@@ -152,10 +152,14 @@ from .state_models import (
     CeoRuntime,
 )
 from .tool_contract import (
+    apply_pinned_contract_to_head,
     build_frontdoor_tool_contract,
+    frontdoor_pinned_contract_text,
     is_frontdoor_tool_contract_echo_text,
     is_frontdoor_tool_contract_message,
     normalize_frontdoor_candidate_tool_items,
+    pinned_contract_is_carried_by_head,
+    pinned_skill_ids_for,
     strip_frontdoor_tool_contract_echo,
     upsert_frontdoor_tool_contract_message,
 )
@@ -3216,6 +3220,44 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
         避免临时文件散落到工作区根目录。目录惰性创建（exec/filesystem 写入时 mkdir）。
         """
         return ceo_session_temp_dir(getattr(self._loop, "workspace", None), session_key)
+
+    def _frontdoor_exec_runtime_policy(self) -> dict[str, Any] | None:
+        main_service = getattr(self._loop, "main_task_service", None)
+        getter = getattr(main_service, "_current_exec_runtime_policy_payload", None)
+        if not callable(getter):
+            return None
+        try:
+            return getter()
+        except Exception:
+            return None
+
+    def _frontdoor_pinned_contract(
+        self,
+        *,
+        session_key: Any,
+        skill_ids: list[Any] | None,
+        contract_revision: str | None,
+        session: Any = None,
+    ) -> tuple[str, list[str]]:
+        """钉进头部的静态声明原文 + 它钉住的那份名单；空串＝本轮不钉，尾块照旧带全量。
+
+        前门一个回合内有四条装配路（`message_builder` 的两条、回合起点的 send-preflight、
+        同回合每一跳的 prompt contract），它们拿到的 session 实例与 state 形状各不相同，靠
+        `tool_contract` 里那张按 session_key 分桶的进程表对齐：只要三条刷新边界没动，四处
+        拿到的是同一串原文。头部一改就顶掉身后全部前缀，四处不一致比不钉严重。
+        """
+        normalized_session_key = str(session_key or "").strip()
+        pinned_text = frontdoor_pinned_contract_text(
+            session,
+            skill_ids=list(skill_ids or []),
+            exec_runtime_policy=self._frontdoor_exec_runtime_policy(),
+            session_temp_dir=self._ceo_session_temp_dir(normalized_session_key),
+            contract_revision=contract_revision,
+            session_key=normalized_session_key,
+        )
+        if not pinned_text:
+            return "", []
+        return pinned_text, pinned_skill_ids_for(session, session_key=normalized_session_key)
 
     def _ceo_tool_watchdog_runtime_config(self) -> dict[str, Any]:
         """CEO 侧统一工具 timeout 全局默认值入口（读主运行时配置，缺省走内置默认）。"""
@@ -6992,9 +7034,23 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
             )
             cache_family_revision = str(getattr(assembly, "cache_family_revision", "") or "").strip()
             turn_overlay_text = str(getattr(assembly, "turn_overlay_text", "") or "").strip()
+        request_session_key = str(getattr(getattr(session, "state", None), "session_key", "") or "").strip()
+        pinned_contract_text, pinned_skill_ids = self._frontdoor_pinned_contract(
+            session=session,
+            session_key=request_session_key,
+            skill_ids=list(selected_skill_ids),
+            contract_revision=cache_family_revision,
+        )
+        stable_messages = apply_pinned_contract_to_head(stable_messages, pinned_contract_text)
+        messages = apply_pinned_contract_to_head(messages, pinned_contract_text)
+        # 头部先落，尾块才允许省略这三段：判据取头部原文，不取"本轮算出来了"。
+        if not pinned_contract_is_carried_by_head(stable_messages, pinned_contract_text):
+            pinned_contract_text, pinned_skill_ids = "", []
         dynamic_appendix_messages = upsert_frontdoor_tool_contract_message(
             dynamic_appendix_messages,
             build_frontdoor_tool_contract(
+                pinned_contract_text=pinned_contract_text,
+                pinned_skill_ids=pinned_skill_ids,
                 callable_tool_names=list(callable_tool_names),
                 candidate_tool_names=list(candidate_tool_names),
                 candidate_tool_items=list(candidate_tool_items),

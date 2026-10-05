@@ -216,6 +216,13 @@ Heartbeat / cron 不再在主 CEO/frontdoor 路径上使用单独的短 `ceo_hea
 - 不变量：取数是**会话级冻结**，采纳点 = 会话首请求 / 内联 `token_compression` 轮末 / 手动压缩成功后，规则本体见 `runtime-overview.md`「Memory Runtime State」。选压缩轮末是因为那里前缀已经被 `[G3KU_TOKEN_COMPACT_V2]` 砍到 system 头部，记忆更新搭这次断点不额外破缓存；所以复核冲刷（含 `run_due_batch_once()`）必须先于读快照，反序会让采纳点静默失效、表现为整会话冻结。跨轮可比性投影与 durable 基线两侧都剥这个块，它的变化因此永不应被 `comparable_to_previous_request` 报成前缀破坏；`build_stable_prompt_cache_key` 同样不含它——本地 cache key 对这个块是盲的，判读只能看 artifact 的 `memory_snapshot` 字段。
 - 症状：某轮命中前缀在第二条消息就分叉且 `memory_snapshot.hash` 同时变了 → 该轮是采纳点，属预期；「用户说记住/忘掉，模型照旧」→ 比对 `memory_snapshot.adopted_at` 与该会话压缩事件的时间差，就是这条记忆的可见性延迟。
 
+### 3.18 静态声明钉在请求体头部
+
+- 坑：`candidate_skills` 这类回合内常量跟着运行时契约尾块每跳重铺一份——尾块重铺只在它前面不动时便宜，而这份名单本身是尾块里最大的一段（实盘一份会话 58 条 ≈ 307 token/跳）。把它整体搬到头部也不是免费动作：首条 `system` 的字节一改，它身后的全部前缀（含记忆快照与整段历史）从那个位置起不再命中。
+- 不变量：三条静态声明（`candidate_skills` / `exec_runtime_policy` / `session_temp_dir`）钉在首条 `system` 末尾的 `## Runtime Contract (pinned)` 里，逐字节复用；尾块**逐段**看头部原文里有没有那一段，有才省。重钉边界只有三条（曝光提交点、执行策略签名、会话临时目录），名单不进边界、且钉住那份按 id 排序——名单每回合会被语义挑选换序换成员，进边界就等于每回合顶掉头部。成员差用尾块的 `granted_skills` / `unselected_skills` 两行表达，只在差非空时出现。合同本体见 `tool-and-skill-system.md`「Pinned Static Declarations」。
+- 不变量（省缓存不许省声明）：尾块能不能省略，判据取头部那条记录里的原文，不取"本轮算出来了"。前门一个回合内有四条装配路（`message_builder` 的两条、回合起点 send-preflight、同回合每一跳的 prompt contract），它们拿到的 session 不是同一实例，`state` 的键又会被归一化白名单静默丢掉，所以钉住内容除会话对象属性外还落一张按 `session_key` 分桶的进程表；两处都对不上才重钉。拿不到载体（既无会话对象又无 `session_key`）或名单为空时整块不钉，三段声明全留在尾块。
+- 症状：请求体头部出现 `## Runtime Contract (pinned)` 而尾块没有 `candidate_skills` 行＝正常形状。两处都有＝该跳没钉上，查装配路的 head/tail 分工。两处都没有而本轮确有候选技能＝缺陷：模型手里没有可加载的 skill_id，按"省缓存把声明省没了"排查，不要当缓存优化问题处理。相邻跳之间头部字节在变＝两个装配点算出的刷新键不一致（多为临时目录或曝光 revision 不同源），这种交替比不钉糟糕得多。
+
 ## 4. Prompt Cache Family 与 Actual Request
 
 本节是 actual request 的取证合同：family/key 语义、per-request 取证顺序、baseline 与恢复顺序、shrink 原因边界。

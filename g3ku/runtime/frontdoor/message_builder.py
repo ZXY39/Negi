@@ -45,7 +45,15 @@ from g3ku.runtime.frontdoor.canonical_context import (
 from g3ku.runtime.frontdoor.cron_hidden_prompt import strip_cron_hidden_prompt
 from g3ku.runtime.frontdoor.prompt_cache_contract import DEFAULT_CACHE_FAMILY_REVISION
 from g3ku.runtime.frontdoor.raw_stage_renderer import retained_raw_stage_messages
-from g3ku.runtime.frontdoor.tool_contract import build_frontdoor_tool_contract, upsert_frontdoor_tool_contract_message
+from g3ku.runtime.frontdoor.session_temp_dir import ceo_session_temp_dir
+from g3ku.runtime.frontdoor.tool_contract import (
+    build_frontdoor_tool_contract,
+    frontdoor_pinned_contract_text,
+    merge_pinned_contract_into_system_text,
+    pinned_contract_is_carried_by_head,
+    pinned_skill_ids_for,
+    upsert_frontdoor_tool_contract_message,
+)
 from g3ku.runtime.web_ceo_sessions import (
     is_internal_ceo_user_message,
     is_prompt_visible_message,
@@ -1832,6 +1840,51 @@ class CeoMessageBuilder:
             return user_content
         return f"{user_content}\n\n{MESSAGE_ARRIVAL_TIME_MARKER} {render_local_time()}"
 
+    def _frontdoor_exec_runtime_policy(self) -> dict[str, Any] | None:
+        main_service = getattr(self._loop, 'main_task_service', None)
+        getter = getattr(main_service, '_current_exec_runtime_policy_payload', None)
+        if not callable(getter):
+            return None
+        try:
+            return getter()
+        except Exception:
+            return None
+
+    def _frontdoor_session_key(self, persisted_session: Any) -> str:
+        return str(getattr(getattr(persisted_session, 'state', None), 'session_key', '') or '').strip()
+
+    def _frontdoor_pinned_contract(
+        self,
+        *,
+        persisted_session: Any,
+        context_sources: dict[str, Any],
+    ) -> tuple[str, list[str]]:
+        """钉进头部的静态声明原文 + 它钉住的那份名单（空串＝本轮不钉，尾块照旧带全量）。
+
+        判据键与 `prompt contract` 那条装配路必须逐字一致，否则两边各自重印、头部每跳都变，
+        两侧共用 `tool_contract` 里的同一张进程表。
+        """
+        skill_ids = [
+            self._skill_id(item)
+            for item in list(context_sources.get('selected_skills') or [])
+            if self._skill_id(item)
+        ]
+        session_key = self._frontdoor_session_key(persisted_session)
+        pinned_text = frontdoor_pinned_contract_text(
+            persisted_session,
+            skill_ids=skill_ids,
+            exec_runtime_policy=self._frontdoor_exec_runtime_policy(),
+            session_temp_dir=ceo_session_temp_dir(getattr(self._loop, 'workspace', None), session_key),
+            contract_revision=(
+                str(context_sources['capability_snapshot'].exposure_revision or '').strip()
+                or DEFAULT_CACHE_FAMILY_REVISION
+            ),
+            session_key=session_key,
+        )
+        if not pinned_text:
+            return '', []
+        return pinned_text, pinned_skill_ids_for(persisted_session, session_key=session_key)
+
     def _inject_turn_context(
         self,
         *,
@@ -1842,8 +1895,10 @@ class CeoMessageBuilder:
         turn_overlay_parts: list[str],
         memory_snapshot_text: str,
         current_user_in_history: bool,
+        pinned_contract_text: str = '',
     ) -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]], str]:
         turn_overlay_text = self._join_turn_overlay_sections(turn_overlay_parts)
+        system_prompt = merge_pinned_contract_into_system_text(system_prompt, pinned_contract_text)
         stable_messages: list[dict[str, Any]] = [{"role": "system", "content": system_prompt}]
         memory_snapshot_message = self._memory_snapshot_stable_message(memory_snapshot_text)
         if memory_snapshot_message is not None:
@@ -1949,6 +2004,11 @@ class CeoMessageBuilder:
         )
         turn_overlay_parts = list(context_sources['turn_overlay_parts'])
 
+        pinned_contract_text, pinned_skill_ids = self._frontdoor_pinned_contract(
+            persisted_session=persisted_session,
+            context_sources=context_sources,
+        )
+
         inject_started_at = time.perf_counter()
         (
             model_messages,
@@ -1963,9 +2023,15 @@ class CeoMessageBuilder:
             memory_snapshot_text=str(context_sources.get('memory_snapshot_text') or ''),
             query_text=query_text,
             user_metadata=user_metadata,
+            pinned_contract_text=pinned_contract_text,
         )
+        # 这条路的头部来自上一跳的请求体种子，不保证首条仍是 system；没并进就不许尾块省略。
+        if not pinned_contract_is_carried_by_head(stable_messages, pinned_contract_text):
+            pinned_contract_text, pinned_skill_ids = '', []
 
         frontdoor_tool_contract = build_frontdoor_tool_contract(
+            pinned_contract_text=pinned_contract_text,
+            pinned_skill_ids=pinned_skill_ids,
             callable_tool_names=list(context_sources['callable_tool_names']),
             candidate_tool_names=list(context_sources['selected_tool_names']),
             candidate_tool_items=list(context_sources.get('selected_tool_items') or []),
@@ -2285,6 +2351,10 @@ class CeoMessageBuilder:
         history_state['history_source'] = effective_history_source
         history_state['current_user_in_history'] = current_user_in_history
         turn_overlay_parts = list(context_sources['turn_overlay_parts'])
+        pinned_contract_text, pinned_skill_ids = self._frontdoor_pinned_contract(
+            persisted_session=persisted_session,
+            context_sources=context_sources,
+        )
         inject_started_at = time.perf_counter()
         model_messages, stable_messages, dynamic_appendix_messages, turn_overlay_text = self._inject_turn_context(
             system_prompt=str(context_sources['system_prompt'] or ''),
@@ -2294,8 +2364,11 @@ class CeoMessageBuilder:
             turn_overlay_parts=turn_overlay_parts,
             memory_snapshot_text=str(context_sources.get('memory_snapshot_text') or ''),
             current_user_in_history=bool(history_state['current_user_in_history']),
+            pinned_contract_text=pinned_contract_text,
         )
         frontdoor_tool_contract = build_frontdoor_tool_contract(
+            pinned_contract_text=pinned_contract_text,
+            pinned_skill_ids=pinned_skill_ids,
             callable_tool_names=list(context_sources['callable_tool_names']),
             candidate_tool_names=list(context_sources['selected_tool_names']),
             candidate_tool_items=list(context_sources.get('selected_tool_items') or []),

@@ -20,11 +20,37 @@ from g3ku.runtime.frontdoor.prompt_cache_contract import (
 )
 from g3ku.runtime.frontdoor.state_models import CeoFrontdoorInterrupted, initial_persistent_state
 from g3ku.runtime.frontdoor.tool_contract import (
+    clear_pinned_contract_stores,
     is_frontdoor_tool_contract_message,
+    split_pinned_contract_from_system_text,
 )
 from g3ku.runtime import web_ceo_sessions
 from g3ku.runtime.session_agent import RuntimeAgentSession
 from main.runtime.chat_backend import build_actual_request_diagnostics, build_prompt_cache_diagnostics
+
+
+@pytest.fixture(autouse=True)
+def _isolate_pinned_contract_stores():
+    """钉住表按 session_key 分桶且是进程级的：本文件多数用例共用 `web:shared`。
+
+    不隔离的话，前一个用例钉住的名单会被后一个用例当成"已钉住"复用，头部凭空多出别人的名单。
+    """
+    clear_pinned_contract_stores()
+    yield
+    clear_pinned_contract_stores()
+
+
+def _without_pinned_head(records: list[dict[str, object]]) -> list[dict[str, object]]:
+    """摘掉头部那条 system 上的钉住块，按"基础正文"比对前缀。
+
+    钉住块只在刷新边界变化时改一次字节，比对逐字相等的前缀用例要先把它摘掉，否则断言的
+    是"钉住块的字节"而不是本用例要证的复用形状。
+    """
+    normalized = [dict(item) for item in list(records or [])]
+    if normalized and str(normalized[0].get("role") or "").strip().lower() == "system":
+        base, _pinned = split_pinned_contract_from_system_text(normalized[0].get("content"))
+        normalized[0]["content"] = base
+    return normalized
 
 
 def _is_frontdoor_runtime_tool_contract_record(record: dict[str, object]) -> bool:
@@ -2116,7 +2142,14 @@ async def test_create_agent_runner_graph_prepare_turn_keeps_candidate_tools_visi
     assert "callable_tools: `submit_next_stage`" in contract_text
     assert "`filesystem_write`" in contract_text
     assert "- `filesystem_write`: Write file content to disk." not in contract_text
-    assert "candidate_skills (loadable with `load_skill_context`): `memory`" in contract_text
+    # 名单钉在头部（每跳逐字节复用），尾块只在成员差出现时才声明它；两处都省=模型看不见候选集。
+    head_text = "\n".join(
+        str(record.get("content") or "")
+        for record in [dict(item) for item in list(prepared["messages"] or []) if isinstance(item, dict)]
+        if str(record.get("role") or "").strip().lower() == "system"
+    )
+    assert "candidate_skills (loadable with `load_skill_context`): `memory`" in head_text
+    assert "candidate_skills (loadable with `load_skill_context`)" not in contract_text
     assert 'Call `load_skill_context(skill_id="<skill_id>")`' not in contract_text
     assert "visible_skill_ids" not in contract_text
     assert "rbac_visible_tool_names" not in contract_text

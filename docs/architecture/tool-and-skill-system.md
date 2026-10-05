@@ -338,6 +338,16 @@ provider-facing schema 刻意保持最小：
 - 富文本说明留在尾部运行时合同里，provider `tools[]` 只保留 function calling 所需的最小 schema。repair-required 资源不靠轮换 provider `tools[]` 来表达：那两份清单只是运行时摘要侧的指引，清单稳定性优先于缓存连续性。
 - 说明性文本与不支持的 JSON Schema 组合子（`anyOf` / `oneOf` / `allOf`）在传输前被剥平，provider-facing schema 只保留 function calling 需要的最小形状；参数正确性的权威仍在运行时校验侧，不要假设线上那份 schema 还保留了内部合同的每个分支。若缓存缺失与 `actual_tool_schema_hash` 的大幅变化同时出现，先查 provider schema 是否从这份最小/稳定形态回归成了富文本形态。
 
+### Pinned Static Declarations（前门头部的钉住块）
+
+三条回合内不变的声明——`candidate_skills`、`exec_runtime_policy`、`session_temp_dir`——在前门只声明一次：渲染成 `## Runtime Contract (pinned)`，并进请求体首条 system 文本的末尾（与 `## Capability Exposure Snapshot` 同一载体，不是新消息项，因此尾部重铺那条剥运行时块的路碰不到它）。尾块的省略判定**逐段**看头部原文里有没有那一段：有才省，缺的那段照旧整段留在尾块。判据取头部原文而不是"本轮算出来了"——前门一个回合内有四条装配路，任何一条没写进头部却照样让尾块省略，声明就在整份上下文里消失，模型看不到候选技能也不会报错。
+
+- 名单是这块唯一的量（实盘一份会话 58 条 ≈ 307 token/跳），执行策略与会话临时目录各只一行。名单为空时整块不钉，三段声明全留在尾块：为两行短声明去动头部是不划算的买卖——头部一改就顶掉它身后的全部前缀。
+- 重钉边界三条：曝光提交点（`cache_family_revision`，即 capability snapshot 的 `exposure_revision`）、执行策略签名、会话临时目录。名单本身不进边界，且钉住那份按 id 排序——每回合的语义挑选会换顺序也会换成员，进边界就每回合顶掉头部。
+- 名单漂移的表达方式是差集，不是重印：尾块只在成员差非空时出 `granted_skills`（本轮新增可见、头部还没有）与 `unselected_skills`（头部声明了、本轮没选进候选，调不动）两行。头部因此会"过期"，这是设计状态而不是缺陷；只有三条边界动了才整段重印。
+- 载体有两份：会话对象属性，外加按 `session_key` 分桶的进程表（LRU 封顶）。同回合内不同装配路拿到的 session 不是同一实例，而 `state` 里的键会被归一化白名单静默丢掉、不能当载体；两份载体都读，判据键相同就复用同一串原文。重启后首跳重钉一次，代价是那一次整段重算。
+- 节点车道的这份名单仍每跳进尾块：节点的运行时合同消息同时是机器状态（`extract_node_dynamic_contract_payload` 把 `candidate_skills` 交回派发与水合侧），把它移出正文会改掉派发行为，不是一次缓存搬家。
+
 ## 10. 资源目录代检查与语义目录新鲜度
 
 skill / tool 目录可能被编辑器、git 或外部进程直接改动，注册表不会自己收到通知，所以运行时按节拍做一次"代"比对：

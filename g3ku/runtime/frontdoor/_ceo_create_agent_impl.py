@@ -15,7 +15,9 @@ from .state_models import (
 from .prompt_cache_contract import DEFAULT_CACHE_FAMILY_REVISION, build_frontdoor_prompt_contract
 from .tool_contract import (
     build_frontdoor_tool_contract,
+    merge_pinned_contract_into_system_text,
     normalize_frontdoor_candidate_tool_items,
+    pinned_contract_is_carried_by_head,
     upsert_frontdoor_tool_contract_message,
 )
 
@@ -132,6 +134,16 @@ class CreateAgentCeoFrontDoorRunner(CeoFrontDoorRuntimeOps):
             return None
         return first
 
+    def _frontdoor_pinned_contract_for_state(
+        self,
+        state: dict[str, Any],
+    ) -> tuple[str, list[str]]:
+        return self._frontdoor_pinned_contract(
+            session_key=state.get("session_key"),
+            skill_ids=list(state.get("candidate_skill_ids") or []),
+            contract_revision=self._prompt_cache_family_revision(state),
+        )
+
     def _effective_system_record(
         self,
         *,
@@ -149,8 +161,16 @@ class CreateAgentCeoFrontDoorRunner(CeoFrontDoorRuntimeOps):
         )
         for records in candidates:
             system_record = self._leading_system_record(records)
-            if system_record is not None:
+            if system_record is None:
+                continue
+            # 头部是写侧、尾块是读侧：`_frontdoor_prompt_contract` 按 kwargs 顺序先算
+            # stable_messages 再算 dynamic_appendix_messages，同一跳里名单只可能出现在一处。
+            pinned_contract_text, _pinned_skill_ids = self._frontdoor_pinned_contract_for_state(state)
+            if not pinned_contract_text:
                 return system_record
+            merged = dict(system_record)
+            merged["content"] = merge_pinned_contract_into_system_text(merged.get("content"), pinned_contract_text)
+            return merged
         return None
 
     def _with_effective_system_prefix(
@@ -271,7 +291,16 @@ class CreateAgentCeoFrontDoorRunner(CeoFrontDoorRuntimeOps):
             state.get("candidate_tool_items"),
             fallback_names=candidate_tool_names,
         )
+        pinned_contract_text, pinned_skill_ids = self._frontdoor_pinned_contract_for_state(state)
+        head_record = self._effective_system_record(state=state)
+        if not pinned_contract_is_carried_by_head(
+            [head_record] if isinstance(head_record, dict) else [],
+            pinned_contract_text,
+        ):
+            pinned_contract_text, pinned_skill_ids = "", []
         frontdoor_tool_contract = build_frontdoor_tool_contract(
+            pinned_contract_text=pinned_contract_text,
+            pinned_skill_ids=pinned_skill_ids,
             callable_tool_names=list(callable_tool_names),
             candidate_tool_names=list(candidate_tool_names),
             candidate_tool_items=list(candidate_tool_items),

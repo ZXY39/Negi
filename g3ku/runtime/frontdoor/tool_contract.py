@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+from collections import OrderedDict
 from dataclasses import dataclass
 from typing import Any
 
@@ -19,14 +20,26 @@ RUNTIME_APPENDIX_HEADINGS = (FRONTDOOR_DYNAMIC_TOOL_CONTRACT_HEADING, FRONTDOOR_
 # system_prompt 文本（`message_builder` 拼 `## Capability Exposure Snapshot` 的同一位置），
 # 不是新消息项——因此尾部重铺那条路（`_with_dynamic_appendix_at_tail` 只剥"运行时块"）
 # 根本碰不到它，也就不需要第三套消息分类。
-# 刷新键 = 曝光 revision + 策略签名 + 临时目录：三者任一动了才重写头部，代价是那一次
-# 整段重算；没动就逐字节复用，名单/策略/路径每跳 0 计费。头部因此永远是当刻真值，
-# 不存在"过期副本 + 注记纠正"这层结构。
+# 刷新键 = 曝光 revision + 策略签名 + 临时目录：三者任一动了才重写头部，代价是那一次整段
+# 重算；没动就逐字节复用，名单/策略/路径每跳 0 计费。名单不进刷新键，所以它会过期——过期部
+# 分由尾块的 granted/unselected 两行按成员差声明，不出整份新名单。
 FRONTDOOR_PINNED_CONTRACT_HEADING = '## Runtime Contract (pinned)'
 FRONTDOOR_PINNED_CONTRACT_KIND = 'frontdoor_runtime_pinned_contract'
 FRONTDOOR_PINNED_CONTRACT_TEXT_ATTR = '_frontdoor_pinned_contract_text'
 FRONTDOOR_PINNED_CONTRACT_REVISION_ATTR = '_frontdoor_pinned_contract_revision'
 FRONTDOOR_PINNED_CONTRACT_SKILLS_ATTR = '_frontdoor_pinned_contract_skill_ids'
+
+# 进程级钉住表：会话对象属性之外的第二载体。前门一个回合内有两条装配路（回合起点的
+# `message_builder`、同回合每一跳的 `prompt contract`），它们拿到的 session 实例不同；
+# `state` 里的键会被归一化白名单静默丢掉，不能当载体。表按 session_key 分桶、LRU 封顶，
+# 只在进程内活着——重启后首跳重钉一次，代价是那一次整段重算。
+_PINNED_CONTRACT_STORE_LIMIT = 128
+_PINNED_CONTRACT_STORES: 'OrderedDict[str, dict[str, Any]]' = OrderedDict()
+
+
+def clear_pinned_contract_stores() -> None:
+    """测试隔离：钉住表是进程级的，跨用例可见。"""
+    _PINNED_CONTRACT_STORES.clear()
 
 
 def _render_name_list_for_pinned(items: list[Any] | None) -> str:
@@ -45,18 +58,25 @@ def _exec_policy_signature(exec_runtime_policy: dict[str, Any] | None) -> str:
 
 def pinned_contract_revision_key(
     *,
-    skill_ids: list[Any] | None,
     exec_runtime_policy: dict[str, Any] | None,
     session_temp_dir: str | None,
     contract_revision: str | None,
 ) -> str:
-    """头部块的重印判据：三项内容 + 曝光提交点，合成一个短键。"""
-    rendered = render_pinned_contract_text(
-        skill_ids=skill_ids,
-        exec_runtime_policy=exec_runtime_policy,
-        session_temp_dir=session_temp_dir,
-    )
-    digest = hashlib.sha256(f'{contract_revision or ""}\n{rendered}'.encode('utf-8')).hexdigest()[:16]
+    """头部块的重印判据：只有三条结构性边界——曝光提交点、执行策略签名、会话临时目录。
+
+    名单本身**不进键**：本轮选中集与钉住集的成员差由尾块的 granted/unselected 两行表达。
+    把名单算进键会让每回合的语义挑选变成整段头部重写，而头部一改就顶掉它后面的全部前缀，
+    比尾块重复一遍贵得多。
+    """
+    digest = hashlib.sha256(
+        '\n'.join(
+            (
+                str(contract_revision or '').strip(),
+                _exec_policy_signature(exec_runtime_policy),
+                str(session_temp_dir or '').strip(),
+            )
+        ).encode('utf-8')
+    ).hexdigest()[:16]
     return f'pc:{digest}'
 
 
@@ -66,11 +86,22 @@ def render_pinned_contract_text(
     exec_runtime_policy: dict[str, Any] | None,
     session_temp_dir: str | None,
 ) -> str:
-    """渲染钉住块。三项全空时返回空串（装配侧据此不追加头部、尾块照旧）。"""
+    """渲染钉住块；没有名单就返回空串。
+
+    名单是这块唯一的量（实盘 58 条 ≈ 307 token/跳），执行策略与会话临时目录各只一行。为两行
+    短声明去动头部是不划算的买卖——头部一改就顶掉身后全部前缀。所以名单为空时整块不钉，三段
+    声明照旧留在尾块（省略判定逐段看头部原文，头部没有就不省）。
+
+    名单按 id 排序：钉住的那份是"能加载哪些"的集合声明，不带每回合的语义排名，否则同名次
+    不同顺序会在头部改字节。尾块的 `candidate_skills` 仍按本轮选中顺序渲染。
+    """
+    normalized_skill_ids = _normalized_name_list(skill_ids)
+    if not normalized_skill_ids:
+        return ''
     lines = [
         FRONTDOOR_PINNED_CONTRACT_HEADING,
         f'kind: {FRONTDOOR_PINNED_CONTRACT_KIND}',
-        f'candidate_skills (loadable with `load_skill_context`): {_render_name_list_for_pinned(skill_ids)}',
+        f'candidate_skills (loadable with `load_skill_context`): {_render_name_list_for_pinned(sorted(normalized_skill_ids))}',
     ]
     policy_line = _render_exec_runtime_policy(exec_runtime_policy)
     if policy_line:
@@ -81,6 +112,92 @@ def render_pinned_contract_text(
     return '\n'.join(lines).strip()
 
 
+def _pinned_contract_entry(session: Any) -> tuple[str, str, list[Any]]:
+    if session is None:
+        return '', '', []
+    text = getattr(session, FRONTDOOR_PINNED_CONTRACT_TEXT_ATTR, None)
+    revision = str(getattr(session, FRONTDOOR_PINNED_CONTRACT_REVISION_ATTR, '') or '').strip()
+    skill_ids = getattr(session, FRONTDOOR_PINNED_CONTRACT_SKILLS_ATTR, None)
+    return (text if isinstance(text, str) else '', revision, list(skill_ids or []))
+
+
+def _write_pinned_contract_entry(
+    session: Any,
+    *,
+    session_key: str,
+    revision: str,
+    text: str,
+    skill_ids: list[str],
+) -> None:
+    entry = {
+        FRONTDOOR_PINNED_CONTRACT_REVISION_ATTR: revision,
+        FRONTDOOR_PINNED_CONTRACT_TEXT_ATTR: text,
+        FRONTDOOR_PINNED_CONTRACT_SKILLS_ATTR: list(skill_ids),
+    }
+    if session is not None:
+        try:
+            setattr(session, FRONTDOOR_PINNED_CONTRACT_REVISION_ATTR, revision)
+            setattr(session, FRONTDOOR_PINNED_CONTRACT_TEXT_ATTR, text)
+            setattr(session, FRONTDOOR_PINNED_CONTRACT_SKILLS_ATTR, list(skill_ids))
+        except Exception:
+            pass
+    normalized_key = str(session_key or '').strip()
+    if not normalized_key:
+        return
+    _PINNED_CONTRACT_STORES[normalized_key] = entry
+    _PINNED_CONTRACT_STORES.move_to_end(normalized_key)
+    while len(_PINNED_CONTRACT_STORES) > _PINNED_CONTRACT_STORE_LIMIT:
+        _PINNED_CONTRACT_STORES.popitem(last=False)
+
+
+def _pinned_entries(session: Any, *, session_key: str) -> list[tuple[str, str, list[Any]]]:
+    """两份载体的当前内容：会话对象属性优先，进程表兜底。"""
+    entries = [_pinned_contract_entry(session)]
+    normalized_key = str(session_key or '').strip()
+    if normalized_key:
+        stored = _PINNED_CONTRACT_STORES.get(normalized_key)
+        if isinstance(stored, dict):
+            text = stored.get(FRONTDOOR_PINNED_CONTRACT_TEXT_ATTR)
+            entries.append(
+                (
+                    text if isinstance(text, str) else '',
+                    str(stored.get(FRONTDOOR_PINNED_CONTRACT_REVISION_ATTR) or '').strip(),
+                    list(stored.get(FRONTDOOR_PINNED_CONTRACT_SKILLS_ATTR) or []),
+                )
+            )
+    return entries
+
+
+def _read_pinned_contract_entry(
+    session: Any,
+    *,
+    session_key: str,
+    revision: str,
+) -> tuple[str, list[str]]:
+    """两份载体里挑判据键对上的那份；都对不上才重钉。
+
+    判据键相同就复用，是"两个装配点各自渲染、字节必须逐字相同"的唯一保证：前门回合起点走
+    `message_builder`，同回合的每一跳走 `prompt contract`，两处拿到的 session 不是同一个实例。
+    只认对象属性的话，第二个装配点每跳都当成"未钉住"去重印头部，而头部一改就顶掉它后面的
+    全部前缀——比不钉严重。
+    """
+    for text, stored_revision, skill_ids in _pinned_entries(session, session_key=session_key):
+        if text and stored_revision == revision:
+            return text, _normalized_name_list(skill_ids)
+    return '', []
+
+
+def pinned_contract_state(session: Any, *, session_key: str | None = None) -> tuple[str, list[str]]:
+    """已钉住的那份（原文 + 名单），不校验判据键——尾块差集算式的取数口。"""
+    for text, _revision, skill_ids in _pinned_entries(
+        session,
+        session_key=str(session_key or '').strip(),
+    ):
+        if text:
+            return text, _normalized_name_list(skill_ids)
+    return '', []
+
+
 def frontdoor_pinned_contract_text(
     session: Any,
     *,
@@ -88,24 +205,31 @@ def frontdoor_pinned_contract_text(
     exec_runtime_policy: dict[str, Any] | None,
     session_temp_dir: str | None,
     contract_revision: str | None,
+    session_key: str | None = None,
 ) -> str:
     """注入侧唯一取数口：命中已钉住的内容就复用原文，否则重钉一次并记下判据键。
 
-    读一次写一次都在同一轮内完成，重复调用幂等（同样的输入渲染出同样的串）。会话不可用
-    （None / 无属性写入口）时退化为"本轮现算，不钉"，尾块继续带这三段——宁可重复不可缺。
+    读一次写一次都在同一跳内完成，重复调用幂等（同一判据键返回同一串原文）。渲染不出内容
+    （名单为空）时返回空串，装配侧据此不写头部、尾块照旧带全量——宁可重复不可缺。
+
+    没有载体（既拿不到会话对象又没有 session_key）时也返回空串：钉不住就每回合现算，那份
+    名单会随每回合的语义挑选变字节，头部每跳都改比不钉糟糕得多（头部一改就顶掉身后全部前缀）。
     """
-    if session is None:
+    normalized_session_key = str(session_key or '').strip()
+    if session is None and not normalized_session_key:
         return ''
     revision = pinned_contract_revision_key(
-        skill_ids=skill_ids,
         exec_runtime_policy=exec_runtime_policy,
         session_temp_dir=session_temp_dir,
         contract_revision=contract_revision,
     )
-    stored = getattr(session, FRONTDOOR_PINNED_CONTRACT_TEXT_ATTR, None)
-    stored_revision = str(getattr(session, FRONTDOOR_PINNED_CONTRACT_REVISION_ATTR, '') or '').strip()
-    if isinstance(stored, str) and stored and stored_revision == revision:
-        return stored
+    stored_text, _stored_skill_ids = _read_pinned_contract_entry(
+        session,
+        session_key=str(session_key or '').strip(),
+        revision=revision,
+    )
+    if stored_text:
+        return stored_text
     fresh = render_pinned_contract_text(
         skill_ids=skill_ids,
         exec_runtime_policy=exec_runtime_policy,
@@ -113,22 +237,19 @@ def frontdoor_pinned_contract_text(
     )
     if not fresh:
         return ''
-    try:
-        setattr(session, FRONTDOOR_PINNED_CONTRACT_TEXT_ATTR, fresh)
-        setattr(session, FRONTDOOR_PINNED_CONTRACT_REVISION_ATTR, revision)
-        setattr(
-            session,
-            FRONTDOOR_PINNED_CONTRACT_SKILLS_ATTR,
-            _normalized_name_list(skill_ids),
-        )
-    except Exception:
-        return ''
+    _write_pinned_contract_entry(
+        session,
+        session_key=str(session_key or '').strip(),
+        revision=revision,
+        text=fresh,
+        skill_ids=_normalized_name_list(skill_ids),
+    )
     return fresh
 
 
-def pinned_skill_ids_for(session: Any) -> list[str]:
+def pinned_skill_ids_for(session: Any, *, session_key: str | None = None) -> list[str]:
     """钉住块里那份名单（差集算式的左操作数）。"""
-    return _normalized_name_list(getattr(session, FRONTDOOR_PINNED_CONTRACT_SKILLS_ATTR, None) or [])
+    return pinned_contract_state(session, session_key=session_key)[1]
 
 
 def pinned_skill_difference(
@@ -142,6 +263,66 @@ def pinned_skill_difference(
     granted = [name for name in current if name not in set(pinned)]
     unselected = [name for name in pinned if name not in set(current)]
     return granted, unselected
+
+
+def split_pinned_contract_from_system_text(system_text: Any) -> tuple[str, str]:
+    """把基础 system 文本拆成（不含钉住块的正文, 钉住块原文）。
+
+    钉住块只追加在正文末尾，因此按标题行反查即可。拆出来是为了让"合上一次的块"可重入：
+    上一跳写进 `stable_messages[0]` 的原文会随 state 带回来，不先摘掉就会越叠越多份。
+    """
+    text = str(system_text or '')
+    marker = f'\n\n{FRONTDOOR_PINNED_CONTRACT_HEADING}'
+    index = text.rfind(marker)
+    if index < 0:
+        return text, ''
+    return text[:index], text[index + 2:]
+
+
+def merge_pinned_contract_into_system_text(system_text: Any, pinned_contract_text: Any) -> str:
+    """写头部：摘掉旧钉住块再拼上本轮该钉的那一份，字节只在刷新键变化时才改。
+
+    钉住内容为空时原样返回——此时尾块还带着全量声明，不该动头部已有的字节。
+    """
+    original = str(system_text or '')
+    pinned_text = str(pinned_contract_text or '').strip()
+    if not pinned_text:
+        return original
+    base, _existing = split_pinned_contract_from_system_text(original)
+    return f'{base.rstrip()}\n\n{pinned_text}'
+
+
+def apply_pinned_contract_to_head(records: list[dict[str, Any]] | None, pinned_contract_text: Any) -> list[dict[str, Any]]:
+    """把钉住块并进头部那条 system 记录（首条非 system 或空表则原样返回）。"""
+    pinned_text = str(pinned_contract_text or '').strip()
+    normalized = [dict(item) for item in list(records or []) if isinstance(item, dict)]
+    if not pinned_text or not normalized:
+        return normalized
+    if str(normalized[0].get('role') or '').strip().lower() != 'system':
+        return normalized
+    merged = dict(normalized[0])
+    merged['content'] = merge_pinned_contract_into_system_text(merged.get('content'), pinned_text)
+    return [merged, *normalized[1:]]
+
+
+def pinned_contract_is_carried_by_head(
+    records: list[dict[str, Any]] | None,
+    pinned_contract_text: Any,
+) -> bool:
+    """尾块能不能省这三段，只看头部那条记录里是否真有这段原文。
+
+    这是"省缓存不省声明"的闸门：装配路很多（前门四条、节点一条），任何一条没把块写进头部
+    却照样让尾块省略，名单就在整份上下文里消失了——模型看不到候选技能，也不会报错。判据用
+    观测而不是标志位：标志会谎报，头部原文不会。
+    """
+    pinned_text = str(pinned_contract_text or '').strip()
+    if not pinned_text:
+        return False
+    normalized = [dict(item) for item in list(records or []) if isinstance(item, dict)]
+    if not normalized or str(normalized[0].get('role') or '').strip().lower() != 'system':
+        return False
+    _base, carried = split_pinned_contract_from_system_text(normalized[0].get('content'))
+    return carried.strip() == pinned_text
 
 
 

@@ -29,12 +29,26 @@ from g3ku.runtime.frontdoor._ceo_support import CeoFrontDoorSupport
 from g3ku.runtime.frontdoor.ceo_runner import CeoFrontDoorRunner
 from g3ku.runtime.frontdoor.message_builder import CeoMessageBuilder
 from g3ku.runtime.frontdoor.state_models import CeoFrontdoorInterrupted, CeoPendingInterrupt
+from g3ku.runtime.frontdoor.tool_contract import split_pinned_contract_from_system_text
 from g3ku.runtime.manager import SessionRuntimeManager
 from g3ku.runtime.session_agent import RuntimeAgentSession
 from g3ku.session.manager import SessionManager
 from main.runtime.stage_budget import STAGE_TURN_END_SUMMARY_POINTER
 from main.storage.artifact_store import TaskArtifactStore
 from main.storage.sqlite_store import SQLiteTaskStore
+
+
+def _body_without_pinned_head(messages) -> list[dict]:
+    """摘掉请求体首条 system 上的钉住块，按"基础正文"比对。
+
+    这两组用例证的是心跳/定时回合继承上一跳的工具状态、不重选；头部多出一份每跳逐字节复用的
+    静态声明不是它们的变量，比对的形状先归一化掉它。
+    """
+    normalized = [dict(item) for item in list(messages or [])]
+    if normalized and str(normalized[0].get("role") or "").strip().lower() == "system":
+        base, _pinned = split_pinned_contract_from_system_text(normalized[0].get("content"))
+        normalized[0]["content"] = base
+    return normalized
 
 
 class _Registry:
@@ -7172,7 +7186,7 @@ async def test_ceo_frontdoor_prepare_turn_continues_full_context_and_appends_hid
             "content": heartbeat_event_bundle,
         },
     ]
-    assert state_update["frontdoor_request_body_messages"] == [
+    assert _body_without_pinned_head(state_update["frontdoor_request_body_messages"]) == [
         *existing_baseline,
         {
             "role": "system",
@@ -7347,7 +7361,7 @@ async def test_ceo_frontdoor_prepare_turn_heartbeat_inherits_previous_tool_state
     ]
     assert state_update["frontdoor_selection_debug"]["candidate_tool_names"] == ["web_fetch"]
     assert state_update["frontdoor_selection_debug"]["hydrated_tool_names"] == ["filesystem_write"]
-    assert state_update["frontdoor_request_body_messages"] == [
+    assert _body_without_pinned_head(state_update["frontdoor_request_body_messages"]) == [
         *existing_baseline,
         {
             "role": "system",
@@ -7382,7 +7396,12 @@ async def test_ceo_frontdoor_prepare_turn_heartbeat_inherits_previous_tool_state
         in contract_text
     )
     assert "hydrated_tools:" not in contract_text
-    assert "candidate_skills (loadable with `load_skill_context`): `find-skills`" in contract_text
+    # 名单钉在请求体头部的 system 里（每跳逐字节复用），尾块不得再抄第二份。
+    inherited_head_text = str(
+        (list(state_update["frontdoor_request_body_messages"] or [{}])[0] or {}).get("content") or ""
+    )
+    assert "candidate_skills (loadable with `load_skill_context`): `find-skills`" in inherited_head_text
+    assert "candidate_skills (loadable with `load_skill_context`)" not in contract_text
     # skill 加载规则只在基础提示词里说一次，契约不再抄第二份
     assert 'Call `load_skill_context(skill_id="<skill_id>")`' not in contract_text
     assert "candidate_tools: `web_fetch`" in contract_text
@@ -7555,7 +7574,7 @@ async def test_ceo_frontdoor_prepare_turn_cron_inherits_previous_tool_state_with
         ensure_ascii=False,
         indent=2,
     )
-    assert state_update["frontdoor_request_body_messages"] == [
+    assert _body_without_pinned_head(state_update["frontdoor_request_body_messages"]) == [
         *existing_baseline,
         {
             "role": "system",
@@ -7604,7 +7623,12 @@ async def test_ceo_frontdoor_prepare_turn_cron_inherits_previous_tool_state_with
         in contract_text
     )
     assert "hydrated_tools:" not in contract_text
-    assert "candidate_skills (loadable with `load_skill_context`): `find-skills`" in contract_text
+    # 名单钉在请求体头部的 system 里（每跳逐字节复用），尾块不得再抄第二份。
+    inherited_head_text = str(
+        (list(state_update["frontdoor_request_body_messages"] or [{}])[0] or {}).get("content") or ""
+    )
+    assert "candidate_skills (loadable with `load_skill_context`): `find-skills`" in inherited_head_text
+    assert "candidate_skills (loadable with `load_skill_context`)" not in contract_text
     # skill 加载规则只在基础提示词里说一次，契约不再抄第二份
     assert 'Call `load_skill_context(skill_id="<skill_id>")`' not in contract_text
     assert "candidate_tools: `web_fetch`" in contract_text
