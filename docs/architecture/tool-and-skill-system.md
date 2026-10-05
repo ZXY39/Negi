@@ -329,7 +329,7 @@ The surfaced `message` executor and its Tool Admin family `messaging` are absent
 
 - 普通跳只有在成员集合真的变化时才重算 `tools[]`；同名不同序保持持久化顺序原样不动，不为零收益轮换 schema。
 - `stage_compaction` 任何一侧都不得轮转 `tools[]`。`token_compression` 是两条车道共同的重印点，前门另加"手动压缩"与"换车道"两条。重印取的是"此刻按当轮 RBAC 重新播种会得到什么"，不是退回上一跳的窄清单。
-- 清单滞后不是权限滞后，权限收回也不是删名的理由：两条车道的执行准入都与声明解耦——节点按当轮待派发字典查名，前门派发按 `_frontdoor_dispatch_tool_names` = 钉住清单 ∩ 当轮治理可见集（治理可见集取不到时退回当轮 callable pool，宁可窄不可宽）。RBAC 收回在执行侧当跳即拒，而清单继续带着该名字，并由尾块 `denied_tools` 点名"已声明、当前角色无权限"。只有实例彻底不存在（资源被整体禁用、拿不到 schema）时名字才真的离开清单。拒绝文案三态分开：候选未水化 ⇒ 先 `load_tool_context`；`denied_tools` ⇒ 重试与改名都不会放行；两者都不在 ⇒ 未知名字。
+- 清单滞后不是权限滞后，权限收回也不是删名的理由：两条车道的执行准入都与声明解耦——节点按当轮待派发字典查名，前门派发按 `_frontdoor_dispatch_tool_names` = 钉住清单 ∩ 当轮治理可见集（治理可见集取不到时退回当轮 callable pool，宁可窄不可宽）。RBAC 收回在执行侧当跳即拒，而清单继续带着该名字。**尾块 `denied_tools` 这一行目前只有节点道会印**：前门每跳的契约块由 `message_builder.py` 的装配路构建，该路尚未接 `denied_tool_names`，所以前门的收回态只有拒绝文案可见（文案走实时授权读，能正确说"无权限"）。拒绝文案三态分开：候选未水化 ⇒ 先 `load_tool_context`；已收回 ⇒ 重试与改名都不会放行；两者都不在 ⇒ 未知名字。
 - 曝光收窄（候选塌缩、LRU 淘汰 callable）不得把名字从节点清单里删掉；LRU 只管 callable 层，与清单无关。被淘汰但清单仍带 ⇒ 模型看得见参数表、本轮调不动，需重新 `load_tool_context`。
 - 工具曝光漂移改变当轮实际请求，但不因此轮换 caller-side prompt cache family；family 变化只留给稳定前缀重写、车道或模型切换、显式 cache-family revision bump 及其他刻意重置边界。`tool_signature_hash` / `actual_tool_schema_hash` 是观测字段，不是"该有新 family"的证据；缓存侧排查步骤见 `context-and-cache-troubleshooting.md`「跨普通 fresh turn 的 tool schema churn」。
 
