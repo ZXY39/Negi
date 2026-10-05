@@ -101,3 +101,82 @@ async def test_responses_body_carries_system_prompt_in_input_not_instructions(mo
     assert first_item["role"] == "user"
     assert "你是 G3KU。" in first_item["content"][0]["text"]
     assert first_item["content"][0]["text"].startswith("[SYSTEM]")
+
+
+@pytest.mark.asyncio
+async def test_responses_body_keeps_mid_history_system_at_its_own_index(monkeypatch) -> None:
+    """活状态块（工具契约/阶段门/压缩块都是 system 角色）留在原位发。
+
+    抽到 input[0] 会把每次改动推到请求最前面，前缀缓存边界就落在那个改动点上，
+    改动之后的整段历史全部按新输入重计费。
+    """
+    captured = await _send(
+        monkeypatch,
+        model="demo",
+        messages=[
+            {"role": "system", "content": "基础提示"},
+            {"role": "user", "content": "ping"},
+            {"role": "assistant", "content": "pong"},
+            {"role": "system", "content": "## Runtime Stage Gate\nactive_stage_id=stage-7"},
+            {"role": "user", "content": "again"},
+        ],
+    )
+
+    items = captured["body"]["input"]
+    leading_text = items[0]["content"][0]["text"]
+    assert "基础提示" in leading_text
+    assert "Runtime Stage Gate" not in leading_text
+
+    gate_index = next(i for i, item in enumerate(items) if item.get("role") == "system" and i > 0)
+    assert items[gate_index]["type"] == "message"
+    assert "active_stage_id=stage-7" in items[gate_index]["content"][0]["text"]
+    # 原位：排在它所属的 assistant 之后、下一条用户消息之前
+    assistant_index = next(i for i, item in enumerate(items) if item.get("role") == "assistant")
+    last_user_index = max(i for i, item in enumerate(items) if item.get("role") == "user")
+    assert assistant_index < gate_index < last_user_index
+
+
+@pytest.mark.asyncio
+async def test_responses_body_merges_only_the_leading_run_of_system(monkeypatch) -> None:
+    captured = await _send(
+        monkeypatch,
+        model="demo",
+        messages=[
+            {"role": "system", "content": "甲"},
+            {"role": "system", "content": "乙"},
+            {"role": "user", "content": "ping"},
+            {"role": "system", "content": "丙"},
+        ],
+    )
+
+    items = captured["body"]["input"]
+    leading_text = items[0]["content"][0]["text"]
+    assert "甲" in leading_text and "乙" in leading_text
+    assert "丙" not in leading_text
+    tail = [item for item in items[1:] if item.get("role") == "system"]
+    assert len(tail) == 1
+    assert "丙" in tail[0]["content"][0]["text"]
+
+
+@pytest.mark.asyncio
+async def test_responses_leading_item_survives_a_change_to_the_tail_state_block(monkeypatch) -> None:
+    """阶段一推进，只有尾部那项变，前导项必须逐字节不变——这是缓存能命中的前提。"""
+    common = [
+        {"role": "system", "content": "基础提示"},
+        {"role": "user", "content": "ping"},
+    ]
+    first = await _send(
+        monkeypatch,
+        model="demo",
+        messages=[*common, {"role": "system", "content": "active_stage_id=stage-1"}],
+    )
+    second = await _send(
+        monkeypatch,
+        model="demo",
+        messages=[*common, {"role": "system", "content": "active_stage_id=stage-2"}],
+    )
+
+    leading_first = first["body"]["input"][0]["content"][0]["text"]
+    leading_second = second["body"]["input"][0]["content"][0]["text"]
+    assert leading_first == leading_second
+    assert first["body"]["input"][-1] != second["body"]["input"][-1]

@@ -64,7 +64,11 @@ CEO/frontdoor 的 provider-facing request 以 `.g3ku/web-ceo-requests/<session>/
 
 常见情况：`request_messages` 看起来公共前缀很长，但 `provider_request_body.input` 的第一个分叉点更早——说明高层 projection 没问题，真正的问题出在 adapter 最终 payload。
 
-Responses 协议（`/responses` 路径）对 system 消息是**按序合并**语义：协议只有一个 `instructions` 字段，adapter（`responses_protocol_helpers._convert_messages`）把历史中全部 system 消息——基础系统提示、mid-history 运行时工具契约、`[G3KU_STAGE_*]` 阶段块——按历史顺序合并进 `instructions`（`\n\n` 分隔），并在 `input` 头部额外插入一份 `[SYSTEM]…[END SYSTEM]` user 项兜底。取证时不要在 `provider_request_body.input` 的原位找阶段块或契约块——它们不在 `input` 里；要核对 `instructions` 是否按序包含全部 system 内容（丢失或互相覆盖属 adapter bug）。原位压缩设计（块落回被压缩阶段原位置）只在 Chat Completions 协议路径成立：`openai_chat` 透传 mid-history system 消息，阶段块以 system 角色保留在原位。
+#### Responses 的 system 位置保持
+
+Responses 协议（`/responses` 路径）对 system 消息是**位置保持**语义：adapter（`responses_protocol_helpers._convert_messages`）只把数组开头连续的 system 并进 `input` 头部那一份 `[SYSTEM]…[END SYSTEM]` user 项（`\n\n` 分隔；顶层 `instructions` 会被代理到 Chat 后端的供应商整单拒绝，字段口径见 `config-and-models.md`「`llm_config` 子系统」），一旦出现别的角色，其后的 system 消息留在原位发成 `{"type": "message", "role": "system", …}` 项。两条车道因此共用一条不变量：`openai_chat` 原样透传 mid-history system，Responses 也原样透传，`[G3KU_STAGE_*]` 阶段块与运行时工具契约都落回自己的位置。取证要核对的是"块在不在原位、有没有被后写覆盖丢失"，不是"块在不在 `input` 里"。
+
+活状态块的落位本身就是缓存边界。前门把运行时工具契约与阶段门作为数组**末尾**的 system 消息发出，位置保持使它们排在整段历史之后，阶段推进只重写请求尾巴；同样的块放进 `input[0]`，改动点之后的整段存活上下文都按新输入重计费。塌陷跳的代价按字符深度量而不是按改了几条消息量：`cache_hit` 落在首个改动字符的 token 位置（实测两条独立会话，断点第 12,797 字符 → `cache_hit` 10,240；第 22,992 字符 → 15,232），断点之后的历史整段进入 `input_tokens`。
 
 Memory guard 维护要点：
 

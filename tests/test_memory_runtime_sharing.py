@@ -147,12 +147,15 @@ def test_convert_messages_keeps_completed_tool_calls_and_outputs():
     assert input_items[3] == {"role": "user", "content": [{"type": "input_text", "text": "总结一下"}]}
 
 
-def test_convert_messages_merges_multiple_system_messages_in_order():
+def test_convert_messages_merges_leading_system_and_keeps_tail_system_in_place():
     # 回归（阶段块 assistant→system 角色对齐的硬前置）：历史里可以同时存在多条
     # system 消息——基础系统提示、mid-history 的运行时工具契约、[G3KU_STAGE_*]
     # 阶段压缩块。旧实现 `system_prompt = content` 后写覆盖前者：只剩最后一条
-    # system，基础系统提示与其余全部块被静默丢弃。现在必须按序合并、不丢失、
-    # 不覆盖。
+    # system，基础系统提示与其余全部块被静默丢弃。现在一条都不能丢。
+    #
+    # 位置同样是契约：只有开头连续的 system 并进前导块，其后的 system 留在原位。
+    # 把活状态块抽到 input[0] 让它每次改动都重写请求最前面，实测单跳按新输入
+    # 重计费 10 万 token 级（前缀缓存边界正好落在改动点上）。
     system_prompt, input_items = _convert_messages(
         [
             {"role": "system", "content": "BASE PROMPT"},
@@ -167,22 +170,20 @@ def test_convert_messages_merges_multiple_system_messages_in_order():
         ]
     )
 
-    # 三段 system 内容全部保留，且维持历史顺序
-    assert "BASE PROMPT" in system_prompt
-    assert '[G3KU_STAGE_COMPACT_V1]\n{"stage_index":1}' in system_prompt
-    assert "## Runtime Tool Contract" in system_prompt
-    assert (
-        system_prompt.index("BASE PROMPT")
-        < system_prompt.index("[G3KU_STAGE_COMPACT_V1]")
-        < system_prompt.index("## Runtime Tool Contract")
-    )
-    # 非 system 消息按序转换进 input_items，不受合并影响
-    assert [item.get("role") for item in input_items] == ["user", "assistant", "user"]
+    assert system_prompt == "BASE PROMPT"
+    assert [item.get("role") for item in input_items] == ["user", "system", "assistant", "system", "user"]
+    compact_item, contract_item = [item for item in input_items if item.get("role") == "system"]
+    assert compact_item["type"] == "message"
+    assert '[G3KU_STAGE_COMPACT_V1]\n{"stage_index":1}' in compact_item["content"][0]["text"]
+    assert "## Runtime Tool Contract" in contract_item["content"][0]["text"]
+    # 三段 system 内容维持历史顺序：基础提示在前导块，两块按原位排在各自的用户消息之后
+    assert input_items.index(compact_item) < input_items.index(contract_item)
 
 
 def test_convert_messages_keeps_every_stage_block_from_many_system_messages():
     # 事故会话里有 43 个阶段压缩块：改 system 角色后走 Responses provider 时，
-    # 每一个块都必须出现在合并后的 system prompt 里，一个都不能被覆盖丢失。
+    # 每一个块都必须出现在请求里，一个都不能被覆盖丢失——而且留在它自己的位置，
+    # 不并进前导块。
     blocks = [
         f'[G3KU_STAGE_COMPACT_V1]\n{{"stage_index":{index},"completed_stage_summary":"s{index}"}}'
         for index in range(1, 44)
@@ -195,16 +196,19 @@ def test_convert_messages_keeps_every_stage_block_from_many_system_messages():
 
     system_prompt, input_items = _convert_messages(messages)
 
-    assert "BASE PROMPT" in system_prompt
+    assert system_prompt == "BASE PROMPT"
+    tail_blocks = [
+        item["content"][0]["text"] for item in input_items if item.get("role") == "system"
+    ]
+    assert len(tail_blocks) == len(blocks)
     for block in blocks:
-        assert block in system_prompt
-    # user/assistant 消息逐条保留（43 组 × 2）
-    assert len(input_items) == 86
-    assert all(item.get("role") in {"user", "assistant"} for item in input_items)
+        assert any(block in text for text in tail_blocks)
+    # user/assistant 消息逐条保留（43 组 × 2），再加上 43 个原位 system 块
+    assert len(input_items) == 86 + len(blocks)
 
 
 def test_convert_messages_skips_empty_system_messages_when_merging():
-    system_prompt, _input_items = _convert_messages(
+    system_prompt, input_items = _convert_messages(
         [
             {"role": "system", "content": "BASE"},
             {"role": "system", "content": ""},
@@ -213,7 +217,9 @@ def test_convert_messages_skips_empty_system_messages_when_merging():
             {"role": "system", "content": "TAIL CONTRACT"},
         ]
     )
-    assert system_prompt == "BASE\n\nTAIL CONTRACT"
+    assert system_prompt == "BASE"
+    tail = [item for item in input_items if item.get("role") == "system"]
+    assert [item["content"][0]["text"] for item in tail] == ["TAIL CONTRACT"]
 
 
 def test_sync_internal_tool_runtimes_reads_memory_runtime_manifest(tmp_path):

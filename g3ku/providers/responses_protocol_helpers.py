@@ -85,7 +85,7 @@ def _convert_tools(tools: list[dict[str, Any]]) -> list[dict[str, Any]]:
 
 
 def _system_message_text(content: Any) -> str:
-    """Extract plain text from a system message's content for ordered merging."""
+    """Extract plain text from a system message's content for position-preserving mapping."""
     if isinstance(content, str):
         return content
     if isinstance(content, list):
@@ -100,6 +100,15 @@ def _system_message_text(content: Any) -> str:
     return ""
 
 
+def _system_message_item(system_text: str) -> dict[str, Any]:
+    """A mid-history system message kept at its original index in `input`."""
+    return {
+        "type": "message",
+        "role": "system",
+        "content": [{"type": "input_text", "text": system_text}],
+    }
+
+
 def _convert_messages(
     messages: list[dict[str, Any]],
     *,
@@ -108,22 +117,28 @@ def _convert_messages(
     messages = _sanitize_tool_call_history(messages)
     system_parts: list[str] = []
     input_items: list[dict[str, Any]] = []
+    leading_system = True
 
     for idx, msg in enumerate(messages):
         role = msg.get("role")
         content = msg.get("content")
 
         if role == "system":
-            # 按序合并全部 system 内容，而不是后写覆盖前者。历史中可以合法出现
-            # 多条 system 消息：基础系统提示、mid-history 的运行时工具契约、
-            # [G3KU_STAGE_*] 阶段压缩块（system 角色）。旧的 `system_prompt = content`
-            # 赋值只保留最后一条，会把这些内容全部抽出原位、互相覆盖，并顶掉
-            # 基础系统提示，摧毁原位压缩设计（openai_chat_provider 可透传
-            # mid-history system，本协议路径必须同样不丢失、不覆盖）。
+            # 位置即语义：只有开头连续的 system 并进前导 `[SYSTEM]` 块，其后的 system 留在
+            # 原位发成独立项。把它们抽到 input[0] 既摧毁原位压缩设计，又让活状态块每次改动
+            # 都重写请求最前面——缓存边界正好落在改动点上（实测单跳按新输入重计费 10 万
+            # token 级）。openai_chat_provider 原样透传 mid-history system，这里对齐同一
+            # 不变量；role=system 与位置无关，是 Responses 输入项的合法角色。
             system_text = _system_message_text(content)
-            if str(system_text or "").strip():
+            if not str(system_text or "").strip():
+                continue
+            if leading_system:
                 system_parts.append(system_text)
+            else:
+                input_items.append(_system_message_item(system_text))
             continue
+
+        leading_system = False
 
         if role == "user":
             input_items.append(_convert_user_message(content))
