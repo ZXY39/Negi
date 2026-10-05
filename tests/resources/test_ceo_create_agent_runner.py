@@ -3994,45 +3994,81 @@ def test_fresh_turn_tool_schema_seed_does_not_expand_previous_actual_request_sch
     ]
 
 
-def test_frontdoor_provider_tool_exposure_refreshes_immediately_and_keeps_pending_fields_inert() -> None:
+def test_frontdoor_provider_tool_bundle_pins_and_recommits_only_at_compression() -> None:
+    """前门清单与节点同形：只补不删，删名等压缩重印。
+
+    清单排在上下文最前面，成员或顺序一变就把身后整段重铺。新增能力必须即时并入（否则
+    模型手里只剩名字、拼不出合法调用），而收回/下架的删名推迟到重印边界——那一跳正文已被
+    `[G3KU_TOKEN_COMPACT_V2]` 整段重写，可复用前缀反正断在这里，重印不额外破缓存。
+    """
     runner = create_agent_impl.CreateAgentCeoFrontDoorRunner(loop=SimpleNamespace(main_task_service=None))
 
-    frozen = runner._resolve_frontdoor_provider_tool_exposure(
-        active_provider_tool_names=["exec", "submit_next_stage"],
-        pending_provider_tool_names=[],
-        desired_provider_tool_names=["exec", "web_fetch", "submit_next_stage"],
-        commit_reason="",
-    )
+    def resolve(active, desired, *, commit_reason=""):
+        return runner._resolve_frontdoor_provider_tool_exposure(
+            active_provider_tool_names=list(active),
+            pending_provider_tool_names=[],
+            desired_provider_tool_names=list(desired),
+            commit_reason=commit_reason,
+        )
 
-    assert frozen["provider_tool_names"] == ["exec", "web_fetch", "submit_next_stage"]
-    assert frozen["pending_provider_tool_names"] == []
-    assert frozen["provider_tool_exposure_pending"] is False
-    assert frozen["provider_tool_exposure_commit_reason"] == ""
+    addition = resolve(["exec", "submit_next_stage"], ["exec", "web_fetch", "submit_next_stage"])
+    # 持久化顺序原样保持，新增的名字追加在尾部
+    assert addition["provider_tool_names"] == ["exec", "submit_next_stage", "web_fetch"]
+    assert addition["provider_tool_bundle_mode"] == "pinned_frozen"
+    assert addition["pending_provider_tool_names"] == []
+    assert addition["provider_tool_exposure_pending"] is False
+    assert addition["provider_tool_exposure_commit_reason"] == ""
 
-    stage_compaction = runner._resolve_frontdoor_provider_tool_exposure(
-        active_provider_tool_names=["exec", "submit_next_stage"],
-        pending_provider_tool_names=["exec", "web_fetch", "submit_next_stage"],
-        desired_provider_tool_names=["exec", "web_fetch", "submit_next_stage"],
-        commit_reason="stage_compaction",
-    )
+    stage_compaction = resolve(["exec", "submit_next_stage"], ["exec", "web_fetch", "submit_next_stage"],
+                               commit_reason="stage_compaction")
+    assert stage_compaction["provider_tool_names"] == ["exec", "submit_next_stage", "web_fetch"]
+    assert stage_compaction["provider_tool_bundle_mode"] == "pinned_frozen"
 
-    assert stage_compaction["provider_tool_names"] == ["exec", "web_fetch", "submit_next_stage"]
-    assert stage_compaction["pending_provider_tool_names"] == []
-    assert stage_compaction["provider_tool_exposure_pending"] is False
-    assert stage_compaction["provider_tool_exposure_commit_reason"] == ""
+    removal = resolve(["exec", "web_fetch"], ["exec"])
+    # RBAC 收回不摘名：执行准入另有闸门，清单这边等重印
+    assert removal["provider_tool_names"] == ["exec", "web_fetch"]
+    assert removal["provider_tool_bundle_mode"] == "pinned_frozen"
 
-    token_compaction = runner._resolve_frontdoor_provider_tool_exposure(
-        active_provider_tool_names=["exec", "submit_next_stage"],
-        pending_provider_tool_names=["exec", "web_fetch", "submit_next_stage"],
-        desired_provider_tool_names=["exec", "web_fetch", "submit_next_stage"],
-        commit_reason="token_compression",
-    )
+    token_compression = resolve(["exec", "web_fetch"], ["exec"], commit_reason="token_compression")
+    # 压缩跳才真的把僵尸名出清
+    assert token_compression["provider_tool_names"] == ["exec"]
+    assert token_compression["provider_tool_bundle_mode"] == "pinned_recommitted"
 
-    assert token_compaction["provider_tool_names"] == ["exec", "web_fetch", "submit_next_stage"]
-    assert token_compaction["pending_provider_tool_names"] == []
-    assert token_compaction["provider_tool_exposure_pending"] is False
-    assert token_compaction["provider_tool_exposure_commit_reason"] == ""
+    re_add_after_recommit = resolve(["exec"], ["exec", "web_fetch"], commit_reason="token_compression")
+    assert re_add_after_recommit["provider_tool_names"] == ["exec", "web_fetch"]
+    assert re_add_after_recommit["provider_tool_bundle_mode"] == "pinned_recommitted"
 
+def test_frontdoor_dispatch_stays_live_while_declaration_is_pinned() -> None:
+    """钉住只作用于声明，派发仍按当轮治理可见集——声明滞后不能变成权限滞后。
+
+    节点道的执行查表本来就按当轮字典取名，前门过去是"声明≡派发"所以天然一致；
+    清单钉住后这条等式不再成立，必须显式把派发收窄，否则被收回的工具仍会留在可执行集合里。
+    """
+    runner = create_agent_impl.CreateAgentCeoFrontDoorRunner(loop=SimpleNamespace(main_task_service=None))
+
+    state = {
+        "provider_tool_names": ["exec", "web_fetch", "submit_next_stage"],
+        "rbac_visible_tool_names": ["exec", "submit_next_stage"],
+        "tool_names": ["exec"],
+    }
+
+    assert runner._frontdoor_dispatch_tool_names(state) == ["exec", "submit_next_stage"]
+    assert runner._frontdoor_declared_denied_tool_names(
+        declared_tool_names=state["provider_tool_names"],
+        granted_tool_names=state["rbac_visible_tool_names"],
+    ) == ["web_fetch"]
+
+    # 治理可见集取不到时不猜：派发退回当轮 callable pool，也不拿声明全集兜底
+    no_grant = {
+        "provider_tool_names": ["exec", "web_fetch"],
+        "rbac_visible_tool_names": [],
+        "tool_names": ["exec"],
+    }
+    assert runner._frontdoor_dispatch_tool_names(no_grant) == ["exec"]
+    assert runner._frontdoor_declared_denied_tool_names(
+        declared_tool_names=no_grant["provider_tool_names"],
+        granted_tool_names=no_grant["rbac_visible_tool_names"],
+    ) == []
 
 def test_build_frontdoor_request_artifact_payload_includes_provider_tool_exposure_fields() -> None:
     runner = create_agent_impl.CreateAgentCeoFrontDoorRunner(loop=SimpleNamespace(main_task_service=None))

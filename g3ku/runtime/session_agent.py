@@ -58,6 +58,9 @@ _TRANSCRIPT_ERROR_REPLY_SOURCE = "runtime_error"
 # 常量放在运行层，是为了让四条入站车道问的是同一个字段名（api 层依赖运行层，反向不行）。
 MANUAL_COMPRESSION_STATE_ATTR = "_manual_context_compression"
 MANUAL_COMPRESSION_RUNNING = "running"
+# 待重印的 provider tools[] 标记：手动压缩跑在回合外、够不到 preflight，所以由 api 层挂
+# 一个标记，下一跳的清单定形把它当成重印边界消费掉（内联压缩自带 token_compression 信号）。
+PENDING_PROVIDER_BUNDLE_RECOMMIT_ATTR = "_pending_provider_bundle_recommit"
 # _internal_prompt_message_metadata 写入的内部提示词种类；翻转 discarded 时按此匹配，
 # 避免误伤同 turn 的助手错误行（其 metadata 无 internal_prompt_kind）。
 _INTERNAL_PROMPT_KINDS = frozenset(

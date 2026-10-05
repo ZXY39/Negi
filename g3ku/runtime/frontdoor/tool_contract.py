@@ -308,8 +308,14 @@ def _render_frontdoor_stage_gate_summary(payload: dict[str, Any]) -> str:
         f'kind: {FRONTDOOR_DYNAMIC_STAGE_GATE_KIND}',
         _contract_revision_line(payload),
         f'callable_tools: {_render_name_list(payload.get("callable_tool_names"))}',
-        _render_stage_summary(payload.get('stage_summary')),
     ]
+    denied_tool_names = _normalized_name_list(payload.get('denied_tool_names'))
+    if denied_tool_names:
+        lines.append(
+            'denied_tools (`tools[]` 里带着参数表，但你当前角色无权限，调用一律被拒；'
+            f'不要反复重试或改着名字试): {_render_name_list(denied_tool_names)}'
+        )
+    lines.append(_render_stage_summary(payload.get('stage_summary')))
     return '\n'.join(lines)
 
 
@@ -378,12 +384,14 @@ class FrontdoorToolContract:
     repair_required_skill_items: list[dict[str, str]] | None = None
     exec_runtime_policy: dict[str, Any] | None = None
     attachment_reopen_targets: list[dict[str, str]] | None = None
+    denied_tool_names: list[str] | None = None
     session_temp_dir: str | None = None
 
     def to_message_payload(self) -> dict[str, Any]:
         payload = {
             'message_type': FRONTDOOR_DYNAMIC_TOOL_CONTRACT_KIND,
             'callable_tool_names': list(self.callable_tool_names),
+            'denied_tool_names': _normalized_name_list(list(self.denied_tool_names or [])),
             'candidate_tools': _normalized_candidate_tool_items(
                 list(self.candidate_tool_items or []),
                 fallback_names=list(self.candidate_tool_names),
@@ -495,6 +503,7 @@ def build_frontdoor_tool_contract(
     exec_runtime_policy: dict[str, Any] | None = None,
     attachment_reopen_targets: list[dict[str, str]] | None = None,
     session_temp_dir: str | None = None,
+    denied_tool_names: list[str] | None = None,
 ) -> FrontdoorToolContract:
     callable_names = _normalized_name_list(callable_tool_names)
     candidate_names = [
@@ -519,6 +528,7 @@ def build_frontdoor_tool_contract(
         exec_runtime_policy=dict(exec_runtime_policy) if isinstance(exec_runtime_policy, dict) else None,
         attachment_reopen_targets=_normalized_attachment_reopen_targets(attachment_reopen_targets),
         session_temp_dir=str(session_temp_dir or '').strip() or None,
+        denied_tool_names=_normalized_name_list(denied_tool_names),
     )
 
 
