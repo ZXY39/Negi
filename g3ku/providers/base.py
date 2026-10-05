@@ -12,6 +12,11 @@ from g3ku.prompt_trace import render_send_data_trace
 
 _TRACE_TRUE_VALUES = {"1", "true", "yes", "on", "debug", "log"}
 
+# provider 返回这些 HTTP 状态时算"瞬时故障"：模型链可以按每模型轮次预算原地退避重试。
+# 单一来源：provider 侧的 raise 判定与链侧的可重试判定都必须读这一份，否则会出现
+# "provider 说是可重试、链说不算"的分裂（实测过一次：链耗尽审计带 retryable:true）。
+RETRYABLE_STATUS_CODES: frozenset[int] = frozenset({408, 409, 425, 429, 500, 502, 503, 504, 520, 521, 522, 523, 524})
+
 
 @dataclass
 class ToolCallRequest:

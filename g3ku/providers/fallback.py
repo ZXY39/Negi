@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import inspect
 import random
+import re
 from typing import Any
 
 from loguru import logger
@@ -16,7 +17,7 @@ from g3ku.config.schema import (
     normalize_reasoning_effort,
 )
 from g3ku.prompt_trace import render_model_chain_trace
-from g3ku.providers.base import LLMProvider, LLMResponse
+from g3ku.providers.base import RETRYABLE_STATUS_CODES, LLMProvider, LLMResponse
 from g3ku.utils.api_keys import APIKeyConfigurationError, iter_api_key_retry_slots
 from g3ku.utils.retry_keywords import (
     DEFAULT_RETRY_ON_KEYWORDS,
@@ -202,17 +203,57 @@ def is_internal_runtime_model_error(error: Exception | str) -> bool:
     return any(token in text for token in _INTERNAL_RUNTIME_ERROR_TOKENS)
 
 
+def _normalize_retry_text(value: str) -> str:
+    """比对关键词前把分隔符统一成空格，并压掉多余空白。
+
+    供应商的结构化错误码普遍写成 `rate_limit_exceeded` 这类下划线形式，而关键词表里是
+    `rate limit` 这种带空格的短语；不归一就会漏判，漏判的代价是"这把键一次重试都没拿到"。
+    """
+    return re.sub(r"\s+", " ", re.sub(r"[_\-.]+", " ", str(value or "").lower())).strip()
+
+
 def is_retryable_model_error(error: Exception | str, retry_on: list[str] | None = None) -> bool:
-    # retry_on=None（未设置）用默认关键字；retry_on=[]（显式置空）→ 无关键字 → 不可重试。
+    """这条失败能不能按"瞬时故障"原地退避重试。
+
+    两级判据，顺序固定：
+    1. 结构化 HTTP 状态（`error_status` / `status_code` / `status`）——命中
+       `RETRYABLE_STATUS_CODES` 即可重试，400/422 明确不可重试；拿到状态就以它为准，
+       不再读文本。
+    2. 没有状态时才回落到 `retry_on` 关键词：`None` 用默认表，显式 `[]` 表示永不重试。
+       比对前把 `_`/`-`/`.` 归一成空格，否则供应商的结构化 code（`rate_limit_exceeded`）
+       会躲过带空格的短语关键词——实测因此让一把键一次重试都没拿到就被判"链耗尽"。
+    """
+    status_code = _error_status_code(error)
+    if status_code in _REQUEST_SHAPE_STATUS_CODES:
+        return False
+    if status_code in RETRYABLE_STATUS_CODES:
+        return True
+
+    text = _error_display_text(error)
+    if is_internal_runtime_model_error(text):
+        return False
+    return _matches_retry_keywords(text, retry_on)
+
+
+def _error_display_text(error: Any) -> str:
+    """取用于关键词兜底的失败文本；异常取整条链，LLMResponse 取 error_text/content。"""
+    if isinstance(error, Exception):
+        return exception_chain_text(error)
+    if isinstance(error, str):
+        return error.lower()
+    for attr in ("error_text", "content", "message"):
+        value = str(getattr(error, attr, "") or "").strip()
+        if value:
+            return value.lower()
+    return str(error or "").lower()
+
+
+def _matches_retry_keywords(text: str, retry_on: list[str] | None) -> bool:
     keywords = split_retry_keywords(DEFAULT_RETRY_ON_KEYWORDS if retry_on is None else retry_on)
     if not keywords:
         return False
-
-    text = exception_chain_text(error) if isinstance(error, Exception) else str(error or "").lower()
-    if is_internal_runtime_model_error(text):
-        return False
-
-    return any(token in text for token in expand_retry_keywords(keywords))
+    haystack = _normalize_retry_text(text)
+    return any(_normalize_retry_text(token) in haystack for token in expand_retry_keywords(keywords))
 
 
 # 请求体/参数形状错误的 HTTP 状态：换一把 key 修不了畸形 payload，不轮换、快速失败。
@@ -275,8 +316,8 @@ def should_fallback_model_error(error: Exception | str) -> bool:
 def response_requires_retry(response: LLMResponse, retry_on: list[str] | None = None) -> bool:
     if str(response.finish_reason or "").lower() != "error":
         return False
-    error_source = str(response.error_text or response.content or "")
-    return is_retryable_model_error(error_source, retry_on=retry_on)
+    # 传响应对象本身：`LLMResponse.error_status` 是第一判据，退到文本只是没有状态时的兜底。
+    return is_retryable_model_error(response, retry_on=retry_on)
 
 
 def response_requires_api_key_rotation(response: LLMResponse, retry_on: list[str] | None = None) -> bool:

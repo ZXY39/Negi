@@ -30,10 +30,38 @@ class CodexStreamError(RuntimeError):
         *,
         partial_content: str = "",
         error_body: str = "",
+        error_status: int | None = None,
+        error_code: str = "",
     ) -> None:
         super().__init__(message)
         self.partial_content = str(partial_content or "")
         self.error_body = str(error_body or "")
+        # 流内 `response.failed` 事件没有 HTTP 状态，只有 `error.code` 这类结构化标识。
+        # 把它翻成状态码带在异常上，链层判"可重试与否"就不必去猜供应商那句英文散文。
+        self.error_status = error_status
+        self.error_code = str(error_code or "")
+
+
+# 上游在流内事件里给出的限流/配额类结构化 code，一律按 HTTP 429 记账。
+RATE_LIMIT_EVENT_CODES = frozenset({
+    "rate_limit_exceeded",
+    "rate_limit",
+    "insufficient_quota",
+    "usage_limit_reached",
+    "too_many_requests",
+})
+
+
+def _codex_failure_event_status(body: Any) -> tuple[int | None, str]:
+    """从失败事件体里取结构化 code，映射成 HTTP 语义状态；取不到就返回 (None, '')."""
+    if not isinstance(body, dict):
+        return None, ""
+    codes = [str(body.get(key) or "").strip().lower() for key in ("code", "type", "reason")]
+    codes = [code for code in codes if code]
+    for code in codes:
+        if code in RATE_LIMIT_EVENT_CODES:
+            return 429, code
+    return None, (codes[0] if codes else "")
 
 
 # 心跳与节点错误栏只带这一段的长度，超出的完整错误体落到 worker 日志。
@@ -57,7 +85,7 @@ def _failure_body_from_event(event: dict[str, Any]) -> Any:
 
 
 def _codex_failure_summary(event: dict[str, Any]) -> tuple[str, str]:
-    """Return (bounded one-line reason, full error body) for a failed stream event."""
+    """Return (bounded one-line reason, full error body, HTTP 语义状态, 结构化 code)."""
     body = _failure_body_from_event(event)
     try:
         full_body = json.dumps(body, ensure_ascii=False, default=str)
@@ -76,7 +104,8 @@ def _codex_failure_summary(event: dict[str, Any]) -> tuple[str, str]:
             summary[:CODEX_FAILURE_DETAIL_LIMIT]
             + f"...(截断，原文 {len(summary)} 字，完整错误体见 worker 日志)"
         )
-    return summary, full_body
+    error_status, error_code = _codex_failure_event_status(body)
+    return summary, full_body, error_status, error_code
 
 
 def _convert_tools(tools: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -458,11 +487,13 @@ async def _consume_sse(
                 if response_model:
                     stored["g3ku_reasoning_model"] = response_model
         elif event_type in {"error", "response.failed"}:
-            summary, full_body = _codex_failure_summary(event)
+            summary, full_body, error_status, error_code = _codex_failure_summary(event)
             raise CodexStreamError(
-                f"Codex response failed: {summary}" if summary else "Codex response failed",
+                summary or "provider stream failed without an error body",
                 partial_content=content,
                 error_body=full_body,
+                error_status=error_status,
+                error_code=error_code,
             )
 
     return content, tool_calls, finish_reason, usage, reasoning_items
@@ -500,13 +531,12 @@ def _map_finish_reason(status: str | None) -> str:
 
 
 def _friendly_error(status_code: int, raw: str) -> str:
-    if status_code == 429:
-        return "ChatGPT usage quota exceeded or rate limit triggered. Please try again later."
+    """把上游响应体压成一行可读文本，但**不改写语义**：状态码原样带上，供应商说什么就是什么。
+
+    这里过去对 429/5xx 各写了一句我们自己的解释文案（429 那句还写着 ChatGPT/Codex），
+    结果是：判定层拿我们自己的散文当关键词来源，展示层把实际供应商名字写错。
+    """
     detail = _summarize_error_payload(raw)
-    if status_code >= 500:
-        if detail:
-            return f"Upstream service temporarily unavailable (HTTP {status_code}: {detail}). Please retry shortly."
-        return f"Upstream service temporarily unavailable (HTTP {status_code}). Please retry shortly."
     if detail:
         return f"HTTP {status_code}: {detail}"
     return f"HTTP {status_code}"
