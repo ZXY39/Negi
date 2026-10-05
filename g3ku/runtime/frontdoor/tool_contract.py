@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 from dataclasses import dataclass
 from typing import Any
@@ -13,6 +14,135 @@ FRONTDOOR_DYNAMIC_TOOL_CONTRACT_PAYLOAD_KEY = '_frontdoor_tool_contract_payload'
 FRONTDOOR_DYNAMIC_STAGE_GATE_KIND = 'frontdoor_runtime_stage_gate'
 FRONTDOOR_DYNAMIC_STAGE_GATE_HEADING = '## Runtime Stage Gate'
 RUNTIME_APPENDIX_HEADINGS = (FRONTDOOR_DYNAMIC_TOOL_CONTRACT_HEADING, FRONTDOOR_DYNAMIC_STAGE_GATE_HEADING)
+
+# 钉住的静态声明：技能名单、执行策略、会话临时目录进的是 `stable_messages[0]` 那段
+# system_prompt 文本（`message_builder` 拼 `## Capability Exposure Snapshot` 的同一位置），
+# 不是新消息项——因此尾部重铺那条路（`_with_dynamic_appendix_at_tail` 只剥"运行时块"）
+# 根本碰不到它，也就不需要第三套消息分类。
+# 刷新键 = 曝光 revision + 策略签名 + 临时目录：三者任一动了才重写头部，代价是那一次
+# 整段重算；没动就逐字节复用，名单/策略/路径每跳 0 计费。头部因此永远是当刻真值，
+# 不存在"过期副本 + 注记纠正"这层结构。
+FRONTDOOR_PINNED_CONTRACT_HEADING = '## Runtime Contract (pinned)'
+FRONTDOOR_PINNED_CONTRACT_KIND = 'frontdoor_runtime_pinned_contract'
+FRONTDOOR_PINNED_CONTRACT_TEXT_ATTR = '_frontdoor_pinned_contract_text'
+FRONTDOOR_PINNED_CONTRACT_REVISION_ATTR = '_frontdoor_pinned_contract_revision'
+FRONTDOOR_PINNED_CONTRACT_SKILLS_ATTR = '_frontdoor_pinned_contract_skill_ids'
+
+
+def _render_name_list_for_pinned(items: list[Any] | None) -> str:
+    return _render_name_list(_normalized_name_list(items))
+
+
+def _exec_policy_signature(exec_runtime_policy: dict[str, Any] | None) -> str:
+    payload = dict(exec_runtime_policy or {})
+    if not payload:
+        return ''
+    return '|'.join(
+        str(payload.get(key) if payload.get(key) is not None else '')
+        for key in ('mode', 'guardrails_enabled', 'summary')
+    )
+
+
+def pinned_contract_revision_key(
+    *,
+    skill_ids: list[Any] | None,
+    exec_runtime_policy: dict[str, Any] | None,
+    session_temp_dir: str | None,
+    contract_revision: str | None,
+) -> str:
+    """头部块的重印判据：三项内容 + 曝光提交点，合成一个短键。"""
+    rendered = render_pinned_contract_text(
+        skill_ids=skill_ids,
+        exec_runtime_policy=exec_runtime_policy,
+        session_temp_dir=session_temp_dir,
+    )
+    digest = hashlib.sha256(f'{contract_revision or ""}\n{rendered}'.encode('utf-8')).hexdigest()[:16]
+    return f'pc:{digest}'
+
+
+def render_pinned_contract_text(
+    *,
+    skill_ids: list[Any] | None,
+    exec_runtime_policy: dict[str, Any] | None,
+    session_temp_dir: str | None,
+) -> str:
+    """渲染钉住块。三项全空时返回空串（装配侧据此不追加头部、尾块照旧）。"""
+    lines = [
+        FRONTDOOR_PINNED_CONTRACT_HEADING,
+        f'kind: {FRONTDOOR_PINNED_CONTRACT_KIND}',
+        f'candidate_skills (loadable with `load_skill_context`): {_render_name_list_for_pinned(skill_ids)}',
+    ]
+    policy_line = _render_exec_runtime_policy(exec_runtime_policy)
+    if policy_line:
+        lines.append(policy_line)
+    temp_line = _render_session_temp_dir(session_temp_dir)
+    if temp_line:
+        lines.extend(temp_line)
+    return '\n'.join(lines).strip()
+
+
+def frontdoor_pinned_contract_text(
+    session: Any,
+    *,
+    skill_ids: list[Any] | None,
+    exec_runtime_policy: dict[str, Any] | None,
+    session_temp_dir: str | None,
+    contract_revision: str | None,
+) -> str:
+    """注入侧唯一取数口：命中已钉住的内容就复用原文，否则重钉一次并记下判据键。
+
+    读一次写一次都在同一轮内完成，重复调用幂等（同样的输入渲染出同样的串）。会话不可用
+    （None / 无属性写入口）时退化为"本轮现算，不钉"，尾块继续带这三段——宁可重复不可缺。
+    """
+    if session is None:
+        return ''
+    revision = pinned_contract_revision_key(
+        skill_ids=skill_ids,
+        exec_runtime_policy=exec_runtime_policy,
+        session_temp_dir=session_temp_dir,
+        contract_revision=contract_revision,
+    )
+    stored = getattr(session, FRONTDOOR_PINNED_CONTRACT_TEXT_ATTR, None)
+    stored_revision = str(getattr(session, FRONTDOOR_PINNED_CONTRACT_REVISION_ATTR, '') or '').strip()
+    if isinstance(stored, str) and stored and stored_revision == revision:
+        return stored
+    fresh = render_pinned_contract_text(
+        skill_ids=skill_ids,
+        exec_runtime_policy=exec_runtime_policy,
+        session_temp_dir=session_temp_dir,
+    )
+    if not fresh:
+        return ''
+    try:
+        setattr(session, FRONTDOOR_PINNED_CONTRACT_TEXT_ATTR, fresh)
+        setattr(session, FRONTDOOR_PINNED_CONTRACT_REVISION_ATTR, revision)
+        setattr(
+            session,
+            FRONTDOOR_PINNED_CONTRACT_SKILLS_ATTR,
+            _normalized_name_list(skill_ids),
+        )
+    except Exception:
+        return ''
+    return fresh
+
+
+def pinned_skill_ids_for(session: Any) -> list[str]:
+    """钉住块里那份名单（差集算式的左操作数）。"""
+    return _normalized_name_list(getattr(session, FRONTDOOR_PINNED_CONTRACT_SKILLS_ATTR, None) or [])
+
+
+def pinned_skill_difference(
+    *,
+    pinned_skill_ids: list[Any] | None,
+    round_skill_ids: list[Any] | None,
+) -> tuple[list[str], list[str]]:
+    """成员差，不是数量差：本轮选中但头部没声明的 / 头部声明了但本轮不再选中的。"""
+    pinned = _normalized_name_list(pinned_skill_ids)
+    current = _normalized_name_list(round_skill_ids)
+    granted = [name for name in current if name not in set(pinned)]
+    unselected = [name for name in pinned if name not in set(current)]
+    return granted, unselected
+
 
 
 def _normalized_name_list(items: list[Any] | None) -> list[str]:
@@ -281,23 +411,56 @@ def _contract_revision_line(payload: dict[str, Any]) -> str:
 
 
 def _render_frontdoor_contract_summary(payload: dict[str, Any]) -> str:
-    """回合内常量部分：候选集、待修复、附件句柄、临时目录、执行策略。"""
+    """回合内常量部分：候选集、待修复、附件句柄、临时目录、执行策略。
+
+    省略判定是**逐段**的，不看"钉住块是否存在"这种整体开关：头部文本里出现了哪一段，尾块
+    才省哪一段。整体开关会在装配点缺某项输入时（例如某条路径不传 `session_temp_dir`）把那条
+    声明整段变没——省缓存省掉一条声明，比不省严重得多。缺的那段照旧在本块出现，宁可重复
+    不可缺失。
+    """
     candidate_tools = _normalized_candidate_tool_items(payload.get('candidate_tools'))
     repair_required_tools = _normalized_repair_required_tool_items(payload.get('repair_required_tools'))
     repair_required_skills = _normalized_repair_required_skill_items(payload.get('repair_required_skills'))
     attachment_reopen_targets = _normalized_attachment_reopen_targets(payload.get('attachment_reopen_targets'))
+    pinned_text = str(payload.get('pinned_contract_text') or '').strip()
+    pinned_roster = 'candidate_skills (loadable with' in pinned_text
+    pinned_exec = 'exec_runtime_policy' in pinned_text
+    pinned_temp = 'session_temp_dir:' in pinned_text
     lines = [
         FRONTDOOR_DYNAMIC_TOOL_CONTRACT_HEADING,
         f'kind: {FRONTDOOR_DYNAMIC_TOOL_CONTRACT_KIND}',
         _contract_revision_line(payload),
-        f'candidate_skills (loadable with `load_skill_context`): {_render_name_list(payload.get("candidate_skill_ids"))}',
-        *_render_attachment_reopen_target_section(attachment_reopen_targets),
-        *_render_candidate_tool_section(candidate_tools),
-        *_render_repair_required_tool_section(repair_required_tools),
-        *_render_repair_required_skill_section(repair_required_skills),
-        _render_exec_runtime_policy(payload.get('exec_runtime_policy')),
-        *_render_session_temp_dir(payload.get('session_temp_dir')),
     ]
+    if pinned_roster:
+        granted, unselected = pinned_skill_difference(
+            pinned_skill_ids=payload.get('pinned_skill_ids'),
+            round_skill_ids=payload.get('candidate_skill_ids'),
+        )
+        if granted:
+            lines.append(
+                'granted_skills (本轮新增可见、头部名单里还没有，可直接 `load_skill_context`): '
+                f'{_render_name_list(granted)}'
+            )
+        if unselected:
+            lines.append(
+                f'unselected_skills (头部名单声明了但本轮没选进候选，本轮调不动): {_render_name_list(unselected)}'
+            )
+    else:
+        lines.append(
+            f'candidate_skills (loadable with `load_skill_context`): {_render_name_list(payload.get("candidate_skill_ids"))}'
+        )
+    lines.extend(
+        [
+            *_render_attachment_reopen_target_section(attachment_reopen_targets),
+            *_render_candidate_tool_section(candidate_tools),
+            *_render_repair_required_tool_section(repair_required_tools),
+            *_render_repair_required_skill_section(repair_required_skills),
+        ]
+    )
+    if not pinned_exec:
+        lines.append(_render_exec_runtime_policy(payload.get('exec_runtime_policy')))
+    if not pinned_temp:
+        lines.extend(_render_session_temp_dir(payload.get('session_temp_dir')))
     return '\n'.join(lines)
 
 
@@ -386,6 +549,8 @@ class FrontdoorToolContract:
     attachment_reopen_targets: list[dict[str, str]] | None = None
     denied_tool_names: list[str] | None = None
     session_temp_dir: str | None = None
+    pinned_contract_text: str | None = None
+    pinned_skill_ids: list[str] | None = None
 
     def to_message_payload(self) -> dict[str, Any]:
         payload = {
@@ -416,6 +581,10 @@ class FrontdoorToolContract:
         repair_required_skills = _normalized_repair_required_skill_items(self.repair_required_skill_items)
         if repair_required_skills:
             payload['repair_required_skills'] = repair_required_skills
+        pinned_text = str(self.pinned_contract_text or '').strip()
+        if pinned_text:
+            payload['pinned_contract_text'] = pinned_text
+            payload['pinned_skill_ids'] = _normalized_name_list(self.pinned_skill_ids)
         return payload
 
     def to_message(self) -> dict[str, Any]:
@@ -504,6 +673,8 @@ def build_frontdoor_tool_contract(
     attachment_reopen_targets: list[dict[str, str]] | None = None,
     session_temp_dir: str | None = None,
     denied_tool_names: list[str] | None = None,
+    pinned_contract_text: str | None = None,
+    pinned_skill_ids: list[str] | None = None,
 ) -> FrontdoorToolContract:
     callable_names = _normalized_name_list(callable_tool_names)
     candidate_names = [
@@ -529,6 +700,8 @@ def build_frontdoor_tool_contract(
         attachment_reopen_targets=_normalized_attachment_reopen_targets(attachment_reopen_targets),
         session_temp_dir=str(session_temp_dir or '').strip() or None,
         denied_tool_names=_normalized_name_list(denied_tool_names),
+        pinned_contract_text=str(pinned_contract_text or '').strip() or None,
+        pinned_skill_ids=_normalized_name_list(pinned_skill_ids),
     )
 
 

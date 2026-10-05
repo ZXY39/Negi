@@ -1883,6 +1883,7 @@ class CeoMessageBuilder:
         memory_snapshot_text: str,
         query_text: str,
         user_metadata: dict[str, Any] | None,
+        pinned_contract_text: str = "",
     ) -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]], str, bool]:
         turn_overlay_text = self._join_turn_overlay_sections(turn_overlay_parts)
         stable_messages = [
@@ -1898,6 +1899,13 @@ class CeoMessageBuilder:
                 memory_snapshot_message,
                 *list(stable_messages[insert_at:]),
             ]
+        # 钉住的静态声明并进 system 文本尾部：它不是消息项，因此尾部重铺那条剥契约的路
+        # 碰不到它；字节只在刷新键变化时改一次。
+        pinned_text = str(pinned_contract_text or "").strip()
+        if pinned_text and stable_messages and str(stable_messages[0].get("role") or "").strip().lower() == "system":
+            merged_first = dict(stable_messages[0])
+            merged_first["content"] = f"{str(merged_first.get('content') or '').rstrip()}\n\n{pinned_text}"
+            stable_messages = [merged_first, *list(stable_messages[1:])]
         current_user_in_history = self._history_has_current_user(
             history_messages=stable_messages,
             query_text=query_text,
