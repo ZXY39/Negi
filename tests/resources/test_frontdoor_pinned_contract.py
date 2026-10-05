@@ -146,16 +146,22 @@ def test_tail_must_not_omit_when_head_cannot_carry_the_block() -> None:
 
 
 def test_tail_reports_member_difference_only_when_it_drifts() -> None:
-    pinned = _pinned(skill_ids=["memory", "pdf"])
+    # 名单规模按实盘形状给（一份会话 58 条），两条名字的名单换一条会触发"差集太宽退回整份"那条分支。
+    base_roster = [
+        "alpha", "bravo", "charlie", "delta", "echo", "foxtrot",
+        "golf", "hotel", "india", "juliet", "kilo", "lima",
+    ]
+    drifted_roster = [name for name in base_roster if name != "lima"] + ["mike"]
+    pinned = _pinned(skill_ids=list(base_roster))
     tail = build_frontdoor_tool_contract(
         callable_tool_names=["exec"],
         candidate_tool_names=["exec"],
         hydrated_tool_names=["exec"],
         frontdoor_stage_state={},
-        candidate_skill_ids=["memory", "pdf"],
-        visible_skill_ids=["memory", "pdf"],
+        candidate_skill_ids=list(base_roster),
+        visible_skill_ids=list(base_roster),
         rbac_visible_tool_names=["exec"],
-        rbac_visible_skill_ids=["memory", "pdf"],
+        rbac_visible_skill_ids=list(base_roster),
         contract_revision="rev-1",
         pinned_contract_text=pinned,
         pinned_skill_ids=pinned_skill_ids_for(None, session_key="web:pinned"),
@@ -172,17 +178,17 @@ def test_tail_reports_member_difference_only_when_it_drifts() -> None:
         candidate_tool_names=["exec"],
         hydrated_tool_names=["exec"],
         frontdoor_stage_state={},
-        candidate_skill_ids=["memory", "docx"],
-        visible_skill_ids=["memory", "docx"],
+        candidate_skill_ids=list(drifted_roster),
+        visible_skill_ids=list(drifted_roster),
         rbac_visible_tool_names=["exec"],
-        rbac_visible_skill_ids=["memory", "docx"],
+        rbac_visible_skill_ids=list(drifted_roster),
         contract_revision="rev-1",
         pinned_contract_text=pinned,
         pinned_skill_ids=pinned_skill_ids_for(None, session_key="web:pinned"),
     )
     drifted_text = _contract_text(drifted)
-    assert "granted_skills" in drifted_text and "`docx`" in drifted_text
-    assert "unselected_skills" in drifted_text and "`pdf`" in drifted_text
+    assert "granted_skills" in drifted_text and "`mike`" in drifted_text
+    assert "unselected_skills" in drifted_text and "`lima`" in drifted_text
     assert "candidate_skills (loadable with" not in drifted_text
 
     # 头部没带块时，尾块逐段照旧全量（省略判定看头部原文，不看本轮算没算出来）。
@@ -191,10 +197,10 @@ def test_tail_reports_member_difference_only_when_it_drifts() -> None:
         candidate_tool_names=["exec"],
         hydrated_tool_names=["exec"],
         frontdoor_stage_state={},
-        candidate_skill_ids=["memory", "docx"],
-        visible_skill_ids=["memory", "docx"],
+        candidate_skill_ids=list(drifted_roster),
+        visible_skill_ids=list(drifted_roster),
         rbac_visible_tool_names=["exec"],
-        rbac_visible_skill_ids=["memory", "docx"],
+        rbac_visible_skill_ids=list(drifted_roster),
         contract_revision="rev-1",
         session_temp_dir="C:/temp/ceo/pinned",
     )
@@ -203,9 +209,50 @@ def test_tail_reports_member_difference_only_when_it_drifts() -> None:
         line for line in plain_text.splitlines()
         if line.startswith("candidate_skills (loadable with")
     )
-    assert "`docx`" in roster_line and "`memory`" in roster_line
+    assert "`mike`" in roster_line and "`alpha`" in roster_line
     assert "session_temp_dir: C:/temp/ceo/pinned" in plain_text
     assert "granted_skills" not in plain_text and "unselected_skills" not in plain_text
+
+
+def test_wide_member_difference_falls_back_to_the_full_roster_line() -> None:
+    """差集覆盖到名单三分之二就改回整份名单行：那种跳上差集既不更便宜，又把可读性写反。"""
+    wide_ids = [f'skill-{index}' for index in range(30)]
+    pinned = _pinned(skill_ids=list(wide_ids))
+    narrowed = build_frontdoor_tool_contract(
+        callable_tool_names=['exec'],
+        candidate_tool_names=['exec'],
+        hydrated_tool_names=['exec'],
+        frontdoor_stage_state={},
+        candidate_skill_ids=['skill-0', 'skill-1'],
+        visible_skill_ids=['skill-0', 'skill-1'],
+        rbac_visible_tool_names=['exec'],
+        rbac_visible_skill_ids=['skill-0', 'skill-1'],
+        contract_revision='rev-1',
+        pinned_contract_text=pinned,
+        pinned_skill_ids=pinned_skill_ids_for(None, session_key='web:pinned'),
+    )
+    narrowed_text = _contract_text(narrowed)
+    assert 'unselected_skills' not in narrowed_text
+    assert 'candidate_skills (loadable with `load_skill_context`): `skill-0`, `skill-1`' in narrowed_text
+
+    shifted = [name for name in wide_ids if name != 'skill-29'] + ['skill-new']
+    drifted = build_frontdoor_tool_contract(
+        callable_tool_names=['exec'],
+        candidate_tool_names=['exec'],
+        hydrated_tool_names=['exec'],
+        frontdoor_stage_state={},
+        candidate_skill_ids=shifted,
+        visible_skill_ids=shifted,
+        rbac_visible_tool_names=['exec'],
+        rbac_visible_skill_ids=shifted,
+        contract_revision='rev-1',
+        pinned_contract_text=pinned,
+        pinned_skill_ids=pinned_skill_ids_for(None, session_key='web:pinned'),
+    )
+    drifted_text = _contract_text(drifted)
+    assert 'granted_skills' in drifted_text and '`skill-new`' in drifted_text
+    assert 'unselected_skills' in drifted_text and '`skill-29`' in drifted_text
+    assert 'candidate_skills (loadable with' not in drifted_text
 
 
 def test_pinned_skill_difference_reports_membership_not_counts() -> None:
@@ -217,6 +264,13 @@ def test_pinned_skill_difference_reports_membership_not_counts() -> None:
     assert pinned_skill_difference(pinned_skill_ids=["a", "b"], round_skill_ids=["b", "a"]) == ([], [])
 
 
+BASE_ROSTER = [
+    "alpha", "bravo", "charlie", "delta", "echo", "foxtrot",
+    "golf", "hotel", "india", "juliet", "kilo", "lima",
+]
+DRIFTED_ROSTER = [name for name in BASE_ROSTER if name != "lima"] + ["mike"]
+
+
 def _canonical_state(**overrides) -> dict[str, object]:
     state: dict[str, object] = {
         "messages": [{"role": "system", "content": "SYSTEM"}, {"role": "user", "content": "hello"}],
@@ -225,10 +279,10 @@ def _canonical_state(**overrides) -> dict[str, object]:
         "candidate_tool_names": [],
         "candidate_tool_items": [],
         "hydrated_tool_names": [],
-        "visible_skill_ids": ["memory", "pdf"],
-        "candidate_skill_ids": ["memory", "pdf"],
+        "visible_skill_ids": list(BASE_ROSTER),
+        "candidate_skill_ids": list(BASE_ROSTER),
         "rbac_visible_tool_names": [],
-        "rbac_visible_skill_ids": ["memory", "pdf"],
+        "rbac_visible_skill_ids": list(BASE_ROSTER),
         "frontdoor_stage_state": {"active_stage_id": "", "transition_required": False, "stages": []},
         "session_key": "web:pinned",
         "cache_family_revision": "rev-1",
@@ -251,7 +305,7 @@ def test_graph_contract_pins_roster_into_head_and_keeps_it_stable_across_hops() 
 
     first = _contract(runner, _canonical_state())
     assert str(first.stable_messages[0]["content"]).startswith("SYSTEM\n\n")
-    assert "candidate_skills (loadable with `load_skill_context`): `memory`, `pdf`" in first.stable_messages[0]["content"]
+    assert "candidate_skills (loadable with `load_skill_context`): `alpha`, `bravo`" in first.stable_messages[0]["content"]
     assert first.request_messages[0]["content"] == first.stable_messages[0]["content"]
     tail_text = "\n".join(str(item.get("content") or "") for item in first.dynamic_appendix_messages)
     assert "candidate_skills (loadable with" not in tail_text
@@ -261,19 +315,19 @@ def test_graph_contract_pins_roster_into_head_and_keeps_it_stable_across_hops() 
     assert again.stable_messages[0]["content"] == first.stable_messages[0]["content"]
     drifted = _contract(
         runner,
-        _canonical_state(candidate_skill_ids=["memory", "docx"], visible_skill_ids=["memory", "docx"]),
+        _canonical_state(candidate_skill_ids=list(DRIFTED_ROSTER), visible_skill_ids=list(DRIFTED_ROSTER)),
     )
     assert drifted.stable_messages[0]["content"] == first.stable_messages[0]["content"]
     drifted_tail = "\n".join(str(item.get("content") or "") for item in drifted.dynamic_appendix_messages)
-    assert "granted_skills" in drifted_tail and "`docx`" in drifted_tail
-    assert "unselected_skills" in drifted_tail and "`pdf`" in drifted_tail
+    assert "granted_skills" in drifted_tail and "`mike`" in drifted_tail
+    assert "unselected_skills" in drifted_tail and "`lima`" in drifted_tail
 
     # 只有边界动了才重印，且重印出来的是当刻名单；边界没动而名单相同则逐字节复用。
     same_boundary = _contract(runner, _canonical_state(cache_family_revision="rev-2"))
     assert same_boundary.stable_messages[0]["content"] == first.stable_messages[0]["content"]
     repinned = _contract(
         runner,
-        _canonical_state(cache_family_revision="rev-3", candidate_skill_ids=["memory", "docx"]),
+        _canonical_state(cache_family_revision="rev-3", candidate_skill_ids=list(DRIFTED_ROSTER)),
     )
     assert repinned.stable_messages[0]["content"] != first.stable_messages[0]["content"]
-    assert "`docx`" in repinned.stable_messages[0]["content"]
+    assert "`mike`" in repinned.stable_messages[0]["content"]

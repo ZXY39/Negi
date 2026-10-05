@@ -265,6 +265,23 @@ def pinned_skill_difference(
     return granted, unselected
 
 
+def _render_candidate_skills_line(skill_ids: list[str]) -> str:
+    return f'candidate_skills (loadable with `load_skill_context`): {_render_name_list(skill_ids)}'
+
+
+def _roster_difference_too_wide(*, pinned_count: int, round_count: int, difference_count: int) -> bool:
+    """成员差覆盖到名单的三分之二时改回整份名单行。
+
+    实盘 5,005 跳里只有 21 跳名单变过（中位差 1 个名字），但有 3 跳的差达到 40–46 个——
+    那种跳上两行差集既不比整份名单便宜（一个名字 ≈ 5 token，58 个名字 ≈ 281 token），又把
+    "本轮真正能加载什么"写成一句否定式清单。阈值命中量 3/5,005，不触发时保持差集行。
+    """
+    base = max(int(pinned_count), int(round_count))
+    if base <= 0:
+        return False
+    return difference_count * 3 >= base * 2
+
+
 def split_pinned_contract_from_system_text(system_text: Any) -> tuple[str, str]:
     """把基础 system 文本拆成（不含钉住块的正文, 钉住块原文）。
 
@@ -612,24 +629,31 @@ def _render_frontdoor_contract_summary(payload: dict[str, Any]) -> str:
         f'kind: {FRONTDOOR_DYNAMIC_TOOL_CONTRACT_KIND}',
         _contract_revision_line(payload),
     ]
-    if pinned_roster:
-        granted, unselected = pinned_skill_difference(
-            pinned_skill_ids=payload.get('pinned_skill_ids'),
-            round_skill_ids=payload.get('candidate_skill_ids'),
-        )
-        if granted:
-            lines.append(
-                'granted_skills (本轮新增可见、头部名单里还没有，可直接 `load_skill_context`): '
-                f'{_render_name_list(granted)}'
-            )
-        if unselected:
-            lines.append(
-                f'unselected_skills (头部名单声明了但本轮没选进候选，本轮调不动): {_render_name_list(unselected)}'
-            )
+    round_skill_ids = _normalized_name_list(payload.get('candidate_skill_ids'))
+    if not pinned_roster:
+        lines.append(_render_candidate_skills_line(round_skill_ids))
     else:
-        lines.append(
-            f'candidate_skills (loadable with `load_skill_context`): {_render_name_list(payload.get("candidate_skill_ids"))}'
+        pinned_skill_ids = _normalized_name_list(payload.get('pinned_skill_ids'))
+        granted, unselected = pinned_skill_difference(
+            pinned_skill_ids=pinned_skill_ids,
+            round_skill_ids=round_skill_ids,
         )
+        if _roster_difference_too_wide(
+            pinned_count=len(pinned_skill_ids),
+            round_count=len(round_skill_ids),
+            difference_count=len(granted) + len(unselected),
+        ):
+            lines.append(_render_candidate_skills_line(round_skill_ids))
+        else:
+            if granted:
+                lines.append(
+                    'granted_skills (本轮新增可见、头部名单里还没有，可直接 `load_skill_context`): '
+                    f'{_render_name_list(granted)}'
+                )
+            if unselected:
+                lines.append(
+                    f'unselected_skills (头部名单声明了但本轮没选进候选，本轮调不动): {_render_name_list(unselected)}'
+                )
     lines.extend(
         [
             *_render_attachment_reopen_target_section(attachment_reopen_targets),
