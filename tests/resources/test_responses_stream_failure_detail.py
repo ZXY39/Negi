@@ -47,7 +47,9 @@ async def test_response_failed_carries_upstream_error_fields(monkeypatch) -> Non
     raised = await _raise_from(monkeypatch, [event])
 
     message = str(raised)
-    assert message.startswith("Codex response failed:")
+    # 消息就是上游给的字段本身，不再加我们自己造的前缀（那条前缀会在 deepseek/glm 的链上
+    # 写成别的供应商名字，读日志的人会照它去查错账号）。
+    assert message == "inference engine crashed | server_error | engine_error"
     assert "inference engine crashed" in message
     assert "server_error" in message
     assert "engine_error" in message

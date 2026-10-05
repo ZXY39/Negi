@@ -11,7 +11,7 @@ from typing import Any
 import httpx
 from loguru import logger
 
-from g3ku.providers.base import LLMProvider, LLMResponse
+from g3ku.providers.base import RETRYABLE_STATUS_CODES, LLMProvider, LLMResponse
 from g3ku.providers.fallback import normalize_forced_function_tool_choice
 from g3ku.providers.responses_protocol_helpers import (
     _convert_messages,
@@ -140,7 +140,9 @@ class _SSEDiagnosticsResponseProxy:
 class ResponsesProvider(LLMProvider):
     """Call any /v1/responses endpoint with an API Key."""
 
-    RETRYABLE_STATUS_CODES = {408, 409, 425, 429, 500, 502, 503, 504, 520, 521, 522, 523, 524}
+    # 单一来源：链侧 `is_retryable_model_error` 读同一份，两处各自维护就会分裂成
+    # "provider 说可重试、链说不算"（实测过一次链耗尽审计带 retryable:true）。
+    RETRYABLE_STATUS_CODES = RETRYABLE_STATUS_CODES
 
     def __init__(
         self,
@@ -248,8 +250,11 @@ class ResponsesProvider(LLMProvider):
                         text = await response.aread()
                         detail = _friendly_error(response.status_code, text.decode("utf-8", "ignore"))
                         if response.status_code in self.RETRYABLE_STATUS_CODES:
-                            raise _RetryableResponsesError(detail)
-                        raise RuntimeError(detail)
+                            raise _RetryableResponsesError(detail, error_status=response.status_code)
+                        error = RuntimeError(detail)
+                        # 不可重试也把状态带上：链侧先看结构化状态，不再猜文本。
+                        error.error_status = response.status_code
+                        raise error
                     diagnostics = _SSEDiagnosticsResponseProxy(
                         response,
                         first_line_timeout_seconds=stream_timeout_seconds,
@@ -304,6 +309,8 @@ class ResponsesProvider(LLMProvider):
                     content=partial_content,
                     finish_reason="error",
                     error_text=error_text,
+                    error_status=_exc_error_status(e),
+                    error_code=_exc_error_code(e),
                     provider_request_meta=provider_request_meta,
                     provider_request_body=provider_request_body,
                     visible_text_streamed=True,
@@ -313,7 +320,14 @@ class ResponsesProvider(LLMProvider):
             logger.error("Error calling Responses API: {}", error_text)
             if isinstance(e, _RetryableResponsesError):
                 raise
-            raise RuntimeError(error_text) from e
+            # 重新包成普通 RuntimeError 时把结构化状态一起搬过去：链层的判据先看状态，
+            # 拿不到状态才退到关键词——不搬就等于逼它去猜供应商散文。
+            wrapped = RuntimeError(error_text)
+            for attr in ("error_status", "error_code"):
+                value = getattr(e, attr, None)
+                if value is not None:
+                    setattr(wrapped, attr, value)
+            raise wrapped from e
 
     def get_default_model(self) -> str:
         return self.default_model
@@ -335,6 +349,28 @@ class ResponsesProvider(LLMProvider):
         return message
 
 
+def _exc_error_status(exc: Exception) -> int | None:
+    """从异常上取结构化 HTTP 状态（provider 侧的 error_status/status_code）。"""
+    for attr in ("error_status", "status_code", "status"):
+        raw_value = getattr(exc, attr, None)
+        try:
+            value = int(raw_value) if raw_value is not None else None
+        except (TypeError, ValueError):
+            continue
+        if value and value > 0:
+            return value
+    return None
+
+
+def _exc_error_code(exc: Exception) -> str | None:
+    code = getattr(exc, "error_code", None)
+    return str(code).strip() if code else None
+
+
 class _RetryableResponsesError(RuntimeError):
     """Transient upstream failure that outer model-chain fallback may handle."""
+
+    def __init__(self, message: str, *, error_status: int | None = None) -> None:
+        super().__init__(message)
+        self.error_status = error_status
 
