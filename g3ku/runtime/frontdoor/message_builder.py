@@ -2152,10 +2152,20 @@ class CeoMessageBuilder:
             hydrated_tool_names=hydrated_tool_names,
         )
         collect_elapsed_ms = self._elapsed_ms(collect_started_at)
-        # 已声明但当前角色无权限的名字由 ops 侧算好、随 exposure 带进来：这一层的类是
-        # CeoMessageBuilder，没有治理读取的 helper；而装配路才是每跳的热线。
-        context_sources['declared_denied_tool_names'] = list(
-            (exposure or {}).get('declared_denied_tool_names') or []
+        # 已声明但当前角色无权限的名字：清单来自 session 上钉住的那份，授权来自本轮能力快照。
+        # 装配层是 CeoMessageBuilder，没有 runner 的治理 helper，所以这里只做纯差集。
+        _declared_bundle = [
+            str(item or "").strip()
+            for item in list(getattr(session, "_frontdoor_provider_tool_schema_names", []) or [])
+            if str(item or "").strip()
+        ]
+        _granted_now = {
+            str(item or "").strip()
+            for item in list(context_sources["capability_snapshot"].visible_tool_ids or [])
+            if str(item or "").strip()
+        }
+        context_sources['declared_denied_tool_names'] = (
+            [name for name in _declared_bundle if name not in _granted_now] if _granted_now else []
         )
 
         attachment_reopen_targets = self._frontdoor_attachment_reopen_targets(
