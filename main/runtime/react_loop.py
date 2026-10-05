@@ -582,14 +582,12 @@ class ReActToolLoop:
                 # 请求体因阶段过期点变短必须有合法理由，否则逐轮对账会把它读成非法 shrink。
                 history_shrink_reason = 'stage_compaction'
             if str(history_shrink_reason or '').strip() == 'token_compression':
-                prior_provider_tool_names = self._normalized_name_list(
-                    list((dict(tool_schema_selection.get('trace') or {})).get('prior_provider_tool_names') or [])
-                )
-                compression_provider_tool_names = (
-                    list(prior_provider_tool_names)
-                    if prior_provider_tool_names
-                    else list(provider_tool_names)
-                )
+                # token 压缩是节点清单的唯一重新提交点：正文这一跳已被
+                # `[G3KU_TOKEN_COMPACT_V2]` 全量重写，可复用前缀反正已经断在这里，
+                # 重印说明书不额外破缓存；之后的跳按重印后的清单继续钉住。
+                compression_provider_tool_names = self._normalized_name_list(
+                    list(tool_schema_selection.get('pinned_provider_tool_names') or [])
+                ) or list(provider_tool_names)
                 if compression_provider_tool_names != provider_tool_names:
                     compression_tool_schemas = [
                         current_tools[name].to_model_schema()
@@ -637,8 +635,8 @@ class ReActToolLoop:
                                 'provider_tool_exposure_pending': False,
                                 'provider_tool_exposure_revision': provider_tool_exposure_revision,
                                 'provider_tool_exposure_commit_reason': '',
-                                'provider_tool_bundle_seeded': False,
-                                'provider_tool_refresh_deferred_due_to': 'token_compression',
+                                'provider_tool_bundle_seeded': True,
+                                'provider_tool_bundle_recommit_reason': 'token_compression',
                             },
                         }
                         token_preflight_diagnostics = {
@@ -664,7 +662,7 @@ class ReActToolLoop:
                             ),
                             'final_estimate_tokens': compression_final_tokens,
                             'final_request_tokens': compression_final_tokens,
-                            'provider_tool_refresh_deferred_due_to': 'token_compression',
+                            'provider_tool_bundle_recommit_reason': 'token_compression',
                         }
             actual_request_diagnostics = build_actual_request_diagnostics(
                 request_messages=request_messages,
@@ -2999,6 +2997,8 @@ class ReActToolLoop:
         selection_payload: dict[str, Any] = {
             'tool_names': list(selected_tools.keys()),
             'provider_tool_names': list(selected_tools.keys()),
+            'pinned_provider_tool_names': list(selected_tools.keys()),
+            'provider_tool_bundle_mode': '',
             'pending_provider_tool_names': [],
             'provider_tool_exposure_pending': False,
             'provider_tool_exposure_revision': '',
@@ -3045,6 +3045,25 @@ class ReActToolLoop:
                     requested_provider_names.append(normalized)
                 if requested_provider_names:
                     selection_payload['provider_tool_names'] = list(requested_provider_names)
+                requested_pinned_names: list[str] = []
+                seen_pinned_names: set[str] = set()
+                for item in list(
+                    raw_selection.get('pinned_provider_tool_names')
+                    or (dict(raw_selection.get('trace') or {})).get('pinned_provider_tool_names')
+                    or []
+                ):
+                    normalized = str(item or '').strip()
+                    if not normalized or normalized in seen_pinned_names or normalized not in visible_tools:
+                        continue
+                    seen_pinned_names.add(normalized)
+                    requested_pinned_names.append(normalized)
+                if requested_pinned_names:
+                    selection_payload['pinned_provider_tool_names'] = list(requested_pinned_names)
+                selection_payload['provider_tool_bundle_mode'] = str(
+                    raw_selection.get('provider_tool_bundle_mode')
+                    or (dict(raw_selection.get('trace') or {})).get('provider_tool_bundle_mode')
+                    or ''
+                ).strip()
                 selection_payload['lightweight_tool_ids'] = [
                     str(item or '').strip()
                     for item in list(raw_selection.get('lightweight_tool_ids') or [])
@@ -3116,8 +3135,18 @@ class ReActToolLoop:
         ]
         if not provider_tool_names:
             provider_tool_names = list(model_visible_callable_tool_names)
+        pinned_provider_tool_names = [
+            name
+            for name in self._normalized_name_list(
+                list(selection_payload.get('pinned_provider_tool_names') or [])
+            )
+            if name in visible_tools
+        ]
+        if not pinned_provider_tool_names:
+            pinned_provider_tool_names = list(provider_tool_names)
         selection_payload['tool_names'] = list(model_visible_callable_tool_names)
         selection_payload['provider_tool_names'] = list(provider_tool_names)
+        selection_payload['pinned_provider_tool_names'] = list(pinned_provider_tool_names)
         selection_payload['trace'] = {
             **selection_trace,
             'full_callable_tool_names': list(full_callable_tool_names),

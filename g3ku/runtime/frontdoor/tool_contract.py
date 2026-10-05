@@ -7,7 +7,7 @@ from typing import Any
 FRONTDOOR_DYNAMIC_TOOL_CONTRACT_KIND = 'frontdoor_runtime_tool_contract'
 FRONTDOOR_DYNAMIC_TOOL_CONTRACT_HEADING = '## Runtime Tool Contract'
 FRONTDOOR_DYNAMIC_TOOL_CONTRACT_PAYLOAD_KEY = '_frontdoor_tool_contract_payload'
-# 活状态块：`callable_tools` / `hydrated_tools` / `stage_summary` 每次阶段切换都重写
+# 活状态块：`callable_tools` / `stage_summary` 每次阶段切换都重写
 # （实盘 1001 跳里分别 301 与 362 次），其余段一回合内是常量。拆成两份后，重写只
 # 顶掉这份小块的字节，稳定块与它前面的携带正文继续命中前缀缓存。
 FRONTDOOR_DYNAMIC_STAGE_GATE_KIND = 'frontdoor_runtime_stage_gate'
@@ -308,7 +308,6 @@ def _render_frontdoor_stage_gate_summary(payload: dict[str, Any]) -> str:
         f'kind: {FRONTDOOR_DYNAMIC_STAGE_GATE_KIND}',
         _contract_revision_line(payload),
         f'callable_tools: {_render_name_list(payload.get("callable_tool_names"))}',
-        f'hydrated_tools: {_render_name_list(payload.get("hydrated_tool_names"))}',
         _render_stage_summary(payload.get('stage_summary')),
     ]
     return '\n'.join(lines)

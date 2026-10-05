@@ -127,17 +127,18 @@ def _loadable_tool_gate_error(
             label="工具",
         )
     # 常驻内置工具（exec 等）根本没有 toolskill，被拒时必须先答"它不用加载"；
-    # 只说"只能加载候选"而不列名单，模型只能换个名字再撞一次。
+    # 只说"加载不了"而不列名单，模型只能换个名字再撞一次。候选名单里含家族 id，
+    # 所以这里两级名单都要给：本轮候选 + 本角色 RBAC 可见。
     parts = [f"Error: 当前运行时未将 `{target}` 暴露为可加载工具"]
     no_load = no_load_needed_hint(requested=target, actor_role=_runtime_actor_role(runtime))
-    parts.append(no_load or "只能加载本轮候选工具或 RBAC 可见 surfaced tools")
+    parts.append(no_load or "只能加载本轮候选工具或本角色 RBAC 可见的工具")
     text = "；".join(parts)
     tail = "；".join(
         [
             item
             for item in (
                 format_name_group("本轮候选工具：", [name for name in candidate_list if name not in visible]),
-                format_name_group("RBAC 可见 surfaced tools：", visible_list),
+                format_name_group("RBAC 可见工具：", visible_list),
             )
             if item
         ]

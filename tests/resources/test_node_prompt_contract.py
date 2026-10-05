@@ -110,7 +110,7 @@ def test_node_runtime_contract_serializes_minimal_agent_facing_payload() -> None
     gate_content = contract.to_stage_gate_message()["content"]
     assert gate_content.startswith("## Runtime Stage Gate")
     assert "callable_tools: `exec`" in gate_content
-    assert "hydrated_tools: `filesystem_write`" in gate_content
+    assert "hydrated_tools:" not in gate_content
     assert "callable_tools:" not in message["content"]
     assert "hydrated_tools:" not in message["content"]
     # 候选只列名字：说明文字在 provider tools[] 的 function.description 里

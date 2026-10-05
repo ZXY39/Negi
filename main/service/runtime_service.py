@@ -6849,21 +6849,54 @@ class MainRuntimeService:
             for name in ordered_visible_tool_names
             if name not in legacy_monolith_names
         ]
-        desired_provider_tool_names: list[str] = []
-        provider_visible_tool_name_set = set(provider_visible_tool_names)
-        for name in visible_rbac_tool_names:
-            if name in provider_visible_tool_name_set and name not in desired_provider_tool_names:
-                desired_provider_tool_names.append(name)
-        for name in provider_visible_tool_names:
-            if name not in desired_provider_tool_names:
-                desired_provider_tool_names.append(name)
-        exposure = self._refresh_provider_tool_bundle(
-            prior_provider_tool_names=prior_provider_tool_names,
-            desired_provider_tool_names=desired_provider_tool_names,
-            prior_history_shrink_reason=prior_history_shrink_reason,
-        )
-        provider_tool_names = list(exposure.get('provider_tool_names') or [])
-        provider_tool_bundle_seeded = bool(exposure.get('provider_tool_bundle_seeded'))
+        # 发给模型的 tools[] 是"按角色钉住的说明书"，不是当轮能力集：成员只在 token
+        # 压缩那一跳重取（react_loop 压缩段），权限变动不改动它。能力本身由派发字典
+        # 当跳放行（react_loop `_execute_tool_raw` 不校验声明），收回也在同一跳拒绝，
+        # 所以清单滞后不会把能力钉死。
+        pinned_provider_tool_names: list[str] = []
+        for candidate_name in [
+            *visible_rbac_tool_names,
+            *always_callable_tool_names,
+            *provider_visible_tool_names,
+        ]:
+            normalized_name = str(candidate_name or '').strip()
+            if not normalized_name or normalized_name in legacy_monolith_names:
+                continue
+            if normalized_name not in pinned_provider_tool_names:
+                pinned_provider_tool_names.append(normalized_name)
+        if prior_provider_tool_names:
+            # 冻结只允许"补"，不允许"删"：当轮已经 callable 的名字必须带着参数表出现在
+            # 清单里，否则模型手里只剩一个名字、拼不出合法调用；而删名一律留到压缩跳重印，
+            # 这样每跳的可复用前缀只可能因为"新增能力"变，不会因为曝光收窄被打断。
+            frozen_provider_tool_names = list(prior_provider_tool_names)
+            for candidate_name in [
+                *model_visible_callable_tool_names,
+                *selected_tool_names,
+                *promoted_only_hydrated_executor_names,
+                *provider_visible_tool_names,
+            ]:
+                normalized_name = str(candidate_name or '').strip()
+                if not normalized_name or normalized_name in legacy_monolith_names:
+                    continue
+                if normalized_name not in frozen_provider_tool_names:
+                    frozen_provider_tool_names.append(normalized_name)
+            provider_tool_names = frozen_provider_tool_names
+            provider_tool_bundle_mode = 'pinned_frozen'
+        else:
+            provider_tool_names = list(pinned_provider_tool_names)
+            provider_tool_bundle_mode = 'pinned_seeded'
+        provider_tool_membership_changed = provider_tool_names != list(prior_provider_tool_names)
+        provider_tool_bundle_seeded = bool(provider_tool_membership_changed)
+        exposure = {
+            'provider_tool_names': list(provider_tool_names),
+            'desired_provider_tool_names': list(pinned_provider_tool_names),
+            'pending_provider_tool_names': [],
+            'provider_tool_exposure_pending': False,
+            'provider_tool_exposure_revision': self._provider_tool_exposure_revision(provider_tool_names),
+            'provider_tool_exposure_commit_reason': '',
+            'pinned_provider_tool_names': list(pinned_provider_tool_names),
+            'provider_tool_bundle_mode': provider_tool_bundle_mode,
+        }
         final_schema_chars = sum(
             len(json.dumps(visible_tools[name].to_model_schema(), ensure_ascii=False, sort_keys=True))
             for name in selected_tool_names
@@ -6877,6 +6910,8 @@ class MainRuntimeService:
         return {
             'tool_names': selected_tool_names,
             'provider_tool_names': provider_tool_names,
+            'pinned_provider_tool_names': list(pinned_provider_tool_names),
+            'provider_tool_bundle_mode': provider_tool_bundle_mode,
             'candidate_tool_names': candidate_tool_names,
             'lightweight_tool_ids': list(selection.lightweight_tool_ids or []),
             'hydrated_executor_names': list(promoted_only_hydrated_executor_names),
@@ -6909,6 +6944,8 @@ class MainRuntimeService:
                 'provider_tool_exposure_revision': str(exposure.get('provider_tool_exposure_revision') or ''),
                 'provider_tool_exposure_commit_reason': str(exposure.get('provider_tool_exposure_commit_reason') or ''),
                 'provider_tool_bundle_seeded': bool(provider_tool_bundle_seeded),
+                'provider_tool_bundle_mode': provider_tool_bundle_mode,
+                'provider_tool_membership_changed': bool(provider_tool_membership_changed),
                 'base_schema_chars': int(selection.schema_chars),
                 'top_k': int((selection.trace or {}).get('top_k', 0) or 0),
                 'final_schema_chars': int(final_schema_chars),
@@ -7223,21 +7260,9 @@ class MainRuntimeService:
             node_kind=str(getattr(node, 'node_kind', '') or runtime_context.get('node_kind') or ''),
         )
         log_service = getattr(self, 'log_service', None)
-        read_runtime_frame = getattr(log_service, 'read_runtime_frame', None)
-        current_frame = (
-            read_runtime_frame(str(task_id or '').strip(), str(node_id or '').strip())
-            if callable(read_runtime_frame)
-            else {}
-        )
-        candidate_tool_names = self._normalized_tool_name_list(
-            list(
-                runtime_context.get('candidate_tool_names')
-                or dict(current_frame or {}).get('candidate_tool_names')
-                or []
-            )
-        )
-        if not any(name in candidate_tool_names for name in [requested_tool_id, resolved_tool_id] if name):
-            return
+        # load 的准入只看"治理可见"，不再要求本轮排进候选：下面的家族查表本身就是按
+        # actor_role 筛过的，多一道候选门槛只会让"有权限但本轮没排上"的工具变成
+        # 调不动也 load 不动的死区。水合数量的上限交给 LRU 管，不由排名管。
         visible_family_map = self._visible_tool_family_map(actor_role=actor_role, session_id=session_id)
         visible_family = visible_family_map.get(requested_tool_id) or visible_family_map.get(resolved_tool_id)
         if visible_family is None:

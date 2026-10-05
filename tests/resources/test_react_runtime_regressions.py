@@ -2596,12 +2596,53 @@ def test_execution_selector_keeps_governance_visible_executors_promotable_after_
     # 治理可见、尚未水合的执行器仍可被提升
     assert 'content_describe' in selection['candidate_tool_names']
     assert 'content_search' in selection['candidate_tool_names']
-    # 但曝光集与 provider bundle 都不因此变宽（前缀稳定合同）
+    # callable 面不因治理可见而变宽；provider 清单是按角色钉住的说明书，本来就含这些名字
     assert 'content_describe' not in selection['tool_names']
-    assert 'content_describe' not in selection['provider_tool_names']
-    # legacy monolith 两头都不进：模型面只该看到 concrete executor
+    assert 'content_describe' in selection['provider_tool_names']
+    # legacy monolith 三处都不进：模型面只该看到 concrete executor
     assert 'content' not in selection['candidate_tool_names']
     assert 'content' not in selection['tool_names']
+    assert 'content' not in selection['provider_tool_names']
+
+
+def test_execution_provider_bundle_freezes_when_exposure_collapses() -> None:
+    """非提交跳的清单只允许"补"，不允许"删"。
+
+    清单排在整段上下文最前面，成员一变就把身后正文全部重铺。当轮曝光字典塌缩
+    （候选重排、水合被 LRU 挤掉）都不构成删名的理由——删名要等到 token 压缩那一跳
+    重印；而当轮真的可用的名字必须并进清单，否则模型手里只剩名字、没有参数表。
+    """
+    service, visible_tools = _collapsed_bundle_selector_service()
+    service.log_service.upsert_frame(
+        'task-pin',
+        {
+            'node_id': 'node-pin',
+            'provider_tool_names': ['exec', 'content_describe', 'content_search'],
+        },
+    )
+
+    selection = service._select_model_visible_tool_schema_payload(
+        task_id='task-pin',
+        node_id='node-pin',
+        node_kind='execution',
+        visible_tools=visible_tools,
+        runtime_context={
+            'task_id': 'task-pin',
+            'node_id': 'node-pin',
+            'session_key': 'web:shared',
+            'actor_role': 'execution',
+        },
+    )
+
+    bundle = list(selection['provider_tool_names'] or [])
+    assert selection['provider_tool_bundle_mode'] == 'pinned_frozen'
+    # 上一跳声明过、本轮曝光里已经没有了 —— 仍然不能删
+    assert 'content_describe' in bundle
+    assert 'content_search' in bundle
+    # 本轮常驻工具照常在场
+    assert 'exec' in bundle
+    # monolith 名不会因为"补"被带进来
+    assert 'content' not in bundle
 
 
 def _collapsed_bundle_selector_service():
@@ -3561,7 +3602,7 @@ async def test_react_loop_names_available_tools_when_a_tool_name_is_not_callable
 
     assert 'tool not available: submit_final_resultt' in str(result)
     assert '当前可直接调用的工具：submit_final_result' in str(result)
-    assert '本轮可加载的候选工具：agent_browser' in str(result)
+    assert '本轮其他候选工具（排名选中，可加载）：agent_browser' in str(result)
 
 
 @pytest.mark.asyncio
@@ -3923,7 +3964,6 @@ async def test_standalone_contract_echo_repairs_once_then_pauses() -> None:
         "## Runtime Tool Contract\n"
         "kind: node_runtime_tool_contract\n"
         "callable_tools: `submit_next_stage`, `submit_final_result`, `exec`\n"
-        "hydrated_tools: `exec`\n"
         "candidate_tools:\n"
         "- `filesystem_write`\n"
     )
@@ -7958,9 +7998,15 @@ async def test_node_send_preflight_triggers_compression_at_effective_threshold(
 
 
 @pytest.mark.asyncio
-async def test_node_send_preflight_token_compression_keeps_prior_provider_tool_bundle(
+async def test_node_send_preflight_token_compression_recommits_pinned_provider_bundle(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """token 压缩是节点清单的唯一重新提交点。
+
+    这一跳正文已被 `[G3KU_TOKEN_COMPACT_V2]` 全量重写，可复用前缀反正断在这里，所以按
+    角色钉住的清单在此重取一次；旧行为（退回上一跳的窄清单）会让钉住的清单永远没有更新
+    机会，已废弃。
+    """
     import main.runtime.react_loop as react_loop_module
     from main.runtime.chat_backend import SendModelContextWindowInfo
 
@@ -8053,6 +8099,8 @@ async def test_node_send_preflight_token_compression_keeps_prior_provider_tool_b
         return {
             "tool_names": ["submit_final_result", "web_fetch"],
             "provider_tool_names": ["submit_final_result", "web_fetch"],
+            "pinned_provider_tool_names": ["submit_final_result", "web_fetch", "content_open"],
+            "provider_tool_bundle_mode": "pinned_frozen",
             "pending_provider_tool_names": [],
             "provider_tool_exposure_pending": False,
             "provider_tool_exposure_commit_reason": "",
@@ -8083,6 +8131,7 @@ async def test_node_send_preflight_token_compression_keeps_prior_provider_tool_b
         tools={
             "submit_final_result": _submit_final_result_tool(),
             "web_fetch": _SchemaTool(name="web_fetch"),
+            "content_open": _SchemaTool(name="content_open"),
         },
         model_refs=["fake"],
         runtime_context={"task_id": "task-preflight-provider-sync", "node_id": "node-preflight-provider-sync"},
@@ -8093,8 +8142,9 @@ async def test_node_send_preflight_token_compression_keeps_prior_provider_tool_b
     assert len(calls) == 1
     emitted_tools = list(calls[0].get("tools") or [])
     emitted_tool_names = [item["function"]["name"] for item in emitted_tools]
-    assert emitted_tool_names == ["submit_final_result"]
-    assert observed_frame.get("provider_tool_names") == ["submit_final_result"]
+    # 压缩跳按钉住清单重印：当轮生效清单里没有的 `content_open` 在这一跳重新出现在 tools[]。
+    assert emitted_tool_names == ["submit_final_result", "web_fetch", "content_open"]
+    assert observed_frame.get("provider_tool_names") == ["submit_final_result", "web_fetch", "content_open"]
     assert observed_frame.get("provider_tool_exposure_commit_reason") == ""
 
 
