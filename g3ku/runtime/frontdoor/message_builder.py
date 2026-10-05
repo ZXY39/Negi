@@ -1955,11 +1955,15 @@ class CeoMessageBuilder:
                 *list(stable_messages[insert_at:]),
             ]
         # 钉住的静态声明并进 system 文本尾部：它不是消息项，因此尾部重铺那条剥契约的路
-        # 碰不到它；字节只在刷新键变化时改一次。
+        # 碰不到它；字节只在刷新键变化时改一次。这条路的头部来自上一跳的请求体种子，已经带着
+        # 上一跳那份块，必须先摘再拼——直接 concat 会让续跑回合每轮多叠一份（实盘 06:15 抓到）。
         pinned_text = str(pinned_contract_text or "").strip()
         if pinned_text and stable_messages and str(stable_messages[0].get("role") or "").strip().lower() == "system":
             merged_first = dict(stable_messages[0])
-            merged_first["content"] = f"{str(merged_first.get('content') or '').rstrip()}\n\n{pinned_text}"
+            merged_first["content"] = merge_pinned_contract_into_system_text(
+                merged_first.get("content"),
+                pinned_text,
+            )
             stable_messages = [merged_first, *list(stable_messages[1:])]
         current_user_in_history = self._history_has_current_user(
             history_messages=stable_messages,

@@ -285,12 +285,12 @@ def _roster_difference_too_wide(*, pinned_count: int, round_count: int, differen
 def split_pinned_contract_from_system_text(system_text: Any) -> tuple[str, str]:
     """把基础 system 文本拆成（不含钉住块的正文, 钉住块原文）。
 
-    钉住块只追加在正文末尾，因此按标题行反查即可。拆出来是为了让"合上一次的块"可重入：
-    上一跳写进 `stable_messages[0]` 的原文会随 state 带回来，不先摘掉就会越叠越多份。
+    钉住块只追加在正文末尾，因此按标题行**首次**出现处切：一旦某份携带正文里已经叠了多份
+    （实盘抓到过续跑头把同一份块叠了两遍），取第一份才能把它们一起摘掉，再拼回一份。
     """
     text = str(system_text or '')
     marker = f'\n\n{FRONTDOOR_PINNED_CONTRACT_HEADING}'
-    index = text.rfind(marker)
+    index = text.find(marker)
     if index < 0:
         return text, ''
     return text[:index], text[index + 2:]

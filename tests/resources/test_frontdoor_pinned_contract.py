@@ -255,6 +255,59 @@ def test_wide_member_difference_falls_back_to_the_full_roster_line() -> None:
     assert 'candidate_skills (loadable with' not in drifted_text
 
 
+def test_continuation_seed_head_is_not_stacked_with_a_second_pinned_block() -> None:
+    """续跑回合的头部来自上一跳请求体种子，本身已带钉住块：必须先摘再拼。
+
+    实盘 06:15 的第三个请求里同一份块出现两次（头部 11,379 → 12,960 字符），就是直接 concat
+    叠上去的——每轮续跑都多叠一份，既破前缀又越长越大。
+    """
+    from g3ku.runtime.frontdoor.message_builder import CeoMessageBuilder
+
+    builder = CeoMessageBuilder(
+        loop=SimpleNamespace(main_task_service=None, workspace=None, app_config=None),
+        prompt_builder=SimpleNamespace(),
+    )
+    pinned = _pinned(skill_ids=["alpha", "bravo"])
+    seeded_head = merge_pinned_contract_into_system_text("BASE PROMPT", pinned)
+    seed = [
+        {"role": "system", "content": seeded_head},
+        {"role": "user", "content": "上一轮的问题"},
+        {"role": "assistant", "content": "上一轮的回答"},
+    ]
+
+    model_messages, stable_messages, _dynamic, _overlay, _in_history = (
+        builder._inject_direct_request_body_continuation(
+            request_body_seed_messages=seed,
+            user_content="这一轮的问题",
+            turn_overlay_parts=[],
+            memory_snapshot_text="",
+            query_text="这一轮的问题",
+            user_metadata=None,
+            pinned_contract_text=pinned,
+        )
+    )
+    head_text = str(stable_messages[0]["content"])
+    assert head_text.count(FRONTDOOR_PINNED_CONTRACT_HEADING) == 1
+    assert head_text == seeded_head
+    assert pinned_contract_is_carried_by_head(stable_messages, pinned) is True
+    assert stable_messages[0]["content"] == seeded_head
+    assert model_messages[0]["content"] == seeded_head
+
+
+def test_stacked_pinned_blocks_collapse_back_to_one() -> None:
+    """已经叠了两份的携带头部要能收回成一份（实盘 06:15 那份 12,960 字符的头部）。"""
+    pinned = _pinned(skill_ids=["alpha", "bravo"])
+    stacked = f"BASE\n\n{pinned}\n\n{pinned}"
+    merged = merge_pinned_contract_into_system_text(stacked, pinned)
+    assert merged == f"BASE\n\n{pinned}"
+    assert merged.count(FRONTDOOR_PINNED_CONTRACT_HEADING) == 1
+    assert pinned_contract_is_carried_by_head([{"role": "system", "content": merged}], pinned) is True
+    base, carried = split_pinned_contract_from_system_text(stacked)
+    assert base == "BASE"
+    assert carried.count(FRONTDOOR_PINNED_CONTRACT_HEADING) == 2  # 原文里确实叠了两份，合一次才收回
+    assert pinned_contract_is_carried_by_head([{"role": "system", "content": stacked}], pinned) is False
+
+
 def test_pinned_skill_difference_reports_membership_not_counts() -> None:
     granted, unselected = pinned_skill_difference(
         pinned_skill_ids=["a", "b"], round_skill_ids=["b", "c"]
