@@ -406,11 +406,15 @@ class ReActToolLoop:
             provider_tool_names = self._normalized_name_list(
                 list(tool_schema_selection.get('provider_tool_names') or list(model_visible_tools.keys()))
             )
-            tool_schemas = [
-                current_tools[name].to_model_schema()
-                for name in provider_tool_names
-                if name in current_tools
-            ]
+            tool_schemas = self._render_provider_tool_schemas(
+                provider_tool_names=provider_tool_names,
+                current_tools=current_tools,
+                tool_schema_selection=tool_schema_selection,
+            )
+            # 声明里带着但派发字典没有的名字：执行侧照旧拒，拒绝文案要能说出"是无权限"。
+            runtime_context['declared_denied_tool_names'] = self._normalized_name_list(
+                list(tool_schema_selection.get('declared_denied_tool_names') or [])
+            )
             dynamic_contract = self._build_node_dynamic_contract(
                 node=node,
                 message_history=message_history,
@@ -589,11 +593,11 @@ class ReActToolLoop:
                     list(tool_schema_selection.get('pinned_provider_tool_names') or [])
                 ) or list(provider_tool_names)
                 if compression_provider_tool_names != provider_tool_names:
-                    compression_tool_schemas = [
-                        current_tools[name].to_model_schema()
-                        for name in compression_provider_tool_names
-                        if name in current_tools
-                    ]
+                    compression_tool_schemas = self._render_provider_tool_schemas(
+                        provider_tool_names=compression_provider_tool_names,
+                        current_tools=current_tools,
+                        tool_schema_selection=tool_schema_selection,
+                    )
                     compression_prompt_cache_key = self._execution_prompt_cache_key(
                         model_messages=model_messages,
                         tool_schemas=compression_tool_schemas,
@@ -2983,6 +2987,31 @@ class ReActToolLoop:
             stage_tool_name=STAGE_TOOL_NAME,
         )
 
+    @staticmethod
+    def _render_provider_tool_schemas(
+        *,
+        provider_tool_names: list[str],
+        current_tools: dict[str, Any],
+        tool_schema_selection: dict[str, Any] | None,
+    ) -> list[dict[str, Any]]:
+        """按清单顺序渲染发给 provider 的 schema。
+
+        派发字典里没有的名字取声明侧自带的 schema：RBAC 收回只关掉执行准入，工具实例不
+        再进本轮字典（所以调不动），但清单继续带着参数表——删名会把身后正文整段重铺。
+        两边都拿不到 schema 的名字才真的离开清单（例如资源被整体禁用）。
+        """
+        denied_schemas = dict((tool_schema_selection or {}).get('declared_denied_tool_schemas') or {})
+        rendered: list[dict[str, Any]] = []
+        for name in provider_tool_names:
+            to_schema = getattr(current_tools.get(name), 'to_model_schema', None)
+            if callable(to_schema):
+                rendered.append(to_schema())
+                continue
+            schema = denied_schemas.get(name)
+            if isinstance(schema, dict):
+                rendered.append(schema)
+        return rendered
+
     def _model_visible_tools_for_iteration(
         self,
         *,
@@ -2999,6 +3028,8 @@ class ReActToolLoop:
             'provider_tool_names': list(selected_tools.keys()),
             'pinned_provider_tool_names': list(selected_tools.keys()),
             'provider_tool_bundle_mode': '',
+            'declared_denied_tool_names': [],
+            'declared_denied_tool_schemas': {},
             'pending_provider_tool_names': [],
             'provider_tool_exposure_pending': False,
             'provider_tool_exposure_revision': '',
@@ -3009,6 +3040,7 @@ class ReActToolLoop:
         }
         if str(node_kind or '').strip().lower() not in _STAGE_BUDGET_NODE_KINDS:
             return selected_tools, selection_payload
+        declaration_only_names: set[str] = set()
         selector = getattr(self, '_model_visible_tool_schema_selector', None)
         if callable(selector):
             raw_selection = selector(
@@ -3019,6 +3051,17 @@ class ReActToolLoop:
                 runtime_context=dict(runtime_context or {}),
             )
             if isinstance(raw_selection, dict):
+                # 派发字典（visible_tools）按当轮 RBAC 取数，权限收回后名字连实例都没有；
+                # 声明侧自带的 schema 让它继续出现在 tools[] 里，但绝不进派发字典。
+                declaration_only_names = {
+                    str(item or '').strip()
+                    for item in list(raw_selection.get('declared_denied_tool_names') or [])
+                    if str(item or '').strip()
+                }
+                selection_payload['declared_denied_tool_names'] = sorted(declaration_only_names)
+                selection_payload['declared_denied_tool_schemas'] = dict(
+                    raw_selection.get('declared_denied_tool_schemas') or {}
+                )
                 requested_names: list[str] = []
                 seen_requested_names: set[str] = set()
                 for item in list(raw_selection.get('tool_names') or []):
@@ -3039,7 +3082,9 @@ class ReActToolLoop:
                     or []
                 ):
                     normalized = str(item or '').strip()
-                    if not normalized or normalized in seen_provider_names or normalized not in visible_tools:
+                    if not normalized or normalized in seen_provider_names or (
+                        normalized not in visible_tools and normalized not in declaration_only_names
+                    ):
                         continue
                     seen_provider_names.add(normalized)
                     requested_provider_names.append(normalized)
@@ -3131,7 +3176,7 @@ class ReActToolLoop:
         provider_tool_names = [
             name
             for name in provider_tool_names
-            if name in visible_tools
+            if name in visible_tools or name in declaration_only_names
         ]
         if not provider_tool_names:
             provider_tool_names = list(model_visible_callable_tool_names)
@@ -3396,6 +3441,9 @@ class ReActToolLoop:
             hydrated_executor_names=self._normalized_name_list(list(tool_schema_selection.get('hydrated_executor_names') or [])),
             lightweight_tool_ids=self._normalized_name_list(list(tool_schema_selection.get('lightweight_tool_ids') or [])),
             selection_trace=dict(tool_schema_selection.get('trace') or {}),
+            denied_tool_names=self._normalized_name_list(
+                list(tool_schema_selection.get('declared_denied_tool_names') or [])
+            ),
             exec_runtime_policy=exec_runtime_policy,
         )
 
@@ -4337,6 +4385,7 @@ class ReActToolLoop:
                 requested=tool_name,
                 callable_names=list(tools.keys()),
                 candidate_names=runtime_context.get('candidate_tool_names') or [],
+                denied_names=runtime_context.get('declared_denied_tool_names') or [],
             )
             return f'Error: tool not available: {tool_name}' + (f'\n{hint}' if hint else '')
         search_signature = self._search_overflow_signature_for_call(tool_name=tool_name, arguments=arguments)

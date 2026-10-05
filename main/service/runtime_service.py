@@ -6885,6 +6885,27 @@ class MainRuntimeService:
         else:
             provider_tool_names = list(pinned_provider_tool_names)
             provider_tool_bundle_mode = 'pinned_seeded'
+        # 权限收回只关执行准入，不摘清单上的名字：派发字典按当轮 RBAC 取数，名字一旦
+        # 失去权限就拿不到实例、渲不出参数表，所以声明侧自带一份不依赖派发字典的
+        # schema。资源被整体禁用（实例根本不存在）时无从声明，只能让这个名字离开清单。
+        live_granted_tool_names = {
+            name
+            for name in [*visible_rbac_tool_names, *always_callable_tool_names]
+            if name not in legacy_monolith_names
+        }
+        resource_manager = getattr(self, '_resource_manager', None)
+        instance_getter = getattr(resource_manager, 'tool_instances', None)
+        declared_instances = dict(instance_getter() or {}) if callable(instance_getter) else {}
+        declared_denied_tool_schemas: dict[str, Any] = {}
+        for candidate_name in provider_tool_names:
+            normalized_name = str(candidate_name or '').strip()
+            if not normalized_name or normalized_name in live_granted_tool_names:
+                continue
+            to_schema = getattr(declared_instances.get(normalized_name), 'to_model_schema', None)
+            if not callable(to_schema):
+                continue
+            declared_denied_tool_schemas[normalized_name] = to_schema()
+        declared_denied_tool_names = list(declared_denied_tool_schemas.keys())
         provider_tool_membership_changed = provider_tool_names != list(prior_provider_tool_names)
         provider_tool_bundle_seeded = bool(provider_tool_membership_changed)
         exposure = {
@@ -6912,6 +6933,8 @@ class MainRuntimeService:
             'provider_tool_names': provider_tool_names,
             'pinned_provider_tool_names': list(pinned_provider_tool_names),
             'provider_tool_bundle_mode': provider_tool_bundle_mode,
+            'declared_denied_tool_names': list(declared_denied_tool_names),
+            'declared_denied_tool_schemas': dict(declared_denied_tool_schemas),
             'candidate_tool_names': candidate_tool_names,
             'lightweight_tool_ids': list(selection.lightweight_tool_ids or []),
             'hydrated_executor_names': list(promoted_only_hydrated_executor_names),
@@ -6946,6 +6969,7 @@ class MainRuntimeService:
                 'provider_tool_bundle_seeded': bool(provider_tool_bundle_seeded),
                 'provider_tool_bundle_mode': provider_tool_bundle_mode,
                 'provider_tool_membership_changed': bool(provider_tool_membership_changed),
+                'declared_denied_tool_names': list(declared_denied_tool_names),
                 'base_schema_chars': int(selection.schema_chars),
                 'top_k': int((selection.trace or {}).get('top_k', 0) or 0),
                 'final_schema_chars': int(final_schema_chars),

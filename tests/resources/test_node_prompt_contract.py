@@ -319,3 +319,33 @@ def test_is_node_dynamic_contract_echo_text() -> None:
     # 以 system 角色注入的契约消息本身不算"模型回显"（它是运行时注入的元数据）。
     # 该语义由 is_node_dynamic_contract_message 承担，回显检测只面向模型文本。
     assert is_node_dynamic_contract_echo_text(NODE_DYNAMIC_CONTRACT_HEADING + "\nkind: " + NODE_DYNAMIC_CONTRACT_KIND) is True
+
+
+def test_node_stage_gate_lists_declared_but_denied_tools() -> None:
+    """权限收回后名字仍留在 tools[]，尾块必须先把"无权限"说出来。
+
+    否则模型看到的是一份带参数表的说明书，只能靠撞一次拒绝才知道调不动。
+    """
+    contract = NodeRuntimeToolContract(
+        node_id="node:test",
+        node_kind="execution",
+        callable_tool_names=["exec"],
+        candidate_tool_names=[],
+        visible_skills=[],
+        candidate_skill_ids=[],
+        stage_payload={},
+        hydrated_executor_names=[],
+        lightweight_tool_ids=[],
+        selection_trace={},
+        denied_tool_names=["web_fetch"],
+    )
+
+    gate_content = contract.to_stage_gate_message()["content"]
+    assert "callable_tools: `exec`" in gate_content
+    assert "denied_tools" in gate_content
+    assert "web_fetch" in gate_content.split("denied_tools", 1)[1]
+    assert "无权限" in gate_content
+
+    # 没有收回任何工具时这一行整个不出现：尾块每跳重写，空行也是成本
+    contract.denied_tool_names = None
+    assert "denied_tools" not in contract.to_stage_gate_message()["content"]
