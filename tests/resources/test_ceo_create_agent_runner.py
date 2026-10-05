@@ -4038,6 +4038,29 @@ def test_frontdoor_provider_tool_bundle_pins_and_recommits_only_at_compression()
     assert re_add_after_recommit["provider_tool_names"] == ["exec", "web_fetch"]
     assert re_add_after_recommit["provider_tool_bundle_mode"] == "pinned_recommitted"
 
+def test_frontdoor_denied_names_use_live_grant_not_turn_snapshot() -> None:
+    """denied_tools 必须对照实时授权，不是回合内缓存的 capability_snapshot。
+
+    实盘翻过一次：收回后 callable 已经不带那个工具，但装配期快照还带着它，
+    于是清单里那个"已声明无权限"的名字没人点名，模型只能撞一次拒绝才知道。
+    """
+    service = SimpleNamespace(
+        list_effective_tool_names=lambda *, actor_role, session_id: ["exec", "submit_next_stage"]
+    )
+    runner = create_agent_impl.CreateAgentCeoFrontDoorRunner(loop=SimpleNamespace(main_task_service=service))
+
+    granted = runner._frontdoor_live_granted_tool_names(session_key="web:shared")
+    assert granted == ["exec", "submit_next_stage"]
+    assert runner._frontdoor_declared_denied_tool_names(
+        declared_tool_names=["exec", "web_fetch", "submit_next_stage"],
+        granted_tool_names=granted,
+    ) == ["web_fetch"]
+
+    # 实时授权读不到时不产出这一行：宁可不说，也不拿旧快照说错
+    broken = create_agent_impl.CreateAgentCeoFrontDoorRunner(loop=SimpleNamespace(main_task_service=None))
+    assert broken._frontdoor_live_granted_tool_names(session_key="web:shared") == []
+
+
 def test_frontdoor_dispatch_stays_live_while_declaration_is_pinned() -> None:
     """钉住只作用于声明，派发仍按当轮治理可见集——声明滞后不能变成权限滞后。
 
