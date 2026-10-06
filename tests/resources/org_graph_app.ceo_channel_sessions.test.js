@@ -102,7 +102,7 @@ function loadApp() {
             activeSessionItem,
             activeSessionIsReadonly,
             activeSessionCanMessage,
-            buildCeoUserMessageActionsMarkup,
+            buildCeoUserMessageEditMarkup,
         };`,
         context
     );
@@ -261,7 +261,7 @@ test("syncCeoPrimaryButton shows an enabled pause button for readonly channel se
 
 test("registered ext session accepts composer input but keeps history actions hidden", () => {
     const ctx = loadApp();
-    const { S, U, activeSessionCanMessage, activeSessionIsReadonly, buildCeoUserMessageActionsMarkup } = ctx;
+    const { S, U, activeSessionCanMessage, activeSessionIsReadonly, buildCeoUserMessageEditMarkup } = ctx;
     const item = extChannelItem({ can_message: true });
     S.activeSessionId = item.session_id;
     S.ceoSessions = [item];
@@ -278,9 +278,10 @@ test("registered ext session accepts composer input but keeps history actions hi
     assert.ok(U.ceoSend.innerHTML.includes("发送"), U.ceoSend.innerHTML);
     assert.ok(!U.ceoSend.innerHTML.includes("只读"), U.ceoSend.innerHTML);
 
-    // 编辑重发/Fork 必须继续缺席：门槛判 is_readonly，不跟输入闸门一起放宽。
+    // 编辑重发必须继续缺席（渠道转录只读），Fork 的入口在回复行、同样由 web: 前缀挡掉：
+    // 输入闸门 can_message 放宽不等于历史可改，两轴不得合并。
     assert.equal(
-        buildCeoUserMessageActionsMarkup({ turnId: "t1", canEditFork: true, sessionId: item.session_id }),
+        buildCeoUserMessageEditMarkup({ turnId: "t1", canEditFork: true, sessionId: item.session_id }),
         ""
     );
 });

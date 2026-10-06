@@ -1,4 +1,4 @@
-"""快照消息级 can_edit_fork / can_fork / task_dispatched 标志与防御型稳定态总开关测试。"""
+"""快照消息级 can_edit_fork / can_fork_reply / task_dispatched 标志与防御型稳定态总开关测试。"""
 
 from __future__ import annotations
 
@@ -54,15 +54,13 @@ def test_build_ceo_snapshot_emits_flags(tmp_path, monkeypatch):
         messages,
         session_id="web:ceo-x",
         edit_fork_gates={0: True, 2: False},
-        fork_gates={0: True, 2: True},
     )
     users = [item for item in items if item["role"] == "user"]
     assistants = [item for item in items if item["role"] == "assistant"]
     assert users[0].get("can_edit_fork") is True
     assert "can_edit_fork" not in users[1]
-    # 两个 flag 各自独立：编辑被收回的那条仍可 Fork。
-    assert users[0].get("can_fork") is True
-    assert users[1].get("can_fork") is True
+    # 提问轴的 can_fork 整条摘掉：没有渲染者，服务端也不该再发这个键。
+    assert all("can_fork" not in item for item in items)
     assert assistants[0].get("task_dispatched") is True
 
 
@@ -77,16 +75,15 @@ def test_build_ceo_snapshot_marks_reply_lane_separately(tmp_path, monkeypatch):
     items = websocket_ceo._build_ceo_snapshot(
         messages,
         session_id="web:ceo-x",
-        fork_gates={0: True},
         reply_fork_turn_ids={"t1"},
     )
     users = [item for item in items if item["role"] == "user"]
     assistants = [item for item in items if item["role"] == "assistant"]
     assert assistants[0].get("can_fork_reply") is True
     assert all("can_fork_reply" not in item for item in users)
-    # 提问行自己的 can_fork 与回复行资格互不串台
-    assert users[0].get("can_fork") is True
-    assert "can_fork" not in assistants[0]
+    # 同 turn_id 的提问行不冒名领回复行的资格，也不带任何提问轴 flag
+    assert "can_fork" not in users[0]
+    assert "can_fork_reply" not in users[0]
 
 
 def test_reply_fork_turn_ids_follow_the_fork_gates_and_the_tail(tmp_path, monkeypatch):
@@ -199,4 +196,6 @@ def test_relay_pushes_gates_frame_when_session_becomes_stable():
         line for line in relay_block.splitlines() if "await _push_edit_fork_gates()" in line
     )
     assert gate_line.startswith("            await "), "门槛帧被关进了 paused 的 if 块里"
-    assert "'fork_turn_ids'" in source, "补发帧缺 Fork 资格列表"
+    assert "'fork_reply_turn_ids'" in source, "补发帧缺回复轴资格列表"
+    # 提问轴那半已经摘掉：帧里不许再出现只会被前端忽略的列表。
+    assert "'fork_turn_ids'" not in source, "补发帧仍带着没有渲染者的 fork_turn_ids"

@@ -4,12 +4,13 @@ const fs = require("node:fs");
 const vm = require("node:vm");
 
 // 用户消息编辑重发/Fork 的前端契约:
-// - buildCeoUserMessageActionsMarkup:用户气泡只剩编辑(can_edit_fork),web: 会话才产出行(R1);
+// - buildCeoUserMessageEditMarkup:用户气泡那颗是裸按钮(can_edit_fork),web: 会话才产出(R1);
 // - buildCeoAssistantForkMarkup/addMsg/renderCeoAssistantForkAction:Fork 挂在回复行的元信息
-//   行、排在用量左边,切点 at=reply(R10/R11);
-// - 元信息(时间/token/复制)由点击消息显形(.meta-open),Fork 常驻不吃点击门(R7 的 CSS 契约);
-// - normalizeCeoSnapshotMessage 保留 can_edit_fork/can_fork/task_dispatched(R3);
-// - buildCeoRenderSignature 覆盖两个 flag,权威快照到达必须触发重建(R4);
+//   行、排在用量左边,服务端只有这一个切点(R10/R11);
+// - 两颗按钮都排在元信息行里:编辑在发送时间右边,不再自成 .msg-actions 一行(R2);
+// - 元信息(时间/token/复制)由点击消息显形(.meta-open),按钮不吃这道门(R7 的 CSS 契约);
+// - 提问轴的 can_fork / at=question 已从这条车道整体摘掉:flag 不进缓存、不进签名(R3/R4);
+// - normalizeCeoSnapshotMessage 保留 can_edit_fork/can_fork_reply/task_dispatched(R3/R12);
 // - syncCeoFeedTurnActiveClass:回合进行中给 feed 挂 .ceo-turn-active(R5);
 // - editForkErrorText 映射服务端错误码(R6);
 // - applyCeoEditForkGates:收尾后服务端补发门槛,按钮不等手动刷新(R8/R8b/R13);
@@ -203,7 +204,7 @@ function loadApp() {
             S,
             U,
             addMsg,
-            buildCeoUserMessageActionsMarkup,
+            buildCeoUserMessageEditMarkup,
             buildCeoAssistantForkMarkup,
             renderCeoAssistantForkAction,
             renderPersistedCeoAssistantTurn,
@@ -231,73 +232,79 @@ function setup() {
     return api;
 }
 
-test("R1 用户气泡只出编辑，Fork 已经搬到模型回复那一行", () => {
+test("R1 用户气泡只出编辑，而且不再自成一行操作区", () => {
     const api = setup();
-    const both = api.buildCeoUserMessageActionsMarkup({
+    const markup = api.buildCeoUserMessageEditMarkup({
         turnId: "t1",
         canEditFork: true,
-        canFork: true,
         sessionId: "web:ceo-s1",
     });
-    assert.ok(both.includes('data-ceo-edit-resend="t1"'), both);
-    assert.ok(!both.includes('data-ceo-fork='), `用户气泡不该再挂 Fork 按钮: ${both}`);
+    assert.ok(markup.includes('data-ceo-edit-resend="t1"'), markup);
+    assert.ok(!markup.includes('data-ceo-fork='), `用户气泡不该挂 Fork 按钮: ${markup}`);
+    // 裸按钮：它挂进气泡的元信息行，不再包 .msg-actions 容器。
+    assert.ok(!markup.includes("msg-actions"), markup);
 
-    // 只有 Fork 资格（回合在跑/等审批/压缩在途）时用户行不再出任何按钮：
-    // 那个动作的入口在回复下面，由 can_fork_reply 驱动。
-    assert.equal(api.buildCeoUserMessageActionsMarkup({
-        turnId: "t1", canEditFork: false, canFork: true, sessionId: "web:ceo-s1",
+    // 没有编辑资格（回合在跑/等审批/压缩在途）时用户行不出任何按钮：编辑改的是源
+    // 转录；Fork 的入口在回复行，由 can_fork_reply 驱动。
+    assert.equal(api.buildCeoUserMessageEditMarkup({
+        turnId: "t1", canEditFork: false, sessionId: "web:ceo-s1",
     }), "");
-    assert.equal(api.buildCeoUserMessageActionsMarkup({ turnId: "t1", sessionId: "web:ceo-s1" }), "");
-    assert.equal(api.buildCeoUserMessageActionsMarkup({ turnId: "", canEditFork: true, sessionId: "web:ceo-s1" }), "");
-    assert.equal(api.buildCeoUserMessageActionsMarkup({ turnId: "t1", canEditFork: true, sessionId: "ext:qq:1" }), "");
+    assert.equal(api.buildCeoUserMessageEditMarkup({ turnId: "t1", sessionId: "web:ceo-s1" }), "");
+    assert.equal(api.buildCeoUserMessageEditMarkup({ turnId: "", canEditFork: true, sessionId: "web:ceo-s1" }), "");
+    assert.equal(api.buildCeoUserMessageEditMarkup({ turnId: "t1", canEditFork: true, sessionId: "ext:qq:1" }), "");
 });
 
-test("R2 addMsg 用户分支把按钮行渲染进 message-stack", () => {
+test("R2 addMsg 用户分支把编辑排在发送时间右边的同一行", () => {
     const api = setup();
-    api.addMsg("带按钮的消息", "user", { turnId: "t9", canEditFork: true, canFork: true, sessionId: "web:ceo-s1", timestamp: "2026-09-14T10:00:00" });
-    const el = api.U.ceoFeed.children[0];
-    assert.ok(el.innerHTML.includes('class="message-stack"'), el.innerHTML);
-    assert.ok(el.innerHTML.includes('data-ceo-edit-resend="t9"'), el.innerHTML);
-    assert.ok(!el.innerHTML.includes('data-ceo-fork='), el.innerHTML);
+    const el = api.addMsg("带按钮的消息", "user", {
+        turnId: "t9", canEditFork: true, sessionId: "web:ceo-s1", timestamp: "2026-09-14T10:00:00",
+    });
+    const html = String(el.innerHTML);
+    assert.ok(html.includes('class="message-stack"'), html);
+    assert.ok(html.includes('data-ceo-edit-resend="t9"'), html);
+    assert.ok(!html.includes('data-ceo-fork='), html);
+    // 时间与编辑落在同一个 .msg-meta 行里，时间在前、编辑在最右。
+    assert.ok(/class="msg-meta">[\s\S]*?class="msg-meta-text"[\s\S]*?data-ceo-edit-resend="t9"/.test(html), html);
 
     api.addMsg("无按钮的消息", "user", { sessionId: "web:ceo-s1" });
-    const plain = api.U.ceoFeed.children[1];
-    assert.ok(!plain.innerHTML.includes("msg-actions"), plain.innerHTML);
+    assert.ok(!api.U.ceoFeed.children[1].innerHTML.includes("data-ceo-edit-resend"));
 
-    // live 发送路径(两个 flag 都不带)不渲染按钮。
-    api.addMsg("live 消息", "user", { turnId: "t10", canEditFork: false, canFork: false, sessionId: "web:ceo-s1" });
-    assert.ok(!api.U.ceoFeed.children[2].innerHTML.includes("msg-actions"));
+    // live 发送路径（不带 flag）不渲染按钮。
+    api.addMsg("live 消息", "user", { turnId: "t10", canEditFork: false, sessionId: "web:ceo-s1" });
+    assert.ok(!api.U.ceoFeed.children[2].innerHTML.includes("data-ceo-edit-resend"));
 });
 
-test("R3 normalizeCeoSnapshotMessage 保留 can_edit_fork/can_fork/task_dispatched", () => {
+test("R3 normalizeCeoSnapshotMessage 保留按钮 flag，提问轴那条已摘干净", () => {
     const api = setup();
     const user = api.normalizeCeoSnapshotMessage({ role: "user", content: "u", turn_id: "t1", can_edit_fork: true, can_fork: true });
     assert.equal(user.can_edit_fork, true);
-    assert.equal(user.can_fork, true);
+    // can_fork 没有任何渲染者，服务端也不再下发；万一读到不得进缓存行（否则会白占签名）。
+    assert.equal(user.can_fork, undefined);
     const userNoFlag = api.normalizeCeoSnapshotMessage({ role: "user", content: "u", turn_id: "t2" });
     assert.equal(userNoFlag.can_edit_fork, undefined);
-    assert.equal(userNoFlag.can_fork, undefined);
-    const assistant = api.normalizeCeoSnapshotMessage({ role: "assistant", content: "a", turn_id: "t1", task_dispatched: true });
+    const assistant = api.normalizeCeoSnapshotMessage({ role: "assistant", content: "a", turn_id: "t1", task_dispatched: true, can_fork_reply: true });
     assert.equal(assistant.task_dispatched, true);
-    // user 角色不接受 task_dispatched,assistant 角色不接受两个按钮 flag。
+    assert.equal(assistant.can_fork_reply, true);
+    // user 角色不接受 task_dispatched，assistant 角色不接受编辑 flag。
     const userCross = api.normalizeCeoSnapshotMessage({ role: "user", content: "u", task_dispatched: true });
     assert.equal(userCross.task_dispatched, undefined);
-    const assistantCross = api.normalizeCeoSnapshotMessage({ role: "assistant", content: "a", can_edit_fork: true, can_fork: true });
+    const assistantCross = api.normalizeCeoSnapshotMessage({ role: "assistant", content: "a", can_edit_fork: true });
     assert.equal(assistantCross.can_edit_fork, undefined);
-    assert.equal(assistantCross.can_fork, undefined);
 });
 
-test("R4 buildCeoRenderSignature 覆盖编辑/Fork 标志", () => {
+test("R4 buildCeoRenderSignature 覆盖两颗按钮的 flag", () => {
     const api = setup();
     const base = [{ role: "user", content: "u", turn_id: "t1" }, { role: "assistant", content: "a", turn_id: "t1" }];
-    const withFlag = [{ role: "user", content: "u", turn_id: "t1", can_edit_fork: true }, { role: "assistant", content: "a", turn_id: "t1", task_dispatched: true }];
     const signatureBase = api.buildCeoRenderSignature(base, null, null);
-    const signatureFlagged = api.buildCeoRenderSignature(withFlag, null, null);
-    assert.ok(signatureBase && signatureFlagged);
-    assert.notEqual(signatureBase, signatureFlagged);
-    // can_fork 单独变化也必须触发重建，否则回合在跑时补发的 Fork 资格落不到像素上。
-    const withForkOnly = [{ role: "user", content: "u", turn_id: "t1", can_fork: true }, { role: "assistant", content: "a", turn_id: "t1" }];
-    assert.notEqual(signatureBase, api.buildCeoRenderSignature(withForkOnly, null, null));
+    const withFlag = [{ role: "user", content: "u", turn_id: "t1", can_edit_fork: true }, { role: "assistant", content: "a", turn_id: "t1", task_dispatched: true }];
+    assert.ok(signatureBase && api.buildCeoRenderSignature(withFlag, null, null));
+    assert.notEqual(signatureBase, api.buildCeoRenderSignature(withFlag, null, null));
+    // 回复轴 flag 单独变化也必须触发重建，否则补发的门槛帧落不到像素上。
+    const withReplyFork = [{ role: "user", content: "u", turn_id: "t1" }, { role: "assistant", content: "a", turn_id: "t1", can_fork_reply: true }];
+    assert.notEqual(signatureBase, api.buildCeoRenderSignature(withReplyFork, null, null));
+    // 提问轴不进签名：残留的 can_fork 不该白触发一次整列重建。
+    const withStaleCanFork = [{ role: "user", content: "u", turn_id: "t1", can_fork: true }, { role: "assistant", content: "a", turn_id: "t1" }];
+    assert.equal(signatureBase, api.buildCeoRenderSignature(withStaleCanFork, null, null));
 });
 
 test("R4b buildCeoRenderSignature 覆盖 live 回合的阶段轨道增量", () => {
@@ -391,15 +398,15 @@ test("R7 接线静态契约:委托/时序/横幅/HTML 元素", () => {
     const html = fs.readFileSync("g3ku/web/frontend/org_graph.html", "utf8");
     assert.ok(html.includes('id="ceo-edit-resend-banner"'), "org_graph.html 缺少横幅容器");
     assert.ok(APP_CODE.includes('ceoEditResendBanner: document.getElementById("ceo-edit-resend-banner")'), "U 缺少横幅绑定");
-    // CSS:按钮行常驻（不再悬停才出现）+ 回合进行中只隐藏编辑按钮。
+    // CSS：两颗按钮常驻挂在自己的元信息行里，.msg-actions 那层容器整块删掉了。
     const css = fs.readFileSync("g3ku/web/frontend/org_graph.css", "utf8");
-    assert.ok(css.includes(".msg-actions"), "CSS 缺少 .msg-actions");
-    assert.ok(!/\.msg-actions \{[^}]*opacity: 0/.test(css), ".msg-actions 仍被按在悬停后才显形");
-    assert.ok(!css.includes(".message:hover .msg-actions"), "CSS 仍用悬停门控制按钮行");
+    assert.ok(!css.includes(".msg-actions"), "CSS 里还留着 .msg-actions 容器");
+    assert.ok(!APP_CODE.includes("msg-actions"), "前端还在校自成一行的操作区");
     assert.ok(css.includes(".ceo-turn-active .msg-action-edit"), "CSS 缺少编辑按钮的防御型隐藏规则");
-    // 整行隐藏会把 Fork 一起吃掉（暂停/运行中正是唯一还能 Fork 的时刻）。
-    assert.ok(!css.includes(".ceo-turn-active .msg-actions"), "CSS 仍在回合进行中整行隐藏按钮");
-    // 元信息（时间/用量/复制）改成点击这条消息才显形，两车道各一条门；Fork 不吃这道门。
+    // 按整行隐藏会把同一行里的 Fork 一起吃掉（暂停/运行中正是唯一还能 Fork 的时刻）。
+    assert.ok(!css.includes(".ceo-turn-active .msg-meta"), "CSS 仍按整行隐藏元信息里的按钮");
+    assert.ok(!css.includes(".message:hover .msg-action"), "动作按钮仍靠悬停显形");
+    // 元信息（时间/用量/复制）改成点击这条消息才显形，两车道各一条门；两颗按钮不吃这道门。
     assert.ok(
         css.includes(".ceo-turn-message.usage-collapsed:not(.meta-open) .ceo-turn-usage"),
         "CSS 缺轨道回合用量的点击门"
@@ -410,6 +417,7 @@ test("R7 接线静态契约:委托/时序/横幅/HTML 元素", () => {
         "CSS 缺普通气泡元信息的点击门"
     );
     assert.ok(!css.includes(".message:not(.meta-open) .msg-action-fork"), "Fork 按钮被点击门管住了");
+    assert.ok(!css.includes(".message:not(.meta-open) .msg-action-edit"), "编辑按钮被点击门管住了");
     assert.ok(!css.includes(".message:hover .msg-copy-btn"), "复制按钮仍靠悬停显形");
     assert.ok(!css.includes(".message:hover .msg-meta"), "元信息行仍靠悬停显形");
     // 点击门的行为面：委托挂在 feed 的 click 上，且控件与选字都让路。
@@ -422,13 +430,10 @@ test("R7 接线静态契约:委托/时序/横幅/HTML 元素", () => {
     assert.ok(revealBody.includes("getSelection"), "点击门没给选中正文让路");
     assert.ok(revealBody.includes('closest(".message")'), "点击门没有落在消息根元素上");
     assert.ok(revealBody.includes('toggle("meta-open")'), "点击门没有切 meta-open");
-    // 网页上只剩回复切点：缺 data-ceo-fork-at 的按钮按 reply 处理，不许静默换成提问切点。
-    assert.ok(
-        APP_CODE.includes('forkBtn.dataset.ceoForkAt || "reply"'),
-        "Fork 委托的兜底切点不是 reply"
-    );
-    // 网页只剩回复切点：缺 data-ceo-fork-at 的按钮不得静默按提问切点复制前缀。
-    assert.ok(APP_CODE.includes('forkBtn.dataset.ceoForkAt || "reply"'), "Fork 委托的兜底切点不是 reply");
+    // 提问轴整条摘干净：服务端只剩一个切点，客户端不许再发 at，也不许留切点属性。
+    assert.ok(!APP_CODE.includes("ceoForkAt"), "前端还在读 data-ceo-fork-at");
+    assert.ok(!APP_CODE.includes("at: mode"), "Fork 请求体还带 at");
+    assert.ok(!APP_CODE.includes("fork_turn_ids"), "前端还在消费提问轴的 fork_turn_ids");
     // 收尾后服务端补发的门槛帧必须有分发。
     assert.ok(
         APP_CODE.includes('payload.type === "ceo.edit_fork.gates"'),
@@ -466,7 +471,7 @@ test("R8 applyCeoEditForkGates 收尾后补发门槛:按钮不等手动刷新", 
     assert.equal(cached[1].can_edit_fork, undefined, "同批共享 turn_id 的后续行不得拿到 flag");
     const renderedHtml = feed.children.map((child) => child.innerHTML).join("\n");
     assert.ok(renderedHtml.includes('data-ceo-edit-resend="t2"'), renderedHtml);
-    assert.equal((renderedHtml.match(/msg-actions/g) || []).length, 1);
+    assert.equal((renderedHtml.match(/data-ceo-edit-resend=/g) || []).length, 1);
 
     // 同一集合重复推送：签名未变，不得再重建一次。
     const rebuilds = feed.resetCount;
@@ -476,10 +481,10 @@ test("R8 applyCeoEditForkGates 收尾后补发门槛:按钮不等手动刷新", 
     // 空集合 = 整份收回（本轮派发了还没跑完的任务，或旧行掉出"最近 12 轮"窗口）。
     api.applyCeoEditForkGates({ turn_ids: [] });
     assert.equal(api.getCeoSessionSnapshotCache("web:ceo-s1").messages[0].can_edit_fork, undefined);
-    assert.ok(!feed.children.map((child) => child.innerHTML).join("\n").includes("msg-actions"));
+    assert.ok(!feed.children.map((child) => child.innerHTML).join("\n").includes("data-ceo-edit-resend"));
 });
 
-test("R8b 两份门槛列表各自独立:回合在跑时只有回复行出 Fork 按钮", () => {
+test("R8b 门槛帧只剩两份列表:回合在跑时用户行不出按钮、回复行出 Fork", () => {
     const api = setup();
     seedRenderedCeoCache(api, [
         { role: "user", content: "第一条", turn_id: "t1" },
@@ -488,26 +493,24 @@ test("R8b 两份门槛列表各自独立:回合在跑时只有回复行出 Fork 
     const feed = new FeedStub();
     api.U.ceoFeed = feed;
 
-    // 服务端在非稳定态返回 (edit=None, fork=gates)：编辑资格收回、提问轴 Fork 资格照旧
-    // 落在数据里，但用户气泡已经没有这个入口了——看不见的资格不该画成按钮。
+    // 非稳定态收回编辑资格。提问轴的 fork_turn_ids 已经不再生效——旧进程真发来这个键，
+    // 前端也不认：没有渲染者的资格不该画成按钮。
     api.applyCeoEditForkGates({ turn_ids: [], fork_turn_ids: ["t1"] });
     const cached = api.getCeoSessionSnapshotCache("web:ceo-s1").messages;
     assert.equal(cached[0].can_edit_fork, undefined);
-    assert.equal(cached[0].can_fork, true);
-    assert.ok(!feed.children.map((child) => child.innerHTML).join("\n").includes("data-ceo-fork"),
-        "提问行不再贡献 Fork 按钮");
-    assert.ok(!feed.children.map((child) => child.innerHTML).join("\n").includes("data-ceo-edit-resend"));
-
-    // 同一帧带上回复轴资格：按钮挂在回复行的元信息行里，与用量同行。
-    api.applyCeoEditForkGates({ turn_ids: [], fork_turn_ids: ["t1"], fork_reply_turn_ids: ["t1"] });
+    assert.equal(cached[0].can_fork, undefined);
     const renderedHtml = feed.children.map((child) => child.innerHTML).join("\n");
-    assert.equal((renderedHtml.match(/data-ceo-fork="/g) || []).length, 1, renderedHtml);
-    assert.ok(renderedHtml.includes('data-ceo-fork="t1"'), renderedHtml);
-    assert.ok(renderedHtml.includes('data-ceo-fork-at="reply"'), renderedHtml);
+    assert.ok(!renderedHtml.includes("data-ceo-fork"), "提问行不再贡献 Fork 按钮");
+    assert.ok(!renderedHtml.includes("data-ceo-edit-resend"), renderedHtml);
 
-    // 收回回复轴只剩 can_fork：整份 feed 里一个 Fork 按钮都不该剩下。
-    api.applyCeoEditForkGates({ turn_ids: [], fork_turn_ids: ["t1"], fork_reply_turn_ids: [] });
-    assert.equal(api.getCeoSessionSnapshotCache("web:ceo-s1").messages[0].can_fork, true);
+    // 带上回复轴资格：按钮挂在回复行的元信息行里，与用量同行。
+    api.applyCeoEditForkGates({ turn_ids: [], fork_reply_turn_ids: ["t1"] });
+    const withFork = feed.children.map((child) => child.innerHTML).join("\n");
+    assert.equal((withFork.match(/data-ceo-fork="/g) || []).length, 1, withFork);
+    assert.ok(withFork.includes('data-ceo-fork="t1"'), withFork);
+
+    // 收回：整份 feed 一个 Fork 都不剩。
+    api.applyCeoEditForkGates({ turn_ids: [], fork_reply_turn_ids: [] });
     assert.equal(api.getCeoSessionSnapshotCache("web:ceo-s1").messages[1].can_fork_reply, undefined);
     assert.ok(!feed.children.map((child) => child.innerHTML).join("\n").includes("data-ceo-fork"));
 });
@@ -552,11 +555,14 @@ test("R9 暂停收尾把用户行落进快照缓存，补发门槛帧才有行�
     assert.ok(pausedRow, "暂停没有 ceo.reply.final，收尾必须自己把用户行按 turn_id 落进缓存");
 
     // 落进行里之后，同一轮补发的门槛帧才盖得上章——此前正是"刷新才有按钮"的根因。
-    api.applyCeoEditForkGates({ turn_ids: ["t2"], fork_turn_ids: ["t2"] });
+    api.applyCeoEditForkGates({ turn_ids: ["t2"], fork_reply_turn_ids: ["t2"] });
     const flagged = api.getCeoSessionSnapshotCache("web:ceo-s1").messages
         .find((item) => item.role === "user" && item.turn_id === "t2");
-    assert.equal(flagged.can_fork, true);
     assert.equal(flagged.can_edit_fork, true);
+    // 回复轴的列表不许盖到用户行上（收尾时写进缓存的 assistant 行不带 turn_id，
+    // 那份资格由权威快照补，见 R13）。
+    assert.equal(flagged.can_fork_reply, undefined);
+    assert.equal(flagged.can_fork, undefined);
 });
 
 test("R9b 审批等待造成的暂停不落地转录行（回合还没结束）", () => {
@@ -573,7 +579,7 @@ test("R9b 审批等待造成的暂停不落地转录行（回合还没结束）"
     assert.equal(entry.inflight_turn.status, "paused");
 });
 
-test("R10 buildCeoAssistantForkMarkup 只出 Fork、带 at=reply、不吃编辑资格", () => {
+test("R10 buildCeoAssistantForkMarkup 只出一颗裸 Fork、不吃编辑资格", () => {
     const api = setup();
     const markup = api.buildCeoAssistantForkMarkup({
         turnId: "t7",
@@ -581,7 +587,9 @@ test("R10 buildCeoAssistantForkMarkup 只出 Fork、带 at=reply、不吃编辑�
         sessionId: "web:ceo-s1",
     });
     assert.ok(markup.includes('data-ceo-fork="t7"'), markup);
-    assert.ok(markup.includes('data-ceo-fork-at="reply"'), markup);
+    assert.ok(!markup.includes("msg-actions"), markup);
+    // 服务端只剩一个切点（这条回复之后），所以不再需要 at 属性区分入口。
+    assert.ok(!markup.includes("data-ceo-fork-at"), markup);
     assert.ok(!markup.includes("data-ceo-edit-resend"), "编辑重发不该出现在回复下方");
 
     assert.equal(api.buildCeoAssistantForkMarkup({ turnId: "t7", sessionId: "web:ceo-s1" }), "");
@@ -599,14 +607,12 @@ test("R11 addMsg 系统分支把 Fork 排在用量左边的同一行", () => {
         canForkReply: true,
     });
     const html = String(el.innerHTML);
-    assert.ok(html.includes('data-ceo-fork-at="reply"'), html);
     assert.ok(html.includes("message-stack"), html);
     // 同一个 .msg-meta 行内：Fork 在最左，用量文字排在它右边。
     assert.ok(/class="msg-meta"><button[^>]*msg-action-fork/.test(html), html);
     assert.ok(/msg-action-fork[\s\S]*?class="msg-meta-text"/.test(html), html);
 
     const bare = api.addMsg("没有资格的回复", "system", { markdown: true, sessionId: "web:ceo-s1", turnId: "t9" });
-    assert.ok(!String(bare.innerHTML).includes("msg-actions"), bare.innerHTML);
     assert.ok(!String(bare.innerHTML).includes("msg-action-fork"), bare.innerHTML);
 });
 
@@ -635,12 +641,12 @@ test("R13 门槛帧的回复行列表只打 assistant，不冒名到用户行", 
     api.applyCeoEditForkGates({ fork_reply_turn_ids: ["t11"] });
 
     const cached = api.getCeoSessionSnapshotCache("web:ceo-s1").messages;
-    assert.equal(cached[1].can_fork_reply, true, "回复行必须拿到 at=reply 资格");
+    assert.equal(cached[1].can_fork_reply, true, "回复行必须拿到 Fork 资格");
     assert.equal(cached[0].can_fork_reply, undefined, "提问行不得冒名领回复行的资格");
-    assert.equal(cached[0].can_fork, undefined, "fork_reply_turn_ids 不影响 can_fork");
-    // 重建后的 DOM 里，带 at=reply 的按钮行只有一条（挂在回复下方）
+    assert.equal(cached[0].can_fork, undefined, "回复轴列表不会给用户行盖任何 Fork 章");
+    // 重建后的 DOM 里只有一颗 Fork（挂在回复那一条上）
     const renderedHtml = feed.children.map((child) => child.innerHTML).join("\n");
-    assert.equal((renderedHtml.match(/data-ceo-fork-at="reply"/g) || []).length, 1, renderedHtml);
+    assert.equal((renderedHtml.match(/data-ceo-fork="/g) || []).length, 1, renderedHtml);
 
     // 整份收回：新一轮把这条挤出"最近 12 轮"窗口时按钮跟着消失
     api.applyCeoEditForkGates({ fork_reply_turn_ids: [] });

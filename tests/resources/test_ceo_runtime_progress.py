@@ -6159,8 +6159,10 @@ def test_ceo_websocket_manual_pause_restores_paused_inflight_turn_without_final_
         # 暂停收尾必须仍补发门槛帧（它曾被 paused 分支整段跳过），且 Fork 资格不跟着
         # 稳定态一起收窄：暂停时输入不可用，Fork 是把这条前缀救走的唯一出口。
         assert isinstance(gates_data.get("turn_ids"), list)
-        assert isinstance(gates_data.get("fork_turn_ids"), list)
-        assert len(gates_data["fork_turn_ids"]) >= len(gates_data["turn_ids"])
+        assert isinstance(gates_data.get("fork_reply_turn_ids"), list)
+        assert len(gates_data["fork_reply_turn_ids"]) >= len(gates_data["turn_ids"])
+        # 那颗按钮只挂在回复行上，提问轴的列表没有渲染者，帧里不许再出现。
+        assert "fork_turn_ids" not in gates_data, "补发帧仍带着 fork_turn_ids"
 
     holder.manager = SessionRuntimeManager(agent)
 

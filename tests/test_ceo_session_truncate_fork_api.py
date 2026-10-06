@@ -208,7 +208,9 @@ def test_fork_endpoint_success(env):
     source_messages_before = [
         dict(m) for m in env.manager.get_or_create(env.key).messages
     ]
-    response = env.client.post(f"/api/ceo/sessions/{env.key}/fork", json={"turn_id": "t2"})
+    # fork 的 turn_id 指那条**回复**所在的轮次：t1 的回复之后分叉 = 第二条提问之前，
+    # 所以前缀仍是 2 行、composer 回填第二条提问。
+    response = env.client.post(f"/api/ceo/sessions/{env.key}/fork", json={"turn_id": "t1"})
     assert response.status_code == 200, response.text
     payload = response.json()
     assert payload["ok"] is True
@@ -239,7 +241,7 @@ def test_fork_blocked_by_unfinished_task_inside_the_region(env):
     messages[3]["metadata"]["task_ids"] = ["task:aaa"]
     env.manager.save(env.manager.get_or_create(env.key))
     _stub_unfinished_tasks(env, ["task:aaa"])
-    response = env.client.post(f"/api/ceo/sessions/{env.key}/fork", json={"turn_id": "t2"})
+    response = env.client.post(f"/api/ceo/sessions/{env.key}/fork", json={"turn_id": "t1"})
     assert response.status_code == 409
     assert response.json()["detail"] == "edit_fork_blocked_by_async_task"
 
@@ -253,7 +255,7 @@ def test_fork_allows_echoed_task_ids_on_internal_rows(env):
                      "metadata": {"source": "heartbeat", "task_ids": ["task:aaa"]}})
     env.manager.save(env.manager.get_or_create(env.key))
     _stub_unfinished_tasks(env, ["task:aaa"])
-    response = env.client.post(f"/api/ceo/sessions/{env.key}/fork", json={"turn_id": "t2"})
+    response = env.client.post(f"/api/ceo/sessions/{env.key}/fork", json={"turn_id": "t1"})
     assert response.status_code == 200, response.text
 
 
@@ -266,7 +268,7 @@ def test_fork_ignores_source_runtime_state_while_truncate_does_not(env):
     env.runtime.state.is_running = True
     env.runtime.state.status = "running"
     before = [dict(m) for m in env.manager.get_or_create(env.key).messages]
-    response = env.client.post(f"/api/ceo/sessions/{env.key}/fork", json={"turn_id": "t2"})
+    response = env.client.post(f"/api/ceo/sessions/{env.key}/fork", json={"turn_id": "t1"})
     assert response.status_code == 200, response.text
     assert [dict(m) for m in env.manager.get_or_create(env.key).messages] == before
 

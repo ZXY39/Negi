@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import inspect
 import json
 import os
 from pathlib import Path
@@ -282,11 +283,12 @@ def test_fork_copies_prefix_uploads_and_continuity(workspace):
     wcs.write_turn_boundary_snapshot(key, "t1", _payload([{"role": "user", "content": note}]))
     source_jsonl_before = manager.get_path(key).read_text(encoding="utf-8")
 
+    # turn_id 指那条**回复**所在的轮次：t1 的回复之后分叉 = 第二条提问之前。
     result = history_edit.fork_web_ceo_session(
         session_manager=manager,
         agent=None,
         session_id=key,
-        turn_id="t2",
+        turn_id="t1",
     )
     new_key = result["session_id"]
     assert new_key != key
@@ -324,8 +326,8 @@ def test_fork_copies_prefix_uploads_and_continuity(workspace):
     assert src_file.exists()
 
 
-def test_fork_at_reply_maps_to_the_next_question_boundary(workspace):
-    """at=reply 的中间回复与"在下一条提问之前分叉"必须是同一个切点。"""
+def test_fork_from_reply_maps_to_the_next_question_boundary(workspace):
+    """中间回复的 Fork 必须落在"下一条提问之前"那个既有边界上，不是第二种切点。"""
     manager = SessionManager(workspace)
     key = "web:ceo-reply-mid"
     messages = [
@@ -338,23 +340,21 @@ def test_fork_at_reply_maps_to_the_next_question_boundary(workspace):
     _make_session(manager, key, messages)
     wcs.write_turn_boundary_snapshot(key, "t1", _payload([{"role": "user", "content": "第一条消息"}]))
 
-    by_reply = history_edit.fork_web_ceo_session(
-        session_manager=manager, agent=None, session_id=key, turn_id="t1", at="reply"
-    )
-    by_question = history_edit.fork_web_ceo_session(
-        session_manager=manager, agent=None, session_id=key, turn_id="t2", at="question"
+    result = history_edit.fork_web_ceo_session(
+        session_manager=manager, agent=None, session_id=key, turn_id="t1"
     )
 
-    assert by_reply["copied_message_count"] == 2
-    assert by_reply["copied_message_count"] == by_question["copied_message_count"]
-    assert by_reply["continuity_source"] == by_question["continuity_source"] == "turn_boundary"
-    # 回填的是下一条提问，与点用户气泡上那个按钮完全同义
-    assert by_reply["composer"]["text"] == "第二条消息"
-    new_session = manager.get_or_create(by_reply["session_id"])
+    assert result["copied_message_count"] == 2
+    assert result["continuity_source"] == "turn_boundary"
+    # 回填的是下一条提问：切点与边界快照同一个位置。
+    assert result["composer"]["text"] == "第二条消息"
+    new_session = manager.get_or_create(result["session_id"])
     assert [m["content"] for m in new_session.messages] == ["第一条消息", "第一条回复"]
+    # 提问轴那一半（at=question）已经从合同里摘掉：参数不许回来。
+    assert "at" not in inspect.signature(history_edit.fork_web_ceo_session).parameters
 
 
-def test_fork_at_reply_on_tail_reply_copies_whole_transcript(workspace):
+def test_fork_tail_reply_copies_whole_transcript(workspace):
     """尾部回复：整份转录都进新会话、连续性取源会话当前 sidecar、输入框留空。"""
     manager = SessionManager(workspace)
     key = "web:ceo-reply-tail"
@@ -368,7 +368,7 @@ def test_fork_at_reply_on_tail_reply_copies_whole_transcript(workspace):
     wcs.write_completed_continuity_snapshot(key, _payload([{"role": "user", "content": "基线"}]))
 
     result = history_edit.fork_web_ceo_session(
-        session_manager=manager, agent=None, session_id=key, turn_id="t2", at="reply"
+        session_manager=manager, agent=None, session_id=key, turn_id="t2"
     )
 
     assert result["copied_message_count"] == 4
@@ -384,13 +384,13 @@ def test_fork_at_reply_on_tail_reply_copies_whole_transcript(workspace):
     assert sidecar["frontdoor_history_shrink_reason"] == "user_edit_truncation"
 
 
-def test_fork_at_reply_requires_a_visible_reply(workspace):
+def test_fork_requires_a_visible_reply_row(workspace):
     manager = SessionManager(workspace)
     key = "web:ceo-reply-missing"
     _make_session(manager, key, [_user("t1", "只有提问"), _user("t2", "又一条提问")])
     with pytest.raises(history_edit.HistoryEditError) as err:
         history_edit.fork_web_ceo_session(
-            session_manager=manager, agent=None, session_id=key, turn_id="t1", at="reply"
+            session_manager=manager, agent=None, session_id=key, turn_id="t1"
         )
     assert err.value.code == "turn_not_found"
 

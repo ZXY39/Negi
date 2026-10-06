@@ -728,7 +728,6 @@ def fork_web_ceo_session(
     session_id: str,
     turn_id: str,
     title: str | None = None,
-    at: str = "question",
 ) -> dict[str, Any]:
     """把会话在 boundary 之前的前缀复制成新会话，返回 composer 预填载荷。
 
@@ -736,25 +735,22 @@ def fork_web_ceo_session(
     描述符/内容路径重写）+ 截断态连续性 sidecar + prev_turn 边界快照。
     被点击消息本身不进新转录，其原文与（复制后的）附件作为 composer 预填返回。
 
-    ``at="reply"`` 时 ``turn_id`` 指**模型回复**所在的轮次：切点翻译成该回复之后
-    第一条提问之前（与 ``at="question"`` 共用全部判据）；那条回复已是转录尾部时
-    走尾部分支——整份转录都进新会话、连续性取源会话当前的 completed sidecar、
-    composer 留空，所以最后一条回复也有 Fork 入口，不必等下一条提问发出来。
+    ``turn_id`` 指**模型回复**所在的轮次，先由 ``reply_fork_target`` 翻译成既有的
+    边界模型：切点 = 该回复之后第一条提问之前，前缀、连续性锚点、任务门槛、保留
+    窗口全部复用同一条路径。那条回复已是转录尾部时走尾部分支——整份转录都进新
+    会话、连续性取源会话当前的 completed sidecar、composer 留空，所以最后一条
+    回复也有 Fork 入口，不必等下一条提问发出来。
     """
     key = str(session_id or "").strip()
     source_session = session_manager.get_or_create(key)
     messages = list(getattr(source_session, "messages", []) or [])
-    normalized_mode = str(at or "question").strip().lower()
-    tail_fork = False
-    if normalized_mode == "reply":
-        target = reply_fork_target(messages, turn_id)
-        if target is None:
-            raise HistoryEditError("turn_not_found", status_code=404)
-        _reply_index, next_user_turn_id = target
-        if next_user_turn_id:
-            turn_id = next_user_turn_id
-        else:
-            tail_fork = True
+    target = reply_fork_target(messages, turn_id)
+    if target is None:
+        raise HistoryEditError("turn_not_found", status_code=404)
+    _reply_index, next_user_turn_id = target
+    tail_fork = not next_user_turn_id
+    if next_user_turn_id:
+        turn_id = next_user_turn_id
     available = list_turn_boundary_snapshot_turn_ids(key)
     if tail_fork:
         # 尾部 Fork 不截任何东西：任务门槛与保留窗口都不适用。
@@ -897,10 +893,10 @@ def fork_web_ceo_session(
         composer_text = message_text(clicked)
 
     logger.info(
-        "Forked web CEO session {} at turn {} (at={}, into {}, {} message(s) copied, continuity={})",
+        "Forked web CEO session {} at boundary {} ({}, into {}, {} message(s) copied, continuity={})",
         key,
         turn_id,
-        "reply" if normalized_mode == "reply" else "question",
+        "tail" if tail_fork else "after_reply",
         new_key,
         len(copied_prefix),
         source,

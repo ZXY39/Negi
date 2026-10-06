@@ -3140,18 +3140,19 @@ textarea {
     display: none;
 }
 
-/* 气泡下方的编辑重发/Fork 操作行:常驻显示(他 10-06 要求 Fork 不用悬停才出现)。
-   两个按钮分别由服务端 can_edit_fork / can_fork / can_fork_reply 驱动渲染。 */
-.msg-actions {
-    display: flex;
-    align-items: center;
-    gap: 8px;
-}
+/* 两颗动作按钮常驻在元信息行里，各吃一份服务端门槛：can_edit_fork 画用户行的
+   「编辑」（排在发送时间右边），can_fork_reply 画回复行的「Fork」（排在用量左边）。
+   同一行那些读数（时间 / token 用量 / 复制）才走上面的 .meta-open 点击门。 */
 
 /* 回合进行中(含心跳内部轮)只隐藏编辑:它要改源会话转录。
    Fork 是只读前缀复制、源会话零变更，运行/暂停/等审批中都留着可点。 */
 .ceo-turn-active .msg-action-edit {
     display: none;
+}
+
+.msg-meta > .msg-action-btn,
+.ceo-turn-meta > .msg-action-btn {
+    flex-shrink: 0;
 }
 
 .msg-action-btn {
