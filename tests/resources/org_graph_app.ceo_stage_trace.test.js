@@ -1288,6 +1288,39 @@ test("ceo finished live tool step retires on the next rail rebuild", () => {
     assert.equal(body.children.length, 0);
 });
 
+test("ceo tool frames keep the rail counters instead of freezing the meta line", () => {
+    const { applyCeoToolEventToTurn, renderCeoStageTraceIntoTurn } = loadApp();
+    const turn = makeTurn({ text: "" });
+    attachStubStageCard(turn);
+
+    renderCeoStageTraceIntoTurn(turn, liveRailStage("inspect repository", [
+        { round_id: "round-1", round_index: 1, tools: [{ tool_name: "exec", tool_call_id: "call_exec_1", status: "success", output_text: "ok" }] },
+    ]));
+    assert.match(turn.metaEl.textContent, /1 个阶段 · 1 轮工具/);
+
+    applyCeoToolEventToTurn(turn, {
+        tool_name: "exec",
+        status: "running",
+        kind: "tool_start",
+        text: "",
+        tool_call_id: "call_exec_2",
+        source: "user",
+    });
+    // 工具帧把计数换成"正在处理中"，一个十几秒的批次里读起来就是"一直加载不刷新"
+    assert.match(turn.metaEl.textContent, /1 个阶段 · 1 轮工具 · 正在跑 1 个工具/, turn.metaEl.textContent);
+
+    applyCeoToolEventToTurn(turn, {
+        tool_name: "exec",
+        status: "success",
+        kind: "tool",
+        text: "ok",
+        tool_call_id: "call_exec_2",
+        source: "user",
+    });
+    assert.match(turn.metaEl.textContent, /1 个阶段 · 1 轮工具/, turn.metaEl.textContent);
+    assert.doesNotMatch(turn.metaEl.textContent, /正在跑|正在处理中|处理完成/);
+});
+
 test("ceo stage card badges model-evicted stages as 已移出上下文", () => {
     const { renderCeoStageTraceIntoTurn } = loadApp();
     const turn = makeTurn({ text: "" });

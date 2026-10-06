@@ -7427,7 +7427,7 @@ function renderCeoStageTraceIntoTurn(turn, canonicalContext = null, { interrupte
     // 还在跑的挂回新的阶段卡体内——同一件事不再因为换帧而改变位置。
     pruneCeoLiveToolSteps(turn, summary);
     if (turn?.liveToolStepsEl?.children?.length) ceoLiveToolStepHost(turn);
-    updateCeoTurnMeta(turn, `${stageCount} 个阶段 · ${roundCount} 轮工具`);
+    updateCeoTurnMeta(turn, ceoRailMetaLabel(turn) || `${stageCount} 个阶段 · ${roundCount} 轮工具`);
     if (typeof bindTraceOutputAutoLoad === "function") bindTraceOutputAutoLoad(turn.listEl);
     if (typeof hydrateTraceOutputBlocks === "function") {
         Array.from(turn.listEl.querySelectorAll?.(".task-trace-step[open]") || []).forEach((item) => {
@@ -8495,6 +8495,19 @@ function updateCeoTurnMeta(turn, stateLabel) {
     const stepLabel = turn.steps > 0 ? `${turn.steps} 个步骤` : "等待工具开始...";
     const nextStateLabel = String(stateLabel || "").trim();
     turn.metaEl.textContent = nextStateLabel && nextStateLabel !== stepLabel ? `${stepLabel} - ${nextStateLabel}` : stepLabel;
+}
+
+// 轨道在气泡上唯一一直在动的一行：阶段数、轮数、以及此刻还在跑的工具数。
+// 工具帧不许把它换成"正在处理中"这种静态句子——一个十几秒的并行批次里那读起来
+// 就是"一直在加载、不刷新"，而刷新后快照重渲又把计数放了回来。
+function ceoRailMetaLabel(turn) {
+    const stages = Array.isArray(turn?.lastExecutionTraceSummary?.stages) ? turn.lastExecutionTraceSummary.stages : [];
+    if (!stages.length) return "";
+    const rounds = stages.reduce((sum, stage) => sum + (Array.isArray(stage?.rounds) ? stage.rounds.length : 0), 0);
+    const running = turn.liveToolStepsEl
+        ? Array.from(turn.liveToolStepsEl.children).filter((item) => String(item?.dataset?.stepState || "") === "running").length
+        : 0;
+    return `${stages.length} 个阶段 · ${rounds} 轮工具${running ? ` · 正在跑 ${running} 个工具` : ""}`;
 }
 
 function formatCeoTokenCount(value) {
@@ -9630,7 +9643,8 @@ function applyCeoToolEventToTurn(turn, event = {}) {
     turn.flowEl.hidden = false;
     turn.hasError = turn.hasError || status === "error";
     trimCeoToolSteps(turn);
-    updateCeoTurnMeta(turn, stage.meta);
+    // 有轨道时保住那行一直在动的计数，只在没有轨道（纯工具回合）才用状态句子
+    updateCeoTurnMeta(turn, ceoRailMetaLabel(turn) || stage.meta);
     const runtimeEl = item.querySelector(".interaction-step-runtime");
     if (runtimeEl instanceof HTMLElement) updateRuntimeBadge(item, runtimeEl);
     updateCeoBackgroundDetail(item);
