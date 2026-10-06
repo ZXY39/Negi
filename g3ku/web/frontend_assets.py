@@ -51,6 +51,22 @@ DEFAULT_LUCIDE_CHECK_DAYS = 7
 DEFAULT_ASSET_UPDATE_MODE = "notify"
 SUPPORTED_ASSET_UPDATE_MODES = {"off", "notify", "auto"}
 
+# 每次探测都会变的字段：写进数据根的 `<data root>/vendor-updates.json`，
+# 跟踪文件里只留产物身份（installed_*、bundle、font_files 等）。
+VENDOR_UPDATES_FILENAME = "vendor-updates.json"
+_PROBE_MANIFEST_KEYS = frozenset(
+    {
+        "latest_version",
+        "latest_revision",
+        "latest_font_versions",
+        "update_available",
+        "update_mode",
+        "check_interval_days",
+        "checked_at",
+        "last_error",
+    }
+)
+
 _FONT_URL_RE = re.compile(r"url\((https://fonts\.gstatic\.com/[^)]+)\)")
 _FONT_VERSION_RE = re.compile(r"https://fonts\.gstatic\.com/s/(?P<family>[^/]+)/(?P<version>v[^/]+)/")
 _SYNC_LOCK = RLock()
@@ -568,7 +584,26 @@ def _asset_check_due(
     return datetime.now(UTC) - checked_at >= timedelta(days=interval_days)
 
 
-def _read_manifest(path: Path) -> dict[str, object]:
+def _asset_slot(path: Path) -> str:
+    # 按文件名认：安装路径写的是临时目录里的同名文件，比路径相等会认错。
+    return "lucide" if path.name == LUCIDE_MANIFEST_PATH.name else "google-fonts"
+
+
+def _updates_path() -> Path:
+    from g3ku.config.loader import get_data_dir
+
+    return get_data_dir() / VENDOR_UPDATES_FILENAME
+
+
+def _read_updates() -> dict[str, object]:
+    try:
+        payload = json.loads(_updates_path().read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+    return payload if isinstance(payload, dict) else {}
+
+
+def _read_static_manifest(path: Path) -> dict[str, object]:
     if not path.exists():
         return {}
     try:
@@ -578,13 +613,50 @@ def _read_manifest(path: Path) -> dict[str, object]:
     return payload if isinstance(payload, dict) else {}
 
 
+def _read_manifest(path: Path) -> dict[str, object]:
+    """产物身份（跟踪文件）+ 最近一次探测结果（数据根覆盖层）的合并视图。
+
+    调用方看到的键与拆分前完全一样，所以读取逻辑不用改。
+    """
+    static = _read_static_manifest(path)
+    probe = _read_updates().get(_asset_slot(path))
+    if not isinstance(probe, dict):
+        return static
+    return {**static, **probe}
+
+
 def _write_manifest(path: Path, payload: dict[str, object]) -> None:
+    """按字段归属拆开写：探测类字段永不进跟踪文件。
+
+    拆分前每次周期探测都会把 latest_version / checked_at / update_available 就地写回
+    `vendor/*-manifest.json`——那是 git 里的文件，于是每台设备每隔 7~30 天必然多出一次
+    未提交改动，而升级守卫见到未提交的跟踪文件就拒绝继续（实测 09-28 与 10-06 两次
+    「重启并更新」都是这么被挡掉的）。跟踪文件从此只回答"装的这份是什么"。
+    """
+    static = {key: value for key, value in payload.items() if key not in _PROBE_MANIFEST_KEYS}
+    probe = {key: value for key, value in payload.items() if key in _PROBE_MANIFEST_KEYS}
+
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(
-        json.dumps(payload, ensure_ascii=False, indent=2) + "\n",
+        json.dumps(static, ensure_ascii=False, indent=2) + "\n",
         encoding="utf-8",
         newline="\n",
     )
+
+    if not probe:
+        return
+    updates = _read_updates()
+    slot = dict(updates.get(_asset_slot(path)) or {}) if isinstance(updates.get(_asset_slot(path)), dict) else {}
+    slot.update(probe)
+    updates[_asset_slot(path)] = slot
+    target = _updates_path()
+    try:
+        target.parent.mkdir(parents=True, exist_ok=True)
+        temp = target.with_name(f"{target.name}.tmp")
+        temp.write_text(json.dumps(updates, ensure_ascii=False, indent=2) + "\n", encoding="utf-8", newline="\n")
+        os.replace(temp, target)
+    except OSError as exc:
+        logger.debug("frontend asset probe state not saved: {}", exc)
 
 
 def _local_font_filename(remote_url: str, used_names: set[str]) -> str:

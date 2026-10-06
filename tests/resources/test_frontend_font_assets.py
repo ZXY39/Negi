@@ -12,12 +12,14 @@ def _configure_font_paths(tmp_path, monkeypatch) -> None:
     monkeypatch.setattr(frontend_assets, "FONT_VENDOR_DIR", tmp_path)
     monkeypatch.setattr(frontend_assets, "FONT_STYLESHEET_PATH", tmp_path / "google-fonts.css")
     monkeypatch.setattr(frontend_assets, "FONT_MANIFEST_PATH", tmp_path / "google-fonts-manifest.json")
+    monkeypatch.setattr(frontend_assets, "_updates_path", lambda: tmp_path / "vendor-updates.json")
 
 
 def _configure_lucide_paths(tmp_path, monkeypatch) -> None:
     monkeypatch.setattr(frontend_assets, "VENDOR_DIR", tmp_path)
     monkeypatch.setattr(frontend_assets, "LUCIDE_BUNDLE_PATH", tmp_path / "lucide.min.js")
     monkeypatch.setattr(frontend_assets, "LUCIDE_MANIFEST_PATH", tmp_path / "lucide-manifest.json")
+    monkeypatch.setattr(frontend_assets, "_updates_path", lambda: tmp_path / "vendor-updates.json")
 
 
 def _make_lucide_tarball(bundle_text: str) -> bytes:
@@ -72,7 +74,7 @@ def test_ensure_frontend_font_assets_rewrites_stylesheet_and_manifest(tmp_path, 
     assert (tmp_path / "file-a.woff2").read_bytes() == b"payload:file-a.woff2"
     assert (tmp_path / "file-b.woff2").read_bytes() == b"payload:file-b.woff2"
 
-    manifest = json.loads((tmp_path / "google-fonts-manifest.json").read_text(encoding="utf-8"))
+    manifest = frontend_assets._read_manifest(tmp_path / "google-fonts-manifest.json")
     assert manifest["stylesheet"] == "google-fonts.css"
     assert manifest["font_files"] == ["file-a.woff2", "file-b.woff2"]
     assert manifest["installed_version"] == "firasans:v18"
@@ -111,7 +113,7 @@ def test_font_notify_mode_keeps_pinned_assets_and_marks_update_available(tmp_pat
     assert (tmp_path / "google-fonts.css").read_text(encoding="utf-8") == original_css
     assert (tmp_path / "font-a.woff2").read_bytes() == b"old-font"
 
-    manifest = json.loads((tmp_path / "google-fonts-manifest.json").read_text(encoding="utf-8"))
+    manifest = frontend_assets._read_manifest(tmp_path / "google-fonts-manifest.json")
     assert manifest["installed_version"] == "firasans:v17"
     assert manifest["latest_version"] == "firasans:v18"
     assert manifest["update_available"] is True
@@ -145,7 +147,7 @@ def test_lucide_notify_mode_marks_update_available_without_replacing_bundle(tmp_
 
     assert updated is False
     assert (tmp_path / "lucide.min.js").read_text(encoding="utf-8") == "old bundle"
-    manifest = json.loads((tmp_path / "lucide-manifest.json").read_text(encoding="utf-8"))
+    manifest = frontend_assets._read_manifest(tmp_path / "lucide-manifest.json")
     assert manifest["installed_version"] == "1.7.0"
     assert manifest["latest_version"] == "1.8.0"
     assert manifest["update_available"] is True
@@ -181,8 +183,128 @@ def test_lucide_auto_mode_replaces_bundle_and_manifest(tmp_path, monkeypatch) ->
 
     assert updated is True
     assert (tmp_path / "lucide.min.js").read_text(encoding="utf-8") == "new bundle"
-    manifest = json.loads((tmp_path / "lucide-manifest.json").read_text(encoding="utf-8"))
+    manifest = frontend_assets._read_manifest(tmp_path / "lucide-manifest.json")
     assert manifest["installed_version"] == "1.8.0"
     assert manifest["latest_version"] == "1.8.0"
     assert manifest["update_available"] is False
     assert manifest["update_mode"] == "auto"
+
+
+def _full_probe_payload(**overrides):
+    payload = {
+        "asset_id": "lucide",
+        "asset_label": "Lucide icons",
+        "package_name": "lucide",
+        "bundle": "lucide.min.js",
+        "source_url": "https://registry.npmjs.org/lucide/latest",
+        "installed_version": "1.48.0",
+        "installed_at": "2026-10-06T03:27:32Z",
+        "latest_version": "1.52.0",
+        "update_available": True,
+        "update_mode": "notify",
+        "check_interval_days": 7,
+        "checked_at": "2026-10-06T04:00:00Z",
+        "last_error": "",
+    }
+    payload.update(overrides)
+    return payload
+
+
+def test_probe_fields_never_land_in_the_tracked_manifest(tmp_path, monkeypatch) -> None:
+    """探测字段只进数据根的覆盖层，跟踪文件只留"装的这份是什么"。
+
+    跟踪文件被周期性写脏 = 每台设备每隔 7~30 天必然多一笔未提交改动，而升级守卫
+    见到未提交的跟踪文件就直接拒绝（实测两次「重启并更新」都是这么挡住的）。
+    """
+    _configure_lucide_paths(tmp_path, monkeypatch)
+    manifest_path = tmp_path / "lucide-manifest.json"
+
+    frontend_assets._write_manifest(manifest_path, _full_probe_payload())
+
+    tracked = json.loads(manifest_path.read_text(encoding="utf-8"))
+    assert set(tracked) == {
+        "asset_id",
+        "asset_label",
+        "package_name",
+        "bundle",
+        "source_url",
+        "installed_version",
+        "installed_at",
+    }
+    overlay = json.loads((tmp_path / "vendor-updates.json").read_text(encoding="utf-8"))
+    assert overlay["lucide"]["latest_version"] == "1.52.0"
+    assert overlay["lucide"]["update_available"] is True
+
+    merged = frontend_assets._read_manifest(manifest_path)
+    assert merged["installed_version"] == "1.48.0"
+    assert merged["latest_version"] == "1.52.0"
+    assert merged["check_interval_days"] == 7
+
+
+def test_next_probe_leaves_the_tracked_manifest_bytes_untouched(tmp_path, monkeypatch) -> None:
+    """第二次探测（版本与时间都变了）不许再碰跟踪文件一个字节。"""
+    _configure_lucide_paths(tmp_path, monkeypatch)
+    manifest_path = tmp_path / "lucide-manifest.json"
+    frontend_assets._write_manifest(manifest_path, _full_probe_payload())
+    before = manifest_path.read_bytes()
+
+    frontend_assets._write_manifest(
+        manifest_path,
+        _full_probe_payload(latest_version="1.53.0", checked_at="2026-11-01T09:00:00Z", update_available=True),
+    )
+
+    assert manifest_path.read_bytes() == before
+    merged = frontend_assets._read_manifest(manifest_path)
+    assert merged["latest_version"] == "1.53.0"
+    assert merged["checked_at"] == "2026-11-01T09:00:00Z"
+
+
+def test_repeated_startup_probe_never_rewrites_the_tracked_manifest(tmp_path, monkeypatch) -> None:
+    """走真实入口 `ensure_lucide_asset`：探测照常记状态，跟踪文件一个字节都不动。
+
+    启动时 main.py 会在后台跑这条路径，所以"每次开机都可能把树写脏"必须由这里钉住。
+    """
+    from datetime import datetime, timedelta
+
+    _configure_lucide_paths(tmp_path, monkeypatch)
+    manifest_path = tmp_path / "lucide-manifest.json"
+    (tmp_path / "lucide.min.js").write_text("bundle", encoding="utf-8")
+    frontend_assets._write_manifest(
+        manifest_path,
+        {
+            "asset_id": "lucide",
+            "asset_label": "Lucide icons",
+            "package_name": "lucide",
+            "bundle": "lucide.min.js",
+            "source_url": "https://registry.npmjs.org/lucide/latest",
+            "installed_version": "1.48.0",
+            "installed_at": "2026-10-06T03:27:32Z",
+            "latest_version": "1.48.0",
+            "update_available": False,
+            "update_mode": "notify",
+            "check_interval_days": 7,
+            "checked_at": (datetime.now(UTC) - timedelta(days=30)).isoformat(),
+            "last_error": "",
+        },
+    )
+    monkeypatch.setattr(
+        frontend_assets,
+        "_fetch_lucide_release",
+        lambda: frontend_assets.LucideRelease(version="1.52.0", tarball_url="https://example.invalid/x.tgz"),
+    )
+    before = manifest_path.read_bytes()
+
+    assert frontend_assets.frontend_lucide_asset_need_refresh() is True
+    # 返回值说的是"产物有没有被换过"：notify 模式只记状态，不换 bundle
+    assert frontend_assets.ensure_lucide_asset() is False
+
+    assert manifest_path.read_bytes() == before, "跟踪 manifest 不许被探测改写"
+    merged = frontend_assets._read_manifest(manifest_path)
+    assert merged["latest_version"] == "1.52.0"
+    assert merged["update_available"] is True
+    assert merged["installed_version"] == "1.48.0"
+    assert frontend_assets.frontend_lucide_asset_need_refresh() is False, "覆盖层里的 checked_at 要照常生效"
+
+    again = manifest_path.read_bytes()
+    assert frontend_assets.ensure_lucide_asset(force_refresh=True) is False
+    assert manifest_path.read_bytes() == again

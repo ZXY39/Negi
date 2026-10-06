@@ -253,6 +253,17 @@ A dropdown that opens inside a clipped or scrolling surface is lifted out of it:
 
 The task hall grid is content-sized — `repeat(auto-fill, minmax(300px, 1fr))` — so its column count follows the available width, and a long token count wraps inside a fixed-size card rather than the card shrinking to fit one line. Every other page grid may only use the shared bands 1200 / 1024 / 900 / 768 / 640px: Skill/Tool cards step 4 → 3 → 2 → 1 at 1200 / 1024 / 768; model role cards 4 → 2 → 1 at 1200 / 1024; memory keeps two columns at ≥1024px; external access keeps two columns at ≥900px. When space runs short between two bands, tighten gap, card padding and control min-width before dropping a column, and never add a page-specific breakpoint.
 
+## Frontend Vendor Asset Update Contract
+
+`g3ku/web/frontend_assets.py` owns the third-party static assets the console ships with: the Lucide icon bundle and the self-hosted Google Fonts files. Each asset has two state carriers, and they answer different questions.
+
+- **Tracked manifest** (`g3ku/web/frontend/vendor/lucide-manifest.json`, `.../vendor/fonts/google-fonts-manifest.json`) states the identity of what is committed: `installed_version`, `installed_at`, `installed_revision`, plus `bundle` / `stylesheet` / `source_url` / `font_files` / `font_versions`. It changes only together with the vendored bytes, i.e. when a commit actually upgrades the package.
+- **Probe overlay** (`<data root>/vendor-updates.json`, one slot per asset: `lucide`, `google-fonts`) carries what a running device learns about the outside world: `latest_version`, `latest_revision`, `latest_font_versions`, `update_available`, `update_mode`, `check_interval_days`, `checked_at`, `last_error`.
+
+`_read_manifest()` returns the merged view (overlay wins) so readers keep working with one dictionary, and `_write_manifest()` splits by field ownership on write, so call sites still pass complete payloads. The rule this encodes is that **a background probe never writes a tracked file**: the startup path (`main.py` → `ensure_frontend_vendor_assets()`, background task, cadence 7 days for icons and 30 for fonts) must leave `git status --porcelain --untracked-files=no` empty, because that is exactly the check gating an upgrade (see `operations-and-maintenance.md`「新设备首次安装与升级」). A probe that dirtied the manifest would block the next 「重启并更新」 on every device until someone commits it.
+
+Replacing bytes goes through `_install_lucide_release()` / `_install_font_payload()`: fetch the npm tarball member or the CSS URLs, write the artifact plus its tracked manifest, and record `update_available = false` in the overlay. `update_mode` comes from `G3KU_FRONTEND_<ASSET>_UPDATE_MODE` / `G3KU_FRONTEND_ASSET_UPDATE_MODE` with values `off` / `notify` / `auto` (default `notify`); `notify` logs the finding and touches nothing but the overlay, `auto` replaces the vendored file. `LUCIDE_DEFAULT_PINNED_VERSION` is the recovery pin used only when the bundle file itself is missing.
+
 ## CEO Composer Runtime
 
 The Leader/CEO composer has two distinct runtime behaviors that maintainers need to keep straight.
