@@ -1103,3 +1103,93 @@ test("ceo stage card badges model-evicted stages as 已移出上下文", () => {
     assert.match(plainStep, /完成/);
     assert.doesNotMatch(plainStep, /eye-off|已移出上下文|stage-evicted/);
 });
+
+function railStageIds(turn) {
+    return Array.from(
+        String(turn.listEl.innerHTML || "").matchAll(/data-stage-id="([^"]+)"/g),
+        (match) => match[1]
+    );
+}
+
+test("ceo live rail keeps stage_index order when the previous stage's closeout arrives late", () => {
+    const { applyCeoToolEventToTurn, patchCeoInflightTurn, S } = loadApp();
+    const turn = makeTurn({ text: "" });
+    turn.source = "user";
+    turn.turnId = "turn-late-closeout";
+    S.activeSessionId = "web:test";
+    S.ceoPendingTurns = [turn];
+
+    // 1) submit_next_stage 的工具帧先单独把新阶段画上轨（provisional 头，此时轨道只有它）
+    applyCeoToolEventToTurn(turn, {
+        tool_name: "submit_next_stage",
+        status: "success",
+        kind: "tool_result",
+        tool_call_id: "submit-next-stage:1",
+        source: "user",
+        text: JSON.stringify({
+            stage_id: "frontdoor-stage-42",
+            stage_index: 42,
+            stage_kind: "normal",
+            status: "active",
+            stage_goal: "核验新视频脚本的实际结论",
+            tool_round_budget: 10,
+            created_at: "2026-10-06T13:40:45+08:00",
+            rounds: [],
+        }),
+    });
+    assert.deepEqual(railStageIds(turn), ["frontdoor-stage-42"]);
+
+    // 2) 同一个 submit_next_stage 还给上一条阶段补写了 completed_stage_summary，
+    //    而承载它的转录行早在上一回合就落盘了，所以这条旧阶段要等下一个权威 delta
+    //    才到达。轨道顺序必须回到 stage_index，而不是"谁先到谁在上面"。
+    patchCeoInflightTurn({
+        turn_id: "turn-late-closeout",
+        source: "user",
+        status: "running",
+        canonical_context_delta: {
+            stages: [
+                {
+                    stage_id: "frontdoor-stage-41",
+                    stage_index: 41,
+                    stage_kind: "normal",
+                    status: "completed",
+                    stage_goal: "统计四个目录的文件个数",
+                    completed_stage_summary: "四轮计数已全部完成",
+                    tool_round_budget: 10,
+                    created_at: "2026-10-05T00:45:42+08:00",
+                    rounds: [{
+                        round_id: "round-41-1",
+                        round_index: 1,
+                        budget_counted: true,
+                        tools: [{ tool_name: "exec", status: "success", output_text: "3" }],
+                    }],
+                },
+                {
+                    stage_id: "frontdoor-stage-42",
+                    stage_index: 42,
+                    stage_kind: "normal",
+                    status: "active",
+                    stage_goal: "核验新视频脚本的实际结论",
+                    tool_round_budget: 10,
+                    created_at: "2026-10-06T13:40:45+08:00",
+                    rounds: [{
+                        round_id: "round-42-1",
+                        round_index: 1,
+                        budget_counted: true,
+                        tools: [{ tool_name: "read_file", status: "success", output_text: "ok" }],
+                    }],
+                },
+            ],
+        },
+    });
+
+    assert.deepEqual(railStageIds(turn), ["frontdoor-stage-41", "frontdoor-stage-42"]);
+    const html = String(turn.listEl.innerHTML || "");
+    assert.ok(
+        html.indexOf("统计四个目录的文件个数") < html.indexOf("核验新视频脚本的实际结论"),
+        "旧阶段卡片必须排在新阶段之前"
+    );
+    // 迟到的旧阶段带着它自己的工具行，不是只剩一个头
+    assert.match(html, /exec/);
+    assert.match(html, /read_file/);
+});

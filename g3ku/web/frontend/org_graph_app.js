@@ -3023,6 +3023,21 @@ function mergeCeoStageSummaryDelta(baseSummary = null, deltaContext = null) {
     normalize(baseSummary).forEach(accumulateStage);
     normalize(deltaContext).forEach(accumulateStage);
     if (!mergedStages.length) return null;
+    // 轨道顺序按 stage_index，不按到达顺序。跨回合补写会让旧阶段晚于新阶段到齐：
+    // submit_next_stage 的工具帧先把新阶段画上轨（provisional 头），而它同一刻给上一条
+    // 阶段补的 completed_stage_summary 要等下一个 delta 才到——按到达顺序就把旧阶段画在下面。
+    // stage_index 缺失或并列时按 created_at 拆，两者都缺就保持原序（sort 是稳定的）。
+    mergedStages.sort((left, right) => {
+        const leftIndex = Number(left?.stage_index);
+        const rightIndex = Number(right?.stage_index);
+        if (Number.isFinite(leftIndex) && Number.isFinite(rightIndex) && leftIndex !== rightIndex) {
+            return leftIndex - rightIndex;
+        }
+        const leftTime = String(left?.created_at || "");
+        const rightTime = String(right?.created_at || "");
+        if (leftTime && rightTime && leftTime !== rightTime) return leftTime < rightTime ? -1 : 1;
+        return 0;
+    });
     return { stages: mergedStages };
 }
 
