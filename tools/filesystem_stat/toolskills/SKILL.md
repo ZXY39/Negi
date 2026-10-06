@@ -29,4 +29,5 @@ Returns per path:
 - Read-only by construction: creating, editing, moving and deleting live in separate role-gated tools
   (`filesystem_write` / `filesystem_edit` / `filesystem_copy` / `filesystem_move` / `filesystem_delete`).
 - Aggregates stop at 200k files / depth 8 and set `scan_truncated: true` when they do.
+- It does not search file contents. Use `content_search` for one file, or `exec` across a subtree.
 - Paths outside the workspace are measured unless the tool is configured with `restrict_to_workspace: true`.

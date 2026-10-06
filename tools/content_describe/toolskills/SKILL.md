@@ -21,4 +21,4 @@ Never read `line_count` / `char_count` / the placeholder preview as the file's s
 a 600KB valid PDF and a 34-byte stub both show `(1 lines, 22 chars)`. For binary targets `size_bytes`
 is the only size fact; verify structure with `content_search` (byte-level for such targets).
 
-Directories are not supported in path mode. Use `exec` for local directory exploration and subtree searches, and follow the current runtime tool contract for its active execution mode.
+Directories are not supported in path mode. Use `filesystem_stat(paths=["<dir>"])` to see what a directory holds, and `exec` for subtree text searches (follow the current runtime tool contract for its active execution mode).

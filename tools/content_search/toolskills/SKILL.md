@@ -13,6 +13,18 @@ If both `ref` and `path` are provided, the tool attempts both targets and return
 
 Search first, then open only the relevant excerpt instead of requesting the full body.
 
+## Path mode targets one file
+
+`path` must be an absolute path to a **single existing file**. A directory is rejected with
+`path is not a file: <dir>` — path mode never walks a tree.
+
+- What a directory holds (names, sizes, mtime, aggregates) -> `filesystem_stat(paths=["<dir>"])`.
+- Text across many files under a directory -> `exec` (`Get-ChildItem -Recurse`, `Select-String`).
+
+When both `ref` and `path` are given, each target is attempted separately and reported under
+`targets.ref` / `targets.path`. The overall result can stay `ok: true` while one target failed, so
+read the per-target `error` instead of only the top-level flag.
+
 ## Binary targets (PDF, images, xlsx, archives)
 
 For a binary target the search runs over **raw bytes** (its text view is only a placeholder, so a text

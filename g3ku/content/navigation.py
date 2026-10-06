@@ -23,6 +23,13 @@ _PREVIEW_CHAR_LIMIT = 220
 # 共用同一信封契约，不按工具类别特殊化。
 _TOOL_RESULT_EXTERNALIZED_PREVIEW_LINES = 6
 _TOOL_RESULT_EXTERNALIZED_PREVIEW_CHARS = 800
+# 目录误用是 content path 模式唯一的高频错法，文案必须自带两条出路：只说"不是文件"
+# 会让模型对同一个目录连打数次，直到自己改道 exec。
+DIRECTORY_PATH_ERROR_HINT = (
+    "path is not a file: {target} — path mode opens exactly one existing file. "
+    "To see what the directory holds, call filesystem_stat with paths=[this path]. "
+    "To search text across the files under it, use exec (Get-ChildItem -Recurse / Select-String)."
+)
 _MAX_WRAPPER_DEPTH = 8
 # content_open 行模式（默认 / start_line/end_line / around_line/window）的单次
 # 打开"正文"上限（字符数，只计正文内容，不含元数据）。行对齐取整：只回显完整行，
@@ -869,7 +876,7 @@ class ContentNavigationService:
             if not file_path.exists():
                 raise FileNotFoundError(f"path not found: {path}")
             if not file_path.is_file():
-                raise ValueError(f"path is not a file: {path}")
+                raise ValueError(DIRECTORY_PATH_ERROR_HINT.format(target=path))
             mime_type = self._guess_path_mime_type(file_path)
             try:
                 ref_path = str(file_path.relative_to(self._workspace)).replace("\\", "/")
@@ -893,7 +900,7 @@ class ContentNavigationService:
             if not file_path.exists():
                 raise FileNotFoundError(f"path not found: {normalized_ref[5:]}")
             if not file_path.is_file():
-                raise ValueError(f"path is not a file: {normalized_ref[5:]}")
+                raise ValueError(DIRECTORY_PATH_ERROR_HINT.format(target=normalized_ref[5:]))
             mime_type = self._guess_path_mime_type(file_path)
             try:
                 ref_path = str(file_path.relative_to(self._workspace)).replace("\\", "/")
@@ -1364,7 +1371,7 @@ class ContentNavigationService:
             if not file_path.exists():
                 raise FileNotFoundError(f"path not found: {path}")
             if not file_path.is_file():
-                raise ValueError(f"path is not a file: {path}")
+                raise ValueError(DIRECTORY_PATH_ERROR_HINT.format(target=path))
             text, mime_type, display_replaced = self._read_text_for_content_display(file_path)
             try:
                 ref_path = str(file_path.relative_to(self._workspace)).replace("\\", "/")
@@ -1398,7 +1405,7 @@ class ContentNavigationService:
             if not file_path.exists():
                 raise FileNotFoundError(f"path not found: {normalized_ref[5:]}")
             if not file_path.is_file():
-                raise ValueError(f"path is not a file: {normalized_ref[5:]}")
+                raise ValueError(DIRECTORY_PATH_ERROR_HINT.format(target=normalized_ref[5:]))
             text, mime_type, display_replaced = self._read_text_for_content_display(file_path)
             try:
                 ref_path = str(file_path.relative_to(self._workspace)).replace("\\", "/")
