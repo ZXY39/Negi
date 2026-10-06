@@ -695,9 +695,10 @@ test("ceo tool rows stay distinct for same-name events with different tool_call_
 
     assert.ok(first);
     assert.ok(second);
-    assert.equal(turn.listEl.children.length, 2);
+    // 这一回合还没有阶段卡，实时容器就挂在流末尾；行本身在容器里
+    assert.equal(turn.listEl.children.length, 1);
     assert.deepEqual(
-        Array.from(turn.listEl.children, (item) => item.dataset.toolCallId),
+        Array.from(turn.liveToolStepsEl.children, (item) => item.dataset.toolCallId),
         ["filesystem:1", "filesystem:2"]
     );
 });
@@ -715,7 +716,7 @@ test("ceo tool_start running rows stay empty until a result arrives", () => {
         source: "user",
     });
 
-    assert.equal(turn.listEl.children.length, 1);
+    assert.equal(turn.liveToolStepsEl.children.length, 1);
     assert.equal(item.dataset.toolCallId, "filesystem:start-1");
     assert.equal(item.dataset.detailText, "");
     assert.equal(item.querySelector(".interaction-step-preview").textContent, "");
@@ -1065,6 +1066,150 @@ test("ceo silent tool live event creates no interaction step", () => {
 
     assert.equal(applyCeoToolEventToTurn(turn, { tool_name: "silent", status: "success", text: "已静默" }), null);
     assert.equal(turn.listEl.innerHTML, "");
+});
+
+function attachStubStageCard(turn, { traceKey = "ceo:stage:frontdoor-stage-1" } = {}) {
+    // 会话流里的阶段卡是 <details>，实时行要挂进它的 .task-trace-body 体内。
+    const card = new StubHTMLElement();
+    card.className = "interaction-step task-trace-step running";
+    card.open = false;
+    card.dataset.traceKey = traceKey;
+    const body = new StubHTMLElement();
+    card._selectors[".task-trace-body"] = body;
+    turn.listEl._selectorLists[".task-trace-step"] = [card];
+    return { card, body };
+}
+
+function liveRailStage(goal = "inspect repository", rounds = []) {
+    return {
+        stages: [
+            {
+                stage_id: "frontdoor-stage-1",
+                stage_index: 1,
+                stage_goal: goal,
+                status: "running",
+                tool_round_budget: 3,
+                rounds,
+            },
+        ],
+    };
+}
+
+test("ceo live tool step is hosted inside the stage card instead of beside it", () => {
+    const { applyCeoToolEventToTurn } = loadApp();
+    const turn = makeTurn({ text: "" });
+    const { card, body } = attachStubStageCard(turn);
+
+    const item = applyCeoToolEventToTurn(turn, {
+        tool_name: "exec",
+        status: "running",
+        kind: "tool_start",
+        text: "",
+        tool_call_id: "call_exec_1",
+        source: "user",
+    });
+
+    assert.ok(item);
+    // 行的父链是 阶段卡体 → 实时容器 → 行；直接挂在 listEl 上就是"跳到阶段外面"
+    assert.equal(body._children[0], turn.liveToolStepsEl);
+    assert.equal(turn.liveToolStepsEl.children.length, 1);
+    assert.equal(turn.liveToolStepsEl._children[0], item);
+    assert.equal(turn.listEl.children.length, 0);
+    // 阶段卡默认收起，不收开就看不见正在跑的那条工具
+    assert.equal(card.open, true);
+});
+
+test("ceo live tool step keeps its place across a rail rebuild and retires once the round lands", () => {
+    const { applyCeoToolEventToTurn, renderCeoStageTraceIntoTurn } = loadApp();
+    const turn = makeTurn({ text: "" });
+    const { body } = attachStubStageCard(turn);
+    turn.lastExecutionTraceSummary = liveRailStage("inspect repository", []);
+
+    applyCeoToolEventToTurn(turn, {
+        tool_name: "exec",
+        status: "running",
+        kind: "tool_start",
+        text: "",
+        tool_call_id: "call_exec_1",
+        source: "user",
+    });
+
+    // 账本还没画上这条调用：整帧重建后行仍留在卡里，不外显、也不消失
+    renderCeoStageTraceIntoTurn(turn, liveRailStage("inspect repository", []));
+    assert.equal(body._children[0], turn.liveToolStepsEl);
+    assert.equal(turn.liveToolStepsEl.children.length, 1);
+    assert.equal(turn.listEl.children.length, 0);
+
+    // 轮次进账本（tool_call_id 带 responses 车道合成的 |fc_ 后缀），实时行退场，
+    // 空容器也一起摘掉，免得在卡片里留一格空行距
+    renderCeoStageTraceIntoTurn(turn, liveRailStage("inspect repository", [
+        {
+            round_id: "round-1",
+            round_index: 1,
+            tools: [{ tool_name: "exec", tool_call_id: "call_exec_1|fc_021791", status: "success", output_text: "done" }],
+        },
+    ]));
+    assert.equal(turn.liveToolStepsEl.children.length, 0);
+    assert.equal(body.children.length, 0);
+});
+
+test("ceo stage card the user collapsed stays collapsed even with a live tool step", () => {
+    const { applyCeoToolEventToTurn } = loadApp();
+    const turn = makeTurn({ text: "" });
+    const { card, body } = attachStubStageCard(turn);
+
+    applyCeoToolEventToTurn(turn, {
+        tool_name: "exec",
+        status: "running",
+        kind: "tool_start",
+        text: "",
+        tool_call_id: "call_exec_1",
+        source: "user",
+    });
+    assert.equal(card.open, true);
+
+    card.open = false;
+    applyCeoToolEventToTurn(turn, {
+        tool_name: "exec",
+        status: "running",
+        kind: "tool_start",
+        text: "",
+        tool_call_id: "call_exec_2",
+        source: "user",
+    });
+
+    assert.equal(card.open, false);
+    // 顶开之外没有别的动作：行还是挂在卡内同一个容器里
+    assert.equal(turn.listEl.children.length, 0);
+    assert.equal(body._children[0], turn.liveToolStepsEl);
+    assert.equal(turn.liveToolStepsEl.children.length, 2);
+});
+
+test("ceo live tool step is skipped when the round already landed (patch frame arrives first)", () => {
+    const { applyCeoToolEventToTurn, renderCeoStageTraceIntoTurn } = loadApp();
+    const turn = makeTurn({ text: "" });
+    const { body } = attachStubStageCard(turn);
+
+    renderCeoStageTraceIntoTurn(turn, liveRailStage("inspect repository", [
+        {
+            round_id: "round-1",
+            round_index: 1,
+            tools: [{ tool_name: "exec", tool_call_id: "call_exec_1|fc_021791", status: "success", output_text: "done" }],
+        },
+    ]));
+
+    const item = applyCeoToolEventToTurn(turn, {
+        tool_name: "exec",
+        status: "success",
+        kind: "tool",
+        text: "done",
+        tool_call_id: "call_exec_1",
+        source: "user",
+    });
+
+    assert.equal(item, null);
+    assert.equal(body.children.length, 0);
+    assert.equal(turn.listEl.children.length, 0);
 });
 
 test("ceo stage card badges model-evicted stages as 已移出上下文", () => {

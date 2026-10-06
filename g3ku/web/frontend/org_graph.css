@@ -3804,6 +3804,17 @@ textarea {
     margin-top: var(--space-3);
 }
 
+/* 在飞工具行的容器：挂在阶段卡体内，与正式轮次同一处出现（org_graph_app.js ceoLiveToolStepHost）。
+   有它就说明这条调用还没进账本，"当前阶段暂无工具轮次"那句话当场就不成立了。 */
+.task-trace-live-steps {
+    display: grid;
+    gap: var(--space-3);
+}
+
+.task-trace-body:has(> .task-trace-live-steps) .task-trace-stage-empty {
+    display: none;
+}
+
 .task-trace-round-tools {
     display: grid;
     gap: var(--space-3);

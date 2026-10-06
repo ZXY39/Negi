@@ -7029,11 +7029,7 @@ function renderCeoLiveStreamTextIntoTurn(turn) {
         if (existing?.remove) existing.remove();
         return;
     }
-    const lastStep = (() => {
-        if (typeof turn.listEl.querySelectorAll !== "function") return null;
-        const steps = turn.listEl.querySelectorAll(".task-trace-step");
-        return steps && steps.length ? steps[steps.length - 1] : null;
-    })();
+    const lastStep = ceoLastStageTraceStepEl(turn);
     if (!lastStep) {
         // 尚无阶段（纯问答轮或建阶段前）：流式文本退回气泡展示
         if (!turn.textEl) return;
@@ -7427,6 +7423,10 @@ function renderCeoStageTraceIntoTurn(turn, canonicalContext = null, { interrupte
     // 轮次工具条选中),覆盖上面的默认展开;必须发生在下方 [open] 懒加载遍历之前,
     // 让用户此前展开的阶段重新水合输出块。
     applyCeoTurnTraceViewState(turn, turnViewState);
+    // 整帧重建换掉了 listEl，实时行先躲在容器里；这一帧账本已经画上的调用让它退场，
+    // 还在跑的挂回新的阶段卡体内——同一件事不再因为换帧而改变位置。
+    pruneCeoLiveToolSteps(turn, summary);
+    if (turn?.liveToolStepsEl?.children?.length) ceoLiveToolStepHost(turn);
     updateCeoTurnMeta(turn, `${stageCount} 个阶段 · ${roundCount} 轮工具`);
     if (typeof bindTraceOutputAutoLoad === "function") bindTraceOutputAutoLoad(turn.listEl);
     if (typeof hydrateTraceOutputBlocks === "function") {
@@ -7482,6 +7482,8 @@ function patchCeoInflightTurn(snapshot = null, { sessionId = "", cacheField = "i
         // token 用量/完成时间泄漏到新轮次的悬停信息里。
         turn.usage = null;
         turn.completedAt = "";
+        // 上一轮没收尾的实时行不能跟着回合对象带到新轮次里
+        clearCeoLiveToolSteps(turn);
     }
     if (turnId) {
         turn.turnId = turnId;
@@ -8284,6 +8286,10 @@ function createPendingCeoTurn(source = "user", { scrollMode = "preserve" } = {})
             finalized: false,
             historyExpanded: false,
             lastExecutionTraceSummary: null,
+            // 在飞工具行的容器与它寄居的阶段卡（见 ceoLiveToolStepHost）
+            liveToolStepsEl: null,
+            liveToolStepsStageKey: "",
+            liveToolStepsMutedKey: "",
             liveStreamText: "",
             // 悬停元数据(sticky):token 用量与完成时间,由 setCeoTurnUsage 维护。
             usage: null,
@@ -8626,8 +8632,7 @@ function handleCeoToolReminder(payload = {}) {
 }
 
 function findCeoToolStep(turn, { toolCallId = "", toolName = "" } = {}) {
-    if (!turn?.listEl) return null;
-    const items = [...turn.listEl.querySelectorAll(".interaction-step")];
+    const items = Array.from(turn?.liveToolStepsEl?.children || []);
     if (toolCallId) {
         for (let index = items.length - 1; index >= 0; index -= 1) {
             const item = items[index];
@@ -9271,9 +9276,10 @@ async function copyCeoSessionId(button) {
 }
 
 function trimCeoToolSteps(turn) {
-    if (!turn?.listEl) return;
-    const items = Array.from(turn.listEl.children).filter((item) => (
-        item instanceof HTMLElement && !item.classList.contains("task-trace-live-text")
+    if (!turn?.liveToolStepsEl) return;
+    // 实时行现在住在阶段卡体内的容器里，"较早进度"的封顶只按这些行算，不再数阶段卡。
+    const items = Array.from(turn.liveToolStepsEl.children || []).filter((item) => (
+        item instanceof HTMLElement
     ));
     const hiddenCount = Math.max(0, items.length - CEO_TOOL_STEP_MAX);
     items.forEach((item, index) => {
@@ -9443,6 +9449,110 @@ function extractCeoSubmittedStageContext(toolName = "", event = {}) {
     return stage ? { stages: [stage] } : null;
 }
 
+function ceoLastStageTraceStepEl(turn) {
+    if (!turn?.listEl || typeof turn.listEl.querySelectorAll !== "function") return null;
+    const steps = turn.listEl.querySelectorAll(".task-trace-step");
+    return steps && steps.length ? steps[steps.length - 1] : null;
+}
+
+// 账本里的 tool_call_id 是 "call_x|fc_y" 这种合成形
+// （g3ku/providers/responses_protocol_helpers.py 拼的），实时帧可能只带前半段，
+// 两边都按前半段比才认得出同一次调用。与 g3ku/runtime/tool_history.py 的
+// extract_call_id 同一个口径。
+function ceoToolCallKey(value = "") {
+    const raw = String(value || "").trim();
+    if (!raw) return "";
+    const separator = raw.indexOf("|");
+    return separator >= 0 ? raw.slice(0, separator) : raw;
+}
+
+function ceoCommittedToolCallKeys(summary = null) {
+    const keys = new Set();
+    (Array.isArray(summary?.stages) ? summary.stages : []).forEach((stage) => {
+        (Array.isArray(stage?.rounds) ? stage.rounds : []).forEach((round) => {
+            (Array.isArray(round?.tools) ? round.tools : []).forEach((tool) => {
+                const key = ceoToolCallKey(tool?.tool_call_id);
+                if (key) keys.add(key);
+            });
+        });
+    });
+    return keys;
+}
+
+// 在飞工具行的家：最后一个阶段卡的体内。画在阶段外面时，它对应的轮次一进账本，
+// 整帧重建就把它从阶段外搬进阶段里——同一条工具在界面上跳一次位置。
+function ceoLiveToolStepHost(turn) {
+    if (!turn?.listEl) return null;
+    if (!(turn.liveToolStepsEl instanceof HTMLElement)) {
+        const container = document.createElement("div");
+        container.className = "task-trace-live-steps";
+        // 行本身带 role=listitem，挂进阶段卡后父节点换成这个容器，列表语义要跟着落在这里
+        container.setAttribute("role", "list");
+        turn.liveToolStepsEl = container;
+    }
+    const host = turn.liveToolStepsEl;
+    const stageEl = ceoLastStageTraceStepEl(turn);
+    const body = stageEl instanceof HTMLElement && typeof stageEl.querySelector === "function"
+        ? stageEl.querySelector(".task-trace-body")
+        : null;
+    const target = body instanceof HTMLElement ? body : turn.listEl;
+    const traceKey = target === turn.listEl
+        ? ""
+        : String(stageEl?.dataset?.traceKey || "").trim();
+    if (turn.liveToolStepsStageKey && turn.liveToolStepsStageKey !== traceKey) {
+        // 换了阶段：上一张是我们替它展开的，收回去，否则它会一直张着（刷新后才对上）
+        closeCeoLiveTraceStage(turn, turn.liveToolStepsStageKey);
+        turn.liveToolStepsStageKey = "";
+    }
+    if (host.parentElement !== target) target.appendChild(host);
+    if (target !== turn.listEl && !stageEl.open && traceKey !== turn.liveToolStepsMutedKey) {
+        if (traceKey === turn.liveToolStepsStageKey) {
+            // 我们替它展开过、现在它是收起的：那是他自己合上的，这张卡不再顶开
+            turn.liveToolStepsMutedKey = traceKey;
+            turn.liveToolStepsStageKey = "";
+        } else {
+            stageEl.open = true;
+            turn.liveToolStepsStageKey = traceKey;
+        }
+    }
+    return host;
+}
+
+function closeCeoLiveTraceStage(turn, traceKey = "") {
+    const key = String(traceKey || "").trim();
+    if (!key || !turn?.listEl || typeof turn.listEl.querySelectorAll !== "function") return;
+    const stepEl = Array.from(turn.listEl.querySelectorAll(".task-trace-step") || [])
+        .find((item) => String(item?.dataset?.traceKey || "").trim() === key);
+    if (stepEl instanceof HTMLElement) stepEl.open = false;
+}
+
+// 账本已经画上这次调用的，实时行就退场（阶段卡里的轮次条是同一件事的正式画法）。
+function pruneCeoLiveToolSteps(turn, summary = null) {
+    const host = turn?.liveToolStepsEl;
+    if (!host || typeof host.children === "undefined") return;
+    const committed = ceoCommittedToolCallKeys(summary || turn?.lastExecutionTraceSummary);
+    if (!committed.size) return;
+    Array.from(host.children).forEach((item) => {
+        const key = ceoToolCallKey(item?.dataset?.toolCallId);
+        if (key && committed.has(key) && typeof item.remove === "function") item.remove();
+    });
+    // 空容器留在 grid 里会占一格行距，行都退场后顺手摘掉（下一条工具帧再挂回来）
+    if (!host.children.length && host.parentElement && typeof host.remove === "function") host.remove();
+}
+
+function clearCeoLiveToolSteps(turn) {
+    const host = turn?.liveToolStepsEl;
+    if (host && typeof host.children !== "undefined") {
+        Array.from(host.children).forEach((item) => {
+            if (typeof item.remove === "function") item.remove();
+        });
+    }
+    if (host?.parentElement && typeof host.remove === "function") host.remove();
+    if (turn?.liveToolStepsStageKey) closeCeoLiveTraceStage(turn, turn.liveToolStepsStageKey);
+    turn.liveToolStepsStageKey = "";
+    turn.liveToolStepsMutedKey = "";
+}
+
 function applyCeoToolEventToTurn(turn, event = {}) {
     if (!turn?.listEl || !turn?.flowEl) return null;
     const status = resolveCeoToolEventStatus(event);
@@ -9477,6 +9587,11 @@ function applyCeoToolEventToTurn(turn, event = {}) {
         : ceoFriendlyToolDetail(toolName, rawText, status, event.kind);
     const outputRef = normalizeTraceOutputRef(event.output_ref || "");
     const toolCallId = String(event.tool_call_id || "").trim();
+    const callKey = ceoToolCallKey(toolCallId);
+    // 账本已经画上这次调用（补丁按帧先到、工具帧后到）就不再建行，
+    // 否则阶段卡里会同时挂着正式轮次和一条实时行。
+    if (callKey && ceoCommittedToolCallKeys(turn.lastExecutionTraceSummary).has(callKey)) return null;
+    const host = ceoLiveToolStepHost(turn);
     let item = findCeoToolStep(turn, { toolCallId, toolName });
     const stage = ceoToolStage(toolName, rawText, status);
     if (!(item instanceof HTMLElement)) {
@@ -9512,7 +9627,7 @@ function applyCeoToolEventToTurn(turn, event = {}) {
             interactionEvent.stopPropagation();
             void copyCeoToolStepOutput(item);
         });
-        turn.listEl.appendChild(item);
+        host.appendChild(item);
     }
     const eventTimestamp = String(event.timestamp || "").trim();
     const eventElapsed = Number.parseFloat(String(event.elapsed_seconds ?? ""));
@@ -9652,6 +9767,9 @@ function finalizeCeoTurn(text, meta = {}) {
                 syncCeoAssistantLoadingAria(turn.textEl);
             }
             if (finalTraceContext) {
+                // 收尾帧先摘掉实时行、收回我们替阶段卡撑开的展开态：正式轮次就在这张卡里，
+                // 留着行会让它比刷新后的同一帧多张着（"刷新才对"那一族）。
+                clearCeoLiveToolSteps(turn);
                 renderCeoStageTraceIntoTurn(turn, finalTraceContext);
             }
             if (turn.steps > 0) {
@@ -9732,6 +9850,9 @@ function finalizeCeoTurn(text, meta = {}) {
                 syncCeoAssistantLoadingAria(turn.textEl);
             }
             if (finalTraceContext) {
+                // 收尾帧先摘掉实时行、收回我们替阶段卡撑开的展开态：正式轮次就在这张卡里，
+                // 留着行会让它比刷新后的同一帧多张着（"刷新才对"那一族）。
+                clearCeoLiveToolSteps(turn);
                 renderCeoStageTraceIntoTurn(turn, finalTraceContext);
             }
             if (turn.steps > 0) {

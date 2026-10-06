@@ -1811,7 +1811,8 @@ function renderExecutionStageRounds(stage) {
     const rounds = Array.isArray(stage?.rounds) ? stage.rounds : [];
     const summaryHtml = renderExecutionStageSummary(stage);
     if (!rounds.length) {
-        return renderTraceField("阶段轮次", "", "当前阶段暂无工具轮次") + summaryHtml;
+        // 挂进卡内的实时工具行会占住"暂无工具轮次"这句话的位置，靠 CSS 在有行时收掉它
+        return `<div class="task-trace-stage-empty">${renderTraceField("阶段轮次", "", "当前阶段暂无工具轮次")}</div>` + summaryHtml;
     }
     return rounds.map((round, index) => renderExecutionStageRoundBlock(stage, round, index)).join("") + summaryHtml;
 }
