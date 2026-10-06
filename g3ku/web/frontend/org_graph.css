@@ -3155,23 +3155,12 @@ textarea {
     display: none;
 }
 
-/* 用户气泡下方的编辑重发/Fork 操作行:与 .msg-meta 相同的悬停显隐模式。
-   两个按钮分别由服务端 can_edit_fork / can_fork 驱动渲染。 */
+/* 气泡下方的编辑重发/Fork 操作行:常驻显示(他 10-06 要求 Fork 不用悬停才出现)。
+   两个按钮分别由服务端 can_edit_fork / can_fork / can_fork_reply 驱动渲染。 */
 .msg-actions {
     display: flex;
     align-items: center;
     gap: 8px;
-    opacity: 0;
-    transform: translateY(2px);
-    pointer-events: none;
-    transition: opacity 160ms ease, transform 160ms ease;
-}
-
-.message:hover .msg-actions,
-.message:focus-within .msg-actions {
-    opacity: 1;
-    transform: translateY(0);
-    pointer-events: auto;
 }
 
 /* 回合进行中(含心跳内部轮)只隐藏编辑:它要改源会话转录。

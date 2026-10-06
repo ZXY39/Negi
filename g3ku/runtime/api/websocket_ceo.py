@@ -980,6 +980,18 @@ def _session_edit_fork_gates(
     return fork_gates, fork_gates
 
 
+def _reply_fork_turn_id_set(
+    raw_messages: list[Any],
+    fork_gates: dict[int, bool] | None,
+) -> set[str]:
+    """回复行 Fork 的合格轮次集合（渠道会话等不下发时返回空集）。"""
+    if not fork_gates and not raw_messages:
+        return set()
+    from g3ku.runtime.web_ceo_history_edit import compute_reply_fork_turn_ids
+
+    return compute_reply_fork_turn_ids(list(raw_messages or []), fork_gates)
+
+
 def _edit_fork_eligible_turn_ids(
     raw_messages: list[Any],
     gates: dict[int, bool] | None,
@@ -1050,6 +1062,7 @@ def _build_ceo_snapshot(
     session_id: str | None = None,
     edit_fork_gates: dict[int, bool] | None = None,
     fork_gates: dict[int, bool] | None = None,
+    reply_fork_turn_ids: set[str] | None = None,
 ) -> list[dict[str, Any]]:
     inflight_payload = inflight_turn if isinstance(inflight_turn, dict) else {}
     inflight_status = str(inflight_payload.get("status") or "").strip().lower()
@@ -1143,6 +1156,11 @@ def _build_ceo_snapshot(
                 item['can_edit_fork'] = True
             if fork_gates and fork_gates.get(index):
                 item['can_fork'] = True
+        elif role == 'assistant' and turn_id and reply_fork_turn_ids and turn_id in reply_fork_turn_ids:
+            # 回复行的 Fork：切点与"下一条提问之前"是同一个（判据见
+            # compute_reply_fork_turn_ids），turn_id 在提问行与回复行上是同一个值，
+            # 所以两类资格必须分开落键，不能共用 can_fork。
+            item['can_fork_reply'] = True
         if role == 'assistant' and any(
             str(task_id or '').startswith('task:')
             for task_id in list(metadata.get('task_ids') or [])
@@ -1503,6 +1521,7 @@ async def ceo_websocket(websocket: WebSocket):
             session_id=session_id,
             edit_fork_gates=edit_gates,
             fork_gates=fork_gates,
+            reply_fork_turn_ids=_reply_fork_turn_id_set(raw_messages, fork_gates),
         )
 
     persisted_messages = await run_off_event_loop(_compose_ceo_snapshot)
@@ -1607,6 +1626,9 @@ async def ceo_websocket(websocket: WebSocket):
             {
                 'turn_ids': _edit_fork_eligible_turn_ids(raw_messages, edit_gates),
                 'fork_turn_ids': _edit_fork_eligible_turn_ids(raw_messages, fork_gates),
+                # 回复行的资格单独一份：turn_id 在提问行和它的回复行上是同一个值，
+                # 混用会让"这条提问可 Fork"冒充"上面那条回复之后可 Fork"。
+                'fork_reply_turn_ids': sorted(_reply_fork_turn_id_set(raw_messages, fork_gates)),
             },
         )
 

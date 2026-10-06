@@ -669,6 +669,11 @@ async def fork_ceo_session(session_id: str, payload: dict | None = Body(default=
     turn_id = str((payload or {}).get("turn_id") or "").strip()
     if not turn_id:
         raise HTTPException(status_code=400, detail="turn_id_required")
+    # at=reply: turn_id 指模型回复所在轮次，切点翻译成"该回复之后第一条提问之前"；
+    # 该回复已是转录尾部时复制整份转录、composer 留空（判据见 reply_fork_target）。
+    at = str((payload or {}).get("at") or "question").strip().lower()
+    if at not in {"question", "reply"}:
+        raise HTTPException(status_code=400, detail="at_must_be_question_or_reply")
     title = str((payload or {}).get("title") or "").strip() or None
     if _is_channel_session_id(session_id):
         _raise_channel_session_readonly()
@@ -684,6 +689,7 @@ async def fork_ceo_session(session_id: str, payload: dict | None = Body(default=
                 session_id=session.key,
                 turn_id=turn_id,
                 title=title,
+                at=at,
             )
         except HistoryEditError as exc:
             raise HTTPException(status_code=exc.status_code, detail=exc.code) from exc

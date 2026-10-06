@@ -43,6 +43,7 @@ from g3ku.runtime.web_ceo_sessions import (
     is_internal_ceo_user_message,
     list_turn_boundary_snapshot_turn_ids,
     new_web_ceo_session_id,
+    read_completed_continuity_snapshot,
     read_turn_boundary_snapshot,
     summarize_preview_text,
     upload_dir_for_session,
@@ -633,6 +634,93 @@ def _rewrite_paths_in_value(value: Any, replacements: dict[str, str]) -> Any:
     return value
 
 
+def reply_fork_target(messages: list[Any], turn_id: str) -> tuple[int, str] | None:
+    """把"在某条模型回复之后分叉"翻译成既有的边界模型。
+
+    返回 ``(该轮最后一条可见助手行的下标, 其后第一条可见用户消息的 turn_id)``。
+    turn_id 非空时切点与"在那条提问之前分叉"完全相同——前缀、连续性锚点、任务门槛、
+    保留窗口全都复用一条路径，不会出现"新会话的基线提到了它转录里没有的事"。
+    turn_id 为空表示这条回复就是转录尾部（尾部 Fork：整份转录都留，输入框留空）。
+    该轮找不到可见助手行（纯提问轮、被裁掉的内部轮）时返回 None。
+    """
+    normalized_turn_id = str(turn_id or "").strip()
+    msgs = list(messages or [])
+    if not normalized_turn_id:
+        return None
+    reply_index = -1
+    for index, raw in enumerate(msgs):
+        if not isinstance(raw, dict) or message_role(raw) != "assistant":
+            continue
+        if message_turn_id(raw) != normalized_turn_id:
+            continue
+        if _is_internal_transcript_row(raw) or is_internal_assistant_message(raw):
+            continue
+        if not message_text(raw):
+            continue
+        reply_index = index
+    if reply_index < 0:
+        return None
+    for raw in msgs[reply_index + 1:]:
+        if isinstance(raw, dict) and is_visible_user_message(raw):
+            return reply_index, message_turn_id(raw)
+    return reply_index, ""
+
+
+def _is_visible_reply_row(message: Any) -> bool:
+    if not isinstance(message, dict) or message_role(message) != "assistant":
+        return False
+    if _is_internal_transcript_row(message) or is_internal_assistant_message(message):
+        return False
+    if message_metadata(message).get("silent_reply") is True:
+        return False
+    return bool(message_text(message))
+
+
+def _visible_reply_turn_id_at(messages: list[Any], index: int) -> str:
+    raw = messages[index] if 0 <= index < len(messages) else None
+    if not _is_visible_reply_row(raw):
+        return ""
+    return message_turn_id(raw)
+
+
+def compute_reply_fork_turn_ids(
+    messages: list[Any],
+    fork_gates: dict[int, bool] | None,
+) -> set[str]:
+    """回复行 Fork 的合格轮次集合（与 ``reply_fork_target`` 同一套切点判据）。
+
+    两条来源：
+    - 某条可见用户消息有 Fork 资格 ⇒ 它上面那条可见回复同样有（两者是同一个切点，
+      判据、保留窗口、任务门槛全部继承，不会出现"按物理下标切"与快照不一致）；
+    - 转录尾部那条可见回复（它之后没有提问）⇒ 永远合格，走尾部分支，不截任何东西。
+    """
+    msgs = list(messages or [])
+    turn_ids: set[str] = set()
+    for index in sorted(fork_gates or {}):
+        if not (fork_gates or {}).get(index):
+            continue
+        cursor = index - 1
+        while cursor >= 0:
+            turn_id = _visible_reply_turn_id_at(msgs, cursor)
+            if turn_id:
+                turn_ids.add(turn_id)
+                break
+            cursor -= 1
+    last_reply_index = -1
+    for index, raw in enumerate(msgs):
+        if _is_visible_reply_row(raw):
+            last_reply_index = index
+    if last_reply_index >= 0:
+        following_user = any(
+            is_visible_user_message(raw) for raw in msgs[last_reply_index + 1:]
+        )
+        if not following_user:
+            turn_id = _visible_reply_turn_id_at(msgs, last_reply_index)
+            if turn_id:
+                turn_ids.add(turn_id)
+    return turn_ids
+
+
 def fork_web_ceo_session(
     *,
     session_manager: Any,
@@ -640,35 +728,60 @@ def fork_web_ceo_session(
     session_id: str,
     turn_id: str,
     title: str | None = None,
+    at: str = "question",
 ) -> dict[str, Any]:
     """把会话在 boundary 之前的前缀复制成新会话，返回 composer 预填载荷。
 
     对源会话只读（可在源轮运行中执行）；复制内容 = 转录前缀（附件文件复制 +
     描述符/内容路径重写）+ 截断态连续性 sidecar + prev_turn 边界快照。
     被点击消息本身不进新转录，其原文与（复制后的）附件作为 composer 预填返回。
+
+    ``at="reply"`` 时 ``turn_id`` 指**模型回复**所在的轮次：切点翻译成该回复之后
+    第一条提问之前（与 ``at="question"`` 共用全部判据）；那条回复已是转录尾部时
+    走尾部分支——整份转录都进新会话、连续性取源会话当前的 completed sidecar、
+    composer 留空，所以最后一条回复也有 Fork 入口，不必等下一条提问发出来。
     """
     key = str(session_id or "").strip()
     source_session = session_manager.get_or_create(key)
     messages = list(getattr(source_session, "messages", []) or [])
+    normalized_mode = str(at or "question").strip().lower()
+    tail_fork = False
+    if normalized_mode == "reply":
+        target = reply_fork_target(messages, turn_id)
+        if target is None:
+            raise HistoryEditError("turn_not_found", status_code=404)
+        _reply_index, next_user_turn_id = target
+        if next_user_turn_id:
+            turn_id = next_user_turn_id
+        else:
+            tail_fork = True
     available = list_turn_boundary_snapshot_turn_ids(key)
-    resolution = resolve_truncation_boundary(messages, turn_id, available_boundary_turn_ids=available)
-    if resolution is None:
-        raise HistoryEditError("turn_not_found", status_code=404)
-    if not resolution.eligible:
-        raise HistoryEditError(resolution.reason or "turn_not_editable", status_code=409)
-    gates = compute_edit_fork_gates(
-        messages,
-        enabled=True,
-        task_created_ats=legacy_task_created_ats(agent, key, messages),
-        available_boundary_turn_ids=available,
-        unfinished_task_ids=session_unfinished_task_ids(agent, key),
-    )
-    if not gates.get(resolution.boundary_index, False):
-        raise HistoryEditError("edit_fork_blocked_by_async_task", status_code=409)
-    # 先把边界快照读进内存：源会话若在跑，后续修剪/覆盖不影响本次 fork。
-    payload, source = reconstruct_continuity_before_boundary(key, resolution)
-    if payload is None:
-        raise HistoryEditError("boundary_unavailable", status_code=409)
+    if tail_fork:
+        # 尾部 Fork 不截任何东西：任务门槛与保留窗口都不适用。
+        resolution = BoundaryResolution(boundary_index=len(messages), eligible=True, reason="")
+        payload = read_completed_continuity_snapshot(key)
+        if not isinstance(payload, dict) or not payload:
+            payload = _empty_continuity_payload()
+        source = "session_continuity"
+    else:
+        resolution = resolve_truncation_boundary(messages, turn_id, available_boundary_turn_ids=available)
+        if resolution is None:
+            raise HistoryEditError("turn_not_found", status_code=404)
+        if not resolution.eligible:
+            raise HistoryEditError(resolution.reason or "turn_not_editable", status_code=409)
+        gates = compute_edit_fork_gates(
+            messages,
+            enabled=True,
+            task_created_ats=legacy_task_created_ats(agent, key, messages),
+            available_boundary_turn_ids=available,
+            unfinished_task_ids=session_unfinished_task_ids(agent, key),
+        )
+        if not gates.get(resolution.boundary_index, False):
+            raise HistoryEditError("edit_fork_blocked_by_async_task", status_code=409)
+        # 先把边界快照读进内存：源会话若在跑，后续修剪/覆盖不影响本次 fork。
+        payload, source = reconstruct_continuity_before_boundary(key, resolution)
+        if payload is None:
+            raise HistoryEditError("boundary_unavailable", status_code=409)
 
     boundary_index = resolution.boundary_index
     clicked = resolution.boundary_message
@@ -784,9 +897,10 @@ def fork_web_ceo_session(
         composer_text = message_text(clicked)
 
     logger.info(
-        "Forked web CEO session {} at turn {} into {} ({} message(s) copied, continuity={})",
+        "Forked web CEO session {} at turn {} (at={}, into {}, {} message(s) copied, continuity={})",
         key,
         turn_id,
+        "reply" if normalized_mode == "reply" else "question",
         new_key,
         len(copied_prefix),
         source,

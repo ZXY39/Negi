@@ -3146,6 +3146,7 @@ function normalizeCeoSnapshotMessage(message = {}) {
         if (hasDeltaKey) next.canonical_context_delta = canonicalContextDelta || {};
         if (usage) next.usage = usage;
         if (message?.task_dispatched === true) next.task_dispatched = true;
+        if (message?.can_fork_reply === true) next.can_fork_reply = true;
         if (message?.silent_reply === true) next.silent_reply = true;
         if (message?.silent_reason) next.silent_reason = String(message.silent_reason);
         if (!String(next.content || "").trim() && !canonicalContext && !hasDeltaKey && status !== "paused") return null;
@@ -5235,6 +5236,42 @@ function buildCeoUserMessageActionsMarkup({ turnId = "", canEditFork = false, ca
     `;
 }
 
+function buildCeoAssistantForkMarkup({ turnId = "", canForkReply = false, sessionId = "" } = {}) {
+    // 模型回复下方的 Fork。切点与服务端 at=reply 对齐：复制"这条回复及之前"的内容，
+    // 尾部回复也常驻有按钮（不必等下一条提问发出来）。编辑重发不搬到这里——
+    // 它改的是那条提问，按钮留在用户气泡下面。
+    const key = String(turnId || "").trim();
+    if (canForkReply !== true || !key) return "";
+    if (!String(sessionId || "").trim().startsWith("web:")) return "";
+    if (typeof activeSessionIsReadonly === "function" && activeSessionIsReadonly()) return "";
+    const safeTurn = esc(key);
+    return `
+        <div class="msg-actions">
+            <button type="button" class="msg-action-btn msg-action-fork" data-ceo-fork="${safeTurn}" data-ceo-fork-at="reply" title="Fork：把这条回复及之前的内容复制成新会话，从它后面继续问" aria-label="Fork 会话">
+                <i data-lucide="git-fork"></i><span>Fork</span>
+            </button>
+        </div>
+    `;
+}
+
+function renderCeoAssistantForkAction(turn, { turnId = "", canForkReply = false, sessionId = "" } = {}) {
+    // 轨道回合的 .msg-content 是静态装配的（createPendingCeoTurn），这里按权威 flag
+    // 补/摘操作行；插在 .ceo-tool-reminder 之前，让提醒条始终落在回合元素最末。
+    const contentEl = turn?.el?.querySelector?.(".msg-content");
+    if (!contentEl || typeof contentEl.querySelector !== "function") return;
+    const existing = contentEl.querySelector(".msg-actions");
+    if (existing?.remove) existing.remove();
+    const markup = buildCeoAssistantForkMarkup({ turnId, canForkReply, sessionId });
+    if (!markup) return;
+    const holder = document.createElement("div");
+    holder.innerHTML = markup;
+    const actionsEl = (holder.children && holder.children[0]) || null;
+    if (!actionsEl) return;
+    const reminderEl = contentEl.querySelector(".ceo-tool-reminder");
+    if (reminderEl && typeof contentEl.insertBefore === "function") contentEl.insertBefore(actionsEl, reminderEl);
+    else if (typeof contentEl.appendChild === "function") contentEl.appendChild(actionsEl);
+}
+
 function syncCeoInputHeight() {
     if (!U.ceoInput) return;
     // 拖出来的高度是用户的显式意图：不再按内容重排，内容超出时靠 overflow-y 滚动。
@@ -6326,16 +6363,19 @@ function applyCeoEditForkGates(payload = {}, sessionId = "") {
     let nextMessages = messages;
     let changed = false;
     [
-        { flag: "can_edit_fork", ids: payload?.turn_ids },
-        { flag: "can_fork", ids: payload?.fork_turn_ids },
-    ].forEach(({ flag, ids }) => {
+        { flag: "can_edit_fork", ids: payload?.turn_ids, role: "user" },
+        { flag: "can_fork", ids: payload?.fork_turn_ids, role: "user" },
+        // 回复行的资格是另一份列表：turn_id 在提问行和它的回复行上同值，
+        // 混用会让"这条提问可 Fork"冒充"上面那条回复之后可 Fork"。
+        { flag: "can_fork_reply", ids: payload?.fork_reply_turn_ids, role: "assistant" },
+    ].forEach(({ flag, ids, role }) => {
         const eligibleTurnIds = new Set((Array.isArray(ids) ? ids : [])
             .map((item) => String(item || "").trim())
             .filter(Boolean));
         const claimedTurnIds = new Set();
         nextMessages = nextMessages.map((item) => {
             if (!item || typeof item !== "object") return item;
-            if (String(item.role || "").trim().toLowerCase() !== "user") return item;
+            if (String(item.role || "").trim().toLowerCase() !== role) return item;
             const turnId = String(item.turn_id || "").trim();
             // 同一 run 的连续消息共享 turn_id，门槛只属首条行——与按下标编码的服务端一致。
             const allowed = !!turnId && eligibleTurnIds.has(turnId) && !claimedTurnIds.has(turnId);
@@ -6591,9 +6631,10 @@ async function submitCeoEditResend({ text = "", uploads = [] } = {}) {
     }
 }
 
-async function handleCeoForkClick(turnId) {
+async function handleCeoForkClick(turnId, at = "question") {
     const key = String(turnId || "").trim();
     if (!key) return;
+    const mode = at === "reply" ? "reply" : "question";
     const sessionId = activeSessionId();
     if (!sessionId) return;
     // Fork 不吃 ceoHistoryEditBusyReason()：那条守卫的语义是"回合在跑/转录缓存可能陈旧"，
@@ -6608,7 +6649,7 @@ async function handleCeoForkClick(turnId) {
     syncCeoPrimaryButton();
     try {
         armCeoSessionUnreadExemption(sessionId);
-        const payload = await ApiClient.forkCeoSession(sessionId, { turn_id: key });
+        const payload = await ApiClient.forkCeoSession(sessionId, { turn_id: key, at: mode });
         const nextActiveId = applyCeoSessionsPayload(payload);
         closeCeoWs();
         resetCeoSessionState({ scrollToLatest: true });
@@ -6854,7 +6895,7 @@ function mutateCeoFeed(mutator, { scrollMode = "preserve" } = {}) {
     return result;
 }
 
-function addMsg(text, role, { markdown = false, attachments = [], scrollMode = "preserve", sessionId = activeSessionId(), timestamp = "", usage = null, turnId = "", canEditFork = false, canFork = false } = {}) {
+function addMsg(text, role, { markdown = false, attachments = [], scrollMode = "preserve", sessionId = activeSessionId(), timestamp = "", usage = null, turnId = "", canEditFork = false, canFork = false, canForkReply = false } = {}) {
     return mutateCeoFeed(() => {
         const el = document.createElement("div");
         el.className = `message ${role}`;
@@ -6874,7 +6915,7 @@ function addMsg(text, role, { markdown = false, attachments = [], scrollMode = "
             : "";
         const actionsMarkup = role === "user"
             ? buildCeoUserMessageActionsMarkup({ turnId, canEditFork, canFork, sessionId })
-            : "";
+            : buildCeoAssistantForkMarkup({ turnId, canForkReply, sessionId });
         if (voiceClip) {
             el.innerHTML = `<div class="message-stack">${buildCeoVoiceBubbleMarkup(voiceClip, voiceView.text)}${attachmentMarkup}${metaMarkup}${actionsMarkup}</div>`;
         } else if (role === "user" && (attachmentMarkup || metaMarkup || actionsMarkup)) {
@@ -6882,8 +6923,8 @@ function addMsg(text, role, { markdown = false, attachments = [], scrollMode = "
                 ? `<div class="${contentClass}">${content}</div>`
                 : "";
             el.innerHTML = `<div class="message-stack">${textBubble}${attachmentMarkup}${metaMarkup}${actionsMarkup}</div>`;
-        } else if (metaMarkup) {
-            el.innerHTML = `<div class="message-stack"><div class="${contentClass}">${content}${attachmentMarkup}</div>${metaMarkup}</div>`;
+        } else if (metaMarkup || actionsMarkup) {
+            el.innerHTML = `<div class="message-stack"><div class="${contentClass}">${content}${attachmentMarkup}</div>${metaMarkup}${actionsMarkup}</div>`;
         } else {
             el.innerHTML = `<div class="${contentClass}">${content}${attachmentMarkup}</div>`;
         }
@@ -7712,16 +7753,18 @@ function renderPersistedCeoAssistantTurn(item = {}) {
     const isFollowUpArchive = String(item?.turn_id || "").includes(":followup:");
     const historyTimestamp = String(item?.timestamp || "").trim();
     const historyUsage = item?.usage || null;
+    const canForkReply = item?.can_fork_reply === true;
+    const forkTurnId = String(item?.turn_id || "").trim();
     if (status !== "paused" && !canonicalContext && !silentReply) {
         // 无轨道兜底气泡同样携带悬停元信息(完成时间 + token 用量)。
         // 静默回合不走这条：它有自己的折叠行，落到下方共用路径渲染，避免两处装配。
-        addMsg(content, "system", { markdown: true, scrollMode: "preserve", timestamp: historyTimestamp, usage: historyUsage });
+        addMsg(content, "system", { markdown: true, scrollMode: "preserve", timestamp: historyTimestamp, usage: historyUsage, turnId: forkTurnId, canForkReply });
         return;
     }
     const turn = createPendingCeoTurn("history", { scrollMode: "preserve" });
     if (!turn) {
         if (!silentReply) {
-            addMsg(content, "system", { markdown: true, scrollMode: "preserve", timestamp: historyTimestamp, usage: historyUsage });
+            addMsg(content, "system", { markdown: true, scrollMode: "preserve", timestamp: historyTimestamp, usage: historyUsage, turnId: forkTurnId, canForkReply });
         }
         return;
     }
@@ -7738,6 +7781,11 @@ function renderPersistedCeoAssistantTurn(item = {}) {
         turn.flowEl.open = true;
         setCeoTurnUsage(turn, historyUsage, { completedAt: historyTimestamp });
         setCeoTurnUsageCollapsed(turn, true);
+        renderCeoAssistantForkAction(turn, {
+            turnId: forkTurnId,
+            canForkReply,
+            sessionId: activeSessionId(),
+        });
         icons();
     }, { scrollMode: "preserve" });
     if (status === "paused") {
@@ -7961,6 +8009,7 @@ function buildCeoRenderSignature(messages = [], inflightTurn = null, preservedTu
             // 有 flag,或任务派发后 flag 收回)必须触发重建。
             item.can_edit_fork === true ? 1 : 0,
             item.can_fork === true ? 1 : 0,
+            item.can_fork_reply === true ? 1 : 0,
             item.task_dispatched === true ? 1 : 0,
         ];
     };
@@ -16589,7 +16638,10 @@ function bind() {
         if (forkBtn) {
             e.preventDefault();
             e.stopPropagation();
-            void handleCeoForkClick(String(forkBtn.dataset.ceoFork || ""));
+            void handleCeoForkClick(
+                String(forkBtn.dataset.ceoFork || ""),
+                String(forkBtn.dataset.ceoForkAt || "question")
+            );
         }
     });
     U.ceoEditResendBanner?.addEventListener("click", (e) => {

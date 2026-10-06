@@ -66,6 +66,46 @@ def test_build_ceo_snapshot_emits_flags(tmp_path, monkeypatch):
     assert assistants[0].get("task_dispatched") is True
 
 
+def test_build_ceo_snapshot_marks_reply_lane_separately(tmp_path, monkeypatch):
+    """回复行的 Fork 资格落在 assistant 行上，不冒名到同 turn_id 的用户行。"""
+    monkeypatch.setattr(wcs, "workspace_path", lambda: tmp_path)
+    messages = [
+        _user("t1", "第一条"),
+        _assistant("t1", "回复一"),
+        _user("t2", "第二条"),
+    ]
+    items = websocket_ceo._build_ceo_snapshot(
+        messages,
+        session_id="web:ceo-x",
+        fork_gates={0: True},
+        reply_fork_turn_ids={"t1"},
+    )
+    users = [item for item in items if item["role"] == "user"]
+    assistants = [item for item in items if item["role"] == "assistant"]
+    assert assistants[0].get("can_fork_reply") is True
+    assert all("can_fork_reply" not in item for item in users)
+    # 提问行自己的 can_fork 与回复行资格互不串台
+    assert users[0].get("can_fork") is True
+    assert "can_fork" not in assistants[0]
+
+
+def test_reply_fork_turn_ids_follow_the_fork_gates_and_the_tail(tmp_path, monkeypatch):
+    monkeypatch.setattr(wcs, "workspace_path", lambda: tmp_path)
+    messages = [
+        _user("t1", "第一条"),
+        _assistant("t1", "回复一"),
+        _user("t2", "第二条"),
+        _assistant("t2", "回复二"),
+    ]
+    # t2 提问有资格 ⇒ 它上面那条回复（t1）也有：两者是同一个切点；
+    # 同时 t2 自己的回复在尾部（后面没有提问），走"整份转录 + 当前 sidecar"那条分支。
+    assert websocket_ceo._reply_fork_turn_id_set(messages, {2: True}) == {"t1", "t2"}
+    assert websocket_ceo._reply_fork_turn_id_set(messages, {}) == {"t2"}
+    # 转录停在提问上时：既没有尾部回复可挂，也只有门槛给出的那条回复合格
+    assert websocket_ceo._reply_fork_turn_id_set(messages[:3], {}) == set()
+    assert websocket_ceo._reply_fork_turn_id_set(messages[:3], {2: True}) == {"t1"}
+
+
 def test_build_ceo_snapshot_without_gates_has_no_flags(tmp_path, monkeypatch):
     monkeypatch.setattr(wcs, "workspace_path", lambda: tmp_path)
     items = websocket_ceo._build_ceo_snapshot([_user("t1")], session_id="web:ceo-x")

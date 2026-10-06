@@ -202,6 +202,9 @@ function loadApp() {
             U,
             addMsg,
             buildCeoUserMessageActionsMarkup,
+            buildCeoAssistantForkMarkup,
+            renderCeoAssistantForkAction,
+            renderPersistedCeoAssistantTurn,
             normalizeCeoSnapshotMessage,
             buildCeoRenderSignature,
             syncCeoFeedTurnActiveClass,
@@ -392,9 +395,11 @@ test("R7 接线静态契约:委托/时序/横幅/HTML 元素", () => {
     const html = fs.readFileSync("g3ku/web/frontend/org_graph.html", "utf8");
     assert.ok(html.includes('id="ceo-edit-resend-banner"'), "org_graph.html 缺少横幅容器");
     assert.ok(APP_CODE.includes('ceoEditResendBanner: document.getElementById("ceo-edit-resend-banner")'), "U 缺少横幅绑定");
-    // CSS:按钮行悬停显隐 + 回合进行中只隐藏编辑按钮。
+    // CSS:按钮行常驻（不再悬停才出现）+ 回合进行中只隐藏编辑按钮。
     const css = fs.readFileSync("g3ku/web/frontend/org_graph.css", "utf8");
     assert.ok(css.includes(".msg-actions"), "CSS 缺少 .msg-actions");
+    assert.ok(!/\.msg-actions \{[^}]*opacity: 0/.test(css), ".msg-actions 仍被按在悬停后才显形");
+    assert.ok(!css.includes(".message:hover .msg-actions"), "CSS 仍用悬停门控制按钮行");
     assert.ok(css.includes(".ceo-turn-active .msg-action-edit"), "CSS 缺少编辑按钮的防御型隐藏规则");
     // 整行隐藏会把 Fork 一起吃掉（暂停/运行中正是唯一还能 Fork 的时刻）。
     assert.ok(!css.includes(".ceo-turn-active .msg-actions"), "CSS 仍在回合进行中整行隐藏按钮");
@@ -530,4 +535,71 @@ test("R9b 审批等待造成的暂停不落地转录行（回合还没结束）"
     const entry = api.getCeoSessionSnapshotCache("web:ceo-s1");
     assert.equal((entry.messages || []).length, 0, "未结束的回合不得伪装成转录行");
     assert.equal(entry.inflight_turn.status, "paused");
+});
+
+test("R10 buildCeoAssistantForkMarkup 只出 Fork、带 at=reply、不吃编辑资格", () => {
+    const api = setup();
+    const markup = api.buildCeoAssistantForkMarkup({
+        turnId: "t7",
+        canForkReply: true,
+        sessionId: "web:ceo-s1",
+    });
+    assert.ok(markup.includes('data-ceo-fork="t7"'), markup);
+    assert.ok(markup.includes('data-ceo-fork-at="reply"'), markup);
+    assert.ok(!markup.includes("data-ceo-edit-resend"), "编辑重发不该出现在回复下方");
+
+    assert.equal(api.buildCeoAssistantForkMarkup({ turnId: "t7", sessionId: "web:ceo-s1" }), "");
+    assert.equal(api.buildCeoAssistantForkMarkup({ turnId: "t7", canForkReply: true, sessionId: "ext:qq:1" }), "");
+});
+
+test("R11 addMsg 系统分支把 Fork 行渲染进 message-stack", () => {
+    const api = setup();
+    const el = api.addMsg("模型回复正文", "system", {
+        markdown: true,
+        sessionId: "web:ceo-s1",
+        turnId: "t8",
+        canForkReply: true,
+    });
+    assert.ok(String(el.innerHTML).includes('data-ceo-fork-at="reply"'), el.innerHTML);
+    assert.ok(String(el.innerHTML).includes("message-stack"), el.innerHTML);
+
+    const bare = api.addMsg("没有资格的回复", "system", { markdown: true, sessionId: "web:ceo-s1", turnId: "t9" });
+    assert.ok(!String(bare.innerHTML).includes("msg-actions"), bare.innerHTML);
+});
+
+test("R12 normalizeCeoSnapshotMessage 保留 assistant 行的 can_fork_reply", () => {
+    const api = setup();
+    const row = api.normalizeCeoSnapshotMessage({
+        role: "assistant",
+        content: "答",
+        turn_id: "t10",
+        can_fork_reply: true,
+    });
+    assert.equal(row.can_fork_reply, true);
+    const plain = api.normalizeCeoSnapshotMessage({ role: "assistant", content: "答", turn_id: "t10" });
+    assert.equal(plain.can_fork_reply, undefined);
+});
+
+test("R13 门槛帧的回复行列表只打 assistant，不冒名到用户行", () => {
+    const api = setup();
+    seedRenderedCeoCache(api, [
+        { role: "user", content: "问", turn_id: "t11" },
+        { role: "assistant", content: "答", turn_id: "t11" },
+    ]);
+    const feed = new FeedStub();
+    api.U.ceoFeed = feed;
+
+    api.applyCeoEditForkGates({ fork_reply_turn_ids: ["t11"] });
+
+    const cached = api.getCeoSessionSnapshotCache("web:ceo-s1").messages;
+    assert.equal(cached[1].can_fork_reply, true, "回复行必须拿到 at=reply 资格");
+    assert.equal(cached[0].can_fork_reply, undefined, "提问行不得冒名领回复行的资格");
+    assert.equal(cached[0].can_fork, undefined, "fork_reply_turn_ids 不影响 can_fork");
+    // 重建后的 DOM 里，带 at=reply 的按钮行只有一条（挂在回复下方）
+    const renderedHtml = feed.children.map((child) => child.innerHTML).join("\n");
+    assert.equal((renderedHtml.match(/data-ceo-fork-at="reply"/g) || []).length, 1, renderedHtml);
+
+    // 整份收回：新一轮把这条挤出"最近 12 轮"窗口时按钮跟着消失
+    api.applyCeoEditForkGates({ fork_reply_turn_ids: [] });
+    assert.equal(api.getCeoSessionSnapshotCache("web:ceo-s1").messages[1].can_fork_reply, undefined);
 });
