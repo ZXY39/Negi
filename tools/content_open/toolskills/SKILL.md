@@ -35,6 +35,18 @@ For a target that is one very long line (minified JSON, single-line logs, base64
 
 Open only what you need. If you do not know where to look yet, use `content_describe` (sizes/previews) or `content_search` (find the line) first.
 
+## Path mode targets one file
+
+`path` must be an absolute path to a **single existing file**. A directory is rejected with
+`path is not a file: <dir>` — path mode never walks a tree.
+
+- What a directory holds (names, sizes, mtime, aggregates) -> `filesystem_stat(paths=["<dir>"])`.
+- Text across many files under a directory -> `exec` (`Get-ChildItem -Recurse`, `Select-String`).
+
+When both `ref` and `path` are given, each target is attempted separately and reported under
+`targets.ref` / `targets.path`. The overall result can stay `ok: true` while one target failed, so
+read the per-target `error` instead of only the top-level flag.
+
 ## Binary targets (PDF, images, xlsx, archives)
 
 Opening a binary target does not return its bytes. The result sets `binary: true` /

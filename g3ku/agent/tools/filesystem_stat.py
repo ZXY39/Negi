@@ -49,7 +49,9 @@ class FilesystemStatTool(Tool):
             "Read-only measurement of files and directories: existence, real on-disk size in bytes, mtime, "
             "and bounded directory listings with aggregates (file count, total/min/max size). "
             "Use this to verify delivered artifacts as a set instead of guessing sizes, and to get real "
-            "file names instead of constructing them. Never modifies anything."
+            "file names instead of constructing them. It lists and measures targets only - it does not "
+            "search file contents; use content_search for one file or exec across a subtree. "
+            "Never modifies anything."
         )
 
     @property

@@ -186,6 +186,14 @@ def test_skill_dependency_on_tool_family_resolves_from_split_executors(tmp_path:
     assert not any('missing required tools' in warning for warning in skill.warnings)
 
 
+REMOVED_FILESYSTEM_TOOL_TOKENS = (
+    '`filesystem_list`',
+    '`filesystem_read`',
+    '`filesystem_open`',
+    'filesystem(action=',
+)
+
+
 def test_content_describe_docs_do_not_reference_removed_filesystem_read_tools() -> None:
     content_manifest = yaml.safe_load(
         (REPO_ROOT / 'tools' / 'content_describe' / 'resource.yaml').read_text(encoding='utf-8')
@@ -199,9 +207,13 @@ def test_content_describe_docs_do_not_reference_removed_filesystem_read_tools() 
         ).get('description')
         or ''
     )
-    assert 'directory' not in str(path_description).lower()
+    # 这条守卫管的是"不许引用已删除的工具名"，不是"不许提目录"：path 模式对目录的处理
+    # 必须写在参数面上，未先 load toolskill 的调用方才只看得到这一处。
+    for token in REMOVED_FILESYSTEM_TOOL_TOKENS:
+        assert token not in str(path_description)
     assert 'directories are not supported' in content_toolskill.lower()
-    assert '`filesystem_list`' not in content_toolskill
+    for token in REMOVED_FILESYSTEM_TOOL_TOKENS:
+        assert token not in content_toolskill
 
 
 def test_content_navigation_manifests_use_real_artifact_ref_examples() -> None:
