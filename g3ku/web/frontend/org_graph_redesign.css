@@ -902,13 +902,15 @@
     background: var(--ui-bg-canvas);
 }
 
-/* 16. 聊天列：填满可用宽度，不做居中阅读轴。底部留白由 --ceo-composer-inset
+/* 16. 聊天列：填满可用宽度，不做居中阅读轴（没有 max-width 档）。左右是同一档对称
+   内缩：回复不装盒之后，正文直接顶在面板左边就是贴着会话栏，所以给到 max(40px, 5%)
+   ——按面板宽自缩放，窄面板由下面两条断点收回。底部留白由 --ceo-composer-inset
    提供（前端按悬浮输入区的实测高度写上来），固定值只兜住控件的静止高度。 */
 [data-ui-version="v2"] .chat-feed {
     width: 100%;
     max-width: none;
     margin: 0;
-    padding: var(--ui-space-6) var(--ui-space-6) var(--ceo-composer-inset, 96px);
+    padding: var(--ui-space-6) max(40px, 5%) var(--ceo-composer-inset, 96px);
     gap: var(--ui-space-5);
 }
 
