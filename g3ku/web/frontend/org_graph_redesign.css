@@ -2487,12 +2487,10 @@
     color: var(--ui-text-disabled);
 }
 
-/* 51. 「处理中...」占位回合：气泡背景只包到内容宽度，不铺满整列。
-   转录里残留的占位行拿不到 .ceo-turn-loading-only，只能按内容自身收缩；
-   fit-content 取最宽子项，所以带阶段轨道或长文本的回合照常撑开。 */
+/* 51. 「处理中...」占位回合与正式回合同宽：气泡无条件吃满整列（宽度规则见
+   org_graph.css 的 .ceo-turn-message .msg-content），这里只收一下占位态的内边距。 */
 [data-ui-version="v2"] .ceo-turn-message .msg-content:has(> .assistant-text-loading) {
-    width: fit-content;
-    max-width: 100%;
+    padding: var(--ui-space-3);
 }
 
 /* 52. 会话右上角菜单：会话 ID 与创建时间作为只读信息放在「命名」「删除」之前 */

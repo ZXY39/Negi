@@ -2871,13 +2871,15 @@ textarea {
     margin-inline-start: auto;
 }
 
+/* 回合气泡无条件吃满整列：宽度不再由内容决定——展开阶段卡时那一轮并行几个工具条
+   本来会经 nowrap 条带的内在宽度传上来，读起来就是"气泡有时很宽有时不变"。
+   760px 阅读带与"占位回合按内容收缩"两条例外都为它让位。 */
 .ceo-turn-message .msg-content {
-    width: min(100%, 760px);
+    width: 100%;
+    max-width: 100%;
 }
 
 .ceo-turn-message.ceo-turn-loading-only .msg-content {
-    width: fit-content;
-    max-width: none;
     padding: 12px;
 }
 
