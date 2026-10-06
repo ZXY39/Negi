@@ -5,8 +5,6 @@
   "stylesheet": "google-fonts.css",
   "installed_version": "firacode:v27,firasans:v18",
   "installed_revision": "3f9858a42bf92f5674ff486530f6546635e372f37532261fff0f48c56a6fa662",
-  "latest_version": "firacode:v27,firasans:v18",
-  "latest_revision": "3f9858a42bf92f5674ff486530f6546635e372f37532261fff0f48c56a6fa662",
   "font_versions": {
     "firacode": "v27",
     "firasans": "v18"
@@ -55,10 +53,5 @@
     "va9E4kDNxMZdWfMOD5VvmYjLeTY.woff2",
     "va9E4kDNxMZdWfMOD5VvmojLeTY.woff2"
   ],
-  "update_available": false,
-  "update_mode": "notify",
-  "check_interval_days": 30,
-  "checked_at": "2026-09-14T05:27:34Z",
-  "installed_at": "2026-03-28T01:54:19Z",
-  "last_error": ""
+  "installed_at": "2026-03-28T01:54:19Z"
 }
