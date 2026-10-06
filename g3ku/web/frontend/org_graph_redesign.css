@@ -945,6 +945,16 @@
     line-height: 1.7;
 }
 
+/* 模型回复不装盒（V2 层，合同见 org_graph.css 的 .message.system .msg-content）：
+   本表在后面，不补一条同档规则的话 V2 的盒子会把基础层顶回去。
+   :not() 排除内部轮状态条——它不是回复，仍要自己的虚线盒。 */
+[data-ui-version="v2"] .message.system .msg-content:not(.ceo-internal-ack-content) {
+    padding: 0;
+    border: 0;
+    border-radius: 0;
+    background: transparent;
+}
+
 [data-ui-version="v2"] .message.user .msg-content {
     max-width: 100%;
     background: var(--ui-brand-soft);

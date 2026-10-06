@@ -2897,13 +2897,34 @@ textarea {
     gap: 0;
 }
 
-.ceo-internal-ack .msg-content {
+/* 模型回复不再装进气泡：正文直接印在会话面上并占满整列（左右只剩 feed 自己的 12px 内缩）。
+   用户消息与内部轮状态条（.ceo-internal-ack）仍保留盒子；阶段轨道是另一个盒子，不受这条影响。 */
+.message.system .msg-content {
+    width: 100%;
+    max-width: 100%;
+    padding: 0;
+    border: 0;
+    border-radius: 0;
+    background-color: transparent;
+    box-shadow: none;
+}
+
+.message.system .message-stack {
+    width: 100%;
+    max-width: 100%;
+}
+
+/* 内部轮状态条不是模型回复：上面那条"回复不装盒"按 .message.system 命中它，
+   这里用同档选择器把自己的虚线盒子要回来。 */
+.message.system.ceo-internal-ack .msg-content {
     width: fit-content;
     max-width: min(100%, 520px);
     padding: 10px 14px;
+    border: 1px dashed;
     border-style: dashed;
     border-color: color-mix(in srgb, var(--border-subtle) 75%, transparent);
     background: color-mix(in srgb, var(--bg-elevated) 92%, transparent);
+    border-radius: var(--radius-md);
     color: var(--text-secondary);
     font-size: 0.84rem;
 }
