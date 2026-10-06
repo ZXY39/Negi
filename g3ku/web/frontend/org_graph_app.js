@@ -3206,7 +3206,7 @@ function normalizeCeoSnapshotInflight(snapshot = null) {
             next.user_message = { content: String(lastUserMessage.content || "") };
             const attachments = cloneCeoSnapshotAttachments(lastUserMessage.attachments);
             if (attachments.length) next.user_message.attachments = attachments;
-            // 发送时间随 inflight 缓存存活,收尾/会话切换后用户气泡悬停仍可显示。
+            // 发送时间随 inflight 缓存存活,收尾/会话切换后点击用户气泡仍可显示。
             const userTimestamp = String(lastUserMessage.timestamp || "").trim();
             if (userTimestamp) next.user_message.timestamp = userTimestamp;
         }
@@ -3743,7 +3743,7 @@ function appendCeoSessionSnapshotMessage(messages = [], message = null) {
     ) {
         if (nextMessage.canonical_context) previous.canonical_context = nextMessage.canonical_context;
         if (nextMessage.canonical_context_delta) previous.canonical_context_delta = nextMessage.canonical_context_delta;
-        // 悬停元数据同样参与合并:重复 finalize/快照回写时新值覆盖旧值,不丢失。
+        // 点击显形的元数据同样参与合并:重复 finalize/快照回写时新值覆盖旧值,不丢失。
         if (nextMessage.usage) previous.usage = nextMessage.usage;
         if (nextMessage.timestamp) previous.timestamp = nextMessage.timestamp;
         return trimCeoSessionSnapshotMessages(next);
@@ -5205,7 +5205,7 @@ function addCeoUserMessage(text = "", { attachments = [], scrollMode = "preserve
     return addMsg(String(text || ""), "user", { attachments, scrollMode, sessionId, timestamp, turnId, canEditFork, canFork });
 }
 
-// 气泡悬停复制按钮:与悬停时间同一行出现,点击后复制气泡里已渲染的可见文本。
+// 气泡复制按钮:与元信息同行,点击这条消息才显形,按下后复制气泡里已渲染的可见文本。
 // 轨道回合与 addMsg 气泡共用同一份标记,位置由 CSS 按角色分角。
 function buildCeoBubbleCopyMarkup(label = "复制内容") {
     const safeLabel = esc(label);
@@ -5213,63 +5213,52 @@ function buildCeoBubbleCopyMarkup(label = "复制内容") {
 }
 
 function buildCeoUserMessageActionsMarkup({ turnId = "", canEditFork = false, canFork = false, sessionId = "" } = {}) {
-    // 用户气泡下方的编辑重发/Fork 操作行。两个按钮各吃一个服务端 flag：
-    // can_edit_fork 额外要求会话没有活的执行体（要改源转录），can_fork 只看内容判据
-    // （只读前缀、源会话零变更），所以回合在跑/等审批/压缩在途时只剩 Fork 可点。
-    // 另有 web: 前缀 + 非只读 + feed 级 .ceo-turn-active 隐藏编辑按钮三重防御。
+    // 用户气泡下方只剩编辑重发：Fork 已经搬到模型回复那一行（见
+    // buildCeoAssistantForkMarkup），同一件事不在两个气泡上各画一个按钮。
+    // can_edit_fork 额外要求会话没有活的执行体（要改源转录），另有 web: 前缀
+    // + 非只读 + feed 级 .ceo-turn-active 隐藏按钮三重防御。
     const key = String(turnId || "").trim();
-    if (!key || (canEditFork !== true && canFork !== true)) return "";
+    if (!key || canEditFork !== true) return "";
     if (!String(sessionId || "").trim().startsWith("web:")) return "";
     if (typeof activeSessionIsReadonly === "function" && activeSessionIsReadonly()) return "";
     const safeTurn = esc(key);
     return `
         <div class="msg-actions">
-            ${canEditFork === true ? `
             <button type="button" class="msg-action-btn msg-action-edit" data-ceo-edit-resend="${safeTurn}" title="编辑重发：发送后该消息及其后所有内容将被清空" aria-label="编辑重发">
                 <i data-lucide="pencil"></i><span>编辑</span>
-            </button>` : ""}
-            ${canFork === true ? `
-            <button type="button" class="msg-action-btn msg-action-fork" data-ceo-fork="${safeTurn}" title="Fork：把此消息之前的内容复制成新会话，此消息回填输入框" aria-label="Fork 会话">
-                <i data-lucide="git-fork"></i><span>Fork</span>
-            </button>` : ""}
-        </div>
-    `;
-}
-
-function buildCeoAssistantForkMarkup({ turnId = "", canForkReply = false, sessionId = "" } = {}) {
-    // 模型回复下方的 Fork。切点与服务端 at=reply 对齐：复制"这条回复及之前"的内容，
-    // 尾部回复也常驻有按钮（不必等下一条提问发出来）。编辑重发不搬到这里——
-    // 它改的是那条提问，按钮留在用户气泡下面。
-    const key = String(turnId || "").trim();
-    if (canForkReply !== true || !key) return "";
-    if (!String(sessionId || "").trim().startsWith("web:")) return "";
-    if (typeof activeSessionIsReadonly === "function" && activeSessionIsReadonly()) return "";
-    const safeTurn = esc(key);
-    return `
-        <div class="msg-actions">
-            <button type="button" class="msg-action-btn msg-action-fork" data-ceo-fork="${safeTurn}" data-ceo-fork-at="reply" title="Fork：把这条回复及之前的内容复制成新会话，从它后面继续问" aria-label="Fork 会话">
-                <i data-lucide="git-fork"></i><span>Fork</span>
             </button>
         </div>
     `;
 }
 
+function buildCeoAssistantForkMarkup({ turnId = "", canForkReply = false, sessionId = "" } = {}) {
+    // 模型回复的 Fork 按钮：与 token 用量同行，落在用量文字左边（它自己常驻，
+    // 同行那些信息要点开消息才显示）。切点与服务端 at=reply 对齐：复制"这条回复
+    // 及之前"的内容，尾部回复同样有按钮，不必等下一条提问发出来。
+    const key = String(turnId || "").trim();
+    if (canForkReply !== true || !key) return "";
+    if (!String(sessionId || "").trim().startsWith("web:")) return "";
+    if (typeof activeSessionIsReadonly === "function" && activeSessionIsReadonly()) return "";
+    const safeTurn = esc(key);
+    return `<button type="button" class="msg-action-btn msg-action-fork" data-ceo-fork="${safeTurn}" data-ceo-fork-at="reply" title="Fork：把这条回复及之前的内容复制成新会话，从它后面继续问" aria-label="Fork 会话"><i data-lucide="git-fork"></i><span>Fork</span></button>`;
+}
+
 function renderCeoAssistantForkAction(turn, { turnId = "", canForkReply = false, sessionId = "" } = {}) {
-    // 轨道回合的 .msg-content 是静态装配的（createPendingCeoTurn），这里按权威 flag
-    // 补/摘操作行；插在 .ceo-tool-reminder 之前，让提醒条始终落在回合元素最末。
-    const contentEl = turn?.el?.querySelector?.(".msg-content");
-    if (!contentEl || typeof contentEl.querySelector !== "function") return;
-    const existing = contentEl.querySelector(".msg-actions");
+    // 轨道回合的元信息行是静态装配的（createPendingCeoTurn），这里按权威 flag 把
+    // Fork 插到 .ceo-turn-usage 左边（或摘掉）；行本身常驻，用量文字的点开显隐在 CSS。
+    const metaEl = turn?.el?.querySelector?.(".ceo-turn-meta");
+    if (!metaEl || typeof metaEl.querySelector !== "function") return;
+    const existing = metaEl.querySelector(".msg-action-fork");
     if (existing?.remove) existing.remove();
     const markup = buildCeoAssistantForkMarkup({ turnId, canForkReply, sessionId });
     if (!markup) return;
     const holder = document.createElement("div");
     holder.innerHTML = markup;
-    const actionsEl = (holder.children && holder.children[0]) || null;
-    if (!actionsEl) return;
-    const reminderEl = contentEl.querySelector(".ceo-tool-reminder");
-    if (reminderEl && typeof contentEl.insertBefore === "function") contentEl.insertBefore(actionsEl, reminderEl);
-    else if (typeof contentEl.appendChild === "function") contentEl.appendChild(actionsEl);
+    const buttonEl = (holder.children && holder.children[0]) || null;
+    if (!buttonEl) return;
+    const usageEl = metaEl.querySelector(".ceo-turn-usage");
+    if (usageEl && typeof metaEl.insertBefore === "function") metaEl.insertBefore(buttonEl, usageEl);
+    else if (typeof metaEl.appendChild === "function") metaEl.appendChild(buttonEl);
 }
 
 function syncCeoInputHeight() {
@@ -6631,10 +6620,12 @@ async function submitCeoEditResend({ text = "", uploads = [] } = {}) {
     }
 }
 
-async function handleCeoForkClick(turnId, at = "question") {
+async function handleCeoForkClick(turnId, at = "reply") {
     const key = String(turnId || "").trim();
     if (!key) return;
-    const mode = at === "reply" ? "reply" : "question";
+    // at=question 仍是端点的一半合同，但网页上已经没有那个入口：
+    // 缺 data-ceo-fork-at 的按钮按回复切点处理，免得静默复制出另一个前缀。
+    const mode = at === "question" ? "question" : "reply";
     const sessionId = activeSessionId();
     if (!sessionId) return;
     // Fork 不吃 ceoHistoryEditBusyReason()：那条守卫的语义是"回合在跑/转录缓存可能陈旧"，
@@ -6905,17 +6896,22 @@ function addMsg(text, role, { markdown = false, attachments = [], scrollMode = "
         const contentClass = markdown ? "msg-content markdown-content" : "msg-content";
         const content = markdown ? renderMarkdown(displayText) : esc(displayText);
         const attachmentMarkup = renderStructuredChatAttachments(attachments, { sessionId });
-        // 悬停元信息行(发送/完成时间 + token 用量 + 复制按钮):时间仅在调用方提供数据
-        // 时渲染,复制按钮只要有正文就跟着出现,显隐由 CSS 的 .msg-meta 悬停规则控制。
+        // 元信息行(发送/完成时间 + token 用量 + 复制按钮):时间仅在调用方提供数据
+        // 时渲染,复制按钮只要有正文就跟着出现,显隐由 CSS 的 .meta-open 点击门控制。
         // 有 meta 时用 message-stack 纵向包裹,保证元信息落在气泡下方而不是 flex 行内并排。
         const metaText = buildCeoMessageMetaText({ role, timestamp, usage });
         const copyMarkup = hasRenderableText(displayText) ? buildCeoBubbleCopyMarkup() : "";
-        const metaMarkup = metaText || copyMarkup
-            ? `<div class="msg-meta">${metaText ? `<span class="msg-meta-text">${esc(metaText)}</span>` : ""}${copyMarkup}</div>`
+        // 回复的 Fork 与元信息同一行、排在用量文字左边（轨道回合见
+        // renderCeoAssistantForkAction，两条道同一个位置）。
+        const forkMarkup = role === "user"
+            ? ""
+            : buildCeoAssistantForkMarkup({ turnId, canForkReply, sessionId });
+        const metaMarkup = metaText || copyMarkup || forkMarkup
+            ? `<div class="msg-meta">${forkMarkup}${metaText ? `<span class="msg-meta-text">${esc(metaText)}</span>` : ""}${copyMarkup}</div>`
             : "";
         const actionsMarkup = role === "user"
             ? buildCeoUserMessageActionsMarkup({ turnId, canEditFork, canFork, sessionId })
-            : buildCeoAssistantForkMarkup({ turnId, canForkReply, sessionId });
+            : "";
         if (voiceClip) {
             el.innerHTML = `<div class="message-stack">${buildCeoVoiceBubbleMarkup(voiceClip, voiceView.text)}${attachmentMarkup}${metaMarkup}${actionsMarkup}</div>`;
         } else if (role === "user" && (attachmentMarkup || metaMarkup || actionsMarkup)) {
@@ -7520,7 +7516,7 @@ function patchCeoInflightTurn(snapshot = null, { sessionId = "", cacheField = "i
         turn.lastExecutionTraceSummary = null;
         turn.liveStreamText = "";
         // 跨 turn 复用同一回合对象时清空 sticky 元数据,避免上一轮的
-        // token 用量/完成时间泄漏到新轮次的悬停信息里。
+        // token 用量/完成时间泄漏到新轮次的元信息里。
         turn.usage = null;
         turn.completedAt = "";
         // 上一轮没收尾的实时行不能跟着回合对象带到新轮次里
@@ -7756,7 +7752,7 @@ function renderPersistedCeoAssistantTurn(item = {}) {
     const canForkReply = item?.can_fork_reply === true;
     const forkTurnId = String(item?.turn_id || "").trim();
     if (status !== "paused" && !canonicalContext && !silentReply) {
-        // 无轨道兜底气泡同样携带悬停元信息(完成时间 + token 用量)。
+        // 无轨道兜底气泡同样携带元信息(完成时间 + token 用量),同样是点击才显形。
         // 静默回合不走这条：它有自己的折叠行，落到下方共用路径渲染，避免两处装配。
         addMsg(content, "system", { markdown: true, scrollMode: "preserve", timestamp: historyTimestamp, usage: historyUsage, turnId: forkTurnId, canForkReply });
         return;
@@ -8002,7 +7998,7 @@ function buildCeoRenderSignature(messages = [], inflightTurn = null, preservedTu
             item.canonical_context_delta ? 1 : 0,
             String(item.content || ""),
             // usage/timestamp 参与签名:缓存先行渲染(可能缺元数据)后到达的
-            // 服务端权威快照必须触发重建,否则悬停元信息永远停留在缺失状态。
+            // 服务端权威快照必须触发重建,否则元信息永远停留在缺失状态。
             item.usage && typeof item.usage === "object" ? JSON.stringify(item.usage) : "",
             String(item.timestamp || ""),
             // 编辑/Fork 按钮标志参与签名:flag 迟到(缓存渲染无 flag、权威快照
@@ -8095,7 +8091,7 @@ function buildFinalizedCeoTurnPayload(sessionId, { normalizedSource = "", normal
     let messages = trimCeoSessionSnapshotMessages(entry?.messages);
     messages = appendMissingCeoUserMessages(messages, userMessagesToAppend);
     // usage/timestamp 无条件写入缓存:会话切换/刷新后从缓存渲染时,
-    // 悬停元信息(token 用量 + 完成时间)不再依赖服务端快照补齐。
+    // 元信息(token 用量 + 完成时间)不再依赖服务端快照补齐。
     const completedTimestamp = String(completedAt || "").trim();
     const silentReply = meta?.silent_reply === true;
     messages = appendCeoSessionSnapshotMessage(messages, {
@@ -8338,7 +8334,7 @@ function createPendingCeoTurn(source = "user", { scrollMode = "preserve" } = {})
             // 在飞工具行的容器（见 ceoLiveToolStepHost），卡片开合不由它决定
             liveToolStepsEl: null,
             liveStreamText: "",
-            // 悬停元数据(sticky):token 用量与完成时间,由 setCeoTurnUsage 维护。
+            // 元数据(sticky):token 用量与完成时间,由 setCeoTurnUsage 维护。
             usage: null,
             completedAt: "",
             contextLoadNoticeKeys: new Set(),
@@ -8611,7 +8607,7 @@ function setCeoTurnUsage(turn, usage = null, { completedAt = "" } = {}) {
     turn.usageEl.removeAttribute?.("aria-hidden");
 }
 
-// 普通消息气泡(用户/无轨道助手兜底)的悬停元信息文本:时间必带角色语义,
+// 普通消息气泡(用户/无轨道助手兜底)的元信息文本:时间必带角色语义,
 // usage 仅在数据可用时附加(用户消息只有发送时间)。
 function buildCeoMessageMetaText({ role = "", timestamp = "", usage = null } = {}) {
     const parts = [];
@@ -8634,6 +8630,20 @@ function buildCeoMessageMetaText({ role = "", timestamp = "", usage = null } = {
 function setCeoTurnUsageCollapsed(turn, collapsed = true) {
     if (!turn?.el?.classList) return;
     turn.el.classList.toggle("usage-collapsed", !!collapsed);
+}
+
+// 元信息行（完成时间 / 输入·缓存命中·输出 / 复制）改为"点击这条消息才显示"。
+// 悬停门在长会话里会把相邻两条同时点亮，而且鼠标扫过就闪；Fork 按钮不吃这道门
+// （它常驻，见 .msg-action-fork 的样式）。
+function toggleCeoMessageMetaReveal(target = null) {
+    if (!target || typeof target.closest !== "function") return;
+    if (target.closest("button, a, summary, input, textarea, select, label")) return;
+    const messageEl = target.closest(".message");
+    if (!messageEl?.classList || typeof messageEl.classList.toggle !== "function") return;
+    // 选中正文收尾的那次 click 不算"点开"——复制按钮之外的人常在选字
+    const selection = typeof window.getSelection === "function" ? window.getSelection() : null;
+    if (selection && String(selection.toString() || "").trim()) return;
+    messageEl.classList.toggle("meta-open");
 }
 
 function clearCeoToolReminder(turn, { executionId = "", force = false } = {}) {
@@ -16640,9 +16650,12 @@ function bind() {
             e.stopPropagation();
             void handleCeoForkClick(
                 String(forkBtn.dataset.ceoFork || ""),
-                String(forkBtn.dataset.ceoForkAt || "question")
+                String(forkBtn.dataset.ceoForkAt || "reply")
             );
+            return;
         }
+        // 落到消息正文上的点击：展开/收起这一条的元信息行
+        toggleCeoMessageMetaReveal(e.target);
     });
     U.ceoEditResendBanner?.addEventListener("click", (e) => {
         const cancel = e.target.closest("[data-ceo-edit-resend-cancel]");

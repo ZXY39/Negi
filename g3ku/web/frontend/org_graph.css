@@ -2860,7 +2860,7 @@ textarea {
     flex-direction: column;
     align-items: flex-start;
     gap: 12px;
-    /* 按正文收拢而不是铺满 760px 列:悬停元信息行要跟气泡同宽,
+    /* 按正文收拢而不是铺满 760px 列:元信息行要跟气泡同宽,
        复制按钮才能落在气泡的下角。 */
     width: fit-content;
     max-width: min(100%, 760px);
@@ -3038,21 +3038,24 @@ textarea {
     transition: opacity 160ms ease, transform 160ms ease;
 }
 
-.ceo-turn-message.usage-collapsed .ceo-turn-usage {
+/* 元信息（完成时间 / token 用量 / 复制）点击消息后才显形；Fork 按钮不吃这道门。
+   占位常驻（只动 opacity），展开收起不会顶动会话流。 */
+.ceo-turn-message .ceo-turn-usage,
+.message .msg-meta-text,
+.message .msg-copy-btn {
+    transition: opacity 160ms ease, transform 160ms ease;
+}
+
+.ceo-turn-message.usage-collapsed:not(.meta-open) .ceo-turn-usage,
+.message:not(.meta-open) .msg-meta-text,
+.message:not(.meta-open) .msg-copy-btn {
     opacity: 0;
     transform: translateY(2px);
     pointer-events: none;
 }
 
-.ceo-turn-message.usage-collapsed:hover .ceo-turn-usage,
-.ceo-turn-message.usage-collapsed:focus-within .ceo-turn-usage {
-    opacity: 1;
-    transform: translateY(0);
-}
-
-/* 普通消息气泡(用户/无轨道助手兜底)的悬停元信息行:发送/完成时间 + token 用量 + 复制按钮。
-   与 .ceo-turn-usage 的悬停显隐模式保持一致:占位常驻、opacity 淡入。
-   这一行与气泡同宽(message-stack 已收拢到正文),复制按钮因此落在气泡下角:
+/* 普通消息气泡(用户/无轨道助手兜底)的元信息行:发送/完成时间 + token 用量 + 复制按钮,
+   回复的 Fork 按钮排在最左。行的显隐由上面那组点击门管,行本身一直占位。
    助手靠右(时间吃左),用户靠左(时间吃右)。 */
 .msg-meta {
     display: flex;
@@ -3065,10 +3068,6 @@ textarea {
     color: var(--text-muted);
     letter-spacing: 0.01em;
     user-select: text;
-    opacity: 0;
-    transform: translateY(2px);
-    pointer-events: none;
-    transition: opacity 160ms ease, transform 160ms ease;
 }
 
 .msg-meta > .msg-meta-text {
@@ -3088,15 +3087,8 @@ textarea {
     justify-content: flex-start;
 }
 
-.message:hover .msg-meta,
-.message:focus-within .msg-meta {
-    opacity: 1;
-    transform: translateY(0);
-    pointer-events: auto;
-}
-
-/* 气泡复制按钮:与悬停时间同时出现、同一字号的裸图标(不给徽章边框和底色),
-   只在点击后短暂换成 check/x 作为反馈。轨道回合与普通气泡共用同一份样式。 */
+/* 气泡复制按钮:与元信息同一档出现的裸图标(不给徽章边框和底色),只在点击消息后显形,
+   点击后短暂换成 check/x 作为反馈。轨道回合与普通气泡共用同一份样式。 */
 .msg-copy-btn {
     width: 18px;
     height: 18px;
@@ -3105,20 +3097,12 @@ textarea {
     align-items: center;
     justify-content: center;
     color: var(--text-muted);
-    opacity: 0;
-    pointer-events: none;
     transition: opacity 160ms ease, color 140ms ease;
 }
 
 .msg-copy-btn svg {
     width: 13px;
     height: 13px;
-}
-
-.message:hover .msg-copy-btn,
-.message:focus-within .msg-copy-btn {
-    opacity: 1;
-    pointer-events: auto;
 }
 
 .msg-copy-btn:hover,
@@ -3142,7 +3126,8 @@ textarea {
     gap: 8px;
 }
 
-.ceo-turn-meta:has(> .ceo-turn-usage[hidden]) {
+/* 用量为空时整行收起；但行里只要有 Fork 按钮就必须留着（按钮常驻，不跟用量同生死） */
+.ceo-turn-meta:has(> .ceo-turn-usage[hidden]):not(:has(.msg-action-fork)) {
     display: none;
 }
 

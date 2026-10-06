@@ -3,7 +3,7 @@ const assert = require("node:assert/strict");
 const fs = require("node:fs");
 const vm = require("node:vm");
 
-// 气泡悬停元信息契约(token 用量 + 时间 + 复制按钮):
+// 气泡元信息契约(token 用量 + 时间 + 复制按钮,点击消息才显形):
 // - setCeoTurnUsage sticky:后续不带 usage 的调用不得清空历史回合的 usage 行(R1);
 // - finalize 写缓存的 assistant 消息始终携带 usage/timestamp(R3);
 // - 渲染签名覆盖 per-message usage/timestamp,服务端权威快照必须能触发重建(R2);
@@ -273,7 +273,7 @@ test("setCeoTurnUsage 渲染 token + 完成时间,且后续空调用不清空(st
     assert.ok(turn.usageEl.textContent.includes("完成于"), turn.usageEl.textContent);
 });
 
-test("setCeoTurnUsage 只有完成时间也渲染(usage 缺失时悬停仍有内容)", () => {
+test("setCeoTurnUsage 只有完成时间也渲染(usage 缺失时点开仍有内容)", () => {
     const api = setup();
     const turn = makeMetaTurn({ turnId: "t1" });
 
