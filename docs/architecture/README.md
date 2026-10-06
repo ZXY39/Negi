@@ -134,7 +134,7 @@ Start here when you are new to the repository or when a change crosses subsystem
 - CEO 阶段卡里被裁撤/收口的阶段显示「当前阶段暂无工具轮次」 → 显示层必须继续带行，回填口径与未闭合范围见 `web-and-admin.md`「CEO Stage Trace Round Rendering Contract」的阶段轨道条目
 - 回合进行中最新气泡夹着历史阶段一起出现（新阶段带着旧阶段）、旧阶段排在新阶段下面，或刷新网页才恢复正常 → 同上条目：live 帧 delta 只按投影互比，源正文的回填发生在 delta 定型之后；轨道顺序按 `stage_index` 升序合并，不按到达顺序
 - 被模型点名移出上下文的阶段，卡片徽章仍写「完成」而不是「已移出上下文」（或反过来）→ 裁撤标记有没有穿过出帧面与前端阶段白名单，见 `web-and-admin.md`「CEO Turn Timeline Rendering Contract」
-- 工具执行时先在阶段外面冒出来、过一会才进阶段卡（气泡跳一下），或执行中的工具看不见 → 同一文档的在飞工具行条目（落位、宿主卡展开、按 `tool_call_id` 退场）
+- 工具执行时先在阶段外面冒出来、过一会才进阶段卡（气泡跳一下），或某条工具的"加载中"迟迟不消失 → 同一文档的在飞工具行条目（落位、按 `tool_call_id` 退场、`submit_next_stage` 不建行）
 - 项目一启动会话就自动回一条几小时前的旧任务结果、或某个任务结果迟迟没汇报却也没报错 → `heartbeat-system.md`「Task Terminal Repair Contract」（终态 outbox 投递耐久性与 `abandoned` 留痕）+ `operations-and-maintenance.md`「会话无回复」
 - 会话该静默却发话、或该发话却整轮无声；模型写了像哨兵的文本却没静默 → `runtime-overview.md`「3.3 静默回复（`silent` 工具）」+ `web-and-admin.md`「CEO Turn Silent Reply Contract」
 - 新增常驻内置控制工具后模型从不使用它、或调用即报错 → `tool-and-skill-system.md`「3.1.1 为什么"常驻"需要独立机制」

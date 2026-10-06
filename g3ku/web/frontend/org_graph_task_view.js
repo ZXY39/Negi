@@ -1849,32 +1849,10 @@ function formatExecutionStageTitle(stage) {
     const stageGoal = String(stage?.stage_goal || "").trim();
     const fallbackTitle = String(stage?.mode || "自主执行").trim() || "自主执行";
     const title = stageGoal || fallbackTitle;
-    const progress = formatExecutionStageProgress(stage);
+    // 标题只带阶段目标与开始时间：轮数（用过/预算）在卡里逐轮列着，
+    // 画成 "5/15" 只是把同一个信息再挤进标题一行。
     const time = stage?.created_at ? formatCompactTime(stage.created_at) : "";
-    const meta = [progress, time].filter(Boolean).join(" · ");
-    return `${title}${meta ? ` · ${meta}` : ""}`;
-}
-
-function countBudgetedExecutionStageRounds(stage) {
-    const rounds = Array.isArray(stage?.rounds) ? stage.rounds : [];
-    let sawBudgetMarker = false;
-    let countedRounds = 0;
-    rounds.forEach((round) => {
-        if (!round || typeof round !== "object") return;
-        if (!Object.prototype.hasOwnProperty.call(round, "budget_counted")) return;
-        sawBudgetMarker = true;
-        if (round.budget_counted) countedRounds += 1;
-    });
-    return sawBudgetMarker ? countedRounds : rounds.length;
-}
-
-function formatExecutionStageProgress(stage) {
-    const totalRounds = normalizeInt(stage?.stage_total_steps, 0);
-    if (totalRounds <= 0) return "";
-    const explicitUsed = normalizeInt(stage?.tool_rounds_used, 0);
-    const inferredUsed = countBudgetedExecutionStageRounds(stage);
-    const usedRounds = Math.max(explicitUsed, inferredUsed);
-    return `${Math.min(usedRounds, totalRounds)}/${totalRounds}`;
+    return `${title}${time ? ` · ${time}` : ""}`;
 }
 
 function buildExecutionTraceSteps(trace, node) {
