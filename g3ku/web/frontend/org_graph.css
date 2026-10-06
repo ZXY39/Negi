@@ -2892,7 +2892,8 @@ textarea {
 }
 
 .ceo-turn-message.ceo-turn-loading-only .ceo-turn-content {
-    width: auto;
+    /* 只收 gap；宽度不再让位——这条选择器比 .ceo-turn-message .msg-content 高两档，
+       留着 width: auto 就把整列宽顶回去，占位回合又变成按内容收缩。 */
     gap: 0;
 }
 
