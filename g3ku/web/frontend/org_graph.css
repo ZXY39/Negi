@@ -2914,6 +2914,12 @@ textarea {
     max-width: 100%;
 }
 
+/* 回复不装盒之后，相邻两条回复之间只剩留白分隔：feed 自己的 gap 之外再加一档。
+   用户消息有盒子、不需要这层分隔，所以只吃 .system + .system。 */
+.message.system + .message.system {
+    margin-top: var(--space-6);
+}
+
 /* 内部轮状态条不是模型回复：上面那条"回复不装盒"按 .message.system 命中它，
    这里用同档选择器把自己的虚线盒子要回来。 */
 .message.system.ceo-internal-ack .msg-content {
