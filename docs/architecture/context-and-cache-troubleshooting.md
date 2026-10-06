@@ -137,6 +137,7 @@ Disk guard 维护要点（写保护契约本体见 `runtime-overview.md`「磁�
 - **数换束次数只能按 `provider_tool_names` 逐跳差分（或 `provider_tool_exposure_revision` 变化）**，不能用 `provider_tool_bundle_seeded`：该字段记的是"选择器这一跳重铺了一次 bundle"，当它从 frame 读到的 prior 为空时也会置真，而重铺出来的清单常常与上一跳逐字相同（实盘 73,072 跳里 seeded=True 共 1,364 次，其中 1,174 次发出的 bundle 没有任何变化，绝大多数落在 `request_seed_source=scaffold_seed_with_delta`）。同一窗口里按逐跳差分的真实换束是 190 次，且**顺序变化 0 次**——bundle 一直按稳定顺序发出，没有隐藏的顺序轮换。
 - 不变量：清单来源与刷新点的合同本体在 `tool-and-skill-system.md`「Provider Tool Surface」。缓存侧只按这一条读：两条车道的普通跳都必须逐字节沿用上一跳清单原文，成员变化只有两个合法来源——当轮新增了能力（只补不删）、或这一跳落在重印边界（内联压缩 `token_compression`；前门另加手动压缩与换车道）。曝光收窄（候选塌缩、LRU 淘汰 callable）与 RBAC 收回都不改变成员——收回只关掉执行准入，参数表由声明侧继续供着、尾块用 `denied_tools` 说明它无权限；实测一条活节点连续 7 跳 `tools[]` 恒为同一份 22 条，而 `callable_tool_names` 在 6–8 之间波动；前门一份会话收回 `web_fetch` 后的两跳仍带着同一份 32 条清单，只有这两跳的尾块多出 `denied_tools`。名字真的离开清单只可能是资源被整体禁用（拿不到 schema）或重印边界。
 - 症状：没有真实 membership 变化却在同一轮内观察到 provider-visible `tool_schemas` 切换（或 `provider_tool_exposure_revision` 在 desired 集不变时变化）——直接按 runtime bug 排查。`history_shrink_reason=stage_compaction` 那一跳出现新的 `actual_tool_schema_hash` 同样按回归读：阶段压缩不是清单重印点。
+- 归因顺序（零命中跳先做完这三步再怀疑上下文形状）：把这一跳与上一跳的 `actual_tool_schema_hash`、`provider_tool_exposure_revision`、稳定前缀哈希（节点 `model_prefix_hash` / 前门 `stable_prefix_hash`）逐项对齐，**三者全同而命中为 0** 的跳归网关侧，不再往装配路上找。实盘读数：节点 `same_turn_chain` 零命中 112 跳里 109 跳（97.3%）三者全同；前门一条真会话 4 个零命中跳同样三者全同（其中一跳跳间隔 4 小时、一跳 20 秒），而相邻命中跳在 2–6 秒间隔上是 88–97% 命中——命中丢失与本地形状、也与跳间隔都没有稳定相关。另注意 `prompt_cache_key_hash` 会随稳定前缀一起变：前缀一变 key 就变，按 key 分区的网关会把这一跳判成全量未命中。
 
 ### 3.7 manual pause 之后的新 turn，与“暂停回复”不是一回事
 
