@@ -264,6 +264,98 @@ async def test_ensure_web_runtime_services_limits_worker_wait(monkeypatch):
     assert heartbeat._started is True
 
 
+def _pin_startup_body_helpers(monkeypatch, *, heartbeat: _Heartbeat) -> None:
+    """把启动体里与"谁能进、进几次"无关的外部动作全部换成 no-op。"""
+
+    async def _start_heartbeat(_agent, _runtime_manager, **_kwargs):
+        await heartbeat.start()
+        return heartbeat
+
+    monkeypatch.setattr(web_shell, "_global_runtime_services_lock", None)
+    monkeypatch.setattr(web_shell, "_global_web_heartbeat", None)
+    monkeypatch.setattr(web_shell, "_global_runtime_services_boot_completed", False, raising=False)
+    monkeypatch.setattr(web_shell, "_global_runtime_services_boot_in_flight", False, raising=False)
+    monkeypatch.setattr(web_shell, "get_runtime_manager", lambda _agent=None: object())
+    monkeypatch.setattr(web_shell, "start_web_session_heartbeat", _start_heartbeat)
+    monkeypatch.setattr(web_shell, "ensure_managed_task_worker", _noop)
+    monkeypatch.setattr(web_shell, "_ensure_outbound_drain_running", lambda: None)
+    monkeypatch.setattr(web_shell, "_ensure_outbox_reconcile_running", lambda: None)
+    monkeypatch.setattr(web_shell, "_ensure_task_worker_watchdog_running", lambda *_args: None)
+    monkeypatch.setattr(web_shell, "_replay_pending_external_outbox", _noop)
+    monkeypatch.setattr(web_shell, "resume_shutdown_paused_sessions", _noop)
+    monkeypatch.setattr(web_shell, "_sync_qq_official_service", _noop)
+    monkeypatch.setattr(web_shell, "replay_queued_follow_ups", _noop)
+
+
+@pytest.mark.asyncio
+async def test_caller_queued_behind_warmup_does_not_rerun_startup_body(monkeypatch):
+    """在飞预热期间排进来的调用者拿到锁后必须早退。
+
+    就绪判据里混进「这把锁当前被占」时，持锁者自己永远读不到就绪，于是每个排队者都
+    重跑整个启动体；锁从此没有空窗，`/ws/ceo` 连第一帧都发不出来。
+    """
+    heartbeat = _Heartbeat()
+    _pin_startup_body_helpers(monkeypatch, heartbeat=heartbeat)
+
+    inside_body = asyncio.Event()
+    release_body = asyncio.Event()
+    startup_calls: list[str] = []
+
+    class _CountingService:
+        def __init__(self) -> None:
+            self._started = False
+
+        async def startup(self) -> None:
+            startup_calls.append("startup")
+            self._started = True
+
+    async def _worker_wait(_service, *, wait_timeout_s: float = 5.0):
+        _ = _service, wait_timeout_s
+        if not inside_body.is_set():
+            inside_body.set()
+            await release_body.wait()
+        return False
+
+    monkeypatch.setattr(web_shell, "ensure_managed_task_worker", _worker_wait)
+
+    agent = SimpleNamespace(main_task_service=_CountingService())
+    first = asyncio.create_task(web_shell.ensure_web_runtime_services(agent))
+    await asyncio.wait_for(inside_body.wait(), timeout=2.0)
+
+    second = asyncio.create_task(web_shell.ensure_web_runtime_services(agent))
+    await asyncio.sleep(0.05)
+    release_body.set()
+    await asyncio.wait_for(asyncio.gather(first, second), timeout=2.0)
+
+    assert len(startup_calls) == 1
+    assert web_shell.describe_web_runtime_services(agent)["ready"] is True
+
+
+@pytest.mark.asyncio
+async def test_startup_body_hands_queued_follow_up_replay_to_background(monkeypatch):
+    """启动重放不许在启动体里 await：它每个会话要跑一整回合，等于把锁占住同样久。"""
+    heartbeat = _Heartbeat()
+    _pin_startup_body_helpers(monkeypatch, heartbeat=heartbeat)
+
+    replay_entered = asyncio.Event()
+    release_replay = asyncio.Event()
+
+    async def _slow_replay(_agent, _manager):
+        replay_entered.set()
+        await release_replay.wait()
+        return 0
+
+    monkeypatch.setattr(web_shell, "replay_queued_follow_ups", _slow_replay)
+
+    agent = SimpleNamespace(main_task_service=_Service())
+    try:
+        await asyncio.wait_for(web_shell.ensure_web_runtime_services(agent), timeout=1.0)
+        assert web_shell.describe_web_runtime_services(agent)["ready"] is True
+        await asyncio.wait_for(replay_entered.wait(), timeout=1.0)
+    finally:
+        release_replay.set()
+
+
 def test_bootstrap_exit_stops_runtime_before_requesting_server_shutdown(monkeypatch):
     calls: list[str] = []
 

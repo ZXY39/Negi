@@ -62,6 +62,12 @@ _global_outbox_reconcile_task: Optional[asyncio.Task] = None
 _global_qq_official_services: dict[str, Any] = {}
 _global_runtime_services_lock: Optional[asyncio.Lock] = None
 _global_qq_official_sync_lock: Optional[asyncio.Lock] = None
+# 启动体进度。completed 只在启动体完整跑完一遍后置真；in_flight 标记此刻有协程在跑
+# 启动体。就绪闸门读 completed，不读 lock.locked()——后者对持锁者自己恒真，会把
+# 「拿到锁的排队者」全部推回去重跑整个启动体。
+_global_runtime_services_boot_completed = False
+_global_runtime_services_boot_in_flight = False
+_global_queued_follow_up_replay_task: Optional[asyncio.Task] = None
 
 _NO_CEO_MODEL_CONFIGURED_MESSAGE = "No model configured for role 'ceo'."
 
@@ -1116,6 +1122,27 @@ async def replay_queued_follow_ups(
     return replayed
 
 
+def _ensure_queued_follow_up_replay_running(agent: AgentLoop | None = None) -> None:
+    """幂等拉起启动重放，让它跑在启动体之外。
+
+    重放每个会话都要 await 一整回合（上游 429 时一轮数分钟），留在启动体内就等于把
+    runtime-services 锁占住同样长的时间，而 `/ws/ceo`、`/api/internal/*` 和解锁端点都要
+    先拿到这把锁才发得出第一帧。串行本身保留：刚起来的进程并发开 N 个回合会直接顶到
+    provider 限流上。
+    """
+    global _global_queued_follow_up_replay_task
+    task = _global_queued_follow_up_replay_task
+    if task is not None and not task.done():
+        return
+    runtime_agent = agent if agent is not None else _global_agent
+    if runtime_agent is None:
+        return
+    _global_queued_follow_up_replay_task = asyncio.create_task(
+        replay_queued_follow_ups(runtime_agent, get_runtime_manager(runtime_agent)),
+        name="queued-follow-up-boot-replay",
+    )
+
+
 def get_web_heartbeat_service(agent: AgentLoop | None = None):
     runtime_agent = agent or get_agent()
     runtime_manager = get_runtime_manager(runtime_agent)
@@ -1134,8 +1161,14 @@ def describe_web_runtime_services(agent: AgentLoop | None = None) -> dict[str, b
     heartbeat = _global_web_heartbeat
     main_runtime_ready = bool(main_task_service is not None and getattr(main_task_service, '_started', False))
     heartbeat_ready = bool(heartbeat is not None and getattr(heartbeat, '_started', False))
-    bootstrapping = _get_runtime_services_lock().locked()
-    ready = bool(runtime_agent is not None and main_runtime_ready and heartbeat_ready and not bootstrapping)
+    bootstrapping = bool(_global_runtime_services_boot_in_flight)
+    ready = bool(
+        _global_runtime_services_boot_completed
+        and runtime_agent is not None
+        and main_runtime_ready
+        and heartbeat_ready
+        and not bootstrapping
+    )
     return {
         'agent_ready': runtime_agent is not None,
         'main_runtime_ready': main_runtime_ready,
@@ -1145,51 +1178,73 @@ def describe_web_runtime_services(agent: AgentLoop | None = None) -> dict[str, b
     }
 
 
+def _runtime_services_boot_done(agent: AgentLoop | None = None) -> bool:
+    """启动体是否已完整跑完一遍，且任务服务与心跳都还在位。
+
+    判据里不许出现「这把锁当前被谁占着」：持锁者自己读到的永远是被占，于是每个排队
+    拿到锁的调用者都要重跑整个启动体（实盘 2026-10-07：21:58-22:22 连跑 17 轮，
+    `/ws/ceo` 与 `/api/internal/*` 在锁外排队，连第一帧都发不出去，网页停在 Loading）。
+    """
+    runtime_agent = agent if agent is not None else _global_agent
+    if not _global_runtime_services_boot_completed or runtime_agent is None:
+        return False
+    main_task_service = getattr(runtime_agent, 'main_task_service', None)
+    heartbeat = _global_web_heartbeat
+    return bool(
+        getattr(main_task_service, '_started', False)
+        and getattr(heartbeat, '_started', False)
+    )
+
+
 async def ensure_web_runtime_services(agent: AgentLoop | None = None) -> None:
     global _global_web_heartbeat
-    if describe_web_runtime_services(agent).get('ready') and _cron_runtime_ready(agent):
+    global _global_runtime_services_boot_completed, _global_runtime_services_boot_in_flight
+    if _runtime_services_boot_done(agent) and _cron_runtime_ready(agent):
         return
 
     async with _get_runtime_services_lock():
         runtime_agent = agent or get_agent()
-        if describe_web_runtime_services(runtime_agent).get('ready') and _cron_runtime_ready(runtime_agent):
+        if _runtime_services_boot_done(runtime_agent) and _cron_runtime_ready(runtime_agent):
             return
 
-        main_task_service = getattr(runtime_agent, 'main_task_service', None)
-        if main_task_service is not None:
-            await main_task_service.startup()
-            # Avoid blocking unlock on worker warmup; the UI can surface worker readiness separately.
-            await ensure_managed_task_worker(main_task_service, wait_timeout_s=1.0)
-            _ensure_task_worker_watchdog_running(main_task_service)
-        heartbeat = await start_web_session_heartbeat(
-            runtime_agent,
-            get_runtime_manager(runtime_agent),
-            replay_pending_outbox=True,
-            reply_notifier=_make_heartbeat_reply_notifier(),
-        )
-        if heartbeat is not None:
-            _global_web_heartbeat = heartbeat
-        cron_service = getattr(runtime_agent, "cron_service", None)
-        if cron_service is not None and not _cron_runtime_ready(runtime_agent) and _should_start_web_cron(runtime_agent):
-            await cron_service.start()
-        _ensure_outbound_drain_running()
-        await _replay_pending_external_outbox()
-        _ensure_outbox_reconcile_running()
+        _global_runtime_services_boot_in_flight = True
         try:
-            await resume_shutdown_paused_sessions(runtime_agent, get_runtime_manager(runtime_agent), _global_web_heartbeat)
-        except Exception:
-            logger.debug("shutdown-paused session resume skipped during startup")
-        try:
-            await replay_queued_follow_ups(runtime_agent, get_runtime_manager(runtime_agent))
-        except Exception:
-            logger.debug("queued follow-up boot replay skipped during startup")
-        await _sync_qq_official_service()
+            main_task_service = getattr(runtime_agent, 'main_task_service', None)
+            if main_task_service is not None:
+                await main_task_service.startup()
+                # Avoid blocking unlock on worker warmup; the UI can surface worker readiness separately.
+                await ensure_managed_task_worker(main_task_service, wait_timeout_s=1.0)
+                _ensure_task_worker_watchdog_running(main_task_service)
+            heartbeat = await start_web_session_heartbeat(
+                runtime_agent,
+                get_runtime_manager(runtime_agent),
+                replay_pending_outbox=True,
+                reply_notifier=_make_heartbeat_reply_notifier(),
+            )
+            if heartbeat is not None:
+                _global_web_heartbeat = heartbeat
+            cron_service = getattr(runtime_agent, "cron_service", None)
+            if cron_service is not None and not _cron_runtime_ready(runtime_agent) and _should_start_web_cron(runtime_agent):
+                await cron_service.start()
+            _ensure_outbound_drain_running()
+            await _replay_pending_external_outbox()
+            _ensure_outbox_reconcile_running()
+            try:
+                await resume_shutdown_paused_sessions(runtime_agent, get_runtime_manager(runtime_agent), _global_web_heartbeat)
+            except Exception:
+                logger.debug("shutdown-paused session resume skipped during startup")
+            _ensure_queued_follow_up_replay_running(runtime_agent)
+            await _sync_qq_official_service()
+            _global_runtime_services_boot_completed = True
+        finally:
+            _global_runtime_services_boot_in_flight = False
 
 
 async def shutdown_web_runtime() -> None:
     global _global_agent, _global_bus, _global_runtime_manager, _global_web_heartbeat
     global _global_outbound_drain_task, _global_task_worker_watchdog_task, _global_qq_official_services
-    global _global_outbox_reconcile_task
+    global _global_outbox_reconcile_task, _global_queued_follow_up_replay_task
+    global _global_runtime_services_boot_completed, _global_runtime_services_boot_in_flight
 
     agent = _global_agent
     runtime_manager = _global_runtime_manager
@@ -1198,6 +1253,7 @@ async def shutdown_web_runtime() -> None:
     outbound_drain_task = _global_outbound_drain_task
     task_worker_watchdog_task = _global_task_worker_watchdog_task
     outbox_reconcile_task = _global_outbox_reconcile_task
+    queued_follow_up_replay_task = _global_queued_follow_up_replay_task
     qq_official_services = list(_global_qq_official_services.values())
 
     _global_agent = None
@@ -1207,6 +1263,10 @@ async def shutdown_web_runtime() -> None:
     _global_outbound_drain_task = None
     _global_task_worker_watchdog_task = None
     _global_outbox_reconcile_task = None
+    _global_queued_follow_up_replay_task = None
+    # 启动体进度随进程内的运行时一起作废：下一次 ensure_web_runtime_services 要重跑。
+    _global_runtime_services_boot_completed = False
+    _global_runtime_services_boot_in_flight = False
     _global_qq_official_services = {}
 
     if agent is None:
@@ -1240,6 +1300,7 @@ async def shutdown_web_runtime() -> None:
 
     await _cancel_background_task(outbound_drain_task)
     await _cancel_background_task(task_worker_watchdog_task)
+    await _cancel_background_task(queued_follow_up_replay_task)
     # 对账循环必须先于桥服务收割：循环每 5 轮会调 _sync_qq_official_service，
     # 顺序反了会出现「shutdown 停桥后对账又把桥拉起来」的复活竞态。
     await _cancel_background_task(outbox_reconcile_task)
