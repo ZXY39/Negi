@@ -20,7 +20,7 @@
 - 不变量：某工具在这一跳能不能被调用，取决于它的 toolskill 契约正文在这一跳是不是在场。判据只有一个函数（`g3ku/runtime/tool_context_presence.py`），两条车道共用；判据缺失（调用方压根没交当次请求视图）时**不撤销**——读不到不等于不在场，凭"读不到"摘能力比少收一轮危险。
 - 在场证据有两个载体：未被压缩也未被裁撤删除的 `load_tool_context` 结果行，以及阶段块里被 `keep_tools` 点名留下的 `kept_tool_contexts` 正文。重复读守卫读同一判据，所以块里已有正文时再 load 判成重读，否则同一份正文会在上下文里出现两份。`load_skill_context` 的正文同样随裁撤/压缩离开上下文，但 skill 不进水合台账，撤销与它无关。
 - 撤销从下一跳起生效，同批已派发执行的照常执行完；点名裁撤的那一批就是"下一跳"的起点，所以台账写回必须落在**阶段账本落地之后**的那份视图上（裁后的消息 + 带 `context_evicted` 与 `kept_tool_contexts` 的账本）。写回与渲染/派发分家会造出本文禁止的第四态：该名字既不在 `callable_tools`、又被"候选 = 治理可见 −（callable ∪ 已水合）"挡在 `candidate_tools` 之外，模型 load 它拿到没有正文的 `already_callable`，执行侧回 `tool not available`——这两句同时出现即说明读路径与写回又不同源。
-- 撤销掉的名字在同一次写回里并回候选（`revive_contract_absent_candidates`），使"重新 load 一次"在同一个回合内就是出路；提升门禁、尾块渲染与重复读守卫读的是这同一份候选视图。
+- 撤销掉的名字在同一次写回里并回候选（`revive_contract_absent_candidates`），使"重新 load 一次"在同一个回合内就是出路。**并名字必须同时补 `candidate_tool_items` 条目**：尾块 `candidate_tools` 那行按 items 渲染，而候选池是回合初快照、该名字水合时条目已被摘掉，只并名字的话这一行永远少它一个——提升门禁认得出出路、模型看不见，等于没有出路。说明文字仍由 provider `tools[]` 的 `function.description` 承载，这里只列名字。提升门禁、尾块渲染与重复读守卫读的是同一份候选视图。
 - 节点 `token_compression` 那一跳会成批撤销、下一跳成批回到候选：判据按当次请求视图算，这是**预期行为**，不是抖动缺陷。
 - 派发准入与声明不同源：前门 `_frontdoor_dispatch_tool_names` = 钉住的 `tools[]` 声明 ∩ 当轮治理可见 − 当跳不在场的水合名。声明按"只补不删"活到下一次压缩重印，权限不跟着滞后。
 
