@@ -91,10 +91,17 @@ function Stop-G3kuManagedPythonProcesses {
     }
     Write-Host "[g3ku] Force-stopping remaining g3ku processes..." -ForegroundColor Yellow
     foreach ($process in $processes) {
+        # $processes 是发 graceful exit 之前拍的快照；等轮询结束再回来时，
+        # 其中不少 PID 已经自己退干净了。按实况跳过，别把"已经不在了"报成停止失败。
+        if (-not (Get-Process -Id $process.ProcessId -ErrorAction SilentlyContinue)) {
+            continue
+        }
         try {
             Stop-Process -Id $process.ProcessId -Force -ErrorAction Stop
         } catch {
-            Write-Warning "[g3ku] Failed to stop PID $($process.ProcessId): $($_.Exception.Message)"
+            if (Get-Process -Id $process.ProcessId -ErrorAction SilentlyContinue) {
+                Write-Warning "[g3ku] Failed to stop PID $($process.ProcessId): $($_.Exception.Message)"
+            }
         }
     }
     Start-Sleep -Seconds 2
