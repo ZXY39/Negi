@@ -3488,8 +3488,37 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
             return hydrated, []
         messages = list(state.get("messages") or [])
         kept_contexts = kept_tool_contexts_from_frames(self._frontdoor_stage_state_snapshot(state))
+        # 阶段台账在家有两份归一化产物（stage_state 与 canonical），装配路自己也是
+        # 「stage_state 空就回退 canonical」（见 `_graph_prepare_turn` 的 seed 裁剪）。
+        # 只读一份会在 stage_state 恰好为空的那一跳把保留正文读成没有，判成不在场。
+        kept_contexts.extend(
+            kept_tool_contexts_from_frames(state.get("frontdoor_canonical_context"))
+        )
         index = contract_presence_index(request_messages=messages, kept_stage_contexts=kept_contexts)
         return partition_contract_presence(hydrated, index=index)
+
+    def _merge_frontdoor_contract_revocations(
+        self,
+        state: CeoGraphState | dict[str, Any] | None,
+        *,
+        kept_tool_names: Any,
+        revoked_tool_names: Any,
+    ) -> list[str]:
+        """撤销记录的台账合并：新撤销的并进记录、重新在场的移出记录。
+
+        记录必须与 `hydrated_tool_names` 一起进 session persistent state
+        （FIX_PLAN §2.3「前门：同一字段进 session persistent state」）：装配路只收窄台账
+        不留记录，取证时就分不清「模型没 load 过」和「load 过但正文离开上下文被撤了」。
+        """
+        previous = state.get("hydration_revoked_executor_names") if isinstance(state, dict) else None
+        recorded = self._normalized_hydrated_tool_names(previous)
+        for name in list(self._normalized_hydrated_tool_names(revoked_tool_names) or []):
+            if name not in recorded:
+                recorded.append(name)
+        for name in list(self._normalized_hydrated_tool_names(kept_tool_names) or []):
+            if name in recorded:
+                recorded.remove(name)
+        return recorded
 
     def _frontdoor_callable_tool_names_for_state(
         self,
@@ -5066,18 +5095,25 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
         # 契约在场撤销回写台账（前门的台账就是 `hydrated_tool_names` 本身）：不在场的名字
         # 留在水合集里就等于既不在 callable、又被 candidate 的「排除已水合」规则挡在门外，
         # 模型 load 它只会拿到没有出口的 `already_hydrated`。撤销原因另记一个字段，不与
-        # LRU 淘汰混用。本轮刚 load 成功的名字其正文就在同批结果里，不会被这里摘掉。
-        hydrated_tool_names, revoked_hydrated_tool_names = self._frontdoor_contract_presence_partition(
+        # LRU 淘汰混用。
+        promoted_now = set(promotion_targets)
+        # 本轮刚 load 成功的名字**不进判据**：它的正文就在同批工具结果里，下一跳才进请求视图，
+        # 拿这一跳的 messages 判它必然判成不在场（§2.3「撤销从下一跳起生效；同批已派发执行
+        # 的照旧执行完」）。这里只判上一跳就带着的那些名字。
+        carried_hydrated_tool_names = [name for name in hydrated_tool_names if name not in promoted_now]
+        kept_hydrated_tool_names, revoked_hydrated_tool_names = self._frontdoor_contract_presence_partition(
             state,
-            hydrated_tool_names,
+            carried_hydrated_tool_names,
         )
-        recorded_revoked = self._normalized_hydrated_tool_names(state.get("hydration_revoked_executor_names"))
-        for name in list(revoked_hydrated_tool_names or []):
-            if name not in recorded_revoked:
-                recorded_revoked.append(name)
-        for name in list(hydrated_tool_names or []):
-            if name in recorded_revoked:
-                recorded_revoked.remove(name)
+        hydrated_tool_names = [
+            *kept_hydrated_tool_names,
+            *[name for name in hydrated_tool_names if name in promoted_now],
+        ]
+        recorded_revoked = self._merge_frontdoor_contract_revocations(
+            state,
+            kept_tool_names=hydrated_tool_names,
+            revoked_tool_names=revoked_hydrated_tool_names,
+        )
         visible_name_set = set(visible_tool_names)
         if visible_name_set:
             tool_names = [name for name in tool_names if name in visible_name_set]
@@ -6888,6 +6924,9 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
         compression_state_payload = dict(current_compression_state or self._default_compression_state())
         frontdoor_history_shrink_reason_from_prepare = ""
         turn_overlay_section_count = 0
+        # 装配这一跳撤掉的名字，随 persistent state 一起落记录（见下面的返回）：只收窄
+        # 台账不留账，取证时分不清「没 load 过」和「load 过但正文离开上下文」。
+        contract_revoked_tool_names: list[str] = []
         if inherited_internal_contract_state:
             attachment_reopen_targets = [
                 dict(item)
@@ -6918,6 +6957,21 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
                 inherited_internal_contract_state.get("frontdoor_selection_debug") or {}
             )
             tool_names = list(inherited_internal_contract_state.get("tool_names") or [])
+            # 内部轮（心跳 / cron）继承上一轮的 callable、候选与水合台账，继承的那份同样要过
+            # 在场判据（FIX_PLAN §2.3 末条）：压缩把正文摘掉的那一跳，内部轮不能照旧调用
+            # 无契约的工具，也不能把撤掉的名字留在 inherited 的 tool_names 行里。
+            hydrated_tool_names, _revoked_internal_hydrated = self._frontdoor_contract_presence_partition(
+                {
+                    "messages": list(request_body_seed_messages or checkpoint_messages or []),
+                    "frontdoor_stage_state": current_frontdoor_stage_state,
+                    "frontdoor_canonical_context": current_frontdoor_canonical_context,
+                },
+                hydrated_tool_names,
+            )
+            contract_revoked_tool_names = list(_revoked_internal_hydrated or [])
+            if contract_revoked_tool_names:
+                revoked_name_set = set(contract_revoked_tool_names)
+                tool_names = [name for name in tool_names if name not in revoked_name_set]
             callable_tool_names = self._frontdoor_callable_tool_names_for_state(
                 {
                     "frontdoor_stage_state": current_frontdoor_stage_state,
@@ -6989,22 +7043,17 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
             )
             # 装配路也必须过同一判据：builder 用这份 hydrated 组 callable 与 candidate，
             # 少过滤一次就等于三个算点里有两个口径不同（合同分裂）。
+            # 请求视图取 builder 真正会用的那一份：有续跑种子就用种子（走这条时
+            # `checkpoint_messages` 已被置空），没有种子才回到状态里的那份消息。
             hydrated_tool_names, _revoked_hydrated = self._frontdoor_contract_presence_partition(
                 {
-                    "messages": list(
-                        state.get("messages")
-                        if isinstance(state, dict) and "messages" in state
-                        else request_body_seed_messages
-                        if request_body_seed_messages
-                        else internal_seed_messages
-                        or checkpoint_messages
-                        or []
-                    ),
+                    "messages": list(request_body_seed_messages or checkpoint_messages or []),
                     "frontdoor_stage_state": current_frontdoor_stage_state,
                     "frontdoor_canonical_context": current_frontdoor_canonical_context,
                 },
                 hydrated_tool_names,
             )
+            contract_revoked_tool_names = list(_revoked_hydrated or [])
             assembly = await self._builder.build_for_ceo(
                 session=session,
                 query_text=builder_query_text,
@@ -7355,6 +7404,13 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
                 if isinstance(item, dict)
             ],
             "hydrated_tool_names": list(hydrated_tool_names),
+            # 装配这一跳的撤销记录进 session persistent state（FIX_PLAN §2.3）：漏这一份
+            # 就等于撤销只活在收窄后的视图里，下一跳没人知道它为什么少了。
+            "hydration_revoked_executor_names": self._merge_frontdoor_contract_revocations(
+                state,
+                kept_tool_names=hydrated_tool_names,
+                revoked_tool_names=contract_revoked_tool_names,
+            ),
             "visible_skill_ids": list(selected_skill_ids),
             "candidate_skill_ids": list(selected_skill_ids),
             "rbac_visible_tool_names": list(rbac_visible_tool_names),

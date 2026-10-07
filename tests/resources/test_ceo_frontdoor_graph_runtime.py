@@ -282,6 +282,9 @@ def test_frontdoor_tool_state_after_tool_results_skips_fixed_builtin_hydration_t
         "candidate_tool_names": ["agent_browser"],
         "candidate_tool_items": [{"tool_id": "agent_browser", "description": ""}],
         "hydrated_tool_names": [],
+        # 契约在场撤销的台账字段：这份状态没带 `messages`（判据缺请求视图 ⇒ 不撤销），
+        # 所以是空列表而不是缺席。它是返回合同的固定成员，逐轮要能读到撤销记录。
+        "hydration_revoked_executor_names": [],
     }
 
 

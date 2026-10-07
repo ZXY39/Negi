@@ -1589,6 +1589,10 @@ async def test_create_agent_graph_execute_tools_promotes_loaded_tool_context_int
                 "tool_id": tool_id,
                 "callable_now": True,
                 "will_be_hydrated_next_turn": True,
+                # 真 loader 的 ok 载荷必带 fingerprint（`main/governance/tool_context.py`
+                # 的 build_tool_context_fingerprint），在场判据按 tool_id + fingerprint 认正文
+                # ——两条车道的重读守卫一直也是这么要求的，缺它就不算契约载体。
+                "tool_context_fingerprint": "sha256:" + "a" * 64,
                 "hydration_targets": [tool_id],
             }
 
@@ -1824,12 +1828,32 @@ async def test_create_agent_runner_graph_prepare_turn_seeds_session_hydrated_too
     runner._resolve_ceo_model_refs = lambda: ["openai:gpt-4.1"]
     runner._selected_tool_schemas = lambda tool_names: [{"name": name, "parameters": {"type": "object"}} for name in list(tool_names or [])]
 
+    prepared_state = initial_persistent_state(user_input={"content": "hello", "metadata": {}})
+    # 台账跨回合带着名字走，正文也得跟着走：装配路按**当次请求视图**判在场
+    # （FIX_PLAN §0 不变量），这里补上上一跳那条 load_tool_context 的结果行，测的才是
+    # 「种子hydrated + 正文在场 ⇒ 继续可调」这条真路径。少了这一行就等于测撤销。
+    prepared_state["messages"] = [
+        {
+            "role": "tool",
+            "name": "load_tool_context",
+            "content": json.dumps(
+                {
+                    "ok": True,
+                    "tool_id": "filesystem_write",
+                    "tool_context_fingerprint": "sha256:" + "a" * 64,
+                },
+                ensure_ascii=False,
+            ),
+        }
+    ]
+
     prepared = await runner._graph_prepare_turn(
-        state=initial_persistent_state(user_input={"content": "hello", "metadata": {}}),
+        state=prepared_state,
         runtime=SimpleNamespace(context=SimpleNamespace(session=session)),
     )
 
     assert prepared["hydrated_tool_names"] == ["filesystem_write"]
+    assert prepared["hydration_revoked_executor_names"] == []
     assert prepared["tool_names"] == ["submit_next_stage", "load_tool_context", "filesystem_write"]
     assert prepared["frontdoor_selection_debug"] == {
         "query_text": "hello",
@@ -2283,6 +2307,24 @@ async def test_create_agent_runner_graph_prepare_turn_recovers_paused_manual_con
                     }
                 ],
             },
+            "frontdoor_request_body_messages": [
+                # 暂停快照在产线里就是连请求体一起存的
+                # （`_session_frontdoor_context_window_snapshot` 读 `frontdoor_request_body_messages`）。
+                # 水合台账要跨回合活着，它对应的契约正文也得在这份请求体里；装配路按当次
+                # 请求视图判在场（FIX_PLAN §0 不变量），少了这条就会被撤掉水合。
+                {
+                    "role": "tool",
+                    "name": "load_tool_context",
+                    "content": json.dumps(
+                        {
+                            "ok": True,
+                            "tool_id": "filesystem_write",
+                            "tool_context_fingerprint": "sha256:" + "a" * 64,
+                        },
+                        ensure_ascii=False,
+                    ),
+                }
+            ],
             "compression": {
                 "status": "running",
                 "text": "??????",
