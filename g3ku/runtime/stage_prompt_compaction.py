@@ -74,6 +74,65 @@ def _normalize_key_ref(item: Any) -> dict[str, Any] | None:
         return None
 
 
+# 裁撤阶段块里的保留契约小节标题（`keep_tools` / `keep_skills` 的落点，刀二）。
+KEPT_CONTRACT_HEADING = "## 保留契约"
+KEPT_CONTRACT_PAYLOAD_KEY = "kept_contracts"
+
+
+def _kept_context_entry(item: Any) -> dict[str, Any] | None:
+    """保留条目既可能是 dict（前门阶段状态 / 落盘 JSON）也可能是 pydantic 记录。
+
+    节点道渲染走的是 `ExecutionStageState` 对象，条目是 `ExecutionStageKeptToolContext`
+    实例——只认 dict 的话这条阶段在节点侧永远渲染不出保留正文，块里没有正文，在场判据的
+    第二个载体就成了账本里独一份的私有数据。
+    """
+    if isinstance(item, dict):
+        return dict(item)
+    dump = getattr(item, "model_dump", None)
+    if not callable(dump):
+        return None
+    try:
+        payload = dump(mode="json")
+    except Exception:
+        return None
+    return payload if isinstance(payload, dict) else None
+
+
+def render_kept_contract_section(stage: Any) -> str:
+    """把这条阶段账本里的保留正文渲染成块内那一段 `## 保留契约`。
+
+    **只回放账本，一次资源文件都不读**：阶段块落在历史中段，逐轮重读会让运营者或
+    `skill-installer` 改一次 `toolskills/SKILL.md` 就改动块字节，而它之后的整段前缀缓存
+    全断。正文是提交点一次性快照（`g3ku/runtime/kept_contract_snapshot.py` 写入），块字节
+    因此只随账本变。
+
+    技能条目也渲染在这里，但不参与在场判据（技能从不水合，没有 callable 可摘）。
+    """
+    lines: list[str] = []
+    for item in list(_stage_get(stage, "kept_tool_contexts", []) or []):
+        entry = _kept_context_entry(item)
+        if entry is None:
+            continue
+        tool_id = str(entry.get("tool_id") or "").strip()
+        if not tool_id:
+            continue
+        fingerprint = str(entry.get("tool_context_fingerprint") or "").strip()
+        lines.append(f"- tool {tool_id} fingerprint={fingerprint or 'unknown'}")
+        lines.append(str(entry.get("body") or "").strip())
+    for item in list(_stage_get(stage, "kept_skill_contexts", []) or []):
+        entry = _kept_context_entry(item)
+        if entry is None:
+            continue
+        skill_id = str(entry.get("skill_id") or "").strip()
+        if not skill_id:
+            continue
+        lines.append(f"- skill {skill_id}")
+        lines.append(str(entry.get("body") or "").strip())
+    if not lines:
+        return ""
+    return "\n".join([KEPT_CONTRACT_HEADING, *lines])
+
+
 def is_stage_context_message(message: dict[str, Any]) -> bool:
     # 注入的阶段块现在以 user 角色落地（线体只许一份首位 system，严格网关会 400），
     # 但它既不是对话内容也不该被当成模型自己的发言；存量 durable baseline /
@@ -336,6 +395,12 @@ def completed_stage_blocks(stage_state: Any, *, skip_stage_ids: set[str] | None 
             # 只在成立时写。没有这个字段，模型读块时分不清"这条阶段本来就没留细节"和
             # "细节是我上一轮自己要求移走的"——回读通道就形同不存在，裁撤也无法事后核对。
             payload["evicted"] = True
+            kept_section = render_kept_contract_section(stage)
+            if kept_section:
+                # 块位置不变，保留正文作为块里的一段跟着块逐轮在场，直到这条阶段收口
+                # （`context_visible:false`，整段进全局摘要那次）。裁撤省下的载荷按条抵回去
+                # 是操作员选定的取舍（FIX_PLAN §3.4），不是回归。
+                payload[KEPT_CONTRACT_PAYLOAD_KEY] = kept_section
         compacted.append(
             {
                 # user 角色，理由同 externalized 块（见上方注释）。
@@ -1240,6 +1305,8 @@ __all__ = [
     "DEFAULT_INTERNAL_RULE_MARKERS",
     "DEFAULT_STAGE_MODE",
     "ECHO_STRIP_ENABLED",
+    "KEPT_CONTRACT_HEADING",
+    "KEPT_CONTRACT_PAYLOAD_KEY",
     "STAGE_ARCHIVE_HEADING",
     "STAGE_COMPACT_PREFIX",
     "STAGE_EXTERNALIZED_PREFIX",
@@ -1257,6 +1324,7 @@ __all__ = [
     "is_stage_context_message",
     "keep_stage_blocks_off_continuation_tail",
     "prepare_stage_prompt_messages",
+    "render_kept_contract_section",
     "render_stage_ref_candidate_block",
     "render_stage_ref_index",
     "repair_split_stage_tool_boundaries",
