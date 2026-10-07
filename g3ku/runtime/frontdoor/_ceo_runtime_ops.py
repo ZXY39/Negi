@@ -8738,10 +8738,6 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
             if isinstance(item, dict)
         ]
         pending_content_open_image_payloads.extend(self._content_open_image_payloads_from_tool_results(tool_results))
-        updated_tool_contract_state = self._frontdoor_tool_state_after_tool_results(
-            state=dict(state or {}),
-            tool_results=tool_results,
-        )
         frontdoor_stage_state = self._frontdoor_stage_state_after_tool_cycle(
             {
                 **dict(state or {}),
@@ -8780,6 +8776,18 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
         if stage_compaction_applied:
             messages = stage_compacted_messages
         authoritative_request_body_messages = self._durable_frontdoor_request_body_messages(messages)
+        # 工具态写回读**这一跳之后**的视图：裁撤与写回同批时，写回早于阶段账本落地就会读成
+        # "还没裁"，于是台账不记撤销、名字留在 hydrated 里，而下一跳的渲染/派发读的是裁后的
+        # 视图 ⇒ 同一份状态里出现 `already_callable` 回执与 `tool not available` 两种答案。
+        # 这里把新的阶段态与裁后的消息一并交进去，台账、候选、回执、执行四者从此同源。
+        updated_tool_contract_state = self._frontdoor_tool_state_after_tool_results(
+            state={
+                **dict(state or {}),
+                "messages": messages,
+                "frontdoor_stage_state": frontdoor_stage_state,
+            },
+            tool_results=tool_results,
+        )
 
         used_tools = list(state.get("used_tools") or [])
         used_tools.extend(

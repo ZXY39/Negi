@@ -780,3 +780,137 @@ def test_dispatch_excludes_contract_absent_hydrated_tool() -> None:
     names = ops._frontdoor_dispatch_tool_names(state)
     assert TOOL_ID not in names
     assert "exec" in names
+
+
+async def test_graph_execute_tools_records_revocation_in_the_eviction_batch(monkeypatch) -> None:
+    """裁撤落地的那一批就必须把撤销写回台账，不能等下一批或下一回合。
+
+    实盘 web:ceo-1e834a45b8e7（main 45b10c13）：`submit_next_stage(drop=true, 带总结)`
+    这一跳把阶段裁了，随后尾部契约与派发名单都少了它，但 `hydration_revoked_executor_names`
+    全空、`hydrated_tool_names` 仍留着它 ⇒ 模型再 load 拿到 `already_callable` 而没有正文，
+    执行侧回 `tool not available`——正是文档禁止的那对组合，第四态没消除。
+    根因是节点体内的先后：工具态写回读的是裁撤前的阶段视图，而阶段账本在它之后才算完。
+    """
+
+    runner = create_agent_impl.CreateAgentCeoFrontDoorRunner(loop=SimpleNamespace())
+    monkeypatch.setattr(runner, "_registered_tools_for_state", lambda state: {})
+    monkeypatch.setattr(runner, "_build_tool_runtime_context", lambda **kwargs: {"on_progress": None})
+
+    async def _fake_execute_tool_call_with_raw_result(*, tool, tool_name, arguments, runtime_context, on_progress, tool_call_id):
+        _ = tool_name, runtime_context, on_progress, tool_call_id
+        raw_result = await tool.execute(**arguments)
+        return (
+            raw_result,
+            json.dumps(raw_result, ensure_ascii=False),
+            "success",
+            "2026-10-08T00:19:22+08:00",
+            "2026-10-08T00:19:23+08:00",
+            1.0,
+        )
+
+    monkeypatch.setattr(runner, "_execute_tool_call_with_raw_result", _fake_execute_tool_call_with_raw_result)
+
+    loader_row = {
+        "role": "tool",
+        "name": "load_tool_context",
+        "tool_call_id": "call-load-1",
+        "content": json.dumps(
+            {"ok": True, "tool_id": TOOL_ID, "tool_context_fingerprint": "tcf:fixture-presence"},
+            ensure_ascii=False,
+        ),
+    }
+    state = {
+        "session_key": "web:shared",
+        "messages": [
+            {"role": "system", "content": "SYSTEM"},
+            {"role": "user", "content": "本轮问题"},
+            {
+                "role": "assistant",
+                "content": "",
+                "tool_calls": [
+                    {
+                        "id": "call-load-1",
+                        "type": "function",
+                        "function": {"name": "load_tool_context", "arguments": json.dumps({"tool_id": TOOL_ID})},
+                    }
+                ],
+            },
+            loader_row,
+        ],
+        "tool_names": ["exec", TOOL_ID, "load_tool_context"],
+        "candidate_tool_names": [],
+        "candidate_tool_items": [],
+        "hydrated_tool_names": [TOOL_ID],
+        "hydration_revoked_executor_names": [],
+        "rbac_visible_tool_names": ["exec", TOOL_ID, "load_tool_context"],
+        "visible_skill_ids": [],
+        "candidate_skill_ids": [],
+        "rbac_visible_skill_ids": [],
+        "used_tools": [],
+        "route_kind": "direct_reply",
+        "parallel_enabled": False,
+        "max_parallel_tool_calls": 1,
+        "synthetic_tool_calls_used": False,
+        "response_payload": {"content": "", "tool_calls": []},
+        "frontdoor_request_body_messages": [],
+        "frontdoor_history_shrink_reason": "",
+        "frontdoor_stage_state": {
+            "active_stage_id": "frontdoor-stage-1",
+            "transition_required": False,
+            "stages": [
+                {
+                    "stage_id": "frontdoor-stage-1",
+                    "stage_index": 1,
+                    "stage_kind": "normal",
+                    "mode": "自主执行",
+                    "status": "active",
+                    "stage_goal": "inspect repository",
+                    "completed_stage_summary": "",
+                    "tool_round_budget": 4,
+                    "tool_rounds_used": 1,
+                    "key_refs": [],
+                    "created_at": "2026-10-08T00:19:01+08:00",
+                    "finished_at": "",
+                    "rounds": [
+                        {
+                            "round_id": "frontdoor-stage-1:round-1",
+                            "round_index": 1,
+                            "tool_call_ids": ["call-load-1"],
+                            "tools": [{"tool_call_id": "call-load-1", "tool_name": "load_tool_context"}],
+                        }
+                    ],
+                }
+            ],
+        },
+        "tool_call_payloads": [
+            {
+                "id": "call-stage-1",
+                "name": STAGE_TOOL_NAME,
+                "arguments": {
+                    "stage_goal": "run the selected tool calls",
+                    "tool_round_budget": 4,
+                    "completed_stage_summary": "已看完仓库结构",
+                    "drop_completed_stage_tool_detail": True,
+                },
+            }
+        ],
+    }
+
+    result = await runner._graph_execute_tools(state, runtime=SimpleNamespace(context=SimpleNamespace()))
+
+    # 夹具自检：裁撤确实落在这一批里（标记落了、正文行离开了发送基线）
+    evicted = result["frontdoor_stage_state"]["stages"][0]
+    assert evicted["context_evicted"] is True
+    assert "call-load-1" not in {
+        str(item.get("tool_call_id") or "")
+        for item in list(result["messages"])
+        if str(item.get("role") or "") == "tool"
+    }
+
+    assert result["hydration_revoked_executor_names"] == [TOOL_ID]
+    assert TOOL_ID not in list(result["hydrated_tool_names"] or [])
+    assert TOOL_ID not in list(result["tool_names"] or [])
+    assert TOOL_ID in list(result["candidate_tool_names"] or [])
+    # 提升门禁与重复读守卫读的是这份候选视图：含它 ⇒ 下一跳 load 答 `candidate_hit`
+    # 并当场提升，不会再给出没有正文的 `already_callable` 回执。
+    assert TOOL_ID in CeoFrontDoorRuntimeOps._frontdoor_candidate_tool_view(result)
