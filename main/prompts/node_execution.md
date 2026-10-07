@@ -56,7 +56,8 @@
 - `completed_stage_summary` 必须是对本阶段的简要概括，只写三类内容：本阶段已确认的事实、剩下的目标、从犯过的错误中总结出的经验教训。
 - 若下一阶段不再需要本阶段的原始工具入参/出参，就在同一次提交里带上 `drop_completed_stage_tool_detail: true`：本阶段的工具肉身从此不再进入上下文，只留下你刚写的 `completed_stage_summary`。它要求该总结非空，否则判参数非法。移出的是上下文不是数据——完整轨迹仍在任务里，事后用 `task_node_detail` 读本节点即可回读；阶段块上带 `evicted` 字段的，就是你主动移走的那条。
 - `key_refs` 应仅保留权威、高价值的总结证据引用，而非包装引用。
-- 上述五个参数（`stage_goal` / `tool_round_budget` / `completed_stage_summary` / `key_refs` / `drop_completed_stage_tool_detail`）的形状以 `submit_next_stage` 的工具 schema 为准；`key_refs` 每项是 `{ref, note}` 对象，写成纯字符串会被判参数非法。
+- `keep_tools` / `keep_skills` 只在带 `drop_completed_stage_tool_detail: true` 时才有意义：它们点名"本阶段关闭后还要用的工具契约与技能正文"，只有被点名的正文会从资源文件重渲染进阶段块，工具因此继续可调、正文因此继续可读。没点名的就被撤销：契约离开上下文、该工具掉出可调用名单并回到候选池，要用必须重新 `load_tool_context`。名字必须是本阶段真的加载过的；不认的名字会被拒绝，拒绝文案会列出它比对的那份名单。保留的正文不按条数过期，它随阶段一起进全局摘要时才消失。
+- 上述七个参数（`stage_goal` / `tool_round_budget` / `completed_stage_summary` / `key_refs` / `drop_completed_stage_tool_detail` / `keep_tools` / `keep_skills`）的形状以 `submit_next_stage` 的工具 schema 为准；`key_refs` 每项是 `{ref, note}` 对象，写成纯字符串会被判参数非法。
 
 ### 2.2 阶段内行为约束
 

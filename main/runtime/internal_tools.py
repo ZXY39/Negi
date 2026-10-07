@@ -38,19 +38,6 @@ def build_keep_contract_list_schema(*, description: str) -> dict[str, Any]:
     }
 
 
-KEEP_CONTRACT_MODEL_DESCRIPTION = (
-    ' Keep_tools / keep_skills are only meaningful together with '
-    'drop_completed_stage_tool_detail=true: they name the hydrated tool contracts and skill bodies '
-    'this closing stage still needs, and only those bodies are re-rendered from the resource files '
-    'into the stage block, so the tool stays callable and the text stays readable after the raw '
-    'rows leave the context. Anything you do not name is revoked: its contract leaves the context, '
-    'the tool drops out of the callable list and back into the candidate pool, and you must load it '
-    'again to use it. Names must be tools or skills this closing stage actually loaded; an unknown '
-    'name is rejected and the error lists the names it checked against. Kept text does not expire on '
-    'a count: it stays in the block until the stage is folded into the global summary.'
-)
-
-
 def normalize_keep_contract_names(value: Any) -> list[str]:
     """`keep_tools` / `keep_skills` 的取值口径：去空、去重、保序。
 
@@ -116,7 +103,10 @@ class SubmitNextStageTool(Tool):
 
     @property
     def model_description(self) -> str:
-        return 'Start the next stage for the current node.' + KEEP_CONTRACT_MODEL_DESCRIPTION
+        return (
+            'Start the next stage for the current node. '
+            'keep_tools / keep_skills only apply together with drop_completed_stage_tool_detail=true.'
+        )
 
     @property
     def parameters(self) -> dict[str, Any]:
