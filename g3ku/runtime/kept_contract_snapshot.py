@@ -42,6 +42,23 @@ FAILURE_SKILL_BODY_EMPTY = "skill_body_empty"
 
 _EMPTY_FAMILY_REGISTRY: Any = None
 
+# 没裁撤时点名保留是一句空承诺：正文没有阶段块可以放。两条车道的闸门都会按参数错误拒掉
+# 这一路（`keep_contracts_require_drop_error`），这份文案只服务绕过工具层的写入者。
+KEEP_CONTRACT_NOT_DROPPED_NOTE = (
+    "keep_tools / keep_skills 未生效：这次没有点名 drop_completed_stage_tool_detail，"
+    "没有阶段块可以放保留正文，所点名的契约一条都没留下"
+)
+
+# 失败原因码 → 回执里给模型读的那句原因。只给码等于没给：模型分不清"改名了"和"这条本来
+# 就是空的"，也就不知道自己该不该重新 load。
+KEEP_CONTRACT_FAILURE_REASON_TEXT = {
+    FAILURE_TOOL_NOT_FOUND: "工具契约取不到（资源改名或已删除），它仍是撤销态，要用的话得重新 load_tool_context",
+    FAILURE_TOOL_BODY_EMPTY: "工具契约正文为空，留不下任何东西",
+    FAILURE_TOOL_REPAIR_REQUIRED: "工具处于 repair-required 状态，正文不可用",
+    FAILURE_SKILL_NOT_FOUND: "技能正文取不到（资源改名或已删除）",
+    FAILURE_SKILL_BODY_EMPTY: "技能正文为空，留不下任何东西",
+}
+
 
 def _empty_family_registry() -> Any:
     """给 `build_tool_toolskill_payload` 的空家族视图：没有治理库时按单体描述符渲染。
@@ -309,6 +326,61 @@ def normalize_kept_skill_contexts(raw: Any) -> list[dict[str, Any]]:
     return normalized
 
 
+def _kept_names(entries: Any, key: str) -> list[str]:
+    collected: list[str] = []
+    for item in list(entries or []):
+        if not isinstance(item, dict):
+            continue
+        name = str(item.get(key) or "").strip()
+        if name and name not in collected:
+            collected.append(name)
+    return collected
+
+
+def _failure_reason_text(reason: Any) -> str:
+    """原因码 → 给模型读的一句话；`code:ExcName` 这种带后缀的码把后缀一并点名。"""
+    text = str(reason or "").strip()
+    code, _sep, suffix = text.partition(":")
+    base = KEEP_CONTRACT_FAILURE_REASON_TEXT.get(code) or "提取失败"
+    return f"{base}（{suffix}）" if suffix else base
+
+
+def keep_closure_fields(snapshot: Any) -> dict[str, Any]:
+    """`stage_closure` 回执里保留契约那部分，两车道共用同一份形状。
+
+    留下的是**名字**，不是"你以为你留住了"：取不到的那几条逐条点名原因（`keep_failed` 给
+    机器码 + 可读句，`note` 给一句人话），模型才分得清该不该重新 load。什么都没点名时返回
+    空字典，不给没用到这功能的提交添一行噪声。
+    """
+    payload = dict(snapshot or {}) if isinstance(snapshot, dict) else {}
+    kept_tools = _kept_names(payload.get("tool_contexts"), TOOL_ID_FIELD)
+    kept_skills = _kept_names(payload.get("skill_contexts"), SKILL_ID_FIELD)
+    failures = [
+        {
+            "kind": str(item.get("kind") or "").strip(),
+            "name": str(item.get("name") or "").strip(),
+            "reason": str(item.get("reason") or "").strip(),
+            "detail": _failure_reason_text(item.get("reason")),
+        }
+        for item in list(payload.get("failures") or [])
+        if isinstance(item, dict)
+    ]
+    note = str(payload.get("note") or "").strip()
+    if not kept_tools and not kept_skills and not failures and not note:
+        return {}
+    if failures:
+        named = "未能保留：" + "、".join(f"{item.get('name')}（{item.get('detail')}）" for item in failures)
+        note = f"{note}；{named}" if note else named
+    fields: dict[str, Any] = {
+        "kept_tools": kept_tools,
+        "kept_skills": kept_skills,
+        "keep_failed": failures,
+    }
+    if note:
+        fields["note"] = note
+    return fields
+
+
 def keep_contract_name_error(field: str, unknown: list[str], allowed: list[str]) -> str:
     """未知保留名的拒绝文案：点名错在哪，并枚举这条判据自己依据的那份名单。
 
@@ -380,12 +452,14 @@ def resolve_kept_contracts(
 
 
 __all__ = [
+    "KEEP_CONTRACT_NOT_DROPPED_NOTE",
     "KEPT_SKILL_CONTEXTS_FIELD",
     "KEPT_TOOL_CONTEXTS_FIELD",
     "SKILL_ID_FIELD",
     "SKILL_LOADER_TOOL_NAMES",
     "build_kept_contract_snapshot",
     "collect_stage_loader_names",
+    "keep_closure_fields",
     "keep_contract_name_error",
     "normalize_kept_skill_contexts",
     "render_kept_skill_context",

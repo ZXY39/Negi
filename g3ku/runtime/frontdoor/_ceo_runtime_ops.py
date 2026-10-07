@@ -76,11 +76,12 @@ from g3ku.runtime.stage_prompt_compaction import (
     summarized_stage_ids,
 )
 from g3ku.runtime.kept_contract_snapshot import (
+    KEEP_CONTRACT_NOT_DROPPED_NOTE,
     KEPT_SKILL_CONTEXTS_FIELD,
     KEPT_TOOL_CONTEXTS_FIELD,
-    build_kept_contract_snapshot,
-    collect_stage_loader_names,
+    keep_closure_fields,
     normalize_kept_skill_contexts,
+    resolve_kept_contracts,
 )
 from g3ku.runtime.tool_context_presence import (
     contract_presence_index,
@@ -5487,6 +5488,8 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
         drop_completed_stage_tool_detail: bool = False,
         keep_tools: list[str] | None = None,
         keep_skills: list[str] | None = None,
+        kept_tool_contexts: list[dict[str, Any]] | None = None,
+        kept_skill_contexts: list[dict[str, Any]] | None = None,
     ) -> tuple[dict[str, Any], dict[str, Any]]:
         normalized_state = cls._frontdoor_stage_state_snapshot({"frontdoor_stage_state": stage_state})
         normalized_goal = str(stage_goal or "").strip()
@@ -5549,6 +5552,15 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
                 # 所以落盘不会给每条阶段添一个布尔键。
                 if drop_completed_stage_tool_detail and normalized_summary:
                     current["context_evicted"] = True
+                    # 保留正文只在裁撤**真的落了**的那一条阶段上写：没裁撤就没有块，正文
+                    # 写进账本也无处渲染，反而会留下一份"看着留住了"的假证据。取不到的那
+                    # 几条由 `resolve_kept_contracts` 挡在门外（不写条目），工具保持撤销态。
+                    normalized_kept_tool_contexts = normalize_kept_tool_contexts(kept_tool_contexts)
+                    if normalized_kept_tool_contexts:
+                        current[KEPT_TOOL_CONTEXTS_FIELD] = normalized_kept_tool_contexts
+                    normalized_kept_skill_contexts = normalize_kept_skill_contexts(kept_skill_contexts)
+                    if normalized_kept_skill_contexts:
+                        current[KEPT_SKILL_CONTEXTS_FIELD] = normalized_kept_skill_contexts
             stages.append(current)
 
         next_stage_index = max((int(stage.get("stage_index") or 0) for stage in stages), default=0) + 1
