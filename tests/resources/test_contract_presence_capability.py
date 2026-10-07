@@ -386,6 +386,11 @@ def test_frontdoor_kept_context_counts_as_present() -> None:
     ops = _ops()
     state = _frontdoor_state(hydrated=[TOOL_ID], messages=[], stages=_kept_stages())
     assert TOOL_ID in ops._frontdoor_callable_tool_names_for_state(state)
+    # 只断言"仍在 callable"在未修改的树上是假绿（今日什么都不滤，它当然在）。加上判据侧的
+    # 断言：在场的是**保留正文**这个载体，名字既不 revoked 也留在台账里，才证明是它撑住的。
+    kept, revoked = ops._frontdoor_contract_presence_partition(state, list(state["hydrated_tool_names"]))
+    assert kept == [TOOL_ID]
+    assert revoked == []
 
 
 def test_frontdoor_partition_reports_revoked_names() -> None:
