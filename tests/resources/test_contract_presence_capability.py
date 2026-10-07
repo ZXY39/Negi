@@ -1075,3 +1075,51 @@ def test_presence_revocation_subtracts_the_dispatch_dict_before_selection() -> N
         request_messages=[],
     )
     assert calls == []
+
+    # promoted 视图不算台账：state 空、names 里带着名字（哪怕是刚被撤的），本跳都不该把它
+    # 当成待撤对象去读整份请求体——否则从没水合过的工具会被判成撤销目标。
+    calls.clear()
+    revived_logs = _Logs()
+    revived_logs._frame = {
+        "node_id": "node-cp",
+        "hydrated_executor_state": [],
+        "hydrated_executor_names": ["filesystem_stat"],
+        "hydration_revoked_executor_names": ["filesystem_stat"],
+    }
+    loop._log_service = revived_logs
+    kept_after_revive = loop._revoke_contract_absent_hydration_for_hop(
+        tools=tools,
+        task=SimpleNamespace(task_id="task-cp"),
+        node=SimpleNamespace(node_id="node-cp"),
+        runtime_context={"actor_role": "execution", "session_key": "web:shared"},
+        request_messages=[],
+    )
+    assert calls == []
+    assert "filesystem_stat" in kept_after_revive
+
+    # 有 payload 读口时不许走整帧水合：判据每跳一次，读整份会话历史是白付的钱。
+    class _PayloadLogs(_Logs):
+        def __init__(self) -> None:
+            super().__init__()
+            self.hydrated_reads = 0
+
+        def read_runtime_frame(self, task_id: str, node_id: str) -> dict:
+            self.hydrated_reads += 1
+            return dict(self._frame)
+
+        def read_runtime_frame_payload(self, task_id: str, node_id: str) -> dict:
+            return dict(self._frame)
+
+    cheap_logs = _PayloadLogs()
+    cheap_logs._frame = {"node_id": "node-cp", "hydrated_executor_state": ["filesystem_stat"]}
+    loop._log_service = cheap_logs
+    calls.clear()
+    kept_cheap = loop._revoke_contract_absent_hydration_for_hop(
+        tools=tools,
+        task=SimpleNamespace(task_id="task-cp"),
+        node=SimpleNamespace(node_id="node-cp"),
+        runtime_context={"actor_role": "execution", "session_key": "web:shared"},
+        request_messages=[],
+    )
+    assert cheap_logs.hydrated_reads == 0
+    assert calls and "filesystem_stat" not in kept_cheap

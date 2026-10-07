@@ -2380,9 +2380,15 @@ class ReActToolLoop:
             return current_tools
         task_id = str(getattr(task, 'task_id', '') or '').strip()
         node_id = str(getattr(node, 'node_id', '') or '').strip()
-        ledger = self._normalized_name_list(
-            list((self._runtime_frame(task_id, node_id) or {}).get('hydrated_executor_state') or [])
-        )
+        # 只读帧正文：`read_runtime_frame` 会顺带把 messages_ref 指向的整份会话历史读盘解码，
+        # 判据每跳都要跑，不该为了一份名单付一次历史水合。
+        payload_reader = getattr(self._log_service, 'read_runtime_frame_payload', None)
+        frame = payload_reader(task_id, node_id) if callable(payload_reader) else None
+        if not isinstance(frame, dict):
+            frame = self._runtime_frame(task_id, node_id) or {}
+        # 台账只认 `hydrated_executor_state`（每跳由帧写入）。`hydrated_executor_names` 是本轮
+        # 选择派生的 promoted 视图，拿它当台账会把从没水合过的工具判成待撤对象。
+        ledger = self._normalized_name_list(frame.get('hydrated_executor_state') or [])
         if not ledger:
             # 没有水合能力可撤时不必读整份请求体判在场。
             return current_tools
