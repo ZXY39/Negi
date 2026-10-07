@@ -1365,8 +1365,83 @@ async function ensureTraceOutputCodeBlockContent(
     }
 }
 
-async function ensureCeoToolStepFullOutput(item, { view = "canonical" } = {}) {
-    if (!(item instanceof HTMLElement)) return "";
+const TRACE_ARGUMENTS_MISSING_TEXT = "完整入参已不在账本里，这里只有调用提示";
+
+// 入参的按需车道：转录投影会把超长入参清空（canonical_context._cap_tool_payload），
+// 原文仍在 frontdoor 账本里，所以点开工具面板时按 tool_call_id 回取一次。
+async function getTraceArgumentsContentByCallId(toolCallId = "") {
+    const normalized = String(toolCallId || "").trim();
+    if (!normalized) return "";
+    ensureTraceOutputContentState();
+    const cacheKey = `arguments:${normalized}`;
+    if (Object.prototype.hasOwnProperty.call(S.traceOutputContentByKey, cacheKey)) {
+        const cached = S.traceOutputContentByKey[cacheKey];
+        if (cached && typeof cached === "object" && cached.missing) {
+            throw traceOutputMissingError();
+        }
+        return String(cached || "");
+    }
+    if (S.traceOutputRequestsByKey[cacheKey]) {
+        return S.traceOutputRequestsByKey[cacheKey];
+    }
+    const request = (async () => {
+        try {
+            const payload = await ApiClient.getCeoToolArguments(activeSessionId(), normalized);
+            const text = String(payload?.arguments_text || "").trim();
+            if (!text) {
+                S.traceOutputContentByKey[cacheKey] = { missing: true };
+                throw traceOutputMissingError();
+            }
+            S.traceOutputContentByKey[cacheKey] = text;
+            return text;
+        } catch (error) {
+            if (isTraceOutputMissingError(error)) {
+                S.traceOutputContentByKey[cacheKey] = { missing: true };
+            }
+            throw error;
+        }
+    })();
+    S.traceOutputRequestsByKey[cacheKey] = request;
+    try {
+        return await request;
+    } finally {
+        delete S.traceOutputRequestsByKey[cacheKey];
+    }
+}
+
+async function ensureTraceArgumentsCodeBlockContent(element) {
+    if (!(element instanceof HTMLElement)) return "";
+    const lookupId = String(element.dataset.argumentsLookup || "").trim();
+    if (!lookupId) return String(element.textContent || "");
+    if (element.dataset.outputHydrated === "true") return String(element.textContent || "");
+    const previewText = String(element.dataset.previewText || element.textContent || "");
+    element.dataset.previewText = previewText;
+    element.dataset.outputHydrating = "true";
+    setTextContentPreservingScroll(element, "正在加载完整参数...");
+    try {
+        const fullText = await getTraceArgumentsContentByCallId(lookupId);
+        const nextText = String(fullText || previewText).trim() || previewText;
+        setTextContentPreservingScroll(element, nextText);
+        element.dataset.outputHydrated = "true";
+        return nextText;
+    } catch (error) {
+        if (isTraceOutputMissingError(error)) {
+            setTextContentPreservingScroll(element, `${previewText}\n\n${TRACE_ARGUMENTS_MISSING_TEXT}`);
+            element.dataset.outputHydrated = "cleaned";
+            return previewText;
+        }
+        const message = typeof ApiClient?.friendlyErrorMessage === "function"
+            ? ApiClient.friendlyErrorMessage(error, error?.message || "未知错误")
+            : String(error?.message || error || "未知错误");
+        setTextContentPreservingScroll(element, `${previewText}\n\n加载完整参数失败：${message}`);
+        element.dataset.outputHydrated = "error";
+        return previewText;
+    } finally {
+        delete element.dataset.outputHydrating;
+    }
+}
+
+async function ensureCeoToolStepFullOutput(item, { view = "canonical" } = {}) {    if (!(item instanceof HTMLElement)) return "";
     const outputRef = normalizeTraceOutputRef(item.dataset.outputRef || "");
     if (!outputRef) return normalizeInteractionDetailText(item.dataset.detailText || "");
     if (item.dataset.outputHydrated === "true") {

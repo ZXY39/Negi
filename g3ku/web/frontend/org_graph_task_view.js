@@ -1472,6 +1472,8 @@ function normalizeExecutionStageTrace(stage, index = 0) {
                 tool_name: String(step?.tool_name || "tool"),
                 arguments_text: String(step?.arguments_text || step?.arguments_preview || ""),
                 arguments_full: toolArgumentsFullText(step),
+                // 投影把超长入参清空时落这颗标记：面板据此去账本按需回取全量。
+                arguments_truncated: step?.arguments_truncated === true,
                 output_text: String(step?.output_text || step?.output_preview || step?.text || ""),
                 output_ref: String(step?.output_ref || ""),
                 started_at: String(step?.started_at || ""),
@@ -1706,6 +1708,10 @@ function renderExecutionRoundToolPanel(round, step, toolIndex) {
         .map((item) => [String(item?.kind || "").trim(), String(item?.path || item?.ref || "").trim(), String(item?.note || "").trim()].filter(Boolean).join(" | "))
         .filter(Boolean)
         .join("\n");
+    // 入参被投影清空时，面板先印提示、再按 tool_call_id 回取全量。
+    const argumentsLookupId = !String(step?.arguments_full || "").trim() && step?.arguments_truncated
+        ? String(step?.tool_call_id || "").trim()
+        : "";
     const recoveryFields = String(step?.tool_name || "") === "recovery_check"
         ? [
             renderTraceField("恢复检查结论", step?.recovery_decision, "暂无恢复检查结论"),
@@ -1716,7 +1722,7 @@ function renderExecutionRoundToolPanel(round, step, toolIndex) {
     return `
         <section class="task-trace-round-panel" data-tool-key="${esc(toolKey)}" hidden>
             ${[
-                renderTraceField("参数", step?.arguments_full || step?.arguments_text, "无参数", { copyable: true }),
+                renderTraceField("参数", step?.arguments_full || step?.arguments_text, "无参数", { copyable: true, argumentsLookupId }),
                 renderTraceOutputField(
                     "工具输出",
                     step?.output_text,
@@ -2548,12 +2554,14 @@ function renderTraceLabelRow(label, { copyable = false } = {}) {
     `;
 }
 
-function renderTraceField(label, value, emptyText = "暂无内容", { decodeEscapes = false, copyable = false } = {}) {
+function renderTraceField(label, value, emptyText = "暂无内容", { decodeEscapes = false, copyable = false, argumentsLookupId = "" } = {}) {
     const text = readableText(value, { decodeEscapes, emptyText });
+    const lookupId = String(argumentsLookupId || "").trim();
+    const lookupAttr = lookupId ? ` data-arguments-lookup="${esc(lookupId)}"` : "";
     return `
         <div class="task-trace-field">
             ${renderTraceLabelRow(label, { copyable })}
-            <div class="code-block task-trace-code" data-empty-text="${esc(String(emptyText || ""))}">${esc(text)}</div>
+            <div class="code-block task-trace-code"${lookupAttr} data-empty-text="${esc(String(emptyText || ""))}">${esc(text)}</div>
         </div>
     `;
 }
@@ -2584,6 +2592,11 @@ function hydrateTraceOutputBlocks(root) {
     outputBlocks.forEach((block) => {
         if (!(block instanceof HTMLElement)) return;
         void ensureTraceOutputCodeBlockContent(block);
+    });
+    if (typeof ensureTraceArgumentsCodeBlockContent !== "function") return;
+    Array.from(root.querySelectorAll(".task-trace-code[data-arguments-lookup]")).forEach((block) => {
+        if (!(block instanceof HTMLElement) || block.dataset.outputHydrated === "true") return;
+        void ensureTraceArgumentsCodeBlockContent(block);
     });
 }
 
@@ -2617,6 +2630,11 @@ async function resolveTraceFieldCopyText(code) {
     if (code.dataset.outputRef && code.dataset.outputHydrated !== "true"
         && typeof ensureTraceOutputCodeBlockContent === "function") {
         return String(await ensureTraceOutputCodeBlockContent(code) || "");
+    }
+    // 入参同理：复制出来的应该是全量入参，不是那条 48 字提示。
+    if (code.dataset.argumentsLookup && code.dataset.outputHydrated !== "true"
+        && typeof ensureTraceArgumentsCodeBlockContent === "function") {
+        return String(await ensureTraceArgumentsCodeBlockContent(code) || "");
     }
     return String(code.textContent || "");
 }

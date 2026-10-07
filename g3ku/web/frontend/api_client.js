@@ -515,6 +515,13 @@ class ApiClient {
         });
     }
 
+    static async getCeoToolArguments(sessionId, toolCallId) {
+        // 入参被转录投影清空时按 tool_call_id 回取全量：账本里的原文不封顶，进帧的才封顶。
+        return this.get(`/api/ceo/sessions/${encodeURIComponent(sessionId)}/tool-arguments`, {
+            tool_call_id: toolCallId,
+        });
+    }
+
     static async getMainRuntimeTaskDefaults() {
         return this.get("/api/main-runtime/settings");
     }

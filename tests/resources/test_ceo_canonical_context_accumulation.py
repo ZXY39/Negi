@@ -162,17 +162,42 @@ def test_transcript_projection_caps_oversized_tool_arguments() -> None:
                     rounds=[
                         {
                             "round_index": 1,
-                            "tools": [_tool("large", arguments={"payload": "y" * 3000})],
+                            "tools": [
+                                _tool("large", arguments={"payload": "y" * 3000}),
+                                _tool("small", arguments={"payload": "z"}),
+                            ],
                         }
                     ],
                 )
             ]
         }
     )
-    tool = projected["stages"][0]["rounds"][0]["tools"][0]
+    tools = projected["stages"][0]["rounds"][0]["tools"]
 
-    assert tool["arguments"] == {}
-    assert len(str(tool["arguments_text"])) <= 4000
+    assert tools[0]["arguments"] == {}
+    assert len(str(tools[0]["arguments_text"])) <= 4000
+    # 清空要说得出口：前端靠这颗标记去账本按需回取全量入参。
+    assert tools[0]["arguments_truncated"] is True
+    # 没被清空的行不带标记——每帧都多一个键就是白付的字节。
+    assert tools[1]["arguments"] == {"payload": "z"}
+    assert "arguments_truncated" not in tools[1]
+
+
+def test_arguments_truncated_marker_survives_re_normalization() -> None:
+    capped = {
+        "stages": [
+            _stage(
+                "frontdoor-stage-3",
+                3,
+                rounds=[{"round_index": 1, "tools": [_tool("large", arguments={"payload": "y" * 3000})]}],
+            )
+        ]
+    }
+    projected = project_canonical_context_for_transcript(capped)
+    again = project_canonical_context_for_transcript(projected)
+    tool = again["stages"][0]["rounds"][0]["tools"][0]
+
+    assert tool["arguments_truncated"] is True
 
 
 def test_ui_delta_ignores_projection_representation_flips() -> None:

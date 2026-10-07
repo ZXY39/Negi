@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 from datetime import datetime
 from types import SimpleNamespace
 
@@ -742,6 +743,69 @@ async def withdraw_ceo_queued_follow_up(session_id: str, payload: dict = Body(..
         raise HTTPException(status_code=409, detail="follow_up_not_queued")
     await _emit_runtime_state_snapshot(runtime_session)
     return {"ok": True, "session_id": session.key, "turn_id": turn_id}
+
+
+def _tool_arguments_from_ledger(ledger: object, tool_call_id: str) -> dict | None:
+    """按 tool_call_id 在 frontdoor 账本里找那一次调用的原始入参。
+
+    出帧时超长入参会被裁空（`canonical_context._cap_tool_payload`），账本这一份没有裁，
+    所以"面板点开才回取一次"是零常驻字节的那条车道。完成态 sidecar 把账本包在键里，
+    live 快照则是平铺的 stage state，两种形状在这里一次认掉。
+    """
+    payload = ledger if isinstance(ledger, dict) else {}
+    stages = payload.get("stages")
+    if not isinstance(stages, list):
+        for nested_key in ("frontdoor_stage_state", "frontdoor_canonical_context"):
+            nested = payload.get(nested_key)
+            if isinstance(nested, dict) and isinstance(nested.get("stages"), list):
+                stages = nested["stages"]
+                break
+    for stage in list(stages or []):
+        if not isinstance(stage, dict):
+            continue
+        for round_item in list(stage.get("rounds") or []):
+            if not isinstance(round_item, dict):
+                continue
+            for tool in list(round_item.get("tools") or []):
+                if not isinstance(tool, dict):
+                    continue
+                if str(tool.get("tool_call_id") or "").strip() != tool_call_id:
+                    continue
+                arguments = tool.get("arguments")
+                if isinstance(arguments, dict):
+                    return arguments
+    return None
+
+
+@router.get("/ceo/sessions/{session_id}/tool-arguments")
+async def get_ceo_session_tool_arguments(session_id: str, tool_call_id: str = ""):
+    """取一次工具调用的全量入参：Web 轨道上被投影裁掉的入参按这条车道回补。"""
+    target = str(tool_call_id or "").strip()
+    if not target:
+        raise HTTPException(status_code=400, detail="tool_call_id_required")
+    agent, session_manager, runtime_manager, _state_store = _sessions()
+    if agent is None:
+        raise HTTPException(status_code=503, detail="no_model_configured")
+    session_key, runtime_session = _resolve_frontdoor_session(
+        session_manager,
+        runtime_manager,
+        session_id,
+        create=False,
+    )
+    snapshot = getattr(runtime_session, "_frontdoor_visible_canonical_context_snapshot", None)
+    ledger = snapshot() if callable(snapshot) else None
+    if not isinstance(ledger, dict) or not list(ledger.get("stages") or []):
+        # 会话没驻留（重启后没被打开过、或已被回收）时读完成态 sidecar，那份同样是未裁的账本。
+        ledger = read_completed_continuity_snapshot(session_key)
+    arguments = _tool_arguments_from_ledger(ledger, target)
+    if arguments is None:
+        raise HTTPException(status_code=404, detail="tool_arguments_not_found")
+    return {
+        "ok": True,
+        "session_id": session_key,
+        "tool_call_id": target,
+        "arguments_text": json.dumps(arguments, ensure_ascii=False, indent=2),
+    }
 
 
 @router.patch("/ceo/sessions/{session_id}")

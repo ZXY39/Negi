@@ -73,6 +73,9 @@ def _normalize_tool(tool: Any) -> dict[str, Any]:
             if isinstance(item.get("elapsed_seconds"), (int, float))
             else {}
         ),
+        # 入参被投影清空过就要一路带出去：这份白名单每重建一次工具行，漏一个字段
+        # 前端就少一条"还能去取全量"的线索。
+        **({"arguments_truncated": True} if item.get("arguments_truncated") is True else {}),
     }
 
 
@@ -434,10 +437,14 @@ def _cap_tool_payload(
             )
         except Exception:
             arguments_oversized = True
-    elif arguments not in (None, ""):
+    elif arguments not in (None, "", {}):
+        # 空字典是"这个调用本来就没有参数"，不是被裁过的痕迹——把它算成超限会让
+        # 前端为一行根本没有原文的入参去回取，然后印出"原文已不在账本里"。
         arguments_oversized = True
     if arguments_oversized:
         current["arguments"] = {}
+        # 清空要说得出口：前端要靠这颗标记去按需取全量入参，否则它只能把 48 字提示当正文。
+        current["arguments_truncated"] = True
         current["arguments_text"] = _truncate_text(
             current.get("arguments_text"),
             max_arguments_text_chars,
