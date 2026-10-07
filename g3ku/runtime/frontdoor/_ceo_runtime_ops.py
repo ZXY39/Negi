@@ -5278,6 +5278,14 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
             for item in list(candidate_tool_items or [])
             if str(item.get("tool_id") or "").strip() in candidate_name_set
         ]
+        # 并回来的名字在回合初快照里没有条目（它当时已水合，条目被摘掉），只按 names 过滤的话
+        # 尾块 `candidate_tools` 那行就永远少它一个——那一行读的是 items。补名字级条目即可：
+        # 说明文字由 provider `tools[]` 的 description 承载，这里不抄第二份。
+        item_names = {str(item.get("tool_id") or "").strip() for item in candidate_tool_items}
+        for name in candidate_tool_names:
+            if name and name not in item_names:
+                candidate_tool_items.append({"tool_id": name, "description": ""})
+                item_names.add(name)
         return {
             "tool_names": list(tool_names),
             "candidate_tool_names": list(candidate_tool_names),

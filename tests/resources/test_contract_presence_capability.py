@@ -452,6 +452,8 @@ def test_frontdoor_after_tool_results_writes_revoked_into_state() -> None:
     assert TOOL_ID not in list(after["hydrated_tool_names"] or [])
     assert after["hydration_revoked_executor_names"] == [TOOL_ID]
     assert TOOL_ID not in list(after["tool_names"] or [])
+    # 名字并回候选还得有条目：尾块那行只认 items。
+    assert TOOL_ID in [str(item.get("tool_id") or "") for item in list(after["candidate_tool_items"] or [])]
 
 
 def test_frontdoor_hydration_after_successful_load_is_not_revoked() -> None:
@@ -931,6 +933,10 @@ async def test_graph_execute_tools_records_revocation_in_the_eviction_batch(monk
     # 提升门禁与重复读守卫读的是这份候选视图：含它 ⇒ 下一跳 load 答 `candidate_hit`
     # 并当场提升，不会再给出没有正文的 `already_callable` 回执。
     assert TOOL_ID in CeoFrontDoorRuntimeOps._frontdoor_candidate_tool_view(result)
+    # 尾块 `candidate_tools` 那行读的是 `candidate_tool_items`：只并名字不补条目，这一行就少它
+    # 一个（实盘 web:ceo-fb4616acbe9d 的 010401 跳：门禁收下重载并答 `promoted_next_turn`，
+    # 模型看到的候选名单里却没有它——出路存在但对模型不可见，等于没有出路）。
+    assert TOOL_ID in [str(item.get("tool_id") or "") for item in list(result["candidate_tool_items"] or [])]
 
 
 async def test_graph_execute_tools_keeps_named_contract_in_the_eviction_batch(monkeypatch) -> None:
