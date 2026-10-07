@@ -782,44 +782,21 @@ def test_dispatch_excludes_contract_absent_hydrated_tool() -> None:
     assert "exec" in names
 
 
-async def test_graph_execute_tools_records_revocation_in_the_eviction_batch(monkeypatch) -> None:
-    """裁撤落地的那一批就必须把撤销写回台账，不能等下一批或下一回合。
+def _eviction_batch_state(*, keep_tools: list[str] | None = None) -> dict:
+    """一条活动阶段：本阶段 load 过 TOOL_ID，正文行还挂在 `messages` 里，本批要点名裁撤。
 
-    实盘 web:ceo-1e834a45b8e7（main 45b10c13）：`submit_next_stage(drop=true, 带总结)`
-    这一跳把阶段裁了，随后尾部契约与派发名单都少了它，但 `hydration_revoked_executor_names`
-    全空、`hydrated_tool_names` 仍留着它 ⇒ 模型再 load 拿到 `already_callable` 而没有正文，
-    执行侧回 `tool not available`——正是文档禁止的那对组合，第四态没消除。
-    根因是节点体内的先后：工具态写回读的是裁撤前的阶段视图，而阶段账本在它之后才算完。
+    轮次记录带 `arguments.tool_id` 与成功状态：`keep_tools` 的名字只认这份记录，少了它
+    keep 那条会被整批拒绝（回执改成"没留"），夹具就测不到留住的那条道。
     """
-
-    runner = create_agent_impl.CreateAgentCeoFrontDoorRunner(loop=SimpleNamespace())
-    monkeypatch.setattr(runner, "_registered_tools_for_state", lambda state: {})
-    monkeypatch.setattr(runner, "_build_tool_runtime_context", lambda **kwargs: {"on_progress": None})
-
-    async def _fake_execute_tool_call_with_raw_result(*, tool, tool_name, arguments, runtime_context, on_progress, tool_call_id):
-        _ = tool_name, runtime_context, on_progress, tool_call_id
-        raw_result = await tool.execute(**arguments)
-        return (
-            raw_result,
-            json.dumps(raw_result, ensure_ascii=False),
-            "success",
-            "2026-10-08T00:19:22+08:00",
-            "2026-10-08T00:19:23+08:00",
-            1.0,
-        )
-
-    monkeypatch.setattr(runner, "_execute_tool_call_with_raw_result", _fake_execute_tool_call_with_raw_result)
-
-    loader_row = {
-        "role": "tool",
-        "name": "load_tool_context",
-        "tool_call_id": "call-load-1",
-        "content": json.dumps(
-            {"ok": True, "tool_id": TOOL_ID, "tool_context_fingerprint": "tcf:fixture-presence"},
-            ensure_ascii=False,
-        ),
+    stage_arguments = {
+        "stage_goal": "run the selected tool calls",
+        "tool_round_budget": 4,
+        "completed_stage_summary": "已看完仓库结构",
+        "drop_completed_stage_tool_detail": True,
     }
-    state = {
+    if keep_tools is not None:
+        stage_arguments["keep_tools"] = list(keep_tools)
+    return {
         "session_key": "web:shared",
         "messages": [
             {"role": "system", "content": "SYSTEM"},
@@ -835,7 +812,15 @@ async def test_graph_execute_tools_records_revocation_in_the_eviction_batch(monk
                     }
                 ],
             },
-            loader_row,
+            {
+                "role": "tool",
+                "name": "load_tool_context",
+                "tool_call_id": "call-load-1",
+                "content": json.dumps(
+                    {"ok": True, "tool_id": TOOL_ID, "tool_context_fingerprint": "tcf:fixture-presence"},
+                    ensure_ascii=False,
+                ),
+            },
         ],
         "tool_names": ["exec", TOOL_ID, "load_tool_context"],
         "candidate_tool_names": [],
@@ -876,36 +861,68 @@ async def test_graph_execute_tools_records_revocation_in_the_eviction_batch(monk
                             "round_id": "frontdoor-stage-1:round-1",
                             "round_index": 1,
                             "tool_call_ids": ["call-load-1"],
-                            "tools": [{"tool_call_id": "call-load-1", "tool_name": "load_tool_context"}],
+                            "tools": [
+                                {
+                                    "tool_call_id": "call-load-1",
+                                    "tool_name": "load_tool_context",
+                                    "status": "success",
+                                    "arguments": {"tool_id": TOOL_ID},
+                                }
+                            ],
                         }
                     ],
                 }
             ],
         },
-        "tool_call_payloads": [
-            {
-                "id": "call-stage-1",
-                "name": STAGE_TOOL_NAME,
-                "arguments": {
-                    "stage_goal": "run the selected tool calls",
-                    "tool_round_budget": 4,
-                    "completed_stage_summary": "已看完仓库结构",
-                    "drop_completed_stage_tool_detail": True,
-                },
-            }
-        ],
+        "tool_call_payloads": [{"id": "call-stage-1", "name": STAGE_TOOL_NAME, "arguments": stage_arguments}],
     }
 
-    result = await runner._graph_execute_tools(state, runtime=SimpleNamespace(context=SimpleNamespace()))
+
+async def _run_graph_eviction_batch(monkeypatch, state: dict, *, tool_payload_getter=None) -> dict:
+    main_task_service = None if tool_payload_getter is None else SimpleNamespace(get_tool_toolskill=tool_payload_getter)
+    runner = create_agent_impl.CreateAgentCeoFrontDoorRunner(loop=SimpleNamespace(main_task_service=main_task_service))
+    monkeypatch.setattr(runner, "_registered_tools_for_state", lambda state: {})
+    monkeypatch.setattr(runner, "_build_tool_runtime_context", lambda **kwargs: {"on_progress": None})
+
+    async def _fake_execute_tool_call_with_raw_result(*, tool, tool_name, arguments, runtime_context, on_progress, tool_call_id):
+        _ = tool_name, runtime_context, on_progress, tool_call_id
+        raw_result = await tool.execute(**arguments)
+        return (
+            raw_result,
+            json.dumps(raw_result, ensure_ascii=False),
+            "success",
+            "2026-10-08T00:19:22+08:00",
+            "2026-10-08T00:19:23+08:00",
+            1.0,
+        )
+
+    monkeypatch.setattr(runner, "_execute_tool_call_with_raw_result", _fake_execute_tool_call_with_raw_result)
+    return await runner._graph_execute_tools(state, runtime=SimpleNamespace(context=SimpleNamespace()))
+
+
+def _surviving_tool_call_ids(result: dict) -> set[str]:
+    return {
+        str(item.get("tool_call_id") or "")
+        for item in list(result.get("messages") or [])
+        if str(item.get("role") or "") == "tool"
+    }
+
+
+async def test_graph_execute_tools_records_revocation_in_the_eviction_batch(monkeypatch) -> None:
+    """裁撤落地的那一批就必须把撤销写回台账，不能等下一批或下一回合。
+
+    实盘 web:ceo-1e834a45b8e7（main 45b10c13）：`submit_next_stage(drop=true, 带总结)`
+    这一跳把阶段裁了，随后尾部契约与派发名单都少了它，但 `hydration_revoked_executor_names`
+    全空、`hydrated_tool_names` 仍留着它 ⇒ 模型再 load 拿到 `already_callable` 而没有正文，
+    执行侧回 `tool not available`——正是文档禁止的那对组合，第四态没消除。
+    根因是节点体内的先后：工具态写回读的是裁撤前的阶段视图，而阶段账本在它之后才算完。
+    """
+    result = await _run_graph_eviction_batch(monkeypatch, _eviction_batch_state())
 
     # 夹具自检：裁撤确实落在这一批里（标记落了、正文行离开了发送基线）
     evicted = result["frontdoor_stage_state"]["stages"][0]
     assert evicted["context_evicted"] is True
-    assert "call-load-1" not in {
-        str(item.get("tool_call_id") or "")
-        for item in list(result["messages"])
-        if str(item.get("role") or "") == "tool"
-    }
+    assert "call-load-1" not in _surviving_tool_call_ids(result)
 
     assert result["hydration_revoked_executor_names"] == [TOOL_ID]
     assert TOOL_ID not in list(result["hydrated_tool_names"] or [])
@@ -914,3 +931,41 @@ async def test_graph_execute_tools_records_revocation_in_the_eviction_batch(monk
     # 提升门禁与重复读守卫读的是这份候选视图：含它 ⇒ 下一跳 load 答 `candidate_hit`
     # 并当场提升，不会再给出没有正文的 `already_callable` 回执。
     assert TOOL_ID in CeoFrontDoorRuntimeOps._frontdoor_candidate_tool_view(result)
+
+
+async def test_graph_execute_tools_keeps_named_contract_in_the_eviction_batch(monkeypatch) -> None:
+    """同批点名 `keep_tools` ⇒ 正文行虽被裁走，台账不撤销、块里带着正文。
+
+    写回到裁后视图的反面用例：在场证据从 loader 行换成 `kept_tool_contexts`，判据读不到
+    那份账本就会把模型点名留住的工具一起撤掉——留不留得住只看这一条。
+    """
+
+    def _payload_getter(tool_id: str) -> dict:
+        return {
+            "tool_id": tool_id,
+            "content": f"# {tool_id}\n\n保留的契约正文\n",
+            "parameter_contract_markdown": "",
+            "required_parameters": [],
+            "example_arguments": {},
+            "warnings": [],
+            "errors": [],
+        }
+
+    result = await _run_graph_eviction_batch(
+        monkeypatch,
+        _eviction_batch_state(keep_tools=[TOOL_ID]),
+        tool_payload_getter=_payload_getter,
+    )
+
+    evicted = result["frontdoor_stage_state"]["stages"][0]
+    assert evicted["context_evicted"] is True
+    assert [item["tool_id"] for item in list(evicted.get("kept_tool_contexts") or [])] == [TOOL_ID]
+    assert "call-load-1" not in _surviving_tool_call_ids(result)
+    assert result["hydration_revoked_executor_names"] == []
+    assert TOOL_ID in list(result["hydrated_tool_names"] or [])
+    assert TOOL_ID in list(result["tool_names"] or [])
+    assert TOOL_ID not in list(result["candidate_tool_names"] or [])
+    # 块里必须真的带着正文：只有标题没有正文的保留契约等于把撤销藏进渲染里。
+    rendered = "\n".join(str(item.get("content") or "") for item in list(result["messages"] or []))
+    assert KEPT_CONTRACT_HEADING in rendered
+    assert "保留的契约正文" in rendered
