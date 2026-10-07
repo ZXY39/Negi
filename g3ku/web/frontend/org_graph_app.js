@@ -6645,7 +6645,8 @@ async function handleCeoForkClick(turnId) {
             S.ceoSessionBusy = true;
             initCeoWs();
         }
-        showToast({ title: "Fork 完成", text: "已复制到新会话，原消息已回填输入框（不会自动发送）。", kind: "success" });
+        // 成功不再弹 toast：切到新会话 + 输入框里的原文就是回执，
+        // 一层浮层只会盖住刚切好的会话列表。失败照旧要说话。
     } catch (e) {
         showToast({ title: "Fork 失败", text: editForkErrorText(e), kind: "error", durationMs: 5200 });
     } finally {

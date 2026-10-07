@@ -434,6 +434,13 @@ test("R7 接线静态契约:委托/时序/横幅/HTML 元素", () => {
     assert.ok(!APP_CODE.includes("ceoForkAt"), "前端还在读 data-ceo-fork-at");
     assert.ok(!APP_CODE.includes("at: mode"), "Fork 请求体还带 at");
     assert.ok(!APP_CODE.includes("fork_turn_ids"), "前端还在消费提问轴的 fork_turn_ids");
+    // Fork 成功侧不弹 toast：切会话 + 输入框回填就是回执；失败侧必须说话。
+    const forkBody = APP_CODE.slice(
+        APP_CODE.indexOf("async function handleCeoForkClick"),
+        APP_CODE.indexOf("async function handleCeoForkClick") + 2400
+    );
+    assert.ok(!forkBody.includes('kind: "success"'), "Fork 成功又弹提示层了");
+    assert.ok(forkBody.includes('title: "Fork 失败"'), "Fork 失败侧没有提示");
     // 收尾后服务端补发的门槛帧必须有分发。
     assert.ok(
         APP_CODE.includes('payload.type === "ceo.edit_fork.gates"'),
