@@ -161,6 +161,17 @@ class ExecutionStageKeptToolContext(Model):
     body: str = ''
 
 
+class ExecutionStageKeptSkillContext(Model):
+    """阶段块里保留的技能正文。
+
+    与保留契约同一条通道、同一份"提交点一次性快照"规则，但技能不进水合台账，所以这份
+    列表只服务渲染，不参与在场判据（技能从不水合，没有 callable 可摘）。
+    """
+
+    skill_id: str = ''
+    body: str = ''
+
+
 class ExecutionStageRecord(Model):
     stage_id: str = ''
     stage_index: int = 0
@@ -182,6 +193,7 @@ class ExecutionStageRecord(Model):
     context_evicted: bool = False
     key_refs: list[ExecutionStageKeyRef] = Field(default_factory=list)
     kept_tool_contexts: list[ExecutionStageKeptToolContext] = Field(default_factory=list)
+    kept_skill_contexts: list[ExecutionStageKeptSkillContext] = Field(default_factory=list)
     archive_ref: str = ''
     archive_stage_index_start: int = 0
     archive_stage_index_end: int = 0
@@ -202,6 +214,8 @@ class ExecutionStageRecord(Model):
             payload.pop('context_evicted', None)
         if not payload.get('kept_tool_contexts'):
             payload.pop('kept_tool_contexts', None)
+        if not payload.get('kept_skill_contexts'):
+            payload.pop('kept_skill_contexts', None)
         return payload
 
 

@@ -75,6 +75,13 @@ from g3ku.runtime.stage_prompt_compaction import (
     strip_stage_block_echo,
     summarized_stage_ids,
 )
+from g3ku.runtime.kept_contract_snapshot import (
+    KEPT_SKILL_CONTEXTS_FIELD,
+    KEPT_TOOL_CONTEXTS_FIELD,
+    build_kept_contract_snapshot,
+    collect_stage_loader_names,
+    normalize_kept_skill_contexts,
+)
 from g3ku.runtime.tool_context_presence import (
     contract_presence_index,
     kept_contract_index,
@@ -5250,6 +5257,10 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
             kept_tool_contexts = normalize_kept_tool_contexts(raw_stage.get("kept_tool_contexts"))
             if kept_tool_contexts:
                 normalized_stage["kept_tool_contexts"] = kept_tool_contexts
+            # 保留的技能正文同一条通道（只服务渲染、不进在场判据），同样要过白名单。
+            kept_skill_contexts = normalize_kept_skill_contexts(raw_stage.get("kept_skill_contexts"))
+            if kept_skill_contexts:
+                normalized_stage["kept_skill_contexts"] = kept_skill_contexts
             normalized_stages.append(normalized_stage)
         if active_stage_id and not any(
             str(stage.get("stage_id") or "").strip() == active_stage_id
@@ -5363,6 +5374,15 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
         drop_detail = bool(arguments.get("drop_completed_stage_tool_detail"))
         keep_tools = normalize_keep_contract_names(arguments.get("keep_tools"))
         keep_skills = normalize_keep_contract_names(arguments.get("keep_skills"))
+        # 正文提取只在提交点做一次，取的是**即将关闭**那条阶段的 loader 记录。渲染侧此后
+        # 逐轮回放账本，不再读资源文件——块在历史中段，重读会让运营者的一次资源编辑把
+        # 它之后的整段前缀缓存顶掉。
+        kept_snapshot = self._frontdoor_resolve_kept_contracts(
+            self._frontdoor_closing_stage(self._frontdoor_stage_state_snapshot({"frontdoor_stage_state": stage_state})),
+            drop_detail=drop_detail,
+            keep_tools=keep_tools,
+            keep_skills=keep_skills,
+        )
         next_state, next_stage = self._submit_frontdoor_next_stage_state(
             stage_state,
             stage_goal=str(arguments.get("stage_goal") or ""),
@@ -5379,6 +5399,8 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
             drop_completed_stage_tool_detail=drop_detail,
             keep_tools=keep_tools,
             keep_skills=keep_skills,
+            kept_tool_contexts=list(kept_snapshot.get("tool_contexts") or []),
+            kept_skill_contexts=list(kept_snapshot.get("skill_contexts") or []),
         )
         if drop_detail and archive:
             self._frontdoor_archive_evicted_stage(
@@ -5410,11 +5432,45 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
                 ),
                 "evicted": bool(closed and closed.get("context_evicted") is True),
                 "reason": reason,
+                # 保留契约的落地回执：留下的是名字，不是"你以为你留住了"。取不到的那几条
+                # 逐条点名原因，模型才会知道得重新 load。
+                **keep_closure_fields(kept_snapshot),
                 # 落空时在结果里自带一句可读说明：schema 描述两车道共用，改它会整体失效
                 # provider 前缀，而结果属动态尾部，模型不必再靠猜。
                 **({} if reason == "applied" else {"note": STAGE_CLOSURE_INACTIVE_NOTES[reason]}),
             }
         return next_state, payload
+
+    def _frontdoor_resolve_kept_contracts(
+        self,
+        closing_stage: dict[str, Any] | None,
+        *,
+        drop_detail: bool,
+        keep_tools: list[str],
+        keep_skills: list[str],
+    ) -> dict[str, Any]:
+        """前门道的 `keep_*` 收口：正文由主运行时按家族解析渲染，指纹与 `load_tool_context` 同一条。
+
+        没有裁撤、没有点名、或这条阶段压根没被结清时，返回空快照 + 一句说明：名字无处可写，
+        回执必须说清"没留"，不能让模型按参数倒推出"留住了"。
+        """
+        if not keep_tools and not keep_skills:
+            return {}
+        if not drop_detail:
+            return {"failures": [], "note": KEEP_CONTRACT_NOT_DROPPED_NOTE}
+        tool_payload_getter = None
+        main_service = getattr(self._loop, "main_task_service", None)
+        getter = getattr(main_service, "get_tool_toolskill", None)
+        if callable(getter):
+            tool_payload_getter = getter
+        return resolve_kept_contracts(
+            closing_stage,
+            keep_tools=keep_tools,
+            keep_skills=keep_skills,
+            tool_payload_getter=tool_payload_getter,
+            resource_manager=getattr(self._loop, "resource_manager", None),
+            workspace_root=getattr(self._loop, "workspace", None),
+        )
 
     @classmethod
     def _submit_frontdoor_next_stage_state(

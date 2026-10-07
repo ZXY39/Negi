@@ -5,6 +5,7 @@ import hashlib
 import json
 from typing import Any
 
+from g3ku.runtime.kept_contract_snapshot import normalize_kept_skill_contexts
 from g3ku.runtime.tool_context_presence import normalize_kept_tool_contexts
 
 RAW_REPRESENTATION = "raw"
@@ -51,6 +52,21 @@ def _is_context_visible(value: Any) -> bool:
     存量 durable 基线、continuity sidecar 与转录投影里的阶段记录都没有这个字段，
     按 True 处理才能保证旧账本不被静默抹掉。"""
     return value is not False
+
+
+def _dedupe_by_key(entries: list[dict[str, Any]], key: str) -> list[dict[str, Any]]:
+    """保留正文列表按名字去重、保序：跨副本继承时同一条契约会被两侧各带一次。"""
+    collected: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for entry in list(entries or []):
+        if not isinstance(entry, dict):
+            continue
+        name = _as_str(entry.get(key))
+        if not name or name in seen:
+            continue
+        seen.add(name)
+        collected.append(entry)
+    return collected
 
 
 def _normalize_tool(tool: Any) -> dict[str, Any]:
@@ -165,6 +181,10 @@ def _normalize_stage(stage: Any, *, fallback_index: int) -> dict[str, Any]:
     kept_tool_contexts = normalize_kept_tool_contexts(current.get("kept_tool_contexts"))
     if kept_tool_contexts:
         normalized_stage["kept_tool_contexts"] = kept_tool_contexts
+    # 保留的技能正文同一条通道（它不参与在场判据，只服务渲染），漏一份就是块里少一段。
+    kept_skill_contexts = normalize_kept_skill_contexts(current.get("kept_skill_contexts"))
+    if kept_skill_contexts:
+        normalized_stage["kept_skill_contexts"] = kept_skill_contexts
     return normalized_stage
 
 
@@ -181,6 +201,8 @@ def _dedupe_canonical_stages(stages: list[dict[str, Any]]) -> list[dict[str, Any
     latest_index: dict[str, int] = {}
     hidden_ids: set[str] = set()
     evicted_ids: set[str] = set()
+    kept_tools_by_id: dict[str, list[dict[str, Any]]] = {}
+    kept_skills_by_id: dict[str, list[dict[str, Any]]] = {}
     for index, stage in enumerate(stages):
         stage_id = _as_str(stage.get("stage_id"))
         if stage_id:
@@ -189,6 +211,12 @@ def _dedupe_canonical_stages(stages: list[dict[str, Any]]) -> list[dict[str, Any
                 hidden_ids.add(stage_id)
             if stage.get("context_evicted") is True:
                 evicted_ids.add(stage_id)
+            kept_tools_by_id.setdefault(stage_id, []).extend(
+                _dedupe_by_key(normalize_kept_tool_contexts(stage.get("kept_tool_contexts")), "tool_id")
+            )
+            kept_skills_by_id.setdefault(stage_id, []).extend(
+                _dedupe_by_key(normalize_kept_skill_contexts(stage.get("kept_skill_contexts")), "skill_id")
+            )
     result: list[dict[str, Any]] = []
     for index, stage in enumerate(stages):
         stage_id = _as_str(stage.get("stage_id"))
@@ -196,12 +224,23 @@ def _dedupe_canonical_stages(stages: list[dict[str, Any]]) -> list[dict[str, Any
             continue
         needs_visible_mark = bool(stage_id) and stage_id in hidden_ids and stage.get("context_visible") is not False
         needs_evicted_mark = bool(stage_id) and stage_id in evicted_ids and stage.get("context_evicted") is not True
-        if needs_visible_mark or needs_evicted_mark:
+        # 保留正文跟着逻辑阶段走，与那两个标记同口径：存活副本没带正文时（回合副本与
+        # canonical 副本各写一次账本的窗口），从被丢弃的副本里继承回来。少这一句，正文
+        # 会在某一次重铺后被抹掉，症状是"留了契约还是被撤销"。
+        survivor_kept_tools = normalize_kept_tool_contexts(stage.get("kept_tool_contexts"))
+        survivor_kept_skills = normalize_kept_skill_contexts(stage.get("kept_skill_contexts"))
+        inherited_tools = list(kept_tools_by_id.get(stage_id) or []) if not survivor_kept_tools else []
+        inherited_skills = list(kept_skills_by_id.get(stage_id) or []) if not survivor_kept_skills else []
+        if needs_visible_mark or needs_evicted_mark or inherited_tools or inherited_skills:
             stage = dict(stage)
             if needs_visible_mark:
                 stage["context_visible"] = False
             if needs_evicted_mark:
                 stage["context_evicted"] = True
+            if inherited_tools:
+                stage["kept_tool_contexts"] = inherited_tools
+            if inherited_skills:
+                stage["kept_skill_contexts"] = inherited_skills
         result.append(stage)
     return result
 
@@ -304,6 +343,7 @@ def _completed_stage_overlap_signature(stage: Any) -> str:
     current.pop("context_evicted", None)
     # 保留正文同理不得进入重叠签名：它只决定"这一跳契约算不算在场"，不决定"这是哪一条阶段"。
     current.pop("kept_tool_contexts", None)
+    current.pop("kept_skill_contexts", None)
     return json.dumps(current, ensure_ascii=False, sort_keys=True)
 
 
