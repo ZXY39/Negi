@@ -1,9 +1,9 @@
 ---
 name: g3ku-bridge-onboarding
-description: Universal reference for onboarding any external channel bridge to G3KU via the External Agent API — token management rules, protocol walkthrough, bridge-build checklist, connectivity verification, troubleshooting.
+description: Universal reference for onboarding any external channel bridge to Negi via the External Agent API — token management rules, protocol walkthrough, bridge-build checklist, connectivity verification, troubleshooting.
 ---
 
-# G3KU 外部渠道桥接对接（万能参考）
+# Negi 外部渠道桥接对接（万能参考）
 
 适用：用户要求把任意 IM / 渠道 / 自动化桥接入 g3ku（"对接渠道"、"让桥连上 g3ku"、"新建一个渠道桥"、"桥连不上"）。本 skill 是平台无关的对接总纲；权威契约见 `docs/architecture/external-agent-api.md`，参考实现见 `bridges/qq-onebot/`（独立包、零 g3ku import）。
 

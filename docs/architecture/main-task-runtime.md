@@ -1,4 +1,4 @@
-# G3KU 任务运行时：分发、暂停与恢复
+# Negi 任务运行时：分发、暂停与恢复
 
 本文负责 `main/` 任务运行时的三件事：追加通知与消息分发（distribution epoch）、节点级暂停与恢复、优雅停机与启动自动恢复。frontdoor 如何判断一轮要不要建任务、如何组织自己的上下文，归 `runtime-overview.md`；心跳如何把任务终态、失速与分发错误送回会话，归 `heartbeat-system.md`；任务树与分发在网页上的呈现，归 `web-and-admin.md`。
 

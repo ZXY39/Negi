@@ -1,4 +1,4 @@
-# G3KU 本地语音识别架构说明（whisper.cpp）
+# Negi 本地语音识别架构说明（whisper.cpp）
 
 ## 1. 定位与边界
 

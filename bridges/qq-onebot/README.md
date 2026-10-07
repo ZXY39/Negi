@@ -1,6 +1,6 @@
-# QQ/OneBot 参考桥（G3KU External Agent API）
+# QQ/OneBot 参考桥（Negi External Agent API）
 
-独立桥接应用：把 NapCat / LLOneBot / Lagrange 的 OneBot 11 端点接到 G3KU 的
+独立桥接应用：把 NapCat / LLOneBot / Lagrange 的 OneBot 11 端点接到 Negi 的
 `/api/v1` headless agent API。**零 g3ku import**——只经 HTTP + SSE 通信，
 是渠道通信重建"平台代码不进核心"边界的参考实现。
 

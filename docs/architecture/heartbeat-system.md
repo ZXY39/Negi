@@ -1,4 +1,4 @@
-# G3KU Heartbeat System
+# Negi Heartbeat System
 
 This document describes the maintenance boundary around the Web CEO heartbeat path and the CEO inline tool reminder sidecar.
 

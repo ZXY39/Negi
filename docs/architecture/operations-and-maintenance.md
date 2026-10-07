@@ -1,4 +1,4 @@
-# G3KU 运维与维护建议
+# Negi 运维与维护建议
 
 本文档从“接手项目后怎么跑、怎么验证、怎么排障”的角度总结维护要点。
 
@@ -553,7 +553,7 @@ IM 渠道有两条：内置官方 QQ 适配器（`g3ku/qq_official/`，进程内
 
 - `docs/architecture/external-agent-api.md`（API 契约）
 - `bridges/qq-onebot/`（参考桥实现）
-- 新桥接作为独立进程/仓库开发，G3KU 本体零改动
+- 新桥接作为独立进程/仓库开发，Negi 本体零改动
 
 ## 9. 最小验证清单
 
@@ -651,7 +651,7 @@ Queue-head recovery caveats that matter during operations:
 
 ## Docker / Compose Startup
 
-G3KU has two supported operator startup modes:
+Negi has two supported operator startup modes:
 
 - direct local startup through `start-g3ku.ps1` / `start-g3ku.sh`
 - container startup through `compose.yaml`

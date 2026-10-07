@@ -1,9 +1,9 @@
 ---
 name: g3ku-architecture-maintenance
-description: Maintain G3KU architecture docs in docs/architecture when code changes affect system understanding, runtime behavior, contracts, or maintenance workflow.
+description: Maintain Negi architecture docs in docs/architecture when code changes affect system understanding, runtime behavior, contracts, or maintenance workflow.
 ---
 
-# G3KU Architecture Maintenance
+# Negi Architecture Maintenance
 
 Use this skill whenever a change may affect how a future maintainer understands, operates, or safely modifies the system.
 

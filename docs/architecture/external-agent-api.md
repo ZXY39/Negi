@@ -1,4 +1,4 @@
-# G3KU External Agent API 架构说明
+# Negi External Agent API 架构说明
 
 本文档是 External Agent API（`/api/v1`，渠道无关的 headless agent 面）的唯一契约归属文档。渠道通信重建的第一期产物：默认保留 web 会话，IM 平台接入交给第三方桥接应用，g3ku 只暴露本契约。
 

@@ -1,4 +1,4 @@
-# G3KU Architecture Docs
+# Negi Architecture Docs
 
 Start here when you are new to the repository or when a change crosses subsystem boundaries.
 

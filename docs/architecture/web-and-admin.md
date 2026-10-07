@@ -1,4 +1,4 @@
-# G3KU Web And Admin Architecture
+# Negi Web And Admin Architecture
 
 This document describes how the web shell, admin APIs, and browser runtime fit together for day-to-day maintenance.
 

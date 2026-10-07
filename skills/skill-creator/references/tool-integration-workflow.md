@@ -1,6 +1,6 @@
 # 接入 Tool 工作流
 
-本工作流用于创建或更新 `tools/<tool_id>/`，把现有能力稳定接入 G3KU 运行时。
+本工作流用于创建或更新 `tools/<tool_id>/`，把现有能力稳定接入 Negi 运行时。
 
 ## 适用场景
 
@@ -97,7 +97,7 @@ tools/
 - `external`：在外部安装目录维护真实入口，`tools/<tool_id>/` 只保留注册与 toolskill
 - 内置入口优先遵循仓库已有 `build(runtime)` 或装载模式
 - 处理参数校验、运行时上下文、错误信息和返回结构
-- 不要把副作用散落到 G3KU 内核目录
+- 不要把副作用散落到 Negi 内核目录
 
 ## 步骤 6：写 `toolskills/SKILL.md`
 

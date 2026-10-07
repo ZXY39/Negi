@@ -1,4 +1,4 @@
-# G3KU Resource Spec
+# Negi Resource Spec
 
 统一资源目录：
 

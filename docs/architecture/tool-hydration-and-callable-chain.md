@@ -1,4 +1,4 @@
-# G3KU 工具水合与 callable 链路
+# Negi 工具水合与 callable 链路
 
 本文负责"加载一次工具之后它凭什么下一轮能调"这条链：水合台账、提升与重读、参数错误与状态分类、外置工具结果信封、统一工具 Timeout 合同、阶段门控，以及从上下文到 callable tools 的完整链路。
 四个概念的边界定义、fixed builtin 工具的逐项合同与 RBAC 如何得出候选集合，归 `tool-and-skill-system.md`；前门与节点的上下文压缩合同归 `runtime-overview.md`。

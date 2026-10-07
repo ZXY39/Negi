@@ -1,4 +1,4 @@
-# G3KU Agent Gateway 架构说明（OpenAI 兼容端点 + MCP 网关）
+# Negi Agent Gateway 架构说明（OpenAI 兼容端点 + MCP 网关）
 
 本文档是「外部 AI agent 开箱即用对接面」的唯一契约归属文档：OpenAI 兼容端点（`POST /api/v1/chat/completions`、`GET /api/v1/models`）与 MCP stdio 网关（`g3ku mcp serve`）。底层回合/事件/鉴权契约属于 `external-agent-api.md`「回合契约」「事件流」，本文只写网关层叠加的语义；操作向快速上手见 skill `skills/g3ku-bridge-onboarding/references/integration-manual.md`「开箱即用集成」。
 

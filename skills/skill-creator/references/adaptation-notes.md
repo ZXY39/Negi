@@ -1,13 +1,13 @@
 # Adaptation Notes
 
-本目录现在是 G3KU 项目里的统一 `skill-creator`，由原有本地 `skill-creator` 与 `agent-skill-creator` 两部分能力整合而成。
+本目录现在是 Negi 项目里的统一 `skill-creator`，由原有本地 `skill-creator` 与 `agent-skill-creator` 两部分能力整合而成。
 
 ## 整合结果
 
 - 保留 `skill-creator` 作为唯一入口名称，避免资源发现时出现两个功能高度重叠的 skill。
 - 把原 `agent-skill-creator` 的 `references/`、`scripts/`、示例和上游入口文档并入当前目录。
-- 把原本偏本地规范的 `skill-creator` 能力整理为 `references/g3ku-resource-spec.md`，作为 G3KU 资源结构参考。
-- 主 `SKILL.md` 改为集成版入口：先判断目标是 G3KU skill、G3KU tool，还是需要额外导出的开放标准 skill。
+- 把原本偏本地规范的 `skill-creator` 能力整理为 `references/g3ku-resource-spec.md`，作为 Negi 资源结构参考。
+- 主 `SKILL.md` 改为集成版入口：先判断目标是 Negi skill、Negi tool，还是需要额外导出的开放标准 skill。
 
 ## 有意保留的上游痕迹
 

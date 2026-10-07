@@ -1,4 +1,4 @@
-# G3KU Agent Instructions
+# Negi Agent Instructions
 
 This repository is designed to be maintainable by agents with little or no prior context. Treat this file as the default entrypoint for understanding how to work in the codebase.
 
@@ -102,7 +102,9 @@ The product is displayed as **Negi**; the code keeps the legacy `g3ku` spelling,
 
 - The repo path and every URL built from it, including `$RepoName` in `install.ps1` / `install.sh` and the default install directory `~/G3KU-Agent`.
 - Protocol markers matched literally by the runtime: `[G3KU_STAGE_*]`, `[G3KU_SILENT`, `[G3KU_TOKEN_COMPACT_V2]`, `### G3KU_PATCH_METADATA ###`, `### G3KU_PATCH_DIFF ###`.
-- `G3KU_*` environment variables (57 of them).
+- `G3KU_*` environment variables (50 named in code today, plus any config field, because the
+  root settings model declares `env_prefix="G3KU_"` — the set is open-ended, don't treat the
+  count as a list to migrate).
 - The data root directory name `.g3ku`.
 - Outbound contract strings: `MODEL_ID = "g3ku"`, `owned_by`, the `g3ku` key in OpenAI-compatible responses, the MCP server name and `g3ku_*` tool names, and the `x-g3ku-internal-token` header.
 - Frontend storage keys such as `g3ku.audit.last-seen.v1`.
