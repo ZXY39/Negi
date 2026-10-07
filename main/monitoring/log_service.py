@@ -74,6 +74,10 @@ from main.runtime.append_notice_context import (
     roll_append_notice_context_for_compression_stage,
 )
 from main.runtime.chat_backend import build_actual_request_diagnostics
+from main.runtime.internal_tools import (
+    keep_contracts_require_drop_error,
+    normalize_keep_contract_names,
+)
 from main.runtime.send_token_preflight import (
     build_runtime_estimated_input_truth,
     build_runtime_observed_input_truth,
@@ -3194,7 +3198,11 @@ class TaskLogService:
         key_refs: list[dict[str, Any]] | None = None,
         final: bool = False,
         drop_completed_stage_tool_detail: bool = False,
+        keep_tools: list[str] | None = None,
+        keep_skills: list[str] | None = None,
     ) -> dict[str, Any]:
+        normalized_keep_tools = normalize_keep_contract_names(keep_tools)
+        normalized_keep_skills = normalize_keep_contract_names(keep_skills)
         with self._task_lock(task_id):
             task = self._require_task(task_id)
             node = self._store.get_node(node_id)
@@ -3214,6 +3222,12 @@ class TaskLogService:
                 raise ValueError(
                     f'tool_round_budget must not exceed {STAGE_TOOL_ROUND_BUDGET_MAX}'
                 )
+            # 与 `drop requires non-empty summary` 同一处再收一次：绕过工具层的写入者
+            # （恢复重放、内部补开阶段）也不能把 `keep_*` 落在一条不裁撤的阶段上——那是一句
+            # 空承诺，名字无处可写，模型却会按"留住了"行事。
+            keep_gate_error = keep_contracts_require_drop_error(normalized_keep_tools, normalized_keep_skills)
+            if keep_gate_error and not drop_completed_stage_tool_detail:
+                raise ValueError(keep_gate_error)
             state = self._execution_stage_state(node)
             active = self._active_execution_stage(state)
             if (

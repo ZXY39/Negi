@@ -106,7 +106,12 @@ from main.runtime.chat_backend import (
     build_prompt_cache_diagnostics,
     resolve_send_model_context_window_info,
 )
-from main.runtime.internal_tools import SilentTool, SubmitNextStageTool
+from main.runtime.internal_tools import (
+    SubmitNextStageTool,
+    SilentTool,
+    keep_contracts_require_drop_error,
+    normalize_keep_contract_names,
+)
 from main.runtime.send_token_preflight import (
     build_runtime_estimated_input_truth,
     build_runtime_hybrid_send_token_estimate,
@@ -5356,6 +5361,8 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
         closing_stage_id = self._frontdoor_closing_stage_id(stage_state)
         normalized_summary = str(arguments.get("completed_stage_summary") or "").strip()
         drop_detail = bool(arguments.get("drop_completed_stage_tool_detail"))
+        keep_tools = normalize_keep_contract_names(arguments.get("keep_tools"))
+        keep_skills = normalize_keep_contract_names(arguments.get("keep_skills"))
         next_state, next_stage = self._submit_frontdoor_next_stage_state(
             stage_state,
             stage_goal=str(arguments.get("stage_goal") or ""),
@@ -5370,6 +5377,8 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
             preamble_text=preamble_text,
             system_generated=system_generated,
             drop_completed_stage_tool_detail=drop_detail,
+            keep_tools=keep_tools,
+            keep_skills=keep_skills,
         )
         if drop_detail and archive:
             self._frontdoor_archive_evicted_stage(
@@ -5420,18 +5429,27 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
         preamble_text: str = "",
         system_generated: bool = False,
         drop_completed_stage_tool_detail: bool = False,
+        keep_tools: list[str] | None = None,
+        keep_skills: list[str] | None = None,
     ) -> tuple[dict[str, Any], dict[str, Any]]:
         normalized_state = cls._frontdoor_stage_state_snapshot({"frontdoor_stage_state": stage_state})
         normalized_goal = str(stage_goal or "").strip()
         normalized_budget = max(STAGE_TOOL_ROUND_BUDGET_MIN, int(tool_round_budget or 0))
         normalized_summary = str(completed_stage_summary or "").strip()
         normalized_key_refs = [dict(item) for item in list(key_refs or []) if isinstance(item, dict)]
+        normalized_keep_tools = normalize_keep_contract_names(keep_tools)
+        normalized_keep_skills = normalize_keep_contract_names(keep_skills)
         if not normalized_goal:
             raise ValueError("stage_goal must not be empty")
         if normalized_budget > STAGE_TOOL_ROUND_BUDGET_MAX:
             raise ValueError(
                 f"tool_round_budget must not exceed {STAGE_TOOL_ROUND_BUDGET_MAX}"
             )
+        # 与 `drop requires non-empty summary` 同一处再收一次：绕过工具层的写入者不能
+        # 造出「名字收下了、正文无处可写」的空承诺态。
+        keep_gate_error = keep_contracts_require_drop_error(normalized_keep_tools, normalized_keep_skills)
+        if keep_gate_error and not drop_completed_stage_tool_detail:
+            raise ValueError(keep_gate_error)
 
         active_stage_id = str(normalized_state.get("active_stage_id") or "").strip()
         active_stage = next(
@@ -6343,6 +6361,8 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
             key_refs: list[dict[str, Any]] | None = None,
             final: bool = False,
             drop_completed_stage_tool_detail: bool = False,
+            keep_tools: list[str] | None = None,
+            keep_skills: list[str] | None = None,
         ) -> dict[str, Any]:
             # 与 durable 侧重建共用同一个入口，差别只在 `archive=False`：归档要落在
             # durable 账本那一步，写在一份会被覆盖掉的工作副本上只会多留一份没人引用的文件。
@@ -6356,6 +6376,8 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
                     "key_refs": key_refs or [],
                     "final": final,
                     "drop_completed_stage_tool_detail": drop_completed_stage_tool_detail,
+                    "keep_tools": list(keep_tools or []),
+                    "keep_skills": list(keep_skills or []),
                 },
                 preamble_text=str(state.get("analysis_text") or "").strip(),
                 archive=False,

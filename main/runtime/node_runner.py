@@ -3847,7 +3847,7 @@ class NodeRunner:
         tools = dict(self._tool_provider(node) or {})
         if node.node_kind in {KIND_EXECUTION, KIND_ACCEPTANCE}:
             tools['submit_next_stage'] = SubmitNextStageTool(
-                lambda stage_goal, tool_round_budget, completed_stage_summary, key_refs, final, drop_completed_stage_tool_detail: self._submit_next_stage(
+                lambda stage_goal, tool_round_budget, completed_stage_summary, key_refs, final, drop_completed_stage_tool_detail, **keep_contracts: self._submit_next_stage(
                     task_id=task.task_id,
                     node_id=node.node_id,
                     stage_goal=stage_goal,
@@ -3856,6 +3856,7 @@ class NodeRunner:
                     key_refs=key_refs,
                     final=final,
                     drop_completed_stage_tool_detail=drop_completed_stage_tool_detail,
+                    **keep_contracts,
                 )
             )
             tools['submit_final_result'] = SubmitFinalResultTool(
@@ -7230,6 +7231,8 @@ class NodeRunner:
         key_refs: list[dict[str, Any]],
         final: bool,
         drop_completed_stage_tool_detail: bool = False,
+        keep_tools: list[str] | None = None,
+        keep_skills: list[str] | None = None,
     ) -> dict[str, Any]:
         stage = self._log_service.submit_next_stage(
             task_id,
@@ -7240,6 +7243,8 @@ class NodeRunner:
             key_refs=[dict(item) for item in list(key_refs or []) if isinstance(item, dict)],
             final=False,
             drop_completed_stage_tool_detail=bool(drop_completed_stage_tool_detail),
+            keep_tools=list(keep_tools or []),
+            keep_skills=list(keep_skills or []),
         )
         result = {
             'stage_id': str(stage.get('stage_id') or ''),
