@@ -53,6 +53,10 @@ class CeoPersistentState(TypedDict, total=False):
 
     hydrated_tool_names: list[str]
 
+    # 契约不在场而被撤销水合的名字。与 `hydrated_tool_names` 分开记：撤销原因（正文离开
+    # 上下文）和 LRU 淘汰是两种账，混在一起下次就分不出账。
+    hydration_revoked_executor_names: list[str]
+
     visible_skill_ids: list[str]
 
     candidate_skill_ids: list[str]
@@ -244,6 +248,7 @@ def initial_persistent_state(*, user_input: Any) -> dict[str, Any]:
         "candidate_tool_items": [],
 
         "hydrated_tool_names": [],
+        "hydration_revoked_executor_names": [],
 
         "visible_skill_ids": [],
 

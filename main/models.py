@@ -148,6 +148,19 @@ class ExecutionStageKeyRef(Model):
     note: str = ''
 
 
+class ExecutionStageKeptToolContext(Model):
+    """阶段肉身被裁撤时留在阶段块里的契约正文快照。
+
+    来源是**提交点一次性快照**（刀二写入）：渲染只回放账本，绝不每轮重读资源文件，否则
+    运营者改一次 toolskill 就改动块字节，而块在中间位置 ⇒ 它之后的前缀全断。
+    在场判据只认 ``tool_id`` + ``tool_context_fingerprint``，``body`` 是给渲染用的。
+    """
+
+    tool_id: str = ''
+    tool_context_fingerprint: str = ''
+    body: str = ''
+
+
 class ExecutionStageRecord(Model):
     stage_id: str = ''
     stage_index: int = 0
@@ -168,6 +181,7 @@ class ExecutionStageRecord(Model):
     # 写出前提是 completed_stage_summary 非空，由提交点校验，不在此处兜底。
     context_evicted: bool = False
     key_refs: list[ExecutionStageKeyRef] = Field(default_factory=list)
+    kept_tool_contexts: list[ExecutionStageKeptToolContext] = Field(default_factory=list)
     archive_ref: str = ''
     archive_stage_index_start: int = 0
     archive_stage_index_end: int = 0
@@ -180,12 +194,14 @@ class ExecutionStageRecord(Model):
     @model_serializer(mode='wrap')
     def _serialize_omitting_visible_flag(self, handler: Any) -> dict[str, Any]:
         """落盘只写"已收口 / 已裁撤"这一侧：两者默认态都是 True/False 的"未发生"，
-        逐条写等于给每条阶段都加一份体积。"""
+        逐条写等于给每条阶段都加一份体积。保留契约同口径——空列表不写。"""
         payload = handler(self)
         if payload.get('context_visible') is not False:
             payload.pop('context_visible', None)
         if payload.get('context_evicted') is not True:
             payload.pop('context_evicted', None)
+        if not payload.get('kept_tool_contexts'):
+            payload.pop('kept_tool_contexts', None)
         return payload
 
 

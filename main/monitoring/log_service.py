@@ -461,6 +461,8 @@ class TaskLogService:
             'model_visible_tool_names': [],
             'provider_tool_names': [],
             'hydrated_executor_names': [],
+            'hydration_revoked_executor_names': [],
+            'hydration_evicted_executor_names': [],
             'lightweight_tool_ids': [],
             'model_visible_tool_selection_trace': {},
             'exec_runtime_policy': {},
@@ -561,6 +563,12 @@ class TaskLogService:
                 or []
             ),
             'hydrated_executor_names': cls._normalized_name_list(snapshot.get('hydrated_executor_names') or []),
+            'hydration_revoked_executor_names': cls._normalized_name_list(
+                snapshot.get('hydration_revoked_executor_names') or []
+            ),
+            'hydration_evicted_executor_names': cls._normalized_name_list(
+                snapshot.get('hydration_evicted_executor_names') or []
+            ),
             'lightweight_tool_ids': cls._normalized_name_list(snapshot.get('lightweight_tool_ids') or []),
             'provider_tool_bundle_seeded': bool(snapshot.get('provider_tool_bundle_seeded')),
             'model_visible_tool_selection_trace': dict(snapshot.get('model_visible_tool_selection_trace') or {}),
@@ -621,6 +629,8 @@ class TaskLogService:
                     or []
                 ),
                 'hydrated_executor_names': list(frame.get('hydrated_executor_names') or []),
+                'hydration_revoked_executor_names': list(frame.get('hydration_revoked_executor_names') or []),
+                'hydration_evicted_executor_names': list(frame.get('hydration_evicted_executor_names') or []),
                 'lightweight_tool_ids': list(frame.get('lightweight_tool_ids') or []),
                 'provider_tool_bundle_seeded': bool(
                     dict(frame.get('model_visible_tool_selection_trace') or {}).get('provider_tool_bundle_seeded')
@@ -5227,6 +5237,16 @@ class TaskLogService:
                     for item in list(next_frame.get('hydrated_executor_names') or [])
                     if str(item or '').strip()
                 ],
+                'hydration_revoked_executor_names': [
+                    str(item or '').strip()
+                    for item in list(next_frame.get('hydration_revoked_executor_names') or [])
+                    if str(item or '').strip()
+                ],
+                'hydration_evicted_executor_names': [
+                    str(item or '').strip()
+                    for item in list(next_frame.get('hydration_evicted_executor_names') or [])
+                    if str(item or '').strip()
+                ],
                 'lightweight_tool_ids': [
                     str(item or '').strip()
                     for item in list(next_frame.get('lightweight_tool_ids') or [])
@@ -5437,6 +5457,16 @@ class TaskLogService:
             'hydrated_executor_names': [
                 str(item or '').strip()
                 for item in list(payload.get('hydrated_executor_names') or [])
+                if str(item or '').strip()
+            ],
+            'hydration_revoked_executor_names': [
+                str(item or '').strip()
+                for item in list(payload.get('hydration_revoked_executor_names') or [])
+                if str(item or '').strip()
+            ],
+            'hydration_evicted_executor_names': [
+                str(item or '').strip()
+                for item in list(payload.get('hydration_evicted_executor_names') or [])
                 if str(item or '').strip()
             ],
             'lightweight_tool_ids': [
@@ -6214,6 +6244,16 @@ class TaskLogService:
                 for item in list(payload.get('hydrated_executor_names') or [])
                 if str(item or '').strip()
             ],
+            'hydration_revoked_executor_names': [
+                str(item or '').strip()
+                for item in list(payload.get('hydration_revoked_executor_names') or [])
+                if str(item or '').strip()
+            ],
+            'hydration_evicted_executor_names': [
+                str(item or '').strip()
+                for item in list(payload.get('hydration_evicted_executor_names') or [])
+                if str(item or '').strip()
+            ],
             'lightweight_tool_ids': [
                 str(item or '').strip()
                 for item in list(payload.get('lightweight_tool_ids') or [])
@@ -6305,6 +6345,16 @@ class TaskLogService:
             'hydrated_executor_names': [
                 str(item or '').strip()
                 for item in list(payload.get('hydrated_executor_names') or [])
+                if str(item or '').strip()
+            ],
+            'hydration_revoked_executor_names': [
+                str(item or '').strip()
+                for item in list(payload.get('hydration_revoked_executor_names') or [])
+                if str(item or '').strip()
+            ],
+            'hydration_evicted_executor_names': [
+                str(item or '').strip()
+                for item in list(payload.get('hydration_evicted_executor_names') or [])
                 if str(item or '').strip()
             ],
             'lightweight_tool_ids': [

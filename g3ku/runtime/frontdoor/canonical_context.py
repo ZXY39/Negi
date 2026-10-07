@@ -5,6 +5,8 @@ import hashlib
 import json
 from typing import Any
 
+from g3ku.runtime.tool_context_presence import normalize_kept_tool_contexts
+
 RAW_REPRESENTATION = "raw"
 COMPACT_REPRESENTATION = "compact"
 EXTERNALIZED_REPRESENTATION = "externalized"
@@ -158,6 +160,11 @@ def _normalize_stage(stage: Any, *, fallback_index: int) -> dict[str, Any]:
     # 裁撤标记同样必须穿过这份白名单，且只在成立时落字段（缺失即未裁撤）。
     if current.get("context_evicted") is True:
         normalized_stage["context_evicted"] = True
+    # 保留契约正文是在场判据的第二个载体，漏白名单等于逐轮被抹掉（与 `context_visible`
+    # 同一条教训）。空列表不写：正文只在被点名裁撤的阶段上才存在。
+    kept_tool_contexts = normalize_kept_tool_contexts(current.get("kept_tool_contexts"))
+    if kept_tool_contexts:
+        normalized_stage["kept_tool_contexts"] = kept_tool_contexts
     return normalized_stage
 
 
@@ -295,6 +302,8 @@ def _completed_stage_overlap_signature(stage: Any) -> str:
     # 不改变"这是哪一条阶段"。
     current.pop("context_visible", None)
     current.pop("context_evicted", None)
+    # 保留正文同理不得进入重叠签名：它只决定"这一跳契约算不算在场"，不决定"这是哪一条阶段"。
+    current.pop("kept_tool_contexts", None)
     return json.dumps(current, ensure_ascii=False, sort_keys=True)
 
 

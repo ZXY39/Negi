@@ -40,6 +40,11 @@ from g3ku.runtime.context.node_context_selection import (
 from g3ku.runtime.context.summarizer import layered_body_payload, score_query
 from g3ku.runtime.core_tools import configured_core_tools, resolve_core_tool_targets
 from g3ku.runtime.memory_scope import DEFAULT_WEB_MEMORY_SCOPE, normalize_memory_scope
+from g3ku.runtime.tool_context_presence import (
+    contract_presence_index,
+    kept_tool_contexts_from_frames,
+    partition_contract_presence,
+)
 from g3ku.runtime.tool_visibility import (
     NODE_FIXED_BUILTIN_TOOL_NAMES,
     fixed_builtin_tool_name_set_for_actor_role,
@@ -677,6 +682,7 @@ class MainRuntimeService:
         react_loop._adaptive_tool_budget_controller = self.adaptive_tool_budget_controller
         react_loop._model_visible_tool_schema_selector = self._select_model_visible_tool_schema_payload
         react_loop._tool_context_hydration_promoter = self._promote_tool_context_hydration
+        react_loop._tool_contract_presence_revoker = self.revoke_contract_absent_node_hydration
         self._pending_task_delete_confirmations: dict[str, dict[str, Any]] = {}
         self._react_loop = react_loop
         initial_execution_routes = self._initial_model_routes(app_config, 'execution')
@@ -7313,6 +7319,18 @@ class MainRuntimeService:
             next_frame['hydrated_executor_state'] = list(hydrated_state)
             next_frame['hydrated_executor_names'] = list(hydrated_state)
             next_frame['hydration_evicted_executor_names'] = list(evicted)
+            # 重新 load 成功就是"正文回到这一跳"，撤销记录必须一并清掉，否则下一跳
+            # 仍按上一跳的缺席结论把它挡在 callable 外。
+            pending_revoked = self._normalized_hydrated_executor_names(
+                next_frame.get('hydration_revoked_executor_names') or []
+            )
+            if pending_revoked:
+                promoted_name_set = {str(name or '').strip() for name in list(promoted_executor_names or [])}
+                kept_revoked = [name for name in pending_revoked if name not in promoted_name_set]
+                if kept_revoked:
+                    next_frame['hydration_revoked_executor_names'] = kept_revoked
+                else:
+                    next_frame.pop('hydration_revoked_executor_names', None)
             return next_frame
 
         update_frame(str(task_id or '').strip(), str(node_id or '').strip(), _mutate, publish_snapshot=True)
@@ -7335,7 +7353,19 @@ class MainRuntimeService:
         node_id: str,
         actor_role: str,
         session_id: str,
+        request_messages: list[dict[str, Any]] | None = None,
+        kept_stage_contexts: Any = None,
     ) -> list[str]:
+        """本轮可调用的已水合执行器名。
+
+        RBAC 之后再过一道**契约在场判据**：正文不在当次请求视图里的名字要从台账里摘掉，
+        而不只是从视图里收窄。只收窄视图会造出文档禁止的第 4 态——该名字既不在 callable、
+        又被 candidate 的「排除已提升」规则挡在门外，模型 load 它只会拿到没有出口的
+        `already_hydrated`。
+
+        `request_messages=None` 表示调用方手上没有当次请求视图（例如对象字典构建），此时
+        照台账返回：撤销由带视图的那次调用落台账，下一跳自然生效。
+        """
         log_service = getattr(self, 'log_service', None)
         read_runtime_frame = getattr(log_service, 'read_runtime_frame', None)
         if not callable(read_runtime_frame):
@@ -7348,13 +7378,118 @@ class MainRuntimeService:
         }
         raw_hydrated_names = list(frame.get('hydrated_executor_state') or []) or list(frame.get('hydrated_executor_names') or [])
         if not visible_tool_names:
-            return self._normalized_hydrated_executor_names(raw_hydrated_names)
-        hydrated: list[str] = []
-        for raw_name in raw_hydrated_names:
-            name = str(raw_name or '').strip()
-            if name and name in visible_tool_names and name not in hydrated:
-                hydrated.append(name)
-        return hydrated
+            hydrated = self._normalized_hydrated_executor_names(raw_hydrated_names)
+        else:
+            hydrated: list[str] = []
+            for raw_name in raw_hydrated_names:
+                name = str(raw_name or '').strip()
+                if name and name in visible_tool_names and name not in hydrated:
+                    hydrated.append(name)
+        if request_messages is None:
+            return hydrated
+        present, absent = partition_contract_presence(
+            hydrated,
+            index=contract_presence_index(
+                request_messages=request_messages,
+                kept_stage_contexts=kept_stage_contexts or [],
+            ),
+        )
+        if absent:
+            self._revoke_node_hydration_for_absent_contracts(
+                task_id=str(task_id or '').strip(),
+                node_id=str(node_id or '').strip(),
+                revoked_executor_names=absent,
+            )
+        return present
+
+    @staticmethod
+    def _node_stage_kept_tool_contexts(node: Any) -> list[dict[str, Any]]:
+        """节点阶段台账里保留下来的契约正文（在场判据的第二个载体）。
+
+        阶段账本的家在 `node.metadata['execution_stages']`，不在 runtime frame：帧的白名单
+        不收这个键，去帧里读会永远读出空、裁撤过的正文于是永远判成不在场。
+        """
+        metadata = getattr(node, 'metadata', None)
+        if not isinstance(metadata, dict):
+            return []
+        return kept_tool_contexts_from_frames(metadata.get('execution_stages'))
+
+    def _revoke_node_hydration_for_absent_contracts(
+        self,
+        *,
+        task_id: str,
+        node_id: str,
+        revoked_executor_names: list[str],
+    ) -> None:
+        """把契约不在场的水合名回写台账：从 `hydrated_executor_state` 摘掉、记进
+        `hydration_revoked_executor_names`。
+
+        撤销原因必须**另起一个字段**，不复用 `hydration_evicted_executor_names`：LRU 淘汰
+        与契约撤销是两种原因，混在一起下次就分不出账。
+        """
+        log_service = getattr(self, 'log_service', None)
+        update_frame = getattr(log_service, 'update_frame', None)
+        if not callable(update_frame) or not list(revoked_executor_names or []):
+            return
+        revoked = {str(name or '').strip() for name in list(revoked_executor_names or []) if str(name or '').strip()}
+        if not revoked:
+            return
+
+        def _mutate(frame: dict[str, Any]) -> dict[str, Any]:
+            next_frame = dict(frame or {})
+            for state_key in ('hydrated_executor_state', 'hydrated_executor_names'):
+                next_frame[state_key] = [
+                    name
+                    for name in self._normalized_hydrated_executor_names(next_frame.get(state_key) or [])
+                    if str(name or '').strip() not in revoked
+                ]
+            recorded = self._normalized_hydrated_executor_names(next_frame.get('hydration_revoked_executor_names') or [])
+            for name in sorted(revoked):
+                if name not in recorded:
+                    recorded.append(name)
+            next_frame['hydration_revoked_executor_names'] = recorded
+            return next_frame
+
+        try:
+            update_frame(str(task_id or '').strip(), str(node_id or '').strip(), _mutate, publish_snapshot=False)
+        except Exception:
+            # 台账回写失败不能把本轮 callable 判据打回原样：宁可调不到，不可无契约可调。
+            return
+        self._clear_node_context_selection(task_id=str(task_id or '').strip(), node_id=str(node_id or '').strip())
+
+    def revoke_contract_absent_node_hydration(
+        self,
+        *,
+        task_id: str,
+        node_id: str,
+        actor_role: str,
+        session_id: str,
+        request_messages: list[dict[str, Any]],
+        kept_stage_contexts: Any = None,
+        node: Any = None,
+    ) -> list[str]:
+        """按**当次请求视图**判在场并回写台账，返回这一跳仍然在场的水合名。
+
+        唯一带请求视图的调用点在 `react_loop` 里（请求组装完、写帧之前）。判据必须用请求
+        视图而不是帧里存着的上一跳正文：阶段裁撤只作用在渲染出来的请求上，台账里的正文
+        照旧留着，拿台账判会永远判成"在场"。
+
+        撤销从这一跳起对**下一跳**生效：同批已派发的工具照旧执行完，与 `drop` 要账本结清
+        才落标记的既有闸门同口径。
+        """
+        effective_kept_contexts = (
+            kept_stage_contexts
+            if kept_stage_contexts is not None
+            else self._node_stage_kept_tool_contexts(node)
+        )
+        return self._node_hydrated_executor_names(
+            task_id=task_id,
+            node_id=node_id,
+            actor_role=actor_role,
+            session_id=session_id,
+            request_messages=list(request_messages or []),
+            kept_stage_contexts=effective_kept_contexts,
+        )
 
     def _callable_tool_names_for_node(
         self,
@@ -7362,6 +7497,8 @@ class MainRuntimeService:
         task,
         node: Any,
         visible_tool_names: list[str] | None = None,
+        request_messages: list[dict[str, Any]] | None = None,
+        kept_stage_contexts: Any = None,
     ) -> list[str]:
         session_id = str(getattr(task, 'session_id', '') or 'web:shared').strip() or 'web:shared'
         actor_role = self._actor_role_for_node(node)
@@ -7382,11 +7519,18 @@ class MainRuntimeService:
             if name not in seen:
                 callable_names.append(name)
                 seen.add(name)
+        effective_kept_stage_contexts = (
+            kept_stage_contexts
+            if kept_stage_contexts is not None
+            else self._node_stage_kept_tool_contexts(node)
+        )
         for name in self._node_hydrated_executor_names(
             task_id=str(getattr(task, 'task_id', '') or getattr(node, 'task_id', '') or '').strip(),
             node_id=str(getattr(node, 'node_id', '') or '').strip(),
             actor_role=actor_role,
             session_id=session_id,
+            request_messages=request_messages,
+            kept_stage_contexts=effective_kept_stage_contexts,
         ):
             if name not in seen:
                 callable_names.append(name)

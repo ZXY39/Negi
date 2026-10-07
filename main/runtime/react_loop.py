@@ -19,6 +19,7 @@ from loguru import logger
 from g3ku.agent.tools.base import Tool
 from g3ku.content import content_summary_and_ref, parse_content_envelope
 from g3ku.providers.base import ToolCallRequest
+from g3ku.runtime.tool_context_presence import kept_contract_index, kept_tool_contexts_from_frames
 from g3ku.runtime.tool_error_guidance import (
     append_parameter_error_guidance,
     availability_hint,
@@ -698,8 +699,30 @@ class ReActToolLoop:
             # runtime_service._promote_tool_context_hydration（它负责 LRU 与淘汰记录）。
             # 这里只把它带过本帧：用它本轮的 promoted 视图覆写，会让任何一次曝光收窄
             # （RBAC 抖动、对象字典塌缩）永久抹掉台账，而 names 才是本轮视图。
+            #
+            # 契约在场撤销在同一条道上回写台账，但判据取的是**本轮真实请求视图**
+            # （request_messages，已随阶段裁撤/压缩收口）而不是本轮 promoted 视图：
+            # promoted 视图是台账减 RBAC 的结果，它不知道正文还在不在。
+            contract_revoker = getattr(self, '_tool_contract_presence_revoker', None)
+            if callable(contract_revoker):
+                try:
+                    contract_revoker(
+                        task_id=str(task.task_id or ''),
+                        node_id=str(node.node_id or ''),
+                        actor_role=str((runtime_context or {}).get('actor_role') or '').strip(),
+                        session_id=str((runtime_context or {}).get('session_key') or '').strip(),
+                        request_messages=list(request_messages or []),
+                        node=node,
+                    )
+                except Exception:
+                    # 判据跑不起来就照旧不撤：撤销是收紧，不是本轮的可用性前提。
+                    pass
+            prior_frame_for_hydration = self._runtime_frame(task.task_id, node.node_id) or {}
             prior_hydrated_state = self._normalized_name_list(
-                list((self._runtime_frame(task.task_id, node.node_id) or {}).get('hydrated_executor_state') or [])
+                list(prior_frame_for_hydration.get('hydrated_executor_state') or [])
+            )
+            prior_revoked_state = self._normalized_name_list(
+                list(prior_frame_for_hydration.get('hydration_revoked_executor_names') or [])
             )
             self._log_service.upsert_frame(
                 task.task_id,
@@ -742,6 +765,7 @@ class ReActToolLoop:
                     'rbac_visible_skill_ids': list(selected_skill_ids),
                     'lightweight_tool_ids': list(tool_schema_selection.get('lightweight_tool_ids') or []),
                     'hydrated_executor_state': prior_hydrated_state,
+                    'hydration_revoked_executor_names': prior_revoked_state,
                     'hydrated_executor_names': list(tool_schema_selection.get('hydrated_executor_names') or []),
                     'model_visible_tool_names': list(tool_schema_selection.get('tool_names') or list(model_visible_tools.keys())),
                     'provider_tool_names': list(provider_tool_names),
@@ -6907,7 +6931,14 @@ class ReActToolLoop:
     def _latest_load_tool_context_messages_by_tool_id(
         cls,
         messages: list[dict[str, Any]],
+        *,
+        kept_stage_contexts: Any = None,
     ) -> dict[str, dict[str, Any]]:
+        """在场的 toolskill 契约载体，与 callable 收窄共用同一判据。
+
+        除了未压缩的 loader 结果行，阶段块里保留的正文（`kept_tool_contexts`）同样算
+        在场。两处必须同判据，否则裁撤后重读被放行、同一份正文在上下文里出现两次。
+        """
         latest: dict[str, dict[str, Any]] = {}
         for message in reversed(list(messages or [])):
             if not isinstance(message, dict):
@@ -6925,6 +6956,18 @@ class ReActToolLoop:
             if not tool_id or not fingerprint or tool_id in latest:
                 continue
             latest[tool_id] = dict(message or {})
+        for tool_id, fingerprint in kept_contract_index(kept_stage_contexts).items():
+            if not tool_id or not fingerprint or tool_id in latest:
+                continue
+            latest[tool_id] = {
+                "role": "tool",
+                "name": "load_tool_context",
+                "content": json.dumps(
+                    {"ok": True, "tool_id": tool_id, "tool_context_fingerprint": fingerprint},
+                    ensure_ascii=False,
+                ),
+                "carried_by": "kept_stage_context",
+            }
         return latest
 
     @staticmethod
@@ -6990,7 +7033,12 @@ class ReActToolLoop:
                 list(runtime_context.get("rbac_visible_tool_names") or current_frame.get("rbac_visible_tool_names") or [])
             )
         )
-        latest_messages = self._latest_load_tool_context_messages_by_tool_id(message_history)
+        latest_messages = self._latest_load_tool_context_messages_by_tool_id(
+            message_history,
+            kept_stage_contexts=kept_tool_contexts_from_frames(
+                (getattr(node, "metadata", None) or {}).get("execution_stages")
+            ),
+        )
         base_probe = {
             "recorded_at": now_iso(),
             "stage": "load_tool_context_direct_read_violations",

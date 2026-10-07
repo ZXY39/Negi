@@ -1163,6 +1163,9 @@ def _normalized_completed_continuity_snapshot(payload: Any) -> dict[str, Any] | 
         "compression_state": dict(payload.get("compression_state") or {}),
         "semantic_context_state": dict(payload.get("semantic_context_state") or {}),
         "hydrated_tool_names": _normalized_name_list(payload.get("hydrated_tool_names")),
+        "hydration_revoked_executor_names": _normalized_name_list(
+            payload.get("hydration_revoked_executor_names")
+        ),
         "capability_snapshot_exposure_revision": str(payload.get("capability_snapshot_exposure_revision") or "").strip(),
         "visible_tool_ids": _normalized_name_list(payload.get("visible_tool_ids")),
         "visible_skill_ids": _normalized_name_list(payload.get("visible_skill_ids")),
