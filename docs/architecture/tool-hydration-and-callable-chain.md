@@ -18,7 +18,7 @@
 ### 契约在场与撤销
 
 - 不变量：某工具在这一跳能不能被调用，取决于它的 toolskill 契约正文在这一跳是不是在场。判据只有一个函数（`g3ku/runtime/tool_context_presence.py`），两条车道共用；判据缺失（调用方压根没交当次请求视图）时**不撤销**——读不到不等于不在场，凭"读不到"摘能力比少收一轮危险。
-- 在场证据有两个载体：未被压缩也未被裁撤删除的 `load_tool_context` 结果行，以及阶段块里被 `keep_tools` 点名留下的 `kept_tool_contexts` 正文。重复读守卫读同一判据，所以块里已有正文时再 load 判成重读，否则同一份正文会在上下文里出现两份。`load_skill_context` 的正文同样随裁撤/压缩离开上下文，但 skill 不进水合台账，撤销与它无关。
+- 在场证据有两个载体：未被压缩也未被裁撤删除的 `load_tool_context` 结果行，以及阶段块里被 `keep_tools` 点名留下的 `kept_tool_contexts` 正文。第二个载体的取数在节点侧**按 node_id 重读节点记录**（`_node_stage_kept_tool_contexts`）：正文是同一条 `submit_next_stage` 才写进 `node.metadata['execution_stages']` 的，读循环开局那份节点对象等于把留住的正文读成空。重复读守卫读同一判据，所以块里已有正文时再 load 判成重读，否则同一份正文会在上下文里出现两份。`load_skill_context` 的正文同样随裁撤/压缩离开上下文，但 skill 不进水合台账，撤销与它无关。
 - 撤销从下一跳起生效，同批已派发执行的照常执行完；点名裁撤的那一批就是"下一跳"的起点，所以台账写回必须落在**阶段账本落地之后**的那份视图上（裁后的消息 + 带 `context_evicted` 与 `kept_tool_contexts` 的账本）。写回与渲染/派发分家会造出本文禁止的第四态：该名字既不在 `callable_tools`、又被"候选 = 治理可见 −（callable ∪ 已水合）"挡在 `candidate_tools` 之外，模型 load 它拿到没有正文的 `already_callable`，执行侧回 `tool not available`——这两句同时出现即说明读路径与写回又不同源。
 - 台账只有一个读口径（节点侧 `main/monitoring/log_service.py` 的 `_hydrated_ledger_state`）：`hydrated_executor_state` 缺省时回退到 `hydrated_executor_names`，而后者是本轮选择派生的 promoted 视图，它不知道正文在不在场 ⇒ 回退值必须再减一次撤销名单。少了这一减，撤销刚清空的台账下一次读就整份复活，同一条帧上会出现 `revoked` 与 `hydrated` 并列，选择、派发字典与节点详情全都读成"已水合且可调"。
 - 撤销掉的名字要能在**同一跳**回到候选，否则"重新 load 一次"就不是回合内的出路。前门的候选是回合初快照，所以写回里显式并名字并补 `candidate_tool_items` 条目；节点侧不用并——选择在本跳判据之后重算，候选 = 治理可见 −（callable ∪ 已水合）自然把它算回来。
