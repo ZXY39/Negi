@@ -31,6 +31,7 @@ os.environ.setdefault('G3KU_TASK_RUNTIME_ROLE', 'web')
 _SHUTDOWN_HOOKS_LOCK = threading.RLock()
 _SHUTDOWN_HOOKS_INSTALLED = False
 _RUNTIME_SHUTDOWN_LOOP: asyncio.AbstractEventLoop | None = None
+_RUNTIME_WARMUP_TASK: asyncio.Task | None = None
 
 
 async def _refresh_frontend_assets_in_background() -> None:
@@ -38,6 +39,13 @@ async def _refresh_frontend_assets_in_background() -> None:
         await asyncio.to_thread(ensure_frontend_vendor_assets)
     except Exception as exc:
         logger.warning("frontend asset sync skipped: {}", exc)
+
+
+async def _warm_web_runtime_services() -> None:
+    try:
+        await ensure_web_runtime_services()
+    except Exception as exc:
+        logger.warning('web runtime init on startup skipped: {}', exc)
 
 
 def _set_runtime_shutdown_loop(loop: asyncio.AbstractEventLoop | None) -> None:
@@ -106,6 +114,7 @@ async def lifespan(_app: FastAPI):
     _install_process_shutdown_hooks()
     _set_runtime_shutdown_loop(asyncio.get_running_loop())
     asset_refresh_task: asyncio.Task | None = None
+    global _RUNTIME_WARMUP_TASK
     try:
         try:
             if frontend_assets_available():
@@ -122,12 +131,20 @@ async def lifespan(_app: FastAPI):
 
         security = get_bootstrap_security_service()
         if security.is_unlocked():
-            try:
-                await ensure_web_runtime_services()
-            except Exception as exc:
-                logger.warning('web runtime init on startup skipped: {}', exc)
+            # uvicorn 要等 lifespan 走到 yield 才 bind 监听套接字，所以这里 await 的任何
+            # 东西都直接决定网页能不能打开。预热链末端会把排队中的补充消息派成完整
+            # 模型回合（实测一轮 25-30 秒、连轮数分钟，429 时更久），一旦被拖住端口就
+            # 永远不生效，而启动探活只会报"启动失败"。改后台执行：网页先起，就绪状态由
+            # /api/bootstrap/status 的 runtime/runtime_bootstrapping 字段表达。
+            _RUNTIME_WARMUP_TASK = asyncio.create_task(_warm_web_runtime_services())
         yield
     finally:
+        warmup_task = _RUNTIME_WARMUP_TASK
+        _RUNTIME_WARMUP_TASK = None
+        if warmup_task is not None and not warmup_task.done():
+            warmup_task.cancel()
+            with suppress(asyncio.CancelledError):
+                await warmup_task
         if asset_refresh_task is not None and not asset_refresh_task.done():
             asset_refresh_task.cancel()
             with suppress(asyncio.CancelledError):

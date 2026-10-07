@@ -154,6 +154,54 @@ def test_web_lifespan_attempts_env_auto_unlock_before_runtime_boot(monkeypatch) 
     assert calls == ["unlock"]
 
 
+def test_web_lifespan_yields_while_runtime_warmup_still_running(monkeypatch) -> None:
+    """预热链里的模型回合不许挡在 bind 之前。
+
+    uvicorn 只有在 lifespan 走到 yield 后才创建监听套接字，所以启动探活实际测的是
+    "预热链跑完了没有"。排队补充消息的 boot replay 会把消息派成完整模型回合，
+    一轮几十秒、429 时更久，网页因此永远打不开。
+    """
+    entered = asyncio.Event()
+    release = asyncio.Event()
+
+    async def _model_turn_warmup() -> None:
+        entered.set()
+        await release.wait()
+
+    async def _noop() -> None:
+        return None
+
+    class _Unlocked:
+        def is_unlocked(self) -> bool:
+            return True
+
+    monkeypatch.setattr(web_main, "frontend_assets_available", lambda: True)
+    monkeypatch.setattr(web_main, "ensure_frontend_vendor_assets", lambda: None)
+    monkeypatch.setattr(web_main, "auto_unlock_from_env", lambda **_: None)
+    monkeypatch.setattr(web_main, "get_bootstrap_security_service", lambda: _Unlocked())
+    monkeypatch.setattr(web_main, "ensure_web_runtime_services", lambda agent=None: _model_turn_warmup())
+    monkeypatch.setattr(web_main, "shutdown_web_runtime", lambda: _noop())
+
+    async def _drive() -> bool:
+        cm = web_main.lifespan(web_main.app)
+        entered_context = False
+        try:
+            await asyncio.wait_for(cm.__aenter__(), timeout=2)
+            entered_context = True
+            await asyncio.wait_for(entered.wait(), timeout=2)
+            task = web_main._RUNTIME_WARMUP_TASK
+            assert task is not None, "runtime warm-up must be scheduled, not awaited"
+            assert not task.done(), "warm-up must still be in flight when lifespan yields"
+            release.set()
+            await asyncio.wait_for(task, timeout=2)
+        finally:
+            if entered_context:
+                await asyncio.wait_for(cm.__aexit__(None, None, None), timeout=2)
+        return entered_context
+
+    assert asyncio.run(_drive()) is True
+
+
 def test_run_worker_runtime_uses_env_auto_unlock(monkeypatch, tmp_path: Path) -> None:
     calls: list[str] = []
     original_runtime_role = os.environ.get("G3KU_TASK_RUNTIME_ROLE")
