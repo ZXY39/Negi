@@ -39,6 +39,9 @@ FAILURE_TOOL_BODY_EMPTY = "tool_contract_body_empty"
 FAILURE_TOOL_REPAIR_REQUIRED = "tool_repair_required"
 FAILURE_SKILL_NOT_FOUND = "skill_resource_not_found"
 FAILURE_SKILL_BODY_EMPTY = "skill_body_empty"
+# 提交落点收到了名字、却没收到任何对应的快照交代（绕过工具层的写入者，如恢复重放）。
+# 这一条必须存在，否则"名字被接受 + 账本里没正文"就是模型读不到的空承诺。
+FAILURE_NOT_RESOLVED = "keep_not_resolved_at_submit"
 
 _EMPTY_FAMILY_REGISTRY: Any = None
 
@@ -57,6 +60,7 @@ KEEP_CONTRACT_FAILURE_REASON_TEXT = {
     FAILURE_TOOL_REPAIR_REQUIRED: "工具处于 repair-required 状态，正文不可用",
     FAILURE_SKILL_NOT_FOUND: "技能正文取不到（资源改名或已删除）",
     FAILURE_SKILL_BODY_EMPTY: "技能正文为空，留不下任何东西",
+    FAILURE_NOT_RESOLVED: "这次的提交落点没有做保留快照，正文一条都没写下，要用的话得重新 load",
 }
 
 
@@ -345,6 +349,52 @@ def _failure_reason_text(reason: Any) -> str:
     return f"{base}（{suffix}）" if suffix else base
 
 
+def _dedup_names(values: Any) -> list[str]:
+    collected: list[str] = []
+    for raw in list(values or []):
+        name = str(raw or "").strip()
+        if name and name not in collected:
+            collected.append(name)
+    return collected
+
+
+def complete_keep_snapshot(
+    snapshot: Any,
+    *,
+    keep_tools: Any = None,
+    keep_skills: Any = None,
+) -> dict[str, Any]:
+    """把提交落点收到的快照与模型点名的名字**对账**：没被交代过的补一条失败。
+
+    取一条契约只有两种结局——写了正文，或点名了失败原因。第三条路（名字收下、账本里既没
+    正文也没有原因）是模型读不到的空承诺，而它恰恰是绕过工具层的写入者最容易走进去的那条。
+    """
+    payload = dict(snapshot) if isinstance(snapshot, dict) else {}
+    tool_contexts = [item for item in list(payload.get("tool_contexts") or []) if isinstance(item, dict)]
+    skill_contexts = [item for item in list(payload.get("skill_contexts") or []) if isinstance(item, dict)]
+    failures = [item for item in list(payload.get("failures") or []) if isinstance(item, dict)]
+    accounted_tools = {str(item.get(TOOL_ID_FIELD) or "").strip() for item in tool_contexts}
+    accounted_skills = {str(item.get(SKILL_ID_FIELD) or "").strip() for item in skill_contexts}
+    failures = [dict(item) for item in failures]
+    for item in failures:
+        if str(item.get("kind") or "").strip() == "tool":
+            accounted_tools.add(str(item.get("name") or "").strip())
+        else:
+            accounted_skills.add(str(item.get("name") or "").strip())
+    for name in _dedup_names(keep_tools):
+        if name not in accounted_tools:
+            accounted_tools.add(name)
+            failures.append({"kind": "tool", "name": name, "reason": FAILURE_NOT_RESOLVED})
+    for name in _dedup_names(keep_skills):
+        if name not in accounted_skills:
+            accounted_skills.add(name)
+            failures.append({"kind": "skill", "name": name, "reason": FAILURE_NOT_RESOLVED})
+    payload["tool_contexts"] = tool_contexts
+    payload["skill_contexts"] = skill_contexts
+    payload["failures"] = failures
+    return payload
+
+
 def keep_closure_fields(snapshot: Any) -> dict[str, Any]:
     """`stage_closure` 回执里保留契约那部分，两车道共用同一份形状。
 
@@ -459,6 +509,7 @@ __all__ = [
     "SKILL_LOADER_TOOL_NAMES",
     "build_kept_contract_snapshot",
     "collect_stage_loader_names",
+    "complete_keep_snapshot",
     "keep_closure_fields",
     "keep_contract_name_error",
     "normalize_kept_skill_contexts",

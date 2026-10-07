@@ -708,6 +708,10 @@ class MainRuntimeService:
         )
         self._apply_model_route_plans(initial_execution_routes, initial_acceptance_routes, revision=0)
         self.node_runner._tool_snapshot_supplier = self._tool_watchdog_snapshot_supplier
+        # `keep_tools` 的保留正文与 `load_tool_context` 必须同一条渲染（同一家族解析、同一
+        # 份指纹输入），否则块内正文与重新 load 出来的指纹不一致，重复读守卫就认不出
+        # "这一跳已经在场"。与前门读 `main_task_service.get_tool_toolskill` 同一条通道。
+        self.node_runner._tool_toolskill_payload_getter = self.get_tool_toolskill
         self.node_runner.distribution_delivery_callback = self._deliver_distribution_message
         self.node_runner._tool_default_timeout_seconds = self._tool_default_timeout_seconds(app_config)
         self.task_actor_service = TaskActorService(

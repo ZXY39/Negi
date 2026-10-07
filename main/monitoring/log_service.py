@@ -21,12 +21,18 @@ from g3ku.content import (
     parse_content_envelope,
 )
 from g3ku.content.navigation import INLINE_CHAR_LIMIT
+from g3ku.runtime.kept_contract_snapshot import (
+    complete_keep_snapshot,
+    keep_closure_fields,
+    normalize_kept_skill_contexts,
+)
 from g3ku.runtime.stage_prompt_compaction import (
     STAGE_CLOSURE_INACTIVE_NOTES,
     build_stage_archive_document,
     closing_stage_target,
     stage_record_dict,
 )
+from g3ku.runtime.tool_context_presence import normalize_kept_tool_contexts
 from main.ids import new_stage_id, new_stage_round_id
 from main.models import (
     FAILURE_CLASS_BUSINESS_UNPASSED,
@@ -3200,9 +3206,20 @@ class TaskLogService:
         drop_completed_stage_tool_detail: bool = False,
         keep_tools: list[str] | None = None,
         keep_skills: list[str] | None = None,
+        kept_snapshot: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         normalized_keep_tools = normalize_keep_contract_names(keep_tools)
         normalized_keep_skills = normalize_keep_contract_names(keep_skills)
+        # 名字与正文对账：模型点名的每一条要么带着正文进来、要么带着失败原因进来，
+        # 第三条路（收下名字却什么都没写）是一条模型读不到的空承诺。取不到的那几条不写
+        # 条目、工具保持撤销态，这是安全方向。
+        kept_snapshot_payload = complete_keep_snapshot(
+            kept_snapshot,
+            keep_tools=normalized_keep_tools,
+            keep_skills=normalized_keep_skills,
+        )
+        normalized_kept_tool_contexts = normalize_kept_tool_contexts(kept_snapshot_payload.get("tool_contexts"))
+        normalized_kept_skill_contexts = normalize_kept_skill_contexts(kept_snapshot_payload.get("skill_contexts"))
         with self._task_lock(task_id):
             task = self._require_task(task_id)
             node = self._store.get_node(node_id)
@@ -3286,22 +3303,27 @@ class TaskLogService:
             for stage in list(state.stages or []):
                 current = stage
                 if closing_stage_id and str(stage.stage_id or '').strip() == closing_stage_id:
-                    current = stage.model_copy(
-                        update={
-                            'status': _EXECUTION_STAGE_STATUS_COMPLETED,
-                            # 被结清的阶段保留原 finished_at：它是时间线与收口水位线的命中键。
-                            'finished_at': now if closing_was_active else (
-                                str(stage.finished_at or '').strip() or now
-                            ),
-                            'completed_stage_summary': normalized_completed_summary,
-                            'key_refs': normalized_key_refs,
-                            # 工具层已用 validate_params 拦过"空总结+点名裁撤"，这里再收一次：
-                            # 绕过工具层的写入者不能造出"肉身和总结一起消失"的黑洞态。
-                            'context_evicted': bool(
-                                drop_completed_stage_tool_detail and normalized_completed_summary
-                            ),
-                        }
-                    )
+                    stage_evicts = bool(drop_completed_stage_tool_detail and normalized_completed_summary)
+                    stage_update: dict[str, Any] = {
+                        'status': _EXECUTION_STAGE_STATUS_COMPLETED,
+                        # 被结清的阶段保留原 finished_at：它是时间线与收口水位线的命中键。
+                        'finished_at': now if closing_was_active else (
+                            str(stage.finished_at or '').strip() or now
+                        ),
+                        'completed_stage_summary': normalized_completed_summary,
+                        'key_refs': normalized_key_refs,
+                        # 工具层已用 validate_params 拦过"空总结+点名裁撤"，这里再收一次：
+                        # 绕过工具层的写入者不能造出"肉身和总结一起消失"的黑洞态。
+                        'context_evicted': stage_evicts,
+                    }
+                    # 保留正文只写在裁撤**真落**的那条阶段上：没裁撤就没有阶段块，正文写进
+                    # 账本也无处渲染，留下的只是一份"看着像留住了"的假证据。
+                    if stage_evicts:
+                        if normalized_kept_tool_contexts:
+                            stage_update['kept_tool_contexts'] = normalized_kept_tool_contexts
+                        if normalized_kept_skill_contexts:
+                            stage_update['kept_skill_contexts'] = normalized_kept_skill_contexts
+                    current = stage.model_copy(update=stage_update)
                 stages.append(current)
             closing_index = next(
                 (index for index, item in enumerate(stages) if str(item.stage_id or '').strip() == closing_stage_id),
@@ -3375,6 +3397,9 @@ class TaskLogService:
                     'evicted': bool(closing_stage is not None and closing_stage.context_evicted is True),
                     'archive_ref': str(closing_stage.archive_ref or '') if closing_stage is not None else '',
                     'reason': reason,
+                    # 保留契约的落地回执（与前门同形）：留下的是名字列表，取不到的逐条点名
+                    # 原因。没有这一段，模型只能按参数倒推"我点了名就一定留住了"。
+                    **keep_closure_fields(kept_snapshot_payload),
                     # 与前门同一份落空说明：结果属动态尾部，工具 schema 是两车道共享的
                     # provider 前缀，改它会整体失效一次缓存。
                     **({} if reason == 'applied' else {'note': STAGE_CLOSURE_INACTIVE_NOTES[reason]}),
