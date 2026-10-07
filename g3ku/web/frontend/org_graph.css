@@ -3837,6 +3837,8 @@ textarea {
     line-height: 1.4;
     color: var(--text-tertiary);
     letter-spacing: normal;
+    /* 轮次行是 grid 且行距统一,单独收窄它到下方工具条的距离只能从这一格自己扣。 */
+    margin-bottom: calc(var(--space-3) / -2);
 }
 
 .task-trace-round-strip {
@@ -4077,6 +4079,14 @@ textarea {
     overscroll-behavior: contain;
     font-size: 0.85rem;
     background: color-mix(in srgb, var(--bg-panel) 62%, var(--bg-app));
+}
+
+/* 参数不封顶:展开工具就是要看全量入参,封顶会把后半截藏进容器里。
+   封顶只留给工具输出——那才是动辄几十 KB 的那一半。 */
+.task-trace-code.task-trace-args {
+    min-height: 0;
+    max-height: none;
+    overflow: visible;
 }
 
 .task-trace-output {
@@ -12549,17 +12559,6 @@ textarea {
     border-left: 2px solid color-mix(in srgb, var(--brand-primary) 45%, transparent);
     border-radius: 0 var(--radius-md) var(--radius-md) 0;
     background: color-mix(in srgb, var(--bg-msg-sys) 60%, transparent);
-}
-
-.task-trace-stage-summary-label {
-    margin-bottom: 4px;
-    color: var(--text-secondary);
-    font-size: 0.78rem;
-    letter-spacing: 0.02em;
-    opacity: 0.8;
-}
-
-.task-trace-stage-summary-text {
     color: var(--text-secondary);
     font-size: 0.9rem;
     line-height: 1.65;

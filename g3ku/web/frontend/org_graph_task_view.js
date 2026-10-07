@@ -1436,6 +1436,14 @@ function buildNodeExecutionTrace(node, detail, liveFrame = null) {
     };
 }
 
+// CEO 轨道的 arguments_text 是 `_tool_invocation_hint` 的 48 字截断提示（模型-facing
+// 同一份），展开面板要的是原始入参对象，不能拿提示当正文印。
+function toolArgumentsFullText(step) {
+    const args = step?.arguments;
+    if (!args || typeof args !== "object" || Array.isArray(args)) return "";
+    return Object.keys(args).length ? JSON.stringify(args, null, 2) : "";
+}
+
 function normalizeExecutionStageTrace(stage, index = 0) {
     const rounds = Array.isArray(stage?.rounds) ? stage.rounds : [];
     return {
@@ -1463,6 +1471,7 @@ function normalizeExecutionStageTrace(stage, index = 0) {
                 tool_call_id: String(step?.tool_call_id || ""),
                 tool_name: String(step?.tool_name || "tool"),
                 arguments_text: String(step?.arguments_text || step?.arguments_preview || ""),
+                arguments_full: toolArgumentsFullText(step),
                 output_text: String(step?.output_text || step?.output_preview || step?.text || ""),
                 output_ref: String(step?.output_ref || ""),
                 started_at: String(step?.started_at || ""),
@@ -1707,7 +1716,7 @@ function renderExecutionRoundToolPanel(round, step, toolIndex) {
     return `
         <section class="task-trace-round-panel" data-tool-key="${esc(toolKey)}" hidden>
             ${[
-                renderTraceField("参数", step?.arguments_text, "无参数", { copyable: true }),
+                renderTraceField("参数", step?.arguments_full || step?.arguments_text, "无参数", { copyable: true, codeClass: "task-trace-args" }),
                 renderTraceOutputField(
                     "工具输出",
                     step?.output_text,
@@ -1800,10 +1809,7 @@ function renderExecutionStageSummary(stage) {
     const summaryText = String(stage?.completed_stage_summary || "").trim();
     if (!summaryText) return "";
     return `
-        <div class="task-trace-stage-summary">
-            <div class="task-trace-stage-summary-label">阶段总结</div>
-            <div class="task-trace-stage-summary-text">${esc(summaryText)}</div>
-        </div>
+        <div class="task-trace-stage-summary">${esc(summaryText)}</div>
     `;
 }
 
@@ -1848,11 +1854,9 @@ function stageTraceStatusLabel(stage) {
 function formatExecutionStageTitle(stage) {
     const stageGoal = String(stage?.stage_goal || "").trim();
     const fallbackTitle = String(stage?.mode || "自主执行").trim() || "自主执行";
-    const title = stageGoal || fallbackTitle;
-    // 标题只带阶段目标与开始时间：轮数（用过/预算）在卡里逐轮列着，
-    // 画成 "5/15" 只是把同一个信息再挤进标题一行。
-    const time = stage?.created_at ? formatCompactTime(stage.created_at) : "";
-    return `${title}${time ? ` · ${time}` : ""}`;
+    // 标题只带阶段目标：开始时间在卡内逐轮那行已经印过一遍，轮数（用过/预算）
+    // 更是账本字段而非显示字段。
+    return stageGoal || fallbackTitle;
 }
 
 function buildExecutionTraceSteps(trace, node) {
@@ -1888,7 +1892,7 @@ function buildExecutionTraceSteps(trace, node) {
                 status: step.status || "info",
                 open: false,
                 bodyHtml: contextLoad ? renderContextLoadBodyField(contextLoad, step) : [
-                    renderTraceField("Arguments", step.arguments_text, "No arguments", { copyable: true }),
+                    renderTraceField("Arguments", step.arguments_text, "No arguments", { copyable: true, codeClass: "task-trace-args" }),
                     renderTraceOutputField(
                         "Output",
                         step.output_text,
@@ -2544,12 +2548,13 @@ function renderTraceLabelRow(label, { copyable = false } = {}) {
     `;
 }
 
-function renderTraceField(label, value, emptyText = "暂无内容", { decodeEscapes = false, copyable = false } = {}) {
+function renderTraceField(label, value, emptyText = "暂无内容", { decodeEscapes = false, copyable = false, codeClass = "" } = {}) {
     const text = readableText(value, { decodeEscapes, emptyText });
+    const classAttr = `code-block task-trace-code${codeClass ? ` ${esc(codeClass)}` : ""}`;
     return `
         <div class="task-trace-field">
             ${renderTraceLabelRow(label, { copyable })}
-            <div class="code-block task-trace-code" data-empty-text="${esc(String(emptyText || ""))}">${esc(text)}</div>
+            <div class="${classAttr}" data-empty-text="${esc(String(emptyText || ""))}">${esc(text)}</div>
         </div>
     `;
 }

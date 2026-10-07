@@ -5857,6 +5857,7 @@ def test_stage_body_renders_round_narration_text_and_stage_summary() -> None:
           hasSummaryBlock: html.includes("task-trace-stage-summary"),
           hasSummaryLabel: html.includes("阶段总结"),
           hasSummaryText: html.includes("task book fully read; three async tasks created."),
+          titleWithTime: formatExecutionStageTitle({ stage_goal: "read task book", created_at: "2026-09-05T19:34:58" }),
         }));
         """
     )
@@ -5866,8 +5867,64 @@ def test_stage_body_renders_round_narration_text_and_stage_summary() -> None:
     assert result["hasRoundTextBlock"] is True
     assert result["hasRoundText"] is True
     assert result["hasSummaryBlock"] is True
-    assert result["hasSummaryLabel"] is True
     assert result["hasSummaryText"] is True
+    # 总结正文自己就是那块引用条，不再印「阶段总结」四个字；标题也不再把开始时间挤进最后一行。
+    assert result["hasSummaryLabel"] is False
+    assert result["titleWithTime"] == "read task book"
+
+
+def test_stage_tool_panel_renders_full_arguments_instead_of_the_hint() -> None:
+    result = _run_node_script(
+        """
+        const fs = require("fs");
+        const vm = require("vm");
+        global.window = global;
+        global.S = {};
+        global.U = {};
+        global.esc = (v) => String(v ?? "").replaceAll("&", "&amp;").replaceAll("<", "&lt;")
+          .replaceAll(">", "&gt;").replaceAll('"', "&quot;").replaceAll("'", "&#39;");
+        global.normalizeInt = (value, fallback = 0) => {
+          const parsed = Number.parseInt(String(value ?? ""), 10);
+          return Number.isFinite(parsed) ? parsed : fallback;
+        };
+        global.readableText = (value, options = {}) => String(value ?? "").trim() || String(options.emptyText || "");
+        global.formatCompactTime = (value) => String(value || "");
+        const code = fs.readFileSync("g3ku/web/frontend/org_graph_task_view.js", "utf8");
+        vm.runInThisContext(code);
+
+        const stage = normalizeExecutionStageTrace({
+          stage_id: "stage:1",
+          stage_goal: "run the probe",
+          rounds: [
+            {
+              round_id: "round:1",
+              round_index: 1,
+              created_at: "2026-09-05T19:34:58",
+              tools: [
+                {
+                  tool_name: "exec",
+                  status: "success",
+                  // 模型-facing 的调用提示在 48 字处截断，面板要读的是原始入参。
+                  arguments_text: "exec (command=printf aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa..., timeout_seconds=10)",
+                  arguments: { command: "printf " + "a".repeat(120), timeout_seconds: 10 },
+                },
+                { tool_name: "content_open", status: "success", arguments_text: "content_open (ref=artifact:1)", arguments: {} },
+              ],
+            },
+          ],
+        }, 0);
+        const html = renderExecutionStageRounds(stage);
+        console.log(JSON.stringify({
+          fullCommandShown: html.includes("a".repeat(120)),
+          argsFieldClass: html.includes("task-trace-code task-trace-args"),
+          hintOnlyWhenNoArgs: html.includes("content_open (ref=artifact:1)"),
+        }));
+        """
+    )
+
+    assert result["fullCommandShown"] is True
+    assert result["argsFieldClass"] is True
+    assert result["hintOnlyWhenNoArgs"] is True
 
 
 def test_tree_node_search_matches_id_or_goal_and_ranks_exact_prefix_above_contains() -> None:
