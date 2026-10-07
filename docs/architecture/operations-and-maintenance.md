@@ -54,6 +54,7 @@
 - 普通用户快速启动项目
 - 本地单机直接拉起 Web 与托管 worker
 - 让脚本自动处理 `.venv`、依赖安装、基础配置兜底与已有托管进程重启
+- 回收既有进程的点**只有两处**：`start-g3ku.ps1` 的 `Stop-G3kuManagedPythonProcesses` 与 `start-g3ku.sh:118-119`；`g3ku.ps1` / `g3ku.sh` / `install.ps1` / `install.sh` 都不杀进程，排查"启动时为什么把我的实例关了"只看这两处。两边语义已对齐：先发 `POST /api/bootstrap/exit` 优雅退出并轮询，再对残留 PID 动手，且**动手前按实况判存活**（sh 用 `kill -0`，ps 用 `Get-Process`）。ps 侧曾按"发优雅退出之前拍的那份快照"逐个 `Stop-Process`，等待窗口里已自退的 PID 会被掐第二下并报 `Failed to stop PID <n>: 找不到进程标识符`——那是噪音不是故障（`main` 上 `d7fd6f62` 修掉，同时把"确实还活着却没掐掉"才报警告作为判据）。别把这条误读成"端口被别的进程占着"：端口是否被占的权威判据是 `Get-NetTCPConnection -LocalPort 18790`，`netstat` 里状态列在地址之后，用 `LISTENING.*<port>` 这种模式永远匹配不到。
 
 维护上要记住：
 
