@@ -4081,14 +4081,6 @@ textarea {
     background: color-mix(in srgb, var(--bg-panel) 62%, var(--bg-app));
 }
 
-/* 参数不封顶:展开工具就是要看全量入参,封顶会把后半截藏进容器里。
-   封顶只留给工具输出——那才是动辄几十 KB 的那一半。 */
-.task-trace-code.task-trace-args {
-    min-height: 0;
-    max-height: none;
-    overflow: visible;
-}
-
 .task-trace-output {
     min-height: 72px;
 }
@@ -5285,7 +5277,30 @@ textarea {
     min-width: 0;
     font-size: 0.88rem;
     color: var(--text-primary);
+    /* 一行封顶:补充消息可以是整篇正文,不封顶会把输入区上方撑成一块盖住会话的面板。
+       要看全文靠右侧那颗三角切到下面的滚动块。 */
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
+/* 展开态:正文换成固定高度的滚动块,行高由它定,序号与动作保持垂直居中。 */
+.ceo-follow-up-chip.is-expanded {
+    align-items: stretch;
+}
+
+.ceo-follow-up-chip.is-expanded .ceo-follow-up-kind,
+.ceo-follow-up-chip.is-expanded .ceo-follow-up-action {
+    align-self: center;
+}
+
+.ceo-follow-up-chip.is-expanded .ceo-follow-up-name {
+    white-space: pre-wrap;
     overflow-wrap: anywhere;
+    overflow-x: hidden;
+    overflow-y: auto;
+    max-height: 160px;
+    text-overflow: clip;
 }
 
 .ceo-follow-up-remove,
@@ -5301,6 +5316,21 @@ textarea {
     align-items: center;
     justify-content: center;
     border-radius: 999px;
+}
+
+/* 动作图标按现箭头(24px)的 2/3 收一档:三个按钮并排,原来的尺寸会把这一行占满。 */
+.ceo-follow-up-action svg {
+    width: 16px;
+    height: 16px;
+}
+
+/* 插话是唯一带文字的那颗,宽度让给文字;编辑与删除只留图标。 */
+.ceo-follow-up-flush {
+    width: auto;
+    gap: 6px;
+    padding: 0 10px;
+    font-size: 0.8rem;
+    font-weight: 600;
 }
 
 .ceo-follow-up-remove:hover,

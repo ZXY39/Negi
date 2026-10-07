@@ -1716,7 +1716,7 @@ function renderExecutionRoundToolPanel(round, step, toolIndex) {
     return `
         <section class="task-trace-round-panel" data-tool-key="${esc(toolKey)}" hidden>
             ${[
-                renderTraceField("参数", step?.arguments_full || step?.arguments_text, "无参数", { copyable: true, codeClass: "task-trace-args" }),
+                renderTraceField("参数", step?.arguments_full || step?.arguments_text, "无参数", { copyable: true }),
                 renderTraceOutputField(
                     "工具输出",
                     step?.output_text,
@@ -1892,7 +1892,7 @@ function buildExecutionTraceSteps(trace, node) {
                 status: step.status || "info",
                 open: false,
                 bodyHtml: contextLoad ? renderContextLoadBodyField(contextLoad, step) : [
-                    renderTraceField("Arguments", step.arguments_text, "No arguments", { copyable: true, codeClass: "task-trace-args" }),
+                    renderTraceField("Arguments", step.arguments_text, "No arguments", { copyable: true }),
                     renderTraceOutputField(
                         "Output",
                         step.output_text,
@@ -2548,13 +2548,12 @@ function renderTraceLabelRow(label, { copyable = false } = {}) {
     `;
 }
 
-function renderTraceField(label, value, emptyText = "暂无内容", { decodeEscapes = false, copyable = false, codeClass = "" } = {}) {
+function renderTraceField(label, value, emptyText = "暂无内容", { decodeEscapes = false, copyable = false } = {}) {
     const text = readableText(value, { decodeEscapes, emptyText });
-    const classAttr = `code-block task-trace-code${codeClass ? ` ${esc(codeClass)}` : ""}`;
     return `
         <div class="task-trace-field">
             ${renderTraceLabelRow(label, { copyable })}
-            <div class="${classAttr}" data-empty-text="${esc(String(emptyText || ""))}">${esc(text)}</div>
+            <div class="code-block task-trace-code" data-empty-text="${esc(String(emptyText || ""))}">${esc(text)}</div>
         </div>
     `;
 }

@@ -171,7 +171,7 @@ Start here when you are new to the repository or when a change crosses subsystem
 - 模型或节点声称"已把某阶段移出"却找不到 `archive_ref`、或点名裁撤后那批工具帧仍逐轮重发、提交时写的阶段总结在账本里是空的 → `runtime-overview.md`「stage_compaction」（跨结清的收尾对象判据与 `stage_closure` 回执，前门与节点同一条）+ `context-and-cache-troubleshooting.md`「Shrink 原因与压缩边界」（粘着的 shrink 原因不能当"裁过"的证据）
 - 切回仍在处理的会话看不到期间产生的阶段/工具调用（刷新网页才出现）→ `web-and-admin.md`「CEO Feed View State And Scroll Preservation Contract」
 - 用户气泡的「编辑」或模型回复元信息行里的「Fork」要刷新网页才出现、会话被暂停/审批/压缩挡住输入时找不到 Fork 入口、点了按钮提示「当前不可编辑」、或点击消息后用量/复制仍不显形 → `web-and-admin.md`「Message Edit-Resend And Session Fork Contract」+「Per-Turn Token Usage Contract」
-- 回合进行中发的补充没被回答、待发送气泡上的「立即发送 / 撤回」行为疑问、或撤回后条目又被画回来 → `web-and-admin.md`「Queued Follow-Ups」
+- 回合进行中发的补充没被回答、待发送条目上的「插话 / 编辑 / 删除」行为疑问、或撤下后条目又被画回来 → `web-and-admin.md`「Queued Follow-Ups」
 - 回合卡在半截、下方一直转圈，刷新网页才同步到最终回复（本地与渠道会话同症状，转录里其实已有完整回复）→ `web-and-admin.md`「CEO Websocket Lane Failure Contract」
 - 节点详情页的「加载 skill / 加载 tool」chip 风险色全部同一档、或展开看不到正文 → `web-and-admin.md`「Context Loader Notices」
 - 翻看工具输出时新输出把输出框滚动条顶回顶部 → `web-and-admin.md`「CEO Feed View State And Scroll Preservation Contract」

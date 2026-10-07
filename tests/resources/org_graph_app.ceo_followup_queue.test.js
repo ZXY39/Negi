@@ -178,6 +178,8 @@ function loadApp() {
             renderQueuedCeoFollowUps,
             flushCeoQueuedFollowUp,
             withdrawCeoQueuedFollowUp,
+            discardCeoQueuedFollowUp,
+            toggleCeoQueuedFollowUpExpansion,
             sendCeoMessage,
         };`,
         context
@@ -268,35 +270,59 @@ test("sending while a turn is active holds the follow-up in the browser, not the
     assert.equal((__context.__showToastCalls || []).length, 0);
 });
 
-test("chip offers 立即发送 only for unsent items while a turn runs", () => {
+test("chip offers 插话 only for unsent items while a turn runs", () => {
     const { S, U, setCeoQueuedFollowUps } = loadApp();
     S.ceoTurnActive = true;
     setCeoQueuedFollowUps("web:test", [{ id: "draft", text: "还没发出去的补充" }]);
 
+    // 插话是唯一带文字的那颗，图标在左、文字在右。
     assert.match(U.ceoFollowUpQueue.innerHTML, /data-follow-up-flush="draft"/);
+    assert.match(U.ceoFollowUpQueue.innerHTML, /<i data-lucide="send"><\/i><span>插话<\/span>/);
     assert.match(U.ceoFollowUpQueue.innerHTML, /data-follow-up-withdraw="draft"/);
     assert.match(U.ceoFollowUpQueue.innerHTML, /data-follow-up-remove="draft"/);
-    // 撤回的图标是左下转弯箭头，不是圆弧（圆弧那颗读起来像"刷新"）。
+    // 编辑的图标是左下转弯箭头，不是圆弧（圆弧那颗读起来像"刷新"）。
     assert.match(U.ceoFollowUpQueue.innerHTML, /data-lucide="corner-down-left"/);
+    assert.match(U.ceoFollowUpQueue.innerHTML, /data-lucide="trash-2"/);
+    // 「已受理」不再画：条目还挂在输入区上面就代表没发出去。
+    assert.doesNotMatch(U.ceoFollowUpQueue.innerHTML, /已受理/);
 
-    // 回合结束后没有"下一轮"可并，立即发送按钮不再出现，撤回与丢弃留着。
+    // 回合结束后没有"下一轮"可并，插话按钮不再出现，编辑与删除留着。
     S.ceoTurnActive = false;
     setCeoQueuedFollowUps("web:test", [{ id: "draft", text: "还没发出去的补充" }]);
     assert.doesNotMatch(U.ceoFollowUpQueue.innerHTML, /data-follow-up-flush/);
     assert.match(U.ceoFollowUpQueue.innerHTML, /data-follow-up-withdraw="draft"/);
 });
 
-test("in-flight item paints 已受理 with no affordance until it is represented", () => {
+test("正文默认一行，点三角切到滚动块并活过重绘", () => {
+    const { U, setCeoQueuedFollowUps, toggleCeoQueuedFollowUpExpansion } = loadApp();
+    setCeoQueuedFollowUps("web:test", [{ id: "draft", text: "一条很长的补充正文" }]);
+
+    assert.doesNotMatch(U.ceoFollowUpQueue.innerHTML, /is-expanded/);
+    assert.match(U.ceoFollowUpQueue.innerHTML, /data-lucide="chevron-down"/);
+    assert.match(U.ceoFollowUpQueue.innerHTML, /aria-expanded="false"/);
+
+    toggleCeoQueuedFollowUpExpansion("draft");
+    assert.match(U.ceoFollowUpQueue.innerHTML, /ceo-follow-up-chip is-expanded/);
+    assert.match(U.ceoFollowUpQueue.innerHTML, /data-lucide="chevron-up"/);
+    assert.match(U.ceoFollowUpQueue.innerHTML, /aria-expanded="true"/);
+
+    // 队列每帧重画，展开态必须跟着条目 id 活下来；再点一次收回。
+    U.ceoFollowUpQueue.innerHTML = "";
+    toggleCeoQueuedFollowUpExpansion("draft");
+    assert.doesNotMatch(U.ceoFollowUpQueue.innerHTML, /is-expanded/);
+});
+
+test("in-flight item paints no affordance and no state text until it is represented", () => {
     const { S, U, setCeoQueuedFollowUps } = loadApp();
     S.ceoTurnActive = true;
     // 已转出去、服务端状态帧还没跟上的那一小段：runtime 已经持有它，
-    // 既不能再"立即发送"，也没有可撤回的对象。
+    // 既不能再"插话"，也没有可撤的对象。
     setCeoQueuedFollowUps("web:test", [
         { id: "sent", text: "已经转出去的补充", runtime_sent_at: "2026-09-24T18:00:00.000Z" },
     ]);
 
     assert.match(U.ceoFollowUpQueue.innerHTML, /已经转出去的补充/);
-    assert.match(U.ceoFollowUpQueue.innerHTML, /已受理/);
+    assert.doesNotMatch(U.ceoFollowUpQueue.innerHTML, /已受理/);
     assert.doesNotMatch(U.ceoFollowUpQueue.innerHTML, /data-follow-up-flush/);
     assert.doesNotMatch(U.ceoFollowUpQueue.innerHTML, /data-follow-up-withdraw/);
     assert.doesNotMatch(U.ceoFollowUpQueue.innerHTML, /data-follow-up-remove/);
@@ -372,12 +398,38 @@ test("state snapshot with a runtime-held queue paints the accepted chip", () => 
     // 换标签页/重启后 sessionStorage 是空的，这条候选只能由服务端状态快照画出来。
     assert.equal(U.ceoFollowUpQueue.hidden, false);
     assert.match(U.ceoFollowUpQueue.innerHTML, /压缩途中发的那条/);
-    assert.match(U.ceoFollowUpQueue.innerHTML, /已受理/);
-    assert.doesNotMatch(U.ceoFollowUpQueue.innerHTML, /data-follow-up-remove/);
+    // 已受理不再写成文字；条目还在队列里就是"还没被那一轮接走"。
+    assert.doesNotMatch(U.ceoFollowUpQueue.innerHTML, /已受理/);
+    // 服务端排队里的条目一样可以编辑与删除（两颗都对应服务端那一行）。
+    assert.match(U.ceoFollowUpQueue.innerHTML, /data-follow-up-withdraw="server:t-1"/);
+    assert.match(U.ceoFollowUpQueue.innerHTML, /data-follow-up-remove="server:t-1"/);
+    // 已经交给 runtime 排队了，插话那颗不再出现。
+    assert.doesNotMatch(U.ceoFollowUpQueue.innerHTML, /data-follow-up-flush/);
     const merged = getMergedCeoQueuedFollowUps("web:test");
     assert.equal(merged.length, 1);
     assert.equal(merged[0].accepted_by_runtime, true);
     assert.equal(merged[0].id, "server:t-1");
+});
+
+test("删除已受理条目撤下服务端那一行但不回填输入框", async () => {
+    const api = loadApp();
+    const { U, applyCeoState, discardCeoQueuedFollowUp, __context } = api;
+    applyCeoState({
+        status: "running",
+        queued_follow_up_messages: [
+            { content: "压缩途中发的那条", attachments: [], metadata: { _transcript_turn_id: "t-8" } },
+        ],
+    });
+    U.ceoInput.value = "";
+
+    assert.equal(await discardCeoQueuedFollowUp("server:t-8"), true);
+
+    const calls = __context.__withdrawCalls || [];
+    assert.equal(calls.length, 1);
+    assert.equal(calls[0].payload.turn_id, "t-8");
+    // 与编辑的分工：删除只把条目弄走，正文不进输入框。
+    assert.equal(U.ceoInput.value, "");
+    assert.equal(U.ceoFollowUpQueue.hidden, true);
 });
 
 test("a follow-up the runtime already holds is not painted twice", () => {
@@ -418,5 +470,5 @@ test("an unsent local draft stays removable beside the server queue", () => {
     assert.equal(merged[0].text, "服务端已在排队");
     assert.equal(merged[1].text, "还没发出去的");
     assert.match(U.ceoFollowUpQueue.innerHTML, /data-follow-up-remove="local-unsent"/);
-    assert.doesNotMatch(U.ceoFollowUpQueue.innerHTML, /data-follow-up-remove="server:t-3"/);
+    assert.match(U.ceoFollowUpQueue.innerHTML, /data-follow-up-remove="server:t-3"/);
 });

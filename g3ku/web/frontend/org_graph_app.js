@@ -5340,6 +5340,17 @@ function renderPendingCeoUploads() {
     icons();
 }
 
+// 队列每帧重画，展开态因此只能存在这里；DOM 上的开合下一次 render 就没了。
+const ceoFollowUpExpandedIds = new Set();
+
+function toggleCeoQueuedFollowUpExpansion(entryId) {
+    const key = String(entryId || "").trim();
+    if (!key) return;
+    if (ceoFollowUpExpandedIds.has(key)) ceoFollowUpExpandedIds.delete(key);
+    else ceoFollowUpExpandedIds.add(key);
+    renderQueuedCeoFollowUps();
+}
+
 function renderQueuedCeoFollowUps(sessionId = activeSessionId()) {
     if (!U.ceoFollowUpQueue) return;
     const key = String(sessionId || "").trim();
@@ -5352,32 +5363,35 @@ function renderQueuedCeoFollowUps(sessionId = activeSessionId()) {
     U.ceoFollowUpQueue.innerHTML = `
         <div class="ceo-follow-up-chip-list" role="list">
             ${items.map((item, index) => {
-                const entryId = esc(String(item.id || ""));
-                const withdrawMarkup = `<button type="button" class="ceo-follow-up-action" data-follow-up-withdraw="${entryId}" aria-label="撤回重新编辑">
-                        <i data-lucide="corner-down-left"></i>
-                    </button>`;
-                const actions = [];
-                // 三态分开：服务端队列里的条目（重启也还在，撤回有对应操作）／已转出去在飞的
-                // 条目（runtime 已持有，既不能"立即发送"也没有可撤回的东西，只能等它被那一轮
-                // 代表后由 consumeRepresentedRuntimeSentCeoFollowUps 收掉）／还没出门的本地草稿。
+                const rawId = String(item.id || "");
+                const entryId = esc(rawId);
+                const expanded = ceoFollowUpExpandedIds.has(rawId);
+                const actions = [`
+                    <button type="button" class="ceo-follow-up-action ceo-follow-up-expand" data-follow-up-expand="${entryId}"
+                        aria-expanded="${expanded ? "true" : "false"}" aria-label="${expanded ? "收起正文" : "展开正文"}">
+                        <i data-lucide="${expanded ? "chevron-up" : "chevron-down"}"></i>
+                    </button>
+                `];
+                // 三态分开：服务端队列里的条目（重启也还在，编辑与删除都对应服务端那行）／
+                // 已转出去在飞的条目（runtime 已持有，既不能"插话"也没有可撤的对象，只能等它
+                // 被那一轮代表后由 consumeRepresentedRuntimeSentCeoFollowUps 收掉）／还没出门的本地草稿。
+                // 行上不写状态字：条目还挂在输入区上面就代表没发出去。
                 const inFlight = !item.accepted_by_runtime && !!String(item.runtime_sent_at || "").trim();
-                if (item.accepted_by_runtime) {
-                    actions.push(`<span class="ceo-follow-up-state">已受理</span>`, withdrawMarkup);
-                } else if (inFlight) {
-                    actions.push(`<span class="ceo-follow-up-state">已受理</span>`);
-                } else {
-                    if (S.ceoTurnActive) {
-                        actions.push(`<button type="button" class="ceo-follow-up-action" data-follow-up-flush="${entryId}" aria-label="立即并入下一轮">
-                                <i data-lucide="send"></i>
+                if (!inFlight) {
+                    if (S.ceoTurnActive && !item.accepted_by_runtime) {
+                        actions.push(`<button type="button" class="ceo-follow-up-action ceo-follow-up-flush" data-follow-up-flush="${entryId}" aria-label="插话进当前回合">
+                                <i data-lucide="send"></i><span>插话</span>
                             </button>`);
                     }
-                    actions.push(withdrawMarkup);
-                    actions.push(`<button type="button" class="ceo-follow-up-remove" data-follow-up-remove="${entryId}" aria-label="丢弃待发送补充">
-                            <i data-lucide="x"></i>
+                    actions.push(`<button type="button" class="ceo-follow-up-action" data-follow-up-withdraw="${entryId}" aria-label="编辑">
+                            <i data-lucide="corner-down-left"></i>
+                        </button>`);
+                    actions.push(`<button type="button" class="ceo-follow-up-action ceo-follow-up-remove" data-follow-up-remove="${entryId}" aria-label="删除">
+                            <i data-lucide="trash-2"></i>
                         </button>`);
                 }
                 return `
-                <div class="ceo-follow-up-chip" role="listitem">
+                <div class="ceo-follow-up-chip${expanded ? " is-expanded" : ""}" role="listitem">
                     <span class="ceo-follow-up-kind">${index + 1}</span>
                     <span class="ceo-follow-up-name">${esc(String(item.text || "").trim() || summarizeUploads(item.uploads || []))}</span>
                     ${actions.join("")}
@@ -5416,7 +5430,9 @@ function flushCeoQueuedFollowUp(entryId) {
     return true;
 }
 
-async function withdrawCeoQueuedFollowUp(entryId) {
+// 编辑与删除走同一条退场：服务端队列里的条目必须先删那边（否则下一帧原样画回来），
+// 两者的差别只在正文还不还给输入框。
+async function releaseCeoQueuedFollowUp(entryId, { refillComposer }) {
     const sessionId = activeSessionId();
     const item = findCeoQueuedFollowUpEntry(sessionId, entryId);
     if (!sessionId || !item) return false;
@@ -5428,7 +5444,7 @@ async function withdrawCeoQueuedFollowUp(entryId) {
             await ApiClient.withdrawCeoQueuedFollowUp(sessionId, { turn_id: turnId });
         } catch (error) {
             showToast({
-                title: "撤回失败",
+                title: "撤下失败",
                 text: String(error?.message || "该条补充可能已被本轮接走，无法撤回。"),
                 kind: "error",
             });
@@ -5445,15 +5461,26 @@ async function withdrawCeoQueuedFollowUp(entryId) {
     } else {
         removeCeoQueuedFollowUp(sessionId, item.id);
     }
-    // 回填输入框：与 Fork 一样走草稿通道，附件一起回来，不自动发送。
-    setCeoComposerDraft(sessionId, {
-        text: String(item.text || ""),
-        uploads: normalizeUploadList(item.uploads),
-    });
-    restoreCeoComposerDraftForSession(sessionId);
+    ceoFollowUpExpandedIds.delete(String(item.id || ""));
+    if (refillComposer) {
+        // 编辑的落点是输入框，不是转录：回填后可继续编辑，不自动发送。
+        setCeoComposerDraft(sessionId, {
+            text: String(item.text || ""),
+            uploads: normalizeUploadList(item.uploads),
+        });
+        restoreCeoComposerDraftForSession(sessionId);
+    }
     renderQueuedCeoFollowUps(sessionId);
     syncCeoPrimaryButton();
     return true;
+}
+
+function withdrawCeoQueuedFollowUp(entryId) {
+    return releaseCeoQueuedFollowUp(entryId, { refillComposer: true });
+}
+
+function discardCeoQueuedFollowUp(entryId) {
+    return releaseCeoQueuedFollowUp(entryId, { refillComposer: false });
 }
 
 function syncCeoPrimaryButton() {
@@ -16555,6 +16582,11 @@ function bind() {
         removePendingCeoUpload(Number(remove.dataset.uploadRemove));
     });
     U.ceoFollowUpQueue?.addEventListener("click", (e) => {
+        const expand = e.target.closest("[data-follow-up-expand]");
+        if (expand) {
+            toggleCeoQueuedFollowUpExpansion(String(expand.dataset.followUpExpand || ""));
+            return;
+        }
         const flush = e.target.closest("[data-follow-up-flush]");
         if (flush) {
             flushCeoQueuedFollowUp(String(flush.dataset.followUpFlush || ""));
@@ -16567,7 +16599,7 @@ function bind() {
         }
         const remove = e.target.closest("[data-follow-up-remove]");
         if (!remove) return;
-        removeCeoQueuedFollowUp(activeSessionId(), String(remove.dataset.followUpRemove || ""));
+        void discardCeoQueuedFollowUp(String(remove.dataset.followUpRemove || ""));
     });
     U.ceoFeed?.addEventListener("click", (e) => {
         handleCeoVoiceBubbleClick(e);

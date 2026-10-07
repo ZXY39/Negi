@@ -5916,14 +5916,15 @@ def test_stage_tool_panel_renders_full_arguments_instead_of_the_hint() -> None:
         const html = renderExecutionStageRounds(stage);
         console.log(JSON.stringify({
           fullCommandShown: html.includes("a".repeat(120)),
-          argsFieldClass: html.includes("task-trace-code task-trace-args"),
+          sharedCodeBlock: html.includes('class="code-block task-trace-code"') && !html.includes("task-trace-args"),
           hintOnlyWhenNoArgs: html.includes("content_open (ref=artifact:1)"),
         }));
         """
     )
 
     assert result["fullCommandShown"] is True
-    assert result["argsFieldClass"] is True
+    # 参数与输出共用同一个代码块：固定高度 + 内部滚动，长入参不许把面板撑成一整屏。
+    assert result["sharedCodeBlock"] is True
     assert result["hintOnlyWhenNoArgs"] is True
 
 
