@@ -180,6 +180,7 @@ function loadApp() {
             withdrawCeoQueuedFollowUp,
             discardCeoQueuedFollowUp,
             toggleCeoQueuedFollowUpExpansion,
+            measureCeoFollowUpSingleLine,
             sendCeoMessage,
         };`,
         context
@@ -280,9 +281,16 @@ test("chip offers 插话 only for unsent items while a turn runs", () => {
     assert.match(U.ceoFollowUpQueue.innerHTML, /<i data-lucide="send"><\/i><span>插话<\/span>/);
     assert.match(U.ceoFollowUpQueue.innerHTML, /data-follow-up-withdraw="draft"/);
     assert.match(U.ceoFollowUpQueue.innerHTML, /data-follow-up-remove="draft"/);
-    // 编辑的图标是左下转弯箭头，不是圆弧（圆弧那颗读起来像"刷新"）。
-    assert.match(U.ceoFollowUpQueue.innerHTML, /data-lucide="corner-down-left"/);
+    // 编辑是"取回正文继续改"，图标用铅笔；左下转弯箭头读起来像"撤回/回车"。
+    assert.match(U.ceoFollowUpQueue.innerHTML, /data-lucide="pencil"/);
     assert.match(U.ceoFollowUpQueue.innerHTML, /data-lucide="trash-2"/);
+    // 三颗都带悬停文字（图标按钮没有可见文案，功能只能在这里说）。
+    assert.match(U.ceoFollowUpQueue.innerHTML, /title="编辑：把正文取回输入框继续改"/);
+    assert.match(U.ceoFollowUpQueue.innerHTML, /title="删除这条待发送补充"/);
+    assert.match(U.ceoFollowUpQueue.innerHTML, /title="插话：现在就并进正在跑的这一轮"/);
+    assert.match(U.ceoFollowUpQueue.innerHTML, /title="展开正文"/);
+    // 没量过之前三角一律在（放得下与否要等排版，缺证据就不能藏入口）。
+    assert.doesNotMatch(U.ceoFollowUpQueue.innerHTML, /ceo-follow-up-expand[\s\S]{0,160}?hidden/);
     // 「已受理」不再画：条目还挂在输入区上面就代表没发出去。
     assert.doesNotMatch(U.ceoFollowUpQueue.innerHTML, /已受理/);
 
@@ -471,4 +479,69 @@ test("an unsent local draft stays removable beside the server queue", () => {
     assert.equal(merged[1].text, "还没发出去的");
     assert.match(U.ceoFollowUpQueue.innerHTML, /data-follow-up-remove="local-unsent"/);
     assert.match(U.ceoFollowUpQueue.innerHTML, /data-follow-up-remove="server:t-3"/);
+});
+
+function fakeChip({ id, clientWidth, scrollWidth, expanded = false, hidden = false }) {
+    const name = new StubHTMLElement("name");
+    name.clientWidth = clientWidth;
+    name.scrollWidth = scrollWidth;
+    const button = new StubHTMLElement("expand");
+    button.hidden = hidden;
+    const classes = new Set(expanded ? ["is-expanded"] : []);
+    const chip = new StubHTMLElement("chip");
+    chip.dataset.followUpId = id;
+    // 桩 classList 是空实现，这里换成集合，断言才看得见摘类名的动作。
+    chip.classList = {
+        contains: (token) => classes.has(token),
+        add: (token) => classes.add(token),
+        remove: (token) => classes.delete(token),
+    };
+    chip.querySelector = (selector) => {
+        if (selector === ".ceo-follow-up-name") return name;
+        if (selector === ".ceo-follow-up-expand") return button;
+        return null;
+    };
+    return { chip, button, classes };
+}
+
+test("一行放得下的条目收掉三角，放不下的留着", () => {
+    const { U, measureCeoFollowUpSingleLine } = loadApp();
+    const fits = fakeChip({ id: "short", clientWidth: 320, scrollWidth: 300 });
+    const overflows = fakeChip({ id: "long", clientWidth: 320, scrollWidth: 900 });
+    U.ceoFollowUpQueue.querySelectorAll = () => [fits.chip, overflows.chip];
+
+    measureCeoFollowUpSingleLine();
+
+    assert.equal(fits.button.hidden, true);
+    assert.equal(overflows.button.hidden, false);
+});
+
+test("展开着的行不参与测量，宽度未知的行不下结论", () => {
+    const { U, measureCeoFollowUpSingleLine } = loadApp();
+    const expanded = fakeChip({ id: "open", clientWidth: 320, scrollWidth: 120, expanded: true, hidden: false });
+    const unmeasured = fakeChip({ id: "hidden-panel", clientWidth: 0, scrollWidth: 0, hidden: false });
+    U.ceoFollowUpQueue.querySelectorAll = () => [expanded.chip, unmeasured.chip];
+
+    measureCeoFollowUpSingleLine();
+
+    // 展开态的正文盒是换行排版的，量出来永远"放得下"，按这个结论收就会点开即塌。
+    assert.equal(expanded.button.hidden, false);
+    assert.equal(expanded.classes.has("is-expanded"), true);
+    assert.equal(unmeasured.button.hidden, false);
+});
+
+test("量出放得下之后，重画不再画那颗三角", () => {
+    const { U, setCeoQueuedFollowUps, measureCeoFollowUpSingleLine } = loadApp();
+    U.ceoFollowUpQueue.querySelectorAll = () => [
+        fakeChip({ id: "draft", clientWidth: 320, scrollWidth: 300 }).chip,
+    ];
+    setCeoQueuedFollowUps("web:test", [{ id: "draft", text: "一句话的补充" }]);
+    assert.equal(/data-follow-up-expand="draft"/.test(U.ceoFollowUpQueue.innerHTML), true);
+
+    measureCeoFollowUpSingleLine();
+    U.ceoFollowUpQueue.querySelectorAll = () => [];
+    setCeoQueuedFollowUps("web:test", [{ id: "draft", text: "一句话的补充" }]);
+
+    const expandTag = U.ceoFollowUpQueue.innerHTML.match(/<button[^>]*ceo-follow-up-expand[^>]*>/)?.[0] || "";
+    assert.match(expandTag, /hidden/);
 });

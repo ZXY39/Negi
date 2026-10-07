@@ -792,10 +792,13 @@ async def get_ceo_session_tool_arguments(session_id: str, tool_call_id: str = ""
         session_id,
         create=False,
     )
-    snapshot = getattr(runtime_session, "_frontdoor_visible_canonical_context_snapshot", None)
-    ledger = snapshot() if callable(snapshot) else None
+    # 账本按引用读，不走 `_frontdoor_visible_canonical_context_snapshot()`：那份是
+    # deepcopy + normalize，590 阶段的实测 11 ms，而这里全程只读、也不改形状。
+    # 前提钉在"取账本到序列化之间不许出现 await"——单线程里没有 await 点，回合就
+    # 没机会在遍历中途改写这张 dict；将来要是在下面任何一步之前加了 await，得退回快照口径。
+    ledger = getattr(runtime_session, "_frontdoor_stage_state", None)
     if not isinstance(ledger, dict) or not list(ledger.get("stages") or []):
-        # 会话没驻留（重启后没被打开过、或已被回收）时读完成态 sidecar，那份同样是未裁的账本。
+        # 会话没驻留（进程重启后还没人连过）时读完成态 sidecar，那份同样是未裁的账本。
         ledger = read_completed_continuity_snapshot(session_key)
     arguments = _tool_arguments_from_ledger(ledger, target)
     if arguments is None:

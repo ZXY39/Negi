@@ -5417,6 +5417,8 @@ function renderPendingCeoUploads() {
 
 // 队列每帧重画，展开态因此只能存在这里；DOM 上的开合下一次 render 就没了。
 const ceoFollowUpExpandedIds = new Set();
+// 实测"这一条一行放得下"的条目：放得下就没有可展开的东西，那颗三角也不该占位。
+const ceoFollowUpSingleLineIds = new Set();
 
 function toggleCeoQueuedFollowUpExpansion(entryId) {
     const key = String(entryId || "").trim();
@@ -5424,6 +5426,42 @@ function toggleCeoQueuedFollowUpExpansion(entryId) {
     if (ceoFollowUpExpandedIds.has(key)) ceoFollowUpExpandedIds.delete(key);
     else ceoFollowUpExpandedIds.add(key);
     renderQueuedCeoFollowUps();
+}
+
+// 溢出要量出来，CSS 判不出"这一行放得不下"。宽度为 0（面板没显示、还没排版）时
+// 不下结论：宁可留着那颗三角，也不能把唯一的展开入口藏掉。
+function measureCeoFollowUpSingleLine() {
+    const chips = Array.from(U.ceoFollowUpQueue?.querySelectorAll?.(".ceo-follow-up-chip") || []);
+    chips.forEach((chip) => {
+        if (!(chip instanceof HTMLElement)) return;
+        const entryId = String(chip.dataset.followUpId || "").trim();
+        const name = chip.querySelector(".ceo-follow-up-name");
+        const button = chip.querySelector(".ceo-follow-up-expand");
+        if (!entryId || !(name instanceof HTMLElement) || !(button instanceof HTMLElement)) return;
+        // 展开态的正文盒是换行排版的，量出来的宽度永远"放得下"——再按这个结论收回去
+        // 就成了点开即塌。只量收起着的行。
+        if (chip.classList?.contains("is-expanded")) return;
+        const width = Number(name.clientWidth || 0);
+        if (width <= 0) return;
+        if (name.scrollWidth <= width + 1) {
+            ceoFollowUpSingleLineIds.add(entryId);
+            ceoFollowUpExpandedIds.delete(entryId);
+            chip.classList.remove("is-expanded");
+            button.hidden = true;
+        } else {
+            ceoFollowUpSingleLineIds.delete(entryId);
+            button.hidden = false;
+        }
+    });
+}
+
+let ceoFollowUpResizeObserver = null;
+
+// 输入区可拖宽窄、侧栏可折叠，放得下与否因此会变；观察队列容器而不是在每条改宽路径上补写。
+function watchCeoFollowUpWidth() {
+    if (ceoFollowUpResizeObserver || !U.ceoFollowUpQueue || !window.ResizeObserver) return;
+    ceoFollowUpResizeObserver = new ResizeObserver(() => measureCeoFollowUpSingleLine());
+    ceoFollowUpResizeObserver.observe(U.ceoFollowUpQueue);
 }
 
 function renderQueuedCeoFollowUps(sessionId = activeSessionId()) {
@@ -5440,10 +5478,12 @@ function renderQueuedCeoFollowUps(sessionId = activeSessionId()) {
             ${items.map((item, index) => {
                 const rawId = String(item.id || "");
                 const entryId = esc(rawId);
-                const expanded = ceoFollowUpExpandedIds.has(rawId);
+                const singleLine = ceoFollowUpSingleLineIds.has(rawId);
+                const expanded = !singleLine && ceoFollowUpExpandedIds.has(rawId);
+                const expandLabel = expanded ? "收起正文" : "展开正文";
                 const actions = [`
                     <button type="button" class="ceo-follow-up-action ceo-follow-up-expand" data-follow-up-expand="${entryId}"
-                        aria-expanded="${expanded ? "true" : "false"}" aria-label="${expanded ? "收起正文" : "展开正文"}">
+                        aria-expanded="${expanded ? "true" : "false"}" aria-label="${expandLabel}" title="${expandLabel}"${singleLine ? " hidden" : ""}>
                         <i data-lucide="${expanded ? "chevron-up" : "chevron-down"}"></i>
                     </button>
                 `];
@@ -5454,19 +5494,20 @@ function renderQueuedCeoFollowUps(sessionId = activeSessionId()) {
                 const inFlight = !item.accepted_by_runtime && !!String(item.runtime_sent_at || "").trim();
                 if (!inFlight) {
                     if (S.ceoTurnActive && !item.accepted_by_runtime) {
-                        actions.push(`<button type="button" class="ceo-follow-up-action ceo-follow-up-flush" data-follow-up-flush="${entryId}" aria-label="插话进当前回合">
+                        actions.push(`<button type="button" class="ceo-follow-up-action ceo-follow-up-flush" data-follow-up-flush="${entryId}"
+                                aria-label="插话" title="插话：现在就并进正在跑的这一轮">
                                 <i data-lucide="send"></i><span>插话</span>
                             </button>`);
                     }
-                    actions.push(`<button type="button" class="ceo-follow-up-action" data-follow-up-withdraw="${entryId}" aria-label="编辑">
-                            <i data-lucide="corner-down-left"></i>
+                    actions.push(`<button type="button" class="ceo-follow-up-action" data-follow-up-withdraw="${entryId}" aria-label="编辑" title="编辑：把正文取回输入框继续改">
+                            <i data-lucide="pencil"></i>
                         </button>`);
-                    actions.push(`<button type="button" class="ceo-follow-up-action ceo-follow-up-remove" data-follow-up-remove="${entryId}" aria-label="删除">
+                    actions.push(`<button type="button" class="ceo-follow-up-action ceo-follow-up-remove" data-follow-up-remove="${entryId}" aria-label="删除" title="删除这条待发送补充">
                             <i data-lucide="trash-2"></i>
                         </button>`);
                 }
                 return `
-                <div class="ceo-follow-up-chip${expanded ? " is-expanded" : ""}" role="listitem">
+                <div class="ceo-follow-up-chip${expanded ? " is-expanded" : ""}" role="listitem" data-follow-up-id="${entryId}">
                     <span class="ceo-follow-up-kind">${index + 1}</span>
                     <span class="ceo-follow-up-name">${esc(String(item.text || "").trim() || summarizeUploads(item.uploads || []))}</span>
                     ${actions.join("")}
@@ -5477,6 +5518,8 @@ function renderQueuedCeoFollowUps(sessionId = activeSessionId()) {
     `;
     scheduleCeoComposerUsageRefresh();
     icons();
+    watchCeoFollowUpWidth();
+    measureCeoFollowUpSingleLine();
 }
 
 function findCeoQueuedFollowUpEntry(sessionId, entryId) {

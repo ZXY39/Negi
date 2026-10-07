@@ -50,10 +50,13 @@ def _ledger(tool_call_id: str = "call-1") -> dict:
 
 class _RuntimeStub:
     def __init__(self, ledger: dict):
-        self._ledger = ledger
+        # 端点按引用读这张账本，不调快照方法（后者是 deepcopy + normalize）。
+        self._frontdoor_stage_state = ledger
+        self.snapshot_calls = 0
 
     def _frontdoor_visible_canonical_context_snapshot(self) -> dict:
-        return self._ledger
+        self.snapshot_calls += 1
+        return self._frontdoor_stage_state
 
 
 @pytest.fixture()
@@ -82,7 +85,8 @@ def _get(env, tool_call_id: str):
 
 
 def test_endpoint_serves_full_arguments_from_the_resident_ledger(env):
-    env.holder["session"] = _RuntimeStub(_ledger())
+    runtime = _RuntimeStub(_ledger())
+    env.holder["session"] = runtime
 
     response = _get(env, "call-1")
 
@@ -92,6 +96,10 @@ def test_endpoint_serves_full_arguments_from_the_resident_ledger(env):
     assert json.loads(body["arguments_text"]) == {"command": LONG_COMMAND, "timeout_seconds": 60}
     assert '"timeout_seconds": 60' in body["arguments_text"]
     assert body["tool_call_id"] == "call-1"
+    # 收法本身：账本按引用读，不付 deepcopy + normalize 那一份。
+    # （"驻留时一次磁盘都不碰"这条断言不成立也不是这里能收的：`_assert_known_session`
+    # 为判断会话可否恢复，每个 web: 请求都会读一次完成态 sidecar。）
+    assert runtime.snapshot_calls == 0
 
 
 def test_endpoint_falls_back_to_the_completed_continuity_sidecar(env):
