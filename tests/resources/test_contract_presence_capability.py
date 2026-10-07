@@ -975,3 +975,103 @@ async def test_graph_execute_tools_keeps_named_contract_in_the_eviction_batch(mo
     rendered = "\n".join(str(item.get("content") or "") for item in list(result["messages"] or []))
     assert KEPT_CONTRACT_HEADING in rendered
     assert "保留的契约正文" in rendered
+
+
+
+# ---------------------------------------------------------------------------
+# 节点车道：撤销必须早于本轮选择与派发字典，且不许被 promoted 视图复活
+# ---------------------------------------------------------------------------
+
+
+def test_frame_read_does_not_resurrect_revoked_hydration() -> None:
+    """台账被撤空后，不许由本轮 promoted 视图把它复活。
+
+    `hydrated_executor_state` 的取值是 `state or names`，而 `hydrated_executor_names` 是本轮
+    选择派生的视图：撤销只清 state 的话读出来又是整份视图，选择与派发照旧把无契约的工具
+    当已水合。实盘 task:92ad2fe69148 的同一条帧上 `revoked` 与 `hydrated` 并列就是这么来的。
+    """
+    frame = TaskLogService._sanitize_runtime_frame(
+        {
+            "node_id": "node-cp",
+            "hydrated_executor_state": [],
+            "hydrated_executor_names": ["filesystem_stat", "content_open"],
+            "hydration_revoked_executor_names": ["filesystem_stat"],
+        }
+    )
+    assert frame["hydrated_executor_state"] == ["content_open"]
+    assert "filesystem_stat" not in frame["hydrated_executor_state"]
+    # 两份来源同时缺 state 时也要同一口径：promoted 视图里带着已撤销的名字，读出来得减掉。
+    only_names = TaskLogService._sanitize_runtime_frame(
+        {
+            "node_id": "node-cp",
+            "hydrated_executor_names": ["filesystem_stat"],
+            "hydration_revoked_executor_names": ["filesystem_stat"],
+        }
+    )
+    assert only_names["hydrated_executor_state"] == []
+
+
+def test_presence_revocation_subtracts_the_dispatch_dict_before_selection() -> None:
+    """判据要摘的是**本轮派发字典**：只清台账的话，同一跳的字典仍带着该工具。
+
+    实盘 task:92ad2fe69148：01:37:03 那跳正文已离开投影、帧里也记了
+    `hydration_revoked_executor_names=['filesystem_stat']`，而发出去的 callable 仍含它、
+    候选没有它，01:37:07 直接调用还成功了——选择与准入读的都是撤销前的台账视图。
+    """
+
+    class _Logs:
+        def __init__(self) -> None:
+            self._frame = {"node_id": "node-cp", "hydrated_executor_state": ["filesystem_stat"]}
+
+        def read_runtime_frame(self, task_id: str, node_id: str) -> dict:
+            return dict(self._frame)
+
+    loop = ReActToolLoop(chat_backend=SimpleNamespace(), log_service=_Logs(), max_iterations=2)
+    calls: list[dict] = []
+
+    def _revoker(**kwargs):
+        calls.append(kwargs)
+        return []
+
+    loop._tool_contract_presence_revoker = _revoker
+    tools = {"exec": object(), "filesystem_stat": object(), "content_open": object()}
+    kept = loop._revoke_contract_absent_hydration_for_hop(
+        tools=tools,
+        task=SimpleNamespace(task_id="task-cp"),
+        node=SimpleNamespace(node_id="node-cp"),
+        runtime_context={"actor_role": "execution", "session_key": "web:shared"},
+        request_messages=[],
+    )
+    assert "filesystem_stat" not in kept
+    assert "exec" in kept and "content_open" in kept
+    assert calls and calls[0]["request_messages"] == []
+    assert calls[0]["node"] is not None
+
+    # 判据跑不起来 ⇒ 照旧不撤（撤销是收紧，不是本轮可用性的前提）
+    def _boom(**kwargs):
+        raise RuntimeError("judgement unavailable")
+
+    loop._tool_contract_presence_revoker = _boom
+    kept_after_failure = loop._revoke_contract_absent_hydration_for_hop(
+        tools=tools,
+        task=SimpleNamespace(task_id="task-cp"),
+        node=SimpleNamespace(node_id="node-cp"),
+        runtime_context={"actor_role": "execution", "session_key": "web:shared"},
+        request_messages=[],
+    )
+    assert "filesystem_stat" in kept_after_failure
+
+    # 台账为空时根本不调判据：没有水合能力可撤，别为不存在的名字读一遍整份请求体。
+    calls.clear()
+    loop._tool_contract_presence_revoker = _revoker
+    empty_logs = _Logs()
+    empty_logs._frame = {"node_id": "node-cp", "hydrated_executor_state": []}
+    loop._log_service = empty_logs
+    loop._revoke_contract_absent_hydration_for_hop(
+        tools=tools,
+        task=SimpleNamespace(task_id="task-cp"),
+        node=SimpleNamespace(node_id="node-cp"),
+        runtime_context={"actor_role": "execution", "session_key": "web:shared"},
+        request_messages=[],
+    )
+    assert calls == []

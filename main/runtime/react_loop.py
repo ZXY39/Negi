@@ -386,6 +386,21 @@ class ReActToolLoop:
                         for item in list(refreshed_history or [])
                         if isinstance(item, dict)
                     ]
+            # 投影先于选择：在场判据要按本轮**真正会发出去**的那份正文判，而选择组 callable、
+            # 派发字典做准入，两者都在同一跳里消费台账。判据排在它们后面（原来排在写帧前）
+            # 就等于"新一轮照旧宣传并放行无契约的工具"，实盘 task:92ad2fe69148 的 01:37:03 跳
+            # 正是这个形状：帧里已记撤销，发出去的 callable 仍含它，下一跳直调成功。
+            model_messages, stage_compaction_parts = self._prepare_messages_with_parts(
+                message_history,
+                runtime_context=runtime_context,
+            )
+            current_tools = self._revoke_contract_absent_hydration_for_hop(
+                tools=current_tools,
+                task=task,
+                node=node,
+                runtime_context=runtime_context,
+                request_messages=model_messages,
+            )
             stage_gate = self._execution_stage_gate(
                 task_id=task.task_id,
                 node_id=node.node_id,
@@ -436,10 +451,6 @@ class ReActToolLoop:
                     item.get('skill_id') if isinstance(item, dict) else item
                     for item in list(dynamic_contract_payload.get('candidate_skills') or [])
                 ]
-            )
-            model_messages, stage_compaction_parts = self._prepare_messages_with_parts(
-                message_history,
-                runtime_context=runtime_context,
             )
             # 契约先注入、当轮 overlay/repair 提示最后追加：请求末位保持 user
             # 回合提示而不是契约块，避免模型把契约抬头当作"上一条发言"回显进
@@ -700,23 +711,9 @@ class ReActToolLoop:
             # 这里只把它带过本帧：用它本轮的 promoted 视图覆写，会让任何一次曝光收窄
             # （RBAC 抖动、对象字典塌缩）永久抹掉台账，而 names 才是本轮视图。
             #
-            # 契约在场撤销在同一条道上回写台账，但判据取的是**本轮真实请求视图**
-            # （request_messages，已随阶段裁撤/压缩收口）而不是本轮 promoted 视图：
-            # promoted 视图是台账减 RBAC 的结果，它不知道正文还在不在。
-            contract_revoker = getattr(self, '_tool_contract_presence_revoker', None)
-            if callable(contract_revoker):
-                try:
-                    contract_revoker(
-                        task_id=str(task.task_id or ''),
-                        node_id=str(node.node_id or ''),
-                        actor_role=str((runtime_context or {}).get('actor_role') or '').strip(),
-                        session_id=str((runtime_context or {}).get('session_key') or '').strip(),
-                        request_messages=list(request_messages or []),
-                        node=node,
-                    )
-                except Exception:
-                    # 判据跑不起来就照旧不撤：撤销是收紧，不是本轮的可用性前提。
-                    pass
+            # 契约在场撤销不在这里跑：它已经在本跳的选择之前跑过一次（见
+            # `_revoke_contract_absent_hydration_for_hop`），判据同一跳只该判一次，
+            # 而且必须在选择与派发字典之前判——在这儿判到的结论只能留给下一跳。
             prior_frame_for_hydration = self._runtime_frame(task.task_id, node.node_id) or {}
             prior_hydrated_state = self._normalized_name_list(
                 list(prior_frame_for_hydration.get('hydrated_executor_state') or [])
@@ -2360,6 +2357,55 @@ class ReActToolLoop:
             publish_snapshot=True,
         )
         return prepared_history
+
+    def _revoke_contract_absent_hydration_for_hop(
+        self,
+        *,
+        tools: dict[str, Any],
+        task: Any,
+        node: Any,
+        runtime_context: dict[str, Any],
+        request_messages: list[dict[str, Any]],
+    ) -> dict[str, Any]:
+        """按本轮请求投影判契约在场，撤掉不在场的水合能力，并把它们摘出**本轮派发字典**。
+
+        台账回写由 `runtime_service.revoke_contract_absent_node_hydration` 完成，本方法只负责
+        把它接在选择之前：选择用台账组 callable、执行按这份字典准入，两者都在同一跳里消费，
+        判据排在它们之后就等于让"正文已离开上下文"的这一跳照旧宣传并放行该工具。固定内置与
+        控制/加载器不进水合台账，因此不在摘除范围内。
+        """
+        revoker = getattr(self, '_tool_contract_presence_revoker', None)
+        current_tools = dict(tools or {})
+        if not callable(revoker) or not current_tools:
+            return current_tools
+        task_id = str(getattr(task, 'task_id', '') or '').strip()
+        node_id = str(getattr(node, 'node_id', '') or '').strip()
+        ledger = self._normalized_name_list(
+            list((self._runtime_frame(task_id, node_id) or {}).get('hydrated_executor_state') or [])
+        )
+        if not ledger:
+            # 没有水合能力可撤时不必读整份请求体判在场。
+            return current_tools
+        try:
+            present = self._normalized_name_list(
+                revoker(
+                    task_id=task_id,
+                    node_id=node_id,
+                    actor_role=str((runtime_context or {}).get('actor_role') or '').strip(),
+                    session_id=str((runtime_context or {}).get('session_key') or '').strip(),
+                    request_messages=list(request_messages or []),
+                    node=node,
+                )
+            )
+        except Exception:
+            # 判据跑不起来就照旧不撤：撤销是收紧，不是本轮的可用性前提。
+            return current_tools
+        present_set = set(present)
+        revoked_now = [name for name in ledger if name not in present_set]
+        if not revoked_now:
+            return current_tools
+        revoked_set = set(revoked_now)
+        return {name: tool for name, tool in current_tools.items() if name not in revoked_set}
 
     def _runtime_frame(self, task_id: str, node_id: str) -> dict[str, Any] | None:
         frame = self._log_service.read_runtime_frame(task_id, node_id)
