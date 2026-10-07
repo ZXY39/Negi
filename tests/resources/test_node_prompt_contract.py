@@ -49,7 +49,7 @@ def test_upsert_node_dynamic_contract_message_replaces_existing_contract_message
     updated = upsert_node_dynamic_contract_message(base_messages, contract)
 
     assert len(updated) == 4  # 原 3 条 + 稳定契约 + 活状态块
-    assert updated[-1]["role"] == "system"
+    assert updated[-1]["role"] == "user"
     assert updated[-1]["content"].startswith("## Runtime Stage Gate")
     assert updated[-2]["content"].startswith("## Runtime Tool Contract")
     assert '"message_type"' not in updated[-2]["content"]
@@ -103,7 +103,7 @@ def test_node_runtime_contract_serializes_minimal_agent_facing_payload() -> None
     assert "model_visible_tool_selection_trace" not in payload
     assert "node_id" not in payload
     assert "node_kind" not in payload
-    assert message["role"] == "system"
+    assert message["role"] == "user"
     assert message["content"].startswith("## Runtime Tool Contract")
     assert '"message_type"' not in message["content"]
     # 活状态只在尾块里，稳定块一份都没有
@@ -222,7 +222,7 @@ def test_inject_node_dynamic_contract_message_appends_contract_to_request_tail()
         contract,
     )
 
-    assert [item["role"] for item in injected] == ["system", "user", "assistant", "system", "system"]
+    assert [item["role"] for item in injected] == ["system", "user", "assistant", "user", "user"]
     assert injected[-1]["content"].startswith("## Runtime Stage Gate")
     assert injected[-2]["content"].startswith("## Runtime Tool Contract")
     assert '"message_type"' not in injected[-2]["content"]

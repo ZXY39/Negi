@@ -526,6 +526,43 @@ def test_sanitize_provider_messages_normalizes_internal_tool_call_shape() -> Non
     ]
 
 
+def test_sanitize_provider_messages_keeps_one_system_message_at_the_head_only() -> None:
+    """线体不变量：一份请求里 system 至多一份、且只能占首位。
+
+    严格 OpenAI-compatible 网关（glm 系 /responses 道）对违规直接 400
+    「no more than one system message」，而中段/末位的 system 块由运行时注入，
+    续跑基线里也存量大量旧 system 块——咽喉点这一道改写同时兜住两者。
+    """
+    raw_messages = [
+        {"role": "system", "content": "# 定位"},
+        {"role": "user", "content": "分析这个仓库"},
+        {"role": "system", "content": '[G3KU_STAGE_COMPACT_V1]\n{"stage_index":1}'},
+        {"role": "assistant", "content": "读完了入口文件"},
+        {"role": "system", "content": "## Runtime Tool Contract\nkind: frontdoor_runtime_tool_contract"},
+    ]
+
+    sanitized = chat_backend_module.sanitize_provider_messages(raw_messages)
+
+    assert [item["role"] for item in sanitized] == ["system", "user", "user", "assistant", "user"]
+    assert [item["content"] for item in sanitized if item["role"] == "system"] == ["# 定位"]
+    # 被改写的块正文与位置都不动：只有角色变，前缀字节仍然连续。
+    assert sanitized[2]["content"] == '[G3KU_STAGE_COMPACT_V1]\n{"stage_index":1}'
+    assert sanitized[-1]["content"].startswith("## Runtime Tool Contract")
+    assert chat_backend_module.sanitize_provider_messages(sanitized) == sanitized
+
+
+def test_sanitize_provider_messages_leaves_system_alone_when_history_starts_with_user() -> None:
+    """头部不是 system 时（压缩 helper 那种 user 开头的体），后面也不许冒出 system。"""
+    sanitized = chat_backend_module.sanitize_provider_messages(
+        [
+            {"role": "user", "content": "压缩这段历史"},
+            {"role": "system", "content": "## Runtime Stage Gate"},
+        ]
+    )
+
+    assert [item["role"] for item in sanitized] == ["user", "user"]
+
+
 @pytest.mark.asyncio
 async def test_config_chat_backend_recommends_fixed_single_request_timeout(monkeypatch) -> None:
     chat_backend_runtime = importlib.reload(chat_backend_module)

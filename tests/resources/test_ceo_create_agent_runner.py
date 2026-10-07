@@ -1951,7 +1951,7 @@ async def test_create_agent_runner_graph_prepare_turn_keeps_cron_internal_event_
     seed_messages = [dict(item) for item in list(captured["request_body_seed_messages"] or [])]
     assert seed_messages == []
     internal_messages = [dict(item) for item in list(captured["internal_seed_messages"] or [])]
-    assert [message["role"] for message in internal_messages] == ["system", "system"]
+    assert [message["role"] for message in internal_messages] == ["user", "user"]
     assert str(internal_messages[0]["content"]).startswith("你接收到了之前你定时的任务，如下：")
     assert str(internal_messages[1]["content"]).startswith("[CRON INTERNAL EVENT]")
     assert not any(
@@ -2233,7 +2233,7 @@ async def test_create_agent_runner_graph_prepare_turn_persists_request_body_with
     assert len(prepared["dynamic_appendix_messages"]) == 2  # 一份稳定契约 + 一份活状态块
     contract_message = dict(prepared["dynamic_appendix_messages"][0] or {})
     assert is_frontdoor_tool_contract_message(contract_message)
-    assert contract_message["role"] == "system"
+    assert contract_message["role"] == "user"
     assert str(contract_message.get("content") or "").startswith("## Runtime Tool Contract")
 
 
@@ -3400,7 +3400,7 @@ def test_create_agent_runner_sync_blocks_internal_only_heartbeat_baseline_regres
         _frontdoor_actual_request_message_count=3,
         _frontdoor_actual_tool_schema_hash="existing-tool-hash",
         _frontdoor_history_shrink_reason="",
-        _sync_completed_continuity_snapshot=lambda *, source_reason: continuity_syncs.append(source_reason),
+        _sync_completed_continuity_snapshot=lambda *, source_reason, internal_turn=False: continuity_syncs.append(source_reason),
     )
     continuity_syncs: list[str] = []
     runner = create_agent_impl.CreateAgentCeoFrontDoorRunner(loop=SimpleNamespace(main_task_service=None))
@@ -3474,7 +3474,7 @@ def test_create_agent_runner_sync_allows_appending_legitimate_heartbeat_continua
         _frontdoor_actual_request_message_count=3,
         _frontdoor_actual_tool_schema_hash="existing-tool-hash",
         _frontdoor_history_shrink_reason="",
-        _sync_completed_continuity_snapshot=lambda *, source_reason: continuity_syncs.append(source_reason),
+        _sync_completed_continuity_snapshot=lambda *, source_reason, internal_turn=False: continuity_syncs.append(source_reason),
     )
     continuity_syncs: list[str] = []
     runner = create_agent_impl.CreateAgentCeoFrontDoorRunner(loop=SimpleNamespace(main_task_service=None))

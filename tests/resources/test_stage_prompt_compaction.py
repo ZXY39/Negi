@@ -188,13 +188,14 @@ def test_prepare_stage_prompt_messages_keeps_every_unmarked_stage_raw_and_compac
         if content.startswith(STAGE_COMPACT_PREFIX)
     ]
     assert len(compact_blocks) == 1
-    # 阶段块以 system 角色落地（压缩元数据、非对话内容）
+    # 阶段块以 user 角色落地：线体只许一份首位 system（严格网关 400），又不得用
+    # assistant（模型会在续写位置仿造整块 JSON）
     compact_messages = [
         item
         for item in prepared
         if str(item.get("content") or "").startswith(STAGE_COMPACT_PREFIX)
     ]
-    assert [str(item.get("role")) for item in compact_messages] == ["system"]
+    assert [str(item.get("role")) for item in compact_messages] == ["user"]
     compact_payload = json.loads(compact_blocks[0].split("\n", 1)[1])
     assert compact_payload["stage_index"] == 1
     assert compact_payload["completed_stage_summary"] == "finished stage one"
@@ -264,13 +265,13 @@ def test_prepare_stage_prompt_messages_externalizes_compression_stages() -> None
         if content.startswith(STAGE_EXTERNALIZED_PREFIX)
     ]
     assert len(externalized_blocks) == 1
-    # 外置归档块同样以 system 角色落地
+    # 外置归档块同样以 user 角色落地
     externalized_messages = [
         item
         for item in prepared
         if str(item.get("content") or "").startswith(STAGE_EXTERNALIZED_PREFIX)
     ]
-    assert [str(item.get("role")) for item in externalized_messages] == ["system"]
+    assert [str(item.get("role")) for item in externalized_messages] == ["user"]
     payload = json.loads(externalized_blocks[0].split("\n", 1)[1])
     assert payload["archive_ref"] == "artifact:artifact:stage-archive-1"
     assert payload["archive_stage_index_start"] == 1
@@ -641,7 +642,7 @@ def test_compact_block_payload_keeps_non_default_mode_and_generated_flag() -> No
     assert "mode" not in payloads[2]
 
 
-def test_stage_blocks_render_with_system_role() -> None:
+def test_stage_blocks_render_with_user_role() -> None:
     # 角色对齐（事故 ext:qq-official:f8a8001865631301）：阶段块是运行时标注的
     # 已完成阶段摘要（压缩元数据、非对话内容），必须以 system 角色落地；
     # assistant 角色会向模型示范"你的回复长这样"，诱导其在续写位置仿造/回显
@@ -690,17 +691,18 @@ def test_stage_blocks_render_with_system_role() -> None:
         )
     ]
     assert blocks
-    assert all(str(item.get("role") or "") == "system" for item in blocks)
+    assert all(str(item.get("role") or "") == "user" for item in blocks)
     rendered_prefixes = {str(item.get("content") or "").split("\n", 1)[0] for item in blocks}
     assert STAGE_COMPACT_PREFIX in rendered_prefixes
     assert STAGE_EXTERNALIZED_PREFIX in rendered_prefixes
 
 
 def test_in_place_compaction_accepts_mixed_legacy_assistant_and_system_blocks() -> None:
-    # 迁移期双角色识别：存量 durable baseline / continuity sidecar / 续跑 seed /
-    # actual-request scaffold 里可能仍有 assistant 角色旧块，与新渲染的 system 块
-    # 混存。压缩必须两类都剥离并去重回插——不得因识别不到旧块而重复或丢失，
-    # 且重复执行收敛（幂等），旧块随下一次渲染自然收敛为 system 角色。
+    # 迁移期三角色识别：存量 durable baseline / continuity sidecar / 续跑 seed /
+    # actual-request scaffold 里既有更早的 assistant 角色旧块，也有 10-05 之后一直
+    # 到本轮改动之前的 system 角色旧块，与新渲染的 user 块混存。压缩必须三类都剥离
+    # 并去重回插——不得因识别不到旧块而重复或丢失，且重复执行收敛（幂等），旧块随下
+    # 一次渲染自然收敛为 user 角色。
     messages: list[dict[str, object]] = [
         {"role": "system", "content": "system"},
         {"role": "user", "content": "hi"},
@@ -719,12 +721,14 @@ def test_in_place_compaction_accepts_mixed_legacy_assistant_and_system_blocks() 
         if str(item.get("content") or "").startswith(STAGE_COMPACT_PREFIX)
         and int(json.loads(str(item.get("content")).split("\n", 1)[1])["stage_index"]) == 1
     )
-    assert str(stage_one_block.get("role")) == "system"
+    assert str(stage_one_block.get("role")) == "user"
 
-    # 模拟存量旧块：同内容、assistant 角色，混入历史另一位置
+    # 模拟存量旧块：同内容、assistant 与 system 两种历史角色，各混入另一位置
     legacy_block = {"role": "assistant", "content": stage_one_block["content"]}
+    legacy_system_block = {"role": "system", "content": stage_one_block["content"]}
     mixed = list(first_output)
     mixed.insert(2, legacy_block)
+    mixed.insert(4, legacy_system_block)
 
     second = compact_stage_prompt_messages_in_place(
         mixed, stage_state=stage_state

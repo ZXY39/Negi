@@ -2694,14 +2694,44 @@ def test_fold_recognizes_baseline_messages_without_metadata() -> None:
     bundle = "[SESSION EVENTS]\n## EVENT BUNDLE\n- Task X (task:t) has a node paused after an error"
     msgs: list[dict] = []
     for _ in range(5):
-        msgs.append({"role": "system", "content": rule})
+        # 新生产者的规则行也落在 user 上——折叠按内容标记识别，角色不得参与判据
+        msgs.append({"role": "user", "content": rule})
         msgs.append({"role": "user", "content": bundle})
     msgs.append({"role": "assistant", "content": "处理完成"})
 
     folded = web_ceo_sessions.fold_internal_prompt_history(msgs)
-    assert sum(1 for m in folded if m["role"] == "system") == 1  # 5 份相同规则 → 1
-    assert sum(1 for m in folded if m["role"] == "user") == 1  # 5 份相同事件束 → 1
+    assert sum(1 for m in folded if str(m.get("content") or "").startswith("This is a background heartbeat")) == 1
+    assert sum(1 for m in folded if str(m.get("content") or "").startswith("[SESSION EVENTS]")) == 1
     assert sum(1 for m in folded if m["role"] == "assistant") == 1  # 助手消息保留
+
+
+def test_trailing_turn_record_skips_rule_rows_not_event_bundles() -> None:
+    """内部规则行落在 user 之后不得冒充"本轮用户回合"。
+
+    心跳规则/cron 提醒正文现在是 user 角色，"末位是不是本轮 user"的三个判据
+    （_history_has_current_user / _transcript_has_current_user / 继承路径的追加闸门）
+    都会把它当成本轮内容，于是本轮事件束永不追加——模型收不到触发它的那件事。
+    事件束行确实代表本轮内容，同回合重投时仍要由它挡住重复追加。
+    """
+    rule_row = {"role": "user", "content": "heartbeat stable rules",
+                "metadata": {"internal_prompt_kind": "heartbeat_rule"}}
+    bundle_row = {"role": "user", "content": "[SESSION EVENTS] bundle",
+                  "metadata": {"internal_prompt_kind": "heartbeat_event_bundle"}}
+
+    assert web_ceo_sessions.trailing_turn_record(
+        [{"role": "system", "content": "head"},
+         {"role": "user", "content": "prior request"},
+         {"role": "assistant", "content": "prior answer"},
+         rule_row]
+    ) == {"role": "assistant", "content": "prior answer"}
+
+    # 本轮事件束已经在末位 → 交回它，让调用方判"当前用户已在历史里"
+    assert web_ceo_sessions.trailing_turn_record(
+        [{"role": "system", "content": "head"}, rule_row, bundle_row]
+    ) == bundle_row
+
+    assert web_ceo_sessions.trailing_turn_record([]) is None
+    assert web_ceo_sessions.trailing_turn_record([rule_row]) is None
 
 
 def test_fold_does_not_collapse_ordinary_user_messages() -> None:
@@ -2725,7 +2755,7 @@ def _warm_loop_bundle_messages(messages):
 def _warm_loop_rule_messages(messages):
     return [
         m for m in messages
-        if m.get("role") == "system" and str(m.get("content") or "").lstrip().startswith("This is a background heartbeat")
+        if str(m.get("content") or "").lstrip().startswith("This is a background heartbeat")
     ]
 
 
@@ -2748,7 +2778,7 @@ def test_warm_path_baseline_bundle_count_stays_bounded_across_failed_heartbeats(
     baseline: list[dict] = []
     for round_index in range(10):
         request_body = list(baseline) + [
-            {"role": "system", "content": rule},
+            {"role": "user", "content": rule},
             {"role": "user", "content": bundle},
         ]
         # 模型实际看到的请求体：事件束/规则有界（首轮 1，之后"基线折叠副本 + 当前注入"= 2，不再增长）
@@ -2775,7 +2805,7 @@ def test_warm_path_baseline_keeps_distinct_events_but_collapses_redispatches() -
     baseline: list[dict] = []
     # 事件 A 连续重投 3 次（同一内容）→ 折叠到 1
     for _ in range(3):
-        request_body = list(baseline) + [{"role": "system", "content": rule}, {"role": "user", "content": bundle_a}]
+        request_body = list(baseline) + [{"role": "user", "content": rule}, {"role": "user", "content": bundle_a}]
         baseline = helpers._durable_frontdoor_request_body_messages(request_body)
     assert len(_warm_loop_bundle_messages(baseline)) == 1
 

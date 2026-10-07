@@ -389,11 +389,12 @@ class NodeRuntimeToolContract:
     def to_message(self) -> dict[str, Any]:
         payload = self.to_message_payload()
         return {
-            # system 角色：该契约是运行时元数据、不是对话内容。用 assistant 会
-            # 让模型把它当成"自己上一轮说过/发给用户的消息"，进而在续写位置把它
+            # user 角色：严格 OpenAI-compatible 网关只允许一份 system 且必须在首位，
+            # 这两份块排在请求末位，用 system 会被那些网关 400 拒掉。也不许用 assistant
+            # ——模型会把它当成"自己上一轮说过/发给用户的消息"，进而在续写位置把它
             # 整段复读回下一条回复（回显事故 task:e580ebc3dc55）。对齐前门
-            # FrontdoorToolContract 的 system 角色契约（见 tool_contract.py）。
-            'role': 'system',
+            # FrontdoorToolContract 的 user 角色契约（见 tool_contract.py）。
+            'role': 'user',
             'content': _render_node_dynamic_contract_summary(payload),
             NODE_DYNAMIC_CONTRACT_PAYLOAD_KEY: payload,
         }
@@ -401,7 +402,7 @@ class NodeRuntimeToolContract:
     def to_stage_gate_message(self) -> dict[str, Any]:
         """活状态块：与契约同源，只含每跳重写的行，排在请求体真正末位。"""
         return {
-            'role': 'system',
+            'role': 'user',
             'content': _render_node_stage_gate_summary(self.to_message_payload()),
         }
 
@@ -418,9 +419,10 @@ def is_node_dynamic_contract_message(message: dict[str, Any]) -> bool:
         return True
     if _message_declares_tool_calls(message):
         return False
-    # 注入的契约已经以 system 角色落地；存量 frame / seed 重建里仍可能有
-    # assistant 角色的旧契约残留，模型回显的契约也是 assistant 文本，两类都识别。
-    if str((message or {}).get('role') or '').strip().lower() not in {'assistant', 'system'}:
+    # 注入的契约现在以 user 角色落地；存量 frame / seed 重建里仍可能有 system 角色的
+    # 旧契约，assistant 角色的更早旧契约残留与模型回显也是 assistant 文本——三种角色
+    # 都识别，迁移期不得因认不出旧块而在尾部叠出第二份。
+    if str((message or {}).get('role') or '').strip().lower() not in {'assistant', 'system', 'user'}:
         return False
     return any(
         str((message or {}).get('content') or '').strip().startswith(heading)

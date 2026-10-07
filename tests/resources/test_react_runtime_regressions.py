@@ -34,6 +34,7 @@ from main.runtime.node_prompt_contract import (
     NodeRuntimeToolContract,
     extract_node_dynamic_contract_payload,
     inject_node_dynamic_contract_message,
+    is_node_dynamic_contract_message,
 )
 import main.service.runtime_service as runtime_service_module
 from main.runtime.internal_tools import SubmitFinalResultTool, SubmitNextStageTool, SpawnChildNodesTool
@@ -3994,10 +3995,10 @@ async def test_contract_echo_with_stage_tool_call_keeps_pairing_and_tail_order()
     assert str(second_request[-1].get("role") or "") == "user"
     assert str(second_request[-1].get("content") or "").startswith("System note for this turn only:")
     gate_message = second_request[-2]
-    assert str(gate_message.get("role") or "") == "system"
+    assert str(gate_message.get("role") or "") == "user"
     assert str(gate_message.get("content") or "").startswith("## Runtime Stage Gate")
     contract_message = second_request[-3]
-    assert str(contract_message.get("role") or "") == "system"
+    assert str(contract_message.get("role") or "") == "user"
     assert str(contract_message.get("content") or "").startswith("## Runtime Tool Contract")
 
 
@@ -5413,7 +5414,7 @@ def test_node_dynamic_contract_injection_keeps_request_only_message_after_bootst
         contract,
     )
 
-    assert [item["role"] for item in injected[:4]] == ["system", "user", "assistant", "system"]
+    assert [item["role"] for item in injected[:4]] == ["system", "user", "assistant", "user"]
     payload = extract_node_dynamic_contract_payload(injected)
     assert payload is not None
     assert payload["execution_stage"] == {
@@ -6432,7 +6433,13 @@ async def test_enrich_node_messages_never_injects_memory_retrieval_overlay(
         ],
     )
 
-    user_messages = [message for message in enriched if message.get("role") == "user"]
+    # 契约尾块现在也落在 user 角色（线体只许一份首位 system），排除运行时注入块之后
+    # 剩下的才是真实用户消息——本用例要证的是"记忆检索 overlay 不冒充用户消息"。
+    user_messages = [
+        message
+        for message in enriched
+        if message.get("role") == "user" and not is_node_dynamic_contract_message(message)
+    ]
     assert len(user_messages) == 1
     payload = extract_node_dynamic_contract_payload(enriched)
     assert payload is not None

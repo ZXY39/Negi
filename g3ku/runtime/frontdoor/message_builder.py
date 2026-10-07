@@ -62,6 +62,7 @@ from g3ku.runtime.web_ceo_sessions import (
     message_role,
     prompt_history_messages,
     transcript_messages,
+    trailing_turn_record,
 )
 from main.runtime.stage_budget import SILENT_TOOL_NAME
 
@@ -694,6 +695,11 @@ class CeoMessageBuilder:
             return False
         return str(messages[-1].get('role') or '').strip().lower() == 'assistant'
 
+    # 内部规则行（心跳稳定规则 / cron 提醒正文）以 user 角色排在本轮 user 之前时，会冒充
+    # "当前用户回合已在历史里"，事件束就此不再进请求体。跳过它们取真正的末位回合，
+    # 判据与合同都归 web_ceo_sessions（内部提示词这条契约的持有者）。
+    _trailing_turn_record = staticmethod(trailing_turn_record)
+
     def _history_has_current_user(
         self,
         *,
@@ -702,9 +708,9 @@ class CeoMessageBuilder:
         user_metadata: dict[str, Any] | None,
     ) -> bool:
         messages = [message for message in list(history_messages or []) if isinstance(message, dict)]
-        if not messages:
+        last = self._trailing_turn_record(messages)
+        if last is None:
             return False
-        last = dict(messages[-1])
         if str(last.get('role') or '').strip().lower() != 'user':
             return False
         last_metadata = last.get('metadata') if isinstance(last.get('metadata'), dict) else {}
@@ -724,9 +730,9 @@ class CeoMessageBuilder:
         if persisted_session is None:
             return False
         messages = [message for message in transcript_messages(persisted_session) if isinstance(message, dict)]
-        if not messages:
+        last = self._trailing_turn_record(messages)
+        if last is None:
             return False
-        last = dict(messages[-1])
         if str(last.get('role') or '').strip().lower() != 'user':
             return False
         last_metadata = last.get('metadata') if isinstance(last.get('metadata'), dict) else {}

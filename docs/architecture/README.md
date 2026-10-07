@@ -144,6 +144,7 @@ Start here when you are new to the repository or when a change crosses subsystem
 - 上下文里找不到 `candidate_skills`、或头部那份技能名单看着过期、或相邻跳头部字节反复变 → `tool-and-skill-system.md`「Pinned Static Declarations」+ `context-and-cache-troubleshooting.md`「静态声明钉在请求体头部」
 - 模型报告的日期/时间与事实不符（心算毫秒时间戳出错、引用陈旧时间、日报归属日期错误）→ `heartbeat-system.md`「Internal-turn time anchors」+ `runtime-overview.md`「用户消息时间锚点」
 - 用户消息在请求体里同时出现原文与带 `[消息送达时间]` 行的两个版本，或装饰后缓存命中率骤降 → `context-and-cache-troubleshooting.md`「用户消息时间装饰破坏前缀稳定或相等性去重」
+- 某配置整条模型链 400「The input messages must contain no more than one system message」（`InternalError.Algo.InvalidParameter`）、换 key 无效 → `context-and-cache-troubleshooting.md`「线体角色合同」
 - 入站到首个 provider 请求发出耗时异常 → `context-and-cache-troubleshooting.md`「Prompt Cache Family 与 Actual Request」
 - 会话/节点疑似卡在 provider 退避重试，但界面没有重试次数与错误信息 → `runtime-overview.md`「Chat provider 超时与重试边界」+ `web-and-admin.md`「Model Retry Visibility UI Contract」
 - 渠道/会话收到英文 "The turn completed without visible assistant text…"，或回合以「这一轮处理失败：响应流未正常终止」结束 → `runtime-overview.md`「Chat provider 超时与重试边界」（空响应与未终止流两条车道、`finish_reason_seen` 日志锚点）
@@ -161,7 +162,7 @@ Start here when you are new to the repository or when a change crosses subsystem
 - 压缩报成功、`post_tokens` 也降了，但下一回合请求体又回到原大小；或压缩途中发的消息没被回答 → `runtime-overview.md`「压缩窗口：入站闸门与基线写入仲裁」+ `context-and-cache-troubleshooting.md`「Shrink 原因与压缩边界」
 - 压缩后 `[G3KU_STAGE_COMPACT_V1]` 块数量没下降、模型报告"压缩了但历史阶段还在"、或摘要里查不到某条证据引用 → `context-and-cache-troubleshooting.md`「Shrink 原因与压缩边界」（阶段收口判读）+ `runtime-overview.md`「Frontdoor Context Compression」；节点 artifact 带 `stage_archive` 而账本没有 `context_visible` 不属该症状（节点不应用收口标记，见同节）
 - 阶段边界那一跳 `cache_hit` 塌下去、非缓存 `input` 冲高，但下一跳就回血，且此后正文天花板明显更低 → 这是裁撤生效的正常账单（断点位置不动、动的是断点后面的载荷），读数口径见 `context-and-cache-troubleshooting.md`「Shrink 原因与压缩边界」
-- `cache_hit` 每阶段推进都塌回同一小值（头部块末尾的 token 位）而历史没被裁 → 活状态块被搬到了请求头部，位置合同见 `context-and-cache-troubleshooting.md`「Responses 的 system 位置保持」
+- `cache_hit` 每阶段推进都塌回同一小值（头部块末尾的 token 位）而历史没被裁 → 活状态块被搬到了请求头部，位置与角色合同见 `context-and-cache-troubleshooting.md`「线体角色合同」
 - 脑图标读数在阶段边界那一跳冲高数倍、下一跳回落，而 `comparable_to_previous_request` 仍为 `true` → `context-and-cache-troubleshooting.md`「同 turn 的 append-only 规则被破坏」（锚点与阶段投影同源）
 - 节点反复收到"缺必填参数"式拒绝、错误首行逐字相同而 arguments 后缀不同，眼看要被无效提交上限判死 → `context-and-cache-troubleshooting.md`「Shrink 原因与压缩边界」（provider 参数块未转义 + 宽容解析吞参数，按协议故障单独计数）
 - 节点连续多轮重交同一份被拒载荷、越到后面收到的参数契约越短（只剩 `summary` 残段、`ref` 为空） → `tool-and-skill-system.md`「Duplicate Tool Call Guard」（控制工具 error 回执不参与消息级折叠）
@@ -205,7 +206,7 @@ These rules prevent the docs from re-accumulating redundancy. Every edit to this
 | Heartbeat continuation contract, cron at-most-once delivery, reminder sidecar decision semantics, timeout stop, task terminal repair (including terminal-outbox delivery durability and the `abandoned` state), node-error, distribution-error, and task-stall detection/delivery | `heartbeat-system.md` |
 | Tool/skill four concepts, fixed builtin tool contracts, candidate tools and candidate skills, frontdoor head-pinned static declarations (`candidate_skills` / `exec_runtime_policy` / `session_temp_dir`) and their three reprint boundaries, Tool Admin RBAC semantics, provider-facing `tools[]` surface contract (frontdoor live RBAC superset vs node pinned bundle and its single reprint point), duplicate-call guard, resource-directory generation checks and semantic catalog freshness, always-callable resident internal control tools (`silent`, and why fixed-builtin membership does not inject a tool) | `tool-and-skill-system.md` |
 | Tool hydration ledger and promotion, re-read and fingerprints, parameter-error guidance lane, externalized tool result envelope, universal tool timeout contract, tool rerun-safe declaration for the recovery lane, stage gating and callable tightening, context→callable chain | `tool-hydration-and-callable-chain.md` |
-| Actual-request forensics, append-only rule, cache-miss triage, token preflight diagnostics | `context-and-cache-troubleshooting.md` |
+| Actual-request forensics, 线体角色合同（一条请求里 system 至多一份且只能在首位）, append-only rule, cache-miss triage, token preflight diagnostics | `context-and-cache-troubleshooting.md` |
 | Websocket/UI contracts, composer/media rendering, image upload gating, frontend theme and layout contract, model config admin draft contract, log audit event sink and audit page contract, node output content-read API contract, per-call model-call ledger (its writer lanes and `call_kind`) and the Token统计 window, container deployment, frontend vendor asset state (tracked manifest vs data-root probe overlay) | `web-and-admin.md` |
 | Config schema, hot refresh, model bindings, secret location, deployment unlock, config bundle export/import, role route entries and load-balance group config semantics | `config-and-models.md` |
 | Node model route resolution and admission-time binding: ordered route chain vs in-chain load-balance group, quota-bucket observation (rolling RPM + decayed 429 penalty), per-node sticky binding and its rebind triggers, group member budget and intra-group pacing, worker-only process scope and the rollback switch | `runtime-overview.md` |

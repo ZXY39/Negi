@@ -148,12 +148,13 @@ def retained_raw_stage_messages(
     ordered.sort(key=lambda item: int(item.get("stage_index") or 0))
     messages = [
         {
-            # system 角色：raw 阶段块与 compact/externalized 块同属运行时标注的
-            # 阶段上下文（压缩元数据、非对话内容），assistant 角色会诱导模型在
+            # user 角色：raw 阶段块与 compact/externalized 块同属运行时标注的阶段上下文，
+            # 落在历史中段，而严格网关只允许一份首位 system（线体不变量见
+            # chat_backend.sanitize_provider_messages）。assistant 角色会诱导模型在
             # 续写位置仿造/回显整块 JSON。角色合同见 stage_prompt_compaction.py
             # completed_stage_blocks 与 context-and-cache-troubleshooting.md
             # 「压缩块的格式与字段语义」。
-            "role": "system",
+            "role": "user",
             "content": f"{STAGE_RAW_PREFIX}\n{json.dumps(_normalize_stage(stage), ensure_ascii=False, sort_keys=True)}",
         }
         for stage in ordered

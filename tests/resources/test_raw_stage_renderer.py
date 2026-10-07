@@ -68,7 +68,7 @@ def test_retained_raw_stage_messages_keeps_every_unmarked_completed_stage_regard
     messages, retained_ids = retained_raw_stage_messages(_stage_state(stages))
     assert retained_ids == {f"s{i + 1}" for i in range(9)}
     assert len(messages) == 9
-    assert {m["role"] for m in messages} == {"system"}
+    assert {m["role"] for m in messages} == {"user"}
     assert [m["content"].split("\n", 1)[0] for m in messages] == [STAGE_RAW_PREFIX] * 9
 
 
@@ -169,7 +169,7 @@ def test_retained_raw_stage_messages_content_contract() -> None:
     stages = [_stage("s1", 1, stage_goal="检查 中文 目标 / quote \"x\"")]
     messages, _retained = retained_raw_stage_messages(_stage_state(stages))
     message = messages[0]
-    assert message["role"] == "system"
+    assert message["role"] == "user"
     content = message["content"]
     assert content.startswith(f"{STAGE_RAW_PREFIX}\n")
     assert STAGE_RAW_PREFIX == "[G3KU_STAGE_RAW_V1]"

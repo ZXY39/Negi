@@ -75,14 +75,14 @@ def _normalize_key_ref(item: Any) -> dict[str, Any] | None:
 
 
 def is_stage_context_message(message: dict[str, Any]) -> bool:
-    # 注入的阶段块已经以 system 角色落地（压缩元数据、非对话内容，避免模型把块
-    # 当成"自己上一轮说的话"而在续写位置仿造/回显）；存量 durable baseline /
+    # 注入的阶段块现在以 user 角色落地（线体只许一份首位 system，严格网关会 400），
+    # 但它既不是对话内容也不该被当成模型自己的发言；存量 durable baseline /
     # continuity sidecar / 续跑 seed / actual-request scaffold 里仍可能有
-    # assistant 角色的旧块，模型回显的块残留也是 assistant 文本，两类都识别
-    # （对齐 is_node_dynamic_contract_message 的双角色做法）。旧块在下一次
-    # 压缩渲染回插时自然收敛为 system 角色，过渡期不得因识别不到旧块而
-    # 造成块重复或丢失。
-    if _message_role(message) not in {"assistant", "system"}:
+    # system 角色的旧块，assistant 角色的更早旧块与模型回显的块残留也是 assistant
+    # 文本，三种角色都识别（对齐 is_node_dynamic_contract_message 的做法）。存量块在
+    # 下一次压缩渲染回插时自然收敛为 user 角色，过渡期不得因识别不到旧块而造成块
+    # 重复或丢失——前缀判据仍然兜着。
+    if _message_role(message) not in {"assistant", "system", "user"}:
         return False
     # 恰好以阶段块开头、但同时携带 tool_calls 的工具调用回合不是阶段块本身：
     # 整块丢弃会连带丢掉 assistant 的工具调用声明，使其 role=tool 结果成为
@@ -178,7 +178,7 @@ def keep_stage_blocks_off_continuation_tail(messages: list[dict[str, Any]]) -> l
         (
             index
             for index in range(len(items) - 1, -1, -1)
-            if _message_role(items[index]) == "user"
+            if _message_role(items[index]) == "user" and not is_stage_context_message(items[index])
         ),
         None,
     )
@@ -284,13 +284,14 @@ def completed_stage_blocks(stage_state: Any, *, skip_stage_ids: set[str] | None 
             }
             externalized.append(
                 {
-                    # system 角色：阶段块是运行时标注的已完成阶段摘要（压缩元数据、
-                    # 非对话内容）。assistant 角色会让模型把块当成"自己上一轮说的话"，
-                    # 在续写位置仿造/回显整块 JSON（事故 ext:qq-official:f8a8001865631301）。
-                    # 对齐 FrontdoorToolContract（94fb313a）与节点契约（3529f1eb）的
-                    # system 角色合同；[G3KU_TOKEN_COMPACT_V2] 例外保持 assistant
+                    # user 角色：阶段块回插在历史中段，而严格网关只允许一份首位 system
+                    # （见 chat_backend.sanitize_provider_messages），用 system 会被那些
+                    # 网关 400 拒掉。也不许用 assistant——模型会把块当成"自己上一轮说的
+                    # 话"，在续写位置仿造/回显整块 JSON（事故 ext:qq-official:f8a8001865631301）。
+                    # 对齐 FrontdoorToolContract 与节点契约的 user 角色合同；
+                    # [G3KU_TOKEN_COMPACT_V2] 例外保持 assistant
                     # （正文是自然语言会话摘要，语义上属于对话延续）。
-                    "role": "system",
+                    "role": "user",
                     "content": f"{STAGE_EXTERNALIZED_PREFIX}\n{json.dumps(payload, ensure_ascii=False, sort_keys=True)}",
                 }
             )
@@ -337,8 +338,8 @@ def completed_stage_blocks(stage_state: Any, *, skip_stage_ids: set[str] | None 
             payload["evicted"] = True
         compacted.append(
             {
-                # system 角色，理由同 externalized 块（见上方注释）。
-                "role": "system",
+                # user 角色，理由同 externalized 块（见上方注释）。
+                "role": "user",
                 "content": f"{STAGE_COMPACT_PREFIX}\n{json.dumps(payload, ensure_ascii=False, sort_keys=True)}",
             }
         )

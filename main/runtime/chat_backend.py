@@ -308,6 +308,12 @@ def sanitize_provider_messages(messages: list[dict[str, Any]] | None) -> list[di
         role = str(item.get('role') or '').strip().lower()
         if role not in {'system', 'user', 'assistant', 'tool'}:
             continue
+        # 线体不变量：一条请求里 system 至多一份、且必须在首位。严格网关（glm 系
+        # /responses 道）对违规直接 400 「no more than one system message」，这条改写把
+        # 两条车道与存量记录一起兜住：续跑基线 sidecar 里仍有历史遗留的中段 system 块
+        # （实测 164 份 continuity 中 51 份），生产者改成 user 也救不了它们。
+        if role == 'system' and sanitized:
+            role = 'user'
         payload: dict[str, Any] = {'role': role}
         content = item.get('content')
         if role in {'system', 'user'}:
@@ -451,9 +457,9 @@ def _stage_context_digest(messages: list[dict]) -> str:
     found = False
     digest = hashlib.sha256()
     for message in list(messages or []):
-        # 阶段块已对齐为 system 角色；存量 baseline / sidecar / seed / scaffold 里
-        # 仍有 assistant 角色的旧块，迁移期双角色都参与摘要，保证 cache key 稳定。
-        if str(message.get('role') or '').strip().lower() not in {'assistant', 'system'}:
+        # 阶段块现在以 user 角色落地；存量 baseline / sidecar / seed / scaffold 里仍有
+        # system 与更早 assistant 角色的旧块，迁移期三角色都参与摘要，保证 cache key 稳定。
+        if str(message.get('role') or '').strip().lower() not in {'assistant', 'system', 'user'}:
             continue
         content = str(message.get('content') or '')
         if not (

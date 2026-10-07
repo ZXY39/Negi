@@ -183,7 +183,8 @@ class CeoFrontDoorSupport:
             "要求：",
             "- 请立即按任务要求执行。",
         ]
-        return {"role": "system", "content": "\n".join(lines)}
+        # user 角色：这条提醒与事件束落在历史中段/末位，严格网关只允许一份首位 system。
+        return {"role": "user", "content": "\n".join(lines)}
 
     @staticmethod
     def _cron_internal_event_message(
@@ -215,7 +216,7 @@ class CeoFrontDoorSupport:
         if last_delivered_at_local:
             payload["last_delivered_at_local"] = last_delivered_at_local
         return {
-            "role": "system",
+            "role": "user",
             "content": "[CRON INTERNAL EVENT]\n" + json.dumps(payload, ensure_ascii=False, indent=2),
         }
 

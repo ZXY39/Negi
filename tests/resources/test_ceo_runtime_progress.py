@@ -1712,7 +1712,7 @@ async def test_runtime_agent_session_persists_hidden_cron_prompt_messages_and_vi
     assert inflight["execution_trace_summary"] == {}
 
     persisted = loop.sessions.get_or_create("web:shared")
-    assert [message["role"] for message in persisted.messages] == ["system", "system", "assistant"]
+    assert [message["role"] for message in persisted.messages] == ["user", "user", "assistant"]
     assert persisted.messages[0]["content"].startswith("你接收到了之前你定时的任务，如下：")
     assert persisted.messages[0]["metadata"]["source"] == "cron"
     assert persisted.messages[0]["metadata"]["cron_job_id"] == "job-77"
@@ -1746,8 +1746,8 @@ async def test_runtime_agent_session_persists_hidden_cron_prompt_messages_and_vi
         }
     ]
     assert [message["role"] for message in web_ceo_sessions.prompt_history_messages(persisted)] == [
-        "system",
-        "system",
+        "user",
+        "user",
         "assistant",
     ]
 
@@ -1815,7 +1815,7 @@ async def test_runtime_agent_session_persists_hidden_heartbeat_prompt_messages_a
     )
 
     persisted = loop.sessions.get_or_create("web:shared")
-    assert [message["role"] for message in persisted.messages] == ["system", "user", "assistant"]
+    assert [message["role"] for message in persisted.messages] == ["user", "user", "assistant"]
     assert persisted.messages[0]["content"] == heartbeat_rules_text
     assert persisted.messages[0]["metadata"]["source"] == "heartbeat"
     assert persisted.messages[0]["metadata"]["prompt_visible"] is True
@@ -1847,7 +1847,7 @@ async def test_runtime_agent_session_persists_hidden_heartbeat_prompt_messages_a
         }
     ]
     assert [message["role"] for message in web_ceo_sessions.prompt_history_messages(persisted)] == [
-        "system",
+        "user",
         "user",
         "assistant",
     ]
@@ -7170,7 +7170,7 @@ async def test_ceo_frontdoor_prepare_turn_continues_full_context_and_appends_hid
     )
 
     builder_seed = list(captured["builder_kwargs"]["request_body_seed_messages"])
-    assert [message["role"] for message in builder_seed] == ["system", "user", "assistant", "system"]
+    assert [message["role"] for message in builder_seed] == ["system", "user", "assistant", "user"]
     assert builder_seed[:3] == existing_baseline
     assert builder_seed[3]["content"] == heartbeat_rules_text
     assert builder_seed[3]["metadata"] == {
@@ -7191,7 +7191,7 @@ async def test_ceo_frontdoor_prepare_turn_continues_full_context_and_appends_hid
     assert _body_without_pinned_head(state_update["frontdoor_request_body_messages"]) == [
         *existing_baseline,
         {
-            "role": "system",
+            "role": "user",
             "content": heartbeat_rules_text,
             "metadata": {
                 "source": "heartbeat",
@@ -7366,7 +7366,7 @@ async def test_ceo_frontdoor_prepare_turn_heartbeat_inherits_previous_tool_state
     assert _body_without_pinned_head(state_update["frontdoor_request_body_messages"]) == [
         *existing_baseline,
         {
-            "role": "system",
+            "role": "user",
             "content": heartbeat_rules_text,
             "metadata": {
                 "source": "heartbeat",
@@ -7579,7 +7579,7 @@ async def test_ceo_frontdoor_prepare_turn_cron_inherits_previous_tool_state_with
     assert _body_without_pinned_head(state_update["frontdoor_request_body_messages"]) == [
         *existing_baseline,
         {
-            "role": "system",
+            "role": "user",
             "content": "\n".join(
                 [
                     "你接收到了之前你定时的任务，如下：",
@@ -7602,7 +7602,7 @@ async def test_ceo_frontdoor_prepare_turn_cron_inherits_previous_tool_state_with
             },
         },
         {
-            "role": "system",
+            "role": "user",
             "content": expected_cron_event_content,
             "metadata": {
                 "source": "cron",
@@ -7775,7 +7775,7 @@ async def test_ceo_frontdoor_prepare_turn_internal_turn_without_prior_baseline_f
     assert captured["builder_kwargs"]["request_body_seed_messages"] == []
     assert captured["builder_kwargs"]["internal_seed_messages"] == [
         {
-            "role": "system",
+            "role": "user",
             "content": heartbeat_rules_text,
             "metadata": {
                 "source": "heartbeat",

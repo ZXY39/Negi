@@ -4545,7 +4545,7 @@ async def test_execution_node_build_messages_appends_dynamic_tool_contract_after
         messages = await service.node_runner._build_messages(task=task, node=root)
 
         assert len(messages) >= 3
-        assert messages[-1]["role"] == "system"
+        assert messages[-1]["role"] == "user"
         assert str(messages[-1]["content"] or "").startswith("## Runtime Stage Gate")
         assert str(messages[-2]["content"] or "").startswith("## Runtime Tool Contract")
         payload = extract_node_dynamic_contract_payload(messages)
@@ -4606,7 +4606,7 @@ async def test_execution_node_build_messages_exposes_full_callable_tools_without
         messages = await service.node_runner._build_messages(task=task, node=root)
 
         assert len(messages) >= 3
-        assert messages[-1]["role"] == "system"
+        assert messages[-1]["role"] == "user"
         assert str(messages[-1]["content"] or "").startswith("## Runtime Stage Gate")
         assert str(messages[-2]["content"] or "").startswith("## Runtime Tool Contract")
         payload = extract_node_dynamic_contract_payload(messages)
@@ -4675,7 +4675,7 @@ async def test_acceptance_node_build_messages_appends_dynamic_tool_contract_afte
         messages = await service.node_runner._build_messages(task=task, node=acceptance)
 
         assert len(messages) >= 3
-        assert messages[-1]["role"] == "system"
+        assert messages[-1]["role"] == "user"
         assert str(messages[-1]["content"] or "").startswith("## Runtime Stage Gate")
         assert str(messages[-2]["content"] or "").startswith("## Runtime Tool Contract")
         payload = extract_node_dynamic_contract_payload(messages)

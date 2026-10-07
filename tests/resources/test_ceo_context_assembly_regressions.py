@@ -1260,8 +1260,8 @@ async def test_message_builder_appends_frontdoor_runtime_tool_contract_to_dynami
     gate_text = str(gate_message.get("content") or "")
     contract_text = stable_text + "\n" + gate_text
 
-    assert stable_message["role"] == "system"
-    assert gate_message["role"] == "system"
+    assert stable_message["role"] == "user"
+    assert gate_message["role"] == "user"
     assert stable_text.startswith("## Runtime Tool Contract")
     assert gate_text.startswith("## Runtime Stage Gate")
     assert '"message_type"' not in contract_text
@@ -1315,7 +1315,7 @@ async def test_message_builder_appends_frontdoor_runtime_tool_contract_with_exec
     assert len(contract_messages) == 2  # 一份稳定契约 + 一份活状态块
     contract_text = "\n".join(str(item["content"] or "") for item in contract_messages)
 
-    assert contract_messages[0]["role"] == "system"
+    assert contract_messages[0]["role"] == "user"
     assert contract_text.startswith("## Runtime Tool Contract")
     assert "exec_runtime_policy:" in contract_text
     assert "mode=full_access" in contract_text
@@ -1367,7 +1367,7 @@ def test_frontdoor_dynamic_appendix_records_prefer_state_tool_contract_over_stal
 
     assert len(contract_messages) == 2  # 一份稳定契约 + 一份活状态块
     contract_text = "\n".join(str(item["content"] or "") for item in contract_messages)
-    assert contract_messages[0]["role"] == "system"
+    assert contract_messages[0]["role"] == "user"
     assert contract_text.startswith("## Runtime Tool Contract")
     assert "callable_tools: `submit_next_stage`, `filesystem_write`" in contract_text
     assert "candidate_tools: none" in contract_text
@@ -1446,7 +1446,7 @@ def test_frontdoor_tool_contract_upsert_accepts_legacy_dict_and_writes_summary_t
     updated = upsert_frontdoor_tool_contract_message([legacy_message], contract)
     assert len(updated) == 2  # upsert 一次写入稳定契约 + 活状态块
     assert is_frontdoor_tool_contract_message(updated[0])
-    assert updated[0]["role"] == "system"
+    assert updated[0]["role"] == "user"
     assert isinstance(updated[0]["content"], str)
     assert str(updated[0]["content"] or "").startswith("## Runtime Tool Contract")
     assert '"message_type"' not in str(updated[0]["content"] or "")
@@ -2481,7 +2481,7 @@ async def test_message_builder_applies_frontdoor_stage_workset_compaction_to_his
         if str(item.get("content") or "").startswith("[G3KU_STAGE_RAW_V1]")
     ]
     assert raw_block_messages
-    assert all(str(item.get("role") or "") == "system" for item in raw_block_messages)
+    assert all(str(item.get("role") or "") == "user" for item in raw_block_messages)
 
 
 def _completed_stage_with_round(index: int) -> dict[str, object]:
@@ -2533,7 +2533,8 @@ async def test_message_builder_keeps_stage_blocks_off_request_tail_when_current_
     # 当前用户回合已在历史里时，阶段块不得落在其后（否则模型在块之后续写，
     # 把整块 JSON 当成"自己上一轮说的话"仿造/回显，事故
     # ext:qq-official:f8a8001865631301 的请求形态）；越界块整体前移到最后一条
-    # user 之前，且全部以 system 角色落地。
+    # 真实 user 回合之前（块自己也是 user 角色，不能算"最后一条 user"），且全部
+    # 以 user 角色落地。
     prompt_builder = _SplitPromptBuilder()
     memory_manager = _MemoryManager(response="")
     builder = CeoMessageBuilder(loop=_loop(memory_manager), prompt_builder=prompt_builder)
@@ -2574,8 +2575,8 @@ async def test_message_builder_keeps_stage_blocks_off_request_tail_when_current_
     assert last_user_index == len(stable) - 1
     assert strip_arrival_time_stamp(str(stable[-1].get("content") or "")).strip() == "continue"
     assert max(block_indexes) < last_user_index
-    # 块以 system 角色落地
-    assert all(str(stable[index].get("role") or "") == "system" for index in block_indexes)
+    # 块以 user 角色落地（线体只许一份首位 system）
+    assert all(str(stable[index].get("role") or "") == "user" for index in block_indexes)
 
 
 @pytest.mark.asyncio

@@ -2007,8 +2007,10 @@ class RuntimeAgentSession:
                     or ""
                 ).strip()
                 if rule_text:
+                    # user 角色：这一行下一回合就成历史中段的 system，而严格网关只允许
+                    # 一份首位 system；ui_visible=False 的 metadata 让它继续算内部行。
                     persisted_session.add_message(
-                        "system",
+                        "user",
                         rule_text,
                         metadata={
                             **base_metadata,
@@ -2052,7 +2054,7 @@ class RuntimeAgentSession:
                 )
                 if rule_text:
                     persisted_session.add_message(
-                        "system",
+                        "user",
                         rule_text,
                         metadata={
                             **base_metadata,
@@ -2065,7 +2067,7 @@ class RuntimeAgentSession:
                     )
                 if event_text:
                     persisted_session.add_message(
-                        "system",
+                        "user",
                         event_text,
                         metadata={
                             **base_metadata,

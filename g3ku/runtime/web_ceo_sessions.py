@@ -521,6 +521,32 @@ def _internal_prompt_kind(value: Any) -> str:
     return ""
 
 
+_INTERNAL_RULE_PROMPT_KINDS: frozenset[str] = frozenset({"heartbeat_rule", "cron_rule"})
+
+
+def is_internal_rule_prompt_record(message: Any) -> bool:
+    """运行时注入的内部规则行（心跳稳定规则 / cron 提醒正文）——它不是本轮用户内容。
+
+    线体角色合同把这类块落在 user 上，所以任何"末位是不是本轮用户回合"的判据都必须
+    先跳过它，否则当前用户消息被当成已在历史里、不再追加，心跳/cron 的事件束就进不了
+    请求体。事件束行（heartbeat_/cron_event_bundle）确实代表本轮用户内容，不在此列——
+    同回合重投仍靠它挡住重复追加。
+    """
+    kind = str(message_metadata(message).get("internal_prompt_kind") or "").strip()
+    return kind in _INTERNAL_RULE_PROMPT_KINDS
+
+
+def trailing_turn_record(messages: list[Any] | None) -> dict[str, Any] | None:
+    """从尾部回退到第一条不是内部规则行的记录；没有可用记录时返回 None。"""
+    for message in reversed(list(messages or [])):
+        if not isinstance(message, dict):
+            continue
+        if is_internal_rule_prompt_record(message):
+            continue
+        return dict(message)
+    return None
+
+
 def fold_internal_prompt_history(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """折叠重复的内部提示词消息（心跳/cron 的规则 system + 事件束 user）。
 

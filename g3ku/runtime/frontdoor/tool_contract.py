@@ -794,10 +794,11 @@ class FrontdoorToolContract:
 
     def to_message(self) -> dict[str, Any]:
         payload = self.to_message_payload()
-        # system 角色：该契约是运行时元数据，不是对话内容；用 assistant 会让模型把它
-        # 当成"自己上一轮说过/发给用户的消息"，进而在事后复盘时改写时间线。
+        # user 角色：严格 OpenAI-compatible 网关只允许一份 system 且必须在首位，而这两份
+        # 块排在请求末位，用 system 会被那些网关 400 拒掉。也不许用 assistant——模型会把
+        # 它当成"自己上一轮说过/发给用户的消息"，进而在事后复盘时改写时间线。
         return {
-            'role': 'system',
+            'role': 'user',
             'content': _render_frontdoor_contract_summary(payload),
             FRONTDOOR_DYNAMIC_TOOL_CONTRACT_PAYLOAD_KEY: payload,
         }
@@ -805,7 +806,7 @@ class FrontdoorToolContract:
     def to_stage_gate_message(self) -> dict[str, Any]:
         """活状态块：与契约同源，但只含每跳重写的行，排在请求体真正末位。"""
         return {
-            'role': 'system',
+            'role': 'user',
             'content': _render_frontdoor_stage_gate_summary(self.to_message_payload()),
         }
 
@@ -928,8 +929,10 @@ def is_frontdoor_tool_contract_message(message: dict[str, Any]) -> bool:
     if _frontdoor_message_declares_tool_calls(message):
         return False
     # 注入的契约消息经 sanitize 后只保留 role/content，payload 键被剥离，需靠抬头识别。
-    # 契约现在以 system 角色注入；模型回显的契约残留仍是 assistant 文本，两类都识别。
-    if str((message or {}).get('role') or '').strip().lower() not in {'assistant', 'system'}:
+    # 契约现在以 user 角色注入（线体只许一份首位 system），存量记录里仍是 system 角色，
+    # 模型回显的契约残留是 assistant 文本——三种角色都识别，迁移期不得因认不出旧块而
+    # 让尾部叠出第二份。抬头前缀本身足够特异，真实用户消息不会以它开头。
+    if str((message or {}).get('role') or '').strip().lower() not in {'assistant', 'system', 'user'}:
         return False
     content = str((message or {}).get('content') or '').strip()
     return any(content.startswith(heading) for heading in RUNTIME_APPENDIX_HEADINGS)

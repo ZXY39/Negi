@@ -89,6 +89,7 @@ from g3ku.runtime.web_ceo_sessions import (
     is_prompt_visible_message,
     persist_frontdoor_actual_request,
     strip_multimodal_blocks_from_message_records,
+    trailing_turn_record,
 )
 from main.governance.tool_context import apply_runtime_tool_context_projection
 from main.models import normalize_execution_policy_metadata
@@ -3597,7 +3598,7 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
             if stable_rules_text:
                 seed_messages.append(
                     {
-                        "role": "system",
+                        "role": "user",
                         "content": stable_rules_text,
                         "metadata": _hidden_internal_prompt_message_metadata(
                             source=source,
@@ -3617,7 +3618,7 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
             if isinstance(cron_system_message, dict) and str(cron_system_message.get("content") or "").strip():
                 seed_messages.append(
                     {
-                        "role": "system",
+                        "role": "user",
                         "content": str(cron_system_message.get("content") or "").strip(),
                         "metadata": _hidden_internal_prompt_message_metadata(
                             source=source,
@@ -3633,7 +3634,7 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
             if isinstance(cron_event_message, dict) and str(cron_event_message.get("content") or "").strip():
                 seed_messages.append(
                     {
-                        "role": "system",
+                        "role": "user",
                         "content": str(cron_event_message.get("content") or "").strip(),
                         "metadata": _hidden_internal_prompt_message_metadata(
                             source=source,
@@ -6840,9 +6841,11 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
             frontdoor_selection_debug["hydrated_tool_names"] = list(hydrated_tool_names)
             messages = self._prompt_message_records(request_body_seed_messages)
             has_current_turn_user_content = bool(self._content_text(current_turn_user_content).strip())
-            if has_current_turn_user_content and (
-                not messages or str(messages[-1].get("role") or "").strip().lower() != "user"
-            ):
+            # 末位是不是本轮用户回合：内部规则行（心跳规则/cron 提醒正文）现在落在 user
+            # 角色上，必须先跳过它，否则本轮事件束被当成"已在历史里"、永不追加。
+            _trailing_record = trailing_turn_record(messages)
+            _trailing_is_user = bool(_trailing_record) and str(_trailing_record.get("role") or "").strip().lower() == "user"
+            if has_current_turn_user_content and not _trailing_is_user:
                 messages.append({"role": "user", "content": current_turn_user_content})
             provider_model = str(model_refs[0] if model_refs else "").strip()
             prior_provider_tool_names = self._normalized_tool_name_state_list(
@@ -6991,9 +6994,11 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
                     content=current_turn_user_content,
                 )
             has_current_turn_user_content = bool(self._content_text(current_turn_user_content).strip())
-            if has_current_turn_user_content and (
-                not messages or str(messages[-1].get("role") or "").strip().lower() != "user"
-            ):
+            # 末位是不是本轮用户回合：内部规则行（心跳规则/cron 提醒正文）现在落在 user
+            # 角色上，必须先跳过它，否则本轮事件束被当成"已在历史里"、永不追加。
+            _trailing_record = trailing_turn_record(messages)
+            _trailing_is_user = bool(_trailing_record) and str(_trailing_record.get("role") or "").strip().lower() == "user"
+            if has_current_turn_user_content and not _trailing_is_user:
                 messages.append({"role": "user", "content": current_turn_user_content})
 
             provider_model = str(model_refs[0] if model_refs else "").strip()
