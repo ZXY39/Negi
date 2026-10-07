@@ -353,6 +353,11 @@ def _frontdoor_state(*, hydrated: list[str], messages: list[dict], stages: list[
     state["candidate_tool_names"] = []
     state["rbac_visible_tool_names"] = ["exec", *hydrated]
     state["messages"] = list(messages)
+    # 真实图状态始终带 model_refs（`state_models.CeoPersistentState.model_refs`），
+    # `_refresh_prompt_cache_state` 只在状态缺它时才回落到读磁盘配置取模型。测试里没有
+    # `.g3ku/config.json`，不钉住这一份就会在算点二上 FileNotFoundError——那是取模型，
+    # 不是在场判据，别让环境问题冒充判据失败。
+    state["model_refs"] = ["contract-presence-test-model"]
     state["frontdoor_stage_state"] = {
         "active_stage_id": "s1",
         "stages": [{"stage_id": "s1", "status": "active", **({"kept_tool_contexts": []} if stages is None else {})}],
@@ -448,6 +453,11 @@ def test_frontdoor_hydration_after_successful_load_is_not_revoked() -> None:
     ops = _ops()
     state = _frontdoor_state(hydrated=[], messages=[_loader_message()])
     state["candidate_tool_names"] = [TOOL_ID]
+    # candidate 是治理可见集减出来的（FIX_PLAN §0.3「candidate = 治理可见 −（callable ∪ 已提升)」），
+    # 所以候选里的名字必然也在 `rbac_visible_tool_names`。helper 按 hydrated 拼可见集，
+    # 这条用例 hydrated 为空就漏了它——水合 LRU 会先把不在可见集里的名字滤掉（既有口径），
+    # 那是夹具自相矛盾，不是判据把刚 load 的名字撤了。
+    state["rbac_visible_tool_names"] = ["exec", TOOL_ID]
     after = ops._frontdoor_tool_state_after_tool_results(
         state=state,
         tool_results=[
@@ -514,14 +524,11 @@ def test_duplicate_guards_count_kept_context_as_present() -> None:
     assert TOOL_ID in CeoFrontDoorRuntimeOps._latest_frontdoor_load_tool_context_messages_by_tool_id(loader_history)
 
     unrelated = [{"role": "tool", "name": "load_tool_context", "content": json.dumps({"ok": True, "tool_id": "z"})}]
-    assert ReActToolLoop._latest_load_tool_context_messages_by_tool_id(unrelated, kept_stage_contexts=kept) == {}
-    assert (
-        CeoFrontDoorRuntimeOps._latest_frontdoor_load_tool_context_messages_by_tool_id(
-            unrelated,
-            kept_stage_contexts=kept,
-        )
-        == {}
-    )
+    # 对照条：只交 loader 载体、不交保留正文时守卫认不出 TOOL_ID（这条 loader 行连
+    # fingerprint 都没有，本就不算契约载体）。带 `kept_stage_contexts` 的那两条断言在下面
+    # §4.2 里要求 TOOL_ID **在场**，与此处 `== {}` 不能同时成立，故对照只跑无保留正文的一侧。
+    assert ReActToolLoop._latest_load_tool_context_messages_by_tool_id(unrelated) == {}
+    assert CeoFrontDoorRuntimeOps._latest_frontdoor_load_tool_context_messages_by_tool_id(unrelated) == {}
 
     node_from_kept = ReActToolLoop._latest_load_tool_context_messages_by_tool_id(unrelated, kept_stage_contexts=kept)
     assert TOOL_ID in node_from_kept
