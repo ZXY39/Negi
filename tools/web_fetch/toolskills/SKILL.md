@@ -18,7 +18,7 @@
 
 - 参考来源：`E:\Program\openclaw-2026.3.13-1\src\agents\tools\web-fetch.ts`。
 - 当前版本保留了 `web_fetch` 的核心定位：单 URL 轻量抓取、正文提取、超时控制、缓存与安全边界。
-- 当前版本没有直接搬运 OpenClaw 的 TypeScript 工具装配链，也没有引入其 Readability/浏览器回退链路，而是按 G3KU 的 Python 工具规范实现为可直接加载的内置工具。
+- 当前版本没有直接搬运 OpenClaw 的 TypeScript 工具装配链，也没有引入其 Readability/浏览器回退链路，而是按 Negi 的 Python 工具规范实现为可直接加载的内置工具。
 
 ## 与 browser 的边界
 

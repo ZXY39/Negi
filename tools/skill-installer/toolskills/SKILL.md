@@ -3,13 +3,13 @@
 把一个现成 GitHub repo/path 里的 skill 安装到当前工作区的 `skills/` 目录。
 
 这条工具链只负责 **GitHub repo/path -> 本地 `skills/`**。
-如果用户要从 `clawhub.ai` 搜索、下载、安装或更新现成 skill，不要继续使用本工具；转到 `load_skill_context(skill_id="clawhub-skill-manager")`，按 `clawhub-skill-manager` 的唯一工作流处理。ClawHub 来源的 skill 默认是面向第三方项目的上游素材，安装前要先评估是否需要按 G3KU 要求重写。
+如果用户要从 `clawhub.ai` 搜索、下载、安装或更新现成 skill，不要继续使用本工具；转到 `load_skill_context(skill_id="clawhub-skill-manager")`，按 `clawhub-skill-manager` 的唯一工作流处理。ClawHub 来源的 skill 默认是面向第三方项目的上游素材，安装前要先评估是否需要按 Negi 要求重写。
 
 ## 何时使用
 
-- 用户给的是 GitHub skill 链接，目标是“直接装进当前 G3KU 环境”。
+- 用户给的是 GitHub skill 链接，目标是“直接装进当前 Negi 环境”。
 - 用户给的是 `owner/repo + path`，并且不想手工 clone、复制、补 `resource.yaml`。
-- 上游只有 `SKILL.md` 没有 `resource.yaml`，需要自动补齐成可被 G3KU 资源系统发现的本地 skill。
+- 上游只有 `SKILL.md` 没有 `resource.yaml`，需要自动补齐成可被 Negi 资源系统发现的本地 skill。
 
 ## 不要在这些情况使用
 
@@ -96,7 +96,7 @@
 6. `content.main` 必须指向 `SKILL.md`；若存在 `references/`、`scripts/`、`assets/`，`content` 中也应显式声明。
 7. `exposure.agent` 与 `exposure.main_runtime` 必须符合预期使用范围，不能靠默认值蒙混过关。
 8. 若本次导入来自 GitHub，`source.type / url / repo / ref / path` 必须与真实来源一致，便于后续追溯。
-9. 如果 skill 实际上并不适合直接作为 G3KU 本地 skill 使用，而只是上游素材，应立刻转 `skill-creator` 做结构适配，而不是带着不合规 manifest 继续使用。
+9. 如果 skill 实际上并不适合直接作为 Negi 本地 skill 使用，而只是上游素材，应立刻转 `skill-creator` 做结构适配，而不是带着不合规 manifest 继续使用。
 
 结论要求：
 

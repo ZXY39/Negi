@@ -3,7 +3,7 @@ kind: tool
 name: skill-installer
 display_name: Skill Installer
 description: Install or import a skill from a GitHub repo/path into the current workspace
-  skills directory, generating a minimal G3KU resource manifest when the upstream
+  skills directory, generating a minimal Negi resource manifest when the upstream
   skill only ships SKILL.md.
 tool_result_delivery_contract: runtime_managed
 source:
