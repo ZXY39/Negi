@@ -7250,6 +7250,20 @@ async def test_ceo_frontdoor_prepare_turn_heartbeat_inherits_previous_tool_state
     existing_baseline = [
         {"role": "system", "content": "frontdoor fallback"},
         {"role": "user", "content": "prior visible request"},
+        # 上一轮真的 load 过：契约在场，内部轮才允许继承这份能力（契约不在即不可调）。
+        {
+            "role": "tool",
+            "tool_call_id": "call-load-filesystem-write",
+            "name": "load_tool_context",
+            "content": json.dumps(
+                {
+                    "ok": True,
+                    "tool_id": "filesystem_write",
+                    "tool_context_fingerprint": "tcf:fixture-filesystem-write",
+                },
+                ensure_ascii=False,
+            ),
+        },
         {"role": "assistant", "content": "prior visible answer"},
     ]
 
@@ -7441,6 +7455,20 @@ async def test_ceo_frontdoor_prepare_turn_cron_inherits_previous_tool_state_with
     existing_baseline = [
         {"role": "system", "content": "frontdoor fallback"},
         {"role": "user", "content": "prior visible request"},
+        # 上一轮真的 load 过：契约在场，内部轮才允许继承这份能力（契约不在即不可调）。
+        {
+            "role": "tool",
+            "tool_call_id": "call-load-filesystem-write",
+            "name": "load_tool_context",
+            "content": json.dumps(
+                {
+                    "ok": True,
+                    "tool_id": "filesystem_write",
+                    "tool_context_fingerprint": "tcf:fixture-filesystem-write",
+                },
+                ensure_ascii=False,
+            ),
+        },
         {"role": "assistant", "content": "prior visible answer"},
     ]
 

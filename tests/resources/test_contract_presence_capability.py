@@ -649,3 +649,52 @@ def test_kept_contract_block_bytes_do_not_follow_resource_file_edits(tmp_path) -
     assert TOOL_ID in kept_index
     assert kept_index[TOOL_ID]["name"] == "load_tool_context"
 
+
+
+def test_revoked_contract_absent_names_return_to_candidate_view() -> None:
+    """撤销必须把名字并回候选视图：否则回合内既不可调也不可读（第四态）。"""
+
+    from g3ku.runtime.frontdoor._ceo_runtime_ops import revive_contract_absent_candidates
+
+    revived = revive_contract_absent_candidates(
+        candidate_names=["content_open", "cron"],
+        revoked_names=["perf_inspect"],
+        hydrated_names=[],
+        callable_names=["submit_next_stage", "exec"],
+        visible_names=["content_open", "cron", "perf_inspect", "exec"],
+    )
+    assert revived == ["content_open", "cron", "perf_inspect"]
+
+    # 已重新提升的、当前可调的、权限已收回的：都不该并回候选
+    for kwargs in (
+        {"hydrated_names": ["perf_inspect"]},
+        {"callable_names": ["submit_next_stage", "exec", "perf_inspect"]},
+        {"visible_names": ["content_open", "cron"]},
+    ):
+        base = {
+            "candidate_names": ["content_open", "cron"],
+            "revoked_names": ["perf_inspect"],
+            "hydrated_names": [],
+            "callable_names": ["submit_next_stage", "exec"],
+            "visible_names": ["content_open", "cron", "perf_inspect", "exec"],
+        }
+        base.update(kwargs)
+        assert "perf_inspect" not in revive_contract_absent_candidates(**base)
+
+
+def test_frontdoor_candidate_view_reads_state_revoked_field() -> None:
+    """三个消费点共用的视图方法：读 state 上的撤销记录，不要求调用方自己并集。"""
+
+    from g3ku.runtime.frontdoor._ceo_runtime_ops import CeoFrontDoorRuntimeOps
+
+    view = CeoFrontDoorRuntimeOps._frontdoor_candidate_tool_view(
+        {
+            "candidate_tool_names": ["content_open"],
+            "hydration_revoked_executor_names": ["perf_inspect"],
+            "hydrated_tool_names": [],
+            "tool_names": ["exec", "submit_next_stage"],
+            "rbac_visible_tool_names": ["content_open", "perf_inspect", "exec"],
+        }
+    )
+    assert "perf_inspect" in view and "content_open" in view
+    assert CeoFrontDoorRuntimeOps._frontdoor_candidate_tool_view(None) == []

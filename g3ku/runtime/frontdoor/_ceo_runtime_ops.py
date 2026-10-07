@@ -653,6 +653,49 @@ def _model_visible_tool_contract(tool: Tool) -> tuple[str, dict[str, Any] | None
     return model_description, model_parameters if isinstance(model_parameters, dict) else tool.parameters
 
 
+def revive_contract_absent_candidates(
+    *,
+    candidate_names: Any,
+    revoked_names: Any,
+    hydrated_names: Any,
+    callable_names: Any,
+    visible_names: Any,
+) -> list[str]:
+    """把"契约不在场而被撤销"的名字并回本回合候选视图。
+
+    候选集是回合初快照，而撤销发生在回合中途：不并回去，该名字就既不在 callable
+    也不在 candidate——文档禁止的第四态（`tool-and-skill-system.md`「candidate tools」
+    三态划分）。更糟的是提升门禁只认 `candidate_hit`，于是回合内重新 load 永远拿到
+    `not_in_this_turn_candidates`，"必须重新 load 后才能调"这条出口在本回合内不可达
+    （实盘 web:ceo-3b51dc5c5b4e：裁撤后连续 4 跳两个名单都不含 perf_inspect，
+    重载回执 promotion=not_in_this_turn_candidates）。
+
+    只并"确实还治理可见、且当前既不可调也未水合"的名字：刚重新提升的、权限已收回的
+    都不该出现在候选里。
+    """
+    def _names(values: Any) -> list[str]:
+        collected: list[str] = []
+        for raw in list(values or []):
+            name = str(raw or "").strip()
+            if name and name not in collected:
+                collected.append(name)
+        return collected
+
+    candidate = _names(candidate_names)
+    candidate_set = set(candidate)
+    hydrated_set = set(_names(hydrated_names))
+    callable_set = set(_names(callable_names))
+    visible_set = set(_names(visible_names))
+    revived: list[str] = []
+    for name in _names(revoked_names):
+        if name in candidate_set or name in hydrated_set or name in callable_set:
+            continue
+        if visible_set and name not in visible_set:
+            continue
+        revived.append(name)
+    return [*candidate, *revived] if revived else candidate
+
+
 def _ceo_model_compatible_parameters_schema(tool_name: str, schema: dict[str, Any] | None) -> dict[str, Any] | None:
     normalized = copy.deepcopy(schema) if isinstance(schema, dict) else schema
     if str(tool_name or "").strip() != "memory_write" or not isinstance(normalized, dict):
@@ -3323,7 +3366,7 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
             ),
             "tool_contract_enforced": True,
             "callable_tool_names": list(state.get("tool_names") or []),
-            "candidate_tool_names": list(state.get("candidate_tool_names") or []),
+            "candidate_tool_names": self._frontdoor_candidate_tool_view(state),
             "candidate_skill_ids": list(state.get("candidate_skill_ids") or []),
             "hydrated_tool_names": list(state.get("hydrated_tool_names") or []),
             # 给拒绝文案用：撞进来路已收的工具时，要能说"是无权限"而不是"还没水合"。
@@ -3532,6 +3575,23 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
             if name in recorded:
                 recorded.remove(name)
         return recorded
+
+    @staticmethod
+    def _frontdoor_candidate_tool_view(state: CeoGraphState | dict[str, Any] | None) -> list[str]:
+        """本回合生效的候选视图 = 回合初候选快照 ∪ 契约缺席被撤销的名字。
+
+        三个消费点（提升门禁 runtime context、尾块渲染、重复读守卫）必须读同一份，
+        否则会出现"合同里看得见、门禁说不在候选"的分裂。
+        """
+        if not isinstance(state, dict):
+            return []
+        return revive_contract_absent_candidates(
+            candidate_names=state.get("candidate_tool_names"),
+            revoked_names=state.get("hydration_revoked_executor_names"),
+            hydrated_names=state.get("hydrated_tool_names"),
+            callable_names=state.get("tool_names"),
+            visible_names=state.get("rbac_visible_tool_names"),
+        )
 
     def _frontdoor_callable_tool_names_for_state(
         self,
@@ -3894,7 +3954,7 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
         requested_tool_id = str(arguments.get("tool_id") or "").strip()
         if not requested_tool_id or str(arguments.get("search_query") or "").strip():
             return ""
-        candidate_tool_names = self._normalized_tool_name_state_list(state.get("candidate_tool_names"))
+        candidate_tool_names = self._frontdoor_candidate_tool_view(state)
         if requested_tool_id in set(candidate_tool_names):
             return ""
         callable_tool_names = self._normalized_tool_name_state_list(state.get("tool_names"))
@@ -4041,7 +4101,7 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
             cls._normalized_tool_name_state_list(state.get("provider_tool_names"))
             or list(tool_names)
         )
-        candidate_tool_names = cls._normalized_tool_name_state_list(state.get("candidate_tool_names"))
+        candidate_tool_names = cls._frontdoor_candidate_tool_view(state)
         candidate_tool_items = cls._normalized_candidate_tool_items(
             state.get("candidate_tool_items"),
             fallback_names=candidate_tool_names,
@@ -5150,6 +5210,15 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
             for name in candidate_tool_names
             if name not in hydrated_set
         ]
+        # 撤销掉的必须在这一刻并回候选：候选池是回合初快照，回合中途只减不并的话，
+        # 该名字既不可调也不可读，提升门禁的 candidate_hit 永远假 ⇒ 回合内重载救不回。
+        candidate_tool_names = revive_contract_absent_candidates(
+            candidate_names=candidate_tool_names,
+            revoked_names=revoked_hydrated_tool_names,
+            hydrated_names=hydrated_tool_names,
+            callable_names=tool_names,
+            visible_names=visible_tool_names,
+        )
         candidate_name_set = set(candidate_tool_names)
         candidate_tool_items = [
             dict(item)
