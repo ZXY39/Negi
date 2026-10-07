@@ -23,6 +23,8 @@ from g3ku.runtime.frontdoor import _ceo_create_agent_impl as create_agent_impl
 from g3ku.runtime.frontdoor._ceo_runtime_ops import CeoFrontDoorRuntimeOps
 from g3ku.runtime.frontdoor.message_builder import CeoMessageBuilder
 from g3ku.runtime.frontdoor.state_models import initial_persistent_state
+from g3ku.runtime.kept_contract_snapshot import build_kept_contract_snapshot
+from g3ku.runtime.stage_prompt_compaction import KEPT_CONTRACT_HEADING, completed_stage_blocks
 from g3ku.runtime.tool_context_presence import (
     contract_presence,
     contract_presence_index,
@@ -33,6 +35,7 @@ from g3ku.runtime.tool_context_presence import (
     partition_contract_presence,
 )
 from g3ku.runtime.web_ceo_sessions import _normalized_completed_continuity_snapshot
+from main.models import normalize_execution_stage_metadata
 from main.monitoring.log_service import TaskLogService
 from main.monitoring.models import TaskProjectionRuntimeFrameRecord
 from main.runtime.internal_tools import STAGE_TOOL_NAME
@@ -554,3 +557,95 @@ def test_execution_stage_record_carries_kept_tool_contexts() -> None:
     record = ExecutionStageRecord(stage_id="s1", kept_tool_contexts=[_kept_entry()])
     payload = record.model_dump()
     assert payload["kept_tool_contexts"][0]["tool_id"] == TOOL_ID
+
+
+# ---------------------------------------------------------------------------
+# 刀二回归守卫：保留正文是提交点快照，块字节只随账本变
+# ---------------------------------------------------------------------------
+
+
+def test_kept_contract_block_bytes_do_not_follow_resource_file_edits(tmp_path) -> None:
+    """裁撤后的块内正文必须**只回放账本**，且仍然撑起 callable 与重复读守卫。
+
+    三条断言各挡一种回归：
+
+    1. 改一次磁盘上的 `toolskills/SKILL.md`，块字节不许变（顺带证"会变"——同一条取正文
+       的通道再走一次，正文确实不同了）。阶段块落在历史中段，逐轮重读资源文件会让运营者
+       或 `skill-installer` 的一次编辑改动块字节，块之后的整段前缀缓存全断。
+    2. 下一跳（请求视图里已经没有 loader 行了）该工具仍在 callable、台账没被撤销——判据
+       的第二个载体真被读到了，节点车道走的是 `ExecutionStageState` 对象那份账本。
+    3. 重复读守卫同判据：块内正文算在场 ⇒ 再 load 同一 `tool_id` 判成重复读，不会在上下文
+       里出现第二份正文。
+    """
+    toolskill_path = tmp_path / "tools" / TOOL_ID / "toolskills" / "SKILL.md"
+    toolskill_path.parent.mkdir(parents=True)
+    toolskill_path.write_text(f"# {TOOL_ID}\n\n原始契约正文\n", encoding="utf-8")
+
+    def _read_from_disk(tool_id: str) -> dict:
+        return {
+            "tool_id": tool_id,
+            "content": toolskill_path.read_text(encoding="utf-8"),
+            "parameter_contract_markdown": "",
+            "required_parameters": [],
+            "example_arguments": {},
+            "warnings": [],
+            "errors": [],
+        }
+
+    snapshot = build_kept_contract_snapshot(tool_ids=[TOOL_ID], tool_payload_getter=_read_from_disk)
+    assert snapshot["failures"] == []
+    entries = snapshot["tool_contexts"]
+    assert entries[0]["tool_id"] == TOOL_ID
+    assert entries[0]["tool_context_fingerprint"].startswith("tcf:")
+
+    # 提交点落账本后的形态：节点道渲染读的是 pydantic 阶段状态，落盘是它的 JSON 视图，
+    # 两份必须是同一份账本（漏一份白名单就等于逐轮被抹掉）。
+    stage_state = normalize_execution_stage_metadata(
+        {
+            "active_stage_id": "",
+            "stages": [
+                {
+                    "stage_id": "s-keep",
+                    "stage_index": 1,
+                    "stage_kind": "normal",
+                    "status": "完成",
+                    "stage_goal": "g",
+                    "completed_stage_summary": "收尾结论",
+                    "context_evicted": True,
+                    "kept_tool_contexts": entries,
+                    "kept_skill_contexts": [{"skill_id": "demo-skill", "body": "技能正文"}],
+                    "rounds": [],
+                }
+            ],
+        }
+    )
+    ledger = stage_state.model_dump(mode="json")
+    rendered = completed_stage_blocks(stage_state)[0]["content"]
+    assert KEPT_CONTRACT_HEADING in rendered
+    assert "原始契约正文" in rendered
+    assert entries[0]["tool_context_fingerprint"] in rendered
+
+    # 运营者改了一次资源文件：正文确实变了（所以逐轮重读会改块字节），块字节却没变。
+    toolskill_path.write_text(f"# {TOOL_ID}\n\n改过的契约正文\n", encoding="utf-8")
+    assert build_kept_contract_snapshot(tool_ids=[TOOL_ID], tool_payload_getter=_read_from_disk)["tool_contexts"][0][
+        "body"
+    ] != entries[0]["body"]
+    assert completed_stage_blocks(stage_state)[0]["content"] == rendered
+    assert completed_stage_blocks(ledger)[0]["content"] == rendered
+    assert "改过的契约正文" not in rendered
+
+    # 裁撤后的下一跳：请求视图里再没有 loader 行，撑住 callable 的只有账本那一份正文。
+    service, log_service = _node_service(hydrated=[TOOL_ID])
+    node = _node_obj()
+    node.metadata = {"execution_stages": ledger}
+    assert TOOL_ID in service._callable_tool_names_for_node(task=_task_obj(), node=node, request_messages=[])
+    assert log_service.read_runtime_frame("task-cp", "node-cp")["hydration_revoked_executor_names"] == []
+
+    # 同一份账本喂给重复读守卫 ⇒ 认得出这一跳已经在场，重读判成重复读、不再产第二份。
+    kept_index = ReActToolLoop._latest_load_tool_context_messages_by_tool_id(
+        [],
+        kept_stage_contexts=kept_tool_contexts_from_frames(ledger),
+    )
+    assert TOOL_ID in kept_index
+    assert kept_index[TOOL_ID]["name"] == "load_tool_context"
+
