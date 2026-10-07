@@ -49,6 +49,14 @@ from g3ku.runtime.frontdoor.message_builder import (
 from g3ku.runtime.frontdoor.token_preflight_compaction import (
     FrontdoorTokenPreflightResult,
 )
+from g3ku.runtime.kept_contract_snapshot import (
+    KEEP_CONTRACT_NOT_DROPPED_NOTE,
+    KEPT_SKILL_CONTEXTS_FIELD,
+    KEPT_TOOL_CONTEXTS_FIELD,
+    keep_closure_fields,
+    normalize_kept_skill_contexts,
+    resolve_kept_contracts,
+)
 from g3ku.runtime.message_token_estimation import estimate_message_tokens
 from g3ku.runtime.project_environment import current_project_environment
 from g3ku.runtime.session_agent import PENDING_PROVIDER_BUNDLE_RECOMMIT_ATTR
@@ -74,14 +82,6 @@ from g3ku.runtime.stage_prompt_compaction import (
     stage_ref_candidates,
     strip_stage_block_echo,
     summarized_stage_ids,
-)
-from g3ku.runtime.kept_contract_snapshot import (
-    KEEP_CONTRACT_NOT_DROPPED_NOTE,
-    KEPT_SKILL_CONTEXTS_FIELD,
-    KEPT_TOOL_CONTEXTS_FIELD,
-    keep_closure_fields,
-    normalize_kept_skill_contexts,
-    resolve_kept_contracts,
 )
 from g3ku.runtime.tool_context_presence import (
     contract_presence_index,
@@ -115,8 +115,8 @@ from main.runtime.chat_backend import (
     resolve_send_model_context_window_info,
 )
 from main.runtime.internal_tools import (
-    SubmitNextStageTool,
     SilentTool,
+    SubmitNextStageTool,
     keep_contracts_require_drop_error,
     normalize_keep_contract_names,
 )

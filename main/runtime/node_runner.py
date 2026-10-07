@@ -7310,9 +7310,10 @@ class NodeRunner:
         metadata = getattr(node, 'metadata', None)
         payload = metadata.get('execution_stages') if isinstance(metadata, dict) else {}
         state = normalize_execution_stage_metadata(payload)
+        # 归属判据与前门共用 `closing_stage_target`，包括"没有可结清的阶段"那一支：照样交给
+        # `resolve_kept_contracts`，它对空名单点名的拒绝文案两车道同形——两条车道在这里分叉，
+        # 模型收到的就是两种合同。
         closing_stage = closing_stage_target(state)
-        if closing_stage is None:
-            return {}
         try:
             rows = list(self._store.list_task_node_tool_results(task_id, node_id) or [])
         except Exception:
