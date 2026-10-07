@@ -1123,3 +1123,47 @@ def test_presence_revocation_subtracts_the_dispatch_dict_before_selection() -> N
     )
     assert cheap_logs.hydrated_reads == 0
     assert calls and "filesystem_stat" not in kept_cheap
+
+
+def test_node_kept_context_is_read_from_store_not_the_opening_node_snapshot() -> None:
+    """裁撤之后，保留正文只存在于**存储里那份**账本，传入的 node 常是循环开局的快照。
+
+    实盘 task:91b09176d70a：阶段 1 的 `kept_tool_contexts` 已带 1980 字正文落库，同一跳不重载直调
+    仍被撤（`Error: tool not available … 尚未水化，请先 load_tool_context`）——判据读的是传进来的
+    node 对象，那份 metadata 还停在任务开始时刻，`execution_stages` 里没有这条阶段。react_loop 取
+    阶段态一律按 node_id 重读存储（`_execution_stage_state_for_runtime`），保留正文这条道同口径。
+    """
+    service, log_service = _node_service(hydrated=[TOOL_ID])
+    stale_node = _node_obj()
+    stale_node.metadata = {}
+    fresh_node = SimpleNamespace(
+        node_id="node-cp",
+        metadata={"execution_stages": {"stages": _kept_stages()}},
+    )
+    service.store = SimpleNamespace(get_node=lambda node_id: fresh_node if node_id == "node-cp" else None)
+
+    present = service.revoke_contract_absent_node_hydration(
+        task_id="task-cp",
+        node_id="node-cp",
+        actor_role="execution",
+        session_id="web:shared",
+        request_messages=[],
+        node=stale_node,
+    )
+    assert present == [TOOL_ID]
+    frame = log_service.read_runtime_frame("task-cp", "node-cp")
+    assert frame["hydration_revoked_executor_names"] == []
+    assert frame["hydrated_executor_state"] == [TOOL_ID]
+
+    # 存储里没有这个节点时退回传入对象，别把已有正文读成空。
+    service.store = SimpleNamespace(get_node=lambda node_id: None)
+    node_with_ledger = _node_obj()
+    node_with_ledger.metadata = {"execution_stages": {"stages": _kept_stages()}}
+    assert service.revoke_contract_absent_node_hydration(
+        task_id="task-cp",
+        node_id="node-cp",
+        actor_role="execution",
+        session_id="web:shared",
+        request_messages=[],
+        node=node_with_ledger,
+    ) == [TOOL_ID]

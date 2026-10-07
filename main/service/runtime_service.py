@@ -7406,17 +7406,33 @@ class MainRuntimeService:
             )
         return present
 
-    @staticmethod
-    def _node_stage_kept_tool_contexts(node: Any) -> list[dict[str, Any]]:
+    def _node_stage_kept_tool_contexts(self, node: Any) -> list[dict[str, Any]]:
         """节点阶段台账里保留下来的契约正文（在场判据的第二个载体）。
 
         阶段账本的家在 `node.metadata['execution_stages']`，不在 runtime frame：帧的白名单
         不收这个键，去帧里读会永远读出空、裁撤过的正文于是永远判成不在场。
+
+        取数必须按 node_id 重读存储：传进来的 node 常常是循环开局那份快照，而 `keep_tools` 的正文
+        是这一跳的 `submit_next_stage` 才写进去的——读快照等于把模型点名留住的正文读成空，留住的
+        工具照样被撤（实盘 task:91b09176d70a）。读不到该节点才退回传入对象。
         """
-        metadata = getattr(node, 'metadata', None)
-        if not isinstance(metadata, dict):
-            return []
-        return kept_tool_contexts_from_frames(metadata.get('execution_stages'))
+        candidates: list[Any] = []
+        node_id = str(getattr(node, 'node_id', '') or '').strip()
+        getter = getattr(getattr(self, 'store', None), 'get_node', None)
+        if node_id and callable(getter):
+            try:
+                candidates.append(getter(node_id))
+            except Exception:
+                pass
+        candidates.append(node)
+        for candidate in candidates:
+            metadata = getattr(candidate, 'metadata', None)
+            if not isinstance(metadata, dict):
+                continue
+            collected = kept_tool_contexts_from_frames(metadata.get('execution_stages'))
+            if collected:
+                return collected
+        return []
 
     def _revoke_node_hydration_for_absent_contracts(
         self,
