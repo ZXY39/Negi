@@ -2373,13 +2373,6 @@ async function runTaskNoticeSettleTick() {
                 const selected = findTreeNode(S.treeView, nodeId)
                     || { node_id: nodeId, title: nodeId, state: "in_progress" };
                 void showAgent(selected, { preserveViewState: true });
-                if (!remaining.length) {
-                    showToast({
-                        title: "消息已更新",
-                        text: "新增消息已出现在节点消息列表",
-                        kind: "success",
-                    });
-                }
             }
         }
     } catch (error) {

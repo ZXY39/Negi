@@ -1563,12 +1563,6 @@
     syncDefaultModelInputValue(value);
     editor.modelList = null;
     renderModelListPanel();
-    showToast({
-      title: "已填入模型",
-      text: `已将模型ID设置为 ${value}。`,
-      kind: "success",
-      durationMs: 2600,
-    });
   }
 
   async function handleTestMaxConcurrency() {

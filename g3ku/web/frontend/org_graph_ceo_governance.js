@@ -455,12 +455,6 @@ async function toggleToolGovernanceMode() {
         state.enabled = !!item?.enabled;
         state.updatedAt = String(item?.updated_at || "").trim();
         state.loaded = true;
-        showToast({
-            title: "监管模式已更新",
-            text: state.enabled ? "后续中/高风险 Tool 调用将进入审批。" : "后续 Tool 调用将按非监管模式运行。",
-            kind: "success",
-            durationMs: 2200,
-        });
     } catch (error) {
         showToast({
             title: "监管模式更新失败",
@@ -1010,12 +1004,6 @@ async function addExecWhitelistEntryFromForm(event) {
         await ApiClient.addExecCommandWhitelistEntry({ pattern, scope, reason });
         if (U.execWhitelistPatternInput) U.execWhitelistPatternInput.value = "";
         if (U.execWhitelistReasonInput) U.execWhitelistReasonInput.value = "";
-        showToast({
-            title: "白名单已添加",
-            text: `命令模式 ${pattern} 已加入白名单。`,
-            kind: "success",
-            durationMs: 2200,
-        });
         await loadExecWhitelistData({ quiet: true });
     } catch (error) {
         showToast({

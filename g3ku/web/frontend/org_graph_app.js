@@ -1930,7 +1930,6 @@ async function saveCeoModelChain(keys) {
         };
         syncCeoModelModeControl();
         scheduleCeoComposerUsageRefresh({ immediate: true });
-        showToast({ title: "模型链已更新", text: "新的优先级对全部模型链会话生效", kind: "success" });
         return payload;
     } catch (error) {
         // 保存失败回到服务端顺序，避免面板显示一份没生效的链。
@@ -4570,7 +4569,6 @@ async function saveTaskDefaultMaxDepth(value) {
     try {
         const payload = await ApiClient.updateMainRuntimeTaskDefaults({ max_depth: nextDepth });
         applyTaskDefaultsPayload(payload);
-        showToast({ title: "深度已更新", text: `全局后续新任务将使用 ${S.taskDefaults.maxDepth} 层深度。`, kind: "success" });
     } catch (e) {
         S.taskDefaults.maxDepth = previousDepth;
         S.taskDefaults.saving = false;
@@ -12322,7 +12320,6 @@ async function saveModelDetail() {
         }
 
         hint(draft.isCreate ? "模型已添加。" : "模型配置已保存。");
-        showToast({ title: draft.isCreate ? "添加成功" : "修改成功", text: draft.isCreate ? "模型已添加成功" : "模型配置已保存", kind: "success" });
         clearModelSelection();
 
     } catch (e) {
@@ -12347,7 +12344,6 @@ async function deleteModelDetail(modelKey) {
         const payload = await ApiClient.deleteManagedModel(targetKey);
         applyModelCatalog(payload, { preserveRoleDrafts: false });
         hint("模型已删除。");
-        showToast({ title: "删除成功", text: `模型 ${targetKey} 已删除`, kind: "success" });
         clearModelSelection();
     } catch (e) {
         const message = e.message || "delete failed";
@@ -14204,7 +14200,6 @@ async function runMemoryNoteSave(ref, body) {
     renderMemoryNotePreview();
     try {
         await ApiClient.updateMemoryNote(ref, body, "manual-ui");
-        showToast({ title: "已保存", text: `note ${ref} 修改已保存。`, kind: "success" });
         preview.editMode = false;
         preview.body = body;
         preview.editBody = "";
@@ -15694,8 +15689,6 @@ async function checkForUpdatesNow() {
             showToast({ title: "发现新版本", text: `${item.latest_tag}（当前 v${item.current_version}）`, kind: "info" });
         } else if (item?.error) {
             showToast({ title: "检查失败", text: "读不到远端标签，稍后再试。", kind: "warn" });
-        } else {
-            showToast({ title: "已是最新", text: `当前 v${item?.current_version || ""}`, kind: "success" });
         }
     } catch (error) {
         showToast({ title: "检查失败", text: String(error?.message || error), kind: "error" });
