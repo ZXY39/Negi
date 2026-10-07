@@ -4,11 +4,8 @@ from __future__ import annotations
 
 import os
 import asyncio
-import subprocess
 import sys
-import time
 from typing import Any, Optional
-from urllib.parse import urlparse
 
 from loguru import logger
 
@@ -50,7 +47,6 @@ from g3ku.web.worker_control import (
     shutdown_managed_task_worker,
 )
 from main.protocol import now_iso
-from main.service.task_terminal_callback import TASK_TERMINAL_CALLBACK_URL_ENV
 
 _global_agent: Optional[AgentLoop] = None
 _global_bus: Optional[MessageBus] = None
@@ -126,121 +122,25 @@ def _get_qq_official_sync_lock() -> asyncio.Lock:
     return _global_qq_official_sync_lock
 
 
-_PORT_OWNERSHIP_CACHE: dict[tuple[int, int], tuple[bool | None, float]] = {}
-_PORT_OWNERSHIP_RETRY_AFTER_S = 10.0
-
-
-def _listen_port_owners(port: int) -> set[int] | None:
-    owners: set[int] = set()
-    try:
-        if os.name == 'nt':
-            result = subprocess.run(
-                ['netstat', '-ano', '-p', 'tcp'],
-                capture_output=True,
-                text=True,
-                check=False,
-                creationflags=getattr(subprocess, 'CREATE_NO_WINDOW', 0),
-            )
-            if result.returncode != 0:
-                return None
-            needle = f':{int(port)}'
-            for line in result.stdout.splitlines():
-                parts = line.split()
-                if len(parts) < 5:
-                    continue
-                local_addr = parts[1]
-                state = parts[3].upper()
-                owning_pid = parts[4]
-                if not local_addr.endswith(needle):
-                    continue
-                if state != 'LISTENING':
-                    continue
-                try:
-                    owners.add(int(owning_pid))
-                except Exception:
-                    continue
-            return owners
-
-        commands = [
-            ['ss', '-ltnp'],
-            ['lsof', '-nP', f'-iTCP:{int(port)}', '-sTCP:LISTEN'],
-        ]
-        for command in commands:
-            try:
-                result = subprocess.run(command, capture_output=True, text=True, check=False)
-            except FileNotFoundError:
-                continue
-            if result.returncode != 0:
-                continue
-            output = result.stdout
-            if os.path.basename(command[0]) == 'ss':
-                for line in output.splitlines():
-                    if f':{int(port)}' not in line:
-                        continue
-                    for segment in line.split('pid=')[1:]:
-                        pid_part = ''.join(ch for ch in segment if ch.isdigit())
-                        if not pid_part:
-                            continue
-                        owners.add(int(pid_part))
-                return owners
-            for line in output.splitlines():
-                if f':{int(port)}' not in line:
-                    continue
-                parts = line.split()
-                for value in parts:
-                    if value.isdigit():
-                        owners.add(int(value))
-                return owners
-    except Exception:
-        return None
-    return None
-
-
-def _process_owns_listen_port(port: int, *, pid: int | None = None) -> bool | None:
-    # 端口归属探测要起 netstat/ss 子进程，在连接数多的机器上单次可达秒级。
-    # 该检查只用于判定"本进程是否应启动 web cron"，而本进程持有的监听套接字
-    # 在进程生命周期内不会易主，因此确认归属后永久缓存；未归属/探测失败则
-    # 按短 TTL 重试。杜绝每个内部事件回调都在事件循环上同步起子进程。
-    resolved_pid = int(pid or os.getpid())
-    key = (int(port), resolved_pid)
-    cached = _PORT_OWNERSHIP_CACHE.get(key)
-    if cached is not None:
-        owned, cached_at = cached
-        if owned is True or (time.monotonic() - cached_at) < _PORT_OWNERSHIP_RETRY_AFTER_S:
-            return owned
-    owners = _listen_port_owners(port)
-    owned = None if owners is None else (resolved_pid in owners)
-    _PORT_OWNERSHIP_CACHE[key] = (owned, time.monotonic())
-    return owned
-
-
 def debug_trace_enabled() -> bool:
     raw = str(os.getenv('G3KU_DEBUG_TRACE', '')).strip().lower()
     return raw in {'1', 'true', 'yes', 'on', 'debug'}
 
 
-def _resolve_web_runtime_port(agent: AgentLoop | None = None) -> int:
-    callback_url = str(os.getenv(TASK_TERMINAL_CALLBACK_URL_ENV, "") or "").strip()
-    if callback_url:
-        try:
-            parsed = urlparse(callback_url)
-            if parsed.port:
-                return int(parsed.port)
-        except Exception:
-            logger.debug("web cron port resolution skipped for callback url {}", callback_url)
-    runtime_agent = agent or _global_agent
-    config = getattr(runtime_agent, "app_config", None)
-    return int(getattr(getattr(config, "web", None), "port", 18790) or 18790)
+def _should_start_web_cron() -> bool:
+    """cron 只由"本工作区的那个 web 服务"起，而这件事由单实例锁定，不由监听面定。
 
+    早先这里问的是"谁在监听 web 端口"。端口要等 uvicorn 走完 lifespan 才 bind，
+    而这条判定跑在启动体里：冷启动时监听面是空的，空集被读成"端口归别人"，cron
+    就被静默跳过。``.g3ku/start.lock`` 在 bind 之前已经拿到或已经退出，读它是
+    进程内一次属性判断，不起子进程、也不依赖时机。
+    """
+    from g3ku.web.launcher import holds_web_start_lock
 
-def _should_start_web_cron(agent: AgentLoop | None = None) -> bool:
-    port = _resolve_web_runtime_port(agent)
-    ownership = _process_owns_listen_port(port)
-    if ownership is False:
+    if not holds_web_start_lock():
         logger.debug(
-            "Skipping web cron startup in pid={} because web port {} is owned by another process",
+            "Skipping web cron startup in pid={} because this process does not hold the workspace web start lock",
             os.getpid(),
-            port,
         )
         return False
     return True
@@ -259,10 +159,10 @@ def _cron_runtime_ready(agent: AgentLoop | None = None) -> bool:
         except Exception:
             payload = {}
     if bool(payload.get("enabled")):
-        # cron 已由本进程启动并在运行：归属探测（子进程级开销）不再必要。
-        # 先查状态再探测是本函数不被高频回调拖垮事件循环的关键顺序。
+        # cron 已由本进程启动并在运行：归属判定不再必要。先查状态再判定是高频回调
+        # 不把启动体拖重的关键顺序（判定本身已是一次进程内属性读取）。
         return True
-    if not _should_start_web_cron(runtime_agent):
+    if not _should_start_web_cron():
         return True
     return False
 
@@ -1224,7 +1124,7 @@ async def ensure_web_runtime_services(agent: AgentLoop | None = None) -> None:
             if heartbeat is not None:
                 _global_web_heartbeat = heartbeat
             cron_service = getattr(runtime_agent, "cron_service", None)
-            if cron_service is not None and not _cron_runtime_ready(runtime_agent) and _should_start_web_cron(runtime_agent):
+            if cron_service is not None and not _cron_runtime_ready(runtime_agent) and _should_start_web_cron():
                 await cron_service.start()
             _ensure_outbound_drain_running()
             await _replay_pending_external_outbox()

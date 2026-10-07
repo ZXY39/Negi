@@ -140,6 +140,17 @@ def _terminate_stale_web_runtime_processes() -> list[int]:
     return killed
 
 
+def holds_web_start_lock() -> bool:
+    """本进程是否就是"这个工作区的 web 服务"。
+
+    锁句柄只在 ``_acquire_web_start_lock`` 成功之后赋值、释放或退出时清空，所以它
+    是进程内的一个事实，不需要问操作系统：worker、脚本、测试里直接构造运行时的进程
+    恒为 False。web cron 用它判"该不该由我起"——这是这条判据唯一在问的问题，端口
+    在监听面上是否已经出现并不影响它。
+    """
+    return _START_LOCK_HANDLE is not None
+
+
 def release_web_start_lock() -> None:
     global _START_LOCK_HANDLE
     handle = _START_LOCK_HANDLE
