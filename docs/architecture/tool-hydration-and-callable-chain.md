@@ -9,7 +9,7 @@
 
 ### canonical 状态与 LRU
 
-- 节点：runtime frame 里的 `hydrated_executor_state` 是**节点生命周期级台账**，唯一作者是 `_promote_tool_context_hydration`（它同时维护 LRU 与 `hydration_evicted_executor_names`）；`hydrated_executor_names` 是**本轮 promoted 视图**，每轮由工具选择重写。两者不同义：视图可以窄于台账，但窄视图绝不回写台账——否则一次曝光收窄就把已水合的工具永久抹掉。台账跨多轮、阶段切换、pause/resume、frame restore 保留的前提是**契约正文仍在场**（判据、载体与生效时机见「契约在场与撤销」）；节点侧的撤销由算 callable 的 `_node_hydrated_executor_names` 在同一跳写回台账，撤销原因单独写 `hydration_revoked_executor_names`，与 LRU 的 `hydration_evicted_executor_names` 互不覆写（两种成因必须分得开）。
+- 节点：runtime frame 里的 `hydrated_executor_state` 是**节点生命周期级台账**，唯一作者是 `_promote_tool_context_hydration`（它同时维护 LRU 与 `hydration_evicted_executor_names`）；`hydrated_executor_names` 是**本轮 promoted 视图**，每轮由工具选择重写。两者不同义：视图可以窄于台账，但窄视图绝不回写台账——否则一次曝光收窄就把已水合的工具永久抹掉。台账跨多轮、阶段切换、pause/resume、frame restore 保留的前提是**契约正文仍在场**（判据、载体与生效时机见「契约在场与撤销」）；节点侧的撤销由本跳**选择与派发字典之前**的 `_revoke_contract_absent_hydration_for_hop` 判并回写台账（判据必须排在它们之前：选择用台账组 callable、执行按字典准入，两者都在同一跳里消费台账，判晚了这一跳就照旧宣传并放行无契约的工具），撤销原因单独写 `hydration_revoked_executor_names`，与 LRU 的 `hydration_evicted_executor_names` 互不覆写（两种成因必须分得开）。
 - CEO/frontdoor：`RuntimeAgentSession._frontdoor_hydrated_tool_names` 与前门 persistent state 的 `hydrated_tool_names`，session 生命周期级 LRU，跨 turn 保留，每轮按当前 RBAC 可见集合过滤。前门把同一条判据落在 `_graph_execute_tools` 的工具态收尾上：裁撤与撤销在同一次写回里落账，见「契约在场与撤销」。
 - 两侧 LRU 都只接受 concrete tool names；family id 不进入 canonical hydration state。默认上限都是 16；promoted tool 在第 17 个之后被逐出时，优先检查对应运行时对象上的 `_hydrated_tool_limit` 是否被显式改小。
 - resource-backed fixed builtin executors 不进入 hydration LRU：为已经 fixed-callable 的工具加载 toolskill 可能返回契约/帮助文本，但不占 hydration 槽位、不产生下一轮 promotion 条目（节点 frame 与 frontdoor session state 两侧同规则）。排查缺失的 hydration promotion 时，先区分“普通扩展执行器”与“资源支撑固定内置”，后者按设计留在 LRU 之外；`content_describe` / `content_open` / `content_search` 属于前者，成功的 `load_tool_context(tool_id="content_*")` 应占用普通 hydration 槽位并在下一轮 promote 该 concrete tool。
@@ -20,9 +20,10 @@
 - 不变量：某工具在这一跳能不能被调用，取决于它的 toolskill 契约正文在这一跳是不是在场。判据只有一个函数（`g3ku/runtime/tool_context_presence.py`），两条车道共用；判据缺失（调用方压根没交当次请求视图）时**不撤销**——读不到不等于不在场，凭"读不到"摘能力比少收一轮危险。
 - 在场证据有两个载体：未被压缩也未被裁撤删除的 `load_tool_context` 结果行，以及阶段块里被 `keep_tools` 点名留下的 `kept_tool_contexts` 正文。重复读守卫读同一判据，所以块里已有正文时再 load 判成重读，否则同一份正文会在上下文里出现两份。`load_skill_context` 的正文同样随裁撤/压缩离开上下文，但 skill 不进水合台账，撤销与它无关。
 - 撤销从下一跳起生效，同批已派发执行的照常执行完；点名裁撤的那一批就是"下一跳"的起点，所以台账写回必须落在**阶段账本落地之后**的那份视图上（裁后的消息 + 带 `context_evicted` 与 `kept_tool_contexts` 的账本）。写回与渲染/派发分家会造出本文禁止的第四态：该名字既不在 `callable_tools`、又被"候选 = 治理可见 −（callable ∪ 已水合）"挡在 `candidate_tools` 之外，模型 load 它拿到没有正文的 `already_callable`，执行侧回 `tool not available`——这两句同时出现即说明读路径与写回又不同源。
-- 撤销掉的名字在同一次写回里并回候选（`revive_contract_absent_candidates`），使"重新 load 一次"在同一个回合内就是出路。**并名字必须同时补 `candidate_tool_items` 条目**：尾块 `candidate_tools` 那行按 items 渲染，而候选池是回合初快照、该名字水合时条目已被摘掉，只并名字的话这一行永远少它一个——提升门禁认得出出路、模型看不见，等于没有出路。说明文字仍由 provider `tools[]` 的 `function.description` 承载，这里只列名字。提升门禁、尾块渲染与重复读守卫读的是同一份候选视图。
-- 节点 `token_compression` 那一跳会成批撤销、下一跳成批回到候选：判据按当次请求视图算，这是**预期行为**，不是抖动缺陷。
-- 派发准入与声明不同源：前门 `_frontdoor_dispatch_tool_names` = 钉住的 `tools[]` 声明 ∩ 当轮治理可见 − 当跳不在场的水合名。声明按"只补不删"活到下一次压缩重印，权限不跟着滞后。
+- 台账只有一个读口径（节点侧 `main/monitoring/log_service.py` 的 `_hydrated_ledger_state`）：`hydrated_executor_state` 缺省时回退到 `hydrated_executor_names`，而后者是本轮选择派生的 promoted 视图，它不知道正文在不在场 ⇒ 回退值必须再减一次撤销名单。少了这一减，撤销刚清空的台账下一次读就整份复活，同一条帧上会出现 `revoked` 与 `hydrated` 并列，选择、派发字典与节点详情全都读成"已水合且可调"。
+- 撤销掉的名字要能在**同一跳**回到候选，否则"重新 load 一次"就不是回合内的出路。前门的候选是回合初快照，所以写回里显式并名字并补 `candidate_tool_items` 条目；节点侧不用并——选择在本跳判据之后重算，候选 = 治理可见 −（callable ∪ 已水合）自然把它算回来。
+- 两种失去正文的触发点，生效跳不同：节点侧 `token_compression` 在选择之后才改写发送基线，所以那一跳成批撤销、下一跳成批回到候选——判据按当次请求视图算，这是**预期行为**，不是抖动缺陷。阶段裁撤则不同：节点在**本跳选择之前**投影并判据（`_revoke_contract_absent_hydration_for_hop`），前门在**同批账本落地之后**写回，因此点名裁撤的下一跳就把能力摘掉。
+- 派发准入与声明不同源，两条车道各自有个咽喉点：前门 `_frontdoor_dispatch_tool_names` = 钉住的 `tools[]` 声明 ∩ 当轮治理可见 − 当跳不在场的水合名；节点把这一步做在选择之前——判据撤掉的名字直接摘出本轮派发字典，于是选择组出的 callable 与执行准入用的是同一份收窄后的台账。声明按"只补不删"活到下一次压缩重印，权限不跟着滞后。
 
 ### 重读与指纹
 
