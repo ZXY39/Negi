@@ -18,8 +18,6 @@ from __future__ import annotations
 import json
 from types import SimpleNamespace
 
-import pytest
-
 from g3ku.runtime.context.execution_tool_selection import build_execution_tool_selection
 from g3ku.runtime.frontdoor import _ceo_create_agent_impl as create_agent_impl
 from g3ku.runtime.frontdoor._ceo_runtime_ops import CeoFrontDoorRuntimeOps
