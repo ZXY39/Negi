@@ -698,3 +698,85 @@ def test_frontdoor_candidate_view_reads_state_revoked_field() -> None:
     )
     assert "perf_inspect" in view and "content_open" in view
     assert CeoFrontDoorRuntimeOps._frontdoor_candidate_tool_view(None) == []
+
+
+def _evicted_stage_state(*, kept_entries: list[dict] | None = None) -> dict:
+    stage = {
+        "stage_id": "s1",
+        "stage_index": 1,
+        "stage_kind": "normal",
+        "status": "completed",
+        "context_evicted": True,
+        "rounds": [{"round_id": "r1", "tool_call_ids": ["call-load-1"], "tools": []}],
+    }
+    if kept_entries:
+        stage["kept_tool_contexts"] = list(kept_entries)
+    return {"stages": [stage], "active_stage_id": "", "transition_required": False}
+
+
+def _loader_messages() -> list[dict]:
+    return [
+        {
+            "role": "tool",
+            "name": "load_tool_context",
+            "tool_call_id": "call-load-1",
+            "content": json.dumps(
+                {
+                    "ok": True,
+                    "tool_id": TOOL_ID,
+                    "tool_context_fingerprint": "tcf:fixture-presence",
+                },
+                ensure_ascii=False,
+            ),
+        }
+    ]
+
+
+def test_partition_treats_evicted_stage_loader_row_as_absent() -> None:
+    """判据必须与渲染同源：裁撤阶段的正文行虽在 state['messages'] 里，也算不在场。
+
+    实盘 web:ceo-09057e72cac8 上，裁撤发生在请求体重建时，而判据读裁撤前的视图，
+    于是台账不记撤销、候选并回没有输入，尾部契约与候选同时缺这个名字（第四态）。
+    """
+
+    ops = _ops()
+    state = {"messages": _loader_messages(), "frontdoor_stage_state": _evicted_stage_state()}
+    kept, revoked = ops._frontdoor_contract_presence_partition(state, [TOOL_ID])
+    assert revoked == [TOOL_ID]
+    assert kept == []
+
+
+def test_partition_kept_context_overrides_stage_eviction() -> None:
+    """被 keep_tools 点名的正文仍然在场 ⇒ 不撤销。"""
+
+    ops = _ops()
+    state = {
+        "messages": _loader_messages(),
+        "frontdoor_stage_state": _evicted_stage_state(
+            kept_entries=[{
+                "tool_id": TOOL_ID,
+                "tool_context_fingerprint": "tcf:fixture-presence",
+                "body": "# fixture toolskill body",
+            }]
+        ),
+    }
+    kept, revoked = ops._frontdoor_contract_presence_partition(state, [TOOL_ID])
+    assert kept == [TOOL_ID]
+    assert revoked == []
+
+
+def test_dispatch_excludes_contract_absent_hydrated_tool() -> None:
+    """撤销必须落到执行层：只改尾部契约时，那一跳的 callable 已不含它、调用却仍成功。"""
+
+    ops = _ops()
+    state = {
+        "messages": _loader_messages(),
+        "frontdoor_stage_state": _evicted_stage_state(),
+        "provider_tool_names": ["exec", TOOL_ID],
+        "rbac_visible_tool_names": ["exec", TOOL_ID],
+        "tool_names": ["exec", TOOL_ID],
+        "hydrated_tool_names": [TOOL_ID],
+    }
+    names = ops._frontdoor_dispatch_tool_names(state)
+    assert TOOL_ID not in names
+    assert "exec" in names

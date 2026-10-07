@@ -3401,17 +3401,28 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
         }
 
     def _frontdoor_dispatch_tool_names(self, state: CeoGraphState) -> list[str]:
-        """派发名单：钉住的声明 ∩ 当轮治理可见集。
+        """派发名单：钉住的声明 ∩ 当轮治理可见集 −「契约不在场的水合工具」。
 
         清单可以滞后（删名推迟到压缩重印），执行准入不行——声明滞后绝不能变成权限滞后。
         治理可见集取不到时按当轮 callable pool 收，不拿声明兜底（宁可窄不可宽）。
+
+        撤销必须落到这一层才算"不允许调用"：实盘只改尾部契约时，那一跳的 callable 行里
+        已没有 `perf_inspect`，而 stage2 仍把它调用成功（派发与声明解耦），规则只剩文案效果。
+        常驻内置与控制/加载器不在水合台账里，不受这条影响；裁撤但被 `keep_tools` 留住的
+        名字由同一判据判成在场，因此不会被摘。
         """
         declared = self._normalized_tool_name_state_list(list(state.get("provider_tool_names") or []))
         granted = self._normalized_tool_name_state_list(list(state.get("rbac_visible_tool_names") or []))
         if granted:
             granted_set = set(granted)
-            return [name for name in declared if name in granted_set]
-        return self._normalized_tool_name_state_list(list(state.get("tool_names") or []))
+            dispatch = [name for name in declared if name in granted_set]
+        else:
+            dispatch = self._normalized_tool_name_state_list(list(state.get("tool_names") or []))
+        _kept, revoked = self._frontdoor_contract_presence_partition(state, state.get("hydrated_tool_names"))
+        if revoked:
+            revoked_set = set(revoked)
+            dispatch = [name for name in dispatch if name not in revoked_set]
+        return dispatch
 
     def _frontdoor_live_granted_tool_names(self, *, session_key: str) -> list[str]:
         """实时读一次"这个角色现在被允许哪些工具"。
@@ -3542,7 +3553,7 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
             # 请求视图压根没交进来（旁路调用、老快照），退回今日行为：判据缺失时不撤销，
             # 比凭"读不到"就摘掉能力安全。空列表不算缺失——空列表是"这跳确实没有正文"。
             return hydrated, []
-        messages = list(state.get("messages") or [])
+        messages = self._frontdoor_view_without_evicted_stage_rows(state, list(state.get("messages") or []))
         kept_contexts = kept_tool_contexts_from_frames(self._frontdoor_stage_state_snapshot(state))
         # 阶段台账在家有两份归一化产物（stage_state 与 canonical），装配路自己也是
         # 「stage_state 空就回退 canonical」（见 `_graph_prepare_turn` 的 seed 裁剪）。
@@ -3552,6 +3563,48 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
         )
         index = contract_presence_index(request_messages=messages, kept_stage_contexts=kept_contexts)
         return partition_contract_presence(hydrated, index=index)
+
+    def _frontdoor_view_without_evicted_stage_rows(
+        self,
+        state: CeoGraphState | dict[str, Any] | None,
+        messages: list[Any],
+    ) -> list[Any]:
+        """把"属于已裁撤阶段"的工具结果行从判据视图里剔除。
+
+        实盘（web:ceo-09057e72cac8）暴露的是两份视图不同源：裁撤发生在**请求体重建**
+        （`_trim_frontdoor_seed_stage_compaction`）时，而 `state["messages"]` 还是裁撤前那份，
+        于是判据读得到正文 ⇒ 台账不记撤销 ⇒ `hydration_revoked_executor_names` 全空 ⇒
+        候选并回没有输入；渲染却用裁切后的视图 ⇒ callable 少了它、candidate 也没有 ⇒
+        文档禁止的第四态，且执行照旧放行。
+
+        这里不依赖调用方交来哪一份视图：按阶段账本自己把裁撤阶段的 call id 集合摘出来，
+        成对剔除这些行。保留过的正文另有载体（`kept_tool_contexts` → 在场索引），
+        所以剔除不会把该留的能力判没。
+        """
+        try:
+            from g3ku.runtime.stage_prompt_compaction import extract_call_id, stage_round_call_ids
+        except Exception:
+            return list(messages or [])
+        if not isinstance(state, dict):
+            return list(messages or [])
+        snapshot = self._frontdoor_stage_state_snapshot(state)
+        evicted_call_ids: set[str] = set()
+        for stage in list(snapshot.get("stages") or []):
+            if not isinstance(stage, dict):
+                continue
+            if stage.get("context_evicted") is not True:
+                continue
+            evicted_call_ids |= {str(cid or "").strip() for cid in stage_round_call_ids(stage) if str(cid or "").strip()}
+        if not evicted_call_ids:
+            return list(messages or [])
+        filtered: list[Any] = []
+        for message in list(messages or []):
+            if isinstance(message, dict) and str(message.get("role") or "").strip().lower() == "tool":
+                call_id = str(extract_call_id(message.get("tool_call_id")) or "").strip()
+                if call_id and call_id in evicted_call_ids:
+                    continue
+            filtered.append(message)
+        return filtered
 
     def _merge_frontdoor_contract_revocations(
         self,
