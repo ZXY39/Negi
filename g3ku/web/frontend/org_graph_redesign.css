@@ -277,24 +277,6 @@
     font-weight: 700;
 }
 
-[data-ui-version="v2"] .sidebar-toggle {
-    flex: 0 0 auto;
-    width: 32px;
-    height: 32px;
-}
-
-[data-ui-version="v2"] .sidebar-toggle .sidebar-icon-expand {
-    display: none;
-}
-
-[data-ui-version="v2"] .sidebar.is-collapsed .sidebar-toggle .sidebar-icon-collapse {
-    display: none;
-}
-
-[data-ui-version="v2"] .sidebar.is-collapsed .sidebar-toggle .sidebar-icon-expand {
-    display: block;
-}
-
 [data-ui-version="v2"] .nav-item {
     position: relative;
     overflow: visible;
@@ -330,32 +312,6 @@
     background: var(--ui-brand);
     color: var(--ui-on-brand);
     font-weight: 700;
-}
-
-/* 紧凑模式：只留图标，审计角标挂在图标右上角 */
-[data-ui-version="v2"] .sidebar.is-collapsed .brand-text,
-[data-ui-version="v2"] .sidebar.is-collapsed .nav-item > span:not(.nav-badge),
-[data-ui-version="v2"] .sidebar.is-collapsed .settings-label {
-    display: none;
-}
-
-[data-ui-version="v2"] .sidebar.is-collapsed .nav-item {
-    width: 40px;
-    padding: 0;
-    justify-content: center;
-}
-
-[data-ui-version="v2"] .sidebar.is-collapsed #audit-nav-badge {
-    position: absolute;
-    top: 2px;
-    right: 2px;
-    min-width: 16px;
-    height: 16px;
-    padding: 0 4px;
-    display: inline-flex;
-    align-items: center;
-    justify-content: center;
-    z-index: 2;
 }
 
 [data-ui-version="v2"] .sidebar-spacer {
@@ -418,11 +374,6 @@
     width: 16px;
     height: 16px;
     flex: 0 0 auto;
-}
-
-[data-ui-version="v2"] .sidebar.is-collapsed #project-settings-btn {
-    width: 36px;
-    padding: 0;
 }
 
 /* 窄屏：顶栏自身横向滚动，不再引入抽屉层 */

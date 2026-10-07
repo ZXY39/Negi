@@ -46,3 +46,23 @@ def test_app_sidebars_use_compact_160px_width_before_mobile_stack() -> None:
             css,
             flags=re.MULTILINE | re.DOTALL,
         ), css_path.as_posix()
+
+
+def test_navigation_bar_always_shows_labels_without_compact_mode() -> None:
+    """顶部那条栏没有"收起名称"这档：品牌名与每个导航项的文字恒显示，也没有那颗按钮。"""
+    html = (REPO_ROOT / "g3ku/web/frontend/org_graph.html").read_text(encoding="utf-8")
+    app_js = (REPO_ROOT / "g3ku/web/frontend/org_graph_app.js").read_text(encoding="utf-8")
+    v2_css = (REPO_ROOT / "g3ku/web/frontend/org_graph_redesign.css").read_text(encoding="utf-8")
+
+    assert 'id="sidebar-toggle"' not in html
+    for needle in (
+        "sidebarToggle",
+        "uiSidebarCollapsed",
+        "SIDEBAR_COLLAPSED_KEY",
+        "g3ku.ui.sidebar.collapsed",
+        "toggleSidebar",
+        "applySidebarState",
+        "readSidebarPreference",
+    ):
+        assert needle not in app_js, needle
+    assert ".sidebar.is-collapsed" not in v2_css

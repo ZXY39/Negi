@@ -466,8 +466,6 @@ const S = {
 const U = {
     nav: [...document.querySelectorAll(".nav-item")],
     theme: document.getElementById("theme-toggle"),
-    sidebar: document.querySelector(".sidebar"),
-    sidebarToggle: document.getElementById("sidebar-toggle"),
     ceoShell: document.getElementById("ceo-shell"),
     ceoSessionPanel: document.getElementById("ceo-session-panel"),
     ceoSessionPanelToggle: document.getElementById("ceo-session-panel-toggle"),
@@ -16254,9 +16252,7 @@ function bindModelRetryToastExpansion() {
     });
 }
 
-const SIDEBAR_COLLAPSED_KEY = "g3ku.ui.sidebar.collapsed.v1";
 const THEME_KEY = "g3ku.ui.theme.v1";
-let uiSidebarCollapsed = false;
 
 function readStoredUiPreference(key) {
     try {
@@ -16274,13 +16270,6 @@ function writeStoredUiPreference(key, value) {
     }
 }
 
-function readSidebarPreference() {
-    const raw = readStoredUiPreference(SIDEBAR_COLLAPSED_KEY);
-    if (raw === "true") return true;
-    if (raw === "false") return false;
-    return null;
-}
-
 const CEO_SESSION_ORDER_KEY = "g3ku.ui.ceo.session-order.v1";
 
 function readStoredCeoSessionOrder() {
@@ -16296,26 +16285,6 @@ function readStoredCeoSessionOrder() {
 function setCeoSessionOrder(order) {
     S.ceoSessionOrder = [...(Array.isArray(order) ? order : [])];
     writeStoredUiPreference(CEO_SESSION_ORDER_KEY, JSON.stringify(S.ceoSessionOrder));
-}
-
-function updateSidebarButtonA11y() {
-    if (!U.sidebarToggle) return;
-    const label = uiSidebarCollapsed ? "显示名称" : "紧凑模式";
-    U.sidebarToggle.setAttribute("aria-label", label);
-    U.sidebarToggle.setAttribute("title", label);
-    U.sidebarToggle.setAttribute("aria-expanded", String(!uiSidebarCollapsed));
-}
-
-function applySidebarState(state) {
-    uiSidebarCollapsed = !!state;
-    U.sidebar?.classList.toggle("is-collapsed", uiSidebarCollapsed);
-    updateSidebarButtonA11y();
-}
-
-function toggleSidebar() {
-    const next = !uiSidebarCollapsed;
-    applySidebarState(next);
-    writeStoredUiPreference(SIDEBAR_COLLAPSED_KEY, String(next));
 }
 
 function syncThemeToggleIcons() {
@@ -16344,8 +16313,6 @@ function initializeUiPreferences() {
     // 本模块会被 tests/resources 的 vm 桩环境直接求值，那里没有 documentElement。
     if (!document.documentElement) return;
     initializeTheme();
-    applySidebarState(readSidebarPreference() === true);
-    U.sidebarToggle?.addEventListener("click", toggleSidebar);
     S.ceoSessionOrder = readStoredCeoSessionOrder();
 }
 

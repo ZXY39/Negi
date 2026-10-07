@@ -189,17 +189,15 @@ Because there is no left sidebar anymore, fixed overlays must not keep the old s
 - `#confirm-backdrop` sits earlier in the DOM than the settings and 配置 dialogs, so anything that needs `openConfirm()` must close its parent layers first or the confirm renders underneath them. Import does exactly that before opening the confirm.
 - A successful import reloads the page: the config面 and the unlock credential both changed underneath a live UI, so keeping the old DOM would render against stale state. Its toast prefixes the result with `包来自 X，本机 Y` only when the bundle's `source_app_version` differs from `local_app_version` — same-version ends are the case where the report is about behavior, not about the build.
 
-Two collapse systems exist and must not be merged:
+One collapse system exists in the page chrome:
 
 | System | Controls | State source | Effect |
 | --- | --- | --- | --- |
-| Top navigation bar | `#sidebar-toggle` | `is-collapsed` on `.sidebar`, preference key `g3ku.ui.sidebar.collapsed.v1` | Labels shown or icon-only |
 | CEO session list | `#ceo-session-panel-toggle` | `S.ceoSessionPanelExpanded`, `.ceo-shell.is-session-panel-expanded`, `data-panel-state` | CEO page column only |
 
-- Compact mode drops the brand text, the nav labels and the exit-project label but keeps every icon, its `aria-label` / `title`, and the audit badge — `#audit-nav-badge` moves to the top-right corner of its icon instead of disappearing. The bar height stays 56px either way.
-- The toggle's accessible name states what the next click produces (「紧凑模式」 while expanded, 「显示名称」 while collapsed) and `aria-expanded` mirrors label visibility.
-- Nav labels are short (`会话 / 任务 / Skill / Tool / 记忆 / 模型 / 外部 / 日志`); `data-view` values are unchanged and each view's own page title keeps its full name.
-- Collapsing the bar, switching the theme and toggling the CEO session panel are independent, and none of them re-renders session, task or resource data or calls an API.
+- The top navigation bar has no icon-only shape: the brand text, every nav label and the 设置 label always render, there is no control that hides them, and no stored preference for it. `.sidebar.is-collapsed` is therefore not a live selector — a rule written against it can never match, so restyling the bar means editing the one expanded shape.
+- Nav labels are short (`会话 / 任务 / Skill / Tool / 记忆 / 模型 / 外部 / 日志`); `data-view` values are unchanged and each view's own page title keeps its full name. The bar is 56px tall in both themes and at every viewport the layout targets.
+- Switching the theme and toggling the CEO session panel are independent, and neither re-renders session, task or resource data nor calls an API.
 
 ### CEO Reading Column
 
