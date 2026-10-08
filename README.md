@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="assets/banner.png" alt="G3KU-Agent" width="100%">
+  <img src="assets/banner.png" alt="Negi" width="100%">
 </p>
 
 # Negi
@@ -82,25 +82,25 @@ Negi 针对这五处障碍提供机制层面的处理，而不是把它们留给
 Windows PowerShell：
 
 ```powershell
-iwr https://raw.githubusercontent.com/ZXY39/G3KU-Agent/v1.0.15/install.ps1 | iex
+iwr https://raw.githubusercontent.com/ZXY39/Negi/v1.0.15/install.ps1 | iex
 ```
 
 Linux / macOS：
 
 ```bash
-curl -LsSf https://raw.githubusercontent.com/ZXY39/G3KU-Agent/v1.0.15/install.sh | bash
+curl -LsSf https://raw.githubusercontent.com/ZXY39/Negi/v1.0.15/install.sh | bash
 ```
 
-默认安装到 `~/G3KU-Agent`，无需预先安装 Python。设备上缺少 git 时改用源码包下载（需要 curl 或 wget，以及 unzip）。
+默认安装到 `~/Negi`，无需预先安装 Python。设备上缺少 git 时改用源码包下载（需要 curl 或 wget，以及 unzip）。
 
 无法解析 `raw.githubusercontent.com` 时，可改用镜像通道获取同一脚本，仓库地址与参数不变：
 
 ```powershell
-iwr https://cdn.jsdelivr.net/gh/ZXY39/G3KU-Agent@v1.0.15/install.ps1 | iex
-iwr https://ghfast.top/https://raw.githubusercontent.com/ZXY39/G3KU-Agent/v1.0.15/install.ps1 | iex
+iwr https://cdn.jsdelivr.net/gh/ZXY39/Negi@v1.0.15/install.ps1 | iex
+iwr https://ghfast.top/https://raw.githubusercontent.com/ZXY39/Negi/v1.0.15/install.ps1 | iex
 ```
 
-发布页同时提供同一份脚本，可绕开 raw 域名：`https://github.com/ZXY39/G3KU-Agent/releases/download/v1.0.15/install.ps1`。使用第三方代理相当于把"执行什么代码"交给该代理，稳妥做法是先下载再检查：脚本首行应为 `#requires -Version 5.1` 或 `#!/usr/bin/env bash`，脚本内固定的版本号应与地址中的版本标签一致，文件字节数以发布页列出的大小为准。
+发布页同时提供同一份脚本，可绕开 raw 域名：`https://github.com/ZXY39/Negi/releases/download/v1.0.15/install.ps1`。使用第三方代理相当于把"执行什么代码"交给该代理，稳妥做法是先下载再检查：脚本首行应为 `#requires -Version 5.1` 或 `#!/usr/bin/env bash`，脚本内固定的版本号应与地址中的版本标签一致，文件字节数以发布页列出的大小为准。
 
 网络访问 PyPI 或 Python 发行包较慢时，为 uv 指定镜像地址即可，脚本不另设开关：
 
@@ -362,7 +362,7 @@ export UV_PYTHON_INSTALL_MIRROR=<可用的 python-build-standalone 镜像>
 
 ## 9. 升级与版本检查
 
-默认安装位置：Windows `%USERPROFILE%\G3KU-Agent`，Linux / macOS `~/G3KU-Agent`。环境目录 `.venv/` 与数据目录 `.g3ku/` 都在该目录内，升级不会改动它们。
+默认安装位置：Windows `%USERPROFILE%\Negi`，Linux / macOS `~/Negi`。环境目录 `.venv/` 与数据目录 `.g3ku/` 都在该目录内，升级不会改动它们。
 
 - **查看是否有新版本**：在项目目录执行 `g3ku status`，输出的最后一行 `Release:` 显示当前版本与远端最新标签。离线、缺少 git 或远端不是本仓库时该行不出现，不会给出"已是最新"的错误结论。
 - **自动检查**：服务运行期间每 5 小时检查一次，启动时同样检查一次。开关与间隔在配置文件的 `update_check`（`enabled` / `interval_hours`）。项目处于锁定状态时不检查也不提醒。
@@ -419,7 +419,7 @@ docker compose up --build
 
 ```bash
 git clone <仓库地址>
-cd G3KU-Agent
+cd Negi
 ```
 
 ```powershell

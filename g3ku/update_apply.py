@@ -146,7 +146,7 @@ def _upgrade_command(ref: str) -> list[str] | None:
     """Upgrade *this* project root.
 
     `-Dir` must be passed explicitly: the installer's own default is
-    `%USERPROFILE%/G3KU-Agent`, so omitting it would download and upgrade a
+    `%USERPROFILE%/Negi`, so omitting it would download and upgrade a
     different directory while this one restarts unchanged.
     """
     if os.name == "nt":

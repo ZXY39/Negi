@@ -98,9 +98,9 @@ These usually do not require updating `docs/architecture/` unless they alter mai
 
 ## Brand Name vs Frozen Identifiers
 
-The product is displayed as **Negi**; the code keeps the legacy `g3ku` spelling, and the repository path `ZXY39/G3KU-Agent` is unchanged by the rebrand. Do not "finish the rename" into the list below — each entry is a live contract, not branding:
+The product is displayed as **Negi**, the repository is `ZXY39/Negi`, and the code keeps the legacy `g3ku` spelling. Do not "finish the rename" into the list below — each entry is a live contract, not branding:
 
-- The repo path and every URL built from it, including `$RepoName` in `install.ps1` / `install.sh` and the default install directory `~/G3KU-Agent`.
+- The repository path `ZXY39/Negi` and the URLs and directory built from it: `$RepoName` / `REPO_NAME` in `install.ps1` / `install.sh`, and the default install directory `~/Negi`. Never let the name `G3KU-Agent` exist again — GitHub drops old-name redirects as soon as that name is taken, and installed devices check and upgrade through their own `origin` (`g3ku/update_check.py` `git ls-remote --tags origin`, `install.ps1` `git fetch origin`), so they would silently stop receiving updates.
 - Protocol markers matched literally by the runtime: `[G3KU_STAGE_*]`, `[G3KU_SILENT`, `[G3KU_TOKEN_COMPACT_V2]`, `### G3KU_PATCH_METADATA ###`, `### G3KU_PATCH_DIFF ###`.
 - `G3KU_*` environment variables (50 named in code today, plus any config field, because the
   root settings model declares `env_prefix="G3KU_"` — the set is open-ended, don't treat the

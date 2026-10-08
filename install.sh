@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # G3KU one-line installer (macOS / Linux).
 #
-#   curl -LsSf https://raw.githubusercontent.com/ZXY39/G3KU-Agent/v1.0.15/install.sh | bash
+#   curl -LsSf https://raw.githubusercontent.com/ZXY39/Negi/v1.0.15/install.sh | bash
 #
 # Provisions uv (and therefore Python) on a machine that has neither, fetches the
 # pinned checkout, syncs the locked environment and hands off to g3ku_bootstrap.py.
@@ -13,9 +13,9 @@
 set -euo pipefail
 
 REPO_OWNER='ZXY39'
-REPO_NAME='G3KU-Agent'
+REPO_NAME='Negi'
 REF="${G3KU_REF:-v1.0.15}"
-DIR="${G3KU_DIR:-$HOME/G3KU-Agent}"
+DIR="${G3KU_DIR:-$HOME/Negi}"
 NO_START=0
 UPGRADE=0
 REPO_GIT="https://github.com/${REPO_OWNER}/${REPO_NAME}.git"
@@ -36,7 +36,7 @@ usage() {
   cat <<'EOF'
 Usage: install.sh [--dir PATH] [--ref TAG] [--no-start] [--upgrade]
 
-  --dir PATH    install location (default ~/G3KU-Agent)
+  --dir PATH    install location (default ~/Negi)
   --ref TAG     git ref to install (default the pinned release tag)
   --no-start    prepare the environment but do not launch the web UI
   --upgrade     update the code in an existing install, keep .venv and .g3ku

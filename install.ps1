@@ -2,14 +2,14 @@
 <#
   G3KU one-line installer (Windows).
 
-    iwr https://raw.githubusercontent.com/ZXY39/G3KU-Agent/v1.0.15/install.ps1 | iex
+    iwr https://raw.githubusercontent.com/ZXY39/Negi/v1.0.15/install.ps1 | iex
 
   Provisions uv (and therefore Python) on a machine that has neither, fetches the
   pinned checkout, syncs the locked environment and hands off to g3ku_bootstrap.py.
   Runtime code is not modified by this script.
 #>
 param(
-    [string]$Dir = (Join-Path $env:USERPROFILE 'G3KU-Agent'),
+    [string]$Dir = (Join-Path $env:USERPROFILE 'Negi'),
     [string]$Ref = 'v1.0.15',
     [switch]$NoStart,
     [switch]$Upgrade
@@ -19,7 +19,7 @@ $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
 
 $RepoOwner = 'ZXY39'
-$RepoName = 'G3KU-Agent'
+$RepoName = 'Negi'
 $RepoGit = "https://github.com/$RepoOwner/$RepoName.git"
 $RepoZip = "https://github.com/$RepoOwner/$RepoName/archive/${Ref}.zip"
 $UvInstaller = 'https://astral.sh/uv/install.ps1'
