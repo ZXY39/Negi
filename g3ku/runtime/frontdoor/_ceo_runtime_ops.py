@@ -1071,10 +1071,16 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
         )
 
     def _ceo_image_multimodal_enabled_for_model_refs(self, model_refs: list[str] | None) -> bool:
+        """链上任一成员不支持图片，整条链就按不支持处理（保守 AND）。
+
+        解析不到的成员跳过，因为运行时不会把它发出去。净效果是「混进非多模态模型 ⇒ 该链不收
+        图」，而不是把图发给读不了的模型；要带图必须把非多模态成员摘出这条链。
+        """
         app_config = self._frontdoor_runtime_config()
         getter = getattr(app_config, "get_managed_model", None)
         if not callable(getter):
             return False
+        resolved_any = False
         for ref in list(model_refs or []):
             key = str(ref or "").strip()
             if not key:
@@ -1085,8 +1091,10 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
                 model = None
             if model is None:
                 continue
-            return bool(getattr(model, "image_multimodal_enabled", False))
-        return False
+            resolved_any = True
+            if not bool(getattr(model, "image_multimodal_enabled", False)):
+                return False
+        return resolved_any
 
     @staticmethod
     def _web_ceo_uploaded_files_note(uploads: list[dict[str, Any]]) -> str:
@@ -3355,6 +3363,9 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
                 turn_id = str(turn_id_getter() or "").strip()
             except Exception:
                 turn_id = ""
+        turn_model_refs = list(
+            state.get("model_refs") or self._resolve_ceo_model_refs_for_session(session.state.session_key) or []
+        )
         return {
             "on_progress": runtime.context.on_progress,
             "emit_lifecycle": True,
@@ -3362,10 +3373,8 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
             "tool_watchdog": self._ceo_tool_watchdog_runtime_config(),
             "session_key": session.state.session_key,
             "turn_id": turn_id,
-            "model_refs": list(state.get("model_refs") or self._resolve_ceo_model_refs() or []),
-            "image_multimodal_enabled": self._ceo_image_multimodal_enabled_for_model_refs(
-                list(state.get("model_refs") or self._resolve_ceo_model_refs() or [])
-            ),
+            "model_refs": turn_model_refs,
+            "image_multimodal_enabled": self._ceo_image_multimodal_enabled_for_model_refs(turn_model_refs),
             "tool_contract_enforced": True,
             "callable_tool_names": list(state.get("tool_names") or []),
             "candidate_tool_names": self._frontdoor_candidate_tool_view(state),

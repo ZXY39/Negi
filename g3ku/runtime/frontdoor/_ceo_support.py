@@ -31,6 +31,7 @@ from g3ku.runtime.tool_watchdog import (
 )
 from g3ku.runtime.web_ceo_sessions import (
     SESSION_TASK_DEFAULTS_SCOPE_SESSION,
+    ceo_session_model_chain_keys,
     ceo_session_pinned_model_key,
     ceo_session_task_defaults_scope,
 )
@@ -253,15 +254,65 @@ class CeoFrontDoorSupport:
         return [default_ref] if default_ref else [str(getattr(self._loop, "model", "") or "").strip()]
 
     def _resolve_ceo_model_refs_for_session(self, session_key: str | None = None) -> list[str]:
-        """会话固定模型优先，其余情况回退角色模型链。
+        """本轮模型引用：固定模型 > 会话链 > 全局角色链。
 
-        ``session_key`` 缺省或不带固定模型时与 ``_resolve_ceo_model_refs()`` 完全一致；
-        固定模型被删除/禁用时返回模型链（会话自动回退）。
+        ``session_key`` 缺省、既没有固定模型也没有会话链时与 ``_resolve_ceo_model_refs()``
+        完全一致；固定模型被删除/禁用时回退下一档。
         """
         pinned_ref = self._session_pinned_model_ref(session_key)
         if pinned_ref:
             return [pinned_ref]
+        chain_refs = self._session_model_chain_refs(session_key)
+        if chain_refs:
+            return chain_refs
         return self._resolve_ceo_model_refs()
+
+    def _session_model_chain_refs(self, session_key: str | None = None) -> list[str]:
+        """会话链的生效视图：逐成员现读配置，摘掉已删除或禁用的项。
+
+        与固定模型同一条判据——链上成员失效不报错也不钉死会话，剩余为空时回退全局角色链。
+        """
+        key = str(session_key or "").strip()
+        if not key:
+            return []
+        sessions = getattr(self._loop, "sessions", None)
+        getter = getattr(sessions, "get_or_create", None) or getattr(sessions, "get", None)
+        if not callable(getter):
+            return []
+        try:
+            record = getter(key)
+        except Exception:
+            logger.debug("session model chain lookup skipped; session={}", key)
+            return []
+        stored = ceo_session_model_chain_keys(getattr(record, "metadata", None))
+        if not stored:
+            return []
+        app_config = getattr(self._loop, "app_config", None)
+        if app_config is None:
+            return []
+        refs: list[str] = []
+        dropped: list[str] = []
+        for model_key in stored:
+            try:
+                managed = app_config.get_managed_model(model_key)
+            except Exception:
+                managed = None
+            if managed is None or not bool(getattr(managed, "enabled", True)):
+                dropped.append(model_key)
+                continue
+            refs.append(model_key)
+        if dropped:
+            logger.info(
+                "CEO session model chain dropped members: session={} dropped={} remaining={}",
+                key,
+                ",".join(dropped),
+                ",".join(refs) or "-",
+            )
+        if not refs:
+            logger.info("CEO session model chain empty after drop; fallback to ceo chain session={}", key)
+            return []
+        logger.info("CEO session model chain applied: session={} chain={}", key, ",".join(refs))
+        return refs
 
     def _session_pinned_model_ref(self, session_key: str | None = None) -> str:
         key = str(session_key or "").strip()

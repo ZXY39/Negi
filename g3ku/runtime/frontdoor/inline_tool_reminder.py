@@ -497,7 +497,7 @@ class CeoToolReminderService:
             str(item or "").strip()
             for item in list(actual_request_record.get("model_refs") or []) 
             if str(item or "").strip()
-        ] or self._resolve_ceo_model_refs()
+        ] or self._resolve_ceo_model_refs_for_session(record.session_key)
         parallel_tool_calls = actual_request_record.get("parallel_tool_calls")
         normalized_parallel_tool_calls = (
             bool(parallel_tool_calls)

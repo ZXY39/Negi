@@ -214,7 +214,7 @@ Responses 协议的请求体只带各家 `/responses` 共同支持的字段：`t
 - `models.roles.*` 与所有「候选展开」出口（`get_role_model_keys`、`Config.get_scope_model_chain`、管理面 `roles` 字段、`facade.get_routes`）都是**候选视图**：组被摊成成员列表。任何把「候选数组第一项」当成实际执行模型的代码都只在 legacy 纯 direct 链上成立；含组时真正的成员由准入层的绑定决定（契约见 `runtime-overview.md`「节点模型路由与准入绑定」）。
 - `route_entries` 才是有序结构。管理面读写它，`roles` 保留旧形状给存量客户端。
 - 落盘形状：一条链全是 direct 时继续写字符串数组（存量 `config.json` 零 diff），一旦出现组 entry 才整条改写成对象数组。读侧两种形状都吃。
-- `ceo` / `memory` 出现 `load_balance` 会被直接拒绝（负载均衡组当前仅支持 execution/inspection）。记忆车道有固定单并发与 chat capability 契约，CEO 有会话固定模型与缓存键约束，都不能被组语义覆盖。
+- `ceo` / `memory` 出现 `load_balance` 会被直接拒绝（负载均衡组当前仅支持 execution/inspection）。记忆车道有固定单并发与 chat capability 契约，CEO 有会话固定模型与会话链约束，都不能被组语义覆盖；会话链（`model_selection.model_keys`）同样是扁平 key 列表。
 - `mainRuntime.modelRouteLoadBalanceEnabled = false` 是回滚闸门：含组的链按配置顺序摊平成 direct 候选，准入与发送侧一起回到有序链行为。
 - 组是**全局资源，不属于任何一条链**：`_prepare_scope_route_update` 在落链之前先落整份 `models.loadBalanceGroups`，所以一次 scope 保存可以只带 `model_keys` 加一份组集合（链里还没有组也行）——管理面的组配置列因此允许「先建组、之后再拖进链」。也正因每个 scope 的保存都整份替换该字典，客户端必须交**完整**组集合，交子集会把没在这条链上用到的组删掉。成员为空的组不落盘（`modelKeys` 必填），因此链指向一个空组时会得到可读的 `Unknown load balance group`，而不是静默少一跳。
 - 组名是引用位的一部分：改名要同时重写所有链上的 `group:<key>` 记号（管理面在前端一次改完），删除组要连带摘掉引用它的链位。组名撞模型 key 由 schema 直接拒。
@@ -227,14 +227,21 @@ Responses 协议的请求体只带各家 `/responses` 共同支持的字段：`t
 - provider 的 `supports_prompt_caching` 不参与模型选择。它描述的是这条车道转不转发 `prompt_cache_key` 这个请求字段，而不是这个模型吃不吃得到缓存——命中来自网关侧自动前缀缓存，两家车道都会回报 `cached_tokens`（取证口径见 `context-and-cache-troubleshooting.md`「Family 与 key 合同」）。把它当成路由门控会把不具备该字段的模型整段移出链，连带取消它们的容灾资格。
 - 「面板显示的模型不像链首」按两个字段判读：preflight diagnostics 的 `resolved_model_key` 是本轮生效的绑定 key，`provider_model` 是 provider 侧模型名。多条绑定可以共用同一个 `provider_model`，只有绑定 key 能区分它们。含组时 `resolved_model_key` 就是被选中的那个组成员。
 
-### 会话级固定模型优先于角色链
+### 会话级模型链与固定模型
 
-Leader（CEO/frontdoor）解析本轮模型引用时，先读会话元数据的 `model_selection`：`{"mode": "chain"}` 走 `models.roles.ceo`；`{"mode": "model", "model_key": "..."}` 时本轮 `model_refs` 是该固定模型（单元素），不再走模型链。
+Leader（CEO/frontdoor）解析本轮模型引用时按三档取值，顺序固定：会话固定模型 > 会话链 > `models.roles.ceo`。设置住在会话元数据的 `model_selection`：
 
-- 固定项被删除或禁用即视为失效：运行时回退模型链继续发请求，而不是带着不可用模型发请求；失效不静默改写存储，用户重新启用/重建同名 key 后固定关系恢复。
-- 本地与渠道会话（`ext:` / `china:`）都可固定：渠道会话键即规范会话键，设置接口按会话文件定位，只增删 `model_selection` 键，不动渠道侧自有元数据。
+- `{"mode": "model", "model_key": "..."}`：本轮 `model_refs` 是该固定模型（单元素），不再走任何链。
+- `{"mode": "chain", "model_keys": ["b", "a"]}`：本轮用这条**会话链**，顺序即 fallback 优先级，只作用于该会话。
+- `model_keys` 为空或整键缺席：走全局 `models.roles.ceo`。会话从没编辑过链时就是这个形态，所以默认态不落 metadata 键。
+
+- 会话链是扁平绑定 key 数组，不能引用负载均衡组。组的选择发生在 worker 进程的准入层（`main/service/runtime_service.py` 里 balancer 与并发控制器只在 `execution_mode == "worker"` 时构造），前门跑在没有它们的进程里，给它一个组只会退化成一个占位成员。
+- 链上成员被删除或禁用时逐个摘掉、用剩余成员继续；剩余为空才回退全局链。这与固定项失效是同一条判据，两者都不静默改写存储：用户重新启用/重建同名 key 后设置自动恢复。
+- 保存会话链会取消该会话的固定模型，两态互斥由 `normalize_model_selection` 保证，不依赖调用方自觉。
+- 本地与渠道会话（`ext:` / `china:`）都可固定模型、也可设会话链：渠道会话键即规范会话键，设置接口按会话文件定位，只增删 `model_selection` 键，不动渠道侧自有元数据。
+- 只有带会话键的解析跟随会话链：前门回合、迭代/重试边界的链轮换、composer 用量预估、内联工具提醒。`build_chat_model(config, role="ceo")` 那两条进程级车道（`g3ku/runtime/config_refresh.py` 的 provider 重建、`g3ku/runtime/context/summarizer.py` 的资源目录 L0/L1 摘要）没有会话上下文，恒按全局链。
 - 解析入口是 `CeoFrontDoorSupport._resolve_ceo_model_refs_for_session`（`g3ku/runtime/frontdoor/_ceo_support.py`），`prepare_turn`、迭代/重试边界的链轮换、composer 用量预估与内联工具提醒都走它，因此上下文窗口判定、多模态闸门与实际 provider 请求始终按同一组 refs 计算。
-- 与链变更同一口径：固定/取消固定只作用于边界处重建的下一个请求，不中途热切已在飞的 provider 请求。会话模型的读写接口与前端控件详见 `web-and-admin.md`「Composer Model Mode Panel」。
+- 与链变更同一口径：固定/取消固定、会话链增删只作用于边界处重建的下一个请求，不中途热切已在飞的 provider 请求。会话模型的读写接口与前端控件详见 `web-and-admin.md`「Composer Model Mode Panel」。
 - 固定的是 `models.catalog[]` 绑定 key，不是 provider/model 字符串：链路仍是 `key -> binding -> provider target`，删除或重建 binding 等价于删除该 key。
 
 ## 8. secret 的真实去向

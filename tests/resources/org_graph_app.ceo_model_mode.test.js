@@ -101,23 +101,20 @@ function loadApp(apiClientOverrides = {}) {
         },
         updateCeoSessionModelSelection: async (sessionId, payload) => {
             calls.push(["patch", sessionId, payload]);
+            const modelKeys = Array.isArray(payload.model_keys) ? [...payload.model_keys] : [];
             return {
                 ok: true,
                 session_id: sessionId,
                 mode: payload.mode,
                 model_key: payload.model_key || "",
+                model_keys: modelKeys,
+                is_session_chain: modelKeys.length > 0,
+                chain_unavailable_keys: [],
                 pinned_available: true,
             };
         },
-        updateModelRoleChain: async (scope, payload) => {
-            calls.push(["chain", scope, payload]);
-            return {
-                catalog: CATALOG.map((item) => ({ ...item })),
-                roles: { ceo: [...payload.modelKeys] },
-                roleIterations: {},
-                roleConcurrency: {},
-            };
-        },
+        // 故意不提供 updateModelRoleChain：脑图标面板的链保存只准打会话端点，
+        // 谁写回全局角色链就会在这里直接炸掉。
         estimateCeoComposerPreflight: async () => null,
         ...apiClientOverrides,
     };
@@ -183,6 +180,9 @@ function loadApp(apiClientOverrides = {}) {
             ceoModelDisplayTitle,
             ceoModelBadgeTitle,
             ceoModelChainKeys,
+            ceoModelChainBaseline,
+            ceoModelChainDraft,
+            ceoModelChainMixedMultimodal,
             finishCeoModelChainDrag,
             bindCeoModelModeControls,
             ceoModelChainDirty,
@@ -592,7 +592,7 @@ test("拖到原位置不产生草稿差异", () => {
     assert.deepEqual(writesOf(app), []);
 });
 
-test("点击应用按草稿顺序提交模型链并回到干净状态", async () => {
+test("点击应用把会话链提交到本会话，不写全局角色链", async () => {
     const app = loadApp();
     mountControl(app);
     app.bindCeoModelModeControls();
@@ -603,20 +603,22 @@ test("点击应用按草稿顺序提交模型链并回到干净状态", async ()
     const handlers = app.U.ceoModelChainApply.listeners.click || [];
     assert.equal(handlers.length, 1);
     handlers[0]();
-    await new Promise((resolve) => setTimeout(resolve, 0));
+    for (let i = 0; i < 6; i += 1) await new Promise((resolve) => setTimeout(resolve, 0));
 
-    assert.deepEqual(writesOf(app).map((call) => [call[0], call[1], call[2].modelKeys]), [
-        ["chain", "ceo", ["beta", "alpha", "gamma"]],
+    // 只打会话端点：全局角色链接口一次都没被调用，writesOf 里不该出现 "chain"。
+    assert.deepEqual(writesOf(app).map((call) => [call[0], call[1], call[2].mode, call[2].model_keys]), [
+        ["patch", "web:test", "chain", ["beta", "alpha", "gamma"]],
     ]);
-    assert.deepEqual(Array.from(app.ceoModelChainKeys()), ["beta", "alpha", "gamma"]);
+    assert.deepEqual(Array.from(app.ceoModelChainBaseline()), ["beta", "alpha", "gamma"]);
+    assert.deepEqual(Array.from(app.ceoModelChainKeys()), ["alpha", "beta", "gamma"]);
     assert.equal(app.ceoModelChainDirty(), false);
     assert.equal(app.U.ceoModelChainActions.hidden, true);
 });
 
-test("模型链保存失败回到服务端顺序", async () => {
+test("会话链保存失败回到生效中的那条链", async () => {
     const app = loadApp({
-        updateModelRoleChain: async (scope, payload) => {
-            app.calls.push(["chain", scope, payload]);
+        updateCeoSessionModelSelection: async (sessionId, payload) => {
+            app.calls.push(["patch", sessionId, payload]);
             throw new Error("chain_save_failed");
         },
     });
@@ -630,6 +632,40 @@ test("模型链保存失败回到服务端顺序", async () => {
     assert.deepEqual(Array.from(app.S.ceoModelSelection.chainKeys), ["alpha", "beta", "gamma"]);
     assert.equal(app.S.ceoModelSelection.error, "chain_save_failed");
     assert.equal(app.ceoModelChainDirty(), false);
+});
+
+test("会话链非空时基线用会话链，全局链只当种子", () => {
+    const app = loadApp();
+    mountControl(app, { chain: ["alpha", "beta"] });
+
+    app.applyCeoModelSelectionPayload("web:test", { mode: "chain", model_keys: ["beta", "alpha"] });
+    assert.equal(app.S.ceoModelSelection.isSessionChain, true);
+    assert.deepEqual(Array.from(app.ceoModelChainBaseline()), ["beta", "alpha"]);
+    assert.deepEqual(Array.from(app.S.ceoModelSelection.chainKeys), ["beta", "alpha"]);
+    assert.equal(app.ceoModelChainDirty(), false);
+
+    // 恢复全局链：会话链清空后基线回到 roles.ceo。
+    app.applyCeoModelSelectionPayload("web:test", { mode: "chain", model_keys: [] });
+    assert.equal(app.S.ceoModelSelection.isSessionChain, false);
+    assert.deepEqual(Array.from(app.ceoModelChainBaseline()), ["alpha", "beta"]);
+});
+
+test("混链判据只在同时存在收图与不收图成员时成立", () => {
+    const app = loadApp();
+    app.S.modelCatalog.catalog = [
+        { key: "mm1", name: "", provider_model: "openai:m1", enabled: true, image_multimodal_enabled: true },
+        { key: "mm2", name: "", provider_model: "openai:m2", enabled: true, imageMultimodalEnabled: true },
+        { key: "plain", name: "", provider_model: "openai:p", enabled: true, image_multimodal_enabled: false },
+    ];
+
+    assert.equal(app.ceoModelChainMixedMultimodal(["mm1", "plain"]), true);
+    assert.equal(app.ceoModelChainMixedMultimodal(["plain", "mm1"]), true);
+    assert.equal(app.ceoModelChainMixedMultimodal(["mm1", "mm2"]), false);
+    assert.equal(app.ceoModelChainMixedMultimodal(["plain"]), false);
+    assert.equal(app.ceoModelChainMixedMultimodal(["mm1"]), false);
+    // 目录里查不到的成员不参与判定：运行时不会把它发出去。
+    assert.equal(app.ceoModelChainMixedMultimodal(["mm1", "gone"]), false);
+    assert.equal(app.ceoModelChainMixedMultimodal(["plain", "gone"]), false);
 });
 
 test("模型链草稿来自目录 roles.ceo", () => {

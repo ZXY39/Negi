@@ -805,17 +805,37 @@ def ceo_session_task_defaults_scope(metadata: Any) -> str:
     return ""
 
 
-def normalize_model_selection(payload: Any) -> dict[str, str]:
-    """会话模型模式：默认模型链；指定模式下必须带非空模型 key。"""
+def _normalize_model_chain_keys(raw: Any) -> list[str]:
+    """会话链只做去重保序，不校验 key 是否存在：校验发生在写入口，读侧必须容忍失效项。"""
+    if not isinstance(raw, (list, tuple)):
+        return []
+    keys: list[str] = []
+    seen: set[str] = set()
+    for item in raw:
+        key = str(item or "").strip()
+        if not key or key in seen:
+            continue
+        seen.add(key)
+        keys.append(key)
+    return keys
+
+
+def normalize_model_selection(payload: Any) -> dict[str, Any]:
+    """会话模型模式：默认模型链；指定模式下必须带非空模型 key。
+
+    `model_keys` 是会话链：非空时本会话按它走，空时跟随 `models.roles.ceo`。固定模型与
+    会话链互斥，由这里保证，不依赖调用方自觉。
+    """
     source = payload if isinstance(payload, dict) else {}
     mode = str(source.get("mode", source.get("modelSelectionMode", "")) or "").strip().lower()
     model_key = str(source.get("model_key", source.get("modelKey", "")) or "").strip()
-    if mode != SESSION_MODEL_SELECTION_MODE_MODEL or not model_key:
-        return {"mode": SESSION_MODEL_SELECTION_MODE_CHAIN, "model_key": ""}
-    return {"mode": SESSION_MODEL_SELECTION_MODE_MODEL, "model_key": model_key}
+    if mode == SESSION_MODEL_SELECTION_MODE_MODEL and model_key:
+        return {"mode": SESSION_MODEL_SELECTION_MODE_MODEL, "model_key": model_key, "model_keys": []}
+    chain_keys = _normalize_model_chain_keys(source.get("model_keys", source.get("modelKeys")))
+    return {"mode": SESSION_MODEL_SELECTION_MODE_CHAIN, "model_key": "", "model_keys": chain_keys}
 
 
-def ceo_session_model_selection(metadata: Any) -> dict[str, str]:
+def ceo_session_model_selection(metadata: Any) -> dict[str, Any]:
     source = metadata if isinstance(metadata, dict) else {}
     return normalize_model_selection(source.get(SESSION_MODEL_SELECTION_KEY))
 
@@ -825,6 +845,14 @@ def ceo_session_pinned_model_key(metadata: Any) -> str:
     if selection["mode"] != SESSION_MODEL_SELECTION_MODE_MODEL:
         return ""
     return selection["model_key"]
+
+
+def ceo_session_model_chain_keys(metadata: Any) -> list[str]:
+    """会话链的原始 key 列表；空列表表示该会话跟随全局角色链。"""
+    selection = ceo_session_model_selection(metadata)
+    if selection["mode"] != SESSION_MODEL_SELECTION_MODE_CHAIN:
+        return []
+    return list(selection.get("model_keys") or [])
 
 
 def normalize_ceo_metadata(
@@ -866,8 +894,8 @@ def normalize_ceo_metadata(
         )
         normalized[SESSION_TASK_DEFAULTS_SCOPE_KEY] = SESSION_TASK_DEFAULTS_SCOPE_SESSION
     model_selection = normalize_model_selection(payload.get(SESSION_MODEL_SELECTION_KEY))
-    # 只在确有指定模型时落键，避免给每个会话写入恒等的 chain 记录。
-    if model_selection["mode"] == SESSION_MODEL_SELECTION_MODE_MODEL:
+    # 只在确有指定模型或确有会话链时落键，避免给每个会话写入恒等的 chain 记录。
+    if model_selection["mode"] == SESSION_MODEL_SELECTION_MODE_MODEL or model_selection["model_keys"]:
         normalized[SESSION_MODEL_SELECTION_KEY] = model_selection
     else:
         normalized.pop(SESSION_MODEL_SELECTION_KEY, None)

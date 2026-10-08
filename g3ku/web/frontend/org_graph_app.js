@@ -187,6 +187,9 @@ const S = {
         pendingChainSwitch: false,
         search: "",
         chainKeys: [],
+        // 会话链原文（空数组=跟随全局角色链）；chainKeys 是面板草稿，基线由两者共同决定。
+        sessionChainKeys: [],
+        isSessionChain: false,
         dragFrom: -1,
         dropIndex: null,
         error: "",
@@ -1938,6 +1941,8 @@ function resetCeoModelSelection(sessionId) {
         pendingChainSwitch: false,
         search: "",
         chainKeys: ceoModelChainKeys(),
+        sessionChainKeys: [],
+        isSessionChain: false,
         dragFrom: -1,
         dropIndex: null,
     };
@@ -1949,6 +1954,7 @@ function applyCeoModelSelectionPayload(sessionId, payload) {
     const data = payload && typeof payload === "object" ? payload : {};
     const modelKey = String(data.model_key || data.modelKey || "").trim();
     const mode = String(data.mode || "").trim() === "model" && modelKey ? "model" : "chain";
+    const sessionChainKeys = normalizeModelRoleChain(Array.isArray(data.model_keys) ? data.model_keys : []);
     S.ceoModelSelection = {
         ...S.ceoModelSelection,
         sessionId: String(data.session_id || key).trim() || key,
@@ -1959,7 +1965,9 @@ function applyCeoModelSelectionPayload(sessionId, payload) {
         loading: false,
         saving: false,
         error: "",
-        chainKeys: ceoModelChainKeys(),
+        sessionChainKeys,
+        isSessionChain: sessionChainKeys.length > 0,
+        chainKeys: sessionChainKeys.length ? [...sessionChainKeys] : ceoModelChainKeys(),
     };
     syncCeoModelModeControl();
     return S.ceoModelSelection;
@@ -2028,7 +2036,7 @@ async function saveCeoModelSelection(mode, modelKey = "") {
         scheduleCeoComposerUsageRefresh({ immediate: true });
         showToast({
             title: "模型模式已更新",
-            text: nextMode === "model" ? "本会话已固定使用所选模型" : "本会话已恢复模型链",
+            text: nextMode === "model" ? "本会话已固定使用所选模型" : "本会话已恢复全局模型链",
             kind: "success",
         });
         return applied;
@@ -2050,6 +2058,38 @@ async function saveCeoModelSelection(mode, modelKey = "") {
     }
 }
 
+function ceoModelItemSupportsImage(item) {
+    if (!item) return null;
+    const raw = item.image_multimodal_enabled ?? item.imageMultimodalEnabled;
+    if (raw === undefined || raw === null) return null;
+    return raw === true || String(raw) === "true";
+}
+
+// 链里同时存在收图与不收图的成员：运行时按「整条链不支持多模态」处理，保存前要让人确认。
+function ceoModelChainMixedMultimodal(keys) {
+    const flags = normalizeModelRoleChain(keys)
+        .map((key) => ceoModelItemSupportsImage(ceoModelCatalogItem(key)))
+        .filter((flag) => flag !== null);
+    if (flags.length < 2) return false;
+    return new Set(flags).size > 1;
+}
+
+async function confirmChainMultimodalMix(keys, labels) {
+    if (!ceoModelChainMixedMultimodal(keys)) return true;
+    const scopeText = (labels || []).filter(Boolean).join("、");
+    return await new Promise((resolve) => {
+        openConfirm({
+            title: "模型链混入不支持图片的模型",
+            text: `以下角色链同时包含多模态和非多模态：${scopeText}。将统一按照非多模态处理，是否确定？`
+                + "要带图请把不支持图片的模型移出这条链。",
+            confirmLabel: "保存",
+            confirmKind: "danger",
+            onConfirm: () => resolve(true),
+            onClose: () => resolve(false),
+        });
+    });
+}
+
 async function saveCeoModelChain(keys) {
     const sessionId = String(activeSessionId() || "").trim();
     const modelKeys = normalizeModelRoleChain(keys);
@@ -2058,35 +2098,29 @@ async function saveCeoModelChain(keys) {
     S.ceoModelSelection = { ...S.ceoModelSelection, saving: true, error: "" };
     syncCeoModelModeControl();
     try {
-        const payload = await ApiClient.updateModelRoleChain("ceo", {
-            modelKeys,
-            maxIterations: S.modelCatalog.roleIterations?.ceo ?? null,
-            maxConcurrency: S.modelCatalog.roleConcurrency?.ceo ?? null,
+        const payload = await ApiClient.updateCeoSessionModelSelection(sessionId, {
+            mode: "chain",
+            model_keys: modelKeys,
         });
-        if (payload) applyModelCatalog(payload, { preserveRoleDrafts: true });
-        S.ceoModelSelection = {
-            ...S.ceoModelSelection,
-            saving: false,
-            error: "",
-            chainKeys: ceoModelChainKeys(),
-            dragFrom: -1,
-            dropIndex: null,
-        };
-        syncCeoModelModeControl();
+        if (sessionId !== String(activeSessionId() || "").trim()) return null;
+        const applied = applyCeoModelSelectionPayload(sessionId, payload);
+        S.ceoModelSelection = { ...S.ceoModelSelection, pendingChainSwitch: false, dragFrom: -1, dropIndex: null };
+        showToast({ title: "本会话模型链已保存", text: "这条链只作用于当前会话。", kind: "success" });
+        // 链首会改变上下文窗口与图片能力判定，用量表必须跟着重算。
         scheduleCeoComposerUsageRefresh({ immediate: true });
-        return payload;
+        return applied;
     } catch (error) {
-        // 保存失败回到服务端顺序，避免面板显示一份没生效的链。
+        // 保存失败回到生效中的那条链，避免面板显示一份没落盘的链。
         S.ceoModelSelection = {
             ...S.ceoModelSelection,
             saving: false,
             error: String(error?.message || "save_failed"),
-            chainKeys: ceoModelChainKeys(),
+            chainKeys: ceoModelChainBaseline(),
             dragFrom: -1,
             dropIndex: null,
         };
         syncCeoModelModeControl();
-        showToast({ title: "模型链保存失败", text: String(error?.message || "请稍后重试"), kind: "error" });
+        showToast({ title: "本会话模型链保存失败", text: String(error?.message || "请稍后重试"), kind: "error" });
         return null;
     }
 }
@@ -2150,9 +2184,15 @@ function ceoModelChainDraft() {
     return Array.isArray(keys) ? keys : [];
 }
 
+function ceoModelChainBaseline() {
+    // 会话链为空即跟随全局角色链，所以草稿的基线是「当前生效的那条」而不是「全局那条」。
+    const sessionKeys = Array.isArray(S.ceoModelSelection.sessionChainKeys) ? S.ceoModelSelection.sessionChainKeys : [];
+    return sessionKeys.length ? [...sessionKeys] : ceoModelChainKeys();
+}
+
 function ceoModelChainDirty() {
     const draft = ceoModelChainDraft();
-    const serverKeys = ceoModelChainKeys();
+    const serverKeys = ceoModelChainBaseline();
     return draft.length !== serverKeys.length || draft.some((key, index) => key !== serverKeys[index]);
 }
 
@@ -2381,7 +2421,7 @@ function openCeoModelModePanel() {
         paneTouched: false,
         pendingChainSwitch: false,
         search: "",
-        chainKeys: ceoModelChainKeys(),
+        chainKeys: ceoModelChainBaseline(),
         dragFrom: -1,
         dropIndex: null,
     };
@@ -2440,7 +2480,7 @@ function showCeoModelChainPane() {
         // 固定生效时先确认再切回模型链；本来就是模型链则无需确认。
         pendingChainSwitch: !!effectiveKey,
         search: "",
-        chainKeys: ceoModelChainKeys(),
+        chainKeys: ceoModelChainBaseline(),
         dragFrom: -1,
         dropIndex: null,
     };
@@ -2584,7 +2624,10 @@ function bindCeoModelModeControls() {
     });
     U.ceoModelChainApply?.addEventListener("click", () => {
         if (S.ceoModelSelection.saving || !ceoModelChainDirty()) return;
-        void saveCeoModelChain(ceoModelChainDraft());
+        const draft = ceoModelChainDraft();
+        void confirmChainMultimodalMix(draft, ["本会话"]).then((confirmed) => {
+            if (confirmed) void saveCeoModelChain(draft);
+        });
     });
 }
 
@@ -12400,6 +12443,8 @@ function cancelModelRoleEditing() {
 async function persistModelRoleChains(scopes = MODEL_SCOPES.map((item) => item.key), successText = "模型链已保存。", { useDrafts = false } = {}) {
     const updates = buildModelRoleChainUpdates(scopes, { useDrafts });
     if (!Object.keys(updates).length) return;
+    // 只有主Agent 链进前门的图片能力声明：混链整条按不支持处理，提交前确认一次。
+    if (updates.ceo && !(await confirmChainMultimodalMix(updates.ceo.modelKeys || [], ["主Agent"]))) return;
     S.modelCatalog.saving = true;
     renderModelCatalog();
     try {

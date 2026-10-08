@@ -982,13 +982,6 @@ class ApiClient {
         };
     }
 
-    static async updateModelRoleChain(scope, payload) {
-        return this._refreshModelsAfter(this._request("PUT", `/api/models/roles/${scope}`, {
-            body: this._toRoleRouteBody(payload),
-            timeoutMs: 20000,
-        }));
-    }
-
     static async updateModelRoleChains(updates) {
         return this._refreshModelsAfter(this._request("PUT", "/api/models/routes/batch", {
             body: this._toRoleRouteUpdatesBody(updates),
