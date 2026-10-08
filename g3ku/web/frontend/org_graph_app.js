@@ -7723,6 +7723,7 @@ function patchCeoInflightTurn(snapshot = null, { sessionId = "", cacheField = "i
     }, { scrollMode: "preserve" });
     // 阶段收尾先到 live 回合，不重建整帧；不在这里对账的话，旧行要等一次刷新才改口。
     reconcileCeoFeedStageStatuses();
+    reconcileCeoFeedStageCards();
     if (targetSessionId) {
         const inflightTurn = dedupeInflightUserMessageAgainstMessages(
             getCeoSessionSnapshotCache(targetSessionId)?.messages || [],
@@ -8355,6 +8356,67 @@ function reconcileCeoFeedStageStatuses(feedEl = null) {
     return applied;
 }
 
+// 收尾判据：写了阶段总结，或状态已是终态（含被点名移出上下文——那只发生在收口那一刻）。
+function ceoFeedStageCardIsClosed(step) {
+    if (step.classList?.contains("stage-evicted")) return true;
+    if (String(step.querySelector?.(".task-trace-stage-summary")?.textContent || "").trim()) return true;
+    return CEO_STAGE_TERMINAL_TOKENS.includes(ceoFeedStageStepStatus(step));
+}
+
+function mergeCeoStageCardBody(host, donor) {
+    const hostBody = host.querySelector?.(".task-trace-body");
+    const donorBody = donor.querySelector?.(".task-trace-body");
+    if (!hostBody || !donorBody) return;
+    const seen = new Set(Array.from(hostBody.querySelectorAll(".task-trace-round-group"))
+        .map((item) => String(item.dataset?.roundKey || "")).filter(Boolean));
+    const hostSummary = hostBody.querySelector(".task-trace-stage-summary");
+    const donorSummary = donorBody.querySelector(".task-trace-stage-summary");
+    const donorSummaryText = String(donorSummary?.textContent || "").trim();
+    // 总结取最新的非空一份：副本是后写的，收尾那一刻的正文在它身上。
+    if (donorSummaryText && hostSummary) hostSummary.remove();
+    Array.from(donorBody.children).forEach((node) => {
+        if (node === donorSummary || !node.classList) return;
+        // 实时行与空态占位属宿主自己那一帧，不从副本搬。
+        if (node.classList.contains("task-trace-live-steps") || node.classList.contains("task-trace-stage-empty")) return;
+        const roundKey = String(node.dataset?.roundKey || "");
+        if (roundKey && seen.has(roundKey)) return;
+        hostBody.appendChild(node);
+        if (roundKey) seen.add(roundKey);
+    });
+    if (donorSummaryText) hostBody.appendChild(donorSummary);
+}
+
+function reconcileCeoFeedStageCards(feedEl = null) {
+    const feed = feedEl || U.ceoFeed;
+    if (!feed?.querySelectorAll) return 0;
+    const hosts = new Map();
+    let merged = 0;
+    Array.from(feed.querySelectorAll(".task-trace-step[data-stage-id]")).forEach((step) => {
+        const stageId = String(step.dataset?.stageId || "").trim();
+        if (!stageId) return;
+        const host = hosts.get(stageId);
+        if (!host) {
+            hosts.set(stageId, step);
+            return;
+        }
+        // 只有收尾的阶段才归并。未收尾的副本各画一张是设计：`follow_up_archive` 那半截
+        // 与续跑那半截说的是同一阶段的不同时刻，合成一张就把"在哪被劈开"抹掉了。
+        if (!ceoFeedStageCardIsClosed(step)) return;
+        mergeCeoStageCardBody(host, step);
+        if (step.classList?.contains("stage-evicted") && !host.classList.contains("stage-evicted")) {
+            // 「已移出上下文」不是生命周期 token，终态对账不搬它，而它是这张卡现在唯一
+            // 说得出"肉身不再进模型上下文"的标记。
+            host.classList.add("stage-evicted");
+            const hostLabel = host.querySelector?.(".interaction-step-status");
+            const donorLabel = step.querySelector?.(".interaction-step-status");
+            if (hostLabel && donorLabel) hostLabel.innerHTML = donorLabel.innerHTML;
+        }
+        step.remove();
+        merged += 1;
+    });
+    return merged;
+}
+
 function renderCeoSnapshot(messages = [], inflightTurn = null, { sessionId = "", preservedTurn = null } = {}) {
     const shouldScrollToLatest = !!S.ceoScrollToLatestOnSnapshot;
     S.ceoScrollToLatestOnSnapshot = false;
@@ -8439,6 +8501,7 @@ function renderCeoSnapshot(messages = [], inflightTurn = null, { sessionId = "",
     applyCeoFeedViewState(viewState);
     // 放在还原之后：这里只换 class 与标签文字，不改卡片数量与高度，不会动到刚算好的锚点。
     reconcileCeoFeedStageStatuses();
+    reconcileCeoFeedStageCards();
 }
 
 function createPendingCeoTurn(source = "user", { scrollMode = "preserve" } = {}) {
@@ -9994,6 +10057,7 @@ function finalizeCeoTurn(text, meta = {}) {
         // 收尾后才对账：discardPendingCeoTurns / hasRunningCeoToolStep 都按 .running 判活，
         // 抢在它们前面改 class 会让一个还没收尾的回合被当成可丢弃。
         reconcileCeoFeedStageStatuses();
+        reconcileCeoFeedStageCards();
         maybeDispatchQueuedCeoFollowUps();
         return;
     }
@@ -10075,6 +10139,7 @@ function finalizeCeoTurn(text, meta = {}) {
         });
         // 增量分支同样要排在 discardPendingCeoTurns 之后，理由见上面的对账点。
         reconcileCeoFeedStageStatuses();
+        reconcileCeoFeedStageCards();
         S.ceoFeedRenderedMessageKeys = nextKeys;
         S.ceoFeedRenderSignature = buildCeoRenderSignature(
             finalPayload.messages || [],
