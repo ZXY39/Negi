@@ -734,6 +734,57 @@ async def test_filesystem_write_keeps_rejected_body_in_landing_park(tmp_path: Pa
         manager.close()
 
 
+@pytest.mark.asyncio
+async def test_filesystem_write_blocks_mistyped_project_prefix(tmp_path: Path):
+    """抄错绝对前缀不再静默成功：拦住、给出正确路径、正文保住、不长出镜像树。"""
+    workspace = tmp_path / 'Users' / 'Administrator' / 'Documents' / 'Codex' / 'repo'
+    workspace.mkdir(parents=True)
+    (workspace / 'skills').mkdir(parents=True, exist_ok=True)
+    (workspace / 'tools').mkdir(parents=True, exist_ok=True)
+    _copy_filesystem_split_tools(workspace, 'filesystem_write')
+
+    typo_root = tmp_path / 'Users' / 'Adminiistrator' / 'Documents' / 'Codex' / 'repo'
+    bad_target = typo_root / 'temp' / 'tasks' / 'task_x' / 'a.py'
+    body = 'print("x")\n'
+
+    manager = ResourceManager(workspace, app_config=_resource_app_config())
+    manager.reload_now(trigger='test-bind')
+    try:
+        tool = manager.get_tool('filesystem_write')
+        assert tool is not None
+
+        blocked = await tool.execute(path=str(bad_target), content=body)
+        assert 'mistyped' in blocked
+        assert str(workspace / 'temp' / 'tasks' / 'task_x' / 'a.py') in blocked
+        assert 'Body preserved at' in blocked
+        assert not bad_target.exists()
+        assert not typo_root.exists()
+        parked = list((workspace / 'temp' / 'landing-park').glob('*/a.py'))
+        assert len(parked) == 1
+        assert parked[0].read_text(encoding='utf-8') == body
+    finally:
+        manager.close()
+
+
+def test_anchor_typo_correction_flags_only_mistyped_prefix(tmp_path: Path):
+    """判据只认"前缀错一段 + 之后逐段复刻项目尾"，合法出项目根的写入不受影响。"""
+    from g3ku.agent.tools.filesystem_mutation import FilesystemTool
+
+    workspace = tmp_path / 'Users' / 'Administrator' / 'Documents' / 'Codex' / 'repo'
+    tool = FilesystemTool(workspace=workspace)
+    typo = (
+        tmp_path / 'Users' / 'Adminiistrator' / 'Documents' / 'Codex' / 'repo' / 'temp' / 'tasks' / 't1' / 'a.py'
+    )
+    assert tool._anchor_typo_correction(typo) == workspace / 'temp' / 'tasks' / 't1' / 'a.py'
+
+    # 桌面交付不复刻项目尾
+    assert tool._anchor_typo_correction(tmp_path / 'Users' / 'Administrator' / 'Desktop' / 'report.md') is None
+    # 项目内新建目录（未分叉）
+    assert tool._anchor_typo_correction(workspace / 'notes' / 'new' / 'deep' / 'x.md') is None
+    # 分叉之后复刻不足 3 段
+    assert tool._anchor_typo_correction(tmp_path / 'Users' / 'Adminiistrator' / 'notes' / 'n.md') is None
+
+
 def test_model_data_root_hides_the_redundant_token(tmp_path: Path):
     from g3ku.deployment.data_root import data_root
     from g3ku.utils.helpers import model_data_root

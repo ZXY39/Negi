@@ -21,6 +21,14 @@ _DIFF_START = '### G3KU_PATCH_DIFF ###'
 _EDIT_MODE_TEXT = 'text_replace'
 _EDIT_MODE_RANGE = 'line_range'
 _EDIT_MODE_ERROR = 'Error: edit requires exactly one mode: text-replace or line-range'
+
+
+class _AnchorTypoError(PermissionError):
+    """A path that only mistypes the project prefix, carrying the intended target."""
+
+    def __init__(self, message: str, corrected: Path) -> None:
+        super().__init__(message)
+        self.corrected = corrected
 _EDIT_TARGET_EXACT_TEXT = 'exact_text'
 _EDIT_TARGET_ANCHOR_PAIR = 'anchor_pair'
 _ALREADY_APPLIED_PREFIX = 'Already applied:'
@@ -454,6 +462,17 @@ class FilesystemTool:
         externaltools_root = self._externaltools_root()
         tools_root = self._tools_root()
 
+        # 抄错前缀的判据排在最前：它比"别往系统 temp 写"更具体也更有用，一条 mistyped 提示
+        # 直接给出该写哪儿，而系统 temp 那道只会把模型推向再一次全文重写。
+        corrected = self._anchor_typo_correction(resolved)
+        if corrected is not None:
+            raise _AnchorTypoError(
+                f'Path {resolved} is blocked for filesystem.{action}: it differs from the project root '
+                f'{workspace_root} in one prefix segment and then repeats the rest, which is how a mistyped '
+                f'absolute path looks. Did you mean {corrected}? Nothing was written.',
+                corrected,
+            )
+
         for legacy_root in self._legacy_temp_roots():
             if _is_relative_to(resolved, legacy_root):
                 raise PermissionError(
@@ -519,6 +538,19 @@ class FilesystemTool:
             if validated_count > 0:
                 return f'Successfully wrote {len(content)} bytes to {file_path} (validated by {validated_count} command(s))'
             return f'Successfully wrote {len(content)} bytes to {file_path}'
+        except _AnchorTypoError as exc:
+            parked = None
+            if content is not None:
+                parked = self._park_into_temp(
+                    name=Path(exc.corrected).name,
+                    runtime=runtime,
+                    text=content,
+                )
+            note = f' Body preserved at {parked}.' if parked else ''
+            return (
+                f'Error: {exc}{note} Re-run filesystem.write with the corrected path, '
+                'or move the parked file into place instead of re-writing the body.'
+            )
         except PermissionError as exc:
             return f'Error: {exc}'
         except (FileNotFoundError, ValueError) as exc:
@@ -1230,6 +1262,27 @@ class FilesystemTool:
         }
         return json.dumps(payload, ensure_ascii=False)
 
+    def _park_into_temp(
+        self,
+        *,
+        name: str,
+        runtime: dict[str, Any] | None,
+        copy_from: Path | None = None,
+        text: str | None = None,
+    ) -> Path | None:
+        try:
+            park_root = self._canonical_temp_root(runtime) / 'landing-park'
+            park_root.mkdir(parents=True, exist_ok=True)
+            parked = Path(tempfile.mkdtemp(prefix='park-', dir=str(park_root))) / (name or 'payload')
+            if copy_from is not None:
+                shutil.copy2(copy_from, parked)
+            else:
+                parked.write_text(text or '', encoding='utf-8')
+        except Exception:
+            return None
+        self._record_node_file_change(runtime=runtime or {}, path=parked, change_type='created')
+        return parked
+
     def _park_failed_content(self, *, file_path: Path, runtime: dict[str, Any] | None) -> Path | None:
         """Keep the rejected bytes so the model does not have to re-emit the whole body.
 
@@ -1238,15 +1291,34 @@ class FilesystemTool:
         """
         if not file_path.is_file():
             return None
-        try:
-            park_root = self._canonical_temp_root(runtime) / 'landing-park'
-            park_root.mkdir(parents=True, exist_ok=True)
-            parked = Path(tempfile.mkdtemp(prefix='park-', dir=str(park_root))) / file_path.name
-            shutil.copy2(file_path, parked)
-        except Exception:
+        return self._park_into_temp(name=file_path.name, runtime=runtime, copy_from=file_path)
+
+    def _anchor_typo_correction(self, file_path: Path) -> Path | None:
+        """Return the intended target when only the project prefix was mistyped.
+
+        The signature comes from the measured failure mode: the model copies the whole
+        project root, gets one early segment wrong, and reproduces the remaining tail
+        byte-for-byte. Legitimate out-of-project deliveries never carry that tail, so this
+        does not fire on them.
+        """
+        workspace_parts = [part.lower() for part in self._workspace_root().parts]
+        target_parts = [part.lower() for part in Path(file_path).parts]
+        divergent = None
+        for index in range(min(len(target_parts), len(workspace_parts))):
+            if target_parts[index] != workspace_parts[index]:
+                divergent = index
+                break
+        if divergent is None or divergent < 2 or divergent > len(workspace_parts) - 4:
             return None
-        self._record_node_file_change(runtime=runtime or {}, path=parked, change_type='created')
-        return parked
+        tail = 0
+        limit = min(len(target_parts), len(workspace_parts))
+        while divergent + 1 + tail < limit and target_parts[divergent + 1 + tail] == workspace_parts[divergent + 1 + tail]:
+            tail += 1
+        if tail < 3:
+            return None
+        remainder = Path(file_path).parts[len(workspace_parts):]
+        corrected = self._workspace_root().joinpath(*remainder) if remainder else self._workspace_root()
+        return corrected if corrected != file_path else None
 
     async def _validate_file(
         self,
