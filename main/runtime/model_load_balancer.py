@@ -314,8 +314,6 @@ class ModelLoadBalancer:
             return "plan_changed"
         if filters.required_context_window_tokens and member.context_window_tokens < filters.required_context_window_tokens:
             return "filter_changed"
-        if filters.requires_image_multimodal and not member.image_multimodal_enabled:
-            return "filter_changed"
         return "plan_changed"
 
     def _order_key(self, model_key: str) -> tuple[float, int, str]:

@@ -3942,6 +3942,28 @@ async def test_current_task_progress_after_spawn_fails_after_three_ignored_repai
         await service.close()
 
 
+def test_node_runtime_image_gate_takes_conservative_chain_intersection(monkeypatch: pytest.MonkeyPatch) -> None:
+    """节点道的图片闸门按整条链取保守交集，与 CEO 前门同一份判据。
+
+    曾有两处读数分叉：拼图那步取交集、工具运行时上下文看链首。混链时工具会答「可以开图」
+    而拼图那步判「不可以」，模型手里留下一条 ok:true 却等不到像素。
+    """
+    loop = _react_loop_for_content_open_image_overlay()
+    models = {
+        'mm': SimpleNamespace(image_multimodal_enabled=True),
+        'plain': SimpleNamespace(image_multimodal_enabled=False),
+    }
+    config = SimpleNamespace(get_managed_model=lambda key: models.get(str(key or '').strip()))
+    monkeypatch.setattr('main.runtime.react_loop.get_runtime_config', lambda force=False: (config, 1, False))
+
+    assert loop._image_multimodal_enabled_for_model_refs(['mm']) is True
+    assert loop._image_multimodal_enabled_for_model_refs(['mm', 'plain']) is False
+    assert loop._image_multimodal_enabled_for_model_refs(['plain', 'mm']) is False
+    # 解析不到的成员跳过：运行时不会把它发出去，不该替它否决整条链。
+    assert loop._image_multimodal_enabled_for_model_refs(['gone', 'mm']) is True
+    assert loop._image_multimodal_enabled_for_model_refs(['gone']) is False
+
+
 def test_node_runtime_builds_content_open_image_overlay_message_blocks(tmp_path: Path):
     loop = _react_loop_for_content_open_image_overlay()
     image_path = tmp_path / 'demo.png'

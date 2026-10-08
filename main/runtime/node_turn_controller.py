@@ -243,7 +243,6 @@ class NodeTurnController:
         base_filters = filters or lease.route_filters or RouteCandidateFilters()
         effective_filters = RouteCandidateFilters(
             required_context_window_tokens=base_filters.required_context_window_tokens,
-            requires_image_multimodal=base_filters.requires_image_multimodal,
             excluded_model_keys=frozenset(set(base_filters.excluded_model_keys) | set(excluded_model_keys)),
         )
         with self._lock:

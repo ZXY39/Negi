@@ -35,7 +35,7 @@
 - 排空兜底：prompt 返回后循环 `drain_queued_follow_up_messages` → `archive_follow_up_chain_transition` → `prompt_batch` 续跑，整条回合链对外只有一个终态。`prompt_batch` 只以批次最后一条输入驱动回合，较早输入的内容块在请求构建期并入（合同见 `runtime-overview.md`「prompt_batch 批次回合内容合并」）。
 - 回合任务以 `register_task(None, task)` 注册：以真实 session key 注册会在暂停时被 `cancel_session_tasks` 的 gather 自聚集死锁。
 - `Idempotency-Key` 头去重（进程内有界映射）：同会话同键重复提交返回 `status:"duplicate"` + `original_status`——原回合记录仍在则回报其状态与 `turn_id`；排队条目回报 `queued`（无 `turn_id`）；记录已被淘汰的带 id 条目回报 `completed`。排队提交同样占幂等位：否则同一条渠道消息在回合运行期间重试/重发会反复入队，用户收到多份重复回复。回合记录表有界，超限从最旧终态记录淘汰、运行中记录永不淘汰；幂等条目不随记录淘汰失效。
-- 附件：`data_base64` 落盘 `.g3ku/external-uploads/<session>/`，双上限——`kind:"image"` ≤5MiB（与 web 上传同一常量），其余文件类 ≤20MiB（`EXTERNAL_FILE_UPLOAD_MAX_BYTES`），超限一律 413 `attachment_too_large`；桥侧按同值预过滤。图片构造 `image_url` 块，能否进模型由模型绑定 `image_multimodal_enabled` 门控（与 web 上传同语义）；非图片附件只以「本地路径提示」文本块告知模型（落盘路径可直接用工具读盘），不构造多模态内容块。该目录按会话 slug 分片，随会话删除/清空一起被 rmtree（`clear_web_ceo_session_artifacts` 同时清 web 侧与渠道侧两个上传根），所以渠道附件的寿命等于会话寿命。
+- 附件：`data_base64` 落盘 `.g3ku/external-uploads/<session>/`，双上限——`kind:"image"` ≤5MiB（与 web 上传同一常量），其余文件类 ≤20MiB（`EXTERNAL_FILE_UPLOAD_MAX_BYTES`），超限一律 413 `attachment_too_large`；桥侧按同值预过滤。图片构造 `image_url` 块，能否进模型由该会话本轮模型链的 `image_multimodal_enabled` 保守交集门控（与 web 上传同语义）；非图片附件只以「本地路径提示」文本块告知模型（落盘路径可直接用工具读盘），不构造多模态内容块。该目录按会话 slug 分片，随会话删除/清空一起被 rmtree（`clear_web_ceo_session_artifacts` 同时清 web 侧与渠道侧两个上传根），所以渠道附件的寿命等于会话寿命。
 - 控制端点复用桥语义：`POST /turns/{turn_id}/pause`（running guard，空闲返回未暂停）、`POST /sessions/{id}/cancel`。
 - `DELETE /sessions/{id}` 是清除语义（对齐 web-and-admin.md「Channel Session Clear Contract」）：转录清空、内存失效、side artifacts 全清，注册表条目保留。
 

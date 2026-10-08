@@ -228,6 +228,39 @@ check("and.empty_chain", call([]), False)
 
 CeoFrontDoorSupport._resolve_ceo_model_refs = _original_global
 
+# ---------------------------------------------------------------- 5. 节点道与 CEO 同一份判据
+import main.runtime.react_loop as react_loop_module  # noqa: E402
+from main.runtime.model_route import RouteCandidateFilters, RouteMemberView  # noqa: E402
+
+mm_models2 = {
+    "mm": SimpleNamespace(key="mm", enabled=True, image_multimodal_enabled=True),
+    "plain": SimpleNamespace(key="plain", enabled=True, image_multimodal_enabled=False),
+}
+react_loop_module.get_runtime_config = lambda force=False: (_cfg(mm_models2), 1, False)
+node_gate = lambda refs: bool(react_loop_module.ReActToolLoop._image_multimodal_enabled_for_model_refs(refs))
+check("node.and_positive", node_gate(["mm"]), True)
+check("node.and_mixed_head_capable", node_gate(["mm", "plain"]), False)
+check("node.and_mixed_head_incapable", node_gate(["plain", "mm"]), False)
+check("node.and_unresolved_skipped", node_gate(["gone", "mm"]), True)
+check("node.and_nothing_resolved", node_gate(["gone"]), False)
+
+# 图片能力不再参与准入：不可达的那条过滤已经删掉。
+check("filter.image_field_removed", hasattr(RouteCandidateFilters(), "requires_image_multimodal"), False)
+check(
+    "filter.incapable_member_still_eligible",
+    RouteCandidateFilters(required_context_window_tokens=32000).allows(
+        RouteMemberView(model_key="m_small", context_window_tokens=32000, image_multimodal_enabled=False)
+    ),
+    True,
+)
+check(
+    "filter.window_still_excludes",
+    RouteCandidateFilters(required_context_window_tokens=64000).allows(
+        RouteMemberView(model_key="m_small", context_window_tokens=32000, image_multimodal_enabled=True)
+    ),
+    False,
+)
+
 # ---------------------------------------------------------------- 报告
 failed = [row for row in RESULTS if not row[1]]
 for name, ok, note in RESULTS:

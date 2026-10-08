@@ -548,13 +548,11 @@ class ReActToolLoop:
                     current_model_routes = None
                 if current_model_routes is not None and list(current_model_routes.load_balance_group_keys or []):
                     current_model_refs = list(current_model_routes.candidate_model_keys) or current_model_refs
+            # 多模态闸门按整条链取保守交集：这一发实际打到哪个成员要等准入与失败切换才定，
+            # 所以「图片进不进请求体」必须对链上每个可能被打到的成员都成立。判据只有
+            # `_image_multimodal_enabled_for_model_refs` 一份，工具道（_call_runtime_context
+            # 读同一函数）与拼图道因此不可能再分叉。
             image_multimodal_enabled = self._image_multimodal_enabled_for_model_refs(current_model_refs)
-            if current_model_routes is not None and list(current_model_routes.load_balance_group_keys or []):
-                # 组内成员谁被选中要到准入才定，因此多模态闸门取候选的保守交集：
-                # 只有每个候选都支持图像时才对外宣称支持图像。
-                image_multimodal_enabled = all(
-                    self._image_multimodal_enabled_for_model_refs([item]) for item in current_model_refs
-                )
             # prompt cache key 里的模型身份：含组时用稳定的 route signature，不再把候选
             # 数组当成模型身份（候选顺序不代表实际被选中的成员）。
             prompt_cache_model_refs = current_model_refs
@@ -809,14 +807,13 @@ class ReActToolLoop:
                 )
             node_turn_lease = None
             node_turn_controller = getattr(self, '_node_turn_controller', None)
-            request_has_image_parts = self._request_messages_include_image_parts(request_messages)
             primary_model_ref = str(current_model_refs[0] or '').strip()
             route_plan_for_turn = None
             if current_model_routes is not None and list(current_model_routes.load_balance_group_keys or []):
                 route_plan_for_turn = current_model_routes
             if node_turn_controller is not None and (route_plan_for_turn is not None or primary_model_ref):
                 # 绑定跨回合、跨阶段都保留：换 model_key 等于换前缀缓存命名空间，而
-                # "该换人了"的所有真实理由（无容量、限流惩罚、能力不再匹配、成员被移出组）
+                # "该换人了"的所有真实理由（无容量、限流惩罚、窗口不再匹配、成员被移出组）
                 # 都在下一次准入里现判，不需要按阶段节拍强制重选。
                 node_turn_lease = await self._await_with_model_marker(
                     task_id=task.task_id,
@@ -831,7 +828,6 @@ class ReActToolLoop:
                             required_context_window_tokens=int(
                                 (token_preflight_diagnostics or {}).get('estimated_total_tokens') or 0
                             ),
-                            requires_image_multimodal=bool(request_has_image_parts),
                         ),
                     ),
                 )
@@ -8079,6 +8075,12 @@ class ReActToolLoop:
 
     @staticmethod
     def _image_multimodal_enabled_for_model_refs(model_refs: list[str] | None) -> bool:
+        """整条链的保守交集：任一成员收不了图，这条链就判收不了图。
+
+        与 CEO 前门同一口径，理由也同一：图片是否进请求体要在这发实际打到谁之前决定，而失败
+        切换随时可能把这一发改给别的成员。解析不到的成员跳过而不是否决整条链——运行时不会把
+        它发出去。一个都解析不到时判 False。
+        """
         try:
             config, _revision, _changed = get_runtime_config(force=False)
         except Exception:
@@ -8086,6 +8088,7 @@ class ReActToolLoop:
         getter = getattr(config, 'get_managed_model', None)
         if not callable(getter):
             return False
+        resolved_any = False
         for ref in list(model_refs or []):
             key = str(ref or '').strip()
             if not key:
@@ -8096,19 +8099,10 @@ class ReActToolLoop:
                 model = None
             if model is None:
                 continue
-            return bool(getattr(model, 'image_multimodal_enabled', False))
-        return False
-
-    @staticmethod
-    def _request_messages_include_image_parts(messages: list[dict[str, Any]] | None) -> bool:
-        """请求里是否已经带上了图像块，用于组内候选的多模态过滤。"""
-        for message in list(messages or []):
-            content = (message or {}).get('content')
-            if isinstance(content, list):
-                for part in content:
-                    if isinstance(part, dict) and str(part.get('type') or '').strip() == 'image_url':
-                        return True
-        return False
+            resolved_any = True
+            if not bool(getattr(model, 'image_multimodal_enabled', False)):
+                return False
+        return resolved_any
 
     @staticmethod
     def _tool_result_content_open_image_payload(raw_result: Any) -> dict[str, Any] | None:

@@ -360,7 +360,7 @@ Routes live at `/api/bootstrap/config-bundle/{export,download,import}` in `main/
 
 ## Image Multimodal Binding Flag
 
-`models.catalog[]` carries a second binding-owned chat field: `image_multimodal_enabled` (`imageMultimodalEnabled` in saved JSON / admin payload aliases).
+`models.catalog[]` carries a second binding-owned chat field: `image_multimodal_enabled` (`imageMultimodalEnabled` in saved JSON / admin payload aliases). It is read as a **conservative chain intersection**: a model-reference chain counts as image-capable only when every resolvable member is image-capable, because whether pixels enter the request body must hold for whichever member this send may end up on. One function serves both lanes (`_image_multimodal_enabled_for_model_refs` in the node loop and `_ceo_image_multimodal_enabled_for_model_refs` in the frontdoor), so the tool-facing answer and the pixel-attaching step cannot diverge. Unresolvable (deleted/disabled) members are skipped rather than vetoing the chain, and admission never filters group members by image capability.
 
 - Default value is `false`.
 - Existing saved models that do not have the field must be treated as `false` at load time; there is no backfill migration that rewrites old configs just to add the default.

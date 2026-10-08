@@ -27,10 +27,12 @@ class RouteCandidateFilters:
 
     由 preflight 侧算好后传进选择器：模型选择发生在准入层，而这些条件在准入之前就已
     经确定，所以「先过滤再选」不需要重新估算请求体。
+
+    图像能力不在这里过滤：它按整条链取保守交集，在拼 overlay 之前就已决定图片进不进请求体
+    （`react_loop._image_multimodal_enabled_for_model_refs`），所以带图请求不会把成员换掉。
     """
 
     required_context_window_tokens: int = 0
-    requires_image_multimodal: bool = False
     # 本次请求已经试过的成员；组内不得重复选择。
     excluded_model_keys: frozenset[str] = frozenset()
 
@@ -40,8 +42,6 @@ class RouteCandidateFilters:
         if member.model_key in self.excluded_model_keys:
             return False
         if self.required_context_window_tokens and member.context_window_tokens < self.required_context_window_tokens:
-            return False
-        if self.requires_image_multimodal and not member.image_multimodal_enabled:
             return False
         return True
 

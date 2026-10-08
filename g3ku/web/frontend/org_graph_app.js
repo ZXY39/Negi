@@ -2065,23 +2065,73 @@ function ceoModelItemSupportsImage(item) {
     return raw === true || String(raw) === "true";
 }
 
-// 链里同时存在收图与不收图的成员：运行时按「整条链不支持多模态」处理，保存前要让人确认。
-function ceoModelChainMixedMultimodal(keys) {
-    const flags = normalizeModelRoleChain(keys)
+// 组槽位按它当前的成员展开：一个组里混进不收图的成员，和链上直接写一个不收图的模型，
+// 在运行时是同一个后果（整条链按不支持处理）。
+function modelChainMemberKeys(chain) {
+    const groups = activeLoadBalanceGroups() || {};
+    const keys = [];
+    normalizeModelRoleChain(chain).forEach((ref) => {
+        if (isGroupRef(ref)) {
+            const group = groups[groupKeyFromRef(ref)] || {};
+            (group.model_keys || []).forEach((key) => keys.push(String(key || "").trim()));
+            return;
+        }
+        keys.push(String(ref || "").trim());
+    });
+    return keys.filter(Boolean);
+}
+
+// 混链＝链上既有收图的也有不收图的：收图的那些会被整条判掉，这才是这次保存让人失去的东西。
+// 全链都不收图时不提示——那条链本来也看不了图，保存没有让它变得更差。
+function modelChainMixedImageCapability(chain) {
+    const flags = modelChainMemberKeys(chain)
         .map((key) => ceoModelItemSupportsImage(ceoModelCatalogItem(key)))
         .filter((flag) => flag !== null);
     if (flags.length < 2) return false;
     return new Set(flags).size > 1;
 }
 
-async function confirmChainMultimodalMix(keys, labels) {
-    if (!ceoModelChainMixedMultimodal(keys)) return true;
-    const scopeText = (labels || []).filter(Boolean).join("、");
+function modelChainImageIncapableNames(chain) {
+    const names = [];
+    const seen = new Set();
+    modelChainMemberKeys(chain).forEach((key) => {
+        if (!key || seen.has(key)) return;
+        seen.add(key);
+        const item = ceoModelCatalogItem(key);
+        if (ceoModelItemSupportsImage(item) === false) names.push(ceoModelDisplayTitle(item) || key);
+    });
+    return names;
+}
+
+// 只有这三条链的图片能力会被运行时读到：记忆车道没有任何图片面，提示它等于说谎。
+const IMAGE_JUDGED_MODEL_SCOPES = ["ceo", "execution", "inspection"];
+
+function roleChainUpdateToChain(payload = {}) {
+    if (Array.isArray(payload.modelKeys)) return payload.modelKeys;
+    return (payload.routeEntries || []).map((entry) => (
+        String(entry?.type || "") === "load_balance" ? groupRefToken(entry.group_key) : String(entry?.model_key || "")
+    ));
+}
+
+// 一次批量保存可能改到多条链：把混链的成员名并成一个列表，只弹一次。
+function chainsWithImageMix(chains) {
+    const names = [];
+    (chains || []).forEach((chain) => {
+        if (!modelChainMixedImageCapability(chain)) return;
+        modelChainImageIncapableNames(chain).forEach((name) => {
+            if (!names.includes(name)) names.push(name);
+        });
+    });
+    return names;
+}
+
+async function confirmChainsImageCapabilityMix(chains) {
+    const names = chainsWithImageMix(chains);
+    if (!names.length) return true;
     return await new Promise((resolve) => {
         openConfirm({
-            title: "模型链混入不支持图片的模型",
-            text: `以下角色链同时包含多模态和非多模态：${scopeText}。将统一按照非多模态处理，是否确定？`
-                + "要带图请把不支持图片的模型移出这条链。",
+            title: "链中包含不支持图片的成员",
+            text: `链中包含不支持图片的成员：${names.join("、")}，agent 将无法查看图片。是否确定？`,
             confirmLabel: "保存",
             confirmKind: "danger",
             onConfirm: () => resolve(true),
@@ -2625,7 +2675,7 @@ function bindCeoModelModeControls() {
     U.ceoModelChainApply?.addEventListener("click", () => {
         if (S.ceoModelSelection.saving || !ceoModelChainDirty()) return;
         const draft = ceoModelChainDraft();
-        void confirmChainMultimodalMix(draft, ["本会话"]).then((confirmed) => {
+        void confirmChainsImageCapabilityMix([draft]).then((confirmed) => {
             if (confirmed) void saveCeoModelChain(draft);
         });
     });
@@ -12443,8 +12493,10 @@ function cancelModelRoleEditing() {
 async function persistModelRoleChains(scopes = MODEL_SCOPES.map((item) => item.key), successText = "模型链已保存。", { useDrafts = false } = {}) {
     const updates = buildModelRoleChainUpdates(scopes, { useDrafts });
     if (!Object.keys(updates).length) return;
-    // 只有主Agent 链进前门的图片能力声明：混链整条按不支持处理，提交前确认一次。
-    if (updates.ceo && !(await confirmChainMultimodalMix(updates.ceo.modelKeys || [], ["主Agent"]))) return;
+    const submittingChains = Object.entries(updates)
+        .filter(([scope]) => IMAGE_JUDGED_MODEL_SCOPES.includes(scope))
+        .map(([, payload]) => roleChainUpdateToChain(payload));
+    if (!(await confirmChainsImageCapabilityMix(submittingChains))) return;
     S.modelCatalog.saving = true;
     renderModelCatalog();
     try {

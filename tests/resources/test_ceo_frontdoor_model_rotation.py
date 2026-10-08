@@ -168,11 +168,16 @@ async def test_graph_call_model_rotates_stale_model_refs_before_send(
 
 
 def test_multimodal_gate_follows_state_model_refs(monkeypatch: pytest.MonkeyPatch) -> None:
-    """工具运行时上下文的多模态闸门按 state 内模型链首位判定。"""
+    """工具运行时上下文的多模态闸门按整条链取保守交集：任一成员收不了图就判不能收图。
+
+    这一轮实际会打到链上哪个成员要等失败切换才定，所以闸门不能只看链首——否则图会发给收不了
+    它的成员。判据与节点道共用同一份（`react_loop._image_multimodal_enabled_for_model_refs`）。
+    """
     runner = CreateAgentCeoFrontDoorRunner(loop=SimpleNamespace())
 
     managed_models = {
         "qwen-vl": SimpleNamespace(image_multimodal_enabled=True),
+        "qwen-vl-2": SimpleNamespace(image_multimodal_enabled=True),
         "deepseek": SimpleNamespace(image_multimodal_enabled=False),
     }
 
@@ -182,9 +187,11 @@ def test_multimodal_gate_follows_state_model_refs(monkeypatch: pytest.MonkeyPatc
         lambda: SimpleNamespace(get_managed_model=lambda key: managed_models.get(key)),
     )
 
-    # 切换后的链：首位多模态 → 闸门放行
-    assert runner._ceo_image_multimodal_enabled_for_model_refs(["qwen-vl", "deepseek"]) is True
-    # 切换前的链：首位非多模态 → 闸门拒绝
+    # 混链：链首支持但后面有不支持的成员 → 整条链判不支持
+    assert runner._ceo_image_multimodal_enabled_for_model_refs(["qwen-vl", "deepseek"]) is False
+    # 全链支持 → 放行
+    assert runner._ceo_image_multimodal_enabled_for_model_refs(["qwen-vl", "qwen-vl-2"]) is True
+    # 全链不支持 → 拒绝
     assert runner._ceo_image_multimodal_enabled_for_model_refs(["deepseek"]) is False
 
 

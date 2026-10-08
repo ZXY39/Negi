@@ -476,26 +476,34 @@ def test_quota_bucket_key_is_stable_and_never_leaks_material() -> None:
     assert quota_bucket_key(endpoint="https://gw.example/v1", api_key="sk-x", quota_pool_key="gw60") == "pool:gw60"
 
 
-def test_context_and_multimodal_filters_exclude_members() -> None:
+def test_window_filter_excludes_members_while_image_capability_does_not() -> None:
+    """图像能力不参与准入：带图请求不该成为换成员的理由。
+
+    混链在 `_image_multimodal_enabled_for_model_refs` 那一步就按整条链判掉，图片根本不会进
+    请求体，所以准入侧不需要、也不能再按成员的图片能力排除任何人。
+    """
+    members = [
+        RouteMemberView(model_key="m_small", context_window_tokens=32000, image_multimodal_enabled=False),
+        RouteMemberView(model_key="m_big", context_window_tokens=200000, image_multimodal_enabled=True),
+    ]
     balancer = _balancer(
         ResolvedLoadBalanceGroup(
             group_key="g1",
             enabled=True,
             max_retry_rounds=1,
-            members=[
-                RouteMemberView(model_key="m_small", context_window_tokens=32000, image_multimodal_enabled=False),
-                RouteMemberView(model_key="m_big", context_window_tokens=200000, image_multimodal_enabled=True),
-            ],
+            members=members,
         )
     )
 
     lease = _select(
         balancer,
         "node:1",
-        filters=RouteCandidateFilters(required_context_window_tokens=64000, requires_image_multimodal=True),
+        filters=RouteCandidateFilters(required_context_window_tokens=64000),
     )
-
     assert lease.model_key == "m_big"
+
+    # 不收图的成员照样合格：窗口够得到就参选。
+    assert RouteCandidateFilters(required_context_window_tokens=32000).allows(members[0]) is True
 
     # 没有任何成员合格时是 no_candidate（交给 preflight 失败处理），不是 no_capacity。
     blocked, reason = balancer.select(

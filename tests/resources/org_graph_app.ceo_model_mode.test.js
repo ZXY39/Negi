@@ -182,7 +182,10 @@ function loadApp(apiClientOverrides = {}) {
             ceoModelChainKeys,
             ceoModelChainBaseline,
             ceoModelChainDraft,
-            ceoModelChainMixedMultimodal,
+            modelChainMemberKeys,
+            modelChainMixedImageCapability,
+            modelChainImageIncapableNames,
+            chainsWithImageMix,
             finishCeoModelChainDrag,
             bindCeoModelModeControls,
             ceoModelChainDirty,
@@ -650,22 +653,35 @@ test("会话链非空时基线用会话链，全局链只当种子", () => {
     assert.deepEqual(Array.from(app.ceoModelChainBaseline()), ["alpha", "beta"]);
 });
 
-test("混链判据只在同时存在收图与不收图成员时成立", () => {
+test("混链判据按整条链展开成员，并点名不支持图片的配置", () => {
     const app = loadApp();
+    mountControl(app);
     app.S.modelCatalog.catalog = [
-        { key: "mm1", name: "", provider_model: "openai:m1", enabled: true, image_multimodal_enabled: true },
+        { key: "mm1", name: "收图一", provider_model: "openai:m1", enabled: true, image_multimodal_enabled: true },
         { key: "mm2", name: "", provider_model: "openai:m2", enabled: true, imageMultimodalEnabled: true },
-        { key: "plain", name: "", provider_model: "openai:p", enabled: true, image_multimodal_enabled: false },
+        { key: "plain", name: "不收图一", provider_model: "openai:p", enabled: true, image_multimodal_enabled: false },
+        { key: "plain2", name: "", provider_model: "openai:p2", enabled: true, image_multimodal_enabled: false },
     ];
+    app.S.modelCatalog.loadBalanceGroups = {
+        g_mix: { enabled: true, max_retry_rounds: 1, model_keys: ["mm1", "plain"] },
+    };
 
-    assert.equal(app.ceoModelChainMixedMultimodal(["mm1", "plain"]), true);
-    assert.equal(app.ceoModelChainMixedMultimodal(["plain", "mm1"]), true);
-    assert.equal(app.ceoModelChainMixedMultimodal(["mm1", "mm2"]), false);
-    assert.equal(app.ceoModelChainMixedMultimodal(["plain"]), false);
-    assert.equal(app.ceoModelChainMixedMultimodal(["mm1"]), false);
+    assert.equal(app.modelChainMixedImageCapability(["mm1", "plain"]), true);
+    assert.equal(app.modelChainMixedImageCapability(["plain", "mm1"]), true);
+    assert.equal(app.modelChainMixedImageCapability(["mm1", "mm2"]), false);
+    assert.equal(app.modelChainMixedImageCapability(["mm1"]), false);
+    // 全链都不收图不算"混"：那条链本来也看不了图，这次保存没让它失去什么。
+    assert.equal(app.modelChainMixedImageCapability(["plain", "plain2"]), false);
     // 目录里查不到的成员不参与判定：运行时不会把它发出去。
-    assert.equal(app.ceoModelChainMixedMultimodal(["mm1", "gone"]), false);
-    assert.equal(app.ceoModelChainMixedMultimodal(["plain", "gone"]), false);
+    assert.equal(app.modelChainMixedImageCapability(["mm1", "gone"]), false);
+
+    // 组槽位展开成成员：混在组里与混在链上后果相同。
+    assert.deepEqual(Array.from(app.modelChainMemberKeys(["group:g_mix"])), ["mm1", "plain"]);
+    assert.equal(app.modelChainMixedImageCapability(["group:g_mix"]), true);
+    assert.deepEqual(Array.from(app.modelChainImageIncapableNames(["group:g_mix", "plain2"])), ["不收图一", "plain2"]);
+    // 两条链都混 ⇒ 成员名并成一个列表，只弹一次。
+    assert.deepEqual(Array.from(app.chainsWithImageMix([["mm1", "plain"], ["mm1", "plain2"]])), ["不收图一", "plain2"]);
+    assert.deepEqual(Array.from(app.chainsWithImageMix([["plain", "plain2"]])), []);
 });
 
 test("模型链草稿来自目录 roles.ceo", () => {
