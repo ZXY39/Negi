@@ -169,10 +169,10 @@ The browser shell renders one visual system per theme. Theme and layout are fron
 
 ### Theme Persistence
 
-- Default theme is dark; a first visit without a stored preference renders dark.
-- `#theme-toggle` flips `data-theme` on `<html>`, stores the choice under `g3ku.ui.theme.v1`, and updates the sun/moon icon plus the button `aria-label` / `title` so they name the theme the next click produces. Only `dark` and `light` are valid; any other stored value falls back to dark.
+- Light is the default theme, and the default has two carriers that must agree: the static `data-theme="light"` on `<html>` in `org_graph.html`, and the fallback inside `initializeTheme()`. The static attribute is what paints, because the preference is applied by an end-of-`<body>` script; a stored value opposite to it therefore renders for one frame before the script corrects it. The markup's sun/moon inline visibility follows the same default so the toggle never carries the other theme's glyph pre-script.
+- `#theme-toggle` flips `data-theme` on `<html>`, stores the choice under `g3ku.ui.theme.v1`, and updates the sun/moon icon plus the button `aria-label` / `title` so they name the theme the next click produces. An absent key, an unreadable store, or any value other than `dark` / `light` resolves to light, so an operator's explicit `dark` selection is honored and never silently flipped by default work.
 - Switching theme does not reload the page, request data, or rebuild the current view.
-- Every `localStorage` read/write is guarded: blocked or unavailable storage degrades to dark theme plus the default navigation state instead of breaking startup.
+- Every `localStorage` read/write is guarded: blocked or unavailable storage degrades to light theme plus the default navigation state instead of breaking startup.
 
 ### Navigation Bar And Compact Mode
 

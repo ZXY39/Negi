@@ -35,7 +35,7 @@
     --ui-motion-ease: ease-out;
 }
 
-/* 2. 深色主题（默认） */
+/* 2. 深色主题（默认档是亮色，深色只在存过偏好时生效） */
 [data-ui-version="v2"][data-theme="dark"] {
     --ui-bg-canvas: #121212;
     --ui-bg-surface: #191919;

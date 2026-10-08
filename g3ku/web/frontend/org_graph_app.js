@@ -16601,7 +16601,7 @@ function updateThemeToggleA11y() {
 }
 
 function initializeTheme() {
-    const theme = readStoredUiPreference(THEME_KEY) === "light" ? "light" : "dark";
+    const theme = readStoredUiPreference(THEME_KEY) === "dark" ? "dark" : "light";
     document.documentElement.setAttribute("data-theme", theme);
     syncThemeToggleIcons();
     updateThemeToggleA11y();
