@@ -12701,6 +12701,13 @@ function renderCeoSessionCard(item, { allowActions = false, index = -1 } = {}) {
     const sessionId = String(item?.session_id || "");
     const isActive = sessionId === activeSessionId();
     const isRunning = !!item?.is_running;
+    const isErrored = String(item?.status || "").trim().toLowerCase() === "error";
+    // 黄档＝需要人来接手的停住：等审批挂起（有未答复中断）或这一轮异常停止。
+    // 手动暂停与停机暂停同落 status=paused，按口径不算异常，不画。
+    const isAttention = isErrored || !!item?.has_pending_interrupts;
+    const sessionStatusLabel = isErrored
+        ? "（异常停止）"
+        : (item?.has_pending_interrupts ? "（等待审批）" : (isRunning ? "（运行中）" : ""));
     const isBulkMode = !!S.ceoBulkMode;
     const isSelected = isCeoBulkSessionSelected(sessionId);
     const dragIndex = Number.isInteger(index) ? index : -1;
@@ -12720,7 +12727,7 @@ function renderCeoSessionCard(item, { allowActions = false, index = -1 } = {}) {
         item?.is_readonly && !item?.can_message ? '<span class="ceo-session-pill readonly">只读</span>' : "",
     ].filter(Boolean).join("");
     return `
-        <div class="ceo-session-card${isActive ? " is-active" : ""}${unreadCount > 0 ? " has-unread" : ""}${isRunning ? " is-running" : ""}${isBulkMode ? " is-bulk-mode" : ""}${isSelected ? " is-bulk-selected" : ""}" role="listitem"${dragAttrs}>
+        <div class="ceo-session-card${isActive ? " is-active" : ""}${unreadCount > 0 ? " has-unread" : ""}${isRunning ? " is-running" : ""}${isAttention ? " is-attention" : ""}${isBulkMode ? " is-bulk-mode" : ""}${isSelected ? " is-bulk-selected" : ""}" role="listitem"${dragAttrs}>
             ${isBulkMode ? `
                 <label class="ceo-session-checkbox" aria-label="${esc(`选择会话 ${title}`)}">
                     <input type="checkbox" data-session-bulk-checkbox="${esc(sessionId)}" ${isSelected ? "checked" : ""}>
@@ -12732,7 +12739,7 @@ function renderCeoSessionCard(item, { allowActions = false, index = -1 } = {}) {
                 class="ceo-session-main ceo-session-select"
                 data-session-activate="${esc(sessionId)}"
                 aria-pressed="${isBulkMode ? (isSelected ? "true" : "false") : (isActive ? "true" : "false")}"
-                aria-label="${esc(`${title}${isRunning ? "（运行中）" : ""}`)}"
+                aria-label="${esc(`${title}${sessionStatusLabel}`)}"
                 title="${esc(title)}"
             >
                 <span class="ceo-session-glyph" aria-hidden="true">${esc(glyph)}</span>

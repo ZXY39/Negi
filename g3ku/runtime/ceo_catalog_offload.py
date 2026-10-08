@@ -93,6 +93,7 @@ async def build_ceo_session_catalog_async(
     *,
     active_session_id: str,
     is_running_resolver: Callable[[str], bool] | None = None,
+    status_resolver: Callable[[str], str] | None = None,
 ) -> dict[str, Any]:
     """事件循环友好版目录构建：TTL 命中直接返回，未命中在专用线程构建。"""
     cached = peek_ceo_catalog_cache(active_session_id)
@@ -106,6 +107,7 @@ async def build_ceo_session_catalog_async(
             session_manager,
             active_session_id=active_session_id,
             is_running_resolver=is_running_resolver,
+            status_resolver=status_resolver,
         )
     )
     with _catalog_cache_lock:
@@ -119,6 +121,7 @@ def build_ceo_session_catalog_cached(
     *,
     active_session_id: str,
     is_running_resolver: Callable[[str], bool] | None = None,
+    status_resolver: Callable[[str], str] | None = None,
 ) -> dict[str, Any]:
     """同步上下文（发布路径）用：TTL 命中免构建，未命中就地构建并写缓存。"""
     cached = peek_ceo_catalog_cache(active_session_id)
@@ -128,6 +131,7 @@ def build_ceo_session_catalog_cached(
         session_manager,
         active_session_id=active_session_id,
         is_running_resolver=is_running_resolver,
+        status_resolver=status_resolver,
     )
     store_ceo_catalog_cache(active_session_id, catalog)
     return catalog

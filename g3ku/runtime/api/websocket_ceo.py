@@ -149,6 +149,13 @@ def _session_is_running(runtime_manager, session_id: str) -> bool:
     return bool(getattr(state, 'is_running', False)) or status == 'running'
 
 
+def _session_status(runtime_manager, session_id: str) -> str:
+    """会话的运行档位原值；没建过运行会话（渠道归档、已回收）返回空串。"""
+    session = _runtime_session(runtime_manager, session_id)
+    state = getattr(session, 'state', None) if session is not None else None
+    return str(getattr(state, 'status', '') or '').strip().lower()
+
+
 def _approval_interrupts(items: Any) -> list[dict[str, Any]]:
     approvals: list[dict[str, Any]] = []
     for raw in list(items or []):
@@ -216,6 +223,7 @@ def _publish_ceo_sessions_snapshot(*, agent, transcript_store, runtime_manager, 
         transcript_store,
         active_session_id=active_session_id,
         is_running_resolver=lambda session_id: _session_is_running(runtime_manager, session_id),
+        status_resolver=lambda session_id: _session_status(runtime_manager, session_id),
     )
     registry.publish_global_ceo(
         build_envelope(
@@ -252,6 +260,7 @@ def _publish_ceo_session_patch(
         return
     active_session_id = resolve_active_ceo_session_id(transcript_store, state_store)
     resolved_is_running = _session_is_running(runtime_manager, key) if is_running is None else bool(is_running)
+    resolved_status = _session_status(runtime_manager, key)
     if _is_channel_session_id(key):
         # 渠道会话必须走渠道形状构建器：本地构建器返回 None 后会回退到
         # `build_session_summary`，把渠道会话标成普通 web 会话推进全局补丁，
@@ -270,6 +279,7 @@ def _publish_ceo_session_patch(
             key,
             active_session_id=active_session_id,
             is_running=resolved_is_running,
+            status=resolved_status,
         )
         if item is None:
             session = transcript_store.get_or_create(key)
@@ -277,6 +287,7 @@ def _publish_ceo_session_patch(
                 session,
                 is_active=key == active_session_id,
                 is_running=resolved_is_running,
+                status=resolved_status,
             )
     if preview_text is not None:
         item['preview_text'] = str(preview_text or '').strip()
@@ -1421,6 +1432,7 @@ async def ceo_websocket(websocket: WebSocket):
         transcript_store,
         active_session_id=requested_session_id,
         is_running_resolver=lambda key: _session_is_running(runtime_manager, key),
+        status_resolver=lambda key: _session_status(runtime_manager, key),
     )
     requested_item = find_ceo_session_catalog_item(initial_catalog, requested_session_id) if requested_session_id else None
     fallback_session_id = ''
@@ -2000,6 +2012,7 @@ async def ceo_websocket(websocket: WebSocket):
             transcript_store,
             active_session_id=resolve_active_ceo_session_id(transcript_store, state_store),
             is_running_resolver=lambda key: _session_is_running(runtime_manager, key),
+            status_resolver=lambda key: _session_status(runtime_manager, key),
         )
         await _safe_send(
             build_envelope(

@@ -51,6 +51,9 @@
     --status-evicted-text: #3f3f46;
     
     --ceo-session-running-ring: #0d9488;
+    /* 会话"停住且要人接手"的黄环：与模型重试提示条同族的琥珀（#b45309/#f59e0b），
+       不另开一档黄色，侧栏里"黄"只有这一个意思。 */
+    --ceo-session-attention-ring: #b45309;
     /* CEO 会话 unread 角标:品牌青绿 #39c5bb(点名色;不等同 --brand-primary light=#0d9488 / dark=#2dd4bf)。
        文字用深青:白字在 #39c5bb 上仅约 2.13:1,深青 #052e2b 约 6.9:1 达 WCAG AA。 */
     --ceo-session-unread: #39c5bb;
@@ -113,6 +116,7 @@
     --brand-primary-hover: #14b8a6;
     --brand-surface: rgba(20, 184, 166, 0.05);
     --ceo-session-running-ring: #2dd4bf;
+    --ceo-session-attention-ring: #f59e0b;
     --ceo-session-unread: #39c5bb; /* 暗色下 vs 面板 #18181b 约 8.3:1,醒目 */
     --ceo-session-unread-text: #052e2b;
     --ceo-session-unread-ring: var(--bg-panel); /* 暗色下自动解析为 #18181b */
@@ -2271,6 +2275,15 @@ textarea {
     animation: ceo-session-breathe 2.4s cubic-bezier(0.4, 0, 0.2, 1) infinite;
 }
 
+/* 等审批挂起 / 这一轮异常停止：黄环静态。呼吸在这套界面里表示"还在跑"，
+   停住等人接手的事不该跟着呼吸。写在绿环之后，两者同时成立时黄环胜出——
+   有未答复的中断时，可操作的那条事实是"等你点"，不是"它跑过"。 */
+.ceo-session-card.is-attention::after {
+    border-color: color-mix(in srgb, var(--ceo-session-attention-ring) 88%, var(--border-color));
+    opacity: 1;
+    animation: none;
+}
+
 .ceo-session-card.is-active {
     border-color: color-mix(in srgb, var(--brand-primary) 30%, transparent);
     box-shadow: var(--shadow-sm);
@@ -2323,6 +2336,24 @@ textarea {
     opacity: 0.7;
     pointer-events: none;
     animation: ceo-session-glyph-edge-breathe 2.4s cubic-bezier(0.4, 0, 0.2, 1) infinite;
+}
+
+/* 折叠轨道只剩一颗字母块，环跟着搬到 glyph 上，否则 72px 宽的轨道里
+   卡片级描边会把两颗 glyph 框进同一个圈。 */
+.ceo-session-panel[data-panel-state="collapsed"] .ceo-session-card.is-attention::after {
+    opacity: 0;
+    animation: none;
+}
+
+.ceo-session-panel[data-panel-state="collapsed"] .ceo-session-card.is-attention .ceo-session-glyph::after {
+    content: "";
+    position: absolute;
+    inset: 0;
+    border-radius: inherit;
+    border: 1.5px solid color-mix(in srgb, var(--ceo-session-attention-ring) 88%, var(--border-color));
+    opacity: 0.9;
+    pointer-events: none;
+    animation: none;
 }
 
 .ceo-session-panel[data-panel-state="collapsed"] .ceo-session-unread {

@@ -1688,6 +1688,7 @@ def build_session_summary(
     *,
     is_active: bool,
     is_running: bool = False,
+    status: str = "",
     inflight_turn: dict[str, Any] | None = None,
     normalized_metadata: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
@@ -1733,6 +1734,10 @@ def build_session_summary(
         "last_llm_output_at": last_llm_output,
         "is_active": bool(is_active),
         "is_running": bool(is_running),
+        # 运行态的原始档位（idle/running/paused/completed/error）。is_running 是
+        # "在飞标志 ∪ status==running" 的派生值，压不出"挂起"和"错误停止"的区别，
+        # 所以两样一起带：侧栏据此决定绿环还是黄环。
+        "status": str(status or "").strip().lower(),
         "task_defaults": dict(metadata.get("task_defaults") or {}),
         "session_family": "local",
         "session_origin": "web",
@@ -1758,6 +1763,7 @@ def build_local_ceo_session_item(
     *,
     active_session_id: str,
     is_running: bool = False,
+    status: str = "",
     inflight_turn: dict[str, Any] | None = None,
 ) -> dict[str, Any] | None:
     key = str(session_id or "").strip()
@@ -1777,6 +1783,7 @@ def build_local_ceo_session_item(
         session,
         is_active=key == str(active_session_id or "").strip(),
         is_running=bool(is_running),
+        status=status,
         inflight_turn=resolved_inflight_turn,
         normalized_metadata=normalized_metadata,
     )
@@ -1929,6 +1936,7 @@ def list_local_ceo_sessions(
     *,
     active_session_id: str,
     is_running_resolver: Callable[[str], bool] | None = None,
+    status_resolver: Callable[[str], str] | None = None,
 ) -> list[dict[str, Any]]:
     rows: list[dict[str, Any]] = []
     depth_limits = main_runtime_depth_limits()
@@ -1957,11 +1965,18 @@ def list_local_ceo_sessions(
                 is_running = bool(is_running_resolver(key))
             except Exception:
                 is_running = False
+        status = ""
+        if callable(status_resolver):
+            try:
+                status = str(status_resolver(key) or "")
+            except Exception:
+                status = ""
         rows.append(
             build_session_summary(
                 session,
                 is_active=key == active_session_id,
                 is_running=is_running,
+                status=status,
                 inflight_turn=inflight_by_session.get(key),
                 normalized_metadata=normalized_metadata,
             )
@@ -2221,11 +2236,13 @@ def build_ceo_session_catalog(
     *,
     active_session_id: str,
     is_running_resolver: Callable[[str], bool] | None = None,
+    status_resolver: Callable[[str], str] | None = None,
 ) -> dict[str, Any]:
     local_items = list_local_ceo_sessions(
         session_manager,
         active_session_id=active_session_id,
         is_running_resolver=is_running_resolver,
+        status_resolver=status_resolver,
     )
     channel_items = list_channel_ceo_sessions(
         session_manager,
@@ -2361,11 +2378,13 @@ def list_web_ceo_sessions(
     *,
     active_session_id: str,
     is_running_resolver: Callable[[str], bool] | None = None,
+    status_resolver: Callable[[str], str] | None = None,
 ) -> list[dict[str, Any]]:
     return list_local_ceo_sessions(
         session_manager,
         active_session_id=active_session_id,
         is_running_resolver=is_running_resolver,
+        status_resolver=status_resolver,
     )
 
 

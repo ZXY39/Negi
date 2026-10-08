@@ -145,6 +145,13 @@ def _session_is_running(runtime_manager, session_id: str) -> bool:
     return bool(getattr(state, "is_running", False)) or status == "running"
 
 
+def _session_status(runtime_manager, session_id: str) -> str:
+    """会话的运行档位原值；没建过运行会话（渠道归档、已回收）返回空串。"""
+    session = _runtime_session(runtime_manager, session_id)
+    state = getattr(session, "state", None) if session is not None else None
+    return str(getattr(state, "status", "") or "").strip().lower()
+
+
 def _assert_known_session(session_manager, session_id: str):
     key = str(session_id or "").strip()
     if not key.startswith("web:"):
@@ -168,6 +175,7 @@ def _list_session_items(session_manager, runtime_manager, *, active_session_id: 
         session_manager,
         active_session_id=active_session_id,
         is_running_resolver=lambda session_id: _session_is_running(runtime_manager, session_id),
+        status_resolver=lambda session_id: _session_status(runtime_manager, session_id),
     )
 
 
@@ -257,6 +265,7 @@ def _build_catalog(session_manager, runtime_manager, *, active_session_id: str) 
         session_manager,
         active_session_id=active_session_id,
         is_running_resolver=lambda session_id: _session_is_running(runtime_manager, session_id),
+        status_resolver=lambda session_id: _session_status(runtime_manager, session_id),
     )
 
 
@@ -1297,6 +1306,7 @@ async def activate_ceo_session(session_id: str):
         session_manager,
         active_session_id=requested_session_id,
         is_running_resolver=lambda sid: _session_is_running(runtime_manager, sid),
+        status_resolver=lambda sid: _session_status(runtime_manager, sid),
     )
     item = find_ceo_session_catalog_item(catalog, requested_session_id)
     if item is None:
@@ -1307,6 +1317,7 @@ async def activate_ceo_session(session_id: str):
             session_manager,
             active_session_id=target_id,
             is_running_resolver=lambda sid: _session_is_running(runtime_manager, sid),
+            status_resolver=lambda sid: _session_status(runtime_manager, sid),
         )
         item = find_ceo_session_catalog_item(catalog, target_id)
     state_store.set_active_session_id(target_id)
