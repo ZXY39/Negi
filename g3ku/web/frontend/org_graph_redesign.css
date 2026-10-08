@@ -1109,13 +1109,22 @@
     font-weight: 600;
 }
 
-[data-ui-version="v2"] .ceo-approval-viewport,
 [data-ui-version="v2"] .model-retry-toast {
     background: var(--ui-bg-elevated);
     border: 1px solid var(--ui-border);
     border-radius: var(--ui-radius-card);
     box-shadow: none;
     color: var(--ui-text-secondary);
+}
+
+/* .ceo-approval-viewport 只负责把审批卡钉在输入框上方：它是 left:0/right:0 的绝对定位条，
+   宽度跟着输入区（50vw）走，而可见的审批卡 .ceo-approval-toast 最宽只有 560px 居中。
+   容器再画一层底，就会在卡片两侧拉出一整块比弹窗宽、还压在消息流上的空白面。 */
+[data-ui-version="v2"] .ceo-approval-viewport {
+    background: transparent;
+    border: 0;
+    border-radius: 0;
+    box-shadow: none;
 }
 
 /* 待发送附件条同理：容器只负责占位，可见的面是每条 chip。
