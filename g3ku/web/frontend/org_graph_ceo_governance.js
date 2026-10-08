@@ -1200,13 +1200,19 @@ bindExecWhitelistUi();
 bindCeoApprovalUi();
 renderToolGovernanceMode();
 renderCeoApprovalFlow();
-if (typeof syncCeoApprovalFromSnapshotEntry === "function") {
-    syncCeoApprovalFromSnapshotEntry(activeSessionId(), null, {
-        authoritative: true,
-        refreshServer: true,
-    });
-} else if (typeof refreshCeoApprovalFromServer === "function") {
-    void refreshCeoApprovalFromServer(activeSessionId(), { quiet: true });
+// 水合之前不能去问审批状态：activeSessionId() 在会话清单落地前回退到 ApiClient 的兜底 id
+// "web:shared"，拿它查到的挂起批次会被画成阻塞浮层，等清单落地换成真会话才消失——
+// 用户看到的就是"会话还没加载完先弹出一个跟自己无关的审批窗"。
+// 水合后的首次同步由 applyCeoSessionsPayload 按服务端确认的会话发起。
+if (S.ceoSessionHydrated) {
+    if (typeof syncCeoApprovalFromSnapshotEntry === "function") {
+        syncCeoApprovalFromSnapshotEntry(activeSessionId(), null, {
+            authoritative: true,
+            refreshServer: true,
+        });
+    } else if (typeof refreshCeoApprovalFromServer === "function") {
+        void refreshCeoApprovalFromServer(activeSessionId(), { quiet: true });
+    }
 }
 if (S.view === "tools") {
     void loadToolGovernanceMode({ quiet: true });

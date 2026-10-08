@@ -51,7 +51,7 @@ test("governance script syncs approval state from active session snapshot on loa
         HTMLTextAreaElement: StubHTMLTextAreaElement,
         WebSocket: { OPEN: 1 },
         CSS: { escape: (value) => String(value || "") },
-        S: { view: "ceo", ceoQueuedFollowUps: {} },
+        S: { view: "ceo", ceoQueuedFollowUps: {}, ceoSessionHydrated: true },
         U: {},
         ApiClient: {},
         showToast: () => {},
@@ -183,14 +183,100 @@ test("governance script can load after app script without global wrapper name co
 
     vm.runInContext(GOVERNANCE_CODE, context);
 
-    assert.equal(context.syncCeoApprovalFromSnapshotEntryCalls.length, 1);
-    assert.deepEqual(context.syncCeoApprovalFromSnapshotEntryCalls[0], {
-        sessionId: "web:shared",
-        entry: null,
-        authoritative: true,
-        refreshServer: true,
-    });
+    // 真实加载顺序下会话清单还没落地，S.ceoSessionHydrated 仍是 false：
+    // 此时 activeSessionId() 会回退到兜底 id "web:shared"，不许拿它去武装审批浮层。
+    assert.equal(context.syncCeoApprovalFromSnapshotEntryCalls.length, 0);
     assert.equal(context.refreshCeoApprovalFromServerCalls.length, 0);
+});
+
+test("cold load never arms the approval surface for the fallback session, hydration still does", async () => {
+    class StubHTMLInputElement extends StubHTMLElement {}
+    class StubHTMLSelectElement extends StubHTMLElement {}
+
+    const ghostInterrupt = {
+        id: "interrupt-disk-approval-1",
+        value: {
+            kind: "frontdoor_tool_approval_batch",
+            batch_id: "batch:disk-1",
+            mode: "regulatory_review",
+            submission_mode: "batch_submit_only",
+            review_items: [{ tool_call_id: "call-1", name: "exec", risk_level: "high", arguments: { command: "echo hi" } }],
+        },
+    };
+    const context = {
+        console,
+        setTimeout,
+        clearTimeout,
+        setInterval,
+        clearInterval,
+        queueMicrotask,
+        navigator: { clipboard: { writeText: async () => {} } },
+        location: { protocol: "http:", host: "localhost", pathname: "/org_graph.html" },
+        localStorage: { getItem: () => null, setItem: () => {}, removeItem: () => {} },
+        sessionStorage: { getItem: () => null, setItem: () => {}, removeItem: () => {} },
+        document: new StubDocument(),
+        window: {},
+        Element: StubElement,
+        HTMLElement: StubHTMLElement,
+        HTMLButtonElement: StubHTMLButtonElement,
+        HTMLInputElement: StubHTMLInputElement,
+        HTMLTextAreaElement: StubHTMLTextAreaElement,
+        HTMLSelectElement: StubHTMLSelectElement,
+        URLSearchParams,
+        URL,
+        AbortController,
+        fetch: async () => ({ ok: true, json: async () => ({}) }),
+        lucide: { createIcons() {} },
+        marked: { parse: (value) => String(value) },
+        DOMPurify: { sanitize: (value) => String(value) },
+        structuredClone: global.structuredClone,
+        performance: { now: () => 0 },
+        requestAnimationFrame: (callback) => {
+            callback();
+            return 1;
+        },
+        cancelAnimationFrame: () => {},
+        addEventListener() {},
+        removeEventListener() {},
+        WebSocket: { OPEN: 1 },
+        CSS: { escape: (value) => String(value || "") },
+        ApiClient: {
+            getActiveSessionId: () => "web:shared",
+            setActiveSessionId: () => {},
+            getCeoWsUrl: () => "ws://localhost/api/ws/ceo?session_id=web%3Ashared",
+            getCeoPendingInterrupts: async (sessionId) => (
+                String(sessionId || "") === "web:shared" ? [ghostInterrupt] : []
+            ),
+        },
+    };
+    context.window = context;
+    vm.createContext(context);
+
+    vm.runInContext(APP_CODE, context);
+    vm.runInContext(`
+        renderCeoSessions = () => {};
+        syncCeoSessionActions = () => {};
+        syncCeoPrimaryButton = () => {};
+        syncCeoComposerReadonlyState = () => {};
+        syncCeoAttachButton = () => {};
+        syncCeoCompressionDivider = () => {};
+    `, context);
+
+    vm.runInContext(GOVERNANCE_CODE, context);
+    // 让启动期那次异步审批查询有机会落地：兜底会话的挂起批次一旦回来就会 arm flow。
+    await new Promise((resolve) => setTimeout(resolve, 60));
+
+    assert.equal(vm.runInContext(`S.ceoSessionHydrated`, context), false);
+    assert.equal(vm.runInContext(`S.ceoApprovalFlow.active`, context), false);
+    assert.equal(vm.runInContext(`S.ceoApprovalFlow.sessionId`, context), "");
+    assert.equal(vm.runInContext(`hasActiveCeoApprovalBlockingState()`, context), false);
+
+    // 反向对照：同一份中断在水合后按真会话取回时，浮层必须照常武装，别把修复做成"永不显示"。
+    const armed = await vm.runInContext(`refreshCeoApprovalFromServer("web:shared")`, context);
+    assert.equal(armed.length, 1);
+    assert.equal(vm.runInContext(`S.ceoApprovalFlow.active`, context), true);
+    assert.equal(vm.runInContext(`S.ceoApprovalFlow.batchId`, context), "batch:disk-1");
+    assert.equal(vm.runInContext(`hasActiveCeoApprovalBlockingState("web:shared")`, context), true);
 });
 
 test("approval submit clears cached approval interrupts and rebinds the active turn to the user lane", async () => {
