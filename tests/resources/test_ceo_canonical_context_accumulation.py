@@ -411,6 +411,34 @@ def test_ui_delta_does_not_reopen_settled_evicted_stages() -> None:
     assert [stage["stage_id"] for stage in delta_stages] == ["frontdoor-stage-2"]
 
 
+def test_ui_delta_points_archive_when_source_carries_no_bodies() -> None:
+    """补不到正身时交指针：快照行带的是 message-local delta，卡片只能从这里拿到归档 ref。
+
+    实盘症状是刷新后已完成的阶段整卡空白——出帧那份工作集本身就是裁过的（rounds=0），
+    回填因此无从可补。少了这颗指针，前端就只剩"当前阶段暂无工具轮次"，而整段原文
+    一直好端端躺在归档里。
+    """
+    settled_round = {"round_index": 1, "tools": [_tool("old-1", output_text="x" * 3000)]}
+    persisted_projected = project_canonical_context_for_transcript(
+        {"stages": [_stage("frontdoor-stage-1", 1, rounds=[settled_round], evicted=True)]}
+    )
+    capped_source = _stage("frontdoor-stage-1", 1, rounds=[], summary="改了摘要", evicted=True)
+    capped_source["archive_ref"] = ".g3ku/temp/sessions/web-x/g3ku_stage_archive_1_abcd.json"
+
+    stages = list(
+        (ui_canonical_context_delta(persisted_projected, {"stages": [capped_source]}).get("stages") or [])
+    )
+
+    assert stages[0]["rounds"] == []
+    assert stages[0]["rounds_archive_ref"] == capped_source["archive_ref"]
+    # 带着正文的阶段不该多出这颗指针：入口只在取不到东西时才该出现。
+    live_source = _stage("frontdoor-stage-1", 1, rounds=[settled_round], summary="改了摘要", evicted=True)
+    live_stages = list(
+        (ui_canonical_context_delta(persisted_projected, {"stages": [live_source]}).get("stages") or [])
+    )
+    assert "rounds_archive_ref" not in live_stages[0]
+
+
 def test_ui_delta_backfills_rows_for_a_changed_evicted_stage() -> None:
     """裁撤阶段真的改了展示内容时，delta 仍要带上它的调用记录（回填发生在比对之后）。"""
     settled_round = {
@@ -504,6 +532,30 @@ def test_ui_payload_projection_caps_evicted_stage_bodies() -> None:
     row = project_canonical_context_for_ui_payload(context)["stages"][0]["rounds"][0]["tools"][0]
     assert row["tool_call_id"] == "big:1"
     assert row["output_text"] == ""
+
+
+def test_ui_payload_projection_points_empty_stage_at_its_archive() -> None:
+    """轨道没带正文的裁撤阶段必须留一个取档指针：这是"点开才取"的零字节实现。
+
+    把整段原文塞回每一行 checkpoint 会让转录成倍变大（实盘一条会话 +101 KB/行），
+    所以出帧只交指针；指针一旦漏掉，那张卡在界面上就只剩空白，没人知道有原文可取。
+    """
+    archived = _stage("frontdoor-stage-1", 1, evicted=True, rounds=[])
+    archived["archive_ref"] = ".g3ku/main-runtime/artifacts/stage-archive-1.json"
+    with_rounds = _stage(
+        "frontdoor-stage-2",
+        2,
+        rounds=[{"round_index": 1, "tools": [_tool("kept", output_text="ok")]}],
+    )
+    no_archive = _stage("frontdoor-stage-3", 3, evicted=True, rounds=[])
+
+    projected = project_canonical_context_for_ui_payload({"stages": [archived, with_rounds, no_archive]})
+
+    assert projected["stages"][0]["rounds"] == []
+    assert projected["stages"][0]["rounds_archive_ref"] == archived["archive_ref"]
+    # 带着正文的阶段不该多出这颗指针；没有归档可取的空阶段也不该画一个点了没反应的入口。
+    assert "rounds_archive_ref" not in projected["stages"][1]
+    assert "rounds_archive_ref" not in projected["stages"][2]
 
 
 def test_transcript_projection_returns_empty_for_missing_stage_state() -> None:

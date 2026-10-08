@@ -133,7 +133,8 @@ Start here when you are new to the repository or when a change crosses subsystem
 - Broken image icons, file-route 400s, snapshot path mismatch → `web-and-admin.md`「Inline Markdown Image Rendering And Media Middle Layer」
 - 模型重复处理已回答的问题、连续请求尾部反复出现同一条无回复的用户消息、渠道会话里旧提问冒到最新回复下面（像用户重发）；或反向——某轮失败后用户发"继续"，模型答的是上一件成功的事 → `context-and-cache-troubleshooting.md`「残留 paused / pending 转录条目与未回答的用户输入」
 - 同一份 heartbeat 规则 / event bundle 在请求体里重复多份、token 逐轮线性上涨而对话无实质推进、或模型被已 success 节点的过期暂停通知误导 → `context-and-cache-troubleshooting.md`「heartbeat / cron 上下文残骸」
-- CEO 阶段卡里被裁撤/收口的阶段显示「当前阶段暂无工具轮次」 → 显示层必须继续带行，回填口径与未闭合范围见 `web-and-admin.md`「CEO Stage Trace Round Rendering Contract」的阶段轨道条目
+- CEO 阶段卡里被裁撤/收口的阶段只剩一颗「取回本阶段的调用记录」、点开才出轮次 → 显示层带行与按 `rounds_archive_ref` 取档的车道，见 `web-and-admin.md`「CEO Stage Trace Round Rendering Contract」的阶段轨道条目
+- 同一个阶段在会话里刷好几遍、收尾总结只长在最后那遍 → 同一文档的副本归并条目（只归并已收尾的副本，未收尾的半截各画一张是设计）
 - 回合进行中最新气泡夹着历史阶段一起出现（新阶段带着旧阶段）、旧阶段排在新阶段下面，或刷新网页才恢复正常 → 同上条目：live 帧 delta 只按投影互比，源正文的回填发生在 delta 定型之后；轨道顺序按 `stage_index` 升序合并，不按到达顺序
 - 被模型点名移出上下文的阶段，卡片徽章仍写「完成」而不是「已移出上下文」（或反过来）→ 裁撤标记有没有穿过出帧面与前端阶段白名单，见 `web-and-admin.md`「CEO Turn Timeline Rendering Contract」
 - 工具执行时先在阶段外面冒出来、过一会才进阶段卡（气泡跳一下），或某条工具的"加载中"迟迟不消失 → 同一文档的在飞工具行条目（落位、按 `tool_call_id` 退场、`submit_next_stage` 不建行）
@@ -174,7 +175,7 @@ Start here when you are new to the repository or when a change crosses subsystem
 - 模型或节点声称"已把某阶段移出"却找不到 `archive_ref`、或点名裁撤后那批工具帧仍逐轮重发、提交时写的阶段总结在账本里是空的 → `runtime-overview.md`「stage_compaction」（跨结清的收尾对象判据与 `stage_closure` 回执，前门与节点同一条）+ `context-and-cache-troubleshooting.md`「Shrink 原因与压缩边界」（粘着的 shrink 原因不能当"裁过"的证据）
 - 切回仍在处理的会话看不到期间产生的阶段/工具调用（刷新网页才出现）→ `web-and-admin.md`「CEO Feed View State And Scroll Preservation Contract」
 - 用户气泡的「编辑」或模型回复元信息行里的「Fork」要刷新网页才出现、会话被暂停/审批/压缩挡住输入时找不到 Fork 入口、点了按钮提示「当前不可编辑」、或点击消息后用量/复制仍不显形 → `web-and-admin.md`「Message Edit-Resend And Session Fork Contract」+「Per-Turn Token Usage Contract」
-- 回合进行中发的补充没被回答、待发送条目上的「插话 / 编辑 / 删除」行为疑问、或撤下后条目又被画回来 → `web-and-admin.md`「Queued Follow-Ups」
+- 回合进行中发的补充没被回答、待发送条目上的「插话 / 编辑 / 删除」行为疑问、撤下后条目又被画回来，或条目挂着不动、点删除只回 `follow_up_not_queued` → `web-and-admin.md`「Queued Follow-Ups」
 - 回合卡在半截、下方一直转圈，刷新网页才同步到最终回复（本地与渠道会话同症状，转录里其实已有完整回复）→ `web-and-admin.md`「CEO Websocket Lane Failure Contract」
 - 节点详情页的「加载 skill / 加载 tool」chip 风险色全部同一档、或展开看不到正文 → `web-and-admin.md`「Context Loader Notices」
 - 工具面板的「参数」只有 48 字调用提示、超长入参点开也不回补 → `web-and-admin.md`「CEO Stage Trace Round Rendering Contract」（`arguments_truncated` 标记与 `tool-arguments` 按需回取车道）

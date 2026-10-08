@@ -1441,6 +1441,75 @@ async function ensureTraceArgumentsCodeBlockContent(element) {
     }
 }
 
+const ceoStageArchiveHtmlByKey = new Map();
+
+async function loadCeoStageArchiveHtml(archiveRef) {
+    const payload = await ApiClient.readContent({ path: archiveRef, view: "canonical" });
+    const raw = String(payload?.content || payload?.excerpt || "").trim();
+    const parsed = raw.startsWith("{") ? JSON.parse(raw) : null;
+    const stage = (Array.isArray(parsed?.stages) ? parsed.stages : [])[0] || null;
+    if (!Array.isArray(stage?.rounds) || !stage.rounds.length) {
+        const error = new Error("stage_archive_empty");
+        error.status = 404;
+        throw error;
+    }
+    // 归档里存的是未裁的原始账本，键名和轨道投影同一套；过一遍轨道自己的归一化，
+    // 工具名/状态/由 `arguments` 复原的全量入参才是同一种读法。
+    const normalized = typeof normalizeExecutionStageTrace === "function"
+        ? normalizeExecutionStageTrace(stage)
+        : { rounds: stage.rounds };
+    // 总结不重复画：卡片自己那半已经有一份。
+    return renderExecutionStageRounds({ ...normalized, completed_stage_summary: "" });
+}
+
+// 裁撤阶段的调用记录留在归档里（`stage.archive_ref`）：点开取一次，按归档路径缓存，
+// 之后每帧重绘都不再碰网络。归档里带的是未裁的原文，所以这一道取回来的参数本来就是全的。
+function getCeoStageArchiveHtml(archiveRef) {
+    const key = String(archiveRef || "").trim();
+    if (!key) return Promise.resolve("");
+    const cached = ceoStageArchiveHtmlByKey.get(key);
+    if (cached) return cached;
+    const request = loadCeoStageArchiveHtml(key).catch((error) => {
+        // 失败的请求不能留在表里，否则一次抖动就让这张卡永久失去重试机会。
+        ceoStageArchiveHtmlByKey.delete(key);
+        throw error;
+    });
+    ceoStageArchiveHtmlByKey.set(key, request);
+    return request;
+}
+
+function bindStageArchiveOpens(scopeEl) {
+    if (!(scopeEl instanceof HTMLElement) || scopeEl.dataset.stageArchiveBindings === "true") return;
+    scopeEl.dataset.stageArchiveBindings = "true";
+    scopeEl.addEventListener("click", (event) => {
+        const button = event.target instanceof Element ? event.target.closest("[data-stage-archive-open]") : null;
+        if (!(button instanceof HTMLElement)) return;
+        const host = button.closest(".task-trace-stage-archive");
+        if (!(host instanceof HTMLElement)) return;
+        const ref = String(button.dataset.stageArchiveOpen || "").trim();
+        button.disabled = true;
+        getCeoStageArchiveHtml(ref).then((html) => {
+            if (!html) throw new Error("stage_archive_empty");
+            host.innerHTML = html;
+            host.classList.add("is-filled");
+            if (typeof hydrateTraceOutputBlocks === "function") hydrateTraceOutputBlocks(host);
+            icons();
+        }).catch((error) => {
+            // 404 是终态（归档已被磁盘治理清理）；其余失败留着重试的机会。
+            const missing = Number(error?.status) === 404;
+            host.innerHTML = `
+                <div class="task-trace-stage-archive-missing">${esc(missing
+    ? "归档已被清理，取不回本阶段的调用记录"
+    : `取档失败：${String(error?.message || error || "未知错误")}`)}</div>
+            `;
+            if (!missing) {
+                host.insertAdjacentHTML("beforeend", `<button type="button" class="task-trace-stage-archive-btn" data-stage-archive-open="${esc(ref)}"><i data-lucide="archive-restore"></i><span>重试取档</span></button>`);
+                icons();
+            }
+        });
+    });
+}
+
 async function ensureCeoToolStepFullOutput(item, { view = "canonical" } = {}) {    if (!(item instanceof HTMLElement)) return "";
     const outputRef = normalizeTraceOutputRef(item.dataset.outputRef || "");
     if (!outputRef) return normalizeInteractionDetailText(item.dataset.detailText || "");
@@ -7605,6 +7674,7 @@ function renderCeoStageTraceIntoTurn(turn, canonicalContext = null, { interrupte
         });
     }).join("");
     if (typeof bindTraceRoundToolStrips === "function") bindTraceRoundToolStrips(turn.listEl);
+    if (typeof bindStageArchiveOpens === "function") bindStageArchiveOpens(turn.listEl);
     if (typeof bindTraceFieldCopyActions === "function") bindTraceFieldCopyActions(turn.listEl);
     const stageCount = summary.stages.length;
     const roundCount = summary.stages.reduce((sum, stage) => sum + (Array.isArray(stage?.rounds) ? stage.rounds.length : 0), 0);

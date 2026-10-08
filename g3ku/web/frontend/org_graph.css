@@ -12583,6 +12583,43 @@ textarea {
     color: var(--text-secondary);
 }
 
+/* 裁撤阶段的调用记录留在归档里：卡片只给一颗取档按钮，取完就地换成轮次。 */
+.task-trace-stage-archive {
+    margin-top: var(--space-2);
+}
+
+.task-trace-stage-archive.is-filled {
+    margin-top: 0;
+}
+
+.task-trace-stage-archive-btn {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    padding: var(--space-2) var(--space-3);
+    border: 1px solid color-mix(in srgb, var(--border-color) 78%, transparent);
+    border-radius: 999px;
+    background: color-mix(in srgb, var(--bg-app) 72%, transparent);
+    color: var(--text-secondary);
+    font-size: 0.8rem;
+    cursor: pointer;
+}
+
+.task-trace-stage-archive-btn svg {
+    width: 14px;
+    height: 14px;
+}
+
+.task-trace-stage-archive-btn[disabled] {
+    opacity: 0.6;
+    cursor: progress;
+}
+
+.task-trace-stage-archive-missing {
+    font-size: 0.8rem;
+    color: var(--text-muted);
+}
+
 .task-trace-stage-summary {
     margin-top: var(--space-2);
     padding: var(--space-2) var(--space-4);

@@ -1823,6 +1823,18 @@ function renderExecutionStageRounds(stage) {
     const rounds = Array.isArray(stage?.rounds) ? stage.rounds : [];
     const summaryHtml = renderExecutionStageSummary(stage);
     if (!rounds.length) {
+        const archiveRef = String(stage?.rounds_archive_ref || "").trim();
+        if (archiveRef) {
+            // 阶段被点名裁撤后轨道不再带正文，整段原文留在归档里：这里只给入口，
+            // 点开才取档（把正文塞回每一行 checkpoint 会让转录成倍变大）。
+            return `
+                <div class="task-trace-stage-archive" data-stage-archive="${esc(archiveRef)}">
+                    <button type="button" class="task-trace-stage-archive-btn" data-stage-archive-open="${esc(archiveRef)}">
+                        <i data-lucide="archive-restore"></i><span>取回本阶段的调用记录</span>
+                    </button>
+                </div>
+            ` + summaryHtml;
+        }
         // 挂进卡内的实时工具行会占住"暂无工具轮次"这句话的位置，靠 CSS 在有行时收掉它
         return `<div class="task-trace-stage-empty">${renderTraceField("阶段轮次", "", "当前阶段暂无工具轮次")}</div>` + summaryHtml;
     }
@@ -2754,6 +2766,7 @@ function renderExecutionTrace(node, { viewState = null } = {}) {
         if (runtimeEl instanceof HTMLElement) updateRuntimeBadge(item, runtimeEl);
     });
     bindTraceRoundToolStrips(traceList);
+    if (typeof bindStageArchiveOpens === "function") bindStageArchiveOpens(traceList);
     bindTraceOutputAutoLoad(traceList);
     bindTraceFieldCopyActions(traceList);
     traceItems.filter((item) => item instanceof HTMLElement && item.open).forEach((item) => hydrateTraceOutputBlocks(item));

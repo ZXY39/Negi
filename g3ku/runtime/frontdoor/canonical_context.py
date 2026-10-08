@@ -637,12 +637,18 @@ def project_canonical_context_for_ui_payload(canonical_context: Any) -> dict[str
         source = source_by_identity.get(
             canonical_stage_identity(stage, int(stage.get("stage_index") or 0))
         )
-        if source is None:
-            continue
-        stage["rounds"] = _ui_round_bodies_from_source(
-            source.get("rounds"),
-            raw=_as_str(stage.get("representation")) == RAW_REPRESENTATION,
-        )
+        if source is not None:
+            stage["rounds"] = _ui_round_bodies_from_source(
+                source.get("rounds"),
+                raw=_as_str(stage.get("representation")) == RAW_REPRESENTATION,
+            )
+        if not list(stage.get("rounds") or []):
+            archive_ref = _as_str(stage.get("archive_ref"))
+            if archive_ref:
+                # 轨道没带正文、归档里有整段原文：只交指针出去，前端点开才取档。
+                # 这是"裁撤只改发送体、不改 Web 轨道"那条不变量的零字节实现——把正文
+                # 塞回每一行 checkpoint 会让转录成倍变大（实测一条会话 +101 KB/行）。
+                stage["rounds_archive_ref"] = archive_ref
     return projected
 
 
@@ -749,6 +755,16 @@ def ui_canonical_context_delta_from_views(
                     source_stage.get("rounds"),
                     raw=is_raw_stage,
                 )
+            if not list(stage.get("rounds") or []):
+                # 补不到正身（源本身就是裁过的视图）时交指针，口径与
+                # `project_canonical_context_for_ui_payload` 一致：快照行带的是 message-local
+                # delta，卡片要能在点开出档，就得从 delta 里拿到 ref，而不是只在 final 的
+                # 全量投影里有。
+                archive_ref = _as_str(
+                    (source_stage or {}).get("archive_ref") or stage.get("archive_ref")
+                )
+                if archive_ref:
+                    stage["rounds_archive_ref"] = archive_ref
     return delta
 
 
