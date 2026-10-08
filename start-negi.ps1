@@ -15,15 +15,15 @@ $ErrorActionPreference = "Stop"
 Set-StrictMode -Version Latest
 
 $scriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
-$bootstrapScript = Join-Path $scriptDir "g3ku.ps1"
+$bootstrapScript = Join-Path $scriptDir "negi.ps1"
 $rootPattern = [regex]::Escape($scriptDir)
 
 function Show-Usage {
     @"
-Usage: .\start-g3ku.ps1 [-BindHost HOST] [-Port PORT] [-OpenBrowser] [-PromptLog] [-Reload] [-KeepWorker] [-h|--help]
+Usage: .\start-negi.ps1 [-BindHost HOST] [-Port PORT] [-OpenBrowser] [-PromptLog] [-Reload] [-KeepWorker] [-h|--help]
 
 Quick start:
-  .\start-g3ku.ps1
+  .\start-negi.ps1
 
 Common options:
   -BindHost      Web bind host. Default: 127.0.0.1
@@ -41,20 +41,20 @@ if ($Help -or ($ExtraArgs -contains "--help")) {
     exit 0
 }
 
-function Get-G3kuManagedPythonProcesses {
+function Get-NegiManagedPythonProcesses {
     Get-CimInstance Win32_Process | Where-Object {
         $_.Name -like "python*" -and
         $_.CommandLine -and
         $_.CommandLine -match $rootPattern -and
         (
-            $_.CommandLine -match 'g3ku_bootstrap\.py"?\s+web' -or
+            $_.CommandLine -match 'negi_bootstrap\.py"?\s+web' -or
             $_.CommandLine -match '-m\s+g3ku\s+web' -or
             $_.CommandLine -match '-m\s+g3ku\s+worker'
         )
     }
 }
 
-function Request-G3kuGracefulExit {
+function Request-NegiGracefulExit {
     param([int]$Port = 18790)
     try {
         $body = '{"pause_running_work":true}'
@@ -71,25 +71,25 @@ function Request-G3kuGracefulExit {
     }
 }
 
-function Stop-G3kuManagedPythonProcesses {
+function Stop-NegiManagedPythonProcesses {
     param([int]$Port = 18790)
-    $processes = @(Get-G3kuManagedPythonProcesses)
+    $processes = @(Get-NegiManagedPythonProcesses)
     if (-not $processes) {
         return 0
     }
-    Write-Host "[g3ku] Restarting existing g3ku web/worker processes..." -ForegroundColor Yellow
-    if (Request-G3kuGracefulExit -Port $Port) {
-        Write-Host "[g3ku] Graceful exit requested; waiting for the runtime to pause all work and stop..." -ForegroundColor Yellow
+    Write-Host "[negi] Restarting existing Negi web/worker processes..." -ForegroundColor Yellow
+    if (Request-NegiGracefulExit -Port $Port) {
+        Write-Host "[negi] Graceful exit requested; waiting for the runtime to pause all work and stop..." -ForegroundColor Yellow
         $deadline = (Get-Date).AddSeconds(40)
         while ((Get-Date) -lt $deadline) {
-            $remaining = @(Get-G3kuManagedPythonProcesses)
+            $remaining = @(Get-NegiManagedPythonProcesses)
             if (-not $remaining) {
                 return $processes.Count
             }
             Start-Sleep -Milliseconds 500
         }
     }
-    Write-Host "[g3ku] Force-stopping remaining g3ku processes..." -ForegroundColor Yellow
+    Write-Host "[negi] Force-stopping remaining Negi processes..." -ForegroundColor Yellow
     foreach ($process in $processes) {
         # $processes 是发 graceful exit 之前拍的快照；等轮询结束再回来时，
         # 其中不少 PID 已经自己退干净了。按实况跳过，别把"已经不在了"报成停止失败。
@@ -100,7 +100,7 @@ function Stop-G3kuManagedPythonProcesses {
             Stop-Process -Id $process.ProcessId -Force -ErrorAction Stop
         } catch {
             if (Get-Process -Id $process.ProcessId -ErrorAction SilentlyContinue) {
-                Write-Warning "[g3ku] Failed to stop PID $($process.ProcessId): $($_.Exception.Message)"
+                Write-Warning "[negi] Failed to stop PID $($process.ProcessId): $($_.Exception.Message)"
             }
         }
     }
@@ -110,32 +110,32 @@ function Stop-G3kuManagedPythonProcesses {
 
 function Assert-StartPreconditions {
     if (-not (Test-Path $bootstrapScript)) {
-        throw "[g3ku] Missing launcher script: $bootstrapScript"
+        throw "[negi] Missing launcher script: $bootstrapScript"
     }
 
     $existingWeb = @(Get-NetTCPConnection -LocalPort $Port -State Listen -ErrorAction SilentlyContinue)
     if ($existingWeb.Count -gt 0) {
         $pids = ($existingWeb | Select-Object -ExpandProperty OwningProcess | Sort-Object -Unique) -join ", "
-        throw "[g3ku] Port $Port is already in use by PID(s): $pids. Stop the existing process before starting g3ku."
+        throw "[negi] Port $Port is already in use by PID(s): $pids. Stop the existing process before starting Negi."
     }
 
-    $existingManaged = @(Get-G3kuManagedPythonProcesses)
+    $existingManaged = @(Get-NegiManagedPythonProcesses)
     if ($existingManaged.Count -gt 0) {
         $summary = $existingManaged |
             Select-Object ProcessId, CommandLine |
             ForEach-Object { "PID=$($_.ProcessId) $($_.CommandLine)" }
-        throw "[g3ku] Existing g3ku web/worker processes are still running after restart attempt:`n$($summary -join "`n")"
+        throw "[negi] Existing Negi web/worker processes are still running after restart attempt:`n$($summary -join "`n")"
     }
 }
 
-[void](Stop-G3kuManagedPythonProcesses -Port $Port)
+[void](Stop-NegiManagedPythonProcesses -Port $Port)
 Assert-StartPreconditions
 
 $webArgs = @("web", "--host", $BindHost, "--port", "$Port")
 
 if ($PromptLog) {
     $env:G3KU_PROMPT_TRACE = "1"
-    Write-Host "[g3ku] Prompt logging enabled via G3KU_PROMPT_TRACE=1." -ForegroundColor Yellow
+    Write-Host "[negi] Prompt logging enabled via G3KU_PROMPT_TRACE=1." -ForegroundColor Yellow
 } else {
     Remove-Item Env:G3KU_PROMPT_TRACE -ErrorAction SilentlyContinue
 }
@@ -152,17 +152,17 @@ if ($Reload) {
     $webArgs += "--reload"
 }
 
-Write-Host "[g3ku] Project root: $scriptDir"
+Write-Host "[negi] Project root: $scriptDir"
 if ($Reload) {
-    Write-Host "[g3ku] Reload mode enabled; the web runtime will not auto-start a managed worker." -ForegroundColor Yellow
+    Write-Host "[negi] Reload mode enabled; the web runtime will not auto-start a managed worker." -ForegroundColor Yellow
 } else {
-    Write-Host "[g3ku] Task worker will start after project unlock."
+    Write-Host "[negi] Task worker will start after project unlock."
 }
-Write-Host "[g3ku] Starting web server on http://${BindHost}:$Port ..."
+Write-Host "[negi] Starting web server on http://${BindHost}:$Port ..."
 
 if ($KeepWorker) {
     $env:G3KU_WEB_KEEP_WORKER = "1"
-    Write-Host "[g3ku] KeepWorker enabled; web-managed worker will be left running when the web server exits." -ForegroundColor Yellow
+    Write-Host "[negi] KeepWorker enabled; web-managed worker will be left running when the web server exits." -ForegroundColor Yellow
 } else {
     Remove-Item Env:G3KU_WEB_KEEP_WORKER -ErrorAction SilentlyContinue
 }

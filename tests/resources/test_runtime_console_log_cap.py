@@ -3,7 +3,7 @@ import time
 
 import pytest
 
-import g3ku_bootstrap
+import negi_bootstrap
 from main.service.runtime_service import MainRuntimeService
 
 
@@ -73,24 +73,24 @@ def test_cap_console_log_file_tolerates_missing_path(tmp_path) -> None:
 def bootstrap_log_dir(tmp_path, monkeypatch):
     log_dir = tmp_path / 'logs'
     log_dir.mkdir()
-    monkeypatch.setattr(g3ku_bootstrap, 'RUNTIME_LOG_DIR', log_dir)
-    monkeypatch.setattr(g3ku_bootstrap, 'RUNTIME_CONSOLE_LOG_FILE', log_dir / 'console.log')
+    monkeypatch.setattr(negi_bootstrap, 'RUNTIME_LOG_DIR', log_dir)
+    monkeypatch.setattr(negi_bootstrap, 'RUNTIME_CONSOLE_LOG_FILE', log_dir / 'console.log')
     return log_dir
 
 
 def test_bootstrap_rotates_oversized_console_log(bootstrap_log_dir, monkeypatch) -> None:
     log = bootstrap_log_dir / 'console.log'
     _write_lines(log, 1000)
-    monkeypatch.setattr(g3ku_bootstrap, 'RUNTIME_CONSOLE_LOG_MAX_BYTES', 100)
+    monkeypatch.setattr(negi_bootstrap, 'RUNTIME_CONSOLE_LOG_MAX_BYTES', 100)
 
-    g3ku_bootstrap._rotate_runtime_console_log()
+    negi_bootstrap._rotate_runtime_console_log()
 
     assert not log.exists(), '超上限的当前代必须被换走，让新句柄从空文件开始'
     generations = sorted(bootstrap_log_dir.glob('console.log.*'))
     assert len(generations) == 1
     assert generations[0].stat().st_size > 100
 
-    stream = g3ku_bootstrap._open_runtime_console_log_stream()
+    stream = negi_bootstrap._open_runtime_console_log_stream()
     assert stream is not None
     stream.close()
     assert log.exists() and log.stat().st_size == 0
@@ -99,9 +99,9 @@ def test_bootstrap_rotates_oversized_console_log(bootstrap_log_dir, monkeypatch)
 def test_bootstrap_keeps_console_log_under_cap(bootstrap_log_dir, monkeypatch) -> None:
     log = bootstrap_log_dir / 'console.log'
     _write_lines(log, 10)
-    monkeypatch.setattr(g3ku_bootstrap, 'RUNTIME_CONSOLE_LOG_MAX_BYTES', 1024 * 1024)
+    monkeypatch.setattr(negi_bootstrap, 'RUNTIME_CONSOLE_LOG_MAX_BYTES', 1024 * 1024)
 
-    g3ku_bootstrap._rotate_runtime_console_log()
+    negi_bootstrap._rotate_runtime_console_log()
 
     assert log.exists()
     assert list(bootstrap_log_dir.glob('console.log.*')) == []
@@ -112,10 +112,10 @@ def test_bootstrap_prunes_expired_generations_only(bootstrap_log_dir) -> None:
     fresh = bootstrap_log_dir / 'console.log.20990101-000000'
     expired.write_text('old\n', encoding='utf-8')
     fresh.write_text('new\n', encoding='utf-8')
-    stale = time.time() - (g3ku_bootstrap.RUNTIME_CONSOLE_LOG_RETENTION_SECONDS + 3600)
+    stale = time.time() - (negi_bootstrap.RUNTIME_CONSOLE_LOG_RETENTION_SECONDS + 3600)
     os.utime(expired, (stale, stale))
 
-    g3ku_bootstrap._rotate_runtime_console_log()
+    negi_bootstrap._rotate_runtime_console_log()
 
     assert not expired.exists()
     assert fresh.exists()

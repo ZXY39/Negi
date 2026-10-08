@@ -1,6 +1,6 @@
 """Read-only CLI diagnostics for the External Agent API surface.
 
-``g3ku external status`` / ``g3ku external sessions`` give shell users (and
+``negi external status`` / ``negi external sessions`` give shell users (and
 the agent's exec tool) a way to inspect bridge connectivity state without
 touching secrets: tokens render masked (or as a locked-placeholder note) and
 the registry mapping is listed verbatim.

@@ -2,7 +2,7 @@
 set -eu
 
 SCRIPT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)"
-BOOTSTRAP="$SCRIPT_DIR/g3ku_bootstrap.py"
+BOOTSTRAP="$SCRIPT_DIR/negi_bootstrap.py"
 VENV_PYTHON="$SCRIPT_DIR/.venv/bin/python"
 
 if [ ! -f "$VENV_PYTHON" ]; then
@@ -10,7 +10,7 @@ if [ ! -f "$VENV_PYTHON" ]; then
 fi
 
 if [ ! -f "$BOOTSTRAP" ]; then
-  echo "[g3ku] Missing bootstrap script: $BOOTSTRAP" >&2
+  echo "[negi] Missing bootstrap script: $BOOTSTRAP" >&2
   exit 1
 fi
 
@@ -26,5 +26,5 @@ if command -v python >/dev/null 2>&1; then
   exec python "$BOOTSTRAP" "$@"
 fi
 
-echo "[g3ku] Python not found. Install Python or create a local .venv first." >&2
+echo "[negi] Python not found. Install Python or create a local .venv first." >&2
 exit 1

@@ -5,7 +5,7 @@
     iwr https://raw.githubusercontent.com/ZXY39/Negi/v1.0.16/install.ps1 | iex
 
   Provisions uv (and therefore Python) on a machine that has neither, fetches the
-  pinned checkout, syncs the locked environment and hands off to g3ku_bootstrap.py.
+  pinned checkout, syncs the locked environment and hands off to negi_bootstrap.py.
   Runtime code is not modified by this script.
 #>
 param(
@@ -193,7 +193,7 @@ if ($NoStart) {
     exit 0
 }
 
-Write-Step 'launching G3KU web (first run asks for the project password in the browser)'
+Write-Step 'launching Negi web (first run asks for the project password in the browser)'
 $python = Get-VenvPython -Root $Dir
 $saved = $ErrorActionPreference
 $ErrorActionPreference = 'Continue'
@@ -201,7 +201,7 @@ Push-Location -LiteralPath $Dir
 try {
     # No pipeline here: the server keeps the console attached so its live output
     # and clickable URL banner reach the terminal unmodified.
-    & $python g3ku_bootstrap.py web
+    & $python negi_bootstrap.py web
 }
 finally {
     $ErrorActionPreference = $saved

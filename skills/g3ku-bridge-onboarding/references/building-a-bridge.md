@@ -72,7 +72,7 @@ async for event in g3ku.stream_events(session_id, last_event_id=seen):
 
 ## 5. 验收清单（桥写完后逐条过）
 
-- [ ] `g3ku external sessions` 出现 external_key ↔ session_key 映射。
+- [ ] `negi external sessions` 出现 external_key ↔ session_key 映射。
 - [ ] 一条平台消息 → g3ku 收到 → SSE `turn.started → … → turn.completed/failed`。
 - [ ] 同 `Idempotency-Key` 重发返回 `status=duplicate`，不重跑。
 - [ ] 断线重连后 `Last-Event-ID` 回放不丢终态。

@@ -1070,7 +1070,7 @@ class SttConfig(Base):
     off is the operator's way of saying "never touch my microphone lane". What
     stays explicit is the ~157 MB of artifacts (15 MB binary + 142 MB ``base``
     model) -- nothing here downloads or runs inference because a default said
-    so: the engine only reports ``ready=False`` until ``g3ku stt prepare`` (or
+    so: the engine only reports ``ready=False`` until ``negi stt prepare`` (or
     the composer's first-click download) has placed them.
 
     Every default below is measured on this product's own floor (2 vCPU / 4

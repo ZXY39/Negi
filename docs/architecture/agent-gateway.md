@@ -1,6 +1,6 @@
 # Negi Agent Gateway 架构说明（OpenAI 兼容端点 + MCP 网关）
 
-本文档是「外部 AI agent 开箱即用对接面」的唯一契约归属文档：OpenAI 兼容端点（`POST /api/v1/chat/completions`、`GET /api/v1/models`）与 MCP stdio 网关（`g3ku mcp serve`）。底层回合/事件/鉴权契约属于 `external-agent-api.md`「回合契约」「事件流」，本文只写网关层叠加的语义；操作向快速上手见 skill `skills/g3ku-bridge-onboarding/references/integration-manual.md`「开箱即用集成」。
+本文档是「外部 AI agent 开箱即用对接面」的唯一契约归属文档：OpenAI 兼容端点（`POST /api/v1/chat/completions`、`GET /api/v1/models`）与 MCP stdio 网关（`negi mcp serve`）。底层回合/事件/鉴权契约属于 `external-agent-api.md`「回合契约」「事件流」，本文只写网关层叠加的语义；操作向快速上手见 skill `skills/g3ku-bridge-onboarding/references/integration-manual.md`「开箱即用集成」。
 
 ## 1. 定位与边界
 
@@ -50,7 +50,7 @@
 
 ## 4. MCP stdio 网关契约
 
-- 进程模型：`g3ku mcp serve --token <t> [--base-url http://127.0.0.1:18790/api/v1] [--conversation-prefix mcp]`；token 可由 env `G3KU_EXTERNAL_TOKEN` 提供。独立轻量进程，连**运行中的** web 运行时；`g3ku mcp check` 提供接入前连通性自检（回显 bridge_id 与会话数）。
+- 进程模型：`negi mcp serve --token <t> [--base-url http://127.0.0.1:18790/api/v1] [--conversation-prefix mcp]`；token 可由 env `G3KU_EXTERNAL_TOKEN` 提供。独立轻量进程，连**运行中的** web 运行时；`negi mcp check` 提供接入前连通性自检（回显 bridge_id 与会话数）。
 - **stdout 纯净铁律**：stdio 上 stdout 是 JSON-RPC 协议通道，serve 路径一切提示走 stderr（`typer.echo(..., err=True)`；loguru 与 FastMCP 日志均 stderr-only）。任何 stdout 字节都会毁帧。
 - 会话映射：`conversation` 参数 → `external_key = mcp:{conversation}`；每次工具调用内"开 SSE 流 → 发消息 → 有界等待 → 关流"（流先开=零事件间隙；无驻留泵）。
 - 工具面（`g3ku/mcp_gateway/server.py`，全部返回 dict、**永不抛异常**——HTTP/传输错误转 `{ok:false, error, status_code?}` 可读载荷）：
@@ -64,7 +64,7 @@
 | `g3ku_cancel(conversation)` | 取消会话任务 | `cancelled` 计数 |
 | `g3ku_list_conversations()` | 本 bridge 会话列表 | `conversation`（external_key 剥前缀） |
 
-- 客户端接入示例：`claude mcp add g3ku -- g3ku mcp serve --token <t>`（或等价 MCP JSON 配置）。
+- 客户端接入示例：`claude mcp add g3ku -- negi mcp serve --token <t>`（或等价 MCP JSON 配置）。
 
 ## 5. 安全注记
 
@@ -76,7 +76,7 @@
 
 - OpenAI SDK 报 401/403：token 不匹配 / `externalApi.enabled=false`；423：项目锁定；503 `runtime_unavailable`：web 运行时未就绪。
 - 回复总是 "still working"：回合确实还在跑（长任务）——加大 `wait_seconds`、改用 `stream=true`，或稍后对同一 `user`/conversation 再发一条询问结果；确认不是事件缓冲溢出（`eventBufferSize`）。
-- MCP 工具全部 `connection_failed`：web 运行时没在跑或 `--base-url` 错误——先 `g3ku mcp check`。
+- MCP 工具全部 `connection_failed`：web 运行时没在跑或 `--base-url` 错误——先 `negi mcp check`。
 - MCP 客户端报协议错误/解析失败：几乎总是有东西写了 stdout——检查是否改动了 serve 路径的输出（铁律见「MCP stdio 网关契约」）。
 - 流式文本与最终回复不一致：多段思考 + 段切换分隔符是预期行为；对一致性敏感改用非流式（「流式」局限）。
 - 同一会话串话：多个调用方共用同一 `user`/`conversation` 键——按调用方分配独立键或独立 bridge token。

@@ -6,7 +6,7 @@
 
 ## 运行前提
 
-1. g3ku web 已启动，且 `.g3ku/config.json` 中启用 External Agent API 并发放 token：
+1. negi web 已启动，且 `.g3ku/config.json` 中启用 External Agent API 并发放 token：
 
    ```json
    "externalApi": {

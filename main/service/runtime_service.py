@@ -253,7 +253,7 @@ _TASK_DELETE_CONFIRM_TTL_SECONDS = 600.0
 # 删除前等待暂停排空的上限：到期未排空按 task_still_stopping 拒绝，
 # 调用方可在暂停生效后重试；避免无限等待离线/卡死的排空。
 _DELETE_PAUSE_DRAIN_TIMEOUT_SECONDS = 10.0
-# web 自身 stdout 落点（g3ku_bootstrap 把它交给子进程句柄）的长跑封顶：正文写在
+# web 自身 stdout 落点（negi_bootstrap 把它交给子进程句柄）的长跑封顶：正文写在
 # 一个继承来的 append 句柄上，改名换不掉，所以这里只就地截尾。实盘 187 MB/23h
 # 的那次是 QQ 桥重连风暴把 loguru 全量 traceback 灌进来的量级。
 _CONSOLE_LOG_CAP_BYTES = 100 * 1024 * 1024
@@ -8957,7 +8957,7 @@ class MainRuntimeService:
 
         只就地截尾、不改名：文件是 bootstrap 交给 web 子进程的 append 句柄，
         句柄在就换不掉（Windows 上被占用的文件 rename 失败）。整份改名轮转发生在
-        下一次启动（``g3ku_bootstrap._rotate_runtime_console_log``）。
+        下一次启动（``negi_bootstrap._rotate_runtime_console_log``）。
         """
         try:
             claimed = await asyncio.to_thread(

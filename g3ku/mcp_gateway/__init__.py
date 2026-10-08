@@ -1,7 +1,7 @@
 """g3ku MCP gateway — expose a running g3ku runtime to external AI agents.
 
 开箱即用对接面 #2（契约文档：docs/architecture/agent-gateway.md）：
-``g3ku mcp serve`` 起一个 stdio MCP 代理进程，经 HTTP+SSE 消费 External
+``negi mcp serve`` 起一个 stdio MCP 代理进程，经 HTTP+SSE 消费 External
 Agent API（``/api/v1``），把对话封装成六个 MCP 工具（g3ku_chat 等），
 Claude Code / Cursor 等 MCP 客户端一条命令即可接入。
 

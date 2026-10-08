@@ -1,12 +1,15 @@
 import subprocess
 from pathlib import Path
 
-
 REPO_ROOT = Path(__file__).resolve().parents[2]
 
 
-def test_start_g3ku_powershell_help_outputs_usage_for_short_and_long_flags() -> None:
-    script = REPO_ROOT / "start-g3ku.ps1"
+def _read(name: str) -> str:
+    return (REPO_ROOT / name).read_text(encoding="utf-8")
+
+
+def test_start_negi_powershell_help_outputs_usage_for_short_and_long_flags() -> None:
+    script = REPO_ROOT / "start-negi.ps1"
 
     short = subprocess.run(
         [
@@ -45,55 +48,53 @@ def test_start_g3ku_powershell_help_outputs_usage_for_short_and_long_flags() -> 
     assert long.returncode == 0
     assert "Usage:" in short.stdout
     assert "Usage:" in long.stdout
-    assert "start-g3ku.ps1" in short.stdout
+    assert "start-negi.ps1" in short.stdout
     assert "-BindHost" in short.stdout
     assert "-Reload" in short.stdout
     assert "-OpenBrowser" in short.stdout
 
 
-def test_start_g3ku_shell_script_has_richer_help_text() -> None:
-    shell_text = (REPO_ROOT / "start-g3ku.sh").read_text(encoding="utf-8")
+def test_start_negi_shell_script_has_richer_help_text() -> None:
+    shell_text = _read("start-negi.sh")
 
     assert "-h|--help)" in shell_text
-    assert "Usage: ./start-g3ku.sh" in shell_text
+    assert "Usage: ./start-negi.sh" in shell_text
     assert "Common options:" in shell_text
     assert "--open-browser" in shell_text
     assert "--reload" in shell_text
 
 
-def test_readme_uses_start_script_as_primary_launch_and_moves_manual_commands_later() -> None:
-    readme = (REPO_ROOT / "README.md").read_text(encoding="utf-8")
-
-    startup_section_index = readme.index("## 2. 如何启动项目")
-    feature_section_index = readme.index("## 5. 功能介绍")
-    developer_section_index = readme.index("## 6. 面向开发者和 Agent 的补充说明")
-
-    startup_section = readme[startup_section_index:feature_section_index]
-    developer_section = readme[developer_section_index:]
-
-    assert ".\\start-g3ku.ps1" in startup_section
-    assert "./start-g3ku.sh" in startup_section
-    assert "g3ku web" not in startup_section
-    assert "g3ku worker" not in startup_section
-    assert "g3ku web" in developer_section
-    assert "g3ku worker" in developer_section
+def test_wrappers_exec_the_bootstrapper_by_its_current_name() -> None:
+    # 入口是三层链：start-negi.* → negi.* → negi_bootstrap.py。任何一环按旧名 exec，
+    # 双击启动就会指向一个升级后不存在的文件。
+    assert '"negi.ps1"' in _read("start-negi.ps1")
+    assert "/negi.sh" in _read("start-negi.sh")
+    assert "start-negi.ps1" in _read("start-negi.cmd")
+    for wrapper in ("negi.ps1", "negi.sh", "negi.cmd"):
+        assert "negi_bootstrap.py" in _read(wrapper), wrapper
 
 
-def test_readme_adds_emoji_to_seven_pillars_and_feature_intro_section() -> None:
-    readme = (REPO_ROOT / "README.md").read_text(encoding="utf-8")
+def test_stale_process_reaper_keeps_both_cmdline_shapes() -> None:
+    # 入口名换成 negi，进程形状没换：托管 worker、升级后重拉起与容器入口都用 `-m g3ku`，
+    # 只有走包装启动的那一跳才是 negi_bootstrap.py。判据少一条就会留下占着端口的实例。
+    ps_text = _read("start-negi.ps1")
+    sh_text = _read("start-negi.sh")
+    assert r"-m\s+g3ku\s+web" in ps_text
+    assert r"-m\s+g3ku\s+worker" in ps_text
+    assert r"negi_bootstrap\.py" in ps_text
+    assert "/-m[[:space:]]+g3ku[[:space:]]+web/" in sh_text
+    assert "/-m[[:space:]]+g3ku[[:space:]]+worker/" in sh_text
+    assert r"negi_bootstrap\.py" in sh_text
 
-    assert "1. 🧠 **自进化体系**" in readme
-    assert "2. 🧩  **渐进式加载模式**" in readme
-    assert "3. 👥  **多 Agent 架构**" in readme
-    assert "4. 🗺️  **混合 Agent 执行模式**" in readme
-    assert "5. 🗜️  **多层上下文压缩优化机制**" in readme
-    assert "6. ⚡  **性能监控与动态放行机制**" in readme
-    assert "7. 🛡️  **安全机制**" in readme
 
-    assert "## 5. 功能介绍" in readme
-    assert "如果你第一次接触 G3KU" in readme
-    assert "直接问 Agent“你能做什么？有哪些技能和工具？”" in readme
-    assert "在 Skill 管理和 Tool 管理页面里自定义管理能力" in readme
-    assert "浏览器自动化相关能力" in readme
-    assert "定时任务" in readme
-    assert "Skill 安装与下载等扩展能力" in readme
+def test_readme_launches_via_start_script_and_keeps_typed_commands_later() -> None:
+    readme = _read("README.md")
+
+    startup_section = readme[readme.index("## 2. 快速开始"):readme.index("## 3. Web 界面")]
+    manual_section = readme[readme.index("## 11. 手动安装与命令行"):]
+
+    assert "start-negi" in startup_section
+    assert "negi web" not in startup_section
+    assert "negi worker" not in startup_section
+    assert "negi web" in manual_section
+    assert "negi worker" in manual_section

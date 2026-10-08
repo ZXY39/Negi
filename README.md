@@ -135,7 +135,7 @@ export UV_PYTHON_INSTALL_MIRROR=<可用的 python-build-standalone 镜像>
 | `-Ref TAG` / `--ref TAG` | 指定安装版本，用于回滚或试装 |
 | `-Upgrade` / `--upgrade` | 将已安装的设备更新到指定版本 |
 
-启动脚本 `start-g3ku`：
+启动脚本 `start-negi`：
 
 | Windows | Linux / macOS | 作用 |
 | --- | --- | --- |
@@ -316,7 +316,7 @@ export UV_PYTHON_INSTALL_MIRROR=<可用的 python-build-standalone 镜像>
 在上述接口之上另有两个可直接使用的对接形式，二者都随 `externalApi.enabled` 一并开启：
 
 - **OpenAI 兼容接口** `POST /api/v1/chat/completions`：供任何按 OpenAI 协议调用的客户端使用，包含会话映射、等待与超时、流式返回。
-- **工具网关** `g3ku mcp serve`：把系统能力以标准工具协议暴露给本机其他程序；`g3ku mcp check` 用于自检。
+- **工具网关** `negi mcp serve`：把系统能力以标准工具协议暴露给本机其他程序；`negi mcp check` 用于自检。
 
 ## 7. 运行行为
 
@@ -347,7 +347,7 @@ export UV_PYTHON_INSTALL_MIRROR=<可用的 python-build-standalone 镜像>
 
 ### 7.5 语音输入
 
-语音转写在**本机**完成，音频不上传到任何外部服务。使用 whisper.cpp 官方程序与开源模型，转写能力默认允许使用，但不会因为默认值而自动下载任何文件：首次点击麦克风时才拉取程序与模型，合计约 157 MB（程序 15 MB、`base` 模型 142 MB）。也可以先用命令行准备：`g3ku stt prepare`。
+语音转写在**本机**完成，音频不上传到任何外部服务。使用 whisper.cpp 官方程序与开源模型，转写能力默认允许使用，但不会因为默认值而自动下载任何文件：首次点击麦克风时才拉取程序与模型，合计约 157 MB（程序 15 MB、`base` 模型 142 MB）。也可以先用命令行准备：`negi stt prepare`。
 
 转写结果作为该条消息的正文进入对话，并保留来源标记；转写失败的条目会明确标注失败原因。聊天平台收到的语音同样在本机转写，转写结果之外还保留原始音频供回放。未准备好模型时，语音退回普通文件处理，不会静默丢弃。
 
@@ -364,7 +364,7 @@ export UV_PYTHON_INSTALL_MIRROR=<可用的 python-build-standalone 镜像>
 
 默认安装位置：Windows `%USERPROFILE%\Negi`，Linux / macOS `~/Negi`。环境目录 `.venv/` 与数据目录 `.g3ku/` 都在该目录内，升级不会改动它们。
 
-- **查看是否有新版本**：在项目目录执行 `g3ku status`，输出的最后一行 `Release:` 显示当前版本与远端最新标签。离线、缺少 git 或远端不是本仓库时该行不出现，不会给出"已是最新"的错误结论。
+- **查看是否有新版本**：在项目目录执行 `negi status`，输出的最后一行 `Release:` 显示当前版本与远端最新标签。离线、缺少 git 或远端不是本仓库时该行不出现，不会给出"已是最新"的错误结论。
 - **自动检查**：服务运行期间每 5 小时检查一次，启动时同样检查一次。开关与间隔在配置文件的 `update_check`（`enabled` / `interval_hours`）。项目处于锁定状态时不检查也不提醒。
 - **有新版本时**：侧栏「设置」按钮左上角出现标记，命令行启动时也会提示一行。设置页显示「当前版本 · 最新标签 · 检查于」，可手动检查，也可点击「重启并更新」——该操作会先暂停正在进行的对话与任务，更新完成后自动重启服务。代码不会被自动替换，必须由使用者确认。
 - **手动升级**：在安装目录里执行 `.\install.ps1 -Upgrade -Dir .`（Linux / macOS `./install.sh --upgrade --dir .`）。`-Dir` 不能省：脚本按它决定动手的目录，默认值是 `%USERPROFILE%\Negi` / `~/Negi`，装在别处的设备省略它就会去动默认目录、原安装不变。默认升级到脚本内固定的版本，指定版本加 `-Ref v1.0.16` / `--ref v1.0.16`。
@@ -445,7 +445,7 @@ pip install -e ".[dev]"
 需要提前生成项目本地配置：
 
 ```bash
-g3ku onboard --project
+negi onboard --project
 ```
 
 执行后在当前仓库生成 `.g3ku/config.json`，模型、界面、接入与运行时的配置均围绕该文件展开。
@@ -453,13 +453,13 @@ g3ku onboard --project
 ### 11.2 启动方式
 
 ```bash
-g3ku web                              # 启动 Web 服务（默认托管任务执行进程）
-g3ku web --host 127.0.0.1 --port 18790
-g3ku web --reload                     # 开发用自动重载（此时不再托管执行进程）
-g3ku worker                           # 单独启动后台任务执行进程
-g3ku agent                            # 命令行对话
-g3ku agent -m "你好，介绍一下你自己"   # 单条消息测试
-g3ku status                           # 运行状态与版本信息
+negi web                              # 启动 Web 服务（默认托管任务执行进程）
+negi web --host 127.0.0.1 --port 18790
+negi web --reload                     # 开发用自动重载（此时不再托管执行进程）
+negi worker                           # 单独启动后台任务执行进程
+negi agent                            # 命令行对话
+negi agent -m "你好，介绍一下你自己"   # 单条消息测试
+negi status                           # 运行状态与版本信息
 ```
 
 默认端口为 18790，浏览器访问 `http://127.0.0.1:18790`。使用 `--reload` 时任务执行进程需要单独启动，其余情况由 Web 服务托管并随之启停。
@@ -468,16 +468,16 @@ g3ku status                           # 运行状态与版本信息
 
 | 命令 | 用途 |
 | --- | --- |
-| `g3ku onboard` | 生成配置与工作目录 |
-| `g3ku web` / `g3ku worker` / `g3ku agent` | 启动服务、执行进程、命令行对话 |
-| `g3ku status` | 状态检查与版本信息 |
-| `g3ku cron` | 列出、新增、删除、启用、立即执行定时任务 |
-| `g3ku memory` | 长期记忆的检查与维护 |
-| `g3ku resource` | 资源目录的检查与重新加载 |
-| `g3ku provider` | 模型提供方相关操作 |
-| `g3ku external` | 对外接口与桥接会话的只读诊断 |
-| `g3ku stt` | 语音识别的就绪检查与准备 |
-| `g3ku mcp` | 工具网关的运行与自检 |
+| `negi onboard` | 生成配置与工作目录 |
+| `negi web` / `negi worker` / `negi agent` | 启动服务、执行进程、命令行对话 |
+| `negi status` | 状态检查与版本信息 |
+| `negi cron` | 列出、新增、删除、启用、立即执行定时任务 |
+| `negi memory` | 长期记忆的检查与维护 |
+| `negi resource` | 资源目录的检查与重新加载 |
+| `negi provider` | 模型提供方相关操作 |
+| `negi external` | 对外接口与桥接会话的只读诊断 |
+| `negi stt` | 语音识别的就绪检查与准备 |
+| `negi mcp` | 工具网关的运行与自检 |
 
 各命令均支持 `--help`。
 

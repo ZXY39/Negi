@@ -1,4 +1,4 @@
-"""``g3ku mcp`` CLI 测试（typer CliRunner，模式抄 test_external_cli_status）。
+"""``negi mcp`` CLI 测试（typer CliRunner，模式抄 test_external_cli_status）。
 
 核心契约：stdio purity——serve 路径绝不向 stdout 写任何字节（F10），
 一切提示走 stderr；``server.run(transport="stdio")`` 是唯一协议入口。

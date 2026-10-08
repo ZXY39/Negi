@@ -21,7 +21,7 @@
 3. **发消息**：`POST /sessions/{session_id}/messages`，带 `Idempotency-Key` 头，拿回 `turn_id` + `status`。
 4. **订阅事件**：`GET /sessions/{session_id}/events`（SSE），收 `turn.started → reply.delta* → reply.final → turn.completed`。
 5. **收终态**：看到 `turn.completed`（或 `turn.failed`）才算这一回合结束。
-6. **验收**：`g3ku external sessions` 能看到映射；Web 会话列表渠道分组出现该会话（只读）。
+6. **验收**：`negi external sessions` 能看到映射；Web 会话列表渠道分组出现该会话（只读）。
 
 ## 3. 接口参考
 
@@ -116,8 +116,8 @@ curl -N $BASE/sessions/$SESSION_ID/events -H "Authorization: Bearer $TOKEN" \
 
 ## 6. 验收与排障
 
-- `g3ku external status`：总开关 + 每桥 token 掩码 + 启停（锁定时显示占位提示）。
-- `g3ku external sessions [--bridge X]`：注册表映射 external_key ↔ session_key。
+- `negi external status`：总开关 + 每桥 token 掩码 + 启停（锁定时显示占位提示）。
+- `negi external sessions [--bridge X]`：注册表映射 external_key ↔ session_key。
 - 桥收到 403：查 `externalApi.enabled` 与 token；401：token 不匹配或条目禁用；423：项目锁定。
 - 提交成功但收不到回复：确认订阅的 SSE 会话与提交的是同一 `session_id`；事件是否被 `eventBufferSize` 淘汰。
 - 主动推送不到：发布侧（heartbeat 日志）→ drain（`ext outbound drained`/dropped）→ 桥的 `outbound.created` 消费。
@@ -154,8 +154,8 @@ print(resp.choices[0].message.content)
 ### MCP 网关（Claude Code / Cursor 等）
 
 ```bash
-g3ku mcp check --token <bridge token>          # 连通性自检
-claude mcp add g3ku -- g3ku mcp serve --token <bridge token>
+negi mcp check --token <bridge token>          # 连通性自检
+claude mcp add g3ku -- negi mcp serve --token <bridge token>
 ```
 
 等价 MCP JSON 配置：`{"command": "g3ku", "args": ["mcp", "serve", "--token", "<t>"]}`（token 也可走 env `G3KU_EXTERNAL_TOKEN`）。暴露六个工具：`g3ku_chat` / `g3ku_get_reply` / `g3ku_session_status` / `g3ku_pause` / `g3ku_cancel` / `g3ku_list_conversations`；每个 `conversation` 名对应一个持久 g3ku 会话。

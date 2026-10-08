@@ -98,15 +98,16 @@ These usually do not require updating `docs/architecture/` unless they alter mai
 
 ## Brand Name vs Frozen Identifiers
 
-The product is displayed as **Negi**, the repository is `ZXY39/Negi`, and the code keeps the legacy `g3ku` spelling. Do not "finish the rename" into the list below — each entry is a live contract, not branding:
+The product is displayed as **Negi**, the repository is `ZXY39/Negi`, and the operator-facing command and entry scripts are `negi` / `negi web` / `start-negi.*` / `negi.ps1` / `negi_bootstrap.py`; the code itself keeps the legacy `g3ku` spelling. Do not "finish the rename" into the list below — each entry is a live contract, not branding:
 
 - The repository path `ZXY39/Negi` and the URLs and directory built from it: `$RepoName` / `REPO_NAME` in `install.ps1` / `install.sh`, and the default install directory `~/Negi`. Never let the name `G3KU-Agent` exist again — GitHub drops old-name redirects as soon as that name is taken, and installed devices check and upgrade through their own `origin` (`g3ku/update_check.py` `git ls-remote --tags origin`, `install.ps1` `git fetch origin`), so they would silently stop receiving updates.
+- The Python package directory `g3ku/` and therefore every `python -m g3ku` form. This is not only an import path: it is the cmdline shape the stale-process reaper matches (`start-negi.ps1` / `start-negi.sh` test `-m\s+g3ku\s+web|worker`, and `g3ku/web/launcher.py::_web_runtime_cmdline_matches`), and `worker_control.py`, `update_apply.py` and `docker/*-entrypoint.sh` all spawn that shape. Renaming the package would disable the reaper silently.
 - Protocol markers matched literally by the runtime: `[G3KU_STAGE_*]`, `[G3KU_SILENT`, `[G3KU_TOKEN_COMPACT_V2]`, `### G3KU_PATCH_METADATA ###`, `### G3KU_PATCH_DIFF ###`.
 - `G3KU_*` environment variables (50 named in code today, plus any config field, because the
   root settings model declares `env_prefix="G3KU_"` — the set is open-ended, don't treat the
   count as a list to migrate).
 - The data root directory name `.g3ku`.
-- Outbound contract strings: `MODEL_ID = "g3ku"`, `owned_by`, the `g3ku` key in OpenAI-compatible responses, the MCP server name and `g3ku_*` tool names, and the `x-g3ku-internal-token` header.
+- Outbound contract strings: `MODEL_ID = "g3ku"`, `owned_by`, the `g3ku` key in OpenAI-compatible responses, the MCP server name and `g3ku_*` tool names, the `[g3ku]` prefix on External-API turn-status texts (`g3ku/runtime/api/openai_compat.py`, quoted verbatim by `docs/architecture/agent-gateway.md`), and the `x-g3ku-internal-token` header.
 - Frontend storage keys such as `g3ku.audit.last-seen.v1`.
 
 Renaming the data root is the expensive one: the runtime database stores ~1,700 rows whose values are absolute paths under `.g3ku/`, and `config.json` stores 7 more. Treat any of the above as a breaking change requiring its own plan.

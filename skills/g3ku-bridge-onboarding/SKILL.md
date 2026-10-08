@@ -22,18 +22,18 @@ description: Universal reference for onboarding any external channel bridge to N
 
 ## 1. 对接流程（按序执行）
 
-1. 确认总开关：web「外部接入」面板，或 `g3ku external status`（只读）。
+1. 确认总开关：web「外部接入」面板，或 `negi external status`（只读）。
 2. 签发 token：在 web「外部接入」面板签发（默认自动生成；可自定义，重复值会被拒）。明文只显示一次。
 3. 交付明文：交给桥的秘文存储（桥项目 `.env` / 密钥文件，权限收紧，**不进任何仓库**）。模型不得把明文写进 g3ku 仓库文件或会话转录；若模型代写桥配置，写完即从上下文清除。
 4. 配置桥：`base_url` + `Authorization: Bearer <token>` + `bridge_id`（与签发标识一致）。
 5. 启动桥并验收：
-   - `g3ku external sessions` 出现 external_key ↔ session_key 映射；
+   - `negi external sessions` 出现 external_key ↔ session_key 映射；
    - web 会话列表「渠道」分组出现该桥会话（只读，见 §6）；
    - 发一条消息，SSE 收到 `turn.completed`（或 `turn.failed`）。
 
 ## 2. token 管理规则
 
-- 管理面：web「外部接入」面板（签发 / 重新生成 / 启停 / 删除）；`g3ku external status` 只读诊断（掩码回显，锁定时显示占位提示）。
+- 管理面：web「外部接入」面板（签发 / 重新生成 / 启停 / 删除）；`negi external status` 只读诊断（掩码回显，锁定时显示占位提示）。
 - 明文只在签发 / 重新生成响应里返回一次；其余读取只回掩码。
 - 密文在 bootstrap secret overlay：落盘 `config.json` 只留占位；项目锁定时进程内无明文。
 - 冲突码：bridge_id 重复 409 `bridge_id_exists`；token 值重复 409 `token_exists`。
@@ -67,7 +67,7 @@ description: Universal reference for onboarding any external channel bridge to N
 
 ## 5. 排障
 
-- 状态先看：`g3ku external status`（开关 / token 掩码 / 启停）、`g3ku external sessions`（注册表映射）。
+- 状态先看：`negi external status`（开关 / token 掩码 / 启停）、`negi external sessions`（注册表映射）。
 - 401/403/423/404 对照 §3 鉴权行。
 - 消息提交成功但桥收不到回复：确认订阅的 SSE 会话与提交会话是同一 session_id；长断线超过 `eventBufferSize` 窗口会淘汰事件。
 - 主动推送不到达：发布侧（heartbeat 日志）→ drain（`ext outbound drained` / dropped 告警）→ 桥的 `outbound.created` 消费。

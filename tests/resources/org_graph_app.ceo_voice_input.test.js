@@ -273,8 +273,8 @@ test("voice capture reports unsupported until every browser piece exists", () =>
 
 test("not-ready codes are turned into the command the operator has to run", () => {
     const { voiceFailureText } = loadApp();
-    assert.match(voiceFailureText({ error_code: "stt_model_missing" }), /g3ku stt prepare/);
-    assert.match(voiceFailureText({ error_code: "stt_binary_missing" }), /g3ku stt prepare/);
+    assert.match(voiceFailureText({ error_code: "stt_model_missing" }), /negi stt prepare/);
+    assert.match(voiceFailureText({ error_code: "stt_binary_missing" }), /negi stt prepare/);
     assert.match(voiceFailureText({ error_code: "stt_disabled" }), /stt\.enabled/);
     assert.match(voiceFailureText({ error_code: "stt_silent" }), /静音/);
     assert.match(voiceFailureText({ error_code: "audio_decoder_missing" }), /ffmpeg/);

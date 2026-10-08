@@ -1,4 +1,4 @@
-"""MCP gateway CLI shell bindings (``g3ku mcp ...``).
+"""MCP gateway CLI shell bindings (``negi mcp ...``).
 
 stdout 纯净是 stdio MCP 的铁律：``serve`` 路径的一切提示必须走 stderr
 （``typer.echo(..., err=True)``），一个 stdout 字节就会毁掉 JSON-RPC 帧
@@ -32,7 +32,7 @@ def build_mcp_app(console) -> typer.Typer:
         base_url: str = typer.Option(
             "http://127.0.0.1:18790/api/v1",
             "--base-url",
-            help="External Agent API base URL of the RUNNING g3ku web runtime.",
+            help="External Agent API base URL of the RUNNING negi web runtime.",
         ),
         conversation_prefix: str = typer.Option(
             "mcp",
@@ -51,7 +51,7 @@ def build_mcp_app(console) -> typer.Typer:
 
         client = G3kuMcpClient(base_url, resolved, conversation_prefix=conversation_prefix)
         server = build_mcp_server(client)
-        typer.echo(f"g3ku mcp gateway serving on stdio -> {base_url}", err=True)
+        typer.echo(f"negi mcp gateway serving on stdio -> {base_url}", err=True)
         try:
             server.run(transport="stdio")
         except KeyboardInterrupt:
@@ -72,7 +72,7 @@ def build_mcp_app(console) -> typer.Typer:
         base_url: str = typer.Option(
             "http://127.0.0.1:18790/api/v1",
             "--base-url",
-            help="External Agent API base URL of the RUNNING g3ku web runtime.",
+            help="External Agent API base URL of the RUNNING negi web runtime.",
         ),
     ) -> None:
         """Connectivity self-check against a running web runtime (GET /sessions)."""

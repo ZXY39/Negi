@@ -22,7 +22,7 @@ class ProviderSpec:
 
     name:                    config field name / provider id, e.g. "openai"
     keywords:                model-name keywords for matching (lowercase)
-    display_name:            shown in `g3ku status`
+    display_name:            shown in `negi status`
     supports_prompt_caching: provider has a native prompt-cache mechanism
     """
 

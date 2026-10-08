@@ -2,11 +2,11 @@
 setlocal
 
 set "SCRIPT_DIR=%~dp0"
-set "BOOTSTRAP=%SCRIPT_DIR%g3ku_bootstrap.py"
+set "BOOTSTRAP=%SCRIPT_DIR%negi_bootstrap.py"
 set "VENV_PYTHON=%SCRIPT_DIR%.venv\Scripts\python.exe"
 
 if not exist "%BOOTSTRAP%" (
-  echo [g3ku] Missing bootstrap script: %BOOTSTRAP%
+  echo [negi] Missing bootstrap script: %BOOTSTRAP%
   exit /b 1
 )
 
@@ -21,7 +21,7 @@ if %ERRORLEVEL%==0 goto run_py_launcher
 where python >nul 2>nul
 if %ERRORLEVEL%==0 goto run_python_path
 
-echo [g3ku] Python not found. Install Python or create a local .venv first.
+echo [negi] Python not found. Install Python or create a local .venv first.
 exit /b 1
 
 :run_venv_python

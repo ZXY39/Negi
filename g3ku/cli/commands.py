@@ -29,7 +29,7 @@ from g3ku.utils.helpers import resolve_path_in_workspace, sync_workspace_templat
 from g3ku.web.launcher import run_worker_runtime
 
 app = typer.Typer(
-    name="g3ku",
+    name="negi",
     help="Negi - Personal AI Assistant",
     no_args_is_help=True,
 )
@@ -255,7 +255,7 @@ def onboard(
     console.print("\nNext steps:")
     console.print(f"  1. Add your API key to [cyan]{config_path}[/cyan]")
     console.print("     Bind an OpenAI Chat (/v1/chat/completions) or Responses (/v1/responses) endpoint")
-    console.print("  2. Chat: [cyan]g3ku agent -m \"Hello!\"[/cyan]")
+    console.print("  2. Chat: [cyan]negi agent -m \"Hello!\"[/cyan]")
     if project:
         console.print("  3. Keep [cyan].g3ku/[/cyan], [cyan]memory/[/cyan], and [cyan]sessions/[/cyan] local; they contain private runtime state")
     console.print("\n[dim]需要接入 IM 渠道？参考 External Agent API（docs/architecture/external-agent-api.md）与 bridges/qq-onebot 示例桥。[/dim]")
@@ -648,7 +648,7 @@ def _print_release_status() -> None:
 
 @app.command()
 def status():
-    """Show g3ku status."""
+    """Show Negi status."""
     from g3ku.config.loader import get_config_path, load_config
 
     config_path = get_config_path()
@@ -838,7 +838,7 @@ def stt_status():
     )
     console.print(f"{'繁简转换':20s} {snapshot.get('simplify_chinese')} (zhconv={snapshot.get('converter_available')})")
     if not snapshot.get("ready"):
-        console.print("[yellow]未就绪：执行 g3ku stt prepare 下载二进制与模型。[/yellow]")
+        console.print("[yellow]未就绪：执行 negi stt prepare 下载二进制与模型。[/yellow]")
         raise typer.Exit(code=1)
 
 

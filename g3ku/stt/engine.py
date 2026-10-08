@@ -251,14 +251,14 @@ async def transcribe_bytes(
         return SttResult(
             False,
             error_code="stt_binary_missing",
-            error=f"未找到 whisper-cli（{snapshot['binary_path']}），请先执行 g3ku stt prepare。",
+            error=f"未找到 whisper-cli（{snapshot['binary_path']}），请先执行 negi stt prepare。",
             model=model,
         )
     if not snapshot["model_present"]:
         return SttResult(
             False,
             error_code="stt_model_missing",
-            error=f"模型 {model} 未下载（{snapshot['model_path']}），请先执行 g3ku stt prepare。",
+            error=f"模型 {model} 未下载（{snapshot['model_path']}），请先执行 negi stt prepare。",
             model=model,
         )
 

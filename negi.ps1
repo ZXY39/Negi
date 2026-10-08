@@ -1,11 +1,11 @@
 $ErrorActionPreference = "Stop"
 
 $scriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
-$bootstrap = Join-Path $scriptDir "g3ku_bootstrap.py"
+$bootstrap = Join-Path $scriptDir "negi_bootstrap.py"
 $venvPython = Join-Path $scriptDir ".venv\Scripts\python.exe"
 
 if (-not (Test-Path $bootstrap)) {
-    Write-Error "[g3ku] Missing bootstrap script: $bootstrap"
+    Write-Error "[negi] Missing bootstrap script: $bootstrap"
 }
 
 $venvReady = $false
@@ -33,4 +33,4 @@ if (Get-Command python -ErrorAction SilentlyContinue) {
     exit $LASTEXITCODE
 }
 
-Write-Error "[g3ku] Python not found. Install Python or create a local .venv first."
+Write-Error "[negi] Python not found. Install Python or create a local .venv first."

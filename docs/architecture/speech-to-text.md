@@ -8,7 +8,7 @@
 
 代码边界：`g3ku/stt/engine.py`（引擎生命周期、单槽串行、就绪判定、分发下载）与 `g3ku/stt/audio.py`（音频几何与时平）。ASR 本体是**外部的官方 whisper.cpp 可执行文件**，不是 Python 依赖——仓库里没有任何语音模型权重。
 
-新维护者容易误读的两点：`stt.enabled=true` 只代表允许使用，真正可用还需要 `g3ku stt prepare` 落下二进制与模型（就绪与否由 `engine.status()` 的 `ready` 单独表达）；以及语音文本进的是普通回合，没有任何"这是语音"的特殊运行时分支。
+新维护者容易误读的两点：`stt.enabled=true` 只代表允许使用，真正可用还需要 `negi stt prepare` 落下二进制与模型（就绪与否由 `engine.status()` 的 `ready` 单独表达）；以及语音文本进的是普通回合，没有任何"这是语音"的特殊运行时分支。
 
 ## 2. 引擎形态：每次调用起一个子进程
 
@@ -60,9 +60,9 @@ QQ 侧：桥下载语音附件字节 → **进程内**直接调用引擎（桥�
 操作员动作：
 
 ```bash
-g3ku stt prepare            # 下二进制 + 模型，不动开关
-g3ku stt prepare --enable   # 顺带打开 stt.enabled
-g3ku stt status             # 就绪矩阵：开关 / 二进制 / 模型 / 转换器
+negi stt prepare            # 下二进制 + 模型，不动开关
+negi stt prepare --enable   # 顺带打开 stt.enabled
+negi stt status             # 就绪矩阵：开关 / 二进制 / 模型 / 转换器
 ```
 
 `stt.enabled` 默认为真，所以新设备上点麦克风不再需要"先去改配置"；仍要显式取得的是那 157 MB。两条取得路径等价：CLI 的 `prepare`，或网页首点触发的按需下载（`GET /api/ceo/voice/status` 报就绪矩阵与进度、`POST /api/ceo/voice/prepare` 起一个进程内单飞的后台任务，下载跑在线程里，第二个点击只拿台账不重开）。前端的顺序是**先问就绪再要麦克风权限**——反过来的话用户会说完一段话才被告知这台机器还没装模型。
@@ -107,7 +107,7 @@ g3ku stt status             # 就绪矩阵：开关 / 二进制 / 模型 / 转�
 ## 9. 常见排障入口
 
 - 点按钮没反应／报"当前页面不是安全上下文" → 第 7 节安全上下文一条
-- 提示"语音识别未就绪" → `g3ku stt status` 看是哪一道闸门：开关、二进制、还是模型
+- 提示"语音识别未就绪" → `negi stt status` 看是哪一道闸门：开关、二进制、还是模型
 - 一切正常但结果繁体 → `simplify_chinese` 或 `zhconv` 缺包
 - QQ 发来语音只剩「用户语音，机器识别失败：…」 → 看错误码：`audio_decoder_missing` 是缺 ffmpeg，`stt_silent` 是没录到声音，`stt_too_long` 是超上限
 - 转写出来了但气泡不能播放 → 分车道看：网页侧是那次附件上传失败（`.catch` 后刻意只退化成文字气泡）；渠道侧是 `GET /api/ceo/external-upload-file` 被拒，400 表示 `session_id` 与 `path` 不在同一个 external-uploads 子目录下，404 表示文件已被删

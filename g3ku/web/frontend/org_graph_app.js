@@ -6434,7 +6434,7 @@ function voiceFailureText(result) {
     const code = String((result && result.error_code) || "");
     if (code === "stt_disabled") return "语音识别未启用：在配置里打开 stt.enabled。";
     if (code === "stt_binary_missing" || code === "stt_model_missing") {
-        return "语音识别未就绪：执行 g3ku stt prepare 下载 whisper.cpp 与模型。";
+        return "语音识别未就绪：执行 negi stt prepare 下载 whisper.cpp 与模型。";
     }
     if (code === "stt_silent" || code === "stt_empty") return "这段录音几乎是静音，没有可识别的声音。";
     if (code === "stt_busy") return "正在处理另一段音频，请稍候再试。";

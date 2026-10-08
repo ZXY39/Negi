@@ -97,7 +97,7 @@ def _ensure_host_python_supported() -> None:
         required = ".".join(str(part) for part in MIN_PYTHON)
         current = ".".join(str(part) for part in sys.version_info[:3])
         raise SystemExit(
-            f"[g3ku] Python {required}+ is required to bootstrap this project. Current interpreter: {current} ({sys.executable})"
+            f"[negi] Python {required}+ is required to bootstrap this project. Current interpreter: {current} ({sys.executable})"
         )
 
 
@@ -106,7 +106,7 @@ def _ensure_venv() -> None:
     if _is_runnable_python(VENV_PYTHON):
         return
     if VENV_DIR.exists():
-        print(f"[g3ku] Recreating stale virtualenv at {VENV_DIR}")
+        print(f"[negi] Recreating stale virtualenv at {VENV_DIR}")
         _reset_venv()
     _run([sys.executable, "-m", "venv", str(VENV_DIR)], cwd=PROJECT_ROOT)
 
@@ -141,7 +141,7 @@ def _ensure_project_installed() -> None:
         _run([str(VENV_PYTHON), "-m", "pip", "install", "-e", "."], cwd=PROJECT_ROOT)
     else:
         raise SystemExit(
-            f"[g3ku] No usable package installer: uv is not on PATH and {VENV_DIR} has no pip. "
+            f"[negi] No usable package installer: uv is not on PATH and {VENV_DIR} has no pip. "
             "Install uv (https://docs.astral.sh/uv/) or recreate the virtualenv with pip, then retry."
         )
     BOOTSTRAP_MARKER.write_text(_pyproject_fingerprint() + "\n", encoding="utf-8")
@@ -223,12 +223,12 @@ def _print_web_ready_banner(port: int) -> None:
     url = f"http://127.0.0.1:{port}/"
     if os.environ.get("WT_SESSION"):
         url = f"\x1b]8;;{url}\x07{url}\x1b]8;;\x07"
-    print(f"[g3ku] web UI started successfully: {url} (click to open)", flush=True)
+    print(f"[negi] web UI started successfully: {url} (click to open)", flush=True)
 
 
 def _print_web_start_failure(returncode: int) -> None:
     print(
-        f"[g3ku] web UI failed to start (exit code {returncode}); "
+        f"[negi] web UI failed to start (exit code {returncode}); "
         f"see {RUNTIME_CONSOLE_LOG_FILE}",
         flush=True,
     )
@@ -241,7 +241,7 @@ def main(argv: list[str] | None = None) -> int:
     args = list(argv if argv is not None else sys.argv[1:])
     if not args:
         args = ["web"]
-        print("[g3ku] no command given, starting web UI (use `g3ku.cmd <command>` for others)")
+        print("[negi] no command given, starting web UI (use `negi.cmd <command>` for others)")
     _rotate_runtime_console_log()
     console_log_stream: object | None = None
     process_env: dict[str, str] | None = None
@@ -249,7 +249,7 @@ def main(argv: list[str] | None = None) -> int:
     if is_web_command:
         console_log_stream = _open_runtime_console_log_stream()
         if console_log_stream is not None:
-            print(f"[g3ku] web runtime stdout/stderr appending to {RUNTIME_CONSOLE_LOG_FILE}")
+            print(f"[negi] web runtime stdout/stderr appending to {RUNTIME_CONSOLE_LOG_FILE}")
             process_env = dict(os.environ)
             process_env["PYTHONUNBUFFERED"] = "1"
     try:
@@ -272,7 +272,7 @@ def main(argv: list[str] | None = None) -> int:
                 if not warned_slow and time.monotonic() >= deadline:
                     warned_slow = True
                     print(
-                        f"[g3ku] web UI is not responding on port {port} yet; "
+                        f"[negi] web UI is not responding on port {port} yet; "
                         f"check {RUNTIME_CONSOLE_LOG_FILE}",
                         flush=True,
                     )

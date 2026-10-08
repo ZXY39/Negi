@@ -2,10 +2,10 @@
 setlocal
 
 set "SCRIPT_DIR=%~dp0"
-set "PS_SCRIPT=%SCRIPT_DIR%start-g3ku.ps1"
+set "PS_SCRIPT=%SCRIPT_DIR%start-negi.ps1"
 
 if not exist "%PS_SCRIPT%" (
-  echo [g3ku] Missing script: %PS_SCRIPT%
+  echo [negi] Missing script: %PS_SCRIPT%
   exit /b 1
 )
 

@@ -9,14 +9,14 @@ RELOAD=0
 KEEP_WORKER=0
 
 SCRIPT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)"
-BOOTSTRAP_SCRIPT="$SCRIPT_DIR/g3ku.sh"
+BOOTSTRAP_SCRIPT="$SCRIPT_DIR/negi.sh"
 
 usage() {
   cat <<'EOF'
-Usage: ./start-g3ku.sh [--host HOST] [--port PORT] [--open-browser] [--prompt-log] [--reload] [--keep-worker]
+Usage: ./start-negi.sh [--host HOST] [--port PORT] [--open-browser] [--prompt-log] [--reload] [--keep-worker]
 
 Quick start:
-  ./start-g3ku.sh
+  ./start-negi.sh
 
 Common options:
   --host HOST       Web bind host. Default: 127.0.0.1
@@ -32,12 +32,12 @@ EOF
 while [ "$#" -gt 0 ]; do
   case "$1" in
     --host)
-      [ "$#" -ge 2 ] || { echo "[g3ku] Missing value for --host" >&2; exit 1; }
+      [ "$#" -ge 2 ] || { echo "[negi] Missing value for --host" >&2; exit 1; }
       BIND_HOST="$2"
       shift 2
       ;;
     --port|-p)
-      [ "$#" -ge 2 ] || { echo "[g3ku] Missing value for --port" >&2; exit 1; }
+      [ "$#" -ge 2 ] || { echo "[negi] Missing value for --port" >&2; exit 1; }
       PORT="$2"
       shift 2
       ;;
@@ -62,7 +62,7 @@ while [ "$#" -gt 0 ]; do
       exit 0
       ;;
     *)
-      echo "[g3ku] Unknown argument: $1" >&2
+      echo "[negi] Unknown argument: $1" >&2
       usage >&2
       exit 1
       ;;
@@ -70,7 +70,7 @@ while [ "$#" -gt 0 ]; do
 done
 
 if [ ! -f "$BOOTSTRAP_SCRIPT" ]; then
-  echo "[g3ku] Missing launcher script: $BOOTSTRAP_SCRIPT" >&2
+  echo "[negi] Missing launcher script: $BOOTSTRAP_SCRIPT" >&2
   exit 1
 fi
 
@@ -78,7 +78,7 @@ get_managed_pids() {
   ps -ax -o pid= -o command= | awk -v root="$SCRIPT_DIR" '
     index($0, root) &&
     (
-      $0 ~ /g3ku_bootstrap\.py([[:space:]]|")*web/ ||
+      $0 ~ /negi_bootstrap\.py([[:space:]]|")*web/ ||
       $0 ~ /-m[[:space:]]+g3ku[[:space:]]+web/ ||
       $0 ~ /-m[[:space:]]+g3ku[[:space:]]+worker/
     ) { print $1 }
@@ -98,9 +98,9 @@ try_graceful_exit() {
 stop_managed_processes() {
   pids="$(get_managed_pids | tr '\n' ' ' | sed 's/[[:space:]]*$//')"
   [ -n "$pids" ] || return 0
-  echo "[g3ku] Restarting existing g3ku web/worker processes..."
+  echo "[negi] Restarting existing Negi web/worker processes..."
   if try_graceful_exit; then
-    echo "[g3ku] Graceful exit requested; waiting for the runtime to pause all work and stop..."
+    echo "[negi] Graceful exit requested; waiting for the runtime to pause all work and stop..."
     i=0
     while [ "$i" -lt 80 ]; do
       pids="$(get_managed_pids | tr '\n' ' ' | sed 's/[[:space:]]*$//')"
@@ -109,7 +109,7 @@ stop_managed_processes() {
       sleep 0.5
     done
   fi
-  echo "[g3ku] Force-stopping remaining g3ku processes..."
+  echo "[negi] Force-stopping remaining Negi processes..."
   for pid in $pids; do
     kill "$pid" 2>/dev/null || true
   done
@@ -144,13 +144,13 @@ port_listener_summary() {
 assert_start_preconditions() {
   listener_summary="$(port_listener_summary)"
   if [ -n "$listener_summary" ]; then
-    echo "[g3ku] Port $PORT is already in use by: $listener_summary. Stop the existing process before starting g3ku." >&2
+    echo "[negi] Port $PORT is already in use by: $listener_summary. Stop the existing process before starting Negi." >&2
     exit 1
   fi
 
   remaining_managed="$(get_managed_pids | tr '\n' ' ' | sed 's/[[:space:]]*$//')"
   if [ -n "$remaining_managed" ]; then
-    echo "[g3ku] Existing g3ku web/worker processes are still running after restart attempt: $remaining_managed" >&2
+    echo "[negi] Existing Negi web/worker processes are still running after restart attempt: $remaining_managed" >&2
     exit 1
   fi
 }
@@ -160,14 +160,14 @@ assert_start_preconditions
 
 if [ "$PROMPT_LOG" -eq 1 ]; then
   export G3KU_PROMPT_TRACE=1
-  echo "[g3ku] Prompt logging enabled via G3KU_PROMPT_TRACE=1."
+  echo "[negi] Prompt logging enabled via G3KU_PROMPT_TRACE=1."
 else
   unset G3KU_PROMPT_TRACE 2>/dev/null || true
 fi
 
 if [ "$KEEP_WORKER" -eq 1 ]; then
   export G3KU_WEB_KEEP_WORKER=1
-  echo "[g3ku] KeepWorker enabled; web-managed worker will be left running when the web server exits."
+  echo "[negi] KeepWorker enabled; web-managed worker will be left running when the web server exits."
 else
   unset G3KU_WEB_KEEP_WORKER 2>/dev/null || true
 fi
@@ -184,13 +184,13 @@ if [ "$OPEN_BROWSER" -eq 1 ]; then
   ) &
 fi
 
-echo "[g3ku] Project root: $SCRIPT_DIR"
+echo "[negi] Project root: $SCRIPT_DIR"
 if [ "$RELOAD" -eq 1 ]; then
-  echo "[g3ku] Reload mode enabled; the web runtime will not auto-start a managed worker."
+  echo "[negi] Reload mode enabled; the web runtime will not auto-start a managed worker."
 else
-  echo "[g3ku] Task worker will start after project unlock."
+  echo "[negi] Task worker will start after project unlock."
 fi
-echo "[g3ku] Starting web server on http://$BIND_HOST:$PORT ..."
+echo "[negi] Starting web server on http://$BIND_HOST:$PORT ..."
 
 set -- web --host "$BIND_HOST" --port "$PORT"
 if [ "$RELOAD" -eq 1 ]; then

@@ -14,7 +14,7 @@ def test_web_runtime_cmdline_matches() -> None:
         ["python", "-u", "-c", "from g3ku.web.launcher import run_web_server_entrypoint; run_web_server_entrypoint()"]
     )
     assert not launcher._web_runtime_cmdline_matches(["python", "-m", "g3ku", "worker"])
-    assert not launcher._web_runtime_cmdline_matches(["python", "g3ku_bootstrap.py", "web"])
+    assert not launcher._web_runtime_cmdline_matches(["python", "negi_bootstrap.py", "web"])
     assert not launcher._web_runtime_cmdline_matches(["python", "-m", "pytest", "tests"])
     assert not launcher._web_runtime_cmdline_matches(["python", "-m", "g3ku"])
     assert not launcher._web_runtime_cmdline_matches([])

@@ -198,7 +198,7 @@ def _acquire_web_start_lock(root: Path, *, port: int) -> None:
         holder_port = metadata.get("port", "unknown")
         handle.close()
         raise typer.BadParameter(
-            "Another `g3ku web` process is already running for this workspace "
+            "Another `negi web` process is already running for this workspace "
             f"(pid={holder}, port={holder_port}, lock={lock_path})."
         )
 
@@ -234,7 +234,7 @@ def prepare_web_server_start(
     stale_pids = _terminate_stale_web_runtime_processes()
     if stale_pids:
         typer.echo(
-            "[g3ku] terminated stale `g3ku web` runtime process(es): "
+            "[negi] terminated stale `negi web` runtime process(es): "
             + ", ".join(f"pid={pid}" for pid in stale_pids)
         )
     _acquire_web_start_lock(root, port=resolved_port)
@@ -270,7 +270,7 @@ def _print_update_reminder() -> None:
         latest = str(ledger.get("latest_tag") or "").strip()
         current = str(ledger.get("current_version") or "").strip()
         typer.echo(
-            f"[g3ku] 发现新版本 {latest}（当前 v{current}）："
+            f"[negi] 发现新版本 {latest}（当前 v{current}）："
             "在网页「设置」里点「重启并更新」，或在项目目录给安装脚本加 -Upgrade"
         )
     except Exception:
@@ -295,7 +295,7 @@ def run_web_server_entrypoint(
     try:
         if with_worker and reload:
             typer.echo(
-                "[g3ku] worker auto-start is disabled when --reload is enabled; "
+                "[negi] worker auto-start is disabled when --reload is enabled; "
                 "run `python -m g3ku worker` separately."
             )
         from g3ku.web.main import run_server

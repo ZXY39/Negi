@@ -179,7 +179,7 @@ async def test_missing_binary_and_model_report_actionable_codes(tmp_path, monkey
     monkeypatch.setattr(engine, "_run_cli", lambda *a, **k: "")
     missing_binary = await engine.transcribe_bytes(build_wav(sine_samples(1.0)), cfg=cfg)
     assert missing_binary.error_code == "stt_binary_missing"
-    assert "g3ku stt prepare" in missing_binary.error
+    assert "negi stt prepare" in missing_binary.error
 
     (tmp_path / "bin").mkdir(parents=True, exist_ok=True)
     suffix = ".exe" if Path(engine.binary_path(cfg).name).suffix == ".exe" else ""

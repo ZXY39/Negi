@@ -1,6 +1,6 @@
 """E2E mock-bridge verification for the External Agent API (/api/v1).
 
-Runs against a live g3ku web instance with externalApi enabled:
+Runs against a live negi web instance with externalApi enabled:
 
     python scripts/e2e_external_api_mock_bridge.py \
         --base-url http://127.0.0.1:18790 --token <externalApi token>

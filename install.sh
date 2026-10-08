@@ -4,7 +4,7 @@
 #   curl -LsSf https://raw.githubusercontent.com/ZXY39/Negi/v1.0.16/install.sh | bash
 #
 # Provisions uv (and therefore Python) on a machine that has neither, fetches the
-# pinned checkout, syncs the locked environment and hands off to g3ku_bootstrap.py.
+# pinned checkout, syncs the locked environment and hands off to negi_bootstrap.py.
 # Runtime code is not modified by this script.
 #
 # Environment knobs (passed straight through to uv):
@@ -203,4 +203,4 @@ fi
 
 log 'launching G3KU web (first run asks for the project password in the browser)'
 cd "$DIR"
-exec .venv/bin/python g3ku_bootstrap.py web
+exec .venv/bin/python negi_bootstrap.py web

@@ -9,7 +9,7 @@
 
 ## 1. 基本启动方式
 
-产品显示名是 **Negi**，仓库路径 `ZXY39/Negi`；CLI 命令名 `g3ku`、数据根 `.g3ku`、`G3KU_*` 环境变量与 `[G3KU_*]` 协议标记仍是旧拼写，属冻结项（清单见 `AGENTS.md`「Brand Name vs Frozen Identifiers」）。排障时看到的 `g3ku web`、`.g3ku/config.json` 都是正常的当前形态。
+产品显示名是 **Negi**，仓库路径 `ZXY39/Negi`，操作者敲的命令与入口脚本也叫 Negi（`negi web`、`negi status`、`start-negi.ps1` / `start-negi.sh` / `start-negi.cmd`、包装 `negi.ps1` / `negi.sh` / `negi.cmd`、引导 `negi_bootstrap.py`）。Python 包目录 `g3ku/` 与 `python -m g3ku` 形态、数据根 `.g3ku`、`G3KU_*` 环境变量与 `[G3KU_*]` 协议标记仍是旧拼写，属冻结项（清单见 `AGENTS.md`「Brand Name vs Frozen Identifiers」）。排障时看到的 `.g3ku/config.json`、进程 cmdline 里的 `-m g3ku web` 都是正常的当前形态——入口名换了不代表进程形状换了，按进程找实例仍然要看 `-m g3ku`。
 
 ### 新设备首次安装与升级
 
@@ -17,8 +17,8 @@
 
 维护上要记住：
 
-- 安装器只负责补齐它上游的两件事：**取解释器**（缺 uv 就装 uv，再由 uv 按 `.python-version` 提供 Python）与**取代码**（有 git 走 `git clone --branch <ref>`，没有 git 退化成 GitHub 源码包下载）。依赖安装与环境复用全部交给既有的 `g3ku_bootstrap.py`，安装器不实现第二套
-- 最后一步用 **venv 里的 python** 跑 `g3ku_bootstrap.py web`。这既让 `g3ku_bootstrap.py` 的宿主 Python 版本检查落在刚装好的解释器上，也保持了分发形态的前提：本项目安装的是**完整 checkout 就地运行**（bootstrap 会 `chdir` 到仓库根，`main/` 从工作目录导入），不是一个自包含的 Python 包 —— wheel/sdist 目前不含 `main/`，所以安装器与 `uv sync --frozen` / `pip install -e .` 才是唯一可用路径
+- 安装器只负责补齐它上游的两件事：**取解释器**（缺 uv 就装 uv，再由 uv 按 `.python-version` 提供 Python）与**取代码**（有 git 走 `git clone --branch <ref>`，没有 git 退化成 GitHub 源码包下载）。依赖安装与环境复用全部交给既有的 `negi_bootstrap.py`，安装器不实现第二套
+- 最后一步用 **venv 里的 python** 跑 `negi_bootstrap.py web`。这既让 `negi_bootstrap.py` 的宿主 Python 版本检查落在刚装好的解释器上，也保持了分发形态的前提：本项目安装的是**完整 checkout 就地运行**（bootstrap 会 `chdir` 到仓库根，`main/` 从工作目录导入），不是一个自包含的 Python 包 —— wheel/sdist 目前不含 `main/`，所以安装器与 `uv sync --frozen` / `pip install -e .` 才是唯一可用路径
 - 安装得到的资源集等于 git 跟踪集：仓库自带 skills/tools 在内，操作员本地通过市场安装的 skills、`externaltools/`、`.g3ku/` 不在内。"新设备上少了一批 skill/tools" 属预期，不是安装失败
 - 一行指令指向不可变 ref（发布标签）。要覆盖用 `-Ref` / `--ref`，换目录用 `-Dir` / `--dir`（默认 `%USERPROFILE%\Negi`，Linux / macOS `~/Negi`），只建环境不启动用 `-NoStart` / `--no-start`。脚本按 `$Dir` 决议目标目录，`-Upgrade` 也一样，所以装在非默认目录的设备上手动升级要显式带上目录，否则会对着默认目录动手
 - 镜像源不设安装器参数：uv 直接读 `UV_DEFAULT_INDEX` 与 `UV_PYTHON_INSTALL_MIRROR` 环境变量
@@ -26,7 +26,7 @@
 - 不带 `-Upgrade` 时对已存在的目录是**幂等不动代码**（只补环境与启动）。升级是显式动作：git 检出走 `fetch --depth 1` + `checkout --detach FETCH_HEAD`，无 git 的源码包安装走"下归档 + 逐顶层覆盖"，两条路都只换代码，`.venv/` 与 `.g3ku/` 保留
 - 升级前置校验：`git status --porcelain --untracked-files=no` 非空（**跟踪文件被本地改过**）才拒绝执行，不静默覆盖用户改动。未跟踪项不算脏 —— 装过 skill、桥接产物的设备必然有未跟踪文件，把它们算进去会让升级永久被拒。运行期状态一律落在数据根，不改跟踪文件——前端第三方资产的探测状态就在 `<data root>/vendor-updates.json`，见 `web-and-admin.md`「Frontend Vendor Asset Update Contract」
 - 两种取码方式**不可混用**：把源码包盖在 git 检出上会让整棵树在 autocrlf 下变成永久"脏"，从而被下一次升级的脏检查挡住。因此"有 `.git` 但 git 不可用"时报错，而不是退化成覆盖
-- 版本识别通道是 `git ls-remote --tags origin`，只接受 `refs/tags/vX.Y.Z` 形状（`backup/*` 这类路径标签与 peeled `^{}` 行都按形状过滤掉），与 `g3ku/__init__.py` 的 `__version__` 比对，结果只落在 `g3ku status` 的 `Release:` 行。约束：只读不外发、超时 2 秒、失败即整行不出现（离线设备不得显示"已是最新"）
+- 版本识别通道是 `git ls-remote --tags origin`，只接受 `refs/tags/vX.Y.Z` 形状（`backup/*` 这类路径标签与 peeled `^{}` 行都按形状过滤掉），与 `g3ku/__init__.py` 的 `__version__` 比对，结果只落在 `negi status` 的 `Release:` 行。约束：只读不外发、超时 2 秒、失败即整行不出现（离线设备不得显示"已是最新"）
 - 发版动作 = 打标签 + 同步 `pyproject.toml` 与 `g3ku/__init__.py` 两处版本号 + 跑 `uv lock`（`uv.lock` 里钉着 `g3ku-ai` 自身版本，漏这一步会让所有 `uv sync --frozen` 的安装与升级直接失败）+ 更新安装脚本与 README 里钉住的 ref 默认值。标签推上去后 `.github/workflows/release.yml` 自动建 release 并把 `install.ps1` / `install.sh` 挂成资产，不需要手工建；README 的发布页备用通道依赖的就是这两个资产，所以**未推送标签 = 发布页那条地址取不到东西**
 - 取码与查版本只认**当前克隆的 `origin`**：脚本里的仓库名常量只服务首次 `git clone` 与无 git 的源码包兜底，而 `ls-remote` / `fetch` 打的是设备自己 `.git/config` 里的 remote。仓库改名之后已装设备照常检查与升级，不需要通知使用者；这条通道的前提是旧仓库名不被重新占用——GitHub 在名字被建走的那一刻停止重定向，而失败的表现是 `Release:` 行不出现、设置行不点亮，不是一句报错，设备会静默停在旧版本上
 
@@ -41,35 +41,35 @@
 - 执行体的两个参数都是安全边界，改动前先读：端口由调用方显式传入、猜不到就中止（回落到默认端口会去关同机另一个实例）；`install` 必须带 `-Dir/--dir` 指向本项目根（漏了会退回脚本默认路径，结果是"升级了另一个目录、重启未变的代码"，这条是彩排时实测出来的）。
 - 释放等待只在端口真的空下来之后才动代码；任何一次 `exit_refused_*` 或 `port still busy` 都是**不碰代码**直接退出。降级安装（新 config 配旧代码）会撞上 `Config` 的 `extra=forbid`，服务起不来属预期，不是 apply 车道的问题。
 - 全程留痕在 `.g3ku/logs/update-apply.log`，**这个文件里只有执行体自己的行**：安装脚本的进度实时续写进来，而升级完重新拉起的那个 web 进程接到 `.g3ku/logs/console.log`（与 bootstrap 给 web 选的落点一致）——两个流各走各的文件，否则几万行访问日志会把下面的判读锚点埋掉。判读锚点：`exit_refused_409` = 用户没确认暂停；`port still busy` = 服务没退干净、代码未动；`upgrade still running at Ns` = 子进程还在跑（多半在下载），`upgrade timed out after Ns; killed` = 超过 20 分钟被杀；`relaunching the previous version` = 升级失败但服务已恢复；`exit_unreachable` = 关停请求无人处理、服务事件循环已停摆（判停摆：端口仍 LISTENING 但 `/api/*` 全超时），QQ 官方桥即已知成因，见 `external-agent-api.md`「运行入口是硬约束」。重复点击会被 `409 apply_in_flight` 拒掉（闸门与成功侧的 toast/自动刷新归 `web-and-admin.md`「Update Notification And Restart-And-Upgrade Contract」）；两个执行体重叠跑过一次，代价是服务被顶两次、空窗约 2 分钟，且两份缓冲写句柄会在本文件里互相盖行。
-- 一个模型都没配的设备上 `get_agent()` 构造不出运行时，`_running_work_snapshot` 因此**按空快照回答**并带 `runtime_unavailable` 溯源键，而不是抛 500 —— 退出、`start-g3ku` 的优雅重启与「重启并更新」共用这个端点，500 会让这类设备既关不掉自己也升不了级。锁状态判定不变，未解锁仍然 423。
+- 一个模型都没配的设备上 `get_agent()` 构造不出运行时，`_running_work_snapshot` 因此**按空快照回答**并带 `runtime_unavailable` 溯源键，而不是抛 500 —— 退出、`start-negi` 的优雅重启与「重启并更新」共用这个端点，500 会让这类设备既关不掉自己也升不了级。锁状态判定不变，未解锁仍然 423。
 - 执行体收子进程输出统一按 UTF-8 解，不看系统 ANSI 码页：中文 Windows 上 gbk 解不开安装脚本写出的中文进度，读线程抛 `UnicodeDecodeError` 会让整段升级输出丢失，判据随之消失。
 - 前端侧的端点与三态渲染契约归 `web-and-admin.md`「Update Notification And Restart-And-Upgrade Contract」。
 
 ### 首选一键启动脚本
 
-- Windows PowerShell: `.\start-g3ku.ps1`
-- Linux / macOS: `./start-g3ku.sh`
+- Windows PowerShell: `.\start-negi.ps1`
+- Linux / macOS: `./start-negi.sh`
 
 适合：
 
 - 普通用户快速启动项目
 - 本地单机直接拉起 Web 与托管 worker
 - 让脚本自动处理 `.venv`、依赖安装、基础配置兜底与已有托管进程重启
-- 回收既有进程的点**只有两处**：`start-g3ku.ps1` 的 `Stop-G3kuManagedPythonProcesses` 与 `start-g3ku.sh:118-119`；`g3ku.ps1` / `g3ku.sh` / `install.ps1` / `install.sh` 都不杀进程，排查"启动时为什么把我的实例关了"只看这两处。两边语义已对齐：先发 `POST /api/bootstrap/exit` 优雅退出并轮询，再对残留 PID 动手，且**动手前按实况判存活**（sh 用 `kill -0`，ps 用 `Get-Process`）。ps 侧曾按"发优雅退出之前拍的那份快照"逐个 `Stop-Process`，等待窗口里已自退的 PID 会被掐第二下并报 `Failed to stop PID <n>: 找不到进程标识符`——那是噪音不是故障（`main` 上 `d7fd6f62` 修掉，同时把"确实还活着却没掐掉"才报警告作为判据）。别把这条误读成"端口被别的进程占着"：端口是否被占的权威判据是 `Get-NetTCPConnection -LocalPort 18790`，`netstat` 里状态列在地址之后，用 `LISTENING.*<port>` 这种模式永远匹配不到。
+- 回收既有进程的点**只有两处**：`start-negi.ps1` 的 `Stop-NegiManagedPythonProcesses` 与 `start-negi.sh:118-119`；`negi.ps1` / `negi.sh` / `install.ps1` / `install.sh` 都不杀进程，排查"启动时为什么把我的实例关了"只看这两处。两边语义已对齐：先发 `POST /api/bootstrap/exit` 优雅退出并轮询，再对残留 PID 动手，且**动手前按实况判存活**（sh 用 `kill -0`，ps 用 `Get-Process`）。ps 侧曾按"发优雅退出之前拍的那份快照"逐个 `Stop-Process`，等待窗口里已自退的 PID 会被掐第二下并报 `Failed to stop PID <n>: 找不到进程标识符`——那是噪音不是故障（`main` 上 `d7fd6f62` 修掉，同时把"确实还活着却没掐掉"才报警告作为判据）。别把这条误读成"端口被别的进程占着"：端口是否被占的权威判据是 `Get-NetTCPConnection -LocalPort 18790`，`netstat` 里状态列在地址之后，用 `LISTENING.*<port>` 这种模式永远匹配不到。
 
 维护上要记住：
 
 - 这两个脚本是普通用户首选入口
-- 它们会在启动前默认清理当前仓库下已有的 g3ku web / worker 进程，但**先请求优雅退出**：脚本向 `POST /api/bootstrap/exit`（`pause_running_work=true`）发起请求并等待运行时把全部会话与任务持久化暂停、自行退出；只有在接口不可达、返回失败或等待超时（约 40 秒）时才回退到强制杀进程。因此“重跑启动脚本”对运行中的工作是一次优雅暂停而不是异常中断，下次启动会自动恢复（生命周期合同见 `main-task-runtime.md`「Graceful Shutdown Pause and Startup Auto-Resume」）
+- 它们会在启动前默认清理当前仓库下已有的 negi web / worker 进程，但**先请求优雅退出**：脚本向 `POST /api/bootstrap/exit`（`pause_running_work=true`）发起请求并等待运行时把全部会话与任务持久化暂停、自行退出；只有在接口不可达、返回失败或等待超时（约 40 秒）时才回退到强制杀进程。因此“重跑启动脚本”对运行中的工作是一次优雅暂停而不是异常中断，下次启动会自动恢复（生命周期合同见 `main-task-runtime.md`「Graceful Shutdown Pause and Startup Auto-Resume」）
 - 强制回退路径（强杀）对应的是异常中断：下次启动任务走恢复清洗，任务卡片会以 toast 提示「本任务遇到异常停止」；toast 可点击关闭（UI 合同见 `web-and-admin.md`「Task Recovery Notice UI Contract」）
-- 它们最终仍然是调用 `g3ku` bootstrap，再进入 `g3ku web`
-- 当脚本使用 reload 模式时，Web 侧自动托管 worker 会关闭；这时要单独运行 `g3ku worker`
-- `g3ku.cmd` / `g3ku.ps1` / `g3ku.sh` 是 CLI 透传包装；无参调用默认启动 `web`。任何入口的 web 启动都会在终端报告结果：成功横幅带 URL，失败横幅带子进程退出码和 `.g3ku/logs/console.log` 指引。横幅的"成功"只代表监听端口已生效；运行时是否还在预热看 `/api/bootstrap/status` 的 `runtime_bootstrapping`（合同见 `web-and-admin.md`「Local Startup And Launcher Contract」）
-- web 启动在拿单实例锁（`.g3ku/start.lock`）之前会先自愈：杀掉本工作区残留的 g3ku web 服务进程（`-m g3ku web` 或 `-c ...run_web_server_entrypoint...` 形态，按 venv python 路径或进程 cwd 归属本工作区）。因此“端口/锁被占”不是永久失败：再次启动会替换残留实例；若报错里 `pid=unknown`（持有者在加锁与写元数据之间被杀），用 `netstat` 查 web 端口定位占用者
+- 它们最终仍然是调用 `g3ku` bootstrap，再进入 `negi web`
+- 当脚本使用 reload 模式时，Web 侧自动托管 worker 会关闭；这时要单独运行 `negi worker`
+- `negi.cmd` / `negi.ps1` / `negi.sh` 是 CLI 透传包装；无参调用默认启动 `web`。任何入口的 web 启动都会在终端报告结果：成功横幅带 URL，失败横幅带子进程退出码和 `.g3ku/logs/console.log` 指引。横幅的"成功"只代表监听端口已生效；运行时是否还在预热看 `/api/bootstrap/status` 的 `runtime_bootstrapping`（合同见 `web-and-admin.md`「Local Startup And Launcher Contract」）
+- web 启动在拿单实例锁（`.g3ku/start.lock`）之前会先自愈：杀掉本工作区残留的 negi web 服务进程（`-m g3ku web` 或 `-c ...run_web_server_entrypoint...` 形态，按 venv python 路径或进程 cwd 归属本工作区）。因此“端口/锁被占”不是永久失败：再次启动会替换残留实例；若报错里 `pid=unknown`（持有者在加锁与写元数据之间被杀），用 `netstat` 查 web 端口定位占用者
 
 ### CLI
 
-- `g3ku agent -m "Hello"`
+- `negi agent -m "Hello"`
 
 适合验证：
 
@@ -79,7 +79,7 @@
 
 ### Web
 
-- `g3ku web`
+- `negi web`
 
 适合验证：
 
@@ -89,7 +89,7 @@
 
 ### Worker
 
-- `g3ku worker`
+- `negi worker`
 
 适合验证：
 
@@ -101,17 +101,17 @@
 建议按下面顺序做环境确认：
 
 1. 检查 `.g3ku/config.json`
-2. 运行 `g3ku status`
-3. 运行一次 `g3ku agent -m "test"`
-4. 先用 `.\start-g3ku.ps1`（Windows）或 `./start-g3ku.sh`（Linux / macOS）启动项目
+2. 运行 `negi status`
+3. 运行一次 `negi agent -m "test"`
+4. 先用 `.\start-negi.ps1`（Windows）或 `./start-negi.sh`（Linux / macOS）启动项目
 5. 确认 Web API、任务面板、模型配置页能正常返回
 
-如果你要拆开验证启动链路，或排查“是脚本包装层问题还是 Web/runtime 本身问题”，再回退到手动运行 `g3ku web` / `g3ku worker`。
+如果你要拆开验证启动链路，或排查“是脚本包装层问题还是 Web/runtime 本身问题”，再回退到手动运行 `negi web` / `negi worker`。
 
-当前 `g3ku status` 的记忆区块应按 queued Markdown runtime 理解：
+当前 `negi status` 的记忆区块应按 queued Markdown runtime 理解：
 
 - 它会显示 `Memory Notebook`、`Memory Notes Dir`、`Memory Queue`、`Memory Ops Log`
-- `g3ku status` 的 `Memory Notebook` 一行只说明笔记文件在不在，不是长期记忆健康指标；健康判断走 `g3ku memory`，它的命令面是 `current` / `queue` / `flush` / `doctor` / `reconcile-notes` / `import-legacy` / `cleanup-legacy`
+- `negi status` 的 `Memory Notebook` 一行只说明笔记文件在不在，不是长期记忆健康指标；健康判断走 `negi memory`，它的命令面是 `current` / `queue` / `flush` / `doctor` / `reconcile-notes` / `import-legacy` / `cleanup-legacy`
 
 ## 3. 关键状态文件与目录
 
@@ -119,7 +119,7 @@
 
 目录分两个根：
 
-- **安装根**：进程 cwd（`g3ku web` 启动时固定为代码检出目录）。承载代码与 `skills/`、`tools/`、`externaltools/`，配置和密钥材料——`.g3ku/config.json`、`.g3ku/llm-config/`（主密钥信封与 `auto-unlock.key`）、`.g3ku/secret-realms/`、`resources.state.json`、`resource-locks/`、`start.lock`、`internal-callback.json`——以及按 `config.workspace_path`（`agents.defaults.workspace`，默认 `.`）或 `Path.cwd()` 解析的其余状态：`memory/`、`sessions/`、`temp/ceo/`、`.g3ku/cron/`、`.g3ku/errors/`、`.g3ku/audit.jsonl`、`.g3ku/memory-requests/`、`.g3ku/cache/`、`.g3ku/tmp/`、`.g3ku/logs/`、`.g3ku/external-sessions/`、`.g3ku/external-uploads/`、`.g3ku/external-outbox/`。换数据根不带动这些。
+- **安装根**：进程 cwd（`negi web` 启动时固定为代码检出目录）。承载代码与 `skills/`、`tools/`、`externaltools/`，配置和密钥材料——`.g3ku/config.json`、`.g3ku/llm-config/`（主密钥信封与 `auto-unlock.key`）、`.g3ku/secret-realms/`、`resources.state.json`、`resource-locks/`、`start.lock`、`internal-callback.json`——以及按 `config.workspace_path`（`agents.defaults.workspace`，默认 `.`）或 `Path.cwd()` 解析的其余状态：`memory/`、`sessions/`、`temp/ceo/`、`.g3ku/cron/`、`.g3ku/errors/`、`.g3ku/audit.jsonl`、`.g3ku/memory-requests/`、`.g3ku/cache/`、`.g3ku/tmp/`、`.g3ku/logs/`、`.g3ku/external-sessions/`、`.g3ku/external-uploads/`、`.g3ku/external-outbox/`。换数据根不带动这些。
 - **数据根**：只收体积数据，判据是解析入口——经 `g3ku/deployment/data_root.py` 的 `data_root()` / `data_g3ku_path()` / `data_work_path()` / `resolve_data_path()` 落盘的那几类：`.g3ku/main-runtime/`（任务库、artifacts、deliverables、governance 库、`managed-worker.log`）、其余 `.g3ku/web-ceo-*` sidecar、`.g3ku/stt/`、`temp/tasks/`。新增挂载点不走这四个函数之一就会静默留在安装根。
 
 两半都写成 `.g3ku/<相对路径>` 的形状，但根不同，因此**自定义过数据目录的安装在盘上有两个 `.g3ku`**：`<安装根>/.g3ku/` 与 `<数据根>/.g3ku/`。数据根那一侧同样带 `.g3ku` 这一层（`<数据根>/.g3ku/main-runtime/`，不是 `<数据根>/main-runtime/`）；`temp/` 则直接挂数据根。未配置时数据根等于安装根，两个 `.g3ku` 合一，也就是历史布局本身，换锚因此不产生迁移、也不改变相对布局。
@@ -138,11 +138,11 @@
 
 - 进程在跑：`GET /api/bootstrap/status` 的 `data_root` 段（`data_root`、`source`、`default_root`、`pointer_path`），锁屏状态下同样可读。
 - 进程没跑：读 `<安装根>/.g3ku/data-root.json` 的 `data_dir`；该文件缺失再看 `G3KU_DATA_DIR`；两者都空即 cwd。
-- `g3ku status` 不打印这一项。
+- `negi status` 不打印这一项。
 
-日志因此分两半，别在数据根下等 `console.log`：`.g3ku/logs/console.log` 与 `.g3ku/logs/update-apply.log` 由启动器按代码检出目录锚定（`g3ku_bootstrap.py`、`g3ku/update_apply.py` 用 `PROJECT_ROOT`），与数据根无关；`.g3ku/main-runtime/managed-worker.log` 跟数据根。
+日志因此分两半，别在数据根下等 `console.log`：`.g3ku/logs/console.log` 与 `.g3ku/logs/update-apply.log` 由启动器按代码检出目录锚定（`negi_bootstrap.py`、`g3ku/update_apply.py` 用 `PROJECT_ROOT`），与数据根无关；`.g3ku/main-runtime/managed-worker.log` 跟数据根。
 
-`console.log` 的大小由两道机制分别管，别指望其中一道代替另一道。启动时 `g3ku_bootstrap._rotate_runtime_console_log()` 把超过 `RUNTIME_CONSOLE_LOG_MAX_BYTES`（50 MB）的当前代改名成 `console.log.<UTC 时间戳>`，并清掉 `RUNTIME_CONSOLE_LOG_RETENTION_SECONDS`（7 天）以外的旧代。长跑期间由小时级维护循环挂载的 `console_log_cap`（`claim_maintenance_run` 跨进程卡权）在超过上限时就地保留尾部，并落一行 `[log-cap]` 标明丢了多少字节。
+`console.log` 的大小由两道机制分别管，别指望其中一道代替另一道。启动时 `negi_bootstrap._rotate_runtime_console_log()` 把超过 `RUNTIME_CONSOLE_LOG_MAX_BYTES`（50 MB）的当前代改名成 `console.log.<UTC 时间戳>`，并清掉 `RUNTIME_CONSOLE_LOG_RETENTION_SECONDS`（7 天）以外的旧代。长跑期间由小时级维护循环挂载的 `console_log_cap`（`claim_maintenance_run` 跨进程卡权）在超过上限时就地保留尾部，并落一行 `[log-cap]` 标明丢了多少字节。
 
 改名只在启动那一刻能使上劲：正文写在 bootstrap 交给 web 子进程的 append 句柄上，句柄活着就换不掉这个文件（Windows 上被占用的文件 rename 直接失败），所以运行内只能就地截尾、不能归档。截尾把 seek 落点推到下一个换行，绝不留下半行；随后子进程仍按 append 语义写在新 EOF 之后。loguru 的 `rotation=` 对这份文件不起作用——它按"下一条记录"检查尺寸，而 bootstrap 进程自己不发 loguru 记录，所以只在文件上挂着这句参数等于没有轮转。
 
@@ -167,7 +167,7 @@
 
   其中 SQLite（`runtime.sqlite3` 或配置指定的 store 路径）里除任务/节点/帧等表外还有 `shutdown_pause_registry` 台账表：记录上次优雅关闭时被暂停的会话与任务，重启自动恢复后逐行删除。排查“重启后任务没有自动恢复”先查这张表（语义见 `main-task-runtime.md`「Graceful Shutdown Pause and Startup Auto-Resume」）。
 
-  通过 `g3ku web` 启动并启用 auto worker 时，这里还应重点关注两份日志：
+  通过 `negi web` 启动并启用 auto worker 时，这里还应重点关注两份日志：
 
   - `.g3ku/main-runtime/manual-web-run.log`
     Web 主进程日志
@@ -336,7 +336,7 @@ Provider retry troubleshooting note:
 - 重启前探测租约 `holder_pid`：存活则跳过（避免与外部单独启动的 worker 双跑），确认已死才清理陈旧租约以跳过 TTL 等待，未知则不动租约、让新 worker 自行按租约接管；
 - 持续失败做指数退避（5s→…→60s 封顶），避免崩溃循环。
 
-排查「一直 stale」按序：`.g3ku/main-runtime/managed-worker.log` 末尾 `worker_lease_unavailable:<holder>:<expires_at>` 是旧租约未到期就被拉起（非根因，等 TTL 即可）；`managed task worker watchdog:` 打头的是看门狗决策日志；仍需确认没有外部 `g3ku worker` 残留占着租约（查 `worker_leases` 的 `holder_pid` 是否还活着）；worker 反复崩溃时继续按「任务没创建或没推进」查崩溃根因，而非只看门狗兜底。
+排查「一直 stale」按序：`.g3ku/main-runtime/managed-worker.log` 末尾 `worker_lease_unavailable:<holder>:<expires_at>` 是旧租约未到期就被拉起（非根因，等 TTL 即可）；`managed task worker watchdog:` 打头的是看门狗决策日志；仍需确认没有外部 `negi worker` 残留占着租约（查 `worker_leases` 的 `holder_pid` 是否还活着）；worker 反复崩溃时继续按「任务没创建或没推进」查崩溃根因，而非只看门狗兜底。
 
 worker 静默不等于 worker 死亡：空闲 worker 除心跳线程每 1–2s 写库续租外，其余职责全部静默，唯一日志节律是每 10 分钟一行的 `worker heartbeat alive: worker_id=… pid=… active_tasks=… beats=… sqlite_write_failures=…` 存活行。判读：日志超过约 15–20 分钟不滚动而 `worker_leases.heartbeat_at` 仍新鲜（或 `holder_pid` 在 tasklist 中存活）→ 日志输出层异常，继续按本节排查；日志与心跳同时停 → 进程已死，看门狗自动兜底重启，崩溃根因按「任务没创建或没推进」查。
 
@@ -389,7 +389,7 @@ worker 静默不等于 worker 死亡：空闲 worker 除心跳线程每 1–2s �
 
 `execution` / `inspection` 的车道行为契约见 `runtime-overview.md`「节点模型路由与准入绑定」，配置语义见 `config-and-models.md`「角色路由：有序 fallback 与负载均衡组」。运维判读路径：
 
-- 先看这条链到底有没有组：`g3ku status` 打印的是 route/group 结构（`Execution Route: lb:g_shared(m_a|m_b)[rounds=1] → model:m_x`），不再有「链首 = 执行模型」的读法。纯 direct 链仍按配置顺序 fallback，不存在均衡。
+- 先看这条链到底有没有组：`negi status` 打印的是 route/group 结构（`Execution Route: lb:g_shared(m_a|m_b)[rounds=1] → model:m_x`），不再有「链首 = 执行模型」的读法。纯 direct 链仍按配置顺序 fallback，不存在均衡。
 - 看实际分布：`GET /api/models/load-balance/status`（数据来自 worker 心跳，因此需要 worker 在线），按成员读 `running / waiting / reserved / rolling_rpm_60s / penalty_429 / score`。`quota_bucket_count` 小于成员数说明多条绑定共用一份配额，这是预期而不是 bug。
 - 看单个节点为什么选了这个成员：`.g3ku/main-runtime/managed-worker.log` 的 `Model route selected` 行带决策时刻的负载读数与 `selection_reason`；换过成员则看 `Model node binding rebound` 的 `rebind_reason`（`filter_changed` / `capacity` / `plan_changed` / `fallback_after_failure`）。429 惩罚不再是重绑原因，它只进打分决定新绑定选谁（契约见 `runtime-overview.md`「节点模型路由与准入绑定」）。`Model route lease released` 的 `outcome` 按这次授予的真实终态打标：`success`=换到了模型回应，`cancelled`=授予没换成回应（取消/preflight 失败/chat 抛错），另有 `build_failed` 与 `group_exhausted`。
 - 发现某条链首成员被反复 429、而 `model_route_groups` 里它的 `rolling_rpm_60s` 偏低：先确认这些请求出自辅助车道（spawn 送审评审、异步任务重复预检），它们不过准入、不进均衡账。判据是 `Retryable model failure … round x/N` 的 N 落在成员目录 `retryCount` 而不是组的 `maxRetryRounds`（边界与维持现状的理由见 `runtime-overview.md`「节点模型路由与准入绑定」）。
@@ -429,7 +429,7 @@ IM 渠道有两条：内置官方 QQ 适配器（`g3ku/qq_official/`，进程内
 4. 探针自己要记账，别把它的开销算成被观测者的：实盘一次恢复批次开着 tracemalloc 峰值到 3038 MB，摘掉标记重启后同一批恢复峰值 2077 MB（≈1 GB 是 trace 记录本身），且那一轮事件循环滞后实测 337,144 ms。⇒ 归因时先扣这份开销，并且别在一次恢复风暴上开着超过两三拍。
 5. 站点榜只回答"在哪申请"，不回答"谁在申请"。要调用链：`G3KU_MEM_PROBE_FRAMES`（默认 1）抬起 tracemalloc 栈深（>1 才有链），`G3KU_MEM_PROBE_DUMP_MB`>0 时被跟踪驻留**第一次**越过该阈值就落一份 `mem-probe-<pid>-<启动时刻>-dump.txt`（每进程一次，按完整链排名）。成本按活块数走：几百个对象的小堆上 `statistics('traceback')` 已 122ms，实盘 600 万块级别按秒计，所以只在需要那一次开。
 6. 探针的边界：它统计走 Python 分配器的对象，C 侧缓冲（zlib 压缩、sqlite 读入的大 blob、socket 内核缓冲）不进 `top`，所以 `traced_mb` 明显低于 `rss_mb` 时先想这条口径差，别当成统计漏。实盘一次读数就是这形状：`rss` 3038 MB 而 `traced` 605 MB ⇒ 约八成峰值不在 Python 对象上，Python 侧的两个大头是 `json/decoder.py:raw_decode`（整任务 `payload_json` 反复解析后的驻留）与每帧的技能可见性诊断。站点行号指向申请处，不一定是持有者——找持有者用上一条的链。
-7. 为什么是标记文件而不是环境变量：托管 worker 的环境来自 web 进程的 `os.environ.copy()`（`g3ku/web/worker_control.py`），要按环境变量给它开闸就得重启 web；标记文件只需重启 worker，与 `.g3ku/llm-config/auto-unlock.key` 同属"盘上一个文件决定一次行为"的运维开关。手动 `g3ku worker` 同样认这个标记。
+7. 为什么是标记文件而不是环境变量：托管 worker 的环境来自 web 进程的 `os.environ.copy()`（`g3ku/web/worker_control.py`），要按环境变量给它开闸就得重启 web；标记文件只需重启 worker，与 `.g3ku/llm-config/auto-unlock.key` 同属"盘上一个文件决定一次行为"的运维开关。手动 `negi worker` 同样认这个标记。
 
 ### 任务大厅卡顿 / 冻结（浏览器端）
 
@@ -588,7 +588,7 @@ For the queued Markdown memory runtime, the first operator checks should be:
 4. Inspect `memory/failed.jsonl` for parked failed batches: each row carries `category` (`provider_error` / `protocol`), `status` (`parked` / `requeued`), retry counters and a full `error_history`. A non-empty file means some turns of memory are waiting for a success signal or an operator decision.
 5. Inspect `memory/ops.jsonl` for the latest terminal batch history (`applied`, `precheck_failed`, `operator_discarded`).
 6. If a processed row exposes `request_artifact_paths`, inspect the referenced files under `.g3ku/memory-requests/` before blaming prompt assembly or the provider adapter.
-7. Use `g3ku memory current`, `g3ku memory queue`, and `g3ku memory flush` when you need a quick operator view without manually opening files.
+7. Use `negi memory current`, `negi memory queue`, and `negi memory flush` when you need a quick operator view without manually opening files.
 8. If the queue head is stuck in `processing`, inspect `.g3ku/config.json -> models.roles.memory` before debugging the frontend.
 
 Operator workflow for parked failed batches:
@@ -617,23 +617,23 @@ Operator debugging order for duplicated successful memory writes:
 
 The memory CLI keeps only the queued Markdown runtime operator surface:
 
-- `g3ku memory current`
-- `g3ku memory queue`
-- `g3ku memory flush`
-- `g3ku memory doctor`
-- `g3ku memory reconcile-notes`
-- `g3ku memory import-legacy <path>`
-- `g3ku memory cleanup-legacy`
+- `negi memory current`
+- `negi memory queue`
+- `negi memory flush`
+- `negi memory doctor`
+- `negi memory reconcile-notes`
+- `negi memory import-legacy <path>`
+- `negi memory cleanup-legacy`
 
-The active memory operator surface is `g3ku memory` with `current` / `queue` / `flush` / `doctor` / `reconcile-notes` / `import-legacy` / `cleanup-legacy`; there is no reset subcommand, and legacy-only commands (runtime stats/trace/explain, decay, pending-fact review) are not part of the operator contract.
+The active memory operator surface is `negi memory` with `current` / `queue` / `flush` / `doctor` / `reconcile-notes` / `import-legacy` / `cleanup-legacy`; there is no reset subcommand, and legacy-only commands (runtime stats/trace/explain, decay, pending-fact review) are not part of the operator contract.
 
 The operator-oriented maintenance commands beyond `current`, `queue`, and `flush` are:
 
-- `g3ku memory doctor`
+- `negi memory doctor`
   Read-only health check for the queued Markdown memory layout.
-- `g3ku memory reconcile-notes`
+- `negi memory reconcile-notes`
   Explicit note-ref reconciliation for `MEMORY.md` and `memory/notes/`.
-- `g3ku memory import-legacy <path>`
+- `negi memory import-legacy <path>`
   Minimal one-shot importer for legacy memory exports.
 
 Use them with these boundaries in mind:
@@ -645,10 +645,10 @@ Use them with these boundaries in mind:
 
 Recommended operator order:
 
-1. Run `g3ku memory doctor` first.
-2. If the only issues are missing note files or orphan notes, use `g3ku memory reconcile-notes`.
-3. If the notebook is empty and you are doing a controlled migration, run `g3ku memory import-legacy <path>` once without `--apply`, inspect the summary, then rerun with `--apply`.
-4. After migration is complete and `MEMORY.md` is already authoritative, run `g3ku memory cleanup-legacy` once in dry-run mode, review the paths, then rerun with `--apply` to remove leftovers.
+1. Run `negi memory doctor` first.
+2. If the only issues are missing note files or orphan notes, use `negi memory reconcile-notes`.
+3. If the notebook is empty and you are doing a controlled migration, run `negi memory import-legacy <path>` once without `--apply`, inspect the summary, then rerun with `--apply`.
+4. After migration is complete and `MEMORY.md` is already authoritative, run `negi memory cleanup-legacy` once in dry-run mode, review the paths, then rerun with `--apply` to remove leftovers.
 
 Queue-head recovery caveats that matter during operations:
 
@@ -660,7 +660,7 @@ Queue-head recovery caveats that matter during operations:
 
 Negi has two supported operator startup modes:
 
-- direct local startup through `start-g3ku.ps1` / `start-g3ku.sh`
+- direct local startup through `start-negi.ps1` / `start-negi.sh`
 - container startup through `compose.yaml`
 
 For the container path, the maintenance contract is:
@@ -703,7 +703,7 @@ If Docker startup appears healthy but detached tasks never report back, inspect 
 
 Operator expectations:
 
-- `memory/` has no reset command: `g3ku memory cleanup-legacy` (dry-run unless `--apply`) removes legacy artifacts it lists, and `g3ku memory doctor` reports queue/health. Do not manually delete a subset of files.
+- `memory/` has no reset command: `negi memory cleanup-legacy` (dry-run unless `--apply`) removes legacy artifacts it lists, and `negi memory doctor` reports queue/health. Do not manually delete a subset of files.
 - The reset recreates baseline managed files and sync state, but it does not immediately rebuild tool/skill catalog retrieval inside the command itself.
 - After reset, user long-term memory is empty.
 - After reset, tool/skill semantic retrieval is also empty until the next runtime startup.

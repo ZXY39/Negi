@@ -652,7 +652,7 @@ def _ensure_runtime_fields_explicit(raw_data: dict[str, Any], cfg: Config) -> No
     if middlewares is not None:
         raise ValueError(
             "agents.defaults.middlewares is not allowed in project config. "
-            "Remove runtime middlewares from .g3ku/config.json; g3ku web does not use them."
+            "Remove runtime middlewares from .g3ku/config.json; negi web does not use them."
         )
 
     payload = _runtime_config_payload(cfg)

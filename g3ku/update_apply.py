@@ -24,7 +24,7 @@ from typing import Any
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 LOG_FILE = PROJECT_ROOT / ".g3ku" / "logs" / "update-apply.log"
-# 重拉起的 web 进程的输出落点：与 g3ku_bootstrap 给 web 自身日志选的文件一致，
+# 重拉起的 web 进程的输出落点：与 negi_bootstrap 给 web 自身日志选的文件一致，
 # 运维找服务日志只去这里，升级锚点只去 LOG_FILE，两边不互相淹没。
 WEB_LOG_FILE = PROJECT_ROOT / ".g3ku" / "logs" / "console.log"
 EXIT_WAIT_SECONDS = 90.0

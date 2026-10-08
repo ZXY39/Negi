@@ -28,7 +28,7 @@ Full contract (endpoints, turn terminal invariant, event mapping, outbound routi
 
 ## Local Startup And Launcher Contract
 
-- `g3ku.cmd` / `g3ku.ps1` / `g3ku.sh` are thin CLI passthrough wrappers around `g3ku_bootstrap.py`; with no arguments they default to `web`. `start-g3ku.*` remains the explicit double-click entry with its own managed-process handling.
+- `negi.cmd` / `negi.ps1` / `negi.sh` are thin CLI passthrough wrappers around `negi_bootstrap.py`; with no arguments they default to `web`. `start-negi.*` remains the explicit double-click entry with its own managed-process handling.
 - For the `web` command the bootstrap parent stays in the terminal as a readiness supervisor: it spawns the server child, polls `http://127.0.0.1:<port>/api/bootstrap/status` (a g3ku-specific endpoint so a foreign process squatting on the port cannot fake readiness), and prints a terminal banner: success with the clickable URL, or failure with the child exit code plus a pointer to `.g3ku/logs/console.log` (where the child's stdout/stderr are appended). A slow-start warning appears after the probe deadline instead of a false failure.
 - That probe measures *the port is listening*, never *the runtime is warmed up*. uvicorn only creates the listening socket after the lifespan hands control back, so `g3ku/web/main.py::lifespan` schedules `ensure_web_runtime_services()` as a background task instead of awaiting it. Runtime progress lives in the same status payload: `runtime` (the per-service flags), `runtime_ready`, and `runtime_bootstrapping`, where `runtime_bootstrapping` means a coroutine is executing the startup body right now.
 - The startup body runs once per process. Its gate is "the body completed at least once *and* the task service and heartbeat are still up" — it must never be derived from whether the runtime-services lock happens to be held, because the holder reads its own lock as held, so no caller inside the critical section can ever observe readiness. When that happens each queued caller re-runs the whole body instead of returning, the lock never gets an idle window, and `/ws/ceo` accepts connections without ever emitting the first frame: the transcript stays on `Loading …` while `/api/ceo/sessions` and `/api/tasks` keep answering normally. `/api/bootstrap/status` reporting `runtime.bootstrapping=true` together with `main_runtime_ready`/`heartbeat_ready`/`agent_ready` all true is the signature of that stall, and `console.log` shows the body's own tail (`queued follow-up boot replay: N session(s) scanned`) repeating every minute or two.
@@ -758,7 +758,7 @@ Context compression has one operator-facing surface: a rule inside the CEO feed 
 
 The composer carries a mic button (`#ceo-voice-btn`, beside the attach button) that records locally, transcribes on the machine, and puts the text into the input box. The engine and its measured defaults are owned by `speech-to-text.md`; what this surface promises is the following.
 
-- The button is a record/stop toggle and is always rendered: readiness is reported on click (with the exact `g3ku stt prepare` instruction) rather than by hiding the control, so a not-yet-provisioned install explains itself instead of looking broken. While recording it carries `aria-pressed="true"`, the `mic-off` glyph, and the `is-recording` class.
+- The button is a record/stop toggle and is always rendered: readiness is reported on click (with the exact `negi stt prepare` instruction) rather than by hiding the control, so a not-yet-provisioned install explains itself instead of looking broken. While recording it carries `aria-pressed="true"`, the `mic-off` glyph, and the `is-recording` class.
 - **Readiness is asked before the microphone is granted.** `startCeoVoiceCapture` calls `ensureCeoVoiceEngine()` first (`GET /api/ceo/voice/status`): a box that is merely switched off gets that sentence and stops, while a box that is allowed but missing its ~157 MB starts the download in place (`POST /api/ceo/voice/prepare`, polled through the same status route) and only then opens the recorder. The reverse order would let the user speak a whole sentence before learning the model was never installed. The download runs as a single-flight background task server-side, so repeated clicks reuse it, and the toast quotes measured byte counts per stage instead of hiding behind a spinner.
 - Two delivery modes, chosen by the 识别后自动发送 checkbox that appears above the input row while recording or transcribing (default on, persisted in `localStorage`):
   - **Auto send**: the text is sent immediately with the `用户语音，机器识别结果：` prefix and the user never gets a chance to edit it — which is exactly why the prefix is required here, and why this lane obeys the same contract as the channel voice lane (`speech-to-text.md`「提示词侧」). If the send lane refuses (session busy, read-only, no active session) the text stays in the composer instead of being swallowed.
@@ -830,9 +830,9 @@ Do not assume the browser has a second hidden RBAC source. For surfaced tool fam
 
 The web/admin stack has an explicit container-safe startup mode.
 
-- `g3ku web --no-worker` is the container-safe web entrypoint.
+- `negi web --no-worker` is the container-safe web entrypoint.
 - In this mode, the web process still owns FastAPI routes, websocket session/runtime integration, heartbeat startup, and cron startup.
-- Detached task execution is expected to come from a separate `g3ku worker` process or container rather than from the web-managed local child worker path.
+- Detached task execution is expected to come from a separate `negi worker` process or container rather than from the web-managed local child worker path.
 
 The default local (non-`--no-worker`) path runs a web-managed task worker with auto-restart supervision; its lease/heartbeat/stale semantics and troubleshooting are owned by `operations-and-maintenance.md`「托管 worker 看门狗」.
 
