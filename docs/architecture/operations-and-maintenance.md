@@ -27,7 +27,7 @@
 - 升级前置校验：`git status --porcelain --untracked-files=no` 非空（**跟踪文件被本地改过**）才拒绝执行，不静默覆盖用户改动。未跟踪项不算脏 —— 装过 skill、桥接产物的设备必然有未跟踪文件，把它们算进去会让升级永久被拒。运行期状态一律落在数据根，不改跟踪文件——前端第三方资产的探测状态就在 `<data root>/vendor-updates.json`，见 `web-and-admin.md`「Frontend Vendor Asset Update Contract」
 - 两种取码方式**不可混用**：把源码包盖在 git 检出上会让整棵树在 autocrlf 下变成永久"脏"，从而被下一次升级的脏检查挡住。因此"有 `.git` 但 git 不可用"时报错，而不是退化成覆盖
 - 版本识别通道是 `git ls-remote --tags origin`，只接受 `refs/tags/vX.Y.Z` 形状（`backup/*` 这类路径标签与 peeled `^{}` 行都按形状过滤掉），与 `g3ku/__init__.py` 的 `__version__` 比对，结果只落在 `g3ku status` 的 `Release:` 行。约束：只读不外发、超时 2 秒、失败即整行不出现（离线设备不得显示"已是最新"）
-- 发版动作 = 打标签 + 同步 `pyproject.toml` 与 `g3ku/__init__.py` 两处版本号 + 跑 `uv lock`（`uv.lock` 里钉着 `g3ku-ai` 自身版本，漏这一步会让所有 `uv sync --frozen` 的安装与升级直接失败）+ 更新安装脚本与 README 里钉住的 ref 默认值
+- 发版动作 = 打标签 + 同步 `pyproject.toml` 与 `g3ku/__init__.py` 两处版本号 + 跑 `uv lock`（`uv.lock` 里钉着 `g3ku-ai` 自身版本，漏这一步会让所有 `uv sync --frozen` 的安装与升级直接失败）+ 更新安装脚本与 README 里钉住的 ref 默认值。标签推上去后 `.github/workflows/release.yml` 自动建 release 并把 `install.ps1` / `install.sh` 挂成资产，不需要手工建；README 的发布页备用通道依赖的就是这两个资产，所以**未推送标签 = 发布页那条地址取不到东西**
 - 取码与查版本只认**当前克隆的 `origin`**：脚本里的仓库名常量只服务首次 `git clone` 与无 git 的源码包兜底，而 `ls-remote` / `fetch` 打的是设备自己 `.git/config` 里的 remote。仓库改名之后已装设备照常检查与升级，不需要通知使用者；这条通道的前提是旧仓库名不被重新占用——GitHub 在名字被建走的那一刻停止重定向，而失败的表现是 `Release:` 行不出现、设置行不点亮，不是一句报错，设备会静默停在旧版本上
 
 ### 自动检查新版本与「重启并更新」
