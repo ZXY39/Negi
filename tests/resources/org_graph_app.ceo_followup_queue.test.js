@@ -174,6 +174,7 @@ function loadApp() {
             removeCeoQueuedFollowUp,
             enqueueCeoFollowUp,
             applyCeoState,
+            ensureActiveCeoTurn,
             getMergedCeoQueuedFollowUps,
             renderQueuedCeoFollowUps,
             flushCeoQueuedFollowUp,
@@ -544,4 +545,51 @@ test("量出放得下之后，重画不再画那颗三角", () => {
 
     const expandTag = U.ceoFollowUpQueue.innerHTML.match(/<button[^>]*ceo-follow-up-expand[^>]*>/)?.[0] || "";
     assert.match(expandTag, /hidden/);
+});
+
+test("409 撤下失败被当成退场信号：条目摘掉、提示是 info", async () => {
+    const api = loadApp();
+    const { U, applyCeoState, withdrawCeoQueuedFollowUp, __context } = api;
+    applyCeoState({
+        status: "idle",
+        queued_follow_up_messages: [
+            { content: "已被本轮接走的补充", attachments: [], metadata: { _transcript_turn_id: "t-7" } },
+        ],
+    });
+    // 先证条目真的画出来了：回合运行中服务端会隐藏 pending 行，用 idle 帧才有候选条。
+    assert.match(U.ceoFollowUpQueue.innerHTML, /已被本轮接走的补充/);
+    // app.js 顶层的 function showToast 会盖掉沙箱里的桩，所以观察点要装在 vm 的全局上。
+    const toasts = [];
+    __context.showToast = (payload) => { toasts.push(payload); };
+    __context.ApiClient = {
+        ...__context.ApiClient,
+        withdrawCeoQueuedFollowUp: async () => {
+            const error = new Error("HTTP 409");
+            error.status = 409;
+            error.code = "follow_up_not_queued";
+            throw error;
+        },
+    };
+
+    assert.equal(await withdrawCeoQueuedFollowUp("server:t-7"), false);
+
+    // 服务端说"这条已不在队列"，条目就不该继续占位等人再点一次同样的错。
+    assert.equal(U.ceoFollowUpQueue.hidden, true);
+    assert.equal(toasts.length, 1);
+    assert.equal(toasts[0].kind, "info");
+    assert.match(toasts[0].title, /已被本轮接走/);
+});
+
+test("一帧说没在跑，但本地回合未收尾且帧里还有未了结的活 ⇒ 不许放行派发", () => {
+    const { S, applyCeoState } = loadApp();
+    // 直接摆一个未收尾的本地回合（reply.final 还没到），不依赖建泡桩的形状。
+    S.ceoPendingTurns = [{ source: "user", turnId: "t-live" }];
+    S.ceoTurnActive = true;
+
+    applyCeoState({ status: "idle", is_running: false, source: "user", turn_id: "t-live", pending_tool_calls: ["call-1"] });
+    assert.equal(S.ceoTurnActive, true);
+
+    // 帧里什么都没有了：这就是服务端自己说"没事了"，照常放行。
+    applyCeoState({ status: "idle", is_running: false, source: "user", turn_id: "t-live" });
+    assert.equal(S.ceoTurnActive, false);
 });

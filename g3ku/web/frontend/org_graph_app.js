@@ -5548,6 +5548,16 @@ function flushCeoQueuedFollowUp(entryId) {
     return true;
 }
 
+function pruneCeoServerQueuedFollowUpByTurn(sessionId, turnId) {
+    const serverKey = String(sessionId || "").trim();
+    const remaining = (Array.isArray(S.ceoServerQueuedFollowUps?.[serverKey]) ? S.ceoServerQueuedFollowUps[serverKey] : [])
+        .filter((raw) => String(raw?.metadata?.["_transcript_turn_id"] || "").trim() !== turnId);
+    S.ceoServerQueuedFollowUps = {
+        ...(S.ceoServerQueuedFollowUps || {}),
+        [serverKey]: remaining,
+    };
+}
+
 // 编辑与删除走同一条退场：服务端队列里的条目必须先删那边（否则下一帧原样画回来），
 // 两者的差别只在正文还不还给输入框。
 async function releaseCeoQueuedFollowUp(entryId, { refillComposer }) {
@@ -5561,6 +5571,19 @@ async function releaseCeoQueuedFollowUp(entryId, { refillComposer }) {
         try {
             await ApiClient.withdrawCeoQueuedFollowUp(sessionId, { turn_id: turnId });
         } catch (error) {
+            const code = typeof ApiClient?.getErrorCode === "function" ? ApiClient.getErrorCode(error) : "";
+            if (Number(error?.status) === 409 || code === "follow_up_not_queued") {
+                // 409 说的是"这条已经不在服务端队列里"（被某个安全边界接走了），
+                // 那是退场信号而不是失败：条目留着只会让人再点一次同样的错。
+                pruneCeoServerQueuedFollowUpByTurn(sessionId, turnId);
+                removeCeoQueuedFollowUp(sessionId, item.id);
+                showToast({
+                    title: "已被本轮接走",
+                    text: "这条补充已经交给当前回合，不再排在待发送里。",
+                    kind: "info",
+                });
+                return false;
+            }
             showToast({
                 title: "撤下失败",
                 text: String(error?.message || "该条补充可能已被本轮接走，无法撤回。"),
@@ -5568,14 +5591,7 @@ async function releaseCeoQueuedFollowUp(entryId, { refillComposer }) {
             });
             return false;
         }
-        // 服务端撤回会随帧清掉认领的队列；本地这条也顺手丢弃，避免重复画。
-        const serverKey = String(sessionId || "").trim();
-        const remainingServerItems = (Array.isArray(S.ceoServerQueuedFollowUps?.[serverKey]) ? S.ceoServerQueuedFollowUps[serverKey] : [])
-            .filter((raw) => String(raw?.metadata?.["_transcript_turn_id"] || "").trim() !== turnId);
-        S.ceoServerQueuedFollowUps = {
-            ...(S.ceoServerQueuedFollowUps || {}),
-            [serverKey]: remainingServerItems,
-        };
+        pruneCeoServerQueuedFollowUpByTurn(sessionId, turnId);
     } else {
         removeCeoQueuedFollowUp(sessionId, item.id);
     }
@@ -5774,7 +5790,16 @@ function applyCeoState(state = {}, meta = {}) {
     if (adoptCeoServerQueuedFollowUpsFromState(state)) renderQueuedCeoFollowUps(activeSessionId());
     const activeTurn = source || turnId ? getActiveCeoTurn(source, turnId) : getActiveCeoTurn();
     const hadTurnContext = !!activeTurn || !!S.ceoTurnActive;
-    S.ceoTurnActive = running;
+    // 一帧 status 不为 running 不足以证明"这条会话没有回合在跑"：两个可见轮之间、
+    // 服务端刚收下补充还没把 is_running 置起来时都会发这种帧，而本地那条还没等到 reply.final。
+    // 这个标记是"草稿入待发送队列还是直接发出去"的唯一判据（sendCeoMessage 与
+    // maybeDispatchQueuedCeoFollowUps 都只看它），它假一次，草稿就整批上线一次。
+    // 所以只在帧里还留着未了结的活时维持 true；全空就是服务端自己说没事了，照常放行派发。
+    const outstandingWork = (Array.isArray(state?.pending_tool_calls) ? state.pending_tool_calls.length : 0)
+        + (Array.isArray(state?.pending_interrupts) ? state.pending_interrupts.length : 0)
+        + (Array.isArray(state?.queued_follow_up_messages) ? state.queued_follow_up_messages.length : 0)
+        + (String(state?.compression?.status || "").trim().toLowerCase() === "running" ? 1 : 0);
+    S.ceoTurnActive = running || (!!activeTurn && activeTurn.finalized !== true && outstandingWork > 0);
     if (patchCeoSessionRuntimeState(activeSessionId(), running)) renderCeoSessions();
     if (!running) S.ceoPauseBusy = false;
     if (running) {

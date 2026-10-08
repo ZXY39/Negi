@@ -1687,6 +1687,13 @@ async def ceo_websocket(websocket: WebSocket):
                 queued_follow_ups = await _drain_queued_follow_ups()
                 if not queued_follow_ups:
                     break
+                # 队列被接走这一刻必须自己广播一次。浏览器画在输入框上方的候选条来自
+                # state 帧的整表替换，而它的退场判据是 `ceo.reply.final.user_messages`——
+                # 一个还在跑的续跑轮不会发 final，于是条目会一直挂着，而服务端早就不持有它，
+                # 此时点「编辑/删除」只会拿到 409 follow_up_not_queued。
+                emit_state_snapshot = getattr(session, '_emit_state_snapshot', None)
+                if callable(emit_state_snapshot):
+                    await _maybe_await(emit_state_snapshot())
                 archive_follow_up_chain_transition = getattr(session, 'archive_follow_up_chain_transition', None)
                 if callable(archive_follow_up_chain_transition):
                     follow_up_turn_ids = {
