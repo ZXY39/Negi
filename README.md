@@ -82,25 +82,27 @@ Negi 针对这五处障碍提供机制层面的处理，而不是把它们留给
 Windows PowerShell：
 
 ```powershell
-iwr https://raw.githubusercontent.com/ZXY39/Negi/v2.0.0/install.ps1 | iex
+iwr https://github.com/ZXY39/Negi/releases/latest/download/install.ps1 | iex
 ```
 
 Linux / macOS：
 
 ```bash
-curl -LsSf https://raw.githubusercontent.com/ZXY39/Negi/v2.0.0/install.sh | bash
+curl -LsSf https://github.com/ZXY39/Negi/releases/latest/download/install.sh | bash
 ```
+
+这条地址不带版本号，指向最新发布版（GitHub 的 `releases/latest` 不含草稿与预览版），所以引导文档里的命令不需要随发版改写。脚本内部仍钉着一个发布标签（`install.ps1` 的 `$Ref` / `install.sh` 的 `REF`），钉的是它自己所属的那一版，因此"一行命令装最新"与"每个发布各带一份自洽脚本"并不冲突。
 
 默认安装到 `~/Negi`，无需预先安装 Python。设备上缺少 git 时改用源码包下载（需要 curl 或 wget，以及 unzip）。
 
-无法解析 `raw.githubusercontent.com` 时，可改用镜像通道获取同一脚本，仓库地址与参数不变：
+取不到 `github.com` 时，可改用镜像通道获取同一脚本，仓库地址与参数不变：
 
 ```powershell
-iwr https://cdn.jsdelivr.net/gh/ZXY39/Negi@v2.0.0/install.ps1 | iex
-iwr https://ghfast.top/https://raw.githubusercontent.com/ZXY39/Negi/v2.0.0/install.ps1 | iex
+iwr https://cdn.jsdelivr.net/gh/ZXY39/Negi@latest/install.ps1 | iex
+iwr https://ghfast.top/https://github.com/ZXY39/Negi/releases/latest/download/install.ps1 | iex
 ```
 
-发布页同时提供同一份脚本，可绕开 raw 域名：`https://github.com/ZXY39/Negi/releases/download/v2.0.0/install.ps1`。使用第三方代理相当于把"执行什么代码"交给该代理，稳妥做法是先下载再检查：脚本首行应为 `#requires -Version 5.1` 或 `#!/usr/bin/env bash`，脚本内固定的版本号应与地址中的版本标签一致，文件字节数以发布页列出的大小为准。
+使用第三方代理相当于把"执行什么代码"交给该代理，稳妥做法是先下载再检查：脚本首行应为 `#requires -Version 5.1` 或 `#!/usr/bin/env bash`，脚本里的 `$Ref` / `REF` 默认值就是它将安装的版本标签，文件字节数以发布页列出的大小为准。jsdelivr 按标签缓存内容，发新版后 `@latest` 可能滞后一段时间，急着装新标签时把地址里的 `@latest` 换成 `@vX.Y.Z`。
 
 网络访问 PyPI 或 Python 发行包较慢时，为 uv 指定镜像地址即可，脚本不另设开关：
 

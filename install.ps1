@@ -2,7 +2,7 @@
 <#
   G3KU one-line installer (Windows).
 
-    iwr https://raw.githubusercontent.com/ZXY39/Negi/v2.0.0/install.ps1 | iex
+    iwr https://github.com/ZXY39/Negi/releases/latest/download/install.ps1 | iex
 
   Provisions uv (and therefore Python) on a machine that has neither, fetches the
   pinned checkout, syncs the locked environment and hands off to negi_bootstrap.py.

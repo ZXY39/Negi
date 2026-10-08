@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # G3KU one-line installer (macOS / Linux).
 #
-#   curl -LsSf https://raw.githubusercontent.com/ZXY39/Negi/v2.0.0/install.sh | bash
+#   curl -LsSf https://github.com/ZXY39/Negi/releases/latest/download/install.sh | bash
 #
 # Provisions uv (and therefore Python) on a machine that has neither, fetches the
 # pinned checkout, syncs the locked environment and hands off to negi_bootstrap.py.
