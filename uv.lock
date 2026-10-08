@@ -592,7 +592,7 @@ wheels = [
 
 [[package]]
 name = "g3ku-ai"
-version = "1.0.16"
+version = "2.0.0"
 source = { editable = "." }
 dependencies = [
     { name = "aiosqlite" },

@@ -82,13 +82,13 @@ Negi 针对这五处障碍提供机制层面的处理，而不是把它们留给
 Windows PowerShell：
 
 ```powershell
-iwr https://raw.githubusercontent.com/ZXY39/Negi/v1.0.16/install.ps1 | iex
+iwr https://raw.githubusercontent.com/ZXY39/Negi/v2.0.0/install.ps1 | iex
 ```
 
 Linux / macOS：
 
 ```bash
-curl -LsSf https://raw.githubusercontent.com/ZXY39/Negi/v1.0.16/install.sh | bash
+curl -LsSf https://raw.githubusercontent.com/ZXY39/Negi/v2.0.0/install.sh | bash
 ```
 
 默认安装到 `~/Negi`，无需预先安装 Python。设备上缺少 git 时改用源码包下载（需要 curl 或 wget，以及 unzip）。
@@ -96,11 +96,11 @@ curl -LsSf https://raw.githubusercontent.com/ZXY39/Negi/v1.0.16/install.sh | bas
 无法解析 `raw.githubusercontent.com` 时，可改用镜像通道获取同一脚本，仓库地址与参数不变：
 
 ```powershell
-iwr https://cdn.jsdelivr.net/gh/ZXY39/Negi@v1.0.16/install.ps1 | iex
-iwr https://ghfast.top/https://raw.githubusercontent.com/ZXY39/Negi/v1.0.16/install.ps1 | iex
+iwr https://cdn.jsdelivr.net/gh/ZXY39/Negi@v2.0.0/install.ps1 | iex
+iwr https://ghfast.top/https://raw.githubusercontent.com/ZXY39/Negi/v2.0.0/install.ps1 | iex
 ```
 
-发布页同时提供同一份脚本，可绕开 raw 域名：`https://github.com/ZXY39/Negi/releases/download/v1.0.16/install.ps1`。使用第三方代理相当于把"执行什么代码"交给该代理，稳妥做法是先下载再检查：脚本首行应为 `#requires -Version 5.1` 或 `#!/usr/bin/env bash`，脚本内固定的版本号应与地址中的版本标签一致，文件字节数以发布页列出的大小为准。
+发布页同时提供同一份脚本，可绕开 raw 域名：`https://github.com/ZXY39/Negi/releases/download/v2.0.0/install.ps1`。使用第三方代理相当于把"执行什么代码"交给该代理，稳妥做法是先下载再检查：脚本首行应为 `#requires -Version 5.1` 或 `#!/usr/bin/env bash`，脚本内固定的版本号应与地址中的版本标签一致，文件字节数以发布页列出的大小为准。
 
 网络访问 PyPI 或 Python 发行包较慢时，为 uv 指定镜像地址即可，脚本不另设开关：
 
@@ -367,7 +367,7 @@ export UV_PYTHON_INSTALL_MIRROR=<可用的 python-build-standalone 镜像>
 - **查看是否有新版本**：在项目目录执行 `negi status`，输出的最后一行 `Release:` 显示当前版本与远端最新标签。离线、缺少 git 或远端不是本仓库时该行不出现，不会给出"已是最新"的错误结论。
 - **自动检查**：服务运行期间每 5 小时检查一次，启动时同样检查一次。开关与间隔在配置文件的 `update_check`（`enabled` / `interval_hours`）。项目处于锁定状态时不检查也不提醒。
 - **有新版本时**：侧栏「设置」按钮左上角出现标记，命令行启动时也会提示一行。设置页显示「当前版本 · 最新标签 · 检查于」，可手动检查，也可点击「重启并更新」——该操作会先暂停正在进行的对话与任务，更新完成后自动重启服务。代码不会被自动替换，必须由使用者确认。
-- **手动升级**：在安装目录里执行 `.\install.ps1 -Upgrade -Dir .`（Linux / macOS `./install.sh --upgrade --dir .`）。`-Dir` 不能省：脚本按它决定动手的目录，默认值是 `%USERPROFILE%\Negi` / `~/Negi`，装在别处的设备省略它就会去动默认目录、原安装不变。默认升级到脚本内固定的版本，指定版本加 `-Ref v1.0.16` / `--ref v1.0.16`。
+- **手动升级**：在安装目录里执行 `.\install.ps1 -Upgrade -Dir .`（Linux / macOS `./install.sh --upgrade --dir .`）。`-Dir` 不能省：脚本按它决定动手的目录，默认值是 `%USERPROFILE%\Negi` / `~/Negi`，装在别处的设备省略它就会去动默认目录、原安装不变。默认升级到脚本内固定的版本，指定版本加 `-Ref v2.0.0` / `--ref v2.0.0`。
 - **改动过仓库自带文件时**，`-Upgrade` 拒绝执行，需要先提交或丢弃这些改动；自行安装的技能、桥接产物等未纳入版本管理的文件不计入。
 - **更新过程可追溯**：「重启并更新」的完整过程写入 `.g3ku/logs/update-apply.log`，安装脚本的进度实时续写；超过 30 秒没有新输出时另记一行"仍在运行"，慢网络下可以区分等待与卡死。不会出现空白的命令行窗口。
 - **已知限制**：以源码包方式安装的设备，升级只覆盖新版本带来的文件，上一版中被删除的文件不会被回收。需要完整一致的文件集合时，请使用 git 安装，或删除目录重装。

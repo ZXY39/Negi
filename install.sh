@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # G3KU one-line installer (macOS / Linux).
 #
-#   curl -LsSf https://raw.githubusercontent.com/ZXY39/Negi/v1.0.16/install.sh | bash
+#   curl -LsSf https://raw.githubusercontent.com/ZXY39/Negi/v2.0.0/install.sh | bash
 #
 # Provisions uv (and therefore Python) on a machine that has neither, fetches the
 # pinned checkout, syncs the locked environment and hands off to negi_bootstrap.py.
@@ -14,7 +14,7 @@ set -euo pipefail
 
 REPO_OWNER='ZXY39'
 REPO_NAME='Negi'
-REF="${G3KU_REF:-v1.0.16}"
+REF="${G3KU_REF:-v2.0.0}"
 DIR="${G3KU_DIR:-$HOME/Negi}"
 NO_START=0
 UPGRADE=0
