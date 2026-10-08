@@ -16,6 +16,7 @@ candidate 的「排除已提升」规则挡在门外，模型 load 它只会拿�
 from __future__ import annotations
 
 import json
+from pathlib import Path
 from types import SimpleNamespace
 
 from g3ku.runtime.context.execution_tool_selection import build_execution_tool_selection
@@ -1167,3 +1168,32 @@ def test_node_kept_context_is_read_from_store_not_the_opening_node_snapshot() ->
         request_messages=[],
         node=node_with_ledger,
     ) == [TOOL_ID]
+
+
+def test_path_anchor_contract_renders_from_one_source_across_lanes():
+    """落点规则只允许一个来源：两条车道必须同句、同 token 串，否则就是分叉实现。"""
+    from g3ku.runtime.frontdoor.tool_contract import _render_path_anchor, render_pinned_contract_text
+    from g3ku.utils.helpers import PATH_ANCHOR_RULE_TEXT, path_anchor_policy, path_anchor_tokens
+
+    frontdoor_lines = _render_path_anchor()
+    assert frontdoor_lines == [
+        f'path_anchor: {path_anchor_tokens()}',
+        f'path_anchor_rule: {PATH_ANCHOR_RULE_TEXT}',
+    ]
+
+    node_policy = path_anchor_policy(None)
+    assert node_policy['path_anchor_rule'] == PATH_ANCHOR_RULE_TEXT
+    assert node_policy['path_anchor_tokens'] == path_anchor_tokens()
+
+    pinned = render_pinned_contract_text(
+        skill_ids=['alpha'],
+        exec_runtime_policy=None,
+        session_temp_dir='C:/proj/temp/ceo/web_ceo-x',
+    )
+    for line in frontdoor_lines:
+        assert line in pinned
+
+    # `{data}` 只在数据根与项目根真的分离时被列出
+    assert '{data}' not in node_policy['path_anchor_tokens']
+    divergent = path_anchor_policy(Path('D:/definitely-not-the-project-root'))
+    assert '{data}' in divergent['path_anchor_tokens']

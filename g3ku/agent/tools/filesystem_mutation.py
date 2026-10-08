@@ -496,6 +496,7 @@ class FilesystemTool:
             file_path.write_text(content, encoding='utf-8')
             validation_result = await self._validate_file(
                 file_path=file_path,
+                runtime=runtime,
                 enabled=bool(self._settings.write_validation_enabled),
                 timeout_seconds=max(1, int(self._settings.write_validation_timeout_seconds or 20)),
                 rollback_on_failure=bool(self._settings.write_validation_rollback_on_failure),
@@ -633,6 +634,7 @@ class FilesystemTool:
             file_path.write_text(updated, encoding='utf-8')
             validation_result = await self._validate_file(
                 file_path=file_path,
+                runtime=runtime,
                 enabled=bool(self._settings.edit_validation_enabled),
                 timeout_seconds=max(1, int(self._settings.edit_validation_timeout_seconds or 20)),
                 rollback_on_failure=bool(self._settings.edit_validation_rollback_on_failure),
@@ -1228,10 +1230,29 @@ class FilesystemTool:
         }
         return json.dumps(payload, ensure_ascii=False)
 
+    def _park_failed_content(self, *, file_path: Path, runtime: dict[str, Any] | None) -> Path | None:
+        """Keep the rejected bytes so the model does not have to re-emit the whole body.
+
+        The tool result still reports failure; only the payload survives, inside the
+        caller's own temp root so it inherits that directory's retention rules.
+        """
+        if not file_path.is_file():
+            return None
+        try:
+            park_root = self._canonical_temp_root(runtime) / 'landing-park'
+            park_root.mkdir(parents=True, exist_ok=True)
+            parked = Path(tempfile.mkdtemp(prefix='park-', dir=str(park_root))) / file_path.name
+            shutil.copy2(file_path, parked)
+        except Exception:
+            return None
+        self._record_node_file_change(runtime=runtime or {}, path=parked, change_type='created')
+        return parked
+
     async def _validate_file(
         self,
         *,
         file_path: Path,
+        runtime: dict[str, Any] | None = None,
         enabled: bool,
         timeout_seconds: int,
         rollback_on_failure: bool,
@@ -1251,6 +1272,7 @@ class FilesystemTool:
             command = self._format_validation_command(template=template, file_path=file_path, workspace=workspace)
             result = await self._run_validation_command(command=command, cwd=str(workspace), timeout_seconds=timeout_seconds)
             if not bool(result.get('ok')):
+                parked = self._park_failed_content(file_path=file_path, runtime=runtime)
                 rollback_applied = False
                 if rollback_on_failure:
                     try:
@@ -1263,7 +1285,16 @@ class FilesystemTool:
                         rollback_applied = False
                 preview = self._validation_error_preview(result)
                 failure_suffix = ' after rollback' if rollback_applied else ' without rollback'
-                return f"Error: {action_label} validation failed for {file_path}{failure_suffix}. Validation command failed: {command}. {preview}".strip()
+                park_note = (
+                    f' Rejected content preserved at {parked}. Fix it there and move it to the target path;'
+                    ' do not re-write the body.'
+                    if parked
+                    else ''
+                )
+                return (
+                    f"Error: {action_label} validation failed for {file_path}{failure_suffix}."
+                    f"{park_note} Validation command failed: {command}. {preview}"
+                ).strip()
         return None
 
     def _validation_commands_for(

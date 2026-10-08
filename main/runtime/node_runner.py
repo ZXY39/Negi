@@ -21,7 +21,7 @@ from g3ku.runtime.kept_contract_snapshot import (
 from g3ku.runtime.memory_scope import normalize_memory_scope
 from g3ku.runtime.project_environment import current_project_environment
 from g3ku.runtime.stage_prompt_compaction import closing_stage_target
-from g3ku.utils.helpers import model_data_root
+from g3ku.utils.helpers import PATH_ANCHOR_RULE_TEXT, path_anchor_policy
 from main.errors import DistributionHoldError, NodePausedError, TaskPausedError, describe_exception
 from main.ids import new_command_id, new_node_id
 from main.models import (
@@ -4139,9 +4139,7 @@ class NodeRunner:
             'project_python_hint': str(project_environment.get('project_python_hint') or ''),
             'task_temp_dir': task_temp_dir,
             'path_policy': {
-                'relative_paths_bind_to_workspace': True,
-                'bare_filename_binds_to_task_temp_dir': True,
-                'path_anchor_tokens': '{workspace} | {temp}' + (' | {data}' if model_data_root(workspace_root) else ''),
+                **path_anchor_policy(workspace_root),
                 'filesystem_requires_absolute_path': False,
                 'content_requires_absolute_path': False,
                 'exec_default_working_dir': 'task_temp_dir',
@@ -4149,11 +4147,9 @@ class NodeRunner:
             },
             'tool_guidance': {
                 'filesystem': (
-                    '路径三种写法：裸文件名或 `{temp}/<名>` 落到 '
-                    'runtime_environment.task_temp_dir（新建脚本、抓取结果、缓存、调试输出和其他中间文件默认走这里）；'
-                    '`{workspace}/<相对路径>` 或不带前缀的相对路径落到项目根；'
-                    '只有交付物或任务明确要求的位置才写绝对路径。'
-                    '不要逐字重抄整条绝对前缀——它比短写法更容易打错。'
+                    PATH_ANCHOR_RULE_TEXT +
+                    '新建脚本、抓取结果、缓存、调试输出和其他中间文件默认写到 '
+                    'runtime_environment.task_temp_dir；只有为了满足任务要求且只能写到其他目录时才允许例外。'
                 ),
                 'content': (
                     '单个内容体优先用 ref 导航或文件路径（短写法与绝对路径都可）；'

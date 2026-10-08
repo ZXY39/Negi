@@ -6,6 +6,8 @@ from collections import OrderedDict
 from dataclasses import dataclass
 from typing import Any
 
+from g3ku.utils.helpers import PATH_ANCHOR_RULE_TEXT, path_anchor_tokens
+
 FRONTDOOR_DYNAMIC_TOOL_CONTRACT_KIND = 'frontdoor_runtime_tool_contract'
 FRONTDOOR_DYNAMIC_TOOL_CONTRACT_HEADING = '## Runtime Tool Contract'
 FRONTDOOR_DYNAMIC_TOOL_CONTRACT_PAYLOAD_KEY = '_frontdoor_tool_contract_payload'
@@ -109,6 +111,7 @@ def render_pinned_contract_text(
     temp_line = _render_session_temp_dir(session_temp_dir)
     if temp_line:
         lines.extend(temp_line)
+    lines.extend(_render_path_anchor())
     return '\n'.join(lines).strip()
 
 
@@ -624,6 +627,7 @@ def _render_frontdoor_contract_summary(payload: dict[str, Any]) -> str:
     pinned_roster = 'candidate_skills (loadable with' in pinned_text
     pinned_exec = 'exec_runtime_policy' in pinned_text
     pinned_temp = 'session_temp_dir:' in pinned_text
+    pinned_anchor = 'path_anchor:' in pinned_text
     lines = [
         FRONTDOOR_DYNAMIC_TOOL_CONTRACT_HEADING,
         f'kind: {FRONTDOOR_DYNAMIC_TOOL_CONTRACT_KIND}',
@@ -666,6 +670,8 @@ def _render_frontdoor_contract_summary(payload: dict[str, Any]) -> str:
         lines.append(_render_exec_runtime_policy(payload.get('exec_runtime_policy')))
     if not pinned_temp:
         lines.extend(_render_session_temp_dir(payload.get('session_temp_dir')))
+    if not pinned_anchor:
+        lines.extend(_render_path_anchor())
     return '\n'.join(lines)
 
 
@@ -685,6 +691,16 @@ def _render_frontdoor_stage_gate_summary(payload: dict[str, Any]) -> str:
         )
     lines.append(_render_stage_summary(payload.get('stage_summary')))
     return '\n'.join(lines)
+
+
+def _render_path_anchor() -> list[str]:
+    """落点合同的唯一渲染点：与节点道 `runtime_environment.path_policy` 同一函数、同一句规则，
+    两条车道不允许各自措辞。token 集由 `path_anchor_tokens()` 给，实际可用性以解析器为准。
+    """
+    return [
+        f'path_anchor: {path_anchor_tokens()}',
+        f'path_anchor_rule: {PATH_ANCHOR_RULE_TEXT}',
+    ]
 
 
 def _render_session_temp_dir(session_temp_dir: Any) -> list[str]:

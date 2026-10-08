@@ -708,6 +708,32 @@ async def test_content_split_tool_executes_with_legacy_content_settings(tmp_path
         manager.close()
 
 
+@pytest.mark.asyncio
+async def test_filesystem_write_keeps_rejected_body_in_landing_park(tmp_path: Path):
+    """验证不通过时状态仍是 error，但正文不再被删掉，模型不必重打整段。"""
+    workspace = tmp_path / 'workspace'
+    (workspace / 'skills').mkdir(parents=True, exist_ok=True)
+    (workspace / 'tools').mkdir(parents=True, exist_ok=True)
+    _copy_filesystem_split_tools(workspace, 'filesystem_write')
+
+    manager = ResourceManager(workspace, app_config=_resource_app_config())
+    manager.reload_now(trigger='test-bind')
+    bad_body = 'def broken(:\n    pass\n'
+    try:
+        tool = manager.get_tool('filesystem_write')
+        assert tool is not None
+        result = await tool.execute(path='broken.py', content=bad_body)
+        assert 'validation failed' in result
+        assert 'preserved at' in result
+        target = workspace / 'temp' / 'broken.py'
+        assert not target.exists()
+        parked = list((workspace / 'temp' / 'landing-park').glob('*/broken.py'))
+        assert len(parked) == 1
+        assert parked[0].read_text(encoding='utf-8') == bad_body
+    finally:
+        manager.close()
+
+
 def test_model_data_root_hides_the_redundant_token(tmp_path: Path):
     from g3ku.deployment.data_root import data_root
     from g3ku.utils.helpers import model_data_root

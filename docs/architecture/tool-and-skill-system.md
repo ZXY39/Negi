@@ -382,6 +382,9 @@ skill / tool 目录可能被编辑器、git 或外部进程直接改动，注册
 
 1. 落点闸门判的是解析后的绝对路径，与输入形态无关。legacy `workspace/tmp`、越界使用系统临时目录、`tools/` 注册面、托管产物必须落 temp 这四道闸门对四种形态同样生效；放开相对路径不削弱任何一条守卫，也不依赖「模型给的是绝对路径」这个假设。
 2. 工具结果回显的始终是解析后的绝对路径，模型侧、轨道侧和审计面读到的都是落点而不是输入串。
-3. 锚是 `agents.defaults.workspace` 的一次性解析，不随进程当前目录漂移（解析与冻结口径见 `config-and-models.md`「`agents`」）；合同头用 `path_policy.path_anchor_tokens` 原样列出当前运行时可用哪几个 token（合同块整体见 `tool-hydration-and-callable-chain.md`「一条从上下文到 callable tools 的链路」）。
+3. 锚是 `agents.defaults.workspace` 的一次性解析，不随进程当前目录漂移（解析与冻结口径见 `config-and-models.md`「`agents`」；从二级 worktree 起进程时锚即那棵 worktree，见 `operations-and-maintenance.md`「关键状态文件与目录」）。
+4. 两条车道的合同出自同一个渲染点，不允许各自措辞：`g3ku/utils/helpers.py` 的 `PATH_ANCHOR_RULE_TEXT` 与 `path_anchor_tokens()` 是唯一来源，节点道把它们放进 `runtime_environment.path_policy`（含 `path_anchor_tokens`，数据根分离时这里多列一个 `{data}`），CEO 前门把它们放进合同块的 `path_anchor` / `path_anchor_rule` 两行（静态句随钉住块进头部，头部没带时照旧落尾块）。`ceo_frontdoor.md` 不复述落点规则，只指向 `path_anchor_rule`。回归用例钉住"两处渲染的规则句逐字节相同"。
 
 例外：`create_async_task.file_targets[].path` 只接受已存在的绝对路径。派发方携带的是跨任务作用度的用户附件，绑到某一个任务的临时目录会指错目标（同 `web-and-admin.md`「Image Upload Gating」）。
+
+写/改的落地校验（`write_validation_commands_by_ext` / `edit_validation_commands_by_ext`）不通过时，工具**仍然返回 error**，但被拒的正文不会被删：它先被复制到 `<临时根>/landing-park/park-XXXX/<原名>`，再按 `rollback_on_failure` 回滚目标位置，结果行里给出该绝对路径并提示"在那儿修好再 move 过来，别重写正文"。留痕走同一条 `_record_node_file_change` 路径，所以审计面看得见这笔停车。停车目录就在调用方自己的临时根下面，因此它继承该目录的保留与清理策略（见 `operations-and-maintenance.md`「关键状态文件与目录」的 `temp/tasks/`、`temp/ceo/` 两条），不另设回收器。实盘量级：写失败 119 条里 85 条属于这一类。

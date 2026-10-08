@@ -3,6 +3,7 @@
 import re
 from datetime import datetime
 from pathlib import Path
+from typing import Any
 
 
 def ensure_dir(path: Path) -> Path:
@@ -98,6 +99,33 @@ def model_data_root(workspace: Path | None) -> Path | None:
         return None
 
 
+PATH_ANCHOR_RULE_TEXT = (
+    '裸文件名或 `{temp}/<名>` 落到本次调用的临时目录；带目录段的相对路径与 `{workspace}/<相对路径>` 落到项目根；'
+    '绝对路径按给定使用，任何一层都不重写。不要逐字重抄整条绝对前缀——它比短写法更容易打错。'
+    '`{data}` 只在数据根与项目根分离时可用。'
+)
+
+
+def path_anchor_tokens(*, include_data: bool = False) -> str:
+    """The token set advertised to the model; the resolver is the real authority."""
+    tokens = ['{workspace}', '{temp}']
+    if include_data:
+        tokens.append('{data}')
+    return ' | '.join(tokens)
+
+
+def path_anchor_policy(workspace: Path | None) -> dict[str, Any]:
+    """Single source for the path anchoring contract, shared by both lanes."""
+    return {
+        'relative_paths_bind_to_workspace': True,
+        'bare_filename_binds_to_task_temp_dir': True,
+        'path_anchor_tokens': path_anchor_tokens(
+            include_data=workspace is not None and model_data_root(workspace) is not None
+        ),
+        'path_anchor_rule': PATH_ANCHOR_RULE_TEXT,
+    }
+
+
 def resolve_model_path(
     raw_path: str | Path,
     *,
@@ -125,7 +153,7 @@ def resolve_model_path(
     if temp_root is not None and not re.search(r"[\\/]", text):
         return Path(temp_root) / candidate
     if workspace is None:
-        raise ValueError(f"relative path is not allowed; provide absolute path: {raw_path}")
+        raise ValueError(f"no project root to bind a relative path to; provide an absolute path: {raw_path}")
     return Path(workspace) / candidate
 
 
