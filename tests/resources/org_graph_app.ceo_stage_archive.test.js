@@ -105,8 +105,11 @@ function loadApp(readContent) {
         `${TASK_VIEW_CODE}\n${APP_CODE}
         this.__testExports = {
             renderExecutionStageRounds,
+            normalizeExecutionStageTrace,
+            normalizeSummaryExecutionTrace,
             getCeoStageArchiveHtml,
             bindStageArchiveOpens,
+            filterCeoInteractionFlowSummary,
         };`,
         context,
     );
@@ -291,4 +294,37 @@ test("归档空文档按 404 终态处理，不画半张卡", async () => {
 
     assert.match(host.innerHTML, /归档已被清理/);
     assert.doesNotMatch(host.innerHTML, /data-stage-archive-open/);
+});
+
+// 服务端形状的一帧 delta 要活过前端两份阶段白名单才谈得上渲染：漏一个字段，
+// 症状就是"后端明明发了指针，界面上仍然只有一句暂无工具轮次"。
+const serverStagePayload = () => ({
+    stage_id: "frontdoor-stage-1",
+    stage_index: 1,
+    stage_goal: "D4 权限与审批",
+    status: "completed",
+    representation: "compact",
+    context_evicted: true,
+    completed_stage_summary: "收口总结",
+    rounds: [],
+    archive_ref: ARCHIVE_REF,
+    rounds_archive_ref: ARCHIVE_REF,
+});
+
+test("指针活过 CEO 轨道的阶段重建，卡片仍画得出取档入口", () => {
+    const { filterCeoInteractionFlowSummary, renderExecutionStageRounds } = loadApp(async () => ({ content: "" }));
+
+    const summary = filterCeoInteractionFlowSummary({ stages: [serverStagePayload()] });
+    assert.equal(summary.stages[0].rounds_archive_ref, ARCHIVE_REF);
+
+    const html = renderExecutionStageRounds(summary.stages[0]);
+    assert.match(html, /data-stage-archive-open/);
+    assert.doesNotMatch(html, /当前阶段暂无工具轮次/);
+});
+
+test("指针同样活过节点详情的摘要重建", () => {
+    const { normalizeSummaryExecutionTrace } = loadApp(async () => ({ content: "" }));
+    const normalized = normalizeSummaryExecutionTrace({ stages: [serverStagePayload()] });
+
+    assert.equal(normalized.stages[0].rounds_archive_ref, ARCHIVE_REF);
 });

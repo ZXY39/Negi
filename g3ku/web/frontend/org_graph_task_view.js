@@ -1335,6 +1335,9 @@ function normalizeSummaryExecutionTrace(summary) {
             // 裁撤标记必须穿过这份白名单：阶段卡的状态徽章靠它区分"完成"与"已移出上下文"，
             // 漏在这里就等于前端永远看不到模型点名移出这件事。
             context_evicted: stage?.context_evicted === true,
+            // 取档指针同一条教训：轨道按字段重建阶段对象，漏掉它卡片就退回"暂无工具轮次"，
+            // 而后端明明给了"原文还能取回来"的凭据。
+            rounds_archive_ref: String(stage?.rounds_archive_ref || "").trim(),
             stage_goal: String(stage?.stage_goal || "").trim(),
             preamble_text: String(stage?.preamble_text || "").trim(),
             completed_stage_summary: String(stage?.completed_stage_summary || "").trim(),
@@ -1454,6 +1457,9 @@ function normalizeExecutionStageTrace(stage, index = 0) {
         // 这份白名单决定了阶段卡能看到哪些字段：漏掉裁撤标记，前端就只能显示"完成"，
         // 而模型点名移出上下文这件事恰恰只有这个标记能表达。
         context_evicted: stage?.context_evicted === true,
+        // 取档指针同一条教训：CEO 轨道先过这份重建再进渲染器，漏一个字段就等于
+        // 后端那句"原文还能取回来"从来没说过。
+        rounds_archive_ref: String(stage?.rounds_archive_ref || "").trim(),
         stage_goal: String(stage?.stage_goal || "").trim(),
         preamble_text: String(stage?.preamble_text || "").trim(),
         completed_stage_summary: String(stage?.completed_stage_summary || "").trim(),
