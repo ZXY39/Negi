@@ -29,7 +29,7 @@ parameters:
   properties:
     path:
       type: string
-      description: Absolute file path to edit.
+      description: File path to edit. A bare name or `{temp}/` prefix resolves under the task temp dir, a project-relative path under the project root, and absolute paths are used as given.
     target:
       type: object
       description: Preferred target-first edit locator.
@@ -86,7 +86,7 @@ model_parameters:
   properties:
     path:
       type: string
-      description: Absolute file path to edit.
+      description: File path to edit. A bare name or `{temp}/` prefix resolves under the task temp dir, a project-relative path under the project root, and absolute paths are used as given.
     old_text:
       type: string
       description: Exact existing text to replace, copied verbatim from a fresh read and matching once.

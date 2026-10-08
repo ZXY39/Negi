@@ -22,7 +22,7 @@ parameters:
   properties:
     path:
       type: string
-      description: Absolute file path to patch.
+      description: File path to patch. A bare name or `{temp}/` prefix resolves under the task temp dir, a project-relative path under the project root, and absolute paths are used as given.
     old_text:
       type: string
       description: Existing text to replace.

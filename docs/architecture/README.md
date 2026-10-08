@@ -145,6 +145,7 @@ Start here when you are new to the repository or when a change crosses subsystem
 - 相邻跳 provider `tools[]` 成员在变、且没有真实授权变化（缓存命中随之掉）→ `tool-and-skill-system.md`「Provider Tool Surface」+ `context-and-cache-troubleshooting.md`「跨普通 fresh turn 的 tool schema churn」
 - 前门改了尾块运行时契约的一个字段却不出现在请求体里 → `tool-and-skill-system.md`「Provider Tool Surface」（发送前会用 state 重建契约块，装配层那份会被覆盖）
 - 上下文里找不到 `candidate_skills`、或头部那份技能名单看着过期、或相邻跳头部字节反复变 → `tool-and-skill-system.md`「Pinned Static Declarations」+ `context-and-cache-troubleshooting.md`「静态声明钉在请求体头部」
+- 交付物/脚本出现在项目根以外的意外目录（尤其 `C:\Users\<近似拼写的用户名>\...` 这种镜像树）、或模型传的相对路径落点与预期不符 → `tool-and-skill-system.md`「Model Path Anchoring Contract」+ `config-and-models.md`「`agents`」
 - 模型报告的日期/时间与事实不符（心算毫秒时间戳出错、引用陈旧时间、日报归属日期错误）→ `heartbeat-system.md`「Internal-turn time anchors」+ `runtime-overview.md`「用户消息时间锚点」
 - 用户消息在请求体里同时出现原文与带 `[消息送达时间]` 行的两个版本，或装饰后缓存命中率骤降 → `context-and-cache-troubleshooting.md`「用户消息时间装饰破坏前缀稳定或相等性去重」
 - 某配置整条模型链 400「The input messages must contain no more than one system message」（`InternalError.Algo.InvalidParameter`）、换 key 无效 → `context-and-cache-troubleshooting.md`「线体角色合同」

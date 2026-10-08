@@ -29,7 +29,7 @@ parameters:
   properties:
     path:
       type: string
-      description: Absolute file path to write.
+      description: File path to write. A bare name or `{temp}/` prefix resolves under the task temp dir, a project-relative path under the project root, and absolute paths are used as given.
     content:
       type: string
       description: Full file content to write.

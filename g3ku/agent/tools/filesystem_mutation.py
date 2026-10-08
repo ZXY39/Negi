@@ -13,6 +13,7 @@ from typing import Any
 
 from g3ku.resources.tool_settings import FilesystemToolSettings, runtime_tool_settings
 from g3ku.runtime.project_environment import apply_project_environment
+from g3ku.utils.helpers import model_data_root, resolve_model_path
 from g3ku.utils.subprocess_text import decode_subprocess_output, enrich_subprocess_env_for_text
 
 _METADATA_START = '### G3KU_PATCH_METADATA ###'
@@ -72,11 +73,15 @@ def _resolve_path(
     path: str,
     workspace: Path | None = None,
     allowed_dir: Path | None = None,
+    temp_root: Path | None = None,
 ) -> Path:
     _raise_if_content_ref_path(path)
-    candidate = Path(path).expanduser()
-    if not candidate.is_absolute():
-        raise ValueError(f'relative path is not allowed; provide absolute path: {path}')
+    candidate = resolve_model_path(
+        path,
+        workspace=workspace,
+        temp_root=temp_root,
+        data_root=model_data_root(workspace),
+    )
     resolved = candidate.resolve()
     if allowed_dir is not None:
         try:
@@ -323,6 +328,14 @@ class FilesystemTool:
                 return candidate
         return self._temp_root()
 
+    def _resolve_model_path(self, path: str, runtime: dict[str, Any] | None) -> Path:
+        return _resolve_path(
+            path,
+            self._workspace,
+            self._allowed_dir,
+            temp_root=self._canonical_temp_root(runtime),
+        )
+
     def _externaltools_root(self) -> Path:
         return self._workspace_root() / 'externaltools'
 
@@ -473,7 +486,7 @@ class FilesystemTool:
         try:
             if content is None:
                 return 'Error: content is required'
-            file_path = _resolve_path(path, self._workspace, self._allowed_dir)
+            file_path = self._resolve_model_path(path, runtime)
             self._enforce_workspace_path_policy(file_path=file_path, action='write', runtime=runtime)
             existed_before = file_path.exists()
             original = ''
@@ -548,7 +561,7 @@ class FilesystemTool:
             text_mode = bool(normalized.get('text_mode'))
             range_mode = bool(normalized.get('range_mode'))
 
-            file_path = _resolve_path(path, self._workspace, self._allowed_dir)
+            file_path = self._resolve_model_path(path, runtime)
             self._enforce_workspace_path_policy(file_path=file_path, action='edit', runtime=runtime)
             if not file_path.exists():
                 return f'Error: File not found: {path}'
@@ -681,7 +694,7 @@ class FilesystemTool:
                 return json.dumps({'success': False, 'error': 'new_text is required when action=propose_patch'}, ensure_ascii=False)
             if self._artifact_store is None:
                 return json.dumps({'success': False, 'error': 'Patch artifact store is unavailable'}, ensure_ascii=False)
-            file_path = _resolve_path(path, self._workspace, self._allowed_dir)
+            file_path = self._resolve_model_path(path, runtime)
             if not file_path.exists():
                 return json.dumps({'success': False, 'error': f'File not found: {path}'}, ensure_ascii=False)
             if not file_path.is_file():
@@ -764,8 +777,8 @@ class FilesystemTool:
             items: list[dict[str, Any]] = []
             changed_paths: list[Path] = []
             for entry in normalized:
-                source_path = _resolve_path(entry['source'], self._workspace, self._allowed_dir)
-                destination_path = _resolve_path(entry['destination'], self._workspace, self._allowed_dir)
+                source_path = self._resolve_model_path(entry['source'], runtime)
+                destination_path = self._resolve_model_path(entry['destination'], runtime)
                 try:
                     if source_path == destination_path:
                         raise ValueError('source and destination must differ')
@@ -826,8 +839,8 @@ class FilesystemTool:
             items: list[dict[str, Any]] = []
             changed_paths: list[Path] = []
             for entry in normalized:
-                source_path = _resolve_path(entry['source'], self._workspace, self._allowed_dir)
-                destination_path = _resolve_path(entry['destination'], self._workspace, self._allowed_dir)
+                source_path = self._resolve_model_path(entry['source'], runtime)
+                destination_path = self._resolve_model_path(entry['destination'], runtime)
                 try:
                     if source_path == destination_path:
                         raise ValueError('source and destination must differ')
@@ -890,7 +903,7 @@ class FilesystemTool:
             items: list[dict[str, Any]] = []
             changed_paths: list[Path] = []
             for raw_path in normalized_paths:
-                resolved_path = _resolve_path(raw_path, self._workspace, self._allowed_dir)
+                resolved_path = self._resolve_model_path(raw_path, runtime)
                 try:
                     self._enforce_workspace_path_policy(file_path=resolved_path, action='delete', runtime=runtime)
                     self._guard_delete_target(path=resolved_path)
@@ -1440,7 +1453,7 @@ class FilesystemActionTool:
             return {
                 'type': 'object',
                 'properties': {
-                    'path': {'type': 'string', 'description': 'Absolute file path to write.'},
+                    'path': {'type': 'string', 'description': 'Path to write. Bare name or `{temp}/...` lands in the task temp dir; a relative path with directories lands under the project root; absolute paths are used as given.'},
                     'content': {'type': 'string', 'description': 'Full file content to write.'},
                 },
                 'required': ['path', 'content'],
@@ -1449,7 +1462,7 @@ class FilesystemActionTool:
             return {
                 'type': 'object',
                 'properties': {
-                    'path': {'type': 'string', 'description': 'Absolute file path to edit.'},
+                    'path': {'type': 'string', 'description': 'Path to edit. Same anchoring as filesystem.write (bare name or `{temp}/...`, project-relative, or absolute).'},
                     'target': {
                         'type': 'object',
                         'description': 'Preferred target-first edit locator.',
@@ -1490,8 +1503,8 @@ class FilesystemActionTool:
                         'items': {
                             'type': 'object',
                             'properties': {
-                                'source': {'type': 'string', 'description': f'Absolute source path to {self._action}.'},
-                                'destination': {'type': 'string', 'description': 'Absolute destination path to create.'},
+                                'source': {'type': 'string', 'description': f'Path to {self._action} (bare name or {{temp}}/ = task temp dir, project-relative, or absolute).'},
+                                'destination': {'type': 'string', 'description': 'Destination path to create (bare name or {temp}/ = task temp dir, project-relative, or absolute).'},
                             },
                             'required': ['source', 'destination'],
                         },
@@ -1517,8 +1530,8 @@ class FilesystemActionTool:
                 'properties': {
                     'paths': {
                         'type': 'array',
-                        'description': 'Absolute paths to delete.',
-                        'items': {'type': 'string', 'description': 'Absolute path to delete.'},
+                        'description': 'Paths to delete. Same anchoring as filesystem.write.',
+                        'items': {'type': 'string', 'description': 'Path to delete (anchored like filesystem.write).'},
                     },
                     'recursive': {'type': 'boolean', 'description': 'Allow deleting directory paths recursively.'},
                     'allow_missing': {'type': 'boolean', 'description': 'Treat already-missing paths as successful items.'},
@@ -1529,7 +1542,7 @@ class FilesystemActionTool:
         return {
             'type': 'object',
             'properties': {
-                'path': {'type': 'string', 'description': 'Absolute file path to patch.'},
+                'path': {'type': 'string', 'description': 'Path to patch. Same anchoring as filesystem.write.'},
                 'old_text': {'type': 'string', 'description': 'Existing text to replace.'},
                 'new_text': {'type': 'string', 'description': 'Proposed replacement text.'},
                 'summary': {'type': 'string', 'description': 'Optional patch summary.'},

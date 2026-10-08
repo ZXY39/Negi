@@ -6,11 +6,38 @@ from typing import Any
 
 from g3ku.content import ContentNavigationService, parse_content_envelope
 from g3ku.resources.tool_settings import ContentToolSettings, load_tool_settings_from_manifest, runtime_tool_settings
+from g3ku.utils.helpers import model_data_root, resolve_model_path
 
 
 class ContentTool:
     def __init__(self, *, workspace: Path, content_store: ContentNavigationService | None = None) -> None:
+        self._workspace = Path(workspace)
         self._content_store = content_store or ContentNavigationService(workspace=workspace)
+
+    @staticmethod
+    def _runtime_temp_root(runtime: dict[str, Any] | None) -> Path | None:
+        raw = str((runtime or {}).get('task_temp_dir') or '').strip()
+        if not raw:
+            return None
+        try:
+            return Path(raw).expanduser()
+        except Exception:
+            return None
+
+    def _normalize_model_path(self, raw_path: str, runtime: dict[str, Any] | None) -> str:
+        """Bind the model's path to its anchor while the runtime context is still in hand."""
+        if not raw_path or raw_path.startswith('artifact:'):
+            return raw_path
+        try:
+            resolved = resolve_model_path(
+                raw_path,
+                workspace=self._workspace,
+                temp_root=self._runtime_temp_root(runtime),
+                data_root=model_data_root(self._workspace),
+            )
+        except ValueError:
+            return raw_path
+        return str(resolved)
 
     @staticmethod
     def _normalize_ref(ref: str | None) -> str:
@@ -341,6 +368,7 @@ class ContentTool:
             runtime = fallback_runtime if isinstance(fallback_runtime, dict) else None
         operation = str(action or "").strip().lower()
         normalized_ref = str(ref or "").strip()
+        path = self._normalize_model_path(str(path or "").strip(), runtime) or None
         normalized_path = str(path or "").strip()
         try:
             if normalized_ref and normalized_path and operation in {"search", "open"}:

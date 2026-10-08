@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Any
 
 from g3ku.core.results import ContentEnvelope, ContentHandle
+from g3ku.utils.helpers import model_data_root, resolve_model_path
 
 INLINE_CHAR_LIMIT = 6000
 DEFAULT_OPEN_LINES = 80
@@ -1621,13 +1622,16 @@ class ContentNavigationService:
             text=text,
         )
 
-    def _resolve_workspace_path(self, path: str) -> Path:
+    def _resolve_workspace_path(self, path: str, temp_root: Path | None = None) -> Path:
         raw = str(path or "").strip()
         if raw.startswith("artifact:"):
             raise ValueError(f"content ref must be passed via ref, not path: {path}")
-        candidate = Path(path).expanduser()
-        if not candidate.is_absolute():
-            raise ValueError(f"relative path is not allowed; provide absolute path: {path}")
+        candidate = resolve_model_path(
+            raw,
+            workspace=self._workspace,
+            temp_root=temp_root,
+            data_root=model_data_root(self._workspace),
+        )
         resolved = candidate.resolve()
         if self._allowed_dir is not None:
             try:

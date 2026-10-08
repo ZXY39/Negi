@@ -1222,8 +1222,18 @@ class Config(BaseSettings):
 
     @property
     def workspace_path(self) -> Path:
-        """Get expanded workspace path."""
-        return Path(self.agents.defaults.workspace).expanduser()
+        """Anchor for model-facing relative paths, resolved once per declared value.
+
+        ``g3ku/web/launcher.py`` calls ``os.chdir(PROJECT_ROOT)`` during startup, so a
+        relative default would otherwise move under the process; caching pins it.
+        """
+        raw = str(self.agents.defaults.workspace or "").strip() or "."
+        cached = self.__dict__.get("_workspace_path_anchor")
+        if isinstance(cached, tuple) and cached[0] == raw:
+            return cached[1]
+        resolved = Path(raw).expanduser().resolve()
+        object.__setattr__(self, "_workspace_path_anchor", (raw, resolved))
+        return resolved
 
     @staticmethod
     def parse_provider_model(value: str) -> tuple[str, str]:

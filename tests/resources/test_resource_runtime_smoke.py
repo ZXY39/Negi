@@ -708,23 +708,89 @@ async def test_content_split_tool_executes_with_legacy_content_settings(tmp_path
         manager.close()
 
 
+def test_model_data_root_hides_the_redundant_token(tmp_path: Path):
+    from g3ku.deployment.data_root import data_root
+    from g3ku.utils.helpers import model_data_root
+
+    root = Path(data_root())
+    assert model_data_root(root) is None
+    assert model_data_root(tmp_path / 'elsewhere') == root
+
+
 @pytest.mark.asyncio
-async def test_filesystem_tool_rejects_relative_paths(tmp_path: Path):
+async def test_filesystem_tool_anchors_relative_paths(tmp_path: Path):
     workspace = tmp_path / 'workspace'
     target_file = workspace / 'target.txt'
     target_file.parent.mkdir(parents=True, exist_ok=True)
-    target_file.write_text('hello\n', encoding='utf-8')
+    target_file.write_text('do not overwrite me\n', encoding='utf-8')
     (workspace / 'skills').mkdir(parents=True, exist_ok=True)
     (workspace / 'tools').mkdir(parents=True, exist_ok=True)
     _copy_filesystem_split_tools(workspace, 'filesystem_write')
 
     manager = ResourceManager(workspace, app_config=_resource_app_config())
     manager.reload_now(trigger='test-bind')
+    temp_dir = workspace / 'temp' / 'tasks' / 'task_anchor'
     try:
         tool = manager.get_tool('filesystem_write')
         assert tool is not None
-        result = await tool.execute(path='target.txt', content='hello\n')
-        assert 'relative path is not allowed; provide absolute path' in result
+
+        # A bare filename belongs to the task temp dir, not to the project root.
+        bare = await tool.execute(path='r3.py', content='print(1)\n', __g3ku_runtime={'task_temp_dir': str(temp_dir)})
+        assert 'Successfully wrote' in bare
+        assert (temp_dir / 'r3.py').read_text(encoding='utf-8') == 'print(1)\n'
+        assert target_file.read_text(encoding='utf-8') == 'do not overwrite me\n'
+
+        # Relative paths that carry directories belong to the project root.
+        nested = await tool.execute(
+            path='nested/dir/out.md',
+            content='body\n',
+            __g3ku_runtime={'task_temp_dir': str(temp_dir)},
+        )
+        assert 'Successfully wrote' in nested
+        assert (workspace / 'nested' / 'dir' / 'out.md').is_file()
+
+        # Both anchor tokens resolve without the model retyping the prefix.
+        tokened = await tool.execute(
+            path='{temp}/sub/tok.txt',
+            content='tok\n',
+            __g3ku_runtime={'task_temp_dir': str(temp_dir)},
+        )
+        assert 'Successfully wrote' in tokened
+        assert (temp_dir / 'sub' / 'tok.txt').is_file()
+        rooted = await tool.execute(
+            path='{workspace}/README.md',
+            content='readme\n',
+            __g3ku_runtime={'task_temp_dir': str(temp_dir)},
+        )
+        assert 'Successfully wrote' in rooted
+        assert (workspace / 'README.md').is_file()
+
+        # The result always echoes the resolved absolute path, whichever form was used.
+        assert str((temp_dir / 'r3.py')).lower() in bare.lower()
+
+        # Absolute paths are still used exactly as given.
+        absolute_target = workspace / 'abs.txt'
+        absolute = await tool.execute(
+            path=str(absolute_target),
+            content='abs\n',
+            __g3ku_runtime={'task_temp_dir': str(temp_dir)},
+        )
+        assert 'Successfully wrote' in absolute
+        assert absolute_target.read_text(encoding='utf-8') == 'abs\n'
+
+        # The pre-existing landing gates judge the resolved target, so they still bite
+        # on relative forms: workspace/tmp is a legacy root and stays refused.
+        legacy_tmp = await tool.execute(
+            path='tmp/x.txt',
+            content='x\n',
+            __g3ku_runtime={'task_temp_dir': str(temp_dir)},
+        )
+        assert 'legacy tmp directories' in legacy_tmp
+        assert not (workspace / 'tmp' / 'x.txt').exists()
+
+        # A content ref in path mode stays rejected.
+        ref_path = await tool.execute(path='artifact:abc', content='x\n')
+        assert 'content ref is not a filesystem path' in ref_path
     finally:
         manager.close()
 
@@ -1923,11 +1989,14 @@ async def test_content_tool_reads_externalized_artifact_refs(tmp_path: Path):
 
 
 @pytest.mark.asyncio
-async def test_content_tool_rejects_relative_paths(tmp_path: Path):
+async def test_content_tool_anchors_relative_paths(tmp_path: Path):
     workspace = tmp_path / 'workspace'
     target_file = workspace / 'relative.log'
     target_file.parent.mkdir(parents=True, exist_ok=True)
     target_file.write_text('alpha\nneedle\n', encoding='utf-8')
+    temp_dir = workspace / 'temp' / 'ceo' / 'web_ceo-anchor'
+    temp_dir.mkdir(parents=True, exist_ok=True)
+    (temp_dir / 'scratch.txt').write_text('beta\nneedle\n', encoding='utf-8')
     (workspace / 'skills').mkdir(parents=True, exist_ok=True)
     (workspace / 'tools').mkdir(parents=True, exist_ok=True)
     shutil.copytree(REPO_ROOT / 'tools' / 'content', workspace / 'tools' / 'content')
@@ -1937,9 +2006,38 @@ async def test_content_tool_rejects_relative_paths(tmp_path: Path):
     try:
         tool = manager.get_tool('content')
         assert tool is not None
-        blocked = json.loads(await tool.execute(action='search', path='relative.log', query='needle'))
-        assert blocked['ok'] is False
-        assert 'relative path is not allowed; provide absolute path' in blocked['error']
+
+        # Without a task temp anchor, a bare name resolves against the project root.
+        rooted = json.loads(await tool.execute(action='search', path='relative.log', query='needle'))
+        assert rooted['ok'] is True
+
+        # With the anchor in hand the same bare name belongs to the temp dir instead,
+        # and the failure message carries the resolved absolute path.
+        shifted = json.loads(await tool.execute(
+            action='search',
+            path='relative.log',
+            query='needle',
+            __g3ku_runtime={'task_temp_dir': str(temp_dir)},
+        ))
+        assert shifted['ok'] is False
+        assert str(temp_dir / 'relative.log').lower() in shifted['error'].lower()
+
+        parked = json.loads(await tool.execute(
+            action='search',
+            path='{temp}/scratch.txt',
+            query='needle',
+            __g3ku_runtime={'task_temp_dir': str(temp_dir)},
+        ))
+        assert parked['ok'] is True
+
+        # Project-rooted forms still reach the repo file.
+        rooted_token = json.loads(await tool.execute(
+            action='search',
+            path='{workspace}/relative.log',
+            query='needle',
+            __g3ku_runtime={'task_temp_dir': str(temp_dir)},
+        ))
+        assert rooted_token['ok'] is True
     finally:
         manager.close()
 

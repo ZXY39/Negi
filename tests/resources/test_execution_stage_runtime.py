@@ -1204,6 +1204,11 @@ async def test_create_task_assigns_distinct_task_temp_dirs_and_injects_runtime_e
 
         assert payload['runtime_environment']['task_temp_dir'] == original_temp_dir
         assert payload['runtime_environment']['path_policy']['exec_default_working_dir'] == 'task_temp_dir'
+        path_policy = payload['runtime_environment']['path_policy']
+        assert path_policy['relative_paths_bind_to_workspace'] is True
+        assert path_policy['bare_filename_binds_to_task_temp_dir'] is True
+        assert '{workspace}' in path_policy['path_anchor_tokens']
+        assert '{temp}' in path_policy['path_anchor_tokens']
     finally:
         await service.close()
 

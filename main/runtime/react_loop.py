@@ -3642,8 +3642,8 @@ class ReActToolLoop:
             reminder = (
                 "\n\n⚠️ exec 输出已截断（仅返回 head/tail 预览，中间内容未显示）。"
                 "已自动加载 content_open 工具，下一轮可直接调用它按区间精确读取、避免截断：\n"
-                "  content_open(path=<绝对路径>, start_line=<起>, end_line=<止>)   # 多行源码（grep -n 给行号）\n"
-                "  content_open(path=<绝对路径>, start_char=<起>, end_char=<止>)  # 单行/需字符定位\n"
+                "  content_open(path=<目标路径>, start_line=<起>, end_line=<止>)   # 多行源码（grep -n 给行号）\n"
+                "  content_open(path=<目标路径>, start_char=<起>, end_char=<止>)  # 单行/需字符定位\n"
                 "字符偏移为 1-based Unicode code point（非字节偏移）；多行源码优先用 start_line，"
                 "start_char 仅用于单行/超长内容。"
             )

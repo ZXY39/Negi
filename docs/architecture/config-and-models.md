@@ -26,7 +26,7 @@
 
 定义：
 
-- 默认 workspace
+- 默认 workspace（`agents.defaults.workspace`）：允许留相对值（出厂默认 `.`），但首次读取就按当时进程目录解析成绝对并缓存，之后即使进程切换工作目录（`g3ku/web/launcher.py` 的启动 chdir 就是这种情况）锚也不会移动；缓存键是原始字符串，改了配置值会重新解析。它同时是模型相对路径的锚，落点规则见 `tool-and-skill-system.md`「Model Path Anchoring Contract」
 - runtime 模式
 - 温度、max tokens、memory window
 - role iterations / concurrency

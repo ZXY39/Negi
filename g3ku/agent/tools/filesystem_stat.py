@@ -15,6 +15,7 @@ from pathlib import Path
 from typing import Any
 
 from g3ku.agent.tools.base import Tool
+from g3ku.utils.helpers import model_data_root, resolve_model_path
 
 # 目录聚合的上限：防御病态目录树，同时保证正常交付目录（数百文件）一次调用即可测全。
 _MAX_SCAN_FILES = 200_000
@@ -61,7 +62,7 @@ class FilesystemStatTool(Tool):
             "properties": {
                 "paths": {
                     "type": "array",
-                    "items": {"type": "string", "description": "Absolute file or directory path."},
+                    "items": {"type": "string", "description": "File or directory path: a bare name or `{temp}/` prefix resolves under the task temp dir, a project-relative path under the project root, and absolute paths are used as given."},
                     "description": "Paths to measure. Files return size/mtime; directories return bounded listings and aggregates.",
                 },
                 "max_entries": {
@@ -88,9 +89,14 @@ class FilesystemStatTool(Tool):
         __g3ku_runtime: dict[str, Any] | None = None,
         **kwargs: Any,
     ) -> dict[str, Any]:
-        _ = kwargs, __g3ku_runtime
+        _ = kwargs
+        runtime = __g3ku_runtime if isinstance(__g3ku_runtime, dict) else None
         entry_cap = max(1, min(int(max_entries or _DEFAULT_MAX_ENTRIES), _MAX_ENTRIES_LIMIT))
-        items = [self._measure_one(str(raw or "").strip(), entry_cap=entry_cap) for raw in list(paths or [])]
+        temp_root = self._runtime_temp_root(runtime)
+        items = [
+            self._measure_one(str(raw or "").strip(), entry_cap=entry_cap, temp_root=temp_root)
+            for raw in list(paths or [])
+        ]
         items = [item for item in items if item]
         missing = [item["path"] for item in items if not item.get("exists")]
         file_count = sum(1 for item in items if item.get("kind") == "file")
@@ -109,11 +115,11 @@ class FilesystemStatTool(Tool):
             "measured_at": datetime.now().isoformat(timespec="seconds"),
         }
 
-    def _measure_one(self, raw_path: str, *, entry_cap: int) -> dict[str, Any] | None:
+    def _measure_one(self, raw_path: str, *, entry_cap: int, temp_root: Path | None = None) -> dict[str, Any] | None:
         if not raw_path:
             return None
         try:
-            target = self._resolve_path(raw_path)
+            target = self._resolve_path(raw_path, temp_root=temp_root)
         except PermissionError as exc:
             return {"path": raw_path, "exists": False, "error": str(exc)}
         item: dict[str, Any] = {"path": str(target)}
@@ -208,11 +214,24 @@ class FilesystemStatTool(Tool):
             payload["scan_truncated"] = True
         return payload
 
-    def _resolve_path(self, raw_path: str) -> Path:
-        path = Path(raw_path).expanduser()
-        if not path.is_absolute() and self._workspace is not None:
-            path = self._workspace / path
-        resolved = path.resolve()
+    @staticmethod
+    def _runtime_temp_root(runtime: dict[str, Any] | None) -> Path | None:
+        raw = str((runtime or {}).get("task_temp_dir") or "").strip()
+        if not raw:
+            return None
+        try:
+            return Path(raw).expanduser()
+        except Exception:
+            return None
+
+    def _resolve_path(self, raw_path: str, temp_root: Path | None = None) -> Path:
+        candidate = resolve_model_path(
+            raw_path,
+            workspace=self._workspace,
+            temp_root=temp_root,
+            data_root=model_data_root(self._workspace),
+        )
+        resolved = candidate.resolve()
         if self._allowed_dir is not None:
             try:
                 resolved.relative_to(self._allowed_dir.resolve())

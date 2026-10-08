@@ -22,10 +22,10 @@ parameters:
   properties:
     paths:
       type: array
-      description: Paths to measure. Files return size/mtime; directories return bounded listings and aggregates (file count, total/min/max size).
+      description: Paths to measure (a bare name or `{temp}/` prefix resolves under the task temp dir, a project-relative path under the project root, and absolute paths are used as given). Files return size/mtime; directories return bounded listings and aggregates (file count, total/min/max size).
       items:
         type: string
-        description: Absolute file or directory path.
+        description: File or directory path (a bare name or `{temp}/` prefix resolves under the task temp dir, a project-relative path under the project root, and absolute paths are used as given).
     max_entries:
       type: integer
       description: Max entries listed per directory (default 200, max 2000). Aggregates always cover the whole tree.

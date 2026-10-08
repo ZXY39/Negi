@@ -364,3 +364,24 @@ skill / tool 目录可能被编辑器、git 或外部进程直接改动，注册
 - 指纹变化时才动作：`refresh_changed_resources(trigger='external-resource-generation-check')` 重建受影响资源，随后清空 `_node_context_selection_cache`（节点上下文选择里缓存着旧的候选/水合结论），并只对名字出现在差异集里的 skill / tool 重新同步语义目录条目。
 - 管理端保存或编辑资源走的是显式路径（`refresh_resource_paths` / `refresh_paths`，trigger 为 `path-change`），它同步刷新注册表并当场重记基线；各条路径共用同一份基线，所以编辑后的一拍不会因为节流而漏掉变化。
 - 维护要点：新增会进入上下文选择的缓存时，必须在这条差异路径上一起失效，否则外部改动的 skill/tool 正文会长期以旧指纹参与候选与描述投影。
+
+## 11. Model Path Anchoring Contract
+
+文件系统族（`filesystem_write|edit|move|copy|delete|propose_patch|stat`）与内容道（`content_open|search|describe`）接受的 `path` 有四种形态，落点规则只在本文档说一次：
+
+- 裸文件名（不含目录分隔符）→ 本次调用所属的临时目录，即 `runtime['task_temp_dir']`。节点道是任务临时目录；CEO 前门把会话临时目录注入成同一个字段，所以两条车道共用一条判据。
+- 带目录段的相对路径，或 `{workspace}/<相对路径>` → 项目根。
+- `{temp}/<相对路径>` → 同第一条。
+- 绝对路径 → 逐字节按给定使用，任何一层都不重写、不 re-base。
+
+判据是「有没有目录段」，不是「像不像临时文件」：裸文件名没有可供推理的锚，模型的意图就是自己的 scratch 目录；而带目录段的形态绝大多数指向仓库内文件，把它默认进临时目录会让一次源码写入在错误位置返回成功。
+
+`{data}` 只在解析出的数据根与项目根不重合时出现在合同和 schema 里。两根重合时这个 token 整段不渲染，写它得到的是明确的「该运行时不可用」，而不是被静默折成项目根——同一条合同不必让模型在两个同值名字之间猜权威。
+
+三条不变量：
+
+1. 落点闸门判的是解析后的绝对路径，与输入形态无关。legacy `workspace/tmp`、越界使用系统临时目录、`tools/` 注册面、托管产物必须落 temp 这四道闸门对四种形态同样生效；放开相对路径不削弱任何一条守卫，也不依赖「模型给的是绝对路径」这个假设。
+2. 工具结果回显的始终是解析后的绝对路径，模型侧、轨道侧和审计面读到的都是落点而不是输入串。
+3. 锚是 `agents.defaults.workspace` 的一次性解析，不随进程当前目录漂移（解析与冻结口径见 `config-and-models.md`「`agents`」）；合同头用 `path_policy.path_anchor_tokens` 原样列出当前运行时可用哪几个 token（合同块整体见 `tool-hydration-and-callable-chain.md`「一条从上下文到 callable tools 的链路」）。
+
+例外：`create_async_task.file_targets[].path` 只接受已存在的绝对路径。派发方携带的是跨任务作用度的用户附件，绑到某一个任务的临时目录会指错目标（同 `web-and-admin.md`「Image Upload Gating」）。

@@ -28,10 +28,10 @@ parameters:
         properties:
           source:
             type: string
-            description: Absolute source path to move.
+            description: Source path to move (a bare name or `{temp}/` prefix resolves under the task temp dir, a project-relative path under the project root, and absolute paths are used as given).
           destination:
             type: string
-            description: Absolute destination path to create.
+            description: Destination path to create (a bare name or `{temp}/` prefix resolves under the task temp dir, a project-relative path under the project root, and absolute paths are used as given).
         required:
           - source
           - destination

@@ -22,10 +22,10 @@ parameters:
   properties:
     paths:
       type: array
-      description: Absolute paths to delete.
+      description: Paths to delete. A bare name or `{temp}/` prefix resolves under the task temp dir, a project-relative path under the project root, and absolute paths are used as given.
       items:
         type: string
-        description: Absolute path to delete.
+        description: Path to delete (a bare name or `{temp}/` prefix resolves under the task temp dir, a project-relative path under the project root, and absolute paths are used as given).
     recursive:
       type: boolean
       description: Allow deleting directory paths recursively.
