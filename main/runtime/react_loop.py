@@ -39,10 +39,12 @@ from g3ku.runtime.stage_prompt_compaction import (
     render_stage_ref_index,
     split_stage_ref_selection,
     stage_created_at_ceiling,
+    stage_ledger_may_have_moved as _shared_stage_ledger_may_have_moved,
     stage_message_call_ids as _shared_stage_message_call_ids,
     stage_prompt_prefix as _shared_stage_prompt_prefix,
     stage_record_dict,
     stage_ref_candidates,
+    stage_transition_signature as _shared_stage_transition_signature,
     summarized_stage_ids,
 )
 from g3ku.runtime.tool_history import (
@@ -4221,10 +4223,18 @@ class ReActToolLoop:
                 )
                 stage_failed = True
                 continue
+            stage_signature_before = self._execution_stage_transition_signature(runtime_context=runtime_context)
             result = await _run_call(index, call, stage_turn_granted=False)
             ordered_results[index] = result
             if str(dict(result.get('live_state') or {}).get('status') or '').strip().lower() == 'error':
-                stage_failed = True
+                # 只有阶段账本真被动过时，本批普通调用才可能读到与上一跳不一致的能力集。
+                # 提交前就被判拒的那些（参数契约、drop↔summary 配对、keep_* 闸门、无实质进度）
+                # 一字未动，活动阶段还是模型上一跳看过的那份，整批作废只是白烧一轮：实盘
+                # 85,773 条工具结果里 14 批连带作废全部属于这一类，无一例是改到一半失败。
+                stage_failed = _shared_stage_ledger_may_have_moved(
+                    before=stage_signature_before,
+                    after=self._execution_stage_transition_signature(runtime_context=runtime_context),
+                )
         if ordinary_items:
             if stage_items and stage_failed:
                 blocked_error = (
@@ -8474,6 +8484,15 @@ class ReActToolLoop:
             return normalize_execution_stage_metadata({})
         payload = (node.metadata or {}).get('execution_stages') if isinstance(node.metadata, dict) else {}
         return normalize_execution_stage_metadata(payload)
+
+    def _execution_stage_transition_signature(self, *, runtime_context: dict[str, Any]):
+        """本节点阶段账本的事实指纹；读不到返回 None（调用方按"可能动过"处理）。"""
+        try:
+            return _shared_stage_transition_signature(
+                self._execution_stage_state_for_runtime(runtime_context=runtime_context)
+            )
+        except Exception:
+            return None
 
     @staticmethod
     def _is_stage_context_message(message: dict[str, Any]) -> bool:

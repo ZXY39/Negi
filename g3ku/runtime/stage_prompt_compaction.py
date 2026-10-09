@@ -1140,6 +1140,46 @@ def stage_archive_selector_from_request_messages(request_messages: Any) -> dict[
     return {"stage_ids": collected_ids, "archived_through_created_at": watermark}
 
 
+def stage_transition_signature(payload: Any) -> tuple[Any, ...] | None:
+    """阶段账本"被这一跳动过没有"的事实指纹（两侧车道共用，载荷形状都支持）。
+
+    调用方在阶段调用的前后各取一次比对：一致 ⇒ 这次提交在改账本之前就被判拒（参数契约、
+    `drop`↔`completed_stage_summary` 配对、`keep_*` 闸门、无实质进度），本批普通调用看到的
+    活动阶段与上一跳告诉模型的那份完全相同。取不到账本时返回 None，由调用方按"可能动过"
+    处理：少跑一批调用只是白烧一轮，放行一份不一致的能力集是正确性问题。
+    """
+    if payload is None:
+        return None
+    stages = _stage_get(payload, "stages", None)
+    if stages is None:
+        return None
+    rows: list[tuple[Any, ...]] = []
+    for stage in list(stages or []):
+        rounds = list(_stage_get(stage, "rounds", []) or [])
+        rows.append((
+            str(_stage_get(stage, "stage_id", "") or "").strip(),
+            int(_stage_get(stage, "stage_index", 0) or 0),
+            str(_stage_get(stage, "status", "") or "").strip(),
+            int(_stage_get(stage, "tool_rounds_used", 0) or 0),
+            int(_stage_get(stage, "tool_round_budget", 0) or 0),
+            _stage_get(stage, "context_evicted", False) is True,
+            _stage_get(stage, "context_visible", False) is False,
+            len(rounds),
+            str(_stage_get(stage, "completed_stage_summary", "") or "").strip()[:64],
+        ))
+    return (
+        str(_stage_get(payload, "active_stage_id", "") or "").strip(),
+        bool(_stage_get(payload, "transition_required", False)),
+        tuple(rows),
+    )
+
+
+def stage_ledger_may_have_moved(before: Any, after: Any) -> bool:
+    """两次指纹之间账本是否可能被动过。任一侧读不到就当作动过——宁可作废一轮，
+    也不能把与模型所见不一致的能力面放行。"""
+    return before is None or after is None or before != after
+
+
 def stage_message_call_ids(messages: Any) -> set[str]:
     """一批消息里出现过的工具调用 id（assistant 声明的与 tool 回执的都算）。"""
     collected: set[str] = set()
@@ -1338,9 +1378,11 @@ __all__ = [
     "stage_created_at_within_watermark",
     "stage_is_swallowable",
     "stage_is_terminal",
+    "stage_ledger_may_have_moved",
     "stage_message_call_ids",
     "stage_prompt_prefix",
     "stage_record_dict",
+    "stage_transition_signature",
     "stage_ref_candidates",
     "stage_ref_is_dead",
     "stage_round_call_ids",

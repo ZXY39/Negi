@@ -78,8 +78,10 @@ from g3ku.runtime.stage_prompt_compaction import (
     stage_created_at_ceiling,
     stage_created_at_within_watermark,
     stage_is_swallowable,
+    stage_ledger_may_have_moved,
     stage_message_call_ids,
     stage_ref_candidates,
+    stage_transition_signature,
     strip_stage_block_echo,
     summarized_stage_ids,
 )
@@ -8719,10 +8721,16 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
                 )
                 stage_failed = True
                 continue
+            stage_signature_before = stage_transition_signature(mutable_stage_state)
             result = await _run_single(payload)
             ordered_results[index] = result
             if str(result.get("status") or "").strip().lower() == "error":
-                stage_failed = True
+                # 与节点道同一条判据：账本一字未动（提交前就被参数契约或闸门判拒）时，本批
+                # 普通调用看到的阶段面还是模型上一跳看过的那份，作废整批只是白烧一轮。
+                stage_failed = stage_ledger_may_have_moved(
+                    before=stage_signature_before,
+                    after=stage_transition_signature(mutable_stage_state),
+                )
         if ordinary_items:
             if stage_items and stage_failed:
                 for index, payload in ordinary_items:
