@@ -1341,6 +1341,23 @@ def build_stage_archive_document(
     }
 
 
+def stage_archive_owner(task_id: Any, node_id: Any) -> str:
+    """归档信封的 owner 行：每个 id 恰好带一份 `task:` / `node:` 前缀。
+
+    库里的真实 id 本身就带前缀（`task:db8eb9e2db4d`），而调用方过去又补了一遍，打开归档的
+    模型看到的是 `task:task:…/node:node:…`——owner 的作用就是"一眼分清哪条车道的哪份账本"，
+    双前缀把这件事变成噪音。这里按前缀是否存在决定加不加，两种入参形状都出同一种结果。
+    """
+
+    def qualify(value: Any, prefix: str) -> str:
+        text = str(value or "").strip()
+        if not text:
+            return ""
+        return text if text.startswith(f"{prefix}:") else f"{prefix}:{text}"
+
+    return f"{qualify(task_id, 'task')}/{qualify(node_id, 'node')}"
+
+
 __all__ = [
     "DEFAULT_INTERNAL_RULE_MARKERS",
     "DEFAULT_STAGE_MODE",
@@ -1348,6 +1365,7 @@ __all__ = [
     "KEPT_CONTRACT_HEADING",
     "KEPT_CONTRACT_PAYLOAD_KEY",
     "STAGE_ARCHIVE_HEADING",
+    "stage_archive_owner",
     "STAGE_COMPACT_PREFIX",
     "STAGE_EXTERNALIZED_PREFIX",
     "STAGE_RAW_PREFIX",

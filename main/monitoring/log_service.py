@@ -30,6 +30,7 @@ from g3ku.runtime.stage_prompt_compaction import (
     STAGE_CLOSURE_INACTIVE_NOTES,
     build_stage_archive_document,
     closing_stage_target,
+    stage_archive_owner,
     stage_record_dict,
 )
 from g3ku.runtime.tool_context_presence import normalize_kept_tool_contexts
@@ -3107,7 +3108,7 @@ class TaskLogService:
             target.mkdir(parents=True, exist_ok=True)
             payload = build_stage_archive_document(
                 kind='node_stage_eviction',
-                owner=f'task:{task.task_id}/node:{node_id}',
+                owner=stage_archive_owner(task.task_id, node_id),
                 created_at=now_iso(),
                 stages=[self._execution_stage_eviction_record(task_id=str(task.task_id or ''), node_id=node_id, stage=stage)],
             )

@@ -334,3 +334,17 @@ def test_node_rewrite_carries_archive_into_compact_block(tmp_path: Path) -> None
         'stage_ids': [],
         'archived_through_created_at': '2026-09-20T06:00:00+08:00',
     }
+
+
+def test_archive_owner_qualifies_each_id_exactly_once() -> None:
+    """库里真实 id 自带 `task:`/`node:` 前缀，owner 行不许把它们拼成双份。
+
+    双前缀是实盘读出来的（`task:task:db8eb9e2db4d/node:node:3a58669a1ad6`）：owner 唯一作用是让
+    打开归档的人一眼分清哪条车道的哪份账本，双份前缀只留噪音。两种入参形状（裸 id 与带前缀 id）
+    必须出同一个结果。
+    """
+    from g3ku.runtime.stage_prompt_compaction import stage_archive_owner
+
+    assert stage_archive_owner('task:db8eb9e2db4d', 'node:3a58669a1ad6') == 'task:db8eb9e2db4d/node:3a58669a1ad6'
+    assert stage_archive_owner('db8eb9e2db4d', '3a58669a1ad6') == 'task:db8eb9e2db4d/node:3a58669a1ad6'
+    assert 'task:task:' not in stage_archive_owner('task:x', 'node:y')

@@ -37,6 +37,7 @@ from g3ku.runtime.stage_prompt_compaction import (
     is_stage_context_message as _shared_is_stage_context_message,
     render_stage_ref_candidate_block,
     render_stage_ref_index,
+    stage_archive_owner,
     split_stage_ref_selection,
     stage_created_at_ceiling,
     stage_ledger_may_have_moved as _shared_stage_ledger_may_have_moved,
@@ -5491,7 +5492,7 @@ class ReActToolLoop:
             target.mkdir(parents=True, exist_ok=True)
             payload = build_stage_archive_document(
                 kind='node_stage_archive',
-                owner=f'task:{task_id}/node:{node_id}',
+                owner=stage_archive_owner(task_id, node_id),
                 created_at=now_iso(),
                 stages=records,
             )

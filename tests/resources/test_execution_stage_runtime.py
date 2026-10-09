@@ -2080,7 +2080,10 @@ async def test_node_eviction_exports_archive_and_carries_readback_ref(tmp_path: 
         assert archive_ref and Path(archive_ref).exists()
         document = json.loads(Path(archive_ref).read_text(encoding='utf-8'))
         assert document['kind'] == 'node_stage_eviction'
-        assert document['owner'] == f'task:{record.task_id}/node:{record.root_node_id}'
+        # 这条断言原先写的是 `task:{record.task_id}/…`，而 `record.task_id` 本身就带 `task:` 前缀
+        # （与线上真实 id 同形），等于把双前缀钉成合同。owner 只负责指车道，一个前缀。
+        assert document['owner'] == f'{record.task_id}/{record.root_node_id}'
+        assert 'task:task:' not in document['owner'] and 'node:node:' not in document['owner']
         archived_tool = document['stages'][0]['rounds'][0]['tools'][0]
         assert archived_tool['tool_call_id'] == 'call:collect'
         assert archived_tool['tool_name'] == 'web_fetch'
