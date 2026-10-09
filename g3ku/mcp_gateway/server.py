@@ -232,6 +232,7 @@ def build_mcp_server(client: G3kuMcpClient, *, name: str = "g3ku") -> FastMCP:
                     "external_key": str(item.get("external_key") or ""),
                     "title": str(item.get("title") or ""),
                     "created_at": str(item.get("created_at") or ""),
+                    "has_transcript": bool(item.get("has_transcript")),
                 }
                 for item in list(payload.get("items") or [])
                 if isinstance(item, dict)

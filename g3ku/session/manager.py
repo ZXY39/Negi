@@ -176,6 +176,15 @@ class SessionManager:
         """Get the persistent path for a session."""
         return self._get_session_path(key)
 
+    def has_transcript(self, key: str) -> bool:
+        """Whether this session key ever persisted a transcript row.
+
+        注册表条目与转录文件是两个轴：桥一注册就有线上条目（`get_or_create` 不落盘），
+        所以「有身份」不等于「有历史」。渠道会话的清除语义只删历史、留身份，退役后的
+        行在目录里就看就是这个读数为假。
+        """
+        return self._get_session_path(key).exists()
+
     def get_or_create(self, key: str) -> Session:
         """
         Get an existing session or create a new one.

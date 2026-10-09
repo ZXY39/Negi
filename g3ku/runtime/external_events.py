@@ -133,6 +133,18 @@ def get_session_event_hub(session_key: str) -> SessionEventHub:
         return hub
 
 
+def drop_session_event_hub(session_key: str) -> SessionEventHub | None:
+    """摘掉某个会话键在内存里的缓冲与序号。
+
+    注销外部身份时调用：会话键是 `(bridge, external_key)` 的确定性散列，同键再注册
+    会落回同一个路径。缓冲若跟着留下，`Last-Event-ID: 0` 的重放会把上一世的回复当成
+    新身份的历史。
+    """
+    raw = str(session_key or "").strip()
+    with _HUBS_LOCK:
+        return _HUBS.pop(raw, None)
+
+
 def reset_session_event_hubs() -> None:
     """Test hook: drop all in-memory hubs."""
     with _HUBS_LOCK:

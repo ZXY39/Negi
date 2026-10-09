@@ -147,6 +147,7 @@ async def list_external_sessions(
         entries = [registry.get_by_session_key(key)] if key else []
     else:
         entries = registry.list_bridge_sessions(principal.bridge_id)
+    manager = _session_manager()
     return {
         "ok": True,
         "bridge_id": principal.bridge_id,
@@ -156,6 +157,11 @@ async def list_external_sessions(
                 "external_key": entry.external_key,
                 "title": entry.title,
                 "created_at": entry.created_at,
+                # 注册表条目与转录是两个轴：桥一注册就有线上条目（还没有转录文件）。
+                # 这个读数说的是**文件在不在**——网页侧「删除渠道会话」会删掉它（空壳），
+                # 桥侧 `DELETE /sessions/{id}` 的清除语义是清空并保存（文件留着）。
+                # 目录侧不重复这个字段：那里每行本来就带 message_count。
+                "has_transcript": manager.has_transcript(entry.session_key),
             }
             for entry in entries
             if entry is not None

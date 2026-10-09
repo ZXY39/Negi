@@ -12,6 +12,9 @@ from g3ku.runtime.ceo_catalog_offload import (
     run_off_event_loop,
     store_ceo_catalog_cache,
 )
+from g3ku.runtime.external_events import drop_session_event_hub
+from g3ku.runtime.external_outbox import load_pending_outbound
+from g3ku.runtime.external_sessions import get_external_session_registry
 from g3ku.runtime.frontdoor.message_builder import (
     MEMORY_SNAPSHOT_ADOPTION_MANUAL_COMPRESSION,
     adopt_memory_snapshot,
@@ -426,6 +429,37 @@ def _aggregate_session_delete_payloads(items: list[dict]) -> dict:
     }
 
 
+def _identity_forget_blocker(agent, *, session_key: str, external_key: str) -> str:
+    """摘除外部身份前的两道闸门，返回拒绝码（空串=可以摘）。
+
+    清历史不需要闸门——那是「保留身份、只把上下文清空」的既定契约。摘身份不一样：
+    `external_key → session_key` 一旦没了，同一个键下次进来会新建会话，而还指着旧键的
+    东西会静默改道——`find_by_any_key` 只 WARNING 后取最新，不报错。所以先看两类真实
+    引用者：还没被桥取走的回复（账本里未 ack 的行）、以及投递目标就是这个会话的定时任务。
+    """
+    pending = [
+        record
+        for record in load_pending_outbound()
+        if str(record.get("session_key") or "").strip() == session_key
+    ]
+    if pending:
+        return f"outbox_pending:{len(pending)}"
+
+    cron_service = getattr(agent, "cron_service", None)
+    list_jobs = getattr(cron_service, "list_jobs", None)
+    if not callable(list_jobs):
+        return ""
+    for job in list(list_jobs(include_disabled=False) or []):
+        payload = getattr(job, "payload", None)
+        if payload is None:
+            continue
+        if str(getattr(payload, "session_key", "") or "").strip() == session_key:
+            return f"scheduled_target:{getattr(job, 'id', '') or 'unknown'}"
+        if external_key and str(getattr(payload, "to", "") or "").strip() == external_key:
+            return f"scheduled_target:{getattr(job, 'id', '') or 'unknown'}"
+    return ""
+
+
 async def _delete_single_ceo_session(
     agent,
     session_manager,
@@ -435,8 +469,20 @@ async def _delete_single_ceo_session(
     session_key: str,
     is_channel_session: bool,
     delete_task_records: bool,
+    forget_identity: bool = False,
     background_tasks: BackgroundTasks | None = None,
 ) -> dict:
+    registry = get_external_session_registry(session_manager.workspace) if forget_identity else None
+    entry = registry.get_by_session_key(session_key) if registry is not None else None
+    identity_forgotten = False
+    if forget_identity:
+        blocker = _identity_forget_blocker(
+            agent,
+            session_key=session_key,
+            external_key=str(getattr(entry, "external_key", "") or ""),
+        )
+        if blocker:
+            raise HTTPException(status_code=400, detail=blocker)
     heartbeat = get_web_heartbeat_service(agent)
     if heartbeat is not None:
         heartbeat.clear_session(session_key)
@@ -460,10 +506,17 @@ async def _delete_single_ceo_session(
     cancel = getattr(agent, "cancel_session_tasks", None)
     if callable(cancel):
         await cancel(session_key)
+    if registry is not None:
+        identity_forgotten = registry.forget(session_key) is not None
+        if identity_forgotten:
+            # 会话键是 external_key 的确定性散列，注销后同键再注册会落回同一个路径，
+            # 进程内的事件缓冲必须跟着退役，否则新身份能重放出上一世的回复。
+            drop_session_event_hub(session_key)
     return {
         "session_id": session_key,
         "deleted": not is_channel_session,
         "cleared": is_channel_session,
+        "identity_forgotten": identity_forgotten,
         "deleted_task_count": deleted_task_count,
     }
 
@@ -1411,6 +1464,7 @@ async def delete_ceo_session(
         session_id,
     )
     delete_task_records = bool((payload or {}).get('delete_task_records'))
+    forget_identity = bool((payload or {}).get('forget_identity'))
     try:
         result = await _delete_single_ceo_session(
             agent,
@@ -1420,6 +1474,7 @@ async def delete_ceo_session(
             session_key=session_key,
             is_channel_session=is_channel_session,
             delete_task_records=delete_task_records,
+            forget_identity=forget_identity,
             background_tasks=background_tasks,
         )
     except ValueError as exc:
@@ -1455,6 +1510,7 @@ async def bulk_delete_ceo_sessions(
     service = await _task_service(agent)
     session_ids = _normalize_bulk_session_ids((payload or {}).get('session_ids'))
     delete_task_records = bool((payload or {}).get('delete_task_records'))
+    forget_identity = bool((payload or {}).get('forget_identity'))
     results: list[dict] = []
     deleted_count = 0
     failed_count = 0
@@ -1474,6 +1530,7 @@ async def bulk_delete_ceo_sessions(
                 session_key=session_key,
                 is_channel_session=is_channel_session,
                 delete_task_records=delete_task_records,
+                forget_identity=forget_identity,
                 background_tasks=background_tasks,
             )
             result['result'] = 'deleted' if result.get('deleted') else 'cleared'

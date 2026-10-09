@@ -87,6 +87,7 @@ Start here when you are new to the repository or when a change crosses subsystem
 - 会话转录/Web UI 有回复但渠道端（QQ 等）收不到、渠道「能收不能发」、重启后旧提醒补投或重复 → `external-agent-api.md`「出站路由（主动推送）」+「持久 outbox」+「内置官方 QQ 适配器」
 - 渠道端只收到文件签名链接、模型回复里引用的图片/文件没有作为媒体消息送达 → `external-agent-api.md`「事件流」出站附件契约 +「内置官方 QQ 适配器」
 - 桥接端 `reply.final` 的 `usage` 缺失或数值不像本轮 → `external-agent-api.md`「事件流」（usage 随 `message_end` 由发出侧带出，relay 只透传）+ `web-and-admin.md`「Per-Turn Token Usage Contract」
+- 渠道会话在网页目录里删了还在、清过历史的行仍显示可发消息、或注销身份被拒（`outbox_pending` / `scheduled_target`）→ `web-and-admin.md`「Channel Session Clear Contract」+ `external-agent-api.md`「会话注册表与 key 命名空间」
 - 官方 QQ 机器人面板报错、不连接或收不到消息 → `external-agent-api.md`「内置官方 QQ 适配器」+「常见排障入口」
 - 官方 QQ 桥每隔约一小时重登一次（`console.log` 里 `gateway session ended`）是不是故障 → `external-agent-api.md`「内置官方 QQ 适配器」的到期重登界线
 - 加第二个 QQ 号之后原来那条渠道会话不再回话（网页有回复、QQ 端什么都没有）→ `external-agent-api.md`「常见排障入口」（存量会话不迁移；指向旧会话键的 cron/心跳目标要改指新键）

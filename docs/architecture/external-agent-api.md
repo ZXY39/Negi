@@ -24,6 +24,7 @@
 - `POST /sessions` 按 `external_key` 幂等 get-or-create；转录复用共享 `SessionManager`（`sessions/ext_*.jsonl`），无独立持久化机制。首次创建成功与 `PATCH` 改名成功后，以尽力而为方式向 web CEO 端推送一次全局 `ceo.sessions.snapshot`（web 运行时未就绪时静默跳过，不影响接口返回）——浏览器只在页面加载时拉取 REST 会话列表，新渠道会话的实时可见性依赖该推送。
 - `ext:` 前缀在 `session_agent.py` 的 frontdoor 连续性前缀表中。目录分组与「历史不可改」两轴收口在 `g3ku/runtime/session_keys.py::is_channel_session_key`（legacy `china:` 归档同语义）。第三轴「能否向该会话投递输入」由注册表决定，与只读判定无关：`/ws/ceo` 对 `ext:` 会话按 `get_external_session_registry().get_by_session_key()` 解析一次（连接期），有条目即接受网页输入、按「回合契约」提交，无条目（`china:*`、注册表丢失的孤儿转录）回 `channel_session_readonly`。
 - 会话 key 编解码的规范实现位于核心模块 `g3ku/runtime/session_keys.py`（`china:*` 格式与历史转录字节级一致，存量转录保持可读）。
+- 注册表条目与转录文件是两个轴，`GET /sessions` 的每一项因此带 `has_transcript`（判据=该键的 `sessions/ext_*.jsonl` 在不在）：桥一注册就有线上条目而还没有转录，网页侧「删除渠道会话」则相反——清掉转录而留下条目（清除与注销身份的分别见 `web-and-admin.md`「Channel Session Clear Contract」）。web 目录不重复这个读数，那里每行本来就带 `message_count`。
 
 ## 4. 回合契约
 
@@ -37,11 +38,11 @@
 - `Idempotency-Key` 头去重（进程内有界映射）：同会话同键重复提交返回 `status:"duplicate"` + `original_status`——原回合记录仍在则回报其状态与 `turn_id`；排队条目回报 `queued`（无 `turn_id`）；记录已被淘汰的带 id 条目回报 `completed`。排队提交同样占幂等位：否则同一条渠道消息在回合运行期间重试/重发会反复入队，用户收到多份重复回复。回合记录表有界，超限从最旧终态记录淘汰、运行中记录永不淘汰；幂等条目不随记录淘汰失效。
 - 附件：`data_base64` 落盘 `.g3ku/external-uploads/<session>/`，双上限——`kind:"image"` ≤5MiB（与 web 上传同一常量），其余文件类 ≤20MiB（`EXTERNAL_FILE_UPLOAD_MAX_BYTES`），超限一律 413 `attachment_too_large`；桥侧按同值预过滤。图片构造 `image_url` 块，能否进模型由该会话本轮模型链的 `image_multimodal_enabled` 保守交集门控（与 web 上传同语义）；非图片附件只以「本地路径提示」文本块告知模型（落盘路径可直接用工具读盘），不构造多模态内容块。该目录按会话 slug 分片，随会话删除/清空一起被 rmtree（`clear_web_ceo_session_artifacts` 同时清 web 侧与渠道侧两个上传根），所以渠道附件的寿命等于会话寿命。
 - 控制端点复用桥语义：`POST /turns/{turn_id}/pause`（running guard，空闲返回未暂停）、`POST /sessions/{id}/cancel`。
-- `DELETE /sessions/{id}` 是清除语义（对齐 web-and-admin.md「Channel Session Clear Contract」）：转录清空、内存失效、side artifacts 全清，注册表条目保留。
+- `DELETE /sessions/{id}` 是清除语义（对齐 web-and-admin.md「Channel Session Clear Contract」）：转录清空、内存失效、side artifacts 全清，注册表条目保留。注销身份是另一个动作，只在 web 侧提供（`forget_identity`），闸门与后果归 web-and-admin.md 那一节。
 
 ## 5. 事件流
 
-- 每会话一个 `SessionEventHub`（`g3ku/runtime/external_events.py`）：有界环形缓冲 + 单调 `seq` + 订阅扇出；事件形态 `{type, seq, ts, turn_id?, ...}`。
+- 每会话一个 `SessionEventHub`（`g3ku/runtime/external_events.py`）：有界环形缓冲 + 单调 `seq` + 订阅扇出；事件形态 `{type, seq, ts, turn_id?, ...}`。会话键是 `(bridge_id, external_key)` 的确定性散列，所以**身份被注销时缓冲必须一起退役**（`drop_session_event_hub`）：同键日后重新注册会落回同一个路径与同一批文件名，留着旧缓冲就等于让新身份能 `Last-Event-ID: 0` 重放出上一世的回复。只清历史不退役缓冲——那条身份还在用。
 - `GET /sessions/{id}/events` 为 SSE（`id:` = seq）；断线以 `Last-Event-ID` 回放续订；15s 心跳注释行保活。hub 的 seq 是内存态、随服务端重启清零：`Last-Event-ID` 若越过本进程已发布 seq（旧进程遗留的大序号），端点按全量重放处理——第三方桥重连即收到缓冲内全部积压，不因旧序号被静默过滤。
 - 事件集合：
 

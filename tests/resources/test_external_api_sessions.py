@@ -134,6 +134,23 @@ def test_delete_session_clears_context_keeps_entry(client, workspace, registry, 
     assert cleared_artifacts and cleared_artifacts[0]["session_id"] == session_id
 
 
+def test_list_sessions_reports_the_transcript_axis(client, workspace):
+    """注册表条目与转录文件是两个轴：桥刚注册时有线上条目、零转录。"""
+    session_id = client.post("/api/v1/sessions", json={"external_key": "qq:dm:list-axis"}).json()["session_id"]
+
+    def row():
+        items = client.get("/api/v1/sessions").json()["items"]
+        return next(item for item in items if item["session_id"] == session_id)
+
+    assert row()["has_transcript"] is False
+
+    manager = SessionManager(workspace)
+    session = manager.get_or_create(session_id)
+    session.add_message("user", "第一轮")
+    manager.save(session)
+    assert row()["has_transcript"] is True
+
+
 class _FakeCeoRegistry:
     def __init__(self) -> None:
         self.published: list[dict] = []

@@ -154,6 +154,23 @@ class ExternalSessionRegistry:
             self._save()
             return entry, True
 
+    def forget(self, session_key: str) -> ExternalSessionEntry | None:
+        """Retire the identity mapping so the same external_key starts fresh.
+
+        调用方必须先证明没有东西还指着这个会话键（未 ack 的出站账本行、指向它的
+        定时任务）：`find_by_any_key` 对失联目标只 WARNING 后取最新，静默摘除会把
+        推送送走。闸门在 `ceo_sessions._identity_forget_blocker`。
+        """
+        raw = str(session_key or "").strip()
+        with self._lock:
+            entry = self._entries.pop(raw, None)
+            if entry is None:
+                return None
+            if self._index.get((entry.bridge_id, entry.external_key)) == raw:
+                self._index.pop((entry.bridge_id, entry.external_key), None)
+            self._save()
+            return entry
+
     def get_by_session_key(self, session_key: str | None) -> ExternalSessionEntry | None:
         raw = str(session_key or "").strip()
         if not raw:
