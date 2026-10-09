@@ -381,6 +381,43 @@ def score_append_notice_preservation(summary_text: str, records: list[dict[str, 
     }
 
 
+def is_append_notice_tail_message(message: Any) -> bool:
+    """该消息是不是运行时装进去的通知块（代持段或未消费窗口）。"""
+    if str((message or {}).get('role') or '').strip().lower() != 'assistant':
+        return False
+    return str((message or {}).get('content') or '').strip().startswith(APPEND_NOTICE_TAIL_PREFIX)
+
+
+def dedupe_append_notice_tail_messages(
+    candidates: list[dict[str, Any]],
+    existing_messages: list[dict[str, Any]] | None,
+) -> tuple[list[dict[str, Any]], int]:
+    """装配期只放"历史里还没有的那一份"块，重复的直接不插。
+
+    块是 JSON 且 `sort_keys=True`，同一条代持内容逐字节相同；而装配结果会被回写进节点
+    账本（`frame.messages`），每跳再插一次就每跳叠一份——实盘一条账本 135 帧里叠了 36 份
+    同样的 245 字符块。这里挡新副本、不回删已沉淀的历史帧：删掉已经发出去的帧等于重写
+    provider 前缀，代价比留几份重复块大。
+    """
+    seen = {
+        str(item.get('content') or '').strip()
+        for item in list(existing_messages or [])
+        if is_append_notice_tail_message(item)
+    }
+    kept: list[dict[str, Any]] = []
+    dropped = 0
+    for item in list(candidates or []):
+        if not isinstance(item, dict):
+            continue
+        content = str(item.get('content') or '').strip()
+        if content in seen:
+            dropped += 1
+            continue
+        seen.add(content)
+        kept.append(dict(item))
+    return kept, dropped
+
+
 def build_append_notice_tail_messages(
     context: Any,
     *,
@@ -438,6 +475,8 @@ __all__ = [
     'roll_append_notice_context_for_compression_stage',
     'supersede_append_notice_records',
     'APPEND_NOTICE_MUST_PRESERVE_HEADING',
+    'dedupe_append_notice_tail_messages',
+    'is_append_notice_tail_message',
     'render_append_notice_must_preserve_block',
     'score_append_notice_preservation',
     'select_uncovered_append_notices',

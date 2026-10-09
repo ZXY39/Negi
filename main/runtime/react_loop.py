@@ -70,6 +70,7 @@ from main.runtime.append_notice_context import (
     APPEND_NOTICE_CONTEXT_KEY,
     APPEND_NOTICE_TAIL_PREFIX,
     build_append_notice_tail_messages,
+    dedupe_append_notice_tail_messages,
     render_append_notice_must_preserve_block,
     roll_append_notice_context_for_compression_stage,
     score_append_notice_preservation,
@@ -8666,6 +8667,7 @@ class ReActToolLoop:
         notice_tail_messages = self._append_notice_tail_messages(
             runtime_context=runtime_context,
             visible_user_messages=visible_user_messages,
+            existing_messages=rewritten,
         )
         # notice_tail 保持在压缩内容之前；重写区内的块原位放置，输出头两条
         # 恒为系统+首条用户，保证同回合 append-only 前缀探针不退化。
@@ -8683,6 +8685,7 @@ class ReActToolLoop:
         *,
         runtime_context: dict[str, Any],
         visible_user_messages: list[str] | None = None,
+        existing_messages: list[dict[str, Any]] | None = None,
     ) -> list[dict[str, Any]]:
         store = getattr(self._log_service, '_store', None)
         getter = getattr(store, 'get_node', None) if store is not None else None
@@ -8691,10 +8694,17 @@ class ReActToolLoop:
         node = getter(str(runtime_context.get('node_id') or '').strip())
         if node is None or not isinstance(getattr(node, 'metadata', None), dict):
             return []
-        return build_append_notice_tail_messages(
+        candidates = build_append_notice_tail_messages(
             node.metadata.get(APPEND_NOTICE_CONTEXT_KEY),
             visible_user_messages=list(visible_user_messages or []),
         )
+        kept, dropped = dedupe_append_notice_tail_messages(candidates, existing_messages)
+        if dropped:
+            logger.info(
+                f'append notice tail block suppressed as duplicate: '
+                f'node={runtime_context.get("node_id")} dropped={dropped} kept={len(kept)}'
+            )
+        return kept
 
     @staticmethod
     def _prompt_message_records(messages: list[dict[str, Any]] | None) -> list[dict[str, Any]]:
