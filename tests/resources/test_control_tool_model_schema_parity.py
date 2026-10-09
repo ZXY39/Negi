@@ -112,3 +112,19 @@ def test_wire_schema_carries_constraints_and_no_field_prose(label: str, build: C
         f'{label} carries field descriptions that the provider strips anyway: '
         f'{json.dumps(_description_keys(parameters))}'
     )
+
+
+def test_stage_tool_model_description_states_that_eviction_is_permanent() -> None:
+    """裁撤语义只能写在工具级 `model_description` 上：字段级 description 出不了 provider。
+
+    本文件上面两条用例钉住了这件事——`parameters` 里那段逐参数文案会被 normalizer 整段剥掉，
+    所以把它改得再详细也不会到模型眼前。能到模型的只有 `model_description` 与三份提示词，
+    少了"此后所有回合都不再出现 + 用 content_open 按 archive_ref 读回"这两句，模型就会按参数名
+    读成"只躲过下一阶段"，进而把它其实还要逐字引用的原文裁掉。
+    """
+    tool = SubmitNextStageTool(_callback)
+    text = str(tool.model_description or '')
+    assert 'every later turn' in text
+    assert 'content_open' in text
+    assert 'archive_ref' in text
+    assert len(text) < len(str(tool.description or '')), '模型面必须短于权威面（既有约束）'

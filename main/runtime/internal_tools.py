@@ -105,7 +105,9 @@ class SubmitNextStageTool(Tool):
     def model_description(self) -> str:
         return (
             'Start the next stage for the current node. '
-            'keep_tools / keep_skills only apply together with drop_completed_stage_tool_detail=true.'
+            'keep_tools / keep_skills only apply with drop_completed_stage_tool_detail=true, which drops '
+            'the closing stage\'s raw tool args/outputs from every later turn — only your summary and kept '
+            'contracts survive; content_open on the block\'s archive_ref reads them back.'
         )
 
     @property
