@@ -1242,6 +1242,7 @@ class TaskLogService:
         provider_request_meta: dict[str, Any] | None = None,
         provider_request_body: dict[str, Any] | None = None,
         token_preflight_diagnostics: dict[str, Any] | None = None,
+        send_diagnostics: dict[str, Any] | None = None,
         stream_incomplete: bool = False,
     ) -> NodeRecord | None:
         with self._task_lock(task_id):
@@ -1294,6 +1295,7 @@ class TaskLogService:
                 request_seed_message_count=request_seed_message_count,
                 provider_request_meta=provider_request_meta,
                 provider_request_body=provider_request_body,
+                send_diagnostics=send_diagnostics,
             )
             if actual_request_payload is not None:
                 observed_input_truth = self._build_observed_input_truth_from_attempts(
@@ -1448,6 +1450,7 @@ class TaskLogService:
                         observed_input_truth=observed_input_truth,
                         usage_attempts=usage_attempts,
                         stream_incomplete=stream_incomplete,
+                        send_diagnostics=send_diagnostics,
                     )
                     self._event_writer.append_task_model_call(
                         task_id=task_id,
@@ -2162,6 +2165,24 @@ class TaskLogService:
             'source': str(truth.source or '').strip(),
         }
 
+    @staticmethod
+    def _send_diagnostics_fields(send_diagnostics: dict[str, Any] | None) -> dict[str, Any]:
+        """节点发送面诊断的固定白名单：压缩跳是否被重写、投影形态、摘要 helper 用量。
+
+        这些值原本只存在于 `token_preflight_diagnostics`（写进帧，且下一跳被覆盖），
+        逐跳明细行里没有任何压缩标记 ⇒ "这一跳压没压"只能靠 prepared 条数反推。
+        """
+        payload = dict(send_diagnostics or {})
+        helper_usage = payload.get('helper_usage')
+        return {
+            'compaction_applied': bool(payload.get('compaction_applied')),
+            'compaction_mode': str(payload.get('compaction_mode') or '').strip(),
+            'projection_kind': str(payload.get('projection_kind') or '').strip(),
+            'helper_usage': dict(helper_usage) if isinstance(helper_usage, dict) else {},
+            'estimate_source': str(payload.get('estimate_source') or '').strip(),
+            'comparable_to_previous_request': bool(payload.get('comparable_to_previous_request')),
+        }
+
     @classmethod
     def _actual_request_artifact_payload(
         cls,
@@ -2185,6 +2206,7 @@ class TaskLogService:
         request_seed_message_count: int = 0,
         provider_request_meta: dict[str, Any] | None = None,
         provider_request_body: dict[str, Any] | None = None,
+        send_diagnostics: dict[str, Any] | None = None,
     ) -> dict[str, Any] | None:
         if not any(
             (
@@ -2269,6 +2291,7 @@ class TaskLogService:
             'request_seed_message_count': int(request_seed_message_count or 0),
             'provider_request_meta': normalized_provider_request_meta,
             'provider_request_body': normalized_provider_request_body,
+            **cls._send_diagnostics_fields(send_diagnostics),
         }
 
     def _persist_actual_request_artifact(
@@ -2512,6 +2535,7 @@ class TaskLogService:
         observed_input_truth: dict[str, Any] | None = None,
         usage_attempts: list[Any] | None = None,
         stream_incomplete: bool = False,
+        send_diagnostics: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         message_list = list(model_messages or [])
         request_list = list(request_messages or message_list)
@@ -2570,6 +2594,7 @@ class TaskLogService:
             'delta_usage': delta_usage.model_dump(mode='json'),
             'delta_usage_by_model': [item.model_dump(mode='json') for item in list(delta_usage_by_model or [])],
             'stream_incomplete': bool(stream_incomplete),
+            **TaskLogService._send_diagnostics_fields(send_diagnostics),
             **TaskLogService._model_call_attempt_metrics(usage_attempts),
         }
 

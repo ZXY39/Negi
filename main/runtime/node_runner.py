@@ -955,6 +955,13 @@ class NodeRunner:
             # provider input 仅作 legacy 兜底，wire 残片由 adoption 头探针拦截。
             message_list = self._request_messages_from_payload(parsed)
             if message_list:
+                if str(parsed.get('projection_kind') or '').strip() == 'token_compacted':
+                    # 回灌到的是压缩投影：摘要块是一条 assistant 文本，模型会把它读成
+                    # 自己说过的话。P0 只留痕不改状态，采纳基线那批再进 fallback_* 通道。
+                    logger.info(
+                        f'node seed resolved to token-compacted projection: {node.node_id} '
+                        f'messages={len(message_list)} ref={ref}'
+                    )
                 return message_list, 'ok'
             message_list = self._provider_input_messages_from_payload(parsed)
             if message_list:

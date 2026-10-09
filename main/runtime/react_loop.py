@@ -1098,6 +1098,7 @@ class ReActToolLoop:
                 provider_request_meta=getattr(response, 'provider_request_meta', None),
                 provider_request_body=getattr(response, 'provider_request_body', None),
                 stream_incomplete=bool(getattr(response, 'stream_incomplete', False)),
+                send_diagnostics=self._node_send_compaction_diagnostics(token_preflight_diagnostics),
             )
             if response_tool_calls:
                 if xml_repair_attempt_count > 0:
@@ -6078,6 +6079,27 @@ class ReActToolLoop:
         if isinstance(record.get('observed_input_truth'), dict):
             return dict(record.get('observed_input_truth') or {})
         return {}
+
+    @staticmethod
+    def _node_send_compaction_diagnostics(diagnostics: dict[str, Any] | None) -> dict[str, Any]:
+        """把压缩跳的事实从帧诊断里挑出来随发送面留档。
+
+        `token_preflight_diagnostics` 只写进运行帧，且下一跳就被覆盖，所以"这一跳压没压"
+        在逐跳明细与 actual-request artifact 里都没有落点；投影回灌面也据此判断自己拿到的
+        是不是摘要版而非全量账本。
+        """
+        payload = dict(diagnostics or {})
+        applied = bool(payload.get('applied'))
+        helper_call = dict(payload.get('compression_helper_call') or {})
+        helper_usage = helper_call.get('helper_usage')
+        return {
+            'compaction_applied': applied,
+            'compaction_mode': str(payload.get('mode') or '').strip() if applied else '',
+            'projection_kind': 'token_compacted' if applied else '',
+            'helper_usage': dict(helper_usage) if isinstance(helper_usage, dict) else {},
+            'estimate_source': str(payload.get('estimate_source') or '').strip(),
+            'comparable_to_previous_request': bool(payload.get('comparable_to_previous_request')),
+        }
 
     def _append_only_delta_estimate_tokens(
         self,
