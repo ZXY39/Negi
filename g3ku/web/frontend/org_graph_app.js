@@ -4189,6 +4189,11 @@ function normalizeTaskDetailViewState(value) {
         const numericValue = Number(input);
         return Number.isFinite(numericValue) && numericValue > 0 ? numericValue : 0;
     };
+    const normalizeRoundActiveToolKeys = (input) => (input && typeof input === "object" && !Array.isArray(input)
+        ? Object.fromEntries(Object.entries(input)
+            .map(([roundKey, toolKey]) => [String(roundKey || "").trim(), String(toolKey || "").trim()])
+            .filter(([roundKey, toolKey]) => roundKey && toolKey))
+        : {});
     const normalizeTraceItems = (items) => (Array.isArray(items)
         ? items.map((item, index) => ({
             index: Number.isInteger(item?.index) && item.index >= 0 ? item.index : index,
@@ -4196,6 +4201,10 @@ function normalizeTaskDetailViewState(value) {
             title: String(item?.title || "").trim(),
             open: !!item?.open,
             activeToolKey: String(item?.activeToolKey || "").trim(),
+            // 一个阶段卡里可以有多轮，每轮各自选中一个工具面板。这份按轮账本是
+            // 唯一能把选中态放回正确那一轮的依据：只留 activeToolKey 时还原器会把它
+            // 兜到第一轮上，于是用户展开的工具面板在刷新后换轮、等于被折掉。
+            roundActiveToolKeys: normalizeRoundActiveToolKeys(item?.roundActiveToolKeys),
         }))
         : []);
     const traceItems = normalizeTraceItems(value.traceItems);
@@ -4375,13 +4384,16 @@ function applyTaskTraceItemViewState(traceList, traceItems) {
             const roundActiveToolKeys = traceState?.roundActiveToolKeys && typeof traceState.roundActiveToolKeys === "object"
                 ? traceState.roundActiveToolKeys
                 : null;
+            const hasRoundActiveToolKeys = !!roundActiveToolKeys && Object.keys(roundActiveToolKeys).length > 0;
             roundHosts.forEach((roundHost, roundIndex) => {
                 if (!(roundHost instanceof HTMLElement)) return;
                 const roundKey = String(roundHost.dataset.roundKey || "").trim();
                 const persistedToolKey = roundKey && roundActiveToolKeys
                     ? String(roundActiveToolKeys[roundKey] || "").trim()
                     : "";
-                const fallbackToolKey = roundIndex === 0 ? activeToolKey : "";
+                // 只有拿不到按轮账本（旧快照）时才退回"把这个卡里第一个选中项兜到第一轮"；
+                // 有账本时再把同一个 key 抹到第一轮，等于替别的轮开面板。
+                const fallbackToolKey = !hasRoundActiveToolKeys && roundIndex === 0 ? activeToolKey : "";
                 setTraceRoundActiveTool(roundHost, persistedToolKey || fallbackToolKey);
             });
         }

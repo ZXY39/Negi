@@ -4234,7 +4234,7 @@ async function showAgent(node, { preserveViewState = true, forceRefresh = false 
     const previousDetailNodeId = String(S.currentNodeDetail?.node_id || "").trim();
     const hadVisibleCurrentDetail = U.detail?.style?.display !== "none"
         && String(S.currentNodeDetail?.node_id || "").trim() === nodeId;
-    const viewState = consumePendingTaskDetailRestore(nodeId)
+    const entryViewState = consumePendingTaskDetailRestore(nodeId)
         || (preserveViewState ? captureTaskDetailViewState() : getStoredTaskDetailViewState(S.currentTaskId, nodeId));
     if (!S.taskNodeDetails[nodeId] && !hadVisibleCurrentDetail) showTaskNodeLoadingState(node);
     const detail = await ensureTaskNodeDetail(nodeId, { force: forceRefresh });
@@ -4266,6 +4266,14 @@ async function showAgent(node, { preserveViewState = true, forceRefresh = false 
     renderTaskNodeDetailStatus(mergedNode);
     renderTaskNodeModelRetryToast(mergedNode);
     if (U.adRoundSummary) U.adRoundSummary.textContent = String(mergedNode.roundSummary || "");
+    // 同一节点刷新时，展开态取渲染前 DOM 的当下状态：入口那次捕获在请求之前，
+    // 在飞窗口里用户刚点开的卡片和工具面板不在里面，沿用会把它们折回上一次的样子。
+    const liveViewState = hadVisibleCurrentDetail ? captureTaskDetailViewState() : null;
+    const hasLiveRows = !!(liveViewState
+        && (liveViewState.traceItems.length
+            || liveViewState.messageItems.length
+            || liveViewState.spawnReviewItems.length));
+    const viewState = hasLiveRows ? liveViewState : entryViewState;
     const traceChanged = !!renderExecutionTrace(mergedNode, { viewState });
     const messagesChanged = !!renderMessageList(mergedNode, { viewState });
     const spawnReviewChanged = !!renderSpawnReviewTrace(mergedNode, { viewState });
