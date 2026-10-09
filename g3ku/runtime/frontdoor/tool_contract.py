@@ -6,7 +6,11 @@ from collections import OrderedDict
 from dataclasses import dataclass
 from typing import Any
 
-from g3ku.utils.helpers import PATH_ANCHOR_RULE_TEXT, path_anchor_tokens
+from g3ku.utils.helpers import (
+    PATH_ANCHOR_RULE_TEXT,
+    path_anchor_tokens,
+    render_candidate_tool_line,
+)
 
 FRONTDOOR_DYNAMIC_TOOL_CONTRACT_KIND = 'frontdoor_runtime_tool_contract'
 FRONTDOOR_DYNAMIC_TOOL_CONTRACT_HEADING = '## Runtime Tool Contract'
@@ -462,27 +466,24 @@ def _render_name_list(items: list[str] | None) -> str:
     return ', '.join(f'`{name}`' for name in names)
 
 
-def _render_candidate_tool_section(items: list[dict[str, str]] | None) -> list[str]:
-    """只列名字：每个工具的说明文字由 provider `tools[]` 的 `function.description` 承载
-    （见 `_provider_visible_tool_contract`），这里不再抄第二份。
+def _render_candidate_tool_section(items: list[dict[str, str]] | None, declared_names: list[str] | None) -> list[str]:
+    """候选行的判据与文本都在 `render_candidate_tool_line`，两车道共用、字节同形。
+    工具说明由 `tools[]` 的 `function.description` 承载（见 `_provider_visible_tool_contract`）。
     """
-    normalized_items = _normalized_candidate_tool_items(items)
-    if not normalized_items:
-        return ['candidate_tools: none']
-    return [f'candidate_tools: {_render_name_list([str(item.get("tool_id") or "") for item in normalized_items])}']
+    return render_candidate_tool_line(
+        [str(item.get('tool_id') or '') for item in list(_normalized_candidate_tool_items(items) or [])],
+        declared_names,
+    )
 
 
 def _render_repair_required_tool_section(items: list[dict[str, str]] | None) -> list[str]:
+    """只列条目。四句固定处置指令是回合内常量，改由稳定提示词承载
+    （`ceo_frontdoor.md`「工具待修复处置顺序」／节点道 `shared_repair_required.md`）。
+    """
     normalized_items = _normalized_repair_required_tool_items(items)
     if not normalized_items:
         return []
-    lines = [
-        'repair_required_tools:',
-        '- These tools must be repaired before use.',
-        '- Use `load_tool_context(tool_id="<tool_id>")` first.',
-        '- Use `exec`, `filesystem_write`, `filesystem_edit`, `filesystem_copy`, `filesystem_move`, or `filesystem_propose_patch` to repair them.',
-        '- Reference skill: `repair-tool`.',
-    ]
+    lines = ['repair_required_tools:']
     for item in normalized_items:
         tool_id = str(item.get('tool_id') or '').strip()
         description = str(item.get('description') or '').strip()
@@ -495,16 +496,11 @@ def _render_repair_required_tool_section(items: list[dict[str, str]] | None) -> 
 
 
 def _render_repair_required_skill_section(items: list[dict[str, str]] | None) -> list[str]:
+    """只列条目；处置顺序与参考 skill 名在稳定提示词里说一次。"""
     normalized_items = _normalized_repair_required_skill_items(items)
     if not normalized_items:
         return []
-    lines = [
-        'repair_required_skills:',
-        '- These skills must be repaired before viewing their body.',
-        '- Do not call `load_skill_context` until repaired.',
-        '- Use `exec`, `filesystem_write`, `filesystem_edit`, `filesystem_copy`, `filesystem_move`, or `filesystem_propose_patch` to repair them.',
-        '- Reference skill: `writing-skills`.',
-    ]
+    lines = ['repair_required_skills:']
     for item in normalized_items:
         skill_id = str(item.get('skill_id') or '').strip()
         description = str(item.get('description') or '').strip()
@@ -517,19 +513,13 @@ def _render_repair_required_skill_section(items: list[dict[str, str]] | None) ->
 
 
 def _render_attachment_reopen_target_section(items: list[dict[str, str]] | None) -> list[str]:
+    """只列句柄条目。七句固定规则与 `ceo_frontdoor.md`「异步任务的文件依赖」那组条款同义，
+    留两份就是每跳重付一遍；规则的唯一归属是稳定提示词。
+    """
     normalized_items = _normalized_attachment_reopen_targets(items)
     if not normalized_items:
         return []
-    lines = [
-        'attachment_reopen_targets:',
-        '- These uploaded files remain reopenable in later turns.',
-        '- If a detached task must read one of them, copy the exact `path:` or `ref:` into `create_async_task.file_targets`.',
-        '- `create_async_task.file_targets` is the authoritative reopen lane for detached tasks.',
-        '- A made-up filename like `resume.docx` is not a valid reopen target; copy the exact `path:` or `ref:` string shown above.',
-        '- If you provide `path`, runtime rejects relative paths and paths that do not point to an existing file.',
-        '- In `create_async_task.task`, describe why the file matters and how it should be used, but do not rely on prose alone for reopen handles.',
-        '- Do not replace them with placeholders like `current_uploads`, `user_uploads`, or `user_image_and_docx`.',
-    ]
+    lines = ['attachment_reopen_targets:']
     for item in normalized_items:
         name = str(item.get('name') or '').strip() or 'attachment'
         kind = str(item.get('kind') or '').strip() or 'file'
@@ -553,18 +543,12 @@ def _render_stage_summary(stage_summary: dict[str, Any] | None) -> str:
     pending = [dict(item) for item in list(payload.get('pending_orphan_rounds') or []) if isinstance(item, dict)]
     pending_counted = sum(1 for round_item in pending if bool(round_item.get('budget_counted')))
     if not active_stage:
-        guard = (
-            'current stage budget is exhausted; submit `submit_next_stage` together with the tools '
-            'you want to call in the next round, otherwise the call will be blocked'
-            if transition_required
-            else 'no active stage — normal at the start of every turn; when you need tools, submit '
-            '`submit_next_stage` together with them in the same batch (submit_next_stage runs first, '
-            'then the tools are booked on the first round of the new stage); calling ordinary tools '
-            'alone gets one grace execution, then is blocked'
-        )
+        # 两种状态的处置指令（"没有活动阶段""预算耗尽"）都在 `ceo_frontdoor.md` 的阶段闸门
+        # 那组条款里写死了，这里只报状态本身；把整段英文处置意见每跳重贴一遍是尾块里最贵
+        # 的一句废话。待入账轮数是状态量，留着。
         rendered = (
             f'stage_summary: active_stage_id={active_stage_id}; '
-            f'transition_required={transition_required}; {guard}'
+            f'transition_required={transition_required}'
         )
         if pending:
             rendered += (
@@ -637,6 +621,9 @@ def _render_frontdoor_contract_summary(payload: dict[str, Any]) -> str:
     if not pinned_roster:
         lines.append(_render_candidate_skills_line(round_skill_ids))
     else:
+        # 头部名单在场时只印成员差：本轮名单 = (头部 − unselected) ∪ granted，信息完整，
+        # 不需要再抄一份全量。唯一例外是 `_roster_difference_too_wide` 的那一档（差到名单
+        # 三分之二以上），此时差集行既不比全量便宜、又把"本轮能加载什么"写成否定式。
         pinned_skill_ids = _normalized_name_list(payload.get('pinned_skill_ids'))
         granted, unselected = pinned_skill_difference(
             pinned_skill_ids=pinned_skill_ids,
@@ -661,7 +648,7 @@ def _render_frontdoor_contract_summary(payload: dict[str, Any]) -> str:
     lines.extend(
         [
             *_render_attachment_reopen_target_section(attachment_reopen_targets),
-            *_render_candidate_tool_section(candidate_tools),
+            *_render_candidate_tool_section(candidate_tools, payload.get('declared_tool_names')),
             *_render_repair_required_tool_section(repair_required_tools),
             *_render_repair_required_skill_section(repair_required_skills),
         ]
@@ -680,7 +667,8 @@ def _render_frontdoor_stage_gate_summary(payload: dict[str, Any]) -> str:
     lines = [
         FRONTDOOR_DYNAMIC_STAGE_GATE_HEADING,
         f'kind: {FRONTDOOR_DYNAMIC_STAGE_GATE_KIND}',
-        _contract_revision_line(payload),
+        # `contract_revision` 整回合不变，已在上一块出现过；两块各印一份等于每跳为同一个
+        # 值付两遍，而它在这条道没有消费者（曝光 revision 的刷新判据在头部键里算）。
         f'callable_tools: {_render_name_list(payload.get("callable_tool_names"))}',
     ]
     denied_tool_names = _normalized_name_list(payload.get('denied_tool_names'))
@@ -769,6 +757,7 @@ class FrontdoorToolContract:
     exec_runtime_policy: dict[str, Any] | None = None
     attachment_reopen_targets: list[dict[str, str]] | None = None
     denied_tool_names: list[str] | None = None
+    declared_tool_names: list[str] | None = None
     session_temp_dir: str | None = None
     pinned_contract_text: str | None = None
     pinned_skill_ids: list[str] | None = None
@@ -778,6 +767,7 @@ class FrontdoorToolContract:
             'message_type': FRONTDOOR_DYNAMIC_TOOL_CONTRACT_KIND,
             'callable_tool_names': list(self.callable_tool_names),
             'denied_tool_names': _normalized_name_list(list(self.denied_tool_names or [])),
+            'declared_tool_names': _normalized_name_list(list(self.declared_tool_names or [])),
             'candidate_tools': _normalized_candidate_tool_items(
                 list(self.candidate_tool_items or []),
                 fallback_names=list(self.candidate_tool_names),
@@ -895,6 +885,7 @@ def build_frontdoor_tool_contract(
     attachment_reopen_targets: list[dict[str, str]] | None = None,
     session_temp_dir: str | None = None,
     denied_tool_names: list[str] | None = None,
+    declared_tool_names: list[str] | None = None,
     pinned_contract_text: str | None = None,
     pinned_skill_ids: list[str] | None = None,
 ) -> FrontdoorToolContract:
@@ -922,6 +913,7 @@ def build_frontdoor_tool_contract(
         attachment_reopen_targets=_normalized_attachment_reopen_targets(attachment_reopen_targets),
         session_temp_dir=str(session_temp_dir or '').strip() or None,
         denied_tool_names=_normalized_name_list(denied_tool_names),
+        declared_tool_names=_normalized_name_list(declared_tool_names),
         pinned_contract_text=str(pinned_contract_text or '').strip() or None,
         pinned_skill_ids=_normalized_name_list(pinned_skill_ids),
     )

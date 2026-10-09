@@ -126,6 +126,53 @@ def path_anchor_policy(workspace: Path | None) -> dict[str, Any]:
     }
 
 
+UNDECLARED_CANDIDATE_LINE_PREFIX = (
+    'undeclared_candidates (`能 `load_tool_context` 但参数表还没进本次 `tools[]`，'
+    '清单到压缩那一跳才重印)'
+)
+
+
+def render_candidate_tool_line(
+    candidate_names: Any,
+    declared_names: Any,
+) -> list[str]:
+    """候选行只有一种形状，两车道共用同一个函数渲染，保证同形是构造出来的而不是抄的。
+
+    - 拿到声明名单（本次真正带出去的 `tools[]`）时，只渲差集"候选 − 已声明"，为空就整行不出现。
+      全量候选表删掉的理由：钉住清单带着全角色的参数表，`callable_tools` 与 `denied_tools`
+      同块在场，"哪些还能 load"＝`tools[] − callable − denied − 控制工具`，模型在同一块里读得出来。
+      留下的差集行是**声明滞后的出口**：`tools[]` 到压缩那一跳才重印，刚被治理放行、对象字典还没
+      建出它的名字会先能 `load_tool_context` 后上清单（节点道候选池上界是每跳活的治理读）。
+    - 拿不到声明名单时退回渲全量并沿用 `candidate_tools` 标签：省略的前提是"可推导"成立，
+      证明不了就宁可重复不可缺失。
+    """
+    declared = [
+        str(item or '').strip()
+        for item in list(declared_names or [])
+        if str(item or '').strip()
+    ]
+    ordered: list[str] = []
+    seen: set[str] = set()
+    for item in list(candidate_names or []):
+        name = str(item or '').strip()
+        if not name or name in seen:
+            continue
+        seen.add(name)
+        ordered.append(name)
+    if not ordered:
+        return []
+    rendered = ', '.join(f'`{name}`' for name in ordered)
+    if not declared:
+        return [f'candidate_tools: {rendered}']
+    remaining = [name for name in ordered if name not in set(declared)]
+    if not remaining:
+        return []
+    return [
+        f'{UNDECLARED_CANDIDATE_LINE_PREFIX}: '
+        + ', '.join(f'`{name}`' for name in remaining)
+    ]
+
+
 def resolve_model_path(
     raw_path: str | Path,
     *,

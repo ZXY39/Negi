@@ -4,6 +4,8 @@ import json
 from dataclasses import dataclass
 from typing import Any
 
+from g3ku.utils.helpers import render_candidate_tool_line
+
 NODE_DYNAMIC_CONTRACT_KIND = 'node_runtime_tool_contract'
 NODE_DYNAMIC_CONTRACT_HEADING = '## Runtime Tool Contract'
 NODE_DYNAMIC_CONTRACT_PAYLOAD_KEY = '_node_runtime_tool_contract_payload'
@@ -156,15 +158,14 @@ def _render_name_list(items: list[str] | None) -> str:
     return ', '.join(f'`{name}`' for name in names)
 
 
-def _render_candidate_tool_section(items: list[dict[str, str]] | None) -> list[str]:
-    """只列名字：工具说明由 provider `tools[]` 的 `function.description` 承载
-    （节点束走 `Tool.to_model_schema()`，本来就带 model description），行为口径在
-    `node_runtime_contract_shared.md` 稳定提示词里说一次。
+def _render_candidate_tool_section(items: list[dict[str, str]] | None, declared_names: list[str] | None) -> list[str]:
+    """候选行的判据与文本都在 `render_candidate_tool_line`，与前门字节同形。
+    工具描述由 `tools[]` 的 schema 承载，行为口径在 `node_runtime_contract_shared.md` 说一次。
     """
-    normalized_items = _normalized_candidate_tool_items(items)
-    if not normalized_items:
-        return ['candidate_tools: none']
-    return [f'candidate_tools: {_render_name_list([str(item.get("tool_id") or "") for item in normalized_items])}']
+    return render_candidate_tool_line(
+        [str(item.get('tool_id') or '') for item in list(_normalized_candidate_tool_items(items) or [])],
+        declared_names,
+    )
 
 
 def _render_candidate_skill_section(items: list[dict[str, str]] | None) -> list[str]:
@@ -178,16 +179,11 @@ def _render_candidate_skill_section(items: list[dict[str, str]] | None) -> list[
 
 
 def _render_repair_required_tool_section(items: list[dict[str, str]] | None) -> list[str]:
+    """只列条目；四句处置指令的归属是 `shared_repair_required.md`「工具待修复规则」。"""
     normalized_items = _normalized_repair_required_tool_items(items)
     if not normalized_items:
         return []
-    lines = [
-        'repair_required_tools:',
-        '- These tools must be repaired before use.',
-        '- Use `load_tool_context(tool_id="<tool_id>")` first.',
-        '- Use `exec`, `filesystem_write`, `filesystem_edit`, `filesystem_copy`, `filesystem_move`, or `filesystem_propose_patch` to repair them.',
-        '- Reference skill: `repair-tool`.',
-    ]
+    lines = ['repair_required_tools:']
     for item in normalized_items:
         tool_id = str(item.get('tool_id') or '').strip()
         description = str(item.get('description') or '').strip()
@@ -200,16 +196,11 @@ def _render_repair_required_tool_section(items: list[dict[str, str]] | None) -> 
 
 
 def _render_repair_required_skill_section(items: list[dict[str, str]] | None) -> list[str]:
+    """只列条目；处置顺序的归属是 `shared_repair_required.md`「技能待修复规则」。"""
     normalized_items = _normalized_repair_required_skill_items(items)
     if not normalized_items:
         return []
-    lines = [
-        'repair_required_skills:',
-        '- These skills must be repaired before viewing their body.',
-        '- Do not call `load_skill_context` until repaired.',
-        '- Use `exec`, `filesystem_write`, `filesystem_edit`, `filesystem_copy`, `filesystem_move`, or `filesystem_propose_patch` to repair them.',
-        '- Reference skill: `writing-skills`.',
-    ]
+    lines = ['repair_required_skills:']
     for item in normalized_items:
         skill_id = str(item.get('skill_id') or '').strip()
         description = str(item.get('description') or '').strip()
@@ -270,7 +261,7 @@ def _render_node_dynamic_contract_summary(payload: dict[str, Any]) -> str:
     lines = [
         NODE_DYNAMIC_CONTRACT_HEADING,
         f'kind: {NODE_DYNAMIC_CONTRACT_KIND}',
-        *_render_candidate_tool_section(payload.get('candidate_tools')),
+        *_render_candidate_tool_section(payload.get('candidate_tools'), payload.get('declared_tool_names')),
         *_render_candidate_skill_section(payload.get('candidate_skills')),
         *_render_repair_required_tool_section(payload.get('repair_required_tools')),
         *_render_repair_required_skill_section(payload.get('repair_required_skills')),
@@ -347,6 +338,7 @@ class NodeRuntimeToolContract:
     selection_trace: dict[str, Any]
     contract_visible_skill_ids: list[str] | None = None
     denied_tool_names: list[str] | None = None
+    declared_tool_names: list[str] | None = None
     skill_visibility_diagnostics: dict[str, Any] | None = None
     candidate_tool_items: list[dict[str, str]] | None = None
     candidate_skill_items: list[dict[str, str]] | None = None
@@ -359,6 +351,7 @@ class NodeRuntimeToolContract:
             'message_type': NODE_DYNAMIC_CONTRACT_KIND,
             'callable_tool_names': list(self.callable_tool_names or []),
             'denied_tool_names': _normalized_name_list(list(self.denied_tool_names or [])),
+            'declared_tool_names': _normalized_name_list(list(self.declared_tool_names or [])),
             'candidate_tools': _normalized_candidate_tool_items(
                 list(self.candidate_tool_items or []),
                 fallback_names=list(self.candidate_tool_names or []),

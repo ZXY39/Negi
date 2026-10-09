@@ -52,8 +52,11 @@ def test_frontdoor_contract_guides_models_to_copy_reopen_targets_into_file_targe
     contract_text = str(updated[0]["content"] or "")
 
     assert "attachment_reopen_targets:" in contract_text
-    assert "create_async_task.file_targets" in contract_text
-    assert "authoritative reopen lane" in contract_text
-    assert "describe why the file matters" in contract_text
-    assert "copy the exact `path:` or `ref:` into `create_async_task.task`" not in contract_text
-    assert "current_uploads" in contract_text
+    assert "D:/Uploads/resume.docx" in contract_text
+    # 规则文本的唯一载体是稳定提示词（本文件第一条用例就是钉它的那一句），尾块只带句柄：
+    # 七句固定处置指令每跳重贴一遍是纯重复付费，而它整回合不变。
+    assert "create_async_task.file_targets" not in contract_text
+    assert "authoritative reopen lane" not in contract_text
+    prompt = (REPO_ROOT / "g3ku/runtime/prompts/ceo_frontdoor.md").read_text(encoding="utf-8")
+    assert "`attachment_reopen_targets`" in prompt
+    assert "current_uploads" in prompt

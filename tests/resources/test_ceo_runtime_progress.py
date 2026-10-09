@@ -7420,7 +7420,10 @@ async def test_ceo_frontdoor_prepare_turn_heartbeat_inherits_previous_tool_state
     assert "candidate_skills (loadable with `load_skill_context`)" not in contract_text
     # skill 加载规则只在基础提示词里说一次，契约不再抄第二份
     assert 'Call `load_skill_context(skill_id="<skill_id>")`' not in contract_text
-    assert "candidate_tools: `web_fetch`" in contract_text
+    # `web_fetch` 带着参数表在 tools[] 上、又不在 callable_tools 里，就是可推导的候选：
+    # 整表不再重列，只有"能 load 但还没进 tools[]"的滞后差集才占一行。
+    assert "candidate_tools:" not in contract_text
+    assert "undeclared_candidates" not in contract_text
     # 候选工具的说明改由 provider tools[] 的 function.description 承载，正文不再抄第二份
     assert "`web_fetch`: fetch web pages" not in contract_text
 
@@ -7661,7 +7664,10 @@ async def test_ceo_frontdoor_prepare_turn_cron_inherits_previous_tool_state_with
     assert "candidate_skills (loadable with `load_skill_context`)" not in contract_text
     # skill 加载规则只在基础提示词里说一次，契约不再抄第二份
     assert 'Call `load_skill_context(skill_id="<skill_id>")`' not in contract_text
-    assert "candidate_tools: `web_fetch`" in contract_text
+    # `web_fetch` 带着参数表在 tools[] 上、又不在 callable_tools 里，就是可推导的候选：
+    # 整表不再重列，只有"能 load 但还没进 tools[]"的滞后差集才占一行。
+    assert "candidate_tools:" not in contract_text
+    assert "undeclared_candidates" not in contract_text
     # 候选工具的说明改由 provider tools[] 的 function.description 承载，正文不再抄第二份
     assert "`web_fetch`: fetch web pages" not in contract_text
 

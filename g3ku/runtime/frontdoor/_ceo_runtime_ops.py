@@ -7452,6 +7452,8 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
                         session_key=str(state.get("session_key") or ""),
                     ),
                 ),
+                # 本次请求真正带出去的声明名单：尾块据此只渲"能 load 但还没进 tools[]"的差集。
+                declared_tool_names=list(runtime_visible_tool_names or []),
                 contract_revision=cache_family_revision,
                 exec_runtime_policy=(
                     self._loop.main_task_service._current_exec_runtime_policy_payload()

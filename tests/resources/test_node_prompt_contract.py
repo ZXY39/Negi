@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from pathlib import Path
 
 from main.runtime.node_prompt_contract import (
     NODE_DYNAMIC_CONTRACT_KIND,
@@ -184,9 +185,17 @@ def test_node_runtime_contract_renders_repair_required_sections_separately() -> 
     ]
     assert "repair_required_tools:" in message["content"]
     assert "repair_required_skills:" in message["content"]
-    assert 'Use `load_tool_context(tool_id="<tool_id>")` first.' in message["content"]
-    assert "Reference skill: `repair-tool`." in message["content"]
-    assert "Reference skill: `writing-skills`." in message["content"]
+    # 条目留在块里，四句处置指令整段移出：节点道的载体是 `shared_repair_required.md`
+    assert "`agent_browser`: Browser automation Reason: missing required paths" in message["content"]
+    assert "`writing-skills`: Skill maintenance workflow Reason: missing required bins" in message["content"]
+    assert "Reference skill:" not in message["content"]
+    assert "Use `load_tool_context(tool_id=\"<tool_id>\")` first." not in message["content"]
+    assert "These skills must be repaired before viewing their body." not in message["content"]
+    fragment = (
+        Path(__file__).resolve().parents[2] / "main/prompts/shared_repair_required.md"
+    ).read_text(encoding="utf-8")
+    assert "repair-tool" in fragment
+    assert "`writing-skills`" in fragment
 
 
 def test_inject_node_dynamic_contract_message_appends_contract_to_request_tail() -> None:

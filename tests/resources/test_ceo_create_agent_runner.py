@@ -1890,7 +1890,9 @@ async def test_create_agent_runner_graph_prepare_turn_seeds_session_hydrated_too
     assert len(contract_messages) == 2  # 一份稳定契约 + 一份活状态块
     contract_text = "\n".join(str(item["content"] or "") for item in contract_messages)
     assert "callable_tools: `submit_next_stage`" in contract_text
-    assert "candidate_tools: none" in contract_text
+    # 空池不再占一行 `candidate_tools: none`
+    assert "candidate_tools:" not in contract_text
+    assert "undeclared_candidates" not in contract_text
     assert "visible_skill_ids" not in contract_text
     assert "rbac_visible_tool_names" not in contract_text
     assert "rbac_visible_skill_ids" not in contract_text

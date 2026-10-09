@@ -1272,8 +1272,10 @@ async def test_message_builder_appends_frontdoor_runtime_tool_contract_to_dynami
     assert "hydrated_tools:" not in gate_text and "callable_tools:" in gate_text
     assert "stage_summary:" in gate_text and "stage_summary:" not in stable_text
     assert 'load_tool_context(tool_id="filesystem_write")' not in contract_text
-    # 候选工具的一句话说明由 provider tools[] 承载，契约只列名字
-    assert "candidate_tools:" in stable_text
+    # 候选整表不再重列：这份样本里 filesystem_write 已经 callable、池子为空，所以候选行
+    # 一条都不该出现（旧形状会固定打一行 `candidate_tools: none`）。
+    assert "candidate_tools:" not in stable_text
+    assert "undeclared_candidates" not in stable_text
     assert "To use one, call" not in stable_text
 
 
@@ -1370,7 +1372,9 @@ def test_frontdoor_dynamic_appendix_records_prefer_state_tool_contract_over_stal
     assert contract_messages[0]["role"] == "user"
     assert contract_text.startswith("## Runtime Tool Contract")
     assert "callable_tools: `submit_next_stage`, `filesystem_write`" in contract_text
-    assert "candidate_tools: none" in contract_text
+    # 空池不再打 `candidate_tools: none` 这一行占位
+    assert "candidate_tools:" not in contract_text
+    assert "undeclared_candidates" not in contract_text
     assert "hydrated_tools:" not in contract_text
     assert "candidate_skills (loadable with `load_skill_context`): `memory`" in contract_text
     # skill/工具加载规则只在基础提示词里，契约不再抄第二份
@@ -1577,8 +1581,20 @@ def test_frontdoor_tool_contract_renders_repair_required_sections_separately() -
     ]
     assert "repair_required_tools:" in str(updated[0]["content"] or "")
     assert "repair_required_skills:" in str(updated[0]["content"] or "")
-    assert "Reference skill: `repair-tool`." in str(updated[0]["content"] or "")
-    assert "Reference skill: `writing-skills`." in str(updated[0]["content"] or "")
+    contract_text = str(updated[0]["content"] or "")
+    # 条目留在块里，处置指令整段移出：它是回合内常量，每跳重贴就是重复付费
+    assert "`agent_browser`: Browser automation Reason: missing required paths" in contract_text
+    assert "`writing-skills`: Skill maintenance workflow Reason: missing required bins" in contract_text
+    assert "Reference skill:" not in contract_text
+    assert "These tools must be repaired before use." not in contract_text
+    assert "Do not call `load_skill_context` until repaired." not in contract_text
+    # 唯一载体是稳定提示词，两份都要能在那儿读到
+    prompt = (Path(__file__).resolve().parents[2] / "g3ku/runtime/prompts/ceo_frontdoor.md").read_text(encoding="utf-8")
+    assert "`repair-tool`" in prompt
+    assert "`writing-skills`" in prompt
+    shared = (Path(__file__).resolve().parents[2] / "main/prompts/shared_repair_required.md").read_text(encoding="utf-8")
+    assert "repair-tool" in shared
+    assert "`writing-skills`" in shared
 
 
 def test_frontdoor_tool_contract_renders_attachment_reopen_targets() -> None:
@@ -1634,8 +1650,9 @@ def test_frontdoor_tool_contract_renders_attachment_reopen_targets() -> None:
         },
     ]
     assert "attachment_reopen_targets:" in contract_text
-    assert "create_async_task.file_targets` is the authoritative reopen lane" in contract_text
-    assert "describe why the file matters" in contract_text
+    # 处置指令归 `ceo_frontdoor.md`「异步任务的文件依赖」那组条款，块里只留句柄
+    assert "create_async_task.file_targets` is the authoritative reopen lane" not in contract_text
+    assert "describe why the file matters" not in contract_text
     assert "copy the exact `path:` or `ref:` into `create_async_task.task`" not in contract_text
     assert "resume.docx" in contract_text
     assert "D:/Uploads/resume.docx" in contract_text
@@ -1723,8 +1740,8 @@ async def test_message_builder_surfaces_current_and_historical_attachment_reopen
     assert "attachment_reopen_targets:" in contract_text
     assert str(current_path) in contract_text
     assert str(history_path) in contract_text
-    assert "create_async_task.file_targets" in contract_text
-    assert "authoritative reopen lane" in contract_text
+    assert "create_async_task.file_targets" not in contract_text
+    assert "authoritative reopen lane" not in contract_text
     assert "copy the exact `path:` or `ref:` into `create_async_task.task`" not in contract_text
 
 

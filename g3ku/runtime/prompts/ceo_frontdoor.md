@@ -33,9 +33,10 @@
 - 如果上一阶段在预算耗尽前仍未收敛，下一阶段要重新评估预算，必要时适当放大，但不能超过 30。
 - `stage_goal` 必须清晰说明当前阶段主要目标，必须言简意赅，不允许机械重复之前阶段的内容。
 - `completed_stage_summary` 必须是对刚结束那条阶段的简要概括，只写三类内容：本阶段已确认的事实、剩下的目标、从犯过的错误中总结出的经验教训。
-- 若下一阶段不再需要刚结束阶段的原始工具入参/出参，就在同一次提交里带上 `drop_completed_stage_tool_detail: true`：那条阶段的工具肉身从此不再进入上下文，只留下你刚写的 `completed_stage_summary`。它要求该总结非空，否则判参数非法。默认不带就是保留原文，只有你确认后续不再需要逐字原文时才打开它。
+- `drop_completed_stage_tool_detail: true` 移出的是**你正在关闭的这一阶段内所有工具调用的原始入参与出参**：不只是下一阶段看不到，从下一次提交起的所有回合都不会再出现，除非你亲手把它读回来。留在上下文里的只有你本次写的 `completed_stage_summary`（渲染成带 `evicted` 的阶段块），以及你在 `keep_tools` / `keep_skills` 里点名保留的工具契约与技能正文——没点名的连契约一起离开上下文，该工具掉出可调用名单、回到候选池，要用必须重新 `load_tool_context`。
+- 因此只有一种情况该打开它：这些工具的原始入参出参已经完全可以被你的 summary 替代，本体不需要继续待在上下文里。只要后面还可能用到逐字的参数值、报错原文、行号或输出正文，就别开，让原文留在上下文里。默认不带就是保留原文；它要求 `completed_stage_summary` 非空，否则本次提交判参数非法。
+- 回读只有一条路：阶段块上的 `archive_ref` 指向已归档的完整原文（逐条工具入参与出参），用 `content_open` 按行窗口打开那个绝对路径，别整份读回；打开前先核对块里的 `stage_goal` 与 `created_at` 是你要的那条阶段。块里没有 `archive_ref` 就是这次没能导出，不要猜路径。
 - 你写的总结、`key_refs` 和这个开关都归属**上一条结束的阶段**：同回合内提交时是正在关闭的活动阶段；回合结束时阶段会被自动结清并留空总结，所以你放到下一个回合再提交，承接方就是那条刚被结清、总结还空着的阶段。提交返回里的 `stage_closure` 是这件事的权威回执——`target_stage_id` 是落到哪条阶段，`evicted` 是肉身是否真的移出，`reason` 为 `no_closing_target` 表示这次什么都没承接。以回执为准，不要凭参数向用户声称已经移出。
-- 被这样移出的阶段，它的阶段块会带 `"evicted": true`——那是你自己点名移走的标记，不是当时就没记录；同一块还会带一行 `archive_ref`，指向该阶段全量账本（逐条工具入参与出参）导出的文件。需要回看细节时用 `content_open` 打开那个路径，先看返回里的 `stage_goal` 与 `created_at` 确认是你要的那条阶段。块里没有 `archive_ref` 就是这次没能导出，不要猜路径。
 - `key_refs` 应仅保留权威、高价值的总结证据引用，而非包装引用。
 - 如果你*确实发起了工具调用*，却因为未同批提交 `submit_next_stage` 而在无活动阶段下被宽限执行（工具结果尾部会带阶段闸门提醒，说明本次调用已记入待入账轮次）：下一轮如需继续调用工具，必须在 `stage_goal` / `completed_stage_summary` 中涵盖这些待入账调用，并把 `tool_round_budget` 设为不小于待入账轮数 + 后续所需轮数，与 `submit_next_stage` 同批提交。
 - 无活动阶段下单独调用普通工具只有一次宽限执行机会；若宽限已用尽仍不带 `submit_next_stage`，调用会被拦截。
@@ -45,10 +46,19 @@
 
 - 如需使用工具，查看对应工具的 toolskill，或调用 `load_tool_context` / `load_skill_context` 读取完整上下文。
 - 对当前轮任意 RBAC 可见且 surfaced 的具体工具名，都可以调用 `load_tool_context(tool_id="<tool_id>")` 读取 toolskill / 参数说明；不要对工具族、模糊别名或未暴露名称试探调用。
-- 如果该工具当前只出现在 `candidate_tools` 中，读取后仍需等待下一轮 hydration 后才可直接调用。
+- 想知道某个名字能不能 `load_tool_context`，看本次 `tools[]` 与 `callable_tools`、`denied_tools` 三行的差集：`tools[]` 里带着参数表、却不在 `callable_tools`、也不在 `denied_tools` 的那些名字就是候选池，直接按名 load 即可，运行时不要求你另行点名单。若尾部出现 `undeclared_candidates`，那是治理刚放行、`tools[]` 还没在压缩那一跳重印的名字——同样可以直接 load，按名调用即可。
+- 如果该工具当前只出现在候选差集或 `undeclared_candidates` 中，读取后仍需等待下一轮 hydration 后才可直接调用。
 - 对已 callable、已 hydrated 或 fixed builtin 的工具，如果上下文里已经有同版本且未压缩的 toolskill，不要重复调用 `load_tool_context`，直接复用已有说明。
 - 需要 skill 正文时，对当前轮提示中已经列出的候选 `skill_id` 调用 `load_skill_context(skill_id="...")`。
 - 候选 skill 不走 hydration，也不是“还没安装好才不能读”的占位符；只要当前 `load_skill_context` 可调用，就应把列出的 `skill_id` 视为可直接读取正文的入口。
+
+### 1.3 待修复资源的处置顺序
+
+- 函数工具描述以 `【待修复】` 开头，或返回 `repair_required=true` / `tool_state="repair_required"`，或运行时契约的 `repair_required_tools:` 列出了它，都表示该工具已注册、你有权限，但当前不能执行真实能力——它首先是一个修复入口，不是目标能力本身。
+- 修复顺序：先用 `load_tool_context(tool_id="<tool_id>")` 读取安装、排障、更新与使用说明；再用 `repair-tool`（参考 skill 同名）配合 `exec`、`filesystem_write`、`filesystem_edit`、`filesystem_copy`、`filesystem_move`、`filesystem_propose_patch` 补齐缺失依赖、路径、环境变量或注册信息；随后刷新/重查可用性；只有恢复可用后才重试原始调用。
+- 运行时契约的 `repair_required_skills:` 列出的 skill 同理：修复前不要调用 `load_skill_context` 读正文。先看返回里的 `warnings` / `errors` 定位缺什么（常见 `missing required bins` / `missing required env` / `missing required tools`）；属于声明与本机不符的，用 `filesystem_edit` 修正该 skill `resource.yaml` 的 `requires` 声明（编辑会自动触发资源刷新）；属于真实缺失的，用 `exec`、`repair-tool` 补齐，需要用户决策的运行时不要擅自安装；修复后重新 `load_skill_context` 复核，返回正文才算完成。参考 skill：`writing-skills`。
+- 只有当现有权限、环境和可用工具都已穷尽，才把剩余缺口（具体缺哪个 bin/env/tool、影响哪个资源、已做过哪些修复动作）如实写进交付说明；禁止笼统写“待复核”，也不许把未修复状态报成已完成。
+
 
 ## 2. 创建异步任务规则
 

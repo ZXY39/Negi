@@ -80,7 +80,7 @@ Start here when you are new to the repository or when a change crosses subsystem
 - Same task result pushed to the channel multiple times → `heartbeat-system.md`「Task Terminal Repair Contract」
 - Channel/bridge reply emits `## Runtime Tool Contract` or `[G3KU_STAGE_*]` stage-block/internal context text -> `runtime-overview.md`「frontdoor 与任务运行时的关系」(回显守卫) + `external-agent-api.md` (outbound sanitize contract)
 - 请求体里阶段块成批堆在上下文最前面、与自己的用户消息/最终回复脱节 → `runtime-overview.md`「stage_compaction」（块锚点三级取定与顺序不变量）
-- 工具上一轮还能调、这一轮从 `callable_tools` 消失但同时出现在 `candidate_tools`，且 `hydration_evicted_executor_names` 里没有它 → 不是 LRU 也不是权限收回，而是它的 toolskill 正文被阶段裁撤或压缩移出上下文，按"契约不在 ⇒ 能力不在"被撤销；判据、两个载体与 `keep_tools` 保留道见 `tool-hydration-and-callable-chain.md`「hydrated tools」
+- 工具上一轮还能调、这一轮从 `callable_tools` 消失，但仍留在 `tools[]` 上（既不在 `denied_tools`、也不在 `undeclared_candidates`），且 `hydration_evicted_executor_names` 里没有它 → 不是 LRU 也不是权限收回，而是它的 toolskill 正文被阶段裁撤或压缩移出上下文，按"契约不在 ⇒ 能力不在"被撤销；判据、两个载体与 `keep_tools` 保留道见 `tool-hydration-and-callable-chain.md`「hydrated tools」
 - 裁撤后阶段块里没有 `## 保留契约` 段、或 `keep_tools` 点了名字却没留住 → 先确认同批带了 `drop_completed_stage_tool_detail=true` 与 `completed_stage_summary`（不带 drop 时 `keep_*` 按参数非法/忽略处理），再看该名字是否属于本阶段真的加载过的目标集；提取失败不写条目，回执会点名，机制见 `tool-hydration-and-callable-chain.md`「阶段门控与 callable 收紧」
 - 第三方桥接应用接入（/api/v1 鉴权、外部会话、事件流、主动推送不到达）→ `external-agent-api.md`「常见排障入口」
 - 会话转录/Web UI 有回复但渠道端（QQ 等）收不到、渠道「能收不能发」、重启后旧提醒补投或重复 → `external-agent-api.md`「出站路由（主动推送）」+「持久 outbox」+「内置官方 QQ 适配器」

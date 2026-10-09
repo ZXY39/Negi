@@ -3509,6 +3509,10 @@ class ReActToolLoop:
             node_kind=str(getattr(node, 'node_kind', '') or '').strip(),
             callable_tool_names=callable_tool_names,
             candidate_tool_names=candidate_tool_names,
+            # 本次请求真正带出去的声明名单：尾块据此只渲"能 load 但还没进 tools[]"的差集。
+            declared_tool_names=self._normalized_name_list(
+                list(tool_schema_selection.get('provider_tool_names') or [])
+            ),
             candidate_tool_items=candidate_tool_items,
             visible_skills=[],
             candidate_skill_ids=candidate_skill_ids,

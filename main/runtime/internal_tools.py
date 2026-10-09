@@ -164,12 +164,16 @@ class SubmitNextStageTool(Tool):
                 'drop_completed_stage_tool_detail': {
                     'type': 'boolean',
                     'description': (
-                        'Set true to move the stage you are closing out of the model context: its raw '
-                        'tool arguments and outputs stop being sent and only completed_stage_summary '
-                        'remains, as the stage block. Requires a non-empty completed_stage_summary in '
-                        'this same call. Nothing is deleted — the stage keeps its full round-by-round '
-                        'record in the durable ledger. Leave false (default) when the next stage must '
-                        'still see the exact arguments or output text of this one.'
+                        'Set true to drop the raw arguments and outputs of every tool call in the stage '
+                        'you are closing. They do not just disappear from the next stage — they stop being '
+                        'sent in every later turn as well, unless you read them back yourself. What stays '
+                        'in context is your completed_stage_summary (rendered as the stage block) plus only '
+                        'the tools and skills you name in keep_tools / keep_skills. Requires a non-empty '
+                        'completed_stage_summary in this same call. The full round-by-round record is still '
+                        'exported to the file pointed at by the block\'s archive_ref, and content_open is '
+                        'the only way to read it back. So set true only when your summary fully replaces '
+                        'those rows; if a later step might need verbatim arguments, error text, line numbers '
+                        'or output body, leave it false (default) and keep the rows in context.'
                     ),
                 },
                 'keep_tools': build_keep_contract_list_schema(

@@ -11328,6 +11328,20 @@ class MainRuntimeService:
             for item in list(candidate_skill_items or [])
             if str(item.get('skill_id') or '').strip() not in repair_required_skill_ids
         ]
+        frame_provider_tool_names: list[str] = []
+        frame_reader = getattr(log_service, 'read_runtime_frame', None) if log_service is not None else None
+        if callable(frame_reader):
+            try:
+                declared_frame = frame_reader(
+                    str(getattr(task, 'task_id', '') or '').strip(),
+                    str(getattr(node, 'node_id', '') or '').strip(),
+                ) or {}
+            except Exception:
+                declared_frame = {}
+            if isinstance(declared_frame, dict):
+                frame_provider_tool_names = self._normalized_tool_name_list(
+                    list(declared_frame.get('provider_tool_names') or [])
+                )
         enriched = inject_node_dynamic_contract_message(
             list(messages or []),
             NodeRuntimeToolContract(
@@ -11335,6 +11349,9 @@ class MainRuntimeService:
                 node_kind=str(getattr(node, 'node_kind', '') or '').strip(),
                 callable_tool_names=callable_tool_names,
                 candidate_tool_names=candidate_tool_names,
+                # 上一跳真正带出去的声明名单（钉住的清单只在压缩那一跳重印），尾块据此只渲
+                # "能 load 但还没进 tools[]"的差集；读不到就退回渲全量候选。
+                declared_tool_names=frame_provider_tool_names,
                 candidate_tool_items=candidate_tool_items,
                 visible_skills=[],
                 candidate_skill_ids=candidate_skill_ids,
