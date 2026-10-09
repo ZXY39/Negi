@@ -963,14 +963,12 @@ class ConfigChatBackend:
         slot: dict[str, Any],
         tried_model_refs: set[str],
         rotation_number: int,
-        last_error_text: str = "",
     ) -> bool:
         """组内换下一个未试成员，并沿用同模型轮之间的退避节拍。
 
         跨模型前进本身零等待，而组预算是每成员一份、跑满就让位，一次 pass 打满整组会变成对着
         分钟级 RPM 窗口的背靠背请求；这里把节拍从模型维度搬到组维度。`rotation_number`
-        是本请求在本组内第几次换人，第 1 次用最小退避档。档位的分档口径与同模型轮完全一致
-        （分钟窗口型限流按窗口等，其余按封顶指数），所以 `last_error_text` 要跟着传进来。
+        是本请求在本组内第几次换人，第 1 次用最小退避档。
         """
         if controller is None or lease is None:
             return False
@@ -978,10 +976,7 @@ class ConfigChatBackend:
         members = [str(item or "").strip() for item in list(slot.get("members") or []) if str(item or "").strip()]
         if not [item for item in members if item not in excluded]:
             return False
-        delay_seconds = model_retry_backoff_seconds(
-            max(1, int(rotation_number)),
-            error_text=last_error_text,
-        )
+        delay_seconds = model_retry_backoff_seconds(max(1, int(rotation_number)))
         logger.warning(
             "Model load-balance member {} exhausted in group {}; rotating to another member in {:.1f}s",
             str(refs[model_index] if model_index < len(refs) else ""),
@@ -1495,10 +1490,7 @@ class ConfigChatBackend:
                                 restart_with_refreshed_chain = True
                                 break
                             start_revision = current_runtime_config_revision()
-                        delay_seconds = model_retry_backoff_seconds(
-                            rounds_used,
-                            error_text=str(model_last_failure_reason or ""),
-                        )
+                        delay_seconds = model_retry_backoff_seconds(rounds_used)
                         logger.warning(
                             "Retryable model failure for {} (round {}/{}); retrying in {:.1f}s: {}",
                             ref,
@@ -1536,10 +1528,10 @@ class ConfigChatBackend:
                     # 新链链首重新评估。不记成"跨模型 fallback"。
                     model_index = 0
                     continue
-                # 负载均衡组：先在同组内换一个未试成员，成员之间沿用同模型轮的同一套退避档位
-                # （含分钟窗口档）。现网请求量集中在失败尾（跨模型回合扛三成 provider 请求），
-                # 今天的节拍全部来自退避；组预算收缩后若不补节拍，一次 pass 会背靠背打满整组，
-                # 而对手是按分钟计的 RPM 窗口。
+                # 负载均衡组：先在同组内换一个未试成员，成员之间沿用同一套封顶指数退避。
+                # 现网请求量集中在失败尾（跨模型回合扛三成 provider 请求），今天的节拍
+                # 全部来自退避；组预算收缩后若不补节拍，一次 pass 会背靠背打满整组，而
+                # 对手是按分钟计的 RPM 窗口。
                 if route_slot is not None and route_slot["kind"] == "load_balance":
                     moved = await self._advance_group_member(
                         controller=node_turn_controller,
@@ -1549,7 +1541,6 @@ class ConfigChatBackend:
                         slot=route_slot,
                         tried_model_refs=tried_model_refs,
                         rotation_number=group_member_rotations + 1,
-                        last_error_text=str(model_last_failure_reason or ""),
                     )
                     if moved:
                         group_member_rotations += 1

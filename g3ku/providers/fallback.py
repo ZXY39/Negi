@@ -22,7 +22,6 @@ from g3ku.utils.api_keys import APIKeyConfigurationError, iter_api_key_retry_slo
 from g3ku.utils.retry_keywords import (
     DEFAULT_RETRY_ON_KEYWORDS,
     expand_retry_keywords,
-    is_minute_window_throttle,
     split_retry_keywords,
 )
 
@@ -39,13 +38,6 @@ DEFAULT_PROVIDER_ATTEMPT_TIMEOUT_SECONDS = 600.0
 RETRY_BACKOFF_BASE_SECONDS = 1.0
 RETRY_BACKOFF_CAP_SECONDS = 60.0
 RETRY_BACKOFF_JITTER_RATIO = 0.25
-# 分钟窗口型限流（rpm / tpm）另起一档：上游的重置周期就是 60 秒，1s、1.7s 这种
-# 亚秒级节拍只是把同一个窗口内的第二次 429 再吃一遍。起点取整窗口，逐轮加一个
-# 窗口，封顶三个窗口——再等下去，链上下一个模型的推进就已经该发生而不是继续等。
-# 实测样本：2026-10-09 16:14:39 / 16:14:55 / 16:14:56 三发 `inference exceeds
-# tpm/rpm limit` 间隔 1.4s 与 1.4s，三次都是同一分钟窗口内的无效消耗。
-MINUTE_WINDOW_RETRY_BASE_SECONDS = 60.0
-MINUTE_WINDOW_RETRY_CAP_SECONDS = 180.0
 # model_retry_status 的 `state` 取值集合。这几个字面量是活状态机的判别值，前门、节点
 # 帧、审计白名单与前端 toast 都在读同一份，判读点必须一起改（漏一处就等于状态到了界面
 # 上被静默抹掉）。`retrying`/`waiting_upstream` 是「还在等上游」的两种，`cleared` 收尾。
@@ -468,23 +460,15 @@ def normalized_retry_count(value: int | None) -> int:
         return 0
 
 
-def model_retry_backoff_seconds(attempt_number: int, *, error_text: str = "") -> float:
+def model_retry_backoff_seconds(attempt_number: int) -> float:
     """Capped exponential backoff with jitter for retryable model-chain rounds.
 
     Retryable chain failures retry indefinitely; pacing comes from this delay.
     Jitter keeps concurrently retrying nodes from waking up in lockstep and
     hammering the same still-exhausted rate window.
-
-    ``error_text`` 只用来挑档：命中 rpm/tpm 这类分钟窗口维度时按窗口整数倍等
-    （起点 60s、封顶 180s），其余维度（rps、token/entitlement、归不出类的）沿用
-    原封顶指数档。维度判据是文本的，用途限于"最坏多等一轮"，不参与能不能重试的判定。
     """
-    rounds = max(1, int(attempt_number or 1))
-    if is_minute_window_throttle(error_text):
-        delay = min(MINUTE_WINDOW_RETRY_CAP_SECONDS, MINUTE_WINDOW_RETRY_BASE_SECONDS * rounds)
-    else:
-        exponent = max(0, rounds - 1)
-        delay = min(RETRY_BACKOFF_CAP_SECONDS, RETRY_BACKOFF_BASE_SECONDS * (2.0 ** exponent))
+    exponent = max(0, int(attempt_number or 1) - 1)
+    delay = min(RETRY_BACKOFF_CAP_SECONDS, RETRY_BACKOFF_BASE_SECONDS * (2.0 ** exponent))
     jitter = delay * RETRY_BACKOFF_JITTER_RATIO
     return max(0.1, delay + random.uniform(-jitter, jitter))
 
@@ -754,8 +738,8 @@ class FallbackProvider(LLMProvider):
                             restart_with_refreshed_chain = True
                             break
                         start_revision = current_runtime_config_revision()
+                    delay_seconds = model_retry_backoff_seconds(rounds_used)
                     reason_text = str(model_last_failure_reason or "")
-                    delay_seconds = model_retry_backoff_seconds(rounds_used, error_text=reason_text)
                     logger.warning(
                         "Retryable model failure for {} (round {}/{}); retrying in {:.1f}s: {}",
                         model_key,

@@ -191,7 +191,7 @@ async def test_group_budget_ignores_member_catalog_retry_count(monkeypatch) -> N
             "m_b": _target("m_b", _OkProvider("m_b", calls, on_call=_observe_previous_member)),
         },
     )
-    monkeypatch.setattr(chat_backend_module, "model_retry_backoff_seconds", lambda attempt, **_: 0.0)
+    monkeypatch.setattr(chat_backend_module, "model_retry_backoff_seconds", lambda attempt: 0.0)
 
     response = await _backend().chat(
         messages=[{"role": "user", "content": "demo"}],
@@ -224,7 +224,7 @@ async def test_member_rotation_is_paced_by_backoff(monkeypatch) -> None:
     calls: list[str] = []
     delays: list[int] = []
 
-    def _record(attempt_number: int, **_) -> float:
+    def _record(attempt_number: int) -> float:
         delays.append(int(attempt_number))
         return 0.0
 
@@ -256,7 +256,7 @@ async def test_429_outcome_is_attributed_to_the_selected_member(monkeypatch) -> 
     plan = ModelRoutePlan(routes=[_group_route(0, group), _model_route(1, "m_emergency")], config_revision=1)
     turn_controller, controller, balancer, lease = _wiring(group, plan=plan)
     calls: list[str] = []
-    monkeypatch.setattr(chat_backend_module, "model_retry_backoff_seconds", lambda attempt, **_: 0.0)
+    monkeypatch.setattr(chat_backend_module, "model_retry_backoff_seconds", lambda attempt: 0.0)
     _patch(
         monkeypatch,
         {
@@ -465,7 +465,7 @@ async def test_boundary_chain_refresh_keeps_second_group_aligned(monkeypatch) ->
     plan = ModelRoutePlan(routes=[_group_route(0, g1), _group_route(1, g2)], config_revision=1)
     turn_controller, controller, balancer, lease = _wiring(g1, plan=plan, extra_groups=(g2,))
     calls: list[str] = []
-    monkeypatch.setattr(chat_backend_module, "model_retry_backoff_seconds", lambda attempt, **_: 0.0)
+    monkeypatch.setattr(chat_backend_module, "model_retry_backoff_seconds", lambda attempt: 0.0)
     _patch(
         monkeypatch,
         {
@@ -510,7 +510,7 @@ async def test_fallback_trace_names_the_group_not_an_unselected_member(monkeypat
     plan = ModelRoutePlan(routes=[_group_route(0, g1), _group_route(1, g2)], config_revision=1)
     turn_controller, controller, _balancer, lease = _wiring(g1, plan=plan, extra_groups=(g2,))
     calls: list[str] = []
-    monkeypatch.setattr(chat_backend_module, "model_retry_backoff_seconds", lambda attempt, **_: 0.0)
+    monkeypatch.setattr(chat_backend_module, "model_retry_backoff_seconds", lambda attempt: 0.0)
     _patch(
         monkeypatch,
         {

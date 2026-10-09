@@ -5,11 +5,6 @@ import time
 import pytest
 from loguru import logger
 
-from g3ku.providers.fallback import (
-    MINUTE_WINDOW_RETRY_BASE_SECONDS,
-    MINUTE_WINDOW_RETRY_CAP_SECONDS,
-    model_retry_backoff_seconds,
-)
 from g3ku.providers.responses_provider import _SSEDiagnosticsResponseProxy
 from g3ku.providers.streaming_timeouts import (
     UPSTREAM_PAYLOAD_SILENCE_REFRESH_SECONDS,
@@ -18,41 +13,6 @@ from g3ku.providers.streaming_timeouts import (
     is_payload_chunk_kind,
     notice_payload_silence,
 )
-from g3ku.utils.retry_keywords import classify_throttle_dimension, is_minute_window_throttle
-
-_TPM_TEXT = "_RetryableResponsesError: HTTP 429: inference exceeds tpm/rpm limit"
-_RPM_TEXT = "Error calling Responses API: HTTP 429: rpm exhausted"
-_ENTITLEMENT_TEXT = "HTTP 429: token plan entitlement exhausted"
-_RPS_TEXT = "Error code: 429 - rps limit"
-_NETWORK_TEXT = "HTTP 429: too many requests"
-
-
-def test_minute_window_dimensions_are_the_only_ones_paced_by_a_window() -> None:
-    assert classify_throttle_dimension(_TPM_TEXT) == "rpm"
-    assert is_minute_window_throttle(_TPM_TEXT) is True
-    assert is_minute_window_throttle(_RPM_TEXT) is True
-    # 额度打光与亚秒窗口都不值得等到一分钟：前者等多久都不会自己恢复，
-    # 后者下一拍就通。
-    assert is_minute_window_throttle(_ENTITLEMENT_TEXT) is False
-    assert is_minute_window_throttle(_RPS_TEXT) is False
-    assert is_minute_window_throttle(_NETWORK_TEXT) is False
-    assert is_minute_window_throttle("") is False
-
-
-def test_minute_window_throttle_paces_by_whole_windows() -> None:
-    first = model_retry_backoff_seconds(1, error_text=_TPM_TEXT)
-    assert MINUTE_WINDOW_RETRY_BASE_SECONDS * 0.7 <= first <= MINUTE_WINDOW_RETRY_BASE_SECONDS * 1.3
-    third = model_retry_backoff_seconds(3, error_text=_RPM_TEXT)
-    assert third > MINUTE_WINDOW_RETRY_BASE_SECONDS * 2
-    tenth = model_retry_backoff_seconds(10, error_text=_RPM_TEXT)
-    assert tenth <= MINUTE_WINDOW_RETRY_CAP_SECONDS * 1.3
-
-
-def test_other_failures_keep_the_exponential_pace() -> None:
-    for text in (_ENTITLEMENT_TEXT, _RPS_TEXT, _NETWORK_TEXT, ""):
-        delay = model_retry_backoff_seconds(1, error_text=text)
-        assert delay <= MINUTE_WINDOW_RETRY_BASE_SECONDS, text
-    assert model_retry_backoff_seconds(2) < model_retry_backoff_seconds(5, error_text=_NETWORK_TEXT)
 
 
 def test_payload_kind_vocabulary_matches_both_protocols() -> None:
