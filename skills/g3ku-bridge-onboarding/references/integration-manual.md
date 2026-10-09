@@ -58,16 +58,21 @@
 BASE=http://127.0.0.1:18790/api/v1
 TOKEN=<bridge token>
 
+# 请求体一律落成 UTF-8 文件再用 --data-binary 发，不要内联中文：curl 是原生 exe，
+# 它从 shell 拿到的 argv 已按系统 ANSI 码页重编码（实测「你好」送达服务端是 GBK 的
+# C4 E3 BA C3），服务端按 UTF-8 解 JSON 直接回 400 "There was an error parsing the body"。
+
 # 1) 建会话（幂等：同 external_key 重复调用返回同一个 session_id）
+#    session-body.json = {"external_key":"qq:dm:user-123","title":"张三的私聊"}
 curl -s $BASE/sessions -H "Authorization: Bearer $TOKEN" \
-  -H "Content-Type: application/json" \
-  -d '{"external_key":"qq:dm:user-123","title":"张三的私聊"}'
+  -H "Content-Type: application/json" --data-binary @session-body.json
 # → {"ok":true,"session_id":"ext:napcat:a1b2c3d4e5f6a7b8","external_key":"qq:dm:user-123",...}
 
 # 2) 发消息（Idempotency-Key 同键重复提交返回原 turn，status=duplicate）
+#    msg-body.json = {"text":"你好"}
 curl -s $BASE/sessions/$SESSION_ID/messages -H "Authorization: Bearer $TOKEN" \
   -H "Content-Type: application/json" -H "Idempotency-Key: 20260907-0001" \
-  -d '{"text":"你好"}'
+  --data-binary @msg-body.json
 # → {"ok":true,"session_id":"...","turn_id":"<hex>","status":"started"}
 
 # 3) 订阅事件（SSE；断线重连带 Last-Event-ID 从上次 seq 之后回放）
@@ -132,9 +137,10 @@ curl -N $BASE/sessions/$SESSION_ID/events -H "Authorization: Bearer $TOKEN" \
 只认 OpenAI 协议的客户端（AstrBot/LangBot/各语言 SDK）直接改 base_url：
 
 ```bash
+# body.json（UTF-8）= {"model":"g3ku","messages":[{"role":"user","content":"你好"}],"user":"alice"}
 curl -s http://127.0.0.1:18790/api/v1/chat/completions \
   -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \
-  -d '{"model":"g3ku","messages":[{"role":"user","content":"你好"}],"user":"alice"}'
+  --data-binary @body.json
 ```
 
 ```python

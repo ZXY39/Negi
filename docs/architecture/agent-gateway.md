@@ -26,7 +26,7 @@
 
 - 提交前先取 `after_seq = hub.last_seq`，提交后经 `wait_for_external_reply`（`g3ku/runtime/external_events.py`）等待，规则见「等待契约」。
 - **回合级结果一律 HTTP 200**：正常回复、等待超时（"still working" + turn_id）、回合失败（"[g3ku] turn failed: …"）、被暂停/取消、完成但无可见回复，都以诚实 assistant 文本 + `finish_reason:"stop"` 返回，并附非标准顶层 `g3ku` 对象 `{session_id, turn_id, created_session, status, submit_status}` 供机读（status ∈ completed|running|failed|cancelled|no_reply|queued_receipt）。理由：5xx/504 会触发 OpenAI SDK 自动重试（默认 `max_retries=2`），重试通常不带幂等键 → 重复回合适暴；200 让调用方模型自己决定等待/追问。**不得把超时改回 504。**
-- HTTP 错误只留给请求级失败：400/413/503 用 OpenAI `{"error":{message,type,param,code}}` 形状；401/403（鉴权依赖）与 423（锁中间件）保持平台既有 `{"detail":…}` 形状。
+- HTTP 错误只留给请求级失败：400/413/503 用 OpenAI `{"error":{message,type,param,code}}` 形状；401/403（鉴权依赖）与 423（锁中间件）保持平台既有 `{"detail":…}` 形状。框架层先于路由还有两种，也不是 OpenAI 形状：请求体解不出 UTF-8 → 400 `{"detail":"There was an error parsing the body"}`；UTF-8 合法但 JSON 语法错 → 422 `[{"type":"json_invalid","loc":["body",…]}]`。撞前者最常见的原因是调用方把中文 argv 按本地 ANSI 码页重编码后才发出（示例纪律见 `skills/g3ku-bridge-onboarding/references/integration-manual.md`「curl 样例」）。
 - `wait_seconds` 可选 body 字段（SDK 经 `extra_body` 传），clamp 5..3600，默认 600（与 OpenAI SDK 默认请求超时对齐）。
 - 客户端断连：停止等待，**绝不取消回合**——回复照常落会话历史，可经 `/api/v1` SSE 回放取回。
 
