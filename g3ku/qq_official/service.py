@@ -118,7 +118,7 @@ class QqOfficialService:
         )
 
     async def _run(self, account: QqBotAccountConfig, token: str) -> None:
-        from g3ku.qq_official.bridge import run_qq_official_bridge
+        from g3ku.qq_official.bridge import QqGatewaySessionEndedError, run_qq_official_bridge
 
         backoff = _BRIDGE_RETRY_INITIAL_BACKOFF_SECONDS
         last_failure_signature: str | None = None
@@ -139,7 +139,26 @@ class QqOfficialService:
             except asyncio.CancelledError:
                 raise
             except Exception as exc:  # noqa: BLE001 - the service must survive bridge crashes
-                if time.monotonic() - started >= _BRIDGE_RETRY_HEALTHY_RUN_SECONDS:
+                elapsed_seconds = time.monotonic() - started
+                if (
+                    isinstance(exc, QqGatewaySessionEndedError)
+                    and elapsed_seconds >= _BRIDGE_RETRY_HEALTHY_RUN_SECONDS
+                ):
+                    # 跑满一个健康窗口之后才排空会话列表 = 网关按小时判 wss 会话过期
+                    # （close 4009），重登是计划内动作：一行 WARNING、不带栈、状态回
+                    # connecting。没跑满就排空说明登录/网关自己有问题，仍按下面的崩溃
+                    # 账记，别把真故障降级成噪音。
+                    logger.warning(
+                        "qq-official bridge {} gateway session ended after {:.0f}s; re-login in {:.0f}s",
+                        self._bridge_id, elapsed_seconds, backoff,
+                    )
+                    self._set("connecting", f"QQ 网关会话到期，将在 {backoff:.0f}s 后重新登录")
+                    backoff = _BRIDGE_RETRY_INITIAL_BACKOFF_SECONDS
+                    last_failure_signature = None
+                    repeat_failures = 0
+                    await asyncio.sleep(backoff)
+                    continue
+                if elapsed_seconds >= _BRIDGE_RETRY_HEALTHY_RUN_SECONDS:
                     backoff = _BRIDGE_RETRY_INITIAL_BACKOFF_SECONDS
                     # 够久的一次健康运行就是一段新的事故，折叠状态作废：下一次崩溃重新给全栈。
                     last_failure_signature = None
