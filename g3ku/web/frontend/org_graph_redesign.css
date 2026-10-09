@@ -2136,6 +2136,8 @@
 [data-ui-version="v2"] .memory-card-queue {
     display: flex;
     flex-direction: column;
+    /* 列表是定高滚动容器，卡片被压缩会连正文一起截半行；撑不住就交给列表滚 */
+    flex: 0 0 auto;
     gap: var(--ui-space-3);
     padding: var(--ui-space-4);
     border: 1px solid var(--ui-border);
@@ -2165,12 +2167,15 @@
 [data-ui-version="v2"] .memory-card-queue .memory-card-body {
     display: -webkit-box;
     -webkit-box-orient: vertical;
-    -webkit-line-clamp: 3;
+    -webkit-line-clamp: 2;
+    line-clamp: 2;
     overflow: hidden;
     min-height: 0;
-    /* 正文固定占三行：不足三行也撑满，队列卡片等高、不留整块空白 */
-    height: 66px;
+    /* 正文固定占两行：不足两行也撑满，队列卡片等高、不留整块空白 */
+    height: 44px;
     margin: 0;
+    padding: 0;
+    border-top: 0;
     font-size: 13px;
     line-height: 22px;
     color: var(--ui-text-secondary);

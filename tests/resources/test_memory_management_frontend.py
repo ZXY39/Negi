@@ -289,6 +289,28 @@ def test_memory_card_css_uses_full_width_and_compact_centered_content() -> None:
     assert ".memory-card-arrow::before {" in css
 
 
+def test_memory_queue_card_keeps_natural_height_and_two_line_body() -> None:
+    v2_css = (REPO_ROOT / "g3ku/web/frontend/org_graph_redesign.css").read_text(encoding="utf-8")
+    card = _fragment(
+        v2_css,
+        '[data-ui-version="v2"] .memory-card-queue {',
+        '[data-ui-version="v2"] .memory-card-queue .memory-card-head {',
+    )
+    body = _fragment(
+        v2_css,
+        '[data-ui-version="v2"] .memory-card-queue .memory-card-body {',
+        "/* 44.",
+    )
+    # .memory-list 是定高滚动容器：卡片允许收缩就会连正文一起被截成半行，
+    # 撑不下只能交给列表出滚动条。
+    assert "flex: 0 0 auto;" in card
+    assert "-webkit-line-clamp: 2;" in body
+    assert "height: 44px;" in body
+    # 正文与首行徽标共用卡片内边距这条左边界，v1 的下内边距和分隔线要摘掉。
+    assert "padding: 0;" in body
+    assert "border-top: 0;" in body
+
+
 def test_memory_management_view_uses_read_only_queue_endpoints_with_safe_error_messages() -> None:
     api_client_js = (REPO_ROOT / "g3ku/web/frontend/api_client.js").read_text(encoding="utf-8")
     admin_rest_py = (REPO_ROOT / "main/api/admin_rest.py").read_text(encoding="utf-8")

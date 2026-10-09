@@ -16364,8 +16364,8 @@ async function loadMemoryView({ force = false, quiet = false } = {}) {
     }
 }
 
-// 队列卡片正文固定渲染三行（.memory-card-queue .memory-card-body 的 line-clamp），
-// 截断长度按三行的可见字数取，省略号才对应真正看不到的部分。
+// 队列卡片正文固定显示两行（.memory-card-queue .memory-card-body 的 line-clamp），
+// 这里的长度只是进 DOM 的上限，截断出的省略号落在两行之外。
 const MEMORY_QUEUE_BODY_CHARS = 220;
 
 function memoryQueueSourceLabel(item) {
