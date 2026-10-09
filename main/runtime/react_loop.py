@@ -602,6 +602,13 @@ class ReActToolLoop:
                 tool_choice=current_tool_choice,
                 parallel_tool_calls=(self._parallel_tool_calls_enabled if tool_schemas else None),
             )
+            adopted_compacted_baseline = self._node_send_baseline_after_compaction(
+                request_messages,
+                token_preflight_diagnostics,
+            )
+            if adopted_compacted_baseline is not None:
+                previous_actual_request_messages = adopted_compacted_baseline
+                request_seed_source = 'same_turn_token_compacted'
             if stage_compaction_hop and not str(history_shrink_reason or '').strip():
                 # 请求体因阶段过期点变短必须有合法理由，否则逐轮对账会把它读成非法 shrink。
                 history_shrink_reason = 'stage_compaction'
@@ -6156,6 +6163,22 @@ class ReActToolLoop:
         if isinstance(record.get('observed_input_truth'), dict):
             return dict(record.get('observed_input_truth') or {})
         return {}
+
+    @staticmethod
+    def _node_send_baseline_after_compaction(
+        request_messages: list[dict[str, Any]] | None,
+        diagnostics: dict[str, Any] | None,
+    ) -> list[dict[str, Any]] | None:
+        """本跳压过就把投影交给下一跳当基线；没压过返回 None，append-only 链原样继续。
+
+        不采纳的话，下一跳仍从全量账本重装配：预检按全量估 ⇒ 每跳判超窗 ⇒ 每跳重新摘要，
+        摘要块排在第 3 条又每跳换字节，可缓存前缀被钉在头部两条。采纳后请求体＝投影＋本跳
+        新增帧，预检回到"上次真实发的量＋增量"，压缩退化成越线事件。
+        """
+        if not bool(dict(diagnostics or {}).get('applied')):
+            return None
+        records = [dict(item) for item in list(request_messages or []) if isinstance(item, dict)]
+        return records or None
 
     @staticmethod
     def _node_send_compaction_diagnostics(diagnostics: dict[str, Any] | None) -> dict[str, Any]:
