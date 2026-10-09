@@ -54,6 +54,7 @@ def test_uncompacted_hop_is_distinguishable_from_missing_field() -> None:
         'helper_usage',
         'estimate_source',
         'comparable_to_previous_request',
+        'notice_preservation',
     }
 
 
@@ -66,6 +67,7 @@ def test_send_diagnostics_fields_are_whitelisted_and_typed() -> None:
         'helper_usage': {},
         'estimate_source': '',
         'comparable_to_previous_request': False,
+        'notice_preservation': {},
     }
     junk = TaskLogService._send_diagnostics_fields(
         {

@@ -2174,6 +2174,7 @@ class TaskLogService:
         """
         payload = dict(send_diagnostics or {})
         helper_usage = payload.get('helper_usage')
+        notice_preservation = payload.get('notice_preservation')
         return {
             'compaction_applied': bool(payload.get('compaction_applied')),
             'compaction_mode': str(payload.get('compaction_mode') or '').strip(),
@@ -2181,6 +2182,7 @@ class TaskLogService:
             'helper_usage': dict(helper_usage) if isinstance(helper_usage, dict) else {},
             'estimate_source': str(payload.get('estimate_source') or '').strip(),
             'comparable_to_previous_request': bool(payload.get('comparable_to_previous_request')),
+            'notice_preservation': dict(notice_preservation) if isinstance(notice_preservation, dict) else {},
         }
 
     @classmethod
