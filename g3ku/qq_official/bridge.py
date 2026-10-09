@@ -57,6 +57,18 @@ from g3ku.qq_official.messages import (
 
 StateCallback = Callable[[str, str], None]
 
+
+class QqGatewaySessionEndedError(RuntimeError):
+    """网关会话列表排空后的到期重登，不是故障。
+
+    QQ 网关按约 1 小时用 close 4009（"Session timed out"）判 wss 会话过期，botpy
+    于是把它那一份 ``_session_list`` 跑空；桥只跑一份列表（见 ``run_qq_official_bridge``
+    的 ``ret_coro`` 注释），所以列表一空就得整体重登换新列表。实盘两个号各 36 次、
+    间隔 60 分钟，服务层要把它和真崩溃分开记，否则折叠规则永远不生效、每小时往
+    ``console.log`` 灌一份全栈，面板还每小时闪一次 ``error``。
+    """
+
+
 _BOTPY_TASK_PREFIX = "[botpy]"
 _BOTPY_CORO_QUALNAMES = {
     "ConnectionSession._runner",
@@ -934,7 +946,7 @@ async def run_qq_official_bridge(
             # 由它重新登录换一份新列表。
             gateway = await bridge_client.start(appid=app_id, secret=app_secret, ret_coro=True)
             await gateway
-            raise RuntimeError("QQ 网关会话全部结束，需重新登录")
+            raise QqGatewaySessionEndedError("QQ 网关会话全部结束，需重新登录")
     finally:
         # 对账循环是本模块定义的普通任务，_is_botpy_task 收割器认不出它，
         # 必须显式取消。

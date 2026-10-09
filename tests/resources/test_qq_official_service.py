@@ -438,3 +438,131 @@ async def test_changed_bridge_crash_signature_gets_full_traceback_again(
 
     assert len(records) == 3
     assert all(flag for _, flag in records), "三种签名各不相同 ⇒ 三份全栈，一条都不折叠"
+
+
+@pytest.mark.asyncio
+async def test_gateway_session_end_after_healthy_run_is_accounted_as_relogin(
+    monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """跑满一小时后网关排空会话列表（close 4009）：一行 WARNING、不带栈、状态不报 error。"""
+    from loguru import logger
+
+    session_end_type = getattr(qq_bridge, "QqGatewaySessionEndedError", None)
+    if session_end_type is None:
+        pytest.fail("bridge 侧还没有「到期重登」这一终态类型，每小时的重排仍被当崩溃记账")
+
+    account = QqBotAccountConfig(app_secret="s", sandbox=False)
+    service = QqOfficialService(app_id="1", base_url="http://127.0.0.1:1/api/v1")
+
+    calls = {"n": 0}
+    total = 6
+
+    async def fake_bridge(**kwargs) -> None:
+        calls["n"] += 1
+        if calls["n"] > total:
+            return
+        raise session_end_type("QQ 网关会话全部结束，需重新登录")
+
+    monkeypatch.setattr(qq_bridge, "run_qq_official_bridge", fake_bridge)
+    _shrink_retry_backoff(monkeypatch)
+
+    # 每轮两次 monotonic 读数（started / 结算），第二次恒比第一次大 3600 ⇒ 轮轮都算跑满健康窗口。
+    ticks = {"n": 0}
+
+    def fake_monotonic() -> float:
+        ticks["n"] += 1
+        return 3600.0 * (ticks["n"] // 2)
+
+    monkeypatch.setattr(qq_service, "time", SimpleNamespace(monotonic=fake_monotonic))
+
+    records: list[tuple[str, str, bool]] = []
+    sink_id = logger.add(
+        lambda m: records.append(
+            (m.record["level"].name, m.record["message"], m.record["exception"] is not None)
+        ),
+        level="WARNING",
+    )
+    real_sleep = asyncio.sleep
+    delays: list[float] = []
+
+    async def fake_sleep(delay: float) -> None:
+        delays.append(delay)
+        await real_sleep(0)
+
+    monkeypatch.setattr(asyncio, "sleep", fake_sleep)
+    try:
+        await service._run(account, "tok")
+    finally:
+        logger.remove(sink_id)
+
+    assert calls["n"] == total + 1
+    ended = [(level, text) for level, text, _ in records if "gateway session ended" in text]
+    assert len(ended) == total, "每一次到期重登都要留下一行"
+    assert {level for level, _ in ended} == {"WARNING"}, ended
+    assert not any(flag for _, _, flag in records), "计划内重登不许带 traceback"
+    assert not [text for _, text, _ in records if "crashed; retrying" in text], "不能再走崩溃锚点文案"
+    assert set(delays) == {0.01}, f"退避必须钉在起始值而不是逐轮翻倍：{delays}"
+    assert service.status()["state"] == "connecting", service.status()
+    assert "重新登录" in service.status()["detail"], service.status()
+
+
+@pytest.mark.asyncio
+async def test_gateway_session_end_before_healthy_run_still_counts_as_crash(
+    monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """没跑满健康窗口就排空 = 登录/网关自己坏了：仍按崩溃记（栈、error 态、退避上涨）。"""
+    from loguru import logger
+
+    session_end_type = getattr(qq_bridge, "QqGatewaySessionEndedError", None)
+    if session_end_type is None:
+        pytest.fail("bridge 侧还没有「到期重登」这一终态类型")
+
+    account = QqBotAccountConfig(app_secret="s", sandbox=False)
+    service = QqOfficialService(app_id="1", base_url="http://127.0.0.1:1/api/v1")
+
+    calls = {"n": 0}
+
+    async def fake_bridge(**kwargs) -> None:
+        calls["n"] += 1
+        if calls["n"] > 1:
+            return
+        raise session_end_type("QQ 网关会话全部结束，需重新登录")
+
+    monkeypatch.setattr(qq_bridge, "run_qq_official_bridge", fake_bridge)
+    _shrink_retry_backoff(monkeypatch)
+
+    # 每轮只走 5s 就排空 ⇒ 低于 60s 阈值。
+    ticks = {"n": 0}
+
+    def fake_monotonic() -> float:
+        ticks["n"] += 1
+        return 5.0 * (ticks["n"] // 2)
+
+    monkeypatch.setattr(qq_service, "time", SimpleNamespace(monotonic=fake_monotonic))
+
+    records: list[tuple[str, str, bool]] = []
+    sink_id = logger.add(
+        lambda m: records.append(
+            (m.record["level"].name, m.record["message"], m.record["exception"] is not None)
+        ),
+        level="WARNING",
+    )
+    real_sleep = asyncio.sleep
+    delays: list[float] = []
+
+    async def fake_sleep(delay: float) -> None:
+        delays.append(delay)
+        await real_sleep(0)
+
+    monkeypatch.setattr(asyncio, "sleep", fake_sleep)
+    try:
+        await service._run(account, "tok")
+    finally:
+        logger.remove(sink_id)
+
+    crash_lines = [(level, text, flag) for level, text, flag in records if "crashed; retrying" in text]
+    assert len(crash_lines) == 1, "秒级排空仍要按崩溃留行"
+    assert crash_lines[0][0] == "ERROR" and crash_lines[0][2], "崩溃要带栈，不能被降级成静默重登"
+    assert not [text for _, text, _ in records if "gateway session ended" in text], "短命排空不算到期"
+    assert delays == [0.01], f"崩溃侧退避照常翻倍：{delays}"
+    assert service.status()["state"] == "error", service.status()
