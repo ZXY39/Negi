@@ -311,6 +311,14 @@ def test_memory_queue_card_keeps_natural_height_and_two_line_body() -> None:
     assert "border-top: 0;" in body
 
 
+def test_memory_layout_gives_the_stacked_queue_column_a_real_row() -> None:
+    css = (REPO_ROOT / "g3ku/web/frontend/org_graph.css").read_text(encoding="utf-8")
+    layout = _fragment(css, ".memory-layout {", ".memory-layout > .memory-banner {")
+    # 窄屏折成单列时左列栈自己撑不出行高（子列 min-height: 0 ⇒ auto 行量成 0px），
+    # 整块未出队队列因此不可见；行高必须由容器按 1fr 分。
+    assert "grid-auto-rows: minmax(0, 1fr);" in layout
+
+
 def test_memory_management_view_uses_read_only_queue_endpoints_with_safe_error_messages() -> None:
     api_client_js = (REPO_ROOT / "g3ku/web/frontend/api_client.js").read_text(encoding="utf-8")
     admin_rest_py = (REPO_ROOT / "main/api/admin_rest.py").read_text(encoding="utf-8")

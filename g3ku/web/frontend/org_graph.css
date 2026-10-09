@@ -10029,6 +10029,9 @@ textarea {
 .memory-layout {
     display: grid;
     grid-template-columns: repeat(2, minmax(0, 1fr));
+    /* 窄屏折成单列后，左列栈自己撑不出行高：它的子列允许缩到 0，
+       auto 行因此量成 0px，整块队列面板看不见。行高交给容器分。 */
+    grid-auto-rows: minmax(0, 1fr);
     gap: var(--space-4);
     padding: var(--space-4);
     flex: 1 1 auto;
