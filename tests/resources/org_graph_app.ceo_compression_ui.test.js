@@ -209,3 +209,48 @@ test("context window overflow errors show a toast", () => {
     assert.equal(__toasts[0].title, "上下文超限");
     assert.match(String(__toasts[0].text || ""), /上下文大小超出当前模型openai:gpt-5\.2/);
 });
+
+test("model retry toast 在载荷静默时显示等待上游的秒数与分片数", () => {
+    const { S, U, setCeoSessionSnapshotCache, syncCeoModelRetryToast } = loadApp();
+    S.activeSessionId = "web:test";
+    setCeoSessionSnapshotCache("web:test", {
+        inflight_turn: {
+            status: "running",
+            turn_id: "turn:wait",
+            model_retry_status: {
+                state: "waiting_upstream",
+                retry_count: 1,
+                waiting_seconds: 61,
+                chunk_count: 1284,
+                chunk_kinds: "line:1200,event:response.keepalive:84",
+                model_refs: ["primary"],
+                delay_seconds: 0,
+            },
+        },
+    });
+
+    syncCeoModelRetryToast();
+
+    const text = U.ceoModelRetryToastText.textContent;
+    assert.equal(U.ceoModelRetryToast.hidden, false);
+    assert.match(text, /等待上游响应 61 秒/);
+    assert.match(text, /已收 1284 分片/);
+    assert.equal(/次重试/.test(text), false);
+});
+
+test("model retry toast 不把未知状态当成等待上游", () => {
+    const { S, U, setCeoSessionSnapshotCache, syncCeoModelRetryToast } = loadApp();
+    S.activeSessionId = "web:test";
+    setCeoSessionSnapshotCache("web:test", {
+        inflight_turn: {
+            status: "running",
+            turn_id: "turn:wait",
+            model_retry_status: { state: "waiting-upstream", waiting_seconds: 61 },
+        },
+    });
+
+    syncCeoModelRetryToast();
+
+    assert.equal(U.ceoModelRetryToast.hidden, true);
+    assert.equal(U.ceoModelRetryToastText.textContent, "");
+});

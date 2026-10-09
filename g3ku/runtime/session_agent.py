@@ -19,6 +19,7 @@ from g3ku.core.messages import AssistantMessage, UserInputMessage
 from g3ku.core.results import RunResult
 from g3ku.core.state import AgentState, StructuredError
 from g3ku.prompt_trace import render_output_trace
+from g3ku.providers.fallback import MODEL_RETRY_LIVE_STATES
 from g3ku.runtime.cancellation import ToolCancellationToken
 from g3ku.runtime.frontdoor.canonical_context import (
     TRANSCRIPT_CC_UPSERT_FIELD,
@@ -2670,7 +2671,7 @@ class RuntimeAgentSession:
         model_retry_status = getattr(self, "_frontdoor_model_retry_status", None)
         if (
             isinstance(model_retry_status, dict)
-            and str(model_retry_status.get("state") or "").strip() == "retrying"
+            and str(model_retry_status.get("state") or "").strip() in MODEL_RETRY_LIVE_STATES
         ):
             snapshot["model_retry_status"] = copy.deepcopy(model_retry_status)
         frontdoor_selection_debug = getattr(self, "_frontdoor_selection_debug", None)

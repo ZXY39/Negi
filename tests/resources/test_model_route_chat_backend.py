@@ -191,7 +191,7 @@ async def test_group_budget_ignores_member_catalog_retry_count(monkeypatch) -> N
             "m_b": _target("m_b", _OkProvider("m_b", calls, on_call=_observe_previous_member)),
         },
     )
-    monkeypatch.setattr(chat_backend_module, "model_retry_backoff_seconds", lambda attempt: 0.0)
+    monkeypatch.setattr(chat_backend_module, "model_retry_backoff_seconds", lambda attempt, **_: 0.0)
 
     response = await _backend().chat(
         messages=[{"role": "user", "content": "demo"}],
@@ -224,7 +224,7 @@ async def test_member_rotation_is_paced_by_backoff(monkeypatch) -> None:
     calls: list[str] = []
     delays: list[int] = []
 
-    def _record(attempt_number: int) -> float:
+    def _record(attempt_number: int, **_) -> float:
         delays.append(int(attempt_number))
         return 0.0
 
@@ -256,7 +256,7 @@ async def test_429_outcome_is_attributed_to_the_selected_member(monkeypatch) -> 
     plan = ModelRoutePlan(routes=[_group_route(0, group), _model_route(1, "m_emergency")], config_revision=1)
     turn_controller, controller, balancer, lease = _wiring(group, plan=plan)
     calls: list[str] = []
-    monkeypatch.setattr(chat_backend_module, "model_retry_backoff_seconds", lambda attempt: 0.0)
+    monkeypatch.setattr(chat_backend_module, "model_retry_backoff_seconds", lambda attempt, **_: 0.0)
     _patch(
         monkeypatch,
         {
@@ -465,7 +465,7 @@ async def test_boundary_chain_refresh_keeps_second_group_aligned(monkeypatch) ->
     plan = ModelRoutePlan(routes=[_group_route(0, g1), _group_route(1, g2)], config_revision=1)
     turn_controller, controller, balancer, lease = _wiring(g1, plan=plan, extra_groups=(g2,))
     calls: list[str] = []
-    monkeypatch.setattr(chat_backend_module, "model_retry_backoff_seconds", lambda attempt: 0.0)
+    monkeypatch.setattr(chat_backend_module, "model_retry_backoff_seconds", lambda attempt, **_: 0.0)
     _patch(
         monkeypatch,
         {
@@ -510,7 +510,7 @@ async def test_fallback_trace_names_the_group_not_an_unselected_member(monkeypat
     plan = ModelRoutePlan(routes=[_group_route(0, g1), _group_route(1, g2)], config_revision=1)
     turn_controller, controller, _balancer, lease = _wiring(g1, plan=plan, extra_groups=(g2,))
     calls: list[str] = []
-    monkeypatch.setattr(chat_backend_module, "model_retry_backoff_seconds", lambda attempt: 0.0)
+    monkeypatch.setattr(chat_backend_module, "model_retry_backoff_seconds", lambda attempt, **_: 0.0)
     _patch(
         monkeypatch,
         {
@@ -548,3 +548,88 @@ async def test_fallback_trace_names_the_group_not_an_unselected_member(monkeypat
     assert traces, "expected a FALLBACK trace when leaving the first group"
     assert any("next_model_ref: group:g2" in item for item in traces)
     assert not any("next_model_ref: m_c" in item for item in traces)
+
+
+class _UpstreamWaitProvider:
+    """一条「还在滴分片、没有载荷」的流：provider 在收尾前调用 on_upstream_wait。"""
+
+    supports_streaming = True
+    supports_upstream_wait_notice = True
+    manages_request_timeout_internally = True
+
+    def __init__(self, model_key: str, calls: list[str], info: dict[str, object]) -> None:
+        self.model_key = model_key
+        self.calls = calls
+        self.info = info
+
+    async def chat(self, **kwargs):
+        self.calls.append(self.model_key)
+        callback = kwargs.get("on_upstream_wait")
+        if not callable(callback):
+            return LLMResponse(content="no-callback", finish_reason="stop")
+        await callback(dict(self.info))
+        return LLMResponse(content="ok", finish_reason="stop")
+
+
+class _KwargRecordingProvider:
+    supports_streaming = True
+    manages_request_timeout_internally = True
+
+    def __init__(self, calls: list[str], seen: list[dict[str, object]]) -> None:
+        self.calls = calls
+        self.seen = seen
+
+    async def chat(self, **kwargs):
+        self.calls.append("recorded")
+        self.seen.append(dict(kwargs))
+        return LLMResponse(content="ok", finish_reason="stop")
+
+
+@pytest.mark.asyncio
+async def test_upstream_wait_notice_reaches_retry_status_channel(monkeypatch) -> None:
+    """载荷静默必须从 provider 走到 on_model_retry_status，并在这一跳收尾时被清掉。"""
+    statuses: list[dict[str, object]] = []
+
+    async def _capture(status: dict[str, object]) -> None:
+        statuses.append(dict(status))
+
+    calls: list[str] = []
+    provider = _UpstreamWaitProvider(
+        "m_a",
+        calls,
+        {"waiting_seconds": 61, "chunk_count": 1284, "chunk_kinds": "line:1284", "provider": "responses"},
+    )
+    _patch(monkeypatch, {"m_a": _target("m_a", provider)})
+
+    response = await _backend().chat(
+        messages=[{"role": "user", "content": "demo"}],
+        tools=None,
+        model_refs=["m_a"],
+        on_model_retry_status=_capture,
+    )
+
+    assert response.content == "ok"
+    assert [item["state"] for item in statuses] == ["waiting_upstream", "cleared"]
+    waiting = statuses[0]
+    assert waiting["waiting_seconds"] == 61
+    assert waiting["chunk_count"] == 1284
+    # 等待上游不是重试：不谎报退避秒数，也不带重试时刻。
+    assert waiting["delay_seconds"] == 0.0
+    assert "next_retry_at" not in waiting
+    assert "error_message" not in waiting
+
+
+@pytest.mark.asyncio
+async def test_providers_without_notice_capability_are_not_sent_the_callback(monkeypatch) -> None:
+    calls: list[str] = []
+    seen: list[dict[str, object]] = []
+    _patch(monkeypatch, {"m_a": _target("m_a", _KwargRecordingProvider(calls, seen))})
+
+    await _backend().chat(
+        messages=[{"role": "user", "content": "demo"}],
+        tools=None,
+        model_refs=["m_a"],
+    )
+
+    assert calls == ["recorded"]
+    assert "on_upstream_wait" not in seen[0]

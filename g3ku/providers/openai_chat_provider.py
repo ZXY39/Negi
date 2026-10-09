@@ -114,6 +114,10 @@ class OpenAIChatProvider(LLMProvider):
     def supports_streaming(self) -> bool:
         return True
 
+    @property
+    def supports_upstream_wait_notice(self) -> bool:
+        return True
+
     async def chat(self, messages: list[dict[str, Any]], tools: list[dict[str, Any]] | None = None,
                    model: str | None = None, max_tokens: int | None = None, temperature: float | None = None,
                    reasoning_effort: str | None = None,
@@ -121,7 +125,8 @@ class OpenAIChatProvider(LLMProvider):
                    parallel_tool_calls: bool | None = None,
                    prompt_cache_key: str | None = None,
                    request_timeout_seconds: float | None = None,
-                   on_text_delta: Any = None) -> LLMResponse:
+                   on_text_delta: Any = None,
+                   on_upstream_wait: Any = None) -> LLMResponse:
         del prompt_cache_key
         # Chat Completions rejects the flat /responses-style function selector
         # {"type":"function","name":X}; rewrite it to the nested form this protocol
@@ -169,6 +174,7 @@ class OpenAIChatProvider(LLMProvider):
                     first_chunk_timeout_seconds=stream_timeout_seconds,
                     idle_chunk_timeout_seconds=stream_timeout_seconds,
                     on_text_delta=on_text_delta,
+                    on_upstream_wait=on_upstream_wait,
                 )
                 from loguru import logger
                 logger.debug(diagnostics.render_summary(outcome="completed"))

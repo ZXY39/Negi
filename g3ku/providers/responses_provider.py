@@ -23,6 +23,7 @@ from g3ku.providers.responses_protocol_helpers import (
 from g3ku.providers.streaming_timeouts import (
     StreamingChunkTimeoutError,
     StreamingDiagnostics,
+    notice_payload_silence,
     resolve_streaming_timeout_seconds,
 )
 
@@ -62,10 +63,12 @@ class _SSEDiagnosticsResponseProxy:
         *,
         first_line_timeout_seconds: float,
         idle_line_timeout_seconds: float,
+        on_upstream_wait: Any = None,
     ) -> None:
         self._response = response
         self.status_code = response.status_code
         self._diagnostics = StreamingDiagnostics.start("responses")
+        self._on_upstream_wait = on_upstream_wait
         self._first_event_received_at: float | None = None
         self._first_data_received_at: float | None = None
         self._last_event_name = ""
@@ -119,6 +122,7 @@ class _SSEDiagnosticsResponseProxy:
                 self._diagnostics.note_chunk(f"data:{self._last_event_name or 'unknown'}", is_text=is_text)
             else:
                 self._diagnostics.note_chunk("line")
+            await notice_payload_silence(self._diagnostics, self._on_upstream_wait)
             yield line
 
     def render_summary(self, *, outcome: str) -> str:
@@ -163,6 +167,10 @@ class ResponsesProvider(LLMProvider):
     def supports_streaming(self) -> bool:
         return True
 
+    @property
+    def supports_upstream_wait_notice(self) -> bool:
+        return True
+
     async def chat(
         self,
         messages: list[dict[str, Any]],
@@ -176,6 +184,7 @@ class ResponsesProvider(LLMProvider):
         prompt_cache_key: str | None = None,
         request_timeout_seconds: float | None = None,
         on_text_delta: Any = None,
+        on_upstream_wait: Any = None,
     ) -> LLMResponse:
         model = model or self.default_model
         # The /responses API rejects the Chat-Completions nested selector
@@ -259,6 +268,7 @@ class ResponsesProvider(LLMProvider):
                         response,
                         first_line_timeout_seconds=stream_timeout_seconds,
                         idle_line_timeout_seconds=stream_timeout_seconds,
+                        on_upstream_wait=on_upstream_wait,
                     )
                     consume_kwargs: dict[str, Any] = {}
                     if on_text_delta is not None:

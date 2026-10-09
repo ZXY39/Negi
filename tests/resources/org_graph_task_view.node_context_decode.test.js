@@ -196,3 +196,34 @@ test("task node retry toast hides when live frame status is cleared", () => {
     assert.equal(U.taskNodeModelRetryToast.hidden, true);
     assert.equal(U.taskNodeModelRetryToastText.textContent, "");
 });
+
+test("task node retry toast renders upstream wait seconds and chunk count", () => {
+    const { renderTaskNodeModelRetryToast, U } = loadApp();
+
+    renderTaskNodeModelRetryToast({
+        model_retry_status: {
+            state: "waiting_upstream",
+            retry_count: 2,
+            waiting_seconds: 95,
+            chunk_count: 42,
+            chunk_kinds: "line:42",
+        },
+    });
+
+    const text = U.taskNodeModelRetryToastText.textContent;
+    assert.equal(U.taskNodeModelRetryToast.hidden, false);
+    assert.match(text, /等待上游响应 95 秒/);
+    assert.match(text, /已收 42 分片/);
+    assert.equal(/次重试/.test(text), false);
+});
+
+test("task node retry toast hides upstream wait state once the frame clears", () => {
+    const { renderTaskNodeModelRetryToast, U } = loadApp();
+
+    renderTaskNodeModelRetryToast({ model_retry_status: { state: "waiting_upstream", waiting_seconds: 61 } });
+    assert.equal(U.taskNodeModelRetryToast.hidden, false);
+
+    renderTaskNodeModelRetryToast({ model_retry_status: null });
+    assert.equal(U.taskNodeModelRetryToast.hidden, true);
+    assert.equal(U.taskNodeModelRetryToastText.textContent, "");
+});

@@ -26,6 +26,7 @@ from g3ku.json_schema_utils import (
 )
 from g3ku.providers.base import normalize_usage_payload
 from g3ku.providers.fallback import (
+    MODEL_RETRY_LIVE_STATES,
     PUBLIC_PROVIDER_FAILURE_MESSAGE,
     ModelProviderExhaustedError,
     ModelProviderResponseError,
@@ -7791,7 +7792,7 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
                     (
                         copy.deepcopy(dict(status))
                         if isinstance(status, dict)
-                        and str(status.get("state") or "").strip() == "retrying"
+                        and str(status.get("state") or "").strip() in MODEL_RETRY_LIVE_STATES
                         else None
                     ),
                 )

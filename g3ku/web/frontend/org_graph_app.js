@@ -3309,10 +3309,12 @@ function normalizeCeoSnapshotCompression(compression = null) {
     return next;
 }
 
+const CEO_MODEL_RETRY_LIVE_STATES = new Set(["retrying", "waiting_upstream"]);
+
 function normalizeCeoModelRetryStatus(value = null) {
     if (!value || typeof value !== "object") return null;
     const state = String(value?.state || "").trim().toLowerCase();
-    if (state !== "retrying") return null;
+    if (!CEO_MODEL_RETRY_LIVE_STATES.has(state)) return null;
     const rawCount = Number.parseInt(String(value?.retry_count ?? ""), 10);
     const retryCount = Number.isFinite(rawCount) && rawCount >= 0 ? rawCount : 0;
     const rawRound = Number.parseInt(String(value?.chain_round ?? ""), 10);
@@ -3320,7 +3322,7 @@ function normalizeCeoModelRetryStatus(value = null) {
     const rawDelay = Number(value?.delay_seconds);
     const delaySeconds = Number.isFinite(rawDelay) && rawDelay >= 0 ? rawDelay : 0;
     const next = {
-        state: "retrying",
+        state,
         retry_count: retryCount,
         delay_seconds: delaySeconds,
     };
@@ -3335,6 +3337,14 @@ function normalizeCeoModelRetryStatus(value = null) {
     if (lastRetryAt) next.last_retry_at = lastRetryAt;
     const nextRetryAt = String(value?.next_retry_at || "").trim();
     if (nextRetryAt) next.next_retry_at = nextRetryAt;
+    if (state === "waiting_upstream") {
+        const rawWaiting = Number.parseInt(String(value?.waiting_seconds ?? ""), 10);
+        if (Number.isFinite(rawWaiting) && rawWaiting > 0) next.waiting_seconds = rawWaiting;
+        const rawChunks = Number.parseInt(String(value?.chunk_count ?? ""), 10);
+        if (Number.isFinite(rawChunks) && rawChunks > 0) next.chunk_count = rawChunks;
+        const chunkKinds = String(value?.chunk_kinds || "").trim();
+        if (chunkKinds) next.chunk_kinds = chunkKinds;
+    }
     return next;
 }
 
@@ -3901,6 +3911,13 @@ function activeCeoSessionModelRetryStatus() {
 function modelRetryToastText(status = null, label = "") {
     const normalized = normalizeCeoModelRetryStatus(status);
     if (!normalized) return "";
+    if (normalized.state === "waiting_upstream") {
+        // 上游还在滴分片、只是没有任何可显示的产出：报秒数与分片数，不谎称在重试。
+        const parts = [`等待上游响应 ${Math.max(0, Number(normalized.waiting_seconds || 0))} 秒`];
+        const chunks = Math.max(0, Number(normalized.chunk_count || 0));
+        if (chunks) parts.push(`已收 ${chunks} 分片`);
+        return parts.join(" · ");
+    }
     label = String(label || "").trim();
     const count = Math.max(0, Number(normalized.retry_count || 0));
     const countText = count > 0 ? `第 ${count} 次重试` : "自动重试";

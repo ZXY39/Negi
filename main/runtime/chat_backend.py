@@ -23,6 +23,9 @@ from g3ku.providers.base import LLMModelAttempt, LLMResponse, normalize_usage_pa
 from g3ku.providers.fallback import (
     DEFAULT_PROVIDER_ATTEMPT_TIMEOUT_SECONDS,
     DEFAULT_RETRYABLE_MODEL_ROUNDS,
+    MODEL_RETRY_LIVE_STATES,
+    MODEL_RETRY_STATE_RETRYING,
+    MODEL_RETRY_STATE_WAITING_UPSTREAM,
     current_runtime_config_revision,
     exception_chain_display_text,
     exhausted_model_chain_error,
@@ -960,12 +963,14 @@ class ConfigChatBackend:
         slot: dict[str, Any],
         tried_model_refs: set[str],
         rotation_number: int,
+        last_error_text: str = "",
     ) -> bool:
         """组内换下一个未试成员，并沿用同模型轮之间的退避节拍。
 
         跨模型前进本身零等待，而组预算是每成员一份、跑满就让位，一次 pass 打满整组会变成对着
         分钟级 RPM 窗口的背靠背请求；这里把节拍从模型维度搬到组维度。`rotation_number`
-        是本请求在本组内第几次换人，第 1 次用最小退避档。
+        是本请求在本组内第几次换人，第 1 次用最小退避档。档位的分档口径与同模型轮完全一致
+        （分钟窗口型限流按窗口等，其余按封顶指数），所以 `last_error_text` 要跟着传进来。
         """
         if controller is None or lease is None:
             return False
@@ -973,7 +978,10 @@ class ConfigChatBackend:
         members = [str(item or "").strip() for item in list(slot.get("members") or []) if str(item or "").strip()]
         if not [item for item in members if item not in excluded]:
             return False
-        delay_seconds = model_retry_backoff_seconds(max(1, int(rotation_number)))
+        delay_seconds = model_retry_backoff_seconds(
+            max(1, int(rotation_number)),
+            error_text=last_error_text,
+        )
         logger.warning(
             "Model load-balance member {} exhausted in group {}; rotating to another member in {:.1f}s",
             str(refs[model_index] if model_index < len(refs) else ""),
@@ -1131,7 +1139,7 @@ class ConfigChatBackend:
             nonlocal retry_status_emitted
             if not callable(on_model_retry_status):
                 return
-            if str(status.get("state") or "").strip() == "retrying":
+            if str(status.get("state") or "").strip() in MODEL_RETRY_LIVE_STATES:
                 retry_status_emitted = True
             try:
                 result = on_model_retry_status(dict(status))
@@ -1139,6 +1147,26 @@ class ConfigChatBackend:
                     await result
             except Exception:
                 logger.debug("Model retry status callback failed")
+
+        def _waiting_upstream_status(info: dict[str, Any]) -> dict[str, Any]:
+            # 上游一直在滴分片、却没有任何载荷可给界面：这不是重试（没失败过），所以不带
+            # error_message 与重试时刻，只给"等了多久 + 收了多少分片"两个可数的读数。
+            return {
+                "state": MODEL_RETRY_STATE_WAITING_UPSTREAM,
+                "retry_count": provider_request_count,
+                "chain_round": rounds_used,
+                "waiting_seconds": int(info.get("waiting_seconds") or 0),
+                "chunk_count": int(info.get("chunk_count") or 0),
+                "chunk_kinds": str(info.get("chunk_kinds") or ""),
+                "model_refs": _route_candidate_status_refs(route_slots, refs),
+                "route_entries": list(route_entries_payload),
+                "attempted_model_keys": sorted(tried_model_refs),
+                "selected_group_key": str((route_slot or {}).get("group_key") or ''),
+                "delay_seconds": 0.0,
+            }
+
+        async def _notice_upstream_wait(info: dict[str, Any]) -> None:
+            await _emit_model_retry_status(_waiting_upstream_status(info))
 
         try:
             # 发送前先做一次活解析（与旧首轮行为一致）：拿到调用前刚发生的链变更。
@@ -1301,6 +1329,8 @@ class ConfigChatBackend:
                             }
                             if on_text_delta is not None and bool(getattr(target.provider, 'supports_streaming', False)):
                                 provider_kwargs['on_text_delta'] = _provider_text_delta_callback
+                            if bool(getattr(target.provider, 'supports_upstream_wait_notice', False)):
+                                provider_kwargs['on_upstream_wait'] = _notice_upstream_wait
                             outer_attempt_timeout_seconds = None if bool(getattr(target.provider, 'manages_request_timeout_internally', False)) else attempt_timeout_seconds
                             # 咽喉点统计真实请求次数：除第一发外的每次请求都是一次重试。
                             # 同模型重发（轮换/可重试轮转）在此发 retrying status；跨模型
@@ -1313,7 +1343,7 @@ class ConfigChatBackend:
                                 elif current_model_ref == last_request_model_ref:
                                     await _emit_model_retry_status(
                                         {
-                                            "state": "retrying",
+                                            "state": MODEL_RETRY_STATE_RETRYING,
                                             "retry_count": provider_request_count,
                                             "chain_round": rounds_used + 1,
                                             "error_message": _model_retry_status_error_text(
@@ -1465,7 +1495,10 @@ class ConfigChatBackend:
                                 restart_with_refreshed_chain = True
                                 break
                             start_revision = current_runtime_config_revision()
-                        delay_seconds = model_retry_backoff_seconds(rounds_used)
+                        delay_seconds = model_retry_backoff_seconds(
+                            rounds_used,
+                            error_text=str(model_last_failure_reason or ""),
+                        )
                         logger.warning(
                             "Retryable model failure for {} (round {}/{}); retrying in {:.1f}s: {}",
                             ref,
@@ -1479,7 +1512,7 @@ class ConfigChatBackend:
                         suppress_next_request_retry_emission = True
                         await _emit_model_retry_status(
                             {
-                                "state": "retrying",
+                                "state": MODEL_RETRY_STATE_RETRYING,
                                 "retry_count": provider_request_count,
                                 "chain_round": rounds_used,
                                 "error_message": _model_retry_status_error_text(str(model_last_failure_reason or "")),
@@ -1503,10 +1536,10 @@ class ConfigChatBackend:
                     # 新链链首重新评估。不记成"跨模型 fallback"。
                     model_index = 0
                     continue
-                # 负载均衡组：先在同组内换一个未试成员，成员之间沿用同一套封顶指数退避。
-                # 现网请求量集中在失败尾（跨模型回合扛三成 provider 请求），今天的节拍
-                # 全部来自退避；组预算收缩后若不补节拍，一次 pass 会背靠背打满整组，而
-                # 对手是按分钟计的 RPM 窗口。
+                # 负载均衡组：先在同组内换一个未试成员，成员之间沿用同模型轮的同一套退避档位
+                # （含分钟窗口档）。现网请求量集中在失败尾（跨模型回合扛三成 provider 请求），
+                # 今天的节拍全部来自退避；组预算收缩后若不补节拍，一次 pass 会背靠背打满整组，
+                # 而对手是按分钟计的 RPM 窗口。
                 if route_slot is not None and route_slot["kind"] == "load_balance":
                     moved = await self._advance_group_member(
                         controller=node_turn_controller,
@@ -1516,6 +1549,7 @@ class ConfigChatBackend:
                         slot=route_slot,
                         tried_model_refs=tried_model_refs,
                         rotation_number=group_member_rotations + 1,
+                        last_error_text=str(model_last_failure_reason or ""),
                     )
                     if moved:
                         group_member_rotations += 1

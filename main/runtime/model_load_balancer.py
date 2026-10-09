@@ -25,6 +25,7 @@ from dataclasses import dataclass, field
 from typing import Any, Callable, Protocol
 
 from g3ku.providers.fallback import is_retryable_model_error
+from g3ku.utils.retry_keywords import classify_throttle_dimension
 from main.runtime.model_route import (
     LEASE_OUTCOME_SUCCESS,
     ModelRouteLease,
@@ -53,12 +54,6 @@ UNRESOLVED_BUCKET_PREFIX = "unresolved:"
 # config_revision，所以除重绑时的整表清空外，再给一条一分钟的重解析上限。
 QUOTA_BUCKET_CACHE_TTL_SECONDS = 60.0
 
-THROTTLE_DIMENSION_RPM = "rpm"
-THROTTLE_DIMENSION_TPM = "tpm"
-THROTTLE_DIMENSION_RPS = "rps"
-THROTTLE_DIMENSION_TOKEN = "token"
-THROTTLE_DIMENSION_UNKNOWN = "unknown"
-
 
 class PermitSource(Protocol):
     """`ModelKeyConcurrencyController` 在本模块用到的那几个方法上的投影。"""
@@ -73,25 +68,6 @@ class PermitSource(Protocol):
 
 
 QuotaBucketResolver = Callable[[str], list[str]]
-
-
-def classify_throttle_dimension(error_text: str) -> str:
-    """尽力把 429 归到限流维度，归不出来记 unknown。
-
-    只用于观测与加权，不参与「能不能 fallback」的判定——网关会把 429 标成
-    `invalid_request_error`，文本不是可靠的分类依据（见 providers/fallback.py 里
-    `is_request_shape_error` 的同款注释）。
-    """
-    lowered = str(error_text or "").lower()
-    if "rpm" in lowered:
-        return THROTTLE_DIMENSION_RPM
-    if "tpm" in lowered:
-        return THROTTLE_DIMENSION_TPM
-    if "rps" in lowered:
-        return THROTTLE_DIMENSION_RPS
-    if "token" in lowered:
-        return THROTTLE_DIMENSION_TOKEN
-    return THROTTLE_DIMENSION_UNKNOWN
 
 
 def is_rate_limited(status_code: int | None, error_text: str = "") -> bool:

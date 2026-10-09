@@ -21,6 +21,7 @@ from g3ku.content import (
     parse_content_envelope,
 )
 from g3ku.content.navigation import INLINE_CHAR_LIMIT
+from g3ku.providers.fallback import MODEL_RETRY_LIVE_STATES, MODEL_RETRY_STATE_WAITING_UPSTREAM
 from g3ku.runtime.kept_contract_snapshot import (
     complete_keep_snapshot,
     keep_closure_fields,
@@ -6154,7 +6155,8 @@ class TaskLogService:
     def _sanitize_model_retry_status(payload: Any) -> dict[str, Any] | None:
         if not isinstance(payload, dict):
             return None
-        if str(payload.get('state') or '').strip() != 'retrying':
+        state = str(payload.get('state') or '').strip()
+        if state not in MODEL_RETRY_LIVE_STATES:
             return None
         retry_count_raw = payload.get('retry_count')
         try:
@@ -6162,7 +6164,7 @@ class TaskLogService:
         except (TypeError, ValueError):
             retry_count = 0
         normalized = {
-            'state': 'retrying',
+            'state': state,
             'retry_count': retry_count,
         }
         chain_round_raw = payload.get('chain_round')
@@ -6197,6 +6199,19 @@ class TaskLogService:
             time_text = _single_line_text(payload.get(time_key), max_chars=40)
             if time_text:
                 normalized[time_key] = time_text
+        # waiting_upstream 这一档带的是「等了多久 + 收了多少分片」：这两个整数就是
+        # 空转流的全部读数和取证锚点，别的字段没有。
+        if state == MODEL_RETRY_STATE_WAITING_UPSTREAM:
+            for count_key in ('waiting_seconds', 'chunk_count'):
+                try:
+                    count_value = max(0, int(payload.get(count_key) or 0))
+                except (TypeError, ValueError):
+                    count_value = 0
+                if count_value:
+                    normalized[count_key] = count_value
+            chunk_kinds = _single_line_text(payload.get('chunk_kinds'), max_chars=160)
+            if chunk_kinds:
+                normalized['chunk_kinds'] = chunk_kinds
         return normalized
 
     @staticmethod

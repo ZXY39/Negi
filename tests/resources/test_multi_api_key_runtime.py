@@ -388,7 +388,7 @@ async def test_config_chat_backend_retries_retryable_error_without_consuming_fal
             api_key_count=1,
         )
 
-    monkeypatch.setattr(chat_backend_module, "model_retry_backoff_seconds", lambda attempt: 0.0)
+    monkeypatch.setattr(chat_backend_module, "model_retry_backoff_seconds", lambda attempt, **_: 0.0)
     monkeypatch.setattr(chat_backend_module, "build_provider_from_model_key", _builder)
 
     backend = chat_backend_module.ConfigChatBackend(config=SimpleNamespace())
@@ -425,7 +425,7 @@ async def test_config_chat_backend_publishes_model_retry_status_and_clears_it(mo
             api_key_count=1,
         )
 
-    monkeypatch.setattr(chat_backend_module, "model_retry_backoff_seconds", lambda attempt: 0.0)
+    monkeypatch.setattr(chat_backend_module, "model_retry_backoff_seconds", lambda attempt, **_: 0.0)
     monkeypatch.setattr(chat_backend_module, "build_provider_from_model_key", _builder)
 
     async def record_status(status: dict[str, object]) -> None:
@@ -471,7 +471,7 @@ async def test_fallback_provider_retries_retryable_error_without_consuming_fallb
             api_key_count=1,
         )
 
-    monkeypatch.setattr(fallback_module, "model_retry_backoff_seconds", lambda attempt: 0.0)
+    monkeypatch.setattr(fallback_module, "model_retry_backoff_seconds", lambda attempt, **_: 0.0)
     monkeypatch.setattr("g3ku.providers.provider_factory.build_provider_from_model_key", _builder)
 
     provider = fallback_module.FallbackProvider(
@@ -505,7 +505,7 @@ async def test_fallback_provider_chain_retry_stops_at_round_budget(monkeypatch) 
         )
 
     monkeypatch.setattr("g3ku.providers.provider_factory.build_provider_from_model_key", _builder)
-    monkeypatch.setattr(fallback_module, "model_retry_backoff_seconds", lambda attempt: 0.0)
+    monkeypatch.setattr(fallback_module, "model_retry_backoff_seconds", lambda attempt, **_: 0.0)
 
     provider = fallback_module.FallbackProvider(
         config=SimpleNamespace(),
@@ -542,7 +542,7 @@ async def test_config_chat_backend_honors_per_model_retry_round_budgets(monkeypa
             api_key_count=1,
         )
 
-    monkeypatch.setattr(chat_backend_module, "model_retry_backoff_seconds", lambda attempt: 0.0)
+    monkeypatch.setattr(chat_backend_module, "model_retry_backoff_seconds", lambda attempt, **_: 0.0)
     monkeypatch.setattr(chat_backend_module, "build_provider_from_model_key", _builder)
 
     backend = chat_backend_module.ConfigChatBackend(config=SimpleNamespace())
@@ -597,7 +597,7 @@ async def test_config_chat_backend_restarts_with_refreshed_chain_when_runtime_co
         revision_reads.append(1)
         return 5 if len(revision_reads) <= 2 else 6
 
-    monkeypatch.setattr(chat_backend_module, "model_retry_backoff_seconds", lambda attempt: 0.0)
+    monkeypatch.setattr(chat_backend_module, "model_retry_backoff_seconds", lambda attempt, **_: 0.0)
     monkeypatch.setattr(chat_backend_module, "current_runtime_config_revision", _revision)
     monkeypatch.setattr(chat_backend_module, "build_provider_from_model_key", _builder)
 
@@ -642,7 +642,7 @@ async def test_fallback_provider_restarts_with_refreshed_chain_when_runtime_conf
         revision_reads.append(1)
         return 5 if len(revision_reads) <= 2 else 6
 
-    monkeypatch.setattr(fallback_module, "model_retry_backoff_seconds", lambda attempt: 0.0)
+    monkeypatch.setattr(fallback_module, "model_retry_backoff_seconds", lambda attempt, **_: 0.0)
     monkeypatch.setattr(fallback_module, "current_runtime_config_revision", _revision)
     monkeypatch.setattr("g3ku.providers.provider_factory.build_provider_from_model_key", _builder)
 
@@ -678,7 +678,7 @@ async def test_config_chat_backend_retry_backoff_is_cancellable(monkeypatch) -> 
         )
 
     # Long backoff: the cancel must land while the retry loop sleeps.
-    monkeypatch.setattr(chat_backend_module, "model_retry_backoff_seconds", lambda attempt: 30.0)
+    monkeypatch.setattr(chat_backend_module, "model_retry_backoff_seconds", lambda attempt, **_: 30.0)
     monkeypatch.setattr(chat_backend_module, "build_provider_from_model_key", _builder)
 
     backend = chat_backend_module.ConfigChatBackend(config=SimpleNamespace())
@@ -730,7 +730,7 @@ async def test_config_chat_backend_refreshes_model_chain_between_retry_rounds(mo
         # 新加入的 fallback 模型变得可见。
         return ["primary"] if len(resolver_calls) <= 1 else ["primary", "secondary"]
 
-    monkeypatch.setattr(chat_backend_module, "model_retry_backoff_seconds", lambda attempt: 0.0)
+    monkeypatch.setattr(chat_backend_module, "model_retry_backoff_seconds", lambda attempt, **_: 0.0)
     monkeypatch.setattr(chat_backend_module, "build_provider_from_model_key", _builder)
 
     backend = chat_backend_module.ConfigChatBackend(config=SimpleNamespace())
@@ -867,7 +867,7 @@ async def test_config_chat_backend_retries_retryable_timeout_without_fallback(mo
             api_key_count=1,
         )
 
-    monkeypatch.setattr(chat_backend_module, "model_retry_backoff_seconds", lambda attempt: 0.0)
+    monkeypatch.setattr(chat_backend_module, "model_retry_backoff_seconds", lambda attempt, **_: 0.0)
     monkeypatch.setattr(chat_backend_module, "build_provider_from_model_key", _builder)
 
     backend = chat_backend_module.ConfigChatBackend(config=SimpleNamespace())
@@ -925,7 +925,7 @@ async def test_config_chat_backend_retries_gateway_429_with_invalid_request_erro
             api_key_count=1,
         )
 
-    monkeypatch.setattr(chat_backend_module, "model_retry_backoff_seconds", lambda attempt: 0.0)
+    monkeypatch.setattr(chat_backend_module, "model_retry_backoff_seconds", lambda attempt, **_: 0.0)
     monkeypatch.setattr(chat_backend_module, "build_provider_from_model_key", _builder)
 
     backend = chat_backend_module.ConfigChatBackend(config=SimpleNamespace())
@@ -984,7 +984,7 @@ async def test_config_chat_backend_retries_retryable_error_response_at_chain_hea
             api_key_count=1,
         )
 
-    monkeypatch.setattr(chat_backend_module, "model_retry_backoff_seconds", lambda attempt: 0.0)
+    monkeypatch.setattr(chat_backend_module, "model_retry_backoff_seconds", lambda attempt, **_: 0.0)
     monkeypatch.setattr(chat_backend_module, "build_provider_from_model_key", _builder)
 
     backend = chat_backend_module.ConfigChatBackend(config=SimpleNamespace())
@@ -1039,7 +1039,7 @@ async def test_fallback_provider_retries_retryable_error_response_at_chain_head(
             api_key_count=1,
         )
 
-    monkeypatch.setattr(fallback_module, "model_retry_backoff_seconds", lambda attempt: 0.0)
+    monkeypatch.setattr(fallback_module, "model_retry_backoff_seconds", lambda attempt, **_: 0.0)
     monkeypatch.setattr("g3ku.providers.provider_factory.build_provider_from_model_key", _builder)
 
     provider = fallback_module.FallbackProvider(
@@ -1095,7 +1095,7 @@ async def test_fallback_provider_exhausts_full_key_round_budget_then_raises(monk
         )
 
     monkeypatch.setattr("g3ku.providers.provider_factory.build_provider_from_model_key", _builder)
-    monkeypatch.setattr(fallback_module, "model_retry_backoff_seconds", lambda attempt: 0.0)
+    monkeypatch.setattr(fallback_module, "model_retry_backoff_seconds", lambda attempt, **_: 0.0)
 
     provider = fallback_module.FallbackProvider(
         config=SimpleNamespace(),
@@ -1134,7 +1134,7 @@ async def test_config_chat_backend_default_retry_budget_when_retry_count_zero(mo
             api_key_count=1,
         )
 
-    monkeypatch.setattr(chat_backend_module, "model_retry_backoff_seconds", lambda attempt: 0.0)
+    monkeypatch.setattr(chat_backend_module, "model_retry_backoff_seconds", lambda attempt, **_: 0.0)
     monkeypatch.setattr(chat_backend_module, "build_provider_from_model_key", _builder)
 
     backend = chat_backend_module.ConfigChatBackend(config=SimpleNamespace())

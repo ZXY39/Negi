@@ -3955,14 +3955,16 @@ function renderTaskNodeDetailStatus(node) {
     U.adStatus.dataset.paused = effectivePaused ? "true" : "false";
 }
 
+const TASK_NODE_MODEL_RETRY_LIVE_STATES = new Set(["retrying", "waiting_upstream"]);
+
 function normalizeTaskNodeModelRetryStatus(value = null) {
     if (!value || typeof value !== "object") return null;
     const state = String(value?.state || "").trim().toLowerCase();
-    if (state !== "retrying") return null;
+    if (!TASK_NODE_MODEL_RETRY_LIVE_STATES.has(state)) return null;
     const rawCount = Number.parseInt(String(value?.retry_count ?? ""), 10);
     const retryCount = Number.isFinite(rawCount) && rawCount >= 0 ? rawCount : 0;
     const next = {
-        state: "retrying",
+        state,
         retry_count: retryCount,
         error_message: String(value?.error_message || "").trim(),
     };
@@ -3976,12 +3978,25 @@ function normalizeTaskNodeModelRetryStatus(value = null) {
     if (lastRetryAt) next.last_retry_at = lastRetryAt;
     const nextRetryAt = String(value?.next_retry_at || "").trim();
     if (nextRetryAt) next.next_retry_at = nextRetryAt;
+    if (state === "waiting_upstream") {
+        const rawWaiting = Number.parseInt(String(value?.waiting_seconds ?? ""), 10);
+        if (Number.isFinite(rawWaiting) && rawWaiting > 0) next.waiting_seconds = rawWaiting;
+        const rawChunks = Number.parseInt(String(value?.chunk_count ?? ""), 10);
+        if (Number.isFinite(rawChunks) && rawChunks > 0) next.chunk_count = rawChunks;
+    }
     return next;
 }
 
 function taskNodeModelRetryToastText(status = null) {
     const normalized = normalizeTaskNodeModelRetryStatus(status);
     if (!normalized) return "";
+    if (normalized.state === "waiting_upstream") {
+        // 与 CEO 会话同一读数口径：秒数 + 分片数，不写成重试。
+        const parts = [`等待上游响应 ${Math.max(0, Number(normalized.waiting_seconds || 0))} 秒`];
+        const chunks = Math.max(0, Number(normalized.chunk_count || 0));
+        if (chunks) parts.push(`已收 ${chunks} 分片`);
+        return parts.join(" · ");
+    }
     const count = Math.max(0, Number(normalized.retry_count || 0));
     const countText = count > 0 ? `第 ${count} 次重试` : "自动重试";
     const parts = [countText];

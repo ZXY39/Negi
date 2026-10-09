@@ -135,3 +135,80 @@ async def test_react_loop_forwards_and_updates_task_frame_retry_status() -> None
     assert captured[0]["on_model_retry_status"] is callback
     assert log_service.frames[key]["model_retry_status"] is None
     assert len(log_service.publish_counts) == 2
+
+
+def _waiting_upstream_payload(*, waiting_seconds: int = 61, chunk_count: int = 1284) -> dict[str, object]:
+    return {
+        "state": "waiting_upstream",
+        "retry_count": 1,
+        "chain_round": 0,
+        "waiting_seconds": waiting_seconds,
+        "chunk_count": chunk_count,
+        "chunk_kinds": "line:1200,event:response.keepalive:84",
+        "model_refs": ["primary"],
+        "route_entries": [{"type": "model", "model_key": "primary"}],
+        "attempted_model_keys": ["primary"],
+        "selected_group_key": "",
+        "delay_seconds": 0.0,
+    }
+
+
+@pytest.mark.asyncio
+async def test_runtime_session_exposes_live_upstream_wait_status() -> None:
+    session = RuntimeAgentSession(
+        None,
+        session_key="test:upstream-wait",
+        channel="test",
+        chat_id="upstream-wait",
+    )
+    session._state.is_running = True
+    session._state.status = "running"
+    session._last_prompt = UserInputMessage(content="wait demo")
+    session._frontdoor_model_retry_status = _waiting_upstream_payload()
+
+    snapshot = session._build_execution_context_snapshot()
+
+    assert snapshot is not None
+    status = snapshot["model_retry_status"]
+    assert status["state"] == "waiting_upstream"
+    # 这条道只插入不改写：等待秒数与分片数必须原样穿过快照，否则界面上只剩一个转圈。
+    assert status["waiting_seconds"] == 61
+    assert status["chunk_count"] == 1284
+    session._frontdoor_model_retry_status = {"state": "cleared"}
+    assert "model_retry_status" not in (session._build_execution_context_snapshot() or {})
+
+
+def test_task_runtime_frame_sanitizes_upstream_wait_status_for_websocket() -> None:
+    public_frame = TaskLogService._public_runtime_frame(
+        {"node_id": "node:1", "model_retry_status": _waiting_upstream_payload()}
+    )
+
+    status = public_frame["model_retry_status"]
+    assert status["state"] == "waiting_upstream"
+    # 净化器是逐字段重建的白名单：新字段不在名单里就等于没发生。
+    assert status["waiting_seconds"] == 61
+    assert status["chunk_count"] == 1284
+    assert status["chunk_kinds"] == "line:1200,event:response.keepalive:84"
+    assert "error_message" not in status
+
+
+def test_retry_status_sanitizer_still_rejects_unknown_states() -> None:
+    for payload in ({"state": "waiting-upstream"}, {"state": "stalled"}, {"state": "cleared"}, {}):
+        assert TaskLogService._sanitize_model_retry_status(payload) is None, payload
+
+
+@pytest.mark.asyncio
+async def test_react_loop_stores_upstream_wait_on_task_frame() -> None:
+    log_service = _FrameLogService()
+    loop = ReActToolLoop(chat_backend=None, log_service=log_service, max_iterations=2)
+    callback = loop._model_retry_status_callback(task_id="task:1", node_id="node:1")
+
+    await callback(_waiting_upstream_payload(waiting_seconds=95, chunk_count=42))
+
+    status = log_service.frames[("task:1", "node:1")]["model_retry_status"]
+    assert status["state"] == "waiting_upstream"
+    assert status["waiting_seconds"] == 95
+    assert status["chunk_count"] == 42
+
+    await callback({"state": "cleared"})
+    assert log_service.frames[("task:1", "node:1")]["model_retry_status"] is None

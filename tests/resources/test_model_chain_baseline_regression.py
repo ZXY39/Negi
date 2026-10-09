@@ -280,7 +280,7 @@ async def test_backoff_paces_same_model_rounds_only(monkeypatch) -> None:
     进零等待。"""
     delays: list[int] = []
 
-    def _record_backoff(attempt_number: int) -> float:
+    def _record_backoff(attempt_number: int, **_) -> float:
         delays.append(int(attempt_number))
         return 0.0
 
@@ -310,7 +310,7 @@ async def test_backoff_paces_same_model_rounds_only(monkeypatch) -> None:
 async def test_retry_count_zero_uses_default_round_budget_not_one(monkeypatch) -> None:
     """现状陷阱：`retry_count=0`（含未配置）落 `DEFAULT_RETRYABLE_MODEL_ROUNDS`，不
     是 1 轮。group 预算要拿到「1 个完整 key pass」必须写显式值，不能复用该默认。"""
-    monkeypatch.setattr(chat_backend_module, "model_retry_backoff_seconds", lambda attempt: 0.0)
+    monkeypatch.setattr(chat_backend_module, "model_retry_backoff_seconds", lambda attempt, **_: 0.0)
 
     calls: list[str] = []
     providers = {

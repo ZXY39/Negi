@@ -95,6 +95,7 @@ from main.runtime.subtree_hold import (
 )
 from g3ku.providers.fallback import (
     DEFAULT_PROVIDER_ATTEMPT_TIMEOUT_SECONDS,
+    MODEL_RETRY_LIVE_STATES,
     PUBLIC_PROVIDER_FAILURE_MESSAGE,
     ModelProviderExhaustedError,
 )
@@ -8264,7 +8265,7 @@ class ReActToolLoop:
             payload = dict(status or {})
             next_status = (
                 payload
-                if str(payload.get('state') or '').strip() == 'retrying'
+                if str(payload.get('state') or '').strip() in MODEL_RETRY_LIVE_STATES
                 else None
             )
             self._log_service.update_frame(

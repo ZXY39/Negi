@@ -8,6 +8,7 @@ from dataclasses import dataclass, field
 from typing import Any, AsyncIterator, TypeVar
 
 import json_repair
+from loguru import logger
 
 from g3ku.providers.base import ToolCallRequest, normalize_usage_payload
 from g3ku.providers.fallback import DEFAULT_PROVIDER_ATTEMPT_TIMEOUT_SECONDS
@@ -18,6 +19,29 @@ T = TypeVar("T")
 # （DEFAULT_PROVIDER_ATTEMPT_TIMEOUT_SECONDS，600s）。正常生产路径里该值由
 # chat backend 按模型配置的 request_timeout_seconds 解析后显式传入，这里的
 # 兜底只覆盖“直接构造 provider 且未传超时”的窄场景（测试/工具脚本）。
+
+# 载荷分片：携带模型真实产出的那三类增量（正文 / 思考 / 工具调用参数）。两条协议
+# 车道都按 kind 归类，判据只有一条：kind 名里带这些词。其余分片（`response.created`、
+# `chunk`、`non_choice_chunk`、keep-alive 空行）证明上游在说话，但没有任何东西可给
+# 界面，所以「一直有分片、始终无载荷」正是界面看起来死掉的那一族故障。
+PAYLOAD_CHUNK_KIND_TOKENS = (
+    "text_delta",
+    "reasoning",
+    "tool_call",
+    "output_text",
+    "function_call_arguments",
+    "refusal",
+)
+# 静默多久上报一次：本机实测首个**文本**增量 p90=44s、p95=67s（web 3581 样本），
+# 但那条判据轴是"任何载荷"，思考分片通常早于正文到达，所以 60s 全缺已经落在异常区。
+UPSTREAM_PAYLOAD_SILENCE_SECONDS = 60.0
+# 之后按这个间隔刷新同一状态，让界面上的秒数继续走。
+UPSTREAM_PAYLOAD_SILENCE_REFRESH_SECONDS = 30.0
+
+
+def is_payload_chunk_kind(kind: str) -> bool:
+    normalized = str(kind or "").lower()
+    return any(token in normalized for token in PAYLOAD_CHUNK_KIND_TOKENS)
 
 
 class StreamingChunkTimeoutError(TimeoutError):
@@ -40,6 +64,12 @@ class StreamingDiagnostics:
     # kind 即计数 0，所以"chunk_count 很大而 text/reasoning/tool_call 全缺"这类
     # 空转流只能靠这里区分，别把它当成新的判据字段来读。
     chunk_kind_counts: dict[str, int] = field(default_factory=dict)
+    # 最后一个载荷分片（正文 / 思考 / 工具参数）的到达时刻。None 表示这一跳至今没有
+    # 任何可给界面的产出，静默时长从 started_at 起算。
+    last_payload_received_at: float | None = None
+    # 本次静默是否已经上报过、以及上一次上报时刻（刷新节拍用）。
+    silence_reported_at: float | None = None
+    silence_last_report_at: float | None = None
     # 是否收到过携带 finish_reason 的 choice 分片。上游在思考/生成中途关闭 SSE 时
     # 该标记保持 False，而 finish_reason 仍会落到默认值，日志里看起来像正常完成。
     finish_reason_seen: bool = False
@@ -56,8 +86,21 @@ class StreamingDiagnostics:
         self.chunk_kind_counts[normalized_kind] = self.chunk_kind_counts.get(normalized_kind, 0) + 1
         if self.first_chunk_received_at is None:
             self.first_chunk_received_at = now
+        if is_payload_chunk_kind(normalized_kind):
+            self.last_payload_received_at = now
+            self.silence_reported_at = None
+            self.silence_last_report_at = None
         if is_text and self.first_text_delta_received_at is None:
             self.first_text_delta_received_at = now
+
+    def payload_silence_seconds(self, now: float | None = None) -> float:
+        """距离最后一个载荷分片过了多久；这一跳从没出过载荷时从请求起点算。"""
+        baseline = (
+            self.last_payload_received_at
+            if self.last_payload_received_at is not None
+            else self.started_at
+        )
+        return max(0.0, (now if now is not None else time.perf_counter()) - baseline)
 
     def render_chunk_kind_histogram(self) -> str:
         return ",".join(f"{kind}:{count}" for kind, count in sorted(self.chunk_kind_counts.items()))
@@ -97,6 +140,46 @@ class StreamingDiagnostics:
         for key, value in dict(extra_fields or {}).items():
             parts.append(f"{key}={value}")
         return f"{self.provider_label} stream diagnostics: " + " ".join(parts)
+
+
+async def notice_payload_silence(diagnostics: StreamingDiagnostics, on_upstream_wait: Any) -> None:
+    """流还在滴、但已经没有任何载荷可给界面时，把「在等上游」上报一次并定期刷新。
+
+    这一族故障过去只能事后从 `chunk_count` 反推：分片间隔远小于 idle-chunk 阈值，按间隙
+    算的超时永不触发，界面只剩一个不动的回合。首次越阈打一行 WARNING 作为取证锚点，之后
+    每 `UPSTREAM_PAYLOAD_SILENCE_REFRESH_SECONDS` 刷新一次同一状态，让秒数继续走。
+    任何载荷分片到达都会清零这两个标记，所以正常的长思考不会被报成等待。
+    """
+    if not callable(on_upstream_wait):
+        return
+    now = time.perf_counter()
+    if diagnostics.silence_reported_at is not None:
+        last_report_at = diagnostics.silence_last_report_at or diagnostics.silence_reported_at
+        if now - last_report_at < UPSTREAM_PAYLOAD_SILENCE_REFRESH_SECONDS:
+            return
+    silence_seconds = diagnostics.payload_silence_seconds(now)
+    if silence_seconds < UPSTREAM_PAYLOAD_SILENCE_SECONDS:
+        return
+    if diagnostics.silence_reported_at is None:
+        logger.warning(
+            "Model stream carries no payload chunk for {:.1f}s ({} chunks, kinds={})",
+            silence_seconds,
+            diagnostics.chunk_count,
+            diagnostics.render_chunk_kind_histogram() or "<none>",
+        )
+    diagnostics.silence_reported_at = now
+    diagnostics.silence_last_report_at = now
+    result = on_upstream_wait(
+        {
+            "waiting_seconds": int(silence_seconds),
+            "chunk_count": int(diagnostics.chunk_count),
+            "chunk_kinds": diagnostics.render_chunk_kind_histogram(),
+            "last_chunk_kind": diagnostics.last_chunk_kind,
+            "provider": diagnostics.provider_label,
+        }
+    )
+    if inspect.isawaitable(result):
+        await result
 
 
 def resolve_streaming_timeout_seconds(request_timeout_seconds: float | None) -> float:
@@ -206,6 +289,7 @@ async def consume_openai_like_chat_stream(
     first_chunk_timeout_seconds: float,
     idle_chunk_timeout_seconds: float,
     on_text_delta: Any = None,
+    on_upstream_wait: Any = None,
 ) -> tuple[str | None, list[ToolCallRequest], str, dict[str, int], str | None]:
     content_parts: list[str] = []
     tool_call_buffers: dict[int, dict[str, str]] = {}
@@ -224,6 +308,7 @@ async def consume_openai_like_chat_stream(
             usage = chunk_usage
         if not choices:
             diagnostics.note_chunk("non_choice_chunk")
+            await notice_payload_silence(diagnostics, on_upstream_wait)
             continue
         choice = choices[0]
         delta = _maybe_get(choice, "delta", None)
@@ -244,6 +329,7 @@ async def consume_openai_like_chat_stream(
             diagnostics.note_chunk("tool_call_delta")
         else:
             diagnostics.note_chunk("chunk")
+        await notice_payload_silence(diagnostics, on_upstream_wait)
 
         for tool_delta in tool_call_deltas:
             index = int(_maybe_get(tool_delta, "index", 0) or 0)
