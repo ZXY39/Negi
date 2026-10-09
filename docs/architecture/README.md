@@ -137,6 +137,7 @@ Start here when you are new to the repository or when a change crosses subsystem
 - 同一个阶段在会话里刷好几遍、收尾总结只长在最后那遍 → 同一文档的副本归并条目（只归并已收尾的副本，未收尾的半截各画一张是设计）
 - 回合进行中最新气泡夹着历史阶段一起出现（新阶段带着旧阶段）、旧阶段排在新阶段下面，或刷新网页才恢复正常 → 同上条目：live 帧 delta 只按投影互比，源正文的回填发生在 delta 定型之后；轨道顺序按 `stage_index` 升序合并，不按到达顺序
 - 被模型点名移出上下文的阶段，卡片徽章仍写「完成」而不是「已移出上下文」（或反过来）→ 裁撤标记有没有穿过出帧面与前端阶段白名单，见 `web-and-admin.md`「CEO Turn Timeline Rendering Contract」
+- 一批里 `submit_next_stage` 被拒之后，同批其它工具全收到 `failed earlier in this turn` / `failed earlier in this batch` → `tool-hydration-and-callable-chain.md`「阶段门控与 callable 收紧」（只有阶段账本被动过才牵连同批）
 - 工具执行时先在阶段外面冒出来、过一会才进阶段卡（气泡跳一下），或某条工具的"加载中"迟迟不消失 → 同一文档的在飞工具行条目（落位、按 `tool_call_id` 退场、`submit_next_stage` 不建行）
 - 项目一启动会话就自动回一条几小时前的旧任务结果、或某个任务结果迟迟没汇报却也没报错 → `heartbeat-system.md`「Task Terminal Repair Contract」（终态 outbox 投递耐久性与 `abandoned` 留痕）+ `operations-and-maintenance.md`「会话无回复」
 - 会话该静默却发话、或该发话却整轮无声；模型写了像哨兵的文本却没静默 → `runtime-overview.md`「3.3 静默回复（`silent` 工具）」+ `web-and-admin.md`「CEO Turn Silent Reply Contract」
