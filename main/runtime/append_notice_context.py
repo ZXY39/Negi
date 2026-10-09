@@ -305,6 +305,82 @@ def roll_append_notice_context_for_compression_stage(
     return normalized
 
 
+APPEND_NOTICE_MUST_PRESERVE_HEADING = '【必须逐条保留的追加要求】'
+
+
+def select_uncovered_append_notices(context: Any) -> list[dict[str, Any]]:
+    """还没被摘要段代持、也没被作废的通知原文。
+
+    单一判据、两个载体：通知尾块与压缩指令的「必须保留段」都从这里取，避免一边认
+    `compression_stage_id`、另一边另算一套过滤条件。
+    """
+    normalized = normalize_append_notice_context(context)
+    return [
+        {
+            'notification_id': str(item.get('notification_id') or '').strip(),
+            'epoch_id': str(item.get('epoch_id') or '').strip(),
+            'source_node_id': str(item.get('source_node_id') or '').strip(),
+            'message': str(item.get('message') or '').strip(),
+            'consumed_at': str(item.get('consumed_at') or '').strip(),
+        }
+        for item in list(normalized.get('notice_records') or [])
+        if not str(item.get('compression_stage_id') or '').strip()
+        and not str(item.get('superseded_at') or '').strip()
+        and str(item.get('message') or '').strip()
+    ]
+
+
+def _notice_anchor(message: Any) -> str:
+    return ''.join(str(message or '').split())[:24]
+
+
+def render_append_notice_must_preserve_block(records: list[dict[str, Any]]) -> str:
+    """把未代持要求钉进压缩指令尾部。
+
+    压缩指令的任务目标取的是节点建任务时的 goal，摘要器按"是否有助于该目标"筛选，
+    中途改方式的要求会被判成过程信息、甚至反写成"一直是这么做的"既成事实。
+    """
+    lines = []
+    for item in list(records or []):
+        if not isinstance(item, dict):
+            continue
+        message = str(item.get('message') or '').strip()
+        if not message:
+            continue
+        consumed_at = str(item.get('consumed_at') or '').strip()
+        prefix = f'[{consumed_at}] ' if consumed_at else ''
+        lines.append(f'- {prefix}{message}')
+    if not lines:
+        return ''
+    return f'{APPEND_NOTICE_MUST_PRESERVE_HEADING}\n' + '\n'.join(lines)
+
+
+def score_append_notice_preservation(summary_text: str, records: list[dict[str, Any]]) -> dict[str, Any]:
+    """要点命中读数：每条取正文归一化后前 24 字作锚。
+
+    启发式，只用于长期档位判断——锚不在摘要里可以断定"没带上"，命中不等于语义完整。
+    """
+    normalized_summary = ''.join(str(summary_text or '').split())
+    hits = 0
+    miss_ids: list[str] = []
+    for item in list(records or []):
+        if not isinstance(item, dict):
+            continue
+        anchor = _notice_anchor(item.get('message'))
+        if not anchor:
+            continue
+        if anchor in normalized_summary:
+            hits += 1
+        else:
+            miss_ids.append(str(item.get('notification_id') or '').strip())
+    return {
+        'open_count': len(list(records or [])),
+        'hit_count': hits,
+        'miss_count': len(list(records or [])) - hits,
+        'miss_notification_ids': [item for item in miss_ids if item],
+    }
+
+
 def build_append_notice_tail_messages(
     context: Any,
     *,
@@ -327,18 +403,9 @@ def build_append_notice_tail_messages(
             }
         )
     raw_notices = [
-        {
-            'notification_id': str(item.get('notification_id') or '').strip(),
-            'epoch_id': str(item.get('epoch_id') or '').strip(),
-            'source_node_id': str(item.get('source_node_id') or '').strip(),
-            'message': str(item.get('message') or '').strip(),
-            'consumed_at': str(item.get('consumed_at') or '').strip(),
-        }
-        for item in list(normalized.get('notice_records') or [])
-        if not str(item.get('compression_stage_id') or '').strip()
-        and not str(item.get('superseded_at') or '').strip()
-        and str(item.get('message') or '').strip()
-        and str(item.get('message') or '').strip() not in visible_texts
+        dict(item)
+        for item in select_uncovered_append_notices(context)
+        if str(item.get('message') or '').strip() not in visible_texts
     ]
     if raw_notices:
         payload = {
@@ -370,4 +437,8 @@ __all__ = [
     'record_consumed_notifications',
     'roll_append_notice_context_for_compression_stage',
     'supersede_append_notice_records',
+    'APPEND_NOTICE_MUST_PRESERVE_HEADING',
+    'render_append_notice_must_preserve_block',
+    'score_append_notice_preservation',
+    'select_uncovered_append_notices',
 ]
