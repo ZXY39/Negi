@@ -105,6 +105,51 @@ def test_relay_maps_session_events():
     assert final["turn_id"] == "t9"
 
 
+def test_relay_maps_message_end_usage_from_payload():
+    """reply.final 的 usage 来自发出侧随事件带出的那一份，不再按 turn id 猜查哪个会话的字典。"""
+    reset_session_event_hubs()
+    session_key = "ext:test-bridge:usage"
+    relay = make_session_event_relay(session_key, turn_id="t9")
+
+    import asyncio
+
+    usage = {"input_tokens": 1921, "output_tokens": 18, "cache_hit_tokens": 16384, "call_count": 1}
+    asyncio.run(
+        relay(
+            AgentEvent(
+                type="message_end",
+                payload={
+                    "turn_id": "9870a15bac5540fe",
+                    "text": "答复正文",
+                    "source": "user",
+                    "usage": dict(usage),
+                },
+            )
+        )
+    )
+
+    events = get_session_event_hub(session_key).replay(0)
+    final = events[-1]
+    assert final["type"] == "reply.final"
+    assert final["usage"] == usage
+
+
+def test_relay_omits_usage_when_event_carries_none():
+    reset_session_event_hubs()
+    session_key = "ext:test-bridge:usage-none"
+    relay = make_session_event_relay(session_key, turn_id="t9")
+
+    import asyncio
+
+    asyncio.run(
+        relay(AgentEvent(type="message_end", payload={"turn_id": "aaaa1111bbbb2222", "text": "答复", "source": "user"}))
+    )
+
+    final = get_session_event_hub(session_key).replay(0)[-1]
+    assert final["type"] == "reply.final"
+    assert "usage" not in final
+
+
 def test_relay_skips_internal_ack_message_end():
     session_key = "ext:test-bridge:ack"
     relay = make_session_event_relay(session_key, turn_id="t1")

@@ -1294,6 +1294,26 @@ class RuntimeAgentSession:
             return turn_id
         return str(self._active_turn_id or "").strip()
 
+    def _turn_usage_payload(self, turn_id: str) -> dict[str, int] | None:
+        """本轮已累计的 frontdoor 用量，规范化成可直接挂到 transcript 与事件上的字典。
+
+        没有累计（新会话的第一回合在 prompt 之前会话对象还不存在时也会走到）返回 None，
+        调用方据此不写 usage 键——把空数字对外播报比不播更坏。
+        """
+        if not turn_id:
+            return None
+        entry = (getattr(self, "_frontdoor_turn_usage", None) or {}).get(turn_id)
+        if not isinstance(entry, dict):
+            return None
+        if not any(int(entry.get(field) or 0) for field in ("input_tokens", "output_tokens", "cache_hit_tokens")):
+            return None
+        return {
+            "input_tokens": int(entry.get("input_tokens") or 0),
+            "output_tokens": int(entry.get("output_tokens") or 0),
+            "cache_hit_tokens": int(entry.get("cache_hit_tokens") or 0),
+            "call_count": int(entry.get("call_count") or 0),
+        }
+
     @classmethod
     def _find_transcript_user_index(cls, persisted_session: Any, *, turn_id: str) -> int | None:
         normalized_turn_id = str(turn_id or "").strip()
@@ -2939,17 +2959,9 @@ class RuntimeAgentSession:
                 assistant_payload["turn_id"] = turn_id
                 # 轮次 token 用量随 transcript 持久化：frontdoor 请求工件会被修剪，
                 # transcript 级 usage 才是历史气泡悬停展示的稳定数据源。
-                turn_usage = (getattr(self, "_frontdoor_turn_usage", None) or {}).get(turn_id)
-                if isinstance(turn_usage, dict) and any(
-                    int(turn_usage.get(field) or 0)
-                    for field in ("input_tokens", "output_tokens", "cache_hit_tokens")
-                ):
-                    assistant_payload["usage"] = {
-                        "input_tokens": int(turn_usage.get("input_tokens") or 0),
-                        "output_tokens": int(turn_usage.get("output_tokens") or 0),
-                        "cache_hit_tokens": int(turn_usage.get("cache_hit_tokens") or 0),
-                        "call_count": int(turn_usage.get("call_count") or 0),
-                    }
+                turn_usage = self._turn_usage_payload(turn_id)
+                if turn_usage:
+                    assistant_payload["usage"] = turn_usage
             if metadata_payload:
                 assistant_payload["metadata"] = metadata_payload
             archived_index = (
@@ -3598,6 +3610,7 @@ class RuntimeAgentSession:
                         route_kind=str(getattr(self, "_last_route_kind", "") or ""),
                         assistant_metadata=assistant_metadata,
                     )
+                final_turn_id = self._current_turn_id(user_input)
                 await self._emit(
                     "message_end",
                     role="assistant",
@@ -3607,7 +3620,8 @@ class RuntimeAgentSession:
                     heartbeat_internal=heartbeat_internal,
                     heartbeat_reason=str((user_input.metadata or {}).get("heartbeat_reason") or "").strip(),
                     source=internal_source or "user",
-                    turn_id=self._current_turn_id(user_input),
+                    turn_id=final_turn_id,
+                    usage=self._turn_usage_payload(final_turn_id),
                 )
                 if internal_source is None:
                     self.clear_paused_execution_context()
@@ -3806,6 +3820,7 @@ class RuntimeAgentSession:
                     if bool(getattr(self, "_frontdoor_token_compression_applied_turn", False)):
                         await self._flush_memory_review_after_compression()
                         tail_profiler.mark("memory_review_flush")
+            final_turn_id = self._current_turn_id(user_input)
             await self._emit(
                 "message_end",
                 role="assistant",
@@ -3815,7 +3830,8 @@ class RuntimeAgentSession:
                 heartbeat_internal=heartbeat_internal,
                 heartbeat_reason=str((user_input.metadata or {}).get("heartbeat_reason") or "").strip(),
                 source=internal_source or "user",
-                turn_id=self._current_turn_id(user_input),
+                turn_id=final_turn_id,
+                usage=self._turn_usage_payload(final_turn_id),
             )
             tail_profiler.mark("emit_message_end")
             if internal_source is None:
@@ -4146,7 +4162,7 @@ class RuntimeAgentSession:
             except Exception:
                 route_key = ""
             relay = make_session_event_relay(
-                session_key, turn_id=turn_id, session=self, external_key=route_key
+                session_key, turn_id=turn_id, external_key=route_key
             )
             unsubscribe = self.subscribe(relay)
             hub = get_session_event_hub(session_key)
@@ -4340,6 +4356,7 @@ class RuntimeAgentSession:
             self._assistant_stream_pending_text = ""
             silent_reply = self._resolve_silent_reply()
             self._state.latest_message = "" if silent_reply else str(output or "")
+            final_turn_id = self._current_turn_id()
             await self._emit(
                 "message_end",
                 role="assistant",
@@ -4347,7 +4364,8 @@ class RuntimeAgentSession:
                 silent_reply=silent_reply,
                 silent_reason=str(getattr(self, "_last_silent_reason", "") or ""),
                 source="user",
-                turn_id=self._current_turn_id(),
+                turn_id=final_turn_id,
+                usage=self._turn_usage_payload(final_turn_id),
             )
             await self._emit_state_snapshot()
             return RunResult(output="" if silent_reply else str(output or ""), is_silent_reply=silent_reply, events=list(self._event_log))

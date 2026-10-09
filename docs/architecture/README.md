@@ -86,6 +86,7 @@ Start here when you are new to the repository or when a change crosses subsystem
 - 第三方桥接应用接入（/api/v1 鉴权、外部会话、事件流、主动推送不到达）→ `external-agent-api.md`「常见排障入口」
 - 会话转录/Web UI 有回复但渠道端（QQ 等）收不到、渠道「能收不能发」、重启后旧提醒补投或重复 → `external-agent-api.md`「出站路由（主动推送）」+「持久 outbox」+「内置官方 QQ 适配器」
 - 渠道端只收到文件签名链接、模型回复里引用的图片/文件没有作为媒体消息送达 → `external-agent-api.md`「事件流」出站附件契约 +「内置官方 QQ 适配器」
+- 桥接端 `reply.final` 的 `usage` 缺失或数值不像本轮 → `external-agent-api.md`「事件流」（usage 随 `message_end` 由发出侧带出，relay 只透传）+ `web-and-admin.md`「Per-Turn Token Usage Contract」
 - 官方 QQ 机器人面板报错、不连接或收不到消息 → `external-agent-api.md`「内置官方 QQ 适配器」+「常见排障入口」
 - 加第二个 QQ 号之后原来那条渠道会话不再回话（网页有回复、QQ 端什么都没有）→ `external-agent-api.md`「常见排障入口」（存量会话不迁移；指向旧会话键的 cron/心跳目标要改指新键）
 - 端口仍 LISTENING 但网页与所有 `/api/*` 一起超时、进程单核跑满，且「重启并更新」点了没反应 → `external-agent-api.md`「运行入口是硬约束」+「常见排障入口」

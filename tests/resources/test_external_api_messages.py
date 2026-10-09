@@ -59,10 +59,11 @@ class _FakeSession:
 
 
 class _FakeBridge:
-    def __init__(self, session=None, *, fail_with=None, inject_follow_up=False):
+    def __init__(self, session=None, *, fail_with=None, inject_follow_up=False, emit_usage=None):
         self._session = session
         self.fail_with = fail_with
         self.inject_follow_up = inject_follow_up
+        self.emit_usage = emit_usage
         self._injected = False
         self.prompts: list = []
         self.batches: list = []
@@ -84,6 +85,18 @@ class _FakeBridge:
             self._injected = True
             await self._session.queue_follow_up_batch([UserInputMessage(content="mid-turn follow-up")])
             await asyncio.sleep(0.05)
+        if self.emit_usage is not None:
+            # 真实会话收尾时向 listeners 派发 message_end，并带上本轮自己的 usage。
+            from g3ku.core.events import AgentEvent
+
+            payload = {
+                "turn_id": "9870a15bac5540fe",
+                "text": "答复正文",
+                "source": "user",
+                "usage": dict(self.emit_usage),
+            }
+            for listener in list(kwargs.get("listeners") or []):
+                await listener(AgentEvent(type="message_end", payload=dict(payload)))
         return SimpleNamespace(output="ok")
 
     async def prompt_batch(self, messages, **kwargs):
@@ -123,8 +136,10 @@ def harness(monkeypatch, workspace, registry):
     monkeypatch.setattr(external_v1, "workspace_path", lambda: workspace)
     monkeypatch.setattr(external_v1, "clear_web_ceo_session_artifacts", lambda **kwargs: None)
 
-    def build(session=None, *, fail_with=None, inject_follow_up=False):
-        bridge = _FakeBridge(session, fail_with=fail_with, inject_follow_up=inject_follow_up)
+    def build(session=None, *, fail_with=None, inject_follow_up=False, emit_usage=None):
+        bridge = _FakeBridge(
+            session, fail_with=fail_with, inject_follow_up=inject_follow_up, emit_usage=emit_usage
+        )
         service = external_turns.ExternalTurnService(runtime_bridge=bridge, register_task=None)
         external_turns.set_external_turn_service(service)
         monkeypatch.setattr(external_v1, "get_external_turn_service", lambda: service)
@@ -178,6 +193,26 @@ async def test_idle_message_produces_exactly_one_terminal(harness, registry):
     assert events[-1]["turn_id"] == turn_id
     assert len(bridge.prompts) == 1
     assert bridge.prompts[0] == "你好"
+
+
+@pytest.mark.asyncio
+async def test_first_turn_of_new_session_carries_usage(harness, registry):
+    """新会话的第一回合：提交时 manager 里还没有会话对象，对外终稿也得带上本轮 usage。"""
+    usage = {"input_tokens": 8022, "output_tokens": 28, "cache_hit_tokens": 10240, "call_count": 1}
+    app, _bridge = harness(session=None, emit_usage=usage)
+    async with _client(app) as client:
+        created = (await client.post("/api/v1/sessions", json={"external_key": "qq:dm:first-turn"})).json()
+        session_id = created["session_id"]
+
+        response = await client.post(f"/api/v1/sessions/{session_id}/messages", json={"text": "你好"})
+        assert response.status_code == 200
+        assert response.json()["status"] == "started"
+
+        events = await _wait_terminal(session_id)
+
+    finals = [e for e in events if e["type"] == "reply.final"]
+    assert len(finals) == 1
+    assert finals[0]["usage"] == usage
 
 
 @pytest.mark.asyncio

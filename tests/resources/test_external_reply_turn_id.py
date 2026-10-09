@@ -32,21 +32,31 @@ def _event(event_type: str, payload: dict) -> SimpleNamespace:
 
 def test_reply_final_publishes_record_turn_id_and_keeps_usage() -> None:
     reset_session_event_hubs()
-    session = SimpleNamespace(_frontdoor_turn_usage={_TRANSCRIPT_TURN_ID: {"input_tokens": 3, "output_tokens": 5}})
-    relay = make_session_event_relay("ext:t1", turn_id=_RECORD_TURN_ID, session=session)
+    relay = make_session_event_relay("ext:t1", turn_id=_RECORD_TURN_ID)
 
-    asyncio.run(relay(_event("message_end", {"text": "hello", "turn_id": _TRANSCRIPT_TURN_ID})))
+    asyncio.run(
+        relay(
+            _event(
+                "message_end",
+                {
+                    "text": "hello",
+                    "turn_id": _TRANSCRIPT_TURN_ID,
+                    "usage": {"input_tokens": 3, "output_tokens": 5},
+                },
+            )
+        )
+    )
 
     hub = get_session_event_hub("ext:t1")
     finals = [event for event in hub.replay(0) if event.get("type") == "reply.final"]
     assert len(finals) == 1
     assert finals[0]["turn_id"] == _RECORD_TURN_ID, "终稿必须携带 record turn_id"
-    assert finals[0]["usage"] == {"input_tokens": 3, "output_tokens": 5}, "usage 按 transcript id 建键仍可解析"
+    assert finals[0]["usage"] == {"input_tokens": 3, "output_tokens": 5}, "usage 随 message_end 带出"
 
 
 def test_reply_delta_publishes_record_turn_id() -> None:
     reset_session_event_hubs()
-    relay = make_session_event_relay("ext:t2", turn_id=_RECORD_TURN_ID, session=None)
+    relay = make_session_event_relay("ext:t2", turn_id=_RECORD_TURN_ID)
 
     asyncio.run(relay(_event("assistant_stream_delta", {"text": "片段", "turn_id": _TRANSCRIPT_TURN_ID})))
 
@@ -64,7 +74,7 @@ async def test_waiter_receives_final_relayed_under_transcript_id() -> None:
 
     async def _produce() -> None:
         await asyncio.sleep(0.05)
-        relay = make_session_event_relay("ext:t3", turn_id=record_turn_id, session=None)
+        relay = make_session_event_relay("ext:t3", turn_id=record_turn_id)
         await relay(_event("message_end", {"text": "最终回复", "turn_id": "t16-internal"}))
 
     producer = asyncio.create_task(_produce())
@@ -88,7 +98,7 @@ async def test_stream_delta_then_final_matched_by_record_turn_id() -> None:
 
     async def _produce() -> None:
         await asyncio.sleep(0.05)
-        relay = make_session_event_relay("ext:t4", turn_id=record_turn_id, session=None)
+        relay = make_session_event_relay("ext:t4", turn_id=record_turn_id)
         await relay(_event("assistant_stream_delta", {"text": "流式片段", "turn_id": "t16-internal"}))
         await relay(_event("message_end", {"text": "完整回复", "turn_id": "t16-internal"}))
 

@@ -50,7 +50,7 @@
 | `turn.started` / `turn.completed` / `turn.failed` | 回合执行器 | 终态恰好一个；`turn.completed.cancelled=true` 表示被暂停/取消 |
 | `reply.delta` | `assistant_stream_delta` | text 为最新思考段权威全文（桥做全量替换而非追加） |
 | `progress` | `message_delta`（progress/analysis）、工具开始/出错 | `kind: milestone/tool/tool_error`；**g3ku 发全量，节流是桥的职责** |
-| `reply.final` | `message_end` | 权威全文：经出站清洗 + 附件提取（见下）+ 剩余本地引用改写为签名媒体 URL（`ceo_media` HMAC token）；可携带 `attachments`；发布前进持久账本登记并携带 `outbox_id`（合同见「持久 outbox」）；内部心跳 ack（heartbeat_internal）不转发 |
+| `reply.final` | `message_end` | 权威全文：经出站清洗 + 附件提取（见下）+ 剩余本地引用改写为签名媒体 URL（`ceo_media` HMAC token）；可携带 `attachments`；发布前进持久账本登记并携带 `outbox_id`（合同见「持久 outbox」）；内部心跳 ack（heartbeat_internal）不转发。`usage` 是**发出 `message_end` 的那条会话自己盖章带出的**一份（形状见 `web-and-admin.md`「Per-Turn Token Usage Contract」），relay 只透传事件负载里的这份、绝不按 turn id 反查会话累加器，因此会话名下的第一回合与后续回合同形；本轮没有可报数字时该键不出现 |
 | `outbound.created` | 出站总线（见「出站路由（主动推送）」） | 主动推送，可携带 `attachments` |
 
 出站附件契约（`reply.final` 与 `outbound.created` 通用）：正文中以 markdown 链接/图片语法引用、且解析为**存在的本地文件**的条目，在事件发布前被提取为 `attachments` 数组项 `{name, mime_type, size, url}`——`url` 是根相对的签名媒体链接（`/api/ceo/media/original?token=...`，24h 时效，桥按自己的服务端 origin 拼绝对地址下载），原 markdown 标记在正文中替换为其标签文本（无标签用文件名）。单条事件最多提取 4 个附件（超出与重复路径保留原样，走签名改写成为可点击兜底链接）。**仅** markdown 引用触发，裸路径不提取——桥收到 `attachments` 时应作为真实文件/图片消息投递，投递失败的条目降级为签名链接文本行（详见「内置官方 QQ 适配器」与桥自身文档）。普通回合的 `reply.final` 在 relay 侧提取；`outbound.created` 在出站 drain 统一提取（见「出站路由（主动推送）」）。

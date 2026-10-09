@@ -3,7 +3,7 @@
 harness 沿用 test_external_api_messages 的 _FakeBridge/service 形态，并按
 设计注记 F9 扩展：fake bridge 必须向 ``listeners`` 派发 AgentEvent
 （assistant_stream_delta / message_end），否则 relay 不产 hub 事件、等待
-必超时；_FakeSession 带 ``_frontdoor_turn_usage`` 供 usage 映射断言。
+必超时；``message_end`` 自带 ``usage``，与真实会话收尾时发出的那份同形。
 SSE/流式响应用 ASGITransport 整体缓冲断言（流会自行终结）。
 """
 
@@ -32,12 +32,7 @@ from g3ku.runtime.external_sessions import (
     reset_external_session_registry,
 )
 
-
-class _AnyUsageDict(dict):
-    """``_frontdoor_turn_usage`` stand-in returning fixed usage for any turn id."""
-
-    def get(self, key, default=None):  # noqa: D102 - intentional override
-        return {"input_tokens": 11, "output_tokens": 7, "cache_hit_tokens": 3, "call_count": 2}
+_REPLY_USAGE = {"input_tokens": 11, "output_tokens": 7, "cache_hit_tokens": 3, "call_count": 2}
 
 
 class _FakeSession:
@@ -49,7 +44,6 @@ class _FakeSession:
             last_error=None,
         )
         self.queued: list = []
-        self._frontdoor_turn_usage = _AnyUsageDict()
 
     async def queue_follow_up_batch(self, messages, *, persist_transcript=True):
         self.queued.extend(messages)
@@ -93,7 +87,12 @@ class _FakeBridge:
         for listener in list(kwargs.get("listeners") or []):
             for text in self.deltas:
                 await listener(AgentEvent(type="assistant_stream_delta", payload={"text": text, "source": "user"}))
-            await listener(AgentEvent(type="message_end", payload={"text": self.reply_text, "source": "user"}))
+            await listener(
+                AgentEvent(
+                    type="message_end",
+                    payload={"text": self.reply_text, "source": "user", "usage": dict(_REPLY_USAGE)},
+                )
+            )
 
     async def prompt(self, message, **kwargs):
         self.prompts.append(message)

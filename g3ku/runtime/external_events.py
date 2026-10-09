@@ -162,28 +162,10 @@ def _extract_media_attachments(text: str) -> tuple[str, list[dict[str, Any]]]:
     return (cleaned if isinstance(cleaned, str) else text), list(attachments or [])
 
 
-def _turn_usage(session: Any, turn_id: str) -> dict[str, Any] | None:
-    usage_map = getattr(session, "_frontdoor_turn_usage", None)
-    if not isinstance(usage_map, dict) or not turn_id:
-        return None
-    usage = usage_map.get(turn_id)
-    return dict(usage) if isinstance(usage, dict) else None
-
-
-def _resolve_turn_usage(session: Any, payload_turn_id: str, record_turn_id: str) -> dict[str, Any] | None:
-    """usage 记录按会话内部 transcript turn id 建键，而对外事件统一携带
-    record turn id；先按 payload 的 transcript id 查，回退 record id。"""
-    usage = _turn_usage(session, payload_turn_id)
-    if usage is None:
-        usage = _turn_usage(session, record_turn_id)
-    return usage
-
-
 def make_session_event_relay(
     session_key: str,
     *,
     turn_id: str,
-    session: Any | None = None,
     external_key: str = "",
 ) -> Callable[[AgentEvent], Awaitable[None]]:
     """Build an AgentEvent listener mapping runtime events to external hub events.
@@ -237,9 +219,9 @@ def make_session_event_relay(
                 }
                 if attachments:
                     final_payload["attachments"] = attachments
-                usage = _resolve_turn_usage(session, str(payload.get("turn_id") or ""), turn_id)
-                if usage:
-                    final_payload["usage"] = usage
+                usage = payload.get("usage")
+                if isinstance(usage, dict) and usage:
+                    final_payload["usage"] = dict(usage)
                 if route_key:
                     # 账本失败绝不能吃掉这条发布：登记异常在这里就地吞掉，
                     # 回复退回仅内存投递（与 drain 侧同一降级语义）。
