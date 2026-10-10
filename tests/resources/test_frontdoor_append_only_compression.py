@@ -216,7 +216,12 @@ async def test_frontdoor_compression_chunks_when_single_shot_exceeds_window(
         if "frontdoor_token_compression_chunk" in rendered:
             return 100
         if len(messages) == 1 and str((messages[0] or {}).get("role") or "") == "assistant":
-            return 25_000  # 合并摘要超预算 → 触发一次归并
+            text = str((messages[0] or {}).get("content") or "")
+            if text.startswith("[分块摘要"):
+                # 归并判据只看"拼接后的摘要本身超预算"。块预算现在按历史/3 放长，
+                # 这里按内容形态而不是按条数/角色来识别这一读，避免把某个原子组也顶大。
+                return 100_000
+            return 25_000
         return 15_000  # 每个原子组自成一塊
 
     monkeypatch.setattr(ceo_runtime_ops, "_estimate_frontdoor_provider_request_tokens", _module_estimate)
