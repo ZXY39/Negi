@@ -1340,6 +1340,24 @@
     }
 }
 
+/* 外部 token 行的「可会话范围」下拉：上面那条 v2 规则用 background 简式统一了所有原生
+   select，顺带把箭头也抹了——这个控件在窄栏里，没有箭头就看不出可点。这里按行内尺寸收
+   一档并把 chevron 补回来。 */
+[data-ui-version="v2"] .external-scope-select {
+    min-width: 104px;
+    padding-right: 28px;
+    background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='14' height='14' viewBox='0 0 18 18' fill='none'%3E%3Cpath d='M4.5 6.75L9 11.25L13.5 6.75' stroke='%2394A3B8' stroke-width='1.8' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E");
+    background-position: calc(100% - 9px) 50%;
+    background-size: 14px 14px;
+    background-repeat: no-repeat;
+}
+
+[data-ui-version="v2"] .external-row-scope {
+    color: var(--ui-text-muted);
+    font-size: 12px;
+    white-space: nowrap;
+}
+
 /* 21. 任务卡片 */
 [data-ui-version="v2"] .project-card {
     padding: var(--ui-space-4);

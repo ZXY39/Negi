@@ -13042,29 +13042,6 @@ textarea {
     align-items: center;
     gap: 6px;
     flex: 0 0 auto;
-    color: var(--text-secondary);
-    font-size: 0.78rem;
-    white-space: nowrap;
-}
-
-/* 作用域下拉：观感走全站那套 .resource-select（箭头、配色、hover），这里只按行内
-   尺寸收一档——之前它套的是按钮类 toolbar-btn，原生 select 拿不到任何样式。 */
-.external-scope-select {
-    min-width: 104px;
-    min-height: 34px;
-    padding: 6px 30px 6px 10px;
-    border: 1px solid color-mix(in srgb, var(--border-color) 84%, transparent);
-    border-radius: 10px;
-    font: inherit;
-    font-size: 0.82rem;
-    background-position: calc(100% - 10px) 50%;
-    background-size: 14px 14px;
-}
-
-.external-scope-select:focus-visible {
-    outline: 0;
-    border-color: color-mix(in srgb, var(--brand-primary) 44%, var(--border-color));
-    box-shadow: 0 0 0 3px color-mix(in srgb, var(--brand-primary) 16%, transparent);
 }
 
 .external-token-main {
