@@ -1,4 +1,4 @@
-"""FastMCP tool surface for the g3ku MCP gateway (stdio proxy).
+"""FastMCP tool surface for the Negi MCP gateway (stdio proxy).
 
 Out-of-the-box surface #2 for external AI agents (contract owner:
 ``docs/architecture/agent-gateway.md``). The tools never raise: transport /
@@ -19,6 +19,7 @@ from g3ku.mcp_gateway.client import G3kuMcpClient
 
 MIN_WAIT_SECONDS = 5
 MAX_WAIT_SECONDS = 1800
+DEFAULT_LIST_LIMIT = 50
 
 
 async def _safe(factory: Callable[[], Awaitable[dict[str, Any]]]) -> dict[str, Any]:
@@ -44,39 +45,58 @@ async def _safe(factory: Callable[[], Awaitable[dict[str, Any]]]) -> dict[str, A
 
 
 def _clamp_wait(wait_seconds: int, default: int) -> int:
+    return max(MIN_WAIT_SECONDS, min(MAX_WAIT_SECONDS, _raw_wait(wait_seconds, default)))
+
+
+def _raw_wait(wait_seconds: int, default: int) -> int:
     try:
-        value = int(wait_seconds)
+        return int(wait_seconds)
     except (TypeError, ValueError):
-        value = default
-    return max(MIN_WAIT_SECONDS, min(MAX_WAIT_SECONDS, value))
+        return int(default)
 
 
-def build_mcp_server(client: G3kuMcpClient, *, name: str = "g3ku") -> FastMCP:
+def build_mcp_server(client: G3kuMcpClient, *, name: str = "negi") -> FastMCP:
     mcp = FastMCP(
         name,
         instructions=(
-            "Converse with a running g3ku agent over the External Agent API. "
-            "Each conversation is a persistent g3ku session; g3ku keeps its own "
+            "Converse with a running Negi agent over the External Agent API. "
+            "Each conversation is a persistent Negi session; Negi keeps its own "
             "memory, so send only the new message (no client-side history)."
         ),
     )
 
     @mcp.tool(
         description=(
-            "Send a message to g3ku and wait for the final reply. `conversation` is either a "
-            "short name in this gateway's own namespace or a full session key taken from "
-            "g3ku_list_conversations (keys containing ':' address that session directly, "
-            "without creating one). Returns the reply text, or status='pending' with turn_id "
-            "when the agent is still working (increase wait_seconds or call g3ku_get_reply "
-            "later)."
+            "Send a message to Negi. `conversation` is either a short name in this gateway's own "
+            "namespace or a full session key taken from negi_list_conversations (keys containing "
+            "':' address that session directly, without creating one). wait_seconds>0 blocks until "
+            "the turn answers and returns status='completed' with reply/usage/task_ids; "
+            "wait_seconds=0 submits and returns immediately with status='submitted' plus the "
+            "turn_id and any task_ids already bound to the turn — call negi_get_reply later. "
+            "task_ids are the machine-readable handles of the tasks this turn dispatched "
+            "(use them with the web runtime to follow up); reply is prose for a human."
         )
     )
-    async def g3ku_chat(conversation: str, message: str, wait_seconds: int = 120) -> dict[str, Any]:
+    async def negi_chat(conversation: str, message: str, wait_seconds: int = 120) -> dict[str, Any]:
+        submit_only = _raw_wait(wait_seconds, 120) == 0
         timeout = _clamp_wait(wait_seconds, 120)
 
         async def _body() -> dict[str, Any]:
             session_id = await client.resolve_session(conversation)
             after_seq = client.last_seq(session_id)
+            if submit_only:
+                result = await client.send_message(session_id, str(message or ""))
+                return {
+                    "ok": True,
+                    "conversation": conversation,
+                    "session_id": session_id,
+                    "turn_id": str(result.get("turn_id") or "") or None,
+                    "submit_status": str(result.get("status") or ""),
+                    "status": "submitted",
+                    "task_ids": [],
+                    "receipt": str(result.get("receipt") or ""),
+                    "hint": "Submitted without waiting. Call negi_get_reply to fetch the final reply.",
+                }
             async with client.event_stream(session_id, last_seq=after_seq) as events:
                 result = await client.send_message(session_id, str(message or ""))
                 submit_status = str(result.get("status") or "")
@@ -112,6 +132,7 @@ def build_mcp_server(client: G3kuMcpClient, *, name: str = "g3ku") -> FastMCP:
                 "session_id": session_id,
                 "turn_id": outcome.get("turn_id") or turn_id,
                 "submit_status": submit_status,
+                "task_ids": list(outcome.get("task_ids") or []),
             }
             kind = str(outcome.get("kind") or "")
             if kind == "reply":
@@ -130,12 +151,12 @@ def build_mcp_server(client: G3kuMcpClient, *, name: str = "g3ku") -> FastMCP:
                     **base,
                     "status": "queued_receipt",
                     "receipt": str(result.get("receipt") or ""),
-                    "hint": "Message joined the running turn. Call g3ku_get_reply later to fetch the answer.",
+                    "hint": "Message joined the running turn. Call negi_get_reply later to fetch the answer.",
                 }
             return {
                 **base,
                 "status": "pending",
-                "hint": "Still working. Call g3ku_get_reply later or increase wait_seconds.",
+                "hint": "Still working. Call negi_get_reply later, or pass wait_seconds=0 to stop blocking.",
             }
 
         return await _safe(_body)
@@ -143,10 +164,11 @@ def build_mcp_server(client: G3kuMcpClient, *, name: str = "g3ku") -> FastMCP:
     @mcp.tool(
         description=(
             "Fetch the next final reply for a conversation that was not consumed yet "
-            "(e.g. after g3ku_chat returned status='pending')."
+            "(e.g. after negi_chat returned status='pending' or status='submitted'). "
+            "Carries the same task_ids handle as negi_chat."
         )
     )
-    async def g3ku_get_reply(conversation: str, wait_seconds: int = 60) -> dict[str, Any]:
+    async def negi_get_reply(conversation: str, wait_seconds: int = 60) -> dict[str, Any]:
         timeout = _clamp_wait(wait_seconds, 60)
 
         async def _body() -> dict[str, Any]:
@@ -164,6 +186,7 @@ def build_mcp_server(client: G3kuMcpClient, *, name: str = "g3ku") -> FastMCP:
                     "reply": str(outcome.get("text") or ""),
                     "turn_id": outcome.get("turn_id"),
                     "usage": outcome.get("usage"),
+                    "task_ids": list(outcome.get("task_ids") or []),
                 }
             return {
                 "ok": True,
@@ -174,8 +197,8 @@ def build_mcp_server(client: G3kuMcpClient, *, name: str = "g3ku") -> FastMCP:
 
         return await _safe(_body)
 
-    @mcp.tool(description="Report whether the g3ku conversation is running and what is queued.")
-    async def g3ku_session_status(conversation: str) -> dict[str, Any]:
+    @mcp.tool(description="Report whether the Negi conversation is running and what is queued.")
+    async def negi_session_status(conversation: str) -> dict[str, Any]:
         async def _body() -> dict[str, Any]:
             session_id = await client.resolve_session(conversation)
             state = await client.session_state(session_id)
@@ -192,8 +215,13 @@ def build_mcp_server(client: G3kuMcpClient, *, name: str = "g3ku") -> FastMCP:
 
         return await _safe(_body)
 
-    @mcp.tool(description="Pause the conversation's currently running g3ku turn, if any.")
-    async def g3ku_pause(conversation: str) -> dict[str, Any]:
+    @mcp.tool(
+        description=(
+            "Pause the conversation's currently running Negi turn, if any. This stops the agent "
+            "at its next stage boundary; it does not touch tasks the turn already dispatched."
+        )
+    )
+    async def negi_pause(conversation: str) -> dict[str, Any]:
         async def _body() -> dict[str, Any]:
             session_id = await client.resolve_session(conversation)
             state = await client.session_state(session_id)
@@ -210,8 +238,14 @@ def build_mcp_server(client: G3kuMcpClient, *, name: str = "g3ku") -> FastMCP:
 
         return await _safe(_body)
 
-    @mcp.tool(description="Cancel the conversation's running g3ku tasks.")
-    async def g3ku_cancel(conversation: str) -> dict[str, Any]:
+    @mcp.tool(
+        description=(
+            "Cancel the conversation's in-flight work: the running turn and the tasks dispatched "
+            "from this session. Returns the cancelled task count. Paused-but-never-resumed tasks "
+            "belong to the web runtime's task commands, not this call."
+        )
+    )
+    async def negi_cancel(conversation: str) -> dict[str, Any]:
         async def _body() -> dict[str, Any]:
             session_id = await client.resolve_session(conversation)
             result = await client.cancel_session(session_id)
@@ -226,17 +260,25 @@ def build_mcp_server(client: G3kuMcpClient, *, name: str = "g3ku") -> FastMCP:
 
     @mcp.tool(
         description=(
-            "List g3ku conversations. scope='all' (default) covers every session the runtime "
-            "knows — web CEO chats, channel sessions (QQ and others) and other bridges' "
-            "sessions — each with its latest preview, timestamps, running state and the "
-            "transcript file path; pass any returned session_id back as `conversation` to talk "
-            "to that session. scope='own' lists only this gateway's conversations. Replies to "
-            "channel sessions go out as proactive messages, so the platform's message window "
-            "and quota can refuse the reply even though the turn answered."
+            "List Negi conversations. scope='all' covers every session the runtime knows — web CEO "
+            "chats, channel sessions (QQ and others) and other bridges' sessions — and is the only "
+            "scope that carries preview_text, message_count, updated_at, is_running, status and the "
+            "transcript file path; requires the token's cross-session scope, otherwise this tool "
+            "degrades to scope='own' and says so in both `scope` and `requested_scope`. scope='own' "
+            "lists only this gateway's own namespace, and those rows carry preview and activity too. "
+            "Pass any returned session_id back as `conversation` to talk to that session. Filter with "
+            "`query` (substring of conversation/title/preview/session_id) and optionally `bridge_id`; "
+            "pagination is `offset` + returned `next_offset`. Replies to channel sessions go out as "
+            "proactive messages, so the platform's message window and quota can refuse the reply even "
+            "though the turn answered."
         )
     )
-    async def g3ku_list_conversations(
-        scope: str = "all", limit: int = 50
+    async def negi_list_conversations(
+        scope: str = "all",
+        limit: int = DEFAULT_LIST_LIMIT,
+        offset: int = 0,
+        query: str = "",
+        bridge_id: str = "",
     ) -> dict[str, Any]:
         def _normalize(raw: Any) -> dict[str, Any] | None:
             if not isinstance(raw, dict):
@@ -266,12 +308,35 @@ def build_mcp_server(client: G3kuMcpClient, *, name: str = "g3ku") -> FastMCP:
                 item["has_transcript"] = bool(raw.get("has_transcript"))
             return item
 
+        def _matches(item: dict[str, Any], *, needle: str, bridge: str) -> bool:
+            if bridge:
+                account = str(item.get("session_id") or "").split(":")
+                if len(account) < 3 or account[1] != bridge:
+                    return False
+            if not needle:
+                return True
+            haystack = " ".join(
+                [
+                    str(item.get("conversation") or ""),
+                    str(item.get("session_id") or ""),
+                    str(item.get("title") or ""),
+                    str(item.get("preview_text") or ""),
+                ]
+            ).lower()
+            return needle in haystack
+
         async def _body() -> dict[str, Any]:
             wanted = str(scope or "").strip().lower() or "all"
             try:
                 cap = max(1, int(limit or 0))
             except (TypeError, ValueError):
-                cap = 50
+                cap = DEFAULT_LIST_LIMIT
+            try:
+                start = max(0, int(offset or 0))
+            except (TypeError, ValueError):
+                start = 0
+            needle = str(query or "").strip().lower()
+            bridge = str(bridge_id or "").strip()
             effective = wanted
             payload: dict[str, Any]
             if wanted == "all":
@@ -287,13 +352,48 @@ def build_mcp_server(client: G3kuMcpClient, *, name: str = "g3ku") -> FastMCP:
             else:
                 payload = await client.list_sessions()
             items = [item for item in (_normalize(entry) for entry in list(payload.get("items") or [])) if item]
+            if needle or bridge:
+                items = [item for item in items if _matches(item, needle=needle, bridge=bridge)]
+            page = items[start : start + cap]
             return {
                 "ok": True,
                 "scope": effective,
                 "requested_scope": wanted,
-                "count": len(items),
-                "truncated": len(items) > cap,
-                "items": items[:cap],
+                "matched": len(items),
+                "count": len(page),
+                "offset": start,
+                "next_offset": start + len(page) if start + len(page) < len(items) else None,
+                "truncated": bool(items[start + cap :]),
+                "items": page,
+            }
+
+        return await _safe(_body)
+
+    @mcp.tool(
+        description=(
+            "Delete a conversation this gateway created, together with its transcript and side "
+            "artifacts. Only short names in this gateway's own namespace are accepted; full session "
+            "keys (anything containing ':') are refused so one bridge cannot wipe another's "
+            "sessions. The conversation reappears as a fresh session on the next message."
+        )
+    )
+    async def negi_delete_conversation(conversation: str) -> dict[str, Any]:
+        async def _body() -> dict[str, Any]:
+            raw = str(conversation or "").strip()
+            if not raw:
+                return {"ok": False, "error": "conversation_required"}
+            if ":" in raw:
+                # 全键寻址在这里是越权道：别的桥的会话不该由本网关删。
+                return {"ok": False, "error": "own_namespace_only", "conversation": raw}
+            session_id = await client.ensure_session(raw)
+            result = await client.delete_session(session_id, purge=True)
+            client.forget_session(raw)
+            return {
+                "ok": True,
+                "conversation": raw,
+                "session_id": session_id,
+                "deleted": bool(result.get("deleted")),
+                "registry_forgotten": bool(result.get("registry_forgotten")),
             }
 
         return await _safe(_body)

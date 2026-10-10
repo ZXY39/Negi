@@ -2108,16 +2108,23 @@ def _external_channel_row(
         title = f"{label} · {external_key}"
     else:
         title = f"{label} · {parts[2].strip()[:8]}"
-    session = session_manager.get_or_create(key)
-    visible_messages = transcript_messages(session)
+    # 转录在不在是两个轴：桥一注册就有 registry 条目，第一回合才落文件。
+    # 早先这里无条件 `get_or_create`，文件缺失时会当场造一个 `created_at=now` 的空会话
+    # （Session.created_at 默认 datetime.now）并被 manager 缓存住——列表读数于是会
+    # **改写它正在读的那个时间**，registry 里的真实创建时间被 `or` 短路掉。
+    checker = getattr(session_manager, "has_transcript", None)
+    has_transcript = bool(checker(key)) if callable(checker) else True
+    session = session_manager.get_or_create(key) if has_transcript else None
+    visible_messages = transcript_messages(session) if session is not None else []
+    registry_created_at = str(getattr(entry, "created_at", "") or "").strip()
     return {
         "session_id": key,
         "title": title,
-        "preview_text": _channel_preview_text(session),
+        "preview_text": _channel_preview_text(session) if session is not None else "",
         "message_count": len(visible_messages),
-        "created_at": _session_created_at(session) or str(getattr(entry, "created_at", "") or ""),
-        "updated_at": _session_updated_at(session),
-        "last_llm_output_at": _session_last_assistant_at(session),
+        "created_at": (_session_created_at(session) if session is not None else "") or registry_created_at,
+        "updated_at": _session_updated_at(session) if session is not None else "",
+        "last_llm_output_at": _session_last_assistant_at(session) if session is not None else "",
         "is_active": key == str(active_session_id or "").strip(),
         "is_running": bool(is_running),
         "session_family": "channel",

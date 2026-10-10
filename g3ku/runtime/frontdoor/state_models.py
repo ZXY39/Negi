@@ -140,6 +140,8 @@ class CeoPersistentState(TypedDict, total=False):
 
     verified_task_ids: list[str]
 
+    dispatched_task_ids: list[str]
+
     next_step: str
 
     frontdoor_stage_state: dict[str, Any]
@@ -271,6 +273,7 @@ def initial_persistent_state(*, user_input: Any) -> dict[str, Any]:
         "route_kind": "direct_reply",
 
         "verified_task_ids": [],
+        "dispatched_task_ids": [],
 
         "frontdoor_stage_state": {
 

@@ -53,6 +53,7 @@ from g3ku.runtime.web_ceo_sessions import (
     EXTERNAL_UPLOAD_ROOT,
     WEB_CEO_IMAGE_UPLOAD_MAX_BYTES,
     WebCeoStateStore,
+    build_channel_ceo_session_item,
     clear_web_ceo_session_artifacts,
     workspace_path,
 )
@@ -250,24 +251,53 @@ async def list_external_sessions(
     else:
         entries = registry.list_bridge_sessions(principal.bridge_id)
     manager = _session_manager()
-    return {
-        "ok": True,
-        "bridge_id": principal.bridge_id,
-        "items": [
+    agent = peek_global_agent()
+    runtime_manager = get_runtime_manager(agent) if agent is not None else None
+
+    def _running(session_key: str) -> bool:
+        if runtime_manager is None:
+            return False
+        getter = getattr(runtime_manager, "get", None)
+        if not callable(getter):
+            return False
+        state = getattr(getter(str(session_key or "").strip()) or object(), "state", None)
+        return bool(getattr(state, "is_running", False)) or (
+            str(getattr(state, "status", "") or "").strip().lower() == "running"
+        )
+
+    items: list[dict[str, Any]] = []
+    for entry in entries:
+        if entry is None:
+            continue
+        # 活动字段（预览/条数/updated_at/运行态）与 `scope=all` 用同一颗构造器：
+        # 早先 own 只回 registry 的五字段，于是同一条会话在两个 scope 下读数不同形，
+        # 调用方按描述里的"带预览与转录路径"读 own 就会读到空。
+        row = build_channel_ceo_session_item(
+            manager,
+            entry.session_key,
+            active_session_id=f"ext-api:{principal.bridge_id}",
+            is_running=_running(entry.session_key),
+        )
+        item = dict(row or {})
+        item.update(
             {
                 "session_id": entry.session_key,
                 "external_key": entry.external_key,
-                "title": entry.title,
-                "created_at": entry.created_at,
+                "title": str(item.get("title") or entry.title or ""),
+                "created_at": str(item.get("created_at") or "") or entry.created_at,
+                "can_message": True,
                 # 注册表条目与转录是两个轴：桥一注册就有线上条目（还没有转录文件）。
                 # 这个读数说的是**文件在不在**——网页侧「删除渠道会话」会删掉它（空壳），
                 # 桥侧 `DELETE /sessions/{id}` 的清除语义是清空并保存（文件留着）。
-                # 目录侧不重复这个字段：那里每行本来就带 message_count。
+                "transcript_path": str(manager.get_path(entry.session_key)),
                 "has_transcript": manager.has_transcript(entry.session_key),
             }
-            for entry in entries
-            if entry is not None
-        ],
+        )
+        items.append(item)
+    return {
+        "ok": True,
+        "bridge_id": principal.bridge_id,
+        "items": items,
     }
 
 
@@ -289,14 +319,30 @@ async def rename_external_session(
 @router.delete("/sessions/{session_id}")
 async def clear_external_session(
     session_id: str,
+    purge: str | None = Query(default=None),
     principal: ExternalApiPrincipal = Depends(require_external_api),
 ):
     """Clear semantics (matches the Channel Session Clear Contract): the
     registry entry stays visible, the transcript and side artifacts reset so
-    the next turn starts from an empty context."""
+    the next turn starts from an empty context.
+
+    ``?purge=true`` 换成删除语义：连注册表条目一起忘掉，这个 external_key 下次
+    出现就是一条新会话。MCP 的 `negi_delete_conversation` 走这条——清完还留着条目，
+    调用方列自己的会话时那条永远还在，删了等于没删。"""
     entry = _own_entry(session_id, principal)
     session_key = entry.session_key
     manager = _session_manager()
+    if str(purge or "").strip().lower() in {"1", "true", "yes"}:
+        deleted = manager.delete(session_key)
+        _registry().forget(session_key)
+        clear_web_ceo_session_artifacts(session_id=session_key)
+        return {
+            "ok": True,
+            "deleted": True,
+            "registry_forgotten": True,
+            "transcript_removed": bool(deleted),
+            "session_id": session_key,
+        }
     session = manager.get_or_create(session_key)
     session.clear()
     manager.save(session)

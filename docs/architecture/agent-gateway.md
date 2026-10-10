@@ -50,23 +50,24 @@
 
 ## 4. MCP stdio 网关契约
 
-- 进程模型：`negi mcp serve --token <t> [--base-url http://127.0.0.1:18790/api/v1] [--conversation-prefix mcp]`；token 可由 env `G3KU_EXTERNAL_TOKEN` 提供。独立轻量进程，连**运行中的** web 运行时；`negi mcp check` 提供接入前连通性自检（回显 bridge_id 与会话数）。
+- 进程模型：`negi mcp serve --token <t> [--base-url http://127.0.0.1:18790/api/v1] [--conversation-prefix mcp]`；token 可由 env `NEGI_EXTERNAL_TOKEN` 提供（旧名 `G3KU_EXTERNAL_TOKEN` 继续读作兜底，装好的人不必改 env）。MCP server 名与工具名都是 `negi` / `negi_*`（改名当日不留别名：客户端配置里的 `claude mcp add g3ku` 要重跑一次）。独立轻量进程，连**运行中的** web 运行时；`negi mcp check` 提供接入前连通性自检（回显 bridge_id 与会话数）。
 - **stdout 纯净铁律**：stdio 上 stdout 是 JSON-RPC 协议通道，serve 路径一切提示走 stderr（`typer.echo(..., err=True)`；loguru 与 FastMCP 日志均 stderr-only）。任何 stdout 字节都会毁帧。
 - 会话映射：`conversation` 不带 `:` 时 → `external_key = mcp:{conversation}`（本网关命名空间，不存在即建）；**带 `:` 时按全键寻址**（`web:ceo-…`、`qq:group:…`、`ext:…`），不加前缀、不建会话，能不能寻到别名下的会话由 token 的跨桥作用域裁决（`external-agent-api.md`「启用与鉴权」）。每次工具调用内"开 SSE 流 → 发消息 → 有界等待 → 关流"（流先开=零事件间隙；无驻留泵）。
 - 工具面（`g3ku/mcp_gateway/server.py`，全部返回 dict、**永不抛异常**——HTTP/传输错误转 `{ok:false, error, status_code?}` 可读载荷）：
 
 | 工具 | 语义 | 关键返回 |
 |---|---|---|
-| `g3ku_chat(conversation, message, wait_seconds=120)` | 发送并等待终稿 | `status: completed\|pending\|queued_receipt\|failed\|cancelled\|no_reply` + `reply`/`receipt`/`error`/`turn_id`/`usage`；pending 带续取 hint |
-| `g3ku_get_reply(conversation, wait_seconds=60)` | 续取未消费的下一个终稿 | `found` + `reply` |
-| `g3ku_session_status(conversation)` | 运行/排队快照 | `running`、`queued_follow_ups`、`inflight_turn_id`、`last_seq` |
-| `g3ku_pause(conversation)` | 暂停在跑回合 | 无 inflight → `{ok:false, error:"no_inflight_turn"}` |
-| `g3ku_cancel(conversation)` | 取消会话任务 | `cancelled` 计数 |
-| `g3ku_list_conversations(scope="all", limit=50)` | 会话列表：`all` 走 `/sessions?scope=all` 拿全量目录（含预览、运行档位、`transcript_path` 与 `has_transcript`），`own` 只列本网关命名空间 | `scope` + `requested_scope`（token 没有跨桥作用域时降级为 `own`，**两个字段都把降级说出来**，不静默把"全量"变成"自己那几个"）、`count`、`truncated`。`has_transcript` 只在服务端报了之后才出现在条目里——上游没说时省略该键，不折成 `false` |
+| `negi_chat(conversation, message, wait_seconds=120)` | 发送；`wait_seconds>0` 等终稿，`=0` 只提交立即返回（不开 SSE 流） | `status: completed\|submitted\|pending\|queued_receipt\|failed\|cancelled\|no_reply` + `reply`/`receipt`/`error`/`turn_id`/`usage`/**`task_ids`**；pending 与 submitted 都带续取 hint。正数仍按 5..1800 clamp，`0` 是"不等"而不是"等 5 秒" |
+| `negi_get_reply(conversation, wait_seconds=60)` | 续取未消费的下一个终稿 | `found` + `reply` + `task_ids` |
+| `negi_session_status(conversation)` | 运行/排队快照 | `running`、`queued_follow_ups`、`inflight_turn_id`、`last_seq` |
+| `negi_pause(conversation)` | 暂停在跑回合（不动已派发的任务） | 无 inflight → `{ok:false, error:"no_inflight_turn"}` |
+| `negi_cancel(conversation)` | 取消该会话的在飞工作：在跑回合 + 本会话派发的任务 | `cancelled` 计数。**已暂停未恢复的任务归任务命令**，这颗不吃它们 |
+| `negi_list_conversations(scope="all", limit=50, offset=0, query="", bridge_id="")` | 会话列表：`all` 走 `/sessions?scope=all` 拿全量目录，`own` 只列本网关命名空间。**两个 scope 的活动字段同形**（`preview_text`/`message_count`/`updated_at`/`is_running`/`transcript_path`/`has_transcript`）——own 侧由 `build_channel_ceo_session_item` 逐条构造，与 `all` 同一颗读法，不再回"只有五字段"的空读数 | `scope` + `requested_scope`（token 没有跨桥作用域时降级为 `own`，**两个字段都把降级说出来**）、`matched`（过滤后总数）、`count`（本页条数）、`offset`/`next_offset`（`next_offset` 到底时为 `null`）、`truncated`。`has_transcript` 只在服务端报了之后才出现在条目里——上游没说时省略该键，不折成 `false` |
+| `negi_delete_conversation(conversation)` | 删掉本网关自己建的会话：转录文件 + 侧产出 + 注册表条目一起清 | `deleted`/`registry_forgotten`/`transcript_removed`。**只收短名**：带 `:` 的全键一律 `ok:false, error:"own_namespace_only"`——一个桥不该能删另一个桥的会话。服务端 `DELETE /sessions/{id}` 的默认清除语义（留条目、清正文）不变，删除走 `?purge=true` |
 
-- 投全键会话时，那一轮的归属记在**发起方** bridge 上：回复事件流、幂等位与 `g3ku_get_reply` 都跟着发起它的这个网关走，目标会话原本的桥名下不留痕。跨桥发信与在本命名空间发信在运行时里是同一条 `submit` 车道，排队/回执/终态不变量完全一致。
+- 投全键会话时，那一轮的归属记在**发起方** bridge 上：回复事件流、幂等位与 `negi_get_reply` 都跟着发起它的这个网关走，目标会话原本的桥名下不留痕。跨桥发信与在本命名空间发信在运行时里是同一条 `submit` 车道，排队/回执/终态不变量完全一致。
 
-- 客户端接入示例：`claude mcp add g3ku -- negi mcp serve --token <t>`（或等价 MCP JSON 配置）。
+- 客户端接入示例：`claude mcp add negi -- negi mcp serve --token <t>`（或等价 MCP JSON 配置）。
 
 ## 5. 安全注记
 

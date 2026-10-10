@@ -10,24 +10,38 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import os
 
 import typer
 
+# 主名 NEGI_EXTERNAL_TOKEN；旧名继续读作兜底，免得装好的人一行 env 突然失效。
+_TOKEN_ENV_FALLBACKS = ("NEGI_EXTERNAL_TOKEN", "G3KU_EXTERNAL_TOKEN")
+
 
 def build_mcp_app(console) -> typer.Typer:
-    app = typer.Typer(help="MCP gateway: expose g3ku to external AI agents over stdio (Model Context Protocol).")
+    app = typer.Typer(help="MCP gateway: expose Negi to external AI agents over stdio (Model Context Protocol).")
 
     def _resolve_token(token: str | None) -> str:
-        return str(token or "").strip()
+        explicit = str(token or "").strip()
+        if explicit:
+            return explicit
+        for name in _TOKEN_ENV_FALLBACKS:
+            value = str(os.environ.get(name) or "").strip()
+            if value:
+                return value
+        return ""
 
     @app.command("serve")
     def serve(
         token: str = typer.Option(
             None,
             "--token",
-            envvar="G3KU_EXTERNAL_TOKEN",
+            envvar="NEGI_EXTERNAL_TOKEN",
             show_default=False,
-            help="External Agent API bearer token (externalApi.tokens.*); falls back to env G3KU_EXTERNAL_TOKEN.",
+            help=(
+                "External Agent API bearer token (externalApi.tokens.*); falls back to env "
+                "NEGI_EXTERNAL_TOKEN (legacy G3KU_EXTERNAL_TOKEN still read)."
+            ),
         ),
         base_url: str = typer.Option(
             "http://127.0.0.1:18790/api/v1",
@@ -43,7 +57,7 @@ def build_mcp_app(console) -> typer.Typer:
         """Run the stdio MCP proxy until the client disconnects."""
         resolved = _resolve_token(token)
         if not resolved:
-            typer.echo("error: token required (--token or G3KU_EXTERNAL_TOKEN)", err=True)
+            typer.echo("error: token required (--token or NEGI_EXTERNAL_TOKEN)", err=True)
             raise typer.Exit(2)
         # Lazy imports keep `g3ku --help` light and the mcp SDK off the CLI path.
         from g3ku.mcp_gateway.client import G3kuMcpClient
@@ -65,9 +79,9 @@ def build_mcp_app(console) -> typer.Typer:
         token: str = typer.Option(
             None,
             "--token",
-            envvar="G3KU_EXTERNAL_TOKEN",
+            envvar="NEGI_EXTERNAL_TOKEN",
             show_default=False,
-            help="External Agent API bearer token; falls back to env G3KU_EXTERNAL_TOKEN.",
+            help="External Agent API bearer token; falls back to env NEGI_EXTERNAL_TOKEN.",
         ),
         base_url: str = typer.Option(
             "http://127.0.0.1:18790/api/v1",
@@ -78,7 +92,7 @@ def build_mcp_app(console) -> typer.Typer:
         """Connectivity self-check against a running web runtime (GET /sessions)."""
         resolved = _resolve_token(token)
         if not resolved:
-            console.print("[red]error: token required (--token or G3KU_EXTERNAL_TOKEN)[/red]")
+            console.print("[red]error: token required (--token or NEGI_EXTERNAL_TOKEN)[/red]")
             raise typer.Exit(2)
         from g3ku.mcp_gateway.client import G3kuMcpClient
 

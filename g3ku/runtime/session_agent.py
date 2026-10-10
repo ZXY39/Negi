@@ -245,6 +245,7 @@ class RuntimeAgentSession:
         self._active_batch_id: str | None = None
         self._active_user_batch_inputs: list[UserInputMessage] = []
         self._last_verified_task_ids: list[str] = []
+        self._last_dispatched_task_ids: list[str] = []
         self._assistant_stream_seq: int = 0
         self._assistant_stream_pending_text: str = ""
         self._assistant_stream_last_emitted_text: str = ""
@@ -695,6 +696,7 @@ class RuntimeAgentSession:
         self._active_turn_id = None
         self._clear_user_batch_context()
         self._last_verified_task_ids = []
+        self._last_dispatched_task_ids = []
         self._assistant_stream_pending_text = ""
         self._assistant_stream_last_emitted_text = ""
         self._assistant_segment_open = False
@@ -1074,6 +1076,15 @@ class RuntimeAgentSession:
                 continue
             normalized.append(task_id)
         return normalized
+
+    def _turn_dispatched_task_ids(self) -> list[str]:
+        """本回合派发出的任务号：取自运行时自己写的工具结果，不经存在性闸门。
+
+        与 `verified_task_ids` 的分工是一条轴：verified 要进模型可见的派发尾注，
+        所以必须证那行真的存在；这里的句柄是给外部调用方接着用的，工具结果里
+        写了什么号就是什么号。闸门版在实盘 3 次派发里只落了 1 次。
+        """
+        return self._normalize_verified_task_ids(getattr(self, "_last_dispatched_task_ids", None))
 
     @classmethod
     def _extract_task_ids_from_text(cls, value: Any) -> list[str]:
@@ -3512,6 +3523,7 @@ class RuntimeAgentSession:
             self._state.pending_tool_calls.clear()
             self._state.pending_interrupts = []
             self._last_verified_task_ids = []
+            self._last_dispatched_task_ids = []
             if persist_transcript:
                 if internal_source is None:
                     # 接回不能只长在会话重建上：同进程里失败回合留下的 pending 行没有
@@ -3586,6 +3598,7 @@ class RuntimeAgentSession:
                 self._state.last_error = None
                 self._state.pending_tool_calls.clear()
                 self._last_verified_task_ids = list(task_ids)
+                self._last_dispatched_task_ids = list(task_ids)
                 silent_reply = self._resolve_silent_reply()
                 if getattr(self._loop, "prompt_trace", False):
                     logger.info(render_output_trace(output))
@@ -3622,6 +3635,7 @@ class RuntimeAgentSession:
                     source=internal_source or "user",
                     turn_id=final_turn_id,
                     usage=self._turn_usage_payload(final_turn_id),
+                    dispatched_task_ids=self._turn_dispatched_task_ids(),
                 )
                 if internal_source is None:
                     self.clear_paused_execution_context()
@@ -3832,6 +3846,7 @@ class RuntimeAgentSession:
                 source=internal_source or "user",
                 turn_id=final_turn_id,
                 usage=self._turn_usage_payload(final_turn_id),
+                dispatched_task_ids=self._turn_dispatched_task_ids(),
             )
             tail_profiler.mark("emit_message_end")
             if internal_source is None:
@@ -4366,6 +4381,7 @@ class RuntimeAgentSession:
                 source="user",
                 turn_id=final_turn_id,
                 usage=self._turn_usage_payload(final_turn_id),
+                dispatched_task_ids=self._turn_dispatched_task_ids(),
             )
             await self._emit_state_snapshot()
             return RunResult(output="" if silent_reply else str(output or ""), is_silent_reply=silent_reply, events=list(self._event_log))

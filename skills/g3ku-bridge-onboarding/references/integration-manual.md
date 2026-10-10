@@ -161,7 +161,7 @@ print(resp.choices[0].message.content)
 
 ```bash
 negi mcp check --token <bridge token>          # 连通性自检
-claude mcp add g3ku -- negi mcp serve --token <bridge token>
+claude mcp add negi -- negi mcp serve --token <bridge token>
 ```
 
-等价 MCP JSON 配置：`{"command": "g3ku", "args": ["mcp", "serve", "--token", "<t>"]}`（token 也可走 env `G3KU_EXTERNAL_TOKEN`）。暴露六个工具：`g3ku_chat` / `g3ku_get_reply` / `g3ku_session_status` / `g3ku_pause` / `g3ku_cancel` / `g3ku_list_conversations`；每个 `conversation` 名对应一个持久 g3ku 会话。
+等价 MCP JSON 配置：`{"command": "negi", "args": ["mcp", "serve", "--token", "<t>"]}`（token 也可走 env `G3KU_EXTERNAL_TOKEN`）。暴露六个工具：`negi_chat` / `negi_get_reply` / `negi_session_status` / `negi_pause` / `negi_cancel` / `negi_list_conversations`；每个 `conversation` 名对应一个持久 g3ku 会话。

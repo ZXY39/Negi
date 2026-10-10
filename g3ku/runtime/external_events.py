@@ -234,6 +234,11 @@ def make_session_event_relay(
                 usage = payload.get("usage")
                 if isinstance(usage, dict) and usage:
                     final_payload["usage"] = dict(usage)
+                # 本回合派发出的任务号：机器读的回执，与 `text` 里那句人写的散文分两根字段。
+                # 渠道消费者按缺省容忍多余键（读 text），MCP 网关把它透出成 `task_ids`。
+                dispatched = payload.get("dispatched_task_ids")
+                if isinstance(dispatched, list) and dispatched:
+                    final_payload["task_ids"] = [str(item or "").strip() for item in dispatched if str(item or "").strip()]
                 if route_key:
                     # 账本失败绝不能吃掉这条发布：登记异常在这里就地吞掉，
                     # 回复退回仅内存投递（与 drain 侧同一降级语义）。

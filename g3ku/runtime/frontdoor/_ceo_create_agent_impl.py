@@ -699,6 +699,7 @@ class CreateAgentCeoFrontDoorRunner(CeoFrontDoorRuntimeOps):
             tool_results=tool_results,
         )
         verified_task_ids: list[str] = []
+        dispatched_task_ids: list[str] = []
         repair_overlay_text: str | None = None
         for tool_result in tool_results:
             tool_name = str(tool_result.get("tool_name") or "").strip()
@@ -709,9 +710,12 @@ class CreateAgentCeoFrontDoorRunner(CeoFrontDoorRuntimeOps):
             if not bool(parsed.get("created")):
                 continue
             for task_id in list(parsed.get("created_task_ids") or []):
-                if not task_id or not self._task_id_exists(task_id) or task_id in verified_task_ids:
+                if not task_id or task_id in dispatched_task_ids:
                     continue
-                verified_task_ids.append(task_id)
+                # 与 graph 侧同源：派发句柄不设存在性闸门，闸门只用于模型可见尾注。
+                dispatched_task_ids.append(task_id)
+                if self._task_id_exists(task_id):
+                    verified_task_ids.append(task_id)
         route_kind = self._route_kind_for_turn(
             used_tools=used_tools,
             default=str(state.get("route_kind") or "direct_reply"),
@@ -742,6 +746,7 @@ class CreateAgentCeoFrontDoorRunner(CeoFrontDoorRuntimeOps):
             "analysis_text": "",
             "tool_call_payloads": [],
             "verified_task_ids": verified_task_ids,
+            "dispatched_task_ids": dispatched_task_ids,
             "synthetic_tool_calls_used": False,
         }
         should_update_frontdoor_tool_state = (
@@ -940,6 +945,7 @@ class CreateAgentCeoFrontDoorRunner(CeoFrontDoorRuntimeOps):
         )
         setattr(session, "_last_route_kind", str(values.get("route_kind") or "direct_reply"))
         setattr(session, "_last_verified_task_ids", list(values.get("verified_task_ids") or []))
+        setattr(session, "_last_dispatched_task_ids", list(values.get("dispatched_task_ids") or []))
         self._apply_silent_signal_to_session(session=session, values=values)
         self._sync_runtime_session_frontdoor_state(state=values, session=session)
         return str(values.get("final_output") or "")
@@ -969,6 +975,7 @@ class CreateAgentCeoFrontDoorRunner(CeoFrontDoorRuntimeOps):
         )
         setattr(session, "_last_route_kind", str(values.get("route_kind") or "direct_reply"))
         setattr(session, "_last_verified_task_ids", list(values.get("verified_task_ids") or []))
+        setattr(session, "_last_dispatched_task_ids", list(values.get("dispatched_task_ids") or []))
         self._apply_silent_signal_to_session(session=session, values=values)
         self._sync_runtime_session_frontdoor_state(state=values, session=session)
         return str(values.get("final_output") or "")

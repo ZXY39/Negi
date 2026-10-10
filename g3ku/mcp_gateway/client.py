@@ -113,6 +113,24 @@ class G3kuMcpClient:
         response.raise_for_status()
         return response.json()
 
+    async def delete_session(self, session_id: str, *, purge: bool = False) -> dict[str, Any]:
+        """Clear (default) or purge a session.
+
+        ``purge=true`` 连注册表条目一起忘掉——桥侧默认的清除语义留着条目，
+        好让同一个 external_key 下一回合接着用；网关删会话要的是"这条不再存在"。
+        """
+        params = {"purge": "true"} if purge else None
+        response = await self._client.delete(f"/sessions/{session_id}", headers=self._headers(), params=params)
+        response.raise_for_status()
+        return response.json()
+
+    def forget_session(self, conversation: str) -> None:
+        """Drop the cached conversation→session_id mapping after a delete."""
+        key = str(conversation or "")
+        session_id = self._session_ids.pop(key, None)
+        if session_id:
+            self._last_seq.pop(str(session_id), None)
+
     async def resolve_session(self, conversation: str) -> str:
         """``conversation`` → 可用的 session_id。
 
@@ -237,6 +255,7 @@ class G3kuMcpClient:
                         "text": str(event.get("text") or ""),
                         "turn_id": event_turn_id or None,
                         "usage": event.get("usage") if isinstance(event.get("usage"), dict) else None,
+                        "task_ids": list(event.get("task_ids") or []),
                     }
                 continue
             if event_type == "turn.completed":
@@ -249,6 +268,7 @@ class G3kuMcpClient:
                             "text": str(best.get("text") or ""),
                             "turn_id": str(best.get("turn_id") or "") or None,
                             "usage": best.get("usage") if isinstance(best.get("usage"), dict) else None,
+                            "task_ids": list(best.get("task_ids") or []),
                         }
                     return {"kind": "cancelled" if event.get("cancelled") else "no_reply"}
                 if turn_id is not None and event_turn_id != str(turn_id):
