@@ -1336,7 +1336,10 @@
     [data-ui-version="v2"] .external-tokens-panel {
         grid-column: 2;
         grid-row: 1 / span 2;
-        align-self: stretch;
+        /* 按内容排高，不跟左栏对齐：stretch 实测把右栏钉在网格容器的高度上
+           （比左栏两行还矮 44px），面板是 overflow:hidden，末尾卡片既看不见也滚不出来；
+           展开签发表单时列表还会被压到 36px。 */
+        align-self: start;
     }
 }
 

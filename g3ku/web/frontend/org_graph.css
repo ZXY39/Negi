@@ -12928,6 +12928,12 @@ textarea {
     overflow-y: auto;
 }
 
+/* 窄窗（<900px）走这条单列道：面板默认 flex-shrink:1，会被压到滚动口高度以内，
+   token 列表末尾整段被 overflow:hidden 吃掉。三块面板一律按内容排高，超出交给本容器滚。 */
+.external-api-shell > .resource-detail-panel {
+    flex: 0 0 auto;
+}
+
 .external-master-panel .panel-header {
     align-items: center;
 }
@@ -13028,13 +13034,18 @@ textarea {
 
 .external-token-item {
     display: flex;
-    flex-direction: row;
-    align-items: center;
-    justify-content: space-between;
-    flex-wrap: wrap;
-    gap: 12px;
+    flex-direction: column;
+    align-items: stretch;
+    gap: var(--space-2);
     height: auto;
     cursor: default;
+}
+
+.external-token-head {
+    display: flex;
+    align-items: flex-start;
+    justify-content: space-between;
+    gap: var(--space-3);
 }
 
 .external-row-scope {
@@ -13045,7 +13056,6 @@ textarea {
 }
 
 .external-token-main {
-    flex: 1 1 auto;
     min-width: 0;
 }
 
@@ -13058,15 +13068,24 @@ textarea {
     font-size: 0.85em;
 }
 
-/* 右侧四颗控件在窄栏里放不下：允许换行并把整组推到行尾，卡片按内容长高。
-   原先 flex-shrink:0 + 不换行 = 「删除」被卡片裁掉。 */
+.external-row-switch {
+    flex: 0 0 auto;
+}
+
+/* 一行两栏：左边「可会话范围 + 下拉」，右边「重新生成 / 删除」，
+   四颗控件不再挤成上下两截。 */
 .external-token-actions {
     display: flex;
     align-items: center;
-    justify-content: flex-end;
-    flex-wrap: wrap;
-    gap: 8px;
-    margin-left: auto;
+    justify-content: space-between;
+    gap: var(--space-3);
+}
+
+.external-token-tools {
+    display: flex;
+    align-items: center;
+    gap: var(--space-2);
+    flex: 0 0 auto;
 }
 
 .qq-bot-status {

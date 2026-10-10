@@ -81,9 +81,18 @@ function renderExternalTokenList() {
         const row = document.createElement("div");
         row.className = "resource-list-item external-token-item";
         row.innerHTML = `
-            <div class="external-token-main">
-                <div class="resource-list-title">${esc(item.bridge_id)}</div>
-                <div class="resource-list-subtitle">${item.label ? esc(item.label) + " · " : ""}token：<code>${esc(item.token_masked || "（未设置）")}</code></div>
+            <div class="external-token-head">
+                <div class="external-token-main">
+                    <div class="resource-list-title">${esc(item.bridge_id)}</div>
+                    <div class="resource-list-subtitle">${item.label ? esc(item.label) + " · " : ""}token：<code>${esc(item.token_masked || "（未设置）")}</code></div>
+                </div>
+                <button class="tool-governance-switch external-row-switch" type="button"
+                    data-bridge="${esc(item.bridge_id)}"
+                    aria-pressed="${item.enabled ? "true" : "false"}"
+                    aria-label="切换 ${esc(item.bridge_id)} 启用状态">
+                    <span class="tool-governance-switch-track" aria-hidden="true"><span class="tool-governance-switch-thumb"></span></span>
+                    <span class="tool-governance-switch-label">${item.enabled ? "已启用" : "已停用"}</span>
+                </button>
             </div>
             <div class="external-token-actions">
                 <label class="external-row-scope">可会话范围
@@ -93,15 +102,10 @@ function renderExternalTokenList() {
                         <option value="deny"${item.cross_session === false ? " selected" : ""}>仅本桥</option>
                     </select>
                 </label>
-                <button class="tool-governance-switch external-row-switch" type="button"
-                    data-bridge="${esc(item.bridge_id)}"
-                    aria-pressed="${item.enabled ? "true" : "false"}"
-                    aria-label="切换 ${esc(item.bridge_id)} 启用状态">
-                    <span class="tool-governance-switch-track" aria-hidden="true"><span class="tool-governance-switch-thumb"></span></span>
-                    <span class="tool-governance-switch-label">${item.enabled ? "已启用" : "已停用"}</span>
-                </button>
-                <button class="toolbar-btn ghost small" data-action="regenerate" data-bridge="${esc(item.bridge_id)}" type="button">重新生成</button>
-                <button class="toolbar-btn ghost danger small" data-action="delete" data-bridge="${esc(item.bridge_id)}" type="button">删除</button>
+                <div class="external-token-tools">
+                    <button class="toolbar-btn ghost small" data-action="regenerate" data-bridge="${esc(item.bridge_id)}" type="button">重新生成</button>
+                    <button class="toolbar-btn ghost danger small" data-action="delete" data-bridge="${esc(item.bridge_id)}" type="button">删除</button>
+                </div>
             </div>`;
         listEl.appendChild(row);
     }
