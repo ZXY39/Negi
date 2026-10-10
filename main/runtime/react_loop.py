@@ -1815,6 +1815,16 @@ class ReActToolLoop:
                     response_tool_calls=response_tool_calls,
                     count=payload_shape_fault_count,
                 )
+                if shape_label == 'output-capped':
+                    # 思考把声明的输出上限整个吃满：再多问几次只会再烧一遍（实盘某节点
+                    # 为此连撞 11 跳、白烧 69 万输出 token）。运行时不改模型档位，落可恢复
+                    # 暂停并把要改的那一行写清楚，交回会话 agent 或操作员处置。
+                    return self._reasoning_only_output_cap_failure(
+                        task_id=task.task_id,
+                        node_id=node.node_id,
+                        response=response,
+                        shape_reason=shape_reason,
+                    )
                 if payload_shape_fault_count >= _PAYLOAD_SHAPE_FAULT_LIMIT:
                     return self._invalid_final_submission_failure(
                         reason=shape_reason,
@@ -5129,6 +5139,41 @@ class ReActToolLoop:
             ),
             failure_disposition='pause',
         )
+
+    def _reasoning_only_output_cap_failure(
+        self,
+        *,
+        task_id: str,
+        node_id: str,
+        response: Any,
+        shape_reason: str,
+    ) -> NodeFinalResult:
+        """思考把输出上限整个吃满时的可恢复暂停。
+
+        机器不替操作员改模型档位：这条理由要把"现在发的是什么"和"改哪一项"写清，
+        否则 resume 只会让同一个节点再撞同一条上限。
+        """
+        body = dict(getattr(response, 'provider_request_body', {}) or {})
+        usage = dict(getattr(response, 'usage', {}) or {})
+        sent_effort = str(body.get('reasoning_effort') or '').strip() or 'unknown'
+        sent_max = body.get('max_tokens')
+        same_class = 0
+        try:
+            same_class = sum(
+                1
+                for item in list(self._log_service.list_task_node_error_logs(task_id, node_id) or [])
+                if '[output-capped]' in str(getattr(item, 'error_text', '') or '')
+            )
+        except Exception:
+            same_class = 0
+        reason = (
+            f'model_config_fault: {shape_reason} | sent_reasoning_effort={sent_effort} '
+            f'sent_max_tokens={sent_max} output_tokens={int(usage.get("output_tokens") or 0)} '
+            f'同类跳次={max(1, same_class)}；这一跳的思考用量已顶满声明的输出上限，提交体没有任何空间。'
+            '运行时不会改动模型档位：请把该模型的思考强度调低（或把最大输出调高）后再恢复本节点，'
+            '不改配置直接 resume 只会再撞同一条上限。'
+        )
+        return self._invalid_final_submission_failure(reason=reason, count=max(1, same_class))
 
     @classmethod
     def _invalid_final_submission_failure(cls, *, reason: str, count: int) -> NodeFinalResult:

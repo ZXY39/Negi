@@ -46,13 +46,20 @@ def _int_value(value: Any, default: int = 0) -> int:
 
 
 RUNTIME_FAULT_MARKER = 'runtime_fault:'
+MODEL_CONFIG_FAULT_MARKER = 'model_config_fault:'
 
 
 def _runtime_fault_class(error_text: str) -> str:
-    """把"运行时自身缺陷"型暂停单独标出来：resume 只会让节点再撞同一条异常。"""
-    if RUNTIME_FAULT_MARKER not in str(error_text or ''):
-        return ''
-    return 'runtime_fault（运行时自身缺陷，resume 无效，需操作员重启 worker 后再恢复）'
+    """把"不是再跑一次就能好"的暂停型单独标出来：resume 只会让节点再撞同一条异常。"""
+    text = str(error_text or '')
+    if RUNTIME_FAULT_MARKER in text:
+        return 'runtime_fault（运行时自身缺陷，resume 无效，需操作员重启 worker 后再恢复）'
+    if MODEL_CONFIG_FAULT_MARKER in text:
+        return (
+            'model_config_fault（模型配置不匹配：这一跳的思考用量顶满了声明的最大输出，'
+            '提交体没有任何空间；resume 无效，需先把该模型的思考强度调低或把最大输出调高）'
+        )
+    return ''
 
 
 def format_local_timestamp(value: Any) -> str:

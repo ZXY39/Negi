@@ -232,3 +232,28 @@ def test_distribution_skipped_event_reads_as_degraded_not_paused() -> None:
     assert "不会自动重投" in text
     assert "epoch state=failed" not in text
     assert "任务已暂停" not in text
+
+
+def test_node_error_bundle_marks_model_config_fault_class() -> None:
+    """思考顶满最大输出的暂停：agent 必须读到"改配置才有效"，否则会 resume 同一堵墙。"""
+    from g3ku.heartbeat.prompt_lane import build_heartbeat_prompt_lane
+
+    lane = build_heartbeat_prompt_lane(
+        provider_model="",
+        stable_rules_text="rules",
+        events=[{
+            "reason": "task_node_error", "task_id": "task:t", "node_id": "node:n",
+            "pause_reason": "error",
+            "error_text": (
+                "Invalid final result submission detected 1 consecutive times. Latest issue: "
+                "model_config_fault: reply carried no tool call and no text (reasoning-only) "
+                "[output-capped] | sent_reasoning_effort=xhigh sent_max_tokens=65536"
+            ),
+            "retry_attempt": 1, "retry_cap": 5, "retry_escalated": False,
+        }],
+    )
+    text = str(_field(lane, "event_bundle_text"))
+    assert "Failure class: model_config_fault" in text
+    assert "思考强度" in text
+    # 这一类的处置不是重启 worker，别让两个类别的措辞互相污染。
+    assert "重启 worker" not in text
