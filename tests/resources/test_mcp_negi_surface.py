@@ -205,4 +205,5 @@ async def test_delete_conversation_refuses_full_keys_and_purges_own_names():
     assert refused == {"ok": False, "error": "own_namespace_only", "conversation": "web:ceo-1"}
     deleted = await _call(server, "negi_delete_conversation", {"conversation": "c1"})
     assert deleted["deleted"] is True
+    assert deleted["transcript_removed"] is True
     assert client.deleted == [("ext:probe:c1", True)]

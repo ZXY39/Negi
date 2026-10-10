@@ -394,6 +394,7 @@ def build_mcp_server(client: G3kuMcpClient, *, name: str = "negi") -> FastMCP:
                 "session_id": session_id,
                 "deleted": bool(result.get("deleted")),
                 "registry_forgotten": bool(result.get("registry_forgotten")),
+                "transcript_removed": bool(result.get("transcript_removed")),
             }
 
         return await _safe(_body)
