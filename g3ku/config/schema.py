@@ -971,6 +971,8 @@ class ExternalApiTokenConfig(Base):
     token: str = ""
     label: str = ""
     enabled: bool = True
+    # None = 继承 externalApi.cross_session_enabled；true/false = 这一号单独裁决。
+    cross_session: bool | None = None
 
 
 def _normalize_external_token_id(value: Any) -> str:
@@ -989,6 +991,10 @@ class ExternalApiConfig(Base):
 
     enabled: bool = False
     event_buffer_size: int = 512
+    # 默认允许跨桥寻址：一个 token 能枚举全部会话并按 session_key 投消息。开这条
+    # 不需要新凭据层——/api/v1 本来就要 operator 亲手签发的 Bearer，而 web 只绑回环。
+    # 关掉它或按号关掉，恢复"只见自己名下会话"的旧形状。
+    cross_session_enabled: bool = True
     tokens: dict[str, ExternalApiTokenConfig] = Field(default_factory=dict)
 
     @field_validator("tokens", mode="before")

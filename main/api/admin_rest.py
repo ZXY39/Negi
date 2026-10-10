@@ -1052,12 +1052,15 @@ def _external_api_payload(cfg: Config) -> dict[str, Any]:
                 'enabled': bool(getattr(entry, 'enabled', True)),
                 'has_token': bool(token),
                 'token_masked': _mask_external_api_token(token),
+                # 三态原样给前端：None=继承全局，true/false=本号覆盖。
+                'cross_session': getattr(entry, 'cross_session', None),
             }
         )
     items.sort(key=lambda item: item['bridge_id'])
     return {
         'enabled': bool(getattr(external_api, 'enabled', False)),
         'event_buffer_size': int(getattr(external_api, 'event_buffer_size', 0) or 0),
+        'cross_session_enabled': bool(getattr(external_api, 'cross_session_enabled', True)),
         'items': items,
     }
 
@@ -1080,6 +1083,10 @@ async def update_external_api_settings(payload: dict | None = Body(default=None)
             cfg.external_api.event_buffer_size = max(1, int(raw))
         except (TypeError, ValueError):
             raise HTTPException(status_code=400, detail={'code': 'invalid_event_buffer_size'})
+    if 'crossSessionEnabled' in body or 'cross_session_enabled' in body:
+        # 必须按 key 存在判定：全局关是操作者会用的取值，真值判断会把它吞掉。
+        raw_cross = body.get('crossSessionEnabled', body.get('cross_session_enabled'))
+        cfg.external_api.cross_session_enabled = bool(raw_cross)
     save_config(cfg)
     await _refresh_runtime_after_save('admin_external_api_settings_update')
     return {'ok': True, **_external_api_payload(cfg)}
@@ -1129,6 +1136,10 @@ async def update_external_api_token(bridge_id: str, payload: dict | None = Body(
         entry.label = str(body.get('label') or '').strip()
     if 'enabled' in body:
         entry.enabled = bool(body.get('enabled'))
+    if 'crossSession' in body or 'cross_session' in body:
+        # null / 缺失以外才覆盖：显式传 null 是"交回全局裁决"，不是"关掉"。
+        raw_cross = body.get('crossSession', body.get('cross_session'))
+        entry.cross_session = None if raw_cross is None else bool(raw_cross)
     revealed = None
     if bool(body.get('regenerate')):
         revealed = secrets.token_urlsafe(32)

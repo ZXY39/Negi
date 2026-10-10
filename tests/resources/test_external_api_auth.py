@@ -15,12 +15,23 @@ from g3ku.security.bootstrap import (
 )
 
 
-def _config(*, enabled: bool, tokens: dict | None):
+def _config(*, enabled: bool, tokens: dict | None, cross_session_enabled: bool = True):
     entries = {
-        token_id: SimpleNamespace(token=str(payload.get("token") or ""), enabled=bool(payload.get("enabled", True)), label=str(payload.get("label") or ""))
+        token_id: SimpleNamespace(
+                token=str(payload.get("token") or ""),
+                enabled=bool(payload.get("enabled", True)),
+                label=str(payload.get("label") or ""),
+                cross_session=payload.get("cross_session", payload.get("crossSession")),
+            )
         for token_id, payload in (tokens or {}).items()
     }
-    return SimpleNamespace(external_api=SimpleNamespace(enabled=enabled, tokens=entries))
+    return SimpleNamespace(
+        external_api=SimpleNamespace(
+            enabled=enabled,
+            cross_session_enabled=cross_session_enabled,
+            tokens=entries,
+        )
+    )
 
 
 def _install(monkeypatch, config):
@@ -97,3 +108,28 @@ def test_secret_overlay_round_trip_for_external_tokens():
 
     restored = apply_config_secret_entries(stripped, entries)
     assert restored["externalApi"]["tokens"]["qq-bot"]["token"] == "sek-ret"
+
+
+def test_cross_session_scope_is_on_by_default(monkeypatch):
+    _install(monkeypatch, _config(enabled=True, tokens={"qq": {"token": "t"}}))
+    principal = external_auth.require_external_api(authorization="Bearer t")
+    assert principal.cross_session is True
+
+
+def test_token_can_opt_out_of_cross_session(monkeypatch):
+    _install(monkeypatch, _config(enabled=True, tokens={"qq": {"token": "t", "cross_session": False}}))
+    principal = external_auth.require_external_api(authorization="Bearer t")
+    assert principal.cross_session is False
+
+
+def test_token_can_opt_into_cross_session_when_global_is_off(monkeypatch):
+    _install(monkeypatch, _config(enabled=True, tokens={"qq": {"token": "t", "cross_session": True}}, cross_session_enabled=False))
+    principal = external_auth.require_external_api(authorization="Bearer t")
+    assert principal.cross_session is True
+
+
+def test_disabled_token_still_rejected_under_cross_session(monkeypatch):
+    _install(monkeypatch, _config(enabled=True, tokens={"qq": {"token": "t", "enabled": False}}))
+    with pytest.raises(HTTPException) as exc:
+        external_auth.require_external_api(authorization="Bearer t")
+    assert exc.value.status_code == 401

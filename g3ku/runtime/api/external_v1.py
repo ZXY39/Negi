@@ -42,6 +42,7 @@ from g3ku.runtime.external_events import (
     get_session_event_hub,
 )
 from g3ku.runtime.api.external_turns import get_external_turn_service
+from g3ku.runtime.ceo_catalog_offload import build_ceo_session_catalog_async
 from g3ku.runtime.external_outbox import ack_outbound_message, load_pending_outbound
 from g3ku.runtime.external_sessions import (
     ExternalSessionEntry,
@@ -74,11 +75,43 @@ def _registry():
 
 
 def _own_entry(session_id: str, principal: ExternalApiPrincipal) -> ExternalSessionEntry:
+    """本桥名下会话的唯一判据：跨桥寻址绝不走这里。
+
+    注册表生命周期（改名、清空）与 outbox 销账都归"会话属于签发它的那一号"，
+    放宽就等于让一个桥替另一个桥的账本做主。
+    """
     raw = str(session_id or "").strip()
     entry = _registry().get_by_session_key(raw)
     if entry is None or entry.bridge_id != principal.bridge_id:
         raise HTTPException(status_code=404, detail="session_not_found")
     return entry
+
+
+def _resolve_entry(session_id: str, principal: ExternalApiPrincipal) -> ExternalSessionEntry:
+    """读、发信与中止车道的作用域判据。
+
+    本桥名下 → 注册表条目原样返回。跨桥只在 token 被允许时放行，并且只认真实存在的
+    两样东西：别桥的注册会话，或有转录文件的会话键（`web:ceo-*` / `qq:*` 这些不进
+    注册表，没有转录就 404——否则拿到 token 的人能凭空造键）。
+
+    合成条目的 `bridge_id` 记**发起方**：回合归属、幂等位与事件流都按发起方算，
+    跨桥发进去的那一轮回复因此回到正在等的这个调用方，而不是目标会话原来的桥。
+    """
+    raw = str(session_id or "").strip()
+    entry = _registry().get_by_session_key(raw)
+    if entry is not None and entry.bridge_id == principal.bridge_id:
+        return entry
+    if not principal.cross_session:
+        raise HTTPException(status_code=404, detail="session_not_found")
+    if entry is None and not _session_manager().has_transcript(raw):
+        raise HTTPException(status_code=404, detail="session_not_found")
+    return ExternalSessionEntry(
+        bridge_id=principal.bridge_id,
+        external_key=str(entry.external_key or raw) if entry is not None else raw,
+        session_key=raw,
+        created_at=str(entry.created_at or "") if entry is not None else "",
+        title=str(entry.title or "") if entry is not None else "",
+    )
 
 
 def _session_manager() -> SessionManager:
@@ -136,12 +169,65 @@ async def create_external_session(
     }
 
 
+async def _list_all_sessions(principal: ExternalApiPrincipal) -> dict[str, Any]:
+    """全量会话目录（跨桥作用域）：复用网页那份装配，不另开一条枚举道。
+
+    目录构建要遍历全部转录（渠道会话单份可达数十 MB），统一在 CEO 专用线程里跑并吃
+    3 秒 TTL 缓存，事件循环只 await。条目形状以 `build_session_summary` 为唯一来源，
+    这里只补 `transcript_path`——运行时算出的安全名（含键长超限的 digest 逃生），
+    调用方不要自己把 session key 拼成文件名。
+    """
+    if not principal.cross_session:
+        raise HTTPException(status_code=403, detail="cross_session_scope_required")
+    manager = _session_manager()
+    try:
+        bridge = get_external_turn_service()._runtime_bridge
+    except RuntimeError:
+        bridge = None
+
+    def _session_state(session_key: str) -> Any:
+        if bridge is None:
+            return None
+        try:
+            session = bridge.get_existing_session(str(session_key or "").strip())
+        except Exception:
+            return None
+        return getattr(session, "state", None) if session is not None else None
+
+    catalog = await build_ceo_session_catalog_async(
+        manager,
+        active_session_id=f"ext-api:{principal.bridge_id}",
+        is_running_resolver=lambda key: bool(getattr(_session_state(key), "is_running", False))
+        or str(getattr(_session_state(key), "status", "") or "").strip().lower() == "running",
+        status_resolver=lambda key: str(getattr(_session_state(key), "status", "") or "").strip().lower(),
+    )
+    items: list[dict[str, Any]] = []
+    for raw_item in list(catalog.get("items") or []):
+        if not isinstance(raw_item, dict):
+            continue
+        session_id = str(raw_item.get("session_id") or "").strip()
+        if not session_id:
+            continue
+        item = dict(raw_item)
+        item["transcript_path"] = str(manager.get_path(session_id))
+        items.append(item)
+    return {
+        "ok": True,
+        "bridge_id": principal.bridge_id,
+        "scope": "all",
+        "items": items,
+    }
+
+
 @router.get("/sessions")
 async def list_external_sessions(
     external_key: str | None = Query(default=None),
+    scope: str | None = Query(default=None),
     principal: ExternalApiPrincipal = Depends(require_external_api),
 ):
     registry = _registry()
+    if str(scope or "").strip().lower() == "all":
+        return await _list_all_sessions(principal)
     if external_key:
         key = registry.get_session_key(bridge_id=principal.bridge_id, external_key=str(external_key).strip())
         entries = [registry.get_by_session_key(key)] if key else []
@@ -208,7 +294,7 @@ async def get_external_session_state(
     session_id: str,
     principal: ExternalApiPrincipal = Depends(require_external_api),
 ):
-    entry = _own_entry(session_id, principal)
+    entry = _resolve_entry(session_id, principal)
     service = get_external_turn_service()
     session = service._runtime_bridge.get_existing_session(entry.session_key)
     running = service._runtime_bridge.session_is_running(session)
@@ -393,7 +479,7 @@ async def post_external_message(
     principal: ExternalApiPrincipal = Depends(require_external_api),
     idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"),
 ):
-    entry = _own_entry(session_id, principal)
+    entry = _resolve_entry(session_id, principal)
     text = sanitize_channel_outbound_text(str(payload.get("text") or ""))
     raw_attachments = payload.get("attachments")
     if raw_attachments is not None and not isinstance(raw_attachments, list):
@@ -475,7 +561,7 @@ async def cancel_external_session(
     session_id: str,
     principal: ExternalApiPrincipal = Depends(require_external_api),
 ):
-    entry = _own_entry(session_id, principal)
+    entry = _resolve_entry(session_id, principal)
     try:
         service = get_external_turn_service()
     except RuntimeError:
@@ -558,7 +644,7 @@ async def stream_external_events(
     principal: ExternalApiPrincipal = Depends(require_external_api),
     last_event_id: str | None = Header(default=None, alias="Last-Event-ID"),
 ):
-    entry = _own_entry(session_id, principal)
+    entry = _resolve_entry(session_id, principal)
     hub = get_session_event_hub(entry.session_key)
     queue = hub.subscribe()
     try:
