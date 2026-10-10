@@ -31,7 +31,9 @@ from g3ku.agent.markdown_memory import (
 from g3ku.config.live_runtime import get_runtime_config
 from g3ku.providers.base import normalize_usage_payload
 from g3ku.providers.chatmodels import build_chat_model
-from main.runtime.chat_backend import build_actual_request_diagnostics
+from g3ku.runtime.chunk_compression_plan import resolve_chunk_capacity
+from main.runtime.chat_backend import build_actual_request_diagnostics, resolve_send_model_context_window_info
+from main.runtime.send_token_preflight import estimate_runtime_provider_request_preview_tokens
 from main.prompts import load_prompt
 
 _NOTE_REF_RE = re.compile(r"(?:\bref:|见noteid:)(?P<ref>[a-z0-9_]+)\b")
@@ -2173,6 +2175,14 @@ class MemoryManager:
         final_text = ""
         for _ in range(round_limit):
             request_messages = self._memory_request_messages(messages)
+            self._memory_window_guard(
+                runtime_config=runtime_config,
+                model_chain=list(model_chain or []),
+                request_messages=request_messages,
+                tool_schemas=tool_schemas,
+                usage_total=usage_total,
+                request_artifacts=request_artifacts,
+            )
             response = await model.chat(request_messages, tools=tool_schemas or None)
             self._merge_usage(usage_total, self._extract_usage(response))
             artifact = self._persist_memory_request_artifact(
@@ -2976,6 +2986,57 @@ class MemoryManager:
             if tool_calls:
                 payload["tool_calls"] = tool_calls
         return payload
+
+    def _memory_window_guard(
+        self,
+        *,
+        runtime_config: Any,
+        model_chain: list[str],
+        request_messages: list[dict[str, Any]],
+        tool_schemas: list[dict[str, Any]] | None,
+        usage_total: dict[str, int],
+        request_artifacts: list[dict[str, Any]],
+    ) -> None:
+        """记忆车道不切块：估算请求超过单块容量就带真实原因失败，不逐轮撞同一个 400。
+
+        容量与节点/会话车道同一个函数推导（窗口 − 信封 − 输出余量，再用该批次已
+        观测到的输入+输出跨度夹一刀）。记忆批次是一条大 user prompt，没有可分块的
+        历史，所以超限即止，由上层停车等成功信号或人工重试。
+        """
+        refs = [str(item or "").strip() for item in list(model_chain or []) if str(item or "").strip()]
+        if not refs:
+            return
+        try:
+            info = resolve_send_model_context_window_info(config=runtime_config, model_refs=refs)
+            window = int(getattr(info, "context_window_tokens", 0) or 0)
+        except Exception:
+            return
+        if window <= 0:
+            return
+        try:
+            estimated = int(estimate_runtime_provider_request_preview_tokens(
+                provider_request_body=None,
+                request_messages=list(request_messages or []),
+                tool_schemas=list(tool_schemas or []),
+            ) or 0)
+        except Exception:
+            return
+        observed = int(usage_total.get("input_tokens") or 0) + int(usage_total.get("output_tokens") or 0)
+        capacity, _source = resolve_chunk_capacity(
+            context_window_tokens=window,
+            envelope_tokens=0,
+            observed_span_tokens=observed,
+        )
+        if capacity > 0 and estimated <= capacity:
+            return
+        raise _MemoryProviderError(
+            (
+                "memory send exceeds model window: "
+                f"估算={estimated} 容量={capacity} 窗口={window} 观测跨度={observed}"
+            ),
+            usage=dict(usage_total),
+            request_artifacts=list(request_artifacts),
+        )
 
     def _memory_request_messages(self, messages: list[Any]) -> list[dict[str, Any]]:
         return [self._message_to_request_dict(message) for message in list(messages or [])]

@@ -186,7 +186,7 @@ async def test_frontdoor_compression_empty_retry_respects_cancel(
 async def test_frontdoor_compression_chunks_when_single_shot_exceeds_window(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    runner = _build_runner(monkeypatch, context_window_tokens=1_000)
+    runner = _build_runner(monkeypatch, context_window_tokens=4_000)
     captured: list[list[dict[str, object]]] = []
 
     async def _call_model_with_tools(**kwargs):
@@ -218,11 +218,15 @@ async def test_frontdoor_compression_chunks_when_single_shot_exceeds_window(
         if len(messages) == 1 and str((messages[0] or {}).get("role") or "") == "assistant":
             text = str((messages[0] or {}).get("content") or "")
             if text.startswith("[分块摘要"):
-                # 归并判据只看"拼接后的摘要本身超预算"。块预算现在按历史/3 放长，
-                # 这里按内容形态而不是按条数/角色来识别这一读，避免把某个原子组也顶大。
+                # 归并判据只看"拼接后的摘要本身超容量"：按内容形态识别这一读，
+                # 否则某个只含一条 assistant 的原子组会被一起顶大。
                 return 100_000
-            return 25_000
-        return 15_000  # 每个原子组自成一塊
+            return 300
+        if len(messages) == 1 and str((messages[0] or {}).get("role") or "") == "system":
+            return 200  # 信封：容量 = 窗口 − (信封 + 生产侧 2000) − 输出余量
+        if "【上下文压缩指令】" in rendered:
+            return 9_000  # 单发压缩请求自身超窗 → 分块
+        return len(messages) * 300  # 按装载量给读数（原子组各 1 条 ⇒ 300 tok）
 
     monkeypatch.setattr(ceo_runtime_ops, "_estimate_frontdoor_provider_request_tokens", _module_estimate)
 

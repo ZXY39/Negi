@@ -40,6 +40,10 @@ from g3ku.providers.responses_protocol_helpers import (
 from g3ku.providers.responses_protocol_helpers import (
     _prompt_cache_key as _preview_prompt_cache_key,
 )
+from g3ku.runtime.chunk_compression_plan import (
+    ChunkPlanRefusal,
+    plan_chunk_groups,
+)
 from g3ku.runtime.config_refresh import refresh_loop_runtime_config
 from g3ku.runtime.context.summarizer import estimate_tokens
 from g3ku.runtime.frontdoor.message_builder import (
@@ -229,15 +233,6 @@ _FRONTDOOR_TOKEN_COMPRESSION_INSTRUCTION = (
 # 压缩保留尾部的 raw 阶段窗口上限：尾部是压缩后请求体的不可压缩部分，窗口再大
 # 就会挤掉压缩本身的效果；超出上限时退回按条数对齐的普通尾部。
 _FRONTDOOR_COMPACTION_RAW_TAIL_MAX_MESSAGES = 40
-# 分块压缩：单发压缩请求自身放不下窗口时，把可压缩历史按原子组（工具调用组
-# 不可分）装箱成若干块分别摘要。块预算 = 窗口×比例 − 预留（指令+输出+封装）。
-_COMPRESSION_CHUNK_WINDOW_RATIO = 0.5
-_COMPRESSION_CHUNK_HEADROOM_TOKENS = 24_000
-_COMPRESSION_CHUNK_MIN_TOKENS = 20_000
-# 块数上限（与节点侧同源）：超大历史也按 3 次收口，避免按地板切成几十块。
-_COMPRESSION_TARGET_CHUNKS = 3
-# 一次压缩最多发几块：超过即规模问题，直接报窗口超限，不逐块白烧。
-_COMPRESSION_MAX_CHUNKS = 8
 _TOOL_CONTRACT_ECHO_REPAIR_MESSAGE = (
     'The previous response repeated the internal Runtime Tool Contract. '
     'Do not output, summarize, or quote that contract. Return only the '
@@ -1702,13 +1697,40 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
             recoverable=True,
         )
 
-    def _frontdoor_context_window_exceeded_error(self, *, model_info: dict[str, Any] | None) -> FrontdoorCompressionRuntimeError:
+    def _frontdoor_context_window_exceeded_error(
+        self,
+        *,
+        model_info: dict[str, Any] | None,
+        detail: str = '',
+    ) -> FrontdoorCompressionRuntimeError:
         display_name = self._frontdoor_model_display_name(model_info)
+        message = f"上下文大小超出当前模型{display_name}，请更改模型链配置后继续"
+        normalized_detail = str(detail or '').strip()
+        if normalized_detail:
+            # 拒因原样带上：规模超限、单组超容量、容量非正是三种不同处置。
+            message = f"{message}（{normalized_detail}）"
         return FrontdoorCompressionRuntimeError(
             code="frontdoor_context_window_exceeded",
-            message=f"上下文大小超出当前模型{display_name}，请更改模型链配置后继续",
+            message=message,
             recoverable=True,
         )
+
+    def _frontdoor_observed_request_span_tokens(self, state: CeoGraphState | None) -> int:
+        """会话本回合已发出的最大 (输入+输出) 跨度：分块容量的实测下界。"""
+        highest = 0
+        for item in list((state or {}).get('frontdoor_actual_request_history') or []):
+            if not isinstance(item, dict):
+                continue
+            usage = item.get('usage')
+            if not isinstance(usage, dict):
+                continue
+            try:
+                span = int(usage.get('input_tokens') or 0) + int(usage.get('output_tokens') or 0)
+            except (TypeError, ValueError):
+                continue
+            if span > highest:
+                highest = span
+        return highest
 
     @staticmethod
     def _estimate_frontdoor_send_total_tokens(
@@ -2310,6 +2332,7 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
                     is_cancelled=_compression_cancelled,
                     model_info=model_info,
                     context_window_tokens=context_window_tokens,
+                    observed_span_tokens=self._frontdoor_observed_request_span_tokens(state),
                 )
             else:
                 compressed_text, _compressed_message = await self._run_frontdoor_compression_helper_request(
@@ -2609,6 +2632,7 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
         is_cancelled: Any,
         model_info: dict[str, Any],
         context_window_tokens: int,
+        observed_span_tokens: int = 0,
     ) -> tuple[str, int, bool]:
         """超窗分块压缩：单发压缩请求自身放不下窗口时的兜底路径。
 
@@ -2639,57 +2663,23 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
             (list(group), _estimate_messages(group))
             for group in iter_compaction_atomic_groups(older_history_messages)
         ]
-        history_tokens = sum(tokens for _group, tokens in grouped)
-        window_budget = max(
-            _COMPRESSION_CHUNK_MIN_TOKENS,
-            int(context_window_tokens * _COMPRESSION_CHUNK_WINDOW_RATIO) - _COMPRESSION_CHUNK_HEADROOM_TOKENS,
-        )
-
         envelope_budget = _estimate_messages(
             [{"role": "system", "content": _FRONTDOOR_TOKEN_COMPRESSION_SYSTEM_PROMPT}]
         ) + 2_000
-        target_chunks = max(1, _COMPRESSION_TARGET_CHUNKS)
-        # 与节点侧同源：分量要连每块信封一起预留，否则 /3 会因信封占用多切出一块。
-        share_budget = -(-(history_tokens + envelope_budget * target_chunks) // target_chunks)
-        # 单块硬上限：压缩请求（信封 + 装载 + 摘要余量）不得超过声明窗口。
-        chunk_ceiling = max(
-            window_budget,
-            int(context_window_tokens or 0) - envelope_budget - _COMPRESSION_CHUNK_HEADROOM_TOKENS,
+        plan = plan_chunk_groups(
+            [tokens for _group, tokens in grouped],
+            context_window_tokens=int(context_window_tokens or 0),
+            envelope_tokens=envelope_budget,
+            observed_span_tokens=int(observed_span_tokens or 0),
         )
-
-        def _pack(budget: int) -> list[list[dict[str, Any]]]:
-            packed: list[list[dict[str, Any]]] = []
-            carry: list[dict[str, Any]] = []
-            carry_tokens = envelope_budget
-            for grp, grp_tokens in grouped:
-                if carry and carry_tokens + grp_tokens > budget:
-                    packed.append(carry)
-                    carry = []
-                    carry_tokens = envelope_budget
-                carry.extend(grp)
-                carry_tokens += grp_tokens
-            if carry:
-                packed.append(carry)
-            return packed
-
-        chunk_budget = min(max(window_budget, share_budget), chunk_ceiling)
-        chunks = _pack(chunk_budget)
-        # 原子组不可分 + 贪心装箱 ⇒ 即使按 /3 放大仍可能多切一块；按实测块数再放大，
-        # 最多两轮，每轮都被单块硬上限夹住（宁可多切一块，也不发注定超窗的请求）。
-        for _round in range(2):
-            if len(chunks) <= target_chunks:
-                break
-            grown = -(-chunk_budget * len(chunks) // target_chunks)
-            if grown >= chunk_ceiling and chunk_budget >= chunk_ceiling:
-                break
-            chunk_budget = min(grown, chunk_ceiling)
-            chunks = _pack(chunk_budget)
-        if not chunks:
-            chunks = [list(older_history_messages)]
-        if len(chunks) > _COMPRESSION_MAX_CHUNKS:
-            # 按窗口切要十几次的规模：一次都不发，直接报窗口超限。
-            # 这条车道的 helper 重试不设上限，让它逐块跑等于用十几次长调用换一次注定仍超窗的发送。
-            raise self._frontdoor_context_window_exceeded_error(model_info=model_info)
+        if isinstance(plan, ChunkPlanRefusal):
+            # 容量非正 / 单组超容量 / 块数超上限：一次都不发，直接报窗口超限。
+            raise self._frontdoor_context_window_exceeded_error(model_info=model_info, detail=plan.reason)
+        chunks = [
+            [dict(item) for group, _tokens in grouped[start:end] for item in group]
+            for start, end in plan.spans
+        ]
+        chunk_budget = int(plan.capacity_tokens or 0)
         summaries: list[str] = []
         total_chunks = len(chunks)
         for index, chunk in enumerate(chunks, start=1):
