@@ -7682,6 +7682,7 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
             "used_tools": [],
             "route_kind": "direct_reply",
             "verified_task_ids": [],
+            "dispatched_task_ids": [],
             "repair_overlay_text": None,
             "xml_repair_attempt_count": 0,
             "xml_repair_excerpt": "",
@@ -8857,6 +8858,7 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
             ]
         )
         verified_task_ids: list[str] = []
+        dispatched_task_ids: list[str] = []
         for tool_result in tool_results:
             tool_name = str(tool_result.get("tool_name") or "").strip()
             result_text = str(tool_result.get("result_text") or "").strip()
@@ -8866,9 +8868,15 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
             if not bool(parsed.get("created")):
                 continue
             for task_id in list(parsed.get("created_task_ids") or []):
-                if not task_id or not self._task_id_exists(task_id) or task_id in verified_task_ids:
+                if not task_id or task_id in dispatched_task_ids:
                     continue
-                verified_task_ids.append(task_id)
+                # 任务号取自运行时自己写的工具结果（`创建任务成功task:x`），不是模型正文，
+                # 所以"本回合派发了哪些任务"不需要存在性闸门；闸门留给模型可见的那句派发尾注
+                # （verified）——只有那边需要防"回一个不存在的号"。实盘：加了闸门的 metadata
+                # 在 3 次派发里只落了 1 次。
+                dispatched_task_ids.append(task_id)
+                if self._task_id_exists(task_id):
+                    verified_task_ids.append(task_id)
         route_kind = self._route_kind_for_turn(
             used_tools=used_tools,
             default=str(state.get("route_kind") or "direct_reply"),
@@ -8900,6 +8908,7 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
             "executable_tool_call_payloads": [],
             "synthetic_tool_results": [],
             "verified_task_ids": list(verified_task_ids),
+            "dispatched_task_ids": list(dispatched_task_ids),
             "synthetic_tool_calls_used": False,
             "frontdoor_stage_state": frontdoor_stage_state,
             "pending_content_open_image_payloads": pending_content_open_image_payloads,

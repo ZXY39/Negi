@@ -20,12 +20,12 @@ from g3ku.mcp_gateway.client import G3kuMcpClient
 from g3ku.mcp_gateway.server import build_mcp_server
 
 TOOL_NAMES = {
-    "g3ku_chat",
-    "g3ku_get_reply",
-    "g3ku_session_status",
-    "g3ku_pause",
-    "g3ku_cancel",
-    "g3ku_list_conversations",
+    "negi_chat",
+    "negi_get_reply",
+    "negi_session_status",
+    "negi_pause",
+    "negi_cancel",
+    "negi_list_conversations",
 }
 
 
@@ -142,7 +142,7 @@ async def test_chat_completed_maps_reply_and_usage():
         outcome={"kind": "reply", "text": "完成回复", "turn_id": "t7", "usage": {"input_tokens": 3}}
     )
     server = build_mcp_server(fake)
-    result = await _call(server, "g3ku_chat", {"conversation": "c1", "message": "你好"})
+    result = await _call(server, "negi_chat", {"conversation": "c1", "message": "你好"})
     assert result["ok"] is True
     assert result["status"] == "completed"
     assert result["reply"] == "完成回复"
@@ -158,11 +158,11 @@ async def test_chat_completed_maps_reply_and_usage():
 async def test_chat_pending_returns_hint_and_turn_id():
     fake = FakeGatewayClient(outcome={"kind": "timeout"})
     server = build_mcp_server(fake)
-    result = await _call(server, "g3ku_chat", {"conversation": "c1", "message": "慢任务", "wait_seconds": 30})
+    result = await _call(server, "negi_chat", {"conversation": "c1", "message": "慢任务", "wait_seconds": 30})
     assert result["ok"] is True
     assert result["status"] == "pending"
     assert result["turn_id"] == "t1"
-    assert "g3ku_get_reply" in result["hint"]
+    assert "negi_get_reply" in result["hint"]
 
 
 @pytest.mark.asyncio
@@ -172,7 +172,7 @@ async def test_chat_queued_timeout_returns_receipt():
         outcome={"kind": "timeout"},
     )
     server = build_mcp_server(fake)
-    result = await _call(server, "g3ku_chat", {"conversation": "c1", "message": "加一句"})
+    result = await _call(server, "negi_chat", {"conversation": "c1", "message": "加一句"})
     assert result["status"] == "queued_receipt"
     assert result["receipt"] == "收到，将在当前任务中一并处理。"
     assert result["submit_status"] == "queued"
@@ -186,7 +186,7 @@ async def test_chat_failed_and_cancelled_and_no_reply():
         ({"kind": "no_reply"}, "no_reply"),
     ):
         server = build_mcp_server(FakeGatewayClient(outcome=outcome))
-        result = await _call(server, "g3ku_chat", {"conversation": "c1", "message": "x"})
+        result = await _call(server, "negi_chat", {"conversation": "c1", "message": "x"})
         assert result["status"] == expected
         if expected == "failed":
             assert result["error"] == "模型链不可用"
@@ -198,12 +198,12 @@ async def test_tools_never_raise_http_errors_become_payloads():
     response = httpx.Response(401, json={"detail": "invalid_api_token"}, request=request)
     fake = FakeGatewayClient(send_error=httpx.HTTPStatusError("401", request=request, response=response))
     server = build_mcp_server(fake)
-    result = await _call(server, "g3ku_chat", {"conversation": "c1", "message": "x"})
+    result = await _call(server, "negi_chat", {"conversation": "c1", "message": "x"})
     assert result == {"ok": False, "error": "invalid_api_token", "status_code": 401}
 
     fake2 = FakeGatewayClient(send_error=httpx.ConnectError("boom"))
     server2 = build_mcp_server(fake2)
-    result2 = await _call(server2, "g3ku_chat", {"conversation": "c1", "message": "x"})
+    result2 = await _call(server2, "negi_chat", {"conversation": "c1", "message": "x"})
     assert result2 == {"ok": False, "error": "connection_failed"}
 
 
@@ -212,7 +212,7 @@ async def test_get_reply_found_and_not_found():
     server = build_mcp_server(
         FakeGatewayClient(outcome={"kind": "reply", "text": "续取回复", "turn_id": "t2", "usage": None})
     )
-    found = await _call(server, "g3ku_get_reply", {"conversation": "c1"})
+    found = await _call(server, "negi_get_reply", {"conversation": "c1"})
     assert found == {
         "ok": True,
         "conversation": "c1",
@@ -220,10 +220,11 @@ async def test_get_reply_found_and_not_found():
         "reply": "续取回复",
         "turn_id": "t2",
         "usage": None,
+        "task_ids": [],
     }
 
     server2 = build_mcp_server(FakeGatewayClient(outcome={"kind": "timeout"}))
-    missing = await _call(server2, "g3ku_get_reply", {"conversation": "c1"})
+    missing = await _call(server2, "negi_get_reply", {"conversation": "c1"})
     assert missing["found"] is False
     assert missing["status"] == "timeout"
 
@@ -243,23 +244,23 @@ async def test_session_status_pause_cancel_list():
     )
     server = build_mcp_server(fake)
 
-    status = await _call(server, "g3ku_session_status", {"conversation": "c1"})
+    status = await _call(server, "negi_session_status", {"conversation": "c1"})
     assert status["running"] is True
     assert status["queued_follow_ups"] == 2
     assert status["inflight_turn_id"] == "t9"
     assert status["last_seq"] == 3
 
-    paused = await _call(server, "g3ku_pause", {"conversation": "c1"})
+    paused = await _call(server, "negi_pause", {"conversation": "c1"})
     assert paused == {"ok": True, "conversation": "c1", "paused": True, "turn_id": "t9"}
 
     idle = FakeGatewayClient(state={"running": False, "queued_follow_ups": 0, "inflight_turn_id": None, "last_error": None})
-    no_turn = await _call(build_mcp_server(idle), "g3ku_pause", {"conversation": "c1"})
+    no_turn = await _call(build_mcp_server(idle), "negi_pause", {"conversation": "c1"})
     assert no_turn == {"ok": False, "error": "no_inflight_turn", "conversation": "c1"}
 
-    cancelled = await _call(server, "g3ku_cancel", {"conversation": "c1"})
+    cancelled = await _call(server, "negi_cancel", {"conversation": "c1"})
     assert cancelled["cancelled"] == 2
 
-    listed = await _call(server, "g3ku_list_conversations", {})
+    listed = await _call(server, "negi_list_conversations", {})
     assert listed["ok"] is True
     assert [item["conversation"] for item in listed["items"]] == ["alpha", "other:x"]
 
@@ -276,10 +277,10 @@ async def test_mcp_protocol_in_memory_list_and_call_tools():
         tools = await session.list_tools()
         names = {tool.name for tool in tools.tools}
         assert TOOL_NAMES <= names
-        chat_schema = next(t for t in tools.tools if t.name == "g3ku_chat").inputSchema
+        chat_schema = next(t for t in tools.tools if t.name == "negi_chat").inputSchema
         assert {"conversation", "message"} <= set(chat_schema.get("required") or [])
 
-        result = await session.call_tool("g3ku_chat", {"conversation": "c1", "message": "协议层你好"})
+        result = await session.call_tool("negi_chat", {"conversation": "c1", "message": "协议层你好"})
         payload = None
         structured = getattr(result, "structuredContent", None)
         if isinstance(structured, dict):
@@ -477,7 +478,7 @@ async def test_mcp_list_conversations_all_scope_carries_preview_and_path():
             ],
         },
     )
-    listed = await _call(build_mcp_server(fake), "g3ku_list_conversations", {})
+    listed = await _call(build_mcp_server(fake), "negi_list_conversations", {})
     assert fake.listed_scopes == ["all"]
     assert listed["scope"] == "all" and listed["count"] == 1
     item = listed["items"][0]
@@ -500,7 +501,7 @@ async def test_mcp_list_conversations_reports_transcript_flag_only_when_upstream
             ],
         },
     )
-    listed = await _call(build_mcp_server(fake), "g3ku_list_conversations", {})
+    listed = await _call(build_mcp_server(fake), "negi_list_conversations", {})
     by_conversation = {item["conversation"]: item for item in listed["items"]}
     assert by_conversation["with-flag"]["has_transcript"] is True
     assert "has_transcript" not in by_conversation["without-flag"]
@@ -516,7 +517,7 @@ async def test_mcp_list_conversations_labels_fallback_when_scope_denied():
         },
         scope_all_error=_http_error(403),
     )
-    listed = await _call(build_mcp_server(fake), "g3ku_list_conversations", {})
+    listed = await _call(build_mcp_server(fake), "negi_list_conversations", {})
     assert fake.listed_scopes == ["all", ""]
     assert listed["scope"] == "own" and listed["requested_scope"] == "all"
     assert [item["conversation"] for item in listed["items"]] == ["alpha"]
@@ -526,6 +527,6 @@ async def test_mcp_list_conversations_labels_fallback_when_scope_denied():
 async def test_mcp_chat_with_full_session_key_does_not_create_session():
     """全键寻址不建会话：发进去的就是那个会话本身。"""
     fake = FakeGatewayClient()
-    result = await _call(build_mcp_server(fake), "g3ku_chat", {"conversation": "web:ceo-a", "message": "hi"})
+    result = await _call(build_mcp_server(fake), "negi_chat", {"conversation": "web:ceo-a", "message": "hi"})
     assert result["session_id"] == "web:ceo-a"
     assert fake.sent == [("web:ceo-a", "hi")]

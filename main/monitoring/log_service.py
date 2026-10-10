@@ -2180,6 +2180,13 @@ class TaskLogService:
         return {
             'compaction_applied': bool(payload.get('compaction_applied')),
             'compaction_mode': str(payload.get('compaction_mode') or '').strip(),
+            'compression_mode': str(payload.get('compression_mode') or '').strip(),
+            'chunk_count': int(payload.get('chunk_count') or 0),
+            'merge_pass_applied': bool(payload.get('merge_pass_applied')),
+            'chunk_failed_count': int(payload.get('chunk_failed_count') or 0),
+            'chunk_failed_indexes': [
+                int(item or 0) for item in list(payload.get('chunk_failed_indexes') or [])
+            ],
             'projection_kind': str(payload.get('projection_kind') or '').strip(),
             'helper_usage': dict(helper_usage) if isinstance(helper_usage, dict) else {},
             'estimate_source': str(payload.get('estimate_source') or '').strip(),

@@ -26,7 +26,7 @@ def stub_server(monkeypatch):
         def run(self, transport: str = "stdio") -> None:
             captured["transport"] = transport
 
-    def _fake_build(client, *, name: str = "g3ku"):
+    def _fake_build(client, *, name: str = "negi"):
         captured["client"] = client
         captured["name"] = name
         return _StubMcp()
@@ -36,14 +36,14 @@ def stub_server(monkeypatch):
 
 
 def test_serve_requires_token_and_keeps_stdout_clean(runner: CliRunner):
-    result = runner.invoke(app, ["mcp", "serve"], env={"G3KU_EXTERNAL_TOKEN": None})
+    result = runner.invoke(app, ["mcp", "serve"], env={"NEGI_EXTERNAL_TOKEN": None})
     assert result.exit_code == 2
     assert result.stdout == ""  # F10：stdout 一个字节都不能有
     assert "token required" in result.stderr
 
 
 def test_serve_uses_env_token_and_stdio_transport(runner: CliRunner, stub_server):
-    result = runner.invoke(app, ["mcp", "serve"], env={"G3KU_EXTERNAL_TOKEN": "env-token"})
+    result = runner.invoke(app, ["mcp", "serve"], env={"NEGI_EXTERNAL_TOKEN": "env-token"})
     assert result.exit_code == 0, result.stderr
     assert result.stdout == ""  # stdio 协议通道必须纯净
     assert stub_server["transport"] == "stdio"

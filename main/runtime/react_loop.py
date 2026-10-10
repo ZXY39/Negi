@@ -6401,6 +6401,16 @@ class ReActToolLoop:
         return {
             'compaction_applied': applied,
             'compaction_mode': str(payload.get('mode') or '').strip() if applied else '',
+            # `compaction_mode` 说的是"llm 重写还是标记裁撤"，`compression_mode` 说的是
+            # "单发还是分块"——两条轴各一个字段，混成一个就把分块读数从账本里抹掉了
+            # （实盘：节点分块跑了 6 跳，账本里只看得见 mode=llm）。
+            'compression_mode': str(payload.get('compression_mode') or '').strip() if applied else '',
+            'chunk_count': int(payload.get('chunk_count') or 0) if applied else 0,
+            'merge_pass_applied': bool(payload.get('merge_pass_applied')) if applied else False,
+            'chunk_failed_count': int(payload.get('chunk_failed_count') or 0) if applied else 0,
+            'chunk_failed_indexes': (
+                [int(item or 0) for item in list(payload.get('chunk_failed_indexes') or [])] if applied else []
+            ),
             'projection_kind': 'token_compacted' if applied else '',
             'helper_usage': dict(helper_usage) if isinstance(helper_usage, dict) else {},
             'estimate_source': str(payload.get('estimate_source') or '').strip(),
@@ -6612,6 +6622,9 @@ class ReActToolLoop:
                     token_preflight_diagnostics["chunk_failed_count"] = int(
                         compression_helper_call.get("chunk_failed_count") or 0
                     )
+                    token_preflight_diagnostics["chunk_failed_indexes"] = [
+                        int(item or 0) for item in list(compression_helper_call.get("chunk_failed_indexes") or [])
+                    ]
                     token_preflight_diagnostics["helper_message_count"] = int(
                         compression_helper_call.get("history_message_count") or 0
                     )
