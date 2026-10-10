@@ -253,6 +253,34 @@ class LLMProvider(ABC):
         raise NotImplementedError
 
 
+def provider_body_output_cap(body: Any) -> int | None:
+    """请求体里"这一跳声明了多少输出上限"，两种协议键名不同。
+
+    Chat Completions 写 `max_tokens`，Responses 写 `max_output_tokens`。只读前者会让
+    responses 车道的每一跳读成"没声明上限"，据此做的截断判档与台账标量全部失效。
+    """
+    payload = body if isinstance(body, dict) else {}
+    for key in ("max_tokens", "max_output_tokens"):
+        value = payload.get(key)
+        if isinstance(value, bool):
+            continue
+        if isinstance(value, int):
+            return value
+    return None
+
+
+def provider_body_reasoning_effort(body: Any) -> str:
+    """请求体里实际发出的思考档位：Chat 是平铺字段，Responses 在 `reasoning.effort`。"""
+    payload = body if isinstance(body, dict) else {}
+    flat = str(payload.get("reasoning_effort") or "").strip()
+    if flat:
+        return flat
+    reasoning = payload.get("reasoning")
+    if isinstance(reasoning, dict):
+        return str(reasoning.get("effort") or "").strip()
+    return ""
+
+
 def _usage_lookup(value: Any, *path: str) -> tuple[bool, Any]:
     current = value
     for key in path:

@@ -61,6 +61,7 @@ CEO/frontdoor 的 provider-facing request 以 `.g3ku/web-ceo-requests/<session>/
 如果 provider adapter 提供了 `provider_request_body`，排 cache miss 时优先用它校验。特别是 OpenAI `/responses` 路径，要看 `provider_request_body.input`、`provider_request_body.tools`、`provider_request_body.parallel_tool_calls`。
 
 - 两份 adapter 的副本形状不同，别把差异读成"body 没落"：Responses 路径带完整请求体（`input` / `tools` 等），Chat Completions 路径带的是**参数面副本**（`model` / `max_tokens` / `temperature` / `reasoning_effort` / `tool_choice` / `parallel_tool_calls`，工具只记 `tool_count`），正文与工具束本体在 actual-request artifact 的 `request_messages` / `actual_tool_schemas` 里。所以 Chat 路径上 `provider_request_body.input` 缺席是正常形状，不是证据缺失。
+- 取"这一跳声明了多少输出上限/哪个档位"必须按两条协议各自的键名读：Chat 是 `max_tokens` 与平铺 `reasoning_effort`，Responses 是 `max_output_tokens` 与 `reasoning.effort`。单一来源在 `g3ku/providers/base.py`（`provider_body_output_cap` / `provider_body_reasoning_effort`）；只读 Chat 键名会让 Responses 跳的 `sent_max_tokens` 恒为 `None`，据此做的截断判档全部落 `unknown`。
 - 台账逐跳另存 `sent_max_tokens` / `sent_reasoning_effort` 两个标量（未上报为 `None`，与合法的 `0` 分开）。判"这一跳是被声明的输出上限截断、还是被窗口剩余挤掉"靠的就是它们与回执 `output_tokens` 的关系，不依赖 `context_window_tokens`（详见 `config-and-models.md`「Frontdoor Context Window Contract」）。
 
 - 如果 `frontdoor_token_preflight_diagnostics.final_request_tokens` 已经接近 `effective_trigger_tokens`，但 usage 还是明显更高，优先按“估算偏小”排查，不要先怀疑 cache family churn。
