@@ -6,6 +6,9 @@ outbox 销账必须仍然只认本桥名下。这里把界线的两侧都钉住�
 
 from __future__ import annotations
 
+from pathlib import Path
+from types import SimpleNamespace
+
 import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
@@ -35,12 +38,37 @@ def submits():
     return []
 
 
+class _RuntimeState:
+    is_running = False
+    status = ""
+
+
+class _RuntimeManager:
+    """runtime_manager.get(key) 的形状桩：读运行档位用。"""
+
+    def get(self, session_key):
+        return SimpleNamespace(state=_RuntimeState)
+
+
+class _CatalogStore:
+    """只当哨兵用：断言目录构建拿到的就是运行时这一份 store。"""
+
+    def get_path(self, key):
+        return SessionManager(Path.cwd()).get_path(key)
+
+
+_RUNTIME_STORE = _CatalogStore()
+
+
 @pytest.fixture
 def client(monkeypatch, workspace, registry, submits):
     manager = SessionManager(workspace)
+    monkeypatch.chdir(workspace)
     monkeypatch.setattr(external_v1, "get_external_session_registry", lambda: registry)
     monkeypatch.setattr(external_v1, "_session_manager", lambda: manager)
     monkeypatch.setattr(external_v1, "workspace_path", lambda: workspace)
+    monkeypatch.setattr(external_v1, "peek_global_agent", lambda: SimpleNamespace(sessions=_RUNTIME_STORE))
+    monkeypatch.setattr(external_v1, "get_runtime_manager", lambda agent: _RuntimeManager())
 
     class _Bridge:
         def get_existing_session(self, session_key):
@@ -106,9 +134,11 @@ def test_scope_all_lists_preview_and_transcript_path(client, monkeypatch, worksp
     seen = {}
 
     async def _fake_catalog(session_manager, *, active_session_id, is_running_resolver, status_resolver, **kwargs):
+        seen["manager_is_runtime_store"] = session_manager is _RUNTIME_STORE
         seen["active_session_id"] = active_session_id
         seen["is_running"] = is_running_resolver("web:ceo-local")
         seen["status"] = status_resolver("web:ceo-local")
+        # 目录把渠道会话放在 channel_groups，"全部"必须把两侧合起来
         return {
             "items": [
                 {
@@ -136,7 +166,23 @@ def test_scope_all_lists_preview_and_transcript_path(client, monkeypatch, worksp
                     "session_origin": "web",
                     "can_message": True,
                 },
-            ]
+            ],
+            "channel_groups": [
+                {
+                    "channel_id": "qq-official",
+                    "items": [
+                        {
+                            "session_id": "qq:group:7",
+                            "title": "QQ 群",
+                            "preview_text": "群里最后一句",
+                            "message_count": 4,
+                            "session_family": "channel",
+                            "session_origin": "qq-official",
+                            "can_message": True,
+                        }
+                    ],
+                }
+            ],
         }
 
     monkeypatch.setattr(external_v1, "build_ceo_session_catalog_async", _fake_catalog)
@@ -145,8 +191,11 @@ def test_scope_all_lists_preview_and_transcript_path(client, monkeypatch, worksp
     payload = response.json()
     assert payload["scope"] == "all"
     by_id = {item["session_id"]: item for item in payload["items"]}
-    assert set(by_id) == {foreign.session_key, "web:ceo-local"}
+    # 渠道侧那一条也在，且只出现一次
+    assert set(by_id) == {foreign.session_key, "web:ceo-local", "qq:group:7"}
+    assert seen["manager_is_runtime_store"] is True, "必须用运行时那份 store，第二份实例会整表静默跳过"
     assert by_id[foreign.session_key]["preview_text"] == "别人群里最新的一句"
+    assert by_id["qq:group:7"]["transcript_path"].endswith("qq_group_7.jsonl")
     assert by_id["web:ceo-local"]["transcript_path"] == str(SessionManager(workspace).get_path("web:ceo-local"))
     assert seen["active_session_id"] == "ext-api:poster"
     assert seen["is_running"] is False and seen["status"] == ""

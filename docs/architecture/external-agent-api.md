@@ -29,7 +29,10 @@
 - `ext:` 前缀在 `session_agent.py` 的 frontdoor 连续性前缀表中。目录分组与「历史不可改」两轴收口在 `g3ku/runtime/session_keys.py::is_channel_session_key`（legacy `china:` 归档同语义）。第三轴「能否向该会话投递输入」由注册表决定，与只读判定无关：`/ws/ceo` 对 `ext:` 会话按 `get_external_session_registry().get_by_session_key()` 解析一次（连接期），有条目即接受网页输入、按「回合契约」提交，无条目（`china:*`、注册表丢失的孤儿转录）回 `channel_session_readonly`。
 - 会话 key 编解码的规范实现位于核心模块 `g3ku/runtime/session_keys.py`（`china:*` 格式与历史转录字节级一致，存量转录保持可读）。
 - 注册表条目与转录文件是两个轴，`GET /sessions` 的每一项因此带 `has_transcript`（判据=该键的 `sessions/ext_*.jsonl` 在不在）：桥一注册就有线上条目而还没有转录，网页侧「删除渠道会话」则相反——清掉转录而留下条目（清除与注销身份的分别见 `web-and-admin.md`「Channel Session Clear Contract」）。web 目录不重复这个读数，那里每行本来就带 `message_count`。
-- `GET /sessions?scope=all` 是**另一份形状**：它不读注册表，而是复用网页侧的会话目录装配（`ceo_catalog_offload.build_ceo_session_catalog_async` → `web_ceo_sessions.build_session_summary`），因此每一项直接带 `preview_text / message_count / updated_at / is_running / status / session_family / session_origin / can_message`，再加一个 `transcript_path`。这么切的理由是"别开第二条枚举道"：网页侧已经有带 TTL 缓存、在专用线程里跑的全量装配，重写一份按注册表枚举的会既看不见 `web:*` 会话又要自己处理数十 MB 的转录遍历。代价照旧——目录构建遍历全部转录，必须留在那条卸载车道上，不许搬回事件循环。`transcript_path` 由运行时算出（含 `safe_filename` 转写与键长超限的 digest 逃生），调用方不得自己把 session key 拼成文件名。没有跨桥作用域时该参数回 403 `cross_session_scope_required`，不带 `scope` 的请求仍是本桥名下的注册表视图。
+- `GET /sessions?scope=all` 是**另一份形状**：它不读注册表，而是复用网页侧的会话目录装配（`ceo_catalog_offload.build_ceo_session_catalog_async` → `web_ceo_sessions.build_session_summary`），因此每一项直接带 `preview_text / message_count / updated_at / is_running / status / session_family / session_origin / can_message`，再加一个 `transcript_path`。这么切的理由是"别开第二条枚举道"：网页侧已经有带 TTL 缓存、在专用线程里跑的全量装配，重写一份按注册表枚举的会既看不见 `web:*` 会话又要自己处理数十 MB 的转录遍历。代价照旧——目录构建遍历全部转录，必须留在那条卸载车道上，不许搬回事件循环。
+  - store 取的是**运行时那一份** `agent.sessions`（没有活运行时时才退回新建实例）。新起一个 `SessionManager` 指向同一目录是这条道最贵的错法：目录构造逐键 `get_or_create`，异常被 `except: continue` 吞掉，结果是一份**空 items 配 200 状态码**，看不出任何失败痕迹。
+  - 目录把 `items`（本地 `web:`）与 `channel_groups`（渠道会话）分两半给，本接口把两侧合进同一个 `items` 返回，"全部会话"才真是全部。
+  `transcript_path` 由运行时算出（含 `safe_filename` 转写与键长超限的 digest 逃生），调用方不得自己把 session key 拼成文件名。没有跨桥作用域时该参数回 403 `cross_session_scope_required`，不带 `scope` 的请求仍是本桥名下的注册表视图。
 
 ## 4. 回合契约
 

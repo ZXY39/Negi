@@ -172,6 +172,12 @@ async def create_external_session(
 async def _list_all_sessions(principal: ExternalApiPrincipal) -> dict[str, Any]:
     """全量会话目录（跨桥作用域）：复用网页那份装配，不另开一条枚举道。
 
+    store 必须取**运行时那一份** `agent.sessions`，不能现场 new：目录构造里逐键
+    `get_or_create` 的异常是被 `except: continue` 吞掉的，第二个实例在同一批转录上
+    整表跳过时，接口只会安静地返回空 items（实盘第一版就栽在这，200 + 0 条，而
+    `/api/ceo/sessions` 同刻给 175 条）。运行档位也顺手用同一个 runtime_manager 读，
+    与 `/ws/ceo` 的判据同形。
+
     目录构建要遍历全部转录（渠道会话单份可达数十 MB），统一在 CEO 专用线程里跑并吃
     3 秒 TTL 缓存，事件循环只 await。条目形状以 `build_session_summary` 为唯一来源，
     这里只补 `transcript_path`——运行时算出的安全名（含键长超限的 digest 逃生），
@@ -179,19 +185,19 @@ async def _list_all_sessions(principal: ExternalApiPrincipal) -> dict[str, Any]:
     """
     if not principal.cross_session:
         raise HTTPException(status_code=403, detail="cross_session_scope_required")
-    manager = _session_manager()
-    try:
-        bridge = get_external_turn_service()._runtime_bridge
-    except RuntimeError:
-        bridge = None
+    agent = peek_global_agent()
+    manager = getattr(agent, "sessions", None) if agent is not None else None
+    if manager is None:
+        manager = _session_manager()
+    runtime_manager = get_runtime_manager(agent) if agent is not None else None
 
     def _session_state(session_key: str) -> Any:
-        if bridge is None:
+        if runtime_manager is None:
             return None
-        try:
-            session = bridge.get_existing_session(str(session_key or "").strip())
-        except Exception:
+        getter = getattr(runtime_manager, "get", None)
+        if not callable(getter):
             return None
+        session = getter(str(session_key or "").strip())
         return getattr(session, "state", None) if session is not None else None
 
     catalog = await build_ceo_session_catalog_async(
@@ -201,13 +207,21 @@ async def _list_all_sessions(principal: ExternalApiPrincipal) -> dict[str, Any]:
         or str(getattr(_session_state(key), "status", "") or "").strip().lower() == "running",
         status_resolver=lambda key: str(getattr(_session_state(key), "status", "") or "").strip().lower(),
     )
+    # 目录把渠道会话放在 channel_groups 里，"全部会话"必须把两侧合起来：
+    # 只回 items 就等于把渠道端那些号藏起来。
+    raw_entries = list(catalog.get("items") or [])
+    for group in list(catalog.get("channel_groups") or []):
+        if isinstance(group, dict):
+            raw_entries.extend(list(group.get("items") or []))
     items: list[dict[str, Any]] = []
-    for raw_item in list(catalog.get("items") or []):
+    seen_keys: set[str] = set()
+    for raw_item in raw_entries:
         if not isinstance(raw_item, dict):
             continue
         session_id = str(raw_item.get("session_id") or "").strip()
-        if not session_id:
+        if not session_id or session_id in seen_keys:
             continue
+        seen_keys.add(session_id)
         item = dict(raw_item)
         item["transcript_path"] = str(manager.get_path(session_id))
         items.append(item)
