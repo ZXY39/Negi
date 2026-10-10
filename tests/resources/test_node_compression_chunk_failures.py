@@ -105,14 +105,15 @@ def _chunk_chat(calls, *, fail_indexes=(), always_fail=False):
 def test_chunk_budget_bounds_passes_to_three_for_large_history() -> None:
     calls: list[dict] = []
     loop = _make_loop(_chunk_chat(calls))
-    messages = _history(30, 6000)
+    messages = _history(60, 12000)
     est = loop._estimate_node_compression_message_tokens(messages)
-    assert est > 90000, f'探针历史需要足够大才能验块数，实测 {est}'
+    assert est > 400000, f'探针历史需要足够大才能验块数，实测 {est}'
 
-    text, payload = _compress(loop, messages, window=30000)
+    # 窗口取真实量级（39 万）：/3 的分量落在单块硬上限之内，才轮到"3 次收口"生效。
+    text, payload = _compress(loop, messages, window=390000)
 
     assert payload.get('compression_mode') == 'llm_chunked'
-    # 基线在这里是 24 块（20000 地板）；合同是 3 次内收口。
+    # 基线在这里是 4 块（171000 窗口档）；合同是 /3 收口到 3 块。
     assert int(payload.get('chunk_count') or 0) <= 3, payload.get('chunk_count')
     assert len(calls) == int(payload.get('chunk_count') or 0)
     assert text
@@ -138,13 +139,13 @@ def test_frontdoor_chunk_budget_uses_the_same_three_pass_rule() -> None:
 
     runner._run_frontdoor_compression_helper_request = fake_helper
     runner._emit_frontdoor_runtime_snapshot = no_emit
-    history = _history(30, 6000)
+    history = _history(60, 12000)
     combined, chunk_count, _merge = asyncio.run(
         runner._chunked_frontdoor_compression_summaries(
             system_prefix=[],
             older_history_messages=history[2:],
             model_refs=['stub-compress-1'],
-            context_window_tokens=30000,
+            context_window_tokens=390000,
             state={},
             runtime=SimpleNamespace(),
             is_cancelled=None,
@@ -164,10 +165,11 @@ def test_frontdoor_chunk_budget_uses_the_same_three_pass_rule() -> None:
 def test_partial_chunk_failure_is_counted_and_labeled_in_projection() -> None:
     calls: list[dict] = []
     loop = _make_loop(_chunk_chat(calls, fail_indexes={2}))
-    messages = _history(30, 6000)
+    messages = _history(60, 12000)
 
-    text, payload = _compress(loop, messages, window=30000)
+    text, payload = _compress(loop, messages, window=390000)
 
+    assert payload.get('compression_mode') == 'llm_chunked'
     assert int(payload.get('chunk_failed_count') or 0) == 1
     assert list(payload.get('chunk_failed_indexes') or []) == [2]
     assert '未取得摘要' in text
@@ -183,10 +185,11 @@ def test_partial_chunk_failure_is_counted_and_labeled_in_projection() -> None:
 def test_all_chunks_failed_yields_empty_product_and_refusal_reason() -> None:
     calls: list[dict] = []
     loop = _make_loop(_chunk_chat(calls, always_fail=True))
-    messages = _history(20, 6000)
+    messages = _history(60, 12000)
 
-    text, payload = _compress(loop, messages, window=30000)
+    text, payload = _compress(loop, messages, window=390000)
 
+    assert payload.get('compression_mode') == 'llm_chunked'
     assert text == '', f'全部块失败不能产出看起来成功的摘要：{text[:80]!r}'
     assert int(payload.get('chunk_failed_count') or 0) == int(payload.get('chunk_count') or 0) > 0
 

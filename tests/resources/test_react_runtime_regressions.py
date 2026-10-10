@@ -8483,7 +8483,14 @@ async def test_node_preflight_attempts_compression_before_failing_when_pre_compa
         rendered = "\n".join(
             str(item.get("content") or "") for item in request_messages if isinstance(item, dict)
         )
-        return 25110 if "[G3KU_TOKEN_COMPACT_V2]" in rendered else 26000
+        if "[G3KU_TOKEN_COMPACT_V2]" in rendered:
+            return 25110
+        if len(request_messages) > 6 or "【上下文压缩指令】" in rendered:
+            # 整请求与单发压缩指令都按超窗读：分块判据看的正是"单发压缩请求自身是否超窗"。
+            return 26000
+        if "压缩摘要正文" in rendered:
+            return 1_000  # 压缩信封（system + 指令头）：容量 = 窗口 − 信封 − 输出余量
+        return 12_000  # 单个原子组：几条组就会切出多块
 
     monkeypatch.setattr(
         react_loop_module.runtime_send_token_preflight,
