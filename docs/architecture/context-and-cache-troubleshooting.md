@@ -60,6 +60,9 @@ CEO/frontdoor 的 provider-facing request 以 `.g3ku/web-ceo-requests/<session>/
 
 如果 provider adapter 提供了 `provider_request_body`，排 cache miss 时优先用它校验。特别是 OpenAI `/responses` 路径，要看 `provider_request_body.input`、`provider_request_body.tools`、`provider_request_body.parallel_tool_calls`。
 
+- 两份 adapter 的副本形状不同，别把差异读成"body 没落"：Responses 路径带完整请求体（`input` / `tools` 等），Chat Completions 路径带的是**参数面副本**（`model` / `max_tokens` / `temperature` / `reasoning_effort` / `tool_choice` / `parallel_tool_calls`，工具只记 `tool_count`），正文与工具束本体在 actual-request artifact 的 `request_messages` / `actual_tool_schemas` 里。所以 Chat 路径上 `provider_request_body.input` 缺席是正常形状，不是证据缺失。
+- 台账逐跳另存 `sent_max_tokens` / `sent_reasoning_effort` 两个标量（未上报为 `None`，与合法的 `0` 分开）。判"这一跳是被声明的输出上限截断、还是被窗口剩余挤掉"靠的就是它们与回执 `output_tokens` 的关系，不依赖 `context_window_tokens`（详见 `config-and-models.md`「Frontdoor Context Window Contract」）。
+
 - 如果 `frontdoor_token_preflight_diagnostics.final_request_tokens` 已经接近 `effective_trigger_tokens`，但 usage 还是明显更高，优先按“估算偏小”排查，不要先怀疑 cache family churn。
 
 常见情况：`request_messages` 看起来公共前缀很长，但 `provider_request_body.input` 的第一个分叉点更早——说明高层 projection 没问题，真正的问题出在 adapter 最终 payload。

@@ -386,9 +386,10 @@ Per-model generation parameters (`max_tokens`, `temperature`, `reasoning_effort`
 - `reasoning_effort` uses six managed levels: `none` (deep thinking disabled), `low`, `medium` (default), `high`, `xhigh`, `max`. Per-model `parameters.reasoning_effort` wins over the engine default.
 - `none` is a stored value but is never sent to the provider: every provider-facing layer (`chat_backend`, fallback chain, chat adapters, openai/responses providers) omits the `reasoning_effort` field when the resolved level is `none`.
 - The model config page stores both fields on the provider record (`parameters.max_tokens` / `parameters.reasoning_effort`), like `context_window_tokens`; the page contract lives in `web-and-admin.md`「Model Config Page And Admin Contract」.
+- 实际发出的参数面必须可回读。Chat Completions adapter 把这一跳真正发出的标量（`model` / `max_tokens` / `temperature` / `reasoning_effort` / `tool_choice` / `parallel_tool_calls`，工具只记 `tool_count`）附在回包上，节点台账逐跳落 `sent_max_tokens` 与 `sent_reasoning_effort`；未上报保持 `None`，与合法的 `0` 分得开。Responses adapter 带的是完整请求体，两份口径不同是刻意的：台账只取标量，正文与工具束已在 actual-request artifact 里（详见 `context-and-cache-troubleshooting.md`「provider_request_body」）。
 - `request_timeout_seconds`（配置页「请求超时时间(秒)」，位于最大输出TOKEN 右侧）是每次 provider attempt 的超时上限，同时约束外层 attempt 看门狗与流式首块/块间空闲超时：留空 = 未配置，回退全局默认 `DEFAULT_PROVIDER_ATTEMPT_TIMEOUT_SECONDS = 600`；配置则必须 `> 0`。解析优先级：调用方显式传入 → 该模型配置值 → 全局默认，链式回退因此按各模型自己的超时执行。取值真相源与其他参数一致：llm-config record `parameters.request_timeout_seconds`，binding payload 与 catalog 同步。配置里没有独立的 60/120 微默认——任何「未传超时」路径都指向同一个 600 默认。
 
-If a provider reply looks truncated (for example a response ending at exactly the sent `max_tokens` with no tool call), check the node's history record first: 详见 `web-and-admin.md`「Node Detail Error History」.
+If a provider reply looks truncated (for example a response ending at exactly the sent `max_tokens` with no tool call), check the node's history record first: 详见 `web-and-admin.md`「Node Detail Error History」。思考档位与最大输出的组合不设保存时校验（`reasoning_effort` 是标签，思考长度没有可标定的上界，且思考与提交体共用同一份 completion 预算——调小 `max_tokens` 只会让撞顶更早，不会限制思考），命中按运行时处置：见 `main-task-runtime.md`「Node-Level Pause and Recovery」。
 
 ## Model Retry And Key Rotation Config
 
@@ -427,6 +428,7 @@ If an operator reports frontdoor send failures after a model or chain change, ch
 2. The saved `llm-config` record under `.g3ku/llm-config/records/*.json` kept the field during migration.
 3. The role chain only references models that have a valid window configured.
 4. The actual provider request estimate crossed the model's window.
+5. 声明值大于真实上限时**没有任何错误信号**：网关超窗不报错，只把 completion 预算裁成 `真实窗口 − 输入`，所以回包表现为 `finish_reason=length` 且 `output_tokens < sent_max_tokens`。核对时用节点自己的观测下界：`max_observed_request_span_tokens(task_id, node_id)` 取该节点台账里 `有效输入 + 输出` 的最大实测和（走 `task_model_calls` 的 task_id 索引，不全扫）。它是"曾经装下过多少"的下界而不是真值上界；同一份声明值在发送侧（`resolve_send_model_context_window_info` 读记录 `parameters.context_window_tokens`）与派单过滤（`model_route` / 负载均衡成员）同源，改配置前先确认改的是记录那份——`models.catalog[].contextWindowTokens` 只是配置面副本。窗口虚高还会把两道闸门一起顶到墙外：发送压缩触发线（`0.80 × 窗口 × 0.95`）与节点分块压缩的进入条件都比的是这个数。
 
 Behavior once the estimate crosses the window: 详见 `runtime-overview.md`「Frontdoor Context Compression」.
 

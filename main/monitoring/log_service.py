@@ -2704,6 +2704,10 @@ class TaskLogService:
     def list_task_node_error_logs(self, task_id: str, node_id: str) -> list[TaskErrorLogRecord]:
         return self._store.list_task_node_error_logs(task_id, node_id)
 
+    def max_observed_request_span_tokens(self, task_id: str, node_id: str) -> int:
+        """窗口观测下界：provider 超窗不报错，只能从台账的实测和里取这个数。"""
+        return self._store.max_observed_request_span_tokens(task_id, node_id)
+
     def _align_root_node_pause_locked(self, task: TaskRecord) -> NodeRecord | None:
         """任务级暂停标志变化后把任务根节点拉到一致态（根节点驱动口径的一半）。
 

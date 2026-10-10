@@ -1825,6 +1825,15 @@ class ReActToolLoop:
                         response=response,
                         shape_reason=shape_reason,
                     )
+                if shape_label == 'window-clamped':
+                    # 被窗口挤掉：改思考档位治不了它，要核对的是窗口口径本身。
+                    return self._window_integrity_failure(
+                        task_id=task.task_id,
+                        node_id=node.node_id,
+                        response=response,
+                        shape_reason=shape_reason,
+                        token_preflight_diagnostics=token_preflight_diagnostics,
+                    )
                 if payload_shape_fault_count >= _PAYLOAD_SHAPE_FAULT_LIMIT:
                     return self._invalid_final_submission_failure(
                         reason=shape_reason,
@@ -5174,6 +5183,38 @@ class ReActToolLoop:
             '不改配置直接 resume 只会再撞同一条上限。'
         )
         return self._invalid_final_submission_failure(reason=reason, count=max(1, same_class))
+
+    def _window_integrity_failure(
+        self,
+        *,
+        task_id: str,
+        node_id: str,
+        response: Any,
+        shape_reason: str,
+        token_preflight_diagnostics: dict[str, Any] | None,
+    ) -> NodeFinalResult:
+        """回包被窗口剩余挤掉时的可恢复暂停。
+
+        provider 超窗不报错、只静默裁输出，真值取不到，所以运行时既不改配置也不猜
+        上限：把声明窗口和本节点台账里实测过的最大"输入+输出"并列摆出来，由会话 agent
+        决定按观测值核对配置还是报给用户。
+        """
+        body = dict(getattr(response, 'provider_request_body', {}) or {})
+        usage = dict(getattr(response, 'usage', {}) or {})
+        declared_window = int((token_preflight_diagnostics or {}).get('context_window_tokens') or 0)
+        try:
+            observed_span = int(self._log_service.max_observed_request_span_tokens(task_id, node_id) or 0)
+        except Exception:
+            observed_span = 0
+        reason = (
+            f'window_integrity_fault: {shape_reason} | sent_max_tokens={body.get("max_tokens")} '
+            f'output_tokens={int(usage.get("output_tokens") or 0)} 声明窗口={declared_window} '
+            f'本节点实测最大(输入+输出)={observed_span}；这一跳被裁到比声明的发送上限更小的值，'
+            '拦住它的是窗口剩余，不是最大输出配置。降思考档位治不了这一类：请核对该模型的 '
+            'context_window_tokens（发送与派单读的是 llm-config 记录 parameters 里那份，模型目录项的 '
+            'contextWindowTokens 只是配置面副本）是否等于观测值，或把这两个数一起报给用户裁决。'
+        )
+        return self._invalid_final_submission_failure(reason=reason, count=1)
 
     @classmethod
     def _invalid_final_submission_failure(cls, *, reason: str, count: int) -> NodeFinalResult:

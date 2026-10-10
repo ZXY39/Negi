@@ -17,6 +17,7 @@ from g3ku.providers.base import LLMResponse
 from g3ku.providers.openai_chat_provider import OpenAIChatProvider
 from main.monitoring.log_service import TaskLogService
 from main.runtime.react_loop import ReActToolLoop
+from main.storage.sqlite_store import SQLiteTaskStore
 
 
 class _StubCompletions:
@@ -181,3 +182,32 @@ def test_error_history_line_names_sent_cap_and_effort() -> None:
     assert "sent_reasoning_effort=xhigh" in text
     assert "provider_model=sens-x" in text
     assert "疑似触及输出token上限被截断" in text
+
+
+def test_observed_request_span_is_per_node_and_null_safe(tmp_path) -> None:
+    """窗口观测下界的读数口：按节点隔离，缺字段的行不能塌成 0。"""
+    store = SQLiteTaskStore(tmp_path / 'runtime.sqlite3')
+    assert store.max_observed_request_span_tokens('task:span', 'node:span') == 0
+    for eff, out in ((106839, 65536), (245792, 16352), (241572, 20572)):
+        store.append_task_model_call(
+            task_id='task:span',
+            node_id='node:span',
+            created_at='2026-10-10T04:00:00+08:00',
+            payload={'observed_input_truth': {'effective_input_tokens': eff}, 'delta_usage': {'output_tokens': out}},
+        )
+    # 没落 observed_input_truth 的行：和值为 NULL，MAX 忽略它，不能算成 0 拉低读数。
+    store.append_task_model_call(
+        task_id='task:span',
+        node_id='node:span',
+        created_at='2026-10-10T04:00:01+08:00',
+        payload={'delta_usage': {'output_tokens': 7}},
+    )
+    assert store.max_observed_request_span_tokens('task:span', 'node:span') == 262144
+    store.append_task_model_call(
+        task_id='task:span',
+        node_id='node:other',
+        created_at='2026-10-10T04:00:02+08:00',
+        payload={'observed_input_truth': {'effective_input_tokens': 400000}, 'delta_usage': {'output_tokens': 9}},
+    )
+    assert store.max_observed_request_span_tokens('task:span', 'node:span') == 262144
+    assert store.max_observed_request_span_tokens('task:span', 'node:other') == 400009

@@ -124,6 +124,10 @@ class _FakeLogService:
             if item["task_id"] == str(task_id) and item["node_id"] == str(node_id)
         ]
 
+    def max_observed_request_span_tokens(self, task_id, node_id) -> int:
+        _ = task_id, node_id
+        return 262144
+
 
 def _submit_final_result_tool(*, node_kind: str = "execution") -> SubmitFinalResultTool:
     async def _submit(payload: dict[str, object]) -> dict[str, object]:
@@ -1109,8 +1113,11 @@ async def test_react_loop_pauses_on_first_output_capped_reasoning_only_hop() -> 
 
 
 @pytest.mark.asyncio
-async def test_react_loop_does_not_pause_when_a_smaller_limit_bound_the_reply() -> None:
-    """截在比声明上限更小的值上 ⇒ 不是档位吃满，本轮仍按形态计数续跑（处置不同，见窗口那条道）。"""
+async def test_react_loop_pauses_on_window_clamped_with_observed_ceiling() -> None:
+    """被窗口剩余挤掉：暂停理由要并列给出声明窗口与台账实测和，且点名两处载体。
+
+    这一类的处置与档位无关（provider 超窗不报错，只能拿观测下界去核对配置口径）。
+    """
     clamped = LLMResponse(
         content="",
         finish_reason="length",
@@ -1118,20 +1125,18 @@ async def test_react_loop_does_not_pause_when_a_smaller_limit_bound_the_reply() 
         reasoning_content="thinking" * 64,
         provider_request_body={"model": "sens-x", "max_tokens": 65536, "reasoning_effort": "xhigh"},
     )
-    recovery = LLMResponse(
-        content="",
-        tool_calls=[_final_call("call:after-clamped", _good_final_arguments())],
-        finish_reason="tool_calls",
-        usage={"input_tokens": 10, "output_tokens": 20},
-    )
     result, requests, logs = await _run_final_result_loop(
-        responses=[clamped, recovery],
+        responses=[clamped],
         node_kind="execution",
-        task_id="task-window-clamped-continue",
-        node_id="node-window-clamped-continue",
+        task_id="task-window-clamped-pause",
+        node_id="node-window-clamped-pause",
         max_iterations=5,
     )
-    assert len(requests) == 2
-    assert result.status == "success"
+    assert len(requests) == 1, "再问一次不会多出窗口空间"
+    assert result.failure_disposition == "pause"
+    assert "window_integrity_fault:" in result.blocking_reason
+    assert "sent_max_tokens=65536" in result.blocking_reason
+    assert "output_tokens=16352" in result.blocking_reason
+    assert "本节点实测最大(输入+输出)=262144" in result.blocking_reason
+    assert "contextWindowTokens" in result.blocking_reason
     assert "[window-clamped]" in logs.error_logs[0]["error_text"]
-    assert "model_config_fault" not in str(result.blocking_reason or "")

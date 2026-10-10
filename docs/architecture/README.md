@@ -119,7 +119,7 @@ Start here when you are new to the repository or when a change crosses subsystem
 - 节点被恢复后仍不推进（暂停标志已清、再无模型调用，最后被 `orphan reaped at task resume` 收尸）→ `main-task-runtime.md`「Node-Level Pause and Recovery」（恢复的 entry 判读与延迟校验清扫）
 - 节点因一次 `submit_final_result` 参数错误就终止，或参数错误文本里没有必填项与类型 → `main-task-runtime.md`「Node-Level Pause and Recovery」（模型交付违约与回包形态故障分账，各有同值上限）+ `tool-hydration-and-callable-chain.md`「参数错误与状态分类」（必填与可选字段都带类型的契约回贴）
 - 模型反复提交空串 / 空数组 / `start_line=0` 这类越界值、而它看到的 schema 里没有那条边界 → `tool-hydration-and-callable-chain.md`「参数错误与状态分类」（模型面投影只裁篇幅不裁判定；字段级 description 到不了模型）
-- 节点反复收到 `Invalid final result submission detected` 而任务不被判死、错误首行写 `provider output limit truncated` 或 `reasoning-only` → `main-task-runtime.md`「Node-Level Pause and Recovery」（回包形态故障单独计数，不占模型的无效提交预算）
+- 节点错误历史里 `Invalid final result submission detected` 行首带 `[output-capped]` / `[window-clamped]`，或节点因此进入错误暂停 → `main-task-runtime.md`「Node-Level Pause and Recovery」（形态故障分账与首跳处置）+ `config-and-models.md`「Model Request Parameter Defaults」
 - 节点被可恢复暂停且理由写着 `closed before finish_reason`、渠道看到「响应流未正常终止」，或 worker 日志某跳写着 `finish_reason_seen=0` 而 Token统计该行输入/缓存为 `--` → `main-task-runtime.md`「Node-Level Pause and Recovery」（未终止的流由 provider 标成提供侧故障、链内换槽，不记交付违约）+ `web-and-admin.md`「Task Token Stats Window Contract」
 - 停机或暂停打断一批工具调用后，已完成的那条被重新执行一遍（重复外部动作）、或新加的工具在恢复时被自动重放／该重放的只读调用被白问一次模型 → `main-task-runtime.md`「Node-Level Pause and Recovery」（帧活状态留痕与恢复逐条判档）+ `tool-hydration-and-callable-chain.md`「工具可重放声明」
 - 任务树节点已显示暂停但任务大厅仍显示处理中、或全局恢复后大厅卡在已暂停 -> `main-task-runtime.md`「Node-Level Pause and Recovery」+ `web-and-admin.md`「Task Hall Action Contract」（状态胶囊判读）

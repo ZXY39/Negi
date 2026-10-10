@@ -47,6 +47,7 @@ def _int_value(value: Any, default: int = 0) -> int:
 
 RUNTIME_FAULT_MARKER = 'runtime_fault:'
 MODEL_CONFIG_FAULT_MARKER = 'model_config_fault:'
+WINDOW_INTEGRITY_FAULT_MARKER = 'window_integrity_fault:'
 
 
 def _runtime_fault_class(error_text: str) -> str:
@@ -58,6 +59,11 @@ def _runtime_fault_class(error_text: str) -> str:
         return (
             'model_config_fault（模型配置不匹配：这一跳的思考用量顶满了声明的最大输出，'
             '提交体没有任何空间；resume 无效，需先把该模型的思考强度调低或把最大输出调高）'
+        )
+    if WINDOW_INTEGRITY_FAULT_MARKER in text:
+        return (
+            'window_integrity_fault（回包被窗口剩余挤掉，不是最大输出配置的问题；resume 无效，'
+            '需按提醒里的观测值核对该模型记录的 context_window_tokens（发送与派单的权威值），或报给用户）'
         )
     return ''
 
