@@ -334,7 +334,7 @@ async def clear_external_session(
     manager = _session_manager()
     if str(purge or "").strip().lower() in {"1", "true", "yes"}:
         deleted = manager.delete(session_key)
-        registry.forget(session_key)
+        _registry().forget(session_key)
         clear_web_ceo_session_artifacts(session_id=session_key)
         return {
             "ok": True,

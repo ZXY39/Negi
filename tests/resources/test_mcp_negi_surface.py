@@ -59,7 +59,7 @@ def test_external_row_without_transcript_keeps_registry_created_at():
         is_running=False,
     )
     assert row is not None
-    assert row["created_at"] == "2026-09T0"[:0] + "2026-10-09T06:36:00.260596"
+    assert row["created_at"] == "2026-10-09T06:36:00.260596"
     assert row["message_count"] == 0
     assert row["preview_text"] == ""
     assert row["updated_at"] == ""
@@ -167,14 +167,14 @@ class _NoWaitClient:
         self.stream_opens += 1
 
         class _Ctx:
-            async def __aenter__(_self):
+            async def __aenter__(self):
                 async def _events():
                     if False:
                         yield {}
 
                 return _events()
 
-            async def __aexit__(_self, *exc) -> bool:
+            async def __aexit__(self, *exc) -> bool:
                 return False
 
         return _Ctx()

@@ -107,7 +107,7 @@ The product is displayed as **Negi**, the repository is `ZXY39/Negi`, and the op
   root settings model declares `env_prefix="G3KU_"` — the set is open-ended, don't treat the
   count as a list to migrate).
 - The data root directory name `.g3ku`.
-- Outbound contract strings: `MODEL_ID = "g3ku"`, `owned_by`, the `g3ku` key in OpenAI-compatible responses, the MCP server name and `g3ku_*` tool names, the `[g3ku]` prefix on External-API turn-status texts (`g3ku/runtime/api/openai_compat.py`, quoted verbatim by `docs/architecture/agent-gateway.md`), and the `x-g3ku-internal-token` header.
+- Outbound contract strings: `MODEL_ID = "g3ku"`, `owned_by`, the `g3ku` key in OpenAI-compatible responses, the MCP server name `negi` and the `negi_*` tool names (this surface was renamed from `g3ku` / `g3ku_*` on 2026-10-10 with no compatibility aliases — clients re-run `claude mcp add negi`; do not rename it again, and do not "align" it back to the package spelling), the `[g3ku]` prefix on External-API turn-status texts (`g3ku/runtime/api/openai_compat.py`, quoted verbatim by `docs/architecture/agent-gateway.md`), and the `x-g3ku-internal-token` header.
 - Frontend storage keys such as `g3ku.audit.last-seen.v1`.
 
 Renaming the data root is the expensive one: the runtime database stores ~1,700 rows whose values are absolute paths under `.g3ku/`, and `config.json` stores 7 more. Treat any of the above as a breaking change requiring its own plan.
