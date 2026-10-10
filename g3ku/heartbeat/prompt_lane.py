@@ -48,6 +48,7 @@ def _int_value(value: Any, default: int = 0) -> int:
 RUNTIME_FAULT_MARKER = 'runtime_fault:'
 MODEL_CONFIG_FAULT_MARKER = 'model_config_fault:'
 WINDOW_INTEGRITY_FAULT_MARKER = 'window_integrity_fault:'
+SEND_PREFLIGHT_FAULT_MARKER = 'send_preflight_fault:'
 
 
 def _runtime_fault_class(error_text: str) -> str:
@@ -64,6 +65,13 @@ def _runtime_fault_class(error_text: str) -> str:
         return (
             'window_integrity_fault（回包被窗口剩余挤掉，不是最大输出配置的问题；resume 无效，'
             '需按提醒里的观测值核对该模型记录的 context_window_tokens（发送与派单的权威值），或报给用户）'
+        )
+    if SEND_PREFLIGHT_FAULT_MARKER in text:
+        return (
+            'send_preflight_fault（发送前预检拒发：这一跳没发出去，节点零模型调用。成因看正文原话——'
+            '要么预估输入确实超过声明窗口，要么上下文压缩助手那几跳只回空包（空包属回包形态故障，'
+            '与思考顶满输出同源）。resume 会再撞同一次拒发；请按提醒里的预估/声明窗口决定是核对'
+            'context_window_tokens、让节点收口当前阶段少带历史，还是报给用户，不要自动改配置）'
         )
     return ''
 

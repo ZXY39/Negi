@@ -234,6 +234,8 @@ _FRONTDOOR_COMPACTION_RAW_TAIL_MAX_MESSAGES = 40
 _COMPRESSION_CHUNK_WINDOW_RATIO = 0.5
 _COMPRESSION_CHUNK_HEADROOM_TOKENS = 24_000
 _COMPRESSION_CHUNK_MIN_TOKENS = 20_000
+# 块数上限（与节点侧同源）：超大历史也按 3 次收口，避免按地板切成几十块。
+_COMPRESSION_TARGET_CHUNKS = 3
 _TOOL_CONTRACT_ECHO_REPAIR_MESSAGE = (
     'The previous response repeated the internal Runtime Tool Contract. '
     'Do not output, summarize, or quote that contract. Return only the '
@@ -2612,11 +2614,11 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
         贪心装箱为若干块，逐块用传统 system+user 形态（块不构成对话前缀，但体量
         与正常流量同级，快速成功/快速 429 重试）生成摘要，拼为带块标号的单一摘要；
         合并后仍超预算时做且仅做一次归并。返回 (合并摘要, 块数, 是否归并)。
+
+        单块预算取「窗口派生预算」与「可压历史 / 3」的较大值：声明窗口本来就大时
+        不多跑一次，历史远超窗口预算时也只在 3 次内收口，而不是按 2 万 token 的地板
+        切成几十块。
         """
-        chunk_budget = max(
-            _COMPRESSION_CHUNK_MIN_TOKENS,
-            int(context_window_tokens * _COMPRESSION_CHUNK_WINDOW_RATIO) - _COMPRESSION_CHUNK_HEADROOM_TOKENS,
-        )
 
         def _estimate_messages(records: list[dict[str, Any]]) -> int:
             try:
@@ -2631,23 +2633,46 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
             except Exception:
                 return 0
 
+        grouped = [
+            (list(group), _estimate_messages(group))
+            for group in iter_compaction_atomic_groups(older_history_messages)
+        ]
+        history_tokens = sum(tokens for _group, tokens in grouped)
+        window_budget = max(
+            _COMPRESSION_CHUNK_MIN_TOKENS,
+            int(context_window_tokens * _COMPRESSION_CHUNK_WINDOW_RATIO) - _COMPRESSION_CHUNK_HEADROOM_TOKENS,
+        )
+
         envelope_budget = _estimate_messages(
             [{"role": "system", "content": _FRONTDOOR_TOKEN_COMPRESSION_SYSTEM_PROMPT}]
         ) + 2_000
-        groups = iter_compaction_atomic_groups(older_history_messages)
-        chunks: list[list[dict[str, Any]]] = []
-        current: list[dict[str, Any]] = []
-        current_tokens = envelope_budget
-        for group in groups:
-            group_tokens = _estimate_messages(group)
-            if current and current_tokens + group_tokens > chunk_budget:
-                chunks.append(current)
-                current = []
-                current_tokens = envelope_budget
-            current.extend(group)
-            current_tokens += group_tokens
-        if current:
-            chunks.append(current)
+        target_chunks = max(1, _COMPRESSION_TARGET_CHUNKS)
+        # 与节点侧同源：分量要连每块信封一起预留，否则 /3 会因信封占用多切出一块。
+        share_budget = -(-(history_tokens + envelope_budget * target_chunks) // target_chunks)
+
+        def _pack(budget: int) -> list[list[dict[str, Any]]]:
+            packed: list[list[dict[str, Any]]] = []
+            carry: list[dict[str, Any]] = []
+            carry_tokens = envelope_budget
+            for grp, grp_tokens in grouped:
+                if carry and carry_tokens + grp_tokens > budget:
+                    packed.append(carry)
+                    carry = []
+                    carry_tokens = envelope_budget
+                carry.extend(grp)
+                carry_tokens += grp_tokens
+            if carry:
+                packed.append(carry)
+            return packed
+
+        chunk_budget = max(window_budget, share_budget)
+        chunks = _pack(chunk_budget)
+        # 原子组不可分 + 贪心装箱 ⇒ 即使按 /3 放大仍可能多切一块；按实测块数再放大，最多两轮。
+        for _round in range(2):
+            if len(chunks) <= target_chunks:
+                break
+            chunk_budget = -(-chunk_budget * len(chunks) // target_chunks)
+            chunks = _pack(chunk_budget)
         if not chunks:
             chunks = [list(older_history_messages)]
         summaries: list[str] = []
