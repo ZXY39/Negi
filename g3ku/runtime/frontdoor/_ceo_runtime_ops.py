@@ -236,6 +236,8 @@ _COMPRESSION_CHUNK_HEADROOM_TOKENS = 24_000
 _COMPRESSION_CHUNK_MIN_TOKENS = 20_000
 # 块数上限（与节点侧同源）：超大历史也按 3 次收口，避免按地板切成几十块。
 _COMPRESSION_TARGET_CHUNKS = 3
+# 一次压缩最多发几块：超过即规模问题，直接报窗口超限，不逐块白烧。
+_COMPRESSION_MAX_CHUNKS = 8
 _TOOL_CONTRACT_ECHO_REPAIR_MESSAGE = (
     'The previous response repeated the internal Runtime Tool Contract. '
     'Do not output, summarize, or quote that contract. Return only the '
@@ -2649,6 +2651,11 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
         target_chunks = max(1, _COMPRESSION_TARGET_CHUNKS)
         # 与节点侧同源：分量要连每块信封一起预留，否则 /3 会因信封占用多切出一块。
         share_budget = -(-(history_tokens + envelope_budget * target_chunks) // target_chunks)
+        # 单块硬上限：压缩请求（信封 + 装载 + 摘要余量）不得超过声明窗口。
+        chunk_ceiling = max(
+            window_budget,
+            int(context_window_tokens or 0) - envelope_budget - _COMPRESSION_CHUNK_HEADROOM_TOKENS,
+        )
 
         def _pack(budget: int) -> list[list[dict[str, Any]]]:
             packed: list[list[dict[str, Any]]] = []
@@ -2665,16 +2672,24 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
                 packed.append(carry)
             return packed
 
-        chunk_budget = max(window_budget, share_budget)
+        chunk_budget = min(max(window_budget, share_budget), chunk_ceiling)
         chunks = _pack(chunk_budget)
-        # 原子组不可分 + 贪心装箱 ⇒ 即使按 /3 放大仍可能多切一块；按实测块数再放大，最多两轮。
+        # 原子组不可分 + 贪心装箱 ⇒ 即使按 /3 放大仍可能多切一块；按实测块数再放大，
+        # 最多两轮，每轮都被单块硬上限夹住（宁可多切一块，也不发注定超窗的请求）。
         for _round in range(2):
             if len(chunks) <= target_chunks:
                 break
-            chunk_budget = -(-chunk_budget * len(chunks) // target_chunks)
+            grown = -(-chunk_budget * len(chunks) // target_chunks)
+            if grown >= chunk_ceiling and chunk_budget >= chunk_ceiling:
+                break
+            chunk_budget = min(grown, chunk_ceiling)
             chunks = _pack(chunk_budget)
         if not chunks:
             chunks = [list(older_history_messages)]
+        if len(chunks) > _COMPRESSION_MAX_CHUNKS:
+            # 按窗口切要十几次的规模：一次都不发，直接报窗口超限。
+            # 这条车道的 helper 重试不设上限，让它逐块跑等于用十几次长调用换一次注定仍超窗的发送。
+            raise self._frontdoor_context_window_exceeded_error(model_info=model_info)
         summaries: list[str] = []
         total_chunks = len(chunks)
         for index, chunk in enumerate(chunks, start=1):

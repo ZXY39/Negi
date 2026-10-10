@@ -217,6 +217,8 @@ _NODE_COMPRESSION_CHUNK_MIN_TOKENS = 20000
 # 块数上限：按"真实可压历史 / 3"放长单块预算，使超大上下文固定在 3 次内收口。
 # 窗口派生预算仍参与取大——声明窗口本来就大时不该多跑一次，声明窗口小时才让它长回去。
 _NODE_COMPRESSION_TARGET_CHUNKS = 3
+# 一次压缩最多发几块：超过就说明历史规模是窗口的十倍级，救不回来，改走早退拒发。
+_NODE_COMPRESSION_MAX_CHUNKS = 8
 _CONTENT_OPEN_IMAGE_CONTEXT_TEXT = "图片已通过 content_open 打开，视觉内容已附带在本轮上下文中"
 _NODE_CONTRACT_ECHO_REPAIR_MESSAGE = (
     '上一次回复把运行时注入的 `## Runtime Tool Contract` 契约原文复述了一遍。'
@@ -5395,6 +5397,9 @@ class ReActToolLoop:
         所以有 error_text 就必须把它原话带进原因，不能一律写成 empty summary。
         """
         payload = dict(helper_call or {})
+        refused = str(payload.get('chunk_refused_reason') or '').strip()
+        if refused:
+            return f"token compression skipped: {refused}"
         chunk_total = int(payload.get('chunk_count') or 0)
         chunk_failed = int(payload.get('chunk_failed_count') or 0)
         provider_error = str(
@@ -5988,6 +5993,7 @@ class ReActToolLoop:
                 merge_pass_applied,
                 failed_indexes,
                 chunk_error_text,
+                chunk_refused_reason,
             ) = await self._chunked_node_compression_summary(
                 task_goal=task_goal,
                 system_prefix=system_prefix,
@@ -6003,6 +6009,9 @@ class ReActToolLoop:
             helper_payload["chunk_failed_count"] = len(list(failed_indexes or []))
             if str(chunk_error_text or '').strip():
                 helper_payload["chunk_error_text"] = str(chunk_error_text or '').strip()
+            if str(chunk_refused_reason or '').strip():
+                helper_payload["chunk_refused_reason"] = str(chunk_refused_reason or '').strip()
+                return "", helper_payload
             if int(chunk_count or 0) > 0 and helper_payload["chunk_failed_count"] >= int(chunk_count or 0):
                 # 全部块都没拿到摘要：产物只剩缺口标签，不能当压缩结果发出去。
                 # 交回空串，由调用方按压缩失败拒发（可恢复暂停）。
@@ -6102,9 +6111,13 @@ class ReActToolLoop:
         """节点超窗分块压缩（与前台同源语义）：单发压缩请求自身放不下窗口时，
         把可压缩历史按原子组（工具调用组不可分）贪心装箱，逐块生成任务目标
         针对型摘要，拼为带块标号的单一摘要；合并后仍超预算时做且仅做一次归并。
-        单块预算取「窗口派生预算」与「可压历史 / 3」的较大值，所以超大历史也只在
-        3 次内收口，而不会因为地板是 2 万 token 就切成几十块。
-        返回 (合并摘要, 块数, 是否归并, 未取得摘要的块号, 最后一次 provider 错误原文)。"""
+        单块预算取「窗口派生预算」与「可压历史 / 3」的较大值，并被单块硬上限
+        （声明窗口 − 信封 − 余量）夹住，所以超大历史也在 3 次内收口，而不会因为
+        地板是 2 万 token 就切成几十块；反过来也不会放大到"每块注定超窗"。
+        需要超过 `_NODE_COMPRESSION_MAX_CHUNKS` 块才装得下时一次都不发：交回规模读数，
+        由调用方按压缩失败拒发。
+        返回 (合并摘要, 块数, 是否归并, 未取得摘要的块号, 最后一次 provider 错误原文,
+        规模早退原因)。"""
         grouped = [
             (list(group), self._estimate_node_compression_message_tokens(group))
             for group in iter_compaction_atomic_groups(older_history_messages)
@@ -6123,6 +6136,13 @@ class ReActToolLoop:
         # 装箱要连每块的信封（system+指令头）一起算，否则 /3 的分量会因为信封占用
         # 而多切出一块，读起来就成了"合同说 3 次、实跑 4 次"。
         share_budget = -(-(history_tokens + envelope_tokens * target_chunks) // target_chunks)
+        # 单块硬上限：一块压缩请求（信封 + 装载 + 留出的摘要/指令余量）不得超过声明窗口。
+        # "3 次内收口"是偏好，"每块真的发得出去"是约束——历史达到窗口十倍时，
+        # 按 /3 放大只会产出必然被网关拒掉的巨块（实测 172 万 tok/块 vs 窗口 39 万）。
+        chunk_ceiling = max(
+            window_budget,
+            int(context_window_tokens or 0) - envelope_tokens - _NODE_COMPRESSION_CHUNK_HEADROOM_TOKENS,
+        )
 
         def _pack(budget: int) -> list[list[dict[str, Any]]]:
             packed: list[list[dict[str, Any]]] = []
@@ -6139,17 +6159,29 @@ class ReActToolLoop:
                 packed.append(carry)
             return packed
 
-        chunk_budget = max(window_budget, share_budget)
+        chunk_budget = min(max(window_budget, share_budget), chunk_ceiling)
         chunks = _pack(chunk_budget)
         # 原子组不可分 + 贪心装箱 ⇒ 即使按 /3 放大仍可能多切一块；按实测块数再放大一次，
-        # 最多两轮，使块数落到 target_chunks 内（病态历史不让它无限膨胀）。
+        # 最多两轮，且每轮都被单块硬上限夹住（宁可多切一块，也不发注定超窗的请求）。
         for _round in range(2):
             if len(chunks) <= target_chunks:
                 break
-            chunk_budget = -(-chunk_budget * len(chunks) // target_chunks)
+            grown = -(-chunk_budget * len(chunks) // target_chunks)
+            if grown >= chunk_ceiling and chunk_budget >= chunk_ceiling:
+                break
+            chunk_budget = min(grown, chunk_ceiling)
             chunks = _pack(chunk_budget)
         if not chunks:
             chunks = [list(older_history_messages)]
+        if len(chunks) > _NODE_COMPRESSION_MAX_CHUNKS:
+            # 规模已经到"按窗口切要十几次压缩调用"的程度：一次都不发。
+            # 每跳几十分钟、注定仍救不回这一跳的请求，白烧的账比省下的更重要；
+            # 交回规模读数，由调用方按压缩失败拒发（可恢复暂停 + 心跳点名）。
+            refused_reason = (
+                f"compressible history {history_tokens} tok needs {len(chunks)} chunks over the "
+                f"{chunk_ceiling} tok per-chunk ceiling (max {_NODE_COMPRESSION_MAX_CHUNKS} chunks)"
+            )
+            return "", len(chunks), False, [], "", refused_reason
         summaries: list[str] = []
         failed_indexes: list[int] = []
         last_error_text = ""
@@ -6215,7 +6247,7 @@ class ReActToolLoop:
                 last_error_text = merge_error_text
             merge_pass_applied = True
         _ = bootstrap_user, append_notice_tail  # 单发前缀专用；分块请求不构成对话前缀
-        return combined, total_chunks, merge_pass_applied, failed_indexes, last_error_text
+        return combined, total_chunks, merge_pass_applied, failed_indexes, last_error_text, ""
 
     def _estimate_node_send_preflight_tokens(
         self,
