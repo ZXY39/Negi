@@ -24,7 +24,7 @@ from g3ku.config.live_runtime import get_runtime_config
 class ExternalApiPrincipal:
     bridge_id: str
     label: str
-    # 是否可以寻址别名下的/全量会话。token 覆盖优先，缺省继承全局开关。
+    # 是否可以寻址别名下的/全量会话。只按号裁决，默认放开。
     cross_session: bool = False
 
 
@@ -55,14 +55,9 @@ def require_external_api(
         if not expected:
             continue
         if secrets.compare_digest(presented.encode("utf-8"), expected.encode("utf-8")):
-            override = getattr(entry, "cross_session", None)
             return ExternalApiPrincipal(
                 bridge_id=str(bridge_id),
                 label=str(getattr(entry, "label", "") or ""),
-                cross_session=bool(
-                    getattr(external_api, "cross_session_enabled", True)
-                    if override is None
-                    else override
-                ),
+                cross_session=bool(getattr(entry, "cross_session", True)),
             )
     raise HTTPException(status_code=401, detail="invalid_api_token")

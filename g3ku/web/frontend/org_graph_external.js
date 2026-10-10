@@ -6,7 +6,6 @@ const EXTERNAL_API_VIEW_STATE = {
     loaded: false,
     busy: false,
     enabled: false,
-    crossSession: true,
     items: [],
 };
 
@@ -16,19 +15,6 @@ function _externalListEl() {
 
 function _externalMasterSwitch() {
     return document.getElementById("external-api-enabled-toggle");
-}
-
-function _externalScopeSwitch() {
-    return document.getElementById("external-api-cross-session-toggle");
-}
-
-function _renderExternalScopeSwitch() {
-    // 作用域不是开/关，读法按"能看见谁"给文案。
-    _setExternalSwitch(
-        _externalScopeSwitch(),
-        EXTERNAL_API_VIEW_STATE.crossSession,
-        EXTERNAL_API_VIEW_STATE.crossSession ? "全部会话" : "仅本桥",
-    );
 }
 
 function _externalOnceCard() {
@@ -63,8 +49,6 @@ function _externalBusy(next) {
     }
     const master = _externalMasterSwitch();
     if (master) master.disabled = busy;
-    const scope = _externalScopeSwitch();
-    if (scope) scope.disabled = busy;
     const listEl = _externalListEl();
     if (listEl) {
         for (const control of listEl.querySelectorAll("[data-bridge]")) {
@@ -76,9 +60,6 @@ function _externalBusy(next) {
 function _applyExternalPayload(payload) {
     const data = payload || {};
     EXTERNAL_API_VIEW_STATE.enabled = !!data.enabled;
-    // 全局作用域默认开：字段缺失时不能把它读成"关"。
-    EXTERNAL_API_VIEW_STATE.crossSession = data.cross_session_enabled !== false
-        && data.crossSessionEnabled !== false;
     EXTERNAL_API_VIEW_STATE.items = Array.isArray(data.items) ? data.items : [];
     EXTERNAL_API_VIEW_STATE.loaded = true;
 }
@@ -105,11 +86,10 @@ function renderExternalTokenList() {
                 <div class="resource-list-subtitle">${item.label ? esc(item.label) + " · " : ""}token：<code>${esc(item.token_masked || "（未设置）")}</code></div>
             </div>
             <div class="external-token-actions">
-                <label class="external-row-scope">会话作用域
-                    <select class="toolbar-btn ghost small" data-bridge="${esc(item.bridge_id)}"
-                        data-action="scope" aria-label="${esc(item.bridge_id)} 的会话作用域">
-                        <option value="inherit"${item.cross_session === null || item.cross_session === undefined ? " selected" : ""}>继承全局</option>
-                        <option value="allow"${item.cross_session === true ? " selected" : ""}>全部会话</option>
+                <label class="external-row-scope">可会话范围
+                    <select class="resource-select external-scope-select" data-bridge="${esc(item.bridge_id)}"
+                        data-action="scope" aria-label="${esc(item.bridge_id)} 的会话范围">
+                        <option value="allow"${item.cross_session !== false ? " selected" : ""}>全部会话</option>
                         <option value="deny"${item.cross_session === false ? " selected" : ""}>仅本桥</option>
                     </select>
                 </label>
@@ -133,7 +113,6 @@ async function loadExternalApiView({ quiet = false } = {}) {
         const payload = await ApiClient.getExternalApiSettings();
         _applyExternalPayload(payload);
         _setExternalSwitch(_externalMasterSwitch(), EXTERNAL_API_VIEW_STATE.enabled, EXTERNAL_API_VIEW_STATE.enabled ? "已启用" : "已停用");
-        _renderExternalScopeSwitch();
         renderExternalTokenList();
     } catch (error) {
         if (!quiet) showToast({ title: "加载外部接入配置失败", text: ApiClient.friendlyErrorMessage(error), kind: "error" });
@@ -293,31 +272,8 @@ async function toggleExternalApiEnabled(enabled) {
     }
 }
 
-async function toggleExternalApiCrossSession(enabled) {
-    _externalBusy(true);
-    try {
-        const payload = await ApiClient.updateExternalApiSettings({ crossSessionEnabled: enabled });
-        _applyExternalPayload(payload);
-        _renderExternalScopeSwitch();
-        renderExternalTokenList();
-        showToast({
-            title: enabled ? "外部 token 可见全部会话" : "外部 token 收回到各自名下",
-            text: enabled
-                ? "任一桥接 token 都能列出并向全部会话发消息，含别的桥与网页会话。"
-                : "只有单独设为「全部会话」的 token 还能跨桥寻址。",
-            kind: "info",
-        });
-    } catch (error) {
-        showToast({ title: "更新失败", text: ApiClient.friendlyErrorMessage(error), kind: "error" });
-        await loadExternalApiView({ quiet: true });
-    } finally {
-        _externalBusy(false);
-    }
-}
-
 async function updateExternalTokenScope(bridgeId, choice) {
-    // inherit / allow / deny → null / true / false：null 是"交回全局裁决"，不是关掉。
-    const crossSession = choice === "allow" ? true : (choice === "deny" ? false : null);
+    const crossSession = choice !== "deny";
     _externalBusy(true);
     try {
         const payload = await ApiClient.updateExternalApiToken(bridgeId, { crossSession });
@@ -339,13 +295,6 @@ function initExternalApiView() {
     if (master) {
         master.addEventListener("click", () => {
             void toggleExternalApiEnabled(master.getAttribute("aria-pressed") !== "true");
-        });
-    }
-
-    const scopeSwitch = _externalScopeSwitch();
-    if (scopeSwitch) {
-        scopeSwitch.addEventListener("click", () => {
-            void toggleExternalApiCrossSession(scopeSwitch.getAttribute("aria-pressed") !== "true");
         });
     }
 

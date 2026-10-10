@@ -15,20 +15,20 @@ from g3ku.security.bootstrap import (
 )
 
 
-def _config(*, enabled: bool, tokens: dict | None, cross_session_enabled: bool = True):
+def _config(*, enabled: bool, tokens: dict | None):
     entries = {
         token_id: SimpleNamespace(
                 token=str(payload.get("token") or ""),
                 enabled=bool(payload.get("enabled", True)),
                 label=str(payload.get("label") or ""),
-                cross_session=payload.get("cross_session", payload.get("crossSession")),
+                # 与真模型同形：作用域是布尔，默认放开，没有"未表态"这一态。
+                cross_session=payload.get("cross_session", payload.get("crossSession", True)),
             )
         for token_id, payload in (tokens or {}).items()
     }
     return SimpleNamespace(
         external_api=SimpleNamespace(
             enabled=enabled,
-            cross_session_enabled=cross_session_enabled,
             tokens=entries,
         )
     )
@@ -120,12 +120,6 @@ def test_token_can_opt_out_of_cross_session(monkeypatch):
     _install(monkeypatch, _config(enabled=True, tokens={"qq": {"token": "t", "cross_session": False}}))
     principal = external_auth.require_external_api(authorization="Bearer t")
     assert principal.cross_session is False
-
-
-def test_token_can_opt_into_cross_session_when_global_is_off(monkeypatch):
-    _install(monkeypatch, _config(enabled=True, tokens={"qq": {"token": "t", "cross_session": True}}, cross_session_enabled=False))
-    principal = external_auth.require_external_api(authorization="Bearer t")
-    assert principal.cross_session is True
 
 
 def test_disabled_token_still_rejected_under_cross_session(monkeypatch):

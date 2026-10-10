@@ -971,8 +971,9 @@ class ExternalApiTokenConfig(Base):
     token: str = ""
     label: str = ""
     enabled: bool = True
-    # None = 继承 externalApi.cross_session_enabled；true/false = 这一号单独裁决。
-    cross_session: bool | None = None
+    # 作用域按号裁决，默认放开：能拿到 token 与能读本机会话之间没有新的信任边界
+    # （/api/v1 本来就要 operator 亲手签发 Bearer，服务只绑回环）。收回它就设 False。
+    cross_session: bool = True
 
 
 def _normalize_external_token_id(value: Any) -> str:
@@ -991,11 +992,37 @@ class ExternalApiConfig(Base):
 
     enabled: bool = False
     event_buffer_size: int = 512
-    # 默认允许跨桥寻址：一个 token 能枚举全部会话并按 session_key 投消息。开这条
-    # 不需要新凭据层——/api/v1 本来就要 operator 亲手签发的 Bearer，而 web 只绑回环。
-    # 关掉它或按号关掉，恢复"只见自己名下会话"的旧形状。
-    cross_session_enabled: bool = True
     tokens: dict[str, ExternalApiTokenConfig] = Field(default_factory=dict)
+
+    @model_validator(mode="before")
+    @classmethod
+    def _fold_legacy_global_scope(cls, value: Any) -> Any:
+        """把已删除的全局档折进每个 token，别让关掉过全局的存量部署被静默放开。
+
+        作用域现在只按号裁决，默认放开。老配置里 `crossSessionEnabled: false` 而 token
+        没单独表态时，当时的 effective 是"只见自己名下"——照新默认读会变成每个桥都能
+        枚举并投递全部会话。
+        """
+        if not isinstance(value, dict):
+            return value
+        legacy = value.get("crossSessionEnabled", value.get("cross_session_enabled"))
+        if legacy is None:
+            return value
+        folded = dict(value)
+        folded.pop("crossSessionEnabled", None)
+        folded.pop("cross_session_enabled", None)
+        tokens = folded.get("tokens")
+        if not isinstance(tokens, dict):
+            return folded
+        allow = bool(legacy)
+        normalized: dict[str, Any] = {}
+        for token_id, entry in tokens.items():
+            item = dict(entry) if isinstance(entry, dict) else entry
+            if isinstance(item, dict) and item.get("crossSession", item.get("cross_session")) is None:
+                item["crossSession"] = allow
+            normalized[token_id] = item
+        folded["tokens"] = normalized
+        return folded
 
     @field_validator("tokens", mode="before")
     @classmethod
