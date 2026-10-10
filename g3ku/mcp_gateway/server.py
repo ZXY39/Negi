@@ -245,7 +245,7 @@ def build_mcp_server(client: G3kuMcpClient, *, name: str = "g3ku") -> FastMCP:
             if not session_id:
                 return None
             conversation = client.conversation_of(str(raw.get("external_key") or "")) or session_id
-            return {
+            item = {
                 "conversation": conversation,
                 "session_id": session_id,
                 "title": str(raw.get("title") or ""),
@@ -259,8 +259,12 @@ def build_mcp_server(client: G3kuMcpClient, *, name: str = "g3ku") -> FastMCP:
                 "session_origin": str(raw.get("session_origin") or ""),
                 "can_message": bool(raw.get("can_message", True)),
                 "transcript_path": str(raw.get("transcript_path") or ""),
-                "has_transcript": bool(raw.get("has_transcript")),
             }
+            # 上游没报这个读数时整键省略：把它折成 False 等于替调用方下一句假话
+            # （"这个会话没有转录"），而真实情况只是"服务端没说"。
+            if "has_transcript" in raw:
+                item["has_transcript"] = bool(raw.get("has_transcript"))
+            return item
 
         async def _body() -> dict[str, Any]:
             wanted = str(scope or "").strip().lower() or "all"

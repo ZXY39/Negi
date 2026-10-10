@@ -489,6 +489,24 @@ async def test_mcp_list_conversations_all_scope_carries_preview_and_path():
 
 
 @pytest.mark.asyncio
+async def test_mcp_list_conversations_reports_transcript_flag_only_when_upstream_does():
+    """上游没报的读数不能在这里变成 False——那是一句假话。"""
+    fake = FakeGatewayClient(
+        sessions_payload={
+            "ok": True,
+            "items": [
+                {"session_id": "ext:b:1", "external_key": "mcp:with-flag", "has_transcript": True},
+                {"session_id": "ext:b:2", "external_key": "mcp:without-flag"},
+            ],
+        },
+    )
+    listed = await _call(build_mcp_server(fake), "g3ku_list_conversations", {})
+    by_conversation = {item["conversation"]: item for item in listed["items"]}
+    assert by_conversation["with-flag"]["has_transcript"] is True
+    assert "has_transcript" not in by_conversation["without-flag"]
+
+
+@pytest.mark.asyncio
 async def test_mcp_list_conversations_labels_fallback_when_scope_denied():
     """token 没有跨桥作用域时按 own 返回，并把请求的档位如实标出来。"""
     fake = FakeGatewayClient(

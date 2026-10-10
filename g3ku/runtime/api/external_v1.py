@@ -180,8 +180,9 @@ async def _list_all_sessions(principal: ExternalApiPrincipal) -> dict[str, Any]:
 
     目录构建要遍历全部转录（渠道会话单份可达数十 MB），统一在 CEO 专用线程里跑并吃
     3 秒 TTL 缓存，事件循环只 await。条目形状以 `build_session_summary` 为唯一来源，
-    这里只补 `transcript_path`——运行时算出的安全名（含键长超限的 digest 逃生），
-    调用方不要自己把 session key 拼成文件名。
+    这里只补两样运行侧事实——`transcript_path`（运行时算出的安全名，含键长超限的 digest
+    逃生）与 `has_transcript`（该转录文件在不在），调用方不要自己把 session key 拼成
+    文件名，也不该拿到路径后自己去 stat 一遍。
     """
     if not principal.cross_session:
         raise HTTPException(status_code=403, detail="cross_session_scope_required")
@@ -224,6 +225,7 @@ async def _list_all_sessions(principal: ExternalApiPrincipal) -> dict[str, Any]:
         seen_keys.add(session_id)
         item = dict(raw_item)
         item["transcript_path"] = str(manager.get_path(session_id))
+        item["has_transcript"] = manager.has_transcript(session_id)
         items.append(item)
     return {
         "ok": True,

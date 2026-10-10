@@ -62,7 +62,7 @@
 | `g3ku_session_status(conversation)` | 运行/排队快照 | `running`、`queued_follow_ups`、`inflight_turn_id`、`last_seq` |
 | `g3ku_pause(conversation)` | 暂停在跑回合 | 无 inflight → `{ok:false, error:"no_inflight_turn"}` |
 | `g3ku_cancel(conversation)` | 取消会话任务 | `cancelled` 计数 |
-| `g3ku_list_conversations(scope="all", limit=50)` | 会话列表：`all` 走 `/sessions?scope=all` 拿全量目录（含预览、运行档位与 `transcript_path`），`own` 只列本网关命名空间 | `scope` + `requested_scope`（token 没有跨桥作用域时降级为 `own`，**两个字段都把降级说出来**，不静默把"全量"变成"自己那几个"）、`count`、`truncated` |
+| `g3ku_list_conversations(scope="all", limit=50)` | 会话列表：`all` 走 `/sessions?scope=all` 拿全量目录（含预览、运行档位、`transcript_path` 与 `has_transcript`），`own` 只列本网关命名空间 | `scope` + `requested_scope`（token 没有跨桥作用域时降级为 `own`，**两个字段都把降级说出来**，不静默把"全量"变成"自己那几个"）、`count`、`truncated`。`has_transcript` 只在服务端报了之后才出现在条目里——上游没说时省略该键，不折成 `false` |
 
 - 投全键会话时，那一轮的归属记在**发起方** bridge 上：回复事件流、幂等位与 `g3ku_get_reply` 都跟着发起它的这个网关走，目标会话原本的桥名下不留痕。跨桥发信与在本命名空间发信在运行时里是同一条 `submit` 车道，排队/回执/终态不变量完全一致。
 

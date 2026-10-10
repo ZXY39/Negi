@@ -51,10 +51,17 @@ class _RuntimeManager:
 
 
 class _CatalogStore:
-    """只当哨兵用：断言目录构建拿到的就是运行时这一份 store。"""
+    """只当哨兵用：断言目录构建拿到的就是运行时这一份 store。
+
+    车道向 store 问两份路径事实（安全名、转录在不在），所以两个都得答——真
+    `SessionManager` 就是这两个都实现。
+    """
 
     def get_path(self, key):
         return SessionManager(Path.cwd()).get_path(key)
+
+    def has_transcript(self, key):
+        return self.get_path(key).exists()
 
 
 _RUNTIME_STORE = _CatalogStore()
@@ -197,6 +204,10 @@ def test_scope_all_lists_preview_and_transcript_path(client, monkeypatch, worksp
     assert by_id[foreign.session_key]["preview_text"] == "别人群里最新的一句"
     assert by_id["qq:group:7"]["transcript_path"].endswith("qq_group_7.jsonl")
     assert by_id["web:ceo-local"]["transcript_path"] == str(SessionManager(workspace).get_path("web:ceo-local"))
+    # 并进来的每一行都要带"转录在不在"：只给路径等于把判断推给调用方去拼文件名。
+    assert by_id["web:ceo-local"]["has_transcript"] is True
+    assert by_id["qq:group:7"]["has_transcript"] is False
+    assert by_id[foreign.session_key]["has_transcript"] is False
     assert seen["active_session_id"] == "ext-api:poster"
     assert seen["is_running"] is False and seen["status"] == ""
 
