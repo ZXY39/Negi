@@ -1343,22 +1343,20 @@
     }
 }
 
-/* 外部 token 行的「可会话范围」下拉：上面那条 v2 规则用 background 简式统一了所有原生
-   select，顺带把箭头也抹了——这个控件在窄栏里，没有箭头就看不出可点。这里按行内尺寸收
-   一档并把 chevron 补回来。 */
-[data-ui-version="v2"] .external-scope-select {
-    min-width: 104px;
-    padding-right: 28px;
-    background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='14' height='14' viewBox='0 0 18 18' fill='none'%3E%3Cpath d='M4.5 6.75L9 11.25L13.5 6.75' stroke='%2394A3B8' stroke-width='1.8' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E");
-    background-position: calc(100% - 9px) 50%;
-    background-size: 14px 14px;
-    background-repeat: no-repeat;
-}
-
+/* 「可会话范围」不是原生下拉：org_graph_external.js 渲染完调 enhanceResourceSelects()，
+   由 buildResourceSelect 把 <select> 包成应用自有的 .resource-select-shell（触发器 +
+   自定义菜单），尺寸直接吃 §56 的 40px 控件档。这里只定宽——shell 默认 width:100%，
+   在行内 flex 里会随文案浮动。菜单开成 portal（select 上的 data-resource-select-portal），
+   因为面板是 overflow:hidden、外层 shell 又是滚动口，最后一张卡的菜单不挂到 body 就被裁。 */
 [data-ui-version="v2"] .external-row-scope {
     color: var(--ui-text-muted);
     font-size: 12px;
     white-space: nowrap;
+}
+
+[data-ui-version="v2"] .external-token-actions .resource-select-shell {
+    width: 118px;
+    flex: 0 0 auto;
 }
 
 /* 21. 任务卡片 */

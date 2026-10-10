@@ -95,13 +95,15 @@ function renderExternalTokenList() {
                 </button>
             </div>
             <div class="external-token-actions">
-                <label class="external-row-scope">可会话范围
-                    <select class="resource-select external-scope-select" data-bridge="${esc(item.bridge_id)}"
-                        data-action="scope" aria-label="${esc(item.bridge_id)} 的会话范围">
+                <span class="external-row-scope"><span class="external-row-scope-text">可会话范围</span>
+                    <select id="external-scope-${esc(item.bridge_id)}" class="resource-select external-scope-select"
+                        data-bridge="${esc(item.bridge_id)}" data-action="scope"
+                        data-resource-select-label="可会话范围" data-resource-select-portal="true"
+                        aria-label="${esc(item.bridge_id)} 的会话范围">
                         <option value="allow"${item.cross_session !== false ? " selected" : ""}>全部会话</option>
                         <option value="deny"${item.cross_session === false ? " selected" : ""}>仅本桥</option>
                     </select>
-                </label>
+                </span>
                 <div class="external-token-tools">
                     <button class="toolbar-btn ghost small" data-action="regenerate" data-bridge="${esc(item.bridge_id)}" type="button">重新生成</button>
                     <button class="toolbar-btn ghost danger small" data-action="delete" data-bridge="${esc(item.bridge_id)}" type="button">删除</button>
@@ -109,6 +111,10 @@ function renderExternalTokenList() {
             </div>`;
         listEl.appendChild(row);
     }
+    // 整块 innerHTML 重建会把上一次定制出来的下拉壳一起清掉，重绘后必须重新水合，
+    // 否则这一列又退回原生 <select>（应用里没有第二处原生下拉是可见的）。
+    if (typeof enhanceResourceSelects === "function") enhanceResourceSelects();
+    if (typeof restoreOpenResourceSelect === "function") restoreOpenResourceSelect(listEl);
 }
 
 async function loadExternalApiView({ quiet = false } = {}) {
