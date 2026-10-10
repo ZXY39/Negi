@@ -165,7 +165,11 @@ def build_mcp_server(client: G3kuMcpClient, *, name: str = "negi") -> FastMCP:
         description=(
             "Fetch the next final reply for a conversation that was not consumed yet "
             "(e.g. after negi_chat returned status='pending' or status='submitted'). "
-            "Carries the same task_ids handle as negi_chat."
+            "Carries the same task_ids handle as negi_chat. Pass the bare conversation name "
+            "exactly as you gave negi_chat, or a real session_id from negi_list_conversations: "
+            "a name containing ':' is addressed as a full session key, so the gateway prefix is "
+            "not part of it — `mcp:foo` matches no session and comes back `{ok:false, "
+            "error:\"http_404\"}`."
         )
     )
     async def negi_get_reply(conversation: str, wait_seconds: int = 60) -> dict[str, Any]:

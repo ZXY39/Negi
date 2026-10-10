@@ -58,7 +58,7 @@
 | 工具 | 语义 | 关键返回 |
 |---|---|---|
 | `negi_chat(conversation, message, wait_seconds=120)` | 发送；`wait_seconds>0` 等终稿，`=0` 只提交立即返回（不开 SSE 流） | `status: completed\|submitted\|pending\|queued_receipt\|failed\|cancelled\|no_reply` + `reply`/`receipt`/`error`/`turn_id`/`usage`/**`task_ids`**；pending 与 submitted 都带续取 hint。正数仍按 5..1800 clamp，`0` 是"不等"而不是"等 5 秒" |
-| `negi_get_reply(conversation, wait_seconds=60)` | 续取未消费的下一个终稿 | `found` + `reply` + `task_ids` |
+| `negi_get_reply(conversation, wait_seconds=60)` | 续取未消费的下一个终稿 | `found` + `reply` + `task_ids`。`conversation` 只能传当初给 `negi_chat` 的**裸短名**或 `negi_list_conversations` 返回的真 `session_id`：带 `:` 的名字按全键寻址，把网关前缀拼进去（`mcp:foo`）谁的会话都不匹配，回 `{ok:false, error:"http_404"}` |
 | `negi_session_status(conversation)` | 运行/排队快照 | `running`、`queued_follow_ups`、`inflight_turn_id`、`last_seq` |
 | `negi_pause(conversation)` | 暂停在跑回合（不动已派发的任务） | 无 inflight → `{ok:false, error:"no_inflight_turn"}` |
 | `negi_cancel(conversation)` | 取消该会话的在飞工作：在跑回合 + 本会话派发的任务 | `cancelled` 计数。**已暂停未恢复的任务归任务命令**，这颗不吃它们 |
