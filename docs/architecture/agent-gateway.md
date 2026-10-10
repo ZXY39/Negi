@@ -52,13 +52,13 @@
 
 - 进程模型：`negi mcp serve --token <t> [--base-url http://127.0.0.1:18790/api/v1] [--conversation-prefix mcp]`；token 可由 env `NEGI_EXTERNAL_TOKEN` 提供（旧名 `G3KU_EXTERNAL_TOKEN` 继续读作兜底，装好的人不必改 env）。MCP server 名与工具名都是 `negi` / `negi_*`（改名当日不留别名：客户端配置里的 `claude mcp add g3ku` 要重跑一次）。独立轻量进程，连**运行中的** web 运行时；`negi mcp check` 提供接入前连通性自检（回显 bridge_id 与会话数）。
 - **stdout 纯净铁律**：stdio 上 stdout 是 JSON-RPC 协议通道，serve 路径一切提示走 stderr（`typer.echo(..., err=True)`；loguru 与 FastMCP 日志均 stderr-only）。任何 stdout 字节都会毁帧。
-- 会话映射：`conversation` 不带 `:` 时 → `external_key = mcp:{conversation}`（本网关命名空间，不存在即建）；**带 `:` 时按全键寻址**（`web:ceo-…`、`qq:group:…`、`ext:…`），不加前缀、不建会话，能不能寻到别名下的会话由 token 的跨桥作用域裁决（`external-agent-api.md`「启用与鉴权」）。每次工具调用内"开 SSE 流 → 发消息 → 有界等待 → 关流"（流先开=零事件间隙；无驻留泵）。
+- 会话映射：`conversation` 不带 `:` 时 → `external_key = mcp:{conversation}`（本网关命名空间，不存在即建）；**带 `:` 时按全键寻址**（`web:ceo-…`、`qq:group:…`、`ext:…`），不加前缀、不建会话，能不能寻到别名下的会话由 token 的跨桥作用域裁决（`external-agent-api.md`「启用与鉴权」）。**前缀不是会话名的一部分**：把 `mcp:foo` 当名字传，谁的会话都不匹配，工具回 `{ok:false, error:"http_404"}`（实盘踩过一次，读起来像"会话丢了"）。这条寻址规则写在 FastMCP 的 `instructions` 里一处，供全部工具共用，**不再逐工具重复**（描述是每请求都进上下文的，七遍重复只多花 token）。每次工具调用内"开 SSE 流 → 发消息 → 有界等待 → 关流"（流先开=零事件间隙；无驻留泵）。
 - 工具面（`g3ku/mcp_gateway/server.py`，全部返回 dict、**永不抛异常**——HTTP/传输错误转 `{ok:false, error, status_code?}` 可读载荷）：
 
 | 工具 | 语义 | 关键返回 |
 |---|---|---|
 | `negi_chat(conversation, message, wait_seconds=120)` | 发送；`wait_seconds>0` 等终稿，`=0` 只提交立即返回（不开 SSE 流） | `status: completed\|submitted\|pending\|queued_receipt\|failed\|cancelled\|no_reply` + `reply`/`receipt`/`error`/`turn_id`/`usage`/**`task_ids`**；pending 与 submitted 都带续取 hint。正数仍按 5..1800 clamp，`0` 是"不等"而不是"等 5 秒" |
-| `negi_get_reply(conversation, wait_seconds=60)` | 续取未消费的下一个终稿 | `found` + `reply` + `task_ids`。`conversation` 只能传当初给 `negi_chat` 的**裸短名**或 `negi_list_conversations` 返回的真 `session_id`：带 `:` 的名字按全键寻址，把网关前缀拼进去（`mcp:foo`）谁的会话都不匹配，回 `{ok:false, error:"http_404"}` |
+| `negi_get_reply(conversation, wait_seconds=60)` | 续取未消费的下一个终稿 | `found` + `reply` + `task_ids`。`conversation` 原样传当初给 `negi_chat` 的那个名字 |
 | `negi_session_status(conversation)` | 运行/排队快照 | `running`、`queued_follow_ups`、`inflight_turn_id`、`last_seq` |
 | `negi_pause(conversation)` | 暂停在跑回合（不动已派发的任务） | 无 inflight → `{ok:false, error:"no_inflight_turn"}` |
 | `negi_cancel(conversation)` | 取消该会话的在飞工作：在跑回合 + 本会话派发的任务 | `cancelled` 计数。**已暂停未恢复的任务归任务命令**，这颗不吃它们 |
