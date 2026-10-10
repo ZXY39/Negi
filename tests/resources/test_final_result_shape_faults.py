@@ -1004,3 +1004,66 @@ async def test_responses_stream_records_terminal_event_in_diagnostics() -> None:
     assert cut_off._diagnostics.finish_reason_seen is False
     assert calls == []
     assert usage == {}
+
+
+@pytest.mark.asyncio
+async def test_reasoning_only_error_line_names_the_binding_limit() -> None:
+    """只有思考、零工具调用的回包必须把物理成因印在行首：顶满我们声明的上限，
+    和被窗口剩余挤掉，处置完全不同（前者降思考档位，后者先修窗口口径）。"""
+    blown = LLMResponse(
+        content="",
+        finish_reason="length",
+        usage={"input_tokens": 158337, "output_tokens": 65536, "thinking_tokens": 65536},
+        reasoning_content="thinking" * 64,
+        provider_request_body={"model": "sens-x", "max_tokens": 65536, "reasoning_effort": "xhigh"},
+    )
+    recovery = LLMResponse(
+        content="",
+        tool_calls=[_final_call("call:after-capped", _good_final_arguments())],
+        finish_reason="tool_calls",
+        usage={"input_tokens": 10, "output_tokens": 20},
+    )
+    result, _requests, logs = await _run_final_result_loop(
+        responses=[blown, recovery],
+        node_kind="execution",
+        task_id="task-reasoning-capped",
+        node_id="node-reasoning-capped",
+        max_iterations=3,
+    )
+    assert result.status == "success"
+    assert len(logs.error_logs) == 1
+    text = logs.error_logs[0]["error_text"]
+    assert "reasoning-only] [output-capped]".replace("] [", ")-[") in text or "[output-capped]" in text
+    assert "sent_max_tokens=65536" in text
+    assert "sent_reasoning_effort=xhigh" in text
+    assert "疑似触及输出token上限被截断" in text
+
+
+@pytest.mark.asyncio
+async def test_reasoning_only_without_truncation_is_not_labeled_as_truncated() -> None:
+    """`finish_reason=stop` 的零工具调用回包没被任何上限截断：给它加截断措辞就是印假事实。"""
+    stopped = LLMResponse(
+        content="",
+        finish_reason="stop",
+        usage={"input_tokens": 400, "output_tokens": 300, "thinking_tokens": 300},
+        reasoning_content="thinking",
+        provider_request_body={"model": "sens-x", "max_tokens": 65536},
+    )
+    recovery = LLMResponse(
+        content="",
+        tool_calls=[_final_call("call:after-stop", _good_final_arguments())],
+        finish_reason="tool_calls",
+        usage={"input_tokens": 10, "output_tokens": 20},
+    )
+    result, _requests, logs = await _run_final_result_loop(
+        responses=[stopped, recovery],
+        node_kind="execution",
+        task_id="task-reasoning-stop",
+        node_id="node-reasoning-stop",
+        max_iterations=3,
+    )
+    assert result.status == "success"
+    assert len(logs.error_logs) == 1
+    text = logs.error_logs[0]["error_text"]
+    assert "[not-truncated]" in text
+    assert "疑似触及输出token上限被截断" not in text

@@ -1802,8 +1802,9 @@ class ReActToolLoop:
                 # 只有 reasoning、正文为空且零工具调用：runtime 拿不到任何提交体，
                 # 这不是模型的交付违约。`_is_empty_model_response` 把思考内容算作
                 # 非空，所以这种回包不会被空响应重放道接住，必须由这条形态计数兜住。
+                shape_label = self._reasoning_only_shape_label(response)
                 shape_reason = (
-                    f'reply carried no tool call and no text (reasoning-only), '
+                    f'reply carried no tool call and no text (reasoning-only) [{shape_label}], '
                     f'so no {FINAL_RESULT_TOOL_NAME} payload could be evaluated'
                 )
                 payload_shape_fault_count = self._record_payload_shape_fault(
@@ -2548,6 +2549,24 @@ class ReActToolLoop:
     @staticmethod
     def _response_output_truncated(response: Any) -> bool:
         return str(getattr(response, 'finish_reason', '') or '').strip().lower() == 'length'
+
+    @staticmethod
+    def _reasoning_only_shape_label(response: Any) -> str:
+        """把"只有思考、没有提交体"这一族按物理成因分开，供错误行首与处置判据共用。
+
+        只比"发出去的上限"和"回执里的输出量"，不看声明窗口：实盘有模型把窗口配成
+        390000 而真实是 262144（`task:b1d53106c33f`），按窗口算会把"被窗口挤掉"
+        误判成"上限还没到"。回执被截在比上限更小的值上，就是上限之外的东西拦住了它。
+        """
+        if str(getattr(response, 'finish_reason', '') or '').strip().lower() != 'length':
+            return 'not-truncated'
+        body = dict(getattr(response, 'provider_request_body', {}) or {})
+        sent_max = body.get('max_tokens')
+        if not isinstance(sent_max, int) or isinstance(sent_max, bool) or sent_max <= 0:
+            return 'unknown'
+        usage = dict(getattr(response, 'usage', {}) or {})
+        output_tokens = int(usage.get('output_tokens') or 0)
+        return 'output-capped' if output_tokens >= sent_max else 'window-clamped'
 
     @staticmethod
     def _final_result_repair_tags(*, raw_payload: Any, normalized_payload: Any) -> list[str]:

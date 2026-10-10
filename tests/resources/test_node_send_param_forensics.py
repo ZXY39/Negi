@@ -123,6 +123,29 @@ def test_model_call_payload_records_sent_scalars() -> None:
     assert unset["sent_reasoning_effort"] == ""
 
 
+def test_reasoning_only_label_splits_by_binding_limit() -> None:
+    def _resp(*, finish_reason: str, output: int, sent_max) -> LLMResponse:
+        body = {"model": "sens-x"}
+        if sent_max is not None:
+            body["max_tokens"] = sent_max
+        return LLMResponse(
+            content="",
+            finish_reason=finish_reason,
+            usage={"output_tokens": output},
+            reasoning_content="thinking",
+            provider_request_body=body,
+        )
+
+    label = ReActToolLoop._reasoning_only_shape_label
+    # 顶满我们声明的上限：思考把输出预算吃光（实盘 13 条）。
+    assert label(_resp(finish_reason="length", output=65536, sent_max=65536)) == "output-capped"
+    # 截在比上限更小的值上：是上限之外的东西拦住了它，即窗口剩余（实盘 10 条，
+    # 输入 241572/245792 时 provider 只给 20572/16352）。
+    assert label(_resp(finish_reason="length", output=16352, sent_max=65536)) == "window-clamped"
+    assert label(_resp(finish_reason="stop", output=512, sent_max=65536)) == "not-truncated"
+    assert label(_resp(finish_reason="length", output=65536, sent_max=None)) == "unknown"
+
+
 class _CapturingLogService:
     def __init__(self) -> None:
         self.error_logs: list[str] = []
