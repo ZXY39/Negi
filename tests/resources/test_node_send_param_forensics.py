@@ -94,6 +94,40 @@ def test_sent_param_evidence_keeps_absent_and_zero_apart() -> None:
     assert TaskLogService._sent_request_param_evidence(None)["sent_max_tokens"] is None
 
 
+def test_sent_param_evidence_reads_responses_protocol_key_names() -> None:
+    """Responses 车道的输出上限与档位键名和 Chat 不同，读错等于整条道没有发送面证据。
+
+    实盘：切到 responses 模型的节点跳 `sent_max_tokens` 恒为 None（`max_output_tokens`
+    与嵌套 `reasoning.effort` 没被读）。
+    """
+    evidence = TaskLogService._sent_request_param_evidence(
+        {"model": "deepseek-v4-flash", "max_output_tokens": 32768, "reasoning": {"effort": "high"}}
+    )
+    assert evidence == {"sent_max_tokens": 32768, "sent_reasoning_effort": "high"}
+    # 两种键名同时在场时以 Chat 名为准，不重复计。
+    both = TaskLogService._sent_request_param_evidence({"max_tokens": 4096, "max_output_tokens": 32768})
+    assert both["sent_max_tokens"] == 4096
+
+
+def test_reasoning_only_label_works_on_responses_body() -> None:
+    capped = LLMResponse(
+        content="",
+        finish_reason="length",
+        usage={"output_tokens": 32768},
+        reasoning_content="thinking",
+        provider_request_body={"model": "deepseek-v4-flash", "max_output_tokens": 32768},
+    )
+    clamped = LLMResponse(
+        content="",
+        finish_reason="length",
+        usage={"output_tokens": 6000},
+        reasoning_content="thinking",
+        provider_request_body={"model": "deepseek-v4-flash", "max_output_tokens": 32768},
+    )
+    assert ReActToolLoop._reasoning_only_shape_label(capped) == "output-capped"
+    assert ReActToolLoop._reasoning_only_shape_label(clamped) == "window-clamped"
+
+
 def _ledger_payload(**overrides) -> dict:
     args = {
         "task_id": "task:forensics",

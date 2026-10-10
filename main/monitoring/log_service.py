@@ -21,6 +21,7 @@ from g3ku.content import (
     parse_content_envelope,
 )
 from g3ku.content.navigation import INLINE_CHAR_LIMIT
+from g3ku.providers.base import provider_body_output_cap, provider_body_reasoning_effort
 from g3ku.providers.fallback import MODEL_RETRY_LIVE_STATES, MODEL_RETRY_STATE_WAITING_UPSTREAM
 from g3ku.runtime.kept_contract_snapshot import (
     complete_keep_snapshot,
@@ -2515,10 +2516,9 @@ class TaskLogService:
     def _sent_request_param_evidence(provider_request_body: dict[str, Any] | None) -> dict[str, Any]:
         """从回包带回来的发送参数里取出台账要留的两个标量（缺发送面时保持 None/空）。"""
         body = dict(provider_request_body or {})
-        value = body.get('max_tokens')
         return {
-            'sent_max_tokens': int(value) if isinstance(value, int) and not isinstance(value, bool) else None,
-            'sent_reasoning_effort': str(body.get('reasoning_effort') or '').strip(),
+            'sent_max_tokens': provider_body_output_cap(body),
+            'sent_reasoning_effort': provider_body_reasoning_effort(body),
         }
 
     @staticmethod

@@ -18,7 +18,11 @@ from loguru import logger
 
 from g3ku.agent.tools.base import Tool
 from g3ku.content import content_summary_and_ref, parse_content_envelope
-from g3ku.providers.base import ToolCallRequest
+from g3ku.providers.base import (
+    ToolCallRequest,
+    provider_body_output_cap,
+    provider_body_reasoning_effort,
+)
 from g3ku.runtime.tool_context_presence import kept_contract_index, kept_tool_contexts_from_frames
 from g3ku.runtime.tool_error_guidance import (
     append_parameter_error_guidance,
@@ -2579,9 +2583,8 @@ class ReActToolLoop:
         """
         if str(getattr(response, 'finish_reason', '') or '').strip().lower() != 'length':
             return 'not-truncated'
-        body = dict(getattr(response, 'provider_request_body', {}) or {})
-        sent_max = body.get('max_tokens')
-        if not isinstance(sent_max, int) or isinstance(sent_max, bool) or sent_max <= 0:
+        sent_max = provider_body_output_cap(getattr(response, 'provider_request_body', None))
+        if not sent_max or sent_max <= 0:
             return 'unknown'
         usage = dict(getattr(response, 'usage', {}) or {})
         output_tokens = int(usage.get('output_tokens') or 0)
@@ -2706,8 +2709,8 @@ class ReActToolLoop:
             usage = dict(getattr(response, 'usage', {}) or {})
             request_body = dict(getattr(response, 'provider_request_body', {}) or {})
             output_tokens = int(usage.get('output_tokens') or 0)
-            sent_max_tokens = request_body.get('max_tokens')
-            sent_reasoning_effort = str(request_body.get('reasoning_effort') or '').strip()
+            sent_max_tokens = provider_body_output_cap(request_body)
+            sent_reasoning_effort = provider_body_reasoning_effort(request_body)
             provider_model = str(request_body.get('model') or '').strip()
             finish_reason = str(getattr(response, 'finish_reason', '') or '').strip()
             tool_names = ';'.join(
@@ -5164,8 +5167,8 @@ class ReActToolLoop:
         """
         body = dict(getattr(response, 'provider_request_body', {}) or {})
         usage = dict(getattr(response, 'usage', {}) or {})
-        sent_effort = str(body.get('reasoning_effort') or '').strip() or 'unknown'
-        sent_max = body.get('max_tokens')
+        sent_effort = provider_body_reasoning_effort(body) or 'unknown'
+        sent_max = provider_body_output_cap(body)
         same_class = 0
         try:
             same_class = sum(
@@ -5207,7 +5210,7 @@ class ReActToolLoop:
         except Exception:
             observed_span = 0
         reason = (
-            f'window_integrity_fault: {shape_reason} | sent_max_tokens={body.get("max_tokens")} '
+            f'window_integrity_fault: {shape_reason} | sent_max_tokens={provider_body_output_cap(body)} '
             f'output_tokens={int(usage.get("output_tokens") or 0)} 声明窗口={declared_window} '
             f'本节点实测最大(输入+输出)={observed_span}；这一跳被裁到比声明的发送上限更小的值，'
             '拦住它的是窗口剩余，不是最大输出配置。降思考档位治不了这一类：请核对该模型的 '
