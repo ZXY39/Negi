@@ -117,6 +117,17 @@ class _FakeLogService:
         _ = node_title, kwargs
         self.error_logs.append({"task_id": str(task_id), "node_id": str(node_id), "error_text": str(error_text)})
 
+    def list_task_node_error_logs(self, task_id, node_id) -> list[SimpleNamespace]:
+        return [
+            SimpleNamespace(error_text=item["error_text"])
+            for item in self.error_logs
+            if item["task_id"] == str(task_id) and item["node_id"] == str(node_id)
+        ]
+
+    def max_observed_request_span_tokens(self, task_id, node_id) -> int:
+        _ = task_id, node_id
+        return 262144
+
 
 def _submit_final_result_tool(*, node_kind: str = "execution") -> SubmitFinalResultTool:
     async def _submit(payload: dict[str, object]) -> dict[str, object]:
@@ -1004,3 +1015,128 @@ async def test_responses_stream_records_terminal_event_in_diagnostics() -> None:
     assert cut_off._diagnostics.finish_reason_seen is False
     assert calls == []
     assert usage == {}
+
+
+@pytest.mark.asyncio
+async def test_reasoning_only_error_line_names_the_binding_limit() -> None:
+    """顶满声明上限的那一跳，错误行要同时印出类名、发出的上限与档位。
+
+    这条是处置判据的读数面：`sent_max_tokens` 缺席时"吃满上限"与"被窗口挤掉"同形
+    （实盘 108 条同类行的 sent_max_tokens 出现 0 次）。首跳即停的行为见
+    `test_react_loop_pauses_on_first_output_capped_reasoning_only_hop`。
+    """
+    blown = LLMResponse(
+        content="",
+        finish_reason="length",
+        usage={"input_tokens": 158337, "output_tokens": 65536, "thinking_tokens": 65536},
+        reasoning_content="thinking" * 64,
+        provider_request_body={"model": "sens-x", "max_tokens": 65536, "reasoning_effort": "xhigh"},
+    )
+    _result, requests, logs = await _run_final_result_loop(
+        responses=[blown],
+        node_kind="execution",
+        task_id="task-reasoning-capped",
+        node_id="node-reasoning-capped",
+        max_iterations=3,
+    )
+    assert len(requests) == 1
+    assert len(logs.error_logs) == 1
+    text = logs.error_logs[0]["error_text"]
+    assert "[output-capped]" in text
+    assert "sent_max_tokens=65536" in text
+    assert "sent_reasoning_effort=xhigh" in text
+    assert "疑似触及输出token上限被截断" in text
+
+
+@pytest.mark.asyncio
+async def test_reasoning_only_without_truncation_is_not_labeled_as_truncated() -> None:
+    """`finish_reason=stop` 的零工具调用回包没被任何上限截断：给它加截断措辞就是印假事实。"""
+    stopped = LLMResponse(
+        content="",
+        finish_reason="stop",
+        usage={"input_tokens": 400, "output_tokens": 300, "thinking_tokens": 300},
+        reasoning_content="thinking",
+        provider_request_body={"model": "sens-x", "max_tokens": 65536},
+    )
+    recovery = LLMResponse(
+        content="",
+        tool_calls=[_final_call("call:after-stop", _good_final_arguments())],
+        finish_reason="tool_calls",
+        usage={"input_tokens": 10, "output_tokens": 20},
+    )
+    result, _requests, logs = await _run_final_result_loop(
+        responses=[stopped, recovery],
+        node_kind="execution",
+        task_id="task-reasoning-stop",
+        node_id="node-reasoning-stop",
+        max_iterations=3,
+    )
+    assert result.status == "success"
+    assert len(logs.error_logs) == 1
+    text = logs.error_logs[0]["error_text"]
+    assert "[not-truncated]" in text
+    assert "疑似触及输出token上限被截断" not in text
+
+
+@pytest.mark.asyncio
+async def test_react_loop_pauses_on_first_output_capped_reasoning_only_hop() -> None:
+    """思考顶满声明的输出上限：首跳即落可恢复暂停，不再多问一次。
+
+    实盘某节点在 2.5 小时里连撞 11 次同样形态、白烧约 69 万输出 token，因为形态计数
+    被中间的正常工具轮清零；暂停理由必须写清发出去的是什么档位与"改配置才有效"。
+    """
+    blown = LLMResponse(
+        content="",
+        finish_reason="length",
+        usage={"input_tokens": 158337, "output_tokens": 65536, "thinking_tokens": 65536},
+        reasoning_content="thinking" * 64,
+        provider_request_body={"model": "sens-x", "max_tokens": 65536, "reasoning_effort": "xhigh"},
+    )
+    result, requests, logs = await _run_final_result_loop(
+        responses=[blown],
+        node_kind="execution",
+        task_id="task-output-capped-pause",
+        node_id="node-output-capped-pause",
+        max_iterations=5,
+    )
+    assert len(requests) == 1, "首跳即停，不该再烧一跳"
+    assert result.status == "failed"
+    assert result.delivery_status == "blocked"
+    assert result.failure_disposition == "pause"
+    assert "model_config_fault:" in result.blocking_reason
+    assert "sent_reasoning_effort=xhigh" in result.blocking_reason
+    assert "sent_max_tokens=65536" in result.blocking_reason
+    assert "思考强度" in result.blocking_reason
+    assert "同类跳次=1" in result.blocking_reason
+    assert len(logs.error_logs) == 1
+    assert "[output-capped]" in logs.error_logs[0]["error_text"]
+
+
+@pytest.mark.asyncio
+async def test_react_loop_pauses_on_window_clamped_with_observed_ceiling() -> None:
+    """被窗口剩余挤掉：暂停理由要并列给出声明窗口与台账实测和，且点名两处载体。
+
+    这一类的处置与档位无关（provider 超窗不报错，只能拿观测下界去核对配置口径）。
+    """
+    clamped = LLMResponse(
+        content="",
+        finish_reason="length",
+        usage={"input_tokens": 245792, "output_tokens": 16352, "thinking_tokens": 16352},
+        reasoning_content="thinking" * 64,
+        provider_request_body={"model": "sens-x", "max_tokens": 65536, "reasoning_effort": "xhigh"},
+    )
+    result, requests, logs = await _run_final_result_loop(
+        responses=[clamped],
+        node_kind="execution",
+        task_id="task-window-clamped-pause",
+        node_id="node-window-clamped-pause",
+        max_iterations=5,
+    )
+    assert len(requests) == 1, "再问一次不会多出窗口空间"
+    assert result.failure_disposition == "pause"
+    assert "window_integrity_fault:" in result.blocking_reason
+    assert "sent_max_tokens=65536" in result.blocking_reason
+    assert "output_tokens=16352" in result.blocking_reason
+    assert "本节点实测最大(输入+输出)=262144" in result.blocking_reason
+    assert "contextWindowTokens" in result.blocking_reason
+    assert "[window-clamped]" in logs.error_logs[0]["error_text"]

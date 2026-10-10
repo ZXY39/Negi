@@ -3221,6 +3221,24 @@ class SQLiteTaskStore:
             return 0
         return int(row['max_seq'])
 
+    def max_observed_request_span_tokens(self, task_id: str, node_id: str) -> int:
+        """本节点台账里"有效输入 + 输出"的最大实测和，当作窗口口径的观测下界。
+
+        provider 超窗不报错、只把输出静默裁小（实盘 245792 输入时只给 16352），所以
+        真值取不到，能给的只有"这一跳曾经装下过多少"。走 `idx_task_model_calls_task_id_seq`
+        的 task_id 前缀，避免在那张 GB 级表上全扫。
+        """
+        row = self._fetchone(
+            "SELECT MAX("
+            "json_extract(payload_json, '$.observed_input_truth.effective_input_tokens')"
+            " + json_extract(payload_json, '$.delta_usage.output_tokens')"
+            ") AS span FROM task_model_calls WHERE task_id = ? AND node_id = ?",
+            (str(task_id or '').strip(), str(node_id or '').strip()),
+        )
+        if row is None or row['span'] is None:
+            return 0
+        return int(row['span'])
+
     def get_task_node(self, node_id: str) -> TaskProjectionNodeRecord | None:
         row = self._fetchone('SELECT payload_json FROM task_nodes WHERE node_id = ?', (node_id,))
         return self._parse(row['payload_json'], TaskProjectionNodeRecord) if row else None

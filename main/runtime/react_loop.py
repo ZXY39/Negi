@@ -1802,8 +1802,9 @@ class ReActToolLoop:
                 # 只有 reasoning、正文为空且零工具调用：runtime 拿不到任何提交体，
                 # 这不是模型的交付违约。`_is_empty_model_response` 把思考内容算作
                 # 非空，所以这种回包不会被空响应重放道接住，必须由这条形态计数兜住。
+                shape_label = self._reasoning_only_shape_label(response)
                 shape_reason = (
-                    f'reply carried no tool call and no text (reasoning-only), '
+                    f'reply carried no tool call and no text (reasoning-only) [{shape_label}], '
                     f'so no {FINAL_RESULT_TOOL_NAME} payload could be evaluated'
                 )
                 payload_shape_fault_count = self._record_payload_shape_fault(
@@ -1814,6 +1815,25 @@ class ReActToolLoop:
                     response_tool_calls=response_tool_calls,
                     count=payload_shape_fault_count,
                 )
+                if shape_label == 'output-capped':
+                    # 思考把声明的输出上限整个吃满：再多问几次只会再烧一遍（实盘某节点
+                    # 为此连撞 11 跳、白烧 69 万输出 token）。运行时不改模型档位，落可恢复
+                    # 暂停并把要改的那一行写清楚，交回会话 agent 或操作员处置。
+                    return self._reasoning_only_output_cap_failure(
+                        task_id=task.task_id,
+                        node_id=node.node_id,
+                        response=response,
+                        shape_reason=shape_reason,
+                    )
+                if shape_label == 'window-clamped':
+                    # 被窗口挤掉：改思考档位治不了它，要核对的是窗口口径本身。
+                    return self._window_integrity_failure(
+                        task_id=task.task_id,
+                        node_id=node.node_id,
+                        response=response,
+                        shape_reason=shape_reason,
+                        token_preflight_diagnostics=token_preflight_diagnostics,
+                    )
                 if payload_shape_fault_count >= _PAYLOAD_SHAPE_FAULT_LIMIT:
                     return self._invalid_final_submission_failure(
                         reason=shape_reason,
@@ -2550,6 +2570,24 @@ class ReActToolLoop:
         return str(getattr(response, 'finish_reason', '') or '').strip().lower() == 'length'
 
     @staticmethod
+    def _reasoning_only_shape_label(response: Any) -> str:
+        """把"只有思考、没有提交体"这一族按物理成因分开，供错误行首与处置判据共用。
+
+        只比"发出去的上限"和"回执里的输出量"，不看声明窗口：实盘有模型把窗口配成
+        390000 而真实是 262144（`task:b1d53106c33f`），按窗口算会把"被窗口挤掉"
+        误判成"上限还没到"。回执被截在比上限更小的值上，就是上限之外的东西拦住了它。
+        """
+        if str(getattr(response, 'finish_reason', '') or '').strip().lower() != 'length':
+            return 'not-truncated'
+        body = dict(getattr(response, 'provider_request_body', {}) or {})
+        sent_max = body.get('max_tokens')
+        if not isinstance(sent_max, int) or isinstance(sent_max, bool) or sent_max <= 0:
+            return 'unknown'
+        usage = dict(getattr(response, 'usage', {}) or {})
+        output_tokens = int(usage.get('output_tokens') or 0)
+        return 'output-capped' if output_tokens >= sent_max else 'window-clamped'
+
+    @staticmethod
     def _final_result_repair_tags(*, raw_payload: Any, normalized_payload: Any) -> list[str]:
         """列出这次补齐动了哪几类字段（不含证据下标，词表有界）。
 
@@ -2669,6 +2707,7 @@ class ReActToolLoop:
             request_body = dict(getattr(response, 'provider_request_body', {}) or {})
             output_tokens = int(usage.get('output_tokens') or 0)
             sent_max_tokens = request_body.get('max_tokens')
+            sent_reasoning_effort = str(request_body.get('reasoning_effort') or '').strip()
             provider_model = str(request_body.get('model') or '').strip()
             finish_reason = str(getattr(response, 'finish_reason', '') or '').strip()
             tool_names = ';'.join(
@@ -2686,6 +2725,8 @@ class ReActToolLoop:
             ]
             if provider_model:
                 parts.append(f'provider_model={provider_model}')
+            if sent_reasoning_effort:
+                parts.append(f'sent_reasoning_effort={sent_reasoning_effort}')
             truncated = False
             if sent_max_tokens is not None:
                 try:
@@ -2695,8 +2736,8 @@ class ReActToolLoop:
                 if limit > 0:
                     parts.append(f'sent_max_tokens={limit}')
                     truncated = output_tokens >= limit
-            # 节点这条道多数拿不到 provider 请求体（实盘 53 条里 sent_max_tokens 出现 0 次），
-            # 只按上限判等会让截断永远不可见；finish_reason 是 response 上一定在的字段。
+            # 只有自行组请求体的 provider 会带发送参数（chat 道现已带；拿不到时 sent_* 缺席），
+            # 所以只按上限判等会让别的车道看不见截断；finish_reason 是 response 上一定在的字段。
             if truncated or finish_reason == 'length':
                 parts.append('疑似触及输出token上限被截断')
             self._log_service.append_task_error_log(
@@ -5107,6 +5148,73 @@ class ReActToolLoop:
             ),
             failure_disposition='pause',
         )
+
+    def _reasoning_only_output_cap_failure(
+        self,
+        *,
+        task_id: str,
+        node_id: str,
+        response: Any,
+        shape_reason: str,
+    ) -> NodeFinalResult:
+        """思考把输出上限整个吃满时的可恢复暂停。
+
+        机器不替操作员改模型档位：这条理由要把"现在发的是什么"和"改哪一项"写清，
+        否则 resume 只会让同一个节点再撞同一条上限。
+        """
+        body = dict(getattr(response, 'provider_request_body', {}) or {})
+        usage = dict(getattr(response, 'usage', {}) or {})
+        sent_effort = str(body.get('reasoning_effort') or '').strip() or 'unknown'
+        sent_max = body.get('max_tokens')
+        same_class = 0
+        try:
+            same_class = sum(
+                1
+                for item in list(self._log_service.list_task_node_error_logs(task_id, node_id) or [])
+                if '[output-capped]' in str(getattr(item, 'error_text', '') or '')
+            )
+        except Exception:
+            same_class = 0
+        reason = (
+            f'model_config_fault: {shape_reason} | sent_reasoning_effort={sent_effort} '
+            f'sent_max_tokens={sent_max} output_tokens={int(usage.get("output_tokens") or 0)} '
+            f'同类跳次={max(1, same_class)}；这一跳的思考用量已顶满声明的输出上限，提交体没有任何空间。'
+            '运行时不会改动模型档位：请把该模型的思考强度调低（或把最大输出调高）后再恢复本节点，'
+            '不改配置直接 resume 只会再撞同一条上限。'
+        )
+        return self._invalid_final_submission_failure(reason=reason, count=max(1, same_class))
+
+    def _window_integrity_failure(
+        self,
+        *,
+        task_id: str,
+        node_id: str,
+        response: Any,
+        shape_reason: str,
+        token_preflight_diagnostics: dict[str, Any] | None,
+    ) -> NodeFinalResult:
+        """回包被窗口剩余挤掉时的可恢复暂停。
+
+        provider 超窗不报错、只静默裁输出，真值取不到，所以运行时既不改配置也不猜
+        上限：把声明窗口和本节点台账里实测过的最大"输入+输出"并列摆出来，由会话 agent
+        决定按观测值核对配置还是报给用户。
+        """
+        body = dict(getattr(response, 'provider_request_body', {}) or {})
+        usage = dict(getattr(response, 'usage', {}) or {})
+        declared_window = int((token_preflight_diagnostics or {}).get('context_window_tokens') or 0)
+        try:
+            observed_span = int(self._log_service.max_observed_request_span_tokens(task_id, node_id) or 0)
+        except Exception:
+            observed_span = 0
+        reason = (
+            f'window_integrity_fault: {shape_reason} | sent_max_tokens={body.get("max_tokens")} '
+            f'output_tokens={int(usage.get("output_tokens") or 0)} 声明窗口={declared_window} '
+            f'本节点实测最大(输入+输出)={observed_span}；这一跳被裁到比声明的发送上限更小的值，'
+            '拦住它的是窗口剩余，不是最大输出配置。降思考档位治不了这一类：请核对该模型的 '
+            'context_window_tokens（发送与派单读的是 llm-config 记录 parameters 里那份，模型目录项的 '
+            'contextWindowTokens 只是配置面副本）是否等于观测值，或把这两个数一起报给用户裁决。'
+        )
+        return self._invalid_final_submission_failure(reason=reason, count=1)
 
     @classmethod
     def _invalid_final_submission_failure(cls, *, reason: str, count: int) -> NodeFinalResult:

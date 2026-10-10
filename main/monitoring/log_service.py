@@ -1451,6 +1451,7 @@ class TaskLogService:
                         usage_attempts=usage_attempts,
                         stream_incomplete=stream_incomplete,
                         send_diagnostics=send_diagnostics,
+                        **self._sent_request_param_evidence(provider_request_body),
                     )
                     self._event_writer.append_task_model_call(
                         task_id=task_id,
@@ -2511,6 +2512,16 @@ class TaskLogService:
         }
 
     @staticmethod
+    def _sent_request_param_evidence(provider_request_body: dict[str, Any] | None) -> dict[str, Any]:
+        """从回包带回来的发送参数里取出台账要留的两个标量（缺发送面时保持 None/空）。"""
+        body = dict(provider_request_body or {})
+        value = body.get('max_tokens')
+        return {
+            'sent_max_tokens': int(value) if isinstance(value, int) and not isinstance(value, bool) else None,
+            'sent_reasoning_effort': str(body.get('reasoning_effort') or '').strip(),
+        }
+
+    @staticmethod
     def _model_call_payload(
         *,
         task_id: str,
@@ -2538,6 +2549,8 @@ class TaskLogService:
         usage_attempts: list[Any] | None = None,
         stream_incomplete: bool = False,
         send_diagnostics: dict[str, Any] | None = None,
+        sent_max_tokens: int | None = None,
+        sent_reasoning_effort: str = '',
     ) -> dict[str, Any]:
         message_list = list(model_messages or [])
         request_list = list(request_messages or message_list)
@@ -2596,6 +2609,14 @@ class TaskLogService:
             'delta_usage': delta_usage.model_dump(mode='json'),
             'delta_usage_by_model': [item.model_dump(mode='json') for item in list(delta_usage_by_model or [])],
             'stream_incomplete': bool(stream_incomplete),
+            # 发送面标量：None 是"这一跳没落到 max_tokens"（模型没配 / 走的是别的 provider），
+            # 与 0 或空串分开，否则"不下发"和"下发 0"在读数上同形。
+            'sent_max_tokens': (
+                int(sent_max_tokens)
+                if isinstance(sent_max_tokens, int) and not isinstance(sent_max_tokens, bool)
+                else None
+            ),
+            'sent_reasoning_effort': str(sent_reasoning_effort or '').strip(),
             **TaskLogService._send_diagnostics_fields(send_diagnostics),
             **TaskLogService._model_call_attempt_metrics(usage_attempts),
         }
@@ -2682,6 +2703,10 @@ class TaskLogService:
 
     def list_task_node_error_logs(self, task_id: str, node_id: str) -> list[TaskErrorLogRecord]:
         return self._store.list_task_node_error_logs(task_id, node_id)
+
+    def max_observed_request_span_tokens(self, task_id: str, node_id: str) -> int:
+        """窗口观测下界：provider 超窗不报错，只能从台账的实测和里取这个数。"""
+        return self._store.max_observed_request_span_tokens(task_id, node_id)
 
     def _align_root_node_pause_locked(self, task: TaskRecord) -> NodeRecord | None:
         """任务级暂停标志变化后把任务根节点拉到一致态（根节点驱动口径的一半）。

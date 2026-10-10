@@ -20,6 +20,18 @@ from g3ku.providers.streaming_timeouts import (
 )
 
 
+# 出 provider 的参数面：证据只取这些标量，工具按数量记，正文不进这份副本
+# （sidecar 与台账会各复制一份，整份请求体落账会把明细表顶成大头字节）。
+_SENT_REQUEST_PARAM_KEYS = (
+    "model",
+    "max_tokens",
+    "temperature",
+    "reasoning_effort",
+    "tool_choice",
+    "parallel_tool_calls",
+)
+
+
 def _error_text_for(exc: BaseException, *, fallback: str = "unknown provider error") -> str:
     """Render a provider exception into non-empty, self-describing text.
 
@@ -157,6 +169,10 @@ class OpenAIChatProvider(LLMProvider):
             endpoint=endpoint,
             body=dict(kwargs),
         )
+        provider_request_meta, provider_request_body = self._sent_request_capture(
+            endpoint=endpoint,
+            kwargs=kwargs,
+        )
         try:
             stream_timeout_seconds = resolve_streaming_timeout_seconds(request_timeout_seconds)
             stream_kwargs = {
@@ -200,20 +216,46 @@ class OpenAIChatProvider(LLMProvider):
                     visible_text_streamed=diagnostics.first_text_delta_received_at is not None,
                     stream_incomplete=not diagnostics.finish_reason_seen,
                     first_token_ms=diagnostics.first_token_ms(),
+                    provider_request_meta=provider_request_meta,
+                    provider_request_body=provider_request_body,
                 )
             except Exception as stream_exc:
                 if not should_fallback_to_non_streaming_from_error(stream_exc):
                     raise
             non_stream_timeout_seconds = resolve_non_streaming_timeout_seconds(request_timeout_seconds)
-            return self._parse(await self._client.chat.completions.create(**{**kwargs, "timeout": float(non_stream_timeout_seconds)}))
+            fallback_response = self._parse(await self._client.chat.completions.create(**{**kwargs, "timeout": float(non_stream_timeout_seconds)}))
+            fallback_response.provider_request_meta = provider_request_meta
+            fallback_response.provider_request_body = provider_request_body
+            return fallback_response
         except Exception as e:
             error_text = _error_text_for(e)
             return LLMResponse(
                 content=error_text,
                 error_text=error_text,
                 finish_reason="error",
+                provider_request_meta=provider_request_meta,
+                provider_request_body=provider_request_body,
                 **_structured_error_fields(e),
             )
+
+    def _sent_request_capture(
+        self,
+        *,
+        endpoint: str | None,
+        kwargs: dict[str, Any],
+    ) -> tuple[dict[str, Any], dict[str, Any]]:
+        """把这一跳实际发出的标量参数留成可回读的证据。
+
+        链上多槽重试时留的是最后一次尝试的发送值，与 usage / finish_reason 同口径。
+        """
+        params = {key: kwargs[key] for key in _SENT_REQUEST_PARAM_KEYS if key in kwargs}
+        tools = kwargs.get("tools")
+        if tools is not None:
+            params["tool_count"] = len(list(tools))
+        return (
+            {"provider": "openai_chat", "endpoint": str(endpoint or "").strip()},
+            self._normalize_request_payload(params),
+        )
 
     def _parse(self, response: Any) -> LLMResponse:
         choice = response.choices[0]
