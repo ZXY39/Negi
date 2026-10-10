@@ -12939,6 +12939,18 @@ textarea {
     line-height: 1.6;
 }
 
+.external-scope-row {
+    display: flex;
+    flex-direction: row;
+    align-items: center;
+    gap: 12px;
+    margin-top: 10px;
+}
+
+.external-scope-row .subtitle {
+    margin: 0;
+}
+
 .external-security-hint {
     margin: 0;
     padding: 10px var(--space-5) var(--space-4);
@@ -13034,6 +13046,10 @@ textarea {
     gap: 12px;
     height: auto;
     cursor: default;
+}
+
+.external-row-scope {
+    flex: 0 0 auto;
 }
 
 .external-token-main {

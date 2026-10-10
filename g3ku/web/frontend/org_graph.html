@@ -697,6 +697,16 @@
                             </button>
                         </div>
                         <p class="external-security-hint">token 密文保存在加密覆盖层，配置文件不落明文；明文仅在签发 / 重新生成时显示一次。</p>
+                        <div class="external-scope-row">
+                            <button id="external-api-cross-session-toggle" class="tool-governance-switch" type="button"
+                                aria-pressed="true" aria-label="允许桥接 token 跨桥寻址会话">
+                                <span class="tool-governance-switch-track" aria-hidden="true">
+                                    <span class="tool-governance-switch-thumb"></span>
+                                </span>
+                                <span id="external-api-cross-session-label" class="tool-governance-switch-label">全部会话</span>
+                            </button>
+                            <p class="subtitle">开启后任一 token 都能列出并向全部会话发消息；关闭后各自只见自己名下。可在下面按号单独裁决。</p>
+                        </div>
                     </section>
                     <section class="resource-detail-panel qq-bot-panel">
                         <div class="panel-header">

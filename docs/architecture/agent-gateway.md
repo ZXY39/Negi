@@ -52,7 +52,7 @@
 
 - 进程模型：`negi mcp serve --token <t> [--base-url http://127.0.0.1:18790/api/v1] [--conversation-prefix mcp]`；token 可由 env `G3KU_EXTERNAL_TOKEN` 提供。独立轻量进程，连**运行中的** web 运行时；`negi mcp check` 提供接入前连通性自检（回显 bridge_id 与会话数）。
 - **stdout 纯净铁律**：stdio 上 stdout 是 JSON-RPC 协议通道，serve 路径一切提示走 stderr（`typer.echo(..., err=True)`；loguru 与 FastMCP 日志均 stderr-only）。任何 stdout 字节都会毁帧。
-- 会话映射：`conversation` 参数 → `external_key = mcp:{conversation}`；每次工具调用内"开 SSE 流 → 发消息 → 有界等待 → 关流"（流先开=零事件间隙；无驻留泵）。
+- 会话映射：`conversation` 不带 `:` 时 → `external_key = mcp:{conversation}`（本网关命名空间，不存在即建）；**带 `:` 时按全键寻址**（`web:ceo-…`、`qq:group:…`、`ext:…`），不加前缀、不建会话，能不能寻到别名下的会话由 token 的跨桥作用域裁决（`external-agent-api.md`「启用与鉴权」）。每次工具调用内"开 SSE 流 → 发消息 → 有界等待 → 关流"（流先开=零事件间隙；无驻留泵）。
 - 工具面（`g3ku/mcp_gateway/server.py`，全部返回 dict、**永不抛异常**——HTTP/传输错误转 `{ok:false, error, status_code?}` 可读载荷）：
 
 | 工具 | 语义 | 关键返回 |
@@ -62,14 +62,16 @@
 | `g3ku_session_status(conversation)` | 运行/排队快照 | `running`、`queued_follow_ups`、`inflight_turn_id`、`last_seq` |
 | `g3ku_pause(conversation)` | 暂停在跑回合 | 无 inflight → `{ok:false, error:"no_inflight_turn"}` |
 | `g3ku_cancel(conversation)` | 取消会话任务 | `cancelled` 计数 |
-| `g3ku_list_conversations()` | 本 bridge 会话列表 | `conversation`（external_key 剥前缀） |
+| `g3ku_list_conversations(scope="all", limit=50)` | 会话列表：`all` 走 `/sessions?scope=all` 拿全量目录（含预览、运行档位与 `transcript_path`），`own` 只列本网关命名空间 | `scope` + `requested_scope`（token 没有跨桥作用域时降级为 `own`，**两个字段都把降级说出来**，不静默把"全量"变成"自己那几个"）、`count`、`truncated` |
+
+- 投全键会话时，那一轮的归属记在**发起方** bridge 上：回复事件流、幂等位与 `g3ku_get_reply` 都跟着发起它的这个网关走，目标会话原本的桥名下不留痕。跨桥发信与在本命名空间发信在运行时里是同一条 `submit` 车道，排队/回执/终态不变量完全一致。
 
 - 客户端接入示例：`claude mcp add g3ku -- negi mcp serve --token <t>`（或等价 MCP JSON 配置）。
 
 ## 5. 安全注记
 
 - token 即命名空间：明文只出现在签发响应与对接方自己的配置/env 里；g3ku 侧走 bootstrap secret overlay（`config-and-models.md`），日志不落 token。
-- 网关不扩大数据面：出入只有对话文本与附件（5MiB 上限），出站文本沿用 relay 的清洗与媒体签名 URL 改写；系统提示词、工具面、任务树不经网关暴露。
+- 网关不放大**内容**面：出入只有对话文本与附件（5MiB 上限），出站文本沿用 relay 的清洗与媒体签名 URL 改写；系统提示词、工具面、任务树不经网关暴露。**会话面**则按 token 的作用域决定：默认（`externalApi.crossSessionEnabled` 开）任一 token 都能列出全部会话的预览与转录路径，并向任意会话发消息。`transcript_path` 只是把共享 `SessionManager` 算出的文件位置说给调用方——stdio 网关与运行时同机，调用方本来就有本机文件读权，这个字段不新增能力，只省去它自己拼键（拼错键会撞上会话键长度边界）。要把某个号收回去，就在「外部接入」页把它的 token 设为「仅本桥」，别去改全局档：全局关掉后仍可以给个别 token 单独放行。
 - 423 项目锁先于鉴权生效（`/api/*` 全域）；锁定时两个对接面都不可用，MCP 工具收到可读错误而非挂起。
 
 ## 6. 常见排障入口

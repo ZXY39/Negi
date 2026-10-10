@@ -40,10 +40,15 @@ class FakeGatewayClient:
         state: dict[str, Any] | None = None,
         sessions_payload: dict[str, Any] | None = None,
         send_error: Exception | None = None,
+        all_sessions_payload: dict[str, Any] | None = None,
+        scope_all_error: Exception | None = None,
     ):
         self.conversation_prefix = "mcp"
         self.sent: list[tuple[str, str]] = []
         self.streamed: list[tuple[str, int]] = []
+        self.listed_scopes: list[str] = []
+        self._all_sessions_payload = all_sessions_payload
+        self._scope_all_error = scope_all_error
         self._send_result = send_result or {"status": "started", "turn_id": "t1"}
         self._outcome = outcome or {"kind": "reply", "text": "网关回复", "turn_id": "t1", "usage": None}
         self._state = state or {"running": False, "queued_follow_ups": 0, "inflight_turn_id": None, "last_error": None}
@@ -63,6 +68,13 @@ class FakeGatewayClient:
 
     async def ensure_session(self, conversation: str, *, title: str | None = None) -> str:
         return f"ext:test:{conversation}"
+
+    async def resolve_session(self, conversation: str) -> str:
+        # 与真实客户端同规则：含 ':' 的按全键寻址，不建会话。
+        raw = str(conversation or "").strip()
+        if ":" in raw:
+            return raw
+        return await self.ensure_session(raw)
 
     @asynccontextmanager
     async def event_stream(self, session_id: str, *, last_seq: int = 0):
@@ -93,7 +105,13 @@ class FakeGatewayClient:
     async def cancel_session(self, session_id: str) -> dict:
         return {"ok": True, "cancelled": 2, "session_id": session_id}
 
-    async def list_sessions(self) -> dict:
+    async def list_sessions(self, *, scope: str | None = None) -> dict:
+        self.listed_scopes.append(str(scope or ""))
+        if str(scope or "") == "all":
+            if self._scope_all_error is not None:
+                raise self._scope_all_error
+            if self._all_sessions_payload is not None:
+                return dict(self._all_sessions_payload)
         return dict(self._sessions_payload)
 
 
@@ -426,3 +444,70 @@ async def test_client_send_message_idempotency_header_and_session_cache():
         assert json.loads(messages[0].content)["text"] == "无键"
     finally:
         await client.aclose()
+
+
+def _http_error(status_code: int) -> httpx.HTTPStatusError:
+    request = httpx.Request("GET", "http://127.0.0.1:18790/api/v1/sessions")
+    response = httpx.Response(status_code, request=request)
+    return httpx.HTTPStatusError("http error", request=request, response=response)
+
+
+@pytest.mark.asyncio
+async def test_mcp_list_conversations_all_scope_carries_preview_and_path():
+    """默认全量：预览、运行档位与转录路径都要原样送到调用方。"""
+    fake = FakeGatewayClient(
+        sessions_payload={"ok": True, "items": []},
+        all_sessions_payload={
+            "ok": True,
+            "scope": "all",
+            "items": [
+                {
+                    "session_id": "web:ceo-a",
+                    "title": "会话A",
+                    "preview_text": "最新一句",
+                    "message_count": 3,
+                    "updated_at": "2026-10-10T09:00:00",
+                    "is_running": True,
+                    "status": "running",
+                    "session_family": "local",
+                    "session_origin": "web",
+                    "can_message": True,
+                    "transcript_path": "C:\\sessions\\web_ceo-a.jsonl",
+                }
+            ],
+        },
+    )
+    listed = await _call(build_mcp_server(fake), "g3ku_list_conversations", {})
+    assert fake.listed_scopes == ["all"]
+    assert listed["scope"] == "all" and listed["count"] == 1
+    item = listed["items"][0]
+    assert item["session_id"] == "web:ceo-a"
+    assert item["conversation"] == "web:ceo-a"
+    assert item["preview_text"] == "最新一句"
+    assert item["is_running"] is True and item["status"] == "running"
+    assert item["transcript_path"].endswith("web_ceo-a.jsonl")
+
+
+@pytest.mark.asyncio
+async def test_mcp_list_conversations_labels_fallback_when_scope_denied():
+    """token 没有跨桥作用域时按 own 返回，并把请求的档位如实标出来。"""
+    fake = FakeGatewayClient(
+        sessions_payload={
+            "ok": True,
+            "items": [{"session_id": "ext:test:alpha", "external_key": "mcp:alpha", "title": "A"}],
+        },
+        scope_all_error=_http_error(403),
+    )
+    listed = await _call(build_mcp_server(fake), "g3ku_list_conversations", {})
+    assert fake.listed_scopes == ["all", ""]
+    assert listed["scope"] == "own" and listed["requested_scope"] == "all"
+    assert [item["conversation"] for item in listed["items"]] == ["alpha"]
+
+
+@pytest.mark.asyncio
+async def test_mcp_chat_with_full_session_key_does_not_create_session():
+    """全键寻址不建会话：发进去的就是那个会话本身。"""
+    fake = FakeGatewayClient()
+    result = await _call(build_mcp_server(fake), "g3ku_chat", {"conversation": "web:ceo-a", "message": "hi"})
+    assert result["session_id"] == "web:ceo-a"
+    assert fake.sent == [("web:ceo-a", "hi")]

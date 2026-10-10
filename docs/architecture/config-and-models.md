@@ -71,7 +71,7 @@
 
 ### `external_api`
 
-定义 External Agent API（`/api/v1`）的启用与桥接凭据：`enabled`（默认关）、`tokens`（bridge_id → `{token, label, enabled}`）、`eventBufferSize`。token 密文走 bootstrap secret overlay 三件套（保存时剥离进覆盖层、落盘配置只留占位、解锁时回填）。字段语义与鉴权契约详见 `external-agent-api.md`「启用与鉴权」。
+定义 External Agent API（`/api/v1`）的启用与桥接凭据：`enabled`（默认关）、`tokens`（bridge_id → `{token, label, enabled, crossSession}`）、`eventBufferSize`、`crossSessionEnabled`（跨桥会话作用域的全局默认，**默认开**）。token 密文走 bootstrap secret overlay 三件套（保存时剥离进覆盖层、落盘配置只留占位、解锁时回填）。两个作用域字段按"缺省=继承"落盘：`tokens[].crossSession` 只在操作者显式覆盖时才写出来，继承态不在配置里留一个 `null` 字段；写判据按 key 存在与否，不按真值，否则 `false` 会被当成"没填"。字段语义与鉴权契约详见 `external-agent-api.md`「启用与鉴权」。
 
 ### `cron`
 

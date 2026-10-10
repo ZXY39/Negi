@@ -602,11 +602,14 @@ def _runtime_config_payload(cfg: Config) -> dict[str, object]:
         "externalApi": {
             "enabled": cfg.external_api.enabled,
             "eventBufferSize": cfg.external_api.event_buffer_size,
+            "crossSessionEnabled": cfg.external_api.cross_session_enabled,
             "tokens": {
                 str(token_id): {
                     "token": entry.token,
                     "label": entry.label,
                     "enabled": entry.enabled,
+                    # 只在操作者显式覆盖时落盘：不给没配的存量 token 造出一个 null 字段。
+                    **({"crossSession": entry.cross_session} if entry.cross_session is not None else {}),
                 }
                 for token_id, entry in (cfg.external_api.tokens or {}).items()
             },

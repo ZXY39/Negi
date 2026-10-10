@@ -107,10 +107,24 @@ class G3kuMcpClient:
         response.raise_for_status()
         return response.json()
 
-    async def list_sessions(self) -> dict[str, Any]:
-        response = await self._client.get("/sessions", headers=self._headers())
+    async def list_sessions(self, *, scope: str | None = None) -> dict[str, Any]:
+        params = {"scope": scope} if str(scope or "").strip() else None
+        response = await self._client.get("/sessions", headers=self._headers(), params=params)
         response.raise_for_status()
         return response.json()
+
+    async def resolve_session(self, conversation: str) -> str:
+        """``conversation`` → 可用的 session_id。
+
+        含 ``:`` 的名字按**全键**寻址（``web:ceo-…`` / ``qq:group:…`` / ``ext:…``）：
+        不加 ``mcp:`` 前缀、不建会话，直接把它当 session_id 交给服务端裁决——能不能
+        寻到别名下的会话由 token 的跨桥作用域决定，网关不预先替对方造会话。
+        其余短名沿用本桥命名空间，不存在就建。
+        """
+        raw = str(conversation or "").strip()
+        if ":" in raw:
+            return raw
+        return await self.ensure_session(raw)
 
     async def ack_reply(self, session_id: str, outbox_id: str) -> None:
         """Close the durable ledger record behind a reply this client consumed.
