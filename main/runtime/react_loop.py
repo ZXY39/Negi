@@ -2669,6 +2669,7 @@ class ReActToolLoop:
             request_body = dict(getattr(response, 'provider_request_body', {}) or {})
             output_tokens = int(usage.get('output_tokens') or 0)
             sent_max_tokens = request_body.get('max_tokens')
+            sent_reasoning_effort = str(request_body.get('reasoning_effort') or '').strip()
             provider_model = str(request_body.get('model') or '').strip()
             finish_reason = str(getattr(response, 'finish_reason', '') or '').strip()
             tool_names = ';'.join(
@@ -2686,6 +2687,8 @@ class ReActToolLoop:
             ]
             if provider_model:
                 parts.append(f'provider_model={provider_model}')
+            if sent_reasoning_effort:
+                parts.append(f'sent_reasoning_effort={sent_reasoning_effort}')
             truncated = False
             if sent_max_tokens is not None:
                 try:
@@ -2695,8 +2698,8 @@ class ReActToolLoop:
                 if limit > 0:
                     parts.append(f'sent_max_tokens={limit}')
                     truncated = output_tokens >= limit
-            # 节点这条道多数拿不到 provider 请求体（实盘 53 条里 sent_max_tokens 出现 0 次），
-            # 只按上限判等会让截断永远不可见；finish_reason 是 response 上一定在的字段。
+            # 只有自行组请求体的 provider 会带发送参数（chat 道现已带；拿不到时 sent_* 缺席），
+            # 所以只按上限判等会让别的车道看不见截断；finish_reason 是 response 上一定在的字段。
             if truncated or finish_reason == 'length':
                 parts.append('疑似触及输出token上限被截断')
             self._log_service.append_task_error_log(
