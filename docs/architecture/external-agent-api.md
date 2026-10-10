@@ -11,15 +11,15 @@
 
 ## 2. 启用与鉴权
 
-- 配置段 `externalApi`：`enabled`（默认关，显式 opt-in）、`tokens`（bridge_id → `{token, label, enabled, crossSession}` 的字典）、`eventBufferSize`（每会话事件环形缓冲，默认 512）、`crossSessionEnabled`（跨桥会话作用域的全局默认，**默认开**）。
+- 配置段 `externalApi`：`enabled`（默认关，显式 opt-in）、`tokens`（bridge_id → `{token, label, enabled, crossSession}` 的字典）、`eventBufferSize`（每会话事件环形缓冲，默认 512）。
 - token 密文走 bootstrap secret overlay 三件套（保存时剥离、落盘只留占位、解锁时回填）；配置文件落盘时 `tokens[].token` 剥离进覆盖层。
 - 请求带 `Authorization: Bearer <token>`；`require_external_api` 依赖（`g3ku/runtime/api/external_auth.py`）做常量时间比较，匹配启用的条目即注入 `bridge_id`。enabled=false → 403 `external_api_disabled`；token 缺失/错误 → 401。项目锁定仍由全局 423 中间件兜底。
-- 作用域有两档，判据在鉴权依赖里算好一次，之后每条车道按它分支。`cross_session` 取自 `tokens[].crossSession`，缺省继承 `externalApi.crossSessionEnabled`（默认开）。
+- 作用域**只按号裁决**，判据在鉴权依赖里算好一次，之后每条车道按它分支。`cross_session` 取自 `tokens[].crossSession`，是布尔、**默认放开**，没有全局档也没有继承态。
   - **关闭时**：一个桥只看得见/操作得动自己 `bridge_id` 名下的会话，别名一律 404 `session_not_found`（不区分"不存在"与"不属于你"）。
   - **开启时**：`GET /sessions?scope=all`、`GET /sessions/{id}/state`、`GET /sessions/{id}/events`、`POST /sessions/{id}/messages`、`POST /sessions/{id}/cancel` 认全部真实存在的会话键——别桥的注册会话，或有转录文件的 `web:*` / 渠道会话键（没有转录就 404：拿到 token 的人不能凭空造一个新会话键）。跨桥寻址产生的条目把 `bridge_id` 记成**发起方**，所以那一轮的归属、幂等位与回复路由都跟着发起它的那个桥走，不落到目标会话原来的桥名下。
   - **不受作用域放宽影响的车道**：`PATCH /sessions/{id}`（改名）、`DELETE /sessions/{id}`（清除）、`POST /sessions/{id}/outbox/{outbox_id}/ack`（销账）始终只认本桥名下——注册表生命周期与账本归属不能由第三个桥代管，这条界线由 `tests/resources/test_external_api_session_scope.py` 钉住。判据分两个函数（`_resolve_entry` 放宽、`_own_entry` 不放宽），别在一处合并它们。
   - 为什么默认开：这条车道本来就要 operator 亲手签发 Bearer 且服务只绑回环，"能拿到 token"与"能读机器上的会话"之间没有新的信任边界；跨桥读写需要单独 opt-in 只会让每个桥都去申请一个全权 token。
-- 管理面：Web「外部接入」页（`g3ku/web/frontend/org_graph_external.js`）背后是 `main/api/admin_rest.py` 的 `/api/external-api/settings`（GET/PUT，总开关、缓冲大小与全局跨桥作用域 `crossSessionEnabled`）与 `/api/external-api/tokens`（POST 签发——自定义 token 可省略、省略时服务端自动生成，与存量 token 重复返回 409 `token_exists` / PATCH 改 label·enabled·`crossSession`·`regenerate` / DELETE）。面板把作用域做成两处控件：面板头一个药盒开关（读法是"能看见谁"：全部会话 / 仅本桥，不是启用停用），每个 token 行一个三态下拉（继承全局 / 全部会话 / 仅本桥）。**两处的写判据都是"键在不在"而不是"值真不真"**：`crossSessionEnabled=false` 是真要关，`crossSession=null` 是交回全局裁决、落盘不写这个字段——按真值判断会把"关"和"继承"双双吞掉，面板上表现为点了没反应。明文 token 只在签发/重新生成的响应里返回一次，其余读取只回掩码；保存走统一的 `save_config` + overlay 剥离链路。契约由 `tests/resources/test_external_api_admin_tokens.py` 锁定。只读诊断命令 `negi external status` / `negi external sessions` 提供掩码与注册表视图（锁定时显示占位提示），供 shell 与 agent exec 验收连通状态。渠道对接总纲（架构边界、token 交付纪律、协议速览、新桥构建清单、排障）由 skill `skills/g3ku-bridge-onboarding/` owning，其中 `references/integration-manual.md`（接入手册：curl 样例与事件/错误码参考）、`references/building-a-bridge.md`（适配层编写指南）为权威正文；web CEO 目录对 `ext:*` 会话只读分组展示，详见 `web-and-admin.md`「External Agent API」段。
+- 管理面：Web「外部接入」页（`g3ku/web/frontend/org_graph_external.js`）背后是 `main/api/admin_rest.py` 的 `/api/external-api/settings`（GET/PUT，总开关与缓冲大小）与 `/api/external-api/tokens`（POST 签发——自定义 token 可省略、省略时服务端自动生成，与存量 token 重复返回 409 `token_exists` / PATCH 改 label·enabled·`crossSession`·`regenerate` / DELETE）。面板只在每个 token 行给一颗「可会话范围」下拉（全部会话 / 仅本桥），没有面板头的全局档。`crossSession` 的写判据按 key 存在与否、不按真值：`false` 是真要关；显式传 `null` 回 400 `invalid_cross_session`（旧的"交回全局裁决"写法，静默折成 `false` 会悄悄关掉这一号）。明文 token 只在签发/重新生成的响应里返回一次，其余读取只回掩码；保存走统一的 `save_config` + overlay 剥离链路。契约由 `tests/resources/test_external_api_admin_tokens.py` 锁定。只读诊断命令 `negi external status` / `negi external sessions` 提供掩码与注册表视图（锁定时显示占位提示），供 shell 与 agent exec 验收连通状态。渠道对接总纲（架构边界、token 交付纪律、协议速览、新桥构建清单、排障）由 skill `skills/g3ku-bridge-onboarding/` owning，其中 `references/integration-manual.md`（接入手册：curl 样例与事件/错误码参考）、`references/building-a-bridge.md`（适配层编写指南）为权威正文；web CEO 目录对 `ext:*` 会话只读分组展示，详见 `web-and-admin.md`「External Agent API」段。
 
 ## 3. 会话注册表与 key 命名空间
 

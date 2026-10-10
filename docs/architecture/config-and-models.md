@@ -71,7 +71,7 @@
 
 ### `external_api`
 
-定义 External Agent API（`/api/v1`）的启用与桥接凭据：`enabled`（默认关）、`tokens`（bridge_id → `{token, label, enabled, crossSession}`）、`eventBufferSize`、`crossSessionEnabled`（跨桥会话作用域的全局默认，**默认开**）。token 密文走 bootstrap secret overlay 三件套（保存时剥离进覆盖层、落盘配置只留占位、解锁时回填）。两个作用域字段按"缺省=继承"落盘：`tokens[].crossSession` 只在操作者显式覆盖时才写出来，继承态不在配置里留一个 `null` 字段；写判据按 key 存在与否，不按真值，否则 `false` 会被当成"没填"。字段语义与鉴权契约详见 `external-agent-api.md`「启用与鉴权」。
+定义 External Agent API（`/api/v1`）的启用与桥接凭据：`enabled`（默认关）、`tokens`（bridge_id → `{token, label, enabled, crossSession}`）、`eventBufferSize`。token 密文走 bootstrap secret overlay 三件套（保存时剥离进覆盖层、落盘配置只留占位、解锁时回填）。作用域只按号裁决：`tokens[].crossSession` 是布尔、默认放开，落盘时总写出来；写判据按 key 存在与否、不按真值，否则 `false` 会被当成"没填"。存量配置里那个已删除的全局档 `crossSessionEnabled` 在模型加载时折进每个没有单独表态的 token 然后丢弃（`ExternalApiConfig._fold_legacy_global_scope`）——不折的话，当年关掉过全局的部署会在升级后被静默放开成"每个桥都能枚举并投递全部会话"。字段语义与鉴权契约详见 `external-agent-api.md`「启用与鉴权」。
 
 ### `cron`
 

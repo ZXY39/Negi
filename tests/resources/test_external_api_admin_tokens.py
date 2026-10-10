@@ -187,32 +187,48 @@ def test_external_api_token_create_accepts_custom_token_and_dedupes_values(clien
     assert auto.json()["token"] not in ("", custom)
 
 
-def test_cross_session_scope_roundtrip_global_and_token(client: TestClient) -> None:
-    """全局默认开、能真关掉；token 级三态各自成立，null 是交回全局裁决。"""
+def test_cross_session_scope_roundtrip_per_token(client: TestClient) -> None:
+    """作用域只按号裁决：新签的默认放开，false 是真关，旧的"交回全局"写法被拒。"""
     settings = client.get("/api/external-api/settings").json()
-    assert settings["cross_session_enabled"] is True
+    assert "cross_session_enabled" not in settings
 
     created = client.post("/api/external-api/tokens", json={"bridge_id": "relay"}).json()
-    assert [item["cross_session"] for item in created["items"] if item["bridge_id"] == "relay"] == [None]
-
-    off = client.put("/api/external-api/settings", json={"crossSessionEnabled": False}).json()
-    # false 必须真落盘：按 key 存在判定，不是按真值判定
-    assert off["cross_session_enabled"] is False
-
-    allow = client.patch("/api/external-api/tokens/relay", json={"crossSession": True}).json()
-    row = next(item for item in allow["items"] if item["bridge_id"] == "relay")
+    row = next(item for item in created["items"] if item["bridge_id"] == "relay")
     assert row["cross_session"] is True
 
     deny = client.patch("/api/external-api/tokens/relay", json={"crossSession": False}).json()
     row = next(item for item in deny["items"] if item["bridge_id"] == "relay")
     assert row["cross_session"] is False
 
-    inherit = client.patch("/api/external-api/tokens/relay", json={"crossSession": None}).json()
-    row = next(item for item in inherit["items"] if item["bridge_id"] == "relay")
-    assert row["cross_session"] is None
+    rejected = client.patch("/api/external-api/tokens/relay", json={"crossSession": None})
+    assert rejected.status_code == 400
+    assert rejected.json()["detail"]["code"] == "invalid_cross_session"
+
+    allow = client.patch("/api/external-api/tokens/relay", json={"crossSession": True}).json()
+    row = next(item for item in allow["items"] if item["bridge_id"] == "relay")
+    assert row["cross_session"] is True
 
     on_disk = json.loads((Path.cwd() / ".g3ku" / "config.json").read_text(encoding="utf-8"))
     external_api = on_disk["externalApi"]
-    assert external_api["crossSessionEnabled"] is False
-    # 继承态不写 null 字段
-    assert "crossSession" not in external_api["tokens"]["relay"]
+    assert "crossSessionEnabled" not in external_api
+    assert external_api["tokens"]["relay"]["crossSession"] is True
+
+
+def test_legacy_global_scope_folds_into_each_token() -> None:
+    """老配置里关掉过全局的，不能被新默认静默放开。"""
+    from g3ku.config.schema import ExternalApiConfig
+
+    legacy = ExternalApiConfig.model_validate(
+        {
+            "enabled": True,
+            "crossSessionEnabled": False,
+            "tokens": {"quiet": {"token": "t"}, "loud": {"token": "u", "crossSession": True}},
+        }
+    )
+    assert legacy.tokens["quiet"].cross_session is False
+    assert legacy.tokens["loud"].cross_session is True
+
+    opened = ExternalApiConfig.model_validate(
+        {"enabled": True, "crossSessionEnabled": True, "tokens": {"relay": {"token": "t"}}}
+    )
+    assert opened.tokens["relay"].cross_session is True

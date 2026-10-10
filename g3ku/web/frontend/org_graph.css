@@ -12939,18 +12939,6 @@ textarea {
     line-height: 1.6;
 }
 
-.external-scope-row {
-    display: flex;
-    flex-direction: row;
-    align-items: center;
-    gap: 12px;
-    margin-top: 10px;
-}
-
-.external-scope-row .subtitle {
-    margin: 0;
-}
-
 .external-security-hint {
     margin: 0;
     padding: 10px var(--space-5) var(--space-4);
@@ -13043,16 +13031,44 @@ textarea {
     flex-direction: row;
     align-items: center;
     justify-content: space-between;
+    flex-wrap: wrap;
     gap: 12px;
     height: auto;
     cursor: default;
 }
 
 .external-row-scope {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
     flex: 0 0 auto;
+    color: var(--text-secondary);
+    font-size: 0.78rem;
+    white-space: nowrap;
+}
+
+/* 作用域下拉：观感走全站那套 .resource-select（箭头、配色、hover），这里只按行内
+   尺寸收一档——之前它套的是按钮类 toolbar-btn，原生 select 拿不到任何样式。 */
+.external-scope-select {
+    min-width: 104px;
+    min-height: 34px;
+    padding: 6px 30px 6px 10px;
+    border: 1px solid color-mix(in srgb, var(--border-color) 84%, transparent);
+    border-radius: 10px;
+    font: inherit;
+    font-size: 0.82rem;
+    background-position: calc(100% - 10px) 50%;
+    background-size: 14px 14px;
+}
+
+.external-scope-select:focus-visible {
+    outline: 0;
+    border-color: color-mix(in srgb, var(--brand-primary) 44%, var(--border-color));
+    box-shadow: 0 0 0 3px color-mix(in srgb, var(--brand-primary) 16%, transparent);
 }
 
 .external-token-main {
+    flex: 1 1 auto;
     min-width: 0;
 }
 
@@ -13065,11 +13081,15 @@ textarea {
     font-size: 0.85em;
 }
 
+/* 右侧四颗控件在窄栏里放不下：允许换行并把整组推到行尾，卡片按内容长高。
+   原先 flex-shrink:0 + 不换行 = 「删除」被卡片裁掉。 */
 .external-token-actions {
     display: flex;
     align-items: center;
+    justify-content: flex-end;
+    flex-wrap: wrap;
     gap: 8px;
-    flex-shrink: 0;
+    margin-left: auto;
 }
 
 .qq-bot-status {
