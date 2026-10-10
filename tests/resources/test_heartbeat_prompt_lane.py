@@ -282,3 +282,28 @@ def test_node_error_bundle_marks_window_integrity_fault_class() -> None:
     assert "Failure class: window_integrity_fault" in text
     assert "context_window_tokens" in text
     assert "思考强度调低" not in text
+
+
+def test_node_error_bundle_marks_send_preflight_fault_class() -> None:
+    """发送前预检拒发的暂停：提醒要给出预估与声明窗口两个观测值，并说清 resume 无效。"""
+    from g3ku.heartbeat.prompt_lane import build_heartbeat_prompt_lane
+
+    lane = build_heartbeat_prompt_lane(
+        provider_model="",
+        stable_rules_text="rules",
+        events=[{
+            "reason": "task_node_error", "task_id": "task:t", "node_id": "node:n",
+            "pause_reason": "error",
+            "error_text": (
+                "send_preflight_fault: token compression helper returned an empty summary "
+                "after retries (limit 3) [预估=412000 声明窗口=390000 压缩触发线=296400]"
+            ),
+            "retry_attempt": 1, "retry_cap": 5, "retry_escalated": False,
+        }],
+    )
+    text = str(_field(lane, "event_bundle_text"))
+    assert "Failure class: send_preflight_fault" in text
+    assert "零模型调用" in text
+    assert "预估=412000" in text
+    # 这一类同样不该被读成"重启 worker 就好"。
+    assert "重启 worker" not in text

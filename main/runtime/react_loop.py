@@ -824,6 +824,7 @@ class ReActToolLoop:
             if str(preflight_failure_reason or '').strip():
                 return self._token_preflight_failure(
                     reason=str(preflight_failure_reason or '').strip(),
+                    diagnostics=token_preflight_diagnostics,
                 )
             node_turn_lease = None
             node_turn_controller = getattr(self, '_node_turn_controller', None)
@@ -5384,8 +5385,23 @@ class ReActToolLoop:
         )
 
     @staticmethod
-    def _token_preflight_failure(*, reason: str) -> NodeFinalResult:
+    def _token_preflight_failure(*, reason: str, diagnostics: dict[str, Any] | None = None) -> NodeFinalResult:
+        """发送前预检拒发：运行时机械拒绝，不是模型的自愿阻塞声明。
+
+        必须落 `pause` 处置。留 `terminal` 档就会被阻塞核验闸门按自愿声明收走
+        （`node_runner.py:1997-2002` 只判 status/delivery），打回后 `run_node` 原地
+        重跑，同一输入再撞同一次拒发——零 provider 跳、零错误行、无次数上限
+        （2026-10-10 task:3ea1ba0cb21a：6 份相同声明、验收被唤起 14 跳、账本全空）。
+        """
         normalized_reason = str(reason or '').strip() or 'token preflight failed'
+        info = dict(diagnostics or {})
+        observed = [
+            f'预估={int(info.get("estimated_total_tokens") or info.get("final_estimate_tokens") or 0)}',
+            f'声明窗口={int(info.get("context_window_tokens") or 0)}',
+            f'压缩触发线={int(info.get("effective_trigger_tokens") or 0)}',
+        ]
+        # 标记与观测值都写进 blocking_reason：错误行正文取 failure_text
+        # （= blocking_reason 优先），心跳归类读的就是这一份。
         return NodeFinalResult(
             status='failed',
             delivery_status='blocked',
@@ -5393,7 +5409,10 @@ class ReActToolLoop:
             answer='',
             evidence=[],
             remaining_work=[],
-            blocking_reason=normalized_reason,
+            blocking_reason=(
+                f'send_preflight_fault: {normalized_reason} [{" ".join(observed)}]'
+            ),
+            failure_disposition='pause',
         )
 
     @staticmethod
