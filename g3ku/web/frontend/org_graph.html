@@ -24,7 +24,8 @@
                 <h2>检测到旧版秘密数据</h2>
                 <p class="subtitle">启用新口令体系后，系统会先导出旧秘密并做本地备份，随后清空活动秘密来源。你需要在进入项目后手动重新录入秘密值。</p>
                 <label class="confirm-checkbox-row" for="boot-legacy-confirm">
-                    <input id="boot-legacy-confirm" type="checkbox">
+                    <input id="boot-legacy-confirm" class="ui-checkbox-input" type="checkbox">
+                    <span class="ui-checkbox-box" aria-hidden="true"></span>
                     <span>我理解旧秘密不会自动迁移，并允许导出与重置活动秘密来源</span>
                 </label>
                 <pre id="boot-legacy-preview" class="boot-preview"></pre>
@@ -1016,7 +1017,8 @@
                     <p id="confirm-text" class="confirm-text">确认后继续执行当前操作。</p>
                     <div id="confirm-options" class="confirm-options" hidden>
                         <label class="confirm-checkbox-row" for="confirm-checkbox">
-                            <input id="confirm-checkbox" type="checkbox">
+                            <input id="confirm-checkbox" class="ui-checkbox-input" type="checkbox">
+                            <span class="ui-checkbox-box" aria-hidden="true"></span>
                             <span id="confirm-checkbox-label">同时删除此对话创建的所有任务记录</span>
                         </label>
                         <p id="confirm-checkbox-hint" class="confirm-checkbox-hint"></p>

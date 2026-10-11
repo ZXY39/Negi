@@ -11949,7 +11949,8 @@ function renderModelGroupDialog() {
         const title = modelDisplayTitle(item);
         return `
         <label class="model-group-member-option${selected.has(item.key) ? " is-selected" : ""}">
-            <input type="checkbox" data-group-dialog-member="${esc(item.key)}" ${selected.has(item.key) ? "checked" : ""}>
+            <input type="checkbox" class="ui-checkbox-input" data-group-dialog-member="${esc(item.key)}" ${selected.has(item.key) ? "checked" : ""}>
+            <span class="ui-checkbox-box" aria-hidden="true"></span>
             <span title="${esc(item.key)}">${esc(title)}</span>
         </label>`;
     }).join("");
@@ -15100,7 +15101,8 @@ function ensureMemoryBrowserUi() {
             </div>
             <div id="memory-browser-bulk-bar" class="memory-browser-bulk-bar" hidden>
                 <label class="memory-browser-select-all">
-                    <input type="checkbox" id="memory-browser-select-all" aria-label="全选当前筛选结果" />
+                    <input type="checkbox" class="ui-checkbox-input" id="memory-browser-select-all" aria-label="全选当前筛选结果" />
+                    <span class="ui-checkbox-box" aria-hidden="true"></span>
                     <span>全选</span>
                 </label>
                 <span id="memory-browser-selected-count" class="memory-browser-selected-count">已选 0 条</span>

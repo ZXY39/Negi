@@ -967,7 +967,7 @@ function renderTasks() {
         el.innerHTML = `
             <div class="pc-topbar">
                 <div class="pc-topbar-left">
-                    <label class="project-select-toggle${S.multiSelectMode ? " is-visible" : ""}"><input type="checkbox" class="project-select-checkbox" ${selected ? "checked" : ""} ${S.taskBusy ? "disabled" : ""}><span>Select</span></label>
+                    <label class="project-select-toggle${S.multiSelectMode ? " is-visible" : ""}"><input type="checkbox" class="project-select-checkbox ui-checkbox-input" ${selected ? "checked" : ""} ${S.taskBusy ? "disabled" : ""}><span class="ui-checkbox-box" aria-hidden="true"></span><span>Select</span></label>
                     <div class="pc-topbar-meta">
                         <span class="status-badge" data-status="${esc(statusKey)}" data-task-status>${esc(taskStatusLabel(task))}</span>
                         <span class="pc-task-id-chip">
