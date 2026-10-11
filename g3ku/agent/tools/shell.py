@@ -12,6 +12,7 @@ from typing import Any
 from g3ku.agent.tools.base import Tool
 from g3ku.runtime.project_environment import apply_project_environment, resolve_project_environment
 from g3ku.runtime.tool_watchdog import coerce_timeout_argument, resolve_tool_watchdog_config
+from g3ku.utils.helpers import expand_path_anchor_tokens, model_data_root
 from g3ku.utils.process_tree import kill_process_tree
 from g3ku.utils.subprocess_text import decode_subprocess_output, enrich_subprocess_env_for_text
 from main.governance.exec_tool_policy import (
@@ -205,7 +206,17 @@ class ExecTool(Tool):
     async def execute(self, command: str, working_dir: str | None = None, **kwargs: Any) -> str:
         runtime = kwargs.pop("__g3ku_runtime", None) or {}
         effective_timeout = self._resolve_effective_timeout(kwargs.pop("timeout_seconds", None), runtime=runtime)
-        cwd = self._resolve_cwd(working_dir, runtime=runtime)
+        try:
+            cwd = self._resolve_cwd(working_dir, runtime=runtime)
+        except ValueError as exc:
+            message = str(exc)
+            return self._build_payload(
+                status="error",
+                exit_code=None,
+                stdout_text="",
+                stderr_text=message,
+                error=message,
+            )
         execution_mode = self._resolve_execution_mode()
 
         # Full-access exec may skip ordinary exec guardrails, but it can never
@@ -784,7 +795,16 @@ class ExecTool(Tool):
                 task_temp_root.mkdir(parents=True, exist_ok=True)
                 return str(task_temp_root)
             return self.working_dir or os.getcwd()
-        return str(Path(working_dir).expanduser())
+        # 锚源与 filesystem 道同一套（同一个 `_canonical_temp_root`、同一个 workspace 根），
+        # 且展开发生在路径守卫之前——守卫要拿到真实路径而不是带花括号的字面串。
+        workspace_root = self._workspace_root()
+        expanded = expand_path_anchor_tokens(
+            working_dir,
+            workspace=workspace_root,
+            temp_root=self._canonical_temp_root(runtime),
+            data_root=model_data_root(workspace_root),
+        )
+        return str(Path(expanded).expanduser())
 
     @staticmethod
     def _windows_shell_argv(command: str) -> list[str]:

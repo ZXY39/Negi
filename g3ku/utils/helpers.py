@@ -102,6 +102,8 @@ def model_data_root(workspace: Path | None) -> Path | None:
 PATH_ANCHOR_RULE_TEXT = (
     '裸文件名或 `{temp}/<名>` 落到本次调用的临时目录；带目录段的相对路径与 `{workspace}/<相对路径>` 落到项目根；'
     '绝对路径按给定使用，任何一层都不重写。不要逐字重抄整条绝对前缀——它比短写法更容易打错。'
+    '锚点 token 只整体用作路径开头，塞进一条绝对路径的中段不会得到你想要的位置；'
+    'token 只在路径参数里展开，命令正文里的 token 原样交给 shell。'
     '`{data}` 只在数据根与项目根分离时可用。'
 )
 

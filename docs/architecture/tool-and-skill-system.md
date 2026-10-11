@@ -367,7 +367,7 @@ skill / tool 目录可能被编辑器、git 或外部进程直接改动，注册
 
 ## 11. Model Path Anchoring Contract
 
-文件系统族（`filesystem_write|edit|move|copy|delete|propose_patch|stat`）与内容道（`content_open|search|describe`）接受的 `path` 有四种形态，落点规则只在本文档说一次：
+文件系统族（`filesystem_write|edit|move|copy|delete|propose_patch|stat`）、内容道（`content_open|search|describe`）接受的 `path`，以及 `exec` 的 `working_dir`，有四种形态，落点规则只在本文档说一次：
 
 - 裸文件名（不含目录分隔符）→ 本次调用所属的临时目录，即 `runtime['task_temp_dir']`。节点道是任务临时目录；CEO 前门把会话临时目录注入成同一个字段，所以两条车道共用一条判据。
 - 带目录段的相对路径，或 `{workspace}/<相对路径>` → 项目根。
@@ -378,7 +378,9 @@ skill / tool 目录可能被编辑器、git 或外部进程直接改动，注册
 
 `{data}` 只在解析出的数据根与项目根不重合时出现在合同和 schema 里。两根重合时这个 token 整段不渲染，写它得到的是明确的「该运行时不可用」，而不是被静默折成项目根——同一条合同不必让模型在两个同值名字之间猜权威。
 
-三条不变量：
+展开只发生在路径参数上：`exec` 的 `command` 正文原样交给 shell，写在里面的 token 不展开。锚点代表一个绝对前缀，整体用作路径开头才有意义——塞进一条绝对路径的中段，展开后得到的仍是无效位置。
+
+四条不变量：
 
 1. 落点闸门判的是解析后的绝对路径，与输入形态无关。legacy `workspace/tmp`、越界使用系统临时目录、`tools/` 注册面、托管产物必须落 temp 这四道闸门对四种形态同样生效；放开相对路径不削弱任何一条守卫，也不依赖「模型给的是绝对路径」这个假设。
 2. 工具结果回显的始终是解析后的绝对路径，模型侧、轨道侧和审计面读到的都是落点而不是输入串。

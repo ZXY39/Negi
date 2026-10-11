@@ -212,6 +212,33 @@ def test_exec_tool_uses_task_temp_dir_for_default_cwd_and_env(tmp_path) -> None:
     assert task_temp_dir.is_dir()
 
 
+def test_exec_tool_resolves_anchor_tokens_in_working_dir(tmp_path) -> None:
+    """锚点写法的可用面由解析器决定：filesystem 道展开，exec 也必须展开——同一个参数名
+    不允许在两条车道有两种含义。"""
+    workspace = tmp_path / 'workspace'
+    workspace.mkdir()
+    task_temp_dir = workspace / 'temp' / 'tasks' / 'task_abc'
+    tool = ExecTool(workspace_root=str(workspace))
+    runtime = {'task_temp_dir': str(task_temp_dir)}
+
+    assert tool._resolve_cwd('{workspace}', runtime=runtime) == str(workspace)
+    assert tool._resolve_cwd('{temp}', runtime=runtime) == str(task_temp_dir)
+    assert tool._resolve_cwd('{temp}/sub', runtime=runtime) == str(task_temp_dir / 'sub')
+
+
+@pytest.mark.asyncio
+async def test_exec_tool_reports_unavailable_anchor_token(tmp_path, monkeypatch) -> None:
+    workspace = tmp_path / 'workspace'
+    workspace.mkdir()
+    monkeypatch.setattr(shell_module, 'model_data_root', lambda _workspace: None)
+    tool = ExecTool(workspace_root=str(workspace))
+
+    payload = json.loads(await tool.execute(command='echo hi', working_dir='{data}'))
+
+    assert payload['status'] == 'error'
+    assert '{data} is not available' in payload['error']
+
+
 def test_exec_tool_policy_errors_reference_task_temp_dir(tmp_path, monkeypatch) -> None:
     workspace = tmp_path / 'workspace'
     workspace.mkdir()
