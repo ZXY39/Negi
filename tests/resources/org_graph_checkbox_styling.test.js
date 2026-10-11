@@ -2,12 +2,13 @@ const test = require("node:test");
 const assert = require("node:assert/strict");
 const fs = require("node:fs");
 
-// 勾选框样式台账：前端每个 `type="checkbox"` 落点都必须落进下面四档之一
+// 勾选框样式台账：前端每个 `type="checkbox"` 落点都必须落进下面三档之一
 //   ui         —— 套通用自绘组件（org_graph_redesign.css 的 .ui-checkbox-input + .ui-checkbox-box）
 //   specialist —— 面板自己的自绘规则（会话批量、图像多模态、QQ 沙箱）
-//   accent     —— 保留原生盒子但已定尺寸并染品牌色（显式登记，不是漏网）
 //   hidden     —— 按设计不画盒子（角色药丸把 input 藏掉）或纯隐藏字段
 // 新加勾选框没登记进任何一档 = 界面上会冒出一颗系统默认方框，这条用例负责拦住。
+// 「保留原生盒子只染 accent-color」这一档已经清空：那四颗（语音自动发送、记忆页三处）
+// 都换成了通用组件，样式面只剩一套自绘盒子可讲。
 
 const FILES = [
     "g3ku/web/frontend/org_graph.html",
@@ -33,10 +34,10 @@ const LEDGER = [
     { token: "data-session-bulk-checkbox", tier: "specialist" },
     { token: "llm-binding-image-multimodal-enabled", tier: "specialist" },
     { token: "qq-bot-sandbox-input", tier: "specialist" },
-    { token: "ceo-voice-autosend", tier: "accent" },
-    { token: "data-memory-row-select", tier: "accent" },
-    { token: "data-delete-notes-master", tier: "accent" },
-    { token: "data-delete-note-ref", tier: "accent" },
+    { token: "ceo-voice-autosend", tier: "ui" },
+    { token: "data-memory-row-select", tier: "ui" },
+    { token: "data-delete-notes-master", tier: "ui" },
+    { token: "data-delete-note-ref", tier: "ui" },
     { token: "class=\"skill-role\"", tier: "hidden" },
     { token: "tool-role tool-role-input", tier: "hidden" },
     { token: "name=\"enabled\"", tier: "hidden" },
@@ -86,13 +87,6 @@ test("通用自绘组件与三档专用规则都还在样式里", () => {
     assert.match(base, /\.ceo-session-checkbox input:checked \+ \.ceo-session-checkbox__box/);
     assert.match(base, /\.llm-image-checkbox-input input:checked \+ \.llm-image-checkbox-indicator/);
     assert.match(base, /\.qq-bot-sandbox-input:checked::after/);
-    // accent 档是"保留原生盒子"的有意选择，判据是它确实各自染了色，而不是一条全局兜底。
-    [/\.ceo-voice-option input\[type="checkbox"\] \{[^}]*accent-color/,
-        /\.memory-browser-cell-select input\[type="checkbox"\] \{[^}]*accent-color/,
-        /\.memory-delete-master input\[type="checkbox"\] \{[^}]*accent-color/,
-        /\.memory-delete-note-check input\[type="checkbox"\] \{[^}]*accent-color/].forEach((pattern) => {
-        assert.match(base, pattern);
-    });
     // 角色药丸靠藏掉 input 表达选中态，不是缺样式。
     assert.match(base, /\.role-toggle input \{[^}]*opacity: 0/);
 });

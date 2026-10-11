@@ -5005,14 +5005,6 @@ textarea {
     cursor: pointer;
 }
 
-.ceo-voice-option input[type="checkbox"] {
-    width: 14px;
-    height: 14px;
-    margin: 0;
-    accent-color: var(--brand-primary);
-    cursor: pointer;
-}
-
 /* 语音气泡：识别文字收在「转文字」后面，气泡本身是播放器。
    标记前缀仍留在持久文本里给模型看，这里只是不画出来。 */
 .msg-voice-bubble {
@@ -10635,13 +10627,7 @@ textarea {
 .memory-browser-cell-select {
     text-align: center;
     white-space: nowrap;
-}
-
-.memory-browser-cell-select input[type="checkbox"] {
-    width: 15px;
-    height: 15px;
     cursor: pointer;
-    accent-color: var(--brand-primary);
 }
 
 .memory-browser-cell-actions {
@@ -10820,13 +10806,6 @@ textarea {
     user-select: none;
 }
 
-.memory-delete-master input[type="checkbox"] {
-    width: 15px;
-    height: 15px;
-    cursor: pointer;
-    accent-color: var(--brand-primary);
-}
-
 .memory-delete-notes {
     display: flex;
     flex-direction: column;
@@ -10864,13 +10843,6 @@ textarea {
 .memory-delete-note-check {
     display: inline-flex;
     align-items: center;
-}
-
-.memory-delete-note-check input[type="checkbox"] {
-    width: 15px;
-    height: 15px;
-    cursor: pointer;
-    accent-color: var(--brand-primary);
 }
 
 .memory-delete-note-ref {

@@ -224,8 +224,8 @@ test("composer markup carries a mic button next to the attach button", () => {
     const rowAt = APP_HTML.indexOf('class="ceo-input-row"');
     const composerAt = APP_HTML.indexOf('class="ceo-composer"');
     assert.ok(optionsAt > composerAt && optionsAt < rowAt, "option row must sit above the input row inside the composer");
-    const optionBlock = APP_HTML.slice(optionsAt, optionsAt + 300);
-    assert.match(optionBlock, /<input id="ceo-voice-autosend" type="checkbox" checked>/);
+    const optionBlock = APP_HTML.slice(optionsAt, APP_HTML.indexOf("</label>", optionsAt) + "</label>".length);
+    assert.match(optionBlock, /<input id="ceo-voice-autosend" class="ui-checkbox-input" type="checkbox" checked>/);
     assert.match(optionBlock, /识别后自动发送/);
     assert.match(optionBlock, /hidden/);
 });

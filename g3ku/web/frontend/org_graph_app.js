@@ -15231,7 +15231,8 @@ function ensureMemoryBrowserUi() {
             </div>
             <div class="detail-modal-body memory-delete-body">
                 <label class="memory-delete-master">
-                    <input type="checkbox" data-delete-notes-master aria-label="同步删除关联笔记" />
+                    <input type="checkbox" class="ui-checkbox-input" data-delete-notes-master aria-label="同步删除关联笔记" />
+                    <span class="ui-checkbox-box" aria-hidden="true"></span>
                     <span>同步删除关联笔记</span>
                 </label>
                 <div id="memory-delete-notes" class="memory-delete-notes"></div>
@@ -15415,7 +15416,7 @@ function renderMemoryBrowserList() {
             const actionBusy = String(S.memoryBrowser.actionBusy || "").trim();
             const rowBusy = !!actionBusy;
             const selectCell = editMode
-                ? `<td class="memory-browser-cell-select"><input type="checkbox" data-memory-row-select="${esc(selectableId)}"${checked ? " checked" : ""}${rowBusy ? " disabled" : ""} aria-label="选择记忆 ${esc(memoryId)}" /></td>`
+                ? `<td class="memory-browser-cell-select"><input type="checkbox" class="ui-checkbox-input" data-memory-row-select="${esc(selectableId)}"${checked ? " checked" : ""}${rowBusy ? " disabled" : ""} aria-label="选择记忆 ${esc(memoryId)}" /><span class="ui-checkbox-box" aria-hidden="true"></span></td>`
                 : "";
             const actionsCell = editMode
                 ? `
@@ -15664,7 +15665,8 @@ function renderMemoryDeleteDialog() {
             notesHost.innerHTML = state.notes.map((note) => `
                 <div class="memory-delete-note-row${note.expanded ? " is-expanded" : ""}">
                     <label class="memory-delete-note-check">
-                        <input type="checkbox" data-delete-note-ref="${esc(note.ref)}"${note.checked ? " checked" : ""}${!state.syncNotes || state.busy ? " disabled" : ""} aria-label="同步删除笔记 ${esc(note.ref)}" />
+                        <input type="checkbox" class="ui-checkbox-input" data-delete-note-ref="${esc(note.ref)}"${note.checked ? " checked" : ""}${!state.syncNotes || state.busy ? " disabled" : ""} aria-label="同步删除笔记 ${esc(note.ref)}" />
+                        <span class="ui-checkbox-box" aria-hidden="true"></span>
                     </label>
                     <span class="memory-delete-note-ref">${esc(note.ref)}</span>
                     ${note.shared ? '<span class="memory-delete-note-shared" title="删除后其他记忆仍引用该笔记，引用将悬空">仍被其他记忆引用</span>' : ""}
