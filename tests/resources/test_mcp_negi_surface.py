@@ -23,6 +23,10 @@ from g3ku.runtime.external_events import SessionEventHub
 from g3ku.runtime.frontdoor import _ceo_create_agent_impl as create_agent_impl
 from g3ku.runtime.web_ceo_sessions import _external_channel_row
 
+# 任务跳次 `created_at` 的真实形状：`main/monitoring/log_service.py::_now_iso()` 用
+# `datetime.now().astimezone().isoformat(timespec='microseconds')`，带本机偏移。
+HOP_AT_WIRE_SHAPE = "2026-10-11T00:12:34.567890+08:00"
+
 
 async def _call(server, name: str, args: dict) -> dict:
     from g3ku.mcp_gateway import server as server_module  # noqa: F401  (keep import order stable)
@@ -409,14 +413,31 @@ def test_task_activity_reports_unknown_separately_from_none():
     service = SimpleNamespace(
         list_unfinished_tasks_for_session=lambda key: [SimpleNamespace(task_id="task:a", status="in_progress")],
         store=SimpleNamespace(
-            list_task_model_calls=lambda task_id, limit=None: [{"created_at": "2026-10-11T00:12:34"}],
+            list_task_model_calls=lambda task_id, limit=None: [{"created_at": HOP_AT_WIRE_SHAPE}],
             count_task_model_calls=lambda task_id: 245,
         ),
     )
     activity = _session_task_activity(SimpleNamespace(main_task_service=service), "ext:qoder:abc")
     assert activity["tasks_running"] == 1
     assert activity["tasks"][0]["model_calls"] == 245
-    assert _task_hop_ceiling(activity) == "2026-10-11T00:12:34"
+    assert _task_hop_ceiling(activity) == HOP_AT_WIRE_SHAPE
+
+
+def test_task_hop_age_handles_the_timezone_aware_shape_the_store_actually_returns():
+    """/state 里三种时间源形状不一样：任务跳次带 `+08:00`，会话事件与回合是 naive 串。
+
+    桩里原来喂的是 naive 跳次串，所以这条 500 只有实盘能抓到——会话有未完成任务、
+    且那任务已经跳过一次时 `GET /state` 连回两次
+    `TypeError: can't subtract offset-naive and offset-aware datetimes`，
+    MCP 侧整包 `{ok:false}`：越是"节点在跑、想看它活着没"的时候越读不到。
+    """
+    from g3ku.runtime.api.external_v1 import _age_from_iso
+
+    now = datetime.fromisoformat("2026-10-11T10:12:34.567890+08:00")
+    assert _age_from_iso("2026-10-11T10:02:34.567890+08:00", now=now) == 600
+    assert _age_from_iso("2026-10-11T10:02:34.567890", now=now) == 600
+    assert _age_from_iso("", now=now) is None
+    assert _age_from_iso("not-a-time", now=now) is None
 
 
 def test_latest_model_text_is_truncated_and_reports_the_real_length():
