@@ -773,13 +773,14 @@ class SQLiteTaskStore:
 
         唤醒读口的正身：终态行落库后就不再变，所以调用方断开半小时再问也拿得到——
         不需要谁替它"记住"。`paused` 不在这个集合里（暂停的任务归任务命令，不是结束）。
-        时间只按 ISO 串比较，不做减法：`tasks.updated_at` 带本机偏移，减法会把
-        naive/aware 混减那类故障再引一遍。
+        边界取 `>=` 而不是 `>`：游标是墙钟到秒的串，而 `tasks.updated_at` 只存到秒，
+        严格大于会把"同一秒里晚一点落库的那条"永久漏掉。宁可边界那一秒重复报一次
+        （唤醒是幂等信息：某任务已终态），也不许丢。
         """
         rows = self._fetchall(
             'SELECT task_id, status, updated_at FROM tasks '
             "WHERE session_id = ? AND status IN ('success', 'failed', 'canceled', 'cancelled') "
-            'AND updated_at > ? ORDER BY updated_at DESC LIMIT ?',
+            'AND updated_at >= ? ORDER BY updated_at DESC LIMIT ?',
             (str(session_id or '').strip(), str(since_iso or '').strip(), max(1, int(limit))),
         )
         return [dict(row) for row in rows]
