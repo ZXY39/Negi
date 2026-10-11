@@ -186,6 +186,8 @@ const S = {
         paneTouched: false,
         pendingChainSwitch: false,
         search: "",
+        // 打开 picker 的目的：pin=选一个固定模型，append=往会话链里加成员。
+        pickerPurpose: "pin",
         chainKeys: [],
         // 会话链原文（空数组=跟随全局角色链）；chainKeys 是面板草稿，基线由两者共同决定。
         sessionChainKeys: [],
@@ -513,6 +515,7 @@ const U = {
     ceoModelChainConfirmAccept: document.getElementById("ceo-model-chain-confirm-accept"),
     ceoModelChainConfirmCancel: document.getElementById("ceo-model-chain-confirm-cancel"),
     ceoModelChainActions: document.getElementById("ceo-model-chain-actions"),
+    ceoModelChainAdd: document.getElementById("ceo-model-chain-add"),
     ceoModelChainApply: document.getElementById("ceo-model-chain-apply"),
     ceoModelPicker: document.getElementById("ceo-model-picker"),
     ceoModelPickerSearch: document.getElementById("ceo-model-picker-search"),
@@ -2029,6 +2032,7 @@ function resetCeoModelSelection(sessionId) {
         paneTouched: false,
         pendingChainSwitch: false,
         search: "",
+        pickerPurpose: "pin",
         chainKeys: ceoModelChainKeys(),
         sessionChainKeys: [],
         isSessionChain: false,
@@ -2233,7 +2237,8 @@ async function saveCeoModelChain(keys) {
     const sessionId = String(activeSessionId() || "").trim();
     const modelKeys = normalizeModelRoleChain(keys);
     if (!sessionId || S.ceoModelSelection.saving) return null;
-    if (!modelKeys.length) return null;
+    // 空数组是同一条 PATCH 的合法载荷：后端会摘掉会话链键，等于本会话恢复全局模型链，
+    // 所以「把成员删空」有去处，不会变成一个点了没反应的按钮。
     S.ceoModelSelection = { ...S.ceoModelSelection, saving: true, error: "" };
     syncCeoModelModeControl();
     try {
@@ -2244,7 +2249,9 @@ async function saveCeoModelChain(keys) {
         if (sessionId !== String(activeSessionId() || "").trim()) return null;
         const applied = applyCeoModelSelectionPayload(sessionId, payload);
         S.ceoModelSelection = { ...S.ceoModelSelection, pendingChainSwitch: false, dragFrom: -1, dropIndex: null };
-        showToast({ title: "本会话模型链已保存", text: "这条链只作用于当前会话。", kind: "success" });
+        showToast(modelKeys.length
+            ? { title: "本会话模型链已保存", text: "这条链只作用于当前会话。", kind: "success" }
+            : { title: "本会话已恢复全局模型链", text: "这个会话不再自带模型链。", kind: "success" });
         // 链首会改变上下文窗口与图片能力判定，用量表必须跟着重算。
         scheduleCeoComposerUsageRefresh({ immediate: true });
         return applied;
@@ -2277,7 +2284,12 @@ async function ensureCeoModelCatalog() {
 
 function filterCeoModelPickerModels() {
     const query = String(S.ceoModelSelection.search || "").trim().toLowerCase();
-    const catalog = [...(S.modelCatalog.catalog || [])];
+    let catalog = [...(S.modelCatalog.catalog || [])];
+    if (S.ceoModelSelection.pickerPurpose === "append") {
+        // 加入模式只列还没在链里的配置：加两份同一个成员不是这条链支持的形态。
+        const inChain = new Set(normalizeModelRoleChain(ceoModelChainDraft()));
+        catalog = catalog.filter((item) => !inChain.has(String(item?.key || "").trim()));
+    }
     const matched = query
         ? catalog.filter((item) => [ceoModelDisplayTitle(item), item.key, item.provider_model, item.name, item.description]
             .join("\n")
@@ -2295,9 +2307,15 @@ function renderCeoModelPicker() {
         U.ceoModelPickerList.innerHTML = "";
         return;
     }
-    const pinnedKey = String(selection.modelKey || "");
+    const appendMode = selection.pickerPurpose === "append";
+    const pinnedKey = appendMode ? "" : String(selection.modelKey || "");
     const models = filterCeoModelPickerModels();
-    if (U.ceoModelPickerEmpty) U.ceoModelPickerEmpty.hidden = models.length > 0;
+    if (U.ceoModelPickerEmpty) {
+        U.ceoModelPickerEmpty.hidden = models.length > 0;
+        U.ceoModelPickerEmpty.textContent = appendMode && !String(selection.search || "").trim()
+            ? "全部模型配置都已在链里"
+            : "没有匹配的模型配置";
+    }
     U.ceoModelPickerList.innerHTML = models.map((item) => {
         const key = String(item.key || "").trim();
         const title = ceoModelDisplayTitle(item) || key;
@@ -2306,13 +2324,14 @@ function renderCeoModelPicker() {
         const isSelected = key === pinnedKey;
         return `
             <button type="button" class="ceo-model-picker-item${isSelected ? " is-selected" : ""}" role="option"
-                aria-selected="${isSelected ? "true" : "false"}" data-ceo-model-pick="${esc(key)}"${isDisabled ? " disabled" : ""}>
+                aria-selected="${isSelected ? "true" : "false"}"
+                aria-label="${appendMode ? esc(`加入模型链：${title}`) : esc(title)}" data-ceo-model-pick="${esc(key)}"${isDisabled ? " disabled" : ""}>
                 <span class="ceo-model-picker-item-main">
                     <span class="ceo-model-picker-item-title">${esc(title)}</span>
                     <span class="ceo-model-picker-item-subtitle">${esc(subtitle)}</span>
                 </span>
                 ${isDisabled ? '<span class="ceo-model-picker-item-chip">已禁用</span>' : ""}
-                <i data-lucide="check" class="ceo-model-picker-item-check" aria-hidden="true"></i>
+                <i data-lucide="${appendMode ? "plus" : "check"}" class="ceo-model-picker-item-check" aria-hidden="true"></i>
             </button>`;
     }).join("");
     icons();
@@ -2321,6 +2340,31 @@ function renderCeoModelPicker() {
 function ceoModelChainDraft() {
     const keys = S.ceoModelSelection.chainKeys;
     return Array.isArray(keys) ? keys : [];
+}
+
+function setCeoModelChainDraft(keys) {
+    S.ceoModelSelection = {
+        ...S.ceoModelSelection,
+        chainKeys: normalizeModelRoleChain(keys),
+        dragFrom: -1,
+        dropIndex: null,
+    };
+    renderCeoModelPicker();
+    renderCeoModelChainPane();
+    syncCeoModelModeControl();
+}
+
+function appendCeoModelChainMember(modelKey) {
+    const key = String(modelKey || "").trim();
+    if (!key || ceoModelChainDraft().some((item) => String(item) === key)) return;
+    // 留在列表里继续加：加完的成员从可选项里消失，这本身就是反馈。
+    setCeoModelChainDraft([...ceoModelChainDraft(), key]);
+}
+
+function removeCeoModelChainMember(modelKey) {
+    const key = String(modelKey || "").trim();
+    if (!key) return;
+    setCeoModelChainDraft(ceoModelChainDraft().filter((item) => String(item) !== key));
 }
 
 function ceoModelChainBaseline() {
@@ -2360,8 +2404,10 @@ function renderCeoModelChainPane() {
     if (!visible) return;
     const keys = ceoModelChainDraft();
     if (U.ceoModelChainEmpty) U.ceoModelChainEmpty.hidden = keys.length > 0;
-    if (U.ceoModelChainActions) U.ceoModelChainActions.hidden = !ceoModelChainDirty();
-    if (U.ceoModelChainApply) U.ceoModelChainApply.disabled = !!selection?.saving;
+    // 动作行常驻：「加入模型」必须在还没改动时就可点，否则这条链没有起点。
+    if (U.ceoModelChainActions) U.ceoModelChainActions.hidden = false;
+    if (U.ceoModelChainAdd) U.ceoModelChainAdd.disabled = !!selection?.saving;
+    if (U.ceoModelChainApply) U.ceoModelChainApply.disabled = !!selection?.saving || !ceoModelChainDirty();
     U.ceoModelChainList.innerHTML = keys.map((key, index) => {
         const item = ceoModelCatalogItem(key);
         const title = ceoModelDisplayTitle(item) || key;
@@ -2370,6 +2416,8 @@ function renderCeoModelChainPane() {
                 data-ceo-chain-index="${index}" data-ceo-chain-key="${esc(key)}">
                 <span class="ceo-model-chain-grip" aria-hidden="true">&#9776;</span>
                 <span class="ceo-model-chain-title">${esc(title)}</span>
+                <button type="button" class="ceo-model-chain-remove" draggable="false"
+                    data-ceo-chain-remove="${esc(key)}" aria-label="${esc(`从模型链移除 ${title}`)}">&times;</button>
             </article>`;
     }).join("");
 }
@@ -2560,6 +2608,8 @@ function openCeoModelModePanel() {
         paneTouched: false,
         pendingChainSwitch: false,
         search: "",
+        // 面板自己展开的 picker 永远是「选固定模型」，append 只由「加入模型」按钮进入。
+        pickerPurpose: "pin",
         chainKeys: ceoModelChainBaseline(),
         dragFrom: -1,
         dropIndex: null,
@@ -2587,7 +2637,7 @@ function closeCeoModelModePanel() {
     return true;
 }
 
-function openCeoModelModePicker() {
+function openCeoModelModePicker(purpose = "pin") {
     const sessionId = String(activeSessionId() || "").trim();
     if (!sessionId) return;
     S.ceoModelSelection = {
@@ -2595,6 +2645,7 @@ function openCeoModelModePicker() {
         sessionId,
         panelOpen: true,
         pickerOpen: true,
+        pickerPurpose: purpose === "append" ? "append" : "pin",
         paneTouched: true,
         pendingChainSwitch: false,
         search: "",
@@ -2751,7 +2802,18 @@ function bindCeoModelModeControls() {
     U.ceoModelPickerList?.addEventListener("click", (event) => {
         const target = event.target instanceof Element ? event.target.closest("[data-ceo-model-pick]") : null;
         if (!target || target.disabled) return;
-        void saveCeoModelSelection("model", target.getAttribute("data-ceo-model-pick"));
+        const pickedKey = target.getAttribute("data-ceo-model-pick");
+        if (S.ceoModelSelection.pickerPurpose === "append") appendCeoModelChainMember(pickedKey);
+        else void saveCeoModelSelection("model", pickedKey);
+    });
+    U.ceoModelChainList?.addEventListener("click", (event) => {
+        const target = event.target instanceof Element ? event.target.closest("[data-ceo-chain-remove]") : null;
+        if (!target) return;
+        event.stopPropagation();
+        removeCeoModelChainMember(target.getAttribute("data-ceo-chain-remove"));
+    });
+    U.ceoModelChainAdd?.addEventListener("click", () => {
+        openCeoModelModePicker("append");
     });
     U.ceoModelChainList?.addEventListener("dragstart", (event) => beginCeoModelChainDrag(event));
     U.ceoModelChainList?.addEventListener("dragover", (event) => updateCeoModelChainDropTarget(event));

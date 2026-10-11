@@ -182,6 +182,8 @@ function loadApp(apiClientOverrides = {}) {
             ceoModelChainKeys,
             ceoModelChainBaseline,
             ceoModelChainDraft,
+            appendCeoModelChainMember,
+            removeCeoModelChainMember,
             modelChainMemberKeys,
             modelChainMixedImageCapability,
             modelChainImageIncapableNames,
@@ -226,6 +228,7 @@ function mountControl(app, { readonly = false, chain = ["alpha", "beta", "gamma"
     U.ceoModelChainList = new StubHTMLElement();
     U.ceoModelChainEmpty = new StubHTMLElement();
     U.ceoModelChainActions = new StubHTMLElement();
+    U.ceoModelChainAdd = new StubHTMLElement();
     U.ceoModelChainApply = new StubHTMLElement();
     U.ceoModelChainConfirm = new StubHTMLElement();
     U.ceoModelChainConfirmText = new StubHTMLElement();
@@ -275,7 +278,12 @@ test("打开面板展示模型链列表并切换脑图标展开态", () => {
     assert.equal((markup.match(/resource-list-subtitle|policy-chip/g) || []).length, 0);
     assert.ok(markup.indexOf("Alpha 配置") < markup.indexOf("beta"));
     assert.ok(markup.indexOf("beta") < markup.indexOf("Gamma"));
-    assert.equal(app.U.ceoModelChainActions.hidden, true);
+    // 每行都要有移除控件，否则这条链只能减不能加以外的方向也修不了。
+    assert.equal((markup.match(/class="ceo-model-chain-remove"/g) || []).length, 3);
+    // 动作行常驻，未改动时是「应用」禁用而不是整行消失。
+    assert.equal(app.U.ceoModelChainActions.hidden, false);
+    assert.equal(app.U.ceoModelChainApply.disabled, true);
+    assert.equal(app.U.ceoModelChainAdd.disabled, false);
 });
 
 test("固定模型后链面板换成指定模型列表并显示固定标签", () => {
@@ -591,7 +599,7 @@ test("拖到原位置不产生草稿差异", () => {
     app.finishCeoModelChainDrag({ preventDefault() {} });
 
     assert.equal(app.ceoModelChainDirty(), false);
-    assert.equal(app.U.ceoModelChainActions.hidden, true);
+    assert.equal(app.U.ceoModelChainApply.disabled, true);
     assert.deepEqual(writesOf(app), []);
 });
 
@@ -615,7 +623,7 @@ test("点击应用把会话链提交到本会话，不写全局角色链", async
     assert.deepEqual(Array.from(app.ceoModelChainBaseline()), ["beta", "alpha", "gamma"]);
     assert.deepEqual(Array.from(app.ceoModelChainKeys()), ["alpha", "beta", "gamma"]);
     assert.equal(app.ceoModelChainDirty(), false);
-    assert.equal(app.U.ceoModelChainActions.hidden, true);
+    assert.equal(app.U.ceoModelChainApply.disabled, true);
 });
 
 test("会话链保存失败回到生效中的那条链", async () => {
@@ -715,4 +723,64 @@ test("徽标按绑定 key 解析实跑模型，provider 模型名撞名不串到
     );
     // 读数里没有绑定 key 时仍按 provider 模型名解析。
     assert.equal(app.ceoModelBadgeTitle({ provider_model: "alpha" }), "撞名绑定");
+});
+function clickChainRowControl(app, attributeName, value) {
+    const control = new StubHTMLElement();
+    control.attributes = { [attributeName]: value };
+    control.getAttribute = (name) => (Object.prototype.hasOwnProperty.call(control.attributes, name) ? control.attributes[name] : null);
+    control.closest = (selector) => (selector.includes(attributeName) ? control : null);
+    const handlers = app.U.ceoModelChainList.listeners?.click || [];
+    assert.ok(handlers.length >= 1, "链列表应绑定点击处理");
+    handlers[handlers.length - 1]({ target: control, stopPropagation() {} });
+}
+
+test("点行上的移除只改草稿，不提前发写请求", () => {
+    const app = loadApp();
+    mountControl(app);
+    app.bindCeoModelModeControls();
+    app.openCeoModelModePanel();
+
+    clickChainRowControl(app, "data-ceo-chain-remove", "beta");
+
+    assert.deepEqual(Array.from(app.ceoModelChainDraft()), ["alpha", "gamma"]);
+    assert.equal(app.ceoModelChainDirty(), true);
+    assert.equal(app.U.ceoModelChainApply.disabled, false);
+    assert.deepEqual(writesOf(app), []);
+});
+
+test("加入模型进的是链草稿而不是固定模型", () => {
+    const app = loadApp();
+    mountControl(app, { chain: ["alpha"] });
+    app.bindCeoModelModeControls();
+    app.S.ceoModelSelection = { ...app.S.ceoModelSelection, chainKeys: ["alpha"] };
+    app.openCeoModelModePicker("append");
+
+    const markup = app.U.ceoModelPickerList.innerHTML;
+    // 已在链里的不再列出，否则同一成员能被加两遍。
+    assert.equal(markup.includes('data-ceo-model-pick="alpha"'), false);
+    assert.equal(markup.includes('data-ceo-model-pick="beta"'), true);
+    assert.equal((markup.match(/data-lucide="plus"/g) || []).length, 2);
+
+    app.appendCeoModelChainMember("beta");
+
+    assert.deepEqual(Array.from(app.ceoModelChainDraft()), ["alpha", "beta"]);
+    assert.equal(app.ceoModelChainDirty(), true);
+    assert.equal(app.S.ceoModelSelection.mode, "chain");
+    assert.deepEqual(writesOf(app), []);
+});
+
+test("删空会话链后应用恢复全局模型链", async () => {
+    const app = loadApp();
+    mountControl(app);
+    app.S.ceoModelSelection = {
+        ...app.S.ceoModelSelection,
+        sessionChainKeys: ["alpha", "beta", "gamma"],
+        isSessionChain: true,
+        chainKeys: [],
+    };
+
+    await app.saveCeoModelChain([]);
+
+    assert.deepEqual(writesOf(app).map((call) => [call[0], call[2].mode, call[2].model_keys]), [["patch", "chain", []]]);
+    assert.equal(app.S.ceoModelSelection.isSessionChain, false);
 });
