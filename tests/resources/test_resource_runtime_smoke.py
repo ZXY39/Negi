@@ -17,6 +17,7 @@ from fastapi.testclient import TestClient
 from g3ku.agent.tools.filesystem_mutation import FilesystemTool
 from g3ku.agent.tools.propose_patch import parse_patch_artifact
 from g3ku.content import ContentNavigationService, content_summary_and_ref, parse_content_envelope
+from g3ku.content.navigation import _ALWAYS_INLINE_TOOL_RESULT_SOURCES
 from g3ku.resources import ResourceManager
 from g3ku.resources.loader import ResourceLoader
 from g3ku.resources.registry import ResourceRegistry
@@ -2614,15 +2615,9 @@ def test_direct_load_tools_remain_inline_without_manifest_flag(tmp_path: Path, s
 
 @pytest.mark.parametrize(
     'source_kind',
-    [
-        'tool_result:memory_note',
-        'tool_result:create_async_task_cn',
-        'tool_result:task_failed_nodes_cn',
-        'tool_result:task_fetch_cn',
-        'tool_result:task_node_detail_cn',
-        'tool_result:task_progress_cn',
-        'tool_result:task_summary_cn',
-    ],
+    # 按白名单自身取参：新增例外工具自动覆盖，写错拼法（资源目录名 ≠ 模型面名）
+    # 会让这条变红，而不是静默地永不命中。
+    sorted(_ALWAYS_INLINE_TOOL_RESULT_SOURCES),
 )
 def test_externalize_for_message_keeps_named_inline_exception_tools_inline(tmp_path: Path, source_kind: str):
     store = SQLiteTaskStore(tmp_path / 'runtime.sqlite3')

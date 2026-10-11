@@ -51,18 +51,21 @@ SEARCH_PREVIEW_CHAR_LIMIT = 2000
 # 流式扫描避免把大文件整份读进内存；overlap 保证跨块边界的签名（如 PDF 尾部标记）不被漏掉。
 _BINARY_SEARCH_CHUNK_BYTES = 4 * 1024 * 1024
 _BINARY_SEARCH_CONTEXT_BYTES = 48
-# Internal runtime tools that are intentionally always inlined even when their
-# payloads are large. Keep this list explicit here instead of manifest-driven
-# so these delivery exceptions stay auditable and tightly scoped.
+# Internal runtime tools that are intentionally inlined even when their payloads
+# exceed INLINE_CHAR_LIMIT. Keys are `tool_result:<model-facing tool name>` — the
+# exact string both delivery sites build (_ceo_support.py, react_loop.py), not the
+# resource directory name; a `*_cn` spelling here silently never matches.
+# The ceiling keeps the exception bounded: task_node_detail(detail_level="full")
+# measured 7,024,971 chars on 2026-10-11, and inlining that is a window death.
 _ALWAYS_INLINE_TOOL_RESULT_SOURCES = frozenset(
     {
         "tool_result:memory_note",
-        "tool_result:create_async_task_cn",
-        "tool_result:task_failed_nodes_cn",
-        "tool_result:task_fetch_cn",
-        "tool_result:task_node_detail_cn",
-        "tool_result:task_progress_cn",
-        "tool_result:task_summary_cn",
+        "tool_result:create_async_task",
+        "tool_result:task_failed_nodes",
+        "tool_result:task_list",
+        "tool_result:task_node_detail",
+        "tool_result:task_progress",
+        "tool_result:task_summary",
     }
 )
 # Direct-load context tools return the final body the agent should read in the
@@ -422,7 +425,7 @@ def _should_keep_inline_search_tool_result(payload: dict[str, Any]) -> bool:
 def _should_keep_inline_tool_result(value: Any, *, source_kind: str) -> bool:
     normalized = str(source_kind or "").strip().lower()
     if normalized in _ALWAYS_INLINE_TOOL_RESULT_SOURCES:
-        return True
+        return len(_stringify(value)) <= OPEN_EXCERPT_CHAR_LIMIT
     if _should_keep_inline_direct_load_tool_result(value, source_kind=source_kind):
         return True
     payload = _parsed_json_payload(value)

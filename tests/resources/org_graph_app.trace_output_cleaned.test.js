@@ -46,6 +46,29 @@ class StubHTMLElement extends StubElement {
     querySelectorAll() { return []; }
     addEventListener() {}
 
+    matchesClassName(name) {
+        return String(this.className || "").split(/\s+/).includes(name);
+    }
+
+    closest(selector) {
+        const wanted = String(selector || "").replace(/^\./, "");
+        let node = this;
+        while (node instanceof StubHTMLElement) {
+            if (node.matchesClassName(wanted)) return node;
+            node = node.parentElement;
+        }
+        return null;
+    }
+
+    contains(node) {
+        let cursor = node;
+        while (cursor) {
+            if (cursor === this) return true;
+            cursor = cursor.parentElement;
+        }
+        return false;
+    }
+
     appendChild(child) {
         child.parentElement = this;
         this.children.push(child);
@@ -65,7 +88,7 @@ class StubDocument {
     addEventListener() {}
 }
 
-function loadApp({ readContent }) {
+function loadApp({ readContent, openContent, getToolArguments } = {}) {
     // 每个用例重新执行一遍源码:输出缓存挂在 S 上,必须从干净状态起算。
     const context = {
         console,
@@ -104,13 +127,14 @@ function loadApp({ readContent }) {
     context.window = context;
     context.ApiClient = {
         readContent,
-        openContent: readContent,
+        openContent: openContent || readContent,
+        getCeoToolArguments: getToolArguments,
         getErrorCode: (value) => (value && typeof value === "object" ? String(value.code || "") : ""),
         friendlyErrorMessage: (_value, fallback = "") => String(fallback || ""),
     };
     vm.createContext(context);
     vm.runInContext(
-        `${TASK_VIEW_CODE}\n${APP_CODE}\nthis.__testExports = { ensureTraceOutputCodeBlockContent, ensureCeoToolStepFullOutput, getTraceOutputContentByRef };`,
+        `${TASK_VIEW_CODE}\n${APP_CODE}\nthis.__testExports = { ensureTraceOutputCodeBlockContent, ensureTraceArgumentsCodeBlockContent, ensureCeoToolStepFullOutput, getTraceOutputContentByRef, getTraceOutputWindowByRef, loadMoreTraceOutputBlock, traceContentTextUrl, capTraceDisplayText, renderTraceOutputField, toolArgumentsFullText, TRACE_DISPLAY_CHAR_LIMIT };`,
         context
     );
     return context.__testExports;
@@ -241,4 +265,93 @@ test("the CEO feed shows the cleaned placeholder and refetches once", async () =
     const replayed = ceoStepItem();
     await ensureCeoToolStepFullOutput(replayed.item);
     assert.equal(calls, 1);
+});
+
+const ARTIFACT_REF = "artifact:e9f4b91c3391";
+
+function outputField(ref = ARTIFACT_REF) {
+    const field = new StubHTMLElement();
+    field.className = "task-trace-field";
+    const block = new StubHTMLElement();
+    block.className = "code-block task-trace-code task-trace-output-value";
+    block.dataset.outputRef = ref;
+    block.dataset.emptyText = "暂无内容";
+    block.textContent = "预览片段";
+    const button = new StubHTMLElement();
+    button.className = "task-trace-copy task-trace-more";
+    button.hidden = true;
+    field.appendChild(block);
+    field.appendChild(button);
+    return { field, block, button };
+}
+
+test("点开输出只向服务端要一屏，不再拿整份", async () => {
+    const calls = { read: 0, open: [] };
+    const { ensureTraceOutputCodeBlockContent } = loadApp({
+        readContent: async () => {
+            calls.read += 1;
+            return { content: "整份正文".repeat(4000) };
+        },
+        openContent: async ({ ref, startLine }) => {
+            calls.open.push({ ref, startLine });
+            return { excerpt: "第一段正文", start_line: 1, end_line: 84, truncated: true };
+        },
+    });
+
+    const { block, button } = outputField();
+    const text = await ensureTraceOutputCodeBlockContent(block);
+
+    assert.equal(calls.read, 0);
+    assert.deepEqual(calls.open, [{ ref: ARTIFACT_REF, startLine: 1 }]);
+    assert.equal(text, "第一段正文");
+    assert.equal(block.dataset.outputEndLine, "84");
+    assert.equal(button.hidden, false);
+});
+
+test("继续加载接上下一段，取尽后按钮收起", async () => {
+    const { ensureTraceOutputCodeBlockContent, loadMoreTraceOutputBlock } = loadApp({
+        openContent: async ({ startLine }) => (Number(startLine) === 1
+            ? { excerpt: "第一段", start_line: 1, end_line: 84, truncated: true }
+            : { excerpt: "第二段", start_line: 85, end_line: 120, truncated: false }),
+    });
+
+    const { block, button } = outputField();
+    await ensureTraceOutputCodeBlockContent(block);
+    await loadMoreTraceOutputBlock(button);
+
+    assert.equal(block.textContent, "第一段\n第二段");
+    assert.equal(block.dataset.outputEndLine, "120");
+    assert.equal(button.hidden, true);
+});
+
+test("单行巨型 artifact 的行窗推不动，继续加载保持隐藏", async () => {
+    const { ensureTraceOutputCodeBlockContent } = loadApp({
+        openContent: async () => ({ excerpt: "前 15600 字符", start_line: 1, end_line: 1, truncated: true }),
+    });
+
+    const { block, button } = outputField();
+    await ensureTraceOutputCodeBlockContent(block);
+
+    // 再点一次只会拿回同一段，所以这里必须没有第二次请求。
+    assert.equal(button.hidden, true);
+});
+
+test("归档参数按一屏封顶显示，复制仍拿全文", () => {
+    const { capTraceDisplayText, toolArgumentsFullText, TRACE_DISPLAY_CHAR_LIMIT } = loadApp({});
+    const big = "y".repeat(TRACE_DISPLAY_CHAR_LIMIT + 5000);
+
+    const shown = toolArgumentsFullText({ arguments: { command: big } });
+
+    assert.ok(shown.length < big.length, `capped ${shown.length} should be under ${big.length}`);
+    assert.match(shown, /查看完整/);
+    assert.equal(capTraceDisplayText("short"), "short");
+});
+
+test("查看完整走纯文本路由并转义 ref", () => {
+    const { traceContentTextUrl } = loadApp({});
+
+    assert.equal(traceContentTextUrl(ARTIFACT_REF), "/api/content/text?ref=artifact%3Ae9f4b91c3391");
+    assert.equal(traceContentTextUrl(""), "");
+    const encoded = traceContentTextUrl("path:temp/中 文报告.txt");
+    assert.ok(encoded.includes(encodeURIComponent("中 文报告")));
 });

@@ -1444,7 +1444,10 @@ function buildNodeExecutionTrace(node, detail, liveFrame = null) {
 function toolArgumentsFullText(step) {
     const args = step?.arguments;
     if (!args || typeof args !== "object" || Array.isArray(args)) return "";
-    return Object.keys(args).length ? JSON.stringify(args, null, 2) : "";
+    if (!Object.keys(args).length) return "";
+    // 归档里存的是未裁原文，一格能带到几 MB；显示面按服务端那一屏封顶，复制仍走全量。
+    const text = JSON.stringify(args, null, 2);
+    return typeof capTraceDisplayText === "function" ? capTraceDisplayText(text) : text;
 }
 
 function normalizeExecutionStageTrace(stage, index = 0) {
@@ -2558,16 +2561,24 @@ function traceStatusLabel(status) {
     }[String(status || "")] || "信息");
 }
 
-function renderTraceLabelRow(label, { copyable = false } = {}) {
+function renderTraceLabelRow(label, { copyable = false, fullViewRef = "", loadMore = false } = {}) {
     // 字段标题行:需要时在标题旁挂一个复制按钮,点击复制下方代码块内容。
     const copyTitle = `复制 ${String(label || "").trim()}`.trim();
     const copyMarkup = copyable
         ? `<button type="button" class="task-trace-copy" aria-label="${esc(copyTitle)}" title="${esc(copyTitle)}"><i data-lucide="copy"></i></button>`
         : "";
+    const fullViewMarkup = fullViewRef
+        ? `<button type="button" class="task-trace-copy task-trace-full-view" data-full-view-ref="${esc(fullViewRef)}" aria-label="查看完整内容" title="在新标签页查看完整内容"><i data-lucide="external-link"></i></button>`
+        : "";
+    const loadMoreMarkup = loadMore
+        ? `<button type="button" class="task-trace-copy task-trace-more" data-trace-more="" hidden aria-label="继续加载下一段" title="继续加载下一段"><i data-lucide="chevrons-down"></i></button>`
+        : "";
     return `
         <div class="task-trace-label-row">
             <span class="task-trace-label">${esc(label)}</span>
             ${copyMarkup}
+            ${fullViewMarkup}
+            ${loadMoreMarkup}
         </div>
     `;
 }
@@ -2592,7 +2603,7 @@ function renderTraceOutputField(label, value, outputRef = "", emptyText = "暂�
         : ` data-empty-text="${esc(String(emptyText || ""))}"`;
     return `
         <div class="task-trace-field">
-            ${renderTraceLabelRow(label, { copyable })}
+            ${renderTraceLabelRow(label, { copyable, fullViewRef: normalizedRef, loadMore: !!normalizedRef })}
             <div class="code-block task-trace-code task-trace-output-value"${refAttrs}>${esc(text)}</div>
         </div>
     `;
@@ -2688,6 +2699,25 @@ function bindTraceFieldCopyActions(traceList) {
     if (!(traceList instanceof HTMLElement) || traceList.dataset.traceCopyBindings === "true") return;
     traceList.dataset.traceCopyBindings = "true";
     traceList.addEventListener("click", (event) => {
+        const origin = event.target instanceof Element ? event.target : null;
+        if (origin && typeof origin.closest === "function") {
+            const fullView = origin.closest("[data-full-view-ref]");
+            if (fullView && traceList.contains(fullView)) {
+                event.preventDefault();
+                event.stopPropagation();
+                const ref = String(fullView.dataset?.fullViewRef || "").trim();
+                const url = typeof traceContentTextUrl === "function" ? traceContentTextUrl(ref) : "";
+                if (url && typeof window?.open === "function") window.open(url, "_blank", "noopener");
+                return;
+            }
+            const more = origin.closest("[data-trace-more]");
+            if (more && traceList.contains(more)) {
+                event.preventDefault();
+                event.stopPropagation();
+                if (typeof loadMoreTraceOutputBlock === "function") void loadMoreTraceOutputBlock(more);
+                return;
+            }
+        }
         const button = event.target instanceof Element ? event.target.closest(".task-trace-copy") : null;
         if (!(button instanceof HTMLButtonElement) || !traceList.contains(button)) return;
         event.preventDefault();

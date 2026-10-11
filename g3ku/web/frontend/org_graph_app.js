@@ -1099,9 +1099,23 @@ function decodeJsonStringLiteral(text) {
     }
 }
 
+// 一格显示的正文上限与服务端「一屏内容」契约同源（g3ku/content/navigation.py 的
+// OPEN_EXCERPT_CHAR_LIMIT），不是新档：超过它就不交给浏览器排版，改走「查看完整」。
+const TRACE_DISPLAY_CHAR_LIMIT = 16000;
+const TRACE_DISPLAY_OMITTED_PATTERN = /\n\n……（本面板只显示前[\s\S]*$/;
+
+function capTraceDisplayText(text) {
+    const value = String(text ?? "");
+    if (value.length <= TRACE_DISPLAY_CHAR_LIMIT) return value;
+    return `${value.slice(0, TRACE_DISPLAY_CHAR_LIMIT)}\n\n……（本面板只显示前 ${TRACE_DISPLAY_CHAR_LIMIT} 字符，点「查看完整」看全文）`;
+}
+
 function decodeEscapedDisplayText(value) {
     const raw = String(value ?? "");
     if (!raw.trim()) return "";
+    // 巨型正文原样返回：下面五遍全文扫描 + 两次整串 replace 只是为了判断转义形态，
+    // 几 MB 的载荷光这几步就够把主线程占满（2026-10-11 点开 7 MB 节点详情实测）。
+    if (raw.length > TRACE_DISPLAY_CHAR_LIMIT) return raw;
 
     const quotedDecoded = decodeJsonStringLiteral(raw);
     if (quotedDecoded) return quotedDecoded;
@@ -1202,6 +1216,8 @@ function formatArtifactDisplayValue(value, { depth = 0 } = {}) {
     if (depth > 3) return String(value ?? "");
     if (typeof value === "string") {
         const decoded = decodeEscapedDisplayText(value);
+        // 超一屏就不再做 parse + indent 重排：那两步会把 7 MB 变成两份内存副本。
+        if (decoded.length > TRACE_DISPLAY_CHAR_LIMIT) return decoded;
         const parsed = tryParseJsonText(decoded);
         if (parsed === null) return decoded;
         if (typeof parsed === "string") {
@@ -1254,12 +1270,6 @@ function ensureTraceOutputContentState() {
     }
 }
 
-function traceOutputContentCacheKey(outputRef = "", view = "canonical") {
-    const normalizedRef = normalizeTraceOutputRef(outputRef);
-    const normalizedView = String(view || "canonical").trim().toLowerCase() || "canonical";
-    return normalizedRef ? `${normalizedView}:${normalizedRef}` : "";
-}
-
 function extractTraceOutputContentText(payload = null) {
     const raw = String(payload?.content || payload?.excerpt || "");
     return String(formatArtifactDisplayValue(raw) || "").trim();
@@ -1278,30 +1288,52 @@ function traceOutputMissingError() {
     return error;
 }
 
-async function getTraceOutputContentByRef(outputRef = "", { view = "canonical" } = {}) {
+function traceOutputWindowCacheKey(outputRef = "", view = "canonical", startLine = 1) {
     const normalizedRef = normalizeTraceOutputRef(outputRef);
     if (!normalizedRef) return "";
+    const normalizedView = String(view || "canonical").trim().toLowerCase() || "canonical";
+    return `${normalizedView}:${normalizedRef}:${Number(startLine || 1)}`;
+}
+
+function traceContentTextUrl(outputRef = "") {
+    const normalizedRef = normalizeTraceOutputRef(outputRef);
+    if (!normalizedRef) return "";
+    return `/api/content/text?ref=${encodeURIComponent(normalizedRef)}`;
+}
+
+// 输出正文按「服务端一屏」取，不再整份搬到浏览器：/api/content/read 会把 artifact
+// 全文（实测单行 7,024,971 字符的节点详情）一次性交给页面，decode + indent 重排 +
+// 一次性 DOM 注入三步都在主线程，整页就是这样冻住的。
+async function getTraceOutputWindowByRef(outputRef = "", { view = "canonical", startLine = 1 } = {}) {
+    const emptyWindow = { text: "", startLine: 1, endLine: 0, truncated: false };
+    const normalizedRef = normalizeTraceOutputRef(outputRef);
+    if (!normalizedRef) return emptyWindow;
     ensureTraceOutputContentState();
-    const cacheKey = traceOutputContentCacheKey(normalizedRef, view);
-    if (!cacheKey) return "";
+    const cacheKey = traceOutputWindowCacheKey(normalizedRef, view, startLine);
+    if (!cacheKey) return emptyWindow;
     if (Object.prototype.hasOwnProperty.call(S.traceOutputContentByKey, cacheKey)) {
         const cached = S.traceOutputContentByKey[cacheKey];
         if (cached && typeof cached === "object" && cached.missing) {
             throw traceOutputMissingError();
         }
-        return String(cached || "");
+        return cached || emptyWindow;
     }
     if (S.traceOutputRequestsByKey[cacheKey]) {
         return S.traceOutputRequestsByKey[cacheKey];
     }
     const request = (async () => {
         try {
-            const payload = typeof ApiClient?.readContent === "function"
-                ? await ApiClient.readContent({ ref: normalizedRef, view })
-                : await ApiClient.openContent({ ref: normalizedRef, view, startLine: 1, endLine: 200 });
-            const text = extractTraceOutputContentText(payload);
-            S.traceOutputContentByKey[cacheKey] = text;
-            return text;
+            const payload = typeof ApiClient?.openContent === "function"
+                ? await ApiClient.openContent({ ref: normalizedRef, view, startLine: Number(startLine || 1) })
+                : null;
+            const chunk = {
+                text: extractTraceOutputContentText(payload),
+                startLine: Number(payload?.start_line ?? startLine ?? 1),
+                endLine: Number(payload?.end_line || 0),
+                truncated: !!payload?.truncated,
+            };
+            S.traceOutputContentByKey[cacheKey] = chunk;
+            return chunk;
         } catch (error) {
             if (isTraceOutputMissingError(error)) {
                 S.traceOutputContentByKey[cacheKey] = { missing: true };
@@ -1314,6 +1346,45 @@ async function getTraceOutputContentByRef(outputRef = "", { view = "canonical" }
         return await request;
     } finally {
         delete S.traceOutputRequestsByKey[cacheKey];
+    }
+}
+
+async function getTraceOutputContentByRef(outputRef = "", { view = "canonical", startLine = 1 } = {}) {
+    const chunk = await getTraceOutputWindowByRef(outputRef, { view, startLine });
+    return String(chunk?.text || "");
+}
+
+// 继续加载只在"行窗真的往前推进过"时可用：单行巨型 artifact 的 end_line 恒等于
+// start_line，再要一次只会拿回同一段。
+function setTraceOutputMoreState(element, chunk = null) {
+    if (!(element instanceof HTMLElement) || typeof element.closest !== "function") return;
+    const field = element.closest(".task-trace-field");
+    const button = field?.querySelector?.(".task-trace-more");
+    if (!(button instanceof HTMLElement)) return;
+    const advanced = Number(chunk?.endLine || 0) > Number(chunk?.startLine || 1);
+    button.hidden = !(chunk?.truncated && advanced);
+    if (button.hidden) button.disabled = false;
+}
+
+async function loadMoreTraceOutputBlock(button) {
+    if (!(button instanceof HTMLElement)) return;
+    const field = typeof button.closest === "function" ? button.closest(".task-trace-field") : null;
+    const block = field?.querySelector?.(".task-trace-output-value");
+    if (!(block instanceof HTMLElement)) return;
+    const outputRef = normalizeTraceOutputRef(block.dataset.outputRef || "");
+    const startLine = Number(block.dataset.outputEndLine || 0) + 1;
+    if (!outputRef || startLine < 2) return;
+    button.disabled = true;
+    try {
+        const chunk = await getTraceOutputWindowByRef(outputRef, { startLine });
+        const body = String(block.textContent || "").replace(TRACE_DISPLAY_OMITTED_PATTERN, "");
+        const next = `${body}${body ? "\n" : ""}${String(chunk?.text || "").replace(/^\n+/, "")}`;
+        setTextContentPreservingScroll(block, next);
+        block.dataset.outputEndLine = String(chunk?.endLine || block.dataset.outputEndLine || "");
+        setTraceOutputMoreState(block, chunk);
+    } catch (error) {
+        button.disabled = false;
+        throw error;
     }
 }
 
@@ -1337,10 +1408,12 @@ async function ensureTraceOutputCodeBlockContent(
     element.dataset.outputHydrating = "true";
     setTextContentPreservingScroll(element, loadingText);
     try {
-        const fullText = await getTraceOutputContentByRef(outputRef, { view });
-        const nextText = String(fullText || previewText || emptyText).trim() || emptyText;
+        const chunk = await getTraceOutputWindowByRef(outputRef, { view, startLine: 1 });
+        const nextText = String(chunk?.text || previewText || emptyText).trim() || emptyText;
         setTextContentPreservingScroll(element, nextText);
         element.dataset.outputHydrated = "true";
+        element.dataset.outputEndLine = String(chunk?.endLine || "");
+        setTraceOutputMoreState(element, chunk);
         return nextText;
     } catch (error) {
         const fallbackText = String(previewText || emptyText).trim();
@@ -1424,7 +1497,8 @@ async function ensureTraceArgumentsCodeBlockContent(element) {
     try {
         const fullText = await getTraceArgumentsContentByCallId(lookupId);
         const nextText = String(fullText || previewText).trim() || previewText;
-        setTextContentPreservingScroll(element, nextText);
+        // 入参没有 ref 可以再取一次，只能就地封顶显示；复制仍拿全文。
+        setTextContentPreservingScroll(element, capTraceDisplayText(nextText));
         element.dataset.outputHydrated = "true";
         return nextText;
     } catch (error) {

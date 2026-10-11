@@ -241,20 +241,29 @@ test("copy delegation skips placeholder empty text without writing", async () =>
     assert.equal(setup.button.innerHTML, '<i data-lucide="copy"></i>');
 });
 
-test("copy on a lazy output block hydrates the full output before copying", async () => {
-    const hydratedText = "hydrated full output\nsecond line";
+test("copy on a lazy output block hydrates the server window before copying", async () => {
+    const windowText = "hydrated full output\nsecond line";
+    let wholeFileCalls = 0;
     const setup = buildCopySetup({
         text: "preview text",
         emptyText: "暂无工具输出",
         outputRef: "ref:demo/out.log",
         hydrated: "false",
-        apiClient: { readContent: async () => ({ content: hydratedText }) },
+        apiClient: {
+            // 整份车道只该被「查看完整」用；点开和复制都只要服务端那一屏。
+            readContent: async () => {
+                wholeFileCalls += 1;
+                return { content: "整份正文".repeat(9000) };
+            },
+            openContent: async () => ({ excerpt: windowText, start_line: 1, end_line: 2, truncated: false }),
+        },
     });
     setup.dispatchClick();
     await flush();
     await flush();
 
-    assert.deepEqual(setup.copiedTexts, [hydratedText]);
-    assert.equal(setup.code.textContent, hydratedText);
+    assert.equal(wholeFileCalls, 0);
+    assert.deepEqual(setup.copiedTexts, [windowText]);
+    assert.equal(setup.code.textContent, windowText);
     assert.equal(setup.code.dataset.outputHydrated, "true");
 });

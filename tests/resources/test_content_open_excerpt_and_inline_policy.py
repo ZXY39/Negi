@@ -3,10 +3,12 @@ from __future__ import annotations
 from pathlib import Path
 
 from g3ku.content.navigation import (
+    _ALWAYS_INLINE_TOOL_RESULT_SOURCES,
     CHAR_MODE_OPEN_CHAR_LIMIT,
-    ContentNavigationService,
+    INLINE_CHAR_LIMIT,
     OPEN_EXCERPT_CHAR_LIMIT,
     SEARCH_PREVIEW_CHAR_LIMIT,
+    ContentNavigationService,
     tool_result_delivery_policy,
 )
 
@@ -203,3 +205,37 @@ def test_search_preview_is_capped_for_single_line_match(tmp_path: Path) -> None:
     assert result.get("count") == 1
     assert len(result["hits"][0]["preview"]) <= SEARCH_PREVIEW_CHAR_LIMIT + 1
     assert "handle" not in result
+
+
+def _model_facing_tool_names() -> set[str]:
+    names: set[str] = set()
+    for manifest in Path(__file__).resolve().parents[2].glob("tools/*/resource.yaml"):
+        for line in manifest.read_text(encoding="utf-8", errors="replace").splitlines():
+            if line.startswith("name:"):
+                names.add(line.split(":", 1)[1].strip())
+                break
+    return names
+
+
+def test_always_inline_sources_are_model_facing_names() -> None:
+    # 交付侧按 `tool_result:<模型面名>` 建串（_ceo_support.py、react_loop.py），
+    # 写成资源目录名（*_cn）就静默永不命中——2026-10-11 那份 7 MB 节点详情正是
+    # 因为没命中才被外置的，所以这条既要防拼错，也不能让白名单无上限地内联。
+    names = _model_facing_tool_names()
+    assert names, "tools/*/resource.yaml should expose model-facing names"
+    for source in _ALWAYS_INLINE_TOOL_RESULT_SOURCES:
+        assert source.removeprefix("tool_result:") in names, source
+
+
+def test_always_inline_exception_inlines_mid_size_but_not_giant_payloads() -> None:
+    mid_size = "x" * (INLINE_CHAR_LIMIT + 2_000)
+    assert tool_result_delivery_policy(
+        mid_size,
+        source_kind="tool_result:task_node_detail",
+    ) == "inline_small"
+
+    giant = "x" * (OPEN_EXCERPT_CHAR_LIMIT + 1)
+    assert tool_result_delivery_policy(
+        giant,
+        source_kind="tool_result:task_node_detail",
+    ) == "summary_with_ref"

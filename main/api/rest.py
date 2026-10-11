@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import asyncio
 
-from fastapi import APIRouter, Body, HTTPException, Query
+from fastapi import APIRouter, Body, HTTPException, Query, Response
 
 from g3ku.content import artifact_ref_from_id
 from g3ku.shells.web import get_agent, is_no_ceo_model_configured_error
@@ -555,6 +555,23 @@ async def read_content(
             view=view,
         ),
     }
+
+
+@router.get('/content/text')
+async def read_content_as_text(
+    ref: str | None = Query(None),
+    path: str | None = Query(None),
+    view: str = Query('canonical'),
+):
+    # 独立路由而不是复用 JSON 信封：交给浏览器的是纯正文，应用页不再 decode +
+    # pretty-print + 一次性塞 DOM（几 MB 载荷就是这样冻住标签页的）。
+    service = _service()
+    await service.startup()
+    payload = _content_action(service.read_content, ref=ref, path=path, view=view)
+    return Response(
+        content=str(payload.get('content') or ''),
+        media_type='text/plain; charset=utf-8',
+    )
 
 
 @router.post('/tasks/{task_id}/artifacts/{artifact_id}/apply')
