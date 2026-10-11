@@ -3958,6 +3958,26 @@ class MainRuntimeService:
             if str(getattr(task, 'status', '') or '').strip().lower() == 'in_progress'
         ]
 
+    def list_finished_tasks_for_session_since(
+        self, session_id: str, since_iso: str, *, limit: int = 20
+    ) -> list[dict[str, Any]]:
+        reader = getattr(self.store, 'list_finished_tasks_for_session_since', None)
+        if not callable(reader):
+            return []
+        return list(reader(str(session_id or '').strip(), str(since_iso or '').strip(), limit=limit) or [])
+
+    def list_task_node_activity(self, task_id: str, *, limit: int = 6) -> list[dict[str, Any]]:
+        reader = getattr(self.store, 'list_task_node_activity', None)
+        if not callable(reader):
+            return []
+        return list(reader(str(task_id or '').strip(), limit=limit) or [])
+
+    def count_task_nodes(self, task_id: str) -> int:
+        counter = getattr(self.store, 'count_task_nodes', None)
+        if not callable(counter):
+            return 0
+        return int(counter(str(task_id or '').strip()) or 0)
+
     def _refresh_task_store_read_snapshot(self) -> None:
         refresher = getattr(self.store, 'refresh_read_snapshot', None)
         if not callable(refresher):

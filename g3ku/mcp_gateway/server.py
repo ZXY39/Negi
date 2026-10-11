@@ -10,16 +10,24 @@ connection failed, ...).
 
 from __future__ import annotations
 
+import asyncio
+import time
 from typing import Any, Awaitable, Callable
 
 import httpx
 from mcp.server.fastmcp import Context, FastMCP
 
 from g3ku.mcp_gateway.client import G3kuMcpClient
+from g3ku.mcp_gateway.local_store import (
+    read_wake_cursor,
+    spill_reply,
+    write_wake_cursor,
+)
 
 MIN_WAIT_SECONDS = 5
 MAX_WAIT_SECONDS = 1800
 DEFAULT_LIST_LIMIT = 50
+WAKE_POLL_INTERVAL_SECONDS = 2.0
 
 
 def _progress_hook(ctx: Any) -> Any:
@@ -178,8 +186,12 @@ def build_mcp_server(client: G3kuMcpClient, *, name: str = "negi") -> FastMCP:
                 return {
                     **base,
                     "status": "completed",
-                    "reply": str(outcome.get("text") or ""),
                     "usage": outcome.get("usage"),
+                    **spill_reply(
+                        session_id,
+                        str(base.get("transcript_turn_id") or base.get("turn_id") or ""),
+                        str(outcome.get("text") or ""),
+                    ),
                 }
             if kind == "failed":
                 return {**base, "status": "failed", "error": str(outcome.get("error") or "")}
@@ -231,16 +243,23 @@ def build_mcp_server(client: G3kuMcpClient, *, name: str = "negi") -> FastMCP:
                     on_event=on_event,
                 )
             if str(outcome.get("kind") or "") == "reply":
-                return {
+                fetched = {
                     "ok": True,
                     "conversation": conversation,
                     "found": True,
-                    "reply": str(outcome.get("text") or ""),
                     "turn_id": outcome.get("turn_id"),
                     "answered_seq": int(outcome.get("seq") or 0),
                     "usage": outcome.get("usage"),
                     "task_ids": list(outcome.get("task_ids") or []),
                     "transcript_turn_id": outcome.get("transcript_turn_id"),
+                }
+                return {
+                    **fetched,
+                    **spill_reply(
+                        session_id,
+                        str(fetched.get("transcript_turn_id") or fetched.get("turn_id") or ""),
+                        str(outcome.get("text") or ""),
+                    ),
                 }
             return {
                 "ok": True,
@@ -284,6 +303,75 @@ def build_mcp_server(client: G3kuMcpClient, *, name: str = "negi") -> FastMCP:
                 "usage": payload.get("usage") if isinstance(payload.get("usage"), dict) else {},
                 "task_ids": list(payload.get("task_ids") or []),
                 "silent_reply": bool(payload.get("silent_reply")),
+            }
+
+        return await _safe(_body)
+
+    @mcp.tool(
+        description=(
+            "Answer \"what happened while I wasn't listening\" in one call: tasks this "
+            "conversation dispatched that have since reached a terminal state, plus final "
+            "replies still unconsumed in the durable ledger. It reads committed state (the task "
+            "table and the outbound ledger), not a live stream — so a task that finished 40 "
+            "minutes ago with nobody connected is still reported. Replies surfaced here are "
+            "acked, so each one arrives once; if the ack itself fails the entry carries "
+            "`ack_failed` and may appear again. Long replies are spilled to a file like "
+            "everywhere else. `wait_seconds=0` looks once and returns; larger values re-check "
+            "every 2 seconds until something wakes it. The per-conversation cursor is kept by "
+            "the gateway — you don't pass `since`."
+        )
+    )
+    async def negi_wait_wake(conversation: str, wait_seconds: int = 120) -> dict[str, Any]:
+        budget = max(0, _raw_wait(wait_seconds, 120))
+
+        async def _body() -> dict[str, Any]:
+            session_id = await client.resolve_session(conversation)
+            since = read_wake_cursor(session_id)
+            deadline = time.monotonic() + budget
+            payload: dict[str, Any] = {}
+            while True:
+                payload = await client.wake(session_id, since)
+                if payload.get("tasks") or payload.get("replies") or time.monotonic() >= deadline:
+                    break
+                await asyncio.sleep(min(WAKE_POLL_INTERVAL_SECONDS, max(0.0, deadline - time.monotonic())))
+            tasks = list(payload.get("tasks") or [])
+            woken: list[dict[str, Any]] = []
+            for item in payload.get("replies") or []:
+                outbox_id = str(item.get("outbox_id") or "")
+                entry = {
+                    "outbox_id": outbox_id,
+                    "ts": str(item.get("ts") or ""),
+                    **spill_reply(session_id, outbox_id, str(item.get("text") or "")),
+                }
+                woken.append(entry)
+                if outbox_id:
+                    try:
+                        await client.ack_reply(session_id, outbox_id)
+                    except Exception:
+                        # 销账失败就说出来：这条记录还在账本里，下次唤醒会再出现一次。
+                        entry["ack_failed"] = True
+            woke = bool(tasks or woken)
+            next_since = str(payload.get("next_since") or "") or since
+            if woke:
+                write_wake_cursor(session_id, next_since)
+            reason = ""
+            if tasks:
+                reason = "task_terminal"
+            elif woken:
+                reason = "reply"
+            return {
+                "ok": True,
+                "conversation": conversation,
+                "session_id": session_id,
+                "woke": woke,
+                "reason": reason or ("empty" if budget == 0 else "timeout"),
+                "since": since,
+                "next_since": next_since,
+                "tasks": tasks,
+                "tasks_may_be_truncated": bool(payload.get("tasks_truncated")),
+                "replies": woken,
+                "replies_pending": int(payload.get("replies_pending") or 0),
+                "wait_budget_seconds": budget,
             }
 
         return await _safe(_body)

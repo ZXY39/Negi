@@ -56,9 +56,17 @@
 
 - **在不在动**：`started_at`/`elapsed_seconds`（在飞回合，取自 `TurnRecord.started_at`）、`last_activity_at`/`silence_seconds`（hub 最后一条事件的 `ts`）、`last_event_seq`，以及 `last_activity_kind`/`last_activity_text`（此刻的活动文本，先过出站消毒再截 160 字）。
 - **在做什么**：`latest_model_text`（最新一段模型输出，过 `sanitize_channel_outbound_text` 后截 300 字，`latest_model_text_total_chars` 报截断前的字符数；消毒只剥思考段/契约尾，实测**不剥** `[G3KU_STAGE_*]` 一类内部标记）、`recent_tool_calls`（读 `progress` 事件的结构化 `tool_name`，不从 `🔧 xxx started` 的人读文本反解）、`stages_recent`（最近三阶段的 `stage_index`/`status`/`stage_kind`/`goal` 前 120 字/`tool_rounds_used`/`tool_round_budget`/`round_count`；**不给** `completed_stage_summary` 与 `key_refs`——实测原样五阶段平均 87.8 KB、最大 600 KB ≈ 15 万 token，窄化后平均 666 B ≈ 166 token）。会话未驻留时 `stages_recent` 整键省略，含义是"读不到账本"，不是"没有阶段"。
-- **有没有在跑的任务**：`tasks_running`/`tasks`（本会话仍未完成的任务，逐条带 `task_id`/`status`/`model_calls`/`last_hop_at`）与 `task_activity_at`/`task_silence_seconds`（各任务最近一跳时间的最大值）。派发回合几十秒就收尾而节点要跑几十分钟，这段时间会话侧本来就没有新事件——只读 `silence_seconds` 会把在跑误读成卡死，任务侧的跳次时间才是活性的正证。读不到任务服务时这几键整组省略："不知道"与"没有在跑的任务"是两回事，不折成 0。
+- **有没有在跑的任务**：`tasks_running`/`tasks`（本会话仍未完成的任务，逐条带 `task_id`/`status`/`model_calls`/`last_hop_at`）与 `task_activity_at`/`task_silence_seconds`（各任务最近一跳时间的最大值）。派发回合几十秒就收尾而节点要跑几十分钟，这段时间会话侧本来就没有新事件——只读 `silence_seconds` 会把在跑误读成卡死，任务侧的跳次时间才是活性的正证。读不到任务服务时这几键整组省略："不知道"与"没有在跑的任务"是两回事，不折成 0。每个任务还带 `nodes`（最近至多 6 格的 `node_id`/`node_kind`/`status`/`depth`/`updated_at`，按更新时间倒序）与 `node_count`（真实条数）：一个任务是执行节点 + 验收节点的树（实测每任务 p50=2、p90=3），任务级那句 `in_progress` 说不清卡在哪一格——遗留样本 `task:37a79544ee37` 至今 `in_progress`，只有节点级时间能读出执行节点停在 00:18:41、验收节点停在 00:13:48。节点格走 `sqlite_store.list_task_node_activity` 的平铺列窄读，**不许**改成 `list_task_nodes()`：那会把整任务的 `payload_json` 逐行建模（实盘单任务 1227 个节点），而轮询只要最近几格。读不到节点服务时 `nodes`/`node_count` 整键省略，同上一条纪律。
 
 三本时间源的 ISO 串形状不同：事件 `ts` 与 `TurnRecord.started_at` 是本机 naive 串，任务跳次 `created_at` 带本机偏移（生产者 `main/monitoring/log_service.py::_now_iso`）。所有"距现在多少秒"统一走 `external_v1._age_from_iso()`，它按被减数的形状对齐减数。拿 naive 的 now 直接减 aware 的串会 `TypeError` 打死整条 `/state`，而失败的恰好是"任务在跑、正想看它活着没"那一刻——状态端点因此必须把这三种形状都当可达输入。
+
+### 唤醒读数（`GET /sessions/{id}/wake`）
+
+回答"**我没在听的时候发生了什么**"：`tasks`（本会话在该时刻之后落终态的任务，逐条 `task_id`/`status`/`finished_at`）与 `replies`（持久 outbox 账本里属于该会话、`event=reply.final` 且还没销账的记录，带 `outbox_id`/`ts`/`text` 全文），外加 `replies_pending`/`tasks_truncated`/`next_since`。
+
+它存在的理由是既有投递面的两个空洞：事件 hub 是进程内存里的 512 环、`turn.completed`/`turn.failed` 根本不入账本，而回复的取法只听活 SSE——桥或 stdio 网关断开半小时再回来，没有任何一口能回答"我那两个任务结清了没"。这里**不新增写侧记录**：终态行落在 `tasks` 表（落库后不再变），未消费回复落在 outbox 账本（销账才消失），两边都是既有 durable 事实，所以唤醒不依赖"当时有没有人在听"。`since` 是调用方自己的游标（用上一次返回的 `next_since`），空串＝没有历史，回最近 `WAKE_TASKS_MAX` 条终态，首次调用因此能 bootstrap。
+
+机器**不**往出站账本写"任务已结束"这类文本：pump 会把账本记录当渠道消息投给用户（`g3ku/qq_official/bridge.py`），替模型决定推送是禁区。所以唤醒是**读侧**能力（含 MCP 侧的 `negi_wait_wake` 长轮询），服务端不另开推通道。`tasks` 只认 `status IN ('success','failed','canceled','cancelled')`——`paused` 不算结束，它归任务命令。唤醒读数里的时间一律按 ISO 串比较，不做减法。
 
 ## 5. 事件流
 
