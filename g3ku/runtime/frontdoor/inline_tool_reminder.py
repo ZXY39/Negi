@@ -779,7 +779,7 @@ class CeoToolReminderService:
             query_text=str(snapshot.user_message.get("content") or record.tool_name).strip() or record.tool_name,
             exposure={
                 "skills": [],
-                "tool_families": [],
+                "tools": [],
                 "tool_names": ["stop_tool_execution"],
             },
             persisted_session=persisted_session,
