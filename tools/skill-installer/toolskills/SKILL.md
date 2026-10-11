@@ -2,8 +2,7 @@
 
 把一个现成 GitHub repo/path 里的 skill 安装到当前工作区的 `skills/` 目录。
 
-这条工具链只负责 **GitHub repo/path -> 本地 `skills/`**。
-如果用户要从 `clawhub.ai` 搜索、下载、安装或更新现成 skill，不要继续使用本工具；转到 `load_skill_context(skill_id="clawhub-skill-manager")`，按 `clawhub-skill-manager` 的唯一工作流处理。ClawHub 来源的 skill 默认是面向第三方项目的上游素材，安装前要先评估是否需要按 Negi 要求重写。
+这条工具链只负责 **GitHub repo/path -> 本地 `skills/`**。ClawHub 来源的 skill 默认是面向第三方项目的上游素材，安装前要先评估是否需要按 Negi 要求重写。
 
 ## 何时使用
 
@@ -110,7 +109,6 @@
 - 已存在的目标目录不会被覆盖；如需重装，先手动删除旧目录再调用。
 - 如果上游自带 `resource.yaml`，工具会保留它，不会强改上游 skill id。
 - 如果上游只有 `SKILL.md`，工具会自动生成一个结构感知的 `resource.yaml`，并触发一次资源刷新，但你仍然必须按上面的复核流程检查并修正。
-- 本工具不负责 ClawHub 搜索、下载或更新；这些请求统一走 `clawhub-skill-manager`。
 
 ## 失败与回退
 

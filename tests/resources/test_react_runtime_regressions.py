@@ -284,7 +284,7 @@ class _DirectLoadTool(Tool):
             "l0": "tool short summary",
             "l1": "tool structured overview",
             "path": "/virtual/content-tool.md",
-            "uri": "g3ku://resource/tool/content",
+            "uri": "negi://resource/tool/content",
         }
         return json.dumps(payload, ensure_ascii=False)
 
@@ -4881,7 +4881,7 @@ async def test_react_loop_execute_tool_keeps_direct_load_payload_inline(tmp_path
 
         assert parse_content_envelope(rendered) is None
         payload = json.loads(rendered)
-        assert payload["uri"] == "g3ku://resource/tool/content"
+        assert payload["uri"] == "negi://resource/tool/content"
         assert payload["content"].startswith("tool line 001")
     finally:
         store.close()

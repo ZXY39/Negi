@@ -3790,7 +3790,7 @@ async def test_ceo_direct_load_tool_result_stays_inline_even_when_large(tmp_path
             return {
                 "ok": True,
                 "level": "l2",
-                "uri": "g3ku://resource/tool/filesystem",
+                "uri": "negi://resource/tool/filesystem",
                 "l0": "Filesystem tool context",
                 "l1": "Full tool instructions for filesystem operations.",
                 "content": "\n".join(f"context line {index:03d} " + ("x" * 40) for index in range(180)),
@@ -3841,7 +3841,7 @@ async def test_ceo_direct_load_tool_result_stays_inline_even_when_large(tmp_path
     payload = json.loads(result_text)
     assert payload["ok"] is True
     assert payload["level"] == "l2"
-    assert payload["uri"] == "g3ku://resource/tool/filesystem"
+    assert payload["uri"] == "negi://resource/tool/filesystem"
     assert payload["content"].startswith("context line 000")
     assert len(payload["content"]) > 1200
 

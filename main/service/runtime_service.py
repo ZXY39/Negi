@@ -24,6 +24,7 @@ from g3ku.agent.tools.tool_execution_control import StopToolExecutionTool
 from g3ku.config.live_runtime import get_runtime_config
 from g3ku.config.loader import get_config_path
 from g3ku.content import ContentNavigationService, artifact_ref_from_id
+from g3ku.content.navigation import RESOURCE_URI_SCHEME
 from g3ku.deployment.data_root import data_root, data_work_path, ensure_dir, resolve_data_path
 from g3ku.llm_config.runtime_resolver import resolve_chat_target
 from g3ku.resources.models import ResourceKind
@@ -7840,7 +7841,7 @@ class MainRuntimeService:
         return {
             'ok': True,
             'skill_id': record.skill_id,
-            'uri': f'g3ku://skill/{record.skill_id}',
+            'uri': f'{RESOURCE_URI_SCHEME}skill/{record.skill_id}',
             'level': payload['level'],
             'content': payload['content'],
             'l0': payload['l0'],
@@ -7951,7 +7952,7 @@ class MainRuntimeService:
         payload = {
             'ok': True,
             'tool_id': resolved_tool_id,
-            'uri': f'g3ku://resource/tool/{resolved_tool_id}',
+            'uri': f'{RESOURCE_URI_SCHEME}resource/tool/{resolved_tool_id}',
             'level': layered_payload['level'],
             'content': layered_payload['content'],
             'l0': layered_payload['l0'],

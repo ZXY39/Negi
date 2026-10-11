@@ -15,6 +15,15 @@ MAX_OPEN_LINES = 200
 INLINE_OPEN_RESULT_CHAR_LIMIT = 16000
 INLINE_OPEN_RESULT_LINE_LIMIT = 260
 DEFAULT_SEARCH_LIMIT = 10
+# 资源 uri 的方案名：写侧只出 negi://，已沉淀在转录与工具结果里的旧方案名继续可读。
+RESOURCE_URI_SCHEME = "negi://"
+LEGACY_RESOURCE_URI_SCHEME = "g3ku://"
+RESOURCE_URI_PREFIXES = (
+    f"{RESOURCE_URI_SCHEME}skill/",
+    f"{RESOURCE_URI_SCHEME}resource/tool/",
+    f"{LEGACY_RESOURCE_URI_SCHEME}skill/",
+    f"{LEGACY_RESOURCE_URI_SCHEME}resource/tool/",
+)
 MAX_SEARCH_LIMIT = 50
 _HEAD_PREVIEW_LINES = 6
 _TAIL_PREVIEW_LINES = 6
@@ -386,7 +395,7 @@ def _should_keep_inline_direct_load_tool_result(value: Any, *, source_kind: str)
     if level != "l2":
         return False
     uri = str(payload.get("uri") or "").strip()
-    if not uri.startswith(("g3ku://skill/", "g3ku://resource/tool/")):
+    if not uri.startswith(RESOURCE_URI_PREFIXES):
         return False
     content = payload.get("content")
     l0 = payload.get("l0")

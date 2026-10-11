@@ -2545,6 +2545,9 @@ def test_externalize_for_message_keeps_open_excerpt_inline(tmp_path: Path):
 @pytest.mark.parametrize(
     ('source_kind', 'uri'),
     [
+        ('tool_result:load_skill_context', 'negi://skill/full_body_skill'),
+        ('tool_result:load_tool_context', 'negi://resource/tool/content'),
+        # 旧方案名已沉淀在转录与工具结果里：认不出来就会被当普通结果外置，直读正文这条就断了
         ('tool_result:load_skill_context', 'g3ku://skill/full_body_skill'),
         ('tool_result:load_tool_context', 'g3ku://resource/tool/content'),
     ],
@@ -2576,6 +2579,9 @@ def test_externalize_for_message_keeps_direct_load_context_inline(tmp_path: Path
 @pytest.mark.parametrize(
     ('source_kind', 'uri'),
     [
+        ('tool_result:load_skill_context', 'negi://skill/full_body_skill'),
+        ('tool_result:load_tool_context', 'negi://resource/tool/content'),
+        # 旧方案名已沉淀在转录与工具结果里：认不出来就会被当普通结果外置，直读正文这条就断了
         ('tool_result:load_skill_context', 'g3ku://skill/full_body_skill'),
         ('tool_result:load_tool_context', 'g3ku://resource/tool/content'),
     ],
