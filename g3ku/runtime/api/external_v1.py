@@ -468,6 +468,27 @@ def _session_task_activity(agent: Any, session_key: str) -> dict[str, Any] | Non
     return {"tasks_running": len(entries), "tasks": entries}
 
 
+def _age_from_iso(value: str, *, now: datetime | None = None) -> int | None:
+    """ISO 串到"距现在多少秒"。解不开就回 None，不猜。
+
+    两种形状会在同一颗请求里相遇：会话侧的事件 `ts` 与回合 `started_at` 是本机 naive
+    串，任务跳次 `created_at` 带 `+08:00`（`main/monitoring/log_service.py` 的
+    `_now_iso`）。拿 naive 的去减 aware 的会 TypeError 打死整条 `/state`——实盘抓到
+    过两次：会话有未完成任务且那任务已经跳过一次时，`negi_session_status` 整包失败。
+    所以减数先按被减数的形状对齐，而不是假设调用方只喂一种。
+    """
+    text = str(value or "").strip()
+    if not text:
+        return None
+    try:
+        parsed = datetime.fromisoformat(text)
+    except ValueError:
+        return None
+    reference = datetime.now() if now is None else now
+    reference = reference.astimezone() if parsed.tzinfo is not None else reference.replace(tzinfo=None)
+    return max(0, int((reference - parsed).total_seconds()))
+
+
 @router.get("/sessions/{session_id}/state")
 async def get_external_session_state(
     session_id: str,
@@ -494,16 +515,6 @@ async def get_external_session_state(
     tail_event = hub.tail_event() if hub is not None else None
     now = datetime.now()
 
-    def _age_iso(value: str) -> int | None:
-        """ISO 串到"距现在多少秒"。解不开就回 None，不猜。"""
-        text = str(value or "").strip()
-        if not text:
-            return None
-        try:
-            return max(0, int((now - datetime.fromisoformat(text)).total_seconds()))
-        except ValueError:
-            return None
-
     last_activity_at = str((tail_event or {}).get("ts") or "")
     activity = summarize_external_session_activity(list(hub.replay(0)) if hub is not None else [])
     # 只读引用、不 deepcopy：与 `ceo_sessions` 的轨道读法同形，取账本到序列化之间不放 await。
@@ -525,9 +536,9 @@ async def get_external_session_state(
         # 与"已经卡死"（实测有 agent 为此累计阻塞近一小时）。事件本来就带 `ts`，
         # 回合本来就带 `started_at`，这里只把它们投影出来，不新增状态。
         "started_at": started_at,
-        "elapsed_seconds": _age_iso(started_at),
+        "elapsed_seconds": _age_from_iso(started_at, now=now),
         "last_activity_at": last_activity_at,
-        "silence_seconds": _age_iso(last_activity_at),
+        "silence_seconds": _age_from_iso(last_activity_at, now=now),
         "last_event_seq": int((tail_event or {}).get("seq") or 0),
         "last_activity_kind": str((tail_event or {}).get("type") or ""),
         # hub 的 `reply.delta` 这条道不过出站消毒（sanitize 只长在 `message_end` 上），
@@ -548,7 +559,7 @@ async def get_external_session_state(
                 "tasks_running": task_activity["tasks_running"],
                 "tasks": task_activity["tasks"],
                 "task_activity_at": task_hop_ceiling,
-                "task_silence_seconds": _age_iso(task_hop_ceiling) if task_hop_ceiling else None,
+                "task_silence_seconds": _age_from_iso(task_hop_ceiling, now=now) if task_hop_ceiling else None,
             }
             if task_activity is not None
             else {}

@@ -302,7 +302,10 @@ def build_mcp_server(client: G3kuMcpClient, *, name: str = "negi") -> FastMCP:
             "no key_refs). A missing `stages_recent` means the session is not resident, not that "
             "it has no stages. "
             "`last_seq` is the gateway's SSE event cursor, NOT a progress percentage or a step "
-            "count — do not read a slow-rising `last_seq` as a stall."
+            "count — do not read a slow-rising `last_seq` as a stall. Task-side activity is a "
+            "separate clock: `tasks_running`/`tasks` plus `task_activity_at`/`task_silence_seconds` "
+            "cover nodes this conversation dispatched that are still running, and session-side "
+            "silence during that window is expected rather than a stall."
         )
     )
     async def negi_session_status(conversation: str) -> dict[str, Any]:

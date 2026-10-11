@@ -37,7 +37,7 @@
 ## 4. 回合契约
 
 - `POST /sessions/{id}/messages` 异步提交：空闲 → 启动回合并返回 `{turn_id, status:"started"}`；会话被 hold（有回合在跑，**或该会话正在跑一次手动上下文压缩**）→ `queue_follow_up_batch` 排队并返回 `{status:"queued", receipt:"收到，将在当前任务中一并处理。"}`。渠道不因此丢消息：排队条目以转录 `pending` 行为 durable 记录，会话回到空闲后由派发通道发出（合同见 `runtime-overview.md`「压缩窗口：入站闸门与基线写入仲裁」）。
-- `GET /sessions/{id}/state` 除运行档位外，还回答"**现在到底在不在动**"：`started_at`/`elapsed_seconds`（在飞回合，取自 `TurnRecord.started_at`）、`last_activity_at`/`silence_seconds`（hub 最后一条事件的 `ts`，不新增状态）、`last_event_seq` 与 `last_activity_kind`/`last_activity_text`（此刻的活动文本，截 160 字）。这些读数的由来是调用方只有计数器时无法区分"在跑长活"与"卡死"。同一条道还回答"**在做什么**"：`latest_model_text`（最新模型输出，过 `sanitize_channel_outbound_text` 后截 300 字，`latest_model_text_total_chars` 报截前长度；消毒只剥思考段/契约尾，**不剥** `[G3KU_STAGE_*]` 一类内部标记）、`recent_tool_calls`（读 `progress` 的 `tool_name`）、`stages_recent`（最近三阶段的状态/计数/`goal` 前 120 字；不给摘要与 `key_refs`；账本读不到时整键省略）。
+- `GET /sessions/{id}/state` 除运行档位外，还给"在不在动 / 在做什么 / 有没有在跑的任务"三档读数，合同与时间形状纪律见本节末「会话状态读数」。
 - `GET /sessions/{id}/turns/{turn_id}` 按回合 id 回读**转录里那一行的可见原文**（`text`/`created_at`/`usage`/`task_ids`/`source`/`silent_reply`）。判据是 assistant 行上的顶层 `turn_id`（落盘时写入），**它不等于外部提交回包里的 `turn_id`**——调用方要用 `reply.final` 带出的 `transcript_turn_id`，所以它 durable：调用方自己的上下文被压缩之后仍能取回原文。没有转录 → 404 `session_not_found`；有转录但该回合没存过 → 404 `turn_not_found`。内存里的 `TurnRecord` 只留 256 条终态记录且会淘汰，**不能**当历史读口用。
 - 执行走 `SessionRuntimeBridge.prompt/prompt_batch`（与 web/CLI/cron 同一语义基座）。
 - 提交方可以是 HTTP 桥，也可以是 `/ws/ceo` 的网页输入车道（进程内经 `get_external_turn_service()` 调 `submit`，不经 Bearer 鉴权中间件）。两条发起方共用 `submit` 这一处裁决：入站 hold、幂等位（网页发起方不带 `Idempotency-Key`，`duplicate` 分支对它不可达）、排队回执、以及「回合契约」的终态不变量。回合的出站能力长在车道上而不是发起方上：`make_session_event_relay` 只在 `_execute_turn` 挂载，所以网页输入必须走这条车道，否则 hub 上没有 `reply.final`，表现为「网页看得到回复、渠道端什么都没有」。这条车道上产出的每条可见回复在进 hub 前都登记进持久账本并带上 `outbox_id`，因此"当时没有消费者"只是延迟而不是丢失（判据与重放见「持久 outbox」）。
@@ -49,6 +49,16 @@
 - 附件：`data_base64` 落盘 `.g3ku/external-uploads/<session>/`，双上限——`kind:"image"` ≤5MiB（与 web 上传同一常量），其余文件类 ≤20MiB（`EXTERNAL_FILE_UPLOAD_MAX_BYTES`），超限一律 413 `attachment_too_large`；桥侧按同值预过滤。图片构造 `image_url` 块，能否进模型由该会话本轮模型链的 `image_multimodal_enabled` 保守交集门控（与 web 上传同语义）；非图片附件只以「本地路径提示」文本块告知模型（落盘路径可直接用工具读盘），不构造多模态内容块。该目录按会话 slug 分片，随会话删除/清空一起被 rmtree（`clear_web_ceo_session_artifacts` 同时清 web 侧与渠道侧两个上传根），所以渠道附件的寿命等于会话寿命。
 - 控制端点复用桥语义：`POST /turns/{turn_id}/pause`（running guard，空闲返回未暂停）、`POST /sessions/{id}/cancel`。
 - `DELETE /sessions/{id}` 是清除语义（对齐 web-and-admin.md「Channel Session Clear Contract」）：转录清空、内存失效、side artifacts 全清，注册表条目保留。注销身份是另一个动作，只在 web 侧提供（`forget_identity`），闸门与后果归 web-and-admin.md 那一节。
+
+### 会话状态读数（`GET /sessions/{id}/state`）
+
+三档读数都由既有状态投影出来，不新增状态。它们的共同由来：调用方（MCP 网关、外部桥）手里只有一个 SSE 事件游标时，分不清"在跑一个长活"与"已经卡死"。
+
+- **在不在动**：`started_at`/`elapsed_seconds`（在飞回合，取自 `TurnRecord.started_at`）、`last_activity_at`/`silence_seconds`（hub 最后一条事件的 `ts`）、`last_event_seq`，以及 `last_activity_kind`/`last_activity_text`（此刻的活动文本，先过出站消毒再截 160 字）。
+- **在做什么**：`latest_model_text`（最新一段模型输出，过 `sanitize_channel_outbound_text` 后截 300 字，`latest_model_text_total_chars` 报截断前的字符数；消毒只剥思考段/契约尾，实测**不剥** `[G3KU_STAGE_*]` 一类内部标记）、`recent_tool_calls`（读 `progress` 事件的结构化 `tool_name`，不从 `🔧 xxx started` 的人读文本反解）、`stages_recent`（最近三阶段的 `stage_index`/`status`/`stage_kind`/`goal` 前 120 字/`tool_rounds_used`/`tool_round_budget`/`round_count`；**不给** `completed_stage_summary` 与 `key_refs`——实测原样五阶段平均 87.8 KB、最大 600 KB ≈ 15 万 token，窄化后平均 666 B ≈ 166 token）。会话未驻留时 `stages_recent` 整键省略，含义是"读不到账本"，不是"没有阶段"。
+- **有没有在跑的任务**：`tasks_running`/`tasks`（本会话仍未完成的任务，逐条带 `task_id`/`status`/`model_calls`/`last_hop_at`）与 `task_activity_at`/`task_silence_seconds`（各任务最近一跳时间的最大值）。派发回合几十秒就收尾而节点要跑几十分钟，这段时间会话侧本来就没有新事件——只读 `silence_seconds` 会把在跑误读成卡死，任务侧的跳次时间才是活性的正证。读不到任务服务时这几键整组省略："不知道"与"没有在跑的任务"是两回事，不折成 0。
+
+三本时间源的 ISO 串形状不同：事件 `ts` 与 `TurnRecord.started_at` 是本机 naive 串，任务跳次 `created_at` 带本机偏移（生产者 `main/monitoring/log_service.py::_now_iso`）。所有"距现在多少秒"统一走 `external_v1._age_from_iso()`，它按被减数的形状对齐减数。拿 naive 的 now 直接减 aware 的串会 `TypeError` 打死整条 `/state`，而失败的恰好是"任务在跑、正想看它活着没"那一刻——状态端点因此必须把这三种形状都当可达输入。
 
 ## 5. 事件流
 
