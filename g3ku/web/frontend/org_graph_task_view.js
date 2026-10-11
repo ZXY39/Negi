@@ -1844,8 +1844,9 @@ function renderExecutionStageRounds(stage) {
                 </div>
             ` + summaryHtml;
         }
-        // 挂进卡内的实时工具行会占住"暂无工具轮次"这句话的位置，靠 CSS 在有行时收掉它
-        return `<div class="task-trace-stage-empty">${renderTraceField("阶段轮次", "", "当前阶段暂无工具轮次")}</div>` + summaryHtml;
+        // 既没有轮次也没有可取的档：体内什么都不画，占位句只是把"这张卡没有内容"重说一遍。
+        // 在飞工具行照常挂得进这个体内（org_graph_app.js ceoLiveToolStepHost）。
+        return summaryHtml;
     }
     return rounds.map((round, index) => renderExecutionStageRoundBlock(stage, round, index)).join("") + summaryHtml;
 }

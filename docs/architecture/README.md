@@ -191,6 +191,7 @@ Start here when you are new to the repository or when a change crosses subsystem
 - 节点详情页的「加载 skill / 加载 tool」chip 风险色全部同一档、或展开看不到正文 → `web-and-admin.md`「Context Loader Notices」
 - 工具面板的「参数」只有 48 字调用提示、超长入参点开也不回补 → `web-and-admin.md`「CEO Stage Trace Round Rendering Contract」（`arguments_truncated` 标记与 `tool-arguments` 按需回取车道）
 - 翻看工具输出时新输出把输出框滚动条顶回顶部 → `web-and-admin.md`「CEO Feed View State And Scroll Preservation Contract」
+- 模型正在输出最终内容时整页被定住无法滚动（上翻每一帧都被拽回底部）、或回合进行中的流式文本要等收尾才从阶段卡里搬到外面 → `web-and-admin.md`「Streamed Reply Delta Contract」+「CEO Feed View State And Scroll Preservation Contract」
 - 「回到最新」按钮该不该呼吸（回合早已收尾还在闪、或正在进行却不闪）、呼吸光晕盖到周围消息上 → `web-and-admin.md`「CEO Feed View State And Scroll Preservation Contract」
 - 日志板块反复出现「接口返回 500：/api/content/read」、节点详情输出框报「加载完整输出失败」或显示「完整输出已被清理」、点开工具行只有开头一段或整页卡死 → `web-and-admin.md`「Node Output Content Read Contract」
 - 主题切换不生效或刷新后丢失、亮色主题出现大面积灰底、亮色主题下解锁/初始化窗口仍是暗卡片、侧栏折叠后审计角标消失、页面卡片列数在某宽度错乱 → `web-and-admin.md`「Frontend Theme And Layout Contract」

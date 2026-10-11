@@ -202,12 +202,23 @@ test("裁撤阶段没带正文时画取档入口，并带上归档指针", () =>
     assert.match(html, /收口总结/);
 });
 
-test("没有归档可取的空阶段仍画占位，不画点了没反应的入口", () => {
+test("没有归档可取的空阶段什么都不画，也不画点了没反应的入口", () => {
     const { renderExecutionStageRounds } = loadApp(async () => ({ content: "" }));
     const html = renderExecutionStageRounds({ rounds: [] });
 
-    assert.match(html, /当前阶段暂无工具轮次/);
+    // 「当前阶段暂无工具轮次」这句话在轮次为空时是噪声：既没有轮次也没有可取的档，
+    // 卡片体内就什么都不留（在飞工具行照常挂得进来）。
+    assert.equal(String(html || "").trim(), "");
+    assert.doesNotMatch(html, /当前阶段暂无工具轮次/);
     assert.doesNotMatch(html, /data-stage-archive-open/);
+});
+
+test("空阶段带收尾总结时只留总结，不留占位句", () => {
+    const { renderExecutionStageRounds } = loadApp(async () => ({ content: "" }));
+    const html = renderExecutionStageRounds({ rounds: [], completed_stage_summary: "这一阶段没做成事。" });
+
+    assert.match(html, /这一阶段没做成事/);
+    assert.doesNotMatch(html, /当前阶段暂无工具轮次/);
 });
 
 test("取档把归档里的轮次与全量入参画出来，并按指针缓存只请求一次", async () => {

@@ -513,3 +513,90 @@ test("对照:无程序标记且几何近底+手势窗口内,滚动事件会恢�
     api.handleCeoFeedScrollEvent();
     assert.equal(api.S.ceoFeedFollowLatest, false, "直播突变静默期内的程序滚动不改意图");
 });
+
+// 流式车道(ceo.reply.delta)每帧都钉底并把「程序滚动」窗口续到 now+1000ms,
+// 上面两条吞判据因此在这条车道里永远为真——跟随位脱不开,用户被按住无法滚动。
+// 脱离必须发生在手势本身(方向可判)或突变前的几何上(方向不可判)。
+
+test("流式钉底:滚轮上滚当场脱离跟随,不等被吞掉的 scroll 事件", () => {
+    const childA = makeFeedChild({ key: "m:1", contentTop: 0, height: 1000 });
+    const feed = makeFeed({ children: [childA], scrollTop: 800, scrollHeight: 1000, clientHeight: 200 });
+    const api = setupScrollApi(feed);
+
+    api.handleCeoFeedUserGesture({ type: "wheel", deltaY: -120, target: {} });
+    assert.equal(api.S.ceoFeedFollowLatest, false, "贴底时的上滚手势就是要离开底部");
+
+    api.mutateCeoFeed(() => {
+        childA._height = 1200;
+        feed.scrollHeight = 1200;
+    }, { scrollMode: "preserve" });
+    assert.notEqual(feed.scrollTop, 1200, "已脱离跟随的那一帧不许再把视口钉回底部");
+});
+
+test("滚轮被内层滚动容器吃掉时不脱离会话跟随", () => {
+    const childA = makeFeedChild({ key: "m:1", contentTop: 0, height: 1000 });
+    const feed = makeFeed({ children: [childA], scrollTop: 800, scrollHeight: 1000, clientHeight: 200 });
+    const api = setupScrollApi(feed);
+    // 工具输出框自己能滚且还没到顶:这一格滚动属于内层,会话面没动。
+    const inner = { scrollHeight: 500, clientHeight: 100, scrollTop: 40, parentElement: feed };
+
+    api.handleCeoFeedUserGesture({ type: "wheel", deltaY: -120, target: inner });
+    assert.equal(api.S.ceoFeedFollowLatest, true, "内层滚动不该被当成离开会话底部");
+});
+
+test("内层滚动框已到顶后继续上滚会链到会话面:脱离跟随", () => {
+    const childA = makeFeedChild({ key: "m:1", contentTop: 0, height: 1000 });
+    const feed = makeFeed({ children: [childA], scrollTop: 800, scrollHeight: 1000, clientHeight: 200 });
+    const api = setupScrollApi(feed);
+    const inner = { scrollHeight: 500, clientHeight: 100, scrollTop: 0, parentElement: feed };
+
+    api.handleCeoFeedUserGesture({ type: "wheel", deltaY: -120, target: inner });
+    assert.equal(api.S.ceoFeedFollowLatest, false);
+});
+
+test("键盘上翻(PageUp)当场脱离跟随; pointerdown 不凭方向脱离", () => {
+    const childA = makeFeedChild({ key: "m:1", contentTop: 0, height: 1000 });
+    const feed = makeFeed({ children: [childA], scrollTop: 800, scrollHeight: 1000, clientHeight: 200 });
+    const api = setupScrollApi(feed);
+
+    api.handleCeoFeedUserGesture({ type: "keydown", key: "PageUp", target: {} });
+    assert.equal(api.S.ceoFeedFollowLatest, false);
+
+    const api2 = setupScrollApi(makeFeed({ children: [makeFeedChild({ key: "m:1", contentTop: 0, height: 1000 })], scrollTop: 800, scrollHeight: 1000, clientHeight: 200 }));
+    api2.handleCeoFeedUserGesture({ type: "pointerdown", target: {} });
+    assert.equal(api2.S.ceoFeedFollowLatest, true, "按下没有方向,不能凭它判脱离");
+});
+
+test("拖滚动条:手势之后几何已离开底部的那一帧不再钉底,并就地落跟随位", () => {
+    const childA = makeFeedChild({ key: "m:1", contentTop: 0, height: 1000 });
+    // 拖动已经把 scrollTop 拉离底部,而 scroll 事件被程序滚动窗口吞掉了。
+    const feed = makeFeed({ children: [childA], scrollTop: 100, scrollHeight: 1000, clientHeight: 200 });
+    const api = setupScrollApi(feed);
+    api.markCeoFeedProgrammaticScroll(); // 模拟直播帧刚续期过窗口
+    api.handleCeoFeedUserGesture({ type: "pointerdown", target: {} });
+
+    api.mutateCeoFeed(() => {
+        childA._height = 1200;
+        feed.scrollHeight = 1200;
+    }, { scrollMode: "preserve" });
+
+    assert.equal(api.S.ceoFeedFollowLatest, false, "手势后已离开底部即视为脱离跟随");
+    assert.equal(feed.scrollTop, 100, "脱离后视口原地保持");
+    assert.equal(api.U.ceoScrollToLatestBtn.hidden, false, "脱离后「回到最新」出现");
+});
+
+test("内层滚动框展开内容把会话面顶离底部时不误伤跟随", () => {
+    const childA = makeFeedChild({ key: "m:1", contentTop: 0, height: 1000 });
+    const feed = makeFeed({ children: [childA], scrollTop: 800, scrollHeight: 1000, clientHeight: 200 });
+    const api = setupScrollApi(feed);
+    // 用户点阶段卡(指针手势)→ 同一次突变里内容才增高:捕获发生在增高前,几何仍在底部。
+    api.handleCeoFeedUserGesture({ type: "pointerdown", target: {} });
+
+    api.mutateCeoFeed(() => {
+        childA._height = 1200;
+        feed.scrollHeight = 1200;
+    }, { scrollMode: "preserve" });
+
+    assert.equal(api.S.ceoFeedFollowLatest, true, "点击展开不是离开底部的意图,仍应跟随");
+    assert.equal(feed.scrollTop, 1200);
+});

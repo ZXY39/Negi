@@ -141,8 +141,13 @@ class StubDocument {
 }
 
 function makeTurn({ text = "" } = {}) {
+    // textEl 要能真的记账 classList：直播车道按 pending 判「这行归流式文本」，
+    // 空实现会让所有写气泡的分支看不见面。
+    const textEl = new StubHTMLElement();
+    textEl.textContent = text;
+    textEl.innerHTML = text;
     return {
-        textEl: { textContent: text, innerHTML: text, classList: { add() {}, remove() {} } },
+        textEl,
         flowEl: { hidden: true, open: false },
         metaEl: { textContent: "" },
         listEl: new StubHTMLElement(),
@@ -415,8 +420,9 @@ test("ceo stage trace drops loader-only rounds and falls back to the empty stage
     });
 
     assert.equal(renderedSteps, 1);
-    // 整轮只有加载器 → 轨道里不占一条，卡片退回"暂无工具轮次"占位；标题不带轮数
-    assert.match(turn.listEl.innerHTML, /task-trace-stage-empty/);
+    // 整轮只有加载器 → 轨道里不占一条，卡片体内什么都不画（不是一句「暂无工具轮次」）；标题不带轮数
+    assert.match(turn.listEl.innerHTML, /read skill context/);
+    assert.doesNotMatch(turn.listEl.innerHTML, /task-trace-stage-empty|当前阶段暂无工具轮次/);
     assert.doesNotMatch(turn.listEl.innerHTML, /0\/5/);
     assert.doesNotMatch(turn.listEl.innerHTML, /load_skill_context/);
     assert.equal(U.ceoContextLoadNotice.children.length, 0);
@@ -785,7 +791,7 @@ test("inflight patch without delta does not render previous turn stages", () => 
     assert.equal(turn.flowEl.hidden, true);
 });
 
-test("live stream text renders inside the rail and absorbs into round text", () => {
+test("live stream text renders outside the rail and absorbs into round text", () => {
     const { patchCeoInflightTurn, S } = loadApp();
     const turn = makeTurn({ text: "" });
     turn.source = "user";
@@ -802,7 +808,7 @@ test("live stream text renders inside the rail and absorbs into round text", () 
             stages: [{ stage_id: "frontdoor-stage-1", stage_goal: "search", status: "running", tool_round_budget: 3, rounds: [] }],
         },
     });
-    // stub 无法表达 `.task-trace-step` 细节体：live 文本走气泡 fallback 展示
+    // stub 无法表达 `.task-trace-step` 细节体：live 文本本来就走气泡车道
     assert.equal(String(turn.textEl.textContent || ""), "正在搜");
 
     patchCeoInflightTurn({
@@ -822,6 +828,39 @@ test("live stream text renders inside the rail and absorbs into round text", () 
     });
     // round.text 吸收掉已进轨的部分，residual 只剩新内容
     assert.equal(String(turn.textEl.textContent || ""), "，补充中");
+});
+
+test("有活动阶段时流式文本仍落在阶段外，不再挂进末位阶段卡体内", () => {
+    const { patchCeoInflightTurn, S } = loadApp();
+    const turn = makeTurn({ text: "" });
+    turn.source = "user";
+    turn.turnId = "turn-live-outside-1";
+    S.activeSessionId = "web:test";
+    S.ceoPendingTurns = [turn];
+    // 末位阶段卡带真实的 .task-trace-body：旧行为把流式文本 append 进这里。
+    const { body } = attachStubStageCard(turn, { traceKey: "ceo:stage:frontdoor-stage-live-outside" });
+
+    const patched = patchCeoInflightTurn({
+        turn_id: "turn-live-outside-1",
+        source: "user",
+        status: "running",
+        assistant_text: "这是正在输出的最终报告",
+        canonical_context_delta: {
+            stages: [{
+                stage_id: "frontdoor-stage-live-outside",
+                stage_index: 1,
+                stage_goal: "写报告",
+                status: "running",
+                tool_round_budget: 3,
+                rounds: [],
+            }],
+        },
+    });
+
+    assert.equal(patched, true);
+    assert.equal(String(turn.textEl.textContent || ""), "这是正在输出的最终报告");
+    assert.equal(body._children.length, 0, "阶段卡体内不许出现流式文本块");
+    assert.doesNotMatch(String(turn.listEl.innerHTML || ""), /task-trace-live-text/);
 });
 
 test("paused patch clears the live stream text", () => {

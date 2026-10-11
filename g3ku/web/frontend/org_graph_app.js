@@ -7175,8 +7175,35 @@ function setCeoFeedFollowLatest(on) {
     updateCeoScrollToLatestButton();
 }
 
-function handleCeoFeedUserGesture() {
+const CEO_FEED_SCROLL_UP_KEYS = new Set(["PageUp", "Home", "ArrowUp", "Up"]);
+
+// 这次滚动会不会真的落到会话面：内层滚动容器（工具输出框、阶段代码框）还能吃掉
+// 就轮不到会话面，已经滚到头才继续往外链。
+function ceoFeedGestureReachesFeed(event, scrollingUp) {
+    let node = event?.target;
+    while (node && node !== U.ceoFeed) {
+        const scrollHeight = Number(node.scrollHeight || 0);
+        const clientHeight = Number(node.clientHeight || 0);
+        if (scrollHeight > clientHeight) {
+            const top = Number(node.scrollTop || 0);
+            const canConsume = scrollingUp ? top > 0 : top + clientHeight < scrollHeight - 1;
+            if (canConsume) return false;
+        }
+        node = node.parentElement;
+    }
+    return true;
+}
+
+function handleCeoFeedUserGesture(event = null) {
     ceoFeedUserScrollIntentAt = Date.now();
+    // 直播钉底在下一帧就覆盖掉滚轮产生的滚动量，被派发的 scroll 事件读到的仍是底部，
+    // 所以「上翻」必须在手势本身上脱离跟随，否则流式期间用户被按住无法滚动。
+    if (S.ceoFeedFollowLatest === false) return;
+    const type = String(event?.type || "");
+    const scrollingUp = type === "wheel"
+        ? Number(event?.deltaY || 0) < 0
+        : (type === "keydown" && CEO_FEED_SCROLL_UP_KEYS.has(String(event?.key || "")));
+    if (scrollingUp && ceoFeedGestureReachesFeed(event, true)) setCeoFeedFollowLatest(false);
 }
 
 function handleCeoFeedScrollEvent() {
@@ -7253,7 +7280,14 @@ function captureCeoFeedScrollSnapshot() {
     const prevTop = Math.max(0, Number(feed.scrollTop || 0));
     // 用意图位而非瞬时几何：直播突变每几百毫秒一次，用户拖动滚动条的过程中
     // 几何判定会反复误判「还在底部」并把视口钉回去（“翻许多次才翻得动”的根因）。
-    const atBottom = S.ceoFeedFollowLatest !== false;
+    let atBottom = S.ceoFeedFollowLatest !== false;
+    // 拖滚动条/触摸滑动没有方向可判，只在突变前的这一眼几何上补判一次：
+    // 手势之后已经离开底部即视为脱离，本帧不再钉底。捕获发生在 DOM 突变之前，
+    // 所以「点击展开卡片」那一类增高不会被误读成用户上翻。
+    if (atBottom && ceoFeedUserScrollIntentAt > ceoFeedLastMutationAt && !ceoFeedNearBottom()) {
+        setCeoFeedFollowLatest(false);
+        atBottom = false;
+    }
     return {
         prevTop,
         atBottom,
@@ -7493,40 +7527,22 @@ function renderCeoAssistantLoadingState(turn, label = CEO_ASSISTANT_LOADING_LABE
 }
 
 function renderCeoLiveStreamTextIntoTurn(turn) {
-    if (!turn?.listEl || !turn?.flowEl) return;
+    if (!turn?.textEl) return;
+    // pending 是「这行内容归直播车道」的标记：收尾 markdown、静默正文、已暂停都把它摘掉。
+    // 没有这道闸门，旁白全部进轨之后的空 residual 会把那一份权威正文换成转圈。
+    if (!turn.textEl.classList?.contains?.("pending")) return;
+    // 流式文本一律走气泡车道（纯文本，ceo.reply.final 才换 markdown），不再挂进末位阶段卡体。
     const text = ceoLiveStreamResidual(turn, turn.lastExecutionTraceSummary);
-    const existing = typeof turn.listEl.querySelector === "function"
-        ? turn.listEl.querySelector(".task-trace-live-text")
-        : null;
     if (!text.trim()) {
-        if (existing?.remove) existing.remove();
+        // 旁白都已经进轨：回到等待态。只在状态真的变化时重写 markup——
+        // 这一句每帧都会跑到，而 loading markup 里带 <i data-lucide>，重写就牵动全文档图标扫描。
+        if (!turn.textEl.classList?.contains?.("assistant-text-loading")) renderCeoAssistantLoadingState(turn);
         return;
     }
-    const lastStep = ceoLastStageTraceStepEl(turn);
-    if (!lastStep) {
-        // 尚无阶段（纯问答轮或建阶段前）：流式文本退回气泡展示
-        if (!turn.textEl) return;
-        turn.textEl.textContent = text;
-        turn.textEl.classList?.add?.("pending");
-        turn.textEl.classList?.remove?.("assistant-text-loading");
-        turn.textEl.classList?.remove?.("markdown-content");
-        if (typeof syncCeoAssistantLoadingAria === "function") syncCeoAssistantLoadingAria(turn.textEl);
-        if (typeof syncCeoTurnLoadingOnlyState === "function") syncCeoTurnLoadingOnlyState(turn, false);
-        return;
-    }
-    // 有阶段：live 文本挂进最后一个阶段体内，气泡回到 loading，避免中途文本外显
-    if (turn.textEl?.classList?.contains?.("pending")) {
-        renderCeoAssistantTextIntoTurn(turn, "", { status: "running" });
-    }
-    if (existing?.remove) existing.remove();
-    const body = typeof lastStep.querySelector === "function"
-        ? lastStep.querySelector(".task-trace-body")
-        : null;
-    if (!body || typeof body.appendChild !== "function") return;
-    const block = document.createElement("div");
-    block.className = "task-trace-round-text task-trace-live-text";
-    block.textContent = text;
-    body.appendChild(block);
+    turn.textEl.textContent = text;
+    turn.textEl.classList.remove("assistant-text-loading");
+    turn.textEl.classList.remove("markdown-content");
+    if (typeof syncCeoAssistantLoadingAria === "function") syncCeoAssistantLoadingAria(turn.textEl);
     if (typeof syncCeoTurnLoadingOnlyState === "function") syncCeoTurnLoadingOnlyState(turn, false);
 }
 
@@ -7661,14 +7677,17 @@ function flushCeoReplyDeltaBuffers() {
         const turnId = normalizeCeoTurnId(payload?.turnId || "");
         const text = String(payload?.text || "");
         if (normalizedSessionId === activeSessionId()) {
+            const isNewTurnBubble = !getActiveCeoTurn(source, turnId);
             const turn = ensureActiveCeoTurn({ source, turnId });
             if (turn?.textEl) {
                 mutateCeoFeed(() => {
                     if (turnId) turn.turnId = turnId;
                     if (source) turn.source = source;
                     turn.liveStreamText = text;
+                    // 全文档 lucide 扫描只在真要新建气泡（带未实例化图标）的这一帧付；
+                    // 每帧都扫一遍会把这一车道压到出帧节奏以下，表现为整页卡住不能滚。
+                    if (isNewTurnBubble) icons();
                     renderCeoLiveStreamTextIntoTurn(turn);
-                    icons();
                 }, { scrollMode: "preserve" });
             }
         }
@@ -8657,8 +8676,8 @@ function mergeCeoStageCardBody(host, donor) {
     if (donorSummaryText && hostSummary) hostSummary.remove();
     Array.from(donorBody.children).forEach((node) => {
         if (node === donorSummary || !node.classList) return;
-        // 实时行与空态占位属宿主自己那一帧，不从副本搬。
-        if (node.classList.contains("task-trace-live-steps") || node.classList.contains("task-trace-stage-empty")) return;
+        // 实时行属宿主自己那一帧，不从副本搬。
+        if (node.classList.contains("task-trace-live-steps")) return;
         const roundKey = String(node.dataset?.roundKey || "");
         if (roundKey && seen.has(roundKey)) return;
         hostBody.appendChild(node);

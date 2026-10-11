@@ -3840,15 +3840,15 @@ textarea {
     margin-top: var(--space-3);
 }
 
-/* 在飞工具行的容器：挂在阶段卡体内，与正式轮次同一处出现（org_graph_app.js ceoLiveToolStepHost）。
-   有它就说明这条调用还没进账本，"当前阶段暂无工具轮次"那句话当场就不成立了。 */
+/* 在飞工具行的容器：挂在阶段卡体内，与正式轮次同一处出现（org_graph_app.js ceoLiveToolStepHost）。 */
 .task-trace-live-steps {
     display: grid;
     gap: var(--space-3);
 }
 
-.task-trace-body:has(> .task-trace-live-steps) .task-trace-stage-empty {
-    display: none;
+/* 阶段刚提交、第一轮还没落账本时体内是空的：展开不留一格行距。 */
+.task-trace-body:empty {
+    margin-top: 0;
 }
 
 .task-trace-round-tools {
@@ -12579,10 +12579,6 @@ textarea {
     line-height: 1.65;
     white-space: pre-wrap;
     word-break: break-word;
-}
-
-.task-trace-live-text {
-    color: var(--text-secondary);
 }
 
 /* 裁撤阶段的调用记录留在归档里：卡片只给一颗取档按钮，取完就地换成轮次。 */
