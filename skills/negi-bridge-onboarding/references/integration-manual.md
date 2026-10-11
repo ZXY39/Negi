@@ -37,11 +37,11 @@
 | GET | `/sessions` | `?external_key=` | `{ok, bridge_id, items:[{session_id, external_key, title, created_at}]}` | — |
 | PATCH | `/sessions/{id}` | `{"title":"…"}` | `{ok, session_id, title}` | 400 `title_required`、404 |
 | DELETE | `/sessions/{id}` | — | `{ok, cleared, session_id}` | 404 |
-| GET | `/sessions/{id}/state` | — | `{ok, session_id, external_key, running, queued_follow_ups, inflight_turn_id, last_error}` | 404 |
+| GET | `/sessions/{id}/state` | — | `{ok, session_id, external_key, running, queued_follow_ups, inflight_turn_id, last_error}`，另给四档读数：在不在动（`started_at`/`elapsed_seconds`/`last_activity_at`/`silence_seconds`）、在做什么（`latest_model_text`/`recent_tool_calls[].calls`/`stages_recent`/`stage_totals`）、有没有在跑的任务（`tasks_running`/`tasks[].nodes`/`task_silence_seconds`）、这轮怎么结束的（`stop_reason`/`unconsumed_replies`/`turn_left_unconsumed_reply`） | 404 |
 | GET | `/sessions/{id}/wake` | query `since`（上次返回的 `next_since`，空＝没有历史） | `{ok, session_id, since, tasks:[{task_id,status,finished_at}], replies:[{outbox_id,ts,text}], replies_pending, tasks_truncated, next_since}` — "我没在听的时候发生了什么"，读的是终态表与未销账账本 | 404 |
-| POST | `/sessions/{id}/messages` | `{"text?":"…","attachments?":[…],"sender?":{id,name},"metadata?":{}}` | `{ok, session_id, turn_id, status}` | 400 `message_required`/`attachments_must_be_list`、404、503 |
+| POST | `/sessions/{id}/messages` | `{"text?":"…","attachments?":[…],"sender?":{id,name},"metadata?":{}}` | `{ok, session_id, turn_id, status}`；`status:"queued"`（会话被 hold：有回合在跑或手动压缩在途）时另带 `receipt`、`running_turn_id`（你排在哪个回合后面，可拿去 pause/cancel）与 `queued_position` | 400 `message_required`/`attachments_must_be_list`、404、503 |
 | POST | `/turns/{turn_id}/pause` | — | `{ok, paused, turn_id, session_id}` | 404 `turn_not_found` |
-| POST | `/sessions/{id}/cancel` | — | `{ok, cancelled, session_id}` | 503 |
+| POST | `/sessions/{id}/cancel` | — | `{ok, cancelled, cancelled_turns, cancelled_tasks, task_ids, skipped:[{target,reason,how_to_clear}], tasks_still_running, session_id, hint?}` — 停回合**也停本会话未落终态的任务**；取消是请求式的，`tasks_still_running` 在紧随几次读数里可能仍为正 | 503 |
 | GET | `/sessions/{id}/events` | SSE，头 `Last-Event-ID` | 见 §4 | 404 |
 
 鉴权错误码（`require_external_api`）：

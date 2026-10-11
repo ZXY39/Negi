@@ -467,7 +467,11 @@ def test_recent_tool_calls_come_from_structured_names_newest_first():
         {"seq": 4, "type": "progress", "kind": "tool", "text": "🔧 exec started", "tool_name": "exec"},
     ]
     summary = summarize_external_session_activity(events)
-    assert summary["recent_tool_calls"] == ["exec", "content_search"]
+    # 去重名单 + 每项次数：milestone 那颗 `not_a_tool` 不算工具调用。
+    assert summary["recent_tool_calls"] == [
+        {"tool_name": "exec", "calls": 2},
+        {"tool_name": "content_search", "calls": 1},
+    ]
 
 
 def test_stage_projection_gives_status_counts_and_goal_prefix_only():
@@ -778,3 +782,229 @@ def test_wake_state_roundtrip_and_reads_the_bare_cursor_it_once_wrote(tmp_path, 
     # 本地缓存会读到它自己以前写过的形状；旧形状只是没有去重集，不是坏数据。
     (tmp_path / "wake-cursor.json").write_text('{"ext:probe:c1": "2026-10-11T09:00:00"}', encoding="utf-8")
     assert read_wake_state("ext:probe:c1") == ("2026-10-11T09:00:00", [])
+
+
+@pytest.mark.asyncio
+async def test_cancel_settles_dispatched_tasks_and_names_what_it_missed():
+    """取消面必须真能停"自己派出去还活着"的任务，并把没停干净的点名。
+
+    旧实现只清协程表，而外部回合刻意以 None 键注册 ⇒ 回合一收尾就 `cancelled:0`，
+    调用方据此以为安全，任务还在同一棵树上改文件。
+    """
+    from g3ku.runtime.api.external_v1 import cancel_session_inflight_work
+
+    class _TaskService:
+        def __init__(self) -> None:
+            self.unfinished = [SimpleNamespace(task_id="task:a"), SimpleNamespace(task_id="task:b")]
+            self.cancelled: list[str] = []
+
+        def list_unfinished_tasks_for_session(self, key):
+            return list(self.unfinished)
+
+        async def cancel_task(self, task_id):
+            if task_id == "task:b":
+                raise ValueError("worker_unavailable")
+            self.cancelled.append(task_id)
+            self.unfinished = [item for item in self.unfinished if item.task_id != task_id]
+            return SimpleNamespace(task_id=task_id)
+
+    service = _TaskService()
+    out = await cancel_session_inflight_work(session_key="ext:qoder:c1", cancelled_turns=0, task_service=service)
+    assert out["cancelled_turns"] == 0
+    assert out["cancelled_tasks"] == 1
+    assert out["task_ids"] == ["task:a"]
+    # 已发布字段 `cancelled` 收口成"回合 + 任务"，不再是协程条数。
+    assert out["cancelled"] == 1
+    assert out["tasks_still_running"] == 1
+    assert out["skipped"][0]["target"] == "task:b"
+    assert out["skipped"][0]["reason"] == "worker_unavailable"
+    assert "task_commands" in out["skipped"][0]["how_to_clear"]
+    assert out["hint"]
+
+    # 读不到任务服务时不许把"不知道"报成"都停了"。
+    blind = await cancel_session_inflight_work(session_key="k", cancelled_turns=1, task_service=None)
+    assert blind["cancelled_turns"] == 1 and blind["cancelled_tasks"] == 0
+    assert blind["skipped"] == [] and "hint" not in blind
+
+
+@pytest.mark.asyncio
+async def test_cancel_tool_passes_the_new_cancellation_readouts_through():
+    """网关逐键重建回包：`task_ids`/`skipped`/`tasks_still_running` 必须活过这一层。"""
+
+    class _CancelClient:
+        async def resolve_session(self, conversation: str) -> str:
+            return "ext:probe:c1"
+
+        async def cancel_session(self, session_id: str) -> dict:
+            return {
+                "ok": True,
+                "session_id": session_id,
+                "cancelled": 2,
+                "cancelled_turns": 1,
+                "cancelled_tasks": 1,
+                "task_ids": ["task:a"],
+                "skipped": [{"target": "task:b", "reason": "worker_unavailable", "how_to_clear": "task_commands"}],
+                "tasks_still_running": 1,
+                "hint": "有目标没被这次取消落掉",
+            }
+
+    result = await _call(build_mcp_server(_CancelClient()), "negi_cancel", {"conversation": "c1"})
+    assert result["cancelled_tasks"] == 1
+    assert result["task_ids"] == ["task:a"]
+    assert result["skipped"][0]["target"] == "task:b"
+    assert result["tasks_still_running"] == 1
+    assert result["hint"]
+
+
+@pytest.mark.asyncio
+async def test_queued_submit_shows_which_turn_the_message_joined_behind():
+    """派重的根因是提交那一刻看不见在飞回合；回执把它说出来就够了。"""
+    client = _NoWaitClient()
+
+    async def _queued_send(session_id, text, **kwargs):
+        return {
+            "status": "queued",
+            "turn_id": None,
+            "receipt": "收到，将在当前任务中一并处理。",
+            "running_turn_id": "turn-running-9",
+            "queued_position": 2,
+        }
+
+    client.send_message = _queued_send  # type: ignore[assignment]
+    result = await _call(
+        build_mcp_server(client), "negi_chat", {"conversation": "c1", "message": "再来一条", "wait_seconds": 0}
+    )
+    assert result["submit_status"] == "queued"
+    assert result["running_turn_id"] == "turn-running-9"
+    assert result["queued_position"] == 2
+    assert "did NOT restart" in result["hint"]
+
+
+class _NoAnswerClient:
+    """`wait_for_reply` 空手回来，只验分档那半（分档逻辑长在网关）。"""
+
+    def __init__(self, outcome: dict, state: dict) -> None:
+        self._outcome = outcome
+        self._state = state
+
+    async def resolve_session(self, conversation: str) -> str:
+        return "ext:probe:c1"
+
+    def last_seq(self, session_id: str) -> int:
+        return 0
+
+    async def wait_for_reply(self, events, **kwargs) -> dict:
+        return dict(self._outcome)
+
+    @asynccontextmanager
+    async def event_stream(self, session_id: str, *, last_seq: int = 0):
+        async def _iter():
+            if False:
+                yield {}
+
+        yield _iter()
+
+    async def session_state(self, session_id: str) -> dict:
+        return dict(self._state)
+
+
+@pytest.mark.asyncio
+async def test_reply_absence_is_split_into_decidable_reasons():
+    """`found:false` 以前一视同仁，实测的应对动作是重派几十分钟的活。"""
+    pending = await _call(
+        build_mcp_server(_NoAnswerClient({"kind": "timeout"}, {"running": False, "unconsumed_replies": 2})),
+        "negi_get_reply",
+        {"conversation": "c1", "wait_seconds": 1},
+    )
+    assert pending["found"] is False
+    assert pending["reason"] == "waited_out_reply_pending"
+    assert pending["unconsumed_replies"] == 2
+    assert pending["where_to_look"].startswith("negi_wait_wake")
+
+    empty_turn = await _call(
+        build_mcp_server(
+            _NoAnswerClient(
+                {"kind": "no_reply"},
+                {"running": False, "unconsumed_replies": 0, "stop_reason": "user_pause"},
+            )
+        ),
+        "negi_get_reply",
+        {"conversation": "c1", "wait_seconds": 1},
+    )
+    assert empty_turn["reason"] == "no_final_written"
+    assert empty_turn["stop_reason"] == "user_pause"
+
+    # 既没在跑也没存货：接口分不开"没写正文"与"已被别的消费者取走"，就照分不开说。
+    nothing = await _call(
+        build_mcp_server(_NoAnswerClient({"kind": "timeout"}, {"running": False, "unconsumed_replies": 0})),
+        "negi_get_reply",
+        {"conversation": "c1", "wait_seconds": 1},
+    )
+    assert nothing["reason"] == "nothing_pending"
+
+
+def test_stage_totals_give_the_sum_three_goal_rows_cannot_show():
+    """实测形状：4 个阶段、30+30+31+23=114 轮，其中 1 个还 active。"""
+    from g3ku.runtime.api.external_v1 import summarize_external_stage_totals
+
+    ledger = {
+        "stages": [
+            {"stage_index": index, "status": status, "tool_rounds_used": used, "tool_round_budget": 30}
+            for index, (status, used) in enumerate(
+                [("completed", 30), ("completed", 30), ("completed", 31), ("active", 23)], start=1
+            )
+        ]
+    }
+    assert summarize_external_stage_totals(ledger) == {
+        "stages_total": 4,
+        "stages_completed": 3,
+        "rounds_used_total": 114,
+        "rounds_budget_total": 120,
+    }
+    # 账本读不到时给 None（"不知道"），不折成"0 个阶段"。
+    assert summarize_external_stage_totals(None) is None
+
+
+def test_tool_call_counts_scan_the_whole_buffer_not_up_to_the_first_reply():
+    """提前 break 会把次数变成假数：交付正文常常在缓冲尾部之前就到。"""
+    from g3ku.runtime.api.external_v1 import summarize_external_session_activity
+
+    events = [{"seq": 1, "type": "reply.final", "text": "交付正文"}] + [
+        {"seq": index + 2, "type": "progress", "kind": "tool", "text": "🔧 exec", "tool_name": "exec"}
+        for index in range(7)
+    ]
+    summary = summarize_external_session_activity(events)
+    assert summary["latest_model_text"] == "交付正文"
+    assert summary["recent_tool_calls"] == [{"tool_name": "exec", "calls": 7}]
+
+
+@pytest.mark.asyncio
+async def test_session_status_carries_stop_reason_totals_and_unconsumed_count():
+    class _StateClient:
+        async def resolve_session(self, conversation: str) -> str:
+            return "ext:probe:c1"
+
+        def last_seq(self, session_id: str) -> int:
+            return 0
+
+        async def session_state(self, session_id: str) -> dict:
+            return {
+                "running": False,
+                "last_activity_kind": "turn.completed",
+                "stop_reason": "user_pause",
+                "unconsumed_replies": 2,
+                "turn_left_unconsumed_reply": True,
+                "stage_totals": {
+                    "stages_total": 4,
+                    "stages_completed": 3,
+                    "rounds_used_total": 114,
+                    "rounds_budget_total": 120,
+                },
+                "stages_recent": [{"stage_index": 4, "status": "active"}],
+            }
+
+    result = await _call(build_mcp_server(_StateClient()), "negi_session_status", {"conversation": "c1"})
+    assert result["stop_reason"] == "user_pause"
+    assert result["unconsumed_replies"] == 2
+    assert result["turn_left_unconsumed_reply"] is True
+    assert result["stage_totals"]["rounds_used_total"] == 114

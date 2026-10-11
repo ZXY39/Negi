@@ -364,16 +364,22 @@ WAKE_REPLIES_MAX = 10
 
 
 def summarize_external_session_activity(events: list[dict[str, Any]]) -> dict[str, Any]:
-    """从事件缓冲区尾巴算"最新文本输出 + 最近调用过哪几颗工具"。
+    """从事件缓冲区尾巴算"最新文本输出 + 最近用过哪几颗工具、各几次"。
 
     文本必须先过与终稿同一道出站消毒再截断：`reply.delta` 这条道**不做**消毒
     （`external_events.py` 只在 `message_end` 上 sanitize），把 hub 原文直接递出去
     等于把未清洗的思考段交给外部 token。截断量如实报：`latest_model_text_total_chars`
     是消毒后、截断前的字符数。
+
+    工具项带 `calls`，因为"最近用过哪几种"回答不了"是在磨还是要收了"：实测一条 87
+    分钟的审计会话把 114 轮花在同样的几颗名字上，去重名单看着永远一样。计数覆盖
+    **整个会话事件缓冲**（hub 是 512 条环形），所以这里不再提前 break——全扫的代价是
+    微秒级，而提前 break 报出来的次数就是假数。
     """
     latest_text = ""
     latest_total_chars = 0
-    tools: list[str] = []
+    tool_counts: dict[str, int] = {}
+    tool_order: list[str] = []
     for event in reversed(list(events or [])):
         if not isinstance(event, dict):
             continue
@@ -385,14 +391,38 @@ def summarize_external_session_activity(events: list[dict[str, Any]]) -> dict[st
                 latest_total_chars = len(cleaned)
         if event_type == "progress" and str(event.get("kind") or "") == "tool":
             name = str(event.get("tool_name") or "").strip()
-            if name and name not in tools and len(tools) < RECENT_TOOL_NAMES_MAX:
-                tools.append(name)
-        if latest_text and len(tools) >= RECENT_TOOL_NAMES_MAX:
-            break
+            if not name:
+                continue
+            if name not in tool_counts:
+                tool_counts[name] = 0
+                tool_order.append(name)
+            tool_counts[name] += 1
     return {
         "latest_model_text": latest_text,
         "latest_model_text_total_chars": latest_total_chars,
-        "recent_tool_calls": tools,
+        "recent_tool_calls": [
+            {"tool_name": name, "calls": tool_counts[name]} for name in tool_order[:RECENT_TOOL_NAMES_MAX]
+        ],
+    }
+
+
+def summarize_external_stage_totals(ledger: Any) -> dict[str, Any] | None:
+    """跨阶段的整数读数：一共几个阶段、几个已收口、累计用了多少轮预算多少轮。
+
+    `stages_recent` 只给最新 3 条（尺寸定的），于是"4 个阶段的会话被读成 3 个"，
+    "114 轮"这种量一口都给不出来。这里补的全是账本求和，零新状态；账本读不到时
+    整键省略，与 `stages_recent` 同一个"不知道不折成 0"的口径。
+    """
+    if not isinstance(ledger, dict):
+        return None
+    stages = [item for item in list(ledger.get("stages") or []) if isinstance(item, dict)]
+    return {
+        "stages_total": len(stages),
+        "stages_completed": sum(
+            1 for item in stages if str(item.get("status") or "").strip().lower() == "completed"
+        ),
+        "rounds_used_total": sum(int(item.get("tool_rounds_used") or 0) for item in stages),
+        "rounds_budget_total": sum(int(item.get("tool_round_budget") or 0) for item in stages),
     }
 
 
@@ -533,8 +563,21 @@ async def get_external_session_state(
     last_activity_at = str((tail_event or {}).get("ts") or "")
     activity = summarize_external_session_activity(list(hub.replay(0)) if hub is not None else [])
     # 只读引用、不 deepcopy：与 `ceo_sessions` 的轨道读法同形，取账本到序列化之间不放 await。
-    stages_recent = summarize_external_session_stages(
-        getattr(session, "_frontdoor_stage_state", None) if session is not None else None
+    stage_ledger = getattr(session, "_frontdoor_stage_state", None) if session is not None else None
+    stages_recent = summarize_external_session_stages(stage_ledger)
+    stage_totals = summarize_external_stage_totals(stage_ledger)
+    # 会话自己就知道这一轮是怎么停的（`RuntimeAgentSession._last_stop_reason`，正常交/
+    # 用户暂停/没交正文就收），以前只写进续跑状态、没往外给。调用方看到
+    # `turn.completed` 而阶段还 active 时，唯一能分辨交付与早退的就是它。
+    stop_reason = str(getattr(session, "_last_stop_reason", "") or "")
+    # 账本读是整份文件读（实测 31 条 pending ≈ 0.8ms）。它只在两个地方变小：消费方 ack
+    # 落墓碑 + 每小时 compact，所以轮询这颗端点不会把它养成大读口。真养大了就该换成
+    # 按会话索引的读法，而不是在这里加缓存。
+    unconsumed = sum(
+        1
+        for record in load_pending_outbound()
+        if str(record.get("session_key") or "") == entry.session_key
+        and str(record.get("event") or "") == REPLY_EVENT
     )
     task_activity = _session_task_activity(peek_global_agent(), entry.session_key)
     task_hop_ceiling = _task_hop_ceiling(task_activity) if task_activity is not None else ""
@@ -563,9 +606,19 @@ async def get_external_session_state(
         "latest_model_text": activity["latest_model_text"],
         "latest_model_text_total_chars": activity["latest_model_text_total_chars"],
         "recent_tool_calls": activity["recent_tool_calls"],
+        # 结束方式与"这轮留没留下没被取走的正文"：completed 与阶段 active 同时出现时，
+        # 这两行是调用方唯一能分辨"交付完了"还是"中途早退"的读数。
+        "stop_reason": stop_reason,
+        "unconsumed_replies": unconsumed,
+        "turn_left_unconsumed_reply": bool(unconsumed),
         **(
             {"stages_recent": stages_recent}
             if stages_recent is not None
+            else {}
+        ),
+        **(
+            {"stage_totals": stage_totals}
+            if stage_totals is not None
             else {}
         ),
         "last_error": last_error,
@@ -983,18 +1036,108 @@ async def pause_external_turn(
     return {"ok": True, "paused": bool(paused), "turn_id": record.turn_id, "session_id": record.session_key}
 
 
+_TASK_CANCEL_FALLBACK = "web 侧任务命令：task_commands / fail_node(根节点, force)"
+
+
 @router.post("/sessions/{session_id}/cancel")
 async def cancel_external_session(
     session_id: str,
     principal: ExternalApiPrincipal = Depends(require_external_api),
 ):
+    """取消本会话的在飞工作：在跑的回合 + 本会话派出去还没落终态的任务。
+
+    以前这里只停协程。外部回合是刻意以 `None` 键注册的（见 `external_turns` 的
+    None-key 合同），所以回合一收尾协程表就空了，`cancelled:0` 会被调用方读成
+    "没有在飞工作"，而它自己派生的、会写盘的任务还在跑——工具描述当时却写着"回合 +
+    本会话派发的任务"。现在两半都停，并把**没停干净的**点名出来。
+
+    取消是请求式的：分离部署（worker）下节点在下一个检查点才落终态，所以
+    `tasks_still_running` 在紧随的那次读数里可能还是正数，这不是失败。
+    """
     entry = _resolve_entry(session_id, principal)
     try:
         service = get_external_turn_service()
     except RuntimeError:
         raise HTTPException(status_code=503, detail="runtime_unavailable")
-    cancelled = await service.cancel_session(entry.session_key)
-    return {"ok": True, "cancelled": int(cancelled), "session_id": entry.session_key}
+    cancelled_turns = int(await service.cancel_session(entry.session_key) or 0)
+    return {
+        "ok": True,
+        "session_id": entry.session_key,
+        **await cancel_session_inflight_work(
+            session_key=entry.session_key,
+            cancelled_turns=cancelled_turns,
+            task_service=getattr(peek_global_agent(), "main_task_service", None),
+        ),
+    }
+
+
+async def cancel_session_inflight_work(
+    *, session_key: str, cancelled_turns: int, task_service: Any
+) -> dict[str, Any]:
+    """把"本会话的在飞工作"停干净，并自报没停干净的部分。
+
+    单独一颗函数是因为这圈循环得能被桩打：真任务服务只在活体里有，而这里错一次的代价
+    是"调用方以为已经停了、任务还在同一棵工作树上改文件"。
+    """
+    lister = getattr(task_service, "list_unfinished_tasks_for_session", None)
+    canceller = getattr(task_service, "cancel_task", None)
+    cancelled_task_ids: list[str] = []
+    skipped: list[dict[str, str]] = []
+    unfinished: list[Any] = []
+    if callable(lister):
+        try:
+            unfinished = list(lister(str(session_key or "").strip()) or [])
+        except Exception:
+            unfinished = []
+    for task in unfinished:
+        task_id = str(getattr(task, "task_id", "") or "").strip()
+        if not task_id:
+            continue
+        if not callable(canceller):
+            skipped.append(
+                {"target": task_id, "reason": "no_task_cancel_surface", "how_to_clear": _TASK_CANCEL_FALLBACK}
+            )
+            continue
+        try:
+            record = await canceller(task_id)
+        except Exception as exc:
+            skipped.append(
+                {
+                    "target": task_id,
+                    "reason": str(exc).strip() or "cancel_refused",
+                    "how_to_clear": _TASK_CANCEL_FALLBACK,
+                }
+            )
+            continue
+        if record is None:
+            skipped.append(
+                {"target": task_id, "reason": "task_not_found", "how_to_clear": _TASK_CANCEL_FALLBACK}
+            )
+            continue
+        cancelled_task_ids.append(task_id)
+
+    tasks_still_running = 0
+    if callable(lister):
+        try:
+            tasks_still_running = len(list(lister(str(session_key or "").strip()) or []))
+        except Exception:
+            tasks_still_running = 0
+
+    payload: dict[str, Any] = {
+        # `cancelled` 是对接手册里已发布的字段，含义收口成"停掉的回合数 + 停掉的任务数"。
+        "cancelled": int(cancelled_turns) + len(cancelled_task_ids),
+        "cancelled_turns": int(cancelled_turns),
+        "cancelled_tasks": len(cancelled_task_ids),
+        "task_ids": cancelled_task_ids,
+        "skipped": skipped,
+        "tasks_still_running": tasks_still_running,
+    }
+    if skipped:
+        payload["hint"] = (
+            "有目标没被这次取消落掉，按 skipped[].how_to_clear 处置；"
+            "分离部署下 tasks_still_running 会在之后几次读数里归零。"
+        )
+    return payload
 
 
 # -- outbox (durable proactive push ledger) ---------------------------------

@@ -30,6 +30,17 @@ DEFAULT_LIST_LIMIT = 50
 WAKE_POLL_INTERVAL_SECONDS = 2.0
 
 
+def _queue_visibility(result: dict[str, Any]) -> dict[str, Any]:
+    """把"你排在谁后面"从服务端回执搬到调用方眼前。没撞车时这两个键不出现。"""
+    extras: dict[str, Any] = {}
+    running = str(result.get("running_turn_id") or "").strip()
+    if running:
+        extras["running_turn_id"] = running
+    if result.get("queued_position") is not None:
+        extras["queued_position"] = int(result.get("queued_position") or 0)
+    return extras
+
+
 def _progress_hook(ctx: Any) -> Any:
     """把等待期间的事件转成 MCP progress 通知。
 
@@ -129,6 +140,14 @@ def build_mcp_server(client: G3kuMcpClient, *, name: str = "negi") -> FastMCP:
             after_seq = client.last_seq(session_id)
             if submit_only:
                 result = await client.send_message(session_id, str(message or ""))
+                extras = _queue_visibility(result)
+                hint = "Submitted without waiting. Call negi_get_reply to fetch the final reply."
+                if extras.get("running_turn_id"):
+                    hint = (
+                        "Queued behind a running turn — this did NOT restart it. Stop that turn "
+                        "with negi_pause/negi_cancel; its id is running_turn_id. Fetch the answer "
+                        "later with negi_get_reply."
+                    )
                 return {
                     "ok": True,
                     "conversation": conversation,
@@ -138,7 +157,8 @@ def build_mcp_server(client: G3kuMcpClient, *, name: str = "negi") -> FastMCP:
                     "status": "submitted",
                     "task_ids": [],
                     "receipt": str(result.get("receipt") or ""),
-                    "hint": "Submitted without waiting. Call negi_get_reply to fetch the final reply.",
+                    "hint": hint,
+                    **extras,
                 }
             async with client.event_stream(session_id, last_seq=after_seq) as events:
                 result = await client.send_message(session_id, str(message or ""))
@@ -196,21 +216,74 @@ def build_mcp_server(client: G3kuMcpClient, *, name: str = "negi") -> FastMCP:
             if kind == "failed":
                 return {**base, "status": "failed", "error": str(outcome.get("error") or "")}
             if kind in {"cancelled", "no_reply"}:
-                return {**base, "status": kind}
+                return {**base, "status": kind, **await _absence_diagnosis(session_id, outcome)}
             if submit_status == "queued":
                 return {
                     **base,
                     "status": "queued_receipt",
                     "receipt": str(result.get("receipt") or ""),
                     "hint": "Message joined the running turn. Call negi_get_reply later to fetch the answer.",
+                    **_queue_visibility(result),
                 }
             return {
                 **base,
                 "status": "pending",
                 "hint": "Still working. Call negi_get_reply later, or pass wait_seconds=0 to stop blocking.",
+                **await _absence_diagnosis(session_id, outcome),
             }
 
         return await _safe(_body)
+
+    async def _absence_diagnosis(session_id: str, outcome: dict[str, Any]) -> dict[str, Any]:
+        """取不到正文时"为什么取不到"的那组读数，`negi_chat` 与 `negi_get_reply` 共用。
+
+        以前只回 `{found:false, status:"timeout"}`，调用方分不清"这轮没交正文""等短了
+        东西还在""流断了""已被别人取走"，实测的应对动作是重派——把几十分钟的活再烧一遍。
+        判据全取自既有读口（状态端点 + 持久账本条数），不新增状态。
+        """
+        kind = str(outcome.get("kind") or "timeout")
+        try:
+            state = await client.session_state(session_id)
+        except Exception:
+            state = {}
+        unconsumed = int(state.get("unconsumed_replies") or 0)
+        running = bool(state.get("running"))
+        stop_reason = str(state.get("stop_reason") or "")
+        if kind == "cancelled":
+            reason = "turn_cancelled"
+        elif kind == "no_reply":
+            reason = "no_final_written"
+        elif str(outcome.get("error") or "") == "stream_closed":
+            reason = "stream_closed"
+        elif unconsumed:
+            reason = "waited_out_reply_pending"
+        elif running:
+            reason = "still_running"
+        else:
+            # 既没在跑、账本里也没存货：这轮要么没交正文，要么正文已被某个消费者取走——
+            # 接口分不开这两种，就照"分不开"说，不冒充成 `already_consumed`。
+            reason = "nothing_pending"
+        diagnosis: dict[str, Any] = {
+            "reason": reason,
+            "unconsumed_replies": unconsumed,
+            "session_running": running,
+        }
+        if stop_reason:
+            diagnosis["stop_reason"] = stop_reason
+        if reason == "waited_out_reply_pending":
+            diagnosis["where_to_look"] = "negi_wait_wake 取未销账终稿（超阈值的会落盘并给路径）"
+        elif reason in {"no_final_written", "nothing_pending"}:
+            diagnosis["where_to_look"] = "看 stop_reason 判这轮是交付还是早退；要重做就再发一条，别当已丢"
+        return diagnosis
+
+    async def _absence_readout(conversation: str, session_id: str, outcome: dict[str, Any]) -> dict[str, Any]:
+        return {
+            "ok": True,
+            "conversation": conversation,
+            "found": False,
+            "status": str(outcome.get("kind") or "timeout"),
+            **await _absence_diagnosis(session_id, outcome),
+        }
 
     @mcp.tool(
         description=(
@@ -261,12 +334,7 @@ def build_mcp_server(client: G3kuMcpClient, *, name: str = "negi") -> FastMCP:
                         str(outcome.get("text") or ""),
                     ),
                 }
-            return {
-                "ok": True,
-                "conversation": conversation,
-                "found": False,
-                "status": str(outcome.get("kind") or "timeout"),
-            }
+            return await _absence_readout(conversation, session_id, outcome)
 
         return await _safe(_body)
 
@@ -435,6 +503,13 @@ def build_mcp_server(client: G3kuMcpClient, *, name: str = "negi") -> FastMCP:
                 "latest_model_text_total_chars": int(state.get("latest_model_text_total_chars") or 0),
                 "recent_tool_calls": list(state.get("recent_tool_calls") or []),
                 "stages_recent": list(state.get("stages_recent") or []) if "stages_recent" in state else None,
+                # 跨阶段整数读数：只给最新 3 条 goal 会被读成"就 3 个阶段"，累计轮数
+                # 更是没有任何一口能给出（实测 114 轮那种活）。账本读不到时为 None。
+                "stage_totals": state.get("stage_totals"),
+                # 结束方式：回合 completed 而阶段仍 active 时，这是唯一分辨交付/早退的读数。
+                "stop_reason": str(state.get("stop_reason") or ""),
+                "unconsumed_replies": int(state.get("unconsumed_replies") or 0),
+                "turn_left_unconsumed_reply": bool(state.get("turn_left_unconsumed_reply")),
                 "last_error": state.get("last_error"),
                 # 任务侧活动：派发回合早就收尾了，节点还在跑，这段时间会话侧本来就没有
                 # 新事件——只看 silence_seconds 会把"在跑几十分钟的活"读成"卡死了"。
@@ -472,21 +547,37 @@ def build_mcp_server(client: G3kuMcpClient, *, name: str = "negi") -> FastMCP:
 
     @mcp.tool(
         description=(
-            "Cancel the conversation's in-flight work: the running turn and the tasks dispatched "
-            "from this session. Returns the cancelled task count. Paused-but-never-resumed tasks "
-            "belong to the web runtime's task commands, not this call."
+            "Cancel the conversation's in-flight work: the running turn AND the tasks this "
+            "session dispatched that have not settled. Read the result, don't infer from `ok`: "
+            "`cancelled_turns`/`cancelled_tasks` + `task_ids` say what actually stopped, "
+            "`skipped:[{target,reason,how_to_clear}]` names anything this call could not settle "
+            "(and how to clear it), and `tasks_still_running` re-counts unfinished work. "
+            "Cancellation is request-style under a separated worker: a node settles at its next "
+            "checkpoint, so `tasks_still_running` may still be positive in the immediately "
+            "following reads — that is not a failure. A task sitting in paused-never-resumed is "
+            "cancellable here (in_progress+paused is settled as canceled); if the runtime refuses, "
+            "the refusal reason is carried verbatim in `skipped`."
         )
     )
     async def negi_cancel(conversation: str) -> dict[str, Any]:
         async def _body() -> dict[str, Any]:
             session_id = await client.resolve_session(conversation)
             result = await client.cancel_session(session_id)
-            return {
+            skipped = list(result.get("skipped") or [])
+            payload = {
                 "ok": True,
                 "conversation": conversation,
-                "cancelled": int(result.get("cancelled") or 0),
                 "session_id": session_id,
+                "cancelled": int(result.get("cancelled") or 0),
+                "cancelled_turns": int(result.get("cancelled_turns") or 0),
+                "cancelled_tasks": int(result.get("cancelled_tasks") or 0),
+                "task_ids": list(result.get("task_ids") or []),
+                "skipped": skipped,
+                "tasks_still_running": int(result.get("tasks_still_running") or 0),
             }
+            if str(result.get("hint") or "").strip():
+                payload["hint"] = str(result.get("hint") or "")
+            return payload
 
         return await _safe(_body)
 

@@ -140,7 +140,18 @@ class ExternalTurnService:
                     # 排队提交同样要占住幂等位：否则同一条渠道消息在回合运行
                     # 期间重试/重发会反复入队，用户看到多份重复回复。
                     self._remember_idempotency(session_key, idem, QUEUED_IDEMPOTENCY_SENTINEL)
-                return {"turn_id": None, "status": "queued", "receipt": QUEUED_RECEIPT_TEXT}
+                # 排队回执必须把"你排在谁后面"说出口：调用方在提交那一刻就知道这次是
+                # 追加还是撞车（实测有 agent 因为看不见在飞回合，把同一道题派了两遍，
+                # 第二份停在 paused-never-resumed）。回合本来就有这个读数，只是没往外给。
+                state = getattr(session, "state", None)
+                queued_now = len(list(getattr(state, "queued_follow_up_messages", None) or []))
+                return {
+                    "turn_id": None,
+                    "status": "queued",
+                    "receipt": QUEUED_RECEIPT_TEXT,
+                    "running_turn_id": self.inflight_turn_id_for(session_key),
+                    "queued_position": queued_now,
+                }
 
             turn_id = uuid.uuid4().hex
             record = TurnRecord(
