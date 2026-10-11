@@ -1,5 +1,5 @@
 ---
-name: g3ku-architecture-maintenance
+name: negi-architecture-maintenance
 description: Maintain Negi architecture docs in docs/architecture when code changes affect system understanding, runtime behavior, contracts, or maintenance workflow.
 ---
 

@@ -175,7 +175,7 @@ class WebFetchTool:
         timeout = httpx.Timeout(timeout_seconds, connect=10.0)
         limits = httpx.Limits(max_connections=5, max_keepalive_connections=2)
         headers = {
-            "User-Agent": "G3KU-WebFetch/0.1 (+https://local.invalid)",
+            "User-Agent": "Negi-WebFetch/0.1 (+https://local.invalid)",
             "Accept": "text/html,application/xhtml+xml,text/plain;q=0.9,application/json;q=0.8,*/*;q=0.5",
         }
         async with httpx.AsyncClient(timeout=timeout, headers=headers, follow_redirects=True, max_redirects=_MAX_REDIRECTS, limits=limits) as client:

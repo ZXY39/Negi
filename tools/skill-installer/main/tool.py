@@ -91,7 +91,7 @@ class _TokenScopedRedirectHandler(urllib.request.HTTPRedirectHandler):
 
 def _request(url: str, *, timeout: int, cancel_token: Any | None = None) -> bytes:
     headers = {
-        "User-Agent": "g3ku-skill-installer/1.0",
+        "User-Agent": "negi-skill-installer/1.0",
         "Accept": "application/octet-stream, application/zip, text/plain;q=0.9, */*;q=0.1",
     }
     token = os.environ.get("GITHUB_TOKEN") or os.environ.get("GH_TOKEN")
@@ -251,7 +251,7 @@ class SkillInstallerTool:
             self._emit_progress_sync(loop, runtime, f"skill-installer: resolving {source.owner}/{source.repo}:{source.path}")
 
             with tempfile.TemporaryDirectory(
-                prefix="g3ku-skill-installer-",
+                prefix="negi-skill-installer-",
                 ignore_cleanup_errors=True,
             ) as tmp_dir:
                 self._check_cancel(cancel_token)

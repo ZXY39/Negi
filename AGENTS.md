@@ -44,7 +44,7 @@ If a task spans multiple subsystems, read all relevant docs before changing code
 
 ## Required Documentation Workflow
 
-If a change affects any of the following, you must use the project skill `g3ku-architecture-maintenance` before considering the task complete:
+If a change affects any of the following, you must use the project skill `negi-architecture-maintenance` before considering the task complete:
 
 - Architecture boundaries
 - Runtime flow
@@ -60,7 +60,7 @@ If a change affects any of the following, you must use the project skill `g3ku-a
 
 The skill lives at:
 
-- `skills/g3ku-architecture-maintenance/SKILL.md`
+- `skills/negi-architecture-maintenance/SKILL.md`
 
 Use it to determine:
 
@@ -81,7 +81,7 @@ Before committing code changes:
 Do not consider a task complete until you have done all of the following:
 
 1. Checked whether the architecture docs are affected
-2. Used the `g3ku-architecture-maintenance` skill when the change is architecture-relevant
+2. Used the `negi-architecture-maintenance` skill when the change is architecture-relevant
 3. Updated the relevant docs when needed
 4. Mentioned the updated documentation files in your final summary
 

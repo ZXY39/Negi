@@ -1,22 +1,22 @@
 # Negi External Agent API 接入手册
 
-本文是给「任何专做渠道通信的项目/桥」看的接入说明。**它不是任何具体项目的预置适配**——渠道协议、登录、事件订阅、触发词、频控这些平台差异全部归你的项目，g3ku 只在你我之间保留一套固定的 HTTP + SSE 接口。照着这份手册，任何人/任何语言都能把桥接到 g3ku。
+本文是给「任何专做渠道通信的项目/桥」看的接入说明。**它不是任何具体项目的预置适配**——渠道协议、登录、事件订阅、触发词、频控这些平台差异全部归你的项目，Negi 只在你我之间保留一套固定的 HTTP + SSE 接口。照着这份手册，任何人/任何语言都能把桥接到 Negi。
 
 契约的权威定义在 `docs/architecture/external-agent-api.md`；本文是它的「怎么用」展开，两者冲突时以契约为准。
 
 ## 1. 边界与分工
 
-| | 你的桥（渠道项目） | g3ku |
+| | 你的桥（渠道项目） | Negi |
 |---|---|---|
 | 负责 | 平台登录、收发消息、事件订阅、触发词、频控、消息分段 | agent 逻辑、会话记忆、模型调用、工具执行、主动推送 |
-| 语言/技术 | 任意，与 g3ku 无关 | Python |
-| 与 g3ku 的往来 | 只用 HTTP + SSE，**零 g3ku import** | 只认 `/api/v1` + Bearer token |
+| 语言/技术 | 任意，与 Negi 无关 | Python |
+| 与 Negi 的往来 | 只用 HTTP + SSE，**零 Negi import** | 只认 `/api/v1` + Bearer token |
 
-接口是**项目无关**的：会话身份是你给的 `external_key`（随便什么字符串），g3ku 不关心它背后是 QQ 群、飞书单聊还是别的。
+接口是**项目无关**的：会话身份是你给的 `external_key`（随便什么字符串），Negi 不关心它背后是 QQ 群、飞书单聊还是别的。
 
 ## 2. 一次最小接入闭环
 
-1. **拿到 token**：在 g3ku Web「外部接入」面板签发（明文只显示一次），或由运维提供。记下 `bridge_id` 与 token。
+1. **拿到 token**：在 Negi Web「外部接入」面板签发（明文只显示一次），或由运维提供。记下 `bridge_id` 与 token。
 2. **建会话**：`POST /sessions`，body 带 `external_key`，拿回 `session_id`（形如 `ext:{bridge_id}:{hash}`）。
 3. **发消息**：`POST /sessions/{session_id}/messages`，带 `Idempotency-Key` 头，拿回 `turn_id` + `status`。
 4. **订阅事件**：`GET /sessions/{session_id}/events`（SSE），收 `turn.started → reply.delta* → reply.final → turn.completed`。
@@ -107,7 +107,7 @@ curl -N $BASE/sessions/$SESSION_ID/events -H "Authorization: Bearer $TOKEN" \
 | `turn.failed` | `error`, `detail` | 终态：失败，`error` 为用户可读全文 |
 | `reply.delta` | `text`, `source` | 最新思考段权威全文——**全量替换渲染，不追加** |
 | `reply.final` | `text`, `source`, `usage?`, `attachments?` | 权威全文（已出站清洗、媒体改写为签名 URL） |
-| `progress` | `kind`, `text` | `kind: milestone/tool/tool_error`；g3ku 发全量，**节流是桥的职责** |
+| `progress` | `kind`, `text` | `kind: milestone/tool/tool_error`；Negi 发全量，**节流是桥的职责** |
 | `outbound.created` | `external_key`, `session_key`, `text`, `dedupe_key?`, `attachments?` | 主动推送（cron/heartbeat/任务终态回流） |
 
 `attachments`（出站附件）：回复正文中以 markdown 链接引用、且解析为存在的本地文件的条目会被提取为 `[{name, mime_type, size, url}]`，`url` 是根相对签名媒体链接（24h 时效），桥按自己的 `/api/v1` base_url 的 origin 拼绝对地址下载。桥应把附件作为平台的文件/图片消息投递（先于正文），投递失败降级为把签名链接并入正文。单条事件至多 4 个附件；契约细节见 `docs/architecture/external-agent-api.md`「事件流」出站附件契约。
@@ -155,7 +155,7 @@ resp = client.chat.completions.create(
 print(resp.choices[0].message.content)
 ```
 
-要点：只发新消息（客户端历史被忽略，g3ku 会话自持记忆）；长任务超时返回 200 + "still working"（不是错误，稍后同 user 追问或加大 wait_seconds）。
+要点：只发新消息（客户端历史被忽略，Negi 会话自持记忆）；长任务超时返回 200 + "still working"（不是错误，稍后同 user 追问或加大 wait_seconds）。
 
 ### MCP 网关（Claude Code / Cursor 等）
 

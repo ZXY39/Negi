@@ -46,7 +46,7 @@ def test_host_allows_token(url: str, expected: bool) -> None:
 
 def _original_request(url: str, *, with_auth: bool = True) -> urllib.request.Request:
     headers = {
-        "User-Agent": "g3ku-skill-installer/1.0",
+        "User-Agent": "negi-skill-installer/1.0",
         "Accept": "application/octet-stream, */*;q=0.1",
     }
     if with_auth:
@@ -62,7 +62,7 @@ def test_redirect_to_foreign_host_strips_authorization() -> None:
     assert rebuilt.full_url == "https://evil.example.com/steal"
     assert rebuilt.get_header("Authorization") is None
     # benign headers survive so the rebuilt request is still a valid HTTP request
-    assert rebuilt.get_header("User-agent") == "g3ku-skill-installer/1.0"
+    assert rebuilt.get_header("User-agent") == "negi-skill-installer/1.0"
 
 
 def test_redirect_to_allowed_host_keeps_authorization() -> None:

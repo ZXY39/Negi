@@ -23,7 +23,7 @@ import yaml
 
 SITE_URL = 'https://clawhub.ai'
 API_BASE = f'{SITE_URL}/api/v1'
-USER_AGENT = 'g3ku-clawhub-skill-manager/1.0'
+USER_AGENT = 'negi-clawhub-skill-manager/1.0'
 SAFE_SKILL_ID = re.compile(r'[^0-9A-Za-z._-]+')
 ZIP_TIMEOUT_SECONDS = 60
 JSON_TIMEOUT_SECONDS = 30
@@ -217,7 +217,7 @@ def build_resource_manifest(
             'published_at': published_at,
             'installed_at': datetime.now(UTC).isoformat(),
         },
-        'x_g3ku': {
+        'x_negi': {
             'clawhub': {
                 'slug': str(slug or '').strip(),
                 'owner': owner_handle,
@@ -435,7 +435,7 @@ def load_local_manifest(skill_dir: Path) -> dict[str, Any]:
 
 
 def extract_clawhub_meta(manifest: dict[str, Any]) -> dict[str, Any]:
-    x_meta = manifest.get('x_g3ku')
+    x_meta = manifest.get('x_negi')
     if not isinstance(x_meta, dict):
         return {}
     clawhub = x_meta.get('clawhub')
@@ -501,7 +501,7 @@ def make_local_manifest(*, upstream_name: str, description: str, skill_id: str, 
         'content': {
             'main': 'SKILL.md',
         },
-        'x_g3ku': {
+        'x_negi': {
             'clawhub': {
                 'slug': slug,
                 'owner': owner,
@@ -539,7 +539,7 @@ def rewrite_manifest(path: Path, *, skill_data: dict[str, Any], version_data: di
         'homepage': page_url,
     }
 
-    x_meta = manifest.get('x_g3ku')
+    x_meta = manifest.get('x_negi')
     if not isinstance(x_meta, dict):
         x_meta = {}
     x_meta['clawhub'] = {
@@ -551,7 +551,7 @@ def rewrite_manifest(path: Path, *, skill_data: dict[str, Any], version_data: di
         'upstream_name': str(skill_data.get('name') or skill_id),
         'managed': True,
     }
-    manifest['x_g3ku'] = x_meta
+    manifest['x_negi'] = x_meta
 
     path.write_text(yaml.safe_dump(manifest, allow_unicode=True, sort_keys=False), encoding='utf-8')
     return manifest
@@ -802,7 +802,7 @@ def command_status(args: argparse.Namespace) -> dict[str, Any]:
     clawhub = extract_clawhub_meta(manifest)
     slug = str(clawhub.get('slug') or '').strip()
     if not slug:
-        raise ClawHubSkillError(f'Local skill {args.skill_id!r} is not managed by ClawHub or is missing x_g3ku.clawhub.slug.')
+        raise ClawHubSkillError(f'Local skill {args.skill_id!r} is not managed by ClawHub or is missing x_negi.clawhub.slug.')
     installed_version = str(clawhub.get('installed_version') or '').strip()
     skill = fetch_skill_detail(slug, temp_root=temp_root)
     latest = choose_version(skill, None)
@@ -827,7 +827,7 @@ def command_update(args: argparse.Namespace) -> dict[str, Any]:
     clawhub = extract_clawhub_meta(manifest)
     slug = str(clawhub.get('slug') or '').strip()
     if not slug:
-        raise ClawHubSkillError(f'Local skill {args.skill_id!r} is not managed by ClawHub or is missing x_g3ku.clawhub.slug.')
+        raise ClawHubSkillError(f'Local skill {args.skill_id!r} is not managed by ClawHub or is missing x_negi.clawhub.slug.')
 
     installed_version = str(clawhub.get('installed_version') or '').strip()
     skill = fetch_skill_detail(slug, temp_root=temp_root)

@@ -1,11 +1,11 @@
 ---
-name: g3ku-bridge-onboarding
+name: negi-bridge-onboarding
 description: Universal reference for onboarding any external channel bridge to Negi via the External Agent API — token management rules, protocol walkthrough, bridge-build checklist, connectivity verification, troubleshooting.
 ---
 
 # Negi 外部渠道桥接对接（万能参考）
 
-适用：用户要求把任意 IM / 渠道 / 自动化桥接入 g3ku（"对接渠道"、"让桥连上 g3ku"、"新建一个渠道桥"、"桥连不上"）。本 skill 是平台无关的对接总纲；权威契约见 `docs/architecture/external-agent-api.md`，参考实现见 `bridges/qq-onebot/`（独立包、零 g3ku import）。
+适用：用户要求把任意 IM / 渠道 / 自动化桥接入 Negi（"对接渠道"、"让桥连上 Negi"、"新建一个渠道桥"、"桥连不上"）。本 skill 是平台无关的对接总纲；权威契约见 `docs/architecture/external-agent-api.md`，参考实现见 `bridges/qq-onebot/`（独立包、零 Negi import）。
 
 ## 参考文档（权威正文，动手前先读）
 
@@ -16,15 +16,15 @@ description: Universal reference for onboarding any external channel bridge to N
 
 ## 0. 架构边界（三条铁律）
 
-- g3ku 核心只暴露 External Agent API `/api/v1`（Bearer token 鉴权）；核心不出现任何平台特定代码——换一个 IM 平台就要改的代码不属于核心。
+- Negi 核心只暴露 External Agent API `/api/v1`（Bearer token 鉴权）；核心不出现任何平台特定代码——换一个 IM 平台就要改的代码不属于核心。
 - 桥是独立进程 / 独立项目：平台登录、事件订阅、频控、消息分段、触发词识别全部归桥。
-- 会话键 `ext:{bridge_id}:{hash}` 里只有 external_key 的摘要；external_key ↔ session_key 的权威映射在 g3ku 侧注册表，桥不要自行解析 session_key。
+- 会话键 `ext:{bridge_id}:{hash}` 里只有 external_key 的摘要；external_key ↔ session_key 的权威映射在 Negi 侧注册表，桥不要自行解析 session_key。
 
 ## 1. 对接流程（按序执行）
 
 1. 确认总开关：web「外部接入」面板，或 `negi external status`（只读）。
 2. 签发 token：在 web「外部接入」面板签发（默认自动生成；可自定义，重复值会被拒）。明文只显示一次。
-3. 交付明文：交给桥的秘文存储（桥项目 `.env` / 密钥文件，权限收紧，**不进任何仓库**）。模型不得把明文写进 g3ku 仓库文件或会话转录；若模型代写桥配置，写完即从上下文清除。
+3. 交付明文：交给桥的秘文存储（桥项目 `.env` / 密钥文件，权限收紧，**不进任何仓库**）。模型不得把明文写进 Negi 仓库文件或会话转录；若模型代写桥配置，写完即从上下文清除。
 4. 配置桥：`base_url` + `Authorization: Bearer <token>` + `bridge_id`（与签发标识一致）。
 5. 启动桥并验收：
    - `negi external sessions` 出现 external_key ↔ session_key 映射；
@@ -48,7 +48,7 @@ description: Universal reference for onboarding any external channel bridge to N
 - 事件集：
   - `turn.started` / `turn.completed` / `turn.failed`：每回合终态恰好一个；`turn.failed.error` 是用户可读全文。
   - `reply.delta`：text 为最新思考段权威全文——**桥做全量替换，不追加**。
-  - `progress`：`kind: milestone/tool/tool_error`；g3ku 发全量，**节流是桥的职责**。
+  - `progress`：`kind: milestone/tool/tool_error`；Negi 发全量，**节流是桥的职责**。
   - `reply.final`：权威全文（已出站清洗）。
   - `outbound.created`：主动推送（cron / heartbeat / task 终态回流）。
 - 控制：`POST /turns/{id}/pause`、`POST /sessions/{id}/cancel`、`DELETE /sessions/{id}`（清除语义：转录清空、注册表条目保留）。
@@ -56,13 +56,13 @@ description: Universal reference for onboarding any external channel bridge to N
 
 ## 4. 新平台桥构建清单
 
-- external_key 映射规则：dm / group / thread 的隔离粒度由桥决定（一个 external_key = 一个 g3ku 会话）。
+- external_key 映射规则：dm / group / thread 的隔离粒度由桥决定（一个 external_key = 一个 Negi 会话）。
 - 提交幂等：每次用户消息生成唯一 `Idempotency-Key`，重试复用同键。
 - SSE 韧性：断线重连 + `Last-Event-ID`；`reply.delta` 全量替换渲染；`reply.final` 归档。
 - 主动推送：消费 `outbound.created` 并投递到平台。
 - 终态纪律：等 `turn.completed` / `turn.failed` 再发下一轮，或显式 pause/cancel；不要假设提交即串行排队。
-- 平台差异全在桥：频控、分段、触发词、@ 识别等不进 g3ku。
-- 零 g3ku import：桥与 g3ku 只通过 HTTP / SSE 交互。
+- 平台差异全在桥：频控、分段、触发词、@ 识别等不进 Negi。
+- 零 Negi import：桥与 Negi 只通过 HTTP / SSE 交互。
 - 验收按 §1 第 5 步。
 
 ## 5. 排障

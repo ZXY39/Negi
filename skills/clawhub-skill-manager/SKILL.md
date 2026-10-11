@@ -45,7 +45,7 @@
 5. **安装或更新后确认结果：**
    - 目标目录存在于 `skills/<skill_id>/`
    - 至少包含 `SKILL.md` 和 `resource.yaml`
-   - `resource.yaml` 中有 `x_g3ku.clawhub.installed_version`
+   - `resource.yaml` 中有 `x_negi.clawhub.installed_version`
 6. **若评估结果显示不适配 Negi，把本次安装视为“引入上游素材”，并继续转 `skill-creator` 做重写或结构改造。**
 7. **向用户回报：**
    - 选中的 slug / skill 名称
