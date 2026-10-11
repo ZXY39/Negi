@@ -86,7 +86,7 @@ class StubElement {
     }
 
     // 只有测试显式登记过的选择器才会被解析出来，其余返回 null，实现里
-    // 依赖 querySelector 的分支（例如 dockResourceStatusBadge）保持短路。
+    // 依赖 querySelector 的分支保持短路。
     querySelector(selector) {
         return this.stubQueryTargets.get(String(selector || "")) || null;
     }
@@ -382,9 +382,13 @@ test("renderToolDetail shows the split content tool without any action layer", (
     renderToolDetail();
 
     const html = U.toolDetail.innerHTML;
-    assert.match(html, /<h2 id="tool-detail-title">Content Open <span class="meta-tag">核心工具<\/span><\/h2>/);
-    assert.match(html, /<p class="subtitle">content_open<\/p>/);
-    assert.match(html, /<span class="meta-tag risk-low">低风险<\/span>/);
+    // 标题下只有一行徽标：风险、启用状态、核心工具。tool_id 不再重复印一遍。
+    assert.match(html, /<h2 id="tool-detail-title">Content Open<\/h2>/);
+    assert.match(
+        html,
+        /<div class="detail-modal-meta">\s*<span class="meta-tag risk-low">低风险<\/span>\s*<span class="meta-tag status-enabled">已启用<\/span>\s*<span class="meta-tag">核心工具<\/span>\s*<\/div>/
+    );
+    assert.doesNotMatch(html, /class="subtitle"/);
     assert.doesNotMatch(html, /Inspect Content \(Legacy\)/);
     // 族形时代的 action 区块不复存在。
     assert.doesNotMatch(html, /Action 权限/);

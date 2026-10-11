@@ -77,20 +77,6 @@ function displayEnabledLabel(enabled, available = true, repairRequired = false) 
     return enabled ? "已启用" : "已禁用";
 }
 
-function dockResourceStatusBadge(root) {
-    const shell = root instanceof Element ? root : null;
-    const title = shell?.querySelector(".detail-modal-title");
-    const subtitle = title?.querySelector(".subtitle");
-    const statusRow = shell?.querySelector(".resource-status-row");
-    const statusBadge = statusRow?.querySelector(".meta-tag");
-    if (!title || !subtitle || !statusBadge) return;
-    const meta = document.createElement("div");
-    meta.className = "detail-modal-meta";
-    subtitle.replaceWith(meta);
-    meta.appendChild(subtitle);
-    meta.appendChild(statusBadge);
-}
-
 function renderSkills() {
     U.skillList.innerHTML = "";
     const meta = paginateResources(filterSkills(), S.skillPage, S.skillPageSize);
@@ -256,6 +242,7 @@ function renderSkillDetail() {
     const allowedRoles = Array.isArray(S.selectedSkill.allowed_roles) ? S.selectedSkill.allowed_roles : [];
     const editorValue = esc(fileLoaded ? (S.skillContents[selectedFileKey] || "") : "Loading file...");
     const availabilityState = resourceAvailabilityStatus(S.selectedSkill);
+    const skillRisk = String(S.selectedSkill.risk_level || "medium").trim().toLowerCase();
     const unavailableReasons = resourceAvailabilityReasons(S.selectedSkill);
     const fileTabs = S.skillFiles.length
         ? S.skillFiles.map((file) => `<button type="button" class="toolbar-btn ghost skill-file ${S.selectedSkillFile === file.file_key ? "active" : ""}" data-file="${esc(file.file_key)}">${esc(file.file_key)}</button>`).join("")
@@ -265,7 +252,10 @@ function renderSkillDetail() {
             <div class="detail-modal-header">
                 <div class="detail-modal-title">
                     <h2 id="skill-detail-title">${esc(S.selectedSkill.display_name)}</h2>
-                    <p class="subtitle">${esc(S.selectedSkill.skill_id)}</p>
+                    <div class="detail-modal-meta">
+                        <span class="meta-tag risk-${esc(skillRisk)}">${esc(displayRiskLabel(skillRisk))}</span>
+                        <span class="meta-tag status-${availabilityState}">${esc(displayEnabledLabel(S.selectedSkill.enabled, S.selectedSkill.available))}</span>
+                    </div>
                 </div>
                 <div class="detail-modal-actions">
                     <button type="button" class="toolbar-btn" id="skill-modal-save">保存</button>
@@ -274,7 +264,6 @@ function renderSkillDetail() {
             </div>
             <div class="detail-modal-body">
                 <div class="resource-status-row" style="margin-bottom: var(--space-4);">
-                    <span class="meta-tag status-${availabilityState}">${esc(displayEnabledLabel(S.selectedSkill.enabled, S.selectedSkill.available))}</span>
                     ${S.selectedSkill.enabled
                         ? `<button type="button" class="toolbar-btn danger" id="skill-disable-btn">禁用技能</button>`
                         : `<button type="button" class="toolbar-btn success" id="skill-enable-btn">启用技能</button>`}
@@ -307,7 +296,6 @@ function renderSkillDetail() {
                 </div>
             </div>
         </article>`;
-    dockResourceStatusBadge(U.skillDetail);
     U.skillDetail.querySelector("#skill-modal-close")?.addEventListener("click", clearSkillSelection);
     U.skillDetail.querySelector("#skill-modal-save")?.addEventListener("click", () => void saveSkill());
     U.skillDetail.querySelector("#skill-enable-btn")?.addEventListener("click", () => {
@@ -595,8 +583,12 @@ function renderToolDetail() {
         <article class="resource-detail-card detail-modal-shell">
             <div class="detail-modal-header">
                 <div class="detail-modal-title">
-                    <h2 id="tool-detail-title">${esc(S.selectedTool.display_name)}${isCoreTool ? ' <span class="meta-tag">核心工具</span>' : ''}</h2>
-                    <p class="subtitle">${esc(S.selectedTool.tool_id)}</p>
+                    <h2 id="tool-detail-title">${esc(S.selectedTool.display_name)}</h2>
+                    <div class="detail-modal-meta">
+                        <span class="meta-tag risk-${esc(toolRisk)}">${esc(displayRiskLabel(toolRisk))}</span>
+                        <span class="meta-tag status-${availabilityState}">${esc(displayEnabledLabel(S.selectedTool.enabled, S.selectedTool.available, repairRequired))}</span>
+                        ${isCoreTool ? '<span class="meta-tag">核心工具</span>' : ''}
+                    </div>
                 </div>
                 <div class="detail-modal-actions">
                     <button type="button" class="toolbar-btn" id="tool-modal-save">保存</button>
@@ -605,8 +597,6 @@ function renderToolDetail() {
             </div>
             <div class="detail-modal-body">
                 <div class="resource-status-row" style="margin-bottom: var(--space-4);">
-                    <span class="meta-tag status-${availabilityState}">${esc(displayEnabledLabel(S.selectedTool.enabled, S.selectedTool.available, repairRequired))}</span>
-                    <span class="meta-tag risk-${esc(toolRisk)}">${esc(displayRiskLabel(toolRisk))}</span>
                     ${S.selectedTool.enabled
                         ? `<button type="button" class="toolbar-btn danger" id="tool-disable-btn">禁用工具</button>`
                         : `<button type="button" class="toolbar-btn success" id="tool-enable-btn">启用工具</button>`}
@@ -685,7 +675,6 @@ function renderToolDetail() {
         deleteButton.disabled = isCoreTool;
         toolStatusRow.appendChild(deleteButton);
     }
-    dockResourceStatusBadge(U.toolDetail);
     U.toolDetail.querySelector("#tool-modal-close")?.addEventListener("click", clearToolSelection);
     U.toolDetail.querySelector("#tool-modal-save")?.addEventListener("click", () => void saveTool());
     U.toolDetail.querySelector("#tool-enable-btn")?.addEventListener("click", () => {

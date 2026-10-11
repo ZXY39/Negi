@@ -7935,10 +7935,6 @@ textarea {
     gap: 10px;
 }
 
-.detail-modal-meta .subtitle {
-    margin: 0;
-}
-
 .detail-modal-actions {
     display: flex;
     align-items: center;
