@@ -164,4 +164,4 @@ negi mcp check --token <bridge token>          # 连通性自检
 claude mcp add negi -- negi mcp serve --token <bridge token>
 ```
 
-等价 MCP JSON 配置：`{"command": "negi", "args": ["mcp", "serve", "--token", "<t>"]}`（token 也可走 env `G3KU_EXTERNAL_TOKEN`）。暴露六个工具：`negi_chat` / `negi_get_reply` / `negi_session_status` / `negi_pause` / `negi_cancel` / `negi_list_conversations`；每个 `conversation` 名对应一个持久 g3ku 会话。
+等价 MCP JSON 配置：`{"command": "negi", "args": ["mcp", "serve", "--token", "<t>"]}`（token 也可走 env `NEGI_EXTERNAL_TOKEN`）。暴露六个工具：`negi_chat` / `negi_get_reply` / `negi_session_status` / `negi_pause` / `negi_cancel` / `negi_list_conversations`；每个 `conversation` 名对应一个持久会话。

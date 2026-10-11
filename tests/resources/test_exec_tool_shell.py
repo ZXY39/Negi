@@ -148,8 +148,10 @@ def test_exec_tool_builds_subprocess_env_with_project_python(monkeypatch) -> Non
 
     env = tool._build_subprocess_env(runtime={'session_key': 'web:shared'}, cwd=r'D:\projects\G3KU')
 
+    assert env['PROJECT_PYTHON'] == fake_payload['project_python']
+    assert env['PROJECT_PYTHON_HINT'] == fake_payload['project_python_hint']
+    assert env['PROJECT_SCRIPTS_DIR'] == fake_payload['project_scripts_dir']
     assert env['G3KU_PROJECT_PYTHON'] == fake_payload['project_python']
-    assert env['G3KU_PROJECT_PYTHON_HINT'] == fake_payload['project_python_hint']
     assert env['VIRTUAL_ENV'] == fake_payload['project_virtual_env']
     assert env['G3KU_TMP_DIR'].endswith('temp')
     assert env['G3KU_EXTERNAL_TOOLS_DIR'].endswith('externaltools')

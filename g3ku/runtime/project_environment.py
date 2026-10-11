@@ -83,6 +83,14 @@ def format_python_command(python_executable: str, *, shell_family: str | None = 
     return shlex.quote(text)
 
 
+def format_python_env_reference(shell_family: str | None = None) -> str:
+    """指向导出变量而不是重抄绝对路径——头部每次心跳都要重发，而落点合同本来就
+    要求模型不要逐字重抄整条绝对前缀。"""
+    if _normalized_shell_family(shell_family) == 'powershell':
+        return '& $env:PROJECT_PYTHON'
+    return '"$PROJECT_PYTHON"'
+
+
 def current_project_environment(
     *,
     shell_family: str | None = None,
@@ -173,18 +181,18 @@ def apply_project_environment(
     merged_path = os.pathsep.join(_dedupe_path_entries(path_entries))
     if merged_path:
         prepared['PATH'] = merged_path
-    project_python = str(payload.get('project_python') or '').strip()
-    if project_python:
-        prepared['G3KU_PROJECT_PYTHON'] = project_python
-    project_python_dir = str(payload.get('project_python_dir') or '').strip()
-    if project_python_dir:
-        prepared['G3KU_PROJECT_PYTHON_DIR'] = project_python_dir
-    project_scripts_dir = str(payload.get('project_scripts_dir') or '').strip()
-    if project_scripts_dir:
-        prepared['G3KU_PROJECT_SCRIPTS_DIR'] = project_scripts_dir
-    project_python_hint = str(payload.get('project_python_hint') or '').strip()
-    if project_python_hint:
-        prepared['G3KU_PROJECT_PYTHON_HINT'] = project_python_hint
+    # 旧拼写再导出一份：历史转录里模型写过的 `$env:G3KU_PROJECT_PYTHON` 会被继续模仿，
+    # 只留新名会让它打到空变量。删这份别名要单独一刀（改念名侧与本函数的元组）。
+    for payload_key, env_key, legacy_env_key in (
+        ('project_python', 'PROJECT_PYTHON', 'G3KU_PROJECT_PYTHON'),
+        ('project_python_dir', 'PROJECT_PYTHON_DIR', 'G3KU_PROJECT_PYTHON_DIR'),
+        ('project_scripts_dir', 'PROJECT_SCRIPTS_DIR', 'G3KU_PROJECT_SCRIPTS_DIR'),
+        ('project_python_hint', 'PROJECT_PYTHON_HINT', 'G3KU_PROJECT_PYTHON_HINT'),
+    ):
+        value = str(payload.get(payload_key) or '').strip()
+        if value:
+            prepared[env_key] = value
+            prepared[legacy_env_key] = value
     project_virtual_env = str(payload.get('project_virtual_env') or '').strip()
     if project_virtual_env:
         prepared['VIRTUAL_ENV'] = project_virtual_env
@@ -195,5 +203,6 @@ __all__ = [
     'apply_project_environment',
     'current_project_environment',
     'format_python_command',
+    'format_python_env_reference',
     'resolve_project_environment',
 ]

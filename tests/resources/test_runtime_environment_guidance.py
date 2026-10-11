@@ -28,8 +28,10 @@ def test_ceo_prompt_builder_mentions_project_python_guidance(monkeypatch) -> Non
 
     prompt = CeoPromptBuilder(loop=SimpleNamespace(workspace=r'D:\projects\G3KU')).build(skills=[])
 
-    assert 'G3KU_PROJECT_PYTHON' in prompt
-    assert r"& 'C:\Python314\python.exe'" in prompt
+    assert 'PROJECT_PYTHON' in prompt
+    assert 'G3KU_PROJECT_PYTHON' not in prompt
+    assert '& $env:PROJECT_PYTHON' in prompt
+    assert r"& 'C:\Python314\python.exe'" not in prompt
     assert '{{project_python_hint}}' not in prompt
 
 

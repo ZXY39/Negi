@@ -199,5 +199,13 @@ async def test_repair_required_tool_ignores_runtime_context_in_argument_preview(
 
         assert payload['repair_required'] is True
         assert payload['argument_preview'] == {'value': 'demo'}
+
+        # 占位参数表是模型逐字看到的字段名：必须带状态标记，且不掺品牌拼写。
+        properties = tool.parameters['properties']
+        assert '_repair_state' in properties
+        assert not [name for name in properties if 'g3ku' in name.lower()]
+
+        marked = json.loads(await tool.execute(value='demo', _repair_state='repair_required'))
+        assert marked['argument_preview'] == {'value': 'demo'}
     finally:
         manager.close()

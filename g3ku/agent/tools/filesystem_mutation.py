@@ -16,8 +16,8 @@ from g3ku.runtime.project_environment import apply_project_environment
 from g3ku.utils.helpers import model_data_root, resolve_model_path
 from g3ku.utils.subprocess_text import decode_subprocess_output, enrich_subprocess_env_for_text
 
-_METADATA_START = '### G3KU_PATCH_METADATA ###'
-_DIFF_START = '### G3KU_PATCH_DIFF ###'
+_METADATA_START = '### PATCH_METADATA ###'
+_DIFF_START = '### PATCH_DIFF ###'
 _EDIT_MODE_TEXT = 'text_replace'
 _EDIT_MODE_RANGE = 'line_range'
 _EDIT_MODE_ERROR = 'Error: edit requires exactly one mode: text-replace or line-range'

@@ -65,7 +65,7 @@ _HOST_PROCESS_TERMINATION_PATTERNS = (
 
 _HOST_PROCESS_TERMINATION_ERROR = (
     "Error: exec blocked host-process termination. The command could terminate "
-    "the G3KU Web/runtime or managed worker. Use read-only process inspection, "
+    "the web runtime or a managed worker process. Use read-only process inspection, "
     "or let exec timeout/cancellation clean up the child process it started; do not "
     "terminate arbitrary processes by PID/name (for example, all python processes)."
 )

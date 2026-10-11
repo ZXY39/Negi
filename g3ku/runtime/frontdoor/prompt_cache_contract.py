@@ -13,7 +13,6 @@ from main.runtime.chat_backend import (
 from main.runtime.stage_messages import is_turn_only_system_note_message
 
 DEFAULT_CACHE_FAMILY_REVISION = "ceo_frontdoor:stable-prefix:v1"
-LEGACY_LONG_CONTEXT_SUMMARY_PREFIX = "[G3KU_LONG_CONTEXT_SUMMARY_V1]"
 
 
 def _is_frontdoor_runtime_tool_contract_record(record: dict[str, Any]) -> bool:
@@ -169,31 +168,6 @@ def _dynamic_diagnostic_messages(
     return diagnostics
 
 
-def _contains_long_context_summary(records: list[dict[str, Any]]) -> bool:
-    items = list(records or [])
-    for record in items:
-        if not isinstance(record, dict):
-            continue
-        role = str(record.get("role") or "").strip().lower()
-        content = str(record.get("content") or "").strip()
-        if role == "assistant" and content.startswith(LEGACY_LONG_CONTEXT_SUMMARY_PREFIX):
-            return True
-    return False
-
-
-def _effective_stable_messages(
-    *,
-    stable_messages: list[dict[str, Any]],
-    live_request_messages: list[dict[str, Any]],
-    dynamic_appendix_messages: list[dict[str, Any]],
-) -> list[dict[str, Any]]:
-    appendix_for_overlap = _dynamic_appendix_overlap_records(dynamic_appendix_messages)
-    live_without_appendix = _strip_first_slice(live_request_messages, appendix_for_overlap)
-    if live_without_appendix and _contains_long_context_summary(live_without_appendix):
-        return live_without_appendix
-    return list(stable_messages)
-
-
 def _build_request_messages(
     *,
     stable_messages: list[dict[str, Any]],
@@ -262,11 +236,7 @@ def build_frontdoor_prompt_contract(
             normalized_dynamic_appendix_messages,
         )
     else:
-        normalized_effective_stable_messages = _effective_stable_messages(
-            stable_messages=base_stable_messages,
-            live_request_messages=normalized_live_request_messages,
-            dynamic_appendix_messages=normalized_dynamic_appendix_messages,
-        )
+        normalized_effective_stable_messages = list(base_stable_messages)
         normalized_request_messages = _build_request_messages(
             stable_messages=normalized_effective_stable_messages,
             live_request_messages=normalized_live_request_messages,

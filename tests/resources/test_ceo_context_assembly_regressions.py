@@ -2843,8 +2843,6 @@ async def test_message_builder_does_not_inject_global_summary_block_during_histo
         frontdoor_stage_state={"active_stage_id": "", "transition_required": False, "stages": []},
     )
 
-    stable_contents = [str(item.get("content") or "") for item in result.stable_messages]
-    assert not any(content.startswith("[G3KU_LONG_CONTEXT_SUMMARY_V1]") for content in stable_contents)
     assert summary_calls == 0
     assert "global_summary_present" not in result.trace
     assert "semantic_context_state" not in result.trace

@@ -25,7 +25,7 @@ class RepairRequiredTool(Tool):
     def parameters(self) -> dict[str, Any]:
         schema = deepcopy(getattr(self._descriptor, 'parameters', None) or {'type': 'object', 'properties': {}, 'required': []})
         properties = dict(schema.get('properties') or {})
-        properties['_g3ku_tool_state'] = {
+        properties['_repair_state'] = {
             'type': 'string',
             'enum': ['repair_required'],
             'description': '【待修复】Read-only marker that indicates this tool must be repaired before the real capability can run.',
@@ -63,7 +63,7 @@ class RepairRequiredTool(Tool):
         argument_preview = {
             key: self._preview_value(value)
             for key, value in dict(kwargs or {}).items()
-            if key not in {'_g3ku_tool_state', '__g3ku_runtime'}
+            if key not in {'_repair_state', '__g3ku_runtime'}
         }
         return json.dumps(
             {

@@ -4167,7 +4167,7 @@ class NodeRunner:
                 'exec': (
                     'Windows 上的 exec 运行在 PowerShell 中，其他系统运行在宿主 shell 中。'
                     '未传 working_dir 时，默认在 runtime_environment.task_temp_dir 执行，并优先把所有中间文件写到该目录。'
-                    '它会继承当前 G3KU 进程使用的同一套 Python 环境，并把该解释器注入 PATH。'
+                    '它会继承运行时进程的同一套 Python 环境，并把该解释器注入 PATH。'
                     '不要假设 bash heredoc、rg 或 `true` 这类 Unix shell 内建一定可用。'
                     '需要特定目录时，显式传入 working_dir。'
                     '它更适合目录发现、文件名发现和环境探查；如果结果反复退化成 `head_preview`，'

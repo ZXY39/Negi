@@ -9,8 +9,8 @@ from typing import Any
 from g3ku.agent.tools.base import Tool
 from g3ku.agent.tools.filesystem import _resolve_path
 
-_METADATA_START = '### G3KU_PATCH_METADATA ###'
-_DIFF_START = '### G3KU_PATCH_DIFF ###'
+_METADATA_START = '### PATCH_METADATA ###'
+_DIFF_START = '### PATCH_DIFF ###'
 
 
 def _runtime_task_id(runtime: dict[str, Any] | None, default: str | None = None) -> str:

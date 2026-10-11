@@ -4,7 +4,7 @@ import re
 from pathlib import Path
 from typing import Any
 
-from g3ku.runtime.project_environment import current_project_environment
+from g3ku.runtime.project_environment import current_project_environment, format_python_env_reference
 
 
 _PROMPT_TEMPLATE_VARIABLE = re.compile(r'{{\s*([a-zA-Z_][a-zA-Z0-9_]*)\s*}}')
@@ -30,12 +30,7 @@ class CeoPromptBuilder:
     def build_base_prompt(self) -> str:
         project_environment = current_project_environment(workspace_root=getattr(self._loop, 'workspace', None))
         prompt = self._read_prompt('ceo_frontdoor.md')
-        rendered = self._render_prompt(
-            prompt,
-            {
-                'project_python_hint': project_environment.get('project_python_hint') or 'python',
-            },
-        )
+        rendered = self._render_prompt(prompt, {})
         rendered = self._sanitize_prompt(rendered)
         runtime_environment_block = self._runtime_environment_block(project_environment)
         if runtime_environment_block:
@@ -47,12 +42,12 @@ class CeoPromptBuilder:
 
     @staticmethod
     def _runtime_environment_block(project_environment: dict[str, Any]) -> str:
-        project_python_hint = str(project_environment.get('project_python_hint') or 'python').strip() or 'python'
+        env_reference = format_python_env_reference(project_environment.get('shell_family'))
         return '\n'.join(
             [
                 '## 运行时环境',
-                '- 当命令必须使用项目精确解释器时，优先使用运行时导出的环境变量 `G3KU_PROJECT_PYTHON`、`G3KU_PROJECT_PYTHON_DIR`、`G3KU_PROJECT_SCRIPTS_DIR` 和 `G3KU_PROJECT_PYTHON_HINT`。',
-                f'- 当解释器命令必须精确时，优先使用 `{project_python_hint}`，不要默认假设裸 `python` 一定正确。',
+                '- 当命令必须使用项目精确解释器时，优先使用运行时导出的环境变量 `PROJECT_PYTHON`、`PROJECT_PYTHON_DIR`、`PROJECT_SCRIPTS_DIR` 和 `PROJECT_PYTHON_HINT`。',
+                f'- 当解释器命令必须精确时，优先使用 `{env_reference}`，不要默认假设裸 `python` 一定正确。',
             ]
         ).strip()
 

@@ -6863,14 +6863,14 @@ def test_create_agent_prompt_contract_avoids_duplicate_history_when_live_message
                 {"role": "system", "content": "stable system"},
                 {
                     "role": "assistant",
-                    "content": "[G3KU_LONG_CONTEXT_SUMMARY_V1]\nsummary body",
+                    "content": "[G3KU_TOKEN_COMPACT_V2]\nsummary body",
                 },
                 {"role": "assistant", "content": "latest assistant"},
                 {"role": "user", "content": "latest user"},
             ],
             stable_messages=[
                 {"role": "system", "content": "stable system"},
-                {"role": "assistant", "content": "[G3KU_LONG_CONTEXT_SUMMARY_V1]\nsummary body"},
+                {"role": "assistant", "content": "[G3KU_TOKEN_COMPACT_V2]\nsummary body"},
                 {"role": "assistant", "content": "latest assistant"},
                 {"role": "user", "content": "latest user"},
             ],
@@ -6890,14 +6890,14 @@ def test_create_agent_prompt_contract_avoids_duplicate_history_when_live_message
     ]
     assert non_contract_request_messages == [
         {"role": "system", "content": "stable system"},
-        {"role": "assistant", "content": "[G3KU_LONG_CONTEXT_SUMMARY_V1]\nsummary body"},
+        {"role": "assistant", "content": "[G3KU_TOKEN_COMPACT_V2]\nsummary body"},
         {"role": "assistant", "content": "latest assistant"},
         {"role": "user", "content": "latest user"},
         {"role": "assistant", "content": "## Retrieved Context\n- authoritative memory"},
     ]
     assert contract.stable_messages == [
         {"role": "system", "content": "stable system"},
-        {"role": "assistant", "content": "[G3KU_LONG_CONTEXT_SUMMARY_V1]\nsummary body"},
+        {"role": "assistant", "content": "[G3KU_TOKEN_COMPACT_V2]\nsummary body"},
         {"role": "assistant", "content": "latest assistant"},
         {"role": "user", "content": "latest user"},
     ]

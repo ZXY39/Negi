@@ -12,7 +12,7 @@ metadata:
 
 # web-access Skill
 
-**{CLAUDE_SKILL_DIR}为G3KU/skills/web-access的绝对路径**
+**`{CLAUDE_SKILL_DIR}` 是本技能目录的绝对路径**
 
 ## 前置检查
 
