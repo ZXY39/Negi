@@ -352,6 +352,75 @@ async def clear_external_session(
     return {"ok": True, "cleared": True, "session_id": session_key}
 
 
+LATEST_MODEL_TEXT_MAX_CHARS = 300
+RECENT_TOOL_NAMES_MAX = 5
+STAGES_RECENT_MAX = 3
+STAGE_GOAL_MAX_CHARS = 120
+
+
+def summarize_external_session_activity(events: list[dict[str, Any]]) -> dict[str, Any]:
+    """从事件缓冲区尾巴算"最新文本输出 + 最近调用过哪几颗工具"。
+
+    文本必须先过与终稿同一道出站消毒再截断：`reply.delta` 这条道**不做**消毒
+    （`external_events.py` 只在 `message_end` 上 sanitize），把 hub 原文直接递出去
+    等于把未清洗的思考段交给外部 token。截断量如实报：`latest_model_text_total_chars`
+    是消毒后、截断前的字符数。
+    """
+    latest_text = ""
+    latest_total_chars = 0
+    tools: list[str] = []
+    for event in reversed(list(events or [])):
+        if not isinstance(event, dict):
+            continue
+        event_type = str(event.get("type") or "")
+        if not latest_text and event_type in {"reply.delta", "reply.final"}:
+            cleaned = sanitize_channel_outbound_text(str(event.get("text") or "")).strip()
+            if cleaned:
+                latest_text = cleaned[:LATEST_MODEL_TEXT_MAX_CHARS]
+                latest_total_chars = len(cleaned)
+        if event_type == "progress" and str(event.get("kind") or "") == "tool":
+            name = str(event.get("tool_name") or "").strip()
+            if name and name not in tools and len(tools) < RECENT_TOOL_NAMES_MAX:
+                tools.append(name)
+        if latest_text and len(tools) >= RECENT_TOOL_NAMES_MAX:
+            break
+    return {
+        "latest_model_text": latest_text,
+        "latest_model_text_total_chars": latest_total_chars,
+        "recent_tool_calls": tools,
+    }
+
+
+def summarize_external_session_stages(ledger: Any) -> list[dict[str, Any]] | None:
+    """最近几个阶段"在干哪件"：状态与计数加 goal 前缀，不给摘要、不给 key_refs。
+
+    尺寸是实测定的：原样五个阶段平均 87.8 KB（最大 600 KB ≈ 15 万 token），窄化到
+    这个形状后平均 666 B（≈166 token）。账本读不到（会话没驻留）时返回 None，
+    调用方按"不知道"处理，不折成空列表。
+    """
+    if not isinstance(ledger, dict):
+        return None
+    stages = list(ledger.get("stages") or [])
+    if not stages:
+        return []
+    summary: list[dict[str, Any]] = []
+    for stage in stages[-STAGES_RECENT_MAX:]:
+        if not isinstance(stage, dict):
+            continue
+        summary.append(
+            {
+                "stage_index": int(stage.get("stage_index") or 0),
+                "status": str(stage.get("status") or "").strip(),
+                "stage_kind": str(stage.get("stage_kind") or "").strip(),
+                "goal": str(stage.get("stage_goal") or "").strip()[:STAGE_GOAL_MAX_CHARS],
+                "tool_rounds_used": int(stage.get("tool_rounds_used") or 0),
+                "tool_round_budget": int(stage.get("tool_round_budget") or 0),
+                "round_count": len(list(stage.get("rounds") or [])),
+            }
+        )
+    return summary
+
+
 def _session_task_activity(agent: Any, session_key: str) -> dict[str, Any] | None:
     """本会话仍未完成的任务，以及它们最近一跳的时间。
 
@@ -436,6 +505,11 @@ async def get_external_session_state(
             return None
 
     last_activity_at = str((tail_event or {}).get("ts") or "")
+    activity = summarize_external_session_activity(list(hub.replay(0)) if hub is not None else [])
+    # 只读引用、不 deepcopy：与 `ceo_sessions` 的轨道读法同形，取账本到序列化之间不放 await。
+    stages_recent = summarize_external_session_stages(
+        getattr(session, "_frontdoor_stage_state", None) if session is not None else None
+    )
     task_activity = _session_task_activity(peek_global_agent(), entry.session_key)
     task_hop_ceiling = _task_hop_ceiling(task_activity) if task_activity is not None else ""
     started_at = str(getattr(turn_record, "started_at", "") or "")
@@ -456,7 +530,18 @@ async def get_external_session_state(
         "silence_seconds": _age_iso(last_activity_at),
         "last_event_seq": int((tail_event or {}).get("seq") or 0),
         "last_activity_kind": str((tail_event or {}).get("type") or ""),
-        "last_activity_text": activity_text[:160],
+        # hub 的 `reply.delta` 这条道不过出站消毒（sanitize 只长在 `message_end` 上），
+        # 未清洗的思考段不能原样递出去——与 `latest_model_text` 同一条纪律。
+        "last_activity_text": sanitize_channel_outbound_text(activity_text)[:160],
+        # 活动文本与最新输出同一条纪律：hub 里的事件不过消毒，往外递之前先 sanitize。
+        "latest_model_text": activity["latest_model_text"],
+        "latest_model_text_total_chars": activity["latest_model_text_total_chars"],
+        "recent_tool_calls": activity["recent_tool_calls"],
+        **(
+            {"stages_recent": stages_recent}
+            if stages_recent is not None
+            else {}
+        ),
         "last_error": last_error,
         **(
             {

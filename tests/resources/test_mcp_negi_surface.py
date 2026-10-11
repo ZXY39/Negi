@@ -417,3 +417,59 @@ def test_task_activity_reports_unknown_separately_from_none():
     assert activity["tasks_running"] == 1
     assert activity["tasks"][0]["model_calls"] == 245
     assert _task_hop_ceiling(activity) == "2026-10-11T00:12:34"
+
+
+def test_latest_model_text_is_truncated_and_reports_the_real_length():
+    from g3ku.runtime.api.external_v1 import summarize_external_session_activity
+
+    long_text = "结" * 900
+    events = [
+        {"seq": 1, "type": "reply.delta", "text": "较早的一段输出"},
+        {"seq": 2, "type": "reply.delta", "text": long_text},
+    ]
+    summary = summarize_external_session_activity(events)
+    assert summary["latest_model_text"] == "结" * 300
+    assert summary["latest_model_text_total_chars"] == 900
+
+
+def test_recent_tool_calls_come_from_structured_names_newest_first():
+    from g3ku.runtime.api.external_v1 import summarize_external_session_activity
+
+    events = [
+        {"seq": 1, "type": "progress", "kind": "tool", "text": "🔧 exec started", "tool_name": "exec"},
+        {"seq": 2, "type": "progress", "kind": "milestone", "text": "阶段推进", "tool_name": "not_a_tool"},
+        {"seq": 3, "type": "progress", "kind": "tool", "text": "🔧 content_search started", "tool_name": "content_search"},
+        {"seq": 4, "type": "progress", "kind": "tool", "text": "🔧 exec started", "tool_name": "exec"},
+    ]
+    summary = summarize_external_session_activity(events)
+    assert summary["recent_tool_calls"] == ["exec", "content_search"]
+
+
+def test_stage_projection_gives_status_counts_and_goal_prefix_only():
+    from g3ku.runtime.api.external_v1 import summarize_external_session_stages
+
+    ledger = {
+        "stages": [
+            {
+                "stage_index": index,
+                "status": "completed",
+                "stage_kind": "work",
+                "stage_goal": "核查" + ("细" * 400),
+                "tool_rounds_used": index,
+                "tool_round_budget": 12,
+                "rounds": [{}, {}],
+                "completed_stage_summary": "不该出现的摘要",
+                "key_refs": [{"secret": "不该出现"}],
+            }
+            for index in range(1, 6)
+        ]
+    }
+    stages = summarize_external_session_stages(ledger)
+    assert [item["stage_index"] for item in stages] == [3, 4, 5]
+    assert stages[0]["goal"].startswith("核查") and len(stages[0]["goal"]) == 120
+    assert stages[0]["round_count"] == 2 and stages[0]["tool_round_budget"] == 12
+    joined = __import__("json").dumps(stages, ensure_ascii=False)
+    assert "不该出现" not in joined
+    # 账本读不到时是 None（"不知道"），不是空列表——空列表会被读成"这个会话没有阶段"
+    assert summarize_external_session_stages(None) is None
+    assert summarize_external_session_stages({"stages": []}) == []

@@ -278,7 +278,16 @@ def make_session_event_relay(
             if not text:
                 return
             if kind == "tool":
-                hub.publish("progress", turn_id=turn_id, kind="tool", text=f"🔧 {text}")
+                # `tool_name` 是结构化读数：活动摘要要报"最近调过哪几颗工具"，从
+                # `🔧 xxx started` 这种人读文本里反解名字会随文案漂，故在这里一起带上。
+                tool_name = str(payload.get("tool_name") or "").strip()
+                hub.publish(
+                    "progress",
+                    turn_id=turn_id,
+                    kind="tool",
+                    text=f"🔧 {text}",
+                    **({"tool_name": tool_name} if tool_name else {}),
+                )
             elif kind == "tool_error":
                 hub.publish("progress", turn_id=turn_id, kind="tool_error", text=f"⚠️ {text}")
             elif kind in {"progress", "analysis"}:
