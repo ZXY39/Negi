@@ -600,6 +600,34 @@ async def test_wake_projection_counts_only_reply_final_and_shows_truncation():
     assert again["next_since"] == "2026-10-11T02:00:00"
 
 
+def test_wake_watermark_is_one_shape_and_never_drops_the_boundary_second():
+    """活体的两本时间源形状不同：账本 `ts` 是 naive 带微秒，`tasks.updated_at` 带偏移且只到秒。
+
+    混形状做字符串比较时 `+` 排在 `.` 前，同秒内 aware 串被判成"更早"：严格大于的游标
+    会把边界那一秒的终态永久漏掉。归一化成墙钟到秒 + 包含式下界之后，同一秒宁可重复报。
+    """
+    from g3ku.runtime.api.external_v1 import _wake_wall_second, summarize_external_session_wake
+
+    task = {"task_id": "task:late", "status": "success", "updated_at": "2026-10-11T12:37:12+08:00"}
+    reply = {"id": "obx-1", "ts": "2026-10-11T12:37:12.500000", "event": "reply.final", "text": "答复"}
+    first = summarize_external_session_wake(cursor="", task_rows=[task], pending_records=[reply])
+    assert first["next_since"] == _wake_wall_second(task["updated_at"]) == "2026-10-11T12:37:12"
+    assert "+" not in first["next_since"] and "." not in first["next_since"].split("T")[1]
+
+    again = summarize_external_session_wake(
+        cursor=first["next_since"], task_rows=[task], pending_records=[reply]
+    )
+    assert [item["task_id"] for item in again["tasks"]] == ["task:late"]
+    assert [item["outbox_id"] for item in again["replies"]] == ["obx-1"]
+
+    assert _wake_wall_second("2026-10-11T12:37:12.500000") == "2026-10-11T12:37:12"
+    # aware 串按本机墙钟归一（别硬编码偏移：换时区就假了）。
+    local_aware = datetime(2026, 10, 11, 12, 37, 12, tzinfo=datetime.now().astimezone().tzinfo)
+    assert _wake_wall_second(local_aware.isoformat()) == "2026-10-11T12:37:12"
+    assert _wake_wall_second("") == ""
+    assert _wake_wall_second("明早再说") == ""
+
+
 def test_long_reply_spills_to_a_file_but_the_answer_always_arrives(tmp_path, monkeypatch):
     monkeypatch.setenv("NEGI_GATEWAY_DIR", str(tmp_path))
     from g3ku.mcp_gateway.local_store import spill_reply

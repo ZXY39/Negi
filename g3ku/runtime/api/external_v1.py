@@ -599,6 +599,12 @@ def summarize_external_session_wake(
     只算不读，是为了让"哪条算终态、哪条算未消费、截断怎么写"这一套判据可测——
     真读口在 `tasks` 表与 outbox 账本里。回复只认 `event == reply.final`：账本里
     还有主动推送那一种记录，它是发给渠道用户的消息，不是回合的答案。
+
+    水位线只认一种形状：本机墙钟到秒。两本时间源的串不一样——账本 `ts` 是
+    `datetime.now().isoformat()`（naive、带微秒），`tasks.updated_at` 带 `+08:00` 且只到秒
+    （活体读到的就是这两种）。混着比字符串时 `+` 排在 `.` 前面，同秒内 aware 串会被判成
+    "更早"，于是严格大于的游标能把边界那一秒的终态**永久漏掉**。所以先归一化再比，
+    边界取包含式（`>=`）：同一秒宁可重复报一次，唤醒是幂等信息。
     """
     tasks = [
         {
@@ -615,7 +621,7 @@ def summarize_external_session_wake(
         if str(record.get("event") or "") == REPLY_EVENT and str(record.get("text") or "")
     ]
     if cursor:
-        owned = [record for record in owned if str(record.get("ts") or "") > cursor]
+        owned = [record for record in owned if _wake_wall_second(str(record.get("ts") or "")) >= cursor]
     replies = [
         {
             "outbox_id": str(record.get("id") or ""),
@@ -624,7 +630,9 @@ def summarize_external_session_wake(
         }
         for record in owned[:replies_limit]
     ]
-    stamps = [item["finished_at"] for item in tasks] + [item["ts"] for item in replies]
+    stamps = [_wake_wall_second(item["finished_at"]) for item in tasks] + [
+        _wake_wall_second(item["ts"]) for item in replies
+    ]
     return {
         "tasks": tasks,
         # 终态按时间倒序取前 `tasks_limit` 条，撞上上限时最旧的那些没进来——
@@ -634,6 +642,20 @@ def summarize_external_session_wake(
         "replies_pending": len(owned),
         "next_since": max([stamp for stamp in stamps if stamp] or [str(cursor or "")]),
     }
+
+
+def _wake_wall_second(value: str) -> str:
+    """ISO 串 → 本机墙钟到秒的裸串；解不开回空串（不当 0 用）。"""
+    text = str(value or "").strip()
+    if not text:
+        return ""
+    try:
+        parsed = datetime.fromisoformat(text)
+    except ValueError:
+        return ""
+    if parsed.tzinfo is not None:
+        parsed = parsed.astimezone().replace(tzinfo=None)
+    return parsed.replace(microsecond=0).isoformat()
 
 
 @router.get("/sessions/{session_id}/wake")
@@ -657,7 +679,10 @@ async def get_external_session_wake(
     用户（`g3ku/qq_official/bridge.py`），替模型决定推送是禁区。
     """
     entry = _resolve_entry(session_id, principal)
-    cursor = str(since or "").strip()
+    # 调用方可能把两本时间源的原始串当游标递回来，先归一化成同一种形状再当下界；
+    # 归一化失败就当"没有历史"（回最近一批），宁可重复不许漏。
+    raw_since = str(since or "").strip()
+    cursor = _wake_wall_second(raw_since) if raw_since else ""
     agent = peek_global_agent()
     task_service = getattr(agent, "main_task_service", None) if agent is not None else None
     lister = getattr(task_service, "list_finished_tasks_for_session_since", None)
