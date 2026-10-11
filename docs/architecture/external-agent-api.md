@@ -60,6 +60,16 @@
 
 三本时间源的 ISO 串形状不同：事件 `ts` 与 `TurnRecord.started_at` 是本机 naive 串，任务跳次 `created_at` 带本机偏移（生产者 `main/monitoring/log_service.py::_now_iso`）。所有"距现在多少秒"统一走 `external_v1._age_from_iso()`，它按被减数的形状对齐减数。拿 naive 的 now 直接减 aware 的串会 `TypeError` 打死整条 `/state`，而失败的恰好是"任务在跑、正想看它活着没"那一刻——状态端点因此必须把这三种形状都当可达输入。
 
+### 唤醒读数（`GET /sessions/{id}/wake`）
+
+回答"**我没在听的时候发生了什么**"：`tasks`（本会话在该时刻之后落终态的任务，逐条 `task_id`/`status`/`finished_at`）与 `replies`（持久 outbox 账本里属于该会话、`event=reply.final` 且还没销账的记录，带 `outbox_id`/`ts`/`text` 全文），外加 `replies_pending`/`tasks_truncated`/`next_since`。
+
+它存在的理由是既有投递面的两个空洞：事件 hub 是进程内存里的 512 环、`turn.completed`/`turn.failed` 根本不入账本，而回复的取法只听活 SSE——桥或 stdio 网关断开半小时再回来，没有任何一口能回答"我那两个任务结清了没"。这里**不新增写侧记录**：终态行落在 `tasks` 表（落库后不再变），未消费回复落在 outbox 账本（销账才消失），两边都是既有 durable 事实，所以唤醒不依赖"当时有没有人在听"。`since` 是调用方自己的游标（用上一次返回的 `next_since`），空串＝没有历史，回最近 `WAKE_TASKS_MAX` 条终态，首次调用因此能 bootstrap。
+
+机器**不**往出站账本写"任务已结束"这类文本：pump 会把账本记录当渠道消息投给用户（`g3ku/qq_official/bridge.py`），替模型决定推送是禁区。所以唤醒是**读侧**能力（含 MCP 侧的 `negi_wait_wake` 长轮询），服务端不另开推通道。`tasks` 只认 `status IN ('success','failed','canceled','cancelled')`——`paused` 不算结束，它归任务命令。
+
+水位线只认一种形状：`_wake_wall_second()` 把每个候选时间归一成**本机墙钟到秒**的裸串（账本 `ts` 是 naive 带微秒，`tasks.updated_at` 带 `+08:00` 且只到秒，活体读到的就是这两种），比较全程用字符串、不做减法，下界取**包含式** `>=`。混形状直接比会出事：同秒内 `+`（0x2B）排在 `.`（0x2E）前，aware 串被判成"更早"，于是严格大于的游标能把边界那一秒的终态**永久漏掉**。归一 + 包含之后不再丢，但同一秒内的多条行在时间上分不开"报过"与"没报过"——网关因此**按身份去重**：`task_id`/`outbox_id` 随游标存在 `wake-cursor.json`，游标推进到新的一秒就丢掉旧的去重集。只按时间判会把边界那一秒变成永久重报（游标停在 12:37:12，而 `12:37:12+08:00` 永远满足 `>=`），实盘真出现过"会话再也不出现 `woke:false`"。调用方把原始形状串当游标递回来也会被归一；归一不动就当"没有历史"，回最近一批而不是报错。
+
 ## 5. 事件流
 
 - 每会话一个 `SessionEventHub`（`g3ku/runtime/external_events.py`）：有界环形缓冲 + 单调 `seq` + 订阅扇出；事件形态 `{type, seq, ts, turn_id?, ...}`。会话键是 `(bridge_id, external_key)` 的确定性散列，所以**身份被注销时缓冲必须一起退役**（`drop_session_event_hub`）：同键日后重新注册会落回同一个路径与同一批文件名，留着旧缓冲就等于让新身份能 `Last-Event-ID: 0` 重放出上一世的回复。只清历史不退役缓冲——那条身份还在用。

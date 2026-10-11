@@ -97,6 +97,16 @@ class G3kuMcpClient:
         response.raise_for_status()
         return response.json()
 
+    async def wake(self, session_id: str, since: str = "") -> dict[str, Any]:
+        """新落终态的任务 + 还没被消费掉的回复（服务端从 durable 表算，不看有没有人听）。"""
+        response = await self._client.get(
+            f"/sessions/{session_id}/wake",
+            params={"since": str(since or "").strip()},
+            headers=self._headers(),
+        )
+        response.raise_for_status()
+        return response.json()
+
     async def get_turn(self, session_id: str, turn_id: str) -> dict[str, Any]:
         """Re-read one finished turn's stored reply by turn_id (durable, survives
         the caller's own context compaction)."""

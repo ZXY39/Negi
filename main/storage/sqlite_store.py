@@ -766,6 +766,25 @@ class SQLiteTaskStore:
             rows = self._fetchall('SELECT payload_json FROM tasks ORDER BY updated_at DESC')
         return [self._parse(row['payload_json'], TaskRecord) for row in rows]
 
+    def list_finished_tasks_for_session_since(
+        self, session_id: str, since_iso: str, *, limit: int = 20
+    ) -> list[dict[str, Any]]:
+        """某会话在 `since_iso` 之后落定终态的任务，只读三个平铺列。
+
+        唤醒读口的正身：终态行落库后就不再变，所以调用方断开半小时再问也拿得到——
+        不需要谁替它"记住"。`paused` 不在这个集合里（暂停的任务归任务命令，不是结束）。
+        边界取 `>=` 而不是 `>`：游标是墙钟到秒的串，而 `tasks.updated_at` 只存到秒，
+        严格大于会把"同一秒里晚一点落库的那条"永久漏掉。宁可边界那一秒重复报一次
+        （唤醒是幂等信息：某任务已终态），也不许丢。
+        """
+        rows = self._fetchall(
+            'SELECT task_id, status, updated_at FROM tasks '
+            "WHERE session_id = ? AND status IN ('success', 'failed', 'canceled', 'cancelled') "
+            'AND updated_at >= ? ORDER BY updated_at DESC LIMIT ?',
+            (str(session_id or '').strip(), str(since_iso or '').strip(), max(1, int(limit))),
+        )
+        return [dict(row) for row in rows]
+
     def list_task_summaries(self, session_id: str | None = None) -> list[dict[str, Any]]:
         """任务大厅列表窄读路径：json_extract 直取摘要字段，避免整包读取并
         pydantic 全量解析 payload_json（TaskRecord 含 user_request/final_output
@@ -3153,6 +3172,20 @@ class SQLiteTaskStore:
     def list_task_nodes(self, task_id: str) -> list[TaskProjectionNodeRecord]:
         rows = self._fetchall('SELECT payload_json FROM task_nodes WHERE task_id = ? ORDER BY sort_key ASC, node_id ASC', (task_id,))
         return [self._parse(row['payload_json'], TaskProjectionNodeRecord) for row in rows]
+
+    def list_task_node_activity(self, task_id: str, *, limit: int = 6) -> list[dict[str, Any]]:
+        """节点活性摘要：平铺列、`updated_at` 倒序、只取前 limit 行。
+
+        状态读数要的是"卡在哪一格"，不是整棵树的模型。`list_task_nodes` 会把每行
+        `payload_json` 建成 `TaskProjectionNodeRecord`（实盘单任务最多 1227 个节点，
+        p90 才 3 个），拿它当轮询读口就是 `count_task_nodes` 注释里那条纪律要防的事。
+        """
+        rows = self._fetchall(
+            'SELECT node_id, node_kind, status, depth, updated_at FROM task_nodes '
+            'WHERE task_id = ? ORDER BY updated_at DESC, node_id ASC LIMIT ?',
+            (str(task_id or '').strip(), max(1, int(limit))),
+        )
+        return [dict(row) for row in rows]
 
     def read_task_node_write_fingerprint(self, task_id: str) -> tuple[str, int]:
         """节点行的写戳指纹：`(最新 updated_at, 行数)`，只读两个平铺列。

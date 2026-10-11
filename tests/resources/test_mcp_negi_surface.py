@@ -1,17 +1,21 @@
-"""MCP 门面这轮改动的新用例（每条都在未改动的树上先红过）。
+"""MCP 门面这轮改动的新用例（修复自证的那几条都在未改动的树上先红过，
+两条车道守卫例外——它们在基线也绿，作用是拦住后来把投影改成逐字段重建）。
 
-覆盖四件事：
+覆盖的面：
 
 1. 会话列表 own 车道与 all 同形，且**读列表不再伪造 created_at**；
 2. 回合终态带机器读的 `task_ids`，并且派发句柄不被存在性闸门吃掉；
-3. `negi_chat(wait_seconds=0)` 提交即返回，不开 SSE 流；
-4. `negi_delete_conversation` 只收本命名空间短名；节点账本白名单留住分块读数。
+3. `negi_chat(wait_seconds=0)` 提交即返回，不开 SSE 流；`negi_delete_conversation` 只收本命名空间短名；
+4. 状态读数的时间与"在做什么/任务侧活动/节点这一格"，含三种 ISO 形状都能算；
+5. 长回复超阈值落盘（预览 + 路径），且落盘失败或路径可疑都吃不到调用方；
+6. 唤醒：终态任务与未消费回复一次取回、取回即销账、游标落盘跨进程活。
 """
 
 from __future__ import annotations
 
 from contextlib import asynccontextmanager
 from datetime import datetime
+from pathlib import Path
 from types import SimpleNamespace
 
 import httpx
@@ -494,3 +498,283 @@ def test_stage_projection_gives_status_counts_and_goal_prefix_only():
     # 账本读不到时是 None（"不知道"），不是空列表——空列表会被读成"这个会话没有阶段"
     assert summarize_external_session_stages(None) is None
     assert summarize_external_session_stages({"stages": []}) == []
+
+
+def test_task_activity_projects_node_cells_and_reports_the_real_count():
+    """任务级 `in_progress` 说不清卡在哪一格：一个任务是执行 + 验收节点的树。"""
+    from g3ku.runtime.api.external_v1 import _session_task_activity
+
+    service = SimpleNamespace(
+        list_unfinished_tasks_for_session=lambda key: [SimpleNamespace(task_id="task:a", status="in_progress")],
+        store=SimpleNamespace(
+            list_task_model_calls=lambda task_id, limit=None: [{"created_at": HOP_AT_WIRE_SHAPE}],
+            count_task_model_calls=lambda task_id: 5,
+        ),
+        list_task_node_activity=lambda task_id, *, limit=6: [
+            {"node_id": "node:exec", "node_kind": "execution", "status": "in_progress", "depth": 0, "updated_at": "2026-10-11T00:18:41+08:00"},
+            {"node_id": "node:acc", "node_kind": "acceptance", "status": "in_progress", "depth": 1, "updated_at": "2026-10-11T00:13:48+08:00"},
+        ][:limit],
+        count_task_nodes=lambda task_id: 9,
+    )
+    entry = _session_task_activity(SimpleNamespace(main_task_service=service), "ext:qoder:abc")["tasks"][0]
+    assert [item["node_kind"] for item in entry["nodes"]] == ["execution", "acceptance"]
+    assert entry["nodes"][0]["updated_at"] == "2026-10-11T00:18:41+08:00"
+    # 只投影前几项，但总数要说真话：9 个节点、给出 2 个。
+    assert entry["node_count"] == 9
+
+    # 读不到节点服务时整键省略——"没有节点"与"不知道有没有节点"是两回事。
+    plain = SimpleNamespace(
+        list_unfinished_tasks_for_session=lambda key: [SimpleNamespace(task_id="task:a", status="in_progress")],
+        store=None,
+    )
+    assert "nodes" not in _session_task_activity(SimpleNamespace(main_task_service=plain), "k")["tasks"][0]
+
+
+@pytest.mark.asyncio
+async def test_session_status_carries_the_node_cells_through_the_gateway_projection():
+    """网关是逐键重建回包的：`nodes`/`node_count` 必须活过这一层，否则服务端白投影。
+
+    这条在基线也绿（`tasks` 整表透传），它是车道守卫——谁把投影改成逐字段重建，
+    它就红。
+    """
+
+    class _StateClient:
+        async def resolve_session(self, conversation: str) -> str:
+            return "ext:probe:c1"
+
+        def last_seq(self, session_id: str) -> int:
+            return 7
+
+        async def session_state(self, session_id: str) -> dict:
+            return {
+                "running": True,
+                "tasks": [
+                    {
+                        "task_id": "task:a",
+                        "status": "in_progress",
+                        "model_calls": 3,
+                        "last_hop_at": HOP_AT_WIRE_SHAPE,
+                        "nodes": [
+                            {
+                                "node_id": "node:exec",
+                                "node_kind": "execution",
+                                "status": "in_progress",
+                                "depth": 0,
+                                "updated_at": "2026-10-11T00:18:41+08:00",
+                            }
+                        ],
+                        "node_count": 9,
+                    }
+                ],
+            }
+
+    result = await _call(build_mcp_server(_StateClient()), "negi_session_status", {"conversation": "c1"})
+    assert result["tasks"][0]["nodes"][0]["node_kind"] == "execution"
+    assert result["tasks"][0]["node_count"] == 9
+
+
+@pytest.mark.asyncio
+async def test_wake_projection_counts_only_reply_final_and_shows_truncation():
+    from g3ku.runtime.api.external_v1 import summarize_external_session_wake
+
+    rows = [
+        {"task_id": f"task:{index}", "status": "success", "updated_at": f"2026-10-11T00:00:0{index}+08:00"}
+        for index in range(1, 4)
+    ]
+    records = [
+        {"id": "obx-1", "ts": "2026-10-11T01:00:00", "event": "reply.final", "text": "答复一"},
+        {"id": "obx-2", "ts": "2026-10-11T01:30:00", "event": "outbound.created", "text": "主动推送不是答复"},
+        {"id": "obx-3", "ts": "2026-10-11T02:00:00", "event": "reply.final", "text": "答复二"},
+    ]
+    first = summarize_external_session_wake(
+        cursor="", task_rows=rows, pending_records=records, tasks_limit=2, replies_limit=10
+    )
+    assert [item["task_id"] for item in first["tasks"]] == ["task:1", "task:2"]
+    assert first["tasks_truncated"] is True
+    assert [item["outbox_id"] for item in first["replies"]] == ["obx-1", "obx-3"]
+    assert first["replies_pending"] == 2
+    assert first["next_since"] == "2026-10-11T02:00:00"
+
+    again = summarize_external_session_wake(cursor="2026-10-11T01:40:00", task_rows=[], pending_records=records)
+    assert [item["outbox_id"] for item in again["replies"]] == ["obx-3"]
+    assert again["next_since"] == "2026-10-11T02:00:00"
+
+
+def test_wake_watermark_is_one_shape_and_never_drops_the_boundary_second():
+    """活体的两本时间源形状不同：账本 `ts` 是 naive 带微秒，`tasks.updated_at` 带偏移且只到秒。
+
+    混形状做字符串比较时 `+` 排在 `.` 前，同秒内 aware 串被判成"更早"：严格大于的游标
+    会把边界那一秒的终态永久漏掉。归一化成墙钟到秒 + 包含式下界之后，同一秒宁可重复报。
+    """
+    from g3ku.runtime.api.external_v1 import _wake_wall_second, summarize_external_session_wake
+
+    task = {"task_id": "task:late", "status": "success", "updated_at": "2026-10-11T12:37:12+08:00"}
+    reply = {"id": "obx-1", "ts": "2026-10-11T12:37:12.500000", "event": "reply.final", "text": "答复"}
+    first = summarize_external_session_wake(cursor="", task_rows=[task], pending_records=[reply])
+    assert first["next_since"] == _wake_wall_second(task["updated_at"]) == "2026-10-11T12:37:12"
+    assert "+" not in first["next_since"] and "." not in first["next_since"].split("T")[1]
+
+    again = summarize_external_session_wake(
+        cursor=first["next_since"], task_rows=[task], pending_records=[reply]
+    )
+    assert [item["task_id"] for item in again["tasks"]] == ["task:late"]
+    assert [item["outbox_id"] for item in again["replies"]] == ["obx-1"]
+
+    assert _wake_wall_second("2026-10-11T12:37:12.500000") == "2026-10-11T12:37:12"
+    # aware 串按本机墙钟归一（别硬编码偏移：换时区就假了）。
+    local_aware = datetime(2026, 10, 11, 12, 37, 12, tzinfo=datetime.now().astimezone().tzinfo)
+    assert _wake_wall_second(local_aware.isoformat()) == "2026-10-11T12:37:12"
+    assert _wake_wall_second("") == ""
+    assert _wake_wall_second("明早再说") == ""
+
+
+def test_long_reply_spills_to_a_file_but_the_answer_always_arrives(tmp_path, monkeypatch):
+    monkeypatch.setenv("NEGI_GATEWAY_DIR", str(tmp_path))
+    from g3ku.mcp_gateway.local_store import spill_reply
+
+    body = "交付" * 5000
+    out = spill_reply("ext:probe:c1", "turn-9", body)
+    assert out["reply_spilled"] is True
+    assert out["reply_chars"] == len(body)
+    # 预览正好是前 600 字，尾巴上钉着真实路径与真实字数；回包比正文短得多。
+    assert out["reply"].startswith("交付" * 300)
+    assert out["reply"].endswith(f"（共 {len(body)} 字，全文：{out['reply_file']}）")
+    assert len(out["reply"]) < len(body) // 10
+    assert Path(out["reply_file"]).read_text(encoding="utf-8") == body
+    # 没命中阈值的形状一字不改：不带落盘键，不碰磁盘。
+    assert spill_reply("ext:probe:c1", "turn-8", "一行答复") == {"reply": "一行答复"}
+
+
+def test_spill_cannot_escape_its_root_and_a_write_failure_keeps_the_text(tmp_path, monkeypatch):
+    monkeypatch.setenv("NEGI_GATEWAY_DIR", str(tmp_path))
+    from g3ku.mcp_gateway.local_store import spill_reply
+
+    hostile = spill_reply("../../evil", "..", "字" * 9000)
+    landed = Path(hostile["reply_file"]).resolve()
+    assert str(landed).startswith(str(tmp_path.resolve()))
+    assert ".." not in str(landed.relative_to(tmp_path.resolve()))
+
+    def _boom(self, *args, **kwargs):
+        raise OSError("disk full")
+
+    monkeypatch.setattr(Path, "write_text", _boom)
+    failed = spill_reply("ext:probe:c1", "turn-9", "字" * 9000)
+    assert failed["reply"] == "字" * 9000
+    assert "reply_spill_error" in failed
+
+
+@pytest.mark.asyncio
+async def test_get_reply_spills_a_long_answer_through_the_tool(tmp_path, monkeypatch):
+    monkeypatch.setenv("NEGI_GATEWAY_DIR", str(tmp_path))
+    long_text = "细" * 9000
+    events = [
+        {
+            "seq": 1,
+            "ts": "2026-10-11T00:00:02",
+            "type": "reply.final",
+            "turn_id": "mine",
+            "transcript_turn_id": "abc123",
+            "text": long_text,
+        }
+    ]
+    result = await _call(
+        build_mcp_server(_StreamClient(events)),
+        "negi_get_reply",
+        {"conversation": "c1", "wait_seconds": 5, "turn_id": "mine"},
+    )
+    assert result["reply_spilled"] is True and result["reply_chars"] == 9000
+    assert len(result["reply"]) < 900
+    assert Path(result["reply_file"]).read_text(encoding="utf-8") == long_text
+
+
+class _WakeClient:
+    def __init__(self, pages: list[dict]) -> None:
+        self._pages = list(pages)
+        self.since_seen: list[str] = []
+        self.acked: list[tuple[str, str]] = []
+
+    async def resolve_session(self, conversation: str) -> str:
+        return "ext:probe:c1"
+
+    async def wake(self, session_id: str, since: str = "") -> dict:
+        self.since_seen.append(str(since or ""))
+        return self._pages.pop(0) if self._pages else {"tasks": [], "replies": []}
+
+    async def ack_reply(self, session_id: str, outbox_id: str) -> None:
+        self.acked.append((session_id, outbox_id))
+
+
+@pytest.mark.asyncio
+async def test_wait_wake_acks_replies_and_persists_the_cursor(tmp_path, monkeypatch):
+    monkeypatch.setenv("NEGI_GATEWAY_DIR", str(tmp_path))
+    client = _WakeClient(
+        [
+            {
+                "tasks": [{"task_id": "task:a", "status": "success", "finished_at": "2026-10-11T01:00:00+08:00"}],
+                "replies": [{"outbox_id": "obx-1", "ts": "2026-10-11T01:10:00", "text": "答复"}],
+                "replies_pending": 1,
+                "tasks_truncated": False,
+                "next_since": "2026-10-11T01:10:00",
+            },
+            {"tasks": [], "replies": [], "replies_pending": 0, "next_since": "2026-10-11T01:10:00"},
+        ]
+    )
+    server = build_mcp_server(client)
+    first = await _call(server, "negi_wait_wake", {"conversation": "c1", "wait_seconds": 0})
+    assert first["woke"] is True and first["reason"] == "task_terminal"
+    assert first["replies"][0]["reply"] == "答复" and "text" not in first["replies"][0]
+    assert client.acked == [("ext:probe:c1", "obx-1")]
+    assert client.since_seen == [""]
+
+    second = await _call(server, "negi_wait_wake", {"conversation": "c1", "wait_seconds": 0})
+    assert second["woke"] is False and second["reason"] == "empty"
+    # 游标只在真唤醒时推进，且落盘：网关换一个新进程也不会从头再报一遍。
+    assert client.since_seen == ["", "2026-10-11T01:10:00"]
+    fresh = _WakeClient([{"tasks": [], "replies": []}])
+    await _call(build_mcp_server(fresh), "negi_wait_wake", {"conversation": "c1", "wait_seconds": 0})
+    assert fresh.since_seen == ["2026-10-11T01:10:00"]
+
+
+@pytest.mark.asyncio
+async def test_wait_wake_repeats_nothing_but_still_reports_a_later_row_in_the_same_second(tmp_path, monkeypatch):
+    """下界是包含式的（终态行只存到秒，严格大于会吞掉同秒内更晚落库的那条），
+
+    所以"这条报过没有"只能按身份判。只按时间判的旧写法会把边界那一秒永久重报：
+    游标停在 12:37:12，而 `12:37:12+08:00` 永远 `>=` 它，会话再也不会出现 `woke:false`。
+    """
+    monkeypatch.setenv("NEGI_GATEWAY_DIR", str(tmp_path))
+    late = {"task_id": "task:late", "status": "success", "finished_at": "2026-10-11T12:37:12+08:00"}
+    same_second = {
+        "tasks": [late],
+        "replies": [],
+        "replies_pending": 0,
+        "tasks_truncated": False,
+        "next_since": "2026-10-11T12:37:12",
+    }
+    client = _WakeClient(
+        [
+            dict(same_second),
+            dict(same_second),
+            {**same_second, "tasks": [late, {"task_id": "task:newer", "status": "failed", "finished_at": "2026-10-11T12:37:59+08:00"}], "next_since": "2026-10-11T12:37:59"},
+        ]
+    )
+    server = build_mcp_server(client)
+    first = await _call(server, "negi_wait_wake", {"conversation": "c1", "wait_seconds": 0})
+    assert [item["task_id"] for item in first["tasks"]] == ["task:late"]
+    again = await _call(server, "negi_wait_wake", {"conversation": "c1", "wait_seconds": 0})
+    assert again["woke"] is False and again["tasks"] == [] and again["reason"] == "empty"
+    later = await _call(server, "negi_wait_wake", {"conversation": "c1", "wait_seconds": 0})
+    assert [item["task_id"] for item in later["tasks"]] == ["task:newer"], later
+    assert later["reason"] == "task_terminal"
+
+
+def test_wake_state_roundtrip_and_reads_the_bare_cursor_it_once_wrote(tmp_path, monkeypatch):
+    monkeypatch.setenv("NEGI_GATEWAY_DIR", str(tmp_path))
+    from g3ku.mcp_gateway.local_store import read_wake_state, write_wake_state
+
+    assert read_wake_state("ext:probe:c1") == ("", [])
+    write_wake_state("ext:probe:c1", "2026-10-11T12:37:12", ["task:late"])
+    assert read_wake_state("ext:probe:c1") == ("2026-10-11T12:37:12", ["task:late"])
+    # 本地缓存会读到它自己以前写过的形状；旧形状只是没有去重集，不是坏数据。
+    (tmp_path / "wake-cursor.json").write_text('{"ext:probe:c1": "2026-10-11T09:00:00"}', encoding="utf-8")
+    assert read_wake_state("ext:probe:c1") == ("2026-10-11T09:00:00", [])
