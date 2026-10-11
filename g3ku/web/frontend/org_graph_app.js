@@ -1288,11 +1288,11 @@ function traceOutputMissingError() {
     return error;
 }
 
-function traceOutputWindowCacheKey(outputRef = "", view = "canonical", startLine = 1) {
+function traceOutputWindowCacheKey(outputRef = "", view = "canonical", startLine = null, endLine = null) {
     const normalizedRef = normalizeTraceOutputRef(outputRef);
     if (!normalizedRef) return "";
     const normalizedView = String(view || "canonical").trim().toLowerCase() || "canonical";
-    return `${normalizedView}:${normalizedRef}:${Number(startLine || 1)}`;
+    return `${normalizedView}:${normalizedRef}:${startLine ?? ""}-${endLine ?? ""}`;
 }
 
 function traceContentTextUrl(outputRef = "") {
@@ -1304,12 +1304,15 @@ function traceContentTextUrl(outputRef = "") {
 // 输出正文按「服务端一屏」取，不再整份搬到浏览器：/api/content/read 会把 artifact
 // 全文（实测单行 7,024,971 字符的节点详情）一次性交给页面，decode + indent 重排 +
 // 一次性 DOM 注入三步都在主线程，整页就是这样冻住的。
-async function getTraceOutputWindowByRef(outputRef = "", { view = "canonical", startLine = 1 } = {}) {
-    const emptyWindow = { text: "", startLine: 1, endLine: 0, truncated: false };
+// 首屏必须一个行参数都不传：navigation.open() 只要看到 start_line 就走区间分支，
+// 缺 end_line 时把 finish 收成 start —— 只回一行。续读才带两端，跨度用服务端
+// 首屏自己给出的行数，省得前端复刻 MAX_OPEN_LINES。
+async function getTraceOutputWindowByRef(outputRef = "", { view = "canonical", startLine = null, endLine = null } = {}) {
+    const emptyWindow = { text: "", startLine: 1, endLine: 0, lineCount: 0, truncated: false };
     const normalizedRef = normalizeTraceOutputRef(outputRef);
     if (!normalizedRef) return emptyWindow;
     ensureTraceOutputContentState();
-    const cacheKey = traceOutputWindowCacheKey(normalizedRef, view, startLine);
+    const cacheKey = traceOutputWindowCacheKey(normalizedRef, view, startLine, endLine);
     if (!cacheKey) return emptyWindow;
     if (Object.prototype.hasOwnProperty.call(S.traceOutputContentByKey, cacheKey)) {
         const cached = S.traceOutputContentByKey[cacheKey];
@@ -1324,12 +1327,13 @@ async function getTraceOutputWindowByRef(outputRef = "", { view = "canonical", s
     const request = (async () => {
         try {
             const payload = typeof ApiClient?.openContent === "function"
-                ? await ApiClient.openContent({ ref: normalizedRef, view, startLine: Number(startLine || 1) })
+                ? await ApiClient.openContent({ ref: normalizedRef, view, startLine, endLine })
                 : null;
             const chunk = {
                 text: extractTraceOutputContentText(payload),
                 startLine: Number(payload?.start_line ?? startLine ?? 1),
                 endLine: Number(payload?.end_line || 0),
+                lineCount: Number(payload?.line_count || 0),
                 truncated: !!payload?.truncated,
             };
             S.traceOutputContentByKey[cacheKey] = chunk;
@@ -1349,20 +1353,25 @@ async function getTraceOutputWindowByRef(outputRef = "", { view = "canonical", s
     }
 }
 
-async function getTraceOutputContentByRef(outputRef = "", { view = "canonical", startLine = 1 } = {}) {
-    const chunk = await getTraceOutputWindowByRef(outputRef, { view, startLine });
+async function getTraceOutputContentByRef(outputRef = "", { view = "canonical" } = {}) {
+    const chunk = await getTraceOutputWindowByRef(outputRef, { view });
     return String(chunk?.text || "");
 }
 
-// 继续加载只在"行窗真的往前推进过"时可用：单行巨型 artifact 的 end_line 恒等于
-// start_line，再要一次只会拿回同一段。
+// 继续加载的判据是"文件还有下文"，不是服务端的 truncated：后者只说"这一段没给全"，
+// 正好发满一屏时它是 false，而 420 行里这才读到第 168 行。单行巨型 artifact 的
+// end_line 恒等于 start_line（行窗推不动，再要一次只会拿回同一段），所以按推进过
+// 才算数。
 function setTraceOutputMoreState(element, chunk = null) {
     if (!(element instanceof HTMLElement) || typeof element.closest !== "function") return;
     const field = element.closest(".task-trace-field");
     const button = field?.querySelector?.(".task-trace-more");
     if (!(button instanceof HTMLElement)) return;
-    const advanced = Number(chunk?.endLine || 0) > Number(chunk?.startLine || 1);
-    button.hidden = !(chunk?.truncated && advanced);
+    const endLine = Number(chunk?.endLine || 0);
+    const lineCount = Number(chunk?.lineCount || 0);
+    const advanced = endLine > Number(chunk?.startLine || 1);
+    const hasMore = lineCount ? endLine < lineCount : !!chunk?.truncated;
+    button.hidden = !(advanced && hasMore);
     if (button.hidden) button.disabled = false;
 }
 
@@ -1373,10 +1382,13 @@ async function loadMoreTraceOutputBlock(button) {
     if (!(block instanceof HTMLElement)) return;
     const outputRef = normalizeTraceOutputRef(block.dataset.outputRef || "");
     const startLine = Number(block.dataset.outputEndLine || 0) + 1;
-    if (!outputRef || startLine < 2) return;
+    // 跨度取上一屏自己给出的行宽（首屏 endLine-startLine+1），不复制服务端的 200。
+    const span = Math.max(1, Number(block.dataset.outputWindowSpan || 0));
+    if (!outputRef || startLine < 2 || !span) return;
+    const endLine = startLine + span - 1;
     button.disabled = true;
     try {
-        const chunk = await getTraceOutputWindowByRef(outputRef, { startLine });
+        const chunk = await getTraceOutputWindowByRef(outputRef, { startLine, endLine });
         const body = String(block.textContent || "").replace(TRACE_DISPLAY_OMITTED_PATTERN, "");
         const next = `${body}${body ? "\n" : ""}${String(chunk?.text || "").replace(/^\n+/, "")}`;
         setTextContentPreservingScroll(block, next);
@@ -1408,11 +1420,13 @@ async function ensureTraceOutputCodeBlockContent(
     element.dataset.outputHydrating = "true";
     setTextContentPreservingScroll(element, loadingText);
     try {
-        const chunk = await getTraceOutputWindowByRef(outputRef, { view, startLine: 1 });
+        const chunk = await getTraceOutputWindowByRef(outputRef, { view });
         const nextText = String(chunk?.text || previewText || emptyText).trim() || emptyText;
         setTextContentPreservingScroll(element, nextText);
         element.dataset.outputHydrated = "true";
         element.dataset.outputEndLine = String(chunk?.endLine || "");
+        element.dataset.outputWindowSpan = String(Math.max(0,
+            Number(chunk?.endLine || 0) - Number(chunk?.startLine || 1) + 1));
         setTraceOutputMoreState(element, chunk);
         return nextText;
     } catch (error) {

@@ -2561,6 +2561,13 @@ function traceStatusLabel(status) {
     }[String(status || "")] || "信息");
 }
 
+function capTraceFieldBody(text) {
+    // 封顶函数住在 app.js（那里是取数车道），这里按存在性调用：单独加载
+    // task_view 的 harness 与 legacy 页面都还在渲染这些字段。
+    const value = String(text ?? "");
+    return typeof capTraceDisplayText === "function" ? capTraceDisplayText(value) : value;
+}
+
 function renderTraceLabelRow(label, { copyable = false, fullViewRef = "", loadMore = false } = {}) {
     // 字段标题行:需要时在标题旁挂一个复制按钮,点击复制下方代码块内容。
     const copyTitle = `复制 ${String(label || "").trim()}`.trim();
@@ -2584,7 +2591,7 @@ function renderTraceLabelRow(label, { copyable = false, fullViewRef = "", loadMo
 }
 
 function renderTraceField(label, value, emptyText = "暂无内容", { decodeEscapes = false, copyable = false, argumentsLookupId = "" } = {}) {
-    const text = readableText(value, { decodeEscapes, emptyText });
+    const text = capTraceFieldBody(readableText(value, { decodeEscapes, emptyText }));
     const lookupId = String(argumentsLookupId || "").trim();
     const lookupAttr = lookupId ? ` data-arguments-lookup="${esc(lookupId)}"` : "";
     return `
@@ -2596,7 +2603,7 @@ function renderTraceField(label, value, emptyText = "暂无内容", { decodeEsca
 }
 
 function renderTraceOutputField(label, value, outputRef = "", emptyText = "暂无内容", { decodeEscapes = false, copyable = false } = {}) {
-    const text = readableText(value, { decodeEscapes, emptyText });
+    const text = capTraceFieldBody(readableText(value, { decodeEscapes, emptyText }));
     const normalizedRef = String(outputRef || "").trim();
     const refAttrs = normalizedRef
         ? ` data-output-ref="${esc(normalizedRef)}" data-empty-text="${esc(String(emptyText || ""))}"`
@@ -2655,15 +2662,22 @@ function flashTraceCopyButton(button, succeeded = true) {
 
 async function resolveTraceFieldCopyText(code) {
     if (!(code instanceof HTMLElement)) return "";
-    // 懒加载输出块:未水合时先拉取完整内容,保证复制出来的是全量结果而非预览片段。
+    // 入参：显示面按一屏封顶过，DOM 里那句已经不是全量，复制一律按 call_id
+    // 回取账本原文（同一份缓存，不再打网络）；取不到才退回屏幕上的文本。
+    const lookupId = String(code.dataset.argumentsLookup || "").trim();
+    if (lookupId && typeof getTraceArgumentsContentByCallId === "function") {
+        try {
+            const fullText = String(await getTraceArgumentsContentByCallId(lookupId) || "").trim();
+            if (fullText) return fullText;
+        } catch {
+            // 终态缺失（404）等：留屏幕上那份提示可复制。
+        }
+    }
+    // 懒加载输出块：复制走的是这条车道已经取到的那一屏正文（服务端行窗），
+    // 整份不在这里搬——要全文用「查看完整」，它把渲染交给浏览器自己的新标签页。
     if (code.dataset.outputRef && code.dataset.outputHydrated !== "true"
         && typeof ensureTraceOutputCodeBlockContent === "function") {
         return String(await ensureTraceOutputCodeBlockContent(code) || "");
-    }
-    // 入参同理：复制出来的应该是全量入参，不是那条 48 字提示。
-    if (code.dataset.argumentsLookup && code.dataset.outputHydrated !== "true"
-        && typeof ensureTraceArgumentsCodeBlockContent === "function") {
-        return String(await ensureTraceArgumentsCodeBlockContent(code) || "");
     }
     return String(code.textContent || "");
 }

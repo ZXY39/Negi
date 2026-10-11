@@ -107,6 +107,7 @@ function loadApp({ getCeoToolArguments }) {
             normalizeExecutionStageTrace,
             renderExecutionRoundToolPanel,
             ensureTraceArgumentsCodeBlockContent,
+            resolveTraceFieldCopyText,
             hydrateTraceOutputBlocks,
         };`,
         context
@@ -197,6 +198,27 @@ test("点开工具面板时按 tool_call_id 回取全量入参，重绘只发一
     assert.doesNotMatch(element.textContent, /\.\.\.\)/);
     assert.equal(element.dataset.outputHydrated, "true");
     assert.match(text, /command/);
+});
+
+test("入参格屏幕上封顶，复制仍拿账本全量", async () => {
+    const full = `{"command":"${"y".repeat(20000)}"}`;
+    let calls = 0;
+    const { ensureTraceArgumentsCodeBlockContent, resolveTraceFieldCopyText } = loadApp({
+        getCeoToolArguments: async () => {
+            calls += 1;
+            return { ok: true, arguments_text: full };
+        },
+    });
+
+    const element = argsBlock("call-42");
+    await ensureTraceArgumentsCodeBlockContent(element);
+
+    // 一格不许把 MB 级正文整段交给浏览器排版。
+    assert.ok(element.textContent.length < full.length, `显示 ${element.textContent.length} 应小于全量 ${full.length}`);
+    assert.match(element.textContent, /查看完整/);
+    // 已经水合过的那一行也必须拿全量：封顶只属于显示面，不属于复制。
+    assert.equal(await resolveTraceFieldCopyText(element), full);
+    assert.equal(calls, 1);
 });
 
 test("账本里已经没有原文时退回提示并说明原因", async () => {

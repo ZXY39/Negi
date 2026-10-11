@@ -292,8 +292,8 @@ test("点开输出只向服务端要一屏，不再拿整份", async () => {
             calls.read += 1;
             return { content: "整份正文".repeat(4000) };
         },
-        openContent: async ({ ref, startLine }) => {
-            calls.open.push({ ref, startLine });
+        openContent: async ({ ref, startLine, endLine }) => {
+            calls.open.push({ ref, startLine, endLine });
             return { excerpt: "第一段正文", start_line: 1, end_line: 84, truncated: true };
         },
     });
@@ -302,25 +302,49 @@ test("点开输出只向服务端要一屏，不再拿整份", async () => {
     const text = await ensureTraceOutputCodeBlockContent(block);
 
     assert.equal(calls.read, 0);
-    assert.deepEqual(calls.open, [{ ref: ARTIFACT_REF, startLine: 1 }]);
+    // 首屏必须两个行参数都不传：navigation.open() 一见 start_line 就走区间分支，
+    // 缺 end_line 时把 finish 收成 start —— 只回一行。
+    assert.deepEqual(calls.open, [{ ref: ARTIFACT_REF, startLine: null, endLine: null }]);
     assert.equal(text, "第一段正文");
     assert.equal(block.dataset.outputEndLine, "84");
+    assert.equal(block.dataset.outputWindowSpan, "84");
     assert.equal(button.hidden, false);
 });
 
-test("继续加载接上下一段，取尽后按钮收起", async () => {
+test("继续加载按首屏那一屏的行宽接下一段", async () => {
+    const asked = [];
     const { ensureTraceOutputCodeBlockContent, loadMoreTraceOutputBlock } = loadApp({
-        openContent: async ({ startLine }) => (Number(startLine) === 1
-            ? { excerpt: "第一段", start_line: 1, end_line: 84, truncated: true }
-            : { excerpt: "第二段", start_line: 85, end_line: 120, truncated: false }),
+        openContent: async ({ startLine, endLine }) => {
+            asked.push({ startLine, endLine });
+            return startLine
+                ? { excerpt: "第二段", start_line: 85, end_line: 168, line_count: 420, truncated: false }
+                : { excerpt: "第一段", start_line: 1, end_line: 84, line_count: 420, truncated: true };
+        },
     });
 
     const { block, button } = outputField();
     await ensureTraceOutputCodeBlockContent(block);
     await loadMoreTraceOutputBlock(button);
 
+    // 跨度用服务端首屏自己给出的那 84 行，前端不复制 MAX_OPEN_LINES。
+    assert.deepEqual(asked[1], { startLine: 85, endLine: 168 });
     assert.equal(block.textContent, "第一段\n第二段");
-    assert.equal(block.dataset.outputEndLine, "120");
+    assert.equal(block.dataset.outputEndLine, "168");
+    // truncated=false 只说"这一屏发满了"，420 行才读到 168 行时按钮不许消失。
+    assert.equal(button.hidden, false);
+});
+
+test("读到 line_count 那一行才收起继续加载", async () => {
+    const { ensureTraceOutputCodeBlockContent, loadMoreTraceOutputBlock } = loadApp({
+        openContent: async ({ startLine }) => (startLine
+            ? { excerpt: "第二段", start_line: 85, end_line: 420, line_count: 420, truncated: false }
+            : { excerpt: "第一段", start_line: 1, end_line: 84, line_count: 420, truncated: true }),
+    });
+
+    const { block, button } = outputField();
+    await ensureTraceOutputCodeBlockContent(block);
+    await loadMoreTraceOutputBlock(button);
+
     assert.equal(button.hidden, true);
 });
 
