@@ -38,6 +38,7 @@
 | PATCH | `/sessions/{id}` | `{"title":"…"}` | `{ok, session_id, title}` | 400 `title_required`、404 |
 | DELETE | `/sessions/{id}` | — | `{ok, cleared, session_id}` | 404 |
 | GET | `/sessions/{id}/state` | — | `{ok, session_id, external_key, running, queued_follow_ups, inflight_turn_id, last_error}` | 404 |
+| GET | `/sessions/{id}/wake` | query `since`（上次返回的 `next_since`，空＝没有历史） | `{ok, session_id, since, tasks:[{task_id,status,finished_at}], replies:[{outbox_id,ts,text}], replies_pending, tasks_truncated, next_since}` — "我没在听的时候发生了什么"，读的是终态表与未销账账本 | 404 |
 | POST | `/sessions/{id}/messages` | `{"text?":"…","attachments?":[…],"sender?":{id,name},"metadata?":{}}` | `{ok, session_id, turn_id, status}` | 400 `message_required`/`attachments_must_be_list`、404、503 |
 | POST | `/turns/{turn_id}/pause` | — | `{ok, paused, turn_id, session_id}` | 404 `turn_not_found` |
 | POST | `/sessions/{id}/cancel` | — | `{ok, cancelled, session_id}` | 503 |

@@ -44,7 +44,7 @@ from g3ku.runtime.external_events import (
 )
 from g3ku.runtime.api.external_turns import get_external_turn_service
 from g3ku.runtime.ceo_catalog_offload import build_ceo_session_catalog_async
-from g3ku.runtime.external_outbox import ack_outbound_message, load_pending_outbound
+from g3ku.runtime.external_outbox import REPLY_EVENT, ack_outbound_message, load_pending_outbound
 from g3ku.runtime.external_sessions import (
     ExternalSessionEntry,
     get_external_session_registry,
@@ -356,6 +356,11 @@ LATEST_MODEL_TEXT_MAX_CHARS = 300
 RECENT_TOOL_NAMES_MAX = 5
 STAGES_RECENT_MAX = 3
 STAGE_GOAL_MAX_CHARS = 120
+# 实测每任务节点数 p50=2、p90=3（1227 那份是基准副本），6 项已盖住常规树的两层；
+# 超出时 `node_count` 报真实条数，截断可见。
+TASK_NODE_PROJECTION_MAX = 6
+WAKE_TASKS_MAX = 20
+WAKE_REPLIES_MAX = 10
 
 
 def summarize_external_session_activity(events: list[dict[str, Any]]) -> dict[str, Any]:
@@ -457,14 +462,24 @@ def _session_task_activity(agent: Any, session_key: str) -> dict[str, Any] | Non
                 model_calls = int(store.count_task_model_calls(task_id) or 0)
             except Exception:
                 model_calls = 0
-        entries.append(
-            {
-                "task_id": task_id,
-                "status": str(getattr(task, "status", "") or "").strip(),
-                "model_calls": model_calls,
-                "last_hop_at": hop_at,
-            }
-        )
+        entry: dict[str, Any] = {
+            "task_id": task_id,
+            "status": str(getattr(task, "status", "") or "").strip(),
+            "model_calls": model_calls,
+            "last_hop_at": hop_at,
+        }
+        # 任务级 `in_progress` 说不清"卡在哪一格"：一个任务是执行节点 + 验收节点的树
+        # （实测 p50=2、p90=3 个节点）。遗留样本 task:37a79544ee37 至今 in_progress，
+        # 只有节点级时间能看出执行节点 00:18:41 停、验收节点 00:13:48 也停。
+        nodes_reader = getattr(service, "list_task_node_activity", None)
+        if callable(nodes_reader):
+            try:
+                entry["nodes"] = list(nodes_reader(task_id, limit=TASK_NODE_PROJECTION_MAX) or [])
+            except Exception:
+                entry["nodes"] = []
+            counter = getattr(service, "count_task_nodes", None)
+            entry["node_count"] = int(counter(task_id) or 0) if callable(counter) else len(entry["nodes"])
+        entries.append(entry)
     return {"tasks_running": len(entries), "tasks": entries}
 
 
@@ -569,6 +584,101 @@ async def get_external_session_state(
 
 def _task_hop_ceiling(activity: dict[str, Any]) -> str:
     return max([str(item.get("last_hop_at") or "") for item in list(activity.get("tasks") or [])] or [""])
+
+
+def summarize_external_session_wake(
+    *,
+    cursor: str,
+    task_rows: list[dict[str, Any]],
+    pending_records: list[dict[str, Any]],
+    tasks_limit: int = WAKE_TASKS_MAX,
+    replies_limit: int = WAKE_REPLIES_MAX,
+) -> dict[str, Any]:
+    """把两份既有 durable 事实合成一条唤醒读数：终态任务行 + 未销账的回复记录。
+
+    只算不读，是为了让"哪条算终态、哪条算未消费、截断怎么写"这一套判据可测——
+    真读口在 `tasks` 表与 outbox 账本里。回复只认 `event == reply.final`：账本里
+    还有主动推送那一种记录，它是发给渠道用户的消息，不是回合的答案。
+    """
+    tasks = [
+        {
+            "task_id": str(item.get("task_id") or ""),
+            "status": str(item.get("status") or ""),
+            "finished_at": str(item.get("updated_at") or ""),
+        }
+        for item in list(task_rows or [])[:tasks_limit]
+        if str(item.get("task_id") or "")
+    ]
+    owned = [
+        record
+        for record in list(pending_records or [])
+        if str(record.get("event") or "") == REPLY_EVENT and str(record.get("text") or "")
+    ]
+    if cursor:
+        owned = [record for record in owned if str(record.get("ts") or "") > cursor]
+    replies = [
+        {
+            "outbox_id": str(record.get("id") or ""),
+            "ts": str(record.get("ts") or ""),
+            "text": str(record.get("text") or ""),
+        }
+        for record in owned[:replies_limit]
+    ]
+    stamps = [item["finished_at"] for item in tasks] + [item["ts"] for item in replies]
+    return {
+        "tasks": tasks,
+        # 终态按时间倒序取前 `tasks_limit` 条，撞上上限时最旧的那些没进来——
+        # 截断必须可见，调用方才知道"这不是全部"。
+        "tasks_truncated": len(list(task_rows or [])) > len(tasks),
+        "replies": replies,
+        "replies_pending": len(owned),
+        "next_since": max([stamp for stamp in stamps if stamp] or [str(cursor or "")]),
+    }
+
+
+@router.get("/sessions/{session_id}/wake")
+async def get_external_session_wake(
+    session_id: str,
+    since: str = Query(""),
+    principal: ExternalApiPrincipal = Depends(require_external_api),
+):
+    """你不在的时候发生了什么：本会话新落终态的任务 + 还没被消费掉的回复。
+
+    存在的理由：事件 hub 是进程内存里的 512 环，`turn.completed`/`turn.failed` 不进
+    持久账本，而回复的取法只听活 SSE——调用方（stdio 网关、断线的桥）断开半小时再
+    回来，没有任何一口能回答"我那两个任务结清了没"。这里不新增写侧记录：终态行落在
+    `tasks` 表（落库后不再变），未消费回复落在持久 outbox 账本（销账才消失），两边
+    都是既有的 durable 事实，所以唤醒不依赖"当时有没有人在听"。
+
+    `since` 是调用方自己的游标（上一次返回的 `next_since`）；空串＝没有历史，回最近
+    `WAKE_TASKS_MAX` 条终态，首次调用因此也能 bootstrap。
+
+    机器**不**往出站账本写"任务已结束"这种文本：pump 会把账本记录当渠道消息投给
+    用户（`g3ku/qq_official/bridge.py`），替模型决定推送是禁区。
+    """
+    entry = _resolve_entry(session_id, principal)
+    cursor = str(since or "").strip()
+    agent = peek_global_agent()
+    task_service = getattr(agent, "main_task_service", None) if agent is not None else None
+    lister = getattr(task_service, "list_finished_tasks_for_session_since", None)
+    task_rows: list[dict[str, Any]] = []
+    if callable(lister):
+        try:
+            # 多取一条只为了知道"还有没有"——截断信号不能被 SQL 的 LIMIT 吃掉。
+            task_rows = list(lister(entry.session_key, cursor, limit=WAKE_TASKS_MAX + 1) or [])
+        except Exception:
+            task_rows = []
+    pending = [
+        record
+        for record in load_pending_outbound()
+        if str(record.get("session_key") or "") == entry.session_key
+    ]
+    return {
+        "ok": True,
+        "session_id": entry.session_key,
+        "since": cursor,
+        **summarize_external_session_wake(cursor=cursor, task_rows=task_rows, pending_records=pending),
+    }
 
 
 @router.get("/sessions/{session_id}/turns/{turn_id}")
