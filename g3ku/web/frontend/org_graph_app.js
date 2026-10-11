@@ -700,6 +700,7 @@ const U = {
     toastTitle: document.getElementById("app-toast-title"),
     toastText: document.getElementById("app-toast-text"),
     toastClose: document.getElementById("app-toast-close"),
+    toastIcon: document.getElementById("app-toast-icon"),
     taskLoadNotice: document.getElementById("task-load-notice"),
     taskLoadNoticeText: document.getElementById("task-load-notice-text"),
     confirmBackdrop: document.getElementById("confirm-backdrop"),
@@ -10449,7 +10450,7 @@ function closeToast() {
     if (U.toastClose) U.toastClose.hidden = false;
 }
 
-function showToast({ title = "操作成功", text = "修改已生效", kind = "success", durationMs = 3000, persistent = false } = {}) {
+function showToast({ title = "操作成功", text = "修改已生效", kind = "success", durationMs = 3000, persistent = false, spin = false } = {}) {
     if (!U.toast || !U.toastTitle || !U.toastText || !U.toastClose) return;
     clearToastTimers();
     const sticky = persistent || durationMs <= 0;
@@ -10457,7 +10458,9 @@ function showToast({ title = "操作成功", text = "修改已生效", kind = "s
     U.toastText.textContent = text;
     U.toast.hidden = false;
     U.toast.setAttribute("role", kind === "error" ? "alert" : "status");
-    U.toastClose.hidden = false;
+    // 进行中的 toast 是唯一进度信号，给一个关闭键等于让用户自己把它抹掉。
+    U.toastClose.hidden = !!spin;
+    if (U.toastIcon) U.toastIcon.hidden = !spin;
     if (!sticky) {
         S.toastState.timeoutId = window.setTimeout(closeToast, durationMs);
     }
@@ -16558,21 +16561,33 @@ async function loadMoreMemoryFailed() {
 async function runMemoryFailedAction(action, failedId) {
     const target = String(failedId || "").trim();
     if (!target || S.memoryFailedActionBusy) return;
+    const isRetry = action === "retry";
     S.memoryFailedActionBusy = `${action}:${target}`;
     renderMemoryView();
+    showToast({
+        title: isRetry ? "正在重新入队" : "正在删除待处理记忆",
+        text: "",
+        kind: "info",
+        durationMs: 0,
+        persistent: true,
+        spin: true,
+    });
     try {
-        if (action === "retry") {
+        if (isRetry) {
             await ApiClient.retryMemoryFailed(target, "manual-ui");
-            showToast({ title: "已重试", text: "失败记忆已重新入队尾，等待再次处理。", kind: "success" });
         } else {
             await ApiClient.discardMemoryFailed(target, "manual-ui");
-            showToast({ title: "已放弃", text: "该失败记忆已放弃，终态已记入已处理历史。", kind: "warn", durationMs: 4200 });
         }
         closeMemoryDetailPreview();
+        if (isRetry) {
+            showToast({ title: "已重试", text: "失败记忆已重新入队尾，等待再次处理。", kind: "success" });
+        } else {
+            showToast({ title: "删除成功", text: "", kind: "success" });
+        }
         await loadMemoryView({ force: true, quiet: true });
     } catch (error) {
         showToast({
-            title: action === "retry" ? "重试失败" : "放弃失败",
+            title: isRetry ? "重试失败" : "放弃失败",
             text: error?.message || "操作未成功，请稍后重试",
             kind: "error",
             durationMs: 5000,

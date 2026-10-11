@@ -735,9 +735,11 @@ test("区分线两端留白且文字居中，图标自绘旋转，长按 2 秒�
     );
     // 全局 prefers-reduced-motion 规则把所有 animation 打成 none；压缩环必须豁免，
     // 否则「进行中」图标在这类机器上就是静态的（用户报的正是这个）。
+    // 豁免名单是选择器列表（后来陆续并进了工具步图标与 toast 进行中弧），
+    // 所以::before 后面到 { 之间允许跟别的 selector。
     assert.match(
         CSS_CODE,
-        /@media \(prefers-reduced-motion: reduce\) \{\s*\.ceo-compression-divider-spinner::before\s*\{[^}]*!important/
+        /@media \(prefers-reduced-motion: reduce\) \{\s*\.ceo-compression-divider-spinner::before[^{]*\{[^}]*!important/
     );
     // 悬停只露出提示，不再提亮光晕；长按阈值 2 秒；渠道会话不再是拒绝理由。
     assert.equal(CSS_CODE.includes(".ceo-context-usage-brain:hover::after"), false);

@@ -5605,13 +5605,14 @@ textarea {
     background: currentColor;
 }
 
-/* 全局 prefers-reduced-motion 规则会把所有 animation 打成 none，这两处豁免：
-   压缩环与回合/工具步的旋转图标都是「还在跑」的唯一状态信号，冻住就等于没有反馈
-   （正是图标看起来静态的原因）。选择器比全局的 `*` 更具体，两边都带 !important
-   时按特异性取胜。旋转是 0→360deg 的 linear infinite，首尾同角，循环无缝。 */
+/* 全局 prefers-reduced-motion 规则会把所有 animation 打成 none，这几处豁免：
+   压缩环、回合/工具步的旋转图标、toast 的进行中弧都是「还在跑」的唯一状态信号，
+   冻住就等于没有反馈（正是图标看起来静态的原因）。选择器比全局的 `*` 更具体，
+   两边都带 !important 时按特异性取胜。旋转是 0→360deg 的 linear infinite，首尾同角，循环无缝。 */
 @media (prefers-reduced-motion: reduce) {
     .ceo-compression-divider-spinner::before,
-    .interaction-step-icon.is-spinning svg {
+    .interaction-step-icon.is-spinning svg,
+    .app-toast-icon {
         animation: interaction-step-icon-spin 0.9s linear infinite !important;
     }
 }
@@ -7539,6 +7540,19 @@ textarea {
     align-items: center;
     justify-content: space-between;
     gap: 8px;
+}
+
+/* 进行中态的旋转弧：只画一段实心弧、不画整圈底轨——带底轨时动画被系统设置冻住
+   会读成「一个静止的圆」，见 .ceo-compression-divider-spinner 上那条豁免的注释。 */
+.app-toast-icon {
+    flex-shrink: 0;
+    width: 14px;
+    height: 14px;
+    color: var(--brand-primary);
+    border: 2px solid transparent;
+    border-top-color: currentColor;
+    border-radius: 999px;
+    animation: interaction-step-icon-spin 0.9s linear infinite;
 }
 
 .app-toast-copy {

@@ -419,6 +419,38 @@ def test_memory_failed_panel_is_hidden_by_default_and_gated_by_mutations_flag() 
     assert "_memory_admin_mutations_enabled()" in retry_head_route
 
 
+def test_memory_failed_action_reports_progress_with_a_spinning_toast() -> None:
+    app_js = (REPO_ROOT / "g3ku/web/frontend/org_graph_app.js").read_text(encoding="utf-8")
+    css = (REPO_ROOT / "g3ku/web/frontend/org_graph.css").read_text(encoding="utf-8")
+    api_js = (REPO_ROOT / "g3ku/web/frontend/api_client.js").read_text(encoding="utf-8")
+
+    action_body = _fragment(
+        app_js,
+        "async function runMemoryFailedAction(action, failedId)",
+        "function requestMemoryFailedDiscard(failedId)",
+    )
+    # 进行中 toast 必须排在 await 之前发出去，否则这段时间界面就是没有反馈的冻结。
+    assert action_body.index("正在删除待处理记忆") < action_body.index("await ApiClient.discardMemoryFailed(")
+    assert action_body.index("正在删除待处理记忆") < action_body.index("await ApiClient.retryMemoryFailed(")
+    assert "spin: true" in action_body
+    assert 'title: "删除成功"' in action_body
+    assert 'title: isRetry ? "重试失败" : "放弃失败"' in action_body
+
+    # 旋转弧要真的转：这台机器开着 prefers-reduced-motion，全局规则会把 animation 打成 none，
+    # 冻住的弧读起来就是一个静止的圆，等于没有进度反馈。
+    assert ".app-toast-icon {" in css
+    assert re.search(
+        r"@media \(prefers-reduced-motion: reduce\) \{[^}]*\.app-toast-icon[^}]*!important",
+        css,
+    )
+
+    # 这两次变更会把整本台账全量重写，客户端不能比服务端先放弃再报「失败」。
+    discard_call = _fragment(api_js, "static async discardMemoryFailed(", "\n    }")
+    retry_call = _fragment(api_js, "static async retryMemoryFailed(", "\n    }")
+    assert "timeoutMs: 30000" in discard_call
+    assert "timeoutMs: 30000" in retry_call
+
+
 def test_memory_browser_edit_mode_adds_guarded_bulk_operations_with_confirm_dialogs() -> None:
     html_source = (REPO_ROOT / "g3ku/web/frontend/org_graph.html").read_text(encoding="utf-8")
     app_js = (REPO_ROOT / "g3ku/web/frontend/org_graph_app.js").read_text(encoding="utf-8")
