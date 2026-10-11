@@ -733,3 +733,48 @@ async def test_wait_wake_acks_replies_and_persists_the_cursor(tmp_path, monkeypa
     fresh = _WakeClient([{"tasks": [], "replies": []}])
     await _call(build_mcp_server(fresh), "negi_wait_wake", {"conversation": "c1", "wait_seconds": 0})
     assert fresh.since_seen == ["2026-10-11T01:10:00"]
+
+
+@pytest.mark.asyncio
+async def test_wait_wake_repeats_nothing_but_still_reports_a_later_row_in_the_same_second(tmp_path, monkeypatch):
+    """下界是包含式的（终态行只存到秒，严格大于会吞掉同秒内更晚落库的那条），
+
+    所以"这条报过没有"只能按身份判。只按时间判的旧写法会把边界那一秒永久重报：
+    游标停在 12:37:12，而 `12:37:12+08:00` 永远 `>=` 它，会话再也不会出现 `woke:false`。
+    """
+    monkeypatch.setenv("NEGI_GATEWAY_DIR", str(tmp_path))
+    late = {"task_id": "task:late", "status": "success", "finished_at": "2026-10-11T12:37:12+08:00"}
+    same_second = {
+        "tasks": [late],
+        "replies": [],
+        "replies_pending": 0,
+        "tasks_truncated": False,
+        "next_since": "2026-10-11T12:37:12",
+    }
+    client = _WakeClient(
+        [
+            dict(same_second),
+            dict(same_second),
+            {**same_second, "tasks": [late, {"task_id": "task:newer", "status": "failed", "finished_at": "2026-10-11T12:37:59+08:00"}], "next_since": "2026-10-11T12:37:59"},
+        ]
+    )
+    server = build_mcp_server(client)
+    first = await _call(server, "negi_wait_wake", {"conversation": "c1", "wait_seconds": 0})
+    assert [item["task_id"] for item in first["tasks"]] == ["task:late"]
+    again = await _call(server, "negi_wait_wake", {"conversation": "c1", "wait_seconds": 0})
+    assert again["woke"] is False and again["tasks"] == [] and again["reason"] == "empty"
+    later = await _call(server, "negi_wait_wake", {"conversation": "c1", "wait_seconds": 0})
+    assert [item["task_id"] for item in later["tasks"]] == ["task:newer"], later
+    assert later["reason"] == "task_terminal"
+
+
+def test_wake_state_roundtrip_and_reads_the_bare_cursor_it_once_wrote(tmp_path, monkeypatch):
+    monkeypatch.setenv("NEGI_GATEWAY_DIR", str(tmp_path))
+    from g3ku.mcp_gateway.local_store import read_wake_state, write_wake_state
+
+    assert read_wake_state("ext:probe:c1") == ("", [])
+    write_wake_state("ext:probe:c1", "2026-10-11T12:37:12", ["task:late"])
+    assert read_wake_state("ext:probe:c1") == ("2026-10-11T12:37:12", ["task:late"])
+    # 本地缓存会读到它自己以前写过的形状；旧形状只是没有去重集，不是坏数据。
+    (tmp_path / "wake-cursor.json").write_text('{"ext:probe:c1": "2026-10-11T09:00:00"}', encoding="utf-8")
+    assert read_wake_state("ext:probe:c1") == ("2026-10-11T09:00:00", [])

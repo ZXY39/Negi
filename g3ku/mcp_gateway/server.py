@@ -19,9 +19,9 @@ from mcp.server.fastmcp import Context, FastMCP
 
 from g3ku.mcp_gateway.client import G3kuMcpClient
 from g3ku.mcp_gateway.local_store import (
-    read_wake_cursor,
+    read_wake_state,
     spill_reply,
-    write_wake_cursor,
+    write_wake_state,
 )
 
 MIN_WAIT_SECONDS = 5
@@ -318,7 +318,9 @@ def build_mcp_server(client: G3kuMcpClient, *, name: str = "negi") -> FastMCP:
             "`ack_failed` and may appear again. Long replies are spilled to a file like "
             "everywhere else. `wait_seconds=0` looks once and returns; larger values re-check "
             "every 2 seconds until something wakes it. The per-conversation cursor is kept by "
-            "the gateway — you don't pass `since`."
+            "the gateway — you don't pass `since`. Nothing already reported at the cursor "
+            "second comes back a second time (deduped by `task_id`/`outbox_id`), so an idle "
+            "conversation answers `woke:false` instead of re-announcing the same terminal row."
         )
     )
     async def negi_wait_wake(conversation: str, wait_seconds: int = 120) -> dict[str, Any]:
@@ -326,17 +328,26 @@ def build_mcp_server(client: G3kuMcpClient, *, name: str = "negi") -> FastMCP:
 
         async def _body() -> dict[str, Any]:
             session_id = await client.resolve_session(conversation)
-            since = read_wake_cursor(session_id)
+            since, reported = read_wake_state(session_id)
+            seen = set(reported)
             deadline = time.monotonic() + budget
             payload: dict[str, Any] = {}
+            tasks: list[dict[str, Any]] = []
+            woken: list[dict[str, Any]] = []
             while True:
                 payload = await client.wake(session_id, since)
-                if payload.get("tasks") or payload.get("replies") or time.monotonic() >= deadline:
+                # 服务端下界是包含式的（终态行只存到秒，严格大于会吞掉同秒内更晚落库的那条），
+                # 所以"已经报过"必须按身份在这里摘掉——否则同一秒那条终态会被永久重报。
+                tasks = [item for item in list(payload.get("tasks") or []) if str(item.get("task_id") or "") not in seen]
+                fresh_replies = [
+                    item
+                    for item in list(payload.get("replies") or [])
+                    if str(item.get("outbox_id") or "") not in seen
+                ]
+                if tasks or fresh_replies or time.monotonic() >= deadline:
                     break
                 await asyncio.sleep(min(WAKE_POLL_INTERVAL_SECONDS, max(0.0, deadline - time.monotonic())))
-            tasks = list(payload.get("tasks") or [])
-            woken: list[dict[str, Any]] = []
-            for item in payload.get("replies") or []:
+            for item in fresh_replies:
                 outbox_id = str(item.get("outbox_id") or "")
                 entry = {
                     "outbox_id": outbox_id,
@@ -353,7 +364,11 @@ def build_mcp_server(client: G3kuMcpClient, *, name: str = "negi") -> FastMCP:
             woke = bool(tasks or woken)
             next_since = str(payload.get("next_since") or "") or since
             if woke:
-                write_wake_cursor(session_id, next_since)
+                # 游标推进到新的一秒就丢掉旧的去重集；还在同一秒内则把报过的身份累加进去。
+                carry = reported if next_since == since else []
+                identities = carry + [str(item.get("task_id") or "") for item in tasks]
+                identities += [str(item.get("outbox_id") or "") for item in woken]
+                write_wake_state(session_id, next_since, [i for i in identities if i])
             reason = ""
             if tasks:
                 reason = "task_terminal"
