@@ -71,7 +71,7 @@ def _archive_body(
         {"role": "system", "content": "基础提示"},
         {
             "role": "assistant",
-            "content": "[G3KU_TOKEN_COMPACT_V2]\n"
+            "content": "[TOKEN_COMPACT_V2]\n"
             + json.dumps(payload, ensure_ascii=False, sort_keys=True)
             + "\n\n摘要正文",
         },
@@ -141,7 +141,7 @@ def test_warm_assembly_carries_no_compact_blocks_after_archive() -> None:
     ledger = _ledger(stages)
     seed = [
         {"role": "system", "content": "基础提示"},
-        {"role": "assistant", "content": "[G3KU_TOKEN_COMPACT_V2]\n{\"kind\":\"frontdoor_token_compaction_llm\"}\n\n摘要正文"},
+        {"role": "assistant", "content": "[TOKEN_COMPACT_V2]\n{\"kind\":\"frontdoor_token_compaction_llm\"}\n\n摘要正文"},
         {"role": "user", "content": "刚压缩了，结构是什么"},
         {"role": "assistant", "content": "直接回答"},
     ]
@@ -370,7 +370,7 @@ def test_token_compression_backfills_selected_refs_and_archives_ledger(monkeypat
     summary = next(
         str(item.get("content") or "")
         for item in result.request_messages
-        if str(item.get("content") or "").startswith("[G3KU_TOKEN_COMPACT_V2]")
+        if str(item.get("content") or "").startswith("[TOKEN_COMPACT_V2]")
     )
     assert "## 一、身份" in summary
     # 模型只回编号，正文由运行时逐字回填；死链 (#2) 与越界编号 (#9) 都不出现。
@@ -429,7 +429,7 @@ def test_token_compression_without_selection_still_archives(monkeypatch, tmp_pat
     summary = next(
         str(item.get("content") or "")
         for item in result.request_messages
-        if str(item.get("content") or "").startswith("[G3KU_TOKEN_COMPACT_V2]")
+        if str(item.get("content") or "").startswith("[TOKEN_COMPACT_V2]")
     )
     # 模型不选引用不是错误：不出现索引小节，收口与归档照常，绝不回退成逐轮全量渲染。
     assert STAGE_REF_INDEX_HEADING not in summary
@@ -465,7 +465,7 @@ def test_token_compression_skips_archive_when_export_fails(monkeypatch, tmp_path
     summary = next(
         str(item.get("content") or "")
         for item in result.request_messages
-        if str(item.get("content") or "").startswith("[G3KU_TOKEN_COMPACT_V2]")
+        if str(item.get("content") or "").startswith("[TOKEN_COMPACT_V2]")
     )
     assert STAGE_ARCHIVE_HEADING not in summary
     assert json.loads(summary.splitlines()[1]).get("stage_archive") is None
@@ -589,7 +589,7 @@ def test_stage_state_snapshot_carries_the_mark_across_turns() -> None:
     都要重新过一次 `_frontdoor_stage_state_snapshot`，白名单里没有 `context_visible` 就等于
     逐轮抹掉标记。实盘形态：水位线摘要确实落进了基线，`frontdoor_canonical_context` 标了
     425/430 条，而 `frontdoor_stage_state` 0/432 条——渲染读的是后者，于是 432 个
-    `[G3KU_STAGE_COMPACT_V1]` 块照旧每轮发出，模型如实报告"压缩了但阶段还在"。"""
+    `[STAGE_COMPACT_V1]` 块照旧每轮发出，模型如实报告"压缩了但阶段还在"。"""
     archived = [stage["stage_id"] for stage in (_stage(index) for index in range(1, 6))]
     result = {
         "frontdoor_canonical_context": _ledger([_stage(index) for index in range(1, 6)]),
@@ -672,7 +672,7 @@ def test_evidence_index_is_only_a_section_inside_the_summary_block(monkeypatch, 
         if STAGE_REF_INDEX_HEADING in str((item or {}).get("content") or "")
     ]
     assert len(carriers) == 1, f"证据索引只应出现在摘要块内一次，实际 {len(carriers)} 条消息"
-    assert carriers[0].startswith("[G3KU_TOKEN_COMPACT_V2]")
+    assert carriers[0].startswith("[TOKEN_COMPACT_V2]")
     assert "- stage 1 |" in carriers[0], "索引小节被 strip 后没回填 = 这条不变量测不到东西"
 
 
@@ -685,7 +685,7 @@ def test_archive_manifest_bytes_do_not_grow_with_the_swallowed_set(monkeypatch, 
         summary = next(
             str((item or {}).get("content") or "")
             for item in result.request_messages
-            if str((item or {}).get("content") or "").startswith("[G3KU_TOKEN_COMPACT_V2]")
+            if str((item or {}).get("content") or "").startswith("[TOKEN_COMPACT_V2]")
         )
         return json.loads(summary.splitlines()[1])["stage_archive"]
 

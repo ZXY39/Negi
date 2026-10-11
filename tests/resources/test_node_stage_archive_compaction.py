@@ -324,7 +324,7 @@ def test_node_rewrite_carries_archive_into_compact_block(tmp_path: Path) -> None
     block = next(
         str(item.get('content') or '')
         for item in rewritten
-        if str(item.get('content') or '').startswith('[G3KU_TOKEN_COMPACT_V2]')
+        if str(item.get('content') or '').startswith('[TOKEN_COMPACT_V2]')
     )
     assert STAGE_ARCHIVE_HEADING in block
     assert json.loads(block.split('\n', 2)[1])['stage_archive']['stage_count'] == 6

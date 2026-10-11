@@ -181,7 +181,7 @@ def _patch_compression_runner(monkeypatch, runner, *, applied: bool, context_win
     async def _fake_compress(**kwargs):
         calls["compression_request_messages"] = list(kwargs["request_messages"])
         return FrontdoorTokenPreflightResult(
-            request_messages=[{"role": "assistant", "content": "[G3KU_TOKEN_COMPACT_V2]\n摘要"}],
+            request_messages=[{"role": "assistant", "content": "[TOKEN_COMPACT_V2]\n摘要"}],
             final_request_tokens=9_000,
             history_shrink_reason="token_compression",
             diagnostics={
@@ -235,7 +235,7 @@ def test_compress_session_context_rewrites_durable_baseline(monkeypatch) -> None
     # 手动压缩没有新消息：预检按空输入重建基线。
     assert calls["user_input"] == {"content": "", "metadata": {}}
     # 摘要结果写回基线，并且工件带上手写压缩的泳道标记。
-    assert calls["persisted_messages"] == [{"role": "assistant", "content": "[G3KU_TOKEN_COMPACT_V2]\n摘要"}]
+    assert calls["persisted_messages"] == [{"role": "assistant", "content": "[TOKEN_COMPACT_V2]\n摘要"}]
     assert calls["persisted_lane"] == "manual_context_compression"
     # shrink 原因必须随工件一起落，工件自己就说得清这次缩短是谁做的。
     assert calls["persisted_shrink_reason"] == "token_compression"
@@ -266,7 +266,7 @@ def test_compress_session_context_refuses_to_overwrite_an_advanced_baseline(monk
     async def _summariser(**kwargs):
         session._frontdoor_baseline_revision = 42
         return FrontdoorTokenPreflightResult(
-            request_messages=[{"role": "assistant", "content": "[G3KU_TOKEN_COMPACT_V2]\n摘要"}],
+            request_messages=[{"role": "assistant", "content": "[TOKEN_COMPACT_V2]\n摘要"}],
             final_request_tokens=9_000,
             history_shrink_reason="token_compression",
             diagnostics={"applied": True, "compression_mode": "llm"},

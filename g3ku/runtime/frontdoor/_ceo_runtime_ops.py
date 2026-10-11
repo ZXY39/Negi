@@ -69,8 +69,9 @@ from g3ku.runtime.stage_prompt_compaction import (
     ECHO_STRIP_ENABLED,
     STAGE_ARCHIVE_HEADING,
     STAGE_CLOSURE_INACTIVE_NOTES,
-    STAGE_RAW_PREFIX,
+    STAGE_RAW_PREFIXES,
     STAGE_REF_SELECTION_RULE,
+    TOKEN_COMPACT_V2_PREFIX,
     build_stage_archive_document,
     closing_stage_target,
     compact_stage_prompt_messages_in_place,
@@ -239,8 +240,8 @@ _TOOL_CONTRACT_ECHO_REPAIR_MESSAGE = (
     'user-facing answer, or use the structured tool-calling interface when a tool is required.'
 )
 _STAGE_BLOCK_ECHO_REPAIR_MESSAGE = (
-    'The previous response repeated an internal stage-compaction block '
-    '([G3KU_STAGE_*]). Do not output, summarize, or quote those blocks. '
+    'The previous response repeated an internal stage-compaction block. '
+    'Do not output, summarize, or quote those blocks. '
     'To open, advance, or close a stage call the `submit_next_stage` tool. '
     'Otherwise reply to the user in natural language.'
 )
@@ -2102,7 +2103,7 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
                     identity = cls._frontdoor_stage_content_identity(stage)
                     if identity:
                         identities.add(identity)
-        body_raw_stage_indexes = stage_block_indexes(body_messages, prefixes=(STAGE_RAW_PREFIX,))
+        body_raw_stage_indexes = stage_block_indexes(body_messages, prefixes=STAGE_RAW_PREFIXES)
         body_call_ids = stage_message_call_ids(body_messages)
         hidden = 0
         for store in usable:
@@ -2396,7 +2397,7 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
             compacted_block = {
                 "role": "assistant",
                 "content": (
-                    "[G3KU_TOKEN_COMPACT_V2]\n"
+                    f"{TOKEN_COMPACT_V2_PREFIX}\n"
                     f"{json.dumps(compacted_payload, ensure_ascii=False, sort_keys=True)}\n\n"
                     f"{compressed_text}"
                 ).strip(),
@@ -3125,7 +3126,7 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
             if str(item or "").strip()
         ]
         prior_membership = set(prior)
-        # 唯一的重新提交点：这一跳正文已被 `[G3KU_TOKEN_COMPACT_V2]` 整段重写（内联压缩），
+        # 唯一的重新提交点：这一跳正文已被 `[TOKEN_COMPACT_V2]` 整段重写（内联压缩），
         # 或手动压缩车道刚落完基线（它不经过 preflight，所以靠 recommit_boundary 显式接住）。
         # 可复用前缀反正已经断在这里，重印参数表不额外破缓存。
         at_recommit_boundary = bool(recommit_boundary) or str(prior_history_shrink_reason or "").strip() == "token_compression"

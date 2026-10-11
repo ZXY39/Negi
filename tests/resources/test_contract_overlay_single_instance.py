@@ -206,7 +206,7 @@ def test_adopt_seed_derives_delta_when_projection_diverges_mid_body() -> None:
     stable_records = [
         {"role": "system", "content": "sys"},
         {"role": "user", "content": "prompt"},
-        {"role": "system", "content": "[G3KU_STAGE_COMPACT_V1]\n{}"},
+        {"role": "system", "content": "[STAGE_COMPACT_V1]\n{}"},
         {"role": "assistant", "content": "assistant-2"},
         {"role": "tool", "tool_call_id": "call-2", "name": "exec", "content": "latest-result"},
         notice,

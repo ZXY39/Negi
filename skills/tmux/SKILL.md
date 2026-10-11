@@ -5,10 +5,10 @@
 ## 快速开始 (隔离的 socket, exec 工具)
 
 ```bash
-SOCKET_DIR="${G3KU_TMUX_SOCKET_DIR:-${TMPDIR:-/tmp}/g3ku-tmux-sockets}"
+SOCKET_DIR="${TMUX_SOCKET_DIR:-${TMPDIR:-/tmp}/agent-tmux-sockets}"
 mkdir -p "$SOCKET_DIR"
-SOCKET="$SOCKET_DIR/g3ku.sock"
-SESSION=g3ku-python
+SOCKET="$SOCKET_DIR/agent.sock"
+SESSION=agent-python
 
 tmux -S "$SOCKET" new -d -s "$SESSION" -n shell
 tmux -S "$SOCKET" send-keys -t "$SESSION":0.0 -- 'PYTHON_BASIC_REPL=1 python3 -q' Enter
@@ -25,8 +25,8 @@ tmux -S "$SOCKET" capture-pane -p -J -t "$SESSION":0.0 -S -200
 
 ## Socket 约定
 
-- 使用 `G3KU_TMUX_SOCKET_DIR` 环境变量。
-- 默认 socket 路径：`"$G3KU_TMUX_SOCKET_DIR/g3ku.sock"`。
+- 使用 `TMUX_SOCKET_DIR` 环境变量。
+- 默认 socket 路径：`"$TMUX_SOCKET_DIR/agent.sock"`。
 
 ## 指定面板 (Pane) 和命名
 
@@ -37,7 +37,7 @@ tmux -S "$SOCKET" capture-pane -p -J -t "$SESSION":0.0 -S -200
 ## 查找会话 (Session)
 
 - 列出你 socket 上的会话：`{baseDir}/scripts/find-sessions.sh -S "$SOCKET"`。
-- 扫描所有 socket：`{baseDir}/scripts/find-sessions.sh --all` (使用 `G3KU_TMUX_SOCKET_DIR`)。
+- 扫描所有 socket：`{baseDir}/scripts/find-sessions.sh --all` (使用 `TMUX_SOCKET_DIR`)。
 
 ## 安全地发送输入
 

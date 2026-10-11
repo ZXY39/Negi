@@ -3253,7 +3253,7 @@ def test_prepare_messages_keeps_active_stage_and_evicts_only_the_named_stage() -
     compact_blocks = [
         content
         for content in rendered_contents
-        if content.startswith("[G3KU_STAGE_COMPACT_V1]")
+        if content.startswith("[STAGE_COMPACT_V1]")
     ]
     assert len(compact_blocks) == 1
     compact_payload = json.loads(compact_blocks[0].split("\n", 1)[1])
@@ -5476,7 +5476,7 @@ def test_node_token_compaction_keeps_append_notice_tail_before_compact_block() -
 
     contents = [str(item.get("content") or "") for item in rewritten]
     notice_index = next(index for index, content in enumerate(contents) if content.startswith(APPEND_NOTICE_TAIL_PREFIX))
-    compact_index = next(index for index, content in enumerate(contents) if content.startswith("[G3KU_TOKEN_COMPACT_V2]"))
+    compact_index = next(index for index, content in enumerate(contents) if content.startswith("[TOKEN_COMPACT_V2]"))
 
     assert rewritten[0]["role"] == "system"
     assert rewritten[1]["role"] == "user"
@@ -5534,7 +5534,7 @@ def test_node_token_compaction_hoists_deep_raw_notice_windows_out_of_compressibl
     raw_index = next(index for index, content in enumerate(contents) if "keep raw" in content)
     compact_index = next(
         index for index, content in enumerate(contents)
-        if content.startswith("[G3KU_TOKEN_COMPACT_V2]")
+        if content.startswith("[TOKEN_COMPACT_V2]")
     )
     # 捞出的 raw notice 在压缩块之前原样保留；已消费汇总随历史一起被压缩吸收。
     assert raw_index < compact_index
@@ -5638,7 +5638,7 @@ def test_node_token_compaction_tail_boundary_aligns_tool_call_pairs() -> None:
     compact_index = next(
         index
         for index, item in enumerate(rewritten)
-        if str(item.get("content") or "").startswith("[G3KU_TOKEN_COMPACT_V2]")
+        if str(item.get("content") or "").startswith("[TOKEN_COMPACT_V2]")
     )
     tail = rewritten[compact_index + 1 :]
     tail_call_ids = [str(tc.get("id")) for item in tail for tc in list(item.get("tool_calls") or [])]
@@ -7891,7 +7891,7 @@ async def test_node_send_preflight_does_not_compress_below_threshold(
     assert result.status == "success"
     assert len(calls) == 1
     rendered = "\n".join(str(item.get("content") or "") for item in calls[0])
-    assert "[G3KU_TOKEN_COMPACT_V2]" not in rendered
+    assert "[TOKEN_COMPACT_V2]" not in rendered
 
     assert isinstance(observed_frame.get("token_preflight_diagnostics"), dict)
     assert observed_frame.get("history_shrink_reason") in {"", None}
@@ -7958,7 +7958,7 @@ async def test_node_send_preflight_triggers_compression_at_effective_threshold(
         rendered = "\n".join(
             str(item.get("content") or "") for item in request_messages if isinstance(item, dict)
         )
-        return 18000 if "[G3KU_TOKEN_COMPACT_V2]" in rendered else 24320
+        return 18000 if "[TOKEN_COMPACT_V2]" in rendered else 24320
 
     monkeypatch.setattr(
         react_loop_module.runtime_send_token_preflight,
@@ -8029,7 +8029,7 @@ async def test_node_send_preflight_triggers_compression_at_effective_threshold(
     assert len(calls) == 1
     assert len(helper_calls) == 1
     rendered = "\n".join(str(item.get("content") or "") for item in calls[0])
-    assert "[G3KU_TOKEN_COMPACT_V2]" in rendered
+    assert "[TOKEN_COMPACT_V2]" in rendered
     assert "针对任务目标整理的压缩摘要。" in rendered
     helper_rendered = "\n".join(str(item.get("content") or "") for item in helper_calls[0])
     assert "任务目标" in helper_rendered
@@ -8057,7 +8057,7 @@ async def test_node_send_preflight_token_compression_recommits_pinned_provider_b
 ) -> None:
     """token 压缩是节点清单的唯一重新提交点。
 
-    这一跳正文已被 `[G3KU_TOKEN_COMPACT_V2]` 全量重写，可复用前缀反正断在这里，所以按
+    这一跳正文已被 `[TOKEN_COMPACT_V2]` 全量重写，可复用前缀反正断在这里，所以按
     角色钉住的清单在此重取一次；旧行为（退回上一跳的窄清单）会让钉住的清单永远没有更新
     机会，已废弃。
     """
@@ -8092,7 +8092,7 @@ async def test_node_send_preflight_token_compression_recommits_pinned_provider_b
         rendered = "\n".join(
             str(item.get("content") or "") for item in request_messages if isinstance(item, dict)
         )
-        return 18000 if "[G3KU_TOKEN_COMPACT_V2]" in rendered else 24320
+        return 18000 if "[TOKEN_COMPACT_V2]" in rendered else 24320
 
     monkeypatch.setattr(
         react_loop_module.runtime_send_token_preflight,
@@ -8236,7 +8236,7 @@ async def test_node_send_preflight_fails_when_post_compression_overflows(
         rendered = "\n".join(
             str(item.get("content") or "") for item in request_messages if isinstance(item, dict)
         )
-        return 33000 if "[G3KU_TOKEN_COMPACT_V2]" in rendered else 24320
+        return 33000 if "[TOKEN_COMPACT_V2]" in rendered else 24320
 
     monkeypatch.setattr(
         react_loop_module.runtime_send_token_preflight,
@@ -8311,7 +8311,7 @@ async def test_node_preflight_uses_previous_effective_input_tokens_when_preview_
         rendered = "\n".join(
             str(item.get("content") or "") for item in request_messages if isinstance(item, dict)
         )
-        return 11000 if "[G3KU_TOKEN_COMPACT_V2]" in rendered else 12840
+        return 11000 if "[TOKEN_COMPACT_V2]" in rendered else 12840
 
     monkeypatch.setattr(
         react_loop_module.runtime_send_token_preflight,
@@ -8432,7 +8432,7 @@ async def test_node_preflight_uses_previous_effective_input_tokens_when_preview_
     assert result.status == "success"
     assert len(calls) == 1
     rendered = "\n".join(str(item.get("content") or "") for item in calls[0])
-    assert "[G3KU_TOKEN_COMPACT_V2]" in rendered
+    assert "[TOKEN_COMPACT_V2]" in rendered
 
     diagnostics = observed_frame.get("token_preflight_diagnostics")
     assert isinstance(diagnostics, dict)
@@ -8483,7 +8483,7 @@ async def test_node_preflight_attempts_compression_before_failing_when_pre_compa
         rendered = "\n".join(
             str(item.get("content") or "") for item in request_messages if isinstance(item, dict)
         )
-        if "[G3KU_TOKEN_COMPACT_V2]" in rendered:
+        if "[TOKEN_COMPACT_V2]" in rendered:
             return 25110
         if len(request_messages) > 6 or "【上下文压缩指令】" in rendered:
             # 整请求与单发压缩指令都按超窗读：分块判据看的正是"单发压缩请求自身是否超窗"。
@@ -8666,7 +8666,7 @@ async def test_node_preflight_falls_back_to_preview_when_request_is_not_append_o
     assert result.status == "success"
     assert len(calls) == 1
     rendered = "\n".join(str(item.get("content") or "") for item in calls[0])
-    assert "[G3KU_TOKEN_COMPACT_V2]" not in rendered
+    assert "[TOKEN_COMPACT_V2]" not in rendered
 
     diagnostics = observed_frame.get("token_preflight_diagnostics")
     assert isinstance(diagnostics, dict)

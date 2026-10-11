@@ -635,7 +635,7 @@ async def test_graph_call_model_runs_llm_token_compression_before_main_send(
 
     def _estimate(**kwargs):
         rendered = "\n".join(str(item.get("content") or "") for item in list(kwargs.get("request_messages") or []))
-        return 26000 if "[G3KU_TOKEN_COMPACT_V2]" not in rendered else 18000
+        return 26000 if "[TOKEN_COMPACT_V2]" not in rendered else 18000
 
     monkeypatch.setattr(runner, "_estimate_frontdoor_send_total_tokens", _estimate, raising=False)
 
@@ -699,7 +699,7 @@ async def test_graph_call_model_runs_llm_token_compression_before_main_send(
     result = await runner._graph_call_model(state, runtime=runtime)
 
     assert len(captured_calls) == 2
-    assert "[G3KU_TOKEN_COMPACT_V2]" in "\n".join(str(item.get("content") or "") for item in captured_calls[1])
+    assert "[TOKEN_COMPACT_V2]" in "\n".join(str(item.get("content") or "") for item in captured_calls[1])
     assert result["frontdoor_history_shrink_reason"] == "token_compression"
 
 
@@ -732,13 +732,13 @@ async def test_graph_call_model_token_compression_keeps_prior_provider_tool_sche
 
     def _estimate(**kwargs):
         rendered = "\n".join(str(item.get("content") or "") for item in list(kwargs.get("request_messages") or []))
-        return 26000 if "[G3KU_TOKEN_COMPACT_V2]" not in rendered else 18000
+        return 26000 if "[TOKEN_COMPACT_V2]" not in rendered else 18000
 
     monkeypatch.setattr(runner, "_estimate_frontdoor_send_total_tokens", _estimate, raising=False)
 
     async def _call_model_with_tools(**kwargs):
         messages = list(kwargs.get("messages") or [])
-        if "[G3KU_TOKEN_COMPACT_V2]" not in "\n".join(str(item.get("content") or "") for item in messages):
+        if "[TOKEN_COMPACT_V2]" not in "\n".join(str(item.get("content") or "") for item in messages):
             return {"content": "[压缩后的较早历史摘要]"}
         return {"content": "主请求回复"}
 
@@ -834,7 +834,7 @@ async def test_graph_call_model_token_compression_keeps_repair_required_contract
 
     def _estimate(**kwargs):
         rendered = "\n".join(str(item.get("content") or "") for item in list(kwargs.get("request_messages") or []))
-        return 26000 if "[G3KU_TOKEN_COMPACT_V2]" not in rendered else 18000
+        return 26000 if "[TOKEN_COMPACT_V2]" not in rendered else 18000
 
     monkeypatch.setattr(runner, "_estimate_frontdoor_send_total_tokens", _estimate, raising=False)
 
@@ -921,7 +921,7 @@ async def test_graph_call_model_token_compression_keeps_repair_required_contract
     result = await runner._graph_call_model(state, runtime=runtime)
 
     assert len(captured_calls) == 2
-    assert "[G3KU_TOKEN_COMPACT_V2]" in "\n".join(str(item.get("content") or "") for item in captured_calls[1])
+    assert "[TOKEN_COMPACT_V2]" in "\n".join(str(item.get("content") or "") for item in captured_calls[1])
     assert any("repair_required_tools:" in str(item.get("content") or "") for item in captured_calls[1])
     assert any("repair_required_skills:" in str(item.get("content") or "") for item in captured_calls[1])
     assert result["frontdoor_history_shrink_reason"] == "token_compression"
@@ -948,7 +948,7 @@ async def test_graph_call_model_discards_late_compression_result_after_pause(
 
     def _estimate(**kwargs):
         rendered = "\n".join(str(item.get("content") or "") for item in list(kwargs.get("request_messages") or []))
-        return 26000 if "[G3KU_TOKEN_COMPACT_V2]" not in rendered else 18000
+        return 26000 if "[TOKEN_COMPACT_V2]" not in rendered else 18000
 
     monkeypatch.setattr(runner, "_estimate_frontdoor_send_total_tokens", _estimate, raising=False)
 

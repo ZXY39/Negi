@@ -142,7 +142,7 @@ def test_reconcile_stops_reinjecting_paused_message_after_completion():
     phantom_text = "告诉我图片内容"
     seed_template = [
         {"role": "system", "content": "# 定位"},
-        {"role": "assistant", "content": "[G3KU_TOKEN_COMPACT_V2] ..."},
+        {"role": "assistant", "content": "[TOKEN_COMPACT_V2] ..."},
         {"role": "assistant", "content": "好的，立刻停下。"},
     ]
 

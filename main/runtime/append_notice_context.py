@@ -5,7 +5,10 @@ from typing import Any
 
 APPEND_NOTICE_CONTEXT_KEY = 'append_notice_context'
 PENDING_APPEND_NOTICE_RECORDS_KEY = 'pending_append_notice_records'
-APPEND_NOTICE_TAIL_PREFIX = '[G3KU_APPEND_NOTICE_TAIL_V1]'
+APPEND_NOTICE_TAIL_PREFIX = '[NOTICE_TAIL_V1]'
+# 存量节点台账与已装配消息里仍是旧拼写：读侧两种都认，写侧只出新拼写。
+LEGACY_APPEND_NOTICE_TAIL_PREFIX = '[G3KU_APPEND_NOTICE_TAIL_V1]'
+APPEND_NOTICE_TAIL_PREFIXES = (APPEND_NOTICE_TAIL_PREFIX, LEGACY_APPEND_NOTICE_TAIL_PREFIX)
 
 # 定向通知转述族：系统把用户追加的通知转述给祖先/验收节点时生成的包装消息。
 # 新记录在通知行的 payload 里带 origin 标记；存量行用消息前缀兜底识别。
@@ -381,11 +384,22 @@ def score_append_notice_preservation(summary_text: str, records: list[dict[str, 
     }
 
 
+def append_notice_tail_prefix_match(message: Any) -> str:
+    """命中的块前缀，没命中回空串。
+
+    块形状固定是「前缀 + 换行 + JSON」，正文里提到前缀不算块；识别不挑角色，
+    因为存量块带 assistant 角色而新块按线体合同以 user 落地。
+    """
+    content = str((message or {}).get('content') or '').strip()
+    for prefix in APPEND_NOTICE_TAIL_PREFIXES:
+        if content.startswith(f'{prefix}\n'):
+            return prefix
+    return ''
+
+
 def is_append_notice_tail_message(message: Any) -> bool:
     """该消息是不是运行时装进去的通知块（代持段或未消费窗口）。"""
-    if str((message or {}).get('role') or '').strip().lower() != 'assistant':
-        return False
-    return str((message or {}).get('content') or '').strip().startswith(APPEND_NOTICE_TAIL_PREFIX)
+    return bool(append_notice_tail_prefix_match(message))
 
 
 def dedupe_append_notice_tail_messages(
@@ -400,7 +414,7 @@ def dedupe_append_notice_tail_messages(
     provider 前缀，代价比留几份重复块大。
     """
     seen = {
-        str(item.get('content') or '').strip()
+        _append_notice_block_key(item)
         for item in list(existing_messages or [])
         if is_append_notice_tail_message(item)
     }
@@ -409,13 +423,22 @@ def dedupe_append_notice_tail_messages(
     for item in list(candidates or []):
         if not isinstance(item, dict):
             continue
-        content = str(item.get('content') or '').strip()
-        if content in seen:
+        key = _append_notice_block_key(item)
+        if key in seen:
             dropped += 1
             continue
-        seen.add(content)
+        seen.add(key)
         kept.append(dict(item))
     return kept, dropped
+
+
+def _append_notice_block_key(message: Any) -> str:
+    """按去掉前缀后的正文比块：换拼写那一次跳转，存量旧块与新块同内容只算一份。"""
+    content = str((message or {}).get('content') or '').strip()
+    prefix = append_notice_tail_prefix_match(message)
+    if not prefix:
+        return content
+    return APPEND_NOTICE_TAIL_PREFIX + content[len(prefix):]
 
 
 def build_append_notice_tail_messages(
@@ -435,7 +458,7 @@ def build_append_notice_tail_messages(
         }
         messages.append(
             {
-                'role': 'assistant',
+                'role': 'user',
                 'content': f'{APPEND_NOTICE_TAIL_PREFIX}\n{json.dumps(payload, ensure_ascii=False, sort_keys=True)}',
             }
         )
@@ -452,7 +475,7 @@ def build_append_notice_tail_messages(
         }
         messages.append(
             {
-                'role': 'assistant',
+                'role': 'user',
                 'content': f'{APPEND_NOTICE_TAIL_PREFIX}\n{json.dumps(payload, ensure_ascii=False, sort_keys=True)}',
             }
         )
@@ -463,6 +486,9 @@ __all__ = [
     'APPEND_NOTICE_CONTEXT_KEY',
     'PENDING_APPEND_NOTICE_RECORDS_KEY',
     'APPEND_NOTICE_TAIL_PREFIX',
+    'APPEND_NOTICE_TAIL_PREFIXES',
+    'LEGACY_APPEND_NOTICE_TAIL_PREFIX',
+    'append_notice_tail_prefix_match',
     'NOTICE_ORIGIN_SYSTEM_RELAY',
     'SYSTEM_RELAY_NOTICE_PREFIXES',
     'is_system_relay_notice',

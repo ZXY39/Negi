@@ -110,7 +110,7 @@ async def test_frontdoor_compression_request_is_append_only_with_trailing_instru
     # 重写后请求体：系统前缀 + 压缩块 + 尾部 + 契约
     rewritten = result.request_messages
     assert str(rewritten[0].get("content") or "") == "SYSTEM"
-    assert "[G3KU_TOKEN_COMPACT_V2]" in str(rewritten[1].get("content") or "")
+    assert "[TOKEN_COMPACT_V2]" in str(rewritten[1].get("content") or "")
     assert [str(item.get("content") or "") for item in rewritten[2:6]] == [
         "recent-1",
         "recent-2",

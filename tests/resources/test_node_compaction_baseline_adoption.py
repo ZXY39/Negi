@@ -18,7 +18,7 @@ def _messages(count: int, *, prefix: str) -> list[dict[str, str]]:
 
 
 def test_compacted_hop_hands_the_projection_to_the_next_baseline() -> None:
-    body = [{'role': 'system', 'content': '执行节点'}, {'role': 'assistant', 'content': '[G3KU_TOKEN_COMPACT_V2]\n{}'}]
+    body = [{'role': 'system', 'content': '执行节点'}, {'role': 'assistant', 'content': '[TOKEN_COMPACT_V2]\n{}'}]
     assert ReActToolLoop._node_send_baseline_after_compaction(body, {'applied': True}) == body
     # 没压的跳不接管基线，append-only 链照旧
     assert ReActToolLoop._node_send_baseline_after_compaction(body, {'applied': False}) is None

@@ -3,15 +3,20 @@ from __future__ import annotations
 import json
 
 from g3ku.runtime.stage_prompt_compaction import (
+    LEGACY_STAGE_COMPACT_PREFIX,
+    LEGACY_STAGE_EXTERNALIZED_PREFIX,
+    LEGACY_STAGE_RAW_PREFIX,
     STAGE_COMPACT_PREFIX,
     STAGE_EXTERNALIZED_PREFIX,
     STAGE_RAW_PREFIX,
     compact_stage_prompt_messages_in_place,
+    completed_stage_blocks,
     is_stage_block_echo_text,
     is_stage_context_message,
     keep_stage_blocks_off_continuation_tail,
     prepare_stage_prompt_messages,
     retained_completed_stage_ids,
+    stage_block_indexes,
     stage_prompt_prefix,
     strip_stage_block_echo,
 )
@@ -646,7 +651,7 @@ def test_stage_blocks_render_with_user_role() -> None:
     # 角色对齐（事故 ext:qq-official:f8a8001865631301）：阶段块是运行时标注的
     # 已完成阶段摘要（压缩元数据、非对话内容），必须以 system 角色落地；
     # assistant 角色会向模型示范"你的回复长这样"，诱导其在续写位置仿造/回显
-    # 整块 JSON。[G3KU_TOKEN_COMPACT_V2] 例外保持 assistant（自然语言会话摘要，
+    # 整块 JSON。[TOKEN_COMPACT_V2] 例外保持 assistant（自然语言会话摘要，
     # 渲染在 _ceo_runtime_ops，不在本模块）。
     stage_state = {
         "active_stage_id": "",
@@ -1280,3 +1285,36 @@ def test_eviction_flag_round_trips_through_the_node_ledger_without_default_noise
     assert obj.stages[1].context_evicted is False
     assert obj.stages[0].model_dump(mode="json")["context_evicted"] is True
     assert "context_evicted" not in obj.stages[1].model_dump(mode="json")
+
+
+def test_legacy_prefixed_stage_blocks_are_still_recognized() -> None:
+    """存量块带旧拼写（durable baseline、continuity sidecar、续跑 seed、请求体账本）。
+
+    认不出来的后果不是"少一条信息"，而是同一阶段被重复渲染或整块被裁丢。
+    """
+    legacy_messages = [
+        {"role": "user", "content": f'{LEGACY_STAGE_COMPACT_PREFIX}\n{{"stage_index": 1}}'},
+        {"role": "system", "content": f'{LEGACY_STAGE_RAW_PREFIX}\n{{"stage_index": 2}}'},
+    ]
+
+    assert all(is_stage_context_message(item) for item in legacy_messages)
+    assert stage_block_indexes(legacy_messages) == {1, 2}
+    assert is_stage_block_echo_text(f'{LEGACY_STAGE_EXTERNALIZED_PREFIX}\n{{"stage_index": 3}}') is True
+    assert strip_stage_block_echo(
+        f'可见回复 {LEGACY_STAGE_COMPACT_PREFIX}\n{{"stage_index": 1}}'
+    ) == "可见回复"
+
+    rendered = completed_stage_blocks(
+        {
+            "stages": [
+                {
+                    "stage_id": "s1",
+                    "stage_index": 1,
+                    "status": "completed",
+                    "stage_goal": "目标",
+                    "completed_stage_summary": "摘要",
+                }
+            ]
+        }
+    )
+    assert rendered[0]["content"].startswith(f"{STAGE_COMPACT_PREFIX}\n")

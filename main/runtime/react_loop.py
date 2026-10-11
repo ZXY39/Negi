@@ -36,8 +36,9 @@ from g3ku.runtime.chunk_compression_plan import (
 )
 from g3ku.runtime.stage_prompt_compaction import (
     STAGE_ARCHIVE_HEADING,
-    STAGE_COMPACT_PREFIX as _STAGE_COMPACT_PREFIX,
-    STAGE_EXTERNALIZED_PREFIX as _STAGE_EXTERNALIZED_PREFIX,
+    STAGE_COMPACT_PREFIXES as _STAGE_COMPACT_PREFIXES,
+    STAGE_EXTERNALIZED_PREFIXES as _STAGE_EXTERNALIZED_PREFIXES,
+    TOKEN_COMPACT_V2_PREFIX as _SHARED_TOKEN_COMPACT_V2_PREFIX,
     STAGE_REF_SELECTION_RULE,
     build_stage_archive_document,
     compact_stage_prompt_messages_in_place as _shared_compact_stage_prompt_messages_in_place,
@@ -76,7 +77,8 @@ from main.runtime.chat_backend import build_actual_request_diagnostics, build_st
 from main.runtime.model_route import LEASE_OUTCOME_CANCELLED, LEASE_OUTCOME_SUCCESS, RouteCandidateFilters
 from main.runtime.append_notice_context import (
     APPEND_NOTICE_CONTEXT_KEY,
-    APPEND_NOTICE_TAIL_PREFIX,
+    append_notice_tail_prefix_match,
+    is_append_notice_tail_message as _shared_is_append_notice_tail_message,
     build_append_notice_tail_messages,
     dedupe_append_notice_tail_messages,
     render_append_notice_must_preserve_block,
@@ -182,7 +184,7 @@ _STAGE_ONLY_TRANSITION_LIMIT = 5
 _NODE_CONTRACT_ECHO_REPAIR_LIMIT = 2
 _PROVIDER_RETRY_LIMIT = 3
 _NODE_SEND_CONTEXT_WINDOW_HARD_MIN_TOKENS = 25000
-_NODE_TOKEN_COMPACT_MARKER = "[G3KU_TOKEN_COMPACT_V2]"
+_NODE_TOKEN_COMPACT_MARKER = _SHARED_TOKEN_COMPACT_V2_PREFIX
 _NODE_TOKEN_COMPACTION_RECENT_TAIL_COUNT = 12
 # LLM token 压缩保留的最近 tail 与 CEO/frontdoor 同源约束：tail 是压缩后请求体
 # 的不可压缩下限，尾部超大工具结果必须先截断，否则压缩后重算仍超窗、每轮压缩
@@ -619,7 +621,7 @@ class ReActToolLoop:
                 history_shrink_reason = 'stage_compaction'
             if str(history_shrink_reason or '').strip() == 'token_compression':
                 # token 压缩是节点清单的唯一重新提交点：正文这一跳已被
-                # `[G3KU_TOKEN_COMPACT_V2]` 全量重写，可复用前缀反正已经断在这里，
+                # `[TOKEN_COMPACT_V2]` 全量重写，可复用前缀反正已经断在这里，
                 # 重印说明书不额外破缓存；之后的跳按重印后的清单继续钉住。
                 compression_provider_tool_names = self._normalized_name_list(
                     list(tool_schema_selection.get('pinned_provider_tool_names') or [])
@@ -5490,18 +5492,15 @@ class ReActToolLoop:
 
     @staticmethod
     def _is_append_notice_tail_message(message: dict[str, Any]) -> bool:
-        if str((message or {}).get("role") or "").strip().lower() != "assistant":
-            return False
-        return str((message or {}).get("content") or "").strip().startswith(APPEND_NOTICE_TAIL_PREFIX)
+        return _shared_is_append_notice_tail_message(message)
 
     @staticmethod
     def _append_notice_window_kind(message: dict[str, Any]) -> str:
-        if str((message or {}).get("role") or "").strip().lower() != "assistant":
-            return ""
         content = str((message or {}).get("content") or "").strip()
-        if not content.startswith(APPEND_NOTICE_TAIL_PREFIX):
+        matched_prefix = append_notice_tail_prefix_match(message)
+        if not matched_prefix:
             return ""
-        payload_text = content[len(APPEND_NOTICE_TAIL_PREFIX):].strip()
+        payload_text = content[len(matched_prefix):].strip()
         try:
             payload = json.loads(payload_text)
         except Exception:
@@ -8379,7 +8378,7 @@ class ReActToolLoop:
                 return
             if isinstance(item, str):
                 text = str(item or '')
-                for prefix in (_STAGE_COMPACT_PREFIX, _STAGE_EXTERNALIZED_PREFIX):
+                for prefix in (*_STAGE_COMPACT_PREFIXES, *_STAGE_EXTERNALIZED_PREFIXES):
                     if text.startswith(prefix):
                         payload_text = text[len(prefix) :].strip()
                         if payload_text.startswith('{') or payload_text.startswith('['):

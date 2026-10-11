@@ -1,7 +1,7 @@
 """通知块按内容幂等：历史里已有同一份块就不再插第二份。
 
 实盘事故（本仓库自身改动引入）：探针节点 `node:3c3fe3a0f5a8` 的账本 135 帧里，
-逐字节相同的 `[G3KU_APPEND_NOTICE_TAIL_V1]` 块叠了 **36 份**（每份 245 字符）。
+逐字节相同的 `[NOTICE_TAIL_V1]` 块叠了 **36 份**（每份 245 字符）。
 成因是段分支不受可见性过滤、装配结果又被回写进 `frame.messages`，于是每跳再插一份。
 这里只挡新副本：回删已经发出去的帧等于重写 provider 前缀，代价比留重复块大。
 """
@@ -10,6 +10,7 @@ from __future__ import annotations
 
 from main.runtime.append_notice_context import (
     APPEND_NOTICE_TAIL_PREFIX,
+    LEGACY_APPEND_NOTICE_TAIL_PREFIX,
     build_append_notice_tail_messages,
     dedupe_append_notice_tail_messages,
     is_append_notice_tail_message,
@@ -99,3 +100,22 @@ def test_non_notice_messages_are_never_touched_by_the_filter() -> None:
     candidate = {'role': 'assistant', 'content': plain['content']}
     kept, dropped = dedupe_append_notice_tail_messages([candidate], [plain])
     assert dropped == 0 and kept == [candidate]
+
+
+def test_legacy_assistant_prefixed_block_still_counts_as_existing() -> None:
+    """存量块带旧拼写、且是 assistant 角色：识别既不挑拼写也不挑角色，否则去重看不见它，
+    同一份通知会再插一份（叠 36 份的那条道）。"""
+    legacy_block = {
+        'role': 'assistant',
+        'content': f'{LEGACY_APPEND_NOTICE_TAIL_PREFIX}\n{{"kind": "raw_notice_window"}}',
+    }
+    candidate = {
+        'role': 'user',
+        'content': f'{APPEND_NOTICE_TAIL_PREFIX}\n{{"kind": "raw_notice_window"}}',
+    }
+
+    assert is_append_notice_tail_message(legacy_block) is True
+    assert legacy_block['content'].startswith(APPEND_NOTICE_TAIL_PREFIX) is False
+
+    kept, dropped = dedupe_append_notice_tail_messages([candidate], [legacy_block])
+    assert dropped == 1 and kept == []

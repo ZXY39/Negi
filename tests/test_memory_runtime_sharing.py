@@ -149,7 +149,7 @@ def test_convert_messages_keeps_completed_tool_calls_and_outputs():
 
 def test_convert_messages_merges_leading_system_and_keeps_tail_system_in_place():
     # 回归（阶段块 assistant→system 角色对齐的硬前置）：历史里可以同时存在多条
-    # system 消息——基础系统提示、mid-history 的运行时工具契约、[G3KU_STAGE_*]
+    # system 消息——基础系统提示、mid-history 的运行时工具契约、[STAGE_*]
     # 阶段压缩块。旧实现 `system_prompt = content` 后写覆盖前者：只剩最后一条
     # system，基础系统提示与其余全部块被静默丢弃。现在一条都不能丢。
     #
@@ -160,7 +160,7 @@ def test_convert_messages_merges_leading_system_and_keeps_tail_system_in_place()
         [
             {"role": "system", "content": "BASE PROMPT"},
             {"role": "user", "content": "hello"},
-            {"role": "system", "content": '[G3KU_STAGE_COMPACT_V1]\n{"stage_index":1}'},
+            {"role": "system", "content": '[STAGE_COMPACT_V1]\n{"stage_index":1}'},
             {"role": "assistant", "content": "ok"},
             {
                 "role": "system",
@@ -174,7 +174,7 @@ def test_convert_messages_merges_leading_system_and_keeps_tail_system_in_place()
     assert [item.get("role") for item in input_items] == ["user", "system", "assistant", "system", "user"]
     compact_item, contract_item = [item for item in input_items if item.get("role") == "system"]
     assert compact_item["type"] == "message"
-    assert '[G3KU_STAGE_COMPACT_V1]\n{"stage_index":1}' in compact_item["content"][0]["text"]
+    assert '[STAGE_COMPACT_V1]\n{"stage_index":1}' in compact_item["content"][0]["text"]
     assert "## Runtime Tool Contract" in contract_item["content"][0]["text"]
     # 三段 system 内容维持历史顺序：基础提示在前导块，两块按原位排在各自的用户消息之后
     assert input_items.index(compact_item) < input_items.index(contract_item)
@@ -185,7 +185,7 @@ def test_convert_messages_keeps_every_stage_block_from_many_system_messages():
     # 每一个块都必须出现在请求里，一个都不能被覆盖丢失——而且留在它自己的位置，
     # 不并进前导块。
     blocks = [
-        f'[G3KU_STAGE_COMPACT_V1]\n{{"stage_index":{index},"completed_stage_summary":"s{index}"}}'
+        f'[STAGE_COMPACT_V1]\n{{"stage_index":{index},"completed_stage_summary":"s{index}"}}'
         for index in range(1, 44)
     ]
     messages: list[dict] = [{"role": "system", "content": "BASE PROMPT"}]

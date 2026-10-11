@@ -536,7 +536,7 @@ def test_sanitize_provider_messages_keeps_one_system_message_at_the_head_only() 
     raw_messages = [
         {"role": "system", "content": "# 定位"},
         {"role": "user", "content": "分析这个仓库"},
-        {"role": "system", "content": '[G3KU_STAGE_COMPACT_V1]\n{"stage_index":1}'},
+        {"role": "system", "content": '[STAGE_COMPACT_V1]\n{"stage_index":1}'},
         {"role": "assistant", "content": "读完了入口文件"},
         {"role": "system", "content": "## Runtime Tool Contract\nkind: frontdoor_runtime_tool_contract"},
     ]
@@ -546,7 +546,7 @@ def test_sanitize_provider_messages_keeps_one_system_message_at_the_head_only() 
     assert [item["role"] for item in sanitized] == ["system", "user", "user", "assistant", "user"]
     assert [item["content"] for item in sanitized if item["role"] == "system"] == ["# 定位"]
     # 被改写的块正文与位置都不动：只有角色变，前缀字节仍然连续。
-    assert sanitized[2]["content"] == '[G3KU_STAGE_COMPACT_V1]\n{"stage_index":1}'
+    assert sanitized[2]["content"] == '[STAGE_COMPACT_V1]\n{"stage_index":1}'
     assert sanitized[-1]["content"].startswith("## Runtime Tool Contract")
     assert chat_backend_module.sanitize_provider_messages(sanitized) == sanitized
 

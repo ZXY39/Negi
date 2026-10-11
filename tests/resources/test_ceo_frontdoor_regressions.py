@@ -1210,9 +1210,9 @@ async def test_graph_normalize_model_output_bounces_plain_text_once_for_stage_wi
 
 
 _STAGE_ECHO_PREFIX_CASES = [
-    ("[G3KU_STAGE_COMPACT_V1]", "compact"),
-    ("[G3KU_STAGE_EXTERNALIZED_V1]", "externalized"),
-    ("[G3KU_STAGE_RAW_V1]", "raw"),
+    ("[STAGE_COMPACT_V1]", "compact"),
+    ("[STAGE_EXTERNALIZED_V1]", "externalized"),
+    ("[STAGE_RAW_V1]", "raw"),
 ]
 
 

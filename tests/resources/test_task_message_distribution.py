@@ -477,7 +477,7 @@ async def test_compression_notice_tail_block_precedes_externalized_stage_block(t
         )
         contents = [str(item.get("content") or "") for item in prepared]
         notice_index = next(index for index, content in enumerate(contents) if content.startswith(APPEND_NOTICE_TAIL_PREFIX))
-        compression_index = next(index for index, content in enumerate(contents) if content.startswith("[G3KU_STAGE_EXTERNALIZED_V1]"))
+        compression_index = next(index for index, content in enumerate(contents) if content.startswith("[STAGE_EXTERNALIZED_V1]"))
 
         assert notice_index < compression_index
         assert "必须按董事会模板输出" in contents[notice_index]
@@ -2144,7 +2144,7 @@ async def test_distribution_turn_runs_node_send_preflight(tmp_path: Path, monkey
             return (
                 [
                     *list(kwargs.get("request_messages") or []),
-                    {"role": "assistant", "content": "[G3KU_TOKEN_COMPACT_V2]\n{\"kind\":\"distribution-test\"}"},
+                    {"role": "assistant", "content": "[TOKEN_COMPACT_V2]\n{\"kind\":\"distribution-test\"}"},
                 ],
                 {"applied": True, "mode": "marker"},
                 "token_compression",
@@ -2168,7 +2168,7 @@ async def test_distribution_turn_runs_node_send_preflight(tmp_path: Path, monkey
         assert observed["parallel_tool_calls"] is False
         assert len(backend.calls) == 1
         rendered = "\n".join(str(item.get("content") or "") for item in list(backend.calls[0].get("messages") or []))
-        assert "[G3KU_TOKEN_COMPACT_V2]" in rendered
+        assert "[TOKEN_COMPACT_V2]" in rendered
     finally:
         await service.close()
 
@@ -4235,7 +4235,7 @@ async def test_prepare_messages_keeps_append_notice_tail_before_stage_compaction
 
         contents = [str(item.get("content") or "") for item in prepared]
         notice_index = next(index for index, content in enumerate(contents) if content.startswith(APPEND_NOTICE_TAIL_PREFIX))
-        compact_index = next(index for index, content in enumerate(contents) if content.startswith("[G3KU_STAGE_COMPACT_V1]"))
+        compact_index = next(index for index, content in enumerate(contents) if content.startswith("[STAGE_COMPACT_V1]"))
 
         assert notice_index < compact_index
         assert "财务复核要求保留原始凭据" in contents[notice_index]
@@ -4387,7 +4387,7 @@ async def test_new_compression_stage_rolls_append_notices_into_compressed_tail_b
         )
         contents = [str(item.get("content") or "") for item in prepared]
         notice_index = next(index for index, content in enumerate(contents) if content.startswith(APPEND_NOTICE_TAIL_PREFIX))
-        compression_index = next(index for index, content in enumerate(contents) if content.startswith("[G3KU_STAGE_EXTERNALIZED_V1]"))
+        compression_index = next(index for index, content in enumerate(contents) if content.startswith("[STAGE_EXTERNALIZED_V1]"))
 
         assert notice_index < compression_index
         assert "必须按董事会模板输出" in contents[notice_index]

@@ -79,7 +79,7 @@ Start here when you are new to the repository or when a change crosses subsystem
 - Multimodal image not reaching model or fabricated image content → `runtime-overview.md` + `web-and-admin.md` (web upload/reopen) or `external-agent-api.md` (bridge inbound attachments)
 - A config refresh disrupts an in-flight turn → `config-and-models.md`「配置热刷新」
 - Same task result pushed to the channel multiple times → `heartbeat-system.md`「Task Terminal Repair Contract」
-- Channel/bridge reply emits `## Runtime Tool Contract` or `[G3KU_STAGE_*]` stage-block/internal context text -> `runtime-overview.md`「frontdoor 与任务运行时的关系」(回显守卫) + `external-agent-api.md` (outbound sanitize contract)
+- Channel/bridge reply emits `## Runtime Tool Contract` or `[STAGE_*]` stage-block/internal context text -> `runtime-overview.md`「frontdoor 与任务运行时的关系」(回显守卫) + `external-agent-api.md` (outbound sanitize contract)
 - 请求体里阶段块成批堆在上下文最前面、与自己的用户消息/最终回复脱节 → `runtime-overview.md`「stage_compaction」（块锚点三级取定与顺序不变量）
 - 工具上一轮还能调、这一轮从 `callable_tools` 消失，但仍留在 `tools[]` 上（既不在 `denied_tools`、也不在 `undeclared_candidates`），且 `hydration_evicted_executor_names` 里没有它 → 不是 LRU 也不是权限收回，而是它的 toolskill 正文被阶段裁撤或压缩移出上下文，按"契约不在 ⇒ 能力不在"被撤销；判据、两个载体与 `keep_tools` 保留道见 `tool-hydration-and-callable-chain.md`「hydrated tools」
 - 裁撤后阶段块里没有 `## 保留契约` 段、或 `keep_tools` 点了名字却没留住 → 先确认同批带了 `drop_completed_stage_tool_detail=true` 与 `completed_stage_summary`（不带 drop 时 `keep_*` 按参数非法/忽略处理），再看该名字是否属于本阶段真的加载过的目标集；提取失败不写条目，回执会点名，机制见 `tool-hydration-and-callable-chain.md`「阶段门控与 callable 收紧」
@@ -172,7 +172,7 @@ Start here when you are new to the repository or when a change crosses subsystem
 - 上下文脑图标只按新输入变化、读数长期低于上一请求的真实输入规模 → `context-and-cache-troubleshooting.md`「同 turn 的 append-only 规则被破坏」+ `web-and-admin.md`「Composer Context Usage Meter」
 - 长按脑图标不发起压缩、区分线停在「压缩已暂停」、压缩中区分线凭空消失刷新后才出现、渠道会话脑图标没有读数 → `web-and-admin.md`「Manual Context Compression」+ `context-and-cache-troubleshooting.md`「Shrink 原因与压缩边界」
 - 压缩报成功、`post_tokens` 也降了，但下一回合请求体又回到原大小；或压缩途中发的消息没被回答 → `runtime-overview.md`「压缩窗口：入站闸门与基线写入仲裁」+ `context-and-cache-troubleshooting.md`「Shrink 原因与压缩边界」
-- 压缩后 `[G3KU_STAGE_COMPACT_V1]` 块数量没下降、模型报告"压缩了但历史阶段还在"、或摘要里查不到某条证据引用 → `context-and-cache-troubleshooting.md`「Shrink 原因与压缩边界」（阶段收口判读）+ `runtime-overview.md`「Frontdoor Context Compression」；节点 artifact 带 `stage_archive` 而账本没有 `context_visible` 不属该症状（节点不应用收口标记，见同节）
+- 压缩后 `[STAGE_COMPACT_V1]` 块数量没下降、模型报告"压缩了但历史阶段还在"、或摘要里查不到某条证据引用 → `context-and-cache-troubleshooting.md`「Shrink 原因与压缩边界」（阶段收口判读）+ `runtime-overview.md`「Frontdoor Context Compression」；节点 artifact 带 `stage_archive` 而账本没有 `context_visible` 不属该症状（节点不应用收口标记，见同节）
 - 阶段边界那一跳 `cache_hit` 塌下去、非缓存 `input` 冲高，但下一跳就回血，且此后正文天花板明显更低 → 这是裁撤生效的正常账单（断点位置不动、动的是断点后面的载荷），读数口径见 `context-and-cache-troubleshooting.md`「Shrink 原因与压缩边界」
 - `cache_hit` 每阶段推进都塌回同一小值（头部块末尾的 token 位）而历史没被裁 → 活状态块被搬到了请求头部，位置与角色合同见 `context-and-cache-troubleshooting.md`「线体角色合同」
 - 脑图标读数在阶段边界那一跳冲高数倍、下一跳回落，而 `comparable_to_previous_request` 仍为 `true` → `context-and-cache-troubleshooting.md`「同 turn 的 append-only 规则被破坏」（锚点与阶段投影同源）

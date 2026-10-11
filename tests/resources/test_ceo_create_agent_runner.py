@@ -1099,7 +1099,7 @@ async def test_graph_execute_tools_applies_named_stage_eviction_inside_the_turn(
     }
     assert "call-old-1" not in carried_tool_call_ids  # 过期阶段肉身当场离开基线
     assert "call-new-1" in carried_tool_call_ids  # 活动阶段原位不动
-    assert any(item.startswith("[G3KU_STAGE_COMPACT_V1]") for item in contents)
+    assert any(item.startswith("[STAGE_COMPACT_V1]") for item in contents)
     assert result["frontdoor_history_shrink_reason"] == "stage_compaction"
     assert len(result["frontdoor_request_body_messages"]) == len(result["messages"])
     # 一次性：裁过之后同一账本再投影不再移除任何东西，下一跳回到 append-only 链
@@ -4076,7 +4076,7 @@ def test_frontdoor_provider_tool_bundle_pins_and_recommits_only_at_compression()
 
     清单排在上下文最前面，成员或顺序一变就把身后整段重铺。新增能力必须即时并入（否则
     模型手里只剩名字、拼不出合法调用），而收回/下架的删名推迟到重印边界——那一跳正文已被
-    `[G3KU_TOKEN_COMPACT_V2]` 整段重写，可复用前缀反正断在这里，重印不额外破缓存。
+    `[TOKEN_COMPACT_V2]` 整段重写，可复用前缀反正断在这里，重印不额外破缓存。
     """
     runner = create_agent_impl.CreateAgentCeoFrontDoorRunner(loop=SimpleNamespace(main_task_service=None))
 
@@ -6863,14 +6863,14 @@ def test_create_agent_prompt_contract_avoids_duplicate_history_when_live_message
                 {"role": "system", "content": "stable system"},
                 {
                     "role": "assistant",
-                    "content": "[G3KU_TOKEN_COMPACT_V2]\nsummary body",
+                    "content": "[TOKEN_COMPACT_V2]\nsummary body",
                 },
                 {"role": "assistant", "content": "latest assistant"},
                 {"role": "user", "content": "latest user"},
             ],
             stable_messages=[
                 {"role": "system", "content": "stable system"},
-                {"role": "assistant", "content": "[G3KU_TOKEN_COMPACT_V2]\nsummary body"},
+                {"role": "assistant", "content": "[TOKEN_COMPACT_V2]\nsummary body"},
                 {"role": "assistant", "content": "latest assistant"},
                 {"role": "user", "content": "latest user"},
             ],
@@ -6890,14 +6890,14 @@ def test_create_agent_prompt_contract_avoids_duplicate_history_when_live_message
     ]
     assert non_contract_request_messages == [
         {"role": "system", "content": "stable system"},
-        {"role": "assistant", "content": "[G3KU_TOKEN_COMPACT_V2]\nsummary body"},
+        {"role": "assistant", "content": "[TOKEN_COMPACT_V2]\nsummary body"},
         {"role": "assistant", "content": "latest assistant"},
         {"role": "user", "content": "latest user"},
         {"role": "assistant", "content": "## Retrieved Context\n- authoritative memory"},
     ]
     assert contract.stable_messages == [
         {"role": "system", "content": "stable system"},
-        {"role": "assistant", "content": "[G3KU_TOKEN_COMPACT_V2]\nsummary body"},
+        {"role": "assistant", "content": "[TOKEN_COMPACT_V2]\nsummary body"},
         {"role": "assistant", "content": "latest assistant"},
         {"role": "user", "content": "latest user"},
     ]

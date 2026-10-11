@@ -10128,7 +10128,7 @@ async def test_resume_react_state_keeps_canonical_messages_separate_from_provide
             "content": [
                 {
                     "type": "output_text",
-                    "text": '[G3KU_STAGE_COMPACT_V1]\n{"stage_goal":"old stage","status":"完成"}',
+                    "text": '[STAGE_COMPACT_V1]\n{"stage_goal":"old stage","status":"完成"}',
                 }
             ],
         },
@@ -10152,7 +10152,7 @@ async def test_resume_react_state_keeps_canonical_messages_separate_from_provide
     previous_request_messages = [
         {"role": "system", "content": "[SYSTEM] execution node prompt"},
         {"role": "user", "content": '{"task_id":"task:demo","node_id":"node:leaf","goal":"demo"}'},
-        {"role": "assistant", "content": '[G3KU_STAGE_COMPACT_V1]\n{"stage_goal":"old stage","status":"完成"}'},
+        {"role": "assistant", "content": '[STAGE_COMPACT_V1]\n{"stage_goal":"old stage","status":"完成"}'},
         {
             "role": "assistant",
             "content": "## Runtime Tool Contract\nkind: node_runtime_tool_contract\ncallable_tools: `submit_next_stage`",

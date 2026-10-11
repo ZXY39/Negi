@@ -42,10 +42,8 @@ from g3ku.providers.fallback import (
 )
 from g3ku.providers.provider_factory import build_provider_from_model_key
 from g3ku.runtime.stage_prompt_compaction import (
-    STAGE_COMPACT_PREFIX as _STAGE_COMPACT_PREFIX,
-)
-from g3ku.runtime.stage_prompt_compaction import (
-    STAGE_EXTERNALIZED_PREFIX as _STAGE_EXTERNALIZED_PREFIX,
+    STAGE_COMPACT_PREFIXES as _STAGE_COMPACT_PREFIXES,
+    STAGE_EXTERNALIZED_PREFIXES as _STAGE_EXTERNALIZED_PREFIXES,
 )
 from g3ku.utils.api_keys import iter_api_key_retry_slots
 from main.runtime.model_key_concurrency import ModelKeyConcurrencyController, ModelKeyPermitLease
@@ -465,10 +463,7 @@ def _stage_context_digest(messages: list[dict]) -> str:
         if str(message.get('role') or '').strip().lower() not in {'assistant', 'system', 'user'}:
             continue
         content = str(message.get('content') or '')
-        if not (
-            content.startswith(_STAGE_COMPACT_PREFIX)
-            or content.startswith(_STAGE_EXTERNALIZED_PREFIX)
-        ):
+        if not content.startswith((*_STAGE_COMPACT_PREFIXES, *_STAGE_EXTERNALIZED_PREFIXES)):
             continue
         found = True
         digest.update(content.encode('utf-8'))

@@ -2719,11 +2719,11 @@ def test_prompt_cache_key_changes_when_stage_context_blocks_change() -> None:
     ]
     compact_a = {
         'role': 'assistant',
-        'content': '[G3KU_STAGE_COMPACT_V1]\n{"stage_index":1,"completed_stage_summary":"alpha"}',
+        'content': '[STAGE_COMPACT_V1]\n{"stage_index":1,"completed_stage_summary":"alpha"}',
     }
     compact_b = {
         'role': 'assistant',
-        'content': '[G3KU_STAGE_COMPACT_V1]\n{"stage_index":1,"completed_stage_summary":"beta"}',
+        'content': '[STAGE_COMPACT_V1]\n{"stage_index":1,"completed_stage_summary":"beta"}',
     }
     # 阶段块角色对齐 system 后，摘要必须同样识别 system 角色块（双角色识别），
     # 否则迁移期新块不参与 stage_context_digest，cache key 失去块内容敏感性。

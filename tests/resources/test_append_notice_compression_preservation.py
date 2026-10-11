@@ -86,7 +86,7 @@ def test_tail_block_visibility_is_window_scoped_not_ledger_scoped() -> None:
     # 原文不在本次发送窗口（压缩后的 18 条体）⇒ 必须出代持块，哪怕账本里还留着正文
     block = build_append_notice_tail_messages(_CONTEXT, visible_user_messages=[])
     assert len(block) == 1
-    assert block[0]['role'] == 'assistant'
+    assert block[0]['role'] == 'user'
     assert block[0]['content'].startswith(APPEND_NOTICE_TAIL_PREFIX)
     payload = json.loads(block[0]['content'][len(APPEND_NOTICE_TAIL_PREFIX):].strip())
     assert payload['kind'] == 'raw_notice_window'

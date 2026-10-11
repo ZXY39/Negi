@@ -8,9 +8,18 @@ from typing import Any
 
 from g3ku.runtime.tool_history import extract_call_id
 
-STAGE_COMPACT_PREFIX = "[G3KU_STAGE_COMPACT_V1]"
-STAGE_EXTERNALIZED_PREFIX = "[G3KU_STAGE_EXTERNALIZED_V1]"
-STAGE_RAW_PREFIX = "[G3KU_STAGE_RAW_V1]"
+STAGE_COMPACT_PREFIX = "[STAGE_COMPACT_V1]"
+STAGE_EXTERNALIZED_PREFIX = "[STAGE_EXTERNALIZED_V1]"
+STAGE_RAW_PREFIX = "[STAGE_RAW_V1]"
+# 存量块带旧拼写（durable baseline、continuity sidecar、续跑 seed、请求体账本），读侧两种
+# 都认、写侧只出新拼写。这张表不能提前删：认不出存量块会造成同阶段重复渲染或整块丢失。
+LEGACY_STAGE_COMPACT_PREFIX = "[G3KU_STAGE_COMPACT_V1]"
+LEGACY_STAGE_EXTERNALIZED_PREFIX = "[G3KU_STAGE_EXTERNALIZED_V1]"
+LEGACY_STAGE_RAW_PREFIX = "[G3KU_STAGE_RAW_V1]"
+STAGE_COMPACT_PREFIXES = (STAGE_COMPACT_PREFIX, LEGACY_STAGE_COMPACT_PREFIX)
+STAGE_EXTERNALIZED_PREFIXES = (STAGE_EXTERNALIZED_PREFIX, LEGACY_STAGE_EXTERNALIZED_PREFIX)
+STAGE_RAW_PREFIXES = (STAGE_RAW_PREFIX, LEGACY_STAGE_RAW_PREFIX)
+STAGE_BLOCK_PREFIXES = (*STAGE_COMPACT_PREFIXES, *STAGE_EXTERNALIZED_PREFIXES, *STAGE_RAW_PREFIXES)
 
 # 静默收尾工具名，对齐 main/runtime/stage_budget.py 的 SILENT_TOOL_NAME；本模块不成文
 # 地不 import main.*（同下方 DEFAULT_STAGE_MODE 的处理）。含这个调用的 assistant 行必须
@@ -26,7 +35,7 @@ DEFAULT_STAGE_MODE = "自主执行"
 # `strip_frontdoor_tool_contract_echo` 两处调用点：CEO 最终回复收口
 # `_graph_normalize_model_output` 与渠道出站 `sanitize_channel_outbound_text`）。
 # 事故背景：裁剪按"任意位置子串匹配块前缀"实现，会把用户答案中合法引用的
-# `[G3KU_STAGE_*]` 齐根截断（web:ceo-ad3daa814d19 两轮回复被截）。
+# `[STAGE_*]` 齐根截断（web:ceo-ad3daa814d19 两轮回复被截）。
 # 恢复开关前必须先替换为指纹比对实现——仅剥离与当前注入真块逐字一致的回显，
 # 并同步恢复下列回归测试的裁剪断言：
 #   - tests/resources/test_ceo_frontdoor_regressions.py（trailing stage block echo）
@@ -150,11 +159,7 @@ def is_stage_context_message(message: dict[str, Any]) -> bool:
     if list((message or {}).get("tool_calls") or []):
         return False
     content = str((message or {}).get("content") or "")
-    return (
-        content.startswith(STAGE_COMPACT_PREFIX)
-        or content.startswith(STAGE_EXTERNALIZED_PREFIX)
-        or content.startswith(STAGE_RAW_PREFIX)
-    )
+    return content.startswith(STAGE_BLOCK_PREFIXES)
 
 
 def _stage_block_prefix_index(text: str) -> int:
@@ -162,7 +167,7 @@ def _stage_block_prefix_index(text: str) -> int:
     normalized = str(text or "")
     positions = [
         index
-        for prefix in (STAGE_COMPACT_PREFIX, STAGE_EXTERNALIZED_PREFIX, STAGE_RAW_PREFIX)
+        for prefix in STAGE_BLOCK_PREFIXES
         if (index := normalized.find(prefix)) >= 0
     ]
     return min(positions) if positions else -1
@@ -179,11 +184,7 @@ def is_stage_block_echo_text(text: Any) -> bool:
     normalized = str(text or "").strip()
     if not normalized:
         return False
-    return (
-        normalized.startswith(STAGE_COMPACT_PREFIX)
-        or normalized.startswith(STAGE_EXTERNALIZED_PREFIX)
-        or normalized.startswith(STAGE_RAW_PREFIX)
-    )
+    return normalized.startswith(STAGE_BLOCK_PREFIXES)
 
 
 def strip_stage_block_echo(text: Any) -> str:
@@ -348,7 +349,7 @@ def completed_stage_blocks(stage_state: Any, *, skip_stage_ids: set[str] | None 
                     # 网关 400 拒掉。也不许用 assistant——模型会把块当成"自己上一轮说的
                     # 话"，在续写位置仿造/回显整块 JSON（事故 ext:qq-official:f8a8001865631301）。
                     # 对齐 FrontdoorToolContract 与节点契约的 user 角色合同；
-                    # [G3KU_TOKEN_COMPACT_V2] 例外保持 assistant
+                    # [TOKEN_COMPACT_V2] 例外保持 assistant
                     # （正文是自然语言会话摘要，语义上属于对话延续）。
                     "role": "user",
                     "content": f"{STAGE_EXTERNALIZED_PREFIX}\n{json.dumps(payload, ensure_ascii=False, sort_keys=True)}",
@@ -504,11 +505,7 @@ def current_stage_active_window(
 
 def _stage_block_stage_index(message: dict[str, Any]) -> int | None:
     content = str((message or {}).get("content") or "")
-    if not (
-        content.startswith(STAGE_COMPACT_PREFIX)
-        or content.startswith(STAGE_EXTERNALIZED_PREFIX)
-        or content.startswith(STAGE_RAW_PREFIX)
-    ):
+    if not content.startswith(STAGE_BLOCK_PREFIXES):
         return None
     _marker, _separator, payload_text = content.partition("\n")
     try:
@@ -957,7 +954,9 @@ def stage_ref_candidates(
 # 抄引用不可靠（跨代实测：路径逐字保真约 30%、不透明 id 约 10%），所以选择权给模型、
 # 逐字性归运行时；两车道共用同一份实现，避免同一合同出现第二套写法后各自漂移。
 
-TOKEN_COMPACT_V2_PREFIX = "[G3KU_TOKEN_COMPACT_V2]"
+TOKEN_COMPACT_V2_PREFIX = "[TOKEN_COMPACT_V2]"
+LEGACY_TOKEN_COMPACT_V2_PREFIX = "[G3KU_TOKEN_COMPACT_V2]"
+TOKEN_COMPACT_V2_PREFIXES = (TOKEN_COMPACT_V2_PREFIX, LEGACY_TOKEN_COMPACT_V2_PREFIX)
 STAGE_REF_INDEX_HEADING = "## 证据索引"
 STAGE_ARCHIVE_HEADING = "## 阶段归档"
 # 收尾材料没承接上时，结果里自带一句可读说明（两车道共用）。工具 schema 描述是两车道共享的
@@ -1076,7 +1075,7 @@ def render_stage_ref_index(candidates: list[dict[str, Any]], selected_ids: list[
 
 def _token_compact_payload(message: Any) -> dict[str, Any]:
     content = str((message or {}).get("content") or "") if isinstance(message, dict) else ""
-    if not content.startswith(TOKEN_COMPACT_V2_PREFIX):
+    if not content.startswith(TOKEN_COMPACT_V2_PREFIXES):
         return {}
     lines = content.split("\n", 2)
     if len(lines) < 2:
@@ -1199,7 +1198,7 @@ def stage_message_call_ids(messages: Any) -> set[str]:
 def stage_block_indexes(
     messages: Any,
     *,
-    prefixes: tuple[str, ...] = (STAGE_COMPACT_PREFIX, STAGE_EXTERNALIZED_PREFIX, STAGE_RAW_PREFIX),
+    prefixes: tuple[str, ...] = STAGE_BLOCK_PREFIXES,
 ) -> set[int]:
     """请求体里还翻得出来的阶段块编号；`prefixes` 用来只认某一类块。"""
     indexes: set[int] = set()
@@ -1367,12 +1366,21 @@ __all__ = [
     "STAGE_ARCHIVE_HEADING",
     "stage_archive_owner",
     "STAGE_COMPACT_PREFIX",
+    "STAGE_COMPACT_PREFIXES",
     "STAGE_EXTERNALIZED_PREFIX",
+    "STAGE_EXTERNALIZED_PREFIXES",
     "STAGE_RAW_PREFIX",
+    "STAGE_RAW_PREFIXES",
+    "STAGE_BLOCK_PREFIXES",
+    "LEGACY_STAGE_COMPACT_PREFIX",
+    "LEGACY_STAGE_EXTERNALIZED_PREFIX",
+    "LEGACY_STAGE_RAW_PREFIX",
     "STAGE_REF_CANDIDATE_HEADING",
     "STAGE_REF_INDEX_HEADING",
     "STAGE_REF_SELECTION_RULE",
     "TOKEN_COMPACT_V2_PREFIX",
+    "TOKEN_COMPACT_V2_PREFIXES",
+    "LEGACY_TOKEN_COMPACT_V2_PREFIX",
     "build_stage_archive_document",
     "compact_stage_prompt_messages_in_place",
     "completed_stage_blocks",

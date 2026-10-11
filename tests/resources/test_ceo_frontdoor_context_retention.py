@@ -353,8 +353,8 @@ async def test_prepare_turn_prefers_session_request_body_seed_over_visible_check
     state = initial_persistent_state(user_input={"content": "fresh question", "metadata": {}})
     state["messages"] = [
         {"role": "system", "content": "SYSTEM"},
-        {"role": "assistant", "content": "[G3KU_STAGE_RAW_V1]\n{\"stage_id\":\"frontdoor-stage-1\"}"},
-        {"role": "assistant", "content": "[G3KU_STAGE_RAW_V1]\n{\"stage_id\":\"frontdoor-stage-2\"}"},
+        {"role": "assistant", "content": "[STAGE_RAW_V1]\n{\"stage_id\":\"frontdoor-stage-1\"}"},
+        {"role": "assistant", "content": "[STAGE_RAW_V1]\n{\"stage_id\":\"frontdoor-stage-2\"}"},
     ]
 
     await runner._graph_prepare_turn(state, runtime=runtime)

@@ -323,7 +323,7 @@ The surfaced `message` executor and its Tool Admin family `messaging` are absent
 两条车道发的是同一种形状，区别只在重印边界有几条：
 
 - **CEO/frontdoor**：首跳按当轮 RBAC 可见 concrete executor 全集播种，之后钉住。重印边界三条——内联压缩（preflight 报 `token_compression`）、手动压缩（车道路在 session 上挂 `PENDING_PROVIDER_BUNDLE_RECOMMIT_ATTR`，读一次即清）、**换车道**（正常 ↔ 心跳/定时内部轮；内部轮的工具面是刻意收窄的，继承上一车道的宽面等于给内部轮多发一份执行面）。
-- **执行/验收节点**：同样首跳按角色 RBAC 全集播种后钉住，重印边界只有 `token_compression` 一条。两条车道的钉住都是**只补不删**：当轮新增能力即时并入（否则模型手里只剩名字、拼不出合法参数表），删名一律推迟到重印点；那一跳正文已被 `[G3KU_TOKEN_COMPACT_V2]` 整段重写，可复用前缀反正断在这里，重印不额外破缓存。声明侧渲染脱离派发字典：清单里的名字若当轮已无实例，参数表取自 `declared_denied_tool_schemas`。
+- **执行/验收节点**：同样首跳按角色 RBAC 全集播种后钉住，重印边界只有 `token_compression` 一条。两条车道的钉住都是**只补不删**：当轮新增能力即时并入（否则模型手里只剩名字、拼不出合法参数表），删名一律推迟到重印点；那一跳正文已被 `[TOKEN_COMPACT_V2]` 整段重写，可复用前缀反正断在这里，重印不额外破缓存。声明侧渲染脱离派发字典：清单里的名字若当轮已无实例，参数表取自 `declared_denied_tool_schemas`。
 
 漂移规则：
 

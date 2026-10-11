@@ -1263,7 +1263,7 @@ async def _execute_manual_context_compression(agent, runtime_session, *, pause_f
         stats=stats,
         reason="",
     )
-    # 手动车道产出的是 `[G3KU_TOKEN_COMPACT_V2]` 全量正文重写，可复用前缀反正已经断在这里：
+    # 手动车道产出的是 `[TOKEN_COMPACT_V2]` 全量正文重写，可复用前缀反正已经断在这里：
     # 挂一个待重印标记，让下一跳顺手把 tools[] 按当前 RBAC 重取一次（钉住期间只有压缩跳重印）。
     setattr(runtime_session, PENDING_PROVIDER_BUNDLE_RECOMMIT_ATTR, True)
     memory_manager = getattr(agent, "memory_manager", None)
