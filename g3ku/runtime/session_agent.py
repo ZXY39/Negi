@@ -156,24 +156,6 @@ def _frontdoor_continuity_session_key(session_key: str) -> bool:
     )
 
 
-def stamp_transcript_turn_id(user_input: Any, turn_id: str) -> None:
-    """把外部回合记录 id 钉成这条转录行的 turn id，让两套命名空间合成一个。
-
-    实盘抓到的缺陷：`reply.final` 与 MCP 递出的是 `ExternalTurnService` 的 record id，
-    而转录行记的是 `_ensure_user_turn_id` 自己生成的 id ⇒ 调用方拿着刚收到答复的那个
-    turn_id 回来读原文必然 404（`negi_get_turn` 因此一度不可用）。metadata 在
-    `_ensure_user_turn_id` 里优先级高于会话内的 active id，所以盖这里就够。
-    只覆盖"这次提交就是这一回合"的直发路径：在跑时排进去的后续消息各有自己的行，
-    仍按 `get_reply` 的 max-seq 规则取。
-    """
-    text = str(turn_id or "").strip()
-    if not text or not isinstance(user_input, UserInputMessage):
-        return
-    metadata = dict(user_input.metadata or {})
-    metadata[_TRANSCRIPT_TURN_ID_KEY] = text
-    user_input.metadata = metadata
-
-
 class RuntimeAgentSession:
     """Primary AgentSession implementation backed by the runtime engine."""
 

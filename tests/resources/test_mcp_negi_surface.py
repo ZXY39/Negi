@@ -376,18 +376,28 @@ def test_hub_tail_event_exposes_the_time_of_last_activity():
     assert hub.tail_event() == tail
 
 
-def test_external_turn_id_is_stamped_onto_the_transcript_row():
-    """record id 与转录 turn id 必须是一个，否则刚拿到答复的 id 回读原文就 404。"""
-    from g3ku.core.messages import UserInputMessage
-    from g3ku.runtime.session_agent import _TRANSCRIPT_TURN_ID_KEY, stamp_transcript_turn_id
-
-    message = UserInputMessage(content="派个任务")
-    stamp_transcript_turn_id(message, "fc4a22f1475c42ce")
-    assert message.metadata[_TRANSCRIPT_TURN_ID_KEY] == "fc4a22f1475c42ce"
-    # 非 UserInputMessage（老式纯文本提交）与空 id 都不该被硬塞
-    stamp_transcript_turn_id("plain-text", "abc")
-    stamp_transcript_turn_id(message, "")
-    assert message.metadata[_TRANSCRIPT_TURN_ID_KEY] == "fc4a22f1475c42ce"
+@pytest.mark.asyncio
+async def test_reply_carries_the_transcript_turn_id_for_re_read():
+    """两套 id 各管各的：`turn_id` 定址外部回合，`transcript_turn_id` 才是转录行的键。"""
+    events = [
+        {
+            "seq": 3,
+            "ts": "x",
+            "type": "reply.final",
+            "turn_id": "rec-1",
+            "transcript_turn_id": "7eefb1004a5b4fdf",
+            "text": "task=a9862e6309a6",
+            "task_ids": ["task:a9862e6309a6"],
+        }
+    ]
+    result = await _call(
+        build_mcp_server(_StreamClient(events)),
+        "negi_get_reply",
+        {"conversation": "c1", "wait_seconds": 5, "turn_id": "rec-1"},
+    )
+    assert result["turn_id"] == "rec-1"
+    assert result["transcript_turn_id"] == "7eefb1004a5b4fdf"
+    assert result["task_ids"] == ["task:a9862e6309a6"]
 
 
 def test_task_activity_reports_unknown_separately_from_none():

@@ -249,6 +249,13 @@ def make_session_event_relay(
                 dispatched = payload.get("dispatched_task_ids")
                 if isinstance(dispatched, list) and dispatched:
                     final_payload["task_ids"] = [str(item or "").strip() for item in dispatched if str(item or "").strip()]
+                # 转录侧的回合 id 与 record id 是两套命名空间（本文件开头就写着这点），
+                # 与其强行合一（实测盖不动：metadata 活不到落盘那一行），不如把两套都交出去：
+                # `turn_id` 归调用方做暂停/续取定址，`transcript_turn_id` 是转录行的那个，
+                # 也是 `GET /sessions/{id}/turns/{turn_id}` 唯一能查到的键。
+                transcript_turn_id = str(payload.get("turn_id") or "").strip()
+                if transcript_turn_id and transcript_turn_id != str(turn_id or ""):
+                    final_payload["transcript_turn_id"] = transcript_turn_id
                 if route_key:
                     # 账本失败绝不能吃掉这条发布：登记异常在这里就地吞掉，
                     # 回复退回仅内存投递（与 drain 侧同一降级语义）。
