@@ -27,6 +27,7 @@ import binascii
 import json
 import mimetypes
 import uuid
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
@@ -371,15 +372,85 @@ async def get_external_session_state(
                 "code": str(getattr(error, "code", "") or ""),
                 "message": str(getattr(error, "message", "") or ""),
             }
+    inflight_turn_id = service.inflight_turn_id_for(entry.session_key)
+    turn_record = service.get_turn(inflight_turn_id)
+    hub = get_session_event_hub(entry.session_key)
+    tail_event = hub.tail_event() if hub is not None else None
+    now = datetime.now()
+
+    def _age_iso(value: str) -> int | None:
+        """ISO 串到"距现在多少秒"。解不开就回 None，不猜。"""
+        text = str(value or "").strip()
+        if not text:
+            return None
+        try:
+            return max(0, int((now - datetime.fromisoformat(text)).total_seconds()))
+        except ValueError:
+            return None
+
+    last_activity_at = str((tail_event or {}).get("ts") or "")
+    started_at = str(getattr(turn_record, "started_at", "") or "")
+    activity_text = str((tail_event or {}).get("text") or "").strip()
     return {
         "ok": True,
         "session_id": entry.session_key,
         "external_key": entry.external_key,
         "running": running,
         "queued_follow_ups": queued,
-        "inflight_turn_id": service.inflight_turn_id_for(entry.session_key),
+        "inflight_turn_id": inflight_turn_id,
+        # 时间与活动读数：光给 `last_seq` 一个计数器，调用方没法区分"在跑一个长活"
+        # 与"已经卡死"（实测有 agent 为此累计阻塞近一小时）。事件本来就带 `ts`，
+        # 回合本来就带 `started_at`，这里只把它们投影出来，不新增状态。
+        "started_at": started_at,
+        "elapsed_seconds": _age_iso(started_at),
+        "last_activity_at": last_activity_at,
+        "silence_seconds": _age_iso(last_activity_at),
+        "last_event_seq": int((tail_event or {}).get("seq") or 0),
+        "last_activity_kind": str((tail_event or {}).get("type") or ""),
+        "last_activity_text": activity_text[:160],
         "last_error": last_error,
     }
+
+
+@router.get("/sessions/{session_id}/turns/{turn_id}")
+async def get_external_session_turn(
+    session_id: str,
+    turn_id: str,
+    principal: ExternalApiPrincipal = Depends(require_external_api),
+):
+    """按回合 id 重取转录里那一行的可见原文。
+
+    存在的理由：调用方上下文被压缩后，只剩自己那份摘要；回合原文在转录里是 durable
+    的（assistant 行带顶层 `turn_id`，`session_agent.py` 落盘时写的），而内存里的
+    `TurnRecord` 只留 256 条终态记录且会淘汰，不能当历史读口。
+    """
+    entry = _resolve_entry(session_id, principal)
+    manager = _session_manager()
+    wanted = str(turn_id or "").strip()
+    # 只读语义靠"文件在不在"判：manager 没有"不创建就取"的口，而在转录存在时
+    # `get_or_create` 走的是加载分支，不会造出假 created_at 的空会话。
+    if not manager.has_transcript(entry.session_key):
+        raise HTTPException(status_code=404, detail="session_not_found")
+    session = manager.get_or_create(entry.session_key)
+    for message in list(getattr(session, "messages", []) or []):
+        if str(message.get("role") or "") != "assistant":
+            continue
+        if str(message.get("turn_id") or "").strip() != wanted:
+            continue
+        metadata = dict(message.get("metadata") or {}) if isinstance(message.get("metadata"), dict) else {}
+        usage = message.get("usage") if isinstance(message.get("usage"), dict) else {}
+        return {
+            "ok": True,
+            "session_id": entry.session_key,
+            "turn_id": wanted,
+            "text": str(message.get("content") or ""),
+            "created_at": str(message.get("timestamp") or ""),
+            "usage": dict(usage or {}),
+            "task_ids": [str(item) for item in list(metadata.get("task_ids") or [])],
+            "source": str(metadata.get("source") or ""),
+            "silent_reply": bool(metadata.get("silent_reply")),
+        }
+    raise HTTPException(status_code=404, detail="turn_not_found")
 
 
 # -- messages / turns -------------------------------------------------------

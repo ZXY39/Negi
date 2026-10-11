@@ -97,6 +97,15 @@ class G3kuMcpClient:
         response.raise_for_status()
         return response.json()
 
+    async def get_turn(self, session_id: str, turn_id: str) -> dict[str, Any]:
+        """Re-read one finished turn's stored reply by turn_id (durable, survives
+        the caller's own context compaction)."""
+        response = await self._client.get(
+            f"/sessions/{session_id}/turns/{turn_id}", headers=self._headers()
+        )
+        response.raise_for_status()
+        return response.json()
+
     async def pause_turn(self, turn_id: str) -> dict[str, Any]:
         response = await self._client.post(f"/turns/{turn_id}/pause", headers=self._headers())
         response.raise_for_status()
@@ -200,6 +209,7 @@ class G3kuMcpClient:
         after_seq: int = 0,
         timeout: float = 120.0,
         session_id: str = "",
+        on_event: Any = None,
     ) -> dict[str, Any]:
         """Client-side mirror of ``wait_for_external_reply`` (same rules):
 
@@ -242,6 +252,13 @@ class G3kuMcpClient:
             if seq <= threshold or seq in seen:
                 continue
             seen.add(seq)
+            if on_event is not None:
+                # 活动回调只用于把等待期间的进度喂给调用方；它绝不能改变等待语义，
+                # 抛任何异常都只吞掉这一次通知，不中断等回复。
+                try:
+                    await on_event(event)
+                except Exception:
+                    pass
             event_type = str(event.get("type") or "")
             event_turn_id = str(event.get("turn_id") or "")
             if event_type == "reply.final":
@@ -254,6 +271,7 @@ class G3kuMcpClient:
                         "kind": "reply",
                         "text": str(event.get("text") or ""),
                         "turn_id": event_turn_id or None,
+                        "seq": int(event.get("seq") or 0),
                         "usage": event.get("usage") if isinstance(event.get("usage"), dict) else None,
                         "task_ids": list(event.get("task_ids") or []),
                     }
@@ -267,6 +285,7 @@ class G3kuMcpClient:
                             "kind": "reply",
                             "text": str(best.get("text") or ""),
                             "turn_id": str(best.get("turn_id") or "") or None,
+                            "seq": int(best.get("seq") or 0),
                             "usage": best.get("usage") if isinstance(best.get("usage"), dict) else None,
                             "task_ids": list(best.get("task_ids") or []),
                         }

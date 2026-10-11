@@ -13,13 +13,33 @@ from __future__ import annotations
 from typing import Any, Awaitable, Callable
 
 import httpx
-from mcp.server.fastmcp import FastMCP
+from mcp.server.fastmcp import Context, FastMCP
 
 from g3ku.mcp_gateway.client import G3kuMcpClient
 
 MIN_WAIT_SECONDS = 5
 MAX_WAIT_SECONDS = 1800
 DEFAULT_LIST_LIMIT = 50
+
+
+def _progress_hook(ctx: Any) -> Any:
+    """把等待期间的事件转成 MCP progress 通知。
+
+    客户端不支持通知时 `report_progress` 会抛，这里只让它静默失效——等待语义与
+    最终回复绝不能因为"没地方汇报进度"而变化。
+    """
+    if ctx is None:
+        return None
+
+    async def _emit(event: dict[str, Any]) -> None:
+        if str(event.get("type") or "") != "progress":
+            return
+        await ctx.report_progress(
+            progress=float(event.get("seq") or 0),
+            message=f"{event.get('kind')}: {str(event.get('text') or '')[:120]}",
+        )
+
+    return _emit
 
 
 async def _safe(factory: Callable[[], Awaitable[dict[str, Any]]]) -> dict[str, Any]:
@@ -79,13 +99,22 @@ def build_mcp_server(client: G3kuMcpClient, *, name: str = "negi") -> FastMCP:
             "the turn answers and returns status='completed' with reply/usage/task_ids; "
             "wait_seconds=0 submits and returns immediately with status='submitted' plus the "
             "turn_id and any task_ids already bound to the turn — call negi_get_reply later. "
+            "Sending while a turn is already running is safe and does NOT restart it: the message "
+            "is queued onto that session and its answer arrives after the running turn settles, in "
+            "submission order, so independent questions can be submitted back-to-back instead of "
+            "awaited one by one. While blocked, progress notifications carry what Negi is doing. "
+            "A deep verification turn routinely runs for many minutes — do not assume a slow "
+            "response means a stalled one; check negi_session_status for activity and silence. "
             "task_ids are the machine-readable handles of the tasks this turn dispatched "
             "(use them with the web runtime to follow up); reply is prose for a human."
         )
     )
-    async def negi_chat(conversation: str, message: str, wait_seconds: int = 120) -> dict[str, Any]:
+    async def negi_chat(
+        conversation: str, message: str, wait_seconds: int = 120, ctx: Context = None
+    ) -> dict[str, Any]:
         submit_only = _raw_wait(wait_seconds, 120) == 0
         timeout = _clamp_wait(wait_seconds, 120)
+        on_event = _progress_hook(ctx)
 
         async def _body() -> dict[str, Any]:
             session_id = await client.resolve_session(conversation)
@@ -114,6 +143,7 @@ def build_mcp_server(client: G3kuMcpClient, *, name: str = "negi") -> FastMCP:
                         after_seq=after_seq,
                         timeout=timeout,
                         session_id=session_id,
+                        on_event=on_event,
                     )
                 elif submit_status == "duplicate":
                     outcome = await client.wait_for_reply(
@@ -123,6 +153,7 @@ def build_mcp_server(client: G3kuMcpClient, *, name: str = "negi") -> FastMCP:
                         after_seq=0,
                         timeout=timeout,
                         session_id=session_id,
+                        on_event=on_event,
                     )
                 else:
                     outcome = await client.wait_for_reply(
@@ -131,6 +162,7 @@ def build_mcp_server(client: G3kuMcpClient, *, name: str = "negi") -> FastMCP:
                         after_seq=after_seq,
                         timeout=timeout,
                         session_id=session_id,
+                        on_event=on_event,
                     )
             base = {
                 "ok": True,
@@ -172,18 +204,30 @@ def build_mcp_server(client: G3kuMcpClient, *, name: str = "negi") -> FastMCP:
             "Fetch the next final reply for a conversation that was not consumed yet "
             "(e.g. after negi_chat returned status='pending' or status='submitted'). "
             "Carries the same task_ids handle as negi_chat. Pass the conversation exactly "
-            "as you passed it to negi_chat."
+            "as you passed it to negi_chat. Give `turn_id` (the id negi_chat returned) to wait "
+            "for THAT turn instead of whatever answer comes next; the reply always reports "
+            "`turn_id` and `answered_seq` so a reply can be matched to its question."
         )
     )
-    async def negi_get_reply(conversation: str, wait_seconds: int = 60) -> dict[str, Any]:
+    async def negi_get_reply(
+        conversation: str, wait_seconds: int = 60, turn_id: str = "", ctx: Context = None
+    ) -> dict[str, Any]:
         timeout = _clamp_wait(wait_seconds, 60)
+        want_turn_id = str(turn_id or "").strip()
+        on_event = _progress_hook(ctx)
 
         async def _body() -> dict[str, Any]:
             session_id = await client.resolve_session(conversation)
             after_seq = client.last_seq(session_id)
             async with client.event_stream(session_id, last_seq=after_seq) as events:
                 outcome = await client.wait_for_reply(
-                    events, queued=True, after_seq=after_seq, timeout=timeout, session_id=session_id
+                    events,
+                    turn_id=want_turn_id or None,
+                    queued=not bool(want_turn_id),
+                    after_seq=after_seq,
+                    timeout=timeout,
+                    session_id=session_id,
+                    on_event=on_event,
                 )
             if str(outcome.get("kind") or "") == "reply":
                 return {
@@ -192,6 +236,7 @@ def build_mcp_server(client: G3kuMcpClient, *, name: str = "negi") -> FastMCP:
                     "found": True,
                     "reply": str(outcome.get("text") or ""),
                     "turn_id": outcome.get("turn_id"),
+                    "answered_seq": int(outcome.get("seq") or 0),
                     "usage": outcome.get("usage"),
                     "task_ids": list(outcome.get("task_ids") or []),
                 }
@@ -204,7 +249,52 @@ def build_mcp_server(client: G3kuMcpClient, *, name: str = "negi") -> FastMCP:
 
         return await _safe(_body)
 
-    @mcp.tool(description="Report whether the Negi conversation is running and what is queued.")
+    @mcp.tool(
+        description=(
+            "Re-read one finished turn's stored reply text by turn_id, from the session "
+            "transcript (durable: it survives this client's own context compaction, unlike "
+            "whatever summary is left in memory). Use it when you need the original numbers "
+            "of an earlier answer rather than a paraphrase. Returns http_404/turn_not_found "
+            "for a turn id this conversation never stored."
+        )
+    )
+    async def negi_get_turn(conversation: str, turn_id: str) -> dict[str, Any]:
+        async def _body() -> dict[str, Any]:
+            session_id = await client.resolve_session(conversation)
+            wanted = str(turn_id or "").strip()
+            if not wanted:
+                return {"ok": False, "error": "turn_id_required", "conversation": conversation}
+            try:
+                payload = await client.get_turn(session_id, wanted)
+            except httpx.HTTPStatusError as exc:
+                if int(getattr(exc.response, "status_code", 0) or 0) != 404:
+                    raise
+                return {"ok": False, "error": "turn_not_found", "conversation": conversation, "turn_id": wanted}
+            return {
+                "ok": True,
+                "conversation": conversation,
+                "session_id": session_id,
+                "turn_id": wanted,
+                "reply": str(payload.get("text") or ""),
+                "created_at": str(payload.get("created_at") or ""),
+                "usage": payload.get("usage") if isinstance(payload.get("usage"), dict) else {},
+                "task_ids": list(payload.get("task_ids") or []),
+                "silent_reply": bool(payload.get("silent_reply")),
+            }
+
+        return await _safe(_body)
+
+    @mcp.tool(
+        description=(
+            "Report whether the Negi conversation is running and what is queued. Activity is "
+            "expressed as time, not as a counter: `started_at`/`elapsed_seconds` (the in-flight "
+            "turn), `last_activity_at`/`silence_seconds` (the newest session event — silence of "
+            "40 seconds and silence of 12 minutes are different decisions), plus "
+            "`last_activity_kind`/`last_activity_text` for what it is doing right now. "
+            "`last_seq` is the gateway's SSE event cursor, NOT a progress percentage or a step "
+            "count — do not read a slow-rising `last_seq` as a stall."
+        )
+    )
     async def negi_session_status(conversation: str) -> dict[str, Any]:
         async def _body() -> dict[str, Any]:
             session_id = await client.resolve_session(conversation)
@@ -216,6 +306,13 @@ def build_mcp_server(client: G3kuMcpClient, *, name: str = "negi") -> FastMCP:
                 "running": bool(state.get("running")),
                 "queued_follow_ups": int(state.get("queued_follow_ups") or 0),
                 "inflight_turn_id": state.get("inflight_turn_id"),
+                "started_at": str(state.get("started_at") or ""),
+                "elapsed_seconds": state.get("elapsed_seconds"),
+                "last_activity_at": str(state.get("last_activity_at") or ""),
+                "silence_seconds": state.get("silence_seconds"),
+                "last_activity_kind": str(state.get("last_activity_kind") or ""),
+                "last_activity_text": str(state.get("last_activity_text") or ""),
+                "last_event_seq": int(state.get("last_event_seq") or 0),
                 "last_error": state.get("last_error"),
                 "last_seq": client.last_seq(session_id),
             }

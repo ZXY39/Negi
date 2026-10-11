@@ -10,12 +10,16 @@
 
 from __future__ import annotations
 
+from contextlib import asynccontextmanager
 from datetime import datetime
 from types import SimpleNamespace
 
+import httpx
 import pytest
 
-from g3ku.mcp_gateway.server import build_mcp_server
+from g3ku.mcp_gateway.client import G3kuMcpClient
+from g3ku.mcp_gateway.server import _progress_hook, build_mcp_server
+from g3ku.runtime.external_events import SessionEventHub
 from g3ku.runtime.frontdoor import _ceo_create_agent_impl as create_agent_impl
 from g3ku.runtime.web_ceo_sessions import _external_channel_row
 
@@ -207,3 +211,166 @@ async def test_delete_conversation_refuses_full_keys_and_purges_own_names():
     assert deleted["deleted"] is True
     assert deleted["transcript_removed"] is True
     assert client.deleted == [("ext:probe:c1", True)]
+
+
+class _StreamClient(G3kuMcpClient):
+    """只替掉 HTTP 面，让真实 `wait_for_reply` 参与测试（按回合定址的判据在它里面）。"""
+
+    def __init__(self, events: list[dict]) -> None:
+        super().__init__("http://127.0.0.1:1/api/v1", "stub-token")
+        self._events = list(events)
+
+    async def resolve_session(self, conversation: str) -> str:
+        return "ext:probe:abc"
+
+    def last_seq(self, session_id: str) -> int:
+        return 0
+
+    @asynccontextmanager
+    async def event_stream(self, session_id: str, *, last_seq: int = 0):
+        events = list(self._events)
+
+        async def _iter():
+            for item in events:
+                yield item
+
+        yield _iter()
+
+
+@pytest.mark.asyncio
+async def test_get_reply_can_target_a_specific_turn_id():
+    """旧形状只能"取下一条未消费的终稿"，两条终稿并存时会答错题。"""
+    events = [
+        {"seq": 1, "ts": "2026-10-11T00:00:01", "type": "reply.final", "turn_id": "other", "text": "上一问的答复"},
+        {"seq": 2, "ts": "2026-10-11T00:00:02", "type": "reply.final", "turn_id": "mine", "text": "我要的那一份"},
+    ]
+    result = await _call(
+        build_mcp_server(_StreamClient(events)),
+        "negi_get_reply",
+        {"conversation": "c1", "wait_seconds": 5, "turn_id": "mine"},
+    )
+    assert result["reply"] == "我要的那一份", result
+    assert result["turn_id"] == "mine"
+    assert result["answered_seq"] == 2
+
+
+@pytest.mark.asyncio
+async def test_progress_events_reach_the_caller_without_changing_the_reply():
+    events = [
+        {"seq": 1, "ts": "2026-10-11T00:00:01", "type": "progress", "kind": "tool", "text": "🔧 sql_scan"},
+        {"seq": 2, "ts": "2026-10-11T00:00:02", "type": "reply.final", "turn_id": "mine", "text": "答复"},
+    ]
+    seen: list = []
+
+    class _Ctx:
+        async def report_progress(self, *, progress=None, message=None, total=None):
+            seen.append((progress, message))
+
+    client = _StreamClient(events)
+    async with client.event_stream("ext:probe:abc") as stream:
+        outcome = await client.wait_for_reply(
+            stream, turn_id="mine", queued=False, timeout=5, on_event=_progress_hook(_Ctx())
+        )
+    assert outcome["text"] == "答复"
+    assert seen and seen[0][1].startswith("tool:"), seen
+
+
+@pytest.mark.asyncio
+async def test_a_client_that_cannot_receive_progress_still_gets_its_reply():
+    class _Boom:
+        async def report_progress(self, **kwargs):
+            raise RuntimeError("client does not support notifications/progress")
+
+    events = [
+        {"seq": 1, "ts": "x", "type": "progress", "kind": "tool", "text": "x"},
+        {"seq": 2, "ts": "x", "type": "reply.final", "turn_id": "mine", "text": "still arrives"},
+    ]
+    client = _StreamClient(events)
+    async with client.event_stream("ext:probe:abc") as stream:
+        outcome = await client.wait_for_reply(
+            stream, turn_id="mine", queued=False, timeout=5, on_event=_progress_hook(_Boom())
+        )
+    assert outcome["kind"] == "reply" and outcome["text"] == "still arrives"
+
+
+@pytest.mark.asyncio
+async def test_get_turn_reads_the_stored_reply_and_reports_a_missing_turn():
+    class _TurnClient(G3kuMcpClient):
+        def __init__(self, payload=None, status=None):
+            super().__init__("http://127.0.0.1:1/api/v1", "stub-token")
+            self._payload = payload
+            self._status = status
+
+        async def resolve_session(self, conversation: str) -> str:
+            return "ext:probe:abc"
+
+        async def get_turn(self, session_id: str, turn_id: str) -> dict:
+            if self._status:
+                response = httpx.Response(self._status, request=httpx.Request("GET", "http://127.0.0.1:1/x"))
+                raise httpx.HTTPStatusError("nope", request=response.request, response=response)
+            return dict(self._payload)
+
+    found = await _call(
+        build_mcp_server(
+            _TurnClient(
+                payload={
+                    "text": "原文 73,328",
+                    "created_at": "2026-10-10T22:38:05",
+                    "usage": {"input_tokens": 20406},
+                    "task_ids": ["task:f031c42b53e8"],
+                }
+            )
+        ),
+        "negi_get_turn",
+        {"conversation": "c1", "turn_id": "a10e784b"},
+    )
+    assert found["reply"] == "原文 73,328"
+    assert found["task_ids"] == ["task:f031c42b53e8"]
+
+    missing = await _call(
+        build_mcp_server(_TurnClient(status=404)), "negi_get_turn", {"conversation": "c1", "turn_id": "nope"}
+    )
+    assert missing["ok"] is False and missing["error"] == "turn_not_found"
+
+
+@pytest.mark.asyncio
+async def test_session_status_exposes_time_and_activity_not_only_a_cursor():
+    class _StateClient(G3kuMcpClient):
+        async def resolve_session(self, conversation: str) -> str:
+            return "ext:probe:abc"
+
+        async def session_state(self, session_id: str) -> dict:
+            return {
+                "running": True,
+                "queued_follow_ups": 0,
+                "inflight_turn_id": "t1",
+                "started_at": "2026-10-11T00:02:09",
+                "elapsed_seconds": 900,
+                "last_activity_at": "2026-10-11T00:17:00",
+                "silence_seconds": 40,
+                "last_event_seq": 856,
+                "last_activity_kind": "progress",
+                "last_activity_text": "🔧 sql_scan",
+                "last_error": None,
+            }
+
+        def last_seq(self, session_id: str) -> int:
+            return 856
+
+    result = await _call(build_mcp_server(_StateClient()), "negi_session_status", {"conversation": "c1"})
+    assert result["silence_seconds"] == 40
+    assert result["elapsed_seconds"] == 900
+    assert result["last_activity_text"] == "🔧 sql_scan"
+    assert result["last_seq"] == 856
+
+
+def test_hub_tail_event_exposes_the_time_of_last_activity():
+    hub = SessionEventHub("ext:probe:abc", 64)
+    hub.publish("progress", turn_id="t1", kind="tool", text="🔧 exec")
+    final = hub.publish("reply.final", turn_id="t1", text="答复")
+    tail = hub.tail_event()
+    assert tail["seq"] == final["seq"] == 2
+    assert tail["ts"]
+    # 读活动不该消耗或推进任何东西：同一份缓冲区仍能整段回放
+    assert len(hub.replay(0)) == 2
+    assert hub.tail_event() == tail
