@@ -10006,7 +10006,6 @@ textarea {
     align-items: stretch;
     gap: var(--space-4);
     padding: var(--space-4);
-    padding-bottom: calc(var(--space-5) + 8px);
     overflow-y: auto;
     min-height: 0;
     flex: 1 1 auto;
@@ -10899,8 +10898,17 @@ textarea {
     justify-content: space-between;
     align-items: center;
     gap: var(--space-3);
-    padding: var(--space-4);
+    padding: var(--space-2) var(--space-4);
     border-top: 1px solid var(--border-color);
+}
+
+/* 页脚只是计数行，跟工具条同高的按钮会把它顶成一条带；三块面板各吃一份。
+   v2 主题给 .toolbar-btn 同时钉了 height 与 min-height，这里要一起压。 */
+.memory-layout .memory-footer .toolbar-btn {
+    height: 28px;
+    min-height: 28px;
+    padding: 0 10px;
+    font-size: 0.78rem;
 }
 
 .memory-card {
@@ -11058,8 +11066,10 @@ textarea {
 }
 
 .memory-column-stack > .memory-failed-panel {
-    flex: 0 1 auto;
-    max-height: 42%;
+    /* 停车区是积压面（常态几十条），队列常态为空：按 2:1 分这一列，
+       不再用 max-height 百分比给积压面设一个读不到第 3 条的上限。 */
+    flex: 2 1 0;
+    min-height: 0;
 }
 
 /* 失败记忆卡片：整体红色警示 + 右侧重试图标 */
