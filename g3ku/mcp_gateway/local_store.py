@@ -99,17 +99,24 @@ def _cursor_path() -> Path:
     return local_store_root() / CURSOR_FILENAME
 
 
-def read_wake_cursor(session_id: str) -> str:
+def read_wake_state(session_id: str) -> tuple[str, list[str]]:
+    """返回 `(游标, 已在该游标秒报过的身份)`。读不到就是没有历史：("", [])。"""
     try:
         data = json.loads(_cursor_path().read_text(encoding="utf-8"))
     except (OSError, ValueError):
-        return ""
+        return "", []
     if not isinstance(data, dict):
-        return ""
-    return str(data.get(str(session_id or "").strip()) or "")
+        return "", []
+    value = data.get(str(session_id or "").strip())
+    if isinstance(value, str):
+        # 旧形状只有游标串。这是一份本地缓存不是合同，读出形状要能容下它自己以前写过的样子。
+        return value, []
+    if not isinstance(value, dict):
+        return "", []
+    return str(value.get("since") or ""), [str(i) for i in list(value.get("reported") or [])]
 
 
-def write_wake_cursor(session_id: str, since: str) -> None:
+def write_wake_state(session_id: str, since: str, reported: list[str]) -> None:
     """尽力而为：游标写不进磁盘只意味着下次从"没有历史"重新开始，不许弄失败这次唤醒。"""
     key = str(session_id or "").strip()
     value = str(since or "").strip()
@@ -123,7 +130,7 @@ def write_wake_cursor(session_id: str, since: str) -> None:
             data = loaded
     except (OSError, ValueError):
         data = {}
-    data[key] = value
+    data[key] = {"since": value, "reported": [str(i) for i in list(reported or [])][:200]}
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(json.dumps(data, ensure_ascii=False, indent=0), encoding="utf-8")
