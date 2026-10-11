@@ -171,6 +171,7 @@ def build_mcp_server(client: G3kuMcpClient, *, name: str = "negi") -> FastMCP:
                 "turn_id": outcome.get("turn_id") or turn_id,
                 "submit_status": submit_status,
                 "task_ids": list(outcome.get("task_ids") or []),
+                "transcript_turn_id": outcome.get("transcript_turn_id"),
             }
             kind = str(outcome.get("kind") or "")
             if kind == "reply":
@@ -239,6 +240,7 @@ def build_mcp_server(client: G3kuMcpClient, *, name: str = "negi") -> FastMCP:
                     "answered_seq": int(outcome.get("seq") or 0),
                     "usage": outcome.get("usage"),
                     "task_ids": list(outcome.get("task_ids") or []),
+                    "transcript_turn_id": outcome.get("transcript_turn_id"),
                 }
             return {
                 "ok": True,
@@ -251,11 +253,13 @@ def build_mcp_server(client: G3kuMcpClient, *, name: str = "negi") -> FastMCP:
 
     @mcp.tool(
         description=(
-            "Re-read one finished turn's stored reply text by turn_id, from the session "
-            "transcript (durable: it survives this client's own context compaction, unlike "
-            "whatever summary is left in memory). Use it when you need the original numbers "
-            "of an earlier answer rather than a paraphrase. Returns http_404/turn_not_found "
-            "for a turn id this conversation never stored."
+            "Re-read one finished turn's stored reply text, from the session transcript "
+            "(durable: it survives this client's own context compaction, unlike whatever "
+            "summary is left in memory). Pass `transcript_turn_id` — the id the transcript row "
+            "carries, returned by negi_chat/negi_get_reply alongside `turn_id`. The two ids are "
+            "different namespaces on purpose: `turn_id` addresses pause/resume of the external "
+            "turn, `transcript_turn_id` addresses the stored line. Returns turn_not_found when "
+            "the given id is not a stored transcript line for this conversation."
         )
     )
     async def negi_get_turn(conversation: str, turn_id: str) -> dict[str, Any]:
