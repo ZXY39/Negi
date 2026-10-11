@@ -59,16 +59,12 @@ parameters:
       description: One batch-wide annotation shared by all entries - failure reason for fail, registration remark for keep_paused (required there), annotation for pause. Per-entry remarks are not supported.
   required: [task_id]
 governance:
-  family: task_runtime
-  display_name: Task Runtime
-  description: Control paused task nodes after an error or operator review.
-  actions:
-    - id: manage_task_nodes
-      label: Manage Task Nodes
-      risk_level: medium
-      destructive: true
-      allowed_roles:
-        - ceo
+  display_name: Manage Task Nodes
+  description: Manage task nodes after an error pause or operator review - resume, keep_paused, fail, or pause single nodes, whole subtrees (cascade), a whole task (task_id alone), or mixed per-node targets in one atomic call.
+  risk_level: medium
+  destructive: true
+  allowed_roles:
+    - ceo
 exposure:
   agent: true
   main_runtime: false

@@ -32,16 +32,12 @@ parameters:
       description: "本会话 (default) = only tasks of the current session; 全局 = tasks across all sessions."
   required: [任务类型]
 governance:
-  family: task_runtime
-  display_name: Task Runtime
-  description: List background tasks.
-  actions:
-    - id: list_cn
-      label: Task List
-      risk_level: low
-      destructive: false
-      allowed_roles:
-        - ceo
+  display_name: Task List
+  description: List task ids for a requested task category within the current session; pass 查询范围=全局 to list across all sessions (global rows carry status and session labels).
+  risk_level: low
+  destructive: false
+  allowed_roles:
+    - ceo
 recovery_policy:
   rerun_safe: true
 

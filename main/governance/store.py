@@ -8,7 +8,7 @@ from typing import TypeVar
 
 from pydantic import BaseModel
 
-from main.governance.models import RolePolicyMatrixRecord, SkillResourceRecord, ToolFamilyRecord
+from main.governance.models import RolePolicyMatrixRecord, SkillResourceRecord, ToolRecord
 from main.governance.roles import (
     normalize_public_allowed_roles,
     to_public_actor_role,
@@ -45,7 +45,7 @@ class GovernanceStore:
             )
             ''',
             '''
-            CREATE TABLE IF NOT EXISTS tool_families (
+            CREATE TABLE IF NOT EXISTS tools (
                 tool_id TEXT PRIMARY KEY,
                 enabled INTEGER NOT NULL,
                 updated_at TEXT NOT NULL,
@@ -98,6 +98,92 @@ class GovernanceStore:
         with self._lock, self._conn:
             for statement in statements:
                 self._conn.execute(statement)
+            self._migrate_legacy_tool_families()
+
+    def _migrate_legacy_tool_families(self) -> None:
+        """一次性把族粒度记录展开成工具粒度，然后删掉旧表。
+
+        角色的权威一直在 payload_json 里，role_policy_matrix 每次启动都按重建的注册表重生成
+        （实测存量非 default 行为 0），所以这里只搬 payload，旧 matrix 行直接删。
+        """
+        tables = {
+            str(row['name'])
+            for row in self._conn.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()
+        }
+        if 'tool_families' not in tables:
+            return
+        stamp = now_iso()
+        migrated = 0
+        for row in self._conn.execute('SELECT payload_json FROM tool_families').fetchall():
+            try:
+                legacy = json.loads(str(row['payload_json'] or '{}'))
+            except Exception:
+                continue
+            for payload in self._expand_legacy_family(legacy):
+                try:
+                    record = ToolRecord(**payload)
+                except Exception:
+                    continue
+                self._conn.execute(
+                    'INSERT OR REPLACE INTO tools (tool_id, enabled, updated_at, payload_json) VALUES (?, ?, ?, ?)',
+                    (record.tool_id, 1 if record.enabled else 0, stamp, record.model_dump_json()),
+                )
+                migrated += 1
+        self._conn.execute("DELETE FROM role_policy_matrix WHERE resource_kind IN ('tool_family', 'tool')")
+        self._conn.execute('DROP TABLE tool_families')
+        self._conn.execute(
+            "INSERT INTO governance_meta (key, value, updated_at) VALUES (?, ?, ?) "
+            'ON CONFLICT(key) DO UPDATE SET value=excluded.value, updated_at=excluded.updated_at',
+            ('tool_granularity_migration_v1_applied', str(migrated), stamp),
+        )
+
+    @staticmethod
+    def _expand_legacy_family(legacy: dict) -> list[dict]:
+        if not isinstance(legacy, dict):
+            return []
+        family_tool_id = str(legacy.get('tool_id') or '').strip()
+        if not family_tool_id or 'actions' not in legacy:
+            return []
+        base = {
+            'display_name': str(legacy.get('display_name') or family_tool_id),
+            'description': str(legacy.get('description') or ''),
+            'is_core': bool(legacy.get('is_core', False)),
+            'enabled': bool(legacy.get('enabled', True)),
+            'available': bool(legacy.get('available', True)),
+            'tool_type': str(legacy.get('tool_type') or 'internal'),
+            'install_dir': legacy.get('install_dir'),
+            'callable': bool(legacy.get('callable', True)),
+            'source_path': str(legacy.get('source_path') or ''),
+            'metadata': {
+                key: value
+                for key, value in dict(legacy.get('metadata') or {}).items()
+                if key != 'sources'
+            },
+        }
+        items: list[dict] = []
+        for action in list(legacy.get('actions') or []):
+            if not isinstance(action, dict):
+                continue
+            executor_names = [
+                str(name or '').strip()
+                for name in list(action.get('executor_names') or [])
+                if str(name or '').strip()
+            ] or [family_tool_id]
+            for executor_name in executor_names:
+                payload = dict(base)
+                payload.update(
+                    {
+                        'tool_id': executor_name,
+                        'display_name': str(action.get('label') or legacy.get('display_name') or executor_name),
+                        'risk_level': str(action.get('risk_level') or 'medium'),
+                        'destructive': bool(action.get('destructive', False)),
+                        'agent_visible': bool(action.get('agent_visible', True)),
+                        'admin_mode': str(action.get('admin_mode') or 'editable'),
+                        'allowed_roles': list(action.get('allowed_roles') or []),
+                    }
+                )
+                items.append(payload)
+        return items
 
     def replace_skill_resources(self, records: list[SkillResourceRecord], *, updated_at: str | None = None) -> None:
         stamp = updated_at or now_iso()
@@ -126,31 +212,31 @@ class GovernanceStore:
         row = self._fetchone('SELECT payload_json FROM skill_resources WHERE skill_id = ?', (skill_id,))
         return self._parse(row['payload_json'], SkillResourceRecord) if row else None
 
-    def replace_tool_families(self, records: list[ToolFamilyRecord], *, updated_at: str) -> None:
+    def replace_tools(self, records: list[ToolRecord], *, updated_at: str) -> None:
         with self._lock, self._conn:
-            self._conn.execute('DELETE FROM tool_families')
+            self._conn.execute('DELETE FROM tools')
             for record in records:
                 self._conn.execute(
-                    'INSERT INTO tool_families (tool_id, enabled, updated_at, payload_json) VALUES (?, ?, ?, ?)',
+                    'INSERT INTO tools (tool_id, enabled, updated_at, payload_json) VALUES (?, ?, ?, ?)',
                     (record.tool_id, 1 if record.enabled else 0, updated_at, record.model_dump_json()),
                 )
 
-    def upsert_tool_family(self, record: ToolFamilyRecord, *, updated_at: str) -> ToolFamilyRecord:
+    def upsert_tool(self, record: ToolRecord, *, updated_at: str) -> ToolRecord:
         with self._lock, self._conn:
             self._conn.execute(
-                'INSERT INTO tool_families (tool_id, enabled, updated_at, payload_json) VALUES (?, ?, ?, ?) '
+                'INSERT INTO tools (tool_id, enabled, updated_at, payload_json) VALUES (?, ?, ?, ?) '
                 'ON CONFLICT(tool_id) DO UPDATE SET enabled=excluded.enabled, updated_at=excluded.updated_at, payload_json=excluded.payload_json',
                 (record.tool_id, 1 if record.enabled else 0, updated_at, record.model_dump_json()),
             )
         return record
 
-    def list_tool_families(self) -> list[ToolFamilyRecord]:
-        rows = self._fetchall('SELECT payload_json FROM tool_families ORDER BY tool_id ASC')
-        return [self._parse(row['payload_json'], ToolFamilyRecord) for row in rows]
+    def list_tools(self) -> list[ToolRecord]:
+        rows = self._fetchall('SELECT payload_json FROM tools ORDER BY tool_id ASC')
+        return [self._parse(row['payload_json'], ToolRecord) for row in rows]
 
-    def get_tool_family(self, tool_id: str) -> ToolFamilyRecord | None:
-        row = self._fetchone('SELECT payload_json FROM tool_families WHERE tool_id = ?', (tool_id,))
-        return self._parse(row['payload_json'], ToolFamilyRecord) if row else None
+    def get_tool(self, tool_id: str) -> ToolRecord | None:
+        row = self._fetchone('SELECT payload_json FROM tools WHERE tool_id = ?', (tool_id,))
+        return self._parse(row['payload_json'], ToolRecord) if row else None
 
     def replace_default_role_policies(self, records: list[RolePolicyMatrixRecord]) -> None:
         with self._lock, self._conn:
@@ -173,12 +259,12 @@ class GovernanceStore:
         rows = self._fetchall('SELECT payload_json FROM role_policy_matrix ORDER BY actor_role, resource_kind, resource_id, action_id ASC')
         return [self._parse(row['payload_json'], RolePolicyMatrixRecord) for row in rows]
 
-    def find_role_policies(self, *, actor_role: str, resource_kind: str, resource_id: str, action_id: str) -> list[RolePolicyMatrixRecord]:
+    def find_role_policies(self, *, actor_role: str, resource_kind: str, resource_id: str, action_id: str | None = None) -> list[RolePolicyMatrixRecord]:
         """鉴权用的窄查询：只取这个主体对这个资源可能命中的行。
 
         列里的 actor_role 就是公开形态（与 payload 一致），所以按列过滤等价于
         解析后再过滤。排序 action_id DESC 让精确动作排在通配（NULL 动作）之前，
-        与调用方原先「精确动作优先」的取法一致。
+        工具记录没有动作层，存的就是 NULL。
         """
         rows = self._fetchall(
             'SELECT payload_json FROM role_policy_matrix '
@@ -330,10 +416,10 @@ class GovernanceStore:
         payload = json.loads(payload_json)
         if model_cls is SkillResourceRecord and isinstance(payload, dict):
             payload['allowed_roles'] = to_public_allowed_roles(payload.get('allowed_roles') or [])
-        elif model_cls is ToolFamilyRecord and isinstance(payload, dict):
-            for action in payload.get('actions') or []:
-                if isinstance(action, dict):
-                    action['allowed_roles'] = normalize_public_allowed_roles(action.get('allowed_roles') or [])
+        elif model_cls is ToolRecord and isinstance(payload, dict):
+            payload['allowed_roles'] = normalize_public_allowed_roles(
+                [str(role) for role in list(payload.get('allowed_roles') or [])]
+            )
         elif model_cls is RolePolicyMatrixRecord and isinstance(payload, dict):
             payload['actor_role'] = to_public_actor_role(payload.get('actor_role'))
         return model_cls.model_validate(payload)

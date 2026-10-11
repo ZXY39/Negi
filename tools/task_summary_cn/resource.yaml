@@ -27,16 +27,12 @@ parameters:
       enum: ["本会话", "全局"]
       description: "本会话 (default) = only tasks created in the current session; 全局 = tasks across all sessions."
 governance:
-  family: task_runtime
-  display_name: Task Runtime
-  description: Summarize background tasks.
-  actions:
-    - id: summary_cn
-      label: Task Summary
-      risk_level: low
-      destructive: false
-      allowed_roles:
-        - ceo
+  display_name: Task Summary
+  description: Summarize total, in-progress (with paused breakdown), and failed task counts for the current session; pass 查询范围=全局 to count tasks across all sessions.
+  risk_level: low
+  destructive: false
+  allowed_roles:
+    - ceo
 recovery_policy:
   rerun_safe: true
 

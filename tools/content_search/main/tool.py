@@ -1,4 +1,4 @@
-from tools.content.main.tool import build_single_purpose_content_tool
+from g3ku.content.tool import build_single_purpose_content_tool
 
 
 def build(runtime):

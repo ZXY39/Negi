@@ -78,9 +78,14 @@ parameters:
   type: object
   properties: {}
 governance:
-  family: example
-  display_name: Example
+  display_name: Example Tool
   description: Example governance block.
+  risk_level: medium           # low | medium | high
+  destructive: false
+  allowed_roles:               # 精确白名单；空列表 = 对该资源一律拒绝
+    - ceo
+    - execution
+  # 可选：agent_visible: false / admin_mode: readonly_system（系统只读项，不可编辑角色）
 exposure:
   agent: true
   main_runtime: true
@@ -95,6 +100,8 @@ timeout_policy:            # 可选：统一 timeout 合同行为声明（缺省
 规则：
 
 - `tool_type` 缺省时按 `internal`
+- 工具是唯一的治理单位：一个目录 = 一条治理记录 = 一个 `tool_id` = 一个可调用执行器。没有 family / actions 分组层，`governance` 里也不要写分组名；`tool_id` 必须与 `name` 一致被调用与授权
+- 既没有 `governance` 块、也不在默认治理表（`main/governance/action_mapper.py` 的 `DEFAULT_TOOL_GOVERNANCE`）里的工具不会出现在 Tool 管理面与 exposure 名单里
 - `internal` 必须有 `main/tool.py`
 - `internal` 禁止写 `install_dir`
 - `external` 禁止有 `main/`

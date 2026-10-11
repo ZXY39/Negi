@@ -301,22 +301,22 @@ class FilesystemTool:
 
     def _authorize(self, action_id: str, runtime: dict[str, Any]) -> str | None:
         service = self._main_task_service
-        checker = getattr(service, 'is_tool_action_allowed', None) if service is not None else None
+        checker = getattr(service, 'is_tool_allowed', None) if service is not None else None
         if checker is None:
             return None
+        tool_id = f'filesystem_{action_id}'
         actor_role = str(runtime.get('actor_role') or 'ceo').strip().lower() or 'ceo'
         session_id = str(runtime.get('session_key') or 'web:shared').strip() or 'web:shared'
         allowed = checker(
             actor_role=actor_role,
             session_id=session_id,
-            tool_id='filesystem',
-            action_id=action_id,
+            tool_id=tool_id,
             task_id=str(runtime.get('task_id') or '').strip() or None,
             node_id=str(runtime.get('node_id') or '').strip() or None,
         )
         if allowed:
             return None
-        return f'Error: Action not allowed for role {actor_role}: filesystem.{action_id}'
+        return f'Error: Tool not allowed for role {actor_role}: {tool_id}'
 
     def _workspace_root(self) -> Path:
         return Path(self._workspace or Path.cwd()).expanduser().resolve()

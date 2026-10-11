@@ -775,16 +775,25 @@ class MemoryAssemblyConfig(Base):
     )
     core_tools: list[str] = Field(
         default_factory=lambda: [
-            'content',
+            'content_describe',
+            'content_open',
+            'content_search',
             'create_async_task',
-            'task_summary',
+            'manage_task_nodes',
+            'perf_inspect',
+            'task_append_notice',
+            'task_delete',
+            'task_failed_nodes',
             'task_list',
+            'task_node_detail',
             'task_progress',
+            'task_stats',
+            'task_summary',
             'memory_write',
             'memory_delete',
             'memory_note',
-            'task_runtime',
-            'skill_access',
+            'load_skill_context',
+            'load_tool_context',
         ]
     )
 

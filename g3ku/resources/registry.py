@@ -280,10 +280,6 @@ class ResourceRegistry:
             name = str(getattr(descriptor, "name", "") or "").strip()
             if name:
                 names.add(name)
-            governance = dict(getattr(descriptor, "metadata", {}) or {}).get("governance") or {}
-            family = str((governance or {}).get("family") or "").strip()
-            if family:
-                names.add(family)
         return names
 
     def _apply_tool_result_delivery_contract_requirements(self, descriptor: ToolResourceDescriptor) -> None:

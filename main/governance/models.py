@@ -9,7 +9,7 @@ from main.models import Model
 ActorRole: TypeAlias = Literal['ceo', 'execution', 'inspection']
 PermissionEffect: TypeAlias = Literal['allow', 'deny']
 PermissionRiskLevel: TypeAlias = Literal['low', 'medium', 'high']
-ResourceKind: TypeAlias = Literal['skill', 'tool_family']
+ResourceKind: TypeAlias = Literal['skill', 'tool']
 
 
 class PermissionSubject(Model):
@@ -40,22 +40,15 @@ class SkillResourceRecord(Model):
     metadata: dict[str, Any] = Field(default_factory=dict)
 
 
-class ToolActionRecord(Model):
-    action_id: str
-    label: str
+class ToolRecord(Model):
+    tool_id: str
+    display_name: str
+    description: str
     risk_level: PermissionRiskLevel = 'medium'
     destructive: bool = False
     agent_visible: bool = True
     admin_mode: Literal['editable', 'readonly_system'] = 'editable'
     allowed_roles: list[ActorRole] = Field(default_factory=list)
-    executor_names: list[str] = Field(default_factory=list)
-
-
-class ToolFamilyRecord(Model):
-    tool_id: str
-    display_name: str
-    description: str
-    primary_executor_name: str = ''
     is_core: bool = False
     enabled: bool = True
     available: bool = True
@@ -63,7 +56,6 @@ class ToolFamilyRecord(Model):
     install_dir: str | None = None
     callable: bool = True
     source_path: str
-    actions: list[ToolActionRecord] = Field(default_factory=list)
     metadata: dict[str, Any] = Field(default_factory=dict)
 
 

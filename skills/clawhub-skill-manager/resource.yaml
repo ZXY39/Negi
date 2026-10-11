@@ -26,7 +26,8 @@ trigger:
 requires:
   tools:
     - exec
-    - filesystem
+    - filesystem_write
+    - filesystem_edit
   bins: []
   env: []
 content:

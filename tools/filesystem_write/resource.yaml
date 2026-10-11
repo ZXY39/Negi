@@ -37,17 +37,13 @@ parameters:
     - path
     - content
 governance:
-  family: filesystem
-  display_name: Filesystem
-  description: Write, edit, copy, move, delete, and propose patches for local files.
-  actions:
-    - id: write
-      label: Write File
-      risk_level: high
-      destructive: true
-      allowed_roles:
-        - ceo
-        - execution
+  display_name: Filesystem Write
+  description: Write file content to disk.
+  risk_level: high
+  destructive: true
+  allowed_roles:
+    - ceo
+    - execution
 exposure:
   agent: true
   main_runtime: true

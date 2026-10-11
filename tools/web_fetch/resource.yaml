@@ -90,18 +90,14 @@ behavior_contract:
     - Invalid URLs, private-network targets, or unsupported schemes return a direct tool error.
     - Timeouts, network failures, and decode failures are returned as tool errors.
 governance:
-  family: web_fetch
   display_name: Web Fetch
-  description: Fetch a public web page over HTTP(S) and return extracted readable text without browser automation.
-  actions:
-    - id: fetch
-      label: Fetch Web Page
-      risk_level: medium
-      destructive: false
-      allowed_roles:
-        - ceo
-        - execution
-        - inspection
+  description: Lightweight HTTP fetch for reading public web pages and extracting readable text without a browser runtime.
+  risk_level: medium
+  destructive: false
+  allowed_roles:
+    - ceo
+    - execution
+    - inspection
 recovery_policy:
   rerun_safe: true
 

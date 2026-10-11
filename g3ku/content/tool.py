@@ -5,7 +5,7 @@ from pathlib import Path
 from typing import Any
 
 from g3ku.content import ContentNavigationService, parse_content_envelope
-from g3ku.resources.tool_settings import ContentToolSettings, load_tool_settings_from_manifest, runtime_tool_settings
+from g3ku.resources.tool_settings import ContentToolSettings, runtime_tool_settings
 from g3ku.utils.helpers import model_data_root, resolve_model_path
 
 
@@ -56,36 +56,6 @@ class ContentTool:
             return normalized
         resolved_ref = self._normalize_ref(payload.get('resolved_ref'))
         return resolved_ref if resolved_ref.startswith('artifact:') else normalized
-
-    def _guard_ref_access(self, *, runtime: dict[str, Any] | None, ref: str | None) -> str | None:
-        payload = runtime if isinstance(runtime, dict) else {}
-        if not bool(payload.get('enforce_content_ref_allowlist')):
-            return None
-        requested_ref = self._normalize_ref(ref)
-        if not requested_ref.startswith('artifact:'):
-            return None
-        allowed_refs = sorted(
-            {
-                self._normalize_ref(item)
-                for item in list(payload.get('allowed_content_refs') or [])
-                if self._normalize_ref(item).startswith('artifact:')
-            }
-        )
-        if requested_ref in allowed_refs:
-            return None
-        requested_canonical = self._canonical_artifact_ref(requested_ref)
-        allowed_canonical_refs = {self._canonical_artifact_ref(item) for item in allowed_refs}
-        if requested_canonical in allowed_canonical_refs:
-            return None
-        return json.dumps(
-            {
-                'ok': False,
-                'error': 'artifact ref not allowed in this context',
-                'requested_ref': requested_ref,
-                'allowed_refs': allowed_refs,
-            },
-            ensure_ascii=False,
-        )
 
     @staticmethod
     def _runtime_image_multimodal_enabled(runtime: dict[str, Any] | None) -> bool:
@@ -229,26 +199,22 @@ class ContentTool:
                 if image_payload is not None:
                     payload = image_payload
                 elif target == "ref":
-                    blocked = self._guard_ref_access(runtime=runtime, ref=ref)
-                    if blocked is not None:
-                        payload = json.loads(blocked)
-                    else:
-                        payload = self._execute_operation(
-                            operation=operation,
-                            ref=ref,
-                            query=query,
-                            view=view,
-                            limit=limit,
-                            before=before,
-                            after=after,
-                            start_line=start_line,
-                            end_line=end_line,
-                            around_line=around_line,
-                            window=window,
-                            lines=lines,
-                            start_char=start_char,
-                            end_char=end_char,
-                        )
+                    payload = self._execute_operation(
+                        operation=operation,
+                        ref=ref,
+                        query=query,
+                        view=view,
+                        limit=limit,
+                        before=before,
+                        after=after,
+                        start_line=start_line,
+                        end_line=end_line,
+                        around_line=around_line,
+                        window=window,
+                        lines=lines,
+                        start_char=start_char,
+                        end_char=end_char,
+                    )
                 elif target == "path":
                     payload = self._execute_operation(
                         operation=operation,
@@ -269,24 +235,20 @@ class ContentTool:
                 else:
                     raise ValueError(f"unsupported content target: {target}")
             elif target == "ref":
-                blocked = self._guard_ref_access(runtime=runtime, ref=ref)
-                if blocked is not None:
-                    payload = json.loads(blocked)
-                else:
-                    payload = self._execute_operation(
-                        operation=operation,
-                        ref=ref,
-                        query=query,
-                        view=view,
-                        limit=limit,
-                        before=before,
-                        after=after,
-                        start_line=start_line,
-                        end_line=end_line,
-                        around_line=around_line,
-                        window=window,
-                        lines=lines,
-                    )
+                payload = self._execute_operation(
+                    operation=operation,
+                    ref=ref,
+                    query=query,
+                    view=view,
+                    limit=limit,
+                    before=before,
+                    after=after,
+                    start_line=start_line,
+                    end_line=end_line,
+                    around_line=around_line,
+                    window=window,
+                    lines=lines,
+                )
             elif target == "path":
                 payload = self._execute_operation(
                     operation=operation,
@@ -462,9 +424,6 @@ class ContentTool:
                     ),
                     ensure_ascii=False,
                 )
-            blocked = self._guard_ref_access(runtime=runtime, ref=ref)
-            if blocked is not None:
-                return blocked
             return json.dumps(
                 self._execute_operation(
                     operation=operation,
@@ -506,13 +465,9 @@ class ContentActionTool:
         )
 
 
-def build_content_tool(runtime, *, tool_name: str | None = None) -> ContentTool:
-    resolved_tool_name = str(tool_name or getattr(getattr(runtime, 'resource_descriptor', None), 'name', '') or 'content')
-    descriptor_name = str(getattr(getattr(runtime, 'resource_descriptor', None), 'name', '') or '').strip()
-    if resolved_tool_name and resolved_tool_name != descriptor_name:
-        settings = load_tool_settings_from_manifest(runtime.workspace, resolved_tool_name, ContentToolSettings)
-    else:
-        settings = runtime_tool_settings(runtime, ContentToolSettings, tool_name=resolved_tool_name)
+def build_content_tool(runtime) -> ContentTool:
+    descriptor_name = str(getattr(getattr(runtime, 'resource_descriptor', None), 'name', '') or 'content_open').strip()
+    settings = runtime_tool_settings(runtime, ContentToolSettings, tool_name=descriptor_name)
     service = getattr(runtime.services, "main_task_service", None)
     shared_store = getattr(service, "content_store", None) if service is not None else None
     artifact_store = getattr(shared_store, "_artifact_store", None)
@@ -532,11 +487,7 @@ def build_content_tool(runtime, *, tool_name: str | None = None) -> ContentTool:
 
 def build_single_purpose_content_tool(runtime, *, action: str, fixed_kwargs: dict[str, Any] | None = None) -> ContentActionTool:
     return ContentActionTool(
-        build_content_tool(runtime, tool_name='content'),
+        build_content_tool(runtime),
         action=action,
         fixed_kwargs=fixed_kwargs,
     )
-
-
-def build(runtime):
-    return build_content_tool(runtime, tool_name='content')

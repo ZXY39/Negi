@@ -23,7 +23,7 @@ parameters:
   properties:
     tool_id:
       type: string
-      description: Optional tool family id or executor tool name to load directly.
+      description: Tool name to load directly, exactly as it appears in the candidate or callable lists.
     search_query:
       type: string
       description: Optional natural-language query used to search visible tool candidates when tool_id is omitted.

@@ -35,7 +35,7 @@ from main.governance.exec_tool_policy import (
     merge_exec_execution_mode_metadata,
 )
 from main.governance.roles import normalize_public_allowed_roles
-from main.governance.tool_context import build_tool_toolskill_payload, resolve_primary_executor_name
+from main.governance.tool_context import build_tool_toolskill_payload
 from main.protocol import now_iso
 from main.storage.sqlite_store import SQLiteTaskStore
 
@@ -187,25 +187,30 @@ class _StandaloneResourceService:
     def _core_tool_resolution(self):
         return resolve_core_tool_targets(
             self._configured_core_tool_entries(),
-            list(self.resource_registry.list_tool_families()),
+            list(self.resource_registry.list_tools()),
         )
 
-    def _raw_tool_family(self, tool_id: str):
-        return self.resource_registry.get_tool_family(str(tool_id or '').strip())
+    def _raw_tool(self, tool_id: str):
+        return self.resource_registry.get_tool(str(tool_id or '').strip())
 
-    def _decorate_tool_family(self, family):
-        if family is None:
+    def _decorate_tool(self, record):
+        if record is None:
             return None
         resolution = self._core_tool_resolution()
-        metadata = dict(getattr(family, 'metadata', {}) or {})
-        metadata['repair_required'] = bool(getattr(family, 'callable', True)) and not bool(getattr(family, 'available', True))
-        return family.model_copy(update={'is_core': family.tool_id in resolution.family_ids, 'metadata': metadata})
+        metadata = dict(getattr(record, 'metadata', {}) or {})
+        metadata['repair_required'] = bool(getattr(record, 'callable', True)) and not bool(getattr(record, 'available', True))
+        return record.model_copy(
+            update={
+                'is_core': str(getattr(record, 'tool_id', '') or '').strip() in resolution.tool_ids,
+                'metadata': metadata,
+            }
+        )
 
     def list_tool_resources(self) -> list[Any]:
-        return [self._decorate_tool_family(item) for item in self.resource_registry.list_tool_families()]
+        return [self._decorate_tool(item) for item in self.resource_registry.list_tools()]
 
-    def get_tool_family(self, tool_id: str):
-        return self._decorate_tool_family(self._raw_tool_family(tool_id))
+    def get_tool(self, tool_id: str):
+        return self._decorate_tool(self._raw_tool(tool_id))
 
     def get_governance_mode(self) -> dict[str, Any]:
         return {
@@ -222,13 +227,10 @@ class _StandaloneResourceService:
             'updated_at': updated_at,
         }
 
-    def _tool_family_executor_name(self, family) -> str:
-        return resolve_primary_executor_name(family, resource_manager=self._resource_manager)
-
     def get_tool_toolskill(self, tool_id: str) -> dict[str, Any] | None:
         return build_tool_toolskill_payload(
             tool_id,
-            raw_tool_family_getter=self._raw_tool_family,
+            raw_tool_getter=self._raw_tool,
             resource_registry=self.resource_registry,
             resource_manager=self._resource_manager,
         )
@@ -249,7 +251,6 @@ class _StandaloneResourceService:
             supported_tool_names=supported,
             resource_registry=self.resource_registry,
             policy_engine=self.policy_engine,
-            mutation_allowed=True,
         )
 
     def list_visible_skill_resources(self, *, actor_role: str, session_id: str):
@@ -262,24 +263,17 @@ class _StandaloneResourceService:
         )
         return [item for item in self.resource_registry.list_skill_resources() if item.skill_id in visible_ids]
 
-    def list_visible_tool_families(self, *, actor_role: str, session_id: str):
+    def list_visible_tools(self, *, actor_role: str, session_id: str):
         visible_names = set(self.list_effective_tool_names(actor_role=actor_role, session_id=session_id))
         subject = self._subject(actor_role=actor_role, session_id=session_id)
-        families = []
-        for family in self.resource_registry.list_tool_families():
-            actions = []
-            for action in family.actions:
-                decision = self.policy_engine.evaluate_tool_action(
-                    subject=subject,
-                    tool_id=family.tool_id,
-                    action_id=action.action_id,
-                )
-                executor_visible = bool(set(action.executor_names) & visible_names)
-                if decision.allowed and (not bool(getattr(family, 'callable', True)) or executor_visible):
-                    actions.append(action)
-            if actions:
-                families.append(family.model_copy(update={'actions': actions}))
-        return families
+        tools = []
+        for record in self.resource_registry.list_tools():
+            if not bool(getattr(record, 'agent_visible', True)):
+                continue
+            decision = self.policy_engine.evaluate_tool(subject=subject, tool_id=record.tool_id)
+            if decision.allowed and (not bool(getattr(record, 'callable', True)) or record.tool_id in visible_names):
+                tools.append(record)
+        return tools
 
     def capture_resource_tree_state(self) -> dict[str, dict[str, str]]:
         return self._resource_manager.capture_resource_tree_state()
@@ -418,7 +412,7 @@ class _StandaloneResourceService:
         for actor_role in ('execution', 'inspection'):
             visible_ids = {
                 str(getattr(item, 'tool_id', '') or '').strip()
-                for item in self.list_visible_tool_families(actor_role=actor_role, session_id=session_id)
+                for item in self.list_visible_tools(actor_role=actor_role, session_id=session_id)
             }
             if tool_id in visible_ids:
                 roles.append(actor_role)
@@ -501,9 +495,9 @@ class _StandaloneResourceService:
             usage=usage,
         )
 
-    def _raise_if_tool_in_use(self, family) -> None:
-        target_tool_id = str(getattr(family, 'tool_id', '') or '').strip()
-        display_name = str(getattr(family, 'display_name', '') or target_tool_id).strip() or target_tool_id
+    def _raise_if_tool_in_use(self, record) -> None:
+        target_tool_id = str(getattr(record, 'tool_id', '') or '').strip()
+        display_name = str(getattr(record, 'display_name', '') or target_tool_id).strip() or target_tool_id
         usage = self._tool_usage_summary(target_tool_id)
         if not usage['tasks']:
             return
@@ -604,39 +598,26 @@ class _StandaloneResourceService:
         return self.update_skill_policy(skill_id, session_id=session_id, enabled=False)
 
     def delete_tool_resource(self, tool_id: str, *, session_id: str = 'web:shared') -> dict[str, Any]:
-        family = self._raw_tool_family(tool_id)
-        if family is None:
+        record = self._raw_tool(tool_id)
+        if record is None:
             raise ValueError('tool_not_found')
-        target_tool_id = str(family.tool_id or '').strip()
-        if target_tool_id in self._core_tool_resolution().family_ids:
+        target_tool_id = str(record.tool_id or '').strip()
+        if target_tool_id in self._core_tool_resolution().tool_ids:
             raise _ResourceMutationBlockedError(
                 code='core_tool_delete_forbidden',
-                message='Core tool families cannot be deleted.',
-                resource_kind='tool_family',
+                message='Core tools cannot be deleted.',
+                resource_kind='tool',
                 resource_id=target_tool_id,
             )
-        self._raise_if_tool_in_use(family)
-        descriptor_names: set[str] = {
-            str(getattr(family, 'primary_executor_name', '') or '').strip(),
-            target_tool_id,
-        }
-        for action in list(getattr(family, 'actions', []) or []):
-            descriptor_names.update(
-                str(name or '').strip()
-                for name in list(getattr(action, 'executor_names', []) or [])
-                if str(name or '').strip()
-            )
-        descriptor_names.discard('')
-        if self._resource_is_busy(ResourceKind.TOOL, *sorted(descriptor_names)):
+        self._raise_if_tool_in_use(record)
+        if self._resource_is_busy(ResourceKind.TOOL, target_tool_id):
             raise ValueError('tool_busy')
         before_state = self.capture_resource_tree_state()
         delete_paths: set[Path] = set()
         skipped_paths: list[str] = []
-        delete_paths.add(self._resolve_resource_root(family.source_path, kind=ResourceKind.TOOL))
-        for descriptor_name in sorted(descriptor_names):
-            descriptor = self._resource_manager.get_tool_descriptor(descriptor_name)
-            if descriptor is None:
-                continue
+        delete_paths.add(self._resolve_resource_root(record.source_path, kind=ResourceKind.TOOL))
+        descriptor = self._resource_manager.get_tool_descriptor(target_tool_id)
+        if descriptor is not None:
             delete_paths.add(self._resolve_resource_root(descriptor.root, kind=ResourceKind.TOOL))
             self._collect_workspace_delete_path(
                 getattr(descriptor, 'install_dir', None),
@@ -644,7 +625,7 @@ class _StandaloneResourceService:
                 skipped_paths=skipped_paths,
             )
         self._collect_workspace_delete_path(
-            getattr(family, 'install_dir', None),
+            getattr(record, 'install_dir', None),
             delete_paths=delete_paths,
             skipped_paths=skipped_paths,
         )
@@ -657,12 +638,12 @@ class _StandaloneResourceService:
             session_id=session_id,
         )
         self._governance_store.delete_role_policies_for_resource(
-            resource_kind='tool_family',
+            resource_kind='tool',
             resource_id=target_tool_id,
         )
         return {
             'tool_id': target_tool_id,
-            'path': str(self._resolve_resource_root(family.source_path, kind=ResourceKind.TOOL)),
+            'path': str(self._resolve_resource_root(record.source_path, kind=ResourceKind.TOOL)),
             'deleted_paths': deleted_paths,
             'skipped_paths': skipped_paths,
             'resources': refresh_result,
@@ -679,63 +660,49 @@ class _StandaloneResourceService:
         *,
         session_id: str = 'web:shared',
         enabled: bool | None = None,
-        allowed_roles_by_action: dict[str, list[str]] | None = None,
+        allowed_roles: list[str] | None = None,
         execution_mode: str | None = None,
     ):
         _ = session_id
-        family = self._raw_tool_family(tool_id)
-        if family is None:
+        record = self._raw_tool(tool_id)
+        if record is None:
             return None
-        target_tool_id = str(getattr(family, 'tool_id', '') or '').strip()
-        is_core = target_tool_id in self._core_tool_resolution().family_ids
-        if is_core and enabled is not None and not bool(enabled):
-            raise _ResourceMutationBlockedError(
-                code='core_tool_disable_forbidden',
-                message='Core tool families cannot be disabled.',
-                resource_kind='tool_family',
-                resource_id=target_tool_id,
-            )
-        allowed_roles_by_action = dict(allowed_roles_by_action or {})
-        actions = []
-        for action in family.actions:
-            roles = allowed_roles_by_action.get(action.action_id)
-            if str(getattr(action, 'admin_mode', 'editable') or 'editable') == 'readonly_system' and roles is not None:
-                normalized_roles = normalize_public_allowed_roles([str(role) for role in list(roles or [])])
-                current_roles = normalize_public_allowed_roles(list(getattr(action, 'allowed_roles', []) or []))
-                if normalized_roles != current_roles:
-                    raise _ResourceMutationBlockedError(
-                        code='tool_action_readonly',
-                        message='Readonly system actions cannot be edited.',
-                        resource_kind='tool_family',
-                        resource_id=target_tool_id,
-                        details={'action_id': action.action_id},
-                    )
-            next_roles = (
-                list(getattr(action, 'allowed_roles', []) or [])
-                if roles is None
-                else normalize_public_allowed_roles([str(role) for role in list(roles or [])])
-            )
-            actions.append(action.model_copy(update={'allowed_roles': next_roles}))
+        target_tool_id = str(getattr(record, 'tool_id', '') or '').strip()
+        if allowed_roles is not None and str(getattr(record, 'admin_mode', 'editable') or 'editable') == 'readonly_system':
+            normalized_roles = normalize_public_allowed_roles([str(role) for role in list(allowed_roles or [])])
+            current_roles = normalize_public_allowed_roles(list(getattr(record, 'allowed_roles', []) or []))
+            if normalized_roles != current_roles:
+                raise _ResourceMutationBlockedError(
+                    code='tool_readonly',
+                    message='Readonly system tools cannot be edited.',
+                    resource_kind='tool',
+                    resource_id=target_tool_id,
+                )
         if execution_mode is not None and not exec_tool_supports_execution_mode(target_tool_id):
             raise _ResourceMutationBlockedError(
                 code='tool_execution_mode_unsupported',
-                message='execution_mode is only supported for exec_runtime.',
-                resource_kind='tool_family',
+                message='execution_mode is only supported for exec.',
+                resource_kind='tool',
                 resource_id=target_tool_id,
             )
-        updated = family.model_copy(
+        next_roles = (
+            list(getattr(record, 'allowed_roles', []) or [])
+            if allowed_roles is None
+            else normalize_public_allowed_roles([str(role) for role in list(allowed_roles or [])])
+        )
+        updated = record.model_copy(
             update={
-                'enabled': family.enabled if enabled is None else bool(enabled),
-                'actions': actions,
+                'enabled': record.enabled if enabled is None else bool(enabled),
+                'allowed_roles': next_roles,
                 'metadata': merge_exec_execution_mode_metadata(
-                    getattr(family, 'metadata', {}) or {},
+                    getattr(record, 'metadata', {}) or {},
                     execution_mode=execution_mode,
                 ),
             }
         )
-        self._governance_store.upsert_tool_family(updated, updated_at=now_iso())
+        self._governance_store.upsert_tool(updated, updated_at=now_iso())
         self.policy_engine.sync_default_role_policies()
-        return self.get_tool_family(target_tool_id)
+        return self.get_tool(target_tool_id)
 
     def enable_tool(self, tool_id: str, *, session_id: str = 'web:shared'):
         return self.update_tool_policy(tool_id, session_id=session_id, enabled=True)
@@ -1905,7 +1872,7 @@ async def decide_exec_approval(approval_id: str, payload: dict = Body(...)):
 @router.get('/resources/tools/{tool_id}')
 async def get_tool(tool_id: str):
     with _resource_service() as service:
-        item = service.get_tool_family(tool_id)
+        item = service.get_tool(tool_id)
         if item is None:
             raise HTTPException(status_code=404, detail='tool_not_found')
         return {'ok': True, 'item': item.model_dump(mode='json')}
@@ -1922,20 +1889,17 @@ async def get_tool_toolskill(tool_id: str):
 
 @router.put('/resources/tools/{tool_id}/policy')
 async def update_tool_policy(tool_id: str, payload: dict = Body(...), session_id: str = Query('web:shared')):
+    roles_payload = payload.get('allowed_roles')
+    normalized_roles: list[str] | None = None
+    if isinstance(roles_payload, list):
+        normalized_roles = [str(role) for role in roles_payload]
     with _resource_service() as service:
-        actions_payload = payload.get('actions') if isinstance(payload.get('actions'), dict) else None
-        normalized_actions: dict[str, list[str]] | None = None
-        if actions_payload is not None:
-            normalized_actions = {
-                str(action_id): [str(role) for role in (roles or [])]
-                for action_id, roles in actions_payload.items()
-            }
         try:
             item = service.update_tool_policy(
                 tool_id,
                 session_id=session_id,
                 enabled=payload.get('enabled'),
-                allowed_roles_by_action=normalized_actions,
+                allowed_roles=normalized_roles,
                 execution_mode=payload.get('execution_mode'),
             )
         except ValueError as exc:

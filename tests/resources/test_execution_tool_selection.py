@@ -5,20 +5,12 @@ from types import SimpleNamespace
 from g3ku.runtime.context.execution_tool_selection import build_execution_tool_selection
 
 
-def _tool_family_record(tool_id: str, *, description: str = "", executors: list[str] | None = None):
+def _tool_record(tool_id: str, *, description: str = ""):
     return SimpleNamespace(
         tool_id=tool_id,
         display_name=tool_id,
         description=description or tool_id,
-        primary_executor_name=(list(executors or [tool_id])[0] if list(executors or [tool_id]) else ""),
         metadata={"l0": description or tool_id, "l1": description or tool_id},
-        actions=[
-            SimpleNamespace(
-                action_id="default",
-                executor_names=list(executors or [tool_id]),
-                agent_visible=True,
-            )
-        ],
     )
 
 
@@ -27,9 +19,9 @@ def test_selector_keeps_only_internal_protocol_and_fixed_builtin_tools_callable(
         prompt="inspect repo and summarize",
         goal="inspect repo and summarize",
         core_requirement="inspect repo and summarize",
-        visible_tool_families=[
-            _tool_family_record("filesystem", executors=["filesystem_write"]),
-            _tool_family_record("exec_runtime", executors=["exec"]),
+        visible_tool_items=[
+            _tool_record("filesystem_write"),
+            _tool_record("exec"),
         ],
         visible_tool_names=[
             "submit_next_stage",
@@ -60,10 +52,11 @@ def test_selector_does_not_promote_non_builtin_candidates_without_hydration() ->
         prompt="write files and inspect memory",
         goal="write files and inspect memory",
         core_requirement="write files and inspect memory",
-        visible_tool_families=[
-            _tool_family_record("filesystem", executors=["filesystem_write", "filesystem_edit"]),
-            _tool_family_record("memory", executors=["memory_note"]),
-            _tool_family_record("web_fetch", executors=["web_fetch"]),
+        visible_tool_items=[
+            _tool_record("filesystem_write"),
+            _tool_record("filesystem_edit"),
+            _tool_record("memory_note"),
+            _tool_record("web_fetch"),
         ],
         visible_tool_names=[
             "submit_next_stage",
@@ -101,10 +94,10 @@ def test_selector_promoted_tools_remain_concrete_and_do_not_consume_top_k_budget
         prompt="apply patch and inspect docs",
         goal="apply patch and inspect docs",
         core_requirement="apply patch and inspect docs",
-        visible_tool_families=[
-            _tool_family_record("filesystem", executors=["filesystem_propose_patch"]),
-            _tool_family_record("content_navigation", executors=["content_open"]),
-            _tool_family_record("memory", executors=["memory_note"]),
+        visible_tool_items=[
+            _tool_record("filesystem_propose_patch"),
+            _tool_record("content_open"),
+            _tool_record("memory_note"),
         ],
         visible_tool_names=[
             "submit_next_stage",
@@ -138,37 +131,25 @@ def test_selector_promoted_tools_remain_concrete_and_do_not_consume_top_k_budget
     assert result.trace["selected_executor_scores"] == []
 
 
-def test_selector_accepts_runtime_helper_dict_shape_families() -> None:
+def test_selector_accepts_runtime_helper_dict_shape_tools() -> None:
     result = build_execution_tool_selection(
         prompt="inspect repo",
         goal="inspect repo",
         core_requirement="inspect repo",
-        visible_tool_families=[
+        visible_tool_items=[
             {
-                "tool_id": "filesystem",
-                "display_name": "filesystem",
-                "description": "filesystem",
-                "l0": "filesystem",
-                "l1": "filesystem",
-                "actions": [
-                    {
-                        "action_id": "write",
-                        "executor_names": ["filesystem_write"],
-                    }
-                ],
+                "tool_id": "filesystem_write",
+                "display_name": "filesystem_write",
+                "description": "filesystem_write",
+                "l0": "filesystem_write",
+                "l1": "filesystem_write",
             },
             {
-                "tool_id": "exec_runtime",
-                "display_name": "exec_runtime",
-                "description": "exec_runtime",
-                "l0": "exec_runtime",
-                "l1": "exec_runtime",
-                "actions": [
-                    {
-                        "action_id": "run",
-                        "executor_names": ["exec"],
-                    }
-                ],
+                "tool_id": "exec",
+                "display_name": "exec",
+                "description": "exec",
+                "l0": "exec",
+                "l1": "exec",
             },
         ],
         visible_tool_names=[
@@ -186,7 +167,7 @@ def test_selector_accepts_runtime_helper_dict_shape_families() -> None:
         ],
     )
 
-    assert result.lightweight_tool_ids == ["filesystem", "exec_runtime"]
+    assert result.lightweight_tool_ids == ["filesystem_write", "exec"]
     assert result.hydrated_tool_names == [
         "submit_next_stage",
         "submit_final_result",

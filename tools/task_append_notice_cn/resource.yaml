@@ -38,16 +38,12 @@ parameters:
       description: The appended notice, requirement, constraint, or acceptance detail.
   required: [message]
 governance:
-  family: task_runtime
-  display_name: Task Runtime
-  description: Append new requirements or acceptance details to unfinished tasks.
-  actions:
-    - id: append_notice_cn
-      label: Task Append Notice
-      risk_level: medium
-      destructive: false
-      allowed_roles:
-        - ceo
+  display_name: Task Append Notice
+  description: Append a notice to an existing unfinished task in the current session; pass node_ids to target specific nodes and freeze only their subtrees during distribution.
+  risk_level: medium
+  destructive: false
+  allowed_roles:
+    - ceo
 exposure:
   agent: true
   main_runtime: false

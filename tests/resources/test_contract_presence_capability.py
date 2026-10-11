@@ -157,9 +157,9 @@ def _node_service(
         else [TOOL_ID, OTHER_ID, "filesystem_edit", "exec", STAGE_TOOL_NAME, "submit_final_result"]
     )
     service.list_effective_tool_names = lambda *, actor_role, session_id: list(effective_visible)
-    service.list_visible_tool_families = lambda *, actor_role, session_id: [
-        SimpleNamespace(tool_id="filesystem", actions=[SimpleNamespace(executor_names=[TOOL_ID, "filesystem_edit"])]),
-        SimpleNamespace(tool_id="content", actions=[SimpleNamespace(executor_names=[OTHER_ID])]),
+    service.list_visible_tools = lambda *, actor_role, session_id: [
+        SimpleNamespace(tool_id=tool_id)
+        for tool_id in (TOOL_ID, "filesystem_edit", OTHER_ID)
     ]
     log_service.upsert_frame(
         "task-cp",
@@ -258,7 +258,7 @@ def test_node_revoked_name_returns_to_candidate() -> None:
         prompt="p",
         goal="g",
         core_requirement="g",
-        visible_tool_families=[],
+        visible_tool_items=[],
         visible_tool_names=list(visible),
         always_callable_tool_names=[name for name in visible if name != TOOL_ID],
         promoted_tool_names=[],

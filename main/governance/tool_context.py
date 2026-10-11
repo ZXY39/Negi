@@ -10,8 +10,7 @@ from g3ku.json_schema_utils import (
     render_parameter_contract_markdown,
 )
 from main.governance.exec_tool_policy import (
-    EXEC_TOOL_EXECUTOR_NAME,
-    EXEC_TOOL_FAMILY_ID,
+    EXEC_TOOL_ID,
     resolve_exec_runtime_policy_payload,
 )
 
@@ -26,7 +25,7 @@ PROMOTION_HELP = {
         "该名字不在本轮候选工具里，本次加载只返回说明、不会提升它；"
         "请从合同里的本轮候选工具名单中选择，或直接使用本轮可调用名单中的工具。"
     ),
-    "not_promotable": "该资源没有可提升的具体执行器（家族 id 或 legacy 单体不算），请改用同家族的 concrete 工具名。",
+    "not_promotable": "该工具不需要水合（常驻内置工具本轮直接可调用），请改用本轮可调用名单中的工具。",
 }
 
 
@@ -140,44 +139,22 @@ def apply_runtime_tool_context_projection(
     return projected
 
 
-def find_tool_family(
+def find_tool_record(
     tool_id: str,
     *,
-    raw_tool_family_getter: Callable[[str], Any | None],
+    raw_tool_getter: Callable[[str], Any | None],
     resource_registry: Any,
 ) -> Any | None:
     needle = str(tool_id or "").strip()
     if not needle:
         return None
-    family = raw_tool_family_getter(needle)
-    if family is not None:
-        return family
-    for item in list(getattr(resource_registry, "list_tool_families", lambda: [])() or []):
-        action_names = {
-            str(executor_name or "").strip()
-            for action in list(getattr(item, "actions", []) or [])
-            for executor_name in list(getattr(action, "executor_names", []) or [])
-            if str(executor_name or "").strip()
-        }
-        if needle in action_names:
+    record = raw_tool_getter(needle)
+    if record is not None:
+        return record
+    for item in list(getattr(resource_registry, "list_tools", lambda: [])() or []):
+        if str(getattr(item, "tool_id", "") or "").strip() == needle:
             return item
     return None
-
-
-def resolve_primary_executor_name(family: Any, *, resource_manager: Any) -> str:
-    primary = str(getattr(family, "primary_executor_name", "") or "").strip()
-    if primary:
-        return primary
-    for action in list(getattr(family, "actions", []) or []):
-        for executor_name in list(getattr(action, "executor_names", []) or []):
-            name = str(executor_name or "").strip()
-            if name:
-                return name
-    fallback = str(getattr(family, "tool_id", "") or "").strip()
-    descriptor = resource_manager.get_tool_descriptor(fallback) if resource_manager is not None and fallback else None
-    if descriptor is not None:
-        return fallback
-    return ""
 
 
 def _agent_facing_parameters_schema(*, descriptor: Any, runtime_instance: Any) -> dict[str, Any]:
@@ -187,7 +164,7 @@ def _agent_facing_parameters_schema(*, descriptor: Any, runtime_instance: Any) -
     if isinstance(runtime_model_parameters, dict) and type(runtime_instance).__name__ != "RepairRequiredTool":
         return normalize_object_json_schema(runtime_model_parameters)
 
-    metadata = dict(getattr(descriptor, "metadata", {}) or {})
+    metadata = dict(getattr(descriptor, "metadata", {}) or {}) if descriptor is not None else {}
     configured_model_parameters = metadata.get("model_parameters")
     if isinstance(configured_model_parameters, dict):
         return normalize_object_json_schema(configured_model_parameters)
@@ -198,121 +175,82 @@ def _agent_facing_parameters_schema(*, descriptor: Any, runtime_instance: Any) -
 def build_tool_toolskill_payload(
     tool_id: str,
     *,
-    raw_tool_family_getter: Callable[[str], Any | None],
+    raw_tool_getter: Callable[[str], Any | None],
     resource_registry: Any,
     resource_manager: Any,
 ) -> dict[str, Any] | None:
+    """按工具名取说明正文与参数契约。工具 id 就是执行器名，没有中间层。"""
     requested_name = str(tool_id or "").strip()
     if not requested_name:
         return None
 
-    family = find_tool_family(
+    record = find_tool_record(
         requested_name,
-        raw_tool_family_getter=raw_tool_family_getter,
+        raw_tool_getter=raw_tool_getter,
         resource_registry=resource_registry,
     )
-
-    requested_descriptor = resource_manager.get_tool_descriptor(requested_name) if resource_manager is not None else None
-    if family is None and requested_descriptor is None:
+    descriptor = resource_manager.get_tool_descriptor(requested_name) if resource_manager is not None else None
+    if record is None and descriptor is None:
         return None
-
-    primary_executor_name = (
-        resolve_primary_executor_name(family, resource_manager=resource_manager)
-        if family is not None
-        else requested_name
-    )
-
-    candidate_names: list[str] = []
-    for candidate in (
-        requested_name,
-        primary_executor_name,
-        str(getattr(family, "tool_id", "") or "").strip() if family is not None else "",
-    ):
-        normalized = str(candidate or "").strip()
-        if normalized and normalized not in candidate_names:
-            candidate_names.append(normalized)
 
     content = ""
     path = ""
-    toolskill_source_name = ""
-    source_descriptor = None
-    for candidate in candidate_names:
-        if resource_manager is None:
-            break
-        descriptor = resource_manager.get_tool_descriptor(candidate)
-        if descriptor is None:
-            continue
-        if source_descriptor is None:
-            source_descriptor = descriptor
-            toolskill_source_name = candidate
+    if descriptor is not None:
         toolskill_path = getattr(descriptor, "toolskills_main_path", None)
-        if toolskill_path is None or not toolskill_path.exists():
-            continue
-        try:
-            content = resource_manager.load_toolskill_body(candidate)
-        except FileNotFoundError:
-            content = ""
-        path = str(toolskill_path)
-        source_descriptor = descriptor
-        toolskill_source_name = candidate
-        break
+        if toolskill_path is not None and toolskill_path.exists():
+            path = str(toolskill_path)
+            try:
+                content = resource_manager.load_toolskill_body(requested_name)
+            except FileNotFoundError:
+                content = ""
 
-    if source_descriptor is None:
-        source_descriptor = requested_descriptor
-    if not path and source_descriptor is not None and getattr(source_descriptor, "toolskills_main_path", None) is not None:
-        path = str(source_descriptor.toolskills_main_path)
-
-    effective_descriptor = requested_descriptor or source_descriptor
-    runtime_instance_name = requested_name if requested_descriptor is not None else toolskill_source_name
-    runtime_instance = resource_manager.get_tool(runtime_instance_name) if resource_manager is not None and runtime_instance_name else None
+    runtime_instance = resource_manager.get_tool(requested_name) if resource_manager is not None else None
     runtime_repair_required = type(runtime_instance).__name__ == "RepairRequiredTool"
     runtime_repair_reason = str(getattr(runtime_instance, "_reason", "") or "").strip() if runtime_repair_required else ""
 
     tool_type = str(
-        getattr(effective_descriptor, "tool_type", "")
-        or getattr(family, "tool_type", "internal")
+        getattr(descriptor, "tool_type", "")
+        or getattr(record, "tool_type", "internal")
         or "internal"
     )
     install_dir = str(
-        getattr(effective_descriptor, "install_dir", None)
-        or getattr(family, "install_dir", None)
+        getattr(descriptor, "install_dir", None)
+        or getattr(record, "install_dir", None)
         or ""
     ).strip() or None
-    callable_flag = bool(getattr(effective_descriptor, "callable", getattr(family, "callable", True)))
-    available_flag = bool(getattr(effective_descriptor, "available", getattr(family, "available", True)))
+    callable_flag = bool(getattr(descriptor, "callable", getattr(record, "callable", True)))
+    available_flag = bool(getattr(descriptor, "available", getattr(record, "available", True)))
     if runtime_repair_required:
         available_flag = False
 
+    record_metadata = dict(getattr(record, "metadata", {}) or {}) if record is not None else {}
     warnings: list[str] = []
-    for item in list(getattr(effective_descriptor, "warnings", []) or []):
-        warning = str(item or "").strip()
-        if warning and warning not in warnings:
-            warnings.append(warning)
-    for item in list(getattr(family, "metadata", {}).get("warnings") or []):
+    for item in [
+        *list(getattr(descriptor, "warnings", []) or []),
+        *list(record_metadata.get("warnings") or []),
+    ]:
         warning = str(item or "").strip()
         if warning and warning not in warnings:
             warnings.append(warning)
 
     errors: list[str] = []
-    for item in list(getattr(effective_descriptor, "errors", []) or []):
-        error = str(item or "").strip()
-        if error and error not in errors:
-            errors.append(error)
-    for item in list(getattr(family, "metadata", {}).get("errors") or []):
+    for item in [
+        *list(getattr(descriptor, "errors", []) or []),
+        *list(record_metadata.get("errors") or []),
+    ]:
         error = str(item or "").strip()
         if error and error not in errors:
             errors.append(error)
     if runtime_repair_reason and runtime_repair_reason not in errors:
         errors.append(runtime_repair_reason)
 
-    family_tool_id = str(getattr(family, "tool_id", "") or "").strip() if family is not None else ""
     description = str(
-        getattr(effective_descriptor, "description", "")
-        or getattr(family, "description", "")
+        getattr(descriptor, "description", "")
+        or getattr(record, "description", "")
         or requested_name
     ).strip() or requested_name
     parameters_schema = _agent_facing_parameters_schema(
-        descriptor=effective_descriptor,
+        descriptor=descriptor,
         runtime_instance=runtime_instance,
     )
     required_parameters = [
@@ -321,17 +259,15 @@ def build_tool_toolskill_payload(
         if str(item or "").strip()
     ]
     exec_runtime_policy = None
-    if requested_name in {EXEC_TOOL_FAMILY_ID, EXEC_TOOL_EXECUTOR_NAME} or family_tool_id == EXEC_TOOL_FAMILY_ID:
+    if requested_name == EXEC_TOOL_ID:
         exec_runtime_policy = resolve_exec_runtime_policy_payload(
-            family=family,
-            descriptor=effective_descriptor,
+            record=record,
+            descriptor=descriptor,
         )
 
     return {
         "tool_id": requested_name,
-        "family_tool_id": family_tool_id or requested_name,
-        "primary_executor_name": primary_executor_name,
-        "toolskill_source_name": toolskill_source_name or requested_name,
+        "display_name": str(getattr(record, "display_name", "") or requested_name).strip() or requested_name,
         "content": content,
         "path": path,
         "description": description,

@@ -6,33 +6,36 @@ from types import SimpleNamespace
 import pytest
 
 from g3ku.agent.tools.main_runtime import LoadSkillContextTool
-from main.governance.models import ToolActionRecord, ToolFamilyRecord
+from main.governance.models import ToolRecord
 from main.service.runtime_service import MainRuntimeService
 
 
+def _agent_browser_record(**overrides) -> ToolRecord:
+    payload = {
+        'tool_id': 'agent_browser',
+        'display_name': 'Agent Browser',
+        'description': 'Browser automation via the upstream CLI.',
+        'allowed_roles': ['ceo'],
+        'enabled': True,
+        'available': True,
+        'callable': True,
+        'source_path': 'tools/agent_browser',
+        'metadata': {},
+    }
+    payload.update(overrides)
+    return ToolRecord(**payload)
+
+
 def test_main_runtime_service_keeps_enabled_but_unregistered_callable_tool_visible_for_context_lookup():
-    family = ToolFamilyRecord(
-        tool_id='agent_browser',
-        display_name='Agent Browser',
-        description='Browser automation via the upstream CLI.',
-        primary_executor_name='agent_browser',
-        enabled=True,
-        available=True,
-        callable=True,
-        source_path='tools/agent_browser',
-        actions=[
-            ToolActionRecord(action_id='browse', label='Browse', allowed_roles=['ceo'], executor_names=['agent_browser']),
-        ],
-        metadata={},
-    )
+    tool = _agent_browser_record()
 
     class _Registry:
-        def list_tool_families(self):
-            return [family]
+        def list_tools(self):
+            return [tool]
 
     class _PolicyEngine:
-        def evaluate_tool_action(self, *, subject, tool_id: str, action_id: str):
-            _ = subject, tool_id, action_id
+        def evaluate_tool(self, *, subject, tool_id: str):
+            _ = subject, tool_id
             return SimpleNamespace(allowed=True, reason_code='ok')
 
     service = object.__new__(MainRuntimeService)
@@ -41,37 +44,25 @@ def test_main_runtime_service_keeps_enabled_but_unregistered_callable_tool_visib
     service.list_effective_tool_names = lambda **kwargs: []
     service._subject = lambda **kwargs: SimpleNamespace(**kwargs)
 
-    visible = service.list_visible_tool_families(actor_role='ceo', session_id='web:shared')
+    visible = service.list_visible_tools(actor_role='ceo', session_id='web:shared')
 
     assert len(visible) == 1
     assert visible[0].tool_id == 'agent_browser'
-    assert [action.action_id for action in visible[0].actions] == ['browse']
+    # 一层形状：工具记录自己就是被授权的对象，没有动作名单可对照，可见项就是这条记录本身。
+    assert not hasattr(visible[0], 'actions')
     assert visible[0].metadata['context_lookup_only'] is True
 
 
 def test_load_tool_context_search_includes_enabled_but_unregistered_callable_tool():
-    family = ToolFamilyRecord(
-        tool_id='agent_browser',
-        display_name='Agent Browser',
-        description='Browser automation via the upstream CLI.',
-        primary_executor_name='agent_browser',
-        enabled=True,
-        available=True,
-        callable=True,
-        source_path='tools/agent_browser',
-        actions=[
-            ToolActionRecord(action_id='browse', label='Browse', allowed_roles=['ceo'], executor_names=['agent_browser']),
-        ],
-        metadata={},
-    )
+    tool = _agent_browser_record()
 
     class _Registry:
-        def list_tool_families(self):
-            return [family]
+        def list_tools(self):
+            return [tool]
 
     class _PolicyEngine:
-        def evaluate_tool_action(self, *, subject, tool_id: str, action_id: str):
-            _ = subject, tool_id, action_id
+        def evaluate_tool(self, *, subject, tool_id: str):
+            _ = subject, tool_id
             return SimpleNamespace(allowed=True, reason_code='ok')
 
     service = object.__new__(MainRuntimeService)
@@ -93,40 +84,34 @@ def test_load_tool_context_search_includes_enabled_but_unregistered_callable_too
     assert payload['candidates'][0]['available'] is True
 
 
-def test_decorated_tool_family_exposes_repair_required_metadata_and_toolskill_flag():
-    family = ToolFamilyRecord(
-        tool_id='agent_browser',
-        display_name='Agent Browser',
-        description='Browser automation via the upstream CLI.',
-        primary_executor_name='agent_browser',
-        enabled=True,
-        available=False,
-        callable=True,
-        source_path='tools/agent_browser',
-        actions=[
-            ToolActionRecord(action_id='browse', label='Browse', allowed_roles=['ceo'], executor_names=['agent_browser']),
-        ],
-        metadata={'warnings': ['missing required paths']},
-    )
+def test_decorated_tool_exposes_repair_required_metadata_and_toolskill_flag():
+    tool = _agent_browser_record(available=False, metadata={'warnings': ['missing required paths']})
 
     class _Registry:
-        def list_tool_families(self):
-            return [family]
+        def list_tools(self):
+            return [tool]
+
+        def get_tool(self, tool_id: str):
+            return tool if tool_id == 'agent_browser' else None
 
     service = object.__new__(MainRuntimeService)
     service.resource_registry = _Registry()
-    service._core_tool_resolution = lambda: SimpleNamespace(family_ids=set())
-    service._raw_tool_family = lambda tool_id: family if tool_id == 'agent_browser' else None
-    service._tool_family_executor_name = lambda family: 'agent_browser'
+    service._core_tool_resolution = lambda: SimpleNamespace(tool_ids=set(), unresolved_entries=[])
+    service._raw_tool = lambda tool_id: tool if tool_id == 'agent_browser' else None
     service._resource_manager = None
 
-    decorated = service.get_tool_family('agent_browser')
+    decorated = service.get_tool('agent_browser')
     payload = service.get_tool_toolskill('agent_browser')
 
     assert decorated is not None
     assert decorated.metadata['repair_required'] is True
     assert payload is not None
+    assert payload['tool_id'] == 'agent_browser'
     assert payload['repair_required'] is True
+    # 族粒度取消后 payload 不再携带任何族/主执行器字段。
+    assert 'family_tool_id' not in payload
+    assert 'primary_executor_name' not in payload
+    assert 'toolskill_source_name' not in payload
 
 
 @pytest.mark.asyncio

@@ -1,62 +1,13 @@
 from __future__ import annotations
 
-from collections import OrderedDict
 from typing import Any
 
 from g3ku.resources.models import SkillResourceDescriptor, ToolResourceDescriptor
 from main.governance.action_mapper import DEFAULT_ALLOWED_ROLES, get_default_tool_governance
-from main.governance.models import SkillResourceRecord, ToolActionRecord, ToolFamilyRecord
+from main.governance.models import SkillResourceRecord, ToolRecord
 from main.governance.roles import normalize_public_allowed_roles, to_public_allowed_roles
 
 ALL_ROLES = list(DEFAULT_ALLOWED_ROLES)
-
-
-def _primary_executor_name(actions: list[ToolActionRecord], *, preferred_executor_name: str = '') -> str:
-    preferred = str(preferred_executor_name or '').strip()
-    visible_actions = [action for action in actions if bool(getattr(action, 'agent_visible', True))]
-    governance = get_default_tool_governance(preferred)
-    governance_order = [
-        str(item.get('id') or '').strip()
-        for item in list((governance or {}).get('actions') or [])
-        if str(item.get('id') or '').strip()
-    ]
-    if governance_order:
-        action_map = {str(action.action_id or '').strip(): action for action in visible_actions or actions}
-        for action_id in governance_order:
-            action = action_map.get(action_id)
-            if action is None:
-                continue
-            for executor_name in action.executor_names or []:
-                name = str(executor_name or '').strip()
-                if name and name != preferred:
-                    return name
-    for action in visible_actions or actions:
-        for executor_name in action.executor_names or []:
-            name = str(executor_name or '').strip()
-            if name and name != preferred:
-                return name
-    if preferred:
-        for action in visible_actions or actions:
-            for executor_name in action.executor_names or []:
-                name = str(executor_name or '').strip()
-                if name == preferred:
-                    return name
-    for action in visible_actions or actions:
-        for executor_name in action.executor_names or []:
-            name = str(executor_name or '').strip()
-            if name:
-                return name
-    return ''
-
-
-def _ordered_actions(actions: list[ToolActionRecord]) -> list[ToolActionRecord]:
-    return sorted(
-        actions,
-        key=lambda action: (
-            not bool(getattr(action, 'agent_visible', True)),
-            str(getattr(action, 'admin_mode', 'editable') or 'editable') == 'readonly_system',
-        ),
-    )
 
 
 def build_skill_resources(skill_descriptors: list[SkillResourceDescriptor], *, default_risk_level: str, exclude_names: set[str] | None = None) -> list[SkillResourceRecord]:
@@ -98,85 +49,42 @@ def build_skill_resources(skill_descriptors: list[SkillResourceDescriptor], *, d
     return items
 
 
-def build_tool_families(tool_descriptors: list[ToolResourceDescriptor]) -> list[ToolFamilyRecord]:
-    grouped: OrderedDict[str, dict[str, Any]] = OrderedDict()
+def build_tool_records(tool_descriptors: list[ToolResourceDescriptor]) -> list[ToolRecord]:
+    """一个工具一条治理记录。
+
+    只有显式声明 governance 或列在默认治理表里的工具才进管理面；两者都没有的工具
+    （常驻内部控制工具）按设计不出现在 exposure 名单里。
+    """
+    items: list[ToolRecord] = []
     for descriptor in tool_descriptors:
         governance = _tool_governance(descriptor)
         if governance is None:
             continue
         explicit_governance = _has_explicit_tool_governance(descriptor)
-        tool_id = str(governance.get('tool_id') or descriptor.name)
-        family = grouped.setdefault(
-            tool_id,
-            {
-                'tool_id': tool_id,
-                'display_name': str(governance.get('display_name') or descriptor.name or tool_id),
-                'description': str(governance.get('description') or descriptor.description),
-                'enabled': bool(descriptor.enabled),
-                'available': bool(descriptor.available),
-                'tool_type': str(getattr(descriptor, 'tool_type', 'internal') or 'internal'),
-                'install_dir': str(getattr(descriptor, 'install_dir', '') or '') or None,
-                'callable': bool(getattr(descriptor, 'callable', True)),
-                'source_path': str(descriptor.root),
-                'actions': OrderedDict(),
-                'metadata': {
-                    'sources': [descriptor.root.name],
-                    'warnings': list(descriptor.warnings),
-                    'errors': list(descriptor.errors),
-                    'repair_required': bool(getattr(descriptor, 'callable', True)) and not bool(descriptor.available),
-                },
-            },
-        )
-        family['enabled'] = bool(family['enabled']) and bool(descriptor.enabled)
-        family['available'] = bool(family['available']) or bool(descriptor.available)
-        family['callable'] = bool(family['callable']) or bool(getattr(descriptor, 'callable', True))
-        if bool(getattr(descriptor, 'callable', True)):
-            family['tool_type'] = 'internal'
-            family['install_dir'] = None
-        elif not family.get('install_dir'):
-            family['install_dir'] = str(getattr(descriptor, 'install_dir', '') or '') or None
-        if descriptor.root.name not in family['metadata']['sources']:
-            family['metadata']['sources'].append(descriptor.root.name)
-        family['metadata']['repair_required'] = bool(family['callable']) and not bool(family['available'])
-        for action in list(governance.get('actions') or []):
-            action_id = str(action.get('id') or '').strip()
-            if not action_id:
-                continue
-            current = family['actions'].get(action_id)
-            executor_names = [descriptor.name]
-            if current is None:
-                family['actions'][action_id] = ToolActionRecord(
-                    action_id=action_id,
-                    label=str(action.get('label') or action_id),
-                    risk_level=str(action.get('risk_level') or 'medium'),
-                    destructive=bool(action.get('destructive', False)),
-                    agent_visible=bool(action.get('agent_visible', True)),
-                    admin_mode=str(action.get('admin_mode') or 'editable'),
-                    allowed_roles=_tool_action_allowed_roles(action, explicit_governance=explicit_governance),
-                    executor_names=executor_names,
-                )
-            else:
-                merged_executors = list(current.executor_names)
-                if descriptor.name not in merged_executors:
-                    merged_executors.append(descriptor.name)
-                family['actions'][action_id] = current.model_copy(update={'executor_names': merged_executors})
-    items: list[ToolFamilyRecord] = []
-    for payload in grouped.values():
-        actions = _ordered_actions(list(payload['actions'].values()))
+        callable_flag = bool(getattr(descriptor, 'callable', True))
+        available_flag = bool(descriptor.available)
+        metadata: dict[str, Any] = {
+            'warnings': list(descriptor.warnings),
+            'errors': list(descriptor.errors),
+            'repair_required': callable_flag and not available_flag,
+        }
         items.append(
-            ToolFamilyRecord(
-                tool_id=payload['tool_id'],
-                display_name=payload['display_name'],
-                description=payload['description'],
-                primary_executor_name=_primary_executor_name(actions, preferred_executor_name=payload['tool_id']),
-                enabled=payload['enabled'],
-                available=payload['available'],
-                tool_type=payload['tool_type'],
-                install_dir=payload['install_dir'],
-                callable=payload['callable'],
-                source_path=payload['source_path'],
-                actions=actions,
-                metadata=payload['metadata'],
+            ToolRecord(
+                tool_id=descriptor.name,
+                display_name=str(governance.get('display_name') or descriptor.name),
+                description=str(governance.get('description') or descriptor.description),
+                risk_level=str(governance.get('risk_level') or 'medium'),
+                destructive=bool(governance.get('destructive', False)),
+                agent_visible=bool(governance.get('agent_visible', True)),
+                admin_mode=str(governance.get('admin_mode') or 'editable'),
+                allowed_roles=_tool_allowed_roles(governance, explicit_governance=explicit_governance),
+                enabled=bool(descriptor.enabled),
+                available=available_flag,
+                tool_type=str(getattr(descriptor, 'tool_type', 'internal') or 'internal'),
+                install_dir=str(getattr(descriptor, 'install_dir', '') or '') or None,
+                callable=callable_flag,
+                source_path=str(descriptor.root),
+                metadata=metadata,
             )
         )
     return items
@@ -184,23 +92,18 @@ def build_tool_families(tool_descriptors: list[ToolResourceDescriptor]) -> list[
 
 def _has_explicit_tool_governance(descriptor: ToolResourceDescriptor) -> bool:
     governance = descriptor.metadata.get('governance')
-    return isinstance(governance, dict) and bool(governance.get('family'))
+    return isinstance(governance, dict) and bool(governance)
 
 
-def _tool_action_allowed_roles(action: dict[str, Any], *, explicit_governance: bool) -> list[str]:
-    raw_roles = action.get('allowed_roles') if isinstance(action, dict) else None
+def _tool_allowed_roles(governance: dict[str, Any], *, explicit_governance: bool) -> list[str]:
+    raw_roles = governance.get('allowed_roles')
     if explicit_governance or raw_roles is not None:
         return normalize_public_allowed_roles([str(role) for role in list(raw_roles or [])])
     return []
 
 
 def _tool_governance(descriptor: ToolResourceDescriptor) -> dict[str, Any] | None:
-    governance = dict(descriptor.metadata.get('governance') or {})
-    if governance.get('family'):
-        return {
-            'tool_id': str(governance.get('family')),
-            'display_name': str(governance.get('display_name') or descriptor.name),
-            'description': str(governance.get('description') or descriptor.description),
-            'actions': list(governance.get('actions') or []),
-        }
+    governance = descriptor.metadata.get('governance')
+    if isinstance(governance, dict) and governance:
+        return dict(governance)
     return get_default_tool_governance(descriptor.name)

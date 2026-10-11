@@ -215,7 +215,7 @@ class SkillInstallerTool:
         runtime_payload = kwargs.pop("__g3ku_runtime", None)
         runtime = runtime_payload if isinstance(runtime_payload, dict) else (__g3ku_runtime if isinstance(__g3ku_runtime, dict) else {})
         del kwargs
-        denied = self._authorize("install", runtime)
+        denied = self._authorize(runtime)
         if denied is not None:
             return json.dumps({"ok": False, "error": denied}, ensure_ascii=False)
         loop = asyncio.get_running_loop()
@@ -685,9 +685,9 @@ class SkillInstallerTool:
     def _count_files(path: Path) -> int:
         return sum(1 for item in path.rglob("*") if item.is_file())
 
-    def _authorize(self, action_id: str, runtime: dict[str, Any]) -> str | None:
+    def _authorize(self, runtime: dict[str, Any]) -> str | None:
         service = self._main_task_service
-        checker = getattr(service, "is_tool_action_allowed", None) if service is not None else None
+        checker = getattr(service, "is_tool_allowed", None) if service is not None else None
         if checker is None:
             return None
         actor_role = str(runtime.get("actor_role") or "ceo").strip().lower() or "ceo"
@@ -696,13 +696,12 @@ class SkillInstallerTool:
             actor_role=actor_role,
             session_id=session_id,
             tool_id="skill-installer",
-            action_id=action_id,
             task_id=str(runtime.get("task_id") or "").strip() or None,
             node_id=str(runtime.get("node_id") or "").strip() or None,
         )
         if allowed:
             return None
-        return f"Action not allowed for role {actor_role}: skill-installer.{action_id}"
+        return f"Tool not allowed for role {actor_role}: skill-installer"
 
     def _refresh_resources(self, target_path: Path) -> dict[str, Any]:
         service = self._main_task_service

@@ -45,18 +45,14 @@ parameters:
   required:
     - query
 governance:
-  family: content_navigation
-  display_name: Content
-  description: Describe, search, and open large externalized content by reference or absolute path.
-  actions:
-    - id: search
-      label: Search Content
-      risk_level: low
-      destructive: false
-      allowed_roles:
-        - ceo
-        - execution
-        - inspection
+  display_name: Content Search
+  description: Search one content ref or absolute file path for text. When both `ref` and `path` are provided, attempt both targets and return per-target results.
+  risk_level: low
+  destructive: false
+  allowed_roles:
+    - ceo
+    - execution
+    - inspection
 recovery_policy:
   rerun_safe: true
 

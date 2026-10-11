@@ -9429,27 +9429,12 @@ function buildCeoContextLoadNotice(toolName = "", targetId = "") {
         : "\u5df2\u52a0\u8f7d\u5de5\u5177\u4e0a\u4e0b\u6587";
 }
 
-// 资源目录按 surfaced family 记账，actions[].executor_names 才是 concrete executor。
-// concrete id 命中单个 action 时取该 action 的风险度；只有 family 级加载才取整族最高风险度。
+// 资源目录一行一个工具，风险度直接挂在工具记录上。
 function toolCatalogRiskLevel(record, targetId = "") {
     const normalizedTargetId = String(targetId || "").trim();
     if (!normalizedTargetId) return "";
-    const actions = Array.isArray(record?.actions) ? record.actions : [];
-    if (String(record?.tool_id || "").trim() === normalizedTargetId) {
-        const actionLevels = actions
-            .map((action) => String(action?.risk_level || "").trim().toLowerCase())
-            .filter(Boolean);
-        return highestNoticeRiskLevel([
-            String(record?.risk_level || "").trim().toLowerCase(),
-            ...actionLevels,
-        ]);
-    }
-    const executorAction = actions.find((action) => (
-        (Array.isArray(action?.executor_names) ? action.executor_names : [])
-            .map((name) => String(name || "").trim())
-            .includes(normalizedTargetId)
-    ));
-    return executorAction ? normalizeNoticeRiskLevel(executorAction.risk_level) : "";
+    if (String(record?.tool_id || "").trim() !== normalizedTargetId) return "";
+    return normalizeNoticeRiskLevel(record?.risk_level);
 }
 
 function resolveCeoContextLoadNoticeRiskLevel(kind = "", targetId = "") {
@@ -14215,8 +14200,7 @@ function renderToolActions() {
     }
     const toggleButton = U.toolDetail?.querySelector(S.selectedTool?.enabled ? "#tool-disable-btn" : "#tool-enable-btn");
     if (toggleButton) {
-        if (S.selectedTool?.is_core) toggleButton.disabled = true;
-        else toggleButton.disabled = S.toolBusy || !S.selectedTool;
+        toggleButton.disabled = S.toolBusy || !S.selectedTool;
     }
     syncDetailSaveButton("tool");
 }

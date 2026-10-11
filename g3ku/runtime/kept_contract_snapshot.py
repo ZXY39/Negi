@@ -43,7 +43,7 @@ FAILURE_SKILL_BODY_EMPTY = "skill_body_empty"
 # 这一条必须存在，否则"名字被接受 + 账本里没正文"就是模型读不到的空承诺。
 FAILURE_NOT_RESOLVED = "keep_not_resolved_at_submit"
 
-_EMPTY_FAMILY_REGISTRY: Any = None
+_EMPTY_TOOL_REGISTRY: Any = None
 
 # 没裁撤时点名保留是一句空承诺：正文没有阶段块可以放。两条车道的闸门都会按参数错误拒掉
 # 这一路（`keep_contracts_require_drop_error`），这份文案只服务绕过工具层的写入者。
@@ -64,19 +64,19 @@ KEEP_CONTRACT_FAILURE_REASON_TEXT = {
 }
 
 
-def _empty_family_registry() -> Any:
-    """给 `build_tool_toolskill_payload` 的空家族视图：没有治理库时按单体描述符渲染。
+def _empty_tool_registry() -> Any:
+    """给 `build_tool_toolskill_payload` 的空治理视图：没有治理库时按资源描述符渲染。
 
-    注入式 `tool_payload_getter`（节点道由 `MainRuntimeService.get_tool_toolskill` 提供）
-    走的是家族解析那条路，指纹与 `load_tool_context` 逐字一致；这条回退只在拿不到服务时
-    兜底，同一份正文、同一套指纹输入，缺的只是家族级 warnings 与 exec 策略。
+    注入式 `tool_payload_getter`（节点道由 `MainRuntimeService.get_tool_toolskill` 提供）走的是
+    治理记录那条路，指纹与 `load_tool_context` 逐字一致；这条回退只在拿不到服务时兜底，
+    同一份正文、同一套指纹输入，缺的只是治理记录上的 warnings 与 exec 策略。
     """
-    global _EMPTY_FAMILY_REGISTRY
-    if _EMPTY_FAMILY_REGISTRY is None:
+    global _EMPTY_TOOL_REGISTRY
+    if _EMPTY_TOOL_REGISTRY is None:
         from types import SimpleNamespace
 
-        _EMPTY_FAMILY_REGISTRY = SimpleNamespace(list_tool_families=lambda: [])
-    return _EMPTY_FAMILY_REGISTRY
+        _EMPTY_TOOL_REGISTRY = SimpleNamespace(list_tools=lambda: [])
+    return _EMPTY_TOOL_REGISTRY
 
 
 def _field(record: Any, key: str, default: Any = None) -> Any:
@@ -180,8 +180,8 @@ def _fallback_tool_payload_getter(resource_manager: Any) -> Callable[[str], dict
 
         return build_tool_toolskill_payload(
             tool_id,
-            raw_tool_family_getter=lambda _name: None,
-            resource_registry=_empty_family_registry(),
+            raw_tool_getter=lambda _name: None,
+            resource_registry=_empty_tool_registry(),
             resource_manager=resource_manager,
         )
 
@@ -271,7 +271,7 @@ def build_kept_contract_snapshot(
 
     两个车道的提交落点都调它，差别只在传不传 `tool_payload_getter`：节点道由
     `MainRuntimeService.get_tool_toolskill` 注入（与 `load_tool_context` 同一份渲染），
-    前门同理；拿不到服务时回落到共享资源管理器，正文一致、家族级附加项可能缺。
+    前门同理；拿不到服务时回落到共享资源管理器，正文一致、治理记录上的附加项可能缺。
     """
     effective_tool_payload_getter = tool_payload_getter or _fallback_tool_payload_getter(resource_manager)
     effective_skill_body_getter = skill_body_getter or _default_skill_body_getter(workspace_root, resource_manager)

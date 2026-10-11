@@ -48,16 +48,12 @@ parameters:
       description: "`list` 模式排序键：`time`=按创建时间倒序（默认）；`size`=按任务总占用字节（临时目录+产物+数据库明细）倒序，用于快速定位占用空间大的任务。"
   required: [mode]
 governance:
-  family: task_runtime
-  display_name: Task Runtime
-  description: Inspect saved tasks and disk usage.
-  actions:
-    - id: stats_cn
-      label: Task Stats
-      risk_level: low
-      destructive: false
-      allowed_roles:
-        - ceo
+  display_name: Task Stats
+  description: Inspect saved tasks, prompt previews, and disk usage.
+  risk_level: low
+  destructive: false
+  allowed_roles:
+    - ceo
 recovery_policy:
   rerun_safe: true
 

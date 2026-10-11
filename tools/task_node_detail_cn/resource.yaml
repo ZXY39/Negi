@@ -38,18 +38,14 @@ parameters:
       description: Target node id.
   required: [任务id, 节点id]
 governance:
-  family: task_runtime
-  display_name: Task Runtime
-  description: View task node detail and related artifacts.
-  actions:
-    - id: node_detail_cn
-      label: Task Node Detail
-      risk_level: low
-      destructive: false
-      allowed_roles:
-        - ceo
-        - execution
-        - inspection
+  display_name: Task Node Detail
+  description: 'View a task node''s detail and its related artifacts. Agents always receive the full execution trace: every tool call with its arguments and its resolved output. Large results are externalised to a content ref, so continue with content_search / content_open on that ref instead of expecting the payload inline.'
+  risk_level: low
+  destructive: false
+  allowed_roles:
+    - ceo
+    - execution
+    - inspection
 recovery_policy:
   rerun_safe: true
 

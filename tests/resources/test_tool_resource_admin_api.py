@@ -25,7 +25,7 @@ from g3ku.runtime.frontdoor._ceo_support import CeoFrontDoorSupport
 from g3ku.runtime.session_agent import RuntimeAgentSession
 from g3ku.session.manager import Session
 from main.api import admin_rest
-from main.governance.models import ToolActionRecord, ToolFamilyRecord
+from main.governance.models import ToolRecord
 from main.governance.resource_filter import list_effective_tool_names
 from main.models import TaskRecord
 from main.protocol import now_iso
@@ -140,17 +140,13 @@ exposure:
   agent: true
   main_runtime: true
 governance:
-  family: {name}
   display_name: External Browser
   description: Registered external browser automation tool.
-  actions:
-    - id: use
-      label: Use External Browser
-      risk_level: medium
-      destructive: false
-      allowed_roles:
-        - ceo
-        - execution
+  risk_level: medium
+  destructive: false
+  allowed_roles:
+    - ceo
+    - execution
 toolskill:
   enabled: true
 """,
@@ -284,7 +280,7 @@ async def test_main_runtime_delete_task_records_for_session_pauses_in_progress_r
 
 
 @pytest.mark.asyncio
-async def test_main_runtime_service_reads_toolskill_from_primary_executor(tmp_path: Path):
+async def test_main_runtime_service_reads_toolskill_per_tool_and_family_id_is_not_a_tool(tmp_path: Path):
     workspace = tmp_path / 'workspace'
     (workspace / 'skills').mkdir(parents=True, exist_ok=True)
     (workspace / 'tools').mkdir(parents=True, exist_ok=True)
@@ -305,10 +301,13 @@ async def test_main_runtime_service_reads_toolskill_from_primary_executor(tmp_pa
 
     try:
         await service.startup()
-        payload = service.get_tool_toolskill('exec_runtime')
+        # 族名不再是一个合法 tool_id：既查不到记录，也拿不到 toolskill。
+        assert service.get_tool('exec_runtime') is None
+        assert service.get_tool_toolskill('exec_runtime') is None
+
+        payload = service.get_tool_toolskill('exec')
         assert payload is not None
-        assert payload['tool_id'] == 'exec_runtime'
-        assert payload['primary_executor_name'] == 'exec'
+        assert payload['tool_id'] == 'exec'
         assert '# exec' in payload['content']
         assert payload['tool_type'] == 'internal'
         assert payload['install_dir'] is None
@@ -319,7 +318,7 @@ async def test_main_runtime_service_reads_toolskill_from_primary_executor(tmp_pa
 
 
 @pytest.mark.asyncio
-async def test_load_tool_context_prefers_requested_executor_toolskill_over_family_primary(tmp_path: Path):
+async def test_load_tool_context_returns_requested_tool_toolskill_without_family_layer(tmp_path: Path):
     workspace = tmp_path / 'workspace'
     (workspace / 'skills').mkdir(parents=True, exist_ok=True)
     (workspace / 'tools').mkdir(parents=True, exist_ok=True)
@@ -347,8 +346,6 @@ async def test_load_tool_context_prefers_requested_executor_toolskill_over_famil
         toolskill = service.get_tool_toolskill('memory_write')
         assert toolskill is not None
         assert toolskill['tool_id'] == 'memory_write'
-        assert toolskill['family_tool_id'] == 'memory'
-        assert toolskill['toolskill_source_name'] == 'memory_write'
         assert toolskill['available'] is False
         assert toolskill['repair_required'] is True
         assert 'tool_handler_unavailable' in toolskill['errors']
@@ -359,9 +356,9 @@ async def test_load_tool_context_prefers_requested_executor_toolskill_over_famil
         assert dict(toolskill['example_arguments']).get('content')
 
         seeded = service.update_tool_policy(
-            'memory',
+            'memory_write',
             session_id='web:shared',
-            allowed_roles_by_action={'write': ['ceo']},
+            allowed_roles=['ceo'],
         )
         assert seeded is not None
 
@@ -472,18 +469,11 @@ async def test_load_tool_context_marks_result_delivery_contract_violation_as_rep
                     'name': 'demo_contract',
                     'description': 'Demo contract tool',
                     'governance': {
-                        'family': 'demo_contract',
                         'display_name': 'Demo Contract',
                         'description': 'Demo contract tool',
-                        'actions': [
-                            {
-                                'id': 'run',
-                                'label': 'Run Demo Contract Tool',
-                                'risk_level': 'medium',
-                                'destructive': False,
-                                'allowed_roles': ['ceo'],
-                            }
-                        ],
+                        'risk_level': 'medium',
+                        'destructive': False,
+                        'allowed_roles': ['ceo'],
                     },
                 },
                 sort_keys=False,
@@ -569,15 +559,14 @@ async def test_admin_endpoints_expose_external_tool_fields(tmp_path: Path):
 
 
 def test_admin_toolskill_endpoint_returns_content():
-    family = ToolFamilyRecord(
-        tool_id='exec_runtime',
+    record = ToolRecord(
+        tool_id='exec',
         display_name='Exec Runtime',
         description='Execute shell commands.',
-        primary_executor_name='exec',
-        enabled=True,
-        available=True,
+        risk_level='high',
+        destructive=True,
+        allowed_roles=['ceo', 'execution'],
         source_path='tools/exec',
-        actions=[ToolActionRecord(action_id='run', label='Run Command', allowed_roles=['ceo', 'execution'])],
         metadata={},
     )
 
@@ -585,41 +574,42 @@ def test_admin_toolskill_endpoint_returns_content():
         async def startup(self) -> None:
             return None
 
-        def get_tool_family(self, tool_id: str):
-            return family if tool_id == family.tool_id else None
+        def get_tool(self, tool_id: str):
+            return record if tool_id == record.tool_id else None
 
         def get_tool_toolskill(self, tool_id: str):
-            if tool_id != family.tool_id:
+            if tool_id != record.tool_id:
                 return None
             return {
                 'tool_id': tool_id,
-                'primary_executor_name': 'exec',
                 'content': '# exec\n\nUsage guide',
             }
 
     client = TestClient(_build_app(_StubService()))
-    response = client.get('/api/resources/tools/exec_runtime/toolskill')
+    response = client.get('/api/resources/tools/exec/toolskill')
 
     assert response.status_code == 200
     assert response.json() == {
         'ok': True,
-        'tool_id': 'exec_runtime',
-        'primary_executor_name': 'exec',
+        'tool_id': 'exec',
         'content': '# exec\n\nUsage guide',
     }
 
+    # 族名不再是合法 tool_id，toolskill 取不到。
+    family_response = client.get('/api/resources/tools/exec_runtime/toolskill')
+    assert family_response.status_code == 404
 
-def test_admin_tool_policy_endpoint_accepts_actions_mapping():
+
+def test_admin_tool_policy_endpoint_accepts_allowed_roles():
     captured: dict[str, object] = {}
-    family = ToolFamilyRecord(
-        tool_id='filesystem',
-        display_name='Filesystem',
-        description='Workspace filesystem mutation family for write, edit, copy, move, delete, and patch operations.',
-        primary_executor_name='filesystem_write',
-        enabled=True,
-        available=True,
+    record = ToolRecord(
+        tool_id='filesystem_write',
+        display_name='Filesystem Write',
+        description='Write file content to disk.',
+        risk_level='high',
+        destructive=True,
+        allowed_roles=['ceo'],
         source_path='tools/filesystem_write',
-        actions=[ToolActionRecord(action_id='write', label='Write File', allowed_roles=['ceo'])],
         metadata={},
     )
 
@@ -633,67 +623,67 @@ def test_admin_tool_policy_endpoint_accepts_actions_mapping():
             *,
             session_id: str,
             enabled=None,
-            allowed_roles_by_action=None,
+            allowed_roles=None,
             execution_mode=None,
         ):
             captured['tool_id'] = tool_id
             captured['session_id'] = session_id
             captured['enabled'] = enabled
-            captured['allowed_roles_by_action'] = allowed_roles_by_action
+            captured['allowed_roles'] = allowed_roles
             captured['execution_mode'] = execution_mode
-            return family.model_copy(
+            return record.model_copy(
                 update={
                     'enabled': bool(enabled),
-                    'actions': [
-                        family.actions[0].model_copy(
-                            update={'allowed_roles': list((allowed_roles_by_action or {}).get('write') or [])}
-                        )
-                    ],
+                    'allowed_roles': list(allowed_roles or []),
                 }
             )
 
     client = TestClient(_build_app(_StubService()))
     response = client.put(
-        '/api/resources/tools/filesystem/policy',
+        '/api/resources/tools/filesystem_write/policy',
         params={'session_id': 'web:shared'},
-        json={'enabled': True, 'actions': {'write': ['ceo', 'inspection']}},
+        json={'enabled': True, 'allowed_roles': ['ceo', 'inspection']},
     )
 
     assert response.status_code == 200
     assert captured == {
-        'tool_id': 'filesystem',
+        'tool_id': 'filesystem_write',
         'session_id': 'web:shared',
         'enabled': True,
-        'allowed_roles_by_action': {'write': ['ceo', 'inspection']},
+        'allowed_roles': ['ceo', 'inspection'],
         'execution_mode': None,
     }
-    assert response.json()['item']['actions'][0]['allowed_roles'] == ['ceo', 'inspection']
+    assert response.json()['item']['allowed_roles'] == ['ceo', 'inspection']
 
 
-def test_main_runtime_service_filters_visible_actions_for_shared_executor():
-    family = ToolFamilyRecord(
-        tool_id='filesystem',
-        display_name='Filesystem',
-        description='Workspace file operations.',
-        primary_executor_name='filesystem_write',
-        enabled=True,
-        available=True,
-        source_path='tools/filesystem_write',
-        actions=[
-            ToolActionRecord(action_id='copy', label='Copy', allowed_roles=['ceo', 'execution', 'inspection'], executor_names=['filesystem_copy']),
-            ToolActionRecord(action_id='write', label='Write File', allowed_roles=['ceo', 'execution'], executor_names=['filesystem_write']),
-        ],
-        metadata={},
-    )
+def test_main_runtime_service_filters_visible_tools_per_tool():
+    records = [
+        ToolRecord(
+            tool_id='filesystem_copy',
+            display_name='Copy',
+            description='Copy files.',
+            allowed_roles=['ceo', 'execution', 'inspection'],
+            source_path='tools/filesystem_copy',
+            metadata={},
+        ),
+        ToolRecord(
+            tool_id='filesystem_write',
+            display_name='Write File',
+            description='Write file content to disk.',
+            allowed_roles=['ceo', 'execution'],
+            source_path='tools/filesystem_write',
+            metadata={},
+        ),
+    ]
 
     class _Registry:
-        def list_tool_families(self):
-            return [family]
+        def list_tools(self):
+            return list(records)
 
     class _PolicyEngine:
-        def evaluate_tool_action(self, *, subject, tool_id: str, action_id: str):
-            _ = subject, tool_id
-            return SimpleNamespace(allowed=action_id == 'copy')
+        def evaluate_tool(self, *, subject, tool_id: str):
+            _ = subject
+            return SimpleNamespace(allowed=tool_id == 'filesystem_copy')
 
     service = object.__new__(MainRuntimeService)
     service.resource_registry = _Registry()
@@ -701,42 +691,43 @@ def test_main_runtime_service_filters_visible_actions_for_shared_executor():
     service.list_effective_tool_names = lambda **kwargs: ['filesystem_copy', 'filesystem_write']
     service._subject = lambda **kwargs: SimpleNamespace(**kwargs)
 
-    visible = service.list_visible_tool_families(actor_role='inspection', session_id='web:shared')
+    visible = service.list_visible_tools(actor_role='inspection', session_id='web:shared')
 
-    assert len(visible) == 1
-    assert [action.action_id for action in visible[0].actions] == ['copy']
+    assert [item.tool_id for item in visible] == ['filesystem_copy']
 
 
-def test_main_runtime_service_keeps_unavailable_tool_family_visible_for_context_lookup():
-    family = ToolFamilyRecord(
-        tool_id='agent_browser',
-        display_name='Agent Browser',
-        description='Browser automation via the upstream CLI.',
-        primary_executor_name='agent_browser',
-        enabled=True,
-        available=False,
-        callable=True,
-        source_path='tools/agent_browser',
-        actions=[
-            ToolActionRecord(action_id='browse', label='Browse', allowed_roles=['ceo'], executor_names=['agent_browser']),
-            ToolActionRecord(
-                action_id='internal_only',
-                label='Internal Only',
-                agent_visible=False,
-                allowed_roles=['ceo'],
-                executor_names=['agent_browser'],
-            ),
-        ],
-        metadata={'warnings': ['missing required bins']},
-    )
+def test_main_runtime_service_keeps_unavailable_tool_visible_for_context_lookup():
+    records = [
+        ToolRecord(
+            tool_id='agent_browser',
+            display_name='Agent Browser',
+            description='Browser automation via the upstream CLI.',
+            enabled=True,
+            available=False,
+            callable=True,
+            agent_visible=True,
+            allowed_roles=['ceo'],
+            source_path='tools/agent_browser',
+            metadata={'warnings': ['missing required bins']},
+        ),
+        ToolRecord(
+            tool_id='agent_browser_internal',
+            display_name='Internal Only',
+            description='Internal only lane.',
+            agent_visible=False,
+            allowed_roles=['ceo'],
+            source_path='tools/agent_browser',
+            metadata={},
+        ),
+    ]
 
     class _Registry:
-        def list_tool_families(self):
-            return [family]
+        def list_tools(self):
+            return list(records)
 
     class _PolicyEngine:
-        def evaluate_tool_action(self, *, subject, tool_id: str, action_id: str):
-            _ = subject, tool_id, action_id
+        def evaluate_tool(self, *, subject, tool_id: str):
+            _ = subject, tool_id
             return SimpleNamespace(allowed=False, reason_code='resource_disabled')
 
     service = object.__new__(MainRuntimeService)
@@ -745,11 +736,9 @@ def test_main_runtime_service_keeps_unavailable_tool_family_visible_for_context_
     service.list_effective_tool_names = lambda **kwargs: []
     service._subject = lambda **kwargs: SimpleNamespace(**kwargs)
 
-    visible = service.list_visible_tool_families(actor_role='ceo', session_id='web:shared')
+    visible = service.list_visible_tools(actor_role='ceo', session_id='web:shared')
 
-    assert len(visible) == 1
-    assert visible[0].tool_id == 'agent_browser'
-    assert [action.action_id for action in visible[0].actions] == ['browse']
+    assert [item.tool_id for item in visible] == ['agent_browser']
 
 
 def test_main_runtime_service_normalizes_short_task_id_for_lookup_and_progress():
@@ -4579,7 +4568,7 @@ async def test_admin_tool_delete_endpoint_removes_install_dir_and_syncs_catalog(
         assert payload['tool_ids'] == ['external_browser']
         assert not (workspace / 'tools' / 'external_browser').exists()
         assert not (workspace / '.g3ku' / 'external-tools' / 'external_browser').exists()
-        assert service.get_tool_family('external_browser') is None
+        assert service.get_tool('external_browser') is None
     finally:
         await service.close()
         manager.close()
@@ -4633,7 +4622,7 @@ async def test_admin_tool_delete_endpoint_rejects_running_ceo_usage(tmp_path: Pa
         await service.startup()
         visible = {
             item.tool_id
-            for item in service.list_visible_tool_families(actor_role='ceo', session_id=session_id)
+            for item in service.list_visible_tools(actor_role='ceo', session_id=session_id)
         }
         assert 'external_browser' in visible
         client = TestClient(_build_app(service))
@@ -4648,7 +4637,7 @@ async def test_admin_tool_delete_endpoint_rejects_running_ceo_usage(tmp_path: Pa
         assert payload['usage']['ceo_sessions'][0]['session_id'] == session_id
         assert payload['usage']['ceo_sessions'][0]['title'] == '删除测试会话'
         assert (workspace / 'tools' / 'external_browser').exists()
-        assert service.get_tool_family('external_browser') is not None
+        assert service.get_tool('external_browser') is not None
     finally:
         await service.close()
         manager.close()
@@ -4684,8 +4673,7 @@ async def test_admin_endpoints_expose_builtin_tool_fields(tmp_path: Path):
         assert item['tool_type'] == 'internal'
         assert item['callable'] is True
         assert item['install_dir'] is None
-        assert item['actions'][0]['action_id'] == 'fetch'
-        assert item['actions'][0]['allowed_roles'] == ['ceo', 'execution', 'inspection']
+        assert item['allowed_roles'] == ['ceo', 'execution', 'inspection']
 
         # 样本换成自维护工具后没有安装段；安装指引透出由 external 车道用例覆盖。
         toolskill_response = client.get('/api/resources/tools/web_fetch/toolskill')
@@ -4734,13 +4722,13 @@ async def test_unavailable_builtin_tool_context_remains_visible_to_ceo(tmp_path:
     try:
         await service.startup()
         visible_names = set(service.list_effective_tool_names(actor_role='ceo', session_id='web:shared'))
-        visible_families = {
+        visible_tools = {
             item.tool_id
-            for item in service.list_visible_tool_families(actor_role='ceo', session_id='web:shared')
+            for item in service.list_visible_tools(actor_role='ceo', session_id='web:shared')
         }
 
         assert 'web_fetch' not in visible_names
-        assert 'web_fetch' in visible_families
+        assert 'web_fetch' in visible_tools
 
         payload = service.load_tool_context(actor_role='ceo', session_id='web:shared', tool_id='web_fetch')
         assert payload['ok'] is True
@@ -4761,7 +4749,7 @@ async def test_runtime_service_can_search_visible_tool_and_skill_candidates(tmp_
     (workspace / 'skills').mkdir(parents=True, exist_ok=True)
     (workspace / 'tools').mkdir(parents=True, exist_ok=True)
     _write_skill(workspace, name='rollback_helper')
-    _copy_repo_tools(workspace, 'content', 'load_skill_context', 'load_tool_context')
+    _copy_repo_tools(workspace, 'content_search', 'content_open', 'content_describe', 'load_skill_context', 'load_tool_context')
 
     manager = ResourceManager(workspace, app_config=_resource_app_config())
     manager.reload_now(trigger='test-search')
@@ -4782,11 +4770,11 @@ async def test_runtime_service_can_search_visible_tool_and_skill_candidates(tmp_
         tool_payload = service.load_tool_context_v2(
             actor_role='ceo',
             session_id='web:shared',
-            search_query='externalized content reference',
+            search_query='search text inside a content ref',
         )
         assert tool_payload['ok'] is True
         assert tool_payload['mode'] == 'search'
-        assert tool_payload['candidates'][0]['tool_id'] in {'content', 'content_navigation'}
+        assert tool_payload['candidates'][0]['tool_id'] in {'content_search', 'content_open', 'content_describe'}
         assert 'description' in tool_payload['candidates'][0]['matched_fields']
         assert 'load_tool_context(tool_id="' in tool_payload['next_action_hint']
 
@@ -4921,7 +4909,7 @@ async def test_load_tool_context_v2_returns_full_tool_body_by_default(tmp_path: 
     workspace = tmp_path / 'workspace'
     (workspace / 'skills').mkdir(parents=True, exist_ok=True)
     (workspace / 'tools').mkdir(parents=True, exist_ok=True)
-    _copy_repo_tools(workspace, 'content', 'load_tool_context')
+    _copy_repo_tools(workspace, 'content_search', 'load_tool_context')
 
     manager = ResourceManager(workspace, app_config=_resource_app_config())
     manager.reload_now(trigger='test-full-tool-context')
@@ -4938,12 +4926,12 @@ async def test_load_tool_context_v2_returns_full_tool_body_by_default(tmp_path: 
 
     try:
         await service.startup()
-        expected = str((service.get_tool_toolskill('content') or {}).get('content') or '')
+        expected = str((service.get_tool_toolskill('content_search') or {}).get('content') or '')
 
         payload = service.load_tool_context_v2(
             actor_role='ceo',
             session_id='web:shared',
-            tool_id='content',
+            tool_id='content_search',
         )
 
         assert payload['ok'] is True
@@ -4952,20 +4940,20 @@ async def test_load_tool_context_v2_returns_full_tool_body_by_default(tmp_path: 
         assert payload['l0']
         assert payload['l1']
         assert payload['parameters_schema']['properties']['path']['type'] == 'string'
-        assert 'action' in payload['required_parameters']
+        assert payload['required_parameters'] == ['query']
         assert 'path' in payload['parameters_schema']['properties']
-        assert dict(payload['example_arguments']).get('action')
+        assert dict(payload['example_arguments']).get('query')
         assert '## Parameter Contract' in str(payload['parameter_contract_markdown'])
         assert payload['callable_now'] is True
         assert payload['will_be_hydrated_next_turn'] is True
-        assert payload['hydration_targets'] == ['content']
+        assert payload['hydration_targets'] == ['content_search']
     finally:
         await service.close()
         manager.close()
 
 
 @pytest.mark.asyncio
-async def test_message_tool_family_is_not_discovered_after_hard_delete(tmp_path: Path):
+async def test_message_tool_is_not_discovered_after_hard_delete(tmp_path: Path):
     workspace = tmp_path / 'workspace'
     (workspace / 'skills').mkdir(parents=True, exist_ok=True)
     (workspace / 'tools').mkdir(parents=True, exist_ok=True)
@@ -5039,8 +5027,6 @@ def test_resource_read_endpoints_work_without_configured_models(tmp_path: Path, 
     assert memory_toolskill_response.status_code == 200
     memory_payload = memory_toolskill_response.json()
     assert memory_payload['tool_id'] == 'memory_write'
-    assert memory_payload['family_tool_id'] == 'memory'
-    assert memory_payload['toolskill_source_name'] == 'memory_write'
     assert memory_payload['available'] is False
     assert '# memory_write' in str(memory_payload.get('content') or '')
 
@@ -5083,10 +5069,10 @@ def test_resource_write_endpoints_work_without_configured_models(tmp_path: Path,
     tool_policy = client.put(
         '/api/resources/tools/external_browser/policy',
         params={'session_id': 'web:shared'},
-        json={'actions': {'use': ['execution']}},
+        json={'allowed_roles': ['execution']},
     )
     assert tool_policy.status_code == 200
-    assert tool_policy.json()['item']['actions'][0]['allowed_roles'] == ['execution']
+    assert tool_policy.json()['item']['allowed_roles'] == ['execution']
 
     tool_disable = client.post('/api/resources/tools/external_browser/disable', params={'session_id': 'web:shared'})
     assert tool_disable.status_code == 200
@@ -5101,17 +5087,16 @@ def test_resource_write_endpoints_work_without_configured_models(tmp_path: Path,
     assert reload_response.json()['ok'] is True
 
 
-def test_update_tool_policy_endpoint_preserves_empty_action_role_lists():
+def test_update_tool_policy_endpoint_preserves_empty_role_list():
     captured: dict[str, object] = {}
-    family = ToolFamilyRecord(
-        tool_id='exec_runtime',
+    record = ToolRecord(
+        tool_id='exec',
         display_name='Exec Runtime',
         description='Execute shell commands.',
-        primary_executor_name='exec',
-        enabled=True,
-        available=True,
+        risk_level='high',
+        destructive=True,
+        allowed_roles=['ceo', 'execution'],
         source_path='tools/exec',
-        actions=[ToolActionRecord(action_id='run', label='Run Command', allowed_roles=['ceo', 'execution'])],
         metadata={},
     )
 
@@ -5119,52 +5104,49 @@ def test_update_tool_policy_endpoint_preserves_empty_action_role_lists():
         async def startup(self) -> None:
             return None
 
-        def update_tool_policy(self, tool_id: str, *, session_id: str, enabled=None, allowed_roles_by_action=None, execution_mode=None):
+        def update_tool_policy(self, tool_id: str, *, session_id: str, enabled=None, allowed_roles=None, execution_mode=None):
             captured['tool_id'] = tool_id
             captured['session_id'] = session_id
             captured['enabled'] = enabled
-            captured['allowed_roles_by_action'] = allowed_roles_by_action
+            captured['allowed_roles'] = allowed_roles
             captured['execution_mode'] = execution_mode
-            return family.model_copy(
+            return record.model_copy(
                 update={
-                    'enabled': family.enabled if enabled is None else bool(enabled),
-                    'actions': [
-                        family.actions[0].model_copy(
-                            update={'allowed_roles': list((allowed_roles_by_action or {}).get('run', family.actions[0].allowed_roles))}
-                        )
-                    ],
+                    'enabled': record.enabled if enabled is None else bool(enabled),
+                    'allowed_roles': list(
+                        record.allowed_roles if allowed_roles is None else allowed_roles
+                    ),
                 }
             )
 
     client = TestClient(_build_app(_StubService()))
     response = client.put(
-        '/api/resources/tools/exec_runtime/policy',
+        '/api/resources/tools/exec/policy',
         params={'session_id': 'web:shared'},
-        json={'actions': {'run': []}},
+        json={'allowed_roles': []},
     )
 
     assert response.status_code == 200
     assert captured == {
-        'tool_id': 'exec_runtime',
+        'tool_id': 'exec',
         'session_id': 'web:shared',
         'enabled': None,
-        'allowed_roles_by_action': {'run': []},
+        'allowed_roles': [],
         'execution_mode': None,
     }
-    assert response.json()['item']['actions'][0]['allowed_roles'] == []
+    assert response.json()['item']['allowed_roles'] == []
 
 
 def test_update_tool_policy_endpoint_forwards_exec_execution_mode():
     captured: dict[str, object] = {}
-    family = ToolFamilyRecord(
-        tool_id='exec_runtime',
+    record = ToolRecord(
+        tool_id='exec',
         display_name='Exec Runtime',
         description='Execute shell commands.',
-        primary_executor_name='exec',
-        enabled=True,
-        available=True,
+        risk_level='high',
+        destructive=True,
+        allowed_roles=['ceo', 'execution'],
         source_path='tools/exec',
-        actions=[ToolActionRecord(action_id='run', label='Run Command', allowed_roles=['ceo', 'execution'])],
         metadata={},
     )
 
@@ -5178,18 +5160,18 @@ def test_update_tool_policy_endpoint_forwards_exec_execution_mode():
             *,
             session_id: str,
             enabled=None,
-            allowed_roles_by_action=None,
+            allowed_roles=None,
             execution_mode=None,
         ):
             captured['tool_id'] = tool_id
             captured['session_id'] = session_id
             captured['enabled'] = enabled
-            captured['allowed_roles_by_action'] = allowed_roles_by_action
+            captured['allowed_roles'] = allowed_roles
             captured['execution_mode'] = execution_mode
-            return family.model_copy(
+            return record.model_copy(
                 update={
                     'metadata': {
-                        **dict(family.metadata or {}),
+                        **dict(record.metadata or {}),
                         'execution_mode': execution_mode,
                     }
                 }
@@ -5197,17 +5179,17 @@ def test_update_tool_policy_endpoint_forwards_exec_execution_mode():
 
     client = TestClient(_build_app(_StubService()))
     response = client.put(
-        '/api/resources/tools/exec_runtime/policy',
+        '/api/resources/tools/exec/policy',
         params={'session_id': 'web:shared'},
         json={'execution_mode': 'full_access'},
     )
 
     assert response.status_code == 200
     assert captured == {
-        'tool_id': 'exec_runtime',
+        'tool_id': 'exec',
         'session_id': 'web:shared',
         'enabled': None,
-        'allowed_roles_by_action': None,
+        'allowed_roles': None,
         'execution_mode': 'full_access',
     }
     assert response.json()['item']['metadata']['execution_mode'] == 'full_access'
@@ -5277,7 +5259,7 @@ async def test_main_runtime_service_frontdoor_reviewable_tool_risk_map_uses_gove
     workspace = tmp_path / 'workspace'
     (workspace / 'skills').mkdir(parents=True, exist_ok=True)
     (workspace / 'tools').mkdir(parents=True, exist_ok=True)
-    _copy_repo_tools(workspace, 'content', 'exec', 'memory_runtime', 'memory_write')
+    _copy_repo_tools(workspace, 'content_search', 'exec', 'memory_runtime', 'memory_write')
 
     manager = ResourceManager(workspace, app_config=_resource_app_config())
     manager.reload_now(trigger='test-frontdoor-governance-risk-map')
@@ -5300,14 +5282,14 @@ async def test_main_runtime_service_frontdoor_reviewable_tool_risk_map_uses_gove
         ) == {}
 
         service.update_tool_policy(
-            'exec_runtime',
+            'exec',
             session_id='web:shared',
-            allowed_roles_by_action={'run': ['ceo', 'execution']},
+            allowed_roles=['ceo', 'execution'],
         )
         service.update_tool_policy(
-            'memory',
+            'memory_write',
             session_id='web:shared',
-            allowed_roles_by_action={'write': ['ceo']},
+            allowed_roles=['ceo'],
         )
         service.update_governance_mode(enabled=True)
         reviewable = service.frontdoor_reviewable_tool_risk_map(
@@ -5317,7 +5299,7 @@ async def test_main_runtime_service_frontdoor_reviewable_tool_risk_map_uses_gove
 
         assert reviewable['exec'] == 'high'
         assert reviewable['memory_write'] == 'medium'
-        assert 'content_open' not in reviewable
+        assert 'content_search' not in reviewable
     finally:
         await service.close()
         manager.close()
@@ -5365,13 +5347,15 @@ def test_governance_mode_endpoints_round_trip():
 
 
 @pytest.mark.asyncio
-async def test_tool_resources_mark_core_families_and_merge_memory_runtime(tmp_path: Path):
+async def test_tool_resources_mark_core_tools_and_keep_skill_context_tools_independent(tmp_path: Path):
     workspace = tmp_path / 'workspace'
     (workspace / 'skills').mkdir(parents=True, exist_ok=True)
     (workspace / 'tools').mkdir(parents=True, exist_ok=True)
     _copy_repo_tools(
         workspace,
-        'content',
+        'content_search',
+        'content_open',
+        'content_describe',
         'memory_write',
         'memory_delete',
         'memory_note',
@@ -5406,101 +5390,86 @@ async def test_tool_resources_mark_core_families_and_merge_memory_runtime(tmp_pa
         await service.startup()
         items = {item.tool_id: item for item in service.list_tool_resources()}
 
-        assert items['content'].is_core is True
-        assert items['memory'].is_core is True
+        assert items['content_search'].is_core is True
+        assert items['content_open'].is_core is True
+        assert items['content_describe'].is_core is True
+        assert items['memory_write'].is_core is True
         assert 'messaging' not in items
-        assert items['skill_access'].is_core is True
-        assert items['task_runtime'].is_core is True
+        assert items['load_skill_context'].is_core is True
+        assert items['create_async_task'].is_core is True
+        assert items['task_append_notice'].is_core is True
 
-        skill_access_actions = {action.action_id: action for action in items['skill_access'].actions}
-        assert skill_access_actions['load_context'].allowed_roles == ['ceo', 'execution', 'inspection']
+        # 旧模型里 skill_access 是一个 action 共享两条执行器；新模型是两条独立记录，
+        # 默认角色相同但各自持有 allowed_roles。
+        assert items['load_skill_context'].allowed_roles == ['ceo', 'execution', 'inspection']
+        assert items['load_tool_context'].allowed_roles == ['ceo', 'execution', 'inspection']
 
-        task_runtime_actions = {action.action_id: action for action in items['task_runtime'].actions}
-        assert 'append_notice_cn' in task_runtime_actions
-        assert 'ceo' in set(task_runtime_actions['append_notice_cn'].allowed_roles)
+        assert 'ceo' in set(items['task_append_notice'].allowed_roles)
 
-        memory_actions = {action.action_id: action for action in items['memory'].actions}
-        assert set(memory_actions) == {'write', 'delete', 'note', 'runtime'}
-        assert memory_actions['write'].allowed_roles == ['ceo']
-        assert memory_actions['delete'].allowed_roles == ['ceo']
-        assert memory_actions['note'].allowed_roles == ['ceo']
-        assert memory_actions['write'].agent_visible is True
-        assert memory_actions['write'].admin_mode == 'editable'
-        assert memory_actions['delete'].agent_visible is True
-        assert memory_actions['delete'].admin_mode == 'editable'
-        assert memory_actions['note'].agent_visible is True
-        assert memory_actions['note'].admin_mode == 'editable'
-        assert memory_actions['runtime'].agent_visible is False
-        assert memory_actions['runtime'].admin_mode == 'readonly_system'
+        assert {key for key in items if key.startswith('memory_')} == {
+            'memory_write',
+            'memory_delete',
+            'memory_note',
+            'memory_runtime',
+        }
+        assert items['memory_write'].allowed_roles == ['ceo']
+        assert items['memory_delete'].allowed_roles == ['ceo']
+        assert items['memory_note'].allowed_roles == ['ceo']
+        assert items['memory_write'].agent_visible is True
+        assert items['memory_write'].admin_mode == 'editable'
+        assert items['memory_delete'].agent_visible is True
+        assert items['memory_delete'].admin_mode == 'editable'
+        assert items['memory_note'].agent_visible is True
+        assert items['memory_note'].admin_mode == 'editable'
+        assert items['memory_runtime'].agent_visible is False
+        assert items['memory_runtime'].admin_mode == 'readonly_system'
 
         class _Registry:
-            def list_tool_families(self):
+            def list_tools(self):
                 return list(items.values())
+
+            def get_tool(self, tool_id: str):
+                return items.get(str(tool_id or '').strip())
 
         class _PolicyEngine:
             @staticmethod
-            def evaluate_tool_action(**kwargs):
+            def evaluate_tool(**kwargs):
                 subject = kwargs.get('subject')
                 tool_id = str(kwargs.get('tool_id') or '')
-                action_id = str(kwargs.get('action_id') or '')
-                family = items.get(tool_id)
-                action = next(
-                    (
-                        current
-                        for current in list(getattr(family, 'actions', []) or [])
-                        if str(getattr(current, 'action_id', '') or '') == action_id
-                    ),
-                    None,
-                )
-                allowed_roles = set(getattr(action, 'allowed_roles', []) or [])
+                record = items.get(tool_id)
+                allowed_roles = set(getattr(record, 'allowed_roles', []) or [])
                 return SimpleNamespace(allowed=str(getattr(subject, 'actor_role', '') or '') in allowed_roles)
 
+        supported_names = [
+            'load_skill_context',
+            'load_tool_context',
+            'memory_write',
+            'memory_delete',
+            'memory_note',
+            'memory_runtime',
+        ]
         visible = set(
             list_effective_tool_names(
                 subject=SimpleNamespace(actor_role='ceo'),
-                supported_tool_names=[
-                    'load_skill_context',
-                    'load_tool_context',
-                    'memory_write',
-                    'memory_delete',
-                    'memory_note',
-                    'memory_runtime',
-                ],
+                supported_tool_names=list(supported_names),
                 resource_registry=_Registry(),
                 policy_engine=_PolicyEngine(),
-                mutation_allowed=True,
             )
         )
         execution_visible = set(
             list_effective_tool_names(
                 subject=SimpleNamespace(actor_role='execution'),
-                supported_tool_names=[
-                    'load_skill_context',
-                    'load_tool_context',
-                    'memory_write',
-                    'memory_delete',
-                    'memory_note',
-                    'memory_runtime',
-                ],
+                supported_tool_names=list(supported_names),
                 resource_registry=_Registry(),
                 policy_engine=_PolicyEngine(),
-                mutation_allowed=True,
             )
         )
         inspection_visible = set(
             list_effective_tool_names(
                 subject=SimpleNamespace(actor_role='inspection'),
-                supported_tool_names=[
-                    'load_skill_context',
-                    'load_tool_context',
-                    'memory_write',
-                    'memory_delete',
-                    'memory_note',
-                    'memory_runtime',
-                ],
+                supported_tool_names=list(supported_names),
                 resource_registry=_Registry(),
                 policy_engine=_PolicyEngine(),
-                mutation_allowed=True,
             )
         )
         assert visible == {
@@ -5512,13 +5481,27 @@ async def test_tool_resources_mark_core_families_and_merge_memory_runtime(tmp_pa
         }
         assert execution_visible == {'load_skill_context', 'load_tool_context'}
         assert inspection_visible == {'load_skill_context', 'load_tool_context'}
+
+        # 两条记录各自独立的 allowed_roles：改一条不影响另一条。
+        updated = service.update_tool_policy(
+            'load_skill_context',
+            session_id='web:shared',
+            allowed_roles=['ceo'],
+        )
+        assert updated is not None
+        assert updated.allowed_roles == ['ceo']
+        assert service.get_tool('load_tool_context').allowed_roles == [
+            'ceo',
+            'execution',
+            'inspection',
+        ]
     finally:
         await service.close()
         manager.close()
 
 
 @pytest.mark.asyncio
-async def test_startup_reconciles_core_tool_family_visibility_and_enablement(tmp_path: Path):
+async def test_startup_keeps_disabled_core_tool_disabled(tmp_path: Path):
     workspace = tmp_path / 'workspace'
     (workspace / 'skills').mkdir(parents=True, exist_ok=True)
     (workspace / 'tools').mkdir(parents=True, exist_ok=True)
@@ -5538,25 +5521,28 @@ async def test_startup_reconciles_core_tool_family_visibility_and_enablement(tmp
     )
 
     try:
-        families = {item.tool_id: item for item in service.resource_registry.refresh_from_current_resources()[1]}
-        broken = families['skill_access'].model_copy(
+        tools = {item.tool_id: item for item in service.resource_registry.refresh_from_current_resources()[1]}
+        broken = tools['load_tool_context'].model_copy(
             update={
                 'enabled': False,
-                'actions': [
-                    action.model_copy(update={'allowed_roles': ['execution', 'inspection']})
-                    for action in families['skill_access'].actions
-                ],
+                'allowed_roles': ['execution', 'inspection'],
             }
         )
-        service.governance_store.upsert_tool_family(broken, updated_at=datetime.now().isoformat())
+        service.governance_store.upsert_tool(broken, updated_at=datetime.now().isoformat())
 
         await service.startup()
 
-        reconciled = service.get_tool_family('skill_access')
+        # 新合同：核心工具允许被停用；启动不再把它强制拉回 enabled，
+        # 编辑过的角色也保持不变，仅 is_core 标记仍由 core_tools 名单算出。
+        reconciled = service.get_tool('load_tool_context')
         assert reconciled is not None
         assert reconciled.is_core is True
-        assert reconciled.enabled is True
-        assert all('ceo' not in action.allowed_roles for action in reconciled.actions if action.agent_visible)
+        assert reconciled.enabled is False
+        assert reconciled.allowed_roles == ['execution', 'inspection']
+        assert 'load_tool_context' not in service.list_effective_tool_names(
+            actor_role='ceo',
+            session_id='web:shared',
+        )
     finally:
         await service.close()
         manager.close()
@@ -5583,37 +5569,32 @@ async def test_startup_backfills_legacy_empty_roles_for_implicit_tool_governance
     )
 
     try:
-        families = {item.tool_id: item for item in service.resource_registry.refresh_from_current_resources()[1]}
-        legacy_empty = families['skill_access'].model_copy(
-            update={
-                'actions': [
-                    action.model_copy(update={'allowed_roles': []})
-                    for action in families['skill_access'].actions
-                ],
-            }
+        tools = {item.tool_id: item for item in service.resource_registry.refresh_from_current_resources()[1]}
+        legacy_empty = tools['load_tool_context'].model_copy(
+            update={'allowed_roles': []}
         )
-        service.governance_store.upsert_tool_family(legacy_empty, updated_at=datetime.now().isoformat())
+        service.governance_store.upsert_tool(legacy_empty, updated_at=datetime.now().isoformat())
         service.governance_store.set_bool_meta('implicit_tool_role_backfill_v1_applied', False)
 
         await service.startup()
 
-        healed = service.get_tool_family('skill_access')
+        healed = service.get_tool('load_tool_context')
         assert healed is not None
-        assert healed.actions[0].allowed_roles == ['ceo', 'execution', 'inspection']
+        assert healed.allowed_roles == ['ceo', 'execution', 'inspection']
         assert 'load_tool_context' in service.list_effective_tool_names(actor_role='ceo', session_id='web:shared')
 
         cleared = service.update_tool_policy(
-            'skill_access',
+            'load_tool_context',
             session_id='web:shared',
-            allowed_roles_by_action={'load_context': []},
+            allowed_roles=[],
         )
         assert cleared is not None
-        assert cleared.actions[0].allowed_roles == []
+        assert cleared.allowed_roles == []
 
         service.reload_resources(session_id='web:shared')
-        after_reload = service.get_tool_family('skill_access')
+        after_reload = service.get_tool('load_tool_context')
         assert after_reload is not None
-        assert after_reload.actions[0].allowed_roles == []
+        assert after_reload.allowed_roles == []
     finally:
         await service.close()
         manager.close()
@@ -5629,7 +5610,9 @@ async def test_ensure_runtime_config_current_keeps_dynamic_task_tools_visible(tm
     (workspace / 'tools').mkdir(parents=True, exist_ok=True)
     _copy_repo_tools(
         workspace,
-        'content',
+        'content_search',
+        'content_open',
+        'content_describe',
         'memory_note',
         'memory_write',
         'memory_runtime',
@@ -5699,13 +5682,15 @@ async def test_ensure_runtime_config_current_keeps_dynamic_task_tools_visible(tm
 
 
 @pytest.mark.asyncio
-async def test_core_tool_admin_endpoints_block_disable_and_delete_but_allow_role_removal(tmp_path: Path):
+async def test_core_tool_admin_endpoints_allow_disable_block_delete_and_allow_role_removal(tmp_path: Path):
     workspace = tmp_path / 'workspace'
     (workspace / 'skills').mkdir(parents=True, exist_ok=True)
     (workspace / 'tools').mkdir(parents=True, exist_ok=True)
     _copy_repo_tools(
         workspace,
-        'content',
+        'content_search',
+        'content_open',
+        'content_describe',
         'memory_runtime',
         'load_skill_context',
         'load_tool_context',
@@ -5737,21 +5722,27 @@ async def test_core_tool_admin_endpoints_block_disable_and_delete_but_allow_role
         await service.startup()
         client = TestClient(_build_app(service))
 
-        disable_response = client.post('/api/resources/tools/task_runtime/disable', params={'session_id': 'web:shared'})
-        assert disable_response.status_code == 409
-        assert disable_response.json()['detail']['code'] == 'core_tool_disable_forbidden'
+        # 新合同：核心工具可以停用（关掉一条只影响这一条），但仍然不能删除。
+        disable_response = client.post(
+            '/api/resources/tools/task_append_notice/disable',
+            params={'session_id': 'web:shared'},
+        )
+        assert disable_response.status_code == 200
+        assert disable_response.json()['item']['enabled'] is False
+        assert service.get_tool('task_append_notice').enabled is False
+        assert service.get_tool('task_list').enabled is True
 
-        delete_response = client.delete('/api/resources/tools/skill_access', params={'session_id': 'web:shared'})
+        delete_response = client.delete('/api/resources/tools/load_tool_context', params={'session_id': 'web:shared'})
         assert delete_response.status_code == 409
         assert delete_response.json()['detail']['code'] == 'core_tool_delete_forbidden'
 
         policy_response = client.put(
-            '/api/resources/tools/content/policy',
+            '/api/resources/tools/content_search/policy',
             params={'session_id': 'web:shared'},
-            json={'actions': {'inspect': ['execution', 'inspection']}},
+            json={'allowed_roles': ['execution', 'inspection']},
         )
         assert policy_response.status_code == 200
-        assert policy_response.json()['item']['actions'][0]['allowed_roles'] == ['execution', 'inspection']
+        assert policy_response.json()['item']['allowed_roles'] == ['execution', 'inspection']
     finally:
         await service.close()
         manager.close()
@@ -5782,36 +5773,36 @@ async def test_tool_policy_empty_roles_persist_across_reload_for_exec_runtime(tm
         client = TestClient(_build_app(service))
 
         seeded = service.update_tool_policy(
-            'exec_runtime',
+            'exec',
             session_id='web:shared',
-            allowed_roles_by_action={'run': ['ceo', 'execution']},
+            allowed_roles=['ceo', 'execution'],
         )
         assert seeded is not None
 
-        before = service.get_tool_family('exec_runtime')
+        before = service.get_tool('exec')
         assert before is not None
-        assert before.actions[0].allowed_roles == ['ceo', 'execution']
+        assert before.allowed_roles == ['ceo', 'execution']
         assert 'exec' in service.list_effective_tool_names(actor_role='ceo', session_id='web:shared')
 
         policy_response = client.put(
-            '/api/resources/tools/exec_runtime/policy',
+            '/api/resources/tools/exec/policy',
             params={'session_id': 'web:shared'},
-            json={'actions': {'run': []}},
+            json={'allowed_roles': []},
         )
         assert policy_response.status_code == 200
-        assert policy_response.json()['item']['actions'][0]['allowed_roles'] == []
+        assert policy_response.json()['item']['allowed_roles'] == []
 
         reloaded = client.post('/api/resources/reload', params={'session_id': 'web:shared'}, json={})
         assert reloaded.status_code == 200
         assert reloaded.json()['ok'] is True
 
-        detail = client.get('/api/resources/tools/exec_runtime')
+        detail = client.get('/api/resources/tools/exec')
         assert detail.status_code == 200
-        assert detail.json()['item']['actions'][0]['allowed_roles'] == []
+        assert detail.json()['item']['allowed_roles'] == []
 
         assert 'exec' not in service.list_effective_tool_names(actor_role='ceo', session_id='web:shared')
-        visible = service.list_visible_tool_families(actor_role='ceo', session_id='web:shared')
-        assert all(item.tool_id != 'exec_runtime' for item in visible)
+        visible = service.list_visible_tools(actor_role='ceo', session_id='web:shared')
+        assert all(item.tool_id != 'exec' for item in visible)
     finally:
         await service.close()
         manager.close()
@@ -5842,7 +5833,7 @@ async def test_exec_execution_mode_persists_across_reload_and_is_exposed_in_tool
         client = TestClient(_build_app(service))
 
         policy_response = client.put(
-            '/api/resources/tools/exec_runtime/policy',
+            '/api/resources/tools/exec/policy',
             params={'session_id': 'web:shared'},
             json={'execution_mode': 'full_access'},
         )
@@ -5853,7 +5844,7 @@ async def test_exec_execution_mode_persists_across_reload_and_is_exposed_in_tool
         assert reloaded.status_code == 200
         assert reloaded.json()['ok'] is True
 
-        detail = client.get('/api/resources/tools/exec_runtime')
+        detail = client.get('/api/resources/tools/exec')
         assert detail.status_code == 200
         assert detail.json()['item']['metadata']['execution_mode'] == 'full_access'
     finally:
@@ -5887,15 +5878,11 @@ async def test_load_tool_context_includes_exec_runtime_policy(tmp_path: Path):
     try:
         await service.startup()
         updated = service.update_tool_policy(
-            'exec_runtime',
+            'exec',
             session_id='web:shared',
             execution_mode='full_access',
         )
         assert updated is not None
-        service._visible_tool_family_map = lambda **kwargs: {  # type: ignore[method-assign]
-            'exec_runtime': updated,
-            'exec': updated,
-        }
 
         payload = service.load_tool_context(
             actor_role='ceo',

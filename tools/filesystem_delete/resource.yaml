@@ -38,17 +38,13 @@ parameters:
   required:
     - paths
 governance:
-  family: filesystem
-  display_name: Filesystem
-  description: Write, edit, copy, move, delete, and propose patches for local files.
-  actions:
-    - id: delete
-      label: Delete File
-      risk_level: high
-      destructive: true
-      allowed_roles:
-        - ceo
-        - execution
+  display_name: Filesystem Delete
+  description: Delete one or more files or directory paths.
+  risk_level: high
+  destructive: true
+  allowed_roles:
+    - ceo
+    - execution
 exposure:
   agent: true
   main_runtime: true

@@ -27,16 +27,12 @@ parameters:
       description: Target task id.
   required: [任务id]
 governance:
-  family: task_runtime
-  display_name: Task Runtime
-  description: List failed node ids for a task tree.
-  actions:
-    - id: failed_nodes_cn
-      label: Task Failed Nodes
-      risk_level: low
-      destructive: false
-      allowed_roles:
-        - ceo
+  display_name: Task Failed Nodes
+  description: List failed node ids inside a task tree.
+  risk_level: low
+  destructive: false
+  allowed_roles:
+    - ceo
 recovery_policy:
   rerun_safe: true
 

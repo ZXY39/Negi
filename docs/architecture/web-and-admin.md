@@ -435,7 +435,7 @@ This is intentional. The composer button means "pause only when the user has not
   - skill notices use the same `sparkles` icon family as the sidebar Skill page
 - The risk-colored dot remains present on the trailing edge so operators can still distinguish low / medium / high loader risk at a glance.
 - Risk color comes from the resource catalog in browser state (`S.skills` / `S.tools`), not from the tool result. Catalog population is on demand: the node detail path awaits `ensureContextRiskCatalog()` (which fills both lists from `/api/resources/skills` + `/api/resources/tools` and de-duplicates concurrent calls) only when the rendered trace actually contains context-load steps. An empty catalog degrades every risk color to the medium fallback rather than failing the render.
-- Tool risk lookup resolves the concrete executor against the owning surfaced family: `actions[].executor_names` decides the level for ids like `filesystem_write`, while a family-level load (`load_tool_context("filesystem")`) takes the highest action level in that family. `tool_id` equality alone never matches, because the catalog is family-keyed.
+- Tool risk lookup reads that tool record's own `risk_level`: `S.tools` is keyed by `tool_id`, so a loaded `filesystem_write` colors from the write tool itself and a loaded `filesystem_stat` from the measure tool. There is no group-level fallback and no second name space to reconcile.
 - The task node detail page renders the same loader family as round chips rather than hiding it: the chip title is `加载 skill` / `加载 tool` with a leading risk-colored kind icon (`sparkles` / `wrench`, same palette as the notice dot), and the loaded resource id is exposed only as the chip tooltip. Expanding a loader chip shows a single `内容` field holding the loaded body (`content` from the loader result payload), with no arguments field and no tool name.
 - Loader steps that did not succeed keep the ordinary tool-step rendering (name, arguments, raw output), so gate errors and failed loads stay diagnosable instead of collapsing into an empty `内容`.
 - The intended motion contract is still "launch from the composer, settle into the notice stack, then fade out"; the full lifecycle is currently about 5 seconds per notice.
@@ -813,21 +813,25 @@ The context-usage brain is also the composer's model-and-context entry: clicking
 
 ## Tool Admin RBAC Contract
 
-Tool management uses a strict persisted-RBAC contract for surfaced tool families. See `tool-and-skill-system.md`「Tool Admin RBAC」 for the backend semantics: policy seeding, empty-list preservation and one-time repair, the `监管模式` approval switch, and `exec_runtime` execution mode.
+Tool management uses a strict persisted-RBAC contract with **one row per surfaced tool**. See `tool-and-skill-system.md`「Tool Admin RBAC」 for the backend semantics: policy seeding, empty-list preservation and one-time repair, the `监管模式` approval switch, and `exec` execution mode.
+
+The Tool page lists tools, not groups: one row per `tool_id`, carrying its own status / risk / 核心工具 tags, and the detail drawer holds that one tool's role toggles, its own toolskill, and its own enable & delete controls. Records with `agent_visible: false` stay out of the list. `GET /api/resources/tools` returns the same per-tool records, and every write endpoint is keyed by `tool_id`.
 
 The frontend responsibilities are:
 
 - reflect the backend-owned `allowed_roles` exactly,
-- allow all surfaced action role toggles to be unchecked,
-- avoid special-casing CEO for surfaced core tool families,
-- and show a clear operator-visible hint when an action is currently disabled for all roles.
+- allow every surfaced tool's role toggles to be unchecked, including a core tool's,
+- keep `删除` unavailable for core tools (`core_tool_delete_forbidden`) — that is the only remaining core protection, and a disabled core tool stays disabled because nothing force-enables it,
+- and show a clear operator-visible hint when a tool is currently disabled for all roles.
+
+Save payload is `PUT /api/resources/tools/{tool_id}` with `{"enabled": bool, "allowed_roles": [...], "execution_mode": "governed|full_access"?}`; `execution_mode` belongs to `exec` alone.
 
 The Skill and Tool detail drawers share one save rule: edits persist only when the operator clicks the `保存` button beside `关闭`, which fires the same policy/file write the toolbar save used to. There is no autosave or debounce, and closing the drawer discards uncommitted edits. New maintainers often misread the draft hint (`有未保存的修改`) as an autosave indicator — it only marks dirty state that a `保存` click must commit.
 
 If an operator reports "save succeeded but reopen restored the roles", first inspect:
 
 1. the Tool Admin save payload,
-2. the stored `tool_families.payload_json` row for that surfaced family,
+2. the stored `tools.payload_json` row for that tool,
 3. the post-reload `GET /api/resources/tools/{tool_id}` response.
 
 Do not start with frontdoor prompt debugging unless those three layers already agree.
@@ -835,11 +839,13 @@ Do not start with frontdoor prompt debugging unless those three layers already a
 If an operator reports "Tool 管理 shows one role set but runtime visibility behaves differently", inspect in this order:
 
 1. `GET /api/resources/tools/{tool_id}`
-2. the stored `tool_families.payload_json` row
+2. the stored `tools.payload_json` row
 3. the derived `role_policy_matrix`
 4. the runtime-side `list_effective_tool_names(...)` result for the affected role/session
 
-Do not assume the browser has a second hidden RBAC source. For surfaced tool families, the API detail payload and runtime visibility are two views over the same backend-owned family/action state.
+If roles look like shipped defaults right after an upgrade of an existing install, that is the one-time governance migration: the stored group-shaped rows are expanded per tool and the operator's `enabled` / per-action roles ride along (`tool-and-skill-system.md`「Tool Admin RBAC」). It runs once when the governance store opens; `governance_meta.tool_granularity_migration_v1_applied` records how many rows it wrote.
+
+Do not assume the browser has a second hidden RBAC source. For surfaced tools, the API detail payload and runtime visibility are two views over the same backend-owned per-tool state.
 
 ## Container Deployment Contract
 

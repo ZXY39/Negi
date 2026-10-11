@@ -45,16 +45,12 @@ parameters:
         buckets, so a longer window widens the bucket step instead of the output.
   required: [mode]
 governance:
-  family: task_runtime
-  display_name: Task Runtime
-  description: Inspect worker performance history.
-  actions:
-    - id: perf_inspect_cn
-      label: Perf Inspect
-      risk_level: low
-      destructive: false
-      allowed_roles:
-        - ceo
+  display_name: Perf Inspect
+  description: 'Read the worker performance record that the task hall header shows: pressure tier, CPU/memory/disk, tool and node queue waits, SQLite latency. Judging rules for the returned report: ''Samples: 0'' or a listed ''Sampling gap'' means the worker recorded NOTHING in that span - it is not evidence the machine was idle, and it is not evidence of a perf stall either; report it as missing coverage. ''restricted_share=0%'' plus no gaps means the silence was not perf-caused, so keep looking at node/tool logic instead. Non-zero ''tq_wait''/''nq_wait'' or ''Pressure runs'' entries mean calls were actually queued at that clock time, which is the evidence needed to blame performance.'
+  risk_level: low
+  destructive: false
+  allowed_roles:
+    - ceo
 recovery_policy:
   rerun_safe: true
 
