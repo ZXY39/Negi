@@ -45,9 +45,9 @@ def test_v2_approval_viewport_stays_a_positioning_container() -> None:
 
 
 def test_app_sidebars_use_compact_160px_width_before_mobile_stack() -> None:
+    # 只查真正加载的样式表：org_graph.html 挂 org_graph.css 与 org_graph_redesign.css。
     css_files = [
         REPO_ROOT / "g3ku/web/frontend/org_graph.css",
-        REPO_ROOT / "g3ku/web/frontend/search.css",
     ]
 
     for css_path in css_files:
