@@ -36,6 +36,7 @@ import asyncio
 import base64
 import mimetypes
 from collections import OrderedDict
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable
 from urllib.parse import urlparse
@@ -46,6 +47,7 @@ from loguru import logger
 from g3ku.qq_official.client import ExternalApiClient
 from g3ku.qq_official.messages import (
     OUTBOUND_EVENT,
+    bridge_id_for_app_id,
     external_key_for_c2c,
     external_key_for_group,
     external_key_for_guild,
@@ -158,6 +160,49 @@ def _lru_remember(mapping: "OrderedDict[str, Any]", key: str, value: Any = None,
     mapping.move_to_end(key)
     while len(mapping) > max(1, int(limit)):
         mapping.popitem(last=False)
+
+
+@dataclass(slots=True)
+class _BridgeDeliveryState:
+    """一个号的投递账本，活过一轮 QQ 网关登录。
+
+    账本必须比桥活得久，因为「这条已经送过了」的证据在别的地方一律留不住：服务端
+    的事件缓冲（`g3ku.runtime.external_events` 的 hub）长在 web 进程里，桥重登不动
+    它；账本的 ack 墓碑每小时随 `compact_outbox` 落盘，桥侧也拿不到持久读数。账本
+    长在桥的闭包里时，每次重登都同时抹掉游标与去重集，于是新 pump 只能以
+    ``last_seq=0`` 连上 SSE，缓冲里整段历史被重新交给桥——已投递且已销账的回复再投
+    一遍（实盘 2026-10-12：03:29:14 网关到期重登，03:59:50 一次 `pump connecting
+    last_seq=0` 打出三条 `qq-official delivered`，其中两条是 02:33:43 与 02:40:12
+    已 ack 过的回答；账本里那一会话只剩 03:59:48 那一条 `reply.final`）。
+    """
+
+    # external_key -> session_id
+    sessions: dict[str, str] = field(default_factory=dict)
+    # session_id -> 本号最后一次成功投递（或判定跳过）的 hub seq
+    seqs: dict[str, int] = field(default_factory=dict)
+    # outbox_id 维度投递历史：acked 集跳过对账/重放产生的已销账副本；attempts 跨
+    # seq 封顶同一 id 的总投递尝试（毒消息副本不随每份新 seq 重新获得完整预算）。
+    acked_outbox_ids: OrderedDict[str, None] = field(default_factory=OrderedDict)
+    outbox_attempts: OrderedDict[str, int] = field(default_factory=OrderedDict)
+
+
+_DELIVERY_STATES: dict[str, _BridgeDeliveryState] = {}
+
+
+def bridge_delivery_state(bridge_id: str) -> _BridgeDeliveryState:
+    """按 bridge_id 取该号的投递账本（一个 AppID 一份，号与号之间不共享）。"""
+    key = str(bridge_id or "")
+    state = _DELIVERY_STATES.get(key)
+    if state is None:
+        state = _BridgeDeliveryState()
+        _DELIVERY_STATES[key] = state
+    return state
+
+
+def reset_bridge_delivery_state() -> None:
+    """Test hook: 丢掉所有号的账本（进程级状态需要这条隔离缝，同
+    ``external_events.reset_session_event_hubs``）。"""
+    _DELIVERY_STATES.clear()
 
 
 def _is_botpy_task(task: asyncio.Task) -> bool:
@@ -393,16 +438,16 @@ async def run_qq_official_bridge(
 
     client = ExternalApiClient(base_url=base_url, token=token)
     media_client = _create_media_client()
-    # session bookkeeping: session_id -> external_key, and cached last SSE seq.
-    sessions: dict[str, str] = {}
-    seqs: dict[str, int] = {}
+    # 投递账本按号取，跨登录存活（见 ``_BridgeDeliveryState``）：pump 因此从上一次
+    # 成功投递的 seq 续拉，而不是每次重登都从 0 重放整段服务端缓冲。
+    state = bridge_delivery_state(bridge_id_for_app_id(app_id))
+    sessions = state.sessions
+    seqs = state.seqs
+    acked_outbox_ids = state.acked_outbox_ids
+    outbox_attempts = state.outbox_attempts
+    # pump 句柄属于这一轮登录，随桥的 finally 一起取消，绝不跨登录复用任务。
     pumps: set[asyncio.Task] = set()
     pump_tasks: dict[str, asyncio.Task] = {}
-    # outbox_id 维度投递历史（进程内有界 LRU，重启清零 = at-least-once 重投一次）：
-    # acked 集跳过对账/重放产生的已销账副本；attempts 跨 seq 封顶同一 id 的总
-    # 投递尝试（毒消息副本不随每份新 seq 重新获得完整预算）。
-    acked_outbox_ids: OrderedDict[str, None] = OrderedDict()
-    outbox_attempts: OrderedDict[str, int] = OrderedDict()
 
     async def on_incoming(
         external_key: str,
@@ -743,9 +788,9 @@ async def run_qq_official_bridge(
                             )
                             if outbox_id:
                                 # 账本不再有年龄上限，投递预算就是它唯一的上界：判毒后
-                                # 按终态销账。不销的话，每次桥重建（实测每小时一次网关
-                                # 结束）都会把进程内的 per-id 计数清零，让一个平台永久
-                                # 拒绝的目标拿到新一轮 5 次预算。
+                                # 按终态销账。不销的话，一次进程重启（per-id 计数随进程
+                                # 消失，实测网关每小时那次重登已不再清它）就让一个平台
+                                # 永久拒绝的目标重新拿到 5 次预算。
                                 try:
                                     await client.ack_outbox(
                                         session_id, outbox_id, status="undeliverable"

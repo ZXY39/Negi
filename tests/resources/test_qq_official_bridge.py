@@ -160,9 +160,11 @@ class FakeExternalApiClient:
 def _reset_fake_registries():
     FakeClient.instances.clear()
     FakeExternalApiClient.instances.clear()
+    bridge_module.reset_bridge_delivery_state()
     yield
     FakeClient.instances.clear()
     FakeExternalApiClient.instances.clear()
+    bridge_module.reset_bridge_delivery_state()
 
 
 def _install_fake_botpy(
@@ -1450,3 +1452,119 @@ async def test_drained_botpy_multi_run_never_yields() -> None:
         heartbeat.cancel()
         with suppress(asyncio.CancelledError):
             await heartbeat
+
+
+class _SharedHubReplayClient(FakeExternalApiClient):
+    """服务端事件缓冲跨桥重建存活（hub 长在 web 进程里），而每轮登录都 new 一个新
+    客户端实例，所以重放语义必须挂在类上：全部实例共用同一份缓冲与同一套 seq 判据。"""
+
+    feed: list[dict] = []
+    connect_last_seqs: list[int] = []
+
+    async def stream_events(self, session_id: str, last_seq: int = 0):
+        type(self).connect_last_seqs.append(int(last_seq or 0))
+        seen = int(last_seq or 0)
+        while True:
+            for event in list(self.feed):
+                seq = int(event.get("seq") or 0)
+                if seq > seen:
+                    yield event
+                    seen = seq
+            await asyncio.sleep(0.01)
+
+
+@pytest.mark.asyncio
+async def test_bridge_relogin_resumes_from_last_delivered_seq(monkeypatch: pytest.MonkeyPatch) -> None:
+    """回归（实盘 2026-10-12 03:59:50）：QQ 网关到期重登后，历史回答与新回答一起
+    被重复推送。桥重建不得抹掉投递游标与去重集——服务端事件缓冲跨重登存活，新
+    pump 从 ``last_seq=0`` 起就把已 ack 的回复再投一遍，而账本的 ack 墓碑每小时随
+    compact 落盘，两边都拿不到「这条送过了」的证据。"""
+    monkeypatch.setattr(bridge_module, "_PUMP_RECONNECT_INITIAL_BACKOFF_SECONDS", 0.01)
+
+    api = FakeBotApi()
+    delivered: list[str] = []
+
+    async def _record_post_c2c(**kwargs):
+        delivered.append(str(kwargs.get("content") or ""))
+        return {"id": "mid-1"}
+
+    api.post_c2c_message = _record_post_c2c
+
+    class _SharedApiFakeClient(FakeClient):
+        def __init__(self, *args, **kwargs) -> None:
+            super().__init__(*args, **kwargs)
+            self.api = api
+
+    _SharedHubReplayClient.feed = [
+        {
+            "type": "reply.final",
+            "seq": 1,
+            "turn_id": "t1",
+            "text": "上一轮的回答",
+            "outbox_id": "obx-old",
+        }
+    ]
+    _SharedHubReplayClient.connect_last_seqs = []
+
+    _install_fake_botpy(monkeypatch, client_cls=_SharedApiFakeClient)
+    monkeypatch.setattr(bridge_module, "ExternalApiClient", _SharedHubReplayClient)
+    monkeypatch.setattr(
+        bridge_module,
+        "_create_media_client",
+        lambda: httpx.AsyncClient(transport=_media_transport({})),
+    )
+
+    async def _login():
+        # 每轮登录都会 new 一份 botpy Client 与一份 /api/v1 客户端：必须等"新出现的那
+        # 一个"就绪，否则第二次登录会立刻拿到上一轮已经 started 的替身，测的是僵尸句柄。
+        before = len(FakeClient.instances)
+        task = asyncio.create_task(
+            bridge_module.run_qq_official_bridge(
+                app_id="100",
+                app_secret="sekrit",
+                sandbox=False,
+                token="t",
+                base_url="http://127.0.0.1:1/api/v1",
+                on_state=lambda state, detail: None,
+            ),
+            name="test-qq-bridge-relogin",
+        )
+        await _wait_until(lambda: len(FakeClient.instances) > before and FakeClient.instances[-1].started)
+        return task, FakeClient.instances[-1]
+
+    first_task, first_client = await _login()
+    try:
+        await first_client.on_c2c_message_create(_c2c_message("第一条", [], message_id="rl-1"))
+        first_ext = FakeExternalApiClient.instances[-1]
+        await _wait_until(lambda: delivered == ["上一轮的回答"])
+        await _wait_until(lambda: first_ext.acked == [("ext:qq-official:qq:c2c:u9", "obx-old")])
+    finally:
+        first_task.cancel()
+        with suppress(asyncio.CancelledError):
+            await first_task
+
+    # 网关 close 4009 判会话到期 → 桥重建（约每小时一次）。缓冲里这时才多出一条
+    # 网页发起的回合回复，它才是该送的那一条。
+    _SharedHubReplayClient.feed.append(
+        {
+            "type": "reply.final",
+            "seq": 2,
+            "turn_id": "t2",
+            "text": "这一轮的回答",
+            "outbox_id": "obx-new",
+        }
+    )
+
+    second_task, second_client = await _login()
+    try:
+        await second_client.on_c2c_message_create(_c2c_message("第二条", [], message_id="rl-2"))
+        await _wait_until(lambda: delivered == ["上一轮的回答", "这一轮的回答"])
+        assert _SharedHubReplayClient.connect_last_seqs == [0, 1], (
+            "重登后的首连必须续在最后一次成功投递的 seq 上，否则就是在重放历史"
+        )
+        second_ext = FakeExternalApiClient.instances[-1]
+        await _wait_until(lambda: second_ext.acked == [("ext:qq-official:qq:c2c:u9", "obx-new")])
+    finally:
+        second_task.cancel()
+        with suppress(asyncio.CancelledError):
+            await second_task
