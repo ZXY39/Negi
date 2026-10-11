@@ -274,6 +274,7 @@ class G3kuMcpClient:
                         "seq": int(event.get("seq") or 0),
                         "usage": event.get("usage") if isinstance(event.get("usage"), dict) else None,
                         "task_ids": list(event.get("task_ids") or []),
+                        "transcript_turn_id": str(event.get("transcript_turn_id") or "") or None,
                     }
                 continue
             if event_type == "turn.completed":
@@ -288,6 +289,7 @@ class G3kuMcpClient:
                             "seq": int(best.get("seq") or 0),
                             "usage": best.get("usage") if isinstance(best.get("usage"), dict) else None,
                             "task_ids": list(best.get("task_ids") or []),
+                            "transcript_turn_id": str(best.get("transcript_turn_id") or "") or None,
                         }
                     return {"kind": "cancelled" if event.get("cancelled") else "no_reply"}
                 if turn_id is not None and event_turn_id != str(turn_id):

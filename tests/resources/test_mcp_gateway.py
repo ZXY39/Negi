@@ -221,6 +221,7 @@ async def test_get_reply_found_and_not_found():
         "turn_id": "t2",
         "usage": None,
         "task_ids": [],
+        "transcript_turn_id": None,
         "answered_seq": 0,
     }
 
