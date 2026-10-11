@@ -295,6 +295,12 @@ def build_mcp_server(client: G3kuMcpClient, *, name: str = "negi") -> FastMCP:
             "turn), `last_activity_at`/`silence_seconds` (the newest session event — silence of "
             "40 seconds and silence of 12 minutes are different decisions), plus "
             "`last_activity_kind`/`last_activity_text` for what it is doing right now. "
+            "Also carries `latest_model_text` (the newest model output, outbound-sanitized and "
+            "truncated — `latest_model_text_total_chars` says how long it really was), "
+            "`recent_tool_calls` (tool names used, newest first) and `stages_recent` (last three "
+            "stages: status, tool-round usage/budget, round count and a goal prefix — no summaries, "
+            "no key_refs). A missing `stages_recent` means the session is not resident, not that "
+            "it has no stages. "
             "`last_seq` is the gateway's SSE event cursor, NOT a progress percentage or a step "
             "count — do not read a slow-rising `last_seq` as a stall."
         )
@@ -317,6 +323,12 @@ def build_mcp_server(client: G3kuMcpClient, *, name: str = "negi") -> FastMCP:
                 "last_activity_kind": str(state.get("last_activity_kind") or ""),
                 "last_activity_text": str(state.get("last_activity_text") or ""),
                 "last_event_seq": int(state.get("last_event_seq") or 0),
+                # 在做什么：最新一段模型文本（已过出站消毒、截断后仍报总字数）与最近
+                # 调用过的工具名；阶段只给状态/计数与 goal 前缀，不给摘要与 key_refs。
+                "latest_model_text": str(state.get("latest_model_text") or ""),
+                "latest_model_text_total_chars": int(state.get("latest_model_text_total_chars") or 0),
+                "recent_tool_calls": list(state.get("recent_tool_calls") or []),
+                "stages_recent": list(state.get("stages_recent") or []) if "stages_recent" in state else None,
                 "last_error": state.get("last_error"),
                 # 任务侧活动：派发回合早就收尾了，节点还在跑，这段时间会话侧本来就没有
                 # 新事件——只看 silence_seconds 会把"在跑几十分钟的活"读成"卡死了"。
