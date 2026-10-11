@@ -374,3 +374,36 @@ def test_hub_tail_event_exposes_the_time_of_last_activity():
     # 读活动不该消耗或推进任何东西：同一份缓冲区仍能整段回放
     assert len(hub.replay(0)) == 2
     assert hub.tail_event() == tail
+
+
+def test_external_turn_id_is_stamped_onto_the_transcript_row():
+    """record id 与转录 turn id 必须是一个，否则刚拿到答复的 id 回读原文就 404。"""
+    from g3ku.core.messages import UserInputMessage
+    from g3ku.runtime.session_agent import _TRANSCRIPT_TURN_ID_KEY, stamp_transcript_turn_id
+
+    message = UserInputMessage(content="派个任务")
+    stamp_transcript_turn_id(message, "fc4a22f1475c42ce")
+    assert message.metadata[_TRANSCRIPT_TURN_ID_KEY] == "fc4a22f1475c42ce"
+    # 非 UserInputMessage（老式纯文本提交）与空 id 都不该被硬塞
+    stamp_transcript_turn_id("plain-text", "abc")
+    stamp_transcript_turn_id(message, "")
+    assert message.metadata[_TRANSCRIPT_TURN_ID_KEY] == "fc4a22f1475c42ce"
+
+
+def test_task_activity_reports_unknown_separately_from_none():
+    from g3ku.runtime.api.external_v1 import _session_task_activity, _task_hop_ceiling
+
+    assert _session_task_activity(None, "ext:qoder:abc") is None
+    assert _session_task_activity(SimpleNamespace(), "ext:qoder:abc") is None
+
+    service = SimpleNamespace(
+        list_unfinished_tasks_for_session=lambda key: [SimpleNamespace(task_id="task:a", status="in_progress")],
+        store=SimpleNamespace(
+            list_task_model_calls=lambda task_id, limit=None: [{"created_at": "2026-10-11T00:12:34"}],
+            count_task_model_calls=lambda task_id: 245,
+        ),
+    )
+    activity = _session_task_activity(SimpleNamespace(main_task_service=service), "ext:qoder:abc")
+    assert activity["tasks_running"] == 1
+    assert activity["tasks"][0]["model_calls"] == 245
+    assert _task_hop_ceiling(activity) == "2026-10-11T00:12:34"

@@ -352,6 +352,53 @@ async def clear_external_session(
     return {"ok": True, "cleared": True, "session_id": session_key}
 
 
+def _session_task_activity(agent: Any, session_key: str) -> dict[str, Any] | None:
+    """本会话仍未完成的任务，以及它们最近一跳的时间。
+
+    为什么必须有：派发回合几十秒就收尾了，节点还要跑几十分钟，而这段时间会话侧
+    **本来就没有新事件** ⇒ 只看事件时间的调用方会把"沉默 100 秒"读成卡死（实盘真的
+    就这么误判了一次）。任务侧的跳次时间才是"活不活"的正证。
+    读不到任务服务时返回 None——"不知道"与"没有在跑的任务"是两回事，不折成 0。
+    """
+    service = getattr(agent, "main_task_service", None) if agent is not None else None
+    if service is None:
+        return None
+    lister = getattr(service, "list_unfinished_tasks_for_session", None)
+    if not callable(lister):
+        return None
+    try:
+        tasks = list(lister(str(session_key or "").strip()) or [])
+    except Exception:
+        return None
+    store = getattr(service, "store", None)
+    entries: list[dict[str, Any]] = []
+    for task in tasks[:8]:
+        task_id = str(getattr(task, "task_id", "") or "").strip()
+        if not task_id:
+            continue
+        hop_at = ""
+        model_calls = 0
+        if store is not None:
+            try:
+                rows = list(store.list_task_model_calls(task_id, limit=1) or [])
+                hop_at = str((rows[0] or {}).get("created_at") or "") if rows else ""
+            except Exception:
+                hop_at = ""
+            try:
+                model_calls = int(store.count_task_model_calls(task_id) or 0)
+            except Exception:
+                model_calls = 0
+        entries.append(
+            {
+                "task_id": task_id,
+                "status": str(getattr(task, "status", "") or "").strip(),
+                "model_calls": model_calls,
+                "last_hop_at": hop_at,
+            }
+        )
+    return {"tasks_running": len(entries), "tasks": entries}
+
+
 @router.get("/sessions/{session_id}/state")
 async def get_external_session_state(
     session_id: str,
@@ -389,6 +436,8 @@ async def get_external_session_state(
             return None
 
     last_activity_at = str((tail_event or {}).get("ts") or "")
+    task_activity = _session_task_activity(peek_global_agent(), entry.session_key)
+    task_hop_ceiling = _task_hop_ceiling(task_activity) if task_activity is not None else ""
     started_at = str(getattr(turn_record, "started_at", "") or "")
     activity_text = str((tail_event or {}).get("text") or "").strip()
     return {
@@ -409,7 +458,21 @@ async def get_external_session_state(
         "last_activity_kind": str((tail_event or {}).get("type") or ""),
         "last_activity_text": activity_text[:160],
         "last_error": last_error,
+        **(
+            {
+                "tasks_running": task_activity["tasks_running"],
+                "tasks": task_activity["tasks"],
+                "task_activity_at": task_hop_ceiling,
+                "task_silence_seconds": _age_iso(task_hop_ceiling) if task_hop_ceiling else None,
+            }
+            if task_activity is not None
+            else {}
+        ),
     }
+
+
+def _task_hop_ceiling(activity: dict[str, Any]) -> str:
+    return max([str(item.get("last_hop_at") or "") for item in list(activity.get("tasks") or [])] or [""])
 
 
 @router.get("/sessions/{session_id}/turns/{turn_id}")

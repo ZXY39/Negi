@@ -314,6 +314,12 @@ def build_mcp_server(client: G3kuMcpClient, *, name: str = "negi") -> FastMCP:
                 "last_activity_text": str(state.get("last_activity_text") or ""),
                 "last_event_seq": int(state.get("last_event_seq") or 0),
                 "last_error": state.get("last_error"),
+                # 任务侧活动：派发回合早就收尾了，节点还在跑，这段时间会话侧本来就没有
+                # 新事件——只看 silence_seconds 会把"在跑几十分钟的活"读成"卡死了"。
+                "tasks_running": state.get("tasks_running"),
+                "tasks": list(state.get("tasks") or []),
+                "task_activity_at": str(state.get("task_activity_at") or ""),
+                "task_silence_seconds": state.get("task_silence_seconds"),
                 "last_seq": client.last_seq(session_id),
             }
 

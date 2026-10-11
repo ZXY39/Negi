@@ -187,6 +187,10 @@ class ExternalTurnService:
         )
         hub.publish("turn.started", turn_id=record.turn_id)
         try:
+            from g3ku.runtime.session_agent import stamp_transcript_turn_id
+
+            # 延迟 import：车道与回合服务互相指向会成环。
+            stamp_transcript_turn_id(user_message, record.turn_id)
             await self._runtime_bridge.prompt(
                 user_message,
                 session_key=record.session_key,
