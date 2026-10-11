@@ -37,6 +37,8 @@
 ## 4. 回合契约
 
 - `POST /sessions/{id}/messages` 异步提交：空闲 → 启动回合并返回 `{turn_id, status:"started"}`；会话被 hold（有回合在跑，**或该会话正在跑一次手动上下文压缩**）→ `queue_follow_up_batch` 排队并返回 `{status:"queued", receipt:"收到，将在当前任务中一并处理。"}`。渠道不因此丢消息：排队条目以转录 `pending` 行为 durable 记录，会话回到空闲后由派发通道发出（合同见 `runtime-overview.md`「压缩窗口：入站闸门与基线写入仲裁」）。
+- `GET /sessions/{id}/state` 除运行档位外，还回答"**现在到底在不在动**"：`started_at`/`elapsed_seconds`（在飞回合，取自 `TurnRecord.started_at`）、`last_activity_at`/`silence_seconds`（hub 最后一条事件的 `ts`，不新增状态）、`last_event_seq` 与 `last_activity_kind`/`last_activity_text`（此刻的活动文本，截 160 字）。这些读数的由来是调用方只有计数器时无法区分"在跑长活"与"卡死"。
+- `GET /sessions/{id}/turns/{turn_id}` 按回合 id 回读**转录里那一行的可见原文**（`text`/`created_at`/`usage`/`task_ids`/`source`/`silent_reply`）。判据是 assistant 行上的顶层 `turn_id`（落盘时写入），所以它 durable：调用方自己的上下文被压缩之后仍能取回原文。没有转录 → 404 `session_not_found`；有转录但该回合没存过 → 404 `turn_not_found`。内存里的 `TurnRecord` 只留 256 条终态记录且会淘汰，**不能**当历史读口用。
 - 执行走 `SessionRuntimeBridge.prompt/prompt_batch`（与 web/CLI/cron 同一语义基座）。
 - 提交方可以是 HTTP 桥，也可以是 `/ws/ceo` 的网页输入车道（进程内经 `get_external_turn_service()` 调 `submit`，不经 Bearer 鉴权中间件）。两条发起方共用 `submit` 这一处裁决：入站 hold、幂等位（网页发起方不带 `Idempotency-Key`，`duplicate` 分支对它不可达）、排队回执、以及「回合契约」的终态不变量。回合的出站能力长在车道上而不是发起方上：`make_session_event_relay` 只在 `_execute_turn` 挂载，所以网页输入必须走这条车道，否则 hub 上没有 `reply.final`，表现为「网页看得到回复、渠道端什么都没有」。这条车道上产出的每条可见回复在进 hub 前都登记进持久账本并带上 `outbox_id`，因此"当时没有消费者"只是延迟而不是丢失（判据与重放见「持久 outbox」）。
 - 出站只承载 agent 回复与主动推送：**发起方的用户消息不回显到渠道**（事件集合里没有 user-echo 类型，投递它需要经总线走 `outbound.created`，那是主动消息额度）。网页在渠道会话里的接管只在转录与 web 侧可见。

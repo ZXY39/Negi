@@ -57,14 +57,16 @@
 
 | 工具 | 语义 | 关键返回 |
 |---|---|---|
-| `negi_chat(conversation, message, wait_seconds=120)` | 发送；`wait_seconds>0` 等终稿，`=0` 只提交立即返回（不开 SSE 流） | `status: completed\|submitted\|pending\|queued_receipt\|failed\|cancelled\|no_reply` + `reply`/`receipt`/`error`/`turn_id`/`usage`/**`task_ids`**；pending 与 submitted 都带续取 hint。正数仍按 5..1800 clamp，`0` 是"不等"而不是"等 5 秒" |
-| `negi_get_reply(conversation, wait_seconds=60)` | 续取未消费的下一个终稿 | `found` + `reply` + `task_ids`。`conversation` 原样传当初给 `negi_chat` 的那个名字 |
-| `negi_session_status(conversation)` | 运行/排队快照 | `running`、`queued_follow_ups`、`inflight_turn_id`、`last_seq` |
+| `negi_chat(conversation, message, wait_seconds=120)` | 发送；`wait_seconds>0` 等终稿，`=0` 只提交立即返回（不开 SSE 流）。**会话在跑时再发是安全的**：并入该会话队列、在在跑回合终态之后按提交顺序回答，不重启回合 ⇒ 互相独立的问题应连着提交而不是一条条干等 | `status: completed\|submitted\|pending\|queued_receipt\|failed\|cancelled\|no_reply` + `reply`/`receipt`/`error`/`turn_id`/`usage`/**`task_ids`**；pending 与 submitted 都带续取 hint。正数仍按 5..1800 clamp，`0` 是"不等"而不是"等 5 秒" |
+| `negi_get_reply(conversation, wait_seconds=60, turn_id="")` | 续取未消费的下一个终稿；给了 `turn_id` 就只等那一回合（`conversation` 原样传当初给 `negi_chat` 的那个名字） | `found` + `reply` + `task_ids` + `turn_id`/`answered_seq`（答复与提问的配对凭据）。不传 `turn_id` 时沿用「等待契约」的 queued 规则：收 finals 到终态、取 max-seq |
+| `negi_get_turn(conversation, turn_id)` | 按回合 id 重取**转录里那一行的原文**。durable：调用方自己被压缩掉之后仍能取回（内存 `TurnRecord` 只留 256 条终态记录且会淘汰，不能当历史读口） | `reply`/`created_at`/`usage`/`task_ids`/`silent_reply`；这会话没存过该回合 → `{ok:false, error:"turn_not_found"}` |
+| `negi_session_status(conversation)` | 运行/排队快照，**活动用时间表达而不是计数器**（光给一个 `last_seq`，调用方无法区分"在跑一个长活"与"已经卡死"——实测有 agent 为此累计阻塞近一小时） | `running`、`queued_follow_ups`、`inflight_turn_id`、`started_at`/`elapsed_seconds`（在飞回合，取自 `TurnRecord.started_at`）、`last_activity_at`/`silence_seconds`（取自 hub 最后一条事件的 `ts`，**零新状态**）、`last_activity_kind`/`last_activity_text`（此刻在做什么）、`last_event_seq`、`last_error`。工具面里的 `last_seq` 仍是**网关自己的 SSE 事件游标**，不是步数也不是进度 |
 | `negi_pause(conversation)` | 暂停在跑回合（不动已派发的任务） | 无 inflight → `{ok:false, error:"no_inflight_turn"}` |
 | `negi_cancel(conversation)` | 取消该会话的在飞工作：在跑回合 + 本会话派发的任务 | `cancelled` 计数。**已暂停未恢复的任务归任务命令**，这颗不吃它们 |
 | `negi_list_conversations(scope="all", limit=50, offset=0, query="", bridge_id="")` | 会话列表：`all` 走 `/sessions?scope=all` 拿全量目录，`own` 只列本网关命名空间。**两个 scope 的活动字段同形**（`preview_text`/`message_count`/`updated_at`/`is_running`/`transcript_path`/`has_transcript`）——own 侧由 `build_channel_ceo_session_item` 逐条构造，与 `all` 同一颗读法，不再回"只有五字段"的空读数 | `scope` + `requested_scope`（token 没有跨桥作用域时降级为 `own`，**两个字段都把降级说出来**）、`matched`（过滤后总数）、`count`（本页条数）、`offset`/`next_offset`（`next_offset` 到底时为 `null`）、`truncated`。`has_transcript` 只在服务端报了之后才出现在条目里——上游没说时省略该键，不折成 `false` |
 | `negi_delete_conversation(conversation)` | 删掉本网关自己建的会话：转录文件 + 侧产出 + 注册表条目一起清 | `deleted`/`registry_forgotten`/`transcript_removed`。**只收短名**：带 `:` 的全键一律 `ok:false, error:"own_namespace_only"`——一个桥不该能删另一个桥的会话。服务端 `DELETE /sessions/{id}` 的默认清除语义（留条目、清正文）不变，删除走 `?purge=true` |
 
+- 等待期间的通知：`negi_chat`/`negi_get_reply` 在阻塞等待中把 hub 的 `progress` 事件转成 MCP `notifications/progress`（`progress=<事件 seq>`，`message=<kind: 文本前 120 字>`，无 `total`）。FastMCP 的 `Context` 参数不进工具的 JSON schema，客户端无需改配置；**客户端不支持通知时只静默不发**，等待语义与最终回复不因进度通道而改变（两条都有用例钉住：收到 progress 事件仍取回同一份 final；`report_progress` 抛错不影响回复）。
 - 投全键会话时，那一轮的归属记在**发起方** bridge 上：回复事件流、幂等位与 `negi_get_reply` 都跟着发起它的这个网关走，目标会话原本的桥名下不留痕。跨桥发信与在本命名空间发信在运行时里是同一条 `submit` 车道，排队/回执/终态不变量完全一致。
 
 - 客户端接入示例：`claude mcp add negi -- negi mcp serve --token <t>`（或等价 MCP JSON 配置）。

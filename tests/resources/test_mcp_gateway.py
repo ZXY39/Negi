@@ -221,6 +221,7 @@ async def test_get_reply_found_and_not_found():
         "turn_id": "t2",
         "usage": None,
         "task_ids": [],
+        "answered_seq": 0,
     }
 
     server2 = build_mcp_server(FakeGatewayClient(outcome={"kind": "timeout"}))

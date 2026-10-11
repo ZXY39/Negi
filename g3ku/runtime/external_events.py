@@ -85,6 +85,16 @@ class SessionEventHub:
         with self._lock:
             return [event for event in self._buffer if int(event.get("seq") or 0) > threshold]
 
+    def tail_event(self) -> dict[str, Any] | None:
+        """缓冲区里最后一条事件（带 `ts`/`seq`/`type`），不消费、不动游标。
+
+        存在的理由：每条事件本来就带 `ts`，所以"这个会话最后一次动是什么时候"
+        是既成事实，不需要新状态。调用方要的是把 `last_seq` 单独摆着（一个纯计数器，
+        读的人无法区分"在跑长活"和"卡死了"）换成这条能算出沉默时长的读数。
+        """
+        with self._lock:
+            return dict(self._buffer[-1]) if self._buffer else None
+
     @property
     def last_seq(self) -> int:
         with self._lock:
