@@ -4032,7 +4032,6 @@ textarea {
 .task-trace-label-row {
     display: flex;
     align-items: center;
-    justify-content: space-between;
     gap: var(--space-2);
     min-width: 0;
 }
@@ -4044,6 +4043,9 @@ textarea {
     text-transform: uppercase;
     color: var(--text-muted);
     min-width: 0;
+    /* 动作按钮要成组靠右：space-between 在两颗粒件时看不出来，加到第三颗
+       （查看完整 / 继续加载）就把它们沿整行平均摊开。 */
+    margin-right: auto;
 }
 
 .task-trace-copy,

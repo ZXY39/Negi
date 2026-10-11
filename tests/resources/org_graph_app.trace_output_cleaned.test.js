@@ -5,6 +5,7 @@ const vm = require("node:vm");
 
 const TASK_VIEW_PATH = "g3ku/web/frontend/org_graph_task_view.js";
 const APP_PATH = "g3ku/web/frontend/org_graph_app.js";
+const CSS_PATH = "g3ku/web/frontend/org_graph.css";
 const TASK_VIEW_CODE = fs.readFileSync(TASK_VIEW_PATH, "utf8");
 const APP_CODE = fs.readFileSync(APP_PATH, "utf8");
 
@@ -378,4 +379,22 @@ test("查看完整走纯文本路由并转义 ref", () => {
     assert.equal(traceContentTextUrl(""), "");
     const encoded = traceContentTextUrl("path:temp/中 文报告.txt");
     assert.ok(encoded.includes(encodeURIComponent("中 文报告")));
+});
+
+function cssRuleBody(selectorText) {
+    const css = fs.readFileSync(CSS_PATH, "utf8");
+    const at = css.indexOf(`${selectorText} {`);
+    assert.notEqual(at, -1, `CSS 里找不到 ${selectorText} 规则`);
+    const open = css.indexOf("{", at);
+    return css.slice(open + 1, css.indexOf("}", open));
+}
+
+test("标签行的动作按钮成组靠右，不随颗粒数被摊开", () => {
+    // 两颗粒件时 space-between 看不出来；加到第三、第四颗（查看完整 / 继续加载）
+    // 就把它们沿整行平均摊开。剩余宽度归标签，按钮才成组。
+    const row = cssRuleBody(".task-trace-label-row");
+    const label = cssRuleBody(".task-trace-label");
+
+    assert.doesNotMatch(row, /justify-content:\s*space-between/, "标签行仍按 space-between 平摊动作按钮");
+    assert.match(label, /margin-right:\s*auto/, "标签没有吃掉剩余宽度");
 });
