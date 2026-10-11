@@ -7778,7 +7778,13 @@ function queueCeoReplyDelta(payload = {}, { sessionId = activeSessionId() } = {}
         ? S.ceoReplyDeltaBuffers[key]
         : null;
     const currentSeq = Number(current?.seq || 0);
-    if (current && currentSeq > seq) return false;
+    // seq 是会话级单调自增的，但运行时一重启它就从头再数，而页面缓冲里还留着上一个回合
+    // 的高 seq。只比 seq 会把重启后新回合的每一帧静默丢掉（回合在跑、气泡一直空）。
+    // 换了回合就整块接管，不比序号；同一回合内才用"序号必须递增"防乱序回退。
+    const incomingTurnId = normalizeCeoTurnId(payload?.turn_id || payload?.turnId || "");
+    const bufferTurnId = normalizeCeoTurnId(current?.turnId || "");
+    const turnChanged = !!(incomingTurnId && bufferTurnId && incomingTurnId !== bufferTurnId);
+    if (current && !turnChanged && currentSeq > seq) return false;
     S.ceoReplyDeltaBuffers = {
         ...(S.ceoReplyDeltaBuffers || {}),
         [key]: {

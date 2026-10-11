@@ -240,6 +240,68 @@ test("queueCeoReplyDelta updates assistant text without markdown rendering and c
     assert.equal(getCeoSessionSnapshotCache("web:shared")?.inflight_turn?.assistant_text, "OK");
 });
 
+test("运行时重启后 hub seq 从头计数：换回合的帧必须接管缓冲，不能被旧回合的高 seq 静默拒", () => {
+    const {
+        S,
+        createPendingCeoTurn,
+        queueCeoReplyDelta,
+        setCeoSessionSnapshotCache,
+        flushFrames,
+    } = loadApp();
+
+    S.activeSessionId = "web:shared";
+    setCeoSessionSnapshotCache("web:shared", {
+        inflight_turn: { source: "user", turn_id: "turn-old", status: "running", assistant_text: "" },
+    });
+    const oldTurn = createPendingCeoTurn("user");
+    oldTurn.turnId = "turn-old";
+    const newTurn = createPendingCeoTurn("user");
+    newTurn.turnId = "turn-new";
+    S.ceoPendingTurns.push(oldTurn, newTurn);
+
+    queueCeoReplyDelta({ turn_id: "turn-old", source: "user", text: "旧回合的尾巴", seq: 7 }, { sessionId: "web:shared" });
+    // 帧之间不 flush：缓冲里还留着 seq=7，模拟"运行时重启后新回合的第一帧序号更小"。
+    // 旧写法在这里直接 return false，新回合从此再没有第二帧（seq 一直小于 7），
+    // 表现就是回合在跑、气泡一直空。
+    const accepted = queueCeoReplyDelta(
+        { turn_id: "turn-new", source: "user", text: "重启后的第一帧", seq: 1 },
+        { sessionId: "web:shared" }
+    );
+    assert.equal(accepted, true);
+
+    flushFrames();
+
+    assert.equal(String(newTurn.liveStreamText || ""), "重启后的第一帧");
+    assert.equal(String(oldTurn.liveStreamText || ""), "");
+});
+
+test("同一回合内乱序的小序号仍然被拒，不能把已上屏的文本倒回去", () => {
+    const {
+        S,
+        createPendingCeoTurn,
+        queueCeoReplyDelta,
+        setCeoSessionSnapshotCache,
+        flushFrames,
+    } = loadApp();
+
+    S.activeSessionId = "web:shared";
+    setCeoSessionSnapshotCache("web:shared", {
+        inflight_turn: { source: "user", turn_id: "turn-same", status: "running", assistant_text: "" },
+    });
+    const turn = createPendingCeoTurn("user");
+    turn.turnId = "turn-same";
+    S.ceoPendingTurns.push(turn);
+
+    queueCeoReplyDelta({ turn_id: "turn-same", source: "user", text: "第五帧", seq: 5 }, { sessionId: "web:shared" });
+    assert.equal(
+        queueCeoReplyDelta({ turn_id: "turn-same", source: "user", text: "第三帧", seq: 3 }, { sessionId: "web:shared" }),
+        false
+    );
+    flushFrames();
+
+    assert.equal(String(turn.liveStreamText || ""), "第五帧");
+});
+
 test("final assistant renderer still uses markdown after streamed plain text", () => {
     const {
         S,
