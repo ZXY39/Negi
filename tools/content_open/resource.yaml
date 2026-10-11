@@ -48,18 +48,14 @@ parameters:
       description: 1-based Unicode code-point end offset (inclusive). With start_char selects a character window; the per-call char cap applies. Must be >= start_char.
   required: []
 governance:
-  family: content_navigation
-  display_name: Content
-  description: Describe, search, and open large externalized content by reference or absolute path.
-  actions:
-    - id: open
-      label: Open Content Excerpt
-      risk_level: low
-      destructive: false
-      allowed_roles:
-        - ceo
-        - execution
-        - inspection
+  display_name: Content Open
+  description: Open one excerpt from a content ref or absolute file path. When both `ref` and `path` are provided, attempt both targets and return per-target results. Image targets keep the same tool surface and, on multimodal routes, prepare direct visual content for the next request only.
+  risk_level: low
+  destructive: false
+  allowed_roles:
+    - ceo
+    - execution
+    - inspection
 recovery_policy:
   rerun_safe: true
 

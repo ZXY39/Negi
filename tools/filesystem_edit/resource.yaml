@@ -98,17 +98,13 @@ model_parameters:
     - old_text
     - new_text
 governance:
-  family: filesystem
-  display_name: Filesystem
-  description: Write, edit, copy, move, delete, and propose patches for local files.
-  actions:
-    - id: edit
-      label: Edit File
-      risk_level: high
-      destructive: true
-      allowed_roles:
-        - ceo
-        - execution
+  display_name: Filesystem Edit
+  description: Replace one exact text region in one file. old_text must match the file verbatim and appear once.
+  risk_level: high
+  destructive: true
+  allowed_roles:
+    - ceo
+    - execution
 exposure:
   agent: true
   main_runtime: true

@@ -29,22 +29,22 @@ def _visible_skill_ids(visible_skills: list[Any]) -> tuple[str, ...]:
 
 
 def _visible_tool_ids(
-    visible_families: list[Any],
+    visible_tools: list[Any],
     visible_tool_names: list[str] | tuple[str, ...] | None = None,
 ) -> tuple[str, ...]:
-    del visible_families
+    del visible_tools
     return _ordered_unique(visible_tool_names)
 
 
 def _snapshot_payload(
     *,
     visible_skills: list[Any],
-    visible_families: list[Any],
+    visible_tools: list[Any],
     visible_tool_names: list[str] | tuple[str, ...] | None,
 ) -> dict[str, list[str]]:
     return {
         "visible_skill_ids": list(_visible_skill_ids(visible_skills)),
-        "visible_tool_ids": list(_visible_tool_ids(visible_families, visible_tool_names)),
+        "visible_tool_ids": list(_visible_tool_ids(visible_tools, visible_tool_names)),
         "visible_tool_names": list(_ordered_unique(visible_tool_names)),
     }
 
@@ -84,12 +84,12 @@ class CapabilitySnapshot:
 def build_capability_snapshot(
     *,
     visible_skills: list[Any],
-    visible_families: list[Any],
+    visible_tools: list[Any],
     visible_tool_names: list[str] | tuple[str, ...] | None = None,
 ) -> CapabilitySnapshot:
     payload = _snapshot_payload(
         visible_skills=list(visible_skills or []),
-        visible_families=list(visible_families or []),
+        visible_tools=list(visible_tools or []),
         visible_tool_names=visible_tool_names,
     )
     exposure_revision = _exposure_revision(payload)

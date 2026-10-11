@@ -116,22 +116,12 @@ function renderSkills() {
     });
 }
 
-function hideToolAdminAction(tool, action) {
-    const toolId = String(tool?.tool_id || "").trim().toLowerCase();
-    const actionId = String(action?.action_id || "").trim().toLowerCase();
-    if (!toolId || !actionId) return false;
-    if ((toolId === "content_navigation" || toolId === "content") && actionId === "inspect") return true;
-    if (toolId === "memory" && actionId === "runtime") return true;
-    return false;
+function isToolAdminVisible(tool) {
+    return !!tool && tool.agent_visible !== false;
 }
 
-function toolActionsForDisplay(tool) {
-    const actions = Array.isArray(tool?.actions) ? tool.actions : [];
-    return actions.filter((action) => !hideToolAdminAction(tool, action));
-}
-
-function isExecToolFamily(tool) {
-    return String(tool?.tool_id || "").trim().toLowerCase() === "exec_runtime";
+function isExecTool(tool) {
+    return String(tool?.tool_id || "").trim().toLowerCase() === "exec";
 }
 
 function execToolExecutionMode(tool) {
@@ -157,7 +147,7 @@ function execToolModeSummary(mode) {
 }
 
 function applyExecToolExecutionMode(tool, mode) {
-    if (!tool || !isExecToolFamily(tool)) return tool;
+    if (!tool || !isExecTool(tool)) return tool;
     const nextMode = String(mode || "governed").trim().toLowerCase() || "governed";
     tool.metadata = {
         ...(tool.metadata || {}),
@@ -175,14 +165,14 @@ function applyExecToolExecutionMode(tool, mode) {
 function filterTools() {
     const q = String(U.toolSearch.value || "").trim().toLowerCase();
     return S.tools.filter((tool) => {
-        if (q && !`${tool.tool_id} ${tool.display_name} ${tool.source_path}`.toLowerCase().includes(q)) return false;
+        if (!isToolAdminVisible(tool)) return false;
+        if (q && !`${tool.tool_id} ${tool.display_name} ${tool.description} ${tool.source_path}`.toLowerCase().includes(q)) return false;
         const statusFilter = String(U.toolStatus.value || "all").trim().toLowerCase();
         const statusKey = toolRepairRequired(tool)
             ? "repair_required"
             : (tool.available === false ? "unavailable" : (tool.enabled ? "enabled" : "disabled"));
         if (statusFilter !== "all" && statusKey !== statusFilter) return false;
-        const displayActions = toolActionsForDisplay(tool);
-        if (U.toolRisk.value !== "all" && !displayActions.some((a) => a.risk_level === U.toolRisk.value)) return false;
+        if (U.toolRisk.value !== "all" && String(tool.risk_level || "").trim().toLowerCase() !== U.toolRisk.value) return false;
         return true;
     });
 }
@@ -205,8 +195,8 @@ function renderTools() {
             <div class="resource-list-subtitle">${esc(subtitle)}</div>
             <div class="resource-list-meta">
                 <span class="meta-tag status-${resourceAvailabilityStatus(tool)}">${esc(displayEnabledLabel(tool.enabled, tool.available, toolRepairRequired(tool)))}</span>
+                <span class="meta-tag risk-${String(tool.risk_level || "medium").trim().toLowerCase()}">${esc(displayRiskLabel(tool.risk_level || "medium"))}</span>
                 ${tool.is_core ? '<span class="meta-tag">核心工具</span>' : ''}
-                <span class="meta-tag tool-actions">${toolActionsForDisplay(tool).length} 个 action</span>
             </div>`;
         el.addEventListener("click", () => openTool(tool.tool_id));
         U.toolList.appendChild(el);
@@ -592,7 +582,8 @@ function renderToolDetail() {
     U.toolEmpty.style.display = "none";
     setDrawerOpen(U.toolBackdrop, U.toolDrawer, true);
     const roles = ["ceo", "execution", "inspection"];
-    const actions = toolActionsForDisplay(S.selectedTool);
+    const allowedRoles = Array.isArray(S.selectedTool.allowed_roles) ? S.selectedTool.allowed_roles : [];
+    const toolRisk = String(S.selectedTool.risk_level || "medium").trim().toLowerCase();
     const description = String(S.selectedTool.description || "").trim();
     const toolskillContent = String(S.selectedTool.toolskill_content || "").trim();
     const isCoreTool = !!S.selectedTool.is_core;
@@ -615,11 +606,10 @@ function renderToolDetail() {
             <div class="detail-modal-body">
                 <div class="resource-status-row" style="margin-bottom: var(--space-4);">
                     <span class="meta-tag status-${availabilityState}">${esc(displayEnabledLabel(S.selectedTool.enabled, S.selectedTool.available, repairRequired))}</span>
-                    ${isCoreTool
-                        ? `<button type="button" class="toolbar-btn ghost" id="tool-disable-btn" disabled>Core tool cannot be disabled</button>`
-                        : (S.selectedTool.enabled
-                            ? `<button type="button" class="toolbar-btn danger" id="tool-disable-btn">禁用工具族</button>`
-                            : `<button type="button" class="toolbar-btn success" id="tool-enable-btn">启用工具族</button>`)}
+                    <span class="meta-tag risk-${esc(toolRisk)}">${esc(displayRiskLabel(toolRisk))}</span>
+                    ${S.selectedTool.enabled
+                        ? `<button type="button" class="toolbar-btn danger" id="tool-disable-btn">禁用工具</button>`
+                        : `<button type="button" class="toolbar-btn success" id="tool-enable-btn">启用工具</button>`}
                 </div>
                 ${!repairRequired && S.selectedTool.available === false ? `
                     <div class="resource-warning-banner" role="status" aria-live="polite">
@@ -633,7 +623,7 @@ function renderToolDetail() {
                     <h3>描述</h3>
                     <div class="resource-copy-block">${esc(description || "暂无描述。")}</div>
                 </div>
-                ${isExecToolFamily(S.selectedTool) ? `
+                ${isExecTool(S.selectedTool) ? `
                 <div class="resource-section">
                     <div class="tool-permission-heading">
                         <h3>执行模式</h3>
@@ -669,52 +659,18 @@ function renderToolDetail() {
                 </div>
                 <div class="resource-section">
                     <div class="tool-permission-heading">
-                        <h3>Action 权限</h3>
-                        <p class="subtitle">控制当前工具族下各个 action 对主Agent、执行和检验角色的可见性。</p>
+                        <h3>角色可见</h3>
                     </div>
-                    <div class="tool-permission-grid">
-                        ${actions.length ? actions.map((action) => {
-                            const actionName = esc(action.label || action.action_id);
-                            const actionId = esc(action.action_id);
-                            const riskLevel = esc(displayRiskLabel(action.risk_level || "medium"));
-                            const riskClass = `risk-${String(action.risk_level || "medium").toLowerCase()}`;
-                            const adminMode = String(action.admin_mode || "editable").trim().toLowerCase();
-                            const agentVisible = action.agent_visible !== false;
-                            if (adminMode === "readonly_system") {
-                                return `
-                                <article class="tool-permission-card">
-                                    <div class="tool-permission-card-head">
-                                        <div class="tool-action-meta">
-                                            <div class="tool-action-name">${actionName}</div>
-                                            <div class="tool-action-id">${actionId}</div>
-                                        </div>
-                                        <span class="risk-pill ${riskClass}">${riskLevel}</span>
-                                    </div>
-                                    <div class="resource-copy-block">系统只读项；不参与 Agent 工具可见性，不支持角色权限编辑。</div>
-                                </article>`;
-                            }
-                            return `
-                                <article class="tool-permission-card">
-                                    <div class="tool-permission-card-head">
-                                        <div class="tool-action-meta">
-                                            <div class="tool-action-name">${actionName}</div>
-                                            <div class="tool-action-id">${actionId}</div>
-                                        </div>
-                                        <span class="risk-pill ${riskClass}">${riskLevel}</span>
-                                    </div>
-                                    <div class="tool-role-toggle-group">
-                                        ${roles.map((role) => `
-                                            <label class="role-toggle tool-role-toggle ${action.allowed_roles?.includes(role) ? "checked" : ""}">
-                                                <input type="checkbox" class="tool-role tool-role-input" data-action="${actionId}" data-role="${role}" aria-label="${actionName} - ${esc(displayRoleLabel(role))}" ${action.allowed_roles?.includes(role) ? "checked" : ""}>
-                                                <span>${esc(displayRoleLabel(role))}</span>
-                                            </label>
-                                        `).join("")}
-                                    </div>
-                                    ${Array.isArray(action.allowed_roles) && action.allowed_roles.length === 0
-                                        ? '<div class="resource-copy-block">当前 action 对所有角色禁用。</div>'
-                                        : ''}
-                                </article>`;
-                        }).join("") : `<div class="tool-empty-card">当前工具族没有 action。</div>`}
+                    <div class="tool-permission-card">
+                        <div class="tool-role-toggle-group">
+                            ${roles.map((role) => `
+                                <label class="role-toggle tool-role-toggle ${allowedRoles.includes(role) ? "checked" : ""}">
+                                    <input type="checkbox" class="tool-role tool-role-input" data-role="${role}" aria-label="${esc(displayRoleLabel(role))}" ${allowedRoles.includes(role) ? "checked" : ""}>
+                                    <span>${esc(displayRoleLabel(role))}</span>
+                                </label>
+                            `).join("")}
+                        </div>
+                        ${allowedRoles.length === 0 ? '<div class="resource-copy-block">当前工具对所有角色禁用。</div>' : ''}
                     </div>
                 </div>
             </div>
@@ -751,12 +707,10 @@ function renderToolDetail() {
         renderToolDetail();
     }));
     U.toolDetail.querySelectorAll(".tool-role").forEach((checkbox) => checkbox.addEventListener("change", (e) => {
-        const action = S.selectedTool.actions.find((item) => item.action_id === e.target.dataset.action);
-        if (!action) return;
-        const set = new Set(action.allowed_roles || []);
+        const set = new Set(S.selectedTool.allowed_roles || []);
         if (e.target.checked) set.add(e.target.dataset.role);
         else set.delete(e.target.dataset.role);
-        action.allowed_roles = [...set];
+        S.selectedTool.allowed_roles = [...set];
         e.target.closest(".role-toggle")?.classList.toggle("checked", e.target.checked);
         setToolDirty(true);
     }));
@@ -775,7 +729,6 @@ async function loadTools({ renderDetail = true } = {}) {
             if (next) {
                 S.selectedTool = {
                     ...next,
-                    primary_executor_name: S.selectedTool?.primary_executor_name || next.primary_executor_name || "",
                     toolskill_content: S.selectedTool?.toolskill_content || "",
                     repair_required: next.repair_required ?? (next?.metadata?.repair_required === true),
                     exec_runtime_policy: S.selectedTool?.exec_runtime_policy || next.exec_runtime_policy || null,
@@ -806,11 +759,10 @@ async function openTool(toolId, quiet = false) {
     try {
         const [tool, toolskill] = await Promise.all([
             ApiClient.getTool(toolId),
-            ApiClient.getToolSkill(toolId).catch(() => ({ content: "", primary_executor_name: "" })),
+            ApiClient.getToolSkill(toolId).catch(() => ({ content: "" })),
         ]);
         S.selectedTool = {
             ...tool,
-            primary_executor_name: toolskill?.primary_executor_name || tool?.primary_executor_name || "",
             toolskill_content: toolskill?.content || "",
             repair_required: toolskill?.repair_required ?? tool?.repair_required ?? (tool?.metadata?.repair_required === true),
             exec_runtime_policy: toolskill?.exec_runtime_policy || tool?.exec_runtime_policy || null,
@@ -841,18 +793,11 @@ async function saveTool({
     const selectedId = String(S.selectedTool?.tool_id || "").trim();
     const displayName = String(S.selectedTool?.display_name || selectedId || "Tool").trim();
     const enabled = !!S.selectedTool?.enabled;
-    const execution_mode = isExecToolFamily(S.selectedTool) ? execToolExecutionMode(S.selectedTool) : undefined;
-    const actions = Array.isArray(S.selectedTool?.actions)
-        ? Object.fromEntries(
-            S.selectedTool.actions.map((action) => [
-                action.action_id,
-                Array.isArray(action.allowed_roles) ? [...action.allowed_roles] : [],
-            ])
-        )
-        : {};
+    const execution_mode = isExecTool(S.selectedTool) ? execToolExecutionMode(S.selectedTool) : undefined;
+    const allowedRoles = Array.isArray(S.selectedTool?.allowed_roles) ? [...S.selectedTool.allowed_roles] : [];
     if (!selectedId || !S.selectedTool) {
         addNotice({ kind: "resource_failed", title: "No tool selected", text: "Select a tool before saving." });
-        showToast({ title: "保存失败", text: "未选择工具族", kind: "error" });
+        showToast({ title: "保存失败", text: "未选择工具", kind: "error" });
         return;
     }
     if (!S.toolDirty) {
@@ -870,7 +815,7 @@ async function saveTool({
     try {
         await ApiClient.updateToolPolicy(selectedId, {
             enabled,
-            actions,
+            allowed_roles: allowedRoles,
             execution_mode,
         });
         await ApiClient.reloadResources();

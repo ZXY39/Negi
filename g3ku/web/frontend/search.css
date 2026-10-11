@@ -3447,9 +3447,6 @@ textarea {
         max-height: calc(100dvh - 24px);
     }
 
-    .tool-permission-grid {
-        grid-template-columns: 1fr;
-    }
 }
 
 @media (max-width: 1280px) {
@@ -3490,9 +3487,6 @@ textarea {
         max-height: calc(100dvh - 24px);
     }
 
-    .tool-permission-grid {
-        grid-template-columns: 1fr;
-    }
 }
 
 @media (max-width: 768px) {
@@ -4175,12 +4169,6 @@ textarea {
     gap: 6px;
 }
 
-.tool-permission-grid {
-    display: grid;
-    grid-template-columns: repeat(2, minmax(0, 1fr));
-    gap: var(--space-3);
-}
-
 .tool-permission-card {
     display: flex;
     flex-direction: column;
@@ -4191,46 +4179,10 @@ textarea {
     background: color-mix(in srgb, var(--bg-app) 74%, transparent);
 }
 
-.tool-permission-card-head {
-    display: flex;
-    align-items: flex-start;
-    justify-content: space-between;
-    gap: var(--space-3);
-}
-
-.tool-action-meta {
-    display: flex;
-    flex-direction: column;
-    gap: 4px;
-    min-width: 0;
-}
-
-.tool-action-name {
-    font-size: 0.95rem;
-    font-weight: 700;
-    color: var(--text-primary);
-}
-
-.tool-action-id {
-    color: var(--text-muted);
-    font-size: 0.8rem;
-    font-family: "Consolas", "SFMono-Regular", ui-monospace, monospace;
-    word-break: break-word;
-}
-
 .tool-role-toggle-group {
     display: flex;
     flex-wrap: wrap;
     gap: 10px;
-}
-
-.tool-empty-card {
-    padding: 16px;
-    border-radius: var(--radius-md);
-    border: 1px dashed color-mix(in srgb, var(--border-color) 88%, transparent);
-    background: color-mix(in srgb, var(--bg-app) 72%, transparent);
-    color: var(--text-muted);
-    text-align: center;
 }
 
 .risk-pill {
@@ -5978,12 +5930,6 @@ textarea {
 
 .meta-tag.risk-high {
     color: #ef4444;
-}
-
-.meta-tag.tool-actions {
-    color: var(--text-secondary);
-    font-weight: 500;
-    border-style: dashed;
 }
 
 [data-theme="dark"] .meta-tag {

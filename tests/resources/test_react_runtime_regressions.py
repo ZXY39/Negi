@@ -894,20 +894,18 @@ async def test_execution_first_turn_does_not_emit_all_visible_tool_schemas(tmp_p
     )
     service.execution_visible_tool_lightweight_items = lambda *, actor_role, session_id: [
         {
-            'tool_id': 'filesystem',
-            'display_name': 'Filesystem',
+            'tool_id': 'filesystem_stat',
+            'display_name': 'Filesystem Stat',
             'description': 'Inspect files',
             'l0': 'Inspect files',
             'l1': 'Inspect files',
-            'actions': [{'action_id': 'inspect', 'executor_names': ['filesystem']}],
         },
         {
-            'tool_id': 'memory',
-            'display_name': 'Memory',
+            'tool_id': 'memory_write',
+            'display_name': 'Memory Write',
             'description': 'Write memory facts',
             'l0': 'Write memory facts',
             'l1': 'Write memory facts',
-            'actions': [{'action_id': 'write', 'executor_names': ['memory_write']}],
         },
     ]
 
@@ -919,10 +917,10 @@ async def test_execution_first_turn_does_not_emit_all_visible_tool_schemas(tmp_p
             {'role': 'user', 'content': '{"task_id":"task-first-turn-schemas","goal":"demo"}'},
         ],
         tools={
-            'filesystem': _ModelSchemaRecordingTool(
-                name='filesystem',
-                authoritative_description='filesystem authoritative schema',
-                model_description='filesystem compact model schema',
+            'filesystem_stat': _ModelSchemaRecordingTool(
+                name='filesystem_stat',
+                authoritative_description='filesystem stat authoritative schema',
+                model_description='filesystem stat compact model schema',
             ),
             'memory_write': _LargeModelSchemaTool(name='memory_write'),
             'stop_tool_execution': _StageProtocolNoopTool('stop_tool_execution'),
@@ -946,7 +944,7 @@ async def test_execution_first_turn_does_not_emit_all_visible_tool_schemas(tmp_p
     emitted_tool_names = [item['function']['name'] for item in emitted_tools]
 
     assert emitted_tool_names == [
-        'filesystem',
+        'filesystem_stat',
         'memory_write',
         'stop_tool_execution',
         'submit_next_stage',
@@ -1005,7 +1003,7 @@ async def test_execution_root_replay_semantic_selection_includes_split_tools_wit
                 'spawn_child_nodes',
                 'load_tool_context_v2',
             ],
-            'hydrated_executor_names': ['filesystem_write', 'content_describe'],
+            'hydrated_executor_names': ['filesystem_write', 'content_describe', 'filesystem', 'content'],
         },
     )
     fake_log_service.execution_stage_gate_snapshot = lambda task_id, node_id: {
@@ -1030,43 +1028,53 @@ async def test_execution_root_replay_semantic_selection_includes_split_tools_wit
     )
     service.execution_visible_tool_lightweight_items = lambda *, actor_role, session_id: [
         {
-            'tool_id': 'filesystem',
-            'display_name': 'Filesystem',
-            'description': 'Inspect files',
-            'primary_executor_name': 'filesystem_write',
-            'l0': 'Inspect files',
-            'l1': 'Inspect files',
-            'actions': [
-                {'action_id': 'legacy', 'executor_names': ['filesystem']},
-                {
-                    'action_id': 'describe',
-                    'executor_names': ['filesystem_write', 'filesystem_edit', 'filesystem_propose_patch'],
-                },
-            ],
+            'tool_id': 'filesystem_write',
+            'display_name': 'Filesystem Write',
+            'description': 'Write files',
+            'l0': 'Write files',
+            'l1': 'Write files',
         },
         {
-            'tool_id': 'content_navigation',
+            'tool_id': 'filesystem_edit',
+            'display_name': 'Filesystem Edit',
+            'description': 'Edit files',
+            'l0': 'Edit files',
+            'l1': 'Edit files',
+        },
+        {
+            'tool_id': 'filesystem_propose_patch',
+            'display_name': 'Filesystem Propose Patch',
+            'description': 'Propose a patch',
+            'l0': 'Propose a patch',
+            'l1': 'Propose a patch',
+        },
+        {
+            'tool_id': 'content_describe',
             'display_name': 'Content',
             'description': 'Inspect content',
-            'primary_executor_name': 'content_describe',
             'l0': 'Inspect content',
             'l1': 'Inspect content',
-            'actions': [
-                {'action_id': 'legacy', 'executor_names': ['content']},
-                {
-                    'action_id': 'describe',
-                    'executor_names': ['content_describe', 'content_search', 'content_open'],
-                },
-            ],
         },
         {
-            'tool_id': 'memory',
+            'tool_id': 'content_search',
+            'display_name': 'Content',
+            'description': 'Inspect content',
+            'l0': 'Inspect content',
+            'l1': 'Inspect content',
+        },
+        {
+            'tool_id': 'content_open',
+            'display_name': 'Content',
+            'description': 'Inspect content',
+            'l0': 'Inspect content',
+            'l1': 'Inspect content',
+        },
+        {
+            'tool_id': 'memory_write',
             'display_name': 'Memory',
             'description': 'Write memory facts',
-            'primary_executor_name': 'memory_write',
             'l0': 'Write memory facts',
             'l1': 'Write memory facts',
-            'actions': [{'action_id': 'write', 'executor_names': ['memory_write']}],
         },
     ]
 
@@ -1078,7 +1086,6 @@ async def test_execution_root_replay_semantic_selection_includes_split_tools_wit
             {'role': 'user', 'content': '{"task_id":"task-root-replay-budget","goal":"demo"}'},
         ],
         tools={
-            'filesystem': _LargeModelSchemaTool(name='filesystem'),
             'filesystem_write': _ModelSchemaRecordingTool(
                 name='filesystem_write',
                 authoritative_description='filesystem write authoritative schema',
@@ -1086,7 +1093,6 @@ async def test_execution_root_replay_semantic_selection_includes_split_tools_wit
             ),
             'filesystem_edit': _LargeModelSchemaTool(name='filesystem_edit'),
             'filesystem_propose_patch': _LargeModelSchemaTool(name='filesystem_propose_patch'),
-            'content': _LargeModelSchemaTool(name='content'),
             'content_describe': _ModelSchemaRecordingTool(
                 name='content_describe',
                 authoritative_description='content describe authoritative schema',
@@ -1123,6 +1129,7 @@ async def test_execution_root_replay_semantic_selection_includes_split_tools_wit
     assert 'submit_final_result' in emitted_tool_names
     assert 'spawn_child_nodes' in emitted_tool_names
     assert 'load_tool_context_v2' in emitted_tool_names
+    # 族名不再是工具：台账里残留的旧族名既不提升，也不进发给模型的清单。
     assert 'filesystem' not in emitted_tool_names
     assert 'content' not in emitted_tool_names
     assert 'filesystem_write' in emitted_tool_names
@@ -1198,24 +1205,24 @@ async def test_react_loop_acceptance_watchdog_keeps_long_tool_inline() -> None:
     assert heartbeat.terminal_calls == []
 
 
-def test_execution_selector_uses_stable_visible_tool_order_independent_of_family_iteration_order(
+def test_execution_selector_uses_stable_visible_tool_order_independent_of_iteration_order(
 ) -> None:
     visible_tools = {
-        'filesystem': _ModelSchemaRecordingTool(
-            name='filesystem',
-            authoritative_description='filesystem authoritative schema',
-            model_description='filesystem compact model schema ' + ('F' * 1200),
+        'filesystem_stat': _ModelSchemaRecordingTool(
+            name='filesystem_stat',
+            authoritative_description='filesystem stat authoritative schema',
+            model_description='filesystem stat compact model schema ' + ('F' * 1200),
         ),
         'memory_write': _ModelSchemaRecordingTool(
             name='memory_write',
-            authoritative_description='memory authoritative schema',
-            model_description='memory compact model schema ' + ('M' * 800),
+            authoritative_description='memory write authoritative schema',
+            model_description='memory write compact model schema ' + ('M' * 800),
         ),
         'submit_next_stage': _StageProtocolNoopTool('submit_next_stage'),
         'submit_final_result': _submit_final_result_tool(),
         'spawn_child_nodes': _StageProtocolNoopTool('spawn_child_nodes'),
     }
-    def _service_for(families: list[dict[str, object]]) -> MainRuntimeService:
+    def _service_for(items: list[dict[str, object]]) -> MainRuntimeService:
         service = object.__new__(MainRuntimeService)
         service.store = SimpleNamespace(
             get_task=lambda task_id: SimpleNamespace(
@@ -1230,46 +1237,42 @@ def test_execution_selector_uses_stable_visible_tool_order_independent_of_family
                 node_kind='execution',
             ),
         )
-        service.execution_visible_tool_lightweight_items = lambda *, actor_role, session_id: families
+        service.execution_visible_tool_lightweight_items = lambda *, actor_role, session_id: items
         return service
 
     filesystem_first = _service_for(
         [
             {
-                'tool_id': 'filesystem',
-                'display_name': 'Filesystem',
+                'tool_id': 'filesystem_stat',
+                'display_name': 'Filesystem Stat',
                 'description': 'Inspect files',
                 'l0': 'Inspect files',
                 'l1': 'Inspect files',
-                'actions': [{'action_id': 'inspect', 'executor_names': ['filesystem']}],
             },
             {
-                'tool_id': 'memory',
-                'display_name': 'Memory',
+                'tool_id': 'memory_write',
+                'display_name': 'Memory Write',
                 'description': 'Write memory facts',
                 'l0': 'Write memory facts',
                 'l1': 'Write memory facts',
-                'actions': [{'action_id': 'write', 'executor_names': ['memory_write']}],
             },
         ]
     )
     memory_first = _service_for(
         [
             {
-                'tool_id': 'memory',
-                'display_name': 'Memory',
+                'tool_id': 'memory_write',
+                'display_name': 'Memory Write',
                 'description': 'Write memory facts',
                 'l0': 'Write memory facts',
                 'l1': 'Write memory facts',
-                'actions': [{'action_id': 'write', 'executor_names': ['memory_write']}],
             },
             {
-                'tool_id': 'filesystem',
-                'display_name': 'Filesystem',
+                'tool_id': 'filesystem_stat',
+                'display_name': 'Filesystem Stat',
                 'description': 'Inspect files',
                 'l0': 'Inspect files',
                 'l1': 'Inspect files',
-                'actions': [{'action_id': 'inspect', 'executor_names': ['filesystem']}],
             },
         ]
     )
@@ -1410,7 +1413,6 @@ async def test_stageless_free_pass_round_appends_reminder_without_crashing() -> 
         node=node,
         response_tool_calls=[ToolCallRequest(id='call-free-pass-exec', name='exec', arguments={})],
         tools=tools,
-        allowed_content_refs=[],
         runtime_context={'task_id': task.task_id, 'node_id': node.node_id, 'actor_role': 'execution'},
     )
 
@@ -1447,7 +1449,6 @@ async def test_stageless_loader_only_round_executes_without_free_pass() -> None:
             ToolCallRequest(id='call-loader-search', name='load_tool_context', arguments={'tool_id': 'content_search'}),
         ],
         tools=tools,
-        allowed_content_refs=[],
         runtime_context={'task_id': task.task_id, 'node_id': node.node_id, 'actor_role': 'execution'},
     )
 
@@ -1510,7 +1511,6 @@ def test_execution_selector_preserves_prior_model_visible_tool_order_across_turn
             'description': 'Inspect files',
             'l0': 'Inspect files',
             'l1': 'Inspect files',
-            'actions': [{'action_id': 'inspect', 'executor_names': ['filesystem']}],
         }
     ]
 
@@ -1586,7 +1586,6 @@ def test_execution_selector_appends_missing_tools_after_prior_stable_prefix() ->
             'description': 'Inspect files',
             'l0': 'Inspect files',
             'l1': 'Inspect files',
-            'actions': [{'action_id': 'inspect', 'executor_names': ['filesystem']}],
         }
     ]
 
@@ -1655,7 +1654,6 @@ def test_execution_selector_keeps_full_callable_tools_when_transition_required()
             'description': 'Inspect files',
             'l0': 'Inspect files',
             'l1': 'Inspect files',
-            'actions': [{'action_id': 'inspect', 'executor_names': ['filesystem']}],
         }
     ]
 
@@ -1701,10 +1699,10 @@ def test_promotes_selected_tool_next_turn_after_load_tool_context_variants(
             authoritative_description='load tool context v2 authoritative schema',
             model_description='load tool context v2 compact schema',
         ),
-        'filesystem': _ModelSchemaRecordingTool(
-            name='filesystem',
-            authoritative_description='filesystem authoritative schema',
-            model_description='filesystem compact model schema ' + ('F' * 1200),
+        'filesystem_write': _ModelSchemaRecordingTool(
+            name='filesystem_write',
+            authoritative_description='filesystem write authoritative schema',
+            model_description='filesystem write compact model schema ' + ('F' * 1200),
         ),
         'submit_next_stage': _StageProtocolNoopTool('submit_next_stage'),
         'submit_final_result': _submit_final_result_tool(),
@@ -1720,7 +1718,7 @@ def test_promotes_selected_tool_next_turn_after_load_tool_context_variants(
                 'spawn_child_nodes',
                 loader_tool_name,
             ],
-            lightweight_tool_ids=['filesystem'],
+            lightweight_tool_ids=['filesystem_write'],
             schema_chars=321,
             trace={'mode': 'test'},
         ),
@@ -1749,26 +1747,15 @@ def test_promotes_selected_tool_next_turn_after_load_tool_context_variants(
     )
     service.execution_visible_tool_lightweight_items = lambda *, actor_role, session_id: [
         {
-            'tool_id': 'filesystem',
-            'display_name': 'Filesystem',
+            'tool_id': 'filesystem_write',
+            'display_name': 'Filesystem Write',
             'description': 'Inspect files',
             'l0': 'Inspect files',
             'l1': 'Inspect files',
-            # 生产形状：filesystem 家族已拆出 concrete executor，家族 id 那行是 legacy 单体
-            'actions': [
-                {'action_id': 'inspect', 'executor_names': ['filesystem']},
-                {'action_id': 'write', 'executor_names': ['filesystem_write']},
-            ],
         }
     ]
-    service.list_visible_tool_families = lambda *, actor_role, session_id: [
-        SimpleNamespace(
-            tool_id='filesystem',
-            actions=[
-                SimpleNamespace(executor_names=['filesystem']),
-                SimpleNamespace(executor_names=['filesystem_write']),
-            ],
-        )
+    service.list_visible_tools = lambda *, actor_role, session_id: [
+        SimpleNamespace(tool_id='filesystem_write')
     ]
 
     loop = ReActToolLoop(chat_backend=SimpleNamespace(), log_service=log_service, max_iterations=2)
@@ -1787,9 +1774,9 @@ def test_promotes_selected_tool_next_turn_after_load_tool_context_variants(
         },
     )
 
-    assert first_selection['lightweight_tool_ids'] == ['filesystem']
+    assert first_selection['lightweight_tool_ids'] == ['filesystem_write']
     assert loader_tool_name in first_selection['tool_names']
-    assert 'filesystem' not in first_selection['tool_names']
+    assert 'filesystem_write' not in first_selection['tool_names']
     assert first_selection['trace']['base_schema_chars'] == 321
     assert first_selection['trace']['final_schema_chars'] == first_selection['schema_chars']
 
@@ -1799,7 +1786,7 @@ def test_promotes_selected_tool_next_turn_after_load_tool_context_variants(
             'node_id': 'node-tool-hydration',
             'model_visible_tool_names': list(first_selection['tool_names']),
             'hydrated_executor_names': [],
-            'candidate_tool_names': ['filesystem'],
+            'candidate_tool_names': ['filesystem_write'],
         },
     )
 
@@ -1837,7 +1824,7 @@ def test_promotes_selected_tool_next_turn_after_load_tool_context_variants(
             'node_id': 'node-tool-hydration',
             'session_key': 'web:shared',
             'actor_role': 'execution',
-            'candidate_tool_names': ['filesystem'],
+            'candidate_tool_names': ['filesystem_write'],
         },
     )
 
@@ -1877,15 +1864,10 @@ def test_promote_tool_context_hydration_keeps_executor_requests_precise() -> Non
         get_task=lambda task_id: SimpleNamespace(task_id=task_id, session_id='web:shared', metadata={}),
         get_node=lambda node_id: SimpleNamespace(node_id=node_id, node_kind='execution'),
     )
-    service.list_visible_tool_families = lambda *, actor_role, session_id: [
-        SimpleNamespace(
-            tool_id='filesystem',
-            actions=[
-                SimpleNamespace(
-                    executor_names=['filesystem_write', 'filesystem_edit', 'filesystem_propose_patch']
-                )
-            ],
-        )
+    service.list_visible_tools = lambda *, actor_role, session_id: [
+        SimpleNamespace(tool_id='filesystem_write'),
+        SimpleNamespace(tool_id='filesystem_edit'),
+        SimpleNamespace(tool_id='filesystem_propose_patch'),
     ]
     log_service.upsert_frame('task-hydration-precise', {'node_id': 'node-hydration-precise'})
 
@@ -1914,20 +1896,11 @@ def test_promote_tool_context_hydration_rejects_family_names() -> None:
         get_task=lambda task_id: SimpleNamespace(task_id=task_id, session_id='web:shared', metadata={}),
         get_node=lambda node_id: SimpleNamespace(node_id=node_id, node_kind='execution'),
     )
-    service.list_visible_tool_families = lambda *, actor_role, session_id: [
-        SimpleNamespace(
-            tool_id='filesystem',
-            actions=[
-                SimpleNamespace(
-                    executor_names=[
-                        'filesystem_write',
-                        'filesystem_edit',
-                        'filesystem_propose_patch',
-                        'filesystem_write',
-                    ]
-                )
-            ],
-        )
+    # 治理面只有一层：可见的是具体工具，旧族名不再是任何一条记录。
+    service.list_visible_tools = lambda *, actor_role, session_id: [
+        SimpleNamespace(tool_id='filesystem_write'),
+        SimpleNamespace(tool_id='filesystem_edit'),
+        SimpleNamespace(tool_id='filesystem_propose_patch'),
     ]
     log_service.upsert_frame('task-hydration-family', {'node_id': 'node-hydration-family'})
 
@@ -1956,11 +1929,11 @@ def test_promote_tool_context_hydration_applies_lru_limit() -> None:
         get_task=lambda task_id: SimpleNamespace(task_id=task_id, session_id='web:shared', metadata={}),
         get_node=lambda node_id: SimpleNamespace(node_id=node_id, node_kind='execution'),
     )
-    service.list_visible_tool_families = lambda *, actor_role, session_id: [
-        SimpleNamespace(tool_id='filesystem', actions=[SimpleNamespace(executor_names=['filesystem_write'])]),
-        SimpleNamespace(tool_id='content_navigation', actions=[SimpleNamespace(executor_names=['content_open'])]),
-        SimpleNamespace(tool_id='agent_browser', actions=[SimpleNamespace(executor_names=['agent_browser'])]),
-        SimpleNamespace(tool_id='web_fetch', actions=[SimpleNamespace(executor_names=['web_fetch'])]),
+    service.list_visible_tools = lambda *, actor_role, session_id: [
+        SimpleNamespace(tool_id='filesystem_write'),
+        SimpleNamespace(tool_id='content_open'),
+        SimpleNamespace(tool_id='agent_browser'),
+        SimpleNamespace(tool_id='web_fetch'),
     ]
     log_service.upsert_frame('task-hydration-lru', {'node_id': 'node-hydration-lru'})
 
@@ -2078,22 +2051,24 @@ def test_load_tool_context_projection_reports_promotion_and_keeps_fingerprint_st
     assert promotable['tool_context_fingerprint'] == hidden['tool_context_fingerprint']
 
 
-def test_hydration_targets_reject_split_family_monolith_names() -> None:
-    """家族拆出 concrete executor 后，家族 id / legacy 单体不再拿到提升承诺。"""
+def test_hydration_targets_reject_names_that_are_not_the_visible_tool() -> None:
+    """一条记录就是一个工具：只有请求名与它同名才拿到提升承诺，旧族名/单体名一律不给。"""
     service = object.__new__(MainRuntimeService)
-    family = SimpleNamespace(
-        tool_id='content_navigation',
-        actions=[SimpleNamespace(executor_names=['content', 'content_open'])],
-    )
+    visible_tool = SimpleNamespace(tool_id='content_open')
 
     assert service._tool_context_hydration_targets(
         requested_tool_id='content',
-        visible_family=family,
+        visible_tool=visible_tool,
+        actor_role='execution',
+    ) == []
+    assert service._tool_context_hydration_targets(
+        requested_tool_id='content_navigation',
+        visible_tool=visible_tool,
         actor_role='execution',
     ) == []
     assert service._tool_context_hydration_targets(
         requested_tool_id='content_open',
-        visible_family=family,
+        visible_tool=visible_tool,
         actor_role='execution',
     ) == ['content_open']
 
@@ -2106,9 +2081,9 @@ def test_promote_tool_context_hydration_skips_fixed_builtin_executors() -> None:
         get_task=lambda task_id: SimpleNamespace(task_id=task_id, session_id='web:shared', metadata={}),
         get_node=lambda node_id: SimpleNamespace(node_id=node_id, node_kind='execution'),
     )
-    service.list_visible_tool_families = lambda *, actor_role, session_id: [
-        SimpleNamespace(tool_id='exec', actions=[SimpleNamespace(executor_names=['exec'])]),
-        SimpleNamespace(tool_id='agent_browser', actions=[SimpleNamespace(executor_names=['agent_browser'])]),
+    service.list_visible_tools = lambda *, actor_role, session_id: [
+        SimpleNamespace(tool_id='exec'),
+        SimpleNamespace(tool_id='agent_browser'),
     ]
     log_service.upsert_frame('task-hydration-fixed-builtin', {'node_id': 'node-hydration-fixed-builtin'})
 
@@ -2268,7 +2243,6 @@ async def test_execute_tool_calls_promotes_tool_context_hydration_immediately() 
         node=node,
         response_tool_calls=response_tool_calls,
         tools=tools,
-        allowed_content_refs=[],
         runtime_context={'task_id': task.task_id, 'node_id': node.node_id, 'actor_role': 'execution'},
     )
 
@@ -2318,7 +2292,6 @@ async def test_execute_tool_calls_promotes_tool_context_hydration_immediately_fr
         node=node,
         response_tool_calls=response_tool_calls,
         tools=tools,
-        allowed_content_refs=[],
         runtime_context={'task_id': task.task_id, 'node_id': node.node_id, 'actor_role': 'execution'},
     )
 
@@ -2328,22 +2301,12 @@ async def test_execute_tool_calls_promotes_tool_context_hydration_immediately_fr
     assert promoted['raw_result']['tool_id'] == 'filesystem_write'
 
 
-def test_execution_selector_prefers_split_executors_over_legacy_monoliths() -> None:
+def test_execution_selector_promotes_concrete_tools_and_ignores_stale_monolith_names() -> None:
     visible_tools = {
-        'filesystem': _ModelSchemaRecordingTool(
-            name='filesystem',
-            authoritative_description='filesystem authoritative schema',
-            model_description='filesystem compact model schema',
-        ),
         'filesystem_write': _ModelSchemaRecordingTool(
             name='filesystem_write',
             authoritative_description='filesystem write authoritative schema',
             model_description='filesystem write compact model schema',
-        ),
-        'content': _ModelSchemaRecordingTool(
-            name='content',
-            authoritative_description='content authoritative schema',
-            model_description='content compact model schema',
         ),
         'content_describe': _ModelSchemaRecordingTool(
             name='content_describe',
@@ -2373,28 +2336,18 @@ def test_execution_selector_prefers_split_executors_over_legacy_monoliths() -> N
     )
     service.execution_visible_tool_lightweight_items = lambda *, actor_role, session_id: [
         {
-            'tool_id': 'filesystem',
-            'display_name': 'Filesystem',
+            'tool_id': 'filesystem_write',
+            'display_name': 'Filesystem Write',
             'description': 'Inspect files',
-            'primary_executor_name': 'filesystem_write',
             'l0': 'Inspect files',
             'l1': 'Inspect files',
-            'actions': [
-                {'action_id': 'legacy', 'executor_names': ['filesystem']},
-                {'action_id': 'write', 'executor_names': ['filesystem_write']},
-            ],
         },
         {
-            'tool_id': 'content_navigation',
-            'display_name': 'Content',
+            'tool_id': 'content_describe',
+            'display_name': 'Content Describe',
             'description': 'Inspect content',
-            'primary_executor_name': 'content_describe',
             'l0': 'Inspect content',
             'l1': 'Inspect content',
-            'actions': [
-                {'action_id': 'legacy', 'executor_names': ['content']},
-                {'action_id': 'describe', 'executor_names': ['content_describe']},
-            ],
         },
     ]
 
@@ -2411,8 +2364,6 @@ def test_execution_selector_prefers_split_executors_over_legacy_monoliths() -> N
         },
     )
 
-    assert 'filesystem' not in first_selection['tool_names']
-    assert 'content' not in first_selection['tool_names']
     assert 'filesystem_write' not in first_selection['tool_names']
     assert 'content_describe' not in first_selection['tool_names']
     assert 'content_describe' in first_selection['candidate_tool_names']
@@ -2422,7 +2373,8 @@ def test_execution_selector_prefers_split_executors_over_legacy_monoliths() -> N
         {
             'node_id': 'node-split-preference',
             'model_visible_tool_names': list(first_selection['tool_names']),
-            'hydrated_executor_names': ['filesystem', 'content'],
+            # 台账里同时留着旧单体名/族名与拆出来的具体工具名
+            'hydrated_executor_names': ['filesystem', 'content', 'filesystem_write', 'content_describe'],
         },
     )
 
@@ -2484,14 +2436,11 @@ def test_execution_selector_preserves_concrete_hydrated_tool_names_without_famil
     )
     service.execution_visible_tool_lightweight_items = lambda *, actor_role, session_id: [
         {
-            'tool_id': 'task_runtime',
-            'display_name': 'Task Runtime',
+            'tool_id': 'task_list',
+            'display_name': 'Task List',
             'description': 'Inspect task tree',
             'l0': 'Inspect task tree',
             'l1': 'Inspect task tree',
-            'actions': [
-                {'action_id': 'list', 'executor_names': ['task_list']},
-            ],
         }
     ]
 
@@ -2557,7 +2506,7 @@ def test_tool_provider_includes_hydrated_tools_even_when_selection_cache_exclude
         },
     )
     service.list_effective_tool_names = lambda *, actor_role, session_id: ['content_open', 'filesystem_write']
-    service.list_visible_tool_families = lambda *, actor_role, session_id: []
+    service.list_visible_tools = lambda *, actor_role, session_id: []
     service._actor_role_for_node = lambda node: 'execution'
 
     node = SimpleNamespace(
@@ -2580,6 +2529,14 @@ def test_execution_selector_keeps_governance_visible_executors_promotable_after_
     且文案给不出候选组——实盘里这条死区最长挂了 42 分钟。
     """
     service, visible_tools = _collapsed_bundle_selector_service()
+    # 台账里残留旧单体名：它既不是治理记录、也没有实例，三处都不该出现。
+    service.log_service.upsert_frame(
+        'task-collapse',
+        {
+            'node_id': 'node-collapse',
+            'hydrated_executor_names': ['content'],
+        },
+    )
 
     selection = service._select_model_visible_tool_schema_payload(
         task_id='task-collapse',
@@ -2600,7 +2557,7 @@ def test_execution_selector_keeps_governance_visible_executors_promotable_after_
     # callable 面不因治理可见而变宽；provider 清单是按角色钉住的说明书，本来就含这些名字
     assert 'content_describe' not in selection['tool_names']
     assert 'content_describe' in selection['provider_tool_names']
-    # legacy monolith 三处都不进：模型面只该看到 concrete executor
+    # 旧单体名三处都不进：模型面只该看到治理里的具体工具
     assert 'content' not in selection['candidate_tool_names']
     assert 'content' not in selection['tool_names']
     assert 'content' not in selection['provider_tool_names']
@@ -2619,6 +2576,8 @@ def test_execution_provider_bundle_freezes_when_exposure_collapses() -> None:
         {
             'node_id': 'node-pin',
             'provider_tool_names': ['exec', 'content_describe', 'content_search'],
+            # 台账里还留着旧单体名：补名单也不许把它带进清单
+            'hydrated_executor_names': ['content'],
         },
     )
 
@@ -2730,32 +2689,30 @@ def _collapsed_bundle_selector_service():
         'exec',
         'load_tool_context',
         'load_skill_context',
-        'content',
         'content_describe',
         'content_search',
     ]
     service.execution_visible_tool_lightweight_items = lambda *, actor_role, session_id: [
         {
-            'tool_id': 'content_navigation',
-            'display_name': 'Content',
+            'tool_id': 'content_describe',
+            'display_name': 'Content Describe',
             'description': 'Inspect content',
-            'primary_executor_name': 'content_describe',
             'l0': 'Inspect content',
             'l1': 'Inspect content',
-            'actions': [
-                {'action_id': 'legacy', 'executor_names': ['content']},
-                {'action_id': 'describe', 'executor_names': ['content_describe']},
-                {'action_id': 'search', 'executor_names': ['content_search']},
-            ],
         },
         {
-            'tool_id': 'exec_runtime',
+            'tool_id': 'content_search',
+            'display_name': 'Content Search',
+            'description': 'Search content',
+            'l0': 'Search content',
+            'l1': 'Search content',
+        },
+        {
+            'tool_id': 'exec',
             'display_name': 'Exec',
             'description': 'Run commands',
-            'primary_executor_name': 'exec',
             'l0': 'Run commands',
             'l1': 'Run commands',
-            'actions': [{'action_id': 'exec', 'executor_names': ['exec']}],
         },
     ]
     return service, visible_tools
@@ -2791,7 +2748,6 @@ def test_tool_provider_covers_governance_visible_tools_when_frame_candidates_are
     )
     service._external_tool_provider = lambda _node: {}
     service._builtin_tool_cache = None
-    service._legacy_monolith_names_for_role = lambda **_kwargs: {'content'}
     service._node_context_selection_cache = {
         ('task-empty-cand', 'node-empty-cand'): {
             'selection': NodeContextSelectionResult(
@@ -2806,7 +2762,8 @@ def test_tool_provider_covers_governance_visible_tools_when_frame_candidates_are
         'task-empty-cand',
         {'node_id': 'node-empty-cand', 'candidate_tool_names': [], 'hydrated_executor_names': []},
     )
-    service.list_effective_tool_names = lambda *, actor_role, session_id: ['content_open', 'content_search', 'content']
+    # 资源目录里还留着已删除的旧单体实例，但它不再是治理可见工具。
+    service.list_effective_tool_names = lambda *, actor_role, session_id: ['content_open', 'content_search']
     service._actor_role_for_node = lambda node: 'execution'
 
     provided = service._tool_provider(
@@ -2815,6 +2772,7 @@ def test_tool_provider_covers_governance_visible_tools_when_frame_candidates_are
 
     assert 'content_open' in provided
     assert 'content_search' in provided
+    # 不在治理可见集里的名字（旧单体残留实例）拿不到派发资格
     assert 'content' not in provided
 
 
@@ -2852,7 +2810,7 @@ def test_tool_provider_includes_candidate_tools_from_restored_selection() -> Non
     service.list_effective_tool_names = (
         lambda *, actor_role, session_id: ['load_tool_context', 'content_open', 'content_search']
     )
-    service.list_visible_tool_families = lambda *, actor_role, session_id: []
+    service.list_visible_tools = lambda *, actor_role, session_id: []
     service._actor_role_for_node = lambda node: 'execution'
 
     node = SimpleNamespace(
@@ -2912,7 +2870,7 @@ def test_tool_provider_restores_candidates_from_frame_when_cache_was_cleared() -
         lambda *, actor_role, session_id: ['load_tool_context', 'content_open', 'content_search']
     )
     service.list_contract_visible_skill_resources = lambda *, actor_role, session_id: []
-    service.list_visible_tool_families = lambda *, actor_role, session_id: []
+    service.list_visible_tools = lambda *, actor_role, session_id: []
     service._actor_role_for_node = lambda node: 'inspection'
 
     node = SimpleNamespace(
@@ -2967,7 +2925,6 @@ def test_execution_selector_web_research_query_does_not_directly_promote_candida
             'description': 'Fetch public web pages',
             'l0': 'Fetch public web pages',
             'l1': 'Fetch public web pages',
-            'actions': [{'action_id': 'fetch', 'executor_names': ['web_fetch']}],
         },
         {
             'tool_id': 'agent_browser',
@@ -2975,7 +2932,6 @@ def test_execution_selector_web_research_query_does_not_directly_promote_candida
             'description': 'Browse public web pages',
             'l0': 'Browse public web pages',
             'l1': 'Browse public web pages',
-            'actions': [{'action_id': 'browse', 'executor_names': ['agent_browser']}],
         },
     ]
 
@@ -3527,7 +3483,6 @@ async def test_execute_tool_calls_marks_stage_history_archive_reads_ephemeral() 
         node=SimpleNamespace(node_id="node-1", depth=0, node_kind="execution"),
         response_tool_calls=[ToolCallRequest(id="call-archive", name="content", arguments={})],
         tools={"content": _ArchiveTool()},
-        allowed_content_refs=[],
         runtime_context={"task_id": "task-1", "node_id": "node-1", "actor_role": "execution"},
     )
 
@@ -3552,7 +3507,6 @@ async def test_execute_tool_calls_allows_submit_next_stage_and_passes_runtime_co
             )
         ],
         tools={"submit_next_stage": tool},
-        allowed_content_refs=[],
         runtime_context={
             "task_id": "task-stage-probe",
             "node_id": "node-stage-probe",
@@ -3580,8 +3534,6 @@ async def test_execute_tool_calls_allows_submit_next_stage_and_passes_runtime_co
             "callable_tool_names": [],
             "hydrated_executor_names": [],
             "full_callable_tool_names": [],
-            "allowed_content_refs": [],
-            "enforce_content_ref_allowlist": False,
             "prior_overflow_signatures": [],
             "stage_free_pass_kind": "",
             "image_multimodal_enabled": False,
@@ -5007,7 +4959,6 @@ async def test_execute_tool_calls_injects_rbac_visible_tool_names_into_runtime_c
         node=SimpleNamespace(node_id="node-runtime-rbac", depth=0, node_kind="execution"),
         response_tool_calls=[SimpleNamespace(id="call-runtime-rbac", name="capture_runtime", arguments={"value": "demo"})],
         tools={"capture_runtime": _RuntimeCaptureTool()},
-        allowed_content_refs=[],
         runtime_context={"session_key": "web:shared", "actor_role": "execution", "node_kind": "execution"},
     )
 
@@ -5078,7 +5029,6 @@ async def test_execute_tool_calls_injects_image_multimodal_enabled_from_runtime_
         node=SimpleNamespace(node_id="node-runtime-mm", depth=0, node_kind="execution"),
         response_tool_calls=[SimpleNamespace(id="call-runtime-mm", name="capture_runtime", arguments={"value": "demo"})],
         tools={"capture_runtime": _RuntimeCaptureTool()},
-        allowed_content_refs=[],
         runtime_context={
             "session_key": "web:shared",
             "actor_role": "execution",
@@ -5985,7 +5935,7 @@ async def test_enrich_node_messages_visible_only_fallback_injects_all_visible_sk
         return NodeContextSelectionResult(
             mode="visible_only",
             selected_skill_ids=["skill-creator", "tmux"],
-            selected_tool_names=["filesystem"],
+            selected_tool_names=["filesystem_write"],
             trace={"mode": "visible_only"},
         )
 
@@ -5997,14 +5947,14 @@ async def test_enrich_node_messages_visible_only_fallback_injects_all_visible_sk
 
     service = object.__new__(MainRuntimeService)
     service.memory_manager = _MemoryManager()
-    service.list_visible_tool_families = lambda *, actor_role, session_id: [
-        SimpleNamespace(tool_id='filesystem'),
+    service.list_visible_tools = lambda *, actor_role, session_id: [
+        SimpleNamespace(tool_id='filesystem_write'),
     ]
     service.list_visible_skill_resources = lambda *, actor_role, session_id: [
         SimpleNamespace(skill_id='skill-creator', display_name='skill-creator', description='skill creator'),
         SimpleNamespace(skill_id='tmux', display_name='tmux', description='terminal workflow'),
     ]
-    service.list_effective_tool_names = lambda *, actor_role, session_id: ['filesystem']
+    service.list_effective_tool_names = lambda *, actor_role, session_id: ['filesystem_write']
 
     task = SimpleNamespace(
         session_id="web:ceo-origin",
@@ -6029,8 +5979,8 @@ async def test_enrich_node_messages_visible_only_fallback_injects_all_visible_sk
             "goal": "where is the plan",
             "core_requirement": "where is the plan",
             "visible_skills": service.list_visible_skill_resources(actor_role="execution", session_id="web:ceo-origin"),
-            "visible_tool_families": service.list_visible_tool_families(actor_role="execution", session_id="web:ceo-origin"),
-            "visible_tool_names": ["filesystem"],
+            "visible_tool_records": service.list_visible_tools(actor_role="execution", session_id="web:ceo-origin"),
+            "visible_tool_names": ["filesystem_write"],
         }
     ]
     assert retrieve_block_calls == []
@@ -6091,9 +6041,9 @@ async def test_enrich_node_messages_uses_selector_narrowed_skills_without_memory
         return NodeContextSelectionResult(
             mode="dense_rerank",
             selected_skill_ids=["tmux", "skill-creator"],
-            selected_tool_names=["content"],
+            selected_tool_names=["content_open"],
             candidate_skill_ids=["tmux", "skill-creator"],
-            candidate_tool_names=["content"],
+            candidate_tool_names=["content_open"],
             trace={"mode": "dense_rerank"},
         )
 
@@ -6105,14 +6055,14 @@ async def test_enrich_node_messages_uses_selector_narrowed_skills_without_memory
 
     service = object.__new__(MainRuntimeService)
     service.memory_manager = _MemoryManager()
-    service.list_visible_tool_families = lambda *, actor_role, session_id: [
-        SimpleNamespace(tool_id='content'),
+    service.list_visible_tools = lambda *, actor_role, session_id: [
+        SimpleNamespace(tool_id='content_open'),
     ]
     service.list_visible_skill_resources = lambda *, actor_role, session_id: [
         SimpleNamespace(skill_id='skill-creator', display_name='skill-creator', description='skill creator'),
         SimpleNamespace(skill_id='tmux', display_name='tmux', description='terminal workflow'),
     ]
-    service.list_effective_tool_names = lambda *, actor_role, session_id: ['content']
+    service.list_effective_tool_names = lambda *, actor_role, session_id: ['content_open']
 
     task = SimpleNamespace(
         session_id="web:ceo-origin",
@@ -6145,7 +6095,7 @@ async def test_enrich_node_messages_uses_selector_narrowed_skills_without_memory
     ]
     assert dynamic_payload["candidate_tools"] == [
         {
-            "tool_id": "content",
+            "tool_id": "content_open",
             "description": "",
         }
     ]
@@ -6161,9 +6111,9 @@ async def test_enrich_node_messages_reports_hydrated_callable_tools_separately_f
         return NodeContextSelectionResult(
             mode="dense_rerank",
             selected_skill_ids=["tmux"],
-            selected_tool_names=["content", "exec"],
+            selected_tool_names=["content_open", "exec"],
             candidate_skill_ids=["tmux"],
-            candidate_tool_names=["content", "exec"],
+            candidate_tool_names=["content_open", "exec"],
             trace={"mode": "dense_rerank"},
         )
 
@@ -6189,14 +6139,14 @@ async def test_enrich_node_messages_reports_hydrated_callable_tools_separately_f
             'hydrated_executor_names': ['filesystem_write'],
         },
     )
-    service.list_visible_tool_families = lambda *, actor_role, session_id: [
-        SimpleNamespace(tool_id='content'),
-        SimpleNamespace(tool_id='filesystem'),
+    service.list_visible_tools = lambda *, actor_role, session_id: [
+        SimpleNamespace(tool_id='content_open'),
+        SimpleNamespace(tool_id='filesystem_write'),
     ]
     service.list_visible_skill_resources = lambda *, actor_role, session_id: [
         SimpleNamespace(skill_id='tmux', display_name='tmux', description='terminal workflow'),
     ]
-    service.list_effective_tool_names = lambda *, actor_role, session_id: ['content', 'filesystem_write', 'load_tool_context']
+    service.list_effective_tool_names = lambda *, actor_role, session_id: ['content_open', 'filesystem_write', 'load_tool_context']
     task = SimpleNamespace(task_id='task-hydrated-payload', session_id="web:ceo-origin", metadata={})
     node = SimpleNamespace(
         task_id='task-hydrated-payload',
@@ -6222,7 +6172,7 @@ async def test_enrich_node_messages_reports_hydrated_callable_tools_separately_f
     assert dynamic_payload["callable_tool_names"] == ["load_tool_context", "filesystem_write"]
     assert dynamic_payload["candidate_tools"] == [
         {
-            "tool_id": "content",
+            "tool_id": "content_open",
             "description": "",
         }
     ]
@@ -6258,7 +6208,7 @@ async def test_enrich_node_messages_includes_exec_runtime_policy_in_dynamic_cont
         'transition_required': False,
         'active_stage': {'stage_id': 'stage-1'},
     }
-    service.list_visible_tool_families = lambda *, actor_role, session_id: [
+    service.list_visible_tools = lambda *, actor_role, session_id: [
         SimpleNamespace(tool_id='content'),
         SimpleNamespace(tool_id='exec_runtime'),
     ]
@@ -6336,7 +6286,7 @@ async def test_enrich_node_messages_exposes_full_callable_tools_without_valid_st
             'hydrated_executor_names': ['filesystem_write'],
         },
     )
-    service.list_visible_tool_families = lambda *, actor_role, session_id: [
+    service.list_visible_tools = lambda *, actor_role, session_id: [
         SimpleNamespace(tool_id='content'),
         SimpleNamespace(tool_id='filesystem'),
     ]
@@ -6409,7 +6359,7 @@ async def test_enrich_node_messages_never_injects_memory_retrieval_overlay(
 
     service = object.__new__(MainRuntimeService)
     service.memory_manager = _MemoryManager()
-    service.list_visible_tool_families = lambda *, actor_role, session_id: [
+    service.list_visible_tools = lambda *, actor_role, session_id: [
         SimpleNamespace(tool_id='filesystem'),
     ]
     service.list_visible_skill_resources = lambda *, actor_role, session_id: [
@@ -6493,7 +6443,7 @@ async def test_enrich_node_messages_still_applies_selector_when_unified_context_
 
     service = object.__new__(MainRuntimeService)
     service.memory_manager = _MemoryManager()
-    service.list_visible_tool_families = lambda *, actor_role, session_id: [
+    service.list_visible_tools = lambda *, actor_role, session_id: [
         SimpleNamespace(tool_id='content'),
     ]
     service.list_visible_skill_resources = lambda *, actor_role, session_id: [
@@ -9139,8 +9089,9 @@ def test_task_node_detail_manifest_is_agent_full_and_unscoped_by_design() -> Non
     ) or {}
 
     assert "detail_level" not in (manifest.get("parameters") or {}).get("properties", {})
-    action = (manifest.get("governance") or {}).get("actions", [{}])[0]
-    assert sorted(action.get("allowed_roles") or []) == ["ceo", "execution", "inspection"]
+    governance = manifest.get("governance") or {}
+    assert "actions" not in governance and "family" not in governance
+    assert sorted(governance.get("allowed_roles") or []) == ["ceo", "execution", "inspection"]
 
 
 def test_provider_marker_tail_fingerprint_catches_real_corruption_only() -> None:

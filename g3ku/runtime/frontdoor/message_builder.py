@@ -34,7 +34,7 @@ from g3ku.runtime.stage_prompt_compaction import (
 from g3ku.runtime.tool_visibility import (
     CEO_FIXED_BUILTIN_TOOL_NAMES,
     filter_tool_names_for_semantic_top_k,
-    filter_visible_tool_families_for_semantic_top_k,
+    filter_visible_tools_for_semantic_top_k,
 )
 from g3ku.runtime.frontdoor.capability_snapshot import CapabilitySnapshot, build_capability_snapshot
 from g3ku.runtime.frontdoor.canonical_context import (
@@ -197,7 +197,7 @@ class CeoMessageBuilder:
         'cron': ('remind', 'schedule', 'cron', 'timer', 'recurring'),
         'load_skill_context': ('skill', 'workflow', 'procedure', 'steps', 'context', 'details'),
         'load_tool_context': ('tool', 'api', 'parameters', 'usage', 'context', 'details'),
-        'filesystem': ('file', 'path', 'write', 'edit', 'delete', 'patch'),
+        'filesystem_stat': ('file', 'path', 'directory', 'size', 'measure', '目录', '清单', '大小'),
         'filesystem_write': ('write', 'create', 'new file', 'save file', 'markdown file', '写入', '创建', '新建'),
         'filesystem_edit': ('edit', 'modify', 'update', 'append', 'prepend', 'insert', 'replace', 'line', '编辑', '修改', '更新', '追加', '插入', '替换'),
         'filesystem_copy': ('copy', 'duplicate', '复制', '拷贝'),
@@ -403,9 +403,9 @@ class CeoMessageBuilder:
         return str(getattr(item, 'tool_id', '') or '').strip()
 
     @classmethod
-    def _visible_tool_ids(cls, visible_families: list[Any]) -> list[str]:
+    def _visible_tool_ids(cls, visible_tools: list[Any]) -> list[str]:
         ids: list[str] = []
-        for item in list(visible_families or []):
+        for item in list(visible_tools or []):
             tool_id = cls._tool_id(item)
             if not tool_id or tool_id in ids:
                 continue
@@ -416,19 +416,19 @@ class CeoMessageBuilder:
     def _semantic_tool_selection_inputs(
         cls,
         *,
-        visible_families: list[Any],
+        visible_tools: list[Any],
         visible_tool_names: list[str],
     ) -> tuple[list[dict[str, Any]], list[str]]:
         excluded_tool_names = set(cls.FIXED_BUILTIN_TOOL_NAMES)
-        filtered_families = filter_visible_tool_families_for_semantic_top_k(
-            visible_families,
+        filtered_tools = filter_visible_tools_for_semantic_top_k(
+            visible_tools,
             excluded_tool_names=excluded_tool_names,
         )
         filtered_tool_names = filter_tool_names_for_semantic_top_k(
             visible_tool_names,
             excluded_tool_names=excluded_tool_names,
         )
-        return filtered_families, filtered_tool_names
+        return filtered_tools, filtered_tool_names
 
     @staticmethod
     def _capability_snapshot(exposure: dict[str, Any]) -> CapabilitySnapshot:
@@ -437,7 +437,7 @@ class CeoMessageBuilder:
             return existing
         return build_capability_snapshot(
             visible_skills=list(exposure.get('skills') or []),
-            visible_families=list(exposure.get('tool_families') or []),
+            visible_tools=list(exposure.get('tools') or []),
             visible_tool_names=list(exposure.get('tool_names') or []),
         )
 
@@ -779,21 +779,13 @@ class CeoMessageBuilder:
         return getattr(getattr(loop, "_memory_runtime_settings", None), "assembly", None)
 
     @staticmethod
-    def _tool_family_by_executor_name(visible_families: list[Any]) -> dict[str, Any]:
-        family_by_executor: dict[str, Any] = {}
-        for family in list(visible_families or []):
-            tool_id = str(getattr(family, "tool_id", "") or "").strip()
-            executor_names: list[str] = []
-            for action in list(getattr(family, "actions", []) or []):
-                for raw_name in list(getattr(action, "executor_names", []) or []):
-                    name = str(raw_name or "").strip()
-                    if name and name not in executor_names:
-                        executor_names.append(name)
-            if not executor_names and tool_id:
-                executor_names.append(tool_id)
-            for executor_name in executor_names:
-                family_by_executor.setdefault(executor_name, family)
-        return family_by_executor
+    def _tool_record_map(visible_tools: list[Any]) -> dict[str, Any]:
+        mapping: dict[str, Any] = {}
+        for record in list(visible_tools or []):
+            tool_id = str(getattr(record, "tool_id", "") or "").strip()
+            if tool_id and tool_id not in mapping:
+                mapping[tool_id] = record
+        return mapping
 
     @staticmethod
     def _query_contains_any(query_text: str, patterns: tuple[str, ...]) -> bool:
@@ -871,17 +863,16 @@ class CeoMessageBuilder:
         return targets
 
     @classmethod
-    def _tool_intent_bonus(cls, *, tool_name: str, family_tool_id: str, query_text: str) -> float:
+    def _tool_intent_bonus(cls, *, tool_name: str, query_text: str) -> float:
         mutating_targets = cls._filesystem_intent_targets(query_text)
         if not mutating_targets:
             return 0.0
         normalized_tool_name = str(tool_name or '').strip()
-        normalized_family_tool_id = str(family_tool_id or '').strip()
         if normalized_tool_name == 'exec':
             return -8.0
         if normalized_tool_name in mutating_targets:
             return 12.0 - float(mutating_targets.index(normalized_tool_name))
-        if normalized_family_tool_id == 'filesystem':
+        if normalized_tool_name.startswith('filesystem_'):
             return 3.0
         return 0.0
 
@@ -889,9 +880,9 @@ class CeoMessageBuilder:
         self,
         *,
         selected_tool_names: list[str],
-        visible_families: list[Any],
+        visible_tools: list[Any],
     ) -> list[dict[str, str]]:
-        family_by_executor = self._tool_family_by_executor_name(visible_families)
+        record_by_tool_id = self._tool_record_map(visible_tools)
         main_service = getattr(self._loop, 'main_task_service', None)
         get_tool_toolskill = getattr(main_service, 'get_tool_toolskill', None) if main_service is not None else None
         items: list[dict[str, str]] = []
@@ -911,17 +902,8 @@ class CeoMessageBuilder:
                     str(toolskill_payload.get('description') or toolskill_payload.get('l0') or '').strip()
                 )
             if not description:
-                family = family_by_executor.get(tool_id)
-                if family is None:
-                    family = next(
-                        (
-                            item
-                            for item in list(visible_families or [])
-                            if str(getattr(item, 'tool_id', '') or '').strip() == tool_id
-                        ),
-                        None,
-                    )
-                description = self._first_sentence(str(getattr(family, 'description', '') or '').strip()) if family is not None else ''
+                record = record_by_tool_id.get(tool_id)
+                description = self._first_sentence(str(getattr(record, 'description', '') or '').strip()) if record is not None else ''
             items.append(
                 {
                     'tool_id': tool_id,
@@ -1193,20 +1175,13 @@ class CeoMessageBuilder:
         return selected, trace
 
     @staticmethod
-    def _family_has_registered_callable_executor(family: Any, visible_name_set: set[str]) -> bool:
-        executor_names: set[str] = set()
-        for action in list(getattr(family, 'actions', []) or []):
-            executor_names.update(
-                str(name or '').strip()
-                for name in list(getattr(action, 'executor_names', []) or [])
-                if str(name or '').strip()
-            )
-        return bool(executor_names & visible_name_set)
+    def _tool_is_registered_callable(record: Any, visible_name_set: set[str]) -> bool:
+        return bool(str(getattr(record, 'tool_id', '') or '').strip() in visible_name_set)
 
-    def _trace_external_tool_families(
+    def _trace_external_tools(
         self,
         *,
-        visible_families: list[Any],
+        visible_tools: list[Any],
         visible_tool_names: list[str],
     ) -> list[dict[str, Any]]:
         visible_name_set = {
@@ -1215,11 +1190,11 @@ class CeoMessageBuilder:
             if str(name or '').strip()
         }
         trace: list[dict[str, Any]] = []
-        for family in list(visible_families or []):
-            tool_id = str(getattr(family, 'tool_id', '') or '').strip()
-            callable_flag = bool(getattr(family, 'callable', True))
-            available_flag = bool(getattr(family, 'available', True))
-            registered_callable = self._family_has_registered_callable_executor(family, visible_name_set)
+        for record in list(visible_tools or []):
+            tool_id = str(getattr(record, 'tool_id', '') or '').strip()
+            callable_flag = bool(getattr(record, 'callable', True))
+            available_flag = bool(getattr(record, 'available', True))
+            registered_callable = self._tool_is_registered_callable(record, visible_name_set)
             if not tool_id:
                 continue
             if callable_flag and available_flag and registered_callable:
@@ -1249,7 +1224,7 @@ class CeoMessageBuilder:
         *,
         query_text: str,
         visible_names: list[str],
-        visible_families: list[Any],
+        visible_tools: list[Any],
         core_tools: set[str],
         extension_top_k: int,
         ranked_tool_ids: list[str] | None = None,
@@ -1263,13 +1238,13 @@ class CeoMessageBuilder:
                 'candidate_tool_names': [],
             }
         raw_core_entries = {str(name).strip() for name in list(core_tools or []) if str(name).strip()}
-        core_resolution = resolve_core_tool_targets(core_tools, visible_families)
+        core_resolution = resolve_core_tool_targets(core_tools, visible_tools)
         reserved = [name for name in visible_names if name in self.RESERVED_INTERNAL_TOOLS and name in visible_set]
         reserved_set = set(reserved)
         selected = {
             name
             for name in visible_set
-            if (name in core_resolution.executor_names or name in raw_core_entries) and name not in reserved_set
+            if (name in core_resolution.tool_ids or name in raw_core_entries) and name not in reserved_set
         }
         if extension_top_k <= 0:
             ordered = reserved + [name for name in visible_names if name in selected]
@@ -1327,36 +1302,33 @@ class CeoMessageBuilder:
             for index, name in enumerate(list(visible_names or []))
             if str(name or '').strip()
         }
-        executor_family_map = self._tool_family_by_executor_name(visible_families)
+        record_by_tool_id = self._tool_record_map(visible_tools)
         ext_scored: list[tuple[float, int, str]] = []
+        record_by_tool_id = self._tool_record_map(visible_tools)
         for name in visible_names:
             normalized = str(name or '').strip()
             if (
                 not normalized
                 or normalized not in visible_set
-                or normalized in core_resolution.executor_names
+                or normalized in core_resolution.tool_ids
                 or normalized in raw_core_entries
                 or normalized in reserved_set
             ):
                 continue
-            family = executor_family_map.get(normalized)
-            family_tool_id = str(getattr(family, 'tool_id', '') or '').strip()
-            family_display_name = str(getattr(family, 'display_name', '') or '').strip()
-            family_description = str(getattr(family, 'description', '') or '').strip()
+            record = record_by_tool_id.get(normalized)
+            display_name = str(getattr(record, 'display_name', '') or '').strip()
+            description = str(getattr(record, 'description', '') or '').strip()
             score = score_query(
                 query_text,
                 normalized,
-                family_display_name or normalized,
-                family_description,
-                family_tool_id,
+                display_name or normalized,
+                description,
             )
-            for hint_owner in (normalized, family_tool_id):
-                for hint in self.EXTENSION_TOOL_HINTS.get(hint_owner, ()):
-                    if hint and hint.lower() in str(query_text or '').lower():
-                        score += 5.0
+            for hint in self.EXTENSION_TOOL_HINTS.get(normalized, ()):
+                if hint and hint.lower() in str(query_text or '').lower():
+                    score += 5.0
             score += self._tool_intent_bonus(
                 tool_name=normalized,
-                family_tool_id=family_tool_id,
                 query_text=query_text,
             )
             ext_scored.append((score, visible_index.get(normalized, len(visible_index) + 10_000), normalized))
@@ -1483,9 +1455,9 @@ class CeoMessageBuilder:
 
         memory_write_terms = self._detect_memory_write_intent(query_text)
         visible_skills = list(exposure.get('skills') or [])
-        visible_families = list(exposure.get('tool_families') or [])
-        semantic_visible_families, semantic_visible_tool_names = self._semantic_tool_selection_inputs(
-            visible_families=visible_families,
+        visible_tools = list(exposure.get('tools') or [])
+        semantic_visible_tools, semantic_visible_tool_names = self._semantic_tool_selection_inputs(
+            visible_tools=visible_tools,
             visible_tool_names=visible_tool_names,
         )
         capability_snapshot = self._capability_snapshot(exposure)
@@ -1495,7 +1467,7 @@ class CeoMessageBuilder:
             memory_manager=memory_manager,
             query_text=query_text,
             visible_skills=visible_skills,
-            visible_families=semantic_visible_families,
+            visible_tools=semantic_visible_tools,
             skill_limit=max(inventory_top_k * 4, len(visible_skills), inventory_top_k, 8),
             tool_limit=max(extension_top_k * 4, len(semantic_visible_tool_names), extension_top_k, 8),
         )
@@ -1523,8 +1495,8 @@ class CeoMessageBuilder:
             system_prompt = self._prompt_builder.build(skills=[])
         if capability_snapshot.stable_catalog_message:
             system_prompt = f"{system_prompt}\n\n{capability_snapshot.stable_catalog_message}".strip()
-        external_trace = self._trace_external_tool_families(
-            visible_families=visible_families,
+        external_trace = self._trace_external_tools(
+            visible_tools=visible_tools,
             visible_tool_names=visible_tool_names,
         )
 
@@ -1584,7 +1556,7 @@ class CeoMessageBuilder:
             selected_tool_names, tool_trace = self._select_tools(
                 query_text=query_text,
                 visible_names=visible_tool_names,
-                visible_families=visible_families,
+                visible_tools=visible_tools,
                 core_tools=set(callable_tool_names),
                 extension_top_k=extension_top_k,
                 ranked_tool_ids=(ranked_tool_ids if ranked_tool_ids else None),
@@ -1601,20 +1573,20 @@ class CeoMessageBuilder:
                 '_split_repair_required_tool_prompt_items',
             )(
                 candidate_tool_names=list(candidate_tool_names),
-                visible_tool_families=visible_families,
+                visible_tool_records=visible_tools,
                 preferred_items=None,
             )
         else:
             candidate_tool_items = self._candidate_tool_prompt_items(
                 selected_tool_names=list(candidate_tool_names),
-                visible_families=visible_families,
+                visible_tools=visible_tools,
             )
             repair_required_tool_items = []
         if callable(getattr(main_service, '_all_repair_required_tool_prompt_items', None)):
             repair_required_tool_items = getattr(main_service, '_merge_repair_prompt_items')(
                 repair_required_tool_items,
                 getattr(main_service, '_all_repair_required_tool_prompt_items')(
-                    visible_tool_families=visible_families,
+                    visible_tool_records=visible_tools,
                 ),
                 key='tool_id',
             )

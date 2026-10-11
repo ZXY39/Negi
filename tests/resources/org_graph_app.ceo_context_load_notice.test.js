@@ -164,30 +164,50 @@ test("context load notice renders type icon before text and keeps risk dot metad
     assert.equal(notice.children[0].innerHTML, '<i data-lucide="sparkles"></i>');
 });
 
-test("risk level resolves concrete executors from the owning family action", () => {
+test("risk level resolves from the tool record that owns the target id", () => {
     const { S, resolveCeoContextLoadNoticeRiskLevel } = loadApp();
+    // 资源目录一行一个工具：风险度直接读工具记录的 risk_level，
+    // 没有 actions / executor_names 中间层可以回查。
     S.tools = [
-        {
-            tool_id: "filesystem",
-            actions: [
-                { action_id: "edit", risk_level: "high", executor_names: ["filesystem_edit"] },
-                { action_id: "stat", risk_level: "low", executor_names: ["filesystem_stat"] },
-            ],
-        },
-        {
-            tool_id: "content",
-            actions: [
-                { action_id: "open", risk_level: "low", executor_names: ["content_open"] },
-            ],
-        },
+        { tool_id: "filesystem_edit", risk_level: "high" },
+        { tool_id: "filesystem_stat", risk_level: "low" },
+        { tool_id: "content_open", risk_level: "low" },
+        { tool_id: "memory_runtime", risk_level: "" },
     ];
     S.skills = [{ skill_id: "find-skills", risk_level: "high" }];
 
     assert.equal(resolveCeoContextLoadNoticeRiskLevel("tool", "filesystem_edit"), "high");
     assert.equal(resolveCeoContextLoadNoticeRiskLevel("tool", "filesystem_stat"), "low");
     assert.equal(resolveCeoContextLoadNoticeRiskLevel("tool", "content_open"), "low");
-    assert.equal(resolveCeoContextLoadNoticeRiskLevel("tool", "filesystem"), "high");
+    // 目录里没有风险度的记录回落 medium，而不是去族里取最高。
+    assert.equal(resolveCeoContextLoadNoticeRiskLevel("tool", "memory_runtime"), "medium");
+    // 旧工具族 id 已经不是任何一条记录，不再从 action 汇总出风险度。
+    assert.equal(resolveCeoContextLoadNoticeRiskLevel("tool", "filesystem"), "medium");
+    assert.equal(resolveCeoContextLoadNoticeRiskLevel("tool", "content"), "medium");
     assert.equal(resolveCeoContextLoadNoticeRiskLevel("tool", "missing_tool"), "medium");
     assert.equal(resolveCeoContextLoadNoticeRiskLevel("skill", "find-skills"), "high");
     assert.equal(resolveCeoContextLoadNoticeRiskLevel("skill", "missing_skill"), "medium");
 });
+
+test("context load notice renders the risk level of the tool record it loaded", () => {
+    const { S, createPendingCeoTurn, maybeShowCeoContextLoadNotice, U } = loadApp();
+    S.tools = [
+        { tool_id: "filesystem_write", risk_level: "high" },
+        { tool_id: "content_open", risk_level: "low" },
+    ];
+    const turn = createPendingCeoTurn("user");
+
+    const shown = maybeShowCeoContextLoadNotice(turn, {
+        toolName: "load_tool_context_v2",
+        status: "success",
+        detailTexts: ['{"tool_id":"filesystem_write"}'],
+    });
+
+    assert.equal(shown, true);
+    const notice = U.ceoContextLoadNotice.children[0];
+    assert.equal(notice.dataset.noticeKind, "tool");
+    assert.equal(notice.dataset.riskLevel, "high");
+    assert.ok(notice.className.split(" ").includes("risk-high"), "unexpected classes: " + notice.className);
+    assert.equal(notice.children[2].className, "ceo-context-load-notice-risk-dot risk-high");
+});
+

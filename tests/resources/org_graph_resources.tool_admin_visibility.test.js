@@ -1,10 +1,37 @@
 const test = require("node:test");
 const assert = require("node:assert/strict");
 const fs = require("node:fs");
+const path = require("node:path");
 const vm = require("node:vm");
 
 const RESOURCES_PATH = "g3ku/web/frontend/org_graph_resources.js";
 const RESOURCES_CODE = fs.readFileSync(RESOURCES_PATH, "utf8");
+const TOOLS_ROOT = path.resolve(__dirname, "..", "..", "tools");
+
+// GET /api/resources/tools 现在一行就是一个工具：记录上没有 actions / executor_names /
+// primary_executor_name，风险度与角色直接挂在工具记录上（见 main/governance/models.py
+// 的 ToolRecord）。fixture 按那份字段形状构造，不要再造族形数据。
+function toolRecord(overrides = {}) {
+    return {
+        tool_id: "",
+        display_name: "",
+        description: "",
+        risk_level: "medium",
+        destructive: false,
+        agent_visible: true,
+        admin_mode: "editable",
+        allowed_roles: ["ceo", "execution", "inspection"],
+        is_core: false,
+        enabled: true,
+        available: true,
+        callable: true,
+        tool_type: "internal",
+        install_dir: null,
+        source_path: "",
+        metadata: {},
+        ...overrides,
+    };
+}
 
 class StubElement {
     constructor(id = "") {
@@ -12,28 +39,63 @@ class StubElement {
         this.value = "";
         this.hidden = false;
         this.disabled = false;
-        this.innerHTML = "";
         this.textContent = "";
+        this.className = "";
         this.style = {};
         this.dataset = {};
         this.children = [];
+        this.stubQueryTargets = new Map();
+        this._innerHTML = "";
+        // classList 必须真的记账：空实现会让任何类名断言永真。
         this.classList = {
-            add() {},
-            remove() {},
-            toggle() {},
-            contains() { return false; },
+            add: (...tokens) => {
+                const classes = new Set(String(this.className || "").split(/\s+/).filter(Boolean));
+                tokens.forEach((token) => classes.add(token));
+                this.className = [...classes].join(" ");
+            },
+            remove: (...tokens) => {
+                const classes = new Set(String(this.className || "").split(/\s+/).filter(Boolean));
+                tokens.forEach((token) => classes.delete(token));
+                this.className = [...classes].join(" ");
+            },
+            contains: (token) => String(this.className || "").split(/\s+/).includes(token),
+            toggle: (token, force) => {
+                const shouldAdd = force === undefined ? !this.classList.contains(token) : !!force;
+                if (shouldAdd) this.classList.add(token);
+                else this.classList.remove(token);
+            },
         };
     }
 
     addEventListener() {}
+
+    // 浏览器语义：写 innerHTML 会丢掉既有子节点。桩不清 children 的话，
+    // 同一个实例上第二次 renderTools 会把上一轮的行累加进来，行计数断言就失真了。
+    get innerHTML() {
+        return this._innerHTML;
+    }
+
+    set innerHTML(value) {
+        this._innerHTML = String(value);
+        this.children.length = 0;
+    }
 
     appendChild(child) {
         this.children.push(child);
         return child;
     }
 
-    querySelector() {
-        return null;
+    // 只有测试显式登记过的选择器才会被解析出来，其余返回 null，实现里
+    // 依赖 querySelector 的分支（例如 dockResourceStatusBadge）保持短路。
+    querySelector(selector) {
+        return this.stubQueryTargets.get(String(selector || "")) || null;
+    }
+
+    stubQueryTargetFor(selector) {
+        if (!this.stubQueryTargets.has(selector)) {
+            this.stubQueryTargets.set(selector, new StubHTMLElement());
+        }
+        return this.stubQueryTargets.get(selector);
     }
 
     querySelectorAll() {
@@ -133,8 +195,10 @@ function loadResources() {
         `${RESOURCES_CODE}
         this.__testExports = {
             applyExecToolExecutionMode,
+            execToolExecutionMode,
             execToolModeLabel,
             execToolModeSummary,
+            filterTools,
             renderTools,
             renderToolDetail,
             saveTool,
@@ -149,108 +213,267 @@ function loadResources() {
     };
 }
 
-test("renderTools counts only Tool 管理 actions that remain visible in the frontend", () => {
+test("renderTools renders one row per tool with the tool's own status, risk and core tags", () => {
     const { S, U, renderTools } = loadResources();
     S.tools = [
-        {
-            tool_id: "content_navigation",
-            display_name: "Content",
-            description: "Describe, search, and open content.",
-            source_path: "tools/content",
-            enabled: true,
-            available: true,
-            actions: [
-                { action_id: "describe", label: "Describe Content", risk_level: "low" },
-                { action_id: "search", label: "Search Content", risk_level: "low" },
-                { action_id: "open", label: "Open Content Excerpt", risk_level: "low" },
-                { action_id: "inspect", label: "Inspect Content (Legacy)", risk_level: "low" },
-            ],
-        },
-        {
-            tool_id: "memory",
-            display_name: "Memory",
-            description: "Search and write memory.",
-            source_path: "tools/memory",
-            enabled: true,
-            available: true,
-            actions: [
-                { action_id: "search", label: "Search Memory", risk_level: "low" },
-                { action_id: "write", label: "Write Memory", risk_level: "medium" },
-                { action_id: "runtime", label: "Memory Runtime", risk_level: "low", admin_mode: "readonly_system", agent_visible: false },
-            ],
-        },
+        toolRecord({
+            tool_id: "content_open",
+            display_name: "Content Open",
+            description: "Open one excerpt from a content ref or absolute file path.",
+            risk_level: "low",
+            is_core: true,
+            source_path: "tools/content_open",
+        }),
+        toolRecord({
+            tool_id: "filesystem_write",
+            display_name: "Filesystem Write",
+            description: "Write file content to disk.",
+            risk_level: "high",
+            destructive: true,
+            allowed_roles: ["ceo", "execution"],
+            source_path: "tools/filesystem_write",
+        }),
     ];
 
     renderTools();
 
+    // 一行一个工具：两条记录就是两行，不再折叠成工具族。
     assert.equal(U.toolList.children.length, 2);
-    assert.match(U.toolList.children[0].innerHTML, /3\s*个 action/);
-    assert.match(U.toolList.children[1].innerHTML, /2\s*个 action/);
+    const [openRow, writeRow] = U.toolList.children.map((row) => row.innerHTML);
+
+    assert.match(openRow, /Content Open/);
+    assert.match(openRow, /class="meta-tag risk-low">低风险</);
+    assert.match(openRow, /<span class="meta-tag">核心工具<\/span>/);
+
+    assert.match(writeRow, /Filesystem Write/);
+    assert.match(writeRow, /class="meta-tag risk-high">高风险</);
+    assert.doesNotMatch(writeRow, /核心工具/);
+
+    // 族形时代的「N 个 action」统计已经随中间层一起删掉。
+    assert.doesNotMatch(openRow, /个\s*action/);
+    assert.doesNotMatch(writeRow, /个\s*action/);
 });
 
-test("renderToolDetail hides Inspect Content (Legacy) from Tool 管理 details", () => {
+test("renderTools hides tools the agent cannot see instead of hiding single actions by name", () => {
+    const { S, U, renderTools } = loadResources();
+    S.tools = [
+        toolRecord({
+            tool_id: "memory_write",
+            display_name: "Write Memory",
+            description: "Write explicit permanent memory items.",
+            risk_level: "medium",
+            allowed_roles: ["ceo"],
+            source_path: "tools/memory_write",
+        }),
+        // 旧形状里被 hideToolAdminAction(memory, runtime) 藏起来的 action，
+        // 现在整条工具记录就是隐藏的：agent_visible 是唯一规则。
+        toolRecord({
+            tool_id: "memory_runtime",
+            display_name: "Memory Runtime",
+            description: "Expose queued markdown memory runtime internals.",
+            risk_level: "low",
+            agent_visible: false,
+            admin_mode: "readonly_system",
+            source_path: "tools/memory_runtime",
+        }),
+    ];
+
+    renderTools();
+
+    assert.equal(U.toolList.children.length, 1);
+    assert.match(U.toolList.children[0].innerHTML, /Write Memory/);
+    assert.doesNotMatch(U.toolList.children[0].innerHTML, /Memory Runtime/);
+
+    // 搜索、风险、状态筛选都不能把隐藏工具放回列表。
+    U.toolSearch.value = "memory";
+    U.toolRisk.value = "low";
+    U.toolStatus.value = "enabled";
+    renderTools();
+    assert.equal(U.toolList.children.length, 0);
+    assert.doesNotMatch(U.toolList.innerHTML, /Memory Runtime/);
+
+    // 反过来：agent_visible 没被关掉的记录一律进列表，不再按 tool_id 名单挑掉。
+    U.toolSearch.value = "";
+    U.toolRisk.value = "all";
+    U.toolStatus.value = "all";
+    S.tools = [toolRecord({ tool_id: "content", display_name: "Legacy Content", risk_level: "low" })];
+    renderTools();
+    assert.equal(U.toolList.children.length, 1);
+    assert.match(U.toolList.children[0].innerHTML, /Legacy Content/);
+});
+
+test("filterTools matches the tool record's own risk level and searchable fields", () => {
+    const { S, U, filterTools } = loadResources();
+    S.tools = [
+        toolRecord({
+            tool_id: "content_open",
+            display_name: "Content Open",
+            description: "Open one excerpt from a content ref or absolute file path.",
+            risk_level: "low",
+            source_path: "tools/content_open",
+        }),
+        toolRecord({
+            tool_id: "filesystem_write",
+            display_name: "Filesystem Write",
+            description: "Write file content to disk.",
+            risk_level: "high",
+            allowed_roles: ["ceo", "execution"],
+            source_path: "tools/filesystem_write",
+        }),
+        toolRecord({
+            tool_id: "memory_runtime",
+            display_name: "Memory Runtime",
+            risk_level: "low",
+            agent_visible: false,
+            admin_mode: "readonly_system",
+            source_path: "tools/memory_runtime",
+        }),
+    ];
+
+    const ids = () => filterTools().map((tool) => tool.tool_id);
+
+    // 风险筛选比的是这条工具记录自己的 risk_level，不是族下任一 action。
+    U.toolRisk.value = "high";
+    assert.deepEqual(ids(), ["filesystem_write"]);
+    U.toolRisk.value = "low";
+    assert.deepEqual(ids(), ["content_open"]);
+    U.toolRisk.value = "all";
+
+    // 搜索命中 tool_id / display_name / description / source_path。
+    U.toolSearch.value = "filesystem_write";
+    assert.deepEqual(ids(), ["filesystem_write"]);
+    U.toolSearch.value = "excerpt";
+    assert.deepEqual(ids(), ["content_open"]);
+    U.toolSearch.value = "tools/content_open";
+    assert.deepEqual(ids(), ["content_open"]);
+
+    // 状态筛选逻辑不变：禁用/不可用各自独立成档。
+    U.toolSearch.value = "";
+    S.tools.push(toolRecord({ tool_id: "cron", display_name: "Cron Schedule", enabled: false }));
+    U.toolStatus.value = "disabled";
+    assert.deepEqual(ids(), ["cron"]);
+    U.toolStatus.value = "all";
+});
+
+test("the legacy content tool family is gone from both the repository and the frontend", () => {
+    // 旧用例断言 content_navigation 的 inspect action 被前端藏起来；legacy content
+    // 工具族已从仓库删除，藏名单也一起删掉了，所以这里断言它确实不存在。
+    assert.equal(fs.existsSync(path.join(TOOLS_ROOT, "content")), false);
+    assert.equal(fs.existsSync(path.join(TOOLS_ROOT, "content_open")), true);
+    assert.equal(fs.existsSync(path.join(TOOLS_ROOT, "content_search")), true);
+    assert.equal(fs.existsSync(path.join(TOOLS_ROOT, "content_describe")), true);
+
+    assert.equal(RESOURCES_CODE.includes("hideToolAdminAction"), false);
+    assert.equal(RESOURCES_CODE.includes("toolActionsForDisplay"), false);
+});
+
+test("renderToolDetail shows the split content tool without any action layer", () => {
     const { S, U, renderToolDetail } = loadResources();
-    S.selectedTool = {
-        tool_id: "content_navigation",
-        display_name: "Content",
-        description: "Describe, search, and open content.",
-        enabled: true,
-        available: true,
-        callable: true,
+    S.selectedTool = toolRecord({
+        tool_id: "content_open",
+        display_name: "Content Open",
+        description: "Open one excerpt from a content ref or absolute file path.",
+        risk_level: "low",
         is_core: true,
-        metadata: {},
-        actions: [
-            { action_id: "describe", label: "Describe Content", risk_level: "low", allowed_roles: ["ceo", "execution", "inspection"] },
-            { action_id: "search", label: "Search Content", risk_level: "low", allowed_roles: ["ceo", "execution", "inspection"] },
-            { action_id: "open", label: "Open Content Excerpt", risk_level: "low", allowed_roles: ["ceo", "execution", "inspection"] },
-            { action_id: "inspect", label: "Inspect Content (Legacy)", risk_level: "low", allowed_roles: ["ceo", "execution", "inspection"] },
-        ],
+        callable: true,
         toolskill_content: "",
-    };
+    });
 
     renderToolDetail();
 
-    assert.match(U.toolDetail.innerHTML, /Describe Content/);
-    assert.match(U.toolDetail.innerHTML, /Search Content/);
-    assert.match(U.toolDetail.innerHTML, /Open Content Excerpt/);
-    assert.doesNotMatch(U.toolDetail.innerHTML, /Inspect Content \(Legacy\)/);
+    const html = U.toolDetail.innerHTML;
+    assert.match(html, /<h2 id="tool-detail-title">Content Open <span class="meta-tag">核心工具<\/span><\/h2>/);
+    assert.match(html, /<p class="subtitle">content_open<\/p>/);
+    assert.match(html, /<span class="meta-tag risk-low">低风险<\/span>/);
+    assert.doesNotMatch(html, /Inspect Content \(Legacy\)/);
+    // 族形时代的 action 区块不复存在。
+    assert.doesNotMatch(html, /Action 权限/);
+    assert.doesNotMatch(html, /tool-action-name/);
+    assert.doesNotMatch(html, /个\s*action/);
 });
 
-test("renderToolDetail hides Memory Runtime from Tool 管理 details", () => {
+test("renderToolDetail renders one role visibility group driven by the tool's own allowed_roles", () => {
     const { S, U, renderToolDetail } = loadResources();
-    S.selectedTool = {
-        tool_id: "memory",
-        display_name: "Memory",
-        description: "Search and write memory.",
-        enabled: true,
-        available: true,
-        callable: true,
-        is_core: true,
-        metadata: {},
-        actions: [
-            { action_id: "search", label: "Search Memory", risk_level: "low", allowed_roles: ["ceo", "execution", "inspection"] },
-            { action_id: "write", label: "Write Memory", risk_level: "medium", allowed_roles: ["ceo"] },
-            { action_id: "runtime", label: "Memory Runtime", risk_level: "low", allowed_roles: ["ceo", "execution", "inspection"], admin_mode: "readonly_system", agent_visible: false },
-        ],
-        toolskill_content: "",
-    };
+    S.selectedTool = toolRecord({
+        tool_id: "filesystem_write",
+        display_name: "Filesystem Write",
+        description: "Write file content to disk.",
+        risk_level: "high",
+        destructive: true,
+        allowed_roles: ["ceo", "execution"],
+    });
 
     renderToolDetail();
 
-    assert.match(U.toolDetail.innerHTML, /Search Memory/);
-    assert.match(U.toolDetail.innerHTML, /Write Memory/);
-    assert.doesNotMatch(U.toolDetail.innerHTML, /Memory Runtime/);
+    const html = U.toolDetail.innerHTML;
+    assert.match(html, /<h3>角色可见<\/h3>/);
+    // 一组三个 checkbox，只有 data-role，没有旧的 data-action 维度。
+    const roles = [...html.matchAll(/data-role="(ceo|execution|inspection)"/g)].map((match) => match[1]);
+    assert.deepEqual(roles, ["ceo", "execution", "inspection"]);
+    assert.equal(html.includes("data-action="), false);
+    assert.match(html, /class="role-toggle tool-role-toggle checked">\s*<input type="checkbox" class="tool-role tool-role-input" data-role="ceo"/);
+    assert.match(html, /data-role="execution"[^>]*checked/);
+    assert.doesNotMatch(html, /data-role="inspection"[^>]*checked/);
+    assert.doesNotMatch(html, /当前工具对所有角色禁用。/);
+
+    // 角色全空时给出整工具级提示，而不是 per-action 提示。
+    S.selectedTool.allowed_roles = [];
+    renderToolDetail();
+    assert.match(U.toolDetail.innerHTML, /当前工具对所有角色禁用。/);
+    assert.doesNotMatch(U.toolDetail.innerHTML, /当前 action 对所有角色禁用。/);
 });
 
-test("renderToolDetail shows exec execution mode controls for exec_runtime", () => {
+test("renderToolDetail lets operators disable a core tool but never delete it", () => {
     const { S, U, renderToolDetail } = loadResources();
-    S.selectedTool = {
-        tool_id: "exec_runtime",
+    S.selectedTool = toolRecord({
+        tool_id: "content_open",
+        display_name: "Content Open",
+        description: "Open one excerpt from a content ref or absolute file path.",
+        risk_level: "low",
+        is_core: true,
+    });
+    const statusRow = U.toolDetail.stubQueryTargetFor(".resource-status-row");
+
+    renderToolDetail();
+
+    // 新合同：核心工具可以停用，启停按钮不再被 disabled。
+    assert.match(U.toolDetail.innerHTML, /<button type="button" class="toolbar-btn danger" id="tool-disable-btn">禁用工具<\/button>/);
+    assert.doesNotMatch(U.toolDetail.innerHTML, /id="tool-disable-btn"[^>]*disabled/);
+    assert.doesNotMatch(U.toolDetail.innerHTML, /Core tool cannot be disabled/);
+    // 删除仍然锁死。
+    const deleteButton = statusRow.children.find((child) => child.id === "tool-delete-btn");
+    assert.ok(deleteButton, "delete button is appended into the status row");
+    assert.equal(deleteButton.textContent, "核心工具不可删除");
+    assert.equal(deleteButton.disabled, true);
+
+    // 非核心工具：启停与删除都可点。
+    const plain = loadResources();
+    plain.S.selectedTool = toolRecord({
+        tool_id: "filesystem_write",
+        display_name: "Filesystem Write",
+        description: "Write file content to disk.",
+        risk_level: "high",
+        destructive: true,
+        allowed_roles: ["ceo", "execution"],
+    });
+    const plainStatusRow = plain.U.toolDetail.stubQueryTargetFor(".resource-status-row");
+    plain.renderToolDetail();
+
+    assert.match(plain.U.toolDetail.innerHTML, /id="tool-disable-btn">禁用工具<\/button>/);
+    const plainDeleteButton = plainStatusRow.children.find((child) => child.id === "tool-delete-btn");
+    assert.equal(plainDeleteButton.textContent, "删除");
+    assert.equal(plainDeleteButton.disabled, false);
+});
+
+test("renderToolDetail shows exec execution mode controls for exec", () => {
+    const { S, U, renderToolDetail } = loadResources();
+    S.selectedTool = toolRecord({
+        tool_id: "exec",
         display_name: "Exec Runtime",
         description: "Execute shell commands.",
-        enabled: true,
-        available: true,
-        callable: true,
+        risk_level: "high",
+        destructive: true,
+        allowed_roles: ["ceo", "execution"],
         is_core: false,
         metadata: { execution_mode: "full_access" },
         exec_runtime_policy: {
@@ -258,11 +481,8 @@ test("renderToolDetail shows exec execution mode controls for exec_runtime", () 
             guardrails_enabled: false,
             summary: "exec will execute shell commands without exec-side guardrails.",
         },
-        actions: [
-            { action_id: "run", label: "Run Command", risk_level: "high", allowed_roles: ["ceo", "execution"] },
-        ],
         toolskill_content: "",
-    };
+    });
 
     renderToolDetail();
 
@@ -273,7 +493,7 @@ test("renderToolDetail shows exec execution mode controls for exec_runtime", () 
     assert.doesNotMatch(U.toolDetail.innerHTML, /无需重启项目/);
 });
 
-test("saveTool sends execution_mode for exec_runtime", async () => {
+test("saveTool sends allowed_roles and execution_mode for exec", async () => {
     const { S, saveTool, ApiClient } = loadResources();
     const calls = [];
     ApiClient.updateToolPolicy = async (toolId, payload) => {
@@ -282,61 +502,89 @@ test("saveTool sends execution_mode for exec_runtime", async () => {
     };
     ApiClient.reloadResources = async () => ({ ok: true });
     ApiClient.getTools = async () => [
-        {
-            tool_id: "exec_runtime",
+        toolRecord({
+            tool_id: "exec",
             display_name: "Exec Runtime",
             description: "Execute shell commands.",
-            enabled: true,
-            available: true,
-            actions: [
-                { action_id: "run", label: "Run Command", allowed_roles: ["ceo", "execution"] },
-            ],
+            risk_level: "high",
+            destructive: true,
+            allowed_roles: ["ceo", "execution"],
             metadata: { execution_mode: "full_access" },
-        },
+        }),
     ];
 
-    S.selectedTool = {
-        tool_id: "exec_runtime",
+    S.selectedTool = toolRecord({
+        tool_id: "exec",
         display_name: "Exec Runtime",
         description: "Execute shell commands.",
-        enabled: true,
-        available: true,
-        actions: [
-            { action_id: "run", label: "Run Command", allowed_roles: ["ceo", "execution"] },
-        ],
+        risk_level: "high",
+        destructive: true,
+        allowed_roles: ["ceo", "execution"],
         metadata: { execution_mode: "full_access" },
         exec_runtime_policy: { mode: "full_access" },
-    };
+    });
     S.toolDirty = true;
 
     await saveTool({ showProgressToast: false, showSuccessToast: false, reopenDetail: false });
 
     assert.equal(calls.length, 1);
-    assert.equal(calls[0].toolId, "exec_runtime");
+    assert.equal(calls[0].toolId, "exec");
     assert.equal(calls[0].payload.enabled, true);
-    assert.deepEqual([...calls[0].payload.actions.run], ["ceo", "execution"]);
+    assert.deepEqual([...calls[0].payload.allowed_roles], ["ceo", "execution"]);
     assert.equal(calls[0].payload.execution_mode, "full_access");
+    // 旧族形 payload（按 action_id 分组的角色）不再是合同的一部分。
+    assert.equal(calls[0].payload.actions, undefined);
+});
+
+test("saveTool sends allowed_roles without execution_mode for a non-exec tool", async () => {
+    const { S, saveTool, ApiClient } = loadResources();
+    const calls = [];
+    ApiClient.updateToolPolicy = async (toolId, payload) => {
+        calls.push({ toolId, payload });
+        return { item: { tool_id: toolId, allowed_roles: payload.allowed_roles } };
+    };
+    ApiClient.reloadResources = async () => ({ ok: true });
+    ApiClient.getTools = async () => [];
+
+    S.selectedTool = toolRecord({
+        tool_id: "filesystem_write",
+        display_name: "Filesystem Write",
+        description: "Write file content to disk.",
+        risk_level: "high",
+        destructive: true,
+        allowed_roles: ["ceo", "execution", "inspection"],
+        enabled: false,
+    });
+    S.toolDirty = true;
+
+    await saveTool({ showProgressToast: false, showSuccessToast: false, reopenDetail: false });
+
+    assert.equal(calls.length, 1);
+    assert.equal(calls[0].toolId, "filesystem_write");
+    assert.equal(calls[0].payload.enabled, false);
+    assert.deepEqual([...calls[0].payload.allowed_roles], ["ceo", "execution", "inspection"]);
+    assert.equal(calls[0].payload.execution_mode, undefined);
 });
 
 test("applyExecToolExecutionMode updates localized summary for immediate rerender", () => {
-    const { S, U, renderToolDetail, applyExecToolExecutionMode, execToolModeLabel, execToolModeSummary } = loadResources();
-    S.selectedTool = {
-        tool_id: "exec_runtime",
+    const { S, U, renderToolDetail, applyExecToolExecutionMode, execToolExecutionMode, execToolModeLabel, execToolModeSummary } = loadResources();
+    S.selectedTool = toolRecord({
+        tool_id: "exec",
         display_name: "Exec Runtime",
         description: "Execute shell commands.",
-        enabled: true,
-        available: true,
-        actions: [
-            { action_id: "run", label: "Run Command", allowed_roles: ["ceo", "execution"] },
-        ],
+        risk_level: "high",
+        destructive: true,
+        allowed_roles: ["ceo", "execution"],
         metadata: { execution_mode: "full_access" },
         exec_runtime_policy: { mode: "full_access" },
-    };
+    });
 
     assert.equal(execToolModeLabel("governed"), "监管模式");
     assert.equal(execToolModeLabel("full_access"), "全权限模式");
     assert.match(execToolModeSummary("governed"), /继续应用 exec 侧护栏/);
     assert.match(execToolModeSummary("full_access"), /不再应用 exec 侧护栏/);
+    // 没有 policy 也没有 metadata 时回落 governed。
+    assert.equal(execToolExecutionMode(toolRecord({ tool_id: "exec" })), "governed");
 
     applyExecToolExecutionMode(S.selectedTool, "governed");
     renderToolDetail();
@@ -344,4 +592,9 @@ test("applyExecToolExecutionMode updates localized summary for immediate rerende
     assert.equal(S.selectedTool.metadata.execution_mode, "governed");
     assert.equal(S.selectedTool.exec_runtime_policy.mode, "governed");
     assert.match(U.toolDetail.innerHTML, /继续应用 exec 侧护栏/);
+
+    // 非 exec 工具不受影响：旧值 exec_runtime 已废弃。
+    const other = toolRecord({ tool_id: "exec_runtime", display_name: "Exec Runtime Legacy" });
+    applyExecToolExecutionMode(other, "governed");
+    assert.equal(other.metadata.execution_mode, undefined);
 });

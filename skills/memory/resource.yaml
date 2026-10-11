@@ -7,8 +7,9 @@ trigger:
   always: true
 requires:
   tools:
-  - exec
-  - filesystem
+    - exec
+    - filesystem_write
+    - filesystem_edit
   bins: []
   env: []
 content:

@@ -47,17 +47,13 @@ parameters:
   required:
     - operations
 governance:
-  family: filesystem
-  display_name: Filesystem
-  description: Write, edit, copy, move, delete, and propose patches for local files.
-  actions:
-    - id: move
-      label: Move Files
-      risk_level: high
-      destructive: true
-      allowed_roles:
-        - ceo
-        - execution
+  display_name: Filesystem Move
+  description: Move one or more files or directory trees to new absolute destinations.
+  risk_level: high
+  destructive: true
+  allowed_roles:
+    - ceo
+    - execution
 exposure:
   agent: true
   main_runtime: true

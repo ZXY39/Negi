@@ -69,7 +69,7 @@ from g3ku.runtime.tool_watchdog import (
     run_tool_with_hard_timeout,
     run_tool_with_watchdog,
 )
-from main.governance.exec_tool_policy import EXEC_TOOL_EXECUTOR_NAME, EXEC_TOOL_FAMILY_ID
+from main.governance.exec_tool_policy import EXEC_TOOL_ID
 from main.governance.tool_context import apply_runtime_tool_context_projection
 from main.errors import DistributionHoldError, NodePausedError, TaskPausedError, describe_exception, is_runtime_self_fault
 from main.models import NodeEvidenceItem, NodeFinalResult, RESULT_SCHEMA_VERSION, SpawnChildSpec, normalize_execution_stage_metadata
@@ -706,7 +706,6 @@ class ReActToolLoop:
                 request_messages=request_messages,
                 tool_schemas=tool_schemas,
             )
-            allowed_content_refs = self._collect_content_refs(request_messages)
             self._log_service.update_node_input(task.task_id, node.node_id, json.dumps(model_messages, ensure_ascii=False, indent=2))
             tool_history = analyze_tool_call_history(request_messages)
             if tool_history.has_orphan_tool_results:
@@ -1491,7 +1490,6 @@ class ReActToolLoop:
                     node=node,
                     response_tool_calls=response_tool_calls,
                     tools=current_tools,
-                    allowed_content_refs=allowed_content_refs,
                     round_text=str(getattr(response, 'content', '') or ''),
                     runtime_context={
                         **runtime_context,
@@ -1925,7 +1923,6 @@ class ReActToolLoop:
             }
             for item in pending_tool_calls
         ]
-        allowed_content_refs = self._collect_content_refs(message_history)
         round_id = str(frame.get('active_round_id') or '').strip()
         replay_calls: list[Any] = []
         ordered_results: list[dict[str, Any] | None] = []
@@ -2113,7 +2110,6 @@ class ReActToolLoop:
                 node=node,
                 response_tool_calls=replay_calls,
                 tools=tools,
-                allowed_content_refs=allowed_content_refs,
                 runtime_context={
                     **runtime_context,
                     'stage_turn_granted': True,
@@ -2321,13 +2317,11 @@ class ReActToolLoop:
             }
             for call in replay_calls
         ]
-        allowed_content_refs = self._collect_content_refs(message_history)
         replay_results = await self._execute_tool_calls(
             task=task,
             node=node,
             response_tool_calls=replay_calls,
             tools=tools,
-            allowed_content_refs=allowed_content_refs,
             runtime_context={
                 **runtime_context,
                 'stage_turn_granted': True,
@@ -3560,7 +3554,7 @@ class ReActToolLoop:
         else:
             skill_visibility_diagnostics = {}
         exec_runtime_policy = None
-        if EXEC_TOOL_EXECUTOR_NAME in set(callable_tool_names + candidate_tool_names) or EXEC_TOOL_FAMILY_ID in set(callable_tool_names + candidate_tool_names):
+        if EXEC_TOOL_ID in set(callable_tool_names + candidate_tool_names):
             raw_exec_runtime_policy = current_frame.get('exec_runtime_policy') or existing_payload.get('exec_runtime_policy')
             if isinstance(raw_exec_runtime_policy, dict):
                 exec_runtime_policy = dict(raw_exec_runtime_policy)
@@ -3797,7 +3791,6 @@ class ReActToolLoop:
         node,
         response_tool_calls: list[Any],
         tools: dict[str, Tool],
-        allowed_content_refs: list[str],
         runtime_context: dict[str, Any],
         prior_overflow_signatures: set[str] | None = None,
         max_parallel_tool_calls: int | None | object = _UNSET,
@@ -3899,8 +3892,6 @@ class ReActToolLoop:
                 'callable_tool_names': list(callable_tool_names),
                 'hydrated_executor_names': list(hydrated_executor_names),
                 'full_callable_tool_names': list(full_callable_tool_names),
-                'allowed_content_refs': allowed_content_refs,
-                'enforce_content_ref_allowlist': str(runtime_context.get('node_kind') or '').strip().lower() == 'acceptance',
                 'prior_overflow_signatures': sorted(prior_overflow_signatures or set()),
                 'stage_turn_granted': granted,
                 'stage_free_pass_kind': free_pass_kind,

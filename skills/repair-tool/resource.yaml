@@ -19,7 +19,8 @@ trigger:
   always: false
 requires:
   tools:
-    - filesystem
+    - filesystem_write
+    - filesystem_edit
     - exec
     - load_tool_context
   bins: []

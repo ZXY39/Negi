@@ -17,7 +17,8 @@ trigger:
   always: false
 requires:
   tools:
-    - filesystem
+    - filesystem_write
+    - filesystem_edit
   bins: []
   env: []
 content:

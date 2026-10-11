@@ -63,11 +63,9 @@ from main.governance import (
     list_effective_skill_ids,
     list_effective_tool_names,
 )
-from main.governance.action_mapper import get_governance_tool_id
 from main.governance.exec_approvals import ExecApprovalService
 from main.governance.exec_tool_policy import (
-    EXEC_TOOL_EXECUTOR_NAME,
-    EXEC_TOOL_FAMILY_ID,
+    EXEC_TOOL_ID,
     exec_tool_supports_execution_mode,
     merge_exec_execution_mode_metadata,
     resolve_exec_runtime_policy_payload,
@@ -76,7 +74,6 @@ from main.governance.roles import normalize_public_allowed_roles
 from main.governance.tool_context import (
     build_tool_context_fingerprint,
     build_tool_toolskill_payload,
-    resolve_primary_executor_name,
 )
 from main.ids import new_command_id, new_node_id, new_task_id, new_worker_id
 from main.models import (
@@ -485,20 +482,6 @@ def _callback_host_for_log(url: str) -> str:
 
 
 class MainRuntimeService:
-    @staticmethod
-    def _external_tool_family_id(tool_id: str) -> str:
-        normalized = str(tool_id or '').strip()
-        if normalized == 'content_navigation':
-            return 'content'
-        return normalized
-
-    @staticmethod
-    def _resolve_tool_family_alias(tool_id: str) -> str:
-        normalized = str(tool_id or '').strip()
-        if normalized == 'content':
-            return 'content_navigation'
-        return normalized
-
     def __init__(
         self,
         *,
@@ -709,7 +692,7 @@ class MainRuntimeService:
         )
         self._apply_model_route_plans(initial_execution_routes, initial_acceptance_routes, revision=0)
         self.node_runner._tool_snapshot_supplier = self._tool_watchdog_snapshot_supplier
-        # `keep_tools` 的保留正文与 `load_tool_context` 必须同一条渲染（同一家族解析、同一
+        # `keep_tools` 的保留正文与 `load_tool_context` 必须同一条渲染（同一个 tool_id 解析、同一
         # 份指纹输入），否则块内正文与重新 load 出来的指纹不一致，重复读守卫就认不出
         # "这一跳已经在场"。与前门读 `main_task_service.get_tool_toolskill` 同一条通道。
         self.node_runner._tool_toolskill_payload_getter = self.get_tool_toolskill
@@ -915,7 +898,6 @@ class MainRuntimeService:
             self._acquire_worker_lease_or_raise()
             self.worker_heartbeat_service.start_background()
         self.resource_registry.refresh_from_current_resources()
-        self.reconcile_core_tool_families()
         self.policy_engine.sync_default_role_policies()
         self._record_resource_tree_state()
         if self.execution_mode in {'embedded', 'worker'}:
@@ -6337,7 +6319,6 @@ class MainRuntimeService:
         # Resource manager config binding and reload are handled by refresh_loop_runtime_config().
         # Rebinding here clears dynamic tool instances before CEO exposure is assembled.
         self.resource_registry.refresh_from_current_resources()
-        self.reconcile_core_tool_families()
         self.policy_engine.sync_default_role_policies()
         self._runtime_model_revision = int(revision or 0)
         return True
@@ -6392,7 +6373,7 @@ class MainRuntimeService:
         policy_engine = getattr(self, 'policy_engine', None)
         if resource_registry is None or policy_engine is None:
             return list(supported)
-        return list_effective_tool_names(subject=self._subject(actor_role=actor_role, session_id=session_id), supported_tool_names=supported, resource_registry=resource_registry, policy_engine=policy_engine, mutation_allowed=True)
+        return list_effective_tool_names(subject=self._subject(actor_role=actor_role, session_id=session_id), supported_tool_names=supported, resource_registry=resource_registry, policy_engine=policy_engine)
 
     def list_visible_skill_resources(self, *, actor_role: str, session_id: str):
         records = list(self.resource_registry.list_skill_resources() or [])
@@ -6430,82 +6411,53 @@ class MainRuntimeService:
             items.append(record)
         return items
 
-    def list_visible_tool_families(self, *, actor_role: str, session_id: str):
+    def list_visible_tools(self, *, actor_role: str, session_id: str):
         visible_names = set(self.list_effective_tool_names(actor_role=actor_role, session_id=session_id))
         subject = self._subject(actor_role=actor_role, session_id=session_id)
-        families = []
-        for family in self.resource_registry.list_tool_families():
-            callable_family = bool(getattr(family, 'callable', True))
-            actions = []
-            context_lookup_only = False
-            for action in family.actions:
-                decision = self.policy_engine.evaluate_tool_action(
-                    subject=subject,
-                    tool_id=family.tool_id,
-                    action_id=action.action_id,
-                )
-                executor_visible = not callable_family or bool(set(action.executor_names) & visible_names)
-                if decision.allowed and (
-                    executor_visible
-                ):
-                    actions.append(action)
-                    continue
-                if self._should_expose_unavailable_tool_action(
-                    actor_role=actor_role,
-                    family=family,
-                    action=action,
-                ):
-                    actions.append(action)
-                    context_lookup_only = True
-                    continue
-                if self._should_expose_context_lookup_only_tool_action(
-                    actor_role=actor_role,
-                    family=family,
-                    action=action,
-                    decision=decision,
-                    executor_visible=executor_visible,
-                ):
-                    actions.append(action)
-                    context_lookup_only = True
-            if actions:
-                metadata = dict(getattr(family, 'metadata', {}) or {})
-                if context_lookup_only:
-                    metadata['context_lookup_only'] = True
-                families.append(family.model_copy(update={'actions': actions, 'metadata': metadata}))
-        return families
+        tools = []
+        for record in self.resource_registry.list_tools():
+            if not bool(getattr(record, 'agent_visible', True)):
+                continue
+            decision = self.policy_engine.evaluate_tool(subject=subject, tool_id=record.tool_id)
+            # callable=False 的注册资源（外部工具）没有 tool_instances 条目，永远进不了
+            # visible_names；它们的可见性只看授权，不看实例，否则管理端与占用检测会一起失明。
+            tool_visible = (not bool(getattr(record, 'callable', True))) or record.tool_id in visible_names
+            metadata = dict(getattr(record, 'metadata', {}) or {})
+            if decision.allowed and tool_visible:
+                tools.append(record)
+                continue
+            if self._should_expose_unavailable_tool(actor_role=actor_role, record=record):
+                tools.append(record.model_copy(update={'metadata': {**metadata, 'context_lookup_only': True}}))
+                continue
+            if self._should_expose_context_lookup_only_tool(
+                actor_role=actor_role,
+                record=record,
+                decision=decision,
+                tool_visible=tool_visible,
+            ):
+                tools.append(record.model_copy(update={'metadata': {**metadata, 'context_lookup_only': True}}))
+        return tools
 
     def execution_visible_tool_lightweight_items(self, *, actor_role: str, session_id: str) -> list[dict[str, Any]]:
-        families = list(self.list_visible_tool_families(actor_role=actor_role, session_id=session_id) or [])
         items: list[dict[str, Any]] = []
-        for family in families:
-            tool_id = str(getattr(family, "tool_id", "") or "").strip()
+        for record in list(self.list_visible_tools(actor_role=actor_role, session_id=session_id) or []):
+            tool_id = str(getattr(record, "tool_id", "") or "").strip()
             if not tool_id:
                 continue
-            metadata = dict(getattr(family, "metadata", {}) or {})
+            metadata = dict(getattr(record, "metadata", {}) or {})
             items.append(
                 {
                     "tool_id": tool_id,
-                    "display_name": str(getattr(family, "display_name", "") or tool_id).strip() or tool_id,
-                    "description": str(getattr(family, "description", "") or "").strip(),
-                    "l0": str(metadata.get("l0") or getattr(family, "l0", "") or "").strip(),
-                    "l1": str(metadata.get("l1") or getattr(family, "l1", "") or "").strip(),
-                    "actions": [
-                        {
-                            "action_id": str(getattr(action, "action_id", "") or "").strip(),
-                            "executor_names": [
-                                str(name or "").strip()
-                                for name in list(getattr(action, "executor_names", []) or [])
-                                if str(name or "").strip()
-                            ],
-                        }
-                        for action in list(getattr(family, "actions", []) or [])
-                    ],
+                    "display_name": str(getattr(record, "display_name", "") or tool_id).strip() or tool_id,
+                    "description": str(getattr(record, "description", "") or "").strip(),
+                    "l0": str(metadata.get("l0") or getattr(record, "l0", "") or "").strip(),
+                    "l1": str(metadata.get("l1") or getattr(record, "l1", "") or "").strip(),
                 }
             )
         return items
 
     @staticmethod
-    def _stable_execution_visible_tool_families(
+    def _stable_execution_visible_tool_items(
         *,
         items: list[dict[str, Any]],
         visible_tool_names: list[str],
@@ -6517,214 +6469,28 @@ class MainRuntimeService:
         }
         fallback_index = len(visible_index) + 10_000
 
-        def _executor_sort_key(name: Any) -> tuple[int, str]:
-            normalized = str(name or '').strip()
-            return (visible_index.get(normalized, fallback_index), normalized)
+        def _item_sort_key(item: dict[str, Any]) -> tuple[int, str]:
+            tool_id = str((item or {}).get('tool_id') or '').strip()
+            return (visible_index.get(tool_id, fallback_index), tool_id)
 
-        def _action_sort_key(action: dict[str, Any]) -> tuple[int, str]:
-            executors = [
-                str(name or '').strip()
-                for name in list((action or {}).get('executor_names') or [])
-                if str(name or '').strip()
-            ]
-            if executors:
-                return min(_executor_sort_key(name) for name in executors)
-            return (fallback_index, str((action or {}).get('action_id') or '').strip())
-
-        normalized_items: list[dict[str, Any]] = []
-        for raw_item in list(items or []):
-            item = dict(raw_item or {})
-            normalized_actions: list[dict[str, Any]] = []
-            for raw_action in list(item.get('actions') or []):
-                action = dict(raw_action or {})
-                action['executor_names'] = [
-                    name
-                    for name in sorted(
-                        [
-                            str(executor_name or '').strip()
-                            for executor_name in list(action.get('executor_names') or [])
-                            if str(executor_name or '').strip()
-                        ],
-                        key=_executor_sort_key,
-                    )
-                ]
-                normalized_actions.append(action)
-            item['actions'] = sorted(normalized_actions, key=_action_sort_key)
-            normalized_items.append(item)
-
-        def _family_sort_key(item: dict[str, Any]) -> tuple[int, str]:
-            tool_id = str(item.get('tool_id') or '').strip()
-            candidates: list[tuple[int, str]] = []
-            if tool_id:
-                candidates.append((visible_index.get(tool_id, fallback_index), tool_id))
-            for action in list(item.get('actions') or []):
-                for executor_name in list(action.get('executor_names') or []):
-                    candidates.append(_executor_sort_key(executor_name))
-            if candidates:
-                return min(candidates)
-            return (fallback_index, tool_id)
-
-        return sorted(normalized_items, key=_family_sort_key)
+        return sorted(list(items or []), key=_item_sort_key)
 
     @staticmethod
-    def _split_executor_prefixes_for_tool_id(tool_id: str) -> tuple[str, ...]:
-        normalized_tool_id = str(tool_id or '').strip()
-        prefixes = [
-            prefix
-            for prefix in (
-                f'{normalized_tool_id}_' if normalized_tool_id else '',
-                'filesystem_' if normalized_tool_id == 'filesystem' else '',
-                'content_' if normalized_tool_id == 'content_navigation' else '',
-            )
-            if prefix
-        ]
-        return tuple(prefixes)
-
-    @classmethod
-    def _is_legacy_execution_monolith_name(cls, *, tool_id: str, executor_name: str) -> bool:
-        normalized_tool_id = str(tool_id or '').strip()
-        normalized_name = str(executor_name or '').strip()
-        if not normalized_tool_id or not normalized_name:
-            return False
-        split_prefixes = cls._split_executor_prefixes_for_tool_id(normalized_tool_id)
-        if any(normalized_name.startswith(prefix) for prefix in split_prefixes):
-            return False
-        return normalized_name == normalized_tool_id or get_governance_tool_id(normalized_name) == normalized_tool_id
-
-    @classmethod
-    def _execution_legacy_monolith_names(cls, items: list[Any] | None) -> set[str]:
-        """家族已拆出 concrete executor 时，该家族留下的 monolith 名字（含家族 id 本身）。
-
-        provider `tools[]` 与可执行对象字典都不收它们：模型面只该看到 concrete executor。
-        入参可为治理 dict 或 family 对象（`list_visible_tool_families` 的返回形状）。
-        """
-        legacy_names: set[str] = set()
-        for item in list(items or []):
-            tool_id = str(cls._tool_family_item_value(item, 'tool_id') or '').strip()
-            all_executor_names: list[str] = []
-            for action in list(cls._tool_family_item_value(item, 'actions') or []):
-                for raw_name in list(cls._tool_family_item_value(action, 'executor_names') or []):
-                    name = str(raw_name or '').strip()
-                    if name and name not in all_executor_names:
-                        all_executor_names.append(name)
-            split_available = any(
-                not cls._is_legacy_execution_monolith_name(tool_id=tool_id, executor_name=executor_name)
-                for executor_name in all_executor_names
-            )
-            if split_available and tool_id:
-                legacy_names.add(tool_id)
-                for executor_name in all_executor_names:
-                    if cls._is_legacy_execution_monolith_name(tool_id=tool_id, executor_name=executor_name):
-                        legacy_names.add(executor_name)
-        return legacy_names
-
-    @staticmethod
-    def _tool_family_item_value(item: Any, key: str) -> Any:
-        if isinstance(item, dict):
-            return item.get(key)
-        return getattr(item, key, None)
-
-    def _legacy_monolith_names_for_role(self, *, actor_role: str, session_id: str) -> set[str]:
-        """按治理家族数据判定 legacy monolith。取不到数据让它抛，不静默放行全部名字：
-        静默兜底会把"家族 id 也可调用"这条不该出现的形状悄悄放进对象字典。
-        """
-        return self._execution_legacy_monolith_names(
-            list(self.list_visible_tool_families(actor_role=actor_role, session_id=session_id) or [])
-        )
-
-    @classmethod
-    def _filter_execution_model_visible_lightweight_items(
-        cls,
-        *,
-        items: list[dict[str, Any]],
-    ) -> list[dict[str, Any]]:
-        filtered_items: list[dict[str, Any]] = []
-        for raw_item in list(items or []):
-            item = dict(raw_item or {})
-            tool_id = str(item.get('tool_id') or '').strip()
-            split_prefixes = cls._split_executor_prefixes_for_tool_id(tool_id)
-            actions = [dict(raw_action or {}) for raw_action in list(item.get('actions') or [])]
-            all_executor_names = [
-                str(name or '').strip()
-                for action in actions
-                for name in list(action.get('executor_names') or [])
-                if str(name or '').strip()
-            ]
-            split_available = any(
-                any(name.startswith(prefix) for prefix in split_prefixes)
-                for name in all_executor_names
-            )
-            if split_available and tool_id:
-                normalized_actions: list[dict[str, Any]] = []
-                for action in actions:
-                    action['executor_names'] = [
-                        name
-                        for name in [
-                            str(executor_name or '').strip()
-                            for executor_name in list(action.get('executor_names') or [])
-                            if str(executor_name or '').strip()
-                        ]
-                        if not cls._is_legacy_execution_monolith_name(tool_id=tool_id, executor_name=name)
-                    ]
-                    if action['executor_names']:
-                        normalized_actions.append(action)
-                item['actions'] = normalized_actions
-            else:
-                item['actions'] = actions
-            filtered_items.append(item)
-        return filtered_items
-
-    @classmethod
     def _canonicalize_execution_promoted_tool_names(
-        cls,
         *,
         tool_names: list[str],
-        visible_tool_families: list[dict[str, Any]],
+        visible_tool_items: list[dict[str, Any]],
     ) -> list[str]:
-        executor_name_set: set[str] = set()
-        preferred_executor_by_family: dict[str, str] = {}
-        for item in list(visible_tool_families or []):
-            tool_id = str((item or {}).get('tool_id') or '').strip()
-            split_executor_names: list[str] = []
-            fallback_executor_names: list[str] = []
-            for action in list((item or {}).get('actions') or []):
-                for raw_executor_name in list((action or {}).get('executor_names') or []):
-                    executor_name = str(raw_executor_name or '').strip()
-                    if not executor_name:
-                        continue
-                    executor_name_set.add(executor_name)
-                    fallback_executor_names.append(executor_name)
-                    if not cls._is_legacy_execution_monolith_name(tool_id=tool_id, executor_name=executor_name):
-                        split_executor_names.append(executor_name)
-            preferred_executor = ""
-            for candidate in split_executor_names + fallback_executor_names:
-                if candidate:
-                    preferred_executor = candidate
-                    break
-            if tool_id and preferred_executor:
-                preferred_executor_by_family[tool_id] = preferred_executor
-                external_tool_id = cls._external_tool_family_id(tool_id)
-                if external_tool_id:
-                    preferred_executor_by_family.setdefault(external_tool_id, preferred_executor)
+        visible_ids = {
+            str((item or {}).get('tool_id') or '').strip()
+            for item in list(visible_tool_items or [])
+        }
         canonical_names: list[str] = []
         for raw_name in list(tool_names or []):
             name = str(raw_name or '').strip()
-            if not name:
+            if not name or name not in visible_ids or name in canonical_names:
                 continue
-            if name in executor_name_set and name not in canonical_names:
-                canonical_names.append(name)
-                continue
-            preferred_executor = preferred_executor_by_family.get(name)
-            if preferred_executor and preferred_executor not in canonical_names:
-                canonical_names.append(preferred_executor)
-                continue
-            canonical_family_name = get_governance_tool_id(name)
-            preferred_executor = preferred_executor_by_family.get(canonical_family_name)
-            if preferred_executor and preferred_executor not in canonical_names:
-                canonical_names.append(preferred_executor)
-                continue
-            if name not in canonical_names:
-                canonical_names.append(name)
+            canonical_names.append(name)
         return canonical_names
 
     @staticmethod
@@ -6782,12 +6548,11 @@ class MainRuntimeService:
         membership_visible_tool_names = self._normalized_tool_name_list(
             [*visible_rbac_tool_names, *ordered_visible_tool_names]
         )
-        stable_lightweight_items = self._stable_execution_visible_tool_families(
+        stable_lightweight_items = self._stable_execution_visible_tool_items(
             items=list(self.execution_visible_tool_lightweight_items(actor_role=actor_role, session_id=session_id) or []),
             visible_tool_names=visible_rbac_tool_names,
         )
-        lightweight_items = self._filter_execution_model_visible_lightweight_items(items=stable_lightweight_items)
-        legacy_monolith_names = self._execution_legacy_monolith_names(stable_lightweight_items)
+        lightweight_items = list(stable_lightweight_items)
         hydrated_executor_names = self._node_hydrated_executor_names(
             task_id=str(task_id or '').strip(),
             node_id=str(node_id or '').strip(),
@@ -6796,11 +6561,9 @@ class MainRuntimeService:
         )
         always_callable_tool_names: list[str] = []
         lightweight_executor_names = {
-            str(executor_name or '').strip()
+            str((item or {}).get('tool_id') or '').strip()
             for item in list(lightweight_items or [])
-            for action in list((item or {}).get('actions') or [])
-            for executor_name in list((action or {}).get('executor_names') or [])
-            if str(executor_name or '').strip()
+            if str((item or {}).get('tool_id') or '').strip()
         }
         control_tool_names = self._execution_control_tool_names(
             node_kind=normalized_node_kind,
@@ -6814,12 +6577,12 @@ class MainRuntimeService:
             if normalized and normalized in membership_visible_tool_names and normalized not in always_callable_tool_names:
                 always_callable_tool_names.append(normalized)
         for name in membership_visible_tool_names:
-            if name in lightweight_executor_names or name in always_callable_tool_names or name in legacy_monolith_names:
+            if name in lightweight_executor_names or name in always_callable_tool_names:
                 continue
             always_callable_tool_names.append(name)
         promoted_hydrated_executor_names = self._canonicalize_execution_promoted_tool_names(
             tool_names=list(hydrated_executor_names),
-            visible_tool_families=lightweight_items,
+            visible_tool_items=lightweight_items,
         )
         promoted_only_hydrated_executor_names = [
             name for name in promoted_hydrated_executor_names if name not in always_callable_tool_names
@@ -6832,7 +6595,7 @@ class MainRuntimeService:
             prompt=str(getattr(node, 'prompt', '') or ''),
             goal=str(getattr(node, 'goal', '') or ''),
             core_requirement=str(getattr(task, 'metadata', {}).get('core_requirement') or getattr(node, 'prompt', '') or getattr(node, 'goal', '') or ''),
-            visible_tool_families=list(lightweight_items),
+            visible_tool_items=list(lightweight_items),
             visible_tool_names=list(membership_visible_tool_names),
             always_callable_tool_names=list(always_callable_tool_names),
             promoted_tool_names=list(promoted_hydrated_executor_names),
@@ -6875,11 +6638,7 @@ class MainRuntimeService:
         for name in model_visible_callable_tool_names:
             if name not in selected_tool_names:
                 selected_tool_names.append(name)
-        provider_visible_tool_names = [
-            name
-            for name in ordered_visible_tool_names
-            if name not in legacy_monolith_names
-        ]
+        provider_visible_tool_names = list(ordered_visible_tool_names)
         # 发给模型的 tools[] 是"按角色钉住的说明书"，不是当轮能力集：成员只在 token
         # 压缩那一跳重取（react_loop 压缩段），权限变动不改动它。能力本身由派发字典
         # 当跳放行（react_loop `_execute_tool_raw` 不校验声明），收回也在同一跳拒绝，
@@ -6891,7 +6650,7 @@ class MainRuntimeService:
             *provider_visible_tool_names,
         ]:
             normalized_name = str(candidate_name or '').strip()
-            if not normalized_name or normalized_name in legacy_monolith_names:
+            if not normalized_name:
                 continue
             if normalized_name not in pinned_provider_tool_names:
                 pinned_provider_tool_names.append(normalized_name)
@@ -6907,7 +6666,7 @@ class MainRuntimeService:
                 *provider_visible_tool_names,
             ]:
                 normalized_name = str(candidate_name or '').strip()
-                if not normalized_name or normalized_name in legacy_monolith_names:
+                if not normalized_name:
                     continue
                 if normalized_name not in frozen_provider_tool_names:
                     frozen_provider_tool_names.append(normalized_name)
@@ -6922,7 +6681,6 @@ class MainRuntimeService:
         live_granted_tool_names = {
             name
             for name in [*visible_rbac_tool_names, *always_callable_tool_names]
-            if name not in legacy_monolith_names
         }
         resource_manager = getattr(self, '_resource_manager', None)
         instance_getter = getattr(resource_manager, 'tool_instances', None)
@@ -6957,7 +6715,7 @@ class MainRuntimeService:
         candidate_tool_names = [
             name
             for name in self._normalized_tool_name_list(list(getattr(selection, 'candidate_tool_names', []) or []))
-            if name not in set(selected_tool_names) and name not in legacy_monolith_names
+            if name not in set(selected_tool_names)
         ]
         return {
             'tool_names': selected_tool_names,
@@ -7009,64 +6767,51 @@ class MainRuntimeService:
         }
 
     @staticmethod
-    def _should_expose_unavailable_tool_action(*, actor_role: str, family: Any, action: Any) -> bool:
-        if bool(getattr(family, 'available', True)):
+    def _should_expose_unavailable_tool(*, actor_role: str, record: Any) -> bool:
+        if bool(getattr(record, 'available', True)):
             return False
-        if not bool(getattr(family, 'enabled', True)):
-            return False
-        if not bool(getattr(action, 'agent_visible', True)):
+        if not bool(getattr(record, 'enabled', True)):
             return False
         allowed_roles = {
             str(role or '').strip()
-            for role in list(getattr(action, 'allowed_roles', []) or [])
+            for role in list(getattr(record, 'allowed_roles', []) or [])
             if str(role or '').strip()
         }
         return str(actor_role or '').strip() in allowed_roles
 
     @staticmethod
-    def _should_expose_context_lookup_only_tool_action(
+    def _should_expose_context_lookup_only_tool(
         *,
         actor_role: str,
-        family: Any,
-        action: Any,
+        record: Any,
         decision: Any,
-        executor_visible: bool,
+        tool_visible: bool,
     ) -> bool:
         if not bool(getattr(decision, 'allowed', False)):
             return False
-        if executor_visible:
+        if tool_visible:
             return False
-        if not bool(getattr(family, 'enabled', True)):
+        if not bool(getattr(record, 'enabled', True)):
             return False
-        if not bool(getattr(family, 'available', True)):
+        if not bool(getattr(record, 'available', True)):
             return False
-        if not bool(getattr(family, 'callable', True)):
-            return False
-        if not bool(getattr(action, 'agent_visible', True)):
+        if not bool(getattr(record, 'callable', True)):
             return False
         allowed_roles = {
             str(role or '').strip()
-            for role in list(getattr(action, 'allowed_roles', []) or [])
+            for role in list(getattr(record, 'allowed_roles', []) or [])
             if str(role or '').strip()
         }
         if str(actor_role or '').strip() not in allowed_roles:
             return False
         return True
 
-    def _visible_tool_family_map(self, *, actor_role: str, session_id: str) -> dict[str, Any]:
+    def _visible_tool_map(self, *, actor_role: str, session_id: str) -> dict[str, Any]:
         mapping: dict[str, Any] = {}
-        for family in self.list_visible_tool_families(actor_role=actor_role, session_id=session_id):
-            tool_id = str(getattr(family, 'tool_id', '') or '').strip()
-            if tool_id:
-                mapping[tool_id] = family
-                external_tool_id = self._external_tool_family_id(tool_id)
-                if external_tool_id and external_tool_id not in mapping:
-                    mapping[external_tool_id] = family
-            for action in list(getattr(family, 'actions', []) or []):
-                for executor_name in list(getattr(action, 'executor_names', []) or []):
-                    name = str(executor_name or '').strip()
-                    if name and name not in mapping:
-                        mapping[name] = family
+        for record in self.list_visible_tools(actor_role=actor_role, session_id=session_id):
+            tool_id = str(getattr(record, 'tool_id', '') or '').strip()
+            if tool_id and tool_id not in mapping:
+                mapping[tool_id] = record
         return mapping
 
     @staticmethod
@@ -7082,16 +6827,6 @@ class MainRuntimeService:
         normalized_node_kind = str(node_kind or '').strip().lower()
         default_role = 'inspection' if normalized_node_kind == 'acceptance' else 'execution'
         return str(dict(runtime_context or {}).get('actor_role') or default_role).strip() or default_role
-
-    @staticmethod
-    def _family_executor_names(family: Any) -> list[str]:
-        executor_names: list[str] = []
-        for action in list(getattr(family, 'actions', []) or []):
-            for raw_name in list(getattr(action, 'executor_names', []) or []):
-                name = str(raw_name or '').strip()
-                if name and name not in executor_names:
-                    executor_names.append(name)
-        return executor_names
 
     @staticmethod
     def _normalized_hydrated_executor_names(raw_names: Any) -> list[str]:
@@ -7185,28 +6920,18 @@ class MainRuntimeService:
         self,
         *,
         requested_tool_id: str,
-        visible_family: Any,
+        visible_tool: Any,
         actor_role: str = '',
     ) -> list[str]:
         requested_name = str(requested_tool_id or '').strip()
-        if not requested_name:
+        if not requested_name or visible_tool is None:
             return []
-        family_tool_id = str(getattr(visible_family, 'tool_id', '') or '').strip()
-        family_executors = self._family_executor_names(visible_family)
-        # 家族已拆出 concrete executor 时，家族 id 与留下的 monolith 名字都不可提升：
-        # 它们不进 provider tools[]，回一份 targets 就是承诺一次永不发生的水合。
-        # 单执行器家族（web_fetch / agent_browser 这类 id 即执行器）不受此规则影响。
-        legacy_monolith_names = self._execution_legacy_monolith_names([
-            {'tool_id': family_tool_id, 'actions': [{'executor_names': family_executors}]}
-        ])
-        if requested_name in legacy_monolith_names:
+        if requested_name != str(getattr(visible_tool, 'tool_id', '') or '').strip():
             return []
-        if requested_name in family_executors:
-            fixed_builtin_names = self._fixed_builtin_tool_name_set_for_actor_role(actor_role)
-            if requested_name in fixed_builtin_names:
-                return []
-            return [requested_name]
-        return []
+        fixed_builtin_names = self._fixed_builtin_tool_name_set_for_actor_role(actor_role)
+        if requested_name in fixed_builtin_names:
+            return []
+        return [requested_name]
 
     def _apply_hydrated_executor_lru(
         self,
@@ -7239,17 +6964,12 @@ class MainRuntimeService:
         callable_value: Any,
         available_value: Any,
     ) -> dict[str, Any]:
-        visible_family = self._visible_tool_family_map(actor_role=actor_role, session_id=session_id).get(
-            str(requested_tool_id or '').strip() or str(resolved_tool_id or '').strip()
-        )
-        hydration_targets = (
-            self._tool_context_hydration_targets(
-                requested_tool_id=str(requested_tool_id or '').strip() or str(resolved_tool_id or '').strip(),
-                visible_family=visible_family,
-                actor_role=actor_role,
-            )
-            if visible_family is not None
-            else []
+        tool_key = str(requested_tool_id or '').strip() or str(resolved_tool_id or '').strip()
+        visible_tool = self._visible_tool_map(actor_role=actor_role, session_id=session_id).get(tool_key)
+        hydration_targets = self._tool_context_hydration_targets(
+            requested_tool_id=tool_key,
+            visible_tool=visible_tool,
+            actor_role=actor_role,
         )
         callable_now = bool(callable_value) and bool(available_value)
         requested_or_resolved_tool_id = str(requested_tool_id or '').strip() or str(resolved_tool_id or '').strip()
@@ -7259,24 +6979,20 @@ class MainRuntimeService:
             'hydration_targets': list(hydration_targets),
             'exec_runtime_policy': (
                 self._current_exec_runtime_policy_payload()
-                if requested_or_resolved_tool_id in {EXEC_TOOL_FAMILY_ID, EXEC_TOOL_EXECUTOR_NAME}
-                or (
-                    visible_family is not None
-                    and exec_tool_supports_execution_mode(getattr(visible_family, 'tool_id', ''))
-                )
+                if requested_or_resolved_tool_id == EXEC_TOOL_ID
                 else None
             ),
         }
 
     def _current_exec_runtime_policy_payload(self) -> dict[str, Any]:
-        family = self._raw_tool_family(EXEC_TOOL_FAMILY_ID)
+        record = self._raw_tool(EXEC_TOOL_ID)
         descriptor = (
-            self._resource_manager.get_tool_descriptor(EXEC_TOOL_EXECUTOR_NAME)
+            self._resource_manager.get_tool_descriptor(EXEC_TOOL_ID)
             if self._resource_manager is not None and hasattr(self._resource_manager, 'get_tool_descriptor')
             else None
         )
         return resolve_exec_runtime_policy_payload(
-            family=family,
+            record=record,
             descriptor=descriptor,
         )
 
@@ -7315,18 +7031,18 @@ class MainRuntimeService:
             node_kind=str(getattr(node, 'node_kind', '') or runtime_context.get('node_kind') or ''),
         )
         log_service = getattr(self, 'log_service', None)
-        # load 的准入只看"治理可见"，不再要求本轮排进候选：下面的家族查表本身就是按
+        # load 的准入只看"治理可见"，不再要求本轮排进候选：下面的工具查表本身就是按
         # actor_role 筛过的，多一道候选门槛只会让"有权限但本轮没排上"的工具变成
         # 调不动也 load 不动的死区。水合数量的上限交给 LRU 管，不由排名管。
-        visible_family_map = self._visible_tool_family_map(actor_role=actor_role, session_id=session_id)
-        visible_family = visible_family_map.get(requested_tool_id) or visible_family_map.get(resolved_tool_id)
-        if visible_family is None:
+        visible_tool_map = self._visible_tool_map(actor_role=actor_role, session_id=session_id)
+        visible_tool = visible_tool_map.get(requested_tool_id) or visible_tool_map.get(resolved_tool_id)
+        if visible_tool is None:
             return
         promoted_executor_names = self._normalized_tool_name_list(payload.get('hydration_targets'))
         if not promoted_executor_names:
             promoted_executor_names = self._tool_context_hydration_targets(
                 requested_tool_id=requested_tool_id,
-                visible_family=visible_family,
+                visible_tool=visible_tool,
                 actor_role=actor_role,
             )
         if not promoted_executor_names:
@@ -7720,21 +7436,13 @@ class MainRuntimeService:
         query = str(search_query or '').strip()
         if not query:
             return {'ok': False, 'error': 'search_query_required'}
-        visible = list(self.list_visible_tool_families(actor_role=actor_role, session_id=session_id) or [])
-        scored: list[tuple[float, int, int, str, Any, list[str], list[str]]] = []
-        for family in visible:
-            tool_id = str(getattr(family, 'tool_id', '') or '').strip()
-            display_name = str(getattr(family, 'display_name', '') or '').strip()
-            description = str(getattr(family, 'description', '') or '').strip()
-            executor_names: list[str] = []
-            for action in list(getattr(family, 'actions', []) or []):
-                executor_names.extend(
-                    str(name or '').strip()
-                    for name in list(getattr(action, 'executor_names', []) or [])
-                    if str(name or '').strip()
-                )
-            executor_names = sorted(set(executor_names))
-            score = score_query(query, tool_id, display_name, description, ' '.join(executor_names))
+        visible = list(self.list_visible_tools(actor_role=actor_role, session_id=session_id) or [])
+        scored: list[tuple[float, int, int, str, Any, list[str]]] = []
+        for record in visible:
+            tool_id = str(getattr(record, 'tool_id', '') or '').strip()
+            display_name = str(getattr(record, 'display_name', '') or '').strip()
+            description = str(getattr(record, 'description', '') or '').strip()
+            score = score_query(query, tool_id, display_name, description)
             if score <= 0:
                 continue
             matched_fields = self._matched_search_fields(
@@ -7743,36 +7451,33 @@ class MainRuntimeService:
                     'tool_id': tool_id,
                     'display_name': display_name,
                     'description': description,
-                    'executor_names': ' '.join(executor_names),
                 },
             )
             scored.append(
                 (
                     score,
-                    1 if bool(getattr(family, 'available', True)) else 0,
-                    1 if bool(getattr(family, 'callable', True)) else 0,
+                    1 if bool(getattr(record, 'available', True)) else 0,
+                    1 if bool(getattr(record, 'callable', True)) else 0,
                     tool_id,
-                    family,
+                    record,
                     matched_fields,
-                    executor_names,
                 )
             )
         scored.sort(key=lambda item: (-item[0], -item[1], -item[2], item[3]))
         effective_limit = self._search_limit(limit)
         candidates = [
             {
-                'tool_id': self._external_tool_family_id(str(getattr(family, 'tool_id', '') or '').strip()),
-                'display_name': str(getattr(family, 'display_name', '') or '').strip(),
-                'description': str(getattr(family, 'description', '') or '').strip(),
-                'executor_names': list(executor_names),
-                'available': bool(getattr(family, 'available', True)),
-                'callable': bool(getattr(family, 'callable', True)),
-                'tool_type': str(getattr(family, 'tool_type', '') or '').strip(),
-                'install_dir': str(getattr(family, 'install_dir', '') or '').strip() or None,
+                'tool_id': str(getattr(record, 'tool_id', '') or '').strip(),
+                'display_name': str(getattr(record, 'display_name', '') or '').strip(),
+                'description': str(getattr(record, 'description', '') or '').strip(),
+                'available': bool(getattr(record, 'available', True)),
+                'callable': bool(getattr(record, 'callable', True)),
+                'tool_type': str(getattr(record, 'tool_type', '') or '').strip(),
+                'install_dir': str(getattr(record, 'install_dir', '') or '').strip() or None,
                 'match_score': score,
                 'matched_fields': list(matched_fields),
             }
-            for score, _available_rank, _callable_rank, _tool_id, family, matched_fields, executor_names in scored[:effective_limit]
+            for score, _available_rank, _callable_rank, _tool_id, record, matched_fields in scored[:effective_limit]
         ]
         return {
             'ok': True,
@@ -7888,7 +7593,7 @@ class MainRuntimeService:
                     limit=limit,
                 )
             return {'ok': False, 'error': 'tool_id_or_search_query_required'}
-        visible = self._visible_tool_family_map(actor_role=actor_role, session_id=session_id)
+        visible = self._visible_tool_map(actor_role=actor_role, session_id=session_id)
         if tool_name not in visible:
             return {'ok': False, 'error': f'Tool not visible: {tool_id}'}
         if self._resource_manager is None:
@@ -7947,7 +7652,7 @@ class MainRuntimeService:
                     limit=limit,
                 )
             return {'ok': False, 'error': 'tool_id_or_search_query_required'}
-        visible = self._visible_tool_family_map(actor_role=actor_role, session_id=session_id)
+        visible = self._visible_tool_map(actor_role=actor_role, session_id=session_id)
         if tool_name not in visible:
             return {'ok': False, 'error': f'Tool not visible: {tool_id}'}
         if self._resource_manager is None:
@@ -9179,7 +8884,7 @@ class MainRuntimeService:
         for actor_role in ('execution', 'inspection'):
             visible_ids = {
                 str(getattr(item, 'tool_id', '') or '').strip()
-                for item in self.list_visible_tool_families(actor_role=actor_role, session_id=session_id)
+                for item in self.list_visible_tools(actor_role=actor_role, session_id=session_id)
             }
             if tool_id in visible_ids:
                 roles.append(actor_role)
@@ -9273,7 +8978,7 @@ class MainRuntimeService:
         for session_id in self._running_ceo_session_ids():
             visible_ids = {
                 str(getattr(item, 'tool_id', '') or '').strip()
-                for item in self.list_visible_tool_families(actor_role='ceo', session_id=session_id)
+                for item in self.list_visible_tools(actor_role='ceo', session_id=session_id)
             }
             if tool_id not in visible_ids:
                 continue
@@ -9299,9 +9004,9 @@ class MainRuntimeService:
             usage=usage,
         )
 
-    def _raise_if_tool_in_use(self, family) -> None:
-        target_tool_id = str(getattr(family, 'tool_id', '') or '').strip()
-        display_name = str(getattr(family, 'display_name', '') or target_tool_id).strip() or target_tool_id
+    def _raise_if_tool_in_use(self, record) -> None:
+        target_tool_id = str(getattr(record, 'tool_id', '') or '').strip()
+        display_name = str(getattr(record, 'display_name', '') or target_tool_id).strip() or target_tool_id
         usage = self._tool_usage_summary(target_tool_id)
         if not usage['tasks'] and not usage['ceo_sessions']:
             return
@@ -9405,12 +9110,8 @@ class MainRuntimeService:
     def disable_skill(self, skill_id: str, *, session_id: str = 'web:shared'):
         return self.update_skill_policy(skill_id, session_id=session_id, enabled=False)
 
-    def _raw_tool_family(self, tool_id: str):
-        normalized = self._resolve_tool_family_alias(tool_id)
-        family = self.resource_registry.get_tool_family(str(normalized or '').strip())
-        if family is None and normalized != str(tool_id or '').strip():
-            family = self.resource_registry.get_tool_family(str(tool_id or '').strip())
-        return family
+    def _raw_tool(self, tool_id: str):
+        return self.resource_registry.get_tool(str(tool_id or '').strip())
 
     def _configured_core_tool_entries(self) -> list[str]:
         if self._resource_manager is not None:
@@ -9430,29 +9131,28 @@ class MainRuntimeService:
     def _core_tool_resolution(self):
         return resolve_core_tool_targets(
             self._configured_core_tool_entries(),
-            list(self.resource_registry.list_tool_families()),
+            list(self.resource_registry.list_tools()),
         )
 
-    def _decorate_tool_family(self, family):
-        if family is None:
+    def _decorate_tool(self, record):
+        if record is None:
             return None
         resolution = self._core_tool_resolution()
-        metadata = dict(getattr(family, 'metadata', {}) or {})
-        metadata['repair_required'] = bool(getattr(family, 'callable', True)) and not bool(getattr(family, 'available', True))
-        normalized_tool_id = str(getattr(family, 'tool_id', '') or '').strip()
-        return family.model_copy(
+        metadata = dict(getattr(record, 'metadata', {}) or {})
+        metadata['repair_required'] = bool(getattr(record, 'callable', True)) and not bool(getattr(record, 'available', True))
+        normalized_tool_id = str(getattr(record, 'tool_id', '') or '').strip()
+        return record.model_copy(
             update={
-                'tool_id': self._external_tool_family_id(str(getattr(family, 'tool_id', '') or '')),
-                'is_core': normalized_tool_id in resolution.family_ids,
+                'is_core': normalized_tool_id in resolution.tool_ids,
                 'metadata': metadata,
             }
         )
 
     def list_tool_resources(self) -> list[Any]:
-        return [self._decorate_tool_family(item) for item in self.resource_registry.list_tool_families()]
+        return [self._decorate_tool(item) for item in self.resource_registry.list_tools()]
 
-    def get_tool_family(self, tool_id: str):
-        return self._decorate_tool_family(self._raw_tool_family(tool_id))
+    def get_tool(self, tool_id: str):
+        return self._decorate_tool(self._raw_tool(tool_id))
 
     def get_governance_mode(self) -> dict[str, Any]:
         return {
@@ -9490,116 +9190,55 @@ class MainRuntimeService:
         )
         if not visible_names:
             return {}
-        risk_rank = {'low': 0, 'medium': 1, 'high': 2}
         reviewable: dict[str, str] = {}
-        families = list(
-            self.list_visible_tool_families(
-                actor_role=normalized_actor_role,
-                session_id=normalized_session_id,
-            ) or []
-        )
-        for family in families:
-            family_tool_id = str(getattr(family, 'tool_id', '') or '').strip()
-            for action in list(getattr(family, 'actions', []) or []):
-                risk_level = self._normalize_permission_risk_level(
-                    getattr(action, 'risk_level', 'medium'),
-                )
-                if risk_level not in {'medium', 'high'}:
-                    continue
-                executor_names = [
-                    str(name or '').strip()
-                    for name in list(getattr(action, 'executor_names', []) or [])
-                    if str(name or '').strip()
-                ]
-                if not executor_names:
-                    fallback_names: list[str] = []
-                    primary_executor_name = str(
-                        resolve_primary_executor_name(family, resource_manager=self._resource_manager) or ''
-                    ).strip()
-                    if primary_executor_name:
-                        fallback_names.append(primary_executor_name)
-                    if family_tool_id:
-                        fallback_names.append(family_tool_id)
-                    executor_names = fallback_names
-                for executor_name in executor_names:
-                    if executor_name not in visible_names:
-                        continue
-                    current = reviewable.get(executor_name, 'low')
-                    if risk_rank[risk_level] >= risk_rank.get(current, 0):
-                        reviewable[executor_name] = risk_level
+        for record in list(
+            self.list_visible_tools(actor_role=normalized_actor_role, session_id=normalized_session_id) or []
+        ):
+            tool_id = str(getattr(record, 'tool_id', '') or '').strip()
+            if not tool_id or tool_id not in visible_names:
+                continue
+            risk_level = self._normalize_permission_risk_level(getattr(record, 'risk_level', 'medium'))
+            if risk_level not in {'medium', 'high'}:
+                continue
+            reviewable[tool_id] = risk_level
         return reviewable
 
-    def reconcile_core_tool_families(self) -> bool:
-        resolution = self._core_tool_resolution()
-        changed = False
-        for family in list(self.resource_registry.list_tool_families()):
-            if str(getattr(family, 'tool_id', '') or '').strip() not in resolution.family_ids:
-                continue
-            family_changed = not bool(getattr(family, 'enabled', True))
-            if not family_changed:
-                continue
-            updated = family.model_copy(update={'enabled': True})
-            self.governance_store.upsert_tool_family(updated, updated_at=now_iso())
-            changed = True
-        return changed
-
-    def _tool_family_executor_name(self, family) -> str:
-        return resolve_primary_executor_name(family, resource_manager=self._resource_manager)
-
     def get_tool_toolskill(self, tool_id: str) -> dict[str, Any] | None:
-        payload = build_tool_toolskill_payload(
-            self._resolve_tool_family_alias(tool_id),
-            raw_tool_family_getter=self._raw_tool_family,
+        return build_tool_toolskill_payload(
+            str(tool_id or '').strip(),
+            raw_tool_getter=self._raw_tool,
             resource_registry=self.resource_registry,
             resource_manager=self._resource_manager,
         )
-        if isinstance(payload, dict):
-            payload['family_tool_id'] = self._external_tool_family_id(str(payload.get('family_tool_id') or ''))
-        return payload
 
     def delete_tool_resource(self, tool_id: str, *, session_id: str = 'web:shared') -> dict[str, Any]:
-        family = self._raw_tool_family(tool_id)
-        if family is None:
+        record = self._raw_tool(tool_id)
+        if record is None:
             raise ValueError('tool_not_found')
 
-        target_tool_id = str(family.tool_id or '').strip()
-        if target_tool_id in self._core_tool_resolution().family_ids:
+        target_tool_id = str(record.tool_id or '').strip()
+        if target_tool_id in self._core_tool_resolution().tool_ids:
             raise ResourceMutationBlockedError(
                 code='core_tool_delete_forbidden',
-                message='Core tool families cannot be deleted.',
-                resource_kind='tool_family',
+                message='Core tools cannot be deleted.',
+                resource_kind='tool',
                 resource_id=target_tool_id,
             )
-        self._raise_if_tool_in_use(family)
-        descriptor_names: set[str] = {
-            str(getattr(family, 'primary_executor_name', '') or '').strip(),
-            target_tool_id,
-        }
-        for action in list(getattr(family, 'actions', []) or []):
-            descriptor_names.update(
-                str(name or '').strip()
-                for name in list(getattr(action, 'executor_names', []) or [])
-                if str(name or '').strip()
-            )
-        descriptor_names.discard('')
+        self._raise_if_tool_in_use(record)
 
-        if self._resource_is_busy(ResourceKind.TOOL, *sorted(descriptor_names)):
+        descriptor = (
+            self._resource_manager.get_tool_descriptor(target_tool_id)
+            if self._resource_manager is not None and hasattr(self._resource_manager, 'get_tool_descriptor')
+            else None
+        )
+        if self._resource_is_busy(ResourceKind.TOOL, target_tool_id):
             raise ValueError('tool_busy')
 
         before_state = self.capture_resource_tree_state()
         delete_paths: set[Path] = set()
         skipped_paths: list[str] = []
-        delete_paths.add(self._resolve_resource_root(family.source_path, kind=ResourceKind.TOOL))
-
-        manager = getattr(self, '_resource_manager', None)
-        for descriptor_name in sorted(descriptor_names):
-            descriptor = (
-                manager.get_tool_descriptor(descriptor_name)
-                if manager is not None and hasattr(manager, 'get_tool_descriptor')
-                else None
-            )
-            if descriptor is None:
-                continue
+        delete_paths.add(self._resolve_resource_root(record.source_path, kind=ResourceKind.TOOL))
+        if descriptor is not None:
             delete_paths.add(self._resolve_resource_root(descriptor.root, kind=ResourceKind.TOOL))
             self._collect_workspace_delete_path(
                 getattr(descriptor, 'install_dir', None),
@@ -9607,7 +9246,7 @@ class MainRuntimeService:
                 skipped_paths=skipped_paths,
             )
         self._collect_workspace_delete_path(
-            getattr(family, 'install_dir', None),
+            getattr(record, 'install_dir', None),
             delete_paths=delete_paths,
             skipped_paths=skipped_paths,
         )
@@ -9622,12 +9261,12 @@ class MainRuntimeService:
             session_id=session_id,
         )
         self.governance_store.delete_role_policies_for_resource(
-            resource_kind='tool_family',
+            resource_kind='tool',
             resource_id=target_tool_id,
         )
         return {
             'tool_id': target_tool_id,
-            'path': str(self._resolve_resource_root(family.source_path, kind=ResourceKind.TOOL)),
+            'path': str(self._resolve_resource_root(record.source_path, kind=ResourceKind.TOOL)),
             'deleted_paths': deleted_paths,
             'skipped_paths': skipped_paths,
             'resources': refresh_result,
@@ -9650,62 +9289,48 @@ class MainRuntimeService:
         *,
         session_id: str = 'web:shared',
         enabled: bool | None = None,
-        allowed_roles_by_action: dict[str, list[str]] | None = None,
+        allowed_roles: list[str] | None = None,
         execution_mode: str | None = None,
     ):
-        family = self._raw_tool_family(tool_id)
-        if family is None:
+        record = self._raw_tool(tool_id)
+        if record is None:
             return None
-        target_tool_id = str(getattr(family, 'tool_id', '') or '').strip()
-        is_core = target_tool_id in self._core_tool_resolution().family_ids
-        if is_core and enabled is not None and not bool(enabled):
-            raise ResourceMutationBlockedError(
-                code='core_tool_disable_forbidden',
-                message='Core tool families cannot be disabled.',
-                resource_kind='tool_family',
-                resource_id=target_tool_id,
-            )
-        allowed_roles_by_action = dict(allowed_roles_by_action or {})
-        actions = []
-        for action in family.actions:
-            roles = allowed_roles_by_action.get(action.action_id)
-            if str(getattr(action, 'admin_mode', 'editable') or 'editable') == 'readonly_system' and roles is not None:
-                normalized_roles = normalize_public_allowed_roles([str(role) for role in list(roles or [])])
-                current_roles = normalize_public_allowed_roles(list(getattr(action, 'allowed_roles', []) or []))
-                if normalized_roles != current_roles:
-                    raise ResourceMutationBlockedError(
-                        code='tool_action_readonly',
-                        message='Readonly system actions cannot be edited.',
-                        resource_kind='tool_family',
-                        resource_id=target_tool_id,
-                        details={'action_id': action.action_id},
-                    )
-            next_roles = (
-                list(getattr(action, 'allowed_roles', []) or [])
-                if roles is None
-                else normalize_public_allowed_roles([str(role) for role in list(roles or [])])
-            )
-            actions.append(action.model_copy(update={'allowed_roles': next_roles}))
+        target_tool_id = str(getattr(record, 'tool_id', '') or '').strip()
+        if allowed_roles is not None and str(getattr(record, 'admin_mode', 'editable') or 'editable') == 'readonly_system':
+            normalized_roles = normalize_public_allowed_roles([str(role) for role in list(allowed_roles or [])])
+            current_roles = normalize_public_allowed_roles(list(getattr(record, 'allowed_roles', []) or []))
+            if normalized_roles != current_roles:
+                raise ResourceMutationBlockedError(
+                    code='tool_readonly',
+                    message='Readonly system tools cannot be edited.',
+                    resource_kind='tool',
+                    resource_id=target_tool_id,
+                )
         if execution_mode is not None and not exec_tool_supports_execution_mode(target_tool_id):
             raise ResourceMutationBlockedError(
                 code='tool_execution_mode_unsupported',
-                message='execution_mode is only supported for exec_runtime.',
-                resource_kind='tool_family',
+                message='execution_mode is only supported for exec.',
+                resource_kind='tool',
                 resource_id=target_tool_id,
             )
-        updated = family.model_copy(
+        next_roles = (
+            list(getattr(record, 'allowed_roles', []) or [])
+            if allowed_roles is None
+            else normalize_public_allowed_roles([str(role) for role in list(allowed_roles or [])])
+        )
+        updated = record.model_copy(
             update={
-                'enabled': family.enabled if enabled is None else bool(enabled),
-                'actions': actions,
+                'enabled': record.enabled if enabled is None else bool(enabled),
+                'allowed_roles': next_roles,
                 'metadata': merge_exec_execution_mode_metadata(
-                    getattr(family, 'metadata', {}) or {},
+                    getattr(record, 'metadata', {}) or {},
                     execution_mode=execution_mode,
                 ),
             }
         )
-        self.governance_store.upsert_tool_family(updated, updated_at=now_iso())
+        self.governance_store.upsert_tool(updated, updated_at=now_iso())
         self.policy_engine.sync_default_role_policies()
-        return self.get_tool_family(target_tool_id)
+        return self.get_tool(target_tool_id)
 
     def enable_tool(self, tool_id: str, *, session_id: str = 'web:shared'):
         return self.update_tool_policy(tool_id, session_id=session_id, enabled=True)
@@ -9713,20 +9338,18 @@ class MainRuntimeService:
     def disable_tool(self, tool_id: str, *, session_id: str = 'web:shared'):
         return self.update_tool_policy(tool_id, session_id=session_id, enabled=False)
 
-    def is_tool_action_allowed(
+    def is_tool_allowed(
         self,
         *,
         actor_role: str,
         session_id: str,
         tool_id: str,
-        action_id: str,
         task_id: str | None = None,
         node_id: str | None = None,
     ) -> bool:
-        decision = self.policy_engine.evaluate_tool_action(
+        decision = self.policy_engine.evaluate_tool(
             subject=self._subject(actor_role=actor_role, session_id=session_id, task_id=task_id, node_id=node_id),
             tool_id=str(tool_id or '').strip(),
-            action_id=str(action_id or '').strip(),
         )
         return bool(decision.allowed)
 
@@ -9734,7 +9357,6 @@ class MainRuntimeService:
         if self._resource_manager is not None:
             self._resource_manager.reload_now(trigger='manual')
         skills, tools = self.resource_registry.refresh_from_current_resources()
-        self.reconcile_core_tool_families()
         self.policy_engine.sync_default_role_policies()
         self._record_resource_tree_state()
         return {'ok': True, 'session_id': session_id, 'skills': len(skills), 'tools': len(tools)}
@@ -10705,7 +10327,7 @@ class MainRuntimeService:
             'skill_visibility_diagnostics': skill_visibility_diagnostics,
             'candidate_tool_items': candidate_tool_items,
             'candidate_skill_items': candidate_skill_items,
-            'visible_tool_families': list(self.list_visible_tool_families(actor_role=actor_role, session_id=session_key) or []),
+            'visible_tool_records': list(self.list_visible_tools(actor_role=actor_role, session_id=session_key) or []),
             'visible_tool_names': visible_tool_names,
             'prompt': str(payload.get('prompt') or getattr(node, 'prompt', '') or '').strip(),
             'goal': str(payload.get('goal') or getattr(node, 'goal', '') or '').strip(),
@@ -10717,7 +10339,7 @@ class MainRuntimeService:
         session_key = str(getattr(task, 'session_id', '') or 'web:shared').strip() or 'web:shared'
         actor_role = self._actor_role_for_node(node)
         visible_skills = list(self.list_contract_visible_skill_resources(actor_role=actor_role, session_id=session_key) or [])
-        visible_tool_families = list(self.list_visible_tool_families(actor_role=actor_role, session_id=session_key) or [])
+        visible_tool_records = list(self.list_visible_tools(actor_role=actor_role, session_id=session_key) or [])
         visible_tool_names = list(self.list_effective_tool_names(actor_role=actor_role, session_id=session_key) or [])
         task_metadata = task.metadata if isinstance(getattr(task, 'metadata', None), dict) else {}
         prompt = str(getattr(node, 'prompt', '') or '').strip()
@@ -10733,7 +10355,7 @@ class MainRuntimeService:
                 session_id=session_key,
                 visible_skills=visible_skills,
             ),
-            'visible_tool_families': visible_tool_families,
+            'visible_tool_records': visible_tool_records,
             'visible_tool_names': visible_tool_names,
             'prompt': prompt,
             'goal': goal,
@@ -10788,7 +10410,7 @@ class MainRuntimeService:
             goal=str(inputs.get('goal') or ''),
             core_requirement=str(inputs.get('core_requirement') or ''),
             visible_skills=list(inputs.get('visible_skills') or []),
-            visible_tool_families=list(inputs.get('visible_tool_families') or []),
+            visible_tool_records=list(inputs.get('visible_tool_records') or []),
             visible_tool_names=list(inputs.get('visible_tool_names') or []),
         )
         if cache_key is not None:
@@ -10844,14 +10466,9 @@ class MainRuntimeService:
                 selected_visible.add(name)
         # 对象字典按治理可见集兜底，而不是只按 selection/frame 回读出来的候选构建：候选与
         # 对象字典互为输入输出（候选曾= 对象字典 − 已 callable），一次塌缩就会把治理明明
-        # 可见的执行器变成"能加载、不提升、也调不动"的死区。legacy monolith 不进字典——
-        # 模型面只该看到 concrete executor。
-        legacy_monolith_names = self._legacy_monolith_names_for_role(
-            actor_role=actor_role,
-            session_id=session_id,
-        )
+        # 可见的工具变成"能加载、不提升、也调不动"的死区。
         for name in self._normalized_tool_name_list(visible_tool_names):
-            if name and name not in legacy_monolith_names:
+            if name:
                 selected_visible.add(name)
         provided = dict(self._external_tool_provider(node) or {})
         provided.update(self._builtin_tool_instances(actor_role=actor_role))
@@ -10899,27 +10516,19 @@ class MainRuntimeService:
         return items
 
     @staticmethod
-    def _tool_family_by_executor_name(visible_tool_families: list[Any]) -> dict[str, Any]:
-        family_by_executor: dict[str, Any] = {}
-        for family in list(visible_tool_families or []):
-            tool_id = str(getattr(family, 'tool_id', '') or '').strip()
-            executor_names: list[str] = []
-            for action in list(getattr(family, 'actions', []) or []):
-                for raw_name in list(getattr(action, 'executor_names', []) or []):
-                    executor_name = str(raw_name or '').strip()
-                    if executor_name and executor_name not in executor_names:
-                        executor_names.append(executor_name)
-            if not executor_names and tool_id:
-                executor_names.append(tool_id)
-            for executor_name in executor_names:
-                family_by_executor.setdefault(executor_name, family)
-        return family_by_executor
+    def _tool_record_map(visible_tool_records: list[Any]) -> dict[str, Any]:
+        mapping: dict[str, Any] = {}
+        for record in list(visible_tool_records or []):
+            tool_id = str(getattr(record, 'tool_id', '') or '').strip()
+            if tool_id and tool_id not in mapping:
+                mapping[tool_id] = record
+        return mapping
 
     def _repair_required_tool_reason(
         self,
         *,
         tool_id: str,
-        visible_tool_families: list[Any],
+        visible_tool_records: list[Any],
     ) -> str:
         try:
             toolskill_payload = dict(self.get_tool_toolskill(tool_id) or {})
@@ -10929,18 +10538,8 @@ class MainRuntimeService:
             *list(toolskill_payload.get('errors') or []),
             *list(toolskill_payload.get('warnings') or []),
         ]
-        family_by_executor = self._tool_family_by_executor_name(visible_tool_families)
-        family = family_by_executor.get(tool_id)
-        if family is None:
-            family = next(
-                (
-                    item
-                    for item in list(visible_tool_families or [])
-                    if str(getattr(item, 'tool_id', '') or '').strip() == tool_id
-                ),
-                None,
-            )
-        metadata = dict(getattr(family, 'metadata', {}) or {}) if family is not None else {}
+        record = self._tool_record_map(visible_tool_records).get(tool_id)
+        metadata = dict(getattr(record, 'metadata', {}) or {}) if record is not None else {}
         reasons.extend(list(metadata.get('errors') or []))
         reasons.extend(list(metadata.get('warnings') or []))
         return self._repair_reason_summary(
@@ -10952,15 +10551,15 @@ class MainRuntimeService:
         self,
         *,
         candidate_tool_names: list[str],
-        visible_tool_families: list[Any],
+        visible_tool_records: list[Any],
         preferred_items: list[Any] | None = None,
     ) -> tuple[list[str], list[dict[str, str]], list[dict[str, str]]]:
         candidate_tool_items = self._candidate_tool_prompt_items(
             candidate_tool_names=candidate_tool_names,
-            visible_tool_families=visible_tool_families,
+            visible_tool_records=visible_tool_records,
             preferred_items=preferred_items,
         )
-        family_by_executor = self._tool_family_by_executor_name(visible_tool_families)
+        record_by_tool_id = self._tool_record_map(visible_tool_records)
         repair_required_items: list[dict[str, str]] = []
         remaining_names: list[str] = []
         remaining_items: list[dict[str, str]] = []
@@ -10972,10 +10571,10 @@ class MainRuntimeService:
                 toolskill_payload = dict(self.get_tool_toolskill(tool_id) or {})
             except Exception:
                 toolskill_payload = {}
-            family = family_by_executor.get(tool_id)
+            record = record_by_tool_id.get(tool_id)
             repair_required = bool(toolskill_payload.get('repair_required'))
-            if not repair_required and family is not None:
-                repair_required = bool(getattr(family, 'callable', True)) and not bool(getattr(family, 'available', True))
+            if not repair_required and record is not None:
+                repair_required = bool(getattr(record, 'callable', True)) and not bool(getattr(record, 'available', True))
             if repair_required:
                 repair_required_items.append(
                     {
@@ -10983,7 +10582,7 @@ class MainRuntimeService:
                         'description': str(item.get('description') or '').strip(),
                         'reason': self._repair_required_tool_reason(
                             tool_id=tool_id,
-                            visible_tool_families=visible_tool_families,
+                            visible_tool_records=visible_tool_records,
                         ),
                     }
                 )
@@ -11033,38 +10632,27 @@ class MainRuntimeService:
     def _all_repair_required_tool_prompt_items(
         self,
         *,
-        visible_tool_families: list[Any],
+        visible_tool_records: list[Any],
     ) -> list[dict[str, str]]:
         items: list[dict[str, str]] = []
         seen: set[str] = set()
-        for family in list(visible_tool_families or []):
-            if not bool(getattr(family, 'callable', True)) or bool(getattr(family, 'available', True)):
+        for record in list(visible_tool_records or []):
+            if not bool(getattr(record, 'callable', True)) or bool(getattr(record, 'available', True)):
                 continue
-            executor_names: list[str] = []
-            for action in list(getattr(family, 'actions', []) or []):
-                for raw_name in list(getattr(action, 'executor_names', []) or []):
-                    executor_name = str(raw_name or '').strip()
-                    if executor_name and executor_name not in executor_names:
-                        executor_names.append(executor_name)
-            if not executor_names:
-                normalized_tool_id = str(getattr(family, 'tool_id', '') or '').strip()
-                if normalized_tool_id:
-                    executor_names.append(normalized_tool_id)
-            for tool_id in executor_names:
-                if tool_id in seen:
-                    continue
-                seen.add(tool_id)
-                description = str(getattr(family, 'description', '') or '').strip()
-                items.append(
-                    {
-                        'tool_id': tool_id,
-                        'description': description,
-                        'reason': self._repair_required_tool_reason(
-                            tool_id=tool_id,
-                            visible_tool_families=visible_tool_families,
-                        ),
-                    }
-                )
+            tool_id = str(getattr(record, 'tool_id', '') or '').strip()
+            if not tool_id or tool_id in seen:
+                continue
+            seen.add(tool_id)
+            items.append(
+                {
+                    'tool_id': tool_id,
+                    'description': str(getattr(record, 'description', '') or '').strip(),
+                    'reason': self._repair_required_tool_reason(
+                        tool_id=tool_id,
+                        visible_tool_records=visible_tool_records,
+                    ),
+                }
+            )
         return items
 
     def _all_repair_required_skill_prompt_items(
@@ -11113,22 +10701,10 @@ class MainRuntimeService:
         self,
         *,
         candidate_tool_names: list[str],
-        visible_tool_families: list[Any],
+        visible_tool_records: list[Any],
         preferred_items: list[Any] | None = None,
     ) -> list[dict[str, str]]:
-        family_by_executor: dict[str, Any] = {}
-        for family in list(visible_tool_families or []):
-            tool_id = str(getattr(family, 'tool_id', '') or '').strip()
-            executor_names: list[str] = []
-            for action in list(getattr(family, 'actions', []) or []):
-                for raw_name in list(getattr(action, 'executor_names', []) or []):
-                    executor_name = str(raw_name or '').strip()
-                    if executor_name and executor_name not in executor_names:
-                        executor_names.append(executor_name)
-            if not executor_names and tool_id:
-                executor_names.append(tool_id)
-            for executor_name in executor_names:
-                family_by_executor.setdefault(executor_name, family)
+        record_by_tool_id = self._tool_record_map(visible_tool_records)
 
         preferred_by_tool_id: dict[str, dict[str, str]] = {}
         for item in list(preferred_items or []):
@@ -11157,17 +10733,8 @@ class MainRuntimeService:
                     toolskill_payload = {}
                 description = str(toolskill_payload.get('description') or toolskill_payload.get('l0') or '').strip()
             if not description:
-                family = family_by_executor.get(tool_id)
-                if family is None:
-                    family = next(
-                        (
-                            item
-                            for item in list(visible_tool_families or [])
-                            if str(getattr(item, 'tool_id', '') or '').strip() == tool_id
-                        ),
-                        None,
-                    )
-                description = str(getattr(family, 'description', '') or '').strip() if family is not None else ''
+                record = record_by_tool_id.get(tool_id)
+                description = str(getattr(record, 'description', '') or '').strip() if record is not None else ''
             items.append(
                 {
                     'tool_id': tool_id,
@@ -11236,7 +10803,7 @@ class MainRuntimeService:
             for item in [*list(callable_tool_names or []), *list(candidate_tool_names or [])]
             if str(item or '').strip()
         }
-        if EXEC_TOOL_EXECUTOR_NAME not in exposed_tool_names and EXEC_TOOL_FAMILY_ID not in exposed_tool_names:
+        if EXEC_TOOL_ID not in exposed_tool_names:
             return None
         return self._current_exec_runtime_policy_payload()
 
@@ -11291,26 +10858,26 @@ class MainRuntimeService:
             list(getattr(selection, 'candidate_tool_names', []) or [])
         )
         if raw_candidate_tool_names:
-            family_by_executor = self._tool_family_by_executor_name(list(inputs.get('visible_tool_families') or []))
+            record_by_tool_id = self._tool_record_map(list(inputs.get('visible_tool_records') or []))
             callable_name_set = set(callable_tool_names)
             for tool_name in raw_candidate_tool_names:
-                family = family_by_executor.get(tool_name)
-                if family is None:
+                record = record_by_tool_id.get(tool_name)
+                if record is None:
                     continue
-                if not bool(getattr(family, 'callable', True)) or bool(getattr(family, 'available', True)):
+                if not bool(getattr(record, 'callable', True)) or bool(getattr(record, 'available', True)):
                     continue
                 if tool_name in callable_name_set or tool_name in candidate_tool_names:
                     continue
                 candidate_tool_names.append(tool_name)
         candidate_tool_names, candidate_tool_items, repair_required_tool_items = self._split_repair_required_tool_prompt_items(
             candidate_tool_names=list(candidate_tool_names),
-            visible_tool_families=list(inputs.get('visible_tool_families') or []),
+            visible_tool_records=list(inputs.get('visible_tool_records') or []),
             preferred_items=list(inputs.get('candidate_tool_items') or []),
         )
         repair_required_tool_items = self._merge_repair_prompt_items(
             repair_required_tool_items,
             self._all_repair_required_tool_prompt_items(
-                visible_tool_families=list(inputs.get('visible_tool_families') or []),
+                visible_tool_records=list(inputs.get('visible_tool_records') or []),
             ),
             key='tool_id',
         )

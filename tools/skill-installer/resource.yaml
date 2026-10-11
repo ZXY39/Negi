@@ -65,17 +65,13 @@ parameters:
       description: Download strategy. `auto` follows `settings.auto_prefer`; the current default prefers `git sparse checkout` and falls back to the GitHub codeload zip archive after git failures.
   required: []
 governance:
-  family: skill-installer
   display_name: Skill Installer
-  description: Install an existing skill from GitHub into the current workspace.
-  actions:
-  - id: install
-    label: Install Skill
-    risk_level: medium
-    destructive: true
-    allowed_roles:
-    - ceo
-    - execution
+  description: Install or import a skill from a GitHub repo/path into the current workspace skills directory, generating a minimal Negi resource manifest when the upstream skill only ships SKILL.md.
+  risk_level: medium
+  destructive: true
+  allowed_roles:
+  - ceo
+  - execution
 exposure:
   agent: true
   main_runtime: true

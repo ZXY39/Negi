@@ -8571,7 +8571,7 @@ def test_context_assembly_always_keeps_tool_execution_control_tools_visible() ->
             "skill-installer",
             "stop_tool_execution",
         ],
-        visible_families=[],
+        visible_tools=[],
         core_tools={"create_async_task"},
         extension_top_k=1,
     )

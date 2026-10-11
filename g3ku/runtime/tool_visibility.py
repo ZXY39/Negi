@@ -75,34 +75,18 @@ def filter_tool_names_for_semantic_top_k(
     ]
 
 
-def filter_visible_tool_families_for_semantic_top_k(
-    visible_tool_families: list[Any] | None,
+def filter_visible_tools_for_semantic_top_k(
+    visible_tools: list[Any] | None,
     *,
     excluded_tool_names: list[str] | tuple[str, ...] | set[str] | None,
 ) -> list[dict[str, Any]]:
     excluded = normalized_tool_name_set(excluded_tool_names)
     filtered: list[dict[str, Any]] = []
-    for family in list(visible_tool_families or []):
-        tool_id = _normalized_tool_name(_item_value(family, "tool_id"))
-        actions_payload: list[dict[str, Any]] = []
-        for action in list(_item_value(family, "actions") or []):
-            executor_names = [
-                name
-                for name in normalized_tool_name_list(list(_item_value(action, "executor_names") or []))
-                if name not in excluded
-            ]
-            if not executor_names:
-                continue
-            action_payload: dict[str, Any] = {"executor_names": list(executor_names)}
-            action_id = _normalized_tool_name(_item_value(action, "action_id"))
-            if action_id:
-                action_payload["action_id"] = action_id
-            actions_payload.append(action_payload)
-        if actions_payload:
-            filtered.append({"tool_id": tool_id, "actions": actions_payload})
+    for record in list(visible_tools or []):
+        tool_id = _normalized_tool_name(_item_value(record, "tool_id"))
+        if not tool_id or tool_id in excluded:
             continue
-        if tool_id and tool_id not in excluded:
-            filtered.append({"tool_id": tool_id, "actions": []})
+        filtered.append({"tool_id": tool_id})
     return filtered
 
 
@@ -110,7 +94,7 @@ __all__ = [
     "CEO_FIXED_BUILTIN_TOOL_NAMES",
     "NODE_FIXED_BUILTIN_TOOL_NAMES",
     "filter_tool_names_for_semantic_top_k",
-    "filter_visible_tool_families_for_semantic_top_k",
+    "filter_visible_tools_for_semantic_top_k",
     "fixed_builtin_tool_name_set_for_actor_role",
     "normalized_tool_name_list",
     "normalized_tool_name_set",

@@ -445,7 +445,7 @@ test("ceo loader tool events stack tool and skill notices in separate columns fo
     const turn = makeTurn({ text: "" });
     const scheduled = [];
 
-    S.tools = [{ tool_id: "filesystem_write", actions: [{ risk_level: "high" }, { risk_level: "low" }] }];
+    S.tools = [{ tool_id: "filesystem_write", display_name: "Filesystem Write", risk_level: "high" }];
     S.skills = [{ skill_id: "find-skills", risk_level: "low" }];
 
     __context.setTimeout = (callback, delay) => {
@@ -503,7 +503,7 @@ test("ceo stage trace hides successful loader tools from interaction flow render
 
     U.ceoContextLoadNotice = new StubHTMLElement();
     U.ceoContextLoadNotice.hidden = true;
-    S.tools = [{ tool_id: "filesystem_write", actions: [{ risk_level: "medium" }] }];
+    S.tools = [{ tool_id: "filesystem_write", display_name: "Filesystem Write", risk_level: "medium" }];
 
     const renderedSteps = renderCeoStageTraceIntoTurn(turn, {
         stages: [
@@ -547,7 +547,7 @@ test("ceo loader tool live events still show notices when serialized output_text
     const turn = makeTurn({ text: "" });
     const scheduled = [];
 
-    S.tools = [{ tool_id: "filesystem_write", actions: [{ risk_level: "high" }] }];
+    S.tools = [{ tool_id: "filesystem_write", display_name: "Filesystem Write", risk_level: "high" }];
 
     __context.setTimeout = (callback, delay) => {
         scheduled.push({ callback, delay });

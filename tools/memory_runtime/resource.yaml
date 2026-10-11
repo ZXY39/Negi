@@ -70,16 +70,25 @@ settings:
     skill_inventory_max_tokens: 480
     extension_tool_top_k: 16
     core_tools:
-    - content
+    - content_describe
+    - content_open
+    - content_search
     - create_async_task
-    - task_summary
+    - manage_task_nodes
+    - perf_inspect
+    - task_append_notice
+    - task_delete
+    - task_failed_nodes
     - task_list
+    - task_node_detail
     - task_progress
+    - task_stats
+    - task_summary
     - memory_write
     - memory_delete
     - memory_note
-    - task_runtime
-    - skill_access
+    - load_skill_context
+    - load_tool_context
   retention_days: null
 parameters:
   type: object

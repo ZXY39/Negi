@@ -37,7 +37,7 @@ def build_execution_tool_selection(
     prompt: str,
     goal: str,
     core_requirement: str,
-    visible_tool_families: list[Any],
+    visible_tool_items: list[Any],
     visible_tool_names: list[str],
     always_callable_tool_names: list[str],
     promoted_tool_names: list[str] | None = None,
@@ -66,8 +66,8 @@ def build_execution_tool_selection(
     selected_promoted_tool_names = _append_hydrated(promoted_tool_names)
 
     lightweight_tool_ids: list[str] = []
-    for family in list(visible_tool_families or []):
-        tool_id = str(_field(family, "tool_id") or "").strip()
+    for item in list(visible_tool_items or []):
+        tool_id = str(_field(item, "tool_id") or "").strip()
         if tool_id and tool_id not in lightweight_tool_ids:
             lightweight_tool_ids.append(tool_id)
 

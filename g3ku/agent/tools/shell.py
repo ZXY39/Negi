@@ -16,7 +16,7 @@ from g3ku.utils.helpers import expand_path_anchor_tokens, model_data_root
 from g3ku.utils.process_tree import kill_process_tree
 from g3ku.utils.subprocess_text import decode_subprocess_output, enrich_subprocess_env_for_text
 from main.governance.exec_tool_policy import (
-    EXEC_TOOL_FAMILY_ID,
+    EXEC_TOOL_ID,
     EXECUTION_MODE_FULL_ACCESS,
     normalize_exec_execution_mode,
     resolve_exec_execution_mode,
@@ -449,16 +449,16 @@ class ExecTool(Tool):
 
     def _resolve_execution_mode(self) -> str:
         service = getattr(self, "main_task_service", None)
-        family = None
+        record = None
         if service is not None:
-            get_tool_family = getattr(service, "get_tool_family", None)
-            if callable(get_tool_family):
+            get_tool = getattr(service, "get_tool", None)
+            if callable(get_tool):
                 try:
-                    family = get_tool_family(EXEC_TOOL_FAMILY_ID)
+                    record = get_tool(EXEC_TOOL_ID)
                 except Exception:
-                    family = None
+                    record = None
         return resolve_exec_execution_mode(
-            family=family,
+            record=record,
             settings_payload={'execution_mode': self.execution_mode_default},
         )
 

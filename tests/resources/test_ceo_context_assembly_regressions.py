@@ -171,7 +171,6 @@ def _tool_resource_record(
     available: bool = True,
     install_dir: str = "",
     metadata: dict[str, object] | None = None,
-    executor_names: list[str] | None = None,
 ) -> SimpleNamespace:
     return SimpleNamespace(
         tool_id=tool_id,
@@ -181,7 +180,6 @@ def _tool_resource_record(
         available=available,
         install_dir=install_dir,
         metadata=dict(metadata or {}),
-        actions=[SimpleNamespace(executor_names=list(executor_names or [tool_id]))],
     )
 
 
@@ -338,26 +336,28 @@ def test_ceo_prompt_builder_keeps_memory_guidance() -> None:
     assert "submit_next_stage" in prompt
 
 
-def test_capability_snapshot_exposure_revision_ignores_hidden_executor_names() -> None:
+def test_capability_snapshot_exposure_revision_ignores_records_outside_exposed_tool_names() -> None:
     first = build_capability_snapshot(
         visible_skills=[],
-        visible_families=[
+        visible_tools=[
             _tool_resource_record(
                 "agent_browser",
                 "Browser automation via semantic shortlist.",
-                executor_names=["agent_browser"],
             )
         ],
         visible_tool_names=["agent_browser"],
     )
     second = build_capability_snapshot(
         visible_skills=[],
-        visible_families=[
+        visible_tools=[
             _tool_resource_record(
                 "agent_browser",
                 "Browser automation via semantic shortlist.",
-                executor_names=["agent_browser", "hidden_browser_admin"],
-            )
+            ),
+            _tool_resource_record(
+                "hidden_browser_admin",
+                "Browser admin lane not exposed to the model.",
+            ),
         ],
         visible_tool_names=["agent_browser"],
     )
@@ -370,7 +370,7 @@ def test_capability_snapshot_exposure_revision_ignores_hidden_executor_names() -
 def test_capability_snapshot_exposure_revision_ignores_warning_and_install_dir_churn() -> None:
     first = build_capability_snapshot(
         visible_skills=[],
-        visible_families=[
+        visible_tools=[
             _tool_resource_record(
                 "external_docs",
                 "External docs short summary.",
@@ -384,7 +384,7 @@ def test_capability_snapshot_exposure_revision_ignores_warning_and_install_dir_c
     )
     second = build_capability_snapshot(
         visible_skills=[],
-        visible_families=[
+        visible_tools=[
             _tool_resource_record(
                 "external_docs",
                 "External docs short summary.",
@@ -428,7 +428,7 @@ async def test_message_builder_dense_unavailable_exposes_all_visible_skills_and_
                 _skill("focused-skill", "Primary workflow"),
                 _skill("secondary-skill", "Secondary workflow"),
             ],
-            "tool_families": [
+            "tools": [
                 _tool_resource_record("agent_browser", "Browser automation"),
                 _tool_resource_record("web_fetch", "HTTP fetch helper"),
             ],
@@ -481,7 +481,7 @@ async def test_message_builder_dense_unavailable_retrieval_scope_includes_dict_v
                 },
                 _skill("object-skill", "Object workflow"),
             ],
-            "tool_families": [_tool_resource_record("agent_browser", "Browser automation")],
+            "tools": [_tool_resource_record("agent_browser", "Browser automation")],
             "tool_names": ["filesystem", "agent_browser"],
         },
         persisted_session=None,
@@ -510,7 +510,7 @@ async def test_message_builder_keeps_control_tools_visible_in_tool_selection() -
             "skill-installer",
             "stop_tool_execution",
         ],
-        visible_families=[],
+        visible_tools=[],
         core_tools={"create_async_task"},
         extension_top_k=1,
     )
@@ -553,7 +553,7 @@ async def test_message_builder_dense_unavailable_renders_l0_only_skill_and_exter
                     "l0": "L0 concise skill summary.",
                 }
             ],
-            "tool_families": [
+            "tools": [
                 _tool_resource_record(
                     "external_docs",
                     "L0 external tool summary. Detail sentence should not appear.",
@@ -609,7 +609,7 @@ async def test_message_builder_dense_unavailable_renders_l0_style_for_object_ski
         query_text="fallback summary mode object skill",
         exposure={
             "skills": [object_skill],
-            "tool_families": [],
+            "tools": [],
             "tool_names": ["filesystem", "load_tool_context"],
         },
         persisted_session=None,
@@ -648,7 +648,7 @@ async def test_message_builder_dense_unavailable_keeps_non_callable_external_too
         query_text="fallback summary mode external tool",
         exposure={
             "skills": [],
-            "tool_families": [
+            "tools": [
                 _tool_resource_record(
                     "external_docs",
                     "External docs short summary. Detail sentence should not appear.",
@@ -695,7 +695,7 @@ async def test_message_builder_dense_unavailable_renders_l0_only_for_unavailable
         query_text="fallback summary mode unavailable callable tool",
         exposure={
             "skills": [],
-            "tool_families": [
+            "tools": [
                 _tool_resource_record(
                     "agent_browser",
                     "Callable fallback short summary. Later sentence should not appear.",
@@ -730,7 +730,7 @@ async def test_message_builder_renders_external_tool_context_for_unavailable_cal
         query_text="please fix the browser automation tool before using it",
         exposure={
             "skills": [],
-            "tool_families": [
+            "tools": [
                 _tool_resource_record(
                     "agent_browser",
                     "Browser automation via the upstream CLI.",
@@ -768,7 +768,7 @@ async def test_message_builder_uses_memory_write_hint_without_memory_retrieval_o
         query_text="from now on default to the focused browser workflow",
         exposure={
             "skills": [_skill("focused-skill", "Primary workflow")],
-            "tool_families": [_tool_resource_record("agent_browser", "Browser automation via semantic shortlist.")],
+            "tools": [_tool_resource_record("agent_browser", "Browser automation via semantic shortlist.")],
             "tool_names": ["filesystem", "agent_browser", "memory_write"],
         },
         persisted_session=None,
@@ -798,7 +798,7 @@ async def test_message_builder_polls_main_runtime_for_external_resource_changes_
         query_text="browser workflow",
         exposure={
             "skills": [_skill("focused-skill", "Primary workflow")],
-            "tool_families": [_tool_resource_record("agent_browser", "Browser automation via semantic shortlist.")],
+            "tools": [_tool_resource_record("agent_browser", "Browser automation via semantic shortlist.")],
             "tool_names": ["filesystem", "agent_browser"],
         },
         persisted_session=None,
@@ -818,7 +818,7 @@ async def test_message_builder_keeps_callable_and_candidate_tools_separate() -> 
         query_text="browser workflow",
         exposure={
             "skills": [],
-            "tool_families": [
+            "tools": [
                 _tool_resource_record("agent_browser", "Browser automation via semantic shortlist."),
                 _tool_resource_record("web_fetch", "HTTP fetch helper."),
             ],
@@ -853,11 +853,14 @@ async def test_message_builder_renders_candidate_tools_as_structured_tool_id_and
         query_text="update the file contents",
         exposure={
             "skills": [],
-            "tool_families": [
+            "tools": [
                 _tool_resource_record(
-                    "filesystem",
-                    "Write, edit, copy, move, delete, and propose patches for local files.",
-                    executor_names=["filesystem_write", "filesystem_edit"],
+                    "filesystem_write",
+                    "Write a file with full content.",
+                ),
+                _tool_resource_record(
+                    "filesystem_edit",
+                    "Edit one file in text-replace or line-range mode.",
                 ),
             ],
             "tool_names": ["load_tool_context", "filesystem_write", "filesystem_edit"],
@@ -911,15 +914,18 @@ async def test_message_builder_prefers_specific_filesystem_candidates_for_write_
         query_text=query_text,
         exposure={
             "skills": [],
-            "tool_families": [
+            "tools": [
                 _tool_resource_record(
-                    "filesystem",
-                    "Write, edit, copy, move, delete, and propose patches for local files.",
-                    executor_names=[
-                        "filesystem_write",
-                        "filesystem_edit",
-                        "filesystem_delete",
-                    ],
+                    "filesystem_write",
+                    "Write a file with full content.",
+                ),
+                _tool_resource_record(
+                    "filesystem_edit",
+                    "Edit one file in text-replace or line-range mode.",
+                ),
+                _tool_resource_record(
+                    "filesystem_delete",
+                    "Delete a local file.",
                 ),
             ],
             "tool_names": [
@@ -974,7 +980,7 @@ async def test_message_builder_defaults_to_16_skill_and_tool_candidates_when_ass
                 _skill(f"skill-{index:02d}", f"skill description {index:02d}")
                 for index in range(20)
             ],
-            "tool_families": [
+            "tools": [
                 _tool_resource_record(f"tool-{index:02d}", f"tool description {index:02d}")
                 for index in range(20)
             ],
@@ -1015,9 +1021,11 @@ async def test_message_builder_excludes_fixed_builtin_resource_tools_from_semant
         query_text="pick the best tool for browser work",
         exposure={
             "skills": [],
-            "tool_families": [
+            "tools": [
                 _tool_resource_record("exec", "Read-only shell helper."),
-                _tool_resource_record("memory", "Write, delete, and load long-term memory notes.", executor_names=["memory_write", "memory_delete", "memory_note"]),
+                _tool_resource_record("memory_write", "Write explicit permanent memory items."),
+                _tool_resource_record("memory_delete", "Delete remembered content."),
+                _tool_resource_record("memory_note", "Load a detailed memory note by short ref."),
                 _tool_resource_record("agent_browser", "Browser automation via semantic shortlist."),
             ],
             "tool_names": [
@@ -1032,17 +1040,13 @@ async def test_message_builder_excludes_fixed_builtin_resource_tools_from_semant
         persisted_session=None,
     )
 
-    semantic_visible_families = list(captured.get("visible_families") or [])
-    semantic_tool_ids = [str(getattr(item, "tool_id", "") or item.get("tool_id") or "").strip() for item in semantic_visible_families]
-    semantic_executor_names = []
-    for item in semantic_visible_families:
-        actions = list(getattr(item, "actions", None) or item.get("actions") or [])
-        for action in actions:
-            names = list(getattr(action, "executor_names", None) or action.get("executor_names") or [])
-            semantic_executor_names.extend(str(name or "").strip() for name in names if str(name or "").strip())
+    semantic_visible_tools = list(captured.get("visible_tools") or [])
+    semantic_tool_ids = [
+        str((item or {}).get("tool_id") if isinstance(item, dict) else getattr(item, "tool_id", "") or "").strip()
+        for item in semantic_visible_tools
+    ]
 
-    assert semantic_tool_ids == ["memory", "agent_browser"]
-    assert semantic_executor_names == ["agent_browser"]
+    assert semantic_tool_ids == ["agent_browser"]
     assert result.candidate_tool_names[0] == "agent_browser"
     assert "exec" not in result.candidate_tool_names
     assert "memory_write" not in result.candidate_tool_names
@@ -1068,7 +1072,7 @@ async def test_message_builder_promotes_hydrated_tools_into_callable_list() -> N
             query_text="write the skill manifest",
             exposure={
                 "skills": [],
-                "tool_families": [
+                "tools": [
                     _tool_resource_record("content_open", "Open content by ref or path."),
                     _tool_resource_record("content_search", "Search content by ref or path."),
                     _tool_resource_record("filesystem_write", "Write a file with full content."),
@@ -1112,7 +1116,7 @@ async def test_message_builder_promotes_hydrated_content_tools_back_into_callabl
             query_text="inspect the uploaded artifact",
             exposure={
                 "skills": [],
-                "tool_families": [
+                "tools": [
                     _tool_resource_record("content_open", "Open content by ref or path."),
                     _tool_resource_record("content_search", "Search content by ref or path."),
                 ],
@@ -1146,7 +1150,7 @@ async def test_message_builder_moves_turn_specific_context_into_overlay_for_stab
         query_text="from now on default to the focused browser workflow",
         exposure={
             "skills": [_skill("focused-skill", "Primary workflow")],
-            "tool_families": [_tool_resource_record("agent_browser", "Browser automation via semantic shortlist.")],
+            "tools": [_tool_resource_record("agent_browser", "Browser automation via semantic shortlist.")],
             "tool_names": ["filesystem", "agent_browser", "memory_write"],
         },
         persisted_session=persisted_session,
@@ -1195,7 +1199,7 @@ async def test_message_builder_exposes_dynamic_appendix_messages_for_prompt_cach
         query_text="from now on default to the focused browser workflow",
         exposure={
             "skills": [_skill("focused-skill", "Primary workflow")],
-            "tool_families": [_tool_resource_record("agent_browser", "Browser automation via semantic shortlist.")],
+            "tools": [_tool_resource_record("agent_browser", "Browser automation via semantic shortlist.")],
             "tool_names": ["filesystem", "agent_browser", "memory_write"],
         },
         persisted_session=persisted_session,
@@ -1237,7 +1241,7 @@ async def test_message_builder_appends_frontdoor_runtime_tool_contract_to_dynami
         query_text="write the file with filesystem_write",
         exposure={
             "skills": [_skill("focused-skill", "Primary workflow")],
-            "tool_families": [
+            "tools": [
                 _tool_resource_record("filesystem_write", "Write file content."),
                 _tool_resource_record("exec", "Read-only shell helper."),
             ],
@@ -1298,7 +1302,7 @@ async def test_message_builder_appends_frontdoor_runtime_tool_contract_with_exec
         query_text="inspect the repo with exec",
         exposure={
             "skills": [],
-            "tool_families": [
+            "tools": [
                 _tool_resource_record("exec", "Shell execution helper."),
             ],
             "tool_names": ["exec", "load_tool_context"],
@@ -1696,7 +1700,7 @@ async def test_message_builder_surfaces_current_and_historical_attachment_reopen
     result = await builder.build_for_ceo(
         session=_session(),
         query_text="inspect uploaded files",
-        exposure={"skills": [], "tool_families": [], "tool_names": ["create_async_task", "content_open"]},
+        exposure={"skills": [], "tools": [], "tool_names": ["create_async_task", "content_open"]},
         persisted_session=persisted_session,
         user_content="inspect uploaded files",
         user_metadata={
@@ -1768,7 +1772,7 @@ async def test_message_builder_keeps_capability_snapshot_stable_when_semantic_sk
             _skill("focused-skill", "Focused workflow summary."),
             _skill("secondary-skill", "Secondary workflow summary."),
         ],
-        "tool_families": [
+        "tools": [
             _tool_resource_record("agent_browser", "Browser automation via semantic shortlist."),
             _tool_resource_record("web_fetch", "HTTP fetch helper."),
         ],
@@ -1832,7 +1836,7 @@ async def test_message_builder_uses_exposure_revision_when_capability_snapshot_e
             _skill("focused-skill", "Focused workflow summary."),
             _skill("secondary-skill", "Secondary workflow summary."),
         ],
-        visible_families=[
+        visible_tools=[
             _tool_resource_record("agent_browser", "Browser automation via semantic shortlist."),
             _tool_resource_record("web_fetch", "HTTP fetch helper."),
         ],
@@ -1847,7 +1851,7 @@ async def test_message_builder_uses_exposure_revision_when_capability_snapshot_e
                 _skill("focused-skill", "Focused workflow summary."),
                 _skill("secondary-skill", "Secondary workflow summary."),
             ],
-            "tool_families": [
+            "tools": [
                 _tool_resource_record("agent_browser", "Browser automation via semantic shortlist."),
                 _tool_resource_record("web_fetch", "HTTP fetch helper."),
             ],
@@ -1905,7 +1909,7 @@ async def test_message_builder_includes_retrieval_and_full_transcript_without_du
     result = await builder.build_for_ceo(
         session=_session(),
         query_text="follow up question",
-        exposure={"skills": [], "tool_families": [], "tool_names": ["filesystem"]},
+        exposure={"skills": [], "tools": [], "tool_names": ["filesystem"]},
         persisted_session=persisted_session,
         user_content="follow up question",
         user_metadata={"_transcript_turn_id": "turn-2"},
@@ -1953,7 +1957,7 @@ async def test_message_builder_prefers_checkpoint_history_over_transcript_once_a
     result = await builder.build_for_ceo(
         session=_session(),
         query_text="follow up question",
-        exposure={"skills": [], "tool_families": [], "tool_names": ["filesystem"]},
+        exposure={"skills": [], "tools": [], "tool_names": ["filesystem"]},
         persisted_session=persisted_session,
         checkpoint_messages=checkpoint_messages,
         user_content="follow up question",
@@ -2004,7 +2008,7 @@ async def test_message_builder_keeps_batched_user_messages_in_transcript_history
     result = await builder.build_for_ceo(
         session=_session(),
         query_text="first batched follow-up\n\nsecond batched follow-up",
-        exposure={"skills": [], "tool_families": [], "tool_names": ["filesystem"]},
+        exposure={"skills": [], "tools": [], "tool_names": ["filesystem"]},
         persisted_session=persisted_session,
         user_content="second batched follow-up",
         user_metadata={"_transcript_turn_id": "turn-batch-2", "_transcript_batch_id": "batch-1"},
@@ -2035,7 +2039,7 @@ async def test_message_builder_falls_back_to_transcript_when_checkpoint_history_
     result = await builder.build_for_ceo(
         session=_session(),
         query_text="next question",
-        exposure={"skills": [], "tool_families": [], "tool_names": ["filesystem"]},
+        exposure={"skills": [], "tools": [], "tool_names": ["filesystem"]},
         persisted_session=persisted_session,
         checkpoint_messages=checkpoint_messages,
         user_content="next question",
@@ -2066,7 +2070,7 @@ async def test_message_builder_keeps_repeated_user_text_after_completed_turn() -
     result = await builder.build_for_ceo(
         session=_session(),
         query_text="repeat this",
-        exposure={"skills": [], "tool_families": [], "tool_names": ["filesystem"]},
+        exposure={"skills": [], "tools": [], "tool_names": ["filesystem"]},
         persisted_session=None,
         checkpoint_messages=checkpoint_messages,
         user_content="repeat this",
@@ -2104,7 +2108,7 @@ async def test_message_builder_does_not_dedupe_same_text_when_turn_ids_mismatch(
     result = await builder.build_for_ceo(
         session=_session(),
         query_text="repeat this",
-        exposure={"skills": [], "tool_families": [], "tool_names": ["filesystem"]},
+        exposure={"skills": [], "tools": [], "tool_names": ["filesystem"]},
         persisted_session=persisted_session,
         checkpoint_messages=checkpoint_messages,
         user_content="repeat this",
@@ -2129,7 +2133,7 @@ async def test_message_builder_keeps_empty_memory_overlay_when_snapshot_reader_i
     result = await builder.build_for_ceo(
         session=_session(),
         query_text="remembered preference",
-        exposure={"skills": [], "tool_families": [], "tool_names": ["filesystem"]},
+        exposure={"skills": [], "tools": [], "tool_names": ["filesystem"]},
         persisted_session=None,
         checkpoint_messages=[
             {"role": "user", "content": "prior user"},
@@ -2169,7 +2173,7 @@ async def test_message_builder_ignores_stale_retrieved_context_checkpoint_when_s
     result = await builder.build_for_ceo(
         session=_session(),
         query_text="remembered preference",
-        exposure={"skills": [], "tool_families": [], "tool_names": ["filesystem"]},
+        exposure={"skills": [], "tools": [], "tool_names": ["filesystem"]},
         persisted_session=None,
         checkpoint_messages=[
             {"role": "user", "content": "prior user"},
@@ -2199,7 +2203,7 @@ async def test_message_builder_trace_includes_frontdoor_context_span_timings() -
         query_text="remembered preference",
         exposure={
             "skills": [_skill("focused-skill", "Primary workflow")],
-            "tool_families": [_tool_resource_record("agent_browser", "Browser automation")],
+            "tools": [_tool_resource_record("agent_browser", "Browser automation")],
             "tool_names": ["filesystem", "agent_browser"],
         },
         persisted_session=None,
@@ -2326,7 +2330,7 @@ async def test_message_builder_applies_frontdoor_stage_workset_compaction_to_his
     result = await builder.build_for_ceo(
         session=_session(),
         query_text="continue",
-        exposure={"skills": [], "tool_families": [], "tool_names": ["filesystem"]},
+        exposure={"skills": [], "tools": [], "tool_names": ["filesystem"]},
         persisted_session=None,
         checkpoint_messages=checkpoint_messages,
         user_content="continue",
@@ -2564,7 +2568,7 @@ async def test_message_builder_keeps_stage_blocks_off_request_tail_when_current_
     result = await builder.build_for_ceo(
         session=_session(),
         query_text="continue",
-        exposure={"skills": [], "tool_families": [], "tool_names": []},
+        exposure={"skills": [], "tools": [], "tool_names": []},
         persisted_session=None,
         checkpoint_messages=checkpoint_messages,
         user_content="continue",
@@ -2639,7 +2643,7 @@ async def test_message_builder_renders_retained_raw_stage_blocks_from_stage_stat
     result = await builder.build_for_ceo(
         session=_session(),
         query_text="continue",
-        exposure={"skills": [], "tool_families": [], "tool_names": ["filesystem_write", "content_open"]},
+        exposure={"skills": [], "tools": [], "tool_names": ["filesystem_write", "content_open"]},
         persisted_session=None,
         checkpoint_messages=checkpoint_messages,
         user_content="continue",
@@ -2833,7 +2837,7 @@ async def test_message_builder_does_not_inject_global_summary_block_during_histo
     result = await builder.build_for_ceo(
         session=_session(),
         query_text="continue",
-        exposure={"skills": [], "tool_families": [], "tool_names": ["filesystem"]},
+        exposure={"skills": [], "tools": [], "tool_names": ["filesystem"]},
         persisted_session=persisted_session,
         checkpoint_messages=[
             {"role": "user", "content": "older user"},
@@ -2867,7 +2871,7 @@ async def test_message_builder_trace_reports_pre_request_and_effective_prompt_to
     result = await builder.build_for_ceo(
         session=_session(),
         query_text="continue",
-        exposure={"skills": [], "tool_families": [], "tool_names": ["filesystem"]},
+        exposure={"skills": [], "tools": [], "tool_names": ["filesystem"]},
         persisted_session=None,
         user_content="continue",
         frontdoor_canonical_context={
@@ -2935,7 +2939,7 @@ async def test_message_builder_does_not_recompute_or_reuse_global_summary_blocks
     result = await builder.build_for_ceo(
         session=_session(),
         query_text="continue",
-        exposure={"skills": [], "tool_families": [], "tool_names": ["filesystem"]},
+        exposure={"skills": [], "tools": [], "tool_names": ["filesystem"]},
         persisted_session=None,
         checkpoint_messages=checkpoint_messages,
         user_content="continue",
@@ -2988,7 +2992,7 @@ async def test_message_builder_directly_continues_request_body_seed_without_stag
     result = await builder.build_for_ceo(
         session=_session(),
         query_text="strict follow up",
-        exposure={"skills": [], "tool_families": [], "tool_names": ["filesystem"]},
+        exposure={"skills": [], "tools": [], "tool_names": ["filesystem"]},
         persisted_session=None,
         checkpoint_messages=[],
         request_body_seed_messages=request_body_seed_messages,
@@ -3057,7 +3061,7 @@ async def test_message_builder_ignores_global_summary_failure_cooldown_during_hi
     result = await builder.build_for_ceo(
         session=_session(),
         query_text="continue",
-        exposure={"skills": [], "tool_families": [], "tool_names": ["filesystem"]},
+        exposure={"skills": [], "tools": [], "tool_names": ["filesystem"]},
         persisted_session=None,
         checkpoint_messages=checkpoint_messages,
         user_content="continue",
@@ -3111,7 +3115,7 @@ async def test_message_builder_no_longer_emits_global_summary_threshold_trace(
     result = await builder.build_for_ceo(
         session=_session(),
         query_text="continue",
-        exposure={"skills": [], "tool_families": [], "tool_names": ["filesystem"]},
+        exposure={"skills": [], "tools": [], "tool_names": ["filesystem"]},
         persisted_session=None,
         checkpoint_messages=[
             {"role": "user", "content": "older user"},
@@ -3172,7 +3176,7 @@ async def test_message_builder_keeps_externalized_compression_block_without_glob
     result = await builder.build_for_ceo(
         session=_session(),
         query_text="continue",
-        exposure={"skills": [], "tool_families": [], "tool_names": ["filesystem"]},
+        exposure={"skills": [], "tools": [], "tool_names": ["filesystem"]},
         persisted_session=None,
         checkpoint_messages=checkpoint_messages,
         user_content="continue",
@@ -3207,7 +3211,7 @@ async def test_message_builder_history_visibility_checkpoint_round_trip_keeps_hi
     result = await builder.build_for_ceo(
         session=_session(),
         query_text="follow up question",
-        exposure={"skills": [], "tool_families": [], "tool_names": ["filesystem"]},
+        exposure={"skills": [], "tools": [], "tool_names": ["filesystem"]},
         persisted_session=None,
         checkpoint_messages=checkpoint_messages,
         user_content="follow up question",
@@ -3252,7 +3256,7 @@ async def test_message_builder_ignores_same_session_turn_memory_records_for_ceo_
     result = await builder.build_for_ceo(
         session=_session(),
         query_text="follow up question",
-        exposure={"skills": [], "tool_families": [], "tool_names": ["filesystem"]},
+        exposure={"skills": [], "tools": [], "tool_names": ["filesystem"]},
         persisted_session=None,
         checkpoint_messages=[
             {"role": "user", "content": "earlier question"},
@@ -3298,7 +3302,7 @@ async def test_message_builder_keeps_turn_memory_from_different_session_in_share
     result = await builder.build_for_ceo(
         session=_session(),
         query_text="follow up question",
-        exposure={"skills": [], "tool_families": [], "tool_names": ["filesystem"]},
+        exposure={"skills": [], "tools": [], "tool_names": ["filesystem"]},
         persisted_session=None,
         user_content="follow up question",
     )
@@ -3336,7 +3340,7 @@ async def test_ceo_context_assembly_injects_memory_snapshot_without_legacy_memor
     result = await builder._collect_turn_context_sources(
         session=session,
         query_text="记住这个规则",
-        exposure={"tool_names": ["memory_write", "memory_delete", "memory_note"], "tool_families": [], "skills": []},
+        exposure={"tool_names": ["memory_write", "memory_delete", "memory_note"], "tools": [], "skills": []},
         user_content="记住这个规则",
         hydrated_tool_names=[],
     )
@@ -3385,7 +3389,7 @@ async def test_frontdoor_uses_frozen_memory_snapshot_only_once_per_turn() -> Non
     result = await builder._collect_turn_context_sources(
         session=session,
         query_text="remember this rule",
-        exposure={"tool_names": ["memory_write", "memory_delete", "memory_note"], "tool_families": [], "skills": []},
+        exposure={"tool_names": ["memory_write", "memory_delete", "memory_note"], "tools": [], "skills": []},
         user_content="remember this rule",
         hydrated_tool_names=[],
     )
@@ -3423,7 +3427,7 @@ async def test_ceo_context_assembly_keeps_memory_snapshot_out_of_turn_overlay_an
     result = await builder.build_for_ceo(
         session=session,
         query_text="remember this",
-        exposure={"tool_names": ["memory_write", "memory_delete", "memory_note"], "tool_families": [], "skills": []},
+        exposure={"tool_names": ["memory_write", "memory_delete", "memory_note"], "tools": [], "skills": []},
         persisted_session=None,
         user_content="remember this",
     )
@@ -3476,7 +3480,7 @@ async def _collect(builder: CeoMessageBuilder, session: SimpleNamespace) -> dict
     return await builder._collect_turn_context_sources(
         session=session,
         query_text="ordinary question",
-        exposure={"tool_names": ["memory_write"], "tool_families": [], "skills": []},
+        exposure={"tool_names": ["memory_write"], "tools": [], "skills": []},
         user_content="ordinary question",
         hydrated_tool_names=[],
     )
@@ -3663,7 +3667,7 @@ async def test_message_builder_trims_full_transcript_history_to_active_window() 
     result = await builder.build_for_ceo(
         session=_session(),
         query_text="continue",
-        exposure={"skills": [], "tool_families": [], "tool_names": ["filesystem"]},
+        exposure={"skills": [], "tools": [], "tool_names": ["filesystem"]},
         persisted_session=persisted,
         checkpoint_messages=None,
         user_content="continue",
@@ -3849,7 +3853,7 @@ async def test_builder_fresh_path_injects_internal_seed_messages_after_base_prom
     result = await builder.build_for_ceo(
         session=_session(),
         query_text="执行每日新闻推送",
-        exposure={"skills": [], "tool_families": [], "tool_names": []},
+        exposure={"skills": [], "tools": [], "tool_names": []},
         persisted_session=None,
         checkpoint_messages=[],
         request_body_seed_messages=[],
@@ -3881,7 +3885,7 @@ async def test_builder_fresh_path_without_internal_seed_keeps_base_prompt() -> N
     result = await builder.build_for_ceo(
         session=_session(),
         query_text="你好",
-        exposure={"skills": [], "tool_families": [], "tool_names": []},
+        exposure={"skills": [], "tools": [], "tool_names": []},
         persisted_session=None,
         checkpoint_messages=[],
         request_body_seed_messages=[],
@@ -3916,7 +3920,7 @@ async def test_builder_continuation_path_ignores_separate_internal_seed_param() 
     result = await builder.build_for_ceo(
         session=_session(),
         query_text="本轮问题",
-        exposure={"skills": [], "tool_families": [], "tool_names": []},
+        exposure={"skills": [], "tools": [], "tool_names": []},
         persisted_session=None,
         checkpoint_messages=[],
         request_body_seed_messages=list(body),

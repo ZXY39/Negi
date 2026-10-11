@@ -60,10 +60,10 @@ async def build_node_context_selection(
     goal: str,
     core_requirement: str,
     visible_skills: list[Any],
-    visible_tool_families: list[Any],
+    visible_tool_records: list[Any],
     visible_tool_names: list[str],
 ) -> NodeContextSelectionResult:
-    del loop, memory_manager, goal, core_requirement, visible_tool_families
+    del loop, memory_manager, goal, core_requirement, visible_tool_records
     visible_skill_ids = _visible_ids(visible_skills, key="skill_id")
     normalized_tool_names = _tool_names(visible_tool_names)
     selection_query = f"Prompt: {_normalized_text(prompt)}".strip()

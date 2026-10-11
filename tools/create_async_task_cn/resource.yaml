@@ -57,16 +57,12 @@ parameters:
       description: Required when `requires_final_acceptance=true`.
   required: [task, core_requirement, execution_policy]
 governance:
-  family: task_runtime
-  display_name: Task Runtime
-  description: Create background tasks in the main runtime.
-  actions:
-    - id: create_async_task
-      label: Create Async Task
-      risk_level: medium
-      destructive: false
-      allowed_roles:
-        - ceo
+  display_name: Create Async Task
+  description: Create a background task in the main runtime.
+  risk_level: medium
+  destructive: false
+  allowed_roles:
+    - ceo
 exposure:
   agent: true
   main_runtime: false

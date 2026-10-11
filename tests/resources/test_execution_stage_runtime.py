@@ -167,22 +167,32 @@ class _ToolResourceManager:
         return None
 
 
-def _tool_family(tool_id: str, *executor_names: str, primary_executor_name: str = "") -> SimpleNamespace:
+def _tool_record(
+    tool_id: str,
+    *,
+    display_name: str = "",
+    description: str = "",
+    available: bool = True,
+    enabled: bool = True,
+    metadata: dict | None = None,
+) -> SimpleNamespace:
     return SimpleNamespace(
         tool_id=tool_id,
-        primary_executor_name=primary_executor_name,
-        actions=[
-            SimpleNamespace(
-                action_id=f"{tool_id}:call",
-                executor_names=list(executor_names),
-                allowed_roles=["execution", "inspection"],
-                agent_visible=True,
-            )
-        ],
+        display_name=display_name or tool_id,
+        description=description,
+        risk_level="medium",
+        destructive=False,
+        agent_visible=True,
+        admin_mode="editable",
+        allowed_roles=["execution", "inspection"],
+        is_core=False,
+        enabled=enabled,
+        available=available,
+        tool_type="internal",
+        install_dir=None,
         callable=True,
-        available=True,
-        enabled=True,
-        metadata={},
+        source_path=f"/tmp/tools/{tool_id}",
+        metadata=dict(metadata or {}),
     )
 
 
@@ -190,7 +200,7 @@ def _build_selector_test_service(
     *,
     task: SimpleNamespace,
     visible_skills: list[SimpleNamespace],
-    visible_tool_families: list[SimpleNamespace],
+    visible_tool_records: list[SimpleNamespace],
     visible_tool_names: list[str],
     tool_instances: dict[str, Tool],
 ) -> MainRuntimeService:
@@ -203,7 +213,7 @@ def _build_selector_test_service(
     service._builtin_tool_cache = None
     service._node_context_selection_cache = {}
     service.list_visible_skill_resources = lambda *, actor_role, session_id: list(visible_skills)
-    service.list_visible_tool_families = lambda *, actor_role, session_id: list(visible_tool_families)
+    service.list_visible_tools = lambda *, actor_role, session_id: list(visible_tool_records)
     service.list_effective_tool_names = lambda *, actor_role, session_id: list(visible_tool_names)
     return service
 
@@ -604,7 +614,7 @@ async def test_acceptance_stage_blocks_other_tools_before_stage_and_after_budget
 
 
 @pytest.mark.asyncio
-async def test_selector_precompute_is_shared_by_tool_exposure_and_message_enrichment_and_maps_family_ids_to_executors(
+async def test_selector_precompute_is_shared_by_tool_exposure_and_message_enrichment(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     selector_calls: list[dict[str, object]] = []
@@ -624,19 +634,19 @@ async def test_selector_precompute_is_shared_by_tool_exposure_and_message_enrich
         SimpleNamespace(skill_id="tmux", display_name="tmux", description="terminal workflow"),
         SimpleNamespace(skill_id="skill-creator", display_name="skill-creator", description="skill creator"),
     ]
-    visible_tool_families = [
-        _tool_family("content_navigation", "content", primary_executor_name="content"),
-        # 生产形状：filesystem 家族已拆出 concrete executor，家族 id 那行是 legacy 单体
-        _tool_family("filesystem", "filesystem", "filesystem_write"),
+    visible_tool_records = [
+        # 第二条是普通工具记录，名字与执行器同名；过去它是家族 id，会被从对象字典里摘掉
+        _tool_record("content"),
+        _tool_record("filesystem_stat"),
     ]
     service = _build_selector_test_service(
         task=task,
         visible_skills=visible_skills,
-        visible_tool_families=visible_tool_families,
-        visible_tool_names=["content", "filesystem"],
+        visible_tool_records=visible_tool_records,
+        visible_tool_names=["content", "filesystem_stat"],
         tool_instances={
             "content": _StaticTool("content"),
-            "filesystem": _StaticTool("filesystem"),
+            "filesystem_stat": _StaticTool("filesystem_stat"),
         },
     )
 
@@ -667,7 +677,9 @@ async def test_selector_precompute_is_shared_by_tool_exposure_and_message_enrich
     )
 
     assert selection.selected_tool_names == ["content"]
-    assert list(provided) == ["content"]
+    # 治理可见的两条记录都进对象字典：没有分组层就没有"家族 id 要摘掉"这回事，
+    # selection 只决定 callable，不决定字典上界。
+    assert list(provided) == ["content", "filesystem_stat"]
     assert len(selector_calls) == 1
     contract_payload = extract_node_dynamic_contract_payload(enriched)
     assert contract_payload is not None
@@ -710,10 +722,10 @@ async def test_enrich_node_messages_moves_repair_required_tools_and_skills_into_
                 metadata={'warnings': ['missing required bins']},
             ),
         ],
-        visible_tool_families=[
+        visible_tool_records=[
             SimpleNamespace(
                 **{
-                    **_tool_family('agent_browser', 'agent_browser').__dict__,
+                    **_tool_record('agent_browser').__dict__,
                     'available': False,
                     'metadata': {'warnings': ['missing required paths']},
                 }
@@ -788,15 +800,14 @@ async def test_tool_provider_uses_full_visible_tool_fallback_when_selector_retur
     service = _build_selector_test_service(
         task=task,
         visible_skills=[],
-        visible_tool_families=[
-            _tool_family("content_navigation", "content", primary_executor_name="content"),
-            # filesystem 家族在生产里已拆出 concrete executor，家族 id 那行是 legacy 单体
-            _tool_family("filesystem", "filesystem", "filesystem_write"),
+        visible_tool_records=[
+            _tool_record("content"),
+            _tool_record("filesystem_stat"),
         ],
-        visible_tool_names=["content", "filesystem"],
+        visible_tool_names=["content", "filesystem_stat"],
         tool_instances={
             "content": _StaticTool("content"),
-            "filesystem": _StaticTool("filesystem"),
+            "filesystem_stat": _StaticTool("filesystem_stat"),
         },
     )
 
@@ -805,7 +816,7 @@ async def test_tool_provider_uses_full_visible_tool_fallback_when_selector_retur
         return NodeContextSelectionResult(
             mode="visible_only",
             selected_skill_ids=[],
-            selected_tool_names=["content", "filesystem"],
+            selected_tool_names=["content", "filesystem_stat"],
             trace={"mode": "visible_only"},
         )
 
@@ -818,7 +829,7 @@ async def test_tool_provider_uses_full_visible_tool_fallback_when_selector_retur
     await service._prepare_node_context_selection(task=task, node=node)
     provided = service._tool_provider(node)
 
-    assert set(provided) == {"content", "filesystem"}
+    assert set(provided) == {"content", "filesystem_stat"}
 
 
 @pytest.mark.asyncio
@@ -841,15 +852,14 @@ async def test_node_build_tools_preserves_protocol_tools_when_callable_tools_are
     service = _build_selector_test_service(
         task=task,
         visible_skills=[],
-        visible_tool_families=[
-            _tool_family("content_navigation", "content", primary_executor_name="content"),
-            # filesystem 家族在生产里已拆出 concrete executor，家族 id 那行是 legacy 单体
-            _tool_family("filesystem", "filesystem", "filesystem_write"),
+        visible_tool_records=[
+            _tool_record("content"),
+            _tool_record("filesystem_stat"),
         ],
-        visible_tool_names=["content", "filesystem"],
+        visible_tool_names=["content", "filesystem_stat"],
         tool_instances={
             "content": _StaticTool("content"),
-            "filesystem": _StaticTool("filesystem"),
+            "filesystem_stat": _StaticTool("filesystem_stat"),
         },
     )
 
@@ -894,7 +904,7 @@ async def test_node_build_tools_preserves_protocol_tools_when_callable_tools_are
     tools = runner._build_tools(task=task, node=node)
 
     assert "content" in tools
-    assert "filesystem" not in tools
+    assert "filesystem_stat" in tools
     assert isinstance(tools["submit_next_stage"], SubmitNextStageTool)
     assert isinstance(tools["submit_final_result"], SubmitFinalResultTool)
     assert isinstance(tools["spawn_child_nodes"], SpawnChildNodesTool)
@@ -919,14 +929,14 @@ async def test_prepare_node_context_selection_restores_callable_tools_from_persi
     service = _build_selector_test_service(
         task=task,
         visible_skills=[],
-        visible_tool_families=[
-            _tool_family("content_navigation", "content", primary_executor_name="content"),
-            _tool_family("filesystem", "filesystem", "filesystem_write"),
+        visible_tool_records=[
+            _tool_record("content"),
+            _tool_record("filesystem_stat"),
         ],
-        visible_tool_names=["content", "filesystem"],
+        visible_tool_names=["content", "filesystem_stat"],
         tool_instances={
             "content": _StaticTool("content"),
-            "filesystem": _StaticTool("filesystem"),
+            "filesystem_stat": _StaticTool("filesystem_stat"),
         },
     )
     service.log_service = SimpleNamespace(
@@ -935,7 +945,7 @@ async def test_prepare_node_context_selection_restores_callable_tools_from_persi
             "candidate_tool_names": [],
             "selected_skill_ids": [],
             "candidate_skill_ids": [],
-            "rbac_visible_tool_names": ["content", "filesystem"],
+            "rbac_visible_tool_names": ["content", "filesystem_stat"],
             "rbac_visible_skill_ids": [],
             "messages": [
                 {"role": "system", "content": "base prompt"},
@@ -987,7 +997,9 @@ async def test_prepare_node_context_selection_restores_callable_tools_from_persi
 
     assert selection.trace["mode"] == "persisted_frame_restore"
     assert selection.selected_tool_names == ["content"]
-    assert list(provided) == ["content"]
+    # 治理可见的两条记录都进对象字典：没有分组层就没有"家族 id 要摘掉"这回事，
+    # selection 只决定 callable，不决定字典上界。
+    assert list(provided) == ["content", "filesystem_stat"]
 
 
 @pytest.mark.asyncio
@@ -1022,7 +1034,7 @@ async def test_prepare_node_context_selection_recomputes_when_cached_skill_visib
             "visible_skills": [],
             "contract_visible_skill_ids": [],
             "skill_visibility_diagnostics": {"registry_skill_ids": [], "entries": []},
-            "visible_tool_families": [],
+            "visible_tool_records": [],
             "visible_tool_names": ["web_fetch"],
             "prompt": "load web skills",
             "goal": "load web skills",
@@ -1041,8 +1053,8 @@ async def test_prepare_node_context_selection_recomputes_when_cached_skill_visib
     service.list_contract_visible_skill_resources = (
         lambda *, actor_role, session_id: list(visible_skills)
     )
-    service.list_visible_tool_families = (
-        lambda *, actor_role, session_id: [_tool_family("web_fetch", "web_fetch")]
+    service.list_visible_tools = (
+        lambda *, actor_role, session_id: [_tool_record("web_fetch")]
     )
     service.list_effective_tool_names = (
         lambda *, actor_role, session_id: ["web_fetch", "load_skill_context", "load_tool_context"]
@@ -1131,8 +1143,8 @@ async def test_prepare_node_context_selection_ignores_persisted_frame_when_live_
     service.list_contract_visible_skill_resources = (
         lambda *, actor_role, session_id: list(visible_skills)
     )
-    service.list_visible_tool_families = (
-        lambda *, actor_role, session_id: [_tool_family("web_fetch", "web_fetch")]
+    service.list_visible_tools = (
+        lambda *, actor_role, session_id: [_tool_record("web_fetch")]
     )
     service.list_effective_tool_names = (
         lambda *, actor_role, session_id: ["web_fetch", "load_skill_context", "load_tool_context"]

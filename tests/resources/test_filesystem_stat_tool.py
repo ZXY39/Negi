@@ -112,38 +112,40 @@ async def test_measurement_does_not_modify_targets(tmp_path: Path) -> None:
     assert sorted(path.name for path in tmp_path.iterdir()) == ["keep.pdf"]
 
 
-def test_manifest_grants_inspection_role_measurement_action() -> None:
+def test_manifest_grants_inspection_role_as_a_tool_level_record() -> None:
+    """filesystem_stat 的授权现在钉在工具级 governance 单条上，没有族也没有动作列表。"""
     manifest = (REPO_ROOT / "tools/filesystem_stat/resource.yaml").read_text(encoding="utf-8")
-    assert "family: filesystem" in manifest
-    assert "id: stat" in manifest
+    assert "name: filesystem_stat" in manifest
+    assert "family:" not in manifest
+    assert "actions:" not in manifest
     assert "restrict_to_workspace: false" in manifest
     # inspection 必须能测量：没有这条授权，验收节点就拿不到真实体积。
-    assert manifest.count("inspection") >= 1
+    assert "inspection" in manifest
     assert (REPO_ROOT / "tools/filesystem_stat/toolskills/SKILL.md").is_file()
 
 
-class _StubFamilyRegistry:
-    def __init__(self, families):
-        self._families = list(families)
+class _StubToolRegistry:
+    def __init__(self, tools):
+        self._tools = list(tools)
 
-    def list_tool_families(self):
-        return list(self._families)
+    def list_tools(self):
+        return list(self._tools)
 
     def list_skill_resources(self):
         return []
 
-    def get_tool_family(self, tool_id: str):
-        for family in self._families:
-            if str(getattr(family, "tool_id", "")) == str(tool_id):
-                return family
+    def get_tool(self, tool_id: str):
+        for tool in self._tools:
+            if str(getattr(tool, "tool_id", "")) == str(tool_id):
+                return tool
         return None
 
 
-def _discover_filesystem_families(tmp_path: Path):
+def _discover_filesystem_tools(tmp_path: Path):
     import shutil
 
     from g3ku.resources.registry import ResourceRegistry
-    from main.governance.resource_bridge import build_tool_families
+    from main.governance.resource_bridge import build_tool_records
 
     workspace = tmp_path / "workspace"
     (workspace / "skills").mkdir(parents=True, exist_ok=True)
@@ -152,19 +154,22 @@ def _discover_filesystem_families(tmp_path: Path):
         shutil.copytree(REPO_ROOT / "tools" / tool_name, workspace / "tools" / tool_name)
     registry = ResourceRegistry(workspace, skills_dir=workspace / "skills", tools_dir=workspace / "tools")
     snapshot = registry.discover()
-    return {family.tool_id: family for family in build_tool_families(list(snapshot.tools.values()))}
+    return {tool.tool_id: tool for tool in build_tool_records(list(snapshot.tools.values()))}
 
 
-def test_stat_action_joins_filesystem_family_with_inspection_role(tmp_path: Path) -> None:
-    family = _discover_filesystem_families(tmp_path)["filesystem"]
-    action_map = {action.action_id: action for action in family.actions}
+def test_stat_tool_record_carries_inspection_role_and_its_own_executor(tmp_path: Path) -> None:
+    tools = _discover_filesystem_tools(tmp_path)
 
-    stat_action = action_map["stat"]
-    assert "filesystem_stat" in stat_action.executor_names
-    assert "inspection" in stat_action.allowed_roles
-    assert stat_action.destructive is False
+    stat = tools["filesystem_stat"]
+    assert stat.source_path.replace("\\", "/").endswith("filesystem_stat")
+    assert "inspection" in stat.allowed_roles
+    assert stat.destructive is False
+    assert stat.risk_level == "low"
     # 写动作对 inspection 的拒绝不受影响：验收仍是只读裁判。
-    assert "inspection" not in action_map["write"].allowed_roles
+    write = tools["filesystem_write"]
+    assert "inspection" not in write.allowed_roles
+    assert write.destructive is True
+    assert write.risk_level == "high"
 
 
 def test_inspection_role_resolves_allow_for_stat_and_deny_for_write(tmp_path: Path) -> None:
@@ -172,10 +177,10 @@ def test_inspection_role_resolves_allow_for_stat_and_deny_for_write(tmp_path: Pa
     from main.governance.policy_engine import MainRuntimePolicyEngine
     from main.governance.store import GovernanceStore
 
-    families = _discover_filesystem_families(tmp_path)
+    tools = _discover_filesystem_tools(tmp_path)
     store = GovernanceStore(tmp_path / "governance.sqlite3")
     try:
-        engine = MainRuntimePolicyEngine(store=store, resource_registry=_StubFamilyRegistry(families.values()))
+        engine = MainRuntimePolicyEngine(store=store, resource_registry=_StubToolRegistry(tools.values()))
         engine.sync_default_role_policies()
         subject = PermissionSubject(
             user_key="inspection",
@@ -183,8 +188,8 @@ def test_inspection_role_resolves_allow_for_stat_and_deny_for_write(tmp_path: Pa
             actor_role="inspection",
         )
 
-        allowed = engine.evaluate_tool_action(subject=subject, tool_id="filesystem", action_id="stat")
-        denied = engine.evaluate_tool_action(subject=subject, tool_id="filesystem", action_id="write")
+        allowed = engine.evaluate_tool(subject=subject, tool_id="filesystem_stat")
+        denied = engine.evaluate_tool(subject=subject, tool_id="filesystem_write")
 
         assert allowed.allowed is True
         assert denied.allowed is False

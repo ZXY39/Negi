@@ -30,22 +30,20 @@ class MainRuntimePolicyEngine:
                         updated_at=now,
                     )
                 )
-        for family in self._resource_registry.list_tool_families():
-            for action in family.actions:
-                for actor_role in ACTOR_ROLES:
-                    records.append(
-                        RolePolicyMatrixRecord(
-                            policy_id=new_policy_id(),
-                            actor_role=actor_role,
-                            resource_kind='tool_family',
-                            resource_id=family.tool_id,
-                            action_id=action.action_id,
-                            effect='allow' if actor_role in action.allowed_roles else 'deny',
-                            source='default',
-                            created_at=now,
-                            updated_at=now,
-                        )
+        for tool in self._resource_registry.list_tools():
+            for actor_role in ACTOR_ROLES:
+                records.append(
+                    RolePolicyMatrixRecord(
+                        policy_id=new_policy_id(),
+                        actor_role=actor_role,
+                        resource_kind='tool',
+                        resource_id=tool.tool_id,
+                        effect='allow' if actor_role in tool.allowed_roles else 'deny',
+                        source='default',
+                        created_at=now,
+                        updated_at=now,
                     )
+                )
         self._store.replace_default_role_policies(records)
         return records
 
@@ -55,16 +53,20 @@ class MainRuntimePolicyEngine:
             return AccessDecision(allowed=False, reason_code='resource_disabled', source='resource_state', requires_request=False)
         return self._evaluate(subject=subject, resource_kind='skill', resource_id=skill.skill_id, action_id='load', enabled=skill.enabled and skill.available, allowed_roles=skill.allowed_roles)
 
-    def evaluate_tool_action(self, *, subject: PermissionSubject, tool_id: str, action_id: str) -> AccessDecision:
-        family = self._resource_registry.get_tool_family(tool_id)
-        if family is None:
+    def evaluate_tool(self, *, subject: PermissionSubject, tool_id: str) -> AccessDecision:
+        tool = self._resource_registry.get_tool(str(tool_id or '').strip())
+        if tool is None:
             return AccessDecision(allowed=False, reason_code='resource_disabled', source='resource_state', requires_request=False)
-        action = next((item for item in family.actions if item.action_id == action_id), None)
-        if action is None:
-            return AccessDecision(allowed=False, reason_code='resource_disabled', source='resource_state', requires_request=False)
-        return self._evaluate(subject=subject, resource_kind='tool_family', resource_id=tool_id, action_id=action_id, enabled=family.enabled and family.available, allowed_roles=action.allowed_roles)
+        return self._evaluate(
+            subject=subject,
+            resource_kind='tool',
+            resource_id=tool.tool_id,
+            action_id=None,
+            enabled=tool.enabled and tool.available,
+            allowed_roles=tool.allowed_roles,
+        )
 
-    def _evaluate(self, *, subject: PermissionSubject, resource_kind: str, resource_id: str, action_id: str, enabled: bool, allowed_roles: list[str]) -> AccessDecision:
+    def _evaluate(self, *, subject: PermissionSubject, resource_kind: str, resource_id: str, action_id: str | None, enabled: bool, allowed_roles: list[str]) -> AccessDecision:
         if not enabled:
             return AccessDecision(allowed=False, reason_code='resource_disabled', source='resource_state', requires_request=False, manual_policy_change_required=False)
         if subject.actor_role not in set(allowed_roles):
@@ -74,7 +76,7 @@ class MainRuntimePolicyEngine:
             return AccessDecision(allowed=True, reason_code='role_allowed', source='rbac', requires_request=False)
         return AccessDecision(allowed=False, reason_code='policy_denied', source='rbac', requires_request=False, manual_policy_change_required=False)
 
-    def _find_role_policy(self, *, subject: PermissionSubject, resource_kind: str, resource_id: str, action_id: str) -> RolePolicyMatrixRecord | None:
+    def _find_role_policy(self, *, subject: PermissionSubject, resource_kind: str, resource_id: str, action_id: str | None = None) -> RolePolicyMatrixRecord | None:
         policies = self._store.find_role_policies(
             actor_role=subject.actor_role,
             resource_kind=resource_kind,

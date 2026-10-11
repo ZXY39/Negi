@@ -24,7 +24,7 @@ from g3ku.resources.registry import ResourceRegistry
 from g3ku.resources.tool_settings import FilesystemToolSettings
 from g3ku.runtime.frontdoor._ceo_runtime_ops import _provider_visible_tool_contract
 from main.api import rest as api_rest
-from main.governance.resource_bridge import build_tool_families
+from main.governance.resource_bridge import build_tool_records
 from main.runtime.node_prompt_contract import extract_node_dynamic_contract_payload
 from main.service.runtime_service import MainRuntimeService
 from main.storage.artifact_store import TaskArtifactStore
@@ -173,7 +173,7 @@ def test_tool_resource_current_version_text_has_no_replacement_question_marks():
             assert '?' not in value, f'{manifest_path}:{key} contains replacement question marks: {value}'
 
 
-def test_skill_dependency_on_tool_family_resolves_from_split_executors(tmp_path: Path) -> None:
+def test_skill_dependency_on_split_tools_resolves_from_split_tool_resources(tmp_path: Path) -> None:
     workspace = tmp_path / 'workspace'
     (workspace / 'skills').mkdir(parents=True, exist_ok=True)
     (workspace / 'tools').mkdir(parents=True, exist_ok=True)
@@ -218,7 +218,9 @@ def test_content_describe_docs_do_not_reference_removed_filesystem_read_tools() 
 
 
 def test_content_navigation_manifests_use_real_artifact_ref_examples() -> None:
-    for tool_name in ('content', 'content_describe', 'content_open', 'content_search'):
+    # legacy 单体 content 工具已整目录删除，内容导航只剩三个单用途工具。
+    assert not (REPO_ROOT / 'tools' / 'content').exists()
+    for tool_name in ('content_describe', 'content_open', 'content_search'):
         manifest = yaml.safe_load((REPO_ROOT / 'tools' / tool_name / 'resource.yaml').read_text(encoding='utf-8')) or {}
         ref_description = str(
             (
@@ -269,17 +271,13 @@ def _write_demo_external_tool(
               agent: true
               main_runtime: true
             governance:
-              family: {name}
               display_name: External Browser
               description: Registered external browser automation tool.
-              actions:
-                - id: use
-                  label: Use External Browser
-                  risk_level: medium
-                  destructive: false
-                  allowed_roles:
-                    - ceo
-                    - execution
+              risk_level: medium
+              destructive: false
+              allowed_roles:
+                - ceo
+                - execution
             toolskill:
               enabled: true
             """
@@ -580,51 +578,48 @@ async def test_filesystem_tool_runs_as_resource_tool(tmp_path: Path):
         store.close()
 
 
-def test_filesystem_split_tools_are_discoverable_and_merge_into_filesystem_family(tmp_path: Path):
+def test_filesystem_split_tools_are_discoverable_as_one_tool_record_each(tmp_path: Path):
     workspace = tmp_path / 'workspace'
     (workspace / 'skills').mkdir(parents=True, exist_ok=True)
     (workspace / 'tools').mkdir(parents=True, exist_ok=True)
     _copy_filesystem_split_tools(workspace)
+    shutil.copytree(REPO_ROOT / 'tools' / 'filesystem_stat', workspace / 'tools' / 'filesystem_stat')
 
     registry = ResourceRegistry(workspace, skills_dir=workspace / 'skills', tools_dir=workspace / 'tools')
     snapshot = registry.discover()
 
-    for tool_name in (
-        'filesystem_write',
-        'filesystem_edit',
-        'filesystem_copy',
-        'filesystem_move',
-        'filesystem_delete',
-        'filesystem_propose_patch',
-    ):
+    # 原来这些值是 family=filesystem 下每个 action 的属性；一层形状后逐条钉在工具记录上。
+    expected = {
+        'filesystem_write': ('Filesystem Write', 'high', True, ['ceo', 'execution']),
+        'filesystem_edit': ('Filesystem Edit', 'high', True, ['ceo', 'execution']),
+        'filesystem_copy': ('Filesystem Copy', 'high', True, ['ceo', 'execution']),
+        'filesystem_move': ('Filesystem Move', 'high', True, ['ceo', 'execution']),
+        'filesystem_delete': ('Filesystem Delete', 'high', True, ['ceo', 'execution']),
+        'filesystem_propose_patch': ('Filesystem Propose Patch', 'medium', False, ['ceo', 'execution']),
+        'filesystem_stat': ('Measure Paths', 'low', False, ['ceo', 'execution', 'inspection']),
+    }
+    for tool_name in expected:
         assert tool_name in snapshot.tools
 
-    families = {item.tool_id: item for item in build_tool_families(list(snapshot.tools.values()))}
-    family = families['filesystem']
-    action_map = {action.action_id: action for action in family.actions}
-
-    assert family.primary_executor_name == 'filesystem_write'
-    assert set(family.metadata['sources']) == {
-        'filesystem_write',
-        'filesystem_edit',
-        'filesystem_copy',
-        'filesystem_move',
-        'filesystem_delete',
-        'filesystem_propose_patch',
-    }
-    assert 'filesystem_write' in action_map['write'].executor_names
-    assert 'filesystem_edit' in action_map['edit'].executor_names
-    assert 'filesystem_copy' in action_map['copy'].executor_names
-    assert 'filesystem_move' in action_map['move'].executor_names
-    assert 'filesystem_delete' in action_map['delete'].executor_names
-    assert 'filesystem_propose_patch' in action_map['propose_patch'].executor_names
+    records = {item.tool_id: item for item in build_tool_records(list(snapshot.tools.values()))}
+    # 一个 descriptor 一条记录，没有把七个执行器折成一个族的聚合。
+    assert set(records) == set(expected)
+    for tool_name, (display_name, risk_level, destructive, allowed_roles) in expected.items():
+        record = records[tool_name]
+        assert record.display_name == display_name
+        assert record.risk_level == risk_level
+        assert record.destructive is destructive
+        assert record.allowed_roles == allowed_roles
+        # 工具 id 就是执行器名：原来 action.executor_names 的绑定现在由 tool_id 本身承担。
+        assert Path(record.source_path).name == tool_name
+    # 族粒度已被有意取消：族名不是一条能加载出来的记录。
+    assert 'filesystem' not in records
 
 
-def test_content_split_tools_are_discoverable_and_merge_into_content_navigation_family(tmp_path: Path):
+def test_content_split_tools_are_discoverable_as_one_tool_record_each(tmp_path: Path):
     workspace = tmp_path / 'workspace'
     (workspace / 'skills').mkdir(parents=True, exist_ok=True)
     (workspace / 'tools').mkdir(parents=True, exist_ok=True)
-    shutil.copytree(REPO_ROOT / 'tools' / 'content', workspace / 'tools' / 'content')
     for tool_name in (
         'content_describe',
         'content_search',
@@ -635,30 +630,28 @@ def test_content_split_tools_are_discoverable_and_merge_into_content_navigation_
     registry = ResourceRegistry(workspace, skills_dir=workspace / 'skills', tools_dir=workspace / 'tools')
     snapshot = registry.discover()
 
-    for tool_name in (
-        'content',
-        'content_describe',
-        'content_search',
-        'content_open',
-    ):
+    expected = {
+        'content_describe': ('Content Describe', 'low', False, ['ceo', 'execution', 'inspection']),
+        'content_search': ('Content Search', 'low', False, ['ceo', 'execution', 'inspection']),
+        'content_open': ('Content Open', 'low', False, ['ceo', 'execution', 'inspection']),
+    }
+    for tool_name in expected:
         assert tool_name in snapshot.tools
 
-    families = {item.tool_id: item for item in build_tool_families(list(snapshot.tools.values()))}
-    family = families['content_navigation']
-    action_map = {action.action_id: action for action in family.actions}
-
-    assert set(family.metadata['sources']) == {
-        'content',
-        'content_describe',
-        'content_search',
-        'content_open',
-    }
-    assert 'content_describe' in action_map['describe'].executor_names
-    assert 'content_search' in action_map['search'].executor_names
-    assert 'content_open' in action_map['open'].executor_names
+    records = {item.tool_id: item for item in build_tool_records(list(snapshot.tools.values()))}
+    assert set(records) == set(expected)
+    for tool_name, (display_name, risk_level, destructive, allowed_roles) in expected.items():
+        record = records[tool_name]
+        assert record.display_name == display_name
+        assert record.risk_level == risk_level
+        assert record.destructive is destructive
+        assert record.allowed_roles == allowed_roles
+        assert Path(record.source_path).name == tool_name
+    assert 'content_navigation' not in records
+    assert 'content' not in records
 
 
-def test_tool_managed_builtin_family_seeds_default_governance_roles_on_first_discovery(tmp_path: Path):
+def test_tool_managed_builtin_tool_seeds_default_governance_roles_on_first_discovery(tmp_path: Path):
     workspace = tmp_path / 'workspace'
     (workspace / 'skills').mkdir(parents=True, exist_ok=True)
     (workspace / 'tools').mkdir(parents=True, exist_ok=True)
@@ -667,11 +660,14 @@ def test_tool_managed_builtin_family_seeds_default_governance_roles_on_first_dis
     registry = ResourceRegistry(workspace, skills_dir=workspace / 'skills', tools_dir=workspace / 'tools')
     snapshot = registry.discover()
 
-    families = {item.tool_id: item for item in build_tool_families(list(snapshot.tools.values()))}
-    family = families['exec_runtime']
-    action_map = {action.action_id: action for action in family.actions}
+    records = {item.tool_id: item for item in build_tool_records(list(snapshot.tools.values()))}
+    record = records['exec']
 
-    assert action_map['run'].allowed_roles == ['ceo', 'execution']
+    assert record.allowed_roles == ['ceo', 'execution']
+    assert record.risk_level == 'high'
+    assert record.destructive is True
+    # exec_runtime 这个族名不再是一条记录，动作 id 'run' 也不复存在。
+    assert 'exec_runtime' not in records
 
 
 @pytest.mark.asyncio
@@ -684,12 +680,15 @@ async def test_content_split_tool_executes_with_legacy_content_settings(tmp_path
     outside_file.write_text('outside\n', encoding='utf-8')
     (workspace / 'skills').mkdir(parents=True, exist_ok=True)
     (workspace / 'tools').mkdir(parents=True, exist_ok=True)
-    shutil.copytree(REPO_ROOT / 'tools' / 'content', workspace / 'tools' / 'content')
     shutil.copytree(REPO_ROOT / 'tools' / 'content_open', workspace / 'tools' / 'content_open')
 
-    legacy_manifest = workspace / 'tools' / 'content' / 'resource.yaml'
-    legacy_manifest.write_text(
-        legacy_manifest.read_text(encoding='utf-8').replace('restrict_to_workspace: false', 'restrict_to_workspace: true'),
+    # 单体 content 没了以后，restrict_to_workspace 由每个单用途工具自己的 settings 承担：
+    # 默认不声明即不收紧，声明后必须真的拦得住。
+    manifest_path = workspace / 'tools' / 'content_open' / 'resource.yaml'
+    manifest_text = manifest_path.read_text(encoding='utf-8')
+    assert 'restrict_to_workspace' not in manifest_text
+    manifest_path.write_text(
+        f'{manifest_text}settings:\n  restrict_to_workspace: true\n',
         encoding='utf-8',
     )
 
@@ -969,14 +968,14 @@ async def test_content_search_overflow_requires_refine(tmp_path: Path):
     target_file.write_text('\n'.join(['needle'] * 20) + '\n', encoding='utf-8')
     (workspace / 'skills').mkdir(parents=True, exist_ok=True)
     (workspace / 'tools').mkdir(parents=True, exist_ok=True)
-    shutil.copytree(REPO_ROOT / 'tools' / 'content', workspace / 'tools' / 'content')
+    shutil.copytree(REPO_ROOT / 'tools' / 'content_search', workspace / 'tools' / 'content_search')
 
     manager = ResourceManager(workspace, app_config=_resource_app_config())
     manager.reload_now(trigger='test-bind')
     try:
-        tool = manager.get_tool('content')
+        tool = manager.get_tool('content_search')
         assert tool is not None
-        payload = json.loads(await tool.execute(action='search', path=str(target_file), query='needle', limit=5))
+        payload = json.loads(await tool.execute(path=str(target_file), query='needle', limit=5))
         assert payload['ok'] is True
         assert payload['overflow'] is True
         assert payload['requires_refine'] is True
@@ -995,7 +994,6 @@ async def test_content_search_split_tool_combines_ref_and_path_results_when_both
     local_file.write_text('alpha\nneedle in path\nomega\n', encoding='utf-8')
     (workspace / 'skills').mkdir(parents=True, exist_ok=True)
     (workspace / 'tools').mkdir(parents=True, exist_ok=True)
-    shutil.copytree(REPO_ROOT / 'tools' / 'content', workspace / 'tools' / 'content')
     shutil.copytree(REPO_ROOT / 'tools' / 'content_search', workspace / 'tools' / 'content_search')
 
     store = SQLiteTaskStore(tmp_path / 'runtime.sqlite3')
@@ -1047,7 +1045,6 @@ async def test_content_open_split_tool_returns_ref_success_and_path_error_when_b
     workspace = tmp_path / 'workspace'
     (workspace / 'skills').mkdir(parents=True, exist_ok=True)
     (workspace / 'tools').mkdir(parents=True, exist_ok=True)
-    shutil.copytree(REPO_ROOT / 'tools' / 'content', workspace / 'tools' / 'content')
     shutil.copytree(REPO_ROOT / 'tools' / 'content_open', workspace / 'tools' / 'content_open')
 
     store = SQLiteTaskStore(tmp_path / 'runtime.sqlite3')
@@ -1098,7 +1095,6 @@ async def test_content_open_image_path_requires_multimodal_model(tmp_path: Path)
     workspace = tmp_path / 'workspace'
     (workspace / 'skills').mkdir(parents=True, exist_ok=True)
     (workspace / 'tools').mkdir(parents=True, exist_ok=True)
-    shutil.copytree(REPO_ROOT / 'tools' / 'content', workspace / 'tools' / 'content')
     shutil.copytree(REPO_ROOT / 'tools' / 'content_open', workspace / 'tools' / 'content_open')
 
     image_path = workspace / 'demo.png'
@@ -1128,7 +1124,6 @@ async def test_content_open_image_path_returns_runtime_managed_image_payload(tmp
     workspace = tmp_path / 'workspace'
     (workspace / 'skills').mkdir(parents=True, exist_ok=True)
     (workspace / 'tools').mkdir(parents=True, exist_ok=True)
-    shutil.copytree(REPO_ROOT / 'tools' / 'content', workspace / 'tools' / 'content')
     shutil.copytree(REPO_ROOT / 'tools' / 'content_open', workspace / 'tools' / 'content_open')
 
     image_path = workspace / 'demo.png'
@@ -1164,7 +1159,6 @@ async def test_content_open_image_path_missing_file_returns_tool_error(tmp_path:
     workspace = tmp_path / 'workspace'
     (workspace / 'skills').mkdir(parents=True, exist_ok=True)
     (workspace / 'tools').mkdir(parents=True, exist_ok=True)
-    shutil.copytree(REPO_ROOT / 'tools' / 'content', workspace / 'tools' / 'content')
     shutil.copytree(REPO_ROOT / 'tools' / 'content_open', workspace / 'tools' / 'content_open')
 
     missing_path = workspace / 'hallucinated.png'
@@ -1194,7 +1188,6 @@ def test_content_open_split_tool_schema_only_exposes_line_range_selector(tmp_pat
     workspace = tmp_path / 'workspace'
     (workspace / 'skills').mkdir(parents=True, exist_ok=True)
     (workspace / 'tools').mkdir(parents=True, exist_ok=True)
-    shutil.copytree(REPO_ROOT / 'tools' / 'content', workspace / 'tools' / 'content')
     shutil.copytree(REPO_ROOT / 'tools' / 'content_open', workspace / 'tools' / 'content_open')
 
     manager = ResourceManager(workspace, app_config=_resource_app_config())
@@ -1831,13 +1824,17 @@ async def test_exec_tool_blocks_skill_file_creation_side_effects(tmp_path: Path)
         manager.close()
 
 
+CONTENT_NAVIGATION_TOOLS = ('content_describe', 'content_search', 'content_open')
+
+
 @pytest.mark.asyncio
 async def test_exec_tool_externalizes_long_stdout(tmp_path: Path):
     workspace = tmp_path / 'workspace'
     (workspace / 'skills').mkdir(parents=True, exist_ok=True)
     (workspace / 'tools').mkdir(parents=True, exist_ok=True)
     shutil.copytree(REPO_ROOT / 'tools' / 'exec', workspace / 'tools' / 'exec')
-    shutil.copytree(REPO_ROOT / 'tools' / 'content', workspace / 'tools' / 'content')
+    for tool_name in CONTENT_NAVIGATION_TOOLS:
+        shutil.copytree(REPO_ROOT / 'tools' / tool_name, workspace / 'tools' / tool_name)
 
     store = SQLiteTaskStore(tmp_path / 'runtime.sqlite3')
     artifact_store = TaskArtifactStore(artifact_dir=tmp_path / 'artifacts', store=store)
@@ -1848,9 +1845,10 @@ async def test_exec_tool_externalizes_long_stdout(tmp_path: Path):
     manager.reload_now(trigger='test-bind')
     try:
         exec_tool = manager.get_tool('exec')
-        content_tool = manager.get_tool('content')
         assert exec_tool is not None
-        assert content_tool is not None
+        # 外部化的 stdout 要能被读回来：单体 content 拆成三个单用途工具后三个都得在。
+        for tool_name in CONTENT_NAVIGATION_TOOLS:
+            assert manager.get_tool(tool_name) is not None
         command = f'{_python_launcher()} -c "for i in range(90): print(\'line-%03d\' % i)"'
         payload = json.loads(await exec_tool.execute(command=command, __g3ku_runtime={'session_key': 'cli:test'}))
         assert payload['status'] == 'success'
@@ -2030,11 +2028,12 @@ async def test_filesystem_tool_rejects_removed_read_actions(tmp_path: Path):
 
 
 @pytest.mark.asyncio
-async def test_content_tool_reads_externalized_artifact_refs(tmp_path: Path):
+async def test_content_split_tools_read_externalized_artifact_refs(tmp_path: Path):
     workspace = tmp_path / 'workspace'
     (workspace / 'skills').mkdir(parents=True, exist_ok=True)
     (workspace / 'tools').mkdir(parents=True, exist_ok=True)
-    shutil.copytree(REPO_ROOT / 'tools' / 'content', workspace / 'tools' / 'content')
+    for tool_name in CONTENT_NAVIGATION_TOOLS:
+        shutil.copytree(REPO_ROOT / 'tools' / tool_name, workspace / 'tools' / tool_name)
 
     store = SQLiteTaskStore(tmp_path / 'runtime.sqlite3')
     artifact_store = TaskArtifactStore(artifact_dir=tmp_path / 'artifacts', store=store)
@@ -2053,13 +2052,18 @@ async def test_content_tool_reads_externalized_artifact_refs(tmp_path: Path):
     manager.bind_service_getter(lambda: {'main_task_service': service})
     manager.reload_now(trigger='test-bind')
     try:
-        tool = manager.get_tool('content')
-        assert tool is not None
-        described = json.loads(await tool.execute(action='describe', ref=f'artifact:{artifact.artifact_id}'))
+        describe_tool = manager.get_tool('content_describe')
+        search_tool = manager.get_tool('content_search')
+        open_tool = manager.get_tool('content_open')
+        assert describe_tool is not None
+        assert search_tool is not None
+        assert open_tool is not None
+        # 原来一次 content(action=...) 调用就能走完的三个动作，现在是三个工具各走一次。
+        described = json.loads(await describe_tool.execute(ref=f'artifact:{artifact.artifact_id}'))
         assert described['handle']['artifact_id'] == artifact.artifact_id
-        searched = json.loads(await tool.execute(action='search', ref=f'artifact:{artifact.artifact_id}', query='needle'))
+        searched = json.loads(await search_tool.execute(ref=f'artifact:{artifact.artifact_id}', query='needle'))
         assert searched['hits'][0]['line'] == 3
-        opened = json.loads(await tool.execute(action='open', ref=f'artifact:{artifact.artifact_id}', around_line=3, window=3))
+        opened = json.loads(await open_tool.execute(ref=f'artifact:{artifact.artifact_id}', around_line=3, window=3))
         assert 'needle' in opened['excerpt']
     finally:
         manager.close()
@@ -2067,7 +2071,7 @@ async def test_content_tool_reads_externalized_artifact_refs(tmp_path: Path):
 
 
 @pytest.mark.asyncio
-async def test_content_tool_anchors_relative_paths(tmp_path: Path):
+async def test_content_search_tool_anchors_relative_paths(tmp_path: Path):
     workspace = tmp_path / 'workspace'
     target_file = workspace / 'relative.log'
     target_file.parent.mkdir(parents=True, exist_ok=True)
@@ -2077,22 +2081,21 @@ async def test_content_tool_anchors_relative_paths(tmp_path: Path):
     (temp_dir / 'scratch.txt').write_text('beta\nneedle\n', encoding='utf-8')
     (workspace / 'skills').mkdir(parents=True, exist_ok=True)
     (workspace / 'tools').mkdir(parents=True, exist_ok=True)
-    shutil.copytree(REPO_ROOT / 'tools' / 'content', workspace / 'tools' / 'content')
+    shutil.copytree(REPO_ROOT / 'tools' / 'content_search', workspace / 'tools' / 'content_search')
 
     manager = ResourceManager(workspace, app_config=_resource_app_config())
     manager.reload_now(trigger='test-bind')
     try:
-        tool = manager.get_tool('content')
+        tool = manager.get_tool('content_search')
         assert tool is not None
 
         # Without a task temp anchor, a bare name resolves against the project root.
-        rooted = json.loads(await tool.execute(action='search', path='relative.log', query='needle'))
+        rooted = json.loads(await tool.execute(path='relative.log', query='needle'))
         assert rooted['ok'] is True
 
         # With the anchor in hand the same bare name belongs to the temp dir instead,
         # and the failure message carries the resolved absolute path.
         shifted = json.loads(await tool.execute(
-            action='search',
             path='relative.log',
             query='needle',
             __g3ku_runtime={'task_temp_dir': str(temp_dir)},
@@ -2101,7 +2104,6 @@ async def test_content_tool_anchors_relative_paths(tmp_path: Path):
         assert str(temp_dir / 'relative.log').lower() in shifted['error'].lower()
 
         parked = json.loads(await tool.execute(
-            action='search',
             path='{temp}/scratch.txt',
             query='needle',
             __g3ku_runtime={'task_temp_dir': str(temp_dir)},
@@ -2110,7 +2112,6 @@ async def test_content_tool_anchors_relative_paths(tmp_path: Path):
 
         # Project-rooted forms still reach the repo file.
         rooted_token = json.loads(await tool.execute(
-            action='search',
             path='{workspace}/relative.log',
             query='needle',
             __g3ku_runtime={'task_temp_dir': str(temp_dir)},
@@ -2121,18 +2122,18 @@ async def test_content_tool_anchors_relative_paths(tmp_path: Path):
 
 
 @pytest.mark.asyncio
-async def test_content_tool_rejects_artifact_refs_in_path_mode(tmp_path: Path):
+async def test_content_search_tool_rejects_artifact_refs_in_path_mode(tmp_path: Path):
     workspace = tmp_path / 'workspace'
     (workspace / 'skills').mkdir(parents=True, exist_ok=True)
     (workspace / 'tools').mkdir(parents=True, exist_ok=True)
-    shutil.copytree(REPO_ROOT / 'tools' / 'content', workspace / 'tools' / 'content')
+    shutil.copytree(REPO_ROOT / 'tools' / 'content_search', workspace / 'tools' / 'content_search')
 
     manager = ResourceManager(workspace, app_config=_resource_app_config())
     manager.reload_now(trigger='test-bind')
     try:
-        tool = manager.get_tool('content')
+        tool = manager.get_tool('content_search')
         assert tool is not None
-        blocked = json.loads(await tool.execute(action='search', path='artifact:artifact:demo123', query='needle'))
+        blocked = json.loads(await tool.execute(path='artifact:artifact:demo123', query='needle'))
         assert blocked['ok'] is False
         assert 'content ref must be passed via ref, not path' in blocked['error']
     finally:
@@ -2140,20 +2141,20 @@ async def test_content_tool_rejects_artifact_refs_in_path_mode(tmp_path: Path):
 
 
 @pytest.mark.asyncio
-async def test_content_tool_reads_absolute_paths_outside_workspace_by_default(tmp_path: Path):
+async def test_content_search_tool_reads_absolute_paths_outside_workspace_by_default(tmp_path: Path):
     workspace = tmp_path / 'workspace'
     outside_file = tmp_path / 'outside.log'
     outside_file.write_text('alpha\nbeta\nneedle\nomega\n', encoding='utf-8')
     (workspace / 'skills').mkdir(parents=True, exist_ok=True)
     (workspace / 'tools').mkdir(parents=True, exist_ok=True)
-    shutil.copytree(REPO_ROOT / 'tools' / 'content', workspace / 'tools' / 'content')
+    shutil.copytree(REPO_ROOT / 'tools' / 'content_search', workspace / 'tools' / 'content_search')
 
     manager = ResourceManager(workspace, app_config=_resource_app_config())
     manager.reload_now(trigger='test-bind')
     try:
-        tool = manager.get_tool('content')
+        tool = manager.get_tool('content_search')
         assert tool is not None
-        searched = json.loads(await tool.execute(action='search', path=str(outside_file), query='needle'))
+        searched = json.loads(await tool.execute(path=str(outside_file), query='needle'))
         assert searched['ok'] is True
         assert searched['hits'][0]['line'] == 3
     finally:
@@ -2161,26 +2162,26 @@ async def test_content_tool_reads_absolute_paths_outside_workspace_by_default(tm
 
 
 @pytest.mark.asyncio
-async def test_content_tool_blocks_absolute_paths_outside_workspace_when_restricted(tmp_path: Path):
+async def test_content_search_tool_blocks_absolute_paths_outside_workspace_when_restricted(tmp_path: Path):
     workspace = tmp_path / 'workspace'
     outside_file = tmp_path / 'outside.log'
     outside_file.write_text('alpha\nbeta\nneedle\nomega\n', encoding='utf-8')
     (workspace / 'skills').mkdir(parents=True, exist_ok=True)
     (workspace / 'tools').mkdir(parents=True, exist_ok=True)
-    shutil.copytree(REPO_ROOT / 'tools' / 'content', workspace / 'tools' / 'content')
+    shutil.copytree(REPO_ROOT / 'tools' / 'content_search', workspace / 'tools' / 'content_search')
 
-    manifest = workspace / 'tools' / 'content' / 'resource.yaml'
+    manifest = workspace / 'tools' / 'content_search' / 'resource.yaml'
     manifest.write_text(
-        manifest.read_text(encoding='utf-8').replace('restrict_to_workspace: false', 'restrict_to_workspace: true'),
+        f'{manifest.read_text(encoding="utf-8")}settings:\n  restrict_to_workspace: true\n',
         encoding='utf-8',
     )
 
     manager = ResourceManager(workspace, app_config=_resource_app_config())
     manager.reload_now(trigger='test-bind')
     try:
-        tool = manager.get_tool('content')
+        tool = manager.get_tool('content_search')
         assert tool is not None
-        blocked = json.loads(await tool.execute(action='search', path=str(outside_file), query='needle'))
+        blocked = json.loads(await tool.execute(path=str(outside_file), query='needle'))
         assert blocked['ok'] is False
         assert 'outside workspace' in blocked['error']
     finally:
@@ -2188,11 +2189,11 @@ async def test_content_tool_blocks_absolute_paths_outside_workspace_when_restric
 
 
 @pytest.mark.asyncio
-async def test_content_tool_rejects_artifact_refs_outside_acceptance_allowlist(tmp_path: Path):
+async def test_content_open_tool_resolves_artifact_refs_without_request_allowlist(tmp_path: Path):
     workspace = tmp_path / 'workspace'
     (workspace / 'skills').mkdir(parents=True, exist_ok=True)
     (workspace / 'tools').mkdir(parents=True, exist_ok=True)
-    shutil.copytree(REPO_ROOT / 'tools' / 'content', workspace / 'tools' / 'content')
+    shutil.copytree(REPO_ROOT / 'tools' / 'content_open', workspace / 'tools' / 'content_open')
 
     store = SQLiteTaskStore(tmp_path / 'runtime.sqlite3')
     artifact_store = TaskArtifactStore(artifact_dir=tmp_path / 'artifacts', store=store)
@@ -2220,20 +2221,17 @@ async def test_content_tool_rejects_artifact_refs_outside_acceptance_allowlist(t
         'task_id': 'task:test',
         'node_id': 'node:acceptance',
         'node_kind': 'acceptance',
-        'enforce_content_ref_allowlist': True,
-        'allowed_content_refs': [f'artifact:{allowed_artifact.artifact_id}'],
     }
 
     manager = ResourceManager(workspace, app_config=_resource_app_config())
     manager.bind_service_getter(lambda: {'main_task_service': service})
     manager.reload_now(trigger='test-bind')
     try:
-        tool = manager.get_tool('content')
+        tool = manager.get_tool('content_open')
         assert tool is not None
 
         opened = json.loads(
             await tool.execute(
-                action='open',
                 ref=f'artifact:{allowed_artifact.artifact_id}',
                 start_line=1,
                 end_line=5,
@@ -2245,27 +2243,29 @@ async def test_content_tool_rejects_artifact_refs_outside_acceptance_allowlist(t
 
         blocked = json.loads(
             await tool.execute(
-                action='open',
                 ref=f'artifact:{blocked_artifact.artifact_id}',
                 start_line=1,
                 end_line=5,
                 __g3ku_runtime=runtime,
             )
         )
-        assert blocked['ok'] is False
-        assert blocked['requested_ref'] == f'artifact:{blocked_artifact.artifact_id}'
-        assert blocked['allowed_refs'] == [f'artifact:{allowed_artifact.artifact_id}']
+        # 合同：内容道不按"本轮请求里出现过的 ref"收口。曾经有这条白名单，但它只挂在
+        # legacy `content` 单体上，而验收节点的对象字典根本不收那个单体——标志位为真的那一侧
+        # 拿不到工具，能拿到工具的那一侧标志恒假。删掉单体时一并摘除，这里钉住"不在名单内
+        # 的 ref 照样打得开"，将来谁再加静默收口会先红在这里。
+        assert blocked['ok'] is True
+        assert 'gamma' in blocked['excerpt']
     finally:
         manager.close()
         store.close()
 
 
 @pytest.mark.asyncio
-async def test_content_tool_accepts_wrapped_content_when_allowlist_uses_wrapper_or_canonical_ref(tmp_path: Path):
+async def test_content_open_tool_accepts_wrapped_content_when_allowlist_uses_wrapper_or_canonical_ref(tmp_path: Path):
     workspace = tmp_path / 'workspace'
     (workspace / 'skills').mkdir(parents=True, exist_ok=True)
     (workspace / 'tools').mkdir(parents=True, exist_ok=True)
-    shutil.copytree(REPO_ROOT / 'tools' / 'content', workspace / 'tools' / 'content')
+    shutil.copytree(REPO_ROOT / 'tools' / 'content_open', workspace / 'tools' / 'content_open')
 
     store = SQLiteTaskStore(tmp_path / 'runtime.sqlite3')
     artifact_store = TaskArtifactStore(artifact_dir=tmp_path / 'artifacts', store=store)
@@ -2292,12 +2292,11 @@ async def test_content_tool_accepts_wrapped_content_when_allowlist_uses_wrapper_
     manager.bind_service_getter(lambda: {'main_task_service': service})
     manager.reload_now(trigger='test-bind')
     try:
-        tool = manager.get_tool('content')
+        tool = manager.get_tool('content_open')
         assert tool is not None
 
         canonical_allowed = json.loads(
             await tool.execute(
-                action='open',
                 ref=wrapped.ref,
                 start_line=1,
                 end_line=5,
@@ -2312,7 +2311,6 @@ async def test_content_tool_accepts_wrapped_content_when_allowlist_uses_wrapper_
         )
         wrapper_allowed = json.loads(
             await tool.execute(
-                action='open',
                 ref=inner.ref,
                 start_line=1,
                 end_line=5,

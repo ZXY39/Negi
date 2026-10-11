@@ -7,11 +7,24 @@ from types import SimpleNamespace
 import yaml
 
 from g3ku.resources.registry import ResourceRegistry
-from main.governance.action_mapper import DEFAULT_TOOL_FAMILIES
+from main.governance.action_mapper import DEFAULT_TOOL_GOVERNANCE
 
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 TOOLS_ROOT = REPO_ROOT / 'tools'
+
+# 工具级 governance 单条允许出现的键；族名和动作列表都不再是合同的一部分。
+GOVERNANCE_KEYS = {
+    'display_name',
+    'description',
+    'risk_level',
+    'destructive',
+    'allowed_roles',
+    'agent_visible',
+    'admin_mode',
+}
+GOVERNANCE_ACTOR_ROLES = {'ceo', 'execution', 'inspection'}
+GOVERNANCE_RISK_LEVELS = {'low', 'medium', 'high'}
 
 
 class _DummyService:
@@ -174,6 +187,55 @@ def test_all_manifest_parameters_have_descriptions():
             assert str(payload.get('description') or '').strip(), f'{manifest_path.parent.name}.{param_name} is missing description'
 
 
+def test_every_tool_manifest_satisfies_the_tool_level_governance_contract():
+    """治理面改成一层后，每个 tools/ 目录都要么带合法的工具级 governance 单条，
+    要么能在默认治理表里按工具名找到；两种都不满足就是漏进管理面的工具。"""
+    manifest_paths = sorted(TOOLS_ROOT.glob('*/resource.yaml'))
+    tool_dirs = sorted(
+        path.name for path in TOOLS_ROOT.iterdir()
+        if path.is_dir() and not path.name.startswith(('__', '.'))
+    )
+    # 完整性：不允许某个工具目录没有 resource.yaml 而悄悄绕开这条合同。
+    assert sorted(path.parent.name for path in manifest_paths) == tool_dirs
+
+    tool_ids: list[str] = []
+    implicit_governance: list[str] = []
+    for manifest_path in manifest_paths:
+        manifest = yaml.safe_load(manifest_path.read_text(encoding='utf-8-sig')) or {}
+        tool_id = str(manifest.get('name') or '').strip()
+        assert tool_id, f'{manifest_path} declares no tool name'
+        tool_ids.append(tool_id)
+
+        governance = manifest.get('governance')
+        if governance is None or governance == {}:
+            implicit_governance.append(tool_id)
+            continue
+
+        assert isinstance(governance, dict), f'{manifest_path}.governance must be one tool-level mapping'
+        # 族 + 动作两层已取消：任何回指族名或动作列表的字段都算回归。
+        for banned in ('family', 'actions', 'id', 'label', 'executor_names'):
+            assert banned not in governance, f'{manifest_path}.governance still carries {banned}'
+        unknown = set(governance) - GOVERNANCE_KEYS
+        assert not unknown, f'{manifest_path}.governance has unknown keys: {sorted(unknown)}'
+        assert str(governance.get('display_name') or '').strip(), f'{manifest_path}.governance.display_name is empty'
+        assert str(governance.get('description') or '').strip(), f'{manifest_path}.governance.description is empty'
+        assert governance.get('risk_level') in GOVERNANCE_RISK_LEVELS, f'{manifest_path}.governance.risk_level'
+        assert isinstance(governance.get('destructive'), bool), f'{manifest_path}.governance.destructive'
+        roles = governance.get('allowed_roles')
+        assert isinstance(roles, list) and roles, f'{manifest_path}.governance.allowed_roles must be a role list'
+        assert set(roles) <= GOVERNANCE_ACTOR_ROLES, f'{manifest_path}.governance.allowed_roles: {sorted(roles)}'
+        if 'agent_visible' in governance:
+            assert isinstance(governance['agent_visible'], bool), f'{manifest_path}.governance.agent_visible'
+        if 'admin_mode' in governance:
+            assert governance['admin_mode'] in {'editable', 'readonly_system'}, f'{manifest_path}.governance.admin_mode'
+
+    assert len(tool_ids) == len(set(tool_ids)), 'two tool manifests claim the same tool_id'
+    # 隐式治理的那批必须逐个落在默认表里，反过来默认表也不许留没有资源实现的条目。
+    for tool_id in implicit_governance:
+        assert tool_id in DEFAULT_TOOL_GOVERNANCE, f'{tool_id} has no explicit governance and no default entry'
+    assert set(implicit_governance) == set(DEFAULT_TOOL_GOVERNANCE)
+
+
 def test_recovery_policy_blocks_only_declare_a_boolean_rerun_safe():
     for manifest_path in TOOLS_ROOT.glob('*/resource.yaml'):
         manifest = yaml.safe_load(manifest_path.read_text(encoding='utf-8')) or {}
@@ -184,7 +246,7 @@ def test_recovery_policy_blocks_only_declare_a_boolean_rerun_safe():
         assert isinstance(block.get('rerun_safe'), bool), f'{manifest_path.parent.name}.rerun_safe must be a bool'
 
 
-def test_rerunnable_tool_family_is_exactly_the_declared_list():
+def test_rerunnable_tools_are_exactly_the_declared_list():
     # 这份名单就是"重放这一次调用可证明无危害"的全部范围：加一条要写清理由，
     # 少一条说明某个工具的可重放性被撤掉了。名单外的工具一律交给模型裁定。
     declared = set()
@@ -193,7 +255,6 @@ def test_rerunnable_tool_family_is_exactly_the_declared_list():
         if block.get('rerun_safe') is True:
             declared.add(manifest_path.parent.name)
     assert declared == {
-        'content',
         'content_describe',
         'content_open',
         'content_search',
@@ -254,32 +315,42 @@ def test_recovery_policy_declaration_reaches_the_callable_tool_object(tmp_path):
 
 
 def test_task_runtime_resource_tools_are_self_describing_and_not_host_wrapped():
+    # 一层形状下工具 id 就是执行器名，族名与动作 id 都不再是合同的一部分；
+    # 目录名（*_cn）与工具 id 的对应关系由这张表钉住。
     expected = {
-        'create_async_task_cn': ('create_async_task', 'create_async_task'),
-        'perf_inspect_cn': ('perf_inspect', 'perf_inspect_cn'),
-        'task_append_notice_cn': ('task_append_notice', 'append_notice_cn'),
-        'task_delete_cn': ('task_delete', 'delete_cn'),
-        'task_failed_nodes_cn': ('task_failed_nodes', 'failed_nodes_cn'),
-        'task_fetch_cn': ('task_list', 'list_cn'),
-        'task_node_detail_cn': ('task_node_detail', 'node_detail_cn'),
-        'task_progress_cn': ('task_progress', 'progress_cn'),
-        'task_stats_cn': ('task_stats', 'stats_cn'),
-        'task_summary_cn': ('task_summary', 'summary_cn'),
+        'create_async_task_cn': 'create_async_task',
+        'perf_inspect_cn': 'perf_inspect',
+        'task_append_notice_cn': 'task_append_notice',
+        'task_delete_cn': 'task_delete',
+        'task_failed_nodes_cn': 'task_failed_nodes',
+        'task_fetch_cn': 'task_list',
+        'task_node_detail_cn': 'task_node_detail',
+        'task_progress_cn': 'task_progress',
+        'task_stats_cn': 'task_stats',
+        'task_summary_cn': 'task_summary',
     }
-    for tool_dir_name, (tool_name, action_id) in expected.items():
+    tool_ids: list[str] = []
+    for tool_dir_name, tool_id in expected.items():
         manifest = yaml.safe_load((TOOLS_ROOT / tool_dir_name / 'resource.yaml').read_text(encoding='utf-8'))
         governance = manifest.get('governance') or {}
-        action_ids = [str(item.get('id') or '') for item in list(governance.get('actions') or [])]
 
-        assert manifest['name'] == tool_name
-        assert governance.get('family') == 'task_runtime'
-        assert action_id in action_ids
+        assert manifest['name'] == tool_id
+        # 原来靠 family=task_runtime + 不同 action id 区分这批工具；现在每条记录
+        # 自己就是一个工具，区分靠的是互不相同的 tool_id。
+        assert 'family' not in governance, f'{tool_dir_name}.governance still declares a family'
+        assert 'actions' not in governance, f'{tool_dir_name}.governance still declares actions'
+        assert str(governance.get('display_name') or '').strip(), f'{tool_dir_name} has no governance display name'
+        assert set(governance.get('allowed_roles') or []) <= GOVERNANCE_ACTOR_ROLES
+        tool_ids.append(tool_id)
 
+    assert len(set(tool_ids)) == len(tool_ids), 'task runtime tools collapsed onto the same tool_id'
+
+    for tool_dir_name in expected:
         tool_source = (TOOLS_ROOT / tool_dir_name / 'main' / 'tool.py').read_text(encoding='utf-8')
         assert 'main.service.runtime_service' not in tool_source
 
 
-def test_task_runtime_resource_tools_do_not_depend_on_host_action_mapper_entries():
+def test_task_runtime_resource_tools_do_not_depend_on_host_governance_entries():
     hosted = {
         'create_async_task',
         'perf_inspect',
@@ -292,7 +363,7 @@ def test_task_runtime_resource_tools_do_not_depend_on_host_action_mapper_entries
         'task_stats',
         'task_summary',
     }
-    assert hosted.isdisjoint(DEFAULT_TOOL_FAMILIES)
+    assert hosted.isdisjoint(DEFAULT_TOOL_GOVERNANCE)
 
 
 def test_skill_installer_method_description_matches_runtime_strategy():

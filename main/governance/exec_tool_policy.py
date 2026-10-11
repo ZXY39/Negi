@@ -2,8 +2,7 @@ from __future__ import annotations
 
 from typing import Any
 
-EXEC_TOOL_FAMILY_ID = 'exec_runtime'
-EXEC_TOOL_EXECUTOR_NAME = 'exec'
+EXEC_TOOL_ID = 'exec'
 EXECUTION_MODE_METADATA_KEY = 'execution_mode'
 EXECUTION_MODE_GOVERNED = 'governed'
 EXECUTION_MODE_FULL_ACCESS = 'full_access'
@@ -18,7 +17,7 @@ def normalize_exec_execution_mode(value: Any) -> str:
 
 
 def exec_tool_supports_execution_mode(tool_id: Any) -> bool:
-    return str(tool_id or '').strip() == EXEC_TOOL_FAMILY_ID
+    return str(tool_id or '').strip() == EXEC_TOOL_ID
 
 
 def exec_tool_mode_from_settings_payload(settings_payload: dict[str, Any] | None) -> str:
@@ -33,17 +32,17 @@ def exec_tool_mode_from_metadata(metadata: dict[str, Any] | None) -> str:
 
 def resolve_exec_execution_mode(
     *,
-    family: Any | None = None,
+    record: Any | None = None,
     descriptor: Any | None = None,
     settings_payload: dict[str, Any] | None = None,
 ) -> str:
-    family_tool_id = str(getattr(family, 'tool_id', '') or '').strip()
+    record_tool_id = str(getattr(record, 'tool_id', '') or '').strip()
     descriptor_name = str(getattr(descriptor, 'name', '') or '').strip()
-    if family is not None and exec_tool_supports_execution_mode(family_tool_id):
-        metadata = getattr(family, 'metadata', None)
+    if record is not None and exec_tool_supports_execution_mode(record_tool_id):
+        metadata = getattr(record, 'metadata', None)
         if isinstance(metadata, dict) and EXECUTION_MODE_METADATA_KEY in metadata:
             return exec_tool_mode_from_metadata(metadata)
-    if descriptor is not None and descriptor_name == EXEC_TOOL_EXECUTOR_NAME:
+    if descriptor is not None and descriptor_name == EXEC_TOOL_ID:
         metadata = getattr(descriptor, 'metadata', None)
         if isinstance(metadata, dict):
             settings = metadata.get('settings')
@@ -85,13 +84,13 @@ def exec_runtime_policy_payload(
 
 def resolve_exec_runtime_policy_payload(
     *,
-    family: Any | None = None,
+    record: Any | None = None,
     descriptor: Any | None = None,
     settings_payload: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     return exec_runtime_policy_payload(
         mode=resolve_exec_execution_mode(
-            family=family,
+            record=record,
             descriptor=descriptor,
             settings_payload=settings_payload,
         )

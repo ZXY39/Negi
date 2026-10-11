@@ -5623,7 +5623,7 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
         keep_tools: list[str],
         keep_skills: list[str],
     ) -> dict[str, Any]:
-        """前门道的 `keep_*` 收口：正文由主运行时按家族解析渲染，指纹与 `load_tool_context` 同一条。
+        """前门道的 `keep_*` 收口：正文由主运行时按治理记录渲染，指纹与 `load_tool_context` 同一条。
 
         没有裁撤、没有点名、或这条阶段压根没被结清时，返回空快照 + 一句说明：名字无处可写，
         回执必须说清"没留"，不能让模型按参数倒推出"留住了"。
