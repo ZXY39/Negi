@@ -7910,10 +7910,15 @@ textarea {
     color: #4ade80;
 }
 
-/* 没有这条规则时 risk-high 的芯片与 neutral 同色：报警芯片不报警。 */
+/* 没有这条规则时 risk-high 的芯片与 neutral 同色：报警芯片不报警。
+   文字色按主题分档：浅色底上琥珀亮色只有 1.5:1，读不出是警示。 */
 .policy-chip.risk-high {
     border-color: color-mix(in srgb, #f59e0b 42%, transparent);
     background: color-mix(in srgb, #f59e0b 16%, transparent);
+    color: #92400e;
+}
+
+[data-theme="dark"] .policy-chip.risk-high {
     color: #fbbf24;
 }
 
