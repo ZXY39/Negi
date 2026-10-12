@@ -731,7 +731,9 @@ function clickChainRowControl(app, attributeName, value) {
     control.closest = (selector) => (selector.includes(attributeName) ? control : null);
     const handlers = app.U.ceoModelChainList.listeners?.click || [];
     assert.ok(handlers.length >= 1, "链列表应绑定点击处理");
-    handlers[handlers.length - 1]({ target: control, stopPropagation() {} });
+    let stopped = false;
+    handlers[handlers.length - 1]({ target: control, stopPropagation: () => { stopped = true; } });
+    return stopped;
 }
 
 test("点行上的移除只改草稿，不提前发写请求", () => {
@@ -740,7 +742,8 @@ test("点行上的移除只改草稿，不提前发写请求", () => {
     app.bindCeoModelModeControls();
     app.openCeoModelModePanel();
 
-    clickChainRowControl(app, "data-ceo-chain-remove", "beta");
+    // 移除同样会重画列表，必须截断冒泡，否则整个面板会被关掉。
+    assert.equal(clickChainRowControl(app, "data-ceo-chain-remove", "beta"), true);
 
     assert.deepEqual(Array.from(app.ceoModelChainDraft()), ["alpha", "gamma"]);
     assert.equal(app.ceoModelChainDirty(), true);
@@ -748,7 +751,7 @@ test("点行上的移除只改草稿，不提前发写请求", () => {
     assert.deepEqual(writesOf(app), []);
 });
 
-test("加入模型进的是链草稿而不是固定模型", () => {
+test("加入模型走真实点击：截断冒泡、回到链栏、只改草稿", () => {
     const app = loadApp();
     mountControl(app, { chain: ["alpha"] });
     app.bindCeoModelModeControls();
@@ -761,8 +764,18 @@ test("加入模型进的是链草稿而不是固定模型", () => {
     assert.equal(markup.includes('data-ceo-model-pick="beta"'), true);
     assert.equal((markup.match(/data-lucide="plus"/g) || []).length, 2);
 
-    app.appendCeoModelChainMember("beta");
+    const item = new StubHTMLElement();
+    item.attributes = { "data-ceo-model-pick": "beta" };
+    item.getAttribute = (name) => (Object.prototype.hasOwnProperty.call(item.attributes, name) ? item.attributes[name] : null);
+    item.closest = (selector) => (selector.includes("data-ceo-model-pick") ? item : null);
+    let stopped = false;
+    const handlers = app.U.ceoModelPickerList.listeners.click || [];
+    handlers[handlers.length - 1]({ target: item, stopPropagation: () => { stopped = true; } });
 
+    // 处理会重画列表，事件目标随即脱离文档；不截断冒泡就会被「点了面板外」那条全局判定
+    // 关掉整个面板，加进去的成员也跟着被草稿重置掉。
+    assert.equal(stopped, true);
+    assert.equal(app.S.ceoModelSelection.pickerOpen, false);
     assert.deepEqual(Array.from(app.ceoModelChainDraft()), ["alpha", "beta"]);
     assert.equal(app.ceoModelChainDirty(), true);
     assert.equal(app.S.ceoModelSelection.mode, "chain");
@@ -783,4 +796,21 @@ test("删空会话链后应用恢复全局模型链", async () => {
 
     assert.deepEqual(writesOf(app).map((call) => [call[0], call[2].mode, call[2].model_keys]), [["patch", "chain", []]]);
     assert.equal(app.S.ceoModelSelection.isSessionChain, false);
+});
+
+test("切回模型链板块不丢掉刚加入的草稿", () => {
+    const app = loadApp();
+    mountControl(app, { chain: ["alpha", "gamma"] });
+    app.bindCeoModelModeControls();
+    app.openCeoModelModePanel();
+    app.openCeoModelModePicker("append");
+
+    app.appendCeoModelChainMember("beta");
+    assert.equal(app.S.ceoModelSelection.pickerOpen, false, "加完应回到链那一栏");
+
+    // 用户再手动点一次板块，也不能把刚加的成员冲掉。
+    app.showCeoModelChainPane();
+    assert.ok(app.ceoModelChainDraft().includes("beta"));
+    assert.equal(app.ceoModelChainDirty(), true);
+    assert.equal(app.U.ceoModelChainApply.disabled, false);
 });

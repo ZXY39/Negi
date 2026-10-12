@@ -2357,8 +2357,18 @@ function setCeoModelChainDraft(keys) {
 function appendCeoModelChainMember(modelKey) {
     const key = String(modelKey || "").trim();
     if (!key || ceoModelChainDraft().some((item) => String(item) === key)) return;
-    // 留在列表里继续加：加完的成员从可选项里消失，这本身就是反馈。
-    setCeoModelChainDraft([...ceoModelChainDraft(), key]);
+    // 加完回到链那一栏：成员出现在链里才是反馈，把人留在目录列表里只会看到"点了没反应"。
+    S.ceoModelSelection = {
+        ...S.ceoModelSelection,
+        chainKeys: normalizeModelRoleChain([...ceoModelChainDraft(), key]),
+        pickerOpen: false,
+        paneTouched: true,
+        dragFrom: -1,
+        dropIndex: null,
+    };
+    renderCeoModelPicker();
+    renderCeoModelChainPane();
+    syncCeoModelModeControl();
 }
 
 function removeCeoModelChainMember(modelKey) {
@@ -2670,7 +2680,8 @@ function showCeoModelChainPane() {
         // 固定生效时先确认再切回模型链；本来就是模型链则无需确认。
         pendingChainSwitch: !!effectiveKey,
         search: "",
-        chainKeys: ceoModelChainBaseline(),
+        // 板块之间来回切不能丢草稿：只有还没改过时才用生效中的那条链重新打种。
+        chainKeys: ceoModelChainDirty() ? ceoModelChainDraft() : ceoModelChainBaseline(),
         dragFrom: -1,
         dropIndex: null,
     };
@@ -2802,6 +2813,11 @@ function bindCeoModelModeControls() {
     U.ceoModelPickerList?.addEventListener("click", (event) => {
         const target = event.target instanceof Element ? event.target.closest("[data-ceo-model-pick]") : null;
         if (!target || target.disabled) return;
+        // 加入模式会在处理中重画这份列表，事件目标随即脱离文档；而「点了面板外面就关面板」
+        // 那条全局判定用的是 e.target.closest("#ceo-model-mode-panel")，目标一脱离就一律
+        // 返回 null，于是这一下点击会被当成面板外，整个面板被关掉、草稿也被丢弃。
+        // 所以这里必须截断冒泡，而不是指望渲染时机。
+        event.stopPropagation();
         const pickedKey = target.getAttribute("data-ceo-model-pick");
         if (S.ceoModelSelection.pickerPurpose === "append") appendCeoModelChainMember(pickedKey);
         else void saveCeoModelSelection("model", pickedKey);
