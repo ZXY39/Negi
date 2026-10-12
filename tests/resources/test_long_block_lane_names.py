@@ -75,8 +75,13 @@ async def test_append_and_snapshot_lanes_are_named(tmp_path: Path):
     assert {
         'query_service.get_task_snapshot.live_state',
         'query_service.get_task_snapshot.root_node_detail',
-        'query_service.get_task_snapshot.token_rollup',
     } <= sections
+    # 按模型汇总那一格跟着成本搬到了 Token 窗口的窄接口上：冷页扫全任务明细行
+    # （实测 4447 ms）的那位现在只在这条道上出现，快照榜里不该再有它。
+    service.query_service.get_task_token_ledger(record.task_id)
+    ledger_sections = set(recorder.sections)
+    assert 'query_service.get_task_token_ledger.token_rollup' in ledger_sections
+    assert 'query_service.get_task_snapshot.token_rollup' not in sections
 
 
 @pytest.mark.asyncio

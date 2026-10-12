@@ -3309,10 +3309,10 @@ def test_task_projection_tables_are_populated_and_used_for_node_detail(tmp_path:
 
 
 def test_task_detail_summary_exposes_token_usage_by_model(tmp_path: Path):
-    """按模型 token 明细必须能经窄读路径聚合回任务详情 summary。
+    """按模型 token 明细必须能经窄读路径聚合出来，并且只由 Token 窗口的窄接口带。
 
     窄读路径的 json_extract 曾漏掉一层 ``payload.`` 前缀（明细实际嵌在
-    TaskProjectionNodeDetailRecord.payload 内），聚合结果恒为空，任务详情页
+    TaskProjectionNodeDetailRecord.payload 内），聚合结果恒为空，Token 统计窗口
     永远停在“当前只有任务级统计，尚无按模型明细”。
     """
     service = MainRuntimeService(
@@ -3361,11 +3361,20 @@ def test_task_detail_summary_exposes_token_usage_by_model(tmp_path: Path):
     assert detail is not None
     assert detail.payload.get("token_usage_by_model"), "详情投影行未落盘按模型明细"
 
-    snapshot = service.get_task_detail_payload(record.task_id, mark_read=False)
-    assert snapshot is not None
-    by_model = snapshot["summary"]["token_usage_by_model"]
+    # 按模型明细的聚合口现在是 Token 统计窗口的窄接口，不再由任务详情快照带：
+    # 那一格的冷页扫描实测 4447 ms，会拖住"点开任务"（窗口打开时自己取数）。
+    ledger = service.get_task_token_ledger_payload(record.task_id)
+    assert ledger is not None
+    by_model = ledger["token_usage_by_model"]
     assert [item["model_key"] for item in by_model] == ["deepseek-v4-flash-2"]
     assert by_model[0]["input_tokens"] == 120
+
+    snapshot = service.get_task_detail_payload(record.task_id, mark_read=False)
+    assert snapshot is not None
+    assert "token_usage_by_model" not in snapshot["summary"], "快照不该再算这一格"
+    # 任务级计数口留在快照里（明细窗口要靠它说"任务开始以来共 N 次"）；这个 fixture
+    # 没写调用账本行，所以只断口径在场、不断数值。
+    assert isinstance(snapshot["summary"]["total_model_calls"], int)
     assert by_model[0]["output_tokens"] == 60
 
 

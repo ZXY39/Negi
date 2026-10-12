@@ -687,11 +687,10 @@ class TaskQueryService:
             'runnable_node_count': len(list(runtime_summary.get('runnable_node_ids') or [])),
             'waiting_node_count': len(list(runtime_summary.get('waiting_node_ids') or [])),
         }
-        with self._debug_track('query_service.get_task_snapshot.token_rollup'):
-            token_usage_by_model = [
-                item.model_dump(mode='json')
-                for item in self._projection_token_usage_by_model(task.task_id)
-            ]
+        # 按模型明细不在这一档算：它唯一读者是 Token 统计窗口，而窗口现在一打开就自己走
+        # `get_task_token_ledger` 取。实测这一格冷页扫全任务明细行 **4447 ms**（989 行 / 71 MB，
+        # 85% 是存量内联摘要），热态只要 41–105 ms——所以它只在"重启后第一次点开详情"那一下咬人。
+        # 任务级总量走 `task.token_usage`（记录自带），与这一格无关。
         payload = {
             'task': task.model_dump(mode='json'),
             'summary': {
@@ -699,7 +698,6 @@ class TaskQueryService:
                 'status': task.status,
                 'brief': task.brief_text,
                 'updated_at': task.updated_at,
-                'token_usage_by_model': token_usage_by_model,
                 **counts,
             },
             'runtime_summary': runtime_summary,
@@ -722,13 +720,17 @@ class TaskQueryService:
         if task is None:
             return None
         limit = max(1, min(int(model_call_limit or 0), 1000))
+        # 冷页扫全任务明细行的那一格现在只在这条车道上跑（窗口打开/点刷新）。
+        # 段名跟着成本走：它不在快照榜上，就该在这条道自己的榜上。
+        with self._debug_track('query_service.get_task_token_ledger.token_rollup'):
+            per_model = [
+                item.model_dump(mode='json')
+                for item in self._projection_token_usage_by_model(task.task_id)
+            ]
         return {
             'task_id': task.task_id,
             'token_usage': task.token_usage.model_dump(mode='json'),
-            'token_usage_by_model': [
-                item.model_dump(mode='json')
-                for item in self._projection_token_usage_by_model(task.task_id)
-            ],
+            'token_usage_by_model': per_model,
             'model_calls': [
                 item.model_dump(mode='json')
                 for item in self._recent_model_calls(task.task_id, limit=limit)
