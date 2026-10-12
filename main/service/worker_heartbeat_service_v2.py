@@ -55,6 +55,8 @@ _PERF_HISTORY_FIELDS = (
     # 以前这些只存在于 controller 内存里，操作员看到"节点数没变"却读不到是哪条轴拦的。
     'entry_gate_targets',
     'entry_gate_limits',
+    'entry_gate_pool',
+    'entry_gate_reserved',
     'entry_gate_running_total',
     # 「在等请求位」的数是闸口排队，不是 node_queue_waiting：后者量的是过闸之后等
     # 模型 permit 的队列，闸收紧时节点根本走不到那里（实盘 4000 拍里 3986 拍为 0，
@@ -70,7 +72,11 @@ _PERF_HISTORY_FIELDS = (
     'model_rolling_rpm_60s_max',
     'model_rolling_rpm_60s_sum',
     'entry_throughput_rpm_60s',
-    'entry_rpm_at_last_growth',
+    # 抬闸的收益按"换来了回答的那几发"算，不按"发起了多少发"算：后者把 429 重试也计进去
+    # （10-12 实测为完成量的 3–4 倍）。`entry_rpm_at_last_growth` 因这条轴不可信已退役。
+    'entry_completions_60s',
+    'entry_completions_at_last_growth',
+    'entry_binding_seconds',
     'entry_seconds_since_step',
     # 回环连接条数与事件车道计数：套接字耗尽只能在崩溃前从这两个数看到。
     'entry_loopback_established',

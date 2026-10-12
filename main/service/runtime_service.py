@@ -148,6 +148,7 @@ from main.service.task_stall_callback import (
 from main.service.task_stall_notifier import (
     TaskStallNotifier,
     effective_silence_start,
+    running_tool_deadline,
     stall_bucket_minutes,
     stalled_minutes_since,
 )
@@ -248,6 +249,11 @@ _LOOP_CENSUS_TOP_SITES = 10
 _LOOP_CENSUS_POOL_SCAN_EVERY = 5
 _TASK_SUMMARY_RECONCILE_IDLE_SECONDS = 15.0
 _TASK_DELETE_CONFIRM_TTL_SECONDS = 600.0
+# 停滞事件的事实部分要扫同伴任务的调度计数：扫得越多越全，但这条只在真要发事件时跑，
+# 所以按"够判读就停"取小值——8 个占位任务、24 个任务的上限扫描、3 帧现场。
+_STALL_DETAIL_OCCUPIER_LIMIT = 8
+_STALL_DETAIL_OCCUPIER_SCAN_LIMIT = 24
+_STALL_DETAIL_FRAME_LIMIT = 3
 # 删除前等待暂停排空的上限：到期未排空按 task_still_stopping 拒绝，
 # 调用方可在暂停生效后重试；避免无限等待离线/卡死的排空。
 _DELETE_PAUSE_DRAIN_TIMEOUT_SECONDS = 10.0
@@ -5117,6 +5123,120 @@ class MainRuntimeService:
             runtime_state=runtime_state,
         ) == TASK_STALL_REASON_SUSPECTED_STALL
 
+    def _build_task_stall_detail(
+        self,
+        task_id: str,
+        *,
+        runtime_state: dict[str, Any],
+        runtime_meta: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        """停滞事件的**事实**部分：闸位、上游限流、谁占着容量、这一拍卡在哪个相位。
+
+        纪律：这里只写能观测到的量，不写建议。会话拿到"闸 12/12、本任务排队 1、全局排队
+        30、占位任务是 X"之后自己判断要不要动——历史上每次把动作写进事件正文，第二次就会
+        出现"照建议做了反而更慢"的形态（暂停排队方不释放任何格子，恢复还要排队尾）。
+        """
+        meta = dict(runtime_meta if isinstance(runtime_meta, dict) else (self.log_service.read_task_runtime_meta(task_id) or {}))
+        detail: dict[str, Any] = {}
+
+        gate: dict[str, Any] = {}
+        gate['task_running'] = {
+            role: int(value or 0) for role, value in dict(meta.get('dispatch_running') or {}).items()
+        }
+        gate['task_queued'] = {
+            role: int(value or 0) for role, value in dict(meta.get('dispatch_queued') or {}).items()
+        }
+        gate['task_limits'] = {
+            role: int(value or 0) for role, value in dict(meta.get('dispatch_limits') or {}).items()
+        }
+        monitor_snapshot: dict[str, Any] = {}
+        monitor = getattr(self, 'tool_pressure_monitor', None)
+        if monitor is not None:
+            try:
+                monitor_snapshot = dict(monitor.snapshot() or {})
+            except Exception:
+                monitor_snapshot = {}
+        if monitor_snapshot:
+            pool = dict(monitor_snapshot.get('entry_gate_pool') or {})
+            if pool:
+                gate['pool_running'] = int(pool.get('running') or 0)
+                gate['pool_limit'] = int(pool.get('limit') or 0)
+                gate['pool_queued'] = int(pool.get('queued') or 0)
+                gate['pool_ceiling'] = int(pool.get('ceiling') or 0)
+            gate['reserved'] = {
+                role: int(value or 0) for role, value in dict(monitor_snapshot.get('entry_gate_reserved') or {}).items()
+            }
+            gate['binding_seconds'] = round(float(monitor_snapshot.get('entry_binding_seconds') or 0.0), 1)
+        if gate:
+            detail['entry_gate'] = gate
+
+        rate: dict[str, Any] = {}
+        if monitor_snapshot:
+            rate['requests_per_minute'] = float(monitor_snapshot.get('entry_throughput_rpm_60s') or 0.0)
+            rate['completions_per_minute'] = float(monitor_snapshot.get('entry_completions_60s') or 0.0)
+            rate['penalty_429_max'] = float(monitor_snapshot.get('model_rate_penalty_429_max') or 0.0)
+            rate['rolling_rpm_sum'] = int(monitor_snapshot.get('model_rolling_rpm_60s_sum') or 0)
+            rate['local_pressure_state'] = str(monitor_snapshot.get('local_pressure_state') or '')
+            rate['machine_pressure_state'] = str(monitor_snapshot.get('machine_pressure_state') or '')
+            rate['memory_available_bytes'] = int(monitor_snapshot.get('machine_memory_available_bytes') or -1)
+            rate['slot_memory_bytes'] = int(monitor_snapshot.get('entry_slot_memory_bytes') or 0)
+        if rate:
+            detail['upstream_rate'] = rate
+
+        # 谁占着容量：本任务之外、仍在跑的任务各自的闸内/闸外条数。会话要判断"该不该让
+        # 路"，缺的就是这份；只报"资源紧张"而不报谁在吃，等于把决定权交出去又不给依据。
+        occupiers: list[dict[str, Any]] = []
+        try:
+            for other in list(self.store.list_tasks())[: _STALL_DETAIL_OCCUPIER_SCAN_LIMIT]:
+                other_task_id = str(getattr(other, 'task_id', '') or '').strip()
+                if not other_task_id or other_task_id == str(task_id or '').strip():
+                    continue
+                if str(getattr(other, 'status', '') or '').strip().lower() != 'in_progress':
+                    continue
+                other_meta = dict(self.log_service.read_task_runtime_meta(other_task_id) or {})
+                other_running = sum(int(value or 0) for value in dict(other_meta.get('dispatch_running') or {}).values())
+                other_queued = sum(int(value or 0) for value in dict(other_meta.get('dispatch_queued') or {}).values())
+                if other_running <= 0 and other_queued <= 0:
+                    continue
+                occupiers.append(
+                    {
+                        'task_id': other_task_id,
+                        'running': other_running,
+                        'queued': other_queued,
+                        'last_visible_output_at': str(other_meta.get('last_visible_output_at') or ''),
+                    }
+                )
+                if len(occupiers) >= _STALL_DETAIL_OCCUPIER_LIMIT:
+                    break
+        except Exception:
+            occupiers = []
+        if occupiers:
+            detail['occupiers'] = occupiers
+
+        lane: dict[str, Any] = {}
+        distribution = dict(meta.get('distribution') or {})
+        if str(distribution.get('state') or '').strip():
+            lane['distribution_state'] = str(distribution.get('state') or '').strip()
+            lane['distribution_epoch_id'] = str(distribution.get('active_epoch_id') or '').strip()
+        deadline = running_tool_deadline(runtime_state)
+        if deadline is not None:
+            lane['running_tool_deadline'] = deadline.isoformat(timespec='seconds')
+        frames = list(runtime_state.get('frames') or []) if isinstance(runtime_state, dict) else []
+        for frame in frames[: _STALL_DETAIL_FRAME_LIMIT]:
+            if not isinstance(frame, dict):
+                continue
+            lane['frames'] = lane.get('frames') or []
+            lane['frames'].append(
+                {
+                    'node_id': str(frame.get('node_id') or ''),
+                    'phase': str(frame.get('phase') or ''),
+                    'updated_at': str(frame.get('updated_at') or ''),
+                }
+            )
+        if lane:
+            detail['lane'] = lane
+        return detail
+
     def build_task_stall_payload(
         self,
         task_id: str,
@@ -5134,7 +5254,7 @@ class MainRuntimeService:
         stall_reason = self.classify_task_stall_reason(task.task_id, runtime_state=runtime_state)
         if stall_reason != TASK_STALL_REASON_SUSPECTED_STALL:
             return {}
-        visible_at = str(last_visible_output_at or runtime_state.get('last_visible_output_at') or task.created_at or '').strip()
+        visible_at = str(runtime_state.get('last_visible_output_at') or task.created_at or '').strip()
         minute_seconds = float(getattr(self.task_stall_notifier, 'minute_seconds', 60.0) or 60.0)
         # 静默锚点与失速判定保持一致：运行中工具的统一超时截止时间晚于最近可见输出时，
         # 以截止时间计失速时长，工具正常运行期间不计入（详见 heartbeat-system.md「Task Stall Detection」）。
@@ -5143,11 +5263,10 @@ class MainRuntimeService:
         current_bucket = stall_bucket_minutes(baseline_iso, minute_seconds=minute_seconds)
         if current_bucket <= 0:
             return {}
-        active_bucket = max(current_bucket, max(0, int(bucket_minutes or 0)))
-        stalled_minutes = max(
-            stalled_minutes_since(baseline_iso, minute_seconds=minute_seconds),
-            active_bucket,
-        )
+        # 时长必须由事件里印出的那个锚点算出。旧写法把调用方上一拍算好的 bucket 与本拍
+        # 重读的锚点取 max，屏障解除的那一秒两份读数跨在复位写的前后，于是印出
+        # 「最后可见输出＝此刻」＋「已静默 30 分钟」（实盘 task:edf015cc47dc，03:08:33 同秒两档）。
+        stalled_minutes = stalled_minutes_since(baseline_iso, minute_seconds=minute_seconds)
         detail = self.get_task_detail_payload(task.task_id, mark_read=False) or {}
         paused_nodes = [
             {
@@ -5165,13 +5284,14 @@ class MainRuntimeService:
                 'title': str(getattr(task, 'title', '') or task.task_id).strip() or task.task_id,
                 'reason': stall_reason,
                 'stalled_minutes': stalled_minutes,
-                'bucket_minutes': active_bucket,
-                'last_visible_output_at': visible_at,
+                'bucket_minutes': current_bucket,
+                'last_visible_output_at': baseline_iso,
                 'brief_text': str(getattr(task, 'brief_text', '') or '').strip(),
                 'latest_node_summary': self._task_stall_latest_node_summary(detail),
                 'runtime_summary_excerpt': self._task_stall_runtime_summary(detail),
                 'perf_window_summary': self._perf_stall_window_summary(baseline_iso),
                 'paused_nodes': paused_nodes,
+                'stall_detail': self._build_task_stall_detail(task.task_id, runtime_state=runtime_state),
             }
         )
 
@@ -11411,6 +11531,13 @@ class MainRuntimeService:
             'entry_gate_limits': dict(merged.get('entry_gate_limits') or {}),
             'entry_gate_limits_total': int(merged.get('entry_gate_limits_total') or 0),
             'entry_gate_targets': dict(merged.get('entry_gate_targets') or {}),
+            # 共享池本体与各角色保留格：容量不再按角色拆开，判读"谁在等、还能放几格"
+            # 要靠这两份，而不是把两个角色的 limit 相加（那会把同一个池数读两遍）。
+            'entry_gate_pool': dict(merged.get('entry_gate_pool') or {}),
+            'entry_gate_reserved': dict(merged.get('entry_gate_reserved') or {}),
+            'entry_completions_60s': float(merged.get('entry_completions_60s') or 0.0),
+            'entry_completions_at_last_growth': merged.get('entry_completions_at_last_growth'),
+            'entry_binding_seconds': float(merged.get('entry_binding_seconds') or 0.0),
             # 负载均衡：web 进程只能看到 worker 心跳里带上来的快照（balancer 是进程内态）。
             'model_route_groups': list(merged.get('model_route_groups') or []),
             'model_route_config_revision': int(merged.get('model_route_config_revision') or 0),

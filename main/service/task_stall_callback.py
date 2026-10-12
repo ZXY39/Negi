@@ -11,7 +11,6 @@ from main.service.task_terminal_callback import (
     resolve_task_terminal_callback_url,
 )
 
-
 TASK_STALL_CALLBACK_PATH = "/api/internal/task-stall"
 TASK_STALL_REASON_SUSPECTED_STALL = "suspected_stall"
 TASK_STALL_REASON_USER_PAUSED = "user_paused"
@@ -111,6 +110,45 @@ def _normalize_iso(value: Any) -> str:
     return parsed.astimezone(timezone.utc).replace(microsecond=0).isoformat()
 
 
+def _normalize_stall_detail(value: Any) -> dict[str, Any]:
+    """停滞事实细节的收纳口：丢空值、限长，绝不发明读不到时的假数。
+
+    缺哪块就不写哪块（会话据此知道"这一拍没有闸口读数"），不填 0——填 0 会被读成
+    "闸口空闲"，而真实形态常常是"读数取不到"。
+    """
+    payload = value if isinstance(value, dict) else {}
+    detail: dict[str, Any] = {}
+    for key in ("entry_gate", "upstream_rate", "lane"):
+        block = payload.get(key)
+        if not isinstance(block, dict):
+            continue
+        clean = {
+            str(name): (_clip_scalar(inner) if not isinstance(inner, (dict, list)) else inner)
+            for name, inner in block.items()
+            if inner not in (None, "", {}, [])
+        }
+        if clean:
+            detail[str(key)] = clean
+    occupiers = payload.get("occupiers")
+    if isinstance(occupiers, list) and occupiers:
+        detail["occupiers"] = [
+            {
+                "task_id": str(item.get("task_id") or "").strip(),
+                "running": _coerce_positive_int(item.get("running")),
+                "queued": _coerce_positive_int(item.get("queued")),
+            }
+            for item in occupiers[:8]
+            if isinstance(item, dict) and str(item.get("task_id") or "").strip()
+        ]
+    return detail
+
+
+def _clip_scalar(value: Any) -> Any:
+    if isinstance(value, str):
+        return value[:200]
+    return value
+
+
 def normalize_task_stall_reason(value: Any) -> str:
     text = str(value or "").strip().lower()
     return text if text in _TASK_STALL_REASONS else TASK_STALL_REASON_SUSPECTED_STALL
@@ -152,6 +190,11 @@ def normalize_task_stall_payload(payload: dict[str, Any] | None) -> dict[str, An
         "last_visible_output_at": last_visible_output_at,
         "reason": normalize_task_stall_reason(source.get("reason")),
         "brief_text": str(source.get("brief_text") or source.get("briefText") or "").strip(),
+        # 停滞的**事实**细节（闸位/上游限流/谁占容量/卡在哪个相位）。这份只增判读材料，
+        # 不承载动作建议；正文渲染见 `g3ku/heartbeat/prompt_lane.py::_task_stall_lines`。
+        "stall_detail": _normalize_stall_detail(
+            source.get("stall_detail") or source.get("stallDetail")
+        ),
         "latest_node_summary": str(
             source.get("latest_node_summary") or source.get("latestNodeSummary") or ""
         ).strip(),

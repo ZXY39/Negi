@@ -159,10 +159,82 @@ def _task_stall_lines(event: dict[str, Any], retrieval_parts: list[str]) -> list
         ]
         if rendered:
             lines.append(f"  Paused nodes: {', '.join(rendered)}")
+    lines.extend(_task_stall_detail_lines(event.get("stall_detail")))
     lines.extend([
         "  Suggested first step: task_progress(task_id)",
         "  In task_progress output, 'in_progress' means non-terminal, not active; only fresh 运行中/检验中 markers indicate real execution.",
     ])
+    return lines
+
+
+def _task_stall_detail_lines(detail: Any) -> list[str]:
+    """停滞的**事实**行：闸位、上游限流、谁占着容量、卡在哪个相位。
+
+    这里刻意一条建议都不写。把"先暂停任务"之类写进事件正文，会话会照着做，而排队的一方
+    并不占容量（暂停它释放不出任何东西，恢复还要排到队尾）——动作留给拿到这些数的人判断。
+    读不到的块就不写，不填 0：填 0 会被读成"闸口空闲"，而真实形态常常是"这拍没读数"。
+    """
+    if not isinstance(detail, dict):
+        return []
+    lines: list[str] = []
+    gate = detail.get("entry_gate") if isinstance(detail.get("entry_gate"), dict) else {}
+    if gate:
+        pool_running = gate.get("pool_running")
+        pool_limit = gate.get("pool_limit")
+        if pool_running is not None and pool_limit:
+            lines.append(
+                f"  Node-turn gate (shared pool): running {pool_running}/{pool_limit}, "
+                f"waiting {gate.get('pool_queued', 0)}, held {gate.get('binding_seconds', 0)}s"
+            )
+        reserved = gate.get("reserved")
+        if isinstance(reserved, dict) and reserved:
+            lines.append("  Gate reserved per role: " + ", ".join(f"{role}={value}" for role, value in sorted(reserved.items())))
+        task_running = gate.get("task_running")
+        task_queued = gate.get("task_queued")
+        if isinstance(task_running, dict) or isinstance(task_queued, dict):
+            running_text = ", ".join(f"{role}={value}" for role, value in sorted(dict(task_running or {}).items()))
+            queued_text = ", ".join(f"{role}={value}" for role, value in sorted(dict(task_queued or {}).items()))
+            lines.append(f"  This task at the gate: running [{running_text}], waiting [{queued_text}]")
+    rate = detail.get("upstream_rate") if isinstance(detail.get("upstream_rate"), dict) else {}
+    if rate:
+        lines.append(
+            "  Upstream: requests/min {requests_per_minute}, completions/min {completions_per_minute}, "
+            "429 penalty {penalty_429_max}, pressure {local_pressure_state}/{machine_pressure_state}".format(
+                requests_per_minute=rate.get("requests_per_minute", "unknown"),
+                completions_per_minute=rate.get("completions_per_minute", "unknown"),
+                penalty_429_max=rate.get("penalty_429_max", "unknown"),
+                local_pressure_state=rate.get("local_pressure_state", "unknown"),
+                machine_pressure_state=rate.get("machine_pressure_state", "unknown"),
+            )
+        )
+    occupiers = detail.get("occupiers")
+    if isinstance(occupiers, list) and occupiers:
+        lines.append(
+            "  Other in-progress tasks holding capacity: "
+            + ", ".join(
+                f"{item.get('task_id')} (running {item.get('running', 0)}, waiting {item.get('queued', 0)})"
+                for item in occupiers[:8]
+                if isinstance(item, dict)
+            )
+        )
+    lane = detail.get("lane") if isinstance(detail.get("lane"), dict) else {}
+    if lane:
+        state = str(lane.get("distribution_state") or "").strip()
+        if state:
+            lines.append(f"  Distribution barrier active: state={state} epoch={lane.get('distribution_epoch_id') or ''}")
+        deadline = str(lane.get("running_tool_deadline") or "").strip()
+        if deadline:
+            lines.append(f"  A node tool call is still inside its own deadline until: {deadline}")
+        frames = lane.get("frames")
+        if isinstance(frames, list) and frames:
+            lines.append(
+                "  Frame phases at emit time: "
+                + ", ".join(
+                    f"{item.get('node_id')}={item.get('phase') or '?'}@{item.get('updated_at') or '?'}"
+                    for item in frames[:3]
+                    if isinstance(item, dict)
+                )
+            )
     return lines
 
 

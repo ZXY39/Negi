@@ -74,7 +74,13 @@ async def _wait_until(predicate, *, timeout: float = 2.0) -> None:
 
 
 @pytest.mark.asyncio
-async def test_task_node_dispatcher_runs_execution_children_in_parallel_and_respects_limit(tmp_path: Path) -> None:
+async def test_task_node_dispatcher_shares_the_pool_across_roles_and_still_caps_concurrency(tmp_path: Path) -> None:
+    """共享池：执行节点能借走验收那份地板，但同时在飞的回合数仍被池位封顶。
+
+    旧合同里 execution=2 就把执行子节点卡在 2 个并发，哪怕 inspection 那份格子全空
+    （10-12 实盘：`run 5/12` 而 11 个验收节点在闸外，7 格空转）。现在池位是 2+1=3，
+    第 4 个执行节点才要等。
+    """
     service = _make_service(tmp_path)
     record = await _create_task(service)
     task = service.get_task(record.task_id)
@@ -84,9 +90,10 @@ async def test_task_node_dispatcher_runs_execution_children_in_parallel_and_resp
     child_one = _create_execution_child(service, task=task, parent=root, name="child-one")
     child_two = _create_execution_child(service, task=task, parent=root, name="child-two")
     child_three = _create_execution_child(service, task=task, parent=root, name="child-three")
+    child_four = _create_execution_child(service, task=task, parent=root, name="child-four")
 
     dependencies = {
-        root.node_id: [child_one.node_id, child_two.node_id, child_three.node_id],
+        root.node_id: [child_one.node_id, child_two.node_id, child_three.node_id, child_four.node_id],
     }
     starts: dict[str, float] = {}
     finishes: dict[str, float] = {}
@@ -110,13 +117,14 @@ async def test_task_node_dispatcher_runs_execution_children_in_parallel_and_resp
 
     await service.task_actor_service.run_task(record.task_id)
 
-    ordered_children = sorted(
-        [child_one.node_id, child_two.node_id, child_three.node_id],
-        key=lambda item: starts[item],
-    )
-    first_child, second_child, third_child = ordered_children
-    assert starts[second_child] < finishes[first_child]
-    assert starts[third_child] >= min(finishes[first_child], finishes[second_child])
+    children = [child_one.node_id, child_two.node_id, child_three.node_id, child_four.node_id]
+    ordered = sorted(children, key=lambda item: starts[item])
+    first_three = ordered[:3]
+    # 前三个回合彼此重叠地起跑（含借走验收那格的第三个执行节点），不用等谁收尾
+    assert starts[ordered[1]] < finishes[ordered[0]]
+    assert starts[ordered[2]] < min(finishes[first_three[0]], finishes[first_three[1]])
+    # 第四个必须等一格空出来：池位 3 是硬边界，共享不等于放开
+    assert starts[ordered[3]] >= min(finishes[item] for item in first_three)
 
 
 @pytest.mark.asyncio
@@ -183,7 +191,10 @@ async def test_task_node_dispatcher_exposes_dispatch_metrics_in_task_detail_payl
 
     payload = service.get_task_detail_payload(record.task_id, mark_read=False)
     assert payload is not None
-    assert payload["runtime_summary"]["dispatch_limits"] == {"execution": 2, "inspection": 1}
+    # 容量是共享池：地板 execution 2 + inspection 1 ⇒ 池 3。角色键回显同一个池位数
+    # （该角色此刻最多能开到 3 格），池位本身在 dispatch_pool 单独一份。
+    assert payload["runtime_summary"]["dispatch_limits"] == {"execution": 3, "inspection": 3}
+    assert payload["runtime_summary"]["dispatch_pool"] == 3
     assert payload["runtime_summary"]["dispatch_running"] == {"execution": 2, "inspection": 0}
     assert payload["runtime_summary"]["dispatch_queued"] == {"execution": 0, "inspection": 0}
 

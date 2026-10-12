@@ -972,15 +972,15 @@ async def test_entry_gate_follows_published_target_with_slew() -> None:
     await asyncio.sleep(0.05)
     assert not admitted.is_set()
 
-    assert controller.set_entry_targets({'execution': 6}) == {'execution': 4}
+    assert controller.set_entry_targets({'execution': 6})['pool'] == 4
     await asyncio.wait_for(pending, timeout=2)
     assert admitted.is_set()
     # 只动回合闸，不带动工具槽
     assert controller.snapshot()['tool_pressure_target_limit'] == 1
 
-    assert controller.set_entry_targets({'execution': 6}) == {'execution': 6}
-    assert controller.set_entry_targets({'execution': 1}) == {'execution': 5}
-    assert controller.set_entry_targets({'execution': 1}) == {'execution': 4}
+    assert controller.set_entry_targets({'execution': 6})['pool'] == 6
+    assert controller.set_entry_targets({'execution': 1})['pool'] == 5
+    assert controller.set_entry_targets({'execution': 1})['pool'] == 4
 
 
 @pytest.mark.asyncio
@@ -991,7 +991,7 @@ async def test_entry_gate_resets_to_floor_when_queue_drains() -> None:
 
     await controller.acquire_entry_slot(role='execution')
     await controller.acquire_entry_slot(role='execution')
-    assert controller.set_entry_targets({'execution': 9}) == {'execution': 4}
+    assert controller.set_entry_targets({'execution': 9})['pool'] == 4
     snapshot = controller.entry_snapshot()['execution']
     assert snapshot['limit'] == 4
     assert snapshot['running'] == 2
@@ -1135,15 +1135,15 @@ async def test_monitor_grows_entry_gate_toward_headroom_and_records_the_verdict(
 
     # 第一拍还没有"上次抬闸"的吞吐基准，可以直接抬；此后每拍都要证明吞吐在涨
     snapshot = _observe_pressure(monitor, 100.0, throughput_rpm=7.0, **_ROOMY_MEMORY)
-    assert snapshot['entry_gate_limits'] == {'execution': 10}
+    assert snapshot['entry_gate_limits']['pool'] == 10
 
     # 节拍没满（才过 1 拍）时不许再动：一次移动之后要隔满一个反馈周期
     snapshot = _observe_pressure(monitor, 101.0, throughput_rpm=9.0, **_ROOMY_MEMORY)
-    assert snapshot['entry_gate_limits'] == {'execution': 10}
+    assert snapshot['entry_gate_limits']['pool'] == 10
 
     # 满节拍且发起数比上次抬闸时多了 2 次/分（阈值 0.5）⇒ 继续抬
     snapshot = _observe_pressure(monitor, 146.0, throughput_rpm=9.0, **_ROOMY_MEMORY)
-    assert snapshot['entry_gate_limits'] == {'execution': 12}
+    assert snapshot['entry_gate_limits']['pool'] == 12
 
     for task in waiting:
         await asyncio.wait_for(task, timeout=5)
@@ -1162,13 +1162,13 @@ async def test_monitor_does_not_raise_the_entry_gate_without_demand() -> None:
 
     for index in range(6):
         snapshot = _observe_pressure(monitor, 100.0 + index, **_ROOMY_MEMORY)
-    assert snapshot['entry_gate_targets'] == {'execution': 8}
-    assert snapshot['entry_gate_limits'] == {'execution': 8}
+    assert snapshot['entry_gate_targets'] == {'pool': 8}
+    assert snapshot['entry_gate_limits']['pool'] == 8
 
     # 需求一到（排队或占满）才开始抬
     held = [await controller.acquire_entry_slot(role='execution') for _ in range(8)]
     snapshot = _observe_pressure(monitor, 110.0, **_ROOMY_MEMORY)
-    assert snapshot['entry_gate_limits'] == {'execution': 10}
+    assert snapshot['entry_gate_limits']['pool'] == 10
     for _ in held:
         controller.release_entry_slot(role='execution')
 
@@ -1187,8 +1187,8 @@ async def test_monitor_keeps_entry_gate_at_the_floor_when_memory_headroom_is_unr
     await asyncio.sleep(0.05)
     for index in range(4):
         snapshot = _observe_pressure(monitor, 100.0 + index)
-    assert snapshot['entry_gate_targets'] == {'execution': 8}
-    assert snapshot['entry_gate_limits'] == {'execution': 8}
+    assert snapshot['entry_gate_targets']['pool'] == 8
+    assert snapshot['entry_gate_limits']['pool'] == 8
     for task in waiting:
         task.cancel()
     for _ in held:
@@ -1215,8 +1215,8 @@ async def test_monitor_holds_entry_gate_once_an_axis_reaches_its_warn_line() -> 
 
     for index in range(4):
         snapshot = _observe_pressure(monitor, 100.0 + index, lag_ms=300.0, **_ROOMY_MEMORY)
-    assert snapshot['entry_gate_targets'] == {'execution': 8}
-    assert snapshot['entry_gate_limits'] == {'execution': 8}
+    assert snapshot['entry_gate_targets']['pool'] == 8
+    assert snapshot['entry_gate_limits']['pool'] == 8
 
     for task in waiting:
         task.cancel()
@@ -1269,32 +1269,110 @@ def test_monitor_shrinks_an_above_floor_gate_back_to_the_floor_one_slot_per_beat
 
 
 @pytest.mark.asyncio
-async def test_upstream_rate_limit_penalty_holds_the_entry_gate_at_the_floor() -> None:
-    """429 惩罚按实测分布分档：p50=0 / p90=0.18 / p99=4.16 / max=13.57（6255 条路由观测）。
-    越过 1.0 只保持，越过 4.0 也不再抬；两者都止于地板（高于地板时的缓减见下一条用例）。
-    其余四轴此刻仍然安静。"""
+async def test_upstream_rate_limit_penalty_no_longer_pins_the_entry_gate() -> None:
+    """429 惩罚不再参与回合闸的容量判断（操作者 2026-10-12 定）。
+
+    旧合同是"越过 p90(1.0) 只保持、越过 p99(4.0) 缓减"。10-12 的实盘把它现了形：分发屏障
+    那 40 多分钟里 `penalty_429_max` 全程 12.5–23.3，闸被钉在地板 8/4、execution 排队 15–30，
+    而同期完成量 22–36 次/分——这条轴把"该不该给格子"和"上游此刻吃不吃得下"混成了同一个
+    判断，而后者本来就有模型链退避与换槽这条更靠得住的车道在收。现在惩罚只作观测。
+    """
     store = _FakeStore()
     controller = AdaptiveToolBudgetController(normal_limit=6, step_up=1)
     monitor = _entry_target_monitor(controller, store)
     controller.configure_entry_ceilings({'execution': 8})
 
     held = [await controller.acquire_entry_slot(role='execution') for _ in range(8)]
-    waiting = [asyncio.create_task(controller.acquire_entry_slot(role='execution')) for _ in range(2)]
+    waiting = [asyncio.create_task(controller.acquire_entry_slot(role='execution')) for _ in range(4)]
     await asyncio.sleep(0.05)
 
-    for index in range(3):
-        snapshot = _observe_pressure(
-            monitor, 100.0 + index, rate_pressure={'penalty_429_max': 1.5}, **_ROOMY_MEMORY
-        )
-    assert snapshot['entry_gate_limits'] == {'execution': 8}
+    # 惩罚越过旧的 p90 档（1.5）：本地轴安静 ⇒ 照样抬，不再"保持"
+    first = _observe_pressure(monitor, 100.0, rate_pressure={'penalty_429_max': 1.5}, **_ROOMY_MEMORY)
+    assert first['entry_gate_limits']['pool'] == 10
+    # 读数不能因为不再否决就消失：事后要能读出"这一拍闸为什么敢抬、上游当时多挤"
+    assert first['model_rate_penalty_429_max'] == 1.5
 
-    p99 = _observe_pressure(monitor, 150.0, rate_pressure={'penalty_429_max': 5.0}, **_ROOMY_MEMORY)
-    assert p99['entry_gate_limits'] == {'execution': 8}, "地板以下只有磁盘紧急能去"
-    assert p99['entry_gate_targets'] == {'execution': 8}
+    # 惩罚到 p99 档以上（5.0）且持续等待 ⇒ 仍按等待驱动抬
+    heavy = _observe_pressure(monitor, 260.0, rate_pressure={'penalty_429_max': 16.0}, **_ROOMY_MEMORY)
+    assert heavy['entry_gate_limits']['pool'] == 12
+    assert heavy['model_rate_penalty_429_max'] == 16.0
+    # 地板以下只有磁盘紧急能去，这条没变
+    assert heavy['entry_gate_limits']['pool'] >= 8
 
     for task in waiting:
         task.cancel()
+    for _ in range(12):
+        controller.release_entry_slot(role='execution')
     for _ in held:
+        controller.release_entry_slot(role='execution')
+
+
+@pytest.mark.asyncio
+async def test_sustained_waiting_grows_the_pool_even_when_completions_are_flat() -> None:
+    """满载且有等待连续超过 `_ENTRY_WAIT_GROWTH_SECONDS` ⇒ 抬格，完成量平坦也抬。
+
+    这是"等久了就扩"那条新触发线。边际收益判据（完成量必须比上次抬闸时高）仍然在它下面
+    管着没等够的情况——两条路的分工是：短等待要证明值得，长等待先解决"有人在干等"。
+    """
+    from main.runtime.tool_pressure_monitor import _ENTRY_WAIT_GROWTH_SECONDS
+
+    store = _FakeStore()
+    controller = AdaptiveToolBudgetController(normal_limit=6, step_up=1)
+    monitor = _entry_target_monitor(controller, store)
+    controller.configure_entry_ceilings({'execution': 8})
+
+    for _ in range(8):
+        await controller.acquire_entry_slot(role='execution')
+    waiting = [asyncio.create_task(controller.acquire_entry_slot(role='execution')) for _ in range(6)]
+    await asyncio.sleep(0.05)
+
+    # 先抬一次，把完成量基准立起来（bar=9.0）
+    seeded = _observe_pressure(monitor, 100.0, throughput_rpm=9.0, **_ROOMY_MEMORY)
+    assert seeded['entry_completions_at_last_growth'] == 9.0
+
+    # 满节拍但完成量一点没涨、等待还没等够 ⇒ 不抬，反而退一格（山脊搜索照旧）
+    early = _observe_pressure(monitor, 150.0, throughput_rpm=9.0, **_ROOMY_MEMORY)
+    assert early['entry_gate_limits']['pool'] == 9
+    assert float(early['entry_binding_seconds']) < _ENTRY_WAIT_GROWTH_SECONDS
+
+    # 等待连续越线 ⇒ 完成量仍然平坦也继续抬，直到与地板挂钩的硬顶为止
+    limit_sequence = []
+    for index in range(8):
+        snapshot = _observe_pressure(monitor, 300.0 + index * 46.0, throughput_rpm=9.0, **_ROOMY_MEMORY)
+        limit_sequence.append(snapshot['entry_gate_limits']['pool'])
+    assert max(limit_sequence) == 12, f"越线后没抬到硬顶（地板 8 × 1.5）：{limit_sequence}"
+    assert limit_sequence == sorted(limit_sequence), f"越线后出现回头：{limit_sequence}"
+    assert float(snapshot['entry_binding_seconds']) >= _ENTRY_WAIT_GROWTH_SECONDS
+
+    for task in waiting:
+        task.cancel()
+    for _ in range(12):
+        controller.release_entry_slot(role='execution')
+
+
+@pytest.mark.asyncio
+async def test_growth_stays_capped_at_the_hard_ceiling_even_with_long_waiting() -> None:
+    """硬顶：等待再久也不越过地板的 1.5 倍。内存轴在这个现场会放行到 100+ 格
+    （10-12 实测一格 14.6 MB、可用 1.8 GB），所以封顶不能只靠内存读数。"""
+    store = _FakeStore()
+    controller = AdaptiveToolBudgetController(normal_limit=6, step_up=1)
+    monitor = _entry_target_monitor(controller, store)
+    controller.configure_entry_ceilings({'execution': 8})
+
+    for _ in range(8):
+        await controller.acquire_entry_slot(role='execution')
+    waiting = [asyncio.create_task(controller.acquire_entry_slot(role='execution')) for _ in range(30)]
+    await asyncio.sleep(0.05)
+
+    limits = []
+    for index in range(30):
+        snapshot = _observe_pressure(monitor, 100.0 + index * 46.0, throughput_rpm=40.0, **_ROOMY_MEMORY)
+        limits.append(snapshot['entry_gate_limits']['pool'])
+    assert max(limits) == 12, f"越过了 1.5×地板的硬顶：{sorted(set(limits))}"
+
+    for task in waiting:
+        task.cancel()
+    for _ in range(8):
         controller.release_entry_slot(role='execution')
 
 
@@ -1313,20 +1391,20 @@ async def test_entry_gate_backs_off_when_a_wider_gate_buys_no_throughput() -> No
     await asyncio.sleep(0.05)
 
     first = _observe_pressure(monitor, 100.0, throughput_rpm=7.0, **_ROOMY_MEMORY)
-    assert first['entry_gate_limits'] == {'execution': 10}
-    assert first['entry_rpm_at_last_growth'] == 7.0
+    assert first['entry_gate_limits']['pool'] == 10
+    assert first['entry_completions_at_last_growth'] == 7.0
     # 吞吐判据的输入本身也要进历史，否则事后读不出"当时为什么敢抬"
     assert first['model_rolling_rpm_60s_sum'] == 7
     assert first['entry_throughput_rpm_60s'] == 7.0
 
     # 满节拍，但发起数一点没涨（窗口均值 7.05，低于 0.5 的增益门槛）⇒ 不抬，反而退一格
     stalled = _observe_pressure(monitor, 150.0, throughput_rpm=7.1, **_ROOMY_MEMORY)
-    assert stalled['entry_gate_limits'] == {'execution': 9}
+    assert stalled['entry_gate_limits']['pool'] == 9
     # 吞吐基准留在原地：换不来产出的一次抬闸，不能靠"清基准"马上再试一次
-    assert stalled['entry_rpm_at_last_growth'] == 7.0
+    assert stalled['entry_completions_at_last_growth'] == 7.0
 
     rising = _observe_pressure(monitor, 200.0, throughput_rpm=9.0, **_ROOMY_MEMORY)
-    assert rising['entry_gate_limits'] == {'execution': 11}
+    assert rising['entry_gate_limits']['pool'] == 11
 
     for task in waiting:
         task.cancel()
@@ -1335,8 +1413,15 @@ async def test_entry_gate_backs_off_when_a_wider_gate_buys_no_throughput() -> No
 
 
 @pytest.mark.asyncio
-async def test_unproductive_growth_backs_off_to_the_floor_and_stops_there() -> None:
-    """换不来吞吐的退让止于地板：地板是操作员的最低意图，只有越过 critical 线才允许下穿。"""
+async def test_unproductive_growth_holds_at_the_cap_while_nodes_keep_waiting() -> None:
+    """完成量长期平坦、但闸外一直在等人 ⇒ 停在硬顶（地板 ×1.5），不再退穿到地板。
+
+    这条改了旧合同（旧断言是 10→12→14→13→12→11…一路退到 8 停住）。理由不是"边际收益判据
+    错了"，而是它当时读的是**发起量**：10-12 实测那段 rpm 90–138 而完成只有 22–36 次/分，
+    约 70% 的请求是 429 重试——"退让"于是变成拿一批正在干等的节点去换一个被重试撑高的读数。
+    现在判据按完成量算，而"有人持续在闸外等"越线后不再被这条退让路压穿；止于地板、不穿地板
+    这两条不变（下穿只有本地轴 critical 才允许，见 lag 那两条用例）。
+    """
     store = _FakeStore()
     controller = AdaptiveToolBudgetController(normal_limit=6, step_up=1)
     monitor = _entry_target_monitor(controller, store)
@@ -1347,24 +1432,22 @@ async def test_unproductive_growth_backs_off_to_the_floor_and_stops_there() -> N
     waiting = [asyncio.create_task(controller.acquire_entry_slot(role='execution')) for _ in range(6)]
     await asyncio.sleep(0.05)
 
-    # rpm 从 7 跳到 9 后长期平坦：先按"确实涨了"抬几格，随后每节拍退一格，
-    # 退到地板 8 就停住——地板以下只有越过 critical 线才允许去。
     limits = []
     for index in range(24):
         mono = 100.0 + index * 46.0
         rpm = 7.0 if index == 0 else 9.0
         snapshot = _observe_pressure(monitor, mono, throughput_rpm=rpm, **_ROOMY_MEMORY)
-        limits.append(snapshot['entry_gate_limits']['execution'])
+        limits.append(snapshot['entry_gate_limits']['pool'])
 
-    assert limits[:6] == [10, 12, 14, 13, 12, 11]
-    assert min(limits) == 8, f"退让下穿了地板：{limits}"
-    assert limits.count(8) >= 6, f"退到地板后没停住：{limits}"
+    assert limits[:6] == [10, 12, 12, 12, 12, 12], f"等待越线后没停在硬顶：{limits}"
+    assert min(limits) >= 8, f"退让下穿了地板：{limits}"
+    assert max(limits) == 12, f"越过了 1.5×地板的硬顶：{limits}"
     steps = [b - a for a, b in zip(limits, limits[1:])]
     assert all(-1 <= step <= 2 for step in steps), f"单拍跳幅越界：{steps}"
 
     for task in waiting:
         task.cancel()
-    for _ in range(14):
+    for _ in range(12):
         controller.release_entry_slot(role='execution')
 
 
@@ -1417,7 +1500,7 @@ async def test_memory_headroom_caps_entry_growth_but_never_pushes_below_the_floo
         memory_total_bytes=total,
         memory_available_bytes=int(total * 0.12),
     )
-    assert pinned['entry_gate_limits'] == {'execution': 8}
+    assert pinned['entry_gate_limits']['pool'] == 8
 
     roomy = _observe_pressure(
         monitor,
@@ -1425,7 +1508,7 @@ async def test_memory_headroom_caps_entry_growth_but_never_pushes_below_the_floo
         memory_total_bytes=total,
         memory_available_bytes=4 * 1024 ** 3,
     )
-    assert roomy['entry_gate_limits'] == {'execution': 10}
+    assert roomy['entry_gate_limits']['pool'] == 10
 
     for task in waiting:
         await asyncio.wait_for(task, timeout=5)
@@ -1470,7 +1553,11 @@ def test_perf_history_records_why_the_entry_gate_moved() -> None:
         'model_rolling_rpm_60s_max',
         'model_rolling_rpm_60s_sum',
         'entry_throughput_rpm_60s',
-        'entry_rpm_at_last_growth',
+        'entry_completions_60s',
+        'entry_completions_at_last_growth',
+        'entry_binding_seconds',
+        'entry_gate_pool',
+        'entry_gate_reserved',
         'entry_seconds_since_step',
         'tool_pressure_process_cpu_ratio',
     ):
@@ -1495,7 +1582,7 @@ def test_dispatcher_reports_live_entry_gate_limit_not_the_config_floor() -> None
         inspection_limit=1,
         entry_budget=budget,
     )
-    assert dispatcher.snapshot()['dispatch_limits'] == {'execution': 3, 'inspection': 1}
+    assert dispatcher.snapshot()['dispatch_limits'] == {'execution': 4, 'inspection': 4, 'pool': 4}
 
     budget.set_entry_targets({'execution': 5})
     assert dispatcher.snapshot()['dispatch_limits']['execution'] == 5

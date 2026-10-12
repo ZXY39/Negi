@@ -6,6 +6,11 @@ from typing import Any
 
 from main.service.task_stall_callback import task_notice_audience_ok
 
+# 被不可操作原因挡住（分发屏障、暂停、worker 离线）时，定时器必须活着：旧写法直接
+# return，屏障期间的静默就此变成"无人再判"，只有可见输出或屏障解除那次复位能把
+# 它救活——而救活的那一拍会用两份不同时刻读到的锚点，一次同秒齐发两档。
+_STALL_BLOCKED_POLL_SECONDS = 60.0
+
 
 def _parse_iso(value: Any) -> datetime | None:
     text = str(value or "").strip()
@@ -235,8 +240,10 @@ class TaskStallNotifier:
         if callable(is_actionable):
             try:
                 if not bool(is_actionable(key, runtime_state=runtime_state)):
+                    self._schedule_blocked_retry(key)
                     return
             except Exception:
+                self._schedule_blocked_retry(key)
                 return
         elif (
             str(getattr(task, "status", "") or "").strip().lower() != "in_progress"
@@ -244,6 +251,7 @@ class TaskStallNotifier:
             or bool(getattr(task, "pause_requested", False))
             or bool(getattr(task, "cancel_requested", False))
         ):
+            self._schedule_blocked_retry(key)
             return
         last_visible_output_at = str(runtime_state.get("last_visible_output_at") or task.created_at or "").strip()
         if not last_visible_output_at:
@@ -266,6 +274,28 @@ class TaskStallNotifier:
         self._tasks[key] = scheduled
         scheduled.add_done_callback(lambda done_task, stored_key=key: self._cleanup(stored_key, done_task))
 
+    def _schedule_blocked_retry(self, task_id: str) -> None:
+        """屏障/暂停挡住时保持定时器存活：隔一拍再判，别把"屏蔽"做成"停表"。"""
+        key = str(task_id or "").strip()
+        if not key:
+            return
+        self.cancel_task(key)
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            return
+        scheduled = loop.create_task(
+            self._sleep_then_schedule(key, _STALL_BLOCKED_POLL_SECONDS),
+            name=f"task-stall:{key}",
+        )
+        self._tasks[key] = scheduled
+        scheduled.add_done_callback(lambda done_task, stored_key=key: self._cleanup(stored_key, done_task))
+
+    async def _sleep_then_schedule(self, task_id: str, delay_seconds: float) -> None:
+        if delay_seconds > 0:
+            await asyncio.sleep(delay_seconds)
+        self._schedule(task_id)
+
     def _cleanup(self, task_id: str, done_task: asyncio.Task[None]) -> None:
         current = self._tasks.get(task_id)
         if current is done_task:
@@ -285,8 +315,10 @@ class TaskStallNotifier:
         if callable(is_actionable):
             try:
                 if not bool(is_actionable(task_id, runtime_state=runtime_state)):
+                    self._schedule_blocked_retry(task_id)
                     return
             except Exception:
+                self._schedule_blocked_retry(task_id)
                 return
         elif (
             str(getattr(task, "status", "") or "").strip().lower() != "in_progress"
@@ -294,6 +326,7 @@ class TaskStallNotifier:
             or bool(getattr(task, "pause_requested", False))
             or bool(getattr(task, "cancel_requested", False))
         ):
+            self._schedule_blocked_retry(task_id)
             return
         last_visible_output_at = str(runtime_state.get("last_visible_output_at") or task.created_at or "").strip()
         last_bucket_minutes = max(0, int(runtime_state.get("last_stall_notice_bucket_minutes") or 0))

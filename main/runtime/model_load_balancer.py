@@ -116,6 +116,10 @@ class _BucketState:
     request_starts: deque[float] = field(default_factory=deque)
     penalty_events: deque[float] = field(default_factory=deque)
     throttle_events: deque[tuple[float, str]] = field(default_factory=deque)
+    # 换来了回答的完成量（按路由租约成功释放计）。`request_starts` 量的是"发出去多少"，
+    # 429 风暴里它被失败重试撑到实际完成量的 3–4 倍（10-12 实盘：rpm 90–138 vs 完成 22–36
+    # 次/分），拿它判"抬格换没换来吞吐"等于拿重试当吞吐。
+    completions: deque[float] = field(default_factory=deque)
 
 
 @dataclass(slots=True)
@@ -140,6 +144,7 @@ class _MemberMetrics:
     waiting: int = 0
     reserved: int = 0
     rolling_rpm: int = 0
+    rolling_completions: int = 0
     penalty: float = 0.0
     local_capacity: int | None = None
     key_count: int = 1
@@ -369,6 +374,14 @@ class ModelLoadBalancer:
             lease.permit = None
             if permit is not None and self._permit_source is not None:
                 self._permit_source.release(permit)
+            # 完成量只在真的发过请求且这一发换来了回答时计一次；没发出去的 lease
+            # （组内提前耗尽）与失败释放都不算，否则这条轴又会把重试计成产出。
+            if str(outcome or '') == LEASE_OUTCOME_SUCCESS and lease.request_started:
+                now = self._monotonic()
+                for bucket_key in self._buckets_for(lease.model_key):
+                    bucket = self._bucket(bucket_key)
+                    bucket.completions.append(now)
+                    self._trim(bucket.completions, RPM_WINDOW_SECONDS)
 
     def forget_node(self, node_id: str) -> None:
         """节点终态：解除粘滞，下次准入重新按负载选择。"""
@@ -386,17 +399,20 @@ class ModelLoadBalancer:
     # ------------------------------------------------------------------ 诊断
 
     def rate_pressure(self) -> dict[str, Any]:
-        """给回合闸用的聚合上游读数：最大衰减 429 惩罚、最大滚动 RPM，以及跨成员合计的 RPM。
+        """给回合闸用的聚合上游读数：最大衰减 429 惩罚、最大滚动 RPM、滚动 RPM 合计，
+        以及"换来了回答"的完成量合计。
 
         监控每秒调一次，所以这里只取聚合数，不重建 `snapshot()` 那份给人看的完整载荷。
         惩罚本身已在 60 秒半衰（对齐上游的分钟窗口），不需要这里再算窗口。
-        `rolling_rpm_60s_sum` 就是"本进程每分钟实际发起了多少个模型请求"——回合闸用它
-        判断"抬一格有没有换来吞吐"，不另起一套计数器。同一 key 可能挂在多个组里，按
-        model_key 去重后再相加，否则合计会翻倍。
+        回合闸的"抬一格换没换来吞吐"判据用 `rolling_completions_60s_sum`，**不要**退回
+        `rolling_rpm_60s_sum`：后者是"实际发起了多少发"，429 风暴里它把失败重试也计进去，
+        实测能撑到完成量的 3–4 倍（10-12）。同一 key 可能挂在多个组里，按 model_key
+        去重后再相加，否则合计会翻倍。
         """
         penalty_max = 0.0
         rpm_max = 0.0
         rpm_sum = 0
+        completions_sum = 0
         with self._lock:
             seen: set[str] = set()
             for group in self._groups.values():
@@ -409,10 +425,12 @@ class ModelLoadBalancer:
                     penalty_max = max(penalty_max, float(metrics.penalty or 0.0))
                     rpm_max = max(rpm_max, float(metrics.rolling_rpm or 0.0))
                     rpm_sum += int(metrics.rolling_rpm or 0)
+                    completions_sum += int(metrics.rolling_completions or 0)
         return {
             'penalty_429_max': penalty_max,
             'rolling_rpm_60s_max': rpm_max,
             'rolling_rpm_60s_sum': rpm_sum,
+            'rolling_completions_60s_sum': completions_sum,
         }
 
     def snapshot(self, *, group_key: str | None = None, filters: RouteCandidateFilters | None = None) -> dict[str, Any]:
@@ -534,15 +552,22 @@ class ModelLoadBalancer:
     def _metrics(self, model_key: str) -> _MemberMetrics:
         now = self._monotonic()
         rolling = 0
+        completions = 0
         penalty = 0.0
         for bucket_key in self._buckets_for(model_key):
             bucket = self._buckets.get(bucket_key)
             if bucket is None:
                 continue
             rolling += sum(1 for started in bucket.request_starts if now - float(started) <= RPM_WINDOW_SECONDS)
+            completions += sum(1 for done in bucket.completions if now - float(done) <= RPM_WINDOW_SECONDS)
             penalty += sum(_decay(now - float(at), PENALTY_HALF_LIFE_SECONDS) for at in bucket.penalty_events)
 
-        metrics = _MemberMetrics(rolling_rpm=rolling, penalty=float(penalty), reserved=int(self._state(model_key).reserved))
+        metrics = _MemberMetrics(
+            rolling_rpm=rolling,
+            rolling_completions=completions,
+            penalty=float(penalty),
+            reserved=int(self._state(model_key).reserved),
+        )
         if self._permit_source is not None:
             state = dict(self._permit_source.model_state(model_key) or {})
             metrics.running = sum(int(value or 0) for value in dict(state.get("running") or {}).values())

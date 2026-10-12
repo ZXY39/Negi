@@ -281,14 +281,22 @@ class TaskNodeDispatcher:
                 }
             )
         self._entry_budget = entry_budget
-        self._semaphores = {
-            role: (
-                _AdaptiveRoleGate(entry_budget, role)
-                if entry_budget is not None and limit is not None
-                else (asyncio.Semaphore(limit) if limit is not None else None)
-            )
-            for role, limit in self._limits.items()
-        }
+        if entry_budget is not None:
+            # 每角色一个 gate 句柄（release 要按角色归还保留格账本），但格子本身是共享池：
+            # `acquire_entry_slot(role=...)` 在池上判容量与保留格，不再各自封顶。
+            self._semaphores = {
+                role: (_AdaptiveRoleGate(entry_budget, role) if limit is not None else None)
+                for role, limit in self._limits.items()
+            }
+        else:
+            # 没接回合闸的部署（测试/嵌入式）也要共享，否则两个 Semaphore 各自封顶，
+            # 一侧空转另一侧排队——正是拆开算的实盘病灶（10% 的采样拍）。任一角色不限
+            # 时整个池视为不限，保持"这里没有闸门"的原语义。
+            shared_total = sum(int(limit) for limit in self._limits.values() if limit is not None)
+            shared = asyncio.Semaphore(shared_total) if (shared_total > 0 and all(
+                limit is not None for limit in self._limits.values()
+            )) else None
+            self._semaphores = {role: shared for role in self._limits}
         self._entries: dict[str, _DispatchEntry] = {}
         self._closed = False
         self._last_snapshot_fingerprint: tuple[tuple[str, int], ...] | None = None
@@ -308,33 +316,28 @@ class TaskNodeDispatcher:
         }
 
     def _effective_dispatch_limits(self) -> dict[str, int]:
-        """配置值是地板，界面上要读的是闸现在真开到第几格。
+        """活闸位是**共享池**；角色键回显同一个池位数（该角色此刻真的最多能开到这么多）。
 
-        接了回合闸就存活闸位（余量目标每拍推它），没接就回落到配置——两者在无自适应
-        部署里本来就相同。只报地板会让"闸在动"这件事在 UI 上读不出来。
+        接了回合闸就读存活池位（余量目标每拍推它），没接就回落到配置地板。只报地板会让
+        "闸在动"这件事在 UI 上读不出来；而继续报"execution 8 / inspection 4"这种拆开的上限
+        更错——它让人以为验收最多只能同时跑 4 个，实际它能借到整池。磁盘紧急时池位是 0，
+        角色回显也如实是 0。每角色的保留格在 worker 心跳的 `entry_gate_reserved` 里，
+        不在这里重复一份（两处真值迟早分叉）。
         """
+        pool_floor = sum(int(limit) for limit in self._limits.values() if limit is not None)
+        fallback = {**{role: pool_floor for role in self._limits}, 'pool': pool_floor}
         getter = getattr(self._entry_budget, 'entry_snapshot', None)
         if not callable(getter):
-            return dict(self._limits)
+            return fallback
         try:
             live = dict(getter() or {})
         except Exception:
-            return dict(self._limits)
-        effective: dict[str, int | None] = {}
-        for role, limit in self._limits.items():
-            if limit is None:
-                # 不限制该角色：保持原来的键与 None 值，读侧按 0 处理。
-                effective[role] = None
-                continue
-            dim = live.get(str(role))
-            if isinstance(dim, dict) and dim.get('limit') is not None:
-                try:
-                    effective[role] = max(0, int(dim.get('limit') or 0))
-                    continue
-                except (TypeError, ValueError):
-                    pass
-            effective[role] = int(limit)
-        return effective
+            return fallback
+        pool = dict(live.get('pool') or {})
+        if not pool:
+            return fallback
+        pool_limit = max(0, int(pool.get('limit') or 0))
+        return {**{role: pool_limit for role in self._limits}, 'pool': pool_limit}
 
     async def execute_node(self, task_id: str, node_id: str) -> NodeFinalResult:
         normalized_task_id = str(task_id or '').strip()
@@ -392,10 +395,16 @@ class TaskNodeDispatcher:
         if entry.future.done():
             return
         if entry.task is None or entry.task.done():
+            # 重新挂上协程的同时要把"在闸外排队"这件事记账并 publish。旧写法只建任务，
+            # 于是分发释放后根节点在回合闸外排了 40 分钟，而 runtime_meta 仍报
+            # dispatch_running 0 / dispatch_queued 0（实盘 task:edf015cc47dc，10-12），
+            # 界面「调度」与停滞判据都读这份假 0。
+            entry.queued_counted = True
             entry.task = asyncio.create_task(
                 self._run_entry(entry),
                 name=f'task-node-resume:{self._task_id}:{normalized_node_id}',
             )
+            self._publish_dispatch_state()
 
     async def interrupt_node(self, node_id: str, result: NodeFinalResult, *, on_stopped: Any = None) -> None:
         """定向中断一个运行中的节点，用合成结果解析其 future。
@@ -602,8 +611,9 @@ class TaskNodeDispatcher:
     def _publish_dispatch_state(self, *, force: bool = False) -> None:
         snapshot = self.snapshot()
         fingerprint = (
-            ('limits_execution', int(snapshot['dispatch_limits']['execution'] or 0)),
-            ('limits_inspection', int(snapshot['dispatch_limits']['inspection'] or 0)),
+            ('limits_execution', int(snapshot['dispatch_limits'].get('execution') or 0)),
+            ('limits_inspection', int(snapshot['dispatch_limits'].get('inspection') or 0)),
+            ('limits_pool', int(snapshot['dispatch_limits'].get('pool') or 0)),
             ('running_execution', int(snapshot['dispatch_running']['execution'])),
             ('running_inspection', int(snapshot['dispatch_running']['inspection'])),
             ('queued_execution', int(snapshot['dispatch_queued']['execution'])),

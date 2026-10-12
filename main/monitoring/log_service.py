@@ -794,7 +794,7 @@ class TaskLogService:
             'last_visible_output_at': str(last_visible_output_at or '').strip(),
             'last_stall_notice_bucket_minutes': 0,
             'task_temp_dir': self._fallback_task_temp_dir(),
-            'dispatch_limits': {'execution': 0, 'inspection': 0},
+            'dispatch_limits': {'execution': 0, 'inspection': 0, 'pool': 0},
             'dispatch_running': {'execution': 0, 'inspection': 0},
             'dispatch_queued': {'execution': 0, 'inspection': 0},
             'summary_fingerprint': '',
@@ -6152,11 +6152,15 @@ class TaskLogService:
     def _runtime_summary_from_state(self, state: dict[str, Any]) -> dict[str, Any]:
         raw_frames = [item for item in list(state.get('frames') or []) if isinstance(item, dict)]
         frames = raw_frames if state.get('frames_already_public') else [self._public_runtime_frame(item) for item in raw_frames]
+        dispatch_limits = self._sanitize_dispatch_counters(state.get('dispatch_limits'))
+        dispatch_pool = int(dispatch_limits.pop('pool', 0) or 0)
         summary: dict[str, Any] = {
             'active_node_ids': [str(item) for item in list(state.get('active_node_ids') or []) if str(item or '').strip()],
             'runnable_node_ids': [str(item) for item in list(state.get('runnable_node_ids') or []) if str(item or '').strip()],
             'waiting_node_ids': [str(item) for item in list(state.get('waiting_node_ids') or []) if str(item or '').strip()],
-            'dispatch_limits': self._sanitize_dispatch_counters(state.get('dispatch_limits')),
+            'dispatch_limits': dispatch_limits,
+            # 共享池的活闸位：角色那三份不再各自封顶，"闸开到第几格"只有这一个数说得清。
+            'dispatch_pool': dispatch_pool,
             'dispatch_running': self._sanitize_dispatch_counters(state.get('dispatch_running')),
             'dispatch_queued': self._sanitize_dispatch_counters(state.get('dispatch_queued')),
             'governance': self._sanitize_governance_state(state.get('governance')),
@@ -6205,10 +6209,14 @@ class TaskLogService:
     @staticmethod
     def _sanitize_dispatch_counters(payload: Any) -> dict[str, int]:
         counters = dict(payload or {}) if isinstance(payload, dict) else {}
-        return {
+        sanitized = {
             'execution': max(0, int(counters.get('execution') or 0)),
             'inspection': max(0, int(counters.get('inspection') or 0)),
         }
+        # 容量现在是共享池：池位数必须活着穿过这道清洗，否则界面读回的还是拆开的两份。
+        if 'pool' in counters:
+            sanitized['pool'] = max(0, int(counters.get('pool') or 0))
+        return sanitized
 
     @staticmethod
     def _sanitize_model_retry_status(payload: Any) -> dict[str, Any] | None:
