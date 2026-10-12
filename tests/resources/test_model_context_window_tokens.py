@@ -327,14 +327,18 @@ def test_load_config_repairs_a_stale_catalog_window_from_the_llm_config_record(
     parameters = dict(payload.get("parameters") or {})
     assert int(parameters.get("context_window_tokens") or 0) == 128000
     parameters["context_window_tokens"] = 690000
+    # 同一形状的另一个参数：记录改了、副本没跟，加载时必须一起收敛。
+    parameters["request_timeout_seconds"] = 88.5
     payload["parameters"] = parameters
     record_files[0].write_text(json.dumps(payload), encoding="utf-8")
 
     reloaded = ModelManager.load()
 
     assert reloaded.config.get_managed_model("m").context_window_tokens == 690000
+    assert float(reloaded.config.get_managed_model("m").request_timeout_seconds) == 88.5
     saved = json.loads((workspace / ".g3ku" / "config.json").read_text(encoding="utf-8"))
     assert saved["models"]["catalog"][0]["contextWindowTokens"] == 690000
+    assert float(saved["models"]["catalog"][0]["requestTimeoutSeconds"]) == 88.5
 
 
 def test_update_model_window_writes_the_record_and_the_catalog_copy_together(
