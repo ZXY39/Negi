@@ -648,7 +648,7 @@ class TaskQueryService:
                 'active_node_ids': [],
                 'runnable_node_ids': [],
                 'waiting_node_ids': [],
-                'dispatch_limits': {'execution': 0, 'inspection': 0},
+                'dispatch_limits': {'execution': 0, 'inspection': 0, 'pool': 0},
                 'dispatch_running': {'execution': 0, 'inspection': 0},
                 'dispatch_queued': {'execution': 0, 'inspection': 0},
                 'distribution': TaskDistributionState().model_dump(mode='json'),
@@ -1797,6 +1797,8 @@ class TaskQueryService:
         heads = list(self._store.list_task_runtime_frame_heads(task_id) or [])
         runtime_meta = self._log_service.read_task_runtime_meta(task_id) or {}
         dispatch_limits = self._sanitize_dispatch_counters(runtime_meta.get('dispatch_limits'))
+        # 与 log_service._runtime_summary_from_state 同一口径：池位数单独一份。
+        dispatch_pool = int(dispatch_limits.pop('pool', 0) or 0)
         dispatch_running = self._sanitize_dispatch_counters(runtime_meta.get('dispatch_running'))
         dispatch_queued = self._sanitize_dispatch_counters(runtime_meta.get('dispatch_queued'))
         distribution = TaskDistributionState.model_validate(runtime_meta.get('distribution') or {})
@@ -1810,6 +1812,7 @@ class TaskQueryService:
                     dispatch_limits=dispatch_limits,
                     dispatch_running=dispatch_running,
                     dispatch_queued=dispatch_queued,
+                    dispatch_pool=dispatch_pool,
                     frames=[],
                     distribution=distribution,
                 )
@@ -1821,6 +1824,7 @@ class TaskQueryService:
                     dispatch_limits=dispatch_limits,
                     dispatch_running=dispatch_running,
                     dispatch_queued=dispatch_queued,
+                    dispatch_pool=dispatch_pool,
                     frames=[],
                     distribution=distribution,
                 )
@@ -1855,6 +1859,7 @@ class TaskQueryService:
             dispatch_limits=dispatch_limits,
             dispatch_running=dispatch_running,
             dispatch_queued=dispatch_queued,
+            dispatch_pool=dispatch_pool,
             frames=live_frames,
             distribution=distribution,
         )
@@ -1954,10 +1959,14 @@ class TaskQueryService:
     @staticmethod
     def _sanitize_dispatch_counters(payload: Any) -> dict[str, int]:
         counters = dict(payload or {}) if isinstance(payload, dict) else {}
-        return {
+        sanitized = {
             'execution': max(0, int(counters.get('execution') or 0)),
             'inspection': max(0, int(counters.get('inspection') or 0)),
         }
+        # 与 log_service 同一口径：共享池位数不能被这道清洗吃掉。
+        if 'pool' in counters:
+            sanitized['pool'] = max(0, int(counters.get('pool') or 0))
+        return sanitized
 
     @staticmethod
     def _parse_iso_utc(value: Any) -> datetime | None:

@@ -160,6 +160,9 @@ class TaskLiveState(Model):
     dispatch_limits: TaskDispatchCounters = Field(default_factory=TaskDispatchCounters)
     dispatch_running: TaskDispatchCounters = Field(default_factory=TaskDispatchCounters)
     dispatch_queued: TaskDispatchCounters = Field(default_factory=TaskDispatchCounters)
+    # 共享池的活闸位（10-12 起容量不按角色拆开算）。放进 counters 那份会被 running/queued
+    # 一起复制出来，变成两个没有意义的 `pool: 0`。
+    dispatch_pool: int = 0
     frames: list[TaskLiveFrame] = Field(default_factory=list)
     distribution: TaskDistributionState = Field(default_factory=TaskDistributionState)
 
@@ -201,6 +204,7 @@ class TaskRuntimeSummary(Model):
     dispatch_limits: TaskDispatchCounters = Field(default_factory=TaskDispatchCounters)
     dispatch_running: TaskDispatchCounters = Field(default_factory=TaskDispatchCounters)
     dispatch_queued: TaskDispatchCounters = Field(default_factory=TaskDispatchCounters)
+    dispatch_pool: int = 0
     frames: list[TaskLiveFrame] = Field(default_factory=list)
     distribution: TaskDistributionState = Field(default_factory=TaskDistributionState)
 
