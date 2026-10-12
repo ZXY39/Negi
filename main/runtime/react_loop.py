@@ -1841,12 +1841,15 @@ class ReActToolLoop:
                     )
                 if shape_label == 'window-clamped':
                     # 被窗口挤掉：改思考档位治不了它，要核对的是窗口口径本身。
+                    # 这里必须带上这一跳真正绑定的那颗模型（lease 上的选择结果），否则
+                    # 读数只剩"尺子值"一个数，会把人引向链上别的成员。
                     return self._window_integrity_failure(
                         task_id=task.task_id,
                         node_id=node.node_id,
                         response=response,
                         shape_reason=shape_reason,
                         token_preflight_diagnostics=token_preflight_diagnostics,
+                        model_key=str(getattr(node_turn_lease, 'selected_model_ref', '') or ''),
                     )
                 if payload_shape_fault_count >= _PAYLOAD_SHAPE_FAULT_LIMIT:
                     return self._invalid_final_submission_failure(
@@ -5198,27 +5201,47 @@ class ReActToolLoop:
         response: Any,
         shape_reason: str,
         token_preflight_diagnostics: dict[str, Any] | None,
+        model_key: str = '',
     ) -> NodeFinalResult:
         """回包被窗口剩余挤掉时的可恢复暂停。
 
         provider 超窗不报错、只静默裁输出，真值取不到，所以运行时既不改配置也不猜
-        上限：把声明窗口和本节点台账里实测过的最大"输入+输出"并列摆出来，由会话 agent
-        决定按观测值核对配置还是报给用户。
+        上限：把**这一跳实际用的那颗模型**、它自己的声明窗口、发送侧用的那把尺子、以及
+        本节点台账里实测过的最大"输入+输出"并列摆出来，由会话 agent 决定按观测值核对
+        配置还是报给用户。
+
+        为什么必须同时给"这一跳的模型"和"尺子值"：尺子按整条链取（旧实现只读链首），
+        而被裁的是实际接到这一跳的那颗成员。实盘 2026-10-12 task:d07d706989b4
+        node:f5ff329fe004 就是这样被误归因的：事件里只有一个"声明窗口=690000"（那是链首
+        deepseek 的值），而出事那一跳跑在 sensenova（自己声明 390000、实测墙 262144），
+        会话据此去改了三条不相干的模型记录，35 分钟、14 次前门跳，还把一个能装 391,673
+        的成员上限压到了 262,144。
         """
         body = dict(getattr(response, 'provider_request_body', {}) or {})
         usage = dict(getattr(response, 'usage', {}) or {})
         declared_window = int((token_preflight_diagnostics or {}).get('context_window_tokens') or 0)
+        hop_model = str(model_key or '').strip() or str(body.get('model') or '').strip() or 'unknown'
+        hop_window = 0
+        try:
+            config, _revision, _changed = get_runtime_config(force=False)
+            managed = config.get_managed_model(hop_model) if config is not None else None
+            hop_window = int(getattr(managed, 'context_window_tokens', 0) or 0) if managed is not None else 0
+        except Exception:
+            hop_window = 0
         try:
             observed_span = int(self._log_service.max_observed_request_span_tokens(task_id, node_id) or 0)
         except Exception:
             observed_span = 0
         reason = (
-            f'window_integrity_fault: {shape_reason} | sent_max_tokens={provider_body_output_cap(body)} '
-            f'output_tokens={int(usage.get("output_tokens") or 0)} 声明窗口={declared_window} '
+            f'window_integrity_fault: {shape_reason} | 这一跳模型={hop_model} '
+            f'该模型声明窗口={hop_window} 发送尺子(整条链)={declared_window} '
+            f'sent_max_tokens={provider_body_output_cap(body)} '
+            f'output_tokens={int(usage.get("output_tokens") or 0)} '
             f'本节点实测最大(输入+输出)={observed_span}；这一跳被裁到比声明的发送上限更小的值，'
-            '拦住它的是窗口剩余，不是最大输出配置。降思考档位治不了这一类：请核对该模型的 '
-            'context_window_tokens（发送与派单读的是 llm-config 记录 parameters 里那份，模型目录项的 '
-            'contextWindowTokens 只是配置面副本）是否等于观测值，或把这两个数一起报给用户裁决。'
+            '拦住它的是窗口剩余，不是最大输出配置。降思考档位治不了这一类。'
+            '要核对的是"这一跳模型"那一颗的 context_window_tokens（llm-config 记录 '
+            'parameters 里那份，发送与派单都读它）：尺子值来自整条链，可能属于别的成员，'
+            '别拿它去改别的模型。运行时不改配置，请把这几个数报给用户或按观测值改对后再 resume。'
         )
         return self._invalid_final_submission_failure(reason=reason, count=1)
 

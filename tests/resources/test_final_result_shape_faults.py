@@ -1138,5 +1138,10 @@ async def test_react_loop_pauses_on_window_clamped_with_observed_ceiling() -> No
     assert "sent_max_tokens=65536" in result.blocking_reason
     assert "output_tokens=16352" in result.blocking_reason
     assert "本节点实测最大(输入+输出)=262144" in result.blocking_reason
-    assert "contextWindowTokens" in result.blocking_reason
+    # 必须点名"这一跳用的是哪颗模型"和"它自己的声明窗口"：只给尺子值（整条链/链首）会把
+    # 会话引向链上别的成员（实盘据此改错三条记录，见 `_window_integrity_failure` 的说明）。
+    assert "这一跳模型=sens-x" in result.blocking_reason
+    assert "该模型声明窗口=" in result.blocking_reason
+    assert "发送尺子(整条链)=" in result.blocking_reason
+    assert "别拿它去改别的模型" in result.blocking_reason
     assert "[window-clamped]" in logs.error_logs[0]["error_text"]
