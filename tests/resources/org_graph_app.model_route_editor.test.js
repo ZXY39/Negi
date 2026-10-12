@@ -84,6 +84,9 @@ function loadApp(elements = {}, globals = {}) {
             renderModelGroupChainTile,
             renderModelGroupColumn,
             renderModelGroupDialog,
+            loadBalanceGroupWindowSummary,
+            renderLoadBalanceGroupWindowChips,
+            syncLoadBalanceGroupDialogSummary,
             setLoadBalanceGroupDialogField,
             startModelRoleEditing,
             toggleLoadBalanceGroupDialogMember,
@@ -104,10 +107,11 @@ function loadApiClient() {
 
 function catalogItems() {
     // provider_model 各不相同：目录按签名去重，同 provider+同模型会被并成一条别名。
+    // 窗口值故意不齐（m_a 69 万 / m_b 39 万）：组卡的"对齐最小成员"读数要有可判形状。
     return [
-        { key: "m_a", name: "深度V4 快档", enabled: true, provider_model: "openai:model-a" },
-        { key: "m_b", enabled: true, provider_model: "openai:model-b" },
-        { key: "m_emergency", enabled: true, provider_model: "openai:model-c" },
+        { key: "m_a", name: "深度V4 快档", enabled: true, provider_model: "openai:model-a", context_window_tokens: 690000 },
+        { key: "m_b", enabled: true, provider_model: "openai:model-b", context_window_tokens: 390000 },
+        { key: "m_emergency", enabled: true, provider_model: "openai:model-c", context_window_tokens: 390000 },
     ];
 }
 
@@ -534,4 +538,62 @@ test("组卡本体仍然整张可点：查看态也打开配置", () => {
     assert.equal(app.S.modelCatalog.groupDialog.open, true);
     assert.equal(app.S.modelCatalog.groupDialog.editingKey, "g_shared");
     sameJson(app.S.modelCatalog.groupDialog.modelKeys, ["m_a", "m_b"]);
+});
+
+test("链上的组卡点名「窗口对齐」那颗成员，窗口不齐时再给本组最大", () => {
+    const app = loadApp();
+    app.applyModelCatalog(catalogPayload(), { preserveRoleDrafts: false });
+
+    const markup = app.renderModelGroupChainTile("execution", "g_shared", 0, false);
+    assert.match(markup, /窗口对齐 m_b=390000/);
+    assert.match(markup, /本组最大 690000/);
+});
+
+test("组列的组卡同样带窗口对齐读数", () => {
+    const { app, elements } = loadModelPage();
+    app.renderModelGroupColumn();
+    const rows = elements["model-group-list"].innerHTML.split("<article").filter(Boolean);
+    const sharedRow = rows.find((row) => row.includes('data-model-group-key="g_shared"'));
+
+    assert.match(sharedRow, /窗口对齐 m_b=390000/);
+    assert.match(sharedRow, /本组最大 690000/);
+});
+
+test("同组窗口一致时不重复一个相同的「最大」，读不到窗口的成员不参与对齐", () => {
+    const app = loadApp();
+    const payload = catalogPayload();
+    payload.load_balance_groups.g_equal = { enabled: true, max_retry_rounds: 1, model_keys: ["m_b", "m_emergency"] };
+    payload.load_balance_groups.g_unwindowed = { enabled: true, max_retry_rounds: 1, model_keys: ["m_nowindow"] };
+    payload.catalog = [...payload.catalog, { key: "m_nowindow", enabled: true, provider_model: "openai:model-w" }];
+    payload.items = payload.catalog.map((item) => item.key);
+    app.applyModelCatalog(payload, { preserveRoleDrafts: false });
+
+    const equal = app.renderModelGroupChainTile("execution", "g_equal", 0, false);
+    assert.match(equal, /窗口对齐 m_b=390000/);
+    assert.doesNotMatch(equal, /本组最大/);
+    assert.doesNotMatch(app.renderModelGroupChainTile("execution", "g_unwindowed", 1, false), /窗口对齐/);
+});
+
+test("组弹窗的窗口对齐行随勾选更新：压低整组压缩目标的那一刻要看得见", () => {
+    const { app, elements } = loadModelPage();
+    const body = elements["model-group-dialog-body"];
+    const windowsRow = { innerHTML: "" };
+    const countRow = { textContent: "" };
+    body.querySelector = (selector) => {
+        if (selector === "[data-group-dialog-count]") return countRow;
+        if (selector === "[data-group-dialog-windows]") return windowsRow;
+        return null;
+    };
+    app.openLoadBalanceGroupDialog("");
+    app.setLoadBalanceGroupDialogField("name", "g_probe");
+
+    app.toggleLoadBalanceGroupDialogMember("m_a", true);
+    app.syncLoadBalanceGroupDialogSummary();
+    assert.match(windowsRow.innerHTML, /窗口对齐 m_a=690000/);
+    assert.doesNotMatch(windowsRow.innerHTML, /本组最大/);
+
+    app.toggleLoadBalanceGroupDialogMember("m_b", true);
+    app.syncLoadBalanceGroupDialogSummary();
+    assert.match(windowsRow.innerHTML, /窗口对齐 m_b=390000/);
+    assert.match(windowsRow.innerHTML, /本组最大 690000/);
 });
