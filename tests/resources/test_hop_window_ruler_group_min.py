@@ -141,3 +141,56 @@ def test_hop_ruler_stays_silent_when_admission_cannot_predict() -> None:
         assert _loop_with(_PeekController(result))._peek_hop_ruler(node_id="node:1", route_plan=object()) is None
     assert _loop_with(_PeekController(None))._peek_hop_ruler(node_id="node:1", route_plan=None) is None
     assert _loop_with(_PeekController(None, raises=True))._peek_hop_ruler(node_id="node:1", route_plan=object()) is None
+
+
+def _fail_build(monkeypatch) -> None:
+    """链首 provider 建不出来（缺 key、记录坏）这一类身份故障。"""
+
+    def _boom(config, model_key, *, api_key_index=None):
+        _ = config, api_key_index, model_key
+        raise ValueError("Missing API key for managed model binding.")
+
+    monkeypatch.setattr(chat_backend_module, "build_provider_from_model_key", _boom)
+
+
+def test_chain_head_build_failure_keeps_the_known_window(monkeypatch) -> None:
+    """身份构造失败不许把已知窗口一起抹成 0。
+
+    尺子来自模型目录与准入预测，链首可建性是另一根轴。当成 0 交回 `react_loop` 的
+    `context_window_tokens <= 25000` 硬门，这跳会被报成"窗口配置错"，正文指向窗口数字，
+    而真正坏的是密钥——实盘 2026-10-12 满盘把 overlay 截成 0 字节时就是这个形状。
+    """
+    _fail_build(monkeypatch)
+    info = resolve_send_model_context_window_info(
+        config=_config({"m_a": 390000, "m_b": 690000}),
+        model_refs=["m_a", "m_b"],
+    )
+
+    assert info.context_window_tokens == 390000
+    assert "Missing API key" in info.resolution_error
+    assert info.model_key == "m_a"
+    # 身份字段仍是空：不替失败的构造编一个 provider 名出来。
+    assert info.provider_id == ""
+    assert info.provider_model == ""
+
+
+def test_predicted_window_survives_a_chain_head_build_failure(monkeypatch) -> None:
+    """准入已经把目标组报出来了，链首建不出来也不能把它丢掉。"""
+    _fail_build(monkeypatch)
+    info = resolve_send_model_context_window_info(
+        config=_config(None),
+        model_refs=["m_a", "m_b"],
+        target_windows=[690000, 390000],
+    )
+
+    assert info.context_window_tokens == 390000
+    assert "Missing API key" in info.resolution_error
+
+
+def test_nothing_known_still_reports_zero_and_the_build_error(monkeypatch) -> None:
+    """目录读不到、记录也建不出来时保持原形状：0 + 身份故障原话。"""
+    _fail_build(monkeypatch)
+    info = resolve_send_model_context_window_info(config=_config(None), model_refs=["m_a"])
+
+    assert info.context_window_tokens == 0
+    assert "Missing API key" in info.resolution_error
