@@ -3803,13 +3803,14 @@ class SQLiteTaskStore:
         if elapsed_ms < self._SLOW_READ_MS:
             return section
         lane = self._outer_caller()
-        if elapsed_ms >= self._SLOW_READ_EVENT_MS:
-            logger.info(f'slow read: {section} took {elapsed_ms:.0f} ms from={lane}')
-            return f'{section}[from={lane}]'
         key = f'{section}:{lane}'
         if key not in self._slow_read_lanes:
+            # 登记与"首见"日志绑在一起：事件档不能绕过它，否则这块账本会漏掉
+            # 恰好是最慢的那些组合（不变量测试就是盯这个的）。
             self._slow_read_lanes.add(key)
             logger.info(f'slow read: new reader lane section={section} from={lane}')
+        if elapsed_ms >= self._SLOW_READ_EVENT_MS:
+            logger.info(f'slow read: {section} took {elapsed_ms:.0f} ms from={lane}')
         return f'{section}[from={lane}]'
 
     def _record_query_latency(self, section: str, elapsed_ms: float, started_at: str) -> None:
