@@ -270,6 +270,8 @@ const S = {
     taskPerfFreshness: null,
     taskTokenStatsOpen: false,
     taskTokenLedgerRefreshing: false,
+    // 按模型明细是按任务取的：存"这份属于哪个任务"，窗口用它区分还在取数与真的没有。
+    taskTokenLedgerTaskId: "",
     taskErrorLogs: [],
     taskErrorLogOpen: false,
     taskModelCallsPage: 1,

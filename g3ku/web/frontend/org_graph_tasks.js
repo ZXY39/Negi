@@ -1662,6 +1662,10 @@ function setTaskTokenStatsOpen(open) {
     if (!open) return;
     renderTaskTokenStats({ force: true });
     void ensureTaskTokenModelCatalog();
+    // 按模型明细不再由任务详情快照带过来（那一格的冷页扫描会拖住"点开任务"），
+    // 所以窗口一打开就自己取窄接口。先渲染再取数：总量与调用明细手里已经有。
+    // 开窗口带来的这次取数不弹「已刷新」——没人点了刷新，成功反馈是表格填上。
+    void refreshTaskTokenLedger({ quiet: true });
 }
 
 // 模型目录正常在 boot 时已加载；那一次请求失败会让整片 token 统计退化成裸配置 key，
@@ -1787,6 +1791,12 @@ function renderTaskTokenStats(options = {}) {
             `;
         }).join("")
         : '<div class="empty-state task-token-empty">当前只有任务级统计，尚无按模型明细。</div>';
+    // 按模型明细现在由窗口自己取（任务详情快照不再带）。没落到本任务之前说"正在取数"，
+    // 不能套用上面那句——那是在宣称服务端没有这份数据，而它只是在飞。
+    const modelRowsMarkup = String(S.taskTokenLedgerTaskId || "").trim()
+        === String(S.currentTaskId || "").trim()
+        ? rowsMarkup
+        : '<div class="empty-state task-token-empty">按模型明细正在取数…</div>';
     // 快照态即使取回空页也要保留卡片：底栏的「回到最新」是唯一出口。
     const recentCallMarkup = (recentModelCalls.length || modelCallPageMeta.historical)
         ? `
@@ -1816,7 +1826,7 @@ function renderTaskTokenStats(options = {}) {
         : '<div class="empty-state task-token-empty">暂无逐次调用明细。</div>';
     U.taskTokenContent.innerHTML = `
         ${topline}
-        <div class="task-token-model-list">${rowsMarkup}</div>
+        <div class="task-token-model-list">${modelRowsMarkup}</div>
         ${recentCallMarkup}
     `;
 }
@@ -1845,7 +1855,7 @@ function setTaskTokenRefreshBusy(busy) {
 
 // 「刷新」按契约要重新取数，而不是重绘内存：窗口冻结期间 WS 漏掉的行只有取数才补得回。
 // 走窄接口（总量 + 按模型明细 + 最近若干条），整份任务详情带的是全量账本。
-async function refreshTaskTokenLedger() {
+async function refreshTaskTokenLedger({ quiet = false } = {}) {
     const taskId = String(S.currentTaskId || "").trim();
     if (!taskId || S.taskTokenLedgerRefreshing) return;
     S.taskTokenLedgerRefreshing = true;
@@ -1877,8 +1887,11 @@ async function refreshTaskTokenLedger() {
             ? payload.token_usage_by_model
             : (S.taskSummary?.token_usage_by_model || []),
     };
+    // 这份按模型明细属于哪个任务：窗口靠它区分"还在取数"与"真的只有任务级统计"。
+    S.taskTokenLedgerTaskId = taskId;
     S.recentModelCalls = mergeTaskModelCallRows(S.recentModelCalls, rows);
     renderTaskTokenStats({ force: true });
+    if (quiet) return;
     showToast({
         title: "Token 统计已刷新",
         text: `明细已对齐到最近 ${formatTokenCount(rows.length)} 条调用`,
