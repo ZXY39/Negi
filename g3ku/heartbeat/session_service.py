@@ -1396,6 +1396,35 @@ class WebSessionHeartbeatService:
         self._session_manager.save(session)
         return reply_already_persisted
 
+    def _heartbeat_event_text_externalizer(self):
+        """超限事件正文的外置注入点：全文写进 content store，返回 `content_open` 能取回的 ref。
+
+        事件束对正文只做截断，而故障正文的关键句（该核对哪条记录、观测值是多少）写在后半
+        段；取不到存储时返回空串，渲染面如实标"外置不可用"而不是给一个假 ref。
+        """
+        store = getattr(self._main_task_service, "content_store", None)
+        persist = getattr(store, "summarize_for_storage", None)
+        if not callable(persist):
+            return None
+
+        def _externalize(text: str, event: dict[str, Any]) -> str:
+            payload = dict(event or {})
+            runtime = {
+                "task_id": str(payload.get("task_id") or "").strip(),
+                "node_id": str(payload.get("node_id") or "").strip(),
+                "session_key": str(payload.get("session_id") or "").strip(),
+            }
+            _summary, ref = persist(
+                text,
+                runtime=runtime,
+                display_name="heartbeat event text",
+                source_kind="heartbeat_event_text",
+                force=True,
+            )
+            return str(ref or "").strip()
+
+        return _externalize
+
     def _build_heartbeat_user_input(
         self,
         events: list[SessionHeartbeatEvent],
@@ -1415,6 +1444,7 @@ class WebSessionHeartbeatService:
             provider_model="",
             stable_rules_text=stable_rules_text,
             events=[self._enrich_event_payload_for_lane(event) for event in events],
+            output_externalizer=self._heartbeat_event_text_externalizer(),
         )
         # 事件束只包含 [SESSION EVENTS] 段；稳定规则由 heartbeat_stable_rules_text
         # 作为独立 system 消息注入，二者不合并，避免同一回合把规则重复喂给模型。

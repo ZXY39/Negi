@@ -184,7 +184,7 @@ def test_node_error_bundle_omits_failure_class_for_ordinary_errors() -> None:
 
 
 def test_node_error_bundle_keeps_error_excerpt_after_failure_class_slot() -> None:
-    """`Failure class` 插在 Error 之前，长错误正文的 excerpt 分支不能错位。"""
+    """`Failure class` 插在 Error 之前，长错误正文的外置块不能错位。"""
     from g3ku.heartbeat.prompt_lane import build_heartbeat_prompt_lane
 
     lane = build_heartbeat_prompt_lane(
@@ -193,13 +193,125 @@ def test_node_error_bundle_keeps_error_excerpt_after_failure_class_slot() -> Non
         events=[{
             "reason": "task_node_error", "task_id": "task:t", "node_id": "node:n",
             "pause_reason": "error",
-            "error_text": "runtime_fault:exec:AttributeError: " + ("very long " * 900),
+            "error_text": "runtime_fault:exec:AttributeError: " + ("very long " * 900) + "TAIL-SENTENCE",
             "retry_attempt": 1, "retry_cap": 5, "retry_escalated": False,
         }],
     )
     text = str(_field(lane, "event_bundle_text"))
-    assert "Error excerpt:" in text
     assert "Failure class: runtime_fault" in text
+    assert "runtime_fault:exec:AttributeError:" in text
+    # 没有外置道时如实标注，不给一个假 ref，也不许把后半句当成已交付。
+    assert "外置不可用，未内联的部分此刻取不回" in text
+    assert "TAIL-SENTENCE" in text
+    assert text.index("Failure class:") < text.index("runtime_fault:exec:AttributeError:")
+
+
+def test_overflowed_error_text_is_externalized_with_a_retrievable_ref() -> None:
+    """超限正文要全文外置并给可取回的 ref：故障正文的关键句都写在后半段。"""
+    from g3ku.heartbeat.prompt_lane import build_heartbeat_prompt_lane
+
+    calls: list[str] = []
+
+    def _externalize(text: str, event: dict) -> str:
+        calls.append(text)
+        assert str(event.get("node_id") or "") == "node:n"
+        return "artifact:hb-overflow-1"
+
+    long_text = "window_integrity_fault: 开头句 " + ("pad " * 3000) + " 结尾该核对 sensenova 的 context_window_tokens"
+    lane = build_heartbeat_prompt_lane(
+        provider_model="",
+        stable_rules_text="rules",
+        events=[{
+            "reason": "task_node_error", "task_id": "task:t", "node_id": "node:n",
+            "pause_reason": "error", "error_text": long_text,
+        }],
+        output_externalizer=_externalize,
+    )
+    text = str(_field(lane, "event_bundle_text"))
+    assert calls == [long_text], "外置要收到完整正文，不是内联那一段"
+    assert 'content_open(ref="artifact:hb-overflow-1")' in text
+    assert "结尾该核对 sensenova 的 context_window_tokens" in text
+    assert "window_integrity_fault: 开头句" in text
+    # 检索面用头+尾，不能再只带被截断的前半句。
+    assert "结尾该核对 sensenova 的 context_window_tokens" in str(_field(lane, "retrieval_query"))
+
+
+def test_overflow_does_not_grow_the_inline_footprint() -> None:
+    """外置是补回中段，不是放大内联：内联块仍不超过原上限加一行说明。"""
+    from g3ku.heartbeat.prompt_lane import build_heartbeat_prompt_lane
+
+    long_text = "head " + ("x" * 40_000) + " tail"
+    lane = build_heartbeat_prompt_lane(
+        provider_model="",
+        stable_rules_text="rules",
+        events=[{
+            "reason": "task_node_error", "task_id": "task:t", "node_id": "node:n",
+            "pause_reason": "error", "error_text": long_text,
+        }],
+        output_externalizer=lambda text, event: "artifact:hb-2",
+    )
+    bundle = str(_field(lane, "event_bundle_text"))
+    error_block = bundle[bundle.index("  Error:"):]
+    assert len(error_block) <= 4000 + 200
+
+
+def test_within_limit_error_text_stays_fully_inline_and_unexternalized() -> None:
+    from g3ku.heartbeat.prompt_lane import build_heartbeat_prompt_lane
+
+    calls: list[str] = []
+    short = "model_config_fault: 这一跳思考顶满输出"
+    lane = build_heartbeat_prompt_lane(
+        provider_model="",
+        stable_rules_text="rules",
+        events=[{
+            "reason": "task_node_error", "task_id": "task:t", "node_id": "node:n",
+            "pause_reason": "error", "error_text": short,
+        }],
+        output_externalizer=lambda text, event: calls.append(text) or "artifact:never",
+    )
+    text = str(_field(lane, "event_bundle_text"))
+    assert calls == []
+    assert f"Error: {short}" in text
+    assert "content_open" not in text
+
+
+def test_distribution_error_overflow_also_gets_a_ref() -> None:
+    from g3ku.heartbeat.prompt_lane import build_heartbeat_prompt_lane
+
+    lane = build_heartbeat_prompt_lane(
+        provider_model="",
+        stable_rules_text="rules",
+        events=[{
+            "reason": "task_distribution_error", "task_id": "task:t",
+            "error_text": "epoch failed: " + ("pad " * 2000) + "TAIL-CAUSE",
+        }],
+        output_externalizer=lambda text, event: "artifact:hb-dist-1",
+    )
+    text = str(_field(lane, "event_bundle_text"))
+    assert 'content_open(ref="artifact:hb-dist-1")' in text
+    assert "TAIL-CAUSE" in text
+
+
+def test_user_node_supplement_overflow_is_retrievable() -> None:
+    """用户定向补充是验收判据的输入：截掉后半句等于换了一条要求去比对。"""
+    from g3ku.heartbeat.prompt_lane import build_heartbeat_prompt_lane
+
+    lane = build_heartbeat_prompt_lane(
+        provider_model="",
+        stable_rules_text="rules",
+        events=[{
+            "reason": "task_terminal", "task_id": "task:t", "status": "success",
+            "brief_text": "done",
+            "user_node_supplements": [
+                {"node_id": "node:n1", "node_title": "分工变更", "message": "开头 " + ("y" * 20_000) + " 结尾追加：只做只读检查"},
+            ],
+        }],
+        output_externalizer=lambda text, event: "artifact:hb-supp-1",
+    )
+    text = str(_field(lane, "event_bundle_text"))
+    assert 'content_open(ref="artifact:hb-supp-1")' in text
+    assert "结尾追加：只做只读检查" in text
+    assert "结尾追加：只做只读检查" in str(_field(lane, "retrieval_query"))
 
 
 def test_distribution_skipped_event_reads_as_degraded_not_paused() -> None:

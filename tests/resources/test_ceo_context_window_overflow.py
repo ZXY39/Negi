@@ -227,7 +227,9 @@ def test_frontdoor_send_preflight_snapshot_uses_provider_request_preview_tokens(
         raising=False,
     )
 
-    huge_system_prompt = "S" * 40_000
+    # 40k 字符按本地估算只有 ~10,070 token，够不到 25000 窗口算出的 20,000 触发线；
+    # 这条要证的是"发送前预检按最终 provider 请求体估算"，正例必须真的越线。
+    huge_system_prompt = "S" * 120_000
     runtime = SimpleNamespace(
         context=CeoRuntimeContext(
             loop=None,
