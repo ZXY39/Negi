@@ -11314,6 +11314,12 @@ class MainRuntimeService:
             'node_queue_waiting_count': int(payload.get('node_queue_waiting_count') or 0),
             'node_queue_frozen_count': int(payload.get('node_queue_frozen_count') or 0),
             'node_queue_oldest_wait_ms': float(payload.get('node_queue_oldest_wait_ms') or 0.0),
+            # 队头读数：`running=0` 而 `waiting>0` 持续累积时，这两个数直接说出"谁把队列
+            # 钉住、为什么"，不必再去挖日志（2026-10-12 那次 0 次授予、零错误行、110 分钟）。
+            'node_queue_head_pinned_seconds': float(payload.get('node_queue_head_pinned_seconds') or 0.0),
+            'node_queue_head_busy_reason': str(payload.get('node_queue_head_busy_reason') or ''),
+            'node_queue_head_node_id': str(payload.get('node_queue_head_node_id') or ''),
+            'node_queue_head_required_window': int(payload.get('node_queue_head_required_window') or 0),
         }
 
     def _node_turn_gate_allowed(self) -> bool:
@@ -11522,6 +11528,11 @@ class MainRuntimeService:
             'node_queue_running_count': int(merged.get('node_queue_running_count') or 0),
             'node_queue_waiting_count': int(merged.get('node_queue_waiting_count') or 0),
             'node_queue_oldest_wait_ms': float(merged.get('node_queue_oldest_wait_ms') or 0.0),
+            # 队头被钉住时，界面要能读出"钉住的是谁、为什么"，否则这条车道只能靠取证。
+            'node_queue_head_pinned_seconds': float(merged.get('node_queue_head_pinned_seconds') or 0.0),
+            'node_queue_head_busy_reason': str(merged.get('node_queue_head_busy_reason') or ''),
+            'node_queue_head_node_id': str(merged.get('node_queue_head_node_id') or ''),
+            'node_queue_head_required_window': int(merged.get('node_queue_head_required_window') or 0),
             # 回合闸：面板上「等待请求位」的那个数是闸口排队，不是 node_queue_waiting
             # （后者过闸之后才计）。这些键只活在 worker 心跳的 raw payload 里时，
             # 顶层契约与前端都读不到，闸贴顶排队的窗口在界面上就显示成 0 等待。

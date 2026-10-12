@@ -135,11 +135,7 @@ def resolve_send_model_context_window_info(
             context_window_tokens=0,
             resolution_error=str(exc or exc.__class__.__name__).strip() or exc.__class__.__name__,
         )
-    raw = dict(getattr(target, "model_parameters", {}) or {}).get("context_window_tokens")
-    try:
-        context_window_tokens = int(raw or 0)
-    except (TypeError, ValueError):
-        context_window_tokens = 0
+    context_window_tokens = _chain_widest_context_window_tokens(config=config, refs=refs, first_target=target)
     provider_id = str(getattr(target, "provider_id", "") or "").strip()
     resolved_model = str(getattr(target, "model_id", "") or "").strip()
     provider_model = f"{provider_id}:{resolved_model}" if provider_id and resolved_model else model_key
@@ -152,6 +148,40 @@ def resolve_send_model_context_window_info(
         context_window_tokens=max(0, int(context_window_tokens or 0)),
         resolution_error=resolution_error,
     )
+
+
+def _chain_widest_context_window_tokens(
+    *,
+    config: Config,
+    refs: list[str],
+    first_target: Any,
+) -> int:
+    """整条链上只要有一处塞得下就算塞得下：取最大窗口，而不是只看链首那一个。
+
+    压缩发生在选择之前，而选择是"链上任何候选都算数"。以前窗口读 `refs[0]`，图片能力
+    却按整条链取保守交集（`model_route.RouteCandidateFilters` 的注释写明），同一件事两种
+    保守度：链首声明 69 万、后面成员只有 39 万时，压缩永远不动手，请求攒到没人塞得下
+    才进准入（2026-10-12 task:d07d706989b4 停摆 110 分钟）。
+    """
+    widest = 0
+    for index, ref in enumerate(refs):
+        value = 0
+        try:
+            managed = config.get_managed_model(ref)
+            value = int(getattr(managed, "context_window_tokens", 0) or 0) if managed is not None else 0
+        except Exception:
+            value = 0
+        if value <= 0:
+            # 不是受管键（或那份没值）：回落到 provider 记录那一本。
+            try:
+                target = first_target if index == 0 else build_provider_from_model_key(config, ref)
+                raw = dict(getattr(target, "model_parameters", {}) or {}).get("context_window_tokens")
+                value = int(raw or 0)
+            except Exception:
+                value = 0
+        if value > widest:
+            widest = value
+    return max(0, widest)
 
 
 def resolve_send_model_context_window_tokens(

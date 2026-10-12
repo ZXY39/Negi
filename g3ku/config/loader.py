@@ -800,6 +800,61 @@ def build_project_config_from_example(example_path: Path | None = None) -> Confi
     return Config.model_validate(_migrate_config(_load_json_text(raw, source)))
 
 
+def _sync_catalog_parameters_from_records(cfg: Config) -> list[tuple[str, str, object, object]]:
+    """把模型目录里从 llm-config 记录镜像过来的参数对回记录那本；记录才是操作员填的那一本。
+
+    目录项里的 `contextWindowTokens` 与 `requestTimeoutSeconds` 都只是副本。走模型编辑那条道
+    （`facade.update_binding`）时两份会一起写回；只写记录的那条道（`PUT /llm/configs/{config_id}`
+    → `update_config_record`）碰不到副本，于是留下分叉：派单读副本、发送压缩读记录，落在两个数
+    中间的那段体量既不触发压缩也没有成员塞得下，请求就把共享回合队列的队头独占成只剩它自己
+    （task:d07d706989b4 那次整机停摆 110 分钟、零错误行）。所以每次加载都按记录重算副本——
+    它是缓存，不是第二处真值。
+
+    记录读不到、或记录里那一项没有值时保留副本：让一个不可用的记录存储把已配好的模型全打成
+    "窗口未知"，比一份陈旧的副本更糟。
+    """
+    from loguru import logger
+
+    diverged: list[tuple[str, str, object, object]] = []
+    try:
+        from g3ku.llm_config.facade import LLMConfigFacade
+
+        facade = LLMConfigFacade(cfg.workspace_path)
+    except Exception:
+        return diverged
+    for item in list(cfg.models.catalog or []):
+        config_id = str(getattr(item, "llm_config_id", "") or "").strip()
+        if not config_id:
+            continue
+        try:
+            record = facade.repository.get(config_id)
+            parameters = dict(getattr(record, "parameters", None) or {})
+        except Exception:
+            continue
+        for field, caster in (("context_window_tokens", int), ("request_timeout_seconds", float)):
+            try:
+                resolved = caster(parameters.get(field) or 0)
+            except (TypeError, ValueError):
+                continue
+            if resolved <= 0:
+                continue
+            try:
+                current = caster(getattr(item, field, None) or 0)
+            except (TypeError, ValueError):
+                current = 0
+            if current == resolved:
+                continue
+            diverged.append((str(getattr(item, "key", "") or ""), field, current, resolved))
+            setattr(item, field, resolved)
+    if diverged:
+        logger.warning(
+            "Model catalog copies of llm-config parameters were stale and were re-synced: {}{}",
+            "; ".join(f"{key}.{field}: catalog={before} record={after}" for key, field, before, after in diverged[:10]),
+            "" if len(diverged) <= 10 else f" (+{len(diverged) - 10} more)",
+        )
+    return diverged
+
+
 def load_config(config_path: Path | None = None) -> Config:
     """Load configuration from the project-local config file."""
     expected_path = get_config_path().resolve()
@@ -831,6 +886,9 @@ def load_config(config_path: Path | None = None) -> Config:
     migrated = _migrate_config(with_overlay)
     cfg = Config.model_validate(migrated)
     _ensure_runtime_fields_explicit(migrated, cfg)
+    # 窗口与请求超时这类"界面上只填一次、系统里存两本"的参数，每次加载都按记录重算副本。
+    if _sync_catalog_parameters_from_records(cfg):
+        changed = True
     if changed or _raw_uses_inline_model_payload(raw_data):
         save_config(cfg, expected_path)
     return cfg

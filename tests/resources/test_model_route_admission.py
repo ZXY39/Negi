@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import time
 
 import pytest
 
@@ -15,7 +16,12 @@ from main.runtime.model_route import (
     RouteCandidateFilters,
     RouteMemberView,
 )
-from main.runtime.node_turn_controller import SKIP_AGING_LIMIT, NodeTurnController
+from main.runtime.node_turn_controller import (
+    HEAD_PIN_LIMIT_SECONDS,
+    SKIP_AGING_LIMIT,
+    NodeTurnController,
+    NodeTurnUnservableError,
+)
 
 
 def _group(group_key: str, *keys: str, max_rounds: int = 1) -> ResolvedLoadBalanceGroup:
@@ -250,5 +256,109 @@ async def test_aged_request_becomes_a_barrier_against_head_of_line_starvation() 
         assert granted_aged.node_id == "node:aged"
         for lease in later_grants:
             turn_controller.release_turn(lease)
+    finally:
+        await turn_controller.close()
+
+
+@pytest.mark.asyncio
+async def test_request_wider_than_every_candidate_is_rejected_before_it_can_pin_the_queue() -> None:
+    """体量比链上任何候选都大的请求：入队前就结清，队列长度一根毛都不涨。
+
+    实盘形状（2026-10-12 task:d07d706989b4）：392,742 的单 vs 390,000 的成员窗口，
+    入队后被越过 4 次成队头独占，11:55:29 之后整机 0 次授予、零错误行、110 分钟。
+    """
+    group = _group("g1", "m_a", "m_b")
+    turn_controller, _controller, _balancer = _harness(group, limit=None)
+    plan = ModelRoutePlan(routes=[_group_route(0, group)], config_revision=1)
+    try:
+        with pytest.raises(NodeTurnUnservableError) as raised:
+            await turn_controller.acquire_turn(
+                task_id="task:1",
+                node_id="node:wide",
+                route_plan=plan,
+                filters=RouteCandidateFilters(required_context_window_tokens=250000),
+            )
+        assert raised.value.reason == "no_candidate"
+        assert raised.value.required_window_tokens == 250000
+        assert raised.value.largest_candidate_window_tokens == 200000
+        assert turn_controller.snapshot()["node_queue_waiting_count"] == 0
+    finally:
+        await turn_controller.close()
+
+
+@pytest.mark.asyncio
+async def test_route_pointing_at_a_missing_group_is_rejected_as_unservable() -> None:
+    group = _group("g1", "m_a")
+    turn_controller, _controller, _balancer = _harness(group, limit=None)
+    ghost = _group("gone", "m_x")
+    plan = ModelRoutePlan(routes=[_group_route(0, ghost)], config_revision=1)
+    try:
+        with pytest.raises(NodeTurnUnservableError) as raised:
+            await turn_controller.acquire_turn(task_id="task:1", node_id="node:1", route_plan=plan)
+        assert raised.value.reason == "unknown_group"
+        assert turn_controller.snapshot()["node_queue_waiting_count"] == 0
+    finally:
+        await turn_controller.close()
+
+
+@pytest.mark.asyncio
+async def test_placeable_but_busy_request_still_queues_and_reports_capacity_reason() -> None:
+    group = _group("g1", "m_a")
+    turn_controller, _controller, _balancer = _harness(group, limit=1)
+    plan = ModelRoutePlan(routes=[_group_route(0, group)], config_revision=1)
+    try:
+        holder = await asyncio.wait_for(
+            turn_controller.acquire_turn(task_id="task:1", node_id="node:a", route_plan=plan), timeout=1.0
+        )
+        waiter = asyncio.create_task(
+            turn_controller.acquire_turn(task_id="task:1", node_id="node:b", route_plan=plan)
+        )
+        for _ in range(40):
+            await asyncio.sleep(0.05)
+            if turn_controller.snapshot()["node_queue_waiting_count"] == 1:
+                break
+        snap = turn_controller.snapshot()
+        assert snap["node_queue_waiting_count"] == 1
+        # "暂时没位置"与"永远等不到"必须分得开：这条只该排队，不该被结清。
+        assert snap["node_queue_head_busy_reason"] == "no_capacity"
+
+        waiter.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await waiter
+        await asyncio.sleep(0.1)
+        # `CancelledError` 不是 `Exception`：漏掉它就会在队列里留一条无人应答的幽灵项。
+        assert turn_controller.snapshot()["node_queue_waiting_count"] == 0
+        turn_controller.release_turn(holder)
+    finally:
+        await turn_controller.close()
+
+
+@pytest.mark.asyncio
+async def test_pinned_head_that_turned_unservable_is_settled_after_the_time_limit() -> None:
+    group = _group("g1", "m_a")
+    turn_controller, _controller, _balancer = _harness(group, limit=1)
+    plan = ModelRoutePlan(routes=[_group_route(0, group)], config_revision=1)
+    try:
+        holder = await asyncio.wait_for(
+            turn_controller.acquire_turn(task_id="task:1", node_id="node:a", route_plan=plan), timeout=1.0
+        )
+        waiter = asyncio.create_task(
+            turn_controller.acquire_turn(task_id="task:1", node_id="node:b", route_plan=plan)
+        )
+        for _ in range(40):
+            await asyncio.sleep(0.05)
+            if turn_controller.snapshot()["node_queue_waiting_count"] == 1:
+                break
+        with turn_controller._lock:
+            request = turn_controller._queue[0]
+            request.skipped = SKIP_AGING_LIMIT
+            request.pinned_mono = time.perf_counter() - (HEAD_PIN_LIMIT_SECONDS + 100.0)
+            # 授予后被改成"没有任何候选塞得下"（成员窗口缩了/被移出组）：独占必须有出口。
+            request.filters = RouteCandidateFilters(required_context_window_tokens=999_999)
+
+        with pytest.raises(NodeTurnUnservableError):
+            await asyncio.wait_for(waiter, timeout=3.0)
+        assert turn_controller.snapshot()["node_queue_waiting_count"] == 0
+        turn_controller.release_turn(holder)
     finally:
         await turn_controller.close()
