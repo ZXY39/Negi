@@ -595,6 +595,16 @@ class ReActToolLoop:
                 invalid_final_submission_count=invalid_final_submission_count,
                 invalid_stage_submission_count=invalid_stage_submission_count,
             )
+            # 尺子必须在压缩之前定，而"这一跳打到谁"要到准入才定：这里先问准入一份与尺寸
+            # 无关的预测（同一份资格判据，不看 permit 也不看限流），用那个组的最小成员窗口
+            # 当尺子；问不到就交回链级口径（`chat_backend._hop_context_window_tokens` 自己
+            # 退回整条链最小）。
+            node_turn_controller = getattr(self, '_node_turn_controller', None)
+            primary_model_ref = str(current_model_refs[0] or '').strip()
+            route_plan_for_turn = None
+            if current_model_routes is not None and list(current_model_routes.load_balance_group_keys or []):
+                route_plan_for_turn = current_model_routes
+            hop_ruler = self._peek_hop_ruler(node_id=str(node.node_id), route_plan=route_plan_for_turn)
             (
                 request_messages,
                 token_preflight_diagnostics,
@@ -609,6 +619,7 @@ class ReActToolLoop:
                 prompt_cache_key=turn_prompt_cache_key,
                 tool_choice=current_tool_choice,
                 parallel_tool_calls=(self._parallel_tool_calls_enabled if tool_schemas else None),
+                hop_ruler=hop_ruler,
             )
             adopted_compacted_baseline = self._node_send_baseline_after_compaction(
                 request_messages,
@@ -829,11 +840,6 @@ class ReActToolLoop:
                     diagnostics=token_preflight_diagnostics,
                 )
             node_turn_lease = None
-            node_turn_controller = getattr(self, '_node_turn_controller', None)
-            primary_model_ref = str(current_model_refs[0] or '').strip()
-            route_plan_for_turn = None
-            if current_model_routes is not None and list(current_model_routes.load_balance_group_keys or []):
-                route_plan_for_turn = current_model_routes
             if node_turn_controller is not None and (route_plan_for_turn is not None or primary_model_ref):
                 # 绑定跨回合、跨阶段都保留：换 model_key 等于换前缀缓存命名空间，而
                 # "该换人了"的所有真实理由（无容量、限流惩罚、窗口不再匹配、成员被移出组）
@@ -6540,6 +6546,28 @@ class ReActToolLoop:
         current_model = current_raw.split(':', 1)[1].strip() if ':' in current_raw else current_raw
         return bool(previous_model and current_model and previous_model == current_model)
 
+    def _peek_hop_ruler(self, *, node_id: str, route_plan: Any) -> dict[str, Any] | None:
+        """问准入"这一跳大概率落到哪个组"，把那个组的最小成员窗口当压缩尺子。
+
+        返回 `{'windows': [int], 'source': 'group:<key>'}`；没有准入、没有组链位、或问不出
+        结果时返回 None，由 `chat_backend` 退回链级最小值。这里不新增任何拒绝面：预测失败
+        的代价是尺子保守，不是节点停住。
+        """
+        controller = getattr(self, '_node_turn_controller', None)
+        peek = getattr(controller, 'peek_hop_windows', None)
+        if route_plan is None or not callable(peek):
+            return None
+        try:
+            predicted = peek(node_id=str(node_id or '').strip(), route_plan=route_plan)
+        except Exception:
+            return None
+        if not isinstance(predicted, dict):
+            return None
+        window = int(predicted.get('min_window') or 0)
+        if window <= 0:
+            return None
+        return {'windows': [window], 'source': f"group:{str(predicted.get('group_key') or '').strip()}"}
+
     async def _apply_node_send_token_preflight(
         self,
         *,
@@ -6551,6 +6579,7 @@ class ReActToolLoop:
         prompt_cache_key: str = "",
         tool_choice: str | dict[str, Any] | None = None,
         parallel_tool_calls: bool | None = None,
+        hop_ruler: dict[str, Any] | None = None,
     ) -> tuple[list[dict[str, Any]], dict[str, Any], str, str]:
         normalized_model_refs = [
             str(item or "").strip()
@@ -6572,6 +6601,7 @@ class ReActToolLoop:
             info = runtime_chat_backend.resolve_send_model_context_window_info(
                 config=config,
                 model_refs=normalized_model_refs,
+                target_windows=list((hop_ruler or {}).get('windows') or []),
             )
         except Exception as exc:
             info = runtime_chat_backend.SendModelContextWindowInfo(
@@ -6612,6 +6642,9 @@ class ReActToolLoop:
             "provider_model": str(getattr(info, "provider_model", "") or "").strip(),
             "resolution_error": str(getattr(info, "resolution_error", "") or "").strip(),
             "context_window_tokens": int(snapshot.context_window_tokens or 0),
+            # 这把尺子是从哪儿来的：预测到的那个组，还是链级回落。归因"该核对哪一条记录"
+            # 时这是唯一线索，所以只进帧与逐跳明细，不进故障正文（链级数字会诱导改错成员）。
+            "ruler_source": str((hop_ruler or {}).get('source') or 'chain_fallback'),
             "estimated_total_tokens": int(snapshot.estimated_total_tokens or 0),
             "trigger_tokens": int(snapshot.trigger_tokens or 0),
             "effective_trigger_tokens": int(snapshot.effective_trigger_tokens or 0),

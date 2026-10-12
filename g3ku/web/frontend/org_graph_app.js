@@ -11821,6 +11821,43 @@ function renderModelHint() {
     return hint("点击“修改模型链”后再调整角色链；点击模型可打开配置弹窗。", false);
 }
 
+// 压缩尺子按"这一跳可能被达到的成员里最小那颗窗口"取（`chat_backend._hop_context_window_tokens`），
+// 所以组里加一颗小窗口模型会压低整组的压缩目标。配置面必须把这颗成员点出来，否则这层
+// 连带影响只有出事那天才看得见。
+function loadBalanceGroupWindowSummary(members) {
+    const windows = (members || [])
+        .map((key) => {
+            const item = modelRefItem(key);
+            const raw = Number(item?.context_window_tokens ?? item?.contextWindowTokens ?? 0);
+            return { key: String(key || "").trim(), window: Number.isFinite(raw) ? raw : 0 };
+        })
+        .filter((entry) => entry.key && entry.window > 0);
+    if (!windows.length) return null;
+    const sorted = [...windows].sort((left, right) => left.window - right.window);
+    return {
+        minKey: sorted[0].key,
+        minWindow: sorted[0].window,
+        maxWindow: sorted[sorted.length - 1].window,
+        spread: sorted[sorted.length - 1].window - sorted[0].window,
+    };
+}
+
+function renderLoadBalanceGroupWindowChips(members) {
+    const summary = loadBalanceGroupWindowSummary(members);
+    if (!summary) return "";
+    // 数字保持与「编辑模型」里那个窗口输入框同形（裸整数），这台机器的 locale 会给千分位，
+    // 显示层不复算格式，两处读数才对得上。
+    const chips = [
+        `<span class="policy-chip neutral" title="组内按最小那颗成员的窗口对齐压缩">窗口对齐 ${esc(summary.minKey)}=${summary.minWindow}</span>`,
+    ];
+    if (summary.spread > 0) {
+        chips.push(
+            `<span class="policy-chip risk-high" title="组内成员窗口不一致：整组按最小那颗压缩">本组最大 ${summary.maxWindow}</span>`,
+        );
+    }
+    return chips.join("");
+}
+
 // 链上「一跳是一个组」的那张卡。模型页的角色链由 org_graph_llm.js 渲染（它覆盖了
 // window.renderModelRoleEditors），所以这张卡由两边共用，不要再各写一份。
 function renderModelGroupChainTile(scopeKey, groupKey, index, editing) {
@@ -11833,6 +11870,7 @@ function renderModelGroupChainTile(scopeKey, groupKey, index, editing) {
                 <span class="resource-list-subtitle">组内平级 · 按综合负载选成员 · 节点绑定后粘滞</span>
                 <span class="model-inline-meta">
                     <span class="policy-chip risk-low">组</span>
+                    ${renderLoadBalanceGroupWindowChips(members)}
                     ${index === 0 ? '<span class="policy-chip risk-low">链首</span>' : ""}
                     ${group.enabled === false ? '<span class="policy-chip neutral">已禁用</span>' : ""}
                     ${!members.length ? '<span class="policy-chip risk-high">成员为空，保存会被拒绝</span>' : ""}
@@ -12034,6 +12072,7 @@ function renderModelGroupDialog() {
         <div class="resource-field">
             <span class="resource-field-label" data-group-dialog-count>成员模型（${selected.size}）</span>
             <div class="model-group-dialog-members">${memberOptions || '<span class="policy-chip neutral">没有可选模型</span>'}</div>
+            <div class="model-inline-meta" data-group-dialog-windows>${renderLoadBalanceGroupWindowChips(dialog.modelKeys)}</div>
         </div>
         ${dialog.error ? `<p class="model-group-dialog-error" role="alert" data-group-dialog-error>${esc(dialog.error)}</p>` : ""}`;
     backdrop.hidden = false;
@@ -12048,6 +12087,10 @@ function syncLoadBalanceGroupDialogSummary() {
     if (!body || !dialog.open) return;
     const count = body.querySelector("[data-group-dialog-count]");
     if (count) count.textContent = `成员模型（${dialog.modelKeys.length}）`;
+    // 窗口对齐行跟着勾选走：换一颗小窗口成员就会压低整组的压缩目标，这层连带必须在下一次
+    // 勾选时就看见，而不是等出事那天再回头翻配置。
+    const windows = body.querySelector("[data-group-dialog-windows]");
+    if (windows) windows.innerHTML = renderLoadBalanceGroupWindowChips(dialog.modelKeys);
     if (!dialog.error) body.querySelector("[data-group-dialog-error]")?.remove();
 }
 
@@ -12072,6 +12115,7 @@ function renderModelGroupColumn() {
                 return `<span class="policy-chip neutral" title="${esc(item)}">${esc(modelDisplayTitle(model) || item)}</span>`;
             }).join("")
             : '<span class="policy-chip risk-high">成员为空，保存会被拒绝</span>';
+        const windowChips = renderLoadBalanceGroupWindowChips(members);
         // 整张卡都是打开配置的点击区，只有「删除」例外。
         return `
             <article class="model-group-item${editing ? " is-editing" : ""}${members.length ? "" : " is-incomplete"}"${editing ? ' draggable="true"' : ""} data-model-group-key="${esc(key)}" data-model-group-ref="${esc(groupRefToken(key))}" data-group-edit="${esc(key)}">
@@ -12081,6 +12125,7 @@ function renderModelGroupColumn() {
                     ${editing ? `<button type="button" class="toolbar-btn ghost small" data-group-delete="${esc(key)}">删除</button>` : ""}
                 </div>
                 <div class="model-inline-meta">${memberChips}</div>
+                ${windowChips ? `<div class="model-inline-meta">${windowChips}</div>` : ""}
                 ${group.enabled === false ? '<div class="model-inline-meta"><span class="policy-chip neutral">已禁用</span></div>' : ""}
             </article>`;
     }).join("");

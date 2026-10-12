@@ -2190,6 +2190,9 @@ class TaskLogService:
             'projection_kind': str(payload.get('projection_kind') or '').strip(),
             'helper_usage': dict(helper_usage) if isinstance(helper_usage, dict) else {},
             'estimate_source': str(payload.get('estimate_source') or '').strip(),
+            # 尺子来源（预测到的组 / 链级回落）：帧里的值下一跳就被覆盖，逐跳明细才是
+            # "这一跳按哪把尺子压缩"的取证面。
+            'ruler_source': str(payload.get('ruler_source') or '').strip(),
             'comparable_to_previous_request': bool(payload.get('comparable_to_previous_request')),
             'notice_preservation': dict(notice_preservation) if isinstance(notice_preservation, dict) else {},
         }
