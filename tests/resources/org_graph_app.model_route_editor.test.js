@@ -85,7 +85,7 @@ function loadApp(elements = {}, globals = {}) {
             renderModelGroupColumn,
             renderModelGroupDialog,
             loadBalanceGroupWindowSummary,
-            renderLoadBalanceGroupWindowChips,
+            renderLoadBalanceGroupWindowAlignment,
             syncLoadBalanceGroupDialogSummary,
             setLoadBalanceGroupDialogField,
             startModelRoleEditing,
@@ -540,41 +540,48 @@ test("组卡本体仍然整张可点：查看态也打开配置", () => {
     sameJson(app.S.modelCatalog.groupDialog.modelKeys, ["m_a", "m_b"]);
 });
 
-test("链上的组卡点名「窗口对齐」那颗成员，窗口不齐时再给本组最大", () => {
-    const app = loadApp();
-    app.applyModelCatalog(catalogPayload(), { preserveRoleDrafts: false });
-
-    const markup = app.renderModelGroupChainTile("execution", "g_shared", 0, false);
-    assert.match(markup, /窗口对齐 m_b=390000/);
-    assert.match(markup, /本组最大 690000/);
-});
-
-test("组列的组卡同样带窗口对齐读数", () => {
+test("组卡不显示窗口对齐读数：链上卡与组列卡都只留成员与链状态", () => {
     const { app, elements } = loadModelPage();
+
+    const tile = app.renderModelGroupChainTile("execution", "g_shared", 0, false);
+    assert.doesNotMatch(tile, /上下文对齐|窗口对齐|本组最大/);
+    // 不是整行没渲染：组卡自己的标记与成员仍在，少的是窗口那一档读数。
+    assert.match(tile, /policy-chip risk-low">组</);
+
     app.renderModelGroupColumn();
     const rows = elements["model-group-list"].innerHTML.split("<article").filter(Boolean);
     const sharedRow = rows.find((row) => row.includes('data-model-group-key="g_shared"'));
-
-    assert.match(sharedRow, /窗口对齐 m_b=390000/);
-    assert.match(sharedRow, /本组最大 690000/);
+    assert.doesNotMatch(sharedRow, /上下文对齐|窗口对齐|本组最大/);
+    assert.match(sharedRow, /title="m_b">m_b</);
 });
 
-test("同组窗口一致时不重复一个相同的「最大」，读不到窗口的成员不参与对齐", () => {
+test("组弹窗把这行放在成员模型上方，值是对齐后的那颗上限，不齐时给警示档", () => {
+    const { app, elements } = loadModelPage();
+
+    app.openLoadBalanceGroupDialog("g_shared");
+    const body = elements["model-group-dialog-body"].innerHTML;
+    assert.match(body, /组内最大上下文对齐: 390000/);
+    assert.match(body, /title="对齐到最小那颗 m_b=390000；组内最大 690000"/);
+    assert.match(body, /policy-chip risk-high"[^>]*>组内最大上下文对齐/);
+    const alignAt = body.indexOf("组内最大上下文对齐");
+    const membersAt = body.indexOf("成员模型");
+    assert.ok(alignAt >= 0 && membersAt >= 0 && alignAt < membersAt, "这行要在成员列表之前，勾选之后才看得见连带");
+});
+
+test("同组窗口一致时不带警示档，读不到窗口的成员不参与对齐", () => {
     const app = loadApp();
     const payload = catalogPayload();
-    payload.load_balance_groups.g_equal = { enabled: true, max_retry_rounds: 1, model_keys: ["m_b", "m_emergency"] };
-    payload.load_balance_groups.g_unwindowed = { enabled: true, max_retry_rounds: 1, model_keys: ["m_nowindow"] };
     payload.catalog = [...payload.catalog, { key: "m_nowindow", enabled: true, provider_model: "openai:model-w" }];
     payload.items = payload.catalog.map((item) => item.key);
     app.applyModelCatalog(payload, { preserveRoleDrafts: false });
 
-    const equal = app.renderModelGroupChainTile("execution", "g_equal", 0, false);
-    assert.match(equal, /窗口对齐 m_b=390000/);
-    assert.doesNotMatch(equal, /本组最大/);
-    assert.doesNotMatch(app.renderModelGroupChainTile("execution", "g_unwindowed", 1, false), /窗口对齐/);
+    const equal = app.renderLoadBalanceGroupWindowAlignment(["m_b", "m_emergency"]);
+    assert.match(equal, /组内最大上下文对齐: 390000/);
+    assert.doesNotMatch(equal, /risk-high/);
+    assert.equal(app.renderLoadBalanceGroupWindowAlignment(["m_nowindow"]), "");
 });
 
-test("组弹窗的窗口对齐行随勾选更新：压低整组压缩目标的那一刻要看得见", () => {
+test("组弹窗的这行随勾选更新：压低整组上限的那一刻要当场看见", () => {
     const { app, elements } = loadModelPage();
     const body = elements["model-group-dialog-body"];
     const windowsRow = { innerHTML: "" };
@@ -589,11 +596,11 @@ test("组弹窗的窗口对齐行随勾选更新：压低整组压缩目标的�
 
     app.toggleLoadBalanceGroupDialogMember("m_a", true);
     app.syncLoadBalanceGroupDialogSummary();
-    assert.match(windowsRow.innerHTML, /窗口对齐 m_a=690000/);
-    assert.doesNotMatch(windowsRow.innerHTML, /本组最大/);
+    assert.match(windowsRow.innerHTML, /组内最大上下文对齐: 690000/);
+    assert.doesNotMatch(windowsRow.innerHTML, /risk-high/);
 
     app.toggleLoadBalanceGroupDialogMember("m_b", true);
     app.syncLoadBalanceGroupDialogSummary();
-    assert.match(windowsRow.innerHTML, /窗口对齐 m_b=390000/);
-    assert.match(windowsRow.innerHTML, /本组最大 690000/);
+    assert.match(windowsRow.innerHTML, /组内最大上下文对齐: 390000/);
+    assert.match(windowsRow.innerHTML, /组内最大 690000/);
 });

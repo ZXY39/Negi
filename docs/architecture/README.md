@@ -169,7 +169,7 @@ Start here when you are new to the repository or when a change crosses subsystem
 - 脑图标面板改了链却影响别的会话、会话链保存后仍按全局链发请求、或混链会话带图不发 → `config-and-models.md`「会话级模型链与固定模型」+ `web-and-admin.md`「Image Upload Gating」
 - 模型面板显示的不是模型链链首、或显示名与实跑绑定对不上（多条绑定共用同一 provider 模型名）→ `config-and-models.md`「角色路由：有序 fallback 与负载均衡组」+ `web-and-admin.md`「Composer Model Mode Panel」
 - 节点一直打同一个模型、组内分布不均、或"改了组配置没生效" → `runtime-overview.md`「节点模型路由与准入绑定」+ `operations-and-maintenance.md`「节点模型负载不均 / 一直打同一个模型」
-- 加了一颗小窗口成员后压缩比预期更早发生、组卡上的「窗口对齐」读数跟着变、或同一任务里有的跳塞得下有的被判没人塞得下 → `config-and-models.md`「Frontdoor Context Window Contract」+ `context-and-cache-troubleshooting.md`「节点侧排查要点」
+- 加了一颗小窗口成员后压缩比预期更早发生、组弹窗里「组内最大上下文对齐」那行跟着变、或同一任务里有的跳塞得下有的被判没人塞得下 → `config-and-models.md`「Frontdoor Context Window Contract」+ `context-and-cache-troubleshooting.md`「节点侧排查要点」
 - 组车道打分看着很闲但链首一直被 429、或某次模型调用的重试轮数不等于任何组的 `maxRetryRounds` → `runtime-overview.md`「节点模型路由与准入绑定」辅助
 - 模型链在预算没跑满时就报"耗尽"、审计里 `retryable: true` 与"链耗尽"同时出现、或错误文案里写着与实绑供应商不匹配的名字 → `runtime-overview.md`「Chat provider 超时与重试边界」（两级判据与"链位进过即耗尽"）车道那条（spawn 送审评审与重复预检刻意不过准入，属维持现状的已知边界）
 - 按协议车道判断缓存命中（"这条车道不发 `prompt_cache_key` 所以没命中"）→ `context-and-cache-troubleshooting.md`「Family 与 key 合同」
