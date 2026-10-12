@@ -12,6 +12,22 @@ from __future__ import annotations
 from main.monitoring.log_service import TaskLogService
 from main.runtime.react_loop import ReActToolLoop
 
+_EXPECTED_SEND_DIAGNOSTIC_KEYS = {
+    'compaction_applied',
+    'compaction_mode',
+    'compression_mode',
+    'chunk_count',
+    'merge_pass_applied',
+    'chunk_failed_count',
+    'chunk_failed_indexes',
+    'projection_kind',
+    'helper_usage',
+    'estimate_source',
+    'ruler_source',
+    'comparable_to_previous_request',
+    'notice_preservation',
+}
+
 _LIVE_DIAGNOSTICS = {
     'applied': True,
     'mode': 'llm',
@@ -47,15 +63,21 @@ def test_uncompacted_hop_is_distinguishable_from_missing_field() -> None:
     assert fields['compaction_mode'] == ''
     assert fields['projection_kind'] == ''
     assert fields['helper_usage'] == {}
-    assert set(fields) == {
-        'compaction_applied',
-        'compaction_mode',
-        'projection_kind',
-        'helper_usage',
-        'estimate_source',
-        'comparable_to_previous_request',
-        'notice_preservation',
-    }
+    assert set(fields) == _EXPECTED_SEND_DIAGNOSTIC_KEYS
+    # 尺子来源与压没压无关：没触发压缩的跳同样要能回答"按哪把尺子判断不用压"。
+    assert 'ruler_source' in fields
+
+
+def test_the_two_serial_whitelists_keep_the_same_field_set() -> None:
+    """发送面读数要连穿两道白名单（react 投影 → log_service 逐跳行）。
+
+    只补一道时字段照样"存在"，落到账本里却是空串——实盘 2026-10-12 加 `ruler_source`
+    时就是这么漏的，重启后逐跳读到的全是空值。
+    """
+    projector_keys = set(ReActToolLoop._node_send_compaction_diagnostics({'applied': True}))
+    whitelist_keys = set(TaskLogService._send_diagnostics_fields(None))
+    assert projector_keys == whitelist_keys
+    assert projector_keys == _EXPECTED_SEND_DIAGNOSTIC_KEYS
 
 
 def test_send_diagnostics_fields_are_whitelisted_and_typed() -> None:
@@ -63,9 +85,15 @@ def test_send_diagnostics_fields_are_whitelisted_and_typed() -> None:
     assert fields == {
         'compaction_applied': False,
         'compaction_mode': '',
+        'compression_mode': '',
+        'chunk_count': 0,
+        'merge_pass_applied': False,
+        'chunk_failed_count': 0,
+        'chunk_failed_indexes': [],
         'projection_kind': '',
         'helper_usage': {},
         'estimate_source': '',
+        'ruler_source': '',
         'comparable_to_previous_request': False,
         'notice_preservation': {},
     }

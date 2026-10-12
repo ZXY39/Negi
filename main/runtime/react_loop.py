@@ -6478,6 +6478,10 @@ class ReActToolLoop:
             'projection_kind': 'token_compacted' if applied else '',
             'helper_usage': dict(helper_usage) if isinstance(helper_usage, dict) else {},
             'estimate_source': str(payload.get('estimate_source') or '').strip(),
+            # 尺子来源与压缩无关，不能挂在 `applied` 门后面：没压的跳同样要能回答"这一跳
+            # 是按哪把尺子判断不用压的"。投影与 `log_service` 的白名单是串联的两道，漏一道
+            # 逐跳明细里就只剩空串。
+            'ruler_source': str(payload.get('ruler_source') or '').strip(),
             'comparable_to_previous_request': bool(payload.get('comparable_to_previous_request')),
             'notice_preservation': dict(payload.get('notice_preservation') or {}),
         }
