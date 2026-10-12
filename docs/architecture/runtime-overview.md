@@ -271,7 +271,7 @@ chat 调用有两类边界：**单次（单轮）provider 请求的响应时间�
 - 组内换成员之间**有**退避节拍（沿用同模型轮之间的封顶指数退避），跨 direct entry 前进仍然零等待。把组预算收缩当成「立刻换下一个」会把一次 pass 变成对同一分钟窗口的背靠背请求。
 - 同一条角色链上还有两条**不过准入**的辅助车道：spawn 送审评审（`node_runner.py` 的评审调用）与异步任务重复预检（`runtime_service.py`）。它们把 `_acceptance_model_refs` / `_execution_model_refs`（展开视图）原样交给 chat，既不传 route plan 也不带 lease，于是三件事一起成立：预算取该成员目录的 `retryCount`（不是所在组的 `maxRetryRounds`）、前进序是摊平后的整池候选（链首永远先撞）、并且**不进均衡账**——`record_route_request_start` 与 `record_outcome` 都挂在 lease 上，所以这份真实消耗的配额对 60 秒滚动 RPM 与 429 惩罚不可见，组车道的打分因此会低估该链的实际负载。维持现状是量出来的结论：辅助车道一天个位数请求，而为它造一个轻量 lease 会把一次评审变成与节点回合抢准入槽的排队方，代价不对称。判据：`Retryable model failure … round x/N` 里 N 不等于任何在用组的 `maxRetryRounds`，这条请求就出自辅助车道，不是组车道出了错。
 
-进程边界：balancer 与并发控制器只在 `execution_mode == 'worker'` 时存在。`embedded` / `web` 角色下选择层退化成无并发计数的直连绑定，不报错也不排队。多 worker 副本之间不共享这份内存态。
+进程边界：balancer 与并发控制器只在 `execution_mode == 'worker'` 时存在。`embedded` / `web` 角色下选择层退化成无并发计数的直连绑定，不报错也不排队。多 worker 副本之间不共享这份内存态。CEO/frontdoor 的会话发送就活在 `web` 角色那个进程里，那里没有 balancer 对象可拿，所以组观测（60 秒滚动 RPM 与 429 惩罚）里**永远没有会话这一路**——会话与节点共享的是同一把 endpoint+key 的上游配额，不是那份读数；要让会话看见负载，得先决定"选人对象放在哪个进程"（会话侧自造一份 ⇒ 配置面读数按进程分裂；投给 worker ⇒ 会话开始排准入队列），不是一句"加个无租约入口"能带过去的。
 
 排障入口：日志锚点 `Model route selected` / `Model node binding rebound` / `Model route lease released` / `Model load-balance group exhausted`，每条都带决策时刻的负载读数与重绑原因；链追踪 `MODEL CHAIN: FALLBACK` 的 `next_model_ref` 在下一跳是组槽位时写 `group:<组名>` 而不是成员（成员此刻还没定），真实落点看紧随其后的那条 `Model node binding rebound`；跨进程读数看 worker 心跳里的 `model_route_groups`，管理面接口为 `GET /api/models/load-balance/status`。运行操作口径见 `operations-and-maintenance.md`。
 
