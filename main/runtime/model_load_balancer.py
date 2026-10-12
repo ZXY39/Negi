@@ -298,6 +298,29 @@ class ModelLoadBalancer:
                     return lease, ""
             return None, "no_capacity"
 
+    def serveability(self, *, group_key: str, filters: RouteCandidateFilters | None = None) -> tuple[bool, str, int]:
+        """这个组在**任何容量下**能不能服务一次请求：只看组是否存在、是否启用、候选过滤是否放行。
+
+        返回 `(能否服务, 原因, 合格候选里最大的窗口)`。给回合准入用来在入队之前挡掉
+        "体量比链上任何候选都大"这类请求——它们等不来授予，而一旦入队就会把共享队列
+        独占成只剩自己（2026-10-12 task:d07d706989b4：0 次授予、零错误行、110 分钟）。
+        与 `select()` 的区别只有一个：这里不碰 permit，也不动粘滞绑定。
+        """
+        effective_filters = filters or RouteCandidateFilters()
+        with self._lock:
+            group = self._groups.get(str(group_key or "").strip())
+            if group is None:
+                return False, "unknown_group", 0
+            if not group.enabled:
+                return False, "group_disabled", 0
+            members = list(group.members or [])
+            largest_any = max((int(getattr(member, "context_window_tokens", 0) or 0) for member in members), default=0)
+            candidates = [member for member in members if self._candidate_ok(member, effective_filters)]
+            if not candidates:
+                return False, "no_candidate", largest_any
+            largest_ok = max(int(getattr(member, "context_window_tokens", 0) or 0) for member in candidates)
+            return True, "", largest_ok
+
     def _candidate_ok(self, member: RouteMemberView, filters: RouteCandidateFilters) -> bool:
         if not str(member.model_key or "").strip():
             return False

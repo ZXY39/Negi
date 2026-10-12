@@ -75,6 +75,7 @@ from main.errors import DistributionHoldError, NodePausedError, TaskPausedError,
 from main.models import NodeEvidenceItem, NodeFinalResult, RESULT_SCHEMA_VERSION, SpawnChildSpec, normalize_execution_stage_metadata
 from main.runtime.chat_backend import build_actual_request_diagnostics, build_stable_prompt_cache_key
 from main.runtime.model_route import LEASE_OUTCOME_CANCELLED, LEASE_OUTCOME_SUCCESS, RouteCandidateFilters
+from main.runtime.node_turn_controller import NodeTurnUnservableError
 from main.runtime.append_notice_context import (
     APPEND_NOTICE_CONTEXT_KEY,
     append_notice_tail_prefix_match,
@@ -837,22 +838,30 @@ class ReActToolLoop:
                 # 绑定跨回合、跨阶段都保留：换 model_key 等于换前缀缓存命名空间，而
                 # "该换人了"的所有真实理由（无容量、限流惩罚、窗口不再匹配、成员被移出组）
                 # 都在下一次准入里现判，不需要按阶段节拍强制重选。
-                node_turn_lease = await self._await_with_model_marker(
-                    task_id=task.task_id,
-                    node_id=node.node_id,
-                    marker='node_turn.acquire',
-                    awaitable=node_turn_controller.acquire_turn(
+                try:
+                    node_turn_lease = await self._await_with_model_marker(
                         task_id=task.task_id,
                         node_id=node.node_id,
-                        model_ref='' if route_plan_for_turn is not None else primary_model_ref,
-                        route_plan=route_plan_for_turn,
-                        filters=RouteCandidateFilters(
-                            required_context_window_tokens=int(
-                                (token_preflight_diagnostics or {}).get('estimated_total_tokens') or 0
+                        marker='node_turn.acquire',
+                        awaitable=node_turn_controller.acquire_turn(
+                            task_id=task.task_id,
+                            node_id=node.node_id,
+                            model_ref='' if route_plan_for_turn is not None else primary_model_ref,
+                            route_plan=route_plan_for_turn,
+                            filters=RouteCandidateFilters(
+                                required_context_window_tokens=int(
+                                    (token_preflight_diagnostics or {}).get('estimated_total_tokens') or 0
+                                ),
                             ),
                         ),
-                    ),
-                )
+                    )
+                except NodeTurnUnservableError as unservable_exc:
+                    # 准入判过"这条请求比链上任何候选都宽"：排队等不来授予，所以当场落暂停
+                    # 并点名两个数。留在队列里它会把整条共享队列独占掉，别的任务一起停。
+                    return self._node_turn_unservable_failure(
+                        exc=unservable_exc,
+                        diagnostics=token_preflight_diagnostics,
+                    )
             provider_retry_count = 0
             empty_response_retry_count = 0
             restart_with_refreshed_runtime = False
@@ -5433,6 +5442,36 @@ class ReActToolLoop:
             remaining_work=[],
             blocking_reason=(
                 f'send_preflight_fault: {normalized_reason} [{" ".join(observed)}]'
+            ),
+            failure_disposition='pause',
+        )
+
+    @staticmethod
+    def _node_turn_unservable_failure(*, exc: Any, diagnostics: dict[str, Any] | None = None) -> NodeFinalResult:
+        """回合准入判定"这条请求无论多少容量都不会被授予"：落可恢复的暂停并点名两个数。
+
+        与预检拒发同一档处置（`pause`，不是 `terminal`）：这条车道要的是"停下来让人/模型
+        核对"，不是把节点判死。两个数必须写进正文——请求要求的窗口与链上候选的最大窗口，
+        否则下一次还得重新取证才知道该改哪一行。
+        """
+        info = dict(diagnostics or {})
+        observed = [
+            f'预估={int(info.get("estimated_total_tokens") or info.get("final_estimate_tokens") or 0)}',
+            f'压缩触发线={int(info.get("effective_trigger_tokens") or 0)}',
+            f'请求要求窗口={int(getattr(exc, "required_window_tokens", 0) or 0)}',
+            f'链上候选最大窗口={int(getattr(exc, "largest_candidate_window_tokens", 0) or 0)}',
+        ]
+        return NodeFinalResult(
+            status='failed',
+            delivery_status='blocked',
+            summary='node turn admission unservable',
+            answer='',
+            evidence=[],
+            remaining_work=[],
+            blocking_reason=(
+                f'node_turn_admission_fault: {getattr(exc, "reason", "") or "unservable"} '
+                f'[{" ".join(observed)}] 这条请求排进队列也不会被授予，别再等；'
+                '要么缩小本轮上下文，要么核对链上候选的 context_window_tokens。'
             ),
             failure_disposition='pause',
         )

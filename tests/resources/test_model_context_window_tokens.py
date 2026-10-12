@@ -292,7 +292,9 @@ def test_model_manager_backfills_context_window_tokens_from_llm_config_record_wh
     monkeypatch.chdir(workspace)
 
     manager = ModelManager.load()
-    assert manager.config.get_managed_model("m").context_window_tokens is None
+    # 一本账之后，加载就把记录那本对回模型目录的副本，不再等到有人编辑角色链才补
+    # （补得晚 = 中间这段窗口派单读的是空值，正是 2026-10-12 那类"没人塞得下"的形状）。
+    assert manager.config.get_managed_model("m").context_window_tokens == 128000
 
     manager.update_scope_routes_bulk({"ceo": {"model_keys": ["m"]}})
 
@@ -300,3 +302,68 @@ def test_model_manager_backfills_context_window_tokens_from_llm_config_record_wh
     assert reloaded.config.get_managed_model("m").context_window_tokens == 128000
     saved = json.loads((workspace / ".g3ku" / "config.json").read_text(encoding="utf-8"))
     assert saved["models"]["catalog"][0]["contextWindowTokens"] == 128000
+
+
+def test_load_config_repairs_a_stale_catalog_window_from_the_llm_config_record(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """界面上改窗口只写记录，目录里那份是旧拷贝：加载必须把它对回来。
+
+    实盘形状（2026-10-12 task:d07d706989b4）：记录 690000 / 目录停在 390000，压缩按 69 万
+    判"塞得下"、派单按 39 万判"没人接"，392,742 的请求因此把整机队列钉死 110 分钟。
+    """
+    workspace = tmp_path / "workspace"
+    workspace.mkdir(parents=True, exist_ok=True)
+    _write_runtime_config(workspace)
+    monkeypatch.chdir(workspace)
+
+    ModelManager.load()
+
+    record_dir = workspace / ".g3ku" / "llm-config" / "records"
+    record_files = list(record_dir.glob("*.json"))
+    assert record_files
+    payload = json.loads(record_files[0].read_text(encoding="utf-8"))
+    parameters = dict(payload.get("parameters") or {})
+    assert int(parameters.get("context_window_tokens") or 0) == 128000
+    parameters["context_window_tokens"] = 690000
+    payload["parameters"] = parameters
+    record_files[0].write_text(json.dumps(payload), encoding="utf-8")
+
+    reloaded = ModelManager.load()
+
+    assert reloaded.config.get_managed_model("m").context_window_tokens == 690000
+    saved = json.loads((workspace / ".g3ku" / "config.json").read_text(encoding="utf-8"))
+    assert saved["models"]["catalog"][0]["contextWindowTokens"] == 690000
+
+
+def test_update_model_window_writes_the_record_and_the_catalog_copy_together(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """走模型这条编辑道时，记录与目录副本一起动（回归守卫）。
+
+    真分叉来自另一条道：`PUT /llm/configs/{config_id}` → `update_config_record` 只写记录，
+    碰不到 `models.catalog[]`。那一类分叉由上一条用例（加载时按记录重算）负责修。
+    """
+    workspace = tmp_path / "workspace"
+    workspace.mkdir(parents=True, exist_ok=True)
+    _write_runtime_config(workspace)
+    monkeypatch.chdir(workspace)
+
+    manager = ModelManager.load()
+    monkeypatch.setattr(
+        manager.facade.config_service,
+        "probe_draft",
+        lambda draft: SimpleNamespace(success=True, status=ProbeStatus.SUCCESS, message="ok"),
+    )
+
+    updated = manager.update_model(key="m", context_window_tokens=690000)
+
+    assert int(updated["context_window_tokens"]) == 690000
+    reloaded = ModelManager.load()
+    assert reloaded.get_model("m")["context_window_tokens"] == 690000
+    saved = json.loads((workspace / ".g3ku" / "config.json").read_text(encoding="utf-8"))
+    assert saved["models"]["catalog"][0]["contextWindowTokens"] == 690000
+    record_payload = json.loads(list((workspace / ".g3ku" / "llm-config" / "records").glob("*.json"))[0].read_text(encoding="utf-8"))
+    assert int(dict(record_payload.get("parameters") or {}).get("context_window_tokens") or 0) == 690000

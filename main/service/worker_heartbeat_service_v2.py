@@ -42,6 +42,9 @@ _PERF_HISTORY_FIELDS = (
     'node_queue_waiting_count',
     'node_queue_frozen_count',
     'node_queue_oldest_wait_ms',
+    # 队头独占时长：`running=0` 而 `waiting` 累积的那一类停摆，只有这个数能在事后读出
+    # "从哪一拍开始就没发过授予"，不必靠日志行反推。
+    'node_queue_head_pinned_seconds',
     'worker_execution_oldest_wait_ms',
     'tool_pressure_event_loop_lag_ms',
     'tool_pressure_writer_queue_depth',

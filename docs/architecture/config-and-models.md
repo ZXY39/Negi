@@ -409,7 +409,8 @@ If a provider reply looks truncated (for example a response ending at exactly th
 Frontdoor request-size control comes from the selected chat model's `context_window_tokens`.
 
 - Every managed chat model and every `llm-config` chat binding must carry `context_window_tokens`.
-- The value is runtime-authoritative: CEO/frontdoor resolves the currently selected model, reads its `context_window_tokens`, and uses that number for pre-send checks.
+- 只有一个权威载体：绑定记录的 `parameters.context_window_tokens`。`models.catalog[].contextWindowTokens` 是同一份值的**副本**，只给配置面与派单侧读，不是第二处真值；每次加载配置都按记录重算它（`g3ku/config/loader.py` 的同步步骤），因为存在只写记录、碰不到 catalog 的编辑道（`PUT /llm/configs/{config_id}` → `update_config_record`）。副本与记录分叉过的那类后果：发送压缩按记录算触发线、派单按副本算"谁塞得下"，两个数中间那段体量既不压缩也无人可派，请求会在共享回合队列里把队头独占成只剩它自己。
+- The value is runtime-authoritative: CEO/frontdoor resolves the currently selected model, reads its `context_window_tokens`, and uses that number for pre-send checks. 节点侧的尺子取**整条可派候选链上最大的那个窗口**（`chat_backend` 的链宽解析），不是链首那一个——压缩发生在选择之前，而选择允许落在链上任何一颗塞得下的成员；图片能力那根轴同样按整条链取保守交集，两根轴用同一种保守度。
 - For CEO/frontdoor, "runtime-authoritative" explicitly means the current live config revision from `get_runtime_config(...)`. Maintainers should not treat `loop.app_config` as an equivalent source of truth for send-time context-window decisions, because it may lag behind recent admin/model edits.
 - There is no fallback to `loop.context_length` and no default floor.
 - Inline legacy model payload migration must preserve `contextWindowTokens`; otherwise later `/api/models` reads and role-chain validation will misreport the model as missing a context window.
@@ -418,7 +419,7 @@ Frontdoor request-size control comes from the selected chat model's `context_win
 
 - Model create/update requires `context_window_tokens > 25000`.
 - Role-chain batch save fails if any referenced model is missing a valid `context_window_tokens`.
-  - The save path opportunistically backfills missing `models.catalog[].contextWindowTokens` from the bound `llm-config` record's `parameters.context_window_tokens` when possible (this mainly matters for older installs that upgraded after `context_window_tokens` became mandatory).
+  - 角色链校验在副本仍缺失或 ≤25000 时会从绑定记录补一份（这条只覆盖"老安装升级后没落盘"的形状）；两本账真正收敛的地方是加载时的按记录重算，见本文「Frontdoor Context Window Contract」。
 - Old stored models may still exist without that field, but if one is actually selected at runtime the turn fails fast instead of sending with an implicit unlimited window.
 
 ### What To Check When It Breaks

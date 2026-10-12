@@ -27,6 +27,42 @@ MAX_SCAN_REQUESTS = 8
 # 防饿死上界：一条请求被越过这么多此后必须等它自己可用，否则低负载车道的请求会把
 # 高负载车道的请求无限期推后。
 SKIP_AGING_LIMIT = 4
+# 队头独占的兜底时限：一条请求独占授予窗口（`skipped` 已到上界）超过这么久仍未被授予，
+# 就说明它等不来答案。静态不可能的当场结清（否则这条独占会把所有任务的回合队列钉死，
+# 2026-10-12 task:d07d706989b4：11:55:29 之后 0 次授予、零错误行、110 分钟）；
+# 纯容量类的只出读数，不打断正常排队。
+HEAD_PIN_LIMIT_SECONDS = 600.0
+# 静态不可能：候选过滤/组本身决定了无论多少容量都不会被授予，入队前就挡掉。
+UNSERVABLE_REASONS = frozenset({"no_candidate", "unknown_group", "group_disabled", "empty_plan", "empty_model_ref"})
+
+
+class NodeTurnUnservableError(RuntimeError):
+    """这次回合的请求条件比链上任何候选都宽（或链本身不存在），排队等不来授予。
+
+    携带判定时的观测值，让调用方能落一条带名字的暂停而不是"节点永远 in_progress"。
+    """
+
+    def __init__(
+        self,
+        *,
+        task_id: str,
+        node_id: str,
+        reason: str,
+        required_window_tokens: int = 0,
+        largest_candidate_window_tokens: int = 0,
+        detail: str = "",
+    ) -> None:
+        self.task_id = str(task_id or "")
+        self.node_id = str(node_id or "")
+        self.reason = str(reason or "")
+        self.required_window_tokens = int(required_window_tokens or 0)
+        self.largest_candidate_window_tokens = int(largest_candidate_window_tokens or 0)
+        self.detail = str(detail or "")
+        super().__init__(
+            f"node turn unservable: task={self.task_id} node={self.node_id} reason={self.reason} "
+            f"required_window={self.required_window_tokens} largest_candidate_window="
+            f"{self.largest_candidate_window_tokens} {self.detail}".strip()
+        )
 
 
 def _now_iso() -> str:
@@ -69,6 +105,10 @@ class _QueuedNodeTurnRequest:
     route_plan: ModelRoutePlan | None = None
     filters: RouteCandidateFilters | None = None
     skipped: int = 0
+    # 最近一次"为什么没给它授予"的原因，由 `_try_grant` 记下；队头独占的兜底判据读它。
+    busy_reason: str = ""
+    # 它第一次把授予窗口独占成单条的时刻（`skipped` 到达上界），独占时限判据读这个而不是入队时刻。
+    pinned_mono: float = 0.0
 
 
 class NodeTurnController:
@@ -121,11 +161,22 @@ class NodeTurnController:
             if queued_items:
                 oldest_queued_mono = min(float(item.queued_mono or 0.0) for item in queued_items)
                 oldest_wait_ms = max(0.0, (time.perf_counter() - oldest_queued_mono) * 1000.0)
+            head = self._pinned_head()
+            head_pinned_seconds = 0.0
+            if head is not None and head.pinned_mono:
+                head_pinned_seconds = max(0.0, time.perf_counter() - float(head.pinned_mono))
             return {
                 "node_queue_running_count": int(len(self._running_leases)),
                 "node_queue_waiting_count": int(len(self._queue) + sum(len(queue) for queue in self._frozen_queues.values())),
                 "node_queue_frozen_count": int(sum(len(queue) for queue in self._frozen_queues.values())),
                 "node_queue_oldest_wait_ms": round(oldest_wait_ms, 3),
+                # 队头读数：跑动中却一次授予都不发时，这三个数就是"谁把队列钉住、为什么"。
+                "node_queue_head_pinned_seconds": round(head_pinned_seconds, 3),
+                "node_queue_head_busy_reason": str(getattr(head, "busy_reason", "") or ""),
+                "node_queue_head_node_id": str(getattr(head, "node_id", "") or ""),
+                "node_queue_head_required_window": int(
+                    getattr(getattr(head, "filters", None), "required_context_window_tokens", 0) or 0
+                ),
             }
 
     async def acquire_turn(
@@ -151,6 +202,17 @@ class NodeTurnController:
             raise ValueError("task_id and node_id are required")
         if route_plan is None and not normalized_model_ref:
             raise ValueError("model_ref or route_plan is required")
+        # 静态不可能（体量比链上任何候选都大、组不存在或被停）一律不入队：这类请求一旦
+        # 入队，`skipped` 爬到上界后会把授予窗口独占成只剩它自己，所有任务的回合一起停。
+        unservable = self._unservable_error(
+            task_id=normalized_task_id,
+            node_id=normalized_node_id,
+            model_ref=normalized_model_ref,
+            route_plan=route_plan,
+            filters=filters,
+        )
+        if unservable is not None:
+            raise unservable
         loop = asyncio.get_running_loop()
         future: asyncio.Future[NodeTurnLease] = loop.create_future()
         with self._lock:
@@ -172,7 +234,9 @@ class NodeTurnController:
         self.poke()
         try:
             return await future
-        except Exception:
+        except BaseException:
+            # `CancelledError` 不是 `Exception`：按 Exception 接就漏掉取消路径，队列里会留下
+            # 永远无人应答的项（与 0a22fb65 在回合闸那侧修掉的是同一个形状）。
             with self._lock:
                 self._queue = deque(item for item in self._queue if item.future is not future)
                 for task_id, queue in list(self._frozen_queues.items()):
@@ -373,6 +437,10 @@ class NodeTurnController:
                         if not self._has_pending_requests():
                             return
                         break
+                    if len(window) == 1 and self._settle_pinned_request(window[0]):
+                        # 队头被结清，授予窗口立刻重新计算（不等下一拍，也不睡）。
+                        granted = True
+                        continue
                     chosen = None
                     for request in window:
                         lease = self._try_grant(request)
@@ -417,11 +485,148 @@ class NodeTurnController:
             window: list[_QueuedNodeTurnRequest] = []
             for request in self._queue:
                 if request.skipped >= SKIP_AGING_LIMIT:
+                    if not request.pinned_mono:
+                        request.pinned_mono = time.perf_counter()
                     return [request]
                 window.append(request)
                 if len(window) >= MAX_SCAN_REQUESTS:
                     break
             return window
+
+    def _unservable_error(
+        self,
+        *,
+        task_id: str,
+        node_id: str,
+        model_ref: str,
+        route_plan: ModelRoutePlan | None,
+        filters: RouteCandidateFilters | None,
+    ) -> NodeTurnUnservableError | None:
+        """判这条请求是否"无论多少容量都不会被授予"。判不出来就返回 None，保持原排队语义。
+
+        只认静态条件（组存在且启用、候选过滤放得下这个体量），不看 permit/在飞/限流——
+        那些是"暂时没位置"，该排队。误挡一次是把一个本可前进的节点打成暂停，代价比
+        让一条永不满足的请求钉死整机小得多，所以判据要求"整条链都不可服务"才动手。
+        """
+        required_window = int(getattr(filters, "required_context_window_tokens", 0) or 0) if filters is not None else 0
+        if route_plan is None:
+            if str(model_ref or "").strip():
+                return None
+            return self._build_unservable_error(
+                task_id=task_id,
+                node_id=node_id,
+                reason="empty_model_ref",
+                required_window=required_window,
+                largest_candidate_window=0,
+            )
+        routes = list(getattr(route_plan, "routes", None) or [])
+        if not routes:
+            return self._build_unservable_error(
+                task_id=task_id,
+                node_id=node_id,
+                reason="empty_plan",
+                required_window=required_window,
+                largest_candidate_window=0,
+            )
+        serveability = getattr(self._balancer, "serveability", None)
+        last_reason = ""
+        largest = 0
+        for route in routes:
+            if not bool(getattr(route, "is_load_balance", False)):
+                if str(getattr(route, "model_key", "") or "").strip():
+                    return None
+                last_reason = "empty_model_ref"
+                continue
+            if not callable(serveability):
+                return None
+            ok, reason, candidate_largest = serveability(
+                group_key=str(getattr(route, "group_key", "") or ""),
+                filters=filters,
+            )
+            largest = max(largest, int(candidate_largest or 0))
+            if ok:
+                return None
+            last_reason = str(reason or "") or last_reason
+        if last_reason not in UNSERVABLE_REASONS:
+            return None
+        return self._build_unservable_error(
+            task_id=task_id,
+            node_id=node_id,
+            reason=last_reason,
+            required_window=required_window,
+            largest_candidate_window=largest,
+        )
+
+    @staticmethod
+    def _build_unservable_error(
+        *,
+        task_id: str,
+        node_id: str,
+        reason: str,
+        required_window: int,
+        largest_candidate_window: int,
+        detail: str = "",
+    ) -> NodeTurnUnservableError:
+        error = NodeTurnUnservableError(
+            task_id=task_id,
+            node_id=node_id,
+            reason=reason,
+            required_window_tokens=required_window,
+            largest_candidate_window_tokens=largest_candidate_window,
+            detail=detail,
+        )
+        logger.warning(
+            "Node turn request rejected as unservable: task_id={} node_id={} reason={} "
+            "required_window={} largest_candidate_window={} {}",
+            task_id,
+            node_id,
+            reason,
+            int(required_window or 0),
+            int(largest_candidate_window or 0),
+            str(detail or ""),
+        )
+        return error
+
+    def _drop_request_locked(self, request: _QueuedNodeTurnRequest) -> None:
+        self._queue = deque(item for item in self._queue if item is not request)
+        for frozen_task_id, frozen_queue in list(self._frozen_queues.items()):
+            kept = deque(item for item in frozen_queue if item is not request)
+            if kept:
+                self._frozen_queues[frozen_task_id] = kept
+            else:
+                self._frozen_queues.pop(frozen_task_id, None)
+
+    def _settle_pinned_request(self, request: _QueuedNodeTurnRequest) -> bool:
+        """队头独占超过时限：静态不可能的当场结清，把整条队列让出来；容量类的不动。"""
+        reason = str(request.busy_reason or "")
+        if reason not in UNSERVABLE_REASONS:
+            return False
+        if not request.pinned_mono:
+            return False
+        pinned_seconds = max(0.0, time.perf_counter() - float(request.pinned_mono))
+        if pinned_seconds < HEAD_PIN_LIMIT_SECONDS:
+            return False
+        error = self._build_unservable_error(
+            task_id=request.task_id,
+            node_id=request.node_id,
+            reason=reason,
+            required_window=int(getattr(request.filters, "required_context_window_tokens", 0) or 0),
+            largest_candidate_window=0,
+            detail=f"pinned_head_seconds={round(pinned_seconds)}",
+        )
+        with self._lock:
+            self._drop_request_locked(request)
+        if not request.future.done():
+            request.future.set_exception(error)
+        self.poke()
+        return True
+
+    def _pinned_head(self) -> _QueuedNodeTurnRequest | None:
+        with self._lock:
+            for request in self._queue:
+                if int(request.skipped or 0) >= SKIP_AGING_LIMIT:
+                    return request
+            return self._queue[0] if self._queue else None
 
     def _try_grant(self, request: _QueuedNodeTurnRequest) -> NodeTurnLease | None:
         """为一条请求授予回合权；选择与 permit 在同一把锁内原子完成。"""
@@ -430,7 +635,9 @@ class NodeTurnController:
             if plan is None:
                 permit = self._model_concurrency_controller.try_acquire_first_available(model_ref=request.model_ref)
                 if permit is None:
+                    request.busy_reason = "no_capacity"
                     return None
+                request.busy_reason = ""
                 return self._register_grant_locked(
                     request,
                     model_ref=str(permit.model_ref or request.model_ref),
@@ -438,9 +645,10 @@ class NodeTurnController:
                     initial_model_permit=permit,
                 )
 
+            last_reason = ""
             for route in plan.routes:
                 if route.is_load_balance and self._balancer is not None:
-                    route_lease, _reason = self._balancer.select(
+                    route_lease, busy_reason = self._balancer.select(
                         node_id=request.node_id,
                         route_index=int(route.index),
                         group_key=str(route.group_key),
@@ -449,7 +657,10 @@ class NodeTurnController:
                     )
                     if route_lease is None:
                         # 这个组给不出候选（全部不合格 / 无容量），按链向后前进。
+                        # 原因要留下：队头独占的兜底判据靠它分清"等得到"与"等不到"。
+                        last_reason = str(busy_reason or "") or last_reason
                         continue
+                    request.busy_reason = ""
                     return self._register_grant_locked(
                         request,
                         model_ref=str(route_lease.model_key),
@@ -463,7 +674,9 @@ class NodeTurnController:
                     )
                 permit = self._model_concurrency_controller.try_acquire_first_available(model_ref=str(route.model_key or ""))
                 if permit is None:
+                    last_reason = last_reason or "no_capacity"
                     continue
+                request.busy_reason = ""
                 return self._register_grant_locked(
                     request,
                     model_ref=str(permit.model_ref or route.model_key),
@@ -472,6 +685,7 @@ class NodeTurnController:
                     route_plan=plan,
                     route_index=int(route.index),
                 )
+            request.busy_reason = last_reason or "no_capacity"
             return None
 
     def _register_grant_locked(
