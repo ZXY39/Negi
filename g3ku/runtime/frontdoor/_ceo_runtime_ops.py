@@ -6997,6 +6997,7 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
         prompt_cache_key: str,
         on_text_delta: Any = None,
         on_model_retry_status: Any = None,
+        required_context_window_tokens: int = 0,
     ) -> dict[str, Any]:
         response = await self._resolve_chat_backend().chat(
             messages=[dict(item) for item in list(messages or []) if isinstance(item, dict)],
@@ -7006,6 +7007,7 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
             prompt_cache_key=(str(prompt_cache_key).strip() or None) if prompt_cache_key is not None else None,
             on_text_delta=on_text_delta,
             on_model_retry_status=on_model_retry_status,
+            required_context_window_tokens=int(required_context_window_tokens or 0),
         )
         return self._model_response_payload_dict(response)
 
@@ -8096,6 +8098,9 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
                         prompt_cache_key=prompt_cache_key,
                         on_text_delta=assistant_text_delta_handler,
                         on_model_retry_status=model_retry_status_handler,
+                        # 前门没有回合准入，链上"塞不下这一发"的成员过去照样会被发到；
+                        # 这里把预检算出来的本轮体量交给发送层做同一判据。
+                        required_context_window_tokens=int(preflight_diagnostics.get("estimated_total_tokens") or 0),
                     )
                 except Exception as exc:
                     if not isinstance(exc, ModelProviderExhaustedError) and PUBLIC_PROVIDER_FAILURE_MESSAGE not in str(exc or ""):
