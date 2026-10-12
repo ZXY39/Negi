@@ -4,6 +4,7 @@ import mimetypes
 import os
 import signal
 import threading
+import time
 from contextlib import asynccontextmanager, suppress
 from pathlib import Path
 
@@ -220,6 +221,44 @@ async def audit_error_capture_middleware(request: Request, call_next):
         raise
     if response.status_code >= 500:
         _emit_web_api_audit_event(path, response.status_code)
+    return response
+
+
+# 操作员判据：浏览器"点了没反应"到底是服务端让等，还是页面自己卡。慢请求在这里留一行，
+# 事后可与网页侧的时间对账，不需要操作员在场蹲点。
+# 只写日志、不改响应、不计数；阈值以下与非 /api 路径（页面本身、静态资源）一律不记。
+# 计时覆盖不了 WebSocket（/api/ws/*、/ws/ceo）——http 中间件不参与 WebSocket 升级。
+_SLOW_REQUEST_LOG_MS = 1000.0
+
+
+def _log_slow_web_request(method: str, path: str, status_code: int, elapsed_ms: float) -> bool:
+    """超过 _SLOW_REQUEST_LOG_MS 的 API 请求写一行日志；返回是否写了这行。"""
+    normalized_path = str(path or '')
+    if elapsed_ms < _SLOW_REQUEST_LOG_MS or not normalized_path.startswith('/api'):
+        return False
+    logger.info(
+        'slow web request: {} {} -> {} in {:.0f} ms',
+        str(method or '').upper(),
+        normalized_path,
+        int(status_code),
+        float(elapsed_ms),
+    )
+    return True
+
+
+# 必须写在最后：`@app.middleware` 把新项插进 `user_middleware` 头部，Starlette 构建时
+# 又从后往前套，所以**后声明的在最外层**。写在 423 闸门之前就只有路由处理时间被计量，
+# 闸门本身和审计层的花销都不在这行数里，而那正是浏览器实际等待的一部分。
+@app.middleware("http")
+async def slow_request_log_middleware(request: Request, call_next):
+    started = time.perf_counter()
+    response = await call_next(request)
+    _log_slow_web_request(
+        request.method,
+        str(request.url.path or ''),
+        response.status_code,
+        (time.perf_counter() - started) * 1000,
+    )
     return response
 
 WEB_DIR = Path(__file__).resolve().parent
