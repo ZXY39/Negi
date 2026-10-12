@@ -954,6 +954,7 @@ class SQLiteTaskStore:
     _SELF_FILE = os.path.abspath(__file__)
     _slow_read_lanes: set[str] = set()
     _SLOW_READ_MS = 200.0
+    _SLOW_READ_EVENT_MS = 800.0
 
     @classmethod
     def _outer_caller(cls) -> str:
@@ -3789,15 +3790,22 @@ class SQLiteTaskStore:
         return rows, elapsed_ms
 
     def _with_reader_lane(self, section: str, elapsed_ms: float) -> str:
-        """慢读（>=200 ms）才付一次栈遍历：`…fetchall:nodes[from=<谁>]`。
+        """慢读分两档：>=200 ms 报一次"这对组合首次慢过"，>=800 ms 每次都报并带上毫秒。
 
         `fetchone:tasks` 这种单行小查都能花到 4 秒时，"哪张表"已经答不了问题——
         要么是大读在共享 `_read_lock` 上把它排住了，要么是进程在缺页。两者修法不同，
         先要调用方名字。快读不付这个开销。
+
+        新读者车道那行是**去重后的首见记录**，时间戳只代表"这一 (表, 调用方) 第一次
+        越过阈值"，不是事件时刻——拿它给一次卡顿归因会读错。要按时刻归因的是
+        `_SLOW_READ_EVENT_MS` 那一行：它每次都写，并带查询自身的毫秒数。
         """
         if elapsed_ms < self._SLOW_READ_MS:
             return section
         lane = self._outer_caller()
+        if elapsed_ms >= self._SLOW_READ_EVENT_MS:
+            logger.info(f'slow read: {section} took {elapsed_ms:.0f} ms from={lane}')
+            return f'{section}[from={lane}]'
         key = f'{section}:{lane}'
         if key not in self._slow_read_lanes:
             self._slow_read_lanes.add(key)

@@ -456,7 +456,7 @@ IM 渠道有两条：内置官方 QQ 适配器（`g3ku/qq_official/`，进程内
 排障顺序：
 
 1. 拿到卡顿的本地墙钟时刻（精确到分钟）。
-2. 对照四类监控（排查期部署在 `%TEMP%`，失效则按此清单重建）：`os_monitor.csv`（空闲内存/CPU/Edge 工作集/进程数/硬缺页，约 3s 采样）判当时有无风暴；`proc_top.csv`（每 5s 内存前八进程）定风暴起点谁在吃内存；`foreground_log.csv`（每 200ms 前台进程与窗口标题）——dwm 挂「未响应」幽灵标题=窗口真挂起、WerFault=崩溃、前台突变=焦点被抢；`stall_captures/`（200ms 探 worker-status，>0.5s 即 py-spy 抓 web 进程栈）排除服务端阻塞。web 进程自身在 `console.log` 里留一行 `slow web request: <METHOD> <path> -> <status> in <ms> ms`（`/api` 路径超过 1s 才写，契约见 `web-and-admin.md`「Web Event Loop Contract」），拿卡顿时刻的分钟去 grep，能直接判「浏览器在等服务端」还是「服务端根本没事」；WebSocket 车道不在这条覆盖里，live 流仍需浏览器侧探针。
+2. 对照四类监控（排查期部署在 `%TEMP%`，失效则按此清单重建）：`os_monitor.csv`（空闲内存/CPU/Edge 工作集/进程数/硬缺页，约 3s 采样）判当时有无风暴；`proc_top.csv`（每 5s 内存前八进程）定风暴起点谁在吃内存；`foreground_log.csv`（每 200ms 前台进程与窗口标题）——dwm 挂「未响应」幽灵标题=窗口真挂起、WerFault=崩溃、前台突变=焦点被抢；`stall_captures/`（200ms 探 worker-status，>0.5s 即 py-spy 抓 web 进程栈）排除服务端阻塞。web 进程自身在 `console.log` 里留一行 `slow web request: <METHOD> <path> -> <status> in <ms> ms`（`/api` 路径超过 1s 才写，契约见 `web-and-admin.md`「Web Event Loop Contract」），拿卡顿时刻的分钟去 grep，能直接判「浏览器在等服务端」还是「服务端根本没事」；WebSocket 车道不在这条覆盖里，live 流仍需浏览器侧探针。同一份日志里存储层的慢读分两档：`new reader lane` 那行是每个 (表, 调用方) 组合**进程内只报一次**的首见记录，时间戳不代表某一次卡顿，别拿它归因；要按时刻对上具体查询，看 `slow read: <section> took <ms> ms from=<调用方>`（≥800 ms 每次都报）。
 3. 有风暴：按 `proc_top.csv` 的大户处置——暂停对应抓取任务、消除重复服务栈；长期方案是加内存。
 4. 无风暴：在被卡标签页重装控制台探针再复现，探针测量项：关键函数耗时、LoAF 阻塞归因（JS/渲染/非 JS）、帧缺口、输入延迟、wheel 事件与 scrollTop 生效对照、JS 堆悬崖、窗口焦点与可见性变化。
 5. 滚动归零类的验证口径：滚到中部停留 10 秒位置不被拽回，且 `S.taskHallStats.task_hall_full_render_count` 不增长。

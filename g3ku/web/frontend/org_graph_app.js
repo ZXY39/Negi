@@ -753,20 +753,32 @@ const U = {
 };
 
 const esc = (v) => String(v ?? "").replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;").replaceAll('"', "&quot;").replaceAll("'", "&#39;");
+// lucide 把 `<i data-lucide>` 换成 `<svg>` 时连属性一起复制，所以 `[data-lucide]` 这个待渲染
+// 集合永远非空：每一次 createIcons() 都会把整份文档的图标重画一遍（实测 1654 个 = 38–58 ms，
+// 且随文档变大线性上涨：633→11–25 ms、2885→46–103 ms）。画完摘掉 svg 上的标记，下一趟只剩
+// 真正待渲染的 `<i>`。没有代码读这个属性的值，CSS 也不选 `svg[data-lucide]`。
+const ICON_MARKER_ATTR = "data-lucide";
+const clearRenderedIconMarkers = () => {
+    document.querySelectorAll(`svg[${ICON_MARKER_ATTR}]`).forEach((node) => node.removeAttribute(ICON_MARKER_ATTR));
+};
+const runIconPass = () => {
+    if (!window.lucide || typeof lucide.createIcons !== "function") return;
+    lucide.createIcons();
+    clearRenderedIconMarkers();
+};
 let __iconsRafId = 0;
 const icons = (force = false) => {
     if (!window.lucide || typeof lucide.createIcons !== "function") return;
     if (force) {
         if (__iconsRafId) window.cancelAnimationFrame(__iconsRafId);
         __iconsRafId = 0;
-        lucide.createIcons();
+        runIconPass();
         return;
     }
     if (__iconsRafId) return;
     __iconsRafId = window.requestAnimationFrame(() => {
         __iconsRafId = 0;
-        if (!window.lucide || typeof lucide.createIcons !== "function") return;
-        lucide.createIcons();
+        runIconPass();
     });
 };
 const roleKey = (v) => (["ceo", "inspection", "checker"].includes(String(v).toLowerCase()) ? (String(v).toLowerCase() === "ceo" ? "ceo" : "inspection") : "execution");
