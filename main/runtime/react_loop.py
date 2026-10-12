@@ -8537,32 +8537,16 @@ class ReActToolLoop:
     def _image_multimodal_enabled_for_model_refs(model_refs: list[str] | None) -> bool:
         """整条链的保守交集：任一成员收不了图，这条链就判收不了图。
 
-        与 CEO 前门同一口径，理由也同一：图片是否进请求体要在这发实际打到谁之前决定，而失败
-        切换随时可能把这一发改给别的成员。解析不到的成员跳过而不是否决整条链——运行时不会把
-        它发出去。一个都解析不到时判 False。
+        判据本体在 `g3ku/config/model_manager.image_multimodal_chain_decision`，与 CEO 前门和
+        `model_config` 工具的写后回显同源；这里只保留节点需要的布尔面。
         """
+        from g3ku.config.model_manager import image_multimodal_chain_decision
+
         try:
             config, _revision, _changed = get_runtime_config(force=False)
         except Exception:
             config = None
-        getter = getattr(config, 'get_managed_model', None)
-        if not callable(getter):
-            return False
-        resolved_any = False
-        for ref in list(model_refs or []):
-            key = str(ref or '').strip()
-            if not key:
-                continue
-            try:
-                model = getter(key)
-            except Exception:
-                model = None
-            if model is None:
-                continue
-            resolved_any = True
-            if not bool(getattr(model, 'image_multimodal_enabled', False)):
-                return False
-        return resolved_any
+        return image_multimodal_chain_decision(config, model_refs)[0]
 
     @staticmethod
     def _tool_result_content_open_image_payload(raw_result: Any) -> dict[str, Any] | None:

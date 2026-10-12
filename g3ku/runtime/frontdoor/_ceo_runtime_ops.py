@@ -1074,28 +1074,12 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
     def _ceo_image_multimodal_enabled_for_model_refs(self, model_refs: list[str] | None) -> bool:
         """链上任一成员不支持图片，整条链就按不支持处理（保守 AND）。
 
-        解析不到的成员跳过，因为运行时不会把它发出去。净效果是「混进非多模态模型 ⇒ 该链不收
-        图」，而不是把图发给读不了的模型；要带图必须把非多模态成员摘出这条链。
+        判据本体在 `g3ku/config/model_manager.image_multimodal_chain_decision`，与
+        `model_config` 工具的写后回显同源；这里只保留前门需要的布尔面。
         """
-        app_config = self._frontdoor_runtime_config()
-        getter = getattr(app_config, "get_managed_model", None)
-        if not callable(getter):
-            return False
-        resolved_any = False
-        for ref in list(model_refs or []):
-            key = str(ref or "").strip()
-            if not key:
-                continue
-            try:
-                model = getter(key)
-            except Exception:
-                model = None
-            if model is None:
-                continue
-            resolved_any = True
-            if not bool(getattr(model, "image_multimodal_enabled", False)):
-                return False
-        return resolved_any
+        from g3ku.config.model_manager import image_multimodal_chain_decision
+
+        return image_multimodal_chain_decision(self._frontdoor_runtime_config(), model_refs)[0]
 
     @staticmethod
     def _web_ceo_uploaded_files_note(uploads: list[dict[str, Any]]) -> str:
