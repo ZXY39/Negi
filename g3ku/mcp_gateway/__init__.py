@@ -2,7 +2,7 @@
 
 开箱即用对接面 #2（契约文档：docs/architecture/agent-gateway.md）：
 ``negi mcp serve`` 起一个 stdio MCP 代理进程，经 HTTP+SSE 消费 External
-Agent API（``/api/v1``），把对话封装成六个 MCP 工具（g3ku_chat 等），
+Agent API（``/api/v1``），把对话封装成九个 MCP 工具（negi_chat 等），
 Claude Code / Cursor 等 MCP 客户端一条命令即可接入。
 
 ``server`` 模块（依赖 mcp SDK）由 CLI 命令惰性导入，保持 ``g3ku --help``
