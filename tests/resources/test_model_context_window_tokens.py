@@ -332,6 +332,12 @@ def test_load_config_repairs_a_stale_catalog_window_from_the_llm_config_record(
     payload["parameters"] = parameters
     record_files[0].write_text(json.dumps(payload), encoding="utf-8")
 
+    # 审计事件是这条点名的可判读落点：配置加载跑在 loguru 文件 sink 挂上之前，
+    # 只写 WARN 会在两份日志里同时落空（2026-10-12 实测过）。
+    from g3ku.audit_events import configure_audit_sink, list_audit_events
+
+    configure_audit_sink(workspace)
+
     reloaded = ModelManager.load()
 
     assert reloaded.config.get_managed_model("m").context_window_tokens == 690000
@@ -339,6 +345,16 @@ def test_load_config_repairs_a_stale_catalog_window_from_the_llm_config_record(
     saved = json.loads((workspace / ".g3ku" / "config.json").read_text(encoding="utf-8"))
     assert saved["models"]["catalog"][0]["contextWindowTokens"] == 690000
     assert float(saved["models"]["catalog"][0]["requestTimeoutSeconds"]) == 88.5
+    ledger = list_audit_events(subsystem="config", limit=50)
+    events = [
+        item for item in ledger.get("items") or []
+        if str(item.get("event_type") or "") == "model_catalog_parameter_resynced"
+    ]
+    assert events, "分叉被修好了却没有留下任何可判读落点"
+    detail = events[0].get("detail") or {}
+    items = detail.get("items") or []
+    assert {str(item.get("field")) for item in items} == {"context_window_tokens", "request_timeout_seconds"}
+    configure_audit_sink(None)
 
 
 def test_update_model_window_writes_the_record_and_the_catalog_copy_together(

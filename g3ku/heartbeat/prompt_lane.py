@@ -195,6 +195,27 @@ def _task_stall_detail_lines(detail: Any) -> list[str]:
             running_text = ", ".join(f"{role}={value}" for role, value in sorted(dict(task_running or {}).items()))
             queued_text = ", ".join(f"{role}={value}" for role, value in sorted(dict(task_queued or {}).items()))
             lines.append(f"  This task at the gate: running [{running_text}], waiting [{queued_text}]")
+    turn = detail.get("turn_queue") if isinstance(detail.get("turn_queue"), dict) else {}
+    if turn:
+        lines.append(
+            "  Node-turn queue (already past the gate, waiting for a model turn): "
+            "granted {running}, waiting {waiting}, oldest wait {oldest}s".format(
+                running=turn.get("running", "unknown"),
+                waiting=turn.get("waiting", "unknown"),
+                oldest=turn.get("oldest_wait_seconds", "unknown"),
+            )
+        )
+        head_bits: list[str] = []
+        if turn.get("head_pinned_seconds") is not None:
+            head_bits.append(f"one request holding the grant window for {turn.get('head_pinned_seconds')}s")
+        if turn.get("head_busy_reason"):
+            head_bits.append(f"head reason={turn.get('head_busy_reason')}")
+        if turn.get("head_node_id"):
+            head_bits.append(f"head node={turn.get('head_node_id')}")
+        if turn.get("head_required_window"):
+            head_bits.append(f"it needs a {turn.get('head_required_window')}-token window")
+        if head_bits:
+            lines.append("  Turn queue head: " + ", ".join(head_bits))
     rate = detail.get("upstream_rate") if isinstance(detail.get("upstream_rate"), dict) else {}
     if rate:
         lines.append(

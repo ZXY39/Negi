@@ -118,7 +118,7 @@ def _normalize_stall_detail(value: Any) -> dict[str, Any]:
     """
     payload = value if isinstance(value, dict) else {}
     detail: dict[str, Any] = {}
-    for key in ("entry_gate", "upstream_rate", "lane"):
+    for key in ("entry_gate", "turn_queue", "upstream_rate", "lane"):
         block = payload.get(key)
         if not isinstance(block, dict):
             continue
