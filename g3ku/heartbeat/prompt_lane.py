@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Callable
 
 from g3ku.core.timefmt import render_local_time
 from main.service.task_terminal_callback import TASK_TERMINAL_OUTPUT_INLINE_CHAR_LIMIT
@@ -23,12 +23,54 @@ def _non_empty_text(value: Any) -> str:
     return str(value or "").strip()
 
 
+# 事件正文外置的注入点：调用方（heartbeat session_service）持有 content store，
+# 渲染器只做"要不要外置、外置后给什么 ref"的判断，不自己碰存储。返回 canonical ref，
+# 拿不到就回空串。
+EventTextExternalizer = Callable[[str, dict[str, Any]], str]
+
+
 def _append_retrieval_parts(parts: list[str], *values: Any) -> None:
     for value in values:
         text = _non_empty_text(value)
         if not text or text.startswith("artifact:"):
             continue
         parts.append(text)
+
+
+def _overflow_head_and_tail(text: str, *, inline_limit: int) -> tuple[str, str]:
+    """超限正文取头尾两段，两段合起来仍不超过原上限（外置只是补回中段，不是放大内联）。"""
+    head_budget = max(1, int(inline_limit * 0.7))
+    tail_budget = max(1, int(inline_limit * 0.2))
+    return text[:head_budget].rstrip(), text[len(text) - tail_budget:].lstrip()
+
+
+def _long_text_body(
+    text: str,
+    *,
+    inline_limit: int,
+    event: dict[str, Any],
+    externalizer: EventTextExternalizer | None,
+    continuation_indent: str = "  ",
+) -> tuple[str, str]:
+    """渲染一条正文本体，并返回给检索用的那份文本。
+
+    超限时旧做法是只留前 `inline_limit` 字——故障正文的关键句（该核对哪条记录、观测值是
+    多少）都写在后半段，截断等于让它不可读也不可搜。这里改成头尾都留、全文外置、行内给
+    可取回的 `ref=`；外置不可用时如实说"取不回"，不给一个假 ref。
+    """
+    if len(text) <= inline_limit:
+        return text, text
+    head, tail = _overflow_head_and_tail(text, inline_limit=inline_limit)
+    omitted = max(0, len(text) - len(head) - len(tail))
+    ref = ""
+    if callable(externalizer):
+        try:
+            ref = _non_empty_text(externalizer(text, event))
+        except Exception:
+            ref = ""
+    marker = f'  [正文 {len(text)} 字：中间 {omitted} 字未内联]'
+    marker += f' 完整正文用 content_open(ref="{ref}") 取回。' if ref else ' 外置不可用，未内联的部分此刻取不回。'
+    return f'{head}\n{continuation_indent}{marker.strip()}\n{continuation_indent}{tail}', f'{head} … {tail}'
 
 
 def _float_value(value: Any, default: float = 0.0) -> float:
@@ -256,19 +298,29 @@ def _task_stall_detail_lines(detail: Any) -> list[str]:
     return lines
 
 
-def _task_node_error_lines(event: dict[str, Any], retrieval_parts: list[str], *, output_inline_limit: int) -> list[str]:
+def _task_node_error_lines(
+    event: dict[str, Any],
+    retrieval_parts: list[str],
+    *,
+    output_inline_limit: int,
+    externalizer: EventTextExternalizer | None,
+) -> list[str]:
     task_id = _non_empty_text(event.get('task_id'))
     node_id = _non_empty_text(event.get('node_id'))
     node_title = _non_empty_text(event.get('node_title') or node_id) or 'node'
     pause_reason = _non_empty_text(event.get('pause_reason')) or 'error'
     error_text = _non_empty_text(event.get('error_text') or event.get('remark')) or 'Unknown node error.'
     task_title = _non_empty_text(event.get('task_title') or task_id) or 'task'
-    _append_retrieval_parts(retrieval_parts, 'task_node_error', task_title, task_id, node_title, node_id, pause_reason, error_text[:output_inline_limit])
-    error_line = (
-        f'  Error excerpt: {error_text[:output_inline_limit].rstrip()}...'
-        if len(error_text) > output_inline_limit
-        else f'  Error: {error_text}'
+    error_line, error_for_retrieval = _long_text_body(
+        error_text,
+        inline_limit=output_inline_limit,
+        event=event,
+        externalizer=externalizer,
     )
+    _append_retrieval_parts(
+        retrieval_parts, 'task_node_error', task_title, task_id, node_title, node_id, pause_reason, error_for_retrieval
+    )
+    error_line = f'  Error: {error_line}'
     failure_class = _runtime_fault_class(error_text)
     lines = [
         f'- Task {task_title} ({task_id}) has a node paused after an error',
@@ -315,7 +367,13 @@ def _task_node_error_lines(event: dict[str, Any], retrieval_parts: list[str], *,
     return lines
 
 
-def _task_terminal_lines(event: dict[str, Any], retrieval_parts: list[str], *, output_inline_limit: int) -> list[str]:
+def _task_terminal_lines(
+    event: dict[str, Any],
+    retrieval_parts: list[str],
+    *,
+    output_inline_limit: int,
+    externalizer: EventTextExternalizer | None,
+) -> list[str]:
     title = _non_empty_text(event.get("title") or event.get("task_id")) or "task"
     task_id = _non_empty_text(event.get("task_id"))
     status = _non_empty_text(event.get("status")) or "unknown"
@@ -342,12 +400,25 @@ def _task_terminal_lines(event: dict[str, Any], retrieval_parts: list[str], *, o
     # a follow-up content_open round-trip.
     terminal_output_limit = max(output_inline_limit, TASK_TERMINAL_OUTPUT_INLINE_CHAR_LIMIT)
     supplement_retrieval_parts: list[str] = ["user_node_supplements"]
+    supplement_entries: list[tuple[str, str, str, str]] = []
     for supplement in user_node_supplements:
-        for part in (
-            _non_empty_text(supplement.get("node_title")),
-            _non_empty_text(supplement.get("node_id")),
-            _non_empty_text(supplement.get("message"))[:terminal_output_limit],
-        ):
+        node_id = _non_empty_text(supplement.get("node_id"))
+        node_title = _non_empty_text(supplement.get("node_title")) or node_id
+        message = _non_empty_text(supplement.get("message"))
+        # 用户定向补充是验收判据的输入，截掉后半句等于换了一条要求去比对。
+        body, retrieval = _long_text_body(
+            message or '<空>',
+            inline_limit=terminal_output_limit,
+            event=supplement,
+            externalizer=externalizer,
+            continuation_indent="      ",
+        )
+        epoch_state = _non_empty_text(supplement.get("epoch_state")).lower()
+        state_suffix = ""
+        if epoch_state and epoch_state not in {"completed", "unknown"}:
+            state_suffix = f" [distribution state: {epoch_state}]"
+        supplement_entries.append((node_title, node_id, body, state_suffix))
+        for part in (node_title, node_id, retrieval):
             if part:
                 supplement_retrieval_parts.append(part)
     _append_retrieval_parts(
@@ -415,54 +486,64 @@ def _task_terminal_lines(event: dict[str, Any], retrieval_parts: list[str], *, o
             "  User node supplements (用户定向补充：任务期间用户对以下节点追加了信息，"
             "向用户汇报最终结果与验收判定时请将这些补充与任务结果对齐):"
         )
-        for supplement in user_node_supplements:
-            node_id = _non_empty_text(supplement.get("node_id"))
-            node_title = _non_empty_text(supplement.get("node_title")) or node_id
-            message = _non_empty_text(supplement.get("message"))
-            if len(message) > terminal_output_limit:
-                message = f"{message[:terminal_output_limit].rstrip()}..."
-            epoch_state = _non_empty_text(supplement.get("epoch_state")).lower()
-            state_suffix = ""
-            if epoch_state and epoch_state not in {"completed", "unknown"}:
-                state_suffix = f" [distribution state: {epoch_state}]"
-            lines.append(f"    - Node {node_title} ({node_id}): {message}{state_suffix}")
+        for node_title, node_id, body, state_suffix in supplement_entries:
+            lines.append(f"    - Node {node_title} ({node_id}): {body}{state_suffix}")
     return lines
 
 
-def _task_distribution_error_lines(event: dict[str, Any], retrieval_parts: list[str], *, output_inline_limit: int) -> list[str]:
+def _task_distribution_error_lines(
+    event: dict[str, Any],
+    retrieval_parts: list[str],
+    *,
+    output_inline_limit: int,
+    externalizer: EventTextExternalizer | None,
+) -> list[str]:
     task_id = _non_empty_text(event.get('task_id'))
     task_title = _non_empty_text(event.get('title') or task_id) or 'task'
     error_text = _non_empty_text(event.get('error_text')) or 'message distribution failed'
-    _append_retrieval_parts(retrieval_parts, 'task_distribution_error', task_title, task_id, error_text[:output_inline_limit])
-    lines = [
+    error_line, error_for_retrieval = _long_text_body(
+        error_text,
+        inline_limit=output_inline_limit,
+        event=event,
+        externalizer=externalizer,
+    )
+    _append_retrieval_parts(retrieval_parts, 'task_distribution_error', task_title, task_id, error_for_retrieval)
+    return [
         f'- Task {task_title} ({task_id}) 的消息分发失败（epoch state=failed），任务已暂停',
-        f'  Error: {error_text}',
+        f'  Error: {error_line}',
         '  提醒：如果多次出现，则不要再分发，通知用户现状任务已暂停。',
     ]
-    if len(error_text) > output_inline_limit:
-        lines[1] = f'  Error excerpt: {error_text[:output_inline_limit].rstrip()}...'
-    return lines
 
 
-def _task_distribution_skipped_lines(event: dict[str, Any], retrieval_parts: list[str], *, output_inline_limit: int) -> list[str]:
+def _task_distribution_skipped_lines(
+    event: dict[str, Any],
+    retrieval_parts: list[str],
+    *,
+    output_inline_limit: int,
+    externalizer: EventTextExternalizer | None,
+) -> list[str]:
     task_id = _non_empty_text(event.get('task_id'))
     task_title = _non_empty_text(event.get('title') or task_id) or 'task'
     items = [dict(item) for item in list(event.get('skipped') or []) if isinstance(item, dict)]
     count = int(event.get('skipped_count') or len(items) or 0)
     message = _non_empty_text(event.get('root_message'))
-    if len(message) > output_inline_limit:
-        message = f"{message[:output_inline_limit].rstrip()}..."
+    message_line, message_for_retrieval = _long_text_body(
+        message or '<空>',
+        inline_limit=output_inline_limit,
+        event=event,
+        externalizer=externalizer,
+    )
     _append_retrieval_parts(
         retrieval_parts,
         'task_distribution_skipped',
         task_title,
         task_id,
-        f"已跳过 {count} 个节点；消息本体：{message[:output_inline_limit]}",
+        f"已跳过 {count} 个节点；{message_for_retrieval}",
     )
     lines = [
         f'- Task {task_title} ({task_id}) 的消息分发已完成，但**已跳过 {count} 个节点**：'
         '这些子树根节点的转发回合多次未提交有效决策，本轮消息没有进入它们的子树',
-        f'  消息本体（未下发给下列子树）: {message or "<空>"}',
+        f'  消息本体（未下发给下列子树）: {message_line}',
     ]
     for item in items[:10]:
         node_id = _non_empty_text(item.get('node_id'))
@@ -476,7 +557,12 @@ def _task_distribution_skipped_lines(event: dict[str, Any], retrieval_parts: lis
     return lines
 
 
-def _event_bundle_content(events: list[dict[str, Any]], *, output_inline_limit: int) -> tuple[str, str]:
+def _event_bundle_content(
+    events: list[dict[str, Any]],
+    *,
+    output_inline_limit: int,
+    externalizer: EventTextExternalizer | None,
+) -> tuple[str, str]:
     # 唤醒时刻锚点：模型上下文里没有其他"现在几点"来源，事件里又可能引用几小时前
     # 的时间（如 finished_at），头部给出本次唤醒的本地时间供模型直接对照。
     lines = ["[SESSION EVENTS]", "## EVENT BUNDLE", f"当前时间（本次唤醒时刻）：{render_local_time()}"]
@@ -488,19 +574,32 @@ def _event_bundle_content(events: list[dict[str, Any]], *, output_inline_limit: 
             lines.extend(_task_stall_lines(event, retrieval_parts))
             continue
         if reason == "task_node_error":
-            lines.extend(_task_node_error_lines(event, retrieval_parts, output_inline_limit=output_inline_limit))
+            lines.extend(
+                _task_node_error_lines(
+                    event, retrieval_parts, output_inline_limit=output_inline_limit, externalizer=externalizer
+                )
+            )
             continue
         if reason == "task_distribution_error":
-            lines.extend(_task_distribution_error_lines(event, retrieval_parts, output_inline_limit=output_inline_limit))
+            lines.extend(
+                _task_distribution_error_lines(
+                    event, retrieval_parts, output_inline_limit=output_inline_limit, externalizer=externalizer
+                )
+            )
             continue
         if reason == "task_distribution_skipped":
-            lines.extend(_task_distribution_skipped_lines(event, retrieval_parts, output_inline_limit=output_inline_limit))
+            lines.extend(
+                _task_distribution_skipped_lines(
+                    event, retrieval_parts, output_inline_limit=output_inline_limit, externalizer=externalizer
+                )
+            )
             continue
         lines.extend(
             _task_terminal_lines(
                 event,
                 retrieval_parts,
                 output_inline_limit=output_inline_limit,
+                externalizer=externalizer,
             )
         )
     return "\n".join(lines).strip(), " ".join(part for part in retrieval_parts if part).strip()
@@ -512,6 +611,7 @@ def build_heartbeat_prompt_lane(
     stable_rules_text: str,
     events: list[dict[str, Any]],
     output_inline_limit: int = 4000,
+    output_externalizer: EventTextExternalizer | None = None,
 ) -> HeartbeatPromptLane:
     _ = provider_model
     stable_messages: list[dict[str, Any]] = []
@@ -521,6 +621,7 @@ def build_heartbeat_prompt_lane(
     event_bundle_text, retrieval_query = _event_bundle_content(
         list(events or []),
         output_inline_limit=output_inline_limit,
+        externalizer=output_externalizer,
     )
     dynamic_appendix_messages = (
         [{"role": "user", "content": event_bundle_text}]
