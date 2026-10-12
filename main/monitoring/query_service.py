@@ -104,6 +104,13 @@ _TASK_TOKEN_ROLLUP_CACHE_MAX_TASKS = 8
 # 所以戳只保证"变了就一定重算"，另有 TTL 给"同秒没变戳"封顶——别把它当精确判据。
 _TASK_TOKEN_ROLLUP_MAX_AGE_SECONDS = 2.0
 
+# 根节点详情的快照档缓存：一次构造实测 449–780 ms（并发顶到 1082 ms），而读者是轮询方
+# （工具看门狗、心跳停滞诊断、浏览器每次打开详情），戳没动时重算出来的那份完全相同。
+_SNAPSHOT_ROOT_DETAIL_CACHE_MAX_TASKS = 8
+
+# 同样只保证"变了必然重算"：`updated_at` 秒级粒度，同秒两写读成同一个戳，所以配 TTL 封顶。
+_SNAPSHOT_ROOT_DETAIL_MAX_AGE_SECONDS = 5.0
+
 
 def project_pending_distribution_entries(
     entries_by_id: dict[str, dict[str, Any]],
@@ -175,6 +182,12 @@ class TaskQueryService:
         self._live_frame_cache: dict[str, dict[str, tuple[str, Any]]] = {}
         # task_id → ((节点写戳, 节点行数), 聚合好的按模型明细, 算出的时刻)
         self._token_rollup_cache: dict[str, tuple[tuple[str, int], list[Any], float]] = {}
+        # task_id → ((明细行戳, 节点 id), 已 dump 好的根节点详情【不含轨迹正文】, 算出的时刻)
+        # 缓存的是**只读**那份：别处没有写 `root_node[...]` 的读者（前端也把它展开成
+        # 新对象再合并），所以返回同一对象不会串味。
+        self._snapshot_root_detail_cache: dict[
+            str, tuple[tuple[str, str], dict[str, Any] | None, float]
+        ] = {}
 
     def summary(self, session_id: str | None = None) -> TaskSummaryResult:
         # session_id 为空 = 全局口径（跨会话全量任务）；非空 = 该会话口径。
@@ -635,7 +648,9 @@ class TaskQueryService:
         with self._debug_track('query_service.get_task_snapshot.live_state'):
             live_state = self._projection_live_state(task.task_id)
         with self._debug_track('query_service.get_task_snapshot.root_node_detail'):
-            root_node = self.get_node_detail(task.task_id, task.root_node_id)
+            # 快照档不带轨迹正文（1.82 MB 里那 1.42 MB），并按明细行写戳复用：
+            # 打开任务时前端不选中任何节点，正文是选中后走 detail_level='full' 取的。
+            root_node = self._snapshot_root_node_detail(task.task_id, task.root_node_id)
         # 帧表先投影成 JSON 一次，`runtime_summary` 与 `frontier` 共用这一份。
         # 旧写法是 `live_state.model_dump()`（含 195 帧）再为 frontier 逐帧 dump 第二遍：
         # 两遍序列化同一个列表，是 `get_task_snapshot` 长块里除整表建模之外的另一头。
@@ -688,7 +703,7 @@ class TaskQueryService:
                 **counts,
             },
             'runtime_summary': runtime_summary,
-            'root_node': root_node.model_dump(mode='json') if root_node is not None else None,
+            'root_node': root_node,
             'frontier': frontier,
             'counts': counts,
             'recent_model_calls': [
@@ -720,7 +735,50 @@ class TaskQueryService:
             ],
         }
 
-    def get_node_detail(self, task_id: str, node_id: str, *, detail_level: str = 'summary') -> TaskNodeDetail | None:
+    def _snapshot_root_node_detail(self, task_id: str, node_id: str) -> dict[str, Any] | None:
+        """任务快照用的根节点详情：不带轨迹正文，并按明细行写戳复用。
+
+        实盘（8 个并发详情）一次构造 449–1082 ms，而这一档的读者是轮询方——工具看门狗、
+        心跳的停滞诊断、浏览器每次打开详情。戳没动时重算出来的字节与上一份相同。
+        """
+        record = self._store.get_task_node_detail(node_id)
+        if record is None:
+            return None
+        stamp = (
+            str(getattr(record, 'updated_at', '') or ''),
+            str(getattr(record, 'execution_trace_ref', '') or ''),
+        )
+        key = (stamp, str(node_id))
+        now_mono = time.monotonic()
+        cached = self._snapshot_root_detail_cache.get(task_id)
+        if (
+            cached is not None
+            and cached[0] == key
+            and (now_mono - cached[2]) < _SNAPSHOT_ROOT_DETAIL_MAX_AGE_SECONDS
+        ):
+            return cached[1]
+        detail = self.get_node_detail(task_id, node_id, ship_execution_trace_body=False)
+        dumped = detail.model_dump(mode='json') if detail is not None else None
+        while len(self._snapshot_root_detail_cache) >= _SNAPSHOT_ROOT_DETAIL_CACHE_MAX_TASKS:
+            self._snapshot_root_detail_cache.pop(next(iter(self._snapshot_root_detail_cache)), None)
+        self._snapshot_root_detail_cache[task_id] = (key, dumped, now_mono)
+        return dumped
+
+    def get_node_detail(
+        self,
+        task_id: str,
+        node_id: str,
+        *,
+        detail_level: str = 'summary',
+        ship_execution_trace_body: bool = True,
+    ) -> TaskNodeDetail | None:
+        """`ship_execution_trace_body=False`：照旧解析（摘要与 `latest_tool_calls_full` 依它而造），
+        但**不把轨迹正文外发**。任务快照走这一档。
+
+        实盘 `task:1d9cddf9858e`：详情响应 1.82 MB 里 `root_node.execution_trace` 占
+        1.42 MB，而摘要只要 85 KB；打开任务时前端不选中任何节点，`S.rootNode` 全项目
+        只被读了 `.node_id`，节点面板要的正文是选中后另走 `detail_level='full'` 那条道取的。
+        """
         task = self._store.get_task(task_id)
         detail_record = self._store.get_task_node_detail(node_id)
         node_record = self._store.get_task_node(node_id)
@@ -909,6 +967,9 @@ class TaskQueryService:
                     **dict(detail.execution_trace_summary or {}),
                     'latest_tool_calls_full': latest_tool_calls_full,
                 }
+        if not ship_execution_trace_body:
+            # 摘要已带齐（含 latest_tool_calls_full），正文对这一档的读者没有用途。
+            detail.execution_trace = {}
         return detail
 
     def get_tree_snapshot(
