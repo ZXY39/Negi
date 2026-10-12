@@ -11870,20 +11870,15 @@ function loadBalanceGroupWindowSummary(members) {
     };
 }
 
-function renderLoadBalanceGroupWindowChips(members) {
+// 组弹窗里那一行「组内最大上下文对齐」：整组能用的上限是对齐后的那颗最小窗口。卡片（链上
+// 组卡、组列卡）不显示这行——位置留给成员与链状态，窗口口径只在正改成员的那一刻要看。
+function renderLoadBalanceGroupWindowAlignment(members) {
     const summary = loadBalanceGroupWindowSummary(members);
     if (!summary) return "";
     // 数字保持与「编辑模型」里那个窗口输入框同形（裸整数），这台机器的 locale 会给千分位，
     // 显示层不复算格式，两处读数才对得上。
-    const chips = [
-        `<span class="policy-chip neutral" title="组内按最小那颗成员的窗口对齐压缩">窗口对齐 ${esc(summary.minKey)}=${summary.minWindow}</span>`,
-    ];
-    if (summary.spread > 0) {
-        chips.push(
-            `<span class="policy-chip risk-high" title="组内成员窗口不一致：整组按最小那颗压缩">本组最大 ${summary.maxWindow}</span>`,
-        );
-    }
-    return chips.join("");
+    const tone = summary.spread > 0 ? "risk-high" : "neutral";
+    return `<span class="policy-chip ${tone}" title="对齐到最小那颗 ${esc(summary.minKey)}=${summary.minWindow}；组内最大 ${summary.maxWindow}">组内最大上下文对齐: ${summary.minWindow}</span>`;
 }
 
 // 链上「一跳是一个组」的那张卡。模型页的角色链由 org_graph_llm.js 渲染（它覆盖了
@@ -11898,7 +11893,6 @@ function renderModelGroupChainTile(scopeKey, groupKey, index, editing) {
                 <span class="resource-list-subtitle">组内平级 · 按综合负载选成员 · 节点绑定后粘滞</span>
                 <span class="model-inline-meta">
                     <span class="policy-chip risk-low">组</span>
-                    ${renderLoadBalanceGroupWindowChips(members)}
                     ${index === 0 ? '<span class="policy-chip risk-low">链首</span>' : ""}
                     ${group.enabled === false ? '<span class="policy-chip neutral">已禁用</span>' : ""}
                     ${!members.length ? '<span class="policy-chip risk-high">成员为空，保存会被拒绝</span>' : ""}
@@ -12097,10 +12091,10 @@ function renderModelGroupDialog() {
             <span class="resource-field-label">每成员重试次数</span>
             <input class="resource-search spinless-number-input" type="number" min="0" step="1" inputmode="numeric" value="${esc(String(dialog.maxRetryRounds))}" data-group-dialog-rounds>
         </label>
+        <div class="model-inline-meta" data-group-dialog-windows>${renderLoadBalanceGroupWindowAlignment(dialog.modelKeys)}</div>
         <div class="resource-field">
             <span class="resource-field-label" data-group-dialog-count>成员模型（${selected.size}）</span>
             <div class="model-group-dialog-members">${memberOptions || '<span class="policy-chip neutral">没有可选模型</span>'}</div>
-            <div class="model-inline-meta" data-group-dialog-windows>${renderLoadBalanceGroupWindowChips(dialog.modelKeys)}</div>
         </div>
         ${dialog.error ? `<p class="model-group-dialog-error" role="alert" data-group-dialog-error>${esc(dialog.error)}</p>` : ""}`;
     backdrop.hidden = false;
@@ -12115,10 +12109,10 @@ function syncLoadBalanceGroupDialogSummary() {
     if (!body || !dialog.open) return;
     const count = body.querySelector("[data-group-dialog-count]");
     if (count) count.textContent = `成员模型（${dialog.modelKeys.length}）`;
-    // 窗口对齐行跟着勾选走：换一颗小窗口成员就会压低整组的压缩目标，这层连带必须在下一次
-    // 勾选时就看见，而不是等出事那天再回头翻配置。
+    // 这行跟着勾选走，且放在成员列表上方：压低整组上限的那一刻正是在下面勾选的那一颗，
+    // 读数要在手的下一步之前出现，而不是等出事那天再回头翻配置。
     const windows = body.querySelector("[data-group-dialog-windows]");
-    if (windows) windows.innerHTML = renderLoadBalanceGroupWindowChips(dialog.modelKeys);
+    if (windows) windows.innerHTML = renderLoadBalanceGroupWindowAlignment(dialog.modelKeys);
     if (!dialog.error) body.querySelector("[data-group-dialog-error]")?.remove();
 }
 
@@ -12143,7 +12137,6 @@ function renderModelGroupColumn() {
                 return `<span class="policy-chip neutral" title="${esc(item)}">${esc(modelDisplayTitle(model) || item)}</span>`;
             }).join("")
             : '<span class="policy-chip risk-high">成员为空，保存会被拒绝</span>';
-        const windowChips = renderLoadBalanceGroupWindowChips(members);
         // 整张卡都是打开配置的点击区，只有「删除」例外。
         return `
             <article class="model-group-item${editing ? " is-editing" : ""}${members.length ? "" : " is-incomplete"}"${editing ? ' draggable="true"' : ""} data-model-group-key="${esc(key)}" data-model-group-ref="${esc(groupRefToken(key))}" data-group-edit="${esc(key)}">
@@ -12153,7 +12146,6 @@ function renderModelGroupColumn() {
                     ${editing ? `<button type="button" class="toolbar-btn ghost small" data-group-delete="${esc(key)}">删除</button>` : ""}
                 </div>
                 <div class="model-inline-meta">${memberChips}</div>
-                ${windowChips ? `<div class="model-inline-meta">${windowChips}</div>` : ""}
                 ${group.enabled === false ? '<div class="model-inline-meta"><span class="policy-chip neutral">已禁用</span></div>' : ""}
             </article>`;
     }).join("");
