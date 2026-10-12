@@ -81,7 +81,16 @@ async def get_task_worker_status():
     service = _service()
     await service.startup()
     payload = await asyncio.to_thread(service.worker_status_payload)
-    return {'ok': True, **payload}
+    # 本进程（web）自己的长块账本。`payload['debug']` 里那份是 worker 进程的，
+    # 判"这次请求慢在谁身上"要的是服务这个浏览器请求的那个进程：它的 sqlite.query.*
+    # 与 query_service/runtime_service 段名、各自毫秒、以及发生在哪一刻。
+    # 200 ms 以下不入账，取一份是内存读，不加查询路径。
+    return {
+        'ok': True,
+        **payload,
+        'web_long_blocks': service.runtime_debug_recorder.snapshot(),
+        'web_worst_long_blocks': service.runtime_debug_recorder.worst_snapshot(),
+    }
 
 
 @router.get('/tasks/{task_id}')
