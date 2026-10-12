@@ -5170,6 +5170,34 @@ class MainRuntimeService:
         if gate:
             detail['entry_gate'] = gate
 
+        # 闸内那一层的排队。缺这块时，会话只看到 `dispatch_running=10` 就会判成
+        # "10 个节点在推进"，而那 10 个其实全都卡在等模型回合权（2026-10-12 实测：
+        # 09:20 与 09:28 两轮据此判"并非真死锁"，同期授予数恒 0、队列 running=0/waiting=13）。
+        # 直接取控制器的现读快照：`monitor.snapshot()` 里没有这几项（它们由本服务合并进
+        # 状态载荷与 perf 历史，不在压力采样器自己的字典里）。
+        turn: dict[str, Any] = {}
+        node_turn = self._node_turn_snapshot()
+        if node_turn:
+            turn['running'] = int(node_turn.get('node_queue_running_count') or 0)
+            turn['waiting'] = int(node_turn.get('node_queue_waiting_count') or 0)
+            oldest_ms = float(node_turn.get('node_queue_oldest_wait_ms') or 0.0)
+            if oldest_ms > 0:
+                turn['oldest_wait_seconds'] = round(oldest_ms / 1000.0)
+            head_pinned = float(node_turn.get('node_queue_head_pinned_seconds') or 0.0)
+            if head_pinned > 0:
+                turn['head_pinned_seconds'] = round(head_pinned)
+            head_reason = str(node_turn.get('node_queue_head_busy_reason') or '').strip()
+            if head_reason:
+                turn['head_busy_reason'] = head_reason
+            head_node = str(node_turn.get('node_queue_head_node_id') or '').strip()
+            if head_node:
+                turn['head_node_id'] = head_node
+            head_window = int(node_turn.get('node_queue_head_required_window') or 0)
+            if head_window > 0:
+                turn['head_required_window'] = head_window
+        if turn:
+            detail['turn_queue'] = turn
+
         rate: dict[str, Any] = {}
         if monitor_snapshot:
             rate['requests_per_minute'] = float(monitor_snapshot.get('entry_throughput_rpm_60s') or 0.0)

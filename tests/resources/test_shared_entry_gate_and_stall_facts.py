@@ -224,6 +224,15 @@ def test_stall_payload_normalizer_keeps_the_facts_and_drops_the_gaps() -> None:
                     'task_queued': {'execution': 1},
                     'empty_block': {},
                 },
+                'turn_queue': {
+                    'running': 0,
+                    'waiting': 13,
+                    'oldest_wait_seconds': 2405,
+                    'head_pinned_seconds': 2400,
+                    'head_busy_reason': 'no_candidate',
+                    'head_node_id': 'node:03ef30fcff41',
+                    'head_required_window': 392742,
+                },
                 'upstream_rate': {
                     'requests_per_minute': 111.8,
                     'completions_per_minute': 27.0,
@@ -245,6 +254,11 @@ def test_stall_payload_normalizer_keeps_the_facts_and_drops_the_gaps() -> None:
     assert detail['upstream_rate']['completions_per_minute'] == 27.0
     assert [item['task_id'] for item in detail['occupiers']] == ['task:e25f6cb420c8']
     assert 'lane' not in detail
+    # 闸内那层的排队要能活着到会话，且 0 是真 0（granted=0 是这条车道的核心信号）
+    assert detail['turn_queue']['running'] == 0
+    assert detail['turn_queue']['waiting'] == 13
+    assert detail['turn_queue']['head_busy_reason'] == 'no_candidate'
+    assert 'head_window_zero' not in detail['turn_queue']
 
 
 def test_stall_detail_lines_state_facts_and_offer_no_actions() -> None:
@@ -261,6 +275,15 @@ def test_stall_detail_lines_state_facts_and_offer_no_actions() -> None:
                 'reserved': {'execution': 3, 'inspection': 3},
                 'task_running': {'execution': 0},
                 'task_queued': {'execution': 1},
+            },
+            'turn_queue': {
+                'running': 0,
+                'waiting': 13,
+                'oldest_wait_seconds': 2405,
+                'head_pinned_seconds': 2400,
+                'head_busy_reason': 'no_candidate',
+                'head_node_id': 'node:03ef30fcff41',
+                'head_required_window': 392742,
             },
             'upstream_rate': {
                 'requests_per_minute': 111.8,
@@ -279,6 +302,12 @@ def test_stall_detail_lines_state_facts_and_offer_no_actions() -> None:
     assert 'completions/min 27.0' in text
     assert 'task:e25f6cb420c8 (running 11, waiting 22)' in text
     assert 'Distribution barrier active: state=distributing' in text
+    # 闸位显示"10 个在运行"而这一层 granted=0：会话要靠这两行才不会再误判成"在推进"
+    assert 'Node-turn queue (already past the gate' in text
+    assert 'granted 0, waiting 13, oldest wait 2405s' in text
+    assert 'one request holding the grant window for 2400s' in text
+    assert 'head reason=no_candidate' in text
+    assert 'needs a 392742-token window' in text
     for banned in ('Suggested', 'pause', 'Pause', 'resume', 'Consider', 'should'):
         assert banned not in text, f"事实行里混进了动作句：{banned}"
 

@@ -847,6 +847,24 @@ def _sync_catalog_parameters_from_records(cfg: Config) -> list[tuple[str, str, o
             diverged.append((str(getattr(item, "key", "") or ""), field, current, resolved))
             setattr(item, field, resolved)
     if diverged:
+        items = [
+            {"model_key": key, "field": field, "catalog": before, "record": after}
+            for key, field, before, after in diverged[:10]
+        ]
+        # 审计事件是直接写文件的落点：`load_config` 跑在 loguru 的文件 sink 挂上之前，
+        # 只在 WARN 里点名，操作员与日志审计页两头都读不到（2026-10-12 实测过这种落空）。
+        try:
+            from g3ku.audit_events import emit_audit_event
+
+            emit_audit_event(
+                "config",
+                "warning",
+                "model_catalog_parameter_resynced",
+                f"{len(diverged)} model catalog parameter copy(ies) re-synced from llm-config records",
+                detail={"items": items, "total": len(diverged)},
+            )
+        except Exception:
+            pass
         logger.warning(
             "Model catalog copies of llm-config parameters were stale and were re-synced: {}{}",
             "; ".join(f"{key}.{field}: catalog={before} record={after}" for key, field, before, after in diverged[:10]),
