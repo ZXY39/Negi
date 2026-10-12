@@ -6,7 +6,7 @@ import time
 from collections import deque
 from dataclasses import dataclass
 from datetime import datetime
-from typing import Callable
+from typing import Any, Callable
 
 from loguru import logger
 
@@ -586,6 +586,42 @@ class NodeTurnController:
             str(detail or ""),
         )
         return error
+
+    def peek_hop_windows(self, *, node_id: str, route_plan: ModelRoutePlan | None) -> dict[str, Any] | None:
+        """给压缩尺子指一个来源：按授予那侧同一条"从链首往后"的走法，预测这一跳落到哪个组。
+
+        只用与尺寸无关的那半资格（组存在且启用、成员还在计划里、粘滞成员仍合格）：请求
+        体量本来就是要由这把尺子决定的，拿体量当预测条件就是循环。预测偏大也不会误发——
+        授予那侧仍按 `required_context_window_tokens` 筛成员，塞不下的成员拿不到 lease。
+        判不出来（没有 balancer、这一跳落在 direct 链位、整条链都没人接单）返回 None，
+        调用方回落到链级窗口：宁可退回旧口径，也不要在预测失败时把尺子打成 0。
+        """
+        if not str(node_id or "").strip() or route_plan is None:
+            return None
+        peek = getattr(self._balancer, "peek_selection", None)
+        if not callable(peek):
+            return None
+        for route in list(getattr(route_plan, "routes", None) or []):
+            if not bool(getattr(route, "is_load_balance", False)):
+                return None
+            group_key = str(getattr(route, "group_key", "") or "").strip()
+            if not group_key:
+                continue
+            min_window, model_key, reason = peek(
+                node_id=str(node_id or "").strip(),
+                group_key=group_key,
+                filters=RouteCandidateFilters(),
+            )
+            if reason:
+                continue
+            if int(min_window or 0) <= 0:
+                continue
+            return {
+                "group_key": group_key,
+                "model_key": str(model_key or ""),
+                "min_window": int(min_window or 0),
+            }
+        return None
 
     def _drop_request_locked(self, request: _QueuedNodeTurnRequest) -> None:
         self._queue = deque(item for item in self._queue if item is not request)

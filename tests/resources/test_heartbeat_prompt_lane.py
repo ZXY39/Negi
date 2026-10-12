@@ -235,7 +235,7 @@ def test_distribution_skipped_event_reads_as_degraded_not_paused() -> None:
 
 
 def test_node_error_bundle_marks_model_config_fault_class() -> None:
-    """思考顶满最大输出的暂停：agent 必须读到"改配置才有效"，否则会 resume 同一堵墙。"""
+    """思考顶满最大输出的暂停：类名给分类，处置只从 Error 正文来（同一份说法不许有两处）。"""
     from g3ku.heartbeat.prompt_lane import build_heartbeat_prompt_lane
 
     lane = build_heartbeat_prompt_lane(
@@ -245,9 +245,10 @@ def test_node_error_bundle_marks_model_config_fault_class() -> None:
             "reason": "task_node_error", "task_id": "task:t", "node_id": "node:n",
             "pause_reason": "error",
             "error_text": (
-                "Invalid final result submission detected 1 consecutive times. Latest issue: "
+                "Invalid final result submission detected 2 consecutive times. Latest issue: "
                 "model_config_fault: reply carried no tool call and no text (reasoning-only) "
-                "[output-capped] | sent_reasoning_effort=xhigh sent_max_tokens=65536"
+                "[output-capped] | sent_reasoning_effort=xhigh sent_max_tokens=65536 "
+                "同类跳次=2；运行时不会改动模型档位：请把该模型的思考强度调低后再恢复本节点"
             ),
             "retry_attempt": 1, "retry_cap": 5, "retry_escalated": False,
         }],
@@ -272,8 +273,9 @@ def test_node_error_bundle_marks_window_integrity_fault_class() -> None:
             "error_text": (
                 "Invalid final result submission detected 1 consecutive times. Latest issue: "
                 "window_integrity_fault: reply carried no tool call and no text (reasoning-only) "
-                "[window-clamped] | sent_max_tokens=65536 output_tokens=16352 声明窗口=390000 "
-                "本节点实测最大(输入+输出)=262144"
+                "[window-clamped] | 这一跳模型=sens-x 该模型声明窗口=390000 "
+                "sent_max_tokens=65536 output_tokens=16352 本节点实测最大(输入+输出)=262144 "
+                "要核对的只有这一跳模型那一颗的 context_window_tokens"
             ),
             "retry_attempt": 1, "retry_cap": 5, "retry_escalated": False,
         }],
@@ -281,11 +283,12 @@ def test_node_error_bundle_marks_window_integrity_fault_class() -> None:
     text = str(_field(lane, "event_bundle_text"))
     assert "Failure class: window_integrity_fault" in text
     assert "context_window_tokens" in text
+    assert "这一跳模型=sens-x" in text
     assert "思考强度调低" not in text
 
 
 def test_node_error_bundle_marks_send_preflight_fault_class() -> None:
-    """发送前预检拒发的暂停：提醒要给出预估与声明窗口两个观测值，并说清 resume 无效。"""
+    """发送前预检拒发的暂停：类名说清"这一跳没发出去"，两个观测值由正文给。"""
     from g3ku.heartbeat.prompt_lane import build_heartbeat_prompt_lane
 
     lane = build_heartbeat_prompt_lane(
@@ -296,14 +299,36 @@ def test_node_error_bundle_marks_send_preflight_fault_class() -> None:
             "pause_reason": "error",
             "error_text": (
                 "send_preflight_fault: token compression helper returned an empty summary "
-                "after retries (limit 3) [预估=412000 声明窗口=390000 压缩触发线=296400]"
+                "after retries (limit 3) [预估=412000 本轮发送窗口=390000] "
+                "本轮发送窗口是按当跳目标组算出的链级数字"
             ),
             "retry_attempt": 1, "retry_cap": 5, "retry_escalated": False,
         }],
     )
     text = str(_field(lane, "event_bundle_text"))
     assert "Failure class: send_preflight_fault" in text
-    assert "零模型调用" in text
+    assert "没有发出请求" in text
     assert "预估=412000" in text
     # 这一类同样不该被读成"重启 worker 就好"。
     assert "重启 worker" not in text
+
+
+def test_failure_class_line_carries_no_action_sentences() -> None:
+    """`Failure class` 只许描述形状：处置写两遍就会出现"正文改了、类名还在断言"的那份假事实。
+
+    实盘反例：同一节点在一类被裁的跳之后又成功跑了 5 跳，而类名一直断言 `resume 无效`。
+    唯一例外是 `runtime_fault`：它的正文是异常原话，不带任何处置线索。
+    """
+    from g3ku.heartbeat.prompt_lane import _runtime_fault_class
+
+    for marker in (
+        "model_config_fault: whatever [output-capped]",
+        "window_integrity_fault: whatever [window-clamped]",
+        "send_preflight_fault: whatever [预估=1]",
+    ):
+        line = _runtime_fault_class(marker)
+        assert line, marker
+        assert "处置见 Error 正文" in line or "成因见 Error 正文" in line, line
+        for banned in ("resume", "无效", "重启", "请先", "必须", "建议"):
+            assert banned not in line, f"{marker} → {line}"
+    assert "重启 worker" in _runtime_fault_class("runtime_fault:submit_next_stage:NameError: x")

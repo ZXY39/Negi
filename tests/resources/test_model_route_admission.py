@@ -362,3 +362,90 @@ async def test_pinned_head_that_turned_unservable_is_settled_after_the_time_limi
         turn_controller.release_turn(holder)
     finally:
         await turn_controller.close()
+
+
+def _window_group(
+    group_key: str,
+    pairs: list[tuple[str, int]],
+    *,
+    group_enabled: bool = True,
+    member_enabled: bool = True,
+) -> ResolvedLoadBalanceGroup:
+    return ResolvedLoadBalanceGroup(
+        group_key=group_key,
+        enabled=group_enabled,
+        max_retry_rounds=1,
+        members=[
+            RouteMemberView(
+                model_key=key,
+                enabled=member_enabled,
+                context_window_tokens=window,
+                image_multimodal_enabled=True,
+            )
+            for key, window in pairs
+        ],
+    )
+
+
+@pytest.mark.asyncio
+async def test_peek_ruler_reports_the_group_minimum_and_takes_nothing() -> None:
+    """尺子预测只读资格：给这个组最小成员的窗口，不写绑定、不占 permit。
+
+    占 permit 的那一侧才是"这一跳打到谁"的权威；预测只提供一个数，越界了由授予兜住。
+    """
+    group = _window_group("g1", [("m_big", 690000), ("m_small", 390000)])
+    turn_controller, _controller, balancer = _harness(group, limit=1)
+    plan = ModelRoutePlan(routes=[_group_route(0, group)], config_revision=1)
+    try:
+        peeked = turn_controller.peek_hop_windows(node_id="node:1", route_plan=plan)
+        assert peeked == {"group_key": "g1", "model_key": "m_big", "min_window": 390000}
+        assert balancer._bindings == {}, "预测不许写绑定：写了就等于替准入决定粘滞谁"
+        # limit=1：预测若偷偷占了 permit，这一步授予就再也等不到。
+        holder = await asyncio.wait_for(
+            turn_controller.acquire_turn(task_id="task:1", node_id="node:1", route_plan=plan), timeout=1.0
+        )
+        turn_controller.release_turn(holder)
+    finally:
+        await turn_controller.close()
+
+
+@pytest.mark.asyncio
+async def test_peek_ruler_walks_to_the_route_that_can_actually_serve() -> None:
+    """第一个组没人接单（成员全禁用）时按同一条走法往后一位：尺子跟着这一跳真会落到的组。"""
+    dead = _window_group("g_dead", [("m_dead", 999999)], member_enabled=False)
+    live = _window_group("g_live", [("m_live_big", 690000), ("m_live_small", 300000)])
+    turn_controller, _controller, _balancer = _harness(dead, live, limit=1)
+    plan = ModelRoutePlan(routes=[_group_route(0, dead), _group_route(1, live)], config_revision=1)
+    try:
+        peeked = turn_controller.peek_hop_windows(node_id="node:walk", route_plan=plan)
+        assert peeked is not None
+        assert peeked["group_key"] == "g_live"
+        assert peeked["min_window"] == 300000
+    finally:
+        await turn_controller.close()
+
+
+@pytest.mark.asyncio
+async def test_peek_ruler_is_silent_for_direct_routes_and_missing_balancer() -> None:
+    """direct 链位与没有 balancer 时返回 None：调用方退回链级口径，而不是拿到 0 去撞硬门。"""
+    turn_controller, _controller, _balancer = _harness(_window_group("g1", [("m_a", 390000)]))
+    direct_plan = ModelRoutePlan(routes=[_model_route(0, "m_direct")], config_revision=1)
+    try:
+        assert turn_controller.peek_hop_windows(node_id="node:direct", route_plan=direct_plan) is None
+        assert turn_controller.peek_hop_windows(node_id="node:direct", route_plan=None) is None
+    finally:
+        await turn_controller.close()
+
+    plain_controller = NodeTurnController(
+        model_concurrency_controller=_controller,
+        balancer=None,
+        gate_supplier=lambda: True,
+        poll_interval_seconds=0.05,
+    )
+    try:
+        group = _window_group("g1", [("m_a", 390000)])
+        assert plain_controller.peek_hop_windows(
+            node_id="node:nobalancer", route_plan=ModelRoutePlan(routes=[_group_route(0, group)], config_revision=1)
+        ) is None
+    finally:
+        await plain_controller.close()

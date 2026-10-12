@@ -244,34 +244,28 @@ class ModelLoadBalancer:
             if not group.enabled:
                 return None, "group_disabled"
 
-            binding = None if rebind else self._bindings.get(normalized_node_id)
-            binding_drop_reason = str(rebind_reason or "") if rebind else ""
-            if binding is not None and binding.group_key != group.group_key:
-                binding = None
-                binding_drop_reason = "plan_changed"
-            elif binding is not None and binding.model_key not in group.candidate_model_keys:
-                binding_drop_reason = "plan_changed"
-
-            candidates = [
-                member.model_key
-                for member in group.members
-                if self._candidate_ok(member, effective_filters)
-            ]
-            if not candidates:
-                return None, "no_candidate"
+            candidates, sticky_model, busy_reason, binding_drop_reason = self._eligibility_locked(
+                node_id=normalized_node_id,
+                group=group,
+                filters=effective_filters,
+                rebind=rebind,
+                rebind_reason=rebind_reason,
+            )
+            if busy_reason:
+                return None, busy_reason
 
             # 粘滞优先：绑定的成员只要还合格就先用它，只有它拿不出 permit 才换人。
             # 逐回合按 score 重选会把节点在成员之间来回抖，而换 model_key 等于换前缀
             # 缓存命名空间。429 惩罚只进打分（决定一次**新**绑定选谁），不参与已有
             # 绑定的去留：某个成员真被限流时，让位由组内轮换完成——它跑满
             # `maxRetryRounds` 才换下一个成员，与旧模型链同一口径。
-            if binding is not None and binding.model_key in candidates:
+            if sticky_model and sticky_model in candidates:
                 lease = self._try_bind_locked(
                     node_id=normalized_node_id,
                     task_id=task_id,
                     route_index=route_index,
                     group=group,
-                    model_key=binding.model_key,
+                    model_key=sticky_model,
                     sticky=True,
                     rebind_reason="",
                 )
@@ -279,8 +273,8 @@ class ModelLoadBalancer:
                     return lease, ""
                 self._bindings.pop(normalized_node_id, None)
                 binding_drop_reason = binding_drop_reason or "capacity"
-            elif binding is not None:
-                binding_drop_reason = binding_drop_reason or self._binding_blocked_reason(binding.model_key, effective_filters)
+            elif sticky_model:
+                binding_drop_reason = binding_drop_reason or self._binding_blocked_reason(sticky_model, effective_filters)
                 self._bindings.pop(normalized_node_id, None)
 
             ordered = sorted(candidates, key=lambda model_key: self._order_key(model_key))
@@ -297,6 +291,74 @@ class ModelLoadBalancer:
                 if lease is not None:
                     return lease, ""
             return None, "no_capacity"
+
+    def _eligibility_locked(
+        self,
+        *,
+        node_id: str,
+        group: ResolvedLoadBalanceGroup,
+        filters: RouteCandidateFilters,
+        rebind: bool,
+        rebind_reason: str,
+    ) -> tuple[list[str], str, str, str]:
+        """一个组在给定条件下能给出哪些候选：`(合格候选, 粘滞成员, 拒绝原因, 绑定去留原因)`。
+
+        判据只有这一份，`select()` 与 `peek_selection()` 共用。分叉过一次就要命：压缩按
+        一处口径动手、准入按另一处口径拒授，就是 2026-10-12 task:d07d706989b4 的形状。
+        调用方必须持 `self._lock`。
+        """
+        binding = None if rebind else self._bindings.get(node_id)
+        binding_drop_reason = str(rebind_reason or "") if rebind else ""
+        if binding is not None and binding.group_key != group.group_key:
+            binding = None
+            binding_drop_reason = "plan_changed"
+        elif binding is not None and binding.model_key not in group.candidate_model_keys:
+            binding_drop_reason = "plan_changed"
+        candidates = [
+            member.model_key
+            for member in group.members
+            if self._candidate_ok(member, filters)
+        ]
+        busy_reason = "" if candidates else "no_candidate"
+        return candidates, (str(binding.model_key) if binding is not None else ""), busy_reason, binding_drop_reason
+
+    def peek_selection(
+        self,
+        *,
+        node_id: str,
+        group_key: str,
+        filters: RouteCandidateFilters | None = None,
+    ) -> tuple[int, str, str]:
+        """这一跳**大概率**落到哪个组、那个组里最小的成员窗口是多少。
+
+        与 `select()` 同一份资格判据，但不取 permit、不写绑定、不看容量与限流。压缩发生
+        在准入之前，而准入又把压缩后的体量当筛选条件，所以这里只能用"与尺寸无关的那半"
+        来预测尺子。预测偏大不会造成误发：真正塞不下的成员不会被授予。
+        返回 `(最小合格成员窗口, 预测成员 model_key 或 '', 原因)`；原因非空表示这个组
+        给不出候选，调用方按链的下一位继续问。
+        """
+        effective_filters = filters or RouteCandidateFilters()
+        with self._lock:
+            group = self._groups.get(str(group_key or "").strip())
+            if group is None:
+                return 0, "", "unknown_group"
+            if not group.enabled:
+                return 0, "", "group_disabled"
+            candidates, sticky_model, busy_reason, _drop = self._eligibility_locked(
+                node_id=str(node_id or "").strip(),
+                group=group,
+                filters=effective_filters,
+                rebind=False,
+                rebind_reason="",
+            )
+            if busy_reason:
+                return 0, sticky_model, busy_reason
+            windows = [
+                int(member.context_window_tokens or 0)
+                for member in group.members
+                if member.model_key in candidates and int(member.context_window_tokens or 0) > 0
+            ]
+            return (min(windows) if windows else 0), (sticky_model or str(candidates[0] or "")), ""
 
     def serveability(self, *, group_key: str, filters: RouteCandidateFilters | None = None) -> tuple[bool, str, int]:
         """这个组在**任何容量下**能不能服务一次请求：只看组是否存在、是否启用、候选过滤是否放行。

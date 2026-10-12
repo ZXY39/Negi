@@ -108,6 +108,7 @@ def resolve_send_model_context_window_info(
     *,
     config: Config,
     model_refs: list[str] | None,
+    target_windows: list[int] | None = None,
 ) -> SendModelContextWindowInfo:
     refs = [
         str(item or "").strip()
@@ -135,7 +136,12 @@ def resolve_send_model_context_window_info(
             context_window_tokens=0,
             resolution_error=str(exc or exc.__class__.__name__).strip() or exc.__class__.__name__,
         )
-    context_window_tokens = _chain_widest_context_window_tokens(config=config, refs=refs, first_target=target)
+    context_window_tokens = _hop_context_window_tokens(
+        config=config,
+        refs=refs,
+        first_target=target,
+        target_windows=target_windows,
+    )
     provider_id = str(getattr(target, "provider_id", "") or "").strip()
     resolved_model = str(getattr(target, "model_id", "") or "").strip()
     provider_model = f"{provider_id}:{resolved_model}" if provider_id and resolved_model else model_key
@@ -150,20 +156,33 @@ def resolve_send_model_context_window_info(
     )
 
 
-def _chain_widest_context_window_tokens(
+def _hop_context_window_tokens(
     *,
     config: Config,
     refs: list[str],
     first_target: Any,
+    target_windows: list[int] | None = None,
 ) -> int:
-    """整条链上只要有一处塞得下就算塞得下：取最大窗口，而不是只看链首那一个。
+    """压缩尺子 = 这一跳可能被达到的成员里**最小**的那颗窗口。
 
-    压缩发生在选择之前，而选择是"链上任何候选都算数"。以前窗口读 `refs[0]`，图片能力
-    却按整条链取保守交集（`model_route.RouteCandidateFilters` 的注释写明），同一件事两种
-    保守度：链首声明 69 万、后面成员只有 39 万时，压缩永远不动手，请求攒到没人塞得下
-    才进准入（2026-10-12 task:d07d706989b4 停摆 110 分钟）。
+    压缩发生在选择之前，而选择又拿压缩后的体量当筛选条件（`react_loop.py` 把
+    `estimated_total_tokens` 填进 `RouteCandidateFilters.required_context_window_tokens`），
+    所以"这一跳落到谁"只能预测：`target_windows` 是准入那侧按同一份资格判据给出的预测组
+    成员窗口；预测不到（无回合准入的前门与记忆车道、direct 链位）退回整条链 refs 的最小值。
+
+    为什么不是取最大：请求一旦超过某颗成员的窗口，准入就不再把它授予这一跳，组内可用成员
+    随之变少（实盘 10-05 起 6457 跳里有 5 跳 >390,000 ⇒ 一颗 6 成员的组当场只剩 2 颗），
+    攒到链上没人塞得下就是 2026-10-12 task:d07d706989b4 的 110 分钟停摆形状。取最小的代价
+    是按 390,000 口径压缩的那 0.25% 的跳（16/6457）。
+
+    读不到窗口的成员不参与取最小：一个 0 会把整把尺子打到
+    `react_loop._NODE_SEND_CONTEXT_WINDOW_HARD_MIN_TOKENS` 硬门以下，等于让一条坏记录
+    把该节点的所有后续跳全部拒发。
     """
-    widest = 0
+    positive_targets = [int(item or 0) for item in list(target_windows or []) if int(item or 0) > 0]
+    if positive_targets:
+        return min(positive_targets)
+    windows: list[int] = []
     for index, ref in enumerate(refs):
         value = 0
         try:
@@ -179,9 +198,9 @@ def _chain_widest_context_window_tokens(
                 value = int(raw or 0)
             except Exception:
                 value = 0
-        if value > widest:
-            widest = value
-    return max(0, widest)
+        if value > 0:
+            windows.append(value)
+    return min(windows) if windows else 0
 
 
 def resolve_send_model_context_window_tokens(
