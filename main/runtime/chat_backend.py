@@ -128,28 +128,32 @@ def resolve_send_model_context_window_info(
     try:
         target = build_provider_from_model_key(config, model_key)
     except Exception as exc:
-        return SendModelContextWindowInfo(
-            model_key=model_key,
-            provider_id="",
-            provider_model="",
-            resolved_model="",
-            context_window_tokens=0,
-            resolution_error=str(exc or exc.__class__.__name__).strip() or exc.__class__.__name__,
-        )
+        # 身份构造失败与"窗口知不知道"是两根轴：这里只记下身份故障，尺子照算。把窗口
+        # 一起判成 0 会撞 `react_loop` 的 `context_window_tokens <= 25000` 硬门，那一跳的
+        # 暂停正文指向窗口数字，而真正坏的是密钥。
+        target = None
+        build_error = str(exc or exc.__class__.__name__).strip() or exc.__class__.__name__
+    else:
+        build_error = ""
     context_window_tokens = _hop_context_window_tokens(
         config=config,
         refs=refs,
         first_target=target,
         target_windows=target_windows,
     )
-    provider_id = str(getattr(target, "provider_id", "") or "").strip()
-    resolved_model = str(getattr(target, "model_id", "") or "").strip()
+    provider_id = str(getattr(target, "provider_id", "") or "").strip() if target is not None else ""
+    resolved_model = str(getattr(target, "model_id", "") or "").strip() if target is not None else ""
     provider_model = f"{provider_id}:{resolved_model}" if provider_id and resolved_model else model_key
-    resolution_error = "" if context_window_tokens > 0 else "context_window_tokens_missing"
+    if build_error:
+        resolution_error = build_error
+    elif target is None:
+        resolution_error = "context_window_tokens_missing"
+    else:
+        resolution_error = "" if context_window_tokens > 0 else "context_window_tokens_missing"
     return SendModelContextWindowInfo(
         model_key=model_key,
         provider_id=provider_id,
-        provider_model=provider_model,
+        provider_model=provider_model if target is not None else "",
         resolved_model=resolved_model,
         context_window_tokens=max(0, int(context_window_tokens or 0)),
         resolution_error=resolution_error,

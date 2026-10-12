@@ -427,7 +427,7 @@ Frontdoor request-size control comes from the selected chat model's `context_win
 
 If an operator reports frontdoor send failures after a model or chain change, check in this order:
 
-1. The selected model binding in `/api/models` really exposes `context_window_tokens`.
+1. The selected model binding in `/api/models` really exposes `context_window_tokens`. 窗口读数与**链首 provider 能否建出来**是两根轴：链首密钥缺失/记录坏时 `resolution_error` 带着身份故障原话，而尺子仍按目录与准入预测算出来的窗口返回。把这种形状当成"窗口未知"交回发送预检，暂停正文会指向窗口数字，而真正要修的是密钥那一行。
 2. The saved `llm-config` record under `.g3ku/llm-config/records/*.json` kept the field during migration.
 3. The role chain only references models that have a valid window configured.
 4. The actual provider request estimate crossed the model's window.
