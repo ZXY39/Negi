@@ -33,6 +33,36 @@ def _pick_route_entries(body: dict[str, Any]) -> Any:
 
 def _pick_load_balance_groups(body: dict[str, Any]) -> Any:
     return _pick_alias(body, "load_balance_groups", "loadBalanceGroups")
+
+
+def image_multimodal_chain_decision(app_config: Any, refs: Any) -> tuple[bool, list[str]]:
+    """链上任一成员不收图，整条链按不收图处理（保守 AND）。返回 ``(整链判定, 拦路成员的展示名)``。
+
+    判据的唯一归属地在这里：前门的图片闸门与 ``model_config`` 工具的写后回显共用它，
+    两处口径分叉会让模型留下 ``ok:true`` 却等不到像素。解析不到的成员跳过，因为运行时
+    不会把它发出去；一个都没解析到时返回 False。
+    """
+    getter = getattr(app_config, "get_managed_model", None)
+    if not callable(getter):
+        return False, []
+    resolved_any = False
+    blockers: list[str] = []
+    for ref in list(refs or []):
+        key = str(ref or "").strip()
+        if not key:
+            continue
+        try:
+            model = getter(key)
+        except Exception:
+            model = None
+        if model is None:
+            continue
+        resolved_any = True
+        if not bool(getattr(model, "image_multimodal_enabled", False)):
+            blockers.append(str(getattr(model, "name", "") or "").strip() or key)
+    return bool(resolved_any and not blockers), blockers
+
+
 _UNSET = object()
 
 

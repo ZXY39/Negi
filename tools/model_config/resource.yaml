@@ -1,7 +1,7 @@
 schema_version: 1
 kind: tool
 name: model_config
-description: Manage `.g3ku/config.json`, provider templates, drafts, bindings, and the ordered fallback chain for `ceo` / `execution` / `inspection`.
+description: Manage `.g3ku/config.json`, provider templates, drafts, bindings, and the ordered fallback chain for `ceo` / `execution` / `inspection` / `memory`. `get_scope_chain` reads a chain as stored (ordered entries, load-balance group slots, per-role iteration and concurrency); `set_scope_chain` writes it back through the same payload shape the model config page uses, so a group slot survives an edit.
 tool_result_delivery_contract: runtime_managed
 source:
   type: ''
@@ -37,11 +37,18 @@ parameters:
       - update_model
       - enable_model
       - disable_model
+      - rename_model
+      - delete_model
+      - get_scope_chain
+      - list_load_balance_groups
       - set_scope_chain
       description: Model configuration action to execute.
     key:
       type: string
       description: Managed model key.
+    new_key:
+      type: string
+      description: Target key for `rename_model`. Chain entries and load-balance group members are rewritten together.
     provider_model:
       type: string
       description: "`provider:model` identifier or managed model reference."
@@ -75,6 +82,25 @@ parameters:
     reasoning_effort:
       type: string
       description: Optional reasoning-effort override.
+    context_window_tokens:
+      type: integer
+      description: Declared context window. Required for `add_model`; it is the value the send and
+        dispatch path reads, so declaring more than the provider really serves surfaces as a clamped
+        reply rather than an error.
+    request_timeout_seconds:
+      type: number
+      description: Optional per-request timeout for the model.
+    image_multimodal_enabled:
+      type: boolean
+      description: Whether the model can take images. A chain counts as image-incapable when any
+        member is off, so writing this changes what every chain containing the model can do; writes
+        echo the affected chains back.
+    quota_pool_key:
+      type: string
+      description: Optional quota pool shared with other bindings.
+    name:
+      type: string
+      description: Display name shown in the model catalog and chains.
     retry_on:
       type:
       - array
@@ -98,12 +124,28 @@ parameters:
       description: Scopes for `add_model`, for example `ceo`, `execution`, or `inspection`.
     scope:
       type: string
-      description: Target scope for `set_scope_chain`.
+      description: Target scope for `get_scope_chain` and `set_scope_chain` (`ceo` / `execution` / `inspection` / `memory`; `checker` is an alias for `inspection`).
     model_keys:
       type: array
       items:
         type: string
-      description: Ordered model key list for `set_scope_chain`.
+      description: Ordered model key list for `set_scope_chain`. This is a flat chain and replaces the
+        stored chain entirely, so a chain that contains load-balance groups must be written with
+        `route_entries` instead.
+    route_entries:
+      type: array
+      items:
+        type: object
+      description: Ordered chain as stored, for `set_scope_chain`. Each entry is `{"type":"model","model_key":"..."}`
+        or `{"type":"load_balance","group_key":"..."}`. Groups must already exist (see
+        `list_load_balance_groups`); this action does not create or edit them. Load-balance entries are
+        accepted on `execution` and `inspection` only.
+    max_iterations:
+      type: integer
+      description: Per-role iteration budget for `set_scope_chain`.
+    max_concurrency:
+      type: integer
+      description: Per-role concurrency for `set_scope_chain`. The `memory` role is fixed at 1.
   required:
   - action
 exposure:
