@@ -1848,7 +1848,6 @@ class ReActToolLoop:
                         node_id=node.node_id,
                         response=response,
                         shape_reason=shape_reason,
-                        token_preflight_diagnostics=token_preflight_diagnostics,
                         model_key=str(getattr(node_turn_lease, 'selected_model_ref', '') or ''),
                     )
                 if payload_shape_fault_count >= _PAYLOAD_SHAPE_FAULT_LIMIT:
@@ -5200,26 +5199,23 @@ class ReActToolLoop:
         node_id: str,
         response: Any,
         shape_reason: str,
-        token_preflight_diagnostics: dict[str, Any] | None,
         model_key: str = '',
     ) -> NodeFinalResult:
         """回包被窗口剩余挤掉时的可恢复暂停。
 
         provider 超窗不报错、只静默裁输出，真值取不到，所以运行时既不改配置也不猜
-        上限：把**这一跳实际用的那颗模型**、它自己的声明窗口、发送侧用的那把尺子、以及
-        本节点台账里实测过的最大"输入+输出"并列摆出来，由会话 agent 决定按观测值核对
-        配置还是报给用户。
+        上限：点名**这一跳实际接活的那颗模型**、它自己的声明窗口，以及本节点台账里
+        实测过的最大"输入+输出"，由会话 agent 决定按观测值核对配置还是报给用户。
 
-        为什么必须同时给"这一跳的模型"和"尺子值"：尺子按整条链取（旧实现只读链首），
-        而被裁的是实际接到这一跳的那颗成员。实盘 2026-10-12 task:d07d706989b4
-        node:f5ff329fe004 就是这样被误归因的：事件里只有一个"声明窗口=690000"（那是链首
-        deepseek 的值），而出事那一跳跑在 sensenova（自己声明 390000、实测墙 262144），
-        会话据此去改了三条不相干的模型记录，35 分钟、14 次前门跳，还把一个能装 391,673
-        的成员上限压到了 262,144。
+        为什么只给这一跳那颗模型的窗口、不给发送侧那把尺子：尺子按整条链取，而链上
+        成员窗口可以不同，被裁的却是接单的那一颗。实盘 2026-10-12 task:d07d706989b4
+        node:f5ff329fe004 事件里只有一个"声明窗口=690000"（链首 deepseek 的值），出事
+        那一跳跑在 sensenova（自己声明 390000、实测墙 262144），会话据此改了三条不相干
+        的模型记录，35 分钟、14 次前门跳，还把能装 391,673 的成员压到 262,144。链级数字
+        对修这一条没有任何用处，只会当误导磁铁，所以既不印尺子也不印压缩触发线。
         """
         body = dict(getattr(response, 'provider_request_body', {}) or {})
         usage = dict(getattr(response, 'usage', {}) or {})
-        declared_window = int((token_preflight_diagnostics or {}).get('context_window_tokens') or 0)
         hop_model = str(model_key or '').strip() or str(body.get('model') or '').strip() or 'unknown'
         hop_window = 0
         try:
@@ -5232,18 +5228,28 @@ class ReActToolLoop:
             observed_span = int(self._log_service.max_observed_request_span_tokens(task_id, node_id) or 0)
         except Exception:
             observed_span = 0
+        same_class = 0
+        try:
+            same_class = sum(
+                1
+                for item in list(self._log_service.list_task_node_error_logs(task_id, node_id) or [])
+                if '[window-clamped]' in str(getattr(item, 'error_text', '') or '')
+            )
+        except Exception:
+            same_class = 0
         reason = (
-            f'window_integrity_fault: {shape_reason} | 这一跳模型={hop_model} '
-            f'该模型声明窗口={hop_window} 发送尺子(整条链)={declared_window} '
+            f'window_integrity_fault: {shape_reason} | 要核对的只有"这一跳模型"那一颗的 '
+            'context_window_tokens（llm-config 记录 parameters 里那份，发送与派单都读它），'
+            '链上别的成员与这一条无关，别去改它们。'
+            f'这一跳模型={hop_model} 该模型声明窗口={hop_window} '
             f'sent_max_tokens={provider_body_output_cap(body)} '
             f'output_tokens={int(usage.get("output_tokens") or 0)} '
-            f'本节点实测最大(输入+输出)={observed_span}；这一跳被裁到比声明的发送上限更小的值，'
-            '拦住它的是窗口剩余，不是最大输出配置。降思考档位治不了这一类。'
-            '要核对的是"这一跳模型"那一颗的 context_window_tokens（llm-config 记录 '
-            'parameters 里那份，发送与派单都读它）：尺子值来自整条链，可能属于别的成员，'
-            '别拿它去改别的模型。运行时不改配置，请把这几个数报给用户或按观测值改对后再 resume。'
+            f'本节点实测最大(输入+输出)={observed_span} 同类跳次={max(1, same_class)}；'
+            '这一跳被裁到比声明的发送上限更小的值，拦住它的是窗口剩余，不是最大输出配置，'
+            '降思考档位治不了这一类。运行时不改配置：请按上面的观测值核对那颗模型记录，'
+            '或把这几个数报给用户裁决。'
         )
-        return self._invalid_final_submission_failure(reason=reason, count=1)
+        return self._invalid_final_submission_failure(reason=reason, count=max(1, same_class))
 
     @classmethod
     def _invalid_final_submission_failure(cls, *, reason: str, count: int) -> NodeFinalResult:
@@ -5451,8 +5457,7 @@ class ReActToolLoop:
         info = dict(diagnostics or {})
         observed = [
             f'预估={int(info.get("estimated_total_tokens") or info.get("final_estimate_tokens") or 0)}',
-            f'声明窗口={int(info.get("context_window_tokens") or 0)}',
-            f'压缩触发线={int(info.get("effective_trigger_tokens") or 0)}',
+            f'本轮发送窗口={int(info.get("context_window_tokens") or 0)}',
         ]
         # 标记与观测值都写进 blocking_reason：错误行正文取 failure_text
         # （= blocking_reason 优先），心跳归类读的就是这一份。
@@ -5464,7 +5469,9 @@ class ReActToolLoop:
             evidence=[],
             remaining_work=[],
             blocking_reason=(
-                f'send_preflight_fault: {normalized_reason} [{" ".join(observed)}]'
+                f'send_preflight_fault: {normalized_reason} [{" ".join(observed)}] '
+                '本轮发送窗口是按当跳目标组算出的链级数字，不等于任何一颗模型自己的窗口：'
+                '要改就按链上各成员自己的 context_window_tokens 逐个核对，别拿这个数去改某一条记录。'
             ),
             failure_disposition='pause',
         )
@@ -5480,7 +5487,6 @@ class ReActToolLoop:
         info = dict(diagnostics or {})
         observed = [
             f'预估={int(info.get("estimated_total_tokens") or info.get("final_estimate_tokens") or 0)}',
-            f'压缩触发线={int(info.get("effective_trigger_tokens") or 0)}',
             f'请求要求窗口={int(getattr(exc, "required_window_tokens", 0) or 0)}',
             f'链上候选最大窗口={int(getattr(exc, "largest_candidate_window_tokens", 0) or 0)}',
         ]

@@ -152,7 +152,16 @@ def _good_final_arguments() -> dict[str, object]:
     }
 
 
-async def _run_final_result_loop(*, responses, node_kind, task_id, node_id, max_iterations, configure=None):
+async def _run_final_result_loop(
+    *,
+    responses,
+    node_kind,
+    task_id,
+    node_id,
+    max_iterations,
+    configure=None,
+    preset_error_texts=None,
+):
     requests: list[dict[str, object]] = []
     queue = list(responses)
 
@@ -162,6 +171,8 @@ async def _run_final_result_loop(*, responses, node_kind, task_id, node_id, max_
             return queue.pop(0)
 
     logs = _FakeLogService()
+    for preset in list(preset_error_texts or []):
+        logs.error_logs.append({"task_id": str(task_id), "node_id": str(node_id), "error_text": str(preset)})
     loop = ReActToolLoop(chat_backend=_Backend(), log_service=logs, max_iterations=max_iterations)
     if configure is not None:
         configure(loop)
@@ -1138,10 +1149,39 @@ async def test_react_loop_pauses_on_window_clamped_with_observed_ceiling() -> No
     assert "sent_max_tokens=65536" in result.blocking_reason
     assert "output_tokens=16352" in result.blocking_reason
     assert "本节点实测最大(输入+输出)=262144" in result.blocking_reason
-    # 必须点名"这一跳用的是哪颗模型"和"它自己的声明窗口"：只给尺子值（整条链/链首）会把
-    # 会话引向链上别的成员（实盘据此改错三条记录，见 `_window_integrity_failure` 的说明）。
+    # 必须点名"这一跳用的是哪颗模型"和"它自己的声明窗口"：只给链级数字会把会话引向
+    # 链上别的成员（实盘据此改错三条记录，见 `_window_integrity_failure` 的说明）。
     assert "这一跳模型=sens-x" in result.blocking_reason
     assert "该模型声明窗口=" in result.blocking_reason
-    assert "发送尺子(整条链)=" in result.blocking_reason
-    assert "别拿它去改别的模型" in result.blocking_reason
+    assert "同类跳次=1" in result.blocking_reason
+    # 链级数字一个都不印：尺子与压缩触发线都属于"别的成员也可能贡献这个数"的那类读数。
+    for banned in ("发送尺子", "压缩触发线", "本轮发送窗口"):
+        assert banned not in result.blocking_reason
+    # 约束句必须在数字之前：这一条的失败模式是模型先看到一个大数再去翻配置。
+    assert result.blocking_reason.index("别去改它们") < result.blocking_reason.index("这一跳模型=")
     assert "[window-clamped]" in logs.error_logs[0]["error_text"]
+
+
+@pytest.mark.asyncio
+async def test_window_clamped_pause_counts_previous_same_class_hops() -> None:
+    """同类跳次要现算：外壳写死 1 会让第二次被裁的节点读成"第一次"。"""
+    clamped = LLMResponse(
+        content="",
+        finish_reason="length",
+        usage={"input_tokens": 245792, "output_tokens": 16352, "thinking_tokens": 16352},
+        reasoning_content="thinking" * 64,
+        provider_request_body={"model": "sens-x", "max_tokens": 65536, "reasoning_effort": "xhigh"},
+    )
+    result, _requests, _logs = await _run_final_result_loop(
+        responses=[clamped],
+        node_kind="execution",
+        task_id="task-window-clamped-second",
+        node_id="node-window-clamped-second",
+        max_iterations=5,
+        preset_error_texts=[
+            "Invalid final result submission detected 1 consecutive times. Latest issue: "
+            "window_integrity_fault: earlier hop [window-clamped] done",
+        ],
+    )
+    assert "同类跳次=2" in result.blocking_reason
+    assert "detected 2 consecutive times" in result.blocking_reason

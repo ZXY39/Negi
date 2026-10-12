@@ -52,27 +52,24 @@ SEND_PREFLIGHT_FAULT_MARKER = 'send_preflight_fault:'
 
 
 def _runtime_fault_class(error_text: str) -> str:
-    """把"不是再跑一次就能好"的暂停型单独标出来：resume 只会让节点再撞同一条异常。"""
+    """只标故障形状，不复述处置。
+
+    处置与观测数字都在 `Error` 正文里（就是同一条 blocking_reason），这里重复一遍会
+    出现两份说法：正文改过之后类名还在断言"resume 无效"（实盘有节点在同一类故障后
+    又成功跑了 5 跳），也会把模型引去核对正文没点名的载体。例外是 `runtime_fault`——
+    它的正文是异常原话，没有任何处置线索。
+    """
     text = str(error_text or '')
     if RUNTIME_FAULT_MARKER in text:
-        return 'runtime_fault（运行时自身缺陷，resume 无效，需操作员重启 worker 后再恢复）'
+        # 这一类例外：正文是异常原话（`runtime_fault:<函数>:<Exc>`），没有任何处置线索，
+        # "要重启 worker" 只能写在类名里，否则模型只会反复 resume。
+        return 'runtime_fault（运行时自身缺陷，需操作员重启 worker 后再恢复）'
     if MODEL_CONFIG_FAULT_MARKER in text:
-        return (
-            'model_config_fault（模型配置不匹配：这一跳的思考用量顶满了声明的最大输出，'
-            '提交体没有任何空间；resume 无效，需先把该模型的思考强度调低或把最大输出调高）'
-        )
+        return 'model_config_fault（模型配置与这一跳不匹配，处置见 Error 正文）'
     if WINDOW_INTEGRITY_FAULT_MARKER in text:
-        return (
-            'window_integrity_fault（回包被窗口剩余挤掉，不是最大输出配置的问题；resume 无效，'
-            '需按提醒里的观测值核对该模型记录的 context_window_tokens（发送与派单的权威值），或报给用户）'
-        )
+        return 'window_integrity_fault（回包被窗口剩余挤掉，处置见 Error 正文）'
     if SEND_PREFLIGHT_FAULT_MARKER in text:
-        return (
-            'send_preflight_fault（发送前预检拒发：这一跳没发出去，节点零模型调用。成因看正文原话——'
-            '要么预估输入确实超过声明窗口，要么上下文压缩助手那几跳只回空包（空包属回包形态故障，'
-            '与思考顶满输出同源）。resume 会再撞同一次拒发；请按提醒里的预估/声明窗口决定是核对'
-            'context_window_tokens、让节点收口当前阶段少带历史，还是报给用户，不要自动改配置）'
-        )
+        return 'send_preflight_fault（发送前预检拒发，这一跳没有发出请求，成因见 Error 正文）'
     return ''
 
 
