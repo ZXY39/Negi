@@ -54,6 +54,19 @@ def test_second_tier_reports_every_time_with_ms(lines) -> None:
     probe = _LaneProbe()
     probe._with_reader_lane('sqlite.query.fetchall:task_node_details', 900.0)
     probe._with_reader_lane('sqlite.query.fetchall:task_node_details', 3400.0)
-    assert len(lines) == 2, '>=事件档必须每次都留，首见去重不能吞掉它'
-    assert 'took 900 ms' in lines[0] and 'took 3400 ms' in lines[1]
-    assert 'task_node_details' in lines[0] and 'from=' in lines[1]
+
+    events = [line for line in lines if 'took ' in line]
+    first_seen = [line for line in lines if 'new reader lane' in line]
+    assert len(events) == 2, '>=事件档必须每次都留，首见去重不能吞掉它'
+    assert 'took 900 ms' in events[0] and 'took 3400 ms' in events[1]
+    assert 'task_node_details' in events[0] and 'from=' in events[1]
+    assert len(first_seen) == 1, '首见行仍是一生一次，与事件行各管各的'
+
+
+def test_event_tier_still_registers_the_pair_in_the_ledger(lines) -> None:
+    # 事件档不得绕过 (表, 调用方) 登记：漏了它，账本里缺的恰好是最慢的那几组。
+    probe = _LaneProbe()
+    probe._with_reader_lane('sqlite.query.fetchall:nodes', 1200.0)
+    assert any('nodes:' in key for key in probe._slow_read_lanes), sorted(probe._slow_read_lanes)
+    probe._with_reader_lane('sqlite.query.fetchall:nodes', 1300.0)
+    assert len([line for line in lines if 'new reader lane' in line]) == 1
