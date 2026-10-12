@@ -966,6 +966,18 @@ class ConfigChatBackend:
                 return configured
         return self._normalized_model_attempt_timeout_seconds()
 
+    @staticmethod
+    def _target_context_window_tokens(target: Any) -> int:
+        """这颗绑定的声明窗口：读 provider target 的 `model_parameters`（记录那一本真值）。
+
+        与压缩尺子同一来源；读不到（记录没这个字段）返回 0，调用方按"判不出来就不拦"处理。
+        """
+        raw = dict(getattr(target, "model_parameters", {}) or {}).get("context_window_tokens")
+        try:
+            return max(0, int(raw or 0))
+        except (TypeError, ValueError):
+            return 0
+
     def _resolve_group_slot_ref(
         self,
         *,
@@ -1065,10 +1077,15 @@ class ConfigChatBackend:
         on_model_retry_status: Any = None,
         model_routes: Any = None,
         node_turn_controller: Any = None,
+        required_context_window_tokens: int = 0,
     ) -> LLMResponse:
         refs = [str(item or '').strip() for item in list(model_refs or []) if str(item or '').strip()]
         if not refs:
             raise ValueError('model_refs must not be empty')
+        # 本轮请求体需要的窗口下限（压缩/预检之后的真实体量）。>0 时链上"声明窗口塞不下
+        # 这一位"的候选被留到最后再试：把它们当首发等于把请求交给一个必然静默裁输出的成员。
+        # 默认 0 = 不判，helper/评审等没有体量读数的车道保持原行为。
+        required_window = max(0, int(required_context_window_tokens or 0))
         # route plan 里出现负载均衡组时，模型序列由 balancer 的绑定驱动；纯 direct 链
         # 沿用现有 refs 走位，行为与改造前一致。
         route_slots = _build_route_slots(model_routes, node_turn_refs=refs)
@@ -1177,6 +1194,10 @@ class ConfigChatBackend:
         # 链变更重启次数：链在重试途中被改写时按新链重启，此计数跨重启累计，
         # 只兜底病态抖动，不随单模型轮预算重置。
         chain_restart_count = 0
+        # 声明窗口塞不下本轮请求体的候选：`(chain 下标, ref, 声明窗口)`。塞得下的成员
+        # 全部试过之后才回头用它们（最后一轮兜底），保证不会因为判据而一条都发不出去。
+        window_skipped: list[tuple[int, str, int]] = []
+        window_fallback_used = False
 
         async def _emit_model_retry_status(status: dict[str, Any]) -> None:
             nonlocal retry_status_emitted
@@ -1228,6 +1249,27 @@ class ConfigChatBackend:
                 while model_index < len(refs) and refs[model_index] in tried_model_refs:
                     model_index += 1
                 if model_index >= len(refs):
+                    if window_skipped and not window_fallback_used:
+                        # 塞得下的候选都试过了：放开尺寸判据，从头再走一遍链，让被留在后面的
+                        # 成员有机会接手。宁可发出去被裁（下一跳的 `window_integrity_fault`
+                        # 会点名），也不要因为这条判据把整跳打成"链耗尽"。
+                        window_fallback_used = True
+                        widest = max(window_skipped, key=lambda item: item[2])
+                        logger.warning(
+                            "No model on the chain can hold this request body: required_window={} "
+                            "widest_declared_window={} ({}); sending to the widest slot anyway "
+                            "(provider_requests={} window_skipped_slots={})",
+                            int(required_window),
+                            int(widest[2]),
+                            widest[1],
+                            int(provider_request_count),
+                            ", ".join(f"{item[1]}={item[2]}" for item in window_skipped),
+                        )
+                        for _skipped_index, skipped_ref, _skipped_window in window_skipped:
+                            tried_model_refs.discard(str(skipped_ref))
+                        required_window = 0
+                        model_index = 0
+                        continue
                     break
                 ref = refs[model_index]
                 route_slot = _route_slot_at(route_slots, model_index)
@@ -1268,6 +1310,15 @@ class ConfigChatBackend:
                             model_chain=list(refs),
                         ) from exc
                     raise
+                declared_window = self._target_context_window_tokens(base_target)
+                if required_window > 0 and 0 < declared_window < required_window:
+                    # 这一位塞不下本轮请求体：发给它等于让网关把 completion 预算静默裁成
+                    # `真实窗口 − 输入`（没有任何错误信号，只会表现成一跳被裁的输出）。
+                    # 先把它留在链上，等塞得下的成员都试完再回头用它。
+                    if not any(item[1] == ref for item in window_skipped):
+                        window_skipped.append((int(model_index), str(ref), int(declared_window)))
+                    model_index += 1
+                    continue
                 configured_api_key_indexes = getattr(base_target, "api_key_indexes", None)
                 if configured_api_key_indexes is None:
                     api_key_indexes = list(range(max(1, int(getattr(base_target, "api_key_count", 0) or 0))))
