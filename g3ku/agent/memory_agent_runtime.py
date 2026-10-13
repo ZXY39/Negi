@@ -3487,17 +3487,25 @@ class MemoryManager:
                 payload["active_stage_id"] = active_stage_id
             return f"{head}{marker}{json.dumps(payload, ensure_ascii=False, indent=2)}{tail}"
 
-        if estimate_tokens(_render(stages)) <= max_tokens:
+        # 每个阶段只数一次、按累计和装箱。此前每收一个阶段就把已积累的整组重新
+        # 序列化再逐字符数一遍，597 个阶段的实盘载荷因此要 26.7 秒（同一份载荷按
+        # 一次性数是 0.4 秒），而重试点下去的那次同步请求就是这么把前端 30 秒超时擦过去的。
+        stage_sizes = [max(1, estimate_tokens(json.dumps(stage, ensure_ascii=False, indent=2))) for stage in stages]
+        frame_tokens = estimate_tokens(f"{head}{marker}{tail}")
+        budget = max(1, max_tokens - frame_tokens)
+        if sum(stage_sizes) <= budget:
             return [value]
         sections: list[str] = []
         group: list[Any] = []
-        for stage in stages:
-            candidate = group + [stage]
-            if group and estimate_tokens(_render(candidate)) > max_tokens:
+        used_tokens = 0
+        for stage, size in zip(stages, stage_sizes):
+            if group and used_tokens + size > budget:
                 sections.append(_render(group))
                 group = [stage]
+                used_tokens = size
             else:
-                group = candidate
+                group.append(stage)
+                used_tokens += size
         if group:
             sections.append(_render(group))
         return sections or [value]
