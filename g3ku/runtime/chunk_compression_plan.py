@@ -96,6 +96,9 @@ def resolve_chunk_capacity(
 COMPRESSION_MODE_NONE = 'none'
 COMPRESSION_MODE_SINGLE = 'single'
 COMPRESSION_MODE_CHUNKED = 'chunked'
+# 一跳之内最多连着跑几轮分块：第一轮压满 `max_chunks`，剩下的溢出一轮再收。
+# 再往上是规模问题（该由上一跳的裁撤解决），不是靠压缩内循环硬扛的事。
+COMPRESSION_MAX_PASS_ROUNDS = 2
 
 
 @dataclass(frozen=True, slots=True)
@@ -151,11 +154,18 @@ def plan_compression_pass(
     envelope_tokens: int = 0,
     observed_span_tokens: int = 0,
     max_chunks: int = CHUNK_MAX_CHUNKS,
+    single_shot_tokens: int = 0,
 ) -> CompressionPass:
     """压缩的唯一决策口：够小不压、装得下完整压一次、装不下分块压、超上限留到下一跳。
 
     纯函数，输入只有"还没压的原子组"和"这一发落到的那颗窗口"，所以换模型、暂停恢复、
     进程重启之后重跑它就是重算——不需要任何"上次到哪了"的特例。
+
+    `single_shot_tokens` 是 append-only 单发压缩请求的**实测**体量（前缀 + 历史 + 指令）。
+    它只跟声明窗口比，不套实测跨度夹刀：那条前缀与刚被同一颗模型成功接受的那次发送字节
+    一致，缓存真实命中，本次发送替它背书；而分块请求是全新形状，没有这次背书的块才需要
+    被 `观测跨度 × 0.9` 夹一刀。把两道口径混在一起会让每个正常会话一进压缩就被切成多块，
+    正好毁掉 append-only 那条修复。
     """
     counts = [max(0, int(item or 0)) for item in list(group_token_counts or [])]
     history_tokens = sum(counts)
@@ -178,6 +188,16 @@ def plan_compression_pass(
             **kwargs,
         )
 
+    window = int(context_window_tokens or 0)
+    single_request = int(single_shot_tokens or 0)
+    if counts and window > 0 and single_request > 0 and single_request + _output_headroom_tokens(window) <= window:
+        return _pass(
+            mode=COMPRESSION_MODE_SINGLE,
+            spans=[(0, len(counts))],
+            deferred_spans=[],
+            truncation_group_indexes=[],
+            planned_chunks=1,
+        )
     if capacity <= 0:
         # 窗口连一块信封都装不下：这是唯一还不能"分块解决"的情形，交回调用方按既有
         # 拒因处理（节点=可恢复暂停，会话=窗口超限）。

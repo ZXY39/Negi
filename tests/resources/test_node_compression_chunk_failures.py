@@ -1,18 +1,18 @@
-"""分块压缩的块数与失败计数（2026-10-10 实盘/离线读数后的合同）。
+"""分块压缩的块数、失败前缀提交与原因分账（2026-10-13 统一规划器之后的合同）。
 
-实盘读数（临时把执行链指向本机假模型、声明窗口 6 万→3 万）：
+实盘读数（临时把执行链指向本机假模型、声明窗口 6 万→3 万）留下的两条旧处置都不对：
 
-- 12 条以内的历史 ⇒ 尾部（`_NODE_TOKEN_COMPACTION_RECENT_TAIL_COUNT=12`）把整段吃掉 ⇒
-  可压段为 0 ⇒ helper 一次都没调 ⇒ 直接拒发
-  `estimated_total_tokens (163263) exceeded context_window_tokens (60000) with no compressible history`
-- 窗口 3 万、历史 31.8 万 token ⇒ 按 2 万 token 地板切成 **24 块**（24 次 helper 调用）；
-  其中 1 块被限流 ⇒ 该块正文留空、循环继续、**不报任何失败**，节点拿着丢一块的投影继续跑；
-  14 块全部限流 ⇒ 产物只剩 198 个字符的空标签，**照样当成功**。
+- 块数曾按"真实可压历史 / 3"这个目标次数放长，与装箱容量无关，放大轮会把块顶到超窗
+  （估算≈99 万 ⇒ 每块 429,387 tok > 窗口 39 万）；
+- 某一块没拿到摘要时，曾先在摘要里插一行"本块原文未被摘要替代"**却把原文一起吞掉**
+  （谎报收口），也曾整次作废（下一跳把已压好的块重烧一遍）。
 
-本文件锁定三条合同：
-- C1：块数按"真实可压历史 / 3"动态放长，超大历史也在 3 次内收口（两条车道同源）；
-- C2：部分块失败要可数、要在投影里写明缺口，但不拦发布；
-- C3：全部块失败 ⇒ 空产物 ⇒ 预检按压缩失败拒发，原因带 provider 原话与失败块数。
+现在的合同（两条车道同一个规划器 `g3ku/runtime/chunk_compression_plan.py`）：
+- C1：块数 = 贪心装箱(原子组) 的自然结果，容量 = 窗口 − 实测信封 − 输出余量；
+- C2：一块失败就停在那里——已压好的最长成功前缀照常交付，失败那块及其后的原文
+  原样留在本跳请求里，由下一跳按那时的窗口重算；
+- C3：第一块就失败 ⇒ 一块都没收下 ⇒ 空产物 ⇒ 预检按压缩失败拒发，原因写明
+  `0/N chunks committed` 并带 provider 原话。
 """
 
 from __future__ import annotations
@@ -57,7 +57,9 @@ def _history(n_pairs: int, chars_per_msg: int) -> list[dict]:
 
 
 def _make_loop(fake_chat):
-    loop = ReActToolLoop(chat_backend=SimpleNamespace(), log_service=SimpleNamespace())
+    # 分块循环每块前查一次暂停/取消，`_check_pause_or_cancel` 要读 store.get_task。
+    log_service = SimpleNamespace(_store=SimpleNamespace(get_task=lambda task_id: None))
+    loop = ReActToolLoop(chat_backend=SimpleNamespace(), log_service=log_service)
     loop._chat_with_optional_extensions = fake_chat
     loop._resolved_model_response_timeout_seconds = lambda **_: 30.0
     loop._is_empty_model_response = lambda r: not str(getattr(r, 'content', '') or '').strip()
@@ -79,7 +81,7 @@ def _compress(loop, messages, window):
     ))
 
 
-def _chunk_chat(calls, *, fail_indexes=(), always_fail=False):
+def _chunk_chat(estimator, calls, *, fail_indexes=(), always_fail=False):
     async def fake_chat(*args, messages=None, **kwargs):
         payload = str((messages or [{}])[-1].get('content') or '')
         kind, index, total = 'single_shot', 0, 1
@@ -89,119 +91,130 @@ def _chunk_chat(calls, *, fail_indexes=(), always_fail=False):
             index = int(data.get('chunk_index') or 0)
             total = int(data.get('chunk_count') or 1)
         except Exception:
-            pass
-        calls.append({'kind': kind, 'index': index, 'total': total})
-        if always_fail or index in fail_indexes:
+            data = {}
+        calls.append({
+            'kind': kind,
+            'index': index,
+            'total': total,
+            'tokens': int(estimator(list(messages or []))),
+        })
+        if always_fail or (kind.endswith('_chunk') and index in fail_indexes):
             return _Resp(content='', error_text='HTTP 429: inference exceeds tpm/rpm limit')
         return _Resp(content=f'【摘要 {index}/{total}】保留结论与路径。')
     return fake_chat
 
 
 # ---------------------------------------------------------------------------
-# C1：块数按 /3 放长，不再被 2 万 token 地板切成几十块
+# C1：块数由容量推导，与"目标次数"无关
 # ---------------------------------------------------------------------------
 
 
-def test_chunk_budget_bounds_passes_to_three_for_large_history() -> None:
-    calls: list[dict] = []
-    loop = _make_loop(_chunk_chat(calls))
+def test_chunk_count_follows_capacity_and_executes_every_planned_chunk() -> None:
+    probe = _make_loop(lambda *a, **k: _Resp(content='占位'))
+    estimator = probe._estimate_node_compression_message_tokens
     messages = _history(60, 12000)
-    est = loop._estimate_node_compression_message_tokens(messages)
-    assert est > 400000, f'探针历史需要足够大才能验块数，实测 {est}'
+    assert estimator(messages) > 400_000, f'探针历史需要足够大才能验块数，实测 {estimator(messages)}'
 
-    # 窗口取真实量级（39 万）：/3 的分量落在单块硬上限之内，才轮到"3 次收口"生效。
+    calls: list[dict] = []
+    loop = _make_loop(_chunk_chat(estimator, calls))
     text, payload = _compress(loop, messages, window=390000)
 
+    chunk_calls = [item for item in calls if item['kind'].endswith('_chunk')]
     assert payload.get('compression_mode') == 'llm_chunked'
-    # 基线在这里是 4 块（171000 窗口档）；合同是 /3 收口到 3 块。
-    assert int(payload.get('chunk_count') or 0) <= 3, payload.get('chunk_count')
-    assert len(calls) == int(payload.get('chunk_count') or 0)
+    assert payload.get('capacity_source') == 'declared_window'
+    assert int(payload.get('chunk_count') or 0) == len(chunk_calls), '计划块数就是实发块数'
+    assert int(payload.get('chunk_committed_count') or 0) == len(chunk_calls), '全部成功 ⇒ 一块不落'
+    assert int(payload.get('deferred_message_count') or 0) == 0
+    capacity = int(payload.get('capacity_tokens') or 0)
+    assert 0 < capacity < 390_000
+    assert max(item['tokens'] for item in chunk_calls) <= capacity + 5_000, (
+        f'块请求体量必须落在容量内（容量 {capacity}）'
+    )
     assert text
 
 
-def test_frontdoor_chunk_budget_uses_the_same_three_pass_rule() -> None:
+def test_frontdoor_and_node_derive_the_same_chunk_count_from_the_same_capacity() -> None:
+    """两条车道共用一个规划器：同一份组用量与窗口，块数必须一致。"""
+    from g3ku.runtime.chunk_compression_plan import COMPRESSION_MODE_CHUNKED
     from g3ku.runtime.frontdoor._ceo_create_agent_impl import CreateAgentCeoFrontDoorRunner
 
+    counts = [90_000, 90_000, 90_000, 90_000, 90_000]
+    window = 390_000
+    envelope = 6_000
+
     runner = object.__new__(CreateAgentCeoFrontDoorRunner)
-    calls: list[int] = []
-
-    async def fake_helper(*, messages=None, **kwargs):
-        payload = str((messages or [{}])[-1].get('content') or '')
-        try:
-            data = json.loads(payload)
-        except Exception:
-            data = {}
-        calls.append(int(data.get('chunk_index') or 0))
-        return '【摘要】保留结论与路径。', {'role': 'assistant', 'content': '摘要'}
-
-    async def no_emit(**kwargs):
-        return None
-
-    runner._run_frontdoor_compression_helper_request = fake_helper
-    runner._emit_frontdoor_runtime_snapshot = no_emit
-    history = _history(60, 12000)
-    combined, chunk_count, _merge = asyncio.run(
-        runner._chunked_frontdoor_compression_summaries(
-            system_prefix=[],
-            older_history_messages=history[2:],
-            model_refs=['stub-compress-1'],
-            context_window_tokens=390000,
-            state={},
-            runtime=SimpleNamespace(),
-            is_cancelled=None,
-            model_info={},
-        )
+    front_pass = runner._frontdoor_plan_token_compression_pass(
+        grouped_history=[([{'role': 'user', 'content': 'x'}], tokens) for tokens in counts],
+        single_shot_request_tokens=sum(counts) + envelope,
+        context_window_tokens=window,
+        observed_span_tokens=0,
     )
-    assert chunk_count <= 3, chunk_count
-    assert len(calls) == chunk_count
-    assert combined
+
+    loop = _make_loop(lambda *a, **k: _Resp(content='x'))
+    node_pass = loop._node_plan_token_compression_pass(
+        grouped_history=[([{'role': 'user', 'content': 'x'}], tokens) for tokens in counts],
+        single_shot_request_tokens=sum(counts) + envelope,
+        context_window_tokens=window,
+        observed_span_tokens=0,
+    )
+
+    assert front_pass.mode == node_pass.mode == COMPRESSION_MODE_CHUNKED
+    assert front_pass.spans == node_pass.spans
+    assert front_pass.capacity_tokens == node_pass.capacity_tokens
 
 
 # ---------------------------------------------------------------------------
-# C2：部分块失败要可数、要写明缺口，但不拦发布
+# C2：一块失败就停在在那里，前缀照常交付、其余原文留在请求里
 # ---------------------------------------------------------------------------
 
 
-def test_partial_chunk_failure_is_counted_and_labeled_in_projection() -> None:
+def test_partial_chunk_failure_commits_the_prefix_and_keeps_the_rest_raw() -> None:
     calls: list[dict] = []
-    loop = _make_loop(_chunk_chat(calls, fail_indexes={2}))
     messages = _history(60, 12000)
+    estimator = _make_loop(lambda *a, **k: _Resp(content='占位'))._estimate_node_compression_message_tokens
+    loop = _make_loop(_chunk_chat(estimator, calls, fail_indexes={2}))
 
     text, payload = _compress(loop, messages, window=390000)
 
     assert payload.get('compression_mode') == 'llm_chunked'
-    assert int(payload.get('chunk_failed_count') or 0) == 1
     assert list(payload.get('chunk_failed_indexes') or []) == [2]
-    assert '未取得摘要' in text
+    assert int(payload.get('chunk_committed_count') or 0) == 1
+    assert int(payload.get('deferred_message_count') or 0) > 0
+    assert payload.get('deferred_raw_messages'), '未压中的原文要交回调用方留在请求里'
     assert payload.get('chunk_error_text', '').startswith('HTTP 429')
-    assert text.strip(), '部分失败仍要产出可用摘要（只标缺口，不清空）'
+    assert text.strip(), '部分失败仍要产出可用摘要（交回前缀，不再谎称全量收口）'
+    assert '未取得摘要' not in text, f'停下的那块不许留缺口行：{text[:160]}'
+    assert '下一跳按那时的窗口继续压缩' in text
 
 
 # ---------------------------------------------------------------------------
-# C3：全部块失败 ⇒ 空产物 ⇒ 原因写成"没有任何一块拿到摘要"并带 provider 原话
+# C3：第一块就失败 ⇒ 一块都没收下 ⇒ 空产物，原因写明 0/N chunks committed
 # ---------------------------------------------------------------------------
 
 
 def test_all_chunks_failed_yields_empty_product_and_refusal_reason() -> None:
     calls: list[dict] = []
-    loop = _make_loop(_chunk_chat(calls, always_fail=True))
     messages = _history(60, 12000)
+    estimator = _make_loop(lambda *a, **k: _Resp(content='占位'))._estimate_node_compression_message_tokens
+    loop = _make_loop(_chunk_chat(estimator, calls, always_fail=True))
 
     text, payload = _compress(loop, messages, window=390000)
 
     assert payload.get('compression_mode') == 'llm_chunked'
-    assert text == '', f'全部块失败不能产出看起来成功的摘要：{text[:80]!r}'
-    assert int(payload.get('chunk_failed_count') or 0) == int(payload.get('chunk_count') or 0) > 0
+    assert text == '', f'一块都没收下时不能产出看起来成功的摘要：{text[:80]!r}'
+    assert int(payload.get('chunk_committed_count') or 0) == 0
+    assert int(payload.get('chunk_count') or 0) >= 1
 
     reason = ReActToolLoop._compression_failure_reason(payload)
-    assert 'any chunk' in reason
+    assert 'chunks committed' in reason
     assert 'HTTP 429: inference exceeds tpm/rpm limit' in reason, '限流原话必须留在原因里'
 
 
 def test_single_shot_failure_quotes_provider_error() -> None:
     calls: list[dict] = []
-    loop = _make_loop(_chunk_chat(calls, always_fail=True))
     messages = _history(20, 600)
+    estimator = _make_loop(lambda *a, **k: _Resp(content='占位'))._estimate_node_compression_message_tokens
+    loop = _make_loop(_chunk_chat(estimator, calls, always_fail=True))
 
     text, payload = _compress(loop, messages, window=300000)
 
@@ -217,9 +230,25 @@ def test_single_shot_failure_quotes_provider_error() -> None:
 @pytest.mark.parametrize(
     'payload,expected',
     [
-        ({'chunk_count': 3, 'chunk_failed_count': 3, 'chunk_error_text': 'HTTP 429: rate'}, 'any chunk'),
-        ({'chunk_count': 3, 'chunk_failed_count': 1, 'chunk_error_text': 'HTTP 429: rate'}, 'empty summary'),
-        ({'helper_error_text': 'HTTP 503: busy'}, 'empty summary'),
+        (
+            {
+                'compression_mode': 'llm_chunked',
+                'chunk_count': 3,
+                'chunk_committed_count': 0,
+                'chunk_error_text': 'HTTP 429: rate',
+            },
+            'chunks committed',
+        ),
+        (
+            {
+                'compression_mode': 'llm_chunked',
+                'chunk_count': 3,
+                'chunk_committed_count': 2,
+                'chunk_error_text': 'HTTP 429: rate',
+            },
+            'empty summary',
+        ),
+        ({'compression_mode': 'llm', 'chunk_count': 1, 'helper_error_text': 'HTTP 503: busy'}, 'empty summary'),
     ],
 )
 def test_compression_failure_reason_branches(payload: dict, expected: str) -> None:

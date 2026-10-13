@@ -5,14 +5,16 @@
 而估算≈390 万时按 /3 只切 3 块、每块 172 万 tok（窗口的 4.4 倍），9 次注定被拒的调用
 之后才失败。
 
-现在的合同只有一条派生式（`g3ku/runtime/chunk_compression_plan.py`）：
+现在的合同（`g3ku/runtime/chunk_compression_plan.py`）：
 
     容量 = 声明窗口 − 每块信封 − 输出余量(24000)，再被该节点/会话实测跨度 ×0.9 夹一刀
-    块数 = 贪心装箱(原子组) 的自然结果，上限 12；容量非正 / 单组超容量 / 块数超上限
-           ⇒ 一次都不发，交回拒因
+    单发还是分块 = append-only 单发请求体（同一估算器实测）+ 输出余量 ≤ 声明窗口
+    块数 = 贪心装箱(原子组) 的自然结果，上限 12；一跳内最多 2 轮，溢出块在第二轮接着压
+    单组超容量 ⇒ 头尾收成能装箱的形状；收不动也照发
+    只有容量非正（窗口连信封都装不下）才一次都不发
 
-落点各自不同：节点=预检拒发（可恢复暂停 + 心跳点名），会话=`frontdoor_context_window_exceeded`
-（带拒因），记忆=不切块，超容量直接带真实原因失败。
+落点各自不同：节点=预检拒发（可恢复暂停 + 心跳点名），会话=放弃这一 pass、原请求体照发，
+记忆=不切块，超容量直接带真实原因失败。
 """
 
 from __future__ import annotations
@@ -63,14 +65,24 @@ def _history(n_pairs: int, chars_per_msg: int) -> list[dict]:
     return msgs
 
 
-def _node_loop(record: list[int], *, fail: bool = False):
+def _node_loop(record: list[int], *, fail: bool = False, calls: list | None = None,
+               fail_chunk_indexes: set[int] | None = None):
     state: dict = {}
 
     async def fake_chat(*args, messages=None, **kwargs):
         est = state['loop']._estimate_node_compression_message_tokens(list(messages or []))
         record.append(est)
+        if calls is not None:
+            calls.append(list(messages or []))
         if fail:
             return _Resp(content='', error_text='HTTP 429: inference exceeds tpm/rpm limit')
+        if fail_chunk_indexes is not None:
+            for item in list(messages or []):
+                text = str(item.get('content') or '')
+                if '"chunk_index"' in text:
+                    if int(json.loads(text).get('chunk_index') or 0) in fail_chunk_indexes:
+                        return _Resp(content='', error_text='HTTP 429: inference exceeds tpm/rpm limit')
+                    break
         return _Resp(content='【摘要】保留结论与路径。')
 
     # 分块循环每块前查一次暂停/取消，`_check_pause_or_cancel` 要读 store.get_task；
@@ -174,50 +186,90 @@ def test_node_huge_history_stays_inside_capacity() -> None:
     assert text
 
 
-def test_observed_span_clamps_capacity_and_refuses() -> None:
-    """声明窗口 39 万、实测跨度只有 30 万 ⇒ 容量被压到 27 万，块数越过 12 上限即一次都不发。"""
+def test_observed_span_clamps_capacity_and_defers_overflow_within_two_rounds() -> None:
+    """声明窗口 39 万、实测跨度只有 12 万 ⇒ 容量被压到 10.8 万，块数远超 12 上限。
+
+    旧处置是"一次都不发、整次压缩报拒因"；现在第一轮压满 12 块、第二轮接着收溢出块，
+    还剩下的原样留在请求里，由下一跳按那时的窗口重算——规模问题不再变成错误。
+    """
     sizes: list[int] = []
     loop, run = _node_loop(sizes)
-    loop._log_service = SimpleNamespace(max_observed_request_span_tokens=lambda task_id, node_id: 300000)
+    loop._log_service = SimpleNamespace(
+        _store=SimpleNamespace(get_task=lambda task_id: None),
+        max_observed_request_span_tokens=lambda task_id, node_id: 120000,
+    )
 
     text, payload = asyncio.run(run(_history(420, 10000), 390000))
 
-    assert sizes == [], f'容量被观测值夹小后应早退：{sizes}'
-    assert text == ''
-    reason = ReActToolLoop._compression_failure_reason(payload)
-    assert reason.startswith('token compression skipped:')
-    assert '观测跨度=300000' in reason, reason
+    assert payload.get('compression_mode') == 'llm_chunked'
+    assert payload.get('capacity_source') == 'observed_request_span'
+    assert int(payload.get('capacity_tokens') or 0) == int(120000 * 0.9)
+    assert len(sizes) > 12, f'溢出块应在本跳第二轮继续压：{len(sizes)}'
+    assert int(payload.get('compression_pass_rounds') or 0) == 2
+    assert int(payload.get('deferred_message_count') or 0) > 0, '压不完的原始历史必须报数'
+    assert payload.get('deferred_raw_messages'), '留在请求里的原始历史要交回调用方'
+    assert '下一跳按那时的窗口继续压缩' in text, '摘要要明写还有原文在场'
+    assert max(sizes) <= 390000, f'块请求超窗：max={max(sizes)}'
 
 
-def test_node_single_oversized_group_refuses_with_explicit_reason() -> None:
-    """一条超大消息（工具参数/内联正文）现在给的是明确拒因，不再是含混的"无可压历史"。"""
+def test_node_oversized_group_is_head_tail_truncated_and_still_compressed() -> None:
+    """一条超大工具结果单独超过块容量：收成头尾两段照样压，而不是整次压缩拒发。"""
     messages = [
         {'role': 'system', 'content': '你是执行节点。'},
         {'role': 'user', 'content': '任务目标：读大文件'},
     ]
-    for index in range(20):
-        blob = f'hop-{index}-' + '内容。' * 40000  # ≈ 每跳一大块
+    for index in range(30):
+        # 一条 150 万字的工具结果 ≈ 37.5 万 tok：单颗原子组就超过 39 万窗口的块容量
+        # （≈36.3 万），其余各 ≈9 千 tok 把总量顶过窗口，逼出分块 + 截断两档。
+        blob = '内容。' * 500_000 if index == 3 else '内容。' * 4_000
         messages.append({
             'role': 'assistant', 'content': '', 'tool_calls': [{
                 'id': f'call_{index}', 'type': 'function',
-                'function': {'name': 'exec', 'arguments': json.dumps({'command': blob})}}],
+                'function': {'name': 'exec', 'arguments': json.dumps({'command': f'echo hop-{index}'})}}],
         })
-        messages.append({'role': 'tool', 'tool_call_id': f'call_{index}', 'name': 'exec', 'content': 'ok'})
+        messages.append({'role': 'tool', 'tool_call_id': f'call_{index}', 'name': 'exec', 'content': blob})
 
     sizes: list[int] = []
-    loop, run = _node_loop(sizes)
+    calls: list[list[dict]] = []
+    loop, run = _node_loop(sizes, calls=calls)
     est = loop._estimate_node_compression_message_tokens(messages)
-    if est <= 390000:
-        pytest.skip(f'探针没能把请求顶过窗口（实测 {est}）')
+    assert est > 390000, f'探针没能把请求顶过窗口（实测 {est}），这条用例就是空的'
+
     text, payload = asyncio.run(run(messages, 390000))
 
-    reason = ReActToolLoop._compression_failure_reason(payload)
-    assert sizes == [] and text == ''
-    assert 'token compression skipped:' in reason
+    assert payload.get('truncation_group_count') or 0 >= 1, '单组超容量要进截断档'
+    assert text and sizes, '收成头尾两段后照样压，不再交回拒因'
+    assert 'token compression skipped' not in str(payload.get('chunk_refused_reason') or '')
+    assert any('中段省略' in json.dumps(item, ensure_ascii=False, default=str) for item in calls), (
+        '超容量的那块正文必须被收成头尾两段'
+    )
+
+
+def test_node_failed_chunk_ships_the_committed_prefix_and_keeps_the_rest_raw() -> None:
+    """第 2 块没拿到摘要：第 1 块照常交付，第 2 块及其后的原文交回调用方留在请求里。
+
+    旧行为是在摘要里插一行"本块未取得摘要"却把原文一起吞掉，等于谎报收口；而 helper
+    空响应整次作废又会让下一跳把已压好的块重烧一遍。
+    """
+    sizes: list[int] = []
+    loop, run = _node_loop(sizes, fail_chunk_indexes={2})
+    history = _history(219, 4800)
+
+    text, payload = asyncio.run(run(history, 390000))
+
+    assert payload.get('compression_mode') == 'llm_chunked'
+    assert payload.get('chunk_failed_indexes') == [2], payload.get('chunk_failed_indexes')
+    assert text.count('[分块摘要 1/') == 1
+    assert '未取得摘要' not in text, f'停下的那块不许留缺口行：{text[:200]}'
+    deferred = list(payload.get('deferred_raw_messages') or [])
+    assert deferred and len(deferred) == int(payload.get('deferred_message_count') or 0)
+    assert len(deferred) < len(history) - 4, '压中的部分必须真的不在场'
+    assert '下一跳按那时的窗口继续压缩' in text
+    assert any(item.get('tool_calls') for item in deferred), '留在请求里的仍是完整工具调用组'
 
 
 # ---------------------------------------------------------------------------
-# 会话车道：同一个规划器，拒因落到窗口超限错误
+# 会话车道：同一个规划器，溢出块在本跳第二轮继续压
 # ---------------------------------------------------------------------------
 
 
@@ -257,17 +309,33 @@ def _frontdoor_history(n_pairs: int, chars_per_msg: int) -> list[dict]:
 
 
 def _frontdoor_run(runner, history, window, state=None, observed_span_tokens=0):
+    """从前门车道的两个入口喂：先规划（`_frontdoor_plan_token_compression_pass`），再执行。
+
+    单发请求体读数按"整段前缀 + 历史 + 一条指令"给，与生产的 append-only 形状同构，
+    这样规划器算出的信封是真的。
+    """
+    from g3ku.runtime.tool_history import iter_compaction_atomic_groups
+
+    grouped = [
+        (list(group), runner._estimate_frontdoor_compression_body_tokens(group))
+        for group in iter_compaction_atomic_groups(history)
+    ]
+    single_shot = [*history, {'role': 'user', 'content': '【上下文压缩指令】'}]
+    compression_pass = runner._frontdoor_plan_token_compression_pass(
+        grouped_history=grouped,
+        single_shot_request_tokens=runner._estimate_frontdoor_compression_body_tokens(single_shot),
+        context_window_tokens=window,
+        observed_span_tokens=observed_span_tokens,
+    )
     return asyncio.run(
         runner._chunked_frontdoor_compression_summaries(
-            system_prefix=[],
-            older_history_messages=history,
+            grouped_history=grouped,
+            compression_pass=compression_pass,
             model_refs=['m'],
-            context_window_tokens=window,
             state=state if state is not None else {},
             runtime=SimpleNamespace(),
             is_cancelled=None,
             model_info={},
-            observed_span_tokens=observed_span_tokens,
         )
     )
 
@@ -275,10 +343,13 @@ def _frontdoor_run(runner, history, window, state=None, observed_span_tokens=0):
 def test_frontdoor_chunks_stay_inside_window() -> None:
     sizes: list[int] = []
     runner = _frontdoor_runner(sizes)
-    combined, chunk_count, _merge = _frontdoor_run(runner, _frontdoor_history(219, 4800), 390000)
+    combined, chunk_count, _merge, _failed, _rounds, deferred, committed = _frontdoor_run(
+        runner, _frontdoor_history(219, 4800), 390000
+    )
     assert combined
     assert max(sizes) <= 390000, f'会话车道块超窗：max={max(sizes)}'
-    assert len(sizes) == chunk_count
+    assert len(sizes) == chunk_count == committed
+    assert deferred == [], f'块数没超上限就不该留下原始历史：{len(deferred)}'
 
 
 def test_frontdoor_observed_span_reader_reads_request_history_usage() -> None:
@@ -291,17 +362,22 @@ def test_frontdoor_observed_span_reader_reads_request_history_usage() -> None:
     assert runner._frontdoor_observed_request_span_tokens({}) == 0
 
 
-def test_frontdoor_scale_overflow_raises_with_reason_and_no_calls() -> None:
-    from g3ku.runtime.frontdoor._ceo_runtime_ops import FrontdoorCompressionRuntimeError
+def test_frontdoor_scale_overflow_defers_inside_the_hop_instead_of_raising() -> None:
+    from g3ku.runtime.chunk_compression_plan import COMPRESSION_MAX_PASS_ROUNDS
 
     sizes: list[int] = []
     runner = _frontdoor_runner(sizes)
-    # 会话实测跨度 30 万 ⇒ 容量被夹到 27 万，390 万历史要 15 块，越过 12 上限直接报超限。
-    with pytest.raises(FrontdoorCompressionRuntimeError) as raised:
-        _frontdoor_run(runner, _frontdoor_history(420, 10000), 390000, observed_span_tokens=300000)
-    assert sizes == []
-    assert raised.value.code == 'frontdoor_context_window_exceeded'
-    assert 'token compression skipped' in raised.value.message
+    # 会话实测跨度 12 万 ⇒ 容量被夹到 10.8 万，390 万历史要几十块，越过 12 上限。
+    # 旧处置是抛 `frontdoor_context_window_exceeded`；现在两轮压满，剩下的原样交回。
+    combined, chunk_count, _merge, failed, rounds, deferred, committed = _frontdoor_run(
+        runner, _frontdoor_history(420, 10000), 390000, observed_span_tokens=120000
+    )
+    assert sizes, '溢出块应在本跳第二轮继续压'
+    assert rounds == COMPRESSION_MAX_PASS_ROUNDS
+    assert failed == 0
+    assert committed == len(sizes) < chunk_count
+    assert deferred, '压不完的原始历史必须交回，重写请求体时留在摘要之后'
+    assert '下一跳按那时的窗口继续压缩' in combined
 
 
 # ---------------------------------------------------------------------------
