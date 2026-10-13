@@ -6559,9 +6559,10 @@ class ReActToolLoop:
     def _peek_hop_ruler(self, *, node_id: str, route_plan: Any) -> dict[str, Any] | None:
         """问准入"这一跳大概率落到哪个组"，把那个组的最小成员窗口当压缩尺子。
 
-        返回 `{'windows': [int], 'source': 'group:<key>'}`；没有准入、没有组链位、或问不出
-        结果时返回 None，由 `chat_backend` 退回链级最小值。这里不新增任何拒绝面：预测失败
-        的代价是尺子保守，不是节点停住。
+        返回 `{'windows': [int], 'source': 'group:<key>'}`；没有准入、这一跳落在 direct 链位、
+        或问不出结果时返回 None——那时尺子由 `chat_backend` 按**这一发落到的那颗**（链首）
+        自己的窗口定，不再取整条链最小。这里不新增任何拒绝面：预测失败的代价是尺子口径，
+        不是节点停住。
         """
         controller = getattr(self, '_node_turn_controller', None)
         peek = getattr(controller, 'peek_hop_windows', None)
@@ -6652,9 +6653,10 @@ class ReActToolLoop:
             "provider_model": str(getattr(info, "provider_model", "") or "").strip(),
             "resolution_error": str(getattr(info, "resolution_error", "") or "").strip(),
             "context_window_tokens": int(snapshot.context_window_tokens or 0),
-            # 这把尺子是从哪儿来的：预测到的那个组，还是链级回落。归因"该核对哪一条记录"
-            # 时这是唯一线索，所以只进帧与逐跳明细，不进故障正文（链级数字会诱导改错成员）。
-            "ruler_source": str((hop_ruler or {}).get('source') or 'chain_fallback'),
+            # 这把尺子是从哪儿来的：预测到的那个组，还是这一发落到的那颗本身。归因
+            # "该核对哪一条记录"时这是唯一线索，所以只进帧与逐跳明细，不进故障正文
+            # （链级数字会诱导改错成员）。
+            "ruler_source": str((hop_ruler or {}).get('source') or f"chain_head:{str((list(model_refs or []) + [''])[0]).strip()}"),
             "estimated_total_tokens": int(snapshot.estimated_total_tokens or 0),
             "trigger_tokens": int(snapshot.trigger_tokens or 0),
             "effective_trigger_tokens": int(snapshot.effective_trigger_tokens or 0),

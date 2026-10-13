@@ -160,32 +160,8 @@ def resolve_send_model_context_window_info(
     )
 
 
-def _hop_context_window_tokens(
-    *,
-    config: Config,
-    refs: list[str],
-    first_target: Any,
-    target_windows: list[int] | None = None,
-) -> int:
-    """压缩尺子 = 这一跳可能被达到的成员里**最小**的那颗窗口。
-
-    压缩发生在选择之前，而选择又拿压缩后的体量当筛选条件（`react_loop.py` 把
-    `estimated_total_tokens` 填进 `RouteCandidateFilters.required_context_window_tokens`），
-    所以"这一跳落到谁"只能预测：`target_windows` 是准入那侧按同一份资格判据给出的预测组
-    成员窗口；预测不到（无回合准入的前门与记忆车道、direct 链位）退回整条链 refs 的最小值。
-
-    为什么不是取最大：请求一旦超过某颗成员的窗口，准入就不再把它授予这一跳，组内可用成员
-    随之变少（实盘 10-05 起 6457 跳里有 5 跳 >390,000 ⇒ 一颗 6 成员的组当场只剩 2 颗），
-    攒到链上没人塞得下就是 2026-10-12 task:d07d706989b4 的 110 分钟停摆形状。取最小的代价
-    是按 390,000 口径压缩的那 0.25% 的跳（16/6457）。
-
-    读不到窗口的成员不参与取最小：一个 0 会把整把尺子打到
-    `react_loop._NODE_SEND_CONTEXT_WINDOW_HARD_MIN_TOKENS` 硬门以下，等于让一条坏记录
-    把该节点的所有后续跳全部拒发。
-    """
-    positive_targets = [int(item or 0) for item in list(target_windows or []) if int(item or 0) > 0]
-    if positive_targets:
-        return min(positive_targets)
+def _chain_context_window_floor(config: Config, refs: list[str], first_target: Any) -> int:
+    """链上所有正数窗口的最小值：只在链首那颗自己读不到窗口时当兜底用。"""
     windows: list[int] = []
     for index, ref in enumerate(refs):
         value = 0
@@ -205,6 +181,45 @@ def _hop_context_window_tokens(
         if value > 0:
             windows.append(value)
     return min(windows) if windows else 0
+
+
+def _hop_context_window_tokens(
+    *,
+    config: Config,
+    refs: list[str],
+    first_target: Any,
+    target_windows: list[int] | None = None,
+) -> int:
+    """压缩尺子 = **这一发落到的那颗模型**的窗口；落点是组时才是组内最小。
+
+    压缩发生在选择之前，而选择又拿压缩后的体量当筛选条件（`react_loop.py` 把
+    `estimated_total_tokens` 填进 `RouteCandidateFilters.required_context_window_tokens`），
+    所以"这一跳落到谁"只能预测：`target_windows` 是准入那侧按同一份资格判据给出的**预测组**
+    成员窗口，组内取最小（请求一旦超过某颗成员的窗口，准入就不把它授予这一跳，组内可用成员
+    随之变少——实盘 10-05 起 6457 跳里有 5 跳 >390,000 ⇒ 一颗 6 成员的组当场只剩 2 颗；攒到
+    链上没人塞得下就是 2026-10-12 task:d07d706989b4 的 110 分钟停摆形状）。
+
+    没有组预测（direct 链位、无回合准入的前门与记忆车道）时**不再取整条链最小**：那会把
+    链首 500,000 的会话压到链尾 390,000 的口径（实盘 2026-10-13 CEO 链，触发线 296,400 而非
+    380,000）。链前进到塞不下的成员由 `required_context_window_tokens` 那条尺寸筛处理（不首发、
+    塞得下的全失败后才回头用它），代价按"多前进一位"计，不是按"压错口径"计。
+
+    链首那颗读不到窗口时才退回链级最小：一个 0 会把尺子打到
+    `react_loop._NODE_SEND_CONTEXT_WINDOW_HARD_MIN_TOKENS` 硬门以下，等于让一条坏记录
+    把该节点的所有后续跳全部拒发。
+    """
+    positive_targets = [int(item or 0) for item in list(target_windows or []) if int(item or 0) > 0]
+    if positive_targets:
+        return min(positive_targets)
+    try:
+        head_window = int(
+            dict(getattr(first_target, "model_parameters", {}) or {}).get("context_window_tokens") or 0
+        )
+    except (TypeError, ValueError):
+        head_window = 0
+    if head_window > 0:
+        return head_window
+    return _chain_context_window_floor(config, refs, first_target)
 
 
 def resolve_send_model_context_window_tokens(
