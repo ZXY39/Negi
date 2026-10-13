@@ -492,7 +492,7 @@ def test_memory_snapshot_rebuild_prefers_minimal_memory_note_ref_when_memory_bod
     try:
         row = manager._memory_repo.create_memory(
             memory_body="Use checklist replies ref:old_note",
-            minimal_memory="replies->checklist ref:new_note",
+            minimal_memory="replies->checklist ref:note_new",
             source="self",
             from_user=False,
             now_iso="2026-04-25T00:05:00+08:00",
@@ -501,12 +501,12 @@ def test_memory_snapshot_rebuild_prefers_minimal_memory_note_ref_when_memory_bod
         manager._rebuild_memory_snapshot_from_sqlite(now_iso="2026-04-25T00:00:00+08:00")
 
         snapshot = manager.snapshot_text()
-        assert "Use checklist replies ref:new_note" in snapshot
+        assert "Use checklist replies ref:note_new" in snapshot
         assert "old_note" not in snapshot
         rebuilt_entries = module.parse_memory_document(snapshot)
         rebuilt = next(entry for entry in rebuilt_entries if entry.memory_id == row["memory_id"])
-        assert rebuilt.summary == "Use checklist replies ref:new_note"
-        assert rebuilt.note_ref == "new_note"
+        assert rebuilt.summary == "Use checklist replies ref:note_new"
+        assert rebuilt.note_ref == "note_new"
     finally:
         manager.close()
 
@@ -1522,13 +1522,13 @@ def test_memory_agent_apply_batch_prefers_minimal_memory_note_ref_over_stale_con
         )
         session = module._MemoryToolSession(snapshot_text=manager.snapshot_text(), notes_dir=manager.notes_dir)
         apply_kwargs: dict[str, object] = {
-            "note_upserts": {"new_note": "Use checklist replies with the current checklist note."},
+            "note_upserts": {"note_new": "Use checklist replies with the current checklist note."},
         }
         if mode == "add":
             apply_kwargs["adds"] = [
                 {
                     "content": "Use checklist replies ref:old_note",
-                    "minimal_memory": "replies->checklist 见noteid:new_note",
+                    "minimal_memory": "replies->checklist 见noteid:note_new",
                     "decision_source": "self",
                 }
             ]
@@ -1537,7 +1537,7 @@ def test_memory_agent_apply_batch_prefers_minimal_memory_note_ref_over_stale_con
                 {
                     "id": "Ab12Z9",
                     "content": "Use checklist replies ref:old_note",
-                    "minimal_memory": "replies->checklist 见noteid:new_note",
+                    "minimal_memory": "replies->checklist 见noteid:note_new",
                 }
             ]
 
@@ -1549,11 +1549,11 @@ def test_memory_agent_apply_batch_prefers_minimal_memory_note_ref_over_stale_con
             session=session,
             batch=batch,
         )
-        assert "ref:new_note" in validated.document_text
+        assert "ref:note_new" in validated.document_text
         assert "old_note" not in validated.document_text
         parsed_entries = module.parse_memory_document(validated.document_text)
         assert len(parsed_entries) == 1
-        assert parsed_entries[0].note_ref == "new_note"
+        assert parsed_entries[0].note_ref == "note_new"
     finally:
         manager.close()
 
@@ -3321,14 +3321,14 @@ async def test_run_due_batch_once_prefers_minimal_memory_note_ref_over_stale_con
         )
         args: dict[str, object] = {
             "note_upserts": {
-                "new_note": "Use checklist replies with the current checklist note."
+                "note_new": "Use checklist replies with the current checklist note."
             }
         }
         if mode == "add":
             args["adds"] = [
                 {
                     "content": "Use checklist replies ref:old_note",
-                    "minimal_memory": "replies->checklist 见noteid:new_note",
+                    "minimal_memory": "replies->checklist 见noteid:note_new",
                     "decision_source": "self",
                 }
             ]
@@ -3337,7 +3337,7 @@ async def test_run_due_batch_once_prefers_minimal_memory_note_ref_over_stale_con
                 {
                     "id": "Ab12Z9",
                     "content": "Use checklist replies ref:old_note",
-                    "minimal_memory": "replies->checklist 见noteid:new_note",
+                    "minimal_memory": "replies->checklist 见noteid:note_new",
                 }
             ]
         fake_model = _FakeToolCallingModel(
@@ -3365,13 +3365,13 @@ async def test_run_due_batch_once_prefers_minimal_memory_note_ref_over_stale_con
         monkeypatch.setattr(module, "build_chat_model", lambda config, **kwargs: fake_model, raising=False)
 
         report = await manager.run_due_batch_once(now_iso="2026-04-17T10:00:09+08:00")
-        new_note_path = tmp_path / "memory" / "notes" / "new_note.md"
+        note_new_path = tmp_path / "memory" / "notes" / "note_new.md"
 
         assert report["ok"] is True
         assert report["status"] == "applied"
-        assert "ref:new_note" in manager.snapshot_text()
+        assert "ref:note_new" in manager.snapshot_text()
         assert "old_note" not in manager.snapshot_text()
-        assert new_note_path.exists()
+        assert note_new_path.exists()
         assert not old_note_path.exists()
     finally:
         manager.close()
