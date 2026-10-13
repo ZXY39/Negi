@@ -29,7 +29,7 @@
   `body` 的第一行是这个分类覆盖的范围说明，它会原样出现在长期记忆块末尾的归并区里。
   整体改写前先 `memory_read_note` 读全文，交回的 `body` 要包含必须留下的内容。
 - `retirements: Array<{ memory_id, note_ref }>`
-  本轮从长期记忆块退场的记忆，以及它落进哪个分类 note。
+  本轮从长期记忆块退场的记忆，以及它落进哪个分类 note。`memory_id` 只能取「待归并记忆」里列出的那些。
 - `no_consolidation_reason?: string`
   交来的记忆全都不属于任何分类时单独提交，不得与其他字段混用。
 
