@@ -53,6 +53,23 @@ class _StubMemoryManager:
             "has_more": False,
         }
 
+    async def get_failed_payload_window(self, failed_id: str, *, request_id: str = "", start_char: int = 1):
+        self.calls.append(("get_failed_payload_window", (failed_id, request_id, start_char)))
+        if failed_id == "failed_missing":
+            raise KeyError(f"failed memory record not found: {failed_id}")
+        total = 50000
+        start = max(1, int(start_char))
+        end = min(start + 19999, total)
+        return {
+            "failed_id": failed_id,
+            "request_id": request_id or "write_1",
+            "text": "y" * (end - start + 1),
+            "start_char": start,
+            "end_char": end,
+            "char_count": total,
+            "truncated": end < total,
+        }
+
     async def retry_failed_record(self, failed_id: str, *, reason: str = "manual"):
         self.calls.append(("retry_failed_record", failed_id))
         if failed_id == "failed_missing":
@@ -135,6 +152,26 @@ def test_get_memory_failed_returns_items_and_mutation_flag(stub_env, monkeypatch
     assert payload["total"] == 1
     assert payload["items"][0]["failed_id"] == "failed_1"
     assert payload["mutations_enabled"] is True
+
+
+def test_memory_failed_payload_route_pages_by_chars(stub_env):
+    """取全文口按字符寻址：交付区间原样透出，缺记录报 404 而不是 503。"""
+    workspace, manager, client = stub_env
+
+    response = client.get("/api/memory/failed/failed_1/payload?request_id=write_1&start_char=4001")
+
+    assert response.status_code == 200
+    item = response.json()["item"]
+    assert item["start_char"] == 4001
+    assert item["end_char"] == 24000
+    assert len(item["text"]) == 20000
+    assert item["char_count"] == 50000
+    assert item["truncated"] is True
+    assert manager.calls[-1] == ("get_failed_payload_window", ("failed_1", "write_1", 4001))
+
+    missing = client.get("/api/memory/failed/failed_missing/payload")
+    assert missing.status_code == 404
+    assert missing.json()["detail"]["code"] == "memory_failed_not_found"
 
 
 def test_memory_failed_mutations_work_without_feature_flag(stub_env, monkeypatch):

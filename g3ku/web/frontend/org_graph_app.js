@@ -14434,6 +14434,101 @@ function memoryFailedAutoRetryHint(item) {
     return "仅支持手动重试";
 }
 
+// 失败记忆的正文：服务端列表口只投首屏（payload_truncated），取全文按字符一屏一屏点。
+// 抽屉整份灌 1.28MB 文本节点会把手线程占住 ~2.9 秒——实盘 2026-10-13 就是这样卡住的。
+function memoryFailedPayloadBlocksFromRecord(source) {
+    const items = Array.isArray(source?.items) ? source.items : [];
+    return items
+        .map((item, index) => {
+            const text = String(item?.payload_text || "");
+            if (!text.trim() && !Number(item?.payload_char_count || 0)) return null;
+            const charCount = Number(item?.payload_char_count ?? text.length) || text.length;
+            // 列表口的首屏永远从第 1 个字符起投，续读才由响应里的 end_char 推进。
+            const startChar = 1;
+            const deliveredEnd = startChar - 1 + text.length;
+            return {
+                requestId: String(item?.request_id || `#${index + 1}`).trim(),
+                text,
+                startChar,
+                endChar: deliveredEnd,
+                charCount,
+                truncated: Boolean(item?.payload_truncated) && deliveredEnd < charCount,
+            };
+        })
+        .filter(Boolean);
+}
+
+function memoryFailedPayloadRangeText({ startChar = 1, endChar = 0, charCount = 0 } = {}) {
+    if (!charCount) return "无正文";
+    if (endChar >= charCount) return `全文 ${charCount} 字符已全部显示`;
+    return `已显示第 ${startChar}–${endChar} 字符 / 共 ${charCount} 字符`;
+}
+
+function renderMemoryFailedPayloadBlocks(blocks) {
+    return blocks.map((block) => `
+        <div class="memory-detail-payload-item" data-memory-payload-item data-request-id="${esc(block.requestId)}" data-start-char="${block.startChar}" data-end-char="${block.endChar}" data-char-count="${block.charCount}">
+            <div class="memory-detail-payload-head">
+                <span class="memory-detail-payload-request">${esc(block.requestId)}</span>
+                <span class="memory-detail-payload-range">${esc(memoryFailedPayloadRangeText(block))}</span>
+            </div>
+            <div class="memory-detail-payload-text">${renderMemoryTextWithNoteRefs(block.text)}</div>
+            ${block.truncated ? '<button type="button" class="toolbar-btn ghost memory-detail-payload-more" data-memory-payload-more>取全文</button>' : ""}
+        </div>
+    `).join("");
+}
+
+async function loadMoreMemoryFailedPayload(button) {
+    if (!(button instanceof HTMLElement)) return;
+    const item = typeof button.closest === "function" ? button.closest("[data-memory-payload-item]") : null;
+    if (!item) return;
+    const failedId = String(S.memoryDetailPreview?.key || "").trim();
+    const charCount = Number(item.dataset.charCount || 0);
+    const previousEnd = Number(item.dataset.endChar || 0);
+    const startChar = previousEnd + 1;
+    if (!failedId || startChar > charCount) {
+        button.hidden = true;
+        return;
+    }
+    button.disabled = true;
+    try {
+        const payload = typeof ApiClient?.getMemoryFailedPayload === "function"
+            ? await ApiClient.getMemoryFailedPayload({
+                failedId,
+                requestId: String(item.dataset.requestId || "").trim(),
+                startChar,
+            })
+            : null;
+        const chunk = payload?.item || {};
+        const text = String(chunk.text || "");
+        const deliveredEnd = Number(chunk.end_char || 0);
+        if (text && item.querySelector(".memory-detail-payload-text")) {
+            // 只往这一条的正文尾部追加：整块重绘会把用户的滚动位置打回顶部。
+            item.querySelector(".memory-detail-payload-text").insertAdjacentHTML("beforeend", renderMemoryTextWithNoteRefs(text));
+        }
+        const advanced = deliveredEnd > previousEnd;
+        if (advanced) item.dataset.endChar = String(deliveredEnd);
+        const range = item.querySelector(".memory-detail-payload-range");
+        if (range) {
+            range.textContent = memoryFailedPayloadRangeText({
+                startChar: Number(item.dataset.startChar || 1),
+                endChar: Number(item.dataset.endChar || 0),
+                charCount,
+            });
+        }
+        // 推进不了就收口：再点一次只会拿回同一段（与内容车道续读判据一致）。
+        button.hidden = !(advanced && deliveredEnd < charCount);
+        button.disabled = false;
+    } catch (error) {
+        button.disabled = false;
+        showToast({
+            title: "取全文失败",
+            text: String(error?.message || error || "未知错误").slice(0, 160),
+            kind: "error",
+            durationMs: 5000,
+        });
+    }
+}
+
 const MEMORY_OP_KINDS = {
     add: { label: "增加", icon: "plus" },
     rewrite: { label: "修改", icon: "pencil" },
@@ -15004,6 +15099,14 @@ function ensureMemoryDetailPreviewUi() {
     U.memoryDetailBackdrop?.addEventListener("click", () => closeMemoryDetailPreview());
     U.memoryDetailDrawer?.addEventListener("click", (e) => {
         if (!(e.target instanceof Element)) return;
+        const payloadMore = e.target.closest("[data-memory-payload-more]");
+        if (payloadMore) {
+            e.preventDefault();
+            e.stopPropagation();
+            if (payloadMore.disabled) return;
+            void loadMoreMemoryFailedPayload(payloadMore);
+            return;
+        }
         const failedAction = e.target.closest("[data-memory-failed-action]");
         if (failedAction) {
             e.preventDefault();
@@ -15070,8 +15173,13 @@ function renderMemoryDetailPreview() {
         U.memoryDetailPrimaryTitle.textContent = preview.kind === "processed" ? "原始请求内容" : "请求正文";
     }
     if (U.memoryDetailPrimary) {
-        const primaryText = String(preview.primaryText || "").trim() || "当前没有可显示的正文。";
-        setInnerHtmlPreservingScroll(U.memoryDetailPrimary, renderMemoryTextWithNoteRefs(primaryText));
+        const blocks = Array.isArray(preview.primaryBlocks) ? preview.primaryBlocks : [];
+        if (blocks.length) {
+            setInnerHtmlPreservingScroll(U.memoryDetailPrimary, renderMemoryFailedPayloadBlocks(blocks));
+        } else {
+            const primaryText = String(preview.primaryText || "").trim() || "当前没有可显示的正文。";
+            setInnerHtmlPreservingScroll(U.memoryDetailPrimary, renderMemoryTextWithNoteRefs(primaryText));
+        }
     }
     const secondaryText = String(preview.secondaryText || "").trim();
     const changeListHtml = renderMemoryChangeList(preview.changes);
@@ -15145,9 +15253,6 @@ function openMemoryDetailPreview(kind, key) {
     const payloadTexts = Array.isArray(source?.payload_texts) ? source.payload_texts : [];
     const noopReason = isProcessed ? memoryProcessedNoopReason(source) : "";
     const failedUsage = isFailed && source?.usage_total && typeof source.usage_total === "object" ? source.usage_total : {};
-    const failedPayloads = isFailed && Array.isArray(source?.items)
-        ? source.items.map((item) => String(item?.payload_text || "")).filter((text) => text.trim())
-        : [];
     const fields = isProcessed
         ? [
             { label: "批次", value: normalizedKey },
@@ -15201,10 +15306,13 @@ function openMemoryDetailPreview(kind, key) {
                 ? `失败停车批次 ${normalizedKey}`
                 : `队列请求 ${normalizedKey}`,
         fields,
+        // 失败记忆按条给正文块（每块自带 request id、已显示区间与取全文按钮），
+        // 正文只投服务端给的首屏，其余留在停车区文件里。
+        primaryBlocks: isFailed ? memoryFailedPayloadBlocksFromRecord(source) : [],
         primaryText: isProcessed
             ? payloadTexts.join("\n\n---\n\n")
             : isFailed
-                ? failedPayloads.join("\n\n---\n\n")
+                ? ""
                 : String(source?.payload_text || ""),
         secondaryTitle: isProcessed
             ? (noopReason ? "无变更原因" : "变更内容")
