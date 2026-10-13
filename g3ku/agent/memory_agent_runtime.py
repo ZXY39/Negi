@@ -535,6 +535,7 @@ class _MemoryToolSession:
         rewrites: list[dict[str, Any]] | None = None,
         deletes: list[str] | None = None,
         note_upserts: dict[str, str] | None = None,
+        note_edits: dict[str, list[dict[str, str]]] | None = None,
         inspired_memory_ids: list[str] | None = None,
         noop_reason: str | None = None,
         already_satisfied: str | None = None,
@@ -544,6 +545,7 @@ class _MemoryToolSession:
         normalized_rewrites: list[dict[str, str]] = []
         normalized_deletes: list[str] = []
         normalized_note_upserts: dict[str, str] = {}
+        normalized_note_edits: dict[str, list[dict[str, str]]] = {}
         normalized_inspired_memory_ids: list[str] = []
         normalized_noop_reason = str(noop_reason or "").strip()
         normalized_already_satisfied = str(already_satisfied or "").strip()
@@ -625,6 +627,39 @@ class _MemoryToolSession:
                     continue
                 normalized_note_upserts[ref] = body
 
+        # Incremental note editing, on purpose shaped like the ordinary file edit tool:
+        # flat old_text/new_text per op, `new_text` empty means delete that span, and
+        # `old_text` has to match exactly once. Rewriting a whole note to change one
+        # line costs the full body on the output side every time and can silently drop
+        # paragraphs nobody re-read - measured, the largest note here is 2964 chars.
+        raw_note_edits = dict(note_edits or {})
+        if not isinstance(note_edits, dict) and note_edits is not None:
+            errors["note_edits"] = "note_edits must be an object"
+        else:
+            for raw_ref, raw_ops in raw_note_edits.items():
+                ref = str(raw_ref or "").strip()
+                try:
+                    note_file_name(ref)
+                except Exception as exc:
+                    errors[f"note_edits.{ref or '<empty>'}"] = str(exc or "invalid note ref").strip()
+                    continue
+                if not isinstance(raw_ops, list):
+                    errors[f"note_edits.{ref}"] = "note_edits value must be a list of edits"
+                    continue
+                ops: list[dict[str, str]] = []
+                for index, raw_op in enumerate(raw_ops):
+                    if not isinstance(raw_op, dict):
+                        errors[f"note_edits.{ref}[{index}]"] = "each edit must be an object with old_text and new_text"
+                        continue
+                    old_text = str(raw_op.get("old_text") or "")
+                    new_text = str(raw_op.get("new_text") or "")
+                    if not old_text.strip():
+                        errors[f"note_edits.{ref}[{index}]"] = "old_text must not be empty"
+                        continue
+                    ops.append({"old_text": old_text, "new_text": new_text})
+                if ops:
+                    normalized_note_edits[ref] = ops
+
         raw_inspired_memory_ids = inspired_memory_ids
         if raw_inspired_memory_ids is None:
             raw_inspired_memory_ids = []
@@ -642,12 +677,18 @@ class _MemoryToolSession:
                 seen_inspired_ids.add(memory_id)
                 normalized_inspired_memory_ids.append(memory_id)
 
-        has_mutation = bool(normalized_adds or normalized_rewrites or normalized_deletes or normalized_note_upserts)
+        has_mutation = bool(
+            normalized_adds
+            or normalized_rewrites
+            or normalized_deletes
+            or normalized_note_upserts
+            or normalized_note_edits
+        )
         if normalized_noop_reason and has_mutation:
-            errors["noop_reason"] = "noop_reason may not be combined with add, rewrite, delete, or note_upsert"
+            errors["noop_reason"] = "noop_reason may not be combined with add, rewrite, delete, or note change"
         if normalized_already_satisfied and (has_mutation or normalized_noop_reason):
             errors["already_satisfied"] = (
-                "already_satisfied may not be combined with add, rewrite, delete, note_upsert, or noop_reason"
+                "already_satisfied may not be combined with add, rewrite, delete, note change, or noop_reason"
             )
         if self.batch_op == "delete" and normalized_noop_reason:
             errors["noop_reason"] = _DELETE_NOOP_RULE
@@ -655,7 +696,7 @@ class _MemoryToolSession:
             errors["already_satisfied"] = "already_satisfied is only valid for delete batches"
         if not normalized_noop_reason and not normalized_already_satisfied and not has_mutation:
             errors["batch"] = (
-                "at least one add, rewrite, delete, note_upsert, noop_reason, or already_satisfied is required"
+                "at least one add, rewrite, delete, note_upsert, note_edits, noop_reason, or already_satisfied is required"
             )
 
         if errors:
@@ -667,6 +708,7 @@ class _MemoryToolSession:
             "rewrites": normalized_rewrites,
             "deletes": normalized_deletes,
             "note_upserts": normalized_note_upserts,
+            "note_edits": normalized_note_edits,
             "inspired_memory_ids": normalized_inspired_memory_ids,
             "noop_reason": normalized_noop_reason,
             "already_satisfied": normalized_already_satisfied,
@@ -693,6 +735,10 @@ class _MemoryValidatedWrite:
     rewrites: list[dict[str, str]] = field(default_factory=list)
     deletes: list[str] = field(default_factory=list)
     note_upserts: dict[str, str] = field(default_factory=dict)
+    note_edits: dict[str, list[dict[str, str]]] = field(default_factory=dict)
+    # Per-op outcome of the incremental note edits, recorded so a failed span is
+    # visible instead of quietly leaving the note unchanged.
+    note_edit_results: list[dict[str, Any]] = field(default_factory=list)
     inspired_memory_ids: list[str] = field(default_factory=list)
     write_mode: str = ""
     # Note files this batch deleted because the store stopped owning them, each with
@@ -2709,6 +2755,23 @@ class MemoryManager:
                     "content": str(body or ""),
                 }
             )
+        for item in list(validated.note_edit_results or []):
+            normalized_ref = str(item.get("note_ref") or "").strip()
+            if not normalized_ref:
+                continue
+            changes.append(
+                {
+                    "type": "note_edit",
+                    "note_ref": normalized_ref,
+                    "op_index": item.get("op_index", 0),
+                    # Keeping old_text is the point: it is the only diff record that
+                    # exists for a note, so a dropped paragraph becomes visible.
+                    "old_text": str(item.get("old_text") or ""),
+                    "new_text": str(item.get("new_text") or ""),
+                    "applied": bool(item.get("applied")),
+                    "error": str(item.get("error") or ""),
+                }
+            )
         for item in list(validated.reaped_notes or []):
             normalized_ref = str(item.get("note_ref") or "").strip()
             if not normalized_ref:
@@ -2832,6 +2895,7 @@ class MemoryManager:
                 note_path = self.notes_dir / note_file_name(ref)
                 note_path.parent.mkdir(parents=True, exist_ok=True)
                 self._atomic_write_text(note_path, body)
+            validated.note_edit_results = self._apply_note_edits_locked(validated.note_edits)
             self._reconcile_mirror_with_sqlite_locked(now_iso=now_iso)
             # Capture the original bodies of rewritten/deleted memories before the
             # mutation is applied so the processed record can show before/after text.
@@ -2990,6 +3054,62 @@ class MemoryManager:
         if repo is None:
             return self._collect_note_refs(self.snapshot_text())
         return repo.referenced_note_refs()
+
+    def _apply_note_edits_locked(
+        self, note_edits: dict[str, list[dict[str, str]]] | None
+    ) -> list[dict[str, Any]]:
+        """Apply incremental note edits after whole-file writes, one op at a time.
+
+        A miss does not fail the batch. The measured cost of the old whole-file-only
+        path is on the output side and on fidelity: growing one line meant resubmitting
+        the entire note (largest here: 2964 chars), and any paragraph the agent did not
+        re-read could disappear with nothing in the ledger to show it.
+        """
+        results: list[dict[str, Any]] = []
+        for ref, ops in sorted(dict(note_edits or {}).items()):
+            path = self.notes_dir / note_file_name(ref)
+            if not path.exists():
+                for op_index, _op in enumerate(list(ops or [])):
+                    results.append(
+                        {
+                            "note_ref": ref,
+                            "op_index": op_index,
+                            "applied": False,
+                            "error": f"note not found: {ref}",
+                            "old_text": str(_op.get("old_text") or ""),
+                            "new_text": str(_op.get("new_text") or ""),
+                        }
+                    )
+                continue
+            body = path.read_text(encoding="utf-8")
+            changed = False
+            for op_index, op in enumerate(list(ops or [])):
+                old_text = str(op.get("old_text") or "")
+                new_text = str(op.get("new_text") or "")
+                occurrences = body.count(old_text) if old_text else 0
+                record: dict[str, Any] = {
+                    "note_ref": ref,
+                    "op_index": op_index,
+                    "old_text": old_text,
+                    "new_text": new_text,
+                }
+                if occurrences == 0:
+                    record["applied"] = False
+                    record["error"] = f"old_text not found in note {ref}. Verify the note content."
+                elif occurrences > 1:
+                    record["applied"] = False
+                    record["error"] = (
+                        f"old_text matches {occurrences} places in note {ref}; "
+                        "provide a longer old_text that matches exactly once"
+                    )
+                else:
+                    body = body.replace(old_text, new_text, 1)
+                    record["applied"] = True
+                    changed = True
+                results.append(record)
+            if changed:
+                self._atomic_write_text(path, self._normalize_note_text(body))
+        return results
 
     def _cleanup_orphan_notes_locked(self) -> list[str]:
         """Delete note files the store no longer owns; return the removed refs.
@@ -3173,6 +3293,10 @@ class MemoryManager:
             "rewrites": minimal_rewrites,
             "deletes": list(payload.get("deletes") or []),
             "note_upserts": dict(payload.get("note_upserts") or {}),
+            "note_edits": {
+                str(ref): [dict(op) for op in list(ops or [])]
+                for ref, ops in dict(payload.get("note_edits") or {}).items()
+            },
             "inspired_memory_ids": list(payload.get("inspired_memory_ids") or []),
             "noop_reason": str(payload.get("noop_reason") or "").strip(),
         }
@@ -4216,6 +4340,7 @@ class MemoryManager:
             rewrites: list[dict[str, Any]] | None = None,
             deletes: list[str] | None = None,
             note_upserts: dict[str, str] | None = None,
+            note_edits: dict[str, list[dict[str, str]]] | None = None,
             inspired_memory_ids: list[str] | None = None,
             noop_reason: str | None = None,
             already_satisfied: str | None = None,
@@ -4227,6 +4352,7 @@ class MemoryManager:
                 rewrites=rewrites,
                 deletes=deletes,
                 note_upserts=note_upserts,
+                note_edits=note_edits,
                 inspired_memory_ids=inspired_memory_ids,
                 noop_reason=noop_reason,
                 already_satisfied=already_satisfied,
@@ -4272,7 +4398,9 @@ class MemoryManager:
             "- delete 请求要解析成精确的记忆 id，并把这些 id 放进 deletes。\n"
             "- delete 批次没有零变更出口：目标内容已不在当前正文里（已被改写或被更早的批次删掉）时，"
             "单独提交 already_satisfied 说明已满足，不要提交 noop_reason。\n"
-            "- note_upserts 只写需要新增或改写的 note。\n"
+            "- note_upserts 只写需要新增或整体重写的 note。\n"
+            "- note_edits 改已有 note 的局部：{note名: [{old_text, new_text}]}，old_text 必须唯一命中一次，"
+            "new_text 留空即删掉这段。改一两个段落用 note_edits，不要用 note_upserts 重交整份。\n"
             "- inspired_memory_ids 可选，用于列出当前完整 snapshot 里对本批判断有实质帮助的 memory id。\n"
             "- minimal_memory 格式应写成 `条件->要求关键词`，必要时优先附加 `见noteid:<id>`，并兼容 `ref:<id>`。\n"
             "- 当本轮无需任何记忆或 note 变更时，可单独提交 noop_reason（仅 write 批次）。\n"
@@ -4309,6 +4437,10 @@ class MemoryManager:
         rewrites = list(payload.get("rewrites") or [])
         deletes = list(payload.get("deletes") or [])
         note_upserts = dict(payload.get("note_upserts") or {})
+        note_edits = {
+            str(ref): [dict(op) for op in list(ops or [])]
+            for ref, ops in dict(payload.get("note_edits") or {}).items()
+        }
         raw_inspired_memory_ids = payload.get("inspired_memory_ids")
         if raw_inspired_memory_ids is None:
             inspired_memory_ids: list[str] = []
@@ -4325,11 +4457,13 @@ class MemoryManager:
             raise _MemoryAgentValidationError(_DELETE_NOOP_RULE)
         if batch.op != "delete" and already_satisfied:
             raise _MemoryAgentValidationError("already_satisfied is only valid for delete batches")
-        if noop_reason and (adds or rewrites or deletes or note_upserts):
-            raise _MemoryAgentValidationError("noop_reason may not be combined with add, rewrite, delete, or note_upsert")
-        if already_satisfied and (adds or rewrites or deletes or note_upserts or noop_reason):
+        if noop_reason and (adds or rewrites or deletes or note_upserts or note_edits):
             raise _MemoryAgentValidationError(
-                "already_satisfied may not be combined with add, rewrite, delete, note_upsert, or noop_reason"
+                "noop_reason may not be combined with add, rewrite, delete, note_upsert or note_edits"
+            )
+        if already_satisfied and (adds or rewrites or deletes or note_upserts or note_edits or noop_reason):
+            raise _MemoryAgentValidationError(
+                "already_satisfied may not be combined with add, rewrite, delete, note_upsert, note_edits or noop_reason"
             )
 
         before_entries = parse_memory_document(before_text)
@@ -4500,6 +4634,7 @@ class MemoryManager:
             rewrites=effective_rewrites,
             deletes=effective_delete_ids,
             note_upserts=normalized_note_upserts,
+            note_edits=dict(note_edits),
             inspired_memory_ids=list(inspired_memory_ids),
             write_mode=self._validated_write_mode(
                 adds=adds,

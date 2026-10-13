@@ -58,20 +58,24 @@
   - 用于删除已过时、被更高质量记忆覆盖、或与保留规则冲突的旧记忆
   - 如果收到的是自然语言删除请求，先解析成精确的记忆 id，再把这些 id 提交到 `deletes`
 - `note_upserts?: Record<string, string>`
-  - 仅写入需要新增或改写的 note
+  - 仅写入需要新增或**整体重写**的 note
   - 不要为不再被任何记忆引用的 note 继续保留内容
+- `note_edits?: Record<string, Array<{ old_text: string, new_text: string }>>`
+  - 改已有 note 的局部内容用这个：`old_text` 必须在该 note 里**唯一命中一次**，`new_text` 留空表示删掉这段
+  - 只改一两个段落时**不要**用 `note_upserts` 重交整份——那要求你把没在改的段落也整份抄对，漏抄的部分会直接消失
+  - 同一 note 可以放多条 edit，按顺序依次生效
 - `inspired_memory_ids?: string[]`
   - 列出当前完整 memory snapshot 中，对本批判断有实质帮助的 memory id
   - 可选，但会真实改变后续行为：被列出的记忆刷新计数加一、通过计数清零，从而延后它被压缩清理。只列你真正用过的，不要凑数
 - `noop_reason?: string`
   - 零变更专用：本轮既不新增、也不改写、删除、归并任何记忆时才用
-  - 只能单独使用，不能与 `adds`、`rewrites`、`deletes`、`note_upserts` 混用；混合场景（忽略本批候选、同时又要改写或删除某条旧记忆）只交变更字段
+  - 只能单独使用，不能与 `adds`、`rewrites`、`deletes`、`note_upserts`、`note_edits` 混用；混合场景（忽略本批候选、同时又要改写或删除某条旧记忆）只交变更字段
   - 适用于候选与已有记忆语义相同、旧记忆已足够好、或候选经审查应被忽略的情况
   - 仅 write 批次可用；delete 批次提交它会被打回
 - `already_satisfied?: string`
   - 仅 delete 批次可用的终态：待删目标已不在当前记忆正文里（已被更早的批次改写掉、删掉，或本就不存在）
   - 值里写清你核对过的 id 或主题，以及它为何已不需要再删
-  - 只能单独使用，不能与 `adds`、`rewrites`、`deletes`、`note_upserts`、`noop_reason` 混用
+  - 只能单独使用，不能与 `adds`、`rewrites`、`deletes`、`note_upserts`、`note_edits`、`noop_reason` 混用
   - 这是 delete 批次唯一的零变更出口：目标已不存在时不要提交 `noop_reason`，也不要为凑 `deletes` 而删掉仍然有效的记忆
 - `minimal_memory`
   - 写成 `条件->要求关键词` 的形式，去除所有补充性解释和语法，只保留核心要点，丢失非核心信息和模糊描述

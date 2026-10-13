@@ -1277,5 +1277,52 @@ def test_memory_operation_chips_use_one_color_per_operation() -> None:
     css = (REPO_ROOT / "g3ku/web/frontend/org_graph.css").read_text(encoding="utf-8")
     colors = dict(re.findall(r'\.memory-op-chip\[data-op="(\w+)"\]\s*\{\s*color:\s*([^;]+);', css))
 
-    assert set(colors) == {"add", "rewrite", "delete", "note_upsert"}
-    assert len(set(colors.values())) == 4
+    assert set(colors) == {"add", "rewrite", "delete", "note_upsert", "note_edit", "note_reaped"}
+    assert len(set(colors.values())) == 6
+
+
+def test_note_edit_and_note_reap_records_survive_into_the_memory_surfaces() -> None:
+    """The ledger keeps these records precisely so "was a note swept or edited by
+    mistake" is answerable; a card that drops the type or a block that falls through to
+    the add-template would leave the record unreadable."""
+    result = _run_app_script(
+        """
+        const item = {
+          batch_id: "write_note_edit_demo",
+          op: "write",
+          source_op: "write",
+          status: "applied",
+          write_mode: "mixed",
+          processed_at: "2026-09-21T16:00:00+08:00",
+          changes: [
+            { type: "note_edit", note_ref: "note_ports", old_text: "127.0.0.1:8788",
+              new_text: "127.0.0.1:8799", applied: true, error: "" },
+            { type: "note_edit", note_ref: "note_ports", old_text: "这一行不存在",
+              new_text: "x", applied: false, error: "old_text not found in note note_ports" },
+            { type: "note_edit", note_ref: "note_steps", old_text: "第二步",
+              new_text: "", applied: true, error: "" },
+            { type: "note_reaped", note_ref: "note_old", reason: "ref_dropped" },
+          ],
+        };
+
+        __out.cardHtml = context.__testExports.renderMemoryProcessedCard(item);
+        __out.label = context.__testExports.memoryProcessedOpLabel(item);
+        __out.blocks = context.__testExports.renderMemoryChangeList(item.changes);
+        """,
+        ["renderMemoryProcessedCard", "memoryProcessedOpLabel", "renderMemoryChangeList"],
+    )
+
+    card_html = str(result["cardHtml"])
+    assert 'data-op="note_edit"' in card_html
+    assert 'data-op="note_reaped"' in card_html
+    assert str(result["label"]) == "编辑 Note / 回收 Note"
+
+    blocks = str(result["blocks"])
+    assert blocks.count('data-change-type="note_edit"') == 3
+    assert "编辑 Note" in blocks and "回收 Note" in blocks
+    assert "新增内容" not in blocks, "note changes must not fall through to the add template"
+    assert "127.0.0.1:8788" in blocks and "127.0.0.1:8799" in blocks
+    assert "old_text not found in note note_ports" in blocks
+    assert "已删掉这段" in blocks
+    assert "改写后不再指向它" in blocks
+    assert "ref:note_old" in blocks

@@ -14553,6 +14553,8 @@ const MEMORY_OP_KINDS = {
     rewrite: { label: "修改", icon: "pencil" },
     delete: { label: "删除", icon: "trash-2" },
     note_upsert: { label: "更新 Note", icon: "notebook-pen" },
+    note_edit: { label: "编辑 Note", icon: "notebook-pen" },
+    note_reaped: { label: "回收 Note", icon: "trash-2" },
 };
 
 // write_mode 把删除并进 rewrite 桶、把多种操作压成 mixed；只有持久化的 changes
@@ -14747,8 +14749,16 @@ function memoryChangeTypeLabel(type) {
     if (normalized === "rewrite") return "修改";
     if (normalized === "delete") return "删除";
     if (normalized === "note_upsert") return "更新 Note";
+    if (normalized === "note_edit") return "编辑 Note";
+    if (normalized === "note_reaped") return "回收 Note";
     return normalized || "变更";
 }
+
+const MEMORY_NOTE_REAP_REASONS = {
+    memory_deleted: "拥有它的记忆被删除",
+    ref_dropped: "改写后不再指向它",
+    unreferenced: "没有记忆指向它",
+};
 
 function renderMemoryChangeBlock(change) {
     const type = String(change?.type || "").trim().toLowerCase();
@@ -14799,6 +14809,34 @@ function renderMemoryChangeBlock(change) {
                 <div class="memory-change-text">${renderMemoryTextWithNoteRefs(content) || "-"}</div>
             </div>
         `;
+    } else if (type === "note_edit") {
+        const applied = Boolean(change?.applied);
+        const newText = String(change?.new_text || "");
+        const modifiedHtml = applied
+            ? (newText.trim()
+                ? `<div class="memory-change-text">${renderMemoryTextWithNoteRefs(newText)}</div>`
+                : `<div class="memory-change-text memory-change-missing">已删掉这段</div>`)
+            : `<div class="memory-change-text memory-change-missing">未生效：${esc(String(change?.error || ""))}</div>`;
+        bodyHtml = `
+            <div class="memory-change-compare">
+                <div class="memory-change-col">
+                    <div class="memory-change-col-label">原文</div>
+                    <div class="memory-change-text">${renderMemoryTextWithNoteRefs(String(change?.old_text || "")) || "-"}</div>
+                </div>
+                <div class="memory-change-col">
+                    <div class="memory-change-col-label">改为</div>
+                    ${modifiedHtml}
+                </div>
+            </div>
+        `;
+    } else if (type === "note_reaped") {
+        const reason = String(change?.reason || "").trim();
+        bodyHtml = `
+            <div class="memory-change-col">
+                <div class="memory-change-col-label">回收原因</div>
+                <div class="memory-change-text">${esc(MEMORY_NOTE_REAP_REASONS[reason] || reason || "-")}</div>
+            </div>
+        `;
     } else {
         bodyHtml = `
             <div class="memory-change-col">
@@ -14808,7 +14846,7 @@ function renderMemoryChangeBlock(change) {
         `;
     }
 
-    const idChip = type === "note_upsert" && noteRef
+    const idChip = noteRef
         ? `<span class="policy-chip neutral">ref:${esc(noteRef)}</span>`
         : (memoryId ? `<span class="policy-chip neutral">${esc(memoryId)}</span>` : "");
 
