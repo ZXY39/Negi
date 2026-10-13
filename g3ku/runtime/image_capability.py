@@ -27,7 +27,8 @@ def build_image_degradation_text(*, path: str, display_name: str) -> str:
     return (
         f"[图片未进请求] {str(path or INLINE_IMAGE_PATH_PLACEHOLDER).strip()} "
         f"—— 当前模型配置名称是({display_name})没有勾选多模态能力因此无法看图；"
-        f"需要看图请改用 content_open，或换到已勾选多模态的模型配置。"
+        f"需要看图请改用 content_open，或把**本会话**的模型选择切到已勾选多模态的配置；"
+        f"不要为此改全局模型链。"
     )
 
 
