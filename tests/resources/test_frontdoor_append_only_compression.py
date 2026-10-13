@@ -509,3 +509,30 @@ async def test_frontdoor_compression_aborts_and_keeps_body_when_helper_yields_no
     assert [dict(item) for item in result.request_messages] == original
     assert result.history_shrink_reason == ""
     assert "no summary" in str(result.diagnostics.get("compression_pass_failed") or "")
+
+
+def test_over_window_messages_state_facts_and_never_order_a_chain_edit() -> None:
+    """两条超窗故障文案只陈述事实：模型看得见的那句里不许出现"改模型链配置"。
+
+    泛指"换配置"就是给模型一张改全局 CEO 链的许可证（实盘一次：降级文案写"换配置"，
+    模型真去 PUT 了角色链）。两条车道同一条口径。
+    """
+    runner = CreateAgentCeoFrontDoorRunner(loop=SimpleNamespace())
+    model_info = {
+        "model_key": "glm-5.2-3",
+        "provider_model": "responses:glm-5.2",
+        "context_window_tokens": 0,
+        "resolution_error": "context_window_missing",
+    }
+
+    missing = runner._frontdoor_missing_context_window_error(model_info=model_info)
+    exceeded = runner._frontdoor_context_window_exceeded_error(model_info=model_info, detail="capacity_non_positive")
+
+    for error in (missing, exceeded):
+        assert "更改模型链配置" not in error.message, error.message
+        assert "请更改" not in error.message, error.message
+        assert "responses:glm-5.2" in error.message, error.message
+    assert "没有可用压缩窗口" in missing.message
+    assert "原因: context_window_missing" in missing.message
+    assert "按这颗模型的窗口压缩后仍装不下" in exceeded.message
+    assert "capacity_non_positive" in exceeded.message
