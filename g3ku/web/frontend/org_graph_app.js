@@ -14422,15 +14422,16 @@ function memoryOpLabel(op) {
 function memoryFailedCategoryLabel(item) {
     const normalized = String(item?.category || "").trim().toLowerCase();
     if (normalized === "provider_error") return "provider 瞬时错误";
+    if (normalized === "window_refusal") return "超窗拒发";
     if (normalized === "protocol") return "协议违规";
     return normalized || "未知类别";
 }
 
 function memoryFailedAutoRetryHint(item) {
     const normalized = String(item?.category || "").trim().toLowerCase();
-    return normalized === "provider_error"
-        ? "队列下一次成功处理后自动重排队尾"
-        : "仅支持手动重试";
+    if (normalized === "provider_error") return "队列下一次成功处理后自动重排队尾";
+    if (normalized === "window_refusal") return "载荷变小或模型窗口调大后手动重试";
+    return "仅支持手动重试";
 }
 
 const MEMORY_OP_KINDS = {

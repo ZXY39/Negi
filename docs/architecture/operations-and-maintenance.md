@@ -586,7 +586,7 @@ For the queued Markdown memory runtime, the first operator checks should be:
 1. Inspect `memory/memory_state.sqlite3` for the authoritative memory rows, `refresh_count`, `passed_count`, `is_compressed`, and `from_user` state.
 2. Inspect `memory/MEMORY.md` for the regenerated prompt snapshot currently injected into CEO/frontdoor.
 3. Inspect `memory/queue.jsonl` for pending `write` / `delete` requests.
-4. Inspect `memory/failed.jsonl` for parked failed batches: each row carries `category` (`provider_error` / `protocol`), `status` (`parked` / `requeued`), retry counters and a full `error_history`. A non-empty file means some turns of memory are waiting for a success signal or an operator decision.
+4. Inspect `memory/failed.jsonl` for parked failed batches: each row carries `category` (`provider_error` / `window_refusal` / `protocol`), `status` (`parked` / `requeued`), retry counters and a full `error_history`. A non-empty file means some turns of memory are waiting for a success signal or an operator decision.
 5. Inspect `memory/ops.jsonl` for the latest terminal batch history (`applied`, `precheck_failed`, `operator_discarded`).
 6. If a processed row exposes `request_artifact_paths`, inspect the referenced files under `.g3ku/memory-requests/` before blaming prompt assembly or the provider adapter.
 7. Use `negi memory current`, `negi memory queue`, and `negi memory flush` when you need a quick operator view without manually opening files.
@@ -596,16 +596,18 @@ Operator workflow for parked failed batches:
 
 1. The web `记忆管理` page shows the `失败记忆` panel only while parked records exist (left column, under the pending queue). Cards are red, carry the failure category and a retry icon; clicking a card opens the detail drawer with the full error history.
 2. `provider_error` records rejoin the queue automatically: every successfully applied batch requeues the oldest parked provider-error record at the queue tail. During a provider outage nothing retries; recovery is paced by real traffic. `queue.auto_requeue_on_success=false` disables the signal entirely.
-3. `protocol` records (the memory agent answered but never produced a valid `memory_apply_batch` result) never auto-requeue; they wait for an operator.
-4. Manual retry and discard are ordinary operator actions on this surface (no environment flag): retry requeues the record under its original `request_id`s; discard writes an `operator_discarded` terminal row into `ops.jsonl`, removes the parked record and any stale queue rows, and makes those `request_id`s dedupe-processed. Both actions append to `memory/admin_audit.jsonl`. Only the legacy queue-head retry contract still requires `G3KU_ENABLE_MEMORY_ADMIN_MUTATIONS`.
-5. The UI buttons stay usable for every operator; the protective layers are the in-app second-confirmation dialogs and the audit trail. Inspecting parked records needs no flag either.
+3. `window_refusal` records (the batch was refused by the memory lane's own pre-send capacity check, before any provider call) never auto-requeue: the estimate is a deterministic function of the payload, so a plain retry recomputes the same number and pays the earlier rounds again. Retry only after the batch payload shrinks or the model's declared window grows; otherwise discard.
+4. `protocol` records (the memory agent answered but never produced a valid `memory_apply_batch` result) never auto-requeue; they wait for an operator.
+5. Manual retry and discard are ordinary operator actions on this surface (no environment flag): retry requeues the record under its original `request_id`s; discard writes an `operator_discarded` terminal row into `ops.jsonl`, removes the parked record and any stale queue rows, and makes those `request_id`s dedupe-processed. Both actions append to `memory/admin_audit.jsonl`. Only the legacy queue-head retry contract still requires `G3KU_ENABLE_MEMORY_ADMIN_MUTATIONS`.
+6. The UI buttons stay usable for every operator; the protective layers are the in-app second-confirmation dialogs and the audit trail. Inspecting parked records needs no flag either.
 
 Operator debugging order for a stuck queue head:
 
 1. Check whether `models.roles.memory` is empty or points to an invalid model chain.
 2. Check the queue-head `last_error_text`, `last_error_at`, `retry_after`, and `processing_started_at`.
 3. Check `memory/failed.jsonl` and the worker logs for provider/tool-call failures or semantic validation failures — processing failures park instead of blocking, so an empty queue with a non-empty failed file is the normal signature of a provider outage, not a lost queue.
-4. Only after the runtime side is healthy should you debug the web `记忆管理` page.
+4. When many parked rows repeat the same `memory send exceeds model window` text, that is the memory lane's local capacity precheck, not an outage. Compare the two numbers inside the message: an `估算` far below `窗口` means the refusal came from the check's own capacity rule, while `估算` above `窗口` means the batch really is oversized, and the fix belongs on the enqueue side. Category and capacity contracts: `runtime-overview.md`「队列状态机与失败停车语义」.
+5. Only after the runtime side is healthy should you debug the web `记忆管理` page.
 
 Operator debugging order for duplicated successful memory writes:
 

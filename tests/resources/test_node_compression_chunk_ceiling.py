@@ -333,6 +333,7 @@ def test_memory_guard_rejects_oversized_send(monkeypatch: pytest.MonkeyPatch) ->
         )
     assert 'memory send exceeds model window' in str(raised.value)
     assert '容量=366000' in str(raised.value)
+    assert raised.value.discard_reason == 'window_refusal'
 
 
 def test_memory_guard_allows_send_inside_capacity(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -349,5 +350,30 @@ def test_memory_guard_allows_send_inside_capacity(monkeypatch: pytest.MonkeyPatc
         request_messages=[{'role': 'user', 'content': 'x'}],
         tool_schemas=[],
         usage_total={'input_tokens': 0, 'output_tokens': 0},
+        request_artifacts=[],
+    )
+
+
+def test_memory_guard_does_not_clamp_capacity_by_prior_round_usage(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """记忆批次每轮把全部历史重发一遍：拿此前轮次的用量夹容量必死在第 2 轮。
+
+    形状取自实盘停车记录 failed_24378346de28：第 1 轮 provider 回执 输入 7500 /
+    缓存 8192 / 输出 1806，第 2 轮估算 17920，而声明窗口 390000 根本装得下。
+    """
+    manager, module = _memory_manager()
+    monkeypatch.setattr(
+        module, 'resolve_send_model_context_window_info',
+        lambda **_: SimpleNamespace(context_window_tokens=390000),
+    )
+    monkeypatch.setattr(module, 'estimate_runtime_provider_request_preview_tokens', lambda **_: 17920)
+
+    manager._memory_window_guard(
+        runtime_config=SimpleNamespace(),
+        model_chain=['mem-1'],
+        request_messages=[{'role': 'user', 'content': 'x'}],
+        tool_schemas=[],
+        usage_total={'input_tokens': 7500, 'output_tokens': 1806, 'cache_read_tokens': 8192},
         request_artifacts=[],
     )
