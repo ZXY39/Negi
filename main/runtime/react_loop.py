@@ -6075,6 +6075,8 @@ class ReActToolLoop:
                 chunk_error_text,
                 chunk_refused_reason,
             ) = await self._chunked_node_compression_summary(
+                task_id=str(task_id or ''),
+                node_id=str(node_id or ''),
                 task_goal=task_goal,
                 system_prefix=system_prefix,
                 bootstrap_user=bootstrap_user,
@@ -6181,6 +6183,8 @@ class ReActToolLoop:
     async def _chunked_node_compression_summary(
         self,
         *,
+        task_id: str = '',
+        node_id: str = '',
         task_goal: str,
         system_prefix: list[dict[str, Any]],
         bootstrap_user: list[dict[str, Any]],
@@ -6223,6 +6227,10 @@ class ReActToolLoop:
         last_error_text = ""
         total_chunks = len(chunks)
         for index, chunk in enumerate(chunks, start=1):
+            # 每块之前查一次暂停/取消：整个分块循环跑在 `run()` 的一次迭代里，只在迭代
+            # 开头查等于"暂停要等整次压缩结束"。与前门那侧逐块查同形。
+            if str(task_id or '').strip():
+                self._check_pause_or_cancel(str(task_id), str(node_id or '').strip())
             chunk_messages = [
                 {"role": "system", "content": _NODE_TOKEN_COMPRESSION_SYSTEM_PROMPT},
                 {

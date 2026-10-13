@@ -73,7 +73,10 @@ def _node_loop(record: list[int], *, fail: bool = False):
             return _Resp(content='', error_text='HTTP 429: inference exceeds tpm/rpm limit')
         return _Resp(content='【摘要】保留结论与路径。')
 
-    loop = ReActToolLoop(chat_backend=SimpleNamespace(), log_service=SimpleNamespace())
+    # 分块循环每块前查一次暂停/取消，`_check_pause_or_cancel` 要读 store.get_task；
+    # 查不到任务按"不暂停不取消"处理，与生产同语义。
+    log_service = SimpleNamespace(_store=SimpleNamespace(get_task=lambda task_id: None))
+    loop = ReActToolLoop(chat_backend=SimpleNamespace(), log_service=log_service)
     state['loop'] = loop
     loop._chat_with_optional_extensions = fake_chat
     loop._resolved_model_response_timeout_seconds = lambda **_: 30.0
@@ -377,3 +380,27 @@ def test_memory_guard_does_not_clamp_capacity_by_prior_round_usage(
         usage_total={'input_tokens': 7500, 'output_tokens': 1806, 'cache_read_tokens': 8192},
         request_artifacts=[],
     )
+
+
+def test_node_chunk_loop_checks_pause_before_every_chunk() -> None:
+    """暂停要能在块与块之间生效。
+
+    整个分块循环跑在 `run()` 的一次迭代里，只在迭代开头查一次等于"暂停得等整次压缩跑完"；
+    前门那侧本来就是逐块查，这里同形。
+    """
+    sizes: list[int] = []
+    loop, run = _node_loop(sizes)
+    checks: list[tuple[str, str]] = []
+
+    def _pause(task_id: str, node_id: str = '') -> None:
+        checks.append((task_id, node_id))
+        if len(checks) >= 2:
+            raise asyncio.CancelledError()
+
+    loop._check_pause_or_cancel = _pause
+
+    with pytest.raises(asyncio.CancelledError):
+        asyncio.run(run(_history(420, 10000), 390000))
+
+    assert len(checks) == 2, checks
+    assert len(sizes) == 1, f'第二块之前就该被拦下：{sizes}'
