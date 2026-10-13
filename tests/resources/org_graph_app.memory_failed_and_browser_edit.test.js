@@ -129,10 +129,10 @@ function loadApp() {
             memoryFailedCategoryLabel,
             memoryFailedAutoRetryHint,
             memoryFailedErrorHistoryText,
-            memoryFailedPayloadBlocksFromRecord,
-            memoryFailedPayloadRangeText,
-            renderMemoryFailedPayloadBlocks,
-            loadMoreMemoryFailedPayload,
+            memoryPayloadBlocksFromRecord,
+            memoryPayloadRangeText,
+            renderMemoryPayloadBlocks,
+            loadMoreMemoryPayloadBlock,
             memoryBrowserSelectedIds,
             renderMemoryBrowserList,
             renderMemoryBrowserEditState,
@@ -328,79 +328,106 @@ test("edit mode is refused when mutations are disabled", () => {
     assert.deepEqual(Object.keys(api.S.memoryBrowser.selected), []);
 });
 
-test("failed drawer body carries only the projected first screen", () => {
+test("memory drawer body carries only the projected first screen, per request block", () => {
     const api = loadApp();
-    const blocks = api.memoryFailedPayloadBlocksFromRecord({
+    const blocks = api.memoryPayloadBlocksFromRecord({
         items: [
-            { request_id: "write_1", payload_text: "x".repeat(4000), payload_char_count: 50000, payload_truncated: true },
-            { request_id: "write_2", payload_text: "短载荷", payload_char_count: 3, payload_truncated: false },
+            { request_id: "write_1", payload_text: "x".repeat(4000), payload_char_count: 50000 },
+            { request_id: "write_2", payload_text: "短载荷", payload_char_count: 3 },
         ],
-    });
+    }, "failed");
     assert.equal(blocks.length, 2);
     assert.equal(blocks[0].endChar, 4000);
     assert.equal(blocks[0].charCount, 50000);
     assert.equal(blocks[0].truncated, true);
     assert.equal(blocks[1].truncated, false);
 
-    const html = api.renderMemoryFailedPayloadBlocks(blocks);
+    const html = api.renderMemoryPayloadBlocks(blocks, "failed", "failed_abc123");
+    assert.match(html, /data-payload-kind="failed"/);
+    assert.match(html, /data-payload-key="failed_abc123"/);
     assert.match(html, /data-memory-payload-more/);
     assert.match(html, /已显示第 1–4000 字符 \/ 共 50000 字符/);
     assert.match(html, /全文 3 字符已全部显示/);
-    // 回归钉子：抽屉曾经把 1.28MB 正文整份拼成一个字符串再注入，主线程被占住 ~2.9 秒。
+    // 回归钉子：抽屉曾经把整份正文拼成一个字符串再注入，1.28MB 时主线程被占住 ~2.9 秒。
     assert.ok(html.length < 8000, `首屏渲染带回了整份载荷：${html.length} 字符`);
 });
 
-test("payload paging appends by delivered chars and hides the button once exhausted", async () => {
+test("processed and queue records project from their own payload shapes", () => {
     const api = loadApp();
-    api.S.memoryDetailPreview = { open: true, kind: "failed", key: "failed_paged" };
+    // 已处理批次：payload_texts 与 payload_char_counts 同下标对齐，request_ids 提供寻址。
+    const processed = api.memoryPayloadBlocksFromRecord({
+        batch_id: "write_batch_1",
+        request_ids: ["write_a", "write_b"],
+        payload_texts: ["a".repeat(4000), "第二条正文"],
+        payload_char_counts: [40000, 5],
+    }, "processed");
+    assert.deepEqual(processed.map((b) => b.requestId), ["write_a", "write_b"]);
+    assert.equal(processed[0].truncated, true);
+    assert.equal(processed[1].truncated, false);
+    assert.equal(processed[1].charCount, 5);
+
+    // 队列行只有一份正文。
+    const queued = api.memoryPayloadBlocksFromRecord({
+        request_id: "write_q",
+        payload_text: "z".repeat(4000),
+        payload_char_count: 9000,
+    }, "queue");
+    assert.equal(queued.length, 1);
+    assert.equal(queued[0].requestId, "write_q");
+    assert.equal(queued[0].truncated, true);
+
+    // 旧服务端没给 counts 时按交付长度判：不截断、不出按钮，也不报错。
+    const legacy = api.memoryPayloadBlocksFromRecord({ payload_texts: ["短"], request_ids: ["w"] }, "processed");
+    assert.equal(legacy[0].truncated, false);
+});
+
+test("payload paging appends by delivered chars across surfaces and hides the button once exhausted", async () => {
+    const api = loadApp();
     const calls = [];
-    api.ApiClient.getMemoryFailedPayload = async ({ startChar }) => {
-        calls.push(startChar);
+    api.ApiClient.getMemoryPayload = async ({ kind, key, requestId, startChar }) => {
+        calls.push([kind, key, requestId, startChar]);
         const end = Math.min(Number(startChar) + 19999, 50000);
-        return { item: { text: "y".repeat(end - Number(startChar) + 1), start_char: Number(startChar), end_char: end, char_count: 50000, truncated: end < 50000 } };
+        return { item: { kind, key, request_id: requestId, text: "y".repeat(end - Number(startChar) + 1), start_char: Number(startChar), end_char: end, char_count: 50000, truncated: end < 50000 } };
     };
     const textNode = new StubHTMLElement();
     const rangeNode = new StubHTMLElement();
     const item = new StubHTMLElement();
-    item.dataset = { requestId: "write_1", startChar: "1", endChar: "4000", charCount: "50000" };
+    item.dataset = { payloadKind: "processed", payloadKey: "write_batch_1", requestId: "write_a", startChar: "1", endChar: "4000", charCount: "50000" };
     item._qs = { ".memory-detail-payload-text": textNode, ".memory-detail-payload-range": rangeNode };
     const button = new StubHTMLElement();
     button._closest = item;
 
-    await api.loadMoreMemoryFailedPayload(button);
-    assert.deepEqual(calls, [4001], "续读起点必须取自已交付的 end_char+1");
+    await api.loadMoreMemoryPayloadBlock(button);
+    assert.deepEqual(calls[0], ["processed", "write_batch_1", "write_a", 4001], "续读起点取自已交付的 end_char+1");
     assert.equal(item.dataset.endChar, "24000");
     assert.equal(textNode.innerHTML.length, 20000);
     assert.match(rangeNode.textContent, /已显示第 1–24000 字符 \/ 共 50000 字符/);
     assert.equal(button.hidden, false);
 
-    await api.loadMoreMemoryFailedPayload(button);
-    assert.deepEqual(calls, [4001, 24001]);
+    await api.loadMoreMemoryPayloadBlock(button);
     assert.equal(item.dataset.endChar, "44000");
     assert.equal(textNode.innerHTML.length, 40000, "追加不许重绘已有正文");
 
-    await api.loadMoreMemoryFailedPayload(button);
+    await api.loadMoreMemoryPayloadBlock(button);
     assert.equal(item.dataset.endChar, "50000");
-    assert.equal(textNode.innerHTML.length, 46000);
     assert.match(rangeNode.textContent, /全文 50000 字符已全部显示/);
     assert.equal(button.hidden, true, "取尽后取全文按钮要收口");
 });
 
 test("payload paging closes the button when the server delivers no progress", async () => {
     const api = loadApp();
-    api.S.memoryDetailPreview = { open: true, kind: "failed", key: "failed_stalled" };
-    api.ApiClient.getMemoryFailedPayload = async ({ startChar }) => ({
+    api.ApiClient.getMemoryPayload = async ({ startChar }) => ({
         item: { text: "same", start_char: Number(startChar), end_char: Number(startChar) - 1, char_count: 50000, truncated: true },
     });
     const textNode = new StubHTMLElement();
     const rangeNode = new StubHTMLElement();
     const item = new StubHTMLElement();
-    item.dataset = { requestId: "write_1", startChar: "1", endChar: "4000", charCount: "50000" };
+    item.dataset = { payloadKind: "failed", payloadKey: "failed_stalled", requestId: "write_1", startChar: "1", endChar: "4000", charCount: "50000" };
     item._qs = { ".memory-detail-payload-text": textNode, ".memory-detail-payload-range": rangeNode };
     const button = new StubHTMLElement();
     button._closest = item;
 
-    await api.loadMoreMemoryFailedPayload(button);
+    await api.loadMoreMemoryPayloadBlock(button);
     assert.equal(item.dataset.endChar, "4000", "没推进就不动已交付水位");
     assert.equal(button.hidden, true, "再点只会拿回同一段，收口而不是留个死按钮");
     assert.equal(button.disabled, false, "按钮收口后不能留在禁用态");

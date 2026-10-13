@@ -41,12 +41,13 @@ _REVIEW_TOOL_OUTPUT_MAX_CHARS = 400
 _REVIEW_TOOL_PREVIEW_MAX_CHARS = 240
 _REVIEW_REPORTED_TOOL_ID_CAP = 5000
 _STAGED_DOCUMENT_UNSET = object()
-# 失败停车记录读侧的载荷窗口（字符寻址，与 g3ku/content/navigation 的 char 模式同词汇）。
-# 存储不动：停车记录仍带完整 items[].payload_text，重试/放弃回队时要用。
-# 首屏投影只给 4000 字符——抽屉整份灌 1.28MB 文本节点会把手线程占住 ~2.9 秒（实盘 10-13）。
+# 记忆三类读面（队列 / 已处理批次 / 失败停车区）共用的载荷窗口，字符寻址，与
+# g3ku/content/navigation 的 char 模式同词汇。存储不动：三份文件里仍是完整载荷，
+# 回队、重建快照、审计都读原文，投影只发生在返回浏览器的那一份拷贝上。
+# 首屏 4000 字符：抽屉正文的成本是排版，实盘一条 1.28MB 载荷让"点开一张卡片"占住主线程 2.9 秒。
 # 一屏 20000 字符而不是导航车道的 128000：那一档是给模型读文件的，操作者面每屏只要排版得起。
-_MEMORY_FAILED_PAYLOAD_PREVIEW_CHARS = 4_000
-_MEMORY_FAILED_PAYLOAD_WINDOW_CHARS = 20_000
+_MEMORY_PAYLOAD_PREVIEW_CHARS = 4_000
+_MEMORY_PAYLOAD_WINDOW_CHARS = 20_000
 _DELETE_NOOP_RULE = (
     "delete batch may not use noop_reason; submit the resolved ids in deletes, "
     "or declare already_satisfied when the delete target is no longer in the snapshot"
@@ -1289,7 +1290,8 @@ class MemoryManager:
         page_size = max(int(limit or 0), 0)
         end = start + page_size
         return {
-            "items": [asdict(item) for item in rows[start:end]],
+            # 只对这一页做投影：单条入队载荷实测最大 400,264 字符，整份给浏览器就是抽屉卡死的来源。
+            "items": [self._project_queue_row_for_read(asdict(item)) for item in rows[start:end]],
             "total": len(rows),
             "has_more": end < len(rows),
         }
@@ -1300,7 +1302,10 @@ class MemoryManager:
         start = max(int(offset or 0), 0)
         page_size = max(int(limit or 0), 0)
         end = start + page_size
-        items = [self._backfill_legacy_changes(row) for row in ordered[start:end]]
+        items = [
+            self._project_processed_row_for_read(self._backfill_legacy_changes(row))
+            for row in ordered[start:end]
+        ]
         return {
             "items": items,
             "total": len(ordered),
@@ -4657,24 +4662,127 @@ class MemoryManager:
             "truncated": end < total,
         }
 
+    def _project_payload_for_read(self, text: str) -> dict[str, Any]:
+        """单份载荷的首屏投影：给投影后的正文与原文长度，是否截断由两者相减判出。"""
+
+        window = self._window_payload_chars(
+            str(text or ""),
+            start_char=1,
+            limit_chars=_MEMORY_PAYLOAD_PREVIEW_CHARS,
+        )
+        return {"text": window["text"], "char_count": window["char_count"]}
+
     def _project_failed_record_for_read(self, record: dict[str, Any]) -> dict[str, Any]:
         """读侧投影：`items[].payload_text` 只留首屏，整份载荷仍留在停车区文件里供回队。"""
 
         projected_items: list[dict[str, Any]] = []
         for payload in list(record.get("items") or []):
             item = dict(payload) if isinstance(payload, dict) else {}
-            window = self._window_payload_chars(
-                str(item.get("payload_text") or ""),
-                start_char=1,
-                limit_chars=_MEMORY_FAILED_PAYLOAD_PREVIEW_CHARS,
-            )
+            window = self._project_payload_for_read(str(item.get("payload_text") or ""))
             item["payload_text"] = window["text"]
             item["payload_char_count"] = window["char_count"]
-            item["payload_truncated"] = window["truncated"]
             projected_items.append(item)
         projected = dict(record)
         projected["items"] = projected_items
         return projected
+
+    def _project_processed_row_for_read(self, row: dict[str, Any]) -> dict[str, Any]:
+        """终态行的 `payload_texts` 逐条投首屏，另给一条等长的 `payload_char_counts`。
+
+        两个数组按同一下标对齐，截断与否由 `len(text) < char_counts[i]` 判出，
+        不再放第三个平行标志位（三份同源读数会各说各话）。
+        """
+
+        projected = dict(row)
+        windows = [self._project_payload_for_read(str(text or "")) for text in list(row.get("payload_texts") or [])]
+        projected["payload_texts"] = [window["text"] for window in windows]
+        projected["payload_char_counts"] = [window["char_count"] for window in windows]
+        return projected
+
+    def _project_queue_row_for_read(self, row: dict[str, Any]) -> dict[str, Any]:
+        projected = dict(row)
+        window = self._project_payload_for_read(str(row.get("payload_text") or ""))
+        projected["payload_text"] = window["text"]
+        projected["payload_char_count"] = window["char_count"]
+        return projected
+
+    def _locate_memory_payload_text(self, kind: str, key: str, request_id: str) -> tuple[str, str]:
+        """按 (kind, key[, request_id]) 取回**原文**载荷：三类读面的分页共用这一处定位。"""
+
+        if kind == "failed":
+            record = next(
+                (row for row in self._read_failed_records() if str(row.get("failed_id") or "").strip() == key),
+                None,
+            )
+            if record is None:
+                raise KeyError(f"failed memory record not found: {key}")
+            items = [item for item in list(record.get("items") or []) if isinstance(item, dict)]
+        elif kind == "processed":
+            row = next(
+                (item for item in self._read_processed_batches() if str(item.get("batch_id") or "").strip() == key),
+                None,
+            )
+            if row is None:
+                raise KeyError(f"processed memory batch not found: {key}")
+            texts = [str(text or "") for text in list(row.get("payload_texts") or [])]
+            ids = [str(rid or "").strip() for rid in list(row.get("request_ids") or [])]
+            index = 0
+            if request_id:
+                if request_id not in ids:
+                    raise KeyError(f"processed memory payload not found: {key}/{request_id}")
+                index = ids.index(request_id)
+            if index >= len(texts):
+                raise KeyError(f"processed memory payload not found: {key}/{request_id or 'first item'}")
+            return ids[index] if index < len(ids) else request_id, texts[index]
+        else:  # queue
+            row = next(
+                (item for item in self._read_queue_requests() if str(item.request_id or "").strip() == key),
+                None,
+            )
+            if row is None:
+                raise KeyError(f"memory queue request not found: {key}")
+            return key, str(row.payload_text or "")
+
+        item = None
+        if request_id:
+            item = next(
+                (row for row in items if str(row.get("request_id") or "").strip() == request_id),
+                None,
+            )
+        else:
+            item = items[0] if items else None
+        if item is None:
+            raise KeyError(f"memory payload not found: {key}/{request_id or 'first item'}")
+        return str(item.get("request_id") or "").strip(), str(item.get("payload_text") or "")
+
+    async def get_payload_window(
+        self,
+        kind: str,
+        key: str,
+        *,
+        request_id: str = "",
+        start_char: int = 1,
+    ) -> dict[str, Any]:
+        """取全文一屏：三类记忆读面共用一个分页实现，按 kind/key 定位原文再切窗。"""
+
+        normalized_kind = str(kind or "").strip().lower()
+        normalized_key = str(key or "").strip()
+        if normalized_kind not in ("failed", "processed", "queue") or not normalized_key:
+            raise KeyError(f"unsupported memory payload source: {normalized_kind or '(empty kind)'}/{normalized_key}")
+        located_request_id, text = self._locate_memory_payload_text(
+            normalized_kind, normalized_key, str(request_id or "").strip()
+        )
+        window = self._window_payload_chars(
+            text,
+            start_char=int(start_char or 1),
+            limit_chars=_MEMORY_PAYLOAD_WINDOW_CHARS,
+        )
+        return {
+            "kind": normalized_kind,
+            "key": normalized_key,
+            "request_id": located_request_id,
+            **window,
+        }
 
     async def list_failed_page(self, *, limit: int = 20, offset: int = 0) -> dict[str, Any]:
         rows = self._read_failed_records()
@@ -4688,42 +4796,6 @@ class MemoryManager:
             "items": [self._project_failed_record_for_read(row) for row in parked[start:end]],
             "total": len(parked),
             "has_more": end < len(parked),
-        }
-
-    async def get_failed_payload_window(
-        self,
-        failed_id: str,
-        *,
-        request_id: str = "",
-        start_char: int = 1,
-    ) -> dict[str, Any]:
-        """取全文一屏：定位停车记录里的原始载荷，从 `start_char` 起给一屏。"""
-
-        target = str(failed_id or "").strip()
-        normalized_request_id = str(request_id or "").strip()
-        rows = self._read_failed_records()
-        record = next((row for row in rows if str(row.get("failed_id") or "").strip() == target), None)
-        if record is None:
-            raise KeyError(f"failed memory record not found: {target}")
-        items = [item for item in list(record.get("items") or []) if isinstance(item, dict)]
-        if normalized_request_id:
-            item = next(
-                (row for row in items if str(row.get("request_id") or "").strip() == normalized_request_id),
-                None,
-            )
-        else:
-            item = items[0] if items else None
-        if item is None:
-            raise KeyError(f"failed memory payload not found: {target}/{normalized_request_id or 'first item'}")
-        window = self._window_payload_chars(
-            str(item.get("payload_text") or ""),
-            start_char=int(start_char or 1),
-            limit_chars=_MEMORY_FAILED_PAYLOAD_WINDOW_CHARS,
-        )
-        return {
-            "failed_id": target,
-            "request_id": str(item.get("request_id") or "").strip(),
-            **window,
         }
 
     async def retry_failed_record(self, failed_id: str, *, reason: str = "manual") -> dict[str, Any]:

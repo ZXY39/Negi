@@ -14434,42 +14434,59 @@ function memoryFailedAutoRetryHint(item) {
     return "仅支持手动重试";
 }
 
-// 失败记忆的正文：服务端列表口只投首屏（payload_truncated），取全文按字符一屏一屏点。
-// 抽屉整份灌 1.28MB 文本节点会把手线程占住 ~2.9 秒——实盘 2026-10-13 就是这样卡住的。
-function memoryFailedPayloadBlocksFromRecord(source) {
-    const items = Array.isArray(source?.items) ? source.items : [];
-    return items
-        .map((item, index) => {
-            const text = String(item?.payload_text || "");
-            if (!text.trim() && !Number(item?.payload_char_count || 0)) return null;
-            const charCount = Number(item?.payload_char_count ?? text.length) || text.length;
-            // 列表口的首屏永远从第 1 个字符起投，续读才由响应里的 end_char 推进。
-            const startChar = 1;
-            const deliveredEnd = startChar - 1 + text.length;
-            return {
-                requestId: String(item?.request_id || `#${index + 1}`).trim(),
-                text,
-                startChar,
-                endChar: deliveredEnd,
-                charCount,
-                truncated: Boolean(item?.payload_truncated) && deliveredEnd < charCount,
-            };
-        })
-        .filter(Boolean);
+// 记忆三面（队列 / 已处理批次 / 失败停车区）的正文都只投首屏，取全文按字符一屏一屏点。
+// 整份灌进正文节点的成本是排版：实盘一条 1.28MB 载荷让"点开一张卡片"占住主线程 2.9 秒。
+function memoryPayloadBlockFromText(text, charCount, requestId, index) {
+    const value = String(text || "");
+    const total = Number(charCount ?? value.length) || value.length;
+    if (!value.trim() && !total) return null;
+    // 首屏永远从第 1 个字符起投，续读才由响应里实际交付的 end_char 推进。
+    return {
+        requestId: String(requestId || `#${index + 1}`).trim(),
+        text: value,
+        startChar: 1,
+        endChar: value.length,
+        charCount: total,
+        truncated: value.length < total,
+    };
 }
 
-function memoryFailedPayloadRangeText({ startChar = 1, endChar = 0, charCount = 0 } = {}) {
+function memoryPayloadBlocksFromRecord(source, kind) {
+    if (kind === "failed") {
+        return (Array.isArray(source?.items) ? source.items : [])
+            .map((item, index) => memoryPayloadBlockFromText(
+                item?.payload_text, item?.payload_char_count, item?.request_id, index,
+            ))
+            .filter(Boolean);
+    }
+    if (kind === "processed") {
+        const texts = Array.isArray(source?.payload_texts) ? source.payload_texts : [];
+        const counts = Array.isArray(source?.payload_char_counts) ? source.payload_char_counts : [];
+        const ids = Array.isArray(source?.request_ids) ? source.request_ids : [];
+        return texts
+            .map((text, index) => memoryPayloadBlockFromText(text, counts[index], ids[index], index))
+            .filter(Boolean);
+    }
+    if (kind === "queue") {
+        return [memoryPayloadBlockFromText(
+            source?.payload_text, source?.payload_char_count, source?.request_id, 0,
+        )].filter(Boolean);
+    }
+    return [];
+}
+
+function memoryPayloadRangeText({ startChar = 1, endChar = 0, charCount = 0 } = {}) {
     if (!charCount) return "无正文";
     if (endChar >= charCount) return `全文 ${charCount} 字符已全部显示`;
     return `已显示第 ${startChar}–${endChar} 字符 / 共 ${charCount} 字符`;
 }
 
-function renderMemoryFailedPayloadBlocks(blocks) {
+function renderMemoryPayloadBlocks(blocks, kind, key) {
     return blocks.map((block) => `
-        <div class="memory-detail-payload-item" data-memory-payload-item data-request-id="${esc(block.requestId)}" data-start-char="${block.startChar}" data-end-char="${block.endChar}" data-char-count="${block.charCount}">
+        <div class="memory-detail-payload-item" data-memory-payload-item data-payload-kind="${esc(kind)}" data-payload-key="${esc(key)}" data-request-id="${esc(block.requestId)}" data-start-char="${block.startChar}" data-end-char="${block.endChar}" data-char-count="${block.charCount}">
             <div class="memory-detail-payload-head">
                 <span class="memory-detail-payload-request">${esc(block.requestId)}</span>
-                <span class="memory-detail-payload-range">${esc(memoryFailedPayloadRangeText(block))}</span>
+                <span class="memory-detail-payload-range">${esc(memoryPayloadRangeText(block))}</span>
             </div>
             <div class="memory-detail-payload-text">${renderMemoryTextWithNoteRefs(block.text)}</div>
             ${block.truncated ? '<button type="button" class="toolbar-btn ghost memory-detail-payload-more" data-memory-payload-more>取全文</button>' : ""}
@@ -14477,23 +14494,25 @@ function renderMemoryFailedPayloadBlocks(blocks) {
     `).join("");
 }
 
-async function loadMoreMemoryFailedPayload(button) {
+async function loadMoreMemoryPayloadBlock(button) {
     if (!(button instanceof HTMLElement)) return;
     const item = typeof button.closest === "function" ? button.closest("[data-memory-payload-item]") : null;
     if (!item) return;
-    const failedId = String(S.memoryDetailPreview?.key || "").trim();
+    const kind = String(item.dataset.payloadKind || "").trim();
+    const key = String(item.dataset.payloadKey || "").trim();
     const charCount = Number(item.dataset.charCount || 0);
     const previousEnd = Number(item.dataset.endChar || 0);
     const startChar = previousEnd + 1;
-    if (!failedId || startChar > charCount) {
+    if (!kind || !key || startChar > charCount) {
         button.hidden = true;
         return;
     }
     button.disabled = true;
     try {
-        const payload = typeof ApiClient?.getMemoryFailedPayload === "function"
-            ? await ApiClient.getMemoryFailedPayload({
-                failedId,
+        const payload = typeof ApiClient?.getMemoryPayload === "function"
+            ? await ApiClient.getMemoryPayload({
+                kind,
+                key,
                 requestId: String(item.dataset.requestId || "").trim(),
                 startChar,
             })
@@ -14509,7 +14528,7 @@ async function loadMoreMemoryFailedPayload(button) {
         if (advanced) item.dataset.endChar = String(deliveredEnd);
         const range = item.querySelector(".memory-detail-payload-range");
         if (range) {
-            range.textContent = memoryFailedPayloadRangeText({
+            range.textContent = memoryPayloadRangeText({
                 startChar: Number(item.dataset.startChar || 1),
                 endChar: Number(item.dataset.endChar || 0),
                 charCount,
@@ -15104,7 +15123,7 @@ function ensureMemoryDetailPreviewUi() {
             e.preventDefault();
             e.stopPropagation();
             if (payloadMore.disabled) return;
-            void loadMoreMemoryFailedPayload(payloadMore);
+            void loadMoreMemoryPayloadBlock(payloadMore);
             return;
         }
         const failedAction = e.target.closest("[data-memory-failed-action]");
@@ -15175,7 +15194,10 @@ function renderMemoryDetailPreview() {
     if (U.memoryDetailPrimary) {
         const blocks = Array.isArray(preview.primaryBlocks) ? preview.primaryBlocks : [];
         if (blocks.length) {
-            setInnerHtmlPreservingScroll(U.memoryDetailPrimary, renderMemoryFailedPayloadBlocks(blocks));
+            setInnerHtmlPreservingScroll(
+                U.memoryDetailPrimary,
+                renderMemoryPayloadBlocks(blocks, String(preview.kind || "").trim(), String(preview.key || "").trim()),
+            );
         } else {
             const primaryText = String(preview.primaryText || "").trim() || "当前没有可显示的正文。";
             setInnerHtmlPreservingScroll(U.memoryDetailPrimary, renderMemoryTextWithNoteRefs(primaryText));
@@ -15306,14 +15328,12 @@ function openMemoryDetailPreview(kind, key) {
                 ? `失败停车批次 ${normalizedKey}`
                 : `队列请求 ${normalizedKey}`,
         fields,
-        // 失败记忆按条给正文块（每块自带 request id、已显示区间与取全文按钮），
-        // 正文只投服务端给的首屏，其余留在停车区文件里。
-        primaryBlocks: isFailed ? memoryFailedPayloadBlocksFromRecord(source) : [],
+        // 三面正文都按条给块（每块自带 request id、已显示区间与取全文按钮），
+        // 正文只投服务端给的首屏，其余留在存储里原样不动。
+        primaryBlocks: memoryPayloadBlocksFromRecord(source, normalizedKind),
         primaryText: isProcessed
             ? payloadTexts.join("\n\n---\n\n")
-            : isFailed
-                ? ""
-                : String(source?.payload_text || ""),
+            : String(source?.payload_text || ""),
         secondaryTitle: isProcessed
             ? (noopReason ? "无变更原因" : "变更内容")
             : isFailed
