@@ -695,16 +695,27 @@ class _MemoryAgentRuntimeError(RuntimeError):
 
 
 class _MemoryProviderError(RuntimeError):
-    """Provider 调用失败（限流/超时/上游错误响应），与"模型没按协议调工具"区分开。
+    """发送/调用层失败，与"模型没按协议调工具"区分开。
 
     携带失败前已累计的 usage 与 request artifacts，供停车记录保留真实成本与线索。
+    `discard_reason` 决定停车类别：provider 回包错误按 `provider_error`（瞬时类，
+    参与成功信号自动重排），本地发送前预检拒发按 `window_refusal`（确定性失败，
+    重试只会重演，等载荷或模型窗口配置变化后人工重试）。
     """
 
-    def __init__(self, error_text: str, *, usage: dict[str, int] | None = None, request_artifacts: list[dict[str, Any]] | None = None):
+    def __init__(
+        self,
+        error_text: str,
+        *,
+        usage: dict[str, int] | None = None,
+        request_artifacts: list[dict[str, Any]] | None = None,
+        discard_reason: str = "provider_error",
+    ):
         super().__init__(error_text)
         self.error_text = str(error_text or "").strip()
         self.usage = dict(usage or {})
         self.request_artifacts = list(request_artifacts or [])
+        self.discard_reason = str(discard_reason or "provider_error").strip()
 
 
 class _MemorySqliteRepository:
@@ -2997,11 +3008,14 @@ class MemoryManager:
         usage_total: dict[str, int],
         request_artifacts: list[dict[str, Any]],
     ) -> None:
-        """记忆车道不切块：估算请求超过单块容量就带真实原因失败，不逐轮撞同一个 400。
+        """记忆车道不切块：估算请求超过容量就带真实原因失败，不逐轮撞同一个 400。
 
-        容量与节点/会话车道同一个函数推导（窗口 − 信封 − 输出余量，再用该批次已
-        观测到的输入+输出跨度夹一刀）。记忆批次是一条大 user prompt，没有可分块的
-        历史，所以超限即止，由上层停车等成功信号或人工重试。
+        容量只取 声明窗口 − 输出余量（与节点/会话车道同一个函数推导），**不**套
+        它们那道"实测跨度 × 0.9"夹刀：记忆批次是 append-only 的多轮循环，下一轮必然
+        把上一轮的 prompt、模型输出和工具结果一起重发，估算恒大于此前任何一轮的真实
+        跨度，夹刀等于让每一批都死在第 2 轮。窗口声明虚高时由 provider 的回包判——
+        那条路径仍按 `provider_error` 停车。超限即止，拒发按 `window_refusal` 停车，
+        是确定性失败，不参与成功信号自动重排。
         """
         refs = [str(item or "").strip() for item in list(model_chain or []) if str(item or "").strip()]
         if not refs:
@@ -3021,21 +3035,20 @@ class MemoryManager:
             ) or 0)
         except Exception:
             return
-        observed = int(usage_total.get("input_tokens") or 0) + int(usage_total.get("output_tokens") or 0)
         capacity, _source = resolve_chunk_capacity(
             context_window_tokens=window,
             envelope_tokens=0,
-            observed_span_tokens=observed,
         )
         if capacity > 0 and estimated <= capacity:
             return
         raise _MemoryProviderError(
             (
                 "memory send exceeds model window: "
-                f"估算={estimated} 容量={capacity} 窗口={window} 观测跨度={observed}"
+                f"估算={estimated} 容量={capacity} 窗口={window}"
             ),
             usage=dict(usage_total),
             request_artifacts=list(request_artifacts),
+            discard_reason="window_refusal",
         )
 
     def _memory_request_messages(self, messages: list[Any]) -> list[dict[str, Any]]:
@@ -4114,6 +4127,8 @@ class MemoryManager:
             except _MemoryProviderError as exc:
                 # Provider 层失败不做批内修复重试（几秒内的连续尝试只会撞同一个
                 # 限流/故障窗口），直接带真实错误返回，由上层停车等待成功信号或人工重试。
+                # 本地发送前预检拒发（window_refusal）同样不做批内重试：载荷不变则
+                # 重算必然得到同一个估算，而尺子是整条链上最小的那颗窗口。
                 self._merge_usage(total_usage, dict(exc.usage or {}))
                 request_artifacts.extend(list(exc.request_artifacts or []))
                 return {
@@ -4121,7 +4136,7 @@ class MemoryManager:
                     "usage": total_usage,
                     "attempt_count": attempt_index + 1,
                     "assessed_text": None,
-                    "discard_reason": "provider_error",
+                    "discard_reason": exc.discard_reason,
                     "error": exc.error_text,
                     "model_chain": list(current_model_chain),
                     "provider_request_ids": self._provider_request_ids_from_artifacts(request_artifacts),
@@ -4273,9 +4288,15 @@ class MemoryManager:
                 # 处理失败不再写 durable discarded 终态并删行（数据永久丢失），
                 # 而是移入失败停车区 memory/failed.jsonl：
                 # - provider_error（限流/超时等瞬时错误）→ 队列下次成功应用时自动重入队尾
+                # - window_refusal（本地发送前预检拒发）→ 确定性失败，仅人工重试
                 # - rejected（模型真实响应但违反协议）→ 仅人工确认重试
                 # 终态记录推迟到操作员显式放弃（discard）时才写入 ops.jsonl。
-                category = "provider_error" if discard_reason == "provider_error" else "protocol"
+                if discard_reason == "provider_error":
+                    category = "provider_error"
+                elif discard_reason == "window_refusal":
+                    category = "window_refusal"
+                else:
+                    category = "protocol"
                 failed_record = self._park_failed_batch(
                     batch,
                     category=category,
@@ -4353,6 +4374,9 @@ class MemoryManager:
     # - category=provider_error：限流/超时/上游错误等瞬时失败。队列每次成功
     #   应用新批次时（成功信号），自动把停车区里最早的一条重新入队尾；没有
     #   成功信号则一直停车，不产生任何自动重试成本，也不设次数上限。
+    # - category=window_refusal：本地发送前预检拒发（载荷估算超过链上最小窗口容量）。
+    #   载荷不变则重算必然同一个数，属确定性失败，不参与成功信号自动重排，只接受
+    #   人工重试（换模型窗口声明或批内载荷变小之后才有意义）。
     # - category=protocol：模型真实响应但违反 memory_apply_batch 协议（批内
     #   已做过修复重试），只接受人工确认重试。
     # 只有操作员显式放弃（discard）时才写入 ops.jsonl 终态记录，request_id

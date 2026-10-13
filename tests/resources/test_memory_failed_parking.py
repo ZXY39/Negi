@@ -384,6 +384,75 @@ async def test_protocol_failure_is_not_requeued_by_success_signal(tmp_path: Path
 
 
 @pytest.mark.asyncio
+async def test_window_refusal_parks_as_its_own_category_and_is_not_requeued(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    """本地发送前预检拒发不是 provider 瞬时错误：一次调用都不发，也不靠成功信号重排。"""
+    module = _load_memory_agent_runtime_module()
+    manager = module.MemoryManager(tmp_path, _memory_cfg())
+    try:
+        await manager._append_queue_request(
+            module.MemoryQueueRequest(
+                op="write",
+                decision_source="user",
+                payload_text="Memory batch larger than the model window",
+                created_at="2026-04-18T10:00:00+08:00",
+                request_id="write_oversize",
+            )
+        )
+        # 闸门在 model.chat 之前：fake 没有可用响应，真发了就是回归
+        fake_model = _FakeToolCallingModel([])
+        _wire_runtime(module, manager, tmp_path, monkeypatch, fake_model)
+        monkeypatch.setattr(
+            module,
+            "resolve_send_model_context_window_info",
+            lambda **_: SimpleNamespace(context_window_tokens=390000),
+            raising=False,
+        )
+        monkeypatch.setattr(
+            module, "estimate_runtime_provider_request_preview_tokens", lambda **_: 500000, raising=False
+        )
+
+        parked = await manager.run_due_batch_once(now_iso="2026-04-18T10:00:05+08:00")
+        assert parked["status"] == "parked"
+        assert parked["discard_reason"] == "window_refusal"
+        assert parked["category"] == "window_refusal"
+        failed = _read_jsonl(tmp_path / "memory" / "failed.jsonl")
+        assert len(failed) == 1
+        assert failed[0]["category"] == "window_refusal"
+        assert "容量=366000" in failed[0]["last_error_text"]
+        assert failed[0]["usage_total"]["input_tokens"] == 0
+
+        # 后续批次成功 → 超窗拒发记录不参与自动重排（载荷不变则重算必然同一个估算）
+        await manager._append_queue_request(
+            module.MemoryQueueRequest(
+                op="write",
+                decision_source="user",
+                payload_text="Normal memory succeeds",
+                created_at="2026-04-18T10:01:00+08:00",
+                request_id="write_normal",
+            )
+        )
+        monkeypatch.setattr(
+            module, "estimate_runtime_provider_request_preview_tokens", lambda **_: 1000, raising=False
+        )
+        fake_model._responses = [
+            _apply_batch_response("Normal memory succeeds", "normal->succeeds"),
+            _fake_response(content="done", usage={"input_tokens": 1, "output_tokens": 1, "cache_read_tokens": 0}),
+        ]
+        applied = await manager.run_due_batch_once(now_iso="2026-04-18T10:01:05+08:00")
+        assert applied["status"] == "applied"
+        assert "requeued_failed_id" not in applied
+        failed = _read_jsonl(tmp_path / "memory" / "failed.jsonl")
+        assert len(failed) == 1
+        assert failed[0]["status"] == "parked"
+        assert failed[0]["auto_requeue_count"] == 0
+    finally:
+        manager.close()
+
+
+@pytest.mark.asyncio
 async def test_auto_requeue_on_success_can_be_disabled(tmp_path: Path, monkeypatch) -> None:
     module = _load_memory_agent_runtime_module()
     cfg = _memory_cfg()

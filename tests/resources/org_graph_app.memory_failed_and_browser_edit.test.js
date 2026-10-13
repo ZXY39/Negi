@@ -217,6 +217,21 @@ test("protocol category card shows manual-only hint", () => {
     assert.doesNotMatch(html, /2 条/);
 });
 
+test("window refusal card shows its own category and a retry precondition hint", () => {
+    const api = loadApp();
+    api.S.memoryFailedMutationsEnabled = true;
+    const html = api.renderMemoryFailedCard({
+        ...FAILED_RECORD,
+        category: "window_refusal",
+        request_ids: ["write_1"],
+        items: [FAILED_RECORD.items[0]],
+        last_error_text: "memory send exceeds model window: 估算=527077 容量=366000 窗口=390000",
+    });
+    assert.match(html, /超窗拒发/);
+    assert.doesNotMatch(html, /provider 瞬时错误/);
+    assert.match(html, /载荷变小或模型窗口调大后手动重试/);
+});
+
 test("error history text renders failures and requeue events in order", () => {
     const api = loadApp();
     const text = api.memoryFailedErrorHistoryText(FAILED_RECORD);
