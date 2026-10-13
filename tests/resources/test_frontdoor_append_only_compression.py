@@ -271,3 +271,36 @@ def test_iter_compaction_atomic_groups_keeps_tool_call_runs_indivisible() -> Non
     assert [len(group) for group in groups] == [1, 3, 1, 1]
     assert groups[1][0]["role"] == "assistant"
     assert [item.get("role") for item in groups[1]] == ["assistant", "tool", "tool"]
+
+
+@pytest.mark.asyncio
+async def test_frontdoor_compression_aborts_and_keeps_body_when_helper_yields_no_summary(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """helper 没拿到摘要就放弃这一 pass：原请求体照发，绝不拿空产物去替换历史。"""
+    runner = _build_runner(monkeypatch)
+
+    async def _empty(*_args, **_kwargs):
+        return {"content": "", "error_text": "upstream returned empty"}
+
+    monkeypatch.setattr(runner, "_call_model_with_tools", _empty)
+    monkeypatch.setattr(
+        runner,
+        "_estimate_frontdoor_send_total_tokens",
+        lambda **kwargs: 10_000,
+        raising=False,
+    )
+    original = _request_messages()
+
+    result = await runner._run_frontdoor_llm_token_compression(
+        state={"session_key": "web:shared", "prompt_cache_key": ""},
+        runtime=_build_runtime(),
+        request_messages=[dict(item) for item in original],
+        model_refs=["ceo_primary"],
+        tool_schemas=[],
+    )
+
+    assert result.diagnostics.get("applied") is False, result.diagnostics
+    assert [dict(item) for item in result.request_messages] == original
+    assert result.history_shrink_reason == ""
+    assert "no summary" in str(result.diagnostics.get("compression_pass_failed") or "")
