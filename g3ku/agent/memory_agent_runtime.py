@@ -4128,7 +4128,8 @@ class MemoryManager:
                 # Provider 层失败不做批内修复重试（几秒内的连续尝试只会撞同一个
                 # 限流/故障窗口），直接带真实错误返回，由上层停车等待成功信号或人工重试。
                 # 本地发送前预检拒发（window_refusal）同样不做批内重试：载荷不变则
-                # 重算必然得到同一个估算，而尺子是整条链上最小的那颗窗口。
+                # 重算必然得到同一个估算，而尺子读的是这一发落到的那颗模型（记忆车道
+                # 没有组预测，取链首那颗的声明窗口）。
                 self._merge_usage(total_usage, dict(exc.usage or {}))
                 request_artifacts.extend(list(exc.request_artifacts or []))
                 return {
@@ -4374,7 +4375,8 @@ class MemoryManager:
     # - category=provider_error：限流/超时/上游错误等瞬时失败。队列每次成功
     #   应用新批次时（成功信号），自动把停车区里最早的一条重新入队尾；没有
     #   成功信号则一直停车，不产生任何自动重试成本，也不设次数上限。
-    # - category=window_refusal：本地发送前预检拒发（载荷估算超过链上最小窗口容量）。
+    # - category=window_refusal：本地发送前预检拒发（载荷估算超过这一发落点模型的
+    #   容量＝其声明窗口 − 输出余量）。
     #   载荷不变则重算必然同一个数，属确定性失败，不参与成功信号自动重排，只接受
     #   人工重试（换模型窗口声明或批内载荷变小之后才有意义）。
     # - category=protocol：模型真实响应但违反 memory_apply_batch 协议（批内
