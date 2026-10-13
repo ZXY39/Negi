@@ -3,6 +3,7 @@ from __future__ import annotations
 import importlib
 import importlib.util
 import json
+import re
 import sqlite3
 from pathlib import Path
 from types import SimpleNamespace
@@ -3430,5 +3431,93 @@ async def test_queue_row_projects_payload_and_pages_from_the_live_row(tmp_path: 
 
         with pytest.raises(KeyError):
             await manager.get_payload_window("queue", "write_absent")
+    finally:
+        manager.close()
+def test_window_payload_split_packs_turns_and_preserves_stage_order() -> None:
+    """拆片只切"带多少个阶段"，不切内容：回合头尾每片都带，顺序与总数守恒。"""
+    module = _load_memory_agent_runtime_module()
+    manager = module.MemoryManager  # 拆片是无状态类方法，不需要实例
+    big = json.dumps(
+        {"stages": [{"stage_id": f"s{i}", "completed_stage_summary": "x" * 4000} for i in range(8)]},
+        ensure_ascii=False,
+        indent=2,
+    )
+    turn_one = f"[turn_id] t1\nuser_messages:\n- 第一条\nstages:\n{big}\nassistant_text:\n回答一"
+    turn_two = "[turn_id] t2\nuser_messages:\n- 第二条\nstages:\n{\"stages\": []}\nassistant_text:\n回答二"
+    payload = "[session_key] web:ceo-1\n\n## 窗口回合 1\n" + turn_one + "\n\n## 窗口回合 2\n" + turn_two
+
+    pieces = manager._split_window_payload(payload, max_tokens=2000)
+
+    assert len(pieces) > 1, "超容量的窗口必须被拆开"
+    for piece in pieces:
+        assert piece.startswith("[session_key] web:ceo-1"), "每片都要自描述会话归属"
+        assert module.estimate_tokens(piece) <= 2000, f"单片仍超目标: {module.estimate_tokens(piece)}"
+    ids = [m for piece in pieces for m in re.findall(r'"stage_id": "s(\d+)"', piece)]
+    assert ids == [str(i) for i in range(8)], f"阶段必须按原顺序全数保留: {ids}"
+    assert "第二条" in pieces[-1], "第二个回合的正文必须留在某一片里（小回合跟着尾片）"
+
+    # 不超容量 / 拿不到目标 / 阶段 JSON 解析不了：三种情况都必须原样一条，交回既有闸门处置。
+    assert manager._split_window_payload(payload, max_tokens=999_999) == [payload]
+    assert manager._split_window_payload(payload, max_tokens=0) == [payload]
+    broken = "[session_key] s\n\n## 窗口回合 1\n[turn_id] t\nstages:\n{坏掉的 json"
+    assert manager._split_window_payload(broken, max_tokens=10) == [broken]
+
+
+@pytest.mark.asyncio
+async def test_flush_review_window_splits_oversized_window_into_queue_rows(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """入队侧拆片后的每一片都能过发送闸门——整批停在停车区那种结局不再发生。"""
+    module = _load_memory_agent_runtime_module()
+    manager = module.MemoryManager(tmp_path, _memory_cfg())
+    try:
+        monkeypatch.setattr(manager, "_memory_window_split_target_tokens", lambda: 2000)
+        monkeypatch.setattr(
+            module,
+            "resolve_send_model_context_window_info",
+            lambda **_: SimpleNamespace(context_window_tokens=4000),
+        )
+        canonical = {
+            "stages": [
+                {
+                    "stage_id": f"s{i}",
+                    "stage_goal": f"目标{i}",
+                    "completed_stage_summary": "y" * 4000,
+                }
+                for i in range(8)
+            ]
+        }
+        await manager.record_turn_for_review(
+            session_key="web:split",
+            turn_id="turn-1",
+            user_messages=["把这条长任务的阶段都记下来"],
+            assistant_text="已完成",
+            compression_summary={"status": ""},
+            canonical_summary=canonical,
+        )
+
+        result = await manager.flush_review_window(session_key="web:split", trigger_source="token_compression")
+        queue_items = await manager.list_queue(limit=20)
+
+        assert result["status"] == "queued"
+        assert result["split_parts"] == len(queue_items) > 1
+        assert result["request_id"] == result["request_ids"][0]
+        assert len({row["request_id"] for row in queue_items}) == len(queue_items), "每片必须是独立幂等键"
+        collected: list[str] = []
+        for row in queue_items:
+            body = str(row["payload_text"] or "")
+            assert module.estimate_tokens(body) <= 2000
+            collected.extend(re.findall(r'"stage_id": "s(\d+)"', body))
+            # 拆完之后每片都要过闸门（窗口 4000 → 容量 3000）
+            manager._memory_window_guard(
+                runtime_config=SimpleNamespace(),
+                model_chain=["memory-primary"],
+                request_messages=[{"role": "user", "content": body}],
+                tool_schemas=[],
+                usage_total={"input_tokens": 0, "output_tokens": 0, "cache_read_tokens": 0},
+                request_artifacts=[],
+            )
+        assert sorted(collected) == [str(i) for i in range(8)], f"阶段不许丢: {sorted(collected)}"
     finally:
         manager.close()

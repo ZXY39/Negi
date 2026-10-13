@@ -32,6 +32,7 @@ from g3ku.config.live_runtime import get_runtime_config
 from g3ku.providers.base import normalize_usage_payload
 from g3ku.providers.chatmodels import build_chat_model
 from g3ku.runtime.chunk_compression_plan import resolve_chunk_capacity
+from g3ku.runtime.context.summarizer import estimate_tokens
 from main.runtime.chat_backend import build_actual_request_diagnostics, resolve_send_model_context_window_info
 from main.runtime.send_token_preflight import estimate_runtime_provider_request_preview_tokens
 from main.prompts import load_prompt
@@ -40,6 +41,9 @@ _NOTE_REF_RE = re.compile(r"(?:\bref:|见noteid:)(?P<ref>[a-z0-9_]+)\b")
 _REVIEW_TOOL_OUTPUT_MAX_CHARS = 400
 _REVIEW_TOOL_PREVIEW_MAX_CHARS = 240
 _REVIEW_REPORTED_TOOL_ID_CAP = 5000
+# 复核窗口入队前的拆片目标：链上最小声明窗口 × 这个比例（不写死绝对 token 数，
+# 换模型或改窗口声明都自动跟着走）。
+_MEMORY_WINDOW_SPLIT_RATIO = 0.5
 _STAGED_DOCUMENT_UNSET = object()
 # 记忆三类读面（队列 / 已处理批次 / 失败停车区）共用的载荷窗口，字符寻址，与
 # g3ku/content/navigation 的 char 模式同词汇。存储不动：三份文件里仍是完整载荷，
@@ -3308,6 +3312,7 @@ class MemoryManager:
             }
             arguments_text = str(record.get("arguments_text") or "").strip()
             if arguments_text:
+                # 入参长度由写入侧统一限（canonical_context 的 4000 字），这里不再二次截断。
                 entry["args"] = arguments_text
             preview_text = MemoryManager._inline_preview_text(
                 record.get("output_preview_text"),
@@ -3451,6 +3456,163 @@ class MemoryManager:
             parts.append(assistant)
         return "\n".join(str(item) for item in parts if str(item).strip()).strip()
 
+    @staticmethod
+    def _window_turn_sections(section: str, *, max_tokens: int) -> list[str]:
+        """单个窗口回合超容量时按 stage 边界切；stage 是不可分原子组，永不腰斩。
+
+        回合头（turn_id、user_messages）和回合尾（assistant_text）每片都完整带上：
+        拆的是"带多少个阶段"，不是"少带这一轮说了什么"。
+        """
+
+        value = str(section or "")
+        marker = "\nstages:\n"
+        head_end = value.find(marker)
+        if head_end < 0:
+            return [value]
+        head = value[:head_end]
+        body_start = head_end + len(marker)
+        try:
+            data, consumed = json.JSONDecoder().raw_decode(value[body_start:])
+        except ValueError:
+            return [value]
+        tail = value[body_start + consumed:]
+        stages = data.get("stages") if isinstance(data, dict) else None
+        if not isinstance(stages, list) or len(stages) < 2:
+            return [value]
+        active_stage_id = data.get("active_stage_id") if isinstance(data, dict) else None
+
+        def _render(group: list[Any]) -> str:
+            payload: dict[str, Any] = {"stages": group}
+            if active_stage_id:
+                payload["active_stage_id"] = active_stage_id
+            return f"{head}{marker}{json.dumps(payload, ensure_ascii=False, indent=2)}{tail}"
+
+        if estimate_tokens(_render(stages)) <= max_tokens:
+            return [value]
+        sections: list[str] = []
+        group: list[Any] = []
+        for stage in stages:
+            candidate = group + [stage]
+            if group and estimate_tokens(_render(candidate)) > max_tokens:
+                sections.append(_render(group))
+                group = [stage]
+            else:
+                group = candidate
+        if group:
+            sections.append(_render(group))
+        return sections or [value]
+
+    @classmethod
+    def _split_window_payload(cls, payload_text: str, *, max_tokens: int) -> list[str]:
+        """复核窗口的拆片：先按窗口回合装箱，单回合仍超则按 stage 边界再切。
+
+        目标不是少带内容（工具明细按既有合同继续全带），而是让每一片都落在发送闸门
+        之内——超容量的整批只会停在停车区等人工，那条路上没有自动出口。
+        单片仍超（一个 stage 就装不下）时照原样发出，由闸门按真实原因拒。
+        """
+
+        value = str(payload_text or "").strip()
+        if not value or max_tokens <= 0 or estimate_tokens(value) <= max_tokens:
+            return [value] if value else []
+        header, _, rest = value.partition("\n\n")
+        if not header.startswith("[session_key]"):
+            return [value]
+        turns = [part.strip() for part in re.split(r"\n\n(?=## 窗口回合 )", rest) if part.strip()]
+        if not turns:
+            return [value]
+        header_tokens = estimate_tokens(header)
+        pieces: list[str] = []
+        bucket: list[str] = []
+        used_tokens = 0
+
+        def flush() -> None:
+            nonlocal used_tokens
+            if not bucket:
+                return
+            pieces.append("\n\n".join([header, *bucket]).strip())
+            bucket.clear()
+            used_tokens = 0
+
+        def emit(section: str) -> None:
+            nonlocal used_tokens
+            section_tokens = estimate_tokens(section)
+            if bucket and used_tokens + section_tokens > max(1, max_tokens - header_tokens):
+                flush()
+            bucket.append(section)
+            used_tokens += section_tokens
+
+        for section in turns:
+            if header_tokens + estimate_tokens(section) > max_tokens:
+                flush()
+                for sub in cls._window_turn_sections(section, max_tokens=max(1, max_tokens - header_tokens)):
+                    emit(sub)
+                continue
+            emit(section)
+        flush()
+        return pieces or [value]
+
+    def _memory_window_split_target_tokens(self) -> int:
+        """拆片目标 = 记忆链上**最小**声明窗口 × `_MEMORY_WINDOW_SPLIT_RATIO`。
+
+        发送闸门按"这一发落到的那颗模型"的窗口算容量，而批次真正发出时落点可能已经
+        前进过链位，所以这里取整条链最小的一半：任何一次链前进都还在容量内，
+        而不是赌它一定落在链首。拿不到配置就返回 0，表示不拆（闸门那条路照常）。
+        """
+
+        try:
+            runtime_config, _revision, _changed = get_runtime_config()
+        except Exception:
+            return 0
+        windows: list[int] = []
+        for ref in list(self._memory_model_chain(runtime_config) or []):
+            try:
+                info = resolve_send_model_context_window_info(config=runtime_config, model_refs=[ref])
+            except Exception:
+                continue
+            value = int(getattr(info, "context_window_tokens", 0) or 0)
+            if value > 0:
+                windows.append(value)
+        if not windows:
+            return 0
+        return int(min(windows) * _MEMORY_WINDOW_SPLIT_RATIO)
+
+    async def _enqueue_review_window_requests(
+        self,
+        *,
+        session_key: str,
+        payload_text: str,
+        decision_source: str,
+        trigger_source: str,
+    ) -> list[MemoryQueueRequest]:
+        """复核窗口入队的唯一出口：超容量就拆成多条 pending 行，逐条消化。"""
+
+        max_tokens = self._memory_window_split_target_tokens()
+        requests: list[MemoryQueueRequest] = []
+        for piece in self._split_window_payload(payload_text, max_tokens=max_tokens):
+            if not str(piece or "").strip():
+                continue
+            requests.append(
+                MemoryQueueRequest(
+                    op="write",
+                    decision_source=decision_source,
+                    payload_text=piece,
+                    created_at=self._now_iso(),
+                    request_id=self._request_id("write"),
+                    session_key=str(session_key or "").strip(),
+                    trigger_source=trigger_source,
+                )
+            )
+        for request in requests:
+            await self._append_queue_request(request)
+        if len(requests) > 1:
+            logger.info(
+                "复核窗口超单片容量，按 {} 片分别入队：session={} 目标={} tok",
+                len(requests),
+                str(session_key or "").strip(),
+                max_tokens,
+            )
+        return requests
+
     async def record_turn_for_review(
         self,
         *,
@@ -3527,26 +3689,24 @@ class MemoryManager:
                 "pending_turn_count": len(pending_turns),
             }
         payload = self._review_window_payload(session_key=normalized_session, pending_turns=pending_turns)
-        request = MemoryQueueRequest(
-            op="write",
-            decision_source="self",
-            payload_text=payload,
-            created_at=self._now_iso(),
-            request_id=self._request_id("write"),
-            session_key=normalized_session,
-            trigger_source="ordinary_turn_window",
-        )
         sessions[normalized_session] = {
             "pending_turns": [],
             "stage_versions": next_stage_versions,
             "reported_tool_keys": next_reported_tool_keys,
         }
         self._write_review_state({"sessions": sessions})
-        await self._append_queue_request(request)
+        requests = await self._enqueue_review_window_requests(
+            session_key=normalized_session,
+            payload_text=payload,
+            decision_source="self",
+            trigger_source="ordinary_turn_window",
+        )
         return {
             "ok": True,
             "status": "queued",
-            "request_id": request.request_id,
+            "request_id": str(requests[0].request_id if requests else ""),
+            "request_ids": [request.request_id for request in requests],
+            "split_parts": len(requests),
             "pending_turn_count": 0,
         }
 
@@ -3573,15 +3733,6 @@ class MemoryManager:
         if not pending_turns:
             return {"ok": True, "status": "idle", "reason": "no_pending_turns"}
         payload = self._review_window_payload(session_key=normalized_session, pending_turns=pending_turns)
-        request = MemoryQueueRequest(
-            op="write",
-            decision_source="self",
-            payload_text=payload,
-            created_at=self._now_iso(),
-            request_id=self._request_id("write"),
-            session_key=normalized_session,
-            trigger_source=normalized_trigger,
-        )
         sessions[normalized_session] = {
             "pending_turns": [],
             "stage_versions": {
@@ -3596,11 +3747,18 @@ class MemoryManager:
             ][-_REVIEW_REPORTED_TOOL_ID_CAP:],
         }
         self._write_review_state({"sessions": sessions})
-        await self._append_queue_request(request)
+        requests = await self._enqueue_review_window_requests(
+            session_key=normalized_session,
+            payload_text=payload,
+            decision_source="self",
+            trigger_source=normalized_trigger,
+        )
         return {
             "ok": True,
             "status": "queued",
-            "request_id": request.request_id,
+            "request_id": str(requests[0].request_id if requests else ""),
+            "request_ids": [request.request_id for request in requests],
+            "split_parts": len(requests),
             "pending_turn_count": 0,
         }
 
