@@ -65,6 +65,13 @@ def build_memory_app(console) -> typer.Typer:
         else:
             console.print("- Orphan notes: none")
 
+        broken_categories = list(report.get("broken_category_links") or [])
+        if broken_categories:
+            console.print(
+                f"- Retired memories pointing at missing category notes: "
+                f"{', '.join(str(item) for item in broken_categories)}"
+            )
+
         queue_parse_errors = list(report.get("queue_parse_errors") or [])
         if queue_parse_errors:
             console.print(f"- Queue parse errors: {len(queue_parse_errors)} issue(s) in queue.jsonl")

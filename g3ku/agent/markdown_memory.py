@@ -98,3 +98,42 @@ def note_file_name(ref: str) -> str:
     if not normalized:
         raise ValueError("note ref is required")
     return f"{normalized}.md"
+
+
+# 归并区：记忆退场后留在文档里的分类导航。字节由渲染层从库里派生，模型不写这一段的
+# 形状；它的存在只为让常驻块里的每条退场记忆还能被找到。措辞一次定稿就不再改：这段
+# 注入在 message index 1，改一个字节等于顶掉身后整段历史的 prompt cache。
+CONSOLIDATION_HEADING = "## 归并记忆"
+CONSOLIDATION_REMINDER = (
+    "note 是过去沉淀的经验，需要参考。冲突时以长期记忆为准，其次 note 正文，本节描述只作导航。"
+)
+
+
+def render_consolidation_block(rows: list[tuple[str, str]]) -> str:
+    """Render the consolidation block from (scope_line, note_ref) pairs, in given order."""
+    items = [
+        (str(scope_line or "").strip(), str(note_ref or "").strip())
+        for scope_line, note_ref in list(rows or [])
+        if str(scope_line or "").strip() and str(note_ref or "").strip()
+    ]
+    if not items:
+        return ""
+    lines = [CONSOLIDATION_HEADING, CONSOLIDATION_REMINDER]
+    lines.extend(f"- {scope_line} (note: {note_ref})" for scope_line, note_ref in items)
+    return "\n".join(lines) + "\n"
+
+
+def split_consolidation_block(text: str) -> tuple[str, str]:
+    """Split a managed document into its memory entries and the trailing block.
+
+    The marker is written by the renderer at a known position, so this is a positional
+    read of our own structure - nothing here parses model-authored text.
+    """
+    normalized = str(text or "")
+    marker = f"\n{CONSOLIDATION_HEADING}\n"
+    index = normalized.find(marker)
+    if index < 0:
+        if normalized.startswith(f"{CONSOLIDATION_HEADING}\n"):
+            return "", normalized
+        return normalized, ""
+    return normalized[: index + 1], normalized[index + 1 :]

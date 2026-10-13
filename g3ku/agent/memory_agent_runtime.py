@@ -26,6 +26,8 @@ from g3ku.agent.markdown_memory import (
     format_memory_entry,
     note_file_name,
     parse_memory_document,
+    render_consolidation_block,
+    split_consolidation_block,
     validate_memory_document,
 )
 from g3ku.agent.memory_content_guard import scan_memory_candidate
@@ -496,11 +498,15 @@ def _build_memory_tool(*, name: str, fn: Callable[..., Any]) -> _MemoryTool:
 class _MemoryToolSession:
     snapshot_text: str
     notes_dir: Path
+    index_dir: Path | None = None
     batch_op: str = ""
     staged_document: object = _STAGED_DOCUMENT_UNSET
     staged_notes: dict[str, str] = field(default_factory=dict)
     applied_batch: dict[str, Any] | None = None
     apply_batch_count: int = 0
+
+    def note_directories(self) -> list[Path]:
+        return [self.index_dir, self.notes_dir] if self.index_dir is not None else [self.notes_dir]
 
     def read_document(self) -> str:
         if self.staged_document is _STAGED_DOCUMENT_UNSET:
@@ -513,10 +519,14 @@ class _MemoryToolSession:
             raise ValueError("note ref is required")
         if normalized in self.staged_notes:
             return self.staged_notes[normalized]
-        path = self.notes_dir / note_file_name(normalized)
-        if not path.exists():
-            raise FileNotFoundError(f"memory note not found: {normalized}")
-        return path.read_text(encoding="utf-8")
+        note_file_name(normalized)
+        # Category notes live in their own directory and are readable from the ordinary
+        # lane: a stale category description is fixed here, only retiring happens elsewhere.
+        for directory in self.note_directories():
+            path = directory / note_file_name(normalized)
+            if path.exists():
+                return path.read_text(encoding="utf-8")
+        raise FileNotFoundError(f"memory note not found: {normalized}")
 
     def write_document(self, content: str) -> str:
         self.staged_document = str(content or "")
@@ -717,6 +727,153 @@ class _MemoryToolSession:
 
 
 @dataclass(slots=True)
+class _ConsolidationToolSession:
+    """Staging surface of the consolidation lane.
+
+    Category notes live in their own directory, so this session can read both but only
+    ever writes `index_dir`; the ordinary lane's notes stay out of its reach.
+    """
+
+    notes_dir: Path
+    index_dir: Path
+    category_names: list[str] = field(default_factory=list)
+    applied_batch: dict[str, Any] | None = None
+    apply_count: int = 0
+
+    def read_note(self, ref: str) -> str:
+        normalized = str(ref or "").strip()
+        if not normalized:
+            raise ValueError("note ref is required")
+        note_file_name(normalized)
+        for directory in (self.index_dir, self.notes_dir):
+            path = directory / note_file_name(normalized)
+            if path.exists():
+                return path.read_text(encoding="utf-8")
+        raise FileNotFoundError(f"memory note not found: {normalized}")
+
+    def apply_batch(
+        self,
+        *,
+        note_writes: list[dict[str, Any]] | None = None,
+        retirements: list[dict[str, Any]] | None = None,
+        no_consolidation_reason: str | None = None,
+    ) -> dict[str, Any]:
+        errors: dict[str, str] = {}
+        normalized_writes: list[dict[str, Any]] = []
+        seen_refs: set[str] = set()
+
+        raw_writes = list(note_writes or [])
+        if not isinstance(raw_writes, list):
+            errors["note_writes"] = "note_writes must be a list"
+        else:
+            for index, raw in enumerate(raw_writes):
+                if not isinstance(raw, dict):
+                    errors[f"note_writes[{index}]"] = "note write must be an object with note_ref and body or edits"
+                    continue
+                ref = str(raw.get("note_ref") or "").strip()
+                try:
+                    note_file_name(ref)
+                except Exception as exc:
+                    errors[f"note_writes[{index}]"] = str(exc or "invalid note ref").strip()
+                    continue
+                if not ref.startswith("note_"):
+                    errors[f"note_writes[{index}]"] = "category note ref must start with note_"
+                    continue
+                if ref in seen_refs:
+                    errors[f"note_writes[{index}]"] = f"duplicate category note ref: {ref}"
+                    continue
+                body = raw.get("body")
+                edits = raw.get("edits")
+                if body is None and not edits:
+                    errors[f"note_writes[{index}]"] = "category note write needs body or edits"
+                    continue
+                normalized_edits: list[dict[str, str]] = []
+                if edits is not None:
+                    if not isinstance(edits, list):
+                        errors[f"note_writes[{index}].edits"] = "edits must be a list of {old_text, new_text}"
+                        continue
+                    for op_index, raw_op in enumerate(edits):
+                        if not isinstance(raw_op, dict):
+                            errors[f"note_writes[{index}].edits[{op_index}]"] = "each edit must be an object"
+                            continue
+                        old_text = str(raw_op.get("old_text") or "")
+                        new_text = str(raw_op.get("new_text") or "")
+                        if not old_text.strip():
+                            errors[f"note_writes[{index}].edits[{op_index}]"] = "old_text must not be empty"
+                            continue
+                        normalized_edits.append({"old_text": old_text, "new_text": new_text})
+                seen_refs.add(ref)
+                normalized_writes.append(
+                    {
+                        "note_ref": ref,
+                        "body": str(body) if body is not None else None,
+                        "edits": normalized_edits,
+                    }
+                )
+
+        normalized_retire: list[dict[str, str]] = []
+        raw_retire = list(retirements or [])
+        if not isinstance(raw_retire, list):
+            errors["retirements"] = "retirements must be a list"
+        else:
+            seen_retire_ids: set[str] = set()
+            for index, raw in enumerate(raw_retire):
+                if not isinstance(raw, dict):
+                    errors[f"retirements[{index}]"] = "retirement must be an object with memory_id and note_ref"
+                    continue
+                memory_id = str(raw.get("memory_id") or "").strip()
+                category = str(raw.get("note_ref") or "").strip()
+                if not memory_id:
+                    errors[f"retirements[{index}]"] = "memory_id must not be empty"
+                    continue
+                if memory_id in seen_retire_ids:
+                    continue
+                if not category:
+                    errors[f"retirements[{index}]"] = "each retired memory must name the category note it lands in"
+                    continue
+                seen_retire_ids.add(memory_id)
+                normalized_retire.append({"memory_id": memory_id, "note_ref": category})
+
+        normalized_reason = str(no_consolidation_reason or "").strip()
+        has_mutation = bool(normalized_writes or normalized_retire)
+        if normalized_reason and has_mutation:
+            errors["no_consolidation_reason"] = (
+                "no_consolidation_reason may not be combined with note writes or retirements"
+            )
+        if not normalized_reason and not has_mutation:
+            errors["batch"] = "at least one category note write plus retirements, or a no_consolidation_reason, is required"
+        # Bidirectional discipline: a category that gets written must actually receive
+        # something, and everything retired must name a category this batch wrote or an
+        # existing one. One-directional checks let a batch create an empty category whose
+        # index line then describes nothing.
+        if normalized_retire and not normalized_writes:
+            errors["retirements"] = "retiring memories requires a category note write"
+        written_refs = {str(item.get("note_ref") or "") for item in normalized_writes}
+        for item in normalized_retire:
+            if item["note_ref"] in written_refs:
+                continue
+            if not (self.index_dir / note_file_name(item["note_ref"])).exists():
+                errors[f"retirements.{item['memory_id']}"] = (
+                    f"category note {item['note_ref']} is neither written this batch nor existing"
+                )
+        if not normalized_retire:
+            for write in normalized_writes:
+                if write.get("body") is not None:
+                    errors[f"note_writes.{write.get('note_ref')}"] = "a category note write needs a retired memory to land in it"
+
+        if errors:
+            return {"ok": False, "errors": errors}
+
+        self.apply_count += 1
+        self.applied_batch = {
+            "note_writes": normalized_writes,
+            "retirements": normalized_retire,
+            "no_consolidation_reason": normalized_reason,
+        }
+        return {"ok": True, "status": "batch_staged"}
+
+
+@dataclass(slots=True)
 class _MemoryAttemptResult:
     session: _MemoryToolSession
     usage: dict[str, int]
@@ -746,6 +903,13 @@ class _MemoryValidatedWrite:
     reaped_notes: list[dict[str, Any]] = field(default_factory=list)
     # Only an explicit operator legacy import may load sqlite from a document.
     adopt_document: bool = False
+    # Consolidation lane: category notes to write and the rows that retire into them.
+    is_consolidation: bool = False
+    consolidation_writes: list[dict[str, Any]] = field(default_factory=list)
+    retirements: list[dict[str, str]] = field(default_factory=list)
+    # Post-commit trigger outcome: a consolidation batch queued at the queue head.
+    consolidation_requested: bool = False
+    consolidation_reason: str = ""
     noop_reason: str = ""
     already_satisfied: str = ""
     compression_triggered: bool = False
@@ -1273,6 +1437,34 @@ class _MemorySqliteRepository:
         finally:
             conn.close()
 
+    def mark_consolidated(self, memory_ids: list[str], *, category_ref: str, now_iso: str) -> list[str]:
+        """Point retired rows at their category note; the row itself stays.
+
+        Retiring is not deleting: the body has to remain for the mirror rebuild, for
+        audit, and for note ownership (`note_ref` keeps its note file alive).
+        """
+        target = str(category_ref or "").strip()
+        if not target:
+            return []
+        retired: list[str] = []
+        conn = self._connect()
+        try:
+            for memory_id in list(memory_ids or []):
+                normalized = str(memory_id or "").strip()
+                if not normalized:
+                    continue
+                cursor = conn.execute(
+                    "UPDATE memories SET consolidated_into = ?, updated_at = ? "
+                    "WHERE memory_id = ? AND consolidated_into = ''",
+                    (target, str(now_iso or ""), normalized),
+                )
+                if int(cursor.rowcount or 0) > 0:
+                    retired.append(normalized)
+            conn.commit()
+        finally:
+            conn.close()
+        return retired
+
     def update_memory(
         self,
         memory_id: str,
@@ -1343,6 +1535,10 @@ class MemoryManager:
         self.mem_dir = self.workspace / "memory"
         self.memory_file = self.workspace / str(config.document.memory_file)
         self.notes_dir = self.workspace / str(config.document.notes_dir)
+        # Category notes retired memories point at. A separate directory is what makes
+        # them permanent: the orphan sweep only globs notes_dir, and ownership of a
+        # category note is the `consolidated_into` column, not a `ref:` in the text.
+        self.index_dir = self.mem_dir / "index"
         self.queue_file = self.workspace / str(config.queue.queue_file)
         self.ops_file = self.workspace / str(config.queue.ops_file)
         self.failed_file = self.workspace / str(
@@ -1385,6 +1581,7 @@ class MemoryManager:
         self.request_artifacts_dir.mkdir(parents=True, exist_ok=True)
         self.mem_dir.mkdir(parents=True, exist_ok=True)
         self.notes_dir.mkdir(parents=True, exist_ok=True)
+        self.index_dir.mkdir(parents=True, exist_ok=True)
         if not self.memory_file.exists():
             self.memory_file.write_text("", encoding="utf-8")
         else:
@@ -1444,6 +1641,9 @@ class MemoryManager:
     def _document_text_from_sqlite_rows(self, rows: list[dict[str, Any]], *, now_iso: str | None = None) -> str:
         entries: list[MemoryEntry] = []
         for row in rows:
+            if str(row.get("consolidated_into") or "").strip():
+                # Retired: the row stays (body, ownership, audit), the resident block drops it.
+                continue
             updated_at = str(row.get("updated_at") or now_iso or self._now_iso())
             date_text = self._memory_date_text(updated_at)
             memory_body = str(row.get("memory_body") or "").strip()
@@ -1462,6 +1662,61 @@ class MemoryManager:
             )
         return self._normalize_document_text("".join(format_memory_entry(entry) for entry in entries))
 
+    def _consolidation_categories(self) -> tuple[list[tuple[str, str]], list[str]]:
+        """Derive the resident consolidation rows from the store.
+
+        One row per distinct `consolidated_into`, in first-appearance order, described by
+        that category note's first line. The directory is never enumerated: a category
+        whose retired rows are all gone later has to lose its line by itself.
+        Returns (rows, broken_refs) where a broken ref points at a missing note file.
+        """
+        ordered: list[str] = []
+        repo = getattr(self, "_memory_repo", None)
+        if repo is None:
+            return [], []
+        for row in repo.list_memories():
+            category = str(row.get("consolidated_into") or "").strip()
+            if category and category not in ordered:
+                ordered.append(category)
+        rows: list[tuple[str, str]] = []
+        broken: list[str] = []
+        for category in ordered:
+            path = self.index_dir / note_file_name(category)
+            if not path.exists():
+                broken.append(category)
+                continue
+            try:
+                body = path.read_text(encoding="utf-8")
+            except OSError:
+                broken.append(category)
+                continue
+            scope_line = next((line.strip() for line in body.splitlines() if line.strip()), "")
+            if not scope_line:
+                broken.append(category)
+                continue
+            rows.append((scope_line, category))
+        return rows, broken
+
+    def _consolidation_block_text(self) -> str:
+        rows, broken = self._consolidation_categories()
+        if broken:
+            logger.warning(
+                "memory consolidation rows point at missing category notes: {}",
+                ", ".join(broken),
+            )
+        return render_consolidation_block(rows)
+
+    def _resident_memory_chars(self) -> int:
+        """Length of the memory entries the trigger and the cap are measured against.
+
+        The consolidation block is permanent by design, so counting it would let the
+        trigger fire on bytes no batch can ever retire away.
+        """
+        repo = getattr(self, "_memory_repo", None)
+        if repo is None:
+            return len(split_consolidation_block(self.snapshot_text())[0])
+        return len(self._document_text_from_sqlite_rows(repo.list_memories()))
+
     def _reconcile_mirror_with_sqlite_locked(self, *, now_iso: str, at_boot: bool = False) -> str:
         """Align the mirror with sqlite. sqlite is the only authoritative store.
 
@@ -1478,7 +1733,11 @@ class MemoryManager:
         projection standing.
         """
         current_snapshot = self._normalize_document_text(self.snapshot_text())
-        sqlite_snapshot = self._document_text_from_sqlite_rows(self._memory_repo.list_memories(), now_iso=now_iso)
+        sqlite_snapshot = self._normalize_document_text(
+            self._managed_document_text(
+                self._document_text_from_sqlite_rows(self._memory_repo.list_memories(), now_iso=now_iso)
+            )
+        )
         if current_snapshot == sqlite_snapshot:
             return ""
         if current_snapshot:
@@ -1529,20 +1788,38 @@ class MemoryManager:
             raise
 
     def _validate_memory_document_text(self, document_text: str) -> None:
+        entries_text, _block_text = split_consolidation_block(document_text)
         validate_memory_document(
-            document_text,
+            entries_text,
             summary_max_chars=int(getattr(self.config.document, "summary_max_chars", 300) or 300),
             document_max_chars=max(int(getattr(self.config.document, "document_max_chars", 20000) or 20000), 1),
         )
 
+    def _managed_document_text(self, entries_text: str) -> str:
+        """Compose the mirror: resident memory entries, then the derived consolidation block."""
+        block_text = self._consolidation_block_text()
+        if not block_text:
+            return entries_text
+        return f"{entries_text}\n{block_text}" if entries_text else block_text
+
     def _rebuild_memory_snapshot_from_sqlite(self, *, now_iso: str | None = None) -> None:
-        document_text = self._document_text_from_sqlite_rows(self._memory_repo.list_memories(), now_iso=now_iso)
+        document_text = self._managed_document_text(
+            self._document_text_from_sqlite_rows(self._memory_repo.list_memories(), now_iso=now_iso)
+        )
         self._validate_memory_document_text(document_text)
         self._atomic_write_text(self.memory_file, document_text)
 
     async def _append_queue_request(self, request: MemoryQueueRequest) -> None:
         rows = self._read_queue_requests()
         rows.append(self._normalize_queue_request(request))
+        self._write_queue_requests(rows)
+
+    def _insert_queue_request_at_head(self, request: MemoryQueueRequest) -> None:
+        """Push a runtime-generated batch to the front: it must run before the requests
+        whose memories it is about to retire, and FIFO ordering is the only guarantee the
+        queue has (no new queue state is introduced for it)."""
+        rows = self._read_queue_requests()
+        rows.insert(0, self._normalize_queue_request(request))
         self._write_queue_requests(rows)
 
     async def list_queue(self, *, limit: int = 20, offset: int = 0) -> list[dict[str, Any]]:
@@ -1736,13 +2013,14 @@ class MemoryManager:
         stuck_after_seconds: int = 300,
     ) -> dict[str, Any]:
         snapshot_text = self.snapshot_text()
+        entries_text, consolidation_text = split_consolidation_block(snapshot_text)
         summary_limit = int(getattr(self.config.document, "summary_max_chars", 300) or 300)
         document_limit = int(getattr(self.config.document, "document_max_chars", 20000) or 20000)
         document_error = ""
         document_valid = True
         try:
             validate_memory_document(
-                snapshot_text,
+                entries_text,
                 summary_max_chars=summary_limit,
                 document_max_chars=document_limit,
             )
@@ -1754,6 +2032,7 @@ class MemoryManager:
         note_files = self._note_file_refs()
         missing_note_refs = sorted(ref for ref in note_refs if ref not in note_files)
         orphan_notes = sorted(ref for ref in note_files if ref not in note_refs)
+        category_rows, broken_categories = self._consolidation_categories()
         queue_rows, queue_parse_errors = self._read_queue_requests_with_diagnostics()
         stuck_processing_head = self._stuck_processing_head(
             queue_rows=queue_rows,
@@ -1782,6 +2061,11 @@ class MemoryManager:
                 "name": "orphan_notes",
                 "ok": not orphan_notes,
                 "detail": "none" if not orphan_notes else ", ".join(orphan_notes),
+            },
+            {
+                "name": "broken_category_links",
+                "ok": not broken_categories,
+                "detail": "none" if not broken_categories else ", ".join(broken_categories),
             },
             {
                 "name": "queue_parse_errors",
@@ -1821,6 +2105,9 @@ class MemoryManager:
             "memory_note_refs": note_refs,
             "missing_note_refs": missing_note_refs,
             "orphan_notes": orphan_notes,
+            "consolidated_categories": len(category_rows),
+            "broken_category_links": broken_categories,
+            "consolidation_chars": len(consolidation_text),
             "queue_depth": len(queue_rows),
             "queue_head": asdict(queue_rows[0]) if queue_rows else None,
             "queue_parse_errors": queue_parse_errors,
@@ -2013,10 +2300,14 @@ class MemoryManager:
         return MemoryBatch(op=head.op, items=items)
 
     def load_note(self, ref: str) -> str:
-        path = self.notes_dir / note_file_name(ref)
-        if not path.exists():
-            raise FileNotFoundError(f"memory note not found: {ref}")
-        return path.read_text(encoding="utf-8")
+        """Read one note by ref for the CEO's `memory_note` tool: ordinary notes and
+        category notes both resolve, so a retired memory stays reachable."""
+        name = note_file_name(ref)
+        for directory in (self.notes_dir, self.index_dir):
+            path = directory / name
+            if path.exists():
+                return path.read_text(encoding="utf-8")
+        raise FileNotFoundError(f"memory note not found: {ref}")
 
     def close(self) -> None:
         self._stop_event.set()
@@ -2438,24 +2729,43 @@ class MemoryManager:
         repair_reason: str,
         queue_request_ids: list[str],
         model_chain: list[str],
+        lane: str = "memory",
     ) -> _MemoryAttemptResult:
-        session = _MemoryToolSession(
-            snapshot_text=before_text,
-            notes_dir=self.notes_dir,
-            batch_op=str(batch.op or "").strip().lower(),
-        )
-        tools = self._memory_agent_tools(session)
+        consolidation = lane == "consolidate"
+        if consolidation:
+            session: Any = _ConsolidationToolSession(
+                notes_dir=self.notes_dir,
+                index_dir=self.index_dir,
+                category_names=sorted(path.stem for path in self.index_dir.glob("*.md")),
+            )
+            tools = self._consolidation_agent_tools(session)
+            system_prompt = self._consolidation_agent_system_prompt()
+            user_prompt = self._consolidation_agent_user_prompt(
+                batch=batch,
+                snapshot_text=before_text,
+                repair_reason=repair_reason,
+            )
+        else:
+            session = _MemoryToolSession(
+                snapshot_text=before_text,
+                notes_dir=self.notes_dir,
+                index_dir=self.index_dir,
+                batch_op=str(batch.op or "").strip().lower(),
+            )
+            tools = self._memory_agent_tools(session)
+            system_prompt = self._memory_agent_system_prompt()
+            user_prompt = self._memory_agent_user_prompt(
+                batch=batch,
+                snapshot_text=before_text,
+                repair_reason=repair_reason,
+            )
         tool_schemas = [item.openai_schema() for item in list(tools or [])]
         model = build_chat_model(runtime_config, role="memory")
         messages: list[dict[str, Any]] = [
-            {"role": "system", "content": self._memory_agent_system_prompt()},
+            {"role": "system", "content": system_prompt},
             {
                 "role": "user",
-                "content": self._memory_agent_user_prompt(
-                    batch=batch,
-                    snapshot_text=before_text,
-                    repair_reason=repair_reason,
-                ),
+                "content": user_prompt,
             },
         ]
         usage_total = {"input_tokens": 0, "output_tokens": 0, "cache_read_tokens": 0}
@@ -2537,6 +2847,63 @@ class MemoryManager:
 
     def _memory_agent_system_prompt(self) -> str:
         return load_prompt("memory_agent.md").strip()
+
+    def _consolidation_agent_system_prompt(self) -> str:
+        return load_prompt("memory_consolidator.md").strip()
+
+    def _consolidation_agent_tools(self, session: _ConsolidationToolSession) -> list[_MemoryTool]:
+        def memory_read_note(ref: str) -> str:
+            """Read one note by ref without the .md suffix; category notes and ordinary notes both resolve."""
+
+            return session.read_note(ref)
+
+        def memory_consolidation_apply(
+            note_writes: list[dict[str, Any]] | None = None,
+            retirements: list[dict[str, Any]] | None = None,
+            no_consolidation_reason: str | None = None,
+        ) -> dict[str, Any]:
+            """Stage one complete consolidation batch."""
+
+            return session.apply_batch(
+                note_writes=note_writes,
+                retirements=retirements,
+                no_consolidation_reason=no_consolidation_reason,
+            )
+
+        return [
+            _build_memory_tool(name="memory_read_note", fn=memory_read_note),
+            _build_memory_tool(name="memory_consolidation_apply", fn=memory_consolidation_apply),
+        ]
+
+    def _consolidation_agent_user_prompt(
+        self,
+        *,
+        batch: MemoryBatch,
+        snapshot_text: str,
+        repair_reason: str,
+    ) -> str:
+        requests = [
+            {
+                "request_id": item.request_id,
+                "op": item.op,
+                "payload_text": item.payload_text,
+                "created_at": item.created_at,
+            }
+            for item in batch.items
+        ]
+        categories = sorted(path.stem for path in self.index_dir.glob("*.md"))
+        repair_block = f"\n上一轮输出无效：{repair_reason}\n请修复后重试。\n" if repair_reason else ""
+        return (
+            f"当前记忆正文：\n{snapshot_text or '(empty)'}\n\n"
+            f"现有分类 note：{json.dumps(categories, ensure_ascii=False)}\n"
+            f"待归并请求：\n{json.dumps(requests, ensure_ascii=False, indent=2)}\n"
+            "提交要求：\n"
+            "- 只允许使用一次 memory_consolidation_apply 完成所有归并。\n"
+            "- note_writes 每条必须给 note_ref，并按整体新建（body）或局部改（edits）二选一。\n"
+            "- retirements 每条必须给出 memory_id 和落进的 note_ref。\n"
+            "- 找不到分类的记忆不要退场；全都没有去处时单独提交 no_consolidation_reason。\n"
+            f"{repair_block}"
+        )
 
     @staticmethod
     def _response_text(response: Any) -> str:
@@ -2709,6 +3076,33 @@ class MemoryManager:
 
         original_bodies = dict(validated.original_bodies or {})
         changes: list[dict[str, Any]] = []
+        for item in list(validated.consolidation_writes or []):
+            normalized_ref = str(item.get("note_ref") or "").strip()
+            if not normalized_ref:
+                continue
+            changes.append(
+                {
+                    "type": "category_note",
+                    "note_ref": normalized_ref,
+                    "content": str(item.get("body") or ""),
+                    "edits": [dict(op) for op in list(item.get("edits") or [])],
+                }
+            )
+        for item in list(validated.retirements or []):
+            memory_id = str(item.get("memory_id") or "").strip()
+            category = str(item.get("note_ref") or "").strip()
+            if not memory_id or not category:
+                continue
+            changes.append(
+                {
+                    "type": "consolidate",
+                    "memory_id": memory_id,
+                    "note_ref": category,
+                    # The body that left the resident block: the only record showing what
+                    # a retired memory used to say.
+                    "original_content": original_bodies.get(memory_id, ""),
+                }
+            )
         for item in list(validated.adds or []):
             content = str(item.get("content") or "").strip()
             if not content:
@@ -2885,14 +3279,120 @@ class MemoryManager:
         enriched["changes_reconstructed"] = True
         return enriched
 
+    def _commit_consolidation_locked(self, validated: _MemoryValidatedWrite, *, now_iso: str) -> None:
+        """Write category notes, then point the retired rows at them.
+
+        Retiring writes the `consolidated_into` column and never deletes a row: the body
+        stays readable, the note the row owns stays alive, and the mapping stays auditable.
+        """
+        writes = list(validated.consolidation_writes or [])
+        for write in writes:
+            ref = str(write.get("note_ref") or "").strip()
+            body = write.get("body")
+            if not ref or body is None:
+                continue
+            path = self.index_dir / note_file_name(ref)
+            path.parent.mkdir(parents=True, exist_ok=True)
+            self._atomic_write_text(path, self._normalize_note_text(str(body or "")))
+        edits_by_ref = {
+            str(write.get("note_ref") or "").strip(): list(write.get("edits") or [])
+            for write in writes
+            if str(write.get("note_ref") or "").strip() and list(write.get("edits") or [])
+        }
+        validated.note_edit_results = self._apply_note_edits_locked(edits_by_ref, directory=self.index_dir)
+        self._reconcile_mirror_with_sqlite_locked(now_iso=now_iso)
+        rows_before = self._memory_repo.list_memories()
+        try:
+            for item in list(validated.retirements or []):
+                memory_id = str(item.get("memory_id") or "").strip()
+                category = str(item.get("note_ref") or "").strip()
+                if not memory_id or not category:
+                    continue
+                self._memory_repo.mark_consolidated([memory_id], category_ref=category, now_iso=now_iso)
+            self._rebuild_memory_snapshot_from_sqlite(now_iso=now_iso)
+        except Exception:
+            try:
+                self._memory_repo.restore_rows(rows_before=rows_before)
+                self._rebuild_memory_snapshot_from_sqlite(now_iso=now_iso)
+            except Exception as restore_exc:
+                logger.error(f"memory consolidation rollback failed: {restore_exc}")
+            raise
+        validated.memory_chars_after = self._resident_memory_chars()
+        validated.document_preview = self._document_preview(self.snapshot_text())
+        if not validated.retirements:
+            # Nothing retired means the snapshot is still over the line and the next
+            # commit would queue another consolidation forever. Degrade the oldest rows so
+            # the trigger makes progress even when no category fits; this never deletes.
+            compressed = self._fallback_compress_to_target(
+                now_iso=now_iso,
+                target=int(getattr(self.config.document, "compress_target_chars", 13000) or 13000),
+            )
+            validated.compression_triggered = bool(compressed)
+            validated.compressed_memory_ids = compressed
+
+    def _build_consolidation_write_from_apply_batch(
+        self,
+        *,
+        batch: MemoryBatch,
+        session: _ConsolidationToolSession,
+    ) -> _MemoryValidatedWrite:
+        if session.apply_count != 1 or not isinstance(session.applied_batch, dict):
+            raise _MemoryAgentValidationError(
+                "consolidation agent must call memory_consolidation_apply exactly once"
+            )
+        _ = batch
+        payload = dict(session.applied_batch)
+        writes = [dict(item) for item in list(payload.get("note_writes") or [])]
+        retirements = [dict(item) for item in list(payload.get("retirements") or [])]
+        noop_reason = str(payload.get("no_consolidation_reason") or "").strip()
+
+        rows = {str(row.get("memory_id") or "").strip(): row for row in self._memory_repo.list_memories()}
+        unknown = sorted(
+            str(item.get("memory_id") or "").strip()
+            for item in retirements
+            if str(item.get("memory_id") or "").strip() not in rows
+        )
+        if unknown:
+            raise _MemoryAgentValidationError(f"retire ids not found: {', '.join(unknown)}")
+        already_retired = sorted(
+            str(item.get("memory_id") or "").strip()
+            for item in retirements
+            if str(rows.get(str(item.get("memory_id") or "").strip(), {}).get("consolidated_into") or "").strip()
+        )
+        if already_retired:
+            raise _MemoryAgentValidationError(f"memories already consolidated: {', '.join(already_retired)}")
+
+        entries_text = self._document_text_from_sqlite_rows(self._memory_repo.list_memories())
+        block_text = self._consolidation_block_text()
+        document_text = self._normalize_document_text(f"{entries_text}\n{block_text}" if block_text else entries_text)
+        return _MemoryValidatedWrite(
+            document_text=document_text,
+            note_writes={},
+            note_refs_written=sorted(
+                {str(item.get("note_ref") or "").strip() for item in writes} - {""}
+            ),
+            memory_chars_after=self._resident_memory_chars(),
+            document_preview=self._document_preview(self.snapshot_text()),
+            is_consolidation=True,
+            consolidation_writes=writes,
+            retirements=retirements,
+            original_bodies=self._memory_repo.fetch_bodies(
+                [str(item.get("memory_id") or "").strip() for item in retirements]
+            ),
+            noop_reason=noop_reason,
+        )
+
     def _commit_validated_write(self, validated: _MemoryValidatedWrite) -> None:
         now_iso = self._now_iso()
         with self._io_lock:
+            if validated.is_consolidation:
+                self._commit_consolidation_locked(validated, now_iso=now_iso)
+                return
             # Note bodies land before the store mutation. If the mutation is later
             # rejected, an orphan note file is only surplus bytes - the next successful
             # commit's orphan sweep removes them; the store itself is rolled back whole.
             for ref, body in validated.note_writes.items():
-                note_path = self.notes_dir / note_file_name(ref)
+                note_path = self._note_write_path(ref)
                 note_path.parent.mkdir(parents=True, exist_ok=True)
                 self._atomic_write_text(note_path, body)
             validated.note_edit_results = self._apply_note_edits_locked(validated.note_edits)
@@ -2958,13 +3458,14 @@ class MemoryManager:
 
             _record_reaped(self._cleanup_orphan_notes_locked())
             compression_result = self._run_post_commit_compression_locked(now_iso=now_iso)
-            final_snapshot = self.snapshot_text()
             _record_reaped(self._cleanup_orphan_notes_locked())
-            validated.memory_chars_after = len(final_snapshot)
-            validated.document_preview = self._document_preview(final_snapshot)
+            validated.memory_chars_after = self._resident_memory_chars()
+            validated.document_preview = self._document_preview(self.snapshot_text())
             validated.compression_triggered = bool(compression_result.get("compression_triggered"))
             validated.compressed_memory_ids = list(compression_result.get("compressed_memory_ids") or [])
             validated.deleted_by_compression_ids = list(compression_result.get("deleted_by_compression_ids") or [])
+            validated.consolidation_requested = bool(compression_result.get("consolidation_requested"))
+            validated.consolidation_reason = str(compression_result.get("consolidation_reason") or "").strip()
 
     @classmethod
     def _processed_batch_retention_delta(cls) -> timedelta:
@@ -3001,50 +3502,125 @@ class MemoryManager:
     def _run_post_commit_compression_locked(self, *, now_iso: str) -> dict[str, Any]:
         return self._compress_memory_snapshot_if_needed(now_iso=now_iso)
 
+    def _queued_consolidation_request(self) -> MemoryQueueRequest | None:
+        for row in self._read_queue_requests():
+            if str(row.op or "").strip().lower() == "consolidate":
+                return row
+        return None
+
+    def _consolidation_candidate_rows(self) -> list[dict[str, Any]]:
+        """Rows the machine may retire, in survival order.
+
+        Already-retired rows are skipped, and `from_user` rows are never consolidated by
+        the machine: only the memory agent (or the user) removes what the user stated.
+        """
+        return [
+            row
+            for row in self._memory_repo.compression_candidates()
+            if not str(row.get("consolidated_into") or "").strip() and not bool(row.get("from_user"))
+        ]
+
+    def _build_consolidation_payload(self, *, trigger: int, target: int) -> tuple[str, list[str]]:
+        resident = self._resident_memory_chars()
+        need = max(resident - target, 1)
+        picked: list[str] = []
+        blocks: list[str] = []
+        taken = 0
+        for row in self._consolidation_candidate_rows():
+            memory_id = str(row.get("memory_id") or "").strip()
+            body = str(row.get("memory_body") or "").strip()
+            if not memory_id or not body:
+                continue
+            note_ref = str(row.get("note_ref") or "").strip()
+            picked.append(memory_id)
+            taken += len(body)
+            head = f"- id:{memory_id}"
+            if note_ref:
+                head += f" (note: {note_ref})"
+            blocks.append(f"{head}\n{body}")
+            if taken >= need:
+                break
+        if not picked:
+            return "", []
+        categories = sorted(
+            (
+                (path.stem, next((line.strip() for line in path.read_text(encoding="utf-8").splitlines() if line.strip()), ""))
+                for path in self.index_dir.glob("*.md")
+            ),
+            key=lambda item: item[0],
+        )
+        category_lines = "\n".join(f"- {name} | {scope}" for name, scope in categories) or "-（还没有分类 note）"
+        payload = (
+            f"长期记忆到达归并线：常驻 {resident} 字，触发线 {trigger} 字，目标 {target} 字。\n"
+            "下面每条都要在分类 note 里找到去处；找不到去处的不要退场。\n\n"
+            "## 待归并记忆\n" + "\n\n".join(blocks) + "\n\n"
+            "## 现有分类 note\n" + category_lines + "\n"
+        )
+        return payload, picked
+
+    def _fallback_compress_to_target(self, *, now_iso: str, target: int) -> list[str]:
+        """Last resort when nothing may be consolidated: downgrade rows to their minimal
+        form. This never deletes a memory."""
+        compressed: list[str] = []
+        for row in self._memory_repo.compression_candidates():
+            if self._resident_memory_chars() <= target:
+                break
+            if bool(row.get("is_compressed")) or str(row.get("consolidated_into") or "").strip():
+                continue
+            memory_id = str(row.get("memory_id") or "").strip()
+            if not memory_id:
+                continue
+            if self._memory_repo.mark_compressed(memory_id):
+                compressed.append(memory_id)
+                self._rebuild_memory_snapshot_from_sqlite(now_iso=now_iso)
+        return compressed
+
     def _compress_memory_snapshot_if_needed(self, *, now_iso: str | None = None) -> dict[str, Any]:
+        """Over the trigger line memories are consolidated into category notes, not deleted.
+
+        The delete lane used to retire 18 memories in one machine pass with the model
+        never knowing. `deleted_by_compression_ids` stays in the result shape (and stays
+        empty) because the ledger and the admin surface read it.
+        """
         effective_now = str(now_iso or self._now_iso()).strip()
         trigger = int(getattr(self.config.document, "compress_trigger_chars", 16000) or 16000)
         target = int(getattr(self.config.document, "compress_target_chars", 13000) or 13000)
-        compressed_memory_ids: list[str] = []
-        deleted_by_compression_ids: list[str] = []
-        if len(self.snapshot_text()) <= trigger:
-            return {
-                "compression_triggered": False,
-                "compressed_memory_ids": compressed_memory_ids,
-                "deleted_by_compression_ids": deleted_by_compression_ids,
-            }
-
-        compression_triggered = False
-        while len(self.snapshot_text()) > target:
-            mutated_in_pass = False
-            for row in self._memory_repo.compression_candidates():
-                if len(self.snapshot_text()) <= target:
-                    break
-                memory_id = str(row.get("memory_id") or "").strip()
-                if not memory_id:
-                    continue
-                mutated = False
-                if not bool(row.get("is_compressed")):
-                    mutated = self._memory_repo.mark_compressed(memory_id)
-                    if mutated:
-                        compressed_memory_ids.append(memory_id)
-                elif not bool(row.get("from_user")):
-                    mutated = self._memory_repo.delete_memory(memory_id)
-                    if mutated:
-                        deleted_by_compression_ids.append(memory_id)
-                if not mutated:
-                    continue
-                compression_triggered = True
-                mutated_in_pass = True
-                self._rebuild_memory_snapshot_from_sqlite(now_iso=effective_now)
-            if not mutated_in_pass:
-                break
-
-        return {
-            "compression_triggered": compression_triggered,
-            "compressed_memory_ids": compressed_memory_ids,
-            "deleted_by_compression_ids": deleted_by_compression_ids,
+        result: dict[str, Any] = {
+            "compression_triggered": False,
+            "compressed_memory_ids": [],
+            "deleted_by_compression_ids": [],
+            "consolidation_requested": False,
+            "consolidation_memory_ids": [],
+            "consolidation_reason": "",
         }
+        if self._resident_memory_chars() <= trigger:
+            return result
+        if self._queued_consolidation_request() is not None:
+            result["consolidation_reason"] = "already_queued"
+            return result
+
+        payload, memory_ids = self._build_consolidation_payload(trigger=trigger, target=target)
+        if not memory_ids:
+            compressed = self._fallback_compress_to_target(now_iso=effective_now, target=target)
+            result["compression_triggered"] = bool(compressed)
+            result["compressed_memory_ids"] = compressed
+            result["consolidation_reason"] = "no_consolidation_candidates"
+            return result
+
+        self._insert_queue_request_at_head(
+            MemoryQueueRequest(
+                op="consolidate",
+                decision_source="self",
+                payload_text=payload,
+                created_at=effective_now,
+                request_id=self._request_id("consolidate"),
+                trigger_source="compression_trigger",
+            )
+        )
+        result["consolidation_requested"] = True
+        result["consolidation_memory_ids"] = memory_ids
+        result["consolidation_reason"] = "queued"
+        return result
 
     def _referenced_note_refs(self) -> list[str]:
         """Note names the store owns. Ownership is a column, not a rendering artefact:
@@ -3055,8 +3631,32 @@ class MemoryManager:
             return self._collect_note_refs(self.snapshot_text())
         return repo.referenced_note_refs()
 
+    def _note_write_path(self, ref: str) -> Path:
+        """Where a whole-file note write lands.
+
+        An existing category note is rewritten in place under `memory/index`; everything
+        else is an ordinary note. The ordinary lane may fix a stale category description,
+        but it cannot invent a category - that is the consolidator's job.
+        """
+        name = note_file_name(ref)
+        indexed = self.index_dir / name
+        if indexed.exists():
+            return indexed
+        return self.notes_dir / name
+
+    def _note_edit_target(self, ref: str) -> Path:
+        """Edits land on whichever directory actually holds the note."""
+        name = note_file_name(ref)
+        for candidate in (self.notes_dir / name, self.index_dir / name):
+            if candidate.exists():
+                return candidate
+        return self.notes_dir / name
+
     def _apply_note_edits_locked(
-        self, note_edits: dict[str, list[dict[str, str]]] | None
+        self,
+        note_edits: dict[str, list[dict[str, str]]] | None,
+        *,
+        directory: Path | None = None,
     ) -> list[dict[str, Any]]:
         """Apply incremental note edits after whole-file writes, one op at a time.
 
@@ -3067,7 +3667,11 @@ class MemoryManager:
         """
         results: list[dict[str, Any]] = []
         for ref, ops in sorted(dict(note_edits or {}).items()):
-            path = self.notes_dir / note_file_name(ref)
+            path = (
+                directory / note_file_name(ref)
+                if directory is not None
+                else self._note_edit_target(ref)
+            )
             if not path.exists():
                 for op_index, _op in enumerate(list(ops or [])):
                     results.append(
@@ -3286,7 +3890,11 @@ class MemoryManager:
             minimal_rewrites.append({"id": memory_id, "content": minimal, "minimal_memory": minimal})
         if not minimal_adds and not minimal_rewrites:
             return None
-        fresh = _MemoryToolSession(snapshot_text=before_text, notes_dir=self.notes_dir)
+        fresh = _MemoryToolSession(
+            snapshot_text=before_text,
+            notes_dir=self.notes_dir,
+            index_dir=self.index_dir,
+        )
         fresh.apply_batch_count = 1
         fresh.applied_batch = {
             "adds": minimal_adds,
@@ -3613,7 +4221,7 @@ class MemoryManager:
         if normalized_fallback:
             payload["fallback"] = normalized_fallback
         if validated is not None:
-            payload["memory_chars_after"] = len(self.snapshot_text())
+            payload["memory_chars_after"] = self._resident_memory_chars()
             payload["note_refs_written"] = list(validated.note_refs_written)
             payload["document_preview"] = self._document_preview(self.snapshot_text())
             change_preview = self._build_change_preview(validated)
@@ -3626,6 +4234,17 @@ class MemoryManager:
             payload["compression_triggered"] = bool(validated.compression_triggered)
             payload["compressed_memory_ids"] = list(validated.compressed_memory_ids)
             payload["deleted_by_compression_ids"] = list(validated.deleted_by_compression_ids)
+            if validated.is_consolidation:
+                payload["category_count"] = len(
+                    {
+                        str(item.get("note_ref") or "").strip()
+                        for item in list(validated.consolidation_writes or [])
+                        if str(item.get("note_ref") or "").strip()
+                    }
+                )
+            if validated.consolidation_requested or validated.consolidation_reason:
+                payload["consolidation_requested"] = bool(validated.consolidation_requested)
+                payload["consolidation_reason"] = validated.consolidation_reason
             normalized_write_mode = str(validated.write_mode or "").strip().lower()
             if normalized_write_mode:
                 payload["write_mode"] = normalized_write_mode
@@ -4344,7 +4963,10 @@ class MemoryManager:
         snapshot_text: str,
         repair_reason: str,
     ) -> str:
-        note_index = sorted(path.stem for path in self.notes_dir.glob("*.md"))
+        note_index = sorted(
+            {path.stem for path in self.notes_dir.glob("*.md")}
+            | {path.stem for path in self.index_dir.glob("*.md")}
+        )
         requests = [
             {
                 "request_id": item.request_id,
@@ -4375,6 +4997,8 @@ class MemoryManager:
             "- note_upserts 只写需要新增或整体重写的 note。\n"
             "- note_edits 改已有 note 的局部：{note名: [{old_text, new_text}]}，old_text 必须唯一命中一次，"
             "new_text 留空即删掉这段。改一两个段落用 note_edits，不要用 note_upserts 重交整份。\n"
+            "- 归并区列出的分类 note 也可以这样改（内容错误或过时时）；不要新建分类 note，"
+            "也不要让记忆从归并区退场，退场只由归并环节做。\n"
             "- inspired_memory_ids 可选，用于列出当前完整 snapshot 里对本批判断有实质帮助的 memory id。\n"
             "- minimal_memory 格式应写成 `条件->要求关键词`，必要时优先附加 `见noteid:<id>`，并兼容 `ref:<id>`。\n"
             "- 当本轮无需任何记忆或 note 变更时，可单独提交 noop_reason（仅 write 批次）。\n"
@@ -4576,7 +5200,9 @@ class MemoryManager:
             )
         except ValueError as exc:
             raise _MemoryAgentValidationError(str(exc or "memory document invalid").strip()) from exc
-        existing_refs = {path.stem for path in self.notes_dir.glob("*.md")}
+        existing_refs = {path.stem for path in self.notes_dir.glob("*.md")} | {
+            path.stem for path in self.index_dir.glob("*.md")
+        }
         normalized_note_upserts = {
             str(ref): self._normalize_note_text(content)
             for ref, content in note_upserts.items()
@@ -4693,6 +5319,7 @@ class MemoryManager:
         current_runtime_config = runtime_config
         current_runtime_revision = int(runtime_revision or 0)
         current_model_chain = list(model_chain or [])
+        lane = "consolidate" if str(batch.op or "").strip().lower() == "consolidate" else "memory"
         processing_batch = batch
         if str(batch.op or "").strip().lower() == "assess":
             processing_batch = MemoryBatch(
@@ -4737,6 +5364,7 @@ class MemoryManager:
                     repair_reason=repair_reason,
                     queue_request_ids=queue_request_ids,
                     model_chain=current_model_chain,
+                    lane=lane,
                 )
             except _MemoryProviderError as exc:
                 # Provider 层失败不做批内修复重试（几秒内的连续尝试只会撞同一个
@@ -4761,11 +5389,17 @@ class MemoryManager:
             request_artifacts.extend(list(attempt.request_artifacts or []))
             attempt_sessions.append(attempt.session)
             try:
-                validated = self._validate_candidate_state(
-                    batch=processing_batch,
-                    before_text=before_text,
-                    session=attempt.session,
-                )
+                if lane == "consolidate":
+                    validated = self._build_consolidation_write_from_apply_batch(
+                        batch=processing_batch,
+                        session=attempt.session,
+                    )
+                else:
+                    validated = self._validate_candidate_state(
+                        batch=processing_batch,
+                        before_text=before_text,
+                        session=attempt.session,
+                    )
                 return {
                     "validated": validated,
                     "usage": total_usage,
@@ -4778,10 +5412,14 @@ class MemoryManager:
             except _MemoryAgentValidationError as exc:
                 last_error = str(exc or "memory agent output invalid").strip()
                 continue
-        fallback_validated = self._minimal_compression_fallback_write(
-            batch=processing_batch,
-            before_text=before_text,
-            sessions=attempt_sessions,
+        fallback_validated = (
+            None
+            if lane == "consolidate"
+            else self._minimal_compression_fallback_write(
+                batch=processing_batch,
+                before_text=before_text,
+                sessions=attempt_sessions,
+            )
         )
         if fallback_validated is not None:
             return {
@@ -5141,6 +5779,21 @@ class MemoryManager:
                 "request_artifact_paths": [str(item or "").strip() for item in list(request_artifact_paths or []) if str(item or "").strip()],
             }
             rows.append(record)
+        if str(batch.op or "").strip().lower() == "consolidate" and int(record.get("park_count") or 0) >= 2:
+            # A consolidation that cannot get through must not leave the resident block
+            # over the line forever: downgrade the oldest rows to their minimal form.
+            # This is the only machine-side compression left, and it never deletes.
+            with self._io_lock:
+                degraded = self._fallback_compress_to_target(
+                    now_iso=now,
+                    target=int(getattr(self.config.document, "compress_target_chars", 13000) or 13000),
+                )
+            if degraded:
+                record["compression_fallback_ids"] = degraded
+                logger.warning(
+                    "memory consolidation parked twice; downgraded {} memories to their minimal form",
+                    len(degraded),
+                )
         self._write_failed_records(rows)
         self._drop_request_ids(id_set)
         _emit_audit_memory_parked(record, trigger=str(trigger or "initial").strip())
