@@ -45,6 +45,7 @@ class FakeGatewayClient:
     ):
         self.conversation_prefix = "mcp"
         self.sent: list[tuple[str, str]] = []
+        self.sent_attachments: list[list[dict[str, Any]]] = []
         self.streamed: list[tuple[str, int]] = []
         self.listed_scopes: list[str] = []
         self._all_sessions_payload = all_sessions_payload
@@ -85,10 +86,18 @@ class FakeGatewayClient:
 
         yield _events()
 
-    async def send_message(self, session_id: str, text: str, *, idempotency_key: str | None = None) -> dict:
+    async def send_message(
+        self,
+        session_id: str,
+        text: str,
+        *,
+        attachments: list[dict[str, Any]] | None = None,
+        idempotency_key: str | None = None,
+    ) -> dict:
         if self._send_error is not None:
             raise self._send_error
         self.sent.append((session_id, text))
+        self.sent_attachments.append(list(attachments or []))
         return dict(self._send_result)
 
     async def wait_for_reply(self, events, **kwargs) -> dict:

@@ -78,15 +78,19 @@ class G3kuMcpClient:
         session_id: str,
         text: str,
         *,
+        attachments: list[dict[str, Any]] | None = None,
         idempotency_key: str | None = None,
     ) -> dict[str, Any]:
         headers = self._headers()
         key = str(idempotency_key or "").strip()
         if key:
             headers["Idempotency-Key"] = key
+        body: dict[str, Any] = {"text": text}
+        if attachments:
+            body["attachments"] = list(attachments)
         response = await self._client.post(
             f"/sessions/{session_id}/messages",
-            json={"text": text},
+            json=body,
             headers=headers,
         )
         response.raise_for_status()

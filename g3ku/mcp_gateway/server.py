@@ -11,7 +11,11 @@ connection failed, ...).
 from __future__ import annotations
 
 import asyncio
+import base64
+import mimetypes
+import re
 import time
+from pathlib import Path
 from typing import Any, Awaitable, Callable
 
 import httpx
@@ -29,6 +33,121 @@ MIN_WAIT_SECONDS = 5
 MAX_WAIT_SECONDS = 1800
 DEFAULT_LIST_LIMIT = 50
 WAKE_POLL_INTERVAL_SECONDS = 2.0
+
+# 附件的上限沿用运行时已有的闸门，MCP 侧不新立一套数字；等值关系由
+# tests/resources/test_mcp_chat_attachments.py 钉住（网关不许 import web 路由层）。
+ATTACHMENT_IMAGE_MAX_BYTES = 5 * 1024 * 1024
+ATTACHMENT_FILE_MAX_BYTES = 20 * 1024 * 1024
+ATTACHMENTS_PER_MESSAGE_MAX = 4
+_URL_PREFIXES = ("http://", "https://")
+_SCHEME_PREFIX = re.compile(r"^[a-zA-Z][a-zA-Z0-9+.\-]*://")
+
+
+def _attachment_problem(
+    index: int, source: str, error: str, hint: str, **extra: Any
+) -> dict[str, Any]:
+    return {
+        "ok": False,
+        "error": error,
+        "attachment_index": index,
+        "attachment": source,
+        "hint": hint,
+        **extra,
+    }
+
+
+def _resolve_attachments(
+    items: list[str] | None,
+) -> tuple[list[dict[str, Any]], dict[str, Any] | None, list[str]]:
+    """Turn caller-supplied paths/URLs into ``/api/v1`` attachment descriptors.
+
+    The gateway does the reading, so the runtime only ever receives files it
+    stored itself and the calling model never has to emit base64.
+    """
+    raw = [str(item or "").strip() for item in list(items or [])]
+    if len(raw) > ATTACHMENTS_PER_MESSAGE_MAX:
+        return [], _attachment_problem(
+            ATTACHMENTS_PER_MESSAGE_MAX,
+            "",
+            "too_many_attachments",
+            f"Send at most {ATTACHMENTS_PER_MESSAGE_MAX} attachments per message; "
+            "this one carried none of them, so nothing was submitted. Split them over "
+            "several messages, or name the files in the text instead.",
+            attachments_requested=len(raw),
+            max_attachments=ATTACHMENTS_PER_MESSAGE_MAX,
+        ), []
+
+    descriptors: list[dict[str, Any]] = []
+    echoes: list[str] = []
+    for index, source in enumerate(raw):
+        if not source:
+            return [], _attachment_problem(
+                index, source, "attachment_empty",
+                "Remove the empty entry; attachments are file paths or http(s) URLs.",
+            ), []
+        if source.lower().startswith(_URL_PREFIXES):
+            # 名字由服务端从 URL 尾段推，这里不多送一个字段。
+            descriptors.append({"url": source})
+            echoes.append(source)
+            continue
+        if source.lower().startswith("data:"):
+            return [], _attachment_problem(
+                index, source, "unsupported_attachment_scheme",
+                "A base64 payload does not travel through this argument: save the bytes "
+                "to a file on the machine running `negi mcp serve` and pass that path.",
+            ), []
+        scheme = _SCHEME_PREFIX.match(source)
+        if scheme:
+            return [], _attachment_problem(
+                index, source, "unsupported_attachment_scheme",
+                f"'{scheme.group(0)}' is not accepted here: attachments are local file "
+                "paths on the machine running `negi mcp serve`, or http(s) URLs.",
+            ), []
+
+        path = Path(source).expanduser()
+        try:
+            size = path.stat().st_size
+        except OSError as exc:
+            return [], _attachment_problem(
+                index, source, "attachment_not_found",
+                f"The gateway could not stat this path ({exc.strerror or exc}). Pass a "
+                "file that exists on the machine running `negi mcp serve` — not on the "
+                "caller's own machine.",
+            ), []
+        if not path.is_file():
+            return [], _attachment_problem(
+                index, source, "attachment_is_a_directory",
+                "Point at one file inside the directory, not the directory itself.",
+            ), []
+        mime_type = str(mimetypes.guess_type(path.name)[0] or "").strip()
+        max_bytes = (
+            ATTACHMENT_IMAGE_MAX_BYTES
+            if mime_type.startswith("image/")
+            else ATTACHMENT_FILE_MAX_BYTES
+        )
+        if size > max_bytes:
+            return [], _attachment_problem(
+                index, source, "attachment_too_large",
+                "Compress or split this file; nothing was submitted.",
+                attachment_bytes=size,
+                max_bytes=max_bytes,
+            ), []
+        try:
+            payload = path.read_bytes()
+        except OSError as exc:
+            return [], _attachment_problem(
+                index, source, "attachment_unreadable",
+                f"The gateway could not read this file ({exc.strerror or exc}).",
+            ), []
+        descriptors.append({
+            "data_base64": base64.b64encode(payload).decode("ascii"),
+            "name": path.name,
+            "mime_type": mime_type,
+        })
+        echoes.append(f"{path.name} ({size} bytes)")
+
+    return descriptors, None, echoes
+
 
 
 def _queue_visibility(result: dict[str, Any]) -> dict[str, Any]:
@@ -126,24 +245,39 @@ def build_mcp_server(client: G3kuMcpClient, *, name: str = "negi") -> FastMCP:
             "A deep verification turn routinely runs for many minutes — do not assume a slow "
             "response means a stalled one; check negi_session_status for activity and silence. "
             "task_ids are the machine-readable handles of the tasks this turn dispatched "
-            "(use them with the web runtime to follow up); reply is prose for a human."
+            "(use them with the web runtime to follow up); reply is prose for a human. "
+            "`attachments` sends files with the message: local file paths on the machine "
+            "running `negi mcp serve`, or http(s) URLs — never base64, and not paths from "
+            "your own machine. Up to 4 per message, images up to 5 MB, other files up to "
+            "20 MB; what got sent is echoed in `attachments`. A rejected attachment "
+            "submits nothing at all — fix the argument and resend."
         ),
         annotations=ToolAnnotations(
             readOnlyHint=False, destructiveHint=False, idempotentHint=False, openWorldHint=True
         ),
     )
     async def negi_chat(
-        conversation: str, message: str, wait_seconds: int = 120, ctx: Context = None
+        conversation: str,
+        message: str,
+        wait_seconds: int = 120,
+        attachments: list[str] = [],
+        ctx: Context = None,
     ) -> dict[str, Any]:
         submit_only = _raw_wait(wait_seconds, 120) == 0
         timeout = _clamp_wait(wait_seconds, 120)
         on_event = _progress_hook(ctx)
+        resolved, attachment_problem, sent = _resolve_attachments(attachments)
+        if attachment_problem is not None:
+            return attachment_problem
+        sent_payload = {"attachments": sent} if sent else {}
 
         async def _body() -> dict[str, Any]:
             session_id = await client.resolve_session(conversation)
             after_seq = client.last_seq(session_id)
             if submit_only:
-                result = await client.send_message(session_id, str(message or ""))
+                result = await client.send_message(
+                    session_id, str(message or ""), attachments=resolved
+                )
                 extras = _queue_visibility(result)
                 hint = "Submitted without waiting. Call negi_get_reply to fetch the final reply."
                 if extras.get("running_turn_id"):
@@ -163,9 +297,12 @@ def build_mcp_server(client: G3kuMcpClient, *, name: str = "negi") -> FastMCP:
                     "receipt": str(result.get("receipt") or ""),
                     "hint": hint,
                     **extras,
+                    **sent_payload,
                 }
             async with client.event_stream(session_id, last_seq=after_seq) as events:
-                result = await client.send_message(session_id, str(message or ""))
+                result = await client.send_message(
+                    session_id, str(message or ""), attachments=resolved
+                )
                 submit_status = str(result.get("status") or "")
                 turn_id = str(result.get("turn_id") or "") or None
                 if submit_status == "queued":
@@ -204,6 +341,7 @@ def build_mcp_server(client: G3kuMcpClient, *, name: str = "negi") -> FastMCP:
                 "submit_status": submit_status,
                 "task_ids": list(outcome.get("task_ids") or []),
                 "transcript_turn_id": outcome.get("transcript_turn_id"),
+                **sent_payload,
             }
             kind = str(outcome.get("kind") or "")
             if kind == "reply":
