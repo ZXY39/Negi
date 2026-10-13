@@ -63,6 +63,8 @@ def test_degradation_text_names_the_config_and_keeps_the_path() -> None:
 
     assert r"C:\g3ku\uploads\a.png" in text
     assert "当前模型配置名称是(链尾纯文本)没有勾选多模态能力因此无法看图" in text
+    # 实盘（2026-10-13 探针）：文案只说"换配置"，模型就去改全局链，把别的会话一起带下水。
+    assert "本会话" in text and "不要为此改全局模型链" in text
 
 
 def test_degrade_replaces_image_blocks_and_keeps_the_text_block() -> None:
