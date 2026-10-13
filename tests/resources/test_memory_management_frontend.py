@@ -1273,12 +1273,58 @@ def test_memory_processed_card_renders_actual_operations_in_change_order() -> No
     assert str(result["mixedLabel"]) == "删除 / 增加 / 修改 / 更新 Note"
 
 
+def test_consolidation_records_survive_into_the_memory_surfaces() -> None:
+    """A retired memory leaves the resident block; the ledger row saying where it went is
+    the only place a maintainer can see it, so both must render."""
+    result = _run_app_script(
+        """
+        const item = {
+          batch_id: "write_consolidate_demo",
+          op: "consolidate",
+          source_op: "consolidate",
+          status: "applied",
+          processed_at: "2026-09-21T16:00:00+08:00",
+          category_count: 1,
+          changes: [
+            { type: "category_note", note_ref: "note_local_env", content: "本机运行环境 / 端口 / 网页 18790。", edits: [] },
+            { type: "consolidate", memory_id: "Ab12Z9", note_ref: "note_local_env", original_content: "网页端口是 18790" },
+          ],
+        };
+
+        __out.cardHtml = context.__testExports.renderMemoryProcessedCard(item);
+        __out.label = context.__testExports.memoryProcessedOpLabel(item);
+        __out.blocks = context.__testExports.renderMemoryChangeList(item.changes);
+        """,
+        ["renderMemoryProcessedCard", "memoryProcessedOpLabel", "renderMemoryChangeList"],
+    )
+
+    card_html = str(result["cardHtml"])
+    assert 'data-op="category_note"' in card_html
+    assert 'data-op="consolidate"' in card_html
+    assert str(result["label"]) == "归并 Note / 记忆退场"
+
+    blocks = str(result["blocks"])
+    assert "新增内容" not in blocks, "consolidation records must not fall through to the add template"
+    assert "本机运行环境" in blocks
+    assert "网页端口是 18790" in blocks
+    assert "ref:note_local_env" in blocks
+
+
 def test_memory_operation_chips_use_one_color_per_operation() -> None:
     css = (REPO_ROOT / "g3ku/web/frontend/org_graph.css").read_text(encoding="utf-8")
     colors = dict(re.findall(r'\.memory-op-chip\[data-op="(\w+)"\]\s*\{\s*color:\s*([^;]+);', css))
 
-    assert set(colors) == {"add", "rewrite", "delete", "note_upsert", "note_edit", "note_reaped"}
-    assert len(set(colors.values())) == 6
+    assert set(colors) == {
+        "add",
+        "rewrite",
+        "delete",
+        "note_upsert",
+        "note_edit",
+        "note_reaped",
+        "category_note",
+        "consolidate",
+    }
+    assert len(set(colors.values())) == 8
 
 
 def test_note_edit_and_note_reap_records_survive_into_the_memory_surfaces() -> None:

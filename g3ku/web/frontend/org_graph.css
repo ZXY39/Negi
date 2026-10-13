@@ -11092,6 +11092,14 @@ textarea {
     color: #4b5563;
 }
 
+.memory-op-chip[data-op="category_note"] {
+    color: #0e7490;
+}
+
+.memory-op-chip[data-op="consolidate"] {
+    color: #a21caf;
+}
+
 .memory-card-minimal-trailing {
     display: flex;
     align-items: center;

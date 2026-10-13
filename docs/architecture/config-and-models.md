@@ -447,6 +447,7 @@ Settings surface:
 
 - `document.*` controls the Markdown notebook layout, including `memory/MEMORY.md`, `memory/notes/`, the summary character limit, and the full document character ceiling.
   - The default `document.summary_max_chars` is `300`.
+  - `document.compress_trigger_chars` / `document.compress_target_chars` are the consolidation thresholds and are measured against the resident memory entries only: crossing the trigger queues a `consolidate` batch at the queue head instead of shrinking the snapshot in place, and the permanent consolidation index counts toward neither threshold nor `document_max_chars`. See `runtime-overview.md`「Memory Runtime State」.
   - `document.compress_trigger_chars` and `document.compress_target_chars` define the post-commit snapshot compaction thresholds.
 - `queue.*` controls the single durable queue and its failure parking store, including `memory/queue.jsonl`, `memory/ops.jsonl`, `memory/failed.jsonl`, batch size, max wait time, and the ordinary-turn review window size. `queue.review_interval_turns` is the per-session ordinary-turn review window size, defaulting to `5`. `queue.auto_requeue_on_success` (default `true`) enables the success-signal auto requeue: each applied batch requeues the oldest parked `provider_error` record at the queue tail; `window_refusal` (local pre-send capacity refusal) and protocol-violation records never auto-requeue. Parking/requeue semantics live in `runtime-overview.md`「队列状态机与失败停车语义」.
 - `agent.*` controls the dedicated memory-maintenance worker behavior.

@@ -10,7 +10,7 @@ from typing import Any
 
 from loguru import logger
 
-from g3ku.agent.markdown_memory import parse_memory_document
+from g3ku.agent.markdown_memory import parse_memory_document, split_consolidation_block
 from g3ku.config.live_runtime import get_runtime_config
 from g3ku.core.timefmt import (
     MESSAGE_ARRIVAL_TIME_MARKER,
@@ -349,16 +349,24 @@ class CeoMessageBuilder:
         snapshot_text = str(memory_snapshot_text or '').strip()
         if not snapshot_text:
             return None
-        parsed_entries = parse_memory_document(snapshot_text)
-        if parsed_entries:
-            snapshot_text = '\n'.join(
-                f"---\n{str(entry.summary or '').strip()}".strip()
-                for entry in parsed_entries
-                if str(entry.summary or '').strip()
-            ).strip()
+        entries_text, consolidation_text = split_consolidation_block(snapshot_text)
+        parsed_entries = parse_memory_document(entries_text)
+        rendered = '\n'.join(
+            f"---\n{str(entry.summary or '').strip()}".strip()
+            for entry in parsed_entries
+            if str(entry.summary or '').strip()
+        ).strip()
+        # The consolidation block is rendered by the memory runtime and carried through
+        # verbatim: re-deriving it here would read note files mid-session and change the
+        # bytes at message index 1, which is exactly the cache break the freeze prevents.
+        content = rendered or (entries_text.strip() if not consolidation_text else '')
+        if consolidation_text:
+            content = f"{content}\n{consolidation_text.strip()}".strip()
+        if not content:
+            return None
         return {
             "role": "assistant",
-            "content": f"## 长期记忆\n{snapshot_text}".strip(),
+            "content": f"## 长期记忆\n{content}".strip(),
         }
 
     @staticmethod

@@ -14555,6 +14555,8 @@ const MEMORY_OP_KINDS = {
     note_upsert: { label: "更新 Note", icon: "notebook-pen" },
     note_edit: { label: "编辑 Note", icon: "notebook-pen" },
     note_reaped: { label: "回收 Note", icon: "trash-2" },
+    category_note: { label: "归并 Note", icon: "notebook-pen" },
+    consolidate: { label: "记忆退场", icon: "pencil" },
 };
 
 // write_mode 把删除并进 rewrite 桶、把多种操作压成 mixed；只有持久化的 changes
@@ -14751,6 +14753,8 @@ function memoryChangeTypeLabel(type) {
     if (normalized === "note_upsert") return "更新 Note";
     if (normalized === "note_edit") return "编辑 Note";
     if (normalized === "note_reaped") return "回收 Note";
+    if (normalized === "category_note") return "归并 Note";
+    if (normalized === "consolidate") return "记忆退场";
     return normalized || "变更";
 }
 
@@ -14827,6 +14831,29 @@ function renderMemoryChangeBlock(change) {
                     <div class="memory-change-col-label">改为</div>
                     ${modifiedHtml}
                 </div>
+            </div>
+        `;
+    } else if (type === "category_note") {
+        const edits = Array.isArray(change?.edits) ? change.edits : [];
+        const editsHtml = edits.length
+            ? `<div class="memory-change-col">
+                   <div class="memory-change-col-label">局部改动</div>
+                   ${edits.map((op) => `<div class="memory-change-text">${renderMemoryDiffHighlighted(String(op?.old_text || ""), String(op?.new_text || "")) || esc(String(op?.old_text || ""))}</div>`).join("")}
+               </div>`
+            : "";
+        bodyHtml = `
+            ${content.trim()
+                ? `<div class="memory-change-col">
+                       <div class="memory-change-col-label">分类 Note 内容</div>
+                       <div class="memory-change-text">${renderMemoryTextWithNoteRefs(content)}</div>
+                   </div>`
+                : editsHtml}
+        `;
+    } else if (type === "consolidate") {
+        bodyHtml = `
+            <div class="memory-change-col">
+                <div class="memory-change-col-label">退场的正文</div>
+                <div class="memory-change-text">${renderMemoryTextWithNoteRefs(original) || "-"}</div>
             </div>
         `;
     } else if (type === "note_reaped") {

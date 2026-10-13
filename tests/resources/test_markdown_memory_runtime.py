@@ -636,7 +636,7 @@ def test_memory_commit_keeps_snapshot_after_sqlite_rebuild(tmp_path: Path) -> No
         manager.close()
 
 
-def test_memory_compression_orders_by_passed_desc_refresh_asc_and_preserves_from_user_rows(tmp_path: Path) -> None:
+def test_trigger_queues_a_consolidation_batch_at_the_head_instead_of_deleting(tmp_path: Path) -> None:
     module = _load_memory_agent_runtime_module()
     cfg = _memory_cfg()
     cfg.document.compress_trigger_chars = 120
@@ -682,14 +682,41 @@ def test_memory_compression_orders_by_passed_desc_refresh_asc_and_preserves_from
             conn.commit()
 
         manager._rebuild_memory_snapshot_from_sqlite(now_iso="2026-04-25T00:00:00+08:00")
-        manager._compress_memory_snapshot_if_needed(now_iso="2026-04-25T00:00:00+08:00")
+        manager._write_queue_requests(
+            [
+                module.MemoryQueueRequest(
+                    op="write",
+                    decision_source="user",
+                    payload_text="a request that arrived first",
+                    created_at="2026-04-25T00:00:00+08:00",
+                    request_id="write_first",
+                )
+            ]
+        )
 
+        result = manager._compress_memory_snapshot_if_needed(now_iso="2026-04-25T00:00:00+08:00")
+
+        queue_rows = manager._read_queue_requests()
+        assert [row.op for row in queue_rows] == ["consolidate", "write"]
+        assert result["consolidation_requested"] is True
+        assert result["deleted_by_compression_ids"] == []
+        assert result["compressed_memory_ids"] == []
+
+        # Nothing was degraded and nothing was lost: the trigger now only queues work.
         rows = {row["memory_id"]: row for row in manager._memory_repo.list_memories()}
+        assert {protected["memory_id"], cold["memory_id"], hotter["memory_id"]} == set(rows)
+        assert all(row["is_compressed"] is False for row in rows.values())
 
-        assert protected["memory_id"] in rows
-        assert rows[protected["memory_id"]]["is_compressed"] is True
-        assert cold["memory_id"] not in rows or rows[cold["memory_id"]]["is_compressed"] is True
-        assert len(manager.snapshot_text()) <= 80
+        payload = queue_rows[0].payload_text
+        assert "C" * 70 in payload
+        assert "H" * 70 in payload
+        assert payload.index("C" * 70) < payload.index("H" * 70)
+        assert "U" * 70 not in payload, "user-stated memory is not the machine's to consolidate"
+
+        again = manager._compress_memory_snapshot_if_needed(now_iso="2026-04-25T00:00:01+08:00")
+        assert again["consolidation_requested"] is False
+        assert again["consolidation_reason"] == "already_queued"
+        assert len(manager._read_queue_requests()) == 2
     finally:
         manager.close()
 
