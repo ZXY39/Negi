@@ -1072,14 +1072,27 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
         )
 
     def _ceo_image_multimodal_enabled_for_model_refs(self, model_refs: list[str] | None) -> bool:
-        """链上任一成员不支持图片，整条链就按不支持处理（保守 AND）。
+        """整条链的保守 AND：**只服务显示与写后回显**，不再门装配层。
 
         判据本体在 `g3ku/config/model_manager.image_multimodal_chain_decision`，与
-        `model_config` 工具的写后回显同源；这里只保留前门需要的布尔面。
+        `model_config` 工具的写后回显同源。装配层的"这一发能不能看图"用
+        `_ceo_image_multimodal_for_ref`（按当前那颗判），两者混用会让已勾多模态的链首
+        因为链尾没收图而看不到图。
         """
         from g3ku.config.model_manager import image_multimodal_chain_decision
 
         return image_multimodal_chain_decision(self._frontdoor_runtime_config(), model_refs)[0]
+
+    def _ceo_image_multimodal_for_ref(self, model_ref: Any) -> tuple[bool, str]:
+        """本轮这一发落到的那颗模型收不收图，以及它的展示名（降级文案要点名它）。"""
+        from g3ku.config.model_manager import image_multimodal_target_decision
+
+        return image_multimodal_target_decision(self._frontdoor_runtime_config(), model_ref)
+
+    def _ceo_image_multimodal_for_request(self, model_refs: list[str] | None) -> tuple[bool, str]:
+        """按链首判：链前进到别的成员时，咽喉点那侧还有同一判据兜底。"""
+        refs = [str(item or "").strip() for item in list(model_refs or []) if str(item or "").strip()]
+        return self._ceo_image_multimodal_for_ref(refs[0] if refs else "")
 
     @staticmethod
     def _web_ceo_uploaded_files_note(uploads: list[dict[str, Any]]) -> str:
@@ -1164,6 +1177,33 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
             recoverable=True,
         )
 
+    @classmethod
+    def _web_ceo_image_capability_note(
+        cls,
+        *,
+        text: str,
+        uploads: list[dict[str, Any]],
+        display_name: str,
+    ) -> str:
+        """当前模型不收图时，给每张图留一行"绝对路径 + 为什么看不到"。"""
+        from g3ku.runtime.image_capability import build_image_degradation_text
+
+        lines = []
+        for item in list(uploads or []):
+            if str(item.get("kind") or "").strip().lower() != "image":
+                continue
+            raw_path = str(item.get("path") or item.get("name") or "").strip()
+            if raw_path:
+                try:
+                    raw_path = str(Path(raw_path).expanduser().resolve())
+                except Exception:
+                    pass
+            lines.append(build_image_degradation_text(path=raw_path, display_name=display_name))
+        if not lines:
+            return str(text or "")
+        base = str(text or "").strip()
+        return "\n".join([part for part in [base, *lines] if part])
+
     def _expand_web_ceo_uploads_for_current_request_content(
         self,
         *,
@@ -1182,7 +1222,7 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
 
         raw_text = payload.get("web_ceo_raw_text")
         text_value = str(raw_text) if isinstance(raw_text, str) else self._content_text(content)
-        multimodal_enabled = self._ceo_image_multimodal_enabled_for_model_refs(model_refs)
+        multimodal_enabled, image_model_name = self._ceo_image_multimodal_for_request(model_refs)
         has_image_uploads = any(
             str(item.get("kind") or "").strip().lower() == "image"
             for item in uploads
@@ -1193,7 +1233,13 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
             else self._web_ceo_user_text_with_upload_note(text=text_value, uploads=uploads)
         )
         if not multimodal_enabled:
-            return merged_text
+            # 图不进请求，但也不能凭空消失：留绝对路径 + 点名当前模型配置，模型自己决定
+            # 用 content_open 取回还是提示用户换配置。链不因为图前进到下一位。
+            return self._web_ceo_image_capability_note(
+                text=merged_text,
+                uploads=uploads,
+                display_name=image_model_name,
+            )
 
         content_blocks: list[dict[str, Any]] = []
         if merged_text:
@@ -1447,10 +1493,14 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
         model_refs: list[str] | None,
         active_stage_goal: str = "",
     ) -> list[dict[str, Any]]:
-        if not self._ceo_image_multimodal_enabled_for_model_refs(model_refs):
+        image_enabled, image_model_name = self._ceo_image_multimodal_for_request(model_refs)
+        if not image_enabled:
             raise FrontdoorCompressionRuntimeError(
                 code="content_open_image_requires_multimodal",
-                message="非多模态模型无法打开图片",
+                message=(
+                    f"当前模型配置名称是({image_model_name})没有勾选多模态能力因此无法打开图片；"
+                    f"换到已勾选的模型配置后再试。"
+                ),
                 recoverable=True,
             )
         overlay_text = self._content_open_image_overlay_context_text(active_stage_goal=active_stage_goal)
@@ -3382,6 +3432,7 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
         turn_model_refs = list(
             state.get("model_refs") or self._resolve_ceo_model_refs_for_session(session.state.session_key) or []
         )
+        image_enabled, image_model_name = self._ceo_image_multimodal_for_request(turn_model_refs)
         return {
             "on_progress": runtime.context.on_progress,
             "emit_lifecycle": True,
@@ -3390,7 +3441,8 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
             "session_key": session.state.session_key,
             "turn_id": turn_id,
             "model_refs": turn_model_refs,
-            "image_multimodal_enabled": self._ceo_image_multimodal_enabled_for_model_refs(turn_model_refs),
+            "image_multimodal_enabled": image_enabled,
+            "image_model_display_name": image_model_name,
             "tool_contract_enforced": True,
             "callable_tool_names": list(state.get("tool_names") or []),
             "candidate_tool_names": self._frontdoor_candidate_tool_view(state),
@@ -7128,12 +7180,10 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
                 model_refs=model_refs,
             )
         )
-        multimodal_enabled = self._ceo_image_multimodal_enabled_for_model_refs(model_refs)
-        if not multimodal_enabled and self._message_content_has_multimodal_blocks(current_turn_user_content):
-            current_turn_user_content = strip_multimodal_blocks_from_message_records(
-                [{"role": "user", "content": current_turn_user_content}]
-            )[0].get("content", current_turn_user_content)
-        current_turn_has_multimodal_uploads = multimodal_enabled and self._message_content_has_multimodal_blocks(
+        # 收图与否已在装配层按当前模型判过（`_expand_web_ceo_uploads_for_current_request_content`
+        # 不支持时给的是"路径 + 原因"的文本），这里不再剥块：剥掉就等于让图凭空消失，
+        # 而链前进到别的成员时还有咽喉点那侧的同一判据兜底。
+        current_turn_has_multimodal_uploads = self._message_content_has_multimodal_blocks(
             current_turn_user_content
         )
         seed_stage_compaction_applied = False

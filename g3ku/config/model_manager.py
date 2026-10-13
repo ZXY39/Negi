@@ -63,6 +63,28 @@ def image_multimodal_chain_decision(app_config: Any, refs: Any) -> tuple[bool, l
     return bool(resolved_any and not blockers), blockers
 
 
+def image_multimodal_target_decision(app_config: Any, ref: Any) -> tuple[bool, str]:
+    """**这一发落到的那颗模型**收不收图，以及它的展示名（降级文案要点名它）。
+
+    与 `image_multimodal_chain_decision` 的分工是刻意的：整链 AND 只在"这一发可能落到链上
+    任何一颗"时才保守，而装配层问的是"当前这颗"。拿链级判据去门装配层，已勾多模态的链首
+    也会因为链尾没收图而看不到图（实盘 2026-10-13 CEO 链）。链级那份继续服务显示与写后
+    回显。解析不到这一颗时按不收图处理：运行时发不出去的东西不该假装能看图。
+    """
+    key = str(ref or "").strip()
+    getter = getattr(app_config, "get_managed_model", None)
+    if not key or not callable(getter):
+        return False, key
+    try:
+        model = getter(key)
+    except Exception:
+        model = None
+    if model is None:
+        return False, key
+    display_name = str(getattr(model, "name", "") or "").strip() or key
+    return bool(getattr(model, "image_multimodal_enabled", False)), display_name
+
+
 _UNSET = object()
 
 

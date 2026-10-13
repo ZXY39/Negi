@@ -581,6 +581,30 @@ test("同组窗口一致时不带警示档，读不到窗口的成员不参与�
     assert.equal(app.renderLoadBalanceGroupWindowAlignment(["m_nowindow"]), "");
 });
 
+test("组弹窗点名「不收图」的成员数：混勾的代价要在勾成员时看得见", () => {
+    const app = loadApp();
+    const payload = catalogPayload();
+    payload.catalog = payload.catalog.map((item) =>
+        item.key === "m_b" ? { ...item, imageMultimodalEnabled: false } : item
+    );
+    payload.catalog = [...payload.catalog, {
+        key: "m_mm",
+        enabled: true,
+        provider_model: "openai:model-mm",
+        context_window_tokens: 390000,
+        imageMultimodalEnabled: true,
+    }];
+    payload.items = payload.catalog.map((item) => item.key);
+    app.applyModelCatalog(payload, { preserveRoleDrafts: false });
+
+    const mixed = app.renderLoadBalanceGroupWindowAlignment(["m_mm", "m_b"]);
+    assert.match(mixed, /组内 1 颗不收图/);
+    assert.match(mixed, /title="m_b"/);
+    // 全收图的组不给这条；读不到开关（旧记录没这个字段）也不算不收图。
+    assert.doesNotMatch(app.renderLoadBalanceGroupWindowAlignment(["m_mm"]), /不收图/);
+    assert.doesNotMatch(app.renderLoadBalanceGroupWindowAlignment(["m_emergency"]), /不收图/);
+});
+
 test("组弹窗的这行随勾选更新：压低整组上限的那一刻要当场看见", () => {
     const { app, elements } = loadModelPage();
     const body = elements["model-group-dialog-body"];

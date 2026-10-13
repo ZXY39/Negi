@@ -63,7 +63,22 @@ class ContentTool:
         return bool(payload.get('image_multimodal_enabled'))
 
     @staticmethod
-    def _image_open_rejected_payload() -> dict[str, Any]:
+    def _runtime_image_model_display_name(runtime: dict[str, Any] | None) -> str:
+        payload = runtime if isinstance(runtime, dict) else {}
+        return str(payload.get('image_model_display_name') or '').strip()
+
+    @staticmethod
+    def _image_open_rejected_payload(display_name: str = '') -> dict[str, Any]:
+        # 点名当前模型配置：模型要能自己判断"是这颗没勾"而不是"图坏了"，才会去换配置或
+        # 告诉用户，而不是原地重试同一颗。
+        if str(display_name or '').strip():
+            return {
+                'ok': False,
+                'error': (
+                    f'当前模型配置名称是({str(display_name).strip()})没有勾选多模态能力因此无法打开图片；'
+                    f'换到已勾选多模态的模型配置后再试。'
+                ),
+            }
         return {'ok': False, 'error': '非多模态模型无法打开图片'}
 
     @staticmethod
@@ -114,7 +129,7 @@ class ContentTool:
         if not self._content_store.is_image_mime_type(descriptor.get('mime_type')):
             return None
         if not self._runtime_image_multimodal_enabled(runtime):
-            return self._image_open_rejected_payload()
+            return self._image_open_rejected_payload(self._runtime_image_model_display_name(runtime))
         return self._image_open_success_payload(descriptor=descriptor, target=target)
 
     def _execute_operation(

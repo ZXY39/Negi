@@ -564,11 +564,11 @@ class ReActToolLoop:
                     current_model_routes = None
                 if current_model_routes is not None and list(current_model_routes.load_balance_group_keys or []):
                     current_model_refs = list(current_model_routes.candidate_model_keys) or current_model_refs
-            # 多模态闸门按整条链取保守交集：这一发实际打到哪个成员要等准入与失败切换才定，
-            # 所以「图片进不进请求体」必须对链上每个可能被打到的成员都成立。判据只有
-            # `_image_multimodal_enabled_for_model_refs` 一份，工具道（_call_runtime_context
-            # 读同一函数）与拼图道因此不可能再分叉。
-            image_multimodal_enabled = self._image_multimodal_enabled_for_model_refs(current_model_refs)
+            # 多模态闸门按**这一发落到的那颗模型**判（装配时是链首；真打到别的成员时由
+            # `chat_backend` 咽喉点的同一判据兜底降级）。不再取整条链的保守交集——那会让
+            # 已勾多模态的链首因为链尾不收图而看不到图。判据一份：`_image_multimodal_for_request`，
+            # 工具道（下面 `_call_runtime_context` 读同一函数）与拼图道不分叉。
+            image_multimodal_enabled = self._image_multimodal_for_request(current_model_refs)[0]
             # prompt cache key 里的模型身份：含组时用稳定的 route signature，不再把候选
             # 数组当成模型身份（候选顺序不代表实际被选中的成员）。
             prompt_cache_model_refs = current_model_refs
@@ -3903,7 +3903,7 @@ class ReActToolLoop:
         ) -> dict[str, Any]:
             granted = bool(runtime_context.get('stage_turn_granted')) if stage_turn_granted is None else bool(stage_turn_granted)
             free_pass_kind = str(stage_free_pass_kind or '').strip()
-            image_multimodal_enabled = self._image_multimodal_enabled_for_model_refs(current_model_refs)
+            image_multimodal_enabled, image_model_display_name = self._image_multimodal_for_request(current_model_refs)
             return {
                 **runtime_context,
                 'current_tool_call_id': call.id,
@@ -3918,6 +3918,7 @@ class ReActToolLoop:
                 'stage_turn_granted': granted,
                 'stage_free_pass_kind': free_pass_kind,
                 'image_multimodal_enabled': image_multimodal_enabled,
+                'image_model_display_name': image_model_display_name,
             }
 
         def _blocked_call_result(index: int, call: Any, *, error_content: str) -> dict[str, Any]:
@@ -8552,6 +8553,22 @@ class ReActToolLoop:
         except Exception:
             config = None
         return image_multimodal_chain_decision(config, model_refs)[0]
+
+    @staticmethod
+    def _image_multimodal_for_request(model_refs: list[str] | None) -> tuple[bool, str]:
+        """这一发落到的那颗模型收不收图 + 它的展示名（装配时按链首，真换人由咽喉点兜底）。
+
+        与 `_image_multimodal_enabled_for_model_refs`（整链 AND，只服务显示）是两回事：
+        拿链级判据门装配层，已勾多模态的链首也会因为链尾不收图而看不到图。
+        """
+        from g3ku.config.model_manager import image_multimodal_target_decision
+
+        refs = [str(item or '').strip() for item in list(model_refs or []) if str(item or '').strip()]
+        try:
+            config, _revision, _changed = get_runtime_config(force=False)
+        except Exception:
+            config = None
+        return image_multimodal_target_decision(config, refs[0] if refs else '')
 
     @staticmethod
     def _tool_result_content_open_image_payload(raw_result: Any) -> dict[str, Any] | None:
