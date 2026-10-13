@@ -978,6 +978,42 @@ class ConfigChatBackend:
         except (TypeError, ValueError):
             return 0
 
+    def _degrade_image_blocks_for_target(
+        self,
+        *,
+        target: Any,
+        request_messages: list[dict[str, Any]],
+        preview_payload: dict[str, Any] | None = None,
+    ) -> list[dict[str, Any]]:
+        """这一发的目标模型不收图时，把请求体里的图片块原地换成"路径 + 原因"文本块。
+
+        判据与装配层同源（`g3ku/config/model_manager.image_multimodal_target_decision`），
+        按 `target.provider_ref` 这一颗读而不是整条链。咽喉点没有上传记录，路径落
+        `(inline)`——它是诚实的占位，不是编出来的路径。
+        """
+        from g3ku.config.model_manager import image_multimodal_target_decision
+        from g3ku.runtime.image_capability import degrade_image_blocks_in_messages
+
+        model_ref = str(getattr(target, "provider_ref", "") or "").strip()
+        enabled, display_name = image_multimodal_target_decision(self._config, model_ref)
+        if enabled:
+            return request_messages
+        degraded, degraded_count = degrade_image_blocks_in_messages(
+            list(request_messages or []),
+            display_name=display_name,
+        )
+        if not degraded_count:
+            return request_messages
+        if isinstance(preview_payload, dict):
+            # 落盘 artifact 与实发体保持同一份消息，否则取证会读到"发出去了图"的假象。
+            preview_payload["messages"] = list(degraded)
+        logger.warning(
+            "Model {} does not accept images: {} image block(s) degraded to path notes for this request",
+            model_ref,
+            degraded_count,
+        )
+        return degraded
+
     def _resolve_group_slot_ref(
         self,
         *,
@@ -1360,6 +1396,15 @@ class ConfigChatBackend:
                 request_messages = sanitize_provider_messages(preview_payload.get("messages"))
                 request_tools = list(preview_payload.get("tools") or []) or None
                 stable_prompt_cache_key = str(preview_payload.get("prompt_cache_key") or "").strip()
+                # 图片能力按**这一发落到的这颗模型**判：装配层（前门/节点拼图道）手里有上传
+                # 路径，能就地给出"路径 + 原因"；这里兜住其余车道与"链前进到不收图的成员"。
+                # 降级不抛错、也不让链前进——收不收图与"该用哪颗模型"是两条独立判断，混在
+                # 一起会让一次带图请求把整条链烧穿。
+                request_messages = self._degrade_image_blocks_for_target(
+                    target=base_target,
+                    request_messages=request_messages,
+                    preview_payload=preview_payload,
+                )
                 rounds_used = 0
                 model_last_error: Exception | None = None
                 model_last_response: LLMResponse | None = None

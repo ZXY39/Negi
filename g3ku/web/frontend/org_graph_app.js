@@ -11876,11 +11876,28 @@ function loadBalanceGroupWindowSummary(members) {
 // 组卡、组列卡）不显示这行——位置留给成员与链状态，窗口口径只在正改成员的那一刻要看。
 function renderLoadBalanceGroupWindowAlignment(members) {
     const summary = loadBalanceGroupWindowSummary(members);
-    if (!summary) return "";
-    // 数字保持与「编辑模型」里那个窗口输入框同形（裸整数），这台机器的 locale 会给千分位，
-    // 显示层不复算格式，两处读数才对得上。
-    const tone = summary.spread > 0 ? "risk-high" : "neutral";
-    return `<span class="policy-chip ${tone}" title="对齐到最小那颗 ${esc(summary.minKey)}=${summary.minWindow}；组内最大 ${summary.maxWindow}">组内最大上下文对齐: ${summary.minWindow}</span>`;
+    const imageBlockers = (members || [])
+        .map((key) => modelRefItem(key))
+        .filter((item) => item && ceoModelItemSupportsImage(item) === false)
+        .map((item) => String(item.key || "").trim())
+        .filter(Boolean);
+    const chips = [];
+    if (summary) {
+        // 数字保持与「编辑模型」里那个窗口输入框同形（裸整数），这台机器的 locale 会给千分位，
+        // 显示层不复算格式，两处读数才对得上。
+        const tone = summary.spread > 0 ? "risk-high" : "neutral";
+        chips.push(
+            `<span class="policy-chip ${tone}" title="对齐到最小那颗 ${esc(summary.minKey)}=${summary.minWindow}；组内最大 ${summary.maxWindow}">组内最大上下文对齐: ${summary.minWindow}</span>`,
+        );
+    }
+    // 多模态现在按"这一发落到的那颗"判，混勾的组里带图请求会不会看图取决于粘滞到哪一颗：
+    // 这层不确定性要在勾成员的那一刻就看见，但不改任何行为。
+    if (imageBlockers.length) {
+        chips.push(
+            `<span class="policy-chip risk-high" title="${esc(imageBlockers.join(" "))}">组内 ${imageBlockers.length} 颗不收图</span>`,
+        );
+    }
+    return chips.join("");
 }
 
 // 链上「一跳是一个组」的那张卡。模型页的角色链由 org_graph_llm.js 渲染（它覆盖了
