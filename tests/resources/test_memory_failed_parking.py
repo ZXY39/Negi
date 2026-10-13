@@ -672,3 +672,100 @@ async def test_parking_emits_audit_event_with_memory_source(tmp_path: Path, monk
     finally:
         manager.close()
         audit_events.configure_audit_sink(None)
+
+
+@pytest.mark.asyncio
+async def test_failed_read_projects_payload_while_requeue_keeps_full_payload(tmp_path: Path) -> None:
+    """读侧只投首屏，投影不许漏进回队路径：重试必须拿回完整载荷。"""
+    module = _load_memory_agent_runtime_module()
+    manager = module.MemoryManager(tmp_path, _memory_cfg())
+    try:
+        payload_text = "x" * 50_000
+        batch = module.MemoryBatch(
+            op="write",
+            items=[
+                module.MemoryQueueRequest(
+                    op="write",
+                    decision_source="user",
+                    payload_text=payload_text,
+                    created_at="2026-04-18T10:00:00+08:00",
+                    request_id="write_big",
+                )
+            ],
+        )
+        record = manager._park_failed_batch(
+            batch,
+            category="provider_error",
+            discard_reason="provider_error",
+            error="boom",
+            now_iso="2026-04-18T10:00:05+08:00",
+        )
+
+        page = await manager.list_failed_page(limit=20)
+        item = page["items"][0]["items"][0]
+        assert len(item["payload_text"]) == 4000
+        assert item["payload_char_count"] == 50_000
+        assert item["payload_truncated"] is True
+        stored = _read_jsonl(tmp_path / "memory" / "failed.jsonl")[0]["items"][0]["payload_text"]
+        assert len(stored) == 50_000, "停车区仍要留完整载荷，否则回队时没有原文"
+
+        await manager.retry_failed_record(record["failed_id"])
+        rows = await manager.list_queue(limit=10)
+        assert len(rows[0]["payload_text"]) == 50_000
+    finally:
+        manager.close()
+
+
+@pytest.mark.asyncio
+async def test_failed_payload_window_pages_to_the_end_by_delivered_chars(tmp_path: Path) -> None:
+    """取全文按响应里**实际交付**的字符区间推进：逐段拼起来必须等于原文。"""
+    module = _load_memory_agent_runtime_module()
+    manager = module.MemoryManager(tmp_path, _memory_cfg())
+    try:
+        payload_text = "".join(f"line-{index:06d}\n" for index in range(5000))  # 60000 字符
+        batch = module.MemoryBatch(
+            op="write",
+            items=[
+                module.MemoryQueueRequest(
+                    op="write",
+                    decision_source="user",
+                    payload_text=payload_text,
+                    created_at="2026-04-18T10:00:00+08:00",
+                    request_id="write_paged",
+                )
+            ],
+        )
+        record = manager._park_failed_batch(
+            batch,
+            category="window_refusal",
+            discard_reason="window_refusal",
+            error="memory send exceeds model window: 估算=525367 容量=366000 窗口=390000",
+            now_iso="2026-04-18T10:00:05+08:00",
+        )
+
+        first = (await manager.list_failed_page(limit=20))["items"][0]["items"][0]
+        pieces = [first["payload_text"]]
+        cursor = len(first["payload_text"]) + 1
+        screens = 0
+        while True:
+            window = await manager.get_failed_payload_window(
+                record["failed_id"], request_id="write_paged", start_char=cursor
+            )
+            screens += 1
+            assert window["start_char"] == cursor
+            assert window["end_char"] - window["start_char"] + 1 == len(window["text"])
+            assert window["char_count"] == len(payload_text)
+            assert len(window["text"]) <= 20_000
+            pieces.append(window["text"])
+            if not window["truncated"]:
+                break
+            cursor = window["end_char"] + 1
+        assert "".join(pieces) == payload_text
+        assert screens == 3, f"60000 字符首屏 4000 之后应当三屏取尽，实得 {screens}"
+
+        with pytest.raises(KeyError):
+            await manager.get_failed_payload_window("failed_missing", request_id="write_paged")
+        with pytest.raises(KeyError):
+            await manager.get_failed_payload_window(record["failed_id"], request_id="write_absent")
+    finally:
+        manager.close()

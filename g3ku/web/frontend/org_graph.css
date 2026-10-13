@@ -10378,6 +10378,41 @@ textarea {
     scrollbar-gutter: stable;
 }
 
+/* 失败记忆正文的按条分块：正文只投首屏，取全文往这一块尾部追加，盒子仍按固定框滚动 */
+.memory-detail-payload-item + .memory-detail-payload-item {
+    margin-top: 14px;
+    padding-top: 14px;
+    border-top: 1px dashed color-mix(in srgb, var(--border-color) 82%, transparent);
+}
+
+.memory-detail-payload-head {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px 12px;
+    align-items: baseline;
+    justify-content: space-between;
+    margin-bottom: 6px;
+    font-size: 0.78rem;
+}
+
+.memory-detail-payload-request {
+    color: var(--text-primary);
+    font-weight: 700;
+    overflow-wrap: anywhere;
+}
+
+.memory-detail-payload-range {
+    color: color-mix(in srgb, var(--text-secondary) 88%, transparent);
+}
+
+.memory-detail-payload-text {
+    color: var(--text-primary);
+}
+
+.memory-detail-payload-more {
+    margin-top: 10px;
+}
+
 /* Structured per-memory change blocks (processed-memory 变更内容) */
 .memory-change-list {
     display: grid;

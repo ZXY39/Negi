@@ -1251,6 +1251,14 @@ class ApiClient {
         };
     }
 
+    // 失败记忆正文的按需一屏（列表口只投首屏，整份载荷不进浏览器）。
+    static async getMemoryFailedPayload({ failedId = "", requestId = "", startChar = 1 } = {}) {
+        return this.get(`/api/memory/failed/${encodeURIComponent(failedId)}/payload`, {
+            request_id: requestId,
+            start_char: startChar,
+        });
+    }
+
     // 重试 / 放弃会把整本 ops.jsonl 台账读一遍再全量重写（当前 13.5 MB），
     // 默认 10s 会在服务端其实已经改完时先放弃，界面报「失败」而记录已经没了。
     static async retryMemoryFailed(failedId, reason = "manual") {

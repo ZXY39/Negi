@@ -2527,6 +2527,44 @@ async def get_memory_failed(
     }
 
 
+@router.get('/memory/failed/{failed_id}/payload')
+async def get_memory_failed_payload(
+    failed_id: str,
+    request_id: str = Query(''),
+    start_char: int = Query(1, ge=1),
+):
+    """失败记忆正文的按需一屏。
+
+    列表口只投载荷首屏（`items[].payload_truncated`），取全文走这里：字符寻址、
+    响应里的 `start_char`/`end_char` 是本次**实际交付**的区间，前端按它推进，
+    不按请求参数推进——单条 MB 级载荷就是这样把详情抽屉冻住的。
+    """
+    manager = _runtime_memory_manager()
+    reader = getattr(manager, 'get_failed_payload_window', None)
+    if not callable(reader):
+        raise HTTPException(status_code=503, detail='memory_failed_unavailable')
+    try:
+        item = await reader(
+            str(failed_id or '').strip(),
+            request_id=str(request_id or '').strip(),
+            start_char=int(start_char or 1),
+        )
+    except KeyError as exc:
+        raise HTTPException(
+            status_code=404,
+            detail={
+                'code': 'memory_failed_not_found',
+                'message': str(exc or 'failed memory record not found'),
+            },
+        ) from exc
+    except Exception as exc:
+        raise _memory_read_error(
+            code='memory_failed_payload_read_failed',
+            message='失败记忆正文暂时不可读取，请稍后刷新。',
+        ) from exc
+    return {'ok': True, 'item': dict(item or {})}
+
+
 async def _mutate_memory_failed_record(
     manager: Any,
     failed_id: str,
