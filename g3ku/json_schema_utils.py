@@ -144,7 +144,7 @@ def _tighten_object_field_types(schema: dict[str, Any]) -> dict[str, Any]:
     provider-visible contract stays a strict object. ``["object", "null"]``
     (optionality only) is preserved; ``null`` is kept as an additional member
     when present. Fields without a declared ``properties`` shape are untouched,
-    so genuinely open unions (e.g. memory_write ``value``) are unaffected.
+    so genuinely open unions are unaffected.
     """
     if not isinstance(schema, dict):
         return schema

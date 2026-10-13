@@ -33,16 +33,9 @@ DEFAULT_TOOL_GOVERNANCE: dict[str, dict[str, Any]] = {
         'destructive': True,
         'allowed_roles': ['ceo'],
     },
-    'memory_write': {
-        'display_name': 'Write Memory',
-        'description': 'Write explicit permanent memory items.',
-        'risk_level': 'medium',
-        'destructive': False,
-        'allowed_roles': ['ceo'],
-    },
-    'memory_delete': {
-        'display_name': 'Delete Memory',
-        'description': 'Delete remembered content from the committed MEMORY.md snapshot using a natural-language description.',
+    'memory_update': {
+        'display_name': 'Update Memory',
+        'description': 'Queue a natural-language request to remember, revise, or forget long-term memory.',
         'risk_level': 'medium',
         'destructive': True,
         'allowed_roles': ['ceo'],

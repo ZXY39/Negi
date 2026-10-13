@@ -18,7 +18,7 @@ def test_frontdoor_prompt_cache_key_ignores_dynamic_appendix_changes_when_stable
     ]
     tool_schemas = [
         {
-            "name": "memory_write",
+            "name": "memory_update",
             "description": "",
             "parameters": {"type": "object"},
         }
@@ -60,7 +60,7 @@ def test_frontdoor_prompt_cache_key_changes_when_capability_revision_changes() -
     ]
     tool_schemas = [
         {
-            "name": "memory_write",
+            "name": "memory_update",
             "description": "",
             "parameters": {"type": "object"},
         }
@@ -99,7 +99,7 @@ def test_frontdoor_prompt_cache_key_changes_when_exposure_revision_changes() -> 
     ]
     tool_schemas = [
         {
-            "name": "memory_write",
+            "name": "memory_update",
             "description": "",
             "parameters": {"type": "object"},
         }

@@ -9,4 +9,4 @@ Load detailed note content for a `ref:note_xxxx` entry already visible in `MEMOR
 ## Do Not Use
 
 - Guessing note refs that are not visible in the current memory snapshot.
-- Replacing `memory_write` or `memory_delete`.
+- Writing, revising, or forgetting memory (that is `memory_update`).

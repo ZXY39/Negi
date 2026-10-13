@@ -6,7 +6,7 @@ from types import SimpleNamespace
 import pytest
 
 from g3ku.agent.tools.base import Tool
-from g3ku.agent.tools.memory_write import MemoryWriteTool
+from g3ku.agent.tools.memory_update import MemoryUpdateTool
 from g3ku.config.schema import MemoryAssemblyConfig
 from g3ku.core.messages import UserInputMessage
 from g3ku.runtime.frontdoor import _ceo_create_agent_impl as create_agent_impl
@@ -226,10 +226,10 @@ class _CreateAsyncTaskLikeTool(Tool):
         return kwargs
 
 
-class _MemoryWriteLikeTool(Tool):
+class _StructuredFactsTool(Tool):
     @property
     def name(self) -> str:
-        return "memory_write"
+        return "record_facts"
 
     @property
     def description(self) -> str:
@@ -7056,10 +7056,10 @@ def test_create_agent_prompt_contract_keeps_request_body_prefix_before_same_turn
 
 
 async def test_create_agent_frontdoor_execute_tool_call_normalizes_nested_array_object_arguments() -> None:
-    tool = _MemoryWriteLikeTool()
+    tool = _StructuredFactsTool()
 
     normalized_arguments = ceo_runtime_ops._normalize_frontdoor_tool_arguments(
-        "memory_write",
+        "record_facts",
         {
             "facts": [
                 {
@@ -7085,7 +7085,7 @@ async def test_create_agent_frontdoor_execute_tool_call_normalizes_nested_array_
 
     result_text, status, _started_at, _finished_at, _elapsed_seconds = await runner._execute_tool_call(
         tool=tool,
-        tool_name="memory_write",
+        tool_name="record_facts",
         arguments=dict(normalized_arguments or {}),
         runtime_context={},
         on_progress=None,
@@ -7106,9 +7106,9 @@ async def test_create_agent_frontdoor_execute_tool_call_omits_unset_optional_nes
                 "trigger_source": kwargs.get("trigger_source"),
             }
 
-    tool = MemoryWriteTool(manager=_FakeMemoryManager())
+    tool = MemoryUpdateTool(manager=_FakeMemoryManager())
     normalized_arguments = ceo_runtime_ops._normalize_frontdoor_tool_arguments(
-        "memory_write",
+        "memory_update",
         {"content": "remember this preference"},
     )
 
@@ -7122,7 +7122,7 @@ async def test_create_agent_frontdoor_execute_tool_call_omits_unset_optional_nes
 
     result_text, status, _started_at, _finished_at, _elapsed_seconds = await runner._execute_tool_call(
         tool=tool,
-        tool_name="memory_write",
+        tool_name="memory_update",
         arguments=dict(normalized_arguments or {}),
         runtime_context={"session_key": "web:shared"},
         on_progress=None,
@@ -7134,7 +7134,7 @@ async def test_create_agent_frontdoor_execute_tool_call_omits_unset_optional_nes
     assert payload["session_key"] == "web:shared"
     assert payload["decision_source"] == "user"
     assert payload["payload_text"] == "remember this preference"
-    assert payload["trigger_source"] == "memory_write_tool"
+    assert payload["trigger_source"] == "memory_update_tool"
 
 @pytest.mark.asyncio
 async def test_create_agent_frontdoor_execute_tool_call_appends_loader_guidance_for_parameter_like_execute_errors() -> None:
@@ -7365,7 +7365,7 @@ def test_create_agent_runner_preserves_full_tool_call_payloads_when_approval_req
         "tool_calls": [{"name": "create_async_task", "arguments": {"task": "demo"}}],
         "tool_call_payloads": [
             {"name": "create_async_task", "arguments": {"task": "demo"}},
-            {"name": "memory_write", "arguments": {"content": "persist this"}},
+            {"name": "memory_update", "arguments": {"content": "persist this"}},
         ],
     }
 
@@ -7382,7 +7382,7 @@ def test_create_agent_runner_preserves_full_tool_call_payloads_when_approval_req
 
     assert exc_info.value.values["tool_call_payloads"] == [
         {"name": "create_async_task", "arguments": {"task": "demo"}},
-        {"name": "memory_write", "arguments": {"content": "persist this"}},
+        {"name": "memory_update", "arguments": {"content": "persist this"}},
     ]
 
 
@@ -7501,8 +7501,8 @@ def test_frontdoor_stage_gate_whitelists_memory_tools_and_node_error_stageless()
     runner = create_agent_impl.CreateAgentCeoFrontDoorRunner(loop=SimpleNamespace(main_task_service=None))
     stage_state = {"active_stage_id": "", "transition_required": False, "stages": []}
 
-    # memory 三个工具全局白名单：无活动阶段也能调
-    for name in ("memory_write", "memory_delete", "memory_note"):
+    # memory 两个工具全局白名单：无活动阶段也能调
+    for name in ("memory_update", "memory_note"):
         assert runner._frontdoor_stage_gate_error(tool_name=name, stage_state=stage_state) == ""
     # 非白名单工具仍被拦
     assert runner._frontdoor_stage_gate_error(tool_name="manage_task_nodes", stage_state=stage_state) != ""

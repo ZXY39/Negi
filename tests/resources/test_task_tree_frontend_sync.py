@@ -2897,7 +2897,7 @@ def test_summary_execution_trace_preview_fields_render_tool_arguments_and_output
                       tools: [
                         {
                           tool_call_id: "call-1",
-                          tool_name: "memory_write",
+                          tool_name: "memory_update",
                           arguments_preview: '{"facts":[{"attribute":"default_document_save_location"}]}',
                           output_preview: 'Error: facts[0] should be object',
                           status: "error",
@@ -2960,7 +2960,7 @@ def test_summary_execution_trace_round_with_tool_names_only_renders_placeholder_
                     {
                       round_id: "round:2",
                       round_index: 2,
-                      tool_names: ["memory_write"],
+                      tool_names: ["memory_update"],
                       tool_call_ids: ["call-2"],
                       tools: [],
                     },
@@ -2974,7 +2974,7 @@ def test_summary_execution_trace_round_with_tool_names_only_renders_placeholder_
 
         console.log(JSON.stringify({
           showsEmptyRoundPlaceholder: html.includes("本轮暂无工具记录"),
-          hasToolChip: html.includes("memory_write"),
+          hasToolChip: html.includes("memory_update"),
         }));
         """
     )
@@ -2996,7 +2996,7 @@ def test_execution_trace_summary_drops_empty_round_shells_before_ui() -> None:
                         {
                             "round_id": "round:phantom",
                             "round_index": 1,
-                            "tool_names": ["memory_write"],
+                            "tool_names": ["memory_update"],
                             "tool_call_ids": ["call-phantom"],
                             "tools": [],
                         },
@@ -3081,7 +3081,7 @@ def test_summary_execution_trace_no_tool_records_skips_empty_round_shells() -> N
                     {
                       round_id: "round:phantom",
                       round_index: 1,
-                      tool_names: ["memory_write"],
+                      tool_names: ["memory_update"],
                       tool_call_ids: ["call-phantom"],
                       tools: [],
                     },
@@ -3096,7 +3096,7 @@ def test_summary_execution_trace_no_tool_records_skips_empty_round_shells() -> N
         console.log(JSON.stringify({
           roundCount: trace.stages[0]?.rounds?.length || 0,
           showsEmptyRoundPlaceholder: html.includes("鏈疆鏆傛棤宸ュ叿璁板綍"),
-          hasToolChip: html.includes("memory_write"),
+          hasToolChip: html.includes("memory_update"),
         }));
         """
     )

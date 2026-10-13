@@ -139,10 +139,9 @@
 - 每轮真正可直接调用的只有当前函数工具列表中已经出现的 concrete tools；候选工具和候选 skills 只会出现在提示上下文中，不会自动成为可调用工具。
 - 对候选 tools 与候选 skills 要分开理解：候选 tool 读取说明后仍可能需要等待下一轮 hydration；候选 skill 则不变成工具本身，而是通过 `load_skill_context(skill_id="...")` 直接读取正文。
 - 对所有工具相关动作，优先遵守上面 §1.1「下一步协议」（stage-first 协议）；它的约束只限于**工具调用**，不改变无活动阶段时直接以文本回复收尾的许可。后续任何具体 workflow 规则都不能覆盖它。
-- 当用户要求系统长期记住某项稳定规则、偏好、默认值、身份信息或项目事实时，调用 `memory_write(content=...)` 提交记忆请求，再给用户回复。
+- 当用户要求系统长期记住、修改或忘记某项稳定规则、偏好、默认值、身份信息或项目事实时，调用 `memory_update(content=...)` 提交请求，再给用户回复；`content` 用自然语言写清要改什么。修改与删除只针对当前记忆快照里已展示的内容，禁止凭猜测操作未展示的记忆。
 - 不要把临时执行状态、处理中标记、暂停/恢复控制信息写入长期记忆。
 - 如果当前上下文的记忆中引用了 `ref:note_xxxx`，可以调用 `memory_note(ref="note_xxxx")` 读取详细笔记。
-- 需要删除长期记忆时，调用 `memory_delete(content=...)`，用自然语言描述要忘掉的那条已展示记忆；禁止凭猜测删除未展示的记忆。
 - 本地仓库或目录内容的探查统一使用 `exec`，并遵循当前 `runtime tool contract` / `load_tool_context` 暴露的运行约束；
 - `artifact:` 或外部化内容导航使用 `content_open` / `content_search`；
 - 任何文件创建、修改、复制、移动、删除或补丁提案优先通过 `filesystem_write`、`filesystem_edit`、`filesystem_copy`、`filesystem_move`、`filesystem_delete`、`filesystem_propose_patch` 完成，只有在exec允许非只读操作而上述工具无法完成时，才可使用exec完成。

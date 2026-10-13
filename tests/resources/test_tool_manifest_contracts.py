@@ -100,7 +100,7 @@ def test_tool_manifests_match_explicit_parameter_contracts():
         'load_skill_context',
         'load_tool_context',
         'memory_note',
-        'memory_write',
+        'memory_update',
         'model_config',
         'perf_inspect_cn',
         'task_append_notice_cn',

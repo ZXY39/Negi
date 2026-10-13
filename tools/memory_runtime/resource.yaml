@@ -84,8 +84,7 @@ settings:
     - task_progress
     - task_stats
     - task_summary
-    - memory_write
-    - memory_delete
+    - memory_update
     - memory_note
     - load_skill_context
     - load_tool_context

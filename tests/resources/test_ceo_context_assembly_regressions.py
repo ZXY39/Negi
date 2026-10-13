@@ -329,9 +329,10 @@ def _stage_history_with_global_zone() -> tuple[list[dict[str, object]], dict[str
 def test_ceo_prompt_builder_keeps_memory_guidance() -> None:
     builder = CeoPromptBuilder(loop=SimpleNamespace(workspace=Path.cwd()))
     prompt = builder.build(skills=[])
-    assert "memory_write" in prompt
-    assert "memory_delete" in prompt
+    assert "memory_update" in prompt
     assert "memory_note" in prompt
+    assert "memory_write" not in prompt
+    assert "memory_delete" not in prompt
     assert "长期记忆" in prompt
     assert "submit_next_stage" in prompt
 
@@ -769,7 +770,7 @@ async def test_message_builder_uses_memory_write_hint_without_memory_retrieval_o
         exposure={
             "skills": [_skill("focused-skill", "Primary workflow")],
             "tools": [_tool_resource_record("agent_browser", "Browser automation via semantic shortlist.")],
-            "tool_names": ["filesystem", "agent_browser", "memory_write"],
+            "tool_names": ["filesystem", "agent_browser", "memory_update"],
         },
         persisted_session=None,
     )
@@ -1023,16 +1024,14 @@ async def test_message_builder_excludes_fixed_builtin_resource_tools_from_semant
             "skills": [],
             "tools": [
                 _tool_resource_record("exec", "Read-only shell helper."),
-                _tool_resource_record("memory_write", "Write explicit permanent memory items."),
-                _tool_resource_record("memory_delete", "Delete remembered content."),
+                _tool_resource_record("memory_update", "Queue natural-language memory requests."),
                 _tool_resource_record("memory_note", "Load a detailed memory note by short ref."),
                 _tool_resource_record("agent_browser", "Browser automation via semantic shortlist."),
             ],
             "tool_names": [
                 "load_tool_context",
                 "exec",
-                "memory_write",
-                "memory_delete",
+                "memory_update",
                 "memory_note",
                 "agent_browser",
             ],
@@ -1049,8 +1048,7 @@ async def test_message_builder_excludes_fixed_builtin_resource_tools_from_semant
     assert semantic_tool_ids == ["agent_browser"]
     assert result.candidate_tool_names[0] == "agent_browser"
     assert "exec" not in result.candidate_tool_names
-    assert "memory_write" not in result.candidate_tool_names
-    assert "memory_delete" not in result.candidate_tool_names
+    assert "memory_update" not in result.candidate_tool_names
     assert "memory_note" not in result.candidate_tool_names
 
 
@@ -1151,7 +1149,7 @@ async def test_message_builder_moves_turn_specific_context_into_overlay_for_stab
         exposure={
             "skills": [_skill("focused-skill", "Primary workflow")],
             "tools": [_tool_resource_record("agent_browser", "Browser automation via semantic shortlist.")],
-            "tool_names": ["filesystem", "agent_browser", "memory_write"],
+            "tool_names": ["filesystem", "agent_browser", "memory_update"],
         },
         persisted_session=persisted_session,
         user_content="from now on default to the focused browser workflow",
@@ -1200,7 +1198,7 @@ async def test_message_builder_exposes_dynamic_appendix_messages_for_prompt_cach
         exposure={
             "skills": [_skill("focused-skill", "Primary workflow")],
             "tools": [_tool_resource_record("agent_browser", "Browser automation via semantic shortlist.")],
-            "tool_names": ["filesystem", "agent_browser", "memory_write"],
+            "tool_names": ["filesystem", "agent_browser", "memory_update"],
         },
         persisted_session=persisted_session,
         user_content="from now on default to the focused browser workflow",
@@ -3326,7 +3324,7 @@ async def test_ceo_context_assembly_injects_memory_snapshot_without_legacy_memor
             assembly=SimpleNamespace(
                 skill_inventory_top_k=16,
                 extension_tool_top_k=16,
-                core_tools=["memory_write", "memory_delete", "memory_note"],
+                core_tools=["memory_update", "memory_note"],
             )
         ),
     )
@@ -3340,7 +3338,7 @@ async def test_ceo_context_assembly_injects_memory_snapshot_without_legacy_memor
     result = await builder._collect_turn_context_sources(
         session=session,
         query_text="记住这个规则",
-        exposure={"tool_names": ["memory_write", "memory_delete", "memory_note"], "tools": [], "skills": []},
+        exposure={"tool_names": ["memory_update", "memory_note"], "tools": [], "skills": []},
         user_content="记住这个规则",
         hydrated_tool_names=[],
     )
@@ -3375,7 +3373,7 @@ async def test_frontdoor_uses_frozen_memory_snapshot_only_once_per_turn() -> Non
             assembly=SimpleNamespace(
                 skill_inventory_top_k=16,
                 extension_tool_top_k=16,
-                core_tools=["memory_write", "memory_delete", "memory_note"],
+                core_tools=["memory_update", "memory_note"],
             )
         ),
     )
@@ -3389,7 +3387,7 @@ async def test_frontdoor_uses_frozen_memory_snapshot_only_once_per_turn() -> Non
     result = await builder._collect_turn_context_sources(
         session=session,
         query_text="remember this rule",
-        exposure={"tool_names": ["memory_write", "memory_delete", "memory_note"], "tools": [], "skills": []},
+        exposure={"tool_names": ["memory_update", "memory_note"], "tools": [], "skills": []},
         user_content="remember this rule",
         hydrated_tool_names=[],
     )
@@ -3413,7 +3411,7 @@ async def test_ceo_context_assembly_keeps_memory_snapshot_out_of_turn_overlay_an
             assembly=SimpleNamespace(
                 skill_inventory_top_k=16,
                 extension_tool_top_k=16,
-                core_tools=["memory_write", "memory_delete", "memory_note"],
+                core_tools=["memory_update", "memory_note"],
             )
         ),
     )
@@ -3427,7 +3425,7 @@ async def test_ceo_context_assembly_keeps_memory_snapshot_out_of_turn_overlay_an
     result = await builder.build_for_ceo(
         session=session,
         query_text="remember this",
-        exposure={"tool_names": ["memory_write", "memory_delete", "memory_note"], "tools": [], "skills": []},
+        exposure={"tool_names": ["memory_update", "memory_note"], "tools": [], "skills": []},
         persisted_session=None,
         user_content="remember this",
     )
@@ -3480,7 +3478,7 @@ async def _collect(builder: CeoMessageBuilder, session: SimpleNamespace) -> dict
     return await builder._collect_turn_context_sources(
         session=session,
         query_text="ordinary question",
-        exposure={"tool_names": ["memory_write"], "tools": [], "skills": []},
+        exposure={"tool_names": ["memory_update"], "tools": [], "skills": []},
         user_content="ordinary question",
         hydrated_tool_names=[],
     )

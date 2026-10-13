@@ -324,7 +324,7 @@ def _declaration_loop(tmp_path: Path):
         "active_round_id": "round-1",
         "pending_tool_calls": [
             {"id": "call-read", "name": "content_search", "arguments": {"query": "needle"}},
-            {"id": "call-write", "name": "memory_write", "arguments": {"content": "note"}},
+            {"id": "call-write", "name": "memory_update", "arguments": {"content": "note"}},
         ],
         "tool_calls": [],
     }
@@ -366,7 +366,7 @@ def test_resume_replays_only_calls_whose_tool_declares_rerun_safe(tmp_path: Path
         task=task, node=node, message_history=[],
         tools={
             "content_search": SimpleNamespace(rerun_safe=True),
-            "memory_write": SimpleNamespace(rerun_safe=False),
+            "memory_update": SimpleNamespace(rerun_safe=False),
         },
         runtime_context={"node_id": node.node_id},
     ))

@@ -336,8 +336,8 @@ async def test_tool_registry_execute_normalizes_nested_array_object_arguments() 
 
     result = await registry.execute(
         "nested_array_object_tool",
-        {"items": [{"kind": "memory_write"}]},
+        {"items": [{"kind": "memory_update"}]},
     )
 
-    assert result == {"items": [{"kind": "memory_write"}]}
+    assert result == {"items": [{"kind": "memory_update"}]}
 

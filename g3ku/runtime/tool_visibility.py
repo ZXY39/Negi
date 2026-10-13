@@ -12,8 +12,7 @@ CEO_FIXED_BUILTIN_TOOL_NAMES: tuple[str, ...] = (
     "load_skill_context",
     "load_tool_context",
     "exec",
-    "memory_write",
-    "memory_delete",
+    "memory_update",
     "memory_note",
 )
 

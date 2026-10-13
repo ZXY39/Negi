@@ -322,7 +322,7 @@ async def test_load_tool_context_returns_requested_tool_toolskill_without_family
     workspace = tmp_path / 'workspace'
     (workspace / 'skills').mkdir(parents=True, exist_ok=True)
     (workspace / 'tools').mkdir(parents=True, exist_ok=True)
-    _copy_repo_tools(workspace, 'memory_note', 'memory_write', 'memory_runtime')
+    _copy_repo_tools(workspace, 'memory_note', 'memory_update', 'memory_runtime')
 
     manager = ResourceManager(workspace, app_config=_resource_app_config())
     manager.reload_now(trigger='test-bind')
@@ -343,20 +343,20 @@ async def test_load_tool_context_returns_requested_tool_toolskill_without_family
     try:
         await service.startup()
 
-        toolskill = service.get_tool_toolskill('memory_write')
+        toolskill = service.get_tool_toolskill('memory_update')
         assert toolskill is not None
-        assert toolskill['tool_id'] == 'memory_write'
+        assert toolskill['tool_id'] == 'memory_update'
         assert toolskill['available'] is False
         assert toolskill['repair_required'] is True
         assert 'tool_handler_unavailable' in toolskill['errors']
-        assert '# memory_write' in toolskill['content']
+        assert '# memory_update' in toolskill['content']
         assert toolskill['required_parameters'] == ['content']
         assert toolskill['parameters_schema']['properties']['content']['type'] == 'string'
         assert 'content' in str(toolskill['parameter_contract_markdown'])
         assert dict(toolskill['example_arguments']).get('content')
 
         seeded = service.update_tool_policy(
-            'memory_write',
+            'memory_update',
             session_id='web:shared',
             allowed_roles=['ceo'],
         )
@@ -365,17 +365,17 @@ async def test_load_tool_context_returns_requested_tool_toolskill_without_family
         payload = service.load_tool_context(
             actor_role='ceo',
             session_id='web:shared',
-            tool_id='memory_write',
+            tool_id='memory_update',
         )
         assert payload['ok'] is True
-        assert payload['tool_id'] == 'memory_write'
+        assert payload['tool_id'] == 'memory_update'
         assert payload['available'] is False
-        assert '# memory_write' in payload['content']
+        assert '# memory_update' in payload['content']
 
         payload_v2 = service.load_tool_context_v2(
             actor_role='ceo',
             session_id='web:shared',
-            tool_id='memory_write',
+            tool_id='memory_update',
         )
         assert payload_v2['required_parameters'] == ['content']
         assert payload_v2['parameters_schema']['properties']['content']['type'] == 'string'
@@ -4994,7 +4994,7 @@ def test_resource_read_endpoints_work_without_configured_models(tmp_path: Path, 
     ensure_startup_config_ready()
     _write_skill(workspace, name='demo_skill')
     _write_external_tool(workspace, name='external_browser')
-    _copy_repo_tools(workspace, 'memory_note', 'memory_write', 'memory_runtime')
+    _copy_repo_tools(workspace, 'memory_note', 'memory_update', 'memory_runtime')
 
     app = FastAPI()
     app.include_router(admin_rest.router, prefix='/api')
@@ -5023,12 +5023,12 @@ def test_resource_read_endpoints_work_without_configured_models(tmp_path: Path, 
     assert toolskill_response.status_code == 200
     assert '# External Browser' in str(toolskill_response.json().get('content') or '')
 
-    memory_toolskill_response = client.get('/api/resources/tools/memory_write/toolskill')
+    memory_toolskill_response = client.get('/api/resources/tools/memory_update/toolskill')
     assert memory_toolskill_response.status_code == 200
     memory_payload = memory_toolskill_response.json()
-    assert memory_payload['tool_id'] == 'memory_write'
+    assert memory_payload['tool_id'] == 'memory_update'
     assert memory_payload['available'] is False
-    assert '# memory_write' in str(memory_payload.get('content') or '')
+    assert '# memory_update' in str(memory_payload.get('content') or '')
 
 
 def test_resource_write_endpoints_work_without_configured_models(tmp_path: Path, monkeypatch):
@@ -5259,7 +5259,7 @@ async def test_main_runtime_service_frontdoor_reviewable_tool_risk_map_uses_gove
     workspace = tmp_path / 'workspace'
     (workspace / 'skills').mkdir(parents=True, exist_ok=True)
     (workspace / 'tools').mkdir(parents=True, exist_ok=True)
-    _copy_repo_tools(workspace, 'content_search', 'exec', 'memory_runtime', 'memory_write')
+    _copy_repo_tools(workspace, 'content_search', 'exec', 'memory_runtime', 'memory_update')
 
     manager = ResourceManager(workspace, app_config=_resource_app_config())
     manager.reload_now(trigger='test-frontdoor-governance-risk-map')
@@ -5287,7 +5287,7 @@ async def test_main_runtime_service_frontdoor_reviewable_tool_risk_map_uses_gove
             allowed_roles=['ceo', 'execution'],
         )
         service.update_tool_policy(
-            'memory_write',
+            'memory_update',
             session_id='web:shared',
             allowed_roles=['ceo'],
         )
@@ -5298,7 +5298,7 @@ async def test_main_runtime_service_frontdoor_reviewable_tool_risk_map_uses_gove
         )
 
         assert reviewable['exec'] == 'high'
-        assert reviewable['memory_write'] == 'medium'
+        assert reviewable['memory_update'] == 'medium'
         assert 'content_search' not in reviewable
     finally:
         await service.close()
@@ -5356,8 +5356,7 @@ async def test_tool_resources_mark_core_tools_and_keep_skill_context_tools_indep
         'content_search',
         'content_open',
         'content_describe',
-        'memory_write',
-        'memory_delete',
+        'memory_update',
         'memory_note',
         'memory_runtime',
         'load_skill_context',
@@ -5393,7 +5392,7 @@ async def test_tool_resources_mark_core_tools_and_keep_skill_context_tools_indep
         assert items['content_search'].is_core is True
         assert items['content_open'].is_core is True
         assert items['content_describe'].is_core is True
-        assert items['memory_write'].is_core is True
+        assert items['memory_update'].is_core is True
         assert 'messaging' not in items
         assert items['load_skill_context'].is_core is True
         assert items['create_async_task'].is_core is True
@@ -5407,18 +5406,14 @@ async def test_tool_resources_mark_core_tools_and_keep_skill_context_tools_indep
         assert 'ceo' in set(items['task_append_notice'].allowed_roles)
 
         assert {key for key in items if key.startswith('memory_')} == {
-            'memory_write',
-            'memory_delete',
+            'memory_update',
             'memory_note',
             'memory_runtime',
         }
-        assert items['memory_write'].allowed_roles == ['ceo']
-        assert items['memory_delete'].allowed_roles == ['ceo']
+        assert items['memory_update'].allowed_roles == ['ceo']
         assert items['memory_note'].allowed_roles == ['ceo']
-        assert items['memory_write'].agent_visible is True
-        assert items['memory_write'].admin_mode == 'editable'
-        assert items['memory_delete'].agent_visible is True
-        assert items['memory_delete'].admin_mode == 'editable'
+        assert items['memory_update'].agent_visible is True
+        assert items['memory_update'].admin_mode == 'editable'
         assert items['memory_note'].agent_visible is True
         assert items['memory_note'].admin_mode == 'editable'
         assert items['memory_runtime'].agent_visible is False
@@ -5443,8 +5438,7 @@ async def test_tool_resources_mark_core_tools_and_keep_skill_context_tools_indep
         supported_names = [
             'load_skill_context',
             'load_tool_context',
-            'memory_write',
-            'memory_delete',
+            'memory_update',
             'memory_note',
             'memory_runtime',
         ]
@@ -5475,9 +5469,8 @@ async def test_tool_resources_mark_core_tools_and_keep_skill_context_tools_indep
         assert visible == {
             'load_skill_context',
             'load_tool_context',
-            'memory_delete',
             'memory_note',
-            'memory_write',
+            'memory_update',
         }
         assert execution_visible == {'load_skill_context', 'load_tool_context'}
         assert inspection_visible == {'load_skill_context', 'load_tool_context'}
@@ -5505,7 +5498,7 @@ async def test_startup_keeps_disabled_core_tool_disabled(tmp_path: Path):
     workspace = tmp_path / 'workspace'
     (workspace / 'skills').mkdir(parents=True, exist_ok=True)
     (workspace / 'tools').mkdir(parents=True, exist_ok=True)
-    _copy_repo_tools(workspace, 'load_skill_context', 'load_tool_context', 'memory_runtime', 'memory_write')
+    _copy_repo_tools(workspace, 'load_skill_context', 'load_tool_context', 'memory_runtime', 'memory_update')
 
     manager = ResourceManager(workspace, app_config=_resource_app_config())
     manager.reload_now(trigger='test-bind')
@@ -5553,7 +5546,7 @@ async def test_startup_backfills_legacy_empty_roles_for_implicit_tool_governance
     workspace = tmp_path / 'workspace'
     (workspace / 'skills').mkdir(parents=True, exist_ok=True)
     (workspace / 'tools').mkdir(parents=True, exist_ok=True)
-    _copy_repo_tools(workspace, 'load_skill_context', 'load_tool_context', 'memory_write')
+    _copy_repo_tools(workspace, 'load_skill_context', 'load_tool_context', 'memory_update')
 
     manager = ResourceManager(workspace, app_config=_resource_app_config())
     manager.reload_now(trigger='test-bind')
@@ -5614,7 +5607,7 @@ async def test_ensure_runtime_config_current_keeps_dynamic_task_tools_visible(tm
         'content_open',
         'content_describe',
         'memory_note',
-        'memory_write',
+        'memory_update',
         'memory_runtime',
         'load_skill_context',
         'load_tool_context',
@@ -5656,7 +5649,7 @@ async def test_ensure_runtime_config_current_keeps_dynamic_task_tools_visible(tm
         await service.startup()
         before = service.list_effective_tool_names(actor_role='ceo', session_id='web:shared')
         assert 'create_async_task' in before
-        assert 'memory_write' in before
+        assert 'memory_update' in before
 
         changed = service.ensure_runtime_config_current(force=True, reason='test')
 
@@ -5665,7 +5658,7 @@ async def test_ensure_runtime_config_current_keeps_dynamic_task_tools_visible(tm
         after = service.list_effective_tool_names(actor_role='ceo', session_id='web:shared')
         assert 'create_async_task' in after
         assert 'task_append_notice' in after
-        assert 'memory_write' in after
+        assert 'memory_update' in after
         assert {
             'task_list',
             'task_append_notice',

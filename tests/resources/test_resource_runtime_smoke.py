@@ -3195,247 +3195,6 @@ def test_content_rest_routes_use_runtime_service_methods_and_preserve_legacy_art
     assert service.search_calls == [{"query": "needle", "ref": "artifact:artifact:wrapper", "path": None, "view": "canonical", "limit": 10, "before": 2, "after": 2}]
     assert service.open_calls[1]["view"] == "canonical"
     assert service.read_calls == [{"ref": "artifact:artifact:wrapper", "path": None, "view": "canonical"}]
-@pytest.mark.xfail(reason="memory_write contract is being replaced by queued markdown memory requests")
-@pytest.mark.asyncio
-async def test_memory_write_uses_structured_fact_contract(tmp_path: Path):
-    workspace = tmp_path / 'workspace'
-    (workspace / 'skills').mkdir(parents=True, exist_ok=True)
-    (workspace / 'tools').mkdir(parents=True, exist_ok=True)
-    shutil.copytree(REPO_ROOT / 'tools' / 'memory_write', workspace / 'tools' / 'memory_write')
-
-    class _FakeMemoryManager:
-        def __init__(self):
-            self.last_call = None
-
-        async def upsert_structured_memory_facts(self, **kwargs):
-            self.last_call = kwargs
-            return {'ok': True, 'written': 1}
-
-    registry = ResourceRegistry(workspace, skills_dir=workspace / 'skills', tools_dir=workspace / 'tools')
-    descriptor = registry.discover().tools['memory_write']
-    manifest = yaml.safe_load((workspace / 'tools' / 'memory_write' / 'resource.yaml').read_text(encoding='utf-8')) or {}
-    item_properties = (
-        manifest.get('parameters', {})
-        .get('properties', {})
-        .get('facts', {})
-        .get('items', {})
-        .get('properties', {})
-    )
-    manager = _FakeMemoryManager()
-    tool = ResourceLoader(workspace).load_tool(
-        descriptor,
-        services={'loop': SimpleNamespace(_store_enabled=False), 'memory_manager': manager},
-    )
-
-    payload = json.loads(
-        await tool.execute(
-            facts=[
-                {
-                    'category': 'default_setting',
-                    'scope': 'global',
-                    'entity': 'user',
-                    'attribute': 'preferred_package_manager',
-                    'value': 'pnpm',
-                    'observed_at': '2026-04-08T00:00:00',
-                    'time_semantics': 'durable_until_replaced',
-                    'source_excerpt': '以后默认用 pnpm',
-                    'qualifier': {'project': 'g3ku'},
-                    'expires_at': None,
-                }
-            ],
-            __g3ku_runtime={'session_key': 'cli:demo'},
-        )
-    )
-    assert payload['ok'] is True
-    assert manager.last_call['channel'] == 'cli'
-    assert manager.last_call['chat_id'] == 'demo'
-    assert manager.last_call['facts'][0]['attribute'] == 'preferred_package_manager'
-    assert item_properties['merge_mode']['enum'] == ['merge']
-
-
-@pytest.mark.xfail(reason="memory_write no longer parses structured fact payloads")
-@pytest.mark.asyncio
-async def test_memory_write_restores_json_like_value_strings_before_upsert(tmp_path: Path):
-    workspace = tmp_path / 'workspace'
-    (workspace / 'skills').mkdir(parents=True, exist_ok=True)
-    (workspace / 'tools').mkdir(parents=True, exist_ok=True)
-    shutil.copytree(REPO_ROOT / 'tools' / 'memory_write', workspace / 'tools' / 'memory_write')
-
-    class _FakeMemoryManager:
-        def __init__(self):
-            self.last_call = None
-
-        async def upsert_structured_memory_facts(self, **kwargs):
-            self.last_call = kwargs
-            return {'ok': True, 'written': 1}
-
-    registry = ResourceRegistry(workspace, skills_dir=workspace / 'skills', tools_dir=workspace / 'tools')
-    descriptor = registry.discover().tools['memory_write']
-    manager = _FakeMemoryManager()
-    tool = ResourceLoader(workspace).load_tool(
-        descriptor,
-        services={'loop': SimpleNamespace(_store_enabled=False), 'memory_manager': manager},
-    )
-
-    payload = json.loads(
-        await tool.execute(
-            facts=[
-                {
-                    'category': 'preference',
-                    'scope': 'user',
-                    'entity': 'response_style',
-                    'attribute': 'format',
-                    'value': '{"tone":"concise","markdown":true}',
-                    'observed_at': '2026-04-08T00:00:00',
-                    'time_semantics': 'durable_until_replaced',
-                    'source_excerpt': 'remember the response format',
-                    'merge_mode': 'merge',
-                }
-            ],
-            __g3ku_runtime={'session_key': 'cli:demo'},
-        )
-    )
-    assert payload['ok'] is True
-    assert manager.last_call['facts'][0]['value'] == {'tone': 'concise', 'markdown': True}
-    assert manager.last_call['facts'][0]['merge_mode'] == 'merge'
-
-
-@pytest.mark.xfail(reason="memory_write no longer parses structured fact payloads")
-@pytest.mark.asyncio
-async def test_memory_write_parses_json_object_string_value_before_upsert(tmp_path: Path):
-    workspace = tmp_path / 'workspace'
-    (workspace / 'skills').mkdir(parents=True, exist_ok=True)
-    (workspace / 'tools').mkdir(parents=True, exist_ok=True)
-    shutil.copytree(REPO_ROOT / 'tools' / 'memory_write', workspace / 'tools' / 'memory_write')
-
-    class _FakeMemoryManager:
-        def __init__(self):
-            self.last_call = None
-
-        async def upsert_structured_memory_facts(self, **kwargs):
-            self.last_call = kwargs
-            return {'ok': True, 'written': 1}
-
-    registry = ResourceRegistry(workspace, skills_dir=workspace / 'skills', tools_dir=workspace / 'tools')
-    descriptor = registry.discover().tools['memory_write']
-    manager = _FakeMemoryManager()
-    tool = ResourceLoader(workspace).load_tool(
-        descriptor,
-        services={'loop': SimpleNamespace(_store_enabled=False), 'memory_manager': manager},
-    )
-
-    payload = json.loads(
-        await tool.execute(
-            facts=[
-                {
-                    'category': 'current_state',
-                    'scope': 'global',
-                    'entity': 'user',
-                    'attribute': 'editor_preferences',
-                    'value': '{"theme":"light","autosave":true,"tab_size":2}',
-                    'observed_at': '2026-04-08T00:00:00',
-                    'time_semantics': 'durable_until_replaced',
-                    'source_excerpt': '记住我的编辑器偏好',
-                }
-            ],
-            __g3ku_runtime={'session_key': 'cli:demo'},
-        )
-    )
-
-    assert payload == {'ok': True, 'written': 1}
-    assert manager.last_call is not None
-    assert manager.last_call['facts'][0]['value'] == {
-        'theme': 'light',
-        'autosave': True,
-        'tab_size': 2,
-    }
-
-
-@pytest.mark.xfail(reason="memory_write no longer parses structured fact payloads")
-@pytest.mark.asyncio
-async def test_memory_write_keeps_plain_string_value_unchanged(tmp_path: Path):
-    workspace = tmp_path / 'workspace'
-    (workspace / 'skills').mkdir(parents=True, exist_ok=True)
-    (workspace / 'tools').mkdir(parents=True, exist_ok=True)
-    shutil.copytree(REPO_ROOT / 'tools' / 'memory_write', workspace / 'tools' / 'memory_write')
-
-    class _FakeMemoryManager:
-        def __init__(self):
-            self.last_call = None
-
-        async def upsert_structured_memory_facts(self, **kwargs):
-            self.last_call = kwargs
-            return {'ok': True, 'written': 1}
-
-    registry = ResourceRegistry(workspace, skills_dir=workspace / 'skills', tools_dir=workspace / 'tools')
-    descriptor = registry.discover().tools['memory_write']
-    manager = _FakeMemoryManager()
-    tool = ResourceLoader(workspace).load_tool(
-        descriptor,
-        services={'loop': SimpleNamespace(_store_enabled=False), 'memory_manager': manager},
-    )
-
-    payload = json.loads(
-        await tool.execute(
-            facts=[
-                {
-                    'category': 'default_setting',
-                    'scope': 'global',
-                    'entity': 'user',
-                    'attribute': 'preferred_package_manager',
-                    'value': 'pnpm',
-                    'observed_at': '2026-04-08T00:00:00',
-                    'time_semantics': 'durable_until_replaced',
-                    'source_excerpt': '以后默认用 pnpm',
-                }
-            ],
-            __g3ku_runtime={'session_key': 'cli:demo'},
-        )
-    )
-
-    assert payload == {'ok': True, 'written': 1}
-    assert manager.last_call is not None
-    assert manager.last_call['facts'][0]['value'] == 'pnpm'
-
-
-@pytest.mark.xfail(reason="memory_delete contract is being replaced by queued visible-text deletion")
-@pytest.mark.asyncio
-async def test_memory_delete_builds_and_calls_precise_delete(tmp_path: Path):
-    workspace = tmp_path / 'workspace'
-    (workspace / 'skills').mkdir(parents=True, exist_ok=True)
-    (workspace / 'tools').mkdir(parents=True, exist_ok=True)
-    shutil.copytree(REPO_ROOT / 'tools' / 'memory_delete', workspace / 'tools' / 'memory_delete')
-
-    class _FakeMemoryManager:
-        def __init__(self):
-            self.last_call = None
-
-        async def delete_structured_memory_facts(self, **kwargs):
-            self.last_call = kwargs
-            return {'ok': True, 'deleted': 2}
-
-    registry = ResourceRegistry(workspace, skills_dir=workspace / 'skills', tools_dir=workspace / 'tools')
-    descriptor = registry.discover().tools['memory_delete']
-    manager = _FakeMemoryManager()
-    tool = ResourceLoader(workspace).load_tool(
-        descriptor,
-        services={'loop': SimpleNamespace(_store_enabled=False), 'memory_manager': manager},
-    )
-
-    payload = json.loads(
-        await tool.execute(
-            fact_ids=['fact-1'],
-            canonical_keys=['global|identity|user|preferred_package_manager|durable_until_replaced'],
-            __g3ku_runtime={'session_key': 'cli:demo'},
-        )
-    )
-    assert payload == {'ok': True, 'deleted': 2}
-    assert manager.last_call['session_key'] == 'cli:demo'
-    assert manager.last_call['channel'] == 'cli'
-    assert manager.last_call['chat_id'] == 'demo'
-    assert manager.last_call['fact_ids'] == ['fact-1']
-
-
 @pytest.mark.asyncio
 async def test_memory_note_loads_note_body_by_short_ref(tmp_path: Path):
     workspace = tmp_path / "workspace"
@@ -3459,11 +3218,11 @@ async def test_memory_note_loads_note_body_by_short_ref(tmp_path: Path):
         manager.close()
 
 
-def test_resource_manager_infers_memory_manager_from_main_task_service_for_memory_write(tmp_path: Path):
+def test_resource_manager_infers_memory_manager_from_main_task_service_for_memory_update(tmp_path: Path):
     workspace = tmp_path / 'workspace'
     (workspace / 'skills').mkdir(parents=True, exist_ok=True)
     (workspace / 'tools').mkdir(parents=True, exist_ok=True)
-    shutil.copytree(REPO_ROOT / 'tools' / 'memory_write', workspace / 'tools' / 'memory_write')
+    shutil.copytree(REPO_ROOT / 'tools' / 'memory_update', workspace / 'tools' / 'memory_update')
 
     manager = ResourceManager(workspace, app_config=_resource_app_config())
     service = SimpleNamespace(memory_manager=None)
@@ -3471,14 +3230,14 @@ def test_resource_manager_infers_memory_manager_from_main_task_service_for_memor
     manager.reload_now(trigger='test-no-memory-manager')
 
     try:
-        unavailable_tool = manager.get_tool('memory_write')
+        unavailable_tool = manager.get_tool('memory_update')
         assert unavailable_tool is not None
         assert type(unavailable_tool).__name__ == 'RepairRequiredTool'
 
         service.memory_manager = object()
         manager.reload_now(trigger='test-main-task-memory-manager')
 
-        restored_tool = manager.get_tool('memory_write')
+        restored_tool = manager.get_tool('memory_update')
         assert restored_tool is not None
         assert type(restored_tool).__name__ == 'EmbeddedMCPTool'
     finally:
@@ -3758,22 +3517,22 @@ def test_tree_fingerprint_ignores_node_modules(tmp_path: Path):
 
 
 @pytest.mark.asyncio
-async def test_memory_write_queues_explicit_memory_request(tmp_path: Path):
+async def test_memory_update_queues_remember_and_forget_requests_through_one_entry(tmp_path: Path):
     workspace = tmp_path / 'workspace'
     (workspace / 'skills').mkdir(parents=True, exist_ok=True)
     (workspace / 'tools').mkdir(parents=True, exist_ok=True)
-    shutil.copytree(REPO_ROOT / 'tools' / 'memory_write', workspace / 'tools' / 'memory_write')
+    shutil.copytree(REPO_ROOT / 'tools' / 'memory_update', workspace / 'tools' / 'memory_update')
 
     class _FakeMemoryManager:
         def __init__(self):
-            self.last_call = None
+            self.calls = []
 
         async def enqueue_write_request(self, **kwargs):
-            self.last_call = kwargs
-            return {'ok': True, 'request_id': 'write_req_1', 'status': 'queued'}
+            self.calls.append(kwargs)
+            return {'ok': True, 'request_id': f'req_{len(self.calls)}', 'status': 'queued'}
 
     registry = ResourceRegistry(workspace, skills_dir=workspace / 'skills', tools_dir=workspace / 'tools')
-    descriptor = registry.discover().tools['memory_write']
+    descriptor = registry.discover().tools['memory_update']
     manager = _FakeMemoryManager()
     tool = ResourceLoader(workspace).load_tool(
         descriptor,
@@ -3786,39 +3545,7 @@ async def test_memory_write_queues_explicit_memory_request(tmp_path: Path):
             __g3ku_runtime={'session_key': 'cli:demo'},
         )
     )
-
-    assert payload['ok'] is True
-    assert payload['status'] == 'queued'
-    assert manager.last_call['session_key'] == 'cli:demo'
-    assert manager.last_call['decision_source'] == 'user'
-    assert manager.last_call['trigger_source'] == 'memory_write_tool'
-    assert manager.last_call['payload_text'] == '默认创建文件时遵循项目格式要求'
-
-
-@pytest.mark.asyncio
-async def test_memory_delete_queues_natural_language_deletion_request(tmp_path: Path):
-    workspace = tmp_path / 'workspace'
-    (workspace / 'skills').mkdir(parents=True, exist_ok=True)
-    (workspace / 'tools').mkdir(parents=True, exist_ok=True)
-    shutil.copytree(REPO_ROOT / 'tools' / 'memory_delete', workspace / 'tools' / 'memory_delete')
-
-    class _FakeMemoryManager:
-        def __init__(self):
-            self.last_call = None
-
-        async def enqueue_delete_request(self, **kwargs):
-            self.last_call = kwargs
-            return {'ok': True, 'request_id': 'delete_req_1', 'status': 'queued'}
-
-    registry = ResourceRegistry(workspace, skills_dir=workspace / 'skills', tools_dir=workspace / 'tools')
-    descriptor = registry.discover().tools['memory_delete']
-    manager = _FakeMemoryManager()
-    tool = ResourceLoader(workspace).load_tool(
-        descriptor,
-        services={'loop': SimpleNamespace(_store_enabled=False), 'memory_manager': manager},
-    )
-
-    payload = json.loads(
+    forget_payload = json.loads(
         await tool.execute(
             content='删除那条“默认创建文件时遵循项目格式要求”的长期记忆',
             __g3ku_runtime={'session_key': 'cli:demo'},
@@ -3827,7 +3554,9 @@ async def test_memory_delete_queues_natural_language_deletion_request(tmp_path: 
 
     assert payload['ok'] is True
     assert payload['status'] == 'queued'
-    assert manager.last_call['session_key'] == 'cli:demo'
-    assert manager.last_call['decision_source'] == 'user'
-    assert manager.last_call['trigger_source'] == 'memory_delete_tool'
-    assert manager.last_call['payload_text'] == '删除那条“默认创建文件时遵循项目格式要求”的长期记忆'
+    assert forget_payload['status'] == 'queued'
+    assert [call['trigger_source'] for call in manager.calls] == ['memory_update_tool'] * 2
+    assert [call['decision_source'] for call in manager.calls] == ['user'] * 2
+    assert [call['session_key'] for call in manager.calls] == ['cli:demo'] * 2
+    assert manager.calls[0]['payload_text'] == '默认创建文件时遵循项目格式要求'
+    assert manager.calls[1]['payload_text'] == '删除那条“默认创建文件时遵循项目格式要求”的长期记忆'

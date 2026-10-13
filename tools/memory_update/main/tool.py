@@ -1,8 +1,8 @@
-from g3ku.agent.tools.memory_write import MemoryWriteTool
+from g3ku.agent.tools.memory_update import MemoryUpdateTool
 
 
 def build(runtime):
     manager = getattr(runtime.services, "memory_manager", None)
     if manager is None:
         return None
-    return MemoryWriteTool(manager=manager)
+    return MemoryUpdateTool(manager=manager)

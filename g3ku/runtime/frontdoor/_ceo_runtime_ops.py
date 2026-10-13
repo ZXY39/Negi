@@ -251,8 +251,8 @@ _STAGE_BLOCK_ECHO_REPAIR_MESSAGE = (
 )
 
 # 落库类工具全局白名单：免活动阶段即可调用。避免"用户口头给一条长期指令 → 模型
-# 想写记忆却先在 memory_write 上被 no active stage 拦下 → 模型不再重试而永久丢失"。
-FRONTDOOR_STAGELESS_MEMORY_TOOL_NAMES = frozenset({"memory_write", "memory_delete", "memory_note"})
+# 想写记忆却先在 memory_update 上被 no active stage 拦下 → 模型不再重试而永久丢失"。
+FRONTDOOR_STAGELESS_MEMORY_TOOL_NAMES = frozenset({"memory_update", "memory_note"})
 # 节点暂停事件心跳自动补开阶段的预算。
 FRONTDOOR_NODE_ERROR_AUTO_STAGE_BUDGET = 10
 
@@ -703,45 +703,12 @@ def revive_contract_absent_candidates(
     return [*candidate, *revived] if revived else candidate
 
 
-def _ceo_model_compatible_parameters_schema(tool_name: str, schema: dict[str, Any] | None) -> dict[str, Any] | None:
-    normalized = copy.deepcopy(schema) if isinstance(schema, dict) else schema
-    if str(tool_name or "").strip() != "memory_write" or not isinstance(normalized, dict):
-        return normalized
-    facts_schema = dict((normalized.get("properties") or {}).get("facts") or {})
-    items_schema = dict(facts_schema.get("items") or {})
-    fact_properties = items_schema.get("properties")
-    if not isinstance(fact_properties, dict):
-        return normalized
-    value_schema = fact_properties.get("value")
-    if not isinstance(value_schema, dict):
-        return normalized
-    raw_type = value_schema.get("type")
-    if not isinstance(raw_type, list) or not any(item in {"object", "array"} for item in raw_type):
-        return normalized
-    value_schema["type"] = "string"
-    description = str(value_schema.get("description") or "").strip()
-    compatibility_note = (
-        "For CEO frontdoor model compatibility, pass structured values as JSON-serialized strings."
-    )
-    if compatibility_note not in description:
-        value_schema["description"] = f"{description} {compatibility_note}".strip() if description else compatibility_note
-    fact_properties["value"] = value_schema
-    items_schema["properties"] = fact_properties
-    facts_schema["items"] = items_schema
-    normalized["properties"] = {
-        **dict(normalized.get("properties") or {}),
-        "facts": facts_schema,
-    }
-    return normalized
-
-
 def _provider_visible_tool_contract(tool: Tool) -> tuple[str, dict[str, Any] | None]:
     model_description, model_parameters = _model_visible_tool_contract(tool)
-    compatible_parameters = _ceo_model_compatible_parameters_schema(tool.name, model_parameters)
-    stripped_parameters = sanitize_provider_parameters_schema(compatible_parameters)
+    stripped_parameters = sanitize_provider_parameters_schema(model_parameters)
     return (
         str(model_description or "").strip(),
-        stripped_parameters if isinstance(stripped_parameters, dict) else compatible_parameters,
+        stripped_parameters if isinstance(stripped_parameters, dict) else model_parameters,
     )
 
 

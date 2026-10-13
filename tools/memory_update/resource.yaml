@@ -1,14 +1,14 @@
 schema_version: 1
 kind: tool
-name: memory_write
-description: Queue explicit durable memory write requests for the memory agent.
+name: memory_update
+description: Queue natural-language durable memory requests for the memory agent.
 tool_result_delivery_contract: runtime_managed
 source:
   type: ''
   url: ''
   ref: ''
 current_version:
-  summary: Repository-managed queued memory write tool for explicit CEO long-term memory saves.
+  summary: Repository-managed queued memory request tool for the CEO's single long-term memory entry point.
   compare_rule: Treat changes in main implementation, parameters, permissions, settings, or return payload shape as version changes.
   source_of_truth: This resource.yaml and the main implementation are authoritative; toolskills supplement usage guidance when present.
 protocol: mcp
@@ -26,7 +26,7 @@ parameters:
   properties:
     content:
       type: string
-      description: Raw memory candidate text to queue for the memory agent.
+      description: Natural-language memory request to queue for the memory agent - what to remember, revise, or forget.
   required:
     - content
 exposure:
