@@ -705,7 +705,7 @@ async def test_failed_read_projects_payload_while_requeue_keeps_full_payload(tmp
         item = page["items"][0]["items"][0]
         assert len(item["payload_text"]) == 4000
         assert item["payload_char_count"] == 50_000
-        assert item["payload_truncated"] is True
+        assert len(item["payload_text"]) < item["payload_char_count"]
         stored = _read_jsonl(tmp_path / "memory" / "failed.jsonl")[0]["items"][0]["payload_text"]
         assert len(stored) == 50_000, "停车区仍要留完整载荷，否则回队时没有原文"
 
@@ -748,8 +748,8 @@ async def test_failed_payload_window_pages_to_the_end_by_delivered_chars(tmp_pat
         cursor = len(first["payload_text"]) + 1
         screens = 0
         while True:
-            window = await manager.get_failed_payload_window(
-                record["failed_id"], request_id="write_paged", start_char=cursor
+            window = await manager.get_payload_window(
+                "failed", record["failed_id"], request_id="write_paged", start_char=cursor
             )
             screens += 1
             assert window["start_char"] == cursor
@@ -764,8 +764,8 @@ async def test_failed_payload_window_pages_to_the_end_by_delivered_chars(tmp_pat
         assert screens == 3, f"60000 字符首屏 4000 之后应当三屏取尽，实得 {screens}"
 
         with pytest.raises(KeyError):
-            await manager.get_failed_payload_window("failed_missing", request_id="write_paged")
+            await manager.get_payload_window("failed", "failed_missing", request_id="write_paged")
         with pytest.raises(KeyError):
-            await manager.get_failed_payload_window(record["failed_id"], request_id="write_absent")
+            await manager.get_payload_window("failed", record["failed_id"], request_id="write_absent")
     finally:
         manager.close()

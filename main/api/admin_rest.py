@@ -2533,19 +2533,65 @@ async def get_memory_failed_payload(
     request_id: str = Query(''),
     start_char: int = Query(1, ge=1),
 ):
-    """失败记忆正文的按需一屏。
+    """失败记忆正文的按需一屏（三面共用 `_memory_payload_window` 的实现）。"""
+    return await _memory_payload_window(
+        kind='failed',
+        key=failed_id,
+        request_id=request_id,
+        start_char=start_char,
+    )
 
-    列表口只投载荷首屏（`items[].payload_truncated`），取全文走这里：字符寻址、
-    响应里的 `start_char`/`end_char` 是本次**实际交付**的区间，前端按它推进，
+
+@router.get('/memory/processed/{batch_id}/payload')
+async def get_memory_processed_payload(
+    batch_id: str,
+    request_id: str = Query(''),
+    start_char: int = Query(1, ge=1),
+):
+    """已处理批次正文的按需一屏：`request_id` 留空取该批次第一条。"""
+    return await _memory_payload_window(
+        kind='processed',
+        key=batch_id,
+        request_id=request_id,
+        start_char=start_char,
+    )
+
+
+@router.get('/memory/queue/{request_id}/payload')
+async def get_memory_queue_payload(
+    request_id: str,
+    start_char: int = Query(1, ge=1),
+):
+    """队列请求正文的按需一屏。"""
+    return await _memory_payload_window(
+        kind='queue',
+        key=request_id,
+        request_id='',
+        start_char=start_char,
+    )
+
+
+async def _memory_payload_window(
+    *,
+    kind: str,
+    key: str,
+    request_id: str,
+    start_char: int,
+) -> dict:
+    """三面共用的取全文口。
+
+    列表口只投载荷首屏（`payload_char_count` / `payload_char_counts`），取全文走这里：
+    字符寻址、响应里的 `start_char`/`end_char` 是本次**实际交付**的区间，前端按它推进，
     不按请求参数推进——单条 MB 级载荷就是这样把详情抽屉冻住的。
     """
     manager = _runtime_memory_manager()
-    reader = getattr(manager, 'get_failed_payload_window', None)
+    reader = getattr(manager, 'get_payload_window', None)
     if not callable(reader):
-        raise HTTPException(status_code=503, detail='memory_failed_unavailable')
+        raise HTTPException(status_code=503, detail='memory_payload_unavailable')
     try:
         item = await reader(
-            str(failed_id or '').strip(),
+            kind,
+            str(key or '').strip(),
             request_id=str(request_id or '').strip(),
             start_char=int(start_char or 1),
         )
@@ -2553,14 +2599,14 @@ async def get_memory_failed_payload(
         raise HTTPException(
             status_code=404,
             detail={
-                'code': 'memory_failed_not_found',
-                'message': str(exc or 'failed memory record not found'),
+                'code': 'memory_payload_not_found',
+                'message': str(exc or 'memory payload not found'),
             },
         ) from exc
     except Exception as exc:
         raise _memory_read_error(
-            code='memory_failed_payload_read_failed',
-            message='失败记忆正文暂时不可读取，请稍后刷新。',
+            code='memory_payload_read_failed',
+            message='记忆正文暂时不可读取，请稍后刷新。',
         ) from exc
     return {'ok': True, 'item': dict(item or {})}
 

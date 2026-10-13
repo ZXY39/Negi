@@ -1251,9 +1251,10 @@ class ApiClient {
         };
     }
 
-    // 失败记忆正文的按需一屏（列表口只投首屏，整份载荷不进浏览器）。
-    static async getMemoryFailedPayload({ failedId = "", requestId = "", startChar = 1 } = {}) {
-        return this.get(`/api/memory/failed/${encodeURIComponent(failedId)}/payload`, {
+    // 记忆正文的按需一屏：三面（failed / processed / queue）同一路径形状，服务端共用一个分页实现。
+    // 列表口只投首屏，整份载荷不进浏览器。
+    static async getMemoryPayload({ kind = "", key = "", requestId = "", startChar = 1 } = {}) {
+        return this.get(`/api/memory/${encodeURIComponent(kind)}/${encodeURIComponent(key)}/payload`, {
             request_id: requestId,
             start_char: startChar,
         });

@@ -53,15 +53,16 @@ class _StubMemoryManager:
             "has_more": False,
         }
 
-    async def get_failed_payload_window(self, failed_id: str, *, request_id: str = "", start_char: int = 1):
-        self.calls.append(("get_failed_payload_window", (failed_id, request_id, start_char)))
-        if failed_id == "failed_missing":
-            raise KeyError(f"failed memory record not found: {failed_id}")
+    async def get_payload_window(self, kind: str, key: str, *, request_id: str = "", start_char: int = 1):
+        self.calls.append(("get_payload_window", (kind, key, request_id, start_char)))
+        if key == "failed_missing" or key == "batch_missing":
+            raise KeyError(f"memory payload not found: {kind}/{key}")
         total = 50000
         start = max(1, int(start_char))
         end = min(start + 19999, total)
         return {
-            "failed_id": failed_id,
+            "kind": kind,
+            "key": key,
             "request_id": request_id or "write_1",
             "text": "y" * (end - start + 1),
             "start_char": start,
@@ -154,24 +155,49 @@ def test_get_memory_failed_returns_items_and_mutation_flag(stub_env, monkeypatch
     assert payload["mutations_enabled"] is True
 
 
-def test_memory_failed_payload_route_pages_by_chars(stub_env):
-    """取全文口按字符寻址：交付区间原样透出，缺记录报 404 而不是 503。"""
-    workspace, manager, client = stub_env
-
-    response = client.get("/api/memory/failed/failed_1/payload?request_id=write_1&start_char=4001")
-
+def _payload_window_assertions(client, manager, url, kind, key, expected_request_id="write_1"):
+    response = client.get(url)
     assert response.status_code == 200
     item = response.json()["item"]
+    assert item["kind"] == kind
+    assert item["key"] == key
     assert item["start_char"] == 4001
     assert item["end_char"] == 24000
     assert len(item["text"]) == 20000
     assert item["char_count"] == 50000
     assert item["truncated"] is True
-    assert manager.calls[-1] == ("get_failed_payload_window", ("failed_1", "write_1", 4001))
+    assert manager.calls[-1] == ("get_payload_window", (kind, key, expected_request_id, 4001))
+
+
+def test_memory_payload_routes_page_by_chars_across_three_surfaces(stub_env):
+    """三面共用一个分页口：路径不同、寻址形状相同，交付区间原样透出。"""
+    workspace, manager, client = stub_env
+
+    _payload_window_assertions(
+        client, manager,
+        "/api/memory/failed/failed_1/payload?request_id=write_1&start_char=4001",
+        "failed", "failed_1",
+    )
+    _payload_window_assertions(
+        client, manager,
+        "/api/memory/processed/batch_1/payload?request_id=write_1&start_char=4001",
+        "processed", "batch_1",
+    )
+    _payload_window_assertions(
+        client, manager,
+        "/api/memory/queue/write_9/payload?start_char=4001",
+        # 队列面的 key 本身就是 request_id，路由不再重复传一个。
+        "queue", "write_9", "",
+    )
+
+
+def test_memory_payload_route_maps_missing_record_to_404(stub_env):
+    workspace, manager, client = stub_env
 
     missing = client.get("/api/memory/failed/failed_missing/payload")
+
     assert missing.status_code == 404
-    assert missing.json()["detail"]["code"] == "memory_failed_not_found"
+    assert missing.json()["detail"]["code"] == "memory_payload_not_found"
 
 
 def test_memory_failed_mutations_work_without_feature_flag(stub_env, monkeypatch):

@@ -3346,3 +3346,89 @@ async def test_run_due_batch_once_accepts_inspired_ids_from_current_snapshot(tmp
         assert "Use headings" in manager.snapshot_text()
     finally:
         manager.close()
+@pytest.mark.asyncio
+async def test_list_processed_page_projects_payload_texts_with_aligned_counts(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """已处理详情只投首屏：counts 与 payload_texts 等长同下标，存储仍是原文。"""
+    module = _load_memory_agent_runtime_module()
+    manager = module.MemoryManager(tmp_path, _memory_cfg())
+    monkeypatch.setattr(module.MemoryManager, "_now_iso", staticmethod(lambda: "2026-08-30T12:00:00+08:00"))
+    try:
+        first = "甲" * 30_000
+        second = "短正文"
+        manager._write_processed_batches([
+            {
+                "batch_id": "write_paged_batch",
+                "op": "write",
+                "source_op": "write",
+                "status": "applied",
+                "processed_at": "2026-08-29T00:00:00+08:00",
+                "request_ids": ["write_a", "write_b"],
+                "payload_texts": [first, second],
+            }
+        ])
+
+        row = (await manager.list_processed_page(limit=20))["items"][0]
+        assert [len(text) for text in row["payload_texts"]] == [4000, 3]
+        assert row["payload_char_counts"] == [30_000, 3]
+        stored = manager._read_processed_batches()[0]["payload_texts"]
+        assert [len(text) for text in stored] == [30_000, 3], "投影只发生在读侧拷贝"
+
+        window = await manager.get_payload_window(
+            "processed", "write_paged_batch", request_id="write_a", start_char=4001
+        )
+        assert window["start_char"] == 4001
+        assert window["end_char"] == 24000
+        assert window["text"] == first[4000:24000]
+        assert window["char_count"] == 30_000
+        assert window["truncated"] is True
+
+        tail = await manager.get_payload_window(
+            "processed", "write_paged_batch", request_id="write_a", start_char=24001
+        )
+        assert tail["end_char"] == 30_000
+        assert tail["truncated"] is False
+
+        with pytest.raises(KeyError):
+            await manager.get_payload_window("processed", "write_paged_batch", request_id="write_absent")
+        with pytest.raises(KeyError):
+            await manager.get_payload_window("nonsense", "write_paged_batch")
+    finally:
+        manager.close()
+
+
+@pytest.mark.asyncio
+async def test_queue_row_projects_payload_and_pages_from_the_live_row(tmp_path: Path) -> None:
+    """队列详情同样只投首屏，取全文读的是队列里的原文。"""
+    module = _load_memory_agent_runtime_module()
+    manager = module.MemoryManager(tmp_path, _memory_cfg())
+    try:
+        payload = "y" * 25_000
+        await manager._append_queue_request(
+            module.MemoryQueueRequest(
+                op="write",
+                decision_source="user",
+                payload_text=payload,
+                created_at="2026-08-29T10:00:00+08:00",
+                request_id="write_queue_paged",
+            )
+        )
+
+        row = (await manager.list_queue_page(limit=20))["items"][0]
+        assert len(row["payload_text"]) == 4000
+        assert row["payload_char_count"] == 25_000
+
+        window = await manager.get_payload_window("queue", "write_queue_paged", start_char=4001)
+        assert window["request_id"] == "write_queue_paged"
+        assert window["text"] == payload[4000:24000]
+
+        tail = await manager.get_payload_window("queue", "write_queue_paged", start_char=24001)
+        assert tail["end_char"] == 25_000
+        assert tail["truncated"] is False
+
+        with pytest.raises(KeyError):
+            await manager.get_payload_window("queue", "write_absent")
+    finally:
+        manager.close()
