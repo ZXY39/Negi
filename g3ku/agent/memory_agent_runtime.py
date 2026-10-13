@@ -38,6 +38,13 @@ from main.runtime.send_token_preflight import estimate_runtime_provider_request_
 from main.prompts import load_prompt
 
 _NOTE_REF_RE = re.compile(r"(?:\bref:|见noteid:)(?P<ref>[a-z0-9_]+)\b")
+
+
+def _first_note_ref(text: str) -> str:
+    """The note a piece of memory text points at, if any (single-valued by contract)."""
+    match = _NOTE_REF_RE.search(str(text or ""))
+    return str(match.group("ref") or "").strip() if match else ""
+
 _REVIEW_TOOL_OUTPUT_MAX_CHARS = 400
 _REVIEW_TOOL_PREVIEW_MAX_CHARS = 240
 _REVIEW_REPORTED_TOOL_ID_CAP = 5000
@@ -687,6 +694,9 @@ class _MemoryValidatedWrite:
     note_upserts: dict[str, str] = field(default_factory=dict)
     inspired_memory_ids: list[str] = field(default_factory=list)
     write_mode: str = ""
+    # Note files this batch deleted because the store stopped owning them, each with
+    # the reason the ownership went away.
+    reaped_notes: list[dict[str, Any]] = field(default_factory=list)
     # Only an explicit operator legacy import may load sqlite from a document.
     adopt_document: bool = False
     noop_reason: str = ""
@@ -756,6 +766,8 @@ class _MemorySqliteRepository:
                     refresh_count INTEGER NOT NULL DEFAULT 0,
                     passed_count INTEGER NOT NULL DEFAULT 0,
                     is_compressed INTEGER NOT NULL DEFAULT 0,
+                    note_ref TEXT NOT NULL DEFAULT '',
+                    consolidated_into TEXT NOT NULL DEFAULT '',
                     created_at TEXT NOT NULL,
                     updated_at TEXT NOT NULL
                 )
@@ -767,7 +779,55 @@ class _MemorySqliteRepository:
                 ON memories(passed_count DESC, refresh_count ASC)
                 """
             )
+            # Stores created before these columns existed get them in place; SQLite has
+            # no IF NOT EXISTS for ADD COLUMN, so probe first and keep it re-runnable.
+            present = {str(row[1]) for row in conn.execute("PRAGMA table_info(memories)")}
+            for column in ("note_ref", "consolidated_into"):
+                if column not in present:
+                    conn.execute(f"ALTER TABLE memories ADD COLUMN {column} TEXT NOT NULL DEFAULT ''")
             conn.commit()
+        finally:
+            conn.close()
+
+    def backfill_note_refs(self) -> int:
+        """Move note ownership out of the free text and into the column, once.
+
+        Ownership of a note file must not depend on whether the row happens to render a
+        marker: the projection is lossy for compressed rows (they show the minimal
+        string), and a rewrite that paraphrases a rule can drop the marker on the way.
+        Idempotent - it only fills rows whose column is still empty.
+        """
+        conn = self._connect()
+        filled = 0
+        try:
+            with conn:
+                for row in conn.execute(
+                    "SELECT memory_id, memory_body, minimal_memory FROM memories WHERE note_ref = ''"
+                ).fetchall():
+                    ref = _first_note_ref(str(row["minimal_memory"] or "")) or _first_note_ref(str(row["memory_body"] or ""))
+                    if not ref:
+                        continue
+                    conn.execute("UPDATE memories SET note_ref = ? WHERE memory_id = ?", (ref, str(row["memory_id"])))
+                    filled += 1
+        finally:
+            conn.close()
+        return filled
+
+    def referenced_note_refs(self) -> list[str]:
+        """Every note name the store says is in use, including retired rows.
+
+        Retired (`consolidated_into`) rows keep their `note_ref` on purpose: a note the
+        consolidation lane merely points at is still owned, and reading ownership from
+        the rendered document would sweep it the moment the row stops rendering.
+        """
+        conn = self._connect()
+        try:
+            refs: set[str] = set()
+            for row in conn.execute("SELECT note_ref, consolidated_into FROM memories").fetchall():
+                for value in (str(row["note_ref"] or "").strip(), str(row["consolidated_into"] or "").strip()):
+                    if value:
+                        refs.add(value)
+            return sorted(refs)
         finally:
             conn.close()
 
@@ -789,6 +849,20 @@ class _MemorySqliteRepository:
         payload["from_user"] = bool(payload.get("from_user"))
         payload["is_compressed"] = bool(payload.get("is_compressed"))
         return payload
+
+    @staticmethod
+    def _resolve_note_ref(item: dict[str, Any]) -> str:
+        """Explicit `note_ref` wins; otherwise derive it from the text being written.
+
+        Deriving is a migration convenience, not the authority: once stored, the column
+        is what protects the note file, because a later rewrite may drop the marker.
+        """
+        explicit = str(item.get("note_ref") or "").strip()
+        if explicit:
+            return explicit
+        content = str(item.get("content") or "")
+        minimal = str(item.get("minimal_memory") or "")
+        return _first_note_ref(minimal) or _first_note_ref(content)
 
     @staticmethod
     def _normalize_source_and_user_flag(source: str, from_user: bool) -> tuple[str, bool]:
@@ -824,10 +898,11 @@ class _MemorySqliteRepository:
                     refresh_count,
                     passed_count,
                     is_compressed,
+                    note_ref,
                     created_at,
                     updated_at
                 )
-                VALUES (?, ?, ?, ?, ?, 0, 0, 0, ?, ?)
+                VALUES (?, ?, ?, ?, ?, 0, 0, 0, ?, ?, ?)
                 """,
                 (
                     memory_id,
@@ -835,6 +910,7 @@ class _MemorySqliteRepository:
                     minimal_memory,
                     normalized_source,
                     1 if normalized_from_user else 0,
+                    _first_note_ref(minimal_memory) or _first_note_ref(memory_body),
                     now_iso,
                     now_iso,
                 ),
@@ -898,10 +974,12 @@ class _MemorySqliteRepository:
                             refresh_count,
                             passed_count,
                             is_compressed,
+                            note_ref,
+                            consolidated_into,
                             created_at,
                             updated_at
                         )
-                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                         """,
                         (
                             str(entry.memory_id or "").strip(),
@@ -912,6 +990,8 @@ class _MemorySqliteRepository:
                             int(existing_row.get("refresh_count", 0) or 0),
                             int(existing_row.get("passed_count", 0) or 0),
                             1 if bool(existing_row.get("is_compressed")) else 0,
+                            str(existing_row.get("note_ref") or "").strip() or str(entry.note_ref or "").strip(),
+                            str(existing_row.get("consolidated_into") or "").strip(),
                             str(existing_row.get("created_at") or timestamp),
                             timestamp,
                         ),
@@ -942,10 +1022,12 @@ class _MemorySqliteRepository:
                             refresh_count,
                             passed_count,
                             is_compressed,
+                            note_ref,
+                            consolidated_into,
                             created_at,
                             updated_at
                         )
-                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                         """,
                         (
                             str(row.get("memory_id") or ""),
@@ -956,6 +1038,8 @@ class _MemorySqliteRepository:
                             int(row.get("refresh_count", 0) or 0),
                             int(row.get("passed_count", 0) or 0),
                             1 if bool(row.get("is_compressed")) else 0,
+                            str(row.get("note_ref") or ""),
+                            str(row.get("consolidated_into") or ""),
                             str(row.get("created_at") or ""),
                             str(row.get("updated_at") or ""),
                         ),
@@ -993,6 +1077,7 @@ class _MemorySqliteRepository:
                     )
                     memory_id = str(item.get("id") or item.get("memory_id") or "").strip() or self._generate_id(conn)
                     timestamp = self._mutation_timestamp(now_iso, index)
+                    add_note_ref = self._resolve_note_ref(item)
                     conn.execute(
                         """
                         INSERT INTO memories(
@@ -1004,10 +1089,11 @@ class _MemorySqliteRepository:
                             refresh_count,
                             passed_count,
                             is_compressed,
+                            note_ref,
                             created_at,
                             updated_at
                         )
-                        VALUES (?, ?, ?, ?, ?, 0, 0, 0, ?, ?)
+                        VALUES (?, ?, ?, ?, ?, 0, 0, 0, ?, ?, ?)
                         """,
                         (
                             memory_id,
@@ -1015,6 +1101,7 @@ class _MemorySqliteRepository:
                             str(item.get("minimal_memory") or ""),
                             normalized_source,
                             1 if normalized_from_user else 0,
+                            add_note_ref,
                             timestamp,
                             timestamp,
                         ),
@@ -1025,12 +1112,17 @@ class _MemorySqliteRepository:
                     memory_id = str(item.get("id") or "").strip()
                     if not memory_id:
                         continue
+                    # A rewrite that paraphrases the rule without repeating the marker
+                    # keeps the note it already owned: ownership lives in the column,
+                    # not in whether this particular wording carried the marker.
+                    rewrite_note_ref = self._resolve_note_ref(item)
                     conn.execute(
                         """
                         UPDATE memories
                         SET
                             memory_body = ?,
                             minimal_memory = ?,
+                            note_ref = CASE WHEN ? != '' THEN ? ELSE note_ref END,
                             refresh_count = refresh_count + 1,
                             passed_count = 0,
                             is_compressed = 0,
@@ -1040,6 +1132,8 @@ class _MemorySqliteRepository:
                         (
                             str(item.get("content") or ""),
                             str(item.get("minimal_memory") or ""),
+                            rewrite_note_ref,
+                            rewrite_note_ref,
                             now_iso,
                             memory_id,
                         ),
@@ -1231,7 +1325,11 @@ class MemoryManager:
         # fail because the store is over the document cap, so this is best-effort.
         try:
             with self._io_lock:
-                self._reconcile_mirror_with_sqlite_locked(now_iso=self._now_iso())
+                # Ownership has to be in the store before anything reads it from there:
+                # rows written while the marker was the only record backfill into
+                # `note_ref`. Best-effort for the same reason as the reconciliation.
+                self._memory_repo.backfill_note_refs()
+                self._reconcile_mirror_with_sqlite_locked(now_iso=self._now_iso(), at_boot=True)
         except Exception as exc:
             logger.error(f"memory mirror reconciliation failed at boot: {exc}")
 
@@ -1317,20 +1415,32 @@ class MemoryManager:
             )
         return self._normalize_document_text("".join(format_memory_entry(entry) for entry in entries))
 
-    def _reconcile_mirror_with_sqlite_locked(self, *, now_iso: str) -> str:
+    def _reconcile_mirror_with_sqlite_locked(self, *, now_iso: str, at_boot: bool = False) -> str:
         """Align the mirror with sqlite. sqlite is the only authoritative store.
 
-        Returns "", "drift_archived" or "rebuilt_from_sqlite". The mirror never writes
-        into sqlite: a truncated or hand-edited `MEMORY.md` used to be parsed back into
-        the store here, which is how already-compressed rows lost their full body (the
-        rendered form of a compressed row *is* its minimal string) and how one torn
-        write could wipe the library.
+        Returns "", "drift_archived", "rebuilt_from_sqlite" or "legacy_mirror_kept".
+        The mirror never writes into sqlite: a truncated or hand-edited `MEMORY.md` used
+        to be parsed back into the store here, which is how already-compressed rows lost
+        their full body (the rendered form of a compressed row *is* its minimal string)
+        and how one torn write could wipe the library.
+
+        With `at_boot`, a mirror that yields no managed entries at all is left alone:
+        that is the shape of a pre-migration legacy `MEMORY.md`, which `import-legacy`
+        and `cleanup-legacy` still have to read. Mid-session (no `at_boot`) the same
+        content is archived and repainted, because a commit must not leave a divergent
+        projection standing.
         """
         current_snapshot = self._normalize_document_text(self.snapshot_text())
         sqlite_snapshot = self._document_text_from_sqlite_rows(self._memory_repo.list_memories(), now_iso=now_iso)
         if current_snapshot == sqlite_snapshot:
             return ""
         if current_snapshot:
+            if at_boot and not parse_memory_document(current_snapshot):
+                logger.warning(
+                    "memory/MEMORY.md holds no managed memory blocks; treating it as pre-migration "
+                    "legacy input and leaving it for `negi memory import-legacy` / `cleanup-legacy`"
+                )
+                return "legacy_mirror_kept"
             # A non-empty mirror that sqlite does not produce: external edit, pasted
             # text, or a torn write. Keep it as evidence, then repaint it from sqlite.
             self._archive_snapshot_locked()
@@ -1426,7 +1536,8 @@ class MemoryManager:
         """Return every memory row stored in sqlite, with all persisted fields.
 
         Includes memory_id, memory_body, minimal_memory, source, from_user,
-        refresh_count, passed_count, is_compressed, created_at, updated_at.
+        refresh_count, passed_count, is_compressed, note_ref, consolidated_into,
+        created_at, updated_at.
         Used by the read-only "view memories" admin surface.
         """
         repo = getattr(self, "_memory_repo", None)
@@ -1592,7 +1703,7 @@ class MemoryManager:
             document_valid = False
             document_error = str(exc or "invalid memory document").strip()
 
-        note_refs = self._collect_note_refs(snapshot_text)
+        note_refs = self._referenced_note_refs()
         note_files = self._note_file_refs()
         missing_note_refs = sorted(ref for ref in note_refs if ref not in note_files)
         orphan_notes = sorted(ref for ref in note_files if ref not in note_refs)
@@ -1671,8 +1782,7 @@ class MemoryManager:
         }
 
     def reconcile_notes(self, *, delete_orphans: bool = False) -> dict[str, Any]:
-        snapshot_text = self.snapshot_text()
-        note_refs = self._collect_note_refs(snapshot_text)
+        note_refs = self._referenced_note_refs()
         note_files = self._note_file_refs()
         missing_note_refs = sorted(ref for ref in note_refs if ref not in note_files)
         orphan_notes = sorted(ref for ref in note_files if ref not in note_refs)
@@ -2598,6 +2708,17 @@ class MemoryManager:
                     "content": str(body or ""),
                 }
             )
+        for item in list(validated.reaped_notes or []):
+            normalized_ref = str(item.get("note_ref") or "").strip()
+            if not normalized_ref:
+                continue
+            changes.append(
+                {
+                    "type": "note_reaped",
+                    "note_ref": normalized_ref,
+                    "reason": str(item.get("reason") or "unreferenced").strip(),
+                }
+            )
         return changes
 
     # Legacy processed rows kept only a flattened `新增：…；修改 ID：…；删除 ID；更新 note ref:…`
@@ -2752,10 +2873,28 @@ class MemoryManager:
                 except Exception as restore_exc:
                     logger.error(f"memory commit rollback failed: {restore_exc}")
                 raise
-            self._cleanup_orphan_notes_locked(self.snapshot_text())
+            prior_owner_by_ref: dict[str, str] = {
+                str(row.get("note_ref") or "").strip(): str(row.get("memory_id") or "").strip()
+                for row in rows_before
+                if str(row.get("note_ref") or "").strip()
+            }
+            surviving_ids = {str(row.get("memory_id") or "").strip() for row in self._memory_repo.list_memories()}
+
+            def _record_reaped(removed_refs: list[str]) -> None:
+                for ref in removed_refs:
+                    owner = prior_owner_by_ref.get(ref, "")
+                    if not owner:
+                        reason = "unreferenced"
+                    elif owner not in surviving_ids:
+                        reason = "memory_deleted"
+                    else:
+                        reason = "ref_dropped"
+                    validated.reaped_notes.append({"note_ref": ref, "reason": reason})
+
+            _record_reaped(self._cleanup_orphan_notes_locked())
             compression_result = self._run_post_commit_compression_locked(now_iso=now_iso)
             final_snapshot = self.snapshot_text()
-            self._cleanup_orphan_notes_locked(final_snapshot)
+            _record_reaped(self._cleanup_orphan_notes_locked())
             validated.memory_chars_after = len(final_snapshot)
             validated.document_preview = self._document_preview(final_snapshot)
             validated.compression_triggered = bool(compression_result.get("compression_triggered"))
@@ -2842,14 +2981,32 @@ class MemoryManager:
             "deleted_by_compression_ids": deleted_by_compression_ids,
         }
 
-    def _cleanup_orphan_notes_locked(self, document_text: str) -> None:
-        active_refs = set(self._collect_note_refs(document_text))
+    def _referenced_note_refs(self) -> list[str]:
+        """Note names the store owns. Ownership is a column, not a rendering artefact:
+        a compressed row projects to its minimal string and a rewrite can drop the
+        marker, so scanning the projection would sweep notes that are still in use."""
+        repo = getattr(self, "_memory_repo", None)
+        if repo is None:
+            return self._collect_note_refs(self.snapshot_text())
+        return repo.referenced_note_refs()
+
+    def _cleanup_orphan_notes_locked(self) -> list[str]:
+        """Delete note files the store no longer owns; return the removed refs.
+
+        The removal is reported to the caller so it reaches the terminal ledger: an
+        unrecoverable file deletion that leaves no trace cannot be triaged later.
+        """
+        active_refs = set(self._referenced_note_refs())
+        removed: list[str] = []
         for path in self.notes_dir.glob("*.md"):
-            if path.stem not in active_refs:
-                try:
-                    path.unlink()
-                except OSError:
-                    continue
+            if path.stem in active_refs:
+                continue
+            try:
+                path.unlink()
+            except OSError:
+                continue
+            removed.append(path.stem)
+        return removed
 
     @staticmethod
     def _collect_note_refs(document_text: str) -> list[str]:

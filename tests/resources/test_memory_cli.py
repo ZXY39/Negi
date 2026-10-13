@@ -234,10 +234,20 @@ def test_memory_reconcile_notes_creates_missing_notes_and_deletes_orphans(
     memory_dir = tmp_path / "memory"
     notes_dir = memory_dir / "notes"
     notes_dir.mkdir(parents=True, exist_ok=True)
-    (memory_dir / "MEMORY.md").write_text(
-        "---\n2026/4/17-user锛歕nDeployment checklist, see ref:note_ops\n",
-        encoding="utf-8",
-    )
+    # Note ownership lives in the store, not in whatever the document happens to render,
+    # so the row that owns the missing note has to be the thing that is seeded.
+    seed_manager = _memory_agent_runtime_module().MemoryManager(tmp_path, _memory_cfg())
+    try:
+        seed_manager._memory_repo.create_memory(
+            memory_body="Deployment checklist",
+            minimal_memory="deploy->checklist ref:note_ops",
+            source="user",
+            from_user=True,
+            now_iso="2026-04-17T10:00:00+08:00",
+        )
+        seed_manager._rebuild_memory_snapshot_from_sqlite(now_iso="2026-04-17T10:00:01+08:00")
+    finally:
+        seed_manager.close()
     (notes_dir / "orphan_note.md").write_text("orphan body\n", encoding="utf-8")
 
     console = _ConsoleStub()
