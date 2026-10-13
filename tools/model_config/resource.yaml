@@ -1,7 +1,7 @@
 schema_version: 1
 kind: tool
 name: model_config
-description: Manage `.g3ku/config.json`, provider templates, drafts, bindings, and the ordered fallback chain for `ceo` / `execution` / `inspection` / `memory`. `get_scope_chain` reads a chain as stored (ordered entries, load-balance group slots, per-role iteration and concurrency); `set_scope_chain` writes it back through the same payload shape the model config page uses, so a group slot survives an edit.
+description: Manage `.g3ku/config.json`, provider templates, drafts, bindings, and the ordered fallback chain for `ceo` / `execution` / `inspection` / `memory`. `get_scope_chain` reads a chain as stored (ordered entries, load-balance group slots, per-role iteration and concurrency); `set_scope_chain` writes it back through the same payload shape the model config page uses, so a group slot survives an edit. On update actions, omit every field you do not want to change — a field sent as `null` counts as omitted, and an empty string clears the fields that can be cleared.
 tool_result_delivery_contract: runtime_managed
 source:
   type: ''

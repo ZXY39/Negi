@@ -51,7 +51,9 @@ class ModelConfigTool(Tool):
             "and the ordered fallback chain for ceo/execution/inspection/memory scopes. "
             "get_scope_chain reads a chain as it is actually stored (ordered entries, load-balance "
             "group slots, per-role iteration and concurrency); set_scope_chain writes it back through "
-            "the same payload shape the model config page uses, so group slots survive an edit."
+            "the same payload shape the model config page uses, so group slots survive an edit. "
+            "On update actions, leave out every field you do not want to change — a field sent as null "
+            "counts as left out, and an empty string clears the ones that can be cleared."
         )
 
     @property
@@ -236,6 +238,11 @@ class ModelConfigTool(Tool):
             return manager.get_model(str(kwargs.get("key") or "").strip())
 
         if action_name == "add_model":
+            if not self._provided(kwargs, "context_window_tokens"):
+                raise ValueError(
+                    "context_window_tokens is required for add_model: 声明窗口没有安全的默认值，"
+                    "而链准入会拒绝窗口缺失或 ≤25000 的模型。填该模型真实可用的上下文窗口。"
+                )
             result = manager.add_model(
                 key=str(kwargs.get("key") or "").strip(),
                 provider_model=str(kwargs.get("provider_model") or "").strip(),
@@ -244,7 +251,7 @@ class ModelConfigTool(Tool):
                 context_window_tokens=_as_int(kwargs.get("context_window_tokens"), field="context_window_tokens"),
                 scopes=[str(item) for item in (kwargs.get("scopes") or [])],
                 extra_headers=kwargs.get("extra_headers") if isinstance(kwargs.get("extra_headers"), dict) else None,
-                enabled=_as_bool(kwargs.get("enabled", True), field="enabled"),
+                enabled=True if not self._provided(kwargs, "enabled") else _as_bool(kwargs.get("enabled"), field="enabled"),
                 max_tokens=None if kwargs.get("max_tokens") in (None, "") else _as_int(kwargs.get("max_tokens"), field="max_tokens"),
                 temperature=None if kwargs.get("temperature") in (None, "") else _as_float(kwargs.get("temperature"), field="temperature"),
                 reasoning_effort=kwargs.get("reasoning_effort"),
@@ -333,14 +340,16 @@ class ModelConfigTool(Tool):
 
         if action_name == "set_scope_chain":
             route_kwargs: dict[str, Any] = {}
-            if "model_keys" in kwargs:
+            if self._provided(kwargs, "model_keys"):
                 route_kwargs["model_keys"] = [str(item) for item in (kwargs.get("model_keys") or [])]
-            if "route_entries" in kwargs:
+            if self._provided(kwargs, "route_entries"):
                 route_kwargs["route_entries"] = kwargs.get("route_entries")
-            if "max_iterations" in kwargs:
+            if self._provided(kwargs, "max_iterations"):
                 route_kwargs["max_iterations"] = kwargs.get("max_iterations")
-            if "max_concurrency" in kwargs:
+            if self._provided(kwargs, "max_concurrency"):
                 route_kwargs["max_concurrency"] = kwargs.get("max_concurrency")
+            if not route_kwargs:
+                return "Error: set_scope_chain needs model_keys, route_entries, max_iterations or max_concurrency"
             result = manager.update_scope_route(
                 str(kwargs.get("scope") or "").strip(),
                 **route_kwargs,
@@ -352,32 +361,42 @@ class ModelConfigTool(Tool):
 
     _PATCH_TEXT_FIELDS = ("provider_model", "api_key", "api_base", "reasoning_effort", "description", "name", "quota_pool_key")
 
+    @staticmethod
+    def _provided(kwargs: dict[str, Any], field: str) -> bool:
+        """模型会按参数表把没用到的字段填成 null，所以"交了这一格"的判据是值不是 None。
+
+        用 `field in kwargs` 判定会让 `route_entries=null` 与 `model_keys=[...]` 同时下去，
+        manager 直接报"两者不能同时提供"，整次链写失败。
+        """
+        return field in kwargs and kwargs.get(field) is not None
+
     def _collect_model_patch(self, kwargs: dict[str, Any]) -> dict[str, Any]:
-        """只交模型真的填了的键：manager 用 _UNSET 区分"不动这一格"和"把它抹成空"。
+        """只交模型真的填了的字段：manager 用 _UNSET 区分"不动这一格"和"把它抹成空"。
 
         把缺席的键当成 None 传下去会清掉 api_key/api_base，或在 parse_provider_model 里
         报 "Invalid provider_model"，两种都不是调用方要的效果。
         """
         patch: dict[str, Any] = {}
         for field in self._PATCH_TEXT_FIELDS:
-            if field in kwargs:
+            # 文本字段连空串一起当作"没填"：清空 api_base 会让整份 draft 过不了 base_url 校验。
+            if self._provided(kwargs, field) and str(kwargs.get(field) or "").strip() != "":
                 patch[field] = kwargs.get(field)
-        if "extra_headers" in kwargs:
+        if self._provided(kwargs, "extra_headers"):
             value = kwargs.get("extra_headers")
-            patch["extra_headers"] = value if isinstance(value, dict) or value is None else None
+            patch["extra_headers"] = value if isinstance(value, dict) else None
         for field in ("max_tokens", "context_window_tokens"):
-            # 这两格允许显式清空（与模型配置页一致），清空后链准入会要求重新填可信窗口。
-            if field in kwargs:
-                patch[field] = None if kwargs.get(field) in (None, "") else _as_int(kwargs.get(field), field=field)
-        if kwargs.get("retry_count") not in (None, ""):
+            # 数值字段留了显式清空的路：交空串 = 清掉，交 null = 不动。
+            if self._provided(kwargs, field):
+                patch[field] = None if str(kwargs.get(field) or "").strip() == "" else _as_int(kwargs.get(field), field=field)
+        if self._provided(kwargs, "retry_count") and str(kwargs.get("retry_count") or "").strip() != "":
             # retry_count 没有"清空"语义，交 None 会让 manager 的 int(None) 直接抛。
             patch["retry_count"] = _as_int(kwargs.get("retry_count"), field="retry_count")
         for field in ("temperature", "request_timeout_seconds"):
-            if field in kwargs:
-                patch[field] = None if kwargs.get(field) in (None, "") else _as_float(kwargs.get(field), field=field)
-        if "retry_on" in kwargs:
+            if self._provided(kwargs, field):
+                patch[field] = None if str(kwargs.get(field) or "").strip() == "" else _as_float(kwargs.get(field), field=field)
+        if self._provided(kwargs, "retry_on"):
             patch["retry_on"] = kwargs.get("retry_on")
-        if "image_multimodal_enabled" in kwargs:
+        if self._provided(kwargs, "image_multimodal_enabled"):
             patch["image_multimodal_enabled"] = _as_bool(kwargs.get("image_multimodal_enabled"), field="image_multimodal_enabled")
         return patch
 

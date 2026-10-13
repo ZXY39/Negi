@@ -336,6 +336,93 @@ async def test_image_multimodal_chain_decision_is_order_independent(
     assert ReActToolLoop._image_multimodal_enabled_for_model_refs(["m1"]) is True
 
 
+async def test_set_scope_chain_treats_null_siblings_as_omitted(workspace: Path) -> None:
+    """模型会按参数表把没用到的字段填成 null；那不能算"两种链形状同给"。
+
+    现网形状：`{scope, model_keys, route_entries: null}` 报
+    `model_keys and route_entries cannot be provided together`，三次链写全红。
+    """
+    result = await _call(
+        action="set_scope_chain",
+        scope="inspection",
+        model_keys=["m1"],
+        route_entries=None,
+        max_iterations=None,
+        max_concurrency=None,
+    )
+    assert [entry["model_key"] for entry in result["route_entries"]] == ["m1"]
+
+    result = await _call(
+        action="set_scope_chain",
+        scope="execution",
+        route_entries=[{"type": "load_balance", "group_key": "g1"}],
+        model_keys=None,
+    )
+    assert [entry["type"] for entry in result["route_entries"]] == ["load_balance"]
+
+
+async def test_set_scope_chain_without_any_payload_is_readable(workspace: Path) -> None:
+    result = await _call(action="set_scope_chain", scope="execution", model_keys=None, route_entries=None)
+    assert str(result).startswith("Error: set_scope_chain needs")
+
+
+async def test_update_model_with_all_null_siblings_changes_only_one_field(workspace: Path) -> None:
+    """02:58:14 的现网形状：只交 effort 与收图标记，其余字段全为 null。"""
+    result = await _call(
+        action="update_model",
+        key="m1",
+        reasoning_effort="high",
+        image_multimodal_enabled=True,
+        provider_model=None,
+        api_key=None,
+        api_base=None,
+        extra_headers=None,
+        max_tokens=None,
+        temperature=None,
+        context_window_tokens=None,
+        request_timeout_seconds=None,
+        retry_on=None,
+        retry_count=None,
+        description=None,
+        name=None,
+        quota_pool_key=None,
+    )
+
+    assert result["reasoning_effort"] == "high"
+    assert result["image_multimodal_enabled"] is True
+    # 缺席的格子必须原样留着，而不是被 None 抹平。
+    assert result["context_window_tokens"] == 128000
+    assert result["provider_model"] == "openai:gpt-4.1"
+    assert result["max_tokens"] == 1024
+
+
+async def test_add_model_null_or_missing_window_reports_actionably(workspace: Path) -> None:
+    with pytest.raises(ValueError, match="required for add_model"):
+        await _call(
+            action="add_model",
+            key="m9",
+            provider_model="openai:gpt-4.1",
+            api_key="k9",
+            api_base="",
+            context_window_tokens=None,
+            enabled=None,
+        )
+
+    created = await _call(
+        action="add_model",
+        key="m9",
+        provider_model="openai:gpt-4.1",
+        api_key="k9",
+        api_base="",
+        context_window_tokens=131072,
+        enabled=None,
+        image_multimodal_enabled=None,
+        name=None,
+    )
+    # `enabled: null` 不能把新建的模型落成禁用。
+    assert created["enabled"] is True
+
+
 async def test_refresh_failure_still_reports_config_saved(workspace: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     import g3ku.shells.web as web_shell
 

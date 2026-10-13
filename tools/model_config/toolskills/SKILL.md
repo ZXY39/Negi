@@ -55,8 +55,11 @@ Manage .g3ku/config.json model catalog, provider templates/drafts/bindings, and 
   is a group.
 - A `model_keys` write on a chain that stores group slots flattens them. Read first, then write the
   whole shape back through `route_entries`.
-- Omitted fields are left alone; an explicit `null` clears the fields that have a clearable meaning
-  (`max_tokens`, `context_window_tokens`, `temperature`, `request_timeout_seconds`, `extra_headers`).
+- Omitted fields are left alone, and so is any field you send as `null` — sending `null` does not clear
+  anything. To clear a field that has a clearable meaning (`max_tokens`, `context_window_tokens`,
+  `temperature`, `request_timeout_seconds`, `extra_headers`), send an empty string `""` instead.
+  Never list a chain field you are not changing: `model_keys` and `route_entries` are mutually
+  exclusive, and a `null` alongside the other one is still a conflict.
 - `delete_model` quietly removes the model from every chain holding it and reports
   `removed_from_scopes`.
 
