@@ -163,3 +163,31 @@ async def test_frontdoor_expansion_returns_text_only_when_model_cannot_see_image
     )
     assert "没有勾选多模态能力因此无法看图" in text
     assert not isinstance(content, list), "不收图时不该再产出多模态 content 块"
+
+
+def test_frontdoor_choke_degrades_image_blocks_for_a_text_only_head() -> None:
+    """外部／MCP 附件那道的图块也要在定稿正文处收口：否则 artifact 会记成"图发出去了"。"""
+    runner = object.__new__(CeoFrontDoorRuntimeOps)
+    runner._ceo_image_multimodal_for_request = lambda refs: (False, "链尾纯文本")
+    content = [
+        {"type": "text", "text": "这张图里是什么"},
+        {"type": "image_url", "image_url": {"url": "data:image/png;base64,AAAA"}},
+    ]
+
+    degraded = runner._degrade_image_content_for_request(content, model_refs=["m_tail"])
+
+    assert not image_capability_module.message_content_has_image_blocks(degraded)
+    joined = "\n".join(str(block.get("text") or "") for block in degraded)
+    assert "这张图里是什么" in joined
+    assert image_capability_module.INLINE_IMAGE_PATH_PLACEHOLDER in joined
+    assert "当前模型配置名称是(链尾纯文本)" in joined
+
+
+def test_frontdoor_choke_leaves_blocks_alone_when_head_sees_images() -> None:
+    runner = object.__new__(CeoFrontDoorRuntimeOps)
+    runner._ceo_image_multimodal_for_request = lambda refs: (True, "链首多模态")
+    content = [{"type": "image_url", "image_url": {"url": "data:image/png;base64,AAAA"}}]
+
+    kept = runner._degrade_image_content_for_request(content, model_refs=["m_head"])
+
+    assert image_capability_module.message_content_has_image_blocks(kept)

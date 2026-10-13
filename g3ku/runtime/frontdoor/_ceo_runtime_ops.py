@@ -1094,6 +1094,28 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
         refs = [str(item or "").strip() for item in list(model_refs or []) if str(item or "").strip()]
         return self._ceo_image_multimodal_for_ref(refs[0] if refs else "")
 
+    def _degrade_image_content_for_request(self, content: Any, *, model_refs: list[str] | None) -> Any:
+        """本轮这一发落到的那颗不收图时，把 content 里的图片块换成"路径/占位 + 原因"文本。
+
+        放在前门定稿正文之处而不是只放咽喉点，是为了让 artifact 与 `image_count` 读到
+        **降级后的同一份正文**：否则复盘会看见 `image_count=1` 而实际发出去的是文字。
+        外部／MCP 附件那道的落盘路径由它自己的上传说明给出，这里拿不到就留 `(inline)`。
+        """
+        from g3ku.runtime.image_capability import degrade_image_blocks_in_messages
+
+        if not isinstance(content, list):
+            return content
+        enabled, display_name = self._ceo_image_multimodal_for_request(model_refs)
+        if enabled:
+            return content
+        degraded, degraded_count = degrade_image_blocks_in_messages(
+            [{"role": "user", "content": content}],
+            display_name=display_name,
+        )
+        if not degraded_count:
+            return content
+        return degraded[0].get("content", content)
+
     @staticmethod
     def _web_ceo_uploaded_files_note(uploads: list[dict[str, Any]]) -> str:
         if not uploads:
@@ -7216,9 +7238,13 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
                 model_refs=model_refs,
             )
         )
-        # 收图与否已在装配层按当前模型判过（`_expand_web_ceo_uploads_for_current_request_content`
-        # 不支持时给的是"路径 + 原因"的文本），这里不再剥块：剥掉就等于让图凭空消失，
-        # 而链前进到别的成员时还有咽喉点那侧的同一判据兜底。
+        # 收图与否按当前模型判：web 上传那道在 `_expand_web_ceo_uploads_for_current_request_content`
+        # 里已经给过"路径 + 原因"，外部／MCP 附件那道在这里收口。剥块等于让图凭空消失，
+        # 所以一律换成文本块；链前进到别的成员时还有咽喉点那侧的同一判据兜底。
+        current_turn_user_content = self._degrade_image_content_for_request(
+            current_turn_user_content,
+            model_refs=model_refs,
+        )
         current_turn_has_multimodal_uploads = self._message_content_has_multimodal_blocks(
             current_turn_user_content
         )
