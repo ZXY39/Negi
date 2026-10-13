@@ -133,7 +133,7 @@ function loadApp() {
     context.window = context;
     vm.createContext(context);
     vm.runInContext(
-        `${APP_CODE}\nthis.__testExports = { handleCeoControlAck, patchCeoInflightTurn, finalizeCeoTurn, finalizePausedCeoTurn, renderPersistedCeoAssistantTurn, ensureActiveCeoTurn, renderCeoSnapshot, dedupeInflightUserMessageAgainstMessages, applyCeoState, maybeDispatchQueuedCeoFollowUps, setCeoQueuedFollowUps, getCeoQueuedFollowUps, sendCeoMessage, S, U, WebSocket, setAddMsg(fn) { addMsg = fn; }, setCreatePendingCeoTurn(fn) { createPendingCeoTurn = fn; }, setSetCeoSessionSnapshotCache(fn) { setCeoSessionSnapshotCache = fn; }, setPatchCeoSessionSnapshotCache(fn) { patchCeoSessionSnapshotCache = fn; }, getPatchSnapshotCalls: () => globalThis.__patchSnapshotCalls || 0 };`,
+        `${APP_CODE}\nthis.__testExports = { handleCeoControlAck, patchCeoInflightTurn, finalizeCeoTurn, finalizePausedCeoTurn, renderPersistedCeoAssistantTurn, ensureActiveCeoTurn, renderCeoSnapshot, dedupeInflightUserMessageAgainstMessages, applyCeoState, maybeDispatchQueuedCeoFollowUps, setCeoQueuedFollowUps, getCeoQueuedFollowUps, getMergedCeoQueuedFollowUps, sendCeoMessage, S, U, WebSocket, setAddMsg(fn) { addMsg = fn; }, setCreatePendingCeoTurn(fn) { createPendingCeoTurn = fn; }, setSetCeoSessionSnapshotCache(fn) { setCeoSessionSnapshotCache = fn; }, setPatchCeoSessionSnapshotCache(fn) { patchCeoSessionSnapshotCache = fn; }, getPatchSnapshotCalls: () => globalThis.__patchSnapshotCalls || 0 };`,
         context
     );
     vm.runInContext(
@@ -1181,4 +1181,77 @@ test("finalize reorders same-turn follow-up bubbles before the assistant reply",
     );
     assert.deepEqual(userBubbles, ["Original request", "Queued follow-up"]);
     assert.equal(S.ceoQueuedFollowUps["web:test"]?.length || 0, 0);
+});
+
+test("在飞帧接走补充消息后，候选条不再画它", () => {
+    const context = loadApp();
+    const {
+        S,
+        applyCeoState,
+        patchCeoInflightTurn,
+        setAddMsg,
+        setSetCeoSessionSnapshotCache,
+        setPatchCeoSessionSnapshotCache,
+        getMergedCeoQueuedFollowUps,
+    } = context;
+    const snapshotStore = {};
+
+    setAddMsg(() => {});
+    setSetCeoSessionSnapshotCache((sessionId, entry = {}) => {
+        const key = String(sessionId || entry?.session_id || "").trim();
+        if (!key) return null;
+        snapshotStore[key] = { ...(snapshotStore[key] || {}), ...(entry || {}), session_id: key };
+        S.ceoSnapshotCache = { ...snapshotStore };
+        return snapshotStore[key];
+    });
+    setPatchCeoSessionSnapshotCache((sessionId, updater) => {
+        const key = String(sessionId || "").trim();
+        const current = snapshotStore[key] ? { ...snapshotStore[key] } : {};
+        const next = typeof updater === "function" ? updater(current) : current;
+        snapshotStore[key] = { ...current, ...(next || {}), session_id: key };
+        S.ceoSnapshotCache = { ...snapshotStore };
+        return snapshotStore[key];
+    });
+
+    S.activeSessionId = "web:test";
+    S.ceoTurnActive = true;
+    S.ceoUploads = [];
+    S.ceoPendingTurns = [makeTurn({ source: "user", steps: 1 })];
+    S.ceoPendingTurns[0].turnId = "turn-live";
+    snapshotStore["web:test"] = {
+        session_id: "web:test",
+        messages: [],
+        inflight_turn: {
+            source: "user",
+            turn_id: "turn-live",
+            status: "running",
+            user_message: { content: "Original request" },
+            assistant_text: "Still working",
+        },
+    };
+    S.ceoSnapshotCache = { ...snapshotStore };
+
+    // 点过插话之后的某一帧：runtime 报"这条还在我队列里"，候选条因此画它。
+    applyCeoState({
+        status: "running",
+        is_running: true,
+        queued_follow_up_messages: [
+            { content: "Queued follow-up", attachments: [], metadata: { _transcript_turn_id: "t-fold" } },
+        ],
+    });
+    assert.equal(getMergedCeoQueuedFollowUps("web:test").length, 1);
+
+    // 同一轮的在飞帧带上 turn_id 同号的那条：本轮已经把它接走了。
+    patchCeoInflightTurn({
+        source: "user",
+        turn_id: "turn-live",
+        status: "running",
+        assistant_text: "Still working",
+        user_messages: [
+            { role: "user", content: "Original request" },
+            { role: "user", content: "Queued follow-up", turn_id: "t-fold" },
+        ],
+    }, { sessionId: "web:test", cacheField: "inflight_turn" });
+
+    assert.equal(getMergedCeoQueuedFollowUps("web:test").length, 0);
 });

@@ -3180,7 +3180,10 @@ function getCeoQueuedFollowUps(sessionId = activeSessionId()) {
 function getCeoServerQueuedFollowUps(sessionId = activeSessionId()) {
     const key = String(sessionId || "").trim();
     if (!key) return [];
-    return normalizeCeoServerQueuedFollowUpList(S.ceoServerQueuedFollowUps?.[key] || []);
+    // 已被回合接走的条目在这里就出局：镜像只是每帧的整表读数，而"接走"之后服务端还会
+    // 在若干帧里继续报它。判据只用 turn_id（条目 id 是 `server:<turn_id>`），不读正文。
+    return normalizeCeoServerQueuedFollowUpList(S.ceoServerQueuedFollowUps?.[key] || [])
+        .filter((item) => !isCeoTakenFollowUpTurn(key, ceoServerQueuedFollowUpTurnId(item?.id)));
 }
 
 function getMergedCeoQueuedFollowUps(sessionId = activeSessionId()) {
@@ -4269,6 +4272,9 @@ function promoteRepresentedRuntimeSentCeoFollowUps(sessionId = activeSessionId()
     if (!key) return [];
     const normalizedRepresented = normalizeCeoSnapshotUserMessages(representedMessages);
     if (!normalizedRepresented.length) return [];
+    // 这条帧同时负责服务端那一半的退场：本地条目早就被文本去重交给镜像画了，
+    // 只摘本地那份的话，消息都进气泡了候选条还挂着。
+    retireCeoTakenFollowUpsFromRepresentedMessages(key, normalizedRepresented);
     const current = getCeoQueuedFollowUps(key);
     const promoted = current.filter((item) => (
         String(item?.runtime_sent_at || "").trim()
@@ -5791,6 +5797,28 @@ function renderPendingCeoUploads() {
 const ceoFollowUpExpandedIds = new Set();
 // 实测"这一条一行放得下"的条目：放得下就没有可展开的东西，那颗三角也不该占位。
 const ceoFollowUpSingleLineIds = new Set();
+// 已被某个回合接走的补充消息 turn_id。镜像那一半只由 ceo.state 整表替换来摘，而"接走"
+// 这一刻不在那条广播里；不记这份账，一条迟到的旧 state 帧会把已经画成气泡的补充消息
+// 重新当"待发送"画一遍（实测双画 5.8 秒）。
+const ceoTakenFollowUpTurnIds = new Map();
+
+function noteCeoTakenFollowUpTurn(sessionId, turnId) {
+    const key = String(sessionId || "").trim();
+    const target = String(turnId || "").trim();
+    if (!key || !target) return false;
+    const taken = ceoTakenFollowUpTurnIds.get(key) || new Set();
+    if (taken.has(target)) return false;
+    taken.add(target);
+    ceoTakenFollowUpTurnIds.set(key, taken);
+    return true;
+}
+
+function isCeoTakenFollowUpTurn(sessionId, turnId) {
+    const key = String(sessionId || "").trim();
+    const target = String(turnId || "").trim();
+    if (!key || !target) return false;
+    return !!ceoTakenFollowUpTurnIds.get(key)?.has(target);
+}
 
 function toggleCeoQueuedFollowUpExpansion(entryId) {
     const key = String(entryId || "").trim();
@@ -5928,6 +5956,28 @@ function pruneCeoServerQueuedFollowUpByTurn(sessionId, turnId) {
         ...(S.ceoServerQueuedFollowUps || {}),
         [serverKey]: remaining,
     };
+}
+
+// 一个判据、两处落点（在飞帧与收尾帧）：帧里带来的用户消息 turn_id 与镜像条目同号，
+// 就说明这条补充已经被某个回合接走——候选条从此不再画它。
+function retireCeoTakenFollowUpsFromRepresentedMessages(sessionId = activeSessionId(), representedMessages = []) {
+    const key = String(sessionId || "").trim();
+    if (!key) return false;
+    const mirrored = new Set(
+        normalizeCeoServerQueuedFollowUpList(S.ceoServerQueuedFollowUps?.[key] || [])
+            .map((item) => ceoServerQueuedFollowUpTurnId(item?.id))
+            .filter(Boolean)
+    );
+    if (!mirrored.size) return false;
+    let retired = false;
+    (Array.isArray(representedMessages) ? representedMessages : []).forEach((message) => {
+        const turnId = String(message?.turn_id || "").trim();
+        if (!turnId || !mirrored.has(turnId)) return;
+        if (noteCeoTakenFollowUpTurn(key, turnId)) retired = true;
+    });
+    if (!retired) return false;
+    renderQueuedCeoFollowUps(key);
+    return true;
 }
 
 // 编辑与删除走同一条退场：服务端队列里的条目必须先删那边（否则下一帧原样画回来），
@@ -10468,6 +10518,7 @@ function finalizeCeoTurn(text, meta = {}) {
             (renderEntry && renderEntry.preserved_turn) || null
         );
         consumeRepresentedRuntimeSentCeoFollowUps(sessionId, finalUserMessages);
+        retireCeoTakenFollowUpsFromRepresentedMessages(sessionId, finalUserMessages);
         maybeDispatchQueuedCeoFollowUps();
         return;
     }
@@ -10480,6 +10531,7 @@ function finalizeCeoTurn(text, meta = {}) {
         addMsg(text, "system", { markdown: true, scrollMode: "preserve" });
     }
     consumeRepresentedRuntimeSentCeoFollowUps(sessionId, finalUserMessages);
+    retireCeoTakenFollowUpsFromRepresentedMessages(sessionId, finalUserMessages);
     maybeDispatchQueuedCeoFollowUps();
 }
 

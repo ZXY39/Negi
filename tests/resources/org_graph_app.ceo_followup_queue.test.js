@@ -176,6 +176,7 @@ function loadApp() {
             applyCeoState,
             ensureActiveCeoTurn,
             getMergedCeoQueuedFollowUps,
+            promoteRepresentedRuntimeSentCeoFollowUps,
             renderQueuedCeoFollowUps,
             flushCeoQueuedFollowUp,
             withdrawCeoQueuedFollowUp,
@@ -592,4 +593,37 @@ test("一帧说没在跑，但本地回合未收尾且帧里还有未了结的�
     // 帧里什么都没有了：这就是服务端自己说"没事了"，照常放行。
     applyCeoState({ status: "idle", is_running: false, source: "user", turn_id: "t-live" });
     assert.equal(S.ceoTurnActive, false);
+});
+
+test("补充消息被本轮接走之后，迟到的排队读数不得把它画回候选条", () => {
+    const { U, applyCeoState, getMergedCeoQueuedFollowUps, promoteRepresentedRuntimeSentCeoFollowUps } = loadApp();
+
+    // 点过插话：runtime 持有它，每帧状态读数把它当"排队中"报回来，候选条因此还在。
+    applyCeoState({
+        status: "running",
+        is_running: true,
+        queued_follow_up_messages: [
+            { content: "插话的那条", attachments: [], metadata: { _transcript_turn_id: "t-9" } },
+        ],
+    });
+    assert.equal(getMergedCeoQueuedFollowUps("web:test").length, 1);
+
+    // 在飞帧显示本轮已经带上同一条（turn_id 同号）⇒ 这条补充从此不再是待发送。
+    // 断言用长度而不是 deepEqual：沙箱里造的 Array 与测试域的 Array 不同 realm，deepStrictEqual 会判不等。
+    promoteRepresentedRuntimeSentCeoFollowUps("web:test", [
+        { role: "user", content: "正在跑的那条提问" },
+        { role: "user", content: "插话的那条", turn_id: "t-9" },
+    ]);
+    assert.equal(getMergedCeoQueuedFollowUps("web:test").length, 0);
+    assert.equal(U.ceoFollowUpQueue.hidden, true);
+
+    // 迟到的旧读数再报一遍同样的排队条目：已接走的账是永久的，不能因为它再出现一次。
+    applyCeoState({
+        status: "running",
+        is_running: true,
+        queued_follow_up_messages: [
+            { content: "插话的那条", attachments: [], metadata: { _transcript_turn_id: "t-9" } },
+        ],
+    });
+    assert.equal(getMergedCeoQueuedFollowUps("web:test").length, 0);
 });

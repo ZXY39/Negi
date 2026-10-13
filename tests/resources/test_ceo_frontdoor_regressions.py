@@ -561,6 +561,11 @@ async def test_graph_call_model_injects_running_turn_follow_up_messages_before_p
         queued_follow_ups.clear()
         return drained
 
+    state_snapshot_emits: list[int] = []
+
+    async def _emit_state_snapshot() -> None:
+        state_snapshot_emits.append(len(queued_follow_ups))
+
     session = SimpleNamespace(
         state=SimpleNamespace(session_key="web:shared"),
         _memory_channel="web",
@@ -570,6 +575,7 @@ async def test_graph_call_model_injects_running_turn_follow_up_messages_before_p
         _active_cancel_token=None,
         inflight_turn_snapshot=lambda: None,
         take_follow_up_batch_for_call_model=_take_follow_up_batch_for_call_model,
+        _emit_state_snapshot=_emit_state_snapshot,
     )
     runtime = SimpleNamespace(
         context=SimpleNamespace(
@@ -610,6 +616,46 @@ async def test_graph_call_model_injects_running_turn_follow_up_messages_before_p
         "Please also include the risk matrix.",
     ]
     assert str(request_messages[-1].get("role") or "") == "user"
+
+    # 队列被这一跳接走的那一刻必须自己广播一次：网页候选条的镜像只来自 ceo.state 的
+    # 整表读数，不补这一帧，条目会一直挂到下一次恰好发出的状态帧。
+    assert state_snapshot_emits == [0], state_snapshot_emits
+
+
+@pytest.mark.asyncio
+async def test_graph_call_model_does_not_broadcast_follow_up_take_when_queue_is_empty(
+    tmp_path,
+) -> None:
+    async def _noop_ready() -> None:
+        return None
+
+    loop = SimpleNamespace(
+        _ensure_checkpointer_ready=_noop_ready,
+        sessions=SessionManager(tmp_path),
+        _checkpointer=None,
+        _store=None,
+        main_task_service=None,
+        tools=_FakeToolRegistry([]),
+        max_iterations=8,
+        workspace=tmp_path,
+        temp_dir=str(tmp_path / "tmp"),
+    )
+    runner = CeoFrontDoorRunner(loop=loop)
+    emits: list[int] = []
+    session = SimpleNamespace(
+        take_follow_up_batch_for_call_model=lambda: [],
+        _emit_state_snapshot=lambda: emits.append(1),
+    )
+    runtime = SimpleNamespace(context=SimpleNamespace(session=session))
+
+    update = await runner._consume_session_follow_up_messages_before_call_model(
+        state={"session_key": "web:shared", "messages": []},
+        runtime=runtime,
+    )
+
+    assert update == {}
+    # 没接走任何东西就不该多付一帧状态快照。
+    assert emits == []
 
 
 @pytest.mark.asyncio

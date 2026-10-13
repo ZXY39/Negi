@@ -7989,6 +7989,14 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
             state={**dict(state or {}), **update},
             runtime=runtime,
         )
+        # 队列被这一跳接走的那一刻必须自己广播一次，与回合尾 drain 那条 (_run_user_turn)
+        # 同形状：网页候选条的真相来自 ceo.state 的整表读数，不补这一帧，条目会一直挂到
+        # 下一次恰好发出的状态帧（实测多画 5.8 秒，期间正文已经进气泡了）。
+        emit_snapshot = getattr(session, "_emit_state_snapshot", None)
+        if callable(emit_snapshot):
+            result = emit_snapshot()
+            if hasattr(result, "__await__"):
+                await result
         return update
 
     async def _graph_call_model(
