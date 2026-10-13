@@ -60,12 +60,27 @@ def test_predicted_group_takes_its_smallest_member_not_the_largest(monkeypatch) 
     assert info.context_window_tokens == 390000
 
 
-def test_no_prediction_falls_back_to_the_chain_minimum(monkeypatch) -> None:
-    """没有回合准入（前门、记忆车道）或预测判不出来时退回链级口径：取整条链最小，不是最大。"""
+def test_no_prediction_uses_the_chain_head_own_window(monkeypatch) -> None:
+    """没有组预测（direct 链位、前门、记忆车道）：尺子是**这一发落到的那颗**自己的窗口。
+
+    实盘形状（2026-10-13 CEO 链）：链首 500,000 已勾多模态、链尾 390,000，取整条链最小会把
+    会话压到 296,400 触发线而不是 380,000。链前进到塞不下的成员由尺寸筛处理，不该由尺子
+    提前替它买单。
+    """
     _patch_builders(monkeypatch, {"m_a": 390000, "m_b": 690000})
     info = resolve_send_model_context_window_info(
         config=_config({"m_a": 390000, "m_b": 690000}),
-        model_refs=["m_a", "m_b"],
+        model_refs=["m_b", "m_a"],
+    )
+    assert info.context_window_tokens == 690000
+
+
+def test_unreadable_head_falls_back_to_the_chain_floor(monkeypatch) -> None:
+    """链首那颗读不到窗口时才退回链级最小：0 会撞 `<= 25000` 硬门，等于一条坏记录拒发全部后续跳。"""
+    _patch_builders(monkeypatch, {"m_head": 0, "m_a": 390000, "m_b": 690000})
+    info = resolve_send_model_context_window_info(
+        config=_config({"m_head": 0, "m_a": 390000, "m_b": 690000}),
+        model_refs=["m_head", "m_b", "m_a"],
     )
     assert info.context_window_tokens == 390000
 

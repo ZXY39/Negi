@@ -383,11 +383,11 @@ execution / acceptance 节点在真正发 provider 请求前也走最后一层 n
 | `request_seed_source` / `request_seed_message_count` | 第一跳是否采用 scaffold、回退原因（`fallback_*`）或同轮链状态 |
 | `compaction_applied` / `compaction_mode` / `projection_kind` | 这一跳是否被压缩重写、发出的是不是投影（`token_compacted`）|
 | `helper_usage` | 摘要 helper 那次调用的用量（不计入节点与任务累计，账外成本只在这里可见）|
-| `token_preflight_diagnostics.ruler_source` | 这把尺子从哪儿来：`group:<key>`＝按准入预测的那一跳目标组取最小成员窗口，`chain_fallback`＝没有回合准入（前门、记忆车道）或预测判不出时退回整条链的最小窗口 |
+| `token_preflight_diagnostics.ruler_source` | 这把尺子从哪儿来：`group:<key>`＝按准入预测的那一跳目标组取最小成员窗口，`chain_head:<key>`＝没有组预测（direct 链位、前门、记忆车道）时按这一发落到的那颗（链首）自己的窗口 |
 | `token_preflight_diagnostics.error` | 预检为什么拒发这一跳（压缩助手空包 / 无可压缩历史且预估超过本轮发送窗口）|
 | `notice_preservation` | 压缩对"中途变更要求"的保真读数（`open_count` / `hit_count` / `miss_count` / `rolled_stage_id`）|
 
-压缩尺子的合同（一条，两个载体都要读它）：尺子 = **这一跳可能被达到的成员里最小的那颗窗口**。压缩发生在选择之前，而选择又拿压缩后的体量当筛选条件（`required_context_window_tokens`），所以"打到谁"只能预测：准入侧 `ModelLoadBalancer.peek_selection()` / `NodeTurnController.peek_hop_windows()` 用与 `select()` 同一份资格判据（组启用、成员还在计划里、粘滞成员仍合格），但不看 permit、不看限流、也不看尺寸。预测不到就退回整条链的最小值——不是最大：请求一旦超过某颗成员的窗口，准入就不再把它授予这一跳，组内可用成员随之变少，攒到没人塞得下就是把共享队列钉死的那类停摆。取最小的代价是少量本来还能塞得下的跳被提前压缩；读不到窗口的成员不参与取最小（一个 0 会把尺子打到硬门 `context_window_tokens <= 25000` 以下，等于让一条坏记录把该节点后续所有跳全部拒发）。预测偏大不会误发：授予那侧仍按尺寸筛成员，塞不下时落 `node_turn_admission_fault:` 暂停，下一跳用新尺子自愈。
+压缩尺子的合同（一条，两个载体都要读它）：尺子 = **这一发落到的那颗模型的窗口**；落点是负载均衡组时，取那个组里最小的那颗成员窗口。压缩发生在选择之前，而选择又拿压缩后的体量当筛选条件（`required_context_window_tokens`），所以"打到谁"只能预测：准入侧 `ModelLoadBalancer.peek_selection()` / `NodeTurnController.peek_hop_windows()` 用与 `select()` 同一份资格判据（组启用、成员还在计划里、粘滞成员仍合格），但不看 permit、不看限流、也不看尺寸。组内取最小的理由：请求一旦超过某颗成员的窗口，准入就不再把它授予这一跳，组内可用成员随之变少，攒到没人塞得下就是把共享队列钉死的那类停摆。direct 链位与没有回合准入的车道（前门、记忆）**不取整条链最小**，而是按链首那颗自己——拿链尾的窗口去压链首的请求，等于让一条不相干的记录压低本轮预算（实盘 2026-10-13 CEO 链：链首 500,000 被链尾 390,000 压成 296,400 触发线，而不是它自己的 380,000）。链前进到塞不下的成员由那条尺寸筛处理（见 `runtime-overview.md`「Chat provider 超时与重试边界」），不由尺子提前买单。链首那颗也读不到窗口时才退回链级最小：一个 0 会把尺子打到硬门 `context_window_tokens <= 25000` 以下，等于让一条坏记录把该节点后续所有跳全部拒发。预测偏大不会误发：授予那侧仍按尺寸筛成员，塞不下时落 `node_turn_admission_fault:` 暂停，下一跳用新尺子自愈。
 
 预检拒发这一跳不会发出请求，所以该节点在 `task_model_calls` 里没有对应行；它落一条以 `send_preflight_fault:` 开头、带 `预估=`/`本轮发送窗口=` 的错误行，并把节点转成可恢复错误暂停（判据与打回循环的隔离见 `main-task-runtime.md`「自愿失败、blocked 判决与判决文本」）。两种成因要先分开再处置：`estimated_total_tokens` 真的大于 `context_window_tokens` 且历史无可压缩段，是声明窗口或历史规模的问题；`token compression helper returned an empty summary` 是 helper 那一跳的回包形态故障（与"思考顶满输出"同源），此时预估与窗口的差值可能并不大。恢复该节点前，两者都不会因为 resume 而自行消失。
 
