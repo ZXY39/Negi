@@ -9,6 +9,7 @@ from __future__ import annotations
 import importlib
 import importlib.util
 import json
+import re
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -767,5 +768,58 @@ async def test_failed_payload_window_pages_to_the_end_by_delivered_chars(tmp_pat
             await manager.get_payload_window("failed", "failed_missing", request_id="write_paged")
         with pytest.raises(KeyError):
             await manager.get_payload_window("failed", record["failed_id"], request_id="write_absent")
+    finally:
+        manager.close()
+@pytest.mark.asyncio
+async def test_retry_of_oversized_parked_record_splits_into_queue_rows(tmp_path: Path, monkeypatch) -> None:
+    """重排要走同一个拆片器：原样回队只会在闸门上再撞同一次拒发。"""
+    module = _load_memory_agent_runtime_module()
+    manager = module.MemoryManager(tmp_path, _memory_cfg())
+    try:
+        stages = [{"stage_id": f"s{i}", "stage_goal": f"目标{i}", "completed_stage_summary": "z" * 4000} for i in range(8)]
+        payload = (
+            "[session_key] web:split\n\n## 窗口回合 1\n[turn_id] t1\nuser_messages:\n- 把这些阶段记下来\n"
+            "stages:\n" + json.dumps({"stages": stages}, ensure_ascii=False, indent=2)
+        )
+        batch = module.MemoryBatch(
+            op="write",
+            items=[
+                module.MemoryQueueRequest(
+                    op="write",
+                    decision_source="self",
+                    payload_text=payload,
+                    created_at="2026-04-18T10:00:00+08:00",
+                    request_id="write_oversize",
+                    session_key="web:split",
+                    trigger_source="ordinary_turn_window",
+                )
+            ],
+        )
+        record = manager._park_failed_batch(
+            batch,
+            category="window_refusal",
+            discard_reason="window_refusal",
+            error="memory send exceeds model window: 估算=526222 容量=366000 窗口=390000",
+            now_iso="2026-04-18T10:00:05+08:00",
+        )
+        monkeypatch.setattr(manager, "_memory_window_split_target_tokens", lambda: 2000)
+
+        summary = await manager.retry_failed_record(record["failed_id"])
+        rows = await manager.list_queue(limit=20)
+
+        assert len(rows) > 1, f"超容量载荷重试必须被拆片，实得 {len(rows)} 行"
+        assert summary["request_ids"] == [row["request_id"] for row in rows]
+        assert rows[0]["request_id"] == "write_oversize", "首片沿用原幂等键，停车记录才对得上"
+        assert len({row["request_id"] for row in rows}) == len(rows)
+        collected: list[str] = []
+        for row in rows:
+            body = str(row["payload_text"] or "")
+            assert module.estimate_tokens(body) <= 2000, f"片仍超目标: {module.estimate_tokens(body)}"
+            assert body.startswith("[session_key] web:split")
+            collected.extend(re.findall(r'"stage_id": "s(\d+)"', body))
+        assert sorted(collected) == sorted(str(i) for i in range(8)), f"阶段不许丢: {sorted(collected)}"
+
+        stored = manager._read_failed_records()[0]["items"][0]["payload_text"]
+        assert stored == payload, "停车区存的仍是整份原文（拆片只发生在回队的那份拷贝上）"
     finally:
         manager.close()

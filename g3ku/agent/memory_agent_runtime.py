@@ -12,7 +12,7 @@ import sqlite3
 import string
 import threading
 import uuid
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, replace
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any, Callable, get_type_hints
@@ -4758,16 +4758,28 @@ class MemoryManager:
         queue_rows = self._read_queue_requests()
         existing_ids = {str(row.request_id or "").strip() for row in queue_rows}
         requeued_ids: list[str] = []
+        split_target = self._memory_window_split_target_tokens()
         for item_payload in list(record.get("items") or []):
             row = self._failed_queue_row_from_payload(item_payload)
             if row is None:
                 continue
             if row.request_id and row.request_id in existing_ids:
                 continue
-            queue_rows.append(row)
-            if row.request_id:
-                existing_ids.add(row.request_id)
-            requeued_ids.append(row.request_id)
+            # 重排走与入队同一个拆片器：停车区里存的仍是整份载荷，原样回队只会在
+            # 闸门上再撞同一次拒发（实盘那条 1.28MB 记录就是这么停了四轮）。
+            for index, piece in enumerate(self._split_window_payload(str(row.payload_text or ""), max_tokens=split_target)):
+                piece_row = (
+                    row
+                    if index == 0
+                    else replace(row, request_id=self._request_id(str(row.op or "write")))
+                )
+                piece_row.payload_text = str(piece or "")
+                if piece_row.request_id and piece_row.request_id in existing_ids:
+                    continue
+                queue_rows.append(piece_row)
+                if piece_row.request_id:
+                    existing_ids.add(piece_row.request_id)
+                requeued_ids.append(piece_row.request_id)
         self._write_queue_requests(queue_rows)
         history = list(record.get("error_history") or [])
         history.append({"at": now, "event": "requeued", "trigger": str(trigger or "auto").strip()})
