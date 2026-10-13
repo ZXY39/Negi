@@ -28,6 +28,7 @@ from g3ku.agent.markdown_memory import (
     parse_memory_document,
     validate_memory_document,
 )
+from g3ku.agent.memory_content_guard import scan_memory_candidate
 from g3ku.config.live_runtime import get_runtime_config
 from g3ku.providers.base import normalize_usage_payload
 from g3ku.providers.chatmodels import build_chat_model
@@ -3877,20 +3878,27 @@ class MemoryManager:
 
         max_tokens = self._memory_window_split_target_tokens()
         requests: list[MemoryQueueRequest] = []
+        blocked_rules: list[str] = []
         for piece in self._split_window_payload(payload_text, max_tokens=max_tokens):
             if not str(piece or "").strip():
                 continue
-            requests.append(
-                MemoryQueueRequest(
-                    op="write",
-                    decision_source=decision_source,
-                    payload_text=piece,
-                    created_at=self._now_iso(),
-                    request_id=self._request_id("write"),
-                    session_key=str(session_key or "").strip(),
-                    trigger_source=trigger_source,
-                )
+            request = MemoryQueueRequest(
+                op="write",
+                decision_source=decision_source,
+                payload_text=piece,
+                created_at=self._now_iso(),
+                request_id=self._request_id("write"),
+                session_key=str(session_key or "").strip(),
+                trigger_source=trigger_source,
             )
+            blocked, rule = scan_memory_candidate(piece)
+            if blocked:
+                # No model is waiting on this lane, so the piece is dropped here and
+                # only the ledger keeps the record.
+                self._reject_blocked_candidate(request, rule)
+                blocked_rules.append(rule)
+                continue
+            requests.append(request)
         for request in requests:
             await self._append_queue_request(request)
         if len(requests) > 1:
@@ -3899,6 +3907,13 @@ class MemoryManager:
                 len(requests),
                 str(session_key or "").strip(),
                 max_tokens,
+            )
+        if blocked_rules:
+            logger.warning(
+                "复核窗口有 {} 片被内容闸门拦下（rules={}）：session={}",
+                len(blocked_rules),
+                ",".join(sorted(set(blocked_rules))),
+                str(session_key or "").strip(),
             )
         return requests
 
@@ -4062,6 +4077,30 @@ class MemoryManager:
         sessions.pop(normalized_session, None)
         self._write_review_state({"sessions": sessions})
 
+    def _reject_blocked_candidate(self, request: MemoryQueueRequest, rule: str) -> dict[str, Any]:
+        """Keep a blocked candidate out of the queue, but not out of the ledger.
+
+        An enqueue-side refusal has no batch behind it, so the terminal row is written
+        from the single request: without it, "how much did the guard swallow, and what"
+        is unanswerable and a rule that misfires looks like silent memory amnesia.
+        """
+        processed_at = self._now_iso()
+        self._append_terminal_history(
+            batch=MemoryBatch(op=request.op, items=[request]),
+            status="discarded",
+            op=request.op,
+            processed_at=processed_at,
+            discard_reason="content_guard_blocked",
+            error=f"content guard blocked this candidate (rule: {rule}); it was never queued",
+        )
+        return {
+            "ok": False,
+            "status": "blocked",
+            "error": "content_guard_blocked",
+            "rule": rule,
+            "request_id": request.request_id,
+        }
+
     async def enqueue_write_request(
         self,
         *,
@@ -4082,6 +4121,9 @@ class MemoryManager:
             trigger_source=str(trigger_source or "").strip(),
             request_id=self._request_id("write"),
         )
+        blocked, rule = scan_memory_candidate(request.payload_text)
+        if blocked:
+            return self._reject_blocked_candidate(request, rule)
         await self._append_queue_request(request)
         return {"ok": True, "request_id": request.request_id, "status": "queued"}
 
@@ -4105,6 +4147,9 @@ class MemoryManager:
             trigger_source=str(trigger_source or "").strip(),
             request_id=self._request_id("delete"),
         )
+        blocked, rule = scan_memory_candidate(request.payload_text)
+        if blocked:
+            return self._reject_blocked_candidate(request, rule)
         await self._append_queue_request(request)
         return {"ok": True, "request_id": request.request_id, "status": "queued"}
 
