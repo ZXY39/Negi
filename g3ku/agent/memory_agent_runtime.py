@@ -4266,6 +4266,8 @@ class MemoryManager:
             "提交要求：\n"
             "- 只允许使用一次 memory_apply_batch 完成所有修改。\n"
             "- adds 条目必须包含 content、minimal_memory 和 decision_source。\n"
+            "- content 写法按来源分：decision_source=user 写成陈述句（用户偏好什么、某对象是什么），"
+            "不要写成给自己的命令；decision_source=self 写成条件+要求（当……时，要……）。\n"
             "- rewrites 条目必须包含 id、content 和 minimal_memory；系统会保留原 source 并刷新日期。\n"
             "- delete 请求要解析成精确的记忆 id，并把这些 id 放进 deletes。\n"
             "- delete 批次没有零变更出口：目标内容已不在当前正文里（已被改写或被更早的批次删掉）时，"
