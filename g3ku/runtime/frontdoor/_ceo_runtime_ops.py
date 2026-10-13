@@ -1739,7 +1739,10 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
         detail: str = '',
     ) -> FrontdoorCompressionRuntimeError:
         display_name = self._frontdoor_model_display_name(model_info)
-        message = f"上下文大小超出当前模型{display_name}，请更改模型链配置后继续"
+        # 只陈述事实，不指挥改配置：超窗的原因可能是"这颗窗口就这么大"，也可能是
+        # "本轮没有可压的历史了"，两者都不是操作者该去动模型记录的理由。窗口与压缩
+        # 读数在帧与逐跳明细里，处置看那里。
+        message = f"上下文大小超出当前模型{display_name}：按这颗模型的窗口压缩后仍装不下"
         normalized_detail = str(detail or '').strip()
         if normalized_detail:
             # 拒因原样带上：规模超限、单组超容量、容量非正是三种不同处置。
