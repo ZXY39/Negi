@@ -6223,7 +6223,7 @@ function handleCeoError(payload = {}) {
     if (["frontdoor_context_window_exceeded", "model_context_window_missing"].includes(String(payload?.code || "").trim())) {
         showToast({
             title: "上下文超限",
-            text: String(payload?.message || "上下文大小超出当前模型，请更改模型链配置后继续"),
+            text: String(payload?.message || "上下文大小超出当前模型，按这颗模型的窗口压缩后仍装不下"),
             kind: "error",
         });
     }

@@ -778,7 +778,7 @@ Context compression has one operator-facing surface: a rule inside the CEO feed 
 ### Context Window Error UX
 
 - If the estimated provider-bound request is already larger than the selected model's `context_window_tokens`, the frontend shows an error toast instead of attempting a semantic/global-summary fallback.
-- The canonical message is `上下文大小超出当前模型<展示名>，请更改模型链配置后继续`.
+- The canonical message is `上下文大小超出当前模型<展示名>：按这颗模型的窗口压缩后仍装不下`. It states the fact and stops there — telling the operator to change the chain config is wrong for both remaining causes (this model's window really is that small, or this turn has nothing left to compress); the window and compression readouts live in the frame and the per-hop detail.
 - `<展示名>` is expected to come from the runtime-selected model's `provider_model`, with model `key` only as fallback.
 
 ### Composer Voice Input

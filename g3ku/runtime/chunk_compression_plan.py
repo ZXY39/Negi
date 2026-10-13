@@ -16,6 +16,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import Any
 
 # 一块压缩请求里留给摘要输出与指令尾部的余量：按窗口 10% 取，封顶 24000。
 # 写成固定值会把小窗口模型的容量压成非正（25000 窗口的模型根本切不出块），
@@ -87,6 +88,148 @@ def resolve_chunk_capacity(
             capacity = observed_cap
             source = CAPACITY_SOURCE_OBSERVED
     return max(0, capacity), source
+
+
+COMPRESSION_MODE_NONE = 'none'
+COMPRESSION_MODE_SINGLE = 'single'
+COMPRESSION_MODE_CHUNKED = 'chunked'
+
+
+@dataclass(frozen=True, slots=True)
+class CompressionPass:
+    """一次压缩该怎么做：**块数 0 就是不切**，1 就是完整压缩，>1 才是分块。
+
+    三态由同一份装箱结果推出，不再有"单发不等式 vs 装箱容量"两套口径。`deferred_spans`
+    是本轮不压、留给下一跳的最新组（超块数上限时）；`truncation_group_indexes` 是单独
+    一颗就超容量的原子组，执行器先对它做截断摘要再装箱。`refusal` 只在容量非正时非空。
+    """
+
+    mode: str
+    spans: list[tuple[int, int]]
+    deferred_spans: list[tuple[int, int]]
+    truncation_group_indexes: list[int]
+    capacity_tokens: int
+    capacity_source: str
+    history_tokens: int
+    max_group_tokens: int
+    planned_chunks: int
+    refusal: ChunkPlanRefusal | None = None
+
+    @property
+    def chunk_count(self) -> int:
+        return len(self.spans)
+
+    @property
+    def deferred_count(self) -> int:
+        return len(self.deferred_spans)
+
+
+def _pack_groups(counts: list[int], capacity: int) -> list[tuple[int, int]]:
+    spans: list[tuple[int, int]] = []
+    start = 0
+    carry = 0
+    for index, tokens in enumerate(counts):
+        if start < index and carry + tokens > capacity:
+            spans.append((start, index))
+            start = index
+            carry = 0
+        carry += tokens
+    if start < len(counts):
+        spans.append((start, len(counts)))
+    return spans
+
+
+def plan_compression_pass(
+    group_token_counts: list[int],
+    *,
+    estimated_total_tokens: int,
+    trigger_tokens: int,
+    context_window_tokens: int,
+    envelope_tokens: int = 0,
+    observed_span_tokens: int = 0,
+    max_chunks: int = CHUNK_MAX_CHUNKS,
+) -> CompressionPass:
+    """压缩的唯一决策口：够小不压、装得下完整压一次、装不下分块压、超上限留到下一跳。
+
+    纯函数，输入只有"还没压的原子组"和"这一发落到的那颗窗口"，所以换模型、暂停恢复、
+    进程重启之后重跑它就是重算——不需要任何"上次到哪了"的特例。
+    """
+    counts = [max(0, int(item or 0)) for item in list(group_token_counts or [])]
+    history_tokens = sum(counts)
+    max_group_tokens = max(counts) if counts else 0
+    capacity, source = resolve_chunk_capacity(
+        context_window_tokens=context_window_tokens,
+        envelope_tokens=envelope_tokens,
+        observed_span_tokens=observed_span_tokens,
+    )
+    limit = max(1, int(max_chunks or 1))
+
+    def _pass(**kwargs: Any) -> CompressionPass:
+        kwargs.setdefault('deferred_spans', [])
+        kwargs.setdefault('truncation_group_indexes', [])
+        return CompressionPass(
+            capacity_tokens=capacity,
+            capacity_source=source,
+            history_tokens=history_tokens,
+            max_group_tokens=max_group_tokens,
+            **kwargs,
+        )
+
+    if capacity <= 0:
+        # 窗口连一块信封都装不下：这是唯一还不能"分块解决"的情形，交回调用方按既有
+        # 拒因处理（节点=可恢复暂停，会话=窗口超限）。
+        return _pass(
+            mode=COMPRESSION_MODE_NONE,
+            spans=[],
+            deferred_spans=[],
+            truncation_group_indexes=[],
+            planned_chunks=0,
+            refusal=ChunkPlanRefusal(
+                kind=REFUSAL_CAPACITY_NON_POSITIVE,
+                reason=(
+                    f"token compression skipped: per-chunk capacity is {capacity} tok "
+                    f"(no room left for a chunk request) [窗口={int(context_window_tokens or 0)} "
+                    f"信封={int(envelope_tokens or 0)} 观测跨度={int(observed_span_tokens or 0)} "
+                    f"可压历史={history_tokens}]"
+                ),
+                capacity_tokens=capacity,
+                capacity_source=source,
+                planned_chunks=0,
+                history_tokens=history_tokens,
+                max_group_tokens=max_group_tokens,
+            ),
+        )
+    if not counts or int(estimated_total_tokens or 0) < int(trigger_tokens or 0):
+        return _pass(
+            mode=COMPRESSION_MODE_NONE,
+            spans=[],
+            deferred_spans=[],
+            truncation_group_indexes=[],
+            planned_chunks=0,
+        )
+    spans = _pack_groups(counts, capacity)
+    truncation = [index for index, tokens in enumerate(counts) if tokens > capacity]
+    deferred: list[tuple[int, int]] = []
+    if len(spans) > limit:
+        # 超上限不再拒发：压最老的那些，剩下的下一跳重算时自然进窗口。一次 pass 只压
+        # limit 块，代价是多一跳，而不是把整次压缩打成错误。
+        deferred = spans[limit:]
+        spans = spans[:limit]
+    if not spans:
+        return _pass(
+            mode=COMPRESSION_MODE_NONE,
+            spans=[],
+            deferred_spans=[],
+            truncation_group_indexes=truncation,
+            planned_chunks=0,
+        )
+    return _pass(
+        mode=COMPRESSION_MODE_SINGLE if len(spans) == 1 else COMPRESSION_MODE_CHUNKED,
+        spans=spans,
+        deferred_spans=deferred,
+        truncation_group_indexes=truncation,
+        planned_chunks=len(spans) + len(deferred),
+    )
 
 
 def plan_chunk_groups(
