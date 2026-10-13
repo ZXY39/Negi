@@ -584,7 +584,7 @@ IM 渠道有两条：内置官方 QQ 适配器（`g3ku/qq_official/`，进程内
 For the queued Markdown memory runtime, the first operator checks should be:
 
 1. Inspect `memory/memory_state.sqlite3` for the authoritative memory rows, `refresh_count`, `passed_count`, `is_compressed`, and `from_user` state.
-2. Inspect `memory/MEMORY.md` for the regenerated prompt snapshot currently injected into CEO/frontdoor.
+2. Inspect `memory/MEMORY.md` for the prompt projection currently injected into CEO/frontdoor. It is regenerated from sqlite and never feeds back into it, so a difference between the two is a damaged projection, not lost memory. Any content the store does not produce is archived first as `memory/MEMORY.md.bak.<YYYYMMDD-HHMMSS>` before the file is repainted — read those to recover a hand edit or a torn write, and treat a growing count of them as evidence that something outside the runtime is writing into the memory directory.
 3. Inspect `memory/queue.jsonl` for pending `write` / `delete` requests.
 4. Inspect `memory/failed.jsonl` for parked failed batches: each row carries `category` (`provider_error` / `window_refusal` / `protocol`), `status` (`parked` / `requeued`), retry counters and a full `error_history`. A non-empty file means some turns of memory are waiting for a success signal or an operator decision.
 5. Inspect `memory/ops.jsonl` for the latest terminal batch history (`applied`, `precheck_failed`, `operator_discarded`).
