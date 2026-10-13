@@ -41,6 +41,8 @@ from main.runtime.send_token_preflight import estimate_runtime_provider_request_
 from main.prompts import load_prompt
 
 _NOTE_REF_RE = re.compile(r"(?:\bref:|见noteid:)(?P<ref>[a-z0-9_]+)\b")
+# 归并批次载荷里"本轮交来哪些记忆"的那几行，由 `_build_consolidation_payload` 自己渲染。
+_CONSOLIDATION_CANDIDATE_LINE_RE = re.compile(r"^- id:(?P<memory_id>[A-Za-z0-9]{6})", re.MULTILINE)
 
 
 def _first_note_ref(text: str) -> str:
@@ -2943,7 +2945,7 @@ class MemoryManager:
             "提交要求：\n"
             "- 只允许使用一次 memory_consolidation_apply 完成所有归并。\n"
             "- note_writes 每条必须给 note_ref，并按整体新建（body）或局部改（edits）二选一。\n"
-            "- retirements 每条必须给出 memory_id 和落进的 note_ref。\n"
+            "- retirements 每条必须给出 memory_id 和落进的 note_ref，且 memory_id 只能是上面「待归并记忆」列出的那些。\n"
             "- 找不到分类的记忆不要退场；全都没有去处时单独提交 no_consolidation_reason。\n"
             f"{repair_block}"
         )
@@ -3383,7 +3385,6 @@ class MemoryManager:
             raise _MemoryAgentValidationError(
                 "consolidation agent must call memory_consolidation_apply exactly once"
             )
-        _ = batch
         payload = dict(session.applied_batch)
         writes = [dict(item) for item in list(payload.get("note_writes") or [])]
         retirements = [dict(item) for item in list(payload.get("retirements") or [])]
@@ -3404,6 +3405,26 @@ class MemoryManager:
         )
         if already_retired:
             raise _MemoryAgentValidationError(f"memories already consolidated: {', '.join(already_retired)}")
+
+        # Retirement scope is the candidate list this batch was handed, not the whole
+        # library: the consolidator sees the resident block for context, and without this
+        # an eager batch can retire rows nobody asked it to consolidate. The payload is
+        # rendered by `_build_consolidation_payload`, so the id lines are our own format.
+        offered = {
+            match
+            for item in list(batch.items or [])
+            for match in _CONSOLIDATION_CANDIDATE_LINE_RE.findall(str(item.payload_text or ""))
+        }
+        if offered:
+            out_of_scope = sorted(
+                str(item.get("memory_id") or "").strip()
+                for item in retirements
+                if str(item.get("memory_id") or "").strip() not in offered
+            )
+            if out_of_scope:
+                raise _MemoryAgentValidationError(
+                    f"memories not offered to this consolidation batch: {', '.join(out_of_scope)}"
+                )
 
         entries_text = self._document_text_from_sqlite_rows(self._memory_repo.list_memories())
         block_text = self._consolidation_block_text()

@@ -507,3 +507,67 @@ def test_reconcile_notes_never_invents_a_category_note(tmp_path: Path) -> None:
         assert (manager.notes_dir / "note_deep.md").exists(), ordinary
     finally:
         manager.close()
+
+
+def test_a_batch_may_only_retire_the_memories_it_was_offered(tmp_path: Path) -> None:
+    """The consolidator sees the whole resident block for context. Without a scope check
+    an eager batch can retire rows nobody handed it - the live probe did exactly that to
+    a seventh row - so the candidate list in the batch payload is the boundary."""
+    module = _module()
+    manager = _manager(tmp_path)
+    try:
+        offered = _add(manager, body="被交来的那条要归并的记忆", minimal="交来->归并")
+        untouched = _add(manager, body="没被交来的记忆", minimal="没交来->留下")
+
+        def _session() -> object:
+            session = module._ConsolidationToolSession(
+                notes_dir=manager.notes_dir,
+                index_dir=manager.index_dir,
+            )
+            session.apply_batch(
+                note_writes=[{"note_ref": "note_env", "body": "本机运行环境 端口 18790", "edits": []}],
+                retirements=[
+                    {"memory_id": offered, "note_ref": "note_env"},
+                    {"memory_id": untouched, "note_ref": "note_env"},
+                ],
+            )
+            return session
+
+        def _batch(payload_ids: list[str]) -> object:
+            nl = chr(10)
+            body = nl.join(f"- id:{memory_id}{nl}正文{nl}" for memory_id in payload_ids)
+            return module.MemoryBatch(
+                op="consolidate",
+                items=[
+                    module.MemoryQueueRequest(
+                        op="consolidate",
+                        decision_source="self",
+                        payload_text=(
+                            f"## 待归并记忆{nl}{body}{nl}## 现有分类 note{nl}-（还没有分类 note）{nl}"
+                        ),
+                        created_at="2026-04-25T00:00:30+08:00",
+                        request_id="consolidate_scope_1",
+                    )
+                ],
+            )
+
+        with pytest.raises(module._MemoryAgentValidationError, match="not offered to this consolidation batch"):
+            manager._build_consolidation_write_from_apply_batch(
+                batch=_batch([offered]),
+                session=_session(),
+            )
+
+        validated = manager._build_consolidation_write_from_apply_batch(
+            batch=_batch([offered, untouched]),
+            session=_session(),
+        )
+        assert len(validated.retirements) == 2
+
+        prompt = manager._consolidation_agent_user_prompt(
+            batch=_batch([offered]),
+            snapshot_text=manager.snapshot_text(),
+            repair_reason="",
+        )
+        assert "只能是上面「待归并记忆」列出的那些" in prompt
+    finally:
+        manager.close()
