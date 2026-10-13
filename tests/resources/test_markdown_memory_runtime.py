@@ -847,7 +847,31 @@ async def test_list_processed_page_backfills_legacy_rows_and_preserves_new_rows(
         manager.close()
 
 
-def test_memory_commit_after_empty_snapshot_clears_stale_sqlite_rows(tmp_path: Path) -> None:
+def _seed_store(manager, rows: list[tuple[str, str, str, str]], *, now_iso: str = "2026-04-17T09:00:00+08:00") -> None:
+    """Seed committed memory the way production does: sqlite first, mirror repainted.
+
+    Writing only `MEMORY.md` used to be enough because a divergent document was parsed
+    back into the store; that direction is gone, so tests must use the authoritative one.
+    """
+    manager._memory_repo.apply_mutation(
+        adds=[
+            {"id": memory_id, "content": body, "minimal_memory": minimal, "decision_source": source}
+            for memory_id, body, minimal, source in rows
+        ],
+        rewrites=None,
+        deletes=None,
+        inspired_memory_ids=None,
+        now_iso=now_iso,
+    )
+    manager._rebuild_memory_snapshot_from_sqlite(now_iso=now_iso)
+
+
+def test_empty_snapshot_never_clears_sqlite_rows_and_mirror_is_repainted(tmp_path: Path) -> None:
+    """An empty mirror is a projection that fell behind, not an instruction to erase.
+
+    The old behaviour treated it as authoritative, so one truncated write (or a full
+    disk leaving a zero-byte `MEMORY.md`) deleted the whole library on the next commit.
+    """
     module = _load_memory_agent_runtime_module()
     manager = module.MemoryManager(tmp_path, _memory_cfg())
 
@@ -880,15 +904,15 @@ def test_memory_commit_after_empty_snapshot_clears_stale_sqlite_rows(tmp_path: P
         rows = {row["memory_id"]: row for row in manager._memory_repo.list_memories()}
         snapshot = manager.snapshot_text()
 
-        assert stale["memory_id"] not in rows
-        assert len(rows) == 1
+        assert stale["memory_id"] in rows
+        assert len(rows) == 2
         assert "Fresh memory" in snapshot
-        assert "Stale memory" not in snapshot
+        assert "Stale memory" in snapshot
 
         manager._rebuild_memory_snapshot_from_sqlite(now_iso="2026-04-25T00:00:00+08:00")
 
         assert "Fresh memory" in manager.snapshot_text()
-        assert "Stale memory" not in manager.snapshot_text()
+        assert "Stale memory" in manager.snapshot_text()
     finally:
         manager.close()
 
@@ -1031,7 +1055,11 @@ def test_memory_commit_replays_effective_deduped_rewrites(tmp_path: Path) -> Non
         manager.close()
 
 
-def test_memory_sync_preserves_metadata_for_matching_ids_on_non_empty_divergence(tmp_path: Path) -> None:
+def test_memory_reconcile_never_lets_the_mirror_write_into_sqlite(tmp_path: Path) -> None:
+    """sqlite is the authoritative store: a divergent `MEMORY.md` is archived and
+    repainted, never parsed back into the rows. The old behaviour folded
+    `memory_body` into whatever the document rendered, which destroyed the full
+    text of compressed rows."""
     module = _load_memory_agent_runtime_module()
     manager = module.MemoryManager(tmp_path, _memory_cfg())
 
@@ -1059,16 +1087,53 @@ def test_memory_sync_preserves_metadata_for_matching_ids_on_non_empty_divergence
             encoding="utf-8",
         )
 
-        manager._sync_sqlite_from_snapshot_if_needed_locked(now_iso="2026-04-25T01:00:00+08:00")
+        action = manager._reconcile_mirror_with_sqlite_locked(now_iso="2026-04-25T01:00:00+08:00")
 
+        assert action == "drift_archived"
         rows = manager._memory_repo.list_memories()
-
         assert len(rows) == 1
         assert rows[0]["memory_id"] == row["memory_id"]
-        assert rows[0]["memory_body"] == "Updated snapshot text"
-        assert rows[0]["minimal_memory"] == "Updated snapshot text"
+        assert rows[0]["memory_body"] == "Prefer concise answers"
+        assert rows[0]["minimal_memory"] == "answers->concise"
         assert rows[0]["refresh_count"] == 7
         assert rows[0]["passed_count"] == 9
+        assert rows[0]["is_compressed"] is True
+        assert rows[0]["from_user"] is True
+        assert "Updated snapshot text" not in manager.snapshot_text()
+        assert "answers->concise" in manager.snapshot_text()
+        archived = list((tmp_path / "memory").glob("MEMORY.md.bak.*"))
+        assert archived and "Updated snapshot text" in archived[0].read_text(encoding="utf-8")
+    finally:
+        manager.close()
+
+
+def test_memory_adopt_document_preserves_metadata_and_existing_body(tmp_path: Path) -> None:
+    """The one surviving document -> sqlite direction (legacy import) must still keep
+    counters for matching ids, and must not fold an existing full body away."""
+    module = _load_memory_agent_runtime_module()
+    manager = module.MemoryManager(tmp_path, _memory_cfg())
+
+    try:
+        row = manager._memory_repo.create_memory(
+            memory_body="Authoritative long body",
+            minimal_memory="auth->min",
+            source="user",
+            from_user=True,
+            now_iso="2026-04-25T00:00:00+08:00",
+        )
+        manager._memory_repo.mark_compressed(str(row["memory_id"]))
+        manager._memory_repo.restore_rows(rows_before=manager._memory_repo.list_memories())
+
+        manager._memory_repo.replace_all_from_document(
+            document_text=(
+                f"---\nid:{row['memory_id']}\n2026/4/25-user：\nauth->min\n"
+            ),
+            now_iso="2026-04-25T01:00:00+08:00",
+        )
+
+        rows = manager._memory_repo.list_memories()
+        assert len(rows) == 1
+        assert rows[0]["memory_body"] == "Authoritative long body"
         assert rows[0]["is_compressed"] is True
         assert rows[0]["from_user"] is True
     finally:
@@ -2633,10 +2698,8 @@ async def test_run_due_batch_once_records_rewrite_write_mode_for_processed_batch
     module = _load_memory_agent_runtime_module()
     manager = module.MemoryManager(tmp_path, _memory_cfg())
     try:
-        (tmp_path / "memory" / "MEMORY.md").write_text(
-            "---\nid:Ab12Z9\n2026/4/16-user：\n创建 Markdown 文档时，默认使用 [G3KU]-时间-前缀命名。\n",
-            encoding="utf-8",
-        )
+        monkeypatch.setattr(module.MemoryManager, "_memory_date_text", lambda self, now_iso=None: "2026/4/17", raising=False)
+        _seed_store(manager, [("Ab12Z9", "创建 Markdown 文档时，默认使用 [G3KU]-时间-前缀命名。", "命名->时间前缀", "user")])
         await manager._append_queue_request(
             module.MemoryQueueRequest(
                 op="write",
@@ -2936,12 +2999,13 @@ async def test_run_due_batch_once_delete_only_removes_visible_snapshot_items(
     module = _load_memory_agent_runtime_module()
     manager = module.MemoryManager(tmp_path, _memory_cfg())
     try:
-        (tmp_path / "memory" / "MEMORY.md").write_text(
-            (
-                "---\nid:Ab12Z9\n2026/4/17-self：\nReport total elapsed time\n"
-                "---\nid:Cd34Ef\n2026/4/17-user：\nPrefer Chinese replies\n"
-            ),
-            encoding="utf-8",
+        monkeypatch.setattr(module.MemoryManager, "_memory_date_text", lambda self, now_iso=None: "2026/4/17", raising=False)
+        _seed_store(
+            manager,
+            [
+                ("Ab12Z9", "Report total elapsed time", "报告->总耗时", "self"),
+                ("Cd34Ef", "Prefer Chinese replies", "回复->中文", "user"),
+            ],
         )
         await manager._append_queue_request(
             module.MemoryQueueRequest(
@@ -3216,10 +3280,8 @@ async def test_run_due_batch_once_prefers_minimal_memory_note_ref_over_stale_con
         old_note_path.parent.mkdir(parents=True, exist_ok=True)
         old_note_path.write_text("Old checklist note\n", encoding="utf-8")
         if mode == "rewrite":
-            (tmp_path / "memory" / "MEMORY.md").write_text(
-                "---\nid:Ab12Z9\n2026/4/17-self：\nUse checklist replies ref:old_note\n",
-                encoding="utf-8",
-            )
+            monkeypatch.setattr(module.MemoryManager, "_memory_date_text", lambda self, now_iso=None: "2026/4/17", raising=False)
+            _seed_store(manager, [("Ab12Z9", "Use checklist replies ref:old_note", "回复->清单", "self")])
 
         await manager._append_queue_request(
             module.MemoryQueueRequest(
@@ -3293,10 +3355,8 @@ async def test_run_due_batch_once_accepts_inspired_ids_from_current_snapshot(tmp
     module = _load_memory_agent_runtime_module()
     manager = module.MemoryManager(tmp_path, _memory_cfg())
     try:
-        (tmp_path / "memory" / "MEMORY.md").write_text(
-            "---\nid:Ab12Z9\n2026/4/17-user：\nPrefer concise answers\n",
-            encoding="utf-8",
-        )
+        monkeypatch.setattr(module.MemoryManager, "_memory_date_text", lambda self, now_iso=None: "2026/4/17", raising=False)
+        _seed_store(manager, [("Ab12Z9", "Prefer concise answers", "answers->concise", "user")])
         await manager._append_queue_request(
             module.MemoryQueueRequest(
                 op="write",

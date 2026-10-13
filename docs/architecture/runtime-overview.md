@@ -488,8 +488,8 @@ main/ 侧所有持久化写在磁盘满（ENOSPC / SQLITE_FULL）条件下的行
 
 长期记忆运行时是队列化的 Markdown memory 子系统：
 
-- `memory/memory_state.sqlite3` 是长期记忆权威状态：每行存完整记忆正文、最小摘要、`refresh_count`、`passed_count`、`is_compressed`、来源与 `from_user` 保护元数据。
-- `memory/MEMORY.md` 是从 SQLite 状态再生的提示词快照，保留受管 Markdown 块形状供工具与内部 memory agent 检查，但不是权威元数据存储。
+- `memory/memory_state.sqlite3` 是长期记忆权威状态：每行存完整记忆正文、最小摘要、`refresh_count`、`passed_count`、`is_compressed`、来源与 `from_user` 保护元数据。提交路径只改这份库。
+- `memory/MEMORY.md` 是由 SQLite 再生的提示词投影，保留受管 Markdown 块形状供工具与内部 memory agent 检查，但不是权威元数据存储，也不是任何写路径的输入。它与库渲染不一致时按投影损坏处置：投影非空 ⇒ 先把这份内容留证为 `MEMORY.md.bak.<YYYYMMDD-HHMMSS>`，再由库重绘；投影为空而库非空 ⇒ 直接由库重绘（没有内容值得留）。落盘走同目录临时文件 + `os.fsync` + `os.replace`，读者不会观察到半截文档——这份文档注入在 message index 1，半截等于撕开提示词前缀。唯一合法的"文档进库"方向是操作员显式 `import-legacy`，它要求投影本来为空。
 - `memory/notes/` 存 `ref:note_xxxx` 引用的可选详细 note 正文，保持小而人类可读。note 正文可由记忆管理页的 note 窗编辑（保存前二次确认并写审计，无删除入口）；删除记忆时可在删除确认对话框勾选其引用的 note 同步删除（仍被其他记忆引用的 note 会标警并默认不勾选）。失去引用的孤儿 note 由 doctor 检查与 `reconcile-notes` 报告/清理；界面与端点契约见 `web-and-admin.md`「Memory Management Page And Admin Contract」。
 - `memory/queue.jsonl` 是唯一持久队列，带每请求处理状态（`pending` / `processing`、重试计时、最新错误文本）。队列条目只有两种类型：`write`（显式或已提炼的记忆文本，等待真正的记忆处理）与 `delete`（自然语言记忆删除请求，等待内部 memory agent 解析成具体 id）。
 - `memory/failed.jsonl` 是失败停车区：处理尝试失败的批次（含完整载荷与错误历史）整体移出主队列停在这里，主队列继续流动。每条记录带 `failed_id`、`category`（`provider_error` 瞬时类 / `window_refusal` 发送前预检拒发类 / `protocol` 协议违规类）、`status`（`parked` 等待中 / `requeued` 已重排回队列）、`park_count`、`auto_requeue_count`、`manual_retry_count`、`error_history`（失败与重排事件的时间线）与累计 usage。停车不写终态记录，`request_id` 不进入已处理集合，重入队后不会被幂等去重误删。停车区**存完整载荷**（回队靠它），管理页读侧只投首屏、正文按字符分屏取回，合同见 `web-and-admin.md`「Memory Management Page And Admin Contract」。
@@ -511,7 +511,9 @@ main/ 侧所有持久化写在磁盘满（ENOSPC / SQLITE_FULL）条件下的行
 - 专用内部 memory agent 以 FIFO 同-op 批次（`write` 与 `delete` 不混批）消费队列，走 `memory` 模型路由，只有读写 `MEMORY.md` 与 note 文件的受限工具面；它把自然语言删除请求解析成具体 SQLite id，并可报告实质影响该批次的 `inspired_memory_ids`。
 - 两个 memory 工具没有第二份参数声明：`_build_memory_tool` 直接从 handler 函数签名建校验模型，并据此推出发给模型的 schema——改签名就是改契约，不需要同步维护任何手写 schema 表。带默认值的参数保持可选、无默认值的（如 `memory_read_note(ref)`）保持必填；校验失败返回给模型的错误文本就是 pydantic 原文。
 - `memory_apply_batch` 的零变更出口按批次类型分岔：write 批次交 `noop_reason`，delete 批次不接受"本轮无需变更"，只能交 `already_satisfied` 声明待删目标已不在当前正文（已被更早批次改写或删除），该批次按 applied 收尾且快照不变。op 专属规则与参数形状同在暂存层返回字段错误，模型可在同一批内改提交而不消耗跨批尝试次数；落盘前的校验再独立复查同一组规则。
-- 每次非读变更后，运行时先改 SQLite、再重建 `MEMORY.md`、最后检查快照大小：超过 `document.compress_trigger_chars`（默认 `16000`）时按 `passed_count DESC`、`refresh_count ASC` 顺序压缩，先把整行替换为 `minimal_memory`，再只删除已压缩的非 `from_user` 行，直到回到 `document.compress_target_chars`（默认 `13000`）或没有安全压缩工作。
+- 一次提交的顺序是固定的：note 正文落盘 → 投影与库对账 → 应用结构化变更（SQLite）→ 由库重绘投影 → 孤儿 note 清理 → 快照容量检查。重绘前的校验（单条 `summary_max_chars` 与整份 `document_max_chars`）是这笔提交的**最后一道闸**：它拒绝时这笔已经进过库，于是运行时把库逐列回滚到提交前的行集合（含 `memory_body`，回滚靠的是预先读回的整行，不是把渲染结果倒推回去——渲染对有损，压缩行的投影就是它的最小摘要），再按回滚后的库重绘投影，错误照常上抛给批次处理路径。留这个回滚是为了消灭"库已改、投影未改"的分叉：那种分叉下，下一次提交的对账会把刚应用的那批当作外部改动滚掉。
+- 启动时同样做一次投影对账，处置规则与提交时一致；它是 best-effort——库里的内容大到过不了 `document_max_chars` 时只记一条错误日志，让运行时继续起来，不把启动搞挂。
+- 压缩只改变投影的渲染形态：`is_compressed` 决定这一行在投影里显示 `minimal_memory` 还是 `memory_body`，两者在库里各自独立保存，压缩动作不写 `memory_body`。超过 `document.compress_trigger_chars`（默认 `16000`）时按 `passed_count DESC`、`refresh_count ASC` 顺序压缩，先把整行的投影换成 `minimal_memory`，再只删除已压缩的非 `from_user` 行，直到回到 `document.compress_target_chars`（默认 `13000`）或没有安全压缩工作。
 - 队列消费跨进程单活：每次 `run_due_batch_once()` 必须先拿 workspace 级 memory-worker 文件锁；拿不到锁的进程保持队列不动并报告 `worker_lease_unavailable`。`request_id` 是持久幂等键：处理批次前会丢弃 `memory/ops.jsonl` 中已出现过 `request_id` 的队列行。该集合在进程内按台账文件的 `(size, mtime_ns)` 缓存——台账的每次写（终态落行、7 天剪枝、管理员放弃）都重写整个文件，这两个值必变，所以别的进程的写入同样让下一次读失效；缓存只是把"每次节拍全量读+解析台账"换成"台账动过才读"（实盘 20 行就 1.69 MB，每行连批次正文一起存），幂等判据本身不变。
 
 ### 队列状态机与失败停车语义

@@ -687,6 +687,8 @@ class _MemoryValidatedWrite:
     note_upserts: dict[str, str] = field(default_factory=dict)
     inspired_memory_ids: list[str] = field(default_factory=list)
     write_mode: str = ""
+    # Only an explicit operator legacy import may load sqlite from a document.
+    adopt_document: bool = False
     noop_reason: str = ""
     already_satisfied: str = ""
     compression_triggered: bool = False
@@ -903,7 +905,7 @@ class _MemorySqliteRepository:
                         """,
                         (
                             str(entry.memory_id or "").strip(),
-                            summary,
+                            str(existing_row.get("memory_body") or "").strip() or summary,
                             summary,
                             normalized_source,
                             1 if normalized_from_user else 0,
@@ -912,6 +914,50 @@ class _MemorySqliteRepository:
                             1 if bool(existing_row.get("is_compressed")) else 0,
                             str(existing_row.get("created_at") or timestamp),
                             timestamp,
+                        ),
+                    )
+        finally:
+            conn.close()
+
+    def restore_rows(self, *, rows_before: list[dict[str, Any]]) -> None:
+        """Roll the store back to a previously read row set, column for column.
+
+        Used when the mirror rejects a batch after sqlite already took it: the applied
+        mutation has to be undone exactly, not re-derived from a rendered document
+        (rendering is lossy - a compressed row renders as its minimal string).
+        """
+        conn = self._connect()
+        try:
+            with conn:
+                conn.execute("DELETE FROM memories")
+                for row in list(rows_before or []):
+                    conn.execute(
+                        """
+                        INSERT INTO memories(
+                            memory_id,
+                            memory_body,
+                            minimal_memory,
+                            source,
+                            from_user,
+                            refresh_count,
+                            passed_count,
+                            is_compressed,
+                            created_at,
+                            updated_at
+                        )
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        """,
+                        (
+                            str(row.get("memory_id") or ""),
+                            str(row.get("memory_body") or ""),
+                            str(row.get("minimal_memory") or ""),
+                            str(row.get("source") or ""),
+                            1 if bool(row.get("from_user")) else 0,
+                            int(row.get("refresh_count", 0) or 0),
+                            int(row.get("passed_count", 0) or 0),
+                            1 if bool(row.get("is_compressed")) else 0,
+                            str(row.get("created_at") or ""),
+                            str(row.get("updated_at") or ""),
                         ),
                     )
         finally:
@@ -1178,6 +1224,16 @@ class MemoryManager:
             document_text=preserved_document,
             note_bodies=preserved_notes,
         )
+        # sqlite is the only authoritative store, so the mirror is reconciled at boot
+        # rather than on the next commit. Reconcile (not a bare repaint) because a
+        # non-empty mirror that sqlite does not produce is orphan text: it has to be
+        # archived as evidence first, never silently overwritten. A boot must never
+        # fail because the store is over the document cap, so this is best-effort.
+        try:
+            with self._io_lock:
+                self._reconcile_mirror_with_sqlite_locked(now_iso=self._now_iso())
+        except Exception as exc:
+            logger.error(f"memory mirror reconciliation failed at boot: {exc}")
 
     def _ensure_layout(self) -> None:
         self.runtime_dir.mkdir(parents=True, exist_ok=True)
@@ -1215,14 +1271,14 @@ class MemoryManager:
         if preserved_document.strip():
             current_document = self.memory_file.read_text(encoding="utf-8") if self.memory_file.exists() else ""
             if not current_document.strip():
-                self.memory_file.write_text(preserved_document, encoding="utf-8")
+                self._atomic_write_text(self.memory_file, preserved_document)
         for ref, body in dict(note_bodies or {}).items():
             note_path = self.notes_dir / note_file_name(ref)
             current_body = note_path.read_text(encoding="utf-8") if note_path.exists() else ""
             if note_path.exists() and current_body.strip():
                 continue
             note_path.parent.mkdir(parents=True, exist_ok=True)
-            note_path.write_text(str(body or ""), encoding="utf-8")
+            self._atomic_write_text(note_path, str(body or ""))
 
     def start(self) -> None:
         if self._worker_thread is not None and self._worker_thread.is_alive():
@@ -1261,21 +1317,71 @@ class MemoryManager:
             )
         return self._normalize_document_text("".join(format_memory_entry(entry) for entry in entries))
 
-    def _sync_sqlite_from_snapshot_if_needed_locked(self, *, now_iso: str) -> None:
+    def _reconcile_mirror_with_sqlite_locked(self, *, now_iso: str) -> str:
+        """Align the mirror with sqlite. sqlite is the only authoritative store.
+
+        Returns "", "drift_archived" or "rebuilt_from_sqlite". The mirror never writes
+        into sqlite: a truncated or hand-edited `MEMORY.md` used to be parsed back into
+        the store here, which is how already-compressed rows lost their full body (the
+        rendered form of a compressed row *is* its minimal string) and how one torn
+        write could wipe the library.
+        """
         current_snapshot = self._normalize_document_text(self.snapshot_text())
         sqlite_snapshot = self._document_text_from_sqlite_rows(self._memory_repo.list_memories(), now_iso=now_iso)
-        if sqlite_snapshot == current_snapshot:
-            return
-        self._memory_repo.replace_all_from_document(document_text=current_snapshot, now_iso=now_iso)
+        if current_snapshot == sqlite_snapshot:
+            return ""
+        if current_snapshot:
+            # A non-empty mirror that sqlite does not produce: external edit, pasted
+            # text, or a torn write. Keep it as evidence, then repaint it from sqlite.
+            self._archive_snapshot_locked()
+            self._rebuild_memory_snapshot_from_sqlite(now_iso=now_iso)
+            return "drift_archived"
+        self._rebuild_memory_snapshot_from_sqlite(now_iso=now_iso)
+        return "rebuilt_from_sqlite"
 
-    def _rebuild_memory_snapshot_from_sqlite(self, *, now_iso: str | None = None) -> None:
-        document_text = self._document_text_from_sqlite_rows(self._memory_repo.list_memories(), now_iso=now_iso)
+    def _archive_snapshot_locked(self) -> Path:
+        stamp = datetime.now().astimezone().strftime("%Y%m%d-%H%M%S")
+        target = self.memory_file.with_name(f"{self.memory_file.name}.bak.{stamp}")
+        try:
+            shutil.copyfile(self.memory_file, target)
+        except OSError:
+            return self.memory_file
+        return target
+
+    @staticmethod
+    def _atomic_write_text(path: Path, text: str) -> None:
+        """Write through a same-directory temp file, then ``os.replace``.
+
+        Readers must never observe a half-written mirror: ``MEMORY.md`` is injected at
+        message index 1, so a truncated document is a torn prompt prefix rather than a
+        recoverable read error. The temp file stays beside the target so the replace
+        never crosses filesystems.
+        """
+        temp_path = path.with_name(f"{path.name}.{uuid.uuid4().hex[:12]}.tmp")
+        try:
+            with open(temp_path, "w", encoding="utf-8") as handle:
+                handle.write(text)
+                handle.flush()
+                os.fsync(handle.fileno())
+            os.replace(temp_path, path)
+        except BaseException:
+            try:
+                temp_path.unlink(missing_ok=True)
+            except OSError:
+                pass
+            raise
+
+    def _validate_memory_document_text(self, document_text: str) -> None:
         validate_memory_document(
             document_text,
             summary_max_chars=int(getattr(self.config.document, "summary_max_chars", 300) or 300),
             document_max_chars=max(int(getattr(self.config.document, "document_max_chars", 20000) or 20000), 1),
         )
-        self.memory_file.write_text(document_text, encoding="utf-8")
+
+    def _rebuild_memory_snapshot_from_sqlite(self, *, now_iso: str | None = None) -> None:
+        document_text = self._document_text_from_sqlite_rows(self._memory_repo.list_memories(), now_iso=now_iso)
+        self._validate_memory_document_text(document_text)
+        self._atomic_write_text(self.memory_file, document_text)
 
     async def _append_queue_request(self, request: MemoryQueueRequest) -> None:
         rows = self._read_queue_requests()
@@ -1458,7 +1564,7 @@ class MemoryManager:
             path = self.notes_dir / note_file_name(normalized_ref)
             if not path.exists():
                 raise KeyError(f"memory note not found: {normalized_ref}")
-            path.write_text(new_body, encoding="utf-8")
+            self._atomic_write_text(path, new_body)
         return {
             "ref": normalized_ref,
             "body": new_body,
@@ -1576,11 +1682,11 @@ class MemoryManager:
         for ref in missing_note_refs:
             note_path = self.notes_dir / note_file_name(ref)
             note_path.parent.mkdir(parents=True, exist_ok=True)
-            note_path.write_text(
+            self._atomic_write_text(
+                note_path,
                 self._normalize_note_text(
                     f"Placeholder note created by reconcile-notes for ref:{ref}."
                 ),
-                encoding="utf-8",
             )
             created_notes.append(ref)
 
@@ -1641,6 +1747,7 @@ class MemoryManager:
             note_refs_written=sorted(note_writes.keys()),
             memory_chars_after=len(document_text),
             document_preview=self._document_preview(document_text),
+            adopt_document=True,
         )
         self._commit_validated_write(validated)
         report["note_refs_written"] = list(validated.note_refs_written)
@@ -1906,12 +2013,12 @@ class MemoryManager:
     def _write_queue_requests(self, rows: list[MemoryQueueRequest]) -> None:
         with self._io_lock:
             text = "\n".join(json.dumps(asdict(item), ensure_ascii=False) for item in rows)
-            self.queue_file.write_text((f"{text}\n" if text else ""), encoding="utf-8")
+            self._atomic_write_text(self.queue_file, (f"{text}\n" if text else ""))
 
     def _write_processed_batches(self, rows: list[dict[str, Any]]) -> None:
         with self._io_lock:
             text = "\n".join(json.dumps(item, ensure_ascii=False) for item in rows)
-            self.ops_file.write_text((f"{text}\n" if text else ""), encoding="utf-8")
+            self._atomic_write_text(self.ops_file, (f"{text}\n" if text else ""))
 
     def _read_processed_batches(self, *, prune_expired: bool = True, now_iso: str | None = None) -> list[dict[str, Any]]:
         if not self.ops_file.exists():
@@ -2596,12 +2703,14 @@ class MemoryManager:
     def _commit_validated_write(self, validated: _MemoryValidatedWrite) -> None:
         now_iso = self._now_iso()
         with self._io_lock:
-            current_snapshot = self._normalize_document_text(self.snapshot_text())
+            # Note bodies land before the store mutation. If the mutation is later
+            # rejected, an orphan note file is only surplus bytes - the next successful
+            # commit's orphan sweep removes them; the store itself is rolled back whole.
             for ref, body in validated.note_writes.items():
                 note_path = self.notes_dir / note_file_name(ref)
                 note_path.parent.mkdir(parents=True, exist_ok=True)
-                note_path.write_text(body, encoding="utf-8")
-            self._sync_sqlite_from_snapshot_if_needed_locked(now_iso=now_iso)
+                self._atomic_write_text(note_path, body)
+            self._reconcile_mirror_with_sqlite_locked(now_iso=now_iso)
             # Capture the original bodies of rewritten/deleted memories before the
             # mutation is applied so the processed record can show before/after text.
             if not validated.original_bodies:
@@ -2614,20 +2723,35 @@ class MemoryManager:
                 or list(validated.deletes or [])
                 or list(validated.inspired_memory_ids or [])
             )
-            if has_structured_mutation:
-                self._memory_repo.apply_mutation(
-                    adds=validated.adds,
-                    rewrites=validated.rewrites,
-                    deletes=validated.deletes,
-                    inspired_memory_ids=validated.inspired_memory_ids,
-                    now_iso=now_iso,
-                )
-            elif self._normalize_document_text(validated.document_text) != current_snapshot:
-                self._memory_repo.replace_all_from_document(
-                    document_text=validated.document_text,
-                    now_iso=now_iso,
-                )
-            self._rebuild_memory_snapshot_from_sqlite(now_iso=now_iso)
+            rows_before = self._memory_repo.list_memories()
+            try:
+                if has_structured_mutation:
+                    self._memory_repo.apply_mutation(
+                        adds=validated.adds,
+                        rewrites=validated.rewrites,
+                        deletes=validated.deletes,
+                        inspired_memory_ids=validated.inspired_memory_ids,
+                        now_iso=now_iso,
+                    )
+                elif validated.adopt_document:
+                    # The only surviving document -> sqlite direction: an explicit
+                    # operator legacy import, never an ordinary commit.
+                    self._memory_repo.replace_all_from_document(
+                        document_text=validated.document_text,
+                        now_iso=now_iso,
+                    )
+                self._rebuild_memory_snapshot_from_sqlite(now_iso=now_iso)
+            except Exception:
+                # The mirror is the last gate. When it refuses a document (over the hard
+                # cap, or an entry that no longer round-trips) sqlite must go back to
+                # exactly the rows it held - not to a re-derived document, whose
+                # rendering is lossy for compressed rows.
+                try:
+                    self._memory_repo.restore_rows(rows_before=rows_before)
+                    self._rebuild_memory_snapshot_from_sqlite(now_iso=now_iso)
+                except Exception as restore_exc:
+                    logger.error(f"memory commit rollback failed: {restore_exc}")
+                raise
             self._cleanup_orphan_notes_locked(self.snapshot_text())
             compression_result = self._run_post_commit_compression_locked(now_iso=now_iso)
             final_snapshot = self.snapshot_text()
@@ -2782,9 +2906,9 @@ class MemoryManager:
         if not isinstance(sessions, dict):
             normalized["sessions"] = {}
         with self._io_lock:
-            self.review_state_file.write_text(
+            self._atomic_write_text(
+                self.review_state_file,
                 json.dumps(normalized, ensure_ascii=False, indent=2) + "\n",
-                encoding="utf-8",
             )
 
     def _review_window_turns(self) -> int:
@@ -3124,7 +3248,7 @@ class MemoryManager:
             "provider_request_meta": provider_metadata["provider_request_meta"],
             "provider_request_body": provider_metadata["provider_request_body"],
         }
-        artifact_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+        self._atomic_write_text(artifact_path, json.dumps(payload, ensure_ascii=False, indent=2) + "\n")
         return {
             "artifact_id": artifact_id,
             "path": str(artifact_path.resolve()),
@@ -4583,7 +4707,7 @@ class MemoryManager:
         with self._io_lock:
             text = "\n".join(json.dumps(row, ensure_ascii=False) for row in rows)
             self.failed_file.parent.mkdir(parents=True, exist_ok=True)
-            self.failed_file.write_text((f"{text}\n" if text else ""), encoding="utf-8")
+            self._atomic_write_text(self.failed_file, (f"{text}\n" if text else ""))
 
     def _failed_queue_row_from_payload(self, payload: Any) -> MemoryQueueRequest | None:
         try:
