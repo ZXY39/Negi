@@ -34,11 +34,13 @@ MAX_WAIT_SECONDS = 1800
 DEFAULT_LIST_LIMIT = 50
 WAKE_POLL_INTERVAL_SECONDS = 2.0
 
-# 附件的上限沿用运行时已有的闸门，MCP 侧不新立一套数字；等值关系由
+# 附件的单文件闸门沿用运行时已有的两个数字，等值关系由
 # tests/resources/test_mcp_chat_attachments.py 钉住（网关不许 import web 路由层）。
+# 条数封顶是 MCP 独有的约束：网页上传一颗文件一个请求，而这里把整条消息的附件
+# 塞进同一个 POST body，所以按"整体字节"封，跟操作者入口比不额外少给几颗。
 ATTACHMENT_IMAGE_MAX_BYTES = 5 * 1024 * 1024
 ATTACHMENT_FILE_MAX_BYTES = 20 * 1024 * 1024
-ATTACHMENTS_PER_MESSAGE_MAX = 4
+ATTACHMENT_BODY_MAX_BYTES = 20 * 1024 * 1024
 _URL_PREFIXES = ("http://", "https://")
 _SCHEME_PREFIX = re.compile(r"^[a-zA-Z][a-zA-Z0-9+.\-]*://")
 
@@ -65,20 +67,10 @@ def _resolve_attachments(
     stored itself and the calling model never has to emit base64.
     """
     raw = [str(item or "").strip() for item in list(items or [])]
-    if len(raw) > ATTACHMENTS_PER_MESSAGE_MAX:
-        return [], _attachment_problem(
-            ATTACHMENTS_PER_MESSAGE_MAX,
-            "",
-            "too_many_attachments",
-            f"Send at most {ATTACHMENTS_PER_MESSAGE_MAX} attachments per message; "
-            "this one carried none of them, so nothing was submitted. Split them over "
-            "several messages, or name the files in the text instead.",
-            attachments_requested=len(raw),
-            max_attachments=ATTACHMENTS_PER_MESSAGE_MAX,
-        ), []
 
     descriptors: list[dict[str, Any]] = []
     echoes: list[str] = []
+    total_bytes = 0
     for index, source in enumerate(raw):
         if not source:
             return [], _attachment_problem(
@@ -132,6 +124,17 @@ def _resolve_attachments(
                 attachment_bytes=size,
                 max_bytes=max_bytes,
             ), []
+        if total_bytes + size > ATTACHMENT_BODY_MAX_BYTES:
+            return [], _attachment_problem(
+                index, source, "attachment_body_too_large",
+                f"{len(descriptors)} of these files already fill this message's attachment "
+                "budget, so nothing was submitted. Send the rest in the next message.",
+                attachments_accepted=len(descriptors),
+                attachment_bytes_so_far=total_bytes,
+                attachment_bytes=size,
+                max_body_bytes=ATTACHMENT_BODY_MAX_BYTES,
+            ), []
+        total_bytes += size
         try:
             payload = path.read_bytes()
         except OSError as exc:
@@ -248,9 +251,11 @@ def build_mcp_server(client: G3kuMcpClient, *, name: str = "negi") -> FastMCP:
             "(use them with the web runtime to follow up); reply is prose for a human. "
             "`attachments` sends files with the message: local file paths on the machine "
             "running `negi mcp serve`, or http(s) URLs — never base64, and not paths from "
-            "your own machine. Up to 4 per message, images up to 5 MB, other files up to "
-            "20 MB; what got sent is echoed in `attachments`. A rejected attachment "
-            "submits nothing at all — fix the argument and resend."
+            "your own machine. Any number of files, but each one is capped (images 5 MB, "
+            "others 20 MB) and a single message carries at most 20 MB of file bytes, since "
+            "they all travel in one request body; what got sent is echoed in `attachments`. "
+            "A rejected attachment submits nothing at all — resend the rest in the next "
+            "message."
         ),
         annotations=ToolAnnotations(
             readOnlyHint=False, destructiveHint=False, idempotentHint=False, openWorldHint=True

@@ -155,20 +155,47 @@ async def test_oversize_is_refused_before_the_file_is_read(
     assert client.sent == []
 
 
+def _sent_all(client: _RecordingClient) -> list[dict[str, Any]]:
+    assert len(client.attachments) == 1, client.attachments
+    return client.attachments[0]
+
+
 @pytest.mark.asyncio
-async def test_more_than_four_attachments_rejects_the_whole_message(tmp_path: Path):
+async def test_file_count_is_not_capped_because_the_operator_lane_is_not(tmp_path: Path):
     paths = []
-    for index in range(5):
+    for index in range(9):
         item = tmp_path / f"p{index}.txt"
-        item.write_text("x")
+        item.write_bytes(b"x" * 64)
         paths.append(str(item))
     client = _RecordingClient()
 
-    result = await _chat(client, message="五个文件", attachments=paths)
+    result = await _chat(client, message="九个小文件", attachments=paths)
 
+    assert result["ok"] is True, result
+    assert len(_sent_all(client)) == 9, client.attachments
+    assert len(result["attachments"]) == 9, result
+
+
+@pytest.mark.asyncio
+async def test_the_message_body_is_capped_by_bytes_and_says_how_far_it_got(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    monkeypatch.setattr(server_module, "ATTACHMENT_BODY_MAX_BYTES", 30)
+    paths = []
+    for index in range(4):
+        item = tmp_path / f"b{index}.txt"
+        item.write_bytes(b"y" * 12)
+        paths.append(str(item))
+    client = _RecordingClient()
+
+    result = await _chat(client, message="四颗 12 字节的文件", attachments=paths)
+
+    # 前两颗累计 24 字节还在预算里，第三颗会到 36 ⇒ 在第三颗上整条拒绝。
     assert result["ok"] is False, result
-    assert result["error"] == "too_many_attachments", result
-    assert result["attachments_requested"] == 5 and result["max_attachments"] == 4, result
+    assert result["error"] == "attachment_body_too_large", result
+    assert result["attachments_accepted"] == 2, result
+    assert result["attachment_bytes_so_far"] == 24 and result["attachment_index"] == 2, result
+    assert result["max_body_bytes"] == 30, result
     assert client.sent == []
 
 
@@ -239,13 +266,14 @@ def test_the_body_stays_text_only_when_no_attachment_is_given():
 
 
 def test_gateway_limits_are_the_runtimes_own_numbers():
-    from g3ku.runtime.api.ceo_media import MAX_CHANNEL_ATTACHMENTS
     from g3ku.runtime.api.external_v1 import EXTERNAL_FILE_UPLOAD_MAX_BYTES
     from g3ku.runtime.web_ceo_sessions import WEB_CEO_IMAGE_UPLOAD_MAX_BYTES
 
     assert server_module.ATTACHMENT_IMAGE_MAX_BYTES == WEB_CEO_IMAGE_UPLOAD_MAX_BYTES
     assert server_module.ATTACHMENT_FILE_MAX_BYTES == EXTERNAL_FILE_UPLOAD_MAX_BYTES
-    assert server_module.ATTACHMENTS_PER_MESSAGE_MAX == MAX_CHANNEL_ATTACHMENTS
+    # 整体预算不是第四个数字，而是"运行时已经肯收的最大一颗文件"那一档。
+    assert server_module.ATTACHMENT_BODY_MAX_BYTES == EXTERNAL_FILE_UPLOAD_MAX_BYTES
+    assert not hasattr(server_module, "ATTACHMENTS_PER_MESSAGE_MAX"), "条数闸门已经取消"
 
 
 @pytest.mark.asyncio
