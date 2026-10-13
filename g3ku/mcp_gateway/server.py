@@ -16,6 +16,7 @@ from typing import Any, Awaitable, Callable
 
 import httpx
 from mcp.server.fastmcp import Context, FastMCP
+from mcp.types import ToolAnnotations
 
 from g3ku.mcp_gateway.client import G3kuMcpClient
 from g3ku.mcp_gateway.local_store import (
@@ -126,7 +127,10 @@ def build_mcp_server(client: G3kuMcpClient, *, name: str = "negi") -> FastMCP:
             "response means a stalled one; check negi_session_status for activity and silence. "
             "task_ids are the machine-readable handles of the tasks this turn dispatched "
             "(use them with the web runtime to follow up); reply is prose for a human."
-        )
+        ),
+        annotations=ToolAnnotations(
+            readOnlyHint=False, destructiveHint=False, idempotentHint=False, openWorldHint=True
+        ),
     )
     async def negi_chat(
         conversation: str, message: str, wait_seconds: int = 120, ctx: Context = None
@@ -293,7 +297,10 @@ def build_mcp_server(client: G3kuMcpClient, *, name: str = "negi") -> FastMCP:
             "as you passed it to negi_chat. Give `turn_id` (the id negi_chat returned) to wait "
             "for THAT turn instead of whatever answer comes next; the reply always reports "
             "`turn_id` and `answered_seq` so a reply can be matched to its question."
-        )
+        ),
+        annotations=ToolAnnotations(
+            readOnlyHint=False, destructiveHint=False, idempotentHint=False, openWorldHint=False
+        ),
     )
     async def negi_get_reply(
         conversation: str, wait_seconds: int = 60, turn_id: str = "", ctx: Context = None
@@ -347,7 +354,10 @@ def build_mcp_server(client: G3kuMcpClient, *, name: str = "negi") -> FastMCP:
             "different namespaces on purpose: `turn_id` addresses pause/resume of the external "
             "turn, `transcript_turn_id` addresses the stored line. Returns turn_not_found when "
             "the given id is not a stored transcript line for this conversation."
-        )
+        ),
+        annotations=ToolAnnotations(
+            readOnlyHint=True, destructiveHint=False, idempotentHint=True, openWorldHint=False
+        ),
     )
     async def negi_get_turn(conversation: str, turn_id: str) -> dict[str, Any]:
         async def _body() -> dict[str, Any]:
@@ -389,7 +399,10 @@ def build_mcp_server(client: G3kuMcpClient, *, name: str = "negi") -> FastMCP:
             "the gateway — you don't pass `since`. Nothing already reported at the cursor "
             "second comes back a second time (deduped by `task_id`/`outbox_id`), so an idle "
             "conversation answers `woke:false` instead of re-announcing the same terminal row."
-        )
+        ),
+        annotations=ToolAnnotations(
+            readOnlyHint=False, destructiveHint=False, idempotentHint=False, openWorldHint=False
+        ),
     )
     async def negi_wait_wake(conversation: str, wait_seconds: int = 120) -> dict[str, Any]:
         budget = max(0, _raw_wait(wait_seconds, 120))
@@ -477,7 +490,10 @@ def build_mcp_server(client: G3kuMcpClient, *, name: str = "negi") -> FastMCP:
             "separate clock: `tasks_running`/`tasks` plus `task_activity_at`/`task_silence_seconds` "
             "cover nodes this conversation dispatched that are still running, and session-side "
             "silence during that window is expected rather than a stall."
-        )
+        ),
+        annotations=ToolAnnotations(
+            readOnlyHint=True, destructiveHint=False, idempotentHint=True, openWorldHint=False
+        ),
     )
     async def negi_session_status(conversation: str) -> dict[str, Any]:
         async def _body() -> dict[str, Any]:
@@ -526,7 +542,10 @@ def build_mcp_server(client: G3kuMcpClient, *, name: str = "negi") -> FastMCP:
         description=(
             "Pause the conversation's currently running Negi turn, if any. This stops the agent "
             "at its next stage boundary; it does not touch tasks the turn already dispatched."
-        )
+        ),
+        annotations=ToolAnnotations(
+            readOnlyHint=False, destructiveHint=False, idempotentHint=True, openWorldHint=False
+        ),
     )
     async def negi_pause(conversation: str) -> dict[str, Any]:
         async def _body() -> dict[str, Any]:
@@ -557,7 +576,10 @@ def build_mcp_server(client: G3kuMcpClient, *, name: str = "negi") -> FastMCP:
             "following reads — that is not a failure. A task sitting in paused-never-resumed is "
             "cancellable here (in_progress+paused is settled as canceled); if the runtime refuses, "
             "the refusal reason is carried verbatim in `skipped`."
-        )
+        ),
+        annotations=ToolAnnotations(
+            readOnlyHint=False, destructiveHint=True, idempotentHint=True, openWorldHint=False
+        ),
     )
     async def negi_cancel(conversation: str) -> dict[str, Any]:
         async def _body() -> dict[str, Any]:
@@ -594,7 +616,10 @@ def build_mcp_server(client: G3kuMcpClient, *, name: str = "negi") -> FastMCP:
             "pagination is `offset` + returned `next_offset`. Replies to channel sessions go out as "
             "proactive messages, so the platform's message window and quota can refuse the reply even "
             "though the turn answered."
-        )
+        ),
+        annotations=ToolAnnotations(
+            readOnlyHint=True, destructiveHint=False, idempotentHint=True, openWorldHint=False
+        ),
     )
     async def negi_list_conversations(
         scope: str = "all",
@@ -698,7 +723,10 @@ def build_mcp_server(client: G3kuMcpClient, *, name: str = "negi") -> FastMCP:
             "artifacts. Only short names in this gateway's own namespace are accepted; full session "
             "keys (anything containing ':') are refused so one bridge cannot wipe another's "
             "sessions. The conversation reappears as a fresh session on the next message."
-        )
+        ),
+        annotations=ToolAnnotations(
+            readOnlyHint=False, destructiveHint=True, idempotentHint=True, openWorldHint=False
+        ),
     )
     async def negi_delete_conversation(conversation: str) -> dict[str, Any]:
         async def _body() -> dict[str, Any]:
