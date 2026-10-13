@@ -450,7 +450,7 @@ main/ 侧所有持久化写在磁盘满（ENOSPC / SQLITE_FULL）条件下的行
 
 - caller-side prompt cache family 只由稳定前缀加显式 cache-family revision 输入决定；普通 callable/candidate/hydrated 漂移、阶段门控收紧与 hydration promotion 可以改变 actual request，但不得自行轮转 family key。
 - 每次 `call_model` 必须把该轮重建的 request 与匹配重建的 `prompt_cache_key` 一起发送；CEO/frontdoor 与节点侧都保持静态前缀前置 append-only、请求尾部区域恰好一份当前 runtime 契约，且契约与 turn-only note 排在全部携带正文之后（前缀断点只能落在尾部），携带历史中的旧契约与 turn-only note 一律剥掉。
-- 两侧都为每轮 `call_model` 持久化专用 actual-request artifact：CEO/frontdoor 写 `.g3ku/web-ceo-requests/<session>/...json`（`visible_frontdoor` / `token_compression` / `inline_tool_reminder` 共用同一条时间线），节点写专用 JSON 且 `actual_request_ref` / `latest-context` 指向它；这些 artifact 是 provider-facing 顺序的取证权威，durable baseline 与快照则在持久化前剥掉契约消息。节点 artifact 与 `task.model.call` 行同时携带 `request_seed_source` / `request_seed_message_count`（第一跳 scaffold adoption 的来源诊断）。
+- 两侧都为每轮 `call_model` 持久化专用 actual-request artifact：CEO/frontdoor 写 `.g3ku/web-ceo-requests/<session>/...json`（`visible_frontdoor` / `token_compression` 共用同一条时间线），节点写专用 JSON 且 `actual_request_ref` / `latest-context` 指向它；这些 artifact 是 provider-facing 顺序的取证权威，durable baseline 与快照则在持久化前剥掉契约消息。节点 artifact 与 `task.model.call` 行同时携带 `request_seed_source` / `request_seed_message_count`（第一跳 scaffold adoption 的来源诊断）。
 - artifact 写入带内存压力守卫：`MemoryError` 时降级为 forensics-first payload（`artifact_persistence_mode=memory_guard_degraded` / `memory_guard_minimal`），不得因 artifact 过大而失败整个 turn/节点；读取降级 artifact 前先检查该标记。
 - `RuntimeAgentSession._frontdoor_request_body_messages` 是 session-owned request-body baseline：只在当轮已有真实 actual-request 证据后才允许跨回合替换，且只有 `token_compression` / `stage_compaction` 可以让下一轮基线变短；恢复顺序、scaffold 规则与收缩守卫细节归缓存排查文档。
 
@@ -590,17 +590,6 @@ Canonical 阶段状态按以下表示规则收敛（这是 canonical 链唯一�
 若下一轮基线以两个收缩边界与 `user_edit_truncation` 之外的任何理由变短，按意外上下文损失排查；守卫自愈行为见本文「Frontdoor Context Compression」。`user_edit_truncation` 的替换发生在轮间（守卫比较的是"会话基线 vs 本轮新请求"，替换后新请求只会更长），不会触发 quarantine。
 
 token preflight 估算、触发阈值、`effective_input_tokens` 真相车道、压缩优先顺序与诊断字段详见 `context-and-cache-troubleshooting.md`「Prompt Cache Family 与 Actual Request」；图片上传与 `content_open` 的多模态展开、`5 MiB` 守卫与单次发送 overlay 规则详见 `web-and-admin.md`「Image Upload Gating」。
-
-## CEO Inline Tool Reminder Sidecar
-
-CEO/frontdoor 直连长时工具有一条独立的 live-only 内联提醒侧车道，运行时边界如下：
-
-- 内联执行注册在 `InlineToolExecutionRegistry`，这是 CEO 直连长工具唯一的执行登记；执行 id 只在本次调用内有效，跨轮继续等待一条车道不存在。
-- `CeoToolReminderService` 对会话持久化是只读车道：不调 `session.prompt(...)`、不取普通 turn 锁、不创建 heartbeat / internal turn；提醒文本与决策不写入 transcript、canonical context 或后续 prompt 历史注入。
-- 侧车道优先复用最近一份已持久化的 CEO actual-request artifact 作为 provider-facing scaffold，与主轮共享同一段可缓存前缀；artifact 因内存守卫降级（`artifact_persistence_mode=memory_guard_degraded` / `memory_guard_minimal`）时，退回 `CeoMessageBuilder.build_for_ceo(..., ephemeral_tail_messages=...)` 重建。
-- 侧车道停止决策以普通工具失败形式回到主轮（`reason_code=sidecar_timeout_stop`，per-tool 子取消令牌），与用户主动暂停/取消是两条不同路径。
-
-自定排程巡检（首档 120s、模型自定下次间隔）、观测感知决策、`STOP` / `CONTINUE <seconds>` 语义、失败兜底、统一工具 timeout 硬上限与 timeout-stop 错误合同详见 `heartbeat-system.md`「CEO Inline Tool Reminder Sidecar」。
 
 ## Node Provider Request Scaffold
 

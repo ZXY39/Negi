@@ -11,7 +11,7 @@ Start here when you are new to the repository or when a change crosses subsystem
 5. `tool-and-skill-system.md`
 6. `tool-hydration-and-callable-chain.md` when the change touches tool hydration and promotion, parameter-error guidance, the universal tool timeout, or stage gating
 7. `web-and-admin.md`
-8. `heartbeat-system.md` when the change touches heartbeat, long-running CEO tool wakeups, or live reminder behavior
+8. `heartbeat-system.md` when the change touches heartbeat turns, task terminal / stall / distribution-error wakeups, or shutdown-resume session wakes
 9. `config-and-models.md` when the change touches runtime config, provider/model routing, or model bindings
 10. `external-agent-api.md` when the change touches the external bridge API (`/api/v1`), external sessions, outbound routing to bridges, or the built-in official QQ adapter
 11. `agent-gateway.md` when the change touches the OpenAI-compatible endpoint (`/api/v1/chat/completions`) or the MCP stdio gateway (`negi mcp serve`)
@@ -34,7 +34,7 @@ Start here when you are new to the repository or when a change crosses subsystem
 - `web-and-admin.md`
   Use for websocket contracts, frontend/backend responsibility boundaries, and operator-visible UI behavior.
 - `heartbeat-system.md`
-  Use for heartbeat turns, task-terminal/stall/distribution-error wakeups, shutdown-resume session wakes, and the boundary between heartbeat and the CEO inline tool reminder sidecar.
+  Use for heartbeat turns, task-terminal/stall/distribution-error wakeups, cron at-most-once delivery, and shutdown-resume session wakes.
 - `config-and-models.md`
   Use for config source-of-truth rules and role-to-model resolution.
 - `external-agent-api.md`
@@ -46,7 +46,6 @@ Start here when you are new to the repository or when a change crosses subsystem
 
 ## Debugging Entry Points
 
-- Reminder UI or `ceo.tool.reminder` timeout-stop failures → `heartbeat-system.md` (+ `web-and-admin.md` for UI rendering)
 - Node cache misses, restart-seed continuity, token preflight/compression questions → `context-and-cache-troubleshooting.md` (+ `runtime-overview.md`)
 - Append-notice delivery, `waiting_children` replay, task-tree banner after distribution → `runtime-overview.md` + `operations-and-maintenance.md`
 - 追加通知后任务停在 paused、任务树出现红色「消息分发失败」横幅、epoch state=failed → `main-task-runtime.md`「分发状态机与屏障」+ `operations-and-maintenance.md`「task_append_notice / 任务消息分发维护要点」
@@ -223,7 +222,7 @@ These rules prevent the docs from re-accumulating redundancy. Every edit to this
 | Append-notice distribution contract: sub-tree control transaction and drain ledger, epoch state machine and barriers, single-flight epoch driver with wave-retry/degraded skip, mailbox delivery and uplink propagation, epoch-completed vs deferred consumption, acceptance node lifecycle and handshake re-dispatch, spawn review, task tree depth ceiling, force-delete precedence, node-level pause/resume/cancel and circuit breakers, graceful shutdown pause and startup auto-resume | `main-task-runtime.md` |
 | Frontdoor context compression contract (`token_compression` / `stage_compaction`, 阶段收口 `context_visible` 与证据索引回填), 思考内容的上下文回放（reasoning 写入闸门与随压缩退出）, provider/model binding flag `reasoningContextEnabled` 的运行时语义 | `runtime-overview.md` |
 | Memory queue state/file semantics (`runtime-overview`); queue/reset operator workflows (`operations-and-maintenance`) | both, split as shown |
-| Heartbeat continuation contract, cron at-most-once delivery, reminder sidecar decision semantics, timeout stop, task terminal repair (including terminal-outbox delivery durability and the `abandoned` state), node-error, distribution-error, and task-stall detection/delivery | `heartbeat-system.md` |
+| Heartbeat continuation contract, cron at-most-once delivery, task terminal repair (including terminal-outbox delivery durability and the `abandoned` state), node-error, distribution-error, and task-stall detection/delivery | `heartbeat-system.md` |
 | Tool/skill four concepts, fixed builtin tool contracts, candidate tools and candidate skills, frontdoor head-pinned static declarations (`candidate_skills` / `exec_runtime_policy` / `session_temp_dir`) and their three reprint boundaries, Tool Admin RBAC semantics, provider-facing `tools[]` surface contract (frontdoor live RBAC superset vs node pinned bundle and its single reprint point), duplicate-call guard, resource-directory generation checks and semantic catalog freshness, always-callable resident internal control tools (`silent`, and why fixed-builtin membership does not inject a tool) | `tool-and-skill-system.md` |
 | Tool hydration ledger and promotion, re-read and fingerprints, parameter-error guidance lane, externalized tool result envelope, universal tool timeout contract, tool rerun-safe declaration for the recovery lane, stage gating and callable tightening, context→callable chain | `tool-hydration-and-callable-chain.md` |
 | Actual-request forensics, 线体角色合同（一条请求里 system 至多一份且只能在首位）, append-only rule, cache-miss triage, token preflight diagnostics | `context-and-cache-troubleshooting.md` |

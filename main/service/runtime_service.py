@@ -10634,14 +10634,9 @@ class MainRuntimeService:
             def task_service_getter():
                 return self
 
-            def inline_registry_getter():
-                runtime_loop = getattr(self, "_runtime_loop", None)
-                return getattr(runtime_loop, "inline_tool_execution_registry", None) if runtime_loop is not None else None
-
             self._builtin_tool_cache = {
                 'stop_tool_execution': StopToolExecutionTool(
                     task_service_getter,
-                    inline_registry_getter,
                 ),
                 'task_append_notice': TaskAppendNoticeTool(self),
             }

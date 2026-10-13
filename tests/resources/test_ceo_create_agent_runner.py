@@ -635,7 +635,7 @@ def test_build_prompt_cache_diagnostics_accepts_flat_function_tool_schemas() -> 
             }
         ],
         provider_model="gpt-5.2",
-        scope="ceo_inline_tool_reminder",
+        scope="frontdoor_internal",
         prompt_cache_key="cache-key",
         actual_request_messages=[
             {"role": "system", "content": "stable system"},
@@ -7149,7 +7149,6 @@ async def test_create_agent_frontdoor_execute_tool_call_appends_loader_guidance_
         loop=SimpleNamespace(
             tools=_RuntimeToolStack(),
             resource_manager=None,
-            inline_tool_execution_registry=None,
         )
     )
 

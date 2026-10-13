@@ -4610,7 +4610,6 @@ class ReActToolLoop:
             outcome = await run_tool_with_watchdog(
                 tool.execute(**execute_kwargs),
                 tool_name=tool_name,
-                arguments=arguments,
                 runtime_context=runtime_context,
                 snapshot_supplier=self._snapshot_supplier(runtime_context),
                 on_poll=lambda _poll: self._on_tool_watchdog_poll(runtime_context),

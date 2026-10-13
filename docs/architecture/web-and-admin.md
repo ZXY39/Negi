@@ -744,7 +744,7 @@ See `context-and-cache-troubleshooting.md`「Prompt Cache Family 与 Actual Requ
 
 Web-specific artifact locations kept here:
 
-- Every CEO/frontdoor `call_model` round writes the full provider-facing request to `.g3ku/web-ceo-requests/<session>/...json`, including internal lanes such as `token_compression` and `inline_tool_reminder`.
+- Every CEO/frontdoor `call_model` round writes the full provider-facing request to `.g3ku/web-ceo-requests/<session>/...json`, including internal lanes such as `token_compression`.
 - Inflight / paused CEO snapshots expose only the latest `actual_request_path`, hash/count fields, and a short `actual_request_history`.
 - Reopened completed sessions restore baseline state from a compact sidecar at `.g3ku/web-ceo-continuity/<session>.json`.
 
@@ -768,7 +768,6 @@ Context compression has one operator-facing surface: a rule inside the CEO feed 
 - The running rule is a DOM node, not transcript data, so `resetCeoFeed()` deletes it on every full rebuild (`innerHTML = ""`). `renderCeoSnapshot` therefore re-asserts it via `syncCeoCompressionDivider()` *after* the rebuild but *before* `applyCeoFeedViewState()` — dropping that call re-creates the "refresh mid-compression and the indicator vanishes" bug, because `snapshot.ceo` always arrives after the `ceo.state` that first drew the line. The re-assert must not scroll when `S.ceoFeedFollowLatest === false`, or a user reading history gets yanked to the bottom on every rebuild.
 - The compression task belongs to the runtime session, not to the connection: a websocket disconnect cancels only that connection's sender/stream tasks, so refreshing mid-compression does not stop it, and its terminal rule still lands in the transcript.
 - Pausing the turn during an automatic compression still goes through the primary send/pause button and sends `client.pause_turn`; the backend cancels that compression and discards any late result.
-- Tool-wait reminder labels from the reminder sidecar are live-only event data and must not render as transcript lines, assistant bubbles, or persistent notices.
 
 ### Manual Context Compression
 
@@ -913,23 +912,6 @@ A turn that calls `silent` is visible in the session box as one collapsed line, 
 - Snapshot rows keep their content for the same reason, so a refresh rebuilds the same collapsed line.
 - A silent row with no stage track still renders: the collapsed line is itself displayable content. Dropping track-less silent rows was correct only while the backend also emptied their text.
 - `finalizeCeoTurn` and `renderPersistedCeoAssistantTurn` are the two render entry points; both branch on `silent_reply`, and the stage rail, tool steps, usage line and completion timestamp are finalized exactly as on a delivered turn.
-
-## CEO Live Tool Reminder Contract
-
-The CEO browser/runtime integration has a second live-only status lane for long-running direct tools: `ceo.tool.reminder`. It is intentionally different from both ordinary tool interaction steps and heartbeat turns.
-
-- Backend reminder events are emitted only as websocket live events; the payload carries `turn_id`, `execution_id`, `tool_name`, `elapsed_seconds`, `reminder_count`, `decision`, `label`, `source="reminder"`, `next_check_in_seconds` (the self-scheduled interval until the next patrol), and an optional `terminal`.
-- The frontend must not create a new assistant bubble and must not append a new interaction step for reminder events. The CEO frontend does not render `label` as a visible reminder block under the pending turn; these events stay live-only bookkeeping signals while the authoritative tool outcome arrives through the ordinary tool/error/final-reply path.
-
-### Persistence Rules
-
-- Reminder events are not part of `snapshot.ceo.messages` and must not be persisted into the transcript-backed CEO message list.
-- Refresh/reconnect should not restore an old reminder from cached snapshot state.
-- Any ephemeral reminder state is cleared when the tool finishes, the turn finalizes, the turn is discarded, or a `terminal=true` reminder event arrives.
-
-See `heartbeat-system.md`「CEO Inline Tool Reminder Sidecar」 for the self-scheduled patrol and decision semantics (`decision=continue` / `stop` / `unavailable`, observation-aware sidecar review, tool-call-scoped timeout-stop); the universal tool timeout deadline the patrol runs within is owned by `tool-hydration-and-callable-chain.md`「统一工具 Timeout 合同」.
-
-Operators should treat `ceo.tool.reminder` as a live runtime signal, not durable conversation UI; the authoritative end state still arrives through the normal CEO tool/error/final-reply events.
 
 ## Update Notification And Restart-And-Upgrade Contract
 

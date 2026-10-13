@@ -14,7 +14,6 @@ from g3ku.agent.tools.registry import ToolRegistry
 from g3ku.bus.events import InboundMessage, OutboundMessage
 from g3ku.runtime.bootstrap_bridge import RuntimeBootstrapBridge
 from g3ku.runtime.cancellation import ToolCancellationToken
-from g3ku.runtime.frontdoor.inline_tool_reminder import CeoToolReminderService, InlineToolExecutionRegistry
 from g3ku.runtime.manager import SessionRuntimeManager
 
 
@@ -67,11 +66,6 @@ class AgentRuntimeEngine:
         self._session_manager_cls = session_manager_cls
 
         self.tools = ToolRegistry()
-        self.inline_tool_execution_registry = InlineToolExecutionRegistry()
-        self.ceo_tool_reminder_service = CeoToolReminderService(
-            loop=self,
-            registry=self.inline_tool_execution_registry,
-        )
         self._active_tasks: dict[str, set[asyncio.Task[Any]]] = {}
         self._session_cancellation_tokens: dict[str, set[ToolCancellationToken]] = {}
         self._session_notices: dict[str, list[dict[str, Any]]] = {}

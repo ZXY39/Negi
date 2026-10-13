@@ -120,11 +120,9 @@ class RuntimeBootstrapBridge:
     def register_default_tools(self) -> None:
         self.init_resource_runtime()
         task_service_getter = lambda: getattr(self._loop, "main_task_service", None)
-        inline_registry_getter = lambda: getattr(self._loop, "inline_tool_execution_registry", None)
         self._loop.tools.register(
             StopToolExecutionTool(
                 task_service_getter,
-                inline_registry_getter,
             )
         )
         # 静默收尾信号：无回调、无副作用，仅把「本轮不外发」这件事连同判据落成一次

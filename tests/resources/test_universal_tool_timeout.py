@@ -1,18 +1,11 @@
-"""统一工具 timeout_seconds 合同的核心机制测试：解析、硬执行、侧车道自定排程、豁免合同。"""
+"""统一工具 timeout_seconds 合同的核心机制测试：解析、硬执行、豁免合同。"""
 
 from __future__ import annotations
 
 import asyncio
-from types import SimpleNamespace
 
 import pytest
 
-from g3ku.runtime.frontdoor.inline_tool_reminder import (
-    DEFAULT_FIRST_CHECK_SECONDS,
-    InlineToolExecutionRegistry,
-    CeoToolReminderService,
-    clamp_next_check_seconds,
-)
 from g3ku.runtime.cancellation import ToolCancellationToken
 from g3ku.runtime.tool_watchdog import (
     DEFAULT_TOOL_TIMEOUT_SECONDS,
@@ -105,7 +98,6 @@ async def test_watchdog_inline_hard_timeout_returns_unified_error() -> None:
     outcome = await run_tool_with_watchdog(
         _long_running(),
         tool_name="agent_browser",
-        arguments={},
         runtime_context={"tool_watchdog": {"poll_interval_seconds": 0.2}},
         hard_timeout_seconds=0.3,
     )
@@ -123,84 +115,11 @@ async def test_watchdog_self_enforced_tools_get_no_outer_deadline() -> None:
     outcome = await run_tool_with_watchdog(
         _quick(),
         tool_name="exec",
-        arguments={"timeout_seconds": 600},
         runtime_context={"tool_watchdog": {"poll_interval_seconds": 0.2}},
         hard_timeout_seconds=None,
     )
     assert outcome.timed_out is False
     assert outcome.value == "done"
-
-
-def test_clamp_next_check_seconds_bounds() -> None:
-    assert clamp_next_check_seconds(None) is None
-    assert clamp_next_check_seconds("abc") is None
-    assert clamp_next_check_seconds(True) is None
-    assert clamp_next_check_seconds(0) == 30.0
-    assert clamp_next_check_seconds(10) == 30.0
-    assert clamp_next_check_seconds(300) == 300.0
-    assert clamp_next_check_seconds("300") == 300.0
-    assert clamp_next_check_seconds(100000) == 600.0
-
-
-def test_parse_text_decision_continue_with_seconds() -> None:
-    decision, seconds = CeoToolReminderService._parse_text_decision("CONTINUE 300")
-    assert decision == "continue"
-    assert seconds == 300.0
-
-    decision, seconds = CeoToolReminderService._parse_text_decision("STOP")
-    assert decision == "stop"
-    assert seconds is None
-
-    decision, seconds = CeoToolReminderService._parse_text_decision(
-        '{"decision": "continue", "next_check_seconds": 120}'
-    )
-    assert decision == "continue"
-    assert seconds == 120.0
-
-    # 无效秒数 → None（调用方沿用上一轮间隔）
-    decision, seconds = CeoToolReminderService._parse_text_decision("CONTINUE soon")
-    assert decision == "continue"
-    assert seconds is None
-
-    decision, seconds = CeoToolReminderService._parse_text_decision("随便说点什么")
-    assert decision == ""
-    assert seconds is None
-
-
-@pytest.mark.asyncio
-async def test_registry_initial_schedule_uses_first_check_window() -> None:
-    registry = InlineToolExecutionRegistry()
-
-    async def _never() -> None:
-        await asyncio.sleep(30)
-
-    task = asyncio.create_task(_never())
-    try:
-        record = await registry.register_execution(
-            session_key="web:test",
-            turn_id="turn-1",
-            tool_name="agent_browser",
-            tool_call_id="call-1",
-            arguments={},
-            task=task,
-            snapshot_supplier=None,
-            cancel_token=None,
-            started_at=1000.0,
-            runtime_session=None,
-            timeout_seconds=600,
-        )
-        assert record.next_check_at == pytest.approx(1000.0 + DEFAULT_FIRST_CHECK_SECONDS)
-        assert record.last_check_interval_seconds == DEFAULT_FIRST_CHECK_SECONDS
-        assert record.last_continue_at == 1000.0
-        assert record.timeout_seconds == 600.0
-        assert record.llm_continue_count == 0
-        assert record.skip_continue_count == 0
-    finally:
-        task.cancel()
-
-
-def test_default_first_check_is_120_seconds() -> None:
-    assert DEFAULT_FIRST_CHECK_SECONDS == 120.0
 
 
 # ---------------------------------------------------------------------------
@@ -264,52 +183,6 @@ def test_exempt_tools_do_not_advertise_timeout_parameter() -> None:
     assert "timeout_seconds" not in properties
 
 
-class _KwargsRecordingInlineRegistry:
-    def __init__(self) -> None:
-        self.calls: list[dict[str, object]] = []
-
-    async def register_execution(self, **kwargs):
-        self.calls.append(dict(kwargs))
-        return SimpleNamespace(execution_id="inline-tool-exec:1")
-
-    async def discard_execution(self, execution_id: str) -> None:
-        _ = execution_id
-
-
-@pytest.mark.asyncio
-async def test_watchdog_exempt_registration_records_no_timeout_budget() -> None:
-    """豁免工具在 inline 登记时 timeout_seconds=None：提醒侧车道不得向模型
-    宣称一个并不存在的运行上限；对照：非豁免自持语义仍登记统一解析值。"""
-
-    async def _quick() -> str:
-        return "done"
-
-    exempt_registry = _KwargsRecordingInlineRegistry()
-    outcome = await run_tool_with_watchdog(
-        _quick(),
-        tool_name="wait_tool_execution",
-        arguments={},
-        runtime_context={"tool_watchdog": {"poll_interval_seconds": 0.2}},
-        inline_registry=exempt_registry,
-        hard_timeout_seconds=None,
-        universal_timeout_exempt=True,
-    )
-    assert outcome.value == "done"
-    assert exempt_registry.calls[0]["timeout_seconds"] is None
-
-    self_enforced_registry = _KwargsRecordingInlineRegistry()
-    outcome = await run_tool_with_watchdog(
-        _quick(),
-        tool_name="exec",
-        arguments={},
-        runtime_context={"tool_watchdog": {"poll_interval_seconds": 0.2}},
-        inline_registry=self_enforced_registry,
-        hard_timeout_seconds=None,
-    )
-    assert outcome.value == "done"
-    assert self_enforced_registry.calls[0]["timeout_seconds"] == DEFAULT_TOOL_TIMEOUT_SECONDS
-
-
 @pytest.mark.asyncio
 async def test_watchdog_exempt_tool_has_no_hard_deadline() -> None:
     """豁免工具传入 hard_timeout_seconds=None 时外层永不超时（可被取消链中断）。"""
@@ -321,7 +194,6 @@ async def test_watchdog_exempt_tool_has_no_hard_deadline() -> None:
     outcome = await run_tool_with_watchdog(
         _slow(),
         tool_name="spawn_child_nodes",
-        arguments={},
         runtime_context={"tool_watchdog": {"poll_interval_seconds": 0.1}},
         hard_timeout_seconds=None,
         universal_timeout_exempt=True,

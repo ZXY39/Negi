@@ -1,6 +1,6 @@
 # Negi Heartbeat System
 
-This document describes the maintenance boundary around the Web CEO heartbeat path and the CEO inline tool reminder sidecar.
+This document describes the maintenance boundary around the Web CEO heartbeat path.
 
 ## Responsibilities
 
@@ -131,45 +131,3 @@ Graceful project shutdown pauses every running session; at the next startup the 
 - Busy sessions are deferred by the ordinary wake-queue busy check; repeated failures follow the generic non-node-error bounded backoff (see 「Task Node Error Delivery」).
 - Turn identity: a wake whose event bundle is only `shutdown_resume` continues the interrupted request under its original `turn_id`, so the paused bubble and the continued reply remain one transcript row and one bubble. A bundle mixed with other events (`reason=mixed`) answers something else and never claims that id. The claim itself, the archive row it rewrites in place, and the per-turn token carry-over are owned by `runtime-overview.md`「`RuntimeAgentSession` 内部做什么」.
 - The final reply is persisted and published through the ordinary heartbeat visible-reply path (`ceo.reply.final`, channel notifier included), so the user sees the continued work without sending a new message.
-
-## What Heartbeat Does Not Own
-
-The CEO inline tool reminder lane is not a heartbeat turn.
-
-- It enqueues no heartbeat event, calls neither `RuntimeAgentSession.prompt(...)` nor the normal turn lock / heartbeat running gate, and writes no transcript history, canonical context, or persistent session state.
-
-This distinction matters when debugging long-running CEO direct tools: a reminder event is not evidence that a new internal turn happened.
-
-## CEO Inline Tool Reminder Sidecar
-
-CEO frontdoor direct long-running tools use a live-only sidecar reminder lane.
-
-- A CEO direct tool always runs inline inside its own tool turn and registers in `InlineToolExecutionRegistry`; the runtime has no detached background-execution lane, so no `execution_id` outlives the tool call that produced it. Patrol scheduling is self-adaptive, not fixed windows: the first check fires at `DEFAULT_FIRST_CHECK_SECONDS` (120s; before that the sidecar is entirely silent), and every `CONTINUE` decision may carry the next check interval (`CONTINUE <seconds>`, clamped to `[30, 600]`). Deterministic-skip rounds and unusable-decision rounds inherit the previous round's interval, so they keep the cadence without a model call.
-- The sidecar patrols within the universal tool timeout deadline but can never extend it: the deadline is the mechanical backstop, the sidecar is an early-stop optimization. A self-scheduled check landing after the deadline is harmless — the outer layer already terminated the execution and the patrol loop exits on the terminal record state. The universal timeout contract itself (default value, argument override, self-enforcing vs outer enforcement split, timeout error text) is owned by `tool-hydration-and-callable-chain.md`「统一工具 Timeout 合同」.
-- With an authoritative CEO actual-request JSON, `CeoToolReminderService` reuses that saved `request_messages` / `tool_schemas` / `prompt_cache_key` / `parallel_tool_calls` scaffold as cache prefix and appends only live reminder-tail messages (the stats line and the decision instruction); otherwise it falls back to a read-only `CeoMessageBuilder.build_for_ceo(..., ephemeral_tail_messages=...)` rebuild.
-- The sidecar reuses the CEO main model binding; its decision channel is a single line — `STOP`, or `CONTINUE <seconds>` (JSON `{decision, next_check_seconds}` also accepted) — and even when it reuses the main turn's full provider-visible tool bundle for cache-prefix stability, it must not execute arbitrary returned tool calls.
-- The reminder decision prompt carries the judgment statistics: total elapsed runtime, the call's maximum runtime when known, total reminder count, keep-waiting counts split by source (model decisions vs automatic observation skips), and seconds elapsed since the last keep-waiting decision. The decision is still observation-aware before the model is consulted: the sidecar reads the current tool name, normalized arguments, and the latest live `sidecar_observation` payload when available. `sidecar_observation` is a generic progress-side channel: a tool event carrying it refreshes `_latest_sidecar_tool_observation` in `session_agent._handle_progress`, and that is what turns a patrol into an automatic keep-waiting without consulting the model. No tool in the current set emits it, so the observation skip is dormant and every patrol reaches the model. See `web-and-admin.md`「CEO Live Tool Reminder Contract」 for UI rendering of reminder events.
-- Reminder labels remain live-only event data and must not be persisted into transcript, canonical context, or history injection.
-- Reminder snapshots may carry the visible stage view, compression progress, hydrated tools, selection debug, and actual-request pointer for cache forensics; no semantic/global-summary persistence lane is associated with reminder handling.
-
-## Reminder Failure Semantics
-
-- If the reminder model call fails, times out, or returns unusable output, the default decision is `unavailable`; `unavailable` reminders do not stop the tool, do not interrupt the main turn, and inherit the previous round's interval for the next check.
-- Only an explicit sidecar stop decision is allowed to stop the inline execution. A universal-timeout hard stop is a separate mechanical path, not a sidecar decision.
-- If the latest observation shows a concrete hard tool failure, the sidecar keeps waiting so the tool can complete and surface its native error instead of converting that state into a timeout stop; the same applies for positive progress (current URL, page title, or an explicit progress marker).
-
-## Timeout Stop Contract
-
-When the sidecar stops a running CEO direct tool, the stop flows back into the main turn as an ordinary tool failure, not a silent cancel.
-
-- The registry stores `InlineToolStopDecisionMetadata` with `reason_code=sidecar_timeout_stop`, which the direct tool completion path normalizes into a `tool_error` / `status=error` result visible to the main turn.
-- The error text must include the tool name, elapsed runtime, reminder count, and the fact that the stop came from a sidecar timeout decision — e.g., `Error executing exec: stopped by sidecar timeout decision after 120.4s (2 reminders).`
-- Sidecar timeout-stop targets only the inline execution's child cancellation token; it never marks the whole visible turn as cancelled or causes later tool calls in that same turn to fail immediately.
-- If the tool finishes successfully before the stop lands, the runtime clears the timeout-stop metadata and preserves the successful result.
-
-## Web/UI Boundary
-
-- The sidecar publishes `ceo.tool.reminder` live websocket events; browsers may keep them entirely non-visual (the current CEO frontend does not render the reminder label as a visible text block under the pending turn).
-- They do not become `snapshot.ceo` messages and are not restored on refresh or reconnect.
-
-When debugging a “reminder appeared but the transcript stayed clean” report, that is the intended contract.

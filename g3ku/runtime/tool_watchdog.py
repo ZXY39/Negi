@@ -50,7 +50,6 @@ class ToolWatchdogRunResult:
     elapsed_seconds: float
     poll_count: int
     snapshot: dict[str, Any] | None = None
-    execution_id: str = ""
     timed_out: bool = False
 
 
@@ -472,12 +471,9 @@ async def run_tool_with_watchdog(
     awaitable: Awaitable[Any],
     *,
     tool_name: str,
-    arguments: dict[str, Any],
     runtime_context: Any,
     snapshot_supplier: Callable[[], Any] | None = None,
     on_poll: Callable[[dict[str, Any]], Awaitable[None] | None] | None = None,
-    inline_registry: Any | None = None,
-    on_inline_registered: Callable[[Any], Awaitable[None] | None] | None = None,
     hard_timeout_seconds: float | None = None,
     universal_timeout_exempt: bool = False,
 ) -> ToolWatchdogRunResult:
@@ -490,45 +486,14 @@ async def run_tool_with_watchdog(
             elapsed_seconds=0.0,
             poll_count=0,
             snapshot=None,
-            execution_id="",
         )
 
     supplier = snapshot_supplier or resolve_snapshot_supplier(runtime_context)
     execution_task = asyncio.create_task(awaitable, name=f"tool-watchdog:{tool_name}")
     cancel_token = runtime_context_value(runtime_context, "cancel_token", None)
-    session_key = str(runtime_context_value(runtime_context, "session_key", "") or "").strip()
-    runtime_session = runtime_context_value(runtime_context, "runtime_session", None)
     started_at = time.monotonic()
-    inline_entry = None
 
     try:
-        if inline_registry is not None and hasattr(inline_registry, "register_execution"):
-            inline_entry = await inline_registry.register_execution(
-                session_key=session_key,
-                turn_id=str(runtime_context_value(runtime_context, "turn_id", "") or "").strip(),
-                tool_name=tool_name,
-                tool_call_id=str(runtime_context_value(runtime_context, "tool_call_id", "") or "").strip(),
-                arguments=dict(arguments or {}),
-                task=execution_task,
-                snapshot_supplier=supplier,
-                cancel_token=cancel_token,
-                started_at=started_at,
-                runtime_session=runtime_session,
-                # 自持工具的硬上限在工具内部，取统一解析值供巡检判定参考；
-                # 豁免工具（exempt_universal_timeout）没有任何外层时限，
-                # 登记为 None，避免提醒侧车道向模型宣称不存在的运行上限。
-                timeout_seconds=(
-                    None
-                    if universal_timeout_exempt
-                    else (
-                        hard_timeout_seconds
-                        if hard_timeout_seconds
-                        else resolve_effective_tool_timeout(arguments, runtime_context)
-                    )
-                ),
-            )
-            if on_inline_registered is not None:
-                await _maybe_await(on_inline_registered(inline_entry))
         result = await _wait_for_task_window(
             task=execution_task,
             tool_name=tool_name,
@@ -552,7 +517,6 @@ async def run_tool_with_watchdog(
                 elapsed_seconds=result.elapsed_seconds,
                 poll_count=result.poll_count,
                 snapshot=result.snapshot,
-                execution_id="",
                 timed_out=True,
             )
         return ToolWatchdogRunResult(
@@ -561,7 +525,6 @@ async def run_tool_with_watchdog(
             elapsed_seconds=result.elapsed_seconds,
             poll_count=result.poll_count,
             snapshot=result.snapshot,
-            execution_id="",
         )
     except BaseException:
         if not execution_task.done():

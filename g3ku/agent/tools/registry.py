@@ -244,7 +244,6 @@ class ToolRegistry:
         outcome = await run_tool_with_watchdog(
             _invoke(),
             tool_name=tool_name,
-            arguments=params,
             runtime_context=runtime_context,
             on_poll=(
                 (lambda poll: self._emit_watchdog_progress(tool_name=tool_name, poll=poll))

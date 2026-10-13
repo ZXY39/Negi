@@ -537,40 +537,6 @@ def _mock_workspace(monkeypatch, workspace: Path) -> None:
 
 
 @pytest.mark.asyncio
-async def test_runtime_agent_session_exposes_latest_sidecar_tool_observation_in_reminder_snapshot() -> None:
-    loop = SimpleNamespace(model="gpt-test", reasoning_effort=None)
-    session = RuntimeAgentSession(loop, session_key="web:shared", channel="web", chat_id="shared")
-    session._state.is_running = True
-    session._state.status = "running"
-
-    await session._handle_progress(
-        "agent_browser still running",
-        event_kind="tool",
-        event_data={
-            "tool_name": "agent_browser",
-            "sidecar_observation": {
-                "tool_name": "agent_browser",
-                "command_preview": "agent-browser open https://www.bilibili.com",
-                "stderr_tail": "warning tail",
-                "current_url": "https://www.bilibili.com",
-                "positive_progress": True,
-            },
-        },
-    )
-
-    snapshot = session.reminder_context_snapshot()
-
-    assert isinstance(snapshot, dict)
-    assert snapshot["active_tool_observation"] == {
-        "tool_name": "agent_browser",
-        "command_preview": "agent-browser open https://www.bilibili.com",
-        "stderr_tail": "warning tail",
-        "current_url": "https://www.bilibili.com",
-        "positive_progress": True,
-    }
-
-
-@pytest.mark.asyncio
 async def test_runtime_agent_session_merges_control_tool_result_back_into_original_tool_step() -> None:
     loop = SimpleNamespace(model="gpt-test", reasoning_effort=None)
     session = RuntimeAgentSession(loop, session_key="web:shared", channel="web", chat_id="shared")

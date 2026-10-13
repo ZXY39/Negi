@@ -15,20 +15,13 @@ class _ToolExecutionControlTool(Tool):
     def __init__(
         self,
         task_service_getter: Callable[[], Any] | None = None,
-        inline_registry_getter: Callable[[], Any] | None = None,
     ) -> None:
         self._task_service_getter = task_service_getter
-        self._inline_registry_getter = inline_registry_getter
 
     def _task_service(self) -> Any:
         if self._task_service_getter is None:
             return None
         return self._task_service_getter()
-
-    def _inline_registry(self) -> Any:
-        if self._inline_registry_getter is None:
-            return None
-        return self._inline_registry_getter()
 
 
 class StopToolExecutionTool(_ToolExecutionControlTool):
@@ -39,10 +32,10 @@ class StopToolExecutionTool(_ToolExecutionControlTool):
     @property
     def description(self) -> str:
         return (
-            "Stop the tool that is currently running inline in this session, including "
-            "any registered subprocesses, when you decide it should end. "
-            "If the supplied identifier is actually an async task id, fall back to "
-            "cancelling that task."
+            "Cancel a running task by its task id, including its nodes and their "
+            "registered subprocesses. It does not interrupt a tool call that is "
+            "executing inline in the current turn; that call ends when it returns "
+            "or when its own timeout deadline is reached."
         )
 
     @property
@@ -53,14 +46,9 @@ class StopToolExecutionTool(_ToolExecutionControlTool):
                 "execution_id": {
                     "type": "string",
                     "description": (
-                        "The execution id of the running tool. "
-                        "If you only have an async task id, this tool will try to cancel "
-                        "that task as a fallback."
+                        "要取消的任务 id（`task:...`）。标识会先按任务 id 归一，"
+                        "任务不在本运行时或已是终态时返回 not_found。"
                     ),
-                },
-                "reason": {
-                    "type": "string",
-                    "description": "Optional short reason for stopping the execution.",
                 },
             },
             "required": ["execution_id"],
@@ -106,10 +94,7 @@ class StopToolExecutionTool(_ToolExecutionControlTool):
                 "task_status": task_status,
                 "cancel_requested": bool(getattr(task, "cancel_requested", False)),
                 "is_paused": bool(getattr(task, "is_paused", False)),
-                "message": (
-                    "提供的标识对应的是异步任务 task_id，不是后台工具 execution_id；"
-                    "该任务已经处于终态，无需再次停止。"
-                ),
+                "message": "该任务已经处于终态，无需再次停止。",
             }
 
         latest = await service.cancel_task(normalized_identifier)
@@ -122,42 +107,24 @@ class StopToolExecutionTool(_ToolExecutionControlTool):
             "task_status": str(getattr(current, "status", "") or ""),
             "cancel_requested": bool(getattr(current, "cancel_requested", True)),
             "is_paused": bool(getattr(current, "is_paused", False)),
-            "message": (
-                "提供的标识对应的是异步任务 task_id，不是后台工具 execution_id；"
-                "已按 task_id 发起取消。"
-            ),
+            "message": "已按 task_id 发起取消。",
         }
 
     async def execute(
         self,
         execution_id: str,
-        reason: str = "agent_requested_stop",
-        __g3ku_runtime: dict[str, Any] | None = None,
         **kwargs: Any,
     ) -> str:
-        del __g3ku_runtime, kwargs
-        normalized_identifier = str(execution_id or "").strip()
-        inline_registry = self._inline_registry()
-        if inline_registry is not None and hasattr(inline_registry, "stop_execution"):
-            payload = await inline_registry.stop_execution(
-                normalized_identifier,
-                reason=str(reason or "agent_requested_stop").strip() or "agent_requested_stop",
-            )
-            if str((payload or {}).get("status") or "").strip().lower() != "not_found":
-                return json.dumps(payload, ensure_ascii=False)
-
-        task_payload = await self._stop_task_by_identifier(normalized_identifier)
+        del kwargs
+        task_payload = await self._stop_task_by_identifier(str(execution_id or "").strip())
         if task_payload is not None:
             return json.dumps(task_payload, ensure_ascii=False)
-
-        if payload is not None:
-            return json.dumps(payload, ensure_ascii=False)
 
         return json.dumps(
             {
                 "status": "not_found",
                 "execution_id": str(execution_id or ""),
-                "message": "既没有找到本会话在跑的内联工具执行，也没有按这个标识找到可取消的异步任务。",
+                "message": "按这个标识没有找到可取消的任务。",
             },
             ensure_ascii=False,
         )

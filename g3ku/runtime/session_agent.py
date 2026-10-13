@@ -188,7 +188,6 @@ class RuntimeAgentSession:
         self._pending_tool_name_calls: dict[str, deque[str]] = {}
         self._tool_seq: int = 0
         self._active_cancel_token: ToolCancellationToken | None = None
-        self._latest_sidecar_tool_observation: dict[str, Any] = {}
         self._preserved_inflight_turn: dict[str, Any] | None = None
         self._follow_up_transition_snapshot: dict[str, Any] | None = None
         self._paused_execution_context: dict[str, Any] | None = None
@@ -2449,36 +2448,6 @@ class RuntimeAgentSession:
             return "manual_context_compression"
         return ""
 
-    def reminder_context_snapshot(self) -> dict[str, Any] | None:
-        status = str(self._state.status or "").strip().lower()
-        if not (self._state.is_running or status in {"running", "paused", "error"}):
-            return None
-        visible_canonical_context = self._frontdoor_visible_canonical_context_snapshot()
-        durable_canonical_context = self._frontdoor_canonical_context_snapshot()
-        compression = self._compression_snapshot()
-        user_message = self._pending_user_message_snapshot()
-        assistant_text = str(self._state.latest_message or "").strip()
-        snapshot: dict[str, Any] = {
-            "session_key": str(self._state.session_key or "").strip(),
-            "turn_id": self._current_turn_id(),
-            "source": self._internal_prompt_source() or "user",
-            "status": status or ("running" if self._state.is_running else "idle"),
-            "user_message": user_message or {},
-            "assistant_text": assistant_text,
-            "visible_canonical_context": visible_canonical_context,
-            "frontdoor_canonical_context": durable_canonical_context,
-            "compression": compression,
-            "hydrated_tool_names": [
-                str(item or "").strip()
-                for item in list(getattr(self, "_frontdoor_hydrated_tool_names", []) or [])
-                if str(item or "").strip()
-            ],
-            "frontdoor_selection_debug": copy.deepcopy(getattr(self, "_frontdoor_selection_debug", None) or {}),
-            "frontdoor_actual_request_path": str(getattr(self, "_frontdoor_actual_request_path", "") or "").strip(),
-            "active_tool_observation": copy.deepcopy(getattr(self, "_latest_sidecar_tool_observation", None) or {}),
-        }
-        return snapshot
-
     def _cancel_assistant_stream_flush_task(self) -> None:
         task = self._assistant_stream_flush_task
         self._assistant_stream_flush_task = None
@@ -3090,10 +3059,6 @@ class RuntimeAgentSession:
         data = event_data if isinstance(event_data, dict) else {}
         tool_name = str(data.get("tool_name") or "").strip() or "tool"
         source = self._internal_prompt_source() or "user"
-        observation = dict(data.get("sidecar_observation") or {}) if isinstance(data.get("sidecar_observation"), dict) else {}
-        if observation:
-            observation["tool_name"] = str(observation.get("tool_name") or tool_name).strip() or tool_name
-            self._latest_sidecar_tool_observation = observation
 
         if kind == "tool_start":
             await self._flush_assistant_text_delta(force=True)
@@ -3137,8 +3102,6 @@ class RuntimeAgentSession:
                 return
             tool_name, call_id = self._resolve_completed_tool_call(tool_name, data)
             self._state.pending_tool_calls.discard(call_id)
-            if self._latest_sidecar_tool_observation and str(self._latest_sidecar_tool_observation.get("tool_name") or "").strip() == tool_name:
-                self._latest_sidecar_tool_observation = {}
             await self._emit(
                 "tool_execution_end",
                 tool_name=tool_name,
@@ -3191,8 +3154,6 @@ class RuntimeAgentSession:
                 return
             tool_name, call_id = self._resolve_completed_tool_call(tool_name, data)
             self._state.pending_tool_calls.discard(call_id)
-            if self._latest_sidecar_tool_observation and str(self._latest_sidecar_tool_observation.get("tool_name") or "").strip() == tool_name:
-                self._latest_sidecar_tool_observation = observation or {}
             error = StructuredError(
                 code="tool_error",
                 message=str(content or f"{tool_name} failed"),
