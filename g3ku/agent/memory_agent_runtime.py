@@ -4251,32 +4251,6 @@ class MemoryManager:
         await self._append_queue_request(request)
         return {"ok": True, "request_id": request.request_id, "status": "queued"}
 
-    async def enqueue_delete_request(
-        self,
-        *,
-        session_key: str,
-        decision_source: str,
-        payload_text: str,
-        trigger_source: str,
-    ) -> dict[str, Any]:
-        normalized_payload = str(payload_text or "").strip()
-        if not normalized_payload:
-            return {"ok": True, "status": "ignored", "reason": "empty_payload"}
-        request = MemoryQueueRequest(
-            op="delete",
-            decision_source=self._normalize_decision_source(decision_source),
-            payload_text=normalized_payload,
-            created_at=self._now_iso(),
-            session_key=str(session_key or "").strip(),
-            trigger_source=str(trigger_source or "").strip(),
-            request_id=self._request_id("delete"),
-        )
-        blocked, rule = scan_memory_candidate(request.payload_text)
-        if blocked:
-            return self._reject_blocked_candidate(request, rule)
-        await self._append_queue_request(request)
-        return {"ok": True, "request_id": request.request_id, "status": "queued"}
-
     async def enqueue_autonomous_review(
         self,
         *,

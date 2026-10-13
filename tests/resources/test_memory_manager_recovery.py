@@ -35,6 +35,30 @@ def _memory_cfg():
     return MemoryToolsConfig.model_validate(payload)
 
 
+def _seed_store(
+    manager,
+    rows: list[tuple[str, str, str]],
+    *,
+    now_iso: str,
+) -> None:
+    """Seed committed memory the way production does: sqlite first, mirror repainted.
+
+    Writing only `MEMORY.md` used to be enough because a divergent document was parsed
+    back into the store; that direction is gone, so tests must use the authoritative one.
+    """
+    manager._memory_repo.apply_mutation(
+        adds=[
+            {"id": memory_id, "content": text, "minimal_memory": text, "decision_source": source}
+            for memory_id, text, source in rows
+        ],
+        rewrites=None,
+        deletes=None,
+        inspired_memory_ids=None,
+        now_iso=now_iso,
+    )
+    manager._rebuild_memory_snapshot_from_sqlite(now_iso=now_iso)
+
+
 def _app_config(tmp_path: Path, *, memory_chain: list[str] | None) -> object:
     from g3ku.config.schema import Config
 
@@ -228,19 +252,12 @@ async def test_v2_run_due_batch_once_accepts_explicit_noop_reason_without_changi
     monkeypatch,
 ) -> None:
     module = _load_memory_agent_runtime_module()
-    markdown_memory = importlib.import_module("g3ku.agent.markdown_memory")
     manager = module.MemoryManager(tmp_path, _memory_cfg())
     try:
-        (tmp_path / "memory" / "MEMORY.md").write_text(
-            markdown_memory.format_memory_entry(
-                markdown_memory.MemoryEntry(
-                    memory_id="Ab12Z9",
-                    date_text="2026/4/18",
-                    source="user",
-                    summary="Prefer concise answers",
-                )
-            ),
-            encoding="utf-8",
+        _seed_store(
+            manager,
+            [("Ab12Z9", "Prefer concise answers", "user")],
+            now_iso="2026-04-18T09:00:00+08:00",
         )
         before_snapshot = manager.snapshot_text()
         await manager._append_queue_request(
@@ -296,19 +313,12 @@ async def test_v2_run_due_batch_once_applies_delete_batch_declared_already_satis
     monkeypatch,
 ) -> None:
     module = _load_memory_agent_runtime_module()
-    markdown_memory = importlib.import_module("g3ku.agent.markdown_memory")
     manager = module.MemoryManager(tmp_path, _memory_cfg())
     try:
-        (tmp_path / "memory" / "MEMORY.md").write_text(
-            markdown_memory.format_memory_entry(
-                markdown_memory.MemoryEntry(
-                    memory_id="Ab12Z9",
-                    date_text="2026/4/18",
-                    source="user",
-                    summary="人设已替换为新人设",
-                )
-            ),
-            encoding="utf-8",
+        _seed_store(
+            manager,
+            [("Ab12Z9", "人设已替换为新人设", "user")],
+            now_iso="2026-04-18T09:00:00+08:00",
         )
         before_snapshot = manager.snapshot_text()
         await manager._append_queue_request(
@@ -370,19 +380,12 @@ async def test_v2_delete_batch_noop_reason_is_repaired_in_band_before_it_costs_a
     monkeypatch,
 ) -> None:
     module = _load_memory_agent_runtime_module()
-    markdown_memory = importlib.import_module("g3ku.agent.markdown_memory")
     manager = module.MemoryManager(tmp_path, _memory_cfg())
     try:
-        (tmp_path / "memory" / "MEMORY.md").write_text(
-            markdown_memory.format_memory_entry(
-                markdown_memory.MemoryEntry(
-                    memory_id="Ab12Z9",
-                    date_text="2026/4/18",
-                    source="user",
-                    summary="人设已替换为新人设",
-                )
-            ),
-            encoding="utf-8",
+        _seed_store(
+            manager,
+            [("Ab12Z9", "人设已替换为新人设", "user")],
+            now_iso="2026-04-18T09:00:00+08:00",
         )
         before_snapshot = manager.snapshot_text()
         await manager._append_queue_request(
@@ -690,9 +693,10 @@ async def test_v2_run_due_batch_once_rewrite_preserves_id_and_source_but_refresh
     module = _load_memory_agent_runtime_module()
     manager = module.MemoryManager(tmp_path, _memory_cfg())
     try:
-        (tmp_path / "memory" / "MEMORY.md").write_text(
-            "---\nid:Ab12Z9\n2026/4/17-user：\nPrefer concise answers\n",
-            encoding="utf-8",
+        _seed_store(
+            manager,
+            [("Ab12Z9", "Prefer concise answers", "user")],
+            now_iso="2026-04-17T09:00:00+08:00",
         )
         await manager._append_queue_request(
             module.MemoryQueueRequest(
@@ -751,12 +755,13 @@ async def test_v2_run_due_batch_once_delete_batch_removes_memory_by_id(tmp_path:
     module = _load_memory_agent_runtime_module()
     manager = module.MemoryManager(tmp_path, _memory_cfg())
     try:
-        (tmp_path / "memory" / "MEMORY.md").write_text(
-            (
-                "---\nid:Ab12Z9\n2026/4/17-user：\nPrefer concise answers\n"
-                "---\nid:Cd34Ef\n2026/4/17-self：\nReport total elapsed time\n"
-            ),
-            encoding="utf-8",
+        _seed_store(
+            manager,
+            [
+                ("Ab12Z9", "Prefer concise answers", "user"),
+                ("Cd34Ef", "Report total elapsed time", "self"),
+            ],
+            now_iso="2026-04-17T09:00:00+08:00",
         )
         await manager._append_queue_request(
             module.MemoryQueueRequest(

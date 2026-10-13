@@ -575,10 +575,10 @@ def test_compact_schema_internal_execution_tools_expose_shorter_model_visible_co
     ]
 
 
-def test_compact_schema_memory_write_manifest_keeps_authoritative_schema_and_moves_guidance_to_toolskill() -> None:
+def test_compact_schema_memory_update_manifest_keeps_authoritative_schema_and_moves_guidance_to_toolskill() -> None:
     repo_root = Path(__file__).resolve().parents[2]
-    manifest = yaml.safe_load((repo_root / "tools" / "memory_write" / "resource.yaml").read_text(encoding="utf-8")) or {}
-    toolskill = (repo_root / "tools" / "memory_write" / "toolskills" / "SKILL.md").read_text(encoding="utf-8")
+    manifest = yaml.safe_load((repo_root / "tools" / "memory_update" / "resource.yaml").read_text(encoding="utf-8")) or {}
+    toolskill = (repo_root / "tools" / "memory_update" / "toolskills" / "SKILL.md").read_text(encoding="utf-8")
     content_schema = (
         manifest.get("parameters", {})
         .get("properties", {})
@@ -587,7 +587,7 @@ def test_compact_schema_memory_write_manifest_keeps_authoritative_schema_and_mov
 
     assert content_schema["type"] == "string"
     assert "queue for the memory agent" in str(content_schema.get("description") or "")
-    assert "raw memory candidate" in toolskill.lower()
+    assert "raw memory request" in toolskill.lower()
     assert "memory agent will decide the final compact `MEMORY.md` wording" in toolskill
 
 
@@ -595,14 +595,14 @@ def test_compact_schema_resource_tool_uses_manifest_model_visible_overrides(tmp_
     workspace = tmp_path / "workspace"
     (workspace / "skills").mkdir(parents=True, exist_ok=True)
     (workspace / "tools").mkdir(parents=True, exist_ok=True)
-    source_root = Path(__file__).resolve().parents[2] / "tools" / "memory_write"
-    target_root = workspace / "tools" / "memory_write"
+    source_root = Path(__file__).resolve().parents[2] / "tools" / "memory_update"
+    target_root = workspace / "tools" / "memory_update"
     import shutil
     shutil.copytree(source_root, target_root)
 
     registry = ResourceRegistry(workspace, skills_dir=workspace / "skills", tools_dir=workspace / "tools")
     snapshot = registry.discover()
-    descriptor = snapshot.tools["memory_write"]
+    descriptor = snapshot.tools["memory_update"]
     tool = ResourceLoader(workspace).load_tool(
         descriptor,
         services={"memory_manager": SimpleNamespace()},
@@ -612,7 +612,7 @@ def test_compact_schema_resource_tool_uses_manifest_model_visible_overrides(tmp_
     schema = tool.to_model_schema()["function"]
     content_schema = schema["parameters"]["properties"]["content"]
 
-    assert schema["description"].startswith("Queue a durable long-term memory write request.")
+    assert schema["description"].startswith("Queue a durable long-term memory request in natural language.")
     assert content_schema["type"] == "string"
     assert "queue for the memory agent" in str(content_schema.get("description") or "")
 
@@ -901,7 +901,7 @@ async def test_execution_first_turn_does_not_emit_all_visible_tool_schemas(tmp_p
             'l1': 'Inspect files',
         },
         {
-            'tool_id': 'memory_write',
+            'tool_id': 'memory_update',
             'display_name': 'Memory Write',
             'description': 'Write memory facts',
             'l0': 'Write memory facts',
@@ -922,7 +922,7 @@ async def test_execution_first_turn_does_not_emit_all_visible_tool_schemas(tmp_p
                 authoritative_description='filesystem stat authoritative schema',
                 model_description='filesystem stat compact model schema',
             ),
-            'memory_write': _LargeModelSchemaTool(name='memory_write'),
+            'memory_update': _LargeModelSchemaTool(name='memory_update'),
             'stop_tool_execution': _StageProtocolNoopTool('stop_tool_execution'),
             'submit_next_stage': _StageProtocolNoopTool('submit_next_stage'),
             'submit_final_result': _submit_final_result_tool(),
@@ -945,7 +945,7 @@ async def test_execution_first_turn_does_not_emit_all_visible_tool_schemas(tmp_p
 
     assert emitted_tool_names == [
         'filesystem_stat',
-        'memory_write',
+        'memory_update',
         'stop_tool_execution',
         'submit_next_stage',
         'submit_final_result',
@@ -1070,7 +1070,7 @@ async def test_execution_root_replay_semantic_selection_includes_split_tools_wit
             'l1': 'Inspect content',
         },
         {
-            'tool_id': 'memory_write',
+            'tool_id': 'memory_update',
             'display_name': 'Memory',
             'description': 'Write memory facts',
             'l0': 'Write memory facts',
@@ -1100,7 +1100,7 @@ async def test_execution_root_replay_semantic_selection_includes_split_tools_wit
             ),
             'content_search': _LargeModelSchemaTool(name='content_search'),
             'content_open': _LargeModelSchemaTool(name='content_open'),
-            'memory_write': _LargeModelSchemaTool(name='memory_write'),
+            'memory_update': _LargeModelSchemaTool(name='memory_update'),
             'load_tool_context_v2': _ModelSchemaRecordingTool(
                 name='load_tool_context_v2',
                 authoritative_description='load tool context authoritative schema',
@@ -1138,7 +1138,7 @@ async def test_execution_root_replay_semantic_selection_includes_split_tools_wit
     assert 'content_describe' in emitted_tool_names
     assert 'content_search' in emitted_tool_names
     assert 'content_open' in emitted_tool_names
-    assert 'memory_write' in emitted_tool_names
+    assert 'memory_update' in emitted_tool_names
 
 
 @pytest.mark.asyncio
@@ -1213,8 +1213,8 @@ def test_execution_selector_uses_stable_visible_tool_order_independent_of_iterat
             authoritative_description='filesystem stat authoritative schema',
             model_description='filesystem stat compact model schema ' + ('F' * 1200),
         ),
-        'memory_write': _ModelSchemaRecordingTool(
-            name='memory_write',
+        'memory_update': _ModelSchemaRecordingTool(
+            name='memory_update',
             authoritative_description='memory write authoritative schema',
             model_description='memory write compact model schema ' + ('M' * 800),
         ),
@@ -1250,7 +1250,7 @@ def test_execution_selector_uses_stable_visible_tool_order_independent_of_iterat
                 'l1': 'Inspect files',
             },
             {
-                'tool_id': 'memory_write',
+                'tool_id': 'memory_update',
                 'display_name': 'Memory Write',
                 'description': 'Write memory facts',
                 'l0': 'Write memory facts',
@@ -1261,7 +1261,7 @@ def test_execution_selector_uses_stable_visible_tool_order_independent_of_iterat
     memory_first = _service_for(
         [
             {
-                'tool_id': 'memory_write',
+                'tool_id': 'memory_update',
                 'display_name': 'Memory Write',
                 'description': 'Write memory facts',
                 'l0': 'Write memory facts',

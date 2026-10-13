@@ -258,12 +258,12 @@ test("renderTools hides tools the agent cannot see instead of hiding single acti
     const { S, U, renderTools } = loadResources();
     S.tools = [
         toolRecord({
-            tool_id: "memory_write",
-            display_name: "Write Memory",
-            description: "Write explicit permanent memory items.",
+            tool_id: "memory_update",
+            display_name: "Update Memory",
+            description: "Queue natural-language memory requests.",
             risk_level: "medium",
             allowed_roles: ["ceo"],
-            source_path: "tools/memory_write",
+            source_path: "tools/memory_update",
         }),
         // 旧形状里被 hideToolAdminAction(memory, runtime) 藏起来的 action，
         // 现在整条工具记录就是隐藏的：agent_visible 是唯一规则。
@@ -281,7 +281,7 @@ test("renderTools hides tools the agent cannot see instead of hiding single acti
     renderTools();
 
     assert.equal(U.toolList.children.length, 1);
-    assert.match(U.toolList.children[0].innerHTML, /Write Memory/);
+    assert.match(U.toolList.children[0].innerHTML, /Update Memory/);
     assert.doesNotMatch(U.toolList.children[0].innerHTML, /Memory Runtime/);
 
     // 搜索、风险、状态筛选都不能把隐藏工具放回列表。

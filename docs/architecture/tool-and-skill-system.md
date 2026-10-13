@@ -146,12 +146,12 @@ CEO/frontdoor 另有任务生命周期与分发控制类固定工具。治理记
 
 exec 与 memory 工具：
 
-- 部分工具同时是资源支撑与固定内置（CEO 的 `exec` / `memory_write` / `memory_delete` / `memory_note`，节点的 `exec` / loader tools），通过 fixed-builtin 路径直接可调用。
+- 部分工具同时是资源支撑与固定内置（CEO 的 `exec` / `memory_update` / `memory_note`，节点的 `exec` / loader tools），通过 fixed-builtin 路径直接可调用。
 - `exec` 除 RBAC 外还有一条契约轴：surfaced 工具 `exec` 可携带持久化 `metadata.execution_mode`；`governed` 保留 exec 侧守卫，`full_access` 移除 exec 侧 read-only / 路径 / 安全检查，但不绕过 Tool Admin 启用状态与 RBAC。当前模式的权威暴露位置是运行时工具合同 / `load_tool_context` payload。governed 内部分两层：**路径监禁层**（temp/系统路径策略与工作区边界）永不可豁免；**命令形态层**（只读约束 + 破坏性命令黑名单，黑名单默认开启）命中后有两条放行通道——命令白名单豁免（归一化锚定模板匹配，作用域 all/ceo/tasks）或操作者审批（管理端 `/resources/tools/exec-*` 端点裁决；审批请求持久化于 governance sqlite，执行进程轮询等待、web 管理台裁决，天然跨进程；等待到期自动拒绝，时长可配置，近窗连续未获批的同命令快速拒绝防刷屏）。白名单与审批的裁决权只在管理端，模型侧无任何自我豁免参数。**另有不可绕过的宿主进程完整性边界**：`exec` 在进入 execution mode、白名单和审批判定之前，拒绝常见的进程终止表达（PowerShell `Stop-Process`/`Spps`、Windows `taskkill`、POSIX `pkill`/`killall`/`kill`、Python `os.kill`/`signal.kill`，以及 WMI/CIM terminate/delete 等）；该边界在 `full_access`、白名单和审批下仍生效。只读 `Get-Process` / `ps` 等检查允许。它是命令形态防护，不是 OS 沙箱；允许任意 native code、动态解码或外部二进制时，仍必须用独立 worker/container/低权限账户隔离。`exec` 自己启动的子进程应通过 `timeout_seconds`、任务 pause/cancel 或进程树收尾机制清理，不应让任务按 PID/名称清理宿主。
 - `exec` 是发现/探测工具（目录结构、文件名搜索、环境检查）；具体本地文件正文证据应来自 `content_open(path=..., start_line, end_line)`。`exec` 长输出的 agent-facing payload 是有界流式捕获：`head_preview` + `tail_preview` + 截断/捕获字节元数据，供排查“关键结果在命令末尾”的场景；普通结果没有稳定的 `stdout_ref` / `stderr_ref`，不应期待隐藏全量输出 ref。节点反复用 `exec` 提取源码片段时，应把引导转向 `content_open(path)`。
 - `exec` 解码子进程 stdout/stderr 优先 UTF-8，Windows 上先回退宿主首选代码页再替换字节；Windows 子进程 Python 命令注入 `PYTHONIOENCODING=utf-8`（只稳定 Python traceback / `print()` 输出，不改变 RBAC 或 `execution_mode`）；文件系统校验命令等子进程车道共用同一输出解码 helper——某条 Windows 路径仍乱码时，先确认它是否走了共享 subprocess-text helper。
 - committed 长期记忆通过注入的 `MEMORY.md` 快照交付（display-only：剥离 memory id 与日期/来源头，只保留以 `---` 分隔的记忆文本块）；agent-facing 契约没有记忆检索工具，`memory_note(ref)` 是唯一的按需详细记忆加载器。节点执行/验收路径不注入额外记忆检索块。
-- `memory_write` / `memory_delete` 是 queue-submit 工具：只请求记忆运行时稍后批处理，不在当前轮同步改写 committed 记忆；`memory_delete(content=...)` 接受对要遗忘内容的自然语言描述。实际改写/删除决策委托给带受限工具面的内部记忆 agent（不属于常规 agent-facing 目录，也不按 surfaced Tool Admin family 排查）；它把描述解析成具体 SQLite id，并可能就实质影响该批次的行报告 `inspired_memory_ids`。
+- `memory_update` 是 CEO 唯一的记忆写入口，也是唯一的 queue-submit 记忆工具：`memory_update(content=...)` 收自然语言（要记住、要修改、还是要忘记都写在这里），只请求记忆运行时稍后批处理，不在当前轮同步改写 committed 记忆，也不传记忆 id。实际改写/删除决策委托给带受限工具面的内部记忆 agent（不属于常规 agent-facing 目录，也不按 surfaced Tool Admin family 排查）；它把描述解析成具体 SQLite id，并可能就实质影响该批次的行报告 `inspired_memory_ids`。
 
 状态与显示层：
 

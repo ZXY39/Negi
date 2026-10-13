@@ -612,7 +612,7 @@ Operator debugging order for a stuck queue head:
 Operator debugging order for duplicated successful memory writes:
 
 1. Compare `memory/ops.jsonl` rows by `request_id`, not only by `batch_id`.
-2. If the same `request_id` appears in two successful processed rows, treat that as duplicate consumption of one queue request rather than proof that the frontdoor called `memory_write` twice.
+2. If the same `request_id` appears in two successful processed rows, treat that as duplicate consumption of one queue request rather than proof that the frontdoor called `memory_update` twice.
 3. Inspect live `python -m g3ku web` / `python -m g3ku worker` processes and verify only one runtime instance should be actively consuming the memory queue.
 4. If multiple runtimes were active, treat duplicate rows as historical worker-contention evidence first, then inspect whether the current build already has the memory-worker lease and processed-request dedupe protections.
 

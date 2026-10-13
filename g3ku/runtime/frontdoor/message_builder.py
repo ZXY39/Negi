@@ -339,7 +339,7 @@ class CeoMessageBuilder:
             [
                 MEMORY_WRITE_HINT_HEADER,
                 f'- 当前用户回合很可能在请求写入长期记忆（命中词：{terms}）。',
-                '- 如果这是稳定的身份、偏好、约束、默认值、回避规则、工作流规则或项目长期事实，请在回复前调用 `memory_write`。',
+                '- 如果这是稳定的身份、偏好、约束、默认值、回避规则、工作流规则或项目长期事实，请在回复前调用 `memory_update`。',
                 '- 不要把临时任务状态、猜测或未经确认的推断写入永久记忆。',
             ]
         )
@@ -1500,7 +1500,7 @@ class CeoMessageBuilder:
             visible_tool_names=visible_tool_names,
         )
 
-        memory_write_visible = 'memory_write' in {
+        memory_write_visible = 'memory_update' in {
             str(name or '').strip()
             for name in visible_tool_names
             if str(name or '').strip()

@@ -799,7 +799,7 @@ def test_ceo_frontdoor_approval_request_uses_dynamic_governance_risk_map() -> No
             captured["session_id"] = session_id
             return {
                 "exec": "high",
-                "memory_write": "medium",
+                "memory_update": "medium",
             }
 
     runner = CeoFrontDoorRunner(loop=SimpleNamespace(main_task_service=_Service()))
@@ -808,7 +808,7 @@ def test_ceo_frontdoor_approval_request_uses_dynamic_governance_risk_map() -> No
         [
             {"id": "call-low-1", "name": "content_open", "arguments": {"path": "/tmp/a"}},
             {"id": "call-risk-1", "name": "exec", "arguments": {"command": "echo hi"}},
-            {"id": "call-risk-2", "name": "memory_write", "arguments": {"content": "remember this"}},
+            {"id": "call-risk-2", "name": "memory_update", "arguments": {"content": "remember this"}},
         ],
         session_key="web:ceo-dynamic",
     )
@@ -825,7 +825,7 @@ def test_ceo_frontdoor_approval_request_uses_dynamic_governance_risk_map() -> No
         "tool_calls": [
             {"id": "call-low-1", "name": "content_open", "arguments": {"path": "/tmp/a"}},
             {"id": "call-risk-1", "name": "exec", "arguments": {"command": "echo hi"}},
-            {"id": "call-risk-2", "name": "memory_write", "arguments": {"content": "remember this"}},
+            {"id": "call-risk-2", "name": "memory_update", "arguments": {"content": "remember this"}},
         ],
         "review_items": [
             {
@@ -836,7 +836,7 @@ def test_ceo_frontdoor_approval_request_uses_dynamic_governance_risk_map() -> No
             },
             {
                 "tool_call_id": "call-risk-2",
-                "name": "memory_write",
+                "name": "memory_update",
                 "risk_level": "medium",
                 "arguments": {"content": "remember this"},
             },
@@ -2488,7 +2488,7 @@ async def test_graph_finalize_turn_completes_active_frontdoor_stage_for_direct_r
                                 "round_index": 1,
                                 "created_at": "2026-04-09T13:46:36+08:00",
                                 "budget_counted": True,
-                                "tool_names": ["memory_write"],
+                                "tool_names": ["memory_update"],
                                 "tool_call_ids": ["call-1"],
                             }
                         ],

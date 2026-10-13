@@ -19,9 +19,8 @@
 
 ## 如何写入或删除长期记忆
 
-- 需要让系统记住稳定偏好、长期规则、身份信息或项目事实时，调用 `memory_write(content=...)`。
-- 需要删除当前快照里已经可见的旧记忆时，调用 `memory_delete(target_text=...)`。
-- `memory_write` 和 `memory_delete` 都只是入队请求，不会在当前轮同步改写 `MEMORY.md`。
+- 需要让系统记住稳定偏好、长期规则、身份信息或项目事实，或修改、忘记已展示的某条记忆时，调用 `memory_update(content=...)`，用自然语言写清要改什么。
+- `memory_update` 只是入队请求，不会在当前轮同步改写 `MEMORY.md`；由内部记忆 agent 决定它最终成为新增、改写还是删除。
 
 ## 使用原则
 

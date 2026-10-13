@@ -1,4 +1,4 @@
-"""Queued tool for explicit long-term memory writes."""
+"""Queued tool for natural-language long-term memory requests."""
 
 from __future__ import annotations
 
@@ -8,8 +8,8 @@ from typing import Any
 from g3ku.agent.tools.base import Tool
 
 
-class MemoryWriteTool(Tool):
-    """Queue explicit durable memory write requests for the CEO agent."""
+class MemoryUpdateTool(Tool):
+    """Queue a durable memory request for the CEO agent."""
 
     # 内部入队工具、瞬时完成：不向模型暴露统一 timeout_seconds 参数。
     hide_universal_timeout_parameter = True
@@ -19,14 +19,16 @@ class MemoryWriteTool(Tool):
 
     @property
     def name(self) -> str:
-        return "memory_write"
+        return "memory_update"
 
     @property
     def description(self) -> str:
         return (
-            "Queue a durable long-term memory write request.\n"
-            "Use this when the user explicitly asks the system to remember a stable rule, preference, identity detail, "
-            "default, constraint, or project fact.\n"
+            "Queue a durable long-term memory request in natural language.\n"
+            "Use this when the user explicitly asks the system to remember, revise, or forget a stable rule, "
+            "preference, identity detail, default, constraint, or project fact.\n"
+            "State what should change; a memory agent decides whether that becomes a new item, a rewrite of an "
+            "existing one, or a deletion.\n"
             "Do not use this for temporary execution state or speculative guesses."
         )
 
@@ -37,7 +39,10 @@ class MemoryWriteTool(Tool):
             "properties": {
                 "content": {
                     "type": "string",
-                    "description": "Raw memory candidate text to queue for the memory agent.",
+                    "description": (
+                        "Natural-language memory request to queue for the memory agent: "
+                        "what to remember, revise, or forget."
+                    ),
                 }
             },
             "required": ["content"],
@@ -61,6 +66,6 @@ class MemoryWriteTool(Tool):
             session_key=session_key,
             decision_source="user",
             payload_text=str(content or "").strip(),
-            trigger_source="memory_write_tool",
+            trigger_source="memory_update_tool",
         )
         return json.dumps(result, ensure_ascii=False)
