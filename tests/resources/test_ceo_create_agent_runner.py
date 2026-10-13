@@ -5376,7 +5376,7 @@ def test_frontdoor_send_preflight_snapshot_rejects_content_open_image_overlay_wi
         ],
     }
 
-    with pytest.raises(ceo_runtime_ops.FrontdoorCompressionRuntimeError, match="非多模态模型无法打开图片"):
+    with pytest.raises(ceo_runtime_ops.FrontdoorCompressionRuntimeError, match="没有勾选多模态能力因此无法打开图片"):
         runner._frontdoor_send_preflight_snapshot(
             state=state,
             runtime=SimpleNamespace(context=SimpleNamespace(session=None, session_key="web:shared")),
@@ -5432,8 +5432,8 @@ def test_frontdoor_build_tool_runtime_context_includes_image_multimodal_enabled(
     monkeypatch.setattr(runner, "_session_task_defaults", lambda runtime_session: {})
     monkeypatch.setattr(
         runner,
-        "_ceo_image_multimodal_enabled_for_model_refs",
-        lambda refs: list(refs or []) == ["ceo_primary"],
+        "_ceo_image_multimodal_for_request",
+        lambda refs: (list(refs or []) == ["ceo_primary"], "ceo_primary"),
     )
 
     context = runner._build_tool_runtime_context(

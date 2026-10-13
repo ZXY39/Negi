@@ -183,6 +183,56 @@ def test_frontdoor_choke_degrades_image_blocks_for_a_text_only_head() -> None:
     assert "当前模型配置名称是(链尾纯文本)" in joined
 
 
+def test_frontdoor_choke_reuses_attachment_note_paths_instead_of_inline_placeholder() -> None:
+    """渠道／MCP 的图块只带 data: URL，落盘路径在同一条消息的附件说明行里：降级要留真路径。
+
+    留 `(inline)` 等于告诉模型"这张图无处可取"，而它上一行就写着 local path。
+    """
+    runner = object.__new__(CeoFrontDoorRuntimeOps)
+    runner._ceo_image_multimodal_for_request = lambda refs: (False, "链尾纯文本")
+    note = (
+        "这张图里是什么\n\nChannel attachments:\n"
+        "- image: a.png (local path: .g3ku/external-uploads/s1/a.png)\n"
+        "- image: b.jpg (local path: .g3ku/external-uploads/s1/b.jpg)\n"
+        "You may inspect the local file paths or URLs above when helpful."
+    )
+    content = [
+        {"type": "text", "text": note},
+        {"type": "image_url", "image_url": {"url": "data:image/png;base64,AAAA"}},
+        {"type": "image_url", "image_url": {"url": "data:image/jpeg;base64,BBBB"}},
+    ]
+
+    degraded = runner._degrade_image_content_for_request(content, model_refs=["m_tail"])
+
+    joined = "\n".join(str(block.get("text") or "") for block in degraded)
+    assert ".g3ku/external-uploads/s1/a.png" in joined
+    assert ".g3ku/external-uploads/s1/b.jpg" in joined
+    assert image_capability_module.INLINE_IMAGE_PATH_PLACEHOLDER not in joined
+
+
+def test_frontdoor_choke_keeps_placeholder_when_paths_do_not_line_up() -> None:
+    """路径行与图块条数对不上时不猜配对：宁可留占位，也不把 A 的路径配给 B。"""
+    runner = object.__new__(CeoFrontDoorRuntimeOps)
+    runner._ceo_image_multimodal_for_request = lambda refs: (False, "链尾纯文本")
+    content = [
+        {
+            "type": "text",
+            "text": (
+                "Channel attachments:\n"
+                "- image: a.png (local path: .g3ku/external-uploads/s1/a.png)\n"
+                "- file: notes.txt (local path: .g3ku/external-uploads/s1/notes.txt)"
+            ),
+        },
+        {"type": "image_url", "image_url": {"url": "data:image/png;base64,AAAA"}},
+        {"type": "image_url", "image_url": {"url": "data:image/png;base64,BBBB"}},
+    ]
+
+    degraded = runner._degrade_image_content_for_request(content, model_refs=["m_tail"])
+
+    joined = "\n".join(str(block.get("text") or "") for block in degraded)
+    assert joined.count(image_capability_module.INLINE_IMAGE_PATH_PLACEHOLDER) == 2
+
+
 def test_frontdoor_choke_leaves_blocks_alone_when_head_sees_images() -> None:
     runner = object.__new__(CeoFrontDoorRuntimeOps)
     runner._ceo_image_multimodal_for_request = lambda refs: (True, "链首多模态")

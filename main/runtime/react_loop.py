@@ -31,8 +31,11 @@ from g3ku.runtime.tool_error_guidance import (
 )
 from g3ku.runtime.tool_result_status import is_error_like_tool_result
 from g3ku.runtime.chunk_compression_plan import (
-    ChunkPlanRefusal,
-    plan_chunk_groups,
+    CHUNK_MAX_CHUNKS,
+    COMPRESSION_MAX_PASS_ROUNDS,
+    COMPRESSION_MODE_CHUNKED,
+    CompressionPass,
+    plan_compression_pass,
 )
 from g3ku.runtime.stage_prompt_compaction import (
     STAGE_ARCHIVE_HEADING,
@@ -62,6 +65,7 @@ from g3ku.runtime.tool_history import (
     analyze_tool_call_history,
     extract_call_id,
     iter_compaction_atomic_groups,
+    truncate_group_head_tail,
 )
 from g3ku.runtime.tool_watchdog import (
     actor_role_allows_watchdog,
@@ -5429,7 +5433,7 @@ class ReActToolLoop:
 
     @staticmethod
     def _compression_failure_reason(helper_call: dict[str, Any]) -> str:
-        """压缩没拿到产物时的原因文本：分块全失败、单发空包、provider 原话各自分开。
+        """压缩没拿到产物时的原因文本：分块一块都没收下、单发空包、provider 原话各自分开。
 
         限流与"模型真的回空包"处置不同（前者等一等就好，后者是回包形态故障），
         所以有 error_text 就必须把它原话带进原因，不能一律写成 empty summary。
@@ -5440,15 +5444,17 @@ class ReActToolLoop:
             # 规划器给的拒因本身已带 `token compression skipped:` 前缀，不再叠一层。
             return refused
         chunk_total = int(payload.get('chunk_count') or 0)
-        chunk_failed = int(payload.get('chunk_failed_count') or 0)
+        chunk_committed = int(payload.get('chunk_committed_count') or 0)
         provider_error = str(
             payload.get('chunk_error_text') or payload.get('helper_error_text') or ''
         ).strip()
         quoted_error = f": {provider_error}" if provider_error else ""
-        if chunk_total and chunk_failed >= chunk_total:
+        if chunk_total and chunk_committed == 0 and str(payload.get('compression_mode') or '') == 'llm_chunked':
+            # 分块按"最长成功前缀"提交：第一块就空 ⇒ 整次 pass 没收下任何一块。
+            # 报"empty summary"会让人以为还能等到产物，而这里明确是一块都没有。
             return (
                 f"token compression produced no summary in any chunk "
-                f"({chunk_failed}/{chunk_total} chunks failed)"
+                f"(0/{chunk_total} chunks committed)"
                 f"{quoted_error}"
             )
         return (
@@ -5837,6 +5843,7 @@ class ReActToolLoop:
         compressed_text: str = "",
         recent_tail_count: int = _NODE_TOKEN_COMPACTION_RECENT_TAIL_COUNT,
         stage_archive: dict[str, Any] | None = None,
+        preserved_raw_messages: list[dict[str, Any]] | None = None,
     ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
         parts = cls._split_request_messages_for_token_compaction(
             request_messages=request_messages,
@@ -5845,6 +5852,7 @@ class ReActToolLoop:
         if not any(list(parts.get(key) or []) for key in parts):
             return [], {}
 
+        raw_leftover = [dict(item) for item in list(preserved_raw_messages or []) if isinstance(item, dict)]
         compacted_payload = {
             "kind": "node_token_compaction_llm" if str(compressed_text or "").strip() else "node_send_token_compaction",
             "node_id": str(node_id or "").strip(),
@@ -5854,6 +5862,10 @@ class ReActToolLoop:
             "contract_message_count": len(list(parts.get("contract_tail") or [])),
             "append_notice_tail_count": len(list(parts.get("append_notice_tail") or [])),
         }
+        if raw_leftover:
+            # 分块没压中的原始历史留在请求体里，条数进块元数据：下一跳的规划器按"还没压
+            # 的原子组"重算，靠的就是这部分仍然在场。
+            compacted_payload["retained_raw_message_count"] = len(raw_leftover)
         if dict(stage_archive or {}).get("ref"):
             compacted_payload["stage_archive"] = dict(stage_archive)
         summary_text = str(compressed_text or "").strip()
@@ -5871,6 +5883,7 @@ class ReActToolLoop:
             *list(parts.get("bootstrap_user") or []),
             *list(parts.get("append_notice_tail") or []),
             compacted_block,
+            *raw_leftover,
             *cls._bound_node_compaction_tail_messages(parts.get("recent_tail")),
             *list(parts.get("contract_tail") or []),
             *list(parts.get("trailing_note") or []),
@@ -5986,6 +5999,55 @@ class ReActToolLoop:
         except Exception:
             return 0
 
+    def _node_plan_token_compression_pass(
+        self,
+        *,
+        grouped_history: list[tuple[list[dict[str, Any]], int]],
+        single_shot_request_tokens: int,
+        context_window_tokens: int,
+        observed_span_tokens: int,
+    ) -> CompressionPass:
+        """完整压缩 / 分块压缩在节点侧的唯一判定口（与前门车道同一个规划器）。
+
+        信封取**实测**的单发请求体非历史部分（前缀 + 通知尾 + 指令），不用合成的
+        "system + 空 user"：append-only 压缩请求真的把整段前缀发了一遍，记小了会让
+        判据在窗口边缘偏乐观，造出一发发不出去的请求。
+        """
+        counts = [int(tokens or 0) for _group, tokens in list(grouped_history or [])]
+        history_tokens = sum(counts)
+        envelope_tokens = max(0, int(single_shot_request_tokens or 0) - history_tokens)
+        return plan_compression_pass(
+            counts,
+            estimated_total_tokens=int(single_shot_request_tokens or 0),
+            trigger_tokens=0,
+            context_window_tokens=int(context_window_tokens or 0),
+            envelope_tokens=envelope_tokens,
+            observed_span_tokens=int(observed_span_tokens or 0),
+            single_shot_tokens=int(single_shot_request_tokens or 0),
+        )
+
+    def _fit_node_chunk_to_capacity(
+        self,
+        chunk: list[dict[str, Any]],
+        *,
+        capacity_tokens: int,
+    ) -> list[dict[str, Any]]:
+        """一颗原子组单独超过块容量时，把头尾各留一段直到装得下（最多收 3 次）。
+
+        不可分的是"组"而不是"正文"：工具调用与它的结果必须同块，结果正文可以截。
+        收到 0.216 还装不下就照原样发——那时超的是 provider 的宽容度，不是算错的容量。
+        """
+        records = list(chunk or [])
+        if capacity_tokens <= 0:
+            return records
+        for keep_ratio in (0.6, 0.36, 0.216):
+            if self._estimate_node_compression_message_tokens(records) <= capacity_tokens:
+                break
+            records, changed = truncate_group_head_tail(records, keep_ratio=keep_ratio)
+            if not changed:
+                break
+        return records
+
     async def _request_node_token_compression_summary(
         self,
         *,
@@ -6065,7 +6127,25 @@ class ReActToolLoop:
         ]
         single_shot_tokens = self._estimate_node_compression_message_tokens(single_shot_messages)
         window = int(context_window_tokens or 0)
-        if window > 0 and single_shot_tokens > window:
+        grouped_history = [
+            (list(group), self._estimate_node_compression_message_tokens(group))
+            for group in iter_compaction_atomic_groups(older_history_messages)
+        ]
+        compression_pass = self._node_plan_token_compression_pass(
+            grouped_history=grouped_history,
+            single_shot_request_tokens=single_shot_tokens,
+            context_window_tokens=window,
+            observed_span_tokens=self._node_observed_request_span_tokens(task_id, node_id),
+        )
+        helper_payload["capacity_tokens"] = int(compression_pass.capacity_tokens or 0)
+        helper_payload["capacity_source"] = str(compression_pass.capacity_source or "")
+        helper_payload["truncation_group_count"] = len(list(compression_pass.truncation_group_indexes or []))
+        if compression_pass.refusal is not None:
+            # 窗口连一块压缩请求的信封都装不下：这一 pass 一次都不发，交回拒因由调用方
+            # 按压缩失败处理（可恢复暂停 + 心跳点名）。
+            helper_payload["chunk_refused_reason"] = str(compression_pass.refusal.reason or "")
+            return "", helper_payload
+        if compression_pass.mode == COMPRESSION_MODE_CHUNKED:
             helper_payload["compression_mode"] = "llm_chunked"
             (
                 compressed_text,
@@ -6073,32 +6153,33 @@ class ReActToolLoop:
                 merge_pass_applied,
                 failed_indexes,
                 chunk_error_text,
-                chunk_refused_reason,
+                pass_rounds,
+                deferred_messages,
+                committed_chunks,
             ) = await self._chunked_node_compression_summary(
                 task_id=str(task_id or ''),
                 node_id=str(node_id or ''),
                 task_goal=task_goal,
-                system_prefix=system_prefix,
-                bootstrap_user=bootstrap_user,
-                append_notice_tail=append_notice_tail,
-                older_history_messages=older_history_messages,
+                grouped_history=grouped_history,
+                compression_pass=compression_pass,
                 model_refs=list(model_refs or []),
-                context_window_tokens=window,
-                observed_span_tokens=self._node_observed_request_span_tokens(task_id, node_id),
             )
             helper_payload["chunk_count"] = int(chunk_count or 1)
+            helper_payload["chunk_committed_count"] = int(committed_chunks or 0)
             helper_payload["merge_pass_applied"] = bool(merge_pass_applied)
             helper_payload["chunk_failed_indexes"] = list(failed_indexes or [])
             helper_payload["chunk_failed_count"] = len(list(failed_indexes or []))
+            helper_payload["compression_pass_rounds"] = int(pass_rounds or 1)
+            helper_payload["deferred_message_count"] = len(list(deferred_messages or []))
             if str(chunk_error_text or '').strip():
                 helper_payload["chunk_error_text"] = str(chunk_error_text or '').strip()
-            if str(chunk_refused_reason or '').strip():
-                helper_payload["chunk_refused_reason"] = str(chunk_refused_reason or '').strip()
-                return "", helper_payload
-            if int(chunk_count or 0) > 0 and helper_payload["chunk_failed_count"] >= int(chunk_count or 0):
-                # 全部块都没拿到摘要：产物只剩缺口标签，不能当压缩结果发出去。
+            if not str(compressed_text or '').strip():
+                # 连第一段前缀都没压出来：产物只剩缺口，不能当压缩结果发出去。
                 # 交回空串，由调用方按压缩失败拒发（可恢复暂停）。
                 return "", helper_payload
+            # 没压中的原始历史跟着摘要一起交回：调用方重写请求体时把它们留在摘要块之后，
+            # 否则"压缩成功"等于把这几组内容静默删掉。
+            helper_payload["deferred_raw_messages"] = list(deferred_messages or [])
             return compressed_text, helper_payload
         response = await self._node_compression_helper_call(
             messages=single_shot_messages,
@@ -6186,85 +6267,90 @@ class ReActToolLoop:
         task_id: str = '',
         node_id: str = '',
         task_goal: str,
-        system_prefix: list[dict[str, Any]],
-        bootstrap_user: list[dict[str, Any]],
-        append_notice_tail: list[dict[str, Any]],
-        older_history_messages: list[dict[str, Any]],
+        grouped_history: list[tuple[list[dict[str, Any]], int]],
+        compression_pass: CompressionPass,
         model_refs: list[str],
-        context_window_tokens: int,
-        observed_span_tokens: int = 0,
-    ) -> tuple[str, int, bool, list[int], str, str]:
-        """节点超窗分块压缩：单块容量由 `chunk_compression_plan` 从声明窗口与该节点
-        实测请求跨度推导（没有目标次数），按原子组（工具调用组不可分）贪心装箱，
-        逐块生成任务目标针对型摘要，拼为带块标号的单一摘要；合并后仍超容量时做且仅
-        做一次归并。容量非正、某个原子组单独超容量、块数超上限时一次都不发，
-        交回拒因由调用方按压缩失败拒发（可恢复暂停 + 心跳点名）。
-        返回 (合并摘要, 块数, 是否归并, 未取得摘要的块号, 最后一次 provider 错误原文, 拒因)。"""
-        grouped = [
-            (list(group), self._estimate_node_compression_message_tokens(group))
-            for group in iter_compaction_atomic_groups(older_history_messages)
+    ) -> tuple[str, int, bool, list[int], str, int, list[dict[str, Any]], int]:
+        """执行规划器给出的块，提交最长成功前缀，其余原始历史留在本跳请求里。
+
+        容量、块数、溢出块都由 `plan_compression_pass` 在这一跳之前算好（与前门车道同
+        一个规划器），这里只负责执行。一块没拿到摘要就停在这儿：压好的前缀照常交付，
+        这一块及其之后的原始历史整体保留，由下一跳按那时的窗口重算——比整次作废重烧所
+        有块省，也比在摘要里插一行"本块未取得"却把原文删掉诚实。
+        返回 (合并摘要, 计划块数, 是否归并, 未取得摘要的块号, 最后一次 provider 错误原文, 实跑轮数, 留在请求里的原始历史)。"""
+        capacity = int(compression_pass.capacity_tokens or 0)
+        planned_chunks = max(1, int(compression_pass.planned_chunks or 0))
+        queue: list[tuple[int, int]] = [
+            tuple(item) for item in list(compression_pass.spans or []) + list(compression_pass.deferred_spans or [])
         ]
-        envelope = [
-            {"role": "system", "content": _NODE_TOKEN_COMPRESSION_SYSTEM_PROMPT},
-            {"role": "user", "content": "[]"},
-        ]
-        envelope_tokens = self._estimate_node_compression_message_tokens([*system_prefix, *envelope])
-        plan = plan_chunk_groups(
-            [tokens for _group, tokens in grouped],
-            context_window_tokens=int(context_window_tokens or 0),
-            envelope_tokens=envelope_tokens,
-            observed_span_tokens=int(observed_span_tokens or 0),
-        )
-        if isinstance(plan, ChunkPlanRefusal):
-            return "", int(plan.planned_chunks or 0), False, [], "", plan.reason
-        chunks = [
-            [dict(item) for group, _tokens in grouped[start:end] for item in group]
-            for start, end in plan.spans
-        ]
-        chunk_budget = int(plan.capacity_tokens or 0)
         summaries: list[str] = []
         failed_indexes: list[int] = []
         last_error_text = ""
-        total_chunks = len(chunks)
-        for index, chunk in enumerate(chunks, start=1):
-            # 每块之前查一次暂停/取消：整个分块循环跑在 `run()` 的一次迭代里，只在迭代
-            # 开头查等于"暂停要等整次压缩结束"。与前门那侧逐块查同形。
-            if str(task_id or '').strip():
-                self._check_pause_or_cancel(str(task_id), str(node_id or '').strip())
-            chunk_messages = [
-                {"role": "system", "content": _NODE_TOKEN_COMPRESSION_SYSTEM_PROMPT},
-                {
-                    "role": "user",
-                    "content": json.dumps(
-                        {
-                            "kind": "node_token_compression_chunk",
-                            "task_goal": task_goal,
-                            "chunk_index": index,
-                            "chunk_count": total_chunks,
-                            "history_messages": list(chunk),
-                        },
-                        ensure_ascii=False,
-                    ),
-                },
-            ]
-            response = await self._node_compression_helper_call(
-                messages=chunk_messages,
-                model_refs=list(model_refs or []),
-            )
-            chunk_error_text = str(getattr(response, 'error_text', None) or '').strip()
-            chunk_text = "" if chunk_error_text else str(getattr(response, 'content', '') or '').strip()
-            if not chunk_text:
-                # 这一块耗尽重试仍没拿到摘要：投影里留一行明写的缺口，而不是留一个看起来
-                # 像"这块没有内容"的空段——空段会被下游读成历史本身没东西。
-                failed_indexes.append(index)
-                if chunk_error_text:
-                    last_error_text = chunk_error_text
-                summaries.append(f"[分块摘要 {index}/{total_chunks} 未取得摘要：保留原始历史判定见 chunk_failed_count]")
-                continue
-            summaries.append(f"[分块摘要 {index}/{total_chunks}]\n{chunk_text}")
+        committed_group_end = 0
+        rounds = 0
+        while queue:
+            rounds += 1
+            batch = queue[:CHUNK_MAX_CHUNKS]
+            remaining = queue[CHUNK_MAX_CHUNKS:]
+            interrupted = False
+            for offset, (start, end) in enumerate(batch):
+                # 每块之前查一次暂停/取消：整个分块循环跑在 `run()` 的一次迭代里，只在迭代
+                # 开头查等于"暂停要等整次压缩结束"。与前门那侧逐块查同形。
+                if str(task_id or '').strip():
+                    self._check_pause_or_cancel(str(task_id), str(node_id or '').strip())
+                index = len(summaries) + 1
+                chunk = self._fit_node_chunk_to_capacity(
+                    [dict(item) for group, _tokens in grouped_history[start:end] for item in group],
+                    capacity_tokens=capacity,
+                )
+                chunk_messages = [
+                    {"role": "system", "content": _NODE_TOKEN_COMPRESSION_SYSTEM_PROMPT},
+                    {
+                        "role": "user",
+                        "content": json.dumps(
+                            {
+                                "kind": "node_token_compression_chunk",
+                                "task_goal": task_goal,
+                                "chunk_index": index,
+                                "chunk_count": planned_chunks,
+                                "history_messages": list(chunk),
+                            },
+                            ensure_ascii=False,
+                        ),
+                    },
+                ]
+                response = await self._node_compression_helper_call(
+                    messages=chunk_messages,
+                    model_refs=list(model_refs or []),
+                )
+                chunk_error_text = str(getattr(response, 'error_text', None) or '').strip()
+                chunk_text = "" if chunk_error_text else str(getattr(response, 'content', '') or '').strip()
+                if not chunk_text:
+                    failed_indexes.append(index)
+                    if chunk_error_text:
+                        last_error_text = chunk_error_text
+                    queue = batch[offset:] + remaining
+                    interrupted = True
+                    break
+                summaries.append(f"[分块摘要 {index}/{planned_chunks}]\n{chunk_text}")
+                committed_group_end = end
+            if interrupted or rounds >= COMPRESSION_MAX_PASS_ROUNDS:
+                break
+            queue = remaining
+        deferred_messages = [
+            dict(item) for group, _tokens in grouped_history[committed_group_end:] for item in group
+        ]
         combined = "\n\n".join(summaries).strip()
+        deferred_note = (
+            f"[本次分块只覆盖了较早的历史，仍有 {len(deferred_messages)} 条原始消息在本请求里，"
+            "下一跳按那时的窗口继续压缩]"
+            if deferred_messages
+            else ""
+        )
         merge_pass_applied = False
-        if self._estimate_node_compression_message_tokens([{"role": "assistant", "content": combined}]) > chunk_budget:
+        if len(summaries) > 1 and self._estimate_node_compression_message_tokens(
+            [{"role": "assistant", "content": combined}]
+        ) > capacity:
             merge_messages = [
                 {"role": "system", "content": _NODE_TOKEN_COMPRESSION_SYSTEM_PROMPT},
                 {
@@ -6290,8 +6376,18 @@ class ReActToolLoop:
             elif not last_error_text and merge_error_text:
                 last_error_text = merge_error_text
             merge_pass_applied = True
-        _ = bootstrap_user, append_notice_tail  # 单发前缀专用；分块请求不构成对话前缀
-        return combined, total_chunks, merge_pass_applied, failed_indexes, last_error_text, ""
+        if deferred_note and summaries:
+            combined = "\n\n".join(item for item in (combined.strip(), deferred_note) if item).strip()
+        return (
+            combined,
+            planned_chunks,
+            merge_pass_applied,
+            failed_indexes,
+            last_error_text,
+            rounds,
+            deferred_messages,
+            len(summaries),
+        )
 
     def _estimate_node_send_preflight_tokens(
         self,
@@ -6739,6 +6835,23 @@ class ReActToolLoop:
                     token_preflight_diagnostics["helper_message_count"] = int(
                         compression_helper_call.get("history_message_count") or 0
                     )
+                    # 与前门车道同名读数：规划器的容量、实跑轮数、留在请求里的原始条数，
+                    # 判读"分块为什么没压完"只看这三个数。
+                    token_preflight_diagnostics["compression_pass_rounds"] = int(
+                        compression_helper_call.get("compression_pass_rounds") or 1
+                    )
+                    token_preflight_diagnostics["deferred_message_count"] = int(
+                        compression_helper_call.get("deferred_message_count") or 0
+                    )
+                    token_preflight_diagnostics["capacity_tokens"] = int(
+                        compression_helper_call.get("capacity_tokens") or 0
+                    )
+                    token_preflight_diagnostics["capacity_source"] = str(
+                        compression_helper_call.get("capacity_source") or ""
+                    )
+                    token_preflight_diagnostics["truncation_group_count"] = int(
+                        compression_helper_call.get("truncation_group_count") or 0
+                    )
                 if compression_failure:
                     token_preflight_diagnostics["error"] = compression_failure
                     return (
@@ -6800,6 +6913,7 @@ class ReActToolLoop:
                     request_messages=request_messages,
                     compressed_text=compressed_text,
                     stage_archive=stage_archive_payload,
+                    preserved_raw_messages=list(compression_helper_call.get('deferred_raw_messages') or []),
                 )
                 request_messages = rewritten_messages
                 pre_compaction_snapshot = dict(token_preflight_diagnostics)

@@ -13,12 +13,17 @@
 
 from __future__ import annotations
 
+import re
 from typing import Any, Callable
 
 # 咽喉点没有上传记录可查：留一个明写的占位，而不是编一个不存在的路径。
 INLINE_IMAGE_PATH_PLACEHOLDER = "(inline)"
 
 _IMAGE_BLOCK_TYPES = frozenset({"image_url", "input_image"})
+
+# 两条附件车道都把落盘路径写在正文的附件说明行里（web 上传 `- image: n (local path: p)`、
+# 外部／MCP `Channel attachments:` 同形），图片块本身只有 data: URL。
+_LOCAL_IMAGE_PATH_LINE = re.compile(r"^-\s*image:\s.*\(local path:\s*(?P<path>[^)]+)\)\s*$", re.MULTILINE)
 
 
 def build_image_degradation_text(*, path: str, display_name: str) -> str:
@@ -48,6 +53,42 @@ def message_content_has_image_blocks(content: Any) -> bool:
         isinstance(block, dict) and str(block.get("type") or "").strip().lower() in _IMAGE_BLOCK_TYPES
         for block in content
     )
+
+
+def image_path_lookup_from_content(content: Any) -> Callable[[dict[str, Any]], str] | None:
+    """按出现顺序把正文里的图片落盘路径配给同一条消息的图片块；配不上返回 None。
+
+    图片块只带 data: URL，路径写在同一条消息的附件说明行里。降级文本要回答的是"这张图
+    还能从哪儿取回"，所以按顺序配对，而不是统一留 `(inline)`。附件说明里的图片行与图片块
+    由同一段代码按同一顺序生成，条数一致才敢配；对不上就退回 None，宁可留占位也不配错路径。
+    """
+    if not isinstance(content, list):
+        return None
+    paths: list[str] = []
+    image_blocks = 0
+    for block in content:
+        if not isinstance(block, dict):
+            continue
+        block_type = str(block.get("type") or "").strip().lower()
+        if block_type in _IMAGE_BLOCK_TYPES:
+            image_blocks += 1
+            continue
+        if block_type == "text":
+            paths.extend(
+                item.strip()
+                for item in _LOCAL_IMAGE_PATH_LINE.findall(str(block.get("text") or ""))
+                if str(item or "").strip()
+            )
+    if not image_blocks or len(paths) != image_blocks:
+        return None
+    cursor = {"index": 0}
+
+    def _lookup(_block: dict[str, Any]) -> str:
+        index = int(cursor["index"])
+        cursor["index"] = index + 1
+        return paths[index] if index < len(paths) else ""
+
+    return _lookup
 
 
 def degrade_image_blocks_in_messages(
@@ -107,5 +148,6 @@ __all__ = [
     "INLINE_IMAGE_PATH_PLACEHOLDER",
     "build_image_degradation_text",
     "degrade_image_blocks_in_messages",
+    "image_path_lookup_from_content",
     "message_content_has_image_blocks",
 ]

@@ -41,8 +41,11 @@ from g3ku.providers.responses_protocol_helpers import (
     _prompt_cache_key as _preview_prompt_cache_key,
 )
 from g3ku.runtime.chunk_compression_plan import (
-    ChunkPlanRefusal,
-    plan_chunk_groups,
+    CHUNK_MAX_CHUNKS,
+    COMPRESSION_MAX_PASS_ROUNDS,
+    COMPRESSION_MODE_CHUNKED,
+    CompressionPass,
+    plan_compression_pass,
 )
 from g3ku.runtime.config_refresh import refresh_loop_runtime_config
 from g3ku.runtime.context.summarizer import estimate_tokens
@@ -103,6 +106,7 @@ from g3ku.runtime.tool_history import (
     align_compaction_keep_recent,
     extract_call_id,
     iter_compaction_atomic_groups,
+    truncate_group_head_tail,
 )
 from g3ku.runtime.tool_visibility import CEO_FIXED_BUILTIN_TOOL_NAMES
 from g3ku.runtime.web_ceo_sessions import (
@@ -1099,9 +1103,13 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
 
         放在前门定稿正文之处而不是只放咽喉点，是为了让 artifact 与 `image_count` 读到
         **降级后的同一份正文**：否则复盘会看见 `image_count=1` 而实际发出去的是文字。
-        外部／MCP 附件那道的落盘路径由它自己的上传说明给出，这里拿不到就留 `(inline)`。
+        外部／MCP 附件那道只把图片编成 data: URL，落盘路径在同一条消息的附件说明行里，
+        所以按顺序把那些路径配回来；配不上（条数不等）才留 `(inline)`。
         """
-        from g3ku.runtime.image_capability import degrade_image_blocks_in_messages
+        from g3ku.runtime.image_capability import (
+            degrade_image_blocks_in_messages,
+            image_path_lookup_from_content,
+        )
 
         if not isinstance(content, list):
             return content
@@ -1111,6 +1119,7 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
         degraded, degraded_count = degrade_image_blocks_in_messages(
             [{"role": "user", "content": content}],
             display_name=display_name,
+            path_lookup=image_path_lookup_from_content(content),
         )
         if not degraded_count:
             return content
@@ -1521,7 +1530,7 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
                 code="content_open_image_requires_multimodal",
                 message=(
                     f"当前模型配置名称是({image_model_name})没有勾选多模态能力因此无法打开图片；"
-                    f"换到已勾选的模型配置后再试。"
+                    f"需要看图请把**本会话**的模型选择切到已勾选多模态的配置；不要为此改全局模型链。"
                 ),
                 recoverable=True,
             )
@@ -2227,6 +2236,51 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
             body_messages=request_messages,
         )
 
+    @staticmethod
+    def _estimate_frontdoor_compression_body_tokens(messages: list[dict[str, Any]] | None) -> int:
+        """压缩侧的正文尺子：装箱用量、单发请求体用量必须走同一个估算器。
+
+        两处 estimator 不同口径时，"装得下"的判据会随消息形状漂，边界会话随机切块。
+        """
+        try:
+            return int(
+                _estimate_frontdoor_provider_request_tokens(
+                    provider_request_body=None,
+                    request_messages=list(messages or []),
+                    tool_schemas=[],
+                )
+                or 0
+            )
+        except Exception:
+            return 0
+
+    def _frontdoor_plan_token_compression_pass(
+        self,
+        *,
+        grouped_history: list[tuple[list[dict[str, Any]], int]],
+        single_shot_request_tokens: int,
+        context_window_tokens: int,
+        observed_span_tokens: int,
+    ) -> CompressionPass:
+        """完整压缩 / 分块压缩只由这一处判定：块数 1 就是完整压缩，>1 才切块。
+
+        信封取**实测**的单发请求体非历史部分（system 前缀 + 指令尾），不用合成的
+        "系统提示 + 2k"：append-only 压缩请求把整段前缀真的发了一遍，把它记成 2k 会
+        让判据在窗口边缘偏乐观，正好造出一发发不出去的请求。
+        """
+        counts = [int(tokens or 0) for _group, tokens in list(grouped_history or [])]
+        history_tokens = sum(counts)
+        envelope_tokens = max(0, int(single_shot_request_tokens or 0) - history_tokens)
+        return plan_compression_pass(
+            counts,
+            estimated_total_tokens=int(single_shot_request_tokens or 0),
+            trigger_tokens=0,
+            context_window_tokens=int(context_window_tokens or 0),
+            envelope_tokens=envelope_tokens,
+            observed_span_tokens=int(observed_span_tokens or 0),
+            single_shot_tokens=int(single_shot_request_tokens or 0),
+        )
+
     async def _run_frontdoor_llm_token_compression(
         self,
         *,
@@ -2369,7 +2423,38 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
                 request_messages=single_shot_messages,
                 tool_schemas=[],
             )
-            chunked_mode = bool(context_window_tokens > 0 and single_shot_tokens > context_window_tokens)
+            grouped_history = [
+                (list(group), self._estimate_frontdoor_compression_body_tokens(group))
+                for group in iter_compaction_atomic_groups(older_history_messages)
+            ]
+            compression_pass = self._frontdoor_plan_token_compression_pass(
+                grouped_history=grouped_history,
+                single_shot_request_tokens=self._estimate_frontdoor_compression_body_tokens(single_shot_messages),
+                context_window_tokens=context_window_tokens,
+                observed_span_tokens=self._frontdoor_observed_request_span_tokens(state),
+            )
+            if compression_pass.refusal is not None:
+                # 窗口装不下任何一块压缩请求的信封：这一 pass 放弃，原请求体照发。
+                # 这不是"超窗错误"——压缩本来就只是让请求体变小的一条道，压不动时把
+                # 决定权交回正常发送路径，由它按 provider 的实际回执处理。
+                await self._emit_frontdoor_runtime_snapshot(
+                    runtime=runtime,
+                    state={**dict(state or {}), "compression_state": self._default_compression_state()},
+                )
+                return FrontdoorTokenPreflightResult(
+                    request_messages=list(request_messages),
+                    final_request_tokens=int(single_shot_tokens or 0),
+                    history_shrink_reason="",
+                    diagnostics={
+                        "applied": False,
+                        "compression_pass_failed": str(compression_pass.refusal.reason or ""),
+                        "capacity_tokens": int(compression_pass.capacity_tokens or 0),
+                        "capacity_source": compression_pass.capacity_source,
+                        "final_request_tokens": int(single_shot_tokens or 0),
+                        "estimated_total_tokens": int(single_shot_tokens or 0),
+                    },
+                )
+            chunked_mode = bool(compression_pass.mode == COMPRESSION_MODE_CHUNKED)
             compression_state = {
                 "status": "running",
                 "text": "上下文压缩中（分块）" if chunked_mode else "上下文压缩中",
@@ -2383,17 +2468,26 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
             chunk_count = 1
             merge_pass_applied = False
             chunk_failed_count = 0
+            chunk_committed_count = 0
+            compression_pass_rounds = 1
+            deferred_messages: list[dict[str, Any]] = []
             if chunked_mode:
-                compressed_text, chunk_count, merge_pass_applied, chunk_failed_count = await self._chunked_frontdoor_compression_summaries(
-                    system_prefix=system_prefix,
-                    older_history_messages=older_history_messages,
+                (
+                    compressed_text,
+                    chunk_count,
+                    merge_pass_applied,
+                    chunk_failed_count,
+                    compression_pass_rounds,
+                    deferred_messages,
+                    chunk_committed_count,
+                ) = await self._chunked_frontdoor_compression_summaries(
+                    grouped_history=grouped_history,
+                    compression_pass=compression_pass,
                     model_refs=list(model_refs or []),
                     state=state,
                     runtime=runtime,
                     is_cancelled=_compression_cancelled,
                     model_info=model_info,
-                    context_window_tokens=context_window_tokens,
-                    observed_span_tokens=self._frontdoor_observed_request_span_tokens(state),
                 )
             else:
                 compressed_text, _compressed_message = await self._run_frontdoor_compression_helper_request(
@@ -2488,6 +2582,7 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
             rewritten_messages = [
                 *system_prefix,
                 compacted_block,
+                *deferred_messages,
                 *preserved_silent_groups,
                 *recent_tail,
                 *contract_messages,
@@ -2519,6 +2614,13 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
                     "compression_mode": "llm_chunked" if chunked_mode else "llm",
                     "chunk_count": int(chunk_count or 1),
                     "merge_pass_applied": bool(merge_pass_applied),
+                    "chunk_failed_count": int(chunk_failed_count or 0),
+                    "chunk_committed_count": int(chunk_committed_count or 0),
+                    "compression_pass_rounds": int(compression_pass_rounds or 1),
+                    "deferred_message_count": int(len(deferred_messages or [])),
+                    "capacity_tokens": int(compression_pass.capacity_tokens or 0),
+                    "capacity_source": compression_pass.capacity_source,
+                    "truncation_group_count": len(list(compression_pass.truncation_group_indexes or [])),
                     "dropped_dangling_tool_groups": int(dropped_dangling_tool_groups or 0),
                     "retained_recent_tail_count": recent_tail_count,
                     "compressed_history_message_count": len(older_history_messages),
@@ -2707,119 +2809,135 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
             )
             await asyncio.sleep(float(min(10, max(1, empty_response_retry_count))))
 
+    def _fit_frontdoor_chunk_to_capacity(
+        self,
+        chunk: list[dict[str, Any]],
+        *,
+        capacity_tokens: int,
+    ) -> list[dict[str, Any]]:
+        """一颗原子组单独超过块容量时，把头尾各留一段直到装得下（最多收 3 次）。
+
+        不可分的是"组"而不是"正文"：工具调用与它的结果必须同块，但结果正文可以截。
+        收到 0.216 还装不下就照原样发——那时超的是 provider 的宽容度，不是算错的容量，
+        宁多发一节也不在压缩里再套一层摘要。
+        """
+        records = list(chunk or [])
+        if capacity_tokens <= 0:
+            return records
+        for keep_ratio in (0.6, 0.36, 0.216):
+            if self._estimate_frontdoor_compression_body_tokens(records) <= capacity_tokens:
+                break
+            records, changed = truncate_group_head_tail(records, keep_ratio=keep_ratio)
+            if not changed:
+                break
+        return records
+
     async def _chunked_frontdoor_compression_summaries(
         self,
         *,
-        system_prefix: list[dict[str, Any]],
-        older_history_messages: list[dict[str, Any]],
+        grouped_history: list[tuple[list[dict[str, Any]], int]],
+        compression_pass: CompressionPass,
         model_refs: list[str],
         state: CeoGraphState,
         runtime: CeoRuntime,
         is_cancelled: Any,
         model_info: dict[str, Any],
-        context_window_tokens: int,
-        observed_span_tokens: int = 0,
-    ) -> tuple[str, int, bool, int]:
-        """超窗分块压缩：单发压缩请求自身放不下窗口时的兜底路径。
+    ) -> tuple[str, int, bool, int, int, list[dict[str, Any]], int]:
+        """执行规划器给出的块，提交最长成功前缀，其余原始历史留在本跳请求里。
 
-        把可压缩历史按原子组（工具调用组不可分，`iter_compaction_atomic_groups`）
-        贪心装箱为若干块，逐块用传统 system+user 形态（块不构成对话前缀，但体量
-        与正常流量同级，快速成功/快速 429 重试）生成摘要，拼为带块标号的单一摘要；
-        合并后仍超预算时做且仅做一次归并。返回 (合并摘要, 块数, 是否归并)。
-
-        单块预算取「窗口派生预算」与「可压历史 / 3」的较大值：声明窗口本来就大时
-        不多跑一次，历史远超窗口预算时也只在 3 次内收口，而不是按 2 万 token 的地板
-        切成几十块。
+        块是 system+user 重打包形态（块不构成对话前缀，体量与正常流量同级）。一块
+        没拿到摘要就停在这儿：压好的块照常交付，这一块及其之后的原始历史整体保留，
+        由下一跳按那时的窗口重算。比"整次作废、下一跳重烧所有块"省，也比"在摘要里
+        插一行缺口却声称历史已收口"诚实——那行缺口下面根本没跟内容。
+        返回 (合并摘要, 计划块数, 是否归并, 未取得摘要的块数, 实跑轮数, 留在请求里的原始历史, 收下的块数)。
         """
 
-        def _estimate_messages(records: list[dict[str, Any]]) -> int:
-            try:
-                return int(
-                    _estimate_frontdoor_provider_request_tokens(
-                        provider_request_body=None,
-                        request_messages=list(records or []),
-                        tool_schemas=[],
-                    )
-                    or 0
-                )
-            except Exception:
-                return 0
-
-        grouped = [
-            (list(group), _estimate_messages(group))
-            for group in iter_compaction_atomic_groups(older_history_messages)
+        capacity = int(compression_pass.capacity_tokens or 0)
+        planned_chunks = max(1, int(compression_pass.planned_chunks or 0))
+        queue: list[tuple[int, int]] = [
+            tuple(item) for item in list(compression_pass.spans or []) + list(compression_pass.deferred_spans or [])
         ]
-        envelope_budget = _estimate_messages(
-            [{"role": "system", "content": _FRONTDOOR_TOKEN_COMPRESSION_SYSTEM_PROMPT}]
-        ) + 2_000
-        plan = plan_chunk_groups(
-            [tokens for _group, tokens in grouped],
-            context_window_tokens=int(context_window_tokens or 0),
-            envelope_tokens=envelope_budget,
-            observed_span_tokens=int(observed_span_tokens or 0),
-        )
-        if isinstance(plan, ChunkPlanRefusal):
-            # 容量非正 / 单组超容量 / 块数超上限：一次都不发，直接报窗口超限。
-            raise self._frontdoor_context_window_exceeded_error(model_info=model_info, detail=plan.reason)
-        chunks = [
-            [dict(item) for group, _tokens in grouped[start:end] for item in group]
-            for start, end in plan.spans
-        ]
-        chunk_budget = int(plan.capacity_tokens or 0)
         summaries: list[str] = []
         failed_chunks = 0
-        total_chunks = len(chunks)
-        for index, chunk in enumerate(chunks, start=1):
-            if callable(is_cancelled) and bool(is_cancelled()):
-                raise asyncio.CancelledError()
-            progress = f"上下文压缩中（分块 {index}/{total_chunks}）"
-            await self._emit_frontdoor_runtime_snapshot(
-                runtime=runtime,
-                state={
-                    **dict(state or {}),
-                    "compression_state": {
-                        "status": "running",
-                        "text": progress,
-                        "source": "token_compression",
-                        "needs_recheck": False,
-                    },
-                },
-            )
-            chunk_messages = [
-                {"role": "system", "content": _FRONTDOOR_TOKEN_COMPRESSION_SYSTEM_PROMPT},
-                {
-                    "role": "user",
-                    "content": json.dumps(
-                        {
-                            "kind": "frontdoor_token_compression_chunk",
-                            "model": self._frontdoor_model_display_name(model_info),
-                            "chunk_index": index,
-                            "chunk_count": total_chunks,
-                            "history_messages": list(chunk),
+        committed_group_end = 0
+        rounds = 0
+        while queue:
+            rounds += 1
+            batch = queue[:CHUNK_MAX_CHUNKS]
+            remaining = queue[CHUNK_MAX_CHUNKS:]
+            interrupted = False
+            for offset, (start, end) in enumerate(batch):
+                if callable(is_cancelled) and bool(is_cancelled()):
+                    raise asyncio.CancelledError()
+                index = len(summaries) + 1
+                progress = f"上下文压缩中（分块 {index}/{planned_chunks}）"
+                await self._emit_frontdoor_runtime_snapshot(
+                    runtime=runtime,
+                    state={
+                        **dict(state or {}),
+                        "compression_state": {
+                            "status": "running",
+                            "text": progress,
+                            "source": "token_compression",
+                            "needs_recheck": False,
                         },
-                        ensure_ascii=False,
-                    ),
-                },
-            ]
-            chunk_text, _chunk_message = await self._run_frontdoor_compression_helper_request(
-                messages=chunk_messages,
-                model_refs=list(model_refs or []),
-                state=state,
-                runtime=runtime,
-                is_cancelled=is_cancelled,
-                model_info=model_info,
-                progress_text=progress,
-            )
-            if not str(chunk_text or "").strip():
-                # 这一块耗尽重试仍没拿到摘要：留一行明写的缺口，而不是留一个看起来像
-                # "这块没有内容"的空段——空段会被下游读成历史本身没东西。
-                failed_chunks += 1
-                summaries.append(f"[分块摘要 {index}/{total_chunks} 未取得摘要，本块原文未被摘要替代]")
-                continue
-            summaries.append(f"[分块摘要 {index}/{total_chunks}]\n{chunk_text}")
+                    },
+                )
+                chunk = self._fit_frontdoor_chunk_to_capacity(
+                    [dict(item) for group, _tokens in grouped_history[start:end] for item in group],
+                    capacity_tokens=capacity,
+                )
+                chunk_messages = [
+                    {"role": "system", "content": _FRONTDOOR_TOKEN_COMPRESSION_SYSTEM_PROMPT},
+                    {
+                        "role": "user",
+                        "content": json.dumps(
+                            {
+                                "kind": "frontdoor_token_compression_chunk",
+                                "model": self._frontdoor_model_display_name(model_info),
+                                "chunk_index": index,
+                                "chunk_count": planned_chunks,
+                                "history_messages": list(chunk),
+                            },
+                            ensure_ascii=False,
+                        ),
+                    },
+                ]
+                chunk_text, _chunk_message = await self._run_frontdoor_compression_helper_request(
+                    messages=chunk_messages,
+                    model_refs=list(model_refs or []),
+                    state=state,
+                    runtime=runtime,
+                    is_cancelled=is_cancelled,
+                    model_info=model_info,
+                    progress_text=progress,
+                )
+                if not str(chunk_text or "").strip():
+                    # 这一块耗尽重试仍没拿到摘要：停在这里，本块及其后的原始历史原样留在
+                    # 请求里，由下一跳重算。压好的前缀照常交付，不整次作废重烧。
+                    failed_chunks += 1
+                    queue = batch[offset:] + remaining
+                    interrupted = True
+                    break
+                summaries.append(f"[分块摘要 {index}/{planned_chunks}]\n{chunk_text}")
+                committed_group_end = end
+            if interrupted or rounds >= COMPRESSION_MAX_PASS_ROUNDS:
+                break
+            queue = remaining
+        deferred_messages = [
+            dict(item) for group, _tokens in grouped_history[committed_group_end:] for item in group
+        ]
         combined = "\n\n".join(summaries).strip()
+        deferred_note = (
+            f"[本次分块只覆盖了较早的历史，仍有 {len(deferred_messages)} 条原始消息在本请求里，"
+            "下一跳按那时的窗口继续压缩]"
+            if deferred_messages
+            else ""
+        )
         merge_pass_applied = False
-        if _estimate_messages([{"role": "assistant", "content": combined}]) > chunk_budget:
+        if len(summaries) > 1 and self._estimate_frontdoor_compression_body_tokens(
+            [{"role": "assistant", "content": combined}]
+        ) > capacity:
             if callable(is_cancelled) and bool(is_cancelled()):
                 raise asyncio.CancelledError()
             await self._emit_frontdoor_runtime_snapshot(
@@ -2857,9 +2975,22 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
                 model_info=model_info,
                 progress_text="上下文压缩中（归并分块摘要）",
             )
-            combined = merged_text
+            if str(merged_text or "").strip():
+                # 归并失败时交回的是已经压好的那份多块摘要，不是空串：拿空串覆盖等于
+                # 把整次压缩的成果抵给一次没成功的调用。
+                combined = merged_text
             merge_pass_applied = True
-        return combined, total_chunks, merge_pass_applied, failed_chunks
+        if deferred_note and summaries:
+            combined = "\n\n".join(item for item in (combined.strip(), deferred_note) if item).strip()
+        return (
+            combined,
+            planned_chunks,
+            merge_pass_applied,
+            failed_chunks,
+            rounds,
+            deferred_messages,
+            len(summaries),
+        )
 
     def _refresh_runtime_config_for_retry_invalidation(self) -> bool:
         try:

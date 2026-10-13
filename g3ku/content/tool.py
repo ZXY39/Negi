@@ -76,7 +76,7 @@ class ContentTool:
                 'ok': False,
                 'error': (
                     f'当前模型配置名称是({str(display_name).strip()})没有勾选多模态能力因此无法打开图片；'
-                    f'换到已勾选多模态的模型配置后再试。'
+                    f'需要看图请把**本会话**的模型选择切到已勾选多模态的配置后再试；不要为此改全局模型链。'
                 ),
             }
         return {'ok': False, 'error': '非多模态模型无法打开图片'}

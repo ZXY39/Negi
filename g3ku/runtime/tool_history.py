@@ -91,6 +91,48 @@ def align_compaction_keep_recent(messages: list[dict[str, Any]] | None, keep_rec
     return k
 
 
+def truncate_group_head_tail(
+    messages: list[dict[str, Any]] | None,
+    *,
+    keep_ratio: float = 0.6,
+) -> tuple[list[dict[str, Any]], int]:
+    """把一组消息的长文本收成"头 keep_ratio/2 + 尾 keep_ratio/2"，中间留一行省略计数。
+
+    分块装箱唯一的不可分单位是原子组：一颗组单独就超过单块容量时，要么整次压缩
+    报"装不下"，要么先把它收成能装箱的形状。收成头尾两段是因为这两段承载结论
+    （开头的问题与结尾的结果），中段通常是重复的进度；省略了多少字必须写明，否则
+    下一跳的模型会把这份摘要当成全量真相。只动字符串正文：``tool_calls`` 的参数是
+    调用意图，砍掉会让工具轮次读起来像没发生过。返回 (新消息, 被收短的条数)。
+    """
+    ratio = min(0.9, max(0.1, float(keep_ratio or 0.6)))
+    head_ratio = ratio / 2
+    tail_ratio = ratio / 2
+    truncated: list[dict[str, Any]] = []
+    changed = 0
+    for item in list(messages or []):
+        if not isinstance(item, dict):
+            truncated.append(item)
+            continue
+        content = item.get("content")
+        if not isinstance(content, str) or not content:
+            truncated.append(dict(item))
+            continue
+        total = len(content)
+        head_chars = int(total * head_ratio)
+        tail_chars = int(total * tail_ratio)
+        if head_chars + tail_chars >= total - 1:
+            truncated.append(dict(item))
+            continue
+        dropped = total - head_chars - tail_chars
+        updated = dict(item)
+        updated["content"] = (
+            f"{content[:head_chars]}\n…中段省略 {dropped} 字…\n{content[total - tail_chars:]}"
+        )
+        truncated.append(updated)
+        changed += 1
+    return truncated, changed
+
+
 def iter_compaction_atomic_groups(messages: list[dict[str, Any]] | None) -> list[list[dict[str, Any]]]:
     """把消息序列切成压缩不可再分的原子组，供分块压缩装箱。
 

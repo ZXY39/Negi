@@ -3537,6 +3537,7 @@ async def test_execute_tool_calls_allows_submit_next_stage_and_passes_runtime_co
             "prior_overflow_signatures": [],
             "stage_free_pass_kind": "",
             "image_multimodal_enabled": False,
+            "image_model_display_name": "",
         }
     ]
 
