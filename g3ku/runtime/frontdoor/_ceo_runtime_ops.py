@@ -1759,7 +1759,12 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
         detail_suffix = f" 原因: {resolution_error}" if resolution_error else ""
         return FrontdoorCompressionRuntimeError(
             code="model_context_window_missing",
-            message=f"当前模型{display_name}未配置最大上下文TOKEN，请更改模型链配置后继续{detail_suffix}",
+            # 与「压缩后仍装不下」同一条口径：只陈述缺的是什么，不指挥去动模型记录——
+            # 这句在模型看得见的位置，泛指"改链配置"会被当成改全局链的许可。
+            message=(
+                f"当前模型{display_name}的模型记录没有最大上下文TOKEN，本跳没有可用压缩窗口"
+                f"{detail_suffix}"
+            ),
             recoverable=True,
         )
 
