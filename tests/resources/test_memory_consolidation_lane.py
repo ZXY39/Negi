@@ -486,3 +486,24 @@ async def test_a_consolidate_batch_runs_through_the_consolidator_lane(tmp_path: 
         assert row["changes"][1]["original_content"] == "网页端口是 18790"
     finally:
         manager.close()
+
+
+def test_reconcile_notes_never_invents_a_category_note(tmp_path: Path) -> None:
+    """A retired row pointing at a deleted category note is a report, not a file to
+    create: a placeholder would put a resident line describing nothing into the block.
+    The ordinary note a retired row owns still must not read as an orphan."""
+    manager = _manager(tmp_path)
+    try:
+        ordinary = _add(manager, body="细节在 note 里", minimal="细节->正文 ref:note_deep")
+        _write_category(manager, "note_deep", "细节正文")
+        category_id = _add(manager, body="分类被删掉的退场记忆", minimal="断链->分类")
+        _retire(manager, [category_id], "note_missing_cat")
+
+        report = manager.reconcile_notes(delete_orphans=True)
+
+        assert not (manager.notes_dir / "note_missing_cat.md").exists()
+        assert report["broken_category_links"] == ["note_missing_cat"]
+        assert report["deleted_orphan_count"] == 0
+        assert (manager.notes_dir / "note_deep.md").exists(), ordinary
+    finally:
+        manager.close()

@@ -314,3 +314,33 @@ def test_memory_apply_batch_schema_exposes_note_edits(tmp_path: Path) -> None:
         assert "note_upserts" in properties
     finally:
         manager.close()
+
+
+def test_a_new_note_name_must_use_the_note_prefix(tmp_path: Path) -> None:
+    """The prefix is what stops the next reader from guessing which directory a name
+    lives in; existing un-prefixed notes stay editable so history is not broken."""
+    module = _module()
+    manager = _manager(tmp_path)
+    try:
+        legacy = _seed_note(manager, tmp_path, "pdf_render_inspect", "旧写法命名")
+
+        def _session():
+            return module._MemoryToolSession(
+                snapshot_text=manager.snapshot_text(),
+                notes_dir=manager.notes_dir,
+                index_dir=manager.index_dir,
+                batch_op="write",
+            )
+
+        refused = _session().apply_batch(note_upserts={"crawler_tips": "新内容"})
+        assert refused["ok"] is False
+        assert "note_" in json.dumps(refused.get("errors") or {})
+
+        _commit(
+            tmp_path,
+            manager,
+            note_upserts={"pdf_render_inspect": "旧写法仍可改"},
+        )
+        assert "旧写法仍可改" in legacy.read_text(encoding="utf-8")
+    finally:
+        manager.close()

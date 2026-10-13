@@ -508,6 +508,9 @@ class _MemoryToolSession:
     def note_directories(self) -> list[Path]:
         return [self.index_dir, self.notes_dir] if self.index_dir is not None else [self.notes_dir]
 
+    def _note_exists(self, ref: str) -> bool:
+        return any((directory / note_file_name(ref)).exists() for directory in self.note_directories())
+
     def read_document(self) -> str:
         if self.staged_document is _STAGED_DOCUMENT_UNSET:
             return str(self.snapshot_text or "")
@@ -634,6 +637,12 @@ class _MemoryToolSession:
                     note_file_name(ref)
                 except Exception as exc:
                     errors[f"note_upserts.{ref or '<empty>'}"] = str(exc or "invalid note ref").strip()
+                    continue
+                # New notes are prefixed so nobody has to guess which of the two
+                # directories a name lives in; the two pre-rule notes keep working because
+                # only a not-yet-existing ref is held to the prefix.
+                if not ref.startswith("note_") and not self._note_exists(ref):
+                    errors[f"note_upserts.{ref}"] = "a new note ref must start with note_"
                     continue
                 normalized_note_upserts[ref] = body
 
@@ -1038,6 +1047,35 @@ class _MemorySqliteRepository:
                 for value in (str(row["note_ref"] or "").strip(), str(row["consolidated_into"] or "").strip()):
                     if value:
                         refs.add(value)
+            return sorted(refs)
+        finally:
+            conn.close()
+
+    def owned_note_refs(self) -> list[str]:
+        """Ordinary note names some row owns (`note_ref`), retired rows included."""
+        conn = self._connect()
+        try:
+            refs: set[str] = set()
+            for row in conn.execute("SELECT note_ref FROM memories").fetchall():
+                value = str(row["note_ref"] or "").strip()
+                if value:
+                    refs.add(value)
+            return sorted(refs)
+        finally:
+            conn.close()
+
+    def category_refs(self) -> list[str]:
+        """Category note names the store points retired rows at. They live under
+        `memory/index/`, and a missing one is a report, never something to create: a
+        placeholder category note would put a line describing nothing into the resident
+        block."""
+        conn = self._connect()
+        try:
+            refs: set[str] = set()
+            for row in conn.execute("SELECT consolidated_into FROM memories").fetchall():
+                value = str(row["consolidated_into"] or "").strip()
+                if value:
+                    refs.add(value)
             return sorted(refs)
         finally:
             conn.close()
@@ -2116,10 +2154,14 @@ class MemoryManager:
         }
 
     def reconcile_notes(self, *, delete_orphans: bool = False) -> dict[str, Any]:
-        note_refs = self._referenced_note_refs()
+        # Two ownership axes: `note_ref` owns a file under memory/notes/, while
+        # `consolidated_into` only points at a category note under memory/index/. Creating
+        # a placeholder for the second kind would put a resident line describing nothing.
+        note_refs = self._memory_repo.owned_note_refs()
         note_files = self._note_file_refs()
         missing_note_refs = sorted(ref for ref in note_refs if ref not in note_files)
         orphan_notes = sorted(ref for ref in note_files if ref not in note_refs)
+        _category_rows, broken_categories = self._consolidation_categories()
         created_notes: list[str] = []
         deleted_notes: list[str] = []
 
@@ -2152,6 +2194,7 @@ class MemoryManager:
             "created_missing_notes": created_notes,
             "created_missing_count": len(created_notes),
             "orphan_notes_detected": orphan_notes,
+            "broken_category_links": broken_categories,
             "deleted_orphan_notes": deleted_notes,
             "deleted_orphan_count": len(deleted_notes),
             "delete_orphans": bool(delete_orphans),
@@ -4994,7 +5037,7 @@ class MemoryManager:
             "- delete 请求要解析成精确的记忆 id，并把这些 id 放进 deletes。\n"
             "- delete 批次没有零变更出口：目标内容已不在当前正文里（已被改写或被更早的批次删掉）时，"
             "单独提交 already_satisfied 说明已满足，不要提交 noop_reason。\n"
-            "- note_upserts 只写需要新增或整体重写的 note。\n"
+            "- note_upserts 只写需要新增或整体重写的 note，新建的名字必须以 `note_` 开头。\n"
             "- note_edits 改已有 note 的局部：{note名: [{old_text, new_text}]}，old_text 必须唯一命中一次，"
             "new_text 留空即删掉这段。改一两个段落用 note_edits，不要用 note_upserts 重交整份。\n"
             "- 归并区列出的分类 note 也可以这样改（内容错误或过时时）；不要新建分类 note，"
