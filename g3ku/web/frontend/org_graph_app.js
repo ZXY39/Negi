@@ -2261,15 +2261,19 @@ async function saveCeoModelChain(keys) {
     const sessionId = String(activeSessionId() || "").trim();
     const modelKeys = normalizeModelRoleChain(keys);
     if (!sessionId || S.ceoModelSelection.saving) return null;
+    // 草稿与此刻的全局链逐位相同就不必再存一份副本：发不带 model_keys 的 chain 载荷，后端摘掉
+    // 会话链键，本会话继续随全局自动更新。在这份底稿上再动过手（增删/换位）才会落显式链。
+    const followsGlobal = !modelKeys.length
+        || modelKeys.join("\n") === normalizeModelRoleChain(ceoModelChainKeys()).join("\n");
     // 空数组是同一条 PATCH 的合法载荷：后端会摘掉会话链键，等于本会话恢复全局模型链，
     // 所以「把成员删空」有去处，不会变成一个点了没反应的按钮。
     S.ceoModelSelection = { ...S.ceoModelSelection, saving: true, error: "" };
     syncCeoModelModeControl();
     try {
-        const payload = await ApiClient.updateCeoSessionModelSelection(sessionId, {
-            mode: "chain",
-            model_keys: modelKeys,
-        });
+        const payload = await ApiClient.updateCeoSessionModelSelection(
+            sessionId,
+            followsGlobal ? { mode: "chain" } : { mode: "chain", model_keys: modelKeys },
+        );
         if (sessionId !== String(activeSessionId() || "").trim()) return null;
         const applied = applyCeoModelSelectionPayload(sessionId, payload);
         // 落盘成功就回到只读态：面板显示的必须是已经生效的那条链，草稿使命已完成。
@@ -2282,9 +2286,9 @@ async function saveCeoModelChain(keys) {
         };
         // 退出编辑态必须重画：链栏要从"草稿"回到只读那一眼，页签也要跟着换标。
         syncCeoModelModeControl();
-        showToast(modelKeys.length
-            ? { title: "本会话模型链已保存", text: "这条链只作用于当前会话。", kind: "success" }
-            : { title: "本会话已恢复全局模型链", text: "这个会话不再自带模型链。", kind: "success" });
+        showToast(followsGlobal
+            ? { title: "本会话已恢复全局模型链", text: "这个会话不再自带模型链。", kind: "success" }
+            : { title: "本会话模型链已保存", text: "这条链只作用于当前会话。", kind: "success" });
         // 链首会改变上下文窗口与图片能力判定，用量表必须跟着重算。
         scheduleCeoComposerUsageRefresh({ immediate: true });
         return applied;
@@ -2429,9 +2433,12 @@ function enterCeoModelChainEdit() {
     syncCeoModelModeControl();
 }
 
-// 「同步全局模型链」只把草稿清成空：空会话链就是跟随全局，按既有契约仍然要点保存才落盘。
-function stageCeoModelChainGlobalSync() {
-    setCeoModelChainDraft([]);
+// 「同步全局模型链」＝把服务端此刻的那条全局链拉下来当底稿：本地缓存可能已经被模型页改过，
+// 所以先重读一次目录，再按最新的全局链铺列表，而不是留一个空列表让人猜同步成功了没有。
+async function stageCeoModelChainGlobalSync() {
+    if (S.ceoModelSelection.saving) return;
+    await loadModels();
+    setCeoModelChainDraft(ceoModelChainKeys());
 }
 
 function ceoModelChainBaseline() {
@@ -2918,7 +2925,7 @@ function bindCeoModelModeControls() {
     });
     U.ceoModelChainReset?.addEventListener("click", (event) => {
         event.stopPropagation();
-        stageCeoModelChainGlobalSync();
+        void stageCeoModelChainGlobalSync();
     });
     U.ceoModelChainAdd?.addEventListener("click", (event) => {
         event.stopPropagation();

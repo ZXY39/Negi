@@ -245,6 +245,8 @@ function mountControl(app, { readonly = false, chain = ["alpha", "beta", "gamma"
     U.ceoModelPickerList = new StubHTMLElement();
     U.ceoModelPickerEmpty = new StubHTMLElement();
     U.ceoModelModeNote = new StubHTMLElement();
+    // 「同步全局模型链」会重读模型目录，而 renderModelCatalog 的提示行没有 null 守卫。
+    U.modelHint = new StubHTMLElement();
     S.modelCatalog = {
         ...(S.modelCatalog || {}),
         catalog: CATALOG.map((item) => ({ ...item })),
@@ -855,12 +857,19 @@ test("删空会话链后保存恢复全局模型链", async () => {
 
     await app.saveCeoModelChain([]);
 
-    assert.deepEqual(writesOf(app).map((call) => [call[0], call[2].mode, call[2].model_keys]), [["patch", "chain", []]]);
+    // 空草稿与「同步全局模型链」走同一个写：不带 model_keys，后端摘掉会话链键。
+    assert.deepEqual(writesOf(app).map((call) => [call[0], call[2]]), [["patch", { mode: "chain" }]]);
     assert.equal(app.S.ceoModelSelection.isSessionChain, false);
 });
 
-test("点同步全局模型链只把草稿清空，一个写请求都不发", () => {
-    const app = loadApp();
+test("点同步全局模型链把服务端最新那条全局链拉成底稿，一个写请求都不发", async () => {
+    const app = loadApp({
+        // 目录里此刻的全局链与面板缓存的那份不同：同步必须重读，不能拿旧缓存铺列表。
+        getOrgGraphModels: async () => ({
+            catalog: CATALOG.map((item) => ({ ...item })),
+            roles: { ceo: ["gamma", "beta"], execution: [], inspection: [], memory: [] },
+        }),
+    });
     mountControl(app);
     app.bindCeoModelModeControls();
     app.applyCeoModelSelectionPayload("web:test", { mode: "chain", model_keys: ["beta", "alpha"] });
@@ -869,37 +878,71 @@ test("点同步全局模型链只把草稿清空，一个写请求都不发", ()
     assert.deepEqual(Array.from(app.ceoModelChainDraft()), ["beta", "alpha"]);
 
     app.U.ceoModelChainReset.listeners.click[0]({ stopPropagation() {} });
+    for (let i = 0; i < 6; i += 1) await new Promise((resolve) => setTimeout(resolve, 0));
 
-    assert.deepEqual(Array.from(app.ceoModelChainDraft()), []);
+    // 列表铺的是刚拉到的全局链，不是空列表、也不是那份旧缓存。
+    assert.deepEqual(Array.from(app.ceoModelChainDraft()), ["gamma", "beta"]);
+    assert.equal(app.U.ceoModelChainList.innerHTML.includes("Gamma"), true);
+    assert.equal(app.U.ceoModelChainEmpty.hidden, true);
     assert.equal(app.ceoModelChainDirty(), true);
-    // 清空只是 staged：保存才落盘，所以此刻「保存」可用、服务端还没被碰过。
     assert.equal(app.U.ceoModelChainApply.disabled, false);
+    // 同步只改草稿：服务端一条写都没收到。
     assert.deepEqual(writesOf(app), []);
-    // 空链要说清后果，不能只留一个没有解释的空列表。
-    assert.equal(app.U.ceoModelChainEmpty.hidden, false);
 });
 
-test("同步全局模型链后再点保存，才发出一次空载荷并回到只读态", async () => {
-    const app = loadApp();
+test("同步全局模型链后直接保存＝摘掉会话链继续跟随全局", async () => {
+    const app = loadApp({
+        getOrgGraphModels: async () => ({
+            catalog: CATALOG.map((item) => ({ ...item })),
+            roles: { ceo: ["gamma", "beta"], execution: [], inspection: [], memory: [] },
+        }),
+    });
     mountControl(app);
     app.bindCeoModelModeControls();
     app.applyCeoModelSelectionPayload("web:test", { mode: "chain", model_keys: ["beta", "alpha"] });
     app.openCeoModelModePanel();
     app.U.ceoModelChainEdit.listeners.click[0]({ stopPropagation() {} });
     app.U.ceoModelChainReset.listeners.click[0]({ stopPropagation() {} });
+    for (let i = 0; i < 6; i += 1) await new Promise((resolve) => setTimeout(resolve, 0));
     assert.equal(app.U.ceoModelModeChain.textContent, "模型链（此会话）");
 
     app.U.ceoModelChainApply.listeners.click[0]();
     for (let i = 0; i < 6; i += 1) await new Promise((resolve) => setTimeout(resolve, 0));
 
-    assert.deepEqual(writesOf(app).map((call) => [call[1], call[2].mode, call[2].model_keys]), [
-        ["web:test", "chain", []],
-    ]);
+    // 草稿与全局链逐位相同 ⇒ 不再存一份副本：发不带 model_keys 的 chain 载荷，后端摘键。
+    assert.deepEqual(writesOf(app).map((call) => [call[1], call[2]]), [["web:test", { mode: "chain" }]]);
     assert.equal(app.S.ceoModelSelection.isSessionChain, false);
     assert.equal(app.S.ceoModelSelection.chainEditing, false);
-    // 回到只读：列表重新显示正在生效的全局链，页签也说回（全局）。
-    assert.deepEqual(Array.from(app.ceoModelChainDraft()), ["alpha", "beta", "gamma"]);
     assert.equal(app.U.ceoModelModeChain.textContent, "模型链（全局）");
+    assert.deepEqual(Array.from(app.ceoModelChainDraft()), ["gamma", "beta"]);
+});
+
+test("同步成全局底稿后再动一手，保存才落这条会话链", async () => {
+    const app = loadApp({
+        getOrgGraphModels: async () => ({
+            catalog: CATALOG.map((item) => ({ ...item })),
+            roles: { ceo: ["gamma", "beta"], execution: [], inspection: [], memory: [] },
+        }),
+    });
+    mountControl(app);
+    app.bindCeoModelModeControls();
+    app.openCeoModelModePanel();
+    app.U.ceoModelChainEdit.listeners.click[0]({ stopPropagation() {} });
+    app.U.ceoModelChainReset.listeners.click[0]({ stopPropagation() {} });
+    for (let i = 0; i < 6; i += 1) await new Promise((resolve) => setTimeout(resolve, 0));
+    assert.deepEqual(Array.from(app.ceoModelChainDraft()), ["gamma", "beta"]);
+    // 这个会话本来就跟随全局：同步回来的底稿就是正在生效的那条，没有改动可保存。
+    assert.equal(app.ceoModelChainDirty(), false);
+    assert.equal(app.U.ceoModelChainApply.disabled, true);
+
+    // 在底稿上删掉一位：草稿不再等于全局链，保存必须落显式 keys。
+    clickChainRowControl(app, "data-ceo-chain-remove", "beta");
+    app.U.ceoModelChainApply.listeners.click[0]();
+    for (let i = 0; i < 6; i += 1) await new Promise((resolve) => setTimeout(resolve, 0));
+
+    assert.deepEqual(writesOf(app).map((call) => [call[2].mode, call[2].model_keys]), [["chain", ["gamma"]]]);
+    assert.equal(app.S.ceoModelSelection.isSessionChain, true);
+    assert.equal(app.U.ceoModelModeChain.textContent, "模型链（此会话）");
 });
 
 test("页签标出这条链是谁的：没会话链时跟随全局，存了会话链才标此会话", () => {
