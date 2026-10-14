@@ -86,54 +86,79 @@ def read_events(workspace: Path, *, limit: int = 200) -> list[dict[str, Any]]:
 
 
 def configured_key_material(workspace: Path) -> dict[str, list[str]]:
-    """What key material is on disk right now, split into present and missing.
+    """What key material is on disk right now, split into present, empty and missing.
 
-    An empty directory counts as missing: a wipe that leaves `records/` behind as a husk must
-    not read as an intact store.
+    An empty directory or a zero-byte file counts as *not* material: a wipe can leave the
+    husk of `records/` behind, and one ENOSPC leaves a 0-byte envelope that decrypts to
+    nothing. Both have to read as damage rather than as an intact store.
     """
     root = Path(workspace)
     present: list[str] = []
+    empty: list[str] = []
     missing: list[str] = []
     for relative in KEY_STORE_PATHS:
         path = root / relative
         if path.is_dir():
-            if any(child.is_file() for child in path.rglob("*")):
+            if any(child.is_file() and child.stat().st_size > 0 for child in path.rglob("*")):
                 present.append(relative)
+            elif any(child.is_file() for child in path.rglob("*")):
+                empty.append(relative)
             else:
                 missing.append(relative)
         elif path.exists():
-            present.append(relative)
+            if path.stat().st_size > 0:
+                present.append(relative)
+            else:
+                empty.append(relative)
         else:
             missing.append(relative)
-    return {"present": present, "missing": missing}
+    return {"present": present, "empty": empty, "missing": missing}
+
+
+def holds_material(workspace: Path, relative: str) -> bool:
+    """Whether that path exists with at least one non-empty file behind it."""
+    path = Path(workspace) / relative
+    if path.is_dir():
+        return any(child.is_file() and child.stat().st_size > 0 for child in path.rglob("*"))
+    return path.is_file() and path.stat().st_size > 0
 
 
 def store_is_worth_keeping(workspace: Path) -> bool:
     """Whether a snapshot of this store deserves a generation.
 
-    Snapshotting a half-present store (an empty index left behind by a wipe) would push the
-    good generations out of the retention window, so the test is deliberately strict: the
-    envelope, a record file, or a realm overlay.
+    Snapshotting a half-present store (an empty index or a 0-byte envelope left behind by a
+    wipe) would push the good generations out of the retention window, so the test is
+    deliberately strict: a non-empty envelope, a non-empty record file, or a non-empty realm
+    overlay.
     """
     root = Path(workspace)
-    if (root / ".g3ku" / "llm-config" / "master.key").exists():
+    if any(
+        path.is_file() and path.stat().st_size > 0
+        for path in (root / ".g3ku" / "llm-config" / "records").glob("*")
+    ):
         return True
-    if any(path.is_file() for path in (root / ".g3ku" / "llm-config" / "records").glob("*")):
+    if any(
+        path.is_file() and path.stat().st_size > 0
+        for path in (root / ".g3ku" / "secret-realms").glob("*")
+    ):
         return True
-    if any(path.is_file() for path in (root / ".g3ku" / "secret-realms").glob("*")):
-        return True
-    return False
+    master_key = root / ".g3ku" / "llm-config" / "master.key"
+    return master_key.is_file() and master_key.stat().st_size > 0
 
 
 def store_was_configured(workspace: Path) -> bool:
-    """True when key material exists now, or when the evidence trail says it used to.
+    """True when usable key material exists now, or when its remains prove it used to.
 
-    A fresh project must stay quiet: an empty `index.json` and no records is the shape of a
-    workspace nobody has configured yet.
+    A fresh project must stay quiet, but a zero-length envelope is not a fresh project: that
+    file is only ever written by an initialization, so its presence - even damaged - is the
+    evidence that something was configured and is now unreadable.
     """
-    if store_is_worth_keeping(workspace):
+    root = Path(workspace)
+    if store_is_worth_keeping(root):
         return True
-    for event in read_events(workspace, limit=400):
+    if any((root / relative).exists() for relative in LOSS_EVIDENCE_PATHS):
+        return True
+    for event in read_events(root, limit=400):
         if str(event.get("event") or "") == "key_store_backed_up" and int(event.get("files") or 0) > 0:
             return True
     return False
@@ -205,13 +230,18 @@ def list_backups(workspace: Path) -> list[Path]:
 
 
 def prune_backups(workspace: Path) -> int:
-    """Drop generations older than KEEP_GENERATIONS.
+    """Drop generations older than KEEP_GENERATIONS - unless the live store is unusable.
 
-    Every generation is created from a store worth keeping, so the newest few always hold at
-    least one usable copy of the key material.
+    Every generation is created from a store worth keeping, so the newest few normally always
+    hold a usable copy. That assumption is exactly wrong while the live envelope is missing or
+    0 bytes: there, no generation is redundant, and pruning would be the step that turns a
+    recoverable incident into a permanent one.
     """
+    root = Path(workspace)
+    if not holds_material(root, ".g3ku/llm-config/master.key"):
+        return 0
     removed = 0
-    for path in list_backups(workspace)[KEEP_GENERATIONS:]:
+    for path in list_backups(root)[KEEP_GENERATIONS:]:
         try:
             shutil.rmtree(path)
             removed += 1
@@ -229,7 +259,7 @@ def audit_key_store_continuity(workspace: Path, *, reason: str = "boot") -> dict
     """
     root = Path(workspace)
     generations = list_backups(root)
-    lost = [relative for relative in LOSS_EVIDENCE_PATHS if not (root / relative).exists()]
+    lost = [relative for relative in LOSS_EVIDENCE_PATHS if not holds_material(root, relative)]
     if lost and store_was_configured(root):
         record_event(root, "key_store_missing_material", reason=reason, missing=lost, backups=len(generations))
         return {
@@ -256,8 +286,7 @@ def restore_from_backup(workspace: Path, generation: Path | str, *, dry_run: boo
         source = backup_root(root) / str(generation)
     if not source.is_dir():
         raise FileNotFoundError(f"no such key store backup: {source}")
-    live_master_key = root / ".g3ku" / "llm-config" / "master.key"
-    if not dry_run and live_master_key.exists():
+    if not dry_run and holds_material(root, ".g3ku/llm-config/master.key"):
         raise ValueError("refusing to overwrite an existing master.key; move it aside first")
     restored: list[str] = []
     for path in sorted(item for item in source.rglob("*") if item.is_file()):
