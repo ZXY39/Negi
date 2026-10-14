@@ -35,6 +35,8 @@
       initialContextWindowTokens: "",
       imageMultimodalEnabled: false,
       initialImageMultimodalEnabled: false,
+      imageTailOnly: false,
+      initialImageTailOnly: false,
       reasoningEffort: DEFAULT_REASONING_EFFORT,
       initialReasoningEffort: DEFAULT_REASONING_EFFORT,
       maxOutputTokens: String(DEFAULT_MAX_OUTPUT_TOKENS),
@@ -440,6 +442,8 @@
       initialContextWindowTokens: "",
       imageMultimodalEnabled: false,
       initialImageMultimodalEnabled: false,
+      imageTailOnly: false,
+      initialImageTailOnly: false,
       reasoningEffort: validReasoningEffortValue(draft?.parameters?.reasoning_effort) || DEFAULT_REASONING_EFFORT,
       initialReasoningEffort: validReasoningEffortValue(draft?.parameters?.reasoning_effort) || DEFAULT_REASONING_EFFORT,
       maxOutputTokens: Number.isInteger(validMaxOutputTokensValue(draft?.parameters?.max_tokens))
@@ -486,6 +490,8 @@
       initialContextWindowTokens: trim(binding.context_window_tokens),
       imageMultimodalEnabled: Boolean(binding.image_multimodal_enabled),
       initialImageMultimodalEnabled: Boolean(binding.image_multimodal_enabled),
+      imageTailOnly: Boolean(binding.image_tail_only),
+      initialImageTailOnly: Boolean(binding.image_tail_only),
       reasoningEffort: validReasoningEffortValue(draft?.parameters?.reasoning_effort) || DEFAULT_REASONING_EFFORT,
       initialReasoningEffort: validReasoningEffortValue(draft?.parameters?.reasoning_effort) || DEFAULT_REASONING_EFFORT,
       maxOutputTokens: Number.isInteger(validMaxOutputTokensValue(draft?.parameters?.max_tokens))
@@ -538,6 +544,7 @@
     const singleApiKeyMaxConcurrencyInput = document.getElementById("llm-binding-single-api-key-max-concurrency");
     const contextWindowTokensInput = document.getElementById("llm-binding-context-window-tokens");
     const imageMultimodalEnabledInput = document.getElementById("llm-binding-image-multimodal-enabled");
+    const imageTailOnlyInput = document.getElementById("llm-binding-image-tail-only");
     const reasoningEffortInput = document.getElementById("llm-binding-reasoning-effort");
     const maxOutputTokensInput = document.getElementById("llm-binding-max-output-tokens");
     const requestTimeoutSecondsInput = document.getElementById("llm-binding-request-timeout-seconds");
@@ -557,6 +564,7 @@
     }
     if (contextWindowTokensInput) editor.contextWindowTokens = trim(contextWindowTokensInput.value || "");
     if (imageMultimodalEnabledInput) editor.imageMultimodalEnabled = Boolean(imageMultimodalEnabledInput.checked);
+    if (imageTailOnlyInput) editor.imageTailOnly = Boolean(imageTailOnlyInput.checked);
     if (reasoningEffortInput) editor.reasoningEffort = trim(reasoningEffortInput.value || "");
     if (maxOutputTokensInput) editor.maxOutputTokens = trim(maxOutputTokensInput.value || "");
     if (requestTimeoutSecondsInput) editor.requestTimeoutSeconds = trim(requestTimeoutSecondsInput.value || "");
@@ -976,29 +984,57 @@
       contextWindowTokens,
       requestTimeoutSeconds,
       imageMultimodalEnabled: Boolean(editor?.imageMultimodalEnabled),
+      imageTailOnly: Boolean(editor?.imageTailOnly),
       draft,
     };
   }
 
-  function renderImageMultimodalField({ layout = "default" } = {}) {
-    const editor = llmState().editor || emptyEditorState();
+  // 两颗勾选框各自写一行 input 标签：样式台账（tests/resources/org_graph_checkbox_styling.test.js）
+  // 按源码行登记每颗走哪一档画法，抽成公共模板会让两颗挤在同一行、台账对不上落点。
+  function renderImageCheckboxShell({ label, layout = "default", title = "" }) {
     const fieldClasses = ["resource-field", "llm-image-checkbox-field"];
     const controlClasses = ["llm-image-checkbox-control"];
     let spacer = "";
     if (layout === "header") {
       fieldClasses.push("llm-image-checkbox-field--header");
-      spacer = '<span class="resource-field-label llm-image-checkbox-spacer" aria-hidden="true">是否为图像多模态</span>';
+      spacer = `<span class="resource-field-label llm-image-checkbox-spacer" aria-hidden="true">${escv(label)}</span>`;
     } else if (layout === "inline") {
       fieldClasses.push("llm-image-checkbox-field--inline");
       controlClasses.push("llm-image-checkbox-control--inline");
     }
+    return { fieldClasses, controlClasses, spacer, titleAttr: title ? ` title="${escv(title)}"` : "" };
+  }
+
+  function renderImageMultimodalField({ layout = "default" } = {}) {
+    const editor = llmState().editor || emptyEditorState();
+    const shell = renderImageCheckboxShell({ label: "是否为图像多模态", layout });
     return `
-      <label class="${fieldClasses.join(" ")}" for="llm-binding-image-multimodal-enabled">
-        ${spacer}
-        <span class="${controlClasses.join(" ")}">
+      <label class="${shell.fieldClasses.join(" ")}" for="llm-binding-image-multimodal-enabled"${shell.titleAttr}>
+        ${shell.spacer}
+        <span class="${shell.controlClasses.join(" ")}">
           <span>是否为图像多模态</span>
           <span class="llm-image-checkbox-input">
             <input id="llm-binding-image-multimodal-enabled" type="checkbox"${editor.imageMultimodalEnabled ? " checked" : ""}>
+            <span class="llm-image-checkbox-indicator" aria-hidden="true"></span>
+          </span>
+        </span>
+      </label>`;
+  }
+
+  function renderImageTailOnlyField({ layout = "default" } = {}) {
+    const editor = llmState().editor || emptyEditorState();
+    const shell = renderImageCheckboxShell({
+      label: "图片只在最后一条消息生效",
+      layout,
+      title: "仅当实测过「图在末条看得见、排在后面就看不见」的上游才勾。勾上后本轮上传的图随该回合第一条请求的末位发出一次，之后不再重发；要再看就 content_open。",
+    });
+    return `
+      <label class="${shell.fieldClasses.join(" ")}" for="llm-binding-image-tail-only"${shell.titleAttr}>
+        ${shell.spacer}
+        <span class="${shell.controlClasses.join(" ")}">
+          <span>图片只在最后一条消息生效</span>
+          <span class="llm-image-checkbox-input">
+            <input id="llm-binding-image-tail-only" type="checkbox"${editor.imageTailOnly ? " checked" : ""}>
             <span class="llm-image-checkbox-indicator" aria-hidden="true"></span>
           </span>
         </span>
@@ -1127,6 +1163,7 @@
       <div class="llm-form-grid llm-form-grid--binding-header">
         ${renderFetchModelListField()}
         ${renderImageMultimodalField()}
+        ${renderImageTailOnlyField()}
         ${renderContextWindowField(state.editor)}
       </div>`}
       <div id="llm-model-list-panel" class="llm-model-list-panel" hidden></div>`;
@@ -1721,6 +1758,7 @@
           retry_count: bindingDraft.retryCount,
           single_api_key_max_concurrency: bindingDraft.singleApiKeyMaxConcurrency,
           image_multimodal_enabled: bindingDraft.imageMultimodalEnabled,
+          image_tail_only: bindingDraft.imageTailOnly,
         },
         draft,
       });
@@ -1757,6 +1795,9 @@
     }
     if (bindingDraft.imageMultimodalEnabled !== Boolean(binding.image_multimodal_enabled)) {
       bindingPatch.image_multimodal_enabled = bindingDraft.imageMultimodalEnabled;
+    }
+    if (bindingDraft.imageTailOnly !== Boolean(binding.image_tail_only)) {
+      bindingPatch.image_tail_only = bindingDraft.imageTailOnly;
     }
     const nameInput = document.getElementById("llm-edit-name-input");
     if (nameInput) {

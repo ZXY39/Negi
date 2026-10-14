@@ -24,6 +24,10 @@ Manage .g3ku/config.json model catalog, provider templates/drafts/bindings, and 
 - `image_multimodal_enabled`: Whether the model can take images. A chain is treated as
   image-incapable when any member is off, so this changes what every chain holding the model can do;
   the write echoes the affected chains.
+- `image_tail_only`: Set true only for an upstream that reads images from the **last message** of the
+  request and silently ignores images sitting earlier in history (no error, no billed tokens). When
+  true, inbound uploads ride the tail of the first hop of that turn instead of the user turn, so they
+  are visible once and not re-sent on later hops. Leave false otherwise.
 - `quota_pool_key`: Optional quota pool shared with other bindings.
 - `name`: Display name shown in the catalog and chains.
 - `retry_on`: Custom retry keywords (list or comma-separated string) matched as lowercase substrings of the provider error text; a hit triggers automatic retry. Preset aliases `network` and `429` still expand; defaults to `network, 429`. An empty list disables keyword retry instead of restoring the default.
