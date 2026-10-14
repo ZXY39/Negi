@@ -15268,7 +15268,7 @@ function memoryProcessedOpLabel(item) {
 const NOTE_REF_RE = /(?:\bref:|见noteid:)(note_[a-z0-9_]+)\b/g;
 // note 正文里指回别的 note 的两种形状：旧标记 `ref:note_xxx`，以及常驻行同款句柄形状
 // `note:n0bfc7` / `(note: n0bfc7)`。归并 note 浏览层用它在正文里画出"下一级"。
-const NOTE_TOKEN_RE = /(?:\bref:|见noteid:)(note_[a-z0-9_]+)\b|\(\s*note:\s*(n[0-9a-f]{5})\s*\)|\bnote:(n[0-9a-f]{5})\b/g;
+const NOTE_TOKEN_RE = /(?:\bref:|见noteid:)(note_[a-z0-9_]+)\b|\(\s*note:\s*([nc][0-9a-f]{5})\s*\)|\bnote:([nc][0-9a-f]{5})\b/g;
 const MEMORY_VIEW_POLL_MS = 15000;
 
 function renderMemoryNoteRefChip(noteRef) {

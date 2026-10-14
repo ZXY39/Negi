@@ -172,11 +172,14 @@ test("note body tokens become the next level, escaped text stays text", () => {
     const { renderMemoryTextWithNoteTokens } = loadApp();
 
     const html = renderMemoryTextWithNoteTokens(
-        "反代见 (note: n0bfc7) 与 note:n1a2b3；旧标记 ref:note_deep_link 也要能点开\n\n<script>x</script>"
+        "反代见 (note: n0bfc7) 与 note:n1a2b3；分类句柄走 c 前缀 (note: c1a2b3) 和 note:c4d5e6；旧标记 ref:note_deep_link 也要能点开\n\n<script>x</script>"
     );
 
     assert.match(html, /data-memory-note-ref="n0bfc7"/);
     assert.match(html, /data-memory-note-ref="n1a2b3"/);
+    // 两棵树的句柄都要认：`c` 是 memory/index/ 的分类 note
+    assert.match(html, /data-memory-note-ref="c1a2b3"/);
+    assert.match(html, /data-memory-note-ref="c4d5e6"/);
     assert.match(html, /data-memory-note-ref="note_deep_link"/);
     // 正文里除令牌外一律转义：可点入口不能顺带把正文当 HTML 注入
     assert.doesNotMatch(html, /<script>/);

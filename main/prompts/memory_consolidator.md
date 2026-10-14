@@ -25,7 +25,7 @@
 - `note_writes: Array<{ note_ref, body, edits? }>`
   新建或整体改写分类 note 用 `body`；改已有分类 note 的局部用 `edits`
   （`[{old_text, new_text}]`，`old_text` 必须唯一命中一次，`new_text` 留空即删掉这段）。
-  `note_ref` 必须 `note_` 开头。
+  `note_ref` 必须 `note_` 开头。分类 note 与普通 note 共用一套名字：若某个名字已被普通 note 占用，这一条会被当场打回，换一个名字重交即可。
   `body` 的第一行是这个分类覆盖的范围说明，它会原样出现在长期记忆块末尾的归并区里。
   整体改写前先 `memory_read_note` 读全文，交回的 `body` 要包含必须留下的内容。
 - `retirements: Array<{ memory_id, note_ref }>`

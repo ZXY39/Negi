@@ -33,13 +33,14 @@ def _add(
     source: str = "self",
     from_user: bool = False,
     note_ref: str = "",
+    now_iso: str = "2026-04-25T00:00:00+08:00",
 ) -> str:
     row = manager._memory_repo.create_memory(
         memory_body=body,
         minimal_memory=minimal,
         source=source,
         from_user=from_user,
-        now_iso="2026-04-25T00:00:00+08:00",
+        now_iso=now_iso,
         note_ref=note_ref,
     )
     return str(row["memory_id"])
@@ -92,7 +93,7 @@ def test_retiring_writes_the_column_and_never_the_delete_button(tmp_path: Path) 
         assert "反代端口改成" not in entries_text
         assert block_text.startswith(markdown_memory.CONSOLIDATION_HEADING)
         assert "本机运行环境" in block_text
-        assert f"(note: {markdown_memory.note_handle('note_local_env')})" in block_text
+        assert f"(note: {markdown_memory.note_handle('note_local_env', category=True)})" in block_text
         assert "note_local_env" not in block_text, "the resident line shows the handle, not the name"
     finally:
         manager.close()
@@ -160,15 +161,32 @@ def test_a_broken_category_link_drops_the_line_and_is_reported(tmp_path: Path) -
 def test_the_admin_browser_lists_every_class_with_its_count(tmp_path: Path) -> None:
     manager = _manager(tmp_path)
     try:
-        first = _add(manager, body="反代端口改成 8799 之后要重启 nginx", minimal="本机环境->端口")
-        second = _add(manager, body="网页端口固定 18790，占用时不许自动换", minimal="本机环境->网页端口")
+        # 分类按行首次出现排序，行的读序是 (created_at, memory_id)：时间必须给开，
+        # 同一时间戳下 memory_id 是随机串，顺序就成了跑一次变一次。
+        first = _add(
+            manager,
+            body="反代端口改成 8799 之后要重启 nginx",
+            minimal="本机环境->端口",
+            now_iso="2026-04-25T00:00:01+08:00",
+        )
+        second = _add(
+            manager,
+            body="网页端口固定 18790，占用时不许自动换",
+            minimal="本机环境->网页端口",
+            now_iso="2026-04-25T00:00:02+08:00",
+        )
         _write_category(
             manager,
             "note_local_env",
             "要改本机端口或重启反代时打开\n\n## 反代端口\n8799\n",
         )
         _retire(manager, [first, second], "note_local_env")
-        broken = _add(manager, body="指向不存在分类的记忆", minimal="断链->记忆")
+        broken = _add(
+            manager,
+            body="指向不存在分类的记忆",
+            minimal="断链->记忆",
+            now_iso="2026-04-25T00:00:03+08:00",
+        )
         _retire(manager, [broken], "note_gone")
 
         items = manager.list_consolidation_categories()
@@ -176,7 +194,7 @@ def test_the_admin_browser_lists_every_class_with_its_count(tmp_path: Path) -> N
         assert items[0]["scope_line"] == "要改本机端口或重启反代时打开"
         assert items[0]["entry_count"] == 2
         assert items[0]["unusable"] is False
-        assert items[0]["handle"] == _markdown_memory().note_handle("note_local_env")
+        assert items[0]["handle"] == _markdown_memory().note_handle("note_local_env", category=True)
         # 常驻行不渲染的断链分类，浏览面仍要列出来：否则操作员看到的是"少了一类"而不是"链断了"。
         assert items[1]["unusable"] is True
         assert items[1]["scope_line"] == ""
@@ -216,7 +234,7 @@ def test_the_consolidation_block_is_excluded_from_both_counting_judgements(tmp_p
         markdown_memory = _markdown_memory()
         document = (tmp_path / "memory" / "MEMORY.md").read_text(encoding="utf-8")
         assert markdown_memory.CONSOLIDATION_HEADING in document
-        assert f"- 大类 (note: {markdown_memory.note_handle('note_big')})" in document
+        assert f"- 大类 (note: {markdown_memory.note_handle('note_big', category=True)})" in document
         assert "(note: note_big)" not in document
         assert "S" * 3000 not in document, "only the index line is resident; the body loads on demand"
         assert len(document) > 130, "the document exceeds document_max and still landed"
@@ -540,7 +558,8 @@ def test_reconcile_notes_never_invents_a_category_note(tmp_path: Path) -> None:
     manager = _manager(tmp_path)
     try:
         ordinary = _add(manager, body="细节在 note 里", minimal="细节->正文", note_ref="note_deep")
-        _write_category(manager, "note_deep", "细节正文")
+        _write_category(manager, "note_details", "细节正文")
+        _retire(manager, [ordinary], "note_details")
         category_id = _add(manager, body="分类被删掉的退场记忆", minimal="断链->分类")
         _retire(manager, [category_id], "note_missing_cat")
 
@@ -614,5 +633,97 @@ def test_a_batch_may_only_retire_the_memories_it_was_offered(tmp_path: Path) -> 
             repair_reason="",
         )
         assert "只能是上面「待归并记忆」列出的那些" in prompt
+    finally:
+        manager.close()
+
+
+def test_a_category_note_may_not_reuse_an_ordinary_note_name(tmp_path: Path) -> None:
+    """两份同名文件共用一个名字，读侧只能命中其中一个：归并侧在暂存层就拒。"""
+    module = _module()
+    manager = _manager(tmp_path)
+    try:
+        memory_id = _add(manager, body="反代端口要写进笔记", minimal="端口->笔记", note_ref="note_ports")
+        (manager.notes_dir / "note_ports.md").write_text("普通笔记正文\n", encoding="utf-8")
+
+        session = module._ConsolidationToolSession(
+            notes_dir=manager.notes_dir,
+            index_dir=manager.index_dir,
+        )
+        result = session.apply_batch(
+            note_writes=[{"note_ref": "note_ports", "body": "端口分类\n"}],
+            retirements=[{"memory_id": memory_id, "note_ref": "note_ports"}],
+        )
+
+        assert result["ok"] is False
+        assert "already an ordinary note" in json.dumps(result["errors"], ensure_ascii=False)
+        assert not (manager.index_dir / "note_ports.md").exists()
+    finally:
+        manager.close()
+
+
+def test_an_ordinary_note_may_not_reuse_a_category_note_name(tmp_path: Path) -> None:
+    """反方向同一条规则：普通笔记不能占用已被分类 note 使用的名字。"""
+    module = _module()
+    manager = _manager(tmp_path)
+    try:
+        _write_category(manager, "note_deploy", "部署分类\n")
+
+        session = module._MemoryToolSession(
+            snapshot_text=manager.snapshot_text(),
+            notes_dir=manager.notes_dir,
+            index_dir=manager.index_dir,
+        )
+        result = session.apply_batch(note_upserts={"note_deploy": "部署笔记\n"})
+
+        assert result["ok"] is False
+        assert "already a category note" in json.dumps(result["errors"], ensure_ascii=False)
+        assert not (manager.notes_dir / "note_deploy.md").exists()
+    finally:
+        manager.close()
+
+
+def test_the_two_note_trees_keep_separate_handles(tmp_path: Path) -> None:
+    markdown = _markdown_memory()
+    manager = _manager(tmp_path)
+    try:
+        owner = _add(manager, body="端口细节写在普通笔记里", minimal="端口->普通笔记", note_ref="note_ports")
+        (manager.notes_dir / "note_ports.md").write_text("普通笔记正文\n", encoding="utf-8")
+        _write_category(manager, "note_ports", "分类笔记正文")
+        _retire(manager, [owner], "note_ports")
+        manager._rebuild_memory_snapshot_from_sqlite(now_iso="2026-04-25T00:00:06+08:00")
+
+        ordinary_handle = markdown.note_handle("note_ports")
+        category_handle = markdown.note_handle("note_ports", category=True)
+        assert ordinary_handle.startswith("n")
+        assert category_handle.startswith("c")
+        assert ordinary_handle != category_handle
+
+        # 归并区那行带的是 c 句柄，读回来必须是 index/ 那份，不是同名普通笔记
+        assert f"(note: {category_handle})" in manager._consolidation_block_text()
+        assert manager.load_note(category_handle) == "分类笔记正文"
+        assert manager.load_note(ordinary_handle) == "普通笔记正文\n"
+        assert manager.resolve_note_ref(category_handle) == "note_ports"
+
+        # 库里已经存在的同名冲突不再静默：doctor 报出来
+        report = manager.doctor_report(now_iso="2026-04-25T00:00:07+08:00")
+        assert report["note_name_collisions"] == ["note_ports"]
+        assert "note_name_collisions" in [item["name"] for item in report["checks"] if not item["ok"]]
+    finally:
+        manager.close()
+
+
+def test_reconcile_refuses_to_create_an_ordinary_note_over_a_category_name(tmp_path: Path) -> None:
+    manager = _manager(tmp_path)
+    try:
+        owner = _add(manager, body="细节在笔记里", minimal="细节->笔记", note_ref="note_deep")
+        _write_category(manager, "note_deep", "分类正文")
+        _retire(manager, [owner], "note_deep")
+
+        report = manager.reconcile_notes()
+
+        # 只查 notes/ 时这个名字算"缺文件"，但造一份出去就坐实了同名两份
+        assert report["skipped_name_collisions"] == ["note_deep"]
+        assert "note_deep" not in report["created_missing_notes"]
+        assert not (manager.notes_dir / "note_deep.md").exists()
     finally:
         manager.close()

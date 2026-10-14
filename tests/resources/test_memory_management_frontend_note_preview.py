@@ -231,10 +231,14 @@ def test_memory_note_read_endpoint_admits_the_resident_handle(monkeypatch: pytes
     assert response.json()["item"]["ref"] == "note_ports"
     assert stub_manager.calls == ["note_ports"]
 
+    # 归并区那行给的是 c 前缀的分类句柄，形状闸门两种都要放过
+    category = client.get("/api/memory/notes/c106dd")
+    assert category.status_code == 200
+
     invalid = client.get("/api/memory/notes/n106dd/../x")
     assert invalid.status_code == 400
     assert invalid.json()["detail"]["code"] == "memory_note_invalid_ref"
-    assert stub_manager.calls == ["note_ports"]
+    assert stub_manager.calls == ["note_ports", "c106dd"]
 
 
 def test_consolidation_note_browser_wires_the_read_only_lane() -> None:
@@ -268,6 +272,10 @@ def test_consolidation_note_browser_wires_the_read_only_lane() -> None:
     assert "list_consolidation_categories" in route
     for writer in ("update_current_memory", "delete_current_memories", "update_note", "apply_batch"):
         assert writer not in route
+
+    # 句柄分两棵树：`n` 是 memory/notes/，`c` 是 memory/index/，闸门与前端令牌都要认两种
+    assert 'MEMORY_NOTE_HANDLE_RE = re.compile(r"^[nc][0-9a-f]{5}$")' in admin_py
+    assert "[nc][0-9a-f]{5}" in app_js
 
     assert "def list_consolidation_categories(self)" in runtime_py
     # 常驻行仍只渲染可用分类：浏览面放宽不能顺手把断链印进上下文

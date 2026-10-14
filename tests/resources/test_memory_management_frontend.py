@@ -1325,6 +1325,8 @@ def test_memory_operation_chips_use_one_color_per_operation() -> None:
         "consolidate",
     }
     assert len(set(colors.values())) == 8
+    # 记忆退场是黄：它既不是新增也不是删除，而是这条正文搬进了分类 note
+    assert colors["consolidate"] == "#a16207"
 
 
 def test_note_edit_and_note_reap_records_survive_into_the_memory_surfaces() -> None:
