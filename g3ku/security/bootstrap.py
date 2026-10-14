@@ -12,6 +12,7 @@ import threading
 from typing import Any
 
 from cryptography.fernet import Fernet, InvalidToken
+from loguru import logger
 
 from g3ku.security.key_store_backup import (
     audit_key_store_continuity,
@@ -343,6 +344,10 @@ class BootstrapSecurityService:
                 "unlock_scope": UNLOCK_SCOPE,
                 "legacy_detected": self.legacy_detected(),
                 "auto_unlock": _auto_unlock_key_path(self.workspace).exists(),
+                # 解锁态不等于钥匙对得上：钥匙与覆盖层不成对时读出来是空的，写入全被拒，
+                # 而 mode 仍然显示 unlocked。没有这两位，操作员只能从"apikey 都空了"反推。
+                "overlay_readable": None if mode != "unlocked" else (not self._overlay_unverified),
+                "overlay_entries": 0 if self._overlay_unverified else len(self._overlay_cache),
                 "key_store": key_store,
             }
 
@@ -521,6 +526,10 @@ class BootstrapSecurityService:
                 self._activate(master_key=clean_key)
                 if self._overlay_unverified:
                     raise ValueError("master key cannot decrypt the installed secret overlay")
+                if _auto_unlock_key_path(self.workspace).exists():
+                    # 这份 bearer 文件按设计不进配置包，留着它就是留着一把上一任主密钥：
+                    # 启动顺序里它排在口令前面，项目会以"已解锁"的身份带着解不开自己覆盖层的钥匙起来。
+                    self.set_auto_unlock(enabled=True)
             except Exception:
                 self.lock()
                 raise
@@ -587,6 +596,12 @@ class BootstrapSecurityService:
             # data owned by another key.
             self._overlay_cache = {}
             self._overlay_unverified = True
+            logger.error(
+                "secret overlay cannot be opened with the activated master key; every stored key reads "
+                "empty and all secret writes are refused until the project is unlocked with the password "
+                "that wraps the installed envelope ({})",
+                _single_overlay_path(self.workspace),
+            )
             return
         self._overlay_unverified = False
         # Activation never writes. Re-persisting what was just read turned every

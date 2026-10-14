@@ -343,6 +343,14 @@ Provider retry troubleshooting note:
 - 修复只有两条路：把记录本身找回来（配置包导入 / `negi security restore` 代际回滚），或删掉坏行再重新添加配置。管理面的详情保存第一步是按旧 id 更新记录，那次更新要求记录存在，所以就地改字段救不了这种行。删行会连带摘掉链位、绑定名与会话固定，先试找回记录。
 - 凭据记录整本丢失（`llm-config/index.json` 是空 `configs`）时先按上一条「界面停在初始化向导」恢复 records，再回到这里看 `record_missing` 是否清零。
 
+### 导入配置包后同步新配置失败 secret_overlay_decrypt_failed，apikey 全是空
+
+钥匙与覆盖层是成对换的，而 `auto-unlock.key` 按设计不在包里。启动顺序 内存已解锁 → `G3KU_BOOTSTRAP_MASTER_KEY` → **auto-unlock 文件** → 口令，所以那份旧 bearer 件会先赢：进程以"已解锁"的身份带着上一任主密钥起来，`overlay_readable=false`，所有密钥读成空、所有写入被守卫拒绝（`g3ku/security/bootstrap.py` 的 `undecryptable … refusing to overwrite`）。
+
+- 判据分两层，别混：`/api/bootstrap/status` 的 `overlay_readable` / `overlay_entries` 说的是**这个 web 进程**；worker 那一侧看 `task_commands`——`command_type=refresh_runtime_config` 且 `status=failed`、`error_text=secret_overlay_decrypt_failed` 的行，配上 `worker_id`，就是某个还在用旧钥匙的 worker。web 已换对而 worker 仍旧是常见形态，因为 worker 的主密钥是 web 派生它时用 env 递过去的。
+- 处置：关掉自动解锁 → 锁定 → 用**这个包的口令**解锁（磁盘上的 `master.key` 已是包写入的信封）→ 重启，让 worker 由解锁后的 web 重新派生；要免密再把自动解锁打开，这次写进去的是正确主密钥。
+- 留证：`/api/bootstrap/status` 的 `key_store.backups` 与 `.g3ku/security-events.jsonl`。`negi security status` 只看文件在不在，看不到钥匙配不配——那一位只在进程内读得出。
+
 ### 托管 worker 看门狗 / 任务大厅持续显示「worker stale」
 
 本地默认启动（非 `--no-worker` / 容器）下，Web 解锁后托管一个 task worker 子进程（`python -m g3ku worker`）：worker 每 1–2s 写 `worker_status` 心跳并续 `task_worker` 租约（`worker_leases`，TTL 20s）。`/api/tasks/worker-status` 在心跳 `updated_at` 距今超过 15s（有活动任务 60s）时报告 `stale`，前端据此冻结创建/恢复控件并显示条幅。
