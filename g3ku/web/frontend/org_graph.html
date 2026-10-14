@@ -250,7 +250,8 @@
                                                     type="button" role="radio" aria-checked="false">指定模型</button>
                                             </div>
                                             <div id="ceo-model-chain-pane" class="ceo-model-chain-pane" hidden>
-                                                <p class="ceo-model-chain-hint">拖动调整优先级；保存后只作用于本会话。</p>
+                                                <p id="ceo-model-chain-hint" class="ceo-model-chain-hint"
+                                                    hidden>拖动调整优先级；保存后只作用于本会话。</p>
                                                 <div id="ceo-model-chain-confirm" class="ceo-model-chain-confirm"
                                                     role="status" hidden>
                                                     <span id="ceo-model-chain-confirm-text"
@@ -273,10 +274,14 @@
                                                 <p id="ceo-model-chain-empty" class="ceo-model-chain-empty" hidden>
                                                     模型链为空，保存后本会话跟随全局模型链。</p>
                                                 <div id="ceo-model-chain-actions" class="ceo-model-chain-actions">
+                                                    <button id="ceo-model-chain-edit" class="ceo-model-chain-edit"
+                                                        type="button">编辑</button>
+                                                    <button id="ceo-model-chain-reset" class="ceo-model-chain-reset"
+                                                        type="button" hidden>同步全局模型链</button>
                                                     <button id="ceo-model-chain-add" class="ceo-model-chain-add"
-                                                        type="button">加入模型</button>
+                                                        type="button" hidden>加入模型</button>
                                                     <button id="ceo-model-chain-apply" class="ceo-model-chain-apply"
-                                                        type="button">应用</button>
+                                                        type="button" hidden>保存</button>
                                                 </div>
                                             </div>
                                             <div id="ceo-model-picker" class="ceo-model-picker" hidden>

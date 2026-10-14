@@ -189,6 +189,9 @@ const S = {
         // 打开 picker 的目的：pin=选一个固定模型，append=往会话链里加成员。
         pickerPurpose: "pin",
         chainKeys: [],
+        // 链栏两态：false=只读（只有「编辑」），true=编辑（把手、叉号与三点动作行）。
+        // 只读态永远显示当前生效的那条链，会话没自带链时就是全局链，随全局自动更新。
+        chainEditing: false,
         // 会话链原文（空数组=跟随全局角色链）；chainKeys 是面板草稿，基线由两者共同决定。
         sessionChainKeys: [],
         isSessionChain: false,
@@ -510,6 +513,7 @@ const U = {
     ceoModelModeChain: document.getElementById("ceo-model-mode-chain"),
     ceoModelModePinned: document.getElementById("ceo-model-mode-pinned"),
     ceoModelChainPane: document.getElementById("ceo-model-chain-pane"),
+    ceoModelChainHint: document.getElementById("ceo-model-chain-hint"),
     ceoModelChainList: document.getElementById("ceo-model-chain-list"),
     ceoModelChainEmpty: document.getElementById("ceo-model-chain-empty"),
     ceoModelChainConfirm: document.getElementById("ceo-model-chain-confirm"),
@@ -517,6 +521,8 @@ const U = {
     ceoModelChainConfirmAccept: document.getElementById("ceo-model-chain-confirm-accept"),
     ceoModelChainConfirmCancel: document.getElementById("ceo-model-chain-confirm-cancel"),
     ceoModelChainActions: document.getElementById("ceo-model-chain-actions"),
+    ceoModelChainEdit: document.getElementById("ceo-model-chain-edit"),
+    ceoModelChainReset: document.getElementById("ceo-model-chain-reset"),
     ceoModelChainAdd: document.getElementById("ceo-model-chain-add"),
     ceoModelChainApply: document.getElementById("ceo-model-chain-apply"),
     ceoModelPicker: document.getElementById("ceo-model-picker"),
@@ -2051,6 +2057,7 @@ function resetCeoModelSelection(sessionId) {
         search: "",
         pickerPurpose: "pin",
         chainKeys: ceoModelChainKeys(),
+        chainEditing: false,
         sessionChainKeys: [],
         isSessionChain: false,
         dragFrom: -1,
@@ -2265,7 +2272,16 @@ async function saveCeoModelChain(keys) {
         });
         if (sessionId !== String(activeSessionId() || "").trim()) return null;
         const applied = applyCeoModelSelectionPayload(sessionId, payload);
-        S.ceoModelSelection = { ...S.ceoModelSelection, pendingChainSwitch: false, dragFrom: -1, dropIndex: null };
+        // 落盘成功就回到只读态：面板显示的必须是已经生效的那条链，草稿使命已完成。
+        S.ceoModelSelection = {
+            ...S.ceoModelSelection,
+            pendingChainSwitch: false,
+            chainEditing: false,
+            dragFrom: -1,
+            dropIndex: null,
+        };
+        // 退出编辑态必须重画：链栏要从"草稿"回到只读那一眼，页签也要跟着换标。
+        syncCeoModelModeControl();
         showToast(modelKeys.length
             ? { title: "本会话模型链已保存", text: "这条链只作用于当前会话。", kind: "success" }
             : { title: "本会话已恢复全局模型链", text: "这个会话不再自带模型链。", kind: "success" });
@@ -2394,6 +2410,30 @@ function removeCeoModelChainMember(modelKey) {
     setCeoModelChainDraft(ceoModelChainDraft().filter((item) => String(item) !== key));
 }
 
+function enterCeoModelChainEdit() {
+    const sessionId = String(activeSessionId() || "").trim();
+    if (!sessionId) return;
+    const selection = ceoModelSelectionFor(sessionId) || S.ceoModelSelection;
+    S.ceoModelSelection = {
+        ...selection,
+        sessionId,
+        panelOpen: true,
+        pickerOpen: false,
+        paneTouched: true,
+        chainEditing: true,
+        // 已经在草稿上动过手就不能被"重新打种"冲掉；没动过时才用生效中的那条链起稿。
+        chainKeys: ceoModelChainDirty() ? ceoModelChainDraft() : ceoModelChainBaseline(),
+        dragFrom: -1,
+        dropIndex: null,
+    };
+    syncCeoModelModeControl();
+}
+
+// 「同步全局模型链」只把草稿清成空：空会话链就是跟随全局，按既有契约仍然要点保存才落盘。
+function stageCeoModelChainGlobalSync() {
+    setCeoModelChainDraft([]);
+}
+
 function ceoModelChainBaseline() {
     // 会话链为空即跟随全局角色链，所以草稿的基线是「当前生效的那条」而不是「全局那条」。
     const sessionKeys = Array.isArray(S.ceoModelSelection.sessionChainKeys) ? S.ceoModelSelection.sessionChainKeys : [];
@@ -2425,26 +2465,43 @@ function renderCeoModelChainPane() {
     const sessionId = String(activeSessionId() || "").trim();
     const selection = ceoModelSelectionFor(sessionId);
     const visible = !!selection?.panelOpen && !selection?.pickerOpen;
+    const editing = !!selection?.chainEditing;
     U.ceoModelChainList.innerHTML = "";
+    if (U.ceoModelChainHint) U.ceoModelChainHint.hidden = true;
     if (U.ceoModelChainEmpty) U.ceoModelChainEmpty.hidden = true;
     if (U.ceoModelChainActions) U.ceoModelChainActions.hidden = true;
     if (!visible) return;
     const keys = ceoModelChainDraft();
-    if (U.ceoModelChainEmpty) U.ceoModelChainEmpty.hidden = keys.length > 0;
-    // 动作行常驻：「加入模型」必须在还没改动时就可点，否则这条链没有起点。
     if (U.ceoModelChainActions) U.ceoModelChainActions.hidden = false;
-    if (U.ceoModelChainAdd) U.ceoModelChainAdd.disabled = !!selection?.saving;
-    if (U.ceoModelChainApply) U.ceoModelChainApply.disabled = !!selection?.saving || !ceoModelChainDirty();
+    // 「编辑」是只读态唯一的入口，其余三颗只在编辑态里出现；行常驻不跳版。
+    if (U.ceoModelChainEdit) {
+        U.ceoModelChainEdit.hidden = editing;
+        U.ceoModelChainEdit.disabled = !!selection?.saving;
+    }
+    if (U.ceoModelChainReset) U.ceoModelChainReset.hidden = !editing;
+    if (U.ceoModelChainAdd) {
+        U.ceoModelChainAdd.hidden = !editing;
+        U.ceoModelChainAdd.disabled = !!selection?.saving;
+    }
+    if (U.ceoModelChainApply) {
+        U.ceoModelChainApply.hidden = !editing;
+        U.ceoModelChainApply.disabled = !editing || !!selection?.saving || !ceoModelChainDirty();
+    }
+    // 拖拽说明只在编辑态讲：只读态没有可拖的东西，写了就是噪声。
+    if (U.ceoModelChainHint) U.ceoModelChainHint.hidden = !editing;
+    if (U.ceoModelChainEmpty) U.ceoModelChainEmpty.hidden = keys.length > 0;
     U.ceoModelChainList.innerHTML = keys.map((key, index) => {
         const item = ceoModelCatalogItem(key);
         const title = ceoModelDisplayTitle(item) || key;
+        const grip = editing ? '<span class="ceo-model-chain-grip" aria-hidden="true">&#9776;</span>' : "";
+        const remove = editing
+            ? `<button type="button" class="ceo-model-chain-remove" draggable="false"
+                    data-ceo-chain-remove="${esc(key)}" aria-label="${esc(`从模型链移除 ${title}`)}">&times;</button>`
+            : "";
         return `
-            <article class="ceo-model-chain-row" draggable="true" role="listitem"
+            <article class="ceo-model-chain-row"${editing ? ' draggable="true"' : ""} role="listitem"
                 data-ceo-chain-index="${index}" data-ceo-chain-key="${esc(key)}">
-                <span class="ceo-model-chain-grip" aria-hidden="true">&#9776;</span>
-                <span class="ceo-model-chain-title">${esc(title)}</span>
-                <button type="button" class="ceo-model-chain-remove" draggable="false"
-                    data-ceo-chain-remove="${esc(key)}" aria-label="${esc(`从模型链移除 ${title}`)}">&times;</button>
+                ${grip}<span class="ceo-model-chain-title">${esc(title)}</span>${remove}
             </article>`;
     }).join("");
 }
@@ -2470,7 +2527,8 @@ function ceoModelChainDropIndex(list, clientY) {
 function beginCeoModelChainDrag(event) {
     const list = U.ceoModelChainList;
     const card = event.target instanceof Element ? event.target.closest("[data-ceo-chain-index]") : null;
-    if (!list || !card || S.ceoModelSelection.saving) return;
+    // 只读态不许拖：行上的 data-ceo-chain-index 两态都在，只靠"没有把手"不够。
+    if (!list || !card || !S.ceoModelSelection.chainEditing || S.ceoModelSelection.saving) return;
     const index = Number(card.dataset.ceoChainIndex);
     if (!Number.isInteger(index) || index < 0) return;
     S.ceoModelSelection = { ...S.ceoModelSelection, dragFrom: index, dropIndex: null };
@@ -2594,7 +2652,11 @@ function syncCeoModelModeControl() {
         brain.setAttribute("aria-expanded", panelOpen ? "true" : "false");
     }
     if (U.ceoModelModePanel) U.ceoModelModePanel.hidden = !panelOpen;
-    if (U.ceoModelModeChain) U.ceoModelModeChain.setAttribute("aria-checked", effectiveKey ? "false" : "true");
+    if (U.ceoModelModeChain) {
+        U.ceoModelModeChain.setAttribute("aria-checked", effectiveKey ? "false" : "true");
+        // 页签自己回答「这条链是谁的」：没有会话链时列表就是全局链，并随全局自动更新。
+        U.ceoModelModeChain.textContent = selection?.isSessionChain ? "模型链（此会话）" : "模型链（全局）";
+    }
     if (U.ceoModelModePinned) U.ceoModelModePinned.setAttribute("aria-checked", effectiveKey ? "true" : "false");
     if (U.ceoModelPicker) U.ceoModelPicker.hidden = !(panelOpen && selection?.pickerOpen);
     if (U.ceoModelChainPane) U.ceoModelChainPane.hidden = !(panelOpen && !selection?.pickerOpen);
@@ -2635,6 +2697,8 @@ function openCeoModelModePanel() {
         paneTouched: false,
         pendingChainSwitch: false,
         search: "",
+        // 打开永远先给一眼生效中的链，改动要靠点「编辑」。
+        chainEditing: false,
         // 面板自己展开的 picker 永远是「选固定模型」，append 只由「加入模型」按钮进入。
         pickerPurpose: "pin",
         chainKeys: ceoModelChainBaseline(),
@@ -2657,6 +2721,7 @@ function closeCeoModelModePanel() {
         paneTouched: false,
         pendingChainSwitch: false,
         search: "",
+        chainEditing: false,
         dragFrom: -1,
         dropIndex: null,
     };
@@ -2845,7 +2910,18 @@ function bindCeoModelModeControls() {
         event.stopPropagation();
         removeCeoModelChainMember(target.getAttribute("data-ceo-chain-remove"));
     });
-    U.ceoModelChainAdd?.addEventListener("click", () => {
+    U.ceoModelChainEdit?.addEventListener("click", (event) => {
+        // 这三颗都会在处理中重画链栏，祖先那条「点了面板外就关面板」的全局判定会把这一下
+        // 当成面板外，所以面板内的控件一律截断冒泡。
+        event.stopPropagation();
+        enterCeoModelChainEdit();
+    });
+    U.ceoModelChainReset?.addEventListener("click", (event) => {
+        event.stopPropagation();
+        stageCeoModelChainGlobalSync();
+    });
+    U.ceoModelChainAdd?.addEventListener("click", (event) => {
+        event.stopPropagation();
         openCeoModelModePicker("append");
     });
     U.ceoModelChainList?.addEventListener("dragstart", (event) => beginCeoModelChainDrag(event));

@@ -4591,7 +4591,7 @@ textarea {
     background: var(--bg-surface-inner);
 }
 
-/* 链行与「指定模型」列表保持同一密度：只显示配置名称，前置拖动把手。 */
+/* 链行与「指定模型」列表保持同一密度：只显示配置名称，编辑态前置拖动把手。 */
 .ceo-model-chain-row {
     display: flex;
     align-items: center;
@@ -4601,11 +4601,16 @@ textarea {
     border: 1px solid transparent;
     border-radius: 11px;
     color: var(--text-primary);
-    cursor: grab;
+    cursor: default;
     transition: background-color 0.16s ease, border-color 0.16s ease, box-shadow 0.16s ease, opacity 0.16s ease;
 }
 
-.ceo-model-chain-row:hover {
+/* 只读态的行没有把手也没有叉号，不能画成"能拖"的样子。 */
+.ceo-model-chain-row[draggable="true"] {
+    cursor: grab;
+}
+
+.ceo-model-chain-row[draggable="true"]:hover {
     background: var(--bg-hover);
 }
 
@@ -4678,10 +4683,16 @@ textarea {
     display: flex;
     align-items: center;
     justify-content: flex-end;
+    /* 面板只有 336px 宽：编辑态三点挤不下时换行，不压窄标签。 */
+    flex-wrap: wrap;
     gap: 8px;
 }
 
 .ceo-model-chain-actions[hidden] {
+    display: none !important;
+}
+
+.ceo-model-chain-actions > button[hidden] {
     display: none !important;
 }
 
@@ -4753,6 +4764,8 @@ textarea {
     cursor: not-allowed;
 }
 
+.ceo-model-chain-edit,
+.ceo-model-chain-reset,
 .ceo-model-chain-add,
 .ceo-model-chain-apply {
     padding: 6px 14px;
@@ -4765,7 +4778,9 @@ textarea {
     transition: background-color 0.16s ease, box-shadow 0.16s ease;
 }
 
-/* 加入是次级动作：不带品牌色，免得和「应用」争主按钮的位置。 */
+/* 只有「保存」写回服务端，其余三颗都停在草稿上：不带品牌色，免得和它争主按钮的位置。 */
+.ceo-model-chain-edit,
+.ceo-model-chain-reset,
 .ceo-model-chain-add {
     border-color: var(--border-color);
     background: var(--bg-panel);
@@ -4777,11 +4792,17 @@ textarea {
     box-shadow: var(--shadow-sm);
 }
 
+.ceo-model-chain-edit:focus-visible,
+.ceo-model-chain-reset:focus-visible,
+.ceo-model-chain-add:focus-visible,
 .ceo-model-chain-apply:focus-visible {
     outline: 0;
     box-shadow: 0 0 0 3px color-mix(in srgb, var(--brand-primary) 18%, transparent);
 }
 
+.ceo-model-chain-edit:disabled,
+.ceo-model-chain-reset:disabled,
+.ceo-model-chain-add:disabled,
 .ceo-model-chain-apply:disabled {
     opacity: 0.6;
     cursor: not-allowed;

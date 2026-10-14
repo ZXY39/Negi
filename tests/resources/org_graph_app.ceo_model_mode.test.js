@@ -184,6 +184,9 @@ function loadApp(apiClientOverrides = {}) {
             ceoModelChainDraft,
             appendCeoModelChainMember,
             removeCeoModelChainMember,
+            enterCeoModelChainEdit,
+            stageCeoModelChainGlobalSync,
+            beginCeoModelChainDrag,
             modelChainMemberKeys,
             modelChainMixedImageCapability,
             modelChainImageIncapableNames,
@@ -225,9 +228,12 @@ function mountControl(app, { readonly = false, chain = ["alpha", "beta", "gamma"
     U.ceoModelModeChain = new StubHTMLElement();
     U.ceoModelModePinned = new StubHTMLElement();
     U.ceoModelChainPane = new StubHTMLElement();
+    U.ceoModelChainHint = new StubHTMLElement();
     U.ceoModelChainList = new StubHTMLElement();
     U.ceoModelChainEmpty = new StubHTMLElement();
     U.ceoModelChainActions = new StubHTMLElement();
+    U.ceoModelChainEdit = new StubHTMLElement();
+    U.ceoModelChainReset = new StubHTMLElement();
     U.ceoModelChainAdd = new StubHTMLElement();
     U.ceoModelChainApply = new StubHTMLElement();
     U.ceoModelChainConfirm = new StubHTMLElement();
@@ -260,7 +266,7 @@ test("默认态是模型链，脑图标未展开面板", () => {
     assert.equal(app.U.ceoComposerUsageBrain.classList.contains("is-panel-open"), false);
 });
 
-test("打开面板展示模型链列表并切换脑图标展开态", () => {
+test("打开面板默认只读：列出正在生效的链，只给一颗编辑", () => {
     const app = loadApp();
     mountControl(app);
     app.openCeoModelModePanel();
@@ -271,19 +277,63 @@ test("打开面板展示模型链列表并切换脑图标展开态", () => {
     // 模型链模式显示链面板、隐藏指定模型列表。
     assert.equal(app.U.ceoModelChainPane.hidden, false);
     assert.equal(app.U.ceoModelPicker.hidden, true);
-    // 紧凑链行：只显示配置名称，带拖动把手，按服务端顺序渲染。
+    // 只读态的行：只有配置名，按服务端顺序渲染，没有把手、没有叉号、不可拖。
     const markup = app.U.ceoModelChainList.innerHTML;
-    assert.equal((markup.match(/class="ceo-model-chain-grip"/g) || []).length, 3);
     assert.equal((markup.match(/class="ceo-model-chain-title"/g) || []).length, 3);
     assert.equal((markup.match(/resource-list-subtitle|policy-chip/g) || []).length, 0);
     assert.ok(markup.indexOf("Alpha 配置") < markup.indexOf("beta"));
     assert.ok(markup.indexOf("beta") < markup.indexOf("Gamma"));
-    // 每行都要有移除控件，否则这条链只能减不能加以外的方向也修不了。
-    assert.equal((markup.match(/class="ceo-model-chain-remove"/g) || []).length, 3);
-    // 动作行常驻，未改动时是「应用」禁用而不是整行消失。
+    assert.equal((markup.match(/class="ceo-model-chain-grip"/g) || []).length, 0);
+    assert.equal((markup.match(/class="ceo-model-chain-remove"/g) || []).length, 0);
+    assert.equal(markup.includes('draggable="true"'), false);
+    // 拖动说明只在编辑态讲。
+    assert.equal(app.U.ceoModelChainHint.hidden, true);
+    // 只读态的动作行只有「编辑」，其余三颗都不露面。
     assert.equal(app.U.ceoModelChainActions.hidden, false);
+    assert.equal(app.U.ceoModelChainEdit.hidden, false);
+    assert.equal(app.U.ceoModelChainEdit.disabled, false);
+    assert.equal(app.U.ceoModelChainReset.hidden, true);
+    assert.equal(app.U.ceoModelChainAdd.hidden, true);
+    assert.equal(app.U.ceoModelChainApply.hidden, true);
+});
+
+test("点编辑进入编辑态：三点动作、行可拖可删、保存先禁用", () => {
+    const app = loadApp();
+    mountControl(app);
+    app.openCeoModelModePanel();
+    app.enterCeoModelChainEdit();
+
+    const markup = app.U.ceoModelChainList.innerHTML;
+    assert.equal((markup.match(/class="ceo-model-chain-grip"/g) || []).length, 3);
+    assert.equal((markup.match(/class="ceo-model-chain-remove"/g) || []).length, 3);
+    assert.equal((markup.match(/draggable="true"/g) || []).length, 3);
+    assert.equal(app.U.ceoModelChainHint.hidden, false);
+    assert.equal(app.U.ceoModelChainEdit.hidden, true);
+    assert.equal(app.U.ceoModelChainReset.hidden, false);
+    assert.equal(app.U.ceoModelChainAdd.hidden, false);
+    assert.equal(app.U.ceoModelChainApply.hidden, false);
+    // 编辑态刚进来时草稿＝正在生效的链，所以「保存」禁用而不是整颗消失。
+    assert.equal(app.ceoModelChainDirty(), false);
     assert.equal(app.U.ceoModelChainApply.disabled, true);
-    assert.equal(app.U.ceoModelChainAdd.disabled, false);
+    // 进编辑不发任何写请求。
+    assert.deepEqual(writesOf(app), []);
+});
+
+test("只读态不给拖：拖拽起手直接被拒", () => {
+    const app = loadApp();
+    mountControl(app);
+    app.openCeoModelModePanel();
+    app.enterCeoModelChainEdit();
+    // 先证编辑态能起拖，再把状态放回只读。
+    const card = new StubHTMLElement();
+    card.dataset = { ceoChainIndex: "0" };
+    card.closest = () => card;
+    app.beginCeoModelChainDrag({ target: card, dataTransfer: { setData() {} } });
+    assert.equal(app.S.ceoModelSelection.dragFrom, 0);
+
+    app.S.ceoModelSelection = { ...app.S.ceoModelSelection, chainEditing: false, dragFrom: -1 };
+    app.beginCeoModelChainDrag({ target: card, dataTransfer: { setData() {} } });
+    assert.equal(app.S.ceoModelSelection.dragFrom, -1);
 });
 
 test("固定模型后链面板换成指定模型列表并显示固定标签", () => {
@@ -573,10 +623,11 @@ test("模型链为空时渲染空态提示", () => {
     assert.equal(app.U.ceoModelChainList.innerHTML, "");
 });
 
-test("拖拽换位只改草稿并亮出应用按钮", () => {
+test("拖拽换位只改草稿并亮出保存按钮", () => {
     const app = loadApp();
     mountControl(app);
     app.openCeoModelModePanel();
+    app.enterCeoModelChainEdit();
 
     // 把第一项拖到第三项之前。
     app.S.ceoModelSelection = { ...app.S.ceoModelSelection, dragFrom: 0, dropIndex: 2 };
@@ -586,7 +637,8 @@ test("拖拽换位只改草稿并亮出应用按钮", () => {
     assert.equal(app.S.ceoModelSelection.dragFrom, -1);
     assert.equal(app.ceoModelChainDirty(), true);
     assert.equal(app.U.ceoModelChainActions.hidden, false);
-    // 未点应用前不发写请求。
+    assert.equal(app.U.ceoModelChainApply.disabled, false);
+    // 未点保存前不发写请求。
     assert.deepEqual(writesOf(app), []);
 });
 
@@ -594,6 +646,7 @@ test("拖到原位置不产生草稿差异", () => {
     const app = loadApp();
     mountControl(app);
     app.openCeoModelModePanel();
+    app.enterCeoModelChainEdit();
 
     app.S.ceoModelSelection = { ...app.S.ceoModelSelection, dragFrom: 0, dropIndex: 1 };
     app.finishCeoModelChainDrag({ preventDefault() {} });
@@ -603,11 +656,12 @@ test("拖到原位置不产生草稿差异", () => {
     assert.deepEqual(writesOf(app), []);
 });
 
-test("点击应用把会话链提交到本会话，不写全局角色链", async () => {
+test("点保存把会话链提交到本会话，不写全局角色链，并回到只读态", async () => {
     const app = loadApp();
     mountControl(app);
     app.bindCeoModelModeControls();
     app.openCeoModelModePanel();
+    app.U.ceoModelChainEdit.listeners.click[0]({ stopPropagation() {} });
 
     app.S.ceoModelSelection = { ...app.S.ceoModelSelection, dragFrom: 0, dropIndex: 2 };
     app.finishCeoModelChainDrag({ preventDefault() {} });
@@ -623,7 +677,11 @@ test("点击应用把会话链提交到本会话，不写全局角色链", async
     assert.deepEqual(Array.from(app.ceoModelChainBaseline()), ["beta", "alpha", "gamma"]);
     assert.deepEqual(Array.from(app.ceoModelChainKeys()), ["alpha", "beta", "gamma"]);
     assert.equal(app.ceoModelChainDirty(), false);
-    assert.equal(app.U.ceoModelChainApply.disabled, true);
+    // 落盘成功即退出编辑态：只读的那一眼必须是没有未保存改动的链。
+    assert.equal(app.S.ceoModelSelection.chainEditing, false);
+    assert.equal(app.U.ceoModelChainEdit.hidden, false);
+    assert.equal(app.U.ceoModelChainApply.hidden, true);
+    assert.equal(app.U.ceoModelModeChain.textContent, "模型链（此会话）");
 });
 
 test("会话链保存失败回到生效中的那条链", async () => {
@@ -741,6 +799,7 @@ test("点行上的移除只改草稿，不提前发写请求", () => {
     mountControl(app);
     app.bindCeoModelModeControls();
     app.openCeoModelModePanel();
+    app.enterCeoModelChainEdit();
 
     // 移除同样会重画列表，必须截断冒泡，否则整个面板会被关掉。
     assert.equal(clickChainRowControl(app, "data-ceo-chain-remove", "beta"), true);
@@ -755,6 +814,8 @@ test("加入模型走真实点击：截断冒泡、回到链栏、只改草稿",
     const app = loadApp();
     mountControl(app, { chain: ["alpha"] });
     app.bindCeoModelModeControls();
+    app.openCeoModelModePanel();
+    app.U.ceoModelChainEdit.listeners.click[0]({ stopPropagation() {} });
     app.S.ceoModelSelection = { ...app.S.ceoModelSelection, chainKeys: ["alpha"] };
     app.openCeoModelModePicker("append");
 
@@ -782,7 +843,7 @@ test("加入模型走真实点击：截断冒泡、回到链栏、只改草稿",
     assert.deepEqual(writesOf(app), []);
 });
 
-test("删空会话链后应用恢复全局模型链", async () => {
+test("删空会话链后保存恢复全局模型链", async () => {
     const app = loadApp();
     mountControl(app);
     app.S.ceoModelSelection = {
@@ -798,15 +859,88 @@ test("删空会话链后应用恢复全局模型链", async () => {
     assert.equal(app.S.ceoModelSelection.isSessionChain, false);
 });
 
+test("点同步全局模型链只把草稿清空，一个写请求都不发", () => {
+    const app = loadApp();
+    mountControl(app);
+    app.bindCeoModelModeControls();
+    app.applyCeoModelSelectionPayload("web:test", { mode: "chain", model_keys: ["beta", "alpha"] });
+    app.openCeoModelModePanel();
+    app.U.ceoModelChainEdit.listeners.click[0]({ stopPropagation() {} });
+    assert.deepEqual(Array.from(app.ceoModelChainDraft()), ["beta", "alpha"]);
+
+    app.U.ceoModelChainReset.listeners.click[0]({ stopPropagation() {} });
+
+    assert.deepEqual(Array.from(app.ceoModelChainDraft()), []);
+    assert.equal(app.ceoModelChainDirty(), true);
+    // 清空只是 staged：保存才落盘，所以此刻「保存」可用、服务端还没被碰过。
+    assert.equal(app.U.ceoModelChainApply.disabled, false);
+    assert.deepEqual(writesOf(app), []);
+    // 空链要说清后果，不能只留一个没有解释的空列表。
+    assert.equal(app.U.ceoModelChainEmpty.hidden, false);
+});
+
+test("同步全局模型链后再点保存，才发出一次空载荷并回到只读态", async () => {
+    const app = loadApp();
+    mountControl(app);
+    app.bindCeoModelModeControls();
+    app.applyCeoModelSelectionPayload("web:test", { mode: "chain", model_keys: ["beta", "alpha"] });
+    app.openCeoModelModePanel();
+    app.U.ceoModelChainEdit.listeners.click[0]({ stopPropagation() {} });
+    app.U.ceoModelChainReset.listeners.click[0]({ stopPropagation() {} });
+    assert.equal(app.U.ceoModelModeChain.textContent, "模型链（此会话）");
+
+    app.U.ceoModelChainApply.listeners.click[0]();
+    for (let i = 0; i < 6; i += 1) await new Promise((resolve) => setTimeout(resolve, 0));
+
+    assert.deepEqual(writesOf(app).map((call) => [call[1], call[2].mode, call[2].model_keys]), [
+        ["web:test", "chain", []],
+    ]);
+    assert.equal(app.S.ceoModelSelection.isSessionChain, false);
+    assert.equal(app.S.ceoModelSelection.chainEditing, false);
+    // 回到只读：列表重新显示正在生效的全局链，页签也说回（全局）。
+    assert.deepEqual(Array.from(app.ceoModelChainDraft()), ["alpha", "beta", "gamma"]);
+    assert.equal(app.U.ceoModelModeChain.textContent, "模型链（全局）");
+});
+
+test("页签标出这条链是谁的：没会话链时跟随全局，存了会话链才标此会话", () => {
+    const app = loadApp();
+    mountControl(app);
+    app.openCeoModelModePanel();
+    assert.equal(app.U.ceoModelModeChain.textContent, "模型链（全局）");
+
+    app.applyCeoModelSelectionPayload("web:test", { mode: "chain", model_keys: ["gamma"] });
+    assert.equal(app.U.ceoModelModeChain.textContent, "模型链（此会话）");
+
+    app.applyCeoModelSelectionPayload("web:test", { mode: "chain", model_keys: [] });
+    assert.equal(app.U.ceoModelModeChain.textContent, "模型链（全局）");
+});
+
+test("点编辑不关面板：面板内控件都截断冒泡", () => {
+    const app = loadApp();
+    mountControl(app);
+    app.bindCeoModelModeControls();
+    app.openCeoModelModePanel();
+
+    for (const ref of ["ceoModelChainEdit", "ceoModelChainReset", "ceoModelChainAdd"]) {
+        const handlers = app.U[ref].listeners.click || [];
+        assert.equal(handlers.length, 1, `${ref} 应绑定一次点击`);
+        let stopped = false;
+        handlers[0]({ stopPropagation: () => { stopped = true; } });
+        assert.equal(stopped, true, `${ref} 必须截断冒泡，否则面板会被全局判定关掉`);
+    }
+});
+
 test("切回模型链板块不丢掉刚加入的草稿", () => {
     const app = loadApp();
     mountControl(app, { chain: ["alpha", "gamma"] });
     app.bindCeoModelModeControls();
     app.openCeoModelModePanel();
+    app.enterCeoModelChainEdit();
     app.openCeoModelModePicker("append");
 
     app.appendCeoModelChainMember("beta");
     assert.equal(app.S.ceoModelSelection.pickerOpen, false, "加完应回到链那一栏");
+    assert.equal(app.S.ceoModelSelection.chainEditing, true, "加成员是编辑态的动作，不该被踢回只读");
 
     // 用户再手动点一次板块，也不能把刚加的成员冲掉。
     app.showCeoModelChainPane();
