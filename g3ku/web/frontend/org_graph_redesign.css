@@ -68,6 +68,7 @@
     --ui-danger-soft: #3a2727;
     --ui-info: #76a9fa;
     --ui-info-soft: #272f3b;
+    --ui-retire: #facc15;
     --ui-inspecting: #a78bfa;
     --ui-inspecting-soft: #302b3d;
 
@@ -115,6 +116,7 @@
     --ui-danger-soft: #f8bbbb;
     --ui-info: #196ef7;
     --ui-info-soft: #bad4fc;
+    --ui-retire: #a16207;
     --ui-inspecting: #8058f8;
     --ui-inspecting-soft: #d9cdfd;
 
@@ -2254,6 +2256,11 @@
 
 [data-ui-version="v2"] .memory-op-chip[data-op="note_upsert"] {
     color: var(--ui-info);
+}
+
+/* 记忆退场是正文搬进分类 note，既不是新增也不是删除，所以单独一支黄 */
+[data-ui-version="v2"] .memory-op-chip[data-op="consolidate"] {
+    color: var(--ui-retire);
 }
 
 [data-ui-version="v2"] .memory-op-chip[data-op="nochange"] {

@@ -1328,6 +1328,13 @@ def test_memory_operation_chips_use_one_color_per_operation() -> None:
     # 记忆退场是黄：它既不是新增也不是删除，而是这条正文搬进了分类 note
     assert colors["consolidate"] == "#a16207"
 
+    # v2 界面下描边与底色都跟着 currentColor，所以这支黄要有自己的 token，
+    # 两个主题块各给一个值：浅色档的 #a16207 已经贴着"修改"的 #9a6d17，深色档另给亮黄
+    redesign = (REPO_ROOT / "g3ku/web/frontend/org_graph_redesign.css").read_text(encoding="utf-8")
+    assert '[data-ui-version="v2"] .memory-op-chip[data-op="consolidate"]' in redesign
+    assert "color: var(--ui-retire);" in redesign
+    assert redesign.count("--ui-retire:") == 2
+
 
 def test_note_edit_and_note_reap_records_survive_into_the_memory_surfaces() -> None:
     """The ledger keeps these records precisely so "was a note swept or edited by
