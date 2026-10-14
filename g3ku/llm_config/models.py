@@ -224,7 +224,6 @@ class ModelBindingDraft(StrictModel):
     retry_count: int = Field(default=0, ge=0)
     single_api_key_max_concurrency: SingleAPIKeyMaxConcurrency = None
     image_multimodal_enabled: bool = False
-    image_tail_only: bool = False
 
     @field_validator("single_api_key_max_concurrency", mode="before")
     @classmethod

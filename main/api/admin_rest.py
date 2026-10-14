@@ -1299,11 +1299,6 @@ async def create_model(payload: dict = Body(...)):
                 if 'image_multimodal_enabled' in payload
                 else payload.get('imageMultimodalEnabled', False)
             ),
-            image_tail_only=(
-                payload.get('image_tail_only')
-                if 'image_tail_only' in payload
-                else payload.get('imageTailOnly', False)
-            ),
             request_timeout_seconds=(
                 payload.get('request_timeout_seconds')
                 if 'request_timeout_seconds' in payload
@@ -1394,7 +1389,6 @@ async def update_model(model_key: str, payload: dict = Body(...)):
             name=_pick('name'),
             context_window_tokens=_pick('context_window_tokens', 'contextWindowTokens'),
             image_multimodal_enabled=_pick('image_multimodal_enabled', 'imageMultimodalEnabled'),
-            image_tail_only=_pick('image_tail_only', 'imageTailOnly'),
             quota_pool_key=_pick('quota_pool_key', 'quotaPoolKey'),
             request_timeout_seconds=_pick('request_timeout_seconds', 'requestTimeoutSeconds'),
         )

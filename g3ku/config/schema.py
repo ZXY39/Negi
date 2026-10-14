@@ -229,11 +229,6 @@ class ManagedModelConfig(Base):
     # 看门狗与流式首块/块间空闲超时。
     request_timeout_seconds: float | None = None
     image_multimodal_enabled: bool = False
-    # 该上游只把**最后一条消息**里的 image 块送进视觉通道：放在历史位置的图不报错、不计费、
-    # 也看不见（config.json 里写作 imageTailOnly）。它与 image_multimodal_enabled 正交——后者说
-    # "收不收图"，这条说"收哪一条"。只有做过两臂对照（图在末位看得见 / 不在末位看不见）才勾，
-    # 判据与消费点见 g3ku/config/model_manager.image_target_shape。
-    image_tail_only: bool = False
     # 是否把该 binding 回包的思考内容写进 assistant 历史行并重发给模型（config.json 里写作
     # reasoningContextEnabled）。默认开——只有文档明确拒绝历史行带该字段的网关才显式置 false。
     # 实际写不写按整条模型链取交集（任一位关闭则整链不带），判据见

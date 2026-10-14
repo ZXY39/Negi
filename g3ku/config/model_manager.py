@@ -63,40 +63,26 @@ def image_multimodal_chain_decision(app_config: Any, refs: Any) -> tuple[bool, l
     return bool(resolved_any and not blockers), blockers
 
 
-def image_target_shape(app_config: Any, ref: Any) -> tuple[bool, str, bool]:
-    """**这一发落到的那颗模型**的三样事实：收不收图、它的展示名、是否只读末条消息。
+def image_multimodal_target_decision(app_config: Any, ref: Any) -> tuple[bool, str]:
+    """**这一发落到的那颗模型**收不收图，以及它的展示名（降级文案要点名它）。
 
     与 `image_multimodal_chain_decision` 的分工是刻意的：整链 AND 只在"这一发可能落到链上
     任何一颗"时才保守，而装配层问的是"当前这颗"。拿链级判据去门装配层，已勾多模态的链首
     也会因为链尾没收图而看不到图（实盘 2026-10-13 CEO 链）。链级那份继续服务显示与写后
     回显。解析不到这一颗时按不收图处理：运行时发不出去的东西不该假装能看图。
-
-    `image_tail_only` 是**位置**事实不是能力事实：勾了它意味着这颗上游只把最后一条消息里的
-    image 块送进视觉通道，历史位置的图不报错、不计费、也看不见（实盘 2026-10-14 hy4-preview
-    两臂对照）。装配层据此把入站图改走尾部载体，而不是留在用户轮上。
     """
     key = str(ref or "").strip()
     getter = getattr(app_config, "get_managed_model", None)
     if not key or not callable(getter):
-        return False, key, False
+        return False, key
     try:
         model = getter(key)
     except Exception:
         model = None
     if model is None:
-        return False, key, False
+        return False, key
     display_name = str(getattr(model, "name", "") or "").strip() or key
-    return (
-        bool(getattr(model, "image_multimodal_enabled", False)),
-        display_name,
-        bool(getattr(model, "image_tail_only", False)),
-    )
-
-
-def image_multimodal_target_decision(app_config: Any, ref: Any) -> tuple[bool, str]:
-    """按当前这一颗判"收不收图"＋展示名（形状见 `image_target_shape`）。"""
-    enabled, display_name, _tail_only = image_target_shape(app_config, ref)
-    return enabled, display_name
+    return bool(getattr(model, "image_multimodal_enabled", False)), display_name
 
 
 _UNSET = object()
@@ -232,7 +218,6 @@ class ModelManager:
         name: str = "",
         context_window_tokens: int,
         image_multimodal_enabled: bool = False,
-        image_tail_only: bool = False,
         request_timeout_seconds: float | None = None,
     ) -> dict[str, Any]:
         clean_key = str(key or "").strip()
@@ -263,7 +248,6 @@ class ModelManager:
                 "retry_count": 0 if retry_count is None else int(retry_count),
                 "single_api_key_max_concurrency": normalize_single_api_key_max_concurrency(single_api_key_max_concurrency),
                 "image_multimodal_enabled": bool(image_multimodal_enabled),
-                "image_tail_only": bool(image_tail_only),
             },
         )
         for scope in scopes or []:
@@ -290,7 +274,6 @@ class ModelManager:
         name: str | None | object = _UNSET,
         context_window_tokens: int | None | object = _UNSET,
         image_multimodal_enabled: bool | object = _UNSET,
-        image_tail_only: bool | object = _UNSET,
         quota_pool_key: str | None | object = _UNSET,
         request_timeout_seconds: float | None | object = _UNSET,
     ) -> dict[str, Any]:
@@ -346,8 +329,6 @@ class ModelManager:
             )
         if image_multimodal_enabled is not _UNSET:
             item.image_multimodal_enabled = bool(image_multimodal_enabled)
-        if image_tail_only is not _UNSET:
-            item.image_tail_only = bool(image_tail_only)
         if quota_pool_key is not _UNSET:
             cleaned_pool_key = str(quota_pool_key or "").strip()
             item.quota_pool_key = cleaned_pool_key or None

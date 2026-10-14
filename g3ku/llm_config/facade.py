@@ -304,7 +304,6 @@ class LLMConfigFacade:
                 context_window_tokens=self._binding_context_window_tokens(record),
                 request_timeout_seconds=self._binding_request_timeout_seconds(record),
                 image_multimodal_enabled=bool(getattr(binding, "image_multimodal_enabled", False)),
-                image_tail_only=bool(getattr(binding, "image_tail_only", False)),
             )
         )
         return self.get_binding(config, binding.key)
@@ -354,11 +353,6 @@ class LLMConfigFacade:
             if raw_enabled is None and "imageMultimodalEnabled" in draft_payload:
                 raw_enabled = draft_payload.get("imageMultimodalEnabled")
             binding.image_multimodal_enabled = bool(raw_enabled)
-        if "image_tail_only" in draft_payload or "imageTailOnly" in draft_payload:
-            raw_tail_only = draft_payload.get("image_tail_only")
-            if raw_tail_only is None and "imageTailOnly" in draft_payload:
-                raw_tail_only = draft_payload.get("imageTailOnly")
-            binding.image_tail_only = bool(raw_tail_only)
         current = self._hydrate_record_secrets(self.repository.get(binding.llm_config_id))
         binding.context_window_tokens = self._binding_context_window_tokens(current)
         binding.request_timeout_seconds = self._binding_request_timeout_seconds(current)
@@ -471,7 +465,6 @@ class LLMConfigFacade:
             "context_window_tokens": record.parameters.get("context_window_tokens"),
             "request_timeout_seconds": record.parameters.get("request_timeout_seconds"),
             "image_multimodal_enabled": bool(getattr(binding, "image_multimodal_enabled", False)),
-            "image_tail_only": bool(getattr(binding, "image_tail_only", False)),
             "quota_pool_key": str(getattr(binding, "quota_pool_key", "") or "").strip() or None,
             "capability": record.capability.value,
             "auth_mode": record.auth_mode.value,
@@ -506,7 +499,6 @@ class LLMConfigFacade:
             "context_window_tokens": getattr(binding, "context_window_tokens", None),
             "request_timeout_seconds": getattr(binding, "request_timeout_seconds", None),
             "image_multimodal_enabled": bool(getattr(binding, "image_multimodal_enabled", False)),
-            "image_tail_only": bool(getattr(binding, "image_tail_only", False)),
             "quota_pool_key": str(getattr(binding, "quota_pool_key", "") or "").strip() or None,
             "capability": "",
             "auth_mode": "",

@@ -492,7 +492,6 @@ def _managed_models_payload(cfg: Config) -> tuple[list[dict[str, object]], dict[
             "description": item.description,
             "name": str(getattr(item, "name", "") or ""),
             "imageMultimodalEnabled": bool(getattr(item, "image_multimodal_enabled", False)),
-            "imageTailOnly": bool(getattr(item, "image_tail_only", False)),
         }
         if getattr(item, "context_window_tokens", None) is not None:
             payload["contextWindowTokens"] = int(getattr(item, "context_window_tokens", 0) or 0)
