@@ -94,7 +94,8 @@ class _StubMemoryManager:
             {
                 "note_ref": "note_local_env",
                 "handle": "n0bfc7",
-                "scope_line": "要改本机端口或重启反代时打开",
+                "scope_line": "大类:端口、反代、18790",
+                "scope_line_over_limit": False,
                 "entry_count": 2,
                 "unusable": False,
             },
@@ -102,7 +103,16 @@ class _StubMemoryManager:
                 "note_ref": "note_gone",
                 "handle": "n1a2b3",
                 "scope_line": "",
+                "scope_line_over_limit": False,
                 "entry_count": 1,
+                "unusable": True,
+            },
+            {
+                "note_ref": "note_long",
+                "handle": "c9f8e7",
+                "scope_line": "大类:" + "词" * 600,
+                "scope_line_over_limit": True,
+                "entry_count": 3,
                 "unusable": True,
             },
         ]
@@ -553,10 +563,13 @@ def test_index_notes_endpoint_lists_classes_and_keeps_broken_ones(stub_env):
     assert response.status_code == 200
     payload = response.json()
     assert payload["ok"] is True
-    assert payload["total"] == 2
+    assert payload["total"] == 3
     assert payload["items"][0]["note_ref"] == "note_local_env"
     assert payload["items"][0]["handle"] == "n0bfc7"
     # 断链分类照样返回：浏览面少一类比多一类更难查
     assert payload["items"][1]["unusable"] is True
+    # 超线的说明行不进常驻块，但这一位必须留给浏览面去说
+    assert payload["items"][2]["scope_line_over_limit"] is True
+    assert payload["items"][2]["unusable"] is True
     assert ("list_consolidation_categories", ()) in manager.calls
     assert _audit_lines(workspace) == []

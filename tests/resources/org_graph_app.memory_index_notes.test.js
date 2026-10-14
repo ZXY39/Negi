@@ -157,6 +157,20 @@ test("index list keeps every class row with handle, scope line and count", () =>
     assert.match(html, /分类 note 缺失或没有说明行/);
 });
 
+test("index list marks a scope line over the row cap without printing it", () => {
+    const { renderMemoryNoteIndexListHtml } = loadApp();
+    const scope = "大类:" + "词".repeat(600);
+    const html = renderMemoryNoteIndexListHtml({
+        indexBusy: false,
+        indexError: "",
+        indexItems: [{ note_ref: "note_long", handle: "c0ab12", scope_line: scope, scope_line_over_limit: true, unusable: true }],
+    });
+
+    assert.match(html, /is-unusable/);
+    assert.match(html, /过长未进常驻块/);
+    assert.doesNotMatch(html, /大类:/);
+});
+
 test("index list separates loading, error and empty states", () => {
     const { renderMemoryNoteIndexListHtml } = loadApp();
 
