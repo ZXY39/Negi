@@ -4628,7 +4628,14 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
         )
         setattr(target_session, "_frontdoor_stage_state", frontdoor_stage_state)
         setattr(target_session, "_frontdoor_canonical_context", frontdoor_canonical_context)
-        setattr(target_session, "_compression_state", compression_state)
+        # 会话自己判"这个 running 还有没有活的宿主"：被放弃的那一轮会按图状态把旧的
+        # running 覆盖回来，不挡在这里就会一路传到快照与连续性文件，界面上那条线就没人收。
+        adopt = getattr(target_session, "_adopt_compression_state", None)
+        setattr(
+            target_session,
+            "_compression_state",
+            adopt(compression_state) if callable(adopt) else compression_state,
+        )
         setattr(target_session, "_semantic_context_state", {})
         setattr(target_session, "_frontdoor_hydrated_tool_names", list(hydrated_tool_names))
         if isinstance(state, dict):
@@ -8170,6 +8177,9 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
                 "estimated_tool_schema_tokens": int(preflight_snapshot.get("estimated_tool_schema_tokens") or 0),
                 "estimated_image_tokens": int(preflight_snapshot.get("estimated_image_tokens") or 0),
                 "image_count": int(preflight_snapshot.get("image_count") or 0),
+                # 落盘的是"这一发实际要发的体"的末位读数，与 image_count 同一份消息，
+                # 否则 artifact 会说"发了图"而说不出这颗上游看不看得见。
+                "image_blocks_at_tail": self._frontdoor_tail_image_block_count(request_messages),
                 "image_estimation_method": str(preflight_snapshot.get("image_estimation_method") or ""),
             }
             preflight_shrink_reason = ""
