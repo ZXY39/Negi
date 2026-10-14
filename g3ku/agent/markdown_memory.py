@@ -145,6 +145,15 @@ CONSOLIDATION_HEADING = "## 归并记忆"
 CONSOLIDATION_REMINDER = (
     "note 是过去沉淀的经验，需要参考。冲突时以长期记忆为准，其次 note 正文，本节描述只作导航。"
 )
+# 每行说明的唯一上限。这一行是读者决定要不要打开这份 note 之前看到的整句信息，也是这段
+# 永久保留的字节里唯一由归并 agent 写的内容；超线的行不进常驻块，由 doctor 与浏览面报出。
+CONSOLIDATION_SCOPE_LINE_MAX_CHARS = 500
+
+
+def consolidation_scope_line(text: str) -> str:
+    """The category note's first non-empty line - the one row it gets in the resident block."""
+
+    return next((line.strip() for line in str(text or "").splitlines() if line.strip()), "")
 
 
 def render_consolidation_block(rows: list[tuple[str, str]]) -> str:

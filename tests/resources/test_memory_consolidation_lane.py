@@ -780,3 +780,66 @@ def test_the_consolidator_prompt_points_between_notes_in_a_shape_that_opens(tmp_
         assert manager.load_note("note_ports") == ordinary_body
     finally:
         manager.close()
+
+
+def test_an_over_long_category_scope_line_is_refused_at_staging(tmp_path: Path) -> None:
+    """说明行是常驻块里那一行：超线的 body 当场打回，同批改交不消耗只调一次的额度。"""
+    module = _module()
+    manager = _manager(tmp_path)
+    try:
+        memory_id = _add(manager, body="端口要写进笔记", minimal="端口->笔记")
+        nl = chr(10)
+        long_line = "大类:" + "、".join(f"关键词{index}" for index in range(120))
+        assert len(long_line) > 500
+
+        session = module._ConsolidationToolSession(
+            notes_dir=manager.notes_dir,
+            index_dir=manager.index_dir,
+        )
+        result = session.apply_batch(
+            note_writes=[{"note_ref": "note_scope", "body": long_line + nl + "正文" + nl}],
+            retirements=[{"memory_id": memory_id, "note_ref": "note_scope"}],
+        )
+        assert result["ok"] is False
+        assert "the resident row allows" in json.dumps(result["errors"], ensure_ascii=False)
+        assert not (manager.index_dir / "note_scope.md").exists()
+
+        second = session.apply_batch(
+            note_writes=[{"note_ref": "note_scope", "body": "大类:端口" + nl + "正文" + nl}],
+            retirements=[{"memory_id": memory_id, "note_ref": "note_scope"}],
+        )
+        assert second["ok"] is True, second
+    finally:
+        manager.close()
+
+
+def test_an_over_long_scope_line_leaves_the_block_but_stays_listed(tmp_path: Path) -> None:
+    """闸门只拦交回来的 body；改已有分类的首行超线时，这行不进常驻块，浏览面照样报出来。"""
+    manager = _manager(tmp_path)
+    try:
+        memory_id = _add(manager, body="细节在分类里", minimal="细节->分类")
+        nl = chr(10)
+        long_line = "大类:" + "、".join(f"词{index}" for index in range(140))
+        _write_category(manager, "note_long", long_line + nl + "正文" + nl)
+        _retire(manager, [memory_id], "note_long")
+
+        rows, broken = manager._consolidation_categories()
+        assert rows == []
+        assert broken == ["note_long"]
+        assert long_line not in manager._consolidation_block_text()
+
+        entries = manager.list_consolidation_categories()
+        assert len(entries) == 1
+        assert entries[0]["scope_line_over_limit"] is True
+        assert entries[0]["unusable"] is True
+        assert len(str(entries[0]["scope_line"])) > 500
+    finally:
+        manager.close()
+
+
+def test_the_consolidator_prompt_names_the_row_shape_and_its_cap() -> None:
+    markdown = _markdown_memory()
+    prompt = importlib.import_module("main.prompts").load_prompt("memory_consolidator.md")
+    assert "大类:关键词" in prompt
+    assert "不得拿 note 名、路径或 id 当关键词" in prompt
+    assert f"第一行整行不超过 {markdown.CONSOLIDATION_SCOPE_LINE_MAX_CHARS} 字" in prompt

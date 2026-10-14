@@ -22,9 +22,11 @@ from pydantic import BaseModel, create_model
 
 from g3ku.agent.file_locks import _release_file_lock, _try_acquire_file_lock
 from g3ku.agent.markdown_memory import (
+    CONSOLIDATION_SCOPE_LINE_MAX_CHARS,
     CATEGORY_HANDLE_PREFIX,
     MemoryEntry,
     ORDINARY_HANDLE_PREFIX,
+    consolidation_scope_line,
     format_memory_entry,
     note_file_name,
     note_handle,
@@ -898,6 +900,15 @@ class _ConsolidationToolSession:
                             errors[f"note_writes[{index}].edits[{op_index}]"] = "old_text must not be empty"
                             continue
                         normalized_edits.append({"old_text": old_text, "new_text": new_text})
+                if body is not None:
+                    scope_line = consolidation_scope_line(str(body))
+                    if len(scope_line) > CONSOLIDATION_SCOPE_LINE_MAX_CHARS:
+                        errors[f"note_writes[{index}]"] = (
+                            f"first line of note {ref} is {len(scope_line)} chars; the resident "
+                            f"row allows {CONSOLIDATION_SCOPE_LINE_MAX_CHARS}. Keep the category "
+                            "and its trigger words on this line, move the rest below it"
+                        )
+                        continue
                 seen_refs.add(ref)
                 normalized_writes.append(
                     {
@@ -1809,7 +1820,8 @@ class MemoryManager:
 
         One entry per distinct `consolidated_into`, carrying that category note's first
         line (the only navigation text the resident row shows), how many retired rows
-        point at it, and whether the note is readable at all. The directory is never
+        point at it, and whether the note is unusable - missing, without a first line, or
+        with a line so long it does not get rendered. The directory is never
         enumerated: a category whose retired rows are all gone later has to lose its row
         by itself.
         """
@@ -1829,19 +1841,20 @@ class MemoryManager:
         entries: list[dict[str, Any]] = []
         for category_ref in ordered:
             path = self.index_dir / note_file_name(category_ref)
-            scope_line = ""
             try:
                 body = path.read_text(encoding="utf-8")
             except OSError:
                 body = ""
-            scope_line = next((line.strip() for line in body.splitlines() if line.strip()), "")
+            scope_line = consolidation_scope_line(body)
+            over_limit = len(scope_line) > CONSOLIDATION_SCOPE_LINE_MAX_CHARS
             entries.append(
                 {
                     "note_ref": category_ref,
                     "handle": note_handle(category_ref, category=True),
                     "scope_line": scope_line,
+                    "scope_line_over_limit": over_limit,
                     "entry_count": counts[category_ref],
-                    "unusable": not scope_line,
+                    "unusable": not scope_line or over_limit,
                 }
             )
         return entries
@@ -1849,8 +1862,9 @@ class MemoryManager:
     def list_consolidation_categories(self) -> list[dict[str, Any]]:
         """Read-only consolidation list for the admin surface.
 
-        Keeps the unusable entries (missing or empty category note) visible so a broken
-        link is shown instead of silently dropping that class.
+        Keeps the unusable entries (missing category note, no first line, or a first line
+        over the row cap) visible so a broken link is shown instead of silently dropping
+        that class.
         """
         return self._category_note_index()
 
@@ -1869,7 +1883,7 @@ class MemoryManager:
         rows, broken = self._consolidation_categories()
         if broken:
             logger.warning(
-                "memory consolidation rows point at missing category notes: {}",
+                "memory consolidation rows name category notes that do not render: {}",
                 ", ".join(broken),
             )
         return render_consolidation_block(rows)
@@ -3797,7 +3811,7 @@ class MemoryManager:
             return "", []
         categories = sorted(
             (
-                (path.stem, next((line.strip() for line in path.read_text(encoding="utf-8").splitlines() if line.strip()), ""))
+                (path.stem, consolidation_scope_line(path.read_text(encoding="utf-8")))
                 for path in self.index_dir.glob("*.md")
             ),
             key=lambda item: item[0],

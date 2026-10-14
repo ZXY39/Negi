@@ -15815,11 +15815,18 @@ function renderMemoryNoteIndexListHtml(preview) {
         const handle = String(item?.handle || "").trim();
         const scope = String(item?.scope_line || "").trim();
         const unusable = Boolean(item?.unusable);
+        const overLimit = Boolean(item?.scope_line_over_limit);
         const count = Number(item?.entry_count || 0);
         return `<tr class="memory-note-index-row${unusable ? " is-unusable" : ""}">
             <td><button type="button" class="memory-note-ref-trigger" data-memory-note-ref="${esc(ref)}">${esc(ref)}</button></td>
             <td>${esc(handle) || "-"}</td>
-            <td class="memory-note-index-cell-scope">${scope ? esc(scope) : "分类 note 缺失或没有说明行"}</td>
+            <td class="memory-note-index-cell-scope">${
+                scope && !overLimit
+                    ? esc(scope)
+                    : overLimit
+                        ? `说明行 ${scope.length} 字，过长未进常驻块`
+                        : "分类 note 缺失或没有说明行"
+            }</td>
             <td class="memory-note-index-cell-count">${count}</td>
         </tr>`;
     }).join("");
