@@ -699,6 +699,11 @@ from g3ku.shells.memory_cli import build_memory_app
 memory_app = build_memory_app(console)
 app.add_typer(memory_app, name="memory")
 
+from g3ku.shells.security_cli import build_security_app
+
+security_app = build_security_app(console)
+app.add_typer(security_app, name="security")
+
 # ============================================================================
 # OAuth Login
 # ============================================================================

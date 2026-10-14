@@ -261,6 +261,10 @@ Leader（CEO/frontdoor）解析本轮模型引用时按三档取值，顺序固�
 - 排查模型鉴权问题时，不能只看 JSON 文件
 - 覆盖层防护：激活用的 master key 无法解密已存在的覆盖层时，服务进入只读空视图，任何持久化都会被拒绝——错误密钥只能「读不到」，不能「写掉」别人的数据（tests/test_security_overlay_guard.py 锁定该契约）
 - 覆盖层写入耐久性：两条销毁路径都要堵。其一就是上面的错误密钥覆盖；其二是**写失败本身**——`SecretOverlayStore.save()` 走同目录临时文件 + `fsync` + `os.replace()`，绝不用 `write_bytes` 直接落目标（`"wb"` 会先截断再写，一次 ENOSPC 就把覆盖层留成 0 字节，之后解密守卫反过来拒绝一切写入，数据没了且恢复被堵）。`_activate()` 只读不写：解锁/启动不再回写覆盖层，一次例行重启因此不再等于重写全部密钥。守卫测试同时锁住"写失败后原件不变、不留 `.tmp-*`"和"激活后文件 mtime 不变"。
+- 密钥材料有自己的滚动备份与留证：`.g3ku/llm-config-backups/<UTC 时间戳>/` 存最近 12 代完整钥匙材料（主密钥信封、`auto-unlock.key`、`llm-config/index.json`、`records/`、`secret-realms/`），代际只在"值得留"的状态下生成——信封、任一 record 文件、任一 realm 覆盖层至少存在一样，因此一次误清空不会把好副本挤出保留窗；指纹与最新一代相同就不再生成（每次重启都占一代等于把可用副本轮掉）。每次动作追加一行到 `.g3ku/security-events.jsonl`：`key_store_backed_up` / `key_store_missing_material` / `key_store_initialized` / `key_store_restored` / `key_store_overlay_archived`，带 pid、原因与文件数。
+- **主密钥文件不见了是一次事件，不是一次新初始化**：启动链路 `auto_unlock_from_env()` 先调 `security.audit_key_store()`，把结论缓存在服务上并让它进 `/api/bootstrap/status` 的 `key_store`（`state` ∈ `ok` / `lost` / `unconfigured`，`lost` 另带缺失路径与最新备份位置）。没有这段时，被清空的凭据目录与从没配过的目录在 UI 里长得一模一样，都是"新项目"，丢的东西无人报数。恢复只由 `negi security restore` 显式触发，且现场仍有 `master.key` 时直接拒绝——`negi security status` / `backup` / `restore` 是操作员入口。
+- legacy 迁移删除凭据前有前置条件：`_migrate_legacy_state()` 是合法删掉 `master.key` 的唯一路径，它先留一份代际、再要求备份目录里确实出现 `llm-config/` 副本，否则整笔中止——`copytree` 静默失败过一次就会把"清理明文"变成不可恢复的擦除。
+- 覆盖层的 `delete()` 改名不删件（`<name>.removed-<ts>` 并记一条事件）：一份谁也解不开的覆盖层正好记录了"当初期望哪把钥匙"，删掉它就把一次锁死变成一次丢失。
 - 残留缺口：写失败时内存视图已经带上新值，只有磁盘回滚了；下一次成功写入会把它带上盘，但失败到那次之间，本进程读到的值与盘上不一致。
 
 ## 9. 已退役的 channels / chinaBridge 段
