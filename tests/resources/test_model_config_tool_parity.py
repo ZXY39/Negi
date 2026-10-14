@@ -456,3 +456,42 @@ def test_skill_doc_lists_every_action() -> None:
     missing = [action for action in ModelConfigTool().parameters["properties"]["action"]["enum"] if f"`{action}`" not in text]
 
     assert missing == []
+
+
+@pytest.fixture
+def probe_forbidden_workspace(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    """写车道一次真实请求都不许发：把探测打成形，任何一次调用都会红。"""
+    root = tmp_path / "workspace"
+    root.mkdir(parents=True, exist_ok=True)
+    _write_runtime_config(root)
+    monkeypatch.chdir(root)
+
+    def _explode(self, draft):
+        raise AssertionError("保存配置不应向供应商发真实请求")
+
+    monkeypatch.setattr(ConfigService, "probe_draft", _explode)
+    return root
+
+
+async def test_model_config_writes_never_send_a_real_request(probe_forbidden_workspace: Path) -> None:
+    """保存与测试连接分道：换协议、改 provider、新建配置都只校验字段并落盘。"""
+    updated = await _call(
+        action="update_model",
+        key="m1",
+        provider_model="responses:gpt-5.4",
+        api_base="https://provider.test/v1",
+    )
+    assert updated["provider_model"] == "responses:gpt-5.4"
+
+    created = await _call(
+        action="add_model",
+        key="m3",
+        provider_model="openai:gpt-4.1",
+        api_key="k3",
+        api_base="",
+        context_window_tokens=131072,
+    )
+    assert created["key"] == "m3"
+
+    saved = json.loads((probe_forbidden_workspace / ".g3ku" / "config.json").read_text(encoding="utf-8"))
+    assert any(item["key"] == "m3" for item in saved["models"]["catalog"])

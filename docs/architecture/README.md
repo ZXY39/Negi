@@ -113,7 +113,7 @@ Start here when you are new to the repository or when a change crosses subsystem
 - 节点失败但无系统报错、模型回复疑似被输出上限截断(无工具调用、顶格 output_tokens) → `web-and-admin.md`「Node Detail Error History」+ `config-and-models.md`「Model Request Parameter Defaults」
 - 任务树过大打不开（`Failed to open task: Request timeout`）、打开时长时间无树或「加载中(x/xx)」进度异常、从任务树返回任务大厅后长时间卡顿 → `web-and-admin.md`「Task Tree Chunked Load Contract」
 - `/api/tasks` 系列请求长时间挂起、任务大厅列表或 worker-status 数据迟迟不到、浏览器标签页唤醒/切回任务大厅后整个页面短暂失联 → `web-and-admin.md`「Web Event Loop Contract」
-- 真实回合 HTTP 400 而保存时的探测没拦住（配置来自手改或迁移）、或要确认探测到底发了什么字段 → `config-and-models.md`「llm_config 子系统」
+- 真实回合 HTTP 400 而这份配置从没跑过 `测试连接`（保存与手改、迁移都不探测），或要确认探测到底发了什么字段 → `config-and-models.md`「llm_config 子系统」
 - 模型配置弹窗里一打开下拉，整张表单就往上跳或弹窗变高 → `web-and-admin.md`「Frontend Theme And Layout Contract」（展开面板必须脱离滚动容器挂到 body）
 - 弹窗里点列表底部的勾选框后整窗上跳、标题被顶出可视区、底部多出一截空白，换对象重开还在、刷新才恢复 → `web-and-admin.md`「Frontend Theme And Layout Contract」（弹窗外壳不许当滚动口）
 - 验收/节点把合法 PDF（或图片、xlsx 等二进制交付物）判成几十字节空壳、或在其上搜索 `%PDF` 等签名 0 命中 → `tool-hydration-and-callable-chain.md`「外置工具结果信封」（二进制目标的展示契约、字节级搜索与 `filesystem_stat` 只读测量通道）

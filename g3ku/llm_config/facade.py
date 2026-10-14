@@ -175,14 +175,13 @@ class LLMConfigFacade:
                 f"{err.field}: {err.message or err.code or 'invalid'}" for err in (validation.errors or [])
             ).strip()
             raise ValueError(f"Draft validation failed: {detail}" if detail else "Draft validation failed")
-        probe = self.config_service.probe_draft(draft)
-        if not probe.success:
-            raise ValueError(probe.message)
         now = datetime.now(UTC)
         normalized = validation.normalized_preview.model_copy(
             update={"config_id": uuid4().hex, "created_at": now, "updated_at": now}
         )
-        self.repository.save(self._sanitize_record_for_storage(normalized), last_probe_status=probe.status.value)
+        # 保存只做字段校验与落盘，不发真实推理：`last_probe_status=None` 表示这份配置
+        # 还没被测过，落一次盘不会把旧的探测结果继续挂在新内容上。
+        self.repository.save(self._sanitize_record_for_storage(normalized), last_probe_status=None)
         self._store_record_secrets(normalized)
         return self.get_config_record(normalized.config_id, include_secrets=True)
 
@@ -195,9 +194,6 @@ class LLMConfigFacade:
                 f"{err.field}: {err.message or err.code or 'invalid'}" for err in (validation.errors or [])
             ).strip()
             raise ValueError(f"Draft validation failed: {detail}" if detail else "Draft validation failed")
-        probe = self.config_service.probe_draft(merged)
-        if not probe.success:
-            raise ValueError(probe.message)
         updated = validation.normalized_preview.model_copy(
             update={
                 "config_id": current.config_id,
@@ -205,7 +201,7 @@ class LLMConfigFacade:
                 "updated_at": datetime.now(UTC),
             }
         )
-        self.repository.save(self._sanitize_record_for_storage(updated), last_probe_status=probe.status.value)
+        self.repository.save(self._sanitize_record_for_storage(updated), last_probe_status=None)
         self._store_record_secrets(updated)
         return self.get_config_record(updated.config_id, include_secrets=True)
 
@@ -371,9 +367,6 @@ class LLMConfigFacade:
                 f"{err.field}: {err.message or err.code or 'invalid'}" for err in (validation.errors or [])
             ).strip()
             raise ValueError(f"Draft validation failed: {detail}" if detail else "Draft validation failed")
-        probe = self.config_service.probe_draft(merged)
-        if not probe.success:
-            raise ValueError(probe.message)
         updated = validation.normalized_preview.model_copy(
             update={
                 "config_id": current.config_id,
@@ -381,7 +374,7 @@ class LLMConfigFacade:
                 "updated_at": datetime.now(UTC),
             }
         )
-        self.repository.save(self._sanitize_record_for_storage(updated), last_probe_status=probe.status.value)
+        self.repository.save(self._sanitize_record_for_storage(updated), last_probe_status=None)
         self._store_record_secrets(updated)
         binding.context_window_tokens = self._binding_context_window_tokens(updated)
         binding.request_timeout_seconds = self._binding_request_timeout_seconds(updated)
