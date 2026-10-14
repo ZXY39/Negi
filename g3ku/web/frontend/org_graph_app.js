@@ -3637,6 +3637,10 @@ function normalizeCeoSnapshotCompressionMarker(marker = null) {
     const next = { state };
     const source = String(marker?.source || "").trim().toLowerCase();
     if (source) next.source = source;
+    // turn_id 只用来认出这条线属于哪一回合：重建按转录顺序画，画完把 id 标在元素上，
+    // 这样随后才到的实时帧不会在同一回合后面再画一条。
+    const turnId = String(marker?.stats?.turn_id || "").trim();
+    if (turnId) next.turn_id = turnId;
     return next;
 }
 
@@ -4033,20 +4037,50 @@ function syncCeoCompressionRetryAffordances() {
 }
 
 function appendCeoCompressionDivider(state, options = {}) {
-    const { interactive = true } = options;
+    const { interactive = true, anchorEl = null, turnId = "" } = options;
     if (!U.ceoFeed || !CEO_COMPRESSION_TEXT[state]) return null;
     const el = document.createElement("div");
     el.className = `message system ${CEO_COMPRESSION_DIVIDER_CLASS} is-${state}`;
     el.dataset.ceoCompressionState = state;
+    if (turnId) el.dataset.ceoCompressionTurn = turnId;
     el.setAttribute("role", "status");
     el.setAttribute("aria-live", state === "running" ? "polite" : "off");
     el.innerHTML = ceoCompressionDividerInner(state, { interactive });
+    const anchorParent = anchorEl?.parentNode || null;
     mutateCeoFeed(() => {
-        ceoFeedAppendHost().appendChild(el);
+        if (anchorParent) {
+            // 落在自己那一回合之后，而不是 feed 尾部：回合内的压缩线是收尾时才落盘的，
+            // 追到尾部就会把「压缩之后继续跑出来的内容」整段留在线上方。
+            anchorParent.insertBefore(el, anchorEl.nextSibling || null);
+        } else {
+            ceoFeedAppendHost().appendChild(el);
+        }
         icons();
     }, { scrollMode: "preserve" });
     syncCeoCompressionRetryAffordances();
     return el;
+}
+
+// 转录里的回合行 key 是 `m:<turn_id>:assistant:<n>`（含 `:followup:` 变体），实时气泡是
+// `turn:<turn_id>`。同一个回合可能留下多行，线跟着最后渲染的那一行。key 只打在 feed 的
+// 直接子元素上，所以这里扫 children 而不是 querySelectorAll。
+function findCeoCompressionAnchor(turnId) {
+    if (!turnId || !U.ceoFeed) return null;
+    const prefixes = [`turn:${turnId}`, `m:${turnId}:`];
+    let match = null;
+    Array.from(U.ceoFeed.children || []).forEach((el) => {
+        const key = String(el.getAttribute?.("data-ceo-key") || "");
+        if (prefixes.some((prefix) => key === prefix || key.startsWith(prefix))) match = el;
+    });
+    return match;
+}
+
+function ceoCompressionDividerExists(turnId, state) {
+    if (!turnId || !U.ceoFeed || typeof U.ceoFeed.querySelectorAll !== "function") return false;
+    return Array.from(U.ceoFeed.querySelectorAll(`.${CEO_COMPRESSION_DIVIDER_CLASS}`)).some(
+        (el) => String(el.dataset?.ceoCompressionTurn || "") === turnId
+            && String(el.dataset?.ceoCompressionState || "") === state,
+    );
 }
 
 function removeCeoCompressionLiveDivider() {
@@ -4089,9 +4123,12 @@ function applyCeoCompressionMarker(sessionId = "", marker = null) {
     if (!key || key !== String(activeSessionId() || "").trim()) return false;
     if (!U.ceoFeed) return false;
     removeCeoCompressionLiveDivider();
-    appendCeoCompressionDivider(state, { interactive: false });
-    if (S.ceoFeedFollowLatest !== false) scrollCeoFeedToBottom();
-    return true;
+    const turnId = String((marker || {}).turn_id || (marker || {}).stats?.turn_id || "").trim();
+    if (ceoCompressionDividerExists(turnId, state)) return true;
+    const anchorEl = findCeoCompressionAnchor(turnId);
+    appendCeoCompressionDivider(state, { interactive: false, anchorEl, turnId });
+    // 钉底只在"线就是最后一条"时成立：插进历史里的那条不该把正在往上翻的人拽回底部。
+    if (!anchorEl && S.ceoFeedFollowLatest !== false) scrollCeoFeedToBottom();    return true;
 }
 
 function stopCeoContextCompressionPolling() {
@@ -9114,7 +9151,10 @@ function renderCeoSnapshotMessageRange(messages, keys, fromIndex, toIndex, targe
         if (role === "system" && content.trim()) {
             const marker = normalizeCeoSnapshotCompressionMarker(item?.compression_marker);
             if (marker) {
-                appendCeoCompressionDivider(marker.state, { interactive: false });
+                appendCeoCompressionDivider(marker.state, {
+                    interactive: false,
+                    turnId: String(marker.turn_id || ""),
+                });
             } else {
                 addMsg(content, "system", { markdown: true, scrollMode: "preserve" });
             }

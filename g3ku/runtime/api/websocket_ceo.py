@@ -2018,11 +2018,15 @@ async def ceo_websocket(websocket: WebSocket):
             # 进行中的线一收，操作者看到的就是空白。这一帧只把"刚落了一条什么状态的线"
             # 带过去，正文仍由转录提供，所以不做第二份事实源。
             payload = dict(event.payload or {})
+            stats = payload.get('stats')
             await _push_stream_event(
                 'ceo.compression.marker',
                 {
                     'state': str(payload.get('compression_state') or '').strip().lower(),
                     'source': str(payload.get('source') or '').strip().lower(),
+                    # turn_id 决定这条线插在哪个回合后面；缺它前端只能追到 feed 尾部，
+                    # 而回合内的压缩是在收尾时才落线的，那时后面早就有新内容了。
+                    'stats': dict(stats) if isinstance(stats, dict) else {},
                 },
             )
             return

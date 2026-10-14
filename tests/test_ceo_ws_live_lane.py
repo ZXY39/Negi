@@ -270,13 +270,23 @@ def test_compression_marker_lands_as_its_own_frame(harness):
         harness.submit(harness.relay(AgentEvent(
             type="context_compression_marker",
             timestamp="2026-10-14T14:00:00",
-            payload={"compression_state": "COMPLETED", "source": "Auto"},
+            payload={"compression_state": "COMPLETED", "source": "Auto", "stats": {"turn_id": "a1"}},
         )))
         assert harness.wait_until(lambda: "ceo.compression.marker" in harness.frame_types())
+        # 回合外压缩没有 turn_id；stats 缺了或形状不对都不能把整帧带走。
+        harness.submit(harness.relay(AgentEvent(
+            type="context_compression_marker",
+            timestamp="2026-10-14T14:00:01",
+            payload={"compression_state": "paused", "source": "auto", "stats": "frontdoor-stage-9"},
+        )))
+        assert harness.wait_until(lambda: len([
+            frame for frame in harness.frames if frame.get("type") == "ceo.compression.marker"
+        ]) == 2)
 
     frames = [frame for frame in harness.frames if frame.get("type") == "ceo.compression.marker"]
-    assert len(frames) == 1, harness.frame_types()
-    assert frames[0]["data"] == {"state": "completed", "source": "auto"}
+    # stats 决定线插在哪一回合后面，帧里少了它前端只能追到 feed 尾部。
+    assert frames[0]["data"] == {"state": "completed", "source": "auto", "stats": {"turn_id": "a1"}}
+    assert frames[1]["data"] == {"state": "paused", "source": "auto", "stats": {}}
     assert frames[0]["session_id"] == SESSION_KEY
 
 

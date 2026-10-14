@@ -72,6 +72,20 @@ class StubHTMLElement extends StubElement {
         this.children.push(child);
         return child;
     }
+    insertBefore(child, ref) {
+        child.parentElement = this;
+        const index = ref ? this.children.indexOf(ref) : -1;
+        if (index < 0) this.children.push(child);
+        else this.children.splice(index, 0, child);
+        return child;
+    }
+    get parentNode() {
+        return this.parentElement || null;
+    }
+    get nextSibling() {
+        const siblings = this.parentElement?.children || [];
+        return siblings[siblings.indexOf(this) + 1] || null;
+    }
     remove() {
         if (!this.parentElement) return;
         this.parentElement.children = this.parentElement.children.filter((child) => child !== this);
@@ -214,6 +228,7 @@ function loadApp() {
             normalizeCeoSnapshotMessage, activeCeoSessionHasHistory,
             setCeoSessionSnapshotCache, getCeoSessionSnapshotCache,
             applyCeoCompressionMarker, normalizeCeoSessionSnapshotCacheEntry,
+            findCeoCompressionAnchor, normalizeCeoSnapshotCompressionMarker,
             refreshCeoComposerUsageEstimate, syncCeoModelModePanelUsage,
             startCeoContextCompressionPolling, applyCeoContextCompressionStatus,
             adoptCeoContextCompression,
@@ -889,4 +904,93 @@ test("重试点击走长按同一条发起路径，且不带二次确认", () =>
     // 二次确认是给"打断正在跑的回合"准备的；这条线只有在没有回合在跑时才可点，
     // 因为任何新回合的气泡都会排在它后面。
     assert.equal(branch.includes("openConfirm"), false);
+});
+
+function addRow(api, key, className = "message system") {
+    const row = new api.StubHTMLElement();
+    row.className = className;
+    if (key) row.setAttribute("data-ceo-key", key);
+    api.U.ceoFeed.appendChild(row);
+    return row;
+}
+
+const feedOrder = (api) => api.U.ceoFeed.children.map(
+    (child) => child.getAttribute("data-ceo-key")
+        || (String(child.className || "").includes("ceo-compression-divider")
+            ? `divider:${child.dataset.ceoCompressionState}` : "?")
+);
+
+test("终态线插回它所属的那一回合之后，不追到 feed 尾部", () => {
+    const api = loadApp();
+    // 实测形状：压缩属于 a1 那一回合（它在 17:16 就结束了），b1 是之后才发起来的新回合。
+    addRow(api, "m:a1:user:0");
+    addRow(api, "turn:a1");
+    addRow(api, "m:b1:user:0", "message user");
+    addRow(api, "turn:b1");
+
+    assert.equal(api.applyCeoCompressionMarker("web:test", {
+        state: "completed", source: "auto", stats: { turn_id: "a1" },
+    }), true);
+    assert.deepEqual(feedOrder(api), [
+        "m:a1:user:0", "turn:a1", "divider:completed", "m:b1:user:0", "turn:b1",
+    ]);
+});
+
+test("转录里的同一回合有多行时，线跟着最后渲染的那一行", () => {
+    const api = loadApp();
+    addRow(api, "m:a1:user:0");
+    addRow(api, "m:a1:assistant:0");
+    // 续跑归档行与实时气泡都挂同一个 turn id。
+    addRow(api, "m:a1:followup:x1:assistant:0");
+    addRow(api, "turn:a1");
+    addRow(api, "m:b1:user:0", "message user");
+
+    api.applyCeoCompressionMarker("web:test", { state: "paused", stats: { turn_id: "a1" } });
+    assert.deepEqual(feedOrder(api), [
+        "m:a1:user:0", "m:a1:assistant:0", "m:a1:followup:x1:assistant:0",
+        "turn:a1", "divider:paused", "m:b1:user:0",
+    ]);
+});
+
+test("认不出所属回合时退回 feed 尾部（回合外手动压缩那条道）", () => {
+    const api = loadApp();
+    addRow(api, "m:a1:user:0");
+    addRow(api, "turn:a1");
+    addRow(api, "m:b1:user:0", "message user");
+
+    api.applyCeoCompressionMarker("web:test", { state: "completed", source: "manual", stats: {} });
+    assert.deepEqual(feedOrder(api).slice(-1), ["divider:completed"]);
+    api.applyCeoCompressionMarker("web:test", { state: "completed", stats: { turn_id: "zz" } });
+    assert.deepEqual(feedOrder(api).slice(-1), ["divider:completed"]);
+});
+
+test("重建已经画过的那条线，迟到的标记帧不再补第二条", () => {
+    const api = loadApp();
+    addRow(api, "m:a1:assistant:0");
+    // 整页重建按转录顺序画的那一条，带同一个 turn id。
+    api.appendCeoCompressionDivider("completed", { interactive: false, turnId: "a1" });
+    addRow(api, "m:b1:user:0", "message user");
+
+    assert.equal(api.applyCeoCompressionMarker("web:test", {
+        state: "completed", stats: { turn_id: "a1" },
+    }), true);
+    assert.equal(dividers(api.U.ceoFeed).length, 1);
+    assert.deepEqual(feedOrder(api), ["m:a1:assistant:0", "divider:completed", "m:b1:user:0"]);
+
+    // 同一回合的另一种终态是另一件事（先完成后又被中断），该画第二条。
+    api.applyCeoCompressionMarker("web:test", { state: "paused", stats: { turn_id: "a1" } });
+    assert.equal(dividers(api.U.ceoFeed).length, 2);
+});
+
+test("转录标记把 stats.turn_id 带下来，没有 stats 的老行不受影响", () => {
+    const api = loadApp();
+    // vm 里的对象与字面量不同 realm，deepEqual 会因原型判否，这里按 JSON 比结构。
+    assert.equal(JSON.stringify(api.normalizeCeoSnapshotCompressionMarker({
+        state: "completed", source: "auto", stats: { turn_id: "a1", tokens: 12 },
+    })), JSON.stringify({ state: "completed", source: "auto", turn_id: "a1" }));
+    assert.equal(JSON.stringify(api.normalizeCeoSnapshotCompressionMarker({
+        state: "completed", source: "manual",
+    })), JSON.stringify({ state: "completed", source: "manual" }));
+    assert.equal(api.normalizeCeoSnapshotCompressionMarker({ state: "running" }), null);
+    assert.equal(api.findCeoCompressionAnchor(""), null);
 });

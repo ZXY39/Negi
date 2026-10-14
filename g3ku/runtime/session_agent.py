@@ -2454,7 +2454,14 @@ class RuntimeAgentSession:
             persisted_session=persisted_session,
         )
         if wrote:
-            await self._emit("context_compression_marker", compression_state=state, source=source)
+            # stats 与转录行同源、同一次落盘：实时车道靠里面的 turn_id 把线插回它属于的那一
+            # 回合，而不是追到 feed 尾部。
+            await self._emit(
+                "context_compression_marker",
+                compression_state=state,
+                source=source,
+                stats=dict(stats or {}),
+            )
         return wrote
 
     def _begin_frontdoor_compression_generation(self) -> int:
@@ -3226,6 +3233,7 @@ class RuntimeAgentSession:
                 await self.emit_context_compression_marker(
                     state="completed",
                     source="auto",
+                    stats={"turn_id": turn_id},
                     persisted_session=persisted_session,
                 )
             if self._state.session_key.startswith("web:"):
@@ -4514,7 +4522,14 @@ class RuntimeAgentSession:
             self._sync_completed_continuity_snapshot(source_reason="manual_stop")
             self.clear_paused_execution_context()
             if pausing_active_compression:
-                await self.emit_context_compression_marker(state="paused", source="auto")
+                # 线跟着刚归档的那一回合落：turn_id 取自同一份暂停快照，也就是转录里
+                # `manual_pause_archive` 那行用的同一个 id。
+                paused_turn_id = str((paused_snapshot or {}).get("turn_id") or "").strip()
+                await self.emit_context_compression_marker(
+                    state="paused",
+                    source="auto",
+                    stats={"turn_id": paused_turn_id} if paused_turn_id else None,
+                )
                 # 摘要任务可能在 cancel_session_tasks 里被直接掐掉，来不及走自己的
                 # finally；这里替它收口，否则下一回合会被一个已无人认领的代际挡住。
                 self._compression_state = {}

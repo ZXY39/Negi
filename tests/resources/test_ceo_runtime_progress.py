@@ -3118,7 +3118,9 @@ async def test_emit_context_compression_marker_announces_written_rows(tmp_path: 
 
     session.subscribe(_listener)
 
-    assert await session.emit_context_compression_marker(state="completed", source="auto") is True
+    assert await session.emit_context_compression_marker(
+        state="completed", source="auto", stats={"turn_id": "a1"}
+    ) is True
 
     persisted = store.get_or_create("web:shared")
     rows = [
@@ -3129,10 +3131,14 @@ async def test_emit_context_compression_marker_announces_written_rows(tmp_path: 
     assert len(rows) == 1
     assert rows[0]["metadata"]["compression_state"] == "completed"
     assert rows[0]["metadata"]["source"] == "auto"
+    # stats 与转录行同一次落盘，实时帧带的是同一份，不做第二份事实源。
+    assert rows[0]["metadata"]["stats"] == {"turn_id": "a1"}
 
     marker_events = [event for event in events if event.type == "context_compression_marker"]
     assert len(marker_events) == 1
-    assert marker_events[0].payload == {"compression_state": "completed", "source": "auto"}
+    assert marker_events[0].payload == {
+        "compression_state": "completed", "source": "auto", "stats": {"turn_id": "a1"},
+    }
 
 
 @pytest.mark.asyncio
@@ -3198,7 +3204,7 @@ async def test_pause_during_active_auto_compression_announces_paused_rule(tmp_pa
     assert rows[0]["metadata"]["source"] == "auto"
     marker_events = [event for event in events if event.type == "context_compression_marker"]
     assert len(marker_events) == 1
-    assert marker_events[0].payload == {"compression_state": "paused", "source": "auto"}
+    assert marker_events[0].payload == {"compression_state": "paused", "source": "auto", "stats": {}}
     # 暂停归档不能把「进行中」冻进转录：那一行是历史，它说"还在压"就永远没人来收。
     frozen = [
         item
@@ -3207,6 +3213,65 @@ async def test_pause_during_active_auto_compression_announces_paused_rule(tmp_pa
         and str(item["compression"].get("status") or "").lower() == "running"
     ]
     assert frozen == []
+
+
+@pytest.mark.asyncio
+async def test_auto_compression_marker_names_the_turn_it_folded(tmp_path: Path) -> None:
+    """回合内自动压缩的线在收尾时才落盘：那一行必须说自己属于哪一回合。
+
+    少了这个 id，实时车道只能把线追到 feed 尾部——而收尾那一刻，尾部早就轮到压缩之后才
+    发起来的内容，于是「压缩后继续跑出来的东西」整段被留在线的上方。
+    """
+    key = "ext:test-bridge:auto-compress"
+    store = SessionManager(tmp_path)
+    session = RuntimeAgentSession(
+        SimpleNamespace(
+            model="demo",
+            reasoning_effort=None,
+            multi_agent_runner=None,
+            sessions=store,
+            memory_manager=None,
+            commit_service=None,
+            prompt_trace=False,
+            create_session_cancellation_token=lambda _k: None,
+            release_session_cancellation_token=lambda _k, _t: None,
+            _use_rag_memory=lambda: False,
+        ),
+        session_key=key,
+        channel="ext",
+        chat_id="test",
+    )
+    session._state.is_running = True
+    session._state.status = "running"
+    events: list[AgentEvent] = []
+
+    async def _listener(event: AgentEvent) -> None:
+        events.append(event)
+
+    session.subscribe(_listener)
+    queued = await session.queue_follow_up_batch(["压完继续"])
+    turn_id = str((queued[0].metadata or {}).get("_transcript_turn_id") or "").strip()
+    assert turn_id
+    session._frontdoor_compressed_turn_id = turn_id
+
+    await session._persist_turn_transcript(
+        user_input=queued[0],
+        user_text="压完继续",
+        assistant_text="答复",
+        interaction_flow=[],
+        internal_source=None,
+        route_kind="",
+    )
+
+    rows = [
+        item
+        for item in list(store.get_or_create(key).messages or [])
+        if isinstance(item.get("metadata"), dict) and item["metadata"].get("kind") == "context_compression"
+    ]
+    assert [row["metadata"]["compression_state"] for row in rows] == ["completed"]
+    assert rows[0]["metadata"]["stats"] == {"turn_id": turn_id}
+    marker_events = [event for event in events if event.type == "context_compression_marker"]
+    assert [event.payload["stats"] for event in marker_events] == [{"turn_id": turn_id}]
 
 
 def _idle_session(tmp_path: Path) -> RuntimeAgentSession:
