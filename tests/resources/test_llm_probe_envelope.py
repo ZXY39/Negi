@@ -89,6 +89,23 @@ def test_responses_probe_payload_matches_sender_fields() -> None:
     assert "function" not in payload["tools"][0]
 
 
+def test_responses_probe_budget_is_accepted_by_floored_backends() -> None:
+    """探测预算取上游通用下限而不是 1。
+
+    实测 sensenova 的 Responses 端点把 `max_output_tokens` < 16 整单打回
+    （`field max_output_tokens invalid, should be in [16, 393216]`），所以模型一旦
+    切到 Responses 协议就过不了"测试连接"，保存卡在探测失败上。
+    """
+    config = _config(
+        provider_id="responses",
+        protocol_adapter=ProtocolAdapter.OPENAI_RESPONSES,
+    )
+
+    _endpoint, payload = _build_openai_fallback_payload(config)
+
+    assert payload["max_output_tokens"] >= 16
+
+
 def test_chat_probe_payload_matches_sender_fields() -> None:
     config = _config(
         provider_id="openai",

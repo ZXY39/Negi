@@ -170,7 +170,11 @@ def _build_openai_fallback_payload(config: NormalizedProviderConfig) -> tuple[st
             "input": [{"role": "user", "content": [{"type": "input_text", "text": "ping"}]}],
             "include": ["reasoning.encrypted_content"],
             "prompt_cache_key": "g3ku-connection-probe",
-            "max_output_tokens": 1,
+            # Some Responses-compatible backends floor this field (measured: sensenova rejects
+            # anything under 16 with `field max_output_tokens invalid, should be in [16, 393216]`).
+            # The probe only reads the status line, so it uses the smallest budget every server
+            # seen so far accepts instead of 1, which would fail 测试连接 for a healthy model.
+            "max_output_tokens": 16,
             "tools": normalize_responses_tool_definitions([PROBE_TOOL]),
             "tool_choice": "auto",
             "parallel_tool_calls": True,
