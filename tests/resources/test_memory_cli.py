@@ -568,3 +568,40 @@ def test_memory_cli_routes_supported_commands_to_runtime_manager(
         "runtime.flush",
         "runtime.close",
     ]
+
+
+def test_memory_doctor_reads_ownership_from_the_store(monkeypatch, tmp_path: Path) -> None:
+    """只读检查也得看得见库：否则每份有人拥有的 note 都被报成孤儿，删档建议就来自一条假读数。"""
+    memory_cli = _memory_cli_module()
+    runtime = _memory_agent_runtime_module()
+    _mount_real_memory_manager(monkeypatch, tmp_path)
+
+    writer = runtime.MemoryManager(tmp_path, _memory_cfg())
+    try:
+        writer._memory_repo.create_memory(
+            memory_body="反代端口写在笔记里",
+            minimal_memory="端口->笔记",
+            source="self",
+            from_user=False,
+            now_iso="2026-04-17T09:00:00+08:00",
+            note_ref="note_proxy_ports",
+        )
+        notes_dir = tmp_path / "memory" / "notes"
+        notes_dir.mkdir(parents=True, exist_ok=True)
+        (notes_dir / "note_proxy_ports.md").write_text("端口笔记正文" + chr(10), encoding="utf-8")
+    finally:
+        writer.close()
+
+    memory_dir = tmp_path / "memory"
+    before = {path.name: (path.stat().st_size, path.stat().st_mtime_ns) for path in sorted(memory_dir.rglob("*")) if path.is_file()}
+
+    console = _ConsoleStub()
+    app = memory_cli.build_memory_app(console)
+    result = CliRunner().invoke(app, ["doctor"])
+    joined = chr(10).join(console.messages).lower()
+
+    assert result.exit_code == 0, joined
+    assert "orphan notes: none" in joined
+    assert "note_proxy_ports" not in joined.replace("missing note refs: none", "")
+    after = {path.name: (path.stat().st_size, path.stat().st_mtime_ns) for path in sorted(memory_dir.rglob("*")) if path.is_file()}
+    assert after == before
