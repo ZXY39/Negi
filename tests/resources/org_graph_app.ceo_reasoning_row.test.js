@@ -4,8 +4,9 @@ const fs = require("node:fs");
 const vm = require("node:vm");
 
 // CEO 思维链实时行这一车道的单测：只切片加载被测函数，其余依赖给最小桩。
-// 覆盖三件真实踩过的事：段号变了要整段重来（同跳重发/换链不能叠两份）、
-// token 没真值时必须带 `~`、以及 flex 容器盖掉 UA [hidden] 的那类 CSS 陷阱。
+// 覆盖四件真实踩过或容易被改回去的事：段号变了要整段重来（同跳重发/换链不能叠两份）、
+// token 没真值时必须带 `~`、flex 容器盖掉 UA [hidden] 的那类 CSS 陷阱、
+// 以及"点整行头开合"这套形状（没有独立按钮，历史行不带可点能力）。
 const APP_PATH = "g3ku/web/frontend/org_graph_app.js";
 const CSS_PATH = "g3ku/web/frontend/org_graph.css";
 // 这台机器上工作树是 CRLF，按 `\n}\n` 切函数体必须先把换行归一，否则切片全部失配。
@@ -80,10 +81,24 @@ class El {
     }
 
     addEventListener(type, handler) { (this.listeners[type] = this.listeners[type] || []).push(handler); }
-    fire(type) { (this.listeners[type] || []).forEach((handler) => handler({ target: this })); }
+    fire(type, event = null) {
+        const payload = event || { target: this, preventDefault() {} };
+        (this.listeners[type] || []).forEach((handler) => handler(payload));
+    }
     setAttribute(key, value) { this.attrs[key] = String(value); }
     getAttribute(key) { return Object.prototype.hasOwnProperty.call(this.attrs, key) ? this.attrs[key] : null; }
-    querySelector() { return null; }
+    querySelector(selector) {
+        const name = String(selector || "").replace(/^\./, "");
+        const walk = (node) => {
+            for (const child of node.children) {
+                if (child.className.split(/\s+/).includes(name)) return child;
+                const found = walk(child);
+                if (found) return found;
+            }
+            return null;
+        };
+        return walk(this);
+    }
 }
 
 function buildHarness() {
@@ -92,6 +107,8 @@ function buildHarness() {
         document: {
             createElement: (tag) => { const el = new El(tag); created.push(el); return el; },
         },
+        // 历史行那条道用 `hostEl instanceof HTMLElement` 挡非元素入参，桩里给出同一个类。
+        HTMLElement: El,
         console,
         Math,
         Number,
@@ -194,7 +211,7 @@ test("provider 真报了思考 token 才去掉波浪号", () => {
     assert.doesNotMatch(turn.thinkingMetaEl.textContent, /~/);
     assert.match(turn.thinkingMetaEl.textContent, /1\.8k tok/);
     // 没有真值时同一份数据要带 ~
-    const estimateOnly = { ...turn, thinkingLineEl: null, thinkingPaneEl: null, thinkingTailEl: null, thinkingCaretEl: null, reasoningTokensReported: 0 };
+    const estimateOnly = { ...turn, thinkingLineEl: null, thinkingPaneEl: null, thinkingTailEl: null, thinkingHeadEl: null, reasoningTokensReported: 0 };
     vm.runInContext("renderCeoThinkingLineIntoTurn(globalThis.__turn2)", Object.assign(sandbox, { __turn2: estimateOnly }));
     assert.match(estimateOnly.thinkingMetaEl.textContent, /~1\.3k tok/);
 });
@@ -227,4 +244,51 @@ test("样式契约：flex 容器必须自己补 [hidden]，展开窗高度固定
     assert.match(CSS_CODE, /\.ceo-thinking-line-pane\s*\{[^}]*max-height:/);
     assert.match(CSS_CODE, /\.ceo-thinking-line-pane\s*\{[^}]*overflow-y:\s*auto/);
     assert.match(CSS_CODE, /\.ceo-thinking-line-tail\s*\{[^}]*text-overflow:\s*ellipsis/);
+    // 可点判据用 role 而不是 class：历史行不带 role，就不会有可点错觉。
+    assert.match(CSS_CODE, /\.ceo-thinking-line-head\[role="button"\]\s*\{[^}]*cursor:\s*pointer/);
+});
+
+test("点整行头展开、再点收起：没有独立按钮", () => {
+    const { sandbox } = buildHarness();
+    const turn = vm.runInContext("ensureActiveCeoTurn({source:'user',turnId:'t1'})", sandbox);
+    vm.runInContext("applyCeoReasoningDelta({turn_id:'t1',source:'user',attempt:1,seq:1,delta:'在想第一件事\\n第二件事',chars:12,est_tokens:4,seconds:6}, {sessionId:'web:ceo-test'})", sandbox);
+    const head = turn.thinkingHeadEl;
+    const line = turn.thinkingLineEl;
+    const pane = turn.thinkingPaneEl;
+    assert.ok(head && line && pane, "行头或滚动窗没建出来");
+    assert.equal(head.getAttribute("role"), "button");
+    assert.equal(head.getAttribute("aria-expanded"), "false");
+    assert.equal(pane.hidden, true);
+    assert.equal(turn.thinkingLineEl.querySelector(".ceo-thinking-line-caret"), null);
+    head.fire("click");
+    assert.equal(head.getAttribute("aria-expanded"), "true");
+    assert.equal(pane.hidden, false);
+    assert.ok(line.classList.contains("is-expanded"));
+    head.fire("click");
+    assert.equal(head.getAttribute("aria-expanded"), "false");
+    assert.equal(pane.hidden, true);
+    assert.ok(!line.classList.contains("is-expanded"));
+    // 键盘等价：整行头是 role=button 的 tabindex 停靠点
+    head.fire("keydown", { key: "Enter", preventDefault() {} });
+    assert.equal(head.getAttribute("aria-expanded"), "true");
+    // 展开窗自己的点击不冒泡成开关：只在行头上挂了 handler
+    assert.equal(pane.listeners.click, undefined);
+});
+
+test("历史行只给读数：不带可点形状", () => {
+    const { sandbox } = buildHarness();
+    const hostEl = new El("div");
+    hostEl.className = "msg system";
+    const textEl = new El("div");
+    textEl.className = "assistant-text";
+    hostEl.appendChild(textEl);
+    vm.runInContext("renderCeoThinkingSummaryFromSnapshot(globalThis.__host, {seconds:40,chars:2000,est_tokens:1300})", Object.assign(sandbox, { __host: hostEl }));
+    const line = hostEl.children[1];
+    assert.ok(line, "历史汇总行没建出来");
+    assert.ok(line.classList.contains("is-final"));
+    const head = line.children[0];
+    assert.equal(head.getAttribute("role"), null);
+    assert.equal(head.listeners.click, undefined);
+    assert.equal(line.children[1].hidden, true);
+    assert.match(head.children[0].textContent, /~1\.3k tok/);
 });

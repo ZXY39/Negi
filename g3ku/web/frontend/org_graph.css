@@ -3097,17 +3097,14 @@ textarea {
     white-space: nowrap;
 }
 
-.ceo-thinking-line-caret {
-    flex: 0 0 auto;
-    padding: 0 2px;
-    border: 0;
-    background: none;
-    color: var(--text-muted);
-    font: inherit;
+/* 整行头就是开关，没有独立按钮：折叠态只有一行，按钮无论放行尾还是单独一格都会把
+   这一行撑宽。cursor 判据用 role 而不是 class，历史行不带 role 也就不会有可点错觉。 */
+.ceo-thinking-line-head[role="button"] {
     cursor: pointer;
+    user-select: none;
 }
 
-.ceo-thinking-line-caret:hover {
+.ceo-thinking-line-head[role="button"]:hover .ceo-thinking-line-tail {
     color: var(--text-secondary);
 }
 

@@ -7823,11 +7823,6 @@ function ensureCeoThinkingLineEl(turn) {
     meta.className = "ceo-thinking-line-meta";
     const tail = document.createElement("span");
     tail.className = "ceo-thinking-line-tail";
-    const caret = document.createElement("button");
-    caret.type = "button";
-    caret.className = "ceo-thinking-line-caret";
-    caret.textContent = "展开";
-    caret.setAttribute("aria-expanded", "false");
     const pane = document.createElement("div");
     pane.className = "ceo-thinking-line-pane";
     pane.setAttribute("role", "log");
@@ -7836,29 +7831,46 @@ function ensureCeoThinkingLineEl(turn) {
         // 用户手动上滑就停止自动跟随，滑回底部再恢复：滚动位置归用户，渲染层不抢。
         turn.thinkingFollowTail = pane.scrollHeight - pane.scrollTop - pane.clientHeight <= 4;
     });
-    caret.addEventListener("click", () => {
-        const expanded = caret.getAttribute("aria-expanded") !== "true";
-        caret.setAttribute("aria-expanded", expanded ? "true" : "false");
-        caret.textContent = expanded ? "收起" : "展开";
-        pane.hidden = !expanded;
-        line.classList.toggle("is-expanded", expanded);
-        if (expanded) {
-            turn.thinkingFollowTail = true;
-            pane.scrollTop = pane.scrollHeight;
-        }
-    });
+    if (turn.thinkingExpandable === false) {
+        // 历史行不给展开能力：思考全文从不落盘，那一格只有读数。
+        line.classList.add("is-final");
+    } else {
+        // 整行头就是开关，不设独立按钮：折叠态只有一行，按钮要么占宽要么叠在行尾，
+        // 两种都把"一行"撑成两格。aria-expanded 是状态位，也是 CSS 的 cursor 判据。
+        head.setAttribute("role", "button");
+        head.setAttribute("tabindex", "0");
+        head.setAttribute("aria-expanded", "false");
+        head.title = "点击展开思维链";
+        const toggle = () => {
+            const expanded = head.getAttribute("aria-expanded") !== "true";
+            head.setAttribute("aria-expanded", expanded ? "true" : "false");
+            head.title = expanded ? "点击收起思维链" : "点击展开思维链";
+            pane.hidden = !expanded;
+            line.classList.toggle("is-expanded", expanded);
+            if (expanded) {
+                turn.thinkingFollowTail = true;
+                pane.scrollTop = pane.scrollHeight;
+            }
+        };
+        head.addEventListener("click", toggle);
+        head.addEventListener("keydown", (event) => {
+            if (event.key === "Enter" || event.key === " ") {
+                event.preventDefault();
+                toggle();
+            }
+        });
+    }
     head.appendChild(meta);
     head.appendChild(tail);
-    head.appendChild(caret);
     line.appendChild(head);
     line.appendChild(pane);
     const anchor = turn.textEl?.nextElementSibling || null;
     const host = turn.textEl?.parentElement || turn.el;
     host.insertBefore(line, anchor);
     turn.thinkingLineEl = line;
+    turn.thinkingHeadEl = head;
     turn.thinkingMetaEl = meta;
     turn.thinkingTailEl = tail;
-    turn.thinkingCaretEl = caret;
     turn.thinkingPaneEl = pane;
     turn.thinkingFollowTail = true;
     return line;
@@ -7964,6 +7976,7 @@ function renderCeoThinkingSummaryFromSnapshot(hostEl, thinking = null) {
     const fakeTurn = {
         el: hostEl,
         textEl,
+        thinkingExpandable: false,
         reasoningText: " ",
         reasoningSeconds: seconds,
         reasoningChars: chars,
@@ -7971,9 +7984,7 @@ function renderCeoThinkingSummaryFromSnapshot(hostEl, thinking = null) {
         reasoningTokensReported: reported,
     };
     renderCeoThinkingLineIntoTurn(fakeTurn);
-    if (fakeTurn.thinkingCaretEl) fakeTurn.thinkingCaretEl.remove();
     if (fakeTurn.thinkingLineEl) {
-        fakeTurn.thinkingLineEl.classList.add("is-final");
         if (anchorParent !== hostEl && fakeTurn.thinkingLineEl.parentElement === hostEl) {
             anchorParent.insertBefore(fakeTurn.thinkingLineEl, textEl.nextSibling || null);
         }
