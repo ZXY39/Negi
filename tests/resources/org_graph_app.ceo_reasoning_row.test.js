@@ -238,6 +238,19 @@ test("快照里 reasoning 为空时把这一行收起", () => {
     assert.equal(turn.thinkingLineEl.hidden, true);
 });
 
+test("车道进口接线：帧名、快照恢复、历史汇总三处都接上", () => {
+    // 上面那些用例是把函数单独喂进 vm 的；这条钉的是"帧真能走到函数"那段接线，
+    // 断在哪一处，界面上就一个字都不会动。
+    assert.match(APP_CODE, /payload\.type === "ceo\.reasoning\.delta"/);
+    assert.match(APP_CODE, /payload\.type === "ceo\.reasoning\.delta"[\s\S]{0,120}?applyCeoReasoningDelta\(/);
+    assert.match(APP_CODE, /applyCeoThinkingFromInflightSnapshot\(turn, snapshot\?\.reasoning\)/);
+    assert.match(APP_CODE, /renderCeoThinkingSummaryFromSnapshot\([^;]{0,80}item\?\.thinking\)/);
+    // 进行中快照的可见性判据要认思考读数，否则内部轮仍然只有一条静态转圈
+    assert.match(APP_CODE, /function ceoInflightTurnHasVisibleAssistantState[\s\S]{0,900}?!!reasoning/);
+    // 快照缓存条目要把有界读数带走，并重连时喂给这一行
+    assert.match(APP_CODE, /if \(reasoning\) next\.reasoning = reasoning;/);
+});
+
 test("样式契约：flex 容器必须自己补 [hidden]，展开窗高度固定", () => {
     assert.match(CSS_CODE, /\.ceo-thinking-line\s*\{[^}]*display:\s*flex/);
     assert.match(CSS_CODE, /\.ceo-thinking-line\[hidden\]\s*\{\s*display:\s*none/);
