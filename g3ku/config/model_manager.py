@@ -659,7 +659,7 @@ class ModelManager:
         self.config.set_role_model_routes(normalized_scope, entries)
 
     def get_model(self, key: str) -> dict[str, Any]:
-        item = self.facade.get_binding(self.config, key)
+        item = self.facade.describe_binding(self.config, key)
         item["scopes"] = [scope for scope in VALID_SCOPES if key in self._scope_list(scope)]
         return item
 

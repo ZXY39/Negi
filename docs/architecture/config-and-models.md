@@ -245,6 +245,21 @@ Leader（CEO/frontdoor）解析本轮模型引用时按三档取值，顺序固�
 - 与链变更同一口径：固定/取消固定、会话链增删只作用于边界处重建的下一个请求，不中途热切已在飞的 provider 请求。会话模型的读写接口与前端控件详见 `web-and-admin.md`「Composer Model Mode Panel」。
 - 固定的是 `models.catalog[]` 绑定 key，不是 provider/model 字符串：链路仍是 `key -> binding -> provider target`，删除或重建 binding 等价于删除该 key。
 
+### 绑定记录丢失时的降级
+
+`models.catalog[].llmConfigId` 指向 `.g3ku/llm-config/records/<id>.json`。这份记录可以比目录行先消失（凭据目录被清空、从别机导入配置、手工删文件），此时目录行仍然合法，只是这一位发不出去请求。唯一判据是 `Config.model_binding_is_missing()`：只看记录文件在不在，存储本身读不到时一律回答"没丢"——一次读盘故障不该把整条链的成员都摘掉。
+
+四条车道按同一口径处理这种行：
+
+- 运行时解析跳过坏成员：`resolve_role_model_key` 返回链上第一个记录仍在的成员，`build_chat_model` 用它构造 provider 链与默认模型。整条链都不可用时报错点名每个成员 key，并把处置写进「模型配置」。
+- 结构视图不动：`get_role_model_keys`、`get_scope_model_chain`、管理面 `roles` / `route_entries` 仍按配置的原始链给出。操作员看得见坏的那一位，才知道要恢复哪条记录、删哪一行；节点车道的 `model_refs` 也因此在跳失败时自动前进到下一位。
+- operator 读写面降级而不失败：`facade.list_bindings` / `describe_binding` / `set_binding_enabled` / `delete_binding` 对丢失记录出 `record_missing: true` 的行（目录自带的窗口、重试、名称照出，凭据那一半留空），删除不再要求记录存在。`facade.get_binding` 保持抛错——它是运行时解析用的，静默返回空 provider 只会把一次配置故障伪装成一次鉴权失败。
+- 前端把 `record_missing` 画成「凭据记录缺失」徽标（配置列表卡片与详情抽屉头各一处）。详情抽屉对这种行不再请求必然 404 的记录，否则「删除配置」这条修路够不到。
+
+写车道不认「就地重绑」：`update_config_record` 与 `update_binding` 仍要求目标记录存在，恢复一条丢失记录的正道是配置包导入或密钥代际回滚，否则就是删行后重新添加（删行会连带丢掉链位、绑定名与会话固定，所以先试恢复）。
+
+这条口径的分量在启动路径上：`get_agent()` 解析不到链首就构造不出 agent，`runtime.ready` 落回 false，而记忆、任务、会话三个列表都读 runtime——磁盘上一条没少，界面读成"新项目"。所以 `/api/models` 必须比运行时宽容：它是修复入口，一条坏绑定让整个列表 500 等于既看不到也删不掉。
+
 ## 8. secret 的真实去向
 
 配置里的 secret 不一定直接写回文件。
@@ -292,6 +307,8 @@ Leader（CEO/frontdoor）解析本轮模型引用时按三档取值，顺序固�
 - `models.roles.ceo`
 - `models.catalog`
 - `g3ku/llm_config/facade.py`
+
+链上有 key、`/api/models` 里对应行带 `record_missing`，说明绑定的凭据记录已不在（不是没配模型）；运行时按「绑定记录丢失时的降级」跳过该成员，处置是重绑或删行。
 
 ## 11. 维护高风险点
 

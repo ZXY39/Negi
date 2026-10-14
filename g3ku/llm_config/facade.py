@@ -213,15 +213,34 @@ class LLMConfigFacade:
         self.repository.delete(config_id)
         self.security.delete_overlay_prefix_all_realms(f"llm_config.{config_id}.")
 
+    def record_exists(self, config_id: str) -> bool:
+        """这一位绑定还有没有凭据记录——只看文件在不在，不解密、不外抛。
+
+        路由解析每拍都要问一次「这个模型用不用得了」，走 `repository.get()` 会连带解密
+        整份记录并把 `ConfigNotFoundError` 抛给启动路径。
+        """
+        return self.repository.has_record(config_id)
+
     def list_bindings(self, config: Any) -> list[dict[str, Any]]:
         items: list[dict[str, Any]] = []
         for binding in list(getattr(config.models, "catalog", []) or []):
-            config_id = str(getattr(binding, "llm_config_id", "") or "").strip()
-            if not config_id:
-                continue
-            record = self._hydrate_record_secrets(self.repository.get(config_id))
-            items.append(self._binding_payload(binding, record))
+            row = self._binding_row(binding)
+            if row is not None:
+                items.append(row)
         return items
+
+    def _binding_row(self, binding: Any) -> dict[str, Any] | None:
+        """operator 视角的绑定行：记录丢了也照出一份，并带 `record_missing`。
+
+        模型列表是修复入口——一条坏绑定不能让列表 500，否则既看不到也删不掉它。
+        """
+        config_id = str(getattr(binding, "llm_config_id", "") or "").strip()
+        if not config_id:
+            return None
+        record = self._get_optional_record(config_id)
+        if record is None:
+            return self._missing_record_payload(binding)
+        return self._binding_payload(binding, self._hydrate_record_secrets(record))
 
     def get_binding(self, config: Any, model_key: str) -> dict[str, Any]:
         binding = config.get_managed_model(model_key)
@@ -229,6 +248,16 @@ class LLMConfigFacade:
             raise ValueError(f"Unknown model key: {model_key}")
         record = self._hydrate_record_secrets(self.repository.get(binding.llm_config_id))
         return self._binding_payload(binding, record)
+
+    def describe_binding(self, config: Any, model_key: str) -> dict[str, Any]:
+        """详情/删除/开关这类 operator 读法：记录没了也返回降级行。"""
+        binding = config.get_managed_model(model_key)
+        if binding is None:
+            raise ValueError(f"Unknown model key: {model_key}")
+        row = self._binding_row(binding)
+        if row is None:
+            raise ValueError(f"Unknown model key: {model_key}")
+        return row
 
     def get_binding_capability(self, config: Any, model_key: str) -> str:
         payload = self.get_binding(config, model_key)
@@ -369,14 +398,15 @@ class LLMConfigFacade:
         if binding is None:
             raise ValueError(f"Unknown model key: {model_key}")
         binding.enabled = bool(enabled)
-        return self.get_binding(config, model_key)
+        return self.describe_binding(config, model_key)
 
     def delete_binding(self, config: Any, model_key: str) -> None:
         binding = config.get_managed_model(model_key)
         if binding is None:
             raise ValueError(f"Unknown model key: {model_key}")
         config.models.catalog = [item for item in config.models.catalog if item.key != model_key]
-        self.repository.delete(binding.llm_config_id)
+        if self.repository.has_record(binding.llm_config_id):
+            self.repository.delete(binding.llm_config_id)
 
     def get_routes(self, config: Any) -> dict[str, list[str]]:
         # 候选展开视图：链里出现负载均衡组时，成员也算这条车道用到的模型。
@@ -446,6 +476,42 @@ class LLMConfigFacade:
             "capability": record.capability.value,
             "auth_mode": record.auth_mode.value,
             "config_id": record.config_id,
+            "record_missing": False,
+        }
+
+    def _missing_record_payload(self, binding: Any) -> dict[str, Any]:
+        """`llm_config_id` 指向的记录已经不在了：目录行自带的那一半照出，凭据那一半留空。
+
+        键集合与 `_binding_payload` 对齐，operator 才能照常打开这行并把它删掉；
+        `record_missing` 是让前端说清「这一行需要重新绑定」的唯一判据。
+        """
+        config_id = str(getattr(binding, "llm_config_id", "") or "").strip()
+        return {
+            "key": binding.key,
+            "llm_config_id": config_id,
+            "provider_model": str(getattr(binding, "provider_model", "") or "").strip(),
+            "default_model": "",
+            "api_key": "",
+            "api_base": getattr(binding, "api_base", None),
+            "extra_headers": getattr(binding, "extra_headers", None) or {},
+            "enabled": bool(getattr(binding, "enabled", True)),
+            "max_tokens": getattr(binding, "max_tokens", None),
+            "temperature": getattr(binding, "temperature", None),
+            "reasoning_effort": getattr(binding, "reasoning_effort", None),
+            "retry_on": list(binding.retry_on or []),
+            "retry_count": int(getattr(binding, "retry_count", 0) or 0),
+            "single_api_key_max_concurrency": getattr(binding, "single_api_key_max_concurrency", None),
+            "description": str(getattr(binding, "description", "") or ""),
+            "name": str(getattr(binding, "name", "") or "").strip(),
+            "context_window_tokens": getattr(binding, "context_window_tokens", None),
+            "request_timeout_seconds": getattr(binding, "request_timeout_seconds", None),
+            "image_multimodal_enabled": bool(getattr(binding, "image_multimodal_enabled", False)),
+            "image_tail_only": bool(getattr(binding, "image_tail_only", False)),
+            "quota_pool_key": str(getattr(binding, "quota_pool_key", "") or "").strip() or None,
+            "capability": "",
+            "auth_mode": "",
+            "config_id": config_id,
+            "record_missing": True,
         }
 
 
