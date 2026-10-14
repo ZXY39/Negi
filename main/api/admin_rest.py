@@ -2240,6 +2240,33 @@ async def get_current_memories():
     }
 
 
+@router.get('/memory/index-notes')
+async def get_memory_index_notes():
+    """归并区分类 note 的只读列表：每分类一条，带常驻行显示的句柄与被归并的条目数。
+
+    断链的分类同样返回（`unusable` 为真），让浏览面把问题显示出来而不是静默少一类。
+    """
+    manager = _runtime_memory_manager()
+    reader = getattr(manager, 'list_consolidation_categories', None)
+    if not callable(reader):
+        raise HTTPException(status_code=503, detail='memory_index_notes_unavailable')
+    try:
+        items = reader()
+        if isawaitable(items):
+            items = await items
+    except Exception as exc:
+        raise _memory_read_error(
+            code='memory_index_notes_read_failed',
+            message='归并记忆暂时不可读取，请稍后刷新。',
+        ) from exc
+    items = list(items or [])
+    return {
+        'ok': True,
+        'items': items,
+        'total': len(items),
+    }
+
+
 @router.post('/memory/current/update')
 async def update_current_memory(request: Request, payload: dict | None = Body(default=None)):
     manager = _runtime_memory_manager()

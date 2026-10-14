@@ -83,6 +83,10 @@ class ApiClient {
                 return "note 内容校验未通过（不能为空）。";
             case "memory_note_update_failed":
                 return "记忆 note 修改未成功，请稍后重试。";
+            case "memory_index_notes_unavailable":
+                return "归并记忆列表暂不可用，请稍后刷新。";
+            case "memory_index_notes_read_failed":
+                return "归并记忆暂时不可读取，请稍后刷新。";
             case "memory_current_unavailable":
                 return "当前记忆列表暂不可用，请稍后刷新。";
             case "memory_current_read_failed":
@@ -1195,6 +1199,16 @@ class ApiClient {
             items: data.items || [],
             total: data.total || 0,
             hasMore: Boolean(data.has_more ?? data.hasMore),
+        };
+    }
+
+    static async listMemoryIndexNotes() {
+        const data = await this._request("GET", "/api/memory/index-notes", {
+            requestKey: "memory:index-notes",
+        });
+        return {
+            items: data.items || [],
+            total: data.total || 0,
         };
     }
 

@@ -231,3 +231,38 @@ def test_memory_note_read_endpoint_admits_the_resident_handle(monkeypatch: pytes
     assert invalid.status_code == 400
     assert invalid.json()["detail"]["code"] == "memory_note_invalid_ref"
     assert stub_manager.calls == ["n106dd"]
+
+
+def test_consolidation_note_browser_wires_the_read_only_lane() -> None:
+    html = _source("g3ku/web/frontend/org_graph.html")
+    app_js = _source("g3ku/web/frontend/org_graph_app.js")
+    api_js = _source("g3ku/web/frontend/api_client.js")
+    admin_py = _source("main/api/admin_rest.py")
+    runtime_py = _source("g3ku/agent/memory_agent_runtime.py")
+
+    # 入口在「查看记忆」旁边，读的是同一份 sqlite 派生出的归并区分类
+    assert '<button id="memory-index-notes-btn" class="toolbar-btn ghost" type="button">归并 note</button>' in html
+    assert 'memoryIndexNotes: document.getElementById("memory-index-notes-btn")' in app_js
+    assert 'U.memoryIndexNotes?.addEventListener("click", () => void openMemoryNoteBrowser());' in app_js
+    assert '"memory:index-notes"' in api_js
+    assert '"/api/memory/index-notes"' in api_js
+
+    # 列表与正文共用一个窗：index/note 两种形态在同一个 DOM 槽位里换，不叠第二层抽屉
+    assert '<div id="memory-note-index-list" class="memory-note-index-list" hidden></div>' in app_js
+    assert '<nav id="memory-note-preview-trail" class="memory-note-preview-trail"' in app_js
+    assert 'const isIndex = String(preview.mode || "note") === "index";' in app_js
+    # 轮询/重绘必须保住滚动位置（变更内容滚动条被重置是回归 bug）
+    assert "setInnerHtmlPreservingScroll(U.memoryNoteIndexList, renderMemoryNoteIndexListHtml(preview));" in app_js
+    assert "setInnerHtmlPreservingScroll(" in app_js
+    # 正文里的下一级：句柄形状与旧标记都渲染成可点令牌，其余文本一律转义
+    assert "renderMemoryTextWithNoteTokens(bodyText)" in app_js
+
+    # 只读面：端点不调任何写方法，断链的分类也照样列出（少一类比多一类更难查）
+    route = _admin_route_fragment(admin_py, "@router.get('/memory/index-notes')")
+    assert "list_consolidation_categories" in route
+    for writer in ("update_current_memory", "delete_current_memories", "update_note", "apply_batch"):
+        assert writer not in route
+
+    assert "def list_consolidation_categories(self)" in runtime_py
+    # 常驻行仍只渲染可用分类：浏览面放宽不能顺手把断链印进上下文
+    assert 'if not entry["unusable"]' in runtime_py

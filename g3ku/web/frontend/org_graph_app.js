@@ -430,6 +430,15 @@ const S = {
         editBody: "",
         saving: false,
         editable: true,
+        // 归并 note 浏览用同一个窗切换两种形态：index=分类列表，note=某份 note 正文。
+        // trail 是从列表进来的那一串点开的 ref，最后一项即当前；非 index 入口不填它。
+        mode: "note",
+        origin: "direct",
+        trail: [],
+        indexItems: [],
+        indexBusy: false,
+        indexError: "",
+        indexToken: 0,
     },
     memoryBrowser: {
         open: false,
@@ -555,6 +564,7 @@ const U = {
     memoryAdminActions: document.getElementById("memory-admin-actions"),
     memoryRefresh: document.getElementById("memory-refresh-btn"),
     memoryViewCurrent: document.getElementById("memory-view-current-btn"),
+    memoryIndexNotes: document.getElementById("memory-index-notes-btn"),
     memoryQueueList: document.getElementById("memory-queue-list"),
     memoryQueueInfo: document.getElementById("memory-queue-info"),
     memoryQueueMore: document.getElementById("memory-queue-more-btn"),
@@ -14935,6 +14945,9 @@ function memoryProcessedOpLabel(item) {
 }
 
 const NOTE_REF_RE = /(?:\bref:|见noteid:)(note_[a-z0-9_]+)\b/g;
+// note 正文里指回别的 note 的两种形状：旧标记 `ref:note_xxx`，以及常驻行同款句柄形状
+// `note:n0bfc7` / `(note: n0bfc7)`。归并 note 浏览层用它在正文里画出"下一级"。
+const NOTE_TOKEN_RE = /(?:\bref:|见noteid:)(note_[a-z0-9_]+)\b|\(\s*note:\s*(n[0-9a-f]{5})\s*\)|\bnote:(n[0-9a-f]{5})\b/g;
 const MEMORY_VIEW_POLL_MS = 15000;
 
 function renderMemoryNoteRefChip(noteRef) {
@@ -14949,6 +14962,34 @@ function renderMemoryNoteOwnershipChip(noteRef) {
     noteRef = String(noteRef || "").trim();
     if (!noteRef) return "";
     return `<button type="button" class="memory-note-ref-trigger memory-note-ownership-chip" data-memory-note-ref="${esc(noteRef)}">note:${esc(noteRef)}</button>`;
+}
+
+function renderMemoryNoteHandleChip(token, rawText) {
+    token = String(token || "").trim();
+    if (!token) return "";
+    const label = String(rawText || token).trim();
+    return `<button type="button" class="memory-note-ref-trigger memory-note-ownership-chip" data-memory-note-ref="${esc(token)}">${esc(label)}</button>`;
+}
+
+function renderMemoryTextWithNoteTokens(text) {
+    const value = String(text || "");
+    if (!value) return "";
+    NOTE_TOKEN_RE.lastIndex = 0;
+    let cursor = 0;
+    let html = "";
+    let match = NOTE_TOKEN_RE.exec(value);
+    while (match) {
+        const token = String(match[1] || match[2] || match[3] || "").trim();
+        const matchIndex = Number(match.index || 0);
+        const matchText = String(match[0] || "");
+        html += esc(value.slice(cursor, matchIndex));
+        html += token ? renderMemoryNoteHandleChip(token, matchText) : esc(matchText);
+        cursor = matchIndex + matchText.length;
+        match = NOTE_TOKEN_RE.exec(value);
+    }
+    NOTE_TOKEN_RE.lastIndex = 0;
+    html += esc(value.slice(cursor));
+    return html;
 }
 
 function renderMemoryNoteRefList(noteRefs) {
@@ -15270,8 +15311,10 @@ function ensureMemoryNotePreviewUi() {
             </div>
         </div>
         <div class="detail-modal-body">
+            <nav id="memory-note-preview-trail" class="memory-note-preview-trail" hidden aria-label="归并 note 浏览路径"></nav>
             <div class="memory-note-preview-shell">
                 <div id="memory-note-preview-status" class="memory-note-preview-status"></div>
+                <div id="memory-note-index-list" class="memory-note-index-list" hidden></div>
                 <pre id="memory-note-preview-body" class="memory-note-preview-body"></pre>
                 <textarea id="memory-note-edit-body" class="memory-note-edit-body" rows="12" hidden aria-label="note 正文编辑"></textarea>
             </div>
@@ -15292,6 +15335,8 @@ function ensureMemoryNotePreviewUi() {
     U.memoryNoteSubtitle = drawer.querySelector("#memory-note-preview-subtitle");
     U.memoryNoteStatus = drawer.querySelector("#memory-note-preview-status");
     U.memoryNoteBody = drawer.querySelector("#memory-note-preview-body");
+    U.memoryNoteTrail = drawer.querySelector("#memory-note-preview-trail");
+    U.memoryNoteIndexList = drawer.querySelector("#memory-note-index-list");
     U.memoryNoteEditBody = drawer.querySelector("#memory-note-edit-body");
     U.memoryNoteEditFooter = drawer.querySelector("#memory-note-edit-footer");
     U.memoryNoteEditToggle = drawer.querySelector("[data-memory-note-edit-toggle]");
@@ -15308,21 +15353,66 @@ function ensureMemoryNotePreviewUi() {
     U.memoryNoteEditBody?.addEventListener("input", () => {
         S.memoryNotePreview.editBody = U.memoryNoteEditBody.value || "";
     });
+    // 归并 note 浏览的列表行、面包屑与正文里的 note 令牌都在这个窗内走完：借其它显示面
+    // 的委托会让一次点击开出两个窗，两级内容还各说各话。
+    drawer.addEventListener("click", (e) => {
+        const preview = S.memoryNotePreview;
+        if (e.target.closest("[data-memory-note-index-back]")) {
+            void openMemoryNoteBrowser();
+            return;
+        }
+        const crumb = e.target.closest("[data-memory-note-trail-ref]");
+        if (crumb) {
+            const crumbRef = String(crumb.dataset.memoryNoteTrailRef || "").trim();
+            if (!crumbRef) return;
+            const trail = Array.isArray(preview.trail) ? preview.trail : [];
+            const cut = trail.findIndex((entry) => String(entry?.ref || "").trim() === crumbRef);
+            void openMemoryNotePreview(crumbRef, {
+                trail: cut > 0 ? trail.slice(0, cut) : [],
+                origin: "index",
+            });
+            return;
+        }
+        const noteTrigger = e.target.closest("[data-memory-note-ref]");
+        if (!noteTrigger) return;
+        const noteRef = String(noteTrigger.dataset.memoryNoteRef || "").trim();
+        if (!noteRef) return;
+        const trail = Array.isArray(preview.trail) ? [...preview.trail] : [];
+        if (preview.mode === "note" && preview.ref && preview.ref !== noteRef) {
+            trail.push({ ref: preview.ref });
+        }
+        void openMemoryNotePreview(noteRef, { trail, origin: "index" });
+    });
 }
 
 function renderMemoryNotePreview() {
     ensureMemoryNotePreviewUi();
-    const noteRef = String(S.memoryNotePreview.ref || "").trim();
-    const editable = !!S.memoryNotePreview.editable;
-    const editMode = !!S.memoryNotePreview.editMode && editable;
-    if (U.memoryNoteTitle) U.memoryNoteTitle.textContent = noteRef ? `Note 预览 · ${noteRef}` : "Note 预览";
+    const preview = S.memoryNotePreview;
+    const noteRef = String(preview.ref || "").trim();
+    // 同一个窗两种形态：index=归并区分类列表，note=某份 note 正文（含一路点下去的层级）。
+    const isIndex = String(preview.mode || "note") === "index";
+    const editable = !!preview.editable && !isIndex;
+    const editMode = !!preview.editMode && editable;
+    if (U.memoryNoteTitle) {
+        U.memoryNoteTitle.textContent = isIndex
+            ? "归并 note"
+            : (noteRef ? `Note 预览 · ${noteRef}` : "Note 预览");
+    }
     if (U.memoryNoteSubtitle) {
-        U.memoryNoteSubtitle.textContent = editMode ? "编辑 note 正文，保存前会再次确认。" : "";
+        U.memoryNoteSubtitle.textContent = isIndex
+            ? "归并区每分类一行，点分类名看 note 正文。"
+            : (editMode ? "编辑 note 正文，保存前会再次确认。" : "");
+    }
+    if (U.memoryNoteTrail) {
+        const trailHtml = isIndex ? "" : renderMemoryNoteTrailHtml(preview);
+        setInnerHtmlPreservingScroll(U.memoryNoteTrail, trailHtml);
+        U.memoryNoteTrail.hidden = !trailHtml;
     }
     if (U.memoryNoteStatus) {
-        const errorText = String(S.memoryNotePreview.error || "").trim();
-        if (S.memoryNotePreview.busy) {
-            U.memoryNoteStatus.textContent = "正在加载 note 正文...";
+        const errorText = String(isIndex ? (preview.indexError || "") : (preview.error || "")).trim();
+        const busy = isIndex ? !!preview.indexBusy : !!preview.busy;
+        if (busy) {
+            U.memoryNoteStatus.textContent = isIndex ? "正在加载归并记忆..." : "正在加载 note 正文...";
             U.memoryNoteStatus.hidden = false;
             U.memoryNoteStatus.classList.remove("is-error");
         } else if (errorText) {
@@ -15330,19 +15420,30 @@ function renderMemoryNotePreview() {
             U.memoryNoteStatus.hidden = false;
             U.memoryNoteStatus.classList.add("is-error");
         } else {
-            U.memoryNoteStatus.textContent = noteRef ? `当前预览：${noteRef}` : "";
-            U.memoryNoteStatus.hidden = !noteRef;
+            U.memoryNoteStatus.textContent = isIndex ? "" : (noteRef ? `当前预览：${noteRef}` : "");
+            U.memoryNoteStatus.hidden = isIndex ? true : !noteRef;
             U.memoryNoteStatus.classList.remove("is-error");
         }
     }
+    if (U.memoryNoteIndexList) {
+        U.memoryNoteIndexList.hidden = !isIndex;
+        if (isIndex) {
+            setInnerHtmlPreservingScroll(U.memoryNoteIndexList, renderMemoryNoteIndexListHtml(preview));
+        }
+    }
     if (U.memoryNoteBody) {
-        U.memoryNoteBody.hidden = editMode;
-        setTextPreservingScroll(
-            U.memoryNoteBody,
-            S.memoryNotePreview.busy
-                ? ""
-                : String(S.memoryNotePreview.body || "").trim() || "当前 note 没有正文。",
-        );
+        U.memoryNoteBody.hidden = isIndex || editMode;
+        if (!isIndex && !editMode) {
+            const bodyText = String(preview.body || "");
+            setInnerHtmlPreservingScroll(
+                U.memoryNoteBody,
+                preview.busy
+                    ? ""
+                    : (bodyText.trim()
+                        ? renderMemoryTextWithNoteTokens(bodyText)
+                        : esc("当前 note 没有正文。")),
+            );
+        }
     }
     if (U.memoryNoteEditBody) {
         U.memoryNoteEditBody.hidden = !editMode;
@@ -15358,6 +15459,92 @@ function renderMemoryNotePreview() {
     }
     if (U.memoryNoteEditSave) U.memoryNoteEditSave.disabled = !!S.memoryNotePreview.saving;
     setDrawerOpen(U.memoryNoteBackdrop, U.memoryNoteDrawer, !!S.memoryNotePreview.open);
+}
+
+function renderMemoryNoteTrailHtml(preview) {
+    // 面包屑只在从「归并 note」进来的那条道上出现；从记忆行/队列点开的预览仍是一层窗一句标题。
+    if (String(preview.origin || "direct") !== "index") return "";
+    const crumbs = [{ label: "归并 note", back: true }];
+    (Array.isArray(preview.trail) ? preview.trail : []).forEach((entry) => {
+        const ref = String(entry?.ref || "").trim();
+        if (ref) crumbs.push({ label: ref, ref });
+    });
+    const currentRef = String(preview.ref || "").trim();
+    if (currentRef) crumbs.push({ label: currentRef, current: true });
+    if (crumbs.length <= 1) return "";
+    return crumbs.map((crumb) => {
+        if (crumb.current) {
+            return `<span class="memory-note-trail-crumb is-current">${esc(crumb.label)}</span>`;
+        }
+        if (crumb.ref) {
+            return `<button type="button" class="memory-note-trail-crumb" data-memory-note-trail-ref="${esc(crumb.ref)}">${esc(crumb.label)}</button>`;
+        }
+        return `<button type="button" class="memory-note-trail-crumb" data-memory-note-index-back>${esc(crumb.label)}</button>`;
+    }).join(`<span class="memory-note-trail-sep">/</span>`);
+}
+
+function renderMemoryNoteIndexListHtml(preview) {
+    if (preview.indexBusy) return `<div class="memory-note-index-empty">正在加载归并记忆...</div>`;
+    const errorText = String(preview.indexError || "").trim();
+    if (errorText) return `<div class="memory-note-index-empty is-error">${esc(errorText)}</div>`;
+    const items = Array.isArray(preview.indexItems) ? preview.indexItems : [];
+    if (!items.length) return `<div class="memory-note-index-empty">归并区还没有分类 note。</div>`;
+    const rows = items.map((item) => {
+        const ref = String(item?.note_ref || "").trim();
+        const handle = String(item?.handle || "").trim();
+        const scope = String(item?.scope_line || "").trim();
+        const unusable = Boolean(item?.unusable);
+        const count = Number(item?.entry_count || 0);
+        return `<tr class="memory-note-index-row${unusable ? " is-unusable" : ""}">
+            <td><button type="button" class="memory-note-ref-trigger" data-memory-note-ref="${esc(ref)}">${esc(ref)}</button></td>
+            <td>${esc(handle) || "-"}</td>
+            <td class="memory-note-index-cell-scope">${scope ? esc(scope) : "分类 note 缺失或没有说明行"}</td>
+            <td class="memory-note-index-cell-count">${count}</td>
+        </tr>`;
+    }).join("");
+    return `<table class="memory-note-index-table">
+        <thead><tr><th>分类 note</th><th>常驻句柄</th><th>说明行</th><th>条目</th></tr></thead>
+        <tbody>${rows}</tbody>
+    </table>`;
+}
+
+async function openMemoryNoteBrowser() {
+    ensureMemoryNotePreviewUi();
+    const preview = S.memoryNotePreview;
+    preview.open = true;
+    preview.mode = "index";
+    preview.origin = "index";
+    preview.trail = [];
+    preview.ref = "";
+    preview.body = "";
+    preview.error = "";
+    preview.editMode = false;
+    preview.editBody = "";
+    preview.requestToken += 1;
+    renderMemoryNotePreview();
+    await loadMemoryIndexNotes();
+}
+
+async function loadMemoryIndexNotes() {
+    const preview = S.memoryNotePreview;
+    preview.indexBusy = true;
+    preview.indexToken += 1;
+    const requestToken = preview.indexToken;
+    renderMemoryNotePreview();
+    try {
+        const data = await ApiClient.listMemoryIndexNotes();
+        if (requestToken !== preview.indexToken) return;
+        preview.indexItems = Array.isArray(data?.items) ? data.items : [];
+        preview.indexError = "";
+    } catch (error) {
+        if (requestToken !== preview.indexToken) return;
+        preview.indexItems = [];
+        preview.indexError = error?.message || "归并记忆暂时不可读取，请稍后刷新。";
+    } finally {
+        if (requestToken !== preview.indexToken) return;
+        preview.indexBusy = false;
+        renderMemoryNotePreview();
+    }
 }
 
 function toggleMemoryNoteEditMode() {
@@ -15427,6 +15614,10 @@ async function openMemoryNotePreview(noteRef, options = {}) {
     S.memoryNotePreview.editBody = "";
     // 已处理批次的历史入口（变更内容等）打开的 note 窗只读，不提供编辑
     S.memoryNotePreview.editable = options.editable !== false;
+    S.memoryNotePreview.mode = "note";
+    // 从「归并 note」浏览层点进来的带路径，面包屑才能一路回退；其它入口保持单层窗。
+    S.memoryNotePreview.origin = String(options.origin || "direct");
+    S.memoryNotePreview.trail = Array.isArray(options.trail) ? options.trail : [];
     S.memoryNotePreview.requestToken += 1;
     const requestToken = S.memoryNotePreview.requestToken;
     renderMemoryNotePreview();
@@ -16537,14 +16728,6 @@ function setInnerHtmlPreservingScroll(el, html) {
     el.scrollLeft = previousLeft;
 }
 
-function setTextPreservingScroll(el, text) {
-    if (!el) return;
-    if (el.textContent === text) return;
-    const previousTop = el.scrollTop;
-    el.textContent = text;
-    el.scrollTop = previousTop;
-}
-
 function stopMemoryViewAutoRefresh() {
     if (S.memoryPollIntervalId) {
         window.clearInterval(S.memoryPollIntervalId);
@@ -17575,6 +17758,7 @@ function bind() {
     U.backToTasks?.addEventListener("click", () => switchView("tasks"));
     U.memoryRefresh?.addEventListener("click", () => void loadMemoryView({ force: true }));
     U.memoryViewCurrent?.addEventListener("click", () => void openMemoryBrowser());
+    U.memoryIndexNotes?.addEventListener("click", () => void openMemoryNoteBrowser());
     U.memoryQueueMore?.addEventListener("click", () => void loadMoreMemoryQueue());
     U.memoryProcessedMore?.addEventListener("click", () => void loadMoreMemoryProcessed());
     U.memoryFailedMore?.addEventListener("click", () => void loadMoreMemoryFailed());
