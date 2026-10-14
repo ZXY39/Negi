@@ -2078,12 +2078,16 @@ function resetCeoModelSelection(sessionId) {
     syncCeoModelModeControl();
 }
 
-function applyCeoModelSelectionPayload(sessionId, payload) {
+function applyCeoModelSelectionPayload(sessionId, payload, { keepDraft = false } = {}) {
     const key = String(sessionId || "").trim();
     const data = payload && typeof payload === "object" ? payload : {};
     const modelKey = String(data.model_key || data.modelKey || "").trim();
     const mode = String(data.mode || "").trim() === "model" && modelKey ? "model" : "chain";
     const sessionChainKeys = normalizeModelRoleChain(Array.isArray(data.model_keys) ? data.model_keys : []);
+    // keepDraft：后台读到的服务端状态不能顺手把用户正在改的那份草稿打回基线。
+    const chainKeys = keepDraft
+        ? ceoModelChainDraft()
+        : (sessionChainKeys.length ? [...sessionChainKeys] : ceoModelChainKeys());
     S.ceoModelSelection = {
         ...S.ceoModelSelection,
         sessionId: String(data.session_id || key).trim() || key,
@@ -2096,7 +2100,7 @@ function applyCeoModelSelectionPayload(sessionId, payload) {
         error: "",
         sessionChainKeys,
         isSessionChain: sessionChainKeys.length > 0,
-        chainKeys: sessionChainKeys.length ? [...sessionChainKeys] : ceoModelChainKeys(),
+        chainKeys,
     };
     syncCeoModelModeControl();
     return S.ceoModelSelection;
@@ -2119,7 +2123,10 @@ async function refreshCeoModelSelection(sessionId, { force = false } = {}) {
     try {
         const payload = await ApiClient.getCeoSessionModelSelection(key);
         if (token !== S.ceoModelSelection.requestToken) return null;
-        return applyCeoModelSelectionPayload(key, payload);
+        // 这份回执可能晚于用户的第一次改动：正在编辑时只更新服务端状态，草稿留给用户。
+        return applyCeoModelSelectionPayload(key, payload, {
+            keepDraft: !!S.ceoModelSelection.chainEditing,
+        });
     } catch (error) {
         if (token !== S.ceoModelSelection.requestToken) return null;
         S.ceoModelSelection = {
@@ -2320,12 +2327,19 @@ async function saveCeoModelChain(keys) {
     }
 }
 
-async function ensureCeoModelCatalog() {
-    if (S.modelCatalog.loading || (S.modelCatalog.catalog || []).length) return;
+async function ensureCeoModelCatalog({ force = false } = {}) {
+    // 目录只在启动、进「模型配置」页和点那颗刷新时重读；脑图标面板读的就是这份缓存。
+    // force 是给面板打开用的：全局链可能在本页打开之后被模型页或另一个标签页改过，
+    // 不重读就会把一条已经不生效的链标成「模型链（全局）」。
+    if (S.modelCatalog.loading || (!force && (S.modelCatalog.catalog || []).length)) return;
     try {
         await loadModels();
     } catch (error) {
         void error;
+    }
+    // 只读态的草稿就是"正在生效的那条"，基线换了它必须跟着换；编辑态不动人的草稿。
+    if (S.ceoModelSelection.panelOpen && !S.ceoModelSelection.chainEditing) {
+        S.ceoModelSelection = { ...S.ceoModelSelection, chainKeys: ceoModelChainBaseline() };
     }
     renderCeoModelPicker();
     renderCeoModelChainPane();
@@ -2728,7 +2742,8 @@ function openCeoModelModePanel() {
     syncCeoModelModeControl();
     if (S.ceoModelSelection.pickerOpen) U.ceoModelPickerSearch?.focus();
     void refreshCeoModelSelection(sessionId);
-    void ensureCeoModelCatalog();
+    // 每次打开都重读目录：面板显示的是"此刻生效的那条链"，不能是本页上次加载时的快照。
+    void ensureCeoModelCatalog({ force: true });
 }
 
 function closeCeoModelModePanel() {

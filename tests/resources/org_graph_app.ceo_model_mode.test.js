@@ -113,6 +113,11 @@ function loadApp(apiClientOverrides = {}) {
                 pinned_available: true,
             };
         },
+        // 面板打开会重读模型目录（全局链可能已被别处改过），默认桩与 mountControl 的目录一致。
+        getOrgGraphModels: async () => ({
+            catalog: CATALOG.map((item) => ({ ...item })),
+            roles: { ceo: ["alpha", "beta", "gamma"], execution: [], inspection: [], memory: [] },
+        }),
         // 故意不提供 updateModelRoleChain：脑图标面板的链保存只准打会话端点，
         // 谁写回全局角色链就会在这里直接炸掉。
         estimateCeoComposerPreflight: async () => null,
@@ -943,6 +948,54 @@ test("同步成全局底稿后再动一手，保存才落这条会话链", async
     assert.deepEqual(writesOf(app).map((call) => [call[2].mode, call[2].model_keys]), [["chain", ["gamma"]]]);
     assert.equal(app.S.ceoModelSelection.isSessionChain, true);
     assert.equal(app.U.ceoModelModeChain.textContent, "模型链（此会话）");
+});
+
+test("打开面板重读模型目录：只读态显示此刻的全局链而不是上次加载的快照", async () => {
+    const app = loadApp({
+        // 服务端这条链已经换了头：面板必须显示新链，而不是本页加载时那份缓存。
+        getOrgGraphModels: async () => ({
+            catalog: CATALOG.map((item) => ({ ...item })),
+            roles: { ceo: ["beta", "alpha"], execution: [], inspection: [], memory: [] },
+        }),
+    });
+    mountControl(app);
+    assert.deepEqual(Array.from(app.ceoModelChainKeys()), ["alpha", "beta", "gamma"]);
+
+    app.openCeoModelModePanel();
+    for (let i = 0; i < 6; i += 1) await new Promise((resolve) => setTimeout(resolve, 0));
+
+    assert.deepEqual(Array.from(app.ceoModelChainDraft()), ["beta", "alpha"]);
+    assert.equal(app.S.ceoModelSelection.chainEditing, false);
+    assert.equal(app.ceoModelChainDirty(), false);
+    assert.deepEqual(writesOf(app), []);
+});
+
+test("目录重读落地时不盖掉编辑中的草稿", async () => {
+    let release;
+    const gate = new Promise((resolve) => { release = resolve; });
+    const app = loadApp({
+        getOrgGraphModels: async () => {
+            await gate;
+            return {
+                catalog: CATALOG.map((item) => ({ ...item })),
+                roles: { ceo: ["gamma", "beta"], execution: [], inspection: [], memory: [] },
+            };
+        },
+    });
+    mountControl(app);
+    app.openCeoModelModePanel();
+    app.enterCeoModelChainEdit();
+    app.removeCeoModelChainMember("gamma");
+
+    release();
+    for (let i = 0; i < 6; i += 1) await new Promise((resolve) => setTimeout(resolve, 0));
+
+    // 目录已经换成新链，但编辑中的草稿一个字都不动。
+    assert.deepEqual(Array.from(app.ceoModelChainKeys()), ["gamma", "beta"]);
+    assert.deepEqual(Array.from(app.ceoModelChainDraft()), ["alpha", "beta"]);
+    assert.equal(app.S.ceoModelSelection.chainEditing, true);
+    assert.equal(app.ceoModelChainDirty(), true);
+    assert.deepEqual(writesOf(app), []);
 });
 
 test("页签标出这条链是谁的：没会话链时跟随全局，存了会话链才标此会话", () => {
