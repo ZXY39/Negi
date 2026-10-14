@@ -27,6 +27,9 @@ class _StubFacade:
     def get_binding(self, config: object, key: str) -> dict[str, object]:
         return {"key": key, "llm_config_id": "cfg"}
 
+    def describe_binding(self, config: object, key: str) -> dict[str, object]:
+        return self.get_binding(config, key)
+
 
 def _build_manager(monkeypatch: pytest.MonkeyPatch) -> tuple[object, object]:
     from g3ku.config.model_manager import ModelManager

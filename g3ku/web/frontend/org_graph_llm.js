@@ -461,7 +461,9 @@
   async function openDetailModal(modelKey) {
     const binding = llmState().bindingMap[trim(modelKey)] || null;
     if (!binding) return;
-    const record = await ApiClient.getLlmConfig(binding.config_id || binding.llm_config_id, { includeSecrets: true });
+    // 记录已经不在了的行不请求详情：那次调用只会 404，而抽屉必须打得开，
+    // 否则「删除配置」这条修路够不到，坏行既看不见也删不掉。
+    const record = binding.record_missing ? null : await ApiClient.getLlmConfig(binding.config_id || binding.llm_config_id, { includeSecrets: true });
     const draft = withThinkingOutputParameterDefaults(draftFromConfig(record));
     const jsonText = JSON.stringify(draft, null, 2);
     llmState().editor = {
@@ -1300,6 +1302,7 @@
               <p class="subtitle">可同时编辑当前配置的 JSON 配置与降级重试策略。</p>
             </div>
             <div class="detail-modal-actions">
+              ${binding?.record_missing ? '<span class="policy-chip risk-high">凭据记录缺失</span>' : ""}
               ${renderBindingNoteAction()}
               <button type="button" class="toolbar-btn ghost" data-llm-action="close">关闭</button>
             </div>
@@ -1374,12 +1377,16 @@
 
     U.llmBindingsList.innerHTML = items.map((item) => {
       const canDrag = S.modelCatalog.roleEditing;
+      const metaRow = item.record_missing
+        ? '<div class="model-inline-meta"><span class="policy-chip risk-high">凭据记录缺失</span></div>'
+        : "";
       return `
         <article class="llm-binding-card model-available-item${trim(item.key) === trim(llmState().editor.bindingKey) ? " is-selected" : ""}" data-model-available-key="${escv(item.key)}" data-model-open="${escv(item.key)}"${canDrag ? ' draggable="true"' : ""}>
           <button type="button" class="model-available-main" data-model-open="${escv(item.key)}">
             <span class="resource-list-title">${escv(bindingTitle(item))}</span>
             <span class="resource-list-subtitle">${escv(item.api_base || "")}</span>
           </button>
+          ${metaRow}
         </article>`;
     }).join("");
   }

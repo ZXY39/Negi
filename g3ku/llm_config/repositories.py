@@ -43,6 +43,12 @@ class EncryptedConfigRepository:
     def _legacy_record_path(self, config_id: str) -> Path:
         return self.records_root / f"{config_id}.enc"
 
+    def has_record(self, config_id: str) -> bool:
+        clean = str(config_id or "").strip()
+        if not clean:
+            return False
+        return self._record_path(clean).exists() or self._legacy_record_path(clean).exists()
+
     def list_summaries(self) -> list[StoredConfigSummary]:
         return sorted(self._read_index(), key=lambda item: item.updated_at, reverse=True)
 

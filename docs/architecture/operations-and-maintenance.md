@@ -335,6 +335,14 @@ Provider retry troubleshooting note:
 - 没有可用代际（本次故障发生在留证上线之前）时走配置包导入：`negi security` 不补密钥，只有 `.g3ku/config-bundles/*.g3kucb` 能带回信封与 records，且需要该包的口令；导入后 worker 需重启才换链。
 - 别把这条读成"数据被删了"：`sessions/`、`memory/MEMORY.md`、`main-runtime/` 都在，恢复凭据即可见。
 
+### 已解锁但 `runtime.ready` 一直 false：记忆、任务、会话三屏同时空
+
+`mode=unlocked`、`key_store.state=ok`，而 `runtime.agent_ready` / `main_runtime_ready` / `ready` 全 false 时，读的是**运行时没构造起来**，不是数据没了——三个列表都从 runtime 取值，所以缺一个就整屏空。先看 `.g3ku/logs/console.log` 里 `get_agent()` 的抛点，最常见的一条是 `ConfigNotFoundError: Config not found: <id>`：链上某个模型指向的凭据记录已经不在，而 `models.catalog[]` 那行还留着引用。
+
+- 判据是「哪一位坏了」而不是「有没有模型」：`/api/models` 与 `/api/llm/bindings` 的每个 item 带 `record_missing`，管理面对应卡片显示「凭据记录缺失」。运行时按 `config-and-models.md`「绑定记录丢失时的降级」跳过坏成员继续用链上剩余成员，所以链首坏了不必修也能起来；全链都坏才报错，报错文本点名每个 key。
+- 修复只有两条路：把记录本身找回来（配置包导入 / `negi security restore` 代际回滚），或删掉坏行再重新添加配置。管理面的详情保存第一步是按旧 id 更新记录，那次更新要求记录存在，所以就地改字段救不了这种行。删行会连带摘掉链位、绑定名与会话固定，先试找回记录。
+- 凭据记录整本丢失（`llm-config/index.json` 是空 `configs`）时先按上一条「界面停在初始化向导」恢复 records，再回到这里看 `record_missing` 是否清零。
+
 ### 托管 worker 看门狗 / 任务大厅持续显示「worker stale」
 
 本地默认启动（非 `--no-worker` / 容器）下，Web 解锁后托管一个 task worker 子进程（`python -m g3ku worker`）：worker 每 1–2s 写 `worker_status` 心跳并续 `task_worker` 租约（`worker_leases`，TTL 20s）。`/api/tasks/worker-status` 在心跳 `updated_at` 距今超过 15s（有活动任务 60s）时报告 `stale`，前端据此冻结创建/恢复控件并显示条幅。

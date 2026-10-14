@@ -22,7 +22,11 @@ def build_chat_model(
         default_key = direct_model_key
         chain = [direct_model_key]
     else:
-        chain = [target.model_key for target in config.get_scope_model_chain(role_name)]
+        chain = [
+            target.model_key
+            for target in config.get_scope_model_chain(role_name)
+            if not config.model_binding_is_missing(target.model_key)
+        ]
         default_key = str(chain[0] if chain else config.resolve_role_model_key(role_name)).strip()
     if not default_key:
         target_label = f"role '{role_name}'" if role_name else f"model_key '{direct_model_key}'"

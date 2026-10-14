@@ -1524,10 +1524,37 @@ class Config(BaseSettings):
         )
         return max(1, int(value or DEFAULT_NODE_DISPATCH_CONCURRENCY[normalized]))
 
+    def model_binding_is_missing(self, model_key: str) -> bool:
+        """目录行指向的凭据记录是否已经不在（只有正查到「不在」才判缺失）。
+
+        判据只看记录文件在不在：存储本身拿不到（锁、坏盘）时返回 False，让真正的解析
+        去报错，而不是把整条链的成员都当坏成员摘掉。
+        """
+        managed = self.get_managed_model(model_key)
+        if managed is None:
+            return False
+        config_id = str(managed.llm_config_id or "").strip()
+        if not config_id:
+            return False
+        from g3ku.llm_config.facade import get_llm_config_facade
+
+        try:
+            return not get_llm_config_facade(self.workspace_path).record_exists(config_id)
+        except Exception:
+            return False
+
     def resolve_role_model_key(self, role: str) -> str:
-        refs = self.get_role_model_keys(role)
+        refs = [str(item or "").strip() for item in self.get_role_model_keys(role) if str(item or "").strip()]
+        for ref in refs:
+            if not self.model_binding_is_missing(ref):
+                return ref
         if refs:
-            return str(refs[0]).strip()
+            broken = ", ".join(refs)
+            raise ValueError(
+                f"角色 {role} 的模型全部指向已不存在的凭据记录：{broken}。"
+                "先在「模型配置」恢复这些记录（配置包导入或密钥代际回滚），"
+                "或删掉这些行再重新添加配置。"
+            )
         raise ValueError(f"No model configured for role '{role}'.")
 
     def get_role_model_target(self, role: str) -> tuple[str, str]:
