@@ -380,16 +380,56 @@ test("无在跑工作时确认后按原样导入并刷新页面", async () => {
     app.U.configBundleImportPassword.value = "secret-pass-123";
 
     await app.submitConfigBundleImport();
-    await app.confirmCalls.at(-1).onConfirm({ checked: false });
+    await app.confirmCalls.at(-1).onConfirm({ checked: false, value: "local-pass-1" });
     await flush();
 
     assert.deepEqual(plain(app.calls), [
         ["exit-check"],
-        ["import", "bundle.g3kucb", "secret-pass-123", { confirmRunningWork: false }],
+        ["import", "bundle.g3kucb", "secret-pass-123", { confirmRunningWork: false, currentPassword: "local-pass-1" }],
         ["reload"],
     ]);
     assert.equal(app.toasts.at(-1).title, "配置包已导入");
     assert.match(app.toasts.at(-1).text, /重启后 worker 才用新配置/);
+});
+
+test("导入确认要求本机口令，空值不提交", async () => {
+    const app = loadApp();
+    app.U.configBundleImportFile.files = [{ name: "bundle.g3kucb" }];
+    app.U.configBundleImportPassword.value = "secret-pass-123";
+
+    await app.submitConfigBundleImport();
+
+    const confirm = app.confirmCalls.at(-1);
+    assert.deepEqual(plain(confirm.input), {
+        label: "当前项目解锁口令",
+        placeholder: "导入后继续用它解锁",
+        required: true,
+    });
+    await assert.rejects(() => confirm.onConfirm({ checked: false, value: "   " }), /当前项目解锁口令/);
+    assert.deepEqual(app.calls.filter((call) => call[0] === "import"), []);
+});
+
+test("保住本机口令时提示文案说口令不变，没口令可保时说改成包口令", async () => {
+    const kept = loadApp({
+        importConfigBundle: async (file, password, options) => ({ entry_count: 6, password_kept: true, ...options }),
+    });
+    kept.U.configBundleImportFile.files = [{ name: "bundle.g3kucb" }];
+    kept.U.configBundleImportPassword.value = "secret-pass-123";
+    await kept.submitConfigBundleImport();
+    await kept.confirmCalls.at(-1).onConfirm({ checked: false, value: "local-pass-1" });
+    await flush();
+    assert.match(kept.toasts.at(-1).text, /解锁口令保持不变/);
+    assert.doesNotMatch(kept.toasts.at(-1).text, /改成包口令/);
+
+    const adopted = loadApp({
+        importConfigBundle: async () => ({ entry_count: 6, password_kept: false }),
+    });
+    adopted.U.configBundleImportFile.files = [{ name: "bundle.g3kucb" }];
+    adopted.U.configBundleImportPassword.value = "secret-pass-123";
+    await adopted.submitConfigBundleImport();
+    await adopted.confirmCalls.at(-1).onConfirm({ checked: false, value: "local-pass-1" });
+    await flush();
+    assert.match(adopted.toasts.at(-1).text, /解锁口令改成包口令/);
 });
 
 test("有在跑工作时必须勾选暂停才提交", async () => {
@@ -409,15 +449,15 @@ test("有在跑工作时必须勾选暂停才提交", async () => {
     });
     assert.match(confirm.text, /检测到1 个进行中的对话/);
 
-    await assert.rejects(() => confirm.onConfirm({ checked: false }), /请先勾选/);
+    await assert.rejects(() => confirm.onConfirm({ checked: false, value: "local-pass-1" }), /请先勾选/);
     assert.deepEqual(app.calls, []);
 
-    await confirm.onConfirm({ checked: true });
+    await confirm.onConfirm({ checked: true, value: "local-pass-1" });
     assert.deepEqual(plain(app.calls.at(0)), [
         "import",
         "bundle.g3kucb",
         "secret-pass-123",
-        { confirmRunningWork: true },
+        { confirmRunningWork: true, currentPassword: "local-pass-1" },
     ]);
 });
 
