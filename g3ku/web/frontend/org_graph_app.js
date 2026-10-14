@@ -14607,6 +14607,14 @@ function renderMemoryNoteRefChip(noteRef) {
     return `<button type="button" class="memory-note-ref-trigger" data-memory-note-ref="${esc(noteRef)}">ref:${esc(noteRef)}</button>`;
 }
 
+function renderMemoryNoteOwnershipChip(noteRef) {
+    // 归属来自 `note_ref` / `consolidated_into` 列，不是从正文里正则出来的：常驻行现在只
+    // 展示句柄，扫文本会把已经不存在的关系当成缺关系。
+    noteRef = String(noteRef || "").trim();
+    if (!noteRef) return "";
+    return `<button type="button" class="memory-note-ref-trigger memory-note-ownership-chip" data-memory-note-ref="${esc(noteRef)}">note:${esc(noteRef)}</button>`;
+}
+
 function renderMemoryNoteRefList(noteRefs) {
     const items = [...new Set((Array.isArray(noteRefs) ? noteRefs : [])
         .map((item) => String(item || "").trim())
@@ -15682,6 +15690,7 @@ function renderMemoryBrowserList() {
             const source = String(item?.source || "").trim() || "-";
             const memoryId = String(item?.memory_id || "").trim() || "-";
             const body = String(item?.memory_body || "").trim() || "-";
+            const ownershipNoteRef = String(item?.note_ref || "").trim() || String(item?.consolidated_into || "").trim();
             const selectableId = String(item?.memory_id || "").trim();
             const checked = !!S.memoryBrowser.selected[selectableId];
             const actionBusy = String(S.memoryBrowser.actionBusy || "").trim();
@@ -15711,7 +15720,7 @@ function renderMemoryBrowserList() {
                     <td class="memory-browser-cell-nowrap">${esc(String(item?.passed_count ?? 0))}</td>
                     <td class="memory-browser-cell-nowrap">${esc(source)}</td>
                     <td class="memory-browser-cell-nowrap">${esc(memoryId)}</td>
-                    <td class="memory-browser-cell-body">${renderMemoryTextWithNoteRefs(body)}</td>
+                    <td class="memory-browser-cell-body">${renderMemoryTextWithNoteRefs(body)}${renderMemoryNoteOwnershipChip(ownershipNoteRef)}</td>
                     ${actionsCell}
                 </tr>
             `;

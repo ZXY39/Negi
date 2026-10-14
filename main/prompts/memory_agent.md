@@ -14,7 +14,7 @@
 
 ## 你会收到
 
-- 当前记忆正文（含每条记忆的 id 与其引用的 note ref）
+- 当前记忆正文（含每条记忆的 id 与其 note 句柄）
 - 现有 note 的 ref 清单
 - 待处理记忆请求（`用户明确要求` 或 `自主复核提炼` 两类批次；用户侧请求可能是要记住、修改或忘记某条已展示的记忆，落到 `adds` / `rewrites` / `deletes` 由你判断，批次类型不替你决定；阶段可见面 `stages:` 嵌在待处理请求的 `payload_text` 里，不是独立顶层段）
 - 本轮提交要求（参数形状与硬性校验以 `memory_apply_batch` 的工具 schema 和它返回的字段错误为准）
@@ -24,12 +24,12 @@
 ### `memory_read_note(ref)`
 
 用途：
-- 按 ref 读取一个已有 note，不带 `.md` 后缀。
+- 读取一个已有 note 的正文。
 
 参数：
 - `ref: string`
   - 必填
-  - note short ref，例如 `note_policy`
+  - 两种写法都认：note 文件名（不带 `.md`，例如 `note_policy`），或长期记忆正文里 `note:` 后面那串句柄
 
 何时使用：
 - 你准备改写、删除、合并一条引用了 note 的旧记忆时
@@ -43,15 +43,17 @@
 - 必须且只能调用一次
 
 参数：
-- `adds?: Array<{ content: string, minimal_memory: string, decision_source: "user" | "self" }>`
+- `adds?: Array<{ content: string, minimal_memory: string, decision_source: "user" | "self", note_ref?: string }>`
   - 仅用于“独立的新记忆”
   - `decision_source` 必填：`user` = 用户在本轮明确要求记住，`self` = 你自主复核提炼。该值决定记忆的来源标记，`user` 来源的行不参与压缩清理、`self` 来源的参与，标错会直接改变记忆存活
+  - `note_ref` 可选：这条记忆挂哪份 note，填 note 文件名（不带 `.md`）。这是关系的唯一写法
   - 当现有记忆与旧记忆重复时，禁止单独使用 add，可选择以下任意一种处理方式：
     1. `rewrites` 覆盖旧记忆
     2. `deletes` 旧记忆后再 `add` 新记忆
-- `rewrites?: Array<{ id: string, content: string, minimal_memory: string }>`
+- `rewrites?: Array<{ id: string, content: string, minimal_memory: string, note_ref?: string }>`
   - 用于改写已有记忆
   - 会保留原记忆 id 和原 source，并由系统刷新日期
+  - `note_ref` 不给就沿用这条记忆原有的 note；要换挂才写新名字
   - 当候选与旧记忆同槽位但新表述更准确、更规范、更完整时，优先使用 rewrite
 - `deletes?: string[]`
   - 传入要删除的已有记忆 id；该记忆独占引用的 note 会被回收，被其他记忆共享引用的 note 保留
@@ -80,11 +82,11 @@
 - `minimal_memory`
   - 写成 `条件->要求关键词` 的形式，去除所有补充性解释和语法，只保留核心要点，丢失非核心信息和模糊描述
   - 箭头用半角 ASCII `->` 且恰好一个；全角箭头或多出箭头会被打回
-  - 需要引用 note 时，优先附加 `见noteid:<id>`，并兼容历史写法 `ref:<id>`
+  - 需要挂 note 用条目里的 `note_ref` 字段；正文里写 `见noteid:<id>` 或 `ref:<id>` 会被打回，它不再建立关系
   - 下面示例里的「极简记忆：」只是排版标签，不要写进字段值：字段只填箭头串本身
  如：
   1. 用户在判断图片人物像谁时，偏好基于画面细节做角色联想与相似度判断；对无法可靠确认身份的图片，先明确不能直接认人，再给出可能候选并说明依据。 极简记忆：判断图片->从画面细节联想
-  2. 处理 Google Trends 等高动态站点时，要优先用 CDP 触发真实请求并从 performance 捕捉接口 URL 再拉取解析响应，不要优先直拉页面文本；同时处理 consent、重试节流、curl.exe、编码与 anti-XSSI 等兼容问题，详见note id:xxx。  极简记忆：处理高动态站点->CDP 触发， performance 捕捉URL拉取响应 见noteid:xxx
+  2. 处理 Google Trends 等高动态站点时，要优先用 CDP 触发真实请求并从 performance 捕捉接口 URL 再拉取解析响应，不要优先直拉页面文本；同时处理 consent、重试节流、curl.exe、编码与 anti-XSSI 等兼容问题。 极简记忆：处理高动态站点->CDP 触发， performance 捕捉URL拉取响应（这条另在 `note_ref` 里填 `note_trends_cdp`）
 
 ## 载荷中的 stages 可见面
 
@@ -143,7 +145,7 @@
 ### 3. 长度限制
 
 - 单条记忆正文上限为 `300` 字符，按 Unicode 码点计（一个汉字算一个，不是 token）
-- 系统在测长前会先把引用的 ` ref:<id>` 拼到正文后面，所以留给正文的实际预算小于 300；带 note 的记忆按这个余量写
+- 300 字符全部用于正文；note 关系走 `note_ref` 字段，不占这份预算
 - 超过 `300` 字符时，工具返回校验错并提示压缩，不会静默截断入库；此时必须压缩为“摘要 + note”模式，而不是直接把长段正文塞进 MEMORY.md。
 
 ### 4. 重复记忆判定

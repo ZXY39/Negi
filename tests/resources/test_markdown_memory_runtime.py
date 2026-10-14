@@ -49,7 +49,8 @@ def test_parse_memory_document_round_trips_user_and_self_entries() -> None:
         "---\n"
         "id:Cd34Ef\n"
         "2026/4/17-user：\n"
-        "创建文件默认格式要求，见 ref:note_a1b2\n"
+        "创建文件默认格式要求\n"
+        "note:n12345\n"
     )
 
     items = module.parse_memory_document(text)
@@ -57,7 +58,25 @@ def test_parse_memory_document_round_trips_user_and_self_entries() -> None:
     assert [item.source for item in items] == ["self", "user"]
     assert [item.memory_id for item in items] == ["Ab12Z9", "Cd34Ef"]
     assert items[0].summary == "完成任务必须说明任务总耗时"
-    assert items[1].note_ref == "note_a1b2"
+    assert items[1].summary == "创建文件默认格式要求"
+    assert items[1].note_ref == "n12345"
+    assert module.format_memory_entry(items[1]) in text
+
+
+def test_parse_memory_document_keeps_legacy_marker_in_the_summary() -> None:
+    """` ref:` inside old text is prose, not a relationship: nothing parses it any more."""
+    module = _load_markdown_memory_module()
+    text = (
+        "---\n"
+        "id:Cd34Ef\n"
+        "2026/4/17-user：\n"
+        "创建文件默认格式要求，见 ref:note_a1b2\n"
+    )
+
+    items = module.parse_memory_document(text)
+
+    assert items[0].note_ref == ""
+    assert items[0].summary == "创建文件默认格式要求，见 ref:note_a1b2"
 
 
 def test_validate_memory_document_rejects_summary_over_250_chars() -> None:
@@ -391,11 +410,12 @@ def test_memory_snapshot_rebuilds_from_sqlite_rows(tmp_path: Path) -> None:
             now_iso="2026-04-25T00:00:00+08:00",
         )
         second = manager._memory_repo.create_memory(
-            memory_body="Use checklist replies ref:note_policy",
+            memory_body="Use checklist replies",
             minimal_memory="replies->checklist",
             source="self",
             from_user=False,
             now_iso="2026-04-25T00:05:00+08:00",
+            note_ref="note_policy",
         )
         db_path = tmp_path / "memory" / "memory_state.sqlite3"
         with sqlite3.connect(str(db_path)) as conn:
@@ -408,105 +428,99 @@ def test_memory_snapshot_rebuilds_from_sqlite_rows(tmp_path: Path) -> None:
         manager._rebuild_memory_snapshot_from_sqlite(now_iso="2026-04-25T00:00:00+08:00")
 
         snapshot = manager.snapshot_text()
+        handle = module.note_handle("note_policy")
         assert f"id:{first['memory_id']}" in snapshot
         assert "2026/4/25-user" in snapshot
         assert "Prefer concise answers" in snapshot
         assert "answers->concise" not in snapshot
         assert f"id:{second['memory_id']}" in snapshot
         assert "2026/4/25-self" in snapshot
-        assert "replies->checklist ref:note_policy" in snapshot
-        assert "Use checklist replies ref:note_policy" not in snapshot
+        # The column owns the note; what the reader sees is the derived handle, on its own
+        # line, so the stored sentence stays exactly what was written.
+        assert f"replies->checklist\nnote:{handle}" in snapshot
+        assert "ref:note_policy" not in snapshot
+        assert "note_policy" not in snapshot
         rebuilt_entries = module.parse_memory_document(snapshot)
         rebuilt_second = next(entry for entry in rebuilt_entries if entry.memory_id == second["memory_id"])
-        assert rebuilt_second.summary == "replies->checklist ref:note_policy"
-        assert rebuilt_second.note_ref == "note_policy"
+        assert rebuilt_second.summary == "replies->checklist"
+        assert rebuilt_second.note_ref == handle
     finally:
         manager.close()
 
 
-def test_memory_snapshot_rebuild_normalizes_noteid_refs_from_compressed_minimal_memory(tmp_path: Path) -> None:
+def test_backfill_note_refs_reads_legacy_markers_once_and_is_idempotent(tmp_path: Path) -> None:
     module = _load_memory_agent_runtime_module()
     cfg = _memory_cfg()
     manager = module.MemoryManager(tmp_path, cfg)
 
     try:
-        compressed = manager._memory_repo.create_memory(
-            memory_body="Use checklist replies",
+        row = manager._memory_repo.create_memory(
+            memory_body="Use checklist replies ref:note_policy",
             minimal_memory="replies->checklist 见noteid:note_policy",
             source="self",
             from_user=False,
             now_iso="2026-04-25T00:05:00+08:00",
         )
         db_path = tmp_path / "memory" / "memory_state.sqlite3"
+
+        assert manager._memory_repo.backfill_note_refs() == 1
+
+        with sqlite3.connect(str(db_path)) as conn:
+            stored = conn.execute(
+                "SELECT note_ref, memory_body, minimal_memory FROM memories WHERE memory_id = ?",
+                (row["memory_id"],),
+            ).fetchone()
+        assert stored[0] == "note_policy"
+        assert "ref:" not in stored[1] and "见noteid:" not in stored[1]
+        assert "ref:" not in stored[2] and "见noteid:" not in stored[2]
+        assert stored[2] == "replies->checklist"
+
+        assert manager._memory_repo.backfill_note_refs() == 0
+    finally:
+        manager.close()
+
+
+def test_memory_snapshot_rebuild_renders_column_ownership(tmp_path: Path) -> None:
+    """Ownership comes from the column; a marker inside either text field renders nothing."""
+    module = _load_memory_agent_runtime_module()
+    cfg = _memory_cfg()
+    manager = module.MemoryManager(tmp_path, cfg)
+
+    try:
+        linked = manager._memory_repo.create_memory(
+            memory_body="Use checklist replies",
+            minimal_memory="replies->checklist",
+            source="self",
+            from_user=False,
+            now_iso="2026-04-25T00:05:00+08:00",
+            note_ref="note_policy",
+        )
+        inert = manager._memory_repo.create_memory(
+            memory_body="Use headings ref:old_note",
+            minimal_memory="answers->headings",
+            source="self",
+            from_user=False,
+            now_iso="2026-04-25T00:06:00+08:00",
+        )
+        db_path = tmp_path / "memory" / "memory_state.sqlite3"
         with sqlite3.connect(str(db_path)) as conn:
             conn.execute(
                 "UPDATE memories SET is_compressed = 1 WHERE memory_id = ?",
-                (compressed["memory_id"],),
+                (linked["memory_id"],),
             )
             conn.commit()
 
         manager._rebuild_memory_snapshot_from_sqlite(now_iso="2026-04-25T00:00:00+08:00")
-
         snapshot = manager.snapshot_text()
-        assert "见noteid:note_policy" not in snapshot
-        assert "replies->checklist ref:note_policy" in snapshot
-        rebuilt_entries = module.parse_memory_document(snapshot)
-        rebuilt = next(entry for entry in rebuilt_entries if entry.memory_id == compressed["memory_id"])
-        assert rebuilt.summary == "replies->checklist ref:note_policy"
-        assert rebuilt.note_ref == "note_policy"
-    finally:
-        manager.close()
+        handle = module.note_handle("note_policy")
+        rebuilt = {entry.memory_id: entry for entry in module.parse_memory_document(snapshot)}
 
-
-def test_memory_snapshot_rebuild_reinjects_minimal_memory_note_ref_for_uncompressed_rows(tmp_path: Path) -> None:
-    module = _load_memory_agent_runtime_module()
-    cfg = _memory_cfg()
-    manager = module.MemoryManager(tmp_path, cfg)
-
-    try:
-        row = manager._memory_repo.create_memory(
-            memory_body="Use checklist replies",
-            minimal_memory="replies->checklist ref:note_policy",
-            source="self",
-            from_user=False,
-            now_iso="2026-04-25T00:05:00+08:00",
-        )
-
-        manager._rebuild_memory_snapshot_from_sqlite(now_iso="2026-04-25T00:00:00+08:00")
-
-        snapshot = manager.snapshot_text()
-        assert "Use checklist replies ref:note_policy" in snapshot
-        rebuilt_entries = module.parse_memory_document(snapshot)
-        rebuilt = next(entry for entry in rebuilt_entries if entry.memory_id == row["memory_id"])
-        assert rebuilt.summary == "Use checklist replies ref:note_policy"
-        assert rebuilt.note_ref == "note_policy"
-    finally:
-        manager.close()
-
-
-def test_memory_snapshot_rebuild_prefers_minimal_memory_note_ref_when_memory_body_conflicts(tmp_path: Path) -> None:
-    module = _load_memory_agent_runtime_module()
-    cfg = _memory_cfg()
-    manager = module.MemoryManager(tmp_path, cfg)
-
-    try:
-        row = manager._memory_repo.create_memory(
-            memory_body="Use checklist replies ref:old_note",
-            minimal_memory="replies->checklist ref:note_new",
-            source="self",
-            from_user=False,
-            now_iso="2026-04-25T00:05:00+08:00",
-        )
-
-        manager._rebuild_memory_snapshot_from_sqlite(now_iso="2026-04-25T00:00:00+08:00")
-
-        snapshot = manager.snapshot_text()
-        assert "Use checklist replies ref:note_new" in snapshot
-        assert "old_note" not in snapshot
-        rebuilt_entries = module.parse_memory_document(snapshot)
-        rebuilt = next(entry for entry in rebuilt_entries if entry.memory_id == row["memory_id"])
-        assert rebuilt.summary == "Use checklist replies ref:note_new"
-        assert rebuilt.note_ref == "note_new"
+        assert rebuilt[linked["memory_id"]].summary == "replies->checklist"
+        assert rebuilt[linked["memory_id"]].note_ref == handle
+        assert f"note:{handle}" in snapshot
+        # Nothing is derived from text any more: ` ref:old_note` stays prose.
+        assert rebuilt[inert["memory_id"]].note_ref == ""
+        assert "ref:old_note" in rebuilt[inert["memory_id"]].summary
     finally:
         manager.close()
 
@@ -874,17 +888,30 @@ async def test_list_processed_page_backfills_legacy_rows_and_preserves_new_rows(
         manager.close()
 
 
-def _seed_store(manager, rows: list[tuple[str, str, str, str]], *, now_iso: str = "2026-04-17T09:00:00+08:00") -> None:
+def _seed_store(
+    manager,
+    rows: list[tuple[str, str, str, str] | tuple[str, str, str, str, str]],
+    *,
+    now_iso: str = "2026-04-17T09:00:00+08:00",
+) -> None:
     """Seed committed memory the way production does: sqlite first, mirror repainted.
 
     Writing only `MEMORY.md` used to be enough because a divergent document was parsed
     back into the store; that direction is gone, so tests must use the authoritative one.
+    A fifth element, when present, is the note the row owns.
     """
+    adds = [
+        {
+            "id": row[0],
+            "content": row[1],
+            "minimal_memory": row[2],
+            "decision_source": row[3],
+            "note_ref": row[4] if len(row) > 4 else "",
+        }
+        for row in rows
+    ]
     manager._memory_repo.apply_mutation(
-        adds=[
-            {"id": memory_id, "content": body, "minimal_memory": minimal, "decision_source": source}
-            for memory_id, body, minimal, source in rows
-        ],
+        adds=adds,
         rewrites=None,
         deletes=None,
         inspired_memory_ids=None,
@@ -1494,7 +1521,7 @@ def test_memory_agent_apply_batch_rejects_over_limit_content_with_summary_note_h
 
 
 @pytest.mark.parametrize("mode", ["add", "rewrite"])
-def test_memory_agent_apply_batch_prefers_minimal_memory_note_ref_over_stale_content_ref(
+def test_memory_agent_apply_batch_links_note_through_explicit_note_ref(
     tmp_path: Path,
     mode: str,
 ) -> None:
@@ -1503,10 +1530,11 @@ def test_memory_agent_apply_batch_prefers_minimal_memory_note_ref_over_stale_con
     manager = module.MemoryManager(tmp_path, cfg)
 
     try:
-        before_text = ""
         if mode == "rewrite":
-            before_text = "---\nid:Ab12Z9\n2026/4/25-self：\nUse checklist replies ref:old_note\n"
-            (tmp_path / "memory" / "MEMORY.md").write_text(before_text, encoding="utf-8")
+            (tmp_path / "memory" / "MEMORY.md").write_text(
+                "---\nid:Ab12Z9\n2026/4/25-self：\nUse checklist replies\n",
+                encoding="utf-8",
+            )
 
         batch = module.MemoryBatch(
             op="write",
@@ -1524,22 +1552,17 @@ def test_memory_agent_apply_batch_prefers_minimal_memory_note_ref_over_stale_con
         apply_kwargs: dict[str, object] = {
             "note_upserts": {"note_new": "Use checklist replies with the current checklist note."},
         }
+        item: dict[str, object] = {
+            "content": "Use checklist replies",
+            "minimal_memory": "replies->checklist",
+            "note_ref": "note_new",
+        }
         if mode == "add":
-            apply_kwargs["adds"] = [
-                {
-                    "content": "Use checklist replies ref:old_note",
-                    "minimal_memory": "replies->checklist 见noteid:note_new",
-                    "decision_source": "self",
-                }
-            ]
+            item["decision_source"] = "self"
+            apply_kwargs["adds"] = [dict(item)]
         else:
-            apply_kwargs["rewrites"] = [
-                {
-                    "id": "Ab12Z9",
-                    "content": "Use checklist replies ref:old_note",
-                    "minimal_memory": "replies->checklist 见noteid:note_new",
-                }
-            ]
+            item["id"] = "Ab12Z9"
+            apply_kwargs["rewrites"] = [dict(item)]
 
         result = session.apply_batch(**apply_kwargs)
 
@@ -1549,20 +1572,27 @@ def test_memory_agent_apply_batch_prefers_minimal_memory_note_ref_over_stale_con
             session=session,
             batch=batch,
         )
-        assert "ref:note_new" in validated.document_text
-        assert "old_note" not in validated.document_text
+        handle = module.note_handle("note_new")
+        assert f"note:{handle}" in validated.document_text
+        # The real note name never reaches the resident block: readers get the handle.
+        assert "note_new" not in validated.document_text
         parsed_entries = module.parse_memory_document(validated.document_text)
         assert len(parsed_entries) == 1
-        assert parsed_entries[0].note_ref == "note_new"
+        assert parsed_entries[0].note_ref == handle
+        persisted = validated.adds[0] if mode == "add" else validated.rewrites[0]
+        assert persisted["note_ref"] == "note_new"
     finally:
         manager.close()
 
 
+@pytest.mark.parametrize("marker_field", ["content", "minimal_memory"])
 @pytest.mark.parametrize("note_ref_token", ["ref:note_policy", "见noteid:note_policy"])
-def test_memory_agent_apply_batch_requires_note_for_note_ref_present_only_in_minimal_memory(
+def test_memory_agent_apply_batch_rejects_note_ref_written_into_memory_text(
     tmp_path: Path,
     note_ref_token: str,
+    marker_field: str,
 ) -> None:
+    """The relationship is a field: a marker left in the prose is rejected, not parsed."""
     module = _load_memory_agent_runtime_module()
     cfg = _memory_cfg()
     manager = module.MemoryManager(tmp_path, cfg)
@@ -1581,18 +1611,16 @@ def test_memory_agent_apply_batch_requires_note_for_note_ref_present_only_in_min
             ],
         )
         session = module._MemoryToolSession(snapshot_text=manager.snapshot_text(), notes_dir=manager.notes_dir)
-        result = session.apply_batch(
-            adds=[
-                {
-                    "content": "Use headings",
-                    "minimal_memory": f"answers->headings {note_ref_token}",
-                    "decision_source": "self",
-                }
-            ],
-        )
+        item = {
+            "content": "Use headings",
+            "minimal_memory": "answers->headings",
+            "decision_source": "self",
+        }
+        item[marker_field] = f"{item[marker_field]} {note_ref_token}"
+        result = session.apply_batch(adds=[item])
 
         assert result["ok"] is True
-        with pytest.raises(ValueError, match="missing note refs: note_policy"):
+        with pytest.raises(ValueError, match="note ownership goes in the item"):
             manager._build_validated_write_from_apply_batch(
                 before_text=manager.snapshot_text(),
                 session=session,
@@ -2663,9 +2691,10 @@ async def test_run_due_batch_once_records_successful_processed_batch_with_usage_
                             "args": {
                                 "adds": [
                                     {
-                                        "content": "创建文件默认格式要求，见 ref:note_policy",
+                                        "content": "创建文件默认格式要求",
                                         "minimal_memory": "files->default-format",
                                         "decision_source": "user",
+                                        "note_ref": "note_policy",
                                     }
                                 ],
                                 "note_upserts": {
@@ -2699,7 +2728,7 @@ async def test_run_due_batch_once_records_successful_processed_batch_with_usage_
         assert report["attempt_count"] == 1
         assert "id:" in manager.snapshot_text()
         assert "2026/4/17-user：" in manager.snapshot_text()
-        assert "ref:note_policy" in manager.snapshot_text()
+        assert f"note:{module.note_handle('note_policy')}" in manager.snapshot_text()
         assert (tmp_path / "memory" / "notes" / "note_policy.md").exists()
         assert (tmp_path / "memory" / "queue.jsonl").read_text(encoding="utf-8").strip() == ""
         assert len(processed) == 1
@@ -3248,8 +3277,9 @@ async def test_run_due_batch_once_preserves_note_ref_present_only_in_minimal_mem
                                 "adds": [
                                     {
                                         "content": "Use checklist replies",
-                                        "minimal_memory": "replies->checklist 见noteid:note_policy",
+                                        "minimal_memory": "replies->checklist",
                                         "decision_source": "self",
+                                        "note_ref": "note_policy",
                                     }
                                 ],
                                 "note_upserts": {
@@ -3278,13 +3308,13 @@ async def test_run_due_batch_once_preserves_note_ref_present_only_in_minimal_mem
         assert report["ok"] is True
         assert report["status"] == "applied"
         assert note_path.exists()
-        assert "Use checklist replies ref:note_policy" in manager.snapshot_text()
+        assert f"note:{module.note_handle('note_policy')}" in manager.snapshot_text()
 
         manager.close()
         reopened = module.MemoryManager(tmp_path, _memory_cfg())
         try:
             assert note_path.exists()
-            assert "Use checklist replies ref:note_policy" in reopened.snapshot_text()
+            assert f"note:{module.note_handle('note_policy')}" in reopened.snapshot_text()
         finally:
             reopened.close()
         manager = None
@@ -3295,7 +3325,7 @@ async def test_run_due_batch_once_preserves_note_ref_present_only_in_minimal_mem
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("mode", ["add", "rewrite"])
-async def test_run_due_batch_once_prefers_minimal_memory_note_ref_over_stale_content_ref(
+async def test_run_due_batch_once_moves_note_link_and_reaps_the_dropped_note(
     tmp_path: Path,
     monkeypatch,
     mode: str,
@@ -3308,7 +3338,7 @@ async def test_run_due_batch_once_prefers_minimal_memory_note_ref_over_stale_con
         old_note_path.write_text("Old checklist note\n", encoding="utf-8")
         if mode == "rewrite":
             monkeypatch.setattr(module.MemoryManager, "_memory_date_text", lambda self, now_iso=None: "2026/4/17", raising=False)
-            _seed_store(manager, [("Ab12Z9", "Use checklist replies ref:old_note", "回复->清单", "self")])
+            _seed_store(manager, [("Ab12Z9", "Use checklist replies", "回复->清单", "self", "old_note")])
 
         await manager._append_queue_request(
             module.MemoryQueueRequest(
@@ -3327,17 +3357,19 @@ async def test_run_due_batch_once_prefers_minimal_memory_note_ref_over_stale_con
         if mode == "add":
             args["adds"] = [
                 {
-                    "content": "Use checklist replies ref:old_note",
-                    "minimal_memory": "replies->checklist 见noteid:note_new",
+                    "content": "Use checklist replies",
+                    "minimal_memory": "replies->checklist",
                     "decision_source": "self",
+                    "note_ref": "note_new",
                 }
             ]
         else:
             args["rewrites"] = [
                 {
                     "id": "Ab12Z9",
-                    "content": "Use checklist replies ref:old_note",
-                    "minimal_memory": "replies->checklist 见noteid:note_new",
+                    "content": "Use checklist replies",
+                    "minimal_memory": "replies->checklist",
+                    "note_ref": "note_new",
                 }
             ]
         fake_model = _FakeToolCallingModel(
@@ -3369,8 +3401,8 @@ async def test_run_due_batch_once_prefers_minimal_memory_note_ref_over_stale_con
 
         assert report["ok"] is True
         assert report["status"] == "applied"
-        assert "ref:note_new" in manager.snapshot_text()
-        assert "old_note" not in manager.snapshot_text()
+        assert f"note:{module.note_handle('note_new')}" in manager.snapshot_text()
+        assert module.note_handle("old_note") not in manager.snapshot_text()
         assert note_new_path.exists()
         assert not old_note_path.exists()
     finally:
