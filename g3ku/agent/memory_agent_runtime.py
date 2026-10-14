@@ -1060,13 +1060,23 @@ class _MemoryProviderError(RuntimeError):
 
 
 class _MemorySqliteRepository:
-    def __init__(self, path: Path):
+    def __init__(self, path: Path, *, read_only: bool = False):
         self.path = Path(path)
+        self.read_only = bool(read_only)
+        if self.read_only:
+            # Inspection paths must not create a store or migrate an old one: the caller
+            # only builds this form when the file is already there.
+            return
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self._ensure_schema()
 
     def _connect(self) -> sqlite3.Connection:
-        conn = sqlite3.connect(str(self.path))
+        if self.read_only:
+            # The guarantee lives in the driver, not in a per-method check: every write
+            # raises `attempt to write a readonly database`.
+            conn = sqlite3.connect(f"file:{self.path.as_posix()}?mode=ro", uri=True)
+        else:
+            conn = sqlite3.connect(str(self.path))
         conn.row_factory = sqlite3.Row
         return conn
 
@@ -1702,12 +1712,19 @@ class MemoryManager:
         self._worker_thread: threading.Thread | None = None
         self._stop_event = threading.Event()
         self._strategy = MemoryStrategyV2(config)
+        memory_state_db_path = str(getattr(config, "state_db_path", "") or "memory/memory_state.sqlite3")
         if self._read_only_init:
+            # The authority stays in sqlite, so an inspection manager still opens it: without
+            # a store every note looks orphan and every category link looks intact, because
+            # both axes are columns. Opening it read-only is not booting it - no layout, no
+            # backfill, no reconciliation, and the repository skips mkdir and DDL.
+            store_path = self.workspace / memory_state_db_path
+            if store_path.exists():
+                self._memory_repo = _MemorySqliteRepository(store_path, read_only=True)
             return
         preserved_document = self.memory_file.read_text(encoding="utf-8") if self.memory_file.exists() else ""
         preserved_notes = self._read_note_bodies()
         self._ensure_layout()
-        memory_state_db_path = str(getattr(config, "state_db_path", "") or "memory/memory_state.sqlite3")
         self._memory_repo = _MemorySqliteRepository(self.workspace / memory_state_db_path)
         self._restore_preserved_memory_state(
             document_text=preserved_document,
@@ -3894,8 +3911,9 @@ class MemoryManager:
 
         The projection shows derived handles and a compressed row renders only its minimal
         line, so reading ownership out of rendered text would both miss live notes and
-        hand back tokens that are not file names. The inspection-only CLI path builds a
-        manager without a store: nothing is owned there, which beats a wrong answer.
+        hand back tokens that are not file names. Inspection paths read the same columns:
+        a store-less manager would call every note an orphan and every retired class
+        intact, since both axes are columns and nothing else.
         """
         repo = getattr(self, "_memory_repo", None)
         if repo is None:
