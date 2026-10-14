@@ -658,9 +658,9 @@ def test_trigger_queues_a_consolidation_batch_at_the_head_instead_of_deleting(tm
     manager = module.MemoryManager(tmp_path, cfg)
 
     try:
-        protected = manager._memory_repo.create_memory(
+        user_stated = manager._memory_repo.create_memory(
             memory_body="U" * 70,
-            minimal_memory="user->protected",
+            minimal_memory="user->stated",
             source="user",
             from_user=True,
             now_iso="2026-04-25T00:00:00+08:00",
@@ -670,20 +670,20 @@ def test_trigger_queues_a_consolidation_batch_at_the_head_instead_of_deleting(tm
             minimal_memory="cold->compressed",
             source="self",
             from_user=False,
-            now_iso="2026-04-25T00:00:00+08:00",
+            now_iso="2026-04-25T00:00:01+08:00",
         )
         hotter = manager._memory_repo.create_memory(
             memory_body="H" * 70,
             minimal_memory="hotter->compressed",
             source="self",
             from_user=False,
-            now_iso="2026-04-25T00:00:00+08:00",
+            now_iso="2026-04-25T00:00:02+08:00",
         )
 
         with manager._memory_repo._connect() as conn:
             conn.execute(
                 "UPDATE memories SET passed_count = 100, refresh_count = 0 WHERE memory_id = ?",
-                (protected["memory_id"],),
+                (user_stated["memory_id"],),
             )
             conn.execute(
                 "UPDATE memories SET passed_count = 100, refresh_count = 0 WHERE memory_id = ?",
@@ -718,14 +718,16 @@ def test_trigger_queues_a_consolidation_batch_at_the_head_instead_of_deleting(tm
 
         # Nothing was degraded and nothing was lost: the trigger now only queues work.
         rows = {row["memory_id"]: row for row in manager._memory_repo.list_memories()}
-        assert {protected["memory_id"], cold["memory_id"], hotter["memory_id"]} == set(rows)
+        assert {user_stated["memory_id"], cold["memory_id"], hotter["memory_id"]} == set(rows)
         assert all(row["is_compressed"] is False for row in rows.values())
 
         payload = queue_rows[0].payload_text
+        # 用户亲口的行现在与普通行同权进候选：退场只是把正文搬进分类 note，
+        # 行不删、`memory_body` 原样留着，随时读得回来。
+        assert "U" * 70 in payload
         assert "C" * 70 in payload
         assert "H" * 70 in payload
-        assert payload.index("C" * 70) < payload.index("H" * 70)
-        assert "U" * 70 not in payload, "user-stated memory is not the machine's to consolidate"
+        assert payload.index("U" * 70) < payload.index("C" * 70) < payload.index("H" * 70)
 
         again = manager._compress_memory_snapshot_if_needed(now_iso="2026-04-25T00:00:01+08:00")
         assert again["consolidation_requested"] is False

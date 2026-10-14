@@ -17,7 +17,11 @@ NOTE_LINE_PREFIX = "note:"
 _NOTE_LINE_RE = re.compile(r"^note:(?P<handle>[A-Za-z0-9_-]{1,80})$")
 
 
-def note_handle(note_ref: str) -> str:
+ORDINARY_HANDLE_PREFIX = "n"
+CATEGORY_HANDLE_PREFIX = "c"
+
+
+def note_handle(note_ref: str, *, category: bool = False) -> str:
     """The one token a reader has to pass back to open a note.
 
     Derived from the file name, so it is stable across renders (the memory block sits at
@@ -25,11 +29,17 @@ def note_handle(note_ref: str) -> str:
     carries no topic of its own - the description beside it is the only navigation text.
     Ownership stays in the `note_ref` column: nothing may parse this line to decide whether
     a note is still in use.
+
+    The first character names the directory the note lives in: `n` for `memory/notes/`,
+    `c` for the category notes in `memory/index/`. Without it two files sharing a stem
+    across the two directories would collapse onto one token and every reader would
+    silently get whichever one the lookup tried first.
     """
     normalized = str(note_ref or "").strip()
     if not normalized:
         return ""
-    return f"n{hashlib.sha1(normalized.encode('utf-8')).hexdigest()[:5]}"
+    prefix = CATEGORY_HANDLE_PREFIX if category else ORDINARY_HANDLE_PREFIX
+    return f"{prefix}{hashlib.sha1(normalized.encode('utf-8')).hexdigest()[:5]}"
 
 
 @dataclass(slots=True)
@@ -151,7 +161,7 @@ def render_consolidation_block(rows: list[tuple[str, str]]) -> str:
     if not items:
         return ""
     lines = [CONSOLIDATION_HEADING, CONSOLIDATION_REMINDER]
-    lines.extend(f"- {scope_line} (note: {note_handle(note_ref)})" for scope_line, note_ref in items)
+    lines.extend(f"- {scope_line} (note: {note_handle(note_ref, category=True)})" for scope_line, note_ref in items)
     return "\n".join(lines) + "\n"
 
 

@@ -45,7 +45,7 @@ MEMORY_NOTE_REF_RE = re.compile(r"^note_[a-z0-9_]+$")
 # The memory block shows a derived handle instead of the file name, so the read surface
 # accepts both. Writing a note still requires the real name: a handle is not a target an
 # operator chose, it is a token a reader was handed.
-MEMORY_NOTE_HANDLE_RE = re.compile(r"^n[0-9a-f]{5}$")
+MEMORY_NOTE_HANDLE_RE = re.compile(r"^[nc][0-9a-f]{5}$")
 GOVERNANCE_MODE_META_KEY = 'ceo_frontdoor_regulatory_mode_enabled'
 GOVERNANCE_MODE_UPDATED_AT_META_KEY = 'ceo_frontdoor_regulatory_mode_enabled:updated_at'
 

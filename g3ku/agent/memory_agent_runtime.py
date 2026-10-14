@@ -22,7 +22,9 @@ from pydantic import BaseModel, create_model
 
 from g3ku.agent.file_locks import _release_file_lock, _try_acquire_file_lock
 from g3ku.agent.markdown_memory import (
+    CATEGORY_HANDLE_PREFIX,
     MemoryEntry,
+    ORDINARY_HANDLE_PREFIX,
     format_memory_entry,
     note_file_name,
     note_handle,
@@ -63,17 +65,32 @@ def _first_note_ref(text: str) -> str:
     return str(match.group("ref") or "").strip() if match else ""
 
 
-def resolve_note_token(token: str, names: set[str]) -> str:
-    """Map the handle a reader was shown back to the note file it stands for.
+def resolve_note_token(
+    token: str,
+    ordinary_names: set[str],
+    category_names: set[str] | None = None,
+) -> str:
+    """Map the token a reader was shown back to the note file it stands for.
 
-    A real file name still resolves: the writing lanes name their notes, and rows whose
-    column already holds a name must stay readable. Two names landing on one handle is
-    answered as "not found" rather than a guess.
+    The first character picks the tree: `n` is an ordinary note under `memory/notes/`,
+    `c` is a category note under `memory/index/`, so one token cannot land in the wrong
+    directory. A real file name still resolves: the writing lanes name their notes, and
+    rows whose column already holds a name must stay readable. Unknown or ambiguous
+    tokens come back unchanged so the caller answers "not found" instead of guessing.
     """
     normalized = str(token or "").strip()
-    if not normalized or normalized in names:
+    if not normalized:
         return normalized
-    matches = sorted(name for name in names if note_handle(name) == normalized)
+    categories = set(category_names or ())
+    if normalized in ordinary_names or normalized in categories:
+        return normalized
+    is_category = normalized[0] == CATEGORY_HANDLE_PREFIX
+    if not is_category and normalized[0] != ORDINARY_HANDLE_PREFIX:
+        return normalized
+    pool = categories if is_category else ordinary_names
+    matches = sorted(
+        name for name in pool if note_handle(name, category=is_category) == normalized
+    )
     if len(matches) == 1:
         return matches[0]
     return normalized
@@ -553,9 +570,9 @@ class _MemoryToolSession:
         if normalized in self.staged_notes:
             return self.staged_notes[normalized]
         note_file_name(normalized)
-        names = {path.stem for directory in self.note_directories() for path in directory.glob("*.md")}
-        names |= set(self.staged_notes)
-        normalized = resolve_note_token(normalized, names)
+        ordinary_names = {path.stem for path in self.notes_dir.glob("*.md")} | set(self.staged_notes)
+        category_names = {path.stem for path in self.index_dir.glob("*.md")} if self.index_dir is not None else set()
+        normalized = resolve_note_token(normalized, ordinary_names, category_names)
         if normalized in self.staged_notes:
             return self.staged_notes[normalized]
         # Category notes live in their own directory and are readable from the ordinary
@@ -683,6 +700,18 @@ class _MemoryToolSession:
                 if not ref.startswith("note_") and not self._note_exists(ref):
                     errors[f"note_upserts.{ref}"] = "a new note ref must start with note_"
                     continue
+                # One name, one file: a category note already owns this stem in the other
+                # tree, and two files sharing a stem would put two notes behind one handle.
+                if (
+                    not (self.notes_dir / note_file_name(ref)).exists()
+                    and self.index_dir is not None
+                    and (self.index_dir / note_file_name(ref)).exists()
+                ):
+                    errors[f"note_upserts.{ref}"] = (
+                        f"{ref} is already a category note under memory/index/; "
+                        "an ordinary note must use another name"
+                    )
+                    continue
                 normalized_note_upserts[ref] = body
 
         # Incremental note editing, on purpose shaped like the ordinary file edit tool:
@@ -793,8 +822,11 @@ class _ConsolidationToolSession:
         if not normalized:
             raise ValueError("note ref is required")
         note_file_name(normalized)
-        names = {path.stem for directory in (self.index_dir, self.notes_dir) for path in directory.glob("*.md")}
-        normalized = resolve_note_token(normalized, names)
+        normalized = resolve_note_token(
+            normalized,
+            {path.stem for path in self.notes_dir.glob("*.md")},
+            {path.stem for path in self.index_dir.glob("*.md")},
+        )
         for directory in (self.index_dir, self.notes_dir):
             path = directory / note_file_name(normalized)
             if path.exists():
@@ -828,6 +860,15 @@ class _ConsolidationToolSession:
                     continue
                 if not ref.startswith("note_"):
                     errors[f"note_writes[{index}]"] = "category note ref must start with note_"
+                    continue
+                # A category note may not reuse the name of an ordinary note: the handle is
+                # derived from the name, and readers look in `memory/notes/` first, so the
+                # 归并区 line would open the wrong file.
+                if (self.notes_dir / note_file_name(ref)).exists():
+                    errors[f"note_writes[{index}]"] = (
+                        f"category note ref {ref} is already an ordinary note under memory/notes/; "
+                        "pick another name"
+                    )
                     continue
                 if ref in seen_refs:
                     errors[f"note_writes[{index}]"] = f"duplicate category note ref: {ref}"
@@ -1781,8 +1822,8 @@ class MemoryManager:
                 counts[category] = 0
             counts[category] += 1
         entries: list[dict[str, Any]] = []
-        for category in ordered:
-            path = self.index_dir / note_file_name(category)
+        for category_ref in ordered:
+            path = self.index_dir / note_file_name(category_ref)
             scope_line = ""
             try:
                 body = path.read_text(encoding="utf-8")
@@ -1791,10 +1832,10 @@ class MemoryManager:
             scope_line = next((line.strip() for line in body.splitlines() if line.strip()), "")
             entries.append(
                 {
-                    "note_ref": category,
-                    "handle": note_handle(category),
+                    "note_ref": category_ref,
+                    "handle": note_handle(category_ref, category=True),
                     "scope_line": scope_line,
-                    "entry_count": counts[category],
+                    "entry_count": counts[category_ref],
                     "unusable": not scope_line,
                 }
             )
@@ -2155,6 +2196,7 @@ class MemoryManager:
         missing_note_refs = sorted(ref for ref in note_refs if ref not in note_files)
         orphan_notes = sorted(ref for ref in note_files if ref not in note_refs)
         category_rows, broken_categories = self._consolidation_categories()
+        name_collisions = self._note_name_collisions()
         queue_rows, queue_parse_errors = self._read_queue_requests_with_diagnostics()
         stuck_processing_head = self._stuck_processing_head(
             queue_rows=queue_rows,
@@ -2188,6 +2230,11 @@ class MemoryManager:
                 "name": "broken_category_links",
                 "ok": not broken_categories,
                 "detail": "none" if not broken_categories else ", ".join(broken_categories),
+            },
+            {
+                "name": "note_name_collisions",
+                "ok": not name_collisions,
+                "detail": "none" if not name_collisions else ", ".join(name_collisions),
             },
             {
                 "name": "queue_parse_errors",
@@ -2229,6 +2276,7 @@ class MemoryManager:
             "orphan_notes": orphan_notes,
             "consolidated_categories": len(category_rows),
             "broken_category_links": broken_categories,
+            "note_name_collisions": name_collisions,
             "consolidation_chars": len(consolidation_text),
             "queue_depth": len(queue_rows),
             "queue_head": asdict(queue_rows[0]) if queue_rows else None,
@@ -2246,10 +2294,18 @@ class MemoryManager:
         missing_note_refs = sorted(ref for ref in note_refs if ref not in note_files)
         orphan_notes = sorted(ref for ref in note_files if ref not in note_refs)
         _category_rows, broken_categories = self._consolidation_categories()
+        category_names = self._category_note_names()
         created_notes: list[str] = []
         deleted_notes: list[str] = []
+        skipped_collisions: list[str] = []
 
         for ref in missing_note_refs:
+            if ref in category_names:
+                # The name is taken by a category note in the other tree. Creating an
+                # ordinary note here would leave two files behind one name, so the repair
+                # stops and reports instead of papering over the ownership question.
+                skipped_collisions.append(ref)
+                continue
             note_path = self.notes_dir / note_file_name(ref)
             note_path.parent.mkdir(parents=True, exist_ok=True)
             self._atomic_write_text(
@@ -2279,6 +2335,7 @@ class MemoryManager:
             "created_missing_count": len(created_notes),
             "orphan_notes_detected": orphan_notes,
             "broken_category_links": broken_categories,
+            "skipped_name_collisions": skipped_collisions,
             "deleted_orphan_notes": deleted_notes,
             "deleted_orphan_count": len(deleted_notes),
             "delete_orphans": bool(delete_orphans),
@@ -2426,8 +2483,21 @@ class MemoryManager:
             return None
         return MemoryBatch(op=head.op, items=items)
 
-    def _note_names(self) -> set[str]:
-        return {path.stem for directory in (self.notes_dir, self.index_dir) for path in directory.glob("*.md")}
+    def _ordinary_note_names(self) -> set[str]:
+        return {path.stem for path in self.notes_dir.glob("*.md")}
+
+    def _category_note_names(self) -> set[str]:
+        return {path.stem for path in self.index_dir.glob("*.md")}
+
+    def _note_name_collisions(self) -> list[str]:
+        """Names present as both an ordinary note and a category note.
+
+        Handles no longer collide (the prefix picks the tree), but a reader that passes the
+        bare name still gets `memory/notes/` first, so the 归并区 line for that name points
+        at the wrong file. The write gates refuse to create more; this reports what is
+        already there.
+        """
+        return sorted(self._ordinary_note_names() & self._category_note_names())
 
     def resolve_note_ref(self, ref: str) -> str:
         """Map the handle the resident block shows back to the note file it stands for.
@@ -2439,17 +2509,22 @@ class MemoryManager:
         normalized = str(ref or "").strip()
         if not normalized:
             return ""
-        return resolve_note_token(normalized, self._note_names())
+        return resolve_note_token(normalized, self._ordinary_note_names(), self._category_note_names())
 
     def load_note(self, ref: str) -> str:
         """Read one note for the CEO's `memory_note` tool: ordinary notes and category
-        notes both resolve, so a retired memory stays reachable. The resident block shows
-        a derived handle, and the real file name still works."""
+        notes both resolve, so a retired memory stays reachable. The token's first
+        character picks the tree; a bare file name keeps the ordinary-first order."""
         normalized = str(ref or "").strip()
         if not normalized:
             raise FileNotFoundError("memory note ref is required")
-        file_name = note_file_name(resolve_note_token(normalized, self._note_names()))
-        for directory in (self.notes_dir, self.index_dir):
+        ordinary_names = self._ordinary_note_names()
+        category_names = self._category_note_names()
+        file_name = note_file_name(resolve_note_token(normalized, ordinary_names, category_names))
+        prefer_index = (
+            normalized[0] == CATEGORY_HANDLE_PREFIX and normalized not in (ordinary_names | category_names)
+        )
+        for directory in ((self.index_dir, self.notes_dir) if prefer_index else (self.notes_dir, self.index_dir)):
             path = directory / file_name
             if path.exists():
                 return path.read_text(encoding="utf-8")
@@ -3676,13 +3751,15 @@ class MemoryManager:
     def _consolidation_candidate_rows(self) -> list[dict[str, Any]]:
         """Rows the machine may retire, in survival order.
 
-        Already-retired rows are skipped, and `from_user` rows are never consolidated by
-        the machine: only the memory agent (or the user) removes what the user stated.
+        Already-retired rows are skipped. `from_user` rows are eligible on the same terms
+        as any other row: retirement moves the text into a category note and never deletes
+        the row, so a user-stated fact stays readable and editable - it simply stops being
+        rendered in the resident block until something opens its note.
         """
         return [
             row
             for row in self._memory_repo.compression_candidates()
-            if not str(row.get("consolidated_into") or "").strip() and not bool(row.get("from_user"))
+            if not str(row.get("consolidated_into") or "").strip()
         ]
 
     def _build_consolidation_payload(self, *, trigger: int, target: int) -> tuple[str, list[str]]:
