@@ -432,7 +432,7 @@ const S = {
         editBody: "",
         saving: false,
         editable: true,
-        // 归并 note 浏览用同一个窗切换两种形态：index=分类列表，note=某份 note 正文。
+        // 归并记忆浏览用同一个窗切换两种形态：index=分类列表，note=某份 note 正文。
         // trail 是从列表进来的那一串点开的 ref，最后一项即当前；非 index 入口不填它。
         mode: "note",
         origin: "direct",
@@ -15209,7 +15209,7 @@ const MEMORY_OP_KINDS = {
     note_upsert: { label: "更新 Note", icon: "notebook-pen" },
     note_edit: { label: "编辑 Note", icon: "notebook-pen" },
     note_reaped: { label: "回收 Note", icon: "trash-2" },
-    category_note: { label: "归并 Note", icon: "notebook-pen" },
+    category_note: { label: "归并记忆", icon: "notebook-pen" },
     consolidate: { label: "记忆退场", icon: "pencil" },
 };
 
@@ -15267,7 +15267,7 @@ function memoryProcessedOpLabel(item) {
 
 const NOTE_REF_RE = /(?:\bref:|见noteid:)(note_[a-z0-9_]+)\b/g;
 // note 正文里指回别的 note 的两种形状：旧标记 `ref:note_xxx`，以及常驻行同款句柄形状
-// `note:n0bfc7` / `(note: n0bfc7)`。归并 note 浏览层用它在正文里画出"下一级"。
+// `note:n0bfc7` / `(note: n0bfc7)`。归并记忆浏览层用它在正文里画出"下一级"。
 const NOTE_TOKEN_RE = /(?:\bref:|见noteid:)(note_[a-z0-9_]+)\b|\(\s*note:\s*([nc][0-9a-f]{5})\s*\)|\bnote:([nc][0-9a-f]{5})\b/g;
 const MEMORY_VIEW_POLL_MS = 15000;
 
@@ -15278,8 +15278,8 @@ function renderMemoryNoteRefChip(noteRef) {
 }
 
 function renderMemoryNoteOwnershipChip(noteRef) {
-    // 归属来自 `note_ref` / `consolidated_into` 列，不是从正文里正则出来的：常驻行现在只
-    // 展示句柄，扫文本会把已经不存在的关系当成缺关系。
+    // 归属来自 `note_ref` 列，不是从正文里正则出来的：常驻行现在只展示句柄，扫文本会把
+    // 已经不存在的关系当成缺关系。退场行不进这张表，所以不需要 consolidated_into 兜底。
     noteRef = String(noteRef || "").trim();
     if (!noteRef) return "";
     return `<button type="button" class="memory-note-ref-trigger memory-note-ownership-chip" data-memory-note-ref="${esc(noteRef)}">note:${esc(noteRef)}</button>`;
@@ -15446,7 +15446,7 @@ function memoryChangeTypeLabel(type) {
     if (normalized === "note_upsert") return "更新 Note";
     if (normalized === "note_edit") return "编辑 Note";
     if (normalized === "note_reaped") return "回收 Note";
-    if (normalized === "category_note") return "归并 Note";
+    if (normalized === "category_note") return "归并记忆";
     if (normalized === "consolidate") return "记忆退场";
     return normalized || "变更";
 }
@@ -15632,7 +15632,7 @@ function ensureMemoryNotePreviewUi() {
             </div>
         </div>
         <div class="detail-modal-body">
-            <nav id="memory-note-preview-trail" class="memory-note-preview-trail" hidden aria-label="归并 note 浏览路径"></nav>
+            <nav id="memory-note-preview-trail" class="memory-note-preview-trail" hidden aria-label="归并记忆浏览路径"></nav>
             <div class="memory-note-preview-shell">
                 <div id="memory-note-preview-status" class="memory-note-preview-status"></div>
                 <div id="memory-note-index-list" class="memory-note-index-list" hidden></div>
@@ -15674,7 +15674,7 @@ function ensureMemoryNotePreviewUi() {
     U.memoryNoteEditBody?.addEventListener("input", () => {
         S.memoryNotePreview.editBody = U.memoryNoteEditBody.value || "";
     });
-    // 归并 note 浏览的列表行、面包屑与正文里的 note 令牌都在这个窗内走完：借其它显示面
+    // 归并记忆浏览的列表行、面包屑与正文里的 note 令牌都在这个窗内走完：借其它显示面
     // 的委托会让一次点击开出两个窗，两级内容还各说各话。
     drawer.addEventListener("click", (e) => {
         const preview = S.memoryNotePreview;
@@ -15716,12 +15716,12 @@ function renderMemoryNotePreview() {
     const editMode = !!preview.editMode && editable;
     if (U.memoryNoteTitle) {
         U.memoryNoteTitle.textContent = isIndex
-            ? "归并 note"
+            ? "归并记忆"
             : (noteRef ? `Note 预览 · ${noteRef}` : "Note 预览");
     }
     if (U.memoryNoteSubtitle) {
         U.memoryNoteSubtitle.textContent = isIndex
-            ? "归并区每分类一行，点分类名看 note 正文。"
+            ? "归并区每分类一行，点分类名看正文。"
             : (editMode ? "编辑 note 正文，保存前会再次确认。" : "");
     }
     if (U.memoryNoteTrail) {
@@ -15783,9 +15783,9 @@ function renderMemoryNotePreview() {
 }
 
 function renderMemoryNoteTrailHtml(preview) {
-    // 面包屑只在从「归并 note」进来的那条道上出现；从记忆行/队列点开的预览仍是一层窗一句标题。
+    // 面包屑只在从「归并记忆」进来的那条道上出现；从记忆行/队列点开的预览仍是一层窗一句标题。
     if (String(preview.origin || "direct") !== "index") return "";
-    const crumbs = [{ label: "归并 note", back: true }];
+    const crumbs = [{ label: "归并记忆", back: true }];
     (Array.isArray(preview.trail) ? preview.trail : []).forEach((entry) => {
         const ref = String(entry?.ref || "").trim();
         if (ref) crumbs.push({ label: ref, ref });
@@ -15800,7 +15800,7 @@ function renderMemoryNoteTrailHtml(preview) {
         if (crumb.ref) {
             return `<button type="button" class="memory-note-trail-crumb" data-memory-note-trail-ref="${esc(crumb.ref)}">${esc(crumb.label)}</button>`;
         }
-        return `<button type="button" class="memory-note-trail-crumb" data-memory-note-index-back aria-label="返回归并 note 列表">${esc(crumb.label)}</button>`;
+        return `<button type="button" class="memory-note-trail-crumb" data-memory-note-index-back aria-label="返回归并记忆列表">${esc(crumb.label)}</button>`;
     }).join(`<span class="memory-note-trail-sep">/</span>`);
 }
 
@@ -15936,7 +15936,7 @@ async function openMemoryNotePreview(noteRef, options = {}) {
     // 已处理批次的历史入口（变更内容等）打开的 note 窗只读，不提供编辑
     S.memoryNotePreview.editable = options.editable !== false;
     S.memoryNotePreview.mode = "note";
-    // 从「归并 note」浏览层点进来的带路径，面包屑才能一路回退；其它入口保持单层窗。
+    // 从「归并记忆」浏览层点进来的带路径，面包屑才能一路回退；其它入口保持单层窗。
     S.memoryNotePreview.origin = String(options.origin || "direct");
     S.memoryNotePreview.trail = Array.isArray(options.trail) ? options.trail : [];
     S.memoryNotePreview.requestToken += 1;
@@ -16277,7 +16277,7 @@ function ensureMemoryBrowserUi() {
         <div class="detail-modal-header">
             <div class="memory-browser-head">
                 <h2 id="memory-browser-title">当前记忆</h2>
-                <p id="memory-browser-subtitle" class="subtitle">数据来自 sqlite 持久化存储。</p>
+                <p id="memory-browser-subtitle" class="subtitle">只列仍在上下文里的记忆；已退场的看「归并记忆」。</p>
             </div>
             <div class="memory-browser-head-actions">
                 <button type="button" class="toolbar-btn ghost" id="memory-browser-edit-toggle" title="进入编辑模式：批量选择、修改与删除记忆">编辑</button>
@@ -16538,7 +16538,7 @@ function renderMemoryBrowserList() {
             const source = String(item?.source || "").trim() || "-";
             const memoryId = String(item?.memory_id || "").trim() || "-";
             const body = String(item?.memory_body || "").trim() || "-";
-            const ownershipNoteRef = String(item?.note_ref || "").trim() || String(item?.consolidated_into || "").trim();
+            const ownershipNoteRef = String(item?.note_ref || "").trim();
             const selectableId = String(item?.memory_id || "").trim();
             const checked = !!S.memoryBrowser.selected[selectableId];
             const actionBusy = String(S.memoryBrowser.actionBusy || "").trim();

@@ -278,7 +278,6 @@ test("browser row shows note ownership from the column, not from projected text"
     stubBrowserUi(api);
     api.S.memoryBrowser.items = [
         { memory_id: "Ab12Z9", memory_body: "第一条记忆 ref:note_legacy", minimal_memory: "a->b", source: "user", created_at: "2026-09-16T10:00:00+08:00", refresh_count: 1, passed_count: 2, note_ref: "note_ports" },
-        { memory_id: "Cd34Ef", memory_body: "退场过的记忆", minimal_memory: "c->d", source: "self", created_at: "2026-09-16T10:00:00+08:00", refresh_count: 0, passed_count: 0, consolidated_into: "note_runtime_env" },
         { memory_id: "Ef56Gh", memory_body: "没有 note 的记忆", minimal_memory: "e->f", source: "self", created_at: "2026-09-16T10:00:00+08:00", refresh_count: 0, passed_count: 0 },
     ];
     api.S.memoryBrowser.editMode = false;
@@ -286,10 +285,10 @@ test("browser row shows note ownership from the column, not from projected text"
 
     api.renderMemoryBrowserList();
     const html = api.U.memoryBrowserTbody.innerHTML;
-    // 归属 chip 来自 note_ref / consolidated_into 两列；退场行也要能点开分类 note。
+    // 归属 chip 只来自 `note_ref` 列；退场的行根本不进这张表（列表端已过滤），
+    // 所以这里不再拿 consolidated_into 兜底，否则等于把已迁走的记忆又画回常驻面。
     assert.match(html, /data-memory-note-ref="note_ports"[^>]*>note:note_ports</);
-    assert.match(html, /data-memory-note-ref="note_runtime_env"/);
-    assert.equal((html.match(/memory-note-ownership-chip/g) || []).length, 2);
+    assert.equal((html.match(/memory-note-ownership-chip/g) || []).length, 1);
 });
 
 test("browser list adds select and action columns in edit mode", () => {

@@ -1301,7 +1301,7 @@ def test_consolidation_records_survive_into_the_memory_surfaces() -> None:
     card_html = str(result["cardHtml"])
     assert 'data-op="category_note"' in card_html
     assert 'data-op="consolidate"' in card_html
-    assert str(result["label"]) == "归并 Note / 记忆退场"
+    assert str(result["label"]) == "归并记忆 / 记忆退场"
 
     blocks = str(result["blocks"])
     assert "新增内容" not in blocks, "consolidation records must not fall through to the add template"

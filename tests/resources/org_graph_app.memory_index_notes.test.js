@@ -3,7 +3,7 @@ const assert = require("node:assert/strict");
 const fs = require("node:fs");
 const vm = require("node:vm");
 
-// 记忆管理「归并 note」浏览面：分类列表、面包屑路径、正文里的 note 令牌渲染成下一级入口。
+// 记忆管理「归并记忆」浏览面：分类列表、面包屑路径、正文里的 note 令牌渲染成下一级入口。
 
 const APP_PATH = "g3ku/web/frontend/org_graph_app.js";
 const APP_CODE = fs.readFileSync(APP_PATH, "utf8");
