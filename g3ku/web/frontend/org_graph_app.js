@@ -3779,7 +3779,11 @@ function normalizeCeoSessionSnapshotCacheEntry(sessionId, entry = {}) {
     const messages = trimCeoSessionSnapshotMessages(entry?.messages);
     const inflightTurn = normalizeCeoSnapshotInflight(entry?.inflight_turn);
     const preservedTurn = normalizeCeoSnapshotInflight(entry?.preserved_turn);
-    if (!messages.length && !inflightTurn && !preservedTurn) return null;
+    // 会话级压缩载体必须留在缓存里：inflight 那道"这帧值不值得有个回合"的闸门会把内联
+    // 轮的进行中帧整帧丢掉，只读 inflight 时心跳/cron 轮的压缩全程没有信号。
+    const compression = normalizeCeoSnapshotCompression(entry?.compression);
+    const compressionRunning = String(compression?.status || "").trim().toLowerCase() === "running";
+    if (!messages.length && !inflightTurn && !preservedTurn && !compressionRunning) return null;
     const next = {
         session_id: key,
         messages,
@@ -3787,6 +3791,7 @@ function normalizeCeoSessionSnapshotCacheEntry(sessionId, entry = {}) {
     };
     if (inflightTurn) next.inflight_turn = inflightTurn;
     if (preservedTurn) next.preserved_turn = preservedTurn;
+    if (compression) next.compression = compression;
     const messageCount = Number(entry?.message_count);
     if (Number.isFinite(messageCount) && messageCount >= 0) next.message_count = Math.floor(messageCount);
     const updatedAt = String(entry?.updated_at || "").trim();
@@ -3960,6 +3965,10 @@ function activeCeoSessionCompressionState() {
     // 回合外的手动压缩没有 inflight turn，进度只存在于本机发起状态里；自动压缩仍读快照。
     if (activeCeoManualCompressionRunning()) return { status: "running", source: "manual_context_compression" };
     const cacheEntry = getCeoSessionSnapshotCache(activeSessionId());
+    // 会话级载体优先：回合内自动压缩的进行中状态同时也发在 payload.compression 上，
+    // 而 inflight 那条道对内联轮（heartbeat）会被回合闸门整帧丢掉。
+    const sessionCompression = normalizeCeoSnapshotCompression(cacheEntry?.compression);
+    if (String(sessionCompression?.status || "").trim().toLowerCase() === "running") return sessionCompression;
     const inflightTurn = normalizeCeoSnapshotInflight(cacheEntry?.inflight_turn);
     const inflightStatus = String(inflightTurn?.status || "").trim().toLowerCase();
     if (inflightStatus && !["running", "in_progress", "active"].includes(inflightStatus)) return null;
@@ -4022,16 +4031,36 @@ function removeCeoCompressionLiveDivider() {
 function syncCeoCompressionDivider() {
     if (!U.ceoFeed || typeof U.ceoFeed.querySelector !== "function") return;
     ensureCeoContextCompressionPolling();
-    const running = !!activeCeoSessionCompressionState();
+    const state = activeCeoSessionCompressionState();
+    const running = !!state;
     const existing = U.ceoFeed.querySelector(`.${CEO_COMPRESSION_DIVIDER_CLASS}.is-running`);
     if (running && !existing) {
-        appendCeoCompressionDivider("running");
+        // 只有手动压缩那条线挂暂停按钮：它打的是 /compress-context/cancel，而回合内的
+        // 自动压缩由那条端点返回 409（它只认手动任务的状态），点了只会得到一个假承诺。
+        // 自动压缩的停手本来就是 composer 那颗主暂停键（服务端 pause() 掐同一颗代际）。
+        appendCeoCompressionDivider("running", {
+            interactive: String(state.source || "").trim().toLowerCase() === "manual_context_compression",
+        });
         // 只有本来就在跟随最新时才钉底：这条线现在也由 renderCeoSnapshot 在每次整页重建后
         // 重挂，若无条件钉底会把正在往上翻历史的用户每次重建都拽回底部。
         if (S.ceoFeedFollowLatest !== false) scrollCeoFeedToBottom();
         return;
     }
     if (!running && existing) removeCeoCompressionLiveDivider();
+}
+
+function applyCeoCompressionMarker(sessionId = "", marker = null) {
+    // 终态那条线的本体是刚落盘的转录行；这一帧只负责让它在实时车道当场出现，
+    // 不等整页重建。事件在写盘成功之后才广播，所以"画了线"不会先于"有这条行"。
+    const state = String((marker || {}).state || "").trim().toLowerCase();
+    if (state !== "completed" && state !== "paused") return false;
+    const key = String(sessionId || "").trim();
+    if (!key || key !== String(activeSessionId() || "").trim()) return false;
+    if (!U.ceoFeed) return false;
+    removeCeoCompressionLiveDivider();
+    appendCeoCompressionDivider(state, { interactive: false });
+    if (S.ceoFeedFollowLatest !== false) scrollCeoFeedToBottom();
+    return true;
 }
 
 function stopCeoContextCompressionPolling() {
@@ -14245,6 +14274,7 @@ function initCeoWs() {
                 messages: payload.data?.messages || [],
                 inflight_turn: payload.data?.inflight_turn || null,
                 preserved_turn: payload.data?.preserved_turn || null,
+                compression: payload.data?.compression || null,
             };
             if (effectiveSessionId) {
                 setCeoSessionSnapshotCache(effectiveSessionId, snapshotEntry);
@@ -14302,10 +14332,18 @@ function initCeoWs() {
                 syncCeoApprovalFromInterrupts(payload.data?.interrupts || [], effectiveSessionId, { authoritative: true });
             }
         }
+        if (payload.type === "ceo.compression.marker") {
+            applyCeoCompressionMarker(effectiveSessionId, payload.data || {});
+        }
         if (payload.type === "ceo.turn.patch") {
             clearCeoReplyDeltaBuffer(effectiveSessionId, {
                 turnId: payload.data?.inflight_turn?.turn_id || payload.data?.preserved_turn?.turn_id || "",
             });
+            // 会话级压缩载体每帧覆盖一次，缺键就当成"没有在进行中"：缓存是合并语义，
+            // 不显式覆盖的话，压缩结束后的那一帧不会把上一帧的 running 摘掉，线会留在屏上。
+            if (effectiveSessionId) {
+                setCeoSessionSnapshotCache(effectiveSessionId, { compression: payload.data?.compression || null });
+            }
             const patchEntry = {
                 session_id: effectiveSessionId,
                 inflight_turn: payload.data?.inflight_turn || null,

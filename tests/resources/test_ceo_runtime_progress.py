@@ -3101,6 +3101,61 @@ def test_snapshot_includes_compression_state_when_frontdoor_archive_is_running()
     assert snapshot["compression"]["text"] == "上下文压缩中"
 
 
+@pytest.mark.asyncio
+async def test_emit_context_compression_marker_announces_written_rows(tmp_path: Path) -> None:
+    """落一条终态区分线，同时把它广播到实时车道；事件是"这行已经落盘"的凭据。"""
+    store = SessionManager(tmp_path)
+    session = RuntimeAgentSession(
+        SimpleNamespace(model="demo", reasoning_effort=None, multi_agent_runner=None, sessions=store),
+        session_key="web:shared",
+        channel="web",
+        chat_id="shared",
+    )
+    events: list[AgentEvent] = []
+
+    async def _listener(event: AgentEvent) -> None:
+        events.append(event)
+
+    session.subscribe(_listener)
+
+    assert await session.emit_context_compression_marker(state="completed", source="auto") is True
+
+    persisted = store.get_or_create("web:shared")
+    rows = [
+        item
+        for item in list(persisted.messages or [])
+        if isinstance(item.get("metadata"), dict) and item["metadata"].get("kind") == "context_compression"
+    ]
+    assert len(rows) == 1
+    assert rows[0]["metadata"]["compression_state"] == "completed"
+    assert rows[0]["metadata"]["source"] == "auto"
+
+    marker_events = [event for event in events if event.type == "context_compression_marker"]
+    assert len(marker_events) == 1
+    assert marker_events[0].payload == {"compression_state": "completed", "source": "auto"}
+
+
+@pytest.mark.asyncio
+async def test_emit_context_compression_marker_stays_silent_when_row_missing(tmp_path: Path) -> None:
+    """写盘失败就一个字节都不播：前端把这条事件当作"转录里已经有这条行"的凭据。"""
+    session = RuntimeAgentSession(
+        SimpleNamespace(model="demo", reasoning_effort=None, multi_agent_runner=None, sessions=SessionManager(tmp_path)),
+        session_key="web:shared",
+        channel="web",
+        chat_id="shared",
+    )
+    events: list[AgentEvent] = []
+
+    async def _listener(event: AgentEvent) -> None:
+        events.append(event)
+
+    session.subscribe(_listener)
+    session.append_context_compression_marker = lambda **_kwargs: False
+
+    assert await session.emit_context_compression_marker(state="paused", source="auto") is False
+    assert [event for event in events if event.type == "context_compression_marker"] == []
+
+
 def test_stage_trace_round_enrichment_uses_latest_tool_event_status() -> None:
     session = RuntimeAgentSession(
         SimpleNamespace(model="demo", reasoning_effort=None, multi_agent_runner=None),

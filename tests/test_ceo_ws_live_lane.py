@@ -257,3 +257,33 @@ def test_final_frame_forces_the_pending_patch_out_first(harness):
     assert types.count("ceo.turn.patch") == 2, types
     assert types.index("ceo.turn.patch") < types.index("ceo.reply.final")
     assert types[types.index("ceo.reply.final") - 1] == "ceo.turn.patch"
+
+
+def test_compression_marker_lands_as_its_own_frame(harness):
+    """终态区分线落盘后必须有一帧带进实时车道。
+
+    那条行的本体只活在转录里，整页重建才画得出来；进行中的线一收，操作者看到的就是一段
+    空白，而自动压缩的进行中与完成之间可以隔着一整轮工具调用。
+    """
+    with _connect(harness):
+        assert harness.wait_until(lambda: "snapshot.ceo" in harness.frame_types() and harness.loop is not None)
+        harness.submit(harness.relay(AgentEvent(
+            type="context_compression_marker",
+            timestamp="2026-10-14T14:00:00",
+            payload={"compression_state": "COMPLETED", "source": "Auto"},
+        )))
+        assert harness.wait_until(lambda: "ceo.compression.marker" in harness.frame_types())
+
+    frames = [frame for frame in harness.frames if frame.get("type") == "ceo.compression.marker"]
+    assert len(frames) == 1, harness.frame_types()
+    assert frames[0]["data"] == {"state": "completed", "source": "auto"}
+    assert frames[0]["session_id"] == SESSION_KEY
+
+
+def test_non_marker_events_do_not_invent_a_marker_frame(harness):
+    """没有落线就没有帧：前端把这条帧当"已经有这条行"的凭据，不能凭空画。"""
+    with _connect(harness):
+        assert harness.wait_until(lambda: "snapshot.ceo" in harness.frame_types() and harness.loop is not None)
+        harness.submit(harness.relay(_tool_event(0)))
+        harness.submit(asyncio.sleep(0.3))
+    assert "ceo.compression.marker" not in harness.frame_types()

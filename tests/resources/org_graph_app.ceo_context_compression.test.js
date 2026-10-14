@@ -203,6 +203,8 @@ function loadApp() {
             activeCeoManualCompressionRunning, activeCeoSessionCompressionState,
             appendCeoCompressionDivider, syncCeoCompressionDivider,
             normalizeCeoSnapshotMessage, activeCeoSessionHasHistory,
+            setCeoSessionSnapshotCache, getCeoSessionSnapshotCache,
+            applyCeoCompressionMarker, normalizeCeoSessionSnapshotCacheEntry,
             refreshCeoComposerUsageEstimate, syncCeoModelModePanelUsage,
             startCeoContextCompressionPolling, applyCeoContextCompressionStatus,
             adoptCeoContextCompression,
@@ -745,4 +747,77 @@ test("区分线两端留白且文字居中，图标自绘旋转，长按 2 秒�
     assert.equal(CSS_CODE.includes(".ceo-context-usage-brain:hover::after"), false);
     assert.match(APP_CODE, /const CEO_BRAIN_LONG_PRESS_MS = 2000;/);
     assert.equal(APP_CODE.includes("只有本地会话可以压缩上下文"), false);
+});
+
+const AUTO_RUNNING = { status: "running", text: "上下文压缩中", source: "token_compression" };
+
+test("内联轮的进行中压缩走会话级载体，没有回合气泡也画线", () => {
+    const api = loadApp();
+    // 实盘形状：回合是心跳唤醒的内联轮，服务端发了带 compression 的帧，而前端那道
+    // "这帧值不值得有个回合" 的闸门把 inflight 整帧丢掉（见 ceoNeedsAssistantTurn）。
+    // 进行中状态必须还能从 payload.compression 这条载体读回来，否则压缩全程没有信号。
+    const entry = api.setCeoSessionSnapshotCache("web:test", { compression: AUTO_RUNNING });
+    assert.equal(entry?.compression?.status, "running");
+    assert.equal(api.activeCeoSessionCompressionState().source, "token_compression");
+    api.syncCeoCompressionDivider();
+    const live = dividers(api.U.ceoFeed);
+    assert.equal(live.length, 1);
+    assert.equal(live[0].dataset.ceoCompressionState, "running");
+});
+
+test("回合内自动压缩那条线不挂暂停按钮：端点只认手动任务", () => {
+    const api = loadApp();
+    api.setCeoSessionSnapshotCache("web:test", { compression: AUTO_RUNNING });
+    api.syncCeoCompressionDivider();
+    const live = dividers(api.U.ceoFeed);
+    assert.equal(live.length, 1);
+    // /compress-context/cancel 对回合内压缩回 409，按钮画上去就是一个假承诺；
+    // 停手本来就是 composer 那颗主暂停键。
+    assert.doesNotMatch(live[0].innerHTML, /data-ceo-compress-pause/);
+    assert.match(live[0].innerHTML, /ceo-compression-divider-icon/);
+
+    const manual = loadApp();
+    manual.S.ceoContextCompressionStatus = "running";
+    manual.S.ceoContextCompressionSessionId = "web:test";
+    manual.syncCeoCompressionDivider();
+    assert.match(dividers(manual.U.ceoFeed)[0].innerHTML, /data-ceo-compress-pause/);
+});
+
+test("帧里不再带 compression 就把进行中的线摘掉（合并不许把 running 冻住）", () => {
+    const api = loadApp();
+    api.setCeoSessionSnapshotCache("web:test", {
+        messages: [{ role: "user", content: "跑一个长任务" }],
+        compression: AUTO_RUNNING,
+    });
+    api.syncCeoCompressionDivider();
+    assert.equal(dividers(api.U.ceoFeed).length, 1);
+    // 压缩收口那一帧不带 compression 键：缓存是合并语义，必须按"没有在进行中"覆盖掉。
+    api.setCeoSessionSnapshotCache("web:test", {
+        messages: [{ role: "user", content: "跑一个长任务" }],
+        compression: null,
+    });
+    assert.equal(api.getCeoSessionSnapshotCache("web:test")?.compression, undefined);
+    assert.equal(api.activeCeoSessionCompressionState(), null);
+    assert.equal(dividers(api.U.ceoFeed).length, 0);
+});
+
+test("终态标记事件当场画线，并先摘掉进行中那条", () => {
+    const api = loadApp();
+    api.setCeoSessionSnapshotCache("web:test", { compression: AUTO_RUNNING });
+    api.syncCeoCompressionDivider();
+    assert.equal(dividers(api.U.ceoFeed).length, 1);
+
+    assert.equal(api.applyCeoCompressionMarker("web:test", { state: "completed", source: "auto" }), true);
+    const rows = dividers(api.U.ceoFeed);
+    assert.deepEqual(rows.map((item) => item.dataset.ceoCompressionState), ["completed"]);
+    assert.match(rows[0].innerHTML, /会话已压缩/);
+    assert.doesNotMatch(rows[0].innerHTML, /data-ceo-compress-pause/);
+
+    // 别的会话的标记不能画进当前这条消息流；非法状态一律不认。
+    assert.equal(api.applyCeoCompressionMarker("web:other", { state: "paused", source: "auto" }), false);
+    assert.equal(api.applyCeoCompressionMarker("web:test", { state: "running", source: "auto" }), false);
+    assert.deepEqual(
+        dividers(api.U.ceoFeed).map((item) => item.dataset.ceoCompressionState),
+        ["completed"]
+    );
 });

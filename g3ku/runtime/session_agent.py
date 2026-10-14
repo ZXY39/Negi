@@ -2412,6 +2412,29 @@ class RuntimeAgentSession:
             return False
         return True
 
+    async def emit_context_compression_marker(
+        self,
+        *,
+        state: str,
+        source: str,
+        stats: dict[str, Any] | None = None,
+        persisted_session: Any | None = None,
+    ) -> bool:
+        """落一条终态区分线，同时把它广播给实时车道；线没落成就完全不广播。
+
+        这一行本身只活在转录里，整页重建才画得出来；实时车道上「压缩进行中」的线一收，
+        操作者看到的就是空白 —— 自动压缩的进行中与完成之间可以隔着一整轮工具调用。
+        """
+        wrote = self.append_context_compression_marker(
+            state=state,
+            source=source,
+            stats=stats,
+            persisted_session=persisted_session,
+        )
+        if wrote:
+            await self._emit("context_compression_marker", compression_state=state, source=source)
+        return wrote
+
     def _begin_frontdoor_compression_generation(self) -> int:
         self._frontdoor_compression_generation_seq = int(self._frontdoor_compression_generation_seq or 0) + 1
         generation_id = self._frontdoor_compression_generation_seq
@@ -3178,7 +3201,7 @@ class RuntimeAgentSession:
             # 发送时（自动）压缩在收尾处落线：区分线以上是这轮被折进摘要的历史。
             if str(getattr(self, "_frontdoor_compressed_turn_id", "") or "").strip() == turn_id and turn_id:
                 setattr(self, "_frontdoor_compressed_turn_id", "")
-                self.append_context_compression_marker(
+                await self.emit_context_compression_marker(
                     state="completed",
                     source="auto",
                     persisted_session=persisted_session,
@@ -4465,7 +4488,7 @@ class RuntimeAgentSession:
             self._sync_completed_continuity_snapshot(source_reason="manual_stop")
             self.clear_paused_execution_context()
             if pausing_active_compression:
-                self.append_context_compression_marker(state="paused", source="auto")
+                await self.emit_context_compression_marker(state="paused", source="auto")
                 # 摘要任务可能在 cancel_session_tasks 里被直接掐掉，来不及走自己的
                 # finally；这里替它收口，否则下一回合会被一个已无人认领的代际挡住。
                 self._compression_state = {}

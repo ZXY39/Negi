@@ -2013,6 +2013,19 @@ async def ceo_websocket(websocket: WebSocket):
                 is_running=False,
             )
             return
+        if event.type == 'context_compression_marker':
+            # 终态区分线的本体是刚落盘的那条转录行，只有整页重建才画得出来；实时车道上
+            # 进行中的线一收，操作者看到的就是空白。这一帧只把"刚落了一条什么状态的线"
+            # 带过去，正文仍由转录提供，所以不做第二份事实源。
+            payload = dict(event.payload or {})
+            await _push_stream_event(
+                'ceo.compression.marker',
+                {
+                    'state': str(payload.get('compression_state') or '').strip().lower(),
+                    'source': str(payload.get('source') or '').strip().lower(),
+                },
+            )
+            return
         if event.type == 'frontdoor_stage_synced':
             # 图节点边界同步后主动推送一次 live turn patch:阶段/轮次状态刚刷新,
             # 若等到下一工具事件才推,新开阶段的 delta 会为空导致前端清空时间线
