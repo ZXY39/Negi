@@ -33,6 +33,7 @@ const LEDGER = [
     { token: "project-select-checkbox", tier: "ui" },
     { token: "data-session-bulk-checkbox", tier: "specialist" },
     { token: "llm-binding-image-multimodal-enabled", tier: "specialist" },
+    { token: "llm-binding-image-tail-only", tier: "specialist" },
     { token: "qq-bot-sandbox-input", tier: "specialist" },
     { token: "ceo-voice-autosend", tier: "ui" },
     { token: "data-memory-row-select", tier: "ui" },

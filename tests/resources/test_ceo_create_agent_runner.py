@@ -5233,9 +5233,13 @@ def test_frontdoor_send_preflight_snapshot_adds_content_open_image_overlay_only_
         for block in list(snapshot["request_messages"][-1]["content"] or [])
         if isinstance(block, dict)
     ]
-    assert live_blocks[0] == {"type": "text", "text": "图片已通过 content_open 打开，视觉内容已附带在本轮上下文中"}
+    # 末位那条 user 记录就是当轮契约/阶段位置：图片载体必须**折进**它的原文字，
+    # 直接替换会让这一跳收不到 callable_tools（节点道一直是折叠口径，两条道同形）。
+    folded_text = str(live_blocks[0].get("text") or "")
+    assert "Please inspect the reopened image" in folded_text
+    assert "图片已通过 content_open 打开，视觉内容已附带在本轮上下文中" in folded_text
     assert any(block.get("type") == "image_url" for block in live_blocks)
-    assert snapshot["durable_request_messages"][-1]["content"] == "图片已通过 content_open 打开，视觉内容已附带在本轮上下文中"
+    assert snapshot["durable_request_messages"][-1]["content"] == folded_text
 
 
 def test_frontdoor_send_preflight_snapshot_content_open_image_overlay_anchors_active_stage_goal(
@@ -5323,7 +5327,8 @@ def test_frontdoor_send_preflight_snapshot_content_open_image_overlay_anchors_ac
         if isinstance(block, dict)
     ]
     overlay_text = str(live_blocks[0].get("text") or "")
-    assert overlay_text.startswith("图片已通过 content_open 打开，视觉内容已附带在本轮上下文中")
+    # 载体折进末位记录的原文字，所以阶段锚点出现在同一块里（不是块首）。
+    assert "图片已通过 content_open 打开，视觉内容已附带在本轮上下文中" in overlay_text
     assert "当前阶段目标：拉取用户两张图片的高清原图" in overlay_text
     assert "请继续完成该目标" in overlay_text
     assert "不要切换到历史对话或历史定时任务" in overlay_text

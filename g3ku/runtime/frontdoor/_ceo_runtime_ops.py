@@ -1065,6 +1065,13 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
         refs = [str(item or "").strip() for item in list(model_refs or []) if str(item or "").strip()]
         return self._ceo_image_multimodal_for_ref(refs[0] if refs else "")
 
+    def _ceo_image_tail_only_for_request(self, model_refs: list[str] | None) -> bool:
+        """本轮这一发落到的那颗是否"只读末条消息的图"（位置事实，与收不收图正交）。"""
+        from g3ku.config.model_manager import image_target_shape
+
+        refs = [str(item or "").strip() for item in list(model_refs or []) if str(item or "").strip()]
+        return image_target_shape(self._frontdoor_runtime_config(), refs[0] if refs else "")[2]
+
     def _degrade_image_content_for_request(self, content: Any, *, model_refs: list[str] | None) -> Any:
         """本轮这一发落到的那颗不收图时，把 content 里的图片块换成"路径/占位 + 原因"文本。
 
@@ -1147,6 +1154,23 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
         return note or text_value
 
     @classmethod
+    def _web_ceo_tail_only_image_note(cls, *, text: str, uploads: list[dict[str, Any]]) -> str:
+        """只读末条消息的上游：图片不挂用户轮，像素随本回合首条请求的**末位**发出一次。
+
+        文案要划清"哪一跳看得见"，否则模型会拿首跳的印象继续在后面的跳上作答。
+        """
+        text_value = str(text or "").strip()
+        lines = [
+            "For this turn the uploaded image is attached to the LAST message of this turn's first request.",
+            "Later requests in this turn will not carry it; to look at it again, call content_open with the path below.",
+        ]
+        return "\n\n".join(
+            part
+            for part in (text_value, "\n".join(lines), cls._web_ceo_uploaded_files_note(uploads))
+            if part
+        )
+
+    @classmethod
     def _web_ceo_user_text_with_upload_note(
         cls,
         *,
@@ -1225,8 +1249,11 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
             str(item.get("kind") or "").strip().lower() == "image"
             for item in uploads
         )
+        tail_only = bool(multimodal_enabled and has_image_uploads and self._ceo_image_tail_only_for_request(model_refs))
         merged_text = (
-            self._web_ceo_multimodal_image_note(text=text_value, uploads=uploads)
+            self._web_ceo_tail_only_image_note(text=text_value, uploads=uploads)
+            if tail_only
+            else self._web_ceo_multimodal_image_note(text=text_value, uploads=uploads)
             if multimodal_enabled and has_image_uploads
             else self._web_ceo_user_text_with_upload_note(text=text_value, uploads=uploads)
         )
@@ -1239,26 +1266,22 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
                 display_name=image_model_name,
             )
 
+        if tail_only:
+            # 只读末条消息的上游：图留在用户轮上会被当轮契约/阶段尾块挤离末位（实盘 2026-10-14
+            # hy4-preview 两臂对照），所以这里只落文本，像素交给尾部载体（prepare_turn 播种）。
+            for item in uploads:
+                if str(item.get("kind") or "").strip().lower() != "image":
+                    continue
+                self._checked_web_ceo_image_upload(item)
+            return merged_text
+
         content_blocks: list[dict[str, Any]] = []
         if merged_text:
             content_blocks.append({"type": "text", "text": merged_text})
         for item in uploads:
             if str(item.get("kind") or "").strip().lower() != "image":
                 continue
-            path = Path(str(item.get("path") or "")).expanduser()
-            if not path.exists() or not path.is_file():
-                raise FrontdoorCompressionRuntimeError(
-                    code="web_ceo_image_missing",
-                    message=f"Uploaded image is missing: {str(item.get('name') or path)}",
-                    recoverable=True,
-                )
-            size_bytes = int(item.get("size") or 0) or int(path.stat().st_size or 0)
-            if size_bytes > WEB_CEO_IMAGE_UPLOAD_MAX_BYTES:
-                raise self._frontdoor_image_upload_too_large_error(
-                    name=str(item.get("name") or path.name),
-                    size_bytes=size_bytes,
-                )
-            mime_type = str(item.get("mime_type") or item.get("mimeType") or "image/png").strip() or "image/png"
+            path, mime_type, _display_name = self._checked_web_ceo_image_upload(item)
             content_blocks.append(
                 {
                     "type": "image_url",
@@ -1268,6 +1291,98 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
         if len(content_blocks) == 1 and content_blocks[0].get("type") == "text":
             return merged_text
         return content_blocks or merged_text
+
+    def _checked_web_ceo_image_upload(self, item: dict[str, Any]) -> tuple[Path, str, str]:
+        """上传图的两条硬校验（缺图 / 超 5 MiB）与展示身份，两条道共用同一个口径。"""
+        path = Path(str(item.get("path") or "")).expanduser()
+        if not path.exists() or not path.is_file():
+            raise FrontdoorCompressionRuntimeError(
+                code="web_ceo_image_missing",
+                message=f"Uploaded image is missing: {str(item.get('name') or path)}",
+                recoverable=True,
+            )
+        size_bytes = int(item.get("size") or 0) or int(path.stat().st_size or 0)
+        if size_bytes > WEB_CEO_IMAGE_UPLOAD_MAX_BYTES:
+            raise self._frontdoor_image_upload_too_large_error(
+                name=str(item.get("name") or path.name),
+                size_bytes=size_bytes,
+            )
+        mime_type = str(item.get("mime_type") or item.get("mimeType") or "image/png").strip() or "image/png"
+        display_name = str(item.get("name") or path.name).strip() or path.name
+        return path, mime_type, display_name
+
+    def _web_ceo_current_turn_upload_metadatas(
+        self,
+        *,
+        session: Any,
+        metadata: dict[str, Any] | None,
+    ) -> list[dict[str, Any]]:
+        """本回合的上传元数据：当前输入 + prompt_batch 同批兄弟输入。
+
+        同批合并只发生在请求构建期（`_merge_prompt_batch_sibling_contents`），尾部载体要按同一批
+        收集——否则用户连发两条带图消息时，只有最后一条的像素能到末位。
+        """
+        collected: list[dict[str, Any]] = [dict(metadata or {})]
+        for item in list(getattr(session, "_active_user_batch_inputs", None) or []):
+            item_metadata = getattr(item, "metadata", None)
+            if isinstance(item_metadata, dict):
+                collected.append(dict(item_metadata))
+        return collected
+
+    def _web_ceo_tail_only_upload_targets(
+        self,
+        *,
+        metadatas: list[dict[str, Any] | None],
+        model_refs: list[str] | None,
+    ) -> list[dict[str, Any]]:
+        """入站上传在"只读末条消息"的上游上改走尾部载体。
+
+        复用 content_open 那条 pending 通道，因为"贴到末位"和"跳完即清"这两件事只在那里实现过一次：
+        `_frontdoor_send_preflight_snapshot` 在契约定稿之后贴，`_graph_call_model` 收尾清零 ⇒ 结构上
+        就只活一跳，不需要再建一套生命周期。
+        """
+        multimodal_enabled = self._ceo_image_multimodal_for_request(model_refs)[0]
+        if not multimodal_enabled or not self._ceo_image_tail_only_for_request(model_refs):
+            return []
+        targets: list[dict[str, Any]] = []
+        seen_paths: set[str] = set()
+        for raw_metadata in list(metadatas or []):
+            payload = dict(raw_metadata or {})
+            for item in [
+                dict(entry)
+                for entry in list(payload.get("web_ceo_uploads") or [])
+                if isinstance(entry, dict)
+            ]:
+                if str(item.get("kind") or "").strip().lower() != "image":
+                    continue
+                try:
+                    path, mime_type, display_name = self._checked_web_ceo_image_upload(item)
+                except FrontdoorCompressionRuntimeError:
+                    continue
+                path_key = str(path)
+                if path_key in seen_paths:
+                    continue
+                seen_paths.add(path_key)
+                targets.append(
+                    {
+                        "ok": True,
+                        "content_kind": "image",
+                        "mime_type": mime_type,
+                        "multimodal_open_pending": True,
+                        "image_carrier": "web_ceo_upload",
+                        "overlay_text": (
+                            "本轮上传的图片附带在本条消息里（这是本回合第一条请求的末位消息）。"
+                            "同一回合的后续请求不会重复附带它；需要再看就用 content_open 打开下面这个路径。"
+                        ),
+                        "runtime_image_target": {
+                            "path": str(path),
+                            "mime_type": mime_type,
+                            "display_name": display_name,
+                            "source_ref": "",
+                        },
+                    }
+                )
+        return targets
 
     @staticmethod
     def _request_content_block_list(content: Any) -> list[Any]:
@@ -1467,21 +1582,43 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
                 fallback_goal = stage_goal
         return fallback_goal
 
-    def _content_open_image_overlay_context_text(self, *, active_stage_goal: str = "") -> str:
+    def _content_open_image_overlay_context_text(
+        self,
+        *,
+        active_stage_goal: str = "",
+        base_text: str = "",
+    ) -> str:
         """叠加层文案：带多模态图片的末尾用户消息只允许追加在请求尾部。
 
         有活动阶段目标时附上目标锚点并提醒继续完成，避免长会话里的历史内部
-        事件与图片指令竞争注意力；无活动阶段时保持原有通用文案。
+        事件与图片指令竞争注意力；无活动阶段时保持原有通用文案。`base_text` 让
+        载体自己声明身份（入站上传 vs content_open 重开），两种来源的说法不能互抄。
         """
+        base = str(base_text or "").strip() or self._CONTENT_OPEN_IMAGE_CONTEXT_TEXT
         goal = str(active_stage_goal or "").strip()
         if not goal:
-            return self._CONTENT_OPEN_IMAGE_CONTEXT_TEXT
+            return base
         if len(goal) > 300:
             goal = goal[:300].rstrip() + "…"
         return (
-            f"{self._CONTENT_OPEN_IMAGE_CONTEXT_TEXT}\n"
+            f"{base}\n"
             f"当前阶段目标：{goal}\n"
             "请继续完成该目标。这些图片服务于当前任务，不要切换到历史对话或历史定时任务。"
+        )
+
+    @staticmethod
+    def _frontdoor_tail_image_block_count(request_messages: list[dict[str, Any]] | None) -> int:
+        """最后一条消息里有多少个 image 块——"这一发上游到底收不收得到像素"的客观读数。"""
+        records = [item for item in list(request_messages or []) if isinstance(item, dict)]
+        if not records:
+            return 0
+        content = records[-1].get("content")
+        if not isinstance(content, list):
+            return 0
+        return sum(
+            1
+            for block in content
+            if isinstance(block, dict) and str(block.get("type") or "").strip().lower() in {"image_url", "input_image"}
         )
 
     def _content_open_image_overlay_message_blocks(
@@ -1501,7 +1638,15 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
                 ),
                 recoverable=True,
             )
-        overlay_text = self._content_open_image_overlay_context_text(active_stage_goal=active_stage_goal)
+        carrier_text = ""
+        for raw in list(payloads or []):
+            if isinstance(raw, dict) and str(raw.get("overlay_text") or "").strip():
+                carrier_text = str(raw.get("overlay_text") or "").strip()
+                break
+        overlay_text = self._content_open_image_overlay_context_text(
+            active_stage_goal=active_stage_goal,
+            base_text=carrier_text,
+        )
         blocks: list[dict[str, Any]] = [{"type": "text", "text": overlay_text}]
         seen_paths: set[str] = set()
         for raw in list(payloads or []):
@@ -1567,6 +1712,18 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
             return records, durable
         last_role = str(records[-1].get("role") or "").strip().lower() if records else ""
         if last_role == "user":
+            # 末位是当轮契约/阶段闸门块时，直接把 content 换掉会让这一跳收不到 callable_tools，
+            # 契约在场即能力的口径就断了。节点道（react_loop 同名载体）一直是折叠口径：原文字
+            # 并进首个 text 块，两条道按同一形状发。
+            existing_text = self._content_text(records[-1].get("content")).strip()
+            if existing_text and isinstance(blocks[0], dict) and blocks[0].get("type") == "text":
+                blocks = [
+                    {
+                        "type": "text",
+                        "text": f"{existing_text}\n\n{str(blocks[0].get('text') or '').strip()}",
+                    },
+                    *list(blocks[1:]),
+                ]
             live_records = self._replace_last_user_message_content(messages=records, content=blocks)
         else:
             live_records = [*records, {"role": "user", "content": list(blocks)}]
@@ -1960,6 +2117,9 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
             "estimated_tool_schema_tokens": int(estimate_breakdown.get("estimated_tool_schema_tokens") or 0),
             "estimated_image_tokens": int(estimate_breakdown.get("estimated_image_tokens") or 0),
             "image_count": int(estimate_breakdown.get("image_count") or 0),
+            # 位置读数：图块总数 vs 落在**最后一条消息**里的数量。只读末条的上游（实盘 hy4-preview）
+            # 只有 at_tail 那部分真进视觉通道，光看 image_count 会把"发了图"读成"看见了图"。
+            "image_blocks_at_tail": self._frontdoor_tail_image_block_count(request_messages),
             "image_estimation_method": str(estimate_breakdown.get("image_estimation_method") or ""),
         }
 
@@ -7901,6 +8061,13 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
             "stable_messages": self._checkpoint_safe_stable_messages(stable_messages),
             "dynamic_appendix_messages": persisted_dynamic_appendix_messages,
             "frontdoor_live_request_messages": list(live_request_messages),
+            "pending_content_open_image_payloads": self._web_ceo_tail_only_upload_targets(
+                metadatas=self._web_ceo_current_turn_upload_metadatas(
+                    session=session,
+                    metadata=metadata,
+                ),
+                model_refs=model_refs,
+            ),
             "frontdoor_request_body_messages": persisted_messages,
             "frontdoor_history_shrink_reason": shrink_reason,
             "cache_family_revision": cache_family_revision,
@@ -7985,6 +8152,23 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
         }
         if merged_query_text:
             update["query_text"] = merged_query_text
+        follow_up_image_targets = self._web_ceo_tail_only_upload_targets(
+            metadatas=[
+                dict(getattr(item, "metadata", None) or {})
+                for item in queued_inputs
+            ],
+            model_refs=model_refs,
+        )
+        if follow_up_image_targets:
+            # 插话带图走的也是同一个尾部载体：接进这一跳的 pending 列表，别让它停在文本行上。
+            update["pending_content_open_image_payloads"] = [
+                *[
+                    dict(item)
+                    for item in list(state.get("pending_content_open_image_payloads") or [])
+                    if isinstance(item, dict)
+                ],
+                *follow_up_image_targets,
+            ]
         self._sync_runtime_session_frontdoor_state(
             state={**dict(state or {}), **update},
             runtime=runtime,
