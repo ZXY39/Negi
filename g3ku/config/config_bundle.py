@@ -358,8 +358,21 @@ def import_bundle(
     *,
     archive_path: Path | str,
     password: str,
+    current_password: str = "",
 ) -> dict[str, Any]:
     root = (workspace or Path.cwd()).resolve()
+    security = get_bootstrap_security_service(root)
+    # 本机已经有解锁口令时，导入先用它证身份，再用它重裹包里的新主密钥：
+    # 「导入不改项目口令」是合同，而不是操作员要自己记住的副作用。
+    # 没有口令（新装设备）才沿用包口令——那时包口令就是这台机器的第一个口令。
+    kept_password = ""
+    if security.has_installed_envelope():
+        clean_current = str(current_password or "")
+        if not clean_current:
+            raise ValueError("bundle_current_password_required")
+        if not security.unwrap_with_password(clean_current):
+            raise ValueError("bundle_current_password_invalid")
+        kept_password = clean_current
     envelope = _read_envelope(Path(archive_path))
     payload = _decrypt_payload(envelope, _validate_password(password))
     master_key, targets = _preflight(payload)
@@ -370,9 +383,9 @@ def import_bundle(
     backed_up = _backup_targets(root, targets, backup_root)
     try:
         _write_entries(root, entries, targets)
-        status = get_bootstrap_security_service(root).install_master_key(
+        status = security.install_master_key(
             master_key=master_key,
-            password=str(password),
+            password=kept_password or str(password),
         )
     except Exception:
         _restore_backup(root, backup_root, backed_up)
@@ -386,6 +399,7 @@ def import_bundle(
         "source_app_version": str(envelope.get("app_version") or ""),
         "local_app_version": __version__,
         "key_source": str(envelope.get("key_source") or ""),
+        "password_kept": bool(kept_password),
         "status": status,
     }
 

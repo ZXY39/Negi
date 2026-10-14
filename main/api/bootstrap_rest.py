@@ -312,6 +312,8 @@ _BUNDLE_ERROR_CODES: tuple[tuple[str, str, int], ...] = (
     ("project is locked", "project_locked", 423),
     ("invalid password", "bundle_password_invalid", 400),
     ("password is required", "bundle_password_required", 400),
+    ("bundle_current_password_required", "bundle_current_password_required", 400),
+    ("bundle_current_password_invalid", "bundle_current_password_invalid", 400),
     ("unlock password is not configured", "bundle_project_password_unavailable", 400),
     ("rejected", "bundle_path_rejected", 400),
     ("unsupported config bundle version", "bundle_version_unsupported", 400),
@@ -522,6 +524,7 @@ async def bootstrap_config_bundle_import(
     file: UploadFile = File(...),
     password: str = Form(...),
     confirm_running_work: bool = Form(False),
+    current_password: str = Form(""),
 ):
     try:
         await _pause_running_work_for_bundle_import(confirm_running_work)
@@ -543,7 +546,12 @@ async def bootstrap_config_bundle_import(
         raise HTTPException(status_code=500, detail="bundle_staging_failed") from exc
     try:
         try:
-            item = import_bundle(Path.cwd(), archive_path=staged, password=password)
+            item = import_bundle(
+                Path.cwd(),
+                archive_path=staged,
+                password=password,
+                current_password=str(current_password or ""),
+            )
         except Exception as exc:
             raise _bundle_http_exception(exc) from exc
     finally:

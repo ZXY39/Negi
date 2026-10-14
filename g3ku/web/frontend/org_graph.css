@@ -7690,6 +7690,23 @@ textarea {
     background: color-mix(in srgb, var(--bg-elevated) 74%, transparent);
 }
 
+.confirm-input-row {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    margin: 0 0 10px;
+    padding: 12px 14px;
+    border-radius: 14px;
+    border: 1px solid color-mix(in srgb, var(--border-color) 82%, transparent);
+    background: color-mix(in srgb, var(--bg-elevated) 74%, transparent);
+    color: var(--text-primary);
+    line-height: 1.5;
+}
+
+.confirm-input-row input {
+    width: 100%;
+}
+
 .confirm-checkbox-row {
     display: flex;
     align-items: flex-start;

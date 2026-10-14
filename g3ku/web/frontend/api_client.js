@@ -35,6 +35,10 @@ class ApiClient {
                 return "项目当前已锁定，请先完成解锁后再继续。";
             case "bundle_password_invalid":
                 return "配置包口令不正确。";
+            case "bundle_current_password_required":
+                return "导入会替换本机的解锁凭据，请先输入当前项目解锁口令。";
+            case "bundle_current_password_invalid":
+                return "当前项目解锁口令不正确，导入未执行，配置没有改动。";
             case "bundle_project_password_unavailable":
                 return "这个项目没有设置解锁密码（只用环境变量主密钥解锁），请改用自定义导出口令。";
             case "bundle_password_required":
@@ -446,11 +450,12 @@ class ApiClient {
         return this._buildUrl("/api/bootstrap/config-bundle/download", { filename }).toString();
     }
 
-    static async importConfigBundle(file, password, { confirmRunningWork = false } = {}) {
+    static async importConfigBundle(file, password, { confirmRunningWork = false, currentPassword = "" } = {}) {
         const formData = new FormData();
         formData.append("file", file);
         formData.append("password", password);
         formData.append("confirm_running_work", confirmRunningWork ? "true" : "false");
+        formData.append("current_password", currentPassword || "");
         const data = await this._request("POST", "/api/bootstrap/config-bundle/import", {
             body: formData,
             timeoutMs: 180000,

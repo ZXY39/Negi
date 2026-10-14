@@ -712,6 +712,9 @@ const U = {
     confirmTitle: document.getElementById("confirm-title"),
     confirmText: document.getElementById("confirm-text"),
     confirmOptions: document.getElementById("confirm-options"),
+    confirmInputRow: document.getElementById("confirm-input-row"),
+    confirmInputLabel: document.getElementById("confirm-input-label"),
+    confirmInput: document.getElementById("confirm-input"),
     confirmCheckbox: document.getElementById("confirm-checkbox"),
     confirmCheckboxLabel: document.getElementById("confirm-checkbox-label"),
     confirmCheckboxHint: document.getElementById("confirm-checkbox-hint"),
@@ -10604,16 +10607,29 @@ function setToolDirty(next = true) {
     renderToolActions();
 }
 
-function openConfirm({ title, text, confirmLabel = "确认", confirmKind = "danger", onConfirm, onClose = null, returnFocus = null, checkbox = null }) {
+function openConfirm({ title, text, confirmLabel = "确认", confirmKind = "danger", onConfirm, onClose = null, returnFocus = null, checkbox = null, input = null }) {
     S.confirmState = {
         onConfirm,
         onClose,
         returnFocus,
         checkbox: checkbox && typeof checkbox === "object" ? checkbox : null,
+        input: input && typeof input === "object" ? input : null,
         accepted: false,
     };
     U.confirmTitle.textContent = title;
     U.confirmText.textContent = text;
+    if (U.confirmInputRow && U.confirmInput) {
+        const inputEnabled = !!(input && typeof input === "object");
+        U.confirmInputRow.hidden = !inputEnabled;
+        U.confirmInput.disabled = false;
+        U.confirmInput.value = "";
+        if (inputEnabled && U.confirmInputLabel) {
+            U.confirmInputLabel.textContent = input.label || "";
+        }
+        if (inputEnabled && input.placeholder) {
+            U.confirmInput.setAttribute("placeholder", input.placeholder);
+        }
+    }
     if (U.confirmOptions && U.confirmCheckbox && U.confirmCheckboxLabel && U.confirmCheckboxHint) {
         const enabled = !!(checkbox && typeof checkbox === "object");
         U.confirmOptions.hidden = !enabled;
@@ -10642,7 +10658,13 @@ function openConfirm({ title, text, confirmLabel = "确认", confirmKind = "dang
     U.confirmAccept.className = `toolbar-btn ${confirmKind}`;
     U.confirmBackdrop.hidden = false;
     U.confirmBackdrop.classList.add("is-open");
-    window.requestAnimationFrame(() => U.confirmCancel?.focus());
+    window.requestAnimationFrame(() => {
+        if (S.confirmState?.input) {
+            U.confirmInput?.focus();
+            return;
+        }
+        U.confirmCancel?.focus();
+    });
 }
 
 function requestInlineConfirm({ title, text, confirmLabel = "确认", confirmKind = "danger", returnFocus = null, checkbox = null }) {
@@ -11105,6 +11127,11 @@ function closeConfirm({ restoreFocus = true } = {}) {
     const accepted = !!S.confirmState?.accepted;
     S.confirmState = null;
     if (U.confirmOptions) U.confirmOptions.hidden = true;
+    if (U.confirmInputRow) U.confirmInputRow.hidden = true;
+    if (U.confirmInput) {
+        U.confirmInput.value = "";
+        U.confirmInput.disabled = false;
+    }
     if (U.confirmCheckbox) {
         U.confirmCheckbox.checked = false;
         U.confirmCheckbox.disabled = false;
@@ -11129,7 +11156,7 @@ async function acceptConfirm() {
     if (U.confirmCheckbox) U.confirmCheckbox.disabled = true;
     try {
         S.confirmState.accepted = true;
-        await S.confirmState.onConfirm({ checked: !!U.confirmCheckbox?.checked });
+        await S.confirmState.onConfirm({ checked: !!U.confirmCheckbox?.checked, value: String(U.confirmInput?.value || "") });
         closeConfirm();
     } catch (error) {
         if (S.confirmState) S.confirmState.accepted = false;
@@ -11430,7 +11457,7 @@ function applyConfigBundleImportResult(item) {
     const versionNote = source && local && source !== local ? `包来自 ${source}，本机 ${local}。` : "";
     showToast({
         title: "配置包已导入",
-        text: `${versionNote}已还原 ${item?.entry_count || 0} 个文件，解锁口令改成包口令；重启后 worker 才用新配置。`,
+        text: `${versionNote}已还原 ${item?.entry_count || 0} 个文件，${item?.password_kept ? "解锁口令保持不变" : "解锁口令改成包口令"}；重启后 worker 才用新配置。`,
         kind: "success",
     });
     window.setTimeout(() => window.location.reload(), 1500);
@@ -11458,20 +11485,34 @@ async function submitConfigBundleImport() {
         title: "确认导入配置包？",
         text: hasRunning
             ? `检测到${summary}。导入会整体替换配置面，需要先暂停它们。`
-            : "导入会整体替换当前配置面，并把解锁口令改为包口令。",
+            : "导入会整体替换当前配置面；输入当前项目解锁口令，导入后仍用它解锁。",
         confirmLabel: "导入配置包",
         confirmKind: "danger",
+        // 本机口令是这台机器自己的秘密，包不带着它走：先验一遍证明来的人知道，
+        // 再把包里的新主密钥重裹到这把口令下——导入因此不再改项目口令。
+        input: {
+            label: "当前项目解锁口令",
+            placeholder: "导入后继续用它解锁",
+            required: true,
+        },
         checkbox: hasRunning ? {
             checked: false,
             label: "暂停正在进行的所有对话和任务",
             hint: summary,
         } : null,
         returnFocus: U.projectSettings,
-        onConfirm: async ({ checked }) => {
+        onConfirm: async ({ checked, value }) => {
             if (hasRunning && !checked) {
                 throw new Error("请先勾选“暂停正在进行的所有对话和任务”。");
             }
-            const item = await ApiClient.importConfigBundle(file, password, { confirmRunningWork: !!checked });
+            const currentPassword = String(value || "").trim();
+            if (!currentPassword) {
+                throw new Error("请输入当前项目解锁口令。");
+            }
+            const item = await ApiClient.importConfigBundle(file, password, {
+                confirmRunningWork: !!checked,
+                currentPassword,
+            });
             applyConfigBundleImportResult(item);
         },
     });

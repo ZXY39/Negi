@@ -466,6 +466,38 @@ class BootstrapSecurityService:
                 return self.status()
             raise ValueError("invalid secret key envelope")
 
+    def has_installed_envelope(self) -> bool:
+        with self._lock:
+            return self._has_configured_secret_key()
+
+    def unwrap_with_password(self, password: str) -> str:
+        """口令解得开本机信封就返回它裹着的主密钥，解不开返回空串。
+
+        只读：不激活、不落盘、也不触发 legacy 多 realm 迁移——调用方要的是一个
+        「这个人知道本机解锁口令吗」的判据，不是顺便把项目解锁一遍。
+        """
+        clean = str(password or "")
+        if not clean:
+            return ""
+        with self._lock:
+            payload = self._read_master_payload()
+            if payload is None:
+                return ""
+            if self._is_single_envelope(payload):
+                try:
+                    return self._unwrap_single_master_key(envelope=payload, password=clean)
+                except Exception:
+                    return ""
+            if self._is_multi_realm_payload(payload):
+                for realm in list(payload.get("realms") or []):
+                    if not isinstance(realm, dict):
+                        continue
+                    try:
+                        return self._unwrap_legacy_realm_master_key(realm=realm, password=clean)
+                    except Exception:
+                        continue
+            return ""
+
     def activate_with_master_key(self, *, master_key: str) -> dict[str, Any]:
         clean_key = str(master_key or "").strip()
         if not clean_key:

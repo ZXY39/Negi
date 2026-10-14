@@ -17,6 +17,7 @@ from main.governance.store import GovernanceStore
 
 BUNDLE_PASSWORD = "bundle-pass-1234"
 OWNER_PASSWORD = "owner-password"
+TARGET_PASSWORD = "target-owner-password"
 
 
 def _write_workspace(workspace: Path) -> Path:
@@ -189,6 +190,102 @@ def test_custom_lane_accepts_short_passwords_but_never_an_empty_one(tmp_path: Pa
 
     with pytest.raises(ValueError, match="password is required"):
         config_bundle.export_bundle(workspace, password="", use_project_password=False)
+
+
+def test_import_keeps_the_targets_own_unlock_password(tmp_path: Path) -> None:
+    source = _write_workspace(tmp_path / "source")
+    _unlock(source)
+    archive = _export_custom(source)
+
+    target = _write_workspace(tmp_path / "target")
+    # 目标机自己那份 config.json 要能和包里的区分开，否则"导入落盘了"这条断言是空的。
+    (target / ".g3ku" / "config.json").write_text(
+        json.dumps({"web": {"port": 19001}, "resources": {"statePath": ".g3ku/resources.state.json"}}),
+        encoding="utf-8",
+    )
+    get_bootstrap_security_service(target).setup_initial_realm(password=TARGET_PASSWORD)
+
+    restored = config_bundle.import_bundle(
+        target,
+        archive_path=archive,
+        password=BUNDLE_PASSWORD,
+        current_password=TARGET_PASSWORD,
+    )
+
+    assert restored["password_kept"] is True
+    assert json.loads((target / ".g3ku" / "config.json").read_text(encoding="utf-8"))["web"]["port"] == 18790
+    service = get_bootstrap_security_service(target)
+    assert service.current_overlay()["config.qqBot.appSecret"] == "super-secret-app"
+    # 口令位没动：本机口令仍解得开新信封，包口令解不开。
+    service.lock()
+    service.unlock(password=TARGET_PASSWORD)
+    assert service.is_unlocked()
+    service.lock()
+    with pytest.raises(Exception):
+        service.unlock(password=BUNDLE_PASSWORD)
+
+
+def test_import_requires_the_current_password_when_one_is_installed(tmp_path: Path) -> None:
+    source = _write_workspace(tmp_path / "source")
+    _unlock(source)
+    archive = _export_custom(source)
+
+    target = _write_workspace(tmp_path / "target")
+    service = get_bootstrap_security_service(target)
+    service.setup_initial_realm(password=TARGET_PASSWORD)
+    envelope_before = (target / ".g3ku" / "llm-config" / "master.key").read_text(encoding="utf-8")
+    config_before = (target / ".g3ku" / "config.json").read_text(encoding="utf-8")
+
+    with pytest.raises(ValueError, match="bundle_current_password_required"):
+        config_bundle.import_bundle(target, archive_path=archive, password=BUNDLE_PASSWORD)
+
+    # 没输入就不碰任何文件：整包替换不能靠一次失败的口令尝试起步。
+    assert (target / ".g3ku" / "llm-config" / "master.key").read_text(encoding="utf-8") == envelope_before
+    assert (target / ".g3ku" / "config.json").read_text(encoding="utf-8") == config_before
+    service.lock()
+    service.unlock(password=TARGET_PASSWORD)
+
+
+def test_wrong_current_password_aborts_before_touching_files(tmp_path: Path) -> None:
+    source = _write_workspace(tmp_path / "source")
+    _unlock(source)
+    archive = _export_custom(source)
+
+    target = _write_workspace(tmp_path / "target")
+    service = get_bootstrap_security_service(target)
+    service.setup_initial_realm(password=TARGET_PASSWORD)
+    config_before = (target / ".g3ku" / "config.json").read_text(encoding="utf-8")
+    backups_before = list((target / ".g3ku" / "config-bundle-imports").glob("*")) if (
+        target / ".g3ku" / "config-bundle-imports"
+    ).exists() else []
+
+    with pytest.raises(ValueError, match="bundle_current_password_invalid"):
+        config_bundle.import_bundle(
+            target,
+            archive_path=archive,
+            password=BUNDLE_PASSWORD,
+            current_password="wrong-target-password",
+        )
+
+    assert (target / ".g3ku" / "config.json").read_text(encoding="utf-8") == config_before
+    assert list((target / ".g3ku" / "config-bundle-imports").glob("*")) == backups_before
+    service.lock()
+    service.unlock(password=TARGET_PASSWORD)
+
+
+def test_a_target_without_any_password_still_adopts_the_bundle_password(tmp_path: Path) -> None:
+    source = _write_workspace(tmp_path / "source")
+    _unlock(source)
+    archive = _export_custom(source)
+
+    target = _fresh_target(tmp_path)
+    restored = config_bundle.import_bundle(target, archive_path=archive, password=BUNDLE_PASSWORD)
+
+    assert restored["password_kept"] is False
+    service = get_bootstrap_security_service(target)
+    service.lock()
+    service.unlock(password=BUNDLE_PASSWORD)
+    assert service.is_unlocked()
 
 
 def test_custom_lane_target_unlocks_with_bundle_password_only(tmp_path: Path) -> None:
@@ -403,15 +500,41 @@ def test_import_route_survives_a_device_that_never_finished_onboarding(
     with archive.open("rb") as handle:
         applied = _client().post(
             "/api/bootstrap/config-bundle/import",
-            data={"password": OWNER_PASSWORD},
+            data={"password": OWNER_PASSWORD, "current_password": OWNER_PASSWORD},
             files={"file": ("bundle.g3kucb", handle, "application/octet-stream")},
         )
 
     assert applied.status_code == 200, applied.text
     item = applied.json()["item"]
     assert item["refresh"]["saved"] is True
+    assert item["password_kept"] is True
     assert (target / ".g3ku" / "config.json").exists()
     assert get_bootstrap_security_service(target).current_overlay()["config.qqBot.appSecret"] == "super-secret-app"
+
+
+def test_import_route_asks_for_the_local_password_before_touching_anything(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """本机已有解锁口令却不输入时，返回可读的 400 代码，且配置面一个字节都没动。"""
+    source = _write_workspace(tmp_path / "source")
+    _unlock(source)
+    archive = Path(config_bundle.export_bundle(source)["path"])
+
+    target = tmp_path / "target"
+    (target / ".g3ku").mkdir(parents=True)
+    get_bootstrap_security_service(target).setup_initial_realm(password=TARGET_PASSWORD)
+    monkeypatch.chdir(target)
+
+    with archive.open("rb") as handle:
+        refused = _client().post(
+            "/api/bootstrap/config-bundle/import",
+            data={"password": OWNER_PASSWORD},
+            files={"file": ("bundle.g3kucb", handle, "application/octet-stream")},
+        )
+
+    assert refused.status_code == 400
+    assert refused.json()["detail"] == "bundle_current_password_required"
+    assert not (target / ".g3ku" / "config.json").exists()
 
 
 def test_import_route_reports_a_source_version_mismatch_field(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
