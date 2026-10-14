@@ -104,5 +104,11 @@ def test_memory_note_resolves_the_token_the_resident_block_shows(tmp_path: Path)
         assert manager.load_note("note_ports") == "端口正文\n"
         with pytest.raises(FileNotFoundError):
             manager.load_note("n00000")
+
+        # 读侧回实名给管理面：预览拿句柄进来，编辑要按实名提交
+        assert manager.resolve_note_ref(handle) == "note_ports"
+        assert manager.resolve_note_ref("note_ports") == "note_ports"
+        assert manager.resolve_note_ref("n00000") == "n00000"
+        assert manager.resolve_note_ref("") == ""
     finally:
         manager.close()

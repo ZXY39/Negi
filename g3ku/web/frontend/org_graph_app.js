@@ -15361,16 +15361,16 @@ function ensureMemoryNotePreviewUi() {
             void openMemoryNoteBrowser();
             return;
         }
+        // 这一层是浏览道：分类 note 的写侧只有归并 agent，note 更新端点对 memory/index/
+        // 回 404，所以这里的开关一律不给编辑——留着就是点了必失败的假门。
+        const readOnly = { editable: false, origin: "index" };
         const crumb = e.target.closest("[data-memory-note-trail-ref]");
         if (crumb) {
             const crumbRef = String(crumb.dataset.memoryNoteTrailRef || "").trim();
             if (!crumbRef) return;
             const trail = Array.isArray(preview.trail) ? preview.trail : [];
             const cut = trail.findIndex((entry) => String(entry?.ref || "").trim() === crumbRef);
-            void openMemoryNotePreview(crumbRef, {
-                trail: cut > 0 ? trail.slice(0, cut) : [],
-                origin: "index",
-            });
+            void openMemoryNotePreview(crumbRef, { ...readOnly, trail: cut > 0 ? trail.slice(0, cut) : [] });
             return;
         }
         const noteTrigger = e.target.closest("[data-memory-note-ref]");
@@ -15381,7 +15381,7 @@ function ensureMemoryNotePreviewUi() {
         if (preview.mode === "note" && preview.ref && preview.ref !== noteRef) {
             trail.push({ ref: preview.ref });
         }
-        void openMemoryNotePreview(noteRef, { trail, origin: "index" });
+        void openMemoryNotePreview(noteRef, { ...readOnly, trail });
     });
 }
 
@@ -15479,7 +15479,7 @@ function renderMemoryNoteTrailHtml(preview) {
         if (crumb.ref) {
             return `<button type="button" class="memory-note-trail-crumb" data-memory-note-trail-ref="${esc(crumb.ref)}">${esc(crumb.label)}</button>`;
         }
-        return `<button type="button" class="memory-note-trail-crumb" data-memory-note-index-back>${esc(crumb.label)}</button>`;
+        return `<button type="button" class="memory-note-trail-crumb" data-memory-note-index-back aria-label="返回归并 note 列表">${esc(crumb.label)}</button>`;
     }).join(`<span class="memory-note-trail-sep">/</span>`);
 }
 

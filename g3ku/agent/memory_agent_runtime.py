@@ -2426,6 +2426,21 @@ class MemoryManager:
             return None
         return MemoryBatch(op=head.op, items=items)
 
+    def _note_names(self) -> set[str]:
+        return {path.stem for directory in (self.notes_dir, self.index_dir) for path in directory.glob("*.md")}
+
+    def resolve_note_ref(self, ref: str) -> str:
+        """Map the handle the resident block shows back to the note file it stands for.
+
+        The admin read lane needs the real name rather than the token: the note update
+        endpoint only accepts names, so a preview opened by handle has to remember what
+        it actually resolved to.
+        """
+        normalized = str(ref or "").strip()
+        if not normalized:
+            return ""
+        return resolve_note_token(normalized, self._note_names())
+
     def load_note(self, ref: str) -> str:
         """Read one note for the CEO's `memory_note` tool: ordinary notes and category
         notes both resolve, so a retired memory stays reachable. The resident block shows
@@ -2433,11 +2448,7 @@ class MemoryManager:
         normalized = str(ref or "").strip()
         if not normalized:
             raise FileNotFoundError("memory note ref is required")
-        name = resolve_note_token(
-            normalized,
-            {path.stem for directory in (self.notes_dir, self.index_dir) for path in directory.glob("*.md")},
-        )
-        file_name = note_file_name(name)
+        file_name = note_file_name(resolve_note_token(normalized, self._note_names()))
         for directory in (self.notes_dir, self.index_dir):
             path = directory / file_name
             if path.exists():

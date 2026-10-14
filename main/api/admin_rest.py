@@ -2415,8 +2415,13 @@ async def get_memory_note(ref: str):
                 'message': 'note ref must match note_[a-z0-9_]+, or a handle shown in the memory block',
             },
         )
+    # 句柄先进来就要换成实名：编辑走的是只认实名的写端点，预览若把句柄原样回给前端，
+    # 用户点开句柄再保存就会撞 400。
+    resolver = getattr(manager, 'resolve_note_ref', None)
+    read_ref = resolver(normalized_ref) if callable(resolver) else normalized_ref
+    read_ref = str(read_ref or '').strip() or normalized_ref
     try:
-        body = reader(normalized_ref)
+        body = reader(read_ref)
         if isawaitable(body):
             body = await body
     except FileNotFoundError as exc:
@@ -2447,7 +2452,7 @@ async def get_memory_note(ref: str):
     return {
         'ok': True,
         'item': {
-            'ref': normalized_ref,
+            'ref': read_ref,
             'body': str(body or ''),
         },
     }
