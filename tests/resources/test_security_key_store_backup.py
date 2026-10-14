@@ -145,3 +145,34 @@ def test_legacy_migration_refuses_to_delete_without_a_backup_copy(tmp_path: Path
 
     assert (tmp_path / ".g3ku" / "llm-config" / "master.key").exists()
     assert module.snapshot_key_store(tmp_path, reason="still-kept") is not None
+
+
+def test_zero_length_master_key_reads_as_lost_and_blocks_pruning(tmp_path: Path, monkeypatch) -> None:
+    """One ENOSPC leaves a 0-byte envelope: that is damage, not an intact store.
+
+    Without the size check the damaged state both passes as present and keeps consuming
+    generations, so twelve restarts in that state would prune away the only usable copies.
+    """
+    module = _backup_mod()
+    master_key = _seed_store(tmp_path)
+    module.snapshot_key_store(tmp_path, reason="boot")
+    monkeypatch.setattr(module, "KEEP_GENERATIONS", 1)
+    master_key.write_text("", encoding="utf-8")
+    module.snapshot_key_store(tmp_path, reason="forced-again", force=True)
+
+    material = module.configured_key_material(tmp_path)
+    assert ".g3ku/llm-config/master.key" in material["empty"]
+    assert module.audit_key_store_continuity(tmp_path, reason="boot")["state"] == "lost"
+    assert module.prune_backups(tmp_path) == 0
+    assert len(module.list_backups(tmp_path)) >= 2, "no generation is redundant while the live key is unusable"
+
+
+def test_snapshot_refuses_a_store_of_only_empty_files(tmp_path: Path) -> None:
+    module = _backup_mod()
+    (tmp_path / ".g3ku" / "llm-config" / "records").mkdir(parents=True)
+    (tmp_path / ".g3ku" / "llm-config" / "master.key").write_text("", encoding="utf-8")
+    (tmp_path / ".g3ku" / "llm-config" / "records" / "cfg1.json").write_text("", encoding="utf-8")
+
+    assert module.store_is_worth_keeping(tmp_path) is False
+    assert module.snapshot_key_store(tmp_path, reason="boot") is None
+    assert module.audit_key_store_continuity(tmp_path, reason="boot")["state"] == "lost"

@@ -38,6 +38,8 @@ def build_security_app(console) -> typer.Typer:
         console.print(f"workspace: {workspace}")
         console.print(f"state: {finding.get('state')}")
         console.print(f"present: {', '.join(material['present']) or '-'}")
+        if material["empty"]:
+            console.print(f"[red]zero-length (damaged): {', '.join(material['empty'])}[/red]")
         console.print(f"missing: {', '.join(material['missing']) or '-'}")
         generations = list_backups(workspace)
         console.print(f"backups: {len(generations)}")
