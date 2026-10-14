@@ -605,3 +605,60 @@ def test_memory_doctor_reads_ownership_from_the_store(monkeypatch, tmp_path: Pat
     assert "note_proxy_ports" not in joined.replace("missing note refs: none", "")
     after = {path.name: (path.stat().st_size, path.stat().st_mtime_ns) for path in sorted(memory_dir.rglob("*")) if path.is_file()}
     assert after == before
+
+
+def test_memory_doctor_keeps_the_category_axis_off_the_note_checks(monkeypatch, tmp_path: Path) -> None:
+    """分类名住在 memory/index/：算成缺 note 文件就每轮误报，它自己的名字是 broken_category_links。"""
+    memory_cli = _memory_cli_module()
+    runtime = _memory_agent_runtime_module()
+    _mount_real_memory_manager(monkeypatch, tmp_path)
+    memory_dir = tmp_path / "memory"
+    (memory_dir / "notes").mkdir(parents=True, exist_ok=True)
+    (memory_dir / "index").mkdir(parents=True, exist_ok=True)
+
+    writer = runtime.MemoryManager(tmp_path, _memory_cfg())
+    try:
+        owned = writer._memory_repo.create_memory(
+            memory_body="端口细节写在笔记里",
+            minimal_memory="端口->笔记",
+            source="self",
+            from_user=False,
+            now_iso="2026-04-17T09:00:00+08:00",
+            note_ref="note_ports",
+        )
+        retired = writer._memory_repo.create_memory(
+            memory_body="异步任务派发要先立验收",
+            minimal_memory="任务->验收",
+            source="self",
+            from_user=False,
+            now_iso="2026-04-17T09:00:01+08:00",
+        )
+        assert owned and retired
+        (memory_dir / "notes" / "note_ports.md").write_text("端口笔记正文" + chr(10), encoding="utf-8")
+        category_file = memory_dir / "index" / "note_tasks.md"
+        category_file.write_text("异步任务:派发、验收" + chr(10), encoding="utf-8")
+        writer._memory_repo.mark_consolidated(
+            [str(retired["memory_id"])],
+            category_ref="note_tasks",
+            now_iso="2026-04-17T09:00:02+08:00",
+        )
+    finally:
+        writer.close()
+
+    def _run_doctor() -> tuple[int, str]:
+        console = _ConsoleStub()
+        result = CliRunner().invoke(memory_cli.build_memory_app(console), ["doctor"])
+        return result.exit_code, chr(10).join(console.messages).lower()
+
+    exit_code, joined = _run_doctor()
+    assert exit_code == 0, joined
+    assert "missing note refs: none" in joined
+    assert "orphan notes: none" in joined
+    assert "note_tasks" not in joined
+
+    # 分类文件消失报的是断链，而不是缺一份 note 文件
+    category_file.unlink()
+    exit_code, joined = _run_doctor()
+    assert exit_code == 1, joined
+    assert "missing note refs: none" in joined
+    assert "retired memories pointing at missing category notes: note_tasks" in joined

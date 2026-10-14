@@ -1159,11 +1159,12 @@ class _MemorySqliteRepository:
         return touched
 
     def referenced_note_refs(self) -> list[str]:
-        """Every note name the store says is in use, including retired rows.
+        """Every note name a column still mentions: ownership plus category pointers.
 
-        Retired (`consolidated_into`) rows keep their `note_ref` on purpose: a note the
-        consolidation lane merely points at is still owned, and reading ownership from
-        the rendered document would sweep it the moment the row stops rendering.
+        This is the deletion guard, so it is deliberately wider than ownership - a file no
+        row owns that some row still names as its category survives until an operator says
+        otherwise. The missing/orphan report reads `owned_note_refs` instead, because a
+        category name lives under `memory/index/` and is never a missing note file.
         """
         conn = self._connect()
         try:
@@ -2233,7 +2234,7 @@ class MemoryManager:
             document_valid = False
             document_error = str(exc or "invalid memory document").strip()
 
-        note_refs = self._referenced_note_refs()
+        note_refs = self._owned_note_refs()
         note_files = self._note_file_refs()
         missing_note_refs = sorted(ref for ref in note_refs if ref not in note_files)
         orphan_notes = sorted(ref for ref in note_files if ref not in note_refs)
@@ -3907,18 +3908,32 @@ class MemoryManager:
         return result
 
     def _referenced_note_refs(self) -> list[str]:
-        """Note names the store owns, from the columns and nothing else.
+        """Note names any column still mentions - the set the orphan sweep must never delete.
 
-        The projection shows derived handles and a compressed row renders only its minimal
-        line, so reading ownership out of rendered text would both miss live notes and
-        hand back tokens that are not file names. Inspection paths read the same columns:
-        a store-less manager would call every note an orphan and every retired class
-        intact, since both axes are columns and nothing else.
+        Ownership alone would be narrower: a legacy name that exists in both trees is
+        still named by `consolidated_into`, and deleting the file under `memory/notes/`
+        over that pointer is unrecoverable.
         """
         repo = getattr(self, "_memory_repo", None)
         if repo is None:
             return []
         return repo.referenced_note_refs()
+
+    def _owned_note_refs(self) -> list[str]:
+        """Ordinary note names the store owns (`note_ref`), retired rows included.
+
+        Ownership is a column and nothing else: the projection shows derived handles and a
+        compressed row renders only its minimal line, so reading it out of rendered text
+        would both miss live notes and hand back tokens that are not file names. The
+        category axis stays out of this list on purpose - those refs live under
+        `memory/index/`, and a missing one is `broken_category_links`, never a missing note
+        file. Inspection paths read the same columns: a store-less manager would call every
+        owned note an orphan.
+        """
+        repo = getattr(self, "_memory_repo", None)
+        if repo is None:
+            return []
+        return repo.owned_note_refs()
 
     def _note_write_path(self, ref: str) -> Path:
         """Where a whole-file note write lands.
