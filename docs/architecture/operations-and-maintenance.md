@@ -119,7 +119,7 @@
 
 目录分两个根：
 
-- **安装根**：进程 cwd（`negi web` 启动时固定为代码检出目录）。承载代码与 `skills/`、`tools/`、`externaltools/`，配置和密钥材料——`.g3ku/config.json`、`.g3ku/llm-config/`（主密钥信封与 `auto-unlock.key`）、`.g3ku/secret-realms/`、`resources.state.json`、`resource-locks/`、`start.lock`、`internal-callback.json`——以及按 `config.workspace_path`（`agents.defaults.workspace`，默认 `.`）或 `Path.cwd()` 解析的其余状态：`memory/`、`sessions/`、`temp/ceo/`、`.g3ku/cron/`、`.g3ku/errors/`、`.g3ku/audit.jsonl`、`.g3ku/memory-requests/`、`.g3ku/cache/`、`.g3ku/tmp/`、`.g3ku/logs/`、`.g3ku/external-sessions/`、`.g3ku/external-uploads/`、`.g3ku/external-outbox/`。换数据根不带动这些。
+- **安装根**：进程 cwd（`negi web` 启动时固定为代码检出目录）。承载代码与 `skills/`、`tools/`、`externaltools/`，配置和密钥材料——`.g3ku/config.json`、`.g3ku/llm-config/`（主密钥信封与 `auto-unlock.key`）、`.g3ku/secret-realms/`、`resources.state.json`、`resource-locks/`、`start.lock`、`internal-callback.json`——以及按 `config.workspace_path`（`agents.defaults.workspace`，默认 `.`）或 `Path.cwd()` 解析的其余状态：`memory/`、`sessions/`、`temp/ceo/`、`.g3ku/cron/`、`.g3ku/errors/`、`.g3ku/audit.jsonl`、`.g3ku/memory-requests/`、`.g3ku/cache/`、`.g3ku/tmp/`、`.g3ku/logs/`、`.g3ku/external-sessions/`、`.g3ku/external-uploads/`、`.g3ku/external-outbox/`。换数据根不带动这些。密钥材料的滚动副本在 `.g3ku/llm-config-backups/`（按 UTC 时间戳分代，保留最近 12 代），凭据动作的留证流水在 `.g3ku/security-events.jsonl`——两者都不进 git，也不随数据根迁移。
 - **数据根**：只收体积数据，判据是解析入口——经 `g3ku/deployment/data_root.py` 的 `data_root()` / `data_g3ku_path()` / `data_work_path()` / `resolve_data_path()` 落盘的那几类：`.g3ku/main-runtime/`（任务库、artifacts、deliverables、governance 库、`managed-worker.log`）、其余 `.g3ku/web-ceo-*` sidecar、`.g3ku/stt/`、`temp/tasks/`。新增挂载点不走这四个函数之一就会静默留在安装根。
 
 两半都写成 `.g3ku/<相对路径>` 的形状，但根不同，因此**自定义过数据目录的安装在盘上有两个 `.g3ku`**：`<安装根>/.g3ku/` 与 `<数据根>/.g3ku/`。数据根那一侧同样带 `.g3ku` 这一层（`<数据根>/.g3ku/main-runtime/`，不是 `<数据根>/main-runtime/`）；`temp/` 则直接挂数据根。未配置时数据根等于安装根，两个 `.g3ku` 合一，也就是历史布局本身，换锚因此不产生迁移、也不改变相对布局。
@@ -325,6 +325,15 @@ Provider retry troubleshooting note:
 - 优雅路径（重启脚本先调 `/api/bootstrap/exit`、或 Ctrl+C 让信号处理器收尾）：所有运行中的任务与会话被暂停并写 `shutdown_pause_registry` 台账，启动时自动恢复、不出现“异常停止”提示。退出前还有一次 ≤10 秒的排水等待（轮询 `pause_task` 命令直到 worker 真正停完 actor），停完才关闭托管 worker。若此时任务仍停在 paused：先分清它是不是「自动恢复跑过、又被上一个进程遗留的暂停命令打回」——这种任务台账已经为空，形态上和用户暂停完全一样，取证口径见 `main-task-runtime.md`「Graceful Shutdown Pause and Startup Auto-Resume」；worker 是否拿到 lease 完成 startup 也要查。
 - 异常路径（进程被强杀、worker 单进程被单独杀死）：任务恢复清洗照常执行，`metadata.recovery_notice` 写「本任务遇到异常停止…」，UI 以可关闭 toast 呈现（`web-and-admin.md`「Task Recovery Notice UI Contract」）。这是预期行为，点击关闭即可。托管 worker 被单杀后 Web 会由看门狗自动重启、无需人工拉起（见本节「托管 worker 看门狗」），但该 worker 当时正在跑的任务仍按异常中断走恢复清洗。
 - 会话侧的自动恢复走 heartbeat `shutdown_resume` 内部轮（`heartbeat-system.md`「Shutdown Resume Wake」）：会话尾气泡会再现一条由系统恢复产生的回复；若没有出现，查启动日志里 `resume_shutdown_paused_sessions` / `auto-resumed` 与 heartbeat 事件投递日志。
+
+### 界面停在初始化向导（看着像新项目）但 `memory/` 与 `sessions/` 都有东西
+
+先分清"没数据"与"打不开数据"：`GET /api/bootstrap/status` 的 `mode` 是 `setup` 而 `key_store.state` 是 `lost` 时，丢的是凭据而不是项目——没有主密钥就没人能解锁记录，运行时不启动，会话列表因此空着，形态上和从没配过一模一样。
+
+- 时间点与缺失清单：`.g3ku/security-events.jsonl` 里 `key_store_missing_material` 那行带 `missing` 与当时的备份代数；它上一行的 `key_store_backed_up` 说明最后一次完好是什么时候。
+- 回滚：`negi security status` 看代际，`negi security restore --from <代际>` 先看 dry run 的文件表，确认后加 `--apply`。现场仍有 `master.key` 时 restore 直接拒绝，要人工把现件改名再执行。
+- 没有可用代际（本次故障发生在留证上线之前）时走配置包导入：`negi security` 不补密钥，只有 `.g3ku/config-bundles/*.g3kucb` 能带回信封与 records，且需要该包的口令；导入后 worker 需重启才换链。
+- 别把这条读成"数据被删了"：`sessions/`、`memory/MEMORY.md`、`main-runtime/` 都在，恢复凭据即可见。
 
 ### 托管 worker 看门狗 / 任务大厅持续显示「worker stale」
 

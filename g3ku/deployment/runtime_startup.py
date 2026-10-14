@@ -5,6 +5,8 @@ import shutil
 from pathlib import Path
 from typing import Any
 
+from loguru import logger
+
 from g3ku.security import BOOTSTRAP_MASTER_KEY_ENV, get_bootstrap_security_service
 from g3ku.utils.helpers import ensure_dir, sync_workspace_templates
 
@@ -72,6 +74,18 @@ def auto_unlock_from_env(
     security_service: Any | None = None,
 ) -> str:
     security = security_service or get_bootstrap_security_service(workspace)
+    # One audit per process: keep a fresh copy of the key material, or say out loud (and in
+    # .g3ku/security-events.jsonl) that material which used to exist is gone. Without this a
+    # lost credential store looked identical to a never-configured project.
+    try:
+        finding = security.audit_key_store()
+        if str((finding or {}).get("state") or "") == "lost":
+            logger.error(
+                "key store material missing; newest backup: {}",
+                str((finding or {}).get("newest_backup") or "(no backup)"),
+            )
+    except Exception as exc:  # never let the audit block a boot
+        logger.warning(f"key store audit failed: {exc}")
     if security.is_unlocked():
         return "already_unlocked"
 

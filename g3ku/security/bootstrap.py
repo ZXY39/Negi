@@ -13,6 +13,13 @@ from typing import Any
 
 from cryptography.fernet import Fernet, InvalidToken
 
+from g3ku.security.key_store_backup import (
+    audit_key_store_continuity,
+    list_backups,
+    record_event,
+    snapshot_key_store,
+)
+
 
 
 MASTER_KEY_VERSION = 2
@@ -280,12 +287,18 @@ class SecretOverlayStore:
     def delete(self) -> None:
         path = _single_overlay_path(self.workspace)
         if path.exists():
-            path.unlink()
+            # Renamed, not removed: an overlay nobody can decrypt is evidence about which key
+            # was expected, and deleting it turns a lockout into a loss.
+            archived = path.with_name(f"{path.name}.removed-{datetime.now(UTC).strftime('%Y%m%d-%H%M%S')}")
+            path.replace(archived)
+            record_event(self.workspace, "key_store_overlay_archived", to=archived.name)
 
     def delete_all(self) -> None:
         root = _overlay_root(self.workspace)
-        if root.exists():
-            shutil.rmtree(root)
+        if not root.exists():
+            return
+        snapshot_key_store(self.workspace, reason="pre_overlay_delete_all")
+        shutil.rmtree(root)
 
     def load_legacy_realm(self, *, realm_id: str, master_key: str) -> dict[str, Any]:
         path = _legacy_realm_overlay_path(self.workspace, realm_id)
@@ -307,6 +320,7 @@ class BootstrapSecurityService:
         self._active_master_key: str | None = None
         self._overlay_cache: dict[str, Any] = {}
         self._overlay_unverified: bool = False
+        self._key_store_finding: dict[str, Any] | None = None
 
     def status(self) -> dict[str, Any]:
         with self._lock:
@@ -316,12 +330,33 @@ class BootstrapSecurityService:
                 mode = "locked"
             else:
                 mode = "setup"
+            finding = self._key_store_finding or {}
+            key_store = {
+                "state": str(finding.get("state") or ("ok" if mode != "setup" else "unconfigured")),
+                "backups": len(list_backups(self.workspace)),
+            }
+            if str(key_store["state"]) == "lost":
+                key_store["missing"] = list(finding.get("missing") or [])
+                key_store["newest_backup"] = str(finding.get("newest_backup") or "")
             return {
                 "mode": mode,
                 "unlock_scope": UNLOCK_SCOPE,
                 "legacy_detected": self.legacy_detected(),
                 "auto_unlock": _auto_unlock_key_path(self.workspace).exists(),
+                "key_store": key_store,
             }
+
+    def audit_key_store(self, *, reason: str = "boot") -> dict[str, Any]:
+        """Back the key material up, or record and remember that it disappeared.
+
+        Called once per process by the startup path. It never restores: replacing key
+        material is an operator decision, and a boot-time write to the credential store is
+        exactly the kind of surprise that turns a partial loss into a total one.
+        """
+        with self._lock:
+            finding = audit_key_store_continuity(self.workspace, reason=reason)
+            self._key_store_finding = dict(finding)
+            return dict(finding)
 
     def is_unlocked(self) -> bool:
         with self._lock:
@@ -407,6 +442,8 @@ class BootstrapSecurityService:
             envelope = self._create_single_envelope(password=password)
             self._write_master_payload(envelope)
             self._activate(master_key=self._unwrap_single_master_key(envelope=envelope, password=password))
+            record_event(self.workspace, "key_store_initialized")
+            snapshot_key_store(self.workspace, reason="initialized")
             return self.status()
 
     def unlock(self, *, password: str) -> dict[str, Any]:
@@ -460,6 +497,7 @@ class BootstrapSecurityService:
             if verified != master_key:
                 raise ValueError("master key mismatch")
             self._write_master_payload(self._create_single_envelope(password=clean_new, master_key=master_key))
+            snapshot_key_store(self.workspace, reason="password_changed")
             return self.status()
 
     def install_master_key(self, *, master_key: str, password: str) -> dict[str, Any]:
@@ -527,6 +565,7 @@ class BootstrapSecurityService:
                 pass
             # 本进程树内后续拉起的 worker 直接继承这把钥匙；跨重启由上面的文件接手。
             os.environ[BOOTSTRAP_MASTER_KEY_ENV] = master_key
+            snapshot_key_store(self.workspace, reason="auto_unlock_enabled")
             return self.status()
 
     def legacy_detected(self) -> bool:
@@ -737,6 +776,12 @@ class BootstrapSecurityService:
             shutil.copy2(config_path, backup_root / "config.json")
         if llm_root.exists():
             shutil.copytree(llm_root, backup_root / "llm-config", dirs_exist_ok=True)
+        # Everything below deletes credential files. Require proof the copy landed first:
+        # this migration is the one path that legitimately removes master.key, and a silently
+        # failed copytree turned it into an unrecoverable wipe.
+        if llm_root.exists() and not (backup_root / "llm-config").exists():
+            raise ValueError("legacy migration aborted: backup copy of the key store is missing")
+        snapshot_key_store(self.workspace, reason="pre_legacy_migration")
 
         sanitized_config = strip_config_secret_entries(raw_config)
         _json_dump(config_path, sanitized_config)
