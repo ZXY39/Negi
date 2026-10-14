@@ -861,10 +861,15 @@ class _ConsolidationToolSession:
                 if not ref.startswith("note_"):
                     errors[f"note_writes[{index}]"] = "category note ref must start with note_"
                     continue
-                # A category note may not reuse the name of an ordinary note: the handle is
-                # derived from the name, and readers look in `memory/notes/` first, so the
-                # 归并区 line would open the wrong file.
-                if (self.notes_dir / note_file_name(ref)).exists():
+                # A *new* category note may not take the name of an ordinary note: readers
+                # look in `memory/notes/` first, so the 归并区 line would open the wrong
+                # file. An existing category note keeps its name even when a legacy
+                # ordinary note shares it - refusing that would force the agent to fork a
+                # duplicate class beside it (observed: two 归并区 rows with identical text).
+                if (
+                    not (self.index_dir / note_file_name(ref)).exists()
+                    and (self.notes_dir / note_file_name(ref)).exists()
+                ):
                     errors[f"note_writes[{index}]"] = (
                         f"category note ref {ref} is already an ordinary note under memory/notes/; "
                         "pick another name"

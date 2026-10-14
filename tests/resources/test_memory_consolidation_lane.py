@@ -657,6 +657,21 @@ def test_a_category_note_may_not_reuse_an_ordinary_note_name(tmp_path: Path) -> 
         assert result["ok"] is False
         assert "already an ordinary note" in json.dumps(result["errors"], ensure_ascii=False)
         assert not (manager.index_dir / "note_ports.md").exists()
+
+        # 但"这个名字本来就是我要改的分类 note"必须放行：拦它等于逼 agent 另开一个同类，
+        # 归并区就会出现两行一模一样的导航文字（压力测试实测过）
+        _write_category(manager, "note_ports", "端口分类\n")
+        rewrite = module._ConsolidationToolSession(
+            notes_dir=manager.notes_dir,
+            index_dir=manager.index_dir,
+        )
+        second = rewrite.apply_batch(
+            note_writes=[{"note_ref": "note_ports", "edits": [{"old_text": "端口分类", "new_text": "端口分类与重启"}]}],
+            retirements=[{"memory_id": memory_id, "note_ref": "note_ports"}],
+        )
+        assert second["ok"] is True, second
+        staged = [w for w in (rewrite.applied_batch or {}).get("note_writes") or [] if w.get("note_ref") == "note_ports"]
+        assert staged and staged[0]["edits"], rewrite.applied_batch
     finally:
         manager.close()
 
