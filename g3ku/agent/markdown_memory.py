@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import hashlib
 import re
 
 _ENTRY_RE = re.compile(
@@ -10,9 +11,25 @@ _ENTRY_RE = re.compile(
     r"(?P<body>.*?)(?=\n---\n|\Z)",
     re.S,
 )
-_NOTE_RE = re.compile(r"\bref:(?P<ref>[a-z0-9_]+)\b")
 _VALID_ID_RE = re.compile(r"^[A-Za-z0-9]{6}$")
 _HEADER_RE = re.compile(r"^\d{4}/\d{1,2}/\d{1,2}-(?:self|user)$")
+NOTE_LINE_PREFIX = "note:"
+_NOTE_LINE_RE = re.compile(r"^note:(?P<handle>[A-Za-z0-9_-]{1,80})$")
+
+
+def note_handle(note_ref: str) -> str:
+    """The one token a reader has to pass back to open a note.
+
+    Derived from the file name, so it is stable across renders (the memory block sits at
+    message index 1; a changing token would break the prompt cache on every commit) and it
+    carries no topic of its own - the description beside it is the only navigation text.
+    Ownership stays in the `note_ref` column: nothing may parse this line to decide whether
+    a note is still in use.
+    """
+    normalized = str(note_ref or "").strip()
+    if not normalized:
+        return ""
+    return f"n{hashlib.sha1(normalized.encode('utf-8')).hexdigest()[:5]}"
 
 
 @dataclass(slots=True)
@@ -36,7 +53,9 @@ def format_memory_entry(entry: MemoryEntry) -> str:
     summary = str(entry.summary or "").strip()
     if not summary or "\n" in summary or "\r" in summary:
         raise ValueError("memory summary must be one non-empty line")
-    return f"---\nid:{memory_id}\n{header}：\n{summary}\n"
+    note_ref = str(entry.note_ref or "").strip()
+    note_line = f"{NOTE_LINE_PREFIX}{note_ref}\n" if note_ref else ""
+    return f"---\nid:{memory_id}\n{header}：\n{summary}\n{note_line}"
 
 
 def parse_memory_document(text: str) -> list[MemoryEntry]:
@@ -55,14 +74,23 @@ def parse_memory_document(text: str) -> list[MemoryEntry]:
         if not _HEADER_RE.fullmatch(header):
             continue
         date_text, source = header.rsplit("-", 1)
-        note_match = _NOTE_RE.search(body)
+        summary = body
+        note_ref = ""
+        body_lines = body.splitlines()
+        if body_lines:
+            last_line = body_lines[-1].strip()
+            if last_line.startswith(NOTE_LINE_PREFIX):
+                handle_match = _NOTE_LINE_RE.fullmatch(last_line)
+                if handle_match:
+                    note_ref = str(handle_match.group("handle") or "").strip()
+                    summary = "\n".join(body_lines[:-1]).strip()
         entries.append(
             MemoryEntry(
                 memory_id=memory_id,
                 date_text=date_text,
                 source=source,
-                summary=body,
-                note_ref=(note_match.group("ref") if note_match else ""),
+                summary=summary,
+                note_ref=note_ref,
             )
         )
     return entries
@@ -110,7 +138,11 @@ CONSOLIDATION_REMINDER = (
 
 
 def render_consolidation_block(rows: list[tuple[str, str]]) -> str:
-    """Render the consolidation block from (scope_line, note_ref) pairs, in given order."""
+    """Render the consolidation block from (scope_line, note_ref) pairs, in given order.
+
+    The pair carries the real file name; the line shows its handle, so the description is
+    the only topical text a reader sees before deciding to open the note.
+    """
     items = [
         (str(scope_line or "").strip(), str(note_ref or "").strip())
         for scope_line, note_ref in list(rows or [])
@@ -119,7 +151,7 @@ def render_consolidation_block(rows: list[tuple[str, str]]) -> str:
     if not items:
         return ""
     lines = [CONSOLIDATION_HEADING, CONSOLIDATION_REMINDER]
-    lines.extend(f"- {scope_line} (note: {note_ref})" for scope_line, note_ref in items)
+    lines.extend(f"- {scope_line} (note: {note_handle(note_ref)})" for scope_line, note_ref in items)
     return "\n".join(lines) + "\n"
 
 

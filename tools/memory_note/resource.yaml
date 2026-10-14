@@ -1,7 +1,7 @@
 schema_version: 1
 kind: tool
 name: memory_note
-description: Load a detailed memory note by short ref.
+description: Load a detailed memory note by the token shown next to it in the memory block.
 tool_result_delivery_contract: runtime_managed
 source:
   type: ''
@@ -26,7 +26,7 @@ parameters:
   properties:
     ref:
       type: string
-      description: Short note ref such as note_a1b2.
+      description: "The token shown next to the note in the memory block (after `note:`); a real note file name also resolves."
   required:
     - ref
 recovery_policy:

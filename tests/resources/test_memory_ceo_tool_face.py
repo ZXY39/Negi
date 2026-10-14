@@ -4,6 +4,8 @@ import importlib
 import json
 from pathlib import Path
 
+import pytest
+
 from g3ku.config.schema import MemoryToolsConfig
 
 
@@ -70,5 +72,37 @@ async def test_a_forget_request_enters_through_the_same_write_lane_as_a_remember
         assert [row.op for row in rows] == ["write", "write"]
         assert [row.trigger_source for row in rows] == ["memory_update_tool"] * 2
         assert rows[1].payload_text == "忘掉我喜欢简洁回答这条偏好"
+    finally:
+        manager.close()
+
+
+def test_memory_note_resolves_the_token_the_resident_block_shows(tmp_path: Path) -> None:
+    """The handle is the only token the model ever sees, so it must resolve on its own."""
+    module = importlib.import_module("g3ku.agent.memory_agent_runtime")
+    markdown_memory = importlib.import_module("g3ku.agent.markdown_memory")
+    manager = module.MemoryManager(tmp_path, MemoryToolsConfig())
+    try:
+        note_path = manager.notes_dir / "note_ports.md"
+        note_path.write_text("端口正文\n", encoding="utf-8")
+        manager._memory_repo.create_memory(
+            memory_body="改完端口要重启服务",
+            minimal_memory="端口->重启",
+            source="self",
+            from_user=False,
+            now_iso="2026-04-25T00:00:00+08:00",
+            note_ref="note_ports",
+        )
+        manager._rebuild_memory_snapshot_from_sqlite(now_iso="2026-04-25T00:00:01+08:00")
+
+        snapshot = manager.snapshot_text()
+        handle = markdown_memory.note_handle("note_ports")
+        assert f"note:{handle}" in snapshot
+        assert "note_ports" not in snapshot
+
+        assert manager.load_note(handle) == "端口正文\n"
+        # The real file name still resolves: the writing lanes name notes by it.
+        assert manager.load_note("note_ports") == "端口正文\n"
+        with pytest.raises(FileNotFoundError):
+            manager.load_note("n00000")
     finally:
         manager.close()

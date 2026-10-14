@@ -20,7 +20,7 @@ class MemoryNoteTool(Tool):
 
     @property
     def description(self) -> str:
-        return "Load a detailed memory note from memory/notes by short ref."
+        return "Load a detailed memory note by the token shown next to it in the memory block."
 
     @property
     def parameters(self) -> dict[str, Any]:
@@ -29,7 +29,7 @@ class MemoryNoteTool(Tool):
             "properties": {
                 "ref": {
                     "type": "string",
-                    "description": "Short note ref such as note_a1b2.",
+                    "description": "The token shown next to the note in the memory block; a real note file name also resolves.",
                 }
             },
             "required": ["ref"],

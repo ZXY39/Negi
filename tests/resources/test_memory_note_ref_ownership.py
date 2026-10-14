@@ -116,7 +116,14 @@ def test_sweep_still_removes_truly_unreferenced_notes(tmp_path: Path) -> None:
     manager = module.MemoryManager(tmp_path, _cfg())
     try:
         manager._memory_repo.apply_mutation(
-            adds=[{"content": "Rule with note", "minimal_memory": "rule->min ref:note_kept", "decision_source": "user"}],
+            adds=[
+                {
+                    "content": "Rule with note",
+                    "minimal_memory": "rule->min",
+                    "decision_source": "user",
+                    "note_ref": "note_kept",
+                }
+            ],
             rewrites=None,
             deletes=None,
             inspired_memory_ids=None,
@@ -145,8 +152,18 @@ def test_reaping_is_recorded_with_the_reason_ownership_went_away(tmp_path: Path)
     try:
         manager._memory_repo.apply_mutation(
             adds=[
-                {"content": "Deleting rule ref:note_doomed", "minimal_memory": "del->min", "decision_source": "user"},
-                {"content": "Rewritten rule ref:note_old", "minimal_memory": "rw->min", "decision_source": "self"},
+                {
+                    "content": "Deleting rule",
+                    "minimal_memory": "del->min",
+                    "decision_source": "user",
+                    "note_ref": "note_doomed",
+                },
+                {
+                    "content": "Rewritten rule",
+                    "minimal_memory": "rw->min",
+                    "decision_source": "self",
+                    "note_ref": "note_old",
+                },
             ],
             rewrites=None,
             deletes=None,
@@ -169,12 +186,13 @@ def test_reaping_is_recorded_with_the_reason_ownership_went_away(tmp_path: Path)
             adds=[],
             rewrites=[
                 {
-                    "id": by_body["Rewritten rule ref:note_old"],
-                    "content": "Rewritten rule now pointing elsewhere ref:note_new",
+                    "id": by_body["Rewritten rule"],
+                    "content": "Rewritten rule now pointing elsewhere",
                     "minimal_memory": "rw->min",
+                    "note_ref": "note_new",
                 }
             ],
-            deletes=[by_body["Deleting rule ref:note_doomed"]],
+            deletes=[by_body["Deleting rule"]],
             note_upserts={},
             inspired_memory_ids=[],
             noop_reason="",
@@ -215,16 +233,31 @@ def test_boot_leaves_a_pre_migration_legacy_mirror_alone(tmp_path: Path) -> None
         first.close()
 
 
-def test_column_set_matches_text_scan_on_live_mirror(tmp_path: Path) -> None:
-    """Equivalence guard: while the projection still carries the marker, the store and
-    the rendered text must agree - otherwise one of the two is quietly losing refs."""
+def test_projection_carries_no_in_text_marker_and_columns_own_notes(tmp_path: Path) -> None:
+    """The mirror renders handles, never a parseable relationship.
+
+    This is the guard the plan asked for before deleting the text scan: after one commit
+    every owned note shows up as a handle line and no ` ref:` / `见noteid:` token survives
+    in the projection, so a reader that wanted to re-derive ownership from text would find
+    nothing - the column set is the whole truth.
+    """
     module = _load_module()
     manager = module.MemoryManager(tmp_path, _cfg())
     try:
         manager._memory_repo.apply_mutation(
             adds=[
-                {"content": "Alpha rule ref:note_a", "minimal_memory": "alpha->min", "decision_source": "user"},
-                {"content": "Beta rule", "minimal_memory": "beta->min 见noteid:note_b", "decision_source": "self"},
+                {
+                    "content": "Alpha rule",
+                    "minimal_memory": "alpha->min",
+                    "decision_source": "user",
+                    "note_ref": "note_a",
+                },
+                {
+                    "content": "Beta rule",
+                    "minimal_memory": "beta->min",
+                    "decision_source": "self",
+                    "note_ref": "note_b",
+                },
             ],
             rewrites=None,
             deletes=None,
@@ -233,8 +266,12 @@ def test_column_set_matches_text_scan_on_live_mirror(tmp_path: Path) -> None:
         )
         manager._rebuild_memory_snapshot_from_sqlite(now_iso="2026-04-17T10:00:01+08:00")
 
+        snapshot = manager.snapshot_text()
         from_store = set(manager._referenced_note_refs())
-        from_text = set(manager._collect_note_refs(manager.snapshot_text()))
-        assert from_store == from_text == {"note_a", "note_b"}
+        assert from_store == {"note_a", "note_b"}
+        assert module._NOTE_REF_RE.search(snapshot) is None
+        assert "note_a" not in snapshot and "note_b" not in snapshot
+        rendered = {line.split("note:", 1)[1] for line in snapshot.splitlines() if line.startswith("note:")}
+        assert rendered == {module.note_handle(ref) for ref in from_store}
     finally:
         manager.close()

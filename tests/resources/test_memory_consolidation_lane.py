@@ -25,13 +25,22 @@ def _manager(tmp_path: Path, **cfg_kwargs):
     return _module().MemoryManager(tmp_path, _cfg(**cfg_kwargs))
 
 
-def _add(manager, *, body: str, minimal: str, source: str = "self", from_user: bool = False) -> str:
+def _add(
+    manager,
+    *,
+    body: str,
+    minimal: str,
+    source: str = "self",
+    from_user: bool = False,
+    note_ref: str = "",
+) -> str:
     row = manager._memory_repo.create_memory(
         memory_body=body,
         minimal_memory=minimal,
         source=source,
         from_user=from_user,
         now_iso="2026-04-25T00:00:00+08:00",
+        note_ref=note_ref,
     )
     return str(row["memory_id"])
 
@@ -82,7 +91,9 @@ def test_retiring_writes_the_column_and_never_the_delete_button(tmp_path: Path) 
         entries_text, block_text = markdown_memory.split_consolidation_block(document)
         assert "反代端口改成" not in entries_text
         assert block_text.startswith(markdown_memory.CONSOLIDATION_HEADING)
-        assert "本机运行环境" in block_text and "(note: note_local_env)" in block_text
+        assert "本机运行环境" in block_text
+        assert f"(note: {markdown_memory.note_handle('note_local_env')})" in block_text
+        assert "note_local_env" not in block_text, "the resident line shows the handle, not the name"
     finally:
         manager.close()
 
@@ -173,7 +184,8 @@ def test_the_consolidation_block_is_excluded_from_both_counting_judgements(tmp_p
         markdown_memory = _markdown_memory()
         document = (tmp_path / "memory" / "MEMORY.md").read_text(encoding="utf-8")
         assert markdown_memory.CONSOLIDATION_HEADING in document
-        assert "- 大类 (note: note_big)" in document
+        assert f"- 大类 (note: {markdown_memory.note_handle('note_big')})" in document
+        assert "(note: note_big)" not in document
         assert "S" * 3000 not in document, "only the index line is resident; the body loads on demand"
         assert len(document) > 130, "the document exceeds document_max and still landed"
         assert manager._resident_memory_chars() <= 120
@@ -276,7 +288,8 @@ def test_an_ordinary_note_owned_by_a_retired_memory_survives_the_sweep(tmp_path:
         memory_id = _add(
             manager,
             body="细节写在 note 里的一条记忆",
-            minimal="细节->见正文 ref:note_deep",
+            minimal="细节->见正文",
+            note_ref="note_deep",
         )
         note_path = manager.notes_dir / "note_deep.md"
         note_path.write_text("细节正文\n", encoding="utf-8")
@@ -494,7 +507,7 @@ def test_reconcile_notes_never_invents_a_category_note(tmp_path: Path) -> None:
     The ordinary note a retired row owns still must not read as an orphan."""
     manager = _manager(tmp_path)
     try:
-        ordinary = _add(manager, body="细节在 note 里", minimal="细节->正文 ref:note_deep")
+        ordinary = _add(manager, body="细节在 note 里", minimal="细节->正文", note_ref="note_deep")
         _write_category(manager, "note_deep", "细节正文")
         category_id = _add(manager, body="分类被删掉的退场记忆", minimal="断链->分类")
         _retire(manager, [category_id], "note_missing_cat")
