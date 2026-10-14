@@ -40,3 +40,10 @@ test("ceo context load notice uses minimal tag styling instead of cloud decorati
     assert.doesNotMatch(noticeBlock, /radial-gradient\(/);
     assert.doesNotMatch(itemBlock, /radial-gradient\(/);
 });
+
+test("note loads get their own dot colour instead of a risk level", () => {
+    // 读笔记不带风险度含义：这颗点是品牌青，且必须盖住 risk-* 那三档字面色
+    const match = /\.ceo-context-load-notice-item\.is-note\s+\.ceo-context-load-notice-risk-dot\s*\{([\s\S]*?)\n\}/.exec(CSS);
+    assert.ok(match, "note dot rule not found");
+    assert.match(match[1], /background:\s*#39c5bb;/);
+});

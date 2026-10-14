@@ -79,6 +79,19 @@ def normalize_non_budget_stage_tools(extra_non_budget_tools: Iterable[str] | Non
     return names
 
 
+# 落库类工具全局白名单：免活动阶段即可调用。避免"用户口头给一条长期指令 → 模型
+# 想写记忆却先在 memory_update 上被 no active stage 拦下 → 模型不再重试而永久丢失"。
+# 定义在闸门这一侧，不在前门模块里再写一份：同一个集合
+# 既喂 `stage_gate_error_for_tool()`，也喂 CEO 提示词的 `{{stage_free_tools}}` 注入，
+# 两边分开维护迟早让模型照名单裸调一个会被闸门拦下的工具。
+FRONTDOOR_STAGELESS_MEMORY_TOOL_NAMES = frozenset({"memory_update", "memory_note"})
+
+
+def ceo_stage_free_tool_names() -> list[str]:
+    """The stage-free tool list the CEO prompt shows: derived, never transcribed."""
+
+    return sorted(normalize_stage_gate_bypass_tools(FRONTDOOR_STAGELESS_MEMORY_TOOL_NAMES))
+
 def normalize_stage_gate_bypass_tools(extra_allowed_tools: Iterable[str] | None = None) -> set[str]:
     names = {
         str(item or "").strip()

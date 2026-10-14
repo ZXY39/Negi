@@ -1506,7 +1506,13 @@ class CeoMessageBuilder:
             )
         split_prompt_builder = callable(getattr(self._prompt_builder, 'build_base_prompt', None))
         if split_prompt_builder:
-            system_prompt = self._prompt_builder.build_base_prompt()
+            # 提示词的重新拉取跟着记忆块与 tools[] 的时钟走：这两个戳没动，稳定前缀就不该
+            # 出现新的字节；会话中途改写的提示词文件因此等到下一次采纳/曝光变化才生效。
+            prompt_refresh_stamp = (
+                f"{str(getattr(session, MEMORY_SNAPSHOT_ADOPTED_AT_ATTR, '') or '').strip()}"
+                f"|{str(getattr(capability_snapshot, 'exposure_revision', '') or '').strip()}"
+            )
+            system_prompt = self._prompt_builder.build_base_prompt(cache_stamp=prompt_refresh_stamp)
         else:
             system_prompt = self._prompt_builder.build(skills=[])
         if capability_snapshot.stable_catalog_message:

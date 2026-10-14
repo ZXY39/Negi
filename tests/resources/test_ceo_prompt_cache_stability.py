@@ -1,5 +1,9 @@
 from __future__ import annotations
 
+from types import SimpleNamespace
+
+from g3ku.runtime.frontdoor._ceo_runtime_ops import CeoFrontDoorRuntimeOps
+from g3ku.runtime.frontdoor.prompt_builder import CeoPromptBuilder
 from g3ku.runtime.frontdoor.tool_contract import build_frontdoor_tool_contract
 
 
@@ -524,3 +528,47 @@ def test_frontdoor_turn_overlay_appends_ephemeral_tail_message_without_mutating_
         "role": "user",
         "content": "System note for this turn only:\nrepair only",
     }
+
+
+def test_prompt_stage_free_list_is_the_gate_own_set() -> None:
+    """提示词里那份名单必须就是闸门用的那份：分开维护就会让模型照名单裸调被拦的工具。"""
+    from main.runtime.stage_budget import (
+        FRONTDOOR_STAGELESS_MEMORY_TOOL_NAMES,
+        normalize_stage_gate_bypass_tools,
+    )
+
+    builder = CeoPromptBuilder(loop=SimpleNamespace(workspace='.'))
+    rendered = builder.build_base_prompt(cache_stamp='first|r1')
+    gate_names = sorted(
+        normalize_stage_gate_bypass_tools(
+            {
+                *CeoFrontDoorRuntimeOps._CONTROL_TOOL_NAMES,
+                *FRONTDOOR_STAGELESS_MEMORY_TOOL_NAMES,
+            }
+        )
+    )
+    line = next(item for item in rendered.splitlines() if '是运行时注入的名单' in item)
+    start = line.index('`') + 1
+    shown = sorted(name.strip() for name in line[start:line.index('`', start)].split(','))
+    assert set(shown) <= set(gate_names)
+    assert 'memory_note' in shown
+    assert 'memory_update' in shown
+    assert '唯一例外是' not in rendered
+    # 差集就是那批进不了 exposure 的名字：点名它们等于教模型发一个发不出的动作
+    assert set(gate_names) - set(shown) == {
+        'stop_tool_execution',
+        'wait_tool_execution',
+        'load_skill_context_v2',
+        'load_tool_context_v2',
+    }
+
+
+def test_base_prompt_is_re_read_only_when_the_refresh_stamp_moves() -> None:
+    """重取时机对齐记忆块与 tools[] 的戳：戳不动就不换系统字节。"""
+    builder = CeoPromptBuilder(loop=SimpleNamespace(workspace='.'))
+    first = builder.build_base_prompt(cache_stamp='t1|r1')
+    second = builder.build_base_prompt(cache_stamp='t1|r1')
+    assert second is first
+    third = builder.build_base_prompt(cache_stamp='t2|r1')
+    assert third is not first
+    assert third == first

@@ -5,6 +5,32 @@ from pathlib import Path
 from typing import Any
 
 from g3ku.runtime.project_environment import current_project_environment, format_python_env_reference
+from g3ku.runtime.tool_visibility import CEO_FIXED_BUILTIN_TOOL_NAMES
+from main.runtime.stage_budget import (
+    FINAL_RESULT_TOOL_NAME,
+    SILENT_TOOL_NAME,
+    SPAWN_CHILD_NODES_TOOL_NAME,
+    STAGE_TOOL_NAME,
+    ceo_stage_free_tool_names,
+)
+
+# 提示词只点名前门真会曝光的工具：`stop_tool_execution` / `wait_tool_execution` 没有
+# resource.yaml 族、进不了 exposure，`*_v2` 也不是注册名——把它们印进名单等于教模型去发
+# 一个发不出的动作。豁免集本身仍以闸门为唯一来源，这里只做可曝光投影。
+_CEO_ADVERTISABLE_STAGELESS_TOOL_NAMES = frozenset(CEO_FIXED_BUILTIN_TOOL_NAMES) | {
+    STAGE_TOOL_NAME,
+    FINAL_RESULT_TOOL_NAME,
+    SPAWN_CHILD_NODES_TOOL_NAME,
+    SILENT_TOOL_NAME,
+}
+
+
+def _stage_free_prompt_tool_names() -> list[str]:
+    return sorted(
+        name
+        for name in ceo_stage_free_tool_names()
+        if name in _CEO_ADVERTISABLE_STAGELESS_TOOL_NAMES
+    )
 
 
 _PROMPT_TEMPLATE_VARIABLE = re.compile(r'{{\s*([a-zA-Z_][a-zA-Z0-9_]*)\s*}}')
@@ -19,6 +45,8 @@ class CeoPromptBuilder:
     def __init__(self, *, loop) -> None:
         self._loop = loop
         self._repo_prompt_dir = Path(__file__).resolve().parents[1] / 'prompts'
+        self._base_prompt_cache = ''
+        self._base_prompt_cache_stamp = ''
 
     def build(self, *, skills: list) -> str:
         rendered = self.build_base_prompt()
@@ -27,14 +55,30 @@ class CeoPromptBuilder:
             return rendered
         return f'{rendered}\n\n{visible_skills_block}'.strip()
 
-    def build_base_prompt(self) -> str:
+    def build_base_prompt(self, *, cache_stamp: str = '') -> str:
+        """Render the stable system prompt, re-reading the file only when the stamp moves.
+
+        The stamp is (memory-block adoption time, tool-face exposure revision): the two clocks
+        that already decide when the stable prefix changes. Re-reading mid-session would rewrite
+        the system bytes while nothing behind them has to move, so a file edit waits for the next
+        adoption or exposure change - the same moment the memory block and `tools[]` refresh.
+        """
+
+        stamp = str(cache_stamp or '').strip()
+        if stamp and self._base_prompt_cache and stamp == self._base_prompt_cache_stamp:
+            return self._base_prompt_cache
         project_environment = current_project_environment(workspace_root=getattr(self._loop, 'workspace', None))
         prompt = self._read_prompt('ceo_frontdoor.md')
-        rendered = self._render_prompt(prompt, {})
+        rendered = self._render_prompt(
+            prompt,
+            {'stage_free_tools': ', '.join(_stage_free_prompt_tool_names())},
+        )
         rendered = self._sanitize_prompt(rendered)
         runtime_environment_block = self._runtime_environment_block(project_environment)
         if runtime_environment_block:
             rendered = f'{rendered}\n\n{runtime_environment_block}'.strip()
+        self._base_prompt_cache = rendered if stamp else ''
+        self._base_prompt_cache_stamp = stamp
         return rendered
 
     def build_visible_skills_block(self, *, skills: list) -> str:

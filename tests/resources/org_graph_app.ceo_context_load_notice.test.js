@@ -121,7 +121,7 @@ function loadApp() {
     vm.createContext(context);
     vm.runInContext(
         `${APP_CODE}
-        this.__testExports = { S, U, createPendingCeoTurn, maybeShowCeoContextLoadNotice, showCeoContextLoadNotice, resolveCeoContextLoadNoticeRiskLevel };`,
+        this.__testExports = { S, U, createPendingCeoTurn, maybeShowCeoContextLoadNotice, showCeoContextLoadNotice, resolveCeoContextLoadNoticeRiskLevel, isCeoContextLoaderToolName, ceoContextLoaderKind };`,
         context
     );
     context.__testExports.U.ceoContextLoadNotice = new StubHTMLElement();
@@ -209,5 +209,44 @@ test("context load notice renders the risk level of the tool record it loaded", 
     assert.equal(notice.dataset.riskLevel, "high");
     assert.ok(notice.className.split(" ").includes("risk-high"), "unexpected classes: " + notice.className);
     assert.equal(notice.children[2].className, "ceo-context-load-notice-risk-dot risk-high");
+});
+
+test("memory_note loads surface as a note notice instead of a tool row", () => {
+    const { S, createPendingCeoTurn, maybeShowCeoContextLoadNotice, U, ceoContextLoaderKind, isCeoContextLoaderToolName } = loadApp();
+    const turn = createPendingCeoTurn("user");
+    S.ceoPendingTurns = [turn];
+
+    // 行抑制走的就是这个谓词：实时道与快照道都用它把工具行摘掉
+    assert.equal(ceoContextLoaderKind("memory_note"), "note");
+    assert.equal(isCeoContextLoaderToolName("memory_note"), true);
+
+    const shown = maybeShowCeoContextLoadNotice(turn, {
+        toolName: "memory_note",
+        status: "success",
+        detailTexts: ['{"ref":"nb16a5"}'],
+    });
+
+    assert.equal(shown, true);
+    const notice = U.ceoContextLoadNotice.children[0];
+    assert.equal(notice.dataset.noticeKind, "note");
+    assert.ok(notice.className.split(" ").includes("is-note"), "unexpected classes: " + notice.className);
+    assert.equal(notice.children[0].innerHTML, '<i data-lucide="notebook-pen"></i>');
+    assert.equal(notice.children[1].textContent, "已加载 note:nb16a5");
+});
+
+test("a failed note read shows no notice and keeps its own target out of the text", () => {
+    const { S, createPendingCeoTurn, maybeShowCeoContextLoadNotice, U } = loadApp();
+    const turn = createPendingCeoTurn("user");
+    S.ceoPendingTurns = [turn];
+
+    assert.equal(
+        maybeShowCeoContextLoadNotice(turn, {
+            toolName: "memory_note",
+            status: "error",
+            detailTexts: ['{"ref":"zzzzzz"}'],
+        }),
+        false
+    );
+    assert.equal(U.ceoContextLoadNotice.children.length, 0);
 });
 

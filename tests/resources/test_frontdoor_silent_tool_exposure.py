@@ -151,7 +151,7 @@ def test_visible_turns_are_told_the_silent_tool_is_the_only_exit() -> None:
     assert 'silent_help:' not in rendered
     prompt = _CEO_FRONTDOOR_PROMPT.read_text(encoding='utf-8')
     assert '没有文本写法' in prompt
-    assert '不受阶段闸门与工具预算限制' in prompt
+    assert '不占阶段预算' in prompt  # 免阶段那半句已归注入名单，这里只留预算与出口措辞
 
 
 def test_silent_help_follows_the_callable_list() -> None:
