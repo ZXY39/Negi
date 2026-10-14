@@ -594,7 +594,9 @@ class RuntimeAgentSession:
         self._frontdoor_actual_request_history = actual_request_history
         self._frontdoor_stage_state = dict(payload.get("frontdoor_stage_state") or {})
         self._frontdoor_canonical_context = dict(payload.get("frontdoor_canonical_context") or {})
-        self._compression_state = dict(
+        # 摘要任务随进程一起没了，所以恢复回来的 `running` 一定是假的——不挡在这里，
+        # 已经把它写进连续性文件的会话每次重启都会重新钉住那条「上下文压缩中」。
+        self._compression_state = self._adopt_compression_state(
             payload.get("compression_state") or payload.get("compression") or {}
         )
         self._semantic_context_state = dict(payload.get("semantic_context_state") or {})
@@ -2323,6 +2325,26 @@ class RuntimeAgentSession:
             copy.deepcopy(getattr(self, "_frontdoor_stage_state", None) or {})
         )
         return snapshot if list(snapshot.get("stages") or []) else {}
+
+    def _compression_has_live_host(self) -> bool:
+        """`running` 只能由活的宿主持有：回合在跑，或本机手动压缩任务在跑。
+
+        被放弃的那一轮会按图状态把 running 覆盖回来，连续性快照再原样存盘——于是会话
+        早就停了，状态还说"在压"，界面上那条线永远钉着，长按重压也被它一起拒掉。
+        """
+        if bool(getattr(self._state, "is_running", False)):
+            return True
+        if str(getattr(self._state, "status", "") or "").strip().lower() == "running":
+            return True
+        manual = getattr(self, MANUAL_COMPRESSION_STATE_ATTR, None)
+        return isinstance(manual, dict) and str(manual.get("status") or "").strip().lower() == "running"
+
+    def _adopt_compression_state(self, candidate: Any) -> dict[str, Any]:
+        """唯一的写入形状：没有活宿主就不接受 `running`，其余状态原样收下。"""
+        state = dict(candidate) if isinstance(candidate, dict) else {}
+        if str(state.get("status") or "").strip().lower() == "running" and not self._compression_has_live_host():
+            return {}
+        return state
 
     def _compression_snapshot(self) -> dict[str, Any]:
         raw = getattr(self, "_compression_state", None)
@@ -4457,6 +4479,15 @@ class RuntimeAgentSession:
         self._state.paused = True
         self._state.is_running = False
         self._state.status = "paused"
+        # 暂停正好落在自动压缩途中：区分线要停在「压缩已暂停」而不是无声消失，否则会
+        # 留下一段既没有摘要也没有标记的历史。手动压缩走自己的收尾，不重复落线。
+        pausing_active_compression = (
+            manual and getattr(self, "_active_frontdoor_compression_generation", None) is not None
+        )
+        if pausing_active_compression:
+            # 必须在取暂停快照之前先收掉进行中状态：快照会连同这一行的 `compression` 一起
+            # 归档进转录，那份「还在压」是冻住的历史，之后谁也不会再来收这条线。
+            self._compression_state = {}
         paused_snapshot = (
             self._build_execution_context_snapshot(allow_manual_pause=True, status_override="paused")
             if manual
@@ -4465,11 +4496,6 @@ class RuntimeAgentSession:
         if manual:
             self._set_paused_execution_context(paused_snapshot)
         await self._emit_safe_stop_notice("pause")
-        # 暂停正好落在自动压缩途中：区分线要停在「压缩已暂停」而不是无声消失，否则会
-        # 留下一段既没有摘要也没有标记的历史。手动压缩走自己的收尾，不重复落线。
-        pausing_active_compression = (
-            manual and getattr(self, "_active_frontdoor_compression_generation", None) is not None
-        )
         self._cancel_active_frontdoor_compression_generation()
         if self._active_cancel_token is not None:
             self._active_cancel_token.cancel(reason="用户已请求暂停，正在安全停止...")

@@ -31,7 +31,7 @@ from g3ku.runtime.frontdoor.message_builder import CeoMessageBuilder
 from g3ku.runtime.frontdoor.state_models import CeoFrontdoorInterrupted, CeoPendingInterrupt
 from g3ku.runtime.frontdoor.tool_contract import split_pinned_contract_from_system_text
 from g3ku.runtime.manager import SessionRuntimeManager
-from g3ku.runtime.session_agent import RuntimeAgentSession
+from g3ku.runtime.session_agent import MANUAL_COMPRESSION_STATE_ATTR, RuntimeAgentSession
 from g3ku.session.manager import SessionManager
 from main.runtime.stage_budget import STAGE_TURN_END_SUMMARY_POINTER
 from main.storage.artifact_store import TaskArtifactStore
@@ -3199,6 +3199,64 @@ async def test_pause_during_active_auto_compression_announces_paused_rule(tmp_pa
     marker_events = [event for event in events if event.type == "context_compression_marker"]
     assert len(marker_events) == 1
     assert marker_events[0].payload == {"compression_state": "paused", "source": "auto"}
+    # 暂停归档不能把「进行中」冻进转录：那一行是历史，它说"还在压"就永远没人来收。
+    frozen = [
+        item
+        for item in list(store.get_or_create("web:shared").messages or [])
+        if isinstance(item.get("compression"), dict)
+        and str(item["compression"].get("status") or "").lower() == "running"
+    ]
+    assert frozen == []
+
+
+def _idle_session(tmp_path: Path) -> RuntimeAgentSession:
+    store = SessionManager(tmp_path)
+    return RuntimeAgentSession(
+        SimpleNamespace(model="demo", reasoning_effort=None, multi_agent_runner=None, sessions=store),
+        session_key="web:shared",
+        channel="web",
+        chat_id="shared",
+    )
+
+
+_RUNNING = {"status": "running", "text": "上下文压缩中", "source": "token_compression", "needs_recheck": False}
+
+
+def test_running_compression_state_requires_a_live_host(tmp_path: Path) -> None:
+    """`running` 只能由活的宿主持有；其余状态原样收下。"""
+    session = _idle_session(tmp_path)
+    session._state.is_running = False
+    session._state.status = "completed"
+
+    assert session._adopt_compression_state(dict(_RUNNING)) == {}
+    assert session._adopt_compression_state({"status": "ready", "text": "ok"}) == {"status": "ready", "text": "ok"}
+
+    session._state.is_running = True
+    assert session._adopt_compression_state(dict(_RUNNING))["status"] == "running"
+
+    session._state.is_running = False
+    setattr(session, MANUAL_COMPRESSION_STATE_ATTR, {"status": "running"})
+    assert session._adopt_compression_state(dict(_RUNNING))["status"] == "running"
+
+
+def test_abandoned_turn_cannot_write_running_compression_back(tmp_path: Path) -> None:
+    """实盘形状：回合早停了，图状态里还揣着那一份 running，同步回来时必须在写点挡掉。
+
+    挡不住就会一路传到 `state_snapshot`、连续性文件，界面上那条「上下文压缩中」再没人收。
+    """
+    session = _idle_session(tmp_path)
+    session._state.is_running = False
+    session._state.status = "completed"
+
+    runner = create_agent_impl.CreateAgentCeoFrontDoorRunner(loop=SimpleNamespace())
+    runner._sync_runtime_session_frontdoor_state(
+        state={"compression_state": dict(_RUNNING)},
+        session=session,
+    )
+
+    assert session._compression_state == {}
+    assert session._compression_snapshot() == {}
+    assert session.state_dict().get("compression") in (None, {})
 
 
 def test_stage_trace_round_enrichment_uses_latest_tool_event_status() -> None:

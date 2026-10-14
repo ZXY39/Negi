@@ -44,6 +44,8 @@ const CEO_COMPRESSION_POLL_MS = 1000;
 // 连续这么多次轮询失败才放弃跟踪；单次超时不算（大会话收尾会占住事件循环数秒）。
 const CEO_COMPRESSION_POLL_FAIL_LIMIT = 5;
 const CEO_COMPRESSION_DIVIDER_CLASS = "ceo-compression-divider";
+const CEO_COMPRESSION_RETRY_LABEL = "重新压缩";
+const CEO_COMPRESSION_RETRY_TITLE = "重新压缩当前上下文：会先停手，再按这颗模型的窗口压一次";
 const CEO_COMPRESSION_TEXT = {
     running: "上下文压缩中",
     completed: "会话已压缩",
@@ -4002,6 +4004,34 @@ function buildCeoCompressionDividerControl(state, interactive) {
     return "";
 }
 
+function buildCeoCompressionRetryControl() {
+    return `<button type="button" class="ceo-compression-divider-action ceo-compression-divider-retry"
+           data-ceo-compress-retry aria-label="${CEO_COMPRESSION_RETRY_LABEL}"
+           title="${CEO_COMPRESSION_RETRY_TITLE}">${CEO_COMPRESSION_RETRY_LABEL}</button>`;
+}
+
+function ceoCompressionDividerInner(state, { interactive = false, retry = false } = {}) {
+    return `<div class="ceo-compression-divider-inner"><span>${CEO_COMPRESSION_TEXT[state]}</span>${
+        retry ? buildCeoCompressionRetryControl() : buildCeoCompressionDividerControl(state, interactive)
+    }</div>`;
+}
+
+// 只有最后一条中断线带重试动作。它排在最后这件事本身就是安全条件：有回合在跑时新气泡
+// 会插在它后面，往上翻历史时它又不在视口里；更早的中断线只是历史，不该长成控件。
+function syncCeoCompressionRetryAffordances() {
+    if (!U.ceoFeed || typeof U.ceoFeed.querySelectorAll !== "function") return;
+    const rows = Array.from(U.ceoFeed.querySelectorAll(`.${CEO_COMPRESSION_DIVIDER_CLASS}`));
+    const last = rows.length ? rows[rows.length - 1] : null;
+    rows.forEach((row) => {
+        const state = String(row.dataset.ceoCompressionState || "");
+        const eligible = row === last && state === "paused";
+        const current = row.dataset.ceoCompressionRetry === "1";
+        if (eligible === current) return;
+        row.dataset.ceoCompressionRetry = eligible ? "1" : "";
+        row.innerHTML = ceoCompressionDividerInner(state, { retry: eligible });
+    });
+}
+
 function appendCeoCompressionDivider(state, options = {}) {
     const { interactive = true } = options;
     if (!U.ceoFeed || !CEO_COMPRESSION_TEXT[state]) return null;
@@ -4010,13 +4040,12 @@ function appendCeoCompressionDivider(state, options = {}) {
     el.dataset.ceoCompressionState = state;
     el.setAttribute("role", "status");
     el.setAttribute("aria-live", state === "running" ? "polite" : "off");
-    el.innerHTML = `<div class="ceo-compression-divider-inner"><span>${
-        CEO_COMPRESSION_TEXT[state]
-    }</span>${buildCeoCompressionDividerControl(state, interactive)}</div>`;
+    el.innerHTML = ceoCompressionDividerInner(state, { interactive });
     mutateCeoFeed(() => {
         ceoFeedAppendHost().appendChild(el);
         icons();
     }, { scrollMode: "preserve" });
+    syncCeoCompressionRetryAffordances();
     return el;
 }
 
@@ -4044,9 +4073,11 @@ function syncCeoCompressionDivider() {
         // 只有本来就在跟随最新时才钉底：这条线现在也由 renderCeoSnapshot 在每次整页重建后
         // 重挂，若无条件钉底会把正在往上翻历史的用户每次重建都拽回底部。
         if (S.ceoFeedFollowLatest !== false) scrollCeoFeedToBottom();
+        syncCeoCompressionRetryAffordances();
         return;
     }
     if (!running && existing) removeCeoCompressionLiveDivider();
+    syncCeoCompressionRetryAffordances();
 }
 
 function applyCeoCompressionMarker(sessionId = "", marker = null) {
@@ -18036,6 +18067,20 @@ function bind() {
             e.preventDefault();
             e.stopPropagation();
             requestCeoContextCompressionPause();
+            return;
+        }
+        const retryCompressionBtn = e.target.closest("[data-ceo-compress-retry]");
+        if (retryCompressionBtn) {
+            e.preventDefault();
+            e.stopPropagation();
+            // 与长按脑图标同一条发起路径、同一道闸门、同一句拒绝文案；这里不再加二次确认：
+            // 这条线是会话里最后一条线才存在，有回合在跑时它就不是最后一条了。
+            const blocked = ceoBrainHoldBlockedReason();
+            if (blocked) {
+                showToast({ title: "暂不能压缩上下文", text: blocked, kind: "warn" });
+                return;
+            }
+            void beginCeoContextCompression(activeSessionId());
             return;
         }
         const editBtn = e.target.closest("[data-ceo-edit-resend]");

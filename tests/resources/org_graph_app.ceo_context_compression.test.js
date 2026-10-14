@@ -78,13 +78,21 @@ class StubHTMLElement extends StubElement {
         this.parentElement = null;
     }
     querySelector(selector) {
-        // 只按第一个类名做包含匹配，够用于 ".ceo-compression-divider.is-running" 这类选择器。
-        const needle = String(selector || "").replace(/^\./, "").split(".")[0];
-        if (!needle) return null;
-        return this.children.find((child) => String(child.className || "").includes(needle)) || null;
+        const matched = this.querySelectorAll(selector);
+        return matched.length ? matched[0] : null;
     }
-    querySelectorAll() {
-        return [];
+    querySelectorAll(selector) {
+        // 按选择器里出现的每一个类名都做包含匹配：只取第一个类名的话，
+        // ".ceo-compression-divider.is-running" 会先命中同列表里的 paused 行，
+        // 于是"摘掉进行中那条"实际摘掉的是别的东西。
+        const needles = String(selector || "").split(",").map((part) =>
+            part.trim().replace(/^\./, "").split(".").filter(Boolean)
+        ).filter((list) => list.length);
+        if (!needles.length) return [];
+        return this.children.filter((child) => {
+            const cls = ` ${String(child.className || "")} `;
+            return needles.some((list) => list.every((needle) => cls.includes(` ${needle} `)));
+        });
     }
     get lastElementChild() {
         return this.children[this.children.length - 1] || null;
@@ -202,6 +210,7 @@ function loadApp() {
             beginCeoBrainHold, finishCeoBrainHold, ceoBrainHoldBlockedReason,
             activeCeoManualCompressionRunning, activeCeoSessionCompressionState,
             appendCeoCompressionDivider, syncCeoCompressionDivider,
+            syncCeoCompressionRetryAffordances, removeCeoCompressionLiveDivider,
             normalizeCeoSnapshotMessage, activeCeoSessionHasHistory,
             setCeoSessionSnapshotCache, getCeoSessionSnapshotCache,
             applyCeoCompressionMarker, normalizeCeoSessionSnapshotCacheEntry,
@@ -465,11 +474,18 @@ test("终态区分线不带暂停按钮，完成态只有文案", () => {
     assert.doesNotMatch(completed.innerHTML, /data-lucide/);
     assert.doesNotMatch(completed.innerHTML, /ceo-compression-divider-spinner/);
 
+    // 中断线是"这件事断了"，天然带一个再来一次的动作：最新那条给按钮，
+    // 但它带的绝不是"暂停"那颗（data-ceo-compress-pause 是停手，方向相反）。
     const paused = api.appendCeoCompressionDivider("paused", { interactive: false });
     assert.match(paused.innerHTML, /压缩已暂停/);
-    assert.match(paused.innerHTML, /ceo-compression-divider-spinner is-bars-only/);
-    assert.doesNotMatch(paused.innerHTML, /data-lucide/);
+    assert.match(paused.innerHTML, /data-ceo-compress-retry/);
     assert.doesNotMatch(paused.innerHTML, /data-ceo-compress-pause/);
+    assert.doesNotMatch(paused.innerHTML, /data-lucide/);
+
+    const later = api.appendCeoCompressionDivider("paused", { interactive: false });
+    assert.match(paused.innerHTML, /ceo-compression-divider-spinner is-bars-only/);
+    assert.doesNotMatch(paused.innerHTML, /data-ceo-compress-retry/);
+    assert.match(later.innerHTML, /data-ceo-compress-retry/);
 });
 
 test("切走再切回同一会话，实时区分线与轮询都要恢复", () => {
@@ -820,4 +836,57 @@ test("终态标记事件当场画线，并先摘掉进行中那条", () => {
         dividers(api.U.ceoFeed).map((item) => item.dataset.ceoCompressionState),
         ["completed"]
     );
+});
+
+const hasRetry = (row) => String(row.innerHTML || "").includes("data-ceo-compress-retry");
+
+test("只有最后一条中断线带重试按钮，更早的与完成线都不带", () => {
+    const api = loadApp();
+    api.appendCeoCompressionDivider("paused", { interactive: false });
+    api.appendCeoCompressionDivider("completed", { interactive: false });
+    api.appendCeoCompressionDivider("paused", { interactive: false });
+
+    const rows = dividers(api.U.ceoFeed);
+    assert.deepEqual(rows.map((item) => item.dataset.ceoCompressionState), ["paused", "completed", "paused"]);
+    assert.equal(hasRetry(rows[0]), false, "上一次中断只是历史，不该长成控件");
+    assert.equal(hasRetry(rows[1]), false, "完成态没有待办动作");
+    assert.equal(hasRetry(rows[2]), true);
+    assert.match(rows[2].innerHTML, /重新压缩/);
+    // 静态符号版与按钮版的标签都得落在中轴上：CSS 里左侧补偿按按钮宽度另给一条规则。
+    assert.match(CSS_CODE, /\.ceo-compression-divider-retry\s*\{[^}]*width: 4\.6em/);
+    assert.match(
+        CSS_CODE,
+        /\.ceo-compression-divider\.is-paused:has\(\.ceo-compression-divider-retry\)[^}]*margin-right: calc\(4\.6em \+ 10px\)/
+    );
+});
+
+test("进行中线插到后面时收回重试，摘掉后又还给最后一条中断线", () => {
+    const api = loadApp();
+    api.appendCeoCompressionDivider("paused", { interactive: false });
+    let rows = dividers(api.U.ceoFeed);
+    assert.equal(hasRetry(rows[0]), true);
+
+    api.appendCeoCompressionDivider("running");
+    rows = dividers(api.U.ceoFeed);
+    assert.equal(hasRetry(rows[0]), false, "新压缩已经接管这一行，旧中断线不能再可点");
+
+    assert.equal(api.removeCeoCompressionLiveDivider(), true);
+    api.syncCeoCompressionRetryAffordances();
+    rows = dividers(api.U.ceoFeed);
+    assert.equal(hasRetry(rows[0]), true);
+});
+
+test("重试点击走长按同一条发起路径，且不带二次确认", () => {
+    loadApp();
+    const branch = APP_CODE.slice(
+        APP_CODE.indexOf('const retryCompressionBtn = e.target.closest("[data-ceo-compress-retry]");'),
+        APP_CODE.indexOf('const editBtn = e.target.closest("[data-ceo-edit-resend]");')
+    );
+    assert.ok(branch.length > 0 && branch.length < 1200, `重试分支没找到或吞掉了后续处理：${branch.length}`);
+    // 闸门与文案复用长按那一份（同一句拒绝），动作复用同一个发起函数。
+    assert.match(branch, /ceoBrainHoldBlockedReason\(\)/);
+    assert.match(branch, /beginCeoContextCompression\(activeSessionId\(\)\)/);
+    // 二次确认是给"打断正在跑的回合"准备的；这条线只有在没有回合在跑时才可点，
+    // 因为任何新回合的气泡都会排在它后面。
+    assert.equal(branch.includes("openConfirm"), false);
 });

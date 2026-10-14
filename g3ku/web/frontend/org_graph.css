@@ -5689,6 +5689,20 @@ textarea {
     background: color-mix(in srgb, var(--ceo-context-compress-color) 16%, transparent);
 }
 
+/* 重试那颗是文字不是图标：推进宽度按 em 固定下来，下面那条左侧补偿间隙才能跟它等宽，
+   标签仍然落在中轴上（`line-height: 0` 是按钮版图标的继承值，文字必须盖回来）。 */
+.ceo-compression-divider-retry {
+    width: 4.6em;
+    justify-content: center;
+    line-height: 1.2;
+    letter-spacing: 0.02em;
+    color: var(--ceo-context-compress-color);
+}
+
+.ceo-compression-divider.is-paused:has(.ceo-compression-divider-retry) .ceo-compression-divider-inner::before {
+    margin-right: calc(4.6em + 10px);
+}
+
 /* 图标尺寸按 em 跟随上面的字号，与文字同大；外圈只画一段旋转弧（不画整环底轨）、
    中间两条竖杠静止，读起来就是「正在跑，点这里可以停」。 */
 .ceo-compression-divider-spinner {
