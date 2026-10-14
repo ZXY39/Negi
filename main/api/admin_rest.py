@@ -42,6 +42,10 @@ from main.storage.sqlite_store import SQLiteTaskStore
 router = APIRouter()
 
 MEMORY_NOTE_REF_RE = re.compile(r"^note_[a-z0-9_]+$")
+# The memory block shows a derived handle instead of the file name, so the read surface
+# accepts both. Writing a note still requires the real name: a handle is not a target an
+# operator chose, it is a token a reader was handed.
+MEMORY_NOTE_HANDLE_RE = re.compile(r"^n[0-9a-f]{5}$")
 GOVERNANCE_MODE_META_KEY = 'ceo_frontdoor_regulatory_mode_enabled'
 GOVERNANCE_MODE_UPDATED_AT_META_KEY = 'ceo_frontdoor_regulatory_mode_enabled:updated_at'
 
@@ -1295,6 +1299,11 @@ async def create_model(payload: dict = Body(...)):
                 if 'image_multimodal_enabled' in payload
                 else payload.get('imageMultimodalEnabled', False)
             ),
+            image_tail_only=(
+                payload.get('image_tail_only')
+                if 'image_tail_only' in payload
+                else payload.get('imageTailOnly', False)
+            ),
             request_timeout_seconds=(
                 payload.get('request_timeout_seconds')
                 if 'request_timeout_seconds' in payload
@@ -1385,6 +1394,7 @@ async def update_model(model_key: str, payload: dict = Body(...)):
             name=_pick('name'),
             context_window_tokens=_pick('context_window_tokens', 'contextWindowTokens'),
             image_multimodal_enabled=_pick('image_multimodal_enabled', 'imageMultimodalEnabled'),
+            image_tail_only=_pick('image_tail_only', 'imageTailOnly'),
             quota_pool_key=_pick('quota_pool_key', 'quotaPoolKey'),
             request_timeout_seconds=_pick('request_timeout_seconds', 'requestTimeoutSeconds'),
         )
@@ -2370,12 +2380,12 @@ async def get_memory_note(ref: str):
                 'message': 'note ref is required',
             },
         )
-    if not MEMORY_NOTE_REF_RE.fullmatch(normalized_ref):
+    if not MEMORY_NOTE_REF_RE.fullmatch(normalized_ref) and not MEMORY_NOTE_HANDLE_RE.fullmatch(normalized_ref):
         raise HTTPException(
             status_code=400,
             detail={
                 'code': 'memory_note_invalid_ref',
-                'message': 'note ref must match note_[a-z0-9_]+',
+                'message': 'note ref must match note_[a-z0-9_]+, or a handle shown in the memory block',
             },
         )
     try:

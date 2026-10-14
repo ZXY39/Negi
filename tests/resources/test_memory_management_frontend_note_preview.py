@@ -54,8 +54,14 @@ def test_memory_page_renders_note_ref_trigger() -> None:
     assert "setInnerHtmlPreservingScroll(U.memoryDetailPrimary, renderMemoryTextWithNoteRefs(primaryText));" in app_js
     assert "setInnerHtmlPreservingScroll(U.memoryDetailSecondary, reconstructedHint + changeListHtml);" in app_js
     assert "const wantsSecondaryFirst = preview.kind === \"processed\" || preview.kind === \"failed\";" in app_js
-    # 查看记忆表格的记忆内容列同样把 note 引用渲染为可点击按钮
-    assert '<td class="memory-browser-cell-body">${renderMemoryTextWithNoteRefs(body)}</td>' in app_js
+    # 查看记忆表格：正文里历史遗留的 ` ref:` 仍渲染成按钮，而当前行的归属来自
+    # `note_ref` / `consolidated_into` 两列（常驻投影只给句柄，扫文本会漏掉关系）。
+    assert (
+        '<td class="memory-browser-cell-body">'
+        '${renderMemoryTextWithNoteRefs(body)}${renderMemoryNoteOwnershipChip(ownershipNoteRef)}</td>'
+    ) in app_js
+    assert "function renderMemoryNoteOwnershipChip(noteRef)" in app_js
+    assert 'const ownershipNoteRef = String(item?.note_ref || "").trim() || String(item?.consolidated_into || "").trim();' in app_js
     assert 'U.memoryBrowserTbody?.addEventListener("click"' in app_js
     assert "function memoryProcessedChangePreview(item)" in app_js
     assert 'U.memoryQueueList?.addEventListener("click"' in app_js
@@ -195,3 +201,33 @@ def test_memory_page_note_preview_admin_api_and_client_contract(monkeypatch: pyt
     assert invalid.status_code == 400
     assert invalid.json()["detail"]["code"] == "memory_note_invalid_ref"
     assert stub_manager.calls == ["note_policy", "note_missing"]
+
+
+def test_memory_note_read_endpoint_admits_the_resident_handle(monkeypatch: pytest.MonkeyPatch) -> None:
+    """常驻行现在只给句柄，预览端点必须收句柄；写端点仍只认实名。
+
+    名字 → 句柄的解析在 `load_note` 里，这一层只负责形状闸门：句柄进得去，穿越串照旧 400。
+    """
+    class _StubMemoryManager:
+        def __init__(self) -> None:
+            self.calls: list[str] = []
+
+        def load_note(self, ref: str) -> str:
+            self.calls.append(ref)
+            return "# note_ports 端口正文"
+
+    stub_manager = _StubMemoryManager()
+    monkeypatch.setattr(admin_rest, "_runtime_memory_manager", lambda: stub_manager)
+    app = FastAPI()
+    app.include_router(admin_rest.router, prefix="/api")
+    client = TestClient(app)
+
+    response = client.get("/api/memory/notes/n106dd")
+    assert response.status_code == 200
+    assert response.json()["item"]["ref"] == "n106dd"
+    assert stub_manager.calls == ["n106dd"]
+
+    invalid = client.get("/api/memory/notes/n106dd/../x")
+    assert invalid.status_code == 400
+    assert invalid.json()["detail"]["code"] == "memory_note_invalid_ref"
+    assert stub_manager.calls == ["n106dd"]

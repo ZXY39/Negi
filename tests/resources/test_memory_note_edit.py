@@ -33,8 +33,9 @@ def _seed_note(manager, tmp_path: Path, ref: str, body: str) -> Path:
         adds=[
             {
                 "content": f"Rule that owns {ref}",
-                "minimal_memory": f"own->note ref:{ref}",
+                "minimal_memory": "own->note",
                 "decision_source": "user",
+                "note_ref": ref,
             }
         ],
         rewrites=None,
@@ -281,7 +282,8 @@ def test_upsert_lands_first_and_edits_apply_on_top_of_it(tmp_path: Path) -> None
             adds=[
                 {
                     "content": "Deploy checklist detail",
-                    "minimal_memory": "deploy->checklist ref:note_fresh",
+                    "minimal_memory": "deploy->checklist",
+                    "note_ref": "note_fresh",
                     "decision_source": "user",
                 }
             ],

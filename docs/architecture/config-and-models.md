@@ -367,12 +367,14 @@ Routes live at `/api/bootstrap/config-bundle/{export,download,import}` in `main/
 
 `models.catalog[]` carries a second binding-owned chat field: `image_multimodal_enabled` (`imageMultimodalEnabled` in saved JSON / admin payload aliases). It is read as a **conservative chain intersection**: a model-reference chain counts as image-capable only when every resolvable member is image-capable, because whether pixels enter the request body must hold for whichever member this send may end up on. `image_multimodal_chain_decision(app_config, refs)` in `g3ku/config/model_manager.py` is where that judgment is written once; the node loop (`ReActToolLoop._image_multimodal_enabled_for_model_refs`) and the frontdoor (`CeoFrontDoorRuntimeOps._ceo_image_multimodal_enabled_for_model_refs`) keep thin boolean wrappers over it, and `model_config` calls it directly to echo which chains a flag write just affected (second return value = display titles of the blocking members, falling back to the binding key). Unresolvable (deleted/disabled) members are skipped rather than vetoing the chain, and admission never filters group members by image capability.
 
-- Default value is `false`.
-- Existing saved models that do not have the field must be treated as `false` at load time; there is no backfill migration that rewrites old configs just to add the default.
-- The flag belongs to the managed model binding layer, not to the provider config record. It must persist in `.g3ku/config.json` under `models.catalog[]`, and it must not be written into `.g3ku/llm-config/records/*.json`.
-- `/api/models` and `/api/llm/bindings` both expose and update this field because they are two views over the same binding-owned metadata.
+A third field on the same binding answers a **different axis** — position, not capability: `image_tail_only` (`imageTailOnly`). It says this upstream reads image blocks only from the **last message** of the request and silently ignores the same block sitting earlier in history: no 400, no billed image tokens, no error of any kind, so nothing at runtime can learn it from a failure. That asymmetry is why the flag is operator-declared and never inferred, and why the objective read is the preflight counter `image_blocks_at_tail` (详见 `web-and-admin.md`「Image Upload Gating」) rather than the model's own account of what it saw. Capability and position are combined in one place — `image_target_shape(app_config, ref)` returns `(收不收图, 展示名, 是否只读末条)` for the binding this send lands on, and `image_multimodal_target_decision` is a thin two-value wrapper over it so existing consumers keep their shape.
 
-Runtime gating of image uploads by this flag: 详见 `web-and-admin.md`「Image Upload Gating」.
+- Default value is `false` for both fields.
+- Existing saved models that do not have the field must be treated as `false` at load time; there is no backfill migration that rewrites old configs just to add the default.
+- Both flags belong to the managed model binding layer, not to the provider config record. They must persist in `.g3ku/config.json` under `models.catalog[]`, and they must not be written into `.g3ku/llm-config/records/*.json`.
+- `/api/models` and `/api/llm/bindings` both expose and update these fields because they are two views over the same binding-owned metadata; `model_config` writes them with the same effect, and the model page renders a checkbox for each in the binding header row.
+
+Runtime gating of image uploads by these flags: 详见 `web-and-admin.md`「Image Upload Gating」.
 
 ## Reasoning Context Binding Flag
 

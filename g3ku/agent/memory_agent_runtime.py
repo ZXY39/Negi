@@ -25,6 +25,7 @@ from g3ku.agent.markdown_memory import (
     MemoryEntry,
     format_memory_entry,
     note_file_name,
+    note_handle,
     parse_memory_document,
     render_consolidation_block,
     split_consolidation_block,
@@ -40,15 +41,42 @@ from main.runtime.chat_backend import build_actual_request_diagnostics, resolve_
 from main.runtime.send_token_preflight import estimate_runtime_provider_request_preview_tokens
 from main.prompts import load_prompt
 
+# 只服务**入站文本**的两处：legacy import 的候选校验与存量迁移的剥离。新写路径的关系落在
+# `note_ref` 列，渲染出来的是从名字派生的句柄，任何判据都不再扫正文里的 `ref:` / `见noteid:`。
 _NOTE_REF_RE = re.compile(r"(?:\bref:|见noteid:)(?P<ref>[a-z0-9_]+)\b")
+
+
+def _strip_note_ref_markers(text: str) -> str:
+    """Drop the legacy in-text markers, then tidy the whitespace they leave behind."""
+    normalized = str(text or "")
+    if not _NOTE_REF_RE.search(normalized):
+        return normalized
+    stripped = _NOTE_REF_RE.sub("", normalized)
+    return re.sub(r"[ \t]{2,}", " ", stripped).strip()
 # 归并批次载荷里"本轮交来哪些记忆"的那几行，由 `_build_consolidation_payload` 自己渲染。
 _CONSOLIDATION_CANDIDATE_LINE_RE = re.compile(r"^- id:(?P<memory_id>[A-Za-z0-9]{6})", re.MULTILINE)
 
 
 def _first_note_ref(text: str) -> str:
-    """The note a piece of memory text points at, if any (single-valued by contract)."""
+    """The note a piece of legacy memory text points at, if any (inbound text only)."""
     match = _NOTE_REF_RE.search(str(text or ""))
     return str(match.group("ref") or "").strip() if match else ""
+
+
+def resolve_note_token(token: str, names: set[str]) -> str:
+    """Map the handle a reader was shown back to the note file it stands for.
+
+    A real file name still resolves: the writing lanes name their notes, and rows whose
+    column already holds a name must stay readable. Two names landing on one handle is
+    answered as "not found" rather than a guess.
+    """
+    normalized = str(token or "").strip()
+    if not normalized or normalized in names:
+        return normalized
+    matches = sorted(name for name in names if note_handle(name) == normalized)
+    if len(matches) == 1:
+        return matches[0]
+    return normalized
 
 _REVIEW_TOOL_OUTPUT_MAX_CHARS = 400
 _REVIEW_TOOL_PREVIEW_MAX_CHARS = 240
@@ -525,6 +553,11 @@ class _MemoryToolSession:
         if normalized in self.staged_notes:
             return self.staged_notes[normalized]
         note_file_name(normalized)
+        names = {path.stem for directory in self.note_directories() for path in directory.glob("*.md")}
+        names |= set(self.staged_notes)
+        normalized = resolve_note_token(normalized, names)
+        if normalized in self.staged_notes:
+            return self.staged_notes[normalized]
         # Category notes live in their own directory and are readable from the ordinary
         # lane: a stale category description is fixed here, only retiring happens elsewhere.
         for directory in self.note_directories():
@@ -576,6 +609,7 @@ class _MemoryToolSession:
                 content = str(item.get("content") or "").strip()
                 minimal_memory = str(item.get("minimal_memory") or "").strip()
                 decision_source = str(item.get("decision_source") or "").strip().lower()
+                note_ref = str(item.get("note_ref") or "").strip()
                 if not content:
                     errors[f"adds[{index}].content"] = "content must not be empty"
                 if content and not minimal_memory:
@@ -588,6 +622,7 @@ class _MemoryToolSession:
                             "content": content,
                             "minimal_memory": minimal_memory,
                             "decision_source": decision_source,
+                            "note_ref": note_ref,
                         }
                     )
 
@@ -602,6 +637,7 @@ class _MemoryToolSession:
                 memory_id = str(item.get("id") or "").strip()
                 content = str(item.get("content") or "").strip()
                 minimal_memory = str(item.get("minimal_memory") or "").strip()
+                note_ref = str(item.get("note_ref") or "").strip()
                 if not memory_id:
                     errors[f"rewrites[{index}].id"] = "id must not be empty"
                 if not content:
@@ -614,6 +650,7 @@ class _MemoryToolSession:
                             "id": memory_id,
                             "content": content,
                             "minimal_memory": minimal_memory,
+                            "note_ref": note_ref,
                         }
                     )
 
@@ -756,6 +793,8 @@ class _ConsolidationToolSession:
         if not normalized:
             raise ValueError("note ref is required")
         note_file_name(normalized)
+        names = {path.stem for directory in (self.index_dir, self.notes_dir) for path in directory.glob("*.md")}
+        normalized = resolve_note_token(normalized, names)
         for directory in (self.index_dir, self.notes_dir):
             path = directory / note_file_name(normalized)
             if path.exists():
@@ -1017,23 +1056,40 @@ class _MemorySqliteRepository:
         Ownership of a note file must not depend on whether the row happens to render a
         marker: the projection is lossy for compressed rows (they show the minimal
         string), and a rewrite that paraphrases a rule can drop the marker on the way.
-        Idempotent - it only fills rows whose column is still empty.
+        The same pass deletes the markers it has read, because the projection renders a
+        derived handle instead - leaving ` ref:<id>` in the stored text would put
+        ownership-looking tokens back into message index 1 for no reader.
+        Idempotent: a row with a filled column and no marker is left alone.
         """
         conn = self._connect()
-        filled = 0
+        touched = 0
         try:
             with conn:
                 for row in conn.execute(
-                    "SELECT memory_id, memory_body, minimal_memory FROM memories WHERE note_ref = ''"
+                    "SELECT memory_id, memory_body, minimal_memory, note_ref FROM memories"
                 ).fetchall():
-                    ref = _first_note_ref(str(row["minimal_memory"] or "")) or _first_note_ref(str(row["memory_body"] or ""))
-                    if not ref:
+                    stored_ref = str(row["note_ref"] or "").strip()
+                    memory_body = str(row["memory_body"] or "")
+                    minimal_memory = str(row["minimal_memory"] or "")
+                    resolved_ref = stored_ref or (
+                        _first_note_ref(minimal_memory) or _first_note_ref(memory_body)
+                    )
+                    stripped_body = _strip_note_ref_markers(memory_body)
+                    stripped_minimal = _strip_note_ref_markers(minimal_memory)
+                    if (
+                        resolved_ref == stored_ref
+                        and stripped_body == memory_body
+                        and stripped_minimal == minimal_memory
+                    ):
                         continue
-                    conn.execute("UPDATE memories SET note_ref = ? WHERE memory_id = ?", (ref, str(row["memory_id"])))
-                    filled += 1
+                    conn.execute(
+                        "UPDATE memories SET memory_body = ?, minimal_memory = ?, note_ref = ? WHERE memory_id = ?",
+                        (stripped_body, stripped_minimal, resolved_ref, str(row["memory_id"])),
+                    )
+                    touched += 1
         finally:
             conn.close()
-        return filled
+        return touched
 
     def referenced_note_refs(self) -> list[str]:
         """Every note name the store says is in use, including retired rows.
@@ -1103,17 +1159,15 @@ class _MemorySqliteRepository:
 
     @staticmethod
     def _resolve_note_ref(item: dict[str, Any]) -> str:
-        """Explicit `note_ref` wins; otherwise derive it from the text being written.
+        """Ownership is the item's `note_ref` field, nothing else.
 
-        Deriving is a migration convenience, not the authority: once stored, the column
-        is what protects the note file, because a later rewrite may drop the marker.
+        The in-text ` ref:<id>` / `见noteid:<id>` markers are not a write path any more:
+        they were spliced into the resident line, so every commit re-rendered a token that
+        looked like data but was judged only by regex. Legacy text still gets its marker
+        read once by `backfill_note_refs`, and `replace_all_from_document` reads the
+        hand-written import document - both are inbound-text lanes, not this one.
         """
-        explicit = str(item.get("note_ref") or "").strip()
-        if explicit:
-            return explicit
-        content = str(item.get("content") or "")
-        minimal = str(item.get("minimal_memory") or "")
-        return _first_note_ref(minimal) or _first_note_ref(content)
+        return str(item.get("note_ref") or "").strip()
 
     @staticmethod
     def _normalize_source_and_user_flag(source: str, from_user: bool) -> tuple[str, bool]:
@@ -1133,6 +1187,7 @@ class _MemorySqliteRepository:
         source: str,
         from_user: bool,
         now_iso: str,
+        note_ref: str = "",
     ) -> dict[str, Any]:
         normalized_source, normalized_from_user = self._normalize_source_and_user_flag(source, from_user)
         conn = self._connect()
@@ -1161,7 +1216,7 @@ class _MemorySqliteRepository:
                     minimal_memory,
                     normalized_source,
                     1 if normalized_from_user else 0,
-                    _first_note_ref(minimal_memory) or _first_note_ref(memory_body),
+                    str(note_ref or "").strip(),
                     now_iso,
                     now_iso,
                 ),
@@ -1688,16 +1743,17 @@ class MemoryManager:
             date_text = self._memory_date_text(updated_at)
             memory_body = str(row.get("memory_body") or "").strip()
             minimal_memory = str(row.get("minimal_memory") or "").strip()
-            note_ref = self._extract_note_ref(minimal_memory) or self._extract_note_ref(memory_body)
+            # The column is the whole relationship; what the reader sees is the derived
+            # handle, so the resident line adds no topic beyond the stored text itself.
+            note_ref = str(row.get("note_ref") or "").strip()
             summary = minimal_memory if row.get("is_compressed") else memory_body
-            summary = self._summary_with_note_ref(summary, note_ref)
             entries.append(
                 MemoryEntry(
                     memory_id=str(row["memory_id"]),
                     date_text=date_text,
                     source=str(row["source"]),
                     summary=summary,
-                    note_ref=note_ref,
+                    note_ref=note_handle(note_ref),
                 )
             )
         return self._normalize_document_text("".join(format_memory_entry(entry) for entry in entries))
@@ -2211,7 +2267,7 @@ class MemoryManager:
         path = Path(legacy_path)
         rows = self._load_legacy_rows(path)
         document_text, note_writes = self._build_legacy_import_payload(rows)
-        note_refs = self._collect_note_refs(document_text)
+        note_refs = self._legacy_note_refs_from_text(document_text)
         report = {
             "ok": True,
             "status": "dry_run" if not apply else "applied",
@@ -2345,14 +2401,22 @@ class MemoryManager:
         return MemoryBatch(op=head.op, items=items)
 
     def load_note(self, ref: str) -> str:
-        """Read one note by ref for the CEO's `memory_note` tool: ordinary notes and
-        category notes both resolve, so a retired memory stays reachable."""
-        name = note_file_name(ref)
+        """Read one note for the CEO's `memory_note` tool: ordinary notes and category
+        notes both resolve, so a retired memory stays reachable. The resident block shows
+        a derived handle, and the real file name still works."""
+        normalized = str(ref or "").strip()
+        if not normalized:
+            raise FileNotFoundError("memory note ref is required")
+        name = resolve_note_token(
+            normalized,
+            {path.stem for directory in (self.notes_dir, self.index_dir) for path in directory.glob("*.md")},
+        )
+        file_name = note_file_name(name)
         for directory in (self.notes_dir, self.index_dir):
-            path = directory / name
+            path = directory / file_name
             if path.exists():
                 return path.read_text(encoding="utf-8")
-        raise FileNotFoundError(f"memory note not found: {ref}")
+        raise FileNotFoundError(f"memory note not found: {normalized}")
 
     def close(self) -> None:
         self._stop_event.set()
@@ -2690,7 +2754,7 @@ class MemoryManager:
             summary_max_chars=int(getattr(self.config.document, "summary_max_chars", 300) or 300),
             document_max_chars=int(getattr(self.config.document, "document_max_chars", 20000) or 20000),
         )
-        note_refs = self._collect_note_refs(document_text)
+        note_refs = self._legacy_note_refs_from_text(document_text)
         missing_refs = sorted(ref for ref in note_refs if ref not in note_writes and ref not in self._note_file_refs())
         if missing_refs:
             raise ValueError(f"legacy import payload is missing note bodies for refs: {', '.join(missing_refs)}")
@@ -3687,12 +3751,16 @@ class MemoryManager:
         return result
 
     def _referenced_note_refs(self) -> list[str]:
-        """Note names the store owns. Ownership is a column, not a rendering artefact:
-        a compressed row projects to its minimal string and a rewrite can drop the
-        marker, so scanning the projection would sweep notes that are still in use."""
+        """Note names the store owns, from the columns and nothing else.
+
+        The projection shows derived handles and a compressed row renders only its minimal
+        line, so reading ownership out of rendered text would both miss live notes and
+        hand back tokens that are not file names. The inspection-only CLI path builds a
+        manager without a store: nothing is owned there, which beats a wrong answer.
+        """
         repo = getattr(self, "_memory_repo", None)
         if repo is None:
-            return self._collect_note_refs(self.snapshot_text())
+            return []
         return repo.referenced_note_refs()
 
     def _note_write_path(self, ref: str) -> Path:
@@ -3798,7 +3866,8 @@ class MemoryManager:
         return removed
 
     @staticmethod
-    def _collect_note_refs(document_text: str) -> list[str]:
+    def _legacy_note_refs_from_text(document_text: str) -> list[str]:
+        """Inbound-text only: a hand-written legacy document has no column to read."""
         return sorted({match.group("ref") for match in _NOTE_REF_RE.finditer(str(document_text or ""))})
 
     def _read_review_state(self) -> dict[str, Any]:
@@ -3880,13 +3949,19 @@ class MemoryManager:
             raise _MemoryAgentValidationError("memory content must not be empty")
         if "\n" in normalized or "\r" in normalized:
             raise _MemoryAgentValidationError("memory content must be one line")
+        if _NOTE_REF_RE.search(normalized):
+            # 关系不是正文的一部分：写进文本就没人读得到（列才是权威），还会在常驻行里留下
+            # 像数据的魔法串。宁可当场打回，让模型改交 `note_ref` 字段。
+            raise _MemoryAgentValidationError(
+                "note ownership goes in the item's note_ref field; do not write ref: or 见noteid: into the memory text"
+            )
         return normalized
 
     def _normalize_minimal_memory_text(self, text: str, *, summary_max_chars: int) -> str:
         normalized = self._normalize_memory_content_text(text)
         if len(normalized) > max(int(summary_max_chars or 0), 1):
             raise _MemoryAgentValidationError(f"minimal_memory exceeds {summary_max_chars} chars")
-        normalized_core = re.sub(r"\s+", " ", _NOTE_REF_RE.sub("", normalized)).strip()
+        normalized_core = re.sub(r"\s+", " ", normalized).strip()
         if normalized_core.count("->") != 1:
             raise _MemoryAgentValidationError("minimal_memory must use 条件->要求关键词")
         condition_text, keyword_text = [part.strip() for part in normalized_core.split("->", 1)]
@@ -5064,7 +5139,10 @@ class MemoryManager:
             "- 归并区列出的分类 note 也可以这样改（内容错误或过时时）；不要新建分类 note，"
             "也不要让记忆从归并区退场，退场只由归并环节做。\n"
             "- inspired_memory_ids 可选，用于列出当前完整 snapshot 里对本批判断有实质帮助的 memory id。\n"
-            "- minimal_memory 格式应写成 `条件->要求关键词`，必要时优先附加 `见noteid:<id>`，并兼容 `ref:<id>`。\n"
+            "- minimal_memory 写成 `条件->要求关键词`。\n"
+            "- 一条记忆要挂 note 时，在 adds/rewrites 条目里给 `note_ref`（note 文件名，不带 .md）；"
+            "正文里写 `ref:` 或 `见noteid:` 不再建立关系，会被打回。\n"
+            "- 正文里 `note:` 后面那串是读取句柄，`memory_read_note` 两种写法都认；写 note 用上面那个文件名。\n"
             "- 当本轮无需任何记忆或 note 变更时，可单独提交 noop_reason（仅 write 批次）。\n"
             f"{repair_block}"
         )
@@ -5142,7 +5220,7 @@ class MemoryManager:
         rewrite_minimal_by_id: dict[str, str] = {}
         rewrite_note_ref_by_id: dict[str, str] = {}
         effective_rewrites: list[dict[str, str]] = []
-        minimal_note_refs: set[str] = set()
+        submitted_note_refs: set[str] = set()
         summary_limit = int(getattr(self.config.document, "summary_max_chars", 300) or 300)
         for item in rewrites:
             if not isinstance(item, dict):
@@ -5157,10 +5235,10 @@ class MemoryManager:
                 raise _MemoryAgentValidationError(f"rewrite id not found: {memory_id}")
             rewrite_by_id[memory_id] = content
             rewrite_minimal_by_id[memory_id] = minimal_memory
-            rewrite_note_ref = self._extract_note_ref(minimal_memory)
+            rewrite_note_ref = str(item.get("note_ref") or "").strip()
             if rewrite_note_ref:
                 rewrite_note_ref_by_id[memory_id] = rewrite_note_ref
-                minimal_note_refs.add(rewrite_note_ref)
+                submitted_note_refs.add(rewrite_note_ref)
 
         snapshot_memory_ids = {
             str(entry.memory_id or "").strip()
@@ -5180,8 +5258,11 @@ class MemoryManager:
             if entry.memory_id in delete_ids:
                 continue
             if entry.memory_id in rewrite_by_id:
-                updated_note_ref = rewrite_note_ref_by_id.get(entry.memory_id, "") or self._extract_note_ref(rewrite_by_id[entry.memory_id])
-                updated_summary = self._summary_with_note_ref(rewrite_by_id[entry.memory_id], updated_note_ref)
+                explicit_note_ref = rewrite_note_ref_by_id.get(entry.memory_id, "")
+                # A rewrite that does not name a note keeps the note the row already
+                # owned, so the preview line keeps the previous handle too.
+                updated_display_ref = note_handle(explicit_note_ref) if explicit_note_ref else entry.note_ref
+                updated_summary = rewrite_by_id[entry.memory_id]
                 if len(updated_summary) > summary_limit:
                     raise _MemoryAgentValidationError(self._content_exceeds_message(summary_limit))
                 updated = MemoryEntry(
@@ -5189,7 +5270,7 @@ class MemoryManager:
                     date_text=date_text,
                     source=entry.source,
                     summary=updated_summary,
-                    note_ref=updated_note_ref,
+                    note_ref=updated_display_ref,
                 )
                 summary_key = (updated.source, updated.summary)
                 if summary_key in seen_summary_keys:
@@ -5202,6 +5283,7 @@ class MemoryManager:
                         "id": entry.memory_id,
                         "content": rewrite_by_id[entry.memory_id],
                         "minimal_memory": rewrite_minimal_by_id[entry.memory_id],
+                        "note_ref": explicit_note_ref,
                     }
                 )
                 continue
@@ -5224,10 +5306,10 @@ class MemoryManager:
             decision_source = str(item.get("decision_source") or "").strip().lower()
             if decision_source not in {"user", "self"}:
                 raise _MemoryAgentValidationError("add decision_source must be user or self")
-            add_note_ref = self._extract_note_ref(minimal_memory)
+            add_note_ref = str(item.get("note_ref") or "").strip()
             if add_note_ref:
-                minimal_note_refs.add(add_note_ref)
-            summary = self._summary_with_note_ref(content, add_note_ref)
+                submitted_note_refs.add(add_note_ref)
+            summary = content
             if len(summary) > summary_limit:
                 raise _MemoryAgentValidationError(self._content_exceeds_message(summary_limit))
             summary_key = (decision_source, summary)
@@ -5243,7 +5325,7 @@ class MemoryManager:
                     date_text=date_text,
                     source=decision_source,
                     summary=summary,
-                    note_ref=(self._extract_note_ref(summary)),
+                    note_ref=note_handle(add_note_ref),
                 )
             )
             effective_adds.append(
@@ -5252,6 +5334,7 @@ class MemoryManager:
                     "content": content,
                     "minimal_memory": minimal_memory,
                     "decision_source": decision_source,
+                    "note_ref": add_note_ref,
                 }
             )
 
@@ -5272,13 +5355,13 @@ class MemoryManager:
             for ref, content in note_upserts.items()
             if str(ref or "").strip()
         }
-        note_refs = {
-            str(entry.note_ref or "").strip()
-            for entry in after_entries
-            if str(entry.note_ref or "").strip()
-        }
-        note_refs.update(minimal_note_refs)
-        missing_refs = sorted(ref for ref in note_refs if ref not in existing_refs and ref not in normalized_note_upserts)
+        # Only what this batch submits is checkable here: resident rows carry display
+        # handles, and their real ownership lives in the column (doctor reads that set).
+        missing_refs = sorted(
+            ref
+            for ref in submitted_note_refs
+            if ref not in existing_refs and ref not in normalized_note_upserts
+        )
         if missing_refs:
             raise _MemoryAgentValidationError(f"missing note refs: {', '.join(missing_refs)}")
         effective_delete_ids = sorted(
@@ -5335,24 +5418,6 @@ class MemoryManager:
         if has_existing_mutations:
             return "rewrite"
         return ""
-
-    @staticmethod
-    def _extract_note_ref(text: str) -> str:
-        match = _NOTE_REF_RE.search(str(text or "").strip())
-        return str(match.group("ref") or "").strip() if match else ""
-
-    @staticmethod
-    def _summary_with_note_ref(summary: str, note_ref: str) -> str:
-        normalized_ref = str(note_ref or "").strip()
-        normalized_summary = str(summary or "").strip()
-        if normalized_ref:
-            normalized_summary = re.sub(r"\s+", " ", _NOTE_REF_RE.sub("", normalized_summary)).strip()
-            return f"{normalized_summary} ref:{normalized_ref}".strip()
-        normalized_summary = _NOTE_REF_RE.sub(
-            lambda match: f"ref:{str(match.group('ref') or '').strip()}",
-            normalized_summary,
-        )
-        return normalized_summary
 
     def _validate_candidate_state(
         self,

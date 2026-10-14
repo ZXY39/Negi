@@ -10,7 +10,7 @@ from typing import Any
 
 from loguru import logger
 
-from g3ku.agent.markdown_memory import parse_memory_document, split_consolidation_block
+from g3ku.agent.markdown_memory import NOTE_LINE_PREFIX, parse_memory_document, split_consolidation_block
 from g3ku.config.live_runtime import get_runtime_config
 from g3ku.core.timefmt import (
     MESSAGE_ARRIVAL_TIME_MARKER,
@@ -351,11 +351,19 @@ class CeoMessageBuilder:
             return None
         entries_text, consolidation_text = split_consolidation_block(snapshot_text)
         parsed_entries = parse_memory_document(entries_text)
-        rendered = '\n'.join(
-            f"---\n{str(entry.summary or '').strip()}".strip()
-            for entry in parsed_entries
-            if str(entry.summary or '').strip()
-        ).strip()
+        rendered_blocks: list[str] = []
+        for entry in parsed_entries:
+            summary = str(entry.summary or '').strip()
+            if not summary:
+                continue
+            note_ref = str(entry.note_ref or '').strip()
+            # The handle travels with the entry: it is the only way back to the note from
+            # the frozen block, and the file name is deliberately not shown here.
+            block = f"---\n{summary}"
+            if note_ref:
+                block = f"{block}\n{NOTE_LINE_PREFIX}{note_ref}"
+            rendered_blocks.append(block)
+        rendered = '\n'.join(rendered_blocks).strip()
         # The consolidation block is rendered by the memory runtime and carried through
         # verbatim: re-deriving it here would read note files mid-session and change the
         # bytes at message index 1, which is exactly the cache break the freeze prevents.

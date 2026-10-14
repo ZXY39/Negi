@@ -115,6 +115,14 @@ class ModelConfigTool(Tool):
                         "Writes echo the affected chains back."
                     ),
                 },
+                "image_tail_only": {
+                    "type": "boolean",
+                    "description": (
+                        "Set true only for an upstream that reads image blocks from the LAST message of the "
+                        "request and silently ignores images sitting earlier in history. When true, inbound "
+                        "uploads ride the tail of the first hop instead of the user turn."
+                    ),
+                },
                 "quota_pool_key": {"type": "string", "description": "Optional quota pool this binding shares with others."},
                 "name": {"type": "string", "description": "Display name shown in the model catalog and chains."},
                 "retry_on": {
@@ -260,6 +268,7 @@ class ModelConfigTool(Tool):
                 description=str(kwargs.get("description") or ""),
                 name=str(kwargs.get("name") or ""),
                 image_multimodal_enabled=_as_bool(kwargs.get("image_multimodal_enabled", False), field="image_multimodal_enabled"),
+                image_tail_only=_as_bool(kwargs.get("image_tail_only", False), field="image_tail_only"),
                 request_timeout_seconds=(
                     None
                     if kwargs.get("request_timeout_seconds") in (None, "")
@@ -398,6 +407,8 @@ class ModelConfigTool(Tool):
             patch["retry_on"] = kwargs.get("retry_on")
         if self._provided(kwargs, "image_multimodal_enabled"):
             patch["image_multimodal_enabled"] = _as_bool(kwargs.get("image_multimodal_enabled"), field="image_multimodal_enabled")
+        if self._provided(kwargs, "image_tail_only"):
+            patch["image_tail_only"] = _as_bool(kwargs.get("image_tail_only"), field="image_tail_only")
         return patch
 
     def _chain_image_rows(self, manager: ModelManager, key: str) -> list[dict[str, Any]]:
