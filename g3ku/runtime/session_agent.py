@@ -2464,6 +2464,29 @@ class RuntimeAgentSession:
             )
         return wrote
 
+    async def announce_context_compression_boundary(
+        self,
+        *,
+        turn_id: str,
+        boundary_stage_index: int,
+    ) -> None:
+        """把压缩边界广播给实时车道，不落转录行——行仍由回合收尾那一次写盘落。
+
+        区分线要停在阶段轨道中间，就必须在摘要落地那一刻就把边界送出去；等收尾再发的话，
+        压缩之后跑出来的那一截阶段已经全画在线上方了。转录行没落成（进程中途死掉）时刷新
+        会把这条线撤掉：行才是事实源，帧只负责提前画。
+        """
+        stats: dict[str, Any] = {"boundary_stage_index": int(boundary_stage_index or 0)}
+        normalized_turn_id = str(turn_id or "").strip()
+        if normalized_turn_id:
+            stats["turn_id"] = normalized_turn_id
+        await self._emit(
+            "context_compression_marker",
+            compression_state="completed",
+            source="auto",
+            stats=stats,
+        )
+
     def _begin_frontdoor_compression_generation(self) -> int:
         self._frontdoor_compression_generation_seq = int(self._frontdoor_compression_generation_seq or 0) + 1
         generation_id = self._frontdoor_compression_generation_seq
@@ -3230,10 +3253,15 @@ class RuntimeAgentSession:
             # 发送时（自动）压缩在收尾处落线：区分线以上是这轮被折进摘要的历史。
             if str(getattr(self, "_frontdoor_compressed_turn_id", "") or "").strip() == turn_id and turn_id:
                 setattr(self, "_frontdoor_compressed_turn_id", "")
+                boundary_stage_index = int(getattr(self, "_frontdoor_compression_boundary_index", 0) or 0)
+                setattr(self, "_frontdoor_compression_boundary_index", 0)
+                marker_stats: dict[str, Any] = {"turn_id": turn_id}
+                if boundary_stage_index:
+                    marker_stats["boundary_stage_index"] = boundary_stage_index
                 await self.emit_context_compression_marker(
                     state="completed",
                     source="auto",
-                    stats={"turn_id": turn_id},
+                    stats=marker_stats,
                     persisted_session=persisted_session,
                 )
             if self._state.session_key.startswith("web:"):

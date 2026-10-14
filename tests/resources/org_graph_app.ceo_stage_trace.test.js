@@ -99,12 +99,23 @@ class StubHTMLElement extends StubElement {
         delete this.attributes[name];
     }
 
+    getAttribute(name) {
+        return Object.prototype.hasOwnProperty.call(this.attributes, name) ? this.attributes[name] : null;
+    }
+
     get innerHTML() {
         return this._innerHTML;
     }
 
     set innerHTML(value) {
         this._innerHTML = String(value);
+        if (this._innerHTML.includes("interaction-flow-list")) {
+            // createPendingCeoTurn 靠 querySelector 认领己的四个子节点；不登记的话，
+            // 走真实回合创建链路的用例拿到的全是 null，切段那段代码根本进不去。
+            [".assistant-text", ".ceo-turn-usage", ".interaction-flow", ".interaction-flow-meta",
+                ".interaction-flow-list", ".interaction-flow-footer", ".interaction-flow-toggle"]
+                .forEach((selector) => { this._selectors[selector] = new StubHTMLElement(); });
+        }
         if (!this._innerHTML.includes("interaction-step-header")) return;
         this._selectors[".interaction-step-title"] = new StubHTMLElement();
         this._selectors[".interaction-step-started"] = new StubHTMLElement();
@@ -113,6 +124,29 @@ class StubHTMLElement extends StubElement {
         this._selectors[".interaction-step-preview"] = new StubHTMLElement();
         this._selectors[".interaction-step-detail"] = new StubHTMLElement();
         this._selectors[".interaction-step-disclosure"] = new StubHTMLButtonElement();
+    }
+
+    get parentNode() {
+        return this.parentElement || null;
+    }
+
+    get nextSibling() {
+        const siblings = this.parentElement?._children || [];
+        return siblings[siblings.indexOf(this) + 1] || null;
+    }
+
+    insertBefore(child, ref) {
+        child.parentElement = this;
+        const index = ref ? this._children.indexOf(ref) : -1;
+        if (index < 0) this._children.push(child);
+        else this._children.splice(index, 0, child);
+        return child;
+    }
+
+    removeChild(child) {
+        this._children = this._children.filter((item) => item !== child);
+        child.parentElement = null;
+        return child;
     }
 }
 class StubHTMLButtonElement extends StubHTMLElement {}
@@ -211,7 +245,7 @@ function loadApp() {
     context.window = context;
     vm.createContext(context);
     vm.runInContext(
-        `${TASK_VIEW_CODE}\n${APP_CODE}\nthis.__testExports = { renderCeoStageTraceIntoTurn, renderCeoToolEventsIntoTurn, applyCeoToolEventToTurn, patchCeoInflightTurn, finalizeCeoTurn, normalizeCeoSnapshotToolEvents, stageTraceStatus, displayTaskStageStatus, toggleCeoToolStepOutput, resolvePreferredCeoTraceContext, resolveFinalCeoTraceContext, normalizeCeoSnapshotCanonicalContext, renderPersistedCeoAssistantTurn, ceoLiveStreamResidual, S, U };`,
+        `${TASK_VIEW_CODE}\n${APP_CODE}\nthis.__testExports = { renderCeoStageTraceIntoTurn, renderCeoToolEventsIntoTurn, applyCeoToolEventToTurn, patchCeoInflightTurn, finalizeCeoTurn, normalizeCeoSnapshotToolEvents, stageTraceStatus, displayTaskStageStatus, toggleCeoToolStepOutput, resolvePreferredCeoTraceContext, resolveFinalCeoTraceContext, normalizeCeoSnapshotCanonicalContext, renderPersistedCeoAssistantTurn, ceoLiveStreamResidual, applyCeoCompressionMarker, getActiveCeoTurn, createPendingCeoTurn, renderCeoSnapshotMessageRange, S, U };`,
         context
     );
     context.__testExports.__context = context;
@@ -1485,4 +1519,145 @@ test("ceo live rail keeps stage_index order when the previous stage's closeout a
     // 迟到的旧阶段带着它自己的工具行，不是只剩一个头
     assert.match(html, /exec/);
     assert.match(html, /read_file/);
+});
+
+// ---- 压缩边界把回合切成两段 -------------------------------------------------
+
+const railStage = (index, goal) => ({
+    stage_id: `frontdoor-stage-${index}`,
+    stage_index: index,
+    stage_goal: goal,
+    status: "completed",
+    rounds: [{
+        round_id: `round-${index}`,
+        round_index: index,
+        tools: [{ tool_name: "memory_note", status: "success", output_text: "ok" }],
+    }],
+});
+
+function feedHarness(api) {
+    const feed = api.__context.document.createElement();
+    api.U.ceoFeed = feed;
+    api.S.activeSessionId = "web:test";
+    api.S.ceoPendingTurns = [];
+    return feed;
+}
+
+const railOf = (el) => String(el?._selectors?.[".interaction-flow-list"]?.innerHTML || "");
+
+test("压缩落在回合中间时把回合切成两段，线夹在阶段卡之间", () => {
+    const api = loadApp();
+    const feed = feedHarness(api);
+    assert.equal(api.patchCeoInflightTurn({
+        turn_id: "t1",
+        source: "user",
+        status: "running",
+        canonical_context_delta: { stages: [railStage(1, "第一"), railStage(2, "第二"), railStage(3, "第三")] },
+    }), true);
+    assert.equal(feed._children.length, 1, "起手只有一个气泡");
+
+    assert.equal(api.applyCeoCompressionMarker("web:test", {
+        state: "completed", source: "auto",
+        stats: { turn_id: "t1", boundary_stage_index: 2 },
+    }), true);
+
+    const [head, divider, continuation] = feed._children;
+    assert.match(String(divider.className), /ceo-compression-divider is-completed/);
+    assert.equal(divider.dataset.ceoCompressionBoundary, "2");
+    assert.deepEqual(
+        Array.from(railOf(head).matchAll(/data-stage-id="([^"]+)"/g), (m) => m[1]),
+        ["frontdoor-stage-1", "frontdoor-stage-2"]
+    );
+    assert.deepEqual(
+        Array.from(railOf(continuation).matchAll(/data-stage-id="([^"]+)"/g), (m) => m[1]),
+        ["frontdoor-stage-3"]
+    );
+    // 回合身份让给续跑段：之后的帧与"插到当前气泡之前"的用户行都落在线下方。
+    assert.equal(api.getActiveCeoTurn(null, "t1")?.el, continuation);
+    assert.equal(head.getAttribute("data-ceo-key"), "turn:t1#pre-2");
+    assert.equal(continuation.getAttribute("data-ceo-key"), "turn:t1");
+});
+
+test("压缩在新回合第一跳触发时，线挪到整个气泡之前，不切回合", () => {
+    const api = loadApp();
+    const feed = feedHarness(api);
+    api.patchCeoInflightTurn({
+        turn_id: "t1",
+        source: "user",
+        status: "running",
+        // 这一回合的阶段号从 6 起：边界 5 属于上一回合，本回合没有任何内容在线上方。
+        canonical_context_delta: { stages: [railStage(6, "第一"), railStage(7, "第二")] },
+    });
+
+    assert.equal(api.applyCeoCompressionMarker("web:test", {
+        state: "completed", source: "auto",
+        stats: { turn_id: "t1", boundary_stage_index: 5 },
+    }), true);
+
+    const [divider, bubble] = feed._children;
+    assert.match(String(divider.className), /ceo-compression-divider is-completed/);
+    assert.equal(bubble.getAttribute("data-ceo-key"), "turn:t1");
+    assert.deepEqual(
+        Array.from(railOf(bubble).matchAll(/data-stage-id="([^"]+)"/g), (m) => m[1]),
+        ["frontdoor-stage-6", "frontdoor-stage-7"]
+    );
+});
+
+test("重建按转录里的边界键把线放回阶段中间，标记行不再画第二条", () => {
+    const api = loadApp();
+    const feed = feedHarness(api);
+    const messages = [
+        {
+            role: "assistant",
+            content: "答复",
+            turn_id: "t9",
+            canonical_context: { stages: [railStage(1, "第一"), railStage(2, "第二"), railStage(3, "第三")] },
+        },
+        {
+            role: "system",
+            content: "会话已压缩",
+            compression_marker: {
+                state: "completed", source: "auto",
+                stats: { turn_id: "t9", boundary_stage_index: 2 },
+            },
+        },
+    ];
+
+    api.renderCeoSnapshotMessageRange(
+        messages, ["m:t9:assistant:0", "m:-:system:0"], 0, messages.length, "web:test"
+    );
+
+    const [head, divider, continuation] = feed._children;
+    assert.equal(feed._children.length, 3, "头段 + 一条线 + 续跑段，标记行不再画第二条");
+    assert.match(String(divider.className), /ceo-compression-divider is-completed/);
+    assert.match(railOf(head), /第一/);
+    assert.doesNotMatch(railOf(head), /第三/);
+    assert.match(railOf(continuation), /第三/);
+    assert.equal(continuation.getAttribute("data-ceo-key"), "m:t9:assistant:0");
+    assert.equal(head.getAttribute("data-ceo-key"), "turn:t9#pre-2");
+});
+
+test("同一回合压第二次再切一刀，两条线各按自己的边界", () => {
+    const api = loadApp();
+    const feed = feedHarness(api);
+    api.patchCeoInflightTurn({
+        turn_id: "t1",
+        source: "user",
+        status: "running",
+        canonical_context_delta: {
+            stages: [railStage(1, "第一"), railStage(2, "第二"), railStage(3, "第三"), railStage(4, "第四")],
+        },
+    });
+    api.applyCeoCompressionMarker("web:test", {
+        state: "completed", stats: { turn_id: "t1", boundary_stage_index: 1 },
+    });
+    api.applyCeoCompressionMarker("web:test", {
+        state: "completed", stats: { turn_id: "t1", boundary_stage_index: 3 },
+    });
+
+    assert.deepEqual(
+        feed._children.map((el) => (String(el.className).includes("ceo-compression-divider")
+            ? `line:${el.dataset.ceoCompressionBoundary}` : `rail:${railOf(el).split('data-stage-id="frontdoor-stage-').length - 1}`)),
+        ["rail:1", "line:1", "rail:2", "line:3", "rail:1"]
+    );
 });

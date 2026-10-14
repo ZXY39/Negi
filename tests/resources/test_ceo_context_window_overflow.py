@@ -17,6 +17,11 @@ from g3ku.runtime.frontdoor.token_preflight_compaction import FrontdoorTokenPref
 from g3ku.runtime.frontdoor.state_models import CeoRuntimeContext
 
 
+async def _announce_boundary_noop(**_kwargs) -> None:
+    """真会话在摘要落地时会广播压缩边界；这里的假会话只需要接得住。"""
+    return None
+
+
 def _png_chunk(kind: bytes, data: bytes) -> bytes:
     crc = zlib.crc32(kind + data) & 0xFFFFFFFF
     return len(data).to_bytes(4, "big") + kind + data + crc.to_bytes(4, "big")
@@ -87,7 +92,7 @@ async def test_graph_call_model_attempts_token_compression_before_context_window
         "frontdoor_token_preflight_diagnostics": {},
     }
     runtime = SimpleNamespace(
-        context=CeoRuntimeContext(loop=None, session=SimpleNamespace(state=SimpleNamespace(session_key="web:shared")), session_key="web:shared", on_progress=None)
+        context=CeoRuntimeContext(loop=None, session=SimpleNamespace(state=SimpleNamespace(session_key="web:shared"), announce_context_compression_boundary=_announce_boundary_noop), session_key="web:shared", on_progress=None)
     )
 
     async def _run_frontdoor_llm_token_compression(**kwargs):
@@ -154,7 +159,7 @@ async def test_graph_call_model_surfaces_resolution_error_when_context_window_is
         "frontdoor_token_preflight_diagnostics": {},
     }
     runtime = SimpleNamespace(
-        context=CeoRuntimeContext(loop=None, session=SimpleNamespace(state=SimpleNamespace(session_key="web:shared")), session_key="web:shared", on_progress=None)
+        context=CeoRuntimeContext(loop=None, session=SimpleNamespace(state=SimpleNamespace(session_key="web:shared"), announce_context_compression_boundary=_announce_boundary_noop), session_key="web:shared", on_progress=None)
     )
 
     with pytest.raises(RuntimeError, match="bad binding"):
@@ -233,7 +238,7 @@ def test_frontdoor_send_preflight_snapshot_uses_provider_request_preview_tokens(
     runtime = SimpleNamespace(
         context=CeoRuntimeContext(
             loop=None,
-            session=SimpleNamespace(state=SimpleNamespace(session_key="web:shared")),
+            session=SimpleNamespace(state=SimpleNamespace(session_key="web:shared"), announce_context_compression_boundary=_announce_boundary_noop),
             session_key="web:shared",
             on_progress=None,
         )
@@ -377,6 +382,7 @@ def test_frontdoor_preflight_prefers_effective_input_tokens_plus_delta_when_prev
 
     session = SimpleNamespace(
         state=SimpleNamespace(session_key="web:shared"),
+        announce_context_compression_boundary=_announce_boundary_noop,
         _frontdoor_actual_request_history=[],
         _frontdoor_previous_actual_request_history=[],
         _frontdoor_previous_actual_request_path="",
@@ -558,6 +564,7 @@ def test_stage_eviction_hop_subtracts_compacted_body_from_usage_anchor(
 
     session = SimpleNamespace(
         state=SimpleNamespace(session_key="web:shared"),
+        announce_context_compression_boundary=_announce_boundary_noop,
         _frontdoor_actual_request_history=[],
         _frontdoor_previous_actual_request_history=[],
         _frontdoor_previous_actual_request_path="",
@@ -607,6 +614,7 @@ def test_frontdoor_seed_record_prefers_live_trace_over_stale_previous_slot(tmp_p
     stale_path = tmp_path / "stale.json"
     stale_path.write_text(json.dumps({"actual_request_hash": "stale-hash"}), encoding="utf-8")
     session = SimpleNamespace(
+        announce_context_compression_boundary=_announce_boundary_noop,
         _frontdoor_actual_request_history=[{"path": str(latest_path)}],
         _frontdoor_actual_request_path=str(latest_path),
         _frontdoor_previous_actual_request_history=[{"path": str(stale_path)}],
@@ -654,6 +662,7 @@ async def test_graph_call_model_runs_llm_token_compression_before_main_send(
 
     session = SimpleNamespace(
         state=SimpleNamespace(session_key="web:shared"),
+        announce_context_compression_boundary=_announce_boundary_noop,
         _frontdoor_stage_state={"active_stage_id": "", "transition_required": False, "stages": []},
         _frontdoor_canonical_context={"active_stage_id": "", "transition_required": False, "stages": []},
         _compression_state={},
@@ -754,6 +763,7 @@ async def test_graph_call_model_token_compression_keeps_prior_provider_tool_sche
 
     session = SimpleNamespace(
         state=SimpleNamespace(session_key="web:shared"),
+        announce_context_compression_boundary=_announce_boundary_noop,
         _frontdoor_stage_state={"active_stage_id": "", "transition_required": False, "stages": []},
         _frontdoor_canonical_context={"active_stage_id": "", "transition_required": False, "stages": []},
         _compression_state={},
@@ -869,6 +879,7 @@ async def test_graph_call_model_token_compression_keeps_repair_required_contract
 
     session = SimpleNamespace(
         state=SimpleNamespace(session_key="web:shared"),
+        announce_context_compression_boundary=_announce_boundary_noop,
         _frontdoor_stage_state={"active_stage_id": "", "transition_required": False, "stages": []},
         _frontdoor_canonical_context={"active_stage_id": "", "transition_required": False, "stages": []},
         _compression_state={},
@@ -1100,6 +1111,7 @@ async def test_run_frontdoor_llm_token_compression_persists_internal_request_art
 
     session = SimpleNamespace(
         state=SimpleNamespace(session_key="web:shared"),
+        announce_context_compression_boundary=_announce_boundary_noop,
         _frontdoor_actual_request_path="D:/tmp/frontdoor-visible-request.json",
         _frontdoor_request_body_messages=[
             {"role": "system", "content": "SYSTEM"},
@@ -1187,6 +1199,7 @@ async def test_run_frontdoor_llm_token_compression_aligns_tool_pair_tail_boundar
 
     session = SimpleNamespace(
         state=SimpleNamespace(session_key="web:shared"),
+        announce_context_compression_boundary=_announce_boundary_noop,
         _frontdoor_actual_request_path="",
         _frontdoor_request_body_messages=[
             {"role": "system", "content": "SYSTEM"},

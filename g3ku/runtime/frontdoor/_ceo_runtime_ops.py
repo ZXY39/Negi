@@ -2142,6 +2142,31 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
         return summarized_stage_ids(stage_state, body_messages=recent_tail)
 
     @staticmethod
+    def _frontdoor_compression_boundary_index(stage_state: Any, stage_ids: list[str]) -> int:
+        """折进摘要的最后一个阶段的 `stage_index`；0 = 一条阶段都没折。
+
+        区分线在阶段轨道里的落点由它决定：`stage_index` 小于等于它的阶段画在线上方。
+        活动阶段永远不被吞（`stage_is_swallowable` 直接排除 `active_stage_id`），所以它
+        连同之后的阶段一定留在线下方继续长——线因此永远落在两张阶段卡之间，不切开任何
+        一张卡。口径与实时轨道同源：两边都取 `_frontdoor_stage_state` 这本账（实测会话
+        里 1..673 连续），不是 `frontdoor_canonical_context` 那套另一编号。
+        """
+        wanted = {str(item or "").strip() for item in list(stage_ids or []) if str(item or "").strip()}
+        if not wanted:
+            return 0
+        boundary = 0
+        for stage in list((stage_state or {}).get("stages") or []):
+            if not isinstance(stage, dict):
+                continue
+            if str(stage.get("stage_id") or "").strip() not in wanted:
+                continue
+            try:
+                boundary = max(boundary, int(stage.get("stage_index") or 0))
+            except (TypeError, ValueError):
+                continue
+        return boundary
+
+    @staticmethod
     def _frontdoor_stage_content_identity(stage: Any) -> str:
         """跨存储识别同一条逻辑阶段：canonical 链与本轮 stage_state 用的是两套
         stage_id 序号（实测同一条会话里 1..382 对 843..1226，交集 0），只按 id 匹配
@@ -2651,6 +2676,10 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
                     "stage_ref_selected_count": int(selected_ref_count),
                     "stage_ref_dropped_dead": int(dropped_dead_refs),
                     "stage_archive_pending_count": len(summarized_stage_ids),
+                    # 区分线在阶段轨道里的落点；收尾落行时原样带进 stats，实时帧同带。
+                    "boundary_stage_index": self._frontdoor_compression_boundary_index(
+                        durable_stage_state, summarized_stage_ids
+                    ),
                     "stage_archive_ref": archive_path,
                     "final_request_tokens": rewritten_tokens,
                 },
@@ -8206,6 +8235,20 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
                     # 布尔标志：被打断的回合留下的标志不会被下一个回合误读成一次新压缩。
                     compressed_turn_id = str(getattr(runtime_session, "_active_turn_id", "") or "").strip()
                     setattr(runtime_session, "_frontdoor_compressed_turn_id", compressed_turn_id)
+                    compression_boundary_index = int(
+                        dict(preflight.diagnostics or {}).get("boundary_stage_index") or 0
+                    )
+                    setattr(
+                        runtime_session,
+                        "_frontdoor_compression_boundary_index",
+                        compression_boundary_index,
+                    )
+                    # 摘要一落地就先把边界广播出去：这一回合之后还要跑很多跳，等收尾再画线
+                    # 的话，压缩之后跑出来的阶段已经全在线上方了。转录行仍由收尾那次写盘落。
+                    await runtime_session.announce_context_compression_boundary(
+                        turn_id=compressed_turn_id,
+                        boundary_stage_index=compression_boundary_index,
+                    )
                 post_compaction_tokens = int(preflight.final_request_tokens or 0)
                 post_compaction_snapshot = build_runtime_send_token_preflight_snapshot(
                     context_window_tokens=context_window_tokens,
@@ -8240,6 +8283,8 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
                     "estimated_tool_schema_tokens": int(preflight_snapshot.get("estimated_tool_schema_tokens") or 0),
                     "estimated_image_tokens": int(preflight_snapshot.get("estimated_image_tokens") or 0),
                     "image_count": int(preflight_snapshot.get("image_count") or 0),
+                    # 压缩后的请求体才是这一发真正发出去的那份：按它数末位，不按压缩前那份。
+                    "image_blocks_at_tail": self._frontdoor_tail_image_block_count(request_messages),
                     "image_estimation_method": str(preflight_snapshot.get("image_estimation_method") or ""),
                     "pre_compaction_estimated_total_tokens": int(
                         pre_compaction_diagnostics.get("estimated_total_tokens") or 0

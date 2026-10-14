@@ -3253,6 +3253,7 @@ async def test_auto_compression_marker_names_the_turn_it_folded(tmp_path: Path) 
     turn_id = str((queued[0].metadata or {}).get("_transcript_turn_id") or "").strip()
     assert turn_id
     session._frontdoor_compressed_turn_id = turn_id
+    session._frontdoor_compression_boundary_index = 7
 
     await session._persist_turn_transcript(
         user_input=queued[0],
@@ -3269,9 +3270,68 @@ async def test_auto_compression_marker_names_the_turn_it_folded(tmp_path: Path) 
         if isinstance(item.get("metadata"), dict) and item["metadata"].get("kind") == "context_compression"
     ]
     assert [row["metadata"]["compression_state"] for row in rows] == ["completed"]
-    assert rows[0]["metadata"]["stats"] == {"turn_id": turn_id}
+    assert rows[0]["metadata"]["stats"] == {"turn_id": turn_id, "boundary_stage_index": 7}
     marker_events = [event for event in events if event.type == "context_compression_marker"]
-    assert [event.payload["stats"] for event in marker_events] == [{"turn_id": turn_id}]
+    assert [event.payload["stats"] for event in marker_events] == [
+        {"turn_id": turn_id, "boundary_stage_index": 7}
+    ]
+    # 边界是一次性的：落过之后必须收回去，否则下一回合会被钉上一条不属于它的线。
+    assert int(getattr(session, "_frontdoor_compression_boundary_index", 0) or 0) == 0
+
+
+def test_compression_boundary_index_is_the_last_swallowed_stage() -> None:
+    """边界 = 被吞集合里最大的 stage_index；没吞阶段就是 0。
+
+    活动阶段永远不在被吞集合里（`stage_is_swallowable` 排除 `active_stage_id`），所以这条
+    边界永远落在两张阶段卡之间，不会切开任何一张卡。
+    """
+    runner = create_agent_impl.CreateAgentCeoFrontDoorRunner(loop=SimpleNamespace())
+    stage_state = {
+        "stages": [
+            {"stage_id": "frontdoor-stage-1", "stage_index": 1},
+            {"stage_id": "frontdoor-stage-2", "stage_index": 2},
+            {"stage_id": "frontdoor-stage-7", "stage_index": 7},
+            "junk",
+            {"stage_id": "frontdoor-stage-9"},
+        ]
+    }
+    assert runner._frontdoor_compression_boundary_index(stage_state, ["frontdoor-stage-1", "frontdoor-stage-7"]) == 7
+    assert runner._frontdoor_compression_boundary_index(stage_state, []) == 0
+    assert runner._frontdoor_compression_boundary_index(stage_state, ["frontdoor-stage-404"]) == 0
+    assert runner._frontdoor_compression_boundary_index(None, ["frontdoor-stage-1"]) == 0
+
+
+@pytest.mark.asyncio
+async def test_announce_compression_boundary_broadcasts_without_a_row(tmp_path: Path) -> None:
+    """摘要一落地就广播边界，但转录行仍由收尾那次写盘落。
+
+    等收尾再广播的话，压缩之后跑出来的那一截阶段已经全画在线上方了；反过来要是这里就
+    落行，一个回合要重写两遍整份转录。
+    """
+    session = _idle_session(tmp_path)
+    events: list[AgentEvent] = []
+
+    async def _listener(event: AgentEvent) -> None:
+        events.append(event)
+
+    session.subscribe(_listener)
+
+    await session.announce_context_compression_boundary(turn_id="a1", boundary_stage_index=7)
+
+    store = session._loop.sessions
+    rows = [
+        item
+        for item in list(store.get_or_create("web:shared").messages or [])
+        if isinstance(item.get("metadata"), dict) and item["metadata"].get("kind") == "context_compression"
+    ]
+    assert rows == []
+    marker_events = [event for event in events if event.type == "context_compression_marker"]
+    assert len(marker_events) == 1
+    assert marker_events[0].payload == {
+        "compression_state": "completed",
+        "source": "auto",
+        "stats": {"boundary_stage_index": 7, "turn_id": "a1"},
+    }
 
 
 def _idle_session(tmp_path: Path) -> RuntimeAgentSession:

@@ -3641,6 +3641,8 @@ function normalizeCeoSnapshotCompressionMarker(marker = null) {
     // 这样随后才到的实时帧不会在同一回合后面再画一条。
     const turnId = String(marker?.stats?.turn_id || "").trim();
     if (turnId) next.turn_id = turnId;
+    const boundary = Number(marker?.stats?.boundary_stage_index);
+    if (Number.isFinite(boundary) && boundary > 0) next.boundary_stage_index = boundary;
     return next;
 }
 
@@ -4036,16 +4038,24 @@ function syncCeoCompressionRetryAffordances() {
     });
 }
 
-function appendCeoCompressionDivider(state, options = {}) {
-    const { interactive = true, anchorEl = null, turnId = "" } = options;
-    if (!U.ceoFeed || !CEO_COMPRESSION_TEXT[state]) return null;
+function buildCeoCompressionDividerElement(state, { interactive = true, turnId = "", boundary = "" } = {}) {
+    if (!CEO_COMPRESSION_TEXT[state]) return null;
     const el = document.createElement("div");
     el.className = `message system ${CEO_COMPRESSION_DIVIDER_CLASS} is-${state}`;
     el.dataset.ceoCompressionState = state;
     if (turnId) el.dataset.ceoCompressionTurn = turnId;
+    if (boundary !== "" && boundary !== null) el.dataset.ceoCompressionBoundary = String(boundary);
     el.setAttribute("role", "status");
     el.setAttribute("aria-live", state === "running" ? "polite" : "off");
     el.innerHTML = ceoCompressionDividerInner(state, { interactive });
+    return el;
+}
+
+function appendCeoCompressionDivider(state, options = {}) {
+    const { anchorEl = null } = options;
+    if (!U.ceoFeed) return null;
+    const el = buildCeoCompressionDividerElement(state, options);
+    if (!el) return null;
     const anchorParent = anchorEl?.parentNode || null;
     mutateCeoFeed(() => {
         if (anchorParent) {
@@ -4075,11 +4085,15 @@ function findCeoCompressionAnchor(turnId) {
     return match;
 }
 
-function ceoCompressionDividerExists(turnId, state) {
+// 一条线的身份 = (回合, 状态, 边界)：同一回合压两次会得到两条边界不同的线，都该留下；
+// 而"当场画的实时帧"与"重建按转录画的那一条"是同一件事，不能画两遍。
+function ceoCompressionDividerExists(turnId, state, boundary = "") {
     if (!turnId || !U.ceoFeed || typeof U.ceoFeed.querySelectorAll !== "function") return false;
+    const wantedBoundary = boundary === null || boundary === undefined ? "" : String(boundary);
     return Array.from(U.ceoFeed.querySelectorAll(`.${CEO_COMPRESSION_DIVIDER_CLASS}`)).some(
         (el) => String(el.dataset?.ceoCompressionTurn || "") === turnId
-            && String(el.dataset?.ceoCompressionState || "") === state,
+            && String(el.dataset?.ceoCompressionState || "") === state
+            && String(el.dataset?.ceoCompressionBoundary || "") === wantedBoundary,
     );
 }
 
@@ -4114,6 +4128,90 @@ function syncCeoCompressionDivider() {
     syncCeoCompressionRetryAffordances();
 }
 
+function ceoCompressionStagesAroundBoundary(stages, boundary) {
+    const indexes = (Array.isArray(stages) ? stages : [])
+        .map((stage) => Number(stage?.stage_index))
+        .filter((value) => Number.isFinite(value));
+    return {
+        total: indexes.length,
+        pre: indexes.filter((value) => value <= boundary).length,
+    };
+}
+
+function freezeCeoCompressionHeadKey(el, boundary) {
+    const key = el?.getAttribute?.("data-ceo-key") || "";
+    if (key && !key.endsWith(`#pre-${boundary}`)) el.setAttribute("data-ceo-key", `${key}#pre-${boundary}`);
+}
+
+// 头段是冻结的那半：它不再收帧，所以没有正文可显示时不能把加载动画留在线上头。
+function settleCeoCompressionHeadText(turn) {
+    const textEl = turn?.textEl;
+    if (!textEl) return;
+    if (!String(textEl.textContent || "").trim()) {
+        textEl.innerHTML = "";
+        textEl.hidden = true;
+        return;
+    }
+    textEl.classList?.remove?.("pending");
+    textEl.classList?.remove?.("assistant-text-loading");
+    syncCeoAssistantLoadingAria(textEl);
+    syncCeoTurnLoadingOnlyState(turn, false);
+}
+
+// 实时道：把正在跑的那个回合就地切成两段——头段冻结在边界之前那几阶段，续跑段接住之后
+// 的每一帧（阶段、流式文字、用量）。中间夹一条 feed 级的线，于是"压缩之后才发进来的用户
+// 插话"按它既有的"插到当前气泡之前"规则落点，天然就落到了线下方。
+function splitCeoTurnAtCompression(turn, boundary, state) {
+    if (!turn?.el?.parentNode || !Number.isFinite(boundary) || boundary <= 0) return false;
+    const { total, pre } = ceoCompressionStagesAroundBoundary(turn.lastExecutionTraceSummary?.stages, boundary);
+    if (!total || pre >= total) return false;
+    const dividerState = CEO_COMPRESSION_TEXT[state] ? state : "completed";
+    const divider = buildCeoCompressionDividerElement(dividerState, {
+        interactive: false,
+        turnId: String(turn.turnId || ""),
+        boundary,
+    });
+    if (!divider) return false;
+    if (!pre) {
+        // 这一回合的阶段全在压缩之后：线挪到气泡之前，不切。
+        mutateCeoFeed(() => {
+            turn.el.parentNode.insertBefore(divider, turn.el);
+            icons();
+        }, { scrollMode: "preserve" });
+        syncCeoCompressionRetryAffordances();
+        return true;
+    }
+    const continuation = createPendingCeoTurn(turn.source, { scrollMode: "preserve" });
+    if (!continuation?.el?.parentNode) return false;
+    const head = turn;
+    const summary = head.lastExecutionTraceSummary;
+    head.stageWindowTo = boundary;
+    freezeCeoCompressionHeadKey(head.el, boundary);
+    // 头段不再收帧：回合身份让给续跑段，之后的 finalize / 插话锚点都落在它身上。
+    head.finalized = true;
+    continuation.stageWindowFrom = boundary + 1;
+    continuation.turnId = head.turnId;
+    continuation.compressionBoundary = boundary;
+    // 续跑段立刻顶上门牌：视图状态还原与"线插在哪一回合后面"的查找都按 key 认，
+    // 等下一帧才补的话，中间这段时间这条气泡是匿名的。
+    if (head.turnId && continuation.el?.setAttribute) {
+        continuation.el.setAttribute("data-ceo-key", `turn:${head.turnId}`);
+    }
+    S.ceoPendingTurns.push(continuation);
+    mutateCeoFeed(() => {
+        const parent = head.el.parentNode;
+        parent.removeChild(continuation.el);
+        parent.insertBefore(divider, head.el.nextSibling || null);
+        parent.insertBefore(continuation.el, divider.nextSibling || null);
+        icons();
+    }, { scrollMode: "preserve" });
+    renderCeoStageTraceIntoTurn(head, summary);
+    settleCeoCompressionHeadText(head);
+    renderCeoStageTraceIntoTurn(continuation, summary);
+    syncCeoCompressionRetryAffordances();
+    return true;
+}
+
 function applyCeoCompressionMarker(sessionId = "", marker = null) {
     // 终态那条线的本体是刚落盘的转录行；这一帧只负责让它在实时车道当场出现，
     // 不等整页重建。事件在写盘成功之后才广播，所以"画了线"不会先于"有这条行"。
@@ -4123,12 +4221,25 @@ function applyCeoCompressionMarker(sessionId = "", marker = null) {
     if (!key || key !== String(activeSessionId() || "").trim()) return false;
     if (!U.ceoFeed) return false;
     removeCeoCompressionLiveDivider();
-    const turnId = String((marker || {}).turn_id || (marker || {}).stats?.turn_id || "").trim();
-    if (ceoCompressionDividerExists(turnId, state)) return true;
+    const stats = (marker || {}).stats || {};
+    const turnId = String((marker || {}).turn_id || stats.turn_id || "").trim();
+    const boundary = Number(stats.boundary_stage_index);
+    if (state === "completed" && Number.isFinite(boundary) && boundary > 0) {
+        const turn = getActiveCeoTurn(null, turnId);
+        if (turn && splitCeoTurnAtCompression(turn, boundary, state)) return true;
+    }
+    const dividerBoundary = Number.isFinite(boundary) && boundary > 0 ? boundary : "";
+    if (ceoCompressionDividerExists(turnId, state, dividerBoundary)) return true;
     const anchorEl = findCeoCompressionAnchor(turnId);
-    appendCeoCompressionDivider(state, { interactive: false, anchorEl, turnId });
+    appendCeoCompressionDivider(state, {
+        interactive: false,
+        anchorEl,
+        turnId,
+        boundary: dividerBoundary,
+    });
     // 钉底只在"线就是最后一条"时成立：插进历史里的那条不该把正在往上翻的人拽回底部。
-    if (!anchorEl && S.ceoFeedFollowLatest !== false) scrollCeoFeedToBottom();    return true;
+    if (!anchorEl && S.ceoFeedFollowLatest !== false) scrollCeoFeedToBottom();
+    return true;
 }
 
 function stopCeoContextCompressionPolling() {
@@ -8402,6 +8513,21 @@ function applyCeoTurnTraceViewState(turn = null, viewState = null) {
     });
 }
 
+// 一个回合被压缩线切成两段时，两段各渲染自己那截阶段：头段 stage_index <= 边界，
+// 续跑段 > 边界。编号缺失的阶段（老会话、非前门来源）不参与切分，整段照旧渲染。
+function sliceCeoRailStages(stages, turn) {
+    const from = Number.isFinite(turn?.stageWindowFrom) ? turn.stageWindowFrom : null;
+    const to = Number.isFinite(turn?.stageWindowTo) ? turn.stageWindowTo : null;
+    if (from === null && to === null) return stages;
+    return stages.filter((stage) => {
+        const index = Number(stage?.stage_index);
+        if (!Number.isFinite(index)) return true;
+        if (to !== null && index > to) return false;
+        if (from !== null && index < from) return false;
+        return true;
+    });
+}
+
 function renderCeoStageTraceIntoTurn(turn, canonicalContext = null, { interruptedStageMarker = false } = {}) {
     if (!turn?.listEl || !turn?.flowEl) return 0;
     const summary = filterCeoInteractionFlowSummary(canonicalContext);
@@ -8425,14 +8551,17 @@ function renderCeoStageTraceIntoTurn(turn, canonicalContext = null, { interrupte
         || typeof stageIsContextEvicted !== "function") {
         return 0;
     }
+    const stages = sliceCeoRailStages(summary.stages, turn);
+    if (!stages.length) return 0;
+    const visibleSummary = stages === summary.stages ? summary : { ...summary, stages };
     syncCeoTurnLoadingOnlyState(turn, false);
     // 整段重建会 wipe 掉回合内全部 DOM 态,先在 reset 之前捕获用户展开态快照。
     const turnViewState = captureCeoTurnTraceViewState(turn);
     resetCeoToolFlow(turn);
     turn.el?.classList?.add?.("ceo-timeline");
     turn.listEl.classList?.add?.("task-trace-list");
-    turn.listEl.innerHTML = summary.stages.map((stage, index) => {
-        const isInterrupted = interruptedStageMarker && index === summary.stages.length - 1;
+    turn.listEl.innerHTML = visibleSummary.stages.map((stage, index) => {
+        const isInterrupted = interruptedStageMarker && index === visibleSummary.stages.length - 1;
         const preamble = String(stage?.preamble_text || "").trim();
         const preambleHtml = preamble ? `<div class="ceo-stage-preamble">${esc(preamble)}</div>` : "";
         return renderTraceStep({
@@ -8450,8 +8579,10 @@ function renderCeoStageTraceIntoTurn(turn, canonicalContext = null, { interrupte
     if (typeof bindTraceRoundToolStrips === "function") bindTraceRoundToolStrips(turn.listEl);
     if (typeof bindStageArchiveOpens === "function") bindStageArchiveOpens(turn.listEl);
     if (typeof bindTraceFieldCopyActions === "function") bindTraceFieldCopyActions(turn.listEl);
-    const stageCount = summary.stages.length;
-    const roundCount = summary.stages.reduce((sum, stage) => sum + (Array.isArray(stage?.rounds) ? stage.rounds.length : 0), 0);
+    // 计数与在飞行的归属都按这一截渲染出来的阶段算；merge 基线仍留整份，
+    // 否则下一帧的增量没有可对的上游账本。
+    const stageCount = visibleSummary.stages.length;
+    const roundCount = visibleSummary.stages.reduce((sum, stage) => sum + (Array.isArray(stage?.rounds) ? stage.rounds.length : 0), 0);
     turn.steps = roundCount || stageCount;
     turn.lastExecutionTraceSummary = summary;
     turn.flowEl.hidden = false;
@@ -8462,9 +8593,9 @@ function renderCeoStageTraceIntoTurn(turn, canonicalContext = null, { interrupte
     applyCeoTurnTraceViewState(turn, turnViewState);
     // 整帧重建换掉了 listEl，实时行先躲在容器里；这一帧账本已经画上的调用让它退场，
     // 还在跑的挂回新的阶段卡体内——同一件事不再因为换帧而改变位置。
-    pruneCeoLiveToolSteps(turn, summary);
+    pruneCeoLiveToolSteps(turn, visibleSummary);
     if (turn?.liveToolStepsEl?.children?.length) ceoLiveToolStepHost(turn);
-    updateCeoTurnMeta(turn, ceoRailMetaLabel(turn) || `${stageCount} 个阶段 · ${roundCount} 轮工具`);
+    updateCeoTurnMeta(turn, ceoRailMetaLabel(turn, visibleSummary.stages) || `${stageCount} 个阶段 · ${roundCount} 轮工具`);
     if (typeof bindTraceOutputAutoLoad === "function") bindTraceOutputAutoLoad(turn.listEl);
     if (typeof hydrateTraceOutputBlocks === "function") {
         Array.from(turn.listEl.querySelectorAll?.(".task-trace-step[open]") || []).forEach((item) => {
@@ -8737,7 +8868,7 @@ restoreCeoInflightTurn = function approvalAwareRestoreCeoInflightTurn(
     });
 };
 
-function renderPersistedCeoAssistantTurn(item = {}) {
+function renderPersistedCeoAssistantTurn(item = {}, options = {}) {
     const hasDelta = item?.canonical_context_delta !== null && item?.canonical_context_delta !== undefined;
     const canonicalContext = hasDelta
         ? normalizeCeoSnapshotCanonicalContext(item.canonical_context_delta)
@@ -8772,6 +8903,40 @@ function renderPersistedCeoAssistantTurn(item = {}) {
         turn.el.setAttribute("data-ceo-key", `turn:${historyTurnId}`);
     }
     S.ceoPendingTurns.push(turn);
+    // 重建道：区分线按转录里的边界键放回这一回合的阶段中间（或气泡之前），而不是照抄
+    // 转录行的位置——自动压缩的行是在收尾时落在整回合之后的，那个位置本身就是错的。
+    const rule = options.compressionRule || null;
+    const ruleBoundary = Number(rule?.boundary);
+    let headTurn = null;
+    let ruleDivider = null;
+    let absorbedRule = false;
+    if (rule && rule.state === "completed" && Number.isFinite(ruleBoundary) && ruleBoundary > 0) {
+        const { total, pre } = ceoCompressionStagesAroundBoundary(canonicalContext?.stages, ruleBoundary);
+        if (total && pre < total) {
+            absorbedRule = true;
+            ruleDivider = buildCeoCompressionDividerElement("completed", {
+                interactive: false,
+                turnId: historyTurnId,
+                boundary: ruleBoundary,
+            });
+            if (pre && ruleDivider) {
+                turn.stageWindowFrom = ruleBoundary + 1;
+                turn.compressionBoundary = ruleBoundary;
+                headTurn = createPendingCeoTurn("history", { scrollMode: "preserve" });
+                if (headTurn) {
+                    headTurn.stageWindowTo = ruleBoundary;
+                    headTurn.finalized = true;
+                    S.ceoPendingTurns.push(headTurn);
+                    if (historyTurnId && headTurn.el?.setAttribute) {
+                        headTurn.el.setAttribute("data-ceo-key", `turn:${historyTurnId}#pre-${ruleBoundary}`);
+                    }
+                } else {
+                    turn.stageWindowFrom = null;
+                    turn.compressionBoundary = null;
+                }
+            }
+        }
+    }
     withCeoFeedBatch(() => {
         if (silentReply) renderCeoSilentTurn(turn, { text: content, timestamp: historyTimestamp });
         else renderCeoAssistantTextIntoTurn(turn, content || (status === "paused" ? "已暂停" : ""), { status });
@@ -8786,6 +8951,18 @@ function renderPersistedCeoAssistantTurn(item = {}) {
             canForkReply,
             sessionId: activeSessionId(),
         });
+        if (headTurn) {
+            renderCeoStageTraceIntoTurn(headTurn, canonicalContext);
+            settleCeoCompressionHeadText(headTurn);
+        }
+        if (ruleDivider && turn.el?.parentNode) {
+            const parent = turn.el.parentNode;
+            if (headTurn) {
+                parent.removeChild(headTurn.el);
+                parent.insertBefore(headTurn.el, turn.el);
+            }
+            parent.insertBefore(ruleDivider, turn.el);
+        }
         icons();
     }, { scrollMode: "preserve" });
     if (status === "paused") {
@@ -8794,13 +8971,14 @@ function renderPersistedCeoAssistantTurn(item = {}) {
             S.ceoPausedArchiveTurns[historyTurnId] = turn;
         }
         finalizePausedCeoTurn(content || "已暂停", { source: "history" });
-        return;
+        return absorbedRule;
     }
     // meta 带上 usage/timestamp:随后的 finalizeCeoTurn 写缓存与 usage 行时
     // 用历史值而非当前时间,保证刷新后完成时间稳定。
     // silent_reason 必须一起带上：finalize 走 buildFinalizedCeoTurnPayload 重写缓存行，
     // 缺了它这一行的 silent_reason 就落成空串，刷新后审计面看不到静默理由。
     finalizeCeoTurn(content, { source: "history", usage: historyUsage, timestamp: historyTimestamp, silent_reply: silentReply, silent_reason: silentReason });
+    return absorbedRule;
 }
 
 // ---- CEO 会话视图状态保持 -----------------------------------------------------
@@ -9111,10 +9289,31 @@ function buildFinalizedCeoTurnPayload(sessionId, { normalizedSource = "", normal
     return { messages, inflight_turn: inflightMatchesSource ? null : inflightTurn };
 }
 
+// 转录行里的位置不代表线的真正位置：自动压缩的行是在整回合收尾时落的。所以先把所有
+// 标记行按 turn_id 收成一张规则表，渲染到那一回合时由它把线放回阶段边界；被这样安置过
+// 的标记行不再在原地画第二条。
+function buildCeoCompressionRuleMap(messages) {
+    const rules = new Map();
+    (Array.isArray(messages) ? messages : []).forEach((item, index) => {
+        const marker = normalizeCeoSnapshotCompressionMarker(item?.compression_marker);
+        const turnId = String(marker?.turn_id || "");
+        if (!marker || !turnId) return;
+        rules.set(turnId, {
+            rowIndex: index,
+            state: marker.state,
+            turnId,
+            boundary: Number(marker.boundary_stage_index) || 0,
+        });
+    });
+    return rules;
+}
+
 function renderCeoSnapshotMessageRange(messages, keys, fromIndex, toIndex, targetSessionId) {
     // 渲染 messages[fromIndex,toIndex) 到 ceoFeedAppendHost()；首屏窗口与
     // 分页补渲染共用。key 由 buildCeoMessageKeyList 全局算好传入，occ 计数
     // 与整列一致，窗口起点无关。
+    const compressionRules = buildCeoCompressionRuleMap(messages);
+    const absorbedMarkerRows = new Set();
     for (let index = fromIndex; index < toIndex; index += 1) {
         const item = messages[index];
         const role = String(item?.role || "").trim().toLowerCase();
@@ -9144,21 +9343,32 @@ function renderCeoSnapshotMessageRange(messages, keys, fromIndex, toIndex, targe
             continue;
         }
         if (role === "assistant") {
-            renderPersistedCeoAssistantTurn(item);
+            const rule = compressionRules.get(String(item?.turn_id || "").trim()) || null;
+            const absorbed = renderPersistedCeoAssistantTurn(item, rule ? { compressionRule: rule } : {});
+            if (absorbed && rule) absorbedMarkerRows.add(rule.rowIndex);
             tagRendered();
             continue;
         }
         if (role === "system" && content.trim()) {
             const marker = normalizeCeoSnapshotCompressionMarker(item?.compression_marker);
             if (marker) {
-                appendCeoCompressionDivider(marker.state, {
-                    interactive: false,
-                    turnId: String(marker.turn_id || ""),
-                });
+                const turnId = String(marker.turn_id || "");
+                const boundary = Number(marker.boundary_stage_index) || "";
+                // 已经被那一回合安置过（或分页时画过一条同边界的线）就不再补第二条。
+                const alreadyPlaced = absorbedMarkerRows.has(index)
+                    || (turnId && ceoCompressionDividerExists(turnId, marker.state, boundary));
+                if (!alreadyPlaced) {
+                    appendCeoCompressionDivider(marker.state, {
+                        interactive: false,
+                        turnId,
+                        boundary,
+                    });
+                    tagRendered();
+                }
             } else {
                 addMsg(content, "system", { markdown: true, scrollMode: "preserve" });
+                tagRendered();
             }
-            tagRendered();
         }
     }
 }
@@ -9607,14 +9817,16 @@ function updateCeoTurnMeta(turn, stateLabel) {
 // 轨道在气泡上唯一一直在动的一行：阶段数、轮数、以及此刻还在跑的工具数。
 // 工具帧不许把它换成"正在处理中"这种静态句子——一个十几秒的并行批次里那读起来
 // 就是"一直在加载、不刷新"，而刷新后快照重渲又把计数放了回来。
-function ceoRailMetaLabel(turn) {
-    const stages = Array.isArray(turn?.lastExecutionTraceSummary?.stages) ? turn.lastExecutionTraceSummary.stages : [];
-    if (!stages.length) return "";
-    const rounds = stages.reduce((sum, stage) => sum + (Array.isArray(stage?.rounds) ? stage.rounds.length : 0), 0);
+function ceoRailMetaLabel(turn, stages = null) {
+    const items = Array.isArray(stages)
+        ? stages
+        : (Array.isArray(turn?.lastExecutionTraceSummary?.stages) ? turn.lastExecutionTraceSummary.stages : []);
+    if (!items.length) return "";
+    const rounds = items.reduce((sum, stage) => sum + (Array.isArray(stage?.rounds) ? stage.rounds.length : 0), 0);
     const running = turn.liveToolStepsEl
         ? Array.from(turn.liveToolStepsEl.children).filter((item) => String(item?.dataset?.stepState || "") === "running").length
         : 0;
-    return `${stages.length} 个阶段 · ${rounds} 轮工具${running ? ` · 正在跑 ${running} 个工具` : ""}`;
+    return `${items.length} 个阶段 · ${rounds} 轮工具${running ? ` · 正在跑 ${running} 个工具` : ""}`;
 }
 
 function formatCeoTokenCount(value) {
