@@ -628,3 +628,26 @@ test("组弹窗的这行随勾选更新：压低整组上限的那一刻要当�
     assert.match(windowsRow.innerHTML, /组内最大上下文对齐: 390000/);
     assert.match(windowsRow.innerHTML, /组内最大 690000/);
 });
+
+test("重开组弹窗要把正文滚回顶部：常驻容器会把上一组的滚动位置带过来", () => {
+    const { app, elements } = loadModelPage();
+    const body = elements["model-group-dialog-body"];
+
+    assert.equal(app.openLoadBalanceGroupDialog("g_shared"), true);
+    // 用户在上一组的成员列表里滚到了底部，组名那颗输入框已经滚出可视区。
+    body.scrollTop = 91;
+    assert.equal(app.openLoadBalanceGroupDialog("g_unused"), true);
+    assert.equal(body.scrollTop, 0, "换组重开必须从组名那一行开始");
+});
+
+test("确认框自己不许当滚动口：点列表底部的勾选框会把整窗顶上去", () => {
+    // overflow:hidden 仍是滚动容器——成员列表的溢出内容会让弹窗 scrollHeight 高于
+    // clientHeight，复选框一拿焦点，浏览器就把整窗滚下去（标题被顶出、底部露空白）。
+    // 只有 clip 不是滚动容器，所以这条钉在 CSS 上而不是 DOM 上。
+    const css = fs.readFileSync(path.join(ROOT, "g3ku/web/frontend/org_graph.css"), "utf8");
+    const open = css.search(/^\.confirm-dialog\s*\{/m);
+    assert.ok(open > 0, "找不到 .confirm-dialog 规则块");
+    const block = css.slice(open, css.indexOf("}", open));
+    assert.match(block, /overflow:\s*clip/);
+    assert.doesNotMatch(block, /overflow:\s*hidden/);
+});

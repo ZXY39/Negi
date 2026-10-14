@@ -11977,6 +11977,9 @@ function openLoadBalanceGroupDialog(groupKey = "") {
         error: "",
     };
     renderModelGroupDialog();
+    // 正文容器是常驻节点，换组只换它的 innerHTML：不清滚动位置的话，上一组滚到列表
+    // 底部再开下一组，组名那颗输入框会停在可视区上方。
+    if (U.modelGroupDialogBody) U.modelGroupDialogBody.scrollTop = 0;
     return true;
 }
 

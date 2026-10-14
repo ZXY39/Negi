@@ -7662,7 +7662,10 @@ textarea {
     background: var(--bg-panel);
     box-shadow: var(--shadow-lg);
     contain: layout paint;
-    overflow: hidden;
+    /* clip 而不是 hidden：hidden 仍是滚动容器，正文里的复选框一拿到焦点，浏览器会把
+       弹窗本身滚下去（成员列表的溢出内容会让 scrollHeight 高于 clientHeight），
+       标题被顶出可视区、底部露出一截空白。弹窗不许当滚动口，滚动只归 .project-settings-body。 */
+    overflow: clip;
 }
 
 .confirm-header h2 {
