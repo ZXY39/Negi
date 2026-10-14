@@ -1758,39 +1758,65 @@ class MemoryManager:
             )
         return self._normalize_document_text("".join(format_memory_entry(entry) for entry in entries))
 
-    def _consolidation_categories(self) -> tuple[list[tuple[str, str]], list[str]]:
-        """Derive the resident consolidation rows from the store.
+    def _category_note_index(self) -> list[dict[str, Any]]:
+        """Derive every consolidation category from the store, in first-appearance order.
 
-        One row per distinct `consolidated_into`, in first-appearance order, described by
-        that category note's first line. The directory is never enumerated: a category
-        whose retired rows are all gone later has to lose its line by itself.
-        Returns (rows, broken_refs) where a broken ref points at a missing note file.
+        One entry per distinct `consolidated_into`, carrying that category note's first
+        line (the only navigation text the resident row shows), how many retired rows
+        point at it, and whether the note is readable at all. The directory is never
+        enumerated: a category whose retired rows are all gone later has to lose its row
+        by itself.
         """
-        ordered: list[str] = []
         repo = getattr(self, "_memory_repo", None)
         if repo is None:
-            return [], []
+            return []
+        ordered: list[str] = []
+        counts: dict[str, int] = {}
         for row in repo.list_memories():
             category = str(row.get("consolidated_into") or "").strip()
-            if category and category not in ordered:
+            if not category:
+                continue
+            if category not in counts:
                 ordered.append(category)
-        rows: list[tuple[str, str]] = []
-        broken: list[str] = []
+                counts[category] = 0
+            counts[category] += 1
+        entries: list[dict[str, Any]] = []
         for category in ordered:
             path = self.index_dir / note_file_name(category)
-            if not path.exists():
-                broken.append(category)
-                continue
+            scope_line = ""
             try:
                 body = path.read_text(encoding="utf-8")
             except OSError:
-                broken.append(category)
-                continue
+                body = ""
             scope_line = next((line.strip() for line in body.splitlines() if line.strip()), "")
-            if not scope_line:
-                broken.append(category)
-                continue
-            rows.append((scope_line, category))
+            entries.append(
+                {
+                    "note_ref": category,
+                    "handle": note_handle(category),
+                    "scope_line": scope_line,
+                    "entry_count": counts[category],
+                    "unusable": not scope_line,
+                }
+            )
+        return entries
+
+    def list_consolidation_categories(self) -> list[dict[str, Any]]:
+        """Read-only consolidation list for the admin surface.
+
+        Keeps the unusable entries (missing or empty category note) visible so a broken
+        link is shown instead of silently dropping that class.
+        """
+        return self._category_note_index()
+
+    def _consolidation_categories(self) -> tuple[list[tuple[str, str]], list[str]]:
+        """Resident consolidation rows: usable categories only, plus the broken refs."""
+        entries = self._category_note_index()
+        rows = [
+            (str(entry["scope_line"]), str(entry["note_ref"]))
+            for entry in entries
+            if not entry["unusable"]
+        ]
+        broken = [str(entry["note_ref"]) for entry in entries if entry["unusable"]]
         return rows, broken
 
     def _consolidation_block_text(self) -> str:
@@ -2400,6 +2426,21 @@ class MemoryManager:
             return None
         return MemoryBatch(op=head.op, items=items)
 
+    def _note_names(self) -> set[str]:
+        return {path.stem for directory in (self.notes_dir, self.index_dir) for path in directory.glob("*.md")}
+
+    def resolve_note_ref(self, ref: str) -> str:
+        """Map the handle the resident block shows back to the note file it stands for.
+
+        The admin read lane needs the real name rather than the token: the note update
+        endpoint only accepts names, so a preview opened by handle has to remember what
+        it actually resolved to.
+        """
+        normalized = str(ref or "").strip()
+        if not normalized:
+            return ""
+        return resolve_note_token(normalized, self._note_names())
+
     def load_note(self, ref: str) -> str:
         """Read one note for the CEO's `memory_note` tool: ordinary notes and category
         notes both resolve, so a retired memory stays reachable. The resident block shows
@@ -2407,11 +2448,7 @@ class MemoryManager:
         normalized = str(ref or "").strip()
         if not normalized:
             raise FileNotFoundError("memory note ref is required")
-        name = resolve_note_token(
-            normalized,
-            {path.stem for directory in (self.notes_dir, self.index_dir) for path in directory.glob("*.md")},
-        )
-        file_name = note_file_name(name)
+        file_name = note_file_name(resolve_note_token(normalized, self._note_names()))
         for directory in (self.notes_dir, self.index_dir):
             path = directory / file_name
             if path.exists():

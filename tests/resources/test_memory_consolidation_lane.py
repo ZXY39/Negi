@@ -157,6 +157,38 @@ def test_a_broken_category_link_drops_the_line_and_is_reported(tmp_path: Path) -
         manager.close()
 
 
+def test_the_admin_browser_lists_every_class_with_its_count(tmp_path: Path) -> None:
+    manager = _manager(tmp_path)
+    try:
+        first = _add(manager, body="反代端口改成 8799 之后要重启 nginx", minimal="本机环境->端口")
+        second = _add(manager, body="网页端口固定 18790，占用时不许自动换", minimal="本机环境->网页端口")
+        _write_category(
+            manager,
+            "note_local_env",
+            "要改本机端口或重启反代时打开\n\n## 反代端口\n8799\n",
+        )
+        _retire(manager, [first, second], "note_local_env")
+        broken = _add(manager, body="指向不存在分类的记忆", minimal="断链->记忆")
+        _retire(manager, [broken], "note_gone")
+
+        items = manager.list_consolidation_categories()
+        assert [str(item["note_ref"]) for item in items] == ["note_local_env", "note_gone"]
+        assert items[0]["scope_line"] == "要改本机端口或重启反代时打开"
+        assert items[0]["entry_count"] == 2
+        assert items[0]["unusable"] is False
+        assert items[0]["handle"] == _markdown_memory().note_handle("note_local_env")
+        # 常驻行不渲染的断链分类，浏览面仍要列出来：否则操作员看到的是"少了一类"而不是"链断了"。
+        assert items[1]["unusable"] is True
+        assert items[1]["scope_line"] == ""
+        assert items[1]["entry_count"] == 1
+
+        rows, broken_refs = manager._consolidation_categories()
+        assert [ref for _line, ref in rows] == ["note_local_env"]
+        assert broken_refs == ["note_gone"]
+    finally:
+        manager.close()
+
+
 def test_the_consolidation_block_is_excluded_from_both_counting_judgements(tmp_path: Path) -> None:
     """Permanent bytes must not feed a trigger that measures retireable bytes: with the
     block counted, every later commit would queue another consolidation forever. The cap

@@ -2234,6 +2234,33 @@ async def get_current_memories():
     }
 
 
+@router.get('/memory/index-notes')
+async def get_memory_index_notes():
+    """归并区分类 note 的只读列表：每分类一条，带常驻行显示的句柄与被归并的条目数。
+
+    断链的分类同样返回（`unusable` 为真），让浏览面把问题显示出来而不是静默少一类。
+    """
+    manager = _runtime_memory_manager()
+    reader = getattr(manager, 'list_consolidation_categories', None)
+    if not callable(reader):
+        raise HTTPException(status_code=503, detail='memory_index_notes_unavailable')
+    try:
+        items = reader()
+        if isawaitable(items):
+            items = await items
+    except Exception as exc:
+        raise _memory_read_error(
+            code='memory_index_notes_read_failed',
+            message='归并记忆暂时不可读取，请稍后刷新。',
+        ) from exc
+    items = list(items or [])
+    return {
+        'ok': True,
+        'items': items,
+        'total': len(items),
+    }
+
+
 @router.post('/memory/current/update')
 async def update_current_memory(request: Request, payload: dict | None = Body(default=None)):
     manager = _runtime_memory_manager()
@@ -2382,8 +2409,13 @@ async def get_memory_note(ref: str):
                 'message': 'note ref must match note_[a-z0-9_]+, or a handle shown in the memory block',
             },
         )
+    # 句柄先进来就要换成实名：编辑走的是只认实名的写端点，预览若把句柄原样回给前端，
+    # 用户点开句柄再保存就会撞 400。
+    resolver = getattr(manager, 'resolve_note_ref', None)
+    read_ref = resolver(normalized_ref) if callable(resolver) else normalized_ref
+    read_ref = str(read_ref or '').strip() or normalized_ref
     try:
-        body = reader(normalized_ref)
+        body = reader(read_ref)
         if isawaitable(body):
             body = await body
     except FileNotFoundError as exc:
@@ -2414,7 +2446,7 @@ async def get_memory_note(ref: str):
     return {
         'ok': True,
         'item': {
-            'ref': normalized_ref,
+            'ref': read_ref,
             'body': str(body or ''),
         },
     }

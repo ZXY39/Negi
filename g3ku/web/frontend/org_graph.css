@@ -8853,6 +8853,93 @@ textarea {
     overflow-wrap: anywhere;
 }
 
+.memory-note-preview-trail {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 6px;
+    font-size: 0.82rem;
+    color: var(--text-secondary);
+}
+
+.memory-note-trail-crumb {
+    padding: 2px 8px;
+    border: 1px solid var(--border-color);
+    border-radius: 10px;
+    background: transparent;
+    color: var(--text-secondary);
+    font: inherit;
+    cursor: pointer;
+}
+
+.memory-note-trail-crumb.is-current {
+    border-color: transparent;
+    color: var(--text-primary);
+    cursor: default;
+    overflow-wrap: anywhere;
+}
+
+.memory-note-trail-sep {
+    color: var(--text-muted);
+}
+
+/* 归并 note 列表与正文共用同一个固定高度的框：列表按行数撑开会让抽屉高度跳动。 */
+.memory-note-index-list {
+    min-height: 220px;
+    max-height: min(52vh, 560px);
+    overflow: auto;
+    padding: 6px 0;
+    border: 1px solid var(--border-color);
+    border-radius: 18px;
+    background: color-mix(in srgb, var(--bg-app) 82%, var(--bg-panel) 18%);
+}
+
+.memory-note-index-table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 0.86rem;
+}
+
+.memory-note-index-table th,
+.memory-note-index-table td {
+    padding: 8px 16px;
+    text-align: left;
+    vertical-align: top;
+    border-bottom: 1px solid var(--border-color);
+}
+
+.memory-note-index-table th {
+    position: sticky;
+    top: 0;
+    background: var(--bg-panel);
+    color: var(--text-secondary);
+    font-weight: 600;
+}
+
+.memory-note-index-cell-scope {
+    color: var(--text-secondary);
+    overflow-wrap: anywhere;
+}
+
+.memory-note-index-cell-count {
+    white-space: pre;
+    text-align: right;
+}
+
+.memory-note-index-row.is-unusable td {
+    color: var(--status-failed-text);
+}
+
+.memory-note-index-empty {
+    padding: 18px 20px;
+    color: var(--text-secondary);
+    font-size: 0.88rem;
+}
+
+.memory-note-index-empty.is-error {
+    color: var(--status-failed-text);
+}
+
 .model-detail-form {
     display: flex;
     flex-direction: column;

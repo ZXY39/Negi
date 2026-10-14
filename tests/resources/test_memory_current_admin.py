@@ -88,6 +88,25 @@ class _StubMemoryManager:
     def list_current_memories(self):
         return [{"memory_id": "Ab12Z9", "memory_body": "旧内容", "minimal_memory": "old->body"}]
 
+    def list_consolidation_categories(self):
+        self.calls.append(("list_consolidation_categories", ()))
+        return [
+            {
+                "note_ref": "note_local_env",
+                "handle": "n0bfc7",
+                "scope_line": "要改本机端口或重启反代时打开",
+                "entry_count": 2,
+                "unusable": False,
+            },
+            {
+                "note_ref": "note_gone",
+                "handle": "n1a2b3",
+                "scope_line": "",
+                "entry_count": 1,
+                "unusable": True,
+            },
+        ]
+
     async def update_current_memory(self, memory_id: str, *, memory_body: str, minimal_memory=None):
         self.calls.append(("update_current_memory", (memory_id, memory_body, minimal_memory)))
         if memory_id == "missing":
@@ -519,3 +538,25 @@ async def test_delete_current_memories_deletes_only_checked_notes(tmp_path: Path
         assert (manager.notes_dir / "note_keep1.md").exists() is True
     finally:
         manager.close()
+
+
+# ---------------------------------------------------------------------------
+# 归并 note 浏览面（只读列表）
+# ---------------------------------------------------------------------------
+
+
+def test_index_notes_endpoint_lists_classes_and_keeps_broken_ones(stub_env):
+    workspace, manager, client = stub_env
+
+    response = client.get("/api/memory/index-notes")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["ok"] is True
+    assert payload["total"] == 2
+    assert payload["items"][0]["note_ref"] == "note_local_env"
+    assert payload["items"][0]["handle"] == "n0bfc7"
+    # 断链分类照样返回：浏览面少一类比多一类更难查
+    assert payload["items"][1]["unusable"] is True
+    assert ("list_consolidation_categories", ()) in manager.calls
+    assert _audit_lines(workspace) == []
