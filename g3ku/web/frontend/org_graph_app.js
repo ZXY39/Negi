@@ -9985,6 +9985,7 @@ function ceoContextLoaderKind(toolName = "") {
     const normalized = String(toolName || "").trim().toLowerCase();
     if (normalized === "load_tool_context" || normalized === "load_tool_context_v2") return "tool";
     if (normalized === "load_skill_context" || normalized === "load_skill_context_v2") return "skill";
+    if (normalized === "memory_note") return "note";
     return "";
 }
 
@@ -10068,6 +10069,7 @@ function ceoContextLoadNoticeIconName(kind = "") {
     const normalizedKind = String(kind || "").trim().toLowerCase();
     if (normalizedKind === "tool") return "wrench";
     if (normalizedKind === "skill") return "sparkles";
+    if (normalizedKind === "note") return "notebook-pen";
     return "";
 }
 
@@ -10084,7 +10086,7 @@ function showCeoContextLoadNotice(text = "", { durationMs = CEO_CONTEXT_LOAD_NOT
     const item = document.createElement("div");
     item.className = "ceo-context-load-notice-item";
     const normalizedKind = String(kind || "").trim().toLowerCase();
-    if (normalizedKind === "tool" || normalizedKind === "skill") {
+    if (normalizedKind === "tool" || normalizedKind === "skill" || normalizedKind === "note") {
         item.classList?.add?.(`is-${normalizedKind}`);
         item.dataset.noticeKind = normalizedKind;
     }
@@ -10126,7 +10128,7 @@ function showCeoContextLoadNotice(text = "", { durationMs = CEO_CONTEXT_LOAD_NOT
 
 function extractCeoContextLoadTarget(toolName = "", rawText = "") {
     const loaderKind = ceoContextLoaderKind(toolName);
-    const key = loaderKind === "skill" ? "skill_id" : "tool_id";
+    const key = loaderKind === "skill" ? "skill_id" : loaderKind === "note" ? "ref" : "tool_id";
     const text = String(rawText || "").trim();
     if (!text) return "";
     const payload = parseJsonObjectText(text);
@@ -10160,6 +10162,11 @@ function buildCeoContextLoadNotice(toolName = "", targetId = "") {
         return normalizedTargetId
             ? `\u5df2\u52a0\u8f7d skill ${normalizedTargetId}`
             : "\u5df2\u52a0\u8f7d skill";
+    }
+    if (loaderKind === "note") {
+        return normalizedTargetId
+            ? `\u5df2\u52a0\u8f7d note:${normalizedTargetId}`
+            : "\u5df2\u52a0\u8f7d\u8bb0\u5fc6\u7b14\u8bb0";
     }
     return normalizedTargetId
         ? `\u5df2\u52a0\u8f7d\u5de5\u5177 ${normalizedTargetId}`

@@ -140,6 +140,7 @@ from main.runtime.send_token_preflight import (
     compute_runtime_send_token_preflight_thresholds,
 )
 from main.runtime.stage_budget import (
+    FRONTDOOR_STAGELESS_MEMORY_TOOL_NAMES,
     SILENT_TOOL_NAME,
     STAGE_BUDGET_EXHAUSTED_FREE_PASS_REMINDER,
     STAGE_BUDGET_EXHAUSTION_PREDICTED_REMINDER_TEMPLATE,
@@ -250,9 +251,6 @@ _STAGE_BLOCK_ECHO_REPAIR_MESSAGE = (
     'Otherwise reply to the user in natural language.'
 )
 
-# 落库类工具全局白名单：免活动阶段即可调用。避免"用户口头给一条长期指令 → 模型
-# 想写记忆却先在 memory_update 上被 no active stage 拦下 → 模型不再重试而永久丢失"。
-FRONTDOOR_STAGELESS_MEMORY_TOOL_NAMES = frozenset({"memory_update", "memory_note"})
 # 节点暂停事件心跳自动补开阶段的预算。
 FRONTDOOR_NODE_ERROR_AUTO_STAGE_BUDGET = 10
 

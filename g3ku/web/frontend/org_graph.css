@@ -5561,6 +5561,11 @@ textarea {
     background: #ef4444;
 }
 
+/* 读笔记是按需回读，不带风险度含义，所以这颗点不跟着 risk-* 走，用品牌青单独标一类。 */
+.ceo-context-load-notice-item.is-note .ceo-context-load-notice-risk-dot {
+    background: #39c5bb;
+}
+
 .ceo-context-load-notice-kind-icon {
     width: 1rem;
     height: 1rem;

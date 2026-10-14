@@ -410,7 +410,8 @@ test("ceo stage trace renders real stage goal from true frontdoor stage data", (
     assert.doesNotMatch(turn.listEl.innerHTML, /1\/7/);
     assert.doesNotMatch(turn.listEl.innerHTML, /\u6700\u5927\u8f6e\u6570/);
     assert.doesNotMatch(turn.listEl.innerHTML, /loaded context/);
-    assert.match(turn.listEl.innerHTML, /memory_note/);
+    // 读笔记不再画工具行：在飞时什么都不显示，成功后右上角那条 pill 才是它的落点
+    assert.doesNotMatch(turn.listEl.innerHTML, /memory_note/);
     assert.equal(renderedSteps, 1);
     assert.match(turn.metaEl.textContent, /1/);
     assert.doesNotMatch(turn.listEl.innerHTML, /ceo:stage:inflight-stage-1/);
@@ -577,7 +578,7 @@ test("ceo stage trace hides successful loader tools from interaction flow render
 
     assert.equal(renderedSteps, 1);
     assert.doesNotMatch(turn.listEl.innerHTML, /load_tool_context/);
-    assert.match(turn.listEl.innerHTML, /memory_note/);
+    assert.doesNotMatch(turn.listEl.innerHTML, /memory_note/);
     assert.equal(U.ceoContextLoadNotice.children.length, 0);
     assert.equal(U.ceoContextLoadNotice.hidden, true);
 });
@@ -633,7 +634,7 @@ test("ceo stage trace shows stage rail directly with per-stage collapse by defau
                         text: "先搜一下候选",
                         tools: [
                             {
-                                tool_name: "memory_note",
+                                tool_name: "exec",
                                 status: "success",
                                 output_text: "ok",
                             },
@@ -660,11 +661,11 @@ test("ceo live tool events do not auto-expand interaction flow", () => {
     const turn = makeTurn({ text: "" });
 
     const item = applyCeoToolEventToTurn(turn, {
-        tool_name: "memory_note",
+        tool_name: "exec",
         status: "running",
         kind: "tool_start",
-        text: '{"query": "repo"}',
-        tool_call_id: "memory-note:1",
+        text: '{"command": "repo"}',
+        tool_call_id: "exec:1",
         source: "user",
     });
 

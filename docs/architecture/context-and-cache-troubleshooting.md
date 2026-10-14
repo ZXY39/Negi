@@ -236,6 +236,12 @@ Heartbeat / cron 不再在主 CEO/frontdoor 路径上使用单独的短 `ceo_hea
 - 不变量（省缓存不许省声明）：尾块能不能省略，判据取头部那条记录里的原文，不取"本轮算出来了"。前门一个回合内有四条装配路（`message_builder` 的两条、回合起点 send-preflight、同回合每一跳的 prompt contract），它们拿到的 session 不是同一实例，`state` 的键又会被归一化白名单静默丢掉，所以钉住内容除会话对象属性外还落一张按 `session_key` 分桶的进程表；两处都对不上才重钉。拿不到载体（既无会话对象又无 `session_key`）或名单为空时整块不钉，三段声明全留在尾块。
 - 症状：请求体头部出现 `## Runtime Contract (pinned)` 而尾块没有 `candidate_skills` 行＝正常形状。两处都有＝该跳没钉上，查装配路的 head/tail 分工。两处都没有而本轮确有候选技能＝缺陷：模型手里没有可加载的 skill_id，按"省缓存把声明省没了"排查，不要当缓存优化问题处理。相邻跳之间头部字节在变＝两个装配点算出的刷新键不一致（多为临时目录或曝光 revision 不同源），这种交替比不钉糟糕得多。
 
+### 3.19 系统提示词的重读跟着记忆块与曝光的戳走
+
+- 坑：`ceo_frontdoor.md` 逐装配点从磁盘重读。会话中途改一个字节，首条 `system` 就变了，而它身后是 `tools[]`、长期记忆块和整段历史——一次编辑等于给这个会话重铺全部前缀。
+- 不变量：`CeoPromptBuilder.build_base_prompt(cache_stamp=...)` 的复用戳是「记忆块采纳时间 + `capability_snapshot.exposure_revision`」，即记忆块与 `tools[]` 各自决定何时换字节的那两个时钟；戳不动就返回同一份渲染结果，戳一动就重新读盘。注入值是 `stage_budget.ceo_stage_free_tool_names()`（免阶段名单，代码常量的派生值），不随轮变化，也不与本轮可见面取交集。空戳不缓存：新会话与不走这条装配路的调用方每次都读盘。
+- 症状：改了 `ceo_frontdoor.md` 而某个活会话毫无反应＝预期行为，它要等下一次记忆采纳或曝光变化；新开一个会话立刻带新措辞。判"这一跳用的到底是哪份提示词"要比 `system` 字节与文件 mtime 的先后，别拿提交时间当依据。
+
 ## 4. Prompt Cache Family 与 Actual Request
 
 本节是 actual request 的取证合同：family/key 语义、per-request 取证顺序、baseline 与恢复顺序、shrink 原因边界。

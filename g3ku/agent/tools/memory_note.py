@@ -20,7 +20,11 @@ class MemoryNoteTool(Tool):
 
     @property
     def description(self) -> str:
-        return "Load a detailed memory note by the token shown next to it in the memory block."
+        return (
+            "Load the full body of one memory note. Pass the token the memory block shows - an "
+            "entry's `note:<token>` or a consolidation line's `(note: <token>)` - exactly as shown; "
+            "never invent or guess a note name. A real note file name also resolves."
+        )
 
     @property
     def parameters(self) -> dict[str, Any]:
