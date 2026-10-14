@@ -84,9 +84,18 @@ class _DirectProviderChatBackend:
         parallel_tool_calls: bool | None = None,
         prompt_cache_key: str | None = None,
         on_text_delta: Any = None,
+        on_reasoning_delta: Any = None,
+        on_reasoning_segment: Any = None,
         on_model_retry_status: Any = None,
     ):
-        _ = on_text_delta, on_model_retry_status
+        # 直连 provider 这条道本来就不投正文增量（`on_text_delta` 一直在此吞掉），
+        # 所以思考增量同样吞掉——前端在这条道上只剩计时，不会出现半条车道有思考行。
+        # 段号仍要起一次，保持与 chat_backend 的调用形状一致。
+        _ = on_text_delta, on_reasoning_delta, on_model_retry_status
+        if callable(on_reasoning_segment):
+            segment_result = on_reasoning_segment()
+            if inspect.isawaitable(segment_result):
+                await segment_result
         model = str(model_refs[0] if model_refs else "").strip() or None
         kwargs: dict[str, Any] = {
             "messages": sanitize_provider_messages(messages),

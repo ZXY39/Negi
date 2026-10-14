@@ -88,6 +88,8 @@ class ChatBackend(Protocol):
         node_turn_lease: NodeTurnLease | None = None,
         model_concurrency_controller: ModelKeyConcurrencyController | None = None,
         on_text_delta: Any = None,
+        on_reasoning_delta: Any = None,
+        on_reasoning_segment: Any = None,
         model_refs_resolver: Any = None,
         single_request_timeout_seconds: float | None = None,
         on_model_retry_status: Any = None,
@@ -1122,6 +1124,8 @@ class ConfigChatBackend:
         node_turn_lease: NodeTurnLease | None = None,
         model_concurrency_controller: ModelKeyConcurrencyController | None = None,
         on_text_delta: Any = None,
+        on_reasoning_delta: Any = None,
+        on_reasoning_segment: Any = None,
         model_refs_resolver: Any = None,
         model_routes_supplier: Any = None,
         single_request_timeout_seconds: float | None = None,
@@ -1474,6 +1478,15 @@ class ConfigChatBackend:
                                     return None
                                 return on_text_delta(normalized_text)
 
+                            def _provider_reasoning_delta_callback(text: Any) -> Any:
+                                # 刻意不碰 attempt_visible_text_streamed：思考分片不算"正文已投出"。
+                                # 一旦置真，:1602 那条"正文已流出就不换槽"的纪律会把纯思考跳的
+                                # StreamIncomplete 容灾车道堵掉。
+                                normalized_text = str(text or "")
+                                if not normalized_text or on_reasoning_delta is None:
+                                    return None
+                                return on_reasoning_delta(normalized_text)
+
                             provider_kwargs = {
                                 **dict(preview_payload or {}),
                                 'messages': request_messages,
@@ -1483,6 +1496,12 @@ class ConfigChatBackend:
                             }
                             if on_text_delta is not None and bool(getattr(target.provider, 'supports_streaming', False)):
                                 provider_kwargs['on_text_delta'] = _provider_text_delta_callback
+                            if (
+                                on_reasoning_delta is not None
+                                and bool(getattr(target.provider, 'supports_streaming', False))
+                                and bool(getattr(target.provider, 'supports_reasoning_delta_streaming', False))
+                            ):
+                                provider_kwargs['on_reasoning_delta'] = _provider_reasoning_delta_callback
                             if bool(getattr(target.provider, 'supports_upstream_wait_notice', False)):
                                 provider_kwargs['on_upstream_wait'] = _notice_upstream_wait
                             outer_attempt_timeout_seconds = None if bool(getattr(target.provider, 'manages_request_timeout_internally', False)) else attempt_timeout_seconds
@@ -1520,6 +1539,12 @@ class ConfigChatBackend:
                             if node_turn_controller is not None:
                                 node_turn_controller.record_route_request_start(node_turn_lease)
                             attempt_started_monotonic = time.perf_counter()
+                            if callable(on_reasoning_segment):
+                                # 每一发都是一段新的思考：思考文本是按 attempt 产生的，
+                                # 同跳重发/换链必须让前端丢掉上一段重计，否则两条道会叠两份。
+                                segment_result = on_reasoning_segment()
+                                if inspect.isawaitable(segment_result):
+                                    await segment_result
                             response = await wait_for_model_attempt(
                                 target.provider.chat(
                                     **provider_kwargs,

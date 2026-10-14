@@ -289,6 +289,7 @@ async def consume_openai_like_chat_stream(
     first_chunk_timeout_seconds: float,
     idle_chunk_timeout_seconds: float,
     on_text_delta: Any = None,
+    on_reasoning_delta: Any = None,
     on_upstream_wait: Any = None,
 ) -> tuple[str | None, list[ToolCallRequest], str, dict[str, int], str | None]:
     content_parts: list[str] = []
@@ -325,6 +326,10 @@ async def consume_openai_like_chat_stream(
         elif reasoning_delta:
             reasoning_content_parts.append(reasoning_delta)
             diagnostics.note_chunk("reasoning_delta")
+            if callable(on_reasoning_delta):
+                callback_result = on_reasoning_delta(reasoning_delta)
+                if inspect.isawaitable(callback_result):
+                    await callback_result
         elif tool_call_deltas:
             diagnostics.note_chunk("tool_call_delta")
         else:

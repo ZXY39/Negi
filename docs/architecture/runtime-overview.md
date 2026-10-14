@@ -615,6 +615,7 @@ token preflight 估算、触发阈值、`effective_input_tokens` 真相车道、
 - **思考正文的方言有两种**：流式与非流式解析都同时接受 `reasoning_content`（DeepSeek / GLM）与 `reasoning`（SenseNova 用它发思考，实测一条短回答里 102 个分片全走这个键），同一个网关两种键都出现过。只认一种的后果是 `usage.completion_tokens_details.reasoning_tokens` 一直有值、`LLMResponse.reasoning_content` 却全空——思考按 token 计了费、正文一个字都没收进来，闸门开着也没有内容可回放。所以计费里的思考 token 与是否收到思考正文是两条独立读数：判「这条 binding 值不值得开闸」要看后者，不是看 usage。
 - Responses 协议车道的思考是 `type="reasoning"` 的输出项而不是文本块：请求里的 `include:["reasoning.encrypted_content"]` 由消费层接住（`response.output_item.done` 先到、`response.completed` 补齐权威内容），并打一个 `g3ku_reasoning_model` 戳。项里到底带密文还是带 `summary` 由上游决定：不回密文时该项只有 summary，回放出去的就是思考摘要文本（实盘一条 CEO 会话 41 个 reasoning 项全部只有 `id/status/summary`，占该请求 input 字符的 34.8%）。落盘后随行存成 `reasoning_items`，`_convert_messages` 在所属 assistant 正文**之前**原位回放出该项（戳摘掉），且只回给签发它的那个模型：密文由签发模型的服务端密钥加密，换模型解不开、会被当成畸形项；没有戳（流未走到终止事件）就没有回放资格。chat 协议的 `reasoning_content` 文本与 Responses 的 `reasoning_items` 互斥，共用同一套链级闸门与退出规则；`thinking_blocks` 仍全仓无赋值点。
 - 成本按"保留跳数 × 每条思考长度"计，且压缩请求体原样带着历史，开启后压缩触发点前移。`thinking_tokens` 的计量与展示口径见 `web-and-admin.md`「Task Token Stats Window Contract」。
+- **实时显示侧与写入闸门是两条互不授权的判据**：`on_reasoning_delta` 那条流式回调只回答"这一跳有没有思考分片可看"，与 `reasoning_context_enabled` 无关——画得出这一行不代表这份思考会进上下文，链上某位关着回放也不妨碍当跳把它画出来。显示车道只把有界读数交给 inflight 快照，思考全文活到回合结束即弃，转录行里落的是回合汇总标量（合同见 `web-and-admin.md`「Live Reasoning Row Contract」）。同一条不可依赖的读数还有计费侧：`completion_tokens_details.reasoning_tokens` 在现网网关上实测恒 0（243 字符的思考回 0），所以界面上的思考 token 一律标成估算，不拿它当计量。
 
 ## Frontdoor Context Compression
 

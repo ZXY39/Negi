@@ -3058,6 +3058,74 @@ textarea {
     transform: rotate(-135deg);
 }
 
+/* 思维链实时行：折叠态只占一行（耗时 + 思考 token + 最新一行），展开才给固定高度的
+   滚动窗。窗口高度写死是刻意的——思考能到几十 KB，让它按内容撑开就等于把气泡撑出屏，
+   长内容一律"范围固定 + 内部滚动"。display:flex 会盖掉 UA 的 [hidden]，必须自己补一条。 */
+.ceo-thinking-line {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    margin: 2px 0 0;
+    color: var(--text-muted);
+    font-size: 0.74rem;
+    letter-spacing: 0.01em;
+    min-width: 0;
+}
+
+.ceo-thinking-line[hidden] {
+    display: none;
+}
+
+.ceo-thinking-line-head {
+    display: flex;
+    align-items: baseline;
+    gap: 8px;
+    min-width: 0;
+}
+
+.ceo-thinking-line-meta {
+    flex: 0 0 auto;
+    white-space: pre;
+}
+
+.ceo-thinking-line-tail {
+    flex: 1 1 auto;
+    min-width: 0;
+    opacity: 0.86;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.ceo-thinking-line-caret {
+    flex: 0 0 auto;
+    padding: 0 2px;
+    border: 0;
+    background: none;
+    color: var(--text-muted);
+    font: inherit;
+    cursor: pointer;
+}
+
+.ceo-thinking-line-caret:hover {
+    color: var(--text-secondary);
+}
+
+.ceo-thinking-line-pane {
+    max-height: 8.5rem;
+    overflow-y: auto;
+    overscroll-behavior: contain;
+    padding-left: 8px;
+    border-left: 1px solid var(--border-color, rgba(255, 255, 255, 0.12));
+    color: var(--text-secondary);
+    white-space: pre-wrap;
+    word-break: break-word;
+}
+
+.ceo-thinking-line-pane[hidden] {
+    display: none;
+}
+
 .ceo-turn-usage {
     font-size: 0.76rem;
     line-height: 1.4;

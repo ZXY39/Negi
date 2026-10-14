@@ -7369,6 +7369,8 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
         parallel_tool_calls: bool | None,
         prompt_cache_key: str,
         on_text_delta: Any = None,
+        on_reasoning_delta: Any = None,
+        on_reasoning_segment: Any = None,
         on_model_retry_status: Any = None,
         required_context_window_tokens: int = 0,
     ) -> dict[str, Any]:
@@ -7379,6 +7381,8 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
             parallel_tool_calls=bool(parallel_tool_calls) if isinstance(parallel_tool_calls, bool) else None,
             prompt_cache_key=(str(prompt_cache_key).strip() or None) if prompt_cache_key is not None else None,
             on_text_delta=on_text_delta,
+            on_reasoning_delta=on_reasoning_delta,
+            on_reasoning_segment=on_reasoning_segment,
             on_model_retry_status=on_model_retry_status,
             required_context_window_tokens=int(required_context_window_tokens or 0),
         )
@@ -8202,11 +8206,19 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
         state_for_request = self._rotate_frontdoor_model_refs_if_stale(state_for_request)
         runtime_session = getattr(getattr(runtime, "context", None), "session", None)
         assistant_text_delta_handler = None
+        assistant_reasoning_delta_handler = None
+        assistant_reasoning_segment_handler = None
         model_retry_status_handler = None
         if runtime_session is not None:
             callback = getattr(runtime_session, "_handle_assistant_text_delta", None)
             if callable(callback):
                 assistant_text_delta_handler = callback
+            reasoning_callback = getattr(runtime_session, "_handle_assistant_reasoning_delta", None)
+            if callable(reasoning_callback):
+                assistant_reasoning_delta_handler = reasoning_callback
+            reasoning_segment = getattr(runtime_session, "_begin_assistant_reasoning_segment", None)
+            if callable(reasoning_segment):
+                assistant_reasoning_segment_handler = reasoning_segment
             begin_segment = getattr(runtime_session, "_begin_assistant_text_segment", None)
             if callable(begin_segment):
                 begin_segment()
@@ -8509,6 +8521,8 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
                         parallel_tool_calls=(bool(state_for_request.get("parallel_enabled")) if tool_schemas else None),
                         prompt_cache_key=prompt_cache_key,
                         on_text_delta=assistant_text_delta_handler,
+                        on_reasoning_delta=assistant_reasoning_delta_handler,
+                        on_reasoning_segment=assistant_reasoning_segment_handler,
                         on_model_retry_status=model_retry_status_handler,
                         # 前门没有回合准入，链上"塞不下这一发"的成员过去照样会被发到；
                         # 这里把预检算出来的本轮体量交给发送层做同一判据。

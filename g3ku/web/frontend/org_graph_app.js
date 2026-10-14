@@ -3661,6 +3661,8 @@ function normalizeCeoSnapshotInflight(snapshot = null) {
     }
     const interrupts = normalizeCeoSnapshotInterrupts(snapshot?.interrupts);
     if (interrupts.length) next.interrupts = interrupts;
+    const reasoning = normalizeCeoSnapshotReasoning(snapshot?.reasoning);
+    if (reasoning) next.reasoning = reasoning;
     if (
         !ceoInflightTurnHasVisibleAssistantState(next)
         && !next.user_message
@@ -7614,7 +7616,9 @@ function ceoInflightTurnHasVisibleAssistantState(snapshot = null) {
     const turnId = String(snapshot?.turn_id || "").trim();
     const canonicalContext = normalizeCeoSnapshotCanonicalContext(snapshot.canonical_context);
     const canonicalContextDelta = normalizeCeoSnapshotCanonicalContext(snapshot?.canonical_context_delta);
-    return !!assistantText || !!canonicalContext || !!canonicalContextDelta || status === "paused" || status === "error";
+    // 只有思考读数、正文还空的进行中帧也要建行：那一行就是这一跳的全部进度。
+    const reasoning = normalizeCeoSnapshotReasoning(snapshot?.reasoning);
+    return !!assistantText || !!canonicalContext || !!canonicalContextDelta || !!reasoning || status === "paused" || status === "error";
 }
 
 function ceoNeedsAssistantTurn(snapshot = null) {
@@ -7787,8 +7791,196 @@ function renderCeoSilentTurn(turn, { text = "", timestamp = "" } = {}) {
     line.setAttribute("aria-expanded", turn.el.classList.contains("ceo-silent-expanded") ? "true" : "false");
 }
 
-function clearCeoReplyDeltaBuffer(sessionId = "", { turnId = "" } = {}) {
+// --- 思维链实时行（正文下方一行）--------------------------------------------------
+// 为什么需要它：xhigh 档一跳能想 84 秒而界面只有一个转圈（实测 3,037 output 中 2,591
+// token 是不可见思考）。这一行折叠时只占一行：耗时 + 思考 token + 最新一行；展开才给
+// 固定高度的滚动窗。全文只活在内存里，回合结束即弃，所以历史行不再带展开能力。
+function normalizeCeoSnapshotReasoning(raw = null) {
+    // 进行中快照里的那份有界读数（重连时恢复这一行用）；全文不在其中，也不该在。
+    if (!raw || typeof raw !== "object") return null;
+    const seconds = Number(raw.seconds || 0);
+    const chars = Number(raw.chars || 0);
+    const tailLine = String(raw.tail_line || "");
+    if (!seconds && !chars && !tailLine.trim()) return null;
+    return {
+        attempt: Number(raw.attempt || 0),
+        seconds,
+        chars,
+        est_tokens: Number(raw.est_tokens || 0),
+        tail_line: tailLine,
+    };
+}
+
+function ensureCeoThinkingLineEl(turn) {
+    if (turn?.thinkingLineEl?.isConnected) return turn.thinkingLineEl;
+    if (!turn?.el) return null;
+    const line = document.createElement("div");
+    line.className = "ceo-thinking-line";
+    line.hidden = true;
+    const head = document.createElement("div");
+    head.className = "ceo-thinking-line-head";
+    const meta = document.createElement("span");
+    meta.className = "ceo-thinking-line-meta";
+    const tail = document.createElement("span");
+    tail.className = "ceo-thinking-line-tail";
+    const caret = document.createElement("button");
+    caret.type = "button";
+    caret.className = "ceo-thinking-line-caret";
+    caret.textContent = "展开";
+    caret.setAttribute("aria-expanded", "false");
+    const pane = document.createElement("div");
+    pane.className = "ceo-thinking-line-pane";
+    pane.setAttribute("role", "log");
+    pane.hidden = true;
+    pane.addEventListener("scroll", () => {
+        // 用户手动上滑就停止自动跟随，滑回底部再恢复：滚动位置归用户，渲染层不抢。
+        turn.thinkingFollowTail = pane.scrollHeight - pane.scrollTop - pane.clientHeight <= 4;
+    });
+    caret.addEventListener("click", () => {
+        const expanded = caret.getAttribute("aria-expanded") !== "true";
+        caret.setAttribute("aria-expanded", expanded ? "true" : "false");
+        caret.textContent = expanded ? "收起" : "展开";
+        pane.hidden = !expanded;
+        line.classList.toggle("is-expanded", expanded);
+        if (expanded) {
+            turn.thinkingFollowTail = true;
+            pane.scrollTop = pane.scrollHeight;
+        }
+    });
+    head.appendChild(meta);
+    head.appendChild(tail);
+    head.appendChild(caret);
+    line.appendChild(head);
+    line.appendChild(pane);
+    const anchor = turn.textEl?.nextElementSibling || null;
+    const host = turn.textEl?.parentElement || turn.el;
+    host.insertBefore(line, anchor);
+    turn.thinkingLineEl = line;
+    turn.thinkingMetaEl = meta;
+    turn.thinkingTailEl = tail;
+    turn.thinkingCaretEl = caret;
+    turn.thinkingPaneEl = pane;
+    turn.thinkingFollowTail = true;
+    return line;
+}
+
+function renderCeoThinkingLineIntoTurn(turn) {
+    if (!turn?.el) return;
+    const text = String(turn.reasoningText || "");
+    const seconds = Number(turn.reasoningSeconds || 0);
+    const chars = Number(turn.reasoningChars || 0);
+    const estTokens = Number(turn.reasoningEstTokens || 0);
+    if (!text.trim() && !seconds && !chars) {
+        if (turn.thinkingLineEl) turn.thinkingLineEl.hidden = true;
+        return;
+    }
+    const line = ensureCeoThinkingLineEl(turn);
+    if (!line) return;
+    line.hidden = false;
+    const parts = [];
+    if (seconds > 0) parts.push(`思考 ${formatElapsedDuration(seconds)}`);
+    // token 是估算：provider 的 usage 只在流尾给，不少网关连 reasoning_tokens 都不报，
+    // 所以一律带 `~`；真值只有回合结束落进转录行那一刻才可能不带。
+    const tokens = estTokens || Math.round(chars / 4);
+    if (tokens > 0) {
+        // provider 真报了思考 token 才去掉 `~`；否则一律标明是估算。
+        const reported = Number(turn.reasoningTokensReported || 0);
+        parts.push(reported > 0
+            ? `${formatTokenCount(reported)} tok`
+            : `~${formatTokenCount(tokens)} tok`);
+    }
+    turn.thinkingMetaEl.textContent = parts.join(" · ");
+    const lines = text.replace(/\s+$/, "").split("\n");
+    turn.thinkingTailEl.textContent = lines[lines.length - 1] || "";
+    turn.thinkingTailEl.title = lines[lines.length - 1] || "";
+    if (turn.thinkingPaneEl.textContent !== text) {
+        turn.thinkingPaneEl.textContent = text;
+        if (turn.thinkingFollowTail && !turn.thinkingPaneEl.hidden) {
+            turn.thinkingPaneEl.scrollTop = turn.thinkingPaneEl.scrollHeight;
+        }
+    }
+}
+
+function applyCeoReasoningDelta(payload = {}, { sessionId = activeSessionId() } = {}) {
     const key = String(sessionId || "").trim();
+    const turnId = normalizeCeoTurnId(payload?.turn_id || "");
+    if (!key || key !== activeSessionId() || !payload || typeof payload !== "object") return false;
+    const delta = String(payload.delta || "");
+    const attempt = Number(payload.attempt || 0);
+    const seq = Number(payload.seq || 0);
+    if (!delta) return false;
+    const turn = ensureActiveCeoTurn({
+        source: String(payload.source || "user").trim().toLowerCase() || "user",
+        turnId,
+    });
+    if (!turn) return false;
+    if (Number(turn.reasoningAttempt || 0) !== attempt) {
+        // 新的一段（同跳重发或换链降级）：整段重来，绝不与上一发拼接。
+        turn.reasoningAttempt = attempt;
+        turn.reasoningText = "";
+        turn.reasoningLastSeq = 0;
+    }
+    if (seq && Number(turn.reasoningLastSeq || 0) >= seq) return false;
+    turn.reasoningLastSeq = seq;
+    turn.reasoningText = `${turn.reasoningText || ""}${delta}`;
+    turn.reasoningChars = Number(payload.chars || 0);
+    turn.reasoningEstTokens = Number(payload.est_tokens || 0);
+    turn.reasoningSeconds = Number(payload.seconds || 0);
+    mutateCeoFeed(() => renderCeoThinkingLineIntoTurn(turn), { scrollMode: "preserve" });
+    return true;
+}
+
+function applyCeoThinkingFromInflightSnapshot(turn, raw = null) {
+    // 重连时只有这份有界读数：思考帧是 append-only，错过的那几帧不补，
+    // 但耗时/体量/最后一行必须立刻回到界面上。
+    if (!turn) return;
+    const reasoning = normalizeCeoSnapshotReasoning(raw);
+    if (!reasoning) {
+        if (turn.thinkingLineEl) turn.thinkingLineEl.hidden = true;
+        return;
+    }
+    const attempt = Number(reasoning.attempt || 0);
+    if (Number(turn.reasoningAttempt || 0) !== attempt) {
+        turn.reasoningAttempt = attempt;
+        turn.reasoningText = reasoning.tail_line || "";
+    } else if (!String(turn.reasoningText || "").trim()) {
+        turn.reasoningText = reasoning.tail_line || "";
+    }
+    turn.reasoningSeconds = reasoning.seconds;
+    turn.reasoningChars = reasoning.chars;
+    turn.reasoningEstTokens = reasoning.est_tokens;
+    renderCeoThinkingLineIntoTurn(turn);
+}
+
+function renderCeoThinkingSummaryFromSnapshot(hostEl, thinking = null) {
+    // 历史行只给读数、不给展开：思考全文从不落盘，能恢复的是"它想了多久、多大体量"。
+    if (!(hostEl instanceof HTMLElement) || !thinking || typeof thinking !== "object") return;
+    const reported = Number(thinking.tokens || 0);
+    const seconds = Number(thinking.seconds || 0);
+    const chars = Number(thinking.chars || 0);
+    if (!seconds && !chars && !reported) return;
+    const textEl = hostEl.querySelector(".assistant-text") || hostEl.querySelector(".msg-content") || hostEl;
+    const anchorParent = textEl.parentElement || hostEl;
+    const fakeTurn = {
+        el: hostEl,
+        textEl,
+        reasoningText: " ",
+        reasoningSeconds: seconds,
+        reasoningChars: chars,
+        reasoningEstTokens: Number(thinking.est_tokens || 0),
+        reasoningTokensReported: reported,
+    };
+    renderCeoThinkingLineIntoTurn(fakeTurn);
+    if (fakeTurn.thinkingCaretEl) fakeTurn.thinkingCaretEl.remove();
+    if (fakeTurn.thinkingLineEl) {
+        fakeTurn.thinkingLineEl.classList.add("is-final");
+        if (anchorParent !== hostEl && fakeTurn.thinkingLineEl.parentElement === hostEl) {
+            anchorParent.insertBefore(fakeTurn.thinkingLineEl, textEl.nextSibling || null);
+        }
+    }
+}
+
+function clearCeoReplyDeltaBuffer(sessionId = "", { turnId = "" } = {}) {    const key = String(sessionId || "").trim();
     if (!key) return false;
     const current = S.ceoReplyDeltaBuffers && typeof S.ceoReplyDeltaBuffers === "object"
         ? S.ceoReplyDeltaBuffers[key]
@@ -8170,6 +8362,7 @@ function patchCeoInflightTurn(snapshot = null, { sessionId = "", cacheField = "i
         }
         setCeoTurnUsage(turn, snapshot?.usage);
         setCeoTurnUsageCollapsed(turn, status !== "running");
+        applyCeoThinkingFromInflightSnapshot(turn, snapshot?.reasoning);
         icons();
     }, { scrollMode: "preserve" });
     // 阶段收尾先到 live 回合，不重建整帧；不在这里对账的话，旧行要等一次刷新才改口。
@@ -8363,6 +8556,7 @@ function renderPersistedCeoAssistantTurn(item = {}) {
         // 无轨道兜底气泡同样携带元信息(完成时间 + token 用量),同样是点击才显形。
         // 静默回合不走这条：它有自己的折叠行，落到下方共用路径渲染，避免两处装配。
         addMsg(content, "system", { markdown: true, scrollMode: "preserve", timestamp: historyTimestamp, usage: historyUsage, turnId: forkTurnId, canForkReply });
+        renderCeoThinkingSummaryFromSnapshot(ceoFeedAppendHost()?.lastElementChild, item?.thinking);
         return;
     }
     const turn = createPendingCeoTurn("history", { scrollMode: "preserve" });
@@ -8385,6 +8579,7 @@ function renderPersistedCeoAssistantTurn(item = {}) {
         turn.flowEl.open = true;
         setCeoTurnUsage(turn, historyUsage, { completedAt: historyTimestamp });
         setCeoTurnUsageCollapsed(turn, true);
+        renderCeoThinkingSummaryFromSnapshot(turn.el, item?.thinking);
         renderCeoAssistantForkAction(turn, {
             turnId: forkTurnId,
             canForkReply,
@@ -14043,6 +14238,9 @@ function initCeoWs() {
         if (payload.type === "ceo.error") handleCeoError(payload.data || {});
         if (payload.type === "ceo.internal.ack" && effectiveSessionId === activeSessionId()) {
             handleCeoInternalAck(payload.data || {});
+        }
+        if (payload.type === "ceo.reasoning.delta") {
+            applyCeoReasoningDelta(payload.data || {}, { sessionId: effectiveSessionId });
         }
         if (payload.type === "ceo.reply.delta") {
             queueCeoReplyDelta(payload.data || {}, { sessionId: effectiveSessionId });

@@ -1140,7 +1140,13 @@ def _build_ceo_snapshot(
             if role == 'assistant' and isinstance(raw.get('compression'), dict)
             else {}
         )
-        if not content and not attachments and not current_view and not compression:
+        # 只有思考读数、正文为空的行也要出帧：那一行本身就是要显示的进度。
+        thinking = (
+            dict(raw.get('thinking'))
+            if role == 'assistant' and isinstance(raw.get('thinking'), dict)
+            else {}
+        )
+        if not content and not attachments and not current_view and not compression and not thinking:
             continue
         item = {'role': role, 'content': content}
         if role == 'assistant':
@@ -1200,6 +1206,10 @@ def _build_ceo_snapshot(
             turn_usage = transcript_usage or (usage_by_turn.get(turn_id) if turn_id else None)
             if turn_usage:
                 item['usage'] = turn_usage
+            # 历史行的「思考 Ns · ~N tok」就地从转录读数出，不依赖任何请求工件；
+            # 只读行不带展开能力（思考全文从不落盘）。
+            if thinking:
+                item['thinking'] = thinking
         marker = _snapshot_compression_marker(metadata)
         if marker:
             item['compression_marker'] = marker
@@ -1869,6 +1879,24 @@ async def ceo_websocket(websocket: WebSocket):
                     'source': str(payload.get('source') or 'user').strip().lower() or 'user',
                     'text': str(payload.get('text') or ''),
                     'seq': int(payload.get('seq') or 0),
+                },
+            )
+            return
+        if event.type == 'assistant_reasoning_delta':
+            # 思维链帧与正文帧同一条 writer、同一条 stream_queue，不另开 sender；
+            # 载荷是 append-only 增量（正文那套是整段权威覆盖），照抄会把一个回合推成 MB 级。
+            payload = dict(event.payload or {})
+            await _push_stream_event(
+                'ceo.reasoning.delta',
+                {
+                    'turn_id': str(payload.get('turn_id') or '').strip(),
+                    'source': str(payload.get('source') or 'user').strip().lower() or 'user',
+                    'attempt': int(payload.get('attempt') or 0),
+                    'seq': int(payload.get('seq') or 0),
+                    'delta': str(payload.get('delta') or ''),
+                    'chars': int(payload.get('chars') or 0),
+                    'est_tokens': int(payload.get('est_tokens') or 0),
+                    'seconds': float(payload.get('seconds') or 0.0),
                 },
             )
             return

@@ -112,6 +112,16 @@ class LLMProvider(ABC):
         """Whether the provider can prefer streaming output by default."""
         return False
 
+    @property
+    def supports_reasoning_delta_streaming(self) -> bool:
+        """Whether this protocol hands reasoning out chunk by chunk at all.
+
+        Chat Completions does (`delta.reasoning_content` / `delta.reasoning`); the Responses
+        protocol only reports reasoning as a whole item, and its readable form is a summary that
+        we do not even request — so it stays False rather than silently shipping nothing.
+        """
+        return False
+
     @staticmethod
     def _trace_enabled() -> bool:
         raw = str(os.getenv("G3KU_PROMPT_TRACE", "")).strip().lower()
@@ -223,6 +233,7 @@ class LLMProvider(ABC):
         prompt_cache_key: str | None = None,
         request_timeout_seconds: float | None = None,
         on_text_delta: Any = None,
+        on_reasoning_delta: Any = None,
     ) -> LLMResponse:
         """
         Send a chat completion request.
@@ -241,6 +252,10 @@ class LLMProvider(ABC):
                 library defaults.
             on_text_delta: Optional callback invoked for visible assistant text chunks
                 when the provider supports streaming text output.
+            on_reasoning_delta: Optional callback invoked for reasoning chunks, gated by
+                `supports_reasoning_delta_streaming`. It must not be routed through
+                `on_text_delta`: the send layer uses "visible text already streamed" to decide
+                whether a slot switch is still allowed, so reasoning would block fallback.
 
         Returns:
             LLMResponse with content and/or tool calls.

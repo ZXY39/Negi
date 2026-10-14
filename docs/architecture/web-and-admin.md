@@ -434,6 +434,19 @@ This is intentional. The composer button means "pause only when the user has not
 - 转发层 `relay_session_event` 是 `_relay_session_event` 的守卫包装：`RuntimeAgentSession._emit` 逐个 `await` 订阅者且不做捕获，转发层抛出异常会打断正在收尾的回合（`message_end` 之后还有 `state_snapshot`/`turn_end`），前端因此连权威收尾帧都等不到。守卫只记日志不上抛，`CancelledError` 继续传播。
 - 浏览器只接受 JSON 帧：`onmessage` 的 `JSON.parse` 必须带 try/catch。裸解析下，一帧解析失败会让该 socket 之后每帧都被同一个异常吞掉。失败即 `closeCeoWs()` + `initCeoWs()` 重连重取快照，并按 `CEO_WS_PARSE_RESYNC_LIMIT` 限量（收到 `snapshot.ceo` 即恢复预算），避免解析不了时打成重连风暴。
 
+### 2.10. Live Reasoning Row Contract
+
+- "回合卡死"的实测形状是解码量大而可见产出为零：`web:ceo-28ce3df601a5` 那一跳 `completion_tokens=3037`，其中 2,591 个是思考 token，正文一个字都没进气泡，而速率、队列、工具、压缩、重试全部正常——慢的是不可见的解码。进行中的加载行因此不再只写 `正在思考...`：加载图标右侧报本回合累计耗时，耗时右侧报思考 token，再右侧显示思考内容的最后一行，点开才是一个固定高度的滚动窗。
+- 该行走专用事件 `ceo.reasoning.delta`，载荷 `{turn_id, source, attempt, seq, delta, chars, est_tokens, seconds}`。`delta` 是 append-only 增量，**不是** `ceo.reply.delta` 那种"整段权威覆盖"：一跳思考实测 8.6–9.5K 字符、约 1,100 个流分片，按正文那套整段口径转发会把一个回合推到 MB 级（同一回合按增量帧实测 ≈87 KB）。新帧沿用同一条 `stream_queue` 与 `_safe_send`，不另开写者（写者唯一性的合同见「CEO Websocket Lane Failure Contract」）。
+- 每帧都带 `chars` / `est_tokens` / `seconds` 三个**累计**标量，浏览器不自己累加，丢帧或重连后下一帧即自洽。`seq` 单调，`seq` 不增的帧被前端拒绝；`attempt` 是 provider attempt 段号，段号变了整段重来——同跳重发与换链降级都会重放整条思考，把它当追加就是正文车道上已经赔过的"叠两份"。
+- 上游侧：`g3ku/providers/streaming_timeouts.py` 在 `reasoning_content` 与 `reasoning` 两种方言上取分片，经 `on_reasoning_delta` 回调出来。它**绝不**借用正文的 `on_text_delta`：后者会把 `attempt_visible_text_streamed` 置真，而该标记决定流中断时的重试与故障归类（`StreamIncomplete`），借道等于让一次纯思考的半截流被误判成"已经吐过正文"。能力位 `supports_reasoning_delta_streaming`（`providers/base.py` 默认 `False`，`openai_chat_provider.py` 为 `True`）与 `supports_streaming` 双门控，不支持的 provider 就是不发帧，不留分支；非流式与 `_DirectProviderChatBackend` 那条直连道照旧吞掉回调，和它们吞正文回调同形。
+- Responses 车道这一行只有耗时与 token 数：**协议本身没有 reasoning 增量事件**，思考以 `type="reasoning"` 输出项在 `response.output_item.done` / `response.completed` 边界整项交付（合同见 `runtime-overview.md`「思考内容（reasoning）的上下文回放」），没有可转发的分片。这是协议性质，不是本项目实现缺口。
+- 计时按**回合**、段落按 **attempt**：`_begin_assistant_reasoning_segment()` 在每次 provider attempt 的起点开一段并把上一段的耗时与体量收口，`_reasoning_touch_turn()` 以 `turn_id` 为界清零，所以多跳回合（心跳、工具轮）显示的是整回合累计而不是最后一跳；收口值落 `_reasoning_turn_seconds` / `_reasoning_chars_total` / `_reasoning_est_tokens_total`。
+- token 读数的诚实性：进行中一律带 `~`，因为它是按字符估算——provider 的 usage 只在流尾给，且不少网关连 `completion_tokens_details.reasoning_tokens` 都不报（实测本地 WorkBuddy 桥对 243 字符的思考回 `reasoning_tokens: 0`）。只有真值到手那一刻才去掉 `~`：回合收尾时把 `turn_usage.thinking_tokens` 并进转录行（`assistant_payload["thinking"].tokens`），历史行按它渲染。
+- 显示面与落盘面是分开的两件事：思考全文既不写转录也不写 inflight 侧车。快照只带 `_assistant_reasoning_snapshot()` 的有界读数 `{attempt, seconds, chars, est_tokens, tail_line}`，`tail_line` 截到 180 字符，作用是把重连后的那一行恢复出来（`applyCeoThinkingFromInflightSnapshot`）；思考帧的 flush 窗口是 `_ASSISTANT_REASONING_FLUSH_WINDOW_SECONDS`（250 ms），且**不**调 `_sync_persisted_inflight_turn()`——正文那次 flush 顺带落盘是按 75 ms 档设计的，思考每帧整份重写快照等于把显示故障换成 IO 故障。回合收尾时转录 assistant 行带 `thinking = {seconds, chars, est_tokens[, tokens]}`，历史行据此渲染同一行汇总，不带 caret、不可展开。
+- 该行对所有会打模型的回合都画，包括 heartbeat / cron / 内部轮。"这帧值不值得占一个回合"那道闸门会丢掉没有正文的内部轮进行帧，所以思考读数同时进可见性判据（`ceoNeedsAssistantTurn()` 一类与 `ceoInflightTurnHasVisibleAssistantState()`）与空行出帧闸门（`_build_ceo_snapshot` 的 `thinking` 分支），否则内部轮仍然只有一条静态转圈。
+- 前端形状：`.ceo-thinking-line` 插在 `.assistant-text` 之后；折叠态只占一行（`思考 1分15秒 · ~300 tok` + 最后一行，行内 `title` 给同一行全文），展开态是 `.ceo-thinking-line-pane`（`max-height` 定死 + `overflow-y:auto`，盒子不按内容撑开），追加时跟随到尾部，用户上滑即停止跟随、滑回底部恢复（`turn.thinkingFollowTail`）。正文按**原样**显示、不脱敏：这是操作者的明确决定（风险＝思考里可能带敏感字句，而正文车道早有同样暴露），不要再加清洗层。`[hidden]` 必须显式 `display:none`——该族用 flex 布局，会盖掉 UA 的 hidden 规则；样式合同由 `tests/resources/org_graph_app.ceo_reasoning_row.test.js` 钉住。
+
 ### 3. Context Loader Notices
 
 - Successful CEO/frontdoor `load_tool_context` and `load_skill_context` calls do not render as ordinary `Interaction Flow` steps under the assistant bubble.

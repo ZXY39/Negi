@@ -69,6 +69,11 @@ _INTERNAL_PROMPT_KINDS = frozenset(
 )
 _TASK_ID_PATTERN = re.compile(r"task:[A-Za-z0-9][\w:-]*")
 _ASSISTANT_STREAM_FLUSH_WINDOW_SECONDS = 0.075
+# 思考分片比正文碎得多（实测短回答也吃掉 102 个分片），所以窗口放宽到 250ms：
+# 一屏能读完一行，帧数又不会把 WS 打成每秒十几帧。
+_ASSISTANT_REASONING_FLUSH_WINDOW_SECONDS = 0.25
+# 快照里那一行思考的硬上限，超出即截断（展开看全文只在流式期间走内存，不落盘）。
+_ASSISTANT_REASONING_TAIL_LINE_CHARS = 180
 # 上下文压缩区分线：转录里一条 UI-only 的 system 行，永久标出「已折叠的历史」与
 # 「之后新回合」的分界。手动压缩由 API 层写，自动（发送时）压缩由回合收尾写。
 CONTEXT_COMPRESSION_MARKER_KIND = "context_compression"
@@ -251,6 +256,20 @@ class RuntimeAgentSession:
         self._assistant_stream_last_emit_monotonic: float = 0.0
         self._assistant_stream_flush_task: asyncio.Task[Any] | None = None
         self._assistant_segment_open: bool = False
+        # 思维链实时车道：只活在内存里，全文永不落盘（见 `_assistant_reasoning_snapshot`）。
+        self._reasoning_text: str = ""
+        self._reasoning_pending: str = ""
+        self._reasoning_seq: int = 0
+        self._reasoning_attempt: int = 0
+        self._reasoning_started_monotonic: float = 0.0
+        self._reasoning_last_emit_monotonic: float = 0.0
+        self._reasoning_flush_task: asyncio.Task[Any] | None = None
+        # 回合级累计（多跳回合那一行要报整回合，不只是最后一跳）；按 turn_id 划界，
+        # 不依赖各处 reset 的调用顺序。
+        self._reasoning_turn_key: str = ""
+        self._reasoning_turn_seconds: float = 0.0
+        self._reasoning_chars_total: int = 0
+        self._reasoning_est_tokens_total: int = 0
         self._turn_lock = asyncio.Lock()
         self._restore_frontdoor_persistent_state()
         self._rehydrate_queued_follow_ups()
@@ -2461,6 +2480,7 @@ class RuntimeAgentSession:
         self._assistant_stream_last_emitted_text = ""
         self._assistant_stream_last_emit_monotonic = 0.0
         self._assistant_segment_open = False
+        self._reset_assistant_reasoning_state()
 
     def _schedule_assistant_stream_flush(self) -> None:
         task = self._assistant_stream_flush_task
@@ -2535,6 +2555,185 @@ class RuntimeAgentSession:
         # 模型调用开始标记段边界：驻留文本不清空，等新一段首个流式
         # delta 到达再整体覆盖，避免工具执行期间气泡空白。
         self._assistant_segment_open = False
+
+    # --- 思维链实时车道（只服务"这一跳在算什么"的进度显示）-------------------
+    # 与正文那条车道刻意不同：正文帧是"整段权威覆盖"，思考帧是 append-only 增量。
+    # 按整段口径发思考会把一个回合推到 MB 级（实测一跳 8.6-9.5K 字符 × ~1100 帧），
+    # 而且每帧都会顺带把 inflight 快照整份重写一次盘。
+    def _cancel_assistant_reasoning_flush_task(self) -> None:
+        task = self._reasoning_flush_task
+        self._reasoning_flush_task = None
+        if task is not None and not task.done():
+            task.cancel()
+
+    def _reset_assistant_reasoning_state(self) -> None:
+        self._cancel_assistant_reasoning_flush_task()
+        self._reasoning_text = ""
+        self._reasoning_pending = ""
+        self._reasoning_seq = 0
+        self._reasoning_attempt = 0
+        self._reasoning_started_monotonic = 0.0
+        self._reasoning_last_emit_monotonic = 0.0
+
+    def _reasoning_touch_turn(self) -> str:
+        """按 turn_id 划累计口径的边界：换回合即清零，不依赖各处 reset 的调用顺序。"""
+        turn_id = str(self._current_turn_id() or "")
+        if str(self._reasoning_turn_key or "") != turn_id:
+            self._reasoning_turn_key = turn_id
+            self._reasoning_turn_seconds = 0.0
+        return turn_id
+
+    def _reasoning_close_segment(self) -> None:
+        """把当前这一段思考的耗时并进本回合累计，然后停表。
+
+        一个回合常有好几跳（心跳、工具回合），每跳都重新想一遍；界面上那一行要报
+        整回合累计，不是只有最后一跳。
+        """
+        if self._reasoning_started_monotonic <= 0.0:
+            return
+        self._reasoning_turn_seconds = float(self._reasoning_turn_seconds or 0.0) + self._reasoning_seconds()
+        chars, est_tokens = self._reasoning_estimate()
+        self._reasoning_chars_total = int(self._reasoning_chars_total or 0) + chars
+        self._reasoning_est_tokens_total = int(self._reasoning_est_tokens_total or 0) + est_tokens
+        self._reasoning_started_monotonic = 0.0
+
+    def _reasoning_total_seconds(self) -> float:
+        self._reasoning_touch_turn()
+        return float(self._reasoning_turn_seconds or 0.0) + self._reasoning_seconds()
+
+    def _assistant_reasoning_turn_summary(self) -> dict[str, Any]:
+        """回合终态落进转录行的那份读数（只有标量，思考全文永不落盘）。"""
+        self._reasoning_close_segment()
+        seconds = round(float(self._reasoning_turn_seconds or 0.0), 1)
+        chars = int(self._reasoning_chars_total or 0)
+        if not seconds and not chars:
+            return {}
+        return {"seconds": seconds, "chars": chars, "est_tokens": int(self._reasoning_est_tokens_total or 0)}
+
+    def _begin_assistant_reasoning_segment(self) -> None:
+        """每次 provider attempt 一段：上一发的思考绝不与这一发拼接。
+
+        同跳重发与换链降级都会重放整条思考，段号变了前端就整段重来，
+        段号没变才按 `seq` 追加——这是同一类"叠两份"事故在正文车道上的老教训。
+        """
+        self._cancel_assistant_reasoning_flush_task()
+        self._reasoning_touch_turn()
+        self._reasoning_close_segment()
+        self._reasoning_attempt += 1
+        self._reasoning_text = ""
+        self._reasoning_pending = ""
+        try:
+            self._reasoning_started_monotonic = asyncio.get_running_loop().time()
+        except RuntimeError:
+            self._reasoning_started_monotonic = 0.0
+        self._reasoning_last_emit_monotonic = 0.0
+
+    def _reasoning_seconds(self) -> float:
+        if self._reasoning_started_monotonic <= 0.0:
+            return 0.0
+        try:
+            return max(0.0, asyncio.get_running_loop().time() - self._reasoning_started_monotonic)
+        except RuntimeError:
+            return 0.0
+
+    def _reasoning_running_totals(self) -> tuple[float, int, int]:
+        """(累计秒, 累计字符, 累计估算 token)＝已收口的各段 + 正在发的这一段。"""
+        segment_chars, segment_est = self._reasoning_estimate()
+        return (
+            self._reasoning_total_seconds(),
+            int(self._reasoning_chars_total or 0) + segment_chars,
+            int(self._reasoning_est_tokens_total or 0) + segment_est,
+        )
+
+    def _reasoning_estimate(self) -> tuple[int, int]:
+        """(字符数, 估算 token)。token 是估算：provider 的 usage 只在流尾给，
+        且不少网关连 `completion_tokens_details.reasoning_tokens` 都不报。"""
+        text = str(self._reasoning_text or "")
+        if not text:
+            return 0, 0
+        from g3ku.runtime.context.summarizer import estimate_tokens
+
+        return len(text), int(estimate_tokens(text) or 0)
+
+    def _schedule_assistant_reasoning_flush(self) -> None:
+        task = self._reasoning_flush_task
+        if task is not None and not task.done():
+            return
+        self._reasoning_flush_task = asyncio.create_task(self._delayed_assistant_reasoning_flush())
+
+    async def _delayed_assistant_reasoning_flush(self) -> None:
+        try:
+            await asyncio.sleep(_ASSISTANT_REASONING_FLUSH_WINDOW_SECONDS)
+            await self._flush_assistant_reasoning()
+        except asyncio.CancelledError:
+            return
+        finally:
+            current = asyncio.current_task()
+            if self._reasoning_flush_task is current:
+                self._reasoning_flush_task = None
+
+    async def _flush_assistant_reasoning(self) -> None:
+        delta = str(self._reasoning_pending or "")
+        if not delta:
+            return
+        turn_id = self._current_turn_id()
+        if not turn_id:
+            return
+        self._reasoning_pending = ""
+        self._reasoning_seq += 1
+        try:
+            self._reasoning_last_emit_monotonic = asyncio.get_running_loop().time()
+        except RuntimeError:
+            self._reasoning_last_emit_monotonic = 0.0
+        seconds, chars, est_tokens = self._reasoning_running_totals()
+        # 这里不调 `_sync_persisted_inflight_turn()`：正文那次 flush 顺带落盘是按 75ms 档设计的，
+        # 思考按 4 帧/秒落盘等于把每帧的快照整份重写一遍。
+        await self._emit(
+            "assistant_reasoning_delta",
+            turn_id=turn_id,
+            source=self._internal_prompt_source() or "user",
+            attempt=self._reasoning_attempt,
+            seq=self._reasoning_seq,
+            delta=delta,
+            chars=chars,
+            est_tokens=est_tokens,
+            seconds=round(seconds, 1),
+        )
+
+    async def _handle_assistant_reasoning_delta(self, text: str) -> None:
+        normalized_text = str(text or "")
+        if not normalized_text:
+            return
+        self._reasoning_text = str(self._reasoning_text or "") + normalized_text
+        self._reasoning_pending = str(self._reasoning_pending or "") + normalized_text
+        try:
+            now = asyncio.get_running_loop().time()
+        except RuntimeError:
+            now = 0.0
+        if (
+            self._reasoning_seq <= 0
+            or self._reasoning_last_emit_monotonic <= 0.0
+            or (now - self._reasoning_last_emit_monotonic) >= _ASSISTANT_REASONING_FLUSH_WINDOW_SECONDS
+        ):
+            await self._flush_assistant_reasoning()
+            return
+        self._schedule_assistant_reasoning_flush()
+
+    def _assistant_reasoning_snapshot(self) -> dict[str, Any]:
+        """快照里只放有界标量 + 一行尾文本，供重连时恢复这一行；全文永不落盘。"""
+        if self._reasoning_attempt <= 0:
+            return {}
+        seconds, chars, est_tokens = self._reasoning_running_totals()
+        if not chars:
+            return {}
+        tail_line = str((str(self._reasoning_text or "").rstrip().splitlines() or [""])[-1])
+        return {
+            "attempt": int(self._reasoning_attempt),
+            "seconds": round(seconds, 1),
+            "chars": int(chars),
+            "est_tokens": int(est_tokens),
+            "tail_line": tail_line[:_ASSISTANT_REASONING_TAIL_LINE_CHARS],
+        }
 
     def manual_pause_waiting_reason(self) -> bool:
         return False
@@ -2612,6 +2811,11 @@ class RuntimeAgentSession:
         turn_usage = (getattr(self, "_frontdoor_turn_usage", None) or {}).get(turn_id)
         if turn_usage:
             snapshot["usage"] = copy.deepcopy(turn_usage)
+        # 思维链那一行只在这条快照里存活（有界标量 + 一行尾文本），落盘前会被剥掉：
+        # 刷新重连要能恢复"跑到哪了"，但持久侧车不该变成思考的存档。
+        reasoning_snapshot = self._assistant_reasoning_snapshot()
+        if reasoning_snapshot:
+            snapshot["reasoning"] = reasoning_snapshot
         prompt = self._last_prompt
         prompt_source = self._internal_prompt_source(prompt)
         if prompt_source is not None:
@@ -2935,6 +3139,7 @@ class RuntimeAgentSession:
             if verified_task_ids:
                 metadata_payload["task_ids"] = verified_task_ids
             turn_id = self._current_turn_id(user_input)
+            turn_usage: dict[str, Any] = {}
             if turn_id:
                 assistant_payload["turn_id"] = turn_id
                 # 轮次 token 用量随 transcript 持久化：frontdoor 请求工件会被修剪，
@@ -2942,6 +3147,16 @@ class RuntimeAgentSession:
                 turn_usage = self._turn_usage_payload(turn_id)
                 if turn_usage:
                     assistant_payload["usage"] = turn_usage
+            # 思考读数随 transcript 持久化，历史气泡才一直有「思考 Ns」这一行。
+            # 只落标量：思考全文留在内存里，刷新后那一行不再可展开（操作者裁定）。
+            thinking_summary = self._assistant_reasoning_turn_summary()
+            if isinstance(turn_usage, dict):
+                reported_thinking = int(turn_usage.get("thinking_tokens") or 0)
+                if reported_thinking > 0:
+                    # provider 真报了就落真值，前端据此去掉「~」；没报的一律留估算标记。
+                    thinking_summary = {**thinking_summary, "tokens": reported_thinking}
+            if thinking_summary:
+                assistant_payload["thinking"] = thinking_summary
             if metadata_payload:
                 assistant_payload["metadata"] = metadata_payload
             archived_index = (
