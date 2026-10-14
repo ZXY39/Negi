@@ -3156,6 +3156,51 @@ async def test_emit_context_compression_marker_stays_silent_when_row_missing(tmp
     assert [event for event in events if event.type == "context_compression_marker"] == []
 
 
+@pytest.mark.asyncio
+async def test_pause_during_active_auto_compression_announces_paused_rule(tmp_path: Path) -> None:
+    """压缩在途时点暂停：当场落「压缩已暂停」并广播出去。
+
+    操作者看到的就是这条路径——进行中那条线一直不出现，按暂停才冒出来一行；落行必须
+    同时带事件，否则线要等整页重建才画得出来。
+    """
+    store = SessionManager(tmp_path)
+
+    async def _cancel_session_tasks(_session_key: str) -> int:
+        return 0
+
+    loop = SimpleNamespace(
+        model="demo",
+        reasoning_effort=None,
+        multi_agent_runner=None,
+        sessions=store,
+        cancel_session_tasks=_cancel_session_tasks,
+    )
+    session = RuntimeAgentSession(loop, session_key="web:shared", channel="web", chat_id="shared")
+    session._state.is_running = True
+    session._state.status = "running"
+    session._active_frontdoor_compression_generation = 7
+    events: list[AgentEvent] = []
+
+    async def _listener(event: AgentEvent) -> None:
+        events.append(event)
+
+    session.subscribe(_listener)
+
+    await session.pause(manual=True)
+
+    rows = [
+        item
+        for item in list(store.get_or_create("web:shared").messages or [])
+        if isinstance(item.get("metadata"), dict) and item["metadata"].get("kind") == "context_compression"
+    ]
+    assert [row["content"] for row in rows] == ["压缩已暂停"]
+    assert rows[0]["metadata"]["compression_state"] == "paused"
+    assert rows[0]["metadata"]["source"] == "auto"
+    marker_events = [event for event in events if event.type == "context_compression_marker"]
+    assert len(marker_events) == 1
+    assert marker_events[0].payload == {"compression_state": "paused", "source": "auto"}
+
+
 def test_stage_trace_round_enrichment_uses_latest_tool_event_status() -> None:
     session = RuntimeAgentSession(
         SimpleNamespace(model="demo", reasoning_effort=None, multi_agent_runner=None),
