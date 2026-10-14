@@ -8897,7 +8897,7 @@ textarea {
     color: var(--text-muted);
 }
 
-/* 归并 note 列表与正文共用同一个固定高度的框：列表按行数撑开会让抽屉高度跳动。 */
+/* 归并记忆列表与正文共用同一个固定高度的框：列表按行数撑开会让抽屉高度跳动。 */
 .memory-note-index-list {
     min-height: 220px;
     max-height: min(52vh, 560px);

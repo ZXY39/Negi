@@ -742,3 +742,41 @@ def test_reconcile_refuses_to_create_an_ordinary_note_over_a_category_name(tmp_p
         assert not (manager.notes_dir / "note_deep.md").exists()
     finally:
         manager.close()
+
+
+def test_the_memory_browser_lists_only_rows_still_in_the_block(tmp_path: Path) -> None:
+    """「查看记忆」= 模型仍带着的记忆。退场的行整张表迁出去（库与台账照旧留全）。"""
+    manager = _manager(tmp_path)
+    try:
+        resident = _add(manager, body="仍在上下文里的记忆", minimal="常驻->一条", now_iso="2026-04-25T00:00:01+08:00")
+        gone = _add(manager, body="已经搬进分类 note 的记忆", minimal="退场->一条", now_iso="2026-04-25T00:00:02+08:00")
+        _write_category(manager, "note_moved", "搬走的那条的分类\n")
+        _retire(manager, [gone], "note_moved")
+        manager._rebuild_memory_snapshot_from_sqlite(now_iso="2026-04-25T00:00:06+08:00")
+
+        listed = {str(row["memory_id"]) for row in manager.list_current_memories()}
+        assert listed == {resident}
+        assert len(manager._memory_repo.list_memories()) == 2
+        assert {str(row["memory_id"]) for row in manager._memory_repo.list_memories()} == {resident, gone}
+    finally:
+        manager.close()
+
+
+def test_the_consolidator_prompt_points_between_notes_in_a_shape_that_opens(tmp_path: Path) -> None:
+    """提示词要求的指针形状必须真是读得回来的形状：裸名字谁都看不出那还是一份笔记。"""
+    load_prompt = importlib.import_module("main.prompts").load_prompt
+    assert "ref:<note 名>" in load_prompt("memory_consolidator.md")
+
+    manager = _manager(tmp_path)
+    try:
+        ordinary_body = "端口笔记正文\n"
+        owner = _add(manager, body="反代端口写在笔记里", minimal="端口->笔记", note_ref="note_ports")
+        (manager.notes_dir / "note_ports.md").write_text(ordinary_body, encoding="utf-8")
+        _retire(manager, [owner], "note_ports")
+        _write_category(manager, "note_deploy", "部署分类\n- ref:note_ports\n")
+
+        category_body = manager.load_note("note_deploy")
+        assert "ref:note_ports" in category_body
+        assert manager.load_note("note_ports") == ordinary_body
+    finally:
+        manager.close()

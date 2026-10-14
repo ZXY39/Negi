@@ -2025,17 +2025,23 @@ class MemoryManager:
         }
 
     def list_current_memories(self) -> list[dict[str, Any]]:
-        """Return every memory row stored in sqlite, with all persisted fields.
+        """Return the memory rows still living in the resident block, with all persisted fields.
 
         Includes memory_id, memory_body, minimal_memory, source, from_user,
         refresh_count, passed_count, is_compressed, note_ref, consolidated_into,
-        created_at, updated_at.
-        Used by the read-only "view memories" admin surface.
+        created_at, updated_at. Rows that left the resident block (`consolidated_into`
+        set) are excluded: this is the "view memories" surface, and a retired row is no
+        longer memory the model carries - its text now lives in the category note, which
+        the 归并记忆 browser shows. The rows themselves stay in sqlite.
         """
         repo = getattr(self, "_memory_repo", None)
         if repo is None:
             return []
-        return repo.list_memories()
+        return [
+            row
+            for row in repo.list_memories()
+            if not str(row.get("consolidated_into") or "").strip()
+        ]
 
     async def update_current_memory(
         self,
