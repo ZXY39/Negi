@@ -104,6 +104,14 @@ _REVIEW_REPORTED_TOOL_ID_CAP = 5000
 # 复核窗口入队前的拆片目标：链上最小声明窗口 × 这个比例（不写死绝对 token 数，
 # 换模型或改窗口声明都自动跟着走）。
 _MEMORY_WINDOW_SPLIT_RATIO = 0.5
+# 容量压缩的牺牲上限：机器最多把「还能压短的那部分常驻字符」的 7/10 降级成摘要，
+# 剩下 3/10（存活序尾部＝最常被点名的那批）永不被机器降级，也因此永远进不了归并候选。
+# 分母只算 gain>0 的行：已压行占着字节却省不出字，用全量当分母会让预算先被它们吃光。
+COMPRESSIBLE_SACRIFICE_SHARE_NUM = 7
+COMPRESSIBLE_SACRIFICE_SHARE_DEN = 10
+# 一批业务请求最多因"库装不下"被放回队列几次：每次都排一次归并在它前面。归并可能拒收
+# 也可能整批失败，不设上限就是让这一批永远在"插归并→归并无效→再插归并"里自旋。
+CAPACITY_REPLAY_LIMIT = 2
 _STAGED_DOCUMENT_UNSET = object()
 # 记忆三类读面（队列 / 已处理批次 / 失败停车区）共用的载荷窗口，字符寻址，与
 # g3ku/content/navigation 的 char 模式同词汇。存储不动：三份文件里仍是完整载荷，
@@ -143,6 +151,9 @@ class MemoryQueueRequest:
     last_error_text: str = ""
     last_error_at: str = ""
     retry_after: str = ""
+    # How many times this request was put back in the queue because the library had no room
+    # for it. Rows written before this field existed read as 0.
+    capacity_replay_count: int = 0
 
 
 @dataclass(slots=True)
@@ -1022,6 +1033,11 @@ class _MemoryValidatedWrite:
     already_satisfied: str = ""
     compression_triggered: bool = False
     compressed_memory_ids: list[str] = field(default_factory=list)
+    # Per-row outcome of the capacity compress lane, with the bytes each downgrade actually
+    # gave back (0 for rows that were already at their summary length).
+    compressed_details: list[dict[str, Any]] = field(default_factory=list)
+    # Which rung of the ladder (compress -> consolidate -> park) this commit ended on.
+    capacity_action: str = ""
     deleted_by_compression_ids: list[str] = field(default_factory=list)
     # Original memory bodies (memory_id -> body) captured before a rewrite/delete
     # is applied, so the processed record can show an original vs modified comparison.
@@ -1029,7 +1045,17 @@ class _MemoryValidatedWrite:
 
 
 class _MemoryAgentValidationError(ValueError):
-    pass
+    """The staged batch violates a write rule.
+
+    `capacity_overflow` marks the one violation the machine can fix on its own - the
+    resident document is over the hard cap - so the caller knows a compress pass is worth
+    running and the candidate recomputed, instead of feeding the same refusal back to the
+    model for another round.
+    """
+
+    def __init__(self, message: object, *, capacity_overflow: bool = False) -> None:
+        super().__init__(str(message or "memory agent output invalid").strip())
+        self.capacity_overflow = bool(capacity_overflow)
 
 
 class _MemoryAgentRuntimeError(RuntimeError):
@@ -2689,6 +2715,7 @@ class MemoryManager:
             last_error_text=str(request.last_error_text or "").strip(),
             last_error_at=str(request.last_error_at or "").strip(),
             retry_after=str(request.retry_after or "").strip(),
+            capacity_replay_count=max(int(getattr(request, "capacity_replay_count", 0) or 0), 0),
         )
 
     def _read_queue_requests(self) -> list[MemoryQueueRequest]:
@@ -3344,6 +3371,20 @@ class MemoryManager:
 
         original_bodies = dict(validated.original_bodies or {})
         changes: list[dict[str, Any]] = []
+        for item in list(validated.compressed_details or []):
+            memory_id = str(item.get("memory_id") or "").strip()
+            if not memory_id:
+                continue
+            # The machine's own capacity move, recorded per memory with what it gave back:
+            # 0 means the row was already at its summary length and was downgraded only so
+            # consolidation may retire it later.
+            changes.append(
+                {
+                    "type": "compress_for_capacity",
+                    "memory_id": memory_id,
+                    "freed_chars": int(item.get("freed_chars") or 0),
+                }
+            )
         for item in list(validated.consolidation_writes or []):
             normalized_ref = str(item.get("note_ref") or "").strip()
             if not normalized_ref:
@@ -3588,15 +3629,13 @@ class MemoryManager:
         validated.memory_chars_after = self._resident_memory_chars()
         validated.document_preview = self._document_preview(self.snapshot_text())
         if not validated.retirements:
-            # Nothing retired means the snapshot is still over the line and the next
-            # commit would queue another consolidation forever. Degrade the oldest rows so
-            # the trigger makes progress even when no category fits; this never deletes.
-            compressed = self._fallback_compress_to_target(
-                now_iso=now_iso,
-                target=int(getattr(self.config.document, "compress_target_chars", 13000) or 13000),
-            )
-            validated.compression_triggered = bool(compressed)
-            validated.compressed_memory_ids = compressed
+            # The compress lane already ran before this consolidation was ever queued, so
+            # "nothing retired" means the pool is spent and the consolidator found no home
+            # for these rows. Degrading rows here would be the machine silently overriding a
+            # decision a model just made, so the noop stands; `run_due_batch_once` parks it
+            # and `_noop_consolidation_blocks` keeps the same candidate set from being
+            # queued again.
+            validated.capacity_action = "consolidation_noop"
 
     def _build_consolidation_write_from_apply_batch(
         self,
@@ -3753,6 +3792,13 @@ class MemoryManager:
             validated.deleted_by_compression_ids = list(compression_result.get("deleted_by_compression_ids") or [])
             validated.consolidation_requested = bool(compression_result.get("consolidation_requested"))
             validated.consolidation_reason = str(compression_result.get("consolidation_reason") or "").strip()
+            if compression_result.get("compressed_details"):
+                validated.compressed_details = list(compression_result.get("compressed_details") or [])
+            # The pre-commit lane may already have named the rung this commit ended on; the
+            # post-commit pass only overwrites it when it actually took a capacity action.
+            post_action = str(compression_result.get("capacity_action") or "").strip()
+            if post_action:
+                validated.capacity_action = post_action
 
     @classmethod
     def _processed_batch_retention_delta(cls) -> timedelta:
@@ -3796,17 +3842,20 @@ class MemoryManager:
         return None
 
     def _consolidation_candidate_rows(self) -> list[dict[str, Any]]:
-        """Rows the machine may retire, in survival order.
+        """Rows the machine may retire: only rows the compression lane already downgraded.
 
-        Already-retired rows are skipped. `from_user` rows are eligible on the same terms
-        as any other row: retirement moves the text into a category note and never deletes
-        the row, so a user-stated fact stays readable and editable - it simply stops being
-        rendered in the resident block until something opens its note.
+        A memory leaves the resident block only after the machine has first judged it
+        worth downgrading to its summary line. That ordering is the whole ladder - compress,
+        then consolidate, then park - and it makes the survival sort mean something: the
+        rows handed to the consolidator are the ones the model has stopped using twice over.
+        Already-retired rows are skipped, and `from_user` rows are eligible on the same
+        terms as any other: retirement moves the text into a category note and never
+        deletes the row, so a user-stated fact stays readable and editable.
         """
         return [
             row
             for row in self._memory_repo.compression_candidates()
-            if not str(row.get("consolidated_into") or "").strip()
+            if bool(row.get("is_compressed")) and not str(row.get("consolidated_into") or "").strip()
         ]
 
     def _build_consolidation_payload(self, *, trigger: int, target: int) -> tuple[str, list[str]]:
@@ -3822,7 +3871,10 @@ class MemoryManager:
                 continue
             note_ref = str(row.get("note_ref") or "").strip()
             picked.append(memory_id)
-            taken += len(body)
+            # What retiring actually frees is the row's current rendering (a downgraded row
+            # only occupies its summary line), never the stored body - pricing by body length
+            # would report compliance the block never reaches.
+            taken += self._row_rendered_chars(row)
             head = f"- id:{memory_id}"
             if note_ref:
                 head += f" (note: {note_ref})"
@@ -3847,29 +3899,92 @@ class MemoryManager:
         )
         return payload, picked
 
-    def _fallback_compress_to_target(self, *, now_iso: str, target: int) -> list[str]:
-        """Last resort when nothing may be consolidated: downgrade rows to their minimal
-        form. This never deletes a memory."""
-        compressed: list[str] = []
+    def _row_rendered_chars(self, row: dict[str, Any], *, as_compressed: bool | None = None) -> int:
+        """What this row costs the resident block right now, measured with the mirror's own ruler.
+
+        Compression only swaps which column the renderer prints, so the sacrifice a row can
+        make is exactly the difference between those two renderings - never a row count and
+        never the raw column length. `as_compressed` previews the other rendering.
+        """
+        probe = dict(row)
+        if as_compressed is not None:
+            probe["is_compressed"] = 1 if as_compressed else 0
+        return len(self._document_text_from_sqlite_rows([probe]))
+
+    def _compression_pool_rows(
+        self,
+        *,
+        exclude_ids: list[str] | None = None,
+        share_num: int = COMPRESSIBLE_SACRIFICE_SHARE_NUM,
+        share_den: int = COMPRESSIBLE_SACRIFICE_SHARE_DEN,
+    ) -> list[tuple[dict[str, Any], int]]:
+        """Rows the machine may downgrade, in survival order, capped at a share of the bytes.
+
+        Two structural facts shape this:
+
+        - The budget's denominator is the rendered bytes of rows that *can* shrink
+          (`gain > 0`), not the whole resident block. Rows already at their minimal form
+          hold bytes nobody can sacrifice, so counting them would let the guard spend the
+          whole budget on rows it never marks and leave a token pool.
+        - A row that gains nothing (`gain == 0`) is still marked when the walk passes it.
+          Marking costs zero bytes and consolidation only accepts downgraded rows, so
+          skipping them would strand those memories in the resident block forever.
+          `gain < 0` (a minimal line longer than the body) is never marked: downgrading it
+          would *grow* the block and the loop that stops at `target` would never stop.
+        """
+        excluded = {str(item or "").strip() for item in list(exclude_ids or []) if str(item or "").strip()}
+        scored: list[tuple[dict[str, Any], int, int]] = []
         for row in self._memory_repo.compression_candidates():
-            if self._resident_memory_chars() <= target:
-                break
-            if bool(row.get("is_compressed")) or str(row.get("consolidated_into") or "").strip():
+            if str(row.get("consolidated_into") or "").strip() or bool(row.get("is_compressed")):
                 continue
             memory_id = str(row.get("memory_id") or "").strip()
-            if not memory_id:
+            if not memory_id or memory_id in excluded:
                 continue
-            if self._memory_repo.mark_compressed(memory_id):
-                compressed.append(memory_id)
-                self._rebuild_memory_snapshot_from_sqlite(now_iso=now_iso)
+            rendered = self._row_rendered_chars(row)
+            gain = rendered - self._row_rendered_chars(row, as_compressed=True)
+            if gain < 0:
+                continue
+            scored.append((row, gain, rendered))
+        budget = sum(rendered for _, gain, rendered in scored if gain > 0) * max(int(share_num), 0) // max(int(share_den), 1)
+        pool: list[tuple[dict[str, Any], int]] = []
+        consumed = 0
+        for row, gain, rendered in scored:
+            if gain == 0:
+                pool.append((row, 0))
+                continue
+            # The first shrinking row is always taken: a rounded-down budget on a small
+            # library would otherwise leave the machine with no move at all.
+            if consumed and consumed + rendered > budget:
+                break
+            consumed += rendered
+            pool.append((row, gain))
+        return pool
+
+    def _compress_pool_to_target(
+        self,
+        *,
+        now_iso: str,
+        target: int,
+        exclude_ids: list[str] | None = None,
+    ) -> list[dict[str, Any]]:
+        """Downgrade rows until the block is at target or the pool runs out. Never deletes."""
+        compressed: list[dict[str, Any]] = []
+        for row, gain in self._compression_pool_rows(exclude_ids=exclude_ids):
+            if self._resident_memory_chars() <= target:
+                break
+            memory_id = str(row.get("memory_id") or "").strip()
+            if not memory_id or not self._memory_repo.mark_compressed(memory_id):
+                continue
+            compressed.append({"memory_id": memory_id, "freed_chars": max(int(gain), 0)})
+            self._rebuild_memory_snapshot_from_sqlite(now_iso=now_iso)
         return compressed
 
     def _compress_memory_snapshot_if_needed(self, *, now_iso: str | None = None) -> dict[str, Any]:
-        """Over the trigger line memories are consolidated into category notes, not deleted.
+        """Over the trigger line: compress first, consolidate only if compressing ran out.
 
-        The delete lane used to retire 18 memories in one machine pass with the model
-        never knowing. `deleted_by_compression_ids` stays in the result shape (and stays
-        empty) because the ledger and the admin surface read it.
+        Nothing is ever deleted here. The delete lane used to retire 18 memories in one
+        machine pass with the model never knowing. `deleted_by_compression_ids` stays in the
+        result shape (and stays empty) because the ledger and the admin surface read it.
         """
         effective_now = str(now_iso or self._now_iso()).strip()
         trigger = int(getattr(self.config.document, "compress_trigger_chars", 16000) or 16000)
@@ -3877,39 +3992,91 @@ class MemoryManager:
         result: dict[str, Any] = {
             "compression_triggered": False,
             "compressed_memory_ids": [],
+            "compressed_details": [],
             "deleted_by_compression_ids": [],
             "consolidation_requested": False,
             "consolidation_memory_ids": [],
             "consolidation_reason": "",
+            "capacity_action": "",
         }
         if self._resident_memory_chars() <= trigger:
             return result
-        if self._queued_consolidation_request() is not None:
-            result["consolidation_reason"] = "already_queued"
-            return result
 
+        # The ladder is compress -> consolidate -> park. Compression is a machine move: it
+        # costs no model round, keeps every word of the body in the store, and leaves the
+        # memory in the resident block where the model still reads it. Consolidation asks a
+        # model to rewrite several memories into a category note and takes them out of sight,
+        # so it only runs once compression has no room left to give.
+        compressed = self._compress_pool_to_target(now_iso=effective_now, target=target)
+        if compressed:
+            result["compression_triggered"] = True
+            result["compressed_memory_ids"] = [str(item.get("memory_id") or "") for item in compressed]
+            result["compressed_details"] = compressed
+            result["capacity_action"] = "compressed"
+        if self._resident_memory_chars() <= trigger:
+            return result
+        inserted, reason, memory_ids = self._queue_consolidation_at_head(
+            now_iso=effective_now,
+            trigger=trigger,
+            target=target,
+        )
+        result["consolidation_reason"] = reason
+        result["consolidation_memory_ids"] = memory_ids
+        if inserted:
+            result["consolidation_requested"] = True
+            result["consolidation_reason"] = "after_compression" if compressed else "queued"
+            result["capacity_action"] = "consolidation_queued"
+        return result
+
+    def _queue_consolidation_at_head(self, *, now_iso: str, trigger: int, target: int) -> tuple[bool, str, list[str]]:
+        """Put one consolidation in front of the requests whose memories it would retire.
+
+        Shared by the post-commit trigger and the capacity-replay lane so the two can never
+        disagree about whether a consolidation may be queued right now.
+        """
+        if self._queued_consolidation_request() is not None:
+            return False, "already_queued", []
         payload, memory_ids = self._build_consolidation_payload(trigger=trigger, target=target)
         if not memory_ids:
-            compressed = self._fallback_compress_to_target(now_iso=effective_now, target=target)
-            result["compression_triggered"] = bool(compressed)
-            result["compressed_memory_ids"] = compressed
-            result["consolidation_reason"] = "no_consolidation_candidates"
-            return result
-
+            # Nothing has been downgraded yet, so nothing may be retired. Sitting above the
+            # trigger is not fatal - the hard cap is - and the next commit runs the compress
+            # lane first, which is what produces candidates.
+            return False, "no_compressed_candidates", []
+        if self._noop_consolidation_blocks(memory_ids):
+            return False, "noop_parked", memory_ids
         self._insert_queue_request_at_head(
             MemoryQueueRequest(
                 op="consolidate",
                 decision_source="self",
                 payload_text=payload,
-                created_at=effective_now,
+                created_at=now_iso,
                 request_id=self._request_id("consolidate"),
                 trigger_source="compression_trigger",
             )
         )
-        result["consolidation_requested"] = True
-        result["consolidation_memory_ids"] = memory_ids
-        result["consolidation_reason"] = "queued"
-        return result
+        return True, "queued", memory_ids
+
+    def _noop_consolidation_blocks(self, memory_ids: list[str]) -> bool:
+        """True when the consolidator just declined this exact candidate set.
+
+        Without the gate, a library whose rows have no category home queues the same
+        consolidation on every commit forever - the shape the delete batch already showed
+        (no zero-change exit, so it parked and replayed). The parked `capacity_noop` record
+        is the durable fact, and discarding it in the failure surface re-arms consolidation.
+        """
+        wanted = {str(item or "").strip() for item in list(memory_ids or []) if str(item or "").strip()}
+        if not wanted:
+            return False
+        for row in self._read_failed_records():
+            if str(row.get("category") or "").strip() != "capacity_noop":
+                continue
+            offered: set[str] = set()
+            for item in list(row.get("items") or []):
+                payload_text = str((item or {}).get("payload_text") or "") if isinstance(item, dict) else ""
+                offered.update(_CONSOLIDATION_CANDIDATE_LINE_RE.findall(payload_text))
+            if offered == wanted:
+                return True
+        return False
 
     def _referenced_note_refs(self) -> list[str]:
         """Note names any column still mentions - the set the orphan sweep must never delete.
@@ -4153,84 +4320,12 @@ class MemoryManager:
             f"请压缩为“摘要 + note”：正文只保留一句不超过 {limit} 字的独立规则，细节放入 note"
         )
 
-    def _minimal_compression_fallback_write(
-        self,
-        *,
-        batch: MemoryBatch,
-        before_text: str,
-        sessions: list[Any],
-    ) -> _MemoryValidatedWrite | None:
-        for session in sessions:
-            candidate = self._minimal_write_from_session(
-                batch=batch,
-                before_text=before_text,
-                session=session,
-            )
-            if candidate is not None:
-                return candidate
-        return None
-
-    def _minimal_write_from_session(
-        self,
-        *,
-        batch: MemoryBatch,
-        before_text: str,
-        session: Any,
-    ) -> _MemoryValidatedWrite | None:
-        if getattr(session, "apply_batch_count", 0) != 1 or not isinstance(getattr(session, "applied_batch", None), dict):
-            return None
-        payload = dict(session.applied_batch or {})
-        minimal_adds: list[dict[str, str]] = []
-        for item in list(payload.get("adds") or []):
-            if not isinstance(item, dict):
-                continue
-            minimal = str(item.get("minimal_memory") or "").strip()
-            if not minimal:
-                continue
-            minimal_adds.append(
-                {
-                    "content": minimal,
-                    "minimal_memory": minimal,
-                    "decision_source": str(item.get("decision_source") or "").strip().lower(),
-                }
-            )
-        minimal_rewrites: list[dict[str, str]] = []
-        for item in list(payload.get("rewrites") or []):
-            if not isinstance(item, dict):
-                continue
-            memory_id = str(item.get("id") or "").strip()
-            minimal = str(item.get("minimal_memory") or "").strip()
-            if not memory_id or not minimal:
-                continue
-            minimal_rewrites.append({"id": memory_id, "content": minimal, "minimal_memory": minimal})
-        if not minimal_adds and not minimal_rewrites:
-            return None
-        fresh = _MemoryToolSession(
-            snapshot_text=before_text,
-            notes_dir=self.notes_dir,
-            index_dir=self.index_dir,
+    @staticmethod
+    def _minimal_too_long_message(minimal_len: int, body_len: int) -> str:
+        return (
+            f"minimal_memory 有 {minimal_len} 字，正文只有 {body_len} 字；最小记忆不能比正文长。"
+            "把细节放进 note，最小记忆只留“条件->要求关键词”"
         )
-        fresh.apply_batch_count = 1
-        fresh.applied_batch = {
-            "adds": minimal_adds,
-            "rewrites": minimal_rewrites,
-            "deletes": list(payload.get("deletes") or []),
-            "note_upserts": dict(payload.get("note_upserts") or {}),
-            "note_edits": {
-                str(ref): [dict(op) for op in list(ops or [])]
-                for ref, ops in dict(payload.get("note_edits") or {}).items()
-            },
-            "inspired_memory_ids": list(payload.get("inspired_memory_ids") or []),
-            "noop_reason": str(payload.get("noop_reason") or "").strip(),
-        }
-        try:
-            return self._build_validated_write_from_apply_batch(
-                before_text=before_text,
-                session=fresh,
-                batch=batch,
-            )
-        except _MemoryAgentValidationError:
-            return None
 
     @staticmethod
     def _allowed_review_flush_sources() -> set[str]:
@@ -4549,6 +4644,9 @@ class MemoryManager:
             payload["compression_triggered"] = bool(validated.compression_triggered)
             payload["compressed_memory_ids"] = list(validated.compressed_memory_ids)
             payload["deleted_by_compression_ids"] = list(validated.deleted_by_compression_ids)
+            if validated.capacity_action:
+                payload["capacity_action"] = validated.capacity_action
+                payload["capacity_chars_after"] = self._resident_memory_chars()
             if validated.is_consolidation:
                 payload["category_count"] = len(
                     {
@@ -5441,6 +5539,14 @@ class MemoryManager:
                 updated_summary = rewrite_by_id[entry.memory_id]
                 if len(updated_summary) > summary_limit:
                     raise _MemoryAgentValidationError(self._content_exceeds_message(summary_limit))
+                updated_minimal = str(rewrite_minimal_by_id.get(entry.memory_id) or "")
+                if len(updated_minimal) > len(updated_summary):
+                    # Priced against the new body, not the stored one: a rewrite that shortens
+                    # the text while keeping a long summary line would recreate the shape the
+                    # compress lane can never recover (a "summary" longer than what it sums up).
+                    raise _MemoryAgentValidationError(
+                        self._minimal_too_long_message(len(updated_minimal), len(updated_summary))
+                    )
                 updated = MemoryEntry(
                     memory_id=entry.memory_id,
                     date_text=date_text,
@@ -5488,6 +5594,10 @@ class MemoryManager:
             summary = content
             if len(summary) > summary_limit:
                 raise _MemoryAgentValidationError(self._content_exceeds_message(summary_limit))
+            if len(minimal_memory) > len(content):
+                raise _MemoryAgentValidationError(
+                    self._minimal_too_long_message(len(minimal_memory), len(content))
+                )
             summary_key = (decision_source, summary)
             if summary_key in seen_summary_keys:
                 continue
@@ -5515,14 +5625,20 @@ class MemoryManager:
             )
 
         document_text = "".join(format_memory_entry(entry) for entry in after_entries)
+        document_limit = max(int(getattr(self.config.document, "document_max_chars", 20000) or 20000), 1)
         try:
             validate_memory_document(
                 document_text,
                 summary_max_chars=summary_limit,
-                document_max_chars=int(getattr(self.config.document, "document_max_chars", 20000) or 20000),
+                document_max_chars=document_limit,
             )
         except ValueError as exc:
-            raise _MemoryAgentValidationError(str(exc or "memory document invalid").strip()) from exc
+            # Measured against the limit directly, not against the error wording: only a
+            # document that is actually over the cap is something the machine can free.
+            raise _MemoryAgentValidationError(
+                str(exc or "memory document invalid").strip(),
+                capacity_overflow=len(document_text) > document_limit,
+            ) from exc
         existing_refs = {path.stem for path in self.notes_dir.glob("*.md")} | {
             path.stem for path in self.index_dir.glob("*.md")
         }
@@ -5602,11 +5718,35 @@ class MemoryManager:
         before_text: str,
         session: _MemoryToolSession,
     ) -> _MemoryValidatedWrite:
-        return self._build_validated_write_from_apply_batch(
-            before_text=before_text,
-            session=session,
-            batch=batch,
-        )
+        try:
+            return self._build_validated_write_from_apply_batch(
+                before_text=before_text,
+                session=session,
+                batch=batch,
+            )
+        except _MemoryAgentValidationError as exc:
+            if not exc.capacity_overflow:
+                raise
+            # A capacity refusal is the one violation the machine can fix without the model:
+            # downgrade rows in survival order until the block is back at target, then price
+            # the SAME staged payload against the freed store. No repair round is spent - the
+            # model's output did not change, the library made room for it. The compression
+            # stands even if this batch later fails for another reason; it is the same move
+            # the post-commit lane would have made on its own.
+            target = int(getattr(self.config.document, "compress_target_chars", 13000) or 13000)
+            compressed = self._compress_pool_to_target(now_iso=self._now_iso(), target=target)
+            if not compressed:
+                raise
+            rebuilt = self._build_validated_write_from_apply_batch(
+                before_text=self.snapshot_text(),
+                session=session,
+                batch=batch,
+            )
+            rebuilt.compression_triggered = True
+            rebuilt.compressed_memory_ids = [str(item.get("memory_id") or "") for item in compressed]
+            rebuilt.compressed_details = compressed
+            rebuilt.capacity_action = "compressed"
+            return rebuilt
 
     async def _run_memory_agent_batch(
         self,
@@ -5652,7 +5792,7 @@ class MemoryManager:
         repair_attempt_limit = int(getattr(agent_cfg, "repair_attempt_limit", 2) if agent_cfg is not None else 2)
         total_attempts = 1 + max(repair_attempt_limit, 0)
         last_error = "memory agent did not stage a batch"
-        attempt_sessions: list[Any] = []
+        last_capacity_overflow = False
         for attempt_index in range(total_attempts):
             if attempt_index > 0:
                 current_runtime_config, current_runtime_revision, current_model_chain = self._reload_runtime_config_for_memory_retry(
@@ -5692,7 +5832,6 @@ class MemoryManager:
                 }
             self._merge_usage(total_usage, attempt.usage)
             request_artifacts.extend(list(attempt.request_artifacts or []))
-            attempt_sessions.append(attempt.session)
             try:
                 if lane == "consolidate":
                     validated = self._build_consolidation_write_from_apply_batch(
@@ -5716,26 +5855,24 @@ class MemoryManager:
                 }
             except _MemoryAgentValidationError as exc:
                 last_error = str(exc or "memory agent output invalid").strip()
+                last_capacity_overflow = bool(exc.capacity_overflow)
                 continue
-        fallback_validated = (
-            None
-            if lane == "consolidate"
-            else self._minimal_compression_fallback_write(
-                batch=processing_batch,
-                before_text=before_text,
-                sessions=attempt_sessions,
-            )
-        )
-        if fallback_validated is not None:
+        if lane != "consolidate" and last_capacity_overflow:
+            # The store still refuses this payload for one reason only: not enough room, and
+            # the machine's own compress pool is already spent. The payload is held verbatim
+            # in the queue and a consolidation is put ahead of it. Nothing here rewrites the
+            # model's text to make it fit - that lane used to substitute the summary line for
+            # the body and quietly destroyed what was remembered.
             return {
-                "validated": fallback_validated,
+                "validated": None,
                 "usage": total_usage,
                 "attempt_count": total_attempts,
                 "assessed_text": None,
+                "capacity_replay": True,
+                "error": last_error,
                 "model_chain": list(current_model_chain),
                 "provider_request_ids": self._provider_request_ids_from_artifacts(request_artifacts),
                 "request_artifact_paths": self._request_artifact_paths(request_artifacts),
-                "fallback": "minimal_compression",
             }
         return {
             "validated": None,
@@ -5840,6 +5977,14 @@ class MemoryManager:
                 )
                 return self._parked_batch_report(batch, failed_record, discard_reason="agent_exception")
 
+            if bool(result.get("capacity_replay")):
+                return await self._replay_capacity_batch(
+                    batch,
+                    result,
+                    effective_model_chain=list(result.get("model_chain") or model_chain),
+                    now_iso=effective_now,
+                )
+
             discard_reason = str(result.get("discard_reason") or "").strip()
             effective_model_chain = list(result.get("model_chain") or model_chain)
             if discard_reason:
@@ -5885,6 +6030,24 @@ class MemoryManager:
             # 并把停车区里最早的一条 provider/瞬时错误批次重新入队尾（无成功信号则永不自动重试）。
             self._purge_failed_records_for_request_ids({item.request_id for item in batch.items})
             requeued_failed = self._requeue_next_parked_on_success(now_iso=effective_now)
+            validated_outcome = result["validated"]
+            if validated_outcome.is_consolidation and not validated_outcome.retirements:
+                # The consolidator ran clean and declined these rows (no_consolidation_reason).
+                # Park the request as the durable fact that this exact candidate set has no
+                # home: without it every later commit would queue the same consolidation.
+                self._park_failed_batch(
+                    batch,
+                    category="capacity_noop",
+                    discard_reason="consolidation_noop",
+                    error=str(validated_outcome.noop_reason or "no category fits these memories").strip(),
+                    usage=result.get("usage"),
+                    model_chain=effective_model_chain,
+                    attempt_count=int(result.get("attempt_count") or 0),
+                    provider_request_ids=list(result.get("provider_request_ids") or []),
+                    request_artifact_paths=list(result.get("request_artifact_paths") or []),
+                    trigger="consolidation_noop",
+                    now_iso=effective_now,
+                )
             processed_at = self._now_iso()
             fallback = str(result.get("fallback") or "").strip()
             processed_payload = self._append_terminal_history(
@@ -5986,6 +6149,120 @@ class MemoryManager:
             "cache_read_tokens": int((usage or {}).get("cache_read_tokens", 0) or 0),
         }
 
+    def _reset_queue_requests_for_replay(self, request_ids: list[str]) -> list[int]:
+        """Put a refused batch back in the queue and return its replay counts.
+
+        The rows were marked `processing` before the model ran. A capacity refusal is not a
+        verdict on the payload, so the rows go back to `pending` in the same FIFO position
+        with the counter bumped - the next tick takes the head, which is now the
+        consolidation that frees the room they need.
+        """
+        ids = {str(item or "").strip() for item in list(request_ids or []) if str(item or "").strip()}
+        if not ids:
+            return []
+        rows = self._read_queue_requests()
+        counts: list[int] = []
+        for row in rows:
+            if row.request_id not in ids:
+                continue
+            row.status = "pending"
+            row.processing_started_at = ""
+            row.capacity_replay_count = int(row.capacity_replay_count or 0) + 1
+            counts.append(int(row.capacity_replay_count))
+        self._write_queue_requests(rows)
+        return counts
+
+    async def _replay_capacity_batch(
+        self,
+        batch: MemoryBatch,
+        result: dict[str, Any],
+        *,
+        effective_model_chain: list[str],
+        now_iso: str,
+    ) -> dict[str, Any]:
+        """Rung three of the ladder: free room, retry the payload, and only then give up.
+
+        The machine has already spent its compress pool (`_validate_candidate_state` ran it
+        and recomputed), so the only way this batch can still land is a consolidation moving
+        several memories into category notes. The payload is never shortened to make it fit.
+
+        The replay is capped: a consolidation can decline (`no_consolidation_reason`) or fail,
+        and an uncapped retry loop would spin this batch against it forever - which is exactly
+        how the provider-error requeue lane behaved before it got a bound.
+        """
+        trigger = int(getattr(self.config.document, "compress_trigger_chars", 16000) or 16000)
+        target = int(getattr(self.config.document, "compress_target_chars", 13000) or 13000)
+        counts = self._reset_queue_requests_for_replay([item.request_id for item in batch.items])
+        replays = max(counts) if counts else CAPACITY_REPLAY_LIMIT
+        error_text = str(result.get("error") or "").strip()
+        if replays <= CAPACITY_REPLAY_LIMIT:
+            inserted, reason, memory_ids = self._queue_consolidation_at_head(
+                now_iso=now_iso,
+                trigger=trigger,
+                target=target,
+            )
+            logger.warning(
+                "memory batch over capacity; held {} request(s) in queue behind a consolidation (replay {})",
+                len(batch.items),
+                replays,
+            )
+            return {
+                "ok": True,
+                "status": "capacity_replay",
+                "op": batch.op,
+                "processed": 0,
+                "request_ids": [item.request_id for item in batch.items],
+                "capacity_replay_count": replays,
+                "consolidation_queued": inserted,
+                "consolidation_reason": reason,
+                "consolidation_memory_ids": memory_ids,
+                "attempt_count": int(result.get("attempt_count") or 0),
+                "usage": self._normalized_usage_dict(result.get("usage")),
+                "model_chain": list(effective_model_chain),
+                "error": error_text,
+            }
+        failed_record = self._park_failed_batch(
+            batch,
+            category="capacity",
+            discard_reason="capacity_exhausted",
+            error=error_text,
+            usage=result.get("usage"),
+            model_chain=effective_model_chain,
+            attempt_count=int(result.get("attempt_count") or 0),
+            provider_request_ids=list(result.get("provider_request_ids") or []),
+            request_artifact_paths=list(result.get("request_artifact_paths") or []),
+            trigger="capacity",
+            now_iso=now_iso,
+        )
+        # A capacity park is a decision the operator has to be able to find without opening
+        # the failure surface: the ledger row names the rung the ladder stopped on.
+        self._append_terminal_history(
+            batch=batch,
+            status="parked",
+            op=batch.op,
+            processed_at=self._now_iso(),
+            discard_reason="capacity_exhausted",
+            error=error_text,
+            usage=result.get("usage"),
+            model_chain=effective_model_chain,
+            attempt_count=int(result.get("attempt_count") or 0),
+            provider_request_ids=list(result.get("provider_request_ids") or []),
+            request_artifact_paths=list(result.get("request_artifact_paths") or []),
+        )
+        report = self._parked_batch_report(
+            batch,
+            failed_record,
+            discard_reason="capacity_exhausted",
+            usage=result.get("usage"),
+            attempt_count=int(result.get("attempt_count") or 0),
+            model_chain=effective_model_chain,
+            provider_request_ids=list(result.get("provider_request_ids") or []),
+            request_artifact_paths=list(result.get("request_artifact_paths") or []),
+        )
+        report["capacity_action"] = "parked"
+        report["capacity_replay_count"] = replays
+        return report
+
     def _park_failed_batch(
         self,
         batch: MemoryBatch,
@@ -6085,16 +6362,16 @@ class MemoryManager:
             }
             rows.append(record)
         if str(batch.op or "").strip().lower() == "consolidate" and int(record.get("park_count") or 0) >= 2:
-            # A consolidation that cannot get through must not leave the resident block
-            # over the line forever: downgrade the oldest rows to their minimal form.
-            # This is the only machine-side compression left, and it never deletes.
+            # A consolidation that cannot get through twice must not leave the block over the
+            # line with nobody working on it: take whatever the compress lane still has.
+            # Rows added since the consolidation was queued are fresh pool - this never deletes.
             with self._io_lock:
-                degraded = self._fallback_compress_to_target(
+                degraded = self._compress_pool_to_target(
                     now_iso=now,
                     target=int(getattr(self.config.document, "compress_target_chars", 13000) or 13000),
                 )
             if degraded:
-                record["compression_fallback_ids"] = degraded
+                record["compression_fallback_ids"] = [str(item.get("memory_id") or "") for item in degraded]
                 logger.warning(
                     "memory consolidation parked twice; downgraded {} memories to their minimal form",
                     len(degraded),
