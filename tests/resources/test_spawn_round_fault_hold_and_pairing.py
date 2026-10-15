@@ -245,6 +245,99 @@ def test_reused_execution_child_keeps_its_original_acceptance_node() -> None:
     assert bound and bound[0]['acceptance_node_id'] == ACC_ID
 
 
+def test_spawn_round_cancelled_with_live_children_holds_instead_of_faking_failure() -> None:
+    """来源不明的取消不得留下"子节点失败"：整轮交给滞留道等真实终态。
+
+    实盘 16:47:58：看门狗轮询读库抛 OperationalError → request_tool_cancellation →
+    两个父节点的 12 条 entry 全被结算成 `Error: CancelledError`，其中 3 条的孩子
+    早已 success。5 分钟后收尸器照着这本假账杀了 6 个节点。
+    """
+    store = _round_store('in_progress')
+    runner = _runner(store)
+    runner._should_propagate_child_pipeline_cancellation = lambda **_kwargs: False  # type: ignore[attr-defined]
+
+    async def _cancel(**_kwargs):
+        raise asyncio.CancelledError()
+
+    async def _converge_soon():
+        await asyncio.sleep(0.03)
+        store.nodes[EXEC_ID] = store.nodes[EXEC_ID].model_copy(
+            update={'status': 'success', 'final_output': 'done', 'finished_at': now_iso()}
+        )
+
+    settled: list[dict] = []
+    runner._spawn_children_locked = _cancel  # type: ignore[attr-defined]
+    runner._update_spawn_entry = lambda **kwargs: settled.append(dict(kwargs))  # type: ignore[attr-defined]
+    runner._spawn_round_results_from_entries = (  # type: ignore[attr-defined]
+        lambda **_kwargs: [SimpleNamespace(goal='do the work', check_result='真实结论')]
+    )
+
+    async def _run():
+        watcher = asyncio.create_task(_converge_soon())
+        try:
+            return await runner._spawn_children(
+                task_id=TASK_ID, parent_node_id=ROOT_ID, specs=_specs(), call_id=ROUND_ID
+            )
+        finally:
+            await watcher
+
+    results = asyncio.run(_run())
+
+    assert [s.get('status') for s in settled] != ['error'], 'a live child must never be settled as error'
+    assert results[0].check_result == '真实结论'
+
+
+def test_refuse_settlement_allows_it_once_the_bound_node_is_terminal() -> None:
+    """孩子确实已终态时照常结算——拒绝的判据是"还活着"，不是"出过异常"。"""
+    store = _round_store('failed')
+    runner = _runner(store)
+    cached_payload = store.nodes[ROOT_ID].metadata['spawn_operations'][ROUND_ID]
+
+    refused = runner._refuse_spawn_settlement_over_live_node(
+        task=SimpleNamespace(task_id=TASK_ID),
+        parent=store.nodes[ROOT_ID],
+        cache_key=ROUND_ID,
+        cached_payload=cached_payload,
+        index=0,
+        exc=asyncio.CancelledError(),
+    )
+    assert refused is False
+
+
+def test_watchdog_poll_read_failure_does_not_become_a_cancellation() -> None:
+    """看门狗每次轮询的暂停检查读不到库时，只报告这一拍没查成，不外抛。"""
+    import main.runtime.react_loop as react_loop_module
+
+    loop = object.__new__(react_loop_module.ReActToolLoop)
+    store = SimpleNamespace(
+        get_task=lambda _task_id: (_ for _ in ()).throw(sqlite3.OperationalError('disk I/O error')),
+    )
+    loop._log_service = SimpleNamespace(_store=store)  # type: ignore[attr-defined]
+
+    with pytest.raises(sqlite3.OperationalError):
+        loop._check_pause_or_cancel(TASK_ID, ROOT_ID)
+
+    loop._check_pause_or_cancel(TASK_ID, ROOT_ID, observation_only=True)
+
+
+def test_watchdog_poll_still_raises_a_real_pause_in_observation_mode() -> None:
+    """降级只针对"读不到"；真有人请求暂停时控制信号必须照旧冒泡。"""
+    import main.runtime.react_loop as react_loop_module
+    from main.errors import TaskPausedError
+
+    loop = object.__new__(react_loop_module.ReActToolLoop)
+    store = SimpleNamespace(
+        get_task=lambda _task_id: SimpleNamespace(
+            status='in_progress', pause_requested=True, cancel_requested=False, failure_reason=''
+        ),
+    )
+    loop._log_service = SimpleNamespace(_store=store, set_pause_state=lambda *a, **k: None)  # type: ignore[attr-defined]
+    loop._abort_queued_tool_waits = lambda *a, **k: None  # type: ignore[attr-defined]
+
+    with pytest.raises(TaskPausedError):
+        loop._check_pause_or_cancel(TASK_ID, ROOT_ID, observation_only=True)
+
+
 def test_ad_hoc_blocked_verifier_is_not_adopted_as_the_spawn_acceptance() -> None:
     """阻塞核验车道给同一个执行节点配的临时验收人（blocked_verification_only）不是配对对象。"""
     parent = _node(ROOT_ID, kind='execution', status='in_progress', parent='', depth=0)

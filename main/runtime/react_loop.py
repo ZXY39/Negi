@@ -4845,14 +4845,32 @@ class ReActToolLoop:
         task_id = str(runtime_context.get('task_id') or '').strip()
         if not task_id:
             return
-        self._check_pause_or_cancel(task_id, str(runtime_context.get('node_id') or '').strip())
+        self._check_pause_or_cancel(
+            task_id,
+            str(runtime_context.get('node_id') or '').strip(),
+            observation_only=True,
+        )
 
     def _snapshot_supplier(self, runtime_context: dict[str, Any]):
         supplier = runtime_context.get('tool_snapshot_supplier')
         return supplier if callable(supplier) else None
 
-    def _check_pause_or_cancel(self, task_id: str, node_id: str = '') -> None:
-        task = self._log_service._store.get_task(task_id)
+    def _check_pause_or_cancel(self, task_id: str, node_id: str = '', *, observation_only: bool = False) -> None:
+        try:
+            task = self._log_service._store.get_task(task_id)
+        except Exception as exc:
+            if not observation_only:
+                raise
+            # 观测车道（看门狗每次轮询）读不到任务时，这一拍只报告"没查成"，绝不外抛：
+            # 异常会穿透 run_tool_with_watchdog 的 except BaseException，触发
+            # request_tool_cancellation，把一次存储抖动变成对正在正常执行的长时工具的取消。
+            # 下面那些主动抛出的控制信号（暂停/取消/终态）不受影响，照旧冒泡。
+            logger.warning(
+                'tool watchdog pause check skipped: task read failed task={} error={}',
+                str(task_id or '').strip(),
+                type(exc).__name__,
+            )
+            return
         if task is None:
             return
         status = str(getattr(task, 'status', '') or '').strip().lower()
@@ -4872,7 +4890,18 @@ class ReActToolLoop:
         normalized_node_id = str(node_id or '').strip()
         if normalized_node_id:
             # 只要暂停三键：整行正文平均 254 KB，而这一跳每回合、每次看门狗轮询都跑。
-            pause_flags = self._log_service._store.get_node_pause_flags(normalized_node_id)
+            try:
+                pause_flags = self._log_service._store.get_node_pause_flags(normalized_node_id)
+            except Exception as exc:
+                if not observation_only:
+                    raise
+                logger.warning(
+                    'tool watchdog pause check skipped: node flag read failed task={} node={} error={}',
+                    str(task_id or '').strip(),
+                    normalized_node_id,
+                    type(exc).__name__,
+                )
+                return
             if pause_flags is not None and (pause_flags['pause_requested'] or pause_flags['is_paused']):
                 existing = self._log_service._store.get_task_node_pause(normalized_node_id)
                 self._log_service.set_node_pause_state(

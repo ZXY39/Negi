@@ -4208,10 +4208,29 @@ class NodeRunner:
                     specs=specs,
                     call_id=call_id,
                 )
-            except (TaskPausedError, NodePausedError, DistributionHoldError, asyncio.CancelledError):
-                # 冻结/取消类控制信号照旧上抛，绝不改写成一次交付（见 main-task-runtime
+            except (TaskPausedError, NodePausedError, DistributionHoldError):
+                # 冻结类控制信号照旧上抛，绝不改写成一次交付（见 main-task-runtime
                 # 「Node-Level Pause and Recovery」的结算车道合同）。
                 raise
+            except asyncio.CancelledError as exc:
+                # 真取消（任务/父节点级）继续上抛；来源不明的取消（例如看门狗因观测
+                # 读取失败而 request_tool_cancellation）不得留下假结论，交给滞留道等
+                # 真实终态——孩子由各自派发 entry 驱动，并没有被这次取消影响。
+                if self._should_propagate_child_pipeline_cancellation(
+                    task_id=task_id,
+                    parent_node_id=parent_node_id,
+                ):
+                    raise
+                held = await self._hold_spawn_round_for_live_nodes(
+                    task_id=task_id,
+                    parent_node_id=parent_node_id,
+                    cache_key=cache_key,
+                    specs=specs,
+                    fault=exc,
+                )
+                if held is None:
+                    raise
+                return held
             except Exception as exc:
                 held = await self._hold_spawn_round_for_live_nodes(
                     task_id=task_id,
@@ -4515,6 +4534,15 @@ class NodeRunner:
                         parent_node_id=parent.node_id,
                     ):
                         raise
+                    if self._refuse_spawn_settlement_over_live_node(
+                        task=task,
+                        parent=parent,
+                        cache_key=cache_key,
+                        cached_payload=cached_payload,
+                        index=index,
+                        exc=exc,
+                    ):
+                        raise
                     error_text = self._spawn_exception_text(exc)
                     result = self._spawn_runtime_result(spec.goal, error_text=error_text)
                     self._update_spawn_entry(
@@ -4530,6 +4558,15 @@ class NodeRunner:
                     )
                     return result
                 except Exception as exc:
+                    if self._refuse_spawn_settlement_over_live_node(
+                        task=task,
+                        parent=parent,
+                        cache_key=cache_key,
+                        cached_payload=cached_payload,
+                        index=index,
+                        exc=exc,
+                    ):
+                        raise
                     error_text = self._spawn_exception_text(exc)
                     result = self._spawn_runtime_result(spec.goal, error_text=error_text)
                     self._update_spawn_entry(
@@ -5506,6 +5543,41 @@ class NodeRunner:
             entry=entry,
             detail=f'entry status is terminal/blocked while a bound {reason} node is non-terminal',
         )
+
+    def _refuse_spawn_settlement_over_live_node(
+        self,
+        *,
+        task,
+        parent: NodeRecord,
+        cache_key: str,
+        cached_payload: dict[str, Any],
+        index: int,
+        exc: BaseException,
+    ) -> bool:
+        """绑定节点仍非终态时，拒绝把这条 entry 结清成失败交给父节点模型。
+
+        结清即交付：父节点据此认为整批已定，批后帧写清掉 pending_tool_calls，同 id 重放
+        通道随之关闭；而孩子本身没被取消（它们由各自的派发 entry 驱动）。账本从这一刻起
+        是假的，下一次 run_task 取任务时收尸器会照着这句假话把活口判成"无重放路径"杀掉。
+        重抛让整轮交给 `_hold_spawn_round_for_live_nodes` 等真实终态。
+        """
+        entries = list(cached_payload.get('entries') or [])
+        entry = entries[index] if index < len(entries) else None
+        if not isinstance(entry, dict):
+            return False
+        reason = self._spawn_entry_non_terminal_node(entry)
+        if not reason:
+            return False
+        self._emit_spawn_diagnostic(
+            title='spawn_settlement_refused_live_node',
+            task_id=task.task_id,
+            parent_node_id=parent.node_id,
+            cache_key=cache_key,
+            index=index,
+            entry=entry,
+            detail=f'bound {reason} node is non-terminal; fault={describe_exception(exc)}',
+        )
+        return True
 
     def _active_prior_spawn_operations(
         self,
