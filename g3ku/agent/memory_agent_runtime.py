@@ -3925,7 +3925,11 @@ class MemoryManager:
             result["compressed_memory_ids"] = [str(item.get("memory_id") or "") for item in compressed]
             result["compressed_details"] = compressed
             result["capacity_action"] = "compressed"
-        if self._resident_memory_chars() <= trigger:
+        # The rung below is judged against `target`, not the trigger that started the ladder:
+        # a block sitting between the two means compression has already given everything it
+        # can, and `compress_target_chars` would otherwise take part in no decision at all -
+        # every later commit would re-enter here, find an empty pool, and call it done.
+        if self._resident_memory_chars() <= target:
             return result
         inserted, reason, memory_ids = self._queue_consolidation_at_head(
             now_iso=effective_now,

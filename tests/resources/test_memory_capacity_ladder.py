@@ -116,8 +116,8 @@ def _pool_ids(manager, **kwargs) -> list[str]:
 
 
 def test_over_trigger_compresses_and_never_queues_a_consolidation(tmp_path: Path) -> None:
-    """Rung one has to be enough whenever the pool can pay for it."""
-    manager = _manager(tmp_path, trigger=400, target=300)
+    """Rung one has to be enough whenever the pool can pay the way down to `target`."""
+    manager = _manager(tmp_path, trigger=400, target=330)
     try:
         for index in range(4):
             _add(manager, body=f"第{index}条" + "内" * 88, minimal=f"条件{index}->关键词", now_iso=f"2026-04-25T00:00:0{index}+08:00")
@@ -130,8 +130,37 @@ def test_over_trigger_compresses_and_never_queues_a_consolidation(tmp_path: Path
         assert result["capacity_action"] == "compressed"
         assert result["consolidation_requested"] is False
         assert manager._queued_consolidation_request() is None, "no model round is spent while the machine still has room"
-        assert manager._resident_memory_chars() <= 400
+        assert manager._resident_memory_chars() <= 330
         assert all(int(item["freed_chars"]) > 0 for item in result["compressed_details"])
+    finally:
+        manager.close()
+
+
+def test_compression_that_lands_above_target_still_escalates_to_consolidation(tmp_path: Path) -> None:
+    """A 的判据是 target 而不是 trigger：停在两线之间等于压缩已尽力，下一级必须接上。
+
+    否则 `compress_target_chars` 不参与任何决策：每次提交都重跑一趟榨干的压缩、判"没超线"收工，
+    归并永远排不上。
+    """
+    manager = _manager(tmp_path, trigger=400, target=300)
+    try:
+        for index in range(4):
+            _add(manager, body=f"第{index}条" + "内" * 88, minimal=f"条件{index}->关键词", now_iso=f"2026-04-25T00:00:0{index}+08:00")
+        _paint(manager)
+
+        result = manager._compress_memory_snapshot_if_needed(now_iso="2026-04-25T00:00:40+08:00")
+        resident = manager._resident_memory_chars()
+
+        assert result["compression_triggered"] is True, "第一级先动过"
+        assert 300 < resident <= 400, f"夹具要正好停在两线之间，实测 {resident}"
+        assert result["consolidation_requested"] is True
+        assert result["consolidation_reason"] == "after_compression"
+        assert result["capacity_action"] == "consolidation_queued"
+        queued = manager._queued_consolidation_request()
+        assert queued is not None
+        offered = set(__import__("re").findall(r"^- id:([A-Za-z0-9]{6})", queued.payload_text, __import__("re").M))
+        compressed_ids = {str(r["memory_id"]) for r in manager._memory_repo.list_memories() if r["is_compressed"]}
+        assert offered and offered <= compressed_ids, "升级后递给归并的仍然只有已降级行"
     finally:
         manager.close()
 
@@ -556,7 +585,7 @@ def test_the_warming_lane_is_operator_only(tmp_path: Path) -> None:
 def test_the_capacity_rung_is_recorded_per_memory_in_the_ledger(tmp_path: Path) -> None:
     """`capacity_action` names the rung and every downgraded row carries what it gave back."""
     module = _module()
-    manager = _manager(tmp_path, trigger=300, target=200)
+    manager = _manager(tmp_path, trigger=300, target=280)
     try:
         ids = [
             _add(manager, body=f"第{index}条" + "内" * 88, minimal=f"条件{index}->词", now_iso=f"2026-04-25T00:00:0{index}+08:00")
