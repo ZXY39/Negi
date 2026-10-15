@@ -56,10 +56,14 @@ def test_memory_page_renders_note_ref_trigger() -> None:
     assert "const wantsSecondaryFirst = preview.kind === \"processed\" || preview.kind === \"failed\";" in app_js
     # 查看记忆表格：正文里历史遗留的 ` ref:` 仍渲染成按钮，而当前行的归属来自
     # `note_ref` / `consolidated_into` 两列（常驻投影只给句柄，扫文本会漏掉关系）。
+    # 降级标记排在归属前面：表体显示的是全文，这颗才说明上下文里现在只剩摘要。
     assert (
         '<td class="memory-browser-cell-body">'
-        '${renderMemoryTextWithNoteRefs(body)}${renderMemoryNoteOwnershipChip(ownershipNoteRef)}</td>'
+        '${renderMemoryTextWithNoteRefs(body)}${renderMemoryDowngradedChip(item?.is_compressed)}'
+        '${renderMemoryNoteOwnershipChip(ownershipNoteRef)}</td>'
     ) in app_js
+    assert "function renderMemoryDowngradedChip(isCompressed)" in app_js
+    assert ".memory-downgraded-chip {" in css
     assert "function renderMemoryNoteOwnershipChip(noteRef)" in app_js
     assert 'const ownershipNoteRef = String(item?.note_ref || "").trim();' in app_js
     assert 'U.memoryBrowserTbody?.addEventListener("click"' in app_js
@@ -270,7 +274,7 @@ def test_consolidation_note_browser_wires_the_read_only_lane() -> None:
     # 只读面：端点不调任何写方法，断链的分类也照样列出（少一类比多一类更难查）
     route = _admin_route_fragment(admin_py, "@router.get('/memory/index-notes')")
     assert "list_consolidation_categories" in route
-    for writer in ("update_current_memory", "delete_current_memories", "update_note", "apply_batch"):
+    for writer in ("enqueue_operator_request", "uncompress_current_memory", "update_note", "apply_batch"):
         assert writer not in route
 
     # 句柄分两棵树：`n` 是 memory/notes/，`c` 是 memory/index/，闸门与前端令牌都要认两种

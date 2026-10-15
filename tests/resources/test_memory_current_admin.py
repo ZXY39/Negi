@@ -117,24 +117,32 @@ class _StubMemoryManager:
             },
         ]
 
-    async def update_current_memory(self, memory_id: str, *, memory_body: str, minimal_memory=None):
-        self.calls.append(("update_current_memory", (memory_id, memory_body, minimal_memory)))
+    async def enqueue_operator_request(
+        self,
+        *,
+        op: str,
+        decision_source: str,
+        payload_text: str,
+        trigger_source: str,
+        session_key: str = "",
+    ):
+        self.calls.append((op, decision_source, payload_text, trigger_source))
+        if not str(payload_text or "").strip():
+            raise ValueError("payload_text is required")
+        return {"ok": True, "status": "queued", "request_id": f"{op}_1"}
+
+    async def uncompress_current_memory(self, memory_id: str):
+        self.calls.append(("uncompress_current_memory", memory_id))
         if memory_id == "missing":
             raise KeyError(f"memory not found: {memory_id}")
-        if not str(memory_body or "").strip():
-            raise ValueError("memory_body must not be empty")
-        return {"memory_id": memory_id, "memory_body": memory_body, "updated_at": "2026-09-16T10:00:00+08:00"}
-
-    async def delete_current_memories(self, memory_ids, *, reason: str = "", note_refs=None):
-        self.calls.append(("delete_current_memories", (list(memory_ids), reason, list(note_refs or []))))
-        deleted = [mid for mid in memory_ids if mid != "missing"]
-        missing = [mid for mid in memory_ids if mid == "missing"]
+        if memory_id == "boom":
+            raise ValueError("memory document exceeds 20000 chars")
         return {
-            "deleted": deleted,
-            "missing": missing,
-            "deleted_at": "2026-09-16T10:00:00+08:00",
-            "notes_deleted": [ref for ref in (note_refs or []) if ref != "note_missing"],
-            "notes_missing": [ref for ref in (note_refs or []) if ref == "note_missing"],
+            "memory_id": memory_id,
+            "changed": True,
+            "resident_chars_after": 1421,
+            "compress_trigger_chars": 16000,
+            "document_max_chars": 20000,
         }
 
     async def update_note(self, ref, *, body: str):
@@ -312,7 +320,7 @@ def test_memory_failed_discard_writes_audit_record(stub_env, monkeypatch):
 
 
 def test_current_memory_mutations_work_without_feature_flag(stub_env, monkeypatch):
-    """记忆内容编辑/删除面已取消 env 门控：未设置开关也应可用（审计仍记录）。"""
+    """记忆内容编辑/删除面已取消 env 门控：两条动作现在都只是入队，审计照记。"""
     workspace, manager, client = stub_env
     monkeypatch.delenv("G3KU_ENABLE_MEMORY_ADMIN_MUTATIONS", raising=False)
 
@@ -320,11 +328,13 @@ def test_current_memory_mutations_work_without_feature_flag(stub_env, monkeypatc
     delete = client.post("/api/memory/current/delete", json={"memory_ids": ["Ab12Z9"]})
 
     assert update.status_code == 200
-    assert update.json()["item"]["memory_body"] == "新内容"
+    assert update.json()["item"]["status"] == "queued"
     assert delete.status_code == 200
-    assert delete.json()["item"]["deleted"] == ["Ab12Z9"]
+    assert delete.json()["item"]["status"] == "queued"
+    assert [call[0] for call in manager.calls] == ["write", "delete"], "neither route touches the store"
     audit = _audit_lines(workspace)
     assert [record["action"] for record in audit] == ["update_current_memory", "delete_current_memories"]
+    assert [record["result"] for record in audit] == ["queued", "queued"]
 
 
 def test_get_current_memories_reports_mutation_flag(stub_env, monkeypatch):
@@ -339,26 +349,26 @@ def test_get_current_memories_reports_mutation_flag(stub_env, monkeypatch):
     assert payload["items"][0]["memory_id"] == "Ab12Z9"
 
 
-def test_current_memory_update_writes_audit_and_maps_errors(stub_env, monkeypatch):
+def test_current_memory_update_enqueues_a_request_and_maps_errors(stub_env, monkeypatch):
     workspace, manager, client = stub_env
     monkeypatch.setenv("G3KU_ENABLE_MEMORY_ADMIN_MUTATIONS", "1")
 
     ok = client.post(
         "/api/memory/current/update",
-        json={"memory_id": "Ab12Z9", "memory_body": "新内容", "minimal_memory": "new->body", "reason": "ui"},
+        json={"memory_id": "Ab12Z9", "memory_body": "新内容", "minimal_memory": "新的->正文", "reason": "ui"},
         headers={"x-request-id": "req-update-1"},
     )
     assert ok.status_code == 200
-    assert ok.json()["item"]["memory_body"] == "新内容"
+    assert ok.json()["item"]["request_id"] == "write_1"
     assert ok.json()["item"]["audit_logged"] is True
+    op, decision_source, payload_text, trigger_source = manager.calls[0]
+    assert op == "write" and decision_source == "user" and trigger_source == "admin_ui_edit"
+    assert "id:Ab12Z9" in payload_text and "新内容" in payload_text and "新的->正文" in payload_text
+    assert "只改这一条记忆" in payload_text, "the request bounds its own scope"
 
     empty = client.post("/api/memory/current/update", json={"memory_id": "Ab12Z9", "memory_body": "  "})
     assert empty.status_code == 400
     assert empty.json()["detail"]["code"] == "memory_current_invalid"
-
-    missing = client.post("/api/memory/current/update", json={"memory_id": "missing", "memory_body": "x"})
-    assert missing.status_code == 404
-    assert missing.json()["detail"]["code"] == "memory_current_not_found"
 
     no_id = client.post("/api/memory/current/update", json={"memory_body": "x"})
     assert no_id.status_code == 400
@@ -371,111 +381,77 @@ def test_current_memory_update_writes_audit_and_maps_errors(stub_env, monkeypatc
     assert audit[0]["request_id"] == "req-update-1"
 
 
-def test_current_memory_delete_reports_missing_and_writes_audit(stub_env, monkeypatch):
+def test_current_memory_delete_enqueues_one_request_per_action(stub_env, monkeypatch):
     workspace, manager, client = stub_env
     monkeypatch.setenv("G3KU_ENABLE_MEMORY_ADMIN_MUTATIONS", "1")
 
-    response = client.post("/api/memory/current/delete", json={"memory_ids": ["Ab12Z9", "missing"], "reason": "cleanup"})
+    response = client.post(
+        "/api/memory/current/delete",
+        json={"memory_ids": ["Ab12Z9", "missing"], "reason": "cleanup", "note_refs": ["note_keep"]},
+    )
 
     assert response.status_code == 200
     item = response.json()["item"]
-    assert item["deleted"] == ["Ab12Z9"]
-    assert item["missing"] == ["missing"]
+    assert item["status"] == "queued"
+    assert item["memory_ids"] == ["Ab12Z9", "missing"]
     assert item["audit_logged"] is True
+    op, _source, payload_text, trigger_source = manager.calls[0]
+    assert op == "delete" and trigger_source == "admin_ui_delete"
+    assert "id:Ab12Z9" in payload_text and "id:missing" in payload_text and "cleanup" in payload_text
+    # 勾选的笔记只是给 agent 的上下文：笔记文件不在这条请求里被 unlink，
+    # 否则 agent 拒删时会留下指向不存在文件的指针。
+    assert "note_keep" in payload_text
     audit = _audit_lines(workspace)
-    assert len(audit) == 1
     assert audit[0]["action"] == "delete_current_memories"
     assert audit[0]["memory_ids"] == ["Ab12Z9", "missing"]
+    assert audit[0]["queued_request_id"] == "delete_1"
 
     empty = client.post("/api/memory/current/delete", json={"memory_ids": []})
     assert empty.status_code == 400
     assert empty.json()["detail"]["code"] == "memory_current_invalid_id"
 
 
-# ---------------------------------------------------------------------------
-# MemoryManager 真实运行时：编辑 / 删除当前记忆并同步 MEMORY.md 镜像
-# ---------------------------------------------------------------------------
+def test_current_memory_uncompress_route_warms_one_row(stub_env, monkeypatch):
+    workspace, manager, client = stub_env
+    monkeypatch.setenv("G3KU_ENABLE_MEMORY_ADMIN_MUTATIONS", "1")
+
+    ok = client.post("/api/memory/current/uncompress", json={"memory_id": "Ab12Z9", "reason": "operator"})
+    assert ok.status_code == 200
+    assert ok.json()["item"]["changed"] is True
+    assert ok.json()["item"]["resident_chars_after"] == 1421
+
+    missing = client.post("/api/memory/current/uncompress", json={"memory_id": "missing"})
+    assert missing.status_code == 404
+    assert missing.json()["detail"]["code"] == "memory_current_not_found"
+
+    # 顶到硬顶的回暖被整笔拒回（ValueError 带 "exceeds"），这条道不能留下
+    # "库加了字符、镜像写不下"的中间态；对操作员它就是"这条放不回去"。
+    refused = client.post("/api/memory/current/uncompress", json={"memory_id": "boom"})
+    assert refused.status_code == 400
+    assert refused.json()["detail"]["code"] == "memory_current_invalid"
+    assert "exceeds" in refused.json()["detail"]["message"]
+
+    no_id = client.post("/api/memory/current/uncompress", json={})
+    assert no_id.status_code == 400
+
+    audit = _audit_lines(workspace)
+    assert [record["action"] for record in audit] == ["uncompress_current_memory"]
+    assert audit[0]["changed"] is True
 
 
-@pytest.mark.asyncio
-async def test_update_current_memory_updates_sqlite_and_rebuilds_mirror(tmp_path: Path) -> None:
+def test_current_memory_routes_have_no_direct_store_writers_left(stub_env, monkeypatch):
+    """一扇门：管理页不再有任何绕过记忆 agent 的写道。"""
     module = _load_memory_agent_runtime_module()
-    manager = module.MemoryManager(tmp_path, _memory_cfg())
-    try:
-        created = manager._memory_repo.create_memory(
-            memory_body="完成任务必须说明任务总耗时",
-            minimal_memory="任务完成->说明总耗时",
-            source="user",
-            from_user=True,
-            now_iso="2026-09-16T10:00:00+08:00",
-        )
-        memory_id = str(created.get("memory_id") or "").strip()
-        assert memory_id
-        manager._rebuild_memory_snapshot_from_sqlite(now_iso="2026-09-16T10:00:00+08:00")
-        assert "完成任务必须说明任务总耗时" in manager.snapshot_text()
-
-        result = await manager.update_current_memory(
-            memory_id,
-            memory_body="完成任务必须说明任务总耗时与阻塞原因",
-            minimal_memory="任务完成->说明总耗时与阻塞",
-        )
-        assert result["memory_id"] == memory_id
-
-        rows = {str(row.get("memory_id")): row for row in manager.list_current_memories()}
-        assert "完成任务必须说明任务总耗时与阻塞原因" in str(rows[memory_id]["memory_body"])
-        assert str(rows[memory_id]["minimal_memory"]) == "任务完成->说明总耗时与阻塞"
-        # 镜像同步重建
-        assert "完成任务必须说明任务总耗时与阻塞原因" in manager.snapshot_text()
-
-        with pytest.raises(KeyError):
-            await manager.update_current_memory("NoPe12", memory_body="x")
-        with pytest.raises(ValueError):
-            await manager.update_current_memory(memory_id, memory_body="   ")
-        with pytest.raises(ValueError):
-            await manager.update_current_memory(memory_id, memory_body="x" * 400)
-    finally:
-        manager.close()
+    manager = module.MemoryManager
+    for removed in ("update_current_memory", "delete_current_memories"):
+        assert not hasattr(manager, removed), f"{removed} would be a second write door with its own gates"
+    repository = module._MemorySqliteRepository
+    assert not hasattr(repository, "update_memory"), "the row-level writer went with it"
 
 
-@pytest.mark.asyncio
-async def test_delete_current_memories_removes_rows_and_rebuilds_mirror(tmp_path: Path) -> None:
-    module = _load_memory_agent_runtime_module()
-    manager = module.MemoryManager(tmp_path, _memory_cfg())
-    try:
-        first = manager._memory_repo.create_memory(
-            memory_body="第一条记忆内容",
-            minimal_memory="first->memory",
-            source="user",
-            from_user=True,
-            now_iso="2026-09-16T10:00:00+08:00",
-        )
-        second = manager._memory_repo.create_memory(
-            memory_body="第二条记忆内容",
-            minimal_memory="second->memory",
-            source="user",
-            from_user=True,
-            now_iso="2026-09-16T10:01:00+08:00",
-        )
-        manager._rebuild_memory_snapshot_from_sqlite(now_iso="2026-09-16T10:02:00+08:00")
-        assert "第一条记忆内容" in manager.snapshot_text()
-        assert "第二条记忆内容" in manager.snapshot_text()
-
-        result = await manager.delete_current_memories(
-            [str(first["memory_id"]), "Missing9"],
-            reason="cleanup",
-        )
-        assert result["deleted"] == [str(first["memory_id"])]
-        assert result["missing"] == ["Missing9"]
-
-        remaining = manager.list_current_memories()
-        assert [str(row.get("memory_id")) for row in remaining] == [str(second["memory_id"])]
-        assert "第一条记忆内容" not in manager.snapshot_text()
-        assert "第二条记忆内容" in manager.snapshot_text()
-
-        with pytest.raises(ValueError):
-            await manager.delete_current_memories([])
-    finally:
-        manager.close()
+# ---------------------------------------------------------------------------
+# MemoryManager 真实运行时：note 正文编辑（记忆行的写一律走队列）
+# ---------------------------------------------------------------------------
 
 
 # ---------------------------------------------------------------------------
@@ -499,53 +475,6 @@ async def test_update_note_writes_body_and_rejects_empty_or_missing(tmp_path: Pa
             await manager.update_note("note_missing", body="x")
         with pytest.raises(ValueError):
             await manager.update_note("note_demo1", body="   ")
-    finally:
-        manager.close()
-
-
-@pytest.mark.asyncio
-async def test_delete_current_memories_deletes_only_checked_notes(tmp_path: Path) -> None:
-    module = _load_memory_agent_runtime_module()
-    manager = module.MemoryManager(tmp_path, _memory_cfg())
-    try:
-        created = manager._memory_repo.create_memory(
-            memory_body="带笔记引用的记忆 见noteid:note_keep1 与 ref:note_drop1",
-            minimal_memory="memory->with notes",
-            source="user",
-            from_user=True,
-            now_iso="2026-09-16T10:00:00+08:00",
-        )
-        (manager.notes_dir / "note_keep1.md").write_text("保留的笔记", encoding="utf-8")
-        (manager.notes_dir / "note_drop1.md").write_text("要删除的笔记", encoding="utf-8")
-        (manager.notes_dir / "note_gone1.md").write_text("早已不存在的笔记", encoding="utf-8")
-        (manager.notes_dir / "note_gone1.md").unlink()
-
-        result = await manager.delete_current_memories(
-            [str(created["memory_id"])],
-            reason="cleanup",
-            note_refs=["note_drop1", "note_gone1"],
-        )
-        assert result["deleted"] == [str(created["memory_id"])]
-        assert result["notes_deleted"] == ["note_drop1"]
-        assert result["notes_missing"] == ["note_gone1"]
-        # 未勾选的 note 保留
-        assert (manager.notes_dir / "note_keep1.md").exists() is True
-        assert (manager.notes_dir / "note_drop1.md").exists() is False
-        # 记忆与镜像同步删除
-        assert manager.list_current_memories() == []
-        assert "带笔记引用的记忆" not in manager.snapshot_text()
-
-        # 不传 note_refs 时不碰任何 note
-        second = manager._memory_repo.create_memory(
-            memory_body="另一条 见noteid:note_keep1",
-            minimal_memory="second->notes",
-            source="user",
-            from_user=True,
-            now_iso="2026-09-16T10:01:00+08:00",
-        )
-        result2 = await manager.delete_current_memories([str(second["memory_id"])], reason="cleanup")
-        assert result2["notes_deleted"] == []
-        assert (manager.notes_dir / "note_keep1.md").exists() is True
     finally:
         manager.close()
 

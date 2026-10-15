@@ -2263,30 +2263,46 @@ async def get_memory_index_notes():
 
 @router.post('/memory/current/update')
 async def update_current_memory(request: Request, payload: dict | None = Body(default=None)):
+    """管理页编辑不再直写记忆库：它入队，由记忆 agent 落库。
+
+    两条写道就等于两套闸门——内容扫描、容量梯子、带 before/after 的台账、note 所有权
+    两轴原先都只长在队列那一侧。现在只剩一扇门，操作员的原话和 CEO 的请求走同一条道。
+    """
     manager = _runtime_memory_manager()
     body = dict(payload or {})
     memory_id = str(body.get('memory_id') or '').strip()
-    memory_body = str(body.get('memory_body') or '')
+    memory_body = str(body.get('memory_body') or '').strip()
     minimal_memory = body.get('minimal_memory')
-    normalized_minimal = None if minimal_memory is None else str(minimal_memory)
+    normalized_minimal = None if minimal_memory is None else str(minimal_memory).strip()
     if not memory_id:
         raise HTTPException(
             status_code=400,
             detail={'code': 'memory_current_invalid_id', 'message': 'memory_id is required'},
         )
-    method = getattr(manager, 'update_current_memory', None)
-    if not callable(method):
+    if not memory_body:
+        raise HTTPException(
+            status_code=400,
+            detail={'code': 'memory_current_invalid', 'message': 'memory_body must not be empty'},
+        )
+    enqueue = getattr(manager, 'enqueue_operator_request', None)
+    if not callable(enqueue):
         raise HTTPException(
             status_code=503,
             detail={'code': 'memory_current_unavailable', 'message': 'memory update is unavailable'},
         )
+    request_lines = [
+        f'操作员在管理页修改长期记忆 id:{memory_id}。',
+        f'新正文：{memory_body}',
+        f'新最小记忆：{normalized_minimal}' if normalized_minimal else '最小记忆保持不变。',
+        '只改这一条记忆，不要新增也不要删除其它记忆。',
+    ]
     try:
-        result = await method(memory_id, memory_body=memory_body, minimal_memory=normalized_minimal)
-    except KeyError as exc:
-        raise HTTPException(
-            status_code=404,
-            detail={'code': 'memory_current_not_found', 'message': str(exc or 'memory not found')},
-        ) from exc
+        queued = await enqueue(
+            op='write',
+            decision_source='user',
+            payload_text='\n'.join(request_lines),
+            trigger_source='admin_ui_edit',
+        )
     except ValueError as exc:
         raise HTTPException(
             status_code=400,
@@ -2297,20 +2313,83 @@ async def update_current_memory(request: Request, payload: dict | None = Body(de
             status_code=503,
             detail={'code': 'memory_current_update_failed', 'message': str(exc or 'memory update failed')},
         ) from exc
-    item = dict(result or {})
+    item = {
+        'memory_id': memory_id,
+        'status': str(queued.get('status') or ''),
+        'request_id': str(queued.get('request_id') or ''),
+        'reason': str(body.get('reason') or 'manual').strip() or 'manual',
+    }
     try:
         _append_memory_admin_audit_event(
             manager,
             {
                 'action': 'update_current_memory',
-                'reason': str(body.get('reason') or 'manual').strip() or 'manual',
+                'reason': item['reason'],
                 'request_id': str(request.headers.get('x-request-id') or '').strip(),
                 'memory_id': memory_id,
-                'result': 'ok',
+                'queued_request_id': item['request_id'],
+                'queue_status': item['status'],
+                'result': 'queued',
                 'timestamp': now_iso(),
             },
         )
         item['audit_logged'] = True
+    except Exception as exc:
+        item['audit_logged'] = False
+        item['audit_error'] = str(exc or 'memory admin audit write failed').strip()
+    return {'ok': True, 'item': item, **item}
+
+
+@router.post('/memory/current/uncompress')
+async def uncompress_current_memory(request: Request, payload: dict | None = Body(default=None)):
+    """回暖一条被容量压缩降级的记忆：只翻转渲染标记，不改任何正文，所以仍是直操作。
+
+    它往常驻块里加回字符，顶到硬顶会被镜像校验整笔拒回并回滚，读数原样带回来。
+    """
+    manager = _runtime_memory_manager()
+    body = dict(payload or {})
+    memory_id = str(body.get('memory_id') or '').strip()
+    if not memory_id:
+        raise HTTPException(
+            status_code=400,
+            detail={'code': 'memory_current_invalid_id', 'message': 'memory_id is required'},
+        )
+    method = getattr(manager, 'uncompress_current_memory', None)
+    if not callable(method):
+        raise HTTPException(
+            status_code=503,
+            detail={'code': 'memory_current_unavailable', 'message': 'memory un-compress is unavailable'},
+        )
+    try:
+        item = await method(memory_id)
+    except KeyError as exc:
+        raise HTTPException(
+            status_code=404,
+            detail={'code': 'memory_current_not_found', 'message': str(exc or 'memory not found')},
+        ) from exc
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=400,
+            detail={'code': 'memory_current_invalid', 'message': str(exc or 'invalid memory_id')},
+        ) from exc
+    except Exception as exc:
+        raise HTTPException(
+            status_code=503,
+            detail={'code': 'memory_current_uncompress_failed', 'message': str(exc or 'memory un-compress failed')},
+        ) from exc
+    try:
+        _append_memory_admin_audit_event(
+            manager,
+            {
+                'action': 'uncompress_current_memory',
+                'reason': str(body.get('reason') or 'manual').strip() or 'manual',
+                'request_id': str(request.headers.get('x-request-id') or '').strip(),
+                'memory_id': memory_id,
+                'changed': bool((item or {}).get('changed')),
+                'resident_chars_after': int((item or {}).get('resident_chars_after') or 0),
+                'timestamp': now_iso(),
+            },
+        )
     except Exception as exc:
         item['audit_logged'] = False
         item['audit_error'] = str(exc or 'memory admin audit write failed').strip()
@@ -2319,6 +2398,11 @@ async def update_current_memory(request: Request, payload: dict | None = Body(de
 
 @router.post('/memory/current/delete')
 async def delete_current_memories(request: Request, payload: dict | None = Body(default=None)):
+    """管理页删除同样只入队：由记忆 agent 决定删除还是归并，正文不再被硬删。
+
+    `note_refs` 仍是操作员勾选的关联笔记，写进请求里交给 agent 处理（笔记的删除归
+    note 所有权那条道判定，不由请求处理器直接 unlink）。
+    """
     manager = _runtime_memory_manager()
     body = dict(payload or {})
     raw_ids = body.get('memory_ids')
@@ -2334,15 +2418,27 @@ async def delete_current_memories(request: Request, payload: dict | None = Body(
     if not isinstance(raw_note_refs, list):
         raw_note_refs = [raw_note_refs] if raw_note_refs else []
     note_refs = [str(item or '').strip() for item in raw_note_refs if str(item or '').strip()]
-    method = getattr(manager, 'delete_current_memories', None)
-    if not callable(method):
+    enqueue = getattr(manager, 'enqueue_operator_request', None)
+    if not callable(enqueue):
         raise HTTPException(
             status_code=503,
             detail={'code': 'memory_current_unavailable', 'message': 'memory delete is unavailable'},
         )
     reason = str(body.get('reason') or 'manual').strip() or 'manual'
+    request_lines = [
+        '操作员在管理页要求删除长期记忆：' + '、'.join(f'id:{memory_id}' for memory_id in memory_ids) + '。',
+        f'原因：{reason}',
+    ]
+    if note_refs:
+        request_lines.append('同时删除这些关联笔记：' + '、'.join(note_refs) + '。')
+    request_lines.append('只处理上面点名的记忆，其它记忆保持不变。')
     try:
-        result = await method(memory_ids, reason=reason, note_refs=note_refs)
+        queued = await enqueue(
+            op='delete',
+            decision_source='user',
+            payload_text='\n'.join(request_lines),
+            trigger_source='admin_ui_delete',
+        )
     except ValueError as exc:
         raise HTTPException(
             status_code=400,
@@ -2353,7 +2449,12 @@ async def delete_current_memories(request: Request, payload: dict | None = Body(
             status_code=503,
             detail={'code': 'memory_current_delete_failed', 'message': str(exc or 'memory delete failed')},
         ) from exc
-    item = dict(result or {})
+    item = {
+        'memory_ids': memory_ids,
+        'status': str(queued.get('status') or ''),
+        'request_id': str(queued.get('request_id') or ''),
+        'reason': reason,
+    }
     try:
         _append_memory_admin_audit_event(
             manager,
@@ -2362,12 +2463,10 @@ async def delete_current_memories(request: Request, payload: dict | None = Body(
                 'reason': reason,
                 'request_id': str(request.headers.get('x-request-id') or '').strip(),
                 'memory_ids': memory_ids,
-                'deleted': list(item.get('deleted') or []),
-                'missing': list(item.get('missing') or []),
                 'note_refs_requested': note_refs,
-                'notes_deleted': list(item.get('notes_deleted') or []),
-                'notes_missing': list(item.get('notes_missing') or []),
-                'result': 'ok',
+                'queued_request_id': item['request_id'],
+                'queue_status': item['status'],
+                'result': 'queued',
                 'timestamp': now_iso(),
             },
         )
@@ -2375,7 +2474,7 @@ async def delete_current_memories(request: Request, payload: dict | None = Body(
     except Exception as exc:
         item['audit_logged'] = False
         item['audit_error'] = str(exc or 'memory admin audit write failed').strip()
-    return {'ok': True, 'item': item}
+    return {'ok': True, 'item': item, **item}
 
 
 @router.get('/memory/notes/{ref}')

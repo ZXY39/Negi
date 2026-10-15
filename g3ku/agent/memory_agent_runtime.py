@@ -553,8 +553,6 @@ def _build_memory_tool(*, name: str, fn: Callable[..., Any]) -> _MemoryTool:
     )
 
 
-
-
 @dataclass(slots=True)
 class _MemoryToolSession:
     snapshot_text: str
@@ -1636,15 +1634,6 @@ class _MemorySqliteRepository:
         finally:
             conn.close()
 
-    def delete_memory(self, memory_id: str) -> bool:
-        conn = self._connect()
-        try:
-            cursor = conn.execute("DELETE FROM memories WHERE memory_id = ?", (str(memory_id or "").strip(),))
-            conn.commit()
-            return int(cursor.rowcount or 0) > 0
-        finally:
-            conn.close()
-
     def mark_consolidated(self, memory_ids: list[str], *, category_ref: str, now_iso: str) -> list[str]:
         """Point retired rows at their category note; the row itself stays.
 
@@ -1672,32 +1661,6 @@ class _MemorySqliteRepository:
         finally:
             conn.close()
         return retired
-
-    def update_memory(
-        self,
-        memory_id: str,
-        *,
-        memory_body: str,
-        minimal_memory: str | None = None,
-        now_iso: str,
-    ) -> bool:
-        target_id = str(memory_id or "").strip()
-        conn = self._connect()
-        try:
-            if minimal_memory is None:
-                cursor = conn.execute(
-                    "UPDATE memories SET memory_body = ?, updated_at = ? WHERE memory_id = ?",
-                    (str(memory_body or ""), str(now_iso or ""), target_id),
-                )
-            else:
-                cursor = conn.execute(
-                    "UPDATE memories SET memory_body = ?, minimal_memory = ?, updated_at = ? WHERE memory_id = ?",
-                    (str(memory_body or ""), str(minimal_memory or ""), str(now_iso or ""), target_id),
-                )
-            conn.commit()
-            return int(cursor.rowcount or 0) > 0
-        finally:
-            conn.close()
 
 
 def _emit_audit_memory_parked(record: dict[str, Any], *, trigger: str = "initial") -> None:
@@ -2120,68 +2083,6 @@ class MemoryManager:
             if not str(row.get("consolidated_into") or "").strip()
         ]
 
-    async def update_current_memory(
-        self,
-        memory_id: str,
-        *,
-        memory_body: str,
-        minimal_memory: str | None = None,
-    ) -> dict[str, Any]:
-        """管理员编辑单条记忆正文（sqlite 为源，MEMORY.md 镜像同步重建）。
-
-        先按候选文档做长度/格式校验，再写库与重建镜像，避免超限内容破坏快照。
-        """
-        target_id = str(memory_id or "").strip()
-        if not target_id:
-            raise ValueError("memory_id is required")
-        new_body = str(memory_body or "").strip()
-        if not new_body:
-            raise ValueError("memory_body must not be empty")
-        new_minimal = None if minimal_memory is None else str(minimal_memory or "").strip()
-        if new_minimal is not None and not new_minimal:
-            raise ValueError("minimal_memory must not be empty when provided")
-        now_iso = self._now_iso()
-        with self._io_lock:
-            repo = getattr(self, "_memory_repo", None)
-            if repo is None:
-                raise KeyError(f"memory store unavailable: {target_id}")
-            rows = [dict(row) for row in repo.list_memories()]
-            target_row = next(
-                (row for row in rows if str(row.get("memory_id") or "").strip() == target_id),
-                None,
-            )
-            if target_row is None:
-                raise KeyError(f"memory not found: {target_id}")
-            candidate_rows = []
-            for row in rows:
-                candidate = dict(row)
-                if str(candidate.get("memory_id") or "").strip() == target_id:
-                    candidate["memory_body"] = new_body
-                    if new_minimal is not None:
-                        candidate["minimal_memory"] = new_minimal
-                candidate_rows.append(candidate)
-            candidate_text = self._document_text_from_sqlite_rows(candidate_rows, now_iso=now_iso)
-            validate_memory_document(
-                candidate_text,
-                summary_max_chars=int(getattr(self.config.document, "summary_max_chars", 300) or 300),
-                document_max_chars=max(int(getattr(self.config.document, "document_max_chars", 20000) or 20000), 1),
-            )
-            updated = repo.update_memory(
-                target_id,
-                memory_body=new_body,
-                minimal_memory=new_minimal,
-                now_iso=now_iso,
-            )
-            if not updated:
-                raise KeyError(f"memory not found: {target_id}")
-            self._rebuild_memory_snapshot_from_sqlite(now_iso=now_iso)
-        return {
-            "memory_id": target_id,
-            "memory_body": new_body,
-            "updated_at": now_iso,
-            **({"minimal_memory": new_minimal} if new_minimal is not None else {}),
-        }
-
     async def uncompress_current_memory(self, memory_id: str) -> dict[str, Any]:
         """回暖一条被容量压缩降级的行：操作员点名才做，机器永不自己做。
 
@@ -2229,62 +2130,6 @@ class MemoryManager:
             "resident_chars_after": self._resident_memory_chars(),
             "compress_trigger_chars": int(getattr(self.config.document, "compress_trigger_chars", 16000) or 16000),
             "document_max_chars": int(getattr(self.config.document, "document_max_chars", 20000) or 20000),
-        }
-
-    async def delete_current_memories(
-        self,
-        memory_ids: list[str],
-        *,
-        reason: str = "",
-        note_refs: list[str] | None = None,
-    ) -> dict[str, Any]:
-        """管理员批量删除记忆（sqlite 为源，MEMORY.md 镜像同步重建）。
-
-        `note_refs` 为操作员在删除确认弹窗中勾选的关联笔记：仅删除显式勾选的
-        note 文件，未勾选的 note 保留（孤儿 note 由 doctor / reconcile-notes 报告）。
-        """
-        ids: list[str] = []
-        for raw_id in list(memory_ids or []):
-            normalized = str(raw_id or "").strip()
-            if normalized and normalized not in ids:
-                ids.append(normalized)
-        if not ids:
-            raise ValueError("memory_ids is required")
-        requested_note_refs: list[str] = []
-        for raw_ref in list(note_refs or []):
-            normalized_ref = str(raw_ref or "").strip()
-            if normalized_ref and normalized_ref not in requested_note_refs:
-                requested_note_refs.append(normalized_ref)
-        now_iso = self._now_iso()
-        with self._io_lock:
-            repo = getattr(self, "_memory_repo", None)
-            if repo is None:
-                raise KeyError("memory store unavailable")
-            deleted: list[str] = []
-            missing: list[str] = []
-            for memory_id in ids:
-                if repo.delete_memory(memory_id):
-                    deleted.append(memory_id)
-                else:
-                    missing.append(memory_id)
-            if deleted:
-                self._rebuild_memory_snapshot_from_sqlite(now_iso=now_iso)
-            notes_deleted: list[str] = []
-            notes_missing: list[str] = []
-            for ref in requested_note_refs:
-                path = self.notes_dir / note_file_name(ref)
-                if path.exists():
-                    path.unlink()
-                    notes_deleted.append(ref)
-                else:
-                    notes_missing.append(ref)
-        return {
-            "deleted": deleted,
-            "missing": missing,
-            "deleted_at": now_iso,
-            "reason": str(reason or "").strip(),
-            "notes_deleted": notes_deleted,
-            "notes_missing": notes_missing,
         }
 
     async def update_note(self, ref: str, *, body: str) -> dict[str, Any]:

@@ -131,7 +131,13 @@ def test_a_category_emptied_out_later_loses_its_index_line(tmp_path: Path) -> No
         manager._rebuild_memory_snapshot_from_sqlite(now_iso="2026-04-25T00:00:04+08:00")
         assert "运维" in (tmp_path / "memory" / "MEMORY.md").read_text(encoding="utf-8")
 
-        manager._memory_repo.delete_memory(memory_id)
+        manager._memory_repo.apply_mutation(
+            adds=None,
+            rewrites=None,
+            deletes=[memory_id],
+            inspired_memory_ids=None,
+            now_iso="2026-04-25T00:00:05+08:00",
+        )
         manager._rebuild_memory_snapshot_from_sqlite(now_iso="2026-04-25T00:00:05+08:00")
 
         document = (tmp_path / "memory" / "MEMORY.md").read_text(encoding="utf-8")
