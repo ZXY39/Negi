@@ -4615,6 +4615,10 @@ class ReActToolLoop:
                 on_poll=lambda _poll: self._on_tool_watchdog_poll(runtime_context),
                 hard_timeout_seconds=None if (self_enforced or timeout_exempt) else effective_timeout,
                 universal_timeout_exempt=timeout_exempt,
+                # 这三个是「节点该停」，不是「工具坏了该被取消」：观测旁路里只有它们允许
+                # 冒泡出 _safe_observe，其余异常一律降级。类型由本模块声明（g3ku 侧不得
+                # 反向 import main.errors），所以在这里显式交给看门狗。
+                observation_control_signals=(TaskPausedError, NodePausedError, DistributionHoldError),
             )
             return outcome.value
         except Exception as exc:
@@ -4866,9 +4870,10 @@ class ReActToolLoop:
             # request_tool_cancellation，把一次存储抖动变成对正在正常执行的长时工具的取消。
             # 下面那些主动抛出的控制信号（暂停/取消/终态）不受影响，照旧冒泡。
             logger.warning(
-                'tool watchdog pause check skipped: task read failed task={} error={}',
+                'title=tool_watchdog_poll_read_failed carrier=task task={} error={}: {}',
                 str(task_id or '').strip(),
                 type(exc).__name__,
+                exc,
             )
             return
         if task is None:
@@ -4896,10 +4901,11 @@ class ReActToolLoop:
                 if not observation_only:
                     raise
                 logger.warning(
-                    'tool watchdog pause check skipped: node flag read failed task={} node={} error={}',
+                    'title=tool_watchdog_poll_read_failed carrier=node_flag task={} node={} error={}: {}',
                     str(task_id or '').strip(),
                     normalized_node_id,
                     type(exc).__name__,
+                    exc,
                 )
                 return
             if pause_flags is not None and (pause_flags['pause_requested'] or pause_flags['is_paused']):

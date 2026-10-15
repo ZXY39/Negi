@@ -40,6 +40,44 @@ def describe_exception(exc: BaseException | None) -> str:
     return name
 
 
+def describe_exception_chain(exc: BaseException | None, *, max_depth: int = 5) -> str:
+    """把整条因果链摊开：`describe_exception` 只报最后那一跳。
+
+    在 `except` 体里抛出的新异常会把原异常降成 `__context__`，于是「存储抖动顶替了
+    看门狗要取消的那个原始异常」这类事实只剩最后一跳的名字。2026-10-15 事故里 12 条
+    entry 的正文都是裸 `Error: CancelledError`，因为 `CancelledError` 的 `str()` 为空。
+
+    只给需要一手诊断的落点用（错误行正文、结算文本、取消诊断）；日志标题与诊断 detail
+    继续用 `describe_exception`——那些行有 20+ 处，全改成跟链会让正文暴涨。
+    """
+    if exc is None:
+        return 'UnknownError'
+    limit = max(1, int(max_depth or 1))
+    parts: list[str] = []
+    seen: set[int] = set()
+    current: BaseException | None = exc
+    stopped_by_depth = False
+    while current is not None:
+        marker = id(current)
+        if marker in seen:
+            break
+        seen.add(marker)
+        parts.append(describe_exception(current))
+        cause = current.__cause__
+        following = cause if cause is not None else (
+            None if current.__suppress_context__ else current.__context__
+        )
+        if following is None:
+            break
+        if len(parts) >= limit:
+            stopped_by_depth = True
+            break
+        current = following
+    if stopped_by_depth:
+        parts.append(f'…（因果链超过 {limit} 跳，已截）')
+    return ' <- '.join(parts)
+
+
 _RUNTIME_SELF_FAULT_TYPES = frozenset({
     'NameError',
     'UnboundLocalError',

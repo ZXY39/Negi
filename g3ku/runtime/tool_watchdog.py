@@ -467,6 +467,35 @@ def _runtime_summary_tool_calls_summary(
     return "\n".join(lines)
 
 
+WATCHDOG_CANCEL_REQUESTED_TITLE = "tool_watchdog_cancel_requested"
+WATCHDOG_CANCEL_REASON_ATTR = "watchdog_cancel_reason"
+
+
+def _attach_watchdog_cancel_reason(exc: BaseException, *, reason: str) -> None:
+    """把「谁因为什么取消了这个工具」附到异常对象上，让它能走到文本层。
+
+    以前 `reason` 只进 `cancel_token.cancel(reason=...)`（还被 `try/except pass` 包住），
+    全仓再没有第二个人读它——没有登记 cancel_token 时它被整个丢弃。于是被取消的协程看到的
+    是一颗裸 `CancelledError`（`str()` 为空），账本上只剩 `Error: CancelledError`，
+    「仪表自己坏了」这条一手诊断在生成那一刻就消失了（2026-10-15 事故 12 条 entry 的原文）。
+
+    只在真的发起取消时调用：工具已经结束时挂这个属性就是在谎报一次中止。
+    读侧用 `read_watchdog_cancel_reason(exc)`，不要求调用方知道属性名。
+    """
+    try:
+        setattr(exc, WATCHDOG_CANCEL_REASON_ATTR, str(reason or ""))
+    except Exception:
+        # 属性挂不上（少数内建异常类型不允许）时退回只写日志，绝不因此改变控制流。
+        pass
+
+
+def read_watchdog_cancel_reason(exc: BaseException | None) -> str:
+    """取消诊断的可读出口；没有取消诊断时返回空串。`reason` 自带工具名。"""
+    if exc is None:
+        return ""
+    return str(getattr(exc, WATCHDOG_CANCEL_REASON_ATTR, "") or "").strip()
+
+
 async def run_tool_with_watchdog(
     awaitable: Awaitable[Any],
     *,
@@ -476,6 +505,7 @@ async def run_tool_with_watchdog(
     on_poll: Callable[[dict[str, Any]], Awaitable[None] | None] | None = None,
     hard_timeout_seconds: float | None = None,
     universal_timeout_exempt: bool = False,
+    observation_control_signals: tuple[type[BaseException], ...] = (),
 ) -> ToolWatchdogRunResult:
     config = resolve_tool_watchdog_config(runtime_context)
     if not config.enabled:
@@ -506,6 +536,7 @@ async def run_tool_with_watchdog(
             on_poll=on_poll,
             hard_timeout_seconds=hard_timeout_seconds,
             cancel_token=cancel_token,
+            observation_control_signals=observation_control_signals,
         )
         if result.timed_out:
             return ToolWatchdogRunResult(
@@ -526,12 +557,23 @@ async def run_tool_with_watchdog(
             poll_count=result.poll_count,
             snapshot=result.snapshot,
         )
-    except BaseException:
+    except BaseException as exc:
         if not execution_task.done():
+            cancel_reason = f"watchdog_aborted:{tool_name}"
+            _attach_watchdog_cancel_reason(exc, reason=cancel_reason)
+            logger.warning(
+                "title=%s tool_name=%s reason=%s triggered_by=%s: %s",
+                WATCHDOG_CANCEL_REQUESTED_TITLE,
+                str(tool_name or "tool").strip() or "tool",
+                cancel_reason,
+                type(exc).__name__,
+                exc,
+                exc_info=True,
+            )
             await request_tool_cancellation(
                 execution_task,
                 cancel_token=cancel_token,
-                reason=f"watchdog_aborted:{tool_name}",
+                reason=cancel_reason,
                 grace_seconds=config.stop_grace_seconds,
             )
         raise
@@ -567,6 +609,47 @@ async def run_tool_with_hard_timeout(
         raise
 
 
+OBSERVATION_FAILURE_TITLE = "tool_watchdog_observation_failed"
+
+
+async def _safe_observe(
+    invoke: Callable[[], Any],
+    *,
+    tool_name: str,
+    carrier: str,
+    fallback: Any = None,
+    control_signals: tuple[type[BaseException], ...] = (),
+) -> Any:
+    """观测载体的唯一入口：仪表自己坏了，不得变成对被观测工具的取消。
+
+    `run_tool_with_watchdog` 的 `except BaseException` 会把从这里抛出的任何异常读成
+    「中止正在正常执行的长时工具」（`reason=watchdog_aborted:<tool>`）。观测旁路里的
+    一次读失败因此能把一条健康的长时工具打死——2026-10-15 事故里 12 条 spawn entry
+    就是这么变成 `Error: CancelledError` 的。所以非控制异常一律在这里降级，并留下
+    `title=tool_watchdog_observation_failed` 的可数一行。
+
+    只有调用方**显式声明**的控制信号（暂停 / 分发 hold；类型由 `main/runtime` 传入，
+    本模块不得 import `main.errors`）照旧冒泡——冻结必须能停住节点，只有「取消工具」
+    这一件事被禁止。非 `Exception` 的 `BaseException`（`CancelledError`、
+    `KeyboardInterrupt`、`SystemExit`）永远冒泡，不在捕获范围内。
+    """
+    try:
+        return await _maybe_await(invoke())
+    except Exception as exc:
+        if control_signals and isinstance(exc, control_signals):
+            raise
+        logger.warning(
+            "title=%s carrier=%s tool_name=%s error=%s: %s",
+            OBSERVATION_FAILURE_TITLE,
+            carrier,
+            str(tool_name or "tool").strip() or "tool",
+            type(exc).__name__,
+            exc,
+            exc_info=True,
+        )
+        return fallback
+
+
 async def _safe_summarized_snapshot(
     *,
     snapshot_supplier: Callable[[], Any] | None,
@@ -574,26 +657,29 @@ async def _safe_summarized_snapshot(
     text_char_limit: int,
     list_limit: int,
     fallback: dict[str, Any] | None,
+    control_signals: tuple[type[BaseException], ...] = (),
 ) -> dict[str, Any] | None:
-    """快照采集是只读观测旁路：采集失败降级为旧快照，绝不向上传播。
+    """快照采集是只读观测旁路：失败降级为旧快照，绝不向上传播成一次工具取消。
 
-    快照异常若穿透到 run_tool_with_watchdog 的 except BaseException 分支，
-    会触发 request_tool_cancellation 误杀仍在执行的长时工具。此处捕获采集
-    异常并回退最近一次有效快照，仅记录告警；取消类异常不在此拦截范围内。
+    摘要这一步以前在 try 外面——`summarize_runtime_snapshot` 自己抛的话照样会穿透到
+    `except BaseException`，所以取数与摘要整段收进同一个受护入口。降级原因与计数见
+    `_safe_observe`。
     """
-    try:
+
+    async def _collect() -> dict[str, Any] | None:
         payload = await _maybe_await_callable(snapshot_supplier)
-    except Exception:
-        logger.warning(
-            "tool watchdog snapshot supplier failed; keeping previous snapshot (tool=%s)",
-            tool_name,
-            exc_info=True,
+        return summarize_runtime_snapshot(
+            payload,
+            text_char_limit=text_char_limit,
+            list_limit=list_limit,
         )
-        return fallback
-    return summarize_runtime_snapshot(
-        payload,
-        text_char_limit=text_char_limit,
-        list_limit=list_limit,
+
+    return await _safe_observe(
+        _collect,
+        tool_name=tool_name,
+        carrier="snapshot_supplier",
+        fallback=fallback,
+        control_signals=control_signals,
     )
 
 
@@ -610,6 +696,7 @@ async def _wait_for_task_window(
     on_poll: Callable[[dict[str, Any]], Awaitable[None] | None] | None = None,
     hard_timeout_seconds: float | None = None,
     cancel_token: Any | None = None,
+    observation_control_signals: tuple[type[BaseException], ...] = (),
 ) -> ToolWatchdogRunResult:
     poll_count = 0
     last_snapshot: dict[str, Any] | None = None
@@ -638,6 +725,7 @@ async def _wait_for_task_window(
                 text_char_limit=text_char_limit,
                 list_limit=list_limit,
                 fallback=last_snapshot,
+                control_signals=observation_control_signals,
             )
             elapsed = max(0.0, time.monotonic() - started_at)
             return ToolWatchdogRunResult(
@@ -669,11 +757,13 @@ async def _wait_for_task_window(
                 text_char_limit=text_char_limit,
                 list_limit=list_limit,
                 fallback=last_snapshot,
+                control_signals=observation_control_signals,
             )
             if on_poll is not None:
                 elapsed = max(0.0, time.monotonic() - started_at)
-                await _maybe_await(
-                    on_poll(
+
+                def _observe() -> Any:
+                    return on_poll(
                         {
                             "tool_name": str(tool_name or "tool"),
                             "elapsed_seconds": round(elapsed, 1),
@@ -682,6 +772,12 @@ async def _wait_for_task_window(
                             "next_handoff_in_seconds": round(max(0.0, deadline - time.monotonic()), 1),
                         }
                     )
+
+                await _safe_observe(
+                    _observe,
+                    tool_name=tool_name,
+                    carrier="on_poll",
+                    control_signals=observation_control_signals,
                 )
 
 

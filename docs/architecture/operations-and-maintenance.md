@@ -308,7 +308,9 @@ Provider retry troubleshooting note:
 - `title=spawn_round_fault_hold_converged` / `spawn_round_hold_released_by_stop_reason`：滞留的两类出口——绑定节点全部落终态后交付真实结论，或任务/父节点显式终态后按该理由收尾。后者才说明这一轮的子节点结果不会被采纳。
 
 - `title=spawn_settlement_refused_live_node`：某条子管线的执行被异常或取消打断，但它绑定的子/验收节点仍非终态，于是运行时**拒绝**把这条 entry 结清成失败并整轮转交滞留道。这是期望行为：结清即交付，父节点会据此认为整批已定、批后帧写随即清掉 `pending_tool_calls`、同 id 重放通道关闭，而孩子其实没被取消——下一次取任务时它们会被收尸器照这句假话判成"无重放路径"杀掉。`detail` 带是哪一侧非终态与异常正文。
-- `tool watchdog pause check skipped: task read failed` / `... node flag read failed`：看门狗每次轮询的暂停检查读不到库，这一拍没有信号、工具继续执行。它不是故障本身，是故障被挡在取消链之外的痕迹；与同时刻的 `disk I/O error` 成对出现即说明存储抖动正被按观测旁路降级处理，而不是被误读成"该取消这个工具"。
+- `title=tool_watchdog_poll_read_failed`（`carrier=task` / `carrier=node_flag`）：看门狗每次轮询的暂停检查读不到库，这一拍没有信号、工具继续执行。它不是故障本身，是故障被挡在取消链之外的痕迹；与同时刻的 `disk I/O error` 成对出现即说明存储抖动正被按观测旁路降级处理，而不是被误读成"该取消这个工具"。
+- `title=tool_watchdog_observation_failed`（`carrier=snapshot_supplier` / `carrier=on_poll`）：观测通道里抛出了**不属于**声明过的控制信号的异常，被 `_safe_observe` 就地降级（快照回退上一份、轮询跳过这一拍），工具照常执行。计数口径与上一条相同：按 `title=` 数，别按正文措辞正则。它持续出现说明仪表读在坏而工具仍然健康。
+- `title=tool_watchdog_cancel_requested`：看门狗真的中止了一个仍在执行的工具，带 `tool_name=` 与 `reason=`。`reason` 现在同时被挂在异常对象上，交付给模型的文本与节点错误行都能读出「谁因为什么中止了它」。出现这条就要对照同任务同时刻的 spawn entry 状态：一次中止会让整批在飞子节点失去父侧等待者。
 
 修复语义详见 `main-task-runtime.md`「Node-Level Pause and Recovery」。这些 warning 只作诊断，不会自行终结节点；真正的修复在恢复逻辑——等待现有绑定节点到终态，而不是重新评审或重放合成结果。
 
