@@ -21,9 +21,7 @@ class MemoryNoteTool(Tool):
     @property
     def description(self) -> str:
         return (
-            "Load the full body of one memory note. Pass the token the memory block shows - an "
-            "entry's `note:<token>` or a consolidation line's `(note: <token>)` - exactly as shown; "
-            "never invent or guess a note name. A real note file name also resolves."
+            "Load the full body of one memory note. `ref` is the handle token alone - the block prints it after a 'note:' label, and you pass what follows the label (e.g. nb16a5), not the label. A real note name also resolves, without the '.md' suffix."
         )
 
     @property
@@ -33,7 +31,7 @@ class MemoryNoteTool(Tool):
             "properties": {
                 "ref": {
                     "type": "string",
-                    "description": "The token shown next to the note in the memory block; a real note file name also resolves.",
+                    "description": "The handle token alone (what follows the block's 'note:' label), or a note name without the .md suffix.",
                 }
             },
             "required": ["ref"],

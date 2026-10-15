@@ -112,3 +112,42 @@ def test_memory_note_resolves_the_token_the_resident_block_shows(tmp_path: Path)
         assert manager.resolve_note_ref("") == ""
     finally:
         manager.close()
+
+
+def test_a_note_ref_copied_straight_off_the_block_resolves(tmp_path: Path) -> None:
+    """块上那行印的是 `note:<句柄>`：照抄整行的人不该被判失败——容错在读侧，不赌措辞。"""
+    markdown_memory = importlib.import_module("g3ku.agent.markdown_memory")
+    module = importlib.import_module("g3ku.agent.memory_agent_runtime")
+    manager = module.MemoryManager(tmp_path, MemoryToolsConfig())
+    try:
+        notes_dir = tmp_path / "memory" / "notes"
+        notes_dir.mkdir(parents=True, exist_ok=True)
+        (notes_dir / "note_ports.md").write_text("端口正文" + chr(10), encoding="utf-8")
+        manager._memory_repo.create_memory(
+            memory_body="改完端口要重启服务",
+            minimal_memory="端口->重启",
+            source="self",
+            from_user=False,
+            now_iso="2026-04-25T00:00:00+08:00",
+            note_ref="note_ports",
+        )
+        handle = markdown_memory.note_handle("note_ports")
+        plain = manager.load_note(handle)
+        assert manager.load_note("note:" + handle) == plain
+        assert manager.load_note("(note: " + handle + ")") == plain
+        assert manager.load_note("note_ports.md") == plain
+        assert manager.load_note("note_ports" + chr(10)) == plain
+        with pytest.raises(FileNotFoundError) as raised:
+            manager.load_note("note:zzzzzz")
+        assert "without the 'note:'" in str(raised.value)
+    finally:
+        manager.close()
+
+
+def test_the_note_tool_describes_the_argument_without_its_label() -> None:
+    """上一版的描述写的是\"照块里显示的原样传\"，实盘 3/3 都连 `note:` 一起传进来。"""
+    tools = importlib.import_module("g3ku.agent.tools.memory_note")
+    description = tools.MemoryNoteTool(manager=None).description
+    assert "not the label" in description
+    assert "exactly as shown" not in description
+    assert "without the '.md' suffix" in description
