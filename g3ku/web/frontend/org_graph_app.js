@@ -15663,7 +15663,6 @@ function ensureMemoryNotePreviewUi() {
             </div>
         </div>
         <div id="memory-note-edit-footer" class="detail-modal-footer memory-note-edit-footer" hidden>
-            <span class="memory-note-edit-hint">保存前会再次确认；note 不提供删除入口。</span>
             <div class="memory-note-edit-buttons">
                 <button type="button" class="toolbar-btn ghost" data-memory-note-edit-cancel>取消</button>
                 <button type="button" class="toolbar-btn success" data-memory-note-edit-save>保存修改</button>
@@ -15742,9 +15741,7 @@ function renderMemoryNotePreview() {
             : (noteRef ? `Note 预览 · ${noteRef}` : "Note 预览");
     }
     if (U.memoryNoteSubtitle) {
-        U.memoryNoteSubtitle.textContent = isIndex
-            ? "归并区每分类一行，点分类名看正文。"
-            : (editMode ? "编辑 note 正文，保存前会再次确认。" : "");
+        U.memoryNoteSubtitle.textContent = isIndex ? "归并区每分类一行，点分类名看正文。" : "";
     }
     if (U.memoryNoteTrail) {
         const trailHtml = isIndex ? "" : renderMemoryNoteTrailHtml(preview);
