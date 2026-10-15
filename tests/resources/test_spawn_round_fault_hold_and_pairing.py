@@ -15,7 +15,9 @@
 - 派生轮抛异常且本轮仍绑着非终态节点 ⇒ 不向模型交付"派生失败"，等节点收敛后交付真实结论；
 - 派生轮抛异常且本轮没有活节点 ⇒ 原异常照旧上抛（不改写既有故障车道）；
 - 冻结/取消类控制信号 ⇒ 绕过滞留，绝不被改写成一次交付；
-- 新一轮复用同一个执行子节点 ⇒ 沿用它原有的验收节点，不再另配一颗。
+- 新一轮复用同一个执行子节点 ⇒ 沿用它原有的验收节点，不再另配一颗；
+- 清扫子树 ⇒ 落定归取消方（派发器按调用方给的 reason 落行），NodeRunner 不得再判第二次；
+  本进程没有派发 entry 的那些只上报、不强判。
 """
 
 from __future__ import annotations
@@ -100,7 +102,29 @@ def _round_store(child_status: str) -> _FakeStore:
         }
     }
     child = _node(EXEC_ID, kind='execution', status=child_status, parent=ROOT_ID)
-    return _FakeStore({ROOT_ID: parent, EXEC_ID: child}, task=SimpleNamespace(task_id=TASK_ID, status='in_progress'))
+    return _FakeStore(
+        {ROOT_ID: parent, EXEC_ID: child},
+        task=SimpleNamespace(
+            task_id=TASK_ID, status='in_progress', root_node_id=ROOT_ID, session_id='web:fault-hold',
+        ),
+    )
+
+
+class _FallbackLogService:
+    """未显式打桩的 log_service 方法一律空操作。
+
+    清扫这条道会碰很多帧/账本读口，而有些用例只关心「节点行有没有被落定」，
+    不需要为每个旁路读口各写一条 lambda。已在内层桩上的方法照旧走内层。
+    """
+
+    def __init__(self, inner) -> None:
+        object.__setattr__(self, '_inner', inner)
+
+    def __getattr__(self, name):
+        inner = object.__getattribute__(self, '_inner')
+        if hasattr(inner, name):
+            return getattr(inner, name)
+        return lambda *args, **kwargs: None
 
 
 def _runner(store: _FakeStore) -> NodeRunner:
@@ -374,3 +398,116 @@ def test_ad_hoc_blocked_verifier_is_not_adopted_as_the_spawn_acceptance() -> Non
 
     assert created == ['created']
     assert acceptance.node_id == 'node:acc-new'
+
+
+# --- supersede：落定归取消方，NodeRunner 不再判第二次 --------------------------
+
+
+def _reporting_runner(store: _FakeStore) -> tuple[NodeRunner, list[dict]]:
+    runner = _runner(store)
+    diagnostics: list[dict] = []
+    runner._emit_spawn_diagnostic = lambda **kwargs: diagnostics.append(dict(kwargs))  # type: ignore[assignment]
+    return runner, diagnostics
+
+
+def test_cancel_spawn_subtrees_hands_the_reason_to_the_owner_and_returns_ownership() -> None:
+    """取消方（派发器）才是活性的权威；reason 必须传过去，节点行才读得出为什么被停。"""
+    store = _round_store('in_progress')
+    runner, diagnostics = _reporting_runner(store)
+    seen: list[tuple] = []
+
+    async def _executor(task_id, node_ids, reason=''):
+        seen.append((task_id, tuple(node_ids), str(reason or '')))
+        return {EXEC_ID}
+
+    runner.cancel_node_subtree_executor = _executor
+
+    owned = asyncio.run(
+        runner._cancel_spawn_subtrees(
+            task_id=TASK_ID,
+            node_ids={EXEC_ID, ACC_ID},
+            reason_text='superseded by newer spawn round: r2',
+        )
+    )
+
+    assert owned == {EXEC_ID}
+    assert set(seen[0][1]) == {EXEC_ID, ACC_ID}, '整批目标都要交给取消方，不能在这里丢节点'
+    assert seen[0][2] == 'superseded by newer spawn round: r2'
+
+    runner._report_nodes_without_owner(
+        task_id=TASK_ID,
+        parent_node_id=ROOT_ID,
+        cache_key='',
+        reason_text='superseded by newer spawn round: r2',
+        node_ids={EXEC_ID, ACC_ID} - owned,
+    )
+
+    reported = [item for item in diagnostics if str(item.get('title') or '') == 'spawn_supersede_left_to_owner']
+    assert len(reported) == 1, reported
+    assert f'left_node_id={ACC_ID}' in str(reported[0].get('detail') or '')
+    # 有主的那颗由取消方落定，NodeRunner 一个字都不写。
+    assert store.get_node(EXEC_ID).status == 'in_progress'
+
+
+def test_unwired_executor_reports_every_node_and_lands_none() -> None:
+    """执行体没接线＝一个都算不上有主：全部上报，一个都不落终态。
+
+    旧实现在这种形状下会用 50 毫秒轮询库行重推一遍、把 2 秒预算内没等到终态的节点强判
+    failed——那是一条代码没有证据的判决（同文件当时的注释就写着 2 秒掐不住一次真实回合）。
+    """
+    store = _round_store('in_progress')
+    runner, diagnostics = _reporting_runner(store)
+    runner.cancel_node_subtree_executor = None
+
+    owned = asyncio.run(runner._cancel_spawn_subtrees(task_id=TASK_ID, node_ids={EXEC_ID}, reason_text='x'))
+    assert owned == set()
+
+    runner._report_nodes_without_owner(
+        task_id=TASK_ID,
+        parent_node_id=ROOT_ID,
+        cache_key='',
+        reason_text='x',
+        node_ids={EXEC_ID} - owned,
+    )
+
+    assert store.get_node(EXEC_ID).status == 'in_progress'
+    reported = [item for item in diagnostics if str(item.get('title') or '') == 'spawn_supersede_left_to_owner']
+    assert len(reported) == 1
+    detail = str(reported[0].get('detail') or '')
+    assert f'left_node_id={EXEC_ID}' in detail
+    assert 'status=in_progress' in detail, detail
+
+
+def test_supersede_sweep_does_not_land_nodes_the_owner_cannot_account_for() -> None:
+    """走真实清扫入口：本进程没有派发 entry 的节点，判据必须是上报而不是强判。
+
+    这条是行为判据，不是参数形状判据。旧实现在这里用 50 毫秒轮询库行重推一遍再强判
+    `failed`（预算 2 秒，而同文件当时的注释写着一次模型回合 p50 15s / p90 60s 掐不住），
+    于是在别的进程里真在跑的分支会被本进程按一句猜测判死。落定归取消方；无主的只上报。
+
+    判别力落在诊断标题上：这里 `_log_service` 是空操作替身，节点行的写入观察不到，
+    所以不假装断言了状态——HEAD 与本改动分别产出 `spawn_supersede_forced_live_node`
+    与 `spawn_supersede_left_to_owner`，这条用例据此红/绿。
+    """
+    store = _round_store('in_progress')
+    runner, diagnostics = _reporting_runner(store)
+    runner.cancel_node_subtree_executor = None
+    # 旧实现的强判会走 `_mark_finished`，它需要 `_react_loop`；给一个全空操作的替身，
+    # 让判据落在诊断标题上而不是以 AttributeError 提前退出。
+    runner._react_loop = _FallbackLogService(object())  # type: ignore[attr-defined]
+    # 清扫这条道会碰很多帧与账本读口；本用例只关心清扫走了哪条判决道。
+    runner._log_service = _FallbackLogService(runner._log_service)  # type: ignore[attr-defined]
+
+    asyncio.run(
+        runner._settle_superseded_spawn_operations(
+            task=SimpleNamespace(task_id=TASK_ID, root_node_id=ROOT_ID, session_id='web:supersede'),
+            parent=store.get_node(ROOT_ID),
+            exclude_cache_key='call_01_new',
+            replacement_round_id='call_01_new',
+        )
+    )
+
+    titles = [str(item.get('title') or '') for item in diagnostics]
+    assert 'spawn_supersede_left_to_owner' in titles, titles
+    assert 'spawn_supersede_forced_live_node' not in titles, titles
+

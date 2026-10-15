@@ -353,8 +353,20 @@ class TaskNodeDispatcher:
         # 取消 entry future；生命周期由 dispatcher.close()/cancel_nodes 权威管理。
         return await asyncio.shield(entry.future)
 
-    async def cancel_nodes(self, node_ids: list[str]) -> None:
+    async def cancel_nodes(self, node_ids: list[str], reason: str = '') -> set[str]:
+        """取消这批节点的在飞执行体、把它们落定，并返回**本进程确实持有其 entry 的那些**节点 id。
+
+        返回值是调用方唯一需要的活性结论：出现在返回值里的节点在这里已经等到协程真停并被
+        落定，调用方不需要、也没有资格再判一次；没出现的（跨进程、重启后、非常规形态）是本
+        进程「不知道谁在驱动」，只许上报，不许就地落终态。
+
+        `reason` 由发起清扫的一方给出（例如 `superseded by newer spawn round: X`）：是这里
+        停掉了它的执行体，就该由这里把「为什么停」写进行，而不是留一个 `canceled` 让操作员
+        回头去猜这是人工取消还是被取代。
+        """
+        landing_reason = str(reason or '').strip() or 'canceled'
         entries: list[_DispatchEntry] = []
+        owned: set[str] = set()
         seen: set[str] = set()
         for raw_node_id in list(node_ids or []):
             node_id = str(raw_node_id or '').strip()
@@ -364,12 +376,15 @@ class TaskNodeDispatcher:
             entry = self._entries.get(node_id)
             if entry is None:
                 continue
+            owned.add(node_id)
             entries.append(entry)
             if entry.task is not None and not entry.task.done():
                 entry.task.cancel()
             elif not entry.future.done():
                 try:
-                    entry.future.set_result(self._node_runner.fail_paused_node(self._task_id, node_id, 'canceled'))
+                    entry.future.set_result(
+                        self._node_runner.fail_paused_node(self._task_id, node_id, landing_reason)
+                    )
                 except Exception:
                     entry.future.set_exception(asyncio.CancelledError())
         # 先等被取消的协程真停：run_node 的 CancelledError 在活动 hold 下会转
@@ -378,14 +393,21 @@ class TaskNodeDispatcher:
         running_tasks = [entry.task for entry in entries if entry.task is not None and not entry.task.done()]
         if running_tasks:
             await asyncio.gather(*running_tasks, return_exceptions=True)
-        # 协程停稳后仍未解析的 future 强制落终态，保持取消语义权威。
+        # 落定这批节点。判据必须是**节点行**而不是 future 状态：普通取消路径上
+        # `_run_entry` 把 future 置成 cancelled（已经 done），只补「未解析的 future」就会
+        # 漏掉真正在飞的那批，把它们留在 in_progress——那正是过去调用方要自己轮询库行再强判
+        # 的原因。`fail_paused_node` 对已终态的节点原样返回既有结果，所以这里不会把
+        # success 改写掉。
         for entry in entries:
-            if entry.future.done():
-                continue
             try:
-                entry.future.set_result(self._node_runner.fail_paused_node(self._task_id, entry.node_id, 'canceled'))
+                result = self._node_runner.fail_paused_node(self._task_id, entry.node_id, landing_reason)
             except Exception:
-                entry.future.set_exception(asyncio.CancelledError())
+                if not entry.future.done():
+                    entry.future.set_exception(asyncio.CancelledError())
+                continue
+            if not entry.future.done():
+                entry.future.set_result(result)
+        return owned
 
     async def resume_node(self, node_id: str) -> None:
         normalized_node_id = str(node_id or '').strip()
@@ -1207,11 +1229,16 @@ class TaskActorService:
             return await dispatcher.execute_node(task_id, node_id)
         return await self._node_runner.run_node(task_id, node_id)
 
-    async def _cancel_node_subtree(self, task_id: str, node_ids: list[str]) -> None:
+    async def _cancel_node_subtree(self, task_id: str, node_ids: list[str], reason: str = '') -> set[str]:
+        """注入给 NodeRunner 的取消执行体；返回本进程实际持有的节点 id。
+
+        没有 dispatcher（任务不在本进程跑）时返回空集——那是「不知道有没有人在驱动」，
+        调用方必须按未持有处理：标记上报，绝不就地落终态。
+        """
         dispatcher = self._dispatchers.get(str(task_id or '').strip())
         if dispatcher is None:
-            return
-        await dispatcher.cancel_nodes(node_ids)
+            return set()
+        return await dispatcher.cancel_nodes(node_ids, reason)
 
     async def _execute_node(self, task_id: str, node_id: str) -> NodeFinalResult:
         return await self._execute_nested_node(task_id, node_id)

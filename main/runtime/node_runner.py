@@ -5617,61 +5617,65 @@ class NodeRunner:
                     pending.append(child_id)
         return collected
 
-    async def _cancel_spawn_subtrees(self, *, task_id: str, node_ids: set[str]) -> None:
+    async def _cancel_spawn_subtrees(self, *, task_id: str, node_ids: set[str], reason_text: str = '') -> set[str]:
+        """取消这批子树，并返回**本进程确实持有其派发 entry** 的节点 id。
+
+        这个返回值是调用方唯一需要的活性结论，也是本方法存在的全部意义：派发器在里面已经
+        等到协程真停、并把节点落定成 `reason_text`（调用方给不出就用 `canceled`）。调用方
+        拿到的「没出现在返回值里」不是「还在跑」，而是「我不知道谁在驱动它」——两者处置不同，
+        前者不需要再判，后者只许上报。
+        """
         targets = sorted(str(node_id or '').strip() for node_id in list(node_ids or []) if str(node_id or '').strip())
         if not targets:
-            return
+            return set()
         executor = self.cancel_node_subtree_executor
         if not callable(executor):
-            return
+            # 没接线＝本进程给不出持有结论，一律按未持有处理：调用方只上报，不强判。
+            return set()
         try:
-            await executor(task_id, targets)
+            owned = await executor(task_id, targets, str(reason_text or '').strip())
         except TaskPausedError:
             raise
         except asyncio.CancelledError:
             raise
+        return {str(item or '').strip() for item in set(owned or ()) if str(item or '').strip()}
 
-    async def _wait_for_terminal_nodes(self, *, node_ids: set[str], timeout_seconds: float = 2.0) -> set[str]:
-        pending = {
-            str(node_id or '').strip()
-            for node_id in list(node_ids or [])
-            if str(node_id or '').strip()
-            and self._normalized_status(getattr(self._store.get_node(str(node_id or '').strip()), 'status', '')) not in {STATUS_SUCCESS, STATUS_FAILED}
-        }
-        if not pending:
-            return set()
-        deadline = asyncio.get_running_loop().time() + max(0.1, float(timeout_seconds or 0.0))
-        while pending and asyncio.get_running_loop().time() < deadline:
-            await asyncio.sleep(0.05)
-            pending = {
-                node_id
-                for node_id in pending
-                if self._normalized_status(getattr(self._store.get_node(node_id), 'status', '')) not in {STATUS_SUCCESS, STATUS_FAILED}
-            }
-        return pending
+    def _report_nodes_without_owner(
+        self,
+        *,
+        task_id: str,
+        parent_node_id: str,
+        cache_key: str,
+        reason_text: str,
+        node_ids: set[str],
+    ) -> None:
+        """清扫时本进程没有这些节点的派发 entry：只上报，不代签终态。
 
-    def _force_superseded_nodes_terminal(self, *, task_id: str, node_ids: set[str], reason_text: str) -> None:
-        terminal_result = NodeFinalResult(
-            status=STATUS_FAILED,
-            delivery_status='blocked',
-            summary=reason_text,
-            answer='',
-            evidence=[],
-            remaining_work=[],
-            blocking_reason=reason_text,
-        )
-        nodes: list[NodeRecord] = []
-        for node_id in list(node_ids or []):
-            node = self._store.get_node(str(node_id or '').strip())
-            if node is None:
-                continue
-            nodes.append(node)
-        nodes.sort(key=lambda item: (int(item.depth or 0), str(item.node_id or '')), reverse=True)
-        for node in nodes:
-            latest = self._store.get_node(node.node_id) or node
-            if self._normalized_status(getattr(latest, 'status', '')) == STATUS_SUCCESS:
-                continue
-            self._mark_finished(task_id, latest.node_id, terminal_result)
+        「本进程没人驱动它」不等于「它失败了」——它可能在别的 worker 里跑、可能在等一次
+        释放，也可能早就停了我们只是读不到。派发器对它有结论才有 `canceled`；我们没有。
+        旧实现在这里用 50 毫秒轮询重推一遍再强判 `failed`，而同一文件当时的注释就写着
+        「一次模型回合 p50 15s / p90 60s，2s 等待常掐不住」——那个预算从来没成立过。
+
+        上报项要带清扫前的真实状态：操作员据此决定是等、是 `resume_node`、还是按 §3.5
+        的作废签发落 `canceled`。这个判断代码没有证据替人做。
+        """
+        for node_id in sorted(str(item or '').strip() for item in (node_ids or set()) if str(item or '').strip()):
+            node = self._store.get_node(node_id)
+            self._emit_spawn_diagnostic(
+                title='spawn_supersede_left_to_owner',
+                task_id=task_id,
+                parent_node_id=parent_node_id,
+                cache_key=cache_key,
+                index=None,
+                entry=None,
+                detail=(
+                    f'left_node_id={node_id} '
+                    f'kind={str(getattr(node, "node_kind", "") or "")} '
+                    f'depth={str(getattr(node, "depth", "") or "")} '
+                    f'status={self._normalized_status(getattr(node, "status", ""))} '
+                    f'reason={str(reason_text or "").strip()}'
+                ),
+            )
 
     def _find_spawn_entry_for_child(
         self,
@@ -5725,9 +5729,16 @@ class NodeRunner:
             _cache_key, _index, entry, _payload = located
             root_node_ids.update(self._spawn_entry_node_ids(entry))
         subtree_node_ids = self._collect_descendant_node_ids(list(root_node_ids))
-        await self._cancel_spawn_subtrees(task_id=task_id, node_ids=subtree_node_ids)
-        await self._wait_for_terminal_nodes(node_ids=subtree_node_ids)
-        self._force_superseded_nodes_terminal(task_id=task_id, node_ids=subtree_node_ids, reason_text=terminal_reason)
+        owned_node_ids = await self._cancel_spawn_subtrees(
+            task_id=task_id, node_ids=subtree_node_ids, reason_text=terminal_reason,
+        )
+        self._report_nodes_without_owner(
+            task_id=task_id,
+            parent_node_id=parent_node_id,
+            cache_key='',
+            reason_text=terminal_reason,
+            node_ids=set(subtree_node_ids) - owned_node_ids,
+        )
         if located is not None:
             cache_key, index, _entry, cached_payload = located
             self._update_spawn_entry(
@@ -5925,31 +5936,20 @@ class NodeRunner:
             if self._normalized_status(getattr(node, 'status', '')) not in {STATUS_SUCCESS, STATUS_FAILED}:
                 preterminal_node_ids.add(node_id)
 
-        await self._cancel_spawn_subtrees(task_id=task.task_id, node_ids=subtree_node_ids)
-        still_live = await self._wait_for_terminal_nodes(node_ids=subtree_node_ids)
-        # 取消后仍未落终态＝清扫时该节点真在飞（一次模型回合 p50 15s / p90 60s，
-        # 2s 等待常掐不住）。强判终态照旧执行（不留孤儿、不留双活），但必须留下可检索
-        # 现场：否则操作员从 `superseded` 一条读不出"工作是被中途掐断的"。
-        for node_id in sorted(still_live & preterminal_node_ids):
-            node = self._store.get_node(node_id)
-            self._emit_spawn_diagnostic(
-                title='spawn_supersede_forced_live_node',
-                task_id=task.task_id,
-                parent_node_id=parent.node_id,
-                cache_key='',
-                index=None,
-                entry=None,
-                detail=(
-                    f'forced_node_id={node_id} '
-                    f'kind={str(getattr(node, "node_kind", "") or "")} '
-                    f'depth={str(getattr(node, "depth", "") or "")} '
-                    f'replacement_round={replacement_round_id}'
-                ),
-            )
-        self._force_superseded_nodes_terminal(
+        owned_node_ids = await self._cancel_spawn_subtrees(
+            task_id=task.task_id, node_ids=subtree_node_ids, reason_text=reason_text,
+        )
+        # 有 entry 的那批：派发器已经等到协程真停、并把未解析的 future 权威落成 `canceled`，
+        # 这里不再判第二次。没有 entry 的那批：本进程给不出「它还在跑还是已经停了」的结论，
+        # 只许上报，留给操作员或作废签发。旧实现在这两批上都用 50 毫秒轮询从库行重推一遍再
+        # 强判 failed，而它自己的注释就写着 2 秒预算掐不住一次真实回合（p50 15s / p90 60s）。
+        # `reason_text` 已带被取代的轮 id，操作员据此能读出「工作是被清扫打断的」。
+        self._report_nodes_without_owner(
             task_id=task.task_id,
-            node_ids=preterminal_node_ids,
+            parent_node_id=parent.node_id,
+            cache_key='',
             reason_text=reason_text,
+            node_ids=preterminal_node_ids - owned_node_ids,
         )
 
         for cache_key, payload, active_indexes in active_operations:

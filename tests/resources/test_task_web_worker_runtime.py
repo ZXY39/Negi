@@ -5602,6 +5602,16 @@ async def test_new_spawn_round_supersedes_active_old_subtree_and_preserves_termi
         )
 
 
+        # 有主形状：执行体归派发器落定。这里用一个会认领全部目标的假执行体代表
+        # `TaskNodeDispatcher.cancel_nodes`（它等到协程真停、再按调用方给的 reason 落行），
+        # NodeRunner 侧一个都不该再判第二次。
+        async def _fake_cancel_executor(_task_id: str, node_ids: list, reason: str = '') -> set:
+            for _node_id in node_ids:
+                service.node_runner.fail_paused_node(_task_id, _node_id, str(reason or '').strip() or 'canceled')
+            return set(node_ids)
+
+        service.node_runner.cancel_node_subtree_executor = _fake_cancel_executor
+
         new_results = await service.node_runner._spawn_children(
             task_id=record.task_id,
             parent_node_id=root.node_id,
@@ -5633,16 +5643,15 @@ async def test_new_spawn_round_supersedes_active_old_subtree_and_preserves_termi
         assert "superseded by newer spawn round: round-2" in json.dumps(stale_entry, ensure_ascii=False)
         assert spawn_operations["round-1"]["completed"] is True
 
-        # 清扫时该子树仍非终态（harness 无 dispatcher，取消不会让它自己落终态）
-        # ⇒ 强判终态可以保留，但必须留下可检索现场，操作员才读得出"工作是被掐断的"
-        forced = [
+        # 执行体全部有主 ⇒ NodeRunner 不再自行落任何终态，因此也不该有「留给无主」的上报。
+        # 旧实现在这里用 50 毫秒轮询库行重推一遍、把 2 秒预算内没等到终态的节点强判 failed，
+        # 而它自己的注释就写着那个预算掐不住一次真实回合。
+        left_to_owner = [
             str(item.get("detail") or "")
             for item in diagnostics
-            if str(item.get("title") or "") == "spawn_supersede_forced_live_node"
+            if str(item.get("title") or "") == "spawn_supersede_left_to_owner"
         ]
-        assert any(stale_child.node_id in text for text in forced)
-        assert any(stale_descendant.node_id in text for text in forced)
-        assert not [text for text in forced if steady_child.node_id in text]
+        assert not left_to_owner, left_to_owner
 
         assert steady_entry["status"] == "success"
     finally:

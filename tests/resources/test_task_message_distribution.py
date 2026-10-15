@@ -1551,10 +1551,18 @@ async def test_distribution_turn_mixed_distribute_and_terminate_single_turn(
     backend = _QueuedChatBackend([response])
     service = _build_service_with_backend(tmp_path, chat_backend=backend)
     try:
-        async def _no_wait(node_ids, timeout_seconds=2.0):
-            return set()
+        # 本用例直接建节点、没有派发 entry，所以取消方给不出持有结论、也就没人落定这批节点。
+        # 这里用一个会认领全部目标的假执行体代表 `TaskNodeDispatcher.cancel_nodes`：生产里
+        # 真在飞的分支一定有 entry，由它等到协程真停并按 reason 落行。旧实现靠 NodeRunner
+        # 自己轮询库行再强判来兜这个缺口，那条判决已经删掉了。
+        async def _landing_cancel(_task_id, node_ids, reason=''):
+            for _node_id in node_ids:
+                service.node_runner.fail_paused_node(
+                    _task_id, _node_id, str(reason or '').strip() or 'canceled',
+                )
+            return set(node_ids)
 
-        monkeypatch.setattr(service.node_runner, "_wait_for_terminal_nodes", _no_wait)
+        service.node_runner.cancel_node_subtree_executor = _landing_cancel
 
         record, root, branch_a, branch_b = await seed_live_root_with_two_running_children(service)
         await _seed_distributing_epoch(
