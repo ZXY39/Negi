@@ -1642,11 +1642,13 @@ class _MemorySqliteRepository:
         finally:
             conn.close()
 
-    def mark_consolidated(self, memory_ids: list[str], *, category_ref: str, now_iso: str) -> list[str]:
+    def mark_consolidated(self, memory_ids: list[str], *, category_ref: str) -> list[str]:
         """Point retired rows at their category note; the row itself stays.
 
         Retiring is not deleting: the body has to remain for the mirror rebuild, for
-        audit, and for note ownership (`note_ref` keeps its note file alive).
+        audit, and for note ownership (`note_ref` keeps its note file alive). It is also
+        not an edit: `updated_at` stays at the last content change, because that value is
+        what the category note prints as the memory's real modification time.
         """
         target = str(category_ref or "").strip()
         if not target:
@@ -1659,9 +1661,9 @@ class _MemorySqliteRepository:
                 if not normalized:
                     continue
                 cursor = conn.execute(
-                    "UPDATE memories SET consolidated_into = ?, updated_at = ? "
+                    "UPDATE memories SET consolidated_into = ? "
                     "WHERE memory_id = ? AND consolidated_into = ''",
-                    (target, str(now_iso or ""), normalized),
+                    (target, normalized),
                 )
                 if int(cursor.rowcount or 0) > 0:
                     retired.append(normalized)
@@ -3537,7 +3539,7 @@ class MemoryManager:
                 category = str(item.get("note_ref") or "").strip()
                 if not memory_id or not category:
                     continue
-                self._memory_repo.mark_consolidated([memory_id], category_ref=category, now_iso=now_iso)
+                self._memory_repo.mark_consolidated([memory_id], category_ref=category)
             self._rebuild_memory_snapshot_from_sqlite(now_iso=now_iso)
         except Exception:
             try:
@@ -3795,7 +3797,11 @@ class MemoryManager:
             # only occupies its summary line), never the stored body - pricing by body length
             # would report compliance the block never reaches.
             taken += self._row_rendered_chars(row)
-            head = f"- id:{memory_id}"
+            head = (
+                f"- id:{memory_id}"
+                f"｜创建 {self._memory_date_text(row.get('created_at'))}"
+                f"｜修改 {self._memory_date_text(row.get('updated_at'))}"
+            )
             if note_ref:
                 head += f" (note: {note_ref})"
             blocks.append(f"{head}\n{body}")
