@@ -9,7 +9,7 @@ import traceback
 from collections import deque
 from datetime import datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 from loguru import logger
 
@@ -520,8 +520,11 @@ class NodeRunner:
                 continue
             if any(self._normalized_status(item.get('status')) != 'success' for item in entries):
                 continue
-            results = self._spawn_round_results_from_entries(
+            results = self._deliver_spawn_round_results(
                 task_id=parent.task_id,
+                parent_node_id=parent.node_id,
+                cache_key=str(cache_key or ''),
+                stage='reuse_completed_round',
                 entries=entries,
                 specs=specs,
             )
@@ -4385,9 +4388,14 @@ class NodeRunner:
             entry=None,
             detail=f'held_seconds={held_seconds:.0f}',
         )
-        return self._spawn_round_results_from_entries(
+        return self._deliver_spawn_round_results(
             task_id=task_id,
-            entries=self._spawn_round_entries(parent_node_id=parent_node_id, cache_key=cache_key),
+            parent_node_id=parent_node_id,
+            cache_key=cache_key,
+            stage='hold_converged',
+            entries_loader=lambda: self._spawn_round_entries(
+                parent_node_id=parent_node_id, cache_key=cache_key,
+            ),
             specs=specs,
         )
 
@@ -4586,8 +4594,38 @@ class NodeRunner:
             f' {detail}'
         )
         error_text = error_text[:_SPAWN_FAULT_HOLD_REPORT_TEXT_LIMIT]
-        # 这两步都是写库，而走到这里的原因常常正是库在坏：写失败就继续等、下一拍再试，
-        # 绝不让写失败把滞留道炸出去。
+        parked = self._park_parent_for_operator(
+            task_id=task_id,
+            parent_node_id=parent_node_id,
+            error_text=error_text,
+        )
+        self._emit_spawn_diagnostic(
+            title='spawn_round_parked_for_operator',
+            task_id=task_id,
+            parent_node_id=parent_node_id,
+            cache_key=cache_key,
+            index=None,
+            entry=None,
+            detail=f'{detail} persisted={"yes" if parked else "no"} reason=stuck_no_progress',
+        )
+        if not parked:
+            # 现场没落库就不要把它伪装成一次已登记的暂停——继续等，让下一拍重投。
+            return
+        raise NodePausedError(task_id, parent_node_id)
+
+    def _park_parent_for_operator(
+        self,
+        *,
+        task_id: str,
+        parent_node_id: str,
+        error_text: str,
+    ) -> bool:
+        """把现场写进既有的节点错误暂停车道，返回是否真的落了库；写失败绝不外抛。
+
+        走到停车的原因常常正是库在坏，所以这两笔写本身也必须按可失败对待：写不进去就
+        返回 False，由调用方决定「继续等下一拍重投」还是「原样把一手故障抛出去」。
+        谎报一次已登记的暂停，比承认没登记更糟——外界会据此以为已经有人接手。
+        """
         wrote = True
         try:
             self._log_service.append_task_error_log(
@@ -4607,19 +4645,104 @@ class NodeRunner:
                 'title=spawn_round_park_write_failed stage=node_pause task={} node={} error={}',
                 str(task_id or '').strip(), str(parent_node_id or '').strip(), describe_exception(exc),
             )
-        self._emit_spawn_diagnostic(
-            title='spawn_round_parked_for_operator',
-            task_id=task_id,
-            parent_node_id=parent_node_id,
-            cache_key=cache_key,
-            index=None,
-            entry=None,
-            detail=f'{detail} persisted={"yes" if wrote else "no"} reason=stuck_no_progress',
-        )
-        if not wrote:
-            # 现场没落库就不要把它伪装成一次已登记的暂停——继续等，让下一拍重投。
-            return
-        raise NodePausedError(task_id, parent_node_id)
+        return wrote
+
+    def _deliver_spawn_round_results(
+        self,
+        *,
+        task_id: str,
+        parent_node_id: str,
+        cache_key: str,
+        stage: str,
+        entries: list[dict[str, Any]] | None = None,
+        entries_loader: Callable[[], list[dict[str, Any]]] | None = None,
+        specs: list[SpawnChildSpec] | None = None,
+    ) -> list[SpawnChildResult]:
+        """把已收敛轮次的 entry 交付给模型，读不出就**可见地停住**，不交出一句改写过的工具错误。
+
+        子节点的结论这时已经全部落库、轮次 `completed=True`：丢的不是工作，是把工作送到
+        模型眼前这一跳。而这一跳裸读的是 entry 表、节点行、交接件和错误行
+        （`entries_loader` / `_rebuild_spawn_entry_result`），正好是当初把整轮打进滞留道的那
+        同一个存储故障——不套住它，故障就会在"已经修好了"的位置再赢一次。
+
+        落点选 `NodePausedError` 而不是 per-entry 降级：给读不出来的那条 entry 编一个 error
+        结果就是不变量 I 禁止的"把『我不知道』解析成否定判决"；给读不出来的整轮交付一份
+        **空**结果表同理（`entry_count=unreadable` 就是为了让这一跳可查）。而整体落
+        `Error executing spawn_child_nodes` 更糟——它消费掉 `tool_call_id` 并触发批后帧写清掉
+        pending_tool_calls，模型照旧重发同一批，新 call id 生成新 cache_key，
+        `_completed_successful_spawn_results` 又只在**全部 entry 都是 success** 时才复用（一份
+        error entry 就让它整轮重新派生）。停车把 `tool_call_id` 原样留给重放：`resume_node` 后
+        同一轮直接从库里再取一次，交付的是真实结论。
+        """
+        stage = str(stage or '').strip() or 'unknown'
+        resolved: list[Any] = list(entries or [])
+        counted = entries is not None
+        try:
+            if entries_loader is not None:
+                resolved = list(entries_loader() or [])
+            counted = True
+            return self._spawn_round_results_from_entries(
+                task_id=task_id,
+                entries=[dict(item) for item in resolved if isinstance(item, dict)],
+                specs=specs,
+            )
+        except (NodePausedError, TaskPausedError, DistributionHoldError, asyncio.CancelledError):
+            raise
+        except Exception as exc:
+            detail = f'stage={stage} entry_count={len(resolved) if counted else "unreadable"}'
+            error_text = (
+                f'spawn_round_results_unreadable: 派生轮已收敛，但按当前存储状态取不回结果。'
+                f' 子节点的结论没有丢（都在库里），缺的只是交付这一跳。'
+                f' 一手故障: {describe_exception_chain(exc)}。'
+                f' 处置: resume 本节点按同一 call id 重放即可取回；在此之前不要重发同一批，'
+                f' 重发开局会把这一轮的 entry 当成被取代的旧轮清扫掉。 {detail}'
+            )[:_SPAWN_FAULT_HOLD_REPORT_TEXT_LIMIT]
+            parked = self._park_parent_for_operator(
+                task_id=task_id,
+                parent_node_id=parent_node_id,
+                error_text=error_text,
+            )
+            self._emit_spawn_diagnostic(
+                title='spawn_round_converged_results_unreadable',
+                task_id=task_id,
+                parent_node_id=parent_node_id,
+                cache_key=cache_key,
+                index=None,
+                entry=None,
+                detail=(
+                    f'{detail} persisted={"yes" if parked else "no"}'
+                    f' fault={describe_exception_chain(exc)}'
+                ),
+            )
+            if parked:
+                raise NodePausedError(task_id, parent_node_id) from exc
+            # 连暂停都写不进去：库已经不认任何一笔写。这时唯一诚实的动作是把一手故障原样抛出去，
+            # 而不是在这儿再造一条判决。
+            raise
+
+    def _latest_spawn_round_payload(
+        self,
+        *,
+        parent: NodeRecord,
+        cache_key: str,
+        fallback: dict[str, Any],
+    ) -> dict[str, Any]:
+        """批后重读只为拿到并发写入的 entry；读不到就用本进程手里那份。
+
+        这一轮的 entry 本来就是这一轮的记账写进去的，`fallback` 与库里那份同源，用它交付不算
+        伪造结果——伪造的是给读不出来的结论编一条判决。
+        """
+        try:
+            latest_parent = self._store.get_node(parent.node_id) or parent
+            latest = dict((latest_parent.metadata or {}).get('spawn_operations') or {}).get(cache_key)
+        except Exception as exc:
+            logger.warning(
+                'title=spawn_round_result_reread_failed stage=post_convergence cache_key={} error={}',
+                str(cache_key or '').strip(),
+                describe_exception(exc),
+            )
+            return fallback
+        return latest if isinstance(latest, dict) else fallback
 
     def _spawn_round_hold_stop_reason(self, *, task_id: str, parent_node_id: str) -> str:
         """只有明确的终态才算停手理由；查不到行不算（记账故障正是走到这里的原因）。"""
@@ -4670,8 +4793,11 @@ class NodeRunner:
         parent = self._store.get_node(parent_node_id) or parent
         cached = dict((parent.metadata or {}).get('spawn_operations') or {}).get(cache_key)
         if isinstance(cached, dict) and cached.get('completed'):
-            return self._spawn_round_results_from_entries(
+            return self._deliver_spawn_round_results(
                 task_id=task.task_id,
+                parent_node_id=parent.node_id,
+                cache_key=cache_key,
+                stage='replay_completed_round',
                 entries=[dict(item) for item in list(cached.get('entries') or []) if isinstance(item, dict)],
                 specs=specs,
             )
@@ -4804,10 +4930,16 @@ class NodeRunner:
         await asyncio.gather(*[_run_spec(index, spec) for index, spec in enumerate(specs)])
         cached_payload['completed'] = True
         self._save_spawn_cache(task.task_id, parent.node_id, cache_key, cached_payload)
-        latest_parent = self._store.get_node(parent.node_id) or parent
-        latest_payload = dict((latest_parent.metadata or {}).get('spawn_operations') or {}).get(cache_key) or cached_payload
-        return self._spawn_round_results_from_entries(
+        latest_payload = self._latest_spawn_round_payload(
+            parent=parent,
+            cache_key=cache_key,
+            fallback=cached_payload,
+        )
+        return self._deliver_spawn_round_results(
             task_id=task.task_id,
+            parent_node_id=parent.node_id,
+            cache_key=cache_key,
+            stage='post_convergence',
             entries=[dict(item) for item in list(latest_payload.get('entries') or []) if isinstance(item, dict)],
             specs=specs,
         )

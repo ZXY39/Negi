@@ -17,7 +17,9 @@
 - 冻结/取消类控制信号 ⇒ 绕过滞留，绝不被改写成一次交付；
 - 新一轮复用同一个执行子节点 ⇒ 沿用它原有的验收节点，不再另配一颗；
 - 清扫子树 ⇒ 落定归取消方（派发器按调用方给的 reason 落行），NodeRunner 不得再判第二次；
-  本进程没有派发 entry 的那些只上报、不强判。
+  本进程没有派发 entry 的那些只上报、不强判；
+- 轮次已收敛而交付这一跳读不出 ⇒ 父节点可见地停下，同一 call id 重放取回真实结论，绝不落成
+  `Error executing spawn_child_nodes`；连暂停都写不进去时原样抛出一手故障，不伪造"已登记的暂停"。
 """
 
 from __future__ import annotations
@@ -692,4 +694,174 @@ def test_orphan_candidate_is_parked_and_never_signed_failed() -> None:
     assert paused and paused[0][1] == EXEC_ID
     assert paused[0][2].get('reason') == 'error'
     assert store.get_node(EXEC_ID).status == 'in_progress', '候选节点被签成了终态'
+
+
+def _completed_round_store() -> _FakeStore:
+    """本轮已经收敛（completed=True、孩子终态）——只剩"把结论交给模型"这一跳。
+
+    这正是 I-11 的位置：活儿干完了，工作没有丢在库里，丢的是交付。
+    """
+    parent = _node(
+        ROOT_ID, kind='execution', status='in_progress', parent='', depth=0, can_spawn_children=True,
+    )
+    parent.metadata = {
+        'spawn_operations': {
+            ROUND_ID: {
+                'completed': True,
+                'specs': [item.model_dump(mode='json') for item in _specs()],
+                'entries': [{
+                    'index': 0,
+                    'goal': 'do the work',
+                    'status': 'success',
+                    'child_node_id': EXEC_ID,
+                    'acceptance_node_id': '',
+                    'requires_acceptance': False,
+                }],
+            }
+        }
+    }
+    child = _node(EXEC_ID, kind='execution', status='success', parent=ROOT_ID, final_output='shard written')
+    return _FakeStore(
+        {ROOT_ID: parent, EXEC_ID: child},
+        task=SimpleNamespace(
+            task_id=TASK_ID, status='in_progress', root_node_id=ROOT_ID, session_id='web:fault-hold',
+        ),
+    )
+
+
+def test_converged_round_with_an_unreadable_delivery_pauses_then_replays_the_real_conclusion() -> None:
+    """已收敛的轮次读不出结果 ⇒ 父节点可见地停下，库修好后同一 call id 重放回真实结论。
+
+    反例就是本事故的同一条形状：交付这一跳裸读节点行/交接件/错误行，撞上把整轮打进滞留道的
+    那个存储故障，工具就变成 `Error executing spawn_child_nodes`。那句话会消费掉 tool_call_id
+    并清掉 pending_tool_calls，模型重发同一批，新 call id 生成新 cache_key——而这一轮的成果其实
+    一直在库里。
+    """
+    from main.errors import NodePausedError
+
+    store = _completed_round_store()
+    runner, diagnostics, paused, logged = _parking_runner(store)
+    runner._log_service = _FallbackLogService(runner._log_service)
+    original_get_node = store.get_node
+    flaky = {'on': True}
+
+    def _flaky_get_node(node_id):
+        if flaky['on'] and str(node_id or '').strip() == EXEC_ID:
+            raise sqlite3.OperationalError('disk I/O error')
+        return original_get_node(node_id)
+
+    store.get_node = _flaky_get_node  # type: ignore[assignment]
+
+    def _call():
+        return asyncio.run(
+            runner._spawn_children(task_id=TASK_ID, parent_node_id=ROOT_ID, specs=_specs(), call_id=ROUND_ID)
+        )
+
+    with pytest.raises(NodePausedError):
+        _call()
+
+    assert paused and paused[0]['node_id'] == ROOT_ID
+    assert paused[0]['pause_reason'] == 'error'
+    remark = str(paused[0]['remark'] or '')
+    assert 'spawn_round_results_unreadable' in remark
+    assert 'disk I/O error' in remark, '一手故障必须留在暂停行里'
+    assert logged and 'spawn_round_results_unreadable' in str(logged[0].get('error_text') or '')
+    titles = [str(item.get('title') or '') for item in diagnostics]
+    assert 'spawn_round_converged_results_unreadable' in titles, titles
+    assert original_get_node(EXEC_ID).final_output == 'shard written', '交付失败不得改写子节点结论'
+    round_payload = store.get_node(ROOT_ID).metadata['spawn_operations'][ROUND_ID]
+    assert round_payload['completed'] is True, '轮次要留在可重放状态'
+
+    flaky['on'] = False
+    results = _call()
+
+    assert len(results) == 1
+    assert results[0].node_output == 'shard written', '重放必须交付子节点的真实结论'
+    assert len(paused) == 1, '库已修好的重放不该再停一次'
+
+
+def test_converged_delivery_that_cannot_record_a_park_reraises_the_raw_fault() -> None:
+    """连暂停都写不进去时原样抛出一手故障，不伪造一次"已登记的暂停"。"""
+    store = _completed_round_store()
+    runner, diagnostics, paused, logged = _parking_runner(store)
+
+    def _throw(*_args, **_kwargs):
+        raise sqlite3.OperationalError('write path down')
+
+    runner._log_service.append_task_error_log = _throw  # type: ignore[attr-defined]
+    runner._mark_node_paused = _throw  # type: ignore[attr-defined]
+
+    def _unreadable_entries():
+        raise sqlite3.OperationalError('disk I/O error')
+
+    with pytest.raises(sqlite3.OperationalError, match='disk I/O error'):
+        runner._deliver_spawn_round_results(
+            task_id=TASK_ID,
+            parent_node_id=ROOT_ID,
+            cache_key=ROUND_ID,
+            stage='replay_completed_round',
+            entries_loader=_unreadable_entries,
+            specs=_specs(),
+        )
+
+    assert paused == [] and logged == [], '写不进的暂停不得被记成已经落了库'
+    parked = [item for item in diagnostics if str(item.get('title') or '') == 'spawn_round_converged_results_unreadable']
+    assert parked and 'persisted=no' in str(parked[0].get('detail') or ''), parked
+    assert 'entry_count=unreadable' in str(parked[0].get('detail') or ''), (
+        'entry 表本身读不到时不许把 0 当成实测条数'
+    )
+
+
+def test_hold_lane_converged_exit_survives_a_flaky_entries_read() -> None:
+    """滞留道自己的出口也在裸读 entry 表——它抛就等于把已收敛的轮次换成一次工具错误。"""
+    from main.errors import NodePausedError
+
+    store = _round_store('in_progress')
+    runner, _diagnostics, paused, logged = _parking_runner(store)
+    runner.node_liveness_probe = lambda task_id, node_id: False
+    original = runner._spawn_round_entries
+    calls = {'n': 0}
+
+    def _flaky_entries(*, parent_node_id: str, cache_key: str):
+        calls['n'] += 1
+        if calls['n'] > 1:
+            raise sqlite3.OperationalError('disk I/O error')
+        return original(parent_node_id=parent_node_id, cache_key=cache_key)
+
+    runner._spawn_round_entries = _flaky_entries  # type: ignore[attr-defined]
+
+    async def _boom(**_kwargs):
+        raise sqlite3.OperationalError('disk I/O error')
+
+    runner._spawn_children_locked = _boom  # type: ignore[attr-defined]
+
+    with pytest.raises(NodePausedError):
+        asyncio.run(
+            runner._spawn_children(task_id=TASK_ID, parent_node_id=ROOT_ID, specs=_specs(), call_id=ROUND_ID)
+        )
+
+    assert paused and paused[0]['node_id'] == ROOT_ID
+    assert 'spawn_round_results_unreadable' in str(paused[0]['remark'] or '')
+    assert logged, '错误行不落就没有人会被叫醒'
+    assert store.get_node(EXEC_ID).status == 'in_progress', '出口读失败不得动子节点行'
+
+
+def test_post_convergence_reread_falls_back_to_the_payload_this_process_wrote() -> None:
+    """批后重读只是拿并发写入的 entry；读不到就用本进程手里那份同源副本，而不是炸掉整轮。"""
+    store = _completed_round_store()
+    runner = _runner(store)
+    parent = store.get_node(ROOT_ID)
+    payload = parent.metadata['spawn_operations'][ROUND_ID]
+    original_get_node = store.get_node
+
+    assert runner._latest_spawn_round_payload(parent=parent, cache_key=ROUND_ID, fallback={}) is payload
+
+    def _throw(node_id):
+        if str(node_id or '').strip() == ROOT_ID:
+            raise sqlite3.OperationalError('disk I/O error')
+        return original_get_node(node_id)
+
+    store.get_node = _throw  # type: ignore[assignment]
+
+    assert runner._latest_spawn_round_payload(parent=parent, cache_key=ROUND_ID, fallback=payload) is payload
 
