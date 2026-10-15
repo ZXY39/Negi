@@ -339,3 +339,25 @@ test("指针同样活过节点详情的摘要重建", () => {
 
     assert.equal(normalized.stages[0].rounds_archive_ref, ARCHIVE_REF);
 });
+// 写记忆与读笔记同一条 pill 车道：阶段轨道不该留行，只有真失败才需要一行可见的失败。
+test("阶段轨道摘掉成功的记忆写入，保留失败的那一条", () => {
+    const { filterCeoInteractionFlowSummary } = loadApp(async () => ({ content: "" }));
+    const summary = filterCeoInteractionFlowSummary({
+        stages: [{
+            ...serverStagePayload(),
+            rounds: [{
+                round_id: "r1",
+                tools: [
+                    { tool_name: "memory_update", status: "success", output_text: "{}" },
+                    { tool_name: "memory_update", status: "error", output_text: "boom" },
+                    { tool_name: "exec", status: "success", output_text: "ok" },
+                ],
+            }],
+            archive_ref: "",
+            rounds_archive_ref: "",
+        }],
+    });
+
+    const kept = (summary?.stages?.[0]?.rounds?.[0]?.tools || []).map((item) => (item.tool_name + "/" + item.status));
+    assert.deepEqual(kept, ["memory_update/error", "exec/success"]);
+});
