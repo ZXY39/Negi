@@ -128,6 +128,11 @@ function loadApp() {
             renderMemoryFailedCard,
             memoryFailedCategoryLabel,
             memoryFailedAutoRetryHint,
+            memoryProcessedOpKinds,
+            memoryProcessedStatusLabel,
+            memoryProcessedIsNoChange,
+            memoryProcessedNoopReason,
+            renderMemoryChangeBlock,
             memoryFailedErrorHistoryText,
             memoryPayloadBlocksFromRecord,
             memoryPayloadRangeText,
@@ -516,4 +521,41 @@ test("the memory browser never promises a synchronous save", () => {
     assert.match(APP_CODE, /已提交修改/);
     assert.match(APP_CODE, /已提交删除/);
     assert.match(APP_CODE, /交给记忆 agent/);
+});
+
+test("the capacity rungs read as their own outcomes, not as generic failures", () => {
+    const api = loadApp();
+    assert.equal(api.memoryFailedCategoryLabel({ category: "capacity" }), "库容不下");
+    assert.equal(api.memoryFailedCategoryLabel({ category: "capacity_noop" }), "归并未受理");
+    // 两条都必须带"下一步做什么"：停车记录的解释就是操作员的出口。
+    assert.match(api.memoryFailedAutoRetryHint({ category: "capacity" }), /原文完整保留/);
+    assert.match(api.memoryFailedAutoRetryHint({ category: "capacity_noop" }), /放弃.*重新允许/);
+    assert.equal(api.memoryFailedCategoryLabel({ category: "provider_error" }), "provider 瞬时错误");
+});
+
+test("a machine downgrade is its own change chip, not a rewrite", () => {
+    const api = loadApp();
+    const item = {
+        status: "applied",
+        changes: [{ type: "compress_for_capacity", memory_id: "Ab12Z9", freed_chars: 61 }],
+    };
+    const html = api.renderMemoryChangeBlock({ type: "compress_for_capacity", memory_id: "Ab12Z9", freed_chars: 61 });
+    assert.match(html, /容量降级/);
+    const kinds = api.memoryProcessedOpKinds(item);
+    // vm 里产出的数组带着那个 realm 的 Array 原型，deepStrictEqual 会因原型不同而判不等。
+    assert.equal(kinds.join("|"), "compress_for_capacity", "机器动作不能被并进「修改」那颗");
+    assert.match(APP_CODE, /data-op="compress_for_capacity"|compress_for_capacity: \{/);
+});
+
+test("a capacity park reads as a park, not as a batch that wrote nothing", () => {
+    const api = loadApp();
+    const parked = { status: "parked", op: "write", discard_reason: "capacity_exhausted", error: "memory document exceeds 900 chars" };
+    assert.equal(api.memoryProcessedStatusLabel(parked), "已停车");
+    assert.equal(api.memoryProcessedIsNoChange(parked), true, "停下来的批次一行都没写，不许画变更牌");
+    assert.equal(api.memoryProcessedOpKinds(parked).join("|"), "");
+    assert.match(api.memoryProcessedNoopReason(parked), /capacity_exhausted/);
+
+    const applied = { status: "applied", op: "write", changes: [{ type: "add", memory_id: "Ab12Z9", content: "x" }] };
+    assert.equal(api.memoryProcessedStatusLabel(applied), "已应用");
+    assert.equal(api.memoryProcessedOpKinds(applied).join("|"), "add");
 });

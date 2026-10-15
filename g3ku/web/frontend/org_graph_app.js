@@ -15100,6 +15100,8 @@ function memoryFailedCategoryLabel(item) {
     if (normalized === "provider_error") return "provider 瞬时错误";
     if (normalized === "window_refusal") return "超窗拒发";
     if (normalized === "protocol") return "协议违规";
+    if (normalized === "capacity") return "库容不下";
+    if (normalized === "capacity_noop") return "归并未受理";
     return normalized || "未知类别";
 }
 
@@ -15107,6 +15109,8 @@ function memoryFailedAutoRetryHint(item) {
     const normalized = String(item?.category || "").trim().toLowerCase();
     if (normalized === "provider_error") return "队列下一次成功处理后自动重排队尾";
     if (normalized === "window_refusal") return "载荷变小或模型窗口调大后手动重试";
+    if (normalized === "capacity") return "整理出空间后手动重试；这条批次的原文完整保留在这里";
+    if (normalized === "capacity_noop") return "放弃它才会重新允许对同一批记忆排归并";
     return "仅支持手动重试";
 }
 
@@ -15233,6 +15237,7 @@ const MEMORY_OP_KINDS = {
     note_reaped: { label: "回收 Note", icon: "trash-2" },
     category_note: { label: "归并记忆", icon: "notebook-pen" },
     consolidate: { label: "记忆退场", icon: "pencil" },
+    compress_for_capacity: { label: "容量降级", icon: "arrow-down-wide-narrow" },
 };
 
 // write_mode 把删除并进 rewrite 桶、把多种操作压成 mixed；只有持久化的 changes
@@ -15259,7 +15264,13 @@ function memoryProcessedOpKinds(item) {
 }
 
 function memoryProcessedNoopReason(item) {
-    return String(item?.noop_reason || item?.already_satisfied || "").trim();
+    const reason = String(item?.noop_reason || item?.already_satisfied || "").trim();
+    if (reason) return reason;
+    // 容量停车的"原因"就是它停在哪一级：不显示出来，操作员看到的就是一条没头没尾的记录。
+    if (String(item?.status || "").trim().toLowerCase() === "parked") {
+        return String(item?.discard_reason || item?.error || "").trim();
+    }
+    return "";
 }
 
 function memoryProcessedChangePreview(item) {
@@ -15268,13 +15279,17 @@ function memoryProcessedChangePreview(item) {
 
 function memoryProcessedIsNoChange(item) {
     const normalized = String(item?.status || "").trim().toLowerCase();
-    if (normalized === "discarded") return true;
+    // 容量停车那一级一行都没写：载荷原文留在失败区，台账这行只是把"停在哪一级"记下来。
+    if (normalized === "discarded" || normalized === "parked") return true;
     return !!memoryProcessedNoopReason(item);
 }
 
 function memoryProcessedStatusLabel(item) {
+    const normalizedStatus = String(item?.status || "").trim().toLowerCase();
+    // 停下来的批次既不写变更也不是"看过决定不写"：状态位要说清它停在梯子的哪一级。
+    if (normalizedStatus === "parked") return "已停车";
     if (memoryProcessedIsNoChange(item)) return "无变更";
-    const normalized = String(item?.status || "").trim().toLowerCase();
+    const normalized = normalizedStatus;
     if (normalized === "discarded") return "已废弃";
     if (normalized === "applied") return "已应用";
     return normalized || "已处理";
@@ -15477,6 +15492,7 @@ function memoryChangeTypeLabel(type) {
     if (normalized === "note_reaped") return "回收 Note";
     if (normalized === "category_note") return "归并记忆";
     if (normalized === "consolidate") return "记忆退场";
+    if (normalized === "compress_for_capacity") return "容量降级";
     return normalized || "变更";
 }
 

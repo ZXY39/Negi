@@ -11328,6 +11328,12 @@ textarea {
     color: #a16207;
 }
 
+/* 容量降级是机器动作，不是谁改了内容：颜色与"记忆退场"分开，否则两种完全不同的事看起来一样。
+   玫红是这套调色板里唯一没被占用的色相，灰色会跟"回收 Note"糊在一起。 */
+.memory-op-chip[data-op="compress_for_capacity"] {
+    color: #be185d;
+}
+
 .memory-card-minimal-trailing {
     display: flex;
     align-items: center;

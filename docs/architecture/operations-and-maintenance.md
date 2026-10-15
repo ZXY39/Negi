@@ -111,7 +111,7 @@
 当前 `negi status` 的记忆区块应按 queued Markdown runtime 理解：
 
 - 它会显示 `Memory Notebook`、`Memory Notes Dir`、`Memory Queue`、`Memory Ops Log`
-- `negi status` 的 `Memory Notebook` 一行只说明笔记文件在不在，不是长期记忆健康指标；健康判断走 `negi memory`，它的命令面是 `current` / `queue` / `flush` / `doctor` / `reconcile-notes` / `import-legacy` / `cleanup-legacy`
+- `negi status` 的 `Memory Notebook` 一行只说明笔记文件在不在，不是长期记忆健康指标；健康判断走 `negi memory`，它的命令面是 `current` / `queue` / `flush` / `uncompress` / `doctor` / `reconcile-notes` / `import-legacy` / `cleanup-legacy`
 
 ## 3. 关键状态文件与目录
 
@@ -614,7 +614,7 @@ For the queued Markdown memory runtime, the first operator checks should be:
 1. Inspect `memory/memory_state.sqlite3` for the authoritative memory rows, `refresh_count`, `passed_count`, `is_compressed`, and `from_user` state.
 2. Inspect `memory/MEMORY.md` for the prompt projection currently injected into CEO/frontdoor. It is regenerated from sqlite and never feeds back into it, so a difference between the two is a damaged projection, not lost memory. Any content the store does not produce is archived first as `memory/MEMORY.md.bak.<YYYYMMDD-HHMMSS>` before the file is repainted — read those to recover a hand edit or a torn write, and treat a growing count of them as evidence that something outside the runtime is writing into the memory directory.
 3. Inspect `memory/queue.jsonl` for pending `write` / `delete` requests.
-4. Inspect `memory/failed.jsonl` for parked failed batches: each row carries `category` (`provider_error` / `window_refusal` / `protocol`), `status` (`parked` / `requeued`), retry counters and a full `error_history`. A non-empty file means some turns of memory are waiting for a success signal or an operator decision.
+4. Inspect `memory/failed.jsonl` for parked failed batches: each row carries `category` (`provider_error` / `window_refusal` / `protocol` / `capacity` / `capacity_noop`), `status` (`parked` / `requeued`), retry counters and a full `error_history`. A non-empty file means some turns of memory are waiting for a success signal or an operator decision. `capacity` is the ladder's last rung: that batch never fit, its payload is held verbatim, and the queue kept flowing. `capacity_noop` is a consolidation that ran clean and declared these rows have no category - discarding it is what re-arms consolidation for that same candidate set, so leaving it parked is a deliberate "stop asking", not a forgotten failure.
 5. Inspect `memory/ops.jsonl` for the latest terminal batch history (`applied`, `precheck_failed`, `operator_discarded`). Note files removed by the orphan sweep appear as `note_reaped` change entries carrying the reason the store stopped owning them (`memory_deleted` / `ref_dropped` / `unreferenced`) — that is the only evidence trail for a note that is no longer on disk. Candidates refused by the pre-write content guard appear as `discarded` rows with `discard_reason=content_guard_blocked` and the matched rule inside `error`: they never reach the queue, so a user saying "it did not remember" is diagnosed here rather than in the worker log. A rule that keeps firing on ordinary operational memory is a guard defect, not lost memory — compare the blocked `payload_text` against the rule name before touching the memory pipeline.
 6. If a processed row exposes `request_artifact_paths`, inspect the referenced files under `.g3ku/memory-requests/` before blaming prompt assembly or the provider adapter.
 7. Use `negi memory current`, `negi memory queue`, and `negi memory flush` when you need a quick operator view without manually opening files.
@@ -651,12 +651,15 @@ The memory CLI keeps only the queued Markdown runtime operator surface:
 - `negi memory current`
 - `negi memory queue`
 - `negi memory flush`
+- `negi memory uncompress <memory-id>` (`--all` warms every downgraded row)
 - `negi memory doctor`
 - `negi memory reconcile-notes`
 - `negi memory import-legacy <path>`
 - `negi memory cleanup-legacy`
 
-The active memory operator surface is `negi memory` with `current` / `queue` / `flush` / `doctor` / `reconcile-notes` / `import-legacy` / `cleanup-legacy`; there is no reset subcommand, and legacy-only commands (runtime stats/trace/explain, decay, pending-fact review) are not part of the operator contract.
+The active memory operator surface is `negi memory` with `current` / `queue` / `flush` / `uncompress` / `doctor` / `reconcile-notes` / `import-legacy` / `cleanup-legacy`; there is no reset subcommand, and legacy-only commands (runtime stats/trace/explain, decay, pending-fact review) are not part of the operator contract.
+
+`negi memory uncompress` is the only way to undo a capacity downgrade: the runtime never re-promotes a row on its own, because automatic warming would cancel the decision the ladder just made and oscillate against the trigger line. Warming puts characters **back** into the resident block, so it goes through the same hard-cap validation as any other write and rolls the row back whole when the document would not fit - the report carries `resident_chars_after` next to the trigger line and the cap, which is how much headroom the action consumed.
 
 The operator-oriented maintenance commands beyond `current`, `queue`, and `flush` are:
 
