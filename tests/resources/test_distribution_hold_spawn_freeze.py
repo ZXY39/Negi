@@ -942,7 +942,7 @@ async def test_release_lane_and_command_lane_agree_on_entry_triage() -> None:
 
 
 @pytest.mark.asyncio
-async def test_orphan_spawn_child_reaped_at_run_task_entry(tmp_path: Path) -> None:
+async def test_orphan_spawn_child_parked_at_run_task_entry(tmp_path: Path) -> None:
     service = _build_service(tmp_path, _DummyChatBackend())
     try:
         record = await service.create_task("reap orphan task", session_id="web:ceo-demo")
@@ -972,7 +972,7 @@ async def test_orphan_spawn_child_reaped_at_run_task_entry(tmp_path: Path) -> No
         )
 
         async def _fake_run_node(task_id: str, node_id: str) -> NodeFinalResult:
-            assert node_id == record.root_node_id, "被收尸的孤儿不得再被派发执行"
+            assert node_id == record.root_node_id, "被停等的孤儿不得再被派发执行"
             service.log_service.update_node_status(task_id, node_id, status="success", final_output="root done")
             return _success_result(node_id)
 
@@ -981,10 +981,15 @@ async def test_orphan_spawn_child_reaped_at_run_task_entry(tmp_path: Path) -> No
 
         child_after = service.store.get_node(child.node_id)
         assert child_after is not None
-        assert str(child_after.status) == "failed", "孤儿必须被收尸，不得幽灵 in_progress"
+        # 收尸器不签发终态：三载体合取里任何一环都可能只是读不到（父节点正常 success 后
+        # 它的帧就是被设计删掉的），而 fail 不可逆。这里要的是"可见地停等"——状态保持
+        # 非终态、节点落成 error 暂停并带错误行，判决留给能看见现场的一方。
+        assert str(child_after.status) == "in_progress", "候选孤儿不得被收尸器签成终态"
+        assert bool(child_after.is_paused) is True, "候选孤儿必须可见地停等，而不是静默 in_progress"
+        assert str(child_after.pause_reason or "") == "error"
         logs = service.store.list_task_error_logs(record.task_id)
-        assert any("orphan reaped" in str(getattr(item, "error_text", "") or "") for item in logs), (
-            "收尸必须留错误日志"
+        assert any("spawn_orphan_candidate" in str(getattr(item, "error_text", "") or "") for item in logs), (
+            "停等必须留错误行，否则没有会话 agent／操作者会被叫醒"
         )
     finally:
         await service.close()
