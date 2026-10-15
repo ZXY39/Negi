@@ -9981,11 +9981,15 @@ function parseJsonObjectText(raw = "") {
     }
 }
 
+// 这一族记的是"模型对上下文动的一次手"：三类载入加上记忆写入。它们都不值得占一条阶段工具行——
+// 载入的内容就躺在身后那段上下文里，写入的内容就是用户刚说的那句话；失败才要回到阶段行，
+// 因为失败是一个需要被看见的结果。
 function ceoContextLoaderKind(toolName = "") {
     const normalized = String(toolName || "").trim().toLowerCase();
     if (normalized === "load_tool_context" || normalized === "load_tool_context_v2") return "tool";
     if (normalized === "load_skill_context" || normalized === "load_skill_context_v2") return "skill";
     if (normalized === "memory_note") return "note";
+    if (normalized === "memory_update") return "memory";
     return "";
 }
 
@@ -10070,6 +10074,7 @@ function ceoContextLoadNoticeIconName(kind = "") {
     if (normalizedKind === "tool") return "wrench";
     if (normalizedKind === "skill") return "sparkles";
     if (normalizedKind === "note") return "notebook-pen";
+    if (normalizedKind === "memory") return "brain";
     return "";
 }
 
@@ -10086,7 +10091,7 @@ function showCeoContextLoadNotice(text = "", { durationMs = CEO_CONTEXT_LOAD_NOT
     const item = document.createElement("div");
     item.className = "ceo-context-load-notice-item";
     const normalizedKind = String(kind || "").trim().toLowerCase();
-    if (normalizedKind === "tool" || normalizedKind === "skill" || normalizedKind === "note") {
+    if (["tool", "skill", "note", "memory"].includes(normalizedKind)) {
         item.classList?.add?.(`is-${normalizedKind}`);
         item.dataset.noticeKind = normalizedKind;
     }
@@ -10128,7 +10133,7 @@ function showCeoContextLoadNotice(text = "", { durationMs = CEO_CONTEXT_LOAD_NOT
 
 function extractCeoContextLoadTarget(toolName = "", rawText = "") {
     const loaderKind = ceoContextLoaderKind(toolName);
-    const key = loaderKind === "skill" ? "skill_id" : loaderKind === "note" ? "ref" : "tool_id";
+    const key = loaderKind === "skill" ? "skill_id" : loaderKind === "note" ? "ref" : loaderKind === "memory" ? "request_id" : "tool_id";
     const text = String(rawText || "").trim();
     if (!text) return "";
     const payload = parseJsonObjectText(text);
@@ -10173,6 +10178,23 @@ function buildCeoContextLoadNotice(toolName = "", targetId = "") {
         : "\u5df2\u52a0\u8f7d\u5de5\u5177\u4e0a\u4e0b\u6587";
 }
 
+// 写侧的三种真实结局都来自同一个入队门的返回：queued / ignored / blocked。
+// 气泡只承诺这一层——入队不等于记住，成不成由记忆 worker 判定，所以文案不许写成"已记住"。
+function buildCeoMemoryNotice(payload = null) {
+    const status = String(payload?.status || "").trim().toLowerCase();
+    const requestId = String(payload?.request_id || "").trim();
+    if (status === "queued") {
+        return { text: requestId ? `记忆请求已入队 ${requestId}` : "记忆请求已入队", riskLevel: "low" };
+    }
+    if (status === "ignored") {
+        return { text: "这条记忆请求内容为空，没有入队", riskLevel: "medium" };
+    }
+    if (status === "blocked") {
+        const rule = String(payload?.rule || "").trim();
+        return { text: rule ? `记忆请求被内容闸门拦下（规则：${rule}）` : "记忆请求被内容闸门拦下", riskLevel: "high" };
+    }
+    return null;
+}
 // 资源目录一行一个工具，风险度直接挂在工具记录上。
 function toolCatalogRiskLevel(record, targetId = "") {
     const normalizedTargetId = String(targetId || "").trim();
@@ -10215,17 +10237,22 @@ function maybeShowCeoContextLoadNotice(turn, { toolName = "", status = "", detai
     if (String(turn?.source || "").trim().toLowerCase() === "history") return false;
     const keys = ensureCeoContextLoadNoticeKeys(turn);
     let targetId = "";
+    let payload = null;
     for (const candidate of Array.isArray(detailTexts) ? detailTexts : []) {
+        payload = parseJsonObjectText(candidate) || payload;
         targetId = extractCeoContextLoadTarget(normalizedTool, candidate);
         if (targetId) break;
     }
-    const noticeText = buildCeoContextLoadNotice(normalizedTool, targetId);
+    const memoryNotice = loaderKind === "memory" ? buildCeoMemoryNotice(payload) : null;
+    // 读不出 status 就不弹：写记忆这件事宁可没提示，也不能给出一条编出来的"已提交"。
+    if (loaderKind === "memory" && !memoryNotice) return false;
+    const noticeText = memoryNotice ? memoryNotice.text : buildCeoContextLoadNotice(normalizedTool, targetId);
     const signature = `${normalizedTool}:${targetId || noticeText}`;
     if (keys?.has(signature)) return true;
     keys?.add(signature);
     showCeoContextLoadNotice(noticeText, {
         kind: loaderKind,
-        riskLevel: resolveCeoContextLoadNoticeRiskLevel(loaderKind, targetId),
+        riskLevel: memoryNotice ? memoryNotice.riskLevel : resolveCeoContextLoadNoticeRiskLevel(loaderKind, targetId),
     });
     return true;
 }

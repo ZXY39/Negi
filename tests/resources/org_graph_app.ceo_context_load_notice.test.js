@@ -250,3 +250,68 @@ test("a failed note read shows no notice and keeps its own target out of the tex
     assert.equal(U.ceoContextLoadNotice.children.length, 0);
 });
 
+test("memory_update queues into a memory notice instead of a tool row", () => {
+    const { S, createPendingCeoTurn, maybeShowCeoContextLoadNotice, isCeoContextLoaderToolName, ceoContextLoaderKind, U } = loadApp();
+    const turn = createPendingCeoTurn("user");
+    S.ceoPendingTurns = [turn];
+
+    assert.equal(ceoContextLoaderKind("memory_update"), "memory");
+    assert.equal(isCeoContextLoaderToolName("memory_update"), true);
+
+    const shown = maybeShowCeoContextLoadNotice(turn, {
+        toolName: "memory_update",
+        status: "success",
+        detailTexts: ['{"ok":true,"request_id":"write_ab12cd","status":"queued"}'],
+    });
+
+    assert.equal(shown, true);
+    const notice = U.ceoContextLoadNotice.children[0];
+    assert.equal(notice.dataset.noticeKind, "memory");
+    assert.ok(notice.className.split(" ").includes("is-memory"), "unexpected classes: " + notice.className);
+    assert.equal(notice.children[0].innerHTML, '<i data-lucide="brain"></i>');
+    assert.equal(notice.children[1].textContent, "记忆请求已入队 write_ab12cd");
+    assert.equal(notice.children[2].className, "ceo-context-load-notice-risk-dot risk-low");
+});
+
+test("a content-guard refusal is announced with its rule and the high-risk dot", () => {
+    const { S, createPendingCeoTurn, maybeShowCeoContextLoadNotice, U } = loadApp();
+    const turn = createPendingCeoTurn("user");
+
+    const shown = maybeShowCeoContextLoadNotice(turn, {
+        toolName: "memory_update",
+        status: "success",
+        detailTexts: ['{"ok":false,"status":"blocked","error":"content_guard_blocked","rule":"impersonate_system","request_id":"write_cd34ef"}'],
+    });
+
+    assert.equal(shown, true);
+    const notice = U.ceoContextLoadNotice.children[0];
+    assert.match(notice.children[1].textContent, /被内容闸门拦下/);
+    assert.match(notice.children[1].textContent, /impersonate_system/);
+    assert.equal(notice.children[2].className, "ceo-context-load-notice-risk-dot risk-high");
+});
+
+test("an empty memory request says it was not queued", () => {
+    const { S, createPendingCeoTurn, maybeShowCeoContextLoadNotice, U } = loadApp();
+    const turn = createPendingCeoTurn("user");
+
+    assert.equal(maybeShowCeoContextLoadNotice(turn, {
+        toolName: "memory_update",
+        status: "success",
+        detailTexts: ['{"ok":true,"status":"ignored","reason":"empty_payload"}'],
+    }), true);
+    const notice = U.ceoContextLoadNotice.children[0];
+    assert.equal(notice.children[1].textContent, "这条记忆请求内容为空，没有入队");
+    assert.equal(notice.children[2].className, "ceo-context-load-notice-risk-dot risk-medium");
+});
+
+test("an unreadable memory result raises no notice at all", () => {
+    const { S, createPendingCeoTurn, maybeShowCeoContextLoadNotice, U } = loadApp();
+    const turn = createPendingCeoTurn("user");
+
+    assert.equal(maybeShowCeoContextLoadNotice(turn, {
+        toolName: "memory_update",
+        status: "success",
+        detailTexts: ["memory request accepted"],
+    }), false);
+    assert.equal(U.ceoContextLoadNotice.children.length, 0);
+});
