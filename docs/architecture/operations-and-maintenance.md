@@ -303,8 +303,11 @@ Provider retry troubleshooting note:
 - `title=spawn_entry_terminal_with_live_node`：entry 状态已是 terminal/blocked，但绑定节点仍非终态，属无效状态组合信号。
 - `title=spawn_pause_reached_settlement_lane`：某条车道把子节点的暂停当成可结清的异常送到结算面（正常形态是子节点派发 future 保持 pending、父管线原地停等）。命中说明该轮会被父节点读成"子节点失败"，而节点其实可被 resume；核对是哪个调用点绕开了派发 entry。
 - `title=spawn_supersede_forced_live_node`：新轮清扫时该子树取消后仍未落终态（协程当时真在执行），仍按 `superseded` 强判，`detail` 给出被掐断的节点 id 与深度。读法：拿该节点在 `task_model_calls` 的最后一格时间戳与 `task_commands` 里的 `resume_node` 行对照，可判断这是一次人工/agent 复活与重派的竞态，还是旧轮长期挂死。
+- `title=spawn_round_fault_holds_for_live_nodes`：派生轮自身抛异常（典型是记账写库撞上存储故障），而本轮仍绑着非终态节点。运行时把这条轮次留在等待上而不是给模型一条 `Error executing spawn_child_nodes`，`detail` 带 `live_node_count` / `paused` / 异常正文。看到它就去看那几个节点在做什么，而不是去看父节点为什么"派生失败"——父节点没有失败，它在等。
+- `title=spawn_round_fault_hold_still_waiting`：上一条的滞留仍在持续，按固定节拍复报 `pending` / `paused` / 已累计秒数。长期只涨不收敛＝有节点被暂停或没人驱动了，`paused>0` 就直接指向那颗节点的暂停行。
+- `title=spawn_round_fault_hold_converged` / `spawn_round_hold_released_by_stop_reason`：滞留的两类出口——绑定节点全部落终态后交付真实结论，或任务/父节点显式终态后按该理由收尾。后者才说明这一轮的子节点结果不会被采纳。
 
-修复语义详见 `main-task-runtime.md`「Node-Level Pause and Recovery」。这四条 warning 只作诊断，不会自行终结节点；真正的修复在恢复逻辑——等待现有绑定节点到终态，而不是重新评审或重放合成结果。
+修复语义详见 `main-task-runtime.md`「Node-Level Pause and Recovery」。这些 warning 只作诊断，不会自行终结节点；真正的修复在恢复逻辑——等待现有绑定节点到终态，而不是重新评审或重放合成结果。
 
 ### 残留节点自愈
 

@@ -124,6 +124,11 @@ _BLOCKED_VERIFICATION_FALLBACK_PROMPT = (
     '并在 blocking_reason 写明执行节点应继续完成的工作。禁止占位式裁决。'
 )
 _SUPERSEDED_SPAWN_REASON_PREFIX = 'superseded by newer spawn round'
+# 派生轮自身抛异常、但本轮仍绑着非终态节点时的滞留节拍：每片检查一次节点状态，
+# 每满 report 秒补一条可检索的告警。不设上限——交付"派生失败"会让父节点重发新轮，
+# 新轮开局就把这棵还在飞的子树按 superseded 清扫掉。
+_SPAWN_FAULT_HOLD_SLICE_SECONDS = 2.0
+_SPAWN_FAULT_HOLD_REPORT_SECONDS = 60.0
 _SPAWN_REVIEW_TOOL_NAME = 'review_spawn_candidates'
 _SPAWN_REVIEW_BLOCKED_CHECK_RESULT = '派生已被拦截'
 # 检验车道自身故障（模型链缺失 / provider 异常 / 连续拿不到可解析判定）时，本批候选
@@ -4194,13 +4199,178 @@ class NodeRunner:
         specs: list[SpawnChildSpec],
         call_id: str | None,
     ) -> list[SpawnChildResult]:
+        cache_key = self._spawn_round_cache_key(specs=specs, call_id=call_id)
         async with self._spawn_operation_lock(parent_node_id):
-            return await self._spawn_children_locked(
-                task_id=task_id,
-                parent_node_id=parent_node_id,
-                specs=specs,
-                call_id=call_id,
+            try:
+                return await self._spawn_children_locked(
+                    task_id=task_id,
+                    parent_node_id=parent_node_id,
+                    specs=specs,
+                    call_id=call_id,
+                )
+            except (TaskPausedError, NodePausedError, DistributionHoldError, asyncio.CancelledError):
+                # 冻结/取消类控制信号照旧上抛，绝不改写成一次交付（见 main-task-runtime
+                # 「Node-Level Pause and Recovery」的结算车道合同）。
+                raise
+            except Exception as exc:
+                held = await self._hold_spawn_round_for_live_nodes(
+                    task_id=task_id,
+                    parent_node_id=parent_node_id,
+                    cache_key=cache_key,
+                    specs=specs,
+                    fault=exc,
+                )
+                if held is None:
+                    raise
+                return held
+
+    @staticmethod
+    def _spawn_round_cache_key(*, specs: list[SpawnChildSpec], call_id: str | None) -> str:
+        return str(call_id or f'call:{len(specs or [])}')
+
+    async def _hold_spawn_round_for_live_nodes(
+        self,
+        *,
+        task_id: str,
+        parent_node_id: str,
+        cache_key: str,
+        specs: list[SpawnChildSpec],
+        fault: BaseException,
+    ) -> list[SpawnChildResult] | None:
+        """本轮仍绑着非终态节点时返回真实结论，否则返回 None 让原异常照旧上抛。
+
+        `Error executing spawn_child_nodes` 一旦进了父节点的消息链就收不回：它消费掉本轮
+        tool_call_id（幂等重放通道随之关闭），父节点只能重发同一批，而重发开局就把这棵
+        仍在飞的子树结清成 `superseded by newer spawn round`。派生工具对模型的承诺是
+        "全部子管线终态才返回"，所以故障发生在记账上时由这里兜住：等节点自己收敛。
+        """
+        pending = self._spawn_round_non_terminal_node_ids(
+            entries=self._spawn_round_entries(parent_node_id=parent_node_id, cache_key=cache_key),
+        )
+        if not pending:
+            return None
+        self._emit_spawn_diagnostic(
+            title='spawn_round_fault_holds_for_live_nodes',
+            task_id=task_id,
+            parent_node_id=parent_node_id,
+            cache_key=cache_key,
+            index=None,
+            entry=None,
+            detail=(
+                f'live_node_count={len(pending)} '
+                f'paused={self._spawn_round_paused_node_count(node_ids=pending)} '
+                f'fault={describe_exception(fault)}'
+            ),
+        )
+        held_seconds = 0.0
+        next_report_at = _SPAWN_FAULT_HOLD_REPORT_SECONDS
+        while True:
+            stop_reason = self._spawn_round_hold_stop_reason(task_id=task_id, parent_node_id=parent_node_id)
+            if stop_reason:
+                self._emit_spawn_diagnostic(
+                    title='spawn_round_hold_released_by_stop_reason',
+                    task_id=task_id,
+                    parent_node_id=parent_node_id,
+                    cache_key=cache_key,
+                    index=None,
+                    entry=None,
+                    detail=f'pending={len(pending)} held_seconds={held_seconds:.0f} reason={stop_reason}',
+                )
+                return [self._spawn_abort_result(spec.goal, stop_reason) for spec in list(specs or [])]
+            await asyncio.sleep(_SPAWN_FAULT_HOLD_SLICE_SECONDS)
+            held_seconds += _SPAWN_FAULT_HOLD_SLICE_SECONDS
+            pending = self._spawn_round_non_terminal_node_ids(
+                entries=self._spawn_round_entries(parent_node_id=parent_node_id, cache_key=cache_key),
             )
+            if not pending:
+                break
+            if held_seconds >= next_report_at:
+                next_report_at += _SPAWN_FAULT_HOLD_REPORT_SECONDS
+                self._emit_spawn_diagnostic(
+                    title='spawn_round_fault_hold_still_waiting',
+                    task_id=task_id,
+                    parent_node_id=parent_node_id,
+                    cache_key=cache_key,
+                    index=None,
+                    entry=None,
+                    detail=(
+                        f'pending={len(pending)} '
+                        f'paused={self._spawn_round_paused_node_count(node_ids=pending)} '
+                        f'held_seconds={held_seconds:.0f}'
+                    ),
+                )
+        self._emit_spawn_diagnostic(
+            title='spawn_round_fault_hold_converged',
+            task_id=task_id,
+            parent_node_id=parent_node_id,
+            cache_key=cache_key,
+            index=None,
+            entry=None,
+            detail=f'held_seconds={held_seconds:.0f}',
+        )
+        return self._spawn_round_results_from_entries(
+            task_id=task_id,
+            entries=self._spawn_round_entries(parent_node_id=parent_node_id, cache_key=cache_key),
+            specs=specs,
+        )
+
+    def _spawn_round_entries(self, *, parent_node_id: str, cache_key: str) -> list[dict[str, Any]]:
+        """本轮 entry 清单：先读记账，记账缺位时按 owner 戳从节点树合成。
+
+        走到滞留这条路的原因往往就是记账写失败，所以 `spawn_operations` 不能是唯一来源。
+        """
+        parent = self._store.get_node(parent_node_id)
+        payload = dict((parent.metadata or {}).get('spawn_operations') or {}).get(cache_key) if parent else None
+        entries = [dict(item) for item in list((payload or {}).get('entries') or []) if isinstance(item, dict)]
+        if entries:
+            return entries
+        for node in list(self._store.list_children(parent_node_id) or []):
+            metadata = dict(node.metadata or {})
+            if str(metadata.get('spawn_owner_round_id') or '').strip() != str(cache_key or '').strip():
+                continue
+            if str(metadata.get('spawn_owner_parent_node_id') or '').strip() != str(parent_node_id or '').strip():
+                continue
+            entry: dict[str, Any] = {
+                'index': int(metadata.get('spawn_owner_entry_index') or 0),
+                'goal': str(node.goal or ''),
+                'child_node_id': node.node_id,
+            }
+            for acceptance in list(self._store.list_children(node.node_id) or []):
+                if str(acceptance.node_kind or '').strip().lower() == KIND_ACCEPTANCE:
+                    entry['acceptance_node_id'] = acceptance.node_id
+                    break
+            entries.append(entry)
+        return entries
+
+    def _spawn_round_non_terminal_node_ids(self, *, entries: list[dict[str, Any]]) -> set[str]:
+        pending: set[str] = set()
+        for entry in list(entries or []):
+            for node_id in self._spawn_entry_node_ids(entry):
+                node = self._store.get_node(str(node_id or '').strip())
+                if node is None:
+                    continue
+                if self._normalized_status(getattr(node, 'status', '')) not in {STATUS_SUCCESS, STATUS_FAILED}:
+                    pending.add(node.node_id)
+        return pending
+
+    def _spawn_round_paused_node_count(self, *, node_ids: set[str]) -> int:
+        paused = 0
+        for node_id in sorted(node_ids or set()):
+            node = self._store.get_node(node_id)
+            if node is not None and bool(getattr(node, 'is_paused', False)):
+                paused += 1
+        return paused
+
+    def _spawn_round_hold_stop_reason(self, *, task_id: str, parent_node_id: str) -> str:
+        """只有明确的终态才算停手理由；查不到行不算（记账故障正是走到这里的原因）。"""
+        task = self._store.get_task(task_id)
+        if task is None:
+            return ''
+        return self._task_terminal_reason(task_id, task=task) or self._node_terminal_reason(
+            self._store.get_node(parent_node_id),
+            default_failed='parent node failed',
+            default_success='parent node already completed',
+        )
 
     async def _spawn_children_locked(
         self,
@@ -4217,7 +4387,7 @@ class NodeRunner:
         if not parent.can_spawn_children:
             raise ValueError('spawn_child_nodes is not available for this node')
         self._log_service.mark_execution_stage_contains_spawn(task.task_id, parent.node_id)
-        cache_key = str(call_id or f'call:{len(specs)}')
+        cache_key = self._spawn_round_cache_key(specs=specs, call_id=call_id)
         self.reconcile_spawn_entry_child_bindings(
             task_id=task.task_id,
             parent_node_id=parent.node_id,
@@ -6556,18 +6726,26 @@ class NodeRunner:
         if acceptance is None:
             acceptance_goal = _spawn_acceptance_goal(spec.goal)
             acceptance_prompt = str(spec.acceptance_prompt or '')
-            acceptance = self._find_reusable_acceptance_node(
-                task=task,
-                accepted_node=child,
-                goal=acceptance_goal,
-                acceptance_prompt=acceptance_prompt,
-                parent_node_id=child.node_id,
-                exclude_node_ids=self._claimed_spawn_node_ids(
-                    entries=entries,
-                    field='acceptance_node_id',
-                    skip_index=index,
-                ),
+            claimed_acceptance_ids = self._claimed_spawn_node_ids(
+                entries=entries,
+                field='acceptance_node_id',
+                skip_index=index,
             )
+            acceptance = self._find_child_bound_acceptance_node(
+                child=child,
+                exclude_node_ids=claimed_acceptance_ids,
+            )
+            if acceptance is not None:
+                acceptance = self._reset_terminal_acceptance_for_reverify(task=task, acceptance=acceptance)
+            else:
+                acceptance = self._find_reusable_acceptance_node(
+                    task=task,
+                    accepted_node=child,
+                    goal=acceptance_goal,
+                    acceptance_prompt=acceptance_prompt,
+                    parent_node_id=child.node_id,
+                    exclude_node_ids=claimed_acceptance_ids,
+                )
             if acceptance is None:
                 acceptance = self.create_acceptance_node(
                     task=task,
@@ -6656,6 +6834,40 @@ class NodeRunner:
             exclude_node_ids=exclude_node_ids,
             metadata_filter=None,
         )
+
+    def _find_child_bound_acceptance_node(
+        self,
+        *,
+        child: NodeRecord,
+        exclude_node_ids: set[str],
+    ) -> NodeRecord | None:
+        """被验执行节点已经挂着验收子节点时，那一份就是它的验收人，不看状态也不看指纹。
+
+        一个执行节点只配一个验收节点，而这条配对平时只由 entry 的 `acceptance_node_id`
+        承载——它是每轮一份的。新一轮派生复用同一个执行子节点时 entry 是空白的，只按
+        `status == success` + 当轮提交指纹搜索，会把刚被上一轮清扫打成 failed 的那颗判成
+        不可复用，于是给同一个执行节点再配一颗，旧那颗则永远留在树上。
+        """
+        candidates: list[NodeRecord] = []
+        for node in list(self._store.list_children(child.node_id) or []):
+            if str(node.node_id or '').strip() in exclude_node_ids:
+                continue
+            if str(node.node_kind or '').strip().lower() != KIND_ACCEPTANCE:
+                continue
+            metadata = dict(node.metadata or {})
+            if metadata.get(_BLOCKED_VERIFICATION_ONLY_KEY):
+                # 阻塞核验车道给同一个执行节点另配的临时验收人，不是本轮的配对对象。
+                continue
+            if str(metadata.get('accepted_node_id') or '').strip() != str(child.node_id or '').strip():
+                continue
+            candidates.append(node)
+        if not candidates:
+            return None
+        candidates.sort(
+            key=lambda item: (str(item.updated_at or ''), str(item.created_at or ''), str(item.node_id or '')),
+            reverse=True,
+        )
+        return candidates[0]
 
     def _find_reusable_acceptance_node(
         self,
