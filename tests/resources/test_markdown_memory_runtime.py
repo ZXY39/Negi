@@ -231,6 +231,22 @@ def _app_config(tmp_path: Path, *, memory_chain: list[str] | None) -> object:
     )
 
 
+def _with_confirm_call(tool_calls: list[dict[str, object]] | None) -> list[dict[str, object]]:
+    """A mutating batch is scripted together with the confirm call the model makes after reading its preview."""
+
+    calls = list(tool_calls or [])
+    mutating = any(
+        str(call.get("name") or "") == "memory_apply_batch"
+        and isinstance(call.get("args"), dict)
+        and any((call.get("args") or {}).get(key) for key in ("adds", "rewrites", "deletes"))
+        for call in calls
+    )
+    confirmed = any(str(call.get("name") or "") == "memory_apply_confirm" for call in calls)
+    if mutating and not confirmed:
+        calls.append({"id": f"call-confirm-{len(calls)}", "name": "memory_apply_confirm", "args": {}})
+    return calls
+
+
 def _fake_response(
     *,
     content: str = "",
@@ -243,7 +259,7 @@ def _fake_response(
     metadata.update(dict(response_metadata or {}))
     return SimpleNamespace(
         content=content,
-        tool_calls=list(tool_calls or []),
+        tool_calls=_with_confirm_call(tool_calls),
         usage_metadata=usage_payload,
         response_metadata=metadata,
     )
@@ -631,6 +647,7 @@ def test_memory_commit_keeps_snapshot_after_sqlite_rebuild(tmp_path: Path) -> No
         )
         assert apply_result == {"ok": True, "status": "batch_staged"}
 
+        session.confirm_batch()  # the model's second call: a mutating batch lands only after it reads the preview
         validated = manager._build_validated_write_from_apply_batch(
             before_text=manager.snapshot_text(),
             session=session,
@@ -1039,6 +1056,7 @@ def test_memory_commit_replays_effective_deduped_adds(tmp_path: Path) -> None:
 
         assert apply_result == {"ok": True, "status": "batch_staged"}
 
+        session.confirm_batch()  # the model's second call: a mutating batch lands only after it reads the preview
         validated = manager._build_validated_write_from_apply_batch(
             before_text=manager.snapshot_text(),
             session=session,
@@ -1095,6 +1113,7 @@ def test_memory_commit_replays_effective_deduped_rewrites(tmp_path: Path) -> Non
 
         assert apply_result == {"ok": True, "status": "batch_staged"}
 
+        session.confirm_batch()  # the model's second call: a mutating batch lands only after it reads the preview
         validated = manager._build_validated_write_from_apply_batch(
             before_text=manager.snapshot_text(),
             session=session,
@@ -1205,7 +1224,7 @@ def test_v2_memory_agent_tools_expose_read_note_and_apply_batch_only(tmp_path: P
     finally:
         manager.close()
 
-    assert tool_names == ["memory_read_note", "memory_apply_batch"]
+    assert tool_names == ["memory_read_note", "memory_apply_batch", "memory_apply_confirm"]
 
 
 def test_memory_agent_delete_batch_rejects_noop_reason_and_points_at_already_satisfied(tmp_path: Path) -> None:
@@ -1284,7 +1303,7 @@ def test_memory_agent_apply_batch_tool_preserves_inspired_ids_in_active_runtime_
         session = module._MemoryToolSession(snapshot_text=manager.snapshot_text(), notes_dir=manager.notes_dir)
         apply_tool = next(tool for tool in manager._memory_agent_tools(session) if tool.name == "memory_apply_batch")
 
-        assert "inspired_memory_ids" in apply_tool.args
+        assert "inspired_lines" in apply_tool.args
         result = apply_tool.invoke(
             {
                 "adds": [{"content": "Use headings", "minimal_memory": "answers->headings", "decision_source": "self"}],
@@ -1293,6 +1312,7 @@ def test_memory_agent_apply_batch_tool_preserves_inspired_ids_in_active_runtime_
         )
 
         assert result["ok"] is True
+        session.confirm_batch()  # the model's second call: a mutating batch lands only after it reads the preview
         validated = manager._build_validated_write_from_apply_batch(
             before_text=manager.snapshot_text(),
             session=session,
@@ -1336,6 +1356,7 @@ def test_memory_agent_apply_batch_accepts_inspired_ids_present_in_snapshot_witho
         )
 
         assert result["ok"] is True
+        session.confirm_batch()  # the model's second call: a mutating batch lands only after it reads the preview
         validated = manager._build_validated_write_from_apply_batch(
             before_text=manager.snapshot_text(),
             session=session,
@@ -1352,7 +1373,7 @@ def test_memory_agent_apply_batch_rejects_non_list_inspired_ids_at_staging(tmp_p
 
     result = session.apply_batch(
         adds=[{"content": "Use headings", "minimal_memory": "answers->headings", "decision_source": "self"}],
-        inspired_memory_ids="Ab12Z9",
+        inspired_lines="Ab12Z9",
     )
 
     assert result["ok"] is False
@@ -1392,10 +1413,11 @@ def test_memory_agent_apply_batch_requires_minimal_memory_and_tracks_inspired_id
         session = module._MemoryToolSession(snapshot_text=manager.snapshot_text(), notes_dir=manager.notes_dir)
         result = session.apply_batch(
             adds=[{"content": "Use headings", "minimal_memory": "answers->headings", "decision_source": "self"}],
-            inspired_memory_ids=[existing["memory_id"]],
+            inspired_lines=[manager.memory_line_for_id(str(existing["memory_id"]))],
         )
 
         assert result["ok"] is True
+        session.confirm_batch()  # the model's second call: a mutating batch lands only after it reads the preview
         validated = manager._build_validated_write_from_apply_batch(
             before_text=manager.snapshot_text(),
             session=session,
@@ -1437,6 +1459,7 @@ def test_memory_agent_apply_batch_rejects_non_list_inspired_ids_at_validation(tm
         }
 
         with pytest.raises(ValueError, match="inspired_memory_ids must be a list"):
+            session.confirm_batch()  # the model's second call: a mutating batch lands only after it reads the preview
             manager._build_validated_write_from_apply_batch(
                 before_text=manager.snapshot_text(),
                 session=session,
@@ -1471,6 +1494,7 @@ def test_memory_agent_apply_batch_rejects_minimal_memory_without_condition_arrow
 
         assert result["ok"] is True
         with pytest.raises(ValueError, match="minimal_memory must use 条件->要求关键词"):
+            session.confirm_batch()  # the model's second call: a mutating batch lands only after it reads the preview
             manager._build_validated_write_from_apply_batch(
                 before_text=manager.snapshot_text(),
                 session=session,
@@ -1511,6 +1535,7 @@ def test_memory_agent_apply_batch_rejects_over_limit_content_with_summary_note_h
 
         assert result["ok"] is True
         with pytest.raises(ValueError, match="250") as exc_info:
+            session.confirm_batch()  # the model's second call: a mutating batch lands only after it reads the preview
             manager._build_validated_write_from_apply_batch(
                 before_text=manager.snapshot_text(),
                 session=session,
@@ -1569,6 +1594,7 @@ def test_memory_agent_apply_batch_links_note_through_explicit_note_ref(
         result = session.apply_batch(**apply_kwargs)
 
         assert result["ok"] is True
+        session.confirm_batch()  # the model's second call: a mutating batch lands only after it reads the preview
         validated = manager._build_validated_write_from_apply_batch(
             before_text=manager.snapshot_text(),
             session=session,
@@ -1623,6 +1649,7 @@ def test_memory_agent_apply_batch_rejects_note_ref_written_into_memory_text(
 
         assert result["ok"] is True
         with pytest.raises(ValueError, match="note ownership goes in the item"):
+            session.confirm_batch()  # the model's second call: a mutating batch lands only after it reads the preview
             manager._build_validated_write_from_apply_batch(
                 before_text=manager.snapshot_text(),
                 session=session,

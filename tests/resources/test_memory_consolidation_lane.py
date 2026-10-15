@@ -46,6 +46,13 @@ def _add(
     return str(row["memory_id"])
 
 
+def _candidate_line(manager, memory_id: str, *, trigger: int = 16000, target: int = 1) -> int:
+    """Which candidate number this memory holds in the payload the consolidator was handed."""
+
+    _, picked = manager._build_consolidation_payload(trigger=trigger, target=target)
+    return picked.index(str(memory_id)) + 1
+
+
 def _retire(manager, memory_ids: list[str], category: str) -> None:
     manager._memory_repo.mark_consolidated(memory_ids, category_ref=category)
 
@@ -79,7 +86,7 @@ def test_retiring_writes_the_column_and_never_the_delete_button(tmp_path: Path) 
                 consolidation_writes=[
                     {"note_ref": "note_local_env", "body": "本机运行环境\n\n## 反代\n端口 8799，改完重启 nginx。\n", "edits": []}
                 ],
-                retirements=[{"memory_id": memory_id, "note_ref": "note_local_env"}],
+                retirements=[{"line": _candidate_line(manager, memory_id), "note_ref": "note_local_env"}],
             )
         )
 
@@ -233,7 +240,7 @@ def test_the_consolidation_block_is_excluded_from_both_counting_judgements(tmp_p
                 document_preview="",
                 is_consolidation=True,
                 consolidation_writes=[{"note_ref": "note_big", "body": "大类\n\n" + "S" * 3000 + "\n", "edits": []}],
-                retirements=[{"memory_id": retire, "note_ref": "note_big"}],
+                retirements=[{"line": _candidate_line(manager, retire), "note_ref": "note_big"}],
             )
         )
 
@@ -265,7 +272,7 @@ def test_consolidation_staging_refuses_both_directions_of_orphaned_work(tmp_path
             index_dir=manager.index_dir,
         )
         result = retired_without_home.apply_batch(
-            retirements=[{"memory_id": memory_id, "note_ref": "note_nowhere"}]
+            retirements=[{"line": _candidate_line(manager, memory_id), "note_ref": "note_nowhere"}]
         )
         assert result["ok"] is False
         assert "note_nowhere" in json.dumps(result["errors"], ensure_ascii=False)
@@ -291,7 +298,7 @@ def test_consolidation_staging_refuses_both_directions_of_orphaned_work(tmp_path
         )
         assert mixed.apply_batch(
             note_writes=[{"note_ref": "note_x", "body": "x\n"}],
-            retirements=[{"memory_id": memory_id, "note_ref": "note_x"}],
+            retirements=[{"line": _candidate_line(manager, memory_id), "note_ref": "note_x"}],
             no_consolidation_reason="同时又说没有",
         )["ok"] is False
 
@@ -560,7 +567,7 @@ async def test_a_consolidate_batch_runs_through_the_consolidator_lane(tmp_path: 
                                         "body": "本机运行环境\n\n## 端口\n网页 18790，反代 8799。\n",
                                     }
                                 ],
-                                "retirements": [{"memory_id": memory_id, "note_ref": "note_local_env"}],
+                                "retirements": [{"line": _candidate_line(manager, memory_id), "note_ref": "note_local_env"}],
                             },
                         }
                     ],
@@ -635,8 +642,8 @@ def test_a_batch_may_only_retire_the_memories_it_was_offered(tmp_path: Path) -> 
             session.apply_batch(
                 note_writes=[{"note_ref": "note_env", "body": "本机运行环境 端口 18790", "edits": []}],
                 retirements=[
-                    {"memory_id": offered, "note_ref": "note_env"},
-                    {"memory_id": untouched, "note_ref": "note_env"},
+                    {"line": _candidate_line(manager, offered), "note_ref": "note_env"},
+                    {"line": _candidate_line(manager, untouched), "note_ref": "note_env"},
                 ],
             )
             return session
@@ -695,7 +702,7 @@ def test_a_category_note_may_not_reuse_an_ordinary_note_name(tmp_path: Path) -> 
         )
         result = session.apply_batch(
             note_writes=[{"note_ref": "note_ports", "body": "端口分类\n"}],
-            retirements=[{"memory_id": memory_id, "note_ref": "note_ports"}],
+            retirements=[{"line": _candidate_line(manager, memory_id), "note_ref": "note_ports"}],
         )
 
         assert result["ok"] is False
@@ -711,7 +718,7 @@ def test_a_category_note_may_not_reuse_an_ordinary_note_name(tmp_path: Path) -> 
         )
         second = rewrite.apply_batch(
             note_writes=[{"note_ref": "note_ports", "edits": [{"old_text": "端口分类", "new_text": "端口分类与重启"}]}],
-            retirements=[{"memory_id": memory_id, "note_ref": "note_ports"}],
+            retirements=[{"line": _candidate_line(manager, memory_id), "note_ref": "note_ports"}],
         )
         assert second["ok"] is True, second
         staged = [w for w in (rewrite.applied_batch or {}).get("note_writes") or [] if w.get("note_ref") == "note_ports"]
@@ -842,7 +849,7 @@ def test_an_over_long_category_scope_line_is_refused_at_staging(tmp_path: Path) 
         )
         result = session.apply_batch(
             note_writes=[{"note_ref": "note_scope", "body": long_line + nl + "正文" + nl}],
-            retirements=[{"memory_id": memory_id, "note_ref": "note_scope"}],
+            retirements=[{"line": _candidate_line(manager, memory_id), "note_ref": "note_scope"}],
         )
         assert result["ok"] is False
         assert "the resident row allows" in json.dumps(result["errors"], ensure_ascii=False)
@@ -850,7 +857,7 @@ def test_an_over_long_category_scope_line_is_refused_at_staging(tmp_path: Path) 
 
         second = session.apply_batch(
             note_writes=[{"note_ref": "note_scope", "body": "大类:端口" + nl + "正文" + nl}],
-            retirements=[{"memory_id": memory_id, "note_ref": "note_scope"}],
+            retirements=[{"line": _candidate_line(manager, memory_id), "note_ref": "note_scope"}],
         )
         assert second["ok"] is True, second
     finally:

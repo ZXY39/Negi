@@ -96,7 +96,7 @@ def test_memory_note_resolves_the_token_the_resident_block_shows(tmp_path: Path)
 
         snapshot = manager.snapshot_text()
         handle = markdown_memory.note_handle("note_ports")
-        assert f"note:{handle}" in snapshot
+        assert f"(note: {handle})" in snapshot
         assert "note_ports" not in snapshot
 
         assert manager.load_note(handle) == "端口正文\n"

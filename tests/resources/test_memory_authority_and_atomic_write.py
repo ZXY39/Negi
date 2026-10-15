@@ -127,7 +127,7 @@ def test_compressed_row_keeps_its_uncompressed_body(tmp_path: Path) -> None:
         assert manager._memory_repo.mark_compressed(memory_id)
         manager._rebuild_memory_snapshot_from_sqlite(now_iso="2026-04-17T10:00:01+08:00")
 
-        drifted = manager.snapshot_text().replace("2026/4/17-self：", "2026/4/16-self：")
+        drifted = manager.snapshot_text().replace("260417:", "260416:", 1)
         assert drifted != manager.snapshot_text()
         manager.memory_file.write_text(drifted, encoding="utf-8")
 

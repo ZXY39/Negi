@@ -4,14 +4,9 @@ from dataclasses import dataclass
 import hashlib
 import re
 
-_ENTRY_RE = re.compile(
-    r"(?:^|\n)---\n"
-    r"id:(?P<memory_id>[A-Za-z0-9]{6})\n"
-    r"(?P<header>\d{4}/\d{1,2}/\d{1,2}-(?:self|user)：)\n"
-    r"(?P<body>.*?)(?=\n---\n|\Z)",
-    re.S,
+_ENTRY_LINE_RE = re.compile(
+    r"^(?P<date>\d{6}):(?P<body>.+?)(?:\s\(note:\s(?P<handle>[A-Za-z0-9_-]{1,80})\))?$"
 )
-_VALID_ID_RE = re.compile(r"^[A-Za-z0-9]{6}$")
 _HEADER_RE = re.compile(r"^\d{4}/\d{1,2}/\d{1,2}-(?:self|user)$")
 NOTE_LINE_PREFIX = "note:"
 _NOTE_LINE_RE = re.compile(r"^note:(?P<handle>[A-Za-z0-9_-]{1,80})$")
@@ -51,56 +46,64 @@ class MemoryEntry:
     note_ref: str = ""
 
 
+def compact_date(date_text: str) -> str:
+    """`2026-10-15` / `2026/10/15` -> `261015`, the only date shape the block prints."""
+
+    parts = [part for part in re.split(r"\D+", str(date_text or "").strip()) if part]
+    if len(parts) != 3 or not all(part.isdigit() for part in parts):
+        raise ValueError("memory date must be a full year/month/day")
+    year, month, day = (int(part) for part in parts)
+    if not 1 <= month <= 12 or not 1 <= day <= 31:
+        raise ValueError("memory date must be a full year/month/day")
+    return f"{year % 100:02d}{month:02d}{day:02d}"
+
+
+def _expand_date(compact: str) -> str:
+    digits = str(compact or "")
+    return f"20{digits[:2]}/{int(digits[2:4])}/{int(digits[4:6])}"
+
+
 def format_memory_entry(entry: MemoryEntry) -> str:
-    memory_id = str(entry.memory_id or "").strip()
-    if not _VALID_ID_RE.fullmatch(memory_id):
-        raise ValueError("memory id must be exactly 6 alphanumeric characters")
+    """Render one memory as exactly one line: `YYMMDD:text (note: handle)`."""
+
     date_text = str(entry.date_text or "").strip()
-    source = str(entry.source or "").strip()
-    header = f"{date_text}-{source}"
-    if not _HEADER_RE.fullmatch(header):
-        raise ValueError("memory entry header must be YYYY/M/D-source")
     summary = str(entry.summary or "").strip()
     if not summary or "\n" in summary or "\r" in summary:
         raise ValueError("memory summary must be one non-empty line")
+    compact = compact_date(date_text)
     note_ref = str(entry.note_ref or "").strip()
-    note_line = f"{NOTE_LINE_PREFIX}{note_ref}\n" if note_ref else ""
-    return f"---\nid:{memory_id}\n{header}：\n{summary}\n{note_line}"
+    note_tail = f" (note: {note_ref})" if note_ref else ""
+    return f"{compact}:{summary}{note_tail}\n"
 
 
 def parse_memory_document(text: str) -> list[MemoryEntry]:
+    """Read the block back line by line.
+
+    A parsed entry carries no memory id on purpose: the block does not print ids, so
+    anything that has to name a row addresses it by line number against the row list the
+    renderer was built from (`memory_agent_runtime`), never by reconstructing an id here.
+    `source` is likewise only a column now.
+    """
+
     normalized = str(text or "").strip()
     if not normalized:
         return []
     entries: list[MemoryEntry] = []
-    for match in _ENTRY_RE.finditer(normalized):
-        memory_id = str(match.group("memory_id") or "").strip()
-        header = str(match.group("header") or "").strip().rstrip("：")
+    for line in normalized.splitlines():
+        stripped = line.strip()
+        if not stripped:
+            continue
+        match = _ENTRY_LINE_RE.fullmatch(stripped)
+        if not match:
+            continue
         body = str(match.group("body") or "").strip()
-        if not memory_id or not header or not body:
+        if not body:
             continue
-        if not _VALID_ID_RE.fullmatch(memory_id):
-            continue
-        if not _HEADER_RE.fullmatch(header):
-            continue
-        date_text, source = header.rsplit("-", 1)
-        summary = body
-        note_ref = ""
-        body_lines = body.splitlines()
-        if body_lines:
-            last_line = body_lines[-1].strip()
-            if last_line.startswith(NOTE_LINE_PREFIX):
-                handle_match = _NOTE_LINE_RE.fullmatch(last_line)
-                if handle_match:
-                    note_ref = str(handle_match.group("handle") or "").strip()
-                    summary = "\n".join(body_lines[:-1]).strip()
         entries.append(
             MemoryEntry(
-                memory_id=memory_id,
-                date_text=date_text,
-                source=source,
-                summary=summary,
-                note_ref=note_ref,
+                date_text=_expand_date(str(match.group("date") or "")),
+                summary=body,
+                note_ref=str(match.group("handle") or "").strip(),
             )
         )
     return entries
@@ -121,14 +124,10 @@ def validate_memory_document(
     reconstructed = "".join(format_memory_entry(item) for item in parsed).strip()
     if normalized.strip() != reconstructed:
         raise ValueError("memory document contains invalid blocks")
-    seen_ids: set[str] = set()
     for item in parsed:
         summary = str(item.summary or "").strip()
         if len(summary) > int(summary_max_chars):
             raise ValueError(f"summary line exceeds {int(summary_max_chars)} chars")
-        if item.memory_id in seen_ids:
-            raise ValueError(f"duplicate memory id: {item.memory_id}")
-        seen_ids.add(item.memory_id)
 
 
 _NOTE_REF_LABEL_RE = re.compile(r"^\(?\s*note\s*:\s*(?P<token>[^)\s]+)\s*\)?$", re.IGNORECASE)

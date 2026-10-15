@@ -118,6 +118,22 @@ def _app_config(tmp_path: Path, *, memory_chain: list[str] | None) -> object:
     )
 
 
+def _with_confirm_call(tool_calls: list[dict[str, object]] | None) -> list[dict[str, object]]:
+    """A mutating batch is scripted together with the confirm call the model makes after reading its preview."""
+
+    calls = list(tool_calls or [])
+    mutating = any(
+        str(call.get("name") or "") == "memory_apply_batch"
+        and isinstance(call.get("args"), dict)
+        and any((call.get("args") or {}).get(key) for key in ("adds", "rewrites", "deletes"))
+        for call in calls
+    )
+    confirmed = any(str(call.get("name") or "") == "memory_apply_confirm" for call in calls)
+    if mutating and not confirmed:
+        calls.append({"id": f"call-confirm-{len(calls)}", "name": "memory_apply_confirm", "args": {}})
+    return calls
+
+
 def _fake_response(
     *,
     content: str = "",
@@ -130,7 +146,7 @@ def _fake_response(
     metadata.update(dict(response_metadata or {}))
     return SimpleNamespace(
         content=content,
-        tool_calls=list(tool_calls or []),
+        tool_calls=_with_confirm_call(tool_calls),
         usage_metadata=usage_payload,
         response_metadata=metadata,
     )

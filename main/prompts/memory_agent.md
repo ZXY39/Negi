@@ -14,7 +14,8 @@
 
 ## 你会收到
 
-- 当前记忆正文（含每条记忆的 id 与其 note 句柄）
+- 当前记忆正文：一条记忆一行，形状是 `YYMMDD:正文`，带 note 的行在行尾多一个 `(note: 句柄)`
+  - 行首日期与行尾句柄都由系统维护；**正文里没有 id**，一条记忆只用它的**行号**（从上往下数，从 1 开始）来指代
 - 现有 note 的 ref 清单
 - 待处理记忆请求（`用户明确要求` 或 `自主复核提炼` 两类批次；用户侧请求可能是要记住、修改或忘记某条已展示的记忆，落到 `adds` / `rewrites` / `deletes` 由你判断，批次类型不替你决定；阶段可见面 `stages:` 嵌在待处理请求的 `payload_text` 里，不是独立顶层段）
 - 本轮提交要求（参数形状与硬性校验以 `memory_apply_batch` 的工具 schema 和它返回的字段错误为准）
@@ -50,15 +51,16 @@
   - 当现有记忆与旧记忆重复时，禁止单独使用 add，可选择以下任意一种处理方式：
     1. `rewrites` 覆盖旧记忆
     2. `deletes` 旧记忆后再 `add` 新记忆
-- `rewrites?: Array<{ id: string, content: string, minimal_memory: string, note_ref?: string }>`
+- `rewrites?: Array<{ line: number, content: string, minimal_memory: string, note_ref?: string }>`
   - 用于改写已有记忆
-  - 会保留原记忆 id 和原 source，并由系统刷新日期
+  - `line` 是这条记忆在当前正文里的行号（从 1 开始）；行号超出正文行数会被单独打回，其余变更照常
+  - 系统保留这条记忆的 id 与 source，并按内容是否真的变了刷新它的日期；**不要在 `content` 里写日期**
   - `note_ref` 不给就沿用这条记忆原有的 note；要换挂才写新名字
   - 当候选与旧记忆同槽位但新表述更准确、更规范、更完整时，优先使用 rewrite
-- `deletes?: string[]`
-  - 传入要删除的已有记忆 id；该记忆独占引用的 note 会被回收，被其他记忆共享引用的 note 保留
+- `deletes?: number[]`
+  - 传入要删除的记忆**行号**；该记忆独占引用的 note 会被回收，被其他记忆共享引用的 note 保留
   - 用于删除已过时、被更高质量记忆覆盖、或与保留规则冲突的旧记忆
-  - 如果收到的是自然语言删除请求，先解析成精确的记忆 id，再把这些 id 提交到 `deletes`
+  - 操作员用 id 提的请求，系统已在入队时翻译成行号；你只按行号提交，看不到也不需要 id
 - `note_upserts?: Record<string, string>`
   - 仅写入需要新增或**整体重写**的 note
   - 不要为不再被任何记忆引用的 note 继续保留内容
@@ -66,9 +68,16 @@
   - 改已有 note 的局部内容用这个：`old_text` 必须在该 note 里**唯一命中一次**，`new_text` 留空表示删掉这段
   - 只改一两个段落时**不要**用 `note_upserts` 重交整份——那要求你把没在改的段落也整份抄对，漏抄的部分会直接消失
   - 同一 note 可以放多条 edit，按顺序依次生效
-- `inspired_memory_ids?: string[]`
-  - 列出当前完整 memory snapshot 中，对本批判断有实质帮助的 memory id
+- `inspired_lines?: number[]`
+  - 列出当前正文中，对本批判断有实质帮助的行号
   - 可选，但会真实改变后续行为：被列出的记忆刷新计数加一、通过计数清零，从而延后它被压缩清理。只列你真正用过的，不要凑数
+### 预览与确认（会改内容的批次必走）
+
+- 交上 `memory_apply_batch` 后你会拿到这份批次**落库后的正文 diff**（`preview`）与计数；此时什么都没写进库
+- 读那份 diff：行号对不对、要留的记忆有没有被误删、正文是不是你要的形状。确认无误再调一次 `memory_apply_confirm()`（只调一次），批次才落地
+- 预览不是建议：没确认的变更批次会被当场打回
+- 零变更批次（`noop_reason` / `already_satisfied`）不用确认，交了就走
+
 - `noop_reason?: string`
   - 零变更专用：本轮既不新增、也不改写、删除、归并任何记忆时才用
   - 只能单独使用，不能与 `adds`、`rewrites`、`deletes`、`note_upserts`、`note_edits` 混用；混合场景（忽略本批候选、同时又要改写或删除某条旧记忆）只交变更字段
