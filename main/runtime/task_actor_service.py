@@ -353,6 +353,24 @@ class TaskNodeDispatcher:
         # 取消 entry future；生命周期由 dispatcher.close()/cancel_nodes 权威管理。
         return await asyncio.shield(entry.future)
 
+    def node_is_being_driven(self, node_id: str) -> bool | None:
+        """这个节点此刻是不是本进程在驱动。三态，且每一态都可据此做不同的事。
+
+        `True`  ＝ 有派发 entry 且协程未结束：进度在发生，等下去是有依据的。
+        `False` ＝ 有 entry 但协程已结束：本进程的驱动已经停了，节点行现在是稳定的。
+        `None`  ＝ 本进程没有这个节点的 entry。同进程内这是权威答案（entry 只在
+        `future.done()` 且状态非终态时才会被摘掉，见 `_get_or_create_entry`）；但重启之后
+        整张表是空的，这时它退化成「我说不出谁在驱动它」——所以调用方必须把 `None` 当
+        未知处理，既不能当「还活着」也不能当「死了」。
+        """
+        entry = self._entries.get(str(node_id or '').strip())
+        if entry is None:
+            return None
+        task = entry.task
+        if task is None:
+            return False
+        return not task.done()
+
     async def cancel_nodes(self, node_ids: list[str], reason: str = '') -> set[str]:
         """取消这批节点的在飞执行体、把它们落定，并返回**本进程确实持有其 entry 的那些**节点 id。
 
@@ -689,6 +707,7 @@ class TaskActorService:
         self._release_sweeps: dict[str, asyncio.Task[None]] = {}
         self._node_runner.nested_node_executor = self._execute_nested_node
         self._node_runner.cancel_node_subtree_executor = self._cancel_node_subtree
+        self._node_runner.node_liveness_probe = self._node_is_being_driven
 
     async def _resume_distribution_if_needed(self, task_id: str) -> None:
         resume_callback = self.distribution_resume_callback
@@ -1228,6 +1247,13 @@ class TaskActorService:
         if dispatcher is not None:
             return await dispatcher.execute_node(task_id, node_id)
         return await self._node_runner.run_node(task_id, node_id)
+
+    def _node_is_being_driven(self, task_id: str, node_id: str) -> bool | None:
+        """注入给 NodeRunner 的活性探针；没有 dispatcher 就说不出结论（返回 None）。"""
+        dispatcher = self._dispatchers.get(str(task_id or '').strip())
+        if dispatcher is None:
+            return None
+        return dispatcher.node_is_being_driven(node_id)
 
     async def _cancel_node_subtree(self, task_id: str, node_ids: list[str], reason: str = '') -> set[str]:
         """注入给 NodeRunner 的取消执行体；返回本进程实际持有的节点 id。

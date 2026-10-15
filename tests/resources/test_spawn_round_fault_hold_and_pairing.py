@@ -131,6 +131,8 @@ def _runner(store: _FakeStore) -> NodeRunner:
     runner = object.__new__(NodeRunner)
     runner._store = store  # type: ignore[attr-defined]
     runner._spawn_operation_locks = {}  # type: ignore[attr-defined]
+    # 活性探针默认不接线＝本进程说不出谁在驱动，节点行能读到就按行算。
+    runner.node_liveness_probe = None  # type: ignore[attr-defined]
     runner._log_service = SimpleNamespace(  # type: ignore[attr-defined]
         update_node_metadata=lambda node_id, mutator: runner._store.update_node(
             node_id, lambda record: record.model_copy(update={'metadata': mutator(dict(record.metadata or {}))})
@@ -510,4 +512,122 @@ def test_supersede_sweep_does_not_land_nodes_the_owner_cannot_account_for() -> N
     titles = [str(item.get('title') or '') for item in diagnostics]
     assert 'spawn_supersede_left_to_owner' in titles, titles
     assert 'spawn_supersede_forced_live_node' not in titles, titles
+
+
+# --- 滞留道：活性问持有者，停等要可见 ---------------------------------------
+
+
+def _parking_runner(store: _FakeStore):
+    runner, diagnostics = _reporting_runner(store)
+    paused: list[dict] = []
+    logged: list[dict] = []
+    store.get_task_node_pause = lambda node_id: None  # type: ignore[attr-defined]
+    runner._log_service.append_task_error_log = (  # type: ignore[attr-defined]
+        lambda task_id, node_id, **kwargs: logged.append({'task_id': task_id, 'node_id': node_id, **kwargs})
+    )
+    runner._log_service.set_node_pause_state = (  # type: ignore[attr-defined]
+        lambda task_id, node_id, **kwargs: paused.append({'task_id': task_id, 'node_id': node_id, **kwargs})
+    )
+    return runner, diagnostics, paused, logged
+
+
+async def _boom(**_kwargs):
+    raise sqlite3.OperationalError('disk I/O error')
+
+
+def test_hold_parks_the_parent_when_nothing_is_progressing() -> None:
+    """没人推进且说不清会不会再推进 ⇒ 父节点可见地停下，而不是静默挂着。"""
+    from main.errors import NodePausedError
+
+    store = _round_store('in_progress')
+    runner, diagnostics, paused, logged = _parking_runner(store)
+    runner.node_liveness_probe = lambda task_id, node_id: False
+    runner._spawn_children_locked = _boom  # type: ignore[attr-defined]
+
+    with pytest.raises(NodePausedError):
+        asyncio.run(
+            runner._spawn_children(task_id=TASK_ID, parent_node_id=ROOT_ID, specs=_specs(), call_id=ROUND_ID)
+        )
+
+    assert paused and paused[0]['node_id'] == ROOT_ID
+    assert paused[0]['pause_requested'] is True and paused[0]['is_paused'] is True
+    assert paused[0]['pause_reason'] == 'error'
+    remark = str(paused[0]['remark'] or '')
+    assert 'spawn_round_stalled' in remark and 'unknown=' in remark
+    assert logged and 'spawn_round_stalled' in str(logged[0].get('error_text') or '')
+    titles = [str(item.get('title') or '') for item in diagnostics]
+    assert 'spawn_round_parked_for_operator' in titles, titles
+    # 暂停的是父节点；孩子由自己的派发 entry 驱动，这里一个字都不写。
+    assert store.get_node(EXEC_ID).status == 'in_progress'
+
+
+def test_hold_never_parks_while_the_owner_is_making_progress() -> None:
+    """持有者说在跑就不算停等——防的是"一次存储抖动把任务暂停"这种过度反应。"""
+    store = _round_store('in_progress')
+    runner, _diagnostics, paused, _logged = _parking_runner(store)
+    runner.node_liveness_probe = lambda task_id, node_id: True
+    runner._spawn_children_locked = _boom  # type: ignore[attr-defined]
+
+    async def _converge_soon():
+        await asyncio.sleep(0.03)
+        store.nodes[EXEC_ID] = store.nodes[EXEC_ID].model_copy(
+            update={'status': 'success', 'final_output': 'shard written', 'finished_at': now_iso()}
+        )
+
+    async def _run():
+        watcher = asyncio.create_task(_converge_soon())
+        try:
+            return await runner._spawn_children(
+                task_id=TASK_ID, parent_node_id=ROOT_ID, specs=_specs(), call_id=ROUND_ID
+            )
+        finally:
+            await watcher
+
+    results = asyncio.run(_run())
+
+    assert paused == [], '有人驱动时不得落暂停'
+    assert len(results) == 1
+
+
+def test_hold_probe_turns_its_own_read_failures_into_unknown() -> None:
+    """滞留道的读失败计入 unknown，绝不外抛、也绝不当成终态。
+
+    这里抛出去会顶替原异常穿出 `_spawn_children` 的 except 体，工具照旧变成
+    `Error executing spawn_child_nodes`——本道要防的事被本道自己做一遍。
+    """
+    store = _round_store('in_progress')
+    runner, _diagnostics = _reporting_runner(store)
+    original_get_node = store.get_node
+
+    def _flaky_get_node(node_id):
+        if str(node_id or '').strip() == EXEC_ID:
+            raise sqlite3.OperationalError('disk I/O error')
+        return original_get_node(node_id)
+
+    store.get_node = _flaky_get_node  # type: ignore[assignment]
+
+    def _dead_probe(_task_id, _node_id):
+        raise sqlite3.OperationalError('probe down')
+
+    runner.node_liveness_probe = _dead_probe  # type: ignore[attr-defined]
+
+    state = runner._spawn_round_hold_probe(task_id=TASK_ID, parent_node_id=ROOT_ID, cache_key=ROUND_ID)
+
+    assert state['driven'] == [] and state['converged'] == []
+    assert state['unknown'] == [EXEC_ID], state
+
+
+def test_cancel_gate_treats_an_unreadable_store_as_not_a_cancellation() -> None:
+    """这道门在滞留道之前，它自己抛就等于绕过滞留道——读不到一律「不算真取消」。"""
+    store = _round_store('in_progress')
+    runner, _diagnostics = _reporting_runner(store)
+
+    def _throw(_task_id):
+        raise sqlite3.OperationalError('disk I/O error')
+
+    store.get_task = _throw  # type: ignore[assignment]
+
+    assert runner._should_propagate_child_pipeline_cancellation(
+        task_id=TASK_ID, parent_node_id=ROOT_ID,
+    ) is False
 

@@ -22,7 +22,13 @@ from g3ku.runtime.memory_scope import normalize_memory_scope
 from g3ku.runtime.project_environment import current_project_environment
 from g3ku.runtime.stage_prompt_compaction import closing_stage_target
 from g3ku.utils.helpers import PATH_ANCHOR_RULE_TEXT, path_anchor_policy
-from main.errors import DistributionHoldError, NodePausedError, TaskPausedError, describe_exception
+from main.errors import (
+    DistributionHoldError,
+    NodePausedError,
+    TaskPausedError,
+    describe_exception,
+    describe_exception_chain,
+)
 from main.ids import new_command_id, new_node_id
 from main.models import (
     RESULT_SCHEMA_VERSION,
@@ -129,6 +135,10 @@ _SUPERSEDED_SPAWN_REASON_PREFIX = 'superseded by newer spawn round'
 # 新轮开局就把这棵还在飞的子树按 superseded 清扫掉。
 _SPAWN_FAULT_HOLD_SLICE_SECONDS = 2.0
 _SPAWN_FAULT_HOLD_REPORT_SECONDS = 60.0
+# 停等现场要活过心跳渲染端的头尾裁剪（`prompt_lane._overflow_head_and_tail` 只留头 70% +
+# 尾 20%，而外置 ref 要查正可能坏掉的那个库才能解开）。所以正文自限到远低于内联额度，
+# 结论与观测值全在头尾，不依赖任何取回链路。
+_SPAWN_FAULT_HOLD_REPORT_TEXT_LIMIT = 900
 _SPAWN_REVIEW_TOOL_NAME = 'review_spawn_candidates'
 _SPAWN_REVIEW_BLOCKED_CHECK_RESULT = '派生已被拦截'
 # 检验车道自身故障（模型链缺失 / provider 异常 / 连续拿不到可解析判定）时，本批候选
@@ -249,6 +259,9 @@ class NodeRunner:
         self._workspace_root_getter = workspace_root_getter
         self.nested_node_executor = None
         self.cancel_node_subtree_executor = None
+        # 活性问持有者，不问投影：派发器是唯一说得出「这个节点此刻有没有人在驱动」的一方。
+        # 读 dispatcher entry 是调用方的一跳（见 run_node 上方注释的分层），所以在这里注入。
+        self.node_liveness_probe = None
         self._spawn_operation_locks: dict[str, asyncio.Lock] = {}
         self.distribution_delivery_callback = None
         # 磁盘治理（P0）：磁盘满时未能落盘的节点错误文本，仅内存诊断用（有界）。
@@ -410,14 +423,38 @@ class NodeRunner:
         )
 
     def _should_propagate_child_pipeline_cancellation(self, *, task_id: str, parent_node_id: str) -> bool:
-        task = self._store.get_task(task_id)
+        """只有**读到**明确的取消/终态/hold 才算真取消，读不到就不算。
+
+        这道门在滞留道之前，所以它自己那两次库读同样不能外抛：在 except 体里抛出的异常会
+        顶替原本那个 `CancelledError` 穿出 `_spawn_children`，落进 `react_loop` 的
+        `except Exception` 变成 `Error executing spawn_child_nodes`——于是轮次带着活孩子
+        提前返回、批后帧写清掉重放意图，正是本道要防的形状。返回 False 的语义本来就对：
+        「说不清有没有人取消它」不是「有人取消它」，交给滞留道去等真答案。
+        """
+        try:
+            task = self._store.get_task(task_id)
+        except Exception as exc:
+            logger.warning(
+                'title=spawn_round_hold_probe_failed stage=cancel_check_task task={} error={}',
+                str(task_id or '').strip(),
+                describe_exception(exc),
+            )
+            return False
         if task is None:
             return False
         if bool(task.pause_requested) or bool(task.cancel_requested):
             return True
         if self._task_terminal_reason(task_id, task=task):
             return True
-        parent = self._store.get_node(parent_node_id)
+        try:
+            parent = self._store.get_node(parent_node_id)
+        except Exception as exc:
+            logger.warning(
+                'title=spawn_round_hold_probe_failed stage=cancel_check_parent node={} error={}',
+                str(parent_node_id or '').strip(),
+                describe_exception(exc),
+            )
+            return False
         if self._node_terminal_reason(
             parent,
             default_failed='parent node failed',
@@ -4256,17 +4293,21 @@ class NodeRunner:
         specs: list[SpawnChildSpec],
         fault: BaseException,
     ) -> list[SpawnChildResult] | None:
-        """本轮仍绑着非终态节点时返回真实结论，否则返回 None 让原异常照旧上抛。
+        """本轮仍绑着未收敛节点时返回真实结论，否则返回 None 让原异常照旧上抛。
 
         `Error executing spawn_child_nodes` 一旦进了父节点的消息链就收不回：它消费掉本轮
         tool_call_id（幂等重放通道随之关闭），父节点只能重发同一批，而重发开局就把这棵
         仍在飞的子树结清成 `superseded by newer spawn round`。派生工具对模型的承诺是
         "全部子管线终态才返回"，所以故障发生在记账上时由这里兜住：等节点自己收敛。
+
+        三个出口：节点全落终态 → 交付真实结论；任务/父节点显式终态 → 按该理由收尾；
+        没有任何可观测推进（`driven` 空而 `unknown` 非空）持续满一个复报周期 → 把父节点
+        可见地停下请人核对（`_park_spawn_round_for_operator`），而不是静默挂到永远。
         """
-        pending = self._spawn_round_non_terminal_node_ids(
-            entries=self._spawn_round_entries(parent_node_id=parent_node_id, cache_key=cache_key),
+        state = self._spawn_round_hold_probe(
+            task_id=task_id, parent_node_id=parent_node_id, cache_key=cache_key,
         )
-        if not pending:
+        if not (state['driven'] or state['unknown']):
             return None
         self._emit_spawn_diagnostic(
             title='spawn_round_fault_holds_for_live_nodes',
@@ -4275,16 +4316,15 @@ class NodeRunner:
             cache_key=cache_key,
             index=None,
             entry=None,
-            detail=(
-                f'live_node_count={len(pending)} '
-                f'paused={self._spawn_round_paused_node_count(node_ids=pending)} '
-                f'fault={describe_exception(fault)}'
-            ),
+            detail=self._spawn_round_hold_state_text(state=state, fault=fault),
         )
         held_seconds = 0.0
+        stuck_seconds = 0.0
         next_report_at = _SPAWN_FAULT_HOLD_REPORT_SECONDS
         while True:
-            stop_reason = self._spawn_round_hold_stop_reason(task_id=task_id, parent_node_id=parent_node_id)
+            stop_reason = self._spawn_round_hold_stop_reason_safe(
+                task_id=task_id, parent_node_id=parent_node_id,
+            )
             if stop_reason:
                 self._emit_spawn_diagnostic(
                     title='spawn_round_hold_released_by_stop_reason',
@@ -4293,16 +4333,26 @@ class NodeRunner:
                     cache_key=cache_key,
                     index=None,
                     entry=None,
-                    detail=f'pending={len(pending)} held_seconds={held_seconds:.0f} reason={stop_reason}',
+                    detail=(
+                        f'driven={len(state["driven"])} unknown={len(state["unknown"])} '
+                        f'held_seconds={held_seconds:.0f} reason={stop_reason}'
+                    ),
                 )
                 return [self._spawn_abort_result(spec.goal, stop_reason) for spec in list(specs or [])]
             await asyncio.sleep(_SPAWN_FAULT_HOLD_SLICE_SECONDS)
             held_seconds += _SPAWN_FAULT_HOLD_SLICE_SECONDS
-            pending = self._spawn_round_non_terminal_node_ids(
-                entries=self._spawn_round_entries(parent_node_id=parent_node_id, cache_key=cache_key),
+            state = self._spawn_round_hold_probe(
+                task_id=task_id, parent_node_id=parent_node_id, cache_key=cache_key,
             )
-            if not pending:
+            if not (state['driven'] or state['unknown']):
                 break
+            # 只有"没有任何可观测的推进"才算停等：driven 非空就还有人在跑，再久也只复报。
+            # 停等要持续满一个复报周期才升级为暂停——刚重启完的那一拍所有节点都还没有
+            # entry，立刻暂停会把「还没来得及派发」误报成「卡住」。
+            stuck_seconds = (
+                stuck_seconds + _SPAWN_FAULT_HOLD_SLICE_SECONDS
+                if not state['driven'] else 0.0
+            )
             if held_seconds >= next_report_at:
                 next_report_at += _SPAWN_FAULT_HOLD_REPORT_SECONDS
                 self._emit_spawn_diagnostic(
@@ -4312,11 +4362,19 @@ class NodeRunner:
                     cache_key=cache_key,
                     index=None,
                     entry=None,
-                    detail=(
-                        f'pending={len(pending)} '
-                        f'paused={self._spawn_round_paused_node_count(node_ids=pending)} '
-                        f'held_seconds={held_seconds:.0f}'
+                    detail=self._spawn_round_hold_state_text(
+                        state=state, held_seconds=held_seconds, stuck_seconds=stuck_seconds,
                     ),
+                )
+            if stuck_seconds >= _SPAWN_FAULT_HOLD_REPORT_SECONDS:
+                self._park_spawn_round_for_operator(
+                    task_id=task_id,
+                    parent_node_id=parent_node_id,
+                    cache_key=cache_key,
+                    state=state,
+                    fault=fault,
+                    held_seconds=held_seconds,
+                    stuck_seconds=stuck_seconds,
                 )
         self._emit_spawn_diagnostic(
             title='spawn_round_fault_hold_converged',
@@ -4379,6 +4437,189 @@ class NodeRunner:
             if node is not None and bool(getattr(node, 'is_paused', False)):
                 paused += 1
         return paused
+
+    def _spawn_round_liveness(self, *, task_id: str, node_id: str) -> bool | None:
+        """问持有者这个节点此刻有没有人在驱动；探针没接线或自己抛＝说不出结论。"""
+        probe = self.node_liveness_probe
+        if not callable(probe):
+            return None
+        try:
+            return bool(probe(task_id, node_id))
+        except Exception:
+            return None
+
+    def _spawn_round_row_status(self, node_id: str) -> str | None:
+        """节点行的归一状态。**读不到返回 None，不当成终态。**
+
+        这条区分是整件事的关键：读失败是「不知道」，不是「已经结束了」。把 None 当终态，
+        就是让一次存储抖动拥有宣判一个节点结束的权力。
+        """
+        try:
+            node = self._store.get_node(str(node_id or '').strip())
+        except Exception:
+            return None
+        if node is None:
+            return None
+        return self._normalized_status(getattr(node, 'status', ''))
+
+    def _spawn_round_hold_probe(
+        self,
+        *,
+        task_id: str,
+        parent_node_id: str,
+        cache_key: str,
+    ) -> dict[str, Any]:
+        """本轮绑定节点的三态清点，且任何一条读失败都不许外抛。
+
+        走到滞留道的原因往往就是库在坏。这里每处裸读的异常都会**顶替**原异常穿出
+        `_spawn_children` 的 except 体，于是工具照样返回 `Error executing spawn_child_nodes`、
+        轮次照样带着活孩子提前结束、批后帧写照样清掉重放意图、收尸器照样开杀——本道要防的
+        事被本道自己重新做了一遍。所以：读得到就按读到的算，读不到一律计入 unknown。
+
+        `driven`   持有者说有协程在跑 ⇒ 进度在发生，继续等。
+        `converged` 节点行已终态 ⇒ 本轮真收敛了。
+        `unknown`  读不到行，或持有者说停了而行仍非终态 ⇒ 无人推进且说不清会不会再推进。
+        """
+        driven: list[str] = []
+        converged: list[str] = []
+        unknown: list[str] = []
+        try:
+            entries = self._spawn_round_entries(parent_node_id=parent_node_id, cache_key=cache_key)
+        except Exception as exc:
+            logger.warning(
+                'title=spawn_round_hold_probe_failed stage=entries cache_key={} error={}',
+                str(cache_key or '').strip(),
+                describe_exception(exc),
+            )
+            entries = []
+        for entry in list(entries or []):
+            if not isinstance(entry, dict):
+                continue
+            for node_id in self._spawn_entry_node_ids(entry):
+                normalized = str(node_id or '').strip()
+                if not normalized:
+                    continue
+                # 先认终态，再问活性：节点落了终态就是收敛了，此刻它的派发 entry 可能还没
+                # 被摘掉（探针仍会说"在跑"）。反过来先问活性，一轮已完成的子节点会把滞留道
+                # 永远吊住——实测就是这条循环不出。
+                status = self._spawn_round_row_status(normalized)
+                if status in {STATUS_SUCCESS, STATUS_FAILED}:
+                    converged.append(normalized)
+                    continue
+                if self._spawn_round_liveness(task_id=task_id, node_id=normalized) is True:
+                    driven.append(normalized)
+                    continue
+                unknown.append(normalized)
+        return {
+            'entries': list(entries or []),
+            'driven': sorted(set(driven)),
+            'converged': sorted(set(converged)),
+            'unknown': sorted(set(unknown)),
+        }
+
+    def _spawn_round_hold_state_text(
+        self,
+        *,
+        state: dict[str, Any],
+        fault: BaseException | None = None,
+        held_seconds: float = 0.0,
+        stuck_seconds: float = 0.0,
+    ) -> str:
+        bits = [
+            f'driven={len(state.get("driven") or [])}',
+            f'unknown={len(state.get("unknown") or [])}',
+            f'converged={len(state.get("converged") or [])}',
+        ]
+        if held_seconds:
+            bits.append(f'held_seconds={held_seconds:.0f}')
+        if stuck_seconds:
+            bits.append(f'stuck_seconds={stuck_seconds:.0f}')
+        unknown_ids = [str(item) for item in (state.get('unknown') or [])][:8]
+        if unknown_ids:
+            bits.append('unknown_nodes=' + ','.join(unknown_ids))
+        if fault is not None:
+            bits.append('fault=' + describe_exception_chain(fault))
+        return ' '.join(bits)
+
+    def _spawn_round_hold_stop_reason_safe(self, *, task_id: str, parent_node_id: str) -> str:
+        """停手理由只认明确的终态；读不到＝还没读到，不是「可以继续也不是「已经结束」。"""
+        try:
+            return self._spawn_round_hold_stop_reason(task_id=task_id, parent_node_id=parent_node_id)
+        except Exception as exc:
+            logger.warning(
+                'title=spawn_round_hold_probe_failed stage=stop_reason task={} error={}',
+                str(task_id or '').strip(),
+                describe_exception(exc),
+            )
+            return ''
+
+    def _park_spawn_round_for_operator(
+        self,
+        *,
+        task_id: str,
+        parent_node_id: str,
+        cache_key: str,
+        state: dict[str, Any],
+        fault: BaseException | None,
+        held_seconds: float,
+        stuck_seconds: float,
+    ) -> None:
+        """等不到任何可观测推进时让父节点**可见地**停下，而不是静默挂着。
+
+        落点是既有的节点错误暂停车道：错误行进 `task_error_logs`、节点落
+        `pause_reason='error'` 并带 remark，然后抛 `NodePausedError`——它在工具异常保护集里
+        原样重抛，因此不消费 `tool_call_id`，重放通道完整保留，`resume_node` 后同 id 重入。
+
+        这里只把现场摆出来，**不写任何节点判决**：unknown 的含义是"本进程说不出谁在驱动这些
+        节点"，而"说不出"既不是"它们在跑"也不是"它们失败了"。要不要放弃这一批，归看完现场的
+        会话 agent 或操作者。
+        """
+        detail = self._spawn_round_hold_state_text(
+            state=state, held_seconds=held_seconds, stuck_seconds=stuck_seconds,
+        )
+        chain = describe_exception_chain(fault) if fault is not None else 'unknown'
+        error_text = (
+            f'spawn_round_stalled: 派生轮停等，没有任何绑定节点在被驱动，也说不清还有谁在驱动。'
+            f' 一手故障: {chain}。'
+            f' 处置: 确认这批节点的归属后用 manage_task_nodes 把本轮落 canceled，或'
+            f' resume 本节点按同一 call id 重入；在此之前不要重发同一批（重发开局会把在飞子树判成 superseded）。'
+            f' {detail}'
+        )
+        error_text = error_text[:_SPAWN_FAULT_HOLD_REPORT_TEXT_LIMIT]
+        # 这两步都是写库，而走到这里的原因常常正是库在坏：写失败就继续等、下一拍再试，
+        # 绝不让写失败把滞留道炸出去。
+        wrote = True
+        try:
+            self._log_service.append_task_error_log(
+                task_id, parent_node_id, error_text=error_text, node_title='',
+            )
+        except Exception as exc:
+            wrote = False
+            logger.warning(
+                'title=spawn_round_park_write_failed stage=error_log task={} node={} error={}',
+                str(task_id or '').strip(), str(parent_node_id or '').strip(), describe_exception(exc),
+            )
+        try:
+            self._mark_node_paused(task_id, parent_node_id, reason='error', remark=error_text)
+        except Exception as exc:
+            wrote = False
+            logger.warning(
+                'title=spawn_round_park_write_failed stage=node_pause task={} node={} error={}',
+                str(task_id or '').strip(), str(parent_node_id or '').strip(), describe_exception(exc),
+            )
+        self._emit_spawn_diagnostic(
+            title='spawn_round_parked_for_operator',
+            task_id=task_id,
+            parent_node_id=parent_node_id,
+            cache_key=cache_key,
+            index=None,
+            entry=None,
+            detail=f'{detail} persisted={"yes" if wrote else "no"} reason=stuck_no_progress',
+        )
+        if not wrote:
+            # 现场没落库就不要把它伪装成一次已登记的暂停——继续等，让下一拍重投。
+            return
+        raise NodePausedError(task_id, parent_node_id)
 
     def _spawn_round_hold_stop_reason(self, *, task_id: str, parent_node_id: str) -> str:
         """只有明确的终态才算停手理由；查不到行不算（记账故障正是走到这里的原因）。"""
