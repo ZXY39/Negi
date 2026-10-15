@@ -487,6 +487,72 @@ def test_an_equal_summary_is_still_accepted(tmp_path: Path) -> None:
         manager.close()
 
 
+@pytest.mark.asyncio
+async def test_manual_warming_restores_the_full_body_and_rolls_back_at_the_cap(tmp_path: Path) -> None:
+    """回暖是梯子唯一的手动挡：它把字符加回常驻块，所以它也要过硬顶这道校验。"""
+    manager = _manager(tmp_path, trigger=300, target=250, document_max=480)
+    try:
+        keep = _add(manager, body="留着" + "内" * 200, minimal="留着->词", now_iso="2026-04-25T00:00:01+08:00")
+        warm = _add(manager, body="回暖这条" + "外" * 240, minimal="回暖->词", now_iso="2026-04-25T00:00:02+08:00")
+        _set_compressed(manager, [keep, warm])
+        _paint(manager)
+        assert _rows(manager)[warm]["is_compressed"] is True
+
+        result = await manager.uncompress_current_memory(warm)
+
+        assert result["changed"] is True
+        assert _rows(manager)[warm]["is_compressed"] is False
+        assert _rows(manager)[warm]["memory_body"] == "回暖这条" + "外" * 240
+        assert _rows(manager)[keep]["is_compressed"] is True, "warming one row never touches another"
+        assert "回暖这条" in manager.snapshot_text()
+
+        # Warming the second row now pushes the document past the cap. The row has to go back
+        # to its downgraded form: a store ahead of its mirror is the state the ladder reads.
+        with pytest.raises(Exception):
+            await manager.uncompress_current_memory(keep)
+        rows_after = _rows(manager)
+        assert rows_after[keep]["is_compressed"] is True, "a rejected warming rolls back whole"
+        assert rows_after[warm]["is_compressed"] is False, "and the rollback is to this batch's start, not to zero"
+        assert "回暖这条" in manager.snapshot_text()
+        assert ("留着" + "内" * 200) not in manager.snapshot_text()
+        assert result["resident_chars_after"] <= 480
+    finally:
+        manager.close()
+
+
+@pytest.mark.asyncio
+async def test_warming_a_row_that_is_not_downgraded_changes_nothing(tmp_path: Path) -> None:
+    manager = _manager(tmp_path)
+    try:
+        plain = _add(manager, body="全文常驻" + "内" * 20, minimal="全文->词")
+        _paint(manager)
+
+        result = await manager.uncompress_current_memory(plain)
+
+        assert result["changed"] is False
+        assert _rows(manager)[plain]["is_compressed"] is False
+    finally:
+        manager.close()
+
+
+def test_the_warming_lane_is_operator_only(tmp_path: Path) -> None:
+    """Nothing on the machine side may clear `is_compressed`, or the ladder oscillates."""
+    manager = _manager(tmp_path)
+    try:
+        source = Path(importlib.import_module("g3ku.agent.memory_agent_runtime").__file__ or "").read_text(
+            encoding="utf-8"
+        )
+        callers = [
+            line.strip()
+            for line in source.splitlines()
+            if "mark_uncompressed(" in line and "def mark_uncompressed" not in line
+        ]
+        assert len(callers) == 1, "the only caller is the operator lane"
+        assert "repo.mark_uncompressed(target_id)" in callers[0]
+    finally:
+        manager.close()
+
+
 def test_the_capacity_rung_is_recorded_per_memory_in_the_ledger(tmp_path: Path) -> None:
     """`capacity_action` names the rung and every downgraded row carries what it gave back."""
     module = _module()

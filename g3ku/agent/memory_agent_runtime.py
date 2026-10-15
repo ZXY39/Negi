@@ -1618,6 +1618,24 @@ class _MemorySqliteRepository:
         finally:
             conn.close()
 
+    def mark_uncompressed(self, memory_id: str) -> bool:
+        """Operator-only: put a row back at its full body in the resident block.
+
+        Nothing automatic calls this. A capacity decision the machine made on survival order
+        is not wrong because the memory turned out to matter, and an automatic re-promotion
+        would oscillate against the trigger line on every commit.
+        """
+        conn = self._connect()
+        try:
+            cursor = conn.execute(
+                "UPDATE memories SET is_compressed = 0 WHERE memory_id = ? AND is_compressed = 1",
+                (str(memory_id or "").strip(),),
+            )
+            conn.commit()
+            return int(cursor.rowcount or 0) > 0
+        finally:
+            conn.close()
+
     def delete_memory(self, memory_id: str) -> bool:
         conn = self._connect()
         try:
@@ -2162,6 +2180,55 @@ class MemoryManager:
             "memory_body": new_body,
             "updated_at": now_iso,
             **({"minimal_memory": new_minimal} if new_minimal is not None else {}),
+        }
+
+    async def uncompress_current_memory(self, memory_id: str) -> dict[str, Any]:
+        """回暖一条被容量压缩降级的行：操作员点名才做，机器永不自己做。
+
+        回暖往常驻块里加字符，可能直接把文档顶到硬顶：镜像校验不过就整笔回滚，
+        绝不留"库改了、镜像没写"的中间态。返回体带三个读数（回暖后的字数、触发线、
+        硬顶），让操作员看得见自己把余量吃掉了多少。
+        """
+        target_id = str(memory_id or "").strip()
+        if not target_id:
+            raise ValueError("memory_id is required")
+        now_iso = self._now_iso()
+        with self._io_lock:
+            repo = getattr(self, "_memory_repo", None)
+            if repo is None:
+                raise KeyError(f"memory store unavailable: {target_id}")
+            row = next(
+                (item for item in repo.list_memories() if str(item.get("memory_id") or "").strip() == target_id),
+                None,
+            )
+            if row is None:
+                raise KeyError(f"memory not found: {target_id}")
+            if not bool(row.get("is_compressed")):
+                return {
+                    "memory_id": target_id,
+                    "changed": False,
+                    "resident_chars_after": self._resident_memory_chars(),
+                    "compress_trigger_chars": int(getattr(self.config.document, "compress_trigger_chars", 16000) or 16000),
+                    "document_max_chars": int(getattr(self.config.document, "document_max_chars", 20000) or 20000),
+                }
+            rows_before = repo.list_memories()
+            if not repo.mark_uncompressed(target_id):
+                raise KeyError(f"memory not uncompressed: {target_id}")
+            try:
+                self._rebuild_memory_snapshot_from_sqlite(now_iso=now_iso)
+            except Exception:
+                try:
+                    repo.restore_rows(rows_before=rows_before)
+                    self._rebuild_memory_snapshot_from_sqlite(now_iso=now_iso)
+                except Exception as restore_exc:
+                    logger.error(f"memory un-compress rollback failed: {restore_exc}")
+                raise
+        return {
+            "memory_id": target_id,
+            "changed": True,
+            "resident_chars_after": self._resident_memory_chars(),
+            "compress_trigger_chars": int(getattr(self.config.document, "compress_trigger_chars", 16000) or 16000),
+            "document_max_chars": int(getattr(self.config.document, "document_max_chars", 20000) or 20000),
         }
 
     async def delete_current_memories(
@@ -5257,6 +5324,42 @@ class MemoryManager:
             "request_id": request.request_id,
         }
 
+    async def enqueue_operator_request(
+        self,
+        *,
+        op: str,
+        decision_source: str,
+        payload_text: str,
+        trigger_source: str,
+        session_key: str = "",
+    ) -> dict[str, Any]:
+        """The one door every memory write goes through, operator page included.
+
+        Two doors meant two sets of gates: the content scan, the capacity ladder, the ledger
+        row with before/after text and the note-ownership axes all lived on the queue side
+        only. This is the shared entry; nothing writes the store from a request handler.
+        """
+        normalized_op = str(op or "write").strip().lower()
+        if normalized_op not in {"write", "delete"}:
+            raise ValueError(f"unsupported memory request op: {normalized_op}")
+        normalized_payload = str(payload_text or "").strip()
+        if not normalized_payload:
+            return {"ok": True, "status": "ignored", "reason": "empty_payload"}
+        request = MemoryQueueRequest(
+            op=normalized_op,
+            decision_source=self._normalize_decision_source(decision_source),
+            payload_text=normalized_payload,
+            created_at=self._now_iso(),
+            session_key=str(session_key or "").strip(),
+            trigger_source=str(trigger_source or "").strip(),
+            request_id=self._request_id(normalized_op),
+        )
+        blocked, rule = scan_memory_candidate(request.payload_text)
+        if blocked:
+            return self._reject_blocked_candidate(request, rule)
+        await self._append_queue_request(request)
+        return {"ok": True, "request_id": request.request_id, "status": "queued"}
+
     async def enqueue_write_request(
         self,
         *,
@@ -5265,23 +5368,13 @@ class MemoryManager:
         payload_text: str,
         trigger_source: str,
     ) -> dict[str, Any]:
-        normalized_payload = str(payload_text or "").strip()
-        if not normalized_payload:
-            return {"ok": True, "status": "ignored", "reason": "empty_payload"}
-        request = MemoryQueueRequest(
+        return await self.enqueue_operator_request(
             op="write",
-            decision_source=self._normalize_decision_source(decision_source),
-            payload_text=normalized_payload,
-            created_at=self._now_iso(),
-            session_key=str(session_key or "").strip(),
-            trigger_source=str(trigger_source or "").strip(),
-            request_id=self._request_id("write"),
+            decision_source=decision_source,
+            payload_text=payload_text,
+            trigger_source=trigger_source,
+            session_key=session_key,
         )
-        blocked, rule = scan_memory_candidate(request.payload_text)
-        if blocked:
-            return self._reject_blocked_candidate(request, rule)
-        await self._append_queue_request(request)
-        return {"ok": True, "request_id": request.request_id, "status": "queued"}
 
     async def enqueue_autonomous_review(
         self,

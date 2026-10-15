@@ -104,6 +104,40 @@ def build_memory_app(console) -> typer.Typer:
         finally:
             manager.close()
 
+    @app.command('uncompress')
+    def memory_uncompress(
+        memory_id: str = typer.Argument(..., help='The 6-character memory id to put back at full length'),
+        all_compressed: bool = typer.Option(False, '--all', help='Warm every downgraded row back up'),
+    ):
+        """回暖：把被容量压缩降级的记忆恢复成全文常驻（只有操作员能做，机器不自己做）。
+
+        回暖往常驻块加回字符，顶到硬顶会被整笔拒绝并回滚，报告里的三个读数就是这次
+        操作吃掉的余量。
+        """
+        _config, mem_cfg, manager = _load_runtime_manager()
+        if not mem_cfg.enabled:
+            _disabled()
+            raise typer.Exit(1)
+        try:
+            targets = [str(memory_id or "").strip()]
+            if all_compressed:
+                targets = [
+                    str(row.get("memory_id") or "").strip()
+                    for row in manager._memory_repo.list_memories()
+                    if bool(row.get("is_compressed"))
+                ]
+            results = []
+            for target in targets:
+                if not target:
+                    continue
+                try:
+                    results.append(asyncio.run(manager.uncompress_current_memory(target)))
+                except Exception as exc:
+                    results.append({"memory_id": target, "error": str(exc or exc.__class__.__name__).strip()})
+        finally:
+            manager.close()
+        console.print_json(json.dumps(results, ensure_ascii=False))
+
     @app.command('queue')
     def memory_queue(limit: int = typer.Option(20, '--limit', '-n', help='Maximum rows')):
         _config, mem_cfg, manager = _load_runtime_manager()
