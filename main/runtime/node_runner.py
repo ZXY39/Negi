@@ -4775,52 +4775,30 @@ class NodeRunner:
                         parent_node_id=parent.node_id,
                     ):
                         raise
-                    if self._refuse_spawn_settlement_over_live_node(
+                    result = self._settle_spec_fault(
                         task=task,
                         parent=parent,
                         cache_key=cache_key,
                         cached_payload=cached_payload,
                         index=index,
+                        spec=spec,
                         exc=exc,
-                    ):
-                        raise
-                    error_text = self._spawn_exception_text(exc)
-                    result = self._spawn_runtime_result(spec.goal, error_text=error_text)
-                    self._update_spawn_entry(
-                        task_id=task.task_id,
-                        parent_node_id=parent.node_id,
-                        cache_key=cache_key,
-                        cached_payload=cached_payload,
-                        index=index,
-                        status='error',
-                        finished_at=_now(),
-                        check_status='failed',
-                        result=result.model_dump(mode='json', exclude_none=True),
                     )
+                    if result is None:
+                        raise
                     return result
                 except Exception as exc:
-                    if self._refuse_spawn_settlement_over_live_node(
+                    result = self._settle_spec_fault(
                         task=task,
                         parent=parent,
                         cache_key=cache_key,
                         cached_payload=cached_payload,
                         index=index,
+                        spec=spec,
                         exc=exc,
-                    ):
-                        raise
-                    error_text = self._spawn_exception_text(exc)
-                    result = self._spawn_runtime_result(spec.goal, error_text=error_text)
-                    self._update_spawn_entry(
-                        task_id=task.task_id,
-                        parent_node_id=parent.node_id,
-                        cache_key=cache_key,
-                        cached_payload=cached_payload,
-                        index=index,
-                        status='error',
-                        finished_at=_now(),
-                        check_status='failed',
-                        result=result.model_dump(mode='json', exclude_none=True),
                     )
+                    if result is None:
+                        raise
                     return result
 
         await asyncio.gather(*[_run_spec(index, spec) for index, spec in enumerate(specs)])
@@ -5640,6 +5618,15 @@ class NodeRunner:
         Returns one of ``''``, ``'execution'``, or ``'acceptance'``. The real
         node status — not the synthetic entry status — is the authoritative
         signal that a materialized pipeline is still running.
+
+        A missing row is skipped, and that is deliberately not a terminal
+        verdict: within a live task a bound node id cannot go absent, because
+        ``SqliteStore.delete_nodes`` has no callers in ``main/`` (every other
+        delete is task-wide) and ``_fetch_one_on`` re-raises ``sqlite3.Error``
+        instead of turning a read fault into ``None`` — so a failing store
+        surfaces as an exception, never as a missing row. Do not "harden" this
+        by reading a missing row as terminal, and do not add a runtime branch
+        for it: it would be a guard that can never fire.
         """
         for field, reason in (('child_node_id', 'execution'), ('acceptance_node_id', 'acceptance')):
             node_id = str(entry.get(field) or '').strip()
@@ -5785,7 +5772,7 @@ class NodeRunner:
             detail=f'entry status is terminal/blocked while a bound {reason} node is non-terminal',
         )
 
-    def _refuse_spawn_settlement_over_live_node(
+    def _settle_spec_fault(
         self,
         *,
         task,
@@ -5793,32 +5780,75 @@ class NodeRunner:
         cache_key: str,
         cached_payload: dict[str, Any],
         index: int,
+        spec: SpawnChildSpec,
         exc: BaseException,
-    ) -> bool:
-        """绑定节点仍非终态时，拒绝把这条 entry 结清成失败交给父节点模型。
+    ) -> SpawnChildResult | None:
+        """子管线被异常打断时的唯一结算道：判决从绑定节点的真实状态派生。
 
-        结清即交付：父节点据此认为整批已定，批后帧写清掉 pending_tool_calls，同 id 重放
-        通道随之关闭；而孩子本身没被取消（它们由各自的派发 entry 驱动）。账本从这一刻起
-        是假的，下一次 run_task 取任务时收尸器会照着这句假话把活口判成"无重放路径"杀掉。
-        重抛让整轮交给 `_hold_spawn_round_for_live_nodes` 等真实终态。
+        返回 `None` ＝ 不结算、原样重抛，整轮交给 `_hold_spawn_round_for_live_nodes` 等
+        真实终态。`CancelledError` 与 `Exception` 两个 handler 都只调这一个入口：判据写成
+        守卫分别挂在各自分支顶部时，下一个新增的 handler 一定忘。
+
+        结清即交付：父节点据此认为整批已定，批后帧写清掉 `pending_tool_calls`，同 id 重放
+        通道随之关闭；而孩子本身没被取消（它们由各自的派发 entry 驱动）。账本从那一刻起是
+        假的，下一次 `run_task` 取任务时收尸器会照着这句假话把活口停等。
+
+        绑定节点已经终态时交付的是**它的真实结论**，不是"这里抛过异常"：2026-10-15 那 12 条
+        `Error: CancelledError` 里有 3 条对应的孩子其实早已 success——异常文本在这里从来不是
+        事实的第二说法，它是唯一说法，而且常常是假的那一个。只有本轮根本没绑定到节点
+        （评审或物化之前就坏了）时，异常文本才是这里唯一诚实的填法。
         """
         entries = list(cached_payload.get('entries') or [])
-        entry = entries[index] if index < len(entries) else None
-        if not isinstance(entry, dict):
-            return False
+        entry = entries[index] if 0 <= index < len(entries) else None
+        entry = dict(entry) if isinstance(entry, dict) else {}
         reason = self._spawn_entry_non_terminal_node(entry)
-        if not reason:
-            return False
-        self._emit_spawn_diagnostic(
-            title='spawn_settlement_refused_live_node',
+        if reason:
+            self._emit_spawn_diagnostic(
+                title='spawn_settlement_refused_live_node',
+                task_id=task.task_id,
+                parent_node_id=parent.node_id,
+                cache_key=cache_key,
+                index=index,
+                entry=entry,
+                detail=f'bound {reason} node is non-terminal; fault={describe_exception_chain(exc)}',
+            )
+            return None
+        if entry.get('child_node_id') or entry.get('acceptance_node_id'):
+            result, status, check_status, child_check_result = self._rebuild_spawn_entry_result(
+                task_id=task.task_id,
+                entry=dict(entry),
+                fallback_goal=str(getattr(spec, 'goal', '') or ''),
+                fallback_reason=self._spawn_exception_text(exc),
+                error_source='runtime',
+            )
+            child_node_id = str(entry.get('child_node_id') or '').strip()
+            if child_check_result is not None and child_node_id:
+                self._log_service.update_node_check_result(task.task_id, child_node_id, child_check_result)
+            self._update_spawn_entry(
+                task_id=task.task_id,
+                parent_node_id=parent.node_id,
+                cache_key=cache_key,
+                cached_payload=cached_payload,
+                index=index,
+                status=status,
+                finished_at=_now(),
+                check_status=check_status,
+                result=result.model_dump(mode='json', exclude_none=True),
+            )
+            return result
+        result = self._spawn_runtime_result(spec.goal, error_text=self._spawn_exception_text(exc))
+        self._update_spawn_entry(
             task_id=task.task_id,
             parent_node_id=parent.node_id,
             cache_key=cache_key,
+            cached_payload=cached_payload,
             index=index,
-            entry=entry,
-            detail=f'bound {reason} node is non-terminal; fault={describe_exception(exc)}',
+            status='error',
+            finished_at=_now(),
+            check_status='failed',
+            result=result.model_dump(mode='json', exclude_none=True),
         )
-        return True
+        return result
 
     def _active_prior_spawn_operations(
         self,

@@ -141,6 +141,7 @@ def _runner(store: _FakeStore) -> NodeRunner:
         refresh_task_view=lambda task_id, mark_unread=False: None,
         ensure_node_output_externalized=lambda task_id, node_id: None,
         ensure_node_result_payload_externalized=lambda task_id, node_id: None,
+        update_node_check_result=lambda task_id, node_id, check_result: None,
     )
     return runner
 
@@ -313,21 +314,48 @@ def test_spawn_round_cancelled_with_live_children_holds_instead_of_faking_failur
     assert results[0].check_result == '真实结论'
 
 
-def test_refuse_settlement_allows_it_once_the_bound_node_is_terminal() -> None:
-    """孩子确实已终态时照常结算——拒绝的判据是"还活着"，不是"出过异常"。"""
+def test_settle_spec_fault_settles_normally_once_the_bound_node_is_terminal() -> None:
+    """孩子确实已终态时照常结算——拒绝的判据是"还活着"，不是"出过异常"。
+
+    两个 handler 现在共用这一条结算道，所以"记得先问守卫"不再是调用方的责任。
+    """
     store = _round_store('failed')
     runner = _runner(store)
+    # 本用例只问"结算还是重抛"这条路由，不测帧读取；重建真实结论会碰若干与本用例无关的
+    # 读口，在这里包一层空操作替身，而不是把 _runner 的共享桩改成万能桩（那会让本文件
+    # 所有用例失去"生产代码调到新读口时立刻报错"的判别力）。
+    runner._log_service = _FallbackLogService(runner._log_service)  # type: ignore[attr-defined]
     cached_payload = store.nodes[ROOT_ID].metadata['spawn_operations'][ROUND_ID]
 
-    refused = runner._refuse_spawn_settlement_over_live_node(
+    settled = runner._settle_spec_fault(
         task=SimpleNamespace(task_id=TASK_ID),
         parent=store.nodes[ROOT_ID],
         cache_key=ROUND_ID,
         cached_payload=cached_payload,
         index=0,
+        spec=_specs()[0],
         exc=asyncio.CancelledError(),
     )
-    assert refused is False
+    assert settled is not None, '绑定节点已终态时应当结算，而不是把轮次吊住'
+
+
+def test_settle_spec_fault_refuses_while_the_bound_node_is_live() -> None:
+    """绑定节点还活着 ⇒ 返回 None 让调用方重抛，交给滞留道等真实结论。"""
+    store = _round_store('in_progress')
+    runner, diagnostics = _reporting_runner(store)
+
+    settled = runner._settle_spec_fault(
+        task=SimpleNamespace(task_id=TASK_ID),
+        parent=store.nodes[ROOT_ID],
+        cache_key=ROUND_ID,
+        cached_payload=store.nodes[ROOT_ID].metadata['spawn_operations'][ROUND_ID],
+        index=0,
+        spec=_specs()[0],
+        exc=asyncio.CancelledError(),
+    )
+    assert settled is None
+    titles = [str(item.get('title') or '') for item in diagnostics]
+    assert 'spawn_settlement_refused_live_node' in titles, titles
 
 
 def test_watchdog_poll_read_failure_does_not_become_a_cancellation() -> None:
