@@ -103,8 +103,6 @@ def test_read_side_ioerr_is_not_classified_as_disk_full():
 
 def test_best_effort_park_leaves_a_trace_for_a_non_disk_full_write_failure():
     """兜底按"写失败"分流，不按"为什么失败"分流——其余原因不得静默吞掉现场。"""
-    from collections import deque
-
     import main.runtime.node_runner as node_runner_module
     from main.runtime.node_runner import NodeRunner
 
