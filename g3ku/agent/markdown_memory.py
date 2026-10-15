@@ -131,6 +131,27 @@ def validate_memory_document(
         seen_ids.add(item.memory_id)
 
 
+_NOTE_REF_LABEL_RE = re.compile(r"^\(?\s*note\s*:\s*(?P<token>[^)\s]+)\s*\)?$", re.IGNORECASE)
+
+
+def normalize_note_ref(ref: str) -> str:
+    """Accept the shapes a reader copies straight out of the memory block.
+
+    The block prints a handle behind a `note:` label (and inside `(note: ...)` in the
+    consolidation index), and a note file is the stem plus `.md`. All of those spellings
+    name one target. Only the model-facing reader normalises; the admin URL gate stays
+    strict, because there a malformed ref must fail loudly instead of resolving.
+    """
+
+    text = str(ref or "").strip()
+    match = _NOTE_REF_LABEL_RE.match(text)
+    if match:
+        text = str(match.group("token") or "").strip()
+    if text.lower().endswith(".md"):
+        text = text[: -len(".md")].strip()
+    return text
+
+
 def note_file_name(ref: str) -> str:
     normalized = str(ref or "").strip()
     if not normalized:

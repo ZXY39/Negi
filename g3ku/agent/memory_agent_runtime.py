@@ -29,6 +29,7 @@ from g3ku.agent.markdown_memory import (
     consolidation_scope_line,
     format_memory_entry,
     note_file_name,
+    normalize_note_ref,
     note_handle,
     parse_memory_document,
     render_consolidation_block,
@@ -2558,7 +2559,7 @@ class MemoryManager:
         """Read one note for the CEO's `memory_note` tool: ordinary notes and category
         notes both resolve, so a retired memory stays reachable. The token's first
         character picks the tree; a bare file name keeps the ordinary-first order."""
-        normalized = str(ref or "").strip()
+        normalized = normalize_note_ref(ref)
         if not normalized:
             raise FileNotFoundError("memory note ref is required")
         ordinary_names = self._ordinary_note_names()
@@ -2571,7 +2572,10 @@ class MemoryManager:
             path = directory / file_name
             if path.exists():
                 return path.read_text(encoding="utf-8")
-        raise FileNotFoundError(f"memory note not found: {normalized}")
+        raise FileNotFoundError(
+            f"memory note not found: {normalized} - pass the handle alone, without the 'note:' "
+            "label the block prints in front of it, or a note name without the '.md' suffix"
+        )
 
     def close(self) -> None:
         self._stop_event.set()
