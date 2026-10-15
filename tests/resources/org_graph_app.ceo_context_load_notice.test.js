@@ -258,10 +258,17 @@ test("memory_update queues into a memory notice instead of a tool row", () => {
     assert.equal(ceoContextLoaderKind("memory_update"), "memory");
     assert.equal(isCeoContextLoaderToolName("memory_update"), true);
 
+    // 入参照抄实时道那四格：arguments_text 在前、结果 JSON 在 output_text，
+    // 中间还夹着一格进度预览——pill 取的是能读出 status 的那一格，不是第一格。
     const shown = maybeShowCeoContextLoadNotice(turn, {
         toolName: "memory_update",
         status: "success",
-        detailTexts: ['{"ok":true,"request_id":"write_ab12cd","status":"queued"}'],
+        detailTexts: [
+            "",
+            '{"ok": true, "request_id": "write_e1f332303721", "status": "queued"}',
+            "",
+            "memory_update (content=记住反代端口)",
+        ],
     });
 
     assert.equal(shown, true);
@@ -269,7 +276,7 @@ test("memory_update queues into a memory notice instead of a tool row", () => {
     assert.equal(notice.dataset.noticeKind, "memory");
     assert.ok(notice.className.split(" ").includes("is-memory"), "unexpected classes: " + notice.className);
     assert.equal(notice.children[0].innerHTML, '<i data-lucide="brain"></i>');
-    assert.equal(notice.children[1].textContent, "记忆请求已入队 write_ab12cd");
+    assert.equal(notice.children[1].textContent, "记忆请求已入队 write_e1f332303721");
     assert.equal(notice.children[2].className, "ceo-context-load-notice-risk-dot risk-low");
 });
 
