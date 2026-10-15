@@ -430,7 +430,6 @@ def test_a_consolidation_that_retires_nothing_leaves_the_store_alone(tmp_path: P
 
 def test_a_parked_noop_gates_the_same_candidate_set_from_being_queued_again(tmp_path: Path) -> None:
     """Without this the queue would grow a consolidation on every commit, forever."""
-    module = _module()
     manager = _manager(tmp_path, trigger=120, target=100, document_max=20000)
     try:
         first = _add(manager, body="F" * 90, minimal="第一条->短")
