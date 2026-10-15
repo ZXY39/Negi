@@ -643,6 +643,10 @@ class _MemoryToolSession:
                     errors[f"adds[{index}].content"] = "content must not be empty"
                 if content and not minimal_memory:
                     errors[f"adds[{index}].minimal_memory"] = "minimal_memory must not be empty"
+                if minimal_memory and ("\n" in minimal_memory or "\r" in minimal_memory):
+                    errors[f"adds[{index}].minimal_memory"] = (
+                        "minimal_memory must be a single line; put the detail in note_upserts"
+                    )
                 if decision_source not in {"user", "self"}:
                     errors[f"adds[{index}].decision_source"] = "decision_source must be user or self"
                 if content and minimal_memory and decision_source in {"user", "self"}:
@@ -673,6 +677,10 @@ class _MemoryToolSession:
                     errors[f"rewrites[{index}].content"] = "content must not be empty"
                 if content and not minimal_memory:
                     errors[f"rewrites[{index}].minimal_memory"] = "minimal_memory must not be empty"
+                if minimal_memory and ("\n" in minimal_memory or "\r" in minimal_memory):
+                    errors[f"rewrites[{index}].minimal_memory"] = (
+                        "minimal_memory must be a single line; put the detail in note_upserts"
+                    )
                 if memory_id and content and minimal_memory:
                     normalized_rewrites.append(
                         {
@@ -4202,12 +4210,12 @@ class MemoryManager:
         raise RuntimeError("unable to allocate unique memory id")
 
     @staticmethod
-    def _normalize_memory_content_text(text: str) -> str:
+    def _normalize_memory_content_text(text: str, *, field: str = "memory content") -> str:
         normalized = str(text or "").strip()
         if not normalized:
-            raise _MemoryAgentValidationError("memory content must not be empty")
+            raise _MemoryAgentValidationError(f"{field} must not be empty")
         if "\n" in normalized or "\r" in normalized:
-            raise _MemoryAgentValidationError("memory content must be one line")
+            raise _MemoryAgentValidationError(f"{field} must be one line")
         if _NOTE_REF_RE.search(normalized):
             # 关系不是正文的一部分：写进文本就没人读得到（列才是权威），还会在常驻行里留下
             # 像数据的魔法串。宁可当场打回，让模型改交 `note_ref` 字段。
@@ -4217,7 +4225,7 @@ class MemoryManager:
         return normalized
 
     def _normalize_minimal_memory_text(self, text: str, *, summary_max_chars: int) -> str:
-        normalized = self._normalize_memory_content_text(text)
+        normalized = self._normalize_memory_content_text(text, field="minimal_memory")
         if len(normalized) > max(int(summary_max_chars or 0), 1):
             raise _MemoryAgentValidationError(f"minimal_memory exceeds {summary_max_chars} chars")
         normalized_core = re.sub(r"\s+", " ", normalized).strip()
@@ -5698,10 +5706,26 @@ class MemoryManager:
         runtime_revision: int,
         model_chain: list[str],
     ) -> dict[str, Any]:
-        before_text = self.snapshot_text()
         total_usage = {"input_tokens": 0, "output_tokens": 0, "cache_read_tokens": 0}
         request_artifacts: list[dict[str, Any]] = []
         queue_request_ids = [item.request_id for item in batch.items if str(item.request_id or "").strip()]
+        try:
+            before_text = self.snapshot_text()
+        except Exception as exc:
+            # The library cannot be rendered at all: a stored row the renderer refuses is
+            # deterministic, and no model round has run yet. It must not join the provider lane,
+            # because the next success would re-queue it onto the same broken store.
+            return {
+                "validated": None,
+                "usage": total_usage,
+                "attempt_count": 0,
+                "assessed_text": None,
+                "discard_reason": "agent_fault",
+                "error": f"{type(exc).__name__}: {str(exc or 'memory store cannot be rendered').strip()}",
+                "model_chain": list(model_chain or []),
+                "provider_request_ids": [],
+                "request_artifact_paths": [],
+            }
 
         current_runtime_config = runtime_config
         current_runtime_revision = int(runtime_revision or 0)
@@ -5772,6 +5796,22 @@ class MemoryManager:
                     "provider_request_ids": self._provider_request_ids_from_artifacts(request_artifacts),
                     "request_artifact_paths": self._request_artifact_paths(request_artifacts),
                 }
+            except Exception as exc:
+                # Anything else from the model call is transient by origin (transport, a
+                # provider that answered in a shape we do not wrap). It keeps the provider
+                # lane - that is the one category the success signal re-queues - and it carries
+                # the rounds that actually ran, because the operator reads that number.
+                return {
+                    "validated": None,
+                    "usage": total_usage,
+                    "attempt_count": attempt_index + 1,
+                    "assessed_text": None,
+                    "discard_reason": "provider_error",
+                    "error": f"{type(exc).__name__}: {str(exc or 'memory agent call failed').strip()}",
+                    "model_chain": list(current_model_chain),
+                    "provider_request_ids": self._provider_request_ids_from_artifacts(request_artifacts),
+                    "request_artifact_paths": self._request_artifact_paths(request_artifacts),
+                }
             self._merge_usage(total_usage, attempt.usage)
             request_artifacts.extend(list(attempt.request_artifacts or []))
             try:
@@ -5799,6 +5839,21 @@ class MemoryManager:
                 last_error = str(exc or "memory agent output invalid").strip()
                 last_capacity_overflow = bool(exc.capacity_overflow)
                 continue
+            except Exception as exc:
+                # Deterministic fault while turning the model's output into a document. It is
+                # not transient, so it must not land in the category the success signal
+                # re-queues - the same payload would otherwise be replayed forever.
+                return {
+                    "validated": None,
+                    "usage": total_usage,
+                    "attempt_count": attempt_index + 1,
+                    "assessed_text": None,
+                    "discard_reason": "agent_fault",
+                    "error": f"{type(exc).__name__}: {str(exc or 'memory write build failed').strip()}",
+                    "model_chain": list(current_model_chain),
+                    "provider_request_ids": self._provider_request_ids_from_artifacts(request_artifacts),
+                    "request_artifact_paths": self._request_artifact_paths(request_artifacts),
+                }
         if lane != "consolidate" and last_capacity_overflow:
             # The store still refuses this payload for one reason only: not enough room, and
             # the machine's own compress pool is already spent. The payload is held verbatim
@@ -5934,12 +5989,17 @@ class MemoryManager:
                 # 而是移入失败停车区 memory/failed.jsonl：
                 # - provider_error（限流/超时等瞬时错误）→ 队列下次成功应用时自动重入队尾
                 # - window_refusal（本地发送前预检拒发）→ 确定性失败，仅人工重试
+                # - agent_fault（把模型输出写成文档时确定性抛错）→ 仅人工重试，重跑才会换个写法
                 # - rejected（模型真实响应但违反协议）→ 仅人工确认重试
                 # 终态记录推迟到操作员显式放弃（discard）时才写入 ops.jsonl。
                 if discard_reason == "provider_error":
                     category = "provider_error"
                 elif discard_reason == "window_refusal":
                     category = "window_refusal"
+                elif discard_reason == "agent_fault":
+                    # Not the provider lane: that one is the only category a later success
+                    # re-queues, and a deterministic write fault replays identically.
+                    category = "agent_fault"
                 else:
                     category = "protocol"
                 failed_record = self._park_failed_batch(

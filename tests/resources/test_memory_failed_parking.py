@@ -235,7 +235,10 @@ async def test_provider_error_response_parks_batch_with_real_error_and_no_termin
 
 
 @pytest.mark.asyncio
-async def test_agent_exception_parks_batch_as_provider_error(tmp_path: Path, monkeypatch) -> None:
+async def test_a_model_call_fault_parks_on_the_provider_lane_with_the_round_it_reached(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
     module = _load_memory_agent_runtime_module()
     manager = module.MemoryManager(tmp_path, _memory_cfg())
     try:
@@ -255,8 +258,11 @@ async def test_agent_exception_parks_batch_as_provider_error(tmp_path: Path, mon
         failed = _read_jsonl(tmp_path / "memory" / "failed.jsonl")
 
         assert report["status"] == "parked"
-        assert report["discard_reason"] == "agent_exception"
+        # 模型调用里的非包装故障按瞬时处理：留在会被成功信号重排的那一档，但停车不再
+        # 谎报"0 次往返"，也不丢掉这一跳的请求体路径。
+        assert report["discard_reason"] == "provider_error"
         assert report["category"] == "provider_error"
+        assert int(failed[0]["llm_attempt_count"]) == 1
         assert len(failed) == 1
         assert "model chain exhausted" in failed[0]["last_error_text"]
     finally:

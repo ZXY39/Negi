@@ -531,6 +531,9 @@ test("the capacity rungs read as their own outcomes, not as generic failures", (
     assert.match(api.memoryFailedAutoRetryHint({ category: "capacity" }), /原文完整保留/);
     assert.match(api.memoryFailedAutoRetryHint({ category: "capacity_noop" }), /放弃.*重新允许/);
     assert.equal(api.memoryFailedCategoryLabel({ category: "provider_error" }), "provider 瞬时错误");
+    // 确定性写故障不许借 provider 那一档：那一档会被下一次成功重排回同一个坏载荷。
+    assert.equal(api.memoryFailedCategoryLabel({ category: "agent_fault" }), "写入形状故障");
+    assert.match(api.memoryFailedAutoRetryHint({ category: "agent_fault" }), /不随队列成功自动重排/);
 });
 
 test("a machine downgrade is its own change chip, not a rewrite", () => {

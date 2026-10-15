@@ -1134,7 +1134,7 @@ async def test_persisted_processing_head_parks_on_repeated_provider_error(tmp_pa
         # 重启后遗留的 processing 队头再次失败 → 停车（不再原地无限重试阻塞队列）
         assert report["ok"] is True
         assert report["status"] == "parked"
-        assert report["discard_reason"] == "agent_exception"
+        assert report["discard_reason"] == "provider_error"
         assert queue_items == []
         assert len(failed) == 1
         assert failed[0]["request_ids"] == ["write_1"]

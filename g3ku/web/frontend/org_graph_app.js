@@ -15129,6 +15129,7 @@ function memoryFailedCategoryLabel(item) {
     if (normalized === "protocol") return "协议违规";
     if (normalized === "capacity") return "库容不下";
     if (normalized === "capacity_noop") return "归并未受理";
+    if (normalized === "agent_fault") return "写入形状故障";
     return normalized || "未知类别";
 }
 
@@ -15138,6 +15139,7 @@ function memoryFailedAutoRetryHint(item) {
     if (normalized === "window_refusal") return "载荷变小或模型窗口调大后手动重试";
     if (normalized === "capacity") return "整理出空间后手动重试；这条批次的原文完整保留在这里";
     if (normalized === "capacity_noop") return "放弃它才会重新允许对同一批记忆排归并";
+    if (normalized === "agent_fault") return "手动重试会重新问一次模型；不随队列成功自动重排";
     return "仅支持手动重试";
 }
 
