@@ -47,7 +47,7 @@ def _add(
 
 
 def _retire(manager, memory_ids: list[str], category: str) -> None:
-    manager._memory_repo.mark_consolidated(memory_ids, category_ref=category, now_iso="2026-04-25T00:00:01+08:00")
+    manager._memory_repo.mark_consolidated(memory_ids, category_ref=category)
 
 
 def _write_category(manager, category: str, body: str) -> None:

@@ -640,7 +640,6 @@ def test_memory_doctor_keeps_the_category_axis_off_the_note_checks(monkeypatch, 
         writer._memory_repo.mark_consolidated(
             [str(retired["memory_id"])],
             category_ref="note_tasks",
-            now_iso="2026-04-17T09:00:02+08:00",
         )
     finally:
         writer.close()
