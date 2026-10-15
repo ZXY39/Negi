@@ -8126,29 +8126,37 @@ class NodeRunner:
         后 pause 记录（控制流不依赖它——NodePausedError 照抛，task_actor_service
         进入 control-only 返回，不会重跑节点）。两者都失败时文本进内存有界队列
         并留一条 warning 日志，不静默。
+
+        兜底**按"写失败"分流，不按"为什么失败"分流**：曾经只有被分类成磁盘已满的失败才缓冲
+        并告警，其余（包括这台机器上真正在发生的那一类——读侧 `SQLITE_IOERR_READ` 顶着
+        `disk I/O error` 的文本）会被这个 `except` 静静吞掉，现场一条都不留。
         """
         error_log_persisted = False
         try:
             self._log_service.append_task_error_log(task_id, node_id, error_text=text, node_title=node_goal)
             error_log_persisted = True
         except Exception as exc:
-            if is_disk_full_error(exc):
-                self._unpersisted_error_logs.append((task_id, node_id, text))
-                logger.warning(
-                    'disk full: node error log not persisted (kept in memory buffer) task={} node={}',
-                    task_id,
-                    node_id,
-                )
+            self._unpersisted_error_logs.append((task_id, node_id, text))
+            logger.warning(
+                'title=node_fault_report_write_failed stage=error_log task={} node={} buffered=yes '
+                'disk_full={} error={}',
+                task_id,
+                node_id,
+                is_disk_full_error(exc),
+                describe_exception_chain(exc),
+            )
         try:
             self._mark_node_paused(task_id, node_id, reason='error', remark=text)
         except Exception as exc:
-            if is_disk_full_error(exc):
-                logger.warning(
-                    'disk full: node pause record not persisted task={} node={} error_log_persisted={}',
-                    task_id,
-                    node_id,
-                    error_log_persisted,
-                )
+            logger.warning(
+                'title=node_fault_report_write_failed stage=pause_record task={} node={} '
+                'error_log_persisted={} disk_full={} error={}',
+                task_id,
+                node_id,
+                error_log_persisted,
+                is_disk_full_error(exc),
+                describe_exception_chain(exc),
+            )
 
     def _mark_node_paused(self, task_id: str, node_id: str, *, reason: str = '', remark: str = '') -> NodeRecord | None:
         node = self._store.get_node(node_id)

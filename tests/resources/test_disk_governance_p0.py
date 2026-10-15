@@ -78,6 +78,69 @@ def test_is_disk_full_error_classification():
     assert classify_write_error(plain) is plain
 
 
+def _sqlite_ioerr_read_error() -> sqlite3.OperationalError:
+    """2026-10-15 实盘那一条：文本顶着 `disk I/O error`，结构化码却是读侧 IO 故障。"""
+    exc = sqlite3.OperationalError('disk I/O error')
+    try:
+        exc.sqlite_errorname = 'SQLITE_IOERR_READ'
+        exc.sqlite_errorcode = 266
+    except Exception:
+        pass
+    return exc
+
+
+def test_read_side_ioerr_is_not_classified_as_disk_full():
+    """结构化码在场就不许按消息文本判满盘：76 条 `SQLITE_IOERR_READ` 发生时盘还剩 10+ GB。
+
+    按满盘算的后果是两条读数一起指错方向——`_run_write` 的失败计数键写成 `disk_full`，
+    以及 `_persist_error_and_pause_best_effort` 当年只在"满盘"分支才留痕。
+    """
+    exc = _sqlite_ioerr_read_error()
+
+    assert is_disk_full_error(exc) is False
+    assert classify_write_error(exc) is exc, '非满盘的 I/O 故障不得被包成 DiskFullError'
+
+
+def test_best_effort_park_leaves_a_trace_for_a_non_disk_full_write_failure():
+    """兜底按"写失败"分流，不按"为什么失败"分流——其余原因不得静默吞掉现场。"""
+    from collections import deque
+
+    import main.runtime.node_runner as node_runner_module
+    from main.runtime.node_runner import NodeRunner
+
+    runner = NodeRunner.__new__(NodeRunner)
+    runner._unpersisted_error_logs = deque(maxlen=64)
+    warnings: list[str] = []
+
+    class _FakeLogger:
+        def warning(self, message, *args, **kwargs):
+            warnings.append(str(message).format(*args, **kwargs) if args else str(message))
+
+    class _LogService:
+        def append_task_error_log(self, *_args, **_kwargs):
+            raise _sqlite_ioerr_read_error()
+
+    runner._log_service = _LogService()
+    runner._mark_node_paused = lambda *_a, **_k: (_ for _ in ()).throw(_sqlite_ioerr_read_error())
+
+    previous_logger = node_runner_module.logger
+    node_runner_module.logger = _FakeLogger()  # type: ignore[assignment]
+    try:
+        runner._persist_error_and_pause_best_effort(
+            task_id='task:t1', node_id='node:n1', text='boom text', node_goal='goal',
+        )
+    finally:
+        node_runner_module.logger = previous_logger  # type: ignore[assignment]
+
+    assert list(runner._unpersisted_error_logs) == [('task:t1', 'node:n1', 'boom text')], (
+        '非满盘的写失败同样要把文本留在有界队列里'
+    )
+    assert len(warnings) == 2, warnings
+    assert all('title=node_fault_report_write_failed' in line for line in warnings), warnings
+    assert any('stage=error_log' in line and 'disk_full=False' in line for line in warnings), warnings
+    assert any('stage=pause_record' in line and 'error_log_persisted=False' in line for line in warnings), warnings
+
+
 # 2. _run_write 包装 + 失败计数
 
 

@@ -446,6 +446,8 @@ IM 渠道有两条：内置官方 QQ 适配器（`g3ku/qq_official/`，进程内
 
 症状族：worker 日志或 `.g3ku/errors/` 出现 `OSError [Errno 28] No space left on device` / `OperationalError: database or disk is full`；`.g3ku/errors/` 里的错误日志是 0 字节空文件；多个节点连锁 error-pause；渠道告警发不出去。
 
+**先分辨再进本节**：同一句 `OperationalError: disk I/O error` 有两个成因。结构化码是 `SQLITE_FULL` / `SQLITE_IOERR_FULL` 才走下面的排障；是 `SQLITE_IOERR_READ` 且剩余空间充足时**不是**满盘，而是承诺内存见底，判读见下一节「内存峰值 / 恢复风暴后 RSS 不回落」第 8 条——按本节从"定位空间大户"开始查会一路查空。
+
 排障顺序：
 
 1. 先看 worker 心跳 debug 块里的写失败计数（`worker_leases` 行 `payload_json.status_payload.debug` 下的 `sqlite_write_failures` / `event_write_failures`，`worker_status` 行 payload 与存活日志行同步携带）与 `managed-worker.log` 里的 SQLITE_FULL 行、限流告警 `task_events write failure (rate-limited): total=…`（300s 至多一条）——磁盘满期间错误日志本身可能写不出来，`.g3ku/errors/` 不是唯一证据源（计数契约见 `runtime-overview.md`「磁盘写保护与治理」）。
@@ -468,6 +470,7 @@ IM 渠道有两条：内置官方 QQ 适配器（`g3ku/qq_official/`，进程内
 5. 站点榜只回答"在哪申请"，不回答"谁在申请"。要调用链：`G3KU_MEM_PROBE_FRAMES`（默认 1）抬起 tracemalloc 栈深（>1 才有链），`G3KU_MEM_PROBE_DUMP_MB`>0 时被跟踪驻留**第一次**越过该阈值就落一份 `mem-probe-<pid>-<启动时刻>-dump.txt`（每进程一次，按完整链排名）。成本按活块数走：几百个对象的小堆上 `statistics('traceback')` 已 122ms，实盘 600 万块级别按秒计，所以只在需要那一次开。
 6. 探针的边界：它统计走 Python 分配器的对象，C 侧缓冲（zlib 压缩、sqlite 读入的大 blob、socket 内核缓冲）不进 `top`，所以 `traced_mb` 明显低于 `rss_mb` 时先想这条口径差，别当成统计漏。实盘一次读数就是这形状：`rss` 3038 MB 而 `traced` 605 MB ⇒ 约八成峰值不在 Python 对象上，Python 侧的两个大头是 `json/decoder.py:raw_decode`（整任务 `payload_json` 反复解析后的驻留）与每帧的技能可见性诊断。站点行号指向申请处，不一定是持有者——找持有者用上一条的链。
 7. 为什么是标记文件而不是环境变量：托管 worker 的环境来自 web 进程的 `os.environ.copy()`（`g3ku/web/worker_control.py`），要按环境变量给它开闸就得重启 web；标记文件只需重启 worker，与 `.g3ku/llm-config/auto-unlock.key` 同属"盘上一个文件决定一次行为"的运维开关。手动 `negi worker` 同样认这个标记。
+8. **承诺内存见底会伪装成磁盘故障**：Windows 在提交额度耗尽时让 `ReadFile` 直接失败，SQLite 报 `OperationalError: disk I/O error`、结构化码 `SQLITE_IOERR_READ`(266)——盘没满、卷没坏、库没损，只是没有内存页可用了。分辨三读数：① `grep -c sqlite_errorname=SQLITE_IOERR_READ` 与 `...=SQLITE_FULL`（`sqlite_store` 的错误行自带这两个字段，写侧一个都没有＝不是满盘）；② `Get-WinEvent` 里 `Microsoft-Windows-Resource-Exhaustion-Detector` id=2004 按小时数，与 ① 的爆发小时对齐即成立；③ `Win32_PageFileUsage` 的 `PeakUsage` 是否等于 `AllocatedBaseSize`（顶满）与 `Win32_ComputerSystem.AutomaticManagedPagefile` / `Win32_PageFileSetting`（手动钉死的小页文件会把提交上限压到 物理内存+该值）。实盘一天三场（05:54 83 秒内 53 条、13:02 同秒 5 条、16:41 192 秒 8 条）全部由 ② 的同刻事件命名的大进程对上。运行时侧的处置是把这类抖动按设计停在"可见停车 + 同 call id 可重放"（判据见 `main-task-runtime.md` 派生车道），环境侧的一刀在页文件与内存配置，代码改的是后果不是频率。
 
 ### 任务大厅卡顿 / 冻结（浏览器端）
 

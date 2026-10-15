@@ -48,6 +48,11 @@ _DISK_FULL_MESSAGE_MARKERS = (
     'disk i/o error',
 )
 
+# 满盘的 sqlite 错误码只有这两个；其余 `SQLITE_IOERR_*` 都是"存储子系统报了一次 I/O 故障"，
+# 与剩余空间无关。Windows 上提交内存见底时 `ReadFile` 失败就落在 `SQLITE_IOERR_READ`，文本
+# 正是 `disk I/O error`（2026-10-15 实测 76 条全为读侧，C 盘还剩 10+ GB）。
+_SQLITE_DISK_FULL_ERROR_NAMES = frozenset({'SQLITE_FULL', 'SQLITE_IOERR_FULL'})
+
 
 class DiskFullError(OSError):
     """磁盘已满的规范化信号；``original`` 保留底层异常供诊断。"""
@@ -65,8 +70,11 @@ def is_disk_full_error(exc: BaseException | None) -> bool:
     if isinstance(exc, DiskFullError):
         return True
     error_name = str(getattr(exc, 'sqlite_errorname', '') or '').strip().upper()
-    if error_name == 'SQLITE_FULL':
-        return True
+    if error_name:
+        # 结构化码在场就只认它——消息标记是"拿不到码时"的兜底，不是并列判据。
+        # 否则一次读侧 IO 故障会被计成 `disk_full`，把下游全部读数（写失败计数、
+        # node_runner 的降级分支）指向"盘满了"，而盘满与否根本没被测过。
+        return error_name in _SQLITE_DISK_FULL_ERROR_NAMES
     if isinstance(exc, OSError) and exc.errno == errno.ENOSPC:
         return True
     message = str(exc).lower()
