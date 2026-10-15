@@ -631,3 +631,37 @@ def test_cancel_gate_treats_an_unreadable_store_as_not_a_cancellation() -> None:
         task_id=TASK_ID, parent_node_id=ROOT_ID,
     ) is False
 
+
+def test_orphan_candidate_is_parked_and_never_signed_failed() -> None:
+    """收尸器不再签发终态：无人驱动又没有重放路径 ＝ 可见地停等，不是"节点失败了"。
+
+    三载体合取里任何一环都可能只是读不到——父节点正常 success 之后它的帧就是被
+    `_mark_finished` 删掉的（设计态）。用这样一条合取去 `fail_paused_node` 不可逆，
+    2026-10-15 就是这样杀掉了 6 个仍在跑的节点。
+    """
+    from main.runtime.task_actor_service import TaskActorService
+
+    store = _round_store('in_progress')
+    runner = object.__new__(NodeRunner)
+    runner._store = store  # type: ignore[attr-defined]
+    paused: list[tuple] = []
+    logged: list[dict] = []
+    runner._mark_node_paused = (  # type: ignore[assignment]
+        lambda task_id, node_id, **kwargs: paused.append((task_id, node_id, kwargs))
+    )
+    actor = object.__new__(TaskActorService)
+    actor._log_service = SimpleNamespace(  # type: ignore[attr-defined]
+        append_task_error_log=lambda **kwargs: logged.append(dict(kwargs)),
+    )
+    actor._node_runner = runner  # type: ignore[attr-defined]
+
+    actor._report_orphan_candidate(  # type: ignore[attr-defined]
+        task_id=TASK_ID, node=store.get_node(EXEC_ID), node_id=EXEC_ID,
+    )
+
+    assert logged, '错误行不落就没有人会被叫醒'
+    assert 'spawn_orphan_candidate' in str(logged[0].get('error_text') or '')
+    assert paused and paused[0][1] == EXEC_ID
+    assert paused[0][2].get('reason') == 'error'
+    assert store.get_node(EXEC_ID).status == 'in_progress', '候选节点被签成了终态'
+

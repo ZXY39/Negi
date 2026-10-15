@@ -1048,9 +1048,10 @@ class TaskActorService:
     async def _reconcile_orphan_in_progress_nodes(self, task_id: str, dispatcher: 'TaskNodeDispatcher') -> None:
         """C：孤儿收尸/重派发（每次 run_task 拾取时执行，幂等）。
 
-        不变式：DB 里的 in_progress 执行节点必须对应"在跑/即将被派发"或
-        "可由根重放恢复"，否则显式落 failed——杜绝"显示进行中但没人在跑"
-        的幽灵态（2026-09-15 孤儿子节点事故 L3）。
+        不变式：DB 里的 in_progress 执行节点必须对应"在跑/即将被派发"、"可由根重放
+        恢复"，或"已可见地停等、等人裁定"，否则就是幽灵态——本道把它停成人能看见的
+        形状，绝不把一次读不出来宣成节点失败（2026-09-15 孤儿子节点事故 L3 的原始
+        诉求就是消灭幽灵态，消灭它靠让它可见，不靠替它签终态）。
 
         范围：只决断派生树内的 execution 节点（metadata 带 spawn_owner_kind='child'
         且 spawn_owner_round_id 非空）；acceptance 节点的生命周期由验收握手与
@@ -1087,9 +1088,8 @@ class TaskActorService:
                 continue
             if self._node_operator_paused(node):
                 continue
-            entry = dispatcher._entries.get(node_id)
-            if entry is not None and entry.task is not None and not entry.task.done():
-                continue  # 已有活执行器
+            if dispatcher.node_is_being_driven(node_id) is True:
+                continue  # 已有活执行器（问持有者，不问投影）
             if self._orphan_recovery_chain_reachable(
                 task_id=task_id,
                 node=node,
@@ -1107,28 +1107,48 @@ class TaskActorService:
                     pass
                 await self.resume_node_entry(task_id, node_id)
                 continue
-            reason = 'orphan reaped at task resume: in_progress without executor or replay path'
-            try:
-                logger.warning('orphan node reaped: task={} node={}', task_id, node_id)
-            except Exception:
-                pass
-            try:
-                self._node_runner.fail_paused_node(task_id, node_id, reason)
-            except Exception:
-                try:
-                    logger.exception('orphan reap failed: task={} node={}', task_id, node_id)
-                except Exception:
-                    pass
-                continue
-            try:
-                self._log_service.append_task_error_log(
-                    task_id=task_id,
-                    node_id=node_id,
-                    node_title=str(getattr(node, 'title', '') or getattr(node, 'goal', '') or ''),
-                    error_text=reason,
-                )
-            except Exception:
-                pass
+            self._report_orphan_candidate(
+                task_id=task_id,
+                node=node,
+                node_id=node_id,
+            )
+
+    def _report_orphan_candidate(self, *, task_id: str, node, node_id: str) -> None:
+        """没人驱动、又没有重放路径 ⇒ 可见地暂停并请人裁定，**不**由收尸器签发终态。
+
+        三载体合取里任何一环都可能只是"读不到"：父节点正常 success 之后它的帧本就是被
+        `_mark_finished` 删掉的（那是设计态），而父行读到 None 也不等于父已经结束。用一条
+        读不出来的合取去 `fail_paused_node` 是不可逆的——2026-10-15 就是这条把 6 个仍在跑的
+        节点判死了，其中四个属于唯一还没交付分片的那一支。
+
+        暂停是可逆的：`resume_node` 能救回来，看完现场的会话 agent／操作者也能用它本来就
+        有的出口（`manage_task_nodes` 的 fail 要求节点先处于暂停态）把这一批落成 `canceled`。
+        错误行带 `pause_reason='error'`，正好是 `task_node_error` 心跳车道的选择条件，
+        所以这里不需要新通报机制。
+        """
+        reason = (
+            'spawn_orphan_candidate: in_progress without executor or replay path — '
+            '本进程没有它的执行体，父侧也找不到重放路径；这不是"节点失败了"，'
+            '需要核对它到底在别处跑着还是已经停了，再决定 resume 还是落 canceled。'
+        )
+        try:
+            logger.warning('orphan node parked as candidate: task={} node={}', task_id, node_id)
+        except Exception:
+            pass
+        try:
+            self._log_service.append_task_error_log(
+                task_id=task_id,
+                node_id=node_id,
+                node_title=str(getattr(node, 'title', '') or getattr(node, 'goal', '') or ''),
+                error_text=reason,
+            )
+        except Exception:
+            logger.exception('orphan candidate error log failed: task={} node={}', task_id, node_id)
+            return
+        try:
+            self._node_runner._mark_node_paused(task_id, node_id, reason='error', remark=reason)
+        except Exception:
+            logger.exception('orphan candidate park failed: task={} node={}', task_id, node_id)
 
     def _orphan_recovery_chain_reachable(
         self,
