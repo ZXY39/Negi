@@ -1323,10 +1323,14 @@ def test_memory_operation_chips_use_one_color_per_operation() -> None:
         "note_reaped",
         "category_note",
         "consolidate",
+        "compress_for_capacity",
     }
-    assert len(set(colors.values())) == 8
+    assert len(set(colors.values())) == 9
     # 记忆退场是黄：它既不是新增也不是删除，而是这条正文搬进了分类 note
     assert colors["consolidate"] == "#a16207"
+    # 容量降级是机器把渲染换成摘要，谁也没改内容；玫红是这套调色板唯一空着的色相，
+    # 用灰色就会和"回收 Note"看起来像同一件事。
+    assert colors["compress_for_capacity"] == "#be185d"
 
     # v2 界面下描边与底色都跟着 currentColor，所以这支黄要有自己的 token，
     # 两个主题块各给一个值：浅色档的 #a16207 已经贴着"修改"的 #9a6d17，深色档另给亮黄

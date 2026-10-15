@@ -128,6 +128,11 @@ function loadApp() {
             renderMemoryFailedCard,
             memoryFailedCategoryLabel,
             memoryFailedAutoRetryHint,
+            memoryProcessedOpKinds,
+            memoryProcessedStatusLabel,
+            memoryProcessedIsNoChange,
+            memoryProcessedNoopReason,
+            renderMemoryChangeBlock,
             memoryFailedErrorHistoryText,
             memoryPayloadBlocksFromRecord,
             memoryPayloadRangeText,
@@ -139,11 +144,18 @@ function loadApp() {
             toggleMemoryBrowserEditMode,
             memoryBrowserToggleRowSelected,
             memoryBrowserToggleSelectAll,
+            runMemoryBrowserUncompress,
+            runMemoryBrowserDelete,
+            runMemoryBrowserEditSave,
+            pushedToasts: () => __toasts,
+            resetToasts: () => { __toasts.length = 0; },
+            globalRef: () => globalThis,
         };`,
         context
     );
     // 屏蔽 toast/DOM 副作用,只测渲染与状态机
-    vm.runInContext(`showToast = () => {};`, context);
+    context.__toasts = [];
+    vm.runInContext(`showToast = (payload) => { __toasts.push(payload); };`, context);
     return context.__testExports;
 }
 
@@ -449,4 +461,101 @@ test("payload paging closes the button when the server delivers no progress", as
     assert.equal(item.dataset.endChar, "4000", "没推进就不动已交付水位");
     assert.equal(button.hidden, true, "再点只会拿回同一段，收口而不是留个死按钮");
     assert.equal(button.disabled, false, "按钮收口后不能留在禁用态");
+});
+
+test("a downgraded row says so on the face of the table and offers warming", () => {
+    const api = loadApp();
+    stubBrowserUi(api);
+    api.S.memoryBrowser.items = [
+        { memory_id: "Ab12Z9", memory_body: "全文还是这条", minimal_memory: "a->b", source: "user", created_at: "2026-09-16T10:00:00+08:00", is_compressed: true },
+        { memory_id: "Cd34W8", memory_body: "这条没被压过", minimal_memory: "c->d", source: "self", created_at: "2026-09-16T10:01:00+08:00", is_compressed: false },
+    ];
+    api.S.memoryBrowser.editMode = true;
+    api.S.memoryBrowser.mutationsEnabled = true;
+
+    api.renderMemoryBrowserList();
+    const html = api.U.memoryBrowserTbody.innerHTML;
+    // 表体显示的永远是 `memory_body` 全文；这颗标记才是"上下文里现在只剩摘要"。
+    assert.match(html, /memory-downgraded-chip/);
+    assert.match(html, /上下文里只显示摘要/);
+    assert.equal((html.match(/memory-downgraded-chip/g) || []).length, 1, "没被降级的行不许画这颗");
+    assert.match(html, /data-memory-row-uncompress="Ab12Z9"/);
+    assert.doesNotMatch(html, /data-memory-row-uncompress="Cd34W8"/, "回暖只对降级的行有意义");
+});
+
+test("warming calls the operator route, reports the bytes it put back, then reloads", async () => {
+    const api = loadApp();
+    stubBrowserUi(api);
+    api.S.memoryBrowser.items = [];
+    api.S.memoryBrowser.editMode = true;
+    const calls = [];
+    api.ApiClient.uncompressCurrentMemory = async (memoryId) => {
+        calls.push(memoryId);
+        return { ok: true, item: { memory_id: memoryId, changed: true, resident_chars_after: 14210, compress_trigger_chars: 16000, document_max_chars: 20000 } };
+    };
+    let reloaded = 0;
+    api.globalRef().loadMemoryBrowser = async () => { reloaded += 1; };
+
+    await api.runMemoryBrowserUncompress("Ab12Z9");
+
+    assert.deepEqual(calls, ["Ab12Z9"]);
+    assert.equal(reloaded, 1, "成功后必须把表重画，否则那颗标记还留在行上");
+    const toast = api.pushedToasts().at(-1);
+    assert.equal(toast.title, "已回暖");
+    assert.match(toast.text, /14210/);
+    assert.match(toast.text, /16000/);
+    assert.equal(api.S.memoryBrowser.actionBusy, "", "按钮要回到可用态");
+
+    // 顶到硬顶被拒：失败侧同样要有可读落点，不能只把错误吞掉。
+    api.ApiClient.uncompressCurrentMemory = async () => { throw new Error("memory document exceeds 20000 chars"); };
+    await api.runMemoryBrowserUncompress("Ef56Gh");
+    const failed = api.pushedToasts().at(-1);
+    assert.equal(failed.kind, "error");
+    assert.match(failed.text, /exceeds 20000/);
+});
+
+test("the memory browser never promises a synchronous save", () => {
+    // 编辑与删除都只入队：文案再说"已保存/镜像已同步"就是假承诺。
+    assert.doesNotMatch(APP_CODE, /记忆修改已保存/);
+    assert.doesNotMatch(APP_CODE, /已删除 \$\{deletedCount\} 条记忆，镜像已同步/);
+    assert.match(APP_CODE, /已提交修改/);
+    assert.match(APP_CODE, /已提交删除/);
+    assert.match(APP_CODE, /交给记忆 agent/);
+});
+
+test("the capacity rungs read as their own outcomes, not as generic failures", () => {
+    const api = loadApp();
+    assert.equal(api.memoryFailedCategoryLabel({ category: "capacity" }), "库容不下");
+    assert.equal(api.memoryFailedCategoryLabel({ category: "capacity_noop" }), "归并未受理");
+    // 两条都必须带"下一步做什么"：停车记录的解释就是操作员的出口。
+    assert.match(api.memoryFailedAutoRetryHint({ category: "capacity" }), /原文完整保留/);
+    assert.match(api.memoryFailedAutoRetryHint({ category: "capacity_noop" }), /放弃.*重新允许/);
+    assert.equal(api.memoryFailedCategoryLabel({ category: "provider_error" }), "provider 瞬时错误");
+});
+
+test("a machine downgrade is its own change chip, not a rewrite", () => {
+    const api = loadApp();
+    const item = {
+        status: "applied",
+        changes: [{ type: "compress_for_capacity", memory_id: "Ab12Z9", freed_chars: 61 }],
+    };
+    const html = api.renderMemoryChangeBlock({ type: "compress_for_capacity", memory_id: "Ab12Z9", freed_chars: 61 });
+    assert.match(html, /容量降级/);
+    const kinds = api.memoryProcessedOpKinds(item);
+    // vm 里产出的数组带着那个 realm 的 Array 原型，deepStrictEqual 会因原型不同而判不等。
+    assert.equal(kinds.join("|"), "compress_for_capacity", "机器动作不能被并进「修改」那颗");
+    assert.match(APP_CODE, /data-op="compress_for_capacity"|compress_for_capacity: \{/);
+});
+
+test("a capacity park reads as a park, not as a batch that wrote nothing", () => {
+    const api = loadApp();
+    const parked = { status: "parked", op: "write", discard_reason: "capacity_exhausted", error: "memory document exceeds 900 chars" };
+    assert.equal(api.memoryProcessedStatusLabel(parked), "已停车");
+    assert.equal(api.memoryProcessedIsNoChange(parked), true, "停下来的批次一行都没写，不许画变更牌");
+    assert.equal(api.memoryProcessedOpKinds(parked).join("|"), "");
+    assert.match(api.memoryProcessedNoopReason(parked), /capacity_exhausted/);
+
+    const applied = { status: "applied", op: "write", changes: [{ type: "add", memory_id: "Ab12Z9", content: "x" }] };
+    assert.equal(api.memoryProcessedStatusLabel(applied), "已应用");
+    assert.equal(api.memoryProcessedOpKinds(applied).join("|"), "add");
 });

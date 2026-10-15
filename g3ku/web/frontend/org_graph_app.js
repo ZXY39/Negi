@@ -15100,6 +15100,8 @@ function memoryFailedCategoryLabel(item) {
     if (normalized === "provider_error") return "provider 瞬时错误";
     if (normalized === "window_refusal") return "超窗拒发";
     if (normalized === "protocol") return "协议违规";
+    if (normalized === "capacity") return "库容不下";
+    if (normalized === "capacity_noop") return "归并未受理";
     return normalized || "未知类别";
 }
 
@@ -15107,6 +15109,8 @@ function memoryFailedAutoRetryHint(item) {
     const normalized = String(item?.category || "").trim().toLowerCase();
     if (normalized === "provider_error") return "队列下一次成功处理后自动重排队尾";
     if (normalized === "window_refusal") return "载荷变小或模型窗口调大后手动重试";
+    if (normalized === "capacity") return "整理出空间后手动重试；这条批次的原文完整保留在这里";
+    if (normalized === "capacity_noop") return "放弃它才会重新允许对同一批记忆排归并";
     return "仅支持手动重试";
 }
 
@@ -15233,6 +15237,7 @@ const MEMORY_OP_KINDS = {
     note_reaped: { label: "回收 Note", icon: "trash-2" },
     category_note: { label: "归并记忆", icon: "notebook-pen" },
     consolidate: { label: "记忆退场", icon: "pencil" },
+    compress_for_capacity: { label: "容量降级", icon: "arrow-down-wide-narrow" },
 };
 
 // write_mode 把删除并进 rewrite 桶、把多种操作压成 mixed；只有持久化的 changes
@@ -15259,7 +15264,13 @@ function memoryProcessedOpKinds(item) {
 }
 
 function memoryProcessedNoopReason(item) {
-    return String(item?.noop_reason || item?.already_satisfied || "").trim();
+    const reason = String(item?.noop_reason || item?.already_satisfied || "").trim();
+    if (reason) return reason;
+    // 容量停车的"原因"就是它停在哪一级：不显示出来，操作员看到的就是一条没头没尾的记录。
+    if (String(item?.status || "").trim().toLowerCase() === "parked") {
+        return String(item?.discard_reason || item?.error || "").trim();
+    }
+    return "";
 }
 
 function memoryProcessedChangePreview(item) {
@@ -15268,13 +15279,17 @@ function memoryProcessedChangePreview(item) {
 
 function memoryProcessedIsNoChange(item) {
     const normalized = String(item?.status || "").trim().toLowerCase();
-    if (normalized === "discarded") return true;
+    // 容量停车那一级一行都没写：载荷原文留在失败区，台账这行只是把"停在哪一级"记下来。
+    if (normalized === "discarded" || normalized === "parked") return true;
     return !!memoryProcessedNoopReason(item);
 }
 
 function memoryProcessedStatusLabel(item) {
+    const normalizedStatus = String(item?.status || "").trim().toLowerCase();
+    // 停下来的批次既不写变更也不是"看过决定不写"：状态位要说清它停在梯子的哪一级。
+    if (normalizedStatus === "parked") return "已停车";
     if (memoryProcessedIsNoChange(item)) return "无变更";
-    const normalized = String(item?.status || "").trim().toLowerCase();
+    const normalized = normalizedStatus;
     if (normalized === "discarded") return "已废弃";
     if (normalized === "applied") return "已应用";
     return normalized || "已处理";
@@ -15297,6 +15312,13 @@ function renderMemoryNoteRefChip(noteRef) {
     noteRef = String(noteRef || "").trim();
     if (!noteRef) return "";
     return `<button type="button" class="memory-note-ref-trigger" data-memory-note-ref="${esc(noteRef)}">ref:${esc(noteRef)}</button>`;
+}
+
+function renderMemoryDowngradedChip(isCompressed) {
+    // 页面显示的正文永远是 `memory_body` 全文，这一颗标记说的才是"模型现在看到的其实是
+    // 那行最小摘要"——两件事都真，缺一颗就会让人以为改的就是上下文里的样子。
+    if (!isCompressed) return "";
+    return '<span class="memory-downgraded-chip">上下文里只显示摘要</span>';
 }
 
 function renderMemoryNoteOwnershipChip(noteRef) {
@@ -15470,6 +15492,7 @@ function memoryChangeTypeLabel(type) {
     if (normalized === "note_reaped") return "回收 Note";
     if (normalized === "category_note") return "归并记忆";
     if (normalized === "consolidate") return "记忆退场";
+    if (normalized === "compress_for_capacity") return "容量降级";
     return normalized || "变更";
 }
 
@@ -16456,6 +16479,13 @@ function ensureMemoryBrowserUi() {
             e.preventDefault();
             e.stopPropagation();
             requestMemoryBrowserDelete([deleteTrigger.dataset.memoryRowDelete || ""].filter(Boolean), "single");
+            return;
+        }
+        const warmTrigger = e.target.closest("[data-memory-row-uncompress]");
+        if (warmTrigger) {
+            e.preventDefault();
+            e.stopPropagation();
+            void runMemoryBrowserUncompress(warmTrigger.dataset.memoryRowUncompress || "");
         }
     });
     drawer.querySelectorAll("[data-memory-browser-edit-close], [data-memory-browser-edit-cancel]").forEach((button) => {
@@ -16583,6 +16613,11 @@ function renderMemoryBrowserList() {
                         <i data-lucide="trash-2" aria-hidden="true"></i>
                         删除
                     </button>
+                    ${item?.is_compressed ? `
+                    <button type="button" class="toolbar-btn ghost memory-browser-row-btn" data-memory-row-uncompress="${esc(selectableId)}"${rowBusy ? " disabled" : ""} title="回暖：让这条记忆在上下文里恢复全文">
+                        <i data-lucide="sunrise" aria-hidden="true"></i>
+                        回暖
+                    </button>` : ""}
                 </td>
                 `
                 : "";
@@ -16594,7 +16629,7 @@ function renderMemoryBrowserList() {
                     <td class="memory-browser-cell-nowrap">${esc(String(item?.passed_count ?? 0))}</td>
                     <td class="memory-browser-cell-nowrap">${esc(source)}</td>
                     <td class="memory-browser-cell-nowrap">${esc(memoryId)}</td>
-                    <td class="memory-browser-cell-body">${renderMemoryTextWithNoteRefs(body)}${renderMemoryNoteOwnershipChip(ownershipNoteRef)}</td>
+                    <td class="memory-browser-cell-body">${renderMemoryTextWithNoteRefs(body)}${renderMemoryDowngradedChip(item?.is_compressed)}${renderMemoryNoteOwnershipChip(ownershipNoteRef)}</td>
                     ${actionsCell}
                 </tr>
             `;
@@ -16872,6 +16907,36 @@ function confirmMemoryDeleteDialog() {
     void runMemoryBrowserDelete(state.memoryIds, noteRefs);
 }
 
+async function runMemoryBrowserUncompress(memoryId) {
+    const id = String(memoryId || "").trim();
+    if (!id || S.memoryBrowser.actionBusy) return;
+    S.memoryBrowser.actionBusy = `uncompress:${id}`;
+    renderMemoryBrowserList();
+    try {
+        const result = await ApiClient.uncompressCurrentMemory(id);
+        const item = result?.item || {};
+        showToast({
+            title: item.changed ? "已回暖" : "这条本来就是全文",
+            text: item.changed
+                ? `这条记忆已恢复全文常驻，当前常驻 ${item.resident_chars_after} 字（触发线 ${item.compress_trigger_chars}）。`
+                : "",
+            kind: "success",
+            durationMs: 4200,
+        });
+        await loadMemoryBrowser();
+    } catch (error) {
+        showToast({
+            title: "回暖失败",
+            text: error?.message || "这条记忆没能放回去，请稍后重试",
+            kind: "error",
+            durationMs: 5200,
+        });
+    } finally {
+        S.memoryBrowser.actionBusy = "";
+        renderMemoryBrowserList();
+    }
+}
+
 async function runMemoryBrowserDelete(memoryIds, noteRefs = []) {
     const ids = [...new Set((Array.isArray(memoryIds) ? memoryIds : []).map((id) => String(id || "").trim()).filter(Boolean))];
     if (!ids.length || S.memoryBrowser.actionBusy) return;
@@ -16879,16 +16944,13 @@ async function runMemoryBrowserDelete(memoryIds, noteRefs = []) {
     renderMemoryBrowserList();
     try {
         const result = await ApiClient.deleteCurrentMemories(ids, "manual-ui", noteRefs);
-        const deletedCount = Array.isArray(result?.item?.deleted) ? result.item.deleted.length : ids.length;
-        const missingCount = Array.isArray(result?.item?.missing) ? result.item.missing.length : 0;
-        const notesDeleted = Array.isArray(result?.item?.notes_deleted) ? result.item.notes_deleted.length : 0;
+        const status = String(result?.item?.status || "").trim();
         showToast({
-            title: "删除完成",
-            text: [
-                missingCount ? `已删除 ${deletedCount} 条记忆，${missingCount} 条未找到（可能已被删除）。` : `已删除 ${deletedCount} 条记忆，镜像已同步。`,
-                notesDeleted ? `同步删除 ${notesDeleted} 个关联笔记。` : "",
-            ].filter(Boolean).join(" "),
-            kind: missingCount ? "warn" : "success",
+            title: status === "queued" ? "已提交删除" : "删除请求未被受理",
+            text: status === "queued"
+                ? `${ids.length} 条记忆的删除请求已交给记忆 agent，处理结果见「已处理批次」。`
+                : "这条请求没有进入队列，记忆内容未改动。",
+            kind: status === "queued" ? "success" : "warn",
             durationMs: 4200,
         });
         const selected = { ...(S.memoryBrowser.selected || {}) };
@@ -16981,7 +17043,7 @@ async function runMemoryBrowserEditSave(memoryId, body, minimal) {
             minimalMemory: minimalChanged ? minimal.trim() : null,
             reason: "manual-ui",
         });
-        showToast({ title: "已保存", text: "记忆修改已保存，镜像已同步。", kind: "success" });
+        showToast({ title: "已提交修改", text: "修改请求已交给记忆 agent 处理，落库结果以「已处理批次」的台账为准。", kind: "success" });
         S.memoryBrowser.editDialog = { open: false, memoryId: "", body: "", minimal: "", busy: false };
         await loadMemoryBrowser();
     } catch (error) {

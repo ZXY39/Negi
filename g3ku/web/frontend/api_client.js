@@ -1251,6 +1251,12 @@ class ApiClient {
         });
     }
 
+    static async uncompressCurrentMemory(memoryId, reason = "manual-ui") {
+        return this._request("POST", "/api/memory/current/uncompress", {
+            body: { memory_id: memoryId, reason },
+        });
+    }
+
     static async updateMemoryNote(ref, body, reason = "manual-ui") {
         return this._request("POST", `/api/memory/notes/${encodeURIComponent(ref)}/update`, {
             body: { body, reason },

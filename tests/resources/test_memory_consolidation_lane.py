@@ -131,7 +131,13 @@ def test_a_category_emptied_out_later_loses_its_index_line(tmp_path: Path) -> No
         manager._rebuild_memory_snapshot_from_sqlite(now_iso="2026-04-25T00:00:04+08:00")
         assert "运维" in (tmp_path / "memory" / "MEMORY.md").read_text(encoding="utf-8")
 
-        manager._memory_repo.delete_memory(memory_id)
+        manager._memory_repo.apply_mutation(
+            adds=None,
+            rewrites=None,
+            deletes=[memory_id],
+            inspired_memory_ids=None,
+            now_iso="2026-04-25T00:00:05+08:00",
+        )
         manager._rebuild_memory_snapshot_from_sqlite(now_iso="2026-04-25T00:00:05+08:00")
 
         document = (tmp_path / "memory" / "MEMORY.md").read_text(encoding="utf-8")
@@ -386,10 +392,15 @@ def test_the_injected_snapshot_carries_the_block_verbatim(tmp_path: Path) -> Non
     assert "- 工具技巧 (note: note_tools)" in content
 
 
-def test_a_consolidation_that_retires_nothing_still_moves_the_trigger_forward(tmp_path: Path) -> None:
-    """No category fit these memories. Leaving the snapshot over the line would queue
-    another consolidation on every later commit forever, so the machine degrades the
-    oldest rows - and only that."""
+def test_a_consolidation_that_retires_nothing_leaves_the_store_alone(tmp_path: Path) -> None:
+    """A declined consolidation is not a licence for the machine to degrade rows.
+
+    The compress lane already ran before this consolidation was queued, so "nothing retired"
+    means the pool is spent and the model says these rows have no category. Degrading them
+    here would be the machine overriding a decision a model just made - the noop stands, the
+    batch is parked, and `_noop_consolidation_blocks` keeps the same set from being queued
+    again on every later commit.
+    """
     module = _module()
     manager = _manager(tmp_path, trigger=120, target=100, document_max=20000)
     try:
@@ -397,25 +408,59 @@ def test_a_consolidation_that_retires_nothing_still_moves_the_trigger_forward(tm
         second = _add(manager, body="S" * 90, minimal="第二条->短")
         manager._rebuild_memory_snapshot_from_sqlite(now_iso="2026-04-25T00:00:22+08:00")
 
-        manager._commit_validated_write(
-            module._MemoryValidatedWrite(
-                document_text="",
-                note_writes={},
-                note_refs_written=[],
-                memory_chars_after=0,
-                document_preview="",
-                is_consolidation=True,
-                noop_reason="两条都不属于任何分类",
-            )
+        write = module._MemoryValidatedWrite(
+            document_text="",
+            note_writes={},
+            note_refs_written=[],
+            memory_chars_after=0,
+            document_preview="",
+            is_consolidation=True,
+            noop_reason="两条都不属于任何分类",
         )
+        manager._commit_validated_write(write)
 
         rows = {row["memory_id"]: row for row in manager._memory_repo.list_memories()}
-        assert set(rows) == {first, second}, "the fallback never deletes"
-        assert rows[first]["is_compressed"] is True
-        assert manager._resident_memory_chars() <= 120
-        assert manager._compress_memory_snapshot_if_needed(now_iso="2026-04-25T00:00:23+08:00")[
-            "consolidation_requested"
-        ] is False
+        assert set(rows) == {first, second}, "a declined consolidation never deletes"
+        assert rows[first]["is_compressed"] is False, "the machine does not downgrade on a model's no"
+        assert rows[second]["is_compressed"] is False
+        assert write.capacity_action == "consolidation_noop"
+    finally:
+        manager.close()
+
+
+def test_a_parked_noop_gates_the_same_candidate_set_from_being_queued_again(tmp_path: Path) -> None:
+    """Without this the queue would grow a consolidation on every commit, forever."""
+    module = _module()
+    manager = _manager(tmp_path, trigger=120, target=100, document_max=20000)
+    try:
+        first = _add(manager, body="F" * 90, minimal="第一条->短")
+        manager._memory_repo.mark_compressed(first)
+        manager._rebuild_memory_snapshot_from_sqlite(now_iso="2026-04-25T00:00:22+08:00")
+        _payload, candidates = manager._build_consolidation_payload(trigger=120, target=100)
+        assert candidates == [first]
+        assert manager._noop_consolidation_blocks(candidates) is False
+
+        manager._write_failed_records(
+            [
+                {
+                    "failed_id": "failed_noop",
+                    "op": "consolidate",
+                    "category": "capacity_noop",
+                    "discard_reason": "consolidation_noop",
+                    "status": "parked",
+                    "request_ids": ["consolidate_1"],
+                    "items": [
+                        {
+                            "request_id": "consolidate_1",
+                            "op": "consolidate",
+                            "payload_text": f"## 待归并记忆\n- id:{first}\n第一条正文\n",
+                        }
+                    ],
+                }
+            ]
+        )
+        assert manager._noop_consolidation_blocks(candidates) is True
+        assert manager._noop_consolidation_blocks([first, "Zz9ZzZ"]) is False
     finally:
         manager.close()
 

@@ -441,10 +441,16 @@ async def test_v2_delete_batch_noop_reason_is_repaired_in_band_before_it_costs_a
 
 
 @pytest.mark.asyncio
-async def test_run_due_batch_once_falls_back_to_minimal_compression_after_attempts(
+async def test_run_due_batch_once_parks_an_overlong_add_instead_of_shortening_it(
     tmp_path: Path,
     monkeypatch,
 ) -> None:
+    """The removed fallback used to store `minimal_memory` in place of the body.
+
+    That is irreversible: the memory the model wrote no longer exists anywhere, while the
+    resident block looks healthy. A payload three repair rounds could not make legal now
+    leaves the queue intact in the failure surface instead.
+    """
     module = _load_memory_agent_runtime_module()
     manager = module.MemoryManager(tmp_path, _memory_cfg())
     try:
@@ -493,14 +499,17 @@ async def test_run_due_batch_once_falls_back_to_minimal_compression_after_attemp
 
         report = await manager.run_due_batch_once(now_iso="2026-04-18T10:00:05+08:00")
         snapshot_text = manager.snapshot_text()
-        processed = _read_jsonl(tmp_path / "memory" / "ops.jsonl")
+        failed = _read_jsonl(tmp_path / "memory" / "failed.jsonl")
 
-        assert report["status"] == "applied"
-        assert report.get("fallback") == "minimal_compression"
-        assert "csv->preserve column order" in snapshot_text
-        assert overlong_content not in snapshot_text
-        assert len(processed) == 1
-        assert processed[0]["fallback"] == "minimal_compression"
+        assert report["status"] == "parked"
+        assert report["discard_reason"] == "rejected"
+        assert "fallback" not in report
+        assert "csv->preserve column order" not in snapshot_text, "nothing was committed minimized"
+        assert failed, "the batch left the queue for the failure surface"
+        assert "Remember to always preserve column order in CSV imports" in json.dumps(
+            failed[0]["items"], ensure_ascii=False
+        ), "the request is kept verbatim for a manual retry"
+        assert not _read_jsonl(tmp_path / "memory" / "ops.jsonl"), "a park is not a terminal ledger row"
     finally:
         manager.close()
 
@@ -560,9 +569,9 @@ async def test_run_due_batch_once_respects_repair_attempt_limit(
 
         report = await manager.run_due_batch_once(now_iso="2026-04-18T10:00:05+08:00")
 
-        assert report["status"] == "applied"
+        assert report["status"] == "parked"
         assert report["attempt_count"] == 2
-        assert report.get("fallback") == "minimal_compression"
+        assert report["discard_reason"] == "rejected"
     finally:
         manager.close()
 
@@ -1048,7 +1057,7 @@ async def test_processing_head_retries_after_retry_after(tmp_path: Path, monkeyp
                             "args": {
                                 "adds": [
                                     {
-                                        "content": "Report total elapsed time",
+                                        "content": "Report the total elapsed time when a task finishes",
                                         "minimal_memory": "tasks->report-elapsed-time",
                                         "decision_source": "self",
                                     }
