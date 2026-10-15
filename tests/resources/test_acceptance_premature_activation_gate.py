@@ -170,12 +170,12 @@ def test_reused_terminal_acceptance_is_voided_before_reverify() -> None:
     stale = _acceptance(status='failed', final_output='目标文件不存在', failure_reason='目标文件不存在', finished_at=now_iso())
     runner = object.__new__(NodeRunner)
     runner._store = _FakeStore({EXEC_ID: _execution(status='success'), ACC_ID: stale})  # type: ignore[attr-defined]
-    synced: list[str] = []
+    published: list[str] = []
     runner._log_service = SimpleNamespace(  # type: ignore[attr-defined]
         update_node_metadata=lambda node_id, mutator: runner._store.update_node(
             node_id, lambda record: record.model_copy(update={'metadata': mutator(dict(record.metadata or {}))})
         ),
-        sync_node_read_model=lambda task_id, node_id: synced.append(node_id),
+        publish_node_state=lambda task_id, node_id: published.append(node_id),
         refresh_task_view=lambda task_id, mark_unread=False: None,
     )
     runner._update_spawn_entry = lambda **kwargs: None  # type: ignore[attr-defined]
@@ -195,7 +195,7 @@ def test_reused_terminal_acceptance_is_voided_before_reverify() -> None:
     assert acceptance.status == 'in_progress'
     assert acceptance.failure_reason == ''
     assert [entry['failure_reason'] for entry in acceptance.metadata['rejection_history']] == ['目标文件不存在']
-    assert synced == [ACC_ID]
+    assert published == [ACC_ID]
 
 
 def test_child_pipeline_waits_instead_of_consuming_a_frozen_acceptance() -> None:

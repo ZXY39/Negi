@@ -58,7 +58,7 @@ Start here when you are new to the repository or when a change crosses subsystem
 - 派生评审把整批候选全拦下来、把带 `requires_acceptance` 的候选判成"验收内嵌/自产自销"、或想知道评审请求本身有多大/重发过几次 → `main-task-runtime.md`「任务树深度上限」（送审候选的解析结构、派生审查的 fail-closed 默认结果与 `review_attempts` / `review_request_chars`）
 - 任务已终态但仍有节点显示处理中（`in_progress`）→ `operations-and-maintenance.md`「残留节点自愈」+ `main-task-runtime.md`「Node-Level Pause and Recovery」
 - `task_progress` 显示的运行/检验状态与真实执行不符（陈旧帧被当作运行中、未派发的验收节点被当作检验中）→ `main-task-runtime.md`「Node-Level Pause and Recovery」（活性标注与判读合同）+ `tools/task_progress_cn/resource.yaml`（工具描述判读规则）
-- 任务树节点徽标与真实执行不符（未派发的检验节点显示「检验中」、被检验的执行节点跟着显示「检验中」、非终态节点出现 `IN_PROGRESS` 原文、检验节点不见了）→ `web-and-admin.md`「Task Tree Live Sync And Self-Healing Contract」+「Task Message Distribution UI Contract」
+- 任务树节点徽标与真实执行不符（未派发的检验节点显示「检验中」、被检验的执行节点跟着显示「检验中」、非终态节点出现 `IN_PROGRESS` 原文、检验节点不见了、打回后整个返工期间挂着 `FAILED`、验收节点已终局失败却一直读成非终态）→ `web-and-admin.md`「Task Tree Live Sync And Self-Healing Contract」+「Task Message Distribution UI Contract」
 - 任务树刷新时轮次下拉框自己收起/跳回默认轮次 → `web-and-admin.md`「Task Tree Live Sync And Self-Healing Contract」（重绘后的稳定身份与展开态恢复）
 - 节点详情刷新时展开的阶段卡或某轮的工具面板自己折回去、切走再切回对不上 → `web-and-admin.md`「Node Detail Redraw And Expansion State Contract」（捕获时机与按轮账本）
 - 本地会话列表拖动后的顺序被打回原样、或换浏览器顺序不一致 → `web-and-admin.md`「CEO Session List Interaction Contract」（手动顺序只存前端 localStorage）

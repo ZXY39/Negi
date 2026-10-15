@@ -3886,6 +3886,7 @@ class TaskLogService:
                     self._sync_node_read_models_locked(cleared_child)
 
             self._sync_node_read_models_locked(updated_acceptance)
+            self._publish_task_node_patch_locked(task=task, node=updated_acceptance)
             self.refresh_task_view(task_id, mark_unread=True)
             return updated_acceptance
 
@@ -4645,6 +4646,21 @@ class TaskLogService:
             )
             self._sync_task_node_rounds_locked(node)
             return self._store.get_task_node_detail(node_id)
+
+    def publish_node_state(self, task_id: str, node_id: str) -> NodeRecord | None:
+        """给绕过 `update_node_status` 的状态改写补上两份读数：树快照读的投影行，与
+        浏览器树缓存靠的 `task.node.patch`。只同步投影会让节点在整树重拉之前一直挂着
+        上一次的状态（验收打回后的 `failed`、执行失败取消后的非终态都是这个形状）。"""
+        with self._task_lock(task_id):
+            node = self._store.get_node(node_id)
+            if node is None or str(node.task_id or '').strip() != str(task_id or '').strip():
+                return None
+            self._sync_node_read_models_locked(node)
+            self._sync_task_node_rounds_locked(node)
+            task = self._store.get_task(task_id)
+            if task is not None:
+                self._publish_task_node_patch_locked(task=task, node=node)
+            return node
 
     def _sync_node_read_models_locked(
         self,

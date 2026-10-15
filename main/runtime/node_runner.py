@@ -1555,7 +1555,7 @@ class NodeRunner:
             ),
         )
         if updated is not None:
-            self._log_service.sync_node_read_model(task_id, node_id)
+            self._log_service.publish_node_state(task_id, node_id)
         return updated
 
     def _interrupt_acceptance_for_notice_retry(
@@ -1756,6 +1756,9 @@ class NodeRunner:
                 return record.model_copy(update=update)
 
             self._store.update_node(acceptance.node_id, _mutate)
+            # 终局判定也要进树：这条写绕过了 `update_node_status`，不发布的话验收节点在
+            # 快照和浏览器缓存里都会停在非终态，「终局失败才显示 fail」就只剩打回那半成立。
+            self._log_service.publish_node_state(task_id, acceptance.node_id)
         self._update_execution_acceptance_handshake(
             node_id=execution.node_id,
             state=ACCEPTANCE_STATE_CANCELED_BY_EXECUTION_FAILURE,
@@ -1937,7 +1940,7 @@ class NodeRunner:
                     }
                 ),
             )
-            self._log_service.sync_node_read_model(task.task_id, acceptance.node_id)
+            self._log_service.publish_node_state(task.task_id, acceptance.node_id)
             self._log_service.refresh_task_view(task.task_id, mark_unread=True)
             acceptance = self._store.get_node(acceptance.node_id) or acceptance
         result_ref = self._persist_acceptance_candidate_result(task_id=task.task_id, node_id=node.node_id, result=result)
@@ -2214,7 +2217,7 @@ class NodeRunner:
                 }
             ),
         )
-        self._log_service.sync_node_read_model(task.task_id, acceptance.node_id)
+        self._log_service.publish_node_state(task.task_id, acceptance.node_id)
         self._log_service.refresh_task_view(task.task_id, mark_unread=True)
         return self._store.get_node(acceptance.node_id) or acceptance
 
