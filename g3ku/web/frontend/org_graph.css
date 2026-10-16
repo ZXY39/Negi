@@ -3238,7 +3238,8 @@ textarea {
 
 /* 两颗动作按钮常驻在元信息行里，各吃一份服务端门槛：can_edit_fork 画用户行的
    「编辑」（排在发送时间右边），can_fork_reply 画回复行的「Fork」（排在用量左边）。
-   同一行那些读数（时间 / token 用量 / 复制）才走上面的 .meta-open 点击门。 */
+   同一行那些读数（时间 / token 用量 / 复制）才走上面的 .meta-open 点击门。
+   按钮本身一直在，只有外面那圈胶囊描边按悬停显形。 */
 
 /* 回合进行中(含心跳内部轮)只隐藏编辑:它要改源会话转录。
    Fork 是只读前缀复制、源会话零变更，运行/暂停/等审批中都留着可点。 */
@@ -3256,9 +3257,11 @@ textarea {
     align-items: center;
     gap: 5px;
     padding: 4px 10px;
-    border: 1px solid color-mix(in srgb, var(--border-color) 72%, transparent);
+    /* 描边默认不画，移到按钮上才显形。透明边框继续占位，
+       免得显形那一刻按钮长出一圈、顶动会话流。 */
+    border: 1px solid transparent;
     border-radius: 999px;
-    background: color-mix(in srgb, var(--bg-app) 74%, var(--bg-panel) 26%);
+    background: transparent;
     color: var(--text-secondary);
     font-size: 0.76rem;
     line-height: 1.2;
