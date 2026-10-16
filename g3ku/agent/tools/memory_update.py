@@ -29,6 +29,7 @@ class MemoryUpdateTool(Tool):
             "preference, identity detail, default, constraint, or project fact.\n"
             "State what should change; a memory agent decides whether that becomes a new item, a rewrite of an "
             "existing one, or a deletion.\n"
+            "所有关于记忆的处理都通过此工具交给记忆 agent，禁止自己改 `memory/` 下的文件。\n"
             "This call only queues the request: nothing has changed yet, so tell the user what you submitted "
             "and never say the memory is already saved, revised, or removed.\n"
             "任意数量的记忆处理需求可通过自然语言描述后，一次调用即可处理，禁止批量调用。\n"
