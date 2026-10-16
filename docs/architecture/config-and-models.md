@@ -67,7 +67,7 @@
 
 `main_runtime.node_dispatch_concurrency.execution` / `.inspection`（默认 8 / 4）是**节点回合闸共享池的地板**——池地板＝两者之和（默认 12），是空闲排空后的复位值，既不是任一角色的上限也不是下限保证。容量是一份共享池，角色只握保留格 `min(自己的地板, ceil(池地板/4))`：保留格只在该角色**有等待者**时挡住别的角色借走，没人等就可以被借走（各角色各自封顶时实盘 10% 的采样拍出现"一侧空 7 格、另一侧排队 11 个"）。池位由监控按**节拍**（`_ENTRY_BEAT_SECONDS`，实测一次模型调用 p50 37 s）发布的余量目标决定：本地积压轴（事件循环 lag、写入队列、SQLite 读写、回环连接条数）越过 warn 线只保持、越过 critical 线每节拍退一格，任何退让都止于地板（能一次踩到 0 的只有磁盘紧急硬闸）；机器内存余量与 1.5×池地板的硬顶只限制它往上长；**上游 429 限流不参与容量判断**，它的收口处是模型链自己的退避与换槽（见「角色路由：有序 fallback 与负载均衡组」）。界面上的「限」读的是活池位（`dispatch_pool` 与 `dispatch_limits`），不是这两个配置数。调数经一次配置刷新即打到活着的闸，无需重启：任一数被调小 ⇒ 池地板与保留格当场重算、当前池位钳到新地板；两数都不变 ⇒ 保留已抬到的位置；闸口排空后自动回到地板。worker 模式同样生效。完整判据与读数口径见 `runtime-overview.md`「节点回合闸」。
 
-`main_runtime.disk_guard` 子节控制磁盘写保护与治理（行为契约见 `runtime-overview.md`「磁盘写保护与治理」）：`write_guard_enabled`（默认 `true`；关闭后写异常恢复原样上抛、不做应急预算预检）、`emergency_min_bytes`（默认 300MB）与 `emergency_min_ratio`（默认 0.01，紧急线取两者较大值）、`usage_ttl_seconds`（水位探测缓存 TTL，默认 5s）、`artifact_gzip_threshold_bytes`（默认 1MiB；`<=0` 关闭 artifact gzip 压缩）、`terminal_cleanup_enabled`（默认 `true`；关闭后任务终态不自动清理确定不再使用的数据）、`terminal_temp_dir_cleanup_enabled`（默认 `false`；开启后终态硬删 `temp/tasks/<id>`）、`auto_pause_enabled`（默认 `true`；关闭后紧急态只检测告警不自动暂停任务）、`emergency_streak_samples` / `emergency_recovery_samples`（进入/解除紧急态的连续采样拍数，默认 3/5）、`alert_on_disk_emergency`（默认 `true`）、`detail_retention_days`（终态任务大行保留天数，默认 `0`=停用裁剪——任务明细与任务同生命周期，仅随手动删除清除；配置 `>0` 恢复按天裁剪）。磁盘治理没有清理线/自动删任务相关配置；删除台账保留期（7 天）是 `runtime_service` 模块常量，不进配置。`G3KU_*` 同名环境变量仅作测试与应急覆盖，配置源真值以本子节为准。
+`main_runtime.disk_guard` 子节控制磁盘写保护与治理（行为契约见 `runtime-overview.md`「磁盘写保护与治理」）：`write_guard_enabled`（默认 `true`；关闭后写异常恢复原样上抛、不做应急预算预检）、`emergency_min_bytes`（默认 300MB）与 `emergency_min_ratio`（默认 0.01，紧急线取两者较大值）、`usage_ttl_seconds`（水位探测缓存 TTL，默认 5s）、`artifact_gzip_threshold_bytes`（默认 1MiB；`<=0` 关闭 artifact gzip 压缩）、`terminal_cleanup_enabled`（默认 `true`；关闭后任务终态不自动清理确定用不到的数据）、`terminal_temp_dir_cleanup_enabled`（默认 `false`；开启后终态硬删 `temp/tasks/<id>`）、`auto_pause_enabled`（默认 `true`；关闭后紧急态只检测告警不自动暂停任务）、`emergency_streak_samples` / `emergency_recovery_samples`（进入/解除紧急态的连续采样拍数，默认 3/5）、`alert_on_disk_emergency`（默认 `true`）、`detail_retention_days`（终态任务大行保留天数，默认 `0`=停用裁剪——任务明细与任务同生命周期，仅随手动删除清除；配置 `>0` 恢复按天裁剪）。磁盘治理没有清理线/自动删任务相关配置；删除台账保留期（7 天）是 `runtime_service` 模块常量，不进配置。`G3KU_*` 同名环境变量仅作测试与应急覆盖，配置源真值以本子节为准。
 
 ### `external_api`
 
@@ -138,7 +138,7 @@
 - 配置刷新不会把一个“已经发出去的单次 provider 请求”中途热切换到新模型；切换只作用于边界处重建的下一个请求。
 - CEO/frontdoor 在每次 `call_model` 迭代边界（含 provider-failure retry / empty-response retry 边界）对比 runtime revision：revision 变化时重新解析当前角色模型链并写回轮状态，下一次 provider 请求、上下文窗口估算与绑定模型链的能力判定（如 `content_open` 的多模态闸门）都跟随新链。轮状态用 `model_refs_revision` 记录解析时的 revision，作为下一次边界对比的基线。
 - 因此 `model_config set_scope_chain` 之后，同一轮的下一次模型调用即用新链；在同一步把切链与被门控的工具调用作为并行工具调用发出时，闸门仍按切换前的链判定。
-- Main runtime 节点的模型链在任务运行时 chat 后端的每个链轮边界活解析（纯 direct 链由 `model_refs_resolver` 读取当前角色链；链上含组时该活解析只以 route plan 为真源，候选展开不参与链替换，一槽一位的约束见 `runtime-overview.md`「Chat provider 超时与重试边界」），路由/绑定变更在下一个链轮即生效，不必等下一个回合；可重试失败退避等待结束后同样先重新解析链再继续重试。**链在重试途中被改写不会中止回合**：退避边界发现 runtime revision 变化且能解析出与在用链不同的新链时，重试循环丢弃旧链的已试集合、刷新 revision 基线并从新链链首重新评估，成功即正常返回；链未真正变化时只刷新基线，继续原有重试账本，不在同一 revision 上空转。按链首重启意味着新链里此前被跳过的模型重新获得机会。`DEFAULT_MAX_CHAIN_CHANGE_RESTARTS`（`g3ku/providers/fallback.py`）跨重启累计，只兜底"链反复变化且始终不成功"的病态抖动，达到上限后落既有链耗尽终态。CEO/frontdoor 与二者之上还有各自的回合级守卫：`react_loop` 在链耗尽错误处按 `provider_retry_invalidation` 重建回合，frontdoor 在 provider 失败/空响应边界重新解析角色链，二者都只在 `ensure_runtime_config_current` 报告配置确有前进时触发。memory queue 内部 agent 看的不是 CEO/node 的 provider retry，而是 memory 自己的同批次 validation/repair 重试点，普通 review window 不经过单独的 `assess -> apply` 交接。
+- Main runtime 节点的模型链在任务运行时 chat 后端的每个链轮边界活解析（纯 direct 链由 `model_refs_resolver` 读取当前角色链；链上含组时该活解析只以 route plan 为真源，候选展开不参与链替换，一槽一位的约束见 `runtime-overview.md`「Chat provider 超时与重试边界」），路由/绑定变更在下一个链轮即生效，不必等下一个回合；可重试失败退避等待结束后同样先重新解析链再继续重试。**链在重试途中被改写不会中止回合**：退避边界发现 runtime revision 变化且能解析出与在用链不同的新链时，重试循环丢弃旧链的已试集合、刷新 revision 基线并从新链链首重新评估，成功即正常返回；链未真正变化时只刷新基线，继续原有重试账本，不在同一 revision 上空转。按链首重启意味着新链里被跳过的模型重新获得机会。`DEFAULT_MAX_CHAIN_CHANGE_RESTARTS`（`g3ku/providers/fallback.py`）跨重启累计，只兜底"链反复变化且始终不成功"的病态抖动，达到上限后落既有链耗尽终态。CEO/frontdoor 与二者之上还有各自的回合级守卫：`react_loop` 在链耗尽错误处按 `provider_retry_invalidation` 重建回合，frontdoor 在 provider 失败/空响应边界重新解析角色链，二者都只在 `ensure_runtime_config_current` 报告配置确有前进时触发。memory queue 内部 agent 看的不是 CEO/node 的 provider retry，而是 memory 自己的同批次 validation/repair 重试点，普通 review window 不经过单独的 `assess -> apply` 交接。
 
 节点侧的路由结构有两个落地点：worker **启动构造**与管理面的**配置刷新**。两处都重建 `execution` / `inspection` 的 route plan，并且都在同一步把同一份组定义连同 revision 交给负载均衡器（`_apply_model_route_plans`；契约见 `runtime-overview.md`「节点模型路由与准入绑定」）。这个"同一步"是硬约束：准入层对链上每个 `load_balance` entry 都要能在 balancer 里查到那个组，查不到就按 `unknown_group` 跳过整条链，节点永远拿不到授予、队列冻在 waiting。新起的 worker 不会自己跑配置刷新——只有管理面保存下发的 `refresh_runtime_config` 命令才会触发它——所以注册组必须落在启动路径上，链上带组的配置才能在每次重启后继续工作。revision 只作观测，不参与重绑判定：刷新只解绑「绑定成员已被移出组」的那些节点，其余绑定与最近的请求速率、429 惩罚一律保留——那两项描述的是上游，与本地配置有没有被改过无关。因此一次与路由无关的保存（改 prompt、改渠道设置）不会打断任何节点的缓存粘性。
 
@@ -202,7 +202,7 @@ Responses 协议的请求体只带各家 `/responses` 共同支持的字段：`t
 - 运行时看的是“role -> model key -> binding -> provider target”
 - 不是简单的“role 直接写死 provider:model”
 
-绑定 key 是稳定主键：它唯一标识 `models.catalog[]` 条目，同时被 `models.roles.*` 和 `agents.multi_agent.orchestrator_model_key` 引用。管理面创建 binding 时以记录的 `default_model` 为基底自动生成 key，遇到同名模型时追加数字后缀去重，因此 key 不再等于模型名，不同供应商可以添加同名模型。展示标题的优先级是绑定级 `name` > 记录的 `default_model` > `key`：`name` 是 `models.catalog[]` 条目的绑定层字段，空值为「未命名」，展示回退到 `default_model`，写入空 `name`/删除 `name` 即回到回退展示而不改写 key；非空 `name` 在创建/编辑 binding 时做大小写不敏感的全局去重（排除自身），`/api/models` 与 `/api/llm/bindings` 两个视图都读写该字段。编辑 `default_model` 或 `name` 都会更新展示标题而不改写 key；命名与展示职责详见 `web-and-admin.md`「Model Config Page And Admin Contract」。
+绑定 key 是稳定主键：它唯一标识 `models.catalog[]` 条目，同时被 `models.roles.*` 和 `agents.multi_agent.orchestrator_model_key` 引用。管理面创建 binding 时以记录的 `default_model` 为基底自动生成 key，遇到同名模型时追加数字后缀去重，因此 key 不等于模型名，不同供应商可以添加同名模型。展示标题的优先级是绑定级 `name` > 记录的 `default_model` > `key`：`name` 是 `models.catalog[]` 条目的绑定层字段，空值为「未命名」，展示回退到 `default_model`，写入空 `name`/删除 `name` 即回到回退展示而不改写 key；非空 `name` 在创建/编辑 binding 时做大小写不敏感的全局去重（排除自身），`/api/models` 与 `/api/llm/bindings` 两个视图都读写该字段。编辑 `default_model` 或 `name` 都会更新展示标题而不改写 key；命名与展示职责详见 `web-and-admin.md`「Model Config Page And Admin Contract」。
 
 ### 角色路由：有序 fallback 与负载均衡组
 
@@ -232,7 +232,7 @@ Responses 协议的请求体只带各家 `/responses` 共同支持的字段：`t
 
 Leader（CEO/frontdoor）解析本轮模型引用时按三档取值，顺序固定：会话固定模型 > 会话链 > `models.roles.ceo`。设置住在会话元数据的 `model_selection`：
 
-- `{"mode": "model", "model_key": "..."}`：本轮 `model_refs` 是该固定模型（单元素），不再走任何链。
+- `{"mode": "model", "model_key": "..."}`：本轮 `model_refs` 是该固定模型（单元素），不走任何链。
 - `{"mode": "chain", "model_keys": ["b", "a"]}`：本轮用这条**会话链**，顺序即 fallback 优先级，只作用于该会话。
 - `model_keys` 为空或整键缺席：走全局 `models.roles.ceo`。会话从没编辑过链时就是这个形态，所以默认态不落 metadata 键。
 
@@ -253,8 +253,8 @@ Leader（CEO/frontdoor）解析本轮模型引用时按三档取值，顺序固�
 
 - 运行时解析跳过坏成员：`resolve_role_model_key` 返回链上第一个记录仍在的成员，`build_chat_model` 用它构造 provider 链与默认模型。整条链都不可用时报错点名每个成员 key，并把处置写进「模型配置」。
 - 结构视图不动：`get_role_model_keys`、`get_scope_model_chain`、管理面 `roles` / `route_entries` 仍按配置的原始链给出。操作员看得见坏的那一位，才知道要恢复哪条记录、删哪一行；节点车道的 `model_refs` 也因此在跳失败时自动前进到下一位。
-- operator 读写面降级而不失败：`facade.list_bindings` / `describe_binding` / `set_binding_enabled` / `delete_binding` 对丢失记录出 `record_missing: true` 的行（目录自带的窗口、重试、名称照出，凭据那一半留空），删除不再要求记录存在。`facade.get_binding` 保持抛错——它是运行时解析用的，静默返回空 provider 只会把一次配置故障伪装成一次鉴权失败。
-- 前端把 `record_missing` 画成「凭据记录缺失」徽标（配置列表卡片与详情抽屉头各一处）。详情抽屉对这种行不再请求必然 404 的记录，否则「删除配置」这条修路够不到。
+- operator 读写面降级而不失败：`facade.list_bindings` / `describe_binding` / `set_binding_enabled` / `delete_binding` 对丢失记录出 `record_missing: true` 的行（目录自带的窗口、重试、名称照出，凭据那一半留空），删除不要求记录存在。`facade.get_binding` 保持抛错——它是运行时解析用的，静默返回空 provider 只会把一次配置故障伪装成一次鉴权失败。
+- 前端把 `record_missing` 画成「凭据记录缺失」徽标（配置列表卡片与详情抽屉头各一处）。详情抽屉对这种行不请求必然 404 的记录，否则「删除配置」这条修路够不到。
 
 写车道不认「就地重绑」：`update_config_record` 与 `update_binding` 仍要求目标记录存在，恢复一条丢失记录的正道是配置包导入或密钥代际回滚，否则就是删行后重新添加（删行会连带丢掉链位、绑定名与会话固定，所以先试恢复）。
 
@@ -276,8 +276,8 @@ Leader（CEO/frontdoor）解析本轮模型引用时按三档取值，顺序固�
 - 排查模型鉴权问题时，不能只看 JSON 文件
 - 覆盖层防护：激活用的 master key 无法解密已存在的覆盖层时，服务进入只读空视图，任何持久化都会被拒绝——错误密钥只能「读不到」，不能「写掉」别人的数据（tests/test_security_overlay_guard.py 锁定该契约）。这个状态本身带读数：`/api/bootstrap/status` 的 `overlay_readable`（`false`＝钥匙与覆盖层不成对）与 `overlay_entries`，`_activate()` 同时打一条 ERROR；`mode=unlocked` 只说内存里有钥匙，不说它开得开东西。
 - `auto-unlock.key` 是**某一任主密钥的 bearer 件**，启动顺序里它排在口令前面，所以它比口令更先决定进程用哪把钥匙。`install_master_key()`（配置包导入的那一步）在装好新钥匙后必须把它一起换掉：文件已存在就用新钥匙重写（操作员开过免密，意图保留），不存在就不新建（免密仍是 opt-in）。留着旧件等于让下次启动带着解不开自己覆盖层的钥匙起来——所有 apikey 读成空、所有密钥写入被拒，而界面显示一切正常（tests/test_security_auto_unlock_staleness.py 锁定这两半）。同理，worker 的主密钥是 web 在派生它时用 env 递过去的（`g3ku/web/worker_control.py`），所以换完钥匙必须让 worker 重启一次：旧 worker 的 `refresh_runtime_config` 会在 `task_commands` 里留下 `status=failed / error_text=secret_overlay_decrypt_failed`，那是判据而不是噪声。
-- 覆盖层写入耐久性：两条销毁路径都要堵。其一就是上面的错误密钥覆盖；其二是**写失败本身**——`SecretOverlayStore.save()` 走同目录临时文件 + `fsync` + `os.replace()`，绝不用 `write_bytes` 直接落目标（`"wb"` 会先截断再写，一次 ENOSPC 就把覆盖层留成 0 字节，之后解密守卫反过来拒绝一切写入，数据没了且恢复被堵）。`_activate()` 只读不写：解锁/启动不再回写覆盖层，一次例行重启因此不再等于重写全部密钥。守卫测试同时锁住"写失败后原件不变、不留 `.tmp-*`"和"激活后文件 mtime 不变"。
-- 密钥材料有自己的滚动备份与留证：`.g3ku/llm-config-backups/<UTC 时间戳>/` 存最近 12 代完整钥匙材料（主密钥信封、`auto-unlock.key`、`llm-config/index.json`、`records/`、`secret-realms/`），代际只在"值得留"的状态下生成——**非空**的信封、任一 record 文件、任一 realm 覆盖层至少存在一样；指纹与最新一代相同就不再生成（每次重启都占一代等于把可用副本轮掉）。每次动作追加一行到 `.g3ku/security-events.jsonl`：`key_store_backed_up` / `key_store_missing_material` / `key_store_initialized` / `key_store_restored` / `key_store_overlay_archived`，带 pid、原因与文件数。
+- 覆盖层写入耐久性：两条销毁路径都要堵。其一就是上面的错误密钥覆盖；其二是**写失败本身**——`SecretOverlayStore.save()` 走同目录临时文件 + `fsync` + `os.replace()`，绝不用 `write_bytes` 直接落目标（`"wb"` 会先截断再写，一次 ENOSPC 就把覆盖层留成 0 字节，之后解密守卫反过来拒绝一切写入，数据没了且恢复被堵）。`_activate()` 只读不写：解锁/启动不回写覆盖层，一次例行重启因此不等于重写全部密钥。守卫测试同时锁住"写失败后原件不变、不留 `.tmp-*`"和"激活后文件 mtime 不变"。
+- 密钥材料有自己的滚动备份与留证：`.g3ku/llm-config-backups/<UTC 时间戳>/` 存最近 12 代完整钥匙材料（主密钥信封、`auto-unlock.key`、`llm-config/index.json`、`records/`、`secret-realms/`），代际只在"值得留"的状态下生成——**非空**的信封、任一 record 文件、任一 realm 覆盖层至少存在一样；指纹与最新一代相同就不生成（每次重启都占一代等于把可用副本轮掉）。每次动作追加一行到 `.g3ku/security-events.jsonl`：`key_store_backed_up` / `key_store_missing_material` / `key_store_initialized` / `key_store_restored` / `key_store_overlay_archived`，带 pid、原因与文件数。
 - 0 字节等于损坏，不等于存在：`configured_key_material()` 把"存在但长度为 0"的文件单列成 `empty`，它既不算完好也不生成代际，而 `master.key` 这个文件只要存在过（哪怕是 0 字节）就算"这个项目配过"。**现场信封不可用时 `prune_backups()` 直接不裁剪**——那一刻没有任何一代是冗余的，照保留数剪下去就是把一次可恢复事故剪成不可恢复。restore 的"已有 master.key 就拒绝覆盖"同轴：判据是非空可用，0 字节现件可以被替换。
 - **主密钥文件不见了是一次事件，不是一次新初始化**：启动链路 `auto_unlock_from_env()` 先调 `security.audit_key_store()`，把结论缓存在服务上并让它进 `/api/bootstrap/status` 的 `key_store`（`state` ∈ `ok` / `lost` / `unconfigured`，`lost` 另带缺失路径与最新备份位置）。没有这段时，被清空的凭据目录与从没配过的目录在 UI 里长得一模一样，都是"新项目"，丢的东西无人报数。恢复只由 `negi security restore` 显式触发，且现场仍有 `master.key` 时直接拒绝——`negi security status` / `backup` / `restore` 是操作员入口。
 - legacy 迁移删除凭据前有前置条件：`_migrate_legacy_state()` 是合法删掉 `master.key` 的唯一路径，它先留一份代际、再要求备份目录里确实出现 `llm-config/` 副本，否则整笔中止——`copytree` 静默失败过一次就会把"清理明文"变成不可恢复的擦除。
@@ -425,7 +425,7 @@ If a provider reply looks truncated (for example a response ending at exactly th
 
 每个模型绑定有 `retry_on`（关键词列表）与 `retry_count`（可重试错误的退避重试轮预算）。重试/轮换/退避的**行为契约**见 `runtime-overview.md`「Chat provider 超时与重试边界」；这里只讲配置语义。
 
-- `retry_on` 是**真开关**，区分"未设置"与"显式置空"：省略该字段 → 用默认关键字 `["network","429"]`；显式设为 `[]`/`""` → 无关键字 → 任何错误都不触发退避重试。schema validator（`_normalize_retry_on`）与 `model_manager` 都按此区分，不再把显式空值回填成默认。输入按空格/逗号/换行等价分隔解析（配置页以「自动重试错误关键词(空格间隔)」收集）；关键词是单 token，含空白的短语会被拆开。关键词是**第二级判据**：能拿到结构化 HTTP 状态时以状态为准（`RETRYABLE_STATUS_CODES`，单一来源在 `g3ku/providers/base.py`），只有拿不到状态才查这张表；比对前 `_` / `-` / `.` 一律按空格看待，所以 `rate limit` 也能命中上游的 `rate_limit_exceeded`。
+- `retry_on` 是**真开关**，区分"未设置"与"显式置空"：省略该字段 → 用默认关键字 `["network","429"]`；显式设为 `[]`/`""` → 无关键字 → 任何错误都不触发退避重试。schema validator（`_normalize_retry_on`）与 `model_manager` 都按此区分，不把显式空值回填成默认。输入按空格/逗号/换行等价分隔解析（配置页以「自动重试错误关键词(空格间隔)」收集）；关键词是单 token，含空白的短语会被拆开。关键词是**第二级判据**：能拿到结构化 HTTP 状态时以状态为准（`RETRYABLE_STATUS_CODES`，单一来源在 `g3ku/providers/base.py`），只有拿不到状态才查这张表；比对前 `_` / `-` / `.` 一律按空格看待，所以 `rate limit` 也能命中上游的 `rate_limit_exceeded`。
 - 判定为可重试的错误走**该模型的退避重试轮**：一轮 = 完整轮过该模型所有 key，轮间指数退避加抖动；命中即**不换 key**、也不零等待消费下游模型。轮预算耗尽才前进到链上下一个模型。链报错停止的判据是"链上每个位置都进过一次"，不是各模型预算之和跑完——被判定成不可重试的失败会让那一把键 0 轮直接让位（详见 `runtime-overview.md`「Chat provider 超时与重试边界」）。
 - 请求体形状错误只按结构化 HTTP 状态判定（400/422），无文本关键字兜底；status 不可得的错误一律走正常轮换/降级判定。
 - 换 key（轮换）只在错误**未命中 `retry_on`、且非请求体形状错误、且非内部运行时错误**时才发生，且为单趟：每个 key 各试一次即前进到链上下一个模型。**配置脚枪**：把 `401`/`403`/`invalid api key` 之类配进 `retry_on`，会让坏 key 被当成"可重试"从而只重试不换 key——坏 key 应靠"未命中 → 换 key"自愈，不要配进 `retry_on`。
@@ -460,7 +460,7 @@ If an operator reports frontdoor send failures after a model or chain change, ch
 2. The saved `llm-config` record under `.g3ku/llm-config/records/*.json` kept the field during migration.
 3. The role chain only references models that have a valid window configured.
 4. The actual provider request estimate crossed the model's window.
-5. 声明值大于真实上限时**没有任何错误信号**：网关超窗不报错，只把 completion 预算裁成 `真实窗口 − 输入`，所以回包表现为 `finish_reason=length` 且 `output_tokens < sent_max_tokens`。核对时用节点自己的观测下界：`max_observed_request_span_tokens(task_id, node_id)` 取该节点台账里 `有效输入 + 输出` 的最大实测和（走 `task_model_calls` 的 task_id 索引，不全扫）。它是"曾经装下过多少"的下界而不是真值上界；同一份声明值在发送侧（`resolve_send_model_context_window_info` 读记录 `parameters.context_window_tokens`）与派单过滤（`model_route` / 负载均衡成员）同源，改配置前先确认改的是记录那份——`models.catalog[].contextWindowTokens` 只是配置面副本。窗口虚高还会把两道闸门一起顶到墙外：发送压缩触发线（`0.80 × 窗口 × 0.95`）与节点分块压缩的进入条件都比的是这个数。
+5. 声明值大于真实上限时**没有任何错误信号**：网关超窗不报错，只把 completion 预算裁成 `真实窗口 − 输入`，所以回包表现为 `finish_reason=length` 且 `output_tokens < sent_max_tokens`。核对时用节点自己的观测下界：`max_observed_request_span_tokens(task_id, node_id)` 取该节点台账里 `有效输入 + 输出` 的最大实测和（走 `task_model_calls` 的 task_id 索引，不全扫）。它是"至少装下过多少"的下界而不是真值上界；同一份声明值在发送侧（`resolve_send_model_context_window_info` 读记录 `parameters.context_window_tokens`）与派单过滤（`model_route` / 负载均衡成员）同源，改配置前先确认改的是记录那份——`models.catalog[].contextWindowTokens` 只是配置面副本。窗口虚高还会把两道闸门一起顶到墙外：发送压缩触发线（`0.80 × 窗口 × 0.95`）与节点分块压缩的进入条件都比的是这个数。
 
 Behavior once the estimate crosses the window: 详见 `runtime-overview.md`「Frontdoor Context Compression」.
 
