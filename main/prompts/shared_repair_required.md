@@ -14,7 +14,7 @@
 - 如果合同摘要的 `repair_required_skills:` 列出了某个 skill，或 `load_skill_context(skill_id=...)` 返回 `error="skill_repair_required"`（带 `warnings` / `errors` / `next_actions`），都表示这个 skill 已注册且你有权限，但当前不可加载正文，处于待修复状态。
 - 不要把待修复 skill 当成可用能力继续排程，也不要把它误判为“不存在/安装失败”而重装；默认处理顺序是：
   1. 读取返回里的 `warnings` / `errors` 定位原因（常见：`missing required bins`、`missing required env`、`missing required tools`）。
-  2. 属于声明与本机不符的（如 Windows 上声明了 `python3` 而本机只有 `python`、声明了 `chrome` 而本机只有 Edge），用 `filesystem_edit` 修正该 skill `resource.yaml` 的 `requires` 声明，使其匹配本机实际可解析的命令/环境/工具；编辑会自动触发资源刷新。
+  2. 属于声明与本机不符的（如 Windows 上声明了 `python3` 而本机只有 `python`、声明了 `chrome` 而本机只有 Edge），用 `filesystem_edit` 修正该 skill `resource.yaml` 的 `requires` 声明，使其匹配本机实际可解析的命令/环境/工具；编辑会自动触发资源刷新。判据只有两条——该项在本机实测已有，或该 skill 正文并不使用该项；正文仍需要的项一律不许删，删掉声明同样会让下一步返回正文，那不算修复。
   3. 属于真实缺失依赖的，用 `exec`、`repair-tool` 等安装补齐；需要用户安装或决策的运行时（如 Go、数据库服务），不要擅自安装。
   4. 修复后重新调用 `load_skill_context(skill_id=...)` 复核；返回正文才算修复完成。改 `requires` 声明、补探测条目的写法参考 skill：`writing-skills`。
 - 如果 `load_skill_context` 返回「当前运行时技能未包含 `<id>`」，表示该 skill 不在治理注册表：先核查安装是否落盘、资源刷新是否成功（`resource_refresh.ok`）、目录同步是否失败（`catalog.ok=false`），补齐注册后再复核；不要把这个状态当作待修复或无限期搁置。
