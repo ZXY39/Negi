@@ -6,12 +6,22 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parents[2]
 
 
+def _lane_prompt(relative_path: str) -> str:
+    """节点道两条车道的条款现在住在 shared_*.md 里，断言要读展开后的文本。"""
+
+    if relative_path.startswith("main/prompts/"):
+        from main.prompts import load_prompt
+
+        return load_prompt(Path(relative_path).name)
+    return (REPO_ROOT / relative_path).read_text(encoding="utf-8")
+
+
 def test_execution_prompts_use_exec_for_reading_and_filesystem_for_mutation() -> None:
     for relative_path in (
         "main/prompts/node_execution.md",
         "main/prompts/acceptance_execution.md",
     ):
-        prompt = (REPO_ROOT / relative_path).read_text(encoding="utf-8")
+        prompt = _lane_prompt(relative_path)
         assert "`exec`" in prompt
         assert "`filesystem_write`" in prompt
         assert "`filesystem_edit`" in prompt
@@ -31,7 +41,7 @@ def test_prompts_and_exec_manifest_do_not_hardcode_exec_as_read_only() -> None:
         "main/prompts/acceptance_execution.md",
     )
     for relative_path in prompt_paths:
-        prompt = (REPO_ROOT / relative_path).read_text(encoding="utf-8")
+        prompt = _lane_prompt(relative_path)
         assert "只读 `exec`" not in prompt
         assert "read-only `exec`" not in prompt
         assert "runtime tool contract" in prompt or "load_tool_context" in prompt
@@ -56,7 +66,7 @@ def test_prompts_describe_historical_image_reopen_via_content_open() -> None:
         "main/prompts/node_execution.md",
         "main/prompts/acceptance_execution.md",
     ):
-        prompt = (REPO_ROOT / relative_path).read_text(encoding="utf-8")
+        prompt = _lane_prompt(relative_path)
         assert "如果历史上下文中只有图片路径或图片 `ref`" in prompt
         assert "使用 `content_open` 重新打开图片" in prompt
         assert "若本轮已经直接带有图片输入" in prompt
@@ -76,7 +86,7 @@ def test_prompts_require_stage_summary_to_cover_facts_goals_and_lessons() -> Non
         "main/prompts/node_execution.md",
         "main/prompts/acceptance_execution.md",
     ):
-        prompt = (REPO_ROOT / relative_path).read_text(encoding="utf-8")
+        prompt = _lane_prompt(relative_path)
         assert "`completed_stage_summary` 必须是对本阶段的简要概括" in prompt
         assert "本阶段已确认的事实" in prompt
         assert "剩下的目标" in prompt

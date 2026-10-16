@@ -11,11 +11,15 @@ from __future__ import annotations
 
 from pathlib import Path
 
+from main.prompts import load_prompt
+
 REPO_ROOT = Path(__file__).resolve().parents[2]
-NODE_PROMPT = (REPO_ROOT / "main/prompts/node_execution.md").read_text(encoding="utf-8")
-ACCEPTANCE_PROMPT = (REPO_ROOT / "main/prompts/acceptance_execution.md").read_text(encoding="utf-8")
+# 节点道的合同条款现在住在 shared_*.md 里，由 main/prompts.py 展开。断言必须读**渲染结果**：
+# 读原始文件会漏看 partial 里的条款，那等于测试一个模型根本看不到的形状。
+NODE_PROMPT = load_prompt("node_execution.md")
+ACCEPTANCE_PROMPT = load_prompt("acceptance_execution.md")
 CEO_PROMPT = (REPO_ROOT / "g3ku/runtime/prompts/ceo_frontdoor.md").read_text(encoding="utf-8")
-BLOCKED_PROMPT = (REPO_ROOT / "main/prompts/blocked_verification.md").read_text(encoding="utf-8")
+BLOCKED_PROMPT = load_prompt("blocked_verification.md")
 
 OVERLAY_HEADER = "System note for this turn only:"
 

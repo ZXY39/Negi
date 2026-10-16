@@ -1,0 +1,18 @@
+- 如果 JSON 里出现 `file_targets`，把它视为当前任务依赖文件的权威 reopen 入口；优先直接使用其中的真实 `path` / `ref`，不要自己发明占位名或做大范围兜底搜索。
+- `runtime_environment` 是当前节点的权威运行环境和工具约束；涉及路径、工作目录、解释器、shell 行为时，优先遵循其中的 `path_policy` 与 `tool_guidance`。
+- 不要假设相对路径会自动绑定到 workspace；涉及 `filesystem`、`content`、`exec` 的路径与工作目录规则，以 `runtime_environment.path_policy` 为准。
+- 当解释器选择必须精确一致时，优先使用 `runtime_environment.project_python_hint`。
+- 默认所有文件都放在 `runtime_environment.task_temp_dir`。只有为了满足任务要求且只能写到其他目录时，才允许例外；例外时必须显式使用绝对路径，不得隐式落到项目根目录。
+- 如果需要新建脚本、抓取结果、缓存、调试输出或其他中间文件，默认都写到 `runtime_environment.task_temp_dir`。
+- 如果真实目标项目不在当前 `runtime_environment.workspace_root` 内，使用绝对路径直达目标位置，不要先在当前仓库里做大范围兜底搜索。
+- 本地仓库/目录/文件名发现与环境探查优先使用 `exec`，并遵循当前 `runtime tool contract` / `load_tool_context` 暴露的运行约束。
+- 一旦目标收敛到具体本地文件正文，或 `exec` 多次只返回 `head_preview` 式截断结果，切换到 `content_open(path=绝对路径, start_line, end_line)` 做局部核对。
+- `artifact:` 与外部化内容导航优先使用 `content_open` / `content_search`。
+- 如果历史上下文中只有图片路径或图片 `ref`，而你需要直接查看图像内容，使用 `content_open` 重新打开图片。
+- 若本轮已经直接带有图片输入，不要为了查看同一张当前轮图片再调用 `content_open`。
+- 若当前模型不是多模态模型，`content_open` 打开图片会被拒绝并返回 `非多模态模型无法打开图片`；不要对同一目标重复调用。
+- 任何文件创建、修改、复制、移动、删除或补丁提案优先通过 `filesystem_write`、`filesystem_edit`、`filesystem_copy`、`filesystem_move`、`filesystem_delete`、`filesystem_propose_patch` 完成，只有在 exec 允许非只读操作而上述工具无法完成时，才可使用 exec 完成。
+- 当前链路不提供直接长期记忆搜索；如未在当前上下文里给出相关长期记忆，就不要自行模拟或替代这类能力。
+- 除非上游提示词或用户需求明确要求你搜索或核对其他 skill 或工具，否则一律不允许自行搜索、猜测或扩展范围。
+- 对只读/检索类工具（如 `content_open`、`content_search`、`exec`、`task_progress`、`task_node_detail`），如果相同参数的调用已经返回了结果，**不要重复调用完全相同的只读/检索工具**；优先复用已有 `ref`、`resolved_ref`、`summary`、节点摘要或 `artifact` 继续推进。若确实信息不足，改用不同的行号窗口、不同的 query、不同的目标对象，或直接进入收尾判断。
+- 判断哪些历史 round 扣除了本阶段预算时，**禁止按工具名自行猜测**；以每轮注入的系统 overlay（抬头为 `System note for this turn only:`，节点运行合同块的 `stage_summary:` 行）给出的 `tool_rounds_used` 与「已用/预算」实数为准。不计预算的工具名单不在本文件列名：该名单每轮由系统 overlay 重新列出，两份说法不一致时以 overlay 为准。
