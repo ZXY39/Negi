@@ -3253,10 +3253,11 @@ textarea {
 }
 
 .msg-action-btn {
+    --msg-action-pad-x: 10px;
     display: inline-flex;
     align-items: center;
     gap: 5px;
-    padding: 4px 10px;
+    padding: 4px var(--msg-action-pad-x);
     /* 描边默认不画，移到按钮上才显形。透明边框继续占位，
        免得显形那一刻按钮长出一圈、顶动会话流。 */
     border: 1px solid transparent;
@@ -3272,6 +3273,21 @@ textarea {
 .msg-action-btn svg {
     width: 13px;
     height: 13px;
+    /* 图标按线盒居中时，墨迹底边比文字（无下伸部）低 1px，读起来就是图标往下掉。
+       实测「Fork」9.25px / git-fork 10.75px、铅笔 11.75px / 「编辑」11px，抬 1px 后底边齐。 */
+    transform: translateY(-1px);
+}
+
+/* 静止档没有描边，胶囊的横向内边距就成了死空格：按钮落在行首/行尾时用它抵掉，
+   图标才和上方气泡同一条边线（悬停时胶囊向行外溢出，布局不动）。 */
+.msg-meta > .msg-action-btn:first-child,
+.ceo-turn-meta > .msg-action-btn:first-child {
+    margin-inline-start: calc(-1 * (var(--msg-action-pad-x) + 1px));
+}
+
+.msg-meta > .msg-action-btn:last-child,
+.ceo-turn-meta > .msg-action-btn:last-child {
+    margin-inline-end: calc(-1 * (var(--msg-action-pad-x) + 1px));
 }
 
 .msg-action-btn:hover,

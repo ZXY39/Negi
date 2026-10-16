@@ -407,20 +407,43 @@ test("R7 接线静态契约:委托/时序/横幅/HTML 元素", () => {
     assert.ok(!css.includes(".ceo-turn-active .msg-meta"), "CSS 仍按整行隐藏元信息里的按钮");
     assert.ok(!css.includes(".message:hover .msg-action"), "动作按钮仍靠悬停显形");
     // 按钮文字常驻，只有外面那圈胶囊描边按悬停显形：基档必须全透明，悬停档画回来。
-    const actionRules = (css.replace(/\r\n/g, "\n").match(/\n\.msg-action-btn[^{]*\{[^}]*\}/g) || []).map(
-        (rule) => ({ selector: rule.slice(0, rule.indexOf("{")), body: rule.slice(rule.indexOf("{") + 1, -1) })
-    );
-    const actionBase = actionRules.find((rule) => rule.selector.trim() === ".msg-action-btn");
+    const actionRules = [...css.replace(/\r\n/g, "\n").matchAll(/([^{}]+)\{([^}]*)\}/g)]
+        .map(([, selector, body]) => ({ selector: selector.trim(), body }))
+        .filter((rule) => rule.selector.includes(".msg-action-btn"));
+    const actionBase = actionRules.find((rule) => rule.selector === ".msg-action-btn");
     assert.ok(
         actionBase &&
             actionBase.body.includes("border: 1px solid transparent") &&
             actionBase.body.includes("background: transparent"),
         "动作按钮的描边/底色没有默认隐藏"
     );
-    const actionHover = actionRules.find((rule) => rule.selector.includes(":hover"));
+    const actionHover = actionRules.find((rule) => rule.selector.includes(".msg-action-btn:hover"));
     assert.ok(
         actionHover && actionHover.body.includes("border-color:") && actionHover.body.includes("background:"),
         "悬停档没有把描边画回来"
+    );
+    // 对齐档：横向内边距只有一个来源变量，行首/行尾那颗用它把自己的内缩抵掉，
+    // 图标才和上方气泡同一条边线；图标抬 1px 让墨迹底边贴住文字底边。
+    assert.ok(
+        actionBase &&
+            actionBase.body.includes("--msg-action-pad-x:") &&
+            actionBase.body.includes("padding: 4px var(--msg-action-pad-x)"),
+        "动作按钮的横向内边距没有走同一个变量"
+    );
+    const actionLead = actionRules.find((rule) => rule.selector.includes(".msg-action-btn:first-child"));
+    const actionTrail = actionRules.find((rule) => rule.selector.includes(".msg-action-btn:last-child"));
+    assert.ok(
+        actionLead && actionLead.body.includes("margin-inline-start: calc(-1 * (var(--msg-action-pad-x) + 1px))"),
+        "行首动作按钮没有抵掉胶囊内缩"
+    );
+    assert.ok(
+        actionTrail && actionTrail.body.includes("margin-inline-end: calc(-1 * (var(--msg-action-pad-x) + 1px))"),
+        "行尾动作按钮没有抵掉胶囊内缩"
+    );
+    const actionIcon = actionRules.find((rule) => /\.msg-action-btn svg$/.test(rule.selector));
+    assert.ok(
+        actionIcon && actionIcon.body.includes("transform: translateY(-1px)"),
+        "动作按钮的图标没有做光学抬高"
     );
     // 元信息（时间/用量/复制）改成点击这条消息才显形，两车道各一条门；两颗按钮不吃这道门。
     assert.ok(
