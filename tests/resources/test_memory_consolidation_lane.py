@@ -913,3 +913,184 @@ def test_the_consolidator_prompt_names_the_row_shape_and_its_cap() -> None:
     assert "大类:关键词" in prompt
     assert "不得拿 note 名、路径或 id 当关键词" in prompt
     assert f"第一行整行不超过 {markdown.CONSOLIDATION_SCOPE_LINE_MAX_CHARS} 字" in prompt
+
+
+def _write_batch(module, request_id: str = "write_purge_1"):
+    return module.MemoryBatch(
+        op="write",
+        items=[
+            module.MemoryQueueRequest(
+                op="write",
+                decision_source="self",
+                payload_text="把这节导航去掉",
+                created_at="2026-04-25T00:00:30+08:00",
+                request_id=request_id,
+            )
+        ],
+    )
+
+
+def _purge_session(manager, module):
+    return module._MemoryToolSession(
+        snapshot_text=manager.snapshot_text(),
+        notes_dir=manager.notes_dir,
+        index_dir=manager.index_dir,
+    )
+
+
+def _seed_two_categories(manager, markdown_memory):
+    """One category with two retired rows (one owning an ordinary note), one with a single row."""
+    env_port = _add(manager, body="反代端口改成 8799 之后要重启 nginx", minimal="反代->端口", note_ref="note_deep")
+    env_web = _add(manager, body="本机网页 API 端口是 18790", minimal="网页->端口")
+    resume = _add(manager, body="投递版简历须一页且上下留白对称", minimal="简历->留白")
+    resident = _add(manager, body="回信先给结论再给依据", minimal="回信->结论")
+    for memory_id in (env_port, env_web, resume):
+        manager._memory_repo.mark_compressed(memory_id)
+    _write_category(manager, "note_local_env", "本机运行环境:端口、反代\n\n## 端口\n8799 与 18790。\n")
+    _write_category(manager, "note_resume", "简历与求职:留白、一页\n\n## 版式\n一页留白对称。\n")
+    ordinary_note = manager.notes_dir / "note_deep.md"
+    ordinary_note.parent.mkdir(parents=True, exist_ok=True)
+    ordinary_note.write_text("反代细节\n", encoding="utf-8")
+    _retire(manager, [env_port, env_web], "note_local_env")
+    _retire(manager, [resume], "note_resume")
+    manager._rebuild_memory_snapshot_from_sqlite(now_iso="2026-04-25T00:00:40+08:00")
+    return {"env_port": env_port, "env_web": env_web, "resume": resume, "resident": resident}
+
+
+def test_a_category_purge_removes_the_rows_behind_one_navigation_line(tmp_path: Path) -> None:
+    """「这节不要了」得能落地：删的是该分类名下全部退场行，导航行随之消失，
+    别的分类、常驻块和其他行的日期一律不动。"""
+    module = _module()
+    markdown_memory = _markdown_memory()
+    manager = _manager(tmp_path)
+    try:
+        ids = _seed_two_categories(manager, markdown_memory)
+        resident_chars = manager._resident_memory_chars()
+        before_updated_at = {
+            str(row["memory_id"]): str(row["updated_at"]) for row in manager._memory_repo.list_memories()
+        }
+
+        session = _purge_session(manager, module)
+        handle = markdown_memory.note_handle("note_local_env", category=True)
+        staged = session.apply_batch(category_deletes=[handle])
+        assert staged == {"ok": True, "status": "batch_staged"}, staged
+        assert session.batch_has_mutation() is True, "整节摘掉是变更，必须走预览+确认"
+
+        session.confirm_batch()
+        validated = manager._build_validated_write_from_apply_batch(
+            before_text=manager.snapshot_text(),
+            session=session,
+            batch=_write_batch(module),
+        )
+        assert validated.purged_categories == [
+            {"note_ref": "note_local_env", "memory_ids": sorted([ids["env_port"], ids["env_web"]])}
+        ]
+        manager._commit_validated_write(validated)
+
+        rows = {str(row["memory_id"]): row for row in manager._memory_repo.list_memories()}
+        assert ids["env_port"] not in rows and ids["env_web"] not in rows
+        assert ids["resume"] in rows and ids["resident"] in rows
+        document = (tmp_path / "memory" / "MEMORY.md").read_text(encoding="utf-8")
+        assert "本机运行环境" not in document, "被摘那节的导航行不再常驻"
+        resume_handle = markdown_memory.note_handle("note_resume", category=True)
+        assert f"简历与求职:留白、一页 (note: {resume_handle})" in document, "另一节不受影响"
+        assert manager._resident_memory_chars() == resident_chars, "退场行本就不计常驻字数，摘掉也不该改刻度"
+        assert str(rows[ids["resume"]]["updated_at"]) == before_updated_at[ids["resume"]]
+        assert str(rows[ids["resident"]]["updated_at"]) == before_updated_at[ids["resident"]]
+        # 分类 note 文件不在这条车道的影响范围里：删的是行，`memory/index/` 仍按永久保留处置。
+        assert (manager.index_dir / "note_local_env.md").exists()
+        # 被删行独占的普通 note 走归属轴回收，理由要说清是谁没的。
+        assert not (manager.notes_dir / "note_deep.md").exists()
+
+        changes = manager._build_structured_changes(validated)
+        purges = [change for change in changes if change["type"] == "category_purge"]
+        assert [str(item["note_ref"]) for item in purges] == ["note_local_env", "note_local_env"]
+        assert {str(item["memory_id"]) for item in purges} == {ids["env_port"], ids["env_web"]}
+        assert all(str(item["original_content"]).strip() for item in purges), "摘掉的每条都要留原文"
+        assert not [change for change in changes if change["type"] == "delete"], "不是普通删除，别混进那一档"
+        reaps = [change for change in changes if change["type"] == "note_reaped"]
+        assert [(item["note_ref"], item["reason"]) for item in reaps] == [("note_deep", "memory_deleted")]
+    finally:
+        manager.close()
+
+
+def test_a_category_purge_lands_only_after_the_confirmation_call(tmp_path: Path) -> None:
+    """和增删改同一道门：只暂存不确认，一行都不能少。"""
+    module = _module()
+    markdown_memory = _markdown_memory()
+    manager = _manager(tmp_path)
+    try:
+        ids = _seed_two_categories(manager, markdown_memory)
+        session = _purge_session(manager, module)
+        session.apply_batch(
+            category_deletes=[markdown_memory.note_handle("note_local_env", category=True)]
+        )
+
+        with pytest.raises(module._MemoryAgentValidationError, match="memory_apply_confirm is required"):
+            manager._validate_candidate_state(
+                batch=_write_batch(module),
+                before_text=manager.snapshot_text(),
+                session=session,
+            )
+
+        rows = {str(row["memory_id"]) for row in manager._memory_repo.list_memories()}
+        assert ids["env_port"] in rows and ids["env_web"] in rows
+    finally:
+        manager.close()
+
+
+def test_the_purge_preview_names_the_category_and_its_row_count(tmp_path: Path) -> None:
+    """预览的 diff 只看常驻行，归并区那一行消失它根本照不到——所以摘节必须自己占一个字段，
+    否则模型是在没看见后果的情况下按下的确认。"""
+    module = _module()
+    markdown_memory = _markdown_memory()
+    manager = _manager(tmp_path)
+    try:
+        _seed_two_categories(manager, markdown_memory)
+        session = _purge_session(manager, module)
+        session.apply_batch(
+            category_deletes=[markdown_memory.note_handle("note_resume", category=True)]
+        )
+
+        preview = manager._memory_batch_preview(session)
+
+        assert preview["status"] == "built", preview
+        assert preview["purged_categories"] == [{"note_ref": "note_resume", "rows": 1}], preview
+    finally:
+        manager.close()
+
+
+def test_category_deletes_are_validated_by_field_name(tmp_path: Path) -> None:
+    """形状与解析都按字段名打回：一个不存在的句柄不能让整批静默少摘一节。"""
+    module = _module()
+    markdown_memory = _markdown_memory()
+    manager = _manager(tmp_path)
+    try:
+        _seed_two_categories(manager, markdown_memory)
+
+        not_a_list = _purge_session(manager, module)
+        assert not_a_list.apply_batch(category_deletes="note_local_env")["errors"]["category_deletes"] == (
+            "category_deletes must be a list"
+        )
+
+        unknown = _purge_session(manager, module)
+        unknown.apply_batch(category_deletes=["c00000"])
+        unknown.confirm_batch()
+        with pytest.raises(module._MemoryAgentValidationError, match=r"category_deletes\[0\]"):
+            manager._build_validated_write_from_apply_batch(
+                before_text=manager.snapshot_text(),
+                session=unknown,
+                batch=_write_batch(module),
+            )
+
+        empty = _purge_session(manager, module)
+        empty.apply_batch(category_deletes=["note_local_env", "note_local_env"])
+        empty.confirm_batch()
+        built = manager._build_validated_write_from_apply_batch(
+            before_text=manager.snapshot_text(),
+            session=empty,
+            batch=_write_batch(module),
+        )
+        assert len(built.purged_categories) == 1, "同一节交两次只摘一次"
+    finally:
+        manager.close()

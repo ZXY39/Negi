@@ -632,6 +632,7 @@ class _MemoryToolSession:
             list(payload.get("adds") or [])
             or list(payload.get("rewrites") or [])
             or list(payload.get("deletes") or [])
+            or list(payload.get("category_deletes") or [])
         )
 
     def confirm_batch(self) -> dict[str, Any]:
@@ -659,6 +660,7 @@ class _MemoryToolSession:
         note_upserts: dict[str, str] | None = None,
         note_edits: dict[str, list[dict[str, str]]] | None = None,
         inspired_lines: list[int] | None = None,
+        category_deletes: list[str] | None = None,
         noop_reason: str | None = None,
         already_satisfied: str | None = None,
     ) -> dict[str, Any]:
@@ -669,6 +671,7 @@ class _MemoryToolSession:
         normalized_note_upserts: dict[str, str] = {}
         normalized_note_edits: dict[str, list[dict[str, str]]] = {}
         normalized_inspired_lines: list[int] = []
+        normalized_category_deletes: list[str] = []
         normalized_noop_reason = str(noop_reason or "").strip()
         normalized_already_satisfied = str(already_satisfied or "").strip()
 
@@ -829,18 +832,33 @@ class _MemoryToolSession:
                 seen_inspired_lines.add(line)
                 normalized_inspired_lines.append(line)
 
+        raw_category_deletes = category_deletes
+        if raw_category_deletes is None:
+            raw_category_deletes = []
+        elif not isinstance(raw_category_deletes, list):
+            errors["category_deletes"] = "category_deletes must be a list"
+        else:
+            for index, item in enumerate(raw_category_deletes):
+                token = str(item or "").strip()
+                if not token:
+                    errors[f"category_deletes[{index}]"] = "category_deletes entries must name a category note"
+                    continue
+                if token not in normalized_category_deletes:
+                    normalized_category_deletes.append(token)
+
         has_mutation = bool(
             normalized_adds
             or normalized_rewrites
             or normalized_deletes
+            or normalized_category_deletes
             or normalized_note_upserts
             or normalized_note_edits
         )
         if normalized_noop_reason and has_mutation:
-            errors["noop_reason"] = "noop_reason may not be combined with add, rewrite, delete, or note change"
+            errors["noop_reason"] = "noop_reason may not be combined with add, rewrite, delete, category delete, or note change"
         if normalized_already_satisfied and (has_mutation or normalized_noop_reason):
             errors["already_satisfied"] = (
-                "already_satisfied may not be combined with add, rewrite, delete, note change, or noop_reason"
+                "already_satisfied may not be combined with add, rewrite, delete, category delete, note change, or noop_reason"
             )
         if self.batch_op == "delete" and normalized_noop_reason:
             errors["noop_reason"] = _DELETE_NOOP_RULE
@@ -848,7 +866,7 @@ class _MemoryToolSession:
             errors["already_satisfied"] = "already_satisfied is only valid for delete batches"
         if not normalized_noop_reason and not normalized_already_satisfied and not has_mutation:
             errors["batch"] = (
-                "at least one add, rewrite, delete, note_upsert, note_edits, noop_reason, or already_satisfied is required"
+                "at least one add, rewrite, delete, category_delete, note_upsert, note_edits, noop_reason, or already_satisfied is required"
             )
 
         if errors:
@@ -862,6 +880,7 @@ class _MemoryToolSession:
             "note_upserts": normalized_note_upserts,
             "note_edits": normalized_note_edits,
             "inspired_lines": normalized_inspired_lines,
+            "category_deletes": normalized_category_deletes,
             "noop_reason": normalized_noop_reason,
             "already_satisfied": normalized_already_satisfied,
         }
@@ -1067,6 +1086,10 @@ class _MemoryValidatedWrite:
     # visible instead of quietly leaving the note unchanged.
     note_edit_results: list[dict[str, Any]] = field(default_factory=list)
     inspired_memory_ids: list[str] = field(default_factory=list)
+    # Sections of the consolidation navigation this batch removes: the category note and the
+    # retired rows standing behind it. Those rows are not in the resident block, so no line
+    # number can ever name them - this is the one address that can.
+    purged_categories: list[dict[str, Any]] = field(default_factory=list)
     write_mode: str = ""
     # Note files this batch deleted because the store stopped owning them, each with
     # the reason the ownership went away.
@@ -3537,9 +3560,28 @@ class MemoryManager:
                     "content": str(item.get("content") or ""),
                 }
             )
+        purged_by_id: dict[str, str] = {}
+        for item in list(validated.purged_categories or []):
+            normalized_category = str(item.get("note_ref") or "").strip()
+            for memory_id in list(item.get("memory_ids") or []):
+                normalized_id = str(memory_id or "").strip()
+                if normalized_id and normalized_category:
+                    purged_by_id[normalized_id] = normalized_category
         for memory_id in list(validated.deletes or []):
             normalized_id = str(memory_id or "").strip()
             if not normalized_id:
+                continue
+            if normalized_id in purged_by_id:
+                # Not a memory that left the block: a whole navigation section being
+                # dropped. It needs its own chip, or the ledger reads it as an ordinary delete.
+                changes.append(
+                    {
+                        "type": "category_purge",
+                        "memory_id": normalized_id,
+                        "note_ref": purged_by_id[normalized_id],
+                        "original_content": original_bodies.get(normalized_id, ""),
+                    }
+                )
                 continue
             changes.append(
                 {
@@ -5550,6 +5592,7 @@ class MemoryManager:
             note_upserts: dict[str, str] | None = None,
             note_edits: dict[str, list[dict[str, str]]] | None = None,
             inspired_lines: list[int] | None = None,
+            category_deletes: list[str] | None = None,
             noop_reason: str | None = None,
             already_satisfied: str | None = None,
         ) -> dict[str, Any]:
@@ -5561,6 +5604,12 @@ class MemoryManager:
             list of line numbers; `inspired_lines` takes the line numbers this request actually
             decided on. Lines outside the block are refused per item, the rest of the batch
             still stands. Do not write a date into `content` - the backend owns the prefix.
+
+            `category_deletes` removes a whole section of the consolidation navigation at the
+            end of the block: pass the `(note: ...)` token shown beside that section (the real
+            note name works too). It deletes every retired memory filed under that category, so
+            the line disappears and nothing else in the block moves. The category note itself
+            under `memory/index/` stays - this lane never deletes archive files.
             """
 
             staged = session.apply_batch(
@@ -5570,6 +5619,7 @@ class MemoryManager:
                 note_upserts=note_upserts,
                 note_edits=note_edits,
                 inspired_lines=inspired_lines,
+                category_deletes=category_deletes,
                 noop_reason=noop_reason,
                 already_satisfied=already_satisfied,
             )
@@ -5640,6 +5690,8 @@ class MemoryManager:
             "new_text 留空即删掉这段。改一两个段落用 note_edits，不要用 note_upserts 重交整份。\n"
             "- 归并区列出的分类 note 也可以这样改（内容错误或过时时）；不要新建分类 note，"
             "也不要让记忆从归并区退场，退场只由归并环节做。\n"
+            "- 整个分类要摘掉时把它那一行末尾括号里的句柄放进 category_deletes（写分类名也算命中）；"
+            "这一批会删掉归进该分类的全部已退场记忆，分类 note 正文与归档文件都不删。\n"
             "- inspired_lines 可选，填当前正文里对本批判断有实质帮助的行号。\n"
             "- minimal_memory 写成 `条件->要求关键词`。\n"
             "- 一条记忆要挂 note 时，在 adds/rewrites 条目里给 `note_ref`（note 文件名，不带 .md）；"
@@ -5706,6 +5758,12 @@ class MemoryManager:
             "adds": len(validated.adds),
             "rewrites": len(validated.rewrites),
             "deletes": len(validated.deletes),
+            # The diff above compares resident lines only, so a purged navigation line is
+            # invisible in it - without this field the model would confirm without seeing it.
+            "purged_categories": [
+                {"note_ref": str(item.get("note_ref") or ""), "rows": len(list(item.get("memory_ids") or []))}
+                for item in list(validated.purged_categories or [])
+            ],
             "chars_before": len(before_lines and "\n".join(before_lines) or ""),
             "chars_after": validated.memory_chars_after,
             "line_count_after": len(after_lines),
@@ -5777,6 +5835,37 @@ class MemoryManager:
         delete_ids: set[str] = set()
         for index, item in enumerate(deletes):
             delete_ids.add(_entry_at_line("deletes", index, item).memory_id)
+
+        # The consolidation navigation is the one thing in the block a line number cannot
+        # reach: the rows behind it left the resident block, so they have no line. The token
+        # printed beside the section is the address, and purging means deleting every retired
+        # row filed under that category - the navigation line is derived, so it goes by itself.
+        raw_category_deletes = payload.get("category_deletes")
+        if raw_category_deletes is None:
+            raw_category_deletes = []
+        elif not isinstance(raw_category_deletes, list):
+            raise _MemoryAgentValidationError("category_deletes must be a list")
+        category_names = {path.stem for path in self.index_dir.glob("*.md")}
+        retired_by_category: dict[str, list[str]] = {}
+        for row in self._memory_repo.list_memories():
+            category = str(row.get("consolidated_into") or "").strip()
+            memory_id = str(row.get("memory_id") or "").strip()
+            if category and memory_id:
+                retired_by_category.setdefault(category, []).append(memory_id)
+        purged_categories: list[dict[str, Any]] = []
+        purged_ids: set[str] = set()
+        for index, token in enumerate(raw_category_deletes):
+            name = resolve_note_token(str(token or "").strip(), set(), category_names)
+            already_purged = next((item for item in purged_categories if item["note_ref"] == name), None)
+            if already_purged is not None:
+                continue
+            category_ids = sorted(retired_by_category.get(name) or [])
+            if not category_ids:
+                raise _MemoryAgentValidationError(
+                    f"category_deletes[{index}]: {token} names no category with retired memories"
+                )
+            purged_categories.append({"note_ref": name, "memory_ids": category_ids})
+            purged_ids.update(category_ids)
 
         rewrite_by_id: dict[str, str] = {}
         rewrite_minimal_by_id: dict[str, str] = {}
@@ -5955,10 +6044,11 @@ class MemoryManager:
             document_preview=self._document_preview(document_text),
             adds=effective_adds,
             rewrites=effective_rewrites,
-            deletes=effective_delete_ids,
+            deletes=sorted(set(effective_delete_ids) | purged_ids),
             note_upserts=normalized_note_upserts,
             note_edits=dict(note_edits),
             inspired_memory_ids=list(inspired_memory_ids),
+            purged_categories=purged_categories,
             write_mode=self._validated_write_mode(
                 adds=adds,
                 rewrites=rewrites,

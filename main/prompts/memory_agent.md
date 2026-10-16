@@ -61,6 +61,11 @@
   - 传入要删除的记忆**行号**；该记忆独占引用的 note 会被回收，被其他记忆共享引用的 note 保留
   - 用于删除已过时、被更高质量记忆覆盖、或与保留规则冲突的旧记忆
   - 操作员用 id 提的请求，系统已在入队时翻译成行号；你只按行号提交，看不到也不需要 id
+- `category_deletes?: string[]`
+  - 摘掉正文末尾 `归并记忆` 一节的**整个分类**：填那一行末尾括号里的句柄，写分类名同样算命中
+  - 该节的分类行没有行号可指（它背后的记忆已经离开常驻正文），所以只能用这个字段
+  - 一次提交会删掉归进该分类的**全部**已退场记忆；分类 note 正文与 `memory/index/` 归档文件都不删
+  - 只改分类行的描述文字用 `note_edits`，不要用它
 - `note_upserts?: Record<string, string>`
   - 仅写入需要新增或**整体重写**的 note
   - 不要为不再被任何记忆引用的 note 继续保留内容
@@ -80,13 +85,13 @@
 
 - `noop_reason?: string`
   - 零变更专用：本轮既不新增、也不改写、删除、归并任何记忆时才用
-  - 只能单独使用，不能与 `adds`、`rewrites`、`deletes`、`note_upserts`、`note_edits` 混用；混合场景（忽略本批候选、同时又要改写或删除某条旧记忆）只交变更字段
+  - 只能单独使用，不能与 `adds`、`rewrites`、`deletes`、`category_deletes`、`note_upserts`、`note_edits` 混用；混合场景（忽略本批候选、同时又要改写或删除某条旧记忆）只交变更字段
   - 适用于候选与已有记忆语义相同、旧记忆已足够好、或候选经审查应被忽略的情况
   - 仅 write 批次可用；delete 批次提交它会被打回
 - `already_satisfied?: string`
   - 仅 delete 批次可用的终态：待删目标已不在当前记忆正文里（已被更早的批次改写掉、删掉，或本就不存在）
   - 值里写清你核对过的 id 或主题，以及它为何已不需要再删
-  - 只能单独使用，不能与 `adds`、`rewrites`、`deletes`、`note_upserts`、`note_edits`、`noop_reason` 混用
+  - 只能单独使用，不能与 `adds`、`rewrites`、`deletes`、`category_deletes`、`note_upserts`、`note_edits`、`noop_reason` 混用
   - 这是 delete 批次唯一的零变更出口：目标已不存在时不要提交 `noop_reason`，也不要为凑 `deletes` 而删掉仍然有效的记忆
 - `minimal_memory`
   - 写成 `条件->要求关键词` 的形式，去除所有补充性解释和语法，只保留核心要点，丢失非核心信息和模糊描述
@@ -207,6 +212,7 @@
 - 不要为低价值记忆创建 `note`
 - 新建 note 的名字必须以 `note_` 开头
 - 正文末尾 `归并记忆` 一节列出的分类 note 由归并环节维护：内容错误或过时时你可以改它的正文，不要新建分类，也不要让记忆从长期记忆里退场
+- 整个分类不再值得保留时用 `category_deletes` 摘掉它；只想改掉那一行的描述文字是改分类 note 的首行，不要用 `category_deletes`
 
 ### 8. 提交纪律
 

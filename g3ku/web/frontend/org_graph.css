@@ -11308,6 +11308,12 @@ textarea {
     color: #b91c1c;
 }
 
+/* 摘除分类导航与删除同族：两者都以"一行离开常驻块"结束，深一档区别在它一次带走的是
+   一个分类背后的全部退场行。这套调色板已没有空着的色相，另开冷色会让它读起来像 note 那一族。 */
+.memory-op-chip[data-op="category_purge"] {
+    color: #7f1d1d;
+}
+
 .memory-op-chip[data-op="note_upsert"] {
     color: #6d28d9;
 }

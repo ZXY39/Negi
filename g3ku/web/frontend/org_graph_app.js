@@ -15266,6 +15266,7 @@ const MEMORY_OP_KINDS = {
     note_reaped: { label: "回收 Note", icon: "trash-2" },
     category_note: { label: "归并记忆", icon: "notebook-pen" },
     consolidate: { label: "记忆退场", icon: "pencil" },
+    category_purge: { label: "摘除分类导航", icon: "trash-2" },
     compress_for_capacity: { label: "容量降级", icon: "arrow-down-wide-narrow" },
 };
 
@@ -15521,6 +15522,7 @@ function memoryChangeTypeLabel(type) {
     if (normalized === "note_reaped") return "回收 Note";
     if (normalized === "category_note") return "归并记忆";
     if (normalized === "consolidate") return "记忆退场";
+    if (normalized === "category_purge") return "摘除分类导航";
     if (normalized === "compress_for_capacity") return "容量降级";
     return normalized || "变更";
 }
@@ -15620,6 +15622,13 @@ function renderMemoryChangeBlock(change) {
         bodyHtml = `
             <div class="memory-change-col">
                 <div class="memory-change-col-label">退场的正文</div>
+                <div class="memory-change-text">${renderMemoryTextWithNoteRefs(original) || "-"}</div>
+            </div>
+        `;
+    } else if (type === "category_purge") {
+        bodyHtml = `
+            <div class="memory-change-col">
+                <div class="memory-change-col-label">从「${esc(String(change?.note_ref || "-"))}」摘下的正文</div>
                 <div class="memory-change-text">${renderMemoryTextWithNoteRefs(original) || "-"}</div>
             </div>
         `;
