@@ -2656,6 +2656,8 @@ class RuntimeAgentSession:
         if str(self._reasoning_turn_key or "") != turn_id:
             self._reasoning_turn_key = turn_id
             self._reasoning_turn_seconds = 0.0
+            self._reasoning_chars_total = 0
+            self._reasoning_est_tokens_total = 0
         return turn_id
 
     def _reasoning_close_segment(self) -> None:
@@ -2692,8 +2694,9 @@ class RuntimeAgentSession:
         段号没变才按 `seq` 追加——这是同一类"叠两份"事故在正文车道上的老教训。
         """
         self._cancel_assistant_reasoning_flush_task()
-        self._reasoning_touch_turn()
+        # 先把上一发收进它自己的回合，再划回合边界：反了会把上一回合的尾巴算进这一轮。
         self._reasoning_close_segment()
+        self._reasoning_touch_turn()
         self._reasoning_attempt += 1
         self._reasoning_text = ""
         self._reasoning_pending = ""
