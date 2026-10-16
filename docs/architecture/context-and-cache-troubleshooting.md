@@ -220,7 +220,7 @@ Heartbeat / cron 不在主 CEO/frontdoor 路径上使用单独的短 `ceo_heartb
 ### 3.16 验收 bootstrap 定稿与回合尾块
 
 - 坑：验收节点的 bootstrap（`node.prompt`/`node.input`）若随每次交付刷新，就等于每轮搬走头探针的比对基准——头探针取投影首两条记录与 seed 前缀对齐（`_adopt_fresh_turn_seed_scaffold`），第二条正是 `_build_messages` 用 `node.prompt` 装成的 bootstrap user。基准一动，跨轮/跨重启的第一跳只能报 `fallback_seed_prefix_drift`，退回整段重建。
-- 不变量：验收 bootstrap 在 `create_acceptance_node` 一次定稿，之后没有任何写路径回写它（`_refresh_acceptance_node_metadata` 只维护 metadata）。每轮的变化量全部落在**只进本轮的尾块**里：交接通知（`_acceptance_handoff_message`）与重建尾块（`_acceptance_turn_tail`）都只给 `result_payload_ref` / `final_output_ref` + `_ACCEPTANCE_SUMMARY_CHARS` 有界摘要，交付正文一律不进上下文；恢复指纹同样只认验收标准模板 + 提交载荷 ref。派发侧合同见 `main-task-runtime.md`「验收节点：提前创建、激活与握手重派发」。
+- 不变量：验收 bootstrap 在 `create_acceptance_node` 一次定稿，之后没有任何写路径回写它（`_refresh_acceptance_node_metadata` 只维护 metadata）。每轮的变化量全部落在**只进本轮的尾块**里：交接通知（`_acceptance_handoff_message`）与重建尾块（`_acceptance_turn_tail`）都只给 `result_payload_ref` / `final_output_ref` + 按内联额度（`_NODE_MESSAGE_INLINE_CHAR_LIMIT`）交付的摘要——额度内整篇、超限才给头段并指回同一个 ref，正文的完整副本住在 ref 指向的 artifact 里，上下文里不堆历次全文；尾块是每轮重付的未缓存段，因此它的实际尺寸就是这套额度的成本（实盘提交摘要与打回反馈都落在额度内）；恢复指纹同样只认验收标准模板 + 提交载荷 ref。派发侧合同见 `main-task-runtime.md`「验收节点：提前创建、激活与握手重派发」。
 - 症状：验收节点上下文里堆着历次交付全文、或对已被取代的提交下结论 → 先确认 `node.prompt` 跨轮逐字节未变（变了就是刷新路径回写了 bootstrap），再看 `request_seed_source` 是否仍在 `scaffold_seed*`。
 
 ### 3.17 长期记忆快照的会话级冻结

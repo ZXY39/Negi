@@ -22,8 +22,10 @@ from main.runtime.append_notice_context import (
 from main.runtime.node_runner import (
     _BLOCKED_VERIFICATION_LOG_KEY,
     _BLOCKED_VERIFICATION_ONLY_KEY,
+    _NODE_MESSAGE_INLINE_CHAR_LIMIT,
     _REJECTION_HISTORY_KEY,
     NodeRunner,
+    node_message_body,
 )
 from main.runtime.react_loop import ReActToolLoop
 from main.runtime.stage_budget import STAGE_TOOL_ROUND_BUDGET_MIN
@@ -876,15 +878,40 @@ def test_rejection_feedback_falls_back_and_stays_bounded() -> None:
     oversized = NodeFinalResult(
         status="failed",
         delivery_status="final",
-        summary="问" * 3000,
+        summary="问" * (_NODE_MESSAGE_INLINE_CHAR_LIMIT + 500),
         answer="",
         evidence=[],
         remaining_work=[],
         blocking_reason="",
     )
     feedback = NodeRunner._acceptance_feedback_text(oversized)
-    assert len(feedback) < 3000
-    assert feedback.endswith("…（反馈正文已截断）")
+    # 裁决函数交回完整正文；裁剪只发生在投递口，且必须留下可复开的 ref。
+    assert feedback == "问" * (_NODE_MESSAGE_INLINE_CHAR_LIMIT + 500)
+    bounded = node_message_body(feedback, ref="artifact:payload")
+    assert len(bounded) < len(feedback)
+    assert 'content_open(ref="artifact:payload")' in bounded
+
+
+def test_rejection_feedback_delivers_repair_items_within_budget() -> None:
+    """修复要求排在结论之后：旧形态在 2000 字硬切，正文一长就先砍掉它。"""
+    verdict = NodeFinalResult(
+        status="failed",
+        delivery_status="final",
+        summary="行号漂移复核：" + "证据位置需更正。" * 500,
+        answer="",
+        evidence=[],
+        remaining_work=["把 E5b 的 339-341 改为 343-345", "把 E14 的 11、19 改为 9、31"],
+        blocking_reason="",
+    )
+    feedback = NodeRunner._acceptance_feedback_text(verdict)
+    assert "把 E5b 的 339-341 改为 343-345" in feedback
+    assert "把 E14 的 11、19 改为 9、31" in feedback
+    assert node_message_body(feedback, ref="artifact:payload") == feedback
+
+
+def test_node_message_body_marks_missing_ref_honestly() -> None:
+    body = "长" * (_NODE_MESSAGE_INLINE_CHAR_LIMIT + 10)
+    assert "没有可复开的完整正文 ref" in node_message_body(body, ref="")
 
 
 def test_blocked_verification_feedback_still_prefers_blocking_reason() -> None:

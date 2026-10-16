@@ -9,6 +9,10 @@ import pytest
 
 import g3ku.agent.tools.shell as shell_module
 from g3ku.agent.tools.shell import ExecTool
+from g3ku.content import ContentNavigationService, parse_content_envelope
+from g3ku.content.navigation import INLINE_CHAR_LIMIT
+from main.storage.artifact_store import TaskArtifactStore
+from main.storage.sqlite_store import SQLiteTaskStore
 
 
 class _ChunkedStream:
@@ -431,7 +435,8 @@ async def test_exec_tool_windows_decodes_legacy_codepage_output(monkeypatch, tmp
 
 
 @pytest.mark.asyncio
-async def test_exec_tool_emits_tail_preview_for_long_output(monkeypatch, tmp_path) -> None:
+async def test_exec_tool_delivers_output_within_budget_whole(monkeypatch, tmp_path) -> None:
+    """额度内整篇给：旧形态把同一段正文在 head 与 tail 各发一遍，中间行反而拿不到。"""
     lines = [f'line-{i:03d}' for i in range(10)]
     stdout_text = '\n'.join(lines) + '\n'
 
@@ -443,12 +448,70 @@ async def test_exec_tool_emits_tail_preview_for_long_output(monkeypatch, tmp_pat
     monkeypatch.setattr(shell_module.os, 'name', 'nt', raising=False)
     monkeypatch.setattr(shell_module.asyncio, 'create_subprocess_exec', _fake_create_subprocess_exec)
 
-    payload = json.loads(await tool.execute(command='echo ok', __g3ku_runtime={'session_key': 'web:shared'}))
+    rendered = await tool.execute(command='echo ok', __g3ku_runtime={'session_key': 'web:shared'})
+    payload = json.loads(rendered)
 
     assert payload['status'] == 'success'
-    assert payload['head_preview'].startswith('line-000')
-    assert payload['tail_preview'].endswith('line-009')
-    assert 'line-009' not in payload['head_preview']
+    assert payload['head_preview'] == stdout_text.strip()
+    assert payload['tail_preview'] == ''
+    assert payload['output_truncated'] is False
+    assert 'output_ref' not in payload
+    # 额度必须落在通用外置闸门之下，否则整篇交付会被信封换成 800 字符预览。
+    assert len(rendered) <= INLINE_CHAR_LIMIT
+
+
+@pytest.mark.asyncio
+async def test_exec_tool_over_budget_output_is_recoverable_via_envelope(monkeypatch, tmp_path) -> None:
+    """超限正文不在 exec 里切：整篇留在载荷里，由统一信封外置并给回 ref，中段仍可取回。
+
+    这条从车道进口喂：工具载荷先过 `externalize_for_message(source_kind="tool_result:exec")`，
+    那才是模型真正看到的那一份。
+    """
+    lines = [f'line-{i:05d}' for i in range(2000)]
+    stdout_text = '\n'.join(lines) + '\n'
+    assert len(stdout_text) > shell_module._EXEC_INLINE_CHAR_LIMIT
+
+    async def _fake_create_subprocess_exec(*args, **kwargs):
+        return _StreamingStubProcess(stdout_chunks=[stdout_text.encode('utf-8')], returncode=0)
+
+    store = SQLiteTaskStore(tmp_path / 'runtime.sqlite3')
+    artifact_store = TaskArtifactStore(artifact_dir=tmp_path / 'artifacts', store=store)
+    content_store = ContentNavigationService(
+        workspace=tmp_path,
+        artifact_store=artifact_store,
+        artifact_lookup=artifact_store,
+    )
+    tool = ExecTool(workspace_root=str(tmp_path), content_store=content_store)
+
+    monkeypatch.setattr(shell_module.os, 'name', 'nt', raising=False)
+    monkeypatch.setattr(shell_module.asyncio, 'create_subprocess_exec', _fake_create_subprocess_exec)
+
+    try:
+        rendered = await tool.execute(
+            command='echo ok',
+            __g3ku_runtime={'session_key': 'web:shared', 'task_id': 'task:exec-size', 'node_id': 'node:exec-size'},
+        )
+        payload = json.loads(rendered)
+        assert payload['status'] == 'success'
+        assert payload['output_truncated'] is True
+        # exec 自己不再切割：正文整篇留在载荷里，切割与外置归统一信封。
+        assert 'line-01999' in payload['head_preview']
+
+        message_content = content_store.externalize_for_message(
+            rendered,
+            runtime={'task_id': 'task:exec-size', 'node_id': 'node:exec-size'},
+            display_name='tool:exec',
+            source_kind='tool_result:exec',
+            compact=True,
+            delivery_metadata={'tool_status': 'success', 'invocation_text': 'exec(echo ok)'},
+        )
+        envelope = parse_content_envelope(message_content)
+        assert envelope is not None, '超限载荷必须被外置成信封'
+        assert f'content_open(ref="{envelope.ref}")' in envelope.summary
+        opened = content_store.open(ref=envelope.ref, start_line=1, end_line=2000)
+        assert 'line-01000' in str(opened.get('excerpt') or '')
+    finally:
+        store.close()
 
 
 @pytest.mark.asyncio
@@ -470,9 +533,14 @@ async def test_exec_tool_streaming_reader_keeps_output_bounded(monkeypatch, tmp_
     payload = json.loads(await tool.execute(command='echo ok', __g3ku_runtime={'session_key': 'web:shared'}))
 
     assert payload['status'] == 'success'
+    # 捕获环之外的正文不再被切成 head/tail：头环与尾环拼成一份正文整体交付，
+    # 中段确实未保留时由标记说出来。
     assert payload['head_preview'].startswith('first-line')
-    assert payload['tail_preview'].endswith('last-line')
+    assert 'last-line' in payload['head_preview']
+    assert '中段未保留' in payload['head_preview']
+    assert payload['tail_preview'] == ''
     assert payload['stdout_truncated'] is True
+    assert payload['output_truncated'] is True
     assert payload['stdout_captured_bytes'] > 0
 
 

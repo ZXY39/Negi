@@ -105,7 +105,7 @@ Start here when you are new to the repository or when a change crosses subsystem
 - Node error pause is not delivered to the source session, or node-error heartbeats retry forever -> `heartbeat-system.md`「Task Node Error Delivery」
 - 验收反复打回同一交付、任务长时间停在「执行→验收」循环而没有判失败（是否存在打回次数上限）→ `main-task-runtime.md`「验收节点：提前创建、激活与握手重派发」（验收拒收无次数上限：打回只发反馈并复活执行节点，不终态化任务）
 - 节点详情里 `submit_final_result` 的 `summary` 是 `auto-wrapped plain-text final result`、`evidence` 全是 `Auto-collected tool result from X.` → 该轮没有真实提交，纯文本被当成规划的残留；判据与两条打回车道见 `tool-hydration-and-callable-chain.md`「阶段门控与 callable 收紧」
-- 验收节点上下文里堆着历次交付全文、或对已被取代的提交下结论、验收 bootstrap 每轮都在变 → `context-and-cache-troubleshooting.md`「验收 bootstrap 定稿与回合尾块」+ `main-task-runtime.md`「信箱投递、重激活与上行传播」（交接通知与回合尾块只给 ref + 有界摘要）
+- 验收节点上下文里堆着历次交付全文、或对已被取代的提交下结论、验收 bootstrap 每轮都在变 → `context-and-cache-troubleshooting.md`「验收 bootstrap 定稿与回合尾块」+ `main-task-runtime.md`「信箱投递、重激活与上行传播」（交接通知与回合尾块给 ref + 内联额度内的摘要，超限才带头段指回 ref）
 - False "task may be stalled" heartbeat while a long node tool (e.g. `exec` with a large `timeout_seconds`) legitimately runs, or a genuine hang after a tool timeout goes unreported -> `heartbeat-system.md`「Task Stall Detection」
 - 想判断任务停滞是不是资源排队造成 → `heartbeat-system.md`「Task Stall Detection」（失速事件自带 `stall_detail`：共享池闸位、本任务闸外排队、上游限流与占位任务，只有事实没有建议）；要看过去那段区间 → `runtime-overview.md`「Worker Performance History」（同一行窗口判读，更长区间用 `perf_inspect`）；性能条「节点队列」等待恒 0 而闸口其实在排队 → `runtime-overview.md`「节点回合闸（执行器存在的成本也要闸）」
 - 同时在跑节点数上不去、或界面「限」这个数与配置 `node_dispatch_concurrency` 不一致、想知道池位这一拍为什么加/为什么收、或"某类节点在闸外等而另一类有空格" → `runtime-overview.md`「节点回合闸」与 `main-task-runtime.md`「节点调度读数与共享池」
@@ -117,6 +117,7 @@ Start here when you are new to the repository or when a change crosses subsystem
 - 模型配置弹窗里一打开下拉，整张表单就往上跳或弹窗变高 → `web-and-admin.md`「Frontend Theme And Layout Contract」（展开面板必须脱离滚动容器挂到 body）
 - 弹窗里点列表底部的勾选框后整窗上跳、标题被顶出可视区、底部多出一截空白，换对象重开还在、刷新才恢复 → `web-and-admin.md`「Frontend Theme And Layout Contract」（弹窗外壳不许当滚动口）
 - 验收/节点把合法 PDF（或图片、xlsx 等二进制交付物）判成几十字节空壳、或在其上搜索 `%PDF` 等签名 0 命中 → `tool-hydration-and-callable-chain.md`「外置工具结果信封」（二进制目标的展示契约、字节级搜索与 `filesystem_stat` 只读测量通道）
+- 交付物里「路径 + 行号范围」的证据按被引行号读不回原文（差 1 行、差 `start_line-1`、或差 preview 的上下文行数）→ `tool-hydration-and-callable-chain.md`「外置工具结果信封」（content 车道的行号栏）
 - 节点 error_text 是不带 `Error executing` 前缀的裸异常（`FileNotFoundError: …png` 一类）而对应工具结果显示 success、或 `content_open` 声称图片已打开却没有进上下文 → `tool-and-skill-system.md`「fixed builtin tools」（图片 reopen 的存在性校验与 overlay 单图降级）
 - Token统计窗口打开期间表格不随实时事件变化、搜索/筛选与搜索框内容保留、需点「刷新」才更新、点「刷新」看似没反应或总数与明细都不动、副标题的总输入比顶部大一个缓存命中、明细行数开着开着变少（跨节点同序号顶行）、模型调用明细按时间倒序/搜索只覆盖窗口或本页的行为疑问、底栏共 N 页但翻页时才发消息、停在历史页收不到新调用或「回到最新」后行数变化、任务级统计有数字却显示「尚无按模型明细」、分发期那一段调用在明细里读不到或「类型」列分不清，或总耗时/首 Token 耗时/思考 Token 显示 `--` → `web-and-admin.md`「Task Token Stats Window Contract」
 - Node pause or resume behaves unexpectedly -> `main-task-runtime.md`「Node-Level Pause and Recovery」

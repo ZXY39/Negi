@@ -21,7 +21,7 @@ from pathlib import Path
 import pytest
 
 from main.models import NodeFinalResult, normalize_final_acceptance_metadata
-from main.runtime.node_runner import _ACCEPTANCE_SUMMARY_CHARS
+from main.runtime.node_runner import _NODE_MESSAGE_INLINE_CHAR_LIMIT
 from main.service.runtime_service import MainRuntimeService
 
 _LONG_BODY = "交付正文-" * 4000
@@ -139,7 +139,7 @@ async def test_acceptance_handoff_notice_carries_refs_instead_of_the_full_answer
         message = str(notices[-1].message or "")
         assert _LONG_BODY not in message
         assert "待验提交结果载荷 ref" in message
-        assert len(message) <= _ACCEPTANCE_SUMMARY_CHARS + 500
+        assert len(message) <= _NODE_MESSAGE_INLINE_CHAR_LIMIT + 500
         # 有界摘要仍要能认出这是哪一次提交。
         assert "交付正文" in message
     finally:
@@ -179,7 +179,32 @@ async def test_acceptance_bootstrap_bounds_the_creation_time_output(tmp_path: Pa
             result_payload_ref="artifact:payload",
             evidence_summary="",
         )
-        assert "摘要截断至" in composed
+        assert "超出内联额度" in composed
+        assert 'content_open(ref="artifact:payload")' in composed
         assert _LONG_BODY not in composed
+    finally:
+        await service.close()
+
+
+@pytest.mark.asyncio
+async def test_acceptance_handoff_delivers_whole_summary_within_budget(tmp_path: Path) -> None:
+    """额度内的提交摘要整篇进通知：验收节点每轮都要读它，砍掉尾部等于换一份核验对象。"""
+    service = _build_service(tmp_path)
+    try:
+        body = "交付正文-" * 3000
+        assert len(body) <= _NODE_MESSAGE_INLINE_CHAR_LIMIT
+        task_id, root, acceptance = await _final_acceptance_nodes(service, title="whole handoff")
+
+        service.node_runner._maybe_start_acceptance_handshake(
+            task=service.store.get_task(task_id),
+            node=service.store.get_node(root.node_id),
+            result=_submit(body),
+        )
+
+        notices = list(service.store.list_task_node_notifications(task_id, acceptance.node_id) or [])
+        assert notices
+        message = str(notices[-1].message or "")
+        assert body in message
+        assert "超出内联额度" not in message
     finally:
         await service.close()

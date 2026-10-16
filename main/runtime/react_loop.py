@@ -3710,7 +3710,13 @@ class ReActToolLoop:
             payload = self._tool_context_hydration_payload(result.get('raw_result'))
             if not isinstance(payload, dict):
                 continue
-            if not (bool(payload.get('stdout_truncated')) or bool(payload.get('stderr_truncated'))):
+            # output_truncated 才是「模型没拿全」的判据；stdout_truncated 只说明捕获环
+            # 丢过中段，短输出的预览切割在它之前就已发生，两者不同源。
+            if not (
+                bool(payload.get('output_truncated'))
+                or bool(payload.get('stdout_truncated'))
+                or bool(payload.get('stderr_truncated'))
+            ):
                 continue
             raw_content = str(tool_message.get('content') or '')
             if '已自动加载 content_open' in raw_content:
@@ -3726,10 +3732,12 @@ class ReActToolLoop:
                 runtime_context=dict(runtime_context or {}),
             )
             reminder = (
-                "\n\n⚠️ exec 输出已截断（仅返回 head/tail 预览，中间内容未显示）。"
+                "\n\n⚠️ exec 输出未整篇交付到本轮上下文。"
                 "已自动加载 content_open 工具，下一轮可直接调用它按区间精确读取、避免截断：\n"
                 "  content_open(path=<目标路径>, start_line=<起>, end_line=<止>)   # 多行源码（grep -n 给行号）\n"
                 "  content_open(path=<目标路径>, start_char=<起>, end_char=<止>)  # 单行/需字符定位\n"
+                "结果已被外置时，上面这条结果文本自带 `content_open(ref=...)`，按那个 ref 复开即可；"
+                "要对本地文件取权威行号，用 content_search 或 exec 里的 rg -n，不要按节选肉眼数。"
                 "字符偏移为 1-based Unicode code point（非字节偏移）；多行源码优先用 start_line，"
                 "start_char 仅用于单行/超长内容。"
             )

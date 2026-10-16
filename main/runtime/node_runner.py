@@ -110,9 +110,10 @@ _BLOCKED_VERIFICATION_LOG_KEY = 'blocked_verification_log'
 NOTICE_RETRY_STATE_KEY = 'notice_retry_state'
 _ACCEPTANCE_EVIDENCE_AUDIT_KEY = 'acceptance_evidence_audit'
 _REJECTION_HISTORY_KEY = 'rejection_history'
-# 交给验收节点的交付正文一律只给指针 + 有界摘要：验收节点按 ref 复核当前提交，
-# 而不是靠上下文里堆着的历次全文。
-_ACCEPTANCE_SUMMARY_CHARS = 2000
+# 节点消息正文（打回反馈、交接摘要、验收 bootstrap、每轮尾块）的内联额度。额度按实盘
+# 正文尺寸定：打回反馈 p99=3562，验收每轮尾块摘要 p50=2177/p99=5923，整篇都在额度内；
+# 只有超限才退回「头段 + 可复开的 ref」，不在正文里留半截要执行的指令。
+_NODE_MESSAGE_INLINE_CHAR_LIMIT = 16_000
 
 # 冻结不是裁定。闸门返回的是 `success + partial`，而 `_handle_acceptance_node_result`
 # 的首分支只看 `status == success`：不加识别就会把「还没验」结算成一次通过（握手
@@ -128,6 +129,26 @@ def is_acceptance_freeze_result(result: Any) -> bool:
     if str(getattr(result, 'delivery_status', '') or '').strip().lower() != 'partial':
         return False
     return str(getattr(result, 'summary', '') or '').strip().startswith(ACCEPTANCE_FREEZE_PREFIXES)
+
+
+def node_message_body(text: str, *, ref: str = '') -> str:
+    """节点消息正文的内联形态：额度内整篇给，超限才给头段 + 指向完整正文的 ref。"""
+    body = str(text or '').strip()
+    if len(body) <= _NODE_MESSAGE_INLINE_CHAR_LIMIT:
+        return body
+    head = body[:_NODE_MESSAGE_INLINE_CHAR_LIMIT]
+    pointer = str(ref or '').strip()
+    if pointer:
+        return (
+            f'{head}\n…（正文共 {len(body)} 字符，超出内联额度 {_NODE_MESSAGE_INLINE_CHAR_LIMIT}；'
+            f'完整正文用 content_open(ref="{pointer}") 或 content_search(ref="{pointer}") 复开）'
+        )
+    return (
+        f'{head}\n…（正文共 {len(body)} 字符，已按内联额度 {_NODE_MESSAGE_INLINE_CHAR_LIMIT} 截断；'
+        f'本轮没有可复开的完整正文 ref）'
+    )
+
+
 _BLOCKED_VERIFICATION_FALLBACK_PROMPT = (
     '核验被检验执行节点提交的 failed+blocked 阻塞声明是否成立：'
     '阻塞成立返回 success 并附证据；阻塞不成立返回 failed+final，'
@@ -1479,6 +1500,13 @@ class NodeRunner:
             return ''
         return str((latest.metadata or {}).get('result_payload_ref') or '').strip()
 
+    def _externalized_result_payload_ref(self, *, task_id: str, node: NodeRecord) -> str:
+        """裁决正文完整副本所在的 ref。外置不可用时返回空串，由 `node_message_body` 如实标注。"""
+        latest = self._log_service.ensure_node_result_payload_externalized(task_id, node.node_id) or self._store.get_node(node.node_id)
+        if latest is None:
+            return ''
+        return str((latest.metadata or {}).get('result_payload_ref') or '').strip()
+
     @staticmethod
     def _acceptance_feedback_text(result: NodeFinalResult) -> str:
         """打回正文 = 不通过原因 + 逐条修复要求；blocking_reason 属于 blocked 形态，此处不读。"""
@@ -1494,8 +1522,6 @@ class NodeRunner:
         if remaining_work:
             parts.append('修复要求：\n' + '\n'.join(f'- {item}' for item in remaining_work))
         text = '\n\n'.join(parts).strip()
-        if len(text) > _ACCEPTANCE_SUMMARY_CHARS:
-            return f'{text[:_ACCEPTANCE_SUMMARY_CHARS]}…（反馈正文已截断）'
         return text or str(result.blocking_reason or '').strip()
 
     @staticmethod
@@ -1684,6 +1710,7 @@ class NodeRunner:
     ) -> None:
         if execution is None:
             return
+        feedback_ref = self._externalized_result_payload_ref(task_id=task.task_id, node=acceptance)
         current = normalize_acceptance_handshake(((execution.metadata or {}).get(ACCEPTANCE_HANDSHAKE_KEY)))
         self._update_execution_acceptance_handshake(
             node_id=execution.node_id,
@@ -1692,7 +1719,7 @@ class NodeRunner:
             rejection_count=int(rejection_count or 0),
             latest_execution_result_ref=str(current.get('latest_execution_result_ref') or '').strip(),
             latest_execution_result_summary=str(current.get('latest_execution_result_summary') or '').strip(),
-            latest_rejection_feedback_ref='',
+            latest_rejection_feedback_ref=feedback_ref,
             latest_rejection_feedback_summary=str(feedback_text or '').strip(),
         )
         self._reactivate_node_for_retry(task_id=task.task_id, node_id=acceptance.node_id)
@@ -1702,7 +1729,7 @@ class NodeRunner:
             epoch_id='',
             source_node_id=acceptance.node_id,
             target_node_id=execution.node_id,
-            message=str(feedback_text or '').strip(),
+            message=node_message_body(feedback_text, ref=feedback_ref),
         )
         if self._acceptance_updates_task_final_acceptance(task=task, execution=execution, acceptance=acceptance):
             self._set_task_final_acceptance_state(
@@ -1742,7 +1769,7 @@ class NodeRunner:
             rejection_count=int(rejection_count or 0),
             latest_execution_result_ref=str(current.get('latest_execution_result_ref') or '').strip(),
             latest_execution_result_summary=str(current.get('latest_execution_result_summary') or '').strip(),
-            latest_rejection_feedback_ref='',
+            latest_rejection_feedback_ref=self._externalized_result_payload_ref(task_id=task.task_id, node=acceptance),
             latest_rejection_feedback_summary=failure_text,
         )
         if self._acceptance_updates_task_final_acceptance(task=task, execution=execution, acceptance=acceptance):
@@ -2312,7 +2339,7 @@ class NodeRunner:
         result: NodeFinalResult,
         result_ref: str,
     ) -> str:
-        """交接通知：只给指针 + 有界摘要，交付正文由验收节点按 ref 解析。
+        """交接通知：只给指针 + 内联额度内的摘要，交付正文的完整副本由验收节点按 ref 解析。
 
         旧形态把 `result.answer` 整篇塞进通知，而通知会被归档进验收节点的持久上下文，
         于是每打回一轮就多一份全文——核验方面对的不再是"当前这一份提交"，而是历次
@@ -2324,10 +2351,7 @@ class NodeRunner:
             '执行节点提交了新的待验交付。',
             f'被检验节点：{node.node_id}',
             f'待验提交结果载荷 ref：{result_ref or "(none)"}',
-            (
-                f'提交摘要（截断至 {_ACCEPTANCE_SUMMARY_CHARS} 字符，正文以上方 ref 为准）：'
-                f'{summary[:_ACCEPTANCE_SUMMARY_CHARS] or "(empty)"}'
-            ),
+            f'提交摘要：{node_message_body(summary, ref=result_ref) or "(empty)"}',
             '只判该 ref 指向的当前提交；上下文里更早的交付正文一律不再是核验对象。',
         ]
         return '\n'.join(lines)
@@ -6701,6 +6725,8 @@ class NodeRunner:
                     node_id=str(acceptance.node_id or ''),
                     source_node_id=str(child.node_id or ''),
                 )
+                feedback_ref = self._externalized_result_payload_ref(task_id=task.task_id, node=acceptance)
+                new_payload_ref = str(child_handoff.get('result_payload_ref') or '')
                 self._persist_node_notification_direct(
                     task_id=task.task_id,
                     epoch_id='',
@@ -6709,10 +6735,10 @@ class NodeRunner:
                     message=(
                         '被检验执行节点已在打回后重新提交，继续核验新的交付，'
                         '不要重新检验已被取代的旧结果载荷。\n'
-                        f'上一轮验收反馈：{str(acceptance_result.answer or "").strip()[:_ACCEPTANCE_SUMMARY_CHARS]}\n'
-                        f'新的子节点输出摘要：{child_summary[:_ACCEPTANCE_SUMMARY_CHARS]}\n'
+                        f'上一轮验收反馈：{node_message_body(acceptance_result.answer, ref=feedback_ref)}\n'
+                        f'新的子节点输出摘要：{node_message_body(child_summary, ref=new_payload_ref)}\n'
                         f'新的子节点输出 ref：{child_ref}\n'
-                        f'新的子节点结果载荷 ref：{str(child_handoff.get("result_payload_ref") or "")}'
+                        f'新的子节点结果载荷 ref：{new_payload_ref}'
                     ),
                 )
             check_result = str(acceptance_result.summary or acceptance_result.output or acceptance.failure_reason or '').strip() or SKIPPED_CHECK_RESULT
@@ -7856,12 +7882,7 @@ class NodeRunner:
         evidence_summary: str,
     ) -> str:
         normalized_acceptance_prompt = str(acceptance_prompt or '').strip()
-        normalized_output = str(node_output or '').strip()
-        if len(normalized_output) > _ACCEPTANCE_SUMMARY_CHARS:
-            normalized_output = (
-                normalized_output[:_ACCEPTANCE_SUMMARY_CHARS]
-                + f'…（摘要截断至 {_ACCEPTANCE_SUMMARY_CHARS} 字符，正文见下方 ref）'
-            )
+        normalized_output = node_message_body(node_output, ref=result_payload_ref or node_output_ref)
         return (
             f'{normalized_acceptance_prompt}\n\n'
             f'子节点输出摘要：\n{normalized_output or "(empty)"}\n\n'
@@ -7877,8 +7898,8 @@ class NodeRunner:
         移动靶（scaffold 头探针比对的正是它，见
         `context-and-cache-troubleshooting.md`「append-only 规则」）；放在尾块里，
         bootstrap 一次定稿，而"这一轮该判哪份提交"仍然每轮重新按当前状态算出来。
-        摘要按字符上限截断并保留 ref，核验方据此解析当前提交，而不是依赖上下文里
-        残留的旧正文。
+        摘要整篇进尾块（仅超出内联额度时截断并保留 ref），核验方据此解析当前提交，
+        而不是依赖上下文里残留的旧正文。
         """
         metadata = dict(getattr(node, 'metadata', {}) or {})
         accepted_node_id = str(metadata.get('accepted_node_id') or node.parent_node_id or '').strip()
@@ -7894,10 +7915,7 @@ class NodeRunner:
             lines.append(f'待验提交结果载荷 ref：{result_ref or "(none)"}')
             lines.append(f'交付输出 ref：{output_ref or "(none)"}')
             if result_summary:
-                lines.append(
-                    f'提交摘要（截断至 {_ACCEPTANCE_SUMMARY_CHARS} 字符，正文以上方 ref 为准）：'
-                    f'{result_summary[:_ACCEPTANCE_SUMMARY_CHARS]}'
-                )
+                lines.append(f'提交摘要：{node_message_body(result_summary, ref=result_ref or output_ref)}')
         if str(accepted_node.node_id or '').strip() == str(task.root_node_id or '').strip():
             notice_block = self._acceptance_notice_block(accepted_node=accepted_node)
             if notice_block:

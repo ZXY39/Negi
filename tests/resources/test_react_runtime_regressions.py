@@ -8853,6 +8853,51 @@ def test_auto_hydrate_content_open_on_exec_truncation() -> None:
     assert len(promotions) == 1
 
 
+def test_exec_truncation_reminder_fires_on_inline_budget_cut() -> None:
+    """内联额度切割也必须触发复开通道。
+
+    实盘被裁的行号证据正是这一档：捕获环没丢中段（`stdout_truncated=False`），旧判据
+    看不见这次切割，模型既没拿到整篇也没被告知能复开。
+    """
+    loop = ReActToolLoop.__new__(ReActToolLoop)
+    promotions: list[dict[str, object]] = []
+    loop._tool_context_hydration_promoter = lambda **kwargs: promotions.append(dict(kwargs))
+
+    results = [
+        {
+            "raw_result": json.dumps({
+                "status": "ok",
+                "stdout_truncated": False,
+                "stderr_truncated": False,
+                "output_truncated": True,
+            }),
+            "tool_message": {"name": "exec", "tool_call_id": "c1", "content": "<CUT>"},
+            "live_state": {"tool_name": "exec"},
+        },
+        {
+            "raw_result": json.dumps({
+                "status": "ok",
+                "stdout_truncated": False,
+                "output_truncated": False,
+            }),
+            "tool_message": {"name": "exec", "tool_call_id": "c2", "content": "<WHOLE>"},
+            "live_state": {"tool_name": "exec"},
+        },
+    ]
+
+    reminded = loop._auto_hydrate_content_open_on_exec_truncation(
+        task_id="t1", node_id="n1", results=results, runtime_context={}
+    )
+
+    assert reminded == 1
+    assert len(promotions) == 1
+    content = str(results[0]["tool_message"]["content"])
+    assert "已自动加载 content_open" in content
+    assert "content_search" in content
+    # 整篇交付的那条不被改动。
+    assert results[1]["tool_message"]["content"] == "<WHOLE>"
+
+
 @pytest.mark.asyncio
 async def test_empty_model_responses_stop_at_retry_limit(tmp_path, monkeypatch) -> None:
     """连续空响应必须在重试上限处终止并返回 blocked 失败。

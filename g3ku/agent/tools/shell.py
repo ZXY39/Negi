@@ -24,6 +24,12 @@ from main.governance.exec_tool_policy import (
 
 _STREAM_READ_CHUNK_SIZE = 4096
 _STREAM_CAPTURE_BYTE_LIMIT = 64 * 1024
+# exec 正文的内联额度：捕获到的正文不超过它时整篇交付给模型。额度必须低于工具结果的
+# 通用外置闸门（`content.navigation.INLINE_CHAR_LIMIT` = 6000，按序列化后的载荷长度判），
+# 否则 exec 自己刚凑齐的正文会被信封换成 800 字符预览。超限时 exec 不自己切割、也不自带
+# ref：整篇留在载荷里，由统一信封外置成 artifact 并给出 `content_open(ref=...)` 指引。
+# `stdout_truncated` 说的是 64 KB 捕获环有没有丢中段，与这里无关。
+_EXEC_INLINE_CHAR_LIMIT = 5_000
 # 进程退出后，输出管道尾部排空的宽限上限（秒）。正常命令在进程退出瞬间即到 EOF、
 # 排空立即完成；只有当孙进程继承了 stdout/stderr 写端、管道迟迟不到 EOF 时才会等到
 # 这个宽限，到点后杀进程树释放管道并返回已抢救的部分输出（带 drain_timed_out 标记）。
@@ -1018,19 +1024,28 @@ class ExecTool(Tool):
 
         # 反应式指引/告警：既进 tail_preview（模型一定会看工具结果），也单列 notes 字段。
         notes = [str(note).strip() for note in (extra_notes or []) if str(note or "").strip()]
+
+        captured_body = combined_head
+        if ((stdout_capture is not None and stdout_capture.truncated)
+                or (stderr_capture is not None and stderr_capture.truncated)) and combined_tail:
+            captured_body = f"{combined_head}\n…（超出捕获上限，中段未保留）…\n{combined_tail}".strip()
+        # 整篇交付；超限只打标，切割与外置归统一信封（它负责给 ref）。
+        head_preview = captured_body
+        tail_preview = ""
         if notes:
             notes_block = "\n".join(notes)
-            combined_tail = f"{combined_tail}\n{notes_block}".strip() if combined_tail else notes_block
+            tail_preview = notes_block
 
         payload = {
             "status": status,
             "exit_code": exit_code,
-            "head_preview": self._preview(combined_head, from_tail=False),
-            "tail_preview": self._preview(combined_tail, from_tail=True),
+            "head_preview": head_preview,
+            "tail_preview": tail_preview,
             "stdout_truncated": bool(stdout_capture and stdout_capture.truncated),
             "stderr_truncated": bool(stderr_capture and stderr_capture.truncated),
             "stdout_captured_bytes": int(stdout_capture.total_bytes if stdout_capture is not None else len(stdout_text.encode('utf-8'))),
             "stderr_captured_bytes": int(stderr_capture.total_bytes if stderr_capture is not None else len(stderr_text.encode('utf-8'))),
+            "output_truncated": len(captured_body) > _EXEC_INLINE_CHAR_LIMIT,
         }
         if notes:
             payload["notes"] = notes
@@ -1070,16 +1085,5 @@ class ExecTool(Tool):
             service.refresh_changed_resources(None, trigger=trigger, session_id=session_id)
         except Exception:
             return
-
-    @staticmethod
-    def _preview(text: str, *, from_tail: bool) -> str:
-        if not text:
-            return ""
-        lines = text.splitlines()
-        selected = lines[-6:] if from_tail else lines[:6]
-        preview = "\n".join(selected).strip()
-        if len(preview) <= 240:
-            return preview
-        return preview[:240].rstrip() + "..."
 
 
