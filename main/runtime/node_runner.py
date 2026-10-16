@@ -2321,7 +2321,7 @@ class NodeRunner:
         """
         summary = str(result.summary or '').strip() or str(result.answer or '').strip()
         lines = [
-            '执行节点提交了新的待验交付，请继续在当前验收上下文中核验。',
+            '执行节点提交了新的待验交付。',
             f'被检验节点：{node.node_id}',
             f'待验提交结果载荷 ref：{result_ref or "(none)"}',
             (
@@ -6707,7 +6707,7 @@ class NodeRunner:
                     source_node_id=str(child.node_id or ''),
                     target_node_id=str(acceptance.node_id or ''),
                     message=(
-                        '被检验执行节点已在打回后重新提交，请保留当前验收上下文，继续核验新的交付，'
+                        '被检验执行节点已在打回后重新提交，继续核验新的交付，'
                         '不要重新检验已被取代的旧结果载荷。\n'
                         f'上一轮验收反馈：{str(acceptance_result.answer or "").strip()[:_ACCEPTANCE_SUMMARY_CHARS]}\n'
                         f'新的子节点输出摘要：{child_summary[:_ACCEPTANCE_SUMMARY_CHARS]}\n'
