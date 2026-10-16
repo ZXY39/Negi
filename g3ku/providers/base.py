@@ -83,6 +83,9 @@ class LLMResponse:
     stream_incomplete: bool = False
     # 首 token 耗时（毫秒，请求发出 → 首个流式分片）。仅流式 provider 能填。
     first_token_ms: float | None = None
+    # 本次调用在模型链上真实走过的 ref（按尝试顺序去重，末位就是回答这一发的那颗）。
+    # 只有链式包装层 FallbackProvider 会填：长度 > 1 即这一发发生过跨模型降级。
+    attempted_model_chain: list[str] = field(default_factory=list)
 
     @property
     def has_tool_calls(self) -> bool:

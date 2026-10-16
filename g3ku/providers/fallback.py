@@ -564,11 +564,16 @@ class FallbackProvider(LLMProvider):
 
         last_error: Exception | None = None
         last_response: LLMResponse | None = None
+        # 本次调用真实走过的 ref（含建不出 target 就失败的那几位）：成功终态带上它，
+        # 调用方才能看出这一发是链首直接答的，还是降级到后面某一位才答的。
+        attempted_chain: list[str] = []
         start_revision = current_runtime_config_revision()
         chain_restart_count = 0
         model_index = 0
         while model_index < len(chain):
             model_key = chain[model_index]
+            if model_key not in attempted_chain:
+                attempted_chain.append(model_key)
             try:
                 base_target = build_provider_from_model_key(self._config, model_key)
             except Exception as exc:
@@ -701,6 +706,7 @@ class FallbackProvider(LLMProvider):
                         )
                         model_last_failure_reason = exception_chain_display_text(exc)
                         continue  # 非可重试：每个 key 各试一次，轮完切下一模型
+                    response.attempted_model_chain = list(attempted_chain)
                     retryable_response = response_requires_retry(response, retry_on=target.retry_on)
                     fallback_response = response_requires_fallback(response)
                     if not fallback_response:

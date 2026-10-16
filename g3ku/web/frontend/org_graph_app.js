@@ -15518,6 +15518,15 @@ function memoryProcessedChangePreview(item) {
     return String(item?.change_preview || item?.document_preview || "").trim();
 }
 
+// 模型链这一行读的是这一批真实走过的 ref，末位就是最后一次答话的那颗：长度 > 1 即
+// 链上降级过。整条配置链看不出这件事，旧记录没有途经账时显示 "-"，不拿配置链冒充。
+function memoryAttemptedChainText(item) {
+    const refs = (Array.isArray(item?.attempted_model_chain) ? item.attempted_model_chain : [])
+        .map((ref) => String(ref || "").trim())
+        .filter(Boolean);
+    return refs.length ? refs.join(" -> ") : "-";
+}
+
 function memoryProcessedIsNoChange(item) {
     const normalized = String(item?.status || "").trim().toLowerCase();
     // 容量停车那一级一行都没写：载荷原文留在失败区，台账这行只是把"停在哪一级"记下来。
@@ -16487,7 +16496,7 @@ function openMemoryDetailPreview(kind, key) {
             { label: "状态", value: memoryProcessedStatusLabel(source) || "-" },
             { label: "操作", value: memoryProcessedOpLabel(source) || "-" },
             { label: "处理时间", value: formatCompactTime(source?.processed_at) || String(source?.processed_at || "-") },
-            { label: "模型链", value: (Array.isArray(source?.model_chain) ? source.model_chain.join(" -> ") : "") || "-" },
+            { label: "模型链", value: memoryAttemptedChainText(source) },
             { label: "请求数", value: String(source?.request_count || payloadTexts.length || 0) },
             { label: "输入", value: String(usage.input_tokens || 0) },
             { label: "输出", value: String(usage.output_tokens || 0) },

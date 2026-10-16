@@ -164,6 +164,46 @@ async def test_fallback_provider_rotates_keys_on_non_retryable_error(monkeypatch
     assert calls == [0, 1]
 
 
+@pytest.mark.asyncio
+async def test_fallback_provider_stamps_attempted_chain_when_chain_degrades(monkeypatch) -> None:
+    # 链式包装层是记忆/摘要车道唯一知道"走到第几位才答上话"的地方：回包必须带上真实
+    # 途经的 ref，否则处理记录只能印配置整条链，操作员分不出降级。
+    calls: list[str] = []
+
+    class _SuccessProvider:
+        async def chat(self, **kwargs):
+            _ = kwargs
+            calls.append("secondary")
+            return LLMResponse(content="ok", finish_reason="stop")
+
+    providers = {"primary": _AlwaysRetryableChainProvider("primary", calls), "secondary": _SuccessProvider()}
+
+    def _builder(config, model_key, *, api_key_index=None):
+        _ = config, api_key_index
+        return ProviderTarget(
+            provider_ref=str(model_key),
+            provider_id="custom",
+            model_id=f"{model_key}-model",
+            provider=providers[str(model_key)],
+            retry_on=["network"],
+            retry_count=0,
+            api_key_count=1,
+        )
+
+    monkeypatch.setattr("g3ku.providers.provider_factory.build_provider_from_model_key", _builder)
+
+    provider = fallback_module.FallbackProvider(
+        config=SimpleNamespace(),
+        model_chain=["primary", "secondary", "tertiary"],
+        default_model_ref="primary",
+    )
+    response = await provider.chat(messages=[{"role": "user", "content": "demo"}], model=None)
+
+    assert response.content == "ok"
+    assert calls == ["primary", "secondary"]
+    assert response.attempted_model_chain == ["primary", "secondary"]
+
+
 def test_should_rotate_predicate_retryable_request_shape_and_internal() -> None:
     """轮换谓词契约：retryOn 命中(可重试)/请求形状(结构化 400/422)/内部错误 都不换；其余换。"""
     rotate = fallback_module.should_rotate_api_key_error

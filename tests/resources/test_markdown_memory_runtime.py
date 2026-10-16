@@ -204,6 +204,7 @@ def _fake_response(
     tool_calls: list[dict[str, object]] | None = None,
     usage: dict[str, int] | None = None,
     response_metadata: dict[str, object] | None = None,
+    attempted_model_chain: list[str] | None = None,
 ) -> object:
     usage_payload = dict(usage or {})
     metadata = {"token_usage": usage_payload}
@@ -213,6 +214,7 @@ def _fake_response(
         tool_calls=_with_confirm_call(tool_calls),
         usage_metadata=usage_payload,
         response_metadata=metadata,
+        attempted_model_chain=list(attempted_model_chain or []),
     )
 
 
@@ -2794,6 +2796,73 @@ async def test_run_due_batch_once_records_successful_processed_batch_with_usage_
             "cache_read_tokens": 2,
         }
         assert processed[0]["note_refs_written"] == ["note_policy"]
+    finally:
+        manager.close()
+
+
+@pytest.mark.asyncio
+async def test_run_due_batch_once_records_attempted_model_chain_prefix_for_processed_batch(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    # 处理记录里的 model_chain 是当时配置的整条角色链，看不出这一批到底走到哪一颗才答上话。
+    # attempted_model_chain 记的是真实途经的 ref（多轮去重合并），所以降级必须能在台账里读出来。
+    module = _load_memory_agent_runtime_module()
+    manager = module.MemoryManager(tmp_path, _memory_cfg())
+    try:
+        await manager._append_queue_request(
+            module.MemoryQueueRequest(
+                op="write",
+                decision_source="user",
+                payload_text="创建文件默认格式要求，在 ref:note_policy",
+                created_at="2026-04-17T10:00:00+08:00",
+                request_id="write_1",
+            )
+        )
+        fake_model = _FakeToolCallingModel(
+            [
+                _fake_response(
+                    tool_calls=[
+                        {
+                            "id": "call-1",
+                            "name": "memory_apply_batch",
+                            "args": {
+                                "adds": [
+                                    {
+                                        "content": "创建文件默认格式要求",
+                                        "minimal_memory": "文件->默认格式",
+                                        "decision_source": "user",
+                                        "note_ref": "note_policy",
+                                    }
+                                ],
+                                "note_upserts": {"note_policy": "创建文件默认格式要求"},
+                            },
+                        },
+                    ],
+                    attempted_model_chain=["memory-primary", "memory-second"],
+                ),
+                _fake_response(content="done", attempted_model_chain=["memory-second"]),
+            ]
+        )
+        monkeypatch.setattr(
+            module,
+            "get_runtime_config",
+            lambda force=False: (
+                _app_config(tmp_path, memory_chain=["memory-primary", "memory-second", "memory-third"]),
+                2,
+                False,
+            ),
+            raising=False,
+        )
+        monkeypatch.setattr(module.MemoryManager, "_memory_date_text", lambda self, now_iso=None: "2026/4/17", raising=False)
+        monkeypatch.setattr(module, "build_chat_model", lambda config, **kwargs: fake_model, raising=False)
+
+        await manager.run_due_batch_once(now_iso="2026-04-17T10:00:04+08:00")
+        processed = _read_jsonl(tmp_path / "memory" / "ops.jsonl")
+
+        assert len(processed) == 1
+        assert processed[0]["model_chain"] == ["memory-primary", "memory-second", "memory-third"]
+        assert processed[0]["attempted_model_chain"] == ["memory-primary", "memory-second"]
     finally:
         manager.close()
 

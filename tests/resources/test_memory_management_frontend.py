@@ -1429,3 +1429,34 @@ def test_note_edit_and_note_reap_records_survive_into_the_memory_surfaces() -> N
     assert "已删掉这段" in blocks
     assert "改写后不再指向它" in blocks
     assert "ref:note_old" in blocks
+
+
+def test_memory_processed_detail_model_chain_shows_the_models_actually_traversed() -> None:
+    result = _run_app_script(
+        """
+        vm.runInContext("renderMemoryDetailPreview = () => {};", context);
+        context.__testExports.S.memoryProcessedItems = [
+          { batch_id: "degraded_demo", op: "write", status: "applied",
+            processed_at: "2026-10-16T18:18:29+08:00", request_count: 1,
+            payload_texts: ["原始请求内容"],
+            model_chain: ["mem-a", "mem-b", "mem-c"],
+            attempted_model_chain: ["mem-a", "mem-b"] },
+          { batch_id: "legacy_demo", op: "write", status: "applied",
+            processed_at: "2026-10-16T18:18:29+08:00", request_count: 1,
+            payload_texts: ["原始请求内容"],
+            model_chain: ["mem-a", "mem-b", "mem-c"] },
+        ];
+        const chainField = (key) => {
+          context.__testExports.openMemoryDetailPreview("processed", key);
+          return context.__testExports.S.memoryDetailPreview.fields
+            .find((field) => field.label === "模型链").value;
+        };
+        __out.degraded = chainField("degraded_demo");
+        __out.legacy = chainField("legacy_demo");
+        """,
+        ["openMemoryDetailPreview", "S"],
+    )
+
+    assert str(result["degraded"]) == "mem-a -> mem-b"
+    # 途经账落地之前的记录没有这份数据：宁可空着，也不拿配置整条链冒充"走到了这里"。
+    assert str(result["legacy"]) == "-"

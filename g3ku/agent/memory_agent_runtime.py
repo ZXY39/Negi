@@ -1068,6 +1068,8 @@ class _MemoryAttemptResult:
     usage: dict[str, int]
     final_text: str
     request_artifacts: list[dict[str, Any]] = field(default_factory=list)
+    # 本批各轮 model 调用真实走过的 ref（按顺序去重，末位=最后一次答话的那颗）。
+    attempted_chain: list[str] = field(default_factory=list)
 
 
 @dataclass(slots=True)
@@ -3138,6 +3140,18 @@ class MemoryManager:
         except Exception:
             return []
 
+    @staticmethod
+    def _merge_attempted_model_chain(target: list[str], refs: Any) -> None:
+        """按顺序并入某一发真实走过的 ref：重复的只保留首次出现。
+
+        记忆批次是多轮循环，同一颗模型通常每轮都在；走过 a 再降级到 b、下一轮又回到 a，
+        读出来仍是 `a -> b`。
+        """
+        for item in list(refs or []):
+            ref = str(item or "").strip()
+            if ref and ref not in target:
+                target.append(ref)
+
     async def _run_memory_agent_attempt(
         self,
         *,
@@ -3187,6 +3201,7 @@ class MemoryManager:
             },
         ]
         usage_total = {"input_tokens": 0, "output_tokens": 0, "cache_read_tokens": 0}
+        attempted_chain: list[str] = []
         request_artifacts: list[dict[str, Any]] = []
         round_limit = int(runtime_config.get_role_max_iterations("memory") or 8)
         round_limit = max(round_limit, 1)
@@ -3202,6 +3217,7 @@ class MemoryManager:
                 request_artifacts=request_artifacts,
             )
             response = await model.chat(request_messages, tools=tool_schemas or None)
+            self._merge_attempted_model_chain(attempted_chain, getattr(response, "attempted_model_chain", None))
             self._merge_usage(usage_total, self._extract_usage(response))
             artifact = self._persist_memory_request_artifact(
                 phase="agent",
@@ -3261,6 +3277,7 @@ class MemoryManager:
             usage=usage_total,
             final_text=final_text,
             request_artifacts=request_artifacts,
+            attempted_chain=attempted_chain,
         )
 
     def _memory_agent_system_prompt(self) -> str:
@@ -4812,6 +4829,7 @@ class MemoryManager:
         discard_reason: str = "",
         usage: dict[str, int] | None = None,
         model_chain: list[str] | None = None,
+        attempted_model_chain: list[str] | None = None,
         attempt_count: int = 0,
         validated: _MemoryValidatedWrite | None = None,
         provider_request_ids: list[str] | None = None,
@@ -4835,6 +4853,11 @@ class MemoryManager:
                 "cache_read_tokens": int((usage or {}).get("cache_read_tokens", 0) or 0),
             },
             "model_chain": [str(item or "").strip() for item in list(model_chain or []) if str(item or "").strip()],
+            # 这一批真实走过的 ref（末位=最后一次答话的那颗）。与上面的 model_chain（当时
+            # 配置的整条角色链）分开存：只看配置链分不出是否降级、降级到了哪一位。
+            "attempted_model_chain": [
+                str(item or "").strip() for item in list(attempted_model_chain or []) if str(item or "").strip()
+            ],
             "attempt_count": int(attempt_count or 0),
             "provider_request_ids": [str(item or "").strip() for item in list(provider_request_ids or []) if str(item or "").strip()],
             "request_artifact_paths": [str(item or "").strip() for item in list(request_artifact_paths or []) if str(item or "").strip()],
@@ -6139,6 +6162,7 @@ class MemoryManager:
         model_chain: list[str],
     ) -> dict[str, Any]:
         total_usage = {"input_tokens": 0, "output_tokens": 0, "cache_read_tokens": 0}
+        batch_attempted_chain: list[str] = []
         request_artifacts: list[dict[str, Any]] = []
         queue_request_ids = [item.request_id for item in batch.items if str(item.request_id or "").strip()]
         try:
@@ -6155,6 +6179,7 @@ class MemoryManager:
                 "discard_reason": "agent_fault",
                 "error": f"{type(exc).__name__}: {str(exc or 'memory store cannot be rendered').strip()}",
                 "model_chain": list(model_chain or []),
+                "attempted_model_chain": list(batch_attempted_chain),
                 "provider_request_ids": [],
                 "request_artifact_paths": [],
             }
@@ -6225,6 +6250,7 @@ class MemoryManager:
                     "discard_reason": exc.discard_reason,
                     "error": exc.error_text,
                     "model_chain": list(current_model_chain),
+                    "attempted_model_chain": list(batch_attempted_chain),
                     "provider_request_ids": self._provider_request_ids_from_artifacts(request_artifacts),
                     "request_artifact_paths": self._request_artifact_paths(request_artifacts),
                 }
@@ -6241,10 +6267,12 @@ class MemoryManager:
                     "discard_reason": "provider_error",
                     "error": f"{type(exc).__name__}: {str(exc or 'memory agent call failed').strip()}",
                     "model_chain": list(current_model_chain),
+                    "attempted_model_chain": list(batch_attempted_chain),
                     "provider_request_ids": self._provider_request_ids_from_artifacts(request_artifacts),
                     "request_artifact_paths": self._request_artifact_paths(request_artifacts),
                 }
             self._merge_usage(total_usage, attempt.usage)
+            self._merge_attempted_model_chain(batch_attempted_chain, attempt.attempted_chain)
             request_artifacts.extend(list(attempt.request_artifacts or []))
             try:
                 if lane == "consolidate":
@@ -6264,6 +6292,7 @@ class MemoryManager:
                     "attempt_count": attempt_index + 1,
                     "assessed_text": None,
                     "model_chain": list(current_model_chain),
+                    "attempted_model_chain": list(batch_attempted_chain),
                     "provider_request_ids": self._provider_request_ids_from_artifacts(request_artifacts),
                     "request_artifact_paths": self._request_artifact_paths(request_artifacts),
                 }
@@ -6283,6 +6312,7 @@ class MemoryManager:
                     "discard_reason": "agent_fault",
                     "error": f"{type(exc).__name__}: {str(exc or 'memory write build failed').strip()}",
                     "model_chain": list(current_model_chain),
+                    "attempted_model_chain": list(batch_attempted_chain),
                     "provider_request_ids": self._provider_request_ids_from_artifacts(request_artifacts),
                     "request_artifact_paths": self._request_artifact_paths(request_artifacts),
                 }
@@ -6300,6 +6330,7 @@ class MemoryManager:
                 "capacity_replay": True,
                 "error": last_error,
                 "model_chain": list(current_model_chain),
+                "attempted_model_chain": list(batch_attempted_chain),
                 "provider_request_ids": self._provider_request_ids_from_artifacts(request_artifacts),
                 "request_artifact_paths": self._request_artifact_paths(request_artifacts),
             }
@@ -6311,6 +6342,7 @@ class MemoryManager:
             "discard_reason": "rejected",
             "error": last_error,
             "model_chain": list(current_model_chain),
+            "attempted_model_chain": list(batch_attempted_chain),
             "provider_request_ids": self._provider_request_ids_from_artifacts(request_artifacts),
             "request_artifact_paths": self._request_artifact_paths(request_artifacts),
         }
@@ -6416,6 +6448,7 @@ class MemoryManager:
 
             discard_reason = str(result.get("discard_reason") or "").strip()
             effective_model_chain = list(result.get("model_chain") or model_chain)
+            attempted_model_chain = list(result.get("attempted_model_chain") or [])
             if discard_reason:
                 # 处理失败不再写 durable discarded 终态并删行（数据永久丢失），
                 # 而是移入失败停车区 memory/failed.jsonl：
@@ -6441,6 +6474,7 @@ class MemoryManager:
                     error=str(result.get("error") or "").strip(),
                     usage=result.get("usage"),
                     model_chain=effective_model_chain,
+                    attempted_model_chain=attempted_model_chain,
                     attempt_count=int(result.get("attempt_count", 0) or 0),
                     provider_request_ids=list(result.get("provider_request_ids") or []),
                     request_artifact_paths=list(result.get("request_artifact_paths") or []),
@@ -6476,6 +6510,7 @@ class MemoryManager:
                     error=str(validated_outcome.noop_reason or "no category fits these memories").strip(),
                     usage=result.get("usage"),
                     model_chain=effective_model_chain,
+                    attempted_model_chain=attempted_model_chain,
                     attempt_count=int(result.get("attempt_count") or 0),
                     provider_request_ids=list(result.get("provider_request_ids") or []),
                     request_artifact_paths=list(result.get("request_artifact_paths") or []),
@@ -6491,6 +6526,7 @@ class MemoryManager:
                 processed_at=processed_at,
                 usage=result.get("usage"),
                 model_chain=effective_model_chain,
+                attempted_model_chain=attempted_model_chain,
                 attempt_count=int(result["attempt_count"]),
                 validated=result["validated"],
                 provider_request_ids=list(result.get("provider_request_ids") or []),
@@ -6662,6 +6698,7 @@ class MemoryManager:
             error=error_text,
             usage=result.get("usage"),
             model_chain=effective_model_chain,
+            attempted_model_chain=list(result.get("attempted_model_chain") or []),
             attempt_count=int(result.get("attempt_count") or 0),
             provider_request_ids=list(result.get("provider_request_ids") or []),
             request_artifact_paths=list(result.get("request_artifact_paths") or []),
@@ -6679,6 +6716,7 @@ class MemoryManager:
             error=error_text,
             usage=result.get("usage"),
             model_chain=effective_model_chain,
+            attempted_model_chain=list(result.get("attempted_model_chain") or []),
             attempt_count=int(result.get("attempt_count") or 0),
             provider_request_ids=list(result.get("provider_request_ids") or []),
             request_artifact_paths=list(result.get("request_artifact_paths") or []),
@@ -6706,6 +6744,7 @@ class MemoryManager:
         error: str,
         usage: dict[str, int] | None = None,
         model_chain: list[str] | None = None,
+        attempted_model_chain: list[str] | None = None,
         attempt_count: int = 0,
         provider_request_ids: list[str] | None = None,
         request_artifact_paths: list[str] | None = None,
@@ -6715,6 +6754,9 @@ class MemoryManager:
         now = str(now_iso or "").strip() or self._now_iso()
         request_ids = [str(item.request_id or "").strip() for item in batch.items]
         id_set = {rid for rid in request_ids if rid}
+        normalized_attempted_chain = [
+            str(item or "").strip() for item in list(attempted_model_chain or []) if str(item or "").strip()
+        ]
         rows = self._read_failed_records()
         existing: dict[str, Any] | None = None
         for row in rows:
@@ -6755,6 +6797,8 @@ class MemoryManager:
             )
             if model_chain:
                 existing["model_chain"] = [str(item or "").strip() for item in list(model_chain) if str(item or "").strip()]
+            if normalized_attempted_chain:
+                existing["attempted_model_chain"] = normalized_attempted_chain
             for key, values in (
                 ("provider_request_ids", provider_request_ids),
                 ("request_artifact_paths", request_artifact_paths),
@@ -6791,6 +6835,7 @@ class MemoryManager:
                 "error_history": [history_entry],
                 "usage_total": merged_usage,
                 "model_chain": [str(item or "").strip() for item in list(model_chain or []) if str(item or "").strip()],
+                "attempted_model_chain": normalized_attempted_chain,
                 "provider_request_ids": [str(item or "").strip() for item in list(provider_request_ids or []) if str(item or "").strip()],
                 "request_artifact_paths": [str(item or "").strip() for item in list(request_artifact_paths or []) if str(item or "").strip()],
             }
@@ -7125,6 +7170,7 @@ class MemoryManager:
             discard_reason="operator_discarded",
             usage=record.get("usage_total"),
             model_chain=record.get("model_chain"),
+            attempted_model_chain=record.get("attempted_model_chain"),
             attempt_count=int(record.get("llm_attempt_count", 0) or 0),
             provider_request_ids=record.get("provider_request_ids"),
             request_artifact_paths=record.get("request_artifact_paths"),
