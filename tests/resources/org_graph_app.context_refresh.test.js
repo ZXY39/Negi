@@ -167,10 +167,34 @@ test("api_client 走 context-refresh 这一对路径", () => {
     assert.equal(typeof ApiClient.updateContextRefreshSettings, "function");
 });
 
-test("打开弹窗先取服务端读数，草稿没变时「应用」不可点", async () => {
-    const { app, elements, calls } = loadPage({ settings: { enabled: true, idle_minutes: 45 } });
+test("弹窗显隐形状照抄同页可用的那一族（backdrop 载显隐，section 不带 hidden）", () => {
+    // `.confirm-backdrop` 这一族靠外层显示：section 上再挂 hidden，外层打开后内层仍是
+    // display:none，表现就是"点了没窗口"。按 model-group 弹窗的实际形状钉住。
+    const groupBackdrop = HTML.match(/<div id="model-group-backdrop" class="confirm-backdrop"[^>]*>/)[0];
+    const groupSection = HTML.match(/<section id="model-group-dialog"[^>]*>/)[0];
+    const mineBackdrop = HTML.match(/<div id="context-refresh-backdrop" class="confirm-backdrop"[^>]*>/)[0];
+    const mineSection = HTML.match(/<section id="context-refresh-dialog"[^>]*>/)[0];
+    assert.match(groupBackdrop, /hidden/);
+    assert.match(mineBackdrop, /hidden/);
+    assert.doesNotMatch(groupSection, /hidden/, "样板 section 不带 hidden");
+    assert.doesNotMatch(mineSection, /hidden/, "新弹窗 section 也不许带 hidden");
+});
 
-    await app.openContextRefreshDialog();
+test("点按钮真的把外层打开（从点击入口喂，不直接调渲染函数）", async () => {
+    const { elements, calls } = loadPage();
+
+    elements["model-context-refresh-btn"].dispatch("click", {});
+    await flush();
+
+    assert.equal(elements["context-refresh-backdrop"].hidden, false);
+    assert.equal(elements["context-refresh-dialog"].attributes["aria-hidden"], "false");
+    assert.equal(calls.get, 1);
+});
+
+test("打开弹窗先取服务端读数，草稿没变时「应用」不可点", async () => {
+    const { elements, calls } = loadPage({ settings: { enabled: true, idle_minutes: 45 } });
+
+    elements["model-context-refresh-btn"].dispatch("click", {});
     await flush();
 
     assert.equal(calls.get, 1);
@@ -183,7 +207,7 @@ test("打开弹窗先取服务端读数，草稿没变时「应用」不可点",
 test("改分钟数只动草稿，点应用才提交", async () => {
     const { app, elements, calls } = loadPage();
 
-    await app.openContextRefreshDialog();
+    elements["model-context-refresh-btn"].dispatch("click", {});
     await flush();
     elements["context-refresh-minutes"].dispatch("input", { target: { value: "30" } });
     elements["context-refresh-minutes"].value = "30";
@@ -193,7 +217,8 @@ test("改分钟数只动草稿，点应用才提交", async () => {
     assert.equal(calls.put.length, 0, "改动草稿不许当场写盘");
     assert.equal(elements["context-refresh-apply-btn"].disabled, false);
 
-    await app.applyContextRefreshSettings();
+    elements["context-refresh-apply-btn"].dispatch("click", {});
+    await flush();
     await flush();
 
     // vm 里造出来的对象带着另一个 realm 的原型，结构断言统一走 JSON 文本比较。
@@ -209,10 +234,11 @@ test("改分钟数只动草稿，点应用才提交", async () => {
 test("写盘失败时不关窗，错误行与失败提示各一份", async () => {
     const { app, elements, calls } = loadPage({ putFails: true });
 
-    await app.openContextRefreshDialog();
+    elements["model-context-refresh-btn"].dispatch("click", {});
     await flush();
     elements["context-refresh-minutes"].dispatch("input", { target: { value: "15" } });
-    await app.applyContextRefreshSettings();
+    elements["context-refresh-apply-btn"].dispatch("click", {});
+    await flush();
     await flush();
 
     assert.equal(S_open(app), true, "失败必须留在窗口里");
@@ -225,10 +251,11 @@ test("写盘失败时不关窗，错误行与失败提示各一份", async () =>
 test("分钟数低于一分钟时本地拦下，不发请求", async () => {
     const { app, elements, calls } = loadPage();
 
-    await app.openContextRefreshDialog();
+    elements["model-context-refresh-btn"].dispatch("click", {});
     await flush();
     elements["context-refresh-minutes"].dispatch("input", { target: { value: "0" } });
-    await app.applyContextRefreshSettings();
+    elements["context-refresh-apply-btn"].dispatch("click", {});
+    await flush();
     await flush();
 
     assert.equal(calls.put.length, 0);
