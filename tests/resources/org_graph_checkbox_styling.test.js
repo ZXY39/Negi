@@ -41,6 +41,7 @@ const LEDGER = [
     { token: "class=\"skill-role\"", tier: "hidden" },
     { token: "tool-role tool-role-input", tier: "hidden" },
     { token: "name=\"enabled\"", tier: "hidden" },
+    { token: "id=\"context-refresh-enabled\"", tier: "ui" },
 ];
 
 function collectSites() {

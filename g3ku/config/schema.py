@@ -1183,6 +1183,19 @@ class UpdateCheckConfig(Base):
     interval_hours: float = Field(default=5.0, ge=0.1, le=24.0)
 
 
+class ContextRefreshConfig(Base):
+    """Idle boundary for the context carriers that are otherwise pinned.
+
+    `tools[]` and the frontdoor memory snapshot only change bytes where the reusable
+    prefix is already broken. Measured provider hits do not decay with idle length (the
+    residual is a shared head other traffic keeps warm), so this caps how long a revoked
+    tool name may stay declared; it does not buy a guaranteed free refresh.
+    """
+
+    enabled: bool = True
+    idle_minutes: int = Field(default=120, ge=1)
+
+
 class Config(BaseSettings):
     """Root configuration for g3ku."""
 
@@ -1198,6 +1211,7 @@ class Config(BaseSettings):
     cron: CronConfig = Field(default_factory=CronConfig)
     stt: SttConfig = Field(default_factory=SttConfig)
     update_check: UpdateCheckConfig = Field(default_factory=UpdateCheckConfig)
+    context_refresh: ContextRefreshConfig = Field(default_factory=ContextRefreshConfig)
 
     @model_validator(mode="after")
     def _validate_model_runtime_contract(self) -> "Config":

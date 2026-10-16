@@ -159,6 +159,7 @@ Start here when you are new to the repository or when a change crosses subsystem
 - 新增常驻内置控制工具后模型从不使用它、或调用即报错 → `tool-and-skill-system.md`「3.1.1 为什么"常驻"需要独立机制」
 - 某工具上一轮还能调、这一轮报 `tool not available`，且 `load_tool_context` 回 `ok:true` 也不把它提升 → `tool-hydration-and-callable-chain.md`「hydrated tools」「加载门控」+ `context-and-cache-troubleshooting.md`「节点侧排查要点」（压缩不是这条的原因；名字仍在 `tools[]` 里而本轮调不动，是水合台账被淘汰的合法状态，见 `tool-and-skill-system.md`「Provider Tool Surface」）
 - 相邻跳 provider `tools[]` 成员在变、且没有真实授权变化（缓存命中随之掉）→ `tool-and-skill-system.md`「Provider Tool Surface」+ `context-and-cache-troubleshooting.md`「跨普通 fresh turn 的 tool schema churn」
+- 工具被收回后模型仍带着那份参数表，或想知道这个滞后最长多久才消 → `tool-and-skill-system.md`「Provider Tool Surface」（钉住只补不删，退场落在压缩或空闲边界）+ `config-and-models.md`「context_refresh」
 - 升级旧实例后，某条工具的角色/启停看起来回到默认，或工具停用后没有任何东西把它捞回来 → `tool-and-skill-system.md`「Tool Admin RBAC」（一次性展开迁移；核心工具允许停用、禁止删除，且没有自动拉起）
 - 前门改了尾块运行时契约的一个字段却不出现在请求体里 → `tool-and-skill-system.md`「Provider Tool Surface」（发送前会用 state 重建契约块，装配层那份会被覆盖）
 - 上下文里找不到 `candidate_skills`、或头部那份技能名单看着过期、或相邻跳头部字节反复变 → `tool-and-skill-system.md`「Pinned Static Declarations」+ `context-and-cache-troubleshooting.md`「静态声明钉在请求体头部」

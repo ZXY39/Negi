@@ -119,6 +119,7 @@ from g3ku.providers.fallback import (
     PUBLIC_PROVIDER_FAILURE_MESSAGE,
     ModelProviderExhaustedError,
 )
+from g3ku.config.context_refresh import idle_boundary_exceeded
 from g3ku.config.live_runtime import get_runtime_config
 from main.runtime import chat_backend as runtime_chat_backend
 from main.runtime import send_token_preflight as runtime_send_token_preflight
@@ -305,6 +306,10 @@ class ReActToolLoop:
         message_history = list(messages or [])
         fresh_turn_request_seed_messages = self._prompt_message_records(request_body_seed_messages)
         previous_actual_request_messages: list[dict[str, Any]] = []
+        # 上一跳发出去的墙钟，与"本跳是不是空闲边界"——判据必须在本跳把墙钟推前之前取，
+        # 否则每一跳看到的都是刚写上去的当下值。
+        previous_send_at: str = ""
+        hop_idle_boundary: bool = False
         pending_request_delta_messages: list[dict[str, Any]] = []
         request_seed_source = ''
         request_seed_message_count = 0
@@ -548,6 +553,8 @@ class ReActToolLoop:
                     request_seed_source = 'fallback_seed_empty'
                 else:
                     request_seed_source = self._fallback_source_from_state(seed_state_for_source)
+            hop_idle_boundary = idle_boundary_exceeded(previous_send_at)
+            previous_send_at = now_iso()
             previous_actual_request_messages = self._prompt_message_records(request_messages)
             pending_request_delta_messages = []
             repair_overlay_text = None
@@ -635,10 +642,16 @@ class ReActToolLoop:
             if stage_compaction_hop and not str(history_shrink_reason or '').strip():
                 # 请求体因阶段过期点变短必须有合法理由，否则逐轮对账会把它读成非法 shrink。
                 history_shrink_reason = 'stage_compaction'
-            if str(history_shrink_reason or '').strip() == 'token_compression':
-                # token 压缩是节点清单的唯一重新提交点：正文这一跳已被
-                # `[TOKEN_COMPACT_V2]` 全量重写，可复用前缀反正已经断在这里，
-                # 重印说明书不额外破缓存；之后的跳按重印后的清单继续钉住。
+            bundle_recommit_reason = self._node_bundle_recommit_reason(
+                history_shrink_reason=str(history_shrink_reason or ''),
+                idle_boundary=hop_idle_boundary,
+            )
+            if bundle_recommit_reason:
+                # 清单的重新提交点只有这两条：token 压缩（正文这一跳已被 `[TOKEN_COMPACT_V2]`
+                # 全量重写，可复用前缀反正已经断在这里，重印说明书不额外破缓存）与空闲边界
+                # （距上次发送超过 `context_refresh.idle_minutes`，见 `g3ku/config/context_refresh.py`）。
+                # 空闲那一档确实会重付头部那一截，它是"被收回的名字不必等到下次压缩才退场"的价。
+                # 之后的跳按重印后的清单继续钉住。
                 compression_provider_tool_names = self._normalized_name_list(
                     list(tool_schema_selection.get('pinned_provider_tool_names') or [])
                 ) or list(provider_tool_names)
@@ -690,7 +703,7 @@ class ReActToolLoop:
                                 'provider_tool_exposure_revision': provider_tool_exposure_revision,
                                 'provider_tool_exposure_commit_reason': '',
                                 'provider_tool_bundle_seeded': True,
-                                'provider_tool_bundle_recommit_reason': 'token_compression',
+                                'provider_tool_bundle_recommit_reason': bundle_recommit_reason,
                             },
                         }
                         token_preflight_diagnostics = {
@@ -716,7 +729,7 @@ class ReActToolLoop:
                             ),
                             'final_estimate_tokens': compression_final_tokens,
                             'final_request_tokens': compression_final_tokens,
-                            'provider_tool_bundle_recommit_reason': 'token_compression',
+                            'provider_tool_bundle_recommit_reason': bundle_recommit_reason,
                         }
             actual_request_diagnostics = build_actual_request_diagnostics(
                 request_messages=request_messages,
@@ -6585,6 +6598,17 @@ class ReActToolLoop:
         if isinstance(record.get('observed_input_truth'), dict):
             return dict(record.get('observed_input_truth') or {})
         return {}
+
+    @staticmethod
+    def _node_bundle_recommit_reason(*, history_shrink_reason: str, idle_boundary: bool) -> str:
+        """本跳是否要重印 provider tools[]，以及是哪条边界逼出来的。
+
+        token 压缩排前面：它正文已被整段重写，重印不额外破缓存；空闲那一档确实要重付头部
+        那一截，两条都命中时报压缩那一条（缓存侧按那条读数）。
+        """
+        if str(history_shrink_reason or '').strip() == 'token_compression':
+            return 'token_compression'
+        return 'idle_refresh' if idle_boundary else ''
 
     @staticmethod
     def _node_send_baseline_after_compaction(

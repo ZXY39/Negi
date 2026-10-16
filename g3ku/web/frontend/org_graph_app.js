@@ -340,6 +340,16 @@ const S = {
             maxRetryRounds: 1,
             error: "",
         },
+        // 空闲刷新设置：`saved` 是服务端读数，草稿不等它——只有「应用」才写回。
+        contextRefresh: {
+            open: false,
+            enabled: true,
+            idleMinutes: 120,
+            saved: { enabled: true, idleMinutes: 120 },
+            loading: false,
+            saving: false,
+            error: "",
+        },
         defaults: DEFAULT_MODEL_DEFAULTS(),
         loading: false,
         saving: false,
@@ -598,6 +608,15 @@ const U = {
     modelCreate: document.getElementById("model-create-btn"),
     modelRolesCancel: document.getElementById("model-roles-cancel-btn"),
     modelRolesSave: document.getElementById("model-roles-save-btn"),
+    modelContextRefresh: document.getElementById("model-context-refresh-btn"),
+    contextRefreshBackdrop: document.getElementById("context-refresh-backdrop"),
+    contextRefreshDialog: document.getElementById("context-refresh-dialog"),
+    contextRefreshEnabled: document.getElementById("context-refresh-enabled"),
+    contextRefreshMinutes: document.getElementById("context-refresh-minutes"),
+    contextRefreshApply: document.getElementById("context-refresh-apply-btn"),
+    contextRefreshError: document.getElementById("context-refresh-error"),
+    contextRefreshCancel: document.getElementById("context-refresh-cancel-btn"),
+    contextRefreshClose: document.getElementById("context-refresh-close-btn"),
     modelRoleEditors: document.getElementById("model-role-editors"),
     modelRoleLimitsBar: document.getElementById("model-role-limits-bar"),
     modelSearch: document.getElementById("model-search-input"),
@@ -13062,6 +13081,141 @@ function renderModelDetail() {
         </article>`;
 }
 
+// ---- 上下文信息更新时间（空闲刷新边界）---------------------------------------
+function contextRefreshDraftDirty() {
+    const state = S.modelCatalog.contextRefresh;
+    return state.enabled !== state.saved.enabled
+        || Number(state.idleMinutes) !== Number(state.saved.idleMinutes);
+}
+
+function renderContextRefreshDialog() {
+    const state = S.modelCatalog.contextRefresh;
+    const backdrop = U.contextRefreshBackdrop;
+    if (!backdrop) return;
+    if (!state.open) {
+        backdrop.hidden = true;
+        backdrop.classList.remove("is-open");
+        U.contextRefreshDialog?.setAttribute("aria-hidden", "true");
+        return;
+    }
+    backdrop.hidden = false;
+    backdrop.classList.add("is-open");
+    U.contextRefreshDialog?.setAttribute("aria-hidden", "false");
+    // 输入框只在非焦点时回写：整块重绘会把光标位置和勾选焦点踢掉。
+    if (U.contextRefreshEnabled && document.activeElement !== U.contextRefreshEnabled) {
+        U.contextRefreshEnabled.checked = Boolean(state.enabled);
+    }
+    if (U.contextRefreshMinutes && document.activeElement !== U.contextRefreshMinutes) {
+        U.contextRefreshMinutes.value = String(state.idleMinutes ?? "");
+    }
+    if (U.contextRefreshError) {
+        U.contextRefreshError.hidden = !state.error;
+        U.contextRefreshError.textContent = state.error || "";
+    }
+    if (U.contextRefreshApply) {
+        U.contextRefreshApply.disabled = state.loading || state.saving || !contextRefreshDraftDirty();
+        U.contextRefreshApply.textContent = state.saving ? "应用中…" : "应用";
+    }
+    const lockClose = Boolean(state.saving);
+    U.contextRefreshClose?.toggleAttribute("disabled", lockClose);
+    U.contextRefreshCancel?.toggleAttribute("disabled", lockClose);
+}
+
+function closeContextRefreshDialog() {
+    S.modelCatalog.contextRefresh.open = false;
+    S.modelCatalog.contextRefresh.error = "";
+    renderContextRefreshDialog();
+}
+
+async function loadContextRefreshSettings() {
+    const state = S.modelCatalog.contextRefresh;
+    state.loading = true;
+    state.error = "";
+    renderContextRefreshDialog();
+    try {
+        const payload = await ApiClient.getContextRefreshSettings();
+        const section = payload?.context_refresh || {};
+        state.saved = {
+            enabled: Boolean(section.enabled),
+            idleMinutes: Number(section.idle_minutes) || 120,
+        };
+        state.enabled = state.saved.enabled;
+        state.idleMinutes = state.saved.idleMinutes;
+    } catch (error) {
+        state.error = String(error?.message || "读取失败，请稍后重试");
+    } finally {
+        state.loading = false;
+        renderContextRefreshDialog();
+    }
+}
+
+async function applyContextRefreshSettings() {
+    const state = S.modelCatalog.contextRefresh;
+    const minutes = Math.trunc(Number(state.idleMinutes));
+    if (!Number.isFinite(minutes) || minutes < 1) {
+        state.error = "刷新时间至少为 1 分钟";
+        renderContextRefreshDialog();
+        return;
+    }
+    state.error = "";
+    state.saving = true;
+    renderContextRefreshDialog();
+    try {
+        const payload = await ApiClient.updateContextRefreshSettings({
+            enabled: state.enabled,
+            idleMinutes: minutes,
+        });
+        const section = payload?.context_refresh || {};
+        state.saved = {
+            enabled: Boolean(section.enabled),
+            idleMinutes: Number(section.idle_minutes) || minutes,
+        };
+        state.enabled = state.saved.enabled;
+        state.idleMinutes = state.saved.idleMinutes;
+        showToast({
+            title: "上下文信息更新时间已保存",
+            text: state.enabled ? `距上次请求超过 ${state.saved.idleMinutes} 分钟后，下一次请求前先刷新。` : "已禁用。",
+            kind: "success",
+        });
+        closeContextRefreshDialog();
+    } catch (error) {
+        state.error = String(error?.message || "保存失败，请稍后重试");
+        showToast({ title: "上下文信息更新时间保存失败", text: state.error, kind: "error" });
+    } finally {
+        state.saving = false;
+        renderContextRefreshDialog();
+    }
+}
+
+async function openContextRefreshDialog() {
+    const state = S.modelCatalog.contextRefresh;
+    state.open = true;
+    state.error = "";
+    renderContextRefreshDialog();
+    U.contextRefreshDialog?.focus();
+    await loadContextRefreshSettings();
+}
+
+function bindContextRefreshDialog() {
+    U.modelContextRefresh?.addEventListener("click", () => void openContextRefreshDialog());
+    U.contextRefreshCancel?.addEventListener("click", closeContextRefreshDialog);
+    U.contextRefreshClose?.addEventListener("click", closeContextRefreshDialog);
+    U.contextRefreshApply?.addEventListener("click", () => void applyContextRefreshSettings());
+    U.contextRefreshBackdrop?.addEventListener("click", (e) => {
+        if (e.target === U.contextRefreshBackdrop && !S.modelCatalog.contextRefresh.saving) closeContextRefreshDialog();
+    });
+    U.contextRefreshEnabled?.addEventListener("change", (e) => {
+        S.modelCatalog.contextRefresh.enabled = Boolean(e.target.checked);
+        S.modelCatalog.contextRefresh.error = "";
+        renderContextRefreshDialog();
+    });
+    U.contextRefreshMinutes?.addEventListener("input", (e) => {
+        S.modelCatalog.contextRefresh.idleMinutes = e.target.value;
+        S.modelCatalog.contextRefresh.error = "";
+        renderContextRefreshDialog();
+    });
+}
+
 function renderModelCatalog() {
     if (U.modelRefresh) U.modelRefresh.disabled = S.modelCatalog.loading || S.modelCatalog.saving;
     if (U.modelCreate) U.modelCreate.disabled = S.modelCatalog.loading || S.modelCatalog.saving;
@@ -18524,6 +18678,7 @@ function bind() {
     U.modelCreate?.addEventListener("click", startCreateModel);
     U.modelRolesCancel?.addEventListener("click", cancelModelRoleEditing);
     U.modelRolesSave?.addEventListener("click", () => void handleModelRoleEditorAction());
+    bindContextRefreshDialog();
     U.modelSearch?.addEventListener("input", (e) => {
         S.modelCatalog.search = String(e.target.value || "");
         renderModelList();

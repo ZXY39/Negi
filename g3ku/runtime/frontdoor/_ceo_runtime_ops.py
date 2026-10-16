@@ -17,6 +17,7 @@ from typing import Any
 from loguru import logger
 
 from g3ku.agent.tools.base import Tool
+from g3ku.config.context_refresh import idle_boundary_exceeded
 from g3ku.config.live_runtime import get_runtime_config, peek_runtime_revision
 from g3ku.core.messages import UserInputMessage
 from g3ku.core.timefmt import render_arrival_stamp, strip_arrival_time_stamp
@@ -50,8 +51,10 @@ from g3ku.runtime.chunk_compression_plan import (
 from g3ku.runtime.config_refresh import refresh_loop_runtime_config
 from g3ku.runtime.context.summarizer import estimate_tokens
 from g3ku.runtime.frontdoor.message_builder import (
+    MEMORY_SNAPSHOT_ADOPTION_IDLE_REFRESH,
     MEMORY_WRITE_HINT_HEADER,
     RETRIEVED_MEMORY_HINT_HEADER,
+    adopt_memory_snapshot,
     memory_snapshot_provenance,
 )
 from g3ku.runtime.frontdoor.token_preflight_compaction import (
@@ -67,7 +70,10 @@ from g3ku.runtime.kept_contract_snapshot import (
 )
 from g3ku.runtime.message_token_estimation import estimate_message_tokens
 from g3ku.runtime.project_environment import current_project_environment
-from g3ku.runtime.session_agent import PENDING_PROVIDER_BUNDLE_RECOMMIT_ATTR
+from g3ku.runtime.session_agent import (
+    FRONTDOOR_LAST_SEND_AT_ATTR,
+    PENDING_PROVIDER_BUNDLE_RECOMMIT_ATTR,
+)
 from g3ku.runtime.stage_prompt_compaction import (
     ECHO_STRIP_ENABLED,
     STAGE_ARCHIVE_HEADING,
@@ -3792,10 +3798,13 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
 
     def _frontdoor_bundle_recommit_boundary(self, *, session: Any, state: CeoGraphState) -> bool:
         """tools[] 的唯一重新提交点：压缩（内联 preflight 的 token_compression 或手动压缩挂的
-        待重印标记）与换车道。
+        待重印标记）、换车道，以及距上次发送超过空闲窗口的第一跳。
 
         换车道必须重印：心跳/定时内部轮的工具面是刻意收窄的，钉住不能把上一车道的宽面
         继承进来——那等于给内部轮多发一份它本来不该看见的执行面。标记读一次即清。
+
+        空闲这条不自建标记：它读的是上一次发送的墙钟，而每一次发送都会推进它，所以一条
+        回合内只可能在最前面那一跳成立。
         """
         metadata = _user_input_metadata(state.get("user_input"))
         lane = (
@@ -3810,7 +3819,26 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
         if bool(getattr(session, PENDING_PROVIDER_BUNDLE_RECOMMIT_ATTR, False)):
             setattr(session, PENDING_PROVIDER_BUNDLE_RECOMMIT_ATTR, False)
             return True
+        if idle_boundary_exceeded(str(getattr(session, FRONTDOOR_LAST_SEND_AT_ATTR, "") or "")):
+            self._adopt_frontdoor_idle_memory_snapshot(session)
+            return True
         return lane != prior_lane
+
+    def _adopt_frontdoor_idle_memory_snapshot(self, session: Any) -> None:
+        """空闲边界把长期记忆快照读到最新：只重读盘，不冲刷复核窗口。
+
+        "先冲刷再读"那条契约是压缩轮末专用的——记忆 worker 自己按节拍排队列，在请求边界
+        同步冲刷会把一次内部 memory agent 往返塞进用户这一跳。代价是复核窗口最后几轮缓冲
+        可能还没进文档，这一跳读到的仍是旧版。
+        """
+        memory_manager = getattr(self._loop, "memory_manager", None)
+        if memory_manager is None:
+            return
+        adopt_memory_snapshot(
+            session,
+            memory_manager=memory_manager,
+            reason=MEMORY_SNAPSHOT_ADOPTION_IDLE_REFRESH,
+        )
     def _registered_tools_for_state(self, state: CeoGraphState) -> dict[str, Tool]:
         return self._registered_tools(
             self._frontdoor_provider_visible_tool_names(self._frontdoor_dispatch_tool_names(state))
@@ -5135,6 +5163,13 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
         if not session_key:
             return {}
         target_session = getattr(getattr(runtime, "context", None), "session", None)
+        # durable 基线唯一前进点也是"活跃"的唯一读数点：空闲刷新边界按它判"多久没发过"。
+        if target_session is not None:
+            setattr(
+                target_session,
+                FRONTDOOR_LAST_SEND_AT_ATTR,
+                str(provider_request_started_at or "").strip() or now_iso(),
+            )
         # 这里是 durable 基线唯一的前进点，阶段收口跟着它一起落地：请求体里那份摘要块
         # 自带收口水位线（`stage_archive.archived_through_created_at`）。压缩算完但没走到
         # 这一步的回合（发送失败、压缩后被暂停）不翻任何标记，下一轮照旧渲染块，不会丢历史。

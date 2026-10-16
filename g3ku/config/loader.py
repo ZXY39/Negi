@@ -645,6 +645,10 @@ def _runtime_config_payload(cfg: Config) -> dict[str, object]:
             "binaryDownloadBaseUrl": cfg.stt.binary_download_base_url,
             "modelDownloadBaseUrl": cfg.stt.model_download_base_url,
         },
+        "contextRefresh": {
+            "enabled": cfg.context_refresh.enabled,
+            "idleMinutes": cfg.context_refresh.idle_minutes,
+        },
     }
 
 
@@ -665,6 +669,8 @@ def _ensure_runtime_fields_explicit(raw_data: dict[str, Any], cfg: Config) -> No
         ("cron",),
         # 可选能力段：没配就是不用，取值回落到 schema 默认。
         ("stt",),
+        # 空闲刷新边界：存量 config.json 没有这一节也必须能加载，默认值由 schema 承担。
+        ("contextRefresh",),
         # 负载均衡组是可选段：存量 config.json 没有该节也必须能加载，成员预算等
         # 缺省值由 `ModelLoadBalanceGroup` 承担。
         ("models", "loadBalanceGroups"),

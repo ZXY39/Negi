@@ -101,7 +101,7 @@
 
 ### 钉住的 `tools[]` 与它的滞后出口
 
-- `tools[]` 是按角色**钉住**的声明，不是当轮能力集：两条车道在回合内都不因权限变动改成员，只有 `token_compression`（或手动压缩落基线）那一跳才重印。前门的钉住名单在回合起点算一次（治理快照 `capability_snapshot.visible_tool_ids`），冻结分支并的就是这份快照，所以回合内不存在第二次治理读；节点的治理读每跳都活，但冻结分支只并入"已可调 / 已选 / 已提升 / 已构建出对象"四类名字，不并入治理全集。清单滞后不影响安全：派发字典按当轮 RBAC 另行收窄，撤销当跳就拒（合同见 `tool-and-skill-system.md`「Provider Tool Surface」）。
+- `tools[]` 是按角色**钉住**的声明，不是当轮能力集：两条车道在回合内都不因权限变动改成员，成员退场只发生在重印边界（边界清单只有一处定义，见 `tool-and-skill-system.md`「Provider Tool Surface」，本节不复述条数）。前门的钉住名单在回合起点算一次（治理快照 `capability_snapshot.visible_tool_ids`），冻结分支并的就是这份快照，所以回合内不存在第二次治理读；节点的治理读每跳都活，但冻结分支只并入"已可调 / 已选 / 已提升 / 已构建出对象"四类名字，不并入治理全集。清单滞后不影响安全：派发字典按当轮 RBAC 另行收窄，撤销当跳就拒（合同见 `tool-and-skill-system.md`「Provider Tool Surface」）。
 - 滞后有两个方向，两个各有出口：**收回**方向名字还挂在 `tools[]` 上但已无权限，尾块用 `denied_tools` 提前点名，免得模型反复重试或改着名字试；**放行**方向名字进了候选池、能 `load_tool_context`，但参数表还没上清单（节点道独有：候选池上界是每跳活的治理读，清单只认已构建出的对象），尾块用 `undeclared_candidates` 给出这批名字。两者都由 `tools[] − callable_tools − denied_tools − 控制工具` 这一条推导链定位，尾块因此不抄整份候选表。
 - `undeclared_candidates` 每次渲出都意味着"模型手里有一个可加载的名字而没有它的参数表"。它是发现出口的形态，不是常态：非空持续出现说明钉住规则该在压缩跳把那张参数表带上。拿不到本次声明名单的装配路退回渲全量候选，判据在 `g3ku/utils/helpers.py:render_candidate_tool_line` 一处，两条车道共用同一份文本。
 

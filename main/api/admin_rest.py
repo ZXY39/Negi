@@ -1002,6 +1002,46 @@ async def update_main_runtime_settings(payload: dict | None = Body(default=None)
     return {'ok': True, **_main_runtime_settings_payload(cfg)}
 
 
+def _context_refresh_settings_payload(cfg: Config) -> dict[str, Any]:
+    section = cfg.context_refresh
+    return {
+        'context_refresh': {
+            'enabled': bool(getattr(section, 'enabled', True)),
+            'idle_minutes': max(1, int(getattr(section, 'idle_minutes', 120) or 120)),
+        }
+    }
+
+
+@router.get('/context-refresh/settings')
+async def get_context_refresh_settings():
+    cfg = load_config()
+    return {'ok': True, **_context_refresh_settings_payload(cfg)}
+
+
+@router.put('/context-refresh/settings')
+async def update_context_refresh_settings(payload: dict | None = Body(default=None)):
+    """空闲刷新边界开关与分钟数。两条车道都在发送点现读 live config（`get_runtime_config`
+    按 mtime 重载），所以 worker 不需要额外信令就能在下一跳用上新值。
+    """
+    body = payload if isinstance(payload, dict) else {}
+    cfg = load_config()
+    current = cfg.context_refresh
+    enabled = bool(body.get('enabled', current.enabled))
+    raw_minutes = body.get('idleMinutes', body.get('idle_minutes'))
+    try:
+        idle_minutes = int(raw_minutes)
+    except (TypeError, ValueError):
+        raise HTTPException(status_code=400, detail={'code': 'invalid_idle_minutes'})
+    if idle_minutes < 1:
+        raise HTTPException(status_code=400, detail={'code': 'invalid_idle_minutes'})
+    if bool(current.enabled) != enabled or int(current.idle_minutes) != idle_minutes:
+        current.enabled = enabled
+        current.idle_minutes = idle_minutes
+        save_config(cfg)
+        await _refresh_runtime('admin_context_refresh_update')
+    return {'ok': True, **_context_refresh_settings_payload(cfg)}
+
+
 def _mask_external_api_token(token: str) -> str:
     raw = str(token or '')
     if not raw:

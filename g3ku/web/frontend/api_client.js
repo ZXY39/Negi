@@ -1453,6 +1453,14 @@ class ApiClient {
         return this.put("/api/external-api/settings", payload || {});
     }
 
+    static async getContextRefreshSettings() {
+        return this.get("/api/context-refresh/settings");
+    }
+
+    static async updateContextRefreshSettings(payload) {
+        return this.put("/api/context-refresh/settings", payload || {});
+    }
+
     static async createExternalApiToken(payload) {
         return this.post("/api/external-api/tokens", payload || {});
     }

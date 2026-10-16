@@ -322,16 +322,17 @@ The surfaced `message` executor is absent from the resource/tool contract entire
 
 发给 provider 的 `tools[]` 声明清单（`provider_tool_names`）与"本轮真能调用"的 `tool_names` 是两份集合，两条车道都用这份区分做排查：`tool_names` 是当前轮权威 callable 合同；`provider_tool_names` 只决定 `tools[]` 里出现哪些名字与参数表。水合提升与阶段门控改动运行时合同尾块，不该每轮都重铺 `tools[]`。运行时合同是插在最新 user 消息之前的 system-role 摘要，不是 provider schema，也不是 durable history；模型若回显它，前门归一化只做一次私有修复，重复回显永不升级为最终输出。
 
-两条车道发的是同一种形状，区别只在重印边界有几条：
+两条车道发的是同一种形状，区别只在重印边界有几条。边界只有一条判据源：`g3ku/config/context_refresh.py` 的 `idle_boundary_exceeded()`，两条车道共用它，所以"多久没发"在两侧不可能读出不同的值。
 
-- **CEO/frontdoor**：首跳按当轮 RBAC 可见工具全集播种，之后钉住。重印边界三条——内联压缩（preflight 报 `token_compression`）、手动压缩（车道路在 session 上挂 `PENDING_PROVIDER_BUNDLE_RECOMMIT_ATTR`，读一次即清）、**换车道**（正常 ↔ 心跳/定时内部轮；内部轮的工具面是刻意收窄的，继承上一车道的宽面等于给内部轮多发一份执行面）。
-- **执行/验收节点**：同样首跳按角色 RBAC 全集播种后钉住，重印边界只有 `token_compression` 一条。两条车道的钉住都是**只补不删**：当轮新增能力即时并入（否则模型手里只剩名字、拼不出合法参数表），删名一律推迟到重印点；那一跳正文已被 `[TOKEN_COMPACT_V2]` 整段重写，可复用前缀反正断在这里，重印不额外破缓存。声明侧渲染脱离派发字典：清单里的名字若当轮已无实例，参数表取自 `declared_denied_tool_schemas`。
+- **CEO/frontdoor**：首跳按当轮 RBAC 可见工具全集播种，之后钉住。重印边界四条——内联压缩（preflight 报 `token_compression`）、手动压缩（车道路在 session 上挂 `PENDING_PROVIDER_BUNDLE_RECOMMIT_ATTR`，读一次即清）、**换车道**（正常 ↔ 心跳/定时内部轮；内部轮的工具面是刻意收窄的，继承上一车道的宽面等于给内部轮多发一份执行面）、**空闲边界**（距上一次真实发送超过 `contextRefresh.idleMinutes`）。
+- **执行/验收节点**：同样首跳按角色 RBAC 全集播种后钉住，重印边界两条——`token_compression` 与空闲边界（判据在 `ReActToolLoop._node_bundle_recommit_reason`，两条都命中时报 `token_compression`，因为那一跳正文已被整段重写、重印不再额外破缓存）。空闲那条读数用回合内的局部变量计时，不落盘：进程重启本身就是重新播种的边界，落盘只会多一个每跳读数。
+- 两条车道的钉住都是**只补不删**：当轮新增能力即时并入（否则模型手里只剩名字、拼不出合法参数表），删名一律推迟到重印点；压缩那一跳正文已被 `[TOKEN_COMPACT_V2]` 整段重写，可复用前缀反正断在那里，重印不额外破缓存。**空闲那一档不一样，它确实重付头部那一截**——这是维护者按实测代价接受的交换：被收回的名字不该等到下次压缩才退场。声明侧渲染脱离派发字典：清单里的名字若当轮已无实例，参数表取自 `declared_denied_tool_schemas`。
 
 漂移规则：
 
 - 普通跳只有在成员集合真的变化时才重算 `tools[]`；同名不同序保持持久化顺序原样不动，不为零收益轮换 schema。
-- `stage_compaction` 任何一侧都不得轮转 `tools[]`。`token_compression` 是两条车道共同的重印点，前门另加"手动压缩"与"换车道"两条。重印取的是"此刻按当轮 RBAC 重新播种会得到什么"，不是退回上一跳的窄清单。
-- 清单滞后不是权限滞后，权限收回也不是删名的理由：两条车道的执行准入都与声明解耦——节点按当轮待派发字典查名，前门派发按 `_frontdoor_dispatch_tool_names` = 钉住清单 ∩ 当轮治理可见集（治理可见集取不到时退回当轮 callable pool，宁可窄不可宽）。RBAC 收回在执行侧当跳即拒，而清单继续带着该名字。两条车道的尾块都印 `denied_tools` 提前点名这一行。**前门那一行只有一个算点**：`_frontdoor_declared_denied_tool_names_for_state` = state 上钉住的清单 ∩ 实时授权读（`list_effective_tool_names(actor_role="ceo")`，取不到就不印，不拿回合内快照凑）。它必须生效在发送前用 state 重建契约块的那一处——装配路 `message_builder.py` 建的那份在落请求体前还会被 `_refresh_prompt_cache_state` 与发送预检各重算一次，所以尾块加新字段只写进装配层等于没写。拒绝文案三态分开：候选未水化 ⇒ 先 `load_tool_context`；已收回 ⇒ 重试与改名都不会放行；两者都不在 ⇒ 未知名字。
+- `stage_compaction` 任何一侧都不得轮转 `tools[]`。重印点=压缩（`token_compression`）+ 空闲边界，前门另加"手动压缩"与"换车道"两条。重印取的是"此刻按当轮 RBAC 重新播种会得到什么"，不是退回上一跳的窄清单。
+- 清单滞后不是权限滞后，权限收回也不是删名的理由：两条车道的执行准入都与声明解耦——节点按当轮待派发字典查名，前门派发按 `_frontdoor_dispatch_tool_names` = 钉住清单 ∩ 当轮治理可见集（治理可见集取不到时退回当轮 callable pool，宁可窄不可宽）。RBAC 收回在执行侧当跳即拒，而清单继续带着该名字，直到下一个重印边界才真的退场——空闲边界存在之后，这个滞后有了上界（`contextRefresh.idleMinutes`）。两条车道的尾块都印 `denied_tools` 提前点名这一行。**前门那一行只有一个算点**：`_frontdoor_declared_denied_tool_names_for_state` = state 上钉住的清单 ∩ 实时授权读（`list_effective_tool_names(actor_role="ceo")`，取不到就不印，不拿回合内快照凑）。它必须生效在发送前用 state 重建契约块的那一处——装配路 `message_builder.py` 建的那份在落请求体前还会被 `_refresh_prompt_cache_state` 与发送预检各重算一次，所以尾块加新字段只写进装配层等于没写。拒绝文案三态分开：候选未水化 ⇒ 先 `load_tool_context`；已收回 ⇒ 重试与改名都不会放行；两者都不在 ⇒ 未知名字。
 - 曝光收窄（候选塌缩、LRU 淘汰 callable）不得把名字从节点清单里删掉；LRU 只管 callable 层，与清单无关。被淘汰但清单仍带 ⇒ 模型看得见参数表、本轮调不动，需重新 `load_tool_context`。
 - 工具曝光漂移改变当轮实际请求，但不因此轮换 caller-side prompt cache family；family 变化只留给稳定前缀重写、车道或模型切换、显式 cache-family revision bump 及其他刻意重置边界。`tool_signature_hash` / `actual_tool_schema_hash` 是观测字段，不是"该有新 family"的证据；缓存侧排查步骤见 `context-and-cache-troubleshooting.md`「跨普通 fresh turn 的 tool schema churn」。
 

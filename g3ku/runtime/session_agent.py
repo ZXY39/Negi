@@ -62,6 +62,9 @@ MANUAL_COMPRESSION_RUNNING = "running"
 # 待重印的 provider tools[] 标记：手动压缩跑在回合外、够不到 preflight，所以由 api 层挂
 # 一个标记，下一跳的清单定形把它当成重印边界消费掉（内联压缩自带 token_compression 信号）。
 PENDING_PROVIDER_BUNDLE_RECOMMIT_ATTR = "_pending_provider_bundle_recommit"
+# 上一次真实发送的墙钟，空闲刷新边界读它（判据本体在 `g3ku/config/context_refresh.py`）。
+# 不落盘：进程重启本身就是刷新点（清单为空即重新播种、冻结快照不持久化即重采纳）。
+FRONTDOOR_LAST_SEND_AT_ATTR = "_frontdoor_last_send_at"
 # _internal_prompt_message_metadata 写入的内部提示词种类；翻转 discarded 时按此匹配，
 # 避免误伤同 turn 的助手错误行（其 metadata 无 internal_prompt_kind）。
 _INTERNAL_PROMPT_KINDS = frozenset(
@@ -213,10 +216,11 @@ class RuntimeAgentSession:
         # 只表达“当轮压缩事件”，与跨轮残留的 _frontdoor_history_shrink_reason 不同。
         self._frontdoor_token_compression_applied_turn: bool = False
         # 长期记忆快照的会话级冻结值：注入侧只读它，改写只发生在采纳点
-        # （会话首请求 / 压缩轮末 / 手动压缩成功后）。None = 本会话尚未采纳。
+        # （会话首请求 / 压缩轮末 / 手动压缩成功后 / 空闲刷新边界）。None = 本会话尚未采纳。
         self._frontdoor_memory_snapshot_text: str | None = None
         self._frontdoor_memory_snapshot_adopted_at: str = ""
         self._frontdoor_memory_snapshot_adoption_reason: str = ""
+        self._frontdoor_last_send_at: str = ""
         self._frontdoor_compression_generation_seq: int = 0
         self._active_frontdoor_compression_generation: int | None = None
         self._cancelled_frontdoor_compression_generations: set[int] = set()
