@@ -25,7 +25,11 @@ from main.runtime.acceptance_handshake import (
     ACCEPTANCE_HANDSHAKE_KEY,
     ACCEPTANCE_STATE_WAITING_ACCEPTANCE,
 )
-from main.runtime.node_runner import _DISTRIBUTION_DECISION_MAX_ATTEMPTS, NodeRunner
+from main.runtime.node_runner import (
+    NOTICE_RETRY_STATE_KEY,
+    _DISTRIBUTION_DECISION_MAX_ATTEMPTS,
+    NodeRunner,
+)
 from main.runtime.pending_notice_state import (
     PENDING_NOTICE_STATE_KEY,
     RESUME_MODE_ORDINARY,
@@ -1837,6 +1841,115 @@ async def test_notice_inspection_decision_uses_its_tool_arguments(tmp_path: Path
         notifications = service.store.list_task_node_notifications(record.task_id, acceptance.node_id)
         assert len(notifications) == 1
         assert "新的验收约束" in notifications[0].message
+    finally:
+        await service.close()
+
+
+@pytest.mark.asyncio
+async def test_notice_redo_state_is_reported_but_never_vetoes_the_choice(tmp_path: Path) -> None:
+    """返工计数是送给模型的事实，不是机器的闸门。
+
+    计数必须进决策束（模型每回合只看得到手里这条通知，跨轮的历史得有人替它记），
+    但到顶不能替它决定：它选 `resume_execution` 时打断照做、计数照加。
+    """
+    backend = _QueuedChatBackend(
+        [
+            SimpleNamespace(
+                tool_calls=[
+                    {
+                        "name": "submit_notice_inspection_decision",
+                        "arguments": {
+                            "action": "resume_execution",
+                            "reason": "通知改的正是交付物本身。",
+                            "notes": "按新要求重做",
+                        },
+                    }
+                ],
+                content="",
+            )
+        ]
+    )
+    service = _build_service_with_backend(tmp_path, chat_backend=backend)
+    try:
+        record, root, branch_a, _branch_b = await seed_live_root_with_two_running_children(service)
+        acceptance = NodeRecord(
+            node_id="node:acceptance-redo",
+            task_id=record.task_id,
+            parent_node_id=branch_a.node_id,
+            root_node_id=root.node_id,
+            depth=2,
+            node_kind="acceptance",
+            status="in_progress",
+            goal="branch acceptance",
+            prompt="inspect branch a",
+            created_at=now_iso(),
+            updated_at=now_iso(),
+        )
+        service.store.upsert_node(acceptance)
+
+        def _seed_state(metadata: dict) -> dict:
+            metadata[ACCEPTANCE_HANDSHAKE_KEY] = {
+                "state": ACCEPTANCE_STATE_WAITING_ACCEPTANCE,
+                "acceptance_node_id": acceptance.node_id,
+            }
+            # 本节点此前已被追加通知打断过 7 次
+            metadata[NOTICE_RETRY_STATE_KEY] = {"notice_interrupts": 7, "last_interrupt_at": "2026-10-16T10:00:00+08:00"}
+            return metadata
+
+        service.log_service.update_node_metadata(branch_a.node_id, _seed_state)
+        branch_a = service.store.get_node(branch_a.node_id) or branch_a
+        epoch = await _seed_distributing_epoch(
+            service,
+            task_id=record.task_id,
+            message="再补一批候选",
+            frontier_node_ids=[branch_a.node_id],
+        )
+        epoch = epoch.model_copy(
+            update={
+                "payload": {
+                    **dict(epoch.payload or {}),
+                    "target_node_ids": [branch_a.node_id],
+                    "scope_node_ids": [branch_a.node_id, acceptance.node_id],
+                    "barrier_node_ids": [branch_a.node_id],
+                    "frontier_node_ids": [branch_a.node_id],
+                    "distributed_node_ids": [],
+                }
+            }
+        )
+        service.store.upsert_task_message_distribution_epoch(epoch)
+        service.log_service.update_task_runtime_meta(
+            record.task_id,
+            distribution={
+                "active_epoch_id": epoch.epoch_id,
+                "state": "distributing",
+                "target_node_ids": [branch_a.node_id],
+                "frontier_node_ids": [branch_a.node_id],
+                "blocked_node_ids": [branch_a.node_id],
+                "pending_notice_node_ids": [branch_a.node_id],
+                "queued_epoch_count": 0,
+                "pending_mailbox_count": 0,
+            },
+        )
+
+        task = service.get_task(record.task_id)
+        assert task is not None
+        result = await service.node_runner.run_notice_inspection_decision(task=task, node=branch_a)
+        assert result.status == "success"
+
+        prompt_payload = json.loads(str(backend.calls[0]["messages"][1]["content"] or "{}"))
+        assert prompt_payload["redo_state"]["notice_interrupts"] == 7
+
+        await service.task_actor_service._apply_notice_interrupt_effects(
+            task_id=record.task_id,
+            epoch_id=epoch.epoch_id,
+        )
+
+        refreshed = service.store.get_node(branch_a.node_id)
+        assert refreshed is not None
+        metadata = dict(refreshed.metadata or {})
+        assert int((metadata.get(NOTICE_RETRY_STATE_KEY) or {})["notice_interrupts"]) == 8
+        # 无硬闩：模型选 resume_execution 时打断照常落地，节点被复活重跑
+        assert str(refreshed.status) == "in_progress"
     finally:
         await service.close()
 

@@ -104,6 +104,10 @@ _RECOVERY_FINGERPRINT_KEY = 'recovery_fingerprint'
 BLOCKED_VERIFICATION_PROMPT_FILE = 'blocked_verification.md'
 _BLOCKED_VERIFICATION_ONLY_KEY = 'blocked_verification_only'
 _BLOCKED_VERIFICATION_LOG_KEY = 'blocked_verification_log'
+# 定向通知导致的"打断验收→回去重做"是按节点累积的事实计数：决策回合的模型只看得见
+# 手里这条通知，跨轮、跨重启的返工圈必须有人替它记着，否则"这条线已经重做五次"不可判。
+# 它不拦任何模型选择——只作为事实渲染进决策束，重做与否仍由节点决定，问不问用户由前门决定。
+NOTICE_RETRY_STATE_KEY = 'notice_retry_state'
 _ACCEPTANCE_EVIDENCE_AUDIT_KEY = 'acceptance_evidence_audit'
 _REJECTION_HISTORY_KEY = 'rejection_history'
 # 交给验收节点的交付正文一律只给指针 + 有界摘要：验收节点按 ref 复核当前提交，
@@ -1584,6 +1588,40 @@ class NodeRunner:
 
         self._log_service.update_node_metadata(node_id, _mutate)
 
+    def _bump_notice_interrupt_count(self, node_id: str) -> None:
+        """记一次"因定向通知打断验收"的事实计数。
+
+        这个数只被读出来渲染进决策束，不参与任何放行判断：返工圈的历史必须有人替模型
+        记住（它每回合只看得到手里这条通知），但重做与否仍是模型的选择。
+        """
+
+        def _mutate(metadata: dict[str, Any]) -> dict[str, Any]:
+            raw = metadata.get(NOTICE_RETRY_STATE_KEY)
+            state = dict(raw) if isinstance(raw, dict) else {}
+            try:
+                count = max(0, int(state.get('notice_interrupts') or 0))
+            except (TypeError, ValueError):
+                count = 0
+            state['notice_interrupts'] = count + 1
+            state['last_interrupt_at'] = now_iso()
+            metadata[NOTICE_RETRY_STATE_KEY] = state
+            return metadata
+
+        self._log_service.update_node_metadata(node_id, _mutate)
+
+    @staticmethod
+    def _notice_retry_state(metadata: dict[str, Any]) -> dict[str, Any]:
+        raw = metadata.get(NOTICE_RETRY_STATE_KEY)
+        state = raw if isinstance(raw, dict) else {}
+        try:
+            count = max(0, int(state.get('notice_interrupts') or 0))
+        except (TypeError, ValueError):
+            count = 0
+        return {
+            'notice_interrupts': count,
+            'last_interrupt_at': str(state.get('last_interrupt_at') or '').strip(),
+        }
+
     def _reactivate_node_for_retry(self, *, task_id: str, node_id: str) -> NodeRecord | None:
         self._stash_node_verdict_history(node_id)
         updated = self._store.update_node(
@@ -1624,6 +1662,7 @@ class NodeRunner:
             latest_rejection_feedback_ref='',
             latest_rejection_feedback_summary='',
         )
+        self._bump_notice_interrupt_count(execution.node_id)
         self._reactivate_node_for_retry(task_id=task.task_id, node_id=execution.node_id)
         if self._acceptance_updates_task_final_acceptance(task=task, execution=execution, acceptance=acceptance):
             self._set_task_final_acceptance_state(
@@ -3672,6 +3711,7 @@ class NodeRunner:
                         'submitted_output_summary': ' '.join(str(node.final_output or '').split())[:600],
                         'check_result_summary': ' '.join(str(node.check_result or '').split())[:300],
                         'incoming_message': incoming_message,
+                        'redo_state': self._notice_retry_state(metadata),
                         'acceptance': {
                             'node_id': acceptance_node_id,
                             'status': str(getattr(acceptance_node, 'status', '') or '').strip(),

@@ -4086,7 +4086,6 @@ class MainRuntimeService:
                     'core_requirement': str(item.get('core_requirement') or '').strip(),
                     'execution_policy': dict(item.get('execution_policy') or {}),
                     'status': str(item.get('status') or '').strip(),
-                    'is_paused': bool(item.get('is_paused', False)),
                 }
             )
         return payload
