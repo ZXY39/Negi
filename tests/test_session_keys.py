@@ -260,7 +260,10 @@ def test_build_ceo_session_catalog_lists_external_bridge_sessions_in_channel_gro
 def test_hidden_external_session_leaves_the_channel_catalog(monkeypatch, tmp_path: Path) -> None:
     """删过一次的渠道会话（该桥 token 还在）在目录与补丁推送两条道上都不出现；
     同一条 external_key 再入站即回来。"""
-    from g3ku.runtime.external_sessions import ExternalSessionRegistry, reset_external_session_registry
+    from g3ku.runtime.external_sessions import (
+        ExternalSessionRegistry,
+        reset_external_session_registry,
+    )
     from g3ku.runtime.web_ceo_sessions import build_channel_ceo_session_item
 
     monkeypatch.setattr(
@@ -303,7 +306,10 @@ def test_hidden_external_session_leaves_the_channel_catalog(monkeypatch, tmp_pat
 
 def test_external_channel_row_reports_hide_only_while_bridge_token_exists(monkeypatch, tmp_path: Path) -> None:
     """判据只有一处：token 条目不在了，同一行就改成彻底删除，不留隐身态。"""
-    from g3ku.runtime.external_sessions import ExternalSessionRegistry, reset_external_session_registry
+    from g3ku.runtime.external_sessions import (
+        ExternalSessionRegistry,
+        reset_external_session_registry,
+    )
     from g3ku.runtime.web_ceo_sessions import build_channel_ceo_session_item
 
     monkeypatch.setattr(
@@ -495,7 +501,10 @@ def test_resolve_active_ceo_session_id_falls_back_for_unknown_ext_key(tmp_path: 
 def test_build_channel_ceo_session_item_keeps_channel_shape(tmp_path: Path) -> None:
     """补丁/快照构建器必须给渠道键返回渠道形状（P4 根因的契约侧）：
     本地构建器对渠道键返回 None，通用兜底会把它标成普通 web 会话。"""
-    from g3ku.runtime.external_sessions import ExternalSessionRegistry, reset_external_session_registry
+    from g3ku.runtime.external_sessions import (
+        ExternalSessionRegistry,
+        reset_external_session_registry,
+    )
     from g3ku.runtime.web_ceo_sessions import build_channel_ceo_session_item
 
     reset_external_session_registry()
