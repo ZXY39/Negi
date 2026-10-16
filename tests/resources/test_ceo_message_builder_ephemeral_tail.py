@@ -76,24 +76,15 @@ async def test_build_for_ceo_appends_ephemeral_tail_messages_only_to_model_messa
     assert all(item.get("content") != "Ephemeral reminder header" for item in result.dynamic_appendix_messages)
 
 
-def test_frontdoor_memory_snapshot_hides_ids_and_headers() -> None:
+def test_frontdoor_memory_snapshot_carries_the_dated_lines() -> None:
     raw = (
-        "---\n"
-        "id:Ab12Z9\n"
-        "2026/4/25-user：\n"
-        "Prefer concise answers\n"
-        "---\n"
-        "id:Cd34Ef\n"
-        "2026/4/25-self：\n"
-        "Use headings\n"
+        "260425:Prefer concise answers\n"
+        "260425:Use headings (note: n12345)\n"
     )
 
     message = CeoMessageBuilder._memory_snapshot_stable_message(raw)
 
     assert message is not None
     content = str(message["content"] or "")
-    assert "id:Ab12Z9" not in content
-    assert "2026/4/25-user" not in content
-    assert "Prefer concise answers" in content
-    assert "Use headings" in content
-    assert "---" in content
+    assert content == "## 长期记忆\n" + raw.strip()
+    assert "id:" not in content

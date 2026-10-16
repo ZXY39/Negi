@@ -53,6 +53,7 @@ def test_status_reports_current_memory_runtime_contract_without_legacy_store_fie
         lambda: SimpleNamespace(
             workspace_path=workspace,
             resolve_role_model_key=lambda role: f"{role}_model",
+            get_role_model_routes=lambda scope: [SimpleNamespace(type="model", model_key=f"{scope}_model")],
             agents=SimpleNamespace(defaults=SimpleNamespace(runtime="langgraph")),
             providers=SimpleNamespace(),
         ),

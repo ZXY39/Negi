@@ -237,11 +237,12 @@ def test_projection_carries_no_in_text_marker_and_columns_own_notes(tmp_path: Pa
     """The mirror renders handles, never a parseable relationship.
 
     This is the guard the plan asked for before deleting the text scan: after one commit
-    every owned note shows up as a handle line and no ` ref:` / `见noteid:` token survives
-    in the projection, so a reader that wanted to re-derive ownership from text would find
-    nothing - the column set is the whole truth.
+    every owned note shows up as the handle riding on its memory line and no ` ref:` /
+    `见noteid:` token survives in the projection, so a reader that wanted to re-derive
+    ownership from text would find nothing - the column set is the whole truth.
     """
     module = _load_module()
+    markdown = importlib.import_module("g3ku.agent.markdown_memory")
     manager = module.MemoryManager(tmp_path, _cfg())
     try:
         manager._memory_repo.apply_mutation(
@@ -271,7 +272,7 @@ def test_projection_carries_no_in_text_marker_and_columns_own_notes(tmp_path: Pa
         assert from_store == {"note_a", "note_b"}
         assert module._NOTE_REF_RE.search(snapshot) is None
         assert "note_a" not in snapshot and "note_b" not in snapshot
-        rendered = {line.split("note:", 1)[1] for line in snapshot.splitlines() if line.startswith("note:")}
+        rendered = {entry.note_ref for entry in markdown.parse_memory_document(snapshot) if entry.note_ref}
         assert rendered == {module.note_handle(ref) for ref in from_store}
     finally:
         manager.close()

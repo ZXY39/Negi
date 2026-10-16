@@ -118,6 +118,22 @@ def _app_config(tmp_path: Path, *, memory_chain: list[str] | None) -> object:
     )
 
 
+def _with_confirm_call(tool_calls: list[dict[str, object]] | None) -> list[dict[str, object]]:
+    """A mutating batch is scripted together with the confirm call the model makes after reading its preview."""
+
+    calls = list(tool_calls or [])
+    mutating = any(
+        str(call.get("name") or "") == "memory_apply_batch"
+        and isinstance(call.get("args"), dict)
+        and any((call.get("args") or {}).get(key) for key in ("adds", "rewrites", "deletes"))
+        for call in calls
+    )
+    confirmed = any(str(call.get("name") or "") == "memory_apply_confirm" for call in calls)
+    if mutating and not confirmed:
+        calls.append({"id": f"call-confirm-{len(calls)}", "name": "memory_apply_confirm", "args": {}})
+    return calls
+
+
 def _fake_response(
     *,
     content: str = "",
@@ -130,7 +146,7 @@ def _fake_response(
     metadata.update(dict(response_metadata or {}))
     return SimpleNamespace(
         content=content,
-        tool_calls=list(tool_calls or []),
+        tool_calls=_with_confirm_call(tool_calls),
         usage_metadata=usage_payload,
         response_metadata=metadata,
     )
@@ -239,9 +255,7 @@ async def test_v2_run_due_batch_once_applies_write_batch_with_memory_apply_batch
         snapshot_text = manager.snapshot_text()
 
         assert report["status"] == "applied"
-        assert "id:" in snapshot_text
-        assert "2026/4/18-user：" in snapshot_text
-        assert "Prefer concise answers" in snapshot_text
+        assert snapshot_text.strip() == "260418:Prefer concise answers"
     finally:
         manager.close()
 
@@ -726,7 +740,7 @@ async def test_v2_run_due_batch_once_rewrite_preserves_id_and_source_but_refresh
                             "args": {
                                 "rewrites": [
                                     {
-                                        "id": "Ab12Z9",
+                                        "line": 1,
                                         "content": "Prefer concise English headings",
                                         "minimal_memory": "answers->english-headings",
                                     }
@@ -751,16 +765,14 @@ async def test_v2_run_due_batch_once_rewrite_preserves_id_and_source_but_refresh
         await manager.run_due_batch_once(now_iso="2026-04-18T10:00:05+08:00")
         snapshot_text = manager.snapshot_text()
 
-        assert "id:Ab12Z9" in snapshot_text
-        assert "2026/4/18-user：" in snapshot_text
-        assert "Prefer concise English headings" in snapshot_text
-        assert "2026/4/17-user：" not in snapshot_text
+        assert snapshot_text.strip() == "260418:Prefer concise English headings"
+        assert "260417:" not in snapshot_text
     finally:
         manager.close()
 
 
 @pytest.mark.asyncio
-async def test_v2_run_due_batch_once_delete_batch_removes_memory_by_id(tmp_path: Path, monkeypatch) -> None:
+async def test_v2_run_due_batch_once_delete_batch_removes_memory_by_line(tmp_path: Path, monkeypatch) -> None:
     module = _load_memory_agent_runtime_module()
     manager = module.MemoryManager(tmp_path, _memory_cfg())
     try:
@@ -776,7 +788,7 @@ async def test_v2_run_due_batch_once_delete_batch_removes_memory_by_id(tmp_path:
             module.MemoryQueueRequest(
                 op="delete",
                 decision_source="user",
-                payload_text="Ab12Z9",
+                payload_text="Prefer concise answers 这条不用了",
                 created_at="2026-04-18T10:00:00+08:00",
                 request_id="delete_1",
             )
@@ -788,7 +800,7 @@ async def test_v2_run_due_batch_once_delete_batch_removes_memory_by_id(tmp_path:
                         {
                             "id": "call-1",
                             "name": "memory_apply_batch",
-                            "args": {"deletes": ["Ab12Z9"]},
+                            "args": {"deletes": [1]},
                         }
                     ],
                     usage={"input_tokens": 4, "output_tokens": 1, "cache_read_tokens": 0},
@@ -808,8 +820,8 @@ async def test_v2_run_due_batch_once_delete_batch_removes_memory_by_id(tmp_path:
         snapshot_text = manager.snapshot_text()
 
         assert report["status"] == "applied"
-        assert "id:Ab12Z9" not in snapshot_text
-        assert "id:Cd34Ef" in snapshot_text
+        assert "Prefer concise answers" not in snapshot_text
+        assert "Report total elapsed time" in snapshot_text
     finally:
         manager.close()
 

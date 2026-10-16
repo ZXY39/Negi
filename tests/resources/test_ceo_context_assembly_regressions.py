@@ -3403,7 +3403,7 @@ async def test_frontdoor_uses_frozen_memory_snapshot_only_once_per_turn() -> Non
 async def test_ceo_context_assembly_keeps_memory_snapshot_out_of_turn_overlay_and_in_stable_prefix() -> None:
     loop = SimpleNamespace(
         memory_manager=SimpleNamespace(
-            snapshot_text=lambda **_: "---\nid:Ab12Z9\n2026/4/18-user：\nPrefer concise answers\n",
+            snapshot_text=lambda **_: "260418:Prefer concise answers\n",
             sync_catalog=None,
         ),
         main_task_service=None,
@@ -3437,9 +3437,8 @@ async def test_ceo_context_assembly_keeps_memory_snapshot_out_of_turn_overlay_an
     assert len(stable_messages) >= 2
     assert stable_messages[0]["role"] == "system"
     assert stable_messages[1]["role"] == "assistant"
-    assert "id:Ab12Z9" not in str(stable_messages[1]["content"] or "")
-    assert "2026/4/18-user" not in str(stable_messages[1]["content"] or "")
-    assert "Prefer concise answers" in str(stable_messages[1]["content"] or "")
+    assert "id:" not in str(stable_messages[1]["content"] or "")
+    assert "260418:Prefer concise answers" in str(stable_messages[1]["content"] or "")
 
 
 class _MutableMemoryManager:

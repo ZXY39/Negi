@@ -78,11 +78,12 @@ def _commit(tmp_path: Path, manager, **payload):
         deletes=payload.get("deletes"),
         note_upserts=payload.get("note_upserts"),
         note_edits=payload.get("note_edits"),
-        inspired_memory_ids=payload.get("inspired_memory_ids"),
+        inspired_lines=payload.get("inspired_lines"),
         noop_reason=payload.get("noop_reason"),
         already_satisfied=payload.get("already_satisfied"),
     )
     assert result.get("ok") is True, result
+    session.confirm_batch()  # the model's second call: a mutating batch lands only after it reads the preview
     validated = manager._build_validated_write_from_apply_batch(
         before_text=manager.snapshot_text(),
         session=session,

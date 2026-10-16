@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import difflib
 import hashlib
 import inspect
 import json
@@ -26,6 +27,7 @@ from g3ku.agent.markdown_memory import (
     CATEGORY_HANDLE_PREFIX,
     MemoryEntry,
     ORDINARY_HANDLE_PREFIX,
+    compact_date,
     consolidation_scope_line,
     format_memory_entry,
     note_file_name,
@@ -59,7 +61,6 @@ def _strip_note_ref_markers(text: str) -> str:
     stripped = _NOTE_REF_RE.sub("", normalized)
     return re.sub(r"[ \t]{2,}", " ", stripped).strip()
 # 归并批次载荷里"本轮交来哪些记忆"的那几行，由 `_build_consolidation_payload` 自己渲染。
-_CONSOLIDATION_CANDIDATE_LINE_RE = re.compile(r"^- id:(?P<memory_id>[A-Za-z0-9]{6})", re.MULTILINE)
 
 
 def _first_note_ref(text: str) -> str:
@@ -154,6 +155,9 @@ class MemoryQueueRequest:
     # How many times this request was put back in the queue because the library had no room
     # for it. Rows written before this field existed read as 0.
     capacity_replay_count: int = 0
+    # The candidate set a consolidate row was built from: retirement scope and the noop
+    # gate both read this, because the block prints no ids to recover from its payload.
+    consolidation_memory_ids: list[str] = field(default_factory=list)
 
 
 @dataclass(slots=True)
@@ -553,6 +557,22 @@ def _build_memory_tool(*, name: str, fn: Callable[..., Any]) -> _MemoryTool:
     )
 
 
+
+def coerce_memory_line(value: object) -> tuple[int, str]:
+    """A memory line is a 1-based whole number, written the way the block shows it."""
+
+    text = str(value if value is not None else "").strip()
+    if not text:
+        return 0, "line must not be empty"
+    try:
+        number = int(text)
+    except ValueError:
+        return 0, "line must be a whole number"
+    if number < 1:
+        return 0, "line must be 1 or greater"
+    return number, ""
+
+
 @dataclass(slots=True)
 class _MemoryToolSession:
     snapshot_text: str
@@ -563,6 +583,7 @@ class _MemoryToolSession:
     staged_notes: dict[str, str] = field(default_factory=dict)
     applied_batch: dict[str, Any] | None = None
     apply_batch_count: int = 0
+    confirm_count: int = 0
 
     def note_directories(self) -> list[Path]:
         return [self.index_dir, self.notes_dir] if self.index_dir is not None else [self.notes_dir]
@@ -605,25 +626,49 @@ class _MemoryToolSession:
         self.staged_notes[normalized] = str(content or "")
         return f"note staged: {normalized}"
 
+    def batch_has_mutation(self) -> bool:
+        payload = dict(self.applied_batch or {})
+        return bool(
+            list(payload.get("adds") or [])
+            or list(payload.get("rewrites") or [])
+            or list(payload.get("deletes") or [])
+        )
+
+    def confirm_batch(self) -> dict[str, Any]:
+        """Commit gate: a batch that changes memories only lands after this call.
+
+        The model reads its own edit back as a line diff before it commits, so a wrong
+        line number is caught here instead of becoming a legal write to the wrong memory.
+        A zero-change batch skips the round entirely - there is nothing to review.
+        """
+        if not isinstance(self.applied_batch, dict):
+            return {"ok": False, "errors": {"batch": "stage a batch before confirming"}}
+        if not self.batch_has_mutation():
+            return {"ok": False, "errors": {"batch": "this batch changes nothing; it needs no confirmation"}}
+        if self.confirm_count:
+            return {"ok": False, "errors": {"batch": "this batch is already confirmed"}}
+        self.confirm_count = 1
+        return {"ok": True, "status": "batch_confirmed"}
+
     def apply_batch(
         self,
         *,
         adds: list[dict[str, Any]] | None = None,
         rewrites: list[dict[str, Any]] | None = None,
-        deletes: list[str] | None = None,
+        deletes: list[int] | None = None,
         note_upserts: dict[str, str] | None = None,
         note_edits: dict[str, list[dict[str, str]]] | None = None,
-        inspired_memory_ids: list[str] | None = None,
+        inspired_lines: list[int] | None = None,
         noop_reason: str | None = None,
         already_satisfied: str | None = None,
     ) -> dict[str, Any]:
         errors: dict[str, str] = {}
         normalized_adds: list[dict[str, str]] = []
         normalized_rewrites: list[dict[str, str]] = []
-        normalized_deletes: list[str] = []
+        normalized_deletes: list[int] = []
         normalized_note_upserts: dict[str, str] = {}
         normalized_note_edits: dict[str, list[dict[str, str]]] = {}
-        normalized_inspired_memory_ids: list[str] = []
+        normalized_inspired_lines: list[int] = []
         normalized_noop_reason = str(noop_reason or "").strip()
         normalized_already_satisfied = str(already_satisfied or "").strip()
 
@@ -667,12 +712,12 @@ class _MemoryToolSession:
                 if not isinstance(item, dict):
                     errors[f"rewrites[{index}]"] = "rewrite item must be an object"
                     continue
-                memory_id = str(item.get("id") or "").strip()
+                line, line_error = coerce_memory_line(item.get("line"))
                 content = str(item.get("content") or "").strip()
                 minimal_memory = str(item.get("minimal_memory") or "").strip()
                 note_ref = str(item.get("note_ref") or "").strip()
-                if not memory_id:
-                    errors[f"rewrites[{index}].id"] = "id must not be empty"
+                if line_error:
+                    errors[f"rewrites[{index}].line"] = line_error
                 if not content:
                     errors[f"rewrites[{index}].content"] = "content must not be empty"
                 if content and not minimal_memory:
@@ -681,10 +726,10 @@ class _MemoryToolSession:
                     errors[f"rewrites[{index}].minimal_memory"] = (
                         "minimal_memory must be a single line; put the detail in note_upserts"
                     )
-                if memory_id and content and minimal_memory:
+                if line and content and minimal_memory:
                     normalized_rewrites.append(
                         {
-                            "id": memory_id,
+                            "line": line,
                             "content": content,
                             "minimal_memory": minimal_memory,
                             "note_ref": note_ref,
@@ -696,11 +741,11 @@ class _MemoryToolSession:
             errors["deletes"] = "deletes must be a list"
         else:
             for index, item in enumerate(raw_deletes):
-                memory_id = str(item or "").strip()
-                if not memory_id:
-                    errors[f"deletes[{index}]"] = "delete id must not be empty"
+                line, line_error = coerce_memory_line(item)
+                if line_error:
+                    errors[f"deletes[{index}]"] = line_error
                     continue
-                normalized_deletes.append(memory_id)
+                normalized_deletes.append(line)
 
         raw_note_upserts = dict(note_upserts or {})
         if not isinstance(raw_note_upserts, dict):
@@ -767,22 +812,22 @@ class _MemoryToolSession:
                 if ops:
                     normalized_note_edits[ref] = ops
 
-        raw_inspired_memory_ids = inspired_memory_ids
-        if raw_inspired_memory_ids is None:
-            raw_inspired_memory_ids = []
-        elif not isinstance(raw_inspired_memory_ids, list):
-            errors["inspired_memory_ids"] = "inspired_memory_ids must be a list"
+        raw_inspired_lines = inspired_lines
+        if raw_inspired_lines is None:
+            raw_inspired_lines = []
+        elif not isinstance(raw_inspired_lines, list):
+            errors["inspired_lines"] = "inspired_lines must be a list"
         else:
-            seen_inspired_ids: set[str] = set()
-            for index, item in enumerate(raw_inspired_memory_ids):
-                memory_id = str(item or "").strip()
-                if not memory_id:
-                    errors[f"inspired_memory_ids[{index}]"] = "memory id must not be empty"
+            seen_inspired_lines: set[int] = set()
+            for index, item in enumerate(raw_inspired_lines):
+                line, line_error = coerce_memory_line(item)
+                if line_error:
+                    errors[f"inspired_lines[{index}]"] = line_error
                     continue
-                if memory_id in seen_inspired_ids:
+                if line in seen_inspired_lines:
                     continue
-                seen_inspired_ids.add(memory_id)
-                normalized_inspired_memory_ids.append(memory_id)
+                seen_inspired_lines.add(line)
+                normalized_inspired_lines.append(line)
 
         has_mutation = bool(
             normalized_adds
@@ -816,7 +861,7 @@ class _MemoryToolSession:
             "deletes": normalized_deletes,
             "note_upserts": normalized_note_upserts,
             "note_edits": normalized_note_edits,
-            "inspired_memory_ids": normalized_inspired_memory_ids,
+            "inspired_lines": normalized_inspired_lines,
             "noop_reason": normalized_noop_reason,
             "already_satisfied": normalized_already_satisfied,
         }
@@ -941,23 +986,23 @@ class _ConsolidationToolSession:
         if not isinstance(raw_retire, list):
             errors["retirements"] = "retirements must be a list"
         else:
-            seen_retire_ids: set[str] = set()
+            seen_retire_ids: set[int] = set()
             for index, raw in enumerate(raw_retire):
                 if not isinstance(raw, dict):
-                    errors[f"retirements[{index}]"] = "retirement must be an object with memory_id and note_ref"
+                    errors[f"retirements[{index}]"] = "retirement must be an object with line and note_ref"
                     continue
-                memory_id = str(raw.get("memory_id") or "").strip()
+                line, line_error = coerce_memory_line(raw.get("line"))
                 category = str(raw.get("note_ref") or "").strip()
-                if not memory_id:
-                    errors[f"retirements[{index}]"] = "memory_id must not be empty"
+                if line_error:
+                    errors[f"retirements[{index}].line"] = line_error
                     continue
-                if memory_id in seen_retire_ids:
+                if line in seen_retire_ids:
                     continue
                 if not category:
                     errors[f"retirements[{index}]"] = "each retired memory must name the category note it lands in"
                     continue
-                seen_retire_ids.add(memory_id)
-                normalized_retire.append({"memory_id": memory_id, "note_ref": category})
+                seen_retire_ids.add(line)
+                normalized_retire.append({"line": line, "note_ref": category})
 
         normalized_reason = str(no_consolidation_reason or "").strip()
         has_mutation = bool(normalized_writes or normalized_retire)
@@ -978,7 +1023,7 @@ class _ConsolidationToolSession:
             if item["note_ref"] in written_refs:
                 continue
             if not (self.index_dir / note_file_name(item["note_ref"])).exists():
-                errors[f"retirements.{item['memory_id']}"] = (
+                errors[f"retirements.line{item['line']}"] = (
                     f"category note {item['note_ref']} is neither written this batch nor existing"
                 )
         if not normalized_retire:
@@ -1032,6 +1077,9 @@ class _MemoryValidatedWrite:
     is_consolidation: bool = False
     consolidation_writes: list[dict[str, Any]] = field(default_factory=list)
     retirements: list[dict[str, str]] = field(default_factory=list)
+    # How many retired memories got their date stamped into a category note line, and how
+    # many could not be found there because the consolidator reworded them.
+    note_line_stamps: dict[str, int] = field(default_factory=dict)
     # Post-commit trigger outcome: a consolidation batch queued at the queue head.
     consolidation_requested: bool = False
     consolidation_reason: str = ""
@@ -1242,7 +1290,7 @@ class _MemorySqliteRepository:
     def _generate_id(self, conn: sqlite3.Connection) -> str:
         alphabet = string.ascii_letters + string.digits
         for _ in range(2048):
-            candidate = "".join(secrets.choice(alphabet) for _ in range(6))
+            candidate = "".join(secrets.choice(alphabet) for _ in range(8))
             exists = conn.execute(
                 "SELECT 1 FROM memories WHERE memory_id = ?",
                 (candidate,),
@@ -1352,8 +1400,18 @@ class _MemorySqliteRepository:
             return base.isoformat()
         return (base + timedelta(microseconds=int(offset))).isoformat()
 
-    def replace_all_from_document(self, *, document_text: str, now_iso: str) -> None:
+    def replace_all_from_document(self, *, document_text: str, now_iso: str, source: str = "self") -> None:
+        """Adopt a hand-written document as the whole store (the operator import door).
+
+        The block carries no ids and no source, so imported rows get freshly allocated ids
+        and one caller-named source, and a row that already exists is matched by its text -
+        the only handle an inbound document can offer. This is an inbound-text lane by
+        design; nothing in the running code identifies memories this way.
+        """
         entries = parse_memory_document(str(document_text or ""))
+        normalized_import_source, import_from_user = self._normalize_source_and_user_flag(
+            str(source or "self"), str(source or "").strip().lower() == "user"
+        )
         conn = self._connect()
         try:
             existing_rows = {
@@ -1362,13 +1420,18 @@ class _MemorySqliteRepository:
             }
             with conn:
                 conn.execute("DELETE FROM memories")
+                by_text = {
+                    str(row.get("memory_body") or "").strip(): row for row in existing_rows.values()
+                }
+                by_minimal = {
+                    str(row.get("minimal_memory") or "").strip(): row for row in existing_rows.values()
+                }
                 for index, entry in enumerate(entries):
-                    normalized_source, normalized_from_user = self._normalize_source_and_user_flag(
-                        str(entry.source or ""),
-                        str(entry.source or "").strip().lower() == "user",
-                    )
-                    existing_row = dict(existing_rows.get(str(entry.memory_id or "").strip()) or {})
+                    normalized_source, normalized_from_user = normalized_import_source, import_from_user
                     summary = str(entry.summary or "").strip()
+                    existing_row = dict(by_text.get(summary) or by_minimal.get(summary) or {})
+                    if not str(existing_row.get("memory_id") or "").strip():
+                        existing_row["memory_id"] = self._generate_id(conn)
                     timestamp = self._snapshot_timestamp(str(entry.date_text or ""), now_iso, index)
                     conn.execute(
                         """
@@ -1389,7 +1452,7 @@ class _MemorySqliteRepository:
                         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                         """,
                         (
-                            str(entry.memory_id or "").strip(),
+                            str(existing_row.get("memory_id") or "").strip(),
                             str(existing_row.get("memory_body") or "").strip() or summary,
                             summary,
                             normalized_source,
@@ -1624,6 +1687,63 @@ class _MemorySqliteRepository:
         finally:
             conn.close()
 
+    def flatten_multiline_text(self, *, now_iso: str) -> list[str]:
+        """One-time shape fix: a memory is one line, so fold any stored line break.
+
+        Whitespace collapses to single spaces - nothing is reworded and nothing is dropped.
+        A row that already fits is left completely alone, so this is safe to run twice.
+        """
+
+        flattened: list[str] = []
+        conn = self._connect()
+        try:
+            rows = conn.execute(
+                "SELECT memory_id, memory_body, minimal_memory FROM memories"
+            ).fetchall()
+            for memory_id, body, minimal in rows:
+                clean_body = re.sub(r"\s+", " ", str(body or "")).strip()
+                clean_minimal = re.sub(r"\s+", " ", str(minimal or "")).strip()
+                if clean_body == str(body or "") and clean_minimal == str(minimal or ""):
+                    continue
+                if not clean_body or not clean_minimal:
+                    continue
+                conn.execute(
+                    "UPDATE memories SET memory_body = ?, minimal_memory = ?, updated_at = ? WHERE memory_id = ?",
+                    (clean_body, clean_minimal, str(now_iso or ""), str(memory_id)),
+                )
+                flattened.append(str(memory_id))
+            conn.commit()
+        finally:
+            conn.close()
+        return flattened
+
+    def touch_rows_for_notes(self, note_refs: list[str], *, now_iso: str) -> list[str]:
+        """Move `updated_at` on the rows that own the given notes.
+
+        A resident line points at its detail; rewriting that detail changes what the
+        memory says even though the line itself still reads the same, so its date has to
+        move. Rows are matched through the `note_ref` column - nothing here scans text.
+        """
+
+        wanted = {str(ref or "").strip() for ref in list(note_refs or []) if str(ref or "").strip()}
+        if not wanted:
+            return []
+        touched: list[str] = []
+        conn = self._connect()
+        try:
+            for memory_id, current_ref in conn.execute("SELECT memory_id, note_ref FROM memories WHERE note_ref != ''"):
+                if str(current_ref or "").strip() not in wanted:
+                    continue
+                conn.execute(
+                    "UPDATE memories SET updated_at = ? WHERE memory_id = ?",
+                    (str(now_iso or ""), str(memory_id)),
+                )
+                touched.append(str(memory_id))
+            conn.commit()
+        finally:
+            conn.close()
+        return touched
+
     def mark_uncompressed(self, memory_id: str) -> bool:
         """Operator-only: put a row back at its full body in the resident block.
 
@@ -1826,7 +1946,15 @@ class MemoryManager:
             return ""
         return self.memory_file.read_text(encoding="utf-8").strip()
 
-    def _document_text_from_sqlite_rows(self, rows: list[dict[str, Any]], *, now_iso: str | None = None) -> str:
+    def _resident_entries(self, rows: list[dict[str, Any]], *, now_iso: str | None = None) -> list[MemoryEntry]:
+        """The block's rows in the one order that defines line numbers.
+
+        `list_memories()` is `ORDER BY created_at, memory_id` and retired rows drop out, so
+        line N is `entries[N-1]` for the renderer, for the model's addressing and for the
+        byte price all at once. Compression and warming flip a flag only - they never move a
+        line; only inserts and deletes do, which is why a batch may pin line numbers to the
+        snapshot it started from.
+        """
         entries: list[MemoryEntry] = []
         for row in rows:
             if str(row.get("consolidated_into") or "").strip():
@@ -1849,6 +1977,51 @@ class MemoryManager:
                     note_ref=note_handle(note_ref),
                 )
             )
+        return entries
+
+    def resident_lines(self) -> list[MemoryEntry]:
+        """The live resident entries in line order - the address book the model's lines mean."""
+
+        return self._resident_entries(self._memory_repo.list_memories())
+
+    def reformat_store(self, *, now_iso: str | None = None) -> dict[str, Any]:
+        """The one pass that moves everything to the current on-disk shape.
+
+        The resident block is repainted from sqlite, so the new line format arrives with
+        the repaint; the only data fix needed first is a stored row whose text spans
+        several lines, which no longer has a rendering. Ids keep their stored length - the
+        block prints none, so regrowing them would move nothing the reader sees.
+        """
+
+        effective_now = str(now_iso or self._now_iso())
+        before_bytes = len(self.snapshot_text())
+        flattened = self._memory_repo.flatten_multiline_text(now_iso=effective_now)
+        self._rebuild_memory_snapshot_from_sqlite(now_iso=effective_now)
+        return {
+            "ok": True,
+            "flattened_rows": flattened,
+            "chars_before": before_bytes,
+            "chars_after": len(self.snapshot_text()),
+            "resident_rows": len(self.resident_lines()),
+        }
+
+    def memory_line_for_id(self, memory_id: str) -> int:
+        """The 1-based line a stored memory currently occupies, or 0 when it is not resident.
+
+        The operator surface names memories by id (its list came from the API), the model
+        names them by line (the block prints no ids), and this is the only translation.
+        """
+
+        wanted = str(memory_id or "").strip()
+        if not wanted:
+            return 0
+        for index, entry in enumerate(self.resident_lines()):
+            if str(entry.memory_id or "").strip() == wanted:
+                return index + 1
+        return 0
+
+    def _document_text_from_sqlite_rows(self, rows: list[dict[str, Any]], *, now_iso: str | None = None) -> str:
+        entries = self._resident_entries(rows, now_iso=now_iso)
         return self._normalize_document_text("".join(format_memory_entry(entry) for entry in entries))
 
     def _category_note_index(self) -> list[dict[str, Any]]:
@@ -2638,6 +2811,11 @@ class MemoryManager:
             last_error_at=str(request.last_error_at or "").strip(),
             retry_after=str(request.retry_after or "").strip(),
             capacity_replay_count=max(int(getattr(request, "capacity_replay_count", 0) or 0), 0),
+            consolidation_memory_ids=[
+                str(item or "").strip()
+                for item in list(getattr(request, "consolidation_memory_ids", []) or [])
+                if str(item or "").strip()
+            ],
         )
 
     def _read_queue_requests(self) -> list[MemoryQueueRequest]:
@@ -3117,7 +3295,8 @@ class MemoryManager:
             "提交要求：\n"
             "- 只允许使用一次 memory_consolidation_apply 完成所有归并。\n"
             "- note_writes 每条必须给 note_ref，并按整体新建（body）或局部改（edits）二选一。\n"
-            "- retirements 每条必须给出 memory_id 和落进的 note_ref，且 memory_id 只能是上面「待归并记忆」列出的那些。\n"
+            "- retirements 每条必须给出 line（这条记忆在「待归并记忆」里的编号）和落进的 note_ref，"
+            "编号只能取上面列出的那些。\n"
             "- 找不到分类的记忆不要退场；全都没有去处时单独提交 no_consolidation_reason。\n"
             f"{repair_block}"
         )
@@ -3510,6 +3689,54 @@ class MemoryManager:
         enriched["changes_reconstructed"] = True
         return enriched
 
+    def stamp_retired_note_lines(self, retirements: list[dict[str, str]]) -> dict[str, int]:
+        """Prefix each retired memory's line inside its category note with that row's date.
+
+        Same shape as the resident block (`YYMMDD:text`), and the date comes from the
+        column - retiring no longer rewrites `updated_at`, so the note line keeps telling
+        when the rule was last actually changed. A memory the consolidator reworded beyond
+        recognition is counted, never guessed at.
+        """
+
+        rows = {str(row.get("memory_id") or "").strip(): row for row in self._memory_repo.list_memories()}
+        by_note: dict[str, list[dict[str, str]]] = {}
+        for item in list(retirements or []):
+            ref = str(item.get("note_ref") or "").strip()
+            memory_id = str(item.get("memory_id") or "").strip()
+            if not ref or memory_id not in rows:
+                continue
+            by_note.setdefault(ref, []).append(rows[memory_id] | {"memory_id": memory_id})
+        stamped = 0
+        unmatched = 0
+        for ref, note_rows in by_note.items():
+            path = self.index_dir / note_file_name(ref)
+            if not path.exists():
+                unmatched += len(note_rows)
+                continue
+            text = path.read_text(encoding="utf-8")
+            lines = text.splitlines(keepends=True)
+            for row in note_rows:
+                date_prefix = compact_date(self._memory_date_text(str(row.get("updated_at") or "")))
+                candidates = [
+                    value
+                    for value in (str(row.get("memory_body") or "").strip(), str(row.get("minimal_memory") or "").strip())
+                    if value
+                ]
+                hit = False
+                for index, line in enumerate(lines):
+                    needle = next((value for value in candidates if value in line), "")
+                    if not needle or f"{date_prefix}:{needle}" in line:
+                        continue
+                    lines[index] = line.replace(needle, f"{date_prefix}:{needle}", 1)
+                    hit = True
+                    break
+                if hit:
+                    stamped += 1
+                else:
+                    unmatched += 1
+            self._atomic_write_text(path, "".join(lines))
+        return {"stamped": stamped, "unmatched": unmatched}
+
     def _commit_consolidation_locked(self, validated: _MemoryValidatedWrite, *, now_iso: str) -> None:
         """Write category notes, then point the retired rows at them.
 
@@ -3531,6 +3758,12 @@ class MemoryManager:
             if str(write.get("note_ref") or "").strip() and list(write.get("edits") or [])
         }
         validated.note_edit_results = self._apply_note_edits_locked(edits_by_ref, directory=self.index_dir)
+        validated.note_line_stamps = self.stamp_retired_note_lines(
+            [
+                {"memory_id": str(item.get("memory_id") or "").strip(), "note_ref": str(item.get("note_ref") or "").strip()}
+                for item in list(validated.retirements or [])
+            ]
+        )
         self._reconcile_mirror_with_sqlite_locked(now_iso=now_iso)
         rows_before = self._memory_repo.list_memories()
         try:
@@ -3574,6 +3807,26 @@ class MemoryManager:
         retirements = [dict(item) for item in list(payload.get("retirements") or [])]
         noop_reason = str(payload.get("no_consolidation_reason") or "").strip()
 
+        # Retirement scope is the candidate set stored on this batch's queue row, in the
+        # order the payload numbered it: the block prints no ids, so a line the model points
+        # at only means something against that snapshot.
+        offered = [
+            memory_id
+            for item in list(batch.items or [])
+            for memory_id in list(getattr(item, "consolidation_memory_ids", []) or [])
+        ]
+        by_line = {index + 1: memory_id for index, memory_id in enumerate(offered)}
+        resolved: list[dict[str, str]] = []
+        for index, item in enumerate(retirements):
+            number = int(item.get("line") or 0)
+            memory_id = by_line.get(number)
+            if not memory_id:
+                raise _MemoryAgentValidationError(
+                    f"retirements[{index}]: line {number} is outside the candidate list ({len(offered)} entries)"
+                )
+            resolved.append({"memory_id": memory_id, "note_ref": str(item.get("note_ref") or "").strip()})
+        retirements = resolved
+
         rows = {str(row.get("memory_id") or "").strip(): row for row in self._memory_repo.list_memories()}
         unknown = sorted(
             str(item.get("memory_id") or "").strip()
@@ -3589,26 +3842,6 @@ class MemoryManager:
         )
         if already_retired:
             raise _MemoryAgentValidationError(f"memories already consolidated: {', '.join(already_retired)}")
-
-        # Retirement scope is the candidate list this batch was handed, not the whole
-        # library: the consolidator sees the resident block for context, and without this
-        # an eager batch can retire rows nobody asked it to consolidate. The payload is
-        # rendered by `_build_consolidation_payload`, so the id lines are our own format.
-        offered = {
-            match
-            for item in list(batch.items or [])
-            for match in _CONSOLIDATION_CANDIDATE_LINE_RE.findall(str(item.payload_text or ""))
-        }
-        if offered:
-            out_of_scope = sorted(
-                str(item.get("memory_id") or "").strip()
-                for item in retirements
-                if str(item.get("memory_id") or "").strip() not in offered
-            )
-            if out_of_scope:
-                raise _MemoryAgentValidationError(
-                    f"memories not offered to this consolidation batch: {', '.join(out_of_scope)}"
-                )
 
         entries_text = self._document_text_from_sqlite_rows(self._memory_repo.list_memories())
         block_text = self._consolidation_block_text()
@@ -3639,11 +3872,20 @@ class MemoryManager:
             # Note bodies land before the store mutation. If the mutation is later
             # rejected, an orphan note file is only surplus bytes - the next successful
             # commit's orphan sweep removes them; the store itself is rolled back whole.
+            changed_note_refs: set[str] = set()
             for ref, body in validated.note_writes.items():
                 note_path = self._note_write_path(ref)
                 note_path.parent.mkdir(parents=True, exist_ok=True)
+                previous = note_path.read_text(encoding="utf-8") if note_path.exists() else None
+                if previous != body:
+                    changed_note_refs.add(str(ref or "").strip())
                 self._atomic_write_text(note_path, body)
             validated.note_edit_results = self._apply_note_edits_locked(validated.note_edits)
+            changed_note_refs.update(
+                str(result.get("note_ref") or "").strip()
+                for result in list(validated.note_edit_results or [])
+                if result.get("applied")
+            )
             self._reconcile_mirror_with_sqlite_locked(now_iso=now_iso)
             # Capture the original bodies of rewritten/deleted memories before the
             # mutation is applied so the processed record can show before/after text.
@@ -3675,6 +3917,11 @@ class MemoryManager:
                         now_iso=now_iso,
                     )
                 self._rebuild_memory_snapshot_from_sqlite(now_iso=now_iso)
+                if changed_note_refs:
+                    self._memory_repo.touch_rows_for_notes(
+                        sorted(changed_note_refs), now_iso=now_iso
+                    )
+                    self._rebuild_memory_snapshot_from_sqlite(now_iso=now_iso)
             except Exception:
                 # The mirror is the last gate. When it refuses a document (over the hard
                 # cap, or an entry that no longer round-trips) sqlite must go back to
@@ -3797,14 +4044,10 @@ class MemoryManager:
             # only occupies its summary line), never the stored body - pricing by body length
             # would report compliance the block never reaches.
             taken += self._row_rendered_chars(row)
-            head = (
-                f"- id:{memory_id}"
-                f"｜创建 {self._memory_date_text(row.get('created_at'))}"
-                f"｜修改 {self._memory_date_text(row.get('updated_at'))}"
-            )
+            head = f"{len(blocks) + 1})"
             if note_ref:
                 head += f" (note: {note_ref})"
-            blocks.append(f"{head}\n{body}")
+            blocks.append(f"{head} {body}")
             if taken >= need:
                 break
         if not picked:
@@ -3982,6 +4225,7 @@ class MemoryManager:
                 created_at=now_iso,
                 request_id=self._request_id("consolidate"),
                 trigger_source="compression_trigger",
+                consolidation_memory_ids=list(memory_ids),
             )
         )
         return True, "queued", memory_ids
@@ -4000,10 +4244,12 @@ class MemoryManager:
         for row in self._read_failed_records():
             if str(row.get("category") or "").strip() != "capacity_noop":
                 continue
-            offered: set[str] = set()
-            for item in list(row.get("items") or []):
-                payload_text = str((item or {}).get("payload_text") or "") if isinstance(item, dict) else ""
-                offered.update(_CONSOLIDATION_CANDIDATE_LINE_RE.findall(payload_text))
+            offered = {
+                str(memory_id or "").strip()
+                for item in list(row.get("items") or [])
+                for memory_id in list((item or {}).get("consolidation_memory_ids") or [])
+                if isinstance(item, dict) and str(memory_id or "").strip()
+            }
             if offered == wanted:
                 return True
         return False
@@ -4210,7 +4456,7 @@ class MemoryManager:
     def _generate_memory_id(self, existing_ids: set[str]) -> str:
         alphabet = string.ascii_letters + string.digits
         for _ in range(2048):
-            candidate = "".join(secrets.choice(alphabet) for _ in range(6))
+            candidate = "".join(secrets.choice(alphabet) for _ in range(8))
             if candidate not in existing_ids:
                 return candidate
         raise RuntimeError("unable to allocate unique memory id")
@@ -5300,29 +5546,54 @@ class MemoryManager:
         def memory_apply_batch(
             adds: list[dict[str, Any]] | None = None,
             rewrites: list[dict[str, Any]] | None = None,
-            deletes: list[str] | None = None,
+            deletes: list[int] | None = None,
             note_upserts: dict[str, str] | None = None,
             note_edits: dict[str, list[dict[str, str]]] | None = None,
-            inspired_memory_ids: list[str] | None = None,
+            inspired_lines: list[int] | None = None,
             noop_reason: str | None = None,
             already_satisfied: str | None = None,
         ) -> dict[str, Any]:
-            """Stage one complete memory mutation batch."""
+            """Stage one complete memory mutation batch.
 
-            return session.apply_batch(
+            The memory block shows one line per memory as `YYMMDD:text`; it prints no ids, so
+            a memory is named by its **1-based line number in the block you were just given**.
+            `rewrites` takes `{line, content, minimal_memory, note_ref?}`; `deletes` takes a
+            list of line numbers; `inspired_lines` takes the line numbers this request actually
+            decided on. Lines outside the block are refused per item, the rest of the batch
+            still stands. Do not write a date into `content` - the backend owns the prefix.
+            """
+
+            staged = session.apply_batch(
                 adds=adds,
                 rewrites=rewrites,
                 deletes=deletes,
                 note_upserts=note_upserts,
                 note_edits=note_edits,
-                inspired_memory_ids=inspired_memory_ids,
+                inspired_lines=inspired_lines,
                 noop_reason=noop_reason,
                 already_satisfied=already_satisfied,
             )
+            if staged.get("ok") and session.batch_has_mutation():
+                staged["status"] = "batch_previewed"
+                staged["preview"] = self._memory_batch_preview(session)
+                staged["next_step"] = (
+                    "read the preview; if it is what you meant, call memory_apply_confirm() once"
+                )
+            return staged
+
+        def memory_apply_confirm() -> dict[str, Any]:
+            """Land the staged batch after reviewing its preview. Call once.
+
+            Only a batch that adds, rewrites or deletes memories needs this; a batch that
+            changes nothing (noop_reason / already_satisfied) has already landed.
+            """
+
+            return session.confirm_batch()
 
         return [
             _build_memory_tool(name="memory_read_note", fn=memory_read_note),
             _build_memory_tool(name="memory_apply_batch", fn=memory_apply_batch),
+            _build_memory_tool(name="memory_apply_confirm", fn=memory_apply_confirm),
         ]
 
     def _memory_agent_user_prompt(
@@ -5359,8 +5630,9 @@ class MemoryManager:
             "- adds 条目必须包含 content、minimal_memory 和 decision_source。\n"
             "- content 写法按来源分：decision_source=user 写成陈述句（用户偏好什么、某对象是什么），"
             "不要写成给自己的命令；decision_source=self 写成条件+要求（当……时，要……）。\n"
-            "- rewrites 条目必须包含 id、content 和 minimal_memory；系统会保留原 source 并刷新日期。\n"
-            "- delete 请求要解析成精确的记忆 id，并把这些 id 放进 deletes。\n"
+            "- rewrites 条目必须包含 line（这条记忆在当前正文里的行号，从 1 数起）、content 和 minimal_memory；"
+            "系统保留原来源并维护该行的日期。\n"
+            "- delete 请求要解析成当前正文里的行号，并把这些行号放进 deletes。\n"
             "- delete 批次没有零变更出口：目标内容已不在当前正文里（已被改写或被更早的批次删掉）时，"
             "单独提交 already_satisfied 说明已满足，不要提交 noop_reason。\n"
             "- note_upserts 只写需要新增或整体重写的 note，新建的名字必须以 `note_` 开头。\n"
@@ -5368,7 +5640,7 @@ class MemoryManager:
             "new_text 留空即删掉这段。改一两个段落用 note_edits，不要用 note_upserts 重交整份。\n"
             "- 归并区列出的分类 note 也可以这样改（内容错误或过时时）；不要新建分类 note，"
             "也不要让记忆从归并区退场，退场只由归并环节做。\n"
-            "- inspired_memory_ids 可选，用于列出当前完整 snapshot 里对本批判断有实质帮助的 memory id。\n"
+            "- inspired_lines 可选，填当前正文里对本批判断有实质帮助的行号。\n"
             "- minimal_memory 写成 `条件->要求关键词`。\n"
             "- 一条记忆要挂 note 时，在 adds/rewrites 条目里给 `note_ref`（note 文件名，不带 .md）；"
             "正文里写 `ref:` 或 `见noteid:` 不再建立关系，会被打回。\n"
@@ -5393,6 +5665,54 @@ class MemoryManager:
         except Exception as exc:
             return {"ok": False, "tool": name, "error": str(exc or "memory tool failed").strip()}
 
+    PREVIEW_MAX_DIFF_LINES = 60
+
+    def _memory_batch_preview(self, session: _MemoryToolSession) -> dict[str, Any]:
+        """What the block looks like if this staged batch lands - computed, never written.
+
+        The model gets this instead of taking its line numbers on trust: a wrong line is a
+        legal write to some other memory, which no post-commit check could tell apart from
+        an intended one. The pure builder is used on purpose - it prices and validates the
+        candidate document without running the machine's compress lane or touching disk.
+        """
+
+        before_text = self._normalize_document_text(str(session.snapshot_text or ""))
+        batch = MemoryBatch(
+            op=session.batch_op or "write",
+            items=[
+                MemoryQueueRequest(
+                    op=session.batch_op or "write",
+                    decision_source="self",
+                    payload_text="",
+                    created_at=self._now_iso(),
+                    request_id="preview",
+                )
+            ],
+        )
+        try:
+            validated = self._build_validated_write_from_apply_batch(
+                batch=batch,
+                before_text=before_text,
+                session=session,
+            )
+        except _MemoryAgentValidationError as exc:
+            return {"status": "unbuildable", "error": str(exc)}
+        before_lines = before_text.splitlines()
+        after_lines = validated.document_text.splitlines()
+        diff = [line for line in difflib.unified_diff(before_lines, after_lines, "当前", "改后", lineterm="", n=0)]
+        truncated = max(len(diff) - self.PREVIEW_MAX_DIFF_LINES, 0)
+        return {
+            "status": "built",
+            "adds": len(validated.adds),
+            "rewrites": len(validated.rewrites),
+            "deletes": len(validated.deletes),
+            "chars_before": len(before_lines and "\n".join(before_lines) or ""),
+            "chars_after": validated.memory_chars_after,
+            "line_count_after": len(after_lines),
+            "diff": diff[: self.PREVIEW_MAX_DIFF_LINES],
+            "diff_truncated_lines": truncated,
+        }
+
     def _build_validated_write_from_apply_batch(
         self,
         *,
@@ -5411,13 +5731,13 @@ class MemoryManager:
             str(ref): [dict(op) for op in list(ops or [])]
             for ref, ops in dict(payload.get("note_edits") or {}).items()
         }
-        raw_inspired_memory_ids = payload.get("inspired_memory_ids")
-        if raw_inspired_memory_ids is None:
-            inspired_memory_ids: list[str] = []
-        elif not isinstance(raw_inspired_memory_ids, list):
-            raise _MemoryAgentValidationError("inspired_memory_ids must be a list")
+        raw_inspired_lines = payload.get("inspired_lines")
+        if raw_inspired_lines is None:
+            inspired_lines: list[object] = []
+        elif not isinstance(raw_inspired_lines, list):
+            raise _MemoryAgentValidationError("inspired_lines must be a list")
         else:
-            inspired_memory_ids = list(raw_inspired_memory_ids)
+            inspired_lines = list(raw_inspired_lines)
         noop_reason = str(payload.get("noop_reason") or "").strip()
         already_satisfied = str(payload.get("already_satisfied") or "").strip()
 
@@ -5436,15 +5756,27 @@ class MemoryManager:
                 "already_satisfied may not be combined with add, rewrite, delete, note_upsert, note_edits or noop_reason"
             )
 
-        before_entries = parse_memory_document(before_text)
+        # Line numbers, not ids: the block does not print ids any more, so the model points at
+        # the line it means and this snapshot is the only thing that says which row that is.
+        before_entries = self.resident_lines()
+        line_by_number = {index + 1: entry for index, entry in enumerate(before_entries)}
         existing_by_id = {entry.memory_id: entry for entry in before_entries}
-        if len(existing_by_id) != len(before_entries):
-            raise _MemoryAgentValidationError("current memory snapshot contains duplicate ids")
 
-        delete_ids = {str(item or "").strip() for item in deletes if str(item or "").strip()}
-        missing_delete_ids = sorted(memory_id for memory_id in delete_ids if memory_id not in existing_by_id)
-        if missing_delete_ids:
-            raise _MemoryAgentValidationError(f"delete ids not found: {', '.join(missing_delete_ids)}")
+        def _entry_at_line(field: str, index: int, value: object) -> MemoryEntry:
+            try:
+                number = int(str(value if value is not None else "").strip())
+            except (TypeError, ValueError):
+                raise _MemoryAgentValidationError(f"{field}[{index}]: line must be a whole number") from None
+            entry = line_by_number.get(number)
+            if entry is None:
+                raise _MemoryAgentValidationError(
+                    f"{field}[{index}]: line {number} is outside the memory block ({len(before_entries)} lines)"
+                )
+            return entry
+
+        delete_ids: set[str] = set()
+        for index, item in enumerate(deletes):
+            delete_ids.add(_entry_at_line("deletes", index, item).memory_id)
 
         rewrite_by_id: dict[str, str] = {}
         rewrite_minimal_by_id: dict[str, str] = {}
@@ -5452,17 +5784,15 @@ class MemoryManager:
         effective_rewrites: list[dict[str, str]] = []
         submitted_note_refs: set[str] = set()
         summary_limit = int(getattr(self.config.document, "summary_max_chars", 300) or 300)
-        for item in rewrites:
+        for rewrite_index, item in enumerate(rewrites):
             if not isinstance(item, dict):
                 raise _MemoryAgentValidationError("rewrite item must be an object")
-            memory_id = str(item.get("id") or "").strip()
+            memory_id = _entry_at_line("rewrites", rewrite_index, item.get("line")).memory_id
             content = self._normalize_memory_content_text(str(item.get("content") or ""))
             minimal_memory = self._normalize_minimal_memory_text(
                 str(item.get("minimal_memory") or ""),
                 summary_max_chars=summary_limit,
             )
-            if memory_id not in existing_by_id:
-                raise _MemoryAgentValidationError(f"rewrite id not found: {memory_id}")
             rewrite_by_id[memory_id] = content
             rewrite_minimal_by_id[memory_id] = minimal_memory
             rewrite_note_ref = str(item.get("note_ref") or "").strip()
@@ -5470,20 +5800,18 @@ class MemoryManager:
                 rewrite_note_ref_by_id[memory_id] = rewrite_note_ref
                 submitted_note_refs.add(rewrite_note_ref)
 
-        snapshot_memory_ids = {
-            str(entry.memory_id or "").strip()
-            for entry in before_entries
-            if str(entry.memory_id or "").strip()
-        }
-        missing_inspired_ids = sorted(memory_id for memory_id in inspired_memory_ids if memory_id not in snapshot_memory_ids)
-        if missing_inspired_ids:
-            raise _MemoryAgentValidationError(f"inspired ids not found: {', '.join(missing_inspired_ids)}")
+        inspired_lines_as_ids: list[str] = []
+        for index, item in enumerate(inspired_lines):
+            inspired_lines_as_ids.append(_entry_at_line("inspired_lines", index, item).memory_id)
+        inspired_memory_ids = inspired_lines_as_ids
 
         existing_ids = set(existing_by_id)
         date_text = self._memory_date_text()
         after_entries: list[MemoryEntry] = []
         after_entry_ids: set[str] = set()
-        seen_summary_keys: set[tuple[str, str]] = set()
+        # The block prints no source any more, so a repeated line is the same rule stated
+        # twice: one key, the summary itself.
+        seen_summary_keys: set[str] = set()
         for entry in before_entries:
             if entry.memory_id in delete_ids:
                 continue
@@ -5510,7 +5838,7 @@ class MemoryManager:
                     summary=updated_summary,
                     note_ref=updated_display_ref,
                 )
-                summary_key = (updated.source, updated.summary)
+                summary_key = updated.summary
                 if summary_key in seen_summary_keys:
                     continue
                 seen_summary_keys.add(summary_key)
@@ -5525,7 +5853,7 @@ class MemoryManager:
                     }
                 )
                 continue
-            summary_key = (entry.source, entry.summary)
+            summary_key = entry.summary
             if summary_key in seen_summary_keys:
                 continue
             seen_summary_keys.add(summary_key)
@@ -5554,7 +5882,7 @@ class MemoryManager:
                 raise _MemoryAgentValidationError(
                     self._minimal_too_long_message(len(minimal_memory), len(content))
                 )
-            summary_key = (decision_source, summary)
+            summary_key = summary
             if summary_key in seen_summary_keys:
                 continue
             seen_summary_keys.add(summary_key)
@@ -5674,6 +6002,14 @@ class MemoryManager:
         before_text: str,
         session: _MemoryToolSession,
     ) -> _MemoryValidatedWrite:
+        # The gate sits on the commit side, not inside the builder: the builder is also how a
+        # preview is produced, and a preview is precisely what has to be computable before any
+        # confirmation exists.
+        if session.batch_has_mutation() and not session.confirm_count:
+            raise _MemoryAgentValidationError(
+                "memory_apply_confirm is required: a batch that changes memories lands only after the model "
+                "has read back the preview diff it was handed"
+            )
         try:
             return self._build_validated_write_from_apply_batch(
                 before_text=before_text,

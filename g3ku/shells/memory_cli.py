@@ -106,7 +106,7 @@ def build_memory_app(console) -> typer.Typer:
 
     @app.command('uncompress')
     def memory_uncompress(
-        memory_id: str = typer.Argument(..., help='The 6-character memory id to put back at full length'),
+        memory_id: str = typer.Argument(..., help='An 8-character memory id (6 in older rows) to put back at full length'),
         all_compressed: bool = typer.Option(False, '--all', help='Warm every downgraded row back up'),
     ):
         """回暖：把被容量压缩降级的记忆恢复成全文常驻（只有操作员能做，机器不自己做）。
@@ -137,6 +137,23 @@ def build_memory_app(console) -> typer.Typer:
         finally:
             manager.close()
         console.print_json(json.dumps(results, ensure_ascii=False))
+
+    @app.command('reformat')
+    def memory_reformat():
+        """把长期记忆的存储形状一次性对齐当前格式（幂等，可重复跑）。
+
+        常驻块按行渲染 `YYMMDD:正文`，所以重绘就是格式更新；先折叠掉正文跨行的存量行
+        （只并空白，不改字、不删内容），否则那一行渲染不出来。跑在重启之后、压测之前。
+        """
+        _config, mem_cfg, manager = _load_runtime_manager()
+        if not mem_cfg.enabled:
+            _disabled()
+            raise typer.Exit(1)
+        try:
+            report = manager.reformat_store()
+        finally:
+            manager.close()
+        console.print_json(json.dumps(report, ensure_ascii=False))
 
     @app.command('queue')
     def memory_queue(limit: int = typer.Option(20, '--limit', '-n', help='Maximum rows')):

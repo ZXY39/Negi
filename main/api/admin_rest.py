@@ -2290,8 +2290,19 @@ async def update_current_memory(request: Request, payload: dict | None = Body(de
             status_code=503,
             detail={'code': 'memory_current_unavailable', 'message': 'memory update is unavailable'},
         )
+    def _memory_line_label(target_id: str) -> str:
+        """The block prints no ids, so an operator's id becomes the line it currently sits on.
+
+        A memory that is not resident (already retired, or already gone) keeps its id in the
+        wording: the agent has no line to point at and answers that the target is absent.
+        """
+
+        resolver = getattr(manager, 'memory_line_for_id', None)
+        number = int(resolver(target_id)) if callable(resolver) else 0
+        return f'第 {number} 行' if number else f'（id:{target_id} 已不在常驻块里）'
+
     request_lines = [
-        f'操作员在管理页修改长期记忆 id:{memory_id}。',
+        f'操作员在管理页修改长期记忆 {_memory_line_label(memory_id)}。',
         f'新正文：{memory_body}',
         f'新最小记忆：{normalized_minimal}' if normalized_minimal else '最小记忆保持不变。',
         '只改这一条记忆，不要新增也不要删除其它记忆。',
@@ -2425,8 +2436,13 @@ async def delete_current_memories(request: Request, payload: dict | None = Body(
             detail={'code': 'memory_current_unavailable', 'message': 'memory delete is unavailable'},
         )
     reason = str(body.get('reason') or 'manual').strip() or 'manual'
+    def _delete_line_label(target_id: str) -> str:
+        resolver = getattr(manager, 'memory_line_for_id', None)
+        number = int(resolver(target_id)) if callable(resolver) else 0
+        return f'第 {number} 行' if number else f'（id:{target_id} 已不在常驻块里）'
+
     request_lines = [
-        '操作员在管理页要求删除长期记忆：' + '、'.join(f'id:{memory_id}' for memory_id in memory_ids) + '。',
+        '操作员在管理页要求删除长期记忆：' + '、'.join(_delete_line_label(memory_id) for memory_id in memory_ids) + '。',
         f'原因：{reason}',
     ]
     if note_refs:

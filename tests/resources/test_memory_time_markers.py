@@ -1,4 +1,4 @@
-"""记忆时间标记这条道：退场不是修改、压缩不是修改；归并载荷带两枚时间；常驻块形状不动。"""
+"""记忆时间标记这条道：退场不是修改、压缩不是修改；归并载荷只编号、日期由后端盖；常驻块形状不动。"""
 from __future__ import annotations
 
 import importlib
@@ -74,30 +74,39 @@ def test_compression_alone_leaves_the_modification_time_alone(tmp_path: Path) ->
         manager.close()
 
 
-def test_the_consolidation_payload_carries_both_dates_per_row(tmp_path: Path) -> None:
-    """归并 agent 要照抄这两枚时间进 note，看不到就抄不出来。"""
+def test_the_consolidation_payload_numbers_rows_and_the_backend_stamps_the_date(tmp_path: Path) -> None:
+    """归并载荷只给编号：时间不靠模型照抄，退场那行由后端按这一行的真实修改日盖上去。"""
     manager = _manager(tmp_path)
     try:
-        first = _add(manager, body="拆任务每个子任务都带验收标准" + "清" * 60, minimal="拆任务->带验收",
-                     now_iso="2026-04-20T00:00:00+08:00")
-        second = _add(manager, body="改完代码贴受影响文件清单" + "单" * 60, minimal="改完->贴清单",
-                      now_iso="2026-04-21T00:00:00+08:00")
+        memory_id = _add(manager, body="改完代码贴受影响文件清单" + "单" * 60, minimal="改完->贴清单",
+                         now_iso="2026-04-21T00:00:00+08:00")
+        rewritten = "改完代码要贴本次影响的文件清单" + "单" * 60
         manager._memory_repo.apply_mutation(
             adds=[],
-            rewrites=[{"id": second, "content": "改完代码要贴本次影响的文件清单" + "单" * 60, "minimal_memory": "改完->贴清单"}],
+            rewrites=[{"id": memory_id, "content": rewritten, "minimal_memory": "改完->贴清单"}],
             deletes=[],
             inspired_memory_ids=[],
             now_iso="2026-04-27T00:00:00+08:00",
         )
-        for memory_id in (first, second):
-            manager._memory_repo.mark_compressed(memory_id)
+        manager._memory_repo.mark_compressed(memory_id)
         manager._rebuild_memory_snapshot_from_sqlite(now_iso="2026-04-28T00:00:00+08:00")
 
         payload, picked = manager._build_consolidation_payload(trigger=16000, target=1)
 
-        assert set(picked) == {first, second}
-        assert f"- id:{first}｜创建 2026/4/20｜修改 2026/4/20" in payload, payload[:400]
-        assert f"- id:{second}｜创建 2026/4/21｜修改 2026/4/27" in payload, payload[:400]
+        assert picked == [memory_id]
+        assert "1) " in payload, payload[:400]
+        assert "创建" not in payload and "修改" not in payload, "两枚时间都不再交给模型抄"
+        assert memory_id not in payload, "编号是它唯一能指回去的把手"
+
+        category = "note_work_habits"
+        manager.index_dir.mkdir(parents=True, exist_ok=True)
+        note_path = manager.index_dir / f"{category}.md"
+        note_path.write_text(f"工作习惯\n\n- {rewritten}\n", encoding="utf-8")
+
+        stamps = manager.stamp_retired_note_lines([{"memory_id": memory_id, "note_ref": category}])
+
+        assert stamps == {"stamped": 1, "unmatched": 0}
+        assert "- 260427:" in note_path.read_text(encoding="utf-8"), "盖的是归并前那一次真实修改日"
     finally:
         manager.close()
 
