@@ -24,7 +24,7 @@ Start here when you are new to the repository or when a change crosses subsystem
 - `main-task-runtime.md`
   Use for the task side of the runtime: append-notice distribution epochs, mailbox delivery and barriers, acceptance node lifecycle and spawn review, node-level pause/resume/cancel, and graceful shutdown pause with startup auto-resume.
 - `operations-and-maintenance.md`
-  Use for startup workflows, troubleshooting order, high-risk change types, memory queue/reset workflows, and Docker deployment.
+  Use for startup workflows (including the `negi` command stub, icons and the uninstall entry that install writes), troubleshooting order, high-risk change types, memory queue/reset workflows, and Docker deployment.
 - `context-and-cache-troubleshooting.md`
   Use for prompt cache misses, context shrink/continuity regressions, actual-request artifact forensics, and before changing node or CEO context strategies.
 - `tool-and-skill-system.md`
@@ -209,6 +209,7 @@ Start here when you are new to the repository or when a change crosses subsystem
 - 日志板块反复出现「接口返回 500：/api/content/read」、节点详情输出框报「加载完整输出失败」或显示「完整输出已被清理」、点开工具行只有开头一段或整页卡死 → `web-and-admin.md`「Node Output Content Read Contract」
 - 主题切换不生效或刷新后丢失、亮色主题出现大面积灰底、亮色主题下解锁/初始化窗口仍是暗卡片、侧栏折叠后审计角标消失、页面卡片列数在某宽度错乱、某颗勾选框仍画成系统默认方框、样式写进了不加载的样式文件→ `web-and-admin.md`「Frontend Theme And Layout Contract」
 - 新设备一行指令装完发现 skill/tools 比开发机少、重跑安装指令为什么没更新代码、`negi status` 的 `Release:` 行为什么不出现、仓库改名之后已装设备为什么照常更新、`install -Upgrade` 为什么动的是另一个目录 → `operations-and-maintenance.md`「新设备首次安装与升级」
+- 装了但终端里 `negi` 不出现、图标点了没反应、系统「已安装的应用」里没有 Negi、卸载后重装说目录非空、或卸载只该删程序却连数据一起没了 → `operations-and-maintenance.md`「新设备首次安装与升级」+「首选一键启动脚本」
 - 设置按钮红点不亮或误亮、面板显示"已是最新"但设备其实离线、「重启并更新」点了服务没回来 → `web-and-admin.md`「Update Notification And Restart-And-Upgrade Contract」+ `operations-and-maintenance.md`「自动检查新版本与「重启并更新」」
 - 点输入框麦克风提示未就绪／未启用、新设备首点迟迟不出录音、录音结果仍是繁体、或局域网 http 打开时浏览器拒绝麦克风 → `speech-to-text.md`「分发与就绪」「已知边界」
 - QQ 发来的语音变成一行本地路径注记、或只有「用户语音，机器识别失败：…」、或语音条迟迟等不到回复 → `external-agent-api.md`「内置官方 QQ 适配器」+ `speech-to-text.md`「常见排障入口」
@@ -243,4 +244,4 @@ These rules prevent the docs from re-accumulating redundancy. Every edit to this
 | External Agent API contract: `externalApi` config and token overlay, ext session registry/keys, turn terminal invariant, SSE event mapping, ext outbound routing, built-in official QQ adapter (`qqBot` config, in-process botpy bridge) | `external-agent-api.md` |
 | Agent gateway contract: OpenAI-compatible endpoint (`/api/v1/chat/completions`, session mapping, wait/200-honest-text policy, streaming diff) and MCP stdio gateway (`negi mcp serve`, tool surface, stdout purity) | `agent-gateway.md` |
 | Local speech-to-text contract: whisper.cpp subprocess engine and slot serialization, audio normalization and silence/language gating, traditional→simplified post-pass, binary/model provisioning (`stt` defaults' measured basis), voice-clip storage and the model-visibility exclusion, known latency and accuracy envelope | `speech-to-text.md` |
-| Startup/deploy/troubleshooting order, install root vs data root storage layout (which paths hang on which root, where to read the effective data root) and data-root resolution order, memory CLI, Docker compose | `operations-and-maintenance.md` |
+| Startup/deploy/troubleshooting order, the post-install entry surface (`negi` command stub, install-root pointer, desktop/Start Menu shortcuts, uninstall entry and its keep/purge guards), install root vs data root storage layout (which paths hang on which root, where to read the effective data root) and data-root resolution order, memory CLI, Docker compose | `operations-and-maintenance.md` |

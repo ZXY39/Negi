@@ -95,6 +95,8 @@ curl -LsSf https://github.com/ZXY39/Negi/releases/latest/download/install.sh | b
 
 默认安装到 `~/Negi`，无需预先安装 Python。设备上缺少 git 时改用源码包下载（需要 curl 或 wget，以及 unzip）。
 
+安装结束时脚本还会做三件事：把 `negi` 命令装进 `~/.local/bin`（该目录不在 PATH 上时补这一条，用 `-NoPath` / `--no-path` 跳过）、在桌面与开始菜单各放一个 Negi 图标（`-NoShortcut` / `--no-shortcut` 跳过）、在系统的「已安装的应用」里登记一条卸载项。
+
 取不到 `github.com` 时，可改用镜像通道获取同一脚本，仓库地址与参数不变：
 
 ```powershell
@@ -111,9 +113,14 @@ export UV_DEFAULT_INDEX=https://pypi.tuna.tsinghua.edu.cn/simple
 export UV_PYTHON_INSTALL_MIRROR=<可用的 python-build-standalone 镜像>
 ```
 
-### 2.3 首次启动与项目口令
+### 2.3 日常启动与项目口令
 
-安装流程的终点是项目口令设置页。首次启动会在浏览器中要求创建项目口令，设置完成后才进入配置页面；口令用于保护配置中的密钥，遗失后无法恢复。
+装完之后启动 Negi 有三种等价方式：在任意目录的终端里输入 `negi`，点桌面或开始菜单的图标，或在安装目录里跑一键启动脚本（见 [11.2 启动方式](#112-启动方式)）。
+
+- `negi` 不带参数时先探测服务是否已经在跑：已经在跑就只打印地址并打开浏览器，不会重启正在工作的实例
+- 服务没在跑时它把服务拉起来，等到端口就绪再打开浏览器；从图标启动时命令行窗口不出现
+- 安装流程的终点是项目口令设置页。首次启动会在浏览器中要求创建项目口令，设置完成后才进入配置页面；口令用于保护配置中的密钥，遗失后无法恢复
+- 停止服务用网页「设置」里的「退出」按钮，它会先暂停正在跑的任务再关服务
 
 安装得到的文件集合与仓库纳入版本管理的文件一致：项目自带的技能与工具在其中，本机通过市场安装的技能、`externaltools/` 目录与 `.g3ku/` 数据不在其中，需要在新设备上按需重新添加。
 
@@ -136,6 +143,8 @@ export UV_PYTHON_INSTALL_MIRROR=<可用的 python-build-standalone 镜像>
 | `-NoStart` / `--no-start` | 只准备环境，不启动服务 |
 | `-Ref TAG` / `--ref TAG` | 指定安装版本，用于回滚或试装 |
 | `-Upgrade` / `--upgrade` | 将已安装的设备更新到指定版本 |
+| `-NoPath` / `--no-path` | 写入 `negi` 命令桩，但不改 PATH |
+| `-NoShortcut` / `--no-shortcut` | 不创建桌面与开始菜单图标（Linux 上是桌面项） |
 
 启动脚本 `start-negi`：
 
@@ -147,6 +156,19 @@ export UV_PYTHON_INSTALL_MIRROR=<可用的 python-build-standalone 镜像>
 | `-PromptLog` | `--prompt-log` | 记录提示词日志 |
 | `-Reload` | `--reload` | 开发用自动重载 |
 | `-KeepWorker` | `--keep-worker` | 退出时保留托管的执行进程 |
+
+### 2.6 卸载
+
+Windows 在「设置 → 应用 → 已安装的应用」里找到 Negi 点「卸载」；也可以在安装目录执行 `.\uninstall.ps1`。Linux / macOS 在安装目录执行 `./uninstall.sh`。
+
+卸载会先请求正在运行的服务优雅退出，退不干净就中止、什么都不删。随后询问两种处置：
+
+| 选择 | 结果 |
+| --- | --- |
+| 保留数据（默认） | 删掉程序本体与命令行入口、图标、卸载项；`.g3ku/` 里的配置、会话、任务与密钥留在原地，下次装回同一目录会直接认领 |
+| 全部删除 | 连同数据目录一起删除，无法恢复 |
+
+命令行参数：`-KeepData` / `--keep-data`、`-PurgeData` / `--purge-data` 跳过询问，`-Yes` / `--yes` 按默认的"保留数据"执行。uv 与它代管的 Python 属共享工具链，卸载不碰。
 
 ## 3. Web 界面
 
@@ -455,14 +477,17 @@ negi onboard --project
 ### 11.2 启动方式
 
 ```bash
-negi web                              # 启动 Web 服务（默认托管任务执行进程）
+negi                                    # 任意目录：没在跑就启动并打开浏览器，已在跑就只打开浏览器
+negi web                                # 启动 Web 服务（默认托管任务执行进程）
 negi web --host 127.0.0.1 --port 18790
-negi web --reload                     # 开发用自动重载（此时不再托管执行进程）
-negi worker                           # 单独启动后台任务执行进程
-negi agent                            # 命令行对话
+negi web --reload                       # 开发用自动重载（此时不再托管执行进程）
+negi worker                             # 单独启动后台任务执行进程
+negi agent                              # 命令行对话
 negi agent -m "你好，介绍一下你自己"   # 单条消息测试
-negi status                           # 运行状态与版本信息
+negi status                             # 运行状态与版本信息
 ```
+
+`negi` 与 `negi start` 是同一条通道：先探端口，再决定是打开浏览器还是把服务拉起来，所以对着一个正在工作的实例重复执行不会打断它。安装脚本装的命令桩住在 `~/.local/bin`，它按 `G3KU_HOME` → 安装根指针文件的顺序找到安装目录，再交给该目录 `.venv` 里的解释器；手动准备环境时把 `G3KU_HOME` 指到仓库根，或直接执行 `./negi.sh`。
 
 默认端口为 18790，浏览器访问 `http://127.0.0.1:18790`。使用 `--reload` 时任务执行进程需要单独启动，其余情况由 Web 服务托管并随之启停。
 
@@ -470,6 +495,7 @@ negi status                           # 运行状态与版本信息
 
 | 命令 | 用途 |
 | --- | --- |
+| `negi` / `negi start` | 探测服务、按需启动并打开浏览器 |
 | `negi onboard` | 生成配置与工作目录 |
 | `negi web` / `negi worker` / `negi agent` | 启动服务、执行进程、命令行对话 |
 | `negi status` | 状态检查与版本信息 |

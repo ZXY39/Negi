@@ -17,10 +17,16 @@
 
 维护上要记住：
 
-- 安装器只负责补齐它上游的两件事：**取解释器**（缺 uv 就装 uv，再由 uv 按 `.python-version` 提供 Python）与**取代码**（有 git 走 `git clone --branch <ref>`，没有 git 退化成 GitHub 源码包下载）。依赖安装与环境复用全部交给既有的 `negi_bootstrap.py`，安装器不实现第二套
+- 安装器只负责补齐它上游的两件事：**取解释器**（缺 uv 就装 uv，再由 uv 按 `.python-version` 提供 Python）与**取代码**（有 git 走 `git clone --branch <ref>`，没有 git 退化成 GitHub 源码包下载；两条都先落到临时目录再合并进目标）。依赖安装与环境复用全部交给既有的 `negi_bootstrap.py`，安装器不实现第二套
 - 最后一步用 **venv 里的 python** 跑 `negi_bootstrap.py web`。这既让 `negi_bootstrap.py` 的宿主 Python 版本检查落在刚装好的解释器上，也保持了分发形态的前提：本项目安装的是**完整 checkout 就地运行**（bootstrap 会 `chdir` 到仓库根，`main/` 从工作目录导入），不是一个自包含的 Python 包 —— wheel/sdist 目前不含 `main/`，所以安装器与 `uv sync --frozen` / `pip install -e .` 才是唯一可用路径
 - 安装得到的资源集等于 git 跟踪集：仓库自带 skills/tools 在内，操作员本地通过市场安装的 skills、`externaltools/`、`.g3ku/` 不在内。"新设备上少了一批 skill/tools" 属预期，不是安装失败
-- 一行指令的地址与版本无关（`https://github.com/ZXY39/Negi/releases/latest/download/install.ps1`，Linux / macOS 换成 `install.sh`），所以引导文档不需要随发版改写；GitHub 的 `latest` 取最新的非草稿非预览发布。真正决定装哪一版的是脚本内的 `$Ref` / `REF` 钉值，而这份钉值随发布固化在该版本的资产里，于是"命令不变"与"每次装最新发布版"两条同时成立。要覆盖用 `-Ref` / `--ref`，换目录用 `-Dir` / `--dir`（默认 `%USERPROFILE%\Negi`，Linux / macOS `~/Negi`），只建环境不启动用 `-NoStart` / `--no-start`。脚本按 `$Dir` 决议目标目录，`-Upgrade` 也一样，所以装在非默认目录的设备上手动升级要显式带上目录，否则会对着默认目录动手
+- 一行指令的地址与版本无关（`https://github.com/ZXY39/Negi/releases/latest/download/install.ps1`，Linux / macOS 换成 `install.sh`），所以引导文档不需要随发版改写；GitHub 的 `latest` 取最新的非草稿非预览发布。真正决定装哪一版的是脚本内的 `$Ref` / `REF` 钉值，而这份钉值随发布固化在该版本的资产里，于是"命令不变"与"每次装最新发布版"两条同时成立
+- 安装脚本的参数：`-Dir` / `--dir` 换安装目录（默认 `%USERPROFILE%\Negi`，Linux / macOS `~/Negi`），`-NoStart` / `--no-start` 只建环境不启动，`-Ref` / `--ref` 指定版本，`-Upgrade` / `--upgrade` 换代码，`-NoPath` / `--no-path` 写命令桩但不改 PATH，`-NoShortcut` / `--no-shortcut` 不建图标。脚本按 `$Dir` 决议目标目录，`-Upgrade` 也一样，所以装在非默认目录的设备上手动升级要显式带上目录，否则会对着默认目录动手
+- 装完的入口面由安装器落四样：`~/.local/bin` 里的命令桩（该目录不在 PATH 上时补这一条，并把"是我们加的"记进指针）、安装根指针文件、桌面与开始菜单图标、`HKCU\...\CurrentVersion\Uninstall\Negi` 卸载项。桩不硬编码安装根，按 `G3KU_HOME` → 指针文件解析，因为 `--Dir` 是任意位置；每次安装无条件覆写桩与指针，桩体不含版本号，所以升级不需要重写它
+- 图标与命令桩都不自己启动服务：`.lnk` 的 TargetPath 是 `.venv\Scripts\pythonw.exe`（不分配控制台，所以没有黑窗闪现），参数是 `negi_bootstrap.py start --hidden`。快捷方式图标用仓库里已跟踪的 `g3ku/web/frontend/favicon.ico` 复制一份到 `%LOCALAPPDATA%\Negi`，安装期不做图像转换；不放安装根是因为 `-Upgrade` 按顶层覆盖那棵树
+- 取码一律先检出到临时目录再逐顶层合并。`git clone` 对着非空目录直接 fatal，而"保留数据"的卸载留下的正是非空目录，所以认领不是可选项；目标里已有 `.g3ku/config.json` 时报一句认领（配置、会话与密钥沿用），不重新初始化项目
+- 卸载入口是 `uninstall.ps1` / `uninstall.sh`（随发布 checkout 分发，注册表 `UninstallString` 指向它）。顺序固定：先请求优雅退出并确认进程真的退干净，退不干净就中止、一个文件都不删（`.venv` 在跑时文件也删不动）；然后询问保留还是全部删除，默认保留。删除判据是两个独立事实——数据根里要有 Negi 的配置或密钥信封，还要有运行时目录之一——主目录、盘根与读不出标记的路径一律拒绝。uv 与它代管的 Python 属共享工具链，永不删
+- 隐藏窗口的启动没有控制台所有者：停止服务只有网页「设置」里的退出按钮（`org_graph.html` → `POST /api/bootstrap/exit`，见下节与 `web-and-admin.md`「Local Startup And Launcher Contract」）。界面进不去时的兜底仍是 `start-negi.*` 的"先优雅退出再强杀"
 - 镜像源不设安装器参数：uv 直接读 `UV_DEFAULT_INDEX` 与 `UV_PYTHON_INSTALL_MIRROR` 环境变量
 - 安装完成的终点是项目口令设置页，不是可用系统（解锁合同见 `config-and-models.md`「Deployment Unlock Contract」）
 - 不带 `-Upgrade` 时对已存在的目录是**幂等不动代码**（只补环境与启动）。升级是显式动作：git 检出走 `fetch --depth 1` + `checkout --detach FETCH_HEAD`，无 git 的源码包安装走"下归档 + 逐顶层覆盖"，两条路都只换代码，`.venv/` 与 `.g3ku/` 保留
@@ -47,6 +53,8 @@
 
 ### 首选一键启动脚本
 
+入口按"越靠前越不需要知道细节"排：任意目录的 `negi`（= `negi start`）→ 桌面/开始菜单图标（同一条 `start --hidden`）→ 安装目录里的 `start-negi.*`（带参数的显式启动）→ `negi web` / `negi worker`（拆开验证某一环节时用）。
+
 - Windows PowerShell: `.\start-negi.ps1`
 - Linux / macOS: `./start-negi.sh`
 
@@ -64,7 +72,7 @@
 - 强制回退路径（强杀）对应的是异常中断：下次启动任务走恢复清洗，任务卡片会以 toast 提示「本任务遇到异常停止」；toast 可点击关闭（UI 合同见 `web-and-admin.md`「Task Recovery Notice UI Contract」）
 - 它们最终仍然是调用 `g3ku` bootstrap，再进入 `negi web`
 - 当脚本使用 reload 模式时，Web 侧自动托管 worker 会关闭；这时要单独运行 `negi worker`
-- `negi.cmd` / `negi.ps1` / `negi.sh` 是 CLI 透传包装；无参调用默认启动 `web`。任何入口的 web 启动都会在终端报告结果：成功横幅带 URL，失败横幅带子进程退出码和 `.g3ku/logs/console.log` 指引。横幅的"成功"只代表监听端口已生效；运行时是否还在预热看 `/api/bootstrap/status` 的 `runtime_bootstrapping`（合同见 `web-and-admin.md`「Local Startup And Launcher Contract」）
+- `negi.cmd` / `negi.ps1` / `negi.sh` 是 CLI 透传包装；无参调用走 `start`：先探端口，已在跑就只打印地址并打开浏览器（**不打断正在工作的实例**），没在跑才启动服务，等就绪后打开浏览器。`start --hidden` 用脱离式子进程（`DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP`，与「重启并更新」的重拉起同一形态）把服务放到后台，供图标使用；显式 `web` 保持前台、Ctrl+C 可停。三条路最终都是 `python -m g3ku web`，所以进程判据与单实例锁的归属判断都不变。任何入口的 web 启动都会在终端报告结果：成功横幅带 URL，失败横幅带子进程退出码和 `.g3ku/logs/console.log` 指引。横幅的"成功"只代表监听端口已生效；运行时是否还在预热看 `/api/bootstrap/status` 的 `runtime_bootstrapping`（合同见 `web-and-admin.md`「Local Startup And Launcher Contract」）。探针盯的端口是"配置端口与 `--port` 合并后的那一个"，只读配置会让非默认端口在服务正常时打印假失败
 - web 启动在拿单实例锁（`.g3ku/start.lock`）之前会先自愈：杀掉本工作区残留的 negi web 服务进程（`-m g3ku web` 或 `-c ...run_web_server_entrypoint...` 形态，按 venv python 路径或进程 cwd 归属本工作区）。因此“端口/锁被占”不是永久失败：再次启动会替换残留实例；若报错里 `pid=unknown`（持有者在加锁与写元数据之间被杀），用 `netstat` 查 web 端口定位占用者
 
 ### CLI
@@ -103,7 +111,7 @@
 1. 检查 `.g3ku/config.json`
 2. 运行 `negi status`
 3. 运行一次 `negi agent -m "test"`
-4. 先用 `.\start-negi.ps1`（Windows）或 `./start-negi.sh`（Linux / macOS）启动项目
+4. 在任意目录输入 `negi` 启动项目（开发机上装过就有这条命令；没有时回退到安装目录里的 `.\start-negi.ps1` / `./start-negi.sh`）
 5. 确认 Web API、任务面板、模型配置页能正常返回
 
 如果你要拆开验证启动链路，或排查“是脚本包装层问题还是 Web/runtime 本身问题”，再回退到手动运行 `negi web` / `negi worker`。
