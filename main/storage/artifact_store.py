@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+import errno
 import gzip
 import hashlib
 import json
+import time
 from pathlib import Path
 
 from main.ids import new_artifact_id
@@ -10,6 +12,39 @@ from main.models import TaskArtifactRecord
 from main.protocol import now_iso
 from main.storage.disk_guard import classify_write_error, disk_policies
 from main.storage.fs_utils import remove_tree
+
+# 改名盖过目标时唯一的瞬时失败形态是"目标正被一个没带 FILE_SHARE_DELETE 的句柄读着"
+# （CPython 的 open() 就不带，跨进程同样挡）或只读属性；两者都是争用，不是节点坏了。
+# 2026-10-16 实盘：node_input 单例每回合覆盖写同一文件，一份 1 MB 正文整份读走约
+# 8-11 ms，改名落在这扇窗口里就返回 WinError 5，把已成功返回的模型回合作废成 error-pause。
+_REPLACE_CONTENTION_WINERRORS = frozenset({5, 32})
+_REPLACE_CONTENTION_ERRNOS = frozenset({errno.EACCES, errno.EPERM, errno.EBUSY})
+_REPLACE_ATTEMPTS = 4
+_REPLACE_RETRY_SECONDS = 0.025
+
+
+def _is_replace_contention(exc: BaseException) -> bool:
+    winerror = getattr(exc, 'winerror', None)
+    if winerror is not None:
+        return int(winerror) in _REPLACE_CONTENTION_WINERRORS
+    return getattr(exc, 'errno', None) in _REPLACE_CONTENTION_ERRNOS
+
+
+def _replace_atomically(source: Path, target: Path) -> None:
+    """原子替换，只对争用形态的错误重试；其余（含 ENOSPC 分类）原样上抛。
+
+    重试睡在调用线程的任务锁里，最多多占 (attempts-1) * 25 ms，只在真撞读时发生。
+    """
+    for attempt in range(_REPLACE_ATTEMPTS):
+        try:
+            source.replace(target)
+            return
+        except OSError as exc:
+            if not _is_replace_contention(exc):
+                raise
+            if attempt + 1 >= _REPLACE_ATTEMPTS:
+                raise
+            time.sleep(_REPLACE_RETRY_SECONDS)
 
 
 def read_artifact_text(record: TaskArtifactRecord | None) -> str:
@@ -52,6 +87,7 @@ class TaskArtifactStore:
 
         返回 (最终路径, 原始字节数, 'plain'|'gzip')。ENOSPC 不重试，
         直接抛分类后的 DiskFullError——写失败绝不返回指向不存在文件的记录。
+        改名撞开着的读句柄由 ``_replace_atomically`` 重试到上限后再上抛。
         """
         payload_bytes = text.encode('utf-8')
         size = len(payload_bytes)
@@ -68,7 +104,7 @@ class TaskArtifactStore:
                     handle.write(text)
             else:
                 tmp.write_text(text, encoding='utf-8')
-            tmp.replace(path)
+            _replace_atomically(tmp, path)
         except OSError as exc:
             try:
                 if tmp.exists():
