@@ -47,8 +47,14 @@ def _add(
 
 
 def _candidate_line(manager, memory_id: str, *, trigger: int = 16000, target: int = 1) -> int:
-    """Which candidate number this memory holds in the payload the consolidator was handed."""
+    """Which candidate number this memory holds in the payload the consolidator was handed.
 
+    Only a row the compress lane already downgraded is ever offered for retirement, so the
+    helper puts the row into that state first - asking for a candidate number of a row that
+    was never downgraded has no answer.
+    """
+
+    manager._memory_repo.mark_compressed(str(memory_id))
     _, picked = manager._build_consolidation_payload(trigger=trigger, target=target)
     return picked.index(str(memory_id)) + 1
 
@@ -86,7 +92,7 @@ def test_retiring_writes_the_column_and_never_the_delete_button(tmp_path: Path) 
                 consolidation_writes=[
                     {"note_ref": "note_local_env", "body": "本机运行环境\n\n## 反代\n端口 8799，改完重启 nginx。\n", "edits": []}
                 ],
-                retirements=[{"line": _candidate_line(manager, memory_id), "note_ref": "note_local_env"}],
+                retirements=[{"memory_id": memory_id, "note_ref": "note_local_env"}],
             )
         )
 
@@ -225,7 +231,7 @@ def test_the_consolidation_block_is_excluded_from_both_counting_judgements(tmp_p
     block counted, every later commit would queue another consolidation forever. The cap
     is excluded for the same reason, so a wide merge area can always be written."""
     module = _module()
-    manager = _manager(tmp_path, trigger=120, target=100, document_max=130)
+    manager = _manager(tmp_path, trigger=120, target=100, document_max=60)
     try:
         keep = _add(manager, body="K" * 20, minimal="保留->短")
         retire = _add(manager, body="R" * 20, minimal="退场->短")
@@ -240,7 +246,7 @@ def test_the_consolidation_block_is_excluded_from_both_counting_judgements(tmp_p
                 document_preview="",
                 is_consolidation=True,
                 consolidation_writes=[{"note_ref": "note_big", "body": "大类\n\n" + "S" * 3000 + "\n", "edits": []}],
-                retirements=[{"line": _candidate_line(manager, retire), "note_ref": "note_big"}],
+                retirements=[{"memory_id": retire, "note_ref": "note_big"}],
             )
         )
 
@@ -250,7 +256,7 @@ def test_the_consolidation_block_is_excluded_from_both_counting_judgements(tmp_p
         assert f"- 大类 (note: {markdown_memory.note_handle('note_big', category=True)})" in document
         assert "(note: note_big)" not in document
         assert "S" * 3000 not in document, "only the index line is resident; the body loads on demand"
-        assert len(document) > 130, "the document exceeds document_max and still landed"
+        assert len(document) > 60, "the document exceeds document_max and still landed"
         assert manager._resident_memory_chars() <= 120
 
         result = manager._compress_memory_snapshot_if_needed(now_iso="2026-04-25T00:00:09+08:00")
@@ -308,11 +314,23 @@ def test_consolidation_staging_refuses_both_directions_of_orphaned_work(tmp_path
         )
         unknown.apply_batch(
             note_writes=[{"note_ref": "note_x", "body": "x\n"}],
-            retirements=[{"memory_id": "ZZZZZZ", "note_ref": "note_x"}],
+            retirements=[{"line": 2, "note_ref": "note_x"}],
         )
-        with pytest.raises(module._MemoryAgentValidationError, match="retire ids not found"):
+        with pytest.raises(module._MemoryAgentValidationError, match=r"line 2 is outside the candidate list"):
             manager._build_consolidation_write_from_apply_batch(
-                batch=module.MemoryBatch(op="consolidate", items=[]),
+                batch=module.MemoryBatch(
+                    op="consolidate",
+                    items=[
+                        module.MemoryQueueRequest(
+                            op="consolidate",
+                            decision_source="self",
+                            payload_text="## 待归并记忆\n1) 要退场的记忆\n",
+                            created_at="2026-04-25T00:00:30+08:00",
+                            request_id="consolidate_1",
+                            consolidation_memory_ids=[memory_id],
+                        )
+                    ],
+                ),
                 session=unknown,
             )
     finally:
@@ -377,26 +395,24 @@ def test_an_ordinary_note_owned_by_a_retired_memory_survives_the_sweep(tmp_path:
 
 
 def test_the_injected_snapshot_carries_the_block_verbatim(tmp_path: Path) -> None:
-    """The display projection strips ids and headers from entries; the block has to pass
-    through untouched, and nothing may re-read `memory/index` while injecting."""
+    """The painted mirror is what the reader gets, byte for byte: nothing is re-rendered on
+    the way in, and nothing may re-read `memory/index` while injecting."""
     builder_module = importlib.import_module("g3ku.runtime.frontdoor.message_builder")
     markdown_memory = _markdown_memory()
 
     entries = (
-        "---\nid:Ab12Z9\n2026/4/17-user：\n用户偏好：回复先给结论\n"
+        "260417:用户偏好：回复先给结论 (note: n12345)\n"
         f"\n{markdown_memory.CONSOLIDATION_HEADING}\n{markdown_memory.CONSOLIDATION_REMINDER}\n"
-        "- 工具技巧 (note: note_tools)\n"
+        "- 工具技巧 (note: c54321)\n"
     )
 
     message = builder_module.CeoMessageBuilder._memory_snapshot_stable_message(entries)
 
     content = str(message["content"])
     assert content.startswith("## 长期记忆")
-    assert "id:Ab12Z9" not in content
-    assert "2026/4/17-user：" not in content
-    assert "用户偏好：回复先给结论" in content
+    assert "260417:用户偏好：回复先给结论 (note: n12345)" in content
     assert markdown_memory.CONSOLIDATION_REMINDER in content
-    assert "- 工具技巧 (note: note_tools)" in content
+    assert "- 工具技巧 (note: c54321)" in content
 
 
 def test_a_consolidation_that_retires_nothing_leaves_the_store_alone(tmp_path: Path) -> None:
@@ -459,7 +475,8 @@ def test_a_parked_noop_gates_the_same_candidate_set_from_being_queued_again(tmp_
                         {
                             "request_id": "consolidate_1",
                             "op": "consolidate",
-                            "payload_text": f"## 待归并记忆\n- id:{first}\n第一条正文\n",
+                            "payload_text": "## 待归并记忆\n1) 第一条正文\n",
+                            "consolidation_memory_ids": [first],
                         }
                     ],
                 }
@@ -542,14 +559,16 @@ async def test_a_consolidate_batch_runs_through_the_consolidator_lane(tmp_path: 
     manager = _manager(tmp_path)
     try:
         memory_id = _add(manager, body="网页端口是 18790", minimal="网页->端口")
+        manager._memory_repo.mark_compressed(memory_id)
         manager._rebuild_memory_snapshot_from_sqlite(now_iso="2026-04-25T00:00:12+08:00")
         await manager._append_queue_request(
             module.MemoryQueueRequest(
                 op="consolidate",
                 decision_source="self",
-                payload_text=f"## 待归并记忆\n- id:{memory_id}\n网页端口是 18790\n",
+                payload_text="## 待归并记忆\n1) 网页端口是 18790\n",
                 created_at="2026-04-25T00:00:13+08:00",
                 request_id="consolidate_1",
+                consolidation_memory_ids=[memory_id],
             )
         )
 
@@ -567,7 +586,7 @@ async def test_a_consolidate_batch_runs_through_the_consolidator_lane(tmp_path: 
                                         "body": "本机运行环境\n\n## 端口\n网页 18790，反代 8799。\n",
                                     }
                                 ],
-                                "retirements": [{"line": _candidate_line(manager, memory_id), "note_ref": "note_local_env"}],
+                                "retirements": [{"line": 1, "note_ref": "note_local_env"}],
                             },
                         }
                     ],
@@ -633,40 +652,40 @@ def test_a_batch_may_only_retire_the_memories_it_was_offered(tmp_path: Path) -> 
     try:
         offered = _add(manager, body="被交来的那条要归并的记忆", minimal="交来->归并")
         untouched = _add(manager, body="没被交来的记忆", minimal="没交来->留下")
+        manager._memory_repo.mark_compressed(offered)
+        manager._memory_repo.mark_compressed(untouched)
 
         def _session() -> object:
             session = module._ConsolidationToolSession(
                 notes_dir=manager.notes_dir,
                 index_dir=manager.index_dir,
             )
+            # 载荷把候选按 1)、2) 编号端给它，它回的也是这个编号；这里的两条对应交来的顺序。
             session.apply_batch(
                 note_writes=[{"note_ref": "note_env", "body": "本机运行环境 端口 18790", "edits": []}],
                 retirements=[
-                    {"line": _candidate_line(manager, offered), "note_ref": "note_env"},
-                    {"line": _candidate_line(manager, untouched), "note_ref": "note_env"},
+                    {"line": 1, "note_ref": "note_env"},
+                    {"line": 2, "note_ref": "note_env"},
                 ],
             )
             return session
 
         def _batch(payload_ids: list[str]) -> object:
             nl = chr(10)
-            body = nl.join(f"- id:{memory_id}{nl}正文{nl}" for memory_id in payload_ids)
-            return module.MemoryBatch(
+            body = nl.join(f"{index}) 正文{index}{nl}" for index, _ in enumerate(payload_ids, start=1))
+            request = module.MemoryQueueRequest(
                 op="consolidate",
-                items=[
-                    module.MemoryQueueRequest(
-                        op="consolidate",
-                        decision_source="self",
-                        payload_text=(
-                            f"## 待归并记忆{nl}{body}{nl}## 现有分类 note{nl}-（还没有分类 note）{nl}"
-                        ),
-                        created_at="2026-04-25T00:00:30+08:00",
-                        request_id="consolidate_scope_1",
-                    )
-                ],
+                decision_source="self",
+                payload_text=(
+                    f"## 待归并记忆{nl}{body}{nl}## 现有分类 note{nl}-（还没有分类 note）{nl}"
+                ),
+                created_at="2026-04-25T00:00:30+08:00",
+                request_id="consolidate_scope_1",
+                consolidation_memory_ids=list(payload_ids),
             )
+            return module.MemoryBatch(op="consolidate", items=[request])
 
-        with pytest.raises(module._MemoryAgentValidationError, match="not offered to this consolidation batch"):
+        with pytest.raises(module._MemoryAgentValidationError, match=r"line 2 is outside the candidate list"):
             manager._build_consolidation_write_from_apply_batch(
                 batch=_batch([offered]),
                 session=_session(),
@@ -683,7 +702,7 @@ def test_a_batch_may_only_retire_the_memories_it_was_offered(tmp_path: Path) -> 
             snapshot_text=manager.snapshot_text(),
             repair_reason="",
         )
-        assert "只能是上面「待归并记忆」列出的那些" in prompt
+        assert "编号只能取上面列出的那些" in prompt
     finally:
         manager.close()
 

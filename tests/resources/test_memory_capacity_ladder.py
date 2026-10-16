@@ -115,12 +115,25 @@ def _pool_ids(manager, **kwargs) -> list[str]:
     return [str(row.get("memory_id") or "") for row, _gain in manager._compression_pool_rows(**kwargs)]
 
 
+def _confirmed(session) -> object:
+    """Stand in for the model's second call.
+
+    A batch that changes memories only lands after it read back its preview, and that gate
+    sits on the commit side - these tests probe the ladder rungs past it, so they record the
+    confirmation instead of re-testing the gate.
+    """
+
+    if session.batch_has_mutation():
+        session.confirm_batch()
+    return session
+
+
 def test_over_trigger_compresses_and_never_queues_a_consolidation(tmp_path: Path) -> None:
     """Rung one has to be enough whenever the pool can pay the way down to `target`."""
     manager = _manager(tmp_path, trigger=400, target=330)
     try:
         for index in range(4):
-            _add(manager, body=f"第{index}条" + "内" * 88, minimal=f"条件{index}->关键词", now_iso=f"2026-04-25T00:00:0{index}+08:00")
+            _add(manager, body=f"第{index}条" + "内" * 115, minimal=f"条件{index}->关键词", now_iso=f"2026-04-25T00:00:0{index}+08:00")
         _paint(manager)
         assert manager._resident_memory_chars() > 400
 
@@ -142,23 +155,23 @@ def test_compression_that_lands_above_target_still_escalates_to_consolidation(tm
     否则 `compress_target_chars` 不参与任何决策：每次提交都重跑一趟榨干的压缩、判"没超线"收工，
     归并永远排不上。
     """
-    manager = _manager(tmp_path, trigger=400, target=300)
+    manager = _manager(tmp_path, trigger=400, target=250)
     try:
         for index in range(4):
-            _add(manager, body=f"第{index}条" + "内" * 88, minimal=f"条件{index}->关键词", now_iso=f"2026-04-25T00:00:0{index}+08:00")
+            _add(manager, body=f"第{index}条" + "内" * 115, minimal=f"条件{index}->关键词", now_iso=f"2026-04-25T00:00:0{index}+08:00")
         _paint(manager)
 
         result = manager._compress_memory_snapshot_if_needed(now_iso="2026-04-25T00:00:40+08:00")
         resident = manager._resident_memory_chars()
 
         assert result["compression_triggered"] is True, "第一级先动过"
-        assert 300 < resident <= 400, f"夹具要正好停在两线之间，实测 {resident}"
+        assert 250 < resident <= 400, f"夹具要正好停在两线之间，实测 {resident}"
         assert result["consolidation_requested"] is True
         assert result["consolidation_reason"] == "after_compression"
         assert result["capacity_action"] == "consolidation_queued"
         queued = manager._queued_consolidation_request()
         assert queued is not None
-        offered = set(__import__("re").findall(r"^- id:([A-Za-z0-9]{6})", queued.payload_text, __import__("re").M))
+        offered = set(queued.consolidation_memory_ids)
         compressed_ids = {str(r["memory_id"]) for r in manager._memory_repo.list_memories() if r["is_compressed"]}
         assert offered and offered <= compressed_ids, "升级后递给归并的仍然只有已降级行"
     finally:
@@ -170,7 +183,7 @@ def test_the_protected_tail_and_this_batches_own_rows_are_never_downgraded(tmp_p
     manager = _manager(tmp_path, trigger=400, target=300)
     try:
         ids = [
-            _add(manager, body=f"第{index}条" + "内" * 88, minimal=f"条件{index}->关键词", now_iso=f"2026-04-25T00:00:0{index}+08:00")
+            _add(manager, body=f"第{index}条" + "内" * 115, minimal=f"条件{index}->关键词", now_iso=f"2026-04-25T00:00:0{index}+08:00")
             for index in range(4)
         ]
         _paint(manager)
@@ -203,7 +216,7 @@ async def test_a_batch_too_big_for_the_library_is_held_behind_a_consolidation_th
     manager = _manager(tmp_path, trigger=400, target=300, document_max=900)
     try:
         for index in range(4):
-            _add(manager, body=f"第{index}条" + "内" * 88, minimal=f"条件{index}->关键词", now_iso=f"2026-04-25T00:00:0{index}+08:00")
+            _add(manager, body=f"第{index}条" + "内" * 115, minimal=f"条件{index}->关键词", now_iso=f"2026-04-25T00:00:0{index}+08:00")
         _set_compressed(manager, list(_rows(manager)))
         _paint(manager)
         await manager._append_queue_request(
@@ -306,7 +319,7 @@ def test_a_capacity_refusal_frees_room_and_the_payload_is_priced_again(tmp_path:
     manager = _manager(tmp_path, trigger=300, target=250, document_max=600)
     try:
         for index in range(4):
-            _add(manager, body=f"第{index}条" + "内" * 88, minimal=f"条件{index}->关键词", now_iso=f"2026-04-25T00:00:0{index}+08:00")
+            _add(manager, body=f"第{index}条" + "内" * 115, minimal=f"条件{index}->关键词", now_iso=f"2026-04-25T00:00:0{index}+08:00")
         _paint(manager)
         before_rows = _rows(manager)
         resident_before = manager._resident_memory_chars()
@@ -336,7 +349,9 @@ def test_a_capacity_refusal_frees_room_and_the_payload_is_priced_again(tmp_path:
             {"memory_id": "Nw0001", "memory_body": staged_body, "minimal_memory": "新规则->短", "source": "user"}
         ) > 600
 
-        validated = manager._validate_candidate_state(batch=batch, before_text=manager.snapshot_text(), session=session)
+        validated = manager._validate_candidate_state(
+            batch=batch, before_text=manager.snapshot_text(), session=_confirmed(session)
+        )
 
         assert validated.capacity_action == "compressed"
         assert validated.compressed_details, "the machine made room before asking the model to shrink"
@@ -368,7 +383,7 @@ def test_consolidation_candidates_are_only_rows_the_machine_already_downgraded(t
 
 def test_consolidation_prices_rows_by_what_they_cost_the_block_not_by_their_bodies(tmp_path: Path) -> None:
     """A downgraded row occupies its summary line, so that is the only honest ruler."""
-    manager = _manager(tmp_path, trigger=1200, target=1000)
+    manager = _manager(tmp_path, trigger=800, target=650)
     try:
         fat_ids = [
             _add(
@@ -386,16 +401,16 @@ def test_consolidation_prices_rows_by_what_they_cost_the_block_not_by_their_bodi
         _add(manager, body="另一条" + "外" * 250, minimal="另一->词", now_iso="2026-04-25T00:01:22+08:00")
         _paint(manager)
         resident = manager._resident_memory_chars()
-        assert resident > 1200
+        assert resident > 800
         render_each = manager._row_rendered_chars(_rows(manager)[fat_ids[0]])
         assert render_each < 60, "a downgraded row renders to its summary, not its 800-char body"
 
-        _payload, picked = manager._build_consolidation_payload(trigger=1200, target=1000)
+        _payload, picked = manager._build_consolidation_payload(trigger=800, target=650)
 
-        # Priced by bodies, one row would look like enough for a gap of ~400 chars; priced
+        # Priced by bodies, one row would look like enough for a gap of ~180 chars; priced
         # honestly the payload has to reach past the gap or retirement leaves the block over.
         assert len(picked) > 1
-        assert sum(manager._row_rendered_chars(_rows(manager)[memory_id]) for memory_id in picked) >= resident - 1000
+        assert sum(manager._row_rendered_chars(_rows(manager)[memory_id]) for memory_id in picked) >= resident - 650
         assert set(picked) <= set(fat_ids), "the two rows nobody downgraded are not on the list"
     finally:
         manager.close()
@@ -403,13 +418,13 @@ def test_consolidation_prices_rows_by_what_they_cost_the_block_not_by_their_bodi
 
 def test_a_row_that_cannot_shrink_still_gets_the_consolidation_door(tmp_path: Path) -> None:
     """Marking costs nothing on these rows, and skipping them would strand them forever."""
-    manager = _manager(tmp_path, trigger=150, target=120)
+    manager = _manager(tmp_path, trigger=130, target=120)
     try:
         same = "同字" + "内" * 60
         flat = _add(manager, body=same, minimal=same, now_iso="2026-04-25T00:00:01+08:00")
         shrink = _add(manager, body="可压" + "内" * 60, minimal="可压->词", now_iso="2026-04-25T00:00:02+08:00")
         _paint(manager)
-        assert manager._resident_memory_chars() > 150
+        assert manager._resident_memory_chars() > 130
 
         result = manager._compress_memory_snapshot_if_needed(now_iso="2026-04-25T00:00:40+08:00")
 
@@ -447,7 +462,7 @@ def test_a_summary_may_not_be_longer_than_the_memory_it_sums_up(tmp_path: Path, 
     module = _module()
     manager = _manager(tmp_path)
     try:
-        existing = _add(manager, body="原有正文" + "内" * 40, minimal="原有->关键词", now_iso="2026-04-25T00:00:01+08:00")
+        _add(manager, body="原有正文" + "内" * 40, minimal="原有->关键词", now_iso="2026-04-25T00:00:01+08:00")
         _paint(manager)
 
         session = module._MemoryToolSession(
@@ -459,7 +474,7 @@ def test_a_summary_may_not_be_longer_than_the_memory_it_sums_up(tmp_path: Path, 
         if shape == "add":
             session.apply_batch(adds=[{"content": "短正文", "minimal_memory": long_minimal, "decision_source": "user"}])
         else:
-            session.apply_batch(rewrites=[{"id": existing, "content": "短正文", "minimal_memory": long_minimal}])
+            session.apply_batch(rewrites=[{"line": 1, "content": "短正文", "minimal_memory": long_minimal}])
         batch = module.MemoryBatch(
             op="write",
             items=[
@@ -474,7 +489,9 @@ def test_a_summary_may_not_be_longer_than_the_memory_it_sums_up(tmp_path: Path, 
         )
 
         with pytest.raises(module._MemoryAgentValidationError) as refused:
-            manager._validate_candidate_state(batch=batch, before_text=manager.snapshot_text(), session=session)
+            manager._validate_candidate_state(
+                batch=batch, before_text=manager.snapshot_text(), session=_confirmed(session)
+            )
 
         message = str(refused.value)
         assert "最小记忆不能比正文长" in message
@@ -509,7 +526,9 @@ def test_an_equal_summary_is_still_accepted(tmp_path: Path) -> None:
             ],
         )
 
-        validated = manager._validate_candidate_state(batch=batch, before_text=manager.snapshot_text(), session=session)
+        validated = manager._validate_candidate_state(
+            batch=batch, before_text=manager.snapshot_text(), session=_confirmed(session)
+        )
 
         assert len(validated.adds) == 1
     finally:
@@ -519,7 +538,7 @@ def test_an_equal_summary_is_still_accepted(tmp_path: Path) -> None:
 @pytest.mark.asyncio
 async def test_manual_warming_restores_the_full_body_and_rolls_back_at_the_cap(tmp_path: Path) -> None:
     """回暖是梯子唯一的手动挡：它把字符加回常驻块，所以它也要过硬顶这道校验。"""
-    manager = _manager(tmp_path, trigger=300, target=250, document_max=480)
+    manager = _manager(tmp_path, trigger=300, target=250, document_max=400)
     try:
         keep = _add(manager, body="留着" + "内" * 200, minimal="留着->词", now_iso="2026-04-25T00:00:01+08:00")
         warm = _add(manager, body="回暖这条" + "外" * 240, minimal="回暖->词", now_iso="2026-04-25T00:00:02+08:00")
@@ -544,7 +563,7 @@ async def test_manual_warming_restores_the_full_body_and_rolls_back_at_the_cap(t
         assert rows_after[warm]["is_compressed"] is False, "and the rollback is to this batch's start, not to zero"
         assert "回暖这条" in manager.snapshot_text()
         assert ("留着" + "内" * 200) not in manager.snapshot_text()
-        assert result["resident_chars_after"] <= 480
+        assert result["resident_chars_after"] <= 400
     finally:
         manager.close()
 
@@ -588,7 +607,7 @@ def test_the_capacity_rung_is_recorded_per_memory_in_the_ledger(tmp_path: Path) 
     manager = _manager(tmp_path, trigger=300, target=280)
     try:
         ids = [
-            _add(manager, body=f"第{index}条" + "内" * 88, minimal=f"条件{index}->词", now_iso=f"2026-04-25T00:00:0{index}+08:00")
+            _add(manager, body=f"第{index}条" + "内" * 115, minimal=f"条件{index}->词", now_iso=f"2026-04-25T00:00:0{index}+08:00")
             for index in range(3)
         ]
         _paint(manager)

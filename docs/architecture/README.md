@@ -141,6 +141,7 @@ Start here when you are new to the repository or when a change crosses subsystem
 - 记忆页点重试/放弃提示失败、或弹条正文是 `Request timeout` → `web-and-admin.md`「Memory Management Page And Admin Contract」（四条失败正文各自的指向与 30s 客户端超时）
 - 用户说「记住/忘掉」但模型照旧，或某轮命中前缀在第二条消息就分叉 → `runtime-overview.md`「Memory Runtime State」（快照会话级冻结与采纳点）+ `context-and-cache-troubleshooting.md`「长期记忆快照的会话级冻结」
 - 某条记忆从长期记忆块里消失了、`memory/index/` 出现新文件，或医生检查报 `broken_category_links` → `runtime-overview.md`「Memory Runtime State」（退场写 `consolidated_into`、归并区派生、机器压缩只降级不删除）
+- 记忆批次停在停车区而错误文本是 `memory_apply_confirm is required`、`line N is outside the memory block`、`line N is outside the candidate list` → `runtime-overview.md`「Memory Runtime State」（两次提交那道门与行号的解释时刻）
 - 日志审计侧栏角标不更新、原始日志为空或翻页停在空白页、时间显示与事件时间戳不一致、`/api/audit` 503 → `web-and-admin.md`「Log Audit Page And Event Contract」
 - Broken image icons, file-route 400s, snapshot path mismatch → `web-and-admin.md`「Inline Markdown Image Rendering And Media Middle Layer」
 - 模型重复处理已回答的问题、连续请求尾部反复出现同一条无回复的用户消息、渠道会话里旧提问冒到最新回复下面（像用户重发）；或反向——某轮失败后用户发"继续"，模型答的是上一件成功的事 → `context-and-cache-troubleshooting.md`「残留 paused / pending 转录条目与未回答的用户输入」

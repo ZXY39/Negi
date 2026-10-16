@@ -24,54 +24,48 @@ def _load_memory_agent_runtime_module():
 def test_format_memory_entry_uses_minimal_block_shape() -> None:
     module = _load_markdown_memory_module()
     entry = module.MemoryEntry(
-        memory_id="Ab12Z9",
+        memory_id="Ab12Z9Xq",
         date_text="2026/4/17",
         source="self",
         summary="完成任务必须说明任务总耗时",
         note_ref="",
     )
 
-    assert module.format_memory_entry(entry) == (
-        "---\n"
-        "id:Ab12Z9\n"
-        "2026/4/17-self：\n"
-        "完成任务必须说明任务总耗时\n"
+    assert module.format_memory_entry(entry) == "260417:完成任务必须说明任务总耗时\n"
+
+    linked = module.format_memory_entry(
+        module.MemoryEntry(
+            memory_id="Ab12Z9Xq",
+            date_text="2026/4/17",
+            source="user",
+            summary="创建文件默认格式要求",
+            note_ref="n12345",
+        )
     )
 
+    assert linked == "260417:创建文件默认格式要求 (note: n12345)\n"
 
-def test_parse_memory_document_round_trips_user_and_self_entries() -> None:
+
+def test_parse_memory_document_round_trips_every_line() -> None:
     module = _load_markdown_memory_module()
     text = (
-        "---\n"
-        "id:Ab12Z9\n"
-        "2026/4/17-self：\n"
-        "完成任务必须说明任务总耗时\n\n"
-        "---\n"
-        "id:Cd34Ef\n"
-        "2026/4/17-user：\n"
-        "创建文件默认格式要求\n"
-        "note:n12345\n"
+        "260417:完成任务必须说明任务总耗时\n"
+        "260417:创建文件默认格式要求 (note: n12345)\n"
     )
 
     items = module.parse_memory_document(text)
 
-    assert [item.source for item in items] == ["self", "user"]
-    assert [item.memory_id for item in items] == ["Ab12Z9", "Cd34Ef"]
-    assert items[0].summary == "完成任务必须说明任务总耗时"
-    assert items[1].summary == "创建文件默认格式要求"
+    assert [item.summary for item in items] == ["完成任务必须说明任务总耗时", "创建文件默认格式要求"]
+    assert [item.date_text for item in items] == ["2026/4/17", "2026/4/17"]
+    assert items[0].note_ref == ""
     assert items[1].note_ref == "n12345"
     assert module.format_memory_entry(items[1]) in text
 
 
-def test_parse_memory_document_keeps_legacy_marker_in_the_summary() -> None:
-    """` ref:` inside old text is prose, not a relationship: nothing parses it any more."""
+def test_parse_memory_document_reads_a_ref_token_as_prose() -> None:
+    """`ref:` inside memory text is prose, not a relationship: nothing parses it any more."""
     module = _load_markdown_memory_module()
-    text = (
-        "---\n"
-        "id:Cd34Ef\n"
-        "2026/4/17-user：\n"
-        "创建文件默认格式要求，见 ref:note_a1b2\n"
-    )
+    text = "260417:创建文件默认格式要求，见 ref:note_a1b2\n"
 
     items = module.parse_memory_document(text)
 
@@ -81,12 +75,7 @@ def test_parse_memory_document_keeps_legacy_marker_in_the_summary() -> None:
 
 def test_validate_memory_document_rejects_summary_over_250_chars() -> None:
     module = _load_markdown_memory_module()
-    text = (
-        "---\n"
-        "id:Ab12Z9\n"
-        "2026/4/17-self：\n"
-        f"{'x' * 251}\n"
-    )
+    text = f"260417:{'x' * 251}\n"
 
     with pytest.raises(ValueError, match="summary line exceeds 250 chars"):
         module.validate_memory_document(text, summary_max_chars=250, document_max_chars=20000)
@@ -94,56 +83,18 @@ def test_validate_memory_document_rejects_summary_over_250_chars() -> None:
 
 def test_validate_memory_document_rejects_document_over_20000_chars() -> None:
     module = _load_markdown_memory_module()
-    body = (
-        "---\n"
-        "2026/4/17-self：\n"
-        "短句\n"
-    )
-    oversized = body + ("x" * 20001)
+    oversized = "260417:短句\n" + ("x" * 20001)
 
     with pytest.raises(ValueError, match="memory document exceeds 20000 chars"):
         module.validate_memory_document(oversized, summary_max_chars=250, document_max_chars=20000)
 
 
-def test_v2_memory_entry_requires_id_line_and_formats_four_line_block() -> None:
-    module = _load_markdown_memory_module()
-    entry = module.MemoryEntry(
-        memory_id="Ab12Z9",
-        date_text="2026/4/18",
-        source="user",
-        summary="Prefer concise answers",
-        note_ref="",
-    )
-
-    assert module.format_memory_entry(entry) == (
-        "---\n"
-        "id:Ab12Z9\n"
-        "2026/4/18-user：\n"
-        "Prefer concise answers\n"
-    )
-
-
-def test_v2_parse_memory_document_reads_id_line() -> None:
+def test_validate_memory_document_rejects_the_pre_line_block_shape() -> None:
+    """An unmigrated store fails here; `negi memory reformat` is the only way past it."""
     module = _load_markdown_memory_module()
     text = (
         "---\n"
         "id:Ab12Z9\n"
-        "2026/4/18-user：\n"
-        "Prefer concise answers\n"
-    )
-
-    items = module.parse_memory_document(text)
-
-    assert len(items) == 1
-    assert items[0].memory_id == "Ab12Z9"
-    assert items[0].source == "user"
-    assert items[0].summary == "Prefer concise answers"
-
-
-def test_v2_validate_memory_document_rejects_legacy_blocks_without_id() -> None:
-    module = _load_markdown_memory_module()
-    text = (
-        "---\n"
         "2026/4/18-user：\n"
         "Prefer concise answers\n"
     )
@@ -299,7 +250,7 @@ def _read_jsonl(path: Path) -> list[dict[str, object]]:
     ]
 
 
-def test_memory_repository_generates_six_char_base62_ids(tmp_path: Path) -> None:
+def test_memory_repository_generates_eight_char_base62_ids(tmp_path: Path) -> None:
     module = _load_memory_agent_runtime_module()
     cfg = _memory_cfg()
     manager = module.MemoryManager(tmp_path, cfg)
@@ -316,7 +267,7 @@ def test_memory_repository_generates_six_char_base62_ids(tmp_path: Path) -> None
     finally:
         manager.close()
 
-    assert len(row["memory_id"]) == 6
+    assert len(row["memory_id"]) == 8
     assert row["memory_id"].isalnum()
     assert row["memory_body"] == "Prefer concise answers"
     assert row["minimal_memory"] == "answers->concise"
@@ -445,21 +396,20 @@ def test_memory_snapshot_rebuilds_from_sqlite_rows(tmp_path: Path) -> None:
 
         snapshot = manager.snapshot_text()
         handle = module.note_handle("note_policy")
-        assert f"id:{first['memory_id']}" in snapshot
-        assert "2026/4/25-user" in snapshot
-        assert "Prefer concise answers" in snapshot
+        # No id reaches the reader: the block is addressed by line number instead.
+        assert first["memory_id"] not in snapshot
+        assert second["memory_id"] not in snapshot
+        assert "260425:Prefer concise answers\n" in snapshot
         assert "answers->concise" not in snapshot
-        assert f"id:{second['memory_id']}" in snapshot
-        assert "2026/4/25-self" in snapshot
-        # The column owns the note; what the reader sees is the derived handle, on its own
-        # line, so the stored sentence stays exactly what was written.
-        assert f"replies->checklist\nnote:{handle}" in snapshot
+        # The column owns the note; what the reader sees is the derived handle riding on the
+        # same line, so the stored sentence stays exactly what was written.
+        assert f"260425:replies->checklist (note: {handle})" in snapshot
         assert "ref:note_policy" not in snapshot
         assert "note_policy" not in snapshot
-        rebuilt_entries = module.parse_memory_document(snapshot)
-        rebuilt_second = next(entry for entry in rebuilt_entries if entry.memory_id == second["memory_id"])
-        assert rebuilt_second.summary == "replies->checklist"
-        assert rebuilt_second.note_ref == handle
+        rebuilt = module.parse_memory_document(snapshot)
+        assert [item.summary for item in rebuilt] == ["Prefer concise answers", "replies->checklist"]
+        assert rebuilt[0].date_text == "2026/4/25"
+        assert rebuilt[1].note_ref == handle
     finally:
         manager.close()
 
@@ -511,7 +461,7 @@ def test_memory_snapshot_rebuild_renders_column_ownership(tmp_path: Path) -> Non
             now_iso="2026-04-25T00:05:00+08:00",
             note_ref="note_policy",
         )
-        inert = manager._memory_repo.create_memory(
+        manager._memory_repo.create_memory(
             memory_body="Use headings ref:old_note",
             minimal_memory="answers->headings",
             source="self",
@@ -529,14 +479,14 @@ def test_memory_snapshot_rebuild_renders_column_ownership(tmp_path: Path) -> Non
         manager._rebuild_memory_snapshot_from_sqlite(now_iso="2026-04-25T00:00:00+08:00")
         snapshot = manager.snapshot_text()
         handle = module.note_handle("note_policy")
-        rebuilt = {entry.memory_id: entry for entry in module.parse_memory_document(snapshot)}
+        rebuilt = module.parse_memory_document(snapshot)
 
-        assert rebuilt[linked["memory_id"]].summary == "replies->checklist"
-        assert rebuilt[linked["memory_id"]].note_ref == handle
-        assert f"note:{handle}" in snapshot
+        assert rebuilt[0].summary == "replies->checklist"
+        assert rebuilt[0].note_ref == handle
+        assert f"(note: {handle})" in snapshot
         # Nothing is derived from text any more: ` ref:old_note` stays prose.
-        assert rebuilt[inert["memory_id"]].note_ref == ""
-        assert "ref:old_note" in rebuilt[inert["memory_id"]].summary
+        assert rebuilt[1].note_ref == ""
+        assert "ref:old_note" in rebuilt[1].summary
     finally:
         manager.close()
 
@@ -544,7 +494,7 @@ def test_memory_snapshot_rebuild_renders_column_ownership(tmp_path: Path) -> Non
 def test_memory_snapshot_rebuild_uses_active_document_max_chars(tmp_path: Path) -> None:
     module = _load_memory_agent_runtime_module()
     cfg = _memory_cfg()
-    cfg.document.document_max_chars = 40
+    cfg.document.document_max_chars = 20
     manager = module.MemoryManager(tmp_path, cfg)
 
     try:
@@ -556,7 +506,7 @@ def test_memory_snapshot_rebuild_uses_active_document_max_chars(tmp_path: Path) 
             now_iso="2026-04-25T00:00:00+08:00",
         )
 
-        with pytest.raises(ValueError, match="memory document exceeds 40 chars"):
+        with pytest.raises(ValueError, match="memory document exceeds 20 chars"):
             manager._rebuild_memory_snapshot_from_sqlite(now_iso="2026-04-25T00:00:00+08:00")
     finally:
         manager.close()
@@ -657,8 +607,8 @@ def test_memory_commit_keeps_snapshot_after_sqlite_rebuild(tmp_path: Path) -> No
 
         committed_snapshot = manager.snapshot_text()
 
-        assert "Prefer concise answers" in committed_snapshot
-        assert "id:" in committed_snapshot
+        assert re.fullmatch(r"\d{6}:Prefer concise answers", committed_snapshot.strip())
+        assert "id:" not in committed_snapshot
 
         manager._rebuild_memory_snapshot_from_sqlite(now_iso="2026-04-25T00:00:00+08:00")
 
@@ -731,24 +681,30 @@ def test_trigger_queues_a_consolidation_batch_at_the_head_instead_of_deleting(tm
         assert [row.op for row in queue_rows] == ["consolidate", "write"]
         assert result["consolidation_requested"] is True
         assert result["deleted_by_compression_ids"] == []
-        assert result["compressed_memory_ids"] == []
+        # 第 1 级先把冷行降成摘要，降完仍高于 target 才排到第 2 级归并。
+        assert result["compressed_memory_ids"]
 
-        # Nothing was degraded and nothing was lost: the trigger now only queues work.
+        # Nothing was lost: the ladder only repaints the block, every body stays in the store.
         rows = {row["memory_id"]: row for row in manager._memory_repo.list_memories()}
         assert {user_stated["memory_id"], cold["memory_id"], hotter["memory_id"]} == set(rows)
-        assert all(row["is_compressed"] is False for row in rows.values())
+        assert {row["memory_body"] for row in rows.values()} == {"U" * 70, "C" * 70, "H" * 70}
 
         payload = queue_rows[0].payload_text
         # 用户亲口的行现在与普通行同权进候选：退场只是把正文搬进分类 note，
         # 行不删、`memory_body` 原样留着，随时读得回来。
         assert "U" * 70 in payload
         assert "C" * 70 in payload
-        assert "H" * 70 in payload
-        assert payload.index("U" * 70) < payload.index("C" * 70) < payload.index("H" * 70)
+        # 只有压缩道已经降成摘要的行才会被端上桌：H 靠 refresh_count 排在水池之外，
+        # 本轮既没降级也没被请去归并。
+        assert "H" * 70 not in payload
+        assert payload.index("U" * 70) < payload.index("C" * 70)
+        assert set(result["consolidation_memory_ids"]) == set(result["compressed_memory_ids"])
 
         again = manager._compress_memory_snapshot_if_needed(now_iso="2026-04-25T00:00:01+08:00")
         assert again["consolidation_requested"] is False
-        assert again["consolidation_reason"] == "already_queued"
+        # 一轮只放 70% 的水池：上次没轮到降的那一行这次降了下来，压完已低于 target，
+        # 于是既不重排归并，也不再经过排队那道口。
+        assert again["compressed_memory_ids"]
         assert len(manager._read_queue_requests()) == 2
     finally:
         manager.close()
@@ -766,7 +722,7 @@ def test_processed_history_records_refresh_and_compression_metadata(tmp_path: Pa
             note_refs_written=[],
             memory_chars_after=0,
             document_preview="",
-            adds=[{"content": "Use headings", "minimal_memory": "answers->headings", "decision_source": "self"}],
+            adds=[{"content": "Use headings in every answer", "minimal_memory": "answers->headings", "decision_source": "self"}],
             rewrites=[],
             deletes=[],
             note_upserts={},
@@ -1049,8 +1005,8 @@ def test_memory_commit_replays_effective_deduped_adds(tmp_path: Path) -> None:
         session = module._MemoryToolSession(snapshot_text=manager.snapshot_text(), notes_dir=manager.notes_dir)
         apply_result = session.apply_batch(
             adds=[
-                {"content": "Use headings", "minimal_memory": "answers->headings", "decision_source": "self"},
-                {"content": "Use headings", "minimal_memory": "answers->headings", "decision_source": "self"},
+                {"content": "Use headings in every answer", "minimal_memory": "answers->headings", "decision_source": "self"},
+                {"content": "Use headings in every answer", "minimal_memory": "answers->headings", "decision_source": "self"},
             ]
         )
 
@@ -1104,10 +1060,14 @@ def test_memory_commit_replays_effective_deduped_rewrites(tmp_path: Path) -> Non
             ],
         )
         session = module._MemoryToolSession(snapshot_text=manager.snapshot_text(), notes_dir=manager.notes_dir)
+        # The model points at block lines; the test asks the store which line each row is on.
+        line_first = manager.memory_line_for_id(first["memory_id"])
+        line_second = manager.memory_line_for_id(second["memory_id"])
+        assert {line_first, line_second} == {1, 2}
         apply_result = session.apply_batch(
             rewrites=[
-                {"id": first["memory_id"], "content": "Unified", "minimal_memory": "same->value"},
-                {"id": second["memory_id"], "content": "Unified", "minimal_memory": "same->value"},
+                {"line": line_first, "content": "Unified rule", "minimal_memory": "same->value"},
+                {"line": line_second, "content": "Unified rule", "minimal_memory": "same->value"},
             ]
         )
 
@@ -1158,7 +1118,7 @@ def test_memory_reconcile_never_lets_the_mirror_write_into_sqlite(tmp_path: Path
             )
             conn.commit()
         (tmp_path / "memory" / "MEMORY.md").write_text(
-            f"---\nid:{row['memory_id']}\n2026/4/25-user：\nUpdated snapshot text\n",
+            "260425:Updated snapshot text\n",
             encoding="utf-8",
         )
 
@@ -1184,7 +1144,7 @@ def test_memory_reconcile_never_lets_the_mirror_write_into_sqlite(tmp_path: Path
 
 def test_memory_adopt_document_preserves_metadata_and_existing_body(tmp_path: Path) -> None:
     """The one surviving document -> sqlite direction (legacy import) must still keep
-    counters for matching ids, and must not fold an existing full body away."""
+    counters for the row it matches by text, and must not fold an existing full body away."""
     module = _load_memory_agent_runtime_module()
     manager = module.MemoryManager(tmp_path, _memory_cfg())
 
@@ -1200,10 +1160,9 @@ def test_memory_adopt_document_preserves_metadata_and_existing_body(tmp_path: Pa
         manager._memory_repo.restore_rows(rows_before=manager._memory_repo.list_memories())
 
         manager._memory_repo.replace_all_from_document(
-            document_text=(
-                f"---\nid:{row['memory_id']}\n2026/4/25-user：\nauth->min\n"
-            ),
+            document_text="260425:auth->min\n",
             now_iso="2026-04-25T01:00:00+08:00",
+            source="user",
         )
 
         rows = manager._memory_repo.list_memories()
@@ -1211,6 +1170,57 @@ def test_memory_adopt_document_preserves_metadata_and_existing_body(tmp_path: Pa
         assert rows[0]["memory_body"] == "Authoritative long body"
         assert rows[0]["is_compressed"] is True
         assert rows[0]["from_user"] is True
+    finally:
+        manager.close()
+
+
+def test_reformat_store_folds_multiline_rows_and_the_second_pass_changes_nothing(tmp_path: Path) -> None:
+    """上线要跑的就是这一趟，所以它必须能重跑：第二次一行都不动、投影字节不变。"""
+    module = _load_memory_agent_runtime_module()
+    manager = module.MemoryManager(tmp_path, _memory_cfg())
+
+    try:
+        multiline = manager._memory_repo.create_memory(
+            memory_body="创建文件默认格式要求：\n时间在前\n内容在后",
+            minimal_memory="文件->默认格式",
+            source="user",
+            from_user=True,
+            now_iso="2026-04-25T00:00:00+08:00",
+        )
+        plain = manager._memory_repo.create_memory(
+            memory_body="回信先给结论",
+            minimal_memory="回信->结论",
+            source="self",
+            from_user=False,
+            now_iso="2026-04-25T00:00:01+08:00",
+        )
+        manager._memory_repo.mark_compressed(str(multiline["memory_id"]))
+
+        first = manager.reformat_store(now_iso="2026-04-25T00:00:02+08:00")
+
+        assert first["flattened_rows"] == [multiline["memory_id"]]
+        assert first["resident_rows"] == 2
+        rows = {str(row["memory_id"]): row for row in manager._memory_repo.list_memories()}
+        assert rows[multiline["memory_id"]]["memory_body"] == "创建文件默认格式要求： 时间在前 内容在后"
+        assert rows[multiline["memory_id"]]["is_compressed"] is True, "格式更新不动压缩位"
+        assert rows[plain["memory_id"]]["updated_at"].startswith("2026-04-25"), "没跨行的行完全不被动"
+
+        snapshot = manager.snapshot_text()
+        markdown_module = _load_markdown_memory_module()
+        assert len(snapshot.strip().splitlines()) == 2, "一条记忆一行，正文里的换行不再产出续行"
+        assert f"260425:文件->默认格式" in snapshot, "已降级的行仍按最小摘要渲染"
+        assert "260425:回信先给结论" in snapshot
+        markdown_module.validate_memory_document(
+            snapshot,
+            summary_max_chars=int(manager.config.document.summary_max_chars),
+            document_max_chars=int(manager.config.document.document_max_chars),
+        )
+
+        second = manager.reformat_store(now_iso="2026-04-25T00:00:03+08:00")
+
+        assert second["flattened_rows"] == []
+        assert second["chars_before"] == second["chars_after"]
+        assert manager.snapshot_text() == snapshot
     finally:
         manager.close()
 
@@ -1232,7 +1242,7 @@ def test_memory_agent_delete_batch_rejects_noop_reason_and_points_at_already_sat
     manager = module.MemoryManager(tmp_path, _memory_cfg())
     try:
         session = module._MemoryToolSession(
-            snapshot_text="---\nid:Ab12Z9\n2026/4/25-user：\n人设已替换为新人设\n",
+            snapshot_text="260425:人设已替换为新人设\n",
             notes_dir=tmp_path / "memory" / "notes",
             batch_op="delete",
         )
@@ -1244,9 +1254,9 @@ def test_memory_agent_delete_batch_rejects_noop_reason_and_points_at_already_sat
         assert "already_satisfied" in rejected["errors"]["noop_reason"]
         assert session.apply_batch_count == 0
 
-        staged = apply_tool.invoke({"already_satisfied": "id:Ab12Z9 已是新人设，旧人设不在正文里"})
+        staged = apply_tool.invoke({"already_satisfied": "第 1 行已是新人设，旧人设不在正文里"})
         assert staged["ok"] is True
-        assert session.applied_batch["already_satisfied"].startswith("id:Ab12Z9")
+        assert session.applied_batch["already_satisfied"].startswith("第 1 行")
     finally:
         manager.close()
 
@@ -1256,7 +1266,7 @@ def test_memory_agent_write_batch_rejects_already_satisfied(tmp_path: Path) -> N
     manager = module.MemoryManager(tmp_path, _memory_cfg())
     try:
         session = module._MemoryToolSession(
-            snapshot_text="---\nid:Ab12Z9\n2026/4/25-user：\nPrefer concise answers\n",
+            snapshot_text="260425:Prefer concise answers\n",
             notes_dir=tmp_path / "memory" / "notes",
             batch_op="write",
         )
@@ -1266,7 +1276,7 @@ def test_memory_agent_write_batch_rejects_already_satisfied(tmp_path: Path) -> N
         assert rejected["ok"] is False
         assert rejected["errors"]["already_satisfied"] == "already_satisfied is only valid for delete batches"
 
-        combined = apply_tool.invoke({"deletes": ["Ab12Z9"], "already_satisfied": "目标已不存在"})
+        combined = apply_tool.invoke({"deletes": [1], "already_satisfied": "目标已不存在"})
         assert combined["ok"] is False
         assert "already_satisfied" in combined["errors"]
     finally:
@@ -1306,8 +1316,8 @@ def test_memory_agent_apply_batch_tool_preserves_inspired_ids_in_active_runtime_
         assert "inspired_lines" in apply_tool.args
         result = apply_tool.invoke(
             {
-                "adds": [{"content": "Use headings", "minimal_memory": "answers->headings", "decision_source": "self"}],
-                "inspired_memory_ids": [existing["memory_id"]],
+                "adds": [{"content": "Use headings in every answer", "minimal_memory": "answers->headings", "decision_source": "self"}],
+                "inspired_lines": [manager.memory_line_for_id(existing["memory_id"])],
             }
         )
 
@@ -1323,16 +1333,22 @@ def test_memory_agent_apply_batch_tool_preserves_inspired_ids_in_active_runtime_
         manager.close()
 
 
-def test_memory_agent_apply_batch_accepts_inspired_ids_present_in_snapshot_without_sqlite_row(tmp_path: Path) -> None:
+def test_memory_agent_apply_batch_rejects_inspired_lines_that_are_not_resident(tmp_path: Path) -> None:
+    """Lines are read off sqlite's resident rows, never off the mirror text: a line the
+    store does not have is refused instead of quietly counting as a referenced memory."""
     module = _load_memory_agent_runtime_module()
     cfg = _memory_cfg()
     manager = module.MemoryManager(tmp_path, cfg)
 
     try:
-        (tmp_path / "memory" / "MEMORY.md").write_text(
-            "---\nid:Ab12Z9\n2026/4/25-user：\nPrefer concise answers\n",
-            encoding="utf-8",
+        manager._memory_repo.create_memory(
+            memory_body="Prefer concise answers",
+            minimal_memory="answers->concise",
+            source="user",
+            from_user=True,
+            now_iso="2026-04-25T00:00:00+08:00",
         )
+        manager._rebuild_memory_snapshot_from_sqlite(now_iso="2026-04-25T00:00:00+08:00")
         batch = module.MemoryBatch(
             op="write",
             items=[
@@ -1350,37 +1366,37 @@ def test_memory_agent_apply_batch_accepts_inspired_ids_present_in_snapshot_witho
 
         result = apply_tool.invoke(
             {
-                "adds": [{"content": "Use headings", "minimal_memory": "answers->headings", "decision_source": "self"}],
-                "inspired_memory_ids": ["Ab12Z9"],
+                "adds": [{"content": "Use headings in every answer", "minimal_memory": "answers->headings", "decision_source": "self"}],
+                "inspired_lines": [2],
             }
         )
 
         assert result["ok"] is True
-        session.confirm_batch()  # the model's second call: a mutating batch lands only after it reads the preview
-        validated = manager._build_validated_write_from_apply_batch(
-            before_text=manager.snapshot_text(),
-            session=session,
-            batch=batch,
-        )
-        assert validated.inspired_memory_ids == ["Ab12Z9"]
+        session.confirm_batch()
+        with pytest.raises(module._MemoryAgentValidationError, match=r"inspired_lines\[0\]: line 2 is outside"):
+            manager._build_validated_write_from_apply_batch(
+                before_text=manager.snapshot_text(),
+                session=session,
+                batch=batch,
+            )
     finally:
         manager.close()
 
 
-def test_memory_agent_apply_batch_rejects_non_list_inspired_ids_at_staging(tmp_path: Path) -> None:
+def test_memory_agent_apply_batch_rejects_non_list_inspired_lines_at_staging(tmp_path: Path) -> None:
     module = _load_memory_agent_runtime_module()
     session = module._MemoryToolSession(snapshot_text="", notes_dir=tmp_path / "memory" / "notes")
 
     result = session.apply_batch(
-        adds=[{"content": "Use headings", "minimal_memory": "answers->headings", "decision_source": "self"}],
-        inspired_lines="Ab12Z9",
+        adds=[{"content": "Use headings in every answer", "minimal_memory": "answers->headings", "decision_source": "self"}],
+        inspired_lines="3",
     )
 
     assert result["ok"] is False
-    assert result["errors"]["inspired_memory_ids"] == "inspired_memory_ids must be a list"
+    assert result["errors"]["inspired_lines"] == "inspired_lines must be a list"
 
 
-def test_memory_agent_apply_batch_requires_minimal_memory_and_tracks_inspired_ids(
+def test_memory_agent_apply_batch_requires_minimal_memory_and_tracks_inspired_lines(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1412,7 +1428,7 @@ def test_memory_agent_apply_batch_requires_minimal_memory_and_tracks_inspired_id
         )
         session = module._MemoryToolSession(snapshot_text=manager.snapshot_text(), notes_dir=manager.notes_dir)
         result = session.apply_batch(
-            adds=[{"content": "Use headings", "minimal_memory": "answers->headings", "decision_source": "self"}],
+            adds=[{"content": "Use headings in every answer", "minimal_memory": "answers->headings", "decision_source": "self"}],
             inspired_lines=[manager.memory_line_for_id(str(existing["memory_id"]))],
         )
 
@@ -1429,7 +1445,7 @@ def test_memory_agent_apply_batch_requires_minimal_memory_and_tracks_inspired_id
         manager.close()
 
 
-def test_memory_agent_apply_batch_rejects_non_list_inspired_ids_at_validation(tmp_path: Path) -> None:
+def test_memory_agent_apply_batch_rejects_non_list_inspired_lines_at_validation(tmp_path: Path) -> None:
     module = _load_memory_agent_runtime_module()
     cfg = _memory_cfg()
     manager = module.MemoryManager(tmp_path, cfg)
@@ -1450,15 +1466,15 @@ def test_memory_agent_apply_batch_rejects_non_list_inspired_ids_at_validation(tm
         session = module._MemoryToolSession(snapshot_text=manager.snapshot_text(), notes_dir=manager.notes_dir)
         session.apply_batch_count = 1
         session.applied_batch = {
-            "adds": [{"content": "Use headings", "minimal_memory": "answers->headings", "decision_source": "self"}],
+            "adds": [{"content": "Use headings in every answer", "minimal_memory": "answers->headings", "decision_source": "self"}],
             "rewrites": [],
             "deletes": [],
             "note_upserts": {},
-            "inspired_memory_ids": "Ab12Z9",
+            "inspired_lines": "3",
             "noop_reason": "",
         }
 
-        with pytest.raises(ValueError, match="inspired_memory_ids must be a list"):
+        with pytest.raises(ValueError, match="inspired_lines must be a list"):
             session.confirm_batch()  # the model's second call: a mutating batch lands only after it reads the preview
             manager._build_validated_write_from_apply_batch(
                 before_text=manager.snapshot_text(),
@@ -1557,11 +1573,17 @@ def test_memory_agent_apply_batch_links_note_through_explicit_note_ref(
     manager = module.MemoryManager(tmp_path, cfg)
 
     try:
+        rewrite_line = 0
         if mode == "rewrite":
-            (tmp_path / "memory" / "MEMORY.md").write_text(
-                "---\nid:Ab12Z9\n2026/4/25-self：\nUse checklist replies\n",
-                encoding="utf-8",
+            existing = manager._memory_repo.create_memory(
+                memory_body="Use checklist replies",
+                minimal_memory="replies->old",
+                source="self",
+                from_user=False,
+                now_iso="2026-04-25T00:00:00+08:00",
             )
+            manager._rebuild_memory_snapshot_from_sqlite(now_iso="2026-04-25T00:00:00+08:00")
+            rewrite_line = manager.memory_line_for_id(str(existing["memory_id"]))
 
         batch = module.MemoryBatch(
             op="write",
@@ -1588,7 +1610,7 @@ def test_memory_agent_apply_batch_links_note_through_explicit_note_ref(
             item["decision_source"] = "self"
             apply_kwargs["adds"] = [dict(item)]
         else:
-            item["id"] = "Ab12Z9"
+            item["line"] = rewrite_line
             apply_kwargs["rewrites"] = [dict(item)]
 
         result = session.apply_batch(**apply_kwargs)
@@ -1601,7 +1623,7 @@ def test_memory_agent_apply_batch_links_note_through_explicit_note_ref(
             batch=batch,
         )
         handle = module.note_handle("note_new")
-        assert f"note:{handle}" in validated.document_text
+        assert f"(note: {handle})" in validated.document_text
         # The real note name never reaches the resident block: readers get the handle.
         assert "note_new" not in validated.document_text
         parsed_entries = module.parse_memory_document(validated.document_text)
@@ -1640,7 +1662,7 @@ def test_memory_agent_apply_batch_rejects_note_ref_written_into_memory_text(
         )
         session = module._MemoryToolSession(snapshot_text=manager.snapshot_text(), notes_dir=manager.notes_dir)
         item = {
-            "content": "Use headings",
+            "content": "Use headings in every answer",
             "minimal_memory": "answers->headings",
             "decision_source": "self",
         }
@@ -2721,7 +2743,7 @@ async def test_run_due_batch_once_records_successful_processed_batch_with_usage_
                                 "adds": [
                                     {
                                         "content": "创建文件默认格式要求",
-                                        "minimal_memory": "files->default-format",
+                                        "minimal_memory": "文件->默认格式",
                                         "decision_source": "user",
                                         "note_ref": "note_policy",
                                     }
@@ -2755,9 +2777,10 @@ async def test_run_due_batch_once_records_successful_processed_batch_with_usage_
         assert report["ok"] is True
         assert report["status"] == "applied"
         assert report["attempt_count"] == 1
-        assert "id:" in manager.snapshot_text()
-        assert "2026/4/17-user：" in manager.snapshot_text()
-        assert f"note:{module.note_handle('note_policy')}" in manager.snapshot_text()
+        # 一行一条：日期由后端拼，note 句柄挂在同一行末尾，块里没有 id 也没有来源标记。
+        assert manager.snapshot_text().strip() == (
+            f"260417:创建文件默认格式要求 (note: {module.note_handle('note_policy')})"
+        )
         assert (tmp_path / "memory" / "notes" / "note_policy.md").exists()
         assert (tmp_path / "memory" / "queue.jsonl").read_text(encoding="utf-8").strip() == ""
         assert len(processed) == 1
@@ -2804,7 +2827,7 @@ async def test_run_due_batch_once_records_rewrite_write_mode_for_processed_batch
                             "args": {
                                 "rewrites": [
                                     {
-                                        "id": "Ab12Z9",
+                                        "line": 1,
                                         "content": "创建 Markdown 文档时，要使用时间-内容格式命名，不要默认添加 [G3KU]-时间-前缀。",
                                         "minimal_memory": "markdown-docs->time-content-naming",
                                     }
@@ -2838,7 +2861,8 @@ async def test_run_due_batch_once_records_rewrite_write_mode_for_processed_batch
         assert processed[0]["op"] == "write"
         assert processed[0]["write_mode"] == "rewrite"
         assert processed[0]["request_ids"] == ["write_rewrite_1"]
-        assert "id:Ab12Z9" in manager.snapshot_text()
+        assert manager.snapshot_text().startswith("260417:创建 Markdown 文档时，要使用时间-内容格式命名")
+        assert "id:" not in manager.snapshot_text()
         assert "时间-内容格式命名" in manager.snapshot_text()
         assert "[G3KU]-时间-" in manager.snapshot_text()
     finally:
@@ -2851,20 +2875,12 @@ async def test_run_due_batch_once_records_change_preview_for_processed_rewrite_b
     monkeypatch,
 ) -> None:
     module = _load_memory_agent_runtime_module()
-    markdown_module = _load_markdown_memory_module()
     manager = module.MemoryManager(tmp_path, _memory_cfg())
     try:
-        (tmp_path / "memory" / "MEMORY.md").write_text(
-            markdown_module.format_memory_entry(
-                markdown_module.MemoryEntry(
-                    memory_id="Ab12Z9",
-                    date_text="2026/4/16",
-                    source="user",
-                    summary="Use [G3KU]-time-prefix for Markdown files.",
-                    note_ref="",
-                )
-            ),
-            encoding="utf-8",
+        _seed_store(
+            manager,
+            [("Ab12Z9", "Use [G3KU]-time-prefix for Markdown files.", "命名->时间前缀", "user")],
+            now_iso="2026-04-16T09:00:00+08:00",
         )
         await manager._append_queue_request(
             module.MemoryQueueRequest(
@@ -2885,7 +2901,7 @@ async def test_run_due_batch_once_records_change_preview_for_processed_rewrite_b
                             "args": {
                                 "rewrites": [
                                     {
-                                        "id": "Ab12Z9",
+                                        "line": 1,
                                         "content": "Use time-content naming for Markdown files.",
                                         "minimal_memory": "markdown-docs->time-content-naming",
                                     }
@@ -3027,10 +3043,7 @@ async def test_run_due_batch_once_applies_delete_batch_via_memory_agent(
     module = _load_memory_agent_runtime_module()
     manager = module.MemoryManager(tmp_path, _memory_cfg())
     try:
-        (tmp_path / "memory" / "MEMORY.md").write_text(
-            "---\nid:Ab12Z9\n2026/4/17-self：\n完成任务必须说明任务总耗时\n",
-            encoding="utf-8",
-        )
+        _seed_store(manager, [("Ab12Z9", "完成任务必须说明任务总耗时", "报告->总耗时", "self")])
         fake_model = _FakeToolCallingModel(
             [
                 _fake_response(
@@ -3038,7 +3051,7 @@ async def test_run_due_batch_once_applies_delete_batch_via_memory_agent(
                         {
                             "id": "call-1",
                             "name": "memory_apply_batch",
-                            "args": {"deletes": ["Ab12Z9"]},
+                            "args": {"deletes": [1]},
                         }
                     ],
                     usage={"input_tokens": 4, "output_tokens": 1, "cache_read_tokens": 0},
@@ -3050,7 +3063,7 @@ async def test_run_due_batch_once_applies_delete_batch_via_memory_agent(
             module.MemoryQueueRequest(
                 op="delete",
                 decision_source="self",
-                payload_text="Ab12Z9",
+                payload_text="完成任务必须说明任务总耗时 这条已经不需要了",
                 created_at="2026-04-17T10:00:05+08:00",
                 request_id="delete_1",
             )
@@ -3096,7 +3109,7 @@ async def test_run_due_batch_once_delete_only_removes_visible_snapshot_items(
             module.MemoryQueueRequest(
                 op="delete",
                 decision_source="self",
-                payload_text="Ab12Z9",
+                payload_text="Report total elapsed time 这条已经不需要了",
                 created_at="2026-04-17T10:00:05+08:00",
                 request_id="delete_1",
             )
@@ -3108,7 +3121,7 @@ async def test_run_due_batch_once_delete_only_removes_visible_snapshot_items(
                         {
                             "id": "call-1",
                             "name": "memory_apply_batch",
-                            "args": {"deletes": ["Ab12Z9"]},
+                            "args": {"deletes": [1]},
                         }
                     ],
                     usage={"input_tokens": 4, "output_tokens": 1, "cache_read_tokens": 0},
@@ -3142,15 +3155,12 @@ async def test_run_due_batch_once_repairs_delete_batch_that_keeps_non_snapshot_b
     module = _load_memory_agent_runtime_module()
     manager = module.MemoryManager(tmp_path, _memory_cfg())
     try:
-        (tmp_path / "memory" / "MEMORY.md").write_text(
-            "---\nid:Ab12Z9\n2026/4/17-self：\nReport total elapsed time\n",
-            encoding="utf-8",
-        )
+        _seed_store(manager, [("Ab12Z9", "Report total elapsed time", "报告->总耗时", "self")])
         await manager._append_queue_request(
             module.MemoryQueueRequest(
                 op="delete",
                 decision_source="self",
-                payload_text="Ab12Z9",
+                payload_text="Report total elapsed time 这条已经不需要了",
                 created_at="2026-04-17T10:00:05+08:00",
                 request_id="delete_1",
             )
@@ -3166,7 +3176,7 @@ async def test_run_due_batch_once_repairs_delete_batch_that_keeps_non_snapshot_b
                                 "adds": [
                                     {
                                         "content": "Invented replacement block",
-                                        "minimal_memory": "repair->invented-replacement",
+                                        "minimal_memory": "repair->invented",
                                         "decision_source": "self",
                                     }
                                 ]
@@ -3181,7 +3191,7 @@ async def test_run_due_batch_once_repairs_delete_batch_that_keeps_non_snapshot_b
                         {
                             "id": "call-2",
                             "name": "memory_apply_batch",
-                            "args": {"deletes": ["Ab12Z9"]},
+                            "args": {"deletes": [1]},
                         }
                     ],
                     usage={"input_tokens": 5, "output_tokens": 1, "cache_read_tokens": 0},
@@ -3219,10 +3229,8 @@ async def test_run_due_batch_once_cleans_up_orphan_notes_after_commit(
     module = _load_memory_agent_runtime_module()
     manager = module.MemoryManager(tmp_path, _memory_cfg())
     try:
-        (tmp_path / "memory" / "MEMORY.md").write_text(
-            "---\nid:Ab12Z9\n2026/4/17-user：\nDetailed workflow, see ref:orphan_note\n",
-            encoding="utf-8",
-        )
+        # 归属住在 note_ref 列里：行删掉，列就没人再引用这份 note，收尾的孤儿清扫才动手。
+        _seed_store(manager, [("Ab12Z9", "Detailed workflow", "workflow->detail", "user", "orphan_note")])
         orphan_note = tmp_path / "memory" / "notes" / "orphan_note.md"
         orphan_note.parent.mkdir(parents=True, exist_ok=True)
         orphan_note.write_text("Old note body\n", encoding="utf-8")
@@ -3250,7 +3258,7 @@ async def test_run_due_batch_once_cleans_up_orphan_notes_after_commit(
                                         "decision_source": "user",
                                     }
                                 ],
-                                "deletes": ["Ab12Z9"],
+                                "deletes": [1],
                             },
                         }
                     ],
@@ -3272,7 +3280,7 @@ async def test_run_due_batch_once_cleans_up_orphan_notes_after_commit(
 
         assert report["ok"] is True
         assert "Prefer concise answers" in manager.snapshot_text()
-        assert "id:" in manager.snapshot_text()
+        assert "Detailed workflow" not in manager.snapshot_text()
         assert not orphan_note.exists()
     finally:
         manager.close()
@@ -3337,13 +3345,13 @@ async def test_run_due_batch_once_preserves_note_ref_present_only_in_minimal_mem
         assert report["ok"] is True
         assert report["status"] == "applied"
         assert note_path.exists()
-        assert f"note:{module.note_handle('note_policy')}" in manager.snapshot_text()
+        assert f"(note: {module.note_handle('note_policy')})" in manager.snapshot_text()
 
         manager.close()
         reopened = module.MemoryManager(tmp_path, _memory_cfg())
         try:
             assert note_path.exists()
-            assert f"note:{module.note_handle('note_policy')}" in reopened.snapshot_text()
+            assert f"(note: {module.note_handle('note_policy')})" in reopened.snapshot_text()
         finally:
             reopened.close()
         manager = None
@@ -3395,7 +3403,7 @@ async def test_run_due_batch_once_moves_note_link_and_reaps_the_dropped_note(
         else:
             args["rewrites"] = [
                 {
-                    "id": "Ab12Z9",
+                    "line": 1,
                     "content": "Use checklist replies",
                     "minimal_memory": "replies->checklist",
                     "note_ref": "note_new",
@@ -3430,7 +3438,7 @@ async def test_run_due_batch_once_moves_note_link_and_reaps_the_dropped_note(
 
         assert report["ok"] is True
         assert report["status"] == "applied"
-        assert f"note:{module.note_handle('note_new')}" in manager.snapshot_text()
+        assert f"(note: {module.note_handle('note_new')})" in manager.snapshot_text()
         assert module.note_handle("old_note") not in manager.snapshot_text()
         assert note_new_path.exists()
         assert not old_note_path.exists()
@@ -3439,7 +3447,7 @@ async def test_run_due_batch_once_moves_note_link_and_reaps_the_dropped_note(
 
 
 @pytest.mark.asyncio
-async def test_run_due_batch_once_accepts_inspired_ids_from_current_snapshot(tmp_path: Path, monkeypatch) -> None:
+async def test_run_due_batch_once_accepts_inspired_lines_from_the_resident_block(tmp_path: Path, monkeypatch) -> None:
     module = _load_memory_agent_runtime_module()
     manager = module.MemoryManager(tmp_path, _memory_cfg())
     try:
@@ -3464,12 +3472,12 @@ async def test_run_due_batch_once_accepts_inspired_ids_from_current_snapshot(tmp
                             "args": {
                                 "adds": [
                                     {
-                                        "content": "Use headings",
+                                        "content": "Use headings in every answer",
                                         "minimal_memory": "answers->headings",
                                         "decision_source": "self",
                                     }
                                 ],
-                                "inspired_memory_ids": ["Ab12Z9"],
+                                "inspired_lines": [1],
                             },
                         }
                     ],

@@ -123,6 +123,8 @@ def _stage_attempt(manager, monkeypatch, *, payload=None, raises=None):
         session = _session(manager)
         session.applied_batch = dict(payload or {})
         session.apply_batch_count = 1
+        # 真实车道里模型读完预览才会提交；这一层替它把确认记上，故障档才测得到故障本身。
+        session.confirm_count = 1
         return mod._MemoryAttemptResult(
             session=session,
             usage={"input_tokens": 5, "output_tokens": 7, "cache_read_tokens": 0},
@@ -198,6 +200,8 @@ def test_a_summary_shape_fault_names_the_summary_field(tmp_path: Path) -> None:
             ]
         }
         session.apply_batch_count = 1
+        # 确认门在提交侧先亮，这条用例把它当作既成前提：要测的是打回文案点名的字段。
+        session.confirm_count = 1
 
         with pytest.raises(mod._MemoryAgentValidationError) as caught:
             manager._validate_candidate_state(batch=_batch(manager), before_text=manager.snapshot_text(), session=session)

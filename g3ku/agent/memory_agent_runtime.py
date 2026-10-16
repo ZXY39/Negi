@@ -3295,7 +3295,8 @@ class MemoryManager:
             "提交要求：\n"
             "- 只允许使用一次 memory_consolidation_apply 完成所有归并。\n"
             "- note_writes 每条必须给 note_ref，并按整体新建（body）或局部改（edits）二选一。\n"
-            "- retirements 每条必须给出 memory_id 和落进的 note_ref，且 memory_id 只能是上面「待归并记忆」列出的那些。\n"
+            "- retirements 每条必须给出 line（这条记忆在「待归并记忆」里的编号）和落进的 note_ref，"
+            "编号只能取上面列出的那些。\n"
             "- 找不到分类的记忆不要退场；全都没有去处时单独提交 no_consolidation_reason。\n"
             f"{repair_block}"
         )
@@ -3841,19 +3842,6 @@ class MemoryManager:
         )
         if already_retired:
             raise _MemoryAgentValidationError(f"memories already consolidated: {', '.join(already_retired)}")
-
-        # An empty candidate set (a legacy row without the stored list) keeps the older
-        # behaviour of letting any row be retired; every new consolidate row carries it.
-        if offered:
-            out_of_scope = sorted(
-                str(item.get("memory_id") or "").strip()
-                for item in retirements
-                if str(item.get("memory_id") or "").strip() not in set(offered)
-            )
-            if out_of_scope:
-                raise _MemoryAgentValidationError(
-                    f"memories not offered to this consolidation batch: {', '.join(out_of_scope)}"
-                )
 
         entries_text = self._document_text_from_sqlite_rows(self._memory_repo.list_memories())
         block_text = self._consolidation_block_text()
@@ -5642,8 +5630,9 @@ class MemoryManager:
             "- adds 条目必须包含 content、minimal_memory 和 decision_source。\n"
             "- content 写法按来源分：decision_source=user 写成陈述句（用户偏好什么、某对象是什么），"
             "不要写成给自己的命令；decision_source=self 写成条件+要求（当……时，要……）。\n"
-            "- rewrites 条目必须包含 id、content 和 minimal_memory；系统会保留原 source 并刷新日期。\n"
-            "- delete 请求要解析成精确的记忆 id，并把这些 id 放进 deletes。\n"
+            "- rewrites 条目必须包含 line（这条记忆在当前正文里的行号，从 1 数起）、content 和 minimal_memory；"
+            "系统保留原来源并维护该行的日期。\n"
+            "- delete 请求要解析成当前正文里的行号，并把这些行号放进 deletes。\n"
             "- delete 批次没有零变更出口：目标内容已不在当前正文里（已被改写或被更早的批次删掉）时，"
             "单独提交 already_satisfied 说明已满足，不要提交 noop_reason。\n"
             "- note_upserts 只写需要新增或整体重写的 note，新建的名字必须以 `note_` 开头。\n"
@@ -5651,7 +5640,7 @@ class MemoryManager:
             "new_text 留空即删掉这段。改一两个段落用 note_edits，不要用 note_upserts 重交整份。\n"
             "- 归并区列出的分类 note 也可以这样改（内容错误或过时时）；不要新建分类 note，"
             "也不要让记忆从归并区退场，退场只由归并环节做。\n"
-            "- inspired_memory_ids 可选，用于列出当前完整 snapshot 里对本批判断有实质帮助的 memory id。\n"
+            "- inspired_lines 可选，填当前正文里对本批判断有实质帮助的行号。\n"
             "- minimal_memory 写成 `条件->要求关键词`。\n"
             "- 一条记忆要挂 note 时，在 adds/rewrites 条目里给 `note_ref`（note 文件名，不带 .md）；"
             "正文里写 `ref:` 或 `见noteid:` 不再建立关系，会被打回。\n"

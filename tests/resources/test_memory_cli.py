@@ -108,6 +108,36 @@ def test_memory_flush_command_calls_manager_run_due_batch_once(monkeypatch, tmp_
     assert any('"processed": 2' in message.lower() for message in console.messages)
 
 
+def test_memory_reformat_command_prints_the_manager_report(monkeypatch, tmp_path: Path) -> None:
+    memory_cli = _memory_cli_module()
+
+    calls: dict[str, object] = {}
+
+    class _StubManager:
+        def reformat_store(self) -> dict[str, object]:
+            calls["reformat"] = True
+            return {"ok": True, "flattened_rows": ["Ab12Cd34"], "chars_before": 300, "chars_after": 262, "resident_rows": 4}
+
+        def close(self) -> None:
+            return None
+
+    monkeypatch.setattr(memory_cli.config_loader, "load_config", lambda: SimpleNamespace(workspace_path=tmp_path))
+    monkeypatch.setattr(memory_cli, "load_tool_settings_from_manifest", lambda *args, **kwargs: SimpleNamespace(enabled=True))
+    monkeypatch.setattr(memory_cli.memory_agent_runtime, "MemoryManager", lambda workspace, cfg: _StubManager())
+
+    console = _ConsoleStub()
+    app = memory_cli.build_memory_app(console)
+    runner = CliRunner()
+
+    result = runner.invoke(app, ["reformat"])
+
+    assert result.exit_code == 0
+    assert calls == {"reformat": True}
+    report = json.loads(console.messages[-1])
+    assert report["flattened_rows"] == ["Ab12Cd34"], "操作员要能数出这一趟动了几行"
+    assert report["chars_before"] != report["chars_after"]
+
+
 def test_memory_doctor_reports_invalid_document_missing_refs_orphans_and_stuck_head(
     monkeypatch,
     tmp_path: Path,

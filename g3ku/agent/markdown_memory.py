@@ -7,9 +7,6 @@ import re
 _ENTRY_LINE_RE = re.compile(
     r"^(?P<date>\d{6}):(?P<body>.+?)(?:\s\(note:\s(?P<handle>[A-Za-z0-9_-]{1,80})\))?$"
 )
-_HEADER_RE = re.compile(r"^\d{4}/\d{1,2}/\d{1,2}-(?:self|user)$")
-NOTE_LINE_PREFIX = "note:"
-_NOTE_LINE_RE = re.compile(r"^note:(?P<handle>[A-Za-z0-9_-]{1,80})$")
 
 
 ORDINARY_HANDLE_PREFIX = "n"

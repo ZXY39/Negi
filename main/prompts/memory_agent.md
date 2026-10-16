@@ -53,7 +53,7 @@
     2. `deletes` 旧记忆后再 `add` 新记忆
 - `rewrites?: Array<{ line: number, content: string, minimal_memory: string, note_ref?: string }>`
   - 用于改写已有记忆
-  - `line` 是这条记忆在当前正文里的行号（从 1 开始）；行号超出正文行数会被单独打回，其余变更照常
+  - `line` 是这条记忆在当前正文里的行号（从 1 开始）；行号超出正文行数时整批按字段错误打回（写明哪一条、越界到哪），改正后在同一批重交即可
   - 系统保留这条记忆的 id 与 source，并按内容是否真的变了刷新它的日期；**不要在 `content` 里写日期**
   - `note_ref` 不给就沿用这条记忆原有的 note；要换挂才写新名字
   - 当候选与旧记忆同槽位但新表述更准确、更规范、更完整时，优先使用 rewrite

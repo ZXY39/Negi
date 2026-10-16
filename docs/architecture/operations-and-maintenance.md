@@ -111,7 +111,7 @@
 当前 `negi status` 的记忆区块应按 queued Markdown runtime 理解：
 
 - 它会显示 `Memory Notebook`、`Memory Notes Dir`、`Memory Queue`、`Memory Ops Log`
-- `negi status` 的 `Memory Notebook` 一行只说明笔记文件在不在，不是长期记忆健康指标；健康判断走 `negi memory`，它的命令面是 `current` / `queue` / `flush` / `uncompress` / `doctor` / `reconcile-notes` / `import-legacy` / `cleanup-legacy`
+- `negi status` 的 `Memory Notebook` 一行只说明笔记文件在不在，不是长期记忆健康指标；健康判断走 `negi memory`，它的命令面是 `current` / `queue` / `flush` / `uncompress` / `doctor` / `reconcile-notes` / `reformat` / `import-legacy` / `cleanup-legacy`
 
 ## 3. 关键状态文件与目录
 
@@ -661,10 +661,11 @@ The memory CLI keeps only the queued Markdown runtime operator surface:
 - `negi memory uncompress <memory-id>` (`--all` warms every downgraded row)
 - `negi memory doctor`
 - `negi memory reconcile-notes`
+- `negi memory reformat`
 - `negi memory import-legacy <path>`
 - `negi memory cleanup-legacy`
 
-The active memory operator surface is `negi memory` with `current` / `queue` / `flush` / `uncompress` / `doctor` / `reconcile-notes` / `import-legacy` / `cleanup-legacy`; there is no reset subcommand, and legacy-only commands (runtime stats/trace/explain, decay, pending-fact review) are not part of the operator contract.
+The active memory operator surface is `negi memory` with `current` / `queue` / `flush` / `uncompress` / `doctor` / `reconcile-notes` / `reformat` / `import-legacy` / `cleanup-legacy`; there is no reset subcommand, and legacy-only commands (runtime stats/trace/explain, decay, pending-fact review) are not part of the operator contract.
 
 `negi memory uncompress` is the only way to undo a capacity downgrade: the runtime never re-promotes a row on its own, because automatic warming would cancel the decision the ladder just made and oscillate against the trigger line. Warming puts characters **back** into the resident block, so it goes through the same hard-cap validation as any other write and rolls the row back whole when the document would not fit - the report carries `resident_chars_after` next to the trigger line and the cap, which is how much headroom the action consumed.
 
@@ -674,6 +675,8 @@ The operator-oriented maintenance commands beyond `current`, `queue`, and `flush
   Read-only health check for the queued Markdown memory layout.
 - `negi memory reconcile-notes`
   Explicit note-ref reconciliation for `MEMORY.md` and `memory/notes/`.
+- `negi memory reformat`
+  The one pass that moves an existing store onto the current on-disk shape. It flattens any memory row whose stored text spans several lines (a multi-line row has no one-line rendering, so the block would silently drop it), then repaints `MEMORY.md` from SQLite. Stored ids keep the length they were created with - the block prints none, so lengthening them moves nothing a reader sees. The report carries `flattened_rows`, `chars_before` / `chars_after` and `resident_rows`, which is how an operator confirms the pass actually did something.
 - `negi memory import-legacy <path>`
   Minimal one-shot importer for legacy memory exports.
 
@@ -687,9 +690,10 @@ Use them with these boundaries in mind:
 Recommended operator order:
 
 1. Run `negi memory doctor` first.
-2. If the only issues are missing note files or orphan notes, use `negi memory reconcile-notes`.
-3. If the notebook is empty and you are doing a controlled migration, run `negi memory import-legacy <path>` once without `--apply`, inspect the summary, then rerun with `--apply`.
-4. After migration is complete and `MEMORY.md` is already authoritative, run `negi memory cleanup-legacy` once in dry-run mode, review the paths, then rerun with `--apply` to remove leftovers.
+2. When the store is readable but its document does not parse into the current one-line shape, run `negi memory reformat` once and read `flattened_rows` / `chars_after` back.
+3. If the only issues are missing note files or orphan notes, use `negi memory reconcile-notes`.
+4. If the notebook is empty and you are doing a controlled migration, run `negi memory import-legacy <path>` once without `--apply`, inspect the summary, then rerun with `--apply`.
+5. After migration is complete and `MEMORY.md` is already authoritative, run `negi memory cleanup-legacy` once in dry-run mode, review the paths, then rerun with `--apply` to remove leftovers.
 
 Queue-head recovery caveats that matter during operations:
 
