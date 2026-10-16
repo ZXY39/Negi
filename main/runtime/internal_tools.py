@@ -498,8 +498,9 @@ class SpawnChildNodesTool(Tool):
                 'requires_acceptance': {
                     'type': 'boolean',
                     'description': (
-                        'Whether this child should get a follow-up acceptance node. Use true only when the child scope is broad, costly to get wrong, '
-                        'or needs a consistency pass before the parent can trust it. The acceptance node is activated only after this child pipeline '
+                        'Whether this child gets a follow-up acceptance node. Set true when the child output is reused upstream '
+                        '(aggregation, the parent answer, a required deliverable), writes or rewrites files, carries count/scope '
+                        'thresholds, or spans multiple artifacts or directories. The acceptance node is activated only after this child pipeline '
                         'is terminal — this is the correct way to gate acceptance for a single child; do not spawn a sibling acceptance node in the '
                         'same batch for it.'
                     ),

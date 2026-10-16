@@ -14264,7 +14264,9 @@ def test_spawn_review_prompt_states_parsed_structure_and_merge_template() -> Non
     execution_prompt = load_prompt("node_execution.md")
 
     assert "这就是结构上独立的验收节点" in execution_prompt
-    assert "默认开启这条验收闭环" in execution_prompt
+    assert "验收闭环按候选逐条判定" in execution_prompt
+    assert "这两种情况不要带验收" in execution_prompt
+    assert "把判据一次列全" in execution_prompt
 
 
 @pytest.mark.asyncio
