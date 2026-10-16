@@ -19,6 +19,7 @@ from typing import Any
 
 from loguru import logger
 
+from g3ku.bus.events import OutboundMessage
 from g3ku.config.live_runtime import get_runtime_config
 from g3ku.runtime.session_keys import build_external_session_key, normalize_bridge_id
 from g3ku.utils.helpers import ensure_dir
@@ -262,3 +263,39 @@ def reset_external_session_registry() -> None:
     global _REGISTRY
     with _REGISTRY_LOCK:
         _REGISTRY = None
+
+
+async def publish_channel_notice(
+    bus: Any,
+    session_key: str,
+    text: str,
+    *,
+    source: str,
+) -> bool:
+    """Put one runtime-originated notice on the external channel outbound lane.
+
+    The shared web-shell drain is the only consumer of ``channel="ext"``: it
+    sanitizes the text, registers it in the durable outbox and publishes
+    ``outbound.created`` on that session's event hub, so anything sent through
+    here inherits a turn reply's delivery contract (ledger, dedup id, ack,
+    reconnect replay) instead of becoming an in-memory event.
+
+    Returns True only when the message was handed to the bus. No channel other
+    than ``ext:`` sessions has a delivery path, so non-external sessions and a
+    missing bus are a silent no-op by contract, not a failure.
+    """
+    if bus is None:
+        return False
+    key = str(session_key or "").strip()
+    body = str(text or "").strip()
+    if not key or not body:
+        return False
+    await bus.publish_outbound(
+        OutboundMessage(
+            channel=EXTERNAL_OUTBOUND_CHANNEL,
+            chat_id=key,
+            content=body,
+            metadata={"source": str(source or "").strip(), "session_key": key},
+        )
+    )
+    return True

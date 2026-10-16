@@ -87,7 +87,7 @@ Start here when you are new to the repository or when a change crosses subsystem
 - 裁撤后阶段块里没有 `## 保留契约` 段、或 `keep_tools` 点了名字却没留住 → 先确认同批带了 `drop_completed_stage_tool_detail=true` 与 `completed_stage_summary`（不带 drop 时 `keep_*` 按参数非法/忽略处理），再看该名字是否属于本阶段真的加载过的目标集；提取失败不写条目，回执会点名，机制见 `tool-hydration-and-callable-chain.md`「阶段门控与 callable 收紧」
 - 第三方桥接应用接入（/api/v1 鉴权、外部会话、事件流、主动推送不到达）→ `external-agent-api.md`「常见排障入口」
 - 外部 agent 看不见全部会话、或要把某个 token 的可见范围收回去 → `external-agent-api.md`「启用与鉴权」的跨桥作用域一档
-- 会话转录/Web UI 有回复但渠道端（QQ 等）收不到、渠道「能收不能发」、重启后旧提醒补投或重复 → `external-agent-api.md`「出站路由（主动推送）」+「持久 outbox」+「内置官方 QQ 适配器」
+- 会话转录/Web UI 有回复但渠道端（QQ 等）收不到、回合跑坏了渠道端静默、渠道「能收不能发」、重启后旧提醒补投或重复 → `external-agent-api.md`「回合契约」终态不变量 +「出站路由（主动推送）」+「持久 outbox」+「内置官方 QQ 适配器」
 - 渠道端只收到文件签名链接、模型回复里引用的图片/文件没有作为媒体消息送达 → `external-agent-api.md`「事件流」出站附件契约 +「内置官方 QQ 适配器」
 - 桥接端 `reply.final` 的 `usage` 缺失或数值不像本轮 → `external-agent-api.md`「事件流」（usage 随 `message_end` 由发出侧带出，relay 只透传）+ `web-and-admin.md`「Per-Turn Token Usage Contract」
 - 渠道会话在网页目录里删了还在、清过历史的行仍显示可发消息、或注销身份被拒（`outbox_pending` / `scheduled_target`）→ `web-and-admin.md`「Channel Session Clear Contract」+ `external-agent-api.md`「会话注册表与 key 命名空间」

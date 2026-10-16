@@ -3666,6 +3666,38 @@ class RuntimeAgentSession:
         detail = str(error_message or "").strip() or TURN_FAILED_FRIENDLY_TEXT
         return f"这一轮处理失败：{detail}"
 
+    async def _publish_channel_failure_notice(self, text: str) -> None:
+        """Hand a terminal turn failure to the channel that owns the session.
+
+        The same line already reaches the transcript and the web feed, so a
+        channel session that stays silent after a failed turn leaves the user
+        with no reason (2026-10-16 live: three MemoryError turns in 8 minutes,
+        nothing delivered to QQ). The notice rides the shared outbound drain, so
+        it is sanitized, registered in the durable outbox and replayed on bridge
+        reconnect exactly like a turn reply; only ``ext:`` sessions have that
+        delivery path. Never raises: the caller is propagating the turn's own
+        exception, and a lost notice must not replace it.
+        """
+        session_key = str(self._state.session_key or "").strip()
+        try:
+            from g3ku.runtime.external_sessions import publish_channel_notice
+            from g3ku.runtime.session_keys import EXTERNAL_SESSION_KEY_PREFIX
+
+            if not session_key.startswith(EXTERNAL_SESSION_KEY_PREFIX):
+                return
+            await publish_channel_notice(
+                getattr(self._loop, "bus", None),
+                session_key,
+                text,
+                source="turn_failed",
+            )
+        except Exception as exc:  # noqa: BLE001 - the notice must not mask the failure
+            logger.warning(
+                "channel failure notice publish skipped for {} ({})",
+                session_key,
+                exc,
+            )
+
     def _persist_runtime_error_file(
         self,
         exc: Exception,
@@ -3949,6 +3981,7 @@ class RuntimeAgentSession:
             else:
                 error_reply = self._turn_failed_reply(error_message)
             self._state.latest_message = error_reply
+            await self._publish_channel_failure_notice(error_reply)
             self._persist_runtime_error_file(
                 exc,
                 user_text=user_text,

@@ -20,7 +20,11 @@ from g3ku.runtime.external_outbox import (
     record_age_seconds,
     record_outbound_message,
 )
-from g3ku.runtime.external_sessions import EXTERNAL_OUTBOUND_CHANNEL, get_external_session_registry
+from g3ku.runtime.external_sessions import (
+    EXTERNAL_OUTBOUND_CHANNEL,
+    get_external_session_registry,
+    publish_channel_notice,
+)
 from g3ku.runtime.session_keys import (
     EXTERNAL_SESSION_KEY_PREFIX,
     sanitize_channel_outbound_text,
@@ -337,18 +341,9 @@ async def _notify_external_channel_reply(session_id: str, text: str) -> None:
     """Publish a heartbeat/cron/task-terminal reply for an external bridge
     session onto the outbound bus; the shared drain resolves the session via
     the external registry and routes it to the session event hub as
-    ``outbound.created``."""
-    bus = _global_bus
-    if bus is None:
-        return
-    await bus.publish_outbound(
-        OutboundMessage(
-            channel=EXTERNAL_OUTBOUND_CHANNEL,
-            chat_id=session_id,
-            content=text,
-            metadata={'source': 'heartbeat', 'session_key': session_id},
-        )
-    )
+    ``outbound.created``. Terminal turn failures use the same helper, so the
+    outbound message shape for the channel lane is constructed in one place."""
+    await publish_channel_notice(_global_bus, session_id, text, source='heartbeat')
 
 
 async def _notify_heartbeat_channel_reply(session_id: str, text: str) -> None:
