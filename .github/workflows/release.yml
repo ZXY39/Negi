@@ -16,16 +16,19 @@ jobs:
     name: Attach installer scripts
     runs-on: ubuntu-latest
     steps:
-      # fetch-depth: 0 so the annotated tag object is in the checkout; the release
-      # body is read from the tag annotation instead of a fixed sentence.
       - uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
       - name: Create or refresh the release with the two installer scripts
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          git tag -l --format='%(contents)' "$GITHUB_REF_NAME" > release-notes.md
+          # Read the annotation off the tag object through the API: the checkout's
+          # local tag ref can be peeled to the commit, and then `%(contents)` silently
+          # returns the commit message instead of the release notes.
+          set -- $(gh api --jq '.object | "\(.type) \(.sha)"' "repos/$GITHUB_REPOSITORY/git/ref/tags/$GITHUB_REF_NAME")
+          case "$1" in
+            tag) gh api --jq .message "repos/$GITHUB_REPOSITORY/git/tags/$2" > release-notes.md ;;
+            *) gh api --jq .message "repos/$GITHUB_REPOSITORY/git/commits/$2" > release-notes.md ;;
+          esac
           [ -s release-notes.md ] || printf 'Negi %s\n' "$GITHUB_REF_NAME" > release-notes.md
           printf '\nThe two attached files are the one-line install and upgrade entry scripts. Full source is in the Source code archive at the bottom of this page.\n' >> release-notes.md
           gh release create "$GITHUB_REF_NAME" install.ps1 install.sh \
