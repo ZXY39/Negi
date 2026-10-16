@@ -56,7 +56,7 @@
 
 - 函数工具描述以 `【待修复】` 开头，或返回 `repair_required=true` / `tool_state="repair_required"`，或运行时契约的 `repair_required_tools:` 列出了它，都表示该工具已注册、你有权限，但当前不能执行真实能力——它首先是一个修复入口，不是目标能力本身。
 - 修复顺序：先用 `load_tool_context(tool_id="<tool_id>")` 读取安装、排障、更新与使用说明；再用 `repair-tool`（参考 skill 同名）配合 `exec`、`filesystem_write`、`filesystem_edit`、`filesystem_copy`、`filesystem_move`、`filesystem_propose_patch` 补齐缺失依赖、路径、环境变量或注册信息；随后刷新/重查可用性；只有恢复可用后才重试原始调用。
-- 运行时契约的 `repair_required_skills:` 列出的 skill 同理：修复前不要调用 `load_skill_context` 读正文。先看返回里的 `warnings` / `errors` 定位缺什么（常见 `missing required bins` / `missing required env` / `missing required tools`）；属于声明与本机不符的，用 `filesystem_edit` 修正该 skill `resource.yaml` 的 `requires` 声明（编辑会自动触发资源刷新）；属于真实缺失的，用 `exec`、`repair-tool` 补齐，需要用户决策的运行时不要擅自安装；只有满足两条判据之一才算「声明与本机不符」——该项在本机实测已有，或该 skill 正文并不使用该项，其余一律按真实缺失补齐，禁止为消除报错删改正文仍需要的 `requires` 项；修复后重新 `load_skill_context` 复核，返回正文才算完成。参考 skill：`writing-skills`。
+- 运行时契约的 `repair_required_skills:` 列出的 skill 同理：修复完成前 `load_skill_context` 只返回待修复指引，不返回正文。先看它返回的 `warnings` / `errors`（或契约行该项后面的 `Reason`）定位缺什么（常见 `missing required bins` / `missing required env` / `missing required tools`）；属于声明与本机不符的（如声明 `python3` 而本机只有 `python`、声明 `chrome` 而本机只有 Edge），用 `filesystem_edit` 修正该 skill `resource.yaml` 的 `requires` 声明（编辑会自动触发资源刷新）；判据只有两条——该项在本机实测已有，或该 skill 正文并不使用该项，其余一律按真实缺失用 `exec`、`repair-tool` 补齐，需要用户决策的运行时不要擅自安装，禁止为消除报错删改正文仍需要的 `requires` 项；返回「当前运行时技能未包含 `<id>`」不属于待修复，那是该 skill 不在治理注册表，先核查落盘、`resource_refresh.ok`、`catalog.ok=false`，补齐注册后再复核；修复后重新 `load_skill_context` 复核，返回正文才算完成。参考 skill：`writing-skills`。
 - 只有当现有权限、环境和可用工具都已穷尽，才把剩余缺口（具体缺哪个 bin/env/tool、影响哪个资源、已做过哪些修复动作）如实写进交付说明；禁止笼统写“待复核”，也不许把未修复状态报成已完成。
 
 

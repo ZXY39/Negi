@@ -41,14 +41,14 @@
 
 用途：
 - 唯一提交工具
-- 必须且只能调用一次
+- `memory_apply_batch` 本身只能调用一次（确认走 `memory_apply_confirm`，那是另一个工具）
 
 参数：
 - `adds?: Array<{ content: string, minimal_memory: string, decision_source: "user" | "self", note_ref?: string }>`
   - 仅用于“独立的新记忆”
   - `decision_source` 必填：`user` = 用户在本轮明确要求记住，`self` = 你自主复核提炼。该值决定记忆的来源标记，`user` 来源的行不参与压缩清理、`self` 来源的参与，标错会直接改变记忆存活
   - `note_ref` 可选：这条记忆挂哪份 note，填 note 文件名（不带 `.md`）。这是关系的唯一写法
-  - 当现有记忆与旧记忆重复时，禁止单独使用 add，可选择以下任意一种处理方式：
+  - 当候选与旧记忆重复时，禁止单独使用 add，可选择以下任意一种处理方式：
     1. `rewrites` 覆盖旧记忆
     2. `deletes` 旧记忆后再 `add` 新记忆
 - `rewrites?: Array<{ line: number, content: string, minimal_memory: string, note_ref?: string }>`
@@ -76,13 +76,6 @@
 - `inspired_lines?: number[]`
   - 列出当前正文中，对本批判断有实质帮助的行号
   - 可选，但会真实改变后续行为：被列出的记忆刷新计数加一、通过计数清零，从而延后它被压缩清理。只列你真正用过的，不要凑数
-### 预览与确认（会改内容的批次必走）
-
-- 交上 `memory_apply_batch` 后你会拿到这份批次**落库后的正文 diff**（`preview`）与计数；此时什么都没写进库
-- 读那份 diff：行号对不对、要留的记忆有没有被误删、正文是不是你要的形状。确认无误再调一次 `memory_apply_confirm()`（只调一次），批次才落地
-- 预览不是建议：没确认的变更批次会被当场打回
-- 零变更批次（`noop_reason` / `already_satisfied`）不用确认，交了就走
-
 - `noop_reason?: string`
   - 零变更专用：本轮既不新增、也不改写、删除、归并任何记忆时才用
   - 只能单独使用，不能与 `adds`、`rewrites`、`deletes`、`category_deletes`、`note_upserts`、`note_edits` 混用；混合场景（忽略本批候选、同时又要改写或删除某条旧记忆）只交变更字段
@@ -102,6 +95,13 @@
  如：
   1. 用户在判断图片人物像谁时，偏好基于画面细节做角色联想与相似度判断；对无法可靠确认身份的图片，先明确不能直接认人，再给出可能候选并说明依据。 极简记忆：判断图片->从画面细节联想
   2. 处理 Google Trends 等高动态站点时，要优先用 CDP 触发真实请求并从 performance 捕捉接口 URL 再拉取解析响应，不要优先直拉页面文本；同时处理 consent、重试节流、curl.exe、编码与 anti-XSSI 等兼容问题。 极简记忆：处理高动态站点->CDP 触发， performance 捕捉URL拉取响应（这条另在 `note_ref` 里填 `note_trends_cdp`）
+
+### 预览与确认（会改内容的批次必走）
+
+- 交上 `memory_apply_batch` 后你会拿到这份批次**落库后的正文 diff**（`preview`）与计数；此时什么都没写进库
+- 读那份 diff：行号对不对、要留的记忆有没有被误删、正文是不是你要的形状。确认无误再调一次 `memory_apply_confirm()`（只调一次），批次才落地
+- 预览不是建议：没确认的变更批次会被当场打回
+- 零变更批次（`noop_reason` / `already_satisfied`）不用确认，交了就走
 
 ## 载荷中的 stages 可见面
 

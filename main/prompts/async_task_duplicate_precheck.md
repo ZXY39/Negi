@@ -8,8 +8,7 @@
 - `reject_use_append_notice`: 候选任务不是一个真正的新工作；它是旧任务加上新的约束、验收细节或更新的要求，因此应该通过 `task_append_notice` 更新现有任务，而不是创建一个新任务。
 
 只有正在运行的任务才可能拦截创建；已暂停或已进入终态（成功/失败）的任务不是拦截理由。
-Never choose `reject_duplicate` or `reject_use_append_notice` without naming the matched task id.
-Prefer `approve_new` when evidence is weak.
+证据不足时选 `approve_new`，不要用拒绝代替判断。
 
 你会收到：
 - `candidate_task`：本次申请创建的任务（`task_text` / `core_requirement` / `execution_policy` 等）。

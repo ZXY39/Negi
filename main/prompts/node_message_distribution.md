@@ -13,6 +13,6 @@
 - action 取值有三种：distribute（下发消息）、skip（不下发）、terminate（终止子节点）。未给出 action 时，按 should_distribute 推断：true 等同 distribute，false 等同 skip。
 - action=distribute（或 should_distribute=true）时，message 必须填写要下发给该子节点的补充消息。
 - action=skip（或 should_distribute=false）时，reason 必须说明为什么该子节点可以安全不接收本次消息。
-- action=terminate 时，reason 必须说明为什么该子节点的工作已作废、无需继续；终止后该子节点及其子树会被停止，且不会收到任何消息。
+- action=terminate 时，reason 必须说明为什么该子节点的工作已作废、无需继续；`should_distribute` 填 `false`、`message` 留空；终止后该子节点及其子树会被停止，且不会收到任何消息。
 - 如果最新消息改变时间范围、对象性别/类型、范围、交付物、验收标准或其他全局口径，而子节点任务可能受影响，必须选择 distribute。
 - 如果最新消息使某子节点之前的工作作废（如任务变更、目标失效），必须对受影响的子节点选择 terminate。
