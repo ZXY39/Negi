@@ -5223,9 +5223,13 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
             setattr(target_session, "_frontdoor_actual_request_message_count", int(record.get("actual_request_message_count") or 0))
             setattr(target_session, "_frontdoor_actual_tool_schema_hash", str(record.get("actual_tool_schema_hash") or "").strip())
             usage_payload = dict(payload.get("usage") or {}) if isinstance(payload, dict) else {}
-            if turn_id and any(
-                int(usage_payload.get(field) or 0)
-                for field in ("input_tokens", "output_tokens", "cache_hit_tokens")
+            reported_thinking = "thinking_tokens" in usage_payload
+            if turn_id and (
+                reported_thinking
+                or any(
+                    int(usage_payload.get(field) or 0)
+                    for field in ("input_tokens", "output_tokens", "cache_hit_tokens")
+                )
             ):
                 turn_usage = getattr(target_session, "_frontdoor_turn_usage", None)
                 if not isinstance(turn_usage, dict):
@@ -5238,6 +5242,9 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
                 entry["output_tokens"] = int(entry.get("output_tokens") or 0) + int(usage_payload.get("output_tokens") or 0)
                 entry["cache_hit_tokens"] = int(entry.get("cache_hit_tokens") or 0) + int(usage_payload.get("cache_hit_tokens") or 0)
                 entry["call_count"] = int(entry.get("call_count") or 0) + 1
+                if reported_thinking:
+                    # 只在 provider 明确上报时累加：缺失时不写键，界面据此保留「~」估算标记。
+                    entry["thinking_tokens"] = int(entry.get("thinking_tokens") or 0) + int(usage_payload.get("thinking_tokens") or 0)
                 turn_usage[turn_id] = entry
             if frontdoor_token_preflight_diagnostics:
                 setattr(

@@ -1338,12 +1338,17 @@ class RuntimeAgentSession:
             return None
         if not any(int(entry.get(field) or 0) for field in ("input_tokens", "output_tokens", "cache_hit_tokens")):
             return None
-        return {
+        payload = {
             "input_tokens": int(entry.get("input_tokens") or 0),
             "output_tokens": int(entry.get("output_tokens") or 0),
             "cache_hit_tokens": int(entry.get("cache_hit_tokens") or 0),
             "call_count": int(entry.get("call_count") or 0),
         }
+        if "thinking_tokens" in entry:
+            # provider 报过的思考 token 真值随 usage 一起出：转录行的 `thinking.tokens`
+            # 读它，历史那一行才去得了「~」估算标记。没报的保持缺键，不写 0。
+            payload["thinking_tokens"] = int(entry.get("thinking_tokens") or 0)
+        return payload
 
     @classmethod
     def _find_transcript_user_index(cls, persisted_session: Any, *, turn_id: str) -> int | None:

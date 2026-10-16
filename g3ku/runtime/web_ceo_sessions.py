@@ -1392,6 +1392,10 @@ def read_session_turn_token_usage(session_id: str) -> dict[str, dict[str, int]]:
         entry["output_tokens"] += int(usage.get("output_tokens") or 0)
         entry["cache_hit_tokens"] += int(usage.get("cache_hit_tokens") or 0)
         entry["call_count"] += 1
+        if "thinking_tokens" in usage:
+            # 只在 provider 上报过的那几条请求上建键：续跑轮由这份聚合值认领累计器，
+            # 缺键与 0 的区分不能在这里丢掉。
+            entry["thinking_tokens"] = int(entry.get("thinking_tokens") or 0) + int(usage.get("thinking_tokens") or 0)
     return {
         turn_id: entry
         for turn_id, entry in usage_by_turn.items()
