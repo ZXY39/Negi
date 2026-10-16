@@ -56,6 +56,22 @@ _OPEN_NOTICE_RESERVE = 400
 # content_search 单条命中 preview 的字符上限：单行巨型文件命中时，preview 若不限
 # 长会膨胀成整行并把结果撑过内联闸门；超限则截断并以省略号标记。
 SEARCH_PREVIEW_CHAR_LIMIT = 2000
+# 行号栏：行模式的 excerpt 与 search preview 每行前缀 "N: "（与 rg -n 同形状），让
+# 被引行号与正文落在同一个数上——此前正文不带号，模型与验收节点都只能肉眼数行。
+# 字符模式（start_char/end_char）与二进制/图片占位正文不加栏：前者不是整行，后者
+# 的行数本来就不是文件事实。
+LINE_GUTTER_SEPARATOR = ": "
+
+
+def _numbered_line(line_number: int, text: str) -> str:
+    return f"{int(line_number)}{LINE_GUTTER_SEPARATOR}{text}"
+
+
+def _numbered_gutter_budget(last_line_number: int) -> int:
+    """该区间内最宽的一枚行号栏（含分隔符），用于上限累加。"""
+    return len(str(max(1, int(last_line_number)))) + len(LINE_GUTTER_SEPARATOR)
+
+
 # 二进制目标字节级搜索的流式分块大小与命中上下文窗口（字节）。
 # 流式扫描避免把大文件整份读进内存；overlap 保证跨块边界的签名（如 PDF 尾部标记）不被漏掉。
 _BINARY_SEARCH_CHUNK_BYTES = 4 * 1024 * 1024
@@ -1046,7 +1062,12 @@ class ContentNavigationService:
                 return _search_refine_payload(query=needle, cap=max_hits, ref=handle.ref, handle=handle)
             start = max(0, index - before_count)
             end = min(len(lines), index + after_count + 1)
-            preview = "\n".join(lines[start:end]).strip()
+            # preview 每行都带行号栏：只标命中行的话，上下文的 ±N 行仍要靠肉眼数，
+            # 那正是"引用行号比真值偏 2"的来源。
+            preview = "\n".join(
+                _numbered_line(number, lines[number - 1])
+                for number in range(start + 1, end + 1)
+            ).strip()
             if len(preview) > SEARCH_PREVIEW_CHAR_LIMIT:
                 preview = preview[:SEARCH_PREVIEW_CHAR_LIMIT].rstrip() + "…"
             results.append(
@@ -1186,6 +1207,14 @@ class ContentNavigationService:
         range_lines = lines[start - 1 : finish]
         total_range_chars = len("\n".join(range_lines))
         body_cap = max(cap - _OPEN_NOTICE_RESERVE, cap // 2)
+        # 二进制/图片目标的正文是占位串，它的"第 N 行"没有文件语义（行数与字符数本来
+        # 就是占位串的统计），不加行号栏。
+        show_line_numbers = not handle.content_display_replaced
+        gutter_budget = _numbered_gutter_budget(finish) if show_line_numbers else 0
+
+        def _render(line_number: int, text: str) -> str:
+            return _numbered_line(line_number, text) if show_line_numbers else text
+
         first = range_lines[0]
         # 单行巨型 / 首行超限兜底：对这一行按字符截断，提示改用 start_char 或 exec。
         if len(first) > body_cap:
@@ -1195,26 +1224,32 @@ class ContentNavigationService:
                 mode="single_line", shown_chars=shown_chars, shown_lines=1,
                 remaining_chars=remaining_chars, remaining_lines=0, next_char=shown_chars + 1,
             )
-            excerpt = first[:shown_chars].rstrip() + notice
+            excerpt = _render(start, first[:shown_chars].rstrip()) + notice
             return self._open_payload(
                 handle=handle, start_line=start, end_line=start, excerpt=excerpt, truncated=True,
                 shown_chars=shown_chars, shown_lines=1, total_range_chars=total_range_chars,
                 remaining_chars=remaining_chars, remaining_lines=0,
             )
-        # 行对齐累加整行，直到再加一行会超出正文上限。
-        selected: list[str] = []
+        # 行对齐累加整行，直到再加一行会超出正文上限。上限按"真正发出去的行号栏 +
+        # 正文"累加，正文口径（shown_chars/remaining_chars/total_range_chars）仍只数
+        # 原文字符，内联闸门与截断提示的读数口径不变。
+        rendered: list[str] = []
         char_total = 0
+        sent_total = 0
         actual_end = start - 1
         for offset, line in enumerate(range_lines):
-            add = len(line) + (1 if selected else 0)
-            if selected and char_total + add > body_cap:
+            line_number = start + offset
+            add_body = len(line) + (1 if rendered else 0)
+            add_sent = len(line) + gutter_budget + (1 if rendered else 0)
+            if rendered and sent_total + add_sent > body_cap:
                 break
-            selected.append(line)
-            char_total += add
-            actual_end = start + offset
+            rendered.append(_render(line_number, line))
+            char_total += add_body
+            sent_total += add_sent
+            actual_end = line_number
         truncated = actual_end < finish
-        body = "\n".join(selected)
-        shown_lines = len(selected)
+        body = "\n".join(rendered)
+        shown_lines = len(rendered)
         remaining_lines = finish - actual_end
         remaining_chars = max(total_range_chars - char_total, 0)
         excerpt = body

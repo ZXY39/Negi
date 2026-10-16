@@ -6,6 +6,7 @@ from g3ku.content.navigation import (
     _ALWAYS_INLINE_TOOL_RESULT_SOURCES,
     CHAR_MODE_OPEN_CHAR_LIMIT,
     INLINE_CHAR_LIMIT,
+    LINE_GUTTER_SEPARATOR,
     OPEN_EXCERPT_CHAR_LIMIT,
     SEARCH_PREVIEW_CHAR_LIMIT,
     ContentNavigationService,
@@ -76,7 +77,31 @@ def test_open_excerpt_small_content_not_truncated(tmp_path: Path) -> None:
 
     assert result.get("ok") is True
     assert result.get("truncated") is False
-    assert result.get("excerpt") == "第一行\n第二行"
+    assert result.get("excerpt") == "1: 第一行\n2: 第二行"
+
+
+def test_open_excerpt_line_numbers_are_absolute_across_windows(tmp_path: Path) -> None:
+    # 行号栏用文件的绝对行号，不是"窗口内第几行"：被引 343 就必须显示 343，
+    # 否则打开窗口的车道与 rg -n 又回到两个数上（2026-10-16 task:7170f1df65a3 的漂移来源）。
+    service = _make_service(tmp_path)
+    path = tmp_path / "numbered.txt"
+    path.write_text("\n".join("body-%03d" % i for i in range(1, 61)), encoding="utf-8")
+
+    result = service.open(path=str(path), start_line=40, end_line=42)
+
+    assert result.get("excerpt") == "40: body-040\n41: body-041\n42: body-042"
+    assert result.get("start_line") == 40 and result.get("end_line") == 42
+
+
+def test_open_char_mode_excerpt_stays_unnumbered(tmp_path: Path) -> None:
+    # 字符模式切的不是整行，给它标"行号"会标出一个假事实。
+    service = _make_service(tmp_path)
+    path = tmp_path / "single.txt"
+    path.write_text("a" * 30_000, encoding="utf-8")
+
+    result = service.open(path=str(path), start_char=1, end_char=40)
+
+    assert result.get("excerpt") == "a" * 40
 
 
 def test_open_default_reads_small_file_in_full(tmp_path: Path) -> None:
@@ -103,8 +128,8 @@ def test_open_default_line_aligned_truncates_without_splitting_line(tmp_path: Pa
     assert result.get("ok") is True
     assert result.get("truncated") is True
     shown_lines = (result.get("excerpt") or "").split("\n\n[内容已截断]")[0].splitlines()
-    # 行对齐：显示的每一行都是完整 200 字符，没有半行。
-    assert all(len(line) == 200 for line in shown_lines)
+    # 行对齐：去掉行号栏之后的每一行都是完整 200 字符，没有半行。
+    assert all(len(line.split(LINE_GUTTER_SEPARATOR, 1)[1]) == 200 for line in shown_lines)
     assert result.get("excerpt_shown_chars") <= OPEN_EXCERPT_CHAR_LIMIT
     assert "start_line=" in result.get("excerpt")
 
