@@ -2241,8 +2241,10 @@
     color: inherit;
 }
 
-/* 描边与底色都走 currentColor，所以按操作风险度上色会同时作用到图标和文字 */
-[data-ui-version="v2"] .memory-op-chip[data-op="delete"] {
+/* 描边与底色都走 currentColor，所以按操作风险度上色会同时作用到图标和文字。
+   v2 按风险档上色而不是按操作逐支上色，摘除整节与删一条同档，因此共用 danger token */
+[data-ui-version="v2"] .memory-op-chip[data-op="delete"],
+[data-ui-version="v2"] .memory-op-chip[data-op="category_purge"] {
     color: var(--ui-danger);
 }
 

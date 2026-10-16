@@ -1323,11 +1323,15 @@ def test_memory_operation_chips_use_one_color_per_operation() -> None:
         "note_reaped",
         "category_note",
         "consolidate",
+        "category_purge",
         "compress_for_capacity",
     }
-    assert len(set(colors.values())) == 9
+    assert len(set(colors.values())) == 10
     # 记忆退场是黄：它既不是新增也不是删除，而是这条正文搬进了分类 note
     assert colors["consolidate"] == "#a16207"
+    # 摘除分类导航与删除同族（都是一行离开常驻块），深一档表示一次带走整个分类；
+    # 调色板里已没有空色相，开冷色会把它挤进 note 那一族
+    assert colors["category_purge"] == "#7f1d1d"
     # 容量降级是机器把渲染换成摘要，谁也没改内容；玫红是这套调色板唯一空着的色相，
     # 用灰色就会和"回收 Note"看起来像同一件事。
     assert colors["compress_for_capacity"] == "#be185d"
@@ -1338,6 +1342,46 @@ def test_memory_operation_chips_use_one_color_per_operation() -> None:
     assert '[data-ui-version="v2"] .memory-op-chip[data-op="consolidate"]' in redesign
     assert "color: var(--ui-retire);" in redesign
     assert redesign.count("--ui-retire:") == 2
+    # v2 按风险档上色而不是按操作逐支上色：摘除整节与删一条同档，共用 danger token
+    assert '[data-ui-version="v2"] .memory-op-chip[data-op="category_purge"]' in redesign
+
+
+def test_memory_processed_card_renders_a_category_purge_as_its_own_operation() -> None:
+    """A section purge lands as one `category_purge` row per retired memory; the ledger has
+    no other place that names which category they came from, so a card that dropped the type
+    would leave "what did that batch really remove" unanswerable."""
+    result = _run_app_script(
+        """
+        const item = {
+          batch_id: "write_purge_demo",
+          op: "write",
+          source_op: "write",
+          status: "applied",
+          processed_at: "2026-10-16T11:00:00+08:00",
+          changes: [
+            { type: "add", memory_id: "Ab12Z9qw", content: "新的一条" },
+            { type: "category_purge", memory_id: "Cd34Efgh", note_ref: "note_resume", original_content: "求职偏好只看社招" },
+          ],
+        };
+
+        __out.cardHtml = context.__testExports.renderMemoryProcessedCard(item);
+        __out.label = context.__testExports.memoryProcessedOpLabel(item);
+        __out.blocks = context.__testExports.renderMemoryChangeList(item.changes);
+        """,
+        ["renderMemoryProcessedCard", "memoryProcessedOpLabel", "renderMemoryChangeList"],
+    )
+
+    card_html = str(result["cardHtml"])
+    assert 'data-op="category_purge"' in card_html
+    assert 'data-op="delete"' not in card_html, "a purge must not render under the single-delete chip"
+    assert str(result["label"]) == "增加 / 摘除分类导航"
+
+    blocks = str(result["blocks"])
+    assert "摘除分类导航" in blocks
+    assert "note_resume" in blocks
+    assert "求职偏好只看社招" in blocks
+    assert "新增内容" not in blocks.split("摘除分类导航")[1], "purged rows must not fall through to the add template"
+
 
 
 def test_note_edit_and_note_reap_records_survive_into_the_memory_surfaces() -> None:

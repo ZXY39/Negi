@@ -108,7 +108,7 @@ def _with_confirm_call(tool_calls: list[dict[str, object]] | None) -> list[dict[
     mutating = any(
         str(call.get("name") or "") == "memory_apply_batch"
         and isinstance(call.get("args"), dict)
-        and any((call.get("args") or {}).get(key) for key in ("adds", "rewrites", "deletes"))
+        and any((call.get("args") or {}).get(key) for key in ("adds", "rewrites", "deletes", "category_deletes"))
         for call in calls
     )
     confirmed = any(str(call.get("name") or "") == "memory_apply_confirm" for call in calls)
