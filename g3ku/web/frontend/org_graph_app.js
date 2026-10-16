@@ -137,6 +137,8 @@ const S = {
     ceoSelectedSessionIds: new Set(),
     // 拖动得到的手动位次：会话没有服务端顺序字段，顺序只在前端与 localStorage 生效。
     ceoSessionOrder: [],
+    // 渠道分组折叠态同样只在前端与 localStorage 生效，键是 channel_id。
+    ceoChannelCollapsed: [],
     ceoSessionDrag: null,
     ceoScrollToLatestOnSnapshot: false,
     ceoFeedFollowLatest: true,
@@ -899,6 +901,20 @@ function flattenChannelGroups(groups = []) {
     return rows;
 }
 
+function visibleCeoChannelGroups() {
+    return (Array.isArray(S.ceoChannelGroups) ? S.ceoChannelGroups : [])
+        .filter((group) => !isCeoChannelCollapsed(String(group?.channel_id || "").trim()));
+}
+
+function ceoChannelUnreadTotal(items = []) {
+    // 与卡片角标同一口径：当前会话的 unread 恒为 0，所以合计里也剔掉它。
+    const activeId = activeSessionId();
+    return (Array.isArray(items) ? items : [])
+        .map((item) => String(item?.session_id || "").trim())
+        .filter((sessionId) => sessionId && sessionId !== activeId)
+        .reduce((total, sessionId) => total + sessionUnreadCount(sessionId), 0);
+}
+
 function visibleCeoSessions() {
     if (S.ceoSessionTab === "channel") return flattenChannelGroups(S.ceoChannelGroups);
     return Array.isArray(S.ceoLocalSessions) ? S.ceoLocalSessions : [];
@@ -909,7 +925,11 @@ function clearCeoBulkSelection() {
 }
 
 function visibleCeoBulkSelectableSessionIds() {
-    return visibleCeoSessions()
+    // 折叠起来的渠道不在作用集里：「全选」与批量删除的条数只按看得见的行算。
+    const rows = S.ceoSessionTab === "channel"
+        ? flattenChannelGroups(visibleCeoChannelGroups())
+        : visibleCeoSessions();
+    return rows
         .map((item) => String(item?.session_id || "").trim())
         .filter(Boolean);
 }
@@ -14017,12 +14037,29 @@ function renderCeoSessions() {
     if (S.ceoSessionTab === "channel") {
         U.ceoSessionList.innerHTML = (Array.isArray(S.ceoChannelGroups) ? S.ceoChannelGroups : []).map((group) => {
             const items = Array.isArray(group?.items) ? group.items : [];
+            const channelId = String(group?.channel_id || "").trim();
+            const label = String(group?.label || group?.channel_id || "渠道");
+            const collapsed = isCeoChannelCollapsed(channelId);
+            const unreadTotal = collapsed ? ceoChannelUnreadTotal(items) : 0;
+            const unreadText = unreadTotal > 99 ? "99+" : String(unreadTotal);
+            // 窄栏只剩一颗字母块，渠道 tile 用它替掉的那张卡片同一个 glyph，读起来是"这组被折起来了"。
+            const channelGlyph = collapsed ? (items.length ? ceoSessionGlyph(items[0]) : "@") : "";
             return `
-                <section class="ceo-session-group">
-                    <div class="ceo-session-group-title">${esc(String(group?.label || group?.channel_id || "渠道"))}</div>
+                <section class="ceo-session-group${collapsed ? " is-collapsed" : ""}" data-channel-group="${esc(channelId)}">
+                    <button type="button" class="ceo-session-group-title" data-channel-collapse="${esc(channelId)}" aria-expanded="${collapsed ? "false" : "true"}" title="${esc(collapsed ? "展开该渠道" : "折叠该渠道")}">
+                        <span class="ceo-session-group-caret" aria-hidden="true"><i data-lucide="chevron-down"></i></span>
+                        <span class="ceo-session-group-label">${esc(label)}</span>
+                        ${unreadTotal > 0 ? `<span class="ceo-session-group-unread" aria-label="${esc(`新消息 ${unreadTotal} 条`)}">${esc(unreadText)}</span>` : ""}
+                    </button>
+                    ${collapsed ? `
+                    <button type="button" class="ceo-session-channel-tile" data-channel-collapse="${esc(channelId)}" aria-expanded="false" aria-label="${esc(`展开渠道 ${label}`)}" title="${esc(label)}">
+                        <span class="ceo-session-glyph" aria-hidden="true">${esc(channelGlyph)}</span>
+                        ${unreadTotal > 0 ? `<span class="ceo-session-channel-unread" aria-hidden="true">${esc(unreadText)}</span>` : ""}
+                    </button>` : ""}
+                    ${collapsed ? "" : `
                     <div class="ceo-session-group-list" role="list">
                         ${items.map((item) => renderCeoSessionCard(item, { allowActions: true })).join("")}
-                    </div>
+                    </div>`}
                 </section>
             `;
         }).join("");
@@ -18310,6 +18347,52 @@ function setCeoSessionOrder(order) {
     writeStoredUiPreference(CEO_SESSION_ORDER_KEY, JSON.stringify(S.ceoSessionOrder));
 }
 
+const CEO_CHANNEL_COLLAPSE_KEY = "g3ku.ui.ceo.channel-collapse.v1";
+
+function readStoredCeoChannelCollapse() {
+    try {
+        const parsed = JSON.parse(readStoredUiPreference(CEO_CHANNEL_COLLAPSE_KEY) || "[]");
+        if (!Array.isArray(parsed)) return [];
+        return [...new Set(parsed.map((id) => String(id || "").trim()).filter(Boolean))];
+    } catch (error) {
+        return [];
+    }
+}
+
+function isCeoChannelCollapsed(channelId) {
+    const key = String(channelId || "").trim();
+    if (!key) return false;
+    return (Array.isArray(S.ceoChannelCollapsed) ? S.ceoChannelCollapsed : []).includes(key);
+}
+
+function ceoChannelGroupSessionIds(channelId) {
+    const key = String(channelId || "").trim();
+    const ids = (Array.isArray(S.ceoChannelGroups) ? S.ceoChannelGroups : [])
+        .filter((group) => String(group?.channel_id || "").trim() === key)
+        .flatMap((group) => (Array.isArray(group?.items) ? group.items : []))
+        .map((item) => String(item?.session_id || "").trim())
+        .filter(Boolean);
+    return new Set(ids);
+}
+
+function toggleCeoChannelCollapse(channelId) {
+    const key = String(channelId || "").trim();
+    if (!key) return false;
+    const wasCollapsed = isCeoChannelCollapsed(key);
+    const nextCollapsed = wasCollapsed
+        ? S.ceoChannelCollapsed.filter((id) => id !== key)
+        : [...(Array.isArray(S.ceoChannelCollapsed) ? S.ceoChannelCollapsed : []), key];
+    S.ceoChannelCollapsed = nextCollapsed;
+    writeStoredUiPreference(CEO_CHANNEL_COLLAPSE_KEY, JSON.stringify(nextCollapsed));
+    if (!wasCollapsed && S.ceoSelectedSessionIds instanceof Set) {
+        // 折叠把行从界面上拿走，多选作用集跟着退出，否则「删除 N 个」会数到看不见的会话。
+        const hiddenIds = ceoChannelGroupSessionIds(key);
+        S.ceoSelectedSessionIds = new Set([...S.ceoSelectedSessionIds].filter((id) => !hiddenIds.has(id)));
+    }
+    renderCeoSessions();
+    return !wasCollapsed;
+}
+
 function syncThemeToggleIcons() {
     const dark = document.documentElement.getAttribute("data-theme") !== "light";
     const darkIcon = U.theme?.querySelector(".dark-icon");
@@ -18337,6 +18420,7 @@ function initializeUiPreferences() {
     if (!document.documentElement) return;
     initializeTheme();
     S.ceoSessionOrder = readStoredCeoSessionOrder();
+    S.ceoChannelCollapsed = readStoredCeoChannelCollapse();
 }
 
 function bind() {
@@ -18529,6 +18613,12 @@ function bind() {
             const shell = menuToggle.closest(".ceo-session-actions");
             const isOpen = !!shell?.classList.contains("is-open");
             setCeoSessionMenuOpen(sessionId, !isOpen);
+            return;
+        }
+        const collapse = e.target.closest("[data-channel-collapse]");
+        if (collapse) {
+            e.stopPropagation();
+            toggleCeoChannelCollapse(collapse.dataset.channelCollapse);
             return;
         }
         const copyId = e.target.closest("[data-session-copy-id]");

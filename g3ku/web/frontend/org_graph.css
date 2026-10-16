@@ -2198,12 +2198,115 @@ textarea {
 }
 
 .ceo-shell.is-session-panel-expanded .ceo-session-group-title {
-    display: block;
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    width: 100%;
     padding: 0 4px;
+    border: 0;
+    background: transparent;
     color: var(--text-secondary);
+    font: inherit;
     font-size: 0.78rem;
     font-weight: 700;
     letter-spacing: 0.02em;
+    text-align: left;
+    cursor: pointer;
+}
+
+.ceo-shell.is-session-panel-expanded .ceo-session-group-title:hover:not(:disabled),
+.ceo-shell.is-session-panel-expanded .ceo-session-group-title:focus-visible {
+    color: var(--text-primary);
+}
+
+/* 折叠态用箭头朝向说话：展开朝下，折叠朝右，跟侧栏那颗面板开关同一套语言。
+   外层先占住 14px：图标是 rAF 之后才由 <i> 换成 <svg> 的，不预留宽度标题会跳一下。 */
+.ceo-session-group-caret {
+    flex: 0 0 auto;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 14px;
+    height: 14px;
+}
+
+.ceo-session-group-caret svg {
+    width: 14px;
+    height: 14px;
+    transform-origin: center;
+    transition: transform 0.15s ease;
+}
+
+.ceo-session-group.is-collapsed .ceo-session-group-caret svg {
+    transform: rotate(-90deg);
+}
+
+.ceo-session-group-label {
+    flex: 1 1 auto;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+/* 折叠后组内新消息只在这颗计数上说话，尺寸/配色与卡片角标同形。 */
+.ceo-session-group-unread {
+    flex: 0 0 auto;
+    min-width: 22px;
+    height: 22px;
+    padding: 0 7px;
+    border-radius: 999px;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    background: var(--ceo-session-unread);
+    color: var(--ceo-session-unread-text);
+    font-size: 0.72rem;
+    font-weight: 700;
+    white-space: pre;
+}
+
+/* 渠道级 tile 只属于窄栏：窄栏里把字母块和会话卡都不画的渠道既看不见也解不开。
+   展开面板里同一件事由标题行承担，两者按 panel 状态互斥。 */
+.ceo-session-channel-tile {
+    display: none;
+}
+
+.ceo-session-panel[data-panel-state="collapsed"] .ceo-session-channel-tile {
+    position: relative;
+    display: block;
+    width: 100%;
+    padding: 0;
+    border: 0;
+    background: transparent;
+    cursor: pointer;
+}
+
+.ceo-session-panel[data-panel-state="collapsed"] .ceo-session-channel-tile:hover .ceo-session-glyph,
+.ceo-session-panel[data-panel-state="collapsed"] .ceo-session-channel-tile:focus-visible .ceo-session-glyph {
+    border-color: color-mix(in srgb, var(--brand-primary) 28%, var(--border-color));
+    box-shadow: var(--shadow-md);
+}
+
+/* 角标走右上：会话卡的未读角标在窄栏落在左上，同一列里两种位置就是"组 vs 单会话"的区分。
+   负 left 会被 collapsed list 的 overflow-x:hidden 裁切，所以水平方向只用正值。 */
+.ceo-session-channel-unread {
+    position: absolute;
+    top: -6px;
+    right: 2px;
+    min-width: 16px;
+    height: 16px;
+    padding: 0 4px;
+    border-radius: 999px;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    background: var(--ceo-session-unread);
+    color: var(--ceo-session-unread-text);
+    font-size: 0.6rem;
+    font-weight: 700;
+    white-space: pre;
+    z-index: 3;
 }
 
 .ceo-session-group-list {

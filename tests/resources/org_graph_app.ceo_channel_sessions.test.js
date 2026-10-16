@@ -94,11 +94,17 @@ function loadApp() {
         this.__testExports = {
             S,
             U,
+            ceoChannelUnreadTotal,
             isChannelSessionItem,
             deriveCeoChannelId,
             displayChannelGroupLabel,
             applyCeoSessionPatch,
             renderCeoSessionCard,
+            renderCeoSessions,
+            toggleCeoChannelCollapse,
+            isCeoChannelCollapsed,
+            visibleCeoBulkSelectableSessionIds,
+            readStoredCeoChannelCollapse,
             syncCeoPrimaryButton,
             activeSessionItem,
             activeSessionIsReadonly,
@@ -123,7 +129,15 @@ function loadApp() {
         `,
         context
     );
-    return context.__testExports;
+    const exports = context.__testExports;
+    // 桩环境里的 window 就是这个 context（window.localStorage 等由用例替换）。
+    exports.__context = context;
+    // 应用用 `instanceof Set` 判多选集，跨沙箱原型的 Set 会被判成不是 Set。
+    exports.__makeSet = (values = []) => {
+        context.__setSeed = values;
+        return vm.runInContext("new Set(this.__setSeed)", context);
+    };
+    return exports;
 }
 
 function extChannelItem(overrides = {}) {
@@ -350,4 +364,128 @@ test("hides_on_delete survives the patch lane down to the stored row", () => {
     assert.ok(row, "补丁行要落到渠道分组");
     assert.equal(row.hides_on_delete, true);
     assert.equal(row.can_delete, true);
+});
+
+function channelGroupFixture() {
+    return [{
+        channel_id: "ext:qq",
+        label: "外部桥接 · qq",
+        items: [
+            extChannelItem({ session_id: "ext:qq:a", channel_id: "ext:qq", title: "A" }),
+            extChannelItem({ session_id: "ext:qq:b", channel_id: "ext:qq", title: "B" }),
+        ],
+    }];
+}
+
+function railHarness() {
+    const app = loadApp();
+    app.U.ceoSessionList = { innerHTML: "" };
+    app.S.ceoSessionTab = "channel";
+    app.S.ceoChannelGroups = channelGroupFixture();
+    app.S.ceoLocalSessions = [];
+    app.S.activeSessionId = "ext:qq:a";
+    app.S.ceoSessions = app.S.ceoChannelGroups[0].items;
+    return app;
+}
+
+test("collapsed channel group turns the title into a caret button and stops rendering its cards", () => {
+    const { S, U, renderCeoSessions, toggleCeoChannelCollapse } = railHarness();
+
+    S.ceoChannelCollapsed = ["ext:qq"];
+    renderCeoSessions();
+    let html = U.ceoSessionList.innerHTML;
+    assert.match(html, /class="ceo-session-group is-collapsed"/);
+    assert.match(html, /data-channel-collapse="ext:qq"[^>]*aria-expanded="false"/);
+    assert.ok(html.includes("ceo-session-group-caret"), "标题上要带指向明确的折叠标记");
+    assert.doesNotMatch(html, /ceo-session-group-list/);
+    assert.doesNotMatch(html, /data-session-activate=/);
+
+    toggleCeoChannelCollapse("ext:qq");
+    renderCeoSessions();
+    html = U.ceoSessionList.innerHTML;
+    assert.match(html, /data-channel-collapse="ext:qq"[^>]*aria-expanded="true"/);
+    assert.equal((html.match(/data-session-activate=/g) || []).length, 2);
+});
+
+test("collapsed group counts only what the cards would have shown", () => {
+    const { S, U, renderCeoSessions, ceoChannelUnreadTotal } = railHarness();
+    // 当前会话 a 的角标本来就是 0，组内合计也不能把它算进去。
+    S.ceoSessionUnread = { "ext:qq:a": 5, "ext:qq:b": 3 };
+    S.ceoChannelCollapsed = [];
+
+    renderCeoSessions();
+    assert.doesNotMatch(U.ceoSessionList.innerHTML, /ceo-session-group-unread/, "展开时标题不带计数");
+    assert.equal(ceoChannelUnreadTotal(S.ceoChannelGroups[0].items), 3);
+
+    S.ceoChannelCollapsed = ["ext:qq"];
+    renderCeoSessions();
+    assert.match(U.ceoSessionList.innerHTML, /<span class="ceo-session-group-unread"[^>]*>3<\/span>/);
+
+    S.ceoSessionUnread = { "ext:qq:b": 120 };
+    renderCeoSessions();
+    assert.match(U.ceoSessionList.innerHTML, /<span class="ceo-session-group-unread"[^>]*>99\+<\/span>/);
+});
+
+test("collapse state is stored and the renderer never reopens a folded group", () => {
+    const app = railHarness();
+    const { S, U, renderCeoSessions, toggleCeoChannelCollapse, isCeoChannelCollapsed } = app;
+    const store = {};
+    app.__context.localStorage = {
+        getItem: (key) => (Object.prototype.hasOwnProperty.call(store, key) ? store[key] : null),
+        setItem: (key, value) => { store[key] = String(value); },
+        removeItem: (key) => { delete store[key]; },
+    };
+
+    assert.equal(toggleCeoChannelCollapse("ext:qq"), true);
+    assert.equal(store["g3ku.ui.ceo.channel-collapse.v1"], '["ext:qq"]');
+
+    // 目录刷新（新消息进来、卡片重绘）不能替操作员把折叠的组打开。
+    renderCeoSessions();
+    assert.ok(isCeoChannelCollapsed("ext:qq"));
+    assert.doesNotMatch(U.ceoSessionList.innerHTML, /ceo-session-group-list/);
+    // 沙箱里的数组与测试进程的不是同一个原型，按值比而不是 deepEqual。
+    assert.equal(app.readStoredCeoChannelCollapse().join("|"), "ext:qq");
+});
+
+test("folded channel keeps a rail tile that unfolds in place", () => {
+    const { S, U, renderCeoSessions, toggleCeoChannelCollapse } = railHarness();
+
+    // 先记下未折叠时第一张卡片的字母，折叠后渠道 tile 必须画同一颗字母。
+    renderCeoSessions();
+    const cardGlyph = /class="ceo-session-glyph"[\s\S]*?>([^<]*)</.exec(U.ceoSessionList.innerHTML)?.[1];
+    assert.ok(cardGlyph, "未折叠时卡片字母要能读到");
+
+    S.ceoSessionUnread = { "ext:qq:a": 2, "ext:qq:b": 3 };
+    S.activeSessionId = "ext:qq:b";   // b 是当前会话，它的 3 条不计入
+    S.ceoChannelCollapsed = ["ext:qq"];
+    renderCeoSessions();
+    let html = U.ceoSessionList.innerHTML;
+    assert.match(html, /<button type="button" class="ceo-session-channel-tile" data-channel-collapse="ext:qq" aria-expanded="false"/);
+    assert.match(html, new RegExp(`class="ceo-session-glyph" aria-hidden="true">${cardGlyph}</span>`));
+    assert.match(html, /class="ceo-session-channel-unread" aria-hidden="true">2</);
+    assert.match(html, /aria-label="展开渠道 外部桥接 · qq"/);
+    assert.doesNotMatch(html, /data-session-activate=/, "窄栏 tile 不该把会话卡片也画出来");
+
+    // 窄栏里点这颗 tile 走的是同一颗折叠判据：折起来 → 解开 → 卡片回来、tile 消失。
+    toggleCeoChannelCollapse("ext:qq");
+    renderCeoSessions();
+    html = U.ceoSessionList.innerHTML;
+    assert.doesNotMatch(html, /ceo-session-channel-tile/);
+    assert.match(html, /ceo-session-group-list/);
+    assert.equal((html.match(/data-session-activate=/g) || []).length, 2);
+});
+
+test("collapsed groups leave the bulk selection set and their checked rows with it", () => {
+    const { S, __makeSet, toggleCeoChannelCollapse, visibleCeoBulkSelectableSessionIds } = railHarness();
+    S.ceoBulkMode = true;
+    S.ceoSelectedSessionIds = __makeSet(["ext:qq:a", "ext:qq:b", "web:keep"]);
+
+    assert.equal(visibleCeoBulkSelectableSessionIds().slice().sort().join("|"), "ext:qq:a|ext:qq:b");
+
+    toggleCeoChannelCollapse("ext:qq");
+    assert.deepEqual([...S.ceoSelectedSessionIds], ["web:keep"], "看不见的行不能继续留在批量作用集里");
+    assert.equal(visibleCeoBulkSelectableSessionIds().length, 0);
+
+    toggleCeoChannelCollapse("ext:qq");
+    assert.deepEqual([...S.ceoSelectedSessionIds], ["web:keep"], "展开不复活被摘掉的勾选");
 });
