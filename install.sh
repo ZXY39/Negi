@@ -18,28 +18,33 @@ REF="${G3KU_REF:-v2.4.0}"
 DIR="${G3KU_DIR:-$HOME/Negi}"
 NO_START=0
 UPGRADE=0
+NO_PATH=0
+NO_SHORTCUT=0
 REPO_GIT="https://github.com/${REPO_OWNER}/${REPO_NAME}.git"
 REPO_ZIP="https://github.com/${REPO_OWNER}/${REPO_NAME}/archive/${REF}.zip"
 UV_INSTALLER='https://astral.sh/uv/install.sh'
 # Kept across upgrades: the environment and everything the operator created.
 PROTECTED_ENTRIES='.venv .g3ku .git'
-TMP_DIR=''
+STAGE_DIR=''
+CHECKOUT_DIR=''
 
 cleanup() {
-  if [ -n "$TMP_DIR" ]; then
-    rm -rf "$TMP_DIR"
+  if [ -n "$STAGE_DIR" ]; then
+    rm -rf "$STAGE_DIR"
   fi
 }
 trap cleanup EXIT
 
 usage() {
   cat <<'EOF'
-Usage: install.sh [--dir PATH] [--ref TAG] [--no-start] [--upgrade]
+Usage: install.sh [--dir PATH] [--ref TAG] [--no-start] [--upgrade] [--no-path] [--no-shortcut]
 
-  --dir PATH    install location (default ~/Negi)
-  --ref TAG     git ref to install (default the pinned release tag)
-  --no-start    prepare the environment but do not launch the web UI
-  --upgrade     update the code in an existing install, keep .venv and .g3ku
+  --dir PATH       install location (default ~/Negi)
+  --ref TAG        git ref to install (default the pinned release tag)
+  --no-start       prepare the environment but do not launch the web UI
+  --upgrade        update the code in an existing install, keep .venv and .g3ku
+  --no-path        write the command stub but leave PATH alone
+  --no-shortcut    skip the desktop entry
 EOF
 }
 
@@ -67,6 +72,14 @@ while [ $# -gt 0 ]; do
       ;;
     --upgrade)
       UPGRADE=1
+      shift
+      ;;
+    --no-path)
+      NO_PATH=1
+      shift
+      ;;
+    --no-shortcut)
+      NO_SHORTCUT=1
       shift
       ;;
     -h | --help)
@@ -106,34 +119,50 @@ ensure_uv() {
   log "using uv: $UV"
 }
 
-download_archive() {
+stage_code() {
+  # $1 = archive 时强制走源码包：无 git 的历史安装升级要保持原取码形态。
+  # 代码一律先落到临时目录再逐顶层合并 —— `git clone` 对着一个非空目录（保留数据
+  # 后重装的 .g3ku 就算非空）直接 fatal，装不上也谈不上认领。
+  local mode="${1:-auto}"
+  STAGE_DIR="$(mktemp -d)"
+  if [ "$mode" != "archive" ] && command -v git >/dev/null 2>&1; then
+    log "git clone --depth 1 --branch $REF (staged)"
+    git clone --depth 1 --branch "$REF" "$REPO_GIT" "$STAGE_DIR/checkout" || fail 'git clone failed'
+    CHECKOUT_DIR="$STAGE_DIR/checkout"
+    return
+  fi
   log "downloading $REPO_ZIP"
-  TMP_DIR="$(mktemp -d)"
   if command -v curl >/dev/null 2>&1; then
-    curl -LsSf "$REPO_ZIP" -o "$TMP_DIR/source.zip" || fail 'source archive download failed'
+    curl -LsSf "$REPO_ZIP" -o "$STAGE_DIR/source.zip" || fail 'source archive download failed'
   elif command -v wget >/dev/null 2>&1; then
-    wget -qO "$TMP_DIR/source.zip" "$REPO_ZIP" || fail 'source archive download failed'
+    wget -qO "$STAGE_DIR/source.zip" "$REPO_ZIP" || fail 'source archive download failed'
   else
     fail 'neither curl nor wget is available to fetch the source archive'
   fi
   command -v unzip >/dev/null 2>&1 || fail 'unzip is required when git is unavailable'
-  unzip -q "$TMP_DIR/source.zip" -d "$TMP_DIR" || fail 'source archive extraction failed'
-  ARCHIVE_INNER="$(find "$TMP_DIR" -mindepth 1 -maxdepth 1 -type d | head -n 1)"
-  [ -n "${ARCHIVE_INNER:-}" ] || fail "archive for $REF contained no top-level directory"
+  mkdir -p "$STAGE_DIR/expanded"
+  unzip -q "$STAGE_DIR/source.zip" -d "$STAGE_DIR/expanded" || fail 'source archive extraction failed'
+  CHECKOUT_DIR="$(find "$STAGE_DIR/expanded" -mindepth 1 -maxdepth 1 -type d | head -n 1)"
+  [ -n "${CHECKOUT_DIR:-}" ] || fail "archive for $REF contained no top-level directory"
 }
 
-copy_archive_over_root() {
-  local entry name
-  # Top-level merge: environment and operator data are never touched. Files the
-  # new release deleted stay behind until a reinstall.
-  for entry in "$ARCHIVE_INNER"/.* "$ARCHIVE_INNER"/*; do
+copy_checkout_into_root() {
+  local keep_protected="${1:-0}" entry name
+  # Top-level merge: environment and operator data are never touched on an
+  # upgrade. Files the new release deleted stay behind until a reinstall.
+  for entry in "$CHECKOUT_DIR"/.* "$CHECKOUT_DIR"/*; do
     name="$(basename "$entry")"
     case "$name" in
       .|..) continue ;;
     esac
-    case " $PROTECTED_ENTRIES " in
-      *" $name "*) continue ;;
-    esac
+    if [ "$keep_protected" = "1" ]; then
+      case " $PROTECTED_ENTRIES " in
+        *" $name "*) continue ;;
+      esac
+    fi
+    if [ "$name" = ".git" ] && [ -d "$DIR/.git" ]; then
+      continue
+    fi
     [ -e "$entry" ] || continue
     cp -Rf "$entry" "$DIR"/
   done
@@ -165,18 +194,18 @@ update_code() {
       fail "$DIR is a git checkout but git is unavailable; install git so the upgrade stays consistent"
     fi
     log "upgrading code from the $REF source archive (keeping .venv and .g3ku)"
-    download_archive
-    copy_archive_over_root
+    stage_code archive
+    copy_checkout_into_root 1
     return
   fi
   mkdir -p "$DIR"
-  if command -v git >/dev/null 2>&1; then
-    log "git clone --branch $REF into $DIR"
-    git clone --depth 1 --branch "$REF" "$REPO_GIT" "$DIR" || fail 'git clone failed'
-    return
+  if [ -f "$DIR/.g3ku/config.json" ]; then
+    # 卸载时选择"保留数据"的设备：代码没了、口令与任务还在原地，这次装回来
+    # 直接认领，不重新初始化项目。
+    log "adopting the data root already present at $DIR (config, sessions and keys kept)"
   fi
-  download_archive
-  (shopt -s dotglob; mv "$ARCHIVE_INNER"/* "$DIR"/) || fail 'could not move the extracted checkout into place'
+  stage_code
+  copy_checkout_into_root 0
 }
 
 install_environment() {
@@ -191,16 +220,121 @@ install_environment() {
   (cd "$DIR" && "$UV" sync --frozen) || fail 'uv sync failed'
 }
 
+BIN_DIR="$HOME/.local/bin"
+STATE_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/negi"
+APPS_DIR="${XDG_DATA_HOME:-$HOME/.local/share}/applications"
+ICON_DIR="${XDG_DATA_HOME:-$HOME/.local/share}/icons/hicolor/256x256/apps"
+
+path_has_bin_dir() {
+  case ":$PATH:" in
+    *":$BIN_DIR:"*) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+add_path_entry() {
+  # uv's own installer usually puts ~/.local/bin in the shell rc already; only
+  # write when it is genuinely missing, and never rewrite an rc we did not touch.
+  local rc
+  case "${SHELL:-}" in
+    */zsh) rc="$HOME/.zshrc" ;;
+    */bash) rc="$HOME/.bashrc" ;;
+    *) rc="$HOME/.profile" ;;
+  esac
+  if [ -f "$rc" ] && grep -qs '\.local/bin' "$rc"; then
+    log "$BIN_DIR already referenced in $rc; leaving it alone"
+    PATH_ENTRY_ADDED=false
+    return 0
+  fi
+  if printf '\n# Added by Negi install.sh\nexport PATH="%s:$PATH"\n' "$BIN_DIR" >>"$rc"; then
+    PATH="$BIN_DIR:$PATH"
+    PATH_ENTRY_ADDED=true
+    log "added $BIN_DIR to PATH in $rc (open a new shell, or: source $rc)"
+  else
+    PATH_ENTRY_ADDED=false
+    log "could not write $rc; add $BIN_DIR to PATH yourself"
+  fi
+}
+
+install_entry_point() {
+  mkdir -p "$BIN_DIR" "$STATE_DIR"
+  cat >"$BIN_DIR/negi" <<EOF
+#!/usr/bin/env sh
+set -eu
+if [ -z "\${G3KU_HOME:-}" ] && [ -f "$STATE_DIR/install-root.env" ]; then
+  . "$STATE_DIR/install-root.env"
+fi
+if [ -z "\${G3KU_HOME:-}" ]; then
+  echo "[negi] Negi install root is unknown. Set G3KU_HOME to the Negi folder, or run install.sh again." >&2
+  exit 1
+fi
+NEGI_PYTHON="\$G3KU_HOME/.venv/bin/python"
+if [ ! -x "\$NEGI_PYTHON" ]; then
+  NEGI_PYTHON="\$G3KU_HOME/.venv/Scripts/python.exe"
+fi
+if [ ! -x "\$NEGI_PYTHON" ]; then
+  echo "[negi] no interpreter under \$G3KU_HOME/.venv. Run install.sh again to rebuild the environment." >&2
+  exit 1
+fi
+exec "\$NEGI_PYTHON" "\$G3KU_HOME/negi_bootstrap.py" "\$@"
+EOF
+  chmod +x "$BIN_DIR/negi"
+  printf 'G3KU_HOME=%s\n' "$DIR" >"$STATE_DIR/install-root.env"
+  printf 'NEGI_PATH_ENTRY_ADDED=%s\n' "$PATH_ENTRY_ADDED" >>"$STATE_DIR/install-root.env"
+  if command -v negi >/dev/null 2>&1; then
+    log "command ready: negi -> $(command -v negi)"
+  else
+    log "stub written to $BIN_DIR/negi but that directory is not on PATH in this session"
+  fi
+}
+
+install_desktop_entry() {
+  mkdir -p "$APPS_DIR" "$ICON_DIR"
+  if [ -f "$DIR/assets/icon.png" ]; then
+    cp -f "$DIR/assets/icon.png" "$ICON_DIR/negi.png"
+  fi
+  cat >"$APPS_DIR/negi.desktop" <<EOF
+[Desktop Entry]
+Type=Application
+Version=1.0
+Name=Negi
+Comment=Start Negi and open the browser
+Exec=$BIN_DIR/negi start --hidden
+Icon=negi
+Terminal=false
+Categories=Utility;Development;
+StartupWMClass=negi
+EOF
+  command -v update-desktop-database >/dev/null 2>&1 && update-desktop-database "$APPS_DIR" >/dev/null 2>&1
+  log "desktop entry: $APPS_DIR/negi.desktop"
+}
+
 log "target directory: $DIR"
 ensure_uv
 update_code
 install_environment
+
+PATH_ENTRY_ADDED=false
+if path_has_bin_dir; then
+  log "$BIN_DIR is already on PATH"
+elif [ "$NO_PATH" -eq 0 ]; then
+  add_path_entry
+else
+  log 'leaving PATH alone (--no-path)'
+fi
+install_entry_point
+if [ "$NO_SHORTCUT" -eq 0 ]; then
+  install_desktop_entry
+else
+  log "skipping the desktop entry (--no-shortcut)"
+fi
+log 'from any terminal now on: negi'
 
 if [ "$NO_START" -eq 1 ]; then
   log "environment ready at $DIR (--no-start: web not launched)"
   exit 0
 fi
 
-log 'launching G3KU web (first run asks for the project password in the browser)'
+log 'launching Negi web (first run asks for the project password in the browser)'
 cd "$DIR"
 exec .venv/bin/python negi_bootstrap.py web

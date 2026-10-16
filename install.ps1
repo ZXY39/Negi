@@ -1,4 +1,4 @@
-#requires -Version 5.1
+﻿#requires -Version 5.1
 <#
   G3KU one-line installer (Windows).
 
@@ -12,7 +12,9 @@ param(
     [string]$Dir = (Join-Path $env:USERPROFILE 'Negi'),
     [string]$Ref = 'v2.4.0',
     [switch]$NoStart,
-    [switch]$Upgrade
+    [switch]$Upgrade,
+    [switch]$NoPath,
+    [switch]$NoShortcut
 )
 
 $ErrorActionPreference = 'Stop'
@@ -25,6 +27,11 @@ $RepoZip = "https://github.com/$RepoOwner/$RepoName/archive/${Ref}.zip"
 $UvInstaller = 'https://astral.sh/uv/install.ps1'
 # Kept across upgrades: the environment and everything the operator created.
 $ProtectedEntries = @('.venv', '.g3ku', '.git')
+# Per-user install surface outside the project root: the command stub, the icon
+# the shortcuts point at, and the pointer that tells the stub where the code is.
+$AppDisplayName = 'Negi'
+$StateDir = Join-Path $env:LOCALAPPDATA $AppDisplayName
+$UninstallKey = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\$AppDisplayName"
 
 function Write-Step {
     param([string]$Message)
@@ -86,33 +93,49 @@ function Get-ProjectPin {
     return $null
 }
 
-function Install-FromArchive {
-    param([string]$Root, [switch]$Overwrite)
-    $tmp = Join-Path ([System.IO.Path]::GetTempPath()) ("g3ku-" + [Guid]::NewGuid().ToString('N'))
-    $zip = Join-Path $tmp 'source.zip'
-    New-Item -ItemType Directory -Force -Path $tmp | Out-Null
+function Copy-CheckoutInto {
+    param([string]$Source, [string]$Root, [switch]$KeepProtected)
+    # Top-level merge: environment and operator data are never touched on an
+    # upgrade. Files the new release deleted stay behind until a reinstall.
+    Get-ChildItem -LiteralPath $Source -Force | ForEach-Object {
+        if ($KeepProtected -and $ProtectedEntries -contains $_.Name) { return }
+        if ($_.Name -eq '.git' -and (Test-Path (Join-Path $Root '.git'))) { return }
+        Copy-Item -LiteralPath $_.FullName -Destination $Root -Recurse -Force
+    }
+}
+
+function Get-CheckoutStage {
+    param([string]$StageRoot, [switch]$Archive)
+    if (-not $Archive -and (Get-Command git -ErrorAction SilentlyContinue)) {
+        $target = Join-Path $StageRoot 'checkout'
+        Write-Step "git clone --depth 1 --branch $Ref (staged)"
+        Invoke-Checked @('git', 'clone', '--depth', '1', '--branch', $Ref, $RepoGit, $target) -Where $target
+        return $target
+    }
+    Write-Step "downloading $RepoZip"
+    $zip = Join-Path $StageRoot 'source.zip'
+    Invoke-WebRequest -Uri $RepoZip -OutFile $zip -UseBasicParsing
+    $expanded = Join-Path $StageRoot 'expanded'
+    Expand-Archive -LiteralPath $zip -DestinationPath $expanded -Force
+    $inner = Get-ChildItem -LiteralPath $expanded -Directory | Select-Object -First 1
+    if (-not $inner) {
+        Write-Error "[install] archive for $Ref contained no top-level directory"
+    }
+    return $inner.FullName
+}
+
+function Install-CodeInto {
+    param([string]$Root, [switch]$KeepProtected, [switch]$Archive)
+    # 代码一律先落到临时目录再逐顶层合并：`git clone` 对着一个非空目录（保留数据
+    # 后重装的 .g3ku 就算非空）直接 fatal，装不上也谈不上认领。
+    $stageRoot = Join-Path ([System.IO.Path]::GetTempPath()) ('negi-stage-' + [Guid]::NewGuid().ToString('N'))
     try {
-        Invoke-WebRequest -Uri $RepoZip -OutFile $zip -UseBasicParsing
-        Expand-Archive -LiteralPath $zip -DestinationPath $tmp -Force
-        $inner = Get-ChildItem -LiteralPath $tmp -Directory | Select-Object -First 1
-        if (-not $inner) {
-            Write-Error "[install] archive for $Ref contained no top-level directory"
-        }
-        if ($Overwrite) {
-            # Top-level merge: environment and operator data are never touched.
-            # Files the new release deleted stay behind until a reinstall.
-            Get-ChildItem -LiteralPath $inner.FullName -Force | ForEach-Object {
-                if ($ProtectedEntries -notcontains $_.Name) {
-                    Copy-Item -LiteralPath $_.FullName -Destination $Root -Recurse -Force
-                }
-            }
-        }
-        else {
-            Get-ChildItem -LiteralPath $inner.FullName -Force | Move-Item -Destination $Root
-        }
+        New-Item -ItemType Directory -Force -Path $stageRoot | Out-Null
+        $checkout = Get-CheckoutStage -StageRoot $stageRoot -Archive:$Archive
+        Copy-CheckoutInto -Source $checkout -Root $Root -KeepProtected:$KeepProtected
     }
     finally {
-        Remove-Item -LiteralPath $tmp -Recurse -Force -ErrorAction SilentlyContinue
+        Remove-Item -LiteralPath $stageRoot -Recurse -Force -ErrorAction SilentlyContinue
     }
 }
 
@@ -145,17 +168,16 @@ function Update-Code {
             Write-Error "[install] $Root is a git checkout but git is unavailable; install git so the upgrade stays consistent"
         }
         Write-Step "upgrading code from the $Ref source archive (keeping .venv and .g3ku)"
-        Install-FromArchive -Root $Root -Overwrite
+        Install-CodeInto -Root $Root -KeepProtected -Archive
         return
     }
     New-Item -ItemType Directory -Force -Path $Root | Out-Null
-    if (Get-Command git -ErrorAction SilentlyContinue) {
-        Write-Step "git clone --branch $Ref into $Root"
-        Invoke-Checked @('git', 'clone', '--depth', '1', '--branch', $Ref, $RepoGit, $Root) -Where $Root
-        return
+    if (Test-Path (Join-Path $Root '.g3ku' 'config.json')) {
+        # 卸载时选择"保留数据"的设备：代码没了、口令与任务还在原地，这次装回来
+        # 直接认领，不重新初始化项目。
+        Write-Step "adopting the data root already present at $Root (config, sessions and keys kept)"
     }
-    Write-Step "git not available, downloading $RepoZip"
-    Install-FromArchive -Root $Root
+    Install-CodeInto -Root $Root
 }
 
 function Install-Environment {
@@ -183,10 +205,173 @@ function Get-VenvPython {
     Write-Error "[install] no interpreter inside $Root/.venv after uv sync"
 }
 
+function Get-UserBinDir {
+    return Join-Path $env:USERPROFILE '.local\bin'
+}
+
+function Get-TreeSizeBytes {
+    param([string]$Path)
+    # EstimatedSize and the uninstall dialog both need a real number; a .NET
+    # stack walk stays in the seconds range on a 14k-file .venv, where
+    # Get-ChildItem -Recurse | Measure-Object builds an object per file.
+    $total = 0
+    $stack = New-Object 'System.Collections.Generic.Stack[string]'
+    $stack.Push($Path)
+    while ($stack.Count -gt 0) {
+        $entries = @()
+        try { $entries = [System.IO.Directory]::EnumerateFileSystemEntries($stack.Pop()) } catch { continue }
+        foreach ($entry in $entries) {
+            try {
+                if ([System.IO.Directory]::Exists($entry)) { $stack.Push($entry) }
+                else { $total += (New-Object System.IO.FileInfo($entry)).Length }
+            } catch { }
+        }
+    }
+    return $total
+}
+
+function Add-UserPathEntry {
+    param([string]$Directory)
+    # Returns $true only when this install is the one that added the entry, so
+    # uninstall can take it back without touching a PATH the operator edited.
+    $current = [Environment]::GetEnvironmentVariable('Path', 'User')
+    $parts = @()
+    if ($current) { $parts = @($current -split ';' | Where-Object { $_ }) }
+    $wanted = $Directory.TrimEnd('\')
+    foreach ($part in $parts) {
+        if ($part.TrimEnd('\') -ieq $wanted) { return $false }
+    }
+    # .NET broadcasts WM_SETTINGCHANGE here, so terminals opened from Explorer
+    # later pick the entry up without a sign-out.
+    [Environment]::SetEnvironmentVariable('Path', (($parts + $wanted) -join ';'), 'User')
+    $env:Path = "$env:Path;$wanted"
+    return $true
+}
+
+function Write-InstallPointer {
+    param([string]$Root, [bool]$PathEntryAdded, [string]$BinDir)
+    New-Item -ItemType Directory -Force -Path $StateDir | Out-Null
+    $payload = [ordered]@{
+        version          = $Ref
+        root             = $Root
+        bin_dir          = $BinDir
+        path_entry_added = $PathEntryAdded
+        installed_at     = (Get-Date).ToUniversalTime().ToString('yyyy-MM-ddTHH:mm:ssZ')
+    } | ConvertTo-Json
+    Set-Content -LiteralPath (Join-Path $StateDir 'install-root.json') -Value $payload -Encoding UTF8
+    Set-Content -LiteralPath (Join-Path $BinDir 'negi-root.cmd') -Value "@echo off`r`nset `"G3KU_HOME=$Root`"" -Encoding ASCII
+}
+
+function Install-EntryPoint {
+    param([string]$Root)
+    $bin = Get-UserBinDir
+    New-Item -ItemType Directory -Force -Path $bin | Out-Null
+    $stub = Join-Path $bin 'negi.cmd'
+    $stubBody = @'
+@echo off
+setlocal
+if not defined G3KU_HOME if exist "%~dp0negi-root.cmd" call "%~dp0negi-root.cmd"
+if not defined G3KU_HOME goto :noroot
+set "NEGI_PYTHON=%G3KU_HOME%\.venv\Scripts\python.exe"
+if not exist "%NEGI_PYTHON%" goto :nopython
+"%NEGI_PYTHON%" "%G3KU_HOME%\negi_bootstrap.py" %*
+exit /b %ERRORLEVEL%
+:nopython
+echo [negi] %NEGI_PYTHON% is missing. Run install.ps1 again to rebuild the environment.
+exit /b 1
+:noroot
+echo [negi] Negi install root is unknown. Set G3KU_HOME to the Negi folder, or run install.ps1 again.
+exit /b 1
+'@
+    Set-Content -LiteralPath $stub -Value $stubBody -Encoding ASCII
+    $added = $false
+    if (-not $NoPath) { $added = Add-UserPathEntry -Directory $bin }
+    Write-InstallPointer -Root $Root -PathEntryAdded $added -BinDir $bin
+    $resolved = Get-Command negi -ErrorAction SilentlyContinue
+    if ($resolved) {
+        Write-Step "command ready: negi -> $($resolved.Source)"
+    }
+    elseif ($NoPath) {
+        Write-Step "stub written to $stub (-NoPath: PATH untouched; add $bin yourself)"
+    }
+    else {
+        Write-Step "stub written to $stub but $bin is not reachable in this session; open a new terminal, or add it to PATH"
+    }
+}
+
+function Copy-NegiIcon {
+    param([string]$Root)
+    # The tracked favicon is already a square multi-size .ico, so no image
+    # conversion happens at install time. It lives under LOCALAPPDATA because
+    # -Upgrade merges top-level entries over the project root.
+    $source = Join-Path $Root 'g3ku\web\frontend\favicon.ico'
+    if (-not (Test-Path $source)) { return $null }
+    New-Item -ItemType Directory -Force -Path $StateDir | Out-Null
+    $target = Join-Path $StateDir 'negi.ico'
+    Copy-Item -LiteralPath $source -Destination $target -Force
+    return $target
+}
+
+function Install-DesktopIcons {
+    param([string]$Root, [string]$IconPath)
+    $pythonw = Join-Path $Root '.venv\Scripts\pythonw.exe'
+    if (-not (Test-Path $pythonw)) {
+        Write-Step "no pythonw.exe under $Root, skipping shortcuts"
+        return
+    }
+    $targets = @()
+    $desktop = [Environment]::GetFolderPath('Desktop')
+    if ($desktop) { $targets += (Join-Path $desktop "$AppDisplayName.lnk") }
+    $programs = [Environment]::GetFolderPath('Programs')
+    if ($programs) { $targets += (Join-Path $programs "$AppDisplayName.lnk") }
+    $shell = New-Object -ComObject WScript.Shell
+    foreach ($target in $targets) {
+        $link = $shell.CreateShortcut($target)
+        # pythonw allocates no console, so the icon starts Negi without the
+        # window flash a .cmd or -WindowStyle Hidden would still show.
+        $link.TargetPath = $pythonw
+        $link.Arguments = """$Root\negi_bootstrap.py"" start --hidden"
+        $link.WorkingDirectory = $Root
+        $link.Description = 'Start Negi and open the browser'
+        if ($IconPath) { $link.IconLocation = "$IconPath,0" }
+        $link.Save()
+        Write-Step "shortcut: $target"
+    }
+}
+
+function Write-UninstallRegistryEntry {
+    param([string]$Root, [string]$IconPath)
+    $sizeBytes = Get-TreeSizeBytes -Path $Root
+    $uninstaller = Join-Path $Root 'uninstall.ps1'
+    $fields = [ordered]@{
+        DisplayName     = $AppDisplayName
+        DisplayVersion  = $Ref.TrimStart('v')
+        Publisher       = $RepoOwner
+        InstallLocation = $Root
+        UninstallString = "powershell.exe -NoProfile -ExecutionPolicy Bypass -File `"$uninstaller`""
+        EstimatedSize   = [int][math]::Round($sizeBytes / 1KB)
+        NoModify        = 1
+        NoRepair        = 1
+        URLInfoAbout    = "https://github.com/$RepoOwner/$RepoName"
+    }
+    if ($IconPath) { $fields['DisplayIcon'] = "$IconPath,0" }
+    if (-not (Test-Path $UninstallKey)) { New-Item -Path $UninstallKey -Force | Out-Null }
+    foreach ($name in $fields.Keys) {
+        Set-ItemProperty -Path $UninstallKey -Name $name -Value $fields[$name]
+    }
+    Write-Step "installed apps entry: $AppDisplayName ($([math]::Round($sizeBytes / 1MB, 1)) MB)"
+}
+
 Write-Step "target directory: $Dir"
 $uv = Ensure-Uv
 Update-Code -Root $Dir
 Install-Environment -uv $uv -Root $Dir
+
+$icon = Copy-NegiIcon -Root $Dir
+Install-EntryPoint -Root $Dir
+if (-not $NoShortcut) { Install-DesktopIcons -Root $Dir -IconPath $icon }
+Write-UninstallRegistryEntry -Root $Dir -IconPath $icon
+Write-Step 'from any terminal now on: negi'
 
 if ($NoStart) {
     Write-Step "environment ready at $Dir (-NoStart: web not launched)"
