@@ -23,6 +23,8 @@ RUNTIME_CONSOLE_LOG_FILE = RUNTIME_LOG_DIR / "console.log"
 RUNTIME_CONSOLE_LOG_MAX_BYTES = 50 * 1024 * 1024
 RUNTIME_CONSOLE_LOG_RETENTION_SECONDS = 7 * 24 * 3600
 MIN_PYTHON = (3, 11)
+DEFAULT_WEB_PORT = 18790
+READY_WAIT_SECONDS = 180
 RUNTIME_IMPORT_PROBES = (
     "fastapi",
     "aiosqlite",
@@ -203,12 +205,36 @@ def _open_runtime_console_log_stream() -> object | None:
         return None
 
 
-def _web_bind_port() -> int:
+def _port_override(args: list[str]) -> int | None:
+    """``--port 9000`` / ``-p 9000`` / ``--port=9000`` out of a forwarded argv.
+
+    The readiness probe has to watch the port the child will actually bind: the
+    config value alone makes every non-default port look like a startup failure
+    while the server is running fine.
+    """
+    for index, part in enumerate(args):
+        value: str | None = None
+        if part in ("--port", "-p") and index + 1 < len(args):
+            value = args[index + 1]
+        elif str(part).startswith("--port="):
+            value = str(part).split("=", 1)[1]
+        if value is None:
+            continue
+        try:
+            return int(str(value).strip())
+        except ValueError:
+            return None
+    return None
+
+
+def _web_bind_port(port_override: int | None = None) -> int:
+    if port_override is not None:
+        return port_override
     web_cfg = _load_bootstrap_config().get("web")
     try:
-        return int((web_cfg or {}).get("port") or 18790)
+        return int((web_cfg or {}).get("port") or DEFAULT_WEB_PORT)
     except (TypeError, ValueError):
-        return 18790
+        return DEFAULT_WEB_PORT
 
 
 def _probe_web_ready(port: int) -> bool:
@@ -219,8 +245,27 @@ def _probe_web_ready(port: int) -> bool:
         return False
 
 
+def _web_url(port: int) -> str:
+    # The bind host in config is routinely 0.0.0.0, which is not a clickable
+    # address; the loopback form is what the operator is meant to open.
+    return f"http://127.0.0.1:{port}/"
+
+
+def _open_browser(url: str) -> bool:
+    try:
+        import webbrowser
+    except Exception as exc:
+        print(f"[negi] no browser to open: {exc}; the URL is {url}", flush=True)
+        return False
+    try:
+        return bool(webbrowser.open(url))
+    except Exception as exc:
+        print(f"[negi] could not open the browser: {exc}; the URL is {url}", flush=True)
+        return False
+
+
 def _print_web_ready_banner(port: int) -> None:
-    url = f"http://127.0.0.1:{port}/"
+    url = _web_url(port)
     if os.environ.get("WT_SESSION"):
         url = f"\x1b]8;;{url}\x07{url}\x1b]8;;\x07"
     print(f"[negi] web UI started successfully: {url} (click to open)", flush=True)
@@ -234,70 +279,127 @@ def _print_web_start_failure(returncode: int) -> None:
     )
 
 
+def _take_hidden_flag(args: list[str]) -> tuple[list[str], bool]:
+    if "--hidden" not in args:
+        return args, False
+    return [part for part in args if part != "--hidden"], True
+
+
+def _spawn_web_runtime(args: list[str], *, hidden: bool, console_log_stream: object | None) -> object:
+    """Start ``python -m g3ku web`` in the shape the reaper recognizes.
+
+    The cmdline stays ``-m g3ku web`` on purpose: ``g3ku/web/launcher.py`` and
+    ``start-negi.*`` find stale servers by exactly that token shape, so any
+    other process form would leave an orphan holding the port and start lock.
+    """
+    popen_kwargs: dict[str, object] = {"cwd": str(PROJECT_ROOT)}
+    env: dict[str, str] | None = None
+    if console_log_stream is not None:
+        popen_kwargs["stdout"] = console_log_stream
+        popen_kwargs["stderr"] = subprocess.STDOUT
+        env = dict(os.environ)
+        env["PYTHONUNBUFFERED"] = "1"
+    elif hidden:
+        popen_kwargs["stdout"] = subprocess.DEVNULL
+        popen_kwargs["stderr"] = subprocess.DEVNULL
+    if hidden:
+        popen_kwargs["stdin"] = subprocess.DEVNULL
+        popen_kwargs["env"] = env if env is not None else dict(os.environ)
+        if os.name == "nt":
+            popen_kwargs["creationflags"] = subprocess.DETACHED_PROCESS | subprocess.CREATE_NEW_PROCESS_GROUP
+        else:
+            popen_kwargs["start_new_session"] = True
+    return subprocess.Popen([str(VENV_PYTHON), "-m", "g3ku", *args], **popen_kwargs)
+
+
+def _wait_for_web_ready(child: object, port: int) -> bool:
+    deadline = time.monotonic() + READY_WAIT_SECONDS
+    warned_slow = False
+    while child.poll() is None:  # type: ignore[union-attr]
+        if _probe_web_ready(port):
+            return True
+        if not warned_slow and time.monotonic() >= deadline:
+            warned_slow = True
+            print(
+                f"[negi] web UI is not responding on port {port} yet; "
+                f"check {RUNTIME_CONSOLE_LOG_FILE}",
+                flush=True,
+            )
+        time.sleep(1)
+    return False
+
+
+def _launch_web(web_args: list[str], *, port: int, open_browser: bool, hidden: bool) -> int:
+    console_log_stream = _open_runtime_console_log_stream()
+    if console_log_stream is not None:
+        print(f"[negi] web runtime stdout/stderr appending to {RUNTIME_CONSOLE_LOG_FILE}", flush=True)
+    elif hidden:
+        print(f"[negi] {RUNTIME_CONSOLE_LOG_FILE} is not writable; a hidden server keeps no log")
+    child = _spawn_web_runtime(web_args, hidden=hidden, console_log_stream=console_log_stream)
+    try:
+        if not _wait_for_web_ready(child, port):
+            returncode = int(getattr(child, "returncode", None) or 1)
+            _print_web_start_failure(returncode)
+            return returncode
+        _print_web_ready_banner(port)
+        if open_browser:
+            _open_browser(_web_url(port))
+        if hidden:
+            # Nobody owns this console: stopping the server is the web UI's
+            # exit button, and the process stays reachable through `-m g3ku web`.
+            return 0
+        return int(child.wait() or 0)  # type: ignore[union-attr]
+    except KeyboardInterrupt:
+        raise
+    finally:
+        if console_log_stream is not None:
+            try:
+                console_log_stream.close()  # type: ignore[union-attr]
+            except Exception:
+                pass
+
+
+def _run_start(extra_args: list[str]) -> int:
+    hidden = "--hidden" in extra_args
+    web_args, _ = _take_hidden_flag(list(extra_args))
+    port = _web_bind_port(_port_override(web_args))
+    if _probe_web_ready(port):
+        url = _web_url(port)
+        print(f"[negi] Negi is already running on port {port}: {url}", flush=True)
+        _open_browser(url)
+        return 0
+    print(f"[negi] Negi is not running yet; starting the web UI on port {port}", flush=True)
+    return _launch_web(["web", *web_args], port=port, open_browser=True, hidden=hidden)
+
+
 def main(argv: list[str] | None = None) -> int:
     os.chdir(PROJECT_ROOT)
     _ensure_venv()
     _ensure_project_installed()
     args = list(argv if argv is not None else sys.argv[1:])
     if not args:
-        args = ["web"]
-        print("[negi] no command given, starting web UI (use `negi.cmd <command>` for others)")
+        args = ["start"]
+        print("[negi] no command given, starting the web UI (use `negi.cmd <command>` for others)")
     _rotate_runtime_console_log()
-    console_log_stream: object | None = None
-    process_env: dict[str, str] | None = None
-    is_web_command = bool(args) and str(args[0] or "").strip().lower() == "web"
-    if is_web_command:
-        console_log_stream = _open_runtime_console_log_stream()
-        if console_log_stream is not None:
-            print(f"[negi] web runtime stdout/stderr appending to {RUNTIME_CONSOLE_LOG_FILE}")
-            process_env = dict(os.environ)
-            process_env["PYTHONUNBUFFERED"] = "1"
+    command = str(args[0] or "").strip().lower()
     try:
-        if is_web_command:
-            child = subprocess.Popen(
-                [str(VENV_PYTHON), "-m", "g3ku", *args],
-                cwd=str(PROJECT_ROOT),
-                stdout=console_log_stream,
-                stderr=subprocess.STDOUT if console_log_stream is not None else None,
-                env=process_env,
+        if command == "start":
+            return _run_start(args[1:])
+        if command == "web":
+            web_args = args[1:]
+            return _launch_web(
+                ["web", *web_args],
+                port=_web_bind_port(_port_override(web_args)),
+                open_browser=False,
+                hidden=False,
             )
-            port = _web_bind_port()
-            deadline = time.monotonic() + 180
-            warned_slow = False
-            ready = False
-            while child.poll() is None:
-                if _probe_web_ready(port):
-                    ready = True
-                    break
-                if not warned_slow and time.monotonic() >= deadline:
-                    warned_slow = True
-                    print(
-                        f"[negi] web UI is not responding on port {port} yet; "
-                        f"check {RUNTIME_CONSOLE_LOG_FILE}",
-                        flush=True,
-                    )
-                time.sleep(1)
-            if not ready:
-                _print_web_start_failure(int(child.returncode or 1))
-                return int(child.returncode or 1)
-            _print_web_ready_banner(port)
-            return int(child.wait() or 0)
         completed = subprocess.run(
             [str(VENV_PYTHON), "-m", "g3ku", *args],
             cwd=str(PROJECT_ROOT),
-            stdout=console_log_stream,
-            stderr=subprocess.STDOUT if console_log_stream is not None else None,
-            env=process_env,
         )
         return int(completed.returncode or 0)
     except KeyboardInterrupt:
         return 130
-    finally:
-        if console_log_stream is not None:
-            try:
-                console_log_stream.close()
-            except Exception:
-                pass
 
 
 if __name__ == "__main__":
