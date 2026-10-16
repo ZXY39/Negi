@@ -13836,8 +13836,8 @@ function renderCeoSessionCard(item, { allowActions = false, index = -1 } = {}) {
                             </span>
                             <span class="ceo-session-menu-info-row"><span>创建时间</span><code>${esc(createdText || "-")}</code></span>
                         </div>
-                        <button type="button" class="toolbar-menu-item" data-session-rename="${esc(sessionId)}" role="menuitem">命名</button>
-                        <button type="button" class="toolbar-menu-item danger" data-session-delete="${esc(sessionId)}" role="menuitem">删除</button>
+                        ${item?.can_rename === false ? "" : `<button type="button" class="toolbar-menu-item" data-session-rename="${esc(sessionId)}" role="menuitem">命名</button>`}
+                        ${item?.can_delete === false ? "" : `<button type="button" class="toolbar-menu-item danger" data-session-delete="${esc(sessionId)}" role="menuitem">删除</button>`}
                     </div>
                 </div>
             ` : ""}
@@ -13867,7 +13867,7 @@ function renderCeoSessions() {
                 <section class="ceo-session-group">
                     <div class="ceo-session-group-title">${esc(String(group?.label || group?.channel_id || "渠道"))}</div>
                     <div class="ceo-session-group-list" role="list">
-                        ${items.map((item) => renderCeoSessionCard(item, { allowActions: false })).join("")}
+                        ${items.map((item) => renderCeoSessionCard(item, { allowActions: true })).join("")}
                     </div>
                 </section>
             `;
@@ -14291,10 +14291,15 @@ function buildCeoBulkDeleteSummary(items = []) {
     let fallbackDeletable = 0;
     let fallbackInProgress = 0;
     let channelCount = 0;
+    let channelHideCount = 0;
+    let channelRetireCount = 0;
     let localCount = 0;
     entries.forEach(({ item, sessionId }) => {
-        if (isChannelSessionItem(item) || sessionId.startsWith("china:")) channelCount += 1;
-        else localCount += 1;
+        if (isChannelSessionItem(item) || sessionId.startsWith("china:")) {
+            channelCount += 1;
+            if (item?.hides_on_delete === true) channelHideCount += 1;
+            else channelRetireCount += 1;
+        } else localCount += 1;
         const deleteCheck = entries.find((entry) => entry.sessionId === sessionId)?.deleteCheck || {};
         const relatedTasks = deleteCheck?.related_tasks && typeof deleteCheck.related_tasks === "object" ? deleteCheck.related_tasks : {};
         fallbackTotal += normalizeInt(relatedTasks.total, 0);
@@ -14324,7 +14329,7 @@ function buildCeoBulkDeleteSummary(items = []) {
     const onlyChannel = channelCount > 0 && localCount === 0;
     const onlyLocal = localCount > 0 && channelCount === 0;
     const title = onlyChannel
-        ? (entries.length > 1 ? "批量清空渠道会话" : "清空渠道会话")
+        ? (entries.length > 1 ? "批量删除渠道会话" : "删除渠道会话")
         : onlyLocal
             ? (entries.length > 1 ? "批量删除会话" : "删除会话")
             : "批量清理会话";
@@ -14332,8 +14337,11 @@ function buildCeoBulkDeleteSummary(items = []) {
     if (localCount > 0) {
         textLines.push(`将删除所选 ${localCount} 个本地会话的聊天记录与附件。`);
     }
-    if (channelCount > 0) {
-        textLines.push(`将清空所选 ${channelCount} 个渠道会话的上下文与附件。`);
+    if (channelHideCount > 0) {
+        textLines.push(`将隐藏 ${channelHideCount} 个渠道会话，对方再发消息时它们会回到列表。`);
+    }
+    if (channelRetireCount > 0) {
+        textLines.push(`将删除 ${channelRetireCount} 个渠道会话的上下文与附件，卡片不会回到列表。`);
     }
     const text = textLines.join("\n");
     return {
@@ -14377,6 +14385,11 @@ async function performDeleteCeoSession(sessionId, { deleteTaskRecords = false, r
         clearCeoComposerDraft(targetId);
         if (refreshTasks && S.view === "tasks") await loadTasks();
         clearCeoBulkSelection();
+        if (payload?.identity_hidden) {
+            showToast({ title: "已隐藏", text: "该渠道 token 还在，对方再次发消息时会话会回到列表。", kind: "success" });
+        } else if (payload?.identity_forgotten) {
+            showToast({ title: "已删除", text: "该渠道的 token 已不存在，外部身份一并注销。", kind: "success" });
+        }
         return true;
     } catch (e) {
         showToast({ title: "删除失败", text: e.message || "Unknown error", kind: "error" });
@@ -14413,10 +14426,17 @@ async function requestDeleteCeoSession(sessionId) {
     syncCeoPrimaryButton();
     const relatedTasks = deleteCheck?.related_tasks && typeof deleteCheck.related_tasks === "object" ? deleteCheck.related_tasks : {};
     const hasRelatedTaskRecords = normalizeInt(relatedTasks.total, 0) > 0;
+    const isChannel = isChannelSessionItem(current);
+    // 渠道会话的「删除」按该桥的 token 条目分流，读数由目录带下来（判据在服务端一处）。
+    const hidesOnDelete = isChannel && current?.hides_on_delete === true;
     openConfirm({
-        title: "删除会话",
-        text: `将删除会话“${current.title || current.session_id}”（${shortSessionIdLabel(current.session_id)}）的聊天记录与附件。`,
-        confirmLabel: "删除",
+        title: isChannel ? (hidesOnDelete ? "隐藏渠道会话" : "删除渠道会话") : "删除会话",
+        text: isChannel
+            ? (hidesOnDelete
+                ? `将清空渠道会话“${current.title || current.session_id}”的上下文并从列表隐藏，对方再次发消息时它会回来。`
+                : `将删除渠道会话“${current.title || current.session_id}”的上下文与附件，卡片不会回到列表。`)
+            : `将删除会话“${current.title || current.session_id}”（${shortSessionIdLabel(current.session_id)}）的聊天记录与附件。`,
+        confirmLabel: isChannel && hidesOnDelete ? "隐藏" : "删除",
         confirmKind: "danger",
         returnFocus: U.ceoNewSession,
         checkbox: hasRelatedTaskRecords ? {

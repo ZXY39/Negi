@@ -1,6 +1,7 @@
-"""渠道会话删除的两个轴：默认只清历史、保留桥的身份映射；显式 `forget_identity`
-才摘除身份，而摘除前必须证明没有东西还指着这个会话键（未 ack 的出站账本行、
-指向它的定时任务），否则推送会静默消失——`find_by_any_key` 只 WARNING 后取最新。"""
+"""渠道会话删除的三条出口：该桥 token 还在＝清历史并把卡片隐身（身份保留、入站即回来）；
+token 不在＝连身份一起注销；显式 `forget_identity` 无论 token 在不在都按注销走。
+注销前必须证明没有东西还指着这个会话键（未 ack 的出站账本行、指向它的定时任务），
+否则推送会静默消失——`find_by_any_key` 只 WARNING 后取最新。"""
 
 from __future__ import annotations
 
@@ -10,6 +11,7 @@ import pytest
 from fastapi import HTTPException
 
 from g3ku.cron.types import CronJob, CronPayload
+from g3ku.runtime import web_ceo_sessions
 from g3ku.runtime.api import ceo_sessions
 from g3ku.runtime.external_outbox import (
     configure_external_outbox_root,
@@ -51,7 +53,18 @@ def _agent(cron_jobs) -> SimpleNamespace:
 
 @pytest.fixture
 def harness(tmp_path, monkeypatch):
-    """真实 SessionManager + 真实注册表 + 真实账本根，只把销毁性的邻居接缝换成假件。"""
+    """真实 SessionManager + 真实注册表 + 真实账本根，只把销毁性的邻居接缝换成假件。
+
+    `external_bridge_token_present` 默认按"该桥 token 还在"回，用例用 `delete(token_present=False)`
+    切到"条目已不在"那一条道——不这么钉住的话，判据会跟着本机 `.g3ku/config.json` 里的真实
+    token 名单漂，用例就不再是用例了。
+    """
+    token_state = {"present": True}
+    monkeypatch.setattr(
+        web_ceo_sessions,
+        "external_bridge_token_present",
+        lambda bridge_id: bool(token_state["present"]),
+    )
     monkeypatch.setattr(ceo_sessions, "get_web_heartbeat_service", lambda agent: None)
     monkeypatch.setattr(ceo_sessions, "delete_web_ceo_session_artifacts", lambda **kwargs: None)
     configure_external_outbox_root(tmp_path / "outbox")
@@ -64,7 +77,14 @@ def harness(tmp_path, monkeypatch):
     assert created is True
     session_key = entry.session_key
 
-    async def delete(cron_jobs=None, *, session_key_override: str | None = None, **kwargs):
+    async def delete(
+        cron_jobs=None,
+        *,
+        session_key_override: str | None = None,
+        token_present: bool = True,
+        **kwargs,
+    ):
+        token_state["present"] = bool(token_present)
         return await ceo_sessions._delete_single_ceo_session(
             _agent(cron_jobs),
             session_manager,
@@ -88,13 +108,65 @@ def _write_transcript(session_manager: SessionManager, session_key: str) -> None
 
 
 async def test_delete_keeps_identity_by_default(harness):
-    """既定契约：清历史不注销身份，桥下次用同一个 external_key 仍落回这个会话键。"""
+    """该桥 token 还在时的既定契约：清历史不注销身份，桥下次用同一个 external_key
+    仍落回这个会话键；卡片按隐藏处理，等入站把它带回来。"""
     delete, registry, session_key = harness
     result = await delete()
     assert result["cleared"] is True
     assert result["identity_forgotten"] is False
-    assert registry.get_by_session_key(session_key) is not None
+    assert result["identity_hidden"] is True
+    assert registry.get_by_session_key(session_key).hidden is True
     assert registry.get_session_key(bridge_id="qq", external_key=EXTERNAL_KEY) == session_key
+
+
+async def test_hidden_identity_returns_on_the_next_inbound(harness):
+    """隐身只是列表上的事：同一个 external_key 再进一条消息，标记当场清掉。"""
+    delete, registry, session_key = harness
+    await delete()
+    assert registry.get_by_session_key(session_key).hidden is True
+    entry, created = registry.resolve_or_create(bridge_id="qq", external_key=EXTERNAL_KEY)
+    assert created is False
+    assert entry.session_key == session_key
+    assert entry.hidden is False
+
+
+async def test_delete_retires_identity_when_bridge_token_is_gone(harness):
+    """条目都不在了就没人能再认领这条会话：删除走彻底注销，不留永久隐身的第三态。"""
+    delete, registry, session_key = harness
+    result = await delete(token_present=False)
+    assert result["identity_forgotten"] is True
+    assert result["identity_hidden"] is False
+    assert registry.get_by_session_key(session_key) is None
+    assert registry.get_session_key(bridge_id="qq", external_key=EXTERNAL_KEY) is None
+
+
+async def test_retire_lane_lets_unacked_outbox_rows_through(harness):
+    """没有 token 就没有任何桥能再来 ack 这些行，闸门会把会话永久钉死在删不掉的状态。
+    摘掉身份后账本按可路由性自己把它们销成 unreachable（`web._pending_record_reachable`）。"""
+    delete, registry, session_key = harness
+    record_outbound_message(
+        session_key=session_key, external_key=EXTERNAL_KEY, text="没人取的回复", event="reply.final"
+    )
+    result = await delete(token_present=False)
+    assert result["identity_forgotten"] is True
+    assert registry.get_by_session_key(session_key) is None
+
+
+async def test_retire_lane_still_refused_when_job_targets_the_session(harness):
+    """定时任务是操作员自己的引用者，闸门照拦；被拦下时不能留下半成品（既没注销也没隐藏）。"""
+    delete, registry, session_key = harness
+    job = CronJob(
+        id="job-live",
+        name="还在推的定时任务",
+        enabled=True,
+        payload=CronPayload(session_key=session_key, channel="ext", to=EXTERNAL_KEY),
+    )
+    with pytest.raises(HTTPException) as raised:
+        await delete([job], token_present=False)
+    assert raised.value.detail == "scheduled_target:job-live"
+    entry = registry.get_by_session_key(session_key)
+    assert entry is not None
+    assert entry.hidden is False
 
 
 async def test_forget_identity_drops_the_registry_row(harness):

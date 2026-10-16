@@ -37,6 +37,7 @@ from g3ku.runtime.web_ceo_sessions import (
     ceo_session_family,
     ceo_session_model_selection,
     ceo_session_task_defaults_scope,
+    channel_session_hides_on_delete,
     create_web_ceo_session,
     delete_web_ceo_session_artifacts,
     ensure_ceo_session_metadata,
@@ -429,20 +430,25 @@ def _aggregate_session_delete_payloads(items: list[dict]) -> dict:
     }
 
 
-def _identity_forget_blocker(agent, *, session_key: str, external_key: str) -> str:
+def _identity_forget_blocker(agent, *, session_key: str, external_key: str, check_outbox: bool = True) -> str:
     """摘除外部身份前的两道闸门，返回拒绝码（空串=可以摘）。
 
     清历史不需要闸门——那是「保留身份、只把上下文清空」的既定契约。摘身份不一样：
     `external_key → session_key` 一旦没了，同一个键下次进来会新建会话，而还指着旧键的
     东西会静默改道——`find_by_any_key` 只 WARNING 后取最新，不报错。所以先看两类真实
     引用者：还没被桥取走的回复（账本里未 ack 的行）、以及投递目标就是这个会话的定时任务。
+
+    `check_outbox=False` 用于「该桥 token 已不存在」那条自动注销道：没有 token 就没有
+    任何桥能再 ack 这些行，闸门会把会话永久钉死在删不掉的状态。摘掉身份后
+    `web._pending_record_reachable` 会把它们判成不可达并销账（留 WARNING），所以这里放行
+    不是丢弃，是换到那条已有的终态出口。
     """
     pending = [
         record
         for record in load_pending_outbound()
         if str(record.get("session_key") or "").strip() == session_key
     ]
-    if pending:
+    if pending and check_outbox:
         return f"outbox_pending:{len(pending)}"
 
     cron_service = getattr(agent, "cron_service", None)
@@ -472,14 +478,26 @@ async def _delete_single_ceo_session(
     forget_identity: bool = False,
     background_tasks: BackgroundTasks | None = None,
 ) -> dict:
-    registry = get_external_session_registry(session_manager.workspace) if forget_identity else None
+    registry = (
+        get_external_session_registry(session_manager.workspace)
+        if (forget_identity or is_channel_session)
+        else None
+    )
     entry = registry.get_by_session_key(session_key) if registry is not None else None
+    # 渠道会话的「删除」按该桥的 token 条目分流：条目还在＝身份留着、卡片隐身（入站即回来）；
+    # 条目没了＝再无人认领，连注册表一起注销。显式 `forget_identity` 的请求优先，按注销走。
+    hides_identity = bool(
+        is_channel_session and not forget_identity and channel_session_hides_on_delete(entry)
+    )
+    forgets_identity = bool(forget_identity or (is_channel_session and not hides_identity and entry is not None))
     identity_forgotten = False
-    if forget_identity:
+    identity_hidden = False
+    if forgets_identity:
         blocker = _identity_forget_blocker(
             agent,
             session_key=session_key,
             external_key=str(getattr(entry, "external_key", "") or ""),
+            check_outbox=forget_identity,
         )
         if blocker:
             raise HTTPException(status_code=400, detail=blocker)
@@ -507,7 +525,10 @@ async def _delete_single_ceo_session(
     if callable(cancel):
         await cancel(session_key)
     if registry is not None:
-        identity_forgotten = registry.forget(session_key) is not None
+        if hides_identity:
+            identity_hidden = registry.set_hidden(session_key, True) is not None
+        elif forgets_identity:
+            identity_forgotten = registry.forget(session_key) is not None
         if identity_forgotten:
             # 会话键是 external_key 的确定性散列，注销后同键再注册会落回同一个路径，
             # 进程内的事件缓冲必须跟着退役，否则新身份能重放出上一世的回复。
@@ -517,6 +538,7 @@ async def _delete_single_ceo_session(
         "deleted": not is_channel_session,
         "cleared": is_channel_session,
         "identity_forgotten": identity_forgotten,
+        "identity_hidden": identity_hidden,
         "deleted_task_count": deleted_task_count,
     }
 

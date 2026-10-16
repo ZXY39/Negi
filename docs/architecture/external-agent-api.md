@@ -23,12 +23,12 @@
 
 ## 3. 会话注册表与 key 命名空间
 
-- `ExternalSessionRegistry`（`g3ku/runtime/external_sessions.py`）维护 `(bridge_id, external_key) ↔ session_key` 双向映射，原子持久化在 `.g3ku/external-sessions/registry.json`。
+- `ExternalSessionRegistry`（`g3ku/runtime/external_sessions.py`）维护 `(bridge_id, external_key) ↔ session_key` 双向映射，原子持久化在 `.g3ku/external-sessions/registry.json`。条目另带 `title` 与 `hidden`：`hidden` 只是网页列表上的隐身标记，映射照旧参与路由，且 `resolve_or_create` 命中既有条目时一律清掉它（入站即现身）；谁打这个标记见 `web-and-admin.md`「Channel Session Clear Contract」。`/api/v1` 的读写面不受该标记影响——桥看得见、也发得进自己名下每条会话。
 - session key 形态 `ext:{bridge_id}:{sha1(external_key)[:16]}`（文件名安全；键里不含外部标识原文，真相只在注册表）。`build_external_session_key` 的 digest 长度参数只是注册表碰撞逃生口。
 - `POST /sessions` 按 `external_key` 幂等 get-or-create；转录复用共享 `SessionManager`（`sessions/ext_*.jsonl`），无独立持久化机制。首次创建成功与 `PATCH` 改名成功后，以尽力而为方式向 web CEO 端推送一次全局 `ceo.sessions.snapshot`（web 运行时未就绪时静默跳过，不影响接口返回）——浏览器只在页面加载时拉取 REST 会话列表，新渠道会话的实时可见性依赖该推送。
 - `ext:` 前缀在 `session_agent.py` 的 frontdoor 连续性前缀表中。目录分组与「历史不可改」两轴收口在 `g3ku/runtime/session_keys.py::is_channel_session_key`（legacy `china:` 归档同语义）。第三轴「能否向该会话投递输入」由注册表决定，与只读判定无关：`/ws/ceo` 对 `ext:` 会话按 `get_external_session_registry().get_by_session_key()` 解析一次（连接期），有条目即接受网页输入、按「回合契约」提交，无条目（`china:*`、注册表丢失的孤儿转录）回 `channel_session_readonly`。
 - 会话 key 编解码的规范实现位于核心模块 `g3ku/runtime/session_keys.py`（`china:*` 格式与历史转录字节级一致，存量转录保持可读）。
-- 注册表条目与转录文件是两个轴，`GET /sessions` 的每一项因此带 `has_transcript`（判据=该会话键在 `SessionManager` 里算出的转录路径存不存在，两个档位都有：`scope=all` 并进来的本地行同样带）：桥一注册就有线上条目而还没有转录，网页侧「删除渠道会话」则相反——清掉转录而留下条目（清除与注销身份的分别见 `web-and-admin.md`「Channel Session Clear Contract」）。
+- 注册表条目与转录文件是两个轴，`GET /sessions` 的每一项因此带 `has_transcript`（判据=该会话键在 `SessionManager` 里算出的转录路径存不存在，两个档位都有：`scope=all` 并进来的本地行同样带）：桥一注册就有线上条目而还没有转录，网页侧「删除渠道会话」则相反——转录照清、条目按该桥在 `externalApi.tokens` 里还有没有条目决定留着打 `hidden` 还是整条摘掉（两种出口与闸门见 `web-and-admin.md`「Channel Session Clear Contract」）。
 - `GET /sessions?scope=all` 是**另一份形状**：它不读注册表，而是复用网页侧的会话目录装配（`ceo_catalog_offload.build_ceo_session_catalog_async` → `web_ceo_sessions.build_session_summary`），因此每一项直接带 `preview_text / message_count / updated_at / is_running / status / session_family / session_origin / can_message`，再加一个 `transcript_path`。这么切的理由是"别开第二条枚举道"：网页侧已经有带 TTL 缓存、在专用线程里跑的全量装配，重写一份按注册表枚举的会既看不见 `web:*` 会话又要自己处理数十 MB 的转录遍历。代价照旧——目录构建遍历全部转录，必须留在那条卸载车道上，不许搬回事件循环。
   - store 取的是**运行时那一份** `agent.sessions`（没有活运行时时才退回新建实例）。新起一个 `SessionManager` 指向同一目录是这条道最贵的错法：目录构造逐键 `get_or_create`，异常被 `except: continue` 吞掉，结果是一份**空 items 配 200 状态码**，看不出任何失败痕迹。
   - 目录把 `items`（本地 `web:`）与 `channel_groups`（渠道会话）分两半给，本接口把两侧合进同一个 `items` 返回，"全部会话"才真是全部。
@@ -48,7 +48,7 @@
 - `Idempotency-Key` 头去重（进程内有界映射）：同会话同键重复提交返回 `status:"duplicate"` + `original_status`——原回合记录仍在则回报其状态与 `turn_id`；排队条目回报 `queued`（无 `turn_id`）；记录已被淘汰的带 id 条目回报 `completed`。排队提交同样占幂等位：否则同一条渠道消息在回合运行期间重试/重发会反复入队，用户收到多份重复回复。回合记录表有界，超限从最旧终态记录淘汰、运行中记录永不淘汰；幂等条目不随记录淘汰失效。
 - 附件：`data_base64` 落盘 `.g3ku/external-uploads/<session>/`，双上限——`kind:"image"` ≤5MiB（与 web 上传同一常量），其余文件类 ≤20MiB（`EXTERNAL_FILE_UPLOAD_MAX_BYTES`），超限一律 413 `attachment_too_large`；桥侧按同值预过滤。图片构造 `image_url` 块，能否进模型由本轮这一发落到的那颗模型是否勾选多模态决定（与 web 上传同语义：不收图时降级成"绝对路径 + 点名配置"的文本行，见 `web-and-admin.md`「Image Upload Gating」）；非图片附件只以「本地路径提示」文本块告知模型（落盘路径可直接用工具读盘），不构造多模态内容块。该目录按会话 slug 分片，随会话删除/清空一起被 rmtree（`clear_web_ceo_session_artifacts` 同时清 web 侧与渠道侧两个上传根），所以渠道附件的寿命等于会话寿命。
 - 控制端点复用桥语义：`POST /turns/{turn_id}/pause`（running guard，空闲返回未暂停）、`POST /sessions/{id}/cancel`。取消面覆盖**两半**：在跑的回合，以及按 `tasks.session_id` 属于本会话、还没落终态的任务（逐个走 `main_task_service.cancel_task`，"暂停未恢复"的任务也在这半里）。回包 `cancelled_turns`/`cancelled_tasks`/`task_ids`/`skipped:[{target,reason,how_to_clear}]`/`tasks_still_running`；`cancelled` 是对接手册里的已发布字段，等于前两者之和。**取消是请求式的**——分离部署下节点在下一个检查点才落终态，所以紧随的几次读数里 `tasks_still_running` 可能仍为正，不是失败；真被拒的目标把原因原样带在 `skipped` 里。
-- `DELETE /sessions/{id}` 是清除语义（对齐 web-and-admin.md「Channel Session Clear Contract」）：转录清空、内存失效、side artifacts 全清，注册表条目保留。注销身份是另一个动作，只在 web 侧提供（`forget_identity`），闸门与后果归 web-and-admin.md 那一节。
+- `DELETE /sessions/{id}` 默认是清除语义（对齐 web-and-admin.md「Channel Session Clear Contract」）：转录清空、内存失效、side artifacts 全清，注册表条目保留；`?purge=true` 才是连条目一起忘掉（`agent-gateway.md`「MCP stdio 网关契约」的 `negi_delete_conversation` 走这条）。摘除身份时的闸门与后果一律归 web-and-admin.md 那一节：网页侧按该桥的 token 条目分流隐藏/注销，`/api/v1` 这条只认 `_own_entry` 的归属限定，不重复一遍闸门。
 
 ### 会话状态读数（`GET /sessions/{id}/state`）
 

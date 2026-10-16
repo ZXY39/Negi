@@ -38,6 +38,7 @@ class ExternalSessionEntry:
     session_key: str
     created_at: str
     title: str = ""
+    hidden: bool = False
 
 
 def _registry_workspace() -> Path:
@@ -87,6 +88,7 @@ class ExternalSessionRegistry:
                 session_key=str(session_key),
                 created_at=str(item.get("created_at") or ""),
                 title=str(item.get("title") or ""),
+                hidden=bool(item.get("hidden")),
             )
             self._entries[entry.session_key] = entry
             self._index[(entry.bridge_id, entry.external_key)] = entry.session_key
@@ -100,6 +102,7 @@ class ExternalSessionRegistry:
                     "external_key": entry.external_key,
                     "created_at": entry.created_at,
                     "title": entry.title,
+                    "hidden": bool(entry.hidden),
                 }
                 for session_key, entry in self._entries.items()
             },
@@ -123,8 +126,15 @@ class ExternalSessionRegistry:
             existing_key = self._index.get((bridge, key))
             if existing_key is not None:
                 entry = self._entries[existing_key]
+                changed = False
                 if title_text and entry.title != title_text:
                     entry.title = title_text
+                    changed = True
+                if entry.hidden:
+                    # 入站即"这个渠道还在跟我说话"：被操作员从网页隐身的会话要当场回来。
+                    entry.hidden = False
+                    changed = True
+                if changed:
                     self._save()
                 return entry, False
 
@@ -169,6 +179,24 @@ class ExternalSessionRegistry:
                 return None
             if self._index.get((entry.bridge_id, entry.external_key)) == raw:
                 self._index.pop((entry.bridge_id, entry.external_key), None)
+            self._save()
+            return entry
+
+    def set_hidden(self, session_key: str, hidden: bool) -> ExternalSessionEntry | None:
+        """把会话从网页渠道列表隐身/恢复，身份映射照旧保留。
+
+        隐藏是给「渠道 token 还在」的那条删除车道用的：转录按既定清历史契约删掉，
+        但 `external_key → session_key` 不动，所以桥下次发消息仍落回同一个会话，
+        `resolve_or_create` 会顺手把标记清掉。注销身份是另一条道（`forget`）。
+        """
+        raw = str(session_key or "").strip()
+        with self._lock:
+            entry = self._entries.get(raw)
+            if entry is None:
+                return None
+            if entry.hidden is bool(hidden):
+                return entry
+            entry.hidden = bool(hidden)
             self._save()
             return entry
 

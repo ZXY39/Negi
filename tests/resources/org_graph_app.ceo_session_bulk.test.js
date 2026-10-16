@@ -251,6 +251,75 @@ test("requestDeleteCeoSession hides task checkbox when there are no related task
     assert.equal(__context.__capturedConfirm.checkbox, null);
 });
 
+test("channel delete confirm promises 隐藏 only while the bridge token is there", async () => {
+    const { S, requestDeleteCeoSession, __context } = loadApp();
+
+    S.ceoSessions = [
+        { session_id: "ext:qq:1", title: "QQ 会话", session_family: "channel", hides_on_delete: true },
+    ];
+    __context.ApiClient.getCeoSessionDeleteCheck = async () => ({ related_tasks: { total: 0 } });
+    vm.runInContext(
+        "openConfirm = (payload) => { this.__capturedConfirm = payload; };",
+        __context
+    );
+
+    await requestDeleteCeoSession("ext:qq:1");
+
+    const confirm = __context.__capturedConfirm;
+    assert.equal(confirm.title, "隐藏渠道会话");
+    assert.equal(confirm.confirmLabel, "隐藏");
+    assert.match(confirm.text, /从列表隐藏/);
+    assert.match(confirm.text, /对方再次发消息时它会回来/);
+    assert.doesNotMatch(confirm.text, /注销/);
+});
+
+test("channel delete confirm says the card never comes back once the token is gone", async () => {
+    const { S, requestDeleteCeoSession, __context } = loadApp();
+
+    S.ceoSessions = [
+        { session_id: "ext:qq:2", title: "旧桥会话", session_family: "channel", hides_on_delete: false },
+    ];
+    __context.ApiClient.getCeoSessionDeleteCheck = async () => ({ related_tasks: { total: 0 } });
+    vm.runInContext(
+        "openConfirm = (payload) => { this.__capturedConfirm = payload; };",
+        __context
+    );
+
+    await requestDeleteCeoSession("ext:qq:2");
+
+    const confirm = __context.__capturedConfirm;
+    assert.equal(confirm.title, "删除渠道会话");
+    assert.equal(confirm.confirmLabel, "删除");
+    assert.match(confirm.text, /卡片不会回到列表/);
+    // 注销身份只在看得到结果之后才承诺：china 归档与无主行没有身份可注销。
+    assert.doesNotMatch(confirm.text, /注销/);
+});
+
+test("buildCeoBulkDeleteSummary splits channel rows into 隐藏 and 彻底删除", () => {
+    const { buildCeoBulkDeleteSummary } = loadApp();
+
+    const summary = buildCeoBulkDeleteSummary([
+        {
+            session_id: "ext:qq:a",
+            item: { session_id: "ext:qq:a", session_family: "channel", hides_on_delete: true },
+            deleteCheck: { related_tasks: {} },
+        },
+        {
+            session_id: "ext:qq:b",
+            item: { session_id: "ext:qq:b", session_family: "channel", hides_on_delete: false },
+            deleteCheck: { related_tasks: {} },
+        },
+        {
+            session_id: "china:qqbot:default:dm",
+            item: { session_id: "china:qqbot:default:dm", session_family: "channel", hides_on_delete: false },
+            deleteCheck: { related_tasks: {} },
+        },
+    ]);
+
+    assert.match(summary.text, /将隐藏 1 个渠道会话/);
+    assert.match(summary.text, /将删除 2 个渠道会话的上下文与附件/);
+});
+
 test("requestProjectExit hides pause checkbox when there is no running work", async () => {
     const { requestProjectExit, __context } = loadApp();
 
@@ -437,7 +506,7 @@ test("requestDeleteSelectedCeoSessions opens one aggregated confirm dialog", asy
     assert.ok(confirmPayload);
     assert.equal(confirmPayload.title, "批量清理会话");
     assert.match(confirmPayload.text, /将删除所选 1 个本地会话的聊天记录与附件。/);
-    assert.match(confirmPayload.text, /将清空所选 1 个渠道会话的上下文与附件。/);
+    assert.match(confirmPayload.text, /将删除 1 个渠道会话的上下文与附件，卡片不会回到列表。/);
     assert.doesNotMatch(confirmPayload.text, /会话列表：/);
     assert.doesNotMatch(confirmPayload.text, /Local Alpha/);
     assert.doesNotMatch(confirmPayload.text, /Channel Beta/);

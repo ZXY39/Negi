@@ -98,6 +98,7 @@ function loadApp() {
             deriveCeoChannelId,
             displayChannelGroupLabel,
             applyCeoSessionPatch,
+            renderCeoSessionCard,
             syncCeoPrimaryButton,
             activeSessionItem,
             activeSessionIsReadonly,
@@ -317,4 +318,36 @@ test("active session missing from the catalog stays writable", () => {
     S.ceoSessions = [];
 
     assert.equal(activeSessionCanMessage(), true);
+});
+
+test("channel cards expose 删除 and hide 命名 on the row flags", () => {
+    const { renderCeoSessionCard } = loadApp();
+
+    const html = renderCeoSessionCard(
+        extChannelItem({ can_rename: false, can_delete: true, hides_on_delete: true }),
+        { allowActions: true }
+    );
+    assert.ok(html.includes("data-session-delete="), "渠道卡片要有一颗逐卡「删除」");
+    assert.ok(!html.includes("data-session-rename="), "渠道历史不可改名");
+
+    const legacy = renderCeoSessionCard(extChannelItem({ can_rename: false, can_delete: false }), { allowActions: true });
+    assert.ok(!legacy.includes("data-session-delete="), "行旗标关掉时不能凭空造出入口");
+
+    const local = renderCeoSessionCard({ session_id: "web:ceo-1", title: "Local", can_rename: true, can_delete: true }, { allowActions: true });
+    assert.ok(local.includes("data-session-rename=") && local.includes("data-session-delete="));
+});
+
+test("hides_on_delete survives the patch lane down to the stored row", () => {
+    const { S, applyCeoSessionPatch } = loadApp();
+
+    S.activeSessionId = "web:local-1";
+    S.ceoLocalSessions = [{ session_id: "web:local-1", title: "Local", session_family: "local" }];
+    S.ceoChannelGroups = [];
+
+    // 判据由服务端算进目录行；从 WS 补丁这条道喂进来后不能在半路被按字段重建吃掉。
+    applyCeoSessionPatch({ item: extChannelItem({ can_delete: true, hides_on_delete: true }), active_session_id: "" });
+    const row = (S.ceoSessions || []).find((item) => item.session_id === "ext:qq-official:f8a8001865631301");
+    assert.ok(row, "补丁行要落到渠道分组");
+    assert.equal(row.hides_on_delete, true);
+    assert.equal(row.can_delete, true);
 });

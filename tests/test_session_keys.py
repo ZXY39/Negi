@@ -189,7 +189,9 @@ def test_build_ceo_session_catalog_lists_legacy_channel_sessions_readonly(monkey
     assert any(item["session_id"] == "china:qqbot:default:group:group-1" for item in channel_items)
     for item in channel_items:
         assert item["is_readonly"] is True
-        assert item["can_delete"] is False
+        assert item["can_delete"] is True
+        # 归档渠道会话没有注册表身份可隐藏，删除只能是彻底删除。
+        assert item["hides_on_delete"] is False
         # 归档渠道会话两条轴都关：历史不可改，也不可向里发。
         assert item["can_message"] is False
 
@@ -203,6 +205,10 @@ def test_build_ceo_session_catalog_lists_external_bridge_sessions_in_channel_gro
     monkeypatch.setattr(
         "g3ku.runtime.web_ceo_sessions.load_config",
         lambda: SimpleNamespace(workspace_path=str(tmp_path)),
+    )
+    monkeypatch.setattr(
+        "g3ku.runtime.web_ceo_sessions.external_bridge_token_present",
+        lambda bridge_id: True,
     )
     reset_external_session_registry()
     registry = ExternalSessionRegistry(tmp_path)
@@ -243,10 +249,91 @@ def test_build_ceo_session_catalog_lists_external_bridge_sessions_in_channel_gro
     item = ext_groups[0]["items"][0]
     assert item["session_id"] == entry.session_key
     assert item["is_readonly"] is True
-    assert item["can_delete"] is False
+    assert item["can_delete"] is True
+    # 该桥 token 条目还在 ⇒ 这颗「删除」按钮点下去是隐身，不是注销。
+    assert item["hides_on_delete"] is True
     assert item["can_message"] is True
     assert item["session_origin"] == "external"
     assert "qq:dm:user-1" in item["title"]
+
+
+def test_hidden_external_session_leaves_the_channel_catalog(monkeypatch, tmp_path: Path) -> None:
+    """删过一次的渠道会话（该桥 token 还在）在目录与补丁推送两条道上都不出现；
+    同一条 external_key 再入站即回来。"""
+    from g3ku.runtime.external_sessions import ExternalSessionRegistry, reset_external_session_registry
+    from g3ku.runtime.web_ceo_sessions import build_channel_ceo_session_item
+
+    monkeypatch.setattr(
+        "g3ku.runtime.web_ceo_sessions.load_config",
+        lambda: SimpleNamespace(workspace_path=str(tmp_path)),
+    )
+    monkeypatch.setattr(
+        "g3ku.runtime.web_ceo_sessions.external_bridge_token_present",
+        lambda bridge_id: True,
+    )
+    reset_external_session_registry()
+    registry = ExternalSessionRegistry(tmp_path)
+    entry, _ = registry.resolve_or_create(bridge_id="qq", external_key="qq:dm:user-1")
+
+    class _Store:
+        workspace = tmp_path
+
+        def list_sessions(self):
+            return [{"key": entry.session_key}]
+
+        def get_or_create(self, key: str):
+            raise AssertionError(f"hidden session must not be loaded: {key}")
+
+        def has_transcript(self, _key: str) -> bool:
+            return False
+
+    store = _Store()
+    assert registry.set_hidden(entry.session_key, True) is not None
+    assert registry.get_by_session_key(entry.session_key).hidden is True
+
+    catalog = build_ceo_session_catalog(store, active_session_id="")
+    assert catalog["channel_groups"] == []
+    assert build_channel_ceo_session_item(store, entry.session_key, active_session_id="") is None
+
+    # 入站重新注册把标记摘掉，卡片跟着回来。
+    revived, created = registry.resolve_or_create(bridge_id="qq", external_key="qq:dm:user-1")
+    assert created is False
+    assert revived.hidden is False
+
+
+def test_external_channel_row_reports_hide_only_while_bridge_token_exists(monkeypatch, tmp_path: Path) -> None:
+    """判据只有一处：token 条目不在了，同一行就改成彻底删除，不留隐身态。"""
+    from g3ku.runtime.external_sessions import ExternalSessionRegistry, reset_external_session_registry
+    from g3ku.runtime.web_ceo_sessions import build_channel_ceo_session_item
+
+    monkeypatch.setattr(
+        "g3ku.runtime.web_ceo_sessions.load_config",
+        lambda: SimpleNamespace(workspace_path=str(tmp_path)),
+    )
+    reset_external_session_registry()
+    registry = ExternalSessionRegistry(tmp_path)
+    entry, _ = registry.resolve_or_create(bridge_id="qq", external_key="qq:dm:user-1")
+
+    class _Store:
+        workspace = tmp_path
+
+        def list_sessions(self):
+            return [{"key": entry.session_key}]
+
+        def get_or_create(self, key: str):
+            raise AssertionError(key)
+
+        def has_transcript(self, _key: str) -> bool:
+            return False
+
+    for present, expected in ((True, True), (False, False)):
+        monkeypatch.setattr(
+            "g3ku.runtime.web_ceo_sessions.external_bridge_token_present",
+            lambda bridge_id, _present=present: _present,
+        )
+        row = build_channel_ceo_session_item(_Store(), entry.session_key, active_session_id="")
+        assert row is not None
+        assert row["hides_on_delete"] is expected
 
 
 def test_runtime_agent_session_serializes_prompt_and_keeps_live_targets(monkeypatch) -> None:
@@ -428,7 +515,7 @@ def test_build_channel_ceo_session_item_keeps_channel_shape(tmp_path: Path) -> N
         assert ext_item["channel_id"] == "ext:qq-official"
         assert ext_item["is_readonly"] is True
         assert ext_item["can_rename"] is False
-        assert ext_item["can_delete"] is False
+        assert ext_item["can_delete"] is True
         # 有注册表条目 ⇒ 可向里发（提交要靠 entry 路由回复）。
         assert ext_item["can_message"] is True
         assert ext_item["is_active"] is True

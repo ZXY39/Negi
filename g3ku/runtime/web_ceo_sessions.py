@@ -1841,16 +1841,47 @@ def _channel_session_kind(parsed) -> str:
     return "thread" if parsed.thread_id else parsed.chat_type
 
 
-def _external_bridge_label(bridge_id: str) -> str:
+def _external_api_tokens() -> dict[str, Any] | None:
+    """`externalApi.tokens` 快照；读不到返回 None，由调用方各自决定回退。
+
+    渠道行每个工具事件都要重算一次标签：load_config() 走完整迁移+校验（实测 46ms），
+    get_runtime_config() 按配置文件 mtime 缓存，标签新鲜度不变。
+    """
     try:
-        # 渠道行每个工具事件都要重算一次标签：load_config() 走完整迁移+校验（实测 46ms），
-        # get_runtime_config() 按配置文件 mtime 缓存，标签新鲜度不变。
         config, _revision, _changed = get_runtime_config()
-        tokens = dict(getattr(getattr(config, "external_api", None), "tokens", None) or {})
-        label = str(getattr(tokens.get(str(bridge_id or "").strip()), "label", "") or "").strip()
     except Exception:
-        label = ""
+        return None
+    return dict(getattr(getattr(config, "external_api", None), "tokens", None) or {})
+
+
+def _external_bridge_label(bridge_id: str) -> str:
+    tokens = _external_api_tokens()
+    label = "" if tokens is None else str(getattr(tokens.get(str(bridge_id or "").strip()), "label", "") or "").strip()
     return label or str(bridge_id or "bridge").strip() or "bridge"
+
+
+def external_bridge_token_present(bridge_id: str) -> bool:
+    """该桥在 `externalApi.tokens` 里还有没有条目——渠道会话「删除」走隐藏还是注销的判据。
+
+    读不到配置时按"还在"回退：判成"不在了"就会走注销身份那条不可逆的道，一次配置读失败
+    摘掉操作员还在用的外部身份不可接受；判成"还在"只是从列表隐身，对方再发消息即回来。
+    """
+    tokens = _external_api_tokens()
+    if tokens is None:
+        logger.warning("channel delete lane: externalApi.tokens unreadable, bridge {} counted as present", bridge_id)
+        return True
+    return str(bridge_id or "").strip() in tokens
+
+
+def channel_session_hides_on_delete(entry: ExternalSessionEntry | None) -> bool:
+    """删这条渠道会话会不会是「隐藏」——目录文案与删除车道共用这一个判据。
+
+    隐藏需要两样东西：注册表里有身份可打标记，以及该桥的 token 条目还在（否则永远不会
+    有人再发消息把它带回来，隐身就成了永久的第三态）。两者任一不满足即按彻底删除处理。
+    """
+    if entry is None:
+        return False
+    return external_bridge_token_present(str(getattr(entry, "bridge_id", "") or ""))
 
 
 def _channel_label(channel_id: str) -> str:
@@ -1949,7 +1980,9 @@ def _channel_session_summary_from_entry(
         "is_readonly": True,
         "can_message": False,
         "can_rename": False,
-        "can_delete": False,
+        "can_delete": True,
+        # `china:` 归档没有注册表身份，删除只能是彻底删除，没有隐藏这一档。
+        "hides_on_delete": False,
         "channel_id": parsed.channel,
         "account_id": parsed.account_id,
         "chat_type": kind,
@@ -2099,6 +2132,10 @@ def _external_channel_row(
     if len(parts) != 3 or not parts[1].strip() or not parts[2].strip():
         return None
     bridge_id = parts[1].strip()
+    if bool(getattr(entry, "hidden", False)):
+        # 操作员在网页删过这个渠道会话、而该桥 token 还在：身份保留、列表隐身，
+        # 入站经 `resolve_or_create` 清掉标记后回来。
+        return None
     external_key = str(getattr(entry, "external_key", "") or "").strip()
     entry_title = str(getattr(entry, "title", "") or "").strip()
     label = _external_bridge_label(bridge_id)
@@ -2134,7 +2171,10 @@ def _external_channel_row(
         # 孤儿 ext 转录（注册表丢失/手工文件）与 `china:` 归档同样落到 False。
         "can_message": entry is not None,
         "can_rename": False,
-        "can_delete": False,
+        "can_delete": True,
+        # 「删除」这颗按钮点下去会不会只把卡片隐掉（该桥 token 还在、身份可回），
+        # 还是连外部身份一起注销。与删除车道同一个判据，见 `channel_session_hides_on_delete`。
+        "hides_on_delete": channel_session_hides_on_delete(entry),
         "channel_id": f"ext:{bridge_id}",
         "account_id": bridge_id,
         "chat_type": "dm",
