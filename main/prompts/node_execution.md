@@ -144,42 +144,13 @@
 
 ### 5.3 最终结果提交工具
 
-当且仅当你准备结束当前节点时，必须调用 `submit_final_result`，并且让它成为该回合唯一的工具调用。参数形状必须精确符合：
+{{> shared_final_result_protocol.md}}
 
-```json
-{
-  "status": "success" | "failed",
-  "delivery_status": "final" | "blocked",
-  "summary": "...",
-  "answer": "...",
-  "evidence": [
-    {
-      "kind": "file" | "artifact" | "url",
-      "path": "",
-      "ref": "",
-      "start_line": 1,
-      "end_line": 1,
-      "note": "..."
-    }
-  ],
-  "remaining_work": ["..."],
-  "blocking_reason": "..."
-}
-```
+执行节点特有的约束：
 
-补充约束：
-
-- `status` 与 `delivery_status` 各管一件事、都是必填，写了一个不等于写了另一个：`status` 只裁定本节点成败（`success`|`failed`），`delivery_status` 只裁定交付形态（`final`|`blocked`）。少 `status` 会让整条提交在参数校验就被拒收，并占用一次无效提交预算。
-- `evidence[]` 的行号是 1-based 且不适用时要整个省略：`kind="url"` 没有行号，就不要写 `start_line` / `end_line`（写 `0` 或 `-1` 占位会被拒收），把定位信息放进 `ref` 与 `note`。
-- 如果本节点使用过工具，`success` 结果必须至少提供一条 `evidence`。
-- `summary` 必须是简短结论；`answer` 是最终正文。
-- 用户或上游要求你“输出”的文件路径、结论、结构化清单、证据摘要、维护要点，都应放进 `answer` 字段。
-- `failed + blocked` 时，`blocking_reason` 必须非空。
-- 除非工具即使经过了`load_tool_context`也无法使用，否则不允许因为暂时无法使用工具而将节点判定为阻塞失败。
 - `failed + blocked` 会被验收节点独立核验：核验方会结合你的阶段预算、实质执行记录与所引证据判断阻塞是否属实。不成立的阻塞声明会被打回，并要求你继续执行剩余工作——此时你仍在同一个节点内续跑，不是新建节点。连续占位只会留在节点台账里供核验方与人工审计参考，不自动加重处罚，也不会替你结束节点。
 - 禁止把 `failed` 结果（含 `failed + blocked`）用于占位、敷衍、逃避继续执行或规避验收。只要阶段预算未用尽且仍存在可行下一步，就必须继续推进，而不是提交 `failed + blocked`。
 - 同样禁止把 `success + final` 用于占位或敷衍：`summary` / `answer` 必须是真实、完整、可核验的结论正文，绝不允许填入 “placeholder”“占位”“待补充”或字段模板回显等空壳内容。核心交付物尚未实际产出（文件未落盘、数据未抓全、验证未做）时提交 `success` 属于虚假交付——它同样会进入验收、被打回并消耗拒绝预算，比继续干活代价更高。
-- 不要把上述对象当成最终文本回复直接输出；必须通过 `submit_final_result` 提交。
 
 示例：
 

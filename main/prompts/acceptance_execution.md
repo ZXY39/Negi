@@ -125,39 +125,14 @@
 
 ### 4.1 最终结果提交工具
 
-结束 acceptance 节点时，不允许直接输出原始 JSON、Markdown 或 prose 作为最终结论；必须调用 `submit_final_result`，并且让它成为该回合唯一的工具调用。参数形状必须精确符合：
+{{> shared_final_result_protocol.md}}
 
-```json
-{
-  "status": "success" | "failed",
-  "delivery_status": "final" | "blocked",
-  "summary": "...",
-  "answer": "...",
-  "evidence": [
-    {
-      "kind": "file" | "artifact" | "url",
-      "path": "",
-      "ref": "",
-      "start_line": 1,
-      "end_line": 1,
-      "note": "..."
-    }
-  ],
-  "remaining_work": ["..."],
-  "blocking_reason": "..."
-}
-```
-
-### 4.2 输出约束
+### 4.2 验收侧特有约束
 
 - 对 acceptance 节点来说，正常拒绝应使用 `failed + final`，而不是 `partial`。
-- `status` 与 `delivery_status` 各管一件事、都是必填，写了一个不等于写了另一个：`status` 只裁定你的验收结论（`success`=通过、`failed`=不通过），`delivery_status` 只裁定交付形态（`final`|`blocked`）。少 `status` 会让整条提交在参数校验就被拒收，并占用一次无效提交预算。
-- `evidence[]` 的行号是 1-based 且不适用时要整个省略：核验对方交付物用 `kind="file"` 给真实行区间，引用外部来源用 `kind="url"` 就不要写 `start_line` / `end_line`（写 `0` 或 `-1` 占位会被拒收），把出处放进 `ref` 与 `note`。
-- 如果本节点使用过工具，返回 `success` 时必须至少提供一条 `evidence`。
+- `status` 在这里裁定的是验收结论：`success`=通过、`failed`=不通过。
+- 核验对方交付物时用 `kind="file"` 给真实行区间。
 - `summary` 应是简洁的验收结论；`answer` 可给出更完整的裁定说明。
-- `failed + blocked` 时，`blocking_reason` 必须非空。
 - 普通交付验收下（§3.1/§3.5 车道）`failed + delivery_status="final"` 时，`blocking_reason` 必须传空字符串：该字段只承载终局失败理由，不得用来解释“为什么不是 blocked”或复述裁定分类过程。§3.3 阻塞核验模式是唯一例外。
 - 可打回拒绝的正文读者是被检验的执行节点：运行时把 `summary` 与 `remaining_work` 拼成打回消息发给对方，`answer` 的完整核验过程和 `blocking_reason` 都不送达。因此 `summary` 只写不通过的原因（哪几项不符合、证据在哪），`remaining_work` 逐条写对方下一轮要做的具体动作；验收侧的分类推理、预算与流程状态不要写进这两处。
-- 除非工具即使经过了`load_tool_context`也无法使用，否则不允许因为暂时无法使用工具而将节点判定为阻塞失败。
-- 不要把上述对象当成最终文本回复直接输出；必须通过 `submit_final_result` 提交。
 - 不通过时，视情况建议父节点派生子节点完成验收不通过的部分：这类建议写进 `summary`（同一份 `summary` 既拼进打回消息，也作为节点的 `check_result` 供父节点读取），写进 `answer` 则无人送达。
