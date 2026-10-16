@@ -150,8 +150,19 @@ _PUMP_DELIVER_MAX_ATTEMPTS = 5
 _PENDING_RECONCILE_INTERVAL_SECONDS = 30.0
 # outbox_id 维度投递历史（有界 LRU）：acked 集防服务端对账/重放副本重复投递；
 # attempts 计数跨 seq 封顶同一 id 的总尝试次数（重放副本 seq 不同，per-seq
-# failed_attempts 会对每个副本重新计数）。
+# failed_attempts 会对每个副本重新计数）；unconfirmed 集拦住「已发出但没等到回执」
+# 那条的重放副本，见 ``DeliveryUnconfirmedError`` 与 pump 的出站幂等闸门。
 _PUMP_OUTBOX_HISTORY_MAX_IDS = 1024
+
+
+class DeliveryUnconfirmedError(RuntimeError):
+    """渠道 API 无回执：请求已经写进这条连接，只是没等到响应。
+
+    botpy 的 http 层把 ``asyncio.TimeoutError`` 转成一条 WARNING 后返回 ``None``，
+    所以到这里已经分辨不出「没送达」与「送达了但回执丢了」。重放会给出第二份逐字
+    相同的答案，因此 pump 把带 ``outbox_id`` 的这类失败记进投递历史并跳过后续副本；
+    连接建立前的失败（``ClientConnectorError`` 一类）照旧走重放重试，不受这道闸影响。
+    """
 
 
 def _lru_remember(mapping: "OrderedDict[str, Any]", key: str, value: Any = None, *, limit: int = _PUMP_OUTBOX_HISTORY_MAX_IDS) -> None:
@@ -181,9 +192,12 @@ class _BridgeDeliveryState:
     # session_id -> 本号最后一次成功投递（或判定跳过）的 hub seq
     seqs: dict[str, int] = field(default_factory=dict)
     # outbox_id 维度投递历史：acked 集跳过对账/重放产生的已销账副本；attempts 跨
-    # seq 封顶同一 id 的总投递尝试（毒消息副本不随每份新 seq 重新获得完整预算）。
+    # seq 封顶同一 id 的总投递尝试（毒消息副本不随每份新 seq 重新获得完整预算）；
+    # unconfirmed 集是「这条已经发过一份、只是没拿到回执」的凭据，重放副本据此不再
+    # 第二次 POST（代价是该条可能真空未达，换掉的是每条无回执都可能翻倍）。
     acked_outbox_ids: OrderedDict[str, None] = field(default_factory=OrderedDict)
     outbox_attempts: OrderedDict[str, int] = field(default_factory=OrderedDict)
+    unconfirmed_outbox_ids: OrderedDict[str, None] = field(default_factory=OrderedDict)
 
 
 _DELIVERY_STATES: dict[str, _BridgeDeliveryState] = {}
@@ -445,6 +459,7 @@ async def run_qq_official_bridge(
     seqs = state.seqs
     acked_outbox_ids = state.acked_outbox_ids
     outbox_attempts = state.outbox_attempts
+    unconfirmed_outbox_ids = state.unconfirmed_outbox_ids
     # pump 句柄属于这一轮登录，随桥的 finally 一起取消，绝不跨登录复用任务。
     pumps: set[asyncio.Task] = set()
     pump_tasks: dict[str, asyncio.Task] = {}
@@ -682,10 +697,11 @@ async def run_qq_official_bridge(
         else:
             result = await bridge_api.post_dms(guild_id=target["guild_id"], content=body)
         # botpy 的 http 层对请求超时只打一条 WARNING 就返回 None（吞掉
-        # asyncio.TimeoutError）：无回执必须视为投递失败抛出，交给 pump 按
-        # 重放重试，而不是记一次假成功。
+        # asyncio.TimeoutError）：无回执必须视为投递失败抛出，不能记一次假成功。
+        # 抛的是 ``DeliveryUnconfirmedError``——pump 据此把这条 outbox 标记成
+        # 「已发出、回执未知」，重放副本不再第二次 POST。
         if result is None:
-            raise RuntimeError(
+            raise DeliveryUnconfirmedError(
                 f"qq-official delivery unconfirmed (empty API response) for target {external_key}"
             )
         message_id = ""
@@ -707,6 +723,10 @@ async def run_qq_official_bridge(
         才推进 ``seqs``；失败时跳出重连，服务端按 last_seq 重放，本条自动重试，
         重试节奏随重连退避（1s→60s 封顶）递增。SSE 干净结束（服务端重启）同样
         重连，绝不静默终结任务。
+
+        唯一的例外是无回执失败（``DeliveryUnconfirmedError``）：请求已经发给渠道，
+        重放只会给出第二份逐字相同的答案，所以带 ``outbox_id`` 的这类事件被记进
+        ``unconfirmed_outbox_ids``，其重放副本直接按 ``unconfirmed`` 终态销账。
         """
         backoff = _PUMP_RECONNECT_INITIAL_BACKOFF_SECONDS
         failed_seq = 0
@@ -747,6 +767,29 @@ async def run_qq_official_bridge(
                         seqs[session_id] = seq
                         backoff = _PUMP_RECONNECT_INITIAL_BACKOFF_SECONDS
                         continue
+                    if outbox_id and outbox_id in unconfirmed_outbox_ids:
+                        # 出站幂等闸门：上一份 POST 已发给渠道、只是没等到回执，
+                        # 这里再发就是给用户第二份逐字相同的回答。按 unconfirmed
+                        # 终态销账；销账失败也只多一条 pending 记录，副本仍被这道闸
+                        # 拦住（凭据在本进程的投递历史里）。
+                        logger.warning(
+                            "qq-official suppressed replayed send for outbox {} (previous attempt unconfirmed, seq {})",
+                            outbox_id,
+                            seq,
+                        )
+                        try:
+                            await client.ack_outbox(
+                                session_id, outbox_id, status="unconfirmed"
+                            )
+                        except Exception as exc:  # noqa: BLE001 - 销账失败不影响本条已判定
+                            logger.warning(
+                                "qq-official unconfirmed ack failed for {}: {}",
+                                outbox_id,
+                                exc,
+                            )
+                        seqs[session_id] = seq
+                        backoff = _PUMP_RECONNECT_INITIAL_BACKOFF_SECONDS
+                        continue
                     if outbox_id and int(outbox_attempts.get(outbox_id, 0)) >= _PUMP_DELIVER_MAX_ATTEMPTS:
                         # per-seq 预算已被之前的副本耗尽：同 id 的后续副本零尝试
                         # 丢弃，防毒消息随每份新 seq 重新获得完整重试预算。
@@ -763,13 +806,15 @@ async def run_qq_official_bridge(
                         await deliver(target_key, text, attachments)
                     except asyncio.CancelledError:
                         raise
-                    except Exception:  # noqa: BLE001 - retry via reconnect replay
+                    except Exception as exc:  # noqa: BLE001 - retry via reconnect replay
                         if outbox_id:
                             _lru_remember(
                                 outbox_attempts,
                                 outbox_id,
                                 int(outbox_attempts.get(outbox_id, 0)) + 1,
                             )
+                            if isinstance(exc, DeliveryUnconfirmedError):
+                                _lru_remember(unconfirmed_outbox_ids, outbox_id)
                         failed_attempts = failed_attempts + 1 if seq == failed_seq else 1
                         failed_seq = seq
                         logger.exception(

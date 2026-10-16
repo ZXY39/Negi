@@ -79,6 +79,8 @@ class ExternalApiClient:
 
         ``status="undeliverable"`` 是投递预算耗尽时的终态销账：账本已不按年龄
         清理，判毒的条目若不带状态销掉，每次桥重建都会重新拿到一整轮重试。
+        ``status="unconfirmed"`` 是「请求已发出、回执未知」的终态销账：这类条目
+        不再重发，用户才不会被同一条回答打两遍。
         默认值保持与旧调用完全相同的请求体（不带 body）。
         """
         payload = None if status == "delivered" else {"status": status}

@@ -26,7 +26,9 @@ Age is deliberately not a discard reason: ``PENDING_MAX_AGE_SECONDS`` used to
 retire everything unacked for 24h, which threw away answers the requester was
 still waiting for. A record leaves the ledger only through an ack, and the
 non-time exits are ``delivered`` (channel confirmed), ``undeliverable`` (bridge
-gave up after its attempt budget) and ``unreachable`` (no enabled bridge token
+gave up after its attempt budget), ``unconfirmed`` (the request reached the
+channel API but no receipt came back, so the bridge refuses to send a second
+copy of the same text) and ``unreachable`` (no enabled bridge token
 can ever see it again — see ``g3ku.shells.web``).
 
 Storage is a single append-only jsonl (``.g3ku/external-outbox/outbox.jsonl``)

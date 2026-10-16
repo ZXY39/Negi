@@ -764,11 +764,96 @@ async def test_deliver_treats_empty_api_response_as_failure(monkeypatch: pytest.
         client = FakeClient.instances[-1]
         await client.on_c2c_message_create(_c2c_message("hi", [], message_id="u1"))
         ext = FakeExternalApiClient.instances[-1]
+        # 这条事件不带 outbox_id：没有可幂等的身份，重放重发是唯一能保住投递的路径
+        # （带 id 的那条闸门见下一个用例）。
         ext.feed.append({"type": "outbound.created", "seq": 1, "text": "回执缺失", "external_key": "qq:c2c:u9"})
         await _wait_until(lambda: delivered)
         # 第一次无回执 → 判失败 → 重连重放 → 第二次带回执成功。
         assert attempts["n"] == 2
         assert delivered == [("post_c2c_message", {"openid": "u9", "content": "回执缺失", "msg_type": 0})]
+    finally:
+        task.cancel()
+        with suppress(asyncio.CancelledError):
+            await task
+
+
+@pytest.mark.asyncio
+async def test_pump_does_not_resend_unconfirmed_outbox(monkeypatch: pytest.MonkeyPatch) -> None:
+    """出站幂等闸门：无回执意味着请求已经发给渠道，重放副本再发一次就是给用户第二
+    份逐字相同的回答（实盘 2026-10-17 01:14:22 `deliver failed ... seq 80` 紧接
+    01:14:24 `delivered`）。带 `outbox_id` 的这类事件只允许 POST 一次，按
+    `unconfirmed` 销账，且同会话后续事件继续消费。"""
+    monkeypatch.setattr(bridge_module, "_PUMP_RECONNECT_INITIAL_BACKOFF_SECONDS", 0.01)
+
+    attempts: dict[str, int] = {}
+    delivered: list[tuple[str, dict]] = []
+
+    async def _silent_post_c2c(**kwargs):
+        content = str(kwargs.get("content") or "")
+        attempts[content] = attempts.get(content, 0) + 1
+        if content == "回执未知":
+            return None  # botpy 超时：请求已发出，回执一个都没回来
+        delivered.append(("post_c2c_message", kwargs))
+        return {"id": "m-1"}
+
+    api = FakeBotApi()
+    api.post_c2c_message = _silent_post_c2c
+
+    class _ApiFakeClient(FakeClient):
+        def __init__(self, *args, **kwargs) -> None:
+            super().__init__(*args, **kwargs)
+            self.api = api
+
+    fake_botpy = types.ModuleType("botpy")
+    fake_botpy.Client = _ApiFakeClient
+    fake_botpy.Intents = FakeIntents
+    monkeypatch.setitem(sys.modules, "botpy", fake_botpy)
+    monkeypatch.setattr(bridge_module, "ExternalApiClient", _ReplayStreamClient)
+    media = _media_transport({})
+    monkeypatch.setattr(
+        bridge_module, "_create_media_client", lambda: httpx.AsyncClient(transport=media)
+    )
+    task = asyncio.create_task(
+        bridge_module.run_qq_official_bridge(
+            app_id="100",
+            app_secret="sekrit",
+            sandbox=False,
+            token="t",
+            base_url="http://127.0.0.1:1/api/v1",
+            on_state=lambda state, detail: None,
+        ),
+        name="test-qq-bridge-idempotent-send",
+    )
+    try:
+        await _wait_until(lambda: FakeClient.instances and FakeClient.instances[-1].started)
+        client = FakeClient.instances[-1]
+        await client.on_c2c_message_create(_c2c_message("hi", [], message_id="i1"))
+        ext = FakeExternalApiClient.instances[-1]
+        ext.feed.append(
+            {
+                "type": "outbound.created",
+                "seq": 1,
+                "text": "回执未知",
+                "external_key": "qq:c2c:u9",
+                "outbox_id": "obx-dup-1",
+            }
+        )
+        await _wait_until(lambda: ext.ack_status_by_id.get("obx-dup-1") == "unconfirmed")
+        ext.feed.append(
+            {
+                "type": "outbound.created",
+                "seq": 2,
+                "text": "下一条",
+                "external_key": "qq:c2c:u9",
+                "outbox_id": "obx-next-1",
+            }
+        )
+        await _wait_until(lambda: delivered)
+        # 重放副本被闸门拦下：同一条只 POST 一次，销账状态不冒充已送达。
+        assert attempts["回执未知"] == 1
+        assert delivered == [
+            ("post_c2c_message", {"openid": "u9", "content": "下一条", "msg_type": 0})
+        ]
     finally:
         task.cancel()
         with suppress(asyncio.CancelledError):

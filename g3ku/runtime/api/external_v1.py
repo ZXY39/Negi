@@ -1144,7 +1144,9 @@ async def cancel_session_inflight_work(
 
 # 桥能写回的销账状态。其他值一律按 delivered 处理：账本出口必须是封闭集合，
 # 不能让一个拼错的 status 变成"既没投递也没回收"的第三种状态。
-_OUTBOX_ACK_STATUSES = frozenset({"delivered", "unreachable", "undeliverable"})
+_OUTBOX_ACK_STATUSES = frozenset(
+    {"delivered", "unreachable", "undeliverable", "unconfirmed"}
+)
 
 
 @router.get("/outbox/pending")
@@ -1188,7 +1190,9 @@ async def ack_outbox_entry(
     未 ack 的条目。跨会话的 outbox_id 一律拒绝（``acked=false``）。
 
     可选 body ``{"status": "undeliverable"}`` 让桥在投递预算耗尽时按终态销账：
-    账本已不按年龄清理记录，这是永久拒投的目标唯一的重试上界。不带 body 时
+    账本已不按年龄清理记录，这是永久拒投的目标唯一的重试上界。
+    ``{"status": "unconfirmed"}`` 是另一条终态出口——请求已发给渠道但没拿到回执，
+    桥据此不再重发这一条，避免用户收到第二份逐字相同的回答。不带 body 时
     仍是 ``delivered``，旧桥的请求形状不变。
     """
     entry = _own_entry(session_id, principal)
