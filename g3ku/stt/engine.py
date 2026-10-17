@@ -54,6 +54,8 @@ _BINARY_ASSET = {"windows": "whisper-bin-x64.zip", "linux": "whisper-bin-ubuntu-
 # 模型来自 hf-mirror（base 这条与本机已下载文件 147,951,465 逐字节相符），
 # 二进制来自 b5130 的 whisper-bin-x64.zip。未知档位返回 None，让界面只说"需要下载"。
 _MODEL_DOWNLOAD_BYTES = {"tiny": 77691713, "base": 147951465, "small": 487601967}
+# ggml 模型文件的头四字节（实测自 ggml-base.bin），用来把错误页/半截文件挡在交付外。
+_GGML_MAGIC = b"lmgg"
 _BINARY_DOWNLOAD_BYTES = 8573270
 # 官方 zip 里除了 CLI 还有十几个测试/示例可执行文件，只留下载物必需的部分。
 _SKIP_PREFIXES = ("test-", "parakeet", "bench", "command", "stream", "talk", "lsp", "quantize", "vad", "wchess")
@@ -445,6 +447,33 @@ def _sha256(path: Path) -> str:
     return digest.hexdigest()
 
 
+def _starts_with_ggml_magic(path: Path) -> bool:
+    try:
+        with path.open("rb") as handle:
+            return handle.read(4) == _GGML_MAGIC
+    except OSError:
+        return False
+
+
+def _verify_model_bytes(path: Path, cfg: Config) -> None:
+    """拒绝把半截下载或错误页当模型交付。
+
+    断线时 `.part` 可以续传，但续传完与"下歪了"在文件层看不出区别：旧的 416
+    早退分支会把一个比资产更长的 `.part` 直接交回来，而上游换过一次上传也会让
+    同一个文件名对应不同字节数。所以刚下完的这份按已知档位逐字节核对，盘上原有
+    的只认 ggml 头——后者判不出截断，但不冤枉一份能正常推理的模型。
+    """
+    model = str(cfg.stt.model or "").strip().lower()
+    expected = _MODEL_DOWNLOAD_BYTES.get(model)
+    size = path.stat().st_size
+    if expected is not None and size != expected:
+        raise SttProvisionError(
+            f"模型下载不完整：{path.name} 收到 {size} 字节，期望 {expected} 字节。已拒绝交付，重试会重新取。"
+        )
+    if not _starts_with_ggml_magic(path):
+        raise SttProvisionError(f"{path.name} 不是 ggml 模型文件（头部字节不匹配），已拒绝交付。")
+
+
 def prepare_model(
     cfg: Config | None = None,
     on_progress: Callable[[str, int, int | None], None] | None = None,
@@ -452,11 +481,18 @@ def prepare_model(
     cfg = cfg or current_config()
     target = model_path(cfg)
     if target.is_file() and target.stat().st_size > 0:
+        if not _starts_with_ggml_magic(target):
+            raise SttProvisionError(f"{target.name} 不是 ggml 模型文件（头部字节不匹配），请先删除它再重新准备。")
         return {"ok": True, "downloaded": False, "path": str(target), "bytes": target.stat().st_size}
     target.parent.mkdir(parents=True, exist_ok=True)
     url = f"{cfg.stt.model_download_base_url}/{target.name}"
     with httpx.Client(follow_redirects=True) as client:
         part = _stream_to(client, url, target, _stage_progress(on_progress, "model"))
+    try:
+        _verify_model_bytes(part, cfg)
+    except SttProvisionError:
+        part.unlink(missing_ok=True)
+        raise
     part.replace(target)
     return {"ok": True, "downloaded": True, "path": str(target), "bytes": target.stat().st_size}
 

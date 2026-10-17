@@ -405,6 +405,60 @@ def test_prepare_binary_refuses_digest_mismatch(tmp_path, monkeypatch):
     assert not (tmp_path / "bin" / "whisper-cli.exe").exists()
 
 
+def test_prepare_model_refuses_a_truncated_download(tmp_path, monkeypatch):
+    """模型半截落盘会被判成"就绪"，之后每条语音都在推理时炸；字节数不够就必须拒收，
+    并且不能留下可被下次续传接上的 .part。"""
+    cfg = make_cfg(tmp_path)
+    monkeypatch.setattr(engine.httpx, "Client", _FakeClient)
+    monkeypatch.setattr(engine, "_MODEL_DOWNLOAD_BYTES", {"base": 8})
+    _FakeClient.payload = engine._GGML_MAGIC + b"abc"
+    _FakeClient.last_headers = {}
+
+    with pytest.raises(engine.SttProvisionError) as exc:
+        engine.prepare_model(cfg)
+    assert "不完整" in str(exc.value)
+    target = tmp_path / "ggml-base.bin"
+    assert not target.exists()
+    assert not target.with_name(target.name + ".part").exists()
+
+
+def test_prepare_model_accepts_the_declared_byte_count(tmp_path, monkeypatch):
+    cfg = make_cfg(tmp_path)
+    monkeypatch.setattr(engine.httpx, "Client", _FakeClient)
+    monkeypatch.setattr(engine, "_MODEL_DOWNLOAD_BYTES", {"base": 8})
+    _FakeClient.payload = engine._GGML_MAGIC + b"abcd"
+    _FakeClient.last_headers = {}
+
+    result = engine.prepare_model(cfg)
+
+    assert result["downloaded"] is True
+    assert (tmp_path / "ggml-base.bin").read_bytes() == engine._GGML_MAGIC + b"abcd"
+
+
+def test_prepare_model_refuses_bytes_that_are_not_a_model(tmp_path, monkeypatch):
+    """档位不在账上时没有字节数可对，至少头四字节得是 ggml，否则就是错误页。"""
+    cfg = make_cfg(tmp_path)
+    monkeypatch.setattr(engine.httpx, "Client", _FakeClient)
+    monkeypatch.setattr(engine, "_MODEL_DOWNLOAD_BYTES", {})
+    _FakeClient.payload = b"<html>not found</html>"
+    _FakeClient.last_headers = {}
+
+    with pytest.raises(engine.SttProvisionError) as exc:
+        engine.prepare_model(cfg)
+    assert "不是 ggml 模型文件" in str(exc.value)
+    target = tmp_path / "ggml-base.bin"
+    assert not target.exists()
+    assert not target.with_name(target.name + ".part").exists()
+
+
+def test_existing_model_that_is_not_a_model_is_not_delivered(tmp_path):
+    """盘上那一份坏件不能因为"存在且非空"就永远算交付完成。"""
+    (tmp_path / "ggml-base.bin").write_bytes(b"placeholder-model")
+
+    with pytest.raises(engine.SttProvisionError):
+        engine.prepare_model(make_cfg(tmp_path))
+
+
 def test_partial_download_resumes_with_a_range_request(tmp_path, monkeypatch):
     """A ~20KB/s link makes "restart from zero after a drop" a real cost, so the
     partial file must be extended, not overwritten."""
