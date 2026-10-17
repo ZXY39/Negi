@@ -6,8 +6,10 @@ temp/tasks（见 tests/conftest.py 与 MainRuntimeService.workspace_root），
 
 - 空孤儿目录：--apply 时直接删除；
 - 非空孤儿目录：--apply --move-non-empty 时整体移动到备份目录（可逆），
-  或 --apply --purge-non-empty 时直接删除（不可逆，需二次确认）；
+  或 --apply --purge-non-empty 时直接删除（不可逆，两个开关都要显式给出）；
 - 默认 dry-run，只打印统计与操作清单，不做任何修改。
+- 判据缺失即停：runtime 库读不到、`tasks` 表查询失败、库与目录不属同一安装，
+  `--apply` 一律拒绝执行。任务集为空不是「没有任务」，按空集判定会把在库目录当成孤儿。
 
 示例：
   python scripts/cleanup_orphan_task_temp_dirs.py
@@ -38,14 +40,16 @@ def parse_args() -> argparse.Namespace:
 
 
 def load_known_task_dirs(runtime_db: Path) -> set[str]:
+    """以库为准 = 库必须读得出来。读不到就拒绝判定，不按「没有任务」继续。"""
     if not runtime_db.exists():
-        print(f'[warn] runtime 数据库不存在：{runtime_db}，按没有任务处理')
-        return set()
+        raise SystemExit(f'runtime 数据库不存在：{runtime_db}；--apply 需要以任务表为准，拒绝按空集判定')
     conn = sqlite3.connect(str(runtime_db))
     try:
         cur = conn.cursor()
         cur.execute('SELECT task_id FROM tasks')
         task_ids = [str(row[0] or '') for row in cur.fetchall()]
+    except sqlite3.Error as exc:
+        raise SystemExit(f'runtime 数据库读不出任务表：{runtime_db}（{exc}）；拒绝按空集判定') from exc
     finally:
         conn.close()
     return {task_id.replace(':', '_').replace('/', '_').replace('\\', '_') for task_id in task_ids}
@@ -73,6 +77,16 @@ def main() -> None:
         raise SystemExit('--move-non-empty 与 --purge-non-empty 不能同时使用')
     if (args.move_non_empty or args.purge_non_empty) and not args.apply:
         raise SystemExit('--move-non-empty / --purge-non-empty 需要同时给 --apply')
+    if not tasks_root.is_dir():
+        raise SystemExit(f'任务临时目录根不存在：{tasks_root}')
+    if args.apply:
+        # 先验目标再动手：库与目录必须属同一套安装。指错库时「按库判孤儿」会把另一套的
+        # 在库目录当成无主，而 --purge-non-empty 是不可逆删除。
+        install_root = runtime_db.resolve().parents[2]
+        if install_root not in tasks_root.resolve().parents:
+            raise SystemExit(
+                f'--apply 需要 --tasks-root 在 --runtime-db 所属安装之下：库根={install_root}，目录={tasks_root}'
+            )
 
     known = load_known_task_dirs(runtime_db)
     orphans_empty, orphans_nonempty, others = scan(tasks_root, known)

@@ -6,8 +6,8 @@
    （tasks 表已无行且超过宽限期）整删。
 2. 存量 task-archives zip 处理：按终态保留清单判据（kind∈{patch,final_output}、
    task.final_output_ref 指向、标题含 report/summary）从 zip 导出产出到
-   deliverables/<safe_task_id>/（含 manifest.json），随后删除 zip；
-   全部处理完删除 task-archives 目录。
+   deliverables/<safe_task_id>/；判据内产出落盘成功（或本无产出）才删 zip，
+   一条都没导出成功时保留原 zip，task-archives 目录也随未处置的 zip 一起保留。
 3. DB 清理：分批删除 task_events 的 task.live.patch 行（单份快照文件已替代）；
    tasks.metadata 弹除 archived_at/archived_bytes/archive_compressed_bytes/
    archive_reason/decompressed_at/pinned（**purged_at 保留**——遗留墓碑任务由
@@ -198,7 +198,7 @@ def _zip_keep_members(conn: sqlite3.Connection, zip_path: Path, task_id: str) ->
 
 
 def export_zips(conn: sqlite3.Connection, archives_dir: Path, deliverables_dir: Path, *, apply: bool) -> dict[str, int]:
-    stats = {'zips': 0, 'zip_bytes': 0, 'exported_tasks': 0, 'exported_files': 0, 'orphan_zips': 0}
+    stats = {'zips': 0, 'zip_bytes': 0, 'exported_tasks': 0, 'exported_files': 0, 'orphan_zips': 0, 'archive_kept': 0}
     if not archives_dir.is_dir():
         return stats
     # zip 文件名是 safe 化 task_id（':'→'_'，有损），用 DB 全量建反向映射
@@ -225,10 +225,10 @@ def export_zips(conn: sqlite3.Connection, archives_dir: Path, deliverables_dir: 
                 zip_path.unlink(missing_ok=True)
             continue
         kept = _zip_keep_members(conn, zip_path, task_id)
+        exported = 0
         if kept:
             target_dir = deliverables_dir / _safe_task_dir_name(task_id)
             files_meta = []
-            exported = 0
             if apply:
                 target_dir.mkdir(parents=True, exist_ok=True)
             for item in kept:
@@ -295,7 +295,12 @@ def export_zips(conn: sqlite3.Connection, archives_dir: Path, deliverables_dir: 
                     except OSError:
                         pass
         if apply:
-            zip_path.unlink(missing_ok=True)
+            if kept and not exported:
+                # 判据内产出一条都没落盘就不删原 zip：删了等于用「迁移」换走唯一一份产出
+                stats['archive_kept'] += 1
+                print(f'[keep] {zip_path.name}：{len(kept)} 条产出无一导出成功，保留原 zip')
+            else:
+                zip_path.unlink(missing_ok=True)
     if apply:
         for item in work_files:
             try:

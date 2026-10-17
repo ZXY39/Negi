@@ -188,3 +188,36 @@ def test_migration_apply_full_flow(tmp_path) -> None:
         assert usage > 0
     finally:
         store.close()
+
+
+def test_apply_keeps_zip_when_nothing_was_exported(tmp_path) -> None:
+    """判据内产出一条都没落盘就不删 zip，也不移除 task-archives 目录。
+
+    删 zip 此前只看 `if apply`，与 `exported` 无关：成员读失败时状态记成 missing、
+    产出为 0，原 zip 照样被删——等于用「迁移」换走了唯一一份产出。
+    """
+    migrate = _load_script()
+    db_path = _seed(tmp_path)
+    runtime = db_path.parent
+    zip_path = runtime / 'task-archives' / 'task_mig1.zip'
+
+    # 破坏首成员的本地文件头：中央目录完好所以 namelist 仍读得到，read() 抛 BadZipFile
+    with zipfile.ZipFile(zip_path, 'r') as handle:
+        broken_member = handle.infolist()[0]
+        offset = broken_member.header_offset
+    with open(zip_path, 'r+b') as handle:
+        handle.seek(offset)
+        handle.write(b'XXXX')
+
+    code = migrate.main(['--runtime-db', str(db_path), '--apply'])
+
+    assert code == 0
+    assert zip_path.exists(), '成员读不出时不能删原 zip'
+    assert (runtime / 'task-archives').exists(), '仍有 zip 未处置时不得移除目录'
+    deliverables = runtime / 'deliverables'
+    assert not deliverables.exists() or not list(deliverables.rglob('manifest.json'))
+    store = SQLiteTaskStore(db_path)
+    try:
+        assert store.get_task('task:mig1') is not None
+    finally:
+        store.close()
