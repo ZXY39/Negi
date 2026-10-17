@@ -582,6 +582,15 @@ def test_internal_turn_sync_writes_sidecar_but_no_boundary_snapshot(workspace):
     # 心跳/cron 内部轮：连续性照旧落盘，边界快照不写、不占每会话的保留窗口。
     from g3ku.runtime.session_agent import RuntimeAgentSession
 
+    # 对照物由本用例自己写下：以前这条用例读的是上一条用例留在共享数据根里的快照，
+    # 数据根按用例隔离后就只能自己造。
+    hook_stub = _continuity_hook_stub()
+    hook_stub._frontdoor_request_body_messages = [
+        {"role": "user", "content": "基线"},
+        {"role": "assistant", "content": "回复"},
+    ]
+    RuntimeAgentSession._sync_completed_continuity_snapshot(hook_stub, source_reason="finalize")
+
     stub = _continuity_hook_stub(session_key="web:ceo-internal", turn_id="turn-hb")
     RuntimeAgentSession._sync_completed_continuity_snapshot(
         stub, source_reason="finalize", internal_turn=True
