@@ -19,7 +19,11 @@ def load_manifest(path: Path) -> dict[str, Any]:
     if not isinstance(raw, dict):
         raise ResourceManifestError(f"manifest must be a mapping: {path}")
     data = copy.deepcopy(raw)
-    schema_version = int(data.get("schema_version") or 1)
+    raw_version = data.get("schema_version") or 1
+    try:
+        schema_version = int(raw_version)
+    except (TypeError, ValueError) as exc:
+        raise ResourceManifestError(f"schema_version must be an integer, got {raw_version!r}: {path}") from exc
     if schema_version != 1:
         raise ResourceManifestError(f"unsupported schema_version {schema_version}: {path}")
     kind = str(data.get("kind") or "").strip().lower()
