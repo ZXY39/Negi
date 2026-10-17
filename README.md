@@ -69,7 +69,7 @@ Negi 针对这五处障碍提供机制层面的处理，而不是把它们留给
 
 ### 2.1 环境要求
 
-- Python 3.11 或更高版本（一行命令安装按仓库的 `.python-version` 准备解释器，当前为 3.12）
+- Python 3.12 或更高版本（一行命令安装与容器镜像都按 3.12 准备解释器）
 - Windows PowerShell、Linux 或 macOS
 - 现代浏览器
 
@@ -410,7 +410,7 @@ Windows 在「设置 → 应用 → 已安装的应用」里找到 Negi 点「�
 docker compose up --build
 ```
 
-镜像基于 `python:3.11-slim`，以 `uv sync --frozen --no-dev` 安装依赖；`skills/` 与 `tools/` 会作为初始内容写入镜像，首次启动时补入数据卷。
+镜像基于 `python:3.12-slim`，以 `uv sync --frozen --no-dev` 安装依赖；`skills/` 与 `tools/` 会作为初始内容写入镜像，首次启动时补入数据卷。
 
 ### 10.2 服务分工
 
