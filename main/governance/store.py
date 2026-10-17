@@ -6,17 +6,29 @@ import threading
 from pathlib import Path
 from typing import TypeVar
 
+from loguru import logger
 from pydantic import BaseModel
 
 from main.governance.models import RolePolicyMatrixRecord, SkillResourceRecord, ToolRecord
 from main.governance.roles import (
-    normalize_public_allowed_roles,
+    split_public_allowed_roles,
     to_public_actor_role,
-    to_public_allowed_roles,
 )
 from main.protocol import now_iso
 
 T = TypeVar('T', bound=BaseModel)
+
+
+def _report_dropped_roles(payload: dict[str, object], dropped: list[str]) -> None:
+    """读侧丢掉的角色必须留下可数的落点：点名是哪一行、丢了哪些值。"""
+    if not dropped:
+        return
+    row_id = str(payload.get('skill_id') or payload.get('tool_id') or payload.get('resource_id') or '?')
+    logger.warning(
+        'governance: row {} carries unsupported allowed_roles {} and is read without them',
+        row_id,
+        dropped,
+    )
 
 
 class GovernanceStore:
@@ -415,11 +427,14 @@ class GovernanceStore:
     def _parse(payload_json: str, model_cls: type[T]) -> T:
         payload = json.loads(payload_json)
         if model_cls is SkillResourceRecord and isinstance(payload, dict):
-            payload['allowed_roles'] = to_public_allowed_roles(payload.get('allowed_roles') or [])
+            kept, dropped = split_public_allowed_roles(payload.get('allowed_roles') or [])
+            _report_dropped_roles(payload, dropped)
+            # 技能面这条空集回落是现行契约（工具面保留空集，见 tool-and-skill-system.md）
+            payload['allowed_roles'] = kept or ['ceo', 'execution']
         elif model_cls is ToolRecord and isinstance(payload, dict):
-            payload['allowed_roles'] = normalize_public_allowed_roles(
-                [str(role) for role in list(payload.get('allowed_roles') or [])]
-            )
+            kept, dropped = split_public_allowed_roles(list(payload.get('allowed_roles') or []))
+            _report_dropped_roles(payload, dropped)
+            payload['allowed_roles'] = kept
         elif model_cls is RolePolicyMatrixRecord and isinstance(payload, dict):
             payload['actor_role'] = to_public_actor_role(payload.get('actor_role'))
         return model_cls.model_validate(payload)

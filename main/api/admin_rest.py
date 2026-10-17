@@ -1776,12 +1776,22 @@ async def update_skill_file(skill_id: str, file_key: str, payload: dict = Body(.
 
 @router.put('/resources/skills/{skill_id}/policy')
 async def update_skill_policy(skill_id: str, payload: dict = Body(...), session_id: str = Query('web:shared')):
+    raw_roles = payload.get('allowed_roles')
+    try:
+        # 与工具面同一个判据：脏角色在门口就挡掉。读侧的降级是保命，不是纠错。
+        roles = (
+            None
+            if raw_roles is None
+            else normalize_public_allowed_roles([str(role) for role in list(raw_roles or [])])
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
     with _resource_service() as service:
         item = service.update_skill_policy(
             skill_id,
             session_id=session_id,
             enabled=payload.get('enabled'),
-            allowed_roles=[str(item) for item in (payload.get('allowed_roles') or [])] if payload.get('allowed_roles') is not None else None,
+            allowed_roles=roles,
         )
         if item is None:
             raise HTTPException(status_code=404, detail='skill_not_found')
