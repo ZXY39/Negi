@@ -434,10 +434,10 @@ async def test_execution_stage_predicted_reminder_skips_batch_that_already_opens
             )
         predicted = _predicted(ordinary)
         assert (
-            f'本轮结束后当前阶段预算将耗尽'
-            f'（{STAGE_TOOL_ROUND_BUDGET_MIN - 1}/{STAGE_TOOL_ROUND_BUDGET_MIN} 将用满）'
+            f"budget will be exhausted after this round "
+            f"({STAGE_TOOL_ROUND_BUDGET_MIN - 1}/{STAGE_TOOL_ROUND_BUDGET_MIN} used up)"
         ) in predicted
-        assert '单独调用仍会宽限执行一次并记为本阶段的溢出轮次' in predicted
+        assert "a lone call still runs once under a grace pass and is booked as an overflow round" in predicted
 
         # 同批已含 submit_next_stage：那批普通工具记到新阶段上，按旧阶段预算算出的预告失配。
         assert _predicted([SimpleNamespace(name=STAGE_TOOL_NAME, id='call-2', arguments={}), *ordinary]) == ''

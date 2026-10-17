@@ -575,7 +575,7 @@ async def test_graph_execute_tools_free_passes_first_ordinary_tool_without_activ
     assert pending[0]["budget_counted"] is True
     assert pending[0]["tool_names"] == ["echo_tool"]
     assert len(tool_messages) == 1
-    assert "宽限执行" in str(tool_messages[0]["content"])
+    assert "grace pass with no active stage" in str(tool_messages[0]["content"])
 
 
 @pytest.mark.asyncio
@@ -837,7 +837,7 @@ async def test_graph_execute_tools_attaches_overflow_round_when_budget_exhausted
     assert len(stage["rounds"]) == 2
     assert stage["rounds"][-1]["overflow"] is True
     assert stage["rounds"][-1]["budget_counted"] is False
-    assert "预算已耗尽" in str(tool_messages[0]["content"])
+    assert "The current stage's budget is exhausted" in str(tool_messages[0]["content"])
 
 
 def _near_exhaustion_stage_state() -> dict[str, object]:
@@ -944,10 +944,12 @@ async def test_graph_execute_tools_attaches_predicted_exhaustion_reminder_on_las
     ]
     assert executed == ["echo_tool"]
     content = str(tool_messages[0]["content"])
-    assert "本轮结束后当前阶段预算将耗尽（1/2 将用满）" in content
+    assert (
+        "The current stage's tool-round budget will be exhausted after this round (1/2 used up)" in content
+    )
     # 预告必须说清单调仍会宽限一次，否则模型读到的是与执行期政策相反的威胁。
-    assert "单独调用仍会宽限执行一次并记为本阶段的溢出轮次" in content
-    assert "否则调用将被拦截" not in content
+    assert "a lone call still runs once under a grace pass and is booked as an overflow round" in content
+    assert "otherwise next round's calls will be blocked" not in content
     assert result["frontdoor_stage_state"]["stages"][0]["tool_rounds_used"] == 2
 
 
@@ -1005,7 +1007,7 @@ async def test_graph_execute_tools_omits_predicted_exhaustion_reminder_when_stag
     # 模型已合规同批开阶段：旧阶段算出的预告既失配，又会贴到 submit_next_stage 自己的
     # 返回值上，与它刚写进结果的 tool_rounds_used=0 直接矛盾。
     for message in tool_messages:
-        assert "本轮结束后当前阶段预算将耗尽" not in str(message["content"])
+        assert "The current stage's tool-round budget will be exhausted" not in str(message["content"])
     stage_state = result["frontdoor_stage_state"]
     assert stage_state["active_stage_id"] == "frontdoor-stage-2"
     assert stage_state["stages"][-1]["tool_rounds_used"] == 1
