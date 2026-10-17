@@ -105,7 +105,8 @@ def _json_load(path: Path, *, default: Any) -> Any:
 
 def _json_dump(path: Path, payload: Any) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    blob = (json.dumps(payload, ensure_ascii=False, indent=2) + "\n").encode("utf-8")
+    _atomic_write_bytes(path, blob)
 
 
 def fernet_from_key(key: str) -> Fernet:
@@ -599,7 +600,7 @@ class BootstrapSecurityService:
             if not master_key:
                 raise ValueError("project is locked")
             path.parent.mkdir(parents=True, exist_ok=True)
-            path.write_text(f"{master_key}\n", encoding="utf-8")
+            _atomic_write_bytes(path, f"{master_key}\n".encode("utf-8"))
             try:
                 path.chmod(0o600)
             except OSError:
