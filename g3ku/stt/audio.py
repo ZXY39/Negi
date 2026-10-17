@@ -154,7 +154,7 @@ def parse_wav(data: bytes) -> WavInfo:
         end = body + size
         if end > len(data):
             end = len(data)
-        if chunk_id == b"fmt " and end - body >= 14:
+        if chunk_id == b"fmt " and end - body >= 16:
             tag, channels, rate, _byte_rate, align, bits = struct.unpack("<HHIIHH", data[body:body + 16])
             fmt = {"format_tag": tag, "channels": channels, "sample_rate": rate, "align": align, "bits": bits}
         elif chunk_id == b"data":
