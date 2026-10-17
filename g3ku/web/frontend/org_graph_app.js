@@ -14918,7 +14918,7 @@ function initCeoWs() {
         if (payload.type === "ceo.agent.tool" && effectiveSessionId === activeSessionId()) {
             appendCeoToolEvent(payload.data || {});
         }
-        if (payload.type === "ceo.error") handleCeoError(payload.data || {});
+        if (payload.type === "ceo.error" && effectiveSessionId === activeSessionId()) handleCeoError(payload.data || {});
         if (payload.type === "ceo.internal.ack" && effectiveSessionId === activeSessionId()) {
             handleCeoInternalAck(payload.data || {});
         }
