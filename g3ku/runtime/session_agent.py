@@ -266,6 +266,7 @@ class RuntimeAgentSession:
         self._reasoning_seq: int = 0
         self._reasoning_attempt: int = 0
         self._reasoning_started_monotonic: float = 0.0
+        self._reasoning_last_delta_monotonic: float = 0.0
         self._reasoning_last_emit_monotonic: float = 0.0
         self._reasoning_flush_task: asyncio.Task[Any] | None = None
         # 回合级累计（多跳回合那一行要报整回合，不只是最后一跳）；按 turn_id 划界，
@@ -2660,6 +2661,7 @@ class RuntimeAgentSession:
         self._reasoning_seq = 0
         self._reasoning_attempt = 0
         self._reasoning_started_monotonic = 0.0
+        self._reasoning_last_delta_monotonic = 0.0
         self._reasoning_last_emit_monotonic = 0.0
 
     def _reasoning_touch_turn(self) -> str:
@@ -2716,15 +2718,18 @@ class RuntimeAgentSession:
             self._reasoning_started_monotonic = asyncio.get_running_loop().time()
         except RuntimeError:
             self._reasoning_started_monotonic = 0.0
+        self._reasoning_last_delta_monotonic = 0.0
         self._reasoning_last_emit_monotonic = 0.0
 
     def _reasoning_seconds(self) -> float:
-        if self._reasoning_started_monotonic <= 0.0:
+        """这一段走了多久＝该跳请求起点 → 最后一个思维块到达。
+
+        终点不跟着 `now` 走：思维吐完之后模型还在写工具调用参数（写文件时那是一整个文件
+        正文），操作员眼里那是"工具那段事"，不是思考。一个思维块都没到的跳贡献 0。
+        """
+        if self._reasoning_started_monotonic <= 0.0 or self._reasoning_last_delta_monotonic <= 0.0:
             return 0.0
-        try:
-            return max(0.0, asyncio.get_running_loop().time() - self._reasoning_started_monotonic)
-        except RuntimeError:
-            return 0.0
+        return max(0.0, self._reasoning_last_delta_monotonic - self._reasoning_started_monotonic)
 
     def _reasoning_running_totals(self) -> tuple[float, int, int]:
         """(累计秒, 累计字符, 累计估算 token)＝已收口的各段 + 正在发的这一段。"""
@@ -2800,6 +2805,9 @@ class RuntimeAgentSession:
             now = asyncio.get_running_loop().time()
         except RuntimeError:
             now = 0.0
+        if now > 0.0:
+            # 思维表的终点：每到一个思维块往前推一格，之后模型写工具参数或正文都不再推。
+            self._reasoning_last_delta_monotonic = now
         if (
             self._reasoning_seq <= 0
             or self._reasoning_last_emit_monotonic <= 0.0

@@ -195,6 +195,7 @@ Start here when you are new to the repository or when a change crosses subsystem
 - 节点连续多轮重交同一份被拒载荷、越到后面收到的参数契约越短（只剩 `summary` 残段、`ref` 为空） → `tool-and-skill-system.md`「Duplicate Tool Call Guard」（控制工具 error 回执不参与消息级折叠）
 - 模型报告"上一轮我想到哪了"却读不到任何思路、或开了思考回放的 binding 一上线就整条链报 400 → `runtime-overview.md`「思考内容（reasoning）的上下文回放」（写入闸门按整条链取交集，咽喉点只透传）
 - 一个回合只剩转圈、长时间没有任何输出，而 usage 里 `completion_tokens` 已经跑了几千 → 先分清"慢"和"不可见"：解码几乎全花在思考上时界面本来看不到任何东西，`web-and-admin.md`「Live Reasoning Row Contract」（实时思考行；Responses 车道没有增量分片，只有耗时与估算 token）+ `runtime-overview.md`「思考内容（reasoning）的上下文回放」
+- 会话里「思考 N秒」比真实思考长（工具调用参数写了一大段、或该跳根本没思考也报了秒数）、或回合还在跑而那一行的秒数不再涨 → 计时窗口与两个收口点见 `web-and-admin.md`「Live Reasoning Row Contract」
 - 一个回合跑了一两百跳、请求字符与 `effective_input_tokens` 全程只涨不降 → 先确认有没有阶段被模型点名裁撤过：**没点名的阶段一直逐轮重发是设计**（只有点名或压缩收口会让它降）。确有裁撤却仍不降，按 `runtime-overview.md`「stage_compaction」（两条车道都在过期点换基线；节点另看投影与发送体是否分叉）查
 - 模型或节点声称"已把某阶段移出"却找不到 `archive_ref`、或点名裁撤后那批工具帧仍逐轮重发、提交时写的阶段总结在账本里是空的 → `runtime-overview.md`「stage_compaction」（跨结清的收尾对象判据与 `stage_closure` 回执，前门与节点同一条）+ `context-and-cache-troubleshooting.md`「Shrink 原因与压缩边界」（粘着的 shrink 原因不能当"裁过"的证据）
 - 切回仍在处理的会话看不到期间产生的阶段/工具调用（刷新网页才出现）→ `web-and-admin.md`「CEO Feed View State And Scroll Preservation Contract」
