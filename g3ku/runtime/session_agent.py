@@ -47,6 +47,21 @@ _TRANSCRIPT_STATE_KEY = "_transcript_state"
 _TRANSCRIPT_STATE_PENDING = "pending"
 _TRANSCRIPT_STATE_PAUSED = "paused"
 _TRANSCRIPT_STATE_COMPLETED = "completed"
+# 轮级用量热缓存的条数上限：在飞轮与刚收尾那一帧要读，更早的轮从请求工件取。
+_TURN_USAGE_MEMORY_ENTRIES = 64
+
+
+def trim_turn_usage_cache(usage: Any) -> None:
+    """按插入顺序丢掉最旧的轮级用量条目，把缓存压在 `_TURN_USAGE_MEMORY_ENTRIES` 条内。
+
+    累加侧每个回合留一条，摘除侧原本只有截断路径会 pop，不封顶就等于按会话长度线性涨
+    常驻内存（实测一条记录约 270 B，5k 回合的会话 1.3 MB）。读侧只在"这一轮"上取值，
+    更早的轮由请求工件给出合计，所以掉旧条目与重启后内存为空是同一种形状。
+    """
+    if not isinstance(usage, dict) or len(usage) <= _TURN_USAGE_MEMORY_ENTRIES:
+        return
+    for stale_turn_id in list(usage)[: len(usage) - _TURN_USAGE_MEMORY_ENTRIES]:
+        usage.pop(stale_turn_id, None)
 # 回合失败时把本轮已落盘的内部提示词（心跳/cron 的规则 system + 事件束 user）翻成
 # discarded，使其退出后续可重放上下文。这些消息在模型调用前就写盘（见
 # _persist_internal_prompt_messages），失败回合若不回收会在每一轮请求体里反复堆积
@@ -1444,6 +1459,10 @@ class RuntimeAgentSession:
         self._seed_turn_usage_from_artifacts(turn_id)
         return turn_id
 
+    def _bound_turn_usage_cache(self) -> None:
+        """轮级用量是热缓存：只有正在飞的轮与刚收尾那一帧读它，更早的轮由请求工件给。"""
+        trim_turn_usage_cache(getattr(self, "_frontdoor_turn_usage", None))
+
     def _seed_turn_usage_from_artifacts(self, turn_id: str) -> None:
         """把截断前那几跳的用量接回累加器，续跑轮的数字才接着涨而不是从 0 重来。
 
@@ -1462,6 +1481,7 @@ class RuntimeAgentSession:
             return
         if isinstance(entry, dict) and entry:
             self._frontdoor_turn_usage[turn_id] = dict(entry)
+            self._bound_turn_usage_cache()
 
     def _overwrite_archived_paused_assistant_row(
         self,

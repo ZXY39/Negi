@@ -5300,6 +5300,9 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
                     # 只在 provider 明确上报时累加：缺失时不写键，界面据此保留「~」估算标记。
                     entry["thinking_tokens"] = int(entry.get("thinking_tokens") or 0) + int(usage_payload.get("thinking_tokens") or 0)
                 turn_usage[turn_id] = entry
+                trim = getattr(target_session, "_bound_turn_usage_cache", None)
+                if callable(trim):
+                    trim()
             if frontdoor_token_preflight_diagnostics:
                 setattr(
                     target_session,
