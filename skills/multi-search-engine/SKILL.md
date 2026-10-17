@@ -101,7 +101,6 @@ web_fetch({"url": "https://www.wolframalpha.com/input?i=100+USD+to+CNY"})
 
 ## Documentation
 
-- `references/advanced-search.md` - Domestic search guide
 - `references/international-search.md` - International search guide
 - `CHANGELOG.md` - Version history
 

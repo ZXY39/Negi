@@ -13,6 +13,5 @@ files:
   metadata:
     - metadata.json
   docs:
-    - references/domestic-search.md
     - references/international-search.md
     - CHANGELOG.md
