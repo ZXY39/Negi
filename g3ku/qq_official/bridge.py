@@ -616,7 +616,9 @@ async def run_qq_official_bridge(
             uploaded = response.json()
         except ValueError:
             uploaded = None
-        file_info = str(uploaded.get("file_info") or "").strip() if isinstance(uploaded, dict) else ""
+        file_info = ""
+        if isinstance(uploaded, dict):
+            file_info = str(uploaded.get("file_info") or "").strip()
         if not file_info:
             logger.warning(
                 "qq-official file_data media upload rejected status={} body={} after {:.1f}s "
