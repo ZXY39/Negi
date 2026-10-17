@@ -185,7 +185,11 @@ def normalize_draft(
                 errors.append(
                     FieldError(field=field.key, code="invalid_choice", message="Invalid option selected.")
                 )
-        if field.input_type == FieldInputType.NUMBER and not isinstance(value, (int, float)):
+        # bool 是 int 的子类：`max_tokens: true` 必须在这里就当非法数字拒掉，否则原值
+        # 落盘后运行时按 int(True)=1 处理，那颗模型每跳只出一个 token。
+        if field.input_type == FieldInputType.NUMBER and (
+            isinstance(value, bool) or not isinstance(value, (int, float))
+        ):
             errors.append(
                 FieldError(field=field.key, code="invalid_number", message="Expected a numeric value.")
             )

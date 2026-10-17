@@ -1340,3 +1340,24 @@ def test_record_invalid_final_submission_error_log_captures_raw_truncation_info(
     assert len(log_service.error_logs) == 2
     assert '疑似触及输出token上限被截断' not in log_service.error_logs[1]['error_text']
     assert 'output_tokens=120' in log_service.error_logs[1]['error_text']
+
+
+def test_boolean_value_in_a_number_field_is_rejected_instead_of_stored() -> None:
+    """bool 是 int 的子类：数字字段守卫若只判 isinstance(value, (int, float))，
+    `max_tokens: true` 就能通过并原样落盘，运行时按 int(True)=1 处理——那颗模型
+    每一跳只出一个 token，而界面上看着是个合法配置。"""
+    registry = TemplateRegistry()
+    draft = ProviderConfigDraft(
+        provider_id="openai",
+        api_key="demo-key",
+        base_url="https://example.com/v1",
+        default_model="custom-model",
+        parameters={"context_window_tokens": 200_000, "max_tokens": True, "temperature": True},
+    )
+
+    _normalized, errors = normalize_draft(draft, registry)
+
+    codes = {error.field: error.code for error in errors}
+    assert codes.get("max_tokens") == "invalid_number"
+    assert codes.get("temperature") == "invalid_number"
+    assert codes.get("context_window_tokens") is None
