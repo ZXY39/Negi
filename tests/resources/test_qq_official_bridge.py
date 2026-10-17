@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import json
 import sys
 import types
 from collections import OrderedDict
@@ -24,33 +25,49 @@ from g3ku.qq_official import bridge as bridge_module
 
 
 class FakeRoute:
-    """botpy ``Route`` 替身（媒体直传经 http 层，不经 api 包装）。"""
+    """botpy ``Route`` 替身：域名、路径参数与沙盒切换按真实 Route 的算法走。"""
+
+    DOMAIN = "api.sgroup.qq.com"
+    SANDBOX_DOMAIN = "sandbox.api.sgroup.qq.com"
 
     def __init__(self, method: str, path: str, **params) -> None:
         self.method = method
         self.path = path
         self.params = params
+        self.is_sandbox = False
+
+    @property
+    def url(self) -> str:
+        domain = self.SANDBOX_DOMAIN if self.is_sandbox else self.DOMAIN
+        return f"https://{domain}{self.path.format(**self.params)}"
 
 
 class FakeBotHttp:
-    def __init__(self, api: "FakeBotApi") -> None:
+    def __init__(self, api: "FakeBotApi", is_sandbox: bool = False) -> None:
         self._api = api
+        self.is_sandbox = is_sandbox
+        self._headers = {"Authorization": "QQBot fake-access-token", "X-Union-Appid": "100"}
+
+    async def check_session(self):
+        """真实实现续期 access_token、重建 ``_headers``，顺带拉起 SDK 自己的 session。"""
+        self._api.check_session_calls += 1
 
     async def request(self, route: FakeRoute, **kwargs):
+        # 出站媒体上传不走这条道（SDK 的 ``Client(timeout=5)`` 套在每一个 API 请求
+        # 上，超时还只打一条 WARNING 就返回 None）。这里留作记录器：车道被搬回 SDK
+        # 就会在 ``http_calls`` 上被断言抓到。
         self._api.http_calls.append(
             (route.path, {"method": route.method, "params": route.params, **kwargs})
         )
-        if self._api.fail_file_data:
-            raise RuntimeError("simulated file_data rejection")
         return {"file_uuid": "uuid-fd", "file_info": "file-info-fd", "ttl": 0}
 
 
 class FakeBotApi:
-    def __init__(self) -> None:
+    def __init__(self, is_sandbox: bool = False) -> None:
         self.calls: list[tuple[str, dict]] = []
         self.http_calls: list[tuple[str, dict]] = []
-        self._http = FakeBotHttp(self)
-        self.fail_file_data = False
+        self.check_session_calls = 0
+        self._http = FakeBotHttp(self, is_sandbox=is_sandbox)
 
     # 真实 botpy 成功时返回响应 JSON、超时静默返回 None；fake 默认按成功返回
     # 回执 dict（deliver() 会把 None 判为投递失败）。
@@ -88,7 +105,8 @@ class FakeClient:
         self.intents = intents
         self.is_sandbox = is_sandbox
         self.ext_handlers = ext_handlers
-        self.api = FakeBotApi()
+        self.init_kwargs = dict(kwargs)
+        self.api = FakeBotApi(is_sandbox=is_sandbox)
         self.started = False
         self.entered = False
         FakeClient.instances.append(self)
@@ -293,12 +311,25 @@ async def test_bridge_reports_incompatible_intents(monkeypatch: pytest.MonkeyPat
     assert FakeExternalApiClient.instances == []
 
 
-def _media_transport(status_by_url: dict[str, tuple[int, bytes]]) -> httpx.MockTransport:
+def _media_transport(
+    status_by_url: dict[str, tuple[int, bytes]], records: list[httpx.Request] | None = None
+) -> httpx.MockTransport:
     def handler(request: httpx.Request) -> httpx.Response:
+        if records is not None:
+            records.append(request)
         status, body = status_by_url.get(str(request.url), (404, b""))
         return httpx.Response(status, content=body)
 
     return httpx.MockTransport(handler)
+
+
+def _upload_reply(file_info: str = "file-info-fd") -> bytes:
+    return f'{{"file_uuid":"uuid-1","file_info":"{file_info}","ttl":8200}}'.encode()
+
+
+def _api_uploads(records: list[httpx.Request]) -> list[httpx.Request]:
+    """媒体 client 上打到平台 API 的那些请求（上传车道），排除本机签名 URL 的下载。"""
+    return [request for request in records if "sgroup.qq.com" in str(request.url)]
 
 
 def _c2c_message(content: str, attachments: list | None = None, message_id: str = "m2") -> SimpleNamespace:
@@ -328,6 +359,7 @@ async def _start_bridge(
     monkeypatch: pytest.MonkeyPatch,
     media_transport: httpx.MockTransport,
     client_cls: type[FakeExternalApiClient] = FakeExternalApiClient,
+    sandbox: bool = False,
 ):
     _install_fake_botpy(monkeypatch)
     monkeypatch.setattr(bridge_module, "ExternalApiClient", client_cls)
@@ -341,7 +373,7 @@ async def _start_bridge(
         bridge_module.run_qq_official_bridge(
             app_id="100",
             app_secret="sekrit",
-            sandbox=False,
+            sandbox=sandbox,
             token="t",
             base_url="http://127.0.0.1:1/api/v1",
             on_state=lambda state, detail: states.append((state, detail)),
@@ -390,6 +422,32 @@ async def test_bridge_forwards_image_only_message(monkeypatch: pytest.MonkeyPatc
         session_id, text, idem, attachments = ext.sent[0]
         assert (session_id, text, idem) == ("ext:qq-official:qq:c2c:u9", "", "qq-m2")
         assert len(attachments) == 1
+    finally:
+        task.cancel()
+        with suppress(asyncio.CancelledError):
+            await task
+
+
+@pytest.mark.asyncio
+async def test_bridge_names_an_unreachable_attachment_instead_of_vanishing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """纯图片消息在图片取不到时仍要成回合，并点名丢了哪一张。
+
+    QQ 的媒体 URL 带签名且会过期；此前非语音附件的失败出口什么都不留，正文与附件
+    同时为空就被 on_incoming 的早退整条丢掉——用户发了张图，什么反馈都没有。
+    """
+    media = _media_transport({})  # 任何 URL 一律 404
+    task, client = await _start_bridge(monkeypatch, media)
+    try:
+        message = _c2c_message("   ", [_image_attachment()])
+        await client.on_c2c_message_create(message)
+        ext = FakeExternalApiClient.instances[-1]
+        await _wait_until(lambda: ext.sent)
+        _session_id, text, _idem, attachments = ext.sent[0]
+        assert not attachments
+        assert "img.png" in text
+        assert "附件" in text
     finally:
         task.cancel()
         with suppress(asyncio.CancelledError):
@@ -1224,10 +1282,15 @@ def _absolute_media(token: str) -> str:
 
 @pytest.mark.asyncio
 async def test_pump_delivers_event_attachment_via_file_data(monkeypatch: pytest.MonkeyPatch) -> None:
-    """出站附件以 file_data（base64）直传：桥从本机签名 URL 取字节后直接调平台
-    媒体上传接口（不经 botpy 只暴露 url 的包装），拿到 file_info 以 msg_type=7
-    发送，正文另发一条文本。"""
-    media = _media_transport({_absolute_media("t1"): (200, b"doc-bytes")})
+    """出站附件以 file_data（base64）直传：桥从本机签名 URL 取字节后，在自己的媒体
+    client 上打平台媒体上传接口——既不经 botpy 只暴露 url 的包装，也不占 SDK 那枚
+    套在每个 API 请求上的全局超时。拿到 file_info 以 msg_type=7 发送，正文另发一条文本。"""
+    records: list[httpx.Request] = []
+    files_url = "https://api.sgroup.qq.com/v2/users/u9/files"
+    media = _media_transport(
+        {_absolute_media("t1"): (200, b"doc-bytes"), files_url: (200, _upload_reply())},
+        records,
+    )
     task, client = await _start_bridge(monkeypatch, media)
     try:
         await client.on_c2c_message_create(_c2c_message("hi", [], message_id="f1"))
@@ -1243,14 +1306,27 @@ async def test_pump_delivers_event_attachment_via_file_data(monkeypatch: pytest.
         )
         await _wait_until(lambda: len(client.api.calls) >= 2)
 
-        assert len(client.api.http_calls) == 1
-        path, payload = client.api.http_calls[0]
-        assert path == "/v2/users/{openid}/files"
-        assert payload["params"] == {"openid": "u9"}
-        body = payload["json"]
+        uploads = _api_uploads(records)
+        assert len(uploads) == 1
+        upload = uploads[0]
+        assert upload.method == "POST"
+        assert str(upload.url) == files_url
+        assert upload.headers["authorization"] == "QQBot fake-access-token"
+        assert upload.headers["x-union-appid"] == "100"
+        body = json.loads(upload.content)
         assert body["file_type"] == 4  # 任意文件
         assert base64.b64decode(body["file_data"]) == b"doc-bytes"
         assert body["srv_send_msg"] is False
+        # 预算从请求体字节数推导：12 字节的 base64 只落在固定开销那一档，连接判死仍是 5 秒。
+        timeout = upload.extensions["timeout"]
+        assert timeout["connect"] == 5.0
+        assert timeout["read"] == pytest.approx(15.0, abs=0.01)
+        # 这一发不经 botpy 的 http.request（那条道带的是文本消息用的 5 秒旋钮）。
+        assert client.api.http_calls == []
+        # 全局旋钮保持 SDK 默认：把 timeout 抬到上传量级会连带把每条文本消息的判死
+        # 从 5 秒变成几十秒，一个卡住的 POST 就能顶住这条会话的 pump。
+        assert "timeout" not in client.init_kwargs
+        assert client.api.check_session_calls == 1
         assert client.api.calls == [
             (
                 "post_c2c_message",
@@ -1273,12 +1349,19 @@ async def test_pump_delivers_event_attachment_via_file_data(monkeypatch: pytest.
 async def test_pump_falls_back_to_url_upload_when_file_data_rejected(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """file_data 被平台拒时回退 url 回源上传（要求本服务端公网可达），
+    """file_data 被平台拒（非 2xx）时回退 url 回源上传（要求本服务端公网可达），
     回退成功仍以 msg_type=7 送达，不降级。"""
-    media = _media_transport({_absolute_media("t2"): (200, b"pdf-bytes")})
+    records: list[httpx.Request] = []
+    files_url = "https://api.sgroup.qq.com/v2/users/u9/files"
+    media = _media_transport(
+        {
+            _absolute_media("t2"): (200, b"pdf-bytes"),
+            files_url: (400, b'{"code":40093001,"message":"file_data rejected"}'),
+        },
+        records,
+    )
     task, client = await _start_bridge(monkeypatch, media)
     try:
-        client.api.fail_file_data = True
         await client.on_c2c_message_create(_c2c_message("hi", [], message_id="f2"))
         ext = FakeExternalApiClient.instances[-1]
         await ext.events.put(
@@ -1291,7 +1374,9 @@ async def test_pump_falls_back_to_url_upload_when_file_data_rejected(
         )
         await _wait_until(lambda: len(client.api.calls) >= 2)
 
-        assert client.api.http_calls and client.api.http_calls[0][1]["json"]["file_type"] == 4
+        uploads = _api_uploads(records)
+        assert len(uploads) == 1
+        assert json.loads(uploads[0].content)["file_type"] == 4
         assert ("post_c2c_file", {"openid": "u9", "file_type": 4, "url": _absolute_media("t2"), "srv_send_msg": False}) in client.api.calls
         assert (
             "post_c2c_message",
@@ -1310,11 +1395,15 @@ async def test_pump_falls_back_to_url_upload_when_file_data_rejected(
 @pytest.mark.asyncio
 async def test_pump_maps_attachment_mime_to_platform_file_type(monkeypatch: pytest.MonkeyPatch) -> None:
     """mime → file_type 映射：图片 1、mp4 2、语音 3、其余（文档）4；群聊走群接口。"""
+    records: list[httpx.Request] = []
+    group_files_url = "https://api.sgroup.qq.com/v2/groups/g1/files"
     media = _media_transport(
         {
             _absolute_media("i1"): (200, b"png-bytes"),
             _absolute_media("d1"): (200, b"docx-bytes"),
-        }
+            group_files_url: (200, _upload_reply()),
+        },
+        records,
     )
     task, client = await _start_bridge(monkeypatch, media)
     try:
@@ -1336,11 +1425,9 @@ async def test_pump_maps_attachment_mime_to_platform_file_type(monkeypatch: pyte
         )
         await _wait_until(lambda: len(client.api.calls) >= 3)
 
-        paths = [path for path, _ in client.api.http_calls]
-        assert paths == ["/v2/groups/{group_openid}/files", "/v2/groups/{group_openid}/files"]
-        file_types = [payload["json"]["file_type"] for _, payload in client.api.http_calls]
-        assert file_types == [1, 4]
-        assert all(payload["params"] == {"group_openid": "g1"} for _, payload in client.api.http_calls)
+        uploads = _api_uploads(records)
+        assert [str(request.url) for request in uploads] == [group_files_url, group_files_url]
+        assert [json.loads(request.content)["file_type"] for request in uploads] == [1, 4]
         assert client.api.calls == [
             (
                 "post_group_message",
@@ -1362,13 +1449,18 @@ async def test_pump_maps_attachment_mime_to_platform_file_type(monkeypatch: pyte
 async def test_pump_degrades_failed_attachment_to_signed_link_text(monkeypatch: pytest.MonkeyPatch) -> None:
     """两条上传路径都失败时降级为签名下载链接文本：用户至少拿到可下载链接，
     附件不能静默丢失。"""
-    media = _media_transport({_absolute_media("t3"): (200, b"doc-bytes")})
+    files_url = "https://api.sgroup.qq.com/v2/users/u9/files"
+    media = _media_transport(
+        {
+            _absolute_media("t3"): (200, b"doc-bytes"),
+            files_url: (400, b'{"code":40093001,"message":"file_data rejected"}'),
+        }
+    )
     task, client = await _start_bridge(monkeypatch, media)
     try:
         async def _reject(**kwargs):
             raise RuntimeError("simulated url upload rejection")
 
-        client.api.fail_file_data = True
         client.api.post_c2c_file = _reject
         await client.on_c2c_message_create(_c2c_message("hi", [], message_id="f3"))
         ext = FakeExternalApiClient.instances[-1]
@@ -1392,6 +1484,93 @@ async def test_pump_degrades_failed_attachment_to_signed_link_text(monkeypatch: 
                 },
             )
         ]
+    finally:
+        task.cancel()
+        with suppress(asyncio.CancelledError):
+            await task
+
+
+def test_media_upload_budget_derives_from_payload_size() -> None:
+    """上传预算由请求体字节数推导（固定开销 + 按最低吞吐折算的传输时间），不是拍的：
+    零字节只吃固定档，1MiB 加 2 秒，桥的下载封顶（20MiB 原始文件）对应的 base64
+    请求体落在 68 秒档——这是带附件的那一发能占住 pump 的最长时间。"""
+    budget = bridge_module._media_upload_timeout
+    mib = 1024 * 1024
+    assert budget(0) == bridge_module._MEDIA_UPLOAD_FIXED_BUDGET_SECONDS
+    assert budget(1 * mib) == pytest.approx(17.0)
+    body_for_capped_file = len(base64.b64encode(bytes(20 * mib)))
+    assert budget(body_for_capped_file) == pytest.approx(68.3, abs=0.1)
+    assert budget(body_for_capped_file) > budget(1 * mib)
+
+
+@pytest.mark.asyncio
+async def test_pump_falls_back_to_url_upload_when_upload_never_got_a_response(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """上传连回执都没有（连接断/写超时）也照旧回退 url 路径：botpy 的 http 层在这
+    种情况下只打它自己的 WARNING 就返回 None，桥侧什么都不留；换到自己的媒体 client
+    之后这条失败有日志锚点，且不再静默吞掉整发附件。"""
+    files_url = "https://api.sgroup.qq.com/v2/users/u9/files"
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if str(request.url) == files_url:
+            raise httpx.ConnectError("simulated upload transport failure")
+        return httpx.Response(200, content=b"pdf-bytes")
+
+    task, client = await _start_bridge(monkeypatch, httpx.MockTransport(handler))
+    try:
+        await client.on_c2c_message_create(_c2c_message("hi", [], message_id="f4"))
+        ext = FakeExternalApiClient.instances[-1]
+        await ext.events.put(
+            {
+                "type": "reply.final",
+                "seq": 1,
+                "text": "简历已渲染：简历.pdf",
+                "attachments": [_outbound_attachment("简历.pdf", "application/pdf", "t2")],
+            }
+        )
+        await _wait_until(lambda: client.api.calls)
+        assert (
+            "post_c2c_file",
+            {"openid": "u9", "file_type": 4, "url": _absolute_media("t2"), "srv_send_msg": False},
+        ) in client.api.calls
+        assert client.api.http_calls == []
+    finally:
+        task.cancel()
+        with suppress(asyncio.CancelledError):
+            await task
+
+
+@pytest.mark.asyncio
+async def test_pump_uploads_media_to_sandbox_domain_for_sandbox_bridge(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """沙盒号的文件上传打到沙盒域名：域名与鉴权头现在由桥自己从 SDK 取，
+    ``is_sandbox`` 漏带就会把上传甩到正式域名上换成一个 401。"""
+    records: list[httpx.Request] = []
+    sandbox_files_url = "https://sandbox.api.sgroup.qq.com/v2/users/u9/files"
+    media = _media_transport(
+        {
+            _absolute_media("t1"): (200, b"doc-bytes"),
+            sandbox_files_url: (200, _upload_reply()),
+        },
+        records,
+    )
+    task, client = await _start_bridge(monkeypatch, media, sandbox=True)
+    try:
+        await client.on_c2c_message_create(_c2c_message("hi", [], message_id="f5"))
+        ext = FakeExternalApiClient.instances[-1]
+        await ext.events.put(
+            {
+                "type": "outbound.created",
+                "seq": 1,
+                "text": "日报",
+                "external_key": "qq:c2c:u9",
+                "attachments": [_outbound_attachment("日报.docx", "application/octet-stream")],
+            }
+        )
+        await _wait_until(lambda: _api_uploads(records))
+        assert str(_api_uploads(records)[0].url) == sandbox_files_url
     finally:
         task.cancel()
         with suppress(asyncio.CancelledError):

@@ -17,8 +17,11 @@ Real-device seam: the botpy SDK surface is verified against ``qq-botpy==1.2.1`` 
 through ``file_data`` (base64) on the same `/files` routes: botpy's
 ``post_group_file`` / ``post_c2c_file`` wrappers only expose the ``url``
 parameter, which the platform fetches itself (public reachability required),
-so the bridge issues the request directly with the SDK's own route/http pair
-(see docs/architecture/external-agent-api.md「内置官方 QQ 适配器」).
+so the bridge reuses the SDK's own ``Route`` and auth headers but posts the
+upload on its own media client — the SDK's single ``Client(timeout=...)`` knob
+(5s by default) applies to every API call including text messages, and an
+upload needs a budget derived from the payload size instead. See
+docs/architecture/external-agent-api.md「内置官方 QQ 适配器」.
 IMPORTANT: ``Client.run()`` is a blocking entry point
 (``loop.run_until_complete``) that raises ``RuntimeError: This event loop is
 already running`` inside the web runtime's live loop — this bridge therefore
@@ -35,6 +38,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import mimetypes
+import time
 from collections import OrderedDict
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -94,6 +98,24 @@ _ATTACHMENT_DOWNLOAD_RETRY_DELAY_SECONDS = 1.5
 # 超过即降级为签名链接文本，不向平台发起必然失败的巨型上传。
 _MAX_OUTBOUND_ATTACHMENT_BYTES = 20 * 1024 * 1024
 
+# 媒体上传的预算不能借 SDK 那枚全局超时：``botpy.Client(timeout=5)`` 套在桥的每一个
+# API 请求上（文本消息也是它），且 ``http.request`` 对超时只打一条 WARNING 就返回
+# ``None``。上传预算按请求体字节数推导——固定开销（握手与网关收下整段 base64 后落
+# 媒体存储）加上按可接受的最低上行吞吐折算的传输时间；低于该吞吐就该判失败，而不是
+# 无限等。固定开销这一档目前只有握手的实测（本机到 api.sgroup.qq.com 的 DNS+TLS
+# 0.56s），网关落媒体要多久靠 ``qq-official file_data uploaded`` 逐发记录的实耗重定。
+# 上限由上面的下载封顶决定：20MiB 原始文件的 base64 请求体约 27MiB，预算 68s，
+# 且只发生在带附件的那一发上。
+_MEDIA_UPLOAD_FIXED_BUDGET_SECONDS = 15.0
+_MEDIA_UPLOAD_MIN_THROUGHPUT_BYTES_PER_SECOND = 512 * 1024
+
+
+def _media_upload_timeout(body_bytes: int) -> float:
+    """一次 ``file_data`` 上传的读写预算（秒）；连接超时另按 5 秒判死。"""
+    transfer = body_bytes / _MEDIA_UPLOAD_MIN_THROUGHPUT_BYTES_PER_SECOND
+    return _MEDIA_UPLOAD_FIXED_BUDGET_SECONDS + transfer
+
+
 # 服务端排队回执兜底文案（正常取 /api/v1 响应里的 receipt）。
 _QUEUED_RECEIPT_FALLBACK_TEXT = "收到，将在当前任务中一并处理。"
 
@@ -102,6 +124,10 @@ _QUEUED_RECEIPT_FALLBACK_TEXT = "收到，将在当前任务中一并处理。"
 # "机器识别结果：" 等于让模型把一句失败说明当成用户说的话。
 _VOICE_TRANSCRIPT_PREFIX = "用户语音，机器识别结果："
 _VOICE_FAILURE_PREFIX = "用户语音，机器识别失败："
+# 附件取不到时也要给用户留一句话：纯图片/文件消息在下载失败或超限时正文与附件都是空的，
+# 没有这行就会在 on_incoming 的早退里整条消失（"发了东西然后什么都没有"）。只报名字与
+# 形态，绝不把带签名的媒体 URL 写进模型正文。
+_ATTACHMENT_FAILURE_PREFIX = "用户附件，机器取不到："
 
 # QQ 官方附件的 content_type 是**类别词**而不是 MIME：实盘一条语音收到的是
 # `['voice']`（18:05:42），而 `startswith("audio/")` 永远不命中它，语音于是
@@ -325,7 +351,8 @@ async def _collect_attachments(
     forwarded: ``image/*`` as ``kind:"image"``, everything else (documents,
     archives, ...) as ``kind:"file"`` — the server stores non-image files and
     surfaces them to the model as local-path notes. Failures degrade to
-    text-only delivery.
+    text-only delivery; a message that is *only* attachments and yields nothing
+    is named and submitted by ``on_incoming`` instead of being dropped.
 
     ``audio/*`` is the exception: forwarded as a file it reaches the model as
     one local-path line and the utterance itself is lost, so when local
@@ -470,6 +497,7 @@ async def run_qq_official_bridge(
         event_id: str,
         attachments: list[dict[str, str]] | None = None,
         voice_lines: list[str] | None = None,
+        attachment_names: list[str] | None = None,
     ) -> None:
         attachment_payloads = list(attachments or [])
         if voice_lines:
@@ -477,7 +505,15 @@ async def run_qq_official_bridge(
             # 另起回合，用户才有"发了一段话 + 一段语音"的连贯语义。
             text = "\n".join([str(text or "").strip(), *[line for line in voice_lines if line]]).strip()
         if not text.strip() and not attachment_payloads:
-            return
+            if attachment_names:
+                # 一条纯附件消息在所有附件都取不到时（QQ 的媒体 URL 带签名且会过期）
+                # 正文与附件同时为空。以前这里直接 return，用户端就是"发了张图，什么
+                # 都没有"。契约要求纯附件消息照常提交，所以补一行点名式的说明再提交；
+                # 混合正文的场景不加注，保持"降级为仅文本提交"原样。
+                named = "、".join([name for name in attachment_names if name][:3]) or f"{len(attachment_names)} 项"
+                text = f"{_ATTACHMENT_FAILURE_PREFIX}{named}：均未能取到"
+            else:
+                return
         session_id = sessions.get(external_key)
         if session_id is None:
             session_id = await client.ensure_session(external_key)
@@ -546,22 +582,61 @@ async def run_qq_official_bridge(
 
         botpy 的 ``post_group_file`` / ``post_c2c_file`` 只暴露 ``url`` 参数——那
         条路径由 QQ 服务器回源下载，要求本服务端公网可达；``file_data`` 不回源，
-        服务端只监听回环地址时同样成立。故这里用与 botpy 内部完全相同的写法
-        直接发请求，仅补上 SDK 未暴露的入参。
+        服务端只监听回环地址时同样成立。这一发不走 botpy 的 ``http.request``：SDK
+        把 ``Client(timeout=...)``（默认 5 秒）那一枚套在桥的每一个 API 请求上，
+        而媒体上传的预算和一条文本消息的预算不是同一回事；它超时也只打一条 SDK
+        自己的 WARNING 就返回 ``None``，桥侧连失败原因都拿不到。这里沿用 SDK 的
+        Route（域名与路径参数）和它的鉴权头续期，把 POST 发到桥自己的媒体 client
+        上，预算由 ``_media_upload_timeout`` 按请求体字节数推导。
         """
-        payload = {
-            "file_type": file_type,
-            "file_data": base64.b64encode(data).decode("ascii"),
-            "srv_send_msg": False,
-        }
+        file_data = base64.b64encode(data).decode("ascii")
+        body = {"file_type": file_type, "file_data": file_data, "srv_send_msg": False}
+        budget = _media_upload_timeout(len(file_data))
+        route = _media_files_route(kind, target)
+        started = time.perf_counter()
         try:
-            media = await bridge_api._http.request(_media_files_route(kind, target), json=payload)
+            await bridge_api._http.check_session()
+            route.is_sandbox = bridge_api._http.is_sandbox
+            response = await media_client.post(
+                route.url,
+                json=body,
+                headers=dict(bridge_api._http._headers or {}),
+                timeout=httpx.Timeout(budget, connect=5.0),
+            )
         except Exception as exc:  # noqa: BLE001 - 回退 url 路径
             logger.warning(
-                "qq-official file_data media upload failed ({}); falling back to url upload", exc
+                "qq-official file_data media upload failed after {:.1f}s (budget {:.1f}s, {}); "
+                "falling back to url upload",
+                time.perf_counter() - started,
+                budget,
+                exc,
             )
             return ""
-        return str(media.get("file_info") or "").strip() if isinstance(media, dict) else ""
+        try:
+            uploaded = response.json()
+        except ValueError:
+            uploaded = None
+        file_info = ""
+        if isinstance(uploaded, dict):
+            file_info = str(uploaded.get("file_info") or "").strip()
+        if not file_info:
+            logger.warning(
+                "qq-official file_data media upload rejected status={} body={} after {:.1f}s "
+                "(budget {:.1f}s); falling back to url upload",
+                response.status_code,
+                str(response.text)[:200],
+                time.perf_counter() - started,
+                budget,
+            )
+            return ""
+        # 逐发实耗是这条车道的读数：预算的固定开销档靠它重定。
+        logger.info(
+            "qq-official file_data uploaded {} bytes in {:.1f}s (budget {:.1f}s)",
+            len(file_data),
+            time.perf_counter() - started,
+            budget,
+        )
+        return file_info
 
     async def _upload_media_url(
         kind: str, target: dict[str, str], url: str, file_type: int
@@ -974,6 +1049,10 @@ async def run_qq_official_bridge(
                 getattr(message, "id", ""),
                 attachments,
                 voice_lines,
+                [
+                    str(getattr(item, "filename", "") or "").strip()
+                    for item in (getattr(message, "attachments", None) or [])
+                ],
             )
 
         async def on_group_at_message_create(self, message):
