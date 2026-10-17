@@ -3017,7 +3017,13 @@ async def test_message_builder_directly_continues_request_body_seed_without_stag
     assert result.stable_messages[4]["tool_call_id"] == "call-exec-1"
     assert result.stable_messages[4]["name"] == "exec"
     assert stable_contents[-1] == '{"status":"success"}'
-    assert "strict follow up" in model_contents
+    # 续跑轮的这一句仍然原样在场，只是末位 user 会盖上送达时间锚点。
+    from g3ku.core.timefmt import MESSAGE_ARRIVAL_TIME_MARKER
+
+    follow_up_rows = [text for text in model_contents if "strict follow up" in text]
+    assert follow_up_rows, model_contents
+    assert MESSAGE_ARRIVAL_TIME_MARKER in follow_up_rows[0]
+    assert str(result.model_messages[-1].get("role") or "") == "user"
     assert "[STAGE_COMPACT_V1]" not in rendered
     assert "[STAGE_RAW_V1]" not in rendered
     assert result.trace["history_source"] == "session_window"
@@ -3975,3 +3981,39 @@ def test_frontdoor_stage_gate_lists_declared_but_denied_tools() -> None:
         frontdoor_stage_state={},
     )
     assert "denied_tools" not in clean.to_stage_gate_message()["content"]
+
+
+@pytest.mark.asyncio
+async def test_continuation_lane_decorates_the_current_user_row_with_arrival_time() -> None:
+    """续跑轮的最后一条 user 也必须盖送达时间戳。
+
+    另两条装配道（常规注入与内部种子）都走 `_current_user_content_with_arrival_time`，
+    续跑那一步曾经自己手搓 `{"role": "user", "content": 原文}`，于是模型在这一路上看不到
+    "这条问题是什么时候到的"，而上下文里其它行都带这个锚点。
+    """
+    from g3ku.core.timefmt import MESSAGE_ARRIVAL_TIME_MARKER
+
+    prompt_builder = _PromptBuilder()
+    memory_manager = _MemoryManager(response="")
+    builder = CeoMessageBuilder(loop=_loop(memory_manager), prompt_builder=prompt_builder)
+    body = [
+        {"role": "system", "content": "BASE PROMPT"},
+        {"role": "user", "content": "上一轮问题"},
+        {"role": "assistant", "content": "上一轮回答"},
+    ]
+
+    result = await builder.build_for_ceo(
+        session=_session(),
+        query_text="本轮问题",
+        exposure={"skills": [], "tools": [], "tool_names": []},
+        persisted_session=None,
+        checkpoint_messages=[],
+        request_body_seed_messages=list(body),
+        user_content="本轮问题",
+    )
+
+    user_rows = [item for item in result.model_messages if str(item.get("role") or "") == "user"]
+    assert user_rows, result.model_messages
+    assert MESSAGE_ARRIVAL_TIME_MARKER in str(user_rows[-1].get("content") or "")
+    # 末位仍是用户的这一句，契约/overlay 没有挤到它后面。
+    assert str(result.model_messages[-1].get("role") or "") == "user"

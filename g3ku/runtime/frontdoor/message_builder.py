@@ -2073,8 +2073,15 @@ class CeoMessageBuilder:
         if ephemeral_tail:
             model_messages.extend(ephemeral_tail)
         # 当前用户回合必须是模型看到的最后一条，避免契约/overlay 占据末位被回显。
+        # 装饰只能有一个作者：另两条道都盖送达时间（1900/1975），这里漏了就等于续跑轮
+        # 的模型看不到"这条问题是什么时候到的"。估算与发送体也共用同一条消息。
+        current_user_message = None
         if not current_user_in_history and has_user_content:
-            model_messages.append({"role": "user", "content": context_sources['user_content']})
+            current_user_message = {
+                "role": "user",
+                "content": self._current_user_content_with_arrival_time(context_sources['user_content']),
+            }
+            model_messages.append(current_user_message)
 
         raw_history_messages = [
             dict(item)
@@ -2084,8 +2091,8 @@ class CeoMessageBuilder:
         ]
         history_zone_source = list(raw_history_messages)
         pre_request_messages = list(stable_messages)
-        if not current_user_in_history and has_user_content:
-            pre_request_messages.append({"role": "user", "content": str(context_sources["user_content"] or "")})
+        if current_user_message is not None:
+            pre_request_messages.append(dict(current_user_message))
         pre_request_prompt_tokens = estimate_message_tokens(pre_request_messages)
         history_zone_tokens = estimate_message_tokens(history_zone_source)
         compression_state_payload = {
