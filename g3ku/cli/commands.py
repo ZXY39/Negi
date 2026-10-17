@@ -513,7 +513,7 @@ def cron_add(
         console.print(f"[red]Error: {e}[/red]")
         raise typer.Exit(1) from e
 
-    console.print(f"[green]闁翠焦褰?green] Added job '{job.name}' ({job.id})")
+    console.print(f"[green]OK[/green] Added job '{job.name}' ({job.id})")
 
 
 @cron_app.command("remove")
@@ -528,7 +528,7 @@ def cron_remove(
     service = CronService(store_path)
 
     if service.remove_job(job_id):
-        console.print(f"[green]闁翠焦褰?green] Removed job {job_id}")
+        console.print(f"[green]OK[/green] Removed job {job_id}")
     else:
         console.print(f"[red]Job {job_id} not found[/red]")
 
@@ -548,7 +548,7 @@ def cron_enable(
     job = service.enable_job(job_id, enabled=not disable)
     if job:
         status = "disabled" if disable else "enabled"
-        console.print(f"[green]闁翠焦褰?green] Job '{job.name}' {status}")
+        console.print(f"[green]OK[/green] Job '{job.name}' {status}")
     else:
         console.print(f"[red]Job {job_id} not found[/red]")
 
@@ -566,6 +566,7 @@ def cron_run(
     from g3ku.cron.runtime_dispatch import dispatch_cron_job
     from g3ku.cron.service import CronService
     from g3ku.cron.types import CronJob
+    from g3ku.runtime import SessionRuntimeBridge, SessionRuntimeManager
     logger.disable("g3ku")
 
     config = load_config()
@@ -600,7 +601,7 @@ def cron_run(
             await agent_loop.close_mcp()
 
     if asyncio.run(run()):
-        console.print("[green]闁翠焦褰?green] Job executed")
+        console.print("[green]OK[/green] Job executed")
         if result_holder:
             _print_agent_response(result_holder[0], render_markdown=True)
     else:
