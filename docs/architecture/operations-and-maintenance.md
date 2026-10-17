@@ -27,6 +27,7 @@
 - 取码一律先检出到临时目录再逐顶层合并。`git clone` 对着非空目录直接 fatal，而"保留数据"的卸载留下的正是非空目录，所以认领不是可选项；目标里已有 `.g3ku/config.json` 时报一句认领（配置、会话与密钥沿用），不重新初始化项目
 - 卸载入口是 `uninstall.ps1` / `uninstall.sh`（随发布 checkout 分发，注册表 `UninstallString` 指向它）。顺序固定：先请求优雅退出并确认进程真的退干净，退不干净就中止、一个文件都不删（`.venv` 在跑时文件也删不动）；然后询问保留还是全部删除，默认保留。删除判据是两个独立事实——数据根里要有 Negi 的配置或密钥信封，还要有运行时目录之一——主目录、盘根与读不出标记的路径一律拒绝。uv 与它代管的 Python 属共享工具链，永不删
 - 隐藏窗口的启动没有控制台所有者：停止服务只有网页「设置」里的退出按钮（`org_graph.html` → `POST /api/bootstrap/exit`，见下节与 `web-and-admin.md`「Local Startup And Launcher Contract」）。界面进不去时的兜底仍是 `start-negi.*` 的"先优雅退出再强杀"
+- `install.ps1` **不带 UTF-8 BOM，且非 ASCII 只出现在注释行**。一行指令是 `iwr ... | iex`：PowerShell 5.1 把下载到的字节按客户端码页解成文本再交给 `iex`，BOM 于是变成 `#requires` 之前的垃圾字符，`param(` 不再是首条语句，安装会在第一个参数行报 `InvalidLeftHandSide`。去掉 BOM 后 UTF-8 / cp936 / latin-1 三种解码实测都能零错解析，前提是字符串字面量保持 ASCII。`uninstall.ps1` 相反——它只经 `-File` 执行且正文里有中文对话框，必须带 BOM，否则 PS 5.1 按 ANSI 解会把字符串解析打断。这四条由 `tests/resources/test_start_scripts_and_readme.py` 钉住
 - 镜像源不设安装器参数：uv 直接读 `UV_DEFAULT_INDEX` 与 `UV_PYTHON_INSTALL_MIRROR` 环境变量
 - 安装完成的终点是项目口令设置页，不是可用系统（解锁合同见 `config-and-models.md`「Deployment Unlock Contract」）
 - 不带 `-Upgrade` 时对已存在的目录是**幂等不动代码**（只补环境与启动）。升级是显式动作：git 检出走 `fetch --depth 1` + `checkout --detach FETCH_HEAD`，无 git 的源码包安装走"下归档 + 逐顶层覆盖"，两条路都只换代码，`.venv/` 与 `.g3ku/` 保留

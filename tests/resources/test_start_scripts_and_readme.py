@@ -3,6 +3,8 @@ from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 
+BOM = b"\xef\xbb\xbf"
+
 
 def _read(name: str) -> str:
     return (REPO_ROOT / name).read_text(encoding="utf-8")
@@ -98,3 +100,44 @@ def test_readme_launches_via_start_script_and_keeps_typed_commands_later() -> No
     assert "negi worker" not in startup_section
     assert "negi web" in manual_section
     assert "negi worker" in manual_section
+
+
+def test_readme_documents_daily_start_and_uninstall() -> None:
+    readme = _read("README.md")
+
+    assert "### 2.3 日常启动与项目口令" in readme
+    assert "### 2.6 卸载" in readme
+    uninstall_section = readme[readme.index("### 2.6 卸载"):readme.index("## 3. Web 界面")]
+    for phrase in ("已安装的应用", "uninstall.ps1", "uninstall.sh", "保留数据", "全部删除"):
+        assert phrase in uninstall_section, phrase
+
+
+def test_installer_is_bom_free_so_the_one_line_channel_parses() -> None:
+    # `iwr .../install.ps1 | iex` gives PowerShell the downloaded bytes decoded as
+    # text, so a UTF-8 BOM arrives as junk characters *before* `#requires`. That
+    # makes `param(` no longer the first statement and the one-line install dies
+    # with InvalidLeftHandSide on its first parameter line.
+    for name in ("install.ps1", "install.sh", "uninstall.sh"):
+        assert not (REPO_ROOT / name).read_bytes().startswith(BOM), name
+
+
+def test_installer_keeps_non_ascii_inside_comments_only() -> None:
+    # Without a BOM the download is decoded by whatever code page the client
+    # picks; measured clean under UTF-8, cp936 and latin-1 while non-ASCII stays
+    # in comments. A non-ASCII *string literal* would turn into mojibake at run
+    # time, so install.ps1 must stay ASCII outside comments.
+    lines = _read("install.ps1").splitlines()
+    offenders = [
+        (number, line.strip()[:60])
+        for number, line in enumerate(lines, start=1)
+        if not line.isascii() and not line.lstrip().startswith("#")
+    ]
+    assert offenders == [], offenders
+
+
+def test_uninstaller_keeps_its_bom_for_cjk_dialog_text() -> None:
+    # uninstall.ps1 runs through `-File`, where PowerShell 5.1 without a BOM
+    # decodes the script as ANSI and the Chinese dialog strings break parsing.
+    # It is never piped through iex, so the BOM that kills install.ps1 is what
+    # keeps this one readable.
+    assert (REPO_ROOT / "uninstall.ps1").read_bytes().startswith(BOM)
