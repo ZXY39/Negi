@@ -9820,6 +9820,17 @@ function discardPendingCeoTurns({ force = false, source = null, turnId = "" } = 
         const [removedTurn] = S.ceoPendingTurns.splice(index, 1);
         if (removedTurn) removed.push(removedTurn);
     }
+    // 收尾本身就是"这条会话没有回合在跑"的证据，而一个会话同时只跑一条回合。所以只挂着
+    // 加载图标、一个字符都没有的气泡不可能属于另一条还在跑的回合：它某一跳没等到 final
+    // （内部轮的最终回复为空时服务端就不转发那一帧），按 source/turnId 筛永远筛不到它，
+    // 于是加载图标永久留在会话面上，刷新才被服务端的干净快照抹掉。
+    for (let index = S.ceoPendingTurns.length - 1; index >= 0; index -= 1) {
+        const turn = S.ceoPendingTurns[index];
+        if (!turn || turn.finalized) continue;
+        if (!turn.textEl?.classList?.contains?.("assistant-text-loading")) continue;
+        const [removedTurn] = S.ceoPendingTurns.splice(index, 1);
+        if (removedTurn) removed.push(removedTurn);
+    }
     if (!removed.length) return false;
     return mutateCeoFeed(() => {
         removed.forEach((turn) => {
