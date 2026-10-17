@@ -113,7 +113,7 @@
 
 `save_config()` 把 `config.json` **整份重写**（先写同目录临时文件再 `os.replace`），内容来自 `_runtime_config_payload(cfg)` 这一份显式白名单，不与磁盘上的旧文件合并。因此一条硬规则：**运行期会读的字段必须出现在白名单里，否则任何一次保存都会把它抹回 schema 默认**——操作员调过、界面改过、`G3KU_*` 覆盖过都算写过，而下一次保存就不见了。
 
-白名单对可选能力段按「调过才落盘」写：与 schema 默认值相同的字段不落盘（不给操作员文件加噪声，存量文件也不会因此长出键），只有被改动的字段进文件，读侧由 pydantic 补回其余默认值。当前按该形状落盘的有 `agents.nodeParallelism`、`agents.toolDefaultTimeoutSeconds`、`mainRuntime.diskGuard`、`mainRuntime.duplicatePrecheck`、`mainRuntime.eventHistory`、`updateCheck`，以及非空时才落盘的 `models.loadBalanceGroups`。
+白名单对可选字段按「调过才落盘」写：与默认值相同的字段不落盘（不给操作员文件加噪声，存量文件也不会因此长出键），只有被改动的字段进文件，读侧由 pydantic 补回其余默认值。当前按该形状落盘的有 `agents.nodeParallelism`、`agents.toolDefaultTimeoutSeconds`、`mainRuntime.diskGuard`、`mainRuntime.duplicatePrecheck`、`mainRuntime.eventHistory`、`updateCheck`、非空时才落盘的 `models.loadBalanceGroups`，以及 `models.catalog[].reasoningContextEnabled`（这颗开关默认开，只有被操作员关掉的那一行写 `false`——它不落盘就等于下次保存把网关会 400 的那一行重新打开）。
 
 「运行时字段显式性校验」要求白名单里每个叶子都在 `config.json` 出现，缺一个就拒绝加载。豁免前缀（`providers`、`mainRuntime`、`externalApi`、`qqBot`、`cron`、`stt`、`contextRefresh`、`agents.nodeParallelism`、`agents.toolDefaultTimeoutSeconds`、`updateCheck`、`models.loadBalanceGroups`）承担两类情况：存量文件本来没有这些节，以及取值可能来自 `G3KU_*` 环境变量而不是配置文件——被豁免的节没写就是不用，回落到 schema 默认。新增字段时两个判断都要重做：进不进白名单（决定它会不会被保存抹掉），要不要进豁免前缀（决定老文件还能不能加载）。
 
@@ -415,7 +415,7 @@ Runtime gating of image uploads by this flag: 详见 `web-and-admin.md`「Image 
 
 ## Reasoning Context Binding Flag
 
-`models.catalog[]` carries a third binding-owned flag: `reasoning_context_enabled` (`reasoningContextEnabled` in saved JSON / admin payload aliases), **default `true`** — the same no-backfill rule and the same storage location as `imageMultimodalEnabled` (it lives in `.g3ku/config.json`, never in `.g3ku/llm-config/records/*.json`). Absent means on; an operator writes `false` only for a gateway that rejects the field.
+`models.catalog[]` carries a third binding-owned flag: `reasoning_context_enabled` (`reasoningContextEnabled` in saved JSON / admin payload aliases), **default `true`** — the same no-backfill rule and the same storage location as `imageMultimodalEnabled` (it lives in `.g3ku/config.json`, never in `.g3ku/llm-config/records/*.json`). Absent means on; an operator writes `false` only for a gateway that rejects the field. 落盘判据（关掉的那一行才写 `false`）见「写侧：`save_config` 整写与字段白名单」。
 
 It declares that this binding accepts its own thinking content being replayed back to it as `reasoning_content` on the assistant history row. The runtime writes the field only when **every** binding in the resolved model chain enables it (a binding whose managed profile cannot be resolved counts as off), because a row once persisted is re-sent to whichever chain member answers later hops, and a gateway that rejects the field answers 400/422 — which this codebase treats as a request-shape fault that skips the remaining keys and advances straight to the next model. The write gate lives at the history-append point; the send-side sanitizer only passes the field through, so request hashes, preflight estimates and the wire body stay identical.
 

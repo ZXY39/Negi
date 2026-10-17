@@ -502,6 +502,10 @@ def _managed_models_payload(cfg: Config) -> tuple[list[dict[str, object]], dict[
         if getattr(item, "quota_pool_key", None):
             # 只在显式声明时落盘：不给没配的存量配置造出一个 null 字段。
             payload["quotaPoolKey"] = str(item.quota_pool_key)
+        if not bool(getattr(item, "reasoning_context_enabled", True)):
+            # 默认开，所以只有被操作员关掉的那一行才写；不写就等于下次保存把它静默
+            # 抹回 true，而拒收历史带思考位的网关会整链 400。
+            payload["reasoningContextEnabled"] = False
         catalog.append(payload)
     routes = {
         "ceo": _role_route_payload(cfg.models.roles.ceo),

@@ -225,3 +225,19 @@ def test_quota_pool_key_only_serialized_when_declared() -> None:
         {**payload, "models": {**payload["models"], "catalog": [{**payload["models"]["catalog"][0], "quotaPoolKey": "  "}, *payload["models"]["catalog"][1:]]}}
     )
     assert blank.get_managed_model("m_a").quota_pool_key is None
+
+
+def test_disabled_reasoning_context_flag_survives_a_config_save() -> None:
+    """这颗开关默认开，所以只有被关掉的那一行需要落盘；不写就等于下次保存把它
+    静默抹回 true——拒收历史带思考位的网关会整链 400。"""
+    payload = _config_payload()
+    payload["models"]["catalog"][0]["reasoningContextEnabled"] = False
+    cfg = Config.model_validate(payload)
+
+    catalog_payload, _roles = _managed_models_payload(cfg)
+    assert catalog_payload[0].get("reasoningContextEnabled") is False
+    assert "reasoningContextEnabled" not in catalog_payload[1]
+
+    reloaded = Config.model_validate(json.loads(json.dumps(_runtime_config_payload(cfg))))
+    assert reloaded.get_managed_model("m_a").reasoning_context_enabled is False
+    assert reloaded.get_managed_model("m_b").reasoning_context_enabled is True
