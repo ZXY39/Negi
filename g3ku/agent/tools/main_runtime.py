@@ -102,6 +102,43 @@ def _live_registered_skill_visible(
     return False
 
 
+def _live_registered_external_tool_visible(
+    service: Any,
+    *,
+    actor_role: str,
+    session_id: str,
+    tool_id: str,
+) -> bool:
+    """Fallback probe for registered resources the frame lists can never carry.
+
+    An ``external`` tool is discovered and RBAC-visible, but it owns no executor
+    instance, and both canonical name lists are built from instantiated names, so
+    it is absent from them by construction. The fallback is limited to
+    ``tool_type=external`` records: normal tools keep the candidate gate, and RBAC
+    is enforced here and again by ``load_tool_context_v2``.
+    """
+    target = str(tool_id or "").strip()
+    if not target:
+        return False
+    method = getattr(service, "list_visible_tools", None)
+    if not callable(method):
+        return False
+    try:
+        records = method(actor_role=actor_role, session_id=session_id)
+    except Exception:
+        return False
+    for record in list(records or []):
+        if isinstance(record, dict):
+            record_id = record.get("tool_id")
+            record_type = record.get("tool_type")
+        else:
+            record_id = getattr(record, "tool_id", None)
+            record_type = getattr(record, "tool_type", "")
+        if str(record_id or "").strip() == target:
+            return str(record_type or "").strip().lower() == "external"
+    return False
+
+
 def _loadable_tool_gate_error(
     *,
     runtime: dict[str, Any] | None,
@@ -265,7 +302,12 @@ class LoadToolContextTool(_MainRuntimeTool):
                 runtime=__g3ku_runtime,
                 requested_id=tool_name,
             )
-            if gate_error:
+            if gate_error and not _live_registered_external_tool_visible(
+                service,
+                actor_role=_runtime_actor_role(__g3ku_runtime),
+                session_id=_runtime_session_key(__g3ku_runtime),
+                tool_id=tool_name,
+            ):
                 return gate_error
         if hasattr(service, "load_tool_context_v2"):
             kwargs_v2: dict[str, Any] = {
