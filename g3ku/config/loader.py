@@ -512,6 +512,18 @@ def _managed_models_payload(cfg: Config) -> tuple[list[dict[str, object]], dict[
     return catalog, routes
 
 
+def _tuned_block(model: Any) -> dict[str, Any]:
+    """只保留与 schema 默认值不同的字段。
+
+    `save_config` 用 `_runtime_config_payload` 整体重写 config.json（不是增量合并），
+    所以没进这份白名单的旋钮会在任何一次保存后被抹回默认值。可选段按"调过才落盘"
+    写入：没调过的节不产生噪声，调过的必须活着回来。
+    """
+    payload = model.model_dump(by_alias=True)
+    defaults = type(model)().model_dump(by_alias=True)
+    return {key: value for key, value in payload.items() if value != defaults.get(key)}
+
+
 def _runtime_config_payload(cfg: Config) -> dict[str, object]:
     catalog, routes = _managed_models_payload(cfg)
     groups = _load_balance_groups_payload(cfg)
@@ -528,7 +540,7 @@ def _runtime_config_payload(cfg: Config) -> dict[str, object]:
     if groups:
         models_payload["loadBalanceGroups"] = groups
 
-    return {
+    payload: dict[str, Any] = {
         "agents": {
             "defaults": {
                 "workspace": cfg.agents.defaults.workspace,
@@ -651,6 +663,27 @@ def _runtime_config_payload(cfg: Config) -> dict[str, object]:
         },
     }
 
+    # 可选段按"调过才落盘"写入：save_config 是整写而非合并，白名单外的旋钮会在
+    # 任意一次保存后被抹回 schema 默认，而 runtime_service / shells.web 每轮加载
+    # 都会读这些值。
+    node_parallelism = _tuned_block(cfg.agents.node_parallelism)
+    if node_parallelism:
+        payload["agents"]["nodeParallelism"] = node_parallelism
+    timeout_default = type(cfg.agents).model_fields["tool_default_timeout_seconds"].default
+    if cfg.agents.tool_default_timeout_seconds != timeout_default:
+        payload["agents"]["toolDefaultTimeoutSeconds"] = cfg.agents.tool_default_timeout_seconds
+    for block_key, block in (
+        ("eventHistory", _tuned_block(cfg.main_runtime.event_history)),
+        ("diskGuard", _tuned_block(cfg.main_runtime.disk_guard)),
+        ("duplicatePrecheck", _tuned_block(cfg.main_runtime.duplicate_precheck)),
+    ):
+        if block:
+            payload["mainRuntime"][block_key] = block
+    update_check = _tuned_block(cfg.update_check)
+    if update_check:
+        payload["updateCheck"] = update_check
+    return payload
+
 
 def _ensure_runtime_fields_explicit(raw_data: dict[str, Any], cfg: Config) -> None:
     middlewares = ((raw_data.get("agents") or {}).get("defaults") or {}).get("middlewares")
@@ -671,6 +704,11 @@ def _ensure_runtime_fields_explicit(raw_data: dict[str, Any], cfg: Config) -> No
         ("stt",),
         # 空闲刷新边界：存量 config.json 没有这一节也必须能加载，默认值由 schema 承担。
         ("contextRefresh",),
+        # 调过才落盘的可选旋钮：来源可能是 G3KU_* 环境变量而非配置文件，
+        # 因此不能反过来要求 config.json 显式带这些键。
+        ("agents", "nodeParallelism"),
+        ("agents", "toolDefaultTimeoutSeconds"),
+        ("updateCheck",),
         # 负载均衡组是可选段：存量 config.json 没有该节也必须能加载，成员预算等
         # 缺省值由 `ModelLoadBalanceGroup` 承担。
         ("models", "loadBalanceGroups"),
