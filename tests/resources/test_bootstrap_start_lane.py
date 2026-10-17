@@ -100,7 +100,8 @@ def test_start_binds_the_url_to_loopback_even_when_config_binds_all(monkeypatch)
     assert opened == ['http://127.0.0.1:18790/']
 
 
-def test_cold_start_spawns_once_then_opens_browser(monkeypatch) -> None:
+def test_cold_start_detaches_so_the_window_can_close(monkeypatch) -> None:
+    # 他要求的语义：敲 `negi` 起的服务不依附这个终端，关掉窗口项目照跑。
     spawned = {}
     opened = []
     monkeypatch.setattr(negi_bootstrap, '_load_bootstrap_config', lambda: {})
@@ -116,10 +117,28 @@ def test_cold_start_spawns_once_then_opens_browser(monkeypatch) -> None:
 
     monkeypatch.setattr(negi_bootstrap, '_spawn_web_runtime', _capture)
 
-    assert negi_bootstrap._run_start(['--hidden', '--port', '9555']) == 0
+    assert negi_bootstrap._run_start(['--port', '9555']) == 0
     assert spawned['args'] == ['web', '--port', '9555']
     assert spawned['hidden'] is True
     assert opened == ['http://127.0.0.1:9555/']
+
+
+def test_start_still_consumes_the_hidden_flag_of_older_shortcuts(monkeypatch) -> None:
+    spawned = {}
+    monkeypatch.setattr(negi_bootstrap, '_load_bootstrap_config', lambda: {})
+    monkeypatch.setattr(negi_bootstrap, '_probe_web_ready', lambda port: False)
+    monkeypatch.setattr(negi_bootstrap, '_open_runtime_console_log_stream', lambda: None)
+    monkeypatch.setattr(negi_bootstrap, '_open_browser', lambda _url: True)
+    monkeypatch.setattr(negi_bootstrap, '_wait_for_web_ready', lambda child, port: True)
+    monkeypatch.setattr(
+        negi_bootstrap,
+        '_spawn_web_runtime',
+        lambda args, **kwargs: (spawned.update(args=list(args)), _FakeChild())[1],
+    )
+
+    assert negi_bootstrap._run_start(['--hidden', '--port', '9556']) == 0
+    assert '--hidden' not in spawned['args']
+    assert spawned['args'] == ['web', '--port', '9556']
 
 
 def test_hidden_start_returns_without_waiting_for_the_server(monkeypatch) -> None:

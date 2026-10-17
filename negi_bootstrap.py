@@ -357,8 +357,9 @@ def _launch_web(web_args: list[str], *, port: int, open_browser: bool, hidden: b
         if open_browser:
             _open_browser(_web_url(port))
         if hidden:
-            # Nobody owns this console: stopping the server is the web UI's
-            # exit button, and the process stays reachable through `-m g3ku web`.
+            # Nobody owns this console: the server keeps running after this
+            # process exits, and stopping it is the web UI's exit button.
+            print("[negi] Negi runs in the background now; closing this window does not stop it", flush=True)
             return 0
         return int(child.wait() or 0)  # type: ignore[union-attr]
     except KeyboardInterrupt:
@@ -372,7 +373,10 @@ def _launch_web(web_args: list[str], *, port: int, open_browser: bool, hidden: b
 
 
 def _run_start(extra_args: list[str]) -> int:
-    hidden = "--hidden" in extra_args
+    # `--hidden` is still consumed so a shortcut written by an earlier install
+    # keeps working, but start always detaches: a server the operator launched by
+    # typing `negi` must outlive the window it was started from. Watching the
+    # process itself is what `negi web` is for.
     web_args, _ = _take_hidden_flag(list(extra_args))
     port = _web_bind_port(_port_override(web_args))
     if _probe_web_ready(port):
@@ -381,7 +385,7 @@ def _run_start(extra_args: list[str]) -> int:
         _open_browser(url)
         return 0
     print(f"[negi] Negi is not running yet; starting the web UI on port {port}", flush=True)
-    return _launch_web(["web", *web_args], port=port, open_browser=True, hidden=hidden)
+    return _launch_web(["web", *web_args], port=port, open_browser=True, hidden=True)
 
 
 def main(argv: list[str] | None = None) -> int:

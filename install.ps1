@@ -349,7 +349,7 @@ function Install-DesktopIcons {
         # pythonw allocates no console, so the icon starts Negi without the
         # window flash a .cmd or -WindowStyle Hidden would still show.
         $link.TargetPath = $pythonw
-        $link.Arguments = """$Root\negi_bootstrap.py"" start --hidden"
+        $link.Arguments = """$Root\negi_bootstrap.py"" start"
         $link.WorkingDirectory = $Root
         $link.Description = 'Start Negi and open the browser'
         if ($IconPath) { $link.IconLocation = "$IconPath,0" }
