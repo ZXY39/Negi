@@ -1240,14 +1240,22 @@ async def stream_external_events(
         last_seq = 0
 
     async def generate():
+        # 订阅先于重放：这两者之间发布的事件既进了队列也留在缓冲区，按 seq 去重
+        # 才能保证一条事件只落一次（重复的 reply.final 就是用户看到两条相同回复）。
+        emitted_seq = last_seq
         try:
             for event in hub.replay(last_seq):
+                emitted_seq = max(emitted_seq, int(event.get("seq") or 0))
                 yield _sse_chunk(event)
             while True:
                 if await request.is_disconnected():
                     break
                 try:
                     event = await asyncio.wait_for(queue.get(), timeout=SSE_HEARTBEAT_INTERVAL_SECONDS)
+                    seq = int(event.get("seq") or 0)
+                    if seq and seq <= emitted_seq:
+                        continue
+                    emitted_seq = max(emitted_seq, seq)
                     yield _sse_chunk(event)
                 except asyncio.TimeoutError:
                     yield ": keep-alive\n\n"

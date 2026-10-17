@@ -328,3 +328,30 @@ async def test_sse_foreign_bridge_session_404(sse_env):
             foreign, _FakeRequest(), principal=_PRINCIPAL, last_event_id=None
         )
     assert exc.value.status_code == 404
+
+
+@pytest.mark.asyncio
+async def test_sse_emits_an_event_published_at_the_subscribe_boundary_only_once(sse_env):
+    """订阅发生在重放之前：夹在这两者之间发布的那条事件既进了队列也留在缓冲区，
+    不去重就会投两遍——对外是"同一条 reply.final 收到两次"，桥那边就是两条相同回复。"""
+    registry = sse_env
+    entry, _ = registry.resolve_or_create(bridge_id="test-bridge", external_key="qq:dm:dup-boundary")
+
+    iterator = await _open_stream(entry.session_key)
+    get_session_event_hub(entry.session_key).publish("reply.final", turn_id="t1", text="只应出现一次")
+
+    data_lines: list[str] = []
+
+    async def pump() -> None:
+        async for chunk in iterator:
+            text = chunk if isinstance(chunk, str) else chunk.decode("utf-8")
+            data_lines.extend(line for line in text.splitlines() if line.startswith("data:"))
+
+    try:
+        await asyncio.wait_for(pump(), timeout=0.4)
+    except asyncio.TimeoutError:
+        pass
+    await iterator.aclose()
+
+    assert len(data_lines) == 1, data_lines
+    assert '"reply.final"' in data_lines[0]
