@@ -315,10 +315,28 @@ def test_list_sessions_shape_and_filter(harness):
     assert body["bridge_id"] == "test-bridge"
     items = body["items"]
     assert len(items) == 2
-    assert all(set(item) == {"session_id", "external_key", "title", "created_at"} for item in items)
+    # own 作用域的条目由网页侧那颗活动会话构造器富化（预览/条数/updated_at/运行态/
+    # 转录路径），"只剩 registry 四字段"的等式断言已经不是这份合同的样子；这里钉的是
+    # 必须稳定在场的读数，而不是整份键集快照。
+    required = {
+        "session_id",
+        "external_key",
+        "title",
+        "created_at",
+        "can_message",
+        "has_transcript",
+        "transcript_path",
+        "preview_text",
+        "message_count",
+        "updated_at",
+        "is_running",
+    }
+    assert all(required <= set(item) for item in items), sorted(items[0])
     by_key = {item["external_key"]: item for item in items}
-    assert by_key["qq:dm:1"]["title"] == "一号"
-    assert by_key["qq:dm:2"]["title"] == ""  # blank title surfaces as ""
+    # 标题带上桥名是活动目录的显示形状，桥提交的原文仍在其中。
+    assert "一号" in by_key["qq:dm:1"]["title"]
+    # 没提交过标题的会话仍有一个可显示的标签，桥侧不用自己补空串。
+    assert by_key["qq:dm:2"]["title"].strip()
     assert by_key["qq:dm:1"]["created_at"]
 
 

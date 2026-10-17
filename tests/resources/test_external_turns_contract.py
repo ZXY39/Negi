@@ -265,7 +265,14 @@ async def test_running_session_queues_follow_up_with_receipt_and_no_hub_events()
 
     result = await service.submit(entry=_entry(session_key), user_message="在地铁上呢", idempotency_key="k-b1")
 
-    assert result == {"turn_id": None, "status": "queued", "receipt": QUEUED_RECEIPT_TEXT}
+    assert result["turn_id"] is None
+    assert result["status"] == "queued"
+    assert result["receipt"] == QUEUED_RECEIPT_TEXT
+    # 回执另带"谁在跑、排在第几"两个读数：MCP 网关按 running_turn_id 决定要不要
+    # 告诉调用方先暂停那一轮，所以键名与形状都在这条合同上。
+    assert set(result) == {"turn_id", "status", "receipt", "running_turn_id", "queued_position"}
+    assert result["running_turn_id"] is None
+    assert result["queued_position"] == 0
     assert session.queued == ["在地铁上呢"]
     assert session.queue_persist_flags == [True]
     assert bridge.prompts == [] and bridge.batches == []
