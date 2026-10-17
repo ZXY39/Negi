@@ -83,7 +83,7 @@
 
 默认开的是**许可**，不是那 157 MB 的下载：二进制与模型仍要显式取得（`negi stt prepare`，或网页首次点麦克风时按需下载），所以一台没下过东西的机器上 `ready` 仍是 false，引擎不会自己去联网。反过来，已经保存过配置的旧设备里 `enabled: false` 是写死在 `config.json` 里的，不会随默认值翻转——那是它自己的显式选择。
 
-该节属于加载器「显式字段校验」的豁免前缀：存量 `config.json` 不写 `stt` 节也能启动，取值回落到 schema 默认。但 `_runtime_config_payload` 是显式白名单序列化，`stt` 的每个字段都必须同时出现在那里，否则任何一次配置保存都会把整段静默丢掉（`negi stt prepare --enable` 就写不进去）。引擎形态、就绪判定与默认值的实测依据详见 `speech-to-text.md`。
+`stt` 的写侧两个判断（在豁免前缀里、且每个字段都必须进白名单，否则 `negi stt prepare --enable` 落不了盘）见「写侧：`save_config` 整写与字段白名单」。引擎形态、就绪判定与默认值的实测依据详见 `speech-to-text.md`。
 
 ### `context_refresh`
 
@@ -91,7 +91,7 @@
 
 读法只有一个入口：`get_runtime_config()` 按 `config.json` 的 mtime 重载，前门与节点都在各自的发送点现读，所以改完不需要重启、也不需要给 worker 单独发信令。判据读不到配置时**按不刷新处理**（回落到钉住行为），因为刷新是收紧缓存代价的动作，读失败把它打开会让每一跳都变成重印。
 
-同样属于「显式字段校验」的豁免前缀，且同样必须在 `_runtime_config_payload` 里显式列出——缺后者的话，任何一次配置保存都会把这一节静默丢掉，网页上改了分钟数也永不生效。
+`contextRefresh` 的写侧判断（在豁免前缀里、且必须进白名单，否则网页上改了分钟数也永不生效）见「写侧：`save_config` 整写与字段白名单」。
 
 ## 3. 配置加载时做了什么
 
@@ -108,6 +108,14 @@
 
 - 启动时报配置错误，很多不是 JSON 语法错，而是 schema contract 变更
 - 不要手写“看起来像旧版”的配置字段，loader 会直接拒绝
+
+### 写侧：`save_config` 整写与字段白名单
+
+`save_config()` 把 `config.json` **整份重写**（先写同目录临时文件再 `os.replace`），内容来自 `_runtime_config_payload(cfg)` 这一份显式白名单，不与磁盘上的旧文件合并。因此一条硬规则：**运行期会读的字段必须出现在白名单里，否则任何一次保存都会把它抹回 schema 默认**——操作员调过、界面改过、`G3KU_*` 覆盖过都算写过，而下一次保存就不见了。
+
+白名单对可选能力段按「调过才落盘」写：与 schema 默认值相同的字段不落盘（不给操作员文件加噪声，存量文件也不会因此长出键），只有被改动的字段进文件，读侧由 pydantic 补回其余默认值。当前按该形状落盘的有 `agents.nodeParallelism`、`agents.toolDefaultTimeoutSeconds`、`mainRuntime.diskGuard`、`mainRuntime.duplicatePrecheck`、`mainRuntime.eventHistory`、`updateCheck`，以及非空时才落盘的 `models.loadBalanceGroups`。
+
+「运行时字段显式性校验」要求白名单里每个叶子都在 `config.json` 出现，缺一个就拒绝加载。豁免前缀（`providers`、`mainRuntime`、`externalApi`、`qqBot`、`cron`、`stt`、`contextRefresh`、`agents.nodeParallelism`、`agents.toolDefaultTimeoutSeconds`、`updateCheck`、`models.loadBalanceGroups`）承担两类情况：存量文件本来没有这些节，以及取值可能来自 `G3KU_*` 环境变量而不是配置文件——被豁免的节没写就是不用，回落到 schema 默认。新增字段时两个判断都要重做：进不进白名单（决定它会不会被保存抹掉），要不要进豁免前缀（决定老文件还能不能加载）。
 
 ## 4. 配置热刷新
 
@@ -230,7 +238,7 @@ Responses 协议的请求体只带各家 `/responses` 共同支持的字段：`t
 
 两条与序列化器绑定的维护陷阱：
 
-- `models.loadBalanceGroups` 在加载器的「显式字段」校验里是**豁免前缀**。它不豁免的话，任何一份没有该节的存量 `config.json` 都会在下次加载时被要求填写组字段。
+- `models.loadBalanceGroups` 是「调过才落盘」的可选段，也在显式字段校验的豁免前缀里；不豁免的话，任何一份没有该节的存量 `config.json` 都会在下次加载时被要求填写组字段。判据见「写侧：`save_config` 整写与字段白名单」。
 - 写链必须走 `Config.set_role_model_keys` / `set_role_model_routes`。字段类型是 `ModelRouteEntry` 之后，就地 `append` 裸字符串不会被 pydantic 拦下（未开 `validate_assignment`），但会让改名、删除这类按 key 比较的写路径静默失配。改名要同时命中链上的 direct entry 和组内成员（`rename_model_key_in_routing`）；把模型从组里删到空是报错而不是顺手删组。
 
 - provider 的 `supports_prompt_caching` 不参与模型选择。它描述的是这条车道转不转发 `prompt_cache_key` 这个请求字段，而不是这个模型吃不吃得到缓存——命中来自网关侧自动前缀缓存，两家车道都会回报 `cached_tokens`（取证口径见 `context-and-cache-troubleshooting.md`「Family 与 key 合同」）。把它当成路由门控会把不具备该字段的模型整段移出链，连带取消它们的容灾资格。
@@ -288,6 +296,7 @@ Leader（CEO/frontdoor）解析本轮模型引用时按三档取值，顺序固�
 - 覆盖层写入耐久性：两条销毁路径都要堵。其一就是上面的错误密钥覆盖；其二是**写失败本身**——`SecretOverlayStore.save()` 走同目录临时文件 + `fsync` + `os.replace()`，绝不用 `write_bytes` 直接落目标（`"wb"` 会先截断再写，一次 ENOSPC 就把覆盖层留成 0 字节，之后解密守卫反过来拒绝一切写入，数据没了且恢复被堵）。`_activate()` 只读不写：解锁/启动不回写覆盖层，一次例行重启因此不等于重写全部密钥。守卫测试同时锁住"写失败后原件不变、不留 `.tmp-*`"和"激活后文件 mtime 不变"。
 - 密钥材料有自己的滚动备份与留证：`.g3ku/llm-config-backups/<UTC 时间戳>/` 存最近 12 代完整钥匙材料（主密钥信封、`auto-unlock.key`、`llm-config/index.json`、`records/`、`secret-realms/`），代际只在"值得留"的状态下生成——**非空**的信封、任一 record 文件、任一 realm 覆盖层至少存在一样；指纹与最新一代相同就不生成（每次重启都占一代等于把可用副本轮掉）。每次动作追加一行到 `.g3ku/security-events.jsonl`：`key_store_backed_up` / `key_store_missing_material` / `key_store_initialized` / `key_store_restored` / `key_store_overlay_archived`，带 pid、原因与文件数。
 - 0 字节等于损坏，不等于存在：`configured_key_material()` 把"存在但长度为 0"的文件单列成 `empty`，它既不算完好也不生成代际，而 `master.key` 这个文件只要存在过（哪怕是 0 字节）就算"这个项目配过"。**现场信封不可用时 `prune_backups()` 直接不裁剪**——那一刻没有任何一代是冗余的，照保留数剪下去就是把一次可恢复事故剪成不可恢复。restore 的"已有 master.key 就拒绝覆盖"同轴：判据是非空可用，0 字节现件可以被替换。
+- 凭据文件的写入一律走 `_atomic_write_bytes`（同目录临时文件 + flush + fsync + `os.replace`，失败时删掉临时件并原样保留旧文件）：覆盖层、主密钥信封 `master.key`、`auto-unlock.key`、迁移后的 `config.json` 与 legacy 状态导出都是这条道。直接 `write_text`/`write_bytes` 会先截断目标再写，一次 ENOSPC 就把钥匙清零，之后解密守卫拒绝一切写入——损坏由写入方式造成，不是磁盘本身吃掉的数据。
 - **主密钥文件不见了是一次事件，不是一次新初始化**：启动链路 `auto_unlock_from_env()` 先调 `security.audit_key_store()`，把结论缓存在服务上并让它进 `/api/bootstrap/status` 的 `key_store`（`state` ∈ `ok` / `lost` / `unconfigured`，`lost` 另带缺失路径与最新备份位置）。没有这段时，被清空的凭据目录与从没配过的目录在 UI 里长得一模一样，都是"新项目"，丢的东西无人报数。恢复只由 `negi security restore` 显式触发，且现场仍有 `master.key` 时直接拒绝——`negi security status` / `backup` / `restore` 是操作员入口。
 - legacy 迁移删除凭据前有前置条件：`_migrate_legacy_state()` 是合法删掉 `master.key` 的唯一路径，它先留一份代际、再要求备份目录里确实出现 `llm-config/` 副本，否则整笔中止——`copytree` 静默失败过一次就会把"清理明文"变成不可恢复的擦除。
 - 覆盖层的 `delete()` 改名不删件（`<name>.removed-<ts>` 并记一条事件）：一份谁也解不开的覆盖层正好记录了"当初期望哪把钥匙"，删掉它就把一次锁死变成一次丢失。

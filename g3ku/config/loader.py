@@ -2,16 +2,16 @@
 
 from __future__ import annotations
 
+import json
+import os
 from copy import deepcopy
 from datetime import UTC, datetime
 from importlib.resources import files as resource_files
-import json
-import os
 from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
-from g3ku.config.schema import Config, DEFAULT_ROLE_MAX_CONCURRENCY, DEFAULT_ROLE_MAX_ITERATIONS
+from g3ku.config.schema import DEFAULT_ROLE_MAX_CONCURRENCY, DEFAULT_ROLE_MAX_ITERATIONS, Config
 from g3ku.llm_config.migration import migrate_raw_config_if_needed
 from g3ku.security.bootstrap import (
     apply_config_secret_entries,
@@ -375,8 +375,8 @@ def _normalize_inline_model_bindings(cfg: Config) -> bool:
     if not pending_items:
         return False
 
-    from g3ku.llm_config.models import ProviderConfigDraft
     from g3ku.llm_config.facade import LLMConfigFacade
+    from g3ku.llm_config.models import ProviderConfigDraft
 
     facade = LLMConfigFacade(cfg.workspace_path)
     changed = False
