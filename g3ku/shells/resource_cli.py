@@ -36,16 +36,20 @@ def build_resource_app(console) -> typer.Typer:
     def resource_validate() -> None:
         manager = _manager()
         snapshot = manager.reload_now(trigger="validate")
-        issues: list[str] = []
-        for descriptor in snapshot.tools.values():
-            issues.extend([f"tool:{descriptor.name}: {item}" for item in [*descriptor.errors, *descriptor.warnings]])
-        for descriptor in snapshot.skills.values():
-            issues.extend([f"skill:{descriptor.name}: {item}" for item in [*descriptor.errors, *descriptor.warnings]])
-        if not issues:
-            console.print("All resources validated cleanly")
-            return
-        for issue in issues:
+        errors: list[str] = []
+        warnings: list[str] = []
+        for kind, descriptors in (("tool", snapshot.tools), ("skill", snapshot.skills)):
+            for descriptor in descriptors.values():
+                errors.extend(f"{kind}:{descriptor.name}: {item}" for item in list(descriptor.errors or []))
+                warnings.extend(f"{kind}:{descriptor.name}: {item}" for item in list(descriptor.warnings or []))
+        for issue in [*errors, *warnings]:
             console.print(f"- {issue}")
+        if errors:
+            # 校验是给人和 CI 当闸门用的：报错必须以非零退出收尾，否则坏资源树
+            # 在脚本里与干净资源树长得一样。警告只提示，不算失败。
+            raise typer.Exit(1)
+        if not warnings:
+            console.print("All resources validated cleanly")
 
     @app.command("status")
     def resource_status() -> None:
