@@ -371,6 +371,7 @@ async def consume_openai_like_chat_stream(
                 id=str(buffer.get("id") or f"tool_call_{index}"),
                 name=str(buffer.get("name") or f"tool_{index}"),
                 arguments=arguments,
+                raw_arguments=raw_arguments,
             )
         )
 

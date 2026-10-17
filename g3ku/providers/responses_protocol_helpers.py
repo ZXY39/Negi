@@ -454,6 +454,7 @@ async def _consume_sse(
                         id=f"{call_id}|{buf.get('id') or item.get('id') or 'fc_0'}",
                         name=buf.get("name") or item.get("name"),
                         arguments=args,
+                        raw_arguments=args_raw if isinstance(args_raw, str) else "",
                     )
                 )
         elif event_type == "response.completed":

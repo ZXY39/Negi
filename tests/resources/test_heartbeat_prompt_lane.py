@@ -399,6 +399,30 @@ def test_node_error_bundle_marks_window_integrity_fault_class() -> None:
     assert "思考强度调低" not in text
 
 
+def test_node_error_bundle_marks_provider_payload_fault_class() -> None:
+    """上游网关拼坏参数块的暂停：类名要说清"不是节点提交不合格"，否则会话去重派节点。"""
+    from g3ku.heartbeat.prompt_lane import build_heartbeat_prompt_lane
+
+    lane = build_heartbeat_prompt_lane(
+        provider_model="",
+        stable_rules_text="rules",
+        events=[{
+            "reason": "task_node_error", "task_id": "task:t", "node_id": "node:n",
+            "pause_reason": "error",
+            "error_text": (
+                "provider_payload_fault: submit_final_result 的参数块被上游网关序列化错位，"
+                "截尾残片连续第 2 次相同 | 这一跳模型=deepseek-flash 尾部残片=success</｜DSML｜:"
+            ),
+            "retry_attempt": 1, "retry_cap": 5, "retry_escalated": False,
+        }],
+    )
+    text = str(_field(lane, "event_bundle_text"))
+    assert "Failure class: provider_payload_fault" in text
+    assert "非节点提交不合格" in text
+    # 别把两个类别的处置互相污染：这一类不该被读成"降思考档位"。
+    assert "思考强度" not in text
+
+
 def test_node_error_bundle_marks_send_preflight_fault_class() -> None:
     """发送前预检拒发的暂停：类名说清"这一跳没发出去"，两个观测值由正文给。"""
     from g3ku.heartbeat.prompt_lane import build_heartbeat_prompt_lane

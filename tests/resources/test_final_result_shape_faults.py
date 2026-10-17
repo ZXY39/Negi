@@ -136,8 +136,17 @@ def _submit_final_result_tool(*, node_kind: str = "execution") -> SubmitFinalRes
     return SubmitFinalResultTool(_submit, node_kind=node_kind)
 
 
-def _final_call(call_id: str, arguments: dict[str, object]) -> ToolCallRequest:
-    return ToolCallRequest(id=call_id, name="submit_final_result", arguments=dict(arguments))
+def _final_call(
+    call_id: str,
+    arguments: dict[str, object],
+    raw_arguments: str = "",
+) -> ToolCallRequest:
+    return ToolCallRequest(
+        id=call_id,
+        name="submit_final_result",
+        arguments=dict(arguments),
+        raw_arguments=raw_arguments,
+    )
 
 
 def _good_final_arguments() -> dict[str, object]:
@@ -1185,3 +1194,196 @@ async def test_window_clamped_pause_counts_previous_same_class_hops() -> None:
     )
     assert "同类跳次=2" in result.blocking_reason
     assert "detected 2 consecutive times" in result.blocking_reason
+
+
+_DSML = chr(0xFF5C) + "DSML" + chr(0xFF5C)
+
+
+def _marker_arguments(contaminated_value: str) -> dict[str, object]:
+    """宽容解析洗白后的提交体：标记吸进第一个值，后面的必填项整段消失。"""
+    return {"status": contaminated_value, "answer": "", "evidence": []}
+
+
+def _marker_response(call_id: str, contaminated_value: str, raw: str = "") -> LLMResponse:
+    return LLMResponse(
+        content="",
+        tool_calls=[_final_call(call_id, _marker_arguments(contaminated_value), raw)],
+        finish_reason="tool_calls",
+        usage={"input_tokens": 8, "output_tokens": 2190},
+    )
+
+
+@pytest.mark.asyncio
+async def test_repeated_marker_serialization_fault_closes_out_on_the_second_hop() -> None:
+    """同一截尾残片第二次出现就收口：这一族由网关决定，再问几跳也是同一份残片。
+
+    实盘 2026-10-17 task:ee451721281a node:74baae52b7d3 五连击里 4/5 残片逐字相同，
+    旧规则按形态预算打满 5 跳才收口（~10.6K 输出 token / 11 分钟）。
+    """
+    same_tail = "success</" + _DSML + ":"
+    result, requests, logs = await _run_final_result_loop(
+        responses=[
+            _marker_response("call:m1", same_tail),
+            _marker_response("call:m2", same_tail),
+            _marker_response("call:m3", same_tail),
+        ],
+        node_kind="execution",
+        task_id="task-marker-repeat",
+        node_id="node-marker-repeat",
+        max_iterations=6,
+    )
+
+    assert len(requests) == 2, "第 3 跳不该再发出去"
+    assert result.summary == "upstream payload serialization fault"
+    assert result.failure_disposition == "pause"
+    assert "provider_payload_fault:" in result.blocking_reason
+    assert "截尾残片连续第 2 次相同" in result.blocking_reason
+    assert "这一跳模型=" in result.blocking_reason
+    # 归因不能读成"节点的提交不合格"：会话据此会重派一个节点，而不是去核对那条链。
+    assert "Invalid final result submission detected" not in result.blocking_reason
+    assert len(logs.error_logs) == 2
+    assert all("[parameter-marker]" in row["error_text"] for row in logs.error_logs)
+
+
+@pytest.mark.asyncio
+async def test_alternating_marker_tails_still_run_the_full_shape_budget() -> None:
+    """残片各不相同＝不是一次确定性错位，不许一击即停，仍按形态预算封顶。"""
+    tail_a = "success</" + _DSML + ":"
+    tail_b = "failed<" + _DSML + ":"
+    result, requests, _logs = await _run_final_result_loop(
+        responses=[
+            _marker_response("call:a1", tail_a),
+            _marker_response("call:b1", tail_b),
+            _marker_response("call:a2", tail_a),
+            _marker_response("call:b2", tail_b),
+            _marker_response("call:a3", tail_a),
+        ],
+        node_kind="execution",
+        task_id="task-marker-alternating",
+        node_id="node-marker-alternating",
+        max_iterations=8,
+    )
+
+    assert len(requests) == 5
+    assert "provider_payload_fault:" in result.blocking_reason
+    assert "形态故障累计=5" in result.blocking_reason
+    assert "截尾残片连续第 1 次相同" in result.blocking_reason
+
+
+@pytest.mark.asyncio
+async def test_marker_fault_row_carries_the_untouched_upstream_bytes() -> None:
+    """形态故障行首与真违约分开，并带上 provider 边界的原件尾部。"""
+    tail = "success</" + _DSML + ":"
+    raw = '{"status": "success</' + _DSML + ':"' + ",\"summary\":\"" + "x" * 3000 + "\"}"
+    result, _requests, logs = await _run_final_result_loop(
+        responses=[
+            _marker_response("call:raw-1", tail, raw),
+            LLMResponse(
+                content="",
+                tool_calls=[_final_call("call:violation", {
+                    "status": "success",
+                    "delivery_status": "final",
+                    "answer": "正文",
+                    "evidence": [],
+                    "remaining_work": [],
+                    "blocking_reason": "",
+                })],
+                finish_reason="tool_calls",
+                usage={"input_tokens": 8, "output_tokens": 40},
+            ),
+            LLMResponse(
+                content="",
+                tool_calls=[_final_call("call:good", _good_final_arguments())],
+                finish_reason="tool_calls",
+                usage={"input_tokens": 8, "output_tokens": 4},
+            ),
+        ],
+        node_kind="execution",
+        task_id="task-marker-raw-tail",
+        node_id="node-marker-raw-tail",
+        max_iterations=5,
+    )
+
+    assert result.status == "success"
+    shape_row = logs.error_logs[0]["error_text"]
+    violation_row = logs.error_logs[1]["error_text"]
+    assert shape_row.startswith("Upstream payload shape fault detected (第1次)")
+    assert "missing required summary" in violation_row
+    assert violation_row.startswith("Invalid final result submission detected (第1次)")
+    # 原件只在 provider 边界存在：封顶尾部足以判"网关到底有没有把后面的参数发过来"。
+    assert "upstream_raw_bytes=%d" % len(raw) in shape_row
+    assert "x" * 401 not in shape_row
+    assert "x" * 300 in shape_row
+
+
+@pytest.mark.asyncio
+async def test_openai_chat_stream_keeps_the_unrepaired_arguments_string() -> None:
+    """流式分片拼回的原件必须随工具调用带出：修复器吃掉的参数只能在这里取证。"""
+    from g3ku.providers.openai_chat_provider import OpenAIChatProvider
+
+    raw = '{"status": "success</' + _DSML + ':"}'
+    provider = OpenAIChatProvider(api_key="k", api_base="https://example.invalid/v1")
+    provider._client = _fake_chat_client(
+        [
+            {
+                "choices": [{
+                    "delta": {
+                        "tool_calls": [{
+                            "index": 0,
+                            "id": "call_1",
+                            "function": {"name": "submit_final_result", "arguments": raw[:16]},
+                        }]
+                    }
+                }]
+            },
+            {
+                "choices": [{
+                    "delta": {
+                        "tool_calls": [{
+                            "index": 0,
+                            "function": {"arguments": raw[16:]},
+                        }]
+                    }
+                }]
+            },
+            {"choices": [{"delta": {}, "finish_reason": "tool_calls"}]},
+        ]
+    )
+
+    response = await provider.chat(messages=[{"role": "user", "content": "ping"}])
+
+    call = response.tool_calls[0]
+    assert call.raw_arguments == raw
+    assert ReActToolLoop._tool_call_marker_fault(call)
+
+
+@pytest.mark.asyncio
+async def test_openai_chat_non_stream_keeps_the_unrepaired_arguments_string() -> None:
+    """非流式走同一个宽容解析器，取证面不许只有一半。"""
+    from g3ku.providers.openai_chat_provider import OpenAIChatProvider
+
+    raw = '{"status": "failed</' + _DSML + ':"}'
+    provider = OpenAIChatProvider(api_key="k", api_base="https://example.invalid/v1")
+    fake = SimpleNamespace(
+        choices=[
+            SimpleNamespace(
+                message=SimpleNamespace(
+                    content="",
+                    tool_calls=[
+                        SimpleNamespace(
+                            id="call_1",
+                            function=SimpleNamespace(name="submit_final_result", arguments=raw),
+                        )
+                    ],
+                ),
+                finish_reason="tool_calls",
+            )
+        ]
+    )
+
+    response = provider._parse(fake)
+
+    call = response.tool_calls[0]
+    assert call.raw_arguments == raw
+    assert ReActToolLoop._tool_call_marker_fault(call)
+

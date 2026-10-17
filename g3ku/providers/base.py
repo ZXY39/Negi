@@ -25,6 +25,10 @@ class ToolCallRequest:
     id: str
     name: str
     arguments: dict[str, Any]
+    # The gateway's untouched `arguments` string. Lenient parsing eats the parameters
+    # that follow a serialization marker, so this hop's only evidence separating an
+    # upstream fault from a model omission exists right here and nowhere below.
+    raw_arguments: str = ""
 
 
 @dataclass

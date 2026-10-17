@@ -91,6 +91,7 @@ RUNTIME_FAULT_MARKER = 'runtime_fault:'
 MODEL_CONFIG_FAULT_MARKER = 'model_config_fault:'
 WINDOW_INTEGRITY_FAULT_MARKER = 'window_integrity_fault:'
 SEND_PREFLIGHT_FAULT_MARKER = 'send_preflight_fault:'
+PROVIDER_PAYLOAD_FAULT_MARKER = 'provider_payload_fault:'
 
 
 def _runtime_fault_class(error_text: str) -> str:
@@ -110,6 +111,10 @@ def _runtime_fault_class(error_text: str) -> str:
         return 'model_config_fault（模型配置与这一跳不匹配，处置见 Error 正文）'
     if WINDOW_INTEGRITY_FAULT_MARKER in text:
         return 'window_integrity_fault（回包被窗口剩余挤掉，处置见 Error 正文）'
+    if PROVIDER_PAYLOAD_FAULT_MARKER in text:
+        # 这一类的类名要替正文把归因说完：读到"提交无效"会话会重派一个节点，读到
+        # "上游把参数块拼坏了"才会去核对那条链上的模型。
+        return 'provider_payload_fault（上游网关拼坏工具调用参数块，非节点提交不合格，处置见 Error 正文）'
     if SEND_PREFLIGHT_FAULT_MARKER in text:
         return 'send_preflight_fault（发送前预检拒发，这一跳没有发出请求，成因见 Error 正文）'
     return ''

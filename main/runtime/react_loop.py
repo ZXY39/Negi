@@ -174,6 +174,18 @@ _IDENTICAL_FINAL_SUBMISSION_STRIKE_LIMIT = 3
 # 与模型交付违约分账：形态问题占不了模型的预算，但同值封顶，否则上游持续故障会把
 # 节点挂在轮次循环里出不来。
 _PAYLOAD_SHAPE_FAULT_LIMIT = _INVALID_FINAL_SUBMISSION_LIMIT
+# marker 序列化故障的早停：同一截尾残片再出现一次就收口，不打满总预算。判据是这族的
+# 故障是网关的序列化错位，不是模型可改的东西——实盘 2026-10-17 task:ee451721281a
+# node:74baae52b7d3 五连击里 4/5 的残片逐字相同（`success</｜DSML｜:`），5 跳全落在同一颗
+# provider_model 上，白烧 ~10.6K 输出 token / 11 分钟；09-26 那份样本同样是四连击同残片。
+# 只对"残片相同"生效：不同残片仍走 _PAYLOAD_SHAPE_FAULT_LIMIT，避免一次抖动就打死节点。
+_MARKER_FAULT_IDENTICAL_LIMIT = 2
+# 上游原件残片带进错误记录的尺寸：判"网关是否真的把后面的参数发过来"只需要结尾。
+_RAW_ARGUMENTS_TAIL_LIMIT = 400
+# 形态故障三类的记录行首，与模型交付违约的标题分开：共用一句 "Invalid final result
+# submission detected" 时，操作员与会话读到的是"节点交的东西不合格"，处置就会变成重派
+# 节点，而不是去查那颗模型的网关。
+_PAYLOAD_SHAPE_FAULT_HEADING = 'Upstream payload shape fault detected'
 _TRUNCATED_SUBMISSION_CLAUSE = (
     'This payload was cut off by the provider output limit (finish_reason=length), so fields after '
     'the cut never reached the validator. Resubmit with a shorter `answer`/`summary` and reference the '
@@ -321,6 +333,8 @@ class ReActToolLoop:
         invalid_stage_submission_count = 0
         identical_final_submission_streak = 0
         payload_shape_fault_count = 0
+        marker_fault_streak = 0
+        last_marker_fault_fingerprint = ''
         plain_text_reply_strikes = 0
         stage_only_transition_streak = 0
         last_invalid_final_submission_reason = ''
@@ -1176,6 +1190,8 @@ class ReActToolLoop:
                     invalid_stage_submission_count = 0
                     identical_final_submission_streak = 0
                     payload_shape_fault_count = 0
+                    marker_fault_streak = 0
+                    last_marker_fault_fingerprint = ''
                     plain_text_reply_strikes = 0
                     stage_only_transition_streak = 0
                     last_invalid_final_submission_reason = ''
@@ -1319,9 +1335,16 @@ class ReActToolLoop:
                         # 回包形态故障不占模型的无效提交预算，但另设同值上限，
                         # 否则上游持续故障会把节点挂在轮次循环里出不来。
                         fault_reason = (
-                            f'provider tool-call serialization fault: {FINAL_RESULT_TOOL_NAME} '
+                            'provider tool-call serialization fault [parameter-marker]: '
+                            f'{FINAL_RESULT_TOOL_NAME} '
                             f'arguments end with a parameter marker: {marker_fault}'
                         )
+                        marker_fault_streak = (
+                            marker_fault_streak + 1
+                            if marker_fault == last_marker_fault_fingerprint
+                            else 1
+                        )
+                        last_marker_fault_fingerprint = marker_fault
                         payload_shape_fault_count = self._record_payload_shape_fault(
                             task=task,
                             node=node,
@@ -1329,11 +1352,24 @@ class ReActToolLoop:
                             response=response,
                             response_tool_calls=response_tool_calls,
                             count=payload_shape_fault_count,
+                            raw_arguments=str(
+                                getattr(response_tool_calls[0], 'raw_arguments', '') or ''
+                            ),
                         )
-                        if payload_shape_fault_count >= _PAYLOAD_SHAPE_FAULT_LIMIT:
-                            return self._invalid_final_submission_failure(
-                                reason=fault_reason,
-                                count=payload_shape_fault_count,
+                        if (
+                            marker_fault_streak >= _MARKER_FAULT_IDENTICAL_LIMIT
+                            or payload_shape_fault_count >= _PAYLOAD_SHAPE_FAULT_LIMIT
+                        ):
+                            return self._marker_serialization_fault_failure(
+                                task_id=task.task_id,
+                                node_id=node.node_id,
+                                response=response,
+                                marker_fault=marker_fault,
+                                marker_fault_streak=marker_fault_streak,
+                                shape_fault_count=payload_shape_fault_count,
+                                model_key=str(
+                                    getattr(node_turn_lease, 'selected_model_ref', '') or ''
+                                ),
                             )
                         last_invalid_final_submission_reason = fault_reason
                         repair_overlay_text = self._result_protocol_message(node_kind=node.node_kind)
@@ -2704,12 +2740,14 @@ class ReActToolLoop:
         response: Any,
         response_tool_calls: list[Any],
         count: int,
+        raw_arguments: str = '',
     ) -> int:
         """Take one shape-fault tick and return the new count.
 
-        写入同一份节点错误历史（操作员看到的仍是 `Invalid final result submission
-        detected`，靠 reason 分辨类别），但不写 `_persist_invalid_final_submission_state`：
-        那一帧的计数是模型的交付违约预算，形态故障不能替它涨。
+        写节点错误历史，但行首换成 `Upstream payload shape fault detected`：这三类都是
+        上游把回包弄坏，不是模型的交付违约，与真违约共用一句标题会让会话把"换掉那颗
+        模型"读成"重派一个节点"。仍不写 `_persist_invalid_final_submission_state`：那一
+        帧的计数是模型的预算，形态故障不能替它涨。
         """
         strikes = max(0, int(count or 0)) + 1
         self._record_invalid_final_submission_error_log(
@@ -2720,6 +2758,8 @@ class ReActToolLoop:
             reason=reason,
             response=response,
             response_tool_calls=response_tool_calls,
+            heading=_PAYLOAD_SHAPE_FAULT_HEADING,
+            raw_arguments=raw_arguments,
         )
         return strikes
 
@@ -2733,6 +2773,8 @@ class ReActToolLoop:
         reason: str,
         response: Any,
         response_tool_calls: list[Any],
+        heading: str = 'Invalid final result submission detected',
+        raw_arguments: str = '',
     ) -> None:
         """Persist an invalid final-submission event into the node error history.
 
@@ -2755,13 +2797,20 @@ class ReActToolLoop:
                 if str(getattr(call, 'name', '') or '').strip()
             ) or 'none'
             parts = [
-                f'Invalid final result submission detected (第{int(count or 0)}次): '
+                f'{heading} (第{int(count or 0)}次): '
                 f'{str(reason or "").strip() or "reply did not submit a valid final result"}',
                 f'response_tool_call_count={len(list(response_tool_calls or []))}',
                 f'tool_names={tool_names}',
                 f'output_tokens={output_tokens}',
                 f'finish_reason={finish_reason}',
             ]
+            if raw_arguments:
+                # 上游原件只有 provider 边界这一份：宽容解析吃掉的参数、以及网关究竟
+                # 有没有把后面的参数发过来，都只能靠这里的字节判，其余读数全是解析后的。
+                parts.append(f'upstream_raw_bytes={len(raw_arguments)}')
+                parts.append(
+                    f'upstream_raw_tail={raw_arguments[-_RAW_ARGUMENTS_TAIL_LIMIT:]}'
+                )
             if provider_model:
                 parts.append(f'provider_model={provider_model}')
             if sent_reasoning_effort:
@@ -5335,6 +5384,63 @@ class ReActToolLoop:
             blocking_reason=(
                 f'Invalid final result submission detected {int(count or 0)} consecutive times. '
                 f'Latest issue: {text}'
+            ),
+            failure_disposition='pause',
+        )
+
+    def _marker_serialization_fault_failure(
+        self,
+        *,
+        task_id: str,
+        node_id: str,
+        response: Any,
+        marker_fault: str,
+        marker_fault_streak: int,
+        shape_fault_count: int,
+        model_key: str = '',
+    ) -> NodeFinalResult:
+        """上游把工具调用参数块拼错位时的可恢复暂停。
+
+        这一族由网关决定，不是模型改得动的东西：实盘 2026-10-17 task:ee451721281a
+        node:74baae52b7d3 五连击里 4/5 的截尾残片逐字相同、五跳全落同一颗模型，按总预算
+        打满才收口，白烧 ~10.6K 输出 token / 11 分钟。处置文案点名"这一跳实际接活的那颗
+        模型"：会话读到"提交无效"会去重派一个节点，读到"这颗模型的网关把参数块拼坏了"
+        才会去核对那条链。
+        """
+        body = dict(getattr(response, 'provider_request_body', {}) or {})
+        usage = dict(getattr(response, 'usage', {}) or {})
+        hop_model = (
+            str(model_key or '').strip()
+            or str(body.get('model') or '').strip()
+            or 'unknown'
+        )
+        same_class = 0
+        try:
+            same_class = sum(
+                1
+                for item in list(self._log_service.list_task_node_error_logs(task_id, node_id) or [])
+                if '[parameter-marker]' in str(getattr(item, 'error_text', '') or '')
+            )
+        except Exception:
+            same_class = 0
+        return NodeFinalResult(
+            status='failed',
+            delivery_status='blocked',
+            summary='upstream payload serialization fault',
+            answer='',
+            evidence=[],
+            remaining_work=[],
+            blocking_reason=(
+                'provider_payload_fault: '
+                f'{FINAL_RESULT_TOOL_NAME} 的参数块被上游网关序列化错位，截尾残片连续第 '
+                f'{max(1, int(marker_fault_streak or 0))} 次相同'
+                f' | 这一跳模型={hop_model} 形态故障累计={max(1, int(shape_fault_count or 0))}'
+                f' 本节点同类历史={max(1, same_class)}'
+                f' output_tokens={int(usage.get("output_tokens") or 0)} 尾部残片={marker_fault}\n'
+                '运行时不改模型配置，也不替节点重写交付：要恢复本节点，先核对这一跳那颗模型的'
+                '网关端点是否按文本协议拼工具调用参数块（换端点，或把它移出该任务的模型链），'
+                '不改链直接 resume 仍可能落在同一颗上。逐跳的上游原件字节记在本节点错误历史'
+                '（upstream_raw_tail）。'
             ),
             failure_disposition='pause',
         )
