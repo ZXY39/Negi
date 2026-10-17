@@ -100,6 +100,7 @@ from main.runtime.global_scheduler import GlobalScheduler
 from main.runtime.internal_tools import build_detail_level_schema
 from main.runtime.model_key_concurrency import ModelKeyConcurrencyController
 from main.runtime.model_load_balancer import ModelLoadBalancer, quota_bucket_key
+from main.runtime.subtree_hold import DISTRIBUTION_ACTIVE_STATES
 from main.runtime.model_route import build_model_route_plan
 from main.runtime.node_prompt_contract import (
     NodeRuntimeToolContract,
@@ -177,6 +178,11 @@ from main.storage.fs_utils import remove_tree
 from main.storage.sqlite_store import SQLiteTaskStore
 
 _UNSET = object()
+# "分发在飞"的判据只有一份作者：`subtree_hold.DISTRIBUTION_ACTIVE_STATES`（hold 谓词与
+# 恢复车道都用它）。读侧与追加车道必须沿用同一份，否则驱动真会写下的 barrier_requested /
+# barrier_draining 会被当成"没有活动 epoch"——屏障排空期间另起一条 epoch 并行下发。
+# 'resuming' 是存量 epoch 行里可能出现的旧形状，多算在飞只会把闸门收紧，不会绕过屏障。
+_ACTIVE_DISTRIBUTION_EPOCH_STATES = DISTRIBUTION_ACTIVE_STATES | {'resuming'}
 GOVERNANCE_MODE_META_KEY = 'ceo_frontdoor_regulatory_mode_enabled'
 GOVERNANCE_MODE_UPDATED_AT_META_KEY = 'ceo_frontdoor_regulatory_mode_enabled:updated_at'
 _WORKER_STATUS_STALE_AFTER_SECONDS = 15.0
@@ -4423,7 +4429,7 @@ class MainRuntimeService:
             (
                 epoch
                 for epoch in epochs
-                if str(epoch.state or '').strip() in {'pause_requested', 'paused', 'distributing', 'resuming'}
+                if str(epoch.state or '').strip() in _ACTIVE_DISTRIBUTION_EPOCH_STATES
             ),
             None,
         )
@@ -4559,7 +4565,7 @@ class MainRuntimeService:
         task: TaskRecord | None = None,
     ) -> dict[str, Any]:
         epochs = self._task_distribution_epochs(task_id)
-        active_states = {'pause_requested', 'paused', 'distributing', 'resuming'}
+        active_states = _ACTIVE_DISTRIBUTION_EPOCH_STATES
         next_state = 'queued' if any(str(epoch.state or '').strip() in active_states for epoch in epochs) else 'pause_requested'
         epoch_id = new_command_id().replace('command:', 'epoch:', 1)
         targets = list(dict.fromkeys(

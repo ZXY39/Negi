@@ -4958,3 +4958,42 @@ async def test_release_ledger_is_cleared_on_completion_and_repaired_by_reconcile
     finally:
         await service.close()
 
+
+
+@pytest.mark.asyncio
+async def test_barrier_draining_epoch_counts_as_active_distribution(tmp_path: Path) -> None:
+    """屏障排空/屏障请求期间，读侧要认这条 epoch 还在飞，追加通知排在它后面。
+
+    判据曾各写两份且都漏了 `barrier_draining`/`barrier_requested`：读面显示"没在分发"，
+    追加车道同时另起一条 epoch 与排空中的那条并行下发。
+    """
+    for state in ("barrier_draining", "barrier_requested"):
+        root = tmp_path / state
+        root.mkdir(parents=True, exist_ok=True)
+        service = _build_service(root)
+        try:
+            record = await service.create_task("整理重点客户流失信号", session_id="web:ceo-demo")
+            epoch = service.store.upsert_task_message_distribution_epoch(
+                TaskMessageDistributionEpoch(
+                    epoch_id=f"epoch:{state}",
+                    task_id=record.task_id,
+                    root_node_id=record.root_node_id,
+                    root_message="new global constraint",
+                    state=state,
+                    created_at=now_iso(),
+                    payload={},
+                )
+            )
+
+            reading = service._task_distribution_state(record.task_id)
+            assert reading["active_epoch_id"] == epoch.epoch_id, (state, reading)
+
+            queued = service._queue_distribution_epoch(
+                task_id=record.task_id,
+                target_node_ids=[record.root_node_id],
+                root_message="second constraint",
+                task=record,
+            )
+            assert str(queued.get("state") or "") == "queued", (state, queued)
+        finally:
+            await service.close()
