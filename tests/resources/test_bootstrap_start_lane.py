@@ -1,9 +1,12 @@
 import os
 import shutil
 import subprocess
+from pathlib import Path
 from types import SimpleNamespace
 
 import negi_bootstrap
+
+REPO_ROOT = Path(__file__).resolve().parents[2]
 
 
 class _FakeChild:
@@ -235,3 +238,50 @@ def test_main_passes_other_commands_straight_through(monkeypatch) -> None:
     assert negi_bootstrap.main(['status']) == 0
     assert calls[0][0][1:3] == ['-m', 'g3ku']
     assert calls[0][0][3:] == ['status']
+
+
+def _call_spans(source: str, needle: str) -> list[str]:
+    """Each occurrence of `needle` up to its matching close paren."""
+    spans = []
+    start = source.find(needle)
+    while start != -1:
+        depth = 0
+        index = start + len(needle) - 1
+        while index < len(source):
+            char = source[index]
+            if char == '(':
+                depth += 1
+            elif char == ')':
+                depth -= 1
+                if depth == 0:
+                    break
+            index += 1
+        spans.append(source[start:index + 1])
+        start = source.find(needle, index + 1)
+    return spans
+
+
+def test_every_probe_child_is_told_not_to_open_a_console() -> None:
+    # 图标用 pythonw 起 bootstrap：它自己没有控制台可继承，所以每个探测子进程
+    # （解释器版本探测、依赖探测、uv sync）都会另开一个黑窗，用户看到的是连弹几
+    # 下才出浏览器。真终端下加这个标记不改变行为——子进程照样继承父控制台。
+    source = (REPO_ROOT / 'negi_bootstrap.py').read_text(encoding='utf-8')
+    spans = _call_spans(source, 'subprocess.run(')
+    assert spans, 'expected probe calls in negi_bootstrap.py'
+    unflagged = [span.splitlines()[0] for span in spans if '_no_window_flags()' not in span]
+    assert unflagged == [], unflagged
+
+
+def test_probe_helpers_pass_the_flag_at_runtime(monkeypatch) -> None:
+    captured = {}
+
+    def _fake_run(command, **kwargs):
+        captured['kwargs'] = kwargs
+        return SimpleNamespace(returncode=0)
+
+    monkeypatch.setattr(negi_bootstrap.subprocess, 'run', _fake_run)
+    negi_bootstrap._is_runnable_python(REPO_ROOT / 'negi_bootstrap.py')
+    if os.name == 'nt':
+        assert captured['kwargs'].get('creationflags') == negi_bootstrap.subprocess.CREATE_NO_WINDOW
+    else:
+        assert 'creationflags' not in captured['kwargs']

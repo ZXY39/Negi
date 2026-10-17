@@ -32,8 +32,21 @@ RUNTIME_IMPORT_PROBES = (
 )
 
 
+def _no_window_flags() -> dict[str, int]:
+    """Never let a child allocate its own console.
+
+    The desktop shortcut runs this file under ``pythonw``, which has no console to
+    inherit, so every console child (the interpreter probes, ``uv sync``) would pop
+    its own black window on the way to the browser. Under a real terminal the child
+    still inherits it, so typed commands keep printing where the operator is looking.
+    """
+    if os.name == "nt":
+        return {"creationflags": subprocess.CREATE_NO_WINDOW}
+    return {}
+
+
 def _run(command: list[str], *, cwd: Path) -> None:
-    subprocess.run(command, cwd=str(cwd), check=True)
+    subprocess.run(command, cwd=str(cwd), check=True, **_no_window_flags())
 
 
 def _is_runnable_python(python_path: Path) -> bool:
@@ -46,6 +59,7 @@ def _is_runnable_python(python_path: Path) -> bool:
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
             check=False,
+            **_no_window_flags(),
         )
     except OSError:
         return False
@@ -90,6 +104,7 @@ def _venv_has_runtime_deps() -> bool:
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
         check=False,
+        **_no_window_flags(),
     )
     return completed.returncode == 0
 
@@ -120,6 +135,7 @@ def _python_has_module(python: Path, module: str) -> bool:
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
         check=False,
+        **_no_window_flags(),
     )
     return completed.returncode == 0
 
@@ -412,6 +428,7 @@ def main(argv: list[str] | None = None) -> int:
         completed = subprocess.run(
             [str(VENV_PYTHON), "-m", "g3ku", *args],
             cwd=str(PROJECT_ROOT),
+            **_no_window_flags(),
         )
         return int(completed.returncode or 0)
     except KeyboardInterrupt:
