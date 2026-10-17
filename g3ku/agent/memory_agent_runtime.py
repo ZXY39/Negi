@@ -2357,12 +2357,13 @@ class MemoryManager:
         if not new_body.strip():
             raise ValueError("note body must not be empty")
         with self._io_lock:
-            path = self.notes_dir / note_file_name(normalized_ref)
-            if not path.exists():
-                raise KeyError(f"memory note not found: {normalized_ref}")
+            try:
+                path = self._note_path(normalized_ref)
+            except FileNotFoundError as exc:
+                raise KeyError(f"memory note not found: {normalized_ref}") from exc
             self._atomic_write_text(path, new_body)
         return {
-            "ref": normalized_ref,
+            "ref": path.stem,
             "body": new_body,
             "updated_at": self._now_iso(),
         }
@@ -2709,10 +2710,12 @@ class MemoryManager:
             return ""
         return resolve_note_token(normalized, self._ordinary_note_names(), self._category_note_names())
 
-    def load_note(self, ref: str) -> str:
-        """Read one note for the CEO's `memory_note` tool: ordinary notes and category
-        notes both resolve, so a retired memory stays reachable. The token's first
-        character picks the tree; a bare file name keeps the ordinary-first order."""
+    def _note_path(self, ref: str) -> Path:
+        """一条 note 只有一个定位判据：普通区先、分类区（`memory/index/`）兜后。
+
+        读侧与写侧必须共用它：分类 note 的名字同样带 `note_` 前缀、也照样过 ref
+        正则，只查 `notes_dir` 的写法会让"预览读得到、编辑保存 404"留在车上。
+        """
         normalized = normalize_note_ref(ref)
         if not normalized:
             raise FileNotFoundError("memory note ref is required")
@@ -2725,11 +2728,17 @@ class MemoryManager:
         for directory in ((self.index_dir, self.notes_dir) if prefer_index else (self.notes_dir, self.index_dir)):
             path = directory / file_name
             if path.exists():
-                return path.read_text(encoding="utf-8")
+                return path
         raise FileNotFoundError(
             f"memory note not found: {normalized} - pass the handle alone, without the 'note:' "
             "label the block prints in front of it, or a note name without the '.md' suffix"
         )
+
+    def load_note(self, ref: str) -> str:
+        """Read one note for the CEO's `memory_note` tool: ordinary notes and category
+        notes both resolve, so a retired memory stays reachable. The token's first
+        character picks the tree; a bare file name keeps the ordinary-first order."""
+        return self._note_path(ref).read_text(encoding="utf-8")
 
     def close(self) -> None:
         self._stop_event.set()

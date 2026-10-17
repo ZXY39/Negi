@@ -4,6 +4,8 @@ import importlib
 import json
 from pathlib import Path
 
+import pytest
+
 
 def _module():
     return importlib.import_module("g3ku.agent.memory_agent_runtime")
@@ -345,5 +347,34 @@ def test_a_new_note_name_must_use_the_note_prefix(tmp_path: Path) -> None:
             note_upserts={"pdf_render_inspect": "旧写法仍可改"},
         )
         assert "旧写法仍可改" in legacy.read_text(encoding="utf-8")
+    finally:
+        manager.close()
+
+
+def test_admin_note_update_reaches_category_notes_and_ordinary_ones(tmp_path: Path) -> None:
+    """分类 note 住在 `memory/index/`，名字照样带 `note_` 前缀、照样过 ref 正则。
+
+    编辑端点只查普通区时，预览读得到而保存报"未找到对应的记忆 note"——读侧与写侧
+    共用一份定位判据才不会再分叉。
+    """
+    import asyncio
+
+    manager = _manager(tmp_path)
+    try:
+        (manager.index_dir / "note_resume.md").write_text("旧分类正文\n", encoding="utf-8")
+        _seed_note(manager, tmp_path, "note_policy", "旧普通正文\n")
+
+        category = asyncio.run(manager.update_note("note_resume", body="新分类正文\n"))
+        assert category["ref"] == "note_resume"
+        assert (manager.index_dir / "note_resume.md").read_text(encoding="utf-8") == "新分类正文\n"
+        # 写侧不许在普通区造出一个同名空壳。
+        assert not (manager.notes_dir / "note_resume.md").exists()
+
+        ordinary = asyncio.run(manager.update_note("note_policy", body="新普通正文\n"))
+        assert ordinary["ref"] == "note_policy"
+        assert (manager.notes_dir / "note_policy.md").read_text(encoding="utf-8") == "新普通正文\n"
+
+        with pytest.raises(KeyError):
+            asyncio.run(manager.update_note("note_absent", body="x\n"))
     finally:
         manager.close()
