@@ -1384,33 +1384,33 @@ class ApiClient {
     }
 
     static async getExecCommandWhitelist() {
-        const data = await this.get("/api/admin/resources/tools/exec-command-whitelist");
+        const data = await this.get("/api/resources/tools/exec-command-whitelist");
         return data || {};
     }
 
     static async addExecCommandWhitelistEntry(payload) {
-        const data = await this.post("/api/admin/resources/tools/exec-command-whitelist", payload || {});
+        const data = await this.post("/api/resources/tools/exec-command-whitelist", payload || {});
         return data.item || null;
     }
 
     static async removeExecCommandWhitelistEntry(payload) {
-        const data = await this.post("/api/admin/resources/tools/exec-command-whitelist/delete", payload || {});
+        const data = await this.post("/api/resources/tools/exec-command-whitelist/delete", payload || {});
         return data.removed ?? false;
     }
 
     static async updateExecApprovalWait(seconds) {
-        const data = await this.put("/api/admin/resources/tools/exec-approval-wait", { seconds });
+        const data = await this.put("/api/resources/tools/exec-approval-wait", { seconds });
         return data?.approval_wait_seconds ?? null;
     }
 
     static async listExecApprovals(params = {}) {
-        const data = await this.get("/api/admin/resources/tools/exec-approvals", params);
+        const data = await this.get("/api/resources/tools/exec-approvals", params);
         return data || {};
     }
 
     static async decideExecApproval(approvalId, payload) {
         const data = await this.post(
-            `/api/admin/resources/tools/exec-approvals/${encodeURIComponent(String(approvalId || "").trim())}/decision`,
+            `/api/resources/tools/exec-approvals/${encodeURIComponent(String(approvalId || "").trim())}/decision`,
             payload || {},
         );
         return data.item || null;
