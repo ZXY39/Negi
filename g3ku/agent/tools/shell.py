@@ -144,7 +144,7 @@ class ExecTool(Tool):
             r"\brm\s+-[rf]{1,2}\b",          # rm -r, rm -rf, rm -fr
             r"\bdel\s+/[fq]\b",              # del /f, del /q
             r"\brmdir\s+/s\b",               # rmdir /s
-            r"(?:^|[;&|]\s*)format\b",       # format (as standalone command only)
+            r"(?:^|[;&|])\s*format\b",       # format (as standalone command only)
             r"\bformat-volume\b",            # PowerShell format-volume
             r"\bclear-disk\b",               # PowerShell clear-disk
             r"\b(mkfs|diskpart)\b",          # disk operations
@@ -492,21 +492,21 @@ class ExecTool(Tool):
             return None
 
         mutating_patterns = [
-            r"(^|[;&|]\s*)set-content\b",
-            r"(^|[;&|]\s*)add-content\b",
-            r"(^|[;&|]\s*)clear-content\b",
-            r"(^|[;&|]\s*)new-item\b",
-            r"(^|[;&|]\s*)remove-item\b",
-            r"(^|[;&|]\s*)move-item\b",
-            r"(^|[;&|]\s*)copy-item\b",
-            r"(^|[;&|]\s*)rename-item\b",
-            r"(^|[;&|]\s*)touch\b",
-            r"(^|[;&|]\s*)rm\b",
-            r"(^|[;&|]\s*)mv\b",
-            r"(^|[;&|]\s*)cp\b",
-            r"(^|[;&|]\s*)mkdir\b",
-            r"(^|[;&|]\s*)install\b",
-            r"(^|[;&|]\s*)tee\b",
+            r"(^|[;&|])\s*set-content\b",
+            r"(^|[;&|])\s*add-content\b",
+            r"(^|[;&|])\s*clear-content\b",
+            r"(^|[;&|])\s*new-item\b",
+            r"(^|[;&|])\s*remove-item\b",
+            r"(^|[;&|])\s*move-item\b",
+            r"(^|[;&|])\s*copy-item\b",
+            r"(^|[;&|])\s*rename-item\b",
+            r"(^|[;&|])\s*touch\b",
+            r"(^|[;&|])\s*rm\b",
+            r"(^|[;&|])\s*mv\b",
+            r"(^|[;&|])\s*cp\b",
+            r"(^|[;&|])\s*mkdir\b",
+            r"(^|[;&|])\s*install\b",
+            r"(^|[;&|])\s*tee\b",
             r"\bsed\s+-i\b",
             r"<<\s*['\"]?\w+['\"]?\s*>",
             r"(^|[^<])>>?",
@@ -523,8 +523,10 @@ class ExecTool(Tool):
             r"\bremove\(",
             r"open\([^)]*,\s*['\"][wa+]",
         ]
+        # 语句起始锚点必须把换行也当成语句分隔符（MULTILINE），否则
+        # "ls\nrm -rf …" 之类的分行命令能绕过只读层。
         for pattern in mutating_patterns:
-            if re.search(pattern, lower):
+            if re.search(pattern, lower, re.MULTILINE):
                 return self._readonly_error(command)
         return None
 
@@ -648,7 +650,7 @@ class ExecTool(Tool):
             return None
         lower = str(command or "").strip().lower()
         for pattern in self.deny_patterns:
-            if re.search(pattern, lower):
+            if re.search(pattern, lower, re.MULTILINE):
                 return "Error: Command blocked by safety guard (dangerous pattern detected)"
 
         if self.allow_patterns:
@@ -672,7 +674,7 @@ class ExecTool(Tool):
         lower = str(command or "").strip().lower()
         for pattern in self.deny_patterns:
             try:
-                if re.search(pattern, lower):
+                if re.search(pattern, lower, re.MULTILINE):
                     return str(pattern)
             except re.error:
                 continue

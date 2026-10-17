@@ -330,6 +330,45 @@ def test_exec_tool_readonly_error_uses_expanded_guidance_template() -> None:
     assert '`filesystem_write`, `filesystem_edit`, `filesystem_delete`, or `filesystem_propose_patch`' in error
 
 
+@pytest.mark.parametrize(
+    'command',
+    [
+        'Get-Content notes.txt\nremove-item notes.txt',
+        'ls\r\nrm -rf build',
+        'cat a\n  mkdir new-dir',
+        'echo one\n\techo two\nadd-content log.txt -value x',
+    ],
+)
+def test_exec_tool_readonly_gate_treats_newline_as_statement_start(command: str) -> None:
+    assert ExecTool()._enforce_read_only_command(command) is not None
+
+
+@pytest.mark.asyncio
+async def test_exec_tool_blocks_newline_separated_mutation_without_spawning(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    calls: list[list] = []
+
+    async def _fake_create_subprocess_exec(*args, **kwargs):
+        calls.append(list(args))
+        raise AssertionError('subprocess must not start')
+
+    monkeypatch.setattr(shell_module.asyncio, 'create_subprocess_exec', _fake_create_subprocess_exec)
+    tool = ExecTool(workspace_root=str(tmp_path))
+
+    payload = json.loads(
+        await tool.execute(
+            command='Get-Content notes.txt\nremove-item notes.txt',
+            __g3ku_runtime={'session_key': 'web:shared'},
+        )
+    )
+
+    assert payload['status'] == 'error'
+    assert 'read-only tool' in payload['error']
+    assert calls == []
+
+
 @pytest.mark.asyncio
 async def test_exec_tool_makes_python_available_from_project_environment_on_windows(monkeypatch) -> None:
     if os.name != 'nt':
@@ -377,14 +416,14 @@ async def test_exec_tool_full_access_mode_skips_exec_guardrails(monkeypatch) -> 
             return None
 
     class _Service:
-        def get_tool_family(self, tool_id: str):
-            if tool_id != 'exec_runtime':
+        def get_tool(self, tool_id: str):
+            if tool_id != 'exec':
                 return None
             return type(
-                'Family',
+                'ToolRecord',
                 (),
                 {
-                    'tool_id': 'exec_runtime',
+                    'tool_id': 'exec',
                     'metadata': {'execution_mode': 'full_access'},
                 },
             )()
@@ -546,14 +585,14 @@ async def test_exec_tool_streaming_reader_keeps_output_bounded(monkeypatch, tmp_
 
 def test_exec_tool_model_description_reflects_full_access_mode() -> None:
     class _Service:
-        def get_tool_family(self, tool_id: str):
-            if tool_id != 'exec_runtime':
+        def get_tool(self, tool_id: str):
+            if tool_id != 'exec':
                 return None
             return type(
-                'Family',
+                'ToolRecord',
                 (),
                 {
-                    'tool_id': 'exec_runtime',
+                    'tool_id': 'exec',
                     'metadata': {'execution_mode': 'full_access'},
                 },
             )()
