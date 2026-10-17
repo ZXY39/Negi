@@ -45,18 +45,6 @@ class ContentTool:
         if envelope is not None:
             return str(envelope.ref or '').strip()
         return str(ref or '').strip()
-
-    def _canonical_artifact_ref(self, ref: str | None) -> str:
-        normalized = self._normalize_ref(ref)
-        if not normalized.startswith('artifact:'):
-            return normalized
-        try:
-            payload = self._content_store.describe(ref=normalized, view='canonical')
-        except Exception:
-            return normalized
-        resolved_ref = self._normalize_ref(payload.get('resolved_ref'))
-        return resolved_ref if resolved_ref.startswith('artifact:') else normalized
-
     @staticmethod
     def _runtime_image_multimodal_enabled(runtime: dict[str, Any] | None) -> bool:
         payload = runtime if isinstance(runtime, dict) else {}

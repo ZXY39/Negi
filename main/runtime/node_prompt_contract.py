@@ -142,15 +142,6 @@ def _stable_stage_payload(stage_payload: dict[str, Any] | None) -> dict[str, Any
     }
 
 
-def _stable_selection_trace(selection_trace: dict[str, Any] | None) -> dict[str, Any]:
-    payload = dict(selection_trace or {})
-    return {
-        'mode': str(payload.get('mode') or '').strip(),
-        'full_callable_tool_names': _normalized_name_list(list(payload.get('full_callable_tool_names') or [])),
-        'stage_locked_to_submit_next_stage': bool(payload.get('stage_locked_to_submit_next_stage')),
-    }
-
-
 def _render_name_list(items: list[str] | None) -> str:
     names = _normalized_name_list(items)
     if not names:

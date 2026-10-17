@@ -1,9 +1,7 @@
 from __future__ import annotations
 
-import json
 import re
 from pathlib import Path
-
 
 # CJK 字符按 ~1 字符/token（实测 sensenova/deepseek 对中文近似 1 字/token；取 1.0 略偏
 # 高估，对压缩闸门是安全方向——宁可早压不可晚压），其余按 ~4 字符/token。中文密集文本
@@ -163,73 +161,3 @@ def layered_body_payload(
         'l1': l1,
         'path': str(Path(path)) if path else '',
     }
-
-
-async def summarize_layered_model_first(
-    text: str,
-    *,
-    title: str = '',
-    description: str = '',
-    model_key: str | None = None,
-    l0_limit: int = 160,
-    l1_limit: int = 640,
-) -> tuple[str, str]:
-    heuristic_l0 = summarize_l0(text, title=title, description=description, limit=l0_limit)
-    heuristic_l1 = summarize_l1(text, title=title, description=description, limit=l1_limit)
-    source_text = str(text or '').strip()
-    if not source_text:
-        return heuristic_l0, heuristic_l1
-
-    try:
-        from g3ku.config.live_runtime import get_runtime_config
-        from g3ku.providers.chatmodels import build_chat_model
-
-        config, _revision, _changed = get_runtime_config(force=False)
-        explicit_model_key = str(model_key or '').strip()
-        if explicit_model_key:
-            model = build_chat_model(config, model_key=explicit_model_key)
-        else:
-            model = build_chat_model(config, role='ceo')
-        prompt = (
-            'You are generating layered retrieval context for an internal agent catalog.\n'
-            'Return strict JSON with keys l0 and l1 only.\n'
-            f'l0 must be <= {l0_limit} chars.\n'
-            f'l1 must be <= {l1_limit} chars.\n'
-            'l0 = one-line semantic summary.\n'
-            'l1 = short structured overview focused on usage and scope.\n'
-        )
-        body = json.dumps(
-            {
-                'title': str(title or ''),
-                'description': str(description or ''),
-                'content': truncate_by_tokens(source_text, max(512, l1_limit * 2 // 4)),
-            },
-            ensure_ascii=False,
-        )
-        response = await model.chat(
-            [
-                {'role': 'system', 'content': prompt},
-                {'role': 'user', 'content': body},
-            ],
-            tools=None,
-        )
-        raw = getattr(response, 'content', response)
-        if isinstance(raw, list):
-            parts: list[str] = []
-            for item in raw:
-                if isinstance(item, str):
-                    parts.append(item)
-                elif isinstance(item, dict):
-                    text_part = item.get('text') or item.get('content') or ''
-                    if isinstance(text_part, str):
-                        parts.append(text_part)
-            raw = '\n'.join(parts)
-        text_out = str(raw or '').strip()
-        parsed = json.loads(text_out)
-        if not isinstance(parsed, dict):
-            return heuristic_l0, heuristic_l1
-        l0 = truncate_by_tokens(str(parsed.get('l0') or heuristic_l0), max(1, l0_limit // 4))
-        l1 = truncate_by_tokens(str(parsed.get('l1') or heuristic_l1), max(1, l1_limit // 4))
-        return l0 or heuristic_l0, l1 or heuristic_l1
-    except Exception:
-        return heuristic_l0, heuristic_l1

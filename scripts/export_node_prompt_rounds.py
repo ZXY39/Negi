@@ -26,8 +26,6 @@ from main.runtime.node_prompt_contract import (
 from main.runtime.react_loop import ReActToolLoop
 import main.runtime.react_loop as react_loop_module
 
-_OVERLAY_MARKER = "\n\nSystem note for this turn only:\n"
-
 
 def _normalized_names(items: list[Any] | None) -> list[str]:
     ordered: list[str] = []

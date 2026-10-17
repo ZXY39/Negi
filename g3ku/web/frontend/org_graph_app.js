@@ -5846,22 +5846,6 @@ function summarizeUploads(items = []) {
     return parts.length ? `已附加 ${parts.join("，")}` : "已附加附件";
 }
 
-function renderChatAttachments(items = []) {
-    const uploads = normalizeUploadList(items);
-    if (!uploads.length) return "";
-    return `
-        <div class="chat-attachment-list" role="list">
-            ${uploads.map((item) => `
-                <div class="chat-attachment-pill" role="listitem">
-                    <span class="chat-attachment-kind">${String(item.kind || "") === "image" ? "图片" : "文件"}</span>
-                    <span class="chat-attachment-name">${esc(String(item.name || item.path || "附件"))}</span>
-                    <span class="chat-attachment-size">${esc(formatFileSize(item.size))}</span>
-                </div>
-            `).join("")}
-        </div>
-    `;
-}
-
 function ceoAttachmentHref(item = {}, sessionId = activeSessionId()) {
     const explicitUrl = String(item?.url || "").trim();
     if (explicitUrl) return explicitUrl;

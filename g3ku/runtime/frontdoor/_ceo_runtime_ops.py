@@ -525,14 +525,6 @@ def _hidden_internal_prompt_message_metadata(
     return payload
 
 
-def _positive_int(value: Any, default: int) -> int:
-    try:
-        normalized = int(value)
-    except (TypeError, ValueError):
-        return default
-    return normalized if normalized > 0 else default
-
-
 def _checkpoint_safe_value(value: Any) -> Any:
     if value is None or isinstance(value, str | int | float | bool):
         return value
@@ -4637,11 +4629,6 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
             or str(value.get("source") or "").strip()
             or bool(value.get("needs_recheck"))
         )
-
-    @staticmethod
-    def _semantic_context_state_has_material_content(value: Any) -> bool:
-        return False
-
     @classmethod
     def _paused_manual_frontdoor_snapshot(cls, session: Any | None) -> dict[str, Any]:
         snapshot_supplier = getattr(session, "paused_execution_context_snapshot", None)

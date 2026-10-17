@@ -335,26 +335,3 @@ def merge_required(old: StructuredMemoryFact, new: StructuredMemoryFact) -> bool
         and not equivalent_fact(old, new)
         and new.merge_mode == "merge"
     )
-
-
-def merge_values(old_value: Any, new_value: Any) -> Any:
-    """Merge two structured preference values deterministically."""
-
-    if isinstance(old_value, dict) and isinstance(new_value, dict):
-        merged = dict(old_value)
-        merged.update(new_value)
-        return merged
-
-    def _iter_items(value: Any) -> list[Any]:
-        if isinstance(value, list):
-            return list(value)
-        if isinstance(value, tuple):
-            return list(value)
-        return [value]
-
-    merged_items: list[Any] = []
-    for item in [*_iter_items(old_value), *_iter_items(new_value)]:
-        if any(existing == item for existing in merged_items):
-            continue
-        merged_items.append(item)
-    return merged_items

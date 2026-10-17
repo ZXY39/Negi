@@ -37,13 +37,6 @@ def build_image_degradation_text(*, path: str, display_name: str) -> str:
     )
 
 
-def _block_image_url(block: dict[str, Any]) -> str:
-    image_value = block.get("image_url")
-    if isinstance(image_value, dict):
-        return str(image_value.get("url") or "").strip()
-    return str(image_value or block.get("url") or "").strip()
-
-
 def message_content_has_image_blocks(content: Any) -> bool:
     """这条 message content 里是否还有图片块（字符串/None 恒 False）。"""
 

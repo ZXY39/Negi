@@ -4,10 +4,6 @@ from dataclasses import dataclass, field
 from typing import Any, Literal
 
 
-TOOL_CANDIDATE_TOP_K = 16
-SKILL_CANDIDATE_TOP_K = 16
-
-
 def _item_value(item: Any, key: str) -> Any:
     if isinstance(item, dict):
         return item.get(key)

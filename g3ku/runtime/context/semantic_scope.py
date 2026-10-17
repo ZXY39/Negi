@@ -3,9 +3,6 @@ from __future__ import annotations
 from typing import Any
 
 
-CATALOG_NAMESPACE: tuple[str, ...] = ("catalog", "global")
-
-
 def _item_value(item: Any, key: str) -> Any:
     if isinstance(item, dict):
         return item.get(key)
