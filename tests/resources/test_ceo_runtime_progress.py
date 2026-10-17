@@ -3280,25 +3280,56 @@ async def test_auto_compression_marker_names_the_turn_it_folded(tmp_path: Path) 
 
 
 def test_compression_boundary_index_is_the_last_swallowed_stage() -> None:
-    """边界 = 被吞集合里最大的 stage_index；没吞阶段就是 0。
+    """边界 = 被吞集合在**渲染账本**里最大的 stage_index；没吞阶段就是 0。
 
     活动阶段永远不在被吞集合里（`stage_is_swallowable` 排除 `active_stage_id`），所以这条
-    边界永远落在两张阶段卡之间，不会切开任何一张卡。
+    边界永远落在两张阶段卡之间，不会切开任何一张卡。两本账各有一套编号，只按 id 匹配必然
+    落空，跨账靠内容身份（与收口标记同一座桥）。
     """
     runner = create_agent_impl.CreateAgentCeoFrontDoorRunner(loop=SimpleNamespace())
-    stage_state = {
-        "stages": [
+
+    def _canonical(offset: int) -> dict:
+        return {
+            "stage_id": f"frontdoor-stage-{900 + offset}",
+            "stage_index": 900 + offset,
+            "stage_goal": f"目标 {offset}",
+            "completed_stage_summary": f"结论 {offset}",
+            "created_at": f"2026-09-20T10:{offset:02d}:00+08:00",
+            "finished_at": f"2026-09-20T10:{offset:02d}:30+08:00",
+            "status": "completed",
+            "stage_kind": "normal",
+        }
+
+    def _ledger(stages: list[dict]) -> dict:
+        return {"active_stage_id": "", "stages": stages}
+
+    # 同一批逻辑阶段在界面账本里是另一套编号（1..3），stage_id 与 canonical 交集为空。
+    rendered = _ledger(
+        [{**_canonical(offset), "stage_id": f"turn-{offset + 1}", "stage_index": offset + 1} for offset in range(3)]
+    )
+    durable = _ledger([_canonical(offset) for offset in range(3)])
+    assert (
+        runner._frontdoor_compression_boundary_index(
+            rendered, durable, ["frontdoor-stage-900", "frontdoor-stage-901"]
+        )
+        == 2
+    )
+
+    # 两本账合成一本（id 直接命中）时口径不变。
+    same = _ledger(
+        [
             {"stage_id": "frontdoor-stage-1", "stage_index": 1},
-            {"stage_id": "frontdoor-stage-2", "stage_index": 2},
             {"stage_id": "frontdoor-stage-7", "stage_index": 7},
             "junk",
             {"stage_id": "frontdoor-stage-9"},
         ]
-    }
-    assert runner._frontdoor_compression_boundary_index(stage_state, ["frontdoor-stage-1", "frontdoor-stage-7"]) == 7
-    assert runner._frontdoor_compression_boundary_index(stage_state, []) == 0
-    assert runner._frontdoor_compression_boundary_index(stage_state, ["frontdoor-stage-404"]) == 0
-    assert runner._frontdoor_compression_boundary_index(None, ["frontdoor-stage-1"]) == 0
+    )
+    assert runner._frontdoor_compression_boundary_index(same, same, ["frontdoor-stage-1", "frontdoor-stage-7"]) == 7
+    assert runner._frontdoor_compression_boundary_index(same, same, []) == 0
+    # 一条都映不到就不给边界：宁可得"没折阶段"，也不能报一个界面读不懂的大编号——后者
+    # 会被判成"整回合都在边界之下"，线退回 feed 尾部。
+    assert runner._frontdoor_compression_boundary_index(rendered, durable, ["frontdoor-stage-404"]) == 0
+    assert runner._frontdoor_compression_boundary_index(None, None, ["frontdoor-stage-1"]) == 0
 
 
 @pytest.mark.asyncio

@@ -2046,6 +2046,19 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
         return min(len(body), 4)
 
     @staticmethod
+    def _frontdoor_render_stage_state(*, session: Any, state: dict[str, Any] | None) -> dict[str, Any]:
+        """界面阶段轨道读的那本账：本轮/会话的 `frontdoor_stage_state`，不掺 canonical 编号。
+
+        取值顺序必须与 `_frontdoor_durable_stage_state` 里的 `turn_state` 完全一致，否则
+        "压缩时看到的账"与"渲染出来的账"又不是同一本。
+        """
+        if isinstance(state, dict) and isinstance(state.get("frontdoor_stage_state"), dict):
+            return dict(state.get("frontdoor_stage_state") or {})
+        if session is not None and isinstance(getattr(session, "_frontdoor_stage_state", None), dict):
+            return dict(getattr(session, "_frontdoor_stage_state", None) or {})
+        return {}
+
+    @staticmethod
     def _frontdoor_durable_stage_state(*, session: Any, state: dict[str, Any] | None) -> dict[str, Any]:
         """压缩侧读的账本：durable canonical 链 + 本轮 stage_state 的合并视图。"""
         canonical = getattr(session, "_frontdoor_canonical_context", None) if session is not None else None
@@ -2145,25 +2158,42 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
         """本次压缩真正吞掉的阶段（判定规则与节点车道共用 `summarized_stage_ids`）。"""
         return summarized_stage_ids(stage_state, body_messages=recent_tail)
 
-    @staticmethod
-    def _frontdoor_compression_boundary_index(stage_state: Any, stage_ids: list[str]) -> int:
-        """折进摘要的最后一个阶段的 `stage_index`；0 = 一条阶段都没折。
+    @classmethod
+    def _frontdoor_compression_boundary_index(
+        cls,
+        render_stage_state: Any,
+        durable_stage_state: Any,
+        stage_ids: list[str],
+    ) -> int:
+        """折进摘要的最后一个阶段在**渲染账本**里的 `stage_index`；0 = 一条阶段都没折。
 
         区分线在阶段轨道里的落点由它决定：`stage_index` 小于等于它的阶段画在线上方。
         活动阶段永远不被吞（`stage_is_swallowable` 直接排除 `active_stage_id`），所以它
         连同之后的阶段一定留在线下方继续长——线因此永远落在两张阶段卡之间，不切开任何
-        一张卡。口径与实时轨道同源：两边都取 `_frontdoor_stage_state` 这本账（实测会话
-        里 1..673 连续），不是 `frontdoor_canonical_context` 那套另一编号。
+        一张卡。
+
+        边界必须换算到 `_frontdoor_render_stage_state` 那本账：被吞清单出自 canonical
+        合并视图，那侧编号是全局单调的（实测一条会话里 canonical 17740..18445 对界面
+        1..706，交集 0）。原样把 canonical 编号交给前端，判据会读成"这一回合的阶段全部
+        在边界之下"，线就退回 feed 尾部。跨账靠 `_frontdoor_stage_content_identity`，
+        与收口标记 `_frontdoor_mark_stages_archived` 用的是同一座桥。
         """
         wanted = {str(item or "").strip() for item in list(stage_ids or []) if str(item or "").strip()}
         if not wanted:
             return 0
+        identities = {
+            cls._frontdoor_stage_content_identity(stage)
+            for stage in list((durable_stage_state or {}).get("stages") or [])
+            if isinstance(stage, dict) and str(stage.get("stage_id") or "").strip() in wanted
+        }
+        identities.discard("")
         boundary = 0
-        for stage in list((stage_state or {}).get("stages") or []):
+        for stage in list((render_stage_state or {}).get("stages") or []):
             if not isinstance(stage, dict):
                 continue
             if str(stage.get("stage_id") or "").strip() not in wanted:
-                continue
+                if cls._frontdoor_stage_content_identity(stage) not in identities:
+                    continue
             try:
                 boundary = max(boundary, int(stage.get("stage_index") or 0))
             except (TypeError, ValueError):
@@ -2682,7 +2712,9 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
                     "stage_archive_pending_count": len(summarized_stage_ids),
                     # 区分线在阶段轨道里的落点；收尾落行时原样带进 stats，实时帧同带。
                     "boundary_stage_index": self._frontdoor_compression_boundary_index(
-                        durable_stage_state, summarized_stage_ids
+                        self._frontdoor_render_stage_state(session=session, state=state),
+                        durable_stage_state,
+                        summarized_stage_ids,
                     ),
                     "stage_archive_ref": archive_path,
                     "final_request_tokens": rewritten_tokens,

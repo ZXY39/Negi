@@ -310,17 +310,22 @@ def _run_compression(
     helper_text: str,
     archive_fails: bool = False,
     stage_count: int = 5,
+    canonical_stages: list[dict] | None = None,
+    render_stages: list[dict] | None = None,
 ):
     live = tmp_path / "keep.txt"
     live.write_text("x", encoding="utf-8")
-    stages = [
-        _stage(1, key_refs=[{"ref": str(live), "note": "有效产物"}, {"ref": str(tmp_path / "gone.txt"), "note": "已失效"}]),
-        _stage(2, key_refs=[{"ref": "task:7e2a270eec34", "note": "在跑的任务"}]),
-    ]
-    stages.extend(_stage(index) for index in range(3, max(2, int(stage_count)) + 1))
+    if canonical_stages is not None:
+        stages = [dict(item) for item in canonical_stages]
+    else:
+        stages = [
+            _stage(1, key_refs=[{"ref": str(live), "note": "有效产物"}, {"ref": str(tmp_path / "gone.txt"), "note": "已失效"}]),
+            _stage(2, key_refs=[{"ref": "task:7e2a270eec34", "note": "在跑的任务"}]),
+        ]
+        stages.extend(_stage(index) for index in range(3, max(2, int(stage_count)) + 1))
     session = SimpleNamespace(
         _frontdoor_canonical_context=_ledger(stages),
-        _frontdoor_stage_state=_ledger([]),
+        _frontdoor_stage_state=_ledger(render_stages or []),
     )
     runner = CreateAgentCeoFrontDoorRunner(loop=SimpleNamespace(workspace=str(tmp_path)))
     captured: dict[str, object] = {}
@@ -422,6 +427,30 @@ def test_token_compression_backfills_selected_refs_and_archives_ledger(monkeypat
     assert result.diagnostics["stage_ref_dropped_dead"] == 1
     assert result.diagnostics["stage_archive_pending_count"] == 5
     assert result.diagnostics["stage_ref_candidate_count"] == 3
+
+
+def test_token_compression_reports_the_boundary_in_the_rendered_ledger(monkeypatch, tmp_path: Path) -> None:
+    """区分线的边界要报在界面读的那本账上。
+
+    canonical 链与本轮 stage_state 各维护一套 `stage_index`（实测一条会话里 17740..18445
+    对界面 1..706，id 交集 0），合并视图留下的是 canonical 那侧的编号。原样报出去，前端
+    会读成"这一回合的阶段全部在边界之下"而不切分，区分线退回 feed 尾部——正是这条断言
+    在防的事故。
+    """
+    canonical = [
+        {**_stage(index), "stage_id": f"frontdoor-stage-{900 + index}", "stage_index": 900 + index}
+        for index in range(1, 6)
+    ]
+    rendered = [{**_stage(index), "stage_id": f"turn-{index}"} for index in range(1, 6)]
+    result, _session, _captured, _live = _run_compression(
+        monkeypatch,
+        tmp_path,
+        helper_text="## 一、身份\n摘要正文。",
+        canonical_stages=canonical,
+        render_stages=rendered,
+    )
+    assert result.diagnostics["stage_archive_pending_count"] == 5
+    assert result.diagnostics["boundary_stage_index"] == 5
 
 
 def test_token_compression_without_selection_still_archives(monkeypatch, tmp_path: Path) -> None:
