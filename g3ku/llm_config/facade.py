@@ -389,9 +389,21 @@ class LLMConfigFacade:
         binding = config.get_managed_model(model_key)
         if binding is None:
             raise ValueError(f"Unknown model key: {model_key}")
+        config_id = str(getattr(binding, "llm_config_id", "") or "").strip()
         config.models.catalog = [item for item in config.models.catalog if item.key != model_key]
-        if self.repository.has_record(binding.llm_config_id):
-            self.repository.delete(binding.llm_config_id)
+        # 凭据记录是多对一共享的：兄弟绑定还指着同一个 config_id 时删文件，等于把它们
+        # 一起判成 record_missing（解析那一步直接抛）。
+        still_referenced = any(
+            str(getattr(item, "llm_config_id", "") or "").strip() == config_id
+            for item in config.models.catalog
+        )
+        if not config_id or still_referenced:
+            return
+        if self.repository.has_record(config_id):
+            self.repository.delete(config_id)
+        # 与 delete_config_record 同一件事：覆盖层里那把可解密的密钥也要一起摘掉，
+        # 否则每删一个模型就留下一条没人认领的凭据。
+        self.security.delete_overlay_prefix_all_realms(f"llm_config.{config_id}.")
 
     def get_routes(self, config: Any) -> dict[str, list[str]]:
         # 候选展开视图：链里出现负载均衡组时，成员也算这条车道用到的模型。

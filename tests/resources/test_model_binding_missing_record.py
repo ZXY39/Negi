@@ -150,3 +150,51 @@ def test_model_page_marks_the_broken_row_and_still_opens_it() -> None:
     assert "凭据记录缺失" in llm_js
     # 坏行开详情不再打那次必然 404 的记录读取，否则「删除配置」这条修路够不到。
     assert "binding.record_missing ? null : await ApiClient.getLlmConfig" in llm_js
+
+
+def _catalog_config(workspace, rows: list[tuple[str, str]]) -> Config:
+    return Config.model_validate(
+        {
+            "agents": {"defaults": {"workspace": str(workspace)}},
+            "models": {
+                "catalog": [
+                    {"key": key, "llm_config_id": config_id, "enabled": True} for key, config_id in rows
+                ],
+                "roles": {"ceo": [key for key, _ in rows], "execution": [], "inspection": [], "memory": []},
+            },
+        }
+    )
+
+
+def test_deleting_a_binding_keeps_a_record_its_sibling_still_uses(tmp_path) -> None:
+    """凭据记录是多对一共享的：删掉其中一位绑定不能把另一位打成 record_missing。"""
+    workspace = _workspace(tmp_path)
+    facade = _facade(workspace)
+    config = _catalog_config(workspace, [("share-a", "cfg-live"), ("share-b", "cfg-live")])
+    _save_record(facade, "cfg-live", provider_id="openai", model="demo-model")
+
+    facade.delete_binding(config, "share-a")
+
+    assert config.get_managed_model("share-a") is None
+    assert facade.repository.has_record("cfg-live") is True
+    assert facade.describe_binding(config, "share-b")["record_missing"] is False
+
+
+def test_deleting_the_last_binding_drops_its_overlay_credential(tmp_path, monkeypatch) -> None:
+    """最后一位绑定删干净时，覆盖层里那把可解密密钥也要一起摘——判据与
+    `delete_config_record` 同一条，否则每删一个模型就残留一条没人认领的凭据。"""
+    workspace = _workspace(tmp_path)
+    facade = _facade(workspace)
+    config = _catalog_config(workspace, [("live-model", "cfg-live"), ("gone-model", "cfg-gone")])
+    _save_record(facade, "cfg-live", provider_id="openai", model="demo-model")
+    released: list[str] = []
+    monkeypatch.setattr(
+        facade.security,
+        "delete_overlay_prefix_all_realms",
+        lambda prefix: released.append(prefix),
+    )
+
+    facade.delete_binding(config, "live-model")
+
+    assert facade.repository.has_record("cfg-live") is False
+    assert released == ["llm_config.cfg-live."]
