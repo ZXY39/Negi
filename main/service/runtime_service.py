@@ -6160,7 +6160,10 @@ class MainRuntimeService:
     def _resource_reload_poll_interval_ms(config: Any | None) -> int:
         resources = getattr(config, 'resources', None) if config is not None else None
         reload_cfg = getattr(resources, 'reload', None) if resources is not None else None
-        return max(0, int(getattr(reload_cfg, 'poll_interval_ms', 1000) or 1000))
+        raw = getattr(reload_cfg, 'poll_interval_ms', None)
+        if raw is None:
+            return 1000
+        return max(0, int(raw))
 
     @staticmethod
     def _resource_state_names_changed(
