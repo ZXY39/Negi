@@ -7305,9 +7305,9 @@ async def test_react_loop_bounces_midstage_plain_text_instead_of_auto_wrapping()
     assert result.summary == '真交付'
     assert result.answer == 'CSV 与 ZIP 已按备份重建'
     assert 'auto-wrapped' not in str(result.summary)
-    assert '不把它当成交付' not in _request_message_text(requests[0])
-    assert '不把它当成交付' in _request_message_text(requests[1])
-    assert '不把它当成交付' in _request_message_text(requests[2])
+    assert 'does not treat it as a delivery' not in _request_message_text(requests[0])
+    assert 'does not treat it as a delivery' in _request_message_text(requests[1])
+    assert 'does not treat it as a delivery' in _request_message_text(requests[2])
     assert len(requests) == 3
 
 

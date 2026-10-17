@@ -6213,7 +6213,7 @@ async def test_create_agent_runner_reprompts_when_active_stage_has_no_substantiv
     assert result["final_output"] == ""
     assert "repair_overlay_text" in result
     assert "submit_next_stage" in result["repair_overlay_text"]
-    assert "普通工具" in result["repair_overlay_text"]
+    assert "ordinary tool" in result["repair_overlay_text"]
 
 
 @pytest.mark.asyncio

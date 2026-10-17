@@ -10165,7 +10165,7 @@ async def test_resume_react_state_keeps_canonical_messages_separate_from_provide
     canonical_messages = [
         {"role": "system", "content": "[SYSTEM] execution node prompt"},
         {"role": "user", "content": '{"task_id":"task:demo","node_id":"node:leaf","goal":"demo"}'},
-        {"role": "user", "content": "System note for this turn only:\n当前阶段【自主执行 | 进行中】目标：canonical stage goal"},
+        {"role": "user", "content": "System note for this turn only:\nCurrent stage [autonomous | in progress] goal: canonical stage goal"},
     ]
     previous_request_messages = [
         {"role": "system", "content": "[SYSTEM] execution node prompt"},

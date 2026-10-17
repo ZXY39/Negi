@@ -1067,9 +1067,9 @@ def test_build_prompt_context_no_longer_uses_summary_text_overlay() -> None:
     )
 
     overlay = str(result["system_overlay"])
-    assert "当前 CEO 阶段工具轮次预算已耗尽：1/1。" in overlay
-    assert "如果不再需要调用工具，可以直接输出给用户的最终回复收尾" in overlay
-    assert "先不要直接结束" not in overlay
+    assert "The CEO stage tool-round budget is exhausted: 1/1." in overlay
+    assert "output the final reply for the user directly" in overlay
+    assert "no real tool result exists yet" not in overlay
     assert "Use the existing CEO layered context rules." not in overlay
     assert "## CEO Durable Summary" not in overlay
 
@@ -1113,8 +1113,8 @@ def test_build_prompt_context_keeps_dispatch_overlay_and_exhausted_stage_instruc
 
     overlay = str(result["system_overlay"])
     assert "verified task id task:demo-123" in overlay
-    assert "当前 CEO 阶段工具轮次预算已耗尽：1/1。" in overlay
-    assert "必须把 `submit_next_stage` 与目标工具同批提交，开启下一阶段" in overlay
+    assert "The CEO stage tool-round budget is exhausted: 1/1." in overlay
+    assert "submit `submit_next_stage` in the same batch as the target tool to open the next" in overlay
 
 
 @pytest.mark.asyncio
@@ -1192,15 +1192,15 @@ def test_build_ceo_stage_reply_bounce_message_only_for_fresh_stage_without_progr
     # 阶段刚创建、零工具轮：打回一次，文本必须带逃生句。
     fresh = _gate(rounds=[], transition_required=False)
     message = build_ceo_stage_reply_bounce_message(fresh)
-    assert "还没有任何真实工具执行结果" in message
+    assert "no real tool result exists yet" in message
     assert "向用户交付派发确认" in message
-    assert "再次直接输出回复文本即可" in message
+    assert "output the reply text again" in message
     # 仅含 sns/控制类轮次不算实质进展，同样打回。
     sns_only = _gate(
         rounds=[{"round_index": 1, "tool_names": ["submit_next_stage"], "budget_counted": False}],
         transition_required=False,
     )
-    assert "还没有任何真实工具执行结果" in build_ceo_stage_reply_bounce_message(sns_only)
+    assert "no real tool result exists yet" in build_ceo_stage_reply_bounce_message(sns_only)
 
 
 @pytest.mark.asyncio
@@ -1242,8 +1242,8 @@ async def test_graph_normalize_model_output_bounces_plain_text_once_for_stage_wi
     assert first["next_step"] == "call_model"
     assert str(first.get("final_output") or "") == ""
     assert int(first.get("stage_reply_bounce_count") or 0) == 1
-    assert "还没有任何真实工具执行结果" in str(first["repair_overlay_text"])
-    assert "再次直接输出回复文本即可" in str(first["repair_overlay_text"])
+    assert "no real tool result exists yet" in str(first["repair_overlay_text"])
+    assert "output the reply text again" in str(first["repair_overlay_text"])
 
     # 整回合上限一次：计数已达上限时，即使阶段仍无工具轮也必须放行收尾。
     second = await runner._graph_normalize_model_output(

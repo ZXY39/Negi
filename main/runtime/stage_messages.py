@@ -47,17 +47,19 @@ def _stage_has_substantive_progress(active: dict[str, Any]) -> bool:
 def _execution_stage_budget_accounting_note(active: dict[str, Any]) -> str:
     rounds = [item for item in list(active.get('rounds') or []) if isinstance(item, dict)]
     counted_rounds = sum(1 for item in rounds if bool(item.get('budget_counted')))
-    non_budget_tools = '、'.join(f'`{name}`' for name in _NON_BUDGET_ACCOUNTING_TOOL_NAMES)
+    non_budget_tools = ', '.join(f'`{name}`' for name in _NON_BUDGET_ACCOUNTING_TOOL_NAMES)
     note = (
-        ' 预算记账由系统决定，不要按工具名猜：'
-        f'不会计入本阶段 `tool_rounds_used` 的工具只有 {non_budget_tools}。'
-        ' 是否允许调用仍以阶段门控和系统返回为准：撞闸的普通工具首次会宽限执行一次'
-        '（结果照常返回并附宽限提醒；无阶段时记待入账轮、预算耗尽时记溢出轮），宽限用尽后才被硬拦。'
-        ' 历史 round 是否扣预算，只看 `rounds[*].budget_counted`，其中 `budget_counted` 是权威字段；'
-        '`tool_rounds_used` 只统计 `budget_counted=true` 的 round。'
+        ' Budget accounting is decided by the runtime, never guessed from tool names: '
+        f'the only tools that do not add to this stage `tool_rounds_used` are {non_budget_tools}. '
+        'Whether a call is allowed still follows the stage gate and what the runtime returns: a gated ordinary '
+        'tool call runs once under a grace pass the first time (the result comes back normally with a grace '
+        'reminder; without an active stage it books a pending round, on an exhausted stage it books an overflow '
+        'round), and only a later violation is hard-blocked. '
+        'Whether a recorded round cost budget is decided only by `budget_counted` on that round, which is the '
+        'authoritative field; `tool_rounds_used` counts rounds with `budget_counted=true`.'
     )
     if not rounds:
-        return f'{note} 当前还没有任何已记录的 round。'
+        return f'{note} No round has been recorded yet.'
     latest = rounds[-1]
     latest_index = int(latest.get('round_index') or len(rounds) or 0)
     latest_tools = [
@@ -65,11 +67,11 @@ def _execution_stage_budget_accounting_note(active: dict[str, Any]) -> str:
         for name in list(latest.get('tool_names') or [])
         if str(name or '').strip()
     ]
-    latest_tools_text = '、'.join(latest_tools) if latest_tools else '（无工具名）'
+    latest_tools_text = ', '.join(latest_tools) if latest_tools else '(no tool names)'
     latest_counted = str(bool(latest.get('budget_counted'))).lower()
     return (
-        f'{note} 当前已记录 {len(rounds)} 轮，其中扣预算 {counted_rounds} 轮。'
-        f'最近一轮是第 {latest_index} 轮，工具：{latest_tools_text}，budget_counted={latest_counted}。'
+        f'{note} Rounds recorded: {len(rounds)}, of which {counted_rounds} charged against budget. '
+        f'The latest round is round {latest_index}, tools: {latest_tools_text}, budget_counted={latest_counted}.'
     )
 
 
@@ -78,40 +80,44 @@ def build_ceo_stage_overlay(stage_gate: dict[str, Any] | None) -> str | None:
     active = gate.get('active_stage') if isinstance(gate.get('active_stage'), dict) else None
     if not isinstance(active, dict):
         return (
-            '当前没有有效的 CEO 阶段。'
-            '如果本轮需要使用任何工具，必须把 `submit_next_stage` 与目标工具在同一条消息里一起提交'
-            f'（传入简洁的 `stage_goal` 和 {STAGE_TOOL_ROUND_BUDGET_MIN} 到 {STAGE_TOOL_ROUND_BUDGET_MAX} 的 `tool_round_budget`）：'
-            '`submit_next_stage` 会先执行，随后目标工具落入新阶段的第一轮并计入其预算。'
-            '单独调用普通工具只会获得一次宽限执行，再次违规将被拦截。'
-            '如果本轮不需要使用工具，可以直接回复。'
+            'There is no active CEO stage. '
+            'If this round needs any tool, submit `submit_next_stage` in the same message as the target tool '
+            f'(pass a concise `stage_goal` and a `tool_round_budget` between {STAGE_TOOL_ROUND_BUDGET_MIN} and '
+            f'{STAGE_TOOL_ROUND_BUDGET_MAX}): `submit_next_stage` runs first, then the target tool lands as the '
+            'first round of the new stage and counts against its budget. '
+            'A lone ordinary tool call only gets one grace pass; the next violation is blocked. '
+            'If this round needs no tool, reply directly.'
         )
     used = int(active.get('tool_rounds_used') or 0)
     budget = int(active.get('tool_round_budget') or 0)
-    goal = str(active.get('stage_goal') or '').strip() or '（空）'
+    goal = str(active.get('stage_goal') or '').strip() or '(empty)'
     final_note = (
-        ' 当前阶段已标记为最终收敛阶段；它不会仅因为预算耗尽而被强制切换，且不得调用 `spawn_child_nodes`。'
+        ' The current stage is marked as the final convergence stage; it is never forced to switch just because '
+        'the budget is exhausted, and `spawn_child_nodes` must not be called on it.'
         if bool(active.get('final_stage'))
         else ''
     )
     reminder = ''
     if not bool(gate.get('transition_required')) and not _stage_has_substantive_progress(active):
         reminder = (
-            ' 当前阶段已经创建，但还没有任何真实工具执行结果。'
-            ' 不要只输出口头说明，也不要再次调用 `submit_next_stage`；'
-            ' 请先调用一个服务于当前阶段目标的普通工具。'
+            ' The current stage exists but no real tool result has run yet. '
+            'Do not output a verbal explanation only, and do not call `submit_next_stage` again; '
+            'call one ordinary tool that serves the current stage goal first.'
         )
     if bool(gate.get('transition_required')):
         return (
-            f'当前 CEO 阶段工具轮次预算已耗尽：{used}/{budget}。'
-            f'阶段目标：{goal}。'
-            '如需继续使用工具，必须把 `submit_next_stage` 与目标工具同批提交，开启下一阶段；'
-            '同批里的普通工具将作为新阶段的第一轮调用并计入其预算。'
-            '若无需继续调用工具，可直接输出文本回复收尾，系统会自动关闭当前阶段。'
+            f'The CEO stage tool-round budget is exhausted: {used}/{budget}. '
+            f'Stage goal: {goal}. '
+            'To keep using tools, submit `submit_next_stage` in the same batch as the target tool to open the '
+            'next stage; the ordinary tools in that batch run as the first round of the new stage and count '
+            'against its budget. '
+            'If no further tool calls are needed, output a text reply to close the round; the runtime closes the '
+            'current stage automatically.'
         )
     return (
-        f'当前 CEO 阶段目标：{goal}。'
-        f'当前普通工具轮次使用：{used}/{budget}。'
-        '本轮任何工具调用都必须直接服务于当前阶段目标。'
+        f'Current CEO stage goal: {goal}. '
+        f'Ordinary tool rounds used: {used}/{budget}. '
+        'Every tool call this round must directly serve the current stage goal.'
         f'{reminder}'
     )
 
@@ -131,15 +137,15 @@ def build_ceo_stage_reply_bounce_message(stage_gate: dict[str, Any] | None) -> s
         return ''
     if _stage_has_substantive_progress(active):
         return ''
-    goal = str(active.get('stage_goal') or '').strip() or '（空）'
+    goal = str(active.get('stage_goal') or '').strip() or '(empty)'
     return (
-        '当前 CEO 阶段已创建，但还没有任何真实工具执行结果。'
-        f'阶段目标：{goal}。'
-        '不要只输出口头说明，也不要再次调用 `submit_next_stage`。'
-        '请立即调用一个服务于当前阶段目标的普通工具；'
-        '至少产生一个真实工具回合后，再继续总结或结束。'
-        '如果本轮确实不需要调用任何工具、就是要直接交付最终回复，'
-        '再次直接输出回复文本即可，系统会放行并自动关闭当前阶段。'
+        'The CEO stage was created but no real tool result exists yet. '
+        f'Stage goal: {goal}. '
+        'Do not reply with a verbal explanation only, and do not call `submit_next_stage` again. '
+        'Call an ordinary tool that serves the current stage goal now; '
+        'once at least one real tool round exists, continue with the summary or finish. '
+        'If this round genuinely needs no tool call and is meant to deliver the final reply directly, output the '
+        'reply text again; the runtime lets it through and closes the current stage automatically.'
     )
 
 
@@ -154,12 +160,13 @@ def build_ceo_stage_result_block_message(stage_gate: dict[str, Any] | None) -> s
         return ''
     used = int(active.get('tool_rounds_used') or 0)
     budget = int(active.get('tool_round_budget') or 0)
-    goal = str(active.get('stage_goal') or '').strip() or '（空）'
+    goal = str(active.get('stage_goal') or '').strip() or '(empty)'
     return (
-        f'当前 CEO 阶段工具轮次预算已耗尽：{used}/{budget}。'
-        f'阶段目标：{goal}。'
-        '如需继续调用工具，必须把 `submit_next_stage` 与目标工具同批提交，开启下一阶段；'
-        '如果不再需要调用工具，可以直接输出给用户的最终回复收尾，系统会自动关闭当前阶段。'
+        f'The CEO stage tool-round budget is exhausted: {used}/{budget}. '
+        f'Stage goal: {goal}. '
+        'To keep calling tools, submit `submit_next_stage` in the same batch as the target tool to open the next '
+        'stage; if no more tool calls are needed, output the final reply for the user directly and the runtime '
+        'closes the current stage.'
     )
 
 
@@ -176,73 +183,86 @@ def build_execution_stage_overlay(*, node_kind: str, stage_gate: dict[str, Any])
         if pending:
             pending_counted = sum(1 for item in pending if bool(item.get('budget_counted')))
             pending_note = (
-                f' 你已有 {len(pending)} 轮宽限调用待入账（其中 {pending_counted} 轮会消耗预算），'
-                '下一次 `submit_next_stage` 会把它们并入新阶段并消耗其预算，请在 stage_goal / completed_stage_summary'
-                f' 中涵盖它们，并把 tool_round_budget 设为不小于 {len(pending)} + 后续所需轮数。'
+                f' You already have {len(pending)} grace rounds pending accounting ({pending_counted} of them will '
+                'consume budget); the next `submit_next_stage` merges them into the new stage and charges its '
+                'budget, so cover them in stage_goal / completed_stage_summary and set tool_round_budget to at '
+                f'least {len(pending)} plus the rounds you still need.'
             )
         if normalized_kind == 'acceptance':
             return (
-                '当前没有活动阶段。若需使用工具，必须把 `submit_next_stage` 与目标工具在同一条消息里一起提交'
-                f'（填写清晰的 `stage_goal` 和 {STAGE_TOOL_ROUND_BUDGET_MIN} 到 {STAGE_TOOL_ROUND_BUDGET_MAX} 的 `tool_round_budget`）：'
-                'submit_next_stage 先执行、目标工具随后记入新阶段第一轮并计入其预算。'
-                '单独调用普通工具只会获得一次宽限执行，再次违规将被拦截。'
+                'There is no active stage. If you need tools, submit `submit_next_stage` in the same message as '
+                f'the target tool (write a clear `stage_goal` and a `tool_round_budget` between '
+                f'{STAGE_TOOL_ROUND_BUDGET_MIN} and {STAGE_TOOL_ROUND_BUDGET_MAX}): submit_next_stage runs first, '
+                'then the target tools book the first round of the new stage and count against its budget. '
+                'A lone ordinary tool call only gets one grace pass; the next violation is blocked.'
                 f'{pending_note}'
             )
         return (
-            '当前没有活动阶段。若需使用工具，必须把 `submit_next_stage` 与目标工具在同一条消息里一起提交'
-            f'（填写清晰的 `stage_goal` 和 {STAGE_TOOL_ROUND_BUDGET_MIN} 到 {STAGE_TOOL_ROUND_BUDGET_MAX} 的 `tool_round_budget`）：'
-            'submit_next_stage 先执行、目标工具随后记入新阶段第一轮并计入其预算。'
-            '单独调用普通工具只会获得一次宽限执行，再次违规将被拦截。'
+            'There is no active stage. If you need tools, submit `submit_next_stage` in the same message as '
+            f'the target tool (write a clear `stage_goal` and a `tool_round_budget` between '
+            f'{STAGE_TOOL_ROUND_BUDGET_MIN} and {STAGE_TOOL_ROUND_BUDGET_MAX}): submit_next_stage runs first, '
+            'then the target tools book the first round of the new stage and count against its budget. '
+            'A lone ordinary tool call only gets one grace pass; the next violation is blocked.'
             f'{pending_note}'
         )
     used = int(active.get('tool_rounds_used') or 0)
     budget = int(active.get('tool_round_budget') or 0)
-    goal = str(active.get('stage_goal') or '').strip() or '（空）'
+    goal = str(active.get('stage_goal') or '').strip() or '(empty)'
     final_note = (
-        ' 当前阶段已标记为最终收敛阶段；它不会仅因为预算耗尽而被强制切换，且不得调用 `spawn_child_nodes`。'
+        ' The current stage is marked as the final convergence stage; it is never forced to switch just because '
+        'the budget is exhausted, and `spawn_child_nodes` must not be called on it.'
         if bool(active.get('final_stage'))
         else ''
     )
-    mode = str(active.get('mode') or '').strip() or '自主执行'
-    status = str(active.get('status') or '').strip() or '进行中'
+    mode = str(active.get('mode') or '').strip() or 'autonomous'
+    status = str(active.get('status') or '').strip() or 'in progress'
     if bool(stage_gate.get('transition_required')):
         completed = list(stage_gate.get('completed_stages') or []) if isinstance(stage_gate, dict) else []
         previous = completed[-1] if completed else {}
         previous_budget = int((previous or {}).get('tool_round_budget') or 0)
         if normalized_kind == 'acceptance':
             return (
-                f'当前验收阶段已达到工具轮次预算 {used}/{budget}，阶段目标是：{goal}。'
-                '如需继续使用工具，必须把 `submit_next_stage` 与目标工具同批提交，开启下一验收阶段'
-                f'（同批普通工具将作为新阶段第一轮调用）；创建下一阶段时要结合已检查结果，不能机械重复上一阶段预算 {previous_budget or budget}；'
-                f'如果上一阶段仍未收敛，应根据剩余核验工作适当放大预算，但不能超过 {STAGE_TOOL_ROUND_BUDGET_MAX}。'
-                '单独调用普通工具只会获得一次宽限执行（记为本阶段溢出轮），再次违规将被拦截。'
+                f'The acceptance stage reached its tool-round budget {used}/{budget}. Stage goal: {goal}. '
+                'To keep using tools, submit `submit_next_stage` in the same batch as the target tool to open the '
+                'next acceptance stage (the ordinary tools in that batch run as the new stage first round); when '
+                'creating it, weigh the checks already done and never repeat the previous budget '
+                f'{previous_budget or budget} mechanically; if the previous stage did not converge, raise the '
+                f'budget for the remaining verification work, but never above {STAGE_TOOL_ROUND_BUDGET_MAX}. '
+                'A lone ordinary tool call only gets one grace pass (booked as an overflow round of this stage); '
+                'the next violation is blocked.'
                 f'{_execution_stage_budget_accounting_note(active)}'
             )
         return (
-            f'当前阶段【{mode}】已达到工具轮次预算 {used}/{budget}，阶段目标是：{goal}。'
-            '如需继续使用工具，必须把 `submit_next_stage` 与目标工具同批提交，开启下一阶段'
-            f'（同批普通工具将作为新阶段第一轮调用）；创建下一阶段时要结合总目标和已完成阶段结果，不能机械重复上一阶段预算 {previous_budget or budget}；'
-            f'如果上一阶段仍未收敛，应根据剩余工作适当放大预算，但不能超过 {STAGE_TOOL_ROUND_BUDGET_MAX}。'
-            '单独调用普通工具只会获得一次宽限执行（记为本阶段溢出轮），再次违规将被拦截。'
+            f'The current stage [{mode} | {status}] reached its tool-round budget {used}/{budget}. '
+            f'Stage goal: {goal}. '
+            'To keep using tools, submit `submit_next_stage` in the same batch as the target tool to open the '
+            'next stage (the ordinary tools in that batch run as the new stage first round); when creating it, '
+            'weigh the overall goal and the completed stage results and never repeat the previous budget '
+            f'{previous_budget or budget} mechanically; if the previous stage did not converge, raise the budget '
+            f'for the remaining work, but never above {STAGE_TOOL_ROUND_BUDGET_MAX}. '
+            'A lone ordinary tool call only gets one grace pass (booked as an overflow round of this stage); '
+            'the next violation is blocked.'
             f'{_execution_stage_budget_accounting_note(active)}'
         )
     if normalized_kind == 'acceptance':
         return (
-            f'当前验收阶段【{status}】目标：{goal}。'
-            f'当前普通工具轮次使用 {used}/{budget}。'
-            '除创建新阶段外，其余所有思考、工具调用和验收裁定都必须只服务于当前阶段目标。'
+            f'Current acceptance stage [{status}] goal: {goal}. '
+            f'Ordinary tool rounds used {used}/{budget}. '
+            'All reasoning, tool calls and acceptance verdicts except opening a new stage must serve the current '
+            'stage goal.'
             f'{_execution_stage_budget_accounting_note(active)}'
         )
     reminder = ''
     if not _stage_has_substantive_progress(active):
         reminder = (
-            ' 当前阶段尚未产生任何实质执行回合；'
-            '不要再次调用 `submit_next_stage`，必须先执行普通工具或派生子节点。'
+            ' The current stage has produced no substantive execution round yet; do not call '
+            '`submit_next_stage` again — run an ordinary tool or spawn child nodes first.'
         )
     return (
-        f'当前阶段【{mode} | {status}】目标：{goal}。'
-        f'当前普通工具轮次使用 {used}/{budget}。'
-        '除创建新阶段外，其余所有思考、工具调用和派生行为都必须只服务于当前阶段目标。'
+        f'Current stage [{mode} | {status}] goal: {goal}. '
+        f'Ordinary tool rounds used {used}/{budget}. '
+        'All reasoning, tool calls and spawning behaviour except opening a new stage must serve the current '
+        'stage goal.'
         f'{_execution_stage_budget_accounting_note(active)}'
         f'{reminder}'
     )
@@ -257,22 +277,24 @@ def build_execution_stage_result_block_message(*, node_kind: str, stage_gate: di
     if not bool(stage_gate.get('has_active_stage')):
         if normalized_kind == 'acceptance':
             return (
-                '当前验收节点还没有创建第一个阶段。若需使用工具，请把 `submit_next_stage` 与目标工具同批提交'
-                '创建验收阶段，再继续验证或输出验收结论，不要直接结束节点。'
+                'This acceptance node has not created its first stage yet. If you need tools, submit '
+                '`submit_next_stage` in the same batch as the target tool to create an acceptance stage, then keep '
+                'verifying or output the acceptance verdict; do not end the node directly.'
             )
         return (
-            '当前节点还没有创建第一个阶段。若需使用工具，请把 `submit_next_stage` 与目标工具同批提交'
-            '创建阶段，再继续推进，不要直接结束节点。'
+            'This node has not created its first stage yet. If you need tools, submit `submit_next_stage` in the '
+            'same batch as the target tool to create a stage, then keep advancing; do not end the node directly.'
         )
     if bool(stage_gate.get('transition_required')):
         if normalized_kind == 'acceptance':
             return (
-                '当前验收阶段预算已经耗尽。若需继续使用工具，请把 `submit_next_stage` 与目标工具同批提交'
-                '创建下一阶段，再继续验证或输出验收结论。'
+                'The current acceptance stage budget is exhausted. To keep using tools, submit '
+                '`submit_next_stage` in the same batch as the target tool to create the next stage, then keep '
+                'verifying or output the acceptance verdict.'
             )
         return (
-            '当前阶段预算已经耗尽。若需继续使用工具，请把 `submit_next_stage` 与目标工具同批提交'
-            '创建下一阶段，再继续推进或交付结果。'
+            'The current stage budget is exhausted. To keep using tools, submit `submit_next_stage` in the same '
+            'batch as the target tool to create the next stage, then keep advancing or deliver the result.'
         )
     return ''
 
@@ -291,23 +313,26 @@ def build_node_plain_text_reply_block_message(*, node_kind: str, stage_gate: dic
     if not bool(stage_gate.get('has_active_stage')) or bool(stage_gate.get('transition_required')):
         return ''
     active = stage_gate.get('active_stage') if isinstance(stage_gate.get('active_stage'), dict) else {}
-    goal = str(active.get('stage_goal') or '').strip() or '（空）'
-    mode = str(active.get('mode') or '').strip() or '自主执行'
-    status = str(active.get('status') or '').strip() or '进行中'
+    goal = str(active.get('stage_goal') or '').strip() or '(empty)'
+    mode = str(active.get('mode') or '').strip() or 'autonomous'
+    status = str(active.get('status') or '').strip() or 'in progress'
     used = int(active.get('tool_rounds_used') or 0)
     budget = int(active.get('tool_round_budget') or 0)
     work = (
-        '调用普通工具继续核验当前验收标准'
+        'call ordinary tools to keep verifying the acceptance criteria'
         if normalized_kind == 'acceptance'
-        else '调用普通工具（必要时派生子节点）继续推进本阶段目标'
+        else 'call ordinary tools (spawn child nodes if needed) to keep advancing the stage goal'
     )
     return (
-        '本轮只输出了纯文本、没有调用任何工具，运行时不把它当成交付，也不会替你再提交一次。'
-        f'当前阶段【{mode} | {status}】目标：{goal}，普通工具轮次使用 {used}/{budget}。'
-        f'下一步只能是三选一：{work}；'
-        '目标已完成就调用 `submit_final_result` 正式提交（`status`/`answer`/`evidence` 全部写进工具参数）；'
-        '需要新一轮工作就把 `submit_next_stage` 与目标工具同批提交开启下一阶段。'
-        '把计划、进度说明或"接下来我要做什么"写在正文里不构成任何提交。'
+        'This round output plain text with no tool call. The runtime does not treat it as a delivery and will not '
+        'submit anything on your behalf. '
+        f'Current stage [{mode} | {status}] goal: {goal}, ordinary tool rounds used {used}/{budget}. '
+        f'The next step is exactly one of three: {work}; '
+        'if the goal is done, call `submit_final_result` to submit properly (put `status`, `answer` and '
+        '`evidence` all in the tool arguments); '
+        'if new work is needed, submit `submit_next_stage` in the same batch as the target tool to open the next '
+        'stage. '
+        'Writing plans, progress notes or "what I will do next" into the reply body counts as no submission at all.'
     )
 
 

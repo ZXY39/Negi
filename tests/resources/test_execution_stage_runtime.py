@@ -2545,7 +2545,7 @@ def test_execution_stage_overlay_warns_before_zero_progress_stage_switch() -> No
     )
 
     assert overlay is not None
-    assert '不要再次调用 `submit_next_stage`' in overlay
+    assert 'do not call `submit_next_stage` again' in overlay
 
 
 def test_execution_stage_overlay_exposes_budget_accounting_rules_and_latest_round_status() -> None:
@@ -2578,7 +2578,7 @@ def test_execution_stage_overlay_exposes_budget_accounting_rules_and_latest_roun
     )
 
     assert overlay is not None
-    assert '预算记账由系统决定' in overlay
+    assert 'Budget accounting is decided by the runtime' in overlay
     assert '`budget_counted`' in overlay
     assert '`tool_rounds_used`' in overlay
     assert '`submit_next_stage`' in overlay
@@ -2586,7 +2586,7 @@ def test_execution_stage_overlay_exposes_budget_accounting_rules_and_latest_roun
     assert '`spawn_child_nodes`' in overlay
     assert '`load_tool_context`' in overlay
     assert '`load_skill_context`' in overlay
-    assert '第 2 轮' in overlay
+    assert 'The latest round is round 2' in overlay
     assert 'budget_counted=true' in overlay
 
 
