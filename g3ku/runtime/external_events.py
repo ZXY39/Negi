@@ -26,6 +26,8 @@ from dataclasses import dataclass
 from datetime import datetime
 from typing import Any, Awaitable, Callable
 
+from loguru import logger
+
 from g3ku.config.live_runtime import get_runtime_config
 from g3ku.core.events import AgentEvent
 from g3ku.runtime.bridge import cli_event_text
@@ -267,7 +269,17 @@ def make_session_event_relay(
                             attachments=attachments or None,
                             event=REPLY_EVENT,
                         )
-                    except Exception:
+                    except Exception as exc:
+                        # 账本失败绝不能吃掉这条发布：回复退回仅内存投递（与 drain 侧
+                        # 同一降级语义）。但降级本身要留痕——没有这行日志，"渠道为什么
+                        # 没收到这句"只能靠猜。
+                        logger.warning(
+                            "external outbox registration failed, reply falls back to memory "
+                            "delivery: session={} turn={} error={}",
+                            session_key,
+                            turn_id,
+                            exc,
+                        )
                         outbox_id = ""
                     if outbox_id:
                         final_payload["outbox_id"] = outbox_id
@@ -292,8 +304,17 @@ def make_session_event_relay(
                 hub.publish("progress", turn_id=turn_id, kind="tool_error", text=f"⚠️ {text}")
             elif kind in {"progress", "analysis"}:
                 hub.publish("progress", turn_id=turn_id, kind="milestone", text=text)
-        except Exception:
+        except Exception as exc:
             # Relays run on the session event dispatch path: never block, never raise.
+            # 不抛不等于不留痕：这一趟吞掉的正是"渠道始终没收到那句回答"的唯一现场，
+            # 包括 reply.final 与它的账本登记，事后没有任何读数可查。
+            logger.warning(
+                "external relay dropped event type={} session={} turn={} error={}",
+                str(getattr(event, "type", "") or ""),
+                session_key,
+                turn_id,
+                exc,
+            )
             return
 
     return relay

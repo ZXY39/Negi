@@ -431,3 +431,39 @@ def test_internal_turn_completion_stops_the_rehydrate_resurrection_loop():
 
     reopened = _build_agent(_FakePersistedSession(session.messages))
     assert reopened._state.queued_follow_up_messages == [], "退役后不再被当作未回答消息重投"
+
+
+def test_pending_user_persistence_failure_leaves_a_visible_log() -> None:
+    """用户行没写进转录是一次可见的降级，不是 debug 噪声。
+
+    这一趟吞掉的是"用户说过的那句话在转录里不存在"，事后按 session_key 查日志要能查到
+    原因；同级车道（暂停归档）本来就发 `persistence_warning`。
+    """
+    import asyncio
+
+    from loguru import logger
+
+    from g3ku.runtime.session_agent import RuntimeAgentSession
+
+    def _boom(_key):
+        raise RuntimeError("session store down")
+
+    agent = SimpleNamespace(
+        _state=SimpleNamespace(session_key="web:ceo-log"),
+        _history_text=lambda content: str(content or ""),
+        _loop=SimpleNamespace(sessions=SimpleNamespace(get_or_create=_boom, save=lambda _s: None)),
+    )
+    records: list[str] = []
+    sink_id = logger.add(lambda message: records.append(str(message)), level="WARNING")
+    try:
+        asyncio.run(
+            RuntimeAgentSession._persist_pending_user_messages(
+                agent, user_inputs=[UserInputMessage(content="这句要留在转录里")]
+            )
+        )
+    finally:
+        logger.remove(sink_id)
+
+    joined = " ".join(records)
+    assert "Pending transcript persistence skipped for web:ceo-log" in joined
+    assert "session store down" in joined

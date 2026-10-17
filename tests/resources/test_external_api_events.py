@@ -355,3 +355,58 @@ async def test_sse_emits_an_event_published_at_the_subscribe_boundary_only_once(
 
     assert len(data_lines) == 1, data_lines
     assert '"reply.final"' in data_lines[0]
+
+
+@pytest.mark.asyncio
+async def test_relay_logs_an_event_it_cannot_map_and_still_returns(clean_hubs, monkeypatch) -> None:
+    """中继不许抛，但"不抛"不等于"没发生过"。
+
+    这一趟吞掉的正是"渠道始终没收到那句回答"的唯一现场（reply.final 与它的账本登记
+    一起没了），所以降级必须带可查的落点。
+    """
+    from loguru import logger
+
+    from g3ku.runtime import external_events
+
+    def _boom(_text: str) -> str:
+        raise RuntimeError("media rewrite exploded")
+
+    monkeypatch.setattr(external_events, "sanitize_channel_outbound_text", _boom)
+    session_key = "ext:test-bridge:relay-raises"
+    relay = make_session_event_relay(session_key, turn_id="t-raise")
+
+    records: list[str] = []
+    sink_id = logger.add(lambda message: records.append(str(message)), level="WARNING")
+    try:
+        await relay(AgentEvent(type="message_end", payload={"text": "正文", "source": "user"}))
+    finally:
+        logger.remove(sink_id)
+
+    assert get_session_event_hub(session_key).replay(0) == []
+    joined = " ".join(records)
+    assert "external relay dropped event" in joined
+    assert "message_end" in joined and session_key in joined and "t-raise" in joined
+
+
+@pytest.mark.asyncio
+async def test_outbox_registration_failure_still_publishes_and_says_so(clean_hubs, monkeypatch) -> None:
+    """账本登记失败要让回复照发，但要把降级说出来。"""
+    from loguru import logger
+
+    from g3ku.runtime import external_events
+
+    session_key = "ext:test-bridge:relay-outbox-fails"
+    monkeypatch.setattr(external_events, "record_outbound_message", lambda **kwargs: (_ for _ in ()).throw(RuntimeError("store down")))
+    relay = make_session_event_relay(session_key, turn_id="t-outbox", external_key="qq:dm:1")
+
+    records: list[str] = []
+    sink_id = logger.add(lambda message: records.append(str(message)), level="WARNING")
+    try:
+        await relay(AgentEvent(type="message_end", payload={"text": "这是回答", "source": "user"}))
+    finally:
+        logger.remove(sink_id)
+
+    events = get_session_event_hub(session_key).replay(0)
+    assert [event["type"] for event in events] == ["reply.final"]
+    assert "outbox_id" not in events[0]
+    assert any("external outbox registration failed" in line for line in records)

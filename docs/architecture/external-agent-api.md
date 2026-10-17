@@ -87,6 +87,8 @@
 
 出站附件契约（`reply.final` 与 `outbound.created` 通用）：正文中以 markdown 链接/图片语法引用、且解析为**存在的本地文件**的条目，在事件发布前被提取为 `attachments` 数组项 `{name, mime_type, size, url}`——`url` 是根相对的签名媒体链接（`/api/ceo/media/original?token=...`，24h 时效，桥按自己的服务端 origin 拼绝对地址下载），原 markdown 标记在正文中替换为其标签文本（无标签用文件名）。单条事件最多提取 4 个附件（超出与重复路径保留原样，走签名改写成为可点击兜底链接）。**仅** markdown 引用触发，裸路径不提取——桥收到 `attachments` 时应作为真实文件/图片消息投递，投递失败的条目降级为签名链接文本行（详见「内置官方 QQ 适配器」与桥自身文档）。普通回合的 `reply.final` 在 relay 侧提取；`outbound.created` 在出站 drain 统一提取（见「出站路由（主动推送）」）。
 
+中继的失败合同：`make_session_event_relay` 跑在会话事件分发路径上，永不阻塞、永不外抛，但**每一次吞事件都留下一行 WARNING**，带 `type`/`session`/`turn`——被吞掉的正是「渠道始终没收到那句回答」的唯一现场（`reply.final` 与它的账本登记一起没落）。账本登记失败是另一条独立降级：回复照发，只是不带 `outbox_id`，并单独打一行「falls back to memory delivery」。
+
 ## 6. 出站路由（主动推送）
 
 - 投向 `channel="ext"` 的运行时侧消息有两类生产者——会话键为 `ext:` 的 heartbeat/cron/task-terminal 回复（`_notify_heartbeat_channel_reply` 的 ext 分支），以及回合终态失败通知（判据与门件见「回合契约」终态不变量）——两者都经 `publish_channel_notice(bus, session_key, text, source=...)` 发布 `OutboundMessage(channel="ext", chat_id=<ext session key>)`：这条消息形状只在这一处构造，drain 只认 `chat_id` 是会话键还是 external_key（`_derive_session_channel_chat` 对 ext 键保留完整会话键为 chat_id），`source` 只进 metadata 供日志辨认来源。cron 零改动（payload `channel="ext"`、`to=<session key>` 即达）。失败通知走这条车道的理由是可达性而不是省事：`turn.failed` 是只进内存 hub 的瞬时事件，而这条车道自带清洗、账本登记、`outbox_id` 去重与重连重放。

@@ -2058,8 +2058,10 @@ class RuntimeAgentSession:
                     route_kind="",
                 )
             self._loop.sessions.save(persisted_session)
-        except Exception:
-            logger.debug("Pending transcript persistence skipped for {}", self._state.session_key)
+        except Exception as exc:
+            logger.warning(
+                "Pending transcript persistence skipped for {}: {}", self._state.session_key, exc
+            )
         return persisted_session
 
     async def _persist_internal_prompt_messages(
@@ -2161,8 +2163,10 @@ class RuntimeAgentSession:
                         },
                     )
             self._loop.sessions.save(persisted_session)
-        except Exception:
-            logger.debug("Internal prompt transcript persistence skipped for {}", self._state.session_key)
+        except Exception as exc:
+            logger.warning(
+                "Internal prompt transcript persistence skipped for {}: {}", self._state.session_key, exc
+            )
         return persisted_session
 
     @staticmethod
