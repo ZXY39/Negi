@@ -11,7 +11,11 @@ from loguru import logger
 
 from g3ku.core.events import AgentEvent
 from g3ku.core.messages import UserInputMessage
-from g3ku.heartbeat.prompt_lane import build_heartbeat_prompt_lane, format_local_timestamp
+from g3ku.heartbeat.prompt_lane import (
+    build_heartbeat_prompt_lane,
+    format_local_timestamp,
+    shutdown_resume_lines,
+)
 from g3ku.heartbeat.session_events import SessionHeartbeatEvent, SessionHeartbeatEventQueue
 from g3ku.heartbeat.session_wake import SessionHeartbeatWakeQueue
 from g3ku.runtime.frontdoor.canonical_context import ui_canonical_context_delta
@@ -963,8 +967,7 @@ class WebSessionHeartbeatService:
             payload = dict(event.payload or {})
             reason = str(event.reason or "").strip().lower()
             if reason == "shutdown_resume":
-                lines.append("- Session resumed automatically after the project process restarted")
-                lines.append("  Complete the user's previously interrupted request now.")
+                lines.extend(shutdown_resume_lines())
                 continue
             if reason == "task_stall":
                 task_id = str(payload.get("task_id") or "").strip()

@@ -562,6 +562,18 @@ def _task_distribution_skipped_lines(
     return lines
 
 
+def shutdown_resume_lines() -> list[str]:
+    """停机重启后的唤醒文本：接着做上一条被打断的请求，而不是宣布任务收尾。
+
+    两个载体（`session_service` 的提示词构造与这里的事件束）必须印同一句话——
+    事件束没有这一支时会落到终态渲染，模型读到的是"任务已完成"。
+    """
+    return [
+        "- Session resumed automatically after the project process restarted",
+        "  Complete the user's previously interrupted request now.",
+    ]
+
+
 def _event_bundle_content(
     events: list[dict[str, Any]],
     *,
@@ -598,6 +610,9 @@ def _event_bundle_content(
                     event, retrieval_parts, output_inline_limit=output_inline_limit, externalizer=externalizer
                 )
             )
+            continue
+        if reason == "shutdown_resume":
+            lines.extend(shutdown_resume_lines())
             continue
         lines.extend(
             _task_terminal_lines(

@@ -468,3 +468,29 @@ def test_failure_class_line_carries_no_action_sentences() -> None:
         for banned in ("resume", "无效", "重启", "请先", "必须", "建议"):
             assert banned not in line, f"{marker} → {line}"
     assert "重启 worker" in _runtime_fault_class("runtime_fault:submit_next_stage:NameError: x")
+
+
+def test_shutdown_resume_wake_does_not_render_as_a_completed_task() -> None:
+    """停机重启的唤醒落在终态渲染那一步，模型读到的是"Task task () completed"——
+    接着做上一条被打断的请求被换成了宣布任务收工。"""
+    from pathlib import Path
+
+    from g3ku.heartbeat.prompt_lane import build_heartbeat_prompt_lane
+
+    lane = build_heartbeat_prompt_lane(
+        provider_model="openai:gpt-4.1",
+        stable_rules_text="Keep the user informed.",
+        events=[{"reason": "shutdown_resume", "session_id": "web:shared"}],
+    )
+
+    bundle = str(_field(lane, "event_bundle_text") or "")
+    assert "resumed automatically after the project process restarted" in bundle
+    assert "Complete the user's previously interrupted request now." in bundle
+    assert "completed" not in bundle.lower().replace("resume", "")
+
+    # 这句文案只有一个作者：提示词构造那一路必须调用同一份 helper。
+    service = (
+        Path(__file__).resolve().parents[2] / "g3ku" / "heartbeat" / "session_service.py"
+    ).read_text(encoding="utf-8")
+    assert "shutdown_resume_lines()" in service
+    assert "Session resumed automatically" not in service
