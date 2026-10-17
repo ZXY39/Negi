@@ -121,16 +121,18 @@ def test_installer_is_bom_free_so_the_one_line_channel_parses() -> None:
         assert not (REPO_ROOT / name).read_bytes().startswith(BOM), name
 
 
-def test_installer_keeps_non_ascii_inside_comments_only() -> None:
-    # Without a BOM the download is decoded by whatever code page the client
-    # picks; measured clean under UTF-8, cp936 and latin-1 while non-ASCII stays
-    # in comments. A non-ASCII *string literal* would turn into mojibake at run
-    # time, so install.ps1 must stay ASCII outside comments.
-    lines = _read("install.ps1").splitlines()
+def test_installer_is_pure_ascii() -> None:
+    # Without a BOM, PowerShell 5.1 reads a script file in the machine's ANSI code
+    # page. A Chinese comment then decodes into bytes that can end with a backtick,
+    # which is a line continuation: the comment silently swallows the next
+    # statement. That is how Install-CodeInto lost its `$stageRoot` assignment and
+    # a fresh install died with "variable is not defined" - and it parses clean, so
+    # only running it (or keeping the file ASCII) catches it.
+    lines = (REPO_ROOT / "install.ps1").read_bytes().split(b"\n")
     offenders = [
-        (number, line.strip()[:60])
+        (number, line.decode("utf-8", "replace")[:70])
         for number, line in enumerate(lines, start=1)
-        if not line.isascii() and not line.lstrip().startswith("#")
+        if any(byte > 127 for byte in line)
     ]
     assert offenders == [], offenders
 

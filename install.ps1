@@ -126,8 +126,9 @@ function Get-CheckoutStage {
 
 function Install-CodeInto {
     param([string]$Root, [switch]$KeepProtected, [switch]$Archive)
-    # 代码一律先落到临时目录再逐顶层合并：`git clone` 对着一个非空目录（保留数据
-    # 后重装的 .g3ku 就算非空）直接 fatal，装不上也谈不上认领。
+    # Code always lands in a staging directory first and is merged top-level:
+    # `git clone` refuses a non-empty target, and a keep-data uninstall leaves
+    # exactly that (a directory holding only .g3ku).
     $stageRoot = Join-Path ([System.IO.Path]::GetTempPath()) ('negi-stage-' + [Guid]::NewGuid().ToString('N'))
     try {
         New-Item -ItemType Directory -Force -Path $stageRoot | Out-Null
@@ -141,12 +142,15 @@ function Install-CodeInto {
 
 function Update-GitCheckout {
     param([string]$Root)
-    # 只看跟踪文件的**内容**差异：未跟踪项（用户装的 skill、桥接产物、本地脚本）在任何
-    # 正常设备上都不可能为空，算进脏就把升级永久拒死。判据用 diff 而不是 status ——
-    # autocrlf 设备上 git 检出 CRLF、运行时写回 LF，status 把这种字节相同的行尾差报成
-    # 已修改（实测 blob 哈希一致），diff 归一后判无变化；--cached 补住只暂存的改动。
-    # PS 5.1 在 'Stop' 下会把原生命令的 stderr 提成终止性错误，而 git 在这种树上报的
-    # 正是 stderr 警告；照 Invoke-Checked 的做法放宽，只认退出码。
+    # Only content differences of tracked files count: untracked entries (market
+    # skills, bridge artifacts, local scripts) are never empty on a real device, so
+    # counting them would refuse every upgrade. The check uses diff, not status --
+    # on autocrlf devices git checks out CRLF while the runtime writes LF back, and
+    # status reports that byte-identical line-ending difference as modified (measured:
+    # same blob hash); diff normalizes and calls it clean. --cached covers staged-only
+    # edits. PS 5.1 under 'Stop' promotes a native command's stderr to a terminating
+    # error, and git warns on exactly this kind of tree; relax it like Invoke-Checked
+    # does and trust only the exit code.
     $savedPreference = $ErrorActionPreference
     $ErrorActionPreference = 'Continue'
     try {
@@ -186,9 +190,10 @@ function Update-Code {
         return
     }
     New-Item -ItemType Directory -Force -Path $Root | Out-Null
-    if (Test-Path (Join-Path $Root '.g3ku' 'config.json')) {
-        # 卸载时选择"保留数据"的设备：代码没了、口令与任务还在原地，这次装回来
-        # 直接认领，不重新初始化项目。
+    if (Test-Path (Join-Path $Root '.g3ku\config.json')) {
+        # A device whose uninstall kept its data: the code is gone but the
+        # passphrase, sessions and tasks are still here, so adopt them instead of
+        # initializing a second project.
         Write-Step "adopting the data root already present at $Root (config, sessions and keys kept)"
     }
     Install-CodeInto -Root $Root
