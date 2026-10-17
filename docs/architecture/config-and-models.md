@@ -277,6 +277,7 @@ Leader（CEO/frontdoor）解析本轮模型引用时按三档取值，顺序固�
 - `config.json` 里会保留结构性配置
 - 真正 secret 通过 bootstrap security overlay 管理
 - `LLMConfigFacade` 存 record 时会清洗掉明文 secret，再把 secret 写入 overlay
+- 脱敏读面（`GET /api/llm/configs/{id}` 的默认视图、绑定行、runtime config 导出、`_redact_config`）与写回闸门共用 `g3ku/llm_config/export.py` 的 `MASKED_SECRET_VALUE` 一个常量：那个值是"这次没改密钥"的哨兵，不是要落盘的内容。出现第二个掩码字面量时，把脱敏记录读回来再 PUT 回去的调用方会把明文 key 覆盖成掩码字符串本身。
 
 所以：
 

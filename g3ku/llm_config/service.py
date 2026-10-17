@@ -6,8 +6,10 @@ from uuid import uuid4
 
 import httpx
 
+from g3ku.utils.api_keys import parse_api_keys
+
 from .exceptions import ProbeFailedError, ValidationFailedError
-from .export import to_generic_runtime_config
+from .export import MASKED_SECRET_VALUE, to_generic_runtime_config
 from .form_schema import build_form_spec
 from .models import (
     APIKeyMaxConcurrencyProbeItem,
@@ -26,7 +28,6 @@ from .normalization import normalize_draft
 from .probe_strategies import list_config_models, probe_config, probe_config_for_concurrency
 from .repositories import EncryptedConfigRepository
 from .template_registry import TemplateRegistry
-from g3ku.utils.api_keys import parse_api_keys
 
 _MAX_CONCURRENCY_PROBE_LEVELS = (1, 2, 4, 8, 16, 32)
 _MAX_CONCURRENCY_PARALLEL_KEYS = 1
@@ -36,7 +37,7 @@ _MAX_CONCURRENCY_REQUEST_FANOUT = 8
 def _redact_config(config: NormalizedProviderConfig) -> NormalizedProviderConfig:
     redacted_auth = dict(config.auth)
     if "api_key" in redacted_auth:
-        redacted_auth["api_key"] = "***"
+        redacted_auth["api_key"] = MASKED_SECRET_VALUE
     return config.model_copy(update={"auth": redacted_auth})
 
 

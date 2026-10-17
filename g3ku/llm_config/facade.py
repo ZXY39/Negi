@@ -9,7 +9,7 @@ from typing import Any
 from uuid import uuid4
 
 from g3ku.config.schema import normalize_reasoning_effort
-from g3ku.llm_config.export import to_generic_runtime_config
+from g3ku.llm_config.export import MASKED_SECRET_VALUE, to_generic_runtime_config
 from g3ku.llm_config.models import (
     GenericRuntimeConfig,
     ModelBindingDraft,
@@ -28,8 +28,6 @@ from g3ku.utils.api_keys import (
     resolve_api_key_concurrency_layout,
 )
 from g3ku.utils.retry_keywords import DEFAULT_RETRY_ON_KEYWORDS, split_retry_keywords
-
-MASKED_SECRET_VALUE = "********"
 
 
 def _runtime_model_parameters(parameters: dict[str, Any] | None) -> dict[str, Any]:
@@ -163,7 +161,7 @@ class LLMConfigFacade:
         if not include_secrets:
             auth = dict(record.auth)
             api_key = str(auth.get("api_key", "") or "")
-            auth["api_key"] = "***" if api_key else ""
+            auth["api_key"] = MASKED_SECRET_VALUE if api_key else ""
             record = record.model_copy(update={"auth": auth, "headers": {}})
         return record.model_dump(mode="json")
 
