@@ -636,12 +636,16 @@ def _write_manifest(path: Path, payload: dict[str, object]) -> None:
     static = {key: value for key, value in payload.items() if key not in _PROBE_MANIFEST_KEYS}
     probe = {key: value for key, value in payload.items() if key in _PROBE_MANIFEST_KEYS}
 
+    text = json.dumps(static, ensure_ascii=False, indent=2) + "\n"
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(
-        json.dumps(static, ensure_ascii=False, indent=2) + "\n",
-        encoding="utf-8",
-        newline="\n",
-    )
+    try:
+        on_disk = path.read_bytes()
+    except OSError:
+        on_disk = b""
+    # 字节没变就不碰这个文件。autocrlf 设备上 git 检出的是 CRLF，而这里落 LF，一次
+    # 空重写就把跟踪文件变成"内容相同、状态已脏"，升级守卫随即 0 秒拒掉整次升级。
+    if on_disk.replace(b"\r\n", b"\n") != text.encode("utf-8"):
+        path.write_text(text, encoding="utf-8", newline="\n")
 
     if not probe:
         return

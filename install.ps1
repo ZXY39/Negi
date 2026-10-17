@@ -141,10 +141,24 @@ function Install-CodeInto {
 
 function Update-GitCheckout {
     param([string]$Root)
-    # 只看跟踪文件的改动。未跟踪项（用户装的 skill、桥接产物、本地脚本）在任何
-    # 正常设备上都不可能为空，把它们算成"脏"会让升级永久被拒。
-    $dirty = (& git -C $Root status --porcelain --untracked-files=no 2>$null)
-    if ($dirty) {
+    # 只看跟踪文件的**内容**差异：未跟踪项（用户装的 skill、桥接产物、本地脚本）在任何
+    # 正常设备上都不可能为空，算进脏就把升级永久拒死。判据用 diff 而不是 status ——
+    # autocrlf 设备上 git 检出 CRLF、运行时写回 LF，status 把这种字节相同的行尾差报成
+    # 已修改（实测 blob 哈希一致），diff 归一后判无变化；--cached 补住只暂存的改动。
+    # PS 5.1 在 'Stop' 下会把原生命令的 stderr 提成终止性错误，而 git 在这种树上报的
+    # 正是 stderr 警告；照 Invoke-Checked 的做法放宽，只认退出码。
+    $savedPreference = $ErrorActionPreference
+    $ErrorActionPreference = 'Continue'
+    try {
+        & git -C $Root diff --quiet --ignore-cr-at-eol 2>$null
+        $worktreeDirty = ($LASTEXITCODE -ne 0)
+        & git -C $Root diff --cached --quiet --ignore-cr-at-eol 2>$null
+        $stagedDirty = ($LASTEXITCODE -ne 0)
+    }
+    finally {
+        $ErrorActionPreference = $savedPreference
+    }
+    if ($worktreeDirty -or $stagedDirty) {
         Write-Error "[install] $Root has local edits to tracked files; commit or discard them before upgrading"
     }
     Write-Step "git fetch --depth 1 origin $Ref"

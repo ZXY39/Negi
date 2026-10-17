@@ -128,11 +128,76 @@ async def test_status_endpoint_exposes_ledger(monkeypatch, tmp_path: Path):
     item = _status_payload_with(
         monkeypatch,
         tmp_path,
-        {"checked_at": "2026-09-25T17:45:04+08:00", "current_version": "1.0.1", "latest_tag": "v1.0.2", "newer": True, "source": "auto", "error": ""},
+        {"checked_at": "2026-09-25T17:45:04+08:00", "current_version": "1.0.1", "latest_tag": "v99.0.0", "newer": True, "source": "auto", "error": ""},
     )
     assert item["has_ledger"] is True
     assert item["newer"] is True
-    assert item["latest_tag"] == "v1.0.2"
+    assert item["latest_tag"] == "v99.0.0"
+
+
+async def test_status_newer_is_recomputed_against_the_live_version(monkeypatch, tmp_path: Path):
+    """升级成功后红点必须自己灭：台账存的 `newer` 是检查那一刻的结论，不许照抄。
+
+    实盘 01:00：升到 v2.4.1 的执行体 ok 落地后，`/api/update/status` 仍回
+    newer=true，红点挂到下一次检查（自动道要等满 5 小时间隔）才消失。
+    """
+    from g3ku import __version__
+    from g3ku.update_check import read_update_ledger
+
+    item = _status_payload_with(
+        monkeypatch,
+        tmp_path,
+        {
+            "checked_at": "2026-10-18T00:56:12+08:00",
+            "current_version": "2.4.0",
+            "latest_tag": f"v{__version__}",
+            "newer": True,
+            "source": "manual",
+            "error": "",
+        },
+    )
+    assert item["current_version"] == __version__
+    assert item["latest_tag"] == f"v{__version__}"
+    assert item["newer"] is False, "装的就是这个标签了，红点不许再亮"
+    # 台账字段本身不动：它回答的是"上次检查看到了什么"。
+    assert read_update_ledger()["newer"] is True
+
+
+def test_startup_banner_uses_the_same_live_judgement(monkeypatch, tmp_path: Path, capsys):
+    """升级完再启动，横幅不许继续喊"发现新版本（当前 v旧版本）"。
+
+    实盘 01:00 那台升到 v2.4.1 后重启，console.log 里仍然印着"发现新版本 v2.4.1
+    （当前 v2.4.0）"——同一个陈旧结论的第二处读数。
+    """
+    from g3ku import __version__
+    from g3ku.update_check import write_update_ledger
+    from g3ku.web.launcher import _print_update_reminder
+
+    ledger_file = tmp_path / "update-check.json"
+    monkeypatch.setattr("g3ku.update_check.ledger_path", lambda: ledger_file)
+
+    def _write(latest_tag: str) -> None:
+        write_update_ledger(
+            {
+                "checked_at": "2026-10-18T00:56:12+08:00",
+                "current_version": "2.4.0",
+                "latest_tag": latest_tag,
+                "newer": True,
+                "source": "manual",
+                "error": "",
+            },
+            ledger_file,
+        )
+
+    _write(f"v{__version__}")
+    _print_update_reminder()
+    assert capsys.readouterr().out == "", "装的已经是这个标签，横幅必须安静"
+
+    _write("v99.0.0")
+    _print_update_reminder()
+    printed = capsys.readouterr().out
+    assert "v99.0.0" in printed
+    assert f"当前 v{__version__}" in printed, "括号里要印活版本，不是台账存的旧结论"
 
 
 class _FakeURL:
@@ -229,12 +294,12 @@ async def test_apply_upgrades_to_the_fresh_tag_not_the_stale_ledger(monkeypatch,
     monkeypatch.setattr(
         update_api,
         "run_update_check",
-        lambda **kwargs: {"latest_tag": "v1.0.10", "newer": True, "error": ""},
+        lambda **kwargs: {"latest_tag": "v99.0.0", "newer": True, "error": ""},
     )
 
     result = await update_api.update_apply(_FakeRequest(18999), {})
-    assert result["item"]["ref"] == "v1.0.10"
-    assert spawned == ["v1.0.10"]
+    assert result["item"]["ref"] == "v99.0.0"
+    assert spawned == ["v99.0.0"]
 
 
 async def test_apply_refuses_when_the_live_check_returns_nothing(monkeypatch, tmp_path: Path):

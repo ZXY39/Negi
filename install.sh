@@ -169,9 +169,14 @@ copy_checkout_into_root() {
 }
 
 update_git_checkout() {
-  # 只看跟踪文件的改动。未跟踪项（用户装的 skill、桥接产物、本地脚本）在任何
-  # 正常设备上都不可能为空，把它们算成"脏"会让升级永久被拒。
-  if [ -n "$(git -C "$DIR" status --porcelain --untracked-files=no)" ]; then
+  # 只看跟踪文件的**内容**差异：未跟踪项（用户装的 skill、桥接产物、本地脚本）在任何
+  # 正常设备上都不可能为空，算进脏就把升级永久拒死。判据用 diff 而不是 status ——
+  # autocrlf 设备上 git 检出 CRLF、运行时写回 LF，status 把这种字节相同的行尾差报成
+  # 已修改（实测 blob 哈希一致），diff 归一后判无变化；--cached 补住只暂存的改动。
+  TRACKED_DIRTY=0
+  git -C "$DIR" diff --quiet --ignore-cr-at-eol || TRACKED_DIRTY=1
+  git -C "$DIR" diff --cached --quiet --ignore-cr-at-eol || TRACKED_DIRTY=1
+  if [ "$TRACKED_DIRTY" -ne 0 ]; then
     fail "$DIR has local edits to tracked files; commit or discard them before upgrading"
   fi
   log "git fetch --depth 1 origin $REF"

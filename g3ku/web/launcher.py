@@ -1,7 +1,7 @@
 from __future__ import annotations
 
-import atexit
 import asyncio
+import atexit
 import json
 import os
 import secrets
@@ -18,8 +18,8 @@ from g3ku.deployment.runtime_startup import (
 from g3ku.runtime.bootstrap_factory import make_agent_loop as _make_agent_loop
 from g3ku.runtime.bootstrap_factory import make_provider as _make_provider
 from g3ku.security import BOOTSTRAP_MASTER_KEY_ENV, get_bootstrap_security_service
-from g3ku.utils.sdk_logging import configure_openai_sdk_logging
 from g3ku.utils.helpers import sync_workspace_templates
+from g3ku.utils.sdk_logging import configure_openai_sdk_logging
 from g3ku.web.worker_control import WEB_AUTO_WORKER_ENV
 from main.service.task_terminal_callback import (
     TASK_TERMINAL_CALLBACK_PATH,
@@ -262,15 +262,15 @@ def _print_update_reminder() -> None:
     在启动路径上塞一次外网往返，都是这条横幅要避免的。
     """
     try:
-        from g3ku.update_check import read_update_ledger
+        from g3ku import __version__
+        from g3ku.update_check import ledger_newer_now, read_update_ledger
 
         ledger = read_update_ledger()
-        if not ledger or not ledger.get("newer"):
+        if not ledger_newer_now(ledger):
             return
         latest = str(ledger.get("latest_tag") or "").strip()
-        current = str(ledger.get("current_version") or "").strip()
         typer.echo(
-            f"[negi] 发现新版本 {latest}（当前 v{current}）："
+            f"[negi] 发现新版本 {latest}（当前 v{__version__}）："
             "在网页「设置」里点「重启并更新」，或在项目目录给安装脚本加 -Upgrade"
         )
     except Exception:

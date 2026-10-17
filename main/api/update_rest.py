@@ -17,7 +17,12 @@ from loguru import logger
 
 from g3ku import __version__
 from g3ku.update_apply import apply_in_flight, spawn_runner
-from g3ku.update_check import read_apply_result, read_update_ledger, run_update_check
+from g3ku.update_check import (
+    ledger_newer_now,
+    read_apply_result,
+    read_update_ledger,
+    run_update_check,
+)
 
 router = APIRouter()
 
@@ -41,7 +46,7 @@ def _status_payload() -> dict[str, Any]:
     enabled, interval_hours = _settings()
     return {
         "has_ledger": ledger is not None,
-        "newer": bool((ledger or {}).get("newer")),
+        "newer": ledger_newer_now(ledger),
         "latest_tag": str((ledger or {}).get("latest_tag") or ""),
         "current_version": __version__,
         "checked_at": str((ledger or {}).get("checked_at") or ""),
@@ -129,7 +134,7 @@ async def update_apply(request: Request, payload: dict | None = Body(default=Non
             detail={"code": "invalid_ref", "message": f"版本号格式不正确：{ref}"},
         )
     # 没点名版本时只在真有新版本时才动作，避免把设备无谓地重启一次。
-    if not requested_ref and not (ledger or {}).get("newer"):
+    if not requested_ref and not ledger_newer_now(ledger):
         raise HTTPException(
             status_code=409,
             detail={"code": "no_update_available", "message": "当前已是最新版本，无需更新。"},

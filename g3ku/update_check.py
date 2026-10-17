@@ -138,6 +138,22 @@ def build_ledger_payload(latest_tag: str | None, *, source: str) -> dict[str, An
     }
 
 
+def ledger_newer_now(ledger: dict[str, Any] | None) -> bool:
+    """台账里那次检查发现的标签，此刻是否仍然比本机版本新。
+
+    台账存的 `newer` 是检查那一刻的结论，而升级只换代码不换台账：照抄它会让红点在
+    升级成功后一直亮到下一次检查（实测要等满一个 5 小时间隔），启动横幅也会继续念
+    旧版本号。调用方一律用本函数读数，台账原字段只回答"上次检查看到了什么"。
+    """
+    from g3ku import __version__
+
+    if not isinstance(ledger, dict):
+        return False
+    current = parse_version(__version__)
+    latest = parse_version(str(ledger.get("latest_tag") or ""))
+    return bool(current and latest and latest > current)
+
+
 def run_update_check(
     *,
     source: str = "auto",
