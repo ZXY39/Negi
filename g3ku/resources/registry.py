@@ -7,6 +7,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from loguru import logger
+
 from g3ku.resources.manifest import ResourceManifestError, load_manifest
 from g3ku.resources.models import ResourceKind, SkillResourceDescriptor, ToolResourceDescriptor
 
@@ -381,19 +383,51 @@ class ResourceRegistry:
         # walk 内部 scandir 已经拿到目录项的 mtime/size，却被丢掉又重新查一遍。
         # 改用 DirEntry.stat() 直接吃那份缓存。
         entries: list[str] = []
-        ResourceRegistry._collect_tree_entries(str(root), "", entries)
+        unreadable: list[str] = []
+        ResourceRegistry._collect_tree_entries(str(root), "", entries, unreadable)
+        ResourceRegistry._report_fingerprint_failures(str(root), unreadable)
         digest = hashlib.sha256()
         digest.update("\n".join(sorted(entries)).encode("utf-8"))
         return digest.hexdigest()
 
+    _FINGERPRINT_FAILURES: dict[str, tuple[str, ...]] = {}
+
     @staticmethod
-    def _collect_tree_entries(root: str, prefix: str, out: list[str]) -> None:
+    def _report_fingerprint_failures(root: str, unreadable: list[str]) -> None:
+        """丢掉的子树必须留下可数落点，但不逐条命令刷屏。
+
+        打不开的目录不抛错（那会哑掉整条自动重载车道），可指纹从此不含那些正文——
+        改了也看不见。所以判据变化时各发一条：新集合并点名前 5 个路径，恢复时收口。
+        """
+        current = tuple(sorted(unreadable))
+        previous = ResourceRegistry._FINGERPRINT_FAILURES.get(root, ())
+        if current == previous:
+            return
+        if current:
+            ResourceRegistry._FINGERPRINT_FAILURES[root] = current
+            shown = ", ".join(current[:5])
+            if len(current) > 5:
+                shown += f" 等 {len(current)} 处"
+            logger.warning(
+                "resource fingerprint: {} subtree(s) under {} are unreadable and stay out of the "
+                "fingerprint, so content changes there are not detected: {}",
+                len(current),
+                root,
+                shown,
+            )
+        else:
+            ResourceRegistry._FINGERPRINT_FAILURES.pop(root, None)
+            logger.info("resource fingerprint: unreadable subtrees under {} are readable again", root)
+
+    @staticmethod
+    def _collect_tree_entries(root: str, prefix: str, out: list[str], unreadable: list[str]) -> None:
         try:
             with os.scandir(root) as scandir_iter:
                 children = list(scandir_iter)
-        except OSError:
-            # os.walk 对打不开的目录是静默跳过的；一次权限/长路径失败不该让整棵树的
-            # 指纹抛错——那会让上层整个自动重载车道哑掉。
+        except OSError as exc:
+            # os.walk 对打不开的目录也是静默跳过的；一次权限/长路径失败不该让整棵树的
+            # 指纹抛错——那会让上层整个自动重载车道哑掉。失败本身交给上层点名。
+            unreadable.append(f"{root} ({exc.strerror or exc.__class__.__name__})")
             return
         sub_dirs: list[os.DirEntry] = []
         for entry in children:
@@ -406,7 +440,7 @@ class ResourceRegistry:
             stat = entry.stat()
             out.append(f"{prefix}{entry.name}|{stat.st_mtime_ns}|{stat.st_size}")
         for entry in sub_dirs:
-            ResourceRegistry._collect_tree_entries(entry.path, f"{prefix}{entry.name}/", out)
+            ResourceRegistry._collect_tree_entries(entry.path, f"{prefix}{entry.name}/", out, unreadable)
 
     def _resolve_install_dir(self, raw_value: Any) -> Path | None:
         text = str(raw_value or "").strip()
