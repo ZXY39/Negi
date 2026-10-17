@@ -1460,3 +1460,15 @@ def test_memory_processed_detail_model_chain_shows_the_models_actually_traversed
     assert str(result["degraded"]) == "mem-a -> mem-b"
     # 途经账落地之前的记录没有这份数据：宁可空着，也不拿配置整条链冒充"走到了这里"。
     assert str(result["legacy"]) == "-"
+
+
+def test_memory_edit_send_clear_only_when_the_field_actually_changed() -> None:
+    """清空最小记忆那一格必须真的发出去：留空＝清空，没动这一格才是不改。
+
+    判据写在两处，任何一处退回旧读法都会把操作员的一次清空变成"保持不变"。
+    """
+    source = (REPO_ROOT / "g3ku/web/frontend/org_graph_app.js").read_text(encoding="utf-8")
+
+    assert "const minimalChanged = minimal.trim() !== originalMinimal;" in source
+    assert 'minimalMemory: minimalChanged ? minimal.trim() : null' in source
+    assert "最小记忆（minimal_memory，留空即清空）" in source

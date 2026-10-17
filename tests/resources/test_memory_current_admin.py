@@ -381,6 +381,39 @@ def test_current_memory_update_enqueues_a_request_and_maps_errors(stub_env, monk
     assert audit[0]["request_id"] == "req-update-1"
 
 
+def test_current_memory_update_separates_clear_from_unchanged(stub_env, monkeypatch):
+    """三态：没带 minimal_memory 才是不改，带了但为空是显式清空。
+
+    清空被读成"保持不变"时，操作员点保存、界面报成功，那一格永远还在——请求正文
+    是这个字段唯一的载体，所以判据必须分得开这两种意图。
+    """
+    workspace, manager, client = stub_env
+    monkeypatch.setenv("G3KU_ENABLE_MEMORY_ADMIN_MUTATIONS", "1")
+
+    cleared = client.post(
+        "/api/memory/current/update",
+        json={"memory_id": "Ab12Z9", "memory_body": "新内容", "minimal_memory": ""},
+    )
+    assert cleared.status_code == 200
+    cleared_text = manager.calls[0][2]
+    assert "清空" in cleared_text
+    assert "保持不变" not in cleared_text
+
+    kept = client.post("/api/memory/current/update", json={"memory_id": "Ab12Z9", "memory_body": "新内容"})
+    assert kept.status_code == 200
+    assert "保持不变" in manager.calls[1][2]
+    assert "清空" not in manager.calls[1][2]
+
+    replaced = client.post(
+        "/api/memory/current/update",
+        json={"memory_id": "Ab12Z9", "memory_body": "新内容", "minimal_memory": "新的->正文"},
+    )
+    assert replaced.status_code == 200
+    replaced_text = manager.calls[2][2]
+    assert "新最小记忆：新的->正文" in replaced_text
+    assert "保持不变" not in replaced_text and "清空" not in replaced_text
+
+
 def test_current_memory_delete_enqueues_one_request_per_action(stub_env, monkeypatch):
     workspace, manager, client = stub_env
     monkeypatch.setenv("G3KU_ENABLE_MEMORY_ADMIN_MUTATIONS", "1")

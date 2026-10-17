@@ -2323,7 +2323,14 @@ async def update_current_memory(request: Request, payload: dict | None = Body(de
     memory_id = str(body.get('memory_id') or '').strip()
     memory_body = str(body.get('memory_body') or '').strip()
     minimal_memory = body.get('minimal_memory')
-    normalized_minimal = None if minimal_memory is None else str(minimal_memory).strip()
+    normalized_minimal = str(minimal_memory).strip() if minimal_memory is not None else ''
+    if normalized_minimal:
+        minimal_line = f'新最小记忆：{normalized_minimal}'
+    elif minimal_memory is None:
+        minimal_line = '最小记忆保持不变。'
+    else:
+        # 操作员把这一格清空是一次显式动作，不能读成"没改"。
+        minimal_line = '这条记忆的最小记忆清空（不要再留任何最小记忆）。'
     if not memory_id:
         raise HTTPException(
             status_code=400,
@@ -2354,7 +2361,7 @@ async def update_current_memory(request: Request, payload: dict | None = Body(de
     request_lines = [
         f'操作员在管理页修改长期记忆 {_memory_line_label(memory_id)}。',
         f'新正文：{memory_body}',
-        f'新最小记忆：{normalized_minimal}' if normalized_minimal else '最小记忆保持不变。',
+        minimal_line,
         '只改这一条记忆，不要新增也不要删除其它记忆。',
     ]
     try:

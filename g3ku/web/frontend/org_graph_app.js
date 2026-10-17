@@ -16643,7 +16643,7 @@ function ensureMemoryBrowserUi() {
                     <textarea id="memory-browser-edit-body" rows="6" placeholder="记忆正文（必填）"></textarea>
                 </label>
                 <label class="memory-browser-edit-field" for="memory-browser-edit-minimal">
-                    <span>最小记忆（minimal_memory，可留空保持不变）</span>
+                    <span>最小记忆（minimal_memory，留空即清空）</span>
                     <input id="memory-browser-edit-minimal" type="text" placeholder="条件->要求关键词" />
                 </label>
             </div>
@@ -17293,7 +17293,7 @@ async function runMemoryBrowserEditSave(memoryId, body, minimal) {
         const original = (Array.isArray(S.memoryBrowser.items) ? S.memoryBrowser.items : [])
             .find((item) => String(item?.memory_id || "").trim() === memoryId);
         const originalMinimal = String(original?.minimal_memory || "");
-        const minimalChanged = minimal.trim() && minimal.trim() !== originalMinimal;
+        const minimalChanged = minimal.trim() !== originalMinimal;
         await ApiClient.updateCurrentMemory(memoryId, {
             memoryBody: body.trim(),
             minimalMemory: minimalChanged ? minimal.trim() : null,
