@@ -190,15 +190,18 @@ function syncTaskNormalizedState(items = []) {
         .sort(compareTaskListOrder);
     const tasksById = {};
     const orderedTaskIds = [];
+    const sources = {};
     normalized.forEach((item) => {
         const taskId = String(item.task_id || "").trim();
         if (!taskId) return;
         tasksById[taskId] = item;
         orderedTaskIds.push(taskId);
+        sources[taskId] = "list";
     });
     S.tasksById = tasksById;
     S.orderedTaskIds = orderedTaskIds;
     S.tasks = normalized;
+    S.taskItemStateSource = sources;
     return normalized;
 }
 
@@ -241,6 +244,7 @@ function upsertTaskState(task) {
     S.tasksById = tasksById;
     S.orderedTaskIds = orderedTaskIds;
     syncTaskArrayFromState();
+    noteTaskItemStateSource(taskId, "patch");
     return { taskId, previousTask, nextTask, added, orderChanged };
 }
 
@@ -282,6 +286,39 @@ function taskMetricSnapshotValue(task) {
         output_tokens: Number(tokenUsage.output_tokens || 0),
         cache_hit_tokens: Number(tokenUsage.cache_hit_tokens || 0),
     } : null;
+}
+
+// 卡片上的 token 数只有一条服务端来源（任务行的 token_usage），所以"数字比上一次小"这件事
+// 本身就是证据：要么整表替换的列表响应盖住了更新的补丁（source=list），要么服务端某条整包
+// 回写把别的进程刚并进去的用量打回去了（source=patch）。这条观测不改任何显示，只留现场读数，
+// 读法：S.taskHallStats.task_hall_metric_rollback_count 与 S.taskMetricRollbacks。
+function noteTaskMetricRollback(taskId, metricKey, previousValue, nextValue, lane) {
+    if (!Number.isFinite(previousValue) || !Number.isFinite(nextValue)) return false;
+    if (nextValue >= previousValue) return false;
+    const key = String(taskId || "").trim();
+    const nextStats = { ...(S.taskHallStats || {}) };
+    nextStats.task_hall_metric_rollback_count = Number(nextStats.task_hall_metric_rollback_count || 0) + 1;
+    S.taskHallStats = nextStats;
+    const entry = {
+        at: new Date().toISOString(),
+        task_id: key,
+        metric: String(metricKey || ""),
+        from: previousValue,
+        to: nextValue,
+        lane: String(lane || ""),
+        source: String(S.taskItemStateSource?.[key] || ""),
+    };
+    const log = Array.isArray(S.taskMetricRollbacks) ? S.taskMetricRollbacks : [];
+    S.taskMetricRollbacks = [entry, ...log].slice(0, 12);
+    return true;
+}
+
+// 谁最后写了这条任务的卡片数据：列表整表替换记 list，补丁合并记 patch。
+// 回退读数要归因到车道，光看值的变化时刻分不出这两条。
+function noteTaskItemStateSource(taskId, source) {
+    const key = String(taskId || "").trim();
+    if (!key) return;
+    S.taskItemStateSource = { ...(S.taskItemStateSource || {}), [key]: String(source || "") };
 }
 
 // 卡片上的 token 数最多到 10 位（实盘 task:1d9cddf9858e 缓存 1,703,800,704），而一次
@@ -343,6 +380,7 @@ function patchTaskCardElement(taskId) {
         const metricValue = tokenUsage.tracked ? Number(tokenUsage[metricKey] || 0) : null;
         const previousValue = previousMetrics && Number.isFinite(previousMetrics[metricKey]) ? previousMetrics[metricKey] : null;
         const isIncreasing = previousValue !== null && Number.isFinite(metricValue) && metricValue > previousValue;
+        noteTaskMetricRollback(key, metricKey, previousValue, metricValue, "card-patch");
         // 逐位重写会把数字换成新的 span，动画天生重播，不再需要摘 class 后强制重排。
         valueEl.innerHTML = taskMetricValueMarkup(
             Number.isFinite(metricValue) ? formatTokenCount(metricValue) : "--",
@@ -954,6 +992,7 @@ function renderTasks() {
             const hasValue = Number.isFinite(item.value);
             const previousValue = previousMetrics && Number.isFinite(previousMetrics[item.key]) ? previousMetrics[item.key] : null;
             const isIncreasing = metricAnimationTaskIds.has(taskId) && previousValue !== null && hasValue && item.value > previousValue;
+            noteTaskMetricRollback(taskId, item.key, previousValue, hasValue ? item.value : null, "full-render");
             const valueMarkup = taskMetricValueMarkup(
                 hasValue ? formatTokenCount(item.value) : "--",
                 isIncreasing ? formatTokenCount(previousValue) : "",

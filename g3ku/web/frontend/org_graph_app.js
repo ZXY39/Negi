@@ -312,6 +312,9 @@ const S = {
     taskGridSignature: "",
     taskMetricSnapshot: {},
     taskMetricAnimationTaskIds: new Set(),
+    // 卡片数字的"谁写的"与"有没有回退过"两条观测（S.taskHallStats 同族，只在控制台读）。
+    taskItemStateSource: {},
+    taskMetricRollbacks: [],
     taskHallStats: {
         task_hall_full_render_count: 0,
         task_hall_card_patch_count: 0,
