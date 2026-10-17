@@ -21,7 +21,8 @@ def _ops(*, multimodal: bool = False) -> CeoFrontDoorRuntimeOps:
     """构造只带合并路径所需依赖的实例（绕过完整 __init__）。"""
     ops = CeoFrontDoorRuntimeOps.__new__(CeoFrontDoorRuntimeOps)
     ops._loop = SimpleNamespace(app_config=None)
-    ops._ceo_image_multimodal_enabled_for_model_refs = lambda refs: multimodal
+    # 收口判据是这一颗：返回 (是否收图, 参与判定的模型名)，测试只替它给结论。
+    ops._ceo_image_multimodal_for_request = lambda refs: (multimodal, "managed:first")
     return ops
 
 
