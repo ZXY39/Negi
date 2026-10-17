@@ -125,8 +125,20 @@ def _python_has_module(python: Path, module: str) -> bool:
 
 
 def _uv_executable() -> str | None:
+    """定位 uv，与安装脚本同判据：PATH 里没有就回落两个已知安装位。
+
+    astral 安装器把 uv 写进 `~/.local/bin` 并追加用户 PATH，而 PATH 变更对已经开着的终端
+    不可见；首启正落在这个窗口里，只认 `which` 会让新装设备停在 "No usable package installer"。
+    """
     resolved = shutil.which("uv")
-    return str(resolved) if resolved else None
+    if resolved:
+        return str(resolved)
+    exe = "uv.exe" if os.name == "nt" else "uv"
+    for relative in (Path(".local") / "bin" / exe, Path(".cargo") / "bin" / exe):
+        candidate = Path.home() / relative
+        if candidate.exists():
+            return str(candidate)
+    return None
 
 
 def _ensure_project_installed() -> None:

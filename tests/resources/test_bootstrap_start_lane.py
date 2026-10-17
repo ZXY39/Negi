@@ -1,4 +1,5 @@
 import os
+import shutil
 import subprocess
 from types import SimpleNamespace
 
@@ -26,6 +27,26 @@ def _patch_env(monkeypatch, config=None):
     monkeypatch.setattr(negi_bootstrap, '_ensure_project_installed', lambda: None)
     monkeypatch.setattr(negi_bootstrap, '_rotate_runtime_console_log', lambda: None)
     monkeypatch.setattr(negi_bootstrap, '_load_bootstrap_config', lambda: dict(config or {}))
+
+
+def test_uv_probe_falls_back_to_the_installer_locations(monkeypatch, tmp_path) -> None:
+    # astral 安装器把 uv 写进 ~/.local/bin 再追加用户 PATH，而 PATH 变更对已经开着的终端
+    # 不可见；只认 which 会让新装设备的首启停在「No usable package installer」。
+    # 兜底候选必须与 install.ps1 / install.sh 的 Get-UvCommand 一致。
+    fake_home = tmp_path / "home"
+    expected = fake_home / ".local" / "bin" / ("uv.exe" if os.name == "nt" else "uv")
+    expected.parent.mkdir(parents=True)
+    expected.write_text("")
+    monkeypatch.setattr(shutil, "which", lambda _name: None)
+    monkeypatch.setenv("HOME", str(fake_home))
+    monkeypatch.setenv("USERPROFILE", str(fake_home))
+    assert negi_bootstrap._uv_executable() == str(expected)
+
+    # 两处都没有才是真的没有：仍回 None，让终止横幅照原样说清缺什么。
+    missing = tmp_path / "empty"
+    monkeypatch.setenv("HOME", str(missing))
+    monkeypatch.setenv("USERPROFILE", str(missing))
+    assert negi_bootstrap._uv_executable() is None
 
 
 def test_port_override_reads_all_three_shapes() -> None:
