@@ -2614,6 +2614,9 @@ class RuntimeAgentSession:
         if not normalized_text:
             return
         if not self._assistant_segment_open:
+            # 正文首帧就是"这一跳想完了"的锚点：不在这儿停表，工具执行与正文流式
+            # 期间每次状态快照都会把新的秒数重画进思考行（界面读起来是思考一直在涨）。
+            self._reasoning_close_segment()
             self._state.latest_message = ""
             self._assistant_segment_open = True
         current_text = str(self._state.latest_message or "")

@@ -8151,6 +8151,7 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
         assistant_text_delta_handler = None
         assistant_reasoning_delta_handler = None
         assistant_reasoning_segment_handler = None
+        assistant_reasoning_segment_close_handler = None
         model_retry_status_handler = None
         if runtime_session is not None:
             callback = getattr(runtime_session, "_handle_assistant_text_delta", None)
@@ -8162,6 +8163,9 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
             reasoning_segment = getattr(runtime_session, "_begin_assistant_reasoning_segment", None)
             if callable(reasoning_segment):
                 assistant_reasoning_segment_handler = reasoning_segment
+            reasoning_segment_close = getattr(runtime_session, "_reasoning_close_segment", None)
+            if callable(reasoning_segment_close):
+                assistant_reasoning_segment_close_handler = reasoning_segment_close
             begin_segment = getattr(runtime_session, "_begin_assistant_text_segment", None)
             if callable(begin_segment):
                 begin_segment()
@@ -8490,6 +8494,11 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
                         # 这里把预检算出来的本轮体量交给发送层做同一判据。
                         required_context_window_tokens=int(preflight_diagnostics.get("estimated_total_tokens") or 0),
                     )
+                    # 这一跳的模型流到这里就结束了，后面是工具执行。思考段必须在这儿收口，
+                    # 否则表要一直走到下一次 attempt 起点（或回合收尾）才停，工具跑多久
+                    # 就在思考行上多算多久。
+                    if callable(assistant_reasoning_segment_close_handler):
+                        assistant_reasoning_segment_close_handler()
                 except Exception as exc:
                     if not isinstance(exc, ModelProviderExhaustedError) and PUBLIC_PROVIDER_FAILURE_MESSAGE not in str(exc or ""):
                         raise
