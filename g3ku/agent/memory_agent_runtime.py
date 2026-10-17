@@ -12,6 +12,7 @@ import shutil
 import sqlite3
 import string
 import threading
+import time
 import uuid
 from dataclasses import asdict, dataclass, field, replace
 from datetime import datetime, timedelta
@@ -102,6 +103,12 @@ def resolve_note_token(
 _REVIEW_TOOL_OUTPUT_MAX_CHARS = 400
 _REVIEW_TOOL_PREVIEW_MAX_CHARS = 240
 _REVIEW_REPORTED_TOOL_ID_CAP = 5000
+# 轮次窗口默认 5 轮，攒不满就一直躺在缓冲里（活体实测 48 个会话压着 78 轮、最老 8 天
+# 从未送达 memory agent），所以再加一条按龄出口。每 tick 最多倒 2 个会话是入队侧限速，
+# 真正的节奏由队列消费侧每个 tick 一批拿着。
+_REVIEW_STALE_FLUSH_MAX_AGE_SECONDS = 3600
+_REVIEW_STALE_SWEEP_INTERVAL_SECONDS = 60.0
+_REVIEW_STALE_FLUSH_SESSIONS_PER_SWEEP = 2
 # 复核窗口入队前的拆片目标：链上最小声明窗口 × 这个比例（不写死绝对 token 数，
 # 换模型或改窗口声明都自动跟着走）。
 _MEMORY_WINDOW_SPLIT_RATIO = 0.5
@@ -1872,6 +1879,7 @@ class MemoryManager:
         )
         self.review_state_file = self.mem_dir / "review_state.json"
         self._io_lock = threading.RLock()
+        self._last_stale_review_sweep_at = 0.0
         self._processed_request_ids_cache: tuple[tuple[int, int], set[str]] | None = None
         self._worker_thread: threading.Thread | None = None
         self._stop_event = threading.Event()
@@ -2818,6 +2826,10 @@ class MemoryManager:
         while not self._stop_event.wait(1.0):
             try:
                 asyncio.run(self.run_due_batch_once())
+            except Exception:
+                continue
+            try:
+                asyncio.run(self.sweep_stale_review_windows())
             except Exception:
                 continue
 
@@ -4508,6 +4520,140 @@ class MemoryManager:
         return max(int(getattr(self.config.queue, "review_interval_turns", 5) or 5), 1)
 
     @staticmethod
+    def _review_turn_fingerprint(turn: dict[str, Any]) -> str:
+        """缓冲轮次的身份：`turn_id` 可能为空，载荷本身才是稳定的一半。"""
+        source = (
+            f"{str(turn.get('turn_id') or '').strip()}\n"
+            f"{str(turn.get('payload_text') or '').strip()}"
+        )
+        return hashlib.sha256(source.encode("utf-8")).hexdigest()[:32]
+
+    def _merge_review_session_state(self, *, session_key: str, session_state: dict[str, Any]) -> None:
+        """把一个会话的状态盖到最新副本上写回。
+
+        整份按内存副本覆盖会把另一个会话抹掉：web 与 worker 两个进程都各自起记忆 tick
+        （两边的 `run_due_batch_once` 都抢得到 lease 的时机不同），而 `_io_lock` 只在进程内互斥。
+        """
+        normalized_session = str(session_key or "").strip()
+        if not normalized_session:
+            return
+        with self._io_lock:
+            state = self._read_review_state()
+            sessions = dict(state.get("sessions") or {})
+            sessions[normalized_session] = session_state
+            self._write_review_state({"sessions": sessions})
+
+    def _clear_review_turns(self, *, session_key: str, flushed_fingerprints: set[str]) -> None:
+        """只摘本次倒掉的轮次，游标与并发刚 append 的那一轮都原样留着。
+
+        倒掉＝从缓冲里删掉，这是防重复扫的唯一落点：5 轮触发与按龄触发共用同一份缓冲，
+        谁先把这几轮摘掉，另一个就再也看不到它们。
+        """
+        normalized_session = str(session_key or "").strip()
+        if not normalized_session or not flushed_fingerprints:
+            return
+        with self._io_lock:
+            state = self._read_review_state()
+            sessions = dict(state.get("sessions") or {})
+            session_state = dict(sessions.get(normalized_session) or {})
+            pending = [
+                dict(item)
+                for item in list(session_state.get("pending_turns") or [])
+                if isinstance(item, dict)
+            ]
+            session_state["pending_turns"] = [
+                item
+                for item in pending
+                if MemoryManager._review_turn_fingerprint(item) not in flushed_fingerprints
+            ]
+            sessions[normalized_session] = session_state
+            self._write_review_state({"sessions": sessions})
+
+    def _pop_review_session_state(self, *, session_key: str) -> None:
+        normalized_session = str(session_key or "").strip()
+        if not normalized_session:
+            return
+        with self._io_lock:
+            state = self._read_review_state()
+            sessions = dict(state.get("sessions") or {})
+            if normalized_session not in sessions:
+                return
+            sessions.pop(normalized_session, None)
+            self._write_review_state({"sessions": sessions})
+
+    def _stale_review_flush_candidates(self, *, now: datetime) -> list[tuple[float, str]]:
+        """返回躺够阈值的会话（age 秒, session_key），按最老优先。"""
+        state = self._read_review_state()
+        aged: list[tuple[float, str]] = []
+        for session_key, session_state in dict(state.get("sessions") or {}).items():
+            newest: datetime | None = None
+            turn_count = 0
+            for item in list(session_state.get("pending_turns") or []):
+                if not isinstance(item, dict):
+                    continue
+                turn_count += 1
+                created = self._parse_optional_iso(str(item.get("created_at") or ""))
+                if created is None:
+                    continue
+                if created.tzinfo is None:
+                    created = created.replace(tzinfo=now.tzinfo)
+                if newest is None or created > newest:
+                    newest = created
+            if not turn_count or newest is None:
+                continue
+            age_seconds = max(0.0, (now - newest).total_seconds())
+            if age_seconds < _REVIEW_STALE_FLUSH_MAX_AGE_SECONDS:
+                continue
+            aged.append((age_seconds, str(session_key or "").strip()))
+        aged.sort(key=lambda item: -item[0])
+        return aged
+
+    async def sweep_stale_review_windows(self, *, force: bool = False) -> dict[str, Any]:
+        """按龄倒篮：攒不满轮次窗口的短会话也要送达 memory agent。
+
+        自己抢记忆 worker lease，因此只有 worker 节拍会扫，且进程之间不会把同一个会话倒
+        两次；会话侧的压缩冲刷 inline 调 `run_due_batch_once` 时不会被这里追加的批次顶到
+        用户那一跳上。
+        """
+        if self._read_only_init:
+            return {"ok": True, "status": "skipped", "reason": "read_only_manager"}
+        monotonic = time.monotonic()
+        if not force and monotonic - self._last_stale_review_sweep_at < _REVIEW_STALE_SWEEP_INTERVAL_SECONDS:
+            return {"ok": True, "status": "skipped", "reason": "sweep_not_due"}
+        worker_lease = self._try_acquire_memory_worker_lease()
+        if worker_lease is None:
+            return {"ok": True, "status": "skipped", "reason": "worker_lease_unavailable"}
+        try:
+            self._last_stale_review_sweep_at = monotonic
+            candidates = self._stale_review_flush_candidates(now=datetime.now().astimezone())
+            if not candidates:
+                return {"ok": True, "status": "idle", "flushed_sessions": 0}
+            flushed: list[dict[str, Any]] = []
+            for _age_seconds, session_key in candidates[:_REVIEW_STALE_FLUSH_SESSIONS_PER_SWEEP]:
+                result = await self.flush_review_window(
+                    session_key=session_key,
+                    trigger_source="stale_buffer",
+                )
+                if str(result.get("status") or "").strip() == "queued":
+                    flushed.append(
+                        {
+                            "session_key": session_key,
+                            "request_ids": list(result.get("request_ids") or []),
+                            "split_parts": int(result.get("split_parts") or 0),
+                        }
+                    )
+            if flushed:
+                logger.info(
+                    "复核窗口按龄冲刷：{} 个会话入队（候选 {} 个，阈值 {} 秒）",
+                    len(flushed),
+                    len(candidates),
+                    _REVIEW_STALE_FLUSH_MAX_AGE_SECONDS,
+                )
+            return {"ok": True, "status": "flushed", "flushed_sessions": len(flushed), "detail": flushed}
+        finally:
+            _release_file_lock(worker_lease)
+
+    @staticmethod
     def _memory_date_text(now_iso: str | None = None) -> str:
         value = datetime.fromisoformat(str(now_iso or MemoryManager._now_iso()).strip())
         return f"{value.year}/{value.month}/{value.day}"
@@ -4564,7 +4710,7 @@ class MemoryManager:
 
     @staticmethod
     def _allowed_review_flush_sources() -> set[str]:
-        return {"token_compression", "session_boundary"}
+        return {"token_compression", "session_boundary", "stale_buffer"}
 
     @staticmethod
     def _compact_review_stage_summary(canonical_summary: dict[str, Any] | None) -> dict[str, Any] | None:
@@ -4862,6 +5008,12 @@ class MemoryManager:
             "provider_request_ids": [str(item or "").strip() for item in list(provider_request_ids or []) if str(item or "").strip()],
             "request_artifact_paths": [str(item or "").strip() for item in list(request_artifact_paths or []) if str(item or "").strip()],
         }
+        # 按龄冲刷与轮次窗口/压缩冲刷共用同一条入队出口，没有这个字段就数不出"靠龄倒了几次"。
+        trigger_sources = sorted(
+            {str(item.trigger_source or "").strip() for item in batch.items if str(item.trigger_source or "").strip()}
+        )
+        if trigger_sources:
+            payload["trigger_sources"] = trigger_sources
         normalized_discard_reason = str(discard_reason or "").strip()
         if normalized_discard_reason:
             payload["discard_reason"] = normalized_discard_reason
@@ -4974,6 +5126,32 @@ class MemoryManager:
         return records
 
     @staticmethod
+    def _gate_stage_tool_records(records: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        """本批该阶段没出过失败，就只留工具名、状态与伴随的中途输出。
+
+        失败调用的入参与报错原文是防错规则唯一的原料，成功调用的明细则与阶段总结、
+        最终回复重复。判据只看本批记录，所以失败记录出现的那一批必然把整阶段原文带齐，
+        不需要再记一份历史失败 cursor。
+        """
+        record_list = list(records or [])
+        if any(
+            str(record.get("status") or "").strip().lower() not in ("", "success")
+            for record in record_list
+        ):
+            return record_list
+        gated: list[dict[str, Any]] = []
+        for record in record_list:
+            entry: dict[str, Any] = {
+                "tool_name": record.get("tool_name"),
+                "status": record.get("status"),
+            }
+            narration = str(record.get("中途输出") or "").strip()
+            if narration:
+                entry["中途输出"] = narration
+            gated.append(entry)
+        return gated
+
+    @staticmethod
     def _merge_review_stage_payload(
         *,
         canonical_summary: dict[str, Any] | None,
@@ -5051,7 +5229,7 @@ class MemoryManager:
             if stage_goal:
                 stage_entry["stage_goal"] = stage_goal
             if stage_records:
-                stage_entry["tool_records"] = stage_records
+                stage_entry["tool_records"] = MemoryManager._gate_stage_tool_records(stage_records)
             completed_summary = str(source_entry.get("completed_stage_summary") or "").strip()
             if completed_summary:
                 stage_entry["completed_stage_summary"] = completed_summary
@@ -5328,8 +5506,7 @@ class MemoryManager:
         if not normalized_session:
             return {"ok": True, "status": "ignored", "reason": "missing_session_key"}
         state = self._read_review_state()
-        sessions = dict(state.get("sessions") or {})
-        session_state = dict(sessions.get(normalized_session) or {})
+        session_state = dict((state.get("sessions") or {}).get(normalized_session) or {})
         stage_versions = {
             str(key or "").strip(): str(value or "").strip()
             for key, value in dict(session_state.get("stage_versions") or {}).items()
@@ -5346,7 +5523,7 @@ class MemoryManager:
             record for record in collected_tool_records if record["key"] not in reported_tool_key_set
         ]
         # 记录时全量捕获：本轮新出现的工具记录不设每轮数量上限，全部固化进缓冲载荷，
-        # 保证复核窗口内的阶段始终以未压缩形态送达，不受会话侧阶段压缩影响。
+        # 不受会话侧阶段压缩影响。送达时每个阶段带多少明细由 `_gate_stage_tool_records` 决定。
         next_reported_tool_keys = (
             reported_tool_keys + [str(record.get("key") or "").strip() for record in new_tool_records]
         )[-_REVIEW_REPORTED_TOOL_ID_CAP:]
@@ -5378,24 +5555,34 @@ class MemoryManager:
             }
         )
         if len(pending_turns) < self._review_window_turns():
-            sessions[normalized_session] = {
-                "pending_turns": pending_turns,
-                "stage_versions": next_stage_versions,
-                "reported_tool_keys": next_reported_tool_keys,
-            }
-            self._write_review_state({"sessions": sessions})
+            self._merge_review_session_state(
+                session_key=normalized_session,
+                session_state={
+                    "pending_turns": pending_turns,
+                    "stage_versions": next_stage_versions,
+                    "reported_tool_keys": next_reported_tool_keys,
+                },
+            )
             return {
                 "ok": True,
                 "status": "buffered",
                 "pending_turn_count": len(pending_turns),
             }
         payload = self._review_window_payload(session_key=normalized_session, pending_turns=pending_turns)
-        sessions[normalized_session] = {
-            "pending_turns": [],
-            "stage_versions": next_stage_versions,
-            "reported_tool_keys": next_reported_tool_keys,
-        }
-        self._write_review_state({"sessions": sessions})
+        self._merge_review_session_state(
+            session_key=normalized_session,
+            session_state={
+                "pending_turns": pending_turns,
+                "stage_versions": next_stage_versions,
+                "reported_tool_keys": next_reported_tool_keys,
+            },
+        )
+        self._clear_review_turns(
+            session_key=normalized_session,
+            flushed_fingerprints={
+                self._review_turn_fingerprint(item) for item in pending_turns
+            },
+        )
         requests = await self._enqueue_review_window_requests(
             session_key=normalized_session,
             payload_text=payload,
@@ -5424,8 +5611,7 @@ class MemoryManager:
         if normalized_trigger not in self._allowed_review_flush_sources():
             return {"ok": True, "status": "ignored", "reason": "unsupported_trigger_source"}
         state = self._read_review_state()
-        sessions = dict(state.get("sessions") or {})
-        session_state = dict(sessions.get(normalized_session) or {})
+        session_state = dict((state.get("sessions") or {}).get(normalized_session) or {})
         pending_turns = [
             dict(item)
             for item in list(session_state.get("pending_turns") or [])
@@ -5434,20 +5620,14 @@ class MemoryManager:
         if not pending_turns:
             return {"ok": True, "status": "idle", "reason": "no_pending_turns"}
         payload = self._review_window_payload(session_key=normalized_session, pending_turns=pending_turns)
-        sessions[normalized_session] = {
-            "pending_turns": [],
-            "stage_versions": {
-                str(key or "").strip(): str(value or "").strip()
-                for key, value in dict(session_state.get("stage_versions") or {}).items()
-                if str(key or "").strip() and str(value or "").strip()
+        # 只摘本次倒掉的轮次，两个游标留在原位：这条落点就是"5 轮触发与按龄触发不会把
+        # 同一批轮次送两次"的全部保证——谁先摘掉，另一个再读就看不见它们。
+        self._clear_review_turns(
+            session_key=normalized_session,
+            flushed_fingerprints={
+                self._review_turn_fingerprint(item) for item in pending_turns
             },
-            "reported_tool_keys": [
-                str(key or "").strip()
-                for key in list(session_state.get("reported_tool_keys") or [])
-                if str(key or "").strip()
-            ][-_REVIEW_REPORTED_TOOL_ID_CAP:],
-        }
-        self._write_review_state({"sessions": sessions})
+        )
         requests = await self._enqueue_review_window_requests(
             session_key=normalized_session,
             payload_text=payload,
@@ -5467,12 +5647,7 @@ class MemoryManager:
         normalized_session = str(session_key or "").strip()
         if not normalized_session:
             return
-        state = self._read_review_state()
-        sessions = dict(state.get("sessions") or {})
-        if normalized_session not in sessions:
-            return
-        sessions.pop(normalized_session, None)
-        self._write_review_state({"sessions": sessions})
+        self._pop_review_session_state(session_key=normalized_session)
 
     def _reject_blocked_candidate(self, request: MemoryQueueRequest, rule: str) -> dict[str, Any]:
         """Keep a blocked candidate out of the queue, but not out of the ledger.

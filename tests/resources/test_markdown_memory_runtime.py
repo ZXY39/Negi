@@ -2594,13 +2594,14 @@ async def test_v2_review_stage_with_new_records_carries_full_goal_summary(tmp_pa
         state = manager._read_review_state()
         pending = state["sessions"]["web:shared"]["pending_turns"]
         second_payload = pending[1]["payload_text"]
-        # The stage entry stays self-describing and uncompressed: full goal/summary
-        # accompany the new record even without a stage delta this turn.
+        # The stage entry stays self-describing: full goal/summary accompany the new
+        # record even without a stage delta this turn.
         assert "durable stage goal" in second_payload
         assert "durable stage summary" in second_payload
-        assert "q=call-2" in second_payload
-        # The already-reported record is not captured again.
-        assert "q=call-1" not in second_payload
+        # Only the newly reported record shows up, and a clean stage carries no detail.
+        assert second_payload.count('"tool_name": "web_search"') == 1
+        assert '"args"' not in second_payload
+        assert '"output_full"' not in second_payload
     finally:
         manager.close()
 
@@ -2643,6 +2644,271 @@ async def test_v2_review_tool_records_empty_id_fingerprint_dedup(tmp_path: Path)
         assert '"tool_name": "web_search"' not in pending[1]["payload_text"]
         assert '"tool_name": "web_search"' in pending[2]["payload_text"]
         assert all(key.startswith("fingerprint:") for key in state["sessions"]["web:shared"]["reported_tool_keys"])
+    finally:
+        manager.close()
+
+
+def _canonical_stage_with_tools(stage_id: str, tools: list[dict[str, Any]], *, round_text: str = "") -> dict[str, Any]:
+    return {
+        "active_stage_id": stage_id,
+        "stages": [
+            {
+                "stage_id": stage_id,
+                "stage_goal": f"goal {stage_id}",
+                "completed_stage_summary": f"summary {stage_id}",
+                "rounds": [
+                    {
+                        "round_id": f"{stage_id}:round-1",
+                        "text": round_text,
+                        "tools": tools,
+                    }
+                ],
+            }
+        ],
+    }
+
+
+@pytest.mark.asyncio
+async def test_v2_review_clean_stage_drops_tool_detail_keeps_names(tmp_path: Path) -> None:
+    module = _load_memory_agent_runtime_module()
+    manager = module.MemoryManager(tmp_path, _memory_cfg())
+    try:
+        canonical = _canonical_stage_with_tools(
+            "frontdoor-stage-1",
+            [
+                {
+                    "tool_call_id": "call-clean-1",
+                    "tool_name": "web_fetch",
+                    "status": "success",
+                    "arguments_text": "url=CLEAN_ARGS_MUST_NOT_TRAVEL",
+                    "output_text": "CLEAN_OUTPUT_MUST_NOT_TRAVEL",
+                },
+                {
+                    "tool_call_id": "call-clean-2",
+                    "tool_name": "filesystem_stat",
+                    "status": "success",
+                    "arguments_text": "path=CLEAN_ARGS_2_MUST_NOT_TRAVEL",
+                    "output_text": "CLEAN_OUTPUT_2_MUST_NOT_TRAVEL",
+                },
+            ],
+            round_text="ROUND_NARRATION_STAYS",
+        )
+        await manager.record_turn_for_review(
+            session_key="web:clean",
+            turn_id="turn-1",
+            user_messages=["pref"],
+            assistant_text="reply",
+            compression_summary={},
+            canonical_summary=canonical,
+        )
+        payload_text = manager._read_review_state()["sessions"]["web:clean"]["pending_turns"][0]["payload_text"]
+        assert '"tool_name": "web_fetch"' in payload_text
+        assert '"tool_name": "filesystem_stat"' in payload_text
+        assert '"status": "success"' in payload_text
+        assert "CLEAN_ARGS_MUST_NOT_TRAVEL" not in payload_text
+        assert "CLEAN_OUTPUT_MUST_NOT_TRAVEL" not in payload_text
+        assert "CLEAN_ARGS_2_MUST_NOT_TRAVEL" not in payload_text
+        assert "CLEAN_OUTPUT_2_MUST_NOT_TRAVEL" not in payload_text
+        # 阶段自己的东西一条不少
+        assert "ROUND_NARRATION_STAYS" in payload_text
+        assert "summary frontdoor-stage-1" in payload_text
+    finally:
+        manager.close()
+
+
+@pytest.mark.asyncio
+async def test_v2_review_failed_record_keeps_the_whole_stages_detail(tmp_path: Path) -> None:
+    module = _load_memory_agent_runtime_module()
+    manager = module.MemoryManager(tmp_path, _memory_cfg())
+    try:
+        canonical = _canonical_stage_with_tools(
+            "frontdoor-stage-1",
+            [
+                {
+                    "tool_call_id": "call-before",
+                    "tool_name": "content_open",
+                    "status": "success",
+                    "arguments_text": "path=KEEP_SIBLING_ARGS",
+                    "output_text": "KEEP_SIBLING_OUTPUT",
+                },
+                {
+                    "tool_call_id": "call-boom",
+                    "tool_name": "model_config",
+                    "status": "error",
+                    "arguments_text": "BOOM_ARGS",
+                    "output_text": "BOOM_OUTPUT",
+                },
+            ],
+        )
+        await manager.record_turn_for_review(
+            session_key="web:dirty",
+            turn_id="turn-1",
+            user_messages=["pref"],
+            assistant_text="reply",
+            compression_summary={},
+            canonical_summary=canonical,
+        )
+        payload_text = manager._read_review_state()["sessions"]["web:dirty"]["pending_turns"][0]["payload_text"]
+        # 防错规则要的是"失败前试了什么"，所以同阶段的兄弟记录跟着整套留下。
+        assert "BOOM_ARGS" in payload_text
+        assert "BOOM_OUTPUT" in payload_text
+        assert "KEEP_SIBLING_ARGS" in payload_text
+        assert "KEEP_SIBLING_OUTPUT" in payload_text
+    finally:
+        manager.close()
+
+
+@pytest.mark.asyncio
+async def test_stale_review_buffer_flushes_by_age_without_a_full_window(tmp_path: Path) -> None:
+    from datetime import datetime, timedelta
+
+    module = _load_memory_agent_runtime_module()
+    manager = module.MemoryManager(tmp_path, _memory_cfg())
+    try:
+        await manager.record_turn_for_review(
+            session_key="ext:short",
+            turn_id="turn-1",
+            user_messages=["one turn only"],
+            assistant_text="reply one",
+            compression_summary={},
+            canonical_summary=_canonical_with_visible_tool(tool_call_id="call-old"),
+        )
+        state = manager._read_review_state()
+        session_state = dict(state["sessions"]["ext:short"])
+        turns = [dict(item) for item in list(session_state.get("pending_turns") or [])]
+        turns[0]["created_at"] = (datetime.now().astimezone() - timedelta(seconds=3700)).isoformat()
+        session_state["pending_turns"] = turns
+        manager._write_review_state({"sessions": {"ext:short": session_state}})
+
+        result = await manager.sweep_stale_review_windows(force=True)
+        assert result["flushed_sessions"] == 1
+        rows = manager._read_queue_requests()
+        assert len(rows) == 1
+        assert rows[0].trigger_source == "stale_buffer"
+        assert "one turn only" in rows[0].payload_text
+        after = manager._read_review_state()["sessions"]["ext:short"]
+        assert after["pending_turns"] == []
+        # 两个游标留在原位：下一轮不会因为"没见过"再送一遍同一条记录。
+        assert "call-old" in after["reported_tool_keys"]
+    finally:
+        manager.close()
+
+
+@pytest.mark.asyncio
+async def test_stale_sweep_skips_fresh_buffer_and_is_rate_limited(tmp_path: Path) -> None:
+    module = _load_memory_agent_runtime_module()
+    manager = module.MemoryManager(tmp_path, _memory_cfg())
+    try:
+        await manager.record_turn_for_review(
+            session_key="ext:recent",
+            turn_id="turn-1",
+            user_messages=["just now"],
+            assistant_text="reply",
+            compression_summary={},
+            canonical_summary=_canonical_with_visible_tool(tool_call_id="call-now"),
+        )
+        result = await manager.sweep_stale_review_windows(force=True)
+        assert result["status"] == "idle"
+        assert manager._read_queue_requests() == []
+        # 刚扫过：下一次不带 force 的扫描直接跳过，不重复读整份缓冲。
+        second = await manager.sweep_stale_review_windows()
+        assert second["status"] == "skipped"
+        assert second["reason"] == "sweep_not_due"
+    finally:
+        manager.close()
+
+
+@pytest.mark.asyncio
+async def test_stale_flush_leaves_nothing_for_the_turn_window_to_resend(tmp_path: Path) -> None:
+    from datetime import datetime, timedelta
+
+    module = _load_memory_agent_runtime_module()
+    manager = module.MemoryManager(tmp_path, _memory_cfg())
+    try:
+        for index in range(4):
+            await manager.record_turn_for_review(
+                session_key="web:half",
+                turn_id=f"turn-{index}",
+                user_messages=[f"message-{index}"],
+                assistant_text=f"reply-{index}",
+                compression_summary={},
+                canonical_summary=_canonical_with_visible_tool(tool_call_id=f"call-{index}"),
+            )
+        state = manager._read_review_state()
+        session_state = dict(state["sessions"]["web:half"])
+        turns = [dict(item) for item in list(session_state.get("pending_turns") or [])]
+        for item in turns:
+            item["created_at"] = (datetime.now().astimezone() - timedelta(seconds=3700)).isoformat()
+        session_state["pending_turns"] = turns
+        manager._write_review_state({"sessions": {"web:half": session_state}})
+
+        assert (await manager.sweep_stale_review_windows(force=True))["flushed_sessions"] == 1
+        flushed = manager._read_queue_requests()
+        assert len(flushed) == 1
+        assert "message-3" in flushed[0].payload_text
+
+        # 倒过之后窗口是空的：再攒满 5 轮，第二批只能有新轮次，倒过的四条不许再出现。
+        for index in range(4, 9):
+            await manager.record_turn_for_review(
+                session_key="web:half",
+                turn_id=f"turn-{index}",
+                user_messages=[f"message-{index}"],
+                assistant_text=f"reply-{index}",
+                compression_summary={},
+                canonical_summary=_canonical_with_visible_tool(tool_call_id=f"call-{index}"),
+            )
+        rows = manager._read_queue_requests()
+        assert len(rows) == 2
+        assert "message-8" in rows[1].payload_text
+        for index in range(4):
+            assert f"message-{index}" not in rows[1].payload_text
+        assert "## 窗口回合 5" in rows[1].payload_text
+    finally:
+        manager.close()
+
+
+@pytest.mark.asyncio
+async def test_review_window_flush_does_not_clobber_sessions_it_never_read(tmp_path: Path) -> None:
+    module = _load_memory_agent_runtime_module()
+    manager = module.MemoryManager(tmp_path, _memory_cfg())
+    try:
+        await manager.record_turn_for_review(
+            session_key="web:A",
+            turn_id="turn-a",
+            user_messages=["A message"],
+            assistant_text="A reply",
+            compression_summary={},
+            canonical_summary=_canonical_with_visible_tool(stage_id="frontdoor-stage-a", tool_call_id="call-a"),
+        )
+        stale_snapshot = manager._read_review_state()
+
+        await manager.record_turn_for_review(
+            session_key="web:B",
+            turn_id="turn-b",
+            user_messages=["B message"],
+            assistant_text="B reply",
+            compression_summary={},
+            canonical_summary=_canonical_with_visible_tool(stage_id="frontdoor-stage-b", tool_call_id="call-b"),
+        )
+
+        read_calls = {"count": 0}
+        real_read = manager._read_review_state
+
+        def stale_then_real() -> dict:
+            read_calls["count"] += 1
+            if read_calls["count"] == 1:
+                return dict(stale_snapshot)
+            return real_read()
+
+        manager._read_review_state = stale_then_real
+        result = await manager.flush_review_window(session_key="web:A", trigger_source="token_compression")
+        assert result["status"] == "queued"
+
+        sessions = real_read()["sessions"]
+        assert sessions["web:A"]["pending_turns"] == []
+        # 整份按旧副本覆盖写会把 B 刚 append 的那一轮抹掉——它从此哪儿也不会再去。
+        assert len(sessions["web:B"]["pending_turns"]) == 1
+        assert read_calls["count"] >= 2
     finally:
         manager.close()
 

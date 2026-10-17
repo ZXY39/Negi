@@ -105,9 +105,11 @@
 
 ## 载荷中的 stages 可见面
 
-复核载荷可能包含 `stages:` 段（嵌在待处理请求的 `payload_text` 里）：它是用户在界面上能看到的阶段可见面（JSON），每个阶段按界面顺序包含 `stage_id`、`stage_goal`、`tool_records`（该阶段新出现的工具调用，含 `tool_name`/`status`/`args`/`output_preview`/`output_full`，以及模型伴随调用发出的 `中途输出`）与 `completed_stage_summary`。对此段的裁决要求：
+复核载荷可能包含 `stages:` 段（嵌在待处理请求的 `payload_text` 里）：它是用户在界面上能看到的阶段可见面（JSON），每个阶段按界面顺序包含 `stage_id`、`stage_goal`、`tool_records` 与 `completed_stage_summary`。`tool_records` 每条都带 `tool_name` 与 `status`；只有本阶段出现过非 `success` 调用时，这些记录才另外带 `args`、`output_preview`、`output_full` 与模型当时的 `中途输出`。
 
-- 只在工具问题反复出现、或能提炼出跨任务稳定的使用方法时，才沉淀为长期记忆；
+- 判「工具问题反复出现」按 `status` 数：同一工具在多个阶段反复失败就算，不需要逐条读原文。
+- 要写防错规则、需要报错原文或逐字参数时，只在带失败的那些阶段里有原文可引。
+- 干净阶段不带原文不是信息缺失：它只是没出错，本来就不值得沉淀；不要据此猜参数，也不要判定载荷被截断。
 - 写成「条件->要求」形式的防错规则或方法论，不要抄录一次性参数值、输出原文或调试过程；
 - 单次、任务局部的工具报错默认不准入。
 
