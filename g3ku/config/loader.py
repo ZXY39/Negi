@@ -442,7 +442,8 @@ def _normalize_inline_model_bindings(cfg: Config) -> bool:
                 "updated_at": datetime.now(UTC),
             }
         )
-        facade.repository.save(record, last_probe_status=None)
+        facade.repository.save(facade._sanitize_record_for_storage(record), last_probe_status=None)
+        facade._store_record_secrets(record)
         item.llm_config_id = record.config_id
         changed = True
     return changed
