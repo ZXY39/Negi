@@ -33,7 +33,11 @@ from typing import Any
 from g3ku.core.messages import UserInputMessage
 from g3ku.runtime.external_events import get_session_event_hub, make_session_event_relay
 from g3ku.runtime.bridge import SessionRuntimeBridge
-from g3ku.runtime.external_sessions import EXTERNAL_OUTBOUND_CHANNEL, ExternalSessionEntry
+from g3ku.runtime.external_sessions import (
+    EXTERNAL_OUTBOUND_CHANNEL,
+    ExternalSessionEntry,
+    get_external_session_registry,
+)
 from g3ku.runtime.session_agent import TURN_FAILED_FRIENDLY_TEXT
 
 QUEUED_RECEIPT_TEXT = "收到，将在当前任务中一并处理。"
@@ -114,6 +118,18 @@ class ExternalTurnService:
         idem = str(idempotency_key or "").strip() or None
         lock = self._submit_locks.setdefault(session_key, asyncio.Lock())
         async with lock:
+            # 有人真的在跟这条会话说话了：操作员在网页上"删除"过它（该桥 token 还在 ⇒ 只是把
+            # 卡片隐身、身份留着）时，入站回合要把它带回列表。命中既有映射不再重新注册的桥
+            # （MCP 网关按 conversation 缓存在进程内）永远走不到 resolve_or_create，所以这条
+            # 判据不能只长在注册车道上。出站重放不走这里——滞留回复的周期重注入会把整批
+            # 隐身行当场复活。
+            if getattr(entry, "hidden", False):
+                get_external_session_registry().set_hidden(session_key, False)
+                # 目录推送的这颗 helper 长在 external_v1，而 external_v1 在模块层 import 本模块，
+                # 所以只能在冷分支里取；调用方测的是 external_v1 上那颗同名缝。
+                from g3ku.runtime.api.external_v1 import _publish_ceo_catalog_best_effort
+
+                _publish_ceo_catalog_best_effort()
             if idem and (session_key, idem) in self._idempotency:
                 existing_turn_id = str(self._idempotency[(session_key, idem)] or "").strip()
                 record = self._turns.get(existing_turn_id) if existing_turn_id else None

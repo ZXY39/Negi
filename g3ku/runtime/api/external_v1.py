@@ -129,6 +129,8 @@ def _publish_ceo_catalog_best_effort() -> None:
     Best-effort by contract: it must never fail the /api/v1 call. It only
     observes the running web runtime (``peek_global_agent`` never constructs
     the agent); with no live runtime there is no browser to notify.
+
+    渠道会话从隐身里回来时也靠这颗推送（见 external_turns.submit）。
     """
     try:
         agent = peek_global_agent()
@@ -156,10 +158,17 @@ async def create_external_session(
     if not external_key:
         raise HTTPException(status_code=400, detail="external_key_required")
     title = str(payload.get("title") or "").strip() or None
-    entry, created = _registry().resolve_or_create(
+    registry = _registry()
+    # 隐身的行只有"再有人来注册"或"再有人发消息"才会回来。命中既有映射时 resolve_or_create
+    # 顺手清掉 hidden，所以这里也得把目录推出去，否则网页要刷新页面才看得见。
+    previous = registry.get_by_session_key(
+        registry.get_session_key(bridge_id=principal.bridge_id, external_key=external_key)
+    )
+    was_hidden = bool(previous and previous.hidden)
+    entry, created = registry.resolve_or_create(
         bridge_id=principal.bridge_id, external_key=external_key, title=title
     )
-    if created:
+    if created or was_hidden:
         _publish_ceo_catalog_best_effort()
     return {
         "ok": True,

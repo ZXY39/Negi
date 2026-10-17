@@ -31,14 +31,18 @@ from types import SimpleNamespace
 import pytest
 
 from g3ku.core.messages import UserInputMessage
-from g3ku.runtime.api import external_turns
+from g3ku.runtime.api import external_turns, external_v1
 from g3ku.runtime.api.external_turns import (
     QUEUED_RECEIPT_TEXT,
     QUEUED_IDEMPOTENCY_SENTINEL,
     ExternalTurnService,
 )
 from g3ku.runtime.external_events import get_session_event_hub, reset_session_event_hubs
-from g3ku.runtime.external_sessions import EXTERNAL_OUTBOUND_CHANNEL, ExternalSessionEntry
+from g3ku.runtime.external_sessions import (
+    EXTERNAL_OUTBOUND_CHANNEL,
+    ExternalSessionEntry,
+    ExternalSessionRegistry,
+)
 from g3ku.runtime.session_agent import TURN_FAILED_FRIENDLY_TEXT
 
 _HEX32 = re.compile(r"^[0-9a-f]{32}$")
@@ -530,3 +534,88 @@ async def test_queued_follow_ups_chain_with_single_terminal_event():
         assert kwargs["channel"] == EXTERNAL_OUTBOUND_CHANNEL
         assert kwargs["runtime_memory_chat_id"] == "qq:dm:1"
         assert len(kwargs["listeners"]) == 1
+
+
+# -- 隐身渠道会话被入站回合带回来 ------------------------------------------
+# 「删除渠道会话」在该桥 token 还在时只是把卡片隐身。命中既有映射不再重新注册的桥
+# （MCP 网关按 conversation 在进程内缓存 session id）永远走不到 resolve_or_create，
+# 所以摘标记与推目录必须长在 submit 这条车道上。
+
+
+def _hidden_registry(tmp_path):
+    registry = ExternalSessionRegistry(tmp_path)
+    entry, _ = registry.resolve_or_create(bridge_id="test-bridge", external_key="qq:dm:1")
+    registry.set_hidden(entry.session_key, True)
+    return registry, entry
+
+
+@pytest.mark.asyncio
+async def test_queued_inbound_turn_returns_the_hidden_session_and_republishes(tmp_path, monkeypatch):
+    registry, entry = _hidden_registry(tmp_path)
+    monkeypatch.setattr(external_turns, "get_external_session_registry", lambda *_a, **_k: registry)
+    publishes: list[int] = []
+    monkeypatch.setattr(external_v1, "_publish_ceo_catalog_best_effort", lambda: publishes.append(1))
+
+    bridge = _FakeBridge(_FakeSession(running=True))
+    result = await _make_service(bridge).submit(entry=entry, user_message="在吗")
+
+    assert result["status"] == "queued"
+    assert registry.get_by_session_key(entry.session_key).hidden is False
+    assert publishes == [1]
+
+
+@pytest.mark.asyncio
+async def test_started_inbound_turn_also_clears_the_hidden_flag(tmp_path, monkeypatch):
+    registry, entry = _hidden_registry(tmp_path)
+    monkeypatch.setattr(external_turns, "get_external_session_registry", lambda *_a, **_k: registry)
+    publishes: list[int] = []
+    monkeypatch.setattr(external_v1, "_publish_ceo_catalog_best_effort", lambda: publishes.append(1))
+
+    session_key = entry.session_key
+    bridge = _FakeBridge(_FakeSession(running=False))
+    result = await _make_service(bridge).submit(entry=entry, user_message="在吗", idempotency_key="k-h1")
+    try:
+        assert registry.get_by_session_key(session_key).hidden is False
+        assert publishes == [1]
+    finally:
+        await _wait_terminal(session_key, turn_id=result["turn_id"])
+
+
+@pytest.mark.asyncio
+async def test_visible_session_turn_does_not_publish_the_catalog(tmp_path, monkeypatch):
+    """没有隐身行要回来时不该多推一次全局快照，也不该碰注册表文件。"""
+    registry = ExternalSessionRegistry(tmp_path)
+    entry, _ = registry.resolve_or_create(bridge_id="test-bridge", external_key="qq:dm:1")
+    monkeypatch.setattr(external_turns, "get_external_session_registry", lambda *_a, **_k: registry)
+    publishes: list[int] = []
+    monkeypatch.setattr(external_v1, "_publish_ceo_catalog_best_effort", lambda: publishes.append(1))
+
+    bridge = _FakeBridge(_FakeSession(running=True))
+    result = await _make_service(bridge).submit(entry=entry, user_message="在吗")
+
+    assert result["status"] == "queued"
+    assert publishes == []
+    assert registry.get_by_session_key(entry.session_key).hidden is False
+
+
+@pytest.mark.asyncio
+async def test_duplicate_resend_still_returns_the_hidden_session(tmp_path, monkeypatch):
+    """重发是同一条入站活动：即便幂等位命中，隐身行也要回来。"""
+    registry, entry = _hidden_registry(tmp_path)
+    monkeypatch.setattr(external_turns, "get_external_session_registry", lambda *_a, **_k: registry)
+    publishes: list[int] = []
+    monkeypatch.setattr(external_v1, "_publish_ceo_catalog_best_effort", lambda: publishes.append(1))
+
+    session_key = entry.session_key
+    bridge = _FakeBridge(_FakeSession(running=False))
+    service = _make_service(bridge)
+    started = await service.submit(entry=entry, user_message="m1", idempotency_key="k-h2")
+    try:
+        registry.set_hidden(session_key, True)
+        publishes.clear()
+        dup = await service.submit(entry=entry, user_message="m1", idempotency_key="k-h2")
+        assert dup["status"] == "duplicate"
+        assert registry.get_by_session_key(session_key).hidden is False
+        assert publishes == [1]
+    finally:
+        await _wait_terminal(session_key, turn_id=started["turn_id"])

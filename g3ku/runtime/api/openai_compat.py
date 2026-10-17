@@ -491,12 +491,18 @@ async def create_chat_completion(
     user_text, image_parts = _extract_user_text_and_images(last_user)
 
     external_key = _resolve_external_key(payload)
-    entry, created = get_external_session_registry().resolve_or_create(
+    registry = get_external_session_registry()
+    previous = registry.get_by_session_key(
+        registry.get_session_key(bridge_id=principal.bridge_id, external_key=external_key)
+    )
+    was_hidden = bool(previous and previous.hidden)
+    entry, created = registry.resolve_or_create(
         bridge_id=principal.bridge_id,
         external_key=external_key,
         title=f"OpenAI compat · {external_key}",
     )
-    if created:
+    # 新建要推目录，从隐身里回来同样要推：浏览器只在页面加载时拉 REST 列表。
+    if created or was_hidden:
         _publish_ceo_catalog_best_effort()
 
     text = sanitize_channel_outbound_text(user_text)
