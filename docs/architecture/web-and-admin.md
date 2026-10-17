@@ -908,6 +908,21 @@ If roles look like shipped defaults right after an upgrade of an existing instal
 
 Do not assume the browser has a second hidden RBAC source. For surfaced tools, the API detail payload and runtime visibility are two views over the same backend-owned per-tool state.
 
+## Exec Approval And Allowlist Admin Contract
+
+`exec` 的破坏性命令守卫把「这条命令要不要人放行」交给运维：待审批清单、放行/拒绝动作与命令白名单都住在 Web 管理面这一侧。
+
+端点族由 admin router 提供，实际路径是 `/api/resources/tools/...`——`g3ku/web/main.py` 以 `prefix='/api'` 挂载 `main_router`，而 router 内部的路径段本身**不带** `admin`：
+
+- `GET /api/resources/tools/exec-approvals?status=pending&limit=` → `{ok, items}`
+- `POST /api/resources/tools/exec-approvals/{approval_id}/decision` → `{ok, item}`，`decision` 取 `approve_once` / `approve_whitelist` / `deny`
+- `GET` / `POST /api/resources/tools/exec-command-whitelist`、`POST /api/resources/tools/exec-command-whitelist/delete` → `{ok, items, approval_wait_seconds}` / `{ok, item}` / `{ok, removed}`
+- `PUT /api/resources/tools/exec-approval-wait` → `{ok, approval_wait_seconds}`
+
+这一族在治理取不到时返回 **503**（`exec_approvals_unavailable` / `main_task_service_unavailable`），不是空清单：审批台账挂在 `main_task_service` 上，服务缺席就不存在「零条待审批」这个读数。运维侧的判法因此分三态——徽标有数＝真有待审批；徽标无数＝队里确实空；接口 5xx＝这条面没接上。三者不许混成同一个「0」。
+
+新维护者最容易踩的是前缀：`/api/admin/resources/tools/...` 看起来完全合理（文件名是 admin、路由注册在 admin router 上），但它没有对应路由，请求 404 而页面把失败读成「没有待审批」。`tests/resources/test_web_api_path_parity.py` 拿真实挂载的 app 路由表核对前端每一条字面调用，钉的就是这条；新增端点时两侧都要过它，不要在测试里另抄一份前缀当事实源。
+
 ## Container Deployment Contract
 
 The web/admin stack has an explicit container-safe startup mode.

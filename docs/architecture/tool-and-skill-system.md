@@ -300,6 +300,14 @@ Current RBAC rules for surfaced tools:
 
 前端与 API 侧职责详见 `web-and-admin.md`「Tool Admin RBAC Contract」。
 
+### Skill Policy Role Contract
+
+技能的角色名单与工具的角色名单共用写侧判据，但**空集语义是两条**：
+
+- 写侧：`PUT /api/resources/skills/{skill_id}/policy` 的 `allowed_roles` 走与工具面同一个规范化器（`main/governance/roles.py` 的 `normalize_public_allowed_roles`）——旧别名 `checker` / `acceptance` 折叠成 `inspection`，重复值去重，**认不出的取值在门口 400 并点名该值**，不落治理库。记录模型 `allowed_roles` 是 Literal 列表，而 `model_copy` 不做校验，所以规范化必须发生在进入 `model_copy` 之前。
+- 读侧：按行降级。`GovernanceStore._parse` 对每条存储行只保留认得的角色，丢掉的部分就该行发一条 WARNING（点名 `skill_id` 或 `tool_id` 与被丢的值），整张列表照出。一行坏值把 `GET /api/resources/skills` 顶成 500 是必须避免的形态——管理台与候选池都走这条读道，列表 500 之后没人能进去改它；刷新车道也经同一个 `_parse`，所以它既不能是纠错点，也不该是故障点。
+- 空集回落：技能行解析后为空时读成 `['ceo', 'execution']`（`to_public_allowed_roles`），与工具面「`[]` 是真状态、按 deny-all 保留」相反。这条分叉是现行契约，不是待办；要统一两面判据得先改契约再改代码。
+
 ### Exec Runtime Mode Contract
 
 - `exec` 是当前唯一带额外持久化模式字段的 surfaced 工具：`tools` 记录上的 `metadata.execution_mode`。
