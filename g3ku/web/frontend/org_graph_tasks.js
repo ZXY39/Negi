@@ -190,13 +190,18 @@ function syncTaskNormalizedState(items = []) {
         .sort(compareTaskListOrder);
     const tasksById = {};
     const orderedTaskIds = [];
+    const heldById = S.tasksById || {};
     const sources = {};
     normalized.forEach((item) => {
         const taskId = String(item.task_id || "").trim();
         if (!taskId) return;
-        tasksById[taskId] = item;
-        orderedTaskIds.push(taskId);
         sources[taskId] = "list";
+        const heldTask = heldById[taskId] || null;
+        const carriedUsage = resolveTaskTokenUsage(taskId, heldTask, item, "list-apply");
+        tasksById[taskId] = carriedUsage && carriedUsage !== item.token_usage
+            ? { ...item, token_usage: carriedUsage }
+            : item;
+        orderedTaskIds.push(taskId);
     });
     S.tasksById = tasksById;
     S.orderedTaskIds = orderedTaskIds;
@@ -218,6 +223,10 @@ function upsertTaskState(task) {
     if (!taskId) return null;
     const previousTask = S.tasksById?.[taskId] || null;
     const nextTask = previousTask ? { ...previousTask, ...task } : { ...task };
+    noteTaskItemStateSource(taskId, "patch");
+    if (previousTask) {
+        nextTask.token_usage = resolveTaskTokenUsage(taskId, previousTask, nextTask, "patch-merge");
+    }
     const tasksById = { ...(S.tasksById || {}), [taskId]: nextTask };
     let orderedTaskIds = Array.isArray(S.orderedTaskIds) ? [...S.orderedTaskIds] : [];
     let added = false;
@@ -244,7 +253,6 @@ function upsertTaskState(task) {
     S.tasksById = tasksById;
     S.orderedTaskIds = orderedTaskIds;
     syncTaskArrayFromState();
-    noteTaskItemStateSource(taskId, "patch");
     return { taskId, previousTask, nextTask, added, orderChanged };
 }
 
@@ -288,9 +296,8 @@ function taskMetricSnapshotValue(task) {
     } : null;
 }
 
-// 卡片上的 token 数只有一条服务端来源（任务行的 token_usage），所以"数字比上一次小"这件事
-// 本身就是证据：要么整表替换的列表响应盖住了更新的补丁（source=list），要么服务端某条整包
-// 回写把别的进程刚并进去的用量打回去了（source=patch）。这条观测不改任何显示，只留现场读数，
+// 观测器：记 `resolveTaskTokenUsage` 每一次压住的回退（旧数据没被显示出去，但差值留档，
+// lane 分 list-apply / patch-merge，source 分 list / patch）。
 // 读法：S.taskHallStats.task_hall_metric_rollback_count 与 S.taskMetricRollbacks。
 function noteTaskMetricRollback(taskId, metricKey, previousValue, nextValue, lane) {
     if (!Number.isFinite(previousValue) || !Number.isFinite(nextValue)) return false;
@@ -319,6 +326,24 @@ function noteTaskItemStateSource(taskId, source) {
     const key = String(taskId || "").trim();
     if (!key) return;
     S.taskItemStateSource = { ...(S.taskItemStateSource || {}), [key]: String(source || "") };
+}
+
+// 卡片上的 token 数只有一条服务端来源（任务行的 token_usage），而服务端那一格是加性累加，
+// 所以"这次带来的数比手里的小"必然意味着旧数据：整表替换的列表响应赶在补丁之后落地，或某条
+// 整包回写把别的进程刚并进去的用量打回去。这里保留手里那份较大的数，并把这次压制记进观测器——
+// 被压掉的差值就是那条车道存在的证据，读法 `S.taskMetricRollbacks`（含 lane 与 source）。
+// 缺 tracked 的行（全 0）天然按旧值处理，显示不会退化成 "--"。
+function resolveTaskTokenUsage(taskId, heldTask, nextTask, lane) {
+    const heldUsage = heldTask && heldTask.token_usage ? heldTask.token_usage : null;
+    const nextUsage = nextTask && nextTask.token_usage ? nextTask.token_usage : null;
+    if (!heldUsage || !nextUsage) return nextUsage || heldUsage;
+    if (tokenKnownTotal(nextUsage) >= tokenKnownTotal(heldUsage)) return nextUsage;
+    const heldView = taskTokenDisplayUsage({ token_usage: heldUsage });
+    const nextView = taskTokenDisplayUsage({ token_usage: nextUsage });
+    ["input_tokens", "output_tokens", "cache_hit_tokens"].forEach((metricKey) => {
+        noteTaskMetricRollback(taskId, metricKey, heldView[metricKey], nextView[metricKey], lane);
+    });
+    return heldUsage;
 }
 
 // 卡片上的 token 数最多到 10 位（实盘 task:1d9cddf9858e 缓存 1,703,800,704），而一次
@@ -380,7 +405,6 @@ function patchTaskCardElement(taskId) {
         const metricValue = tokenUsage.tracked ? Number(tokenUsage[metricKey] || 0) : null;
         const previousValue = previousMetrics && Number.isFinite(previousMetrics[metricKey]) ? previousMetrics[metricKey] : null;
         const isIncreasing = previousValue !== null && Number.isFinite(metricValue) && metricValue > previousValue;
-        noteTaskMetricRollback(key, metricKey, previousValue, metricValue, "card-patch");
         // 逐位重写会把数字换成新的 span，动画天生重播，不再需要摘 class 后强制重排。
         valueEl.innerHTML = taskMetricValueMarkup(
             Number.isFinite(metricValue) ? formatTokenCount(metricValue) : "--",
@@ -992,7 +1016,6 @@ function renderTasks() {
             const hasValue = Number.isFinite(item.value);
             const previousValue = previousMetrics && Number.isFinite(previousMetrics[item.key]) ? previousMetrics[item.key] : null;
             const isIncreasing = metricAnimationTaskIds.has(taskId) && previousValue !== null && hasValue && item.value > previousValue;
-            noteTaskMetricRollback(taskId, item.key, previousValue, hasValue ? item.value : null, "full-render");
             const valueMarkup = taskMetricValueMarkup(
                 hasValue ? formatTokenCount(item.value) : "--",
                 isIncreasing ? formatTokenCount(previousValue) : "",

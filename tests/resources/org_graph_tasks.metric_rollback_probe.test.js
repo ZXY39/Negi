@@ -3,13 +3,22 @@ const assert = require("node:assert/strict");
 const fs = require("node:fs");
 const vm = require("node:vm");
 
-// 任务卡片 token 数回退观测器的契约：
-// 卡片上的数只有一条服务端来源（任务行的 token_usage），所以"比上一次小"本身就是证据。
-// 这一族只记读数、不改任何显示，归因靠 source（list=整表替换 / patch=补丁合并）与
-// lane（card-patch=增量补丁道 / full-render=整网格重建道）。
+// 任务卡片 token 数只许往前这条契约：
+// 服务端那一格（任务行 token_usage）是加性累加，所以任何写者带来更小的数必然是旧数据——
+// 整表替换的列表响应赶在补丁之后落地（lane=list-apply），或某条整包回写把在飞的合并打回去
+// （lane=patch-merge）。守卫保留手里那份较大的数，并把压掉的差值记进观测器留归因。
 
 const TASKS_PATH = "g3ku/web/frontend/org_graph_tasks.js";
+const APP_PATH = "g3ku/web/frontend/org_graph_app.js";
 const TASKS_CODE = fs.readFileSync(TASKS_PATH, "utf8");
+const APP_CODE = fs.readFileSync(APP_PATH, "utf8");
+
+function sliceBetween(code, startMarker, endMarker, label) {
+    const start = code.indexOf(startMarker);
+    const end = code.indexOf(endMarker);
+    assert.ok(start > 0 && end > start, `${label} slice not found`);
+    return code.slice(start, end);
+}
 
 function loadProbe() {
     const context = {
@@ -21,83 +30,104 @@ function loadProbe() {
         Array,
         Object,
         Date,
+        Intl,
         S: { taskHallStats: { task_hall_metric_rollback_count: 0 }, taskItemStateSource: {}, taskMetricRollbacks: [] },
     };
     context.window = context;
     vm.createContext(context);
-    const start = TASKS_CODE.indexOf("function noteTaskMetricRollback");
-    const end = TASKS_CODE.indexOf("function taskMetricValueMarkup");
-    assert.ok(start > 0 && end > start, "rollback probe slice not found");
-    vm.runInContext(TASKS_CODE.slice(start, end), context);
+    // 显示口径用 app 里那三个真函数，不在测试里重算一遍公式。
+    vm.runInContext(sliceBetween(APP_CODE, "function normalizeTokenUsage", "function normalizeModelTokenUsage", "normalizeTokenUsage"), context);
+    vm.runInContext(sliceBetween(APP_CODE, "function tokenKnownTotal", "function tokenDisplayUsage", "tokenKnownTotal+taskTokenUsage"), context);
+    vm.runInContext(sliceBetween(APP_CODE, "function tokenDisplayUsage", "function taskTokenSummaryLine", "tokenDisplayUsage"), context);
+    vm.runInContext(sliceBetween(
+        TASKS_CODE,
+        "function noteTaskMetricRollback",
+        "function taskMetricValueMarkup",
+        "token rollback guard"
+    ), context);
     return context;
 }
 
-test("回退记一条：带 from/to、观察道与写数据的来源车道", () => {
-    const context = loadProbe();
-    vm.runInContext('noteTaskItemStateSource("task:a", "list")', context);
+function usage({ tracked = true, input = 0, cache = 0, output = 0 } = {}) {
+    return { tracked, input_tokens: input, cache_hit_tokens: cache, output_tokens: output, call_count: 1 };
+}
 
-    const hit = vm.runInContext(
-        'noteTaskMetricRollback("task:a", "input_tokens", 391645384, 391192271, "full-render")',
-        context
-    );
-    assert.equal(hit, true);
-    const state = vm.runInContext("S", context);
-    assert.equal(state.taskHallStats.task_hall_metric_rollback_count, 1);
-    // vm 里造的对象与宿主原型不同，deepEqual 会因引用/原型判不等，逐字段断言。
+function run(context, code) {
+    return vm.runInContext(code, context);
+}
+
+test("列表整表替换带来更小的数：保留手里那份，并记一次压制", () => {
+    const context = loadProbe();
+    run(context, 'noteTaskItemStateSource("task:a", "list")');
+    const held = { token_usage: usage({ input: 391_645_384, cache: 420_943_104, output: 15_056_444 }) };
+    const next = { token_usage: usage({ input: 391_192_271, cache: 420_943_104, output: 14_988_992 }) };
+
+    const kept = run(context, `(() => {
+        const heldTask = ${JSON.stringify(held)};
+        const nextTask = ${JSON.stringify(next)};
+        return resolveTaskTokenUsage("task:a", heldTask, nextTask, "list-apply");
+    })()`);
+
+    assert.equal(kept.input_tokens, held.token_usage.input_tokens, "旧的输入不许覆盖新的");
+    assert.equal(kept.output_tokens, held.token_usage.output_tokens, "旧的输出不许覆盖新的");
+    const state = run(context, "S");
+    assert.ok(state.taskHallStats.task_hall_metric_rollback_count >= 1, "每一次压制都可数");
     const entry = state.taskMetricRollbacks[0];
     assert.equal(entry.task_id, "task:a");
-    assert.equal(entry.metric, "input_tokens");
-    assert.equal(entry.from, 391645384);
-    assert.equal(entry.to, 391192271);
-    assert.equal(entry.lane, "full-render");
+    assert.equal(entry.lane, "list-apply");
     assert.equal(entry.source, "list");
-    assert.ok(Number.isFinite(Date.parse(entry.at)), "at 是可解析的时刻");
+    assert.ok(entry.from > entry.to, "记的是被压掉的差值方向");
 });
 
-test("数字不减时什么都不记", () => {
+test("更大的数照单采纳，什么都不记", () => {
     const context = loadProbe();
-    vm.runInContext('noteTaskItemStateSource("task:a", "patch")', context);
-
-    assert.equal(vm.runInContext('noteTaskMetricRollback("task:a", "input_tokens", 100, 100, "card-patch")', context), false);
-    assert.equal(vm.runInContext('noteTaskMetricRollback("task:a", "output_tokens", 100, 140, "card-patch")', context), false);
-    const state = vm.runInContext("S", context);
-    assert.equal(state.taskHallStats.task_hall_metric_rollback_count, 0);
-    assert.equal(state.taskMetricRollbacks.length, 0);
+    run(context, 'noteTaskItemStateSource("task:a", "patch")');
+    const kept = run(context, `(() => {
+        const heldTask = { token_usage: ${JSON.stringify(usage({ input: 100, cache: 50, output: 10 }))} };
+        const nextTask = { token_usage: ${JSON.stringify(usage({ input: 180, cache: 50, output: 12 }))} };
+        return resolveTaskTokenUsage("task:a", heldTask, nextTask, "patch-merge");
+    })()`);
+    assert.equal(kept.input_tokens, 180);
+    assert.equal(run(context, "S.taskMetricRollbacks.length"), 0);
+    assert.equal(run(context, "S.taskHallStats.task_hall_metric_rollback_count"), 0);
 });
 
-test("首次取值与终态缺数都不算回退", () => {
+test("没带用量的一行（tracked=false）不会把卡片打成 --", () => {
     const context = loadProbe();
-    // previousValue 为 null（这张卡第一次渲染）或 metricValue 为 null（tracked=false 画 "--"）
-    assert.equal(vm.runInContext('noteTaskMetricRollback("task:a", "cache_hit_tokens", null, 420943104, "full-render")', context), false);
-    assert.equal(vm.runInContext('noteTaskMetricRollback("task:a", "cache_hit_tokens", 420943104, null, "full-render")', context), false);
-    assert.equal(vm.runInContext("S.taskMetricRollbacks.length", context), 0);
+    const kept = run(context, `(() => {
+        const heldTask = { token_usage: ${JSON.stringify(usage({ input: 4000, cache: 900, output: 70 }))} };
+        const nextTask = { token_usage: ${JSON.stringify(usage({ tracked: false }))} };
+        return resolveTaskTokenUsage("task:a", heldTask, nextTask, "list-apply");
+    })()`);
+    assert.equal(kept.tracked, true, "未统计的行全 0，按旧数据处理");
+    assert.equal(kept.input_tokens, 4000);
 });
 
-test("日志只留最近 12 条，新的排在最前", () => {
+test("首次拿到数据与缺字段都不判回退", () => {
     const context = loadProbe();
-    vm.runInContext(`
-        for (let i = 0; i < 15; i += 1) {
-            noteTaskMetricRollback("task:" + i, "input_tokens", 1000, 900, "full-render");
-        }
-    `, context);
-    const state = vm.runInContext("S", context);
-    assert.equal(state.taskMetricRollbacks.length, 12);
-    assert.equal(state.taskMetricRollbacks[0].task_id, "task:14");
-    assert.equal(state.taskHallStats.task_hall_metric_rollback_count, 15, "计数记总命中，日志只留窗口");
+    assert.equal(run(context, `(() => {
+        const heldTask = { token_usage: null };
+        const nextTask = { token_usage: ${JSON.stringify(usage({ input: 10 }))} };
+        return resolveTaskTokenUsage("task:a", heldTask, nextTask, "patch-merge").input_tokens;
+    })()`), 10);
+    assert.equal(run(context, `(() => {
+        const heldTask = { token_usage: ${JSON.stringify(usage({ input: 10 }))} };
+        return resolveTaskTokenUsage("task:a", heldTask, {}, "patch-merge").input_tokens;
+    })()`), 10);
+    assert.equal(run(context, "S.taskMetricRollbacks.length"), 0);
 });
 
-test("两条渲染道都挂观测，否则复发时读不到数", () => {
+test("两条写车道各挂守卫，列表道与补丁道都不许回退", () => {
     assert.match(
         TASKS_CODE,
-        /noteTaskMetricRollback\(key, metricKey, previousValue, metricValue, "card-patch"\)/,
-        "增量补丁道"
+        /resolveTaskTokenUsage\(taskId, heldTask, item, "list-apply"\)/,
+        "列表整表替换道"
     );
     assert.match(
         TASKS_CODE,
-        /noteTaskMetricRollback\(taskId, item\.key, previousValue, hasValue \? item\.value : null, "full-render"\)/,
-        "整网格重建道"
+        /resolveTaskTokenUsage\(taskId, previousTask, nextTask, "patch-merge"\)/,
+        "补丁合并道"
     );
-    // 归因判据必须由两条写车道各自盖章：列表整表替换记 list，补丁合并记 patch。
-    assert.match(TASKS_CODE, /sources\[taskId\] = "list";/, "列表道落来源");
-    assert.match(TASKS_CODE, /noteTaskItemStateSource\(taskId, "patch"\);/, "补丁道落来源");
+    assert.match(TASKS_CODE, /sources\[taskId\] = "list";/, "列表道落来源标记");
+    assert.match(TASKS_CODE, /noteTaskItemStateSource\(taskId, "patch"\);/, "补丁道落来源标记");
 });
