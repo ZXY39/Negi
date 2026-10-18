@@ -2443,7 +2443,9 @@ def test_recreate_runtime_session_enriches_completed_continuity_only_restore_wit
     assert runtime_session._frontdoor_actual_tool_schema_hash == 'tool-artifact'
 
 
-def _build_channel_ceo_session_delete_client(tmp_path: Path, monkeypatch, *, persist_channel_session: bool = False):
+def _build_channel_ceo_session_delete_client(
+    tmp_path: Path, monkeypatch, *, persist_channel_session: bool = False, running: bool = False
+):
     _mock_ceo_catalog_config(monkeypatch)
 
     from g3ku.runtime.api import ceo_sessions
@@ -2453,6 +2455,7 @@ def _build_channel_ceo_session_delete_client(tmp_path: Path, monkeypatch, *, per
             self._sessions = {session.key: session for session in sessions}
             self._paths = dict(paths)
             self._extra_keys = list(extra_keys)
+            self.workspace = tmp_path
 
         def get_path(self, key: str) -> Path:
             return self._paths[key]
@@ -2500,7 +2503,9 @@ def _build_channel_ceo_session_delete_client(tmp_path: Path, monkeypatch, *, per
     class _RuntimeManager:
         def get(self, session_id: str):
             _ = session_id
-            return None
+            if not running:
+                return None
+            return SimpleNamespace(state=SimpleNamespace(is_running=True, status='running'))
 
         def remove(self, session_id: str):
             captured['removed_session'] = session_id
@@ -5894,3 +5899,50 @@ async def test_load_tool_context_includes_exec_runtime_policy(tmp_path: Path):
     finally:
         await service.close()
         manager.close()
+
+
+def test_deleting_a_session_with_a_running_turn_is_refused_and_changes_nothing(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """在飞的回合还没收尾时不许删：删除的破坏动作排在 cancel 之前。
+
+    转录、侧车与产物先被删，`cancel_session_tasks` 才在后面一步——那一轮收尾时会把刚
+    删掉的东西按原会话键写回来，界面表现为"删了又自己冒出来"。
+    """
+    state = _build_channel_ceo_session_delete_client(tmp_path, monkeypatch, running=True)
+    assert state.inflight_path.exists()
+
+    response = state.client.request(
+        'DELETE',
+        f'/api/ceo/sessions/{state.channel_id}',
+        json={'delete_task_records': True},
+    )
+
+    assert response.status_code == 409, response.text
+    assert response.json()['detail'] == 'ceo_turn_in_progress'
+    # 闸门在任何破坏动作之前：心跳清理、任务删除、会话移除与取消都没被调用。
+    assert state.captured == {}
+    assert state.inflight_path.exists()
+    assert state.paused_path.exists()
+    assert state.upload_dir.exists()
+
+
+def test_bulk_delete_reports_a_running_session_as_failed_without_sinking_the_batch(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """批量车道里这一条只算自己失败，其余照删。"""
+    state = _build_channel_ceo_session_delete_client(tmp_path, monkeypatch, running=True)
+
+    response = state.client.request(
+        'POST',
+        '/api/ceo/sessions/bulk-delete',
+        json={'session_ids': [state.channel_id], 'delete_task_records': True},
+    )
+
+    assert response.status_code == 200, response.text
+    payload = response.json()
+    assert payload['deleted_count'] == 0
+    assert payload['failed_count'] == 1
+    assert payload['results'][0]['error'] == 'ceo_turn_in_progress'
+    assert state.captured == {}
+    assert state.inflight_path.exists()

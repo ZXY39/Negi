@@ -483,6 +483,11 @@ async def _delete_single_ceo_session(
         if (forget_identity or is_channel_session)
         else None
     )
+    # 破坏动作之前先问"这一会话是不是还在跑"：转录/侧车/产物都在下面几步里被删，
+    # 而 `cancel_session_tasks` 排在它们之后，在飞的回合收尾时会把刚删掉的那一份写回来
+    # （表现为删掉的会话带着新转录重新出现）。批量车道把这条 409 收成逐项 failed。
+    if _session_is_running(runtime_manager, session_key):
+        raise HTTPException(status_code=409, detail="ceo_turn_in_progress")
     entry = registry.get_by_session_key(session_key) if registry is not None else None
     # 渠道会话的「删除」按该桥的 token 条目分流：条目还在＝身份留着、卡片隐身（入站即回来）；
     # 条目没了＝再无人认领，连注册表一起注销。显式 `forget_identity` 的请求优先，按注销走。
