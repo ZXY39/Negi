@@ -688,7 +688,10 @@ class ProvidersConfig(Base):
 class WebConfig(Base):
     """Web server configuration."""
 
-    host: str = "0.0.0.0"
+    # 本机优先：默认只绑回环。要让同网段访问，操作员显式写 0.0.0.0（容器车道
+    # `docker/web-entrypoint.sh` 就是这么显式传的）。管理面没有鉴权，所以出厂
+    # 默认不能把端口开到整栋楼。
+    host: str = "127.0.0.1"
     port: int = 18790
 
 

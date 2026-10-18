@@ -285,3 +285,21 @@ def test_probe_helpers_pass_the_flag_at_runtime(monkeypatch) -> None:
         assert captured['kwargs'].get('creationflags') == negi_bootstrap.subprocess.CREATE_NO_WINDOW
     else:
         assert 'creationflags' not in captured['kwargs']
+
+
+def test_web_bind_default_is_loopback_and_the_container_lane_stays_explicit() -> None:
+    """出厂默认只绑回环：管理面没有鉴权依赖，`0.0.0.0` 等于把删任务/改密钥开放给整网段。
+
+    容器车道要对外是它自己显式传 `--host 0.0.0.0`，不靠默认值——所以这个默认改动
+    必须同时被钉住"容器那侧仍然显式对外"，否则下次读到默认值的人会以为漏了什么。
+    """
+    from pathlib import Path
+
+    from g3ku.config.schema import WebConfig
+
+    assert WebConfig().host == "127.0.0.1"
+    assert WebConfig().port == 18790
+
+    repo_root = Path(__file__).resolve().parents[2]
+    entrypoint = (repo_root / "docker" / "web-entrypoint.sh").read_text(encoding="utf-8")
+    assert "--host 0.0.0.0" in entrypoint
