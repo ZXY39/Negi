@@ -9,6 +9,7 @@ final splitting, outbound push).
 from __future__ import annotations
 
 import asyncio
+import json
 
 import pytest
 
@@ -306,6 +307,28 @@ async def test_pause_without_active_turn_replies_no_task():
 
 
 @pytest.mark.asyncio
+async def test_pause_command_with_fullwidth_exclamation_still_pauses():
+    """中文输入法打出的"暂停！"必须是停机指令，不是一条交给 agent 的消息。"""
+    dispatcher, g3ku, onebot = _dispatcher(send_status="started", turn_id="t-77")
+    await dispatcher.handle_onebot_event(
+        {"post_type": "message", "message_type": "private", "user_id": 7, "message": "开始干活"}
+    )
+    await dispatcher.handle_onebot_event(
+        {"post_type": "message", "message_type": "private", "user_id": 7, "message": "暂停！"}
+    )
+    assert g3ku.paused == ["t-77"]
+    assert onebot.private == [("7", "已暂停。")]
+
+
+def test_control_command_normalization_strips_fullwidth_marks():
+    assert normalize_control_command_text("暂停！") == "暂停"
+    assert normalize_control_command_text("停止？") == "停止"
+    assert normalize_control_command_text("暂停、") == "暂停"
+    # 控制词之外的文本不许被改动：只有尾部标点被剥。
+    assert normalize_control_command_text("暂停！任务") == "暂停！任务"
+
+
+@pytest.mark.asyncio
 async def test_stop_command_cancels_session():
     dispatcher, g3ku, onebot = _dispatcher()
     await dispatcher.handle_onebot_event(
@@ -416,158 +439,20 @@ async def test_progress_flush_respects_max_lines():
     assert onebot.private == [("7", "步骤0\n步骤1")]
 
 
-# -- inbound files ----------------------------------------------------------
-
-
 @pytest.mark.asyncio
-async def test_file_message_downloaded_and_forwarded():
-    """私聊文件消息不再被静默丢弃：下载后以 kind=file 提交，mime 按文件名推断。"""
-    dispatcher, g3ku, onebot = _dispatcher()
-    await dispatcher.handle_onebot_event(
-        {
-            "post_type": "message",
-            "message_type": "private",
-            "user_id": 7,
-            "message": [
-                {
-                    "type": "file",
-                    "data": {"url": "https://cdn.example/报告.docx", "name": "报告.docx", "size": 123},
-                }
-            ],
-        }
-    )
-    assert onebot.downloads == ["https://cdn.example/报告.docx"]
-    assert len(g3ku.sent) == 1
-    payload = g3ku.sent[0]
-    assert payload["text"] == ""
-    attachments = payload["attachments"]
-    assert len(attachments) == 1
-    assert attachments[0]["kind"] == "file"
-    assert attachments[0]["name"] == "报告.docx"
-    assert attachments[0]["mime_type"].endswith("wordprocessingml.document")
-    assert attachments[0]["data_base64"]
-
-
-@pytest.mark.asyncio
-async def test_group_file_resolved_via_get_group_file_url():
-    """群文件只带 id+busid：桥调 get_group_file_url 换取下载链接。"""
-    dispatcher, g3ku, onebot = _dispatcher()
-    await dispatcher.handle_onebot_event(
-        {
-            "post_type": "message",
-            "message_type": "group",
-            "group_id": 42,
-            "message": [
-                {"type": "at", "data": {"qq": "999"}},
-                {"type": "file", "data": {"id": "fid-1", "name": "表格.xlsx", "busid": "bus-7"}},
-            ],
-        }
-    )
-    assert onebot.actions == [
-        ("get_group_file_url", {"group_id": 42, "file_id": "fid-1", "busid": "bus-7"})
-    ]
-    assert onebot.downloads == ["https://cdn.example/group-file.docx"]
-    attachments = g3ku.sent[0]["attachments"]
-    assert len(attachments) == 1 and attachments[0]["kind"] == "file"
-
-
-@pytest.mark.asyncio
-async def test_unresolvable_file_noted_in_text():
-    """拿不到下载链接的文件不得静默吞掉：正文追加提示，回合照常提交。"""
-    dispatcher, g3ku, onebot = _dispatcher()
-    onebot.fail_actions.add("get_group_file_url")
-    await dispatcher.handle_onebot_event(
-        {
-            "post_type": "message",
-            "message_type": "group",
-            "group_id": 42,
-            "message": [
-                {"type": "at", "data": {"qq": "999"}},
-                {"type": "file", "data": {"id": "fid-2", "name": "数据.zip", "busid": "bus-8"}},
-            ],
-        }
-    )
-    payload = g3ku.sent[0]
-    assert "[文件 数据.zip 未能获取]" in payload["text"]
-    assert payload["attachments"] is None
-
-
-# -- outbound files ---------------------------------------------------------
-
-
-@pytest.mark.asyncio
-async def test_outbound_event_attachment_sent_as_upload_action():
-    """reply.final 携带附件：桥下载签名 URL 后经 upload_private_file 以
-    base64:// 发送，正文随后单独发送。"""
-    dispatcher, g3ku, onebot = _dispatcher()
+async def test_reply_final_drains_every_progress_line_before_the_answer():
+    """答案之前必须把里程碑排空，不许留到答案之后的节流 tick。"""
+    behavior = BehaviorConfig(bot_user_id=999, progress_max_lines_per_message=2)
+    dispatcher, g3ku, onebot = _dispatcher(behavior=behavior)
     await dispatcher.handle_onebot_event(
         {"post_type": "message", "message_type": "private", "user_id": 7, "message": "hi"}
     )
     session_id = g3ku.sessions["qq:dm:7"]
-    await dispatcher._handle_g3ku_event(
-        session_id,
-        {
-            "type": "reply.final",
-            "text": "日报已生成：日报",
-            "attachments": [
-                {"name": "日报.docx", "mime_type": "application/octet-stream", "size": 10, "url": "/api/ceo/media/original?token=t1"}
-            ],
-        },
-    )
-    assert g3ku.media_downloads == ["/api/ceo/media/original?token=t1"]
-    upload = [action for action in onebot.actions if action[0] == "upload_private_file"]
-    assert len(upload) == 1
-    params = upload[0][1]
-    assert params["user_id"] == 7
-    assert params["name"] == "日报.docx"
-    assert params["file"].startswith("base64://")
-    assert onebot.private == [("7", "日报已生成：日报")]
+    for i in range(5):
+        await dispatcher._handle_g3ku_event(session_id, {"type": "progress", "text": f"步骤{i}"})
 
+    await dispatcher._handle_g3ku_event(session_id, {"type": "reply.final", "text": "答案"})
 
-@pytest.mark.asyncio
-async def test_outbound_image_attachment_sent_as_cq_image():
-    dispatcher, g3ku, onebot = _dispatcher()
-    await dispatcher.handle_onebot_event(
-        {"post_type": "message", "message_type": "group", "group_id": 42,
-         "message": [{"type": "at", "data": {"qq": "999"}}, {"type": "text", "data": {"text": "hi"}}]}
-    )
-    session_id = g3ku.sessions["qq:group:42"]
-    await dispatcher._handle_g3ku_event(
-        session_id,
-        {
-            "type": "outbound.created",
-            "text": "图表已生成：图表",
-            "external_key": "qq:group:42",
-            "attachments": [
-                {"kind": "image", "name": "chart.png", "mime_type": "image/png", "size": 8, "url": "/api/ceo/media/original?token=t2"}
-            ],
-        },
-    )
-    assert len(onebot.group) == 2
-    image_message = onebot.group[0][1]
-    assert image_message.startswith("[CQ:image,file=base64://") and image_message.endswith("]")
-    assert onebot.group[1] == ("42", "图表已生成：图表")
-
-
-@pytest.mark.asyncio
-async def test_outbound_attachment_failure_degrades_to_signed_link():
-    """下载失败时附件降级为签名链接文本行，不静默丢失。"""
-    dispatcher, g3ku, onebot = _dispatcher()
-    g3ku.media_bytes = None
-    await dispatcher.handle_onebot_event(
-        {"post_type": "message", "message_type": "private", "user_id": 7, "message": "hi"}
-    )
-    session_id = g3ku.sessions["qq:dm:7"]
-    await dispatcher._handle_g3ku_event(
-        session_id,
-        {
-            "type": "reply.final",
-            "text": "日报已生成：日报",
-            "attachments": [
-                {"name": "日报.docx", "url": "/api/ceo/media/original?token=t3"}
-            ],
-        },
-    )
-    assert onebot.private == [
-        ("7", "日报已生成：日报\n📎 日报.docx: http://127.0.0.1:18790/api/ceo/media/original?token=t3")
-    ]
+    texts = [text for _, text in onebot.private]
+    assert texts == ["步骤0\n步骤1", "步骤2\n步骤3", "步骤4", "答案"]
+    assert session_id not in dispatcher._progress

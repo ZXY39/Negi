@@ -25,7 +25,9 @@ from .onebot import OnebotClient
 PAUSE_COMMANDS = {"/pause", "pause", "暂停", "暫停"}
 STOP_COMMANDS = {"/stop", "停止"}
 # Mirrors the legacy _CONTROL_TRAILING_PUNCTUATION_RE normalization.
-_CONTROL_TRAILING_PUNCTUATION_RE = re.compile(r"[.!?…,，。;；:：'\"’”)\]}]+$")
+# 全角 ！ ？ 与顿号必须在剥除集合里：中文输入法打出的"暂停！"如果留下尾标，
+# 整串就不再等于控制词，操作者的停机意图会被当普通消息交给 agent。
+_CONTROL_TRAILING_PUNCTUATION_RE = re.compile(r"[.!?…,，。、;；:：'\"’”！？)\]}]+$")
 _CQ_IMAGE_RE = re.compile(r"\[CQ:image[^\]]*?url=([^,\]]+)[^\]]*\]")
 _CQ_AT_RE = re.compile(r"\[CQ:at,qq=(\d+)\]")
 _CQ_FILE_RE = re.compile(r"\[CQ:file,?([^\]]*)\]")
@@ -306,6 +308,17 @@ class Dispatcher:
         del buffer.lines[:limit]
         external_key = self._g3ku.external_key_for(session_id)
         await self._send_to(external_key, "\n".join(lines))
+        if not buffer.lines:
+            self._progress.pop(session_id, None)
+
+    async def _drain_progress(self, session_id: str) -> None:
+        """终态事件前把里程碑一次清空。
+
+        只发一片的话，残余行会在答案之后的节流 tick 里才发出去（里程碑排在答案
+        后面，还会串进下一回合），而按回合寿命留下的空缓冲永不出队。
+        """
+        while session_id in self._progress:
+            await self._flush_progress(session_id)
 
     # -- g3ku event stream ---------------------------------------------------
 
@@ -335,14 +348,14 @@ class Dispatcher:
             buffer.lines.append(str(event.get("text") or "").strip())
             return
         if event_type == "reply.final":
-            await self._flush_progress(session_id)
+            await self._drain_progress(session_id)
             text = str(event.get("text") or "")
             external_key = self._g3ku.external_key_for(session_id)
             await self._deliver_event(external_key, text, event.get("attachments"))
             await self._ack_outbox(session_id, event)
             return
         if event_type == "turn.failed":
-            await self._flush_progress(session_id)
+            await self._drain_progress(session_id)
             error = str(event.get("error") or "").strip()
             if error:
                 external_key = self._g3ku.external_key_for(session_id)
@@ -372,10 +385,6 @@ class Dispatcher:
             await self._g3ku.ack_outbox(session_id, outbox_id)
         except Exception:
             return
-
-    async def flush_all_progress(self) -> None:
-        for session_id in list(self._progress.keys()):
-            await self._flush_progress(session_id)
 
     async def progress_loop(self) -> None:
         """Throttled milestone flusher (legacy QQBOT_PROGRESS_MIN_INTERVAL)."""

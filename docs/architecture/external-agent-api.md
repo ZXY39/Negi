@@ -81,7 +81,7 @@
 |---|---|---|
 | `turn.started` / `turn.completed` / `turn.failed` | 回合执行器 | 终态恰好一个；`turn.completed.cancelled=true` 表示被暂停/取消。`turn.failed` 只供机器读取，给用户看的那一句由运行时另投一条渠道通知（见「回合契约」终态不变量） |
 | `reply.delta` | `assistant_stream_delta` | text 为最新思考段权威全文（桥做全量替换而非追加） |
-| `progress` | `message_delta`（progress/analysis）、工具开始/出错 | `kind: milestone/tool/tool_error`；**g3ku 发全量，节流是桥的职责**。`kind=tool` 的那条额外带结构化 `tool_name`（人读文本 `🔧 xxx started` 会随文案漂，要工具名的调用方读这个键，不做反解） |
+| `progress` | `message_delta`（progress/analysis）、工具开始/出错 | `kind: milestone/tool/tool_error`；**g3ku 发全量，节流是桥的职责**。节流只决定"一次发几行"，不决定归属：`reply.final` / `turn.failed` 到达时桥必须先把该会话的缓冲整段排空再交付终态正文，否则残余里程碑会排在答案之后落地（读起来像答案还在自述过程，还会串进下一回合），而按回合寿命留下的空缓冲永不出队。`kind=tool` 的那条额外带结构化 `tool_name`（人读文本 `🔧 xxx started` 会随文案漂，要工具名的调用方读这个键，不做反解） |
 | `reply.final` | `message_end` | 权威全文：经出站清洗 + 附件提取（见下）+ 剩余本地引用改写为签名媒体 URL（`ceo_media` HMAC token）；可携带 `attachments`；发布前进持久账本登记并携带 `outbox_id`（合同见「持久 outbox」）；内部心跳 ack（heartbeat_internal）不转发。`usage` 是**发出 `message_end` 的那条会话自己盖章带出的**一份（形状见 `web-and-admin.md`「Per-Turn Token Usage Contract」），relay 只透传事件负载里的这份、绝不按 turn id 反查会话累加器，因此会话名下的第一回合与后续回合同形；本轮没有可报数字时该键不出现。本回合派发出的任务号以 `task_ids` 数组项随同出现（取自运行时自己写的 `create_async_task` 工具结果，不经"那行是否已落库"的存在性闸门——闸门只管模型可见的那句派发尾注 `verified_task_ids`；本轮没有派发时该键不出现，桥与 MCP 网关都只透传，不自行按正文反查）。事件里同时有**两套回合 id**：外层 `turn_id` 是 `ExternalTurnService` 的记录 id（`turn.started`/`turn.completed`/`turn.failed` 与暂停、续取定址都用它），`transcript_turn_id` 是**转录行的** `turn_id`（`GET /sessions/{id}/turns/{turn_id}` 唯一认得的键）；两者不同时才带出 `transcript_turn_id`，同一套 id 的发起方（网页/cron）不会多出这个键。曾有调用方拿外层 id 回读原文得到 404，这就是两套命名空间的原因——实测也证明"把 record id 盖进消息 metadata 当作盘键"盖不住（转录行仍是另一个 id），所以这里选择把两个 id 都交出去而不是强行合一 |
 | `outbound.created` | 出站总线（见「出站路由（主动推送）」） | 主动推送，可携带 `attachments` |
 
