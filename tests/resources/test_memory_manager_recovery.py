@@ -953,7 +953,7 @@ async def test_v2_run_due_batch_once_parks_rejected_legacy_assess_batch_for_manu
         assert failed[0]["category"] == "protocol"
         assert failed[0]["request_ids"] == ["assess_1"]
         assert failed[0]["op"] == "assess"
-        assert failed[0]["error_history"][0]["error"] == "memory agent must call memory_apply_batch exactly once"
+        assert failed[0]["error_history"][0]["error"] == "no memory batch is staged: call memory_apply_batch first"
         assert failed[0]["items"][0]["payload_text"] == "window payload"
     finally:
         manager.close()

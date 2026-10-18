@@ -52,6 +52,12 @@ from main.prompts import load_prompt
 # `note_ref` 列，渲染出来的是从名字派生的句柄，任何判据都不再扫正文里的 `ref:` / `见noteid:`。
 _NOTE_REF_RE = re.compile(r"(?:\bref:|见noteid:)(?P<ref>[a-z0-9_]+)\b")
 
+# 模型看到的是带行号的正文（`18| 261018:...`），它抄 content 时会把这两段一起带回来。日期和
+# 行号都由系统维护，正文里出现就是重影：`261018:261018:...`。剥掉比打回好——打回要模型再读一遍
+# 整块，而这里能确定它抄的是哪一段。
+_RENDERED_LINE_NUMBER_RE = re.compile(r"^\s*\d{1,4}\s*[|｜]\s*")
+_RENDERED_DATE_PREFIX_RE = re.compile(r"^\s*\d{6}\s*[:：]\s*")
+
 
 def _strip_note_ref_markers(text: str) -> str:
     """Drop the legacy in-text markers, then tidy the whitespace they leave behind."""
@@ -590,6 +596,9 @@ class _MemoryToolSession:
     applied_batch: dict[str, Any] | None = None
     apply_batch_count: int = 0
     confirm_count: int = 0
+    # True only between a preview the model was handed and the next submission. It is what
+    # tells the tool whether the new preview replaced one the model has already read.
+    previewed: bool = False
 
     def note_directories(self) -> list[Path]:
         return [self.index_dir, self.notes_dir] if self.index_dir is not None else [self.notes_dir]
@@ -647,6 +656,8 @@ class _MemoryToolSession:
         The model reads its own edit back as a line diff before it commits, so a wrong
         line number is caught here instead of becoming a legal write to the wrong memory.
         A zero-change batch skips the round entirely - there is nothing to review.
+        Resubmitting stages a new payload and clears this flag, so the diff the model
+        confirmed is always the diff that lands.
         """
         if not isinstance(self.applied_batch, dict):
             return {"ok": False, "errors": {"batch": "stage a batch before confirming"}}
@@ -879,6 +890,11 @@ class _MemoryToolSession:
             return {"ok": False, "errors": errors}
 
         self.apply_batch_count += 1
+        # A resubmission replaces the staged payload, so the confirmation attached to the
+        # previous preview is void: otherwise confirm(A) -> resubmit(B) would land B without
+        # anyone having read B's diff.
+        self.confirm_count = 0
+        self.previewed = False
         self.applied_batch = {
             "adds": normalized_adds,
             "rewrites": normalized_rewrites,
@@ -4677,6 +4693,11 @@ class MemoryManager:
     @staticmethod
     def _normalize_memory_content_text(text: str, *, field: str = "memory content") -> str:
         normalized = str(text or "").strip()
+        # The block prints `18| 261018:text`, so a model copying a line into `content` brings
+        # the address and the date along. Both are system-owned: strip them instead of
+        # rejecting, because a rejection costs another full read of the block.
+        normalized = _RENDERED_LINE_NUMBER_RE.sub("", normalized).strip()
+        normalized = _RENDERED_DATE_PREFIX_RE.sub("", normalized).strip()
         if not normalized:
             raise _MemoryAgentValidationError(f"{field} must not be empty")
         if "\n" in normalized or "\r" in normalized:
@@ -5769,12 +5790,17 @@ class MemoryManager:
         ) -> dict[str, Any]:
             """Stage one complete memory mutation batch.
 
-            The memory block shows one line per memory as `YYMMDD:text`; it prints no ids, so
-            a memory is named by its **1-based line number in the block you were just given**.
-            `rewrites` takes `{line, content, minimal_memory, note_ref?}`; `deletes` takes a
-            list of line numbers; `inspired_lines` takes the line numbers this request actually
-            decided on. Lines outside the block are refused per item, the rest of the batch
-            still stands. Do not write a date into `content` - the backend owns the prefix.
+            The memory block shows one line per memory as `YYMMDD:text`, with its 1-based
+            line number printed in front (`18| YYMMDD:text`); that number is how a memory is
+            named. `rewrites` takes `{line, content, minimal_memory, note_ref?}`; `deletes`
+            takes a list of line numbers; `inspired_lines` takes the line numbers this
+            request actually decided on. Lines outside the block are refused per item, the
+            rest of the batch still stands. Do not write a date into `content` - the backend
+            owns the prefix.
+
+            Submitting again replaces the staged batch and voids its confirmation: use that
+            to correct a preview you do not accept, then read the new diff and confirm that
+            one. Only the last submission can land, and it still needs `memory_apply_confirm`.
 
             `category_deletes` removes a whole section of the consolidation navigation at the
             end of the block: pass the `(note: ...)` token shown beside that section (the real
@@ -5783,6 +5809,7 @@ class MemoryManager:
             under `memory/index/` stays - this lane never deletes archive files.
             """
 
+            replaced_previous = session.previewed
             staged = session.apply_batch(
                 adds=adds,
                 rewrites=rewrites,
@@ -5795,10 +5822,27 @@ class MemoryManager:
                 already_satisfied=already_satisfied,
             )
             if staged.get("ok") and session.batch_has_mutation():
+                preview = self._memory_batch_preview(session)
+                if preview.get("status") != "built":
+                    # A batch the machine cannot build is not a staged batch: leaving it
+                    # staged would let a confirm (or the commit gate) retry a payload that
+                    # already failed, which is exactly the loop this replaces.
+                    session.applied_batch = None
+                    return {
+                        "ok": False,
+                        "errors": {"batch": str(preview.get("error") or "batch did not build")},
+                        "preview": preview,
+                        "next_step": "fix this batch and call memory_apply_batch again; nothing was staged",
+                    }
                 staged["status"] = "batch_previewed"
-                staged["preview"] = self._memory_batch_preview(session)
+                staged["preview"] = preview
+                session.previewed = True
+                staged["replaced_previous"] = replaced_previous
                 staged["next_step"] = (
-                    "read the preview; if it is what you meant, call memory_apply_confirm() once"
+                    "this preview replaced the earlier one and voided its confirmation; "
+                    "re-read the diff, then call memory_apply_confirm() once"
+                    if replaced_previous
+                    else "read the preview; if it is what you meant, call memory_apply_confirm() once"
                 )
             return staged
 
@@ -5816,6 +5860,29 @@ class MemoryManager:
             _build_memory_tool(name="memory_apply_batch", fn=memory_apply_batch),
             _build_memory_tool(name="memory_apply_confirm", fn=memory_apply_confirm),
         ]
+
+    @staticmethod
+    def _render_numbered_memory_body(snapshot_text: str) -> str:
+        """The block as the model reads it: every resident line prefixed with its number.
+
+        The line number is the only address the batch tools accept, and counting 20+ long
+        Chinese lines by eye is where a batch goes wrong - observed: one rewrite aimed at
+        line 18 landed on 17 in one attempt and on 19 in the next. Printing the number turns
+        the task from counting into reading. The consolidation navigation is printed verbatim
+        and unnumbered: those rows have no line, `category_deletes` is their address.
+        """
+
+        resident_text, consolidation_text = split_consolidation_block(str(snapshot_text or ""))
+        lines = resident_text.splitlines()
+        if not lines:
+            return "(empty)"
+        numbered = "\n".join(f"{index}| {line}" for index, line in enumerate(lines, 1))
+        if consolidation_text.strip():
+            numbered += (
+                "\n\n以下归并区没有行号，不能写进 rewrites/deletes/inspired_lines；"
+                "要摘掉整类用 category_deletes：\n" + consolidation_text.strip()
+            )
+        return numbered
 
     def _memory_agent_user_prompt(
         self,
@@ -5842,16 +5909,18 @@ class MemoryManager:
         ]
         repair_block = f"\n上一轮输出无效：{repair_reason}\n请修复后重试。\n" if repair_reason else ""
         return (
-            f"当前记忆正文：\n{snapshot_text or '(empty)'}\n\n"
+            f"当前记忆正文（每行开头 `N|` 是这一行的行号）：\n"
+            f"{self._render_numbered_memory_body(snapshot_text)}\n\n"
             f"现有 note refs：{json.dumps(note_index, ensure_ascii=False)}\n"
             f"当前批次类型：{batch.op}\n"
             f"待处理请求：\n{json.dumps(requests, ensure_ascii=False, indent=2)}\n"
             "提交要求：\n"
-            "- 只允许使用一次 memory_apply_batch 完成所有修改。\n"
+            "- 所有修改用一次 memory_apply_batch 交清；预览不对可以改完重交，后一版覆盖前一版并作废它的确认。\n"
+            "- 行号就是正文每行开头的 `N|`，填进 rewrites/deletes/inspired_lines，不要把它抄进 content。\n"
             "- adds 条目必须包含 content、minimal_memory 和 decision_source。\n"
             "- content 写法按来源分：decision_source=user 写成陈述句（用户偏好什么、某对象是什么），"
             "不要写成给自己的命令；decision_source=self 写成条件+要求（当……时，要……）。\n"
-            "- rewrites 条目必须包含 line（这条记忆在当前正文里的行号，从 1 数起）、content 和 minimal_memory；"
+            "- rewrites 条目必须包含 line（正文行首那个行号）、content 和 minimal_memory；"
             "系统保留原来源并维护该行的日期。\n"
             "- delete 请求要解析成当前正文里的行号，并把这些行号放进 deletes。\n"
             "- delete 批次没有零变更出口：目标内容已不在当前正文里（已被改写或被更早的批次删掉）时，"
@@ -5949,8 +6018,8 @@ class MemoryManager:
         session: _MemoryToolSession,
         batch: MemoryBatch,
     ) -> _MemoryValidatedWrite:
-        if session.apply_batch_count != 1 or not isinstance(session.applied_batch, dict):
-            raise _MemoryAgentValidationError("memory agent must call memory_apply_batch exactly once")
+        if not isinstance(session.applied_batch, dict):
+            raise _MemoryAgentValidationError("no memory batch is staged: call memory_apply_batch first")
         payload = dict(session.applied_batch or {})
         adds = list(payload.get("adds") or [])
         rewrites = list(payload.get("rewrites") or [])

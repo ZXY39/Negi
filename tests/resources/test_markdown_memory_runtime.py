@@ -1351,18 +1351,6 @@ def test_memory_agent_apply_batch_rejects_inspired_lines_that_are_not_resident(t
             now_iso="2026-04-25T00:00:00+08:00",
         )
         manager._rebuild_memory_snapshot_from_sqlite(now_iso="2026-04-25T00:00:00+08:00")
-        batch = module.MemoryBatch(
-            op="write",
-            items=[
-                module.MemoryQueueRequest(
-                    op="write",
-                    decision_source="self",
-                    payload_text="Use headings",
-                    created_at=manager._now_iso(),
-                    request_id="write_1",
-                )
-            ],
-        )
         session = module._MemoryToolSession(snapshot_text=manager.snapshot_text(), notes_dir=manager.notes_dir)
         apply_tool = next(tool for tool in manager._memory_agent_tools(session) if tool.name == "memory_apply_batch")
 
@@ -1373,14 +1361,13 @@ def test_memory_agent_apply_batch_rejects_inspired_lines_that_are_not_resident(t
             }
         )
 
-        assert result["ok"] is True
-        session.confirm_batch()
-        with pytest.raises(module._MemoryAgentValidationError, match=r"inspired_lines\[0\]: line 2 is outside"):
-            manager._build_validated_write_from_apply_batch(
-                before_text=manager.snapshot_text(),
-                session=session,
-                batch=batch,
-            )
+        # 建不起来的批次不暂存：行号在预览这步就解析，越界当场打回并指回 memory_apply_batch，
+        # 不再等确认后由提交点才炸（那是"确认一个已知失败的载荷"的形状）。
+        assert result["ok"] is False
+        assert "inspired_lines[0]: line 2 is outside" in result["errors"]["batch"]
+        assert result["preview"]["status"] == "unbuildable"
+        assert session.applied_batch is None
+        assert session.confirm_batch()["ok"] is False
     finally:
         manager.close()
 
