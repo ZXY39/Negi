@@ -4562,6 +4562,7 @@ def test_task_distribution_error_prompt_lane_renders_reminder() -> None:
         },
         [],
         output_inline_limit=4000,
+        externalizer=None,
     )
     joined = "\n".join(lines)
     assert "audit" in joined

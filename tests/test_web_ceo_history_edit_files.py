@@ -417,8 +417,9 @@ def test_fork_clicked_message_uploads_returned_as_composer(workspace):
     _make_session(manager, key, messages)
     wcs.write_turn_boundary_snapshot(key, "t1", _payload())
 
+    # turn_id 指回复所在轮：t1 的回复之后分叉，被摘出的就是带附件的那条提问 t2。
     result = history_edit.fork_web_ceo_session(
-        session_manager=manager, agent=None, session_id=key, turn_id="t2",
+        session_manager=manager, agent=None, session_id=key, turn_id="t1",
     )
     composer = result["composer"]
     assert composer["text"] == "处理这个文件"
