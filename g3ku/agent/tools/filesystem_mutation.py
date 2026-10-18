@@ -14,6 +14,7 @@ from typing import Any
 from g3ku.resources.tool_settings import FilesystemToolSettings, runtime_tool_settings
 from g3ku.runtime.project_environment import apply_project_environment
 from g3ku.utils.helpers import model_data_root, resolve_model_path
+from g3ku.utils.process_tree import kill_process_tree
 from g3ku.utils.subprocess_text import decode_subprocess_output, enrich_subprocess_env_for_text
 
 _METADATA_START = '### PATCH_METADATA ###'
@@ -1439,11 +1440,14 @@ class FilesystemTool:
                     stderr=asyncio.subprocess.PIPE,
                     cwd=cwd,
                     env=env,
+                    start_new_session=True,
                 )
             try:
                 stdout, stderr = await asyncio.wait_for(process.communicate(), timeout=timeout_seconds)
             except asyncio.TimeoutError:
-                process.kill()
+                # 与 exec 车道同一条收尾判据：校验命令会派子孙（lint、pytest），
+                # 裸 kill() 只杀掉外壳，超时就留下一棵继续写盘、继续占 CPU 的孤儿树。
+                kill_process_tree(process)
                 try:
                     await asyncio.wait_for(process.wait(), timeout=5.0)
                 except asyncio.TimeoutError:

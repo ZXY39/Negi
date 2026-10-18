@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import os
 import pytest
 from g3ku.agent.tools.filesystem_mutation import FilesystemActionTool, FilesystemTool
 
@@ -185,3 +186,40 @@ async def test_flat_copy_tool_still_honours_an_explicit_create_parents_false(
 
     assert 'destination parent does not exist' in str(result), result
     assert not destination.exists()
+
+
+@pytest.mark.asyncio
+async def test_validation_timeout_terminates_the_whole_process_tree(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """超时的校验命令必须走整树收尾，不是只杀外壳。"""
+    from g3ku.agent.tools import filesystem_mutation as fs_module
+
+    workspace = tmp_path / 'workspace'
+    workspace.mkdir()
+    tool = FilesystemTool(workspace=workspace)
+    killed: list[object] = []
+    real_kill_tree = fs_module.kill_process_tree
+
+    def _spy_kill_tree(process):
+        killed.append(process)
+        return real_kill_tree(process)
+
+    monkeypatch.setattr(fs_module, 'kill_process_tree', _spy_kill_tree)
+    slow_command = 'Start-Sleep -Seconds 20' if os.name == 'nt' else 'sleep 20'
+
+    result = await tool._run_validation_command(command=slow_command, cwd=str(workspace), timeout_seconds=1)
+
+    assert result['timed_out'] is True
+    assert len(killed) == 1, 'timeout arm did not use the process-tree killer'
+    assert getattr(killed[0], 'returncode', None) is not None
+
+
+def test_validation_shell_runs_in_its_own_session() -> None:
+    """POSIX 那半条道要 start_new_session，否则 killpg 打不到子孙。"""
+    source = (REPO_ROOT / 'g3ku' / 'agent' / 'tools' / 'filesystem_mutation.py').read_text(encoding='utf-8')
+    lane = source.split('async def _run_validation_command', 1)[1].split('except Exception as exc:', 1)[0]
+
+    assert 'start_new_session=True' in lane
+    assert 'process.kill()' not in lane
