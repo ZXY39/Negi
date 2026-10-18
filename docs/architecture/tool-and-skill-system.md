@@ -131,7 +131,7 @@ CEO/frontdoor 另有任务生命周期与分发控制类固定工具。治理记
 当前选择规则：
 
 - `candidate_tool_names` 的上界是 RBAC 治理可见集，**不是**本轮已构建的可执行对象字典：候选 = 治理可见工具 −（本轮 callable ∪ 已提升）。候选生成是 inventory-only，没有语义召回层。`candidate_skill_ids` 与它同一语义。
-- 由此得到一条必须成立的三态划分：任一治理可见的工具在任一时刻恰属于「本轮可调用」/「本轮可加载并在下一轮提升」/「不可见（RBAC 关闭或 repair-required）」之一。存在第四态（可加载、不提升、也调不动）就是水合合同被破坏，排查路径见 `context-and-cache-troubleshooting.md`「节点侧排查要点」。
+- 由此得到一条必须成立的三态划分：**带执行器实例的**治理可见工具在任一时刻恰属于「本轮可调用」/「本轮可加载并在下一轮提升」/「不可见（RBAC 关闭或 repair-required）」之一。存在第四态（可加载、不提升、也调不动）就是水合合同被破坏，排查路径见 `context-and-cache-troubleshooting.md`「节点侧排查要点」。`tool_type: external` 不在这条划分内：按规范它不得带 handler（无 `main/`），因此永不会有执行器实例，也就不参与提升承诺——把它当第四态去"修"是误判，判据见本节"加载门控"里外部资源回退那一条。
 - 普通候选数量由 RBAC 可见工具决定，节点与 CEO/frontdoor 都不按语义 top-k 截断。
 - 当 query 明显表达写入、改写、删除、移动、复制、补丁等变更意图时，本地候选打分优先推 `filesystem_write` / `filesystem_edit` / `filesystem_delete` / `filesystem_move` / `filesystem_copy` / `filesystem_propose_patch` 这类工具名；`exec` 虽然可作为固定 builtin 保持可调用，但在这类意图下不作为候选文件变更方案的首选。
 

@@ -257,6 +257,16 @@ class ResourceRegistry:
             if descriptor.main_root is not None:
                 descriptor.available = False
                 descriptor.errors.append(f"external tool must not contain main/: {root}")
+            # The tool id is the manifest name, never the directory name, and the spec
+            # anchors the install dir as externaltools/<tool_id>/. A divergence is silent
+            # everywhere else (RBAC rows, load_tool_context, delete) while toolskill prose
+            # points at the directory, so name it. Internal tools deliberately diverge
+            # (`task_fetch_cn` -> `task_list`), so this stays external-only.
+            if descriptor.name != root.name:
+                descriptor.warnings.append(
+                    f"external tool id differs from its registration directory: "
+                    f"name '{descriptor.name}' vs '{root.name}'"
+                )
 
         allowed_children = {self.manifest_name, "toolskills"}
         if descriptor.tool_type == "internal":

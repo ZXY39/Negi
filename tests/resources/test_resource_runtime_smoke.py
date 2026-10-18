@@ -1619,6 +1619,38 @@ def test_external_tool_rejects_main_dir_and_install_dir_inside_tools(tmp_path: P
     assert any('outside the tools directory' in err for err in inside_tools_descriptor.errors)
 
 
+def test_external_tool_id_divergence_warns_while_internal_tools_stay_quiet(tmp_path: Path):
+    """The tool id is the manifest name, so a divergent registration directory is
+    silent everywhere downstream while toolskill prose points at the directory.
+    Internal tools diverge on purpose (`task_fetch_cn` -> `task_list`), so the
+    warning must not fire for them.
+    """
+    workspace = tmp_path / 'workspace'
+    (workspace / 'skills').mkdir(parents=True, exist_ok=True)
+    (workspace / 'tools').mkdir(parents=True, exist_ok=True)
+    tool_root = _write_demo_external_tool(workspace, name='external_browser')
+    manifest = tool_root / 'resource.yaml'
+    manifest.write_text(
+        manifest.read_text(encoding='utf-8').replace(
+            'name: external_browser', 'name: external_browser_runtime', 1
+        ),
+        encoding='utf-8',
+    )
+    shutil.copytree(REPO_ROOT / 'tools' / 'task_fetch_cn', workspace / 'tools' / 'task_fetch_cn')
+
+    registry = ResourceRegistry(workspace, skills_dir=workspace / 'skills', tools_dir=workspace / 'tools')
+    discovered = registry.discover().tools
+
+    external = discovered['external_browser_runtime']
+    assert external.available is True
+    assert any(
+        'differs from its registration directory' in warning and 'external_browser_runtime' in warning
+        for warning in external.warnings
+    )
+    internal = discovered['task_list']
+    assert not any('differs from its registration directory' in warning for warning in internal.warnings)
+
+
 @pytest.mark.asyncio
 async def test_main_runtime_query_tools_load_from_resources(tmp_path: Path):
     workspace = tmp_path / 'workspace'
