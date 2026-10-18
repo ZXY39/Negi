@@ -700,7 +700,9 @@ async def test_content_split_tool_executes_with_legacy_content_settings(tmp_path
 
         opened = json.loads(await tool.execute(path=str(inside_file), start_line=1, end_line=5))
         assert opened['ok'] is True
-        assert opened['excerpt'] == 'inside'
+        # 文本正文带行号栏（`g3ku/content/navigation.py` 的 LINE_GUTTER_SEPARATOR）：
+        # 被引行号与正文落在同一个数上。二进制/图片占位与字符模式不加栏。
+        assert opened['excerpt'] == '1: inside'
 
         blocked = await tool.execute(path=str(outside_file), start_line=1, end_line=5)
         assert 'outside workspace' in blocked
