@@ -377,6 +377,7 @@ def test_bootstrap_exit_stops_runtime_before_requesting_server_shutdown(monkeypa
     monkeypatch.setattr(bootstrap_rest, "_service", lambda: _Security())
     monkeypatch.setattr(bootstrap_rest, "_running_work_snapshot", _snapshot)
     monkeypatch.setattr(bootstrap_rest, "shutdown_web_runtime", _shutdown_runtime)
+    monkeypatch.setattr(bootstrap_rest, "can_request_server_shutdown", lambda: True)
     monkeypatch.setattr(
         bootstrap_rest,
         "request_server_shutdown",
@@ -459,6 +460,7 @@ def test_bootstrap_exit_pauses_running_work_before_shutdown(monkeypatch):
     monkeypatch.setattr(bootstrap_rest, "get_runtime_manager", lambda _agent=None: runtime_manager)
     monkeypatch.setattr(bootstrap_rest, "_running_work_snapshot", _snapshot)
     monkeypatch.setattr(bootstrap_rest, "shutdown_web_runtime", _shutdown_runtime)
+    monkeypatch.setattr(bootstrap_rest, "can_request_server_shutdown", lambda: True)
     monkeypatch.setattr(
         bootstrap_rest,
         "request_server_shutdown",
@@ -491,6 +493,7 @@ def test_bootstrap_exit_requires_pause_confirmation(monkeypatch):
 
     monkeypatch.setattr(bootstrap_rest, "_service", lambda: _Security())
     monkeypatch.setattr(bootstrap_rest, "_running_work_snapshot", _snapshot)
+    monkeypatch.setattr(bootstrap_rest, "can_request_server_shutdown", lambda: True)
 
     client = TestClient(_build_app())
     response = client.post("/bootstrap/exit", json={})
@@ -571,3 +574,55 @@ async def test_heartbeat_reply_notifier_skips_legacy_china_sessions(tmp_path):
         monkeypatch.undo()
 
     assert bus.outbound.empty()
+
+
+def test_exit_refuses_before_teardown_when_no_server_can_be_stopped(tmp_path, monkeypatch) -> None:
+    """`--reload` 车道：退不掉就什么都别关。
+
+    旧顺序是先 `shutdown_web_runtime()` 再发现没有 server 实例，回一个 503，
+    留下"端口还占着、runtime 已经没了"的半死进程。
+    """
+    from fastapi import FastAPI
+    from fastapi.testclient import TestClient
+
+    from g3ku.config.schema import Config
+    from main.api import bootstrap_rest
+
+    calls: list[str] = []
+
+    async def _snapshot():
+        return {
+            "has_running_work": False,
+            "running_sessions": [],
+            "running_tasks": [],
+            "summary_text": "idle",
+        }
+
+    async def _shutdown_runtime() -> None:
+        calls.append("shutdown_runtime")
+
+    class _Security:
+        config = Config()
+
+        def status(self):
+            return {"mode": "unlocked", "key_store": {"state": "ok"}}
+
+    monkeypatch.setattr(bootstrap_rest, "_service", lambda: _Security())
+    monkeypatch.setattr(bootstrap_rest, "_running_work_snapshot", _snapshot)
+    monkeypatch.setattr(bootstrap_rest, "shutdown_web_runtime", _shutdown_runtime)
+    monkeypatch.setattr(bootstrap_rest, "can_request_server_shutdown", lambda: False)
+    monkeypatch.setattr(
+        bootstrap_rest,
+        "request_server_shutdown",
+        lambda: calls.append("request_server_shutdown") or True,
+    )
+
+    app = FastAPI()
+    app.include_router(bootstrap_rest.router, prefix="/api")
+    client = TestClient(app)
+
+    response = client.post("/api/bootstrap/exit", json={})
+
+    assert response.status_code == 409, response.text
+    assert response.json()["detail"]["code"] == "exit_unavailable_in_reload"
+    assert calls == []

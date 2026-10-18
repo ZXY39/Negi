@@ -30,7 +30,7 @@ from g3ku.shells.web import (
     shutdown_web_runtime,
 )
 from g3ku.shells.web import wait_shutdown_pause_commands_drained
-from g3ku.web.server_control import request_server_shutdown
+from g3ku.web.server_control import can_request_server_shutdown, request_server_shutdown
 from main.api.admin_rest import _refresh_runtime_after_save
 
 router = APIRouter()
@@ -452,6 +452,18 @@ async def bootstrap_exit(payload: dict | None = Body(default=None)):
         or (payload or {}).get("stop_running_work")
         or (payload or {}).get("stopRunningWork")
     )
+    # 先问"这条道能不能退"，再决定要不要动任何东西：`--reload` 的服务进程由 uvicorn
+    # 的重载监督器自己起，本进程没有可关停的 server 实例。旧顺序是先关 runtime 再发现
+    # 退不掉并回 503，留下的就是"端口还占着、runtime 已经没了"的半死进程。
+    if not can_request_server_shutdown():
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "code": "exit_unavailable_in_reload",
+                "message": "这套服务是 uvicorn 重载车道起的，接口无法让它优雅退出；"
+                "请在终端按 Ctrl+C 结束进程。",
+            },
+        )
     snapshot = await _running_work_snapshot()
     if snapshot["has_running_work"] and not pause_running_work:
         raise HTTPException(

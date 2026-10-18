@@ -23,4 +23,15 @@ def request_server_shutdown() -> bool:
         return True
 
 
-__all__ = ["request_server_shutdown", "set_server_instance"]
+def can_request_server_shutdown() -> bool:
+    """退出这条道现在走不走得通——供调用方在**动手之前**问一次。
+
+    `--reload` 车道由 uvicorn 的重载监督器自己起服务进程，本进程里没有可写的
+    server 实例；先关 runtime 再发现退不掉，就会留下"端口还占着、runtime 已经没了"
+    的半死进程。所以这条判断必须发生在暂停工作与关停之前。
+    """
+    with _SERVER_LOCK:
+        return _SERVER_INSTANCE is not None
+
+
+__all__ = ["can_request_server_shutdown", "request_server_shutdown", "set_server_instance"]
