@@ -5088,12 +5088,14 @@ class ReActToolLoop:
     @staticmethod
     def _validate_final_result(
         *,
-        result: NodeFinalResult,
         raw_payload: dict[str, Any],
-        has_tool_results: bool,
-        node_kind: str,
     ) -> list[str]:
-        _ = result, has_tool_results, node_kind
+        """只校载荷形状：必填键、枚举取值、`summary` 非空、每条证据自身的字段与行号。
+
+        证据"够不够"不在这里判：空数组是否可接受归各车道的证据纪律（见
+        `main/prompts/acceptance_execution.md`），机器侧不打回——打回一次就是多烧
+        一轮模型，而验收打回本来就吃掉一个任务的大部分轮次。
+        """
         violations: list[str] = []
         missing_keys = [key for key in _RESULT_REQUIRED_KEYS if key not in raw_payload]
         violations.extend([f'missing required field: {key}' for key in missing_keys])
@@ -7512,12 +7514,7 @@ class ReActToolLoop:
         result = self._coerce_final_result_payload(raw_payload)
         if result is None:
             return None, prepared_history, [], f'{FINAL_RESULT_TOOL_NAME} returned an invalid payload'
-        violations = self._validate_final_result(
-            result=result,
-            raw_payload=raw_payload,
-            has_tool_results=self._node_has_meaningful_tool_results(task_id=task.task_id, node_id=node.node_id),
-            node_kind=node.node_kind,
-        )
+        violations = self._validate_final_result(raw_payload=raw_payload)
         if violations:
             return None, prepared_history, violations, ''
         return result, prepared_history, [], ''
@@ -8144,18 +8141,6 @@ class ReActToolLoop:
         if target_ref:
             return f'{base} {detail} 当前重复命中的目标：`{target_ref}`。'
         return f'{base} {detail}'
-
-    def _node_has_meaningful_tool_results(self, *, task_id: str, node_id: str) -> bool:
-        store = getattr(self._log_service, '_store', None)
-        lister = getattr(store, 'list_task_node_tool_results', None) if store is not None else None
-        if not callable(lister):
-            return False
-        ignored_tool_names = {STAGE_TOOL_NAME, FINAL_RESULT_TOOL_NAME, *ReActToolLoop._CONTROL_TOOL_NAMES}
-        for item in list(lister(task_id, node_id) or []):
-            tool_name = str(getattr(item, 'tool_name', '') or '').strip()
-            if tool_name and tool_name not in ignored_tool_names:
-                return True
-        return False
 
     @staticmethod
     def _extract_json_object_candidates(content: str) -> list[str]:

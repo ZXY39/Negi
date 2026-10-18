@@ -2327,48 +2327,6 @@ async def test_finalize_execution_stage_absorbs_pending_orphans(tmp_path: Path):
 
 
 @pytest.mark.asyncio
-async def test_react_loop_counts_meaningful_tool_results_from_tool_result_store(tmp_path: Path):
-    service = MainRuntimeService(
-        chat_backend=_DummyChatBackend(),
-        workspace_root=tmp_path,
-        store_path=tmp_path / 'runtime.sqlite3',
-        files_base_dir=tmp_path / 'tasks',
-        artifact_dir=tmp_path / 'artifacts',
-        governance_store_path=tmp_path / 'governance.sqlite3',
-        execution_mode='web',
-    )
-    try:
-        record = await _create_web_task(service)
-        service.log_service.record_tool_result_batch(
-            task_id=record.task_id,
-            node_id=record.root_node_id,
-            response_tool_calls=[
-                ToolCallRequest(id='call:filesystem', name='filesystem', arguments={'path': str(tmp_path)}),
-                ToolCallRequest(id='call:stage', name='submit_next_stage', arguments={'stage_goal': 'ignored'}),
-            ],
-            results=[
-                _tool_result_payload(
-                    call_id='call:filesystem',
-                    tool_name='filesystem',
-                    content='filesystem listed files',
-                ),
-                _tool_result_payload(
-                    call_id='call:stage',
-                    tool_name='submit_next_stage',
-                    content='{"status":"ok"}',
-                ),
-            ],
-        )
-
-        assert service._react_loop._node_has_meaningful_tool_results(
-            task_id=record.task_id,
-            node_id=record.root_node_id,
-        ) is True
-    finally:
-        await service.close()
-
-
-@pytest.mark.asyncio
 async def test_submit_next_stage_rejects_zero_progress_stage_switch(tmp_path: Path):
     service = MainRuntimeService(
         chat_backend=_DummyChatBackend(),
