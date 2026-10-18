@@ -374,7 +374,7 @@ skill / tool 目录可能被编辑器、git 或外部进程直接改动，注册
 - 这条扫描跑在 worker 的事件循环线程上，且是每条 `exec` 命令都要付的成本，所以它的单价必须按实盘规模看：skills 60 个目录 1659 个文件 + tools 33 个目录 93 个文件，一次全量扫描实测 45–50 ms。指纹吃 `os.scandir` 随目录枚举一并返回的目录项元数据；改成"先收集路径再逐个 `stat()`"实测回到 132–150 ms。
 - 首次调用只落基线：没有上一份快照就没有可比对象，因此第一拍永远不报刷新。
 - 三个比对点共用服务侧那一份基线（`_resource_tree_state_cache`）：CEO 前门的节流拍、`exec` 工具每条命令结束（`trigger='tool:exec'`）、管理端显式路径。命令侧不携带自己的快照，所以一条命令只付一次扫描；又因为基线就是"上一次扫描时的树"，命令执行前后之外发生的外部编辑同样会在下一个比对点被抓到，不存在被跳过的变更。
-- 指纹变化时才动作：`refresh_changed_resources(trigger='external-resource-generation-check')` 重建受影响资源，随后清空 `_node_context_selection_cache`（节点上下文选择里缓存着旧的候选/水合结论），并只对名字出现在差异集里的 skill / tool 重新同步语义目录条目。
+- 指纹变化时才动作：`refresh_changed_resources(trigger='external-resource-generation-check')` 重建受影响资源，随后清空 `_node_context_selection_cache`（节点上下文选择里缓存着旧的候选/水合结论）。差异集里的 skill / tool 名字只随返回值一起报数：`_sync_catalog_targets` 不回写语义目录，`catalog_synced` 恒为 `False`，所以那个字段的意思是"这里没做同步"，不是"按差异同步过了"。
 - 管理端保存或编辑资源走的是显式路径（`refresh_resource_paths` / `refresh_paths`，trigger 为 `path-change`），它同步刷新注册表并当场重记基线；各条路径共用同一份基线，所以编辑后的一拍不会因为节流而漏掉变化。
 - 维护要点：新增会进入上下文选择的缓存时，必须在这条差异路径上一起失效，否则外部改动的 skill/tool 正文会长期以旧指纹参与候选与描述投影。
 
