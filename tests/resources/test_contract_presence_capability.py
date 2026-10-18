@@ -785,6 +785,23 @@ def test_dispatch_excludes_contract_absent_hydrated_tool() -> None:
     assert "exec" in names
 
 
+def test_dispatch_stays_pinned_while_executable_set_carries_hydrated_tool() -> None:
+    """`tools[]` 全程钉死：派发名单（schema 面）不并水合名；可执行名单（执行准入面）
+    并入契约在场的水合名——mid-turn 注册的工具 load 落账后即可调用，但参数表要等
+    声明在重印边界吸收它才进 `tools[]`。"""
+
+    ops = _ops()
+    state = {
+        "messages": _loader_messages(),
+        "provider_tool_names": ["exec"],
+        "rbac_visible_tool_names": ["exec"],
+        "tool_names": ["exec", TOOL_ID],
+        "hydrated_tool_names": [TOOL_ID],
+    }
+    assert ops._frontdoor_dispatch_tool_names(state) == ["exec"]
+    assert ops._frontdoor_executable_tool_names(state) == ["exec", TOOL_ID]
+
+
 def _eviction_batch_state(*, keep_tools: list[str] | None = None) -> dict:
     """一条活动阶段：本阶段 load 过 TOOL_ID，正文行还挂在 `messages` 里，本批要点名裁撤。
 

@@ -3461,16 +3461,12 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
             active = list(desired)
             provider_tool_bundle_mode = "pinned_recommitted"
         else:
-            # 钉住＝只补不删：新增能力即时并入清单，删名（权限收回、资源下架）一律推迟到
-            # 下一次压缩重印。一次工具更新不该把身后整段正文打掉，而清单滞后不影响安全——
-            # 派发字典按当轮治理可见集另行收窄。
+            # 钉住＝完全冻结：重印边界（token 压缩、手动压缩、换车道、空闲窗口第一跳）
+            # 之前 `tools[]` 一个名字不增删，回合起点也不并入新增。期间新工具靠尾块
+            # `undeclared_candidates` 点名（清单到压缩那一跳才重印），可执行面走水合
+            # 台账，模型调用的参数契约由 load 返回承载——见 `tool-and-skill-system.md`
+            # 「清单滞后不是权限滞后」。
             active = list(prior)
-            merged_membership = set(prior_membership)
-            for name in desired:
-                if name in merged_membership:
-                    continue
-                merged_membership.add(name)
-                active.append(name)
             provider_tool_bundle_mode = "pinned_frozen"
         return {
             "provider_tool_names": list(active),
@@ -3771,7 +3767,12 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
         }
 
     def _frontdoor_dispatch_tool_names(self, state: CeoGraphState) -> list[str]:
-        """派发名单：钉住的声明 ∩ 当轮治理可见集 −「契约不在场的水合工具」。
+        """派发名单＝模型可见 `tools[]` 的名字源：钉住的声明 ∩ 当轮治理可见 −「契约不在场的水合工具」。
+
+        `tools[]` 全程钉死（重印边界之前一个名字不增删，回合起点也不并入新增），所以这份
+        名单**不并**水合台账——mid-turn 注册的工具在声明吸收它之前，参数表不进 `tools[]`，
+        靠尾块 `undeclared_candidates` 点名、load 返回的参数契约供模型参考；可执行名单另算，
+        见 `_frontdoor_executable_tool_names`。
 
         清单可以滞后（删名推迟到压缩重印），执行准入不行——声明滞后绝不能变成权限滞后。
         治理可见集取不到时按当轮 callable pool 收，不拿声明兜底（宁可窄不可宽）。
@@ -3793,6 +3794,28 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
             revoked_set = set(revoked)
             dispatch = [name for name in dispatch if name not in revoked_set]
         return dispatch
+
+    def _frontdoor_executable_tool_names(self, state: CeoGraphState) -> list[str]:
+        """可执行名单＝派发名单 ∪ 契约在场的水合名。
+
+        `tools[]` 钉死后模型可见面与执行准入分源：mid-turn 注册的工具参数表不进
+        `tools[]`，但 load 成功落账后（台账 + 尾块 `callable_tools` 点名）执行准入必须
+        放行，否则 load 是死出口。kept 名单已过契约在场判据，load 准入又按治理实时
+        可见校验过，并入不放大权限。模型可见 schema 面的钉住由
+        `_frontdoor_tool_schemas_for_state` 滤回派发名单保证。
+        """
+        dispatch = self._frontdoor_dispatch_tool_names(state)
+        kept, _revoked = self._frontdoor_contract_presence_partition(
+            state,
+            state.get("hydrated_tool_names"),
+        )
+        executable = list(dispatch)
+        seen = set(dispatch)
+        for name in kept:
+            if name not in seen:
+                executable.append(name)
+                seen.add(name)
+        return executable
 
     def _frontdoor_live_granted_tool_names(self, *, session_key: str) -> list[str]:
         """实时读一次"这个角色现在被允许哪些工具"。
@@ -3834,6 +3857,11 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
 
         发送前的 prompt contract 会用 state 重建尾块，重建处若自己另算一份（或干脆不传），
         装配层算出来的那一行就会在落请求体前被覆盖掉。
+
+        名单源只有钉住声明：denied_tools 的语义是"`tools[]` 里带着参数表、但实时授权读
+        不放行"。mid-turn 注册的水合名不在 `tools[]` 里，被 RBAC 收回时不进这一行——
+        它的出口是工具态收尾的实时卫生（`_frontdoor_tool_state_after_tool_results`）：
+        下一跳起从 `tool_names` 与台账里摘除，`callable_tools` 不再点名。
         """
         return self._frontdoor_declared_denied_tool_names(
             declared_tool_names=self._frontdoor_schema_renderable_tool_names(
@@ -3924,8 +3952,14 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
             reason=MEMORY_SNAPSHOT_ADOPTION_IDLE_REFRESH,
         )
     def _registered_tools_for_state(self, state: CeoGraphState) -> dict[str, Tool]:
+        """执行束的工具实例表：按**可执行名单**取名（派发 ∪ 契约在场的水合名）。
+
+        `tools[]` 钉死后这条与模型可见 schema 面分源——schema 由
+        `_frontdoor_tool_schemas_for_state` 滤回钉住的派发名单，这里保留水合名，
+        mid-turn 注册的工具 load 落账后执行准入才放行。
+        """
         return self._registered_tools(
-            self._frontdoor_provider_visible_tool_names(self._frontdoor_dispatch_tool_names(state))
+            self._frontdoor_provider_visible_tool_names(self._frontdoor_executable_tool_names(state))
         )
 
     def _frontdoor_provider_visible_tool_names(
@@ -5662,7 +5696,6 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
             state.get("rbac_visible_tool_names")
             or [*tool_names, *candidate_tool_names]
         )
-        candidate_name_set = set(candidate_tool_names)
         promotion_targets: list[str] = []
         for tool_result in list(tool_results or []):
             tool_name = str(tool_result.get("tool_name") or "").strip()
@@ -5673,8 +5706,10 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
                 continue
             targets = self._normalized_tool_name_state_list(raw_payload.get("hydration_targets"))
             for name in targets:
-                if name not in candidate_name_set:
-                    continue
+                # 提升准入只信 payload 的 hydration_targets：它是服务端按治理**实时**
+                # 可见集算出来的（回合中途注册的工具不在 candidate 快照里，若在这里
+                # 再加一道 candidate 门槛，"有权限但没排上"的工具会变成 load 成功也
+                # 提升不了的死区）。常驻内置不进水合台账的规则保留。
                 if name in CEO_FIXED_BUILTIN_TOOL_NAMES:
                     continue
                 if name not in promotion_targets:
@@ -5682,7 +5717,9 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
         hydrated_tool_names = self._frontdoor_hydrated_tool_lru(
             existing_tool_names=hydrated_tool_names,
             incoming_tool_names=promotion_targets,
-            visible_tool_names=visible_tool_names,
+            # 刚提升的名字是本跳实时探针放行的，不在回合初 rbac 快照里；不并进可见集
+            # 的话 LRU 会按 stale 快照把它们当场滤掉，提升等于没发生。
+            visible_tool_names=[*visible_tool_names, *promotion_targets],
         )
         # 契约在场撤销回写台账（前门的台账就是 `hydrated_tool_names` 本身）：不在场的名字
         # 留在水合集里就等于既不在 callable、又被 candidate 的「排除已水合」规则挡在门外，
@@ -5738,6 +5775,47 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
             callable_names=tool_names,
             visible_names=visible_tool_names,
         )
+        # 实时台账卫生与发现出口共用一次治理实时读；读不到就都跳过（宁可滞后再说，
+        # 也不拿失败当收回）。声明名的收回走 denied_tools + 重印边界，不在这里摘。
+        live_granted = self._frontdoor_live_granted_tool_names(
+            session_key=str(state.get("session_key") or ""),
+        )
+        if live_granted:
+            live_granted_set = set(live_granted)
+            declared_set = set(
+                self._normalized_tool_name_state_list(state.get("provider_tool_names"))
+            )
+            # 卫生：非声明的水合名被 RBAC 收回时当跳出 callable 与台账——它不在
+            # `tools[]` 里，denied_tools 点不到名，留在 callable 只会让模型拿着
+            # "可调用"的预告去撞一次拒绝。RBAC 重新放行后由下面的发现出口重新
+            # 送回候选，模型重新 load 即可。
+            rbac_dropped = [
+                name
+                for name in hydrated_tool_names
+                if name not in declared_set and name not in live_granted_set
+            ]
+            if rbac_dropped:
+                rbac_dropped_set = set(rbac_dropped)
+                hydrated_tool_names = [
+                    name for name in hydrated_tool_names if name not in rbac_dropped_set
+                ]
+                tool_names = [name for name in tool_names if name not in rbac_dropped_set]
+            # 发现：治理实时放行、但既不在 `tools[]`（钉住声明未吸收）、也不可调用、
+            # 也未水合的名字，并回候选——尾块把它渲成 `undeclared_candidates`
+            # （"能 load 但参数表还没进本次 tools[]，清单到压缩那一跳才重印"），
+            # 模型 load 拿到正文与参数契约后即可调用。
+            live_undeclared = [
+                name
+                for name in live_granted
+                if name
+                and name not in declared_set
+                and name not in set(tool_names)
+                and name not in set(hydrated_tool_names)
+                and name not in CEO_FIXED_BUILTIN_TOOL_NAMES
+            ]
+            for name in live_undeclared:
+                if name not in candidate_tool_names:
+                    candidate_tool_names.append(name)
         candidate_name_set = set(candidate_tool_names)
         candidate_tool_items = [
             dict(item)
@@ -7032,7 +7110,16 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
         runtime: CeoRuntime,
     ) -> list[dict[str, Any]]:
         execution_bundle = self._frontdoor_execution_bundle(state=state, runtime=runtime)
-        return _provider_tool_schemas(execution_bundle.visible_tools)
+        # `tools[]` 全程钉死：执行束按可执行集组装（含水合名），参数表必须滤回钉住的
+        # 派发名单——mid-turn 注册的工具在声明于重印边界吸收它之前，schema 不进 `tools[]`。
+        keep = set(self._frontdoor_dispatch_tool_names(state))
+        keep.update({STAGE_TOOL_NAME, SILENT_TOOL_NAME})
+        pinned_visible = {
+            name: tool
+            for name, tool in execution_bundle.visible_tools.items()
+            if str(name or "").strip() in keep
+        }
+        return _provider_tool_schemas(pinned_visible)
 
     def _frontdoor_execution_bundle(
         self,
@@ -8743,6 +8830,8 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
     ) -> dict[str, Any]:
         response_payload = dict(state.get("response_payload") or {})
         response_view = self._model_response_view(response_payload)
+        # 调用准入按可执行束（含水合名），不按钉住的 tools[]：mid-turn 注册的工具
+        # load 落账后模型就能点名调用，参数表靠 load 返回的契约承载。
         visible_tools = self._registered_tools_for_state(state)
         visible_tool_names = {
             str(name or "").strip()

@@ -90,7 +90,16 @@ def apply_runtime_tool_context_projection(
     *,
     requested_tool_id: str = "",
     runtime: dict[str, Any] | None = None,
+    live_visible_tool_names: list[str] | None = None,
 ) -> dict[str, Any]:
+    """把"本轮视角"字段（promotion / callable_this_turn / hydration_targets）投影进 load 结果。
+
+    `live_visible_tool_names` 承载门槛层实时探针放行的名字：回合中途注册进 registry
+    的工具永远不在回合起点算出的候选快照里，若只按 stale 快照判 candidate_hit，
+    投影会把服务端按治理实时可见算出的 hydration_targets 清空，promotion 落成
+    not_in_this_turn_candidates，前门与节点两条提升路径都会丢掉这次 load。实时放行
+    名字与候选命中同权，视为可提升。
+    """
     projected = dict(payload or {}) if isinstance(payload, dict) else {}
     if not projected:
         return {}
@@ -99,6 +108,7 @@ def apply_runtime_tool_context_projection(
     target_names = [name for name in [requested_name, resolved_name] if name]
     runtime_payload = runtime if isinstance(runtime, dict) else {}
     candidate_names = set(_normalized_runtime_name_list(runtime_payload.get("candidate_tool_names")))
+    live_visible_names = set(_normalized_runtime_name_list(live_visible_tool_names))
     callable_names = set(
         _normalized_runtime_name_list(
             runtime_payload.get("callable_tool_names")
@@ -112,7 +122,9 @@ def apply_runtime_tool_context_projection(
         )
     )
     normalized_targets = _normalized_runtime_name_list(projected.get("hydration_targets"))
-    candidate_hit = any(name in candidate_names for name in target_names)
+    candidate_hit = any(
+        name in candidate_names or name in live_visible_names for name in target_names
+    )
     callable_hit = any(name in callable_names for name in target_names)
     hydrated_hit = any(name in hydrated_names for name in target_names)
     projected["callable_this_turn"] = bool(callable_hit)

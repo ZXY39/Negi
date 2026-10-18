@@ -102,6 +102,43 @@ def _live_registered_skill_visible(
     return False
 
 
+def _live_registered_tool_visible(
+    service: Any,
+    *,
+    actor_role: str,
+    session_id: str,
+    tool_id: str,
+) -> bool:
+    """Fallback probe against the live governance registry.
+
+    The per-round lists (`candidate_tool_names` / `rbac_visible_tool_names`) are
+    built from the runtime frame captured at turn start. Tools installed or
+    registered mid-turn (e.g. by addtools) never enter that snapshot, so the gate
+    alone would reject them until the next turn. When the gate fails we re-check
+    live visibility here; RBAC and repair-required semantics stay enforced by
+    `load_tool_context_v2` downstream.
+    """
+    target = str(tool_id or "").strip()
+    if not target:
+        return False
+    method = getattr(service, "list_visible_tools", None)
+    if not callable(method):
+        return False
+    try:
+        records = method(actor_role=actor_role, session_id=session_id)
+    except Exception:
+        return False
+    for record in list(records or []):
+        record_id = (
+            record.get("tool_id")
+            if isinstance(record, dict)
+            else getattr(record, "tool_id", None)
+        )
+        if str(record_id or "").strip() == target:
+            return True
+    return False
+
+
 def _loadable_tool_gate_error(
     *,
     runtime: dict[str, Any] | None,
@@ -260,13 +297,21 @@ class LoadToolContextTool(_MainRuntimeTool):
         service = await self._service()
         tool_name = str(tool_id or "").strip()
         search_text = str(search_query or "")
+        live_visible_via_fallback = False
         if tool_name:
             gate_error = _loadable_tool_gate_error(
                 runtime=__g3ku_runtime,
                 requested_id=tool_name,
             )
             if gate_error:
-                return gate_error
+                live_visible_via_fallback = _live_registered_tool_visible(
+                    service,
+                    actor_role=_runtime_actor_role(__g3ku_runtime),
+                    session_id=_runtime_session_key(__g3ku_runtime),
+                    tool_id=tool_name,
+                )
+                if not live_visible_via_fallback:
+                    return gate_error
         if hasattr(service, "load_tool_context_v2"):
             kwargs_v2: dict[str, Any] = {
                 "actor_role": _runtime_actor_role(__g3ku_runtime),
@@ -292,5 +337,9 @@ class LoadToolContextTool(_MainRuntimeTool):
                 payload,
                 requested_tool_id=tool_name,
                 runtime=__g3ku_runtime,
+                # 门槛被实时探针放行的名字不在回合初候选快照里；不带这份名单进投影，
+                # 投影会按 stale 快照把 promotion 清成 not_in_this_turn_candidates，
+                # 前门提升与节点提升都读不到 hydration_targets，load 就白做了。
+                live_visible_tool_names=[tool_name] if live_visible_via_fallback else None,
             )
         return json.dumps(payload, ensure_ascii=False)

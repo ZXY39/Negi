@@ -4072,11 +4072,11 @@ def test_fresh_turn_tool_schema_seed_does_not_expand_previous_actual_request_sch
 
 
 def test_frontdoor_provider_tool_bundle_pins_and_recommits_only_at_compression() -> None:
-    """前门清单与节点同形：只补不删，删名等压缩重印。
+    """前门清单完全冻结：增删都只发生在重印边界。
 
-    清单排在上下文最前面，成员或顺序一变就把身后整段重铺。新增能力必须即时并入（否则
-    模型手里只剩名字、拼不出合法调用），而收回/下架的删名推迟到重印边界——那一跳正文已被
-    `[TOKEN_COMPACT_V2]` 整段重写，可复用前缀反正断在这里，重印不额外破缓存。
+    `tools[]` 排在上下文最前面，成员或顺序一变就把身后整段重铺。新增能力也不再在回合
+    起点并入——期间靠尾块 `undeclared_candidates` 点名、load 返回的参数契约承载调用，
+    声明在压缩/空闲/换车道重印时一次性吸收。
     """
     runner = create_agent_impl.CreateAgentCeoFrontDoorRunner(loop=SimpleNamespace(main_task_service=None))
 
@@ -4089,8 +4089,8 @@ def test_frontdoor_provider_tool_bundle_pins_and_recommits_only_at_compression()
         )
 
     addition = resolve(["exec", "submit_next_stage"], ["exec", "web_fetch", "submit_next_stage"])
-    # 持久化顺序原样保持，新增的名字追加在尾部
-    assert addition["provider_tool_names"] == ["exec", "submit_next_stage", "web_fetch"]
+    # 冻结分支不并入新增：tools[] 到重印边界才吸收新名字
+    assert addition["provider_tool_names"] == ["exec", "submit_next_stage"]
     assert addition["provider_tool_bundle_mode"] == "pinned_frozen"
     assert addition["pending_provider_tool_names"] == []
     assert addition["provider_tool_exposure_pending"] is False
@@ -4098,7 +4098,8 @@ def test_frontdoor_provider_tool_bundle_pins_and_recommits_only_at_compression()
 
     stage_compaction = resolve(["exec", "submit_next_stage"], ["exec", "web_fetch", "submit_next_stage"],
                                commit_reason="stage_compaction")
-    assert stage_compaction["provider_tool_names"] == ["exec", "submit_next_stage", "web_fetch"]
+    # stage_compaction 不是重印判据（只有 token_compression/显式标记是），照样冻结
+    assert stage_compaction["provider_tool_names"] == ["exec", "submit_next_stage"]
     assert stage_compaction["provider_tool_bundle_mode"] == "pinned_frozen"
 
     removal = resolve(["exec", "web_fetch"], ["exec"])
@@ -4136,6 +4137,79 @@ def test_frontdoor_denied_names_use_live_grant_not_turn_snapshot() -> None:
     # 实时授权读不到时不产出这一行：宁可不说，也不拿旧快照说错
     broken = create_agent_impl.CreateAgentCeoFrontDoorRunner(loop=SimpleNamespace(main_task_service=None))
     assert broken._frontdoor_live_granted_tool_names(session_key="web:shared") == []
+
+
+def test_frontdoor_finalize_drops_rbac_revoked_mid_turn_tool_from_callable() -> None:
+    """非声明的水合名被 RBAC 收回时，收尾当跳把它摘出 callable 与台账。
+
+    它不在 `tools[]` 里，denied_tools 点不到名；留在 callable 只会让模型拿着
+    "可调用"的预告去撞一次拒绝。RBAC 重新放行后由发现出口重新送回候选。
+    """
+    service = SimpleNamespace(
+        list_effective_tool_names=lambda *, actor_role, session_id: ["exec"]
+    )
+    runner = create_agent_impl.CreateAgentCeoFrontDoorRunner(
+        loop=SimpleNamespace(main_task_service=service, tools={}),
+    )
+    state = {
+        "session_key": "web:shared",
+        "messages": [
+            {
+                "role": "tool",
+                "name": "load_tool_context",
+                "content": json.dumps(
+                    {
+                        "ok": True,
+                        "tool_id": "windows_mcp",
+                        "tool_context_fingerprint": "tcf:fixture-presence",
+                    },
+                    ensure_ascii=False,
+                ),
+            }
+        ],
+        "provider_tool_names": ["exec"],
+        "rbac_visible_tool_names": ["exec", "windows_mcp"],
+        "tool_names": ["exec", "windows_mcp"],
+        "hydrated_tool_names": ["windows_mcp"],
+    }
+
+    result = runner._frontdoor_tool_state_after_tool_results(
+        state=state,
+        tool_results=[],
+    )
+
+    assert result["tool_names"] == ["exec"]
+    assert result["hydrated_tool_names"] == []
+
+
+def test_frontdoor_finalize_surfaces_live_visible_undeclared_tool_in_candidates() -> None:
+    """`tools[]` 钉死期间的发现出口：治理实时放行、声明未吸收的名字并回候选，
+    尾块渲成 `undeclared_candidates`（能 load 但参数表还没进本次 tools[]）。"""
+
+    service = SimpleNamespace(
+        list_effective_tool_names=lambda *, actor_role, session_id: ["exec", "fresh_tool"]
+    )
+    runner = create_agent_impl.CreateAgentCeoFrontDoorRunner(
+        loop=SimpleNamespace(main_task_service=service, tools={}),
+    )
+    state = {
+        "session_key": "web:shared",
+        "provider_tool_names": ["exec"],
+        "rbac_visible_tool_names": ["exec"],
+        "tool_names": ["exec"],
+        "hydrated_tool_names": [],
+        "candidate_tool_names": [],
+    }
+
+    result = runner._frontdoor_tool_state_after_tool_results(
+        state=state,
+        tool_results=[],
+    )
+
+    assert "fresh_tool" in result["candidate_tool_names"]
+    assert {"tool_id": "fresh_tool", "description": ""} in result["candidate_tool_items"]
+    assert "fresh_tool" not in result["tool_names"]
+    assert "fresh_tool" not in result["hydrated_tool_names"]
 
 
 def test_frontdoor_dispatch_stays_live_while_declaration_is_pinned() -> None:

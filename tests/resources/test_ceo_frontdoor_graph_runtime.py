@@ -297,6 +297,34 @@ def test_frontdoor_tool_state_after_tool_results_skips_fixed_builtin_hydration_t
     }
 
 
+def test_frontdoor_tool_state_promotes_mid_turn_registered_tool_without_candidate_hit() -> None:
+    """回合中途注册的工具不在 candidate 快照里，payload 的 hydration_targets 由服务端
+    按治理实时可见集算出；提升准入信 payload，不再加 candidate 门槛（否则 load 成功也
+    提升不了，mid-turn 注册要到下一回合才能用）。"""
+
+    runner = create_agent_impl.CreateAgentCeoFrontDoorRunner(loop=SimpleNamespace())
+
+    result = runner._frontdoor_tool_state_after_tool_results(
+        state={
+            "tool_names": ["load_tool_context"],
+            "candidate_tool_names": [],
+            "hydrated_tool_names": [],
+            "rbac_visible_tool_names": ["load_tool_context"],
+        },
+        tool_results=[
+            {
+                "tool_name": "load_tool_context",
+                "raw_result": {"ok": True, "hydration_targets": ["windows_mcp"]},
+            }
+        ],
+    )
+
+    assert result["hydrated_tool_names"] == ["windows_mcp"]
+    assert "windows_mcp" in result["tool_names"]
+    assert "windows_mcp" not in result["candidate_tool_names"]
+    assert result["hydration_revoked_executor_names"] == []
+
+
 @pytest.mark.asyncio
 async def test_frontdoor_duplicate_load_tool_context_guard_blocks_same_uncompressed_toolskill() -> None:
     current_payload = {

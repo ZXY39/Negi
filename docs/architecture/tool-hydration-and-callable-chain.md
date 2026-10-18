@@ -23,7 +23,8 @@
 - 台账只有一个读口径（节点侧 `main/monitoring/log_service.py` 的 `_hydrated_ledger_state`）：`hydrated_executor_state` 缺省时回退到 `hydrated_executor_names`，而后者是本轮选择派生的 promoted 视图，它不知道正文在不在场 ⇒ 回退值必须再减一次撤销名单。少了这一减，撤销刚清空的台账下一次读就整份复活，同一条帧上会出现 `revoked` 与 `hydrated` 并列，选择、派发字典与节点详情全都读成"已水合且可调"。
 - 撤销掉的名字要能在**同一跳**回到候选，否则"重新 load 一次"就不是回合内的出路。前门的候选是回合初快照，所以写回里显式并名字并补 `candidate_tool_items` 条目；节点侧不用并——选择在本跳判据之后重算，候选 = 治理可见 −（callable ∪ 已水合）自然把它算回来。
 - 两种失去正文的触发点，生效跳不同：节点侧 `token_compression` 在选择之后才改写发送基线，所以那一跳成批撤销、下一跳成批回到候选——判据按当次请求视图算，这是**预期行为**，不是抖动缺陷。阶段裁撤则不同：节点在**本跳选择之前**投影并判据（`_revoke_contract_absent_hydration_for_hop`），前门在**同批账本落地之后**写回，因此点名裁撤的下一跳就把能力摘掉。
-- 派发准入与声明不同源，两条车道各自有个咽喉点：前门 `_frontdoor_dispatch_tool_names` = 钉住的 `tools[]` 声明 ∩ 当轮治理可见 − 当跳不在场的水合名；节点把这一步做在选择之前——判据撤掉的名字直接摘出本轮派发字典，于是选择组出的 callable 与执行准入用的是同一份收窄后的台账。声明按"只补不删"活到下一次压缩重印，权限不跟着滞后。
+- 派发准入与声明不同源，两条车道各自有个咽喉点：前门 `_frontdoor_dispatch_tool_names` = 钉住的 `tools[]` 声明 ∩ 当轮治理可见 − 当跳不在场的水合名，它同时是模型可见参数表的名单源（`tools[]` 全程钉死，见「钉住的 `tools[]` 与它的滞后出口」）；可执行名单另算——`_frontdoor_executable_tool_names` = 派发 ∪ 契约在场的水合名，`_registered_tools_for_state` 按它取实例，供执行束与调用准入用，模型可见 schema 由 `_frontdoor_tool_schemas_for_state` 滤回派发名单。模型可见面与执行准入面自此分源，这是钉死 `tools[]` 的直接推论。节点把收窄做在选择之前——判据撤掉的名字直接摘出本轮派发字典，选择组出的 callable 与执行准入用同一份收窄后的台账。
+- 非声明的水合名（mid-turn 注册的工具）被 RBAC 收回时的出口在工具态收尾的实时卫生：治理实时读不放行的名字当跳从 `tool_names` 与台账里摘除（它不在 `tools[]` 里，denied_tools 点不到名），`callable_tools` 不再点名；RBAC 重新放行后由发现出口重新送回候选，模型重新 load 即可。声明名的收回仍走 denied_tools（名单源＝钉住声明）+ 重印边界。
 
 ### 重读与指纹
 
@@ -102,9 +103,9 @@
 
 ### 钉住的 `tools[]` 与它的滞后出口
 
-- `tools[]` 是按角色**钉住**的声明，不是当轮能力集：两条车道在回合内都不因权限变动改成员，成员退场只发生在重印边界（边界清单只有一处定义，见 `tool-and-skill-system.md`「Provider Tool Surface」，本节不复述条数）。前门的钉住名单在回合起点算一次（治理快照 `capability_snapshot.visible_tool_ids`），冻结分支并的就是这份快照，所以回合内不存在第二次治理读；节点的治理读每跳都活，但冻结分支只并入"已可调 / 已选 / 已提升 / 已构建出对象"四类名字，不并入治理全集。清单滞后不影响安全：派发字典按当轮 RBAC 另行收窄，撤销当跳就拒（合同见 `tool-and-skill-system.md`「Provider Tool Surface」）。
-- 滞后有两个方向，两个各有出口：**收回**方向名字还挂在 `tools[]` 上但已无权限，尾块用 `denied_tools` 提前点名，免得模型反复重试或改着名字试；**放行**方向名字进了候选池、能 `load_tool_context`，但参数表还没上清单（节点道独有：候选池上界是每跳活的治理读，清单只认已构建出的对象），尾块用 `undeclared_candidates` 给出这批名字。两者都由 `tools[] − callable_tools − denied_tools − 控制工具` 这一条推导链定位，尾块因此不抄整份候选表。
-- `undeclared_candidates` 每次渲出都意味着"模型手里有一个可加载的名字而没有它的参数表"。它是发现出口的形态，不是常态：非空持续出现说明钉住规则该在压缩跳把那张参数表带上。拿不到本次声明名单的装配路退回渲全量候选，判据在 `g3ku/utils/helpers.py:render_candidate_tool_line` 一处，两条车道共用同一份文本。
+- `tools[]` 是按角色**钉死**的声明，不是当轮能力集：重印边界（token 压缩、手动压缩、换车道、空闲窗口第一跳）之前一个名字不增删，回合起点也不并入新增——节点道冻结分支的语义见 `tool-and-skill-system.md`「Provider Tool Surface」，前门与之同形。钉死期间 load 准入、提升准入与执行准入不受声明约束，各按治理实时可见读。清单滞后不影响安全：撤销当跳就拒（合同见 `tool-and-skill-system.md`「Provider Tool Surface」）。
+- 滞后有两个方向，两个各有出口：**收回**方向名字还挂在 `tools[]` 上但已无权限，尾块用 `denied_tools` 提前点名，免得模型反复重试或改着名字试；**放行**方向名字能 `load_tool_context` 但参数表还没上清单——两条车道都用尾块 `undeclared_candidates` 点名（前门在工具态收尾把治理实时放行、声明未吸收的名字并回候选；节点道候选池上界是每跳活的治理读）。mid-turn 注册的工具的完整生效链是四步，任何一环断了它就退化成"重印后才生效"：① 加载门槛的实时探针（`load_tool_context` 的 snapshot 门槛失败时按 `list_visible_tools` 实时复核，与 `load_skill_context` 的技能探针同构；RBAC 与 repair 语义仍由 `load_tool_context_v2` 下游强制）；② 提升准入只信 payload 的 `hydration_targets`（服务端按治理实时可见集算出），不再加 candidate 快照门槛，LRU 的可见集过滤要并入本跳提升的名字；③ 执行准入并回契约在场的水合名（`_registered_tools_for_state` 按可执行名单取实例），尾块 `callable_tools` 并入点名；④ 模型调用的参数契约由 load 返回承载——payload 自带 `parameters_schema` / `parameter_contract_markdown` / `example_arguments`，模型照它拼调用，声明等重印边界才吸收参数表。常驻内置不进台账的规则在 ②③ 两处都保留。
+- `undeclared_candidates` 每次渲出都意味着"模型手里有一个可加载的名字而没有它的参数表"。它是发现出口的形态，不是常态：非空持续出现说明钉住规则该在压缩跳把那张参数表带上。两个尾块出口的名字都由 `tools[] − callable_tools − denied_tools − 控制工具` 这一条推导链定位，尾块因此不抄整份候选表。拿不到本次声明名单的装配路退回渲全量候选，判据在 `g3ku/utils/helpers.py:render_candidate_tool_line` 一处，两条车道共用同一份文本。
 
 ## 2. 一条从上下文到 callable tools 的链路
 
@@ -112,7 +113,7 @@
 2. `runtime/context` 模块根据 query、历史、治理规则挑出候选工具/技能。
 3. prompt builder 把它们以 candidate 列表形式展示给模型。
 4. 模型若决定需要某候选工具，先调用 `load_tool_context(tool_id="...")`。
-5. 只有当该工具仍属于 canonical candidate，且解析到的是普通 concrete extension executor 时，系统才记录 hydration 状态。
+5. 该工具解析为普通 concrete extension executor 且治理实时可见（本回合候选命中，或回合中途注册、由加载门槛的实时探针放行）时，系统才记录 hydration 状态。
 6. 下一轮 `model_visible_tool_names = fixed builtin tools + hydrated tools`。
 7. 只有这一轮，工具才真正成为 callable tool。
 
