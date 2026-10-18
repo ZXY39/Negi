@@ -78,3 +78,26 @@ def test_acceptance_prompt_keeps_verdict_taxonomy_out_of_the_repair_message() ->
     assert "运行时把 `summary` 与 `remaining_work` 拼成打回消息" in prompt
     # §3.3 阻塞核验模式反过来要求用 blocking_reason 承载下一步，两处规则必须有显式让位声明。
     assert "本节对 `blocking_reason` 的用法覆盖 §4.2 的留空规则" in prompt
+
+
+def test_empty_evidence_claim_in_the_prompt_matches_the_runtime_classifier() -> None:
+    """提示词说"空证据的 success 会被判无效裁决并要求重验一次"，运行时必须真这么做。
+
+    这条承诺的实现在 `NodeRunner._classify_blocked_verdict`，不在终态载荷校验里——
+    两边任一方单方面改动都会让这句话变成谎话，所以一处同时钉两端。
+    """
+    from main.models import NodeFinalResult
+    from main.runtime.node_runner import NodeRunner
+
+    assert "会被判无效裁决并要求重验一次" in _prompt()
+
+    empty = NodeFinalResult(status='success', delivery_status='final', summary='阻塞成立', evidence=[])
+    assert NodeRunner._classify_blocked_verdict(empty) == 'invalid'
+
+    filled = NodeFinalResult(
+        status='success',
+        delivery_status='final',
+        summary='阻塞成立',
+        evidence=[{'kind': 'file', 'path': 'output/report.md'}],
+    )
+    assert NodeRunner._classify_blocked_verdict(filled) == 'allow'

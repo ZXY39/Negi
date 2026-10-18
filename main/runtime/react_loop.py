@@ -5092,9 +5092,10 @@ class ReActToolLoop:
     ) -> list[str]:
         """只校载荷形状：必填键、枚举取值、`summary` 非空、每条证据自身的字段与行号。
 
-        证据"够不够"不在这里判：空数组是否可接受归各车道的证据纪律（见
-        `main/prompts/acceptance_execution.md`），机器侧不打回——打回一次就是多烧
-        一轮模型，而验收打回本来就吃掉一个任务的大部分轮次。
+        这里不判"证据够不够"，但不等于没人判：阻塞核验那一条在裁决分类器里
+        （`NodeRunner._classify_blocked_verdict` —— `success` 且 evidence 为空记
+        `invalid`，吃一次重验轮，再空就按"阻塞不成立"打回执行节点）。普通交付
+        裁决的空证据今天不设门槛。
         """
         violations: list[str] = []
         missing_keys = [key for key in _RESULT_REQUIRED_KEYS if key not in raw_payload]
