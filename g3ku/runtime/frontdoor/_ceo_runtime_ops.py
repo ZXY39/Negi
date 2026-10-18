@@ -6842,9 +6842,34 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
                 if raw_decision == "reject" and note:
                     normalized_item["note"] = note
                 normalized_decisions.append(normalized_item)
+            # 逐条裁决必须逐条生效：`reject` 的那条从执行名单里摘掉并留下合成拒绝结果，
+            # `approve` 与免审通过的条目照常执行。整批恒 approved 会把操作者拒掉的工具
+            # 照样跑掉（审批门形同虚设）。
+            rejected_by_id = {
+                str(item.get("tool_call_id") or "").strip(): item
+                for item in normalized_decisions
+                if item.get("decision") == "reject"
+            }
+            executable_payloads: list[dict[str, Any]] = []
+            synthetic_results: list[dict[str, Any]] = []
+            for payload in list(original_payloads or []):
+                tool_call_id = str(payload.get("id") or "").strip()
+                rejected_item = rejected_by_id.get(tool_call_id)
+                if rejected_item is None:
+                    executable_payloads.append(dict(payload))
+                    continue
+                synthetic_results.append(
+                    self._build_synthetic_rejection_result(
+                        tool_call_id=tool_call_id,
+                        tool_name=str(payload.get("name") or ""),
+                        note=str(rejected_item.get("note") or ""),
+                    )
+                )
             return {
                 "approved": True,
                 "tool_call_payloads": list(original_payloads),
+                "executable_tool_call_payloads": executable_payloads,
+                "synthetic_tool_results": synthetic_results,
                 "batch_review_decisions": normalized_decisions,
                 "batch_id": str(normalized_request.get("batch_id") or "").strip(),
             }
@@ -8975,6 +9000,12 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
             "approval_request": None,
             "approval_status": "approved",
             "tool_call_payloads": list(normalized["tool_call_payloads"]),
+            # 批审把条目分成了两半：这一半真的执行，另一半在 `_graph_execute_tools` 里
+            # 与真实结果按原顺序合并。非批审的裁决没有这两个键，回落成"全部照原样执行"。
+            "executable_tool_call_payloads": list(
+                normalized.get("executable_tool_call_payloads") or normalized["tool_call_payloads"]
+            ),
+            "synthetic_tool_results": list(normalized.get("synthetic_tool_results") or []),
             "approval_batch_id": str(normalized.get("batch_id") or ""),
             "next_step": "execute_tools",
         }

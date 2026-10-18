@@ -136,6 +136,11 @@ class CeoPersistentState(TypedDict, total=False):
 
     tool_call_payloads: list[dict[str, Any]]
 
+    # 本轮真正要执行的条目与已经定稿的合成结果（批审里被拒的那几条）。两者只在
+    # `review_tool_calls → execute_tools` 这一跳内存在，合并回原顺序后清空。
+    executable_tool_call_payloads: list[dict[str, Any]]
+    synthetic_tool_results: list[dict[str, Any]]
+
     pending_content_open_image_payloads: list[dict[str, Any]]
 
     verified_task_ids: list[str]

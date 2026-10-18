@@ -113,6 +113,15 @@ def test_graph_review_tool_calls_interrupt_payload_includes_runtime_contract_and
                 "arguments": {"tool_id": "filesystem_write"},
             }
         ],
+        # 全批批准：执行名单等于原名单，没有合成拒绝要合并。
+        "executable_tool_call_payloads": [
+            {
+                "id": "call-1",
+                "name": "load_tool_context",
+                "arguments": {"tool_id": "filesystem_write"},
+            }
+        ],
+        "synthetic_tool_results": [],
         "next_step": "execute_tools",
     }
     payload = dict(captured["payload"] or {})
@@ -1262,4 +1271,153 @@ async def test_graph_execute_tools_executes_only_approved_calls_and_merges_synth
     assert [item["tool_call_id"] for item in tool_messages] == ["call-1", "call-2"]
     assert tool_messages[0]["name"] == "echo_tool"
     assert tool_messages[1]["name"] == "exec"
+    assert "用户不允许运行此工具" in str(tool_messages[1]["content"] or "")
+
+
+_BATCH_PAYLOADS = [
+    {"id": "call-1", "name": "content_open", "arguments": {"path": "/tmp/a"}},
+    {"id": "call-2", "name": "exec", "arguments": {"command": "echo hi"}},
+    {"id": "call-3", "name": "echo_tool", "arguments": {"value": "alpha"}},
+]
+
+
+def _batch_approval_request() -> dict:
+    """两条要审（call-1/call-2）+ 一条免审（call-3），批审只需覆盖待审条目。"""
+    return {
+        "kind": "frontdoor_tool_approval_batch",
+        "batch_id": "batch:123",
+        "mode": "regulatory_review",
+        "submission_mode": "batch_submit_only",
+        "tool_calls": [dict(item) for item in _BATCH_PAYLOADS],
+        "review_items": [
+            {"tool_call_id": "call-1", "name": "content_open", "risk_level": "high", "arguments": {}},
+            {"tool_call_id": "call-2", "name": "exec", "risk_level": "high", "arguments": {}},
+        ],
+        "pass_through_tool_call_ids": ["call-3"],
+    }
+
+
+def _submit_batch(decisions: list[dict]):
+    def _fake_interrupt(*, state, payload):
+        _ = state, payload
+        return {"type": "submit_batch_review", "batch_id": "batch:123", "decisions": decisions}
+
+    return _fake_interrupt
+
+
+def _review_batch(monkeypatch, decisions: list[dict]) -> dict:
+    monkeypatch.setattr(ceo_runtime_ops, "raise_frontdoor_approval_interrupt", _submit_batch(decisions))
+    runner = create_agent_impl.CreateAgentCeoFrontDoorRunner(loop=SimpleNamespace(main_task_service=None))
+    reviewed = runner._graph_review_tool_calls(
+        {
+            "approval_request": _batch_approval_request(),
+            "tool_call_payloads": [dict(item) for item in _BATCH_PAYLOADS],
+        },
+        runtime=SimpleNamespace(context=SimpleNamespace(session=None)),
+    )
+    return reviewed
+
+
+def test_batch_review_rejected_item_leaves_the_executable_list(monkeypatch) -> None:
+    """逐条裁决：被拒的那条不进执行名单并留下合成拒绝，批准与免审的照常执行。"""
+    reviewed = _review_batch(
+        monkeypatch,
+        [
+            {"tool_call_id": "call-1", "decision": "approve"},
+            {"tool_call_id": "call-2", "decision": "reject", "note": "先别动这台机器"},
+        ],
+    )
+
+    assert reviewed["next_step"] == "execute_tools"
+    assert [item["id"] for item in reviewed["tool_call_payloads"]] == ["call-1", "call-2", "call-3"]
+    assert [item["id"] for item in reviewed["executable_tool_call_payloads"]] == ["call-1", "call-3"]
+    rejected = reviewed["synthetic_tool_results"]
+    assert [item["tool_call_id"] for item in rejected] == ["call-2"]
+    assert "用户不允许运行此工具" in str(rejected[0]["result_text"] or "")
+    assert "补充说明：先别动这台机器" in str(rejected[0]["result_text"] or "")
+
+
+def test_batch_review_all_approve_keeps_every_call_executable(monkeypatch) -> None:
+    """全批批准时不产生任何合成结果，执行名单与旧合同一致。"""
+    reviewed = _review_batch(
+        monkeypatch,
+        [
+            {"tool_call_id": "call-1", "decision": "approve"},
+            {"tool_call_id": "call-2", "decision": "approve"},
+        ],
+    )
+
+    assert reviewed["synthetic_tool_results"] == []
+    assert [item["id"] for item in reviewed["executable_tool_call_payloads"]] == ["call-1", "call-2", "call-3"]
+
+
+@pytest.mark.asyncio
+async def test_rejected_batch_item_never_reaches_the_tool_executor(monkeypatch) -> None:
+    """从车道进口喂到执行：拒掉的 call-2 不进执行器，其余两条真跑，工具行按原顺序齐三份。"""
+    reviewed = _review_batch(
+        monkeypatch,
+        [
+            {"tool_call_id": "call-1", "decision": "approve"},
+            {"tool_call_id": "call-2", "decision": "reject"},
+        ],
+    )
+
+    runner = create_agent_impl.CreateAgentCeoFrontDoorRunner(loop=SimpleNamespace(main_task_service=None))
+    executed_ids: list[str] = []
+    echo_tool = _EchoTool()
+    monkeypatch.setattr(
+        runner,
+        "_registered_tools_for_state",
+        lambda state: {"content_open": echo_tool, "exec": echo_tool, "echo_tool": echo_tool},
+    )
+    monkeypatch.setattr(runner, "_build_tool_runtime_context", lambda **kwargs: {"on_progress": None})
+    monkeypatch.setattr(runner, "_frontdoor_stage_gate_error", lambda **kwargs: "")
+
+    async def _fake_execute(*, tool, tool_name, arguments, runtime_context, on_progress, tool_call_id):
+        _ = tool, arguments, runtime_context, on_progress
+        executed_ids.append(str(tool_call_id or ""))
+        raw_result = {"echoed": tool_name}
+        return (
+            raw_result,
+            json.dumps(raw_result, ensure_ascii=False),
+            "success",
+            "2026-10-18T00:00:00+08:00",
+            "2026-10-18T00:00:01+08:00",
+            1.0,
+        )
+
+    monkeypatch.setattr(runner, "_execute_tool_call_with_raw_result", _fake_execute)
+
+    state = {
+        **reviewed,
+        "messages": [],
+        "tool_names": ["content_open", "exec", "echo_tool"],
+        "candidate_tool_names": [],
+        "hydrated_tool_names": [],
+        "visible_skill_ids": [],
+        "candidate_skill_ids": [],
+        "rbac_visible_tool_names": ["content_open", "exec", "echo_tool"],
+        "rbac_visible_skill_ids": [],
+        "frontdoor_stage_state": {
+            "active_stage_id": "",
+            "transition_required": False,
+            "stages": [],
+        },
+        "used_tools": [],
+        "route_kind": "direct_reply",
+        "parallel_enabled": True,
+        "max_parallel_tool_calls": 3,
+        "synthetic_tool_calls_used": False,
+        "response_payload": {"content": "", "tool_calls": []},
+        "session_key": "web:shared",
+    }
+    result = await runner._graph_execute_tools(state, runtime=SimpleNamespace(context=SimpleNamespace(session=None)))
+
+    assert executed_ids == ["call-1", "call-3"]
+    tool_messages = [
+        dict(message)
+        for message in list(result["messages"])
+        if str(message.get("role") or "").strip().lower() == "tool"
+    ]
+    assert [item["tool_call_id"] for item in tool_messages] == ["call-1", "call-2", "call-3"]
     assert "用户不允许运行此工具" in str(tool_messages[1]["content"] or "")
