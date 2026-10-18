@@ -28,6 +28,9 @@ class BehaviorConfig:
     max_message_length: int = 4000
     bot_user_id: int = 0
     reconnect_backoff_seconds: float = 3.0
+    # 入站图片/文件的下载链接由发消息的人写。除公网与 `onebot.http_url` 那台 donor 之外，
+    # 私有/回环目标要点名才放行（例：["127.0.0.1:3000", "media.lan:8080"]）。
+    allowed_media_hosts: list[str] = field(default_factory=list)
 
 
 @dataclass(slots=True)
@@ -59,5 +62,10 @@ def load_bridge_config(path: Path | str) -> BridgeConfig:
             max_message_length=int(behavior_raw.get("max_message_length", 4000)),
             bot_user_id=int(behavior_raw.get("bot_user_id", 0) or 0),
             reconnect_backoff_seconds=float(behavior_raw.get("reconnect_backoff_seconds", 3.0)),
+            allowed_media_hosts=[
+                str(item or "").strip()
+                for item in (behavior_raw.get("allowed_media_hosts") or [])
+                if str(item or "").strip()
+            ],
         ),
     )

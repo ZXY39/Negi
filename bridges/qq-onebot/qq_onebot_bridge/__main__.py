@@ -9,13 +9,20 @@ from pathlib import Path
 from .config import load_bridge_config
 from .dispatcher import Dispatcher
 from .g3ku_client import G3kuClient
-from .onebot import OnebotClient
+from .onebot import MediaSourcePolicy, OnebotClient
 
 
 async def run(config_path: str) -> None:
     config = load_bridge_config(config_path)
     g3ku = G3kuClient(config.g3ku.base_url, config.g3ku.token)
-    onebot = OnebotClient(config.onebot.ws_url, config.onebot.http_url)
+    onebot = OnebotClient(
+        config.onebot.ws_url,
+        config.onebot.http_url,
+        media_policy=MediaSourcePolicy(
+            donor_http_url=config.onebot.http_url,
+            allowed_hosts=config.behavior.allowed_media_hosts,
+        ),
+    )
 
     bot_user_id = config.behavior.bot_user_id
     if not bot_user_id:

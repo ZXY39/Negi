@@ -37,7 +37,7 @@ python -m qq_onebot_bridge --config bridge.config.json
 | progressMode 里程碑（5s 节流、≤3 行、🔧/⚠️） | 消费 `progress` 事件，桥侧按 `progress_min_interval_seconds` / `progress_max_lines_per_message` 节流合并（**g3ku 发全量，节流职责在桥**——这是重建的关键职责转移） |
 | replyFinalOnly | `behavior.final_only=true`：忽略 progress，只发 `reply.final` |
 | QQ 单条长度上限 | `split_outbound_text` 按 `max_message_length` 优先按行分段 |
-| 入站图片 | OneBot image 段 → 下载 → base64 → `messages.attachments`（runtime 侧 `image_multimodal_enabled` 门控生效）。URL 由消息发送者控制，抓取前判地址族：非 http(s)、链路本地（含云元数据 `169.254.169.254`）、保留段、组播、未指定地址一律拒取（日志 `inbound media URL rejected`）；IPv4 回环与私网**仍可取**——OneBot donor 按本地部署（示例配置 `http://127.0.0.1:3000`）发媒体链接，拦私网等于收不到任何附件 |
+| 入站图片 | OneBot image 段 → 下载 → base64 → `messages.attachments`（runtime 侧 `image_multimodal_enabled` 门控生效）。URL 由消息发送者写，抓取前按 socket 判目标，放行三档：① 公网地址；② **配置里的 donor**（`onebot.http_url` 那一台，示例部署就是 `http://127.0.0.1:3000`——群图片链接常由它发出，操作员已表达过的意图不再要求抄白名单）；③ `behavior.allowed_media_hosts` 点名的 `host[:port]`。其余一律拒取（日志 `inbound media URL rejected`，理由里写清怎么放行），其中最要紧的是同机其它私有服务：管理面对回环没有鉴权，`http://127.0.0.1:18790/api/llm/configs` 无 token 直接 200，放任意私网过去等于把这份读口借给群里任何会发消息的人。链路本地（含云元数据 `169.254.169.254`）、保留段、组播、未指定地址任何配置下都拒。比对按解析出的 IP:port 而非主机名：donor 写 `127.0.0.1:3000` 时 `localhost:3000` 会多带一枚 `::1` 端点而不算命中，那种写法请点进 `allowed_media_hosts` |
 | 入站文件 | OneBot file 段（数组或 `[CQ:file,...]`）→ 取 `url`（群文件缺 URL 时经 `get_group_file_url` 换取）→ 下载（≤20MiB、每条消息至多 4 个附件）→ `kind:"file"` 提交；取不到链接时正文追加「[文件 x 未能获取]」提示，不静默吞 |
 | 出站图片/文件 | 事件 `attachments`（见 external-agent-api.md「出站附件契约」）→ 桥下载签名媒体 URL：image 以 `[CQ:image,file=base64://...]` 段发送，其余走 `upload_private_file`/`upload_group_file`（base64 直传，无公网要求）；失败降级为签名链接文本行 |
 | event_id 重推去重 | OneBot `event_id`（缺省 `ob:{message_id}`）→ `Idempotency-Key` |

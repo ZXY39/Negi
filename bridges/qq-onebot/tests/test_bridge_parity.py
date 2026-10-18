@@ -664,17 +664,72 @@ async def test_outbound_attachment_failure_degrades_to_signed_link():
     ]
 
 
-def test_inbound_media_url_guard_blocks_non_public_address_families():
-    from qq_onebot_bridge.onebot import url_is_safe_media_source
+def test_media_source_policy_blocks_never_a_donor_address_families():
+    from qq_onebot_bridge.onebot import MediaSourcePolicy
 
-    assert url_is_safe_media_source("http://169.254.169.254/latest/meta-data/") is False
-    assert url_is_safe_media_source("http://fe80::1/a.png") is False
-    assert url_is_safe_media_source("http://[::1]:18790/api/tasks") is False
-    assert url_is_safe_media_source("http://255.255.255.255/x") is False
-    assert url_is_safe_media_source("file:///etc/passwd") is False
-    assert url_is_safe_media_source("not-a-url") is False
-    # 示例配置的本地 donor（IPv4 回环）不许被误杀：那是参照桥的默认部署形状。
-    assert url_is_safe_media_source("http://127.0.0.1:3000/media/a.png") is True
+    policy = MediaSourcePolicy(donor_http_url="http://127.0.0.1:3000")
+
+    for url in (
+        "http://169.254.169.254/latest/meta-data/",
+        "http://fe80::1/a.png",
+        "http://[::1]:18790/api/tasks",
+        "http://255.255.255.255/x",
+        "file:///etc/passwd",
+        "not-a-url",
+        "http://does-not-exist.invalid/a.png",
+    ):
+        allowed, _reason = policy.allows(url)
+        assert allowed is False, url
+
+
+def test_media_source_policy_allows_the_configured_donor_and_public_hosts():
+    """donor 就是配置里那台：它已经表达了意图，不该再抄一遍白名单。"""
+    from qq_onebot_bridge.onebot import MediaSourcePolicy
+
+    policy = MediaSourcePolicy(donor_http_url="http://127.0.0.1:3000")
+
+    assert policy.allows("http://127.0.0.1:3000/media/a.png")[0] is True
+    assert policy.allows("https://multimedia.nt.qq.com.cn/a.png")[0] is True
+
+
+def test_media_source_policy_matches_sockets_not_host_names(monkeypatch):
+    """donor 写作 127.0.0.1 时，双栈的 `localhost` 多出一枚 ::1 端点，不算同一个 socket——
+    判否并把出路写进理由。解析在测试里钉死，免得结论随机器的地址族配置漂。"""
+    from qq_onebot_bridge import onebot as onebot_module
+    from qq_onebot_bridge.onebot import MediaSourcePolicy
+
+    def _fake_getaddrinfo(host, port, **kwargs):
+        if host == "localhost":
+            return [(6, 1, 6, "", ("::1", port)), (2, 1, 6, "", ("127.0.0.1", port))]
+        return [(2, 1, 6, "", (host, port))]
+
+    monkeypatch.setattr(onebot_module.socket, "getaddrinfo", _fake_getaddrinfo)
+    policy = MediaSourcePolicy(donor_http_url="http://127.0.0.1:3000")
+
+    allowed, reason = policy.allows("http://localhost:3000/media/a.png")
+    assert allowed is False
+    assert "allowed_media_hosts" in reason
+
+    listed = MediaSourcePolicy(donor_http_url="http://127.0.0.1:3000", allowed_hosts=["localhost:3000"])
+    assert listed.allows("http://localhost:3000/media/a.png")[0] is True
+
+
+def test_media_source_policy_denies_unlisted_private_targets_and_names_the_escape_hatch():
+    """同机另一台私有服务默认拒；理由里要写清楚怎么放行。"""
+    from qq_onebot_bridge.onebot import MediaSourcePolicy
+
+    policy = MediaSourcePolicy(donor_http_url="http://127.0.0.1:3000")
+
+    allowed, reason = policy.allows("http://127.0.0.1:18790/api/llm/configs")
+    assert allowed is False
+    assert "allowed_media_hosts" in reason
+
+    listed = MediaSourcePolicy(
+        donor_http_url="http://127.0.0.1:3000",
+        allowed_hosts=["127.0.0.1:18790", "media.lan"],
+    )
+    assert listed.allows("http://127.0.0.1:18790/media/a.png")[0] is True
+    assert listed.allows("http://127.0.0.1:18791/a.png")[0] is False
 
 
 @pytest.mark.asyncio
@@ -691,6 +746,27 @@ async def test_download_bytes_refuses_a_metadata_url_without_fetching(monkeypatc
     monkeypatch.setattr(client._http, "stream", _fake_stream)
 
     result = await client.download_bytes("http://169.254.169.254/latest/meta-data/iam/", max_bytes=1024)
+
+    assert result is None
+    assert attempted == []
+    await client.close()
+
+
+@pytest.mark.asyncio
+async def test_download_bytes_refuses_the_local_admin_surface(monkeypatch):
+    """本机管理面对回环无鉴权：借桥读它就是这条闸门要关掉的口子。"""
+    from qq_onebot_bridge.onebot import OnebotClient
+
+    client = OnebotClient(ws_url="ws://fake", http_url="http://127.0.0.1:3000")
+    attempted: list[str] = []
+
+    def _fake_stream(method, url, **kwargs):
+        attempted.append(str(url))
+        raise AssertionError("guard must reject before the transport")
+
+    monkeypatch.setattr(client._http, "stream", _fake_stream)
+
+    result = await client.download_bytes("http://127.0.0.1:18790/api/llm/configs", max_bytes=1024)
 
     assert result is None
     assert attempted == []
