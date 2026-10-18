@@ -679,8 +679,8 @@ def _render_frontdoor_stage_gate_summary(payload: dict[str, Any]) -> str:
     denied_tool_names = _normalized_name_list(payload.get('denied_tool_names'))
     if denied_tool_names:
         lines.append(
-            'denied_tools (`tools[]` 里带着参数表，但你当前角色无权限，调用一律被拒；'
-            f'不要反复重试或改着名字试): {_render_name_list(denied_tool_names)}'
+            'denied_tools (`tools[]` 里带着参数表，但这一跳调不动——无权限或资源已下架，'
+            f'调用一律被拒；不要反复重试或改着名字试): {_render_name_list(denied_tool_names)}'
         )
     lines.append(_render_stage_summary(payload.get('stage_summary')))
     return '\n'.join(lines)

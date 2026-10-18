@@ -538,22 +538,78 @@ async function requestDeleteSkill() {
     });
 }
 
+// 资源删除的唯一收尾判据：删掉没删掉看磁盘/列表，不看这次请求是否"顺利返回"。
+// 服务端删的是真目录（MCP 工具常带 node_modules），Windows 上 rmtree 几十秒很常见，
+// 中途还可能撞上浏览器断连或服务重启。所以这里做两件事：
+//   1) 请求本身不带客户端超时（ApiClient.deleteTool / deleteSkill 的 timeoutMs=0）；
+//   2) 请求报错时先回读一次列表复核，只有"确实还在"才算失败，绝不把已删除报成 timeout。
+function deleteProgressText(displayName, startedAt) {
+    const elapsedSeconds = Math.max(1, Math.round((Date.now() - startedAt) / 1000));
+    return `正在移除 ${displayName}… 已用时 ${elapsedSeconds}s（目录较大时可能需要几十秒，请不要关闭页面）`;
+}
+
+// 常驻进度提示：删除期间没有别的信号，秒数在走就说明请求还活着。
+// 只改文本节点，不重复走 showToast——那会每秒重建一次 toast 图标。
+function startDeleteProgress(displayName) {
+    const startedAt = Date.now();
+    showToast({
+        title: "正在删除",
+        text: deleteProgressText(displayName, startedAt),
+        kind: "info",
+        persistent: true,
+        spin: true,
+    });
+    const ticker = window.setInterval(() => {
+        if (!U.toastText || String(U.toastTitle?.textContent || "") !== "正在删除") return;
+        U.toastText.textContent = deleteProgressText(displayName, startedAt);
+    }, 1000);
+    return () => window.clearInterval(ticker);
+}
+
+async function runResourceDelete({ request, reload, isGone }) {
+    let requestError = null;
+    try {
+        await request();
+    } catch (e) {
+        requestError = e;
+    }
+    if (!requestError) return { removed: true, error: null };
+    // 请求失败不等于没删掉：回读一次列表，确认资源是否真的还在。
+    let stillPresent = true;
+    try {
+        await reload();
+        stillPresent = !(await isGone());
+    } catch (e) {
+        void e;
+    }
+    if (!stillPresent) return { removed: true, error: requestError };
+    return { removed: false, error: requestError };
+}
+
 async function performDeleteSkill(skillId, displayName) {
     if (!skillId) return;
     S.skillBusy = true;
     renderSkillActions();
-    showToast({ title: "正在删除", text: `正在移除 ${displayName || skillId}...`, kind: "info", persistent: true });
+    const label = displayName || skillId;
+    const stopProgress = startDeleteProgress(label);
     try {
-        await ApiClient.deleteSkill(skillId);
-        clearSkillSelection();
-        await loadSkills({ renderDetail: false });
-        addNotice({ kind: "resource_saved", title: "Skill 已删除", text: displayName || skillId });
-        showToast({ title: "已删除", text: `${displayName || skillId} 已移除。`, kind: "success", durationMs: 2200 });
-    } catch (e) {
-        const message = resourceDeleteErrorText(e);
-        addNotice({ kind: "resource_failed", title: "删除 Skill 失败", text: message });
-        showToast({ title: "删除失败", text: message, kind: "error", durationMs: 3200 });
+        const { removed, error } = await runResourceDelete({
+            request: () => ApiClient.deleteSkill(skillId),
+            reload: () => loadSkills({ renderDetail: false }),
+            isGone: () => !(S.skills || []).some((skill) => String(skill.skill_id || "") === skillId),
+        });
+        if (removed) {
+            clearSkillSelection();
+            await loadSkills({ renderDetail: false });
+            addNotice({ kind: "resource_saved", title: "Skill 已删除", text: label });
+            showToast({ title: "已删除", text: `${label} 已移除。`, kind: "success", durationMs: 2200 });
+        } else {
+            const message = resourceDeleteErrorText(error);
+            addNotice({ kind: "resource_failed", title: "删除 Skill 失败", text: message });
+            showToast({ title: "删除失败", text: message, kind: "error", durationMs: 3200 });
+        }
     } finally {
+        stopProgress();
         S.skillBusy = false;
         renderSkillActions();
     }
@@ -854,18 +910,26 @@ async function performDeleteTool(toolId, displayName) {
     }
     S.toolBusy = true;
     renderToolActions();
-    showToast({ title: "正在删除", text: `正在移除 ${displayName || toolId}...`, kind: "info", persistent: true });
+    const label = displayName || toolId;
+    const stopProgress = startDeleteProgress(label);
     try {
-        await ApiClient.deleteTool(toolId);
-        clearToolSelection();
-        await loadTools({ renderDetail: false });
-        addNotice({ kind: "resource_saved", title: "工具已删除", text: displayName || toolId });
-        showToast({ title: "已删除", text: `${displayName || toolId} 已移除。`, kind: "success", durationMs: 2200 });
-    } catch (e) {
-        const message = resourceDeleteErrorText(e);
-        addNotice({ kind: "resource_failed", title: "删除工具失败", text: message });
-        showToast({ title: "删除失败", text: message, kind: "error", durationMs: 3200 });
+        const { removed, error } = await runResourceDelete({
+            request: () => ApiClient.deleteTool(toolId),
+            reload: () => loadTools({ renderDetail: false }),
+            isGone: () => !(S.tools || []).some((tool) => String(tool.tool_id || "") === toolId),
+        });
+        if (removed) {
+            clearToolSelection();
+            await loadTools({ renderDetail: false });
+            addNotice({ kind: "resource_saved", title: "工具已删除", text: label });
+            showToast({ title: "已删除", text: `${label} 已移除。`, kind: "success", durationMs: 2200 });
+        } else {
+            const message = resourceDeleteErrorText(error);
+            addNotice({ kind: "resource_failed", title: "删除工具失败", text: message });
+            showToast({ title: "删除失败", text: message, kind: "error", durationMs: 3200 });
+        }
     } finally {
+        stopProgress();
         S.toolBusy = false;
         renderToolActions();
     }

@@ -12,6 +12,7 @@ import uuid
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 from loguru import logger
@@ -41,6 +42,7 @@ from g3ku.providers.responses_protocol_helpers import (
 from g3ku.providers.responses_protocol_helpers import (
     _prompt_cache_key as _preview_prompt_cache_key,
 )
+from g3ku.resources.retired_schemas import lookup_tool_schema
 from g3ku.runtime.chunk_compression_plan import (
     CHUNK_MAX_CHUNKS,
     COMPRESSION_MAX_PASS_ROUNDS,
@@ -1861,11 +1863,14 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
         actual_tool_schemas: list[dict[str, Any]] = []
         if hasattr(self, "_frontdoor_prompt_contract"):
             try:
-                runtime_visible_tool_names = self._frontdoor_provider_visible_tool_names(
-                    list(state_for_request.get("provider_tool_names") or state_for_request.get("tool_names") or [])
+                # 声明名单直接交给渲染器：活实例优先、删掉的名字取删除前快照。
+                # 先过 `_frontdoor_provider_visible_tool_names` 会把没有实例的名字摘掉，
+                # 删除就变成"下一跳少一条工具表"——正是要避免的那种断缓存。
+                provider_tool_schema_names = list(
+                    state_for_request.get("provider_tool_names") or state_for_request.get("tool_names") or []
                 )
                 try:
-                    tool_schemas = self._selected_tool_schemas(list(runtime_visible_tool_names))
+                    tool_schemas = self._selected_tool_schemas(provider_tool_schema_names)
                 except Exception:
                     tool_schemas = []
                 actual_tool_schemas = list(tool_schemas or [])
@@ -3831,11 +3836,49 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
         装配层算出来的那一行就会在落请求体前被覆盖掉。
         """
         return self._frontdoor_declared_denied_tool_names(
-            declared_tool_names=list(state.get("provider_tool_names") or []),
+            declared_tool_names=self._frontdoor_schema_renderable_tool_names(
+                list(state.get("provider_tool_names") or []),
+            ),
             granted_tool_names=self._frontdoor_live_granted_tool_names(
                 session_key=str(state.get("session_key") or ""),
             ),
         )
+
+    def _frontdoor_schema_renderable_tool_names(self, tool_names: list[str] | None) -> list[str]:
+        """清单里这一跳**真能渲出参数表**的名字。
+
+        `denied_tools` 的措辞是"`tools[]` 里带着参数表，但这一跳调不动"，所以它只装真的
+        在 `tools[]` 里的名字。判据与 `_selected_tool_schemas` 同源：活实例，或删除前抄下
+        的那份 schema 快照。两者都没有的名字（例如资源被卸载且没留过快照）渲不出参数表，
+        写进这一行只会让模型拿着"参数表在场"的说明去撞一个不存在的名字。
+
+        判据用注册表里的存在性而不是真去渲一遍 schema：`_selected_tool_schemas` 跳过
+        一个名字的条件就是既无实例也无快照，而这段每跳要跑好几处（装配、预检、发送前
+        重建），按名字做一次字典查找就够了。
+        """
+        normalized = [
+            str(item or "").strip()
+            for item in list(tool_names or [])
+            if str(item or "").strip()
+        ]
+        tools_registry = getattr(self._loop, "tools", None)
+        tool_lookup = getattr(tools_registry, "get", None)
+        if not callable(tool_lookup):
+            # 注册表读不到时保持原口径：宁可多说，也不因为一次读失败把收回的名字静默掉。
+            return normalized
+        renderable: list[str] = []
+        for name in normalized:
+            try:
+                tool = tool_lookup(name)
+            except Exception:
+                tool = None
+            if tool is None:
+                if lookup_tool_schema(name) is None:
+                    continue
+                renderable.append(name)
+                continue
+            renderable.append(str(getattr(tool, "name", "") or name).strip() or name)
+        return renderable
 
     def _frontdoor_bundle_recommit_boundary(self, *, session: Any, state: CeoGraphState) -> bool:
         """tools[] 的唯一重新提交点：压缩（内联 preflight 的 token_compression 或手动压缩挂的
@@ -4098,18 +4141,35 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
         return normalized
 
     def _selected_tool_schemas(self, tool_names: list[str] | None) -> list[dict[str, Any]]:
+        """按传入顺序渲染 provider `tools[]`：活实例优先，删掉的名字取删除前快照。
+
+        清单钉住的是名字，`tools[]` 却是按实例现渲的。工具被删除后实例没了，如果这里
+        直接跳过，这一跳的工具表就比上一跳少一条——可复用前缀从工具表那一截整段断开，
+        等于让一次删除把身后正文的缓存全部重付。权限收回不会断是因为实例还在、参数表
+        由声明侧继续供着；删除要享受同一条待遇，就只能用删除前抄下来的那份 schema。
+        快照见 `g3ku/resources/retired_schemas.py`，重印点一过名字离开清单，它自然不再被取用。
+        """
         schemas: list[dict[str, Any]] = []
-        for name in self._frontdoor_provider_visible_tool_names(tool_names):
+        for name in self._normalized_tool_name_state_list(tool_names):
             tool = self._loop.tools.get(str(name or "").strip())
             if tool is None:
-                continue
+                retired = lookup_tool_schema(name)
+                if not isinstance(retired, dict):
+                    continue
+                # 用同一个投影函数渲染，字节才与删除前那一跳完全一致。
+                tool = SimpleNamespace(
+                    name=name,
+                    description="",
+                    parameters={},
+                    to_model_schema=lambda payload=retired: payload,
+                )
             try:
                 description, parameters = _provider_visible_tool_contract(tool)
                 schemas.append(
                     {
                         "type": "function",
                         "function": {
-                            "name": tool.name,
+                            "name": getattr(tool, "name", "") or name,
                             "description": description,
                             "parameters": dict(parameters or {}),
                         },
@@ -5706,8 +5766,9 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
         state: dict[str, Any],
     ) -> dict[str, Any]:
         refreshed = dict(state or {})
-        runtime_visible_tool_names = self._frontdoor_provider_visible_tool_names(
-            list(refreshed.get("provider_tool_names") or refreshed.get("tool_names") or [])
+        # 声明名单直接交给渲染器（活实例优先、删掉的名字取删除前快照），别先摘名字。
+        provider_tool_schema_names = list(
+            refreshed.get("provider_tool_names") or refreshed.get("tool_names") or []
         )
         for legacy_field in ("summary_text", "summary_payload", "summary_model_key", "summary_version"):
             refreshed.pop(legacy_field, None)
@@ -5717,7 +5778,7 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
             model_refs = list(refreshed.get("model_refs") or [])
             provider_model = str(model_refs[0] if model_refs else "").strip()
             try:
-                tool_schemas = self._selected_tool_schemas(list(runtime_visible_tool_names))
+                tool_schemas = self._selected_tool_schemas(provider_tool_schema_names)
             except Exception:
                 tool_schemas = []
             contract = self._frontdoor_prompt_contract(
@@ -6683,7 +6744,7 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
             return snapshot
         first_round_text = str(pending[0].get("text") or "").strip()
         stage_goal = (
-            f"自动补记无阶段工具调用：{first_round_text[:60]}"
+            first_round_text[:60]
             if first_round_text
             else "自动补记：无阶段期间执行的工具调用"
         )
@@ -7884,7 +7945,9 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
                 rbac_visible_tool_names=list(rbac_visible_tool_names),
                 rbac_visible_skill_ids=list(rbac_visible_skill_ids),
                 denied_tool_names=self._frontdoor_declared_denied_tool_names(
-                    declared_tool_names=list(runtime_visible_tool_names or []),
+                    declared_tool_names=self._frontdoor_schema_renderable_tool_names(
+                        list(runtime_visible_tool_names or []),
+                    ),
                     granted_tool_names=self._frontdoor_live_granted_tool_names(
                         session_key=str(state.get("session_key") or ""),
                     ),

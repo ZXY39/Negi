@@ -910,6 +910,16 @@ If roles look like shipped defaults right after an upgrade of an existing instal
 
 Do not assume the browser has a second hidden RBAC source. For surfaced tools, the API detail payload and runtime visibility are two views over the same backend-owned per-tool state.
 
+### Resource Delete Lane（工具 / Skill 删除）
+
+删除是唯一会真的动磁盘的管理写操作：`DELETE /api/resources/tools/{tool_id}` 与 `DELETE /api/resources/skills/{skill_id}` 先 `rmtree` 安装目录，再重建资源树、清角色策略。MCP 工具的安装目录常带 `node_modules`，Windows 上一次 `rmtree` 十几到几十秒都正常，所以这条车道有三条硬约定：
+
+- **服务端把目录删除放进工作线程**（`MainRuntimeService._delete_ordered_paths` 经 `asyncio.to_thread` 调用），资源树刷新与治理收尾仍留在事件循环线程上。反过来的代价是整个 web 服务（含 websocket 推送与其它管理请求）在一次删除期间全部停摆。
+- **客户端不给删除请求设超时**（`ApiClient.deleteTool` / `deleteSkill` 传 `timeoutMs: 0`）。默认 10s 超时会把已经删成功的请求报成 `Request timeout`——实盘症状是"点删除弹 timeout，刷新后工具已经没了"。删除期间详情抽屉的按钮显示 `删除中...`，toast 是常驻的 spinner 并逐秒累计已用时间，没有关闭键：它是唯一的进度信号。
+- **失败判据是资源还在不在，不是请求顺不顺**。请求报错（断连、服务重启、用户切页）后前端回读一次列表复核，只有资源仍在才提示删除失败；请求成功返回才清选择并提示已删除。真正的业务拒绝（`tool_in_use` / `tool_busy` / `core_tool_delete_forbidden`，均 409）资源仍在，按失败提示。
+
+排查"删了但列表还在"：先看 `DELETE` 的响应体 `deleted_paths`，再看 `resources.tools` 计数是否下降，最后确认 `_resource_is_busy` 没有把这次删除挡在 409 上。删除对会话/节点 `tools[]` 的影响见 `tool-and-skill-system.md`「Provider Tool Surface」：删除流程在 `rmtree` 之前把该工具的 provider schema 抄进快照（`g3ku/resources/retired_schemas.py`），所以下一跳的 `tools[]` 与上一跳逐字节相同、可复用前缀不断，尾块用 `denied_tools` 点名它"这一跳调不动"。名字真正离开清单仍只在压缩/空闲这类重印点——删一次工具不该把身后整段正文的缓存重付一遍。
+
 ## Exec Approval And Allowlist Admin Contract
 
 `exec` 的破坏性命令守卫把「这条命令要不要人放行」交给运维：待审批清单、放行/拒绝动作与命令白名单都住在 Web 管理面这一侧。

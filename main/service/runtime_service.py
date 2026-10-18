@@ -28,6 +28,7 @@ from g3ku.content.navigation import RESOURCE_URI_SCHEME
 from g3ku.deployment.data_root import data_root, data_work_path, ensure_dir, resolve_data_path
 from g3ku.llm_config.runtime_resolver import resolve_chat_target
 from g3ku.resources.models import ResourceKind
+from g3ku.resources.retired_schemas import lookup_tool_schema, record_tool_schema
 from g3ku.resources.tool_settings import (
     MemoryRuntimeSettings,
     raw_tool_settings_from_descriptor,
@@ -6864,9 +6865,14 @@ class MainRuntimeService:
             if not normalized_name or normalized_name in live_granted_tool_names:
                 continue
             to_schema = getattr(declared_instances.get(normalized_name), 'to_model_schema', None)
-            if not callable(to_schema):
+            if callable(to_schema):
+                declared_denied_tool_schemas[normalized_name] = to_schema()
                 continue
-            declared_denied_tool_schemas[normalized_name] = to_schema()
+            # 实例已经不在（资源被删除）：取删除前抄下的那一份，`tools[]` 才能与上一跳
+            # 逐字节相同。没有快照就让名字离开清单——发一份猜出来的 schema 比断缓存更糟。
+            retired_schema = lookup_tool_schema(normalized_name)
+            if isinstance(retired_schema, dict):
+                declared_denied_tool_schemas[normalized_name] = retired_schema
         declared_denied_tool_names = list(declared_denied_tool_schemas.keys())
         provider_tool_membership_changed = provider_tool_names != list(prior_provider_tool_names)
         provider_tool_bundle_seeded = bool(provider_tool_membership_changed)
@@ -9225,7 +9231,40 @@ class MainRuntimeService:
             return
         delete_paths.add(resolved)
 
-    def delete_skill_resource(self, skill_id: str, *, session_id: str = 'web:shared') -> dict[str, Any]:
+    def _remember_retired_tool_schema(self, tool_id: str) -> None:
+        """删除前把工具的 provider 参数表抄进快照，供渲染侧在没有实例时继续发出同一份。
+
+        抄的是 `to_model_schema()`——两条车道各自再投影一次（前门剥 schema 组合子、
+        节点原样用），所以快照存的必须是"实例会给出的那一份"，不能是已投影过的形状。
+        抄不到就放弃：宁可这一跳断一次前缀，也不要发一份与上一跳不同的假 schema。
+        """
+        manager = getattr(self, '_resource_manager', None)
+        instance_getter = getattr(manager, 'tool_instances', None)
+        instances = dict(instance_getter() or {}) if callable(instance_getter) else {}
+        tool = instances.get(str(tool_id or '').strip())
+        to_schema = getattr(tool, 'to_model_schema', None)
+        if not callable(to_schema):
+            return
+        try:
+            schema = to_schema()
+        except Exception:
+            return
+        if isinstance(schema, dict):
+            record_tool_schema(tool_id, schema)
+
+    def _delete_ordered_paths(self, paths: list[Path]) -> list[str]:
+        """按给定顺序删除路径。
+
+        这是整条删除流程里唯一可能慢的动作：MCP 工具的安装目录常带 node_modules，
+        Windows 上 rmtree 十几到几十秒都正常。异步车道把它交给线程，别让一次删除
+        把整个 web 事件循环（含 websocket 与其它管理请求）一起冻住。
+        """
+        deleted_paths: list[str] = []
+        for path in list(paths or []):
+            self._delete_path(path, deleted_paths=deleted_paths)
+        return deleted_paths
+
+    def _prepare_skill_resource_delete(self, skill_id: str) -> dict[str, Any]:
         skill = self.get_skill_resource(skill_id)
         if skill is None:
             raise ValueError('skill_not_found')
@@ -9233,13 +9272,25 @@ class MainRuntimeService:
         self._raise_if_skill_in_use(skill)
         if self._resource_is_busy(ResourceKind.SKILL, target_skill_id):
             raise ValueError('skill_busy')
-
-        before_state = self.capture_resource_tree_state()
         skill_root = self._resolve_resource_root(skill.source_path, kind=ResourceKind.SKILL)
-        deleted_paths: list[str] = []
-        self._delete_path(skill_root, deleted_paths=deleted_paths)
+        return {
+            'target_id': target_skill_id,
+            'root': skill_root,
+            'paths': [skill_root],
+            # 基线必须在删除前取：删完再扫就只剩"已删除"这一种状态。
+            'before_state': self.capture_resource_tree_state(),
+        }
+
+    def _finish_skill_resource_delete(
+        self,
+        prepared: dict[str, Any],
+        deleted_paths: list[str],
+        *,
+        session_id: str,
+    ) -> dict[str, Any]:
+        target_skill_id = str(prepared.get('target_id') or '').strip()
         refresh_result = self.refresh_changed_resources(
-            before_state,
+            prepared.get('before_state'),
             trigger='skill-delete',
             session_id=session_id,
         )
@@ -9249,10 +9300,15 @@ class MainRuntimeService:
         )
         return {
             'skill_id': target_skill_id,
-            'path': str(skill_root),
-            'deleted_paths': deleted_paths,
+            'path': str(prepared.get('root') or ''),
+            'deleted_paths': list(deleted_paths or []),
             'resources': refresh_result,
         }
+
+    def delete_skill_resource(self, skill_id: str, *, session_id: str = 'web:shared') -> dict[str, Any]:
+        prepared = self._prepare_skill_resource_delete(skill_id)
+        deleted_paths = self._delete_ordered_paths(list(prepared.get('paths') or []))
+        return self._finish_skill_resource_delete(prepared, deleted_paths, session_id=session_id)
 
     async def delete_skill_resource_async(
         self,
@@ -9261,7 +9317,12 @@ class MainRuntimeService:
         session_id: str = 'web:shared',
     ) -> dict[str, Any]:
         target_skill_id = str(skill_id or '').strip()
-        item = self.delete_skill_resource(target_skill_id, session_id=session_id)
+        prepared = self._prepare_skill_resource_delete(target_skill_id)
+        deleted_paths = await asyncio.to_thread(
+            self._delete_ordered_paths,
+            list(prepared.get('paths') or []),
+        )
+        item = self._finish_skill_resource_delete(prepared, deleted_paths, session_id=session_id)
         item.update(await self._sync_catalog_targets(skill_ids={target_skill_id}))
         return item
 
@@ -9384,7 +9445,7 @@ class MainRuntimeService:
             resource_manager=self._resource_manager,
         )
 
-    def delete_tool_resource(self, tool_id: str, *, session_id: str = 'web:shared') -> dict[str, Any]:
+    def _prepare_tool_resource_delete(self, tool_id: str) -> dict[str, Any]:
         record = self._raw_tool(tool_id)
         if record is None:
             raise ValueError('tool_not_found')
@@ -9407,6 +9468,10 @@ class MainRuntimeService:
         if self._resource_is_busy(ResourceKind.TOOL, target_tool_id):
             raise ValueError('tool_busy')
 
+        # 删除前先抄一份 provider 参数表：实例消失后 `tools[]` 仍要按原字节发出，
+        # 否则这一跳的工具表少一条，可复用前缀整段重付（与权限收回的缓存待遇对齐）。
+        self._remember_retired_tool_schema(target_tool_id)
+
         before_state = self.capture_resource_tree_state()
         delete_paths: set[Path] = set()
         skipped_paths: list[str] = []
@@ -9423,13 +9488,25 @@ class MainRuntimeService:
             delete_paths=delete_paths,
             skipped_paths=skipped_paths,
         )
+        ordered_paths = sorted(delete_paths, key=lambda item: (len(str(item)), str(item)), reverse=True)
+        return {
+            'target_id': target_tool_id,
+            'root': self._resolve_resource_root(record.source_path, kind=ResourceKind.TOOL),
+            'paths': ordered_paths,
+            'skipped_paths': skipped_paths,
+            'before_state': before_state,
+        }
 
-        deleted_paths: list[str] = []
-        for path in sorted(delete_paths, key=lambda item: (len(str(item)), str(item)), reverse=True):
-            self._delete_path(path, deleted_paths=deleted_paths)
-
+    def _finish_tool_resource_delete(
+        self,
+        prepared: dict[str, Any],
+        deleted_paths: list[str],
+        *,
+        session_id: str,
+    ) -> dict[str, Any]:
+        target_tool_id = str(prepared.get('target_id') or '').strip()
         refresh_result = self.refresh_changed_resources(
-            before_state,
+            prepared.get('before_state'),
             trigger='tool-delete',
             session_id=session_id,
         )
@@ -9439,11 +9516,16 @@ class MainRuntimeService:
         )
         return {
             'tool_id': target_tool_id,
-            'path': str(self._resolve_resource_root(record.source_path, kind=ResourceKind.TOOL)),
-            'deleted_paths': deleted_paths,
-            'skipped_paths': skipped_paths,
+            'path': str(prepared.get('root') or ''),
+            'deleted_paths': list(deleted_paths or []),
+            'skipped_paths': list(prepared.get('skipped_paths') or []),
             'resources': refresh_result,
         }
+
+    def delete_tool_resource(self, tool_id: str, *, session_id: str = 'web:shared') -> dict[str, Any]:
+        prepared = self._prepare_tool_resource_delete(tool_id)
+        deleted_paths = self._delete_ordered_paths(list(prepared.get('paths') or []))
+        return self._finish_tool_resource_delete(prepared, deleted_paths, session_id=session_id)
 
     async def delete_tool_resource_async(
         self,
@@ -9452,7 +9534,13 @@ class MainRuntimeService:
         session_id: str = 'web:shared',
     ) -> dict[str, Any]:
         target_tool_id = str(tool_id or '').strip()
-        item = self.delete_tool_resource(target_tool_id, session_id=session_id)
+        prepared = self._prepare_tool_resource_delete(target_tool_id)
+        # 目录删除走线程：一次 MCP 工具删除动辄十几秒，压在事件循环上等于整站停摆。
+        deleted_paths = await asyncio.to_thread(
+            self._delete_ordered_paths,
+            list(prepared.get('paths') or []),
+        )
+        item = self._finish_tool_resource_delete(prepared, deleted_paths, session_id=session_id)
         item.update(await self._sync_catalog_targets(tool_ids={target_tool_id}))
         return item
 

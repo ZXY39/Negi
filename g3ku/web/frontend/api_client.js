@@ -217,12 +217,20 @@ class ApiClient {
             this._requestControllers.set(normalizedKey, controller);
             this._requestTokens.set(normalizedKey, token);
         }
+        // `timeoutMs: 0`（或负数/Infinity）表示**不设客户端超时**。资源删除这类请求的时长
+        // 由服务端磁盘决定（MCP 工具目录常带 node_modules，Windows 上 rmtree 能跑几十秒），
+        // 客户端掐表只会把已经成功的删除报成 "Request timeout"，用户还得刷新才知道删掉了。
+        const timeoutBudget = Number(timeoutMs);
+        const timeoutEnabled = Number.isFinite(timeoutBudget) ? timeoutBudget > 0 : timeoutMs === Infinity;
         try {
             let didTimeout = false;
-            const timeoutId = window.setTimeout(() => {
-                didTimeout = true;
-                controller.abort(new DOMException("Request timeout", "AbortError"));
-            }, Math.max(1000, Number(timeoutMs) || 10000));
+            let timeoutId = 0;
+            if (timeoutEnabled) {
+                timeoutId = window.setTimeout(() => {
+                    didTimeout = true;
+                    controller.abort(new DOMException("Request timeout", "AbortError"));
+                }, Math.max(1000, timeoutBudget));
+            }
             let response;
             try {
                 response = await fetch(url.toString(), {
@@ -240,7 +248,7 @@ class ApiClient {
                 }
                 throw error;
             } finally {
-                window.clearTimeout(timeoutId);
+                if (timeoutId) window.clearTimeout(timeoutId);
             }
             if (normalizedKey && this._requestTokens.get(normalizedKey) !== token) {
                 const staleError = new Error("Stale request");
@@ -1376,8 +1384,13 @@ class ApiClient {
         return this.post(`/api/resources/skills/${skillId}/disable`, {}, { session_id: this.getActiveSessionId() });
     }
 
-    static async deleteSkill(skillId) {
-        return this.delete(`/api/resources/skills/${skillId}`, { session_id: this.getActiveSessionId() });
+    // 删除没有客户端超时：服务端要先 rmtree 目录再重建资源树，耗时不可预估。
+    // 调用方据此把"删除中"做成常驻提示，直到请求真的返回（成功或失败）。
+    static async deleteSkill(skillId, { timeoutMs = 0 } = {}) {
+        return this._request("DELETE", `/api/resources/skills/${skillId}`, {
+            params: { session_id: this.getActiveSessionId() },
+            timeoutMs,
+        });
     }
 
     static async getTools(offset = 0, limit = 200) {
@@ -1454,8 +1467,12 @@ class ApiClient {
         return this.post(`/api/resources/tools/${toolId}/disable`, {}, { session_id: this.getActiveSessionId() });
     }
 
-    static async deleteTool(toolId) {
-        return this.delete(`/api/resources/tools/${toolId}`, { session_id: this.getActiveSessionId() });
+    // 同 deleteSkill：不设客户端超时，删除时长由服务端磁盘决定。
+    static async deleteTool(toolId, { timeoutMs = 0 } = {}) {
+        return this._request("DELETE", `/api/resources/tools/${toolId}`, {
+            params: { session_id: this.getActiveSessionId() },
+            timeoutMs,
+        });
     }
 
     static async reloadResources() {

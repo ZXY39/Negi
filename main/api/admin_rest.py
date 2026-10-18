@@ -19,6 +19,7 @@ from g3ku.config.schema import Config, ExternalApiTokenConfig, _normalize_extern
 from g3ku.deployment.data_root import data_root
 from g3ku.resources import get_shared_resource_manager
 from g3ku.resources.models import ResourceKind
+from g3ku.resources.retired_schemas import record_tool_schema
 from g3ku.runtime.core_tools import configured_core_tools, resolve_core_tool_targets
 from g3ku.shells.web import get_agent, is_no_ceo_model_configured_error, refresh_web_agent_runtime
 from g3ku.utils.retry_keywords import split_retry_keywords
@@ -616,6 +617,17 @@ class _StandaloneResourceService:
         self._raise_if_tool_in_use(record)
         if self._resource_is_busy(ResourceKind.TOOL, target_tool_id):
             raise ValueError('tool_busy')
+        # 删除前抄一份 provider 参数表：实例消失后 `tools[]` 仍按原字节发出，缓存待遇与
+        # 权限收回对齐。抄不到就放弃（宁可这一跳断一次，也不发假 schema）。
+        try:
+            instance = dict(self._resource_manager.tool_instances() or {}).get(target_tool_id)
+            to_schema = getattr(instance, 'to_model_schema', None)
+            if callable(to_schema):
+                schema = to_schema()
+                if isinstance(schema, dict):
+                    record_tool_schema(target_tool_id, schema)
+        except Exception:
+            pass
         before_state = self.capture_resource_tree_state()
         delete_paths: set[Path] = set()
         skipped_paths: list[str] = []
