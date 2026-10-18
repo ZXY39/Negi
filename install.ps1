@@ -140,11 +140,11 @@ function Install-CodeInto {
     }
 }
 
-function Update-GitCheckout {
+function Test-TrackedChanges {
     param([string]$Root)
     # Only content differences of tracked files count: untracked entries (market
     # skills, bridge artifacts, local scripts) are never empty on a real device, so
-    # counting them would refuse every upgrade. The check uses diff, not status --
+    # counting them would flag every upgrade. The check uses diff, not status --
     # on autocrlf devices git checks out CRLF while the runtime writes LF back, and
     # status reports that byte-identical line-ending difference as modified (measured:
     # same blob hash); diff normalizes and calls it clean. --cached covers staged-only
@@ -162,13 +162,79 @@ function Update-GitCheckout {
     finally {
         $ErrorActionPreference = $savedPreference
     }
-    if ($worktreeDirty -or $stagedDirty) {
-        Write-Error "[install] $Root has local edits to tracked files; commit or discard them before upgrading"
+    return ($worktreeDirty -or $stagedDirty)
+}
+
+function Save-TrackedChanges {
+    param([string]$Root, [string]$Label)
+    # Local edits are neither overwritten nor turned into a permanent upgrade
+    # blocker: the whole tracked working tree goes into a stash before the code is
+    # swapped and is put back afterwards. `git stash` writes commit objects and
+    # therefore needs an identity, which a freshly installed device does not have --
+    # an upgrade must not stall on git config, so one is supplied inline.
+    $savedPreference = $ErrorActionPreference
+    $ErrorActionPreference = 'Continue'
+    $code = 1
+    try {
+        & git -C $Root -c user.name=negi-upgrade -c user.email=negi-upgrade@localhost stash push --quiet --message $Label 2>&1 | ForEach-Object { [string]$_ } | Out-Host
+        $code = $LASTEXITCODE
     }
-    Write-Step "git fetch --depth 1 origin $Ref"
-    Invoke-Checked @('git', '-C', $Root, 'fetch', '--depth', '1', 'origin', $Ref) -Where $Root
-    Invoke-Checked @('git', '-C', $Root, 'checkout', '--detach', 'FETCH_HEAD') -Where $Root
-    Write-Step "code updated to $Ref"
+    finally {
+        $ErrorActionPreference = $savedPreference
+    }
+    if ($code -ne 0) {
+        Write-Error "[install] could not stash the local edits in $Root; commit or discard them before upgrading"
+    }
+}
+
+function Restore-TrackedChanges {
+    param([string]$Root, [string]$Label)
+    # A conflict means the new release touched the same lines. Drop the merge
+    # result -- the edits themselves stay in the stash -- because a tree left with
+    # conflict markers cannot serve: the installer is about to hand it to a live
+    # process.
+    $savedPreference = $ErrorActionPreference
+    $ErrorActionPreference = 'Continue'
+    $code = 1
+    try {
+        & git -C $Root stash pop --quiet 'stash@{0}' 2>&1 | ForEach-Object { [string]$_ } | Out-Host
+        $code = $LASTEXITCODE
+        if ($code -ne 0) {
+            & git -C $Root reset --hard HEAD 2>&1 | Out-Null
+        }
+    }
+    finally {
+        $ErrorActionPreference = $savedPreference
+    }
+    if ($code -eq 0) {
+        Write-Step 'local edits restored'
+        return
+    }
+    Write-Step "local edits conflict with $Ref; kept in git stash as $Label (resolve with: git -C $Root stash pop)"
+}
+
+function Update-GitCheckout {
+    param([string]$Root)
+    $label = 'negi-upgrade-' + (Get-Date).ToUniversalTime().ToString('yyyyMMddTHHmmssZ')
+    $stashed = $false
+    if (Test-TrackedChanges -Root $Root) {
+        Write-Step "local edits to tracked files found; stashing them as $label (restored after the upgrade)"
+        Save-TrackedChanges -Root $Root -Label $label
+        $stashed = $true
+    }
+    try {
+        Write-Step "git fetch --depth 1 origin $Ref"
+        Invoke-Checked @('git', '-C', $Root, 'fetch', '--depth', '1', 'origin', $Ref) -Where $Root
+        Invoke-Checked @('git', '-C', $Root, 'checkout', '--detach', 'FETCH_HEAD') -Where $Root
+        Write-Step "code updated to $Ref"
+    }
+    catch {
+        # A failed fetch leaves the tree on the old commit, so put the edits back
+        # before rethrowing: a failed upgrade must not hide them in the stash.
+        if ($stashed) { Restore-TrackedChanges -Root $Root -Label $label }
+        throw
+    }
+    if ($stashed) { Restore-TrackedChanges -Root $Root -Label $label }
 }
 
 function Update-Code {

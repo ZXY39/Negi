@@ -27,6 +27,7 @@ UV_INSTALLER='https://astral.sh/uv/install.sh'
 PROTECTED_ENTRIES='.venv .g3ku .git'
 STAGE_DIR=''
 CHECKOUT_DIR=''
+STASH_LABEL=''
 
 cleanup() {
   if [ -n "$STAGE_DIR" ]; then
@@ -168,6 +169,30 @@ copy_checkout_into_root() {
   done
 }
 
+save_tracked_changes() {
+  # 本地改动既不能被新版本覆盖，也不能变成"永久升不动"的理由：换代码前把整棵跟踪
+  # 工作树存进 stash，换完再原样放回。`git stash` 要写提交对象、因此需要身份，而刚装
+  # 好的设备往往没配过 user.name/user.email —— 升级不该卡在 git 配置上，这里内联给一个。
+  STASH_LABEL="negi-upgrade-$(date -u +%Y%m%dT%H%M%SZ)"
+  log "local edits to tracked files found; stashing them as $STASH_LABEL (restored after the upgrade)"
+  git -C "$DIR" -c user.name=negi-upgrade -c user.email=negi-upgrade@localhost \
+    stash push --quiet --message "$STASH_LABEL" \
+    || fail "$DIR has local edits to tracked files and they could not be stashed; commit or discard them before upgrading"
+}
+
+restore_tracked_changes() {
+  [ -n "$STASH_LABEL" ] || return 0
+  if git -C "$DIR" stash pop --quiet 'stash@{0}'; then
+    log 'local edits restored'
+  else
+    # 冲突说明新版本动过同一批行：丢弃这次合并结果（改动本身仍在 stash 里），代码树
+    # 必须保持干净可运行 —— 带冲突标记的文件交给服务就是起不来。
+    git -C "$DIR" reset --hard HEAD >/dev/null 2>&1 || true
+    log "local edits conflict with $REF; kept in git stash as $STASH_LABEL (resolve with: git -C $DIR stash pop)"
+  fi
+  STASH_LABEL=''
+}
+
 update_git_checkout() {
   # 只看跟踪文件的**内容**差异：未跟踪项（用户装的 skill、桥接产物、本地脚本）在任何
   # 正常设备上都不可能为空，算进脏就把升级永久拒死。判据用 diff 而不是 status ——
@@ -177,12 +202,20 @@ update_git_checkout() {
   git -C "$DIR" diff --quiet --ignore-cr-at-eol || TRACKED_DIRTY=1
   git -C "$DIR" diff --cached --quiet --ignore-cr-at-eol || TRACKED_DIRTY=1
   if [ "$TRACKED_DIRTY" -ne 0 ]; then
-    fail "$DIR has local edits to tracked files; commit or discard them before upgrading"
+    save_tracked_changes
   fi
   log "git fetch --depth 1 origin $REF"
-  git -C "$DIR" fetch --depth 1 origin "$REF" || fail 'git fetch failed'
-  git -C "$DIR" checkout --detach FETCH_HEAD || fail 'git checkout failed'
+  if ! git -C "$DIR" fetch --depth 1 origin "$REF"; then
+    # 取码失败时树还停在旧提交，先把改动放回去：升级失败不能顺带把本地改动藏进 stash。
+    restore_tracked_changes
+    fail 'git fetch failed'
+  fi
+  if ! git -C "$DIR" checkout --detach FETCH_HEAD; then
+    restore_tracked_changes
+    fail 'git checkout failed'
+  fi
   log "code updated to $REF"
+  restore_tracked_changes
 }
 
 update_code() {
