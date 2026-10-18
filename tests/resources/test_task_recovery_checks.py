@@ -3,6 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 
 import asyncio
+import shutil
 from types import SimpleNamespace
 
 from main.runtime.recovery_check import RecoveryCheckDecision, RecoveryCheckEngine
@@ -99,6 +100,60 @@ def test_recovery_check_filesystem_copy_verifies_done_when_all_targets_exist_and
     assert result.expected_tool_status == "success"
     assert "copy request already completed" in result.lost_result_summary
     assert len(result.evidence) == 2
+
+
+def test_recovery_check_filesystem_copy_real_copy_verifies_done(tmp_path: Path) -> None:
+    """真拷完的那一份照旧判完成：判据是字节相同，不是"曾经存在"。"""
+    source = tmp_path / "src.txt"
+    destination = tmp_path / "dst.txt"
+    source.write_bytes(b"alpha" * 40000)
+    shutil.copy2(source, destination)
+
+    result = _engine(tmp_path).inspect_tool_call(
+        tool_name="filesystem_copy",
+        arguments={"operations": [{"source": str(source), "destination": str(destination)}]},
+        runtime_context={"task_temp_dir": str(tmp_path)},
+    )
+
+    assert result.decision == RecoveryCheckDecision.VERIFIED_DONE
+    assert result.expected_tool_status == "success"
+
+
+def test_recovery_check_filesystem_copy_truncated_overwrite_is_not_verified_done(tmp_path: Path) -> None:
+    """覆盖拷贝断在半截：目标本来就在，按存在判完成会把短掉的正文钉死永不重试。"""
+    source = tmp_path / "src.bin"
+    destination = tmp_path / "dst.bin"
+    source.write_bytes(b"new-content" * 900)
+    # 中断现场：目标已被截成半截（长度与正文都不再等于源）。
+    destination.write_bytes(source.read_bytes()[:400])
+
+    result = _engine(tmp_path).inspect_tool_call(
+        tool_name="filesystem_copy",
+        arguments={"operations": [{"source": str(source), "destination": str(destination)}]},
+        runtime_context={"task_temp_dir": str(tmp_path)},
+    )
+
+    assert result.decision == RecoveryCheckDecision.MODEL_DECIDE
+    assert result.expected_tool_status == "interrupted"
+    assert "could not be proven complete" in result.lost_result_summary
+
+
+def test_recovery_check_filesystem_copy_directory_target_is_not_verified_done(tmp_path: Path) -> None:
+    """目录拷贝（copytree）留不下可一次核对的证据，只能交给模型核对后再决定。"""
+    source_dir = tmp_path / "tree"
+    (source_dir / "sub").mkdir(parents=True)
+    (source_dir / "a.txt").write_text("a", encoding="utf-8")
+    (source_dir / "sub" / "b.txt").write_text("b", encoding="utf-8")
+    destination_dir = tmp_path / "tree-copy"
+    shutil.copytree(source_dir, destination_dir)
+
+    result = _engine(tmp_path).inspect_tool_call(
+        tool_name="filesystem_copy",
+        arguments={"operations": [{"source": str(source_dir), "destination": str(destination_dir)}]},
+        runtime_context={"task_temp_dir": str(tmp_path)},
+    )
+
+    assert result.decision == RecoveryCheckDecision.MODEL_DECIDE
 
 
 def test_recovery_check_filesystem_move_verifies_done_when_targets_exist_and_sources_are_gone(tmp_path: Path) -> None:

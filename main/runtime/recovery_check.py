@@ -139,13 +139,51 @@ class RecoveryCheckEngine:
                         "Verify both source and destination states before retrying."
                     ),
                 )
-            evidence.append(self._file_evidence(path=destination, note="Destination already exists for the requested copy."))
+            if not self._copy_bytes_match_source(source, destination):
+                return RecoveryCheckResult(
+                    decision=RecoveryCheckDecision.MODEL_DECIDE,
+                    expected_tool_status="interrupted",
+                    lost_result_summary=(
+                        "The interrupted filesystem.copy request could not be proven complete. "
+                        "Verify both source and destination states before retrying."
+                    ),
+                )
+            evidence.append(self._file_evidence(path=destination, note="Destination bytes match the requested copy source."))
         return RecoveryCheckResult(
             decision=RecoveryCheckDecision.VERIFIED_DONE,
             expected_tool_status="success",
             lost_result_summary="Recovery check confirmed that the requested copy request already completed.",
             evidence=evidence,
         )
+
+    @staticmethod
+    def _copy_bytes_match_source(source: Path, destination: Path) -> bool:
+        """拷贝的终态是"目标字节等于源字节"，不是"目标存在"。
+
+        覆盖拷贝被打断时目标文件本来就在，按存在判完成会把半截正文钉成
+        `verified_done`、永不重试。目录拷贝（copytree）一次 stat 证不了整棵树，
+        留给模型核对。
+        """
+        try:
+            if source.is_dir() or destination.is_dir():
+                return False
+            source_size = source.stat().st_size
+            destination_size = destination.stat().st_size
+        except OSError:
+            return False
+        if source_size != destination_size:
+            return False
+        try:
+            with source.open("rb") as src, destination.open("rb") as dst:
+                while True:
+                    source_chunk = src.read(65536)
+                    destination_chunk = dst.read(65536)
+                    if source_chunk != destination_chunk:
+                        return False
+                    if not source_chunk:
+                        return True
+        except OSError:
+            return False
 
     def _inspect_filesystem_move(self, arguments: dict[str, Any]) -> RecoveryCheckResult:
         operations = self._normalized_operations(arguments)
