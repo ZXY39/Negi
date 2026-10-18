@@ -15,6 +15,7 @@ from urllib.parse import urlparse
 
 import httpx
 
+from g3ku.deployment.data_root import data_work_path
 from g3ku.utils.helpers import model_data_root, resolve_model_path
 
 _CACHE_TTL_SECONDS = 300
@@ -344,7 +345,7 @@ class WebFetchTool:
 
     def _resolve_save_root(self, *, save_dir: str | None, runtime: dict[str, Any] | None) -> Path:
         """Where page text lands: the caller's own temp root, or the path the caller names."""
-        temp_root = self._runtime_temp_root(runtime) or (self.workspace / "temp")
+        temp_root = self._runtime_temp_root(runtime) or data_work_path("temp")
         text = str(save_dir or "").strip()
         if not text:
             return temp_root / _SAVE_SUBDIR

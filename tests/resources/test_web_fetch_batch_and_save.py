@@ -267,15 +267,30 @@ async def test_save_dir_bare_name_resolves_under_the_task_temp_root(tmp_path, te
     assert Path(str(result["items"][0]["saved_path"])).parent == temp_root / "scrape"
 
 
-async def test_save_dir_falls_back_to_workspace_temp_without_runtime(tmp_path, monkeypatch):
+async def test_save_dir_falls_back_to_data_root_temp_without_runtime(tmp_path, monkeypatch):
+    """没有 runtime 注入 `task_temp_dir` 时，正文落数据根的 temp，不是项目根的 temp。
+
+    两根重合的默认安装里这两种写法同值，所以判据要先把数据根指到别处再断言。
+    """
+    from g3ku.deployment import data_root as dr
+
+    data_dir = tmp_path / "D-data"
+    workspace = tmp_path / "install"
+    workspace.mkdir()
+    monkeypatch.setenv(dr.DATA_DIR_ENV, str(data_dir))
+    dr.reset_cache()
     network = _Network()
     network.install(monkeypatch)
-    tool = WebFetchTool(workspace=tmp_path)
+    tool = WebFetchTool(workspace=workspace)
 
-    result = await tool(url="https://two.example.org/", include_text=False)
+    try:
+        result = await tool(url="https://two.example.org/", include_text=False)
+    finally:
+        dr.reset_cache()
 
-    assert result["save_dir"] == str(tmp_path / "temp" / "web_fetch")
+    assert result["save_dir"] == str(data_dir / "temp" / "web_fetch")
     assert Path(str(result["items"][0]["saved_path"])).is_file()
+    assert not (workspace / "temp").exists()
 
 
 async def test_unified_timeout_bounds_the_whole_call(tmp_path, temp_root, monkeypatch):
