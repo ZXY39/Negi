@@ -208,7 +208,6 @@ def _build_selector_test_service(
     service.store = SimpleNamespace(get_task=lambda _task_id: task)
     service.memory_manager = None
     service._react_loop = None
-    service._external_tool_provider = lambda _node: {}
     service._resource_manager = _ToolResourceManager(tool_instances)
     service._builtin_tool_cache = None
     service._node_context_selection_cache = {}

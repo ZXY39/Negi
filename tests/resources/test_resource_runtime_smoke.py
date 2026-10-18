@@ -232,26 +232,32 @@ def test_content_navigation_manifests_use_real_artifact_ref_examples() -> None:
         assert 'artifact:artifact_xxx' not in ref_description
 
 
-def _write_demo_external_tool(
+def _write_demo_registered_tool(
     root: Path,
     *,
-    name: str = 'external_browser',
-    guide: str = 'External browser guide',
+    name: str = 'demo_registered_tool',
+    guide: str = 'Demo registered tool guide',
     install_dir: str | None = None,
+    tool_type: str = 'internal',
 ) -> Path:
     tool_root = root / 'tools' / name
     (tool_root / 'toolskills').mkdir(parents=True, exist_ok=True)
-    install_path = install_dir or f'.g3ku/external-tools/{name}'
+    if tool_type == 'internal':
+        main_root = tool_root / 'main'
+        main_root.mkdir(parents=True, exist_ok=True)
+        (main_root / 'tool.py').write_text('def build(runtime):\n    return None\n', encoding='utf-8')
+    install_line = f'install_dir: {install_dir}' if install_dir else ''
     (tool_root / 'resource.yaml').write_text(
         textwrap.dedent(
             f"""\
             schema_version: 1
             kind: tool
             name: {name}
-            display_name: External Browser
-            description: Registered external browser automation tool.
-            tool_type: external
-            install_dir: {install_path}
+            display_name: Demo Registered Tool
+            description: Demo registered tool resource.
+            tool_type: {tool_type}
+            tool_result_delivery_contract: direct_load_inline
+            {install_line}
             protocol: mcp
             mcp:
               transport: embedded
@@ -1569,86 +1575,45 @@ async def test_filesystem_write_validation_failure_restores_existing_file(tmp_pa
 
 
 
-def test_external_tool_is_discovered_but_not_loaded_as_callable_instance(tmp_path: Path):
+def test_declared_external_tool_type_is_rejected_with_two_exits(tmp_path: Path):
+    """`external` is not a tool type: the rejection names both real exits, and
+    `install_dir` is still parsed so a stale record's uninstall can find its payload."""
     workspace = tmp_path / 'workspace'
     (workspace / 'skills').mkdir(parents=True, exist_ok=True)
     (workspace / 'tools').mkdir(parents=True, exist_ok=True)
-    install_dir = workspace / '.g3ku' / 'external-tools' / 'external_browser'
+    install_dir = workspace / 'externaltools' / 'legacy_external'
     install_dir.mkdir(parents=True, exist_ok=True)
-    _write_demo_external_tool(workspace, install_dir='.g3ku/external-tools/external_browser')
-
-    manager = ResourceManager(workspace, app_config=_resource_app_config())
-    manager.reload_now(trigger='test-bind')
-    try:
-        descriptor = manager.get_tool_descriptor('external_browser')
-        assert descriptor is not None
-        assert descriptor.available is True
-        assert descriptor.tool_type == 'external'
-        assert descriptor.callable is False
-        assert descriptor.install_dir == install_dir.resolve()
-        assert manager.get_tool('external_browser') is None
-        assert 'external_browser' not in manager.tool_instances()
-    finally:
-        manager.close()
-
-
-def test_external_tool_rejects_main_dir_and_install_dir_inside_tools(tmp_path: Path):
-    workspace = tmp_path / 'workspace'
-    (workspace / 'skills').mkdir(parents=True, exist_ok=True)
-    (workspace / 'tools').mkdir(parents=True, exist_ok=True)
-
-    with_main = _write_demo_external_tool(workspace, name='external_with_main')
-    (with_main / 'main').mkdir(parents=True, exist_ok=True)
-
-    inside_tools = _write_demo_external_tool(
+    _write_demo_registered_tool(
         workspace,
-        name='external_in_tools',
-        install_dir='tools/external_in_tools/runtime',
+        name='legacy_external',
+        install_dir='externaltools/legacy_external',
+        tool_type='external',
     )
-    _ = inside_tools
 
     registry = ResourceRegistry(workspace, skills_dir=workspace / 'skills', tools_dir=workspace / 'tools')
-    discovered = registry.discover().tools
+    descriptor = registry.discover().tools['legacy_external']
 
-    with_main_descriptor = discovered['external_with_main']
-    assert with_main_descriptor.available is False
-    assert any('must not contain main/' in err for err in with_main_descriptor.errors)
-
-    inside_tools_descriptor = discovered['external_in_tools']
-    assert inside_tools_descriptor.available is False
-    assert any('outside the tools directory' in err for err in inside_tools_descriptor.errors)
+    assert descriptor.available is False
+    assert any('unsupported tool_type' in err for err in descriptor.errors)
+    assert any('main/tool.py' in err and 'skill' in err for err in descriptor.errors)
+    assert descriptor.install_dir == install_dir.resolve()
 
 
-def test_external_tool_id_divergence_warns_while_internal_tools_stay_quiet(tmp_path: Path):
-    """The tool id is the manifest name, so a divergent registration directory is
-    silent everywhere downstream while toolskill prose points at the directory.
-    Internal tools diverge on purpose (`task_fetch_cn` -> `task_list`), so the
-    warning must not fire for them.
-    """
+def test_install_dir_inside_the_registration_tree_is_rejected(tmp_path: Path):
     workspace = tmp_path / 'workspace'
     (workspace / 'skills').mkdir(parents=True, exist_ok=True)
     (workspace / 'tools').mkdir(parents=True, exist_ok=True)
-    tool_root = _write_demo_external_tool(workspace, name='external_browser')
-    manifest = tool_root / 'resource.yaml'
-    manifest.write_text(
-        manifest.read_text(encoding='utf-8').replace(
-            'name: external_browser', 'name: external_browser_runtime', 1
-        ),
-        encoding='utf-8',
+    _write_demo_registered_tool(
+        workspace,
+        name='install_inside_tools',
+        install_dir='tools/install_inside_tools/runtime',
     )
-    shutil.copytree(REPO_ROOT / 'tools' / 'task_fetch_cn', workspace / 'tools' / 'task_fetch_cn')
 
     registry = ResourceRegistry(workspace, skills_dir=workspace / 'skills', tools_dir=workspace / 'tools')
-    discovered = registry.discover().tools
+    descriptor = registry.discover().tools['install_inside_tools']
 
-    external = discovered['external_browser_runtime']
-    assert external.available is True
-    assert any(
-        'differs from its registration directory' in warning and 'external_browser_runtime' in warning
-        for warning in external.warnings
-    )
-    internal = discovered['task_list']
-    assert not any('differs from its registration directory' in warning for warning in internal.warnings)
+    assert descriptor.available is False
+    assert any('outside the tools directory' in err for err in descriptor.errors)
 
 
 @pytest.mark.asyncio

@@ -15,7 +15,7 @@ trigger:
     - load_tool_context
     - callable tool list
     - externaltools
-    - install_dir
+    - 第三方本体
   always: false
 requires:
   tools:

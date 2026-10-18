@@ -2,24 +2,22 @@
 
 当任务是新增、迁移、合并、重构或审查 `tools/<tool_id>/` 下的工具资源时，使用本规范。
 
-本仓库现在区分两类工具：
+本仓库的工具只有一类：**可执行资源**。
 
-- `internal`：工具本体位于 `tools/<tool_id>/main/`，可直接进入 callable tool 列表。
-- `external`：第三方工具本体安装在工作区根目录的 `externaltools/<tool_id>/`，`tools/<tool_id>/` 只负责注册和说明，不包含第三方工具本体。
+- 工具本体是 `tools/<tool_id>/main/tool.py` 的 handler，注册后即可进入 callable tool 列表。
+- 第三方程序（上游项目、CLI、SDK、MCP 服务）安装在 `<workspace>/externaltools/<tool_id>/`，由某个工具的 handler 或 `exec` 驱动；`tools/<tool_id>/` 仍是唯一注册入口，不存放第三方本体。
 
-外部能力**本身是一个 MCP server**（stdio / http）时，走 `references/mcp-client-tool.md`：产出一个 `internal` 工具，由它的 handler 当 MCP 客户端，远端本体仍安装在 `externaltools/<tool_id>/`。运行时不新增传输类型。
+外部能力**本身是一个 MCP server**（stdio / http）时，走 `references/mcp-client-tool.md`：产出一个由 handler 当 MCP 客户端的工具，远端本体仍安装在 `externaltools/<tool_id>/`。运行时不新增传输类型。
 
 ## 目标
 
 - 统一注册入口仍然是 `tools/<tool_id>/`。
-- `resource.yaml` 必须明确工具类型、来源、版本、参数、权限、治理和安装位置。
-- 需要接收上游更新的第三方工具默认走 `external`，不要把上游项目继续塞进 `tools/<tool_id>/main/`。
+- `resource.yaml` 必须明确来源、版本、参数、权限、治理与结果交付方式。
+- 需要接收上游更新的第三方能力，更新的是 `externaltools/<tool_id>/` 里的安装与它的 handler；不要把上游项目 vendored 进 `tools/<tool_id>/main/`。
 - `toolskills/SKILL.md` 除了说明如何使用，还必须说明如何安装、如何更新。
 - 临时下载、缓存、解压中转文件统一放在工作区根目录的 `temp/` 下。
 
 ## 标准目录
-
-### 内置工具
 
 ```text
 tools/
@@ -33,21 +31,8 @@ tools/
       references/
       scripts/
       assets/
-```
 
-### 外置工具
-
-```text
-tools/
-  <tool_id>/
-    resource.yaml
-    toolskills/
-      SKILL.md
-      references/
-      scripts/
-      assets/
-
-externaltools/
+externaltools/          # 仅当这个工具驱动一份第三方安装时
   <tool_id>/
     ...
 ```
@@ -55,11 +40,10 @@ externaltools/
 约束：
 
 - `tool_id` 使用 `snake_case`。
-- `external` 工具目录下不允许存在 `main/`。
-- `external.install_dir` 必须位于工作区根目录的 `externaltools/<tool_id>/`。
-- `external` 的下载包、解压中转目录、安装日志、一次性脚本应放在工作区根目录的 `temp/<tool_id>/`。
-- `internal` 工具禁止填写 `install_dir`。
-- `external` 工具禁止填写 `source.vendor_dir`。
+- `tools/<tool_id>/` 下只允许 `resource.yaml`、`main/`、`toolskills/`；第三方本体出现在这里会被发现阶段拒绝。
+- 第三方本体安装在 `<workspace>/externaltools/<tool_id>/`，永远不落进 `tools/`（`exec` 侧同一判据，写错会被直接拒）。
+- 下载包、解压中转目录、安装日志、一次性脚本放在 `<workspace>/temp/<tool_id>/`。
+- `install_dir` 不是清单字段。发现阶段仍会读取它，唯一用途是让一条陈旧记录被删除时连带收走它指向的安装目录；新写的清单不要带。
 
 ## `resource.yaml` 关键字段
 
@@ -69,7 +53,7 @@ externaltools/
 - `kind: tool`
 - `name`
 - `description`
-- `tool_type: internal | external`
+- `tool_type: internal`（唯一合法值，其他值在发现阶段被拒）
 - `source`
 - `current_version`
 - `requires`
@@ -92,56 +76,32 @@ externaltools/
 
 额外规则：
 
-- `tool_type=internal`
-  - 必须有 `main/tool.py`
-  - 不得填写 `install_dir`
-- `tool_type=external`
-  - 必须填写 `install_dir`
-  - `install_dir` 必须是工作区根目录下的 `externaltools/<tool_id>/`
-  - 不得落在 `tools/` 内
-  - 不得填写 `source.vendor_dir`
+- 必须有 `main/tool.py`，且它能被装载成工具对象。
+- `install_dir` 只作为陈旧记录的读取痕迹存在，新写的清单不要带。
+- 第三方本体落在 `<workspace>/externaltools/<tool_id>/`，不在 `tools/` 内。
 
-## 选择哪种模式
+## 一份能力该长成什么样
 
-默认判定：
+- 仓库自研逻辑：直接写 handler。
+- 第三方开源项目、CLI、SDK，后续要吃上游更新：写一个 handler 去驱动 `externaltools/<tool_id>/` 里的安装；更新时重装那份安装，仓库里只留 handler 和说明。
+- 外部能力本身是 MCP server（stdio / http）：按 `references/mcp-client-tool.md` 的粒度判据决定包几个工具。
+- 只有"该怎么用"而没有"要执行什么"：那是 skill，不是工具。
 
-- 第三方开源项目、CLI、SDK，且后续需要接收上游更新：选 `external`
-- 仓库自研工具：选 `internal`
-- 明确要把某个外部项目 frozen / vendored 到仓库内长期维护：才选 `internal`
-
-不要把“需要单独安装”的第三方项目做成 vendored 特例，除非用户明确要求把它固定进仓库。
+不要把需要单独安装的第三方项目 vendored 进仓库，除非用户明确要求把它固定进仓库。
 
 ## 新增流程
-
-### A. 外置工具
-
-1. 获取上游下载地址、更新入口和推荐安装方式。
-2. `install_dir` 固定为 `<workspace>/externaltools/<tool_id>`。
-3. 若需要下载、解压或校验，先把中间产物放到 `<workspace>/temp/<tool_id>/`。
-4. 把第三方工具本体安装到 `<workspace>/externaltools/<tool_id>/`。
-5. 在 `tools/<tool_id>/` 下创建注册目录，只写：
-   - `resource.yaml`
-   - `toolskills/`
-6. 在 `resource.yaml` 中写清：
-   - `tool_type: external`
-   - `install_dir`
-   - `source.url`
-   - `source.ref`
-   - `current_version`
-7. 在 `toolskills/SKILL.md` 中写清安装、更新、使用方法，并明确说明：
-   - 下载/缓存/解压中转目录在 `temp/<tool_id>/`
-   - 真实安装目录在 `externaltools/<tool_id>/`
-   - `tools/<tool_id>/` 只负责注册
-
-### B. 内置工具
 
 1. 在 `tools/<tool_id>/` 下创建：
    - `resource.yaml`
    - `main/`
    - `toolskills/`
-2. 在 `resource.yaml` 中写 `tool_type: internal`。
-3. 在 `main/tool.py` 中实现工具。
-4. 在 `toolskills/SKILL.md` 中写清如何使用，以及它无需额外安装；更新方式是修改仓库内实现。
+2. 在 `resource.yaml` 中写 `tool_type: internal`、参数契约、权限、治理与结果交付方式。
+3. 在 `main/tool.py` 中实现 handler。
+4. 若这个工具驱动一份第三方安装：
+   - 先取上游下载地址与更新入口，写进 `source.url` / `source.ref` / `current_version`。
+   - 下载、解压、校验的中间产物放 `<workspace>/temp/<tool_id>/`，本体安装到 `<workspace>/externaltools/<tool_id>/`。
+   - 在 `toolskills/SKILL.md` 里写清安装、更新，以及如何从安装目录找到真实可执行入口。
+5. 在 `toolskills/SKILL.md` 中写清如何使用；纯仓库内实现要写明它无需额外安装、更新方式是修改 `main/`。
 
 ## 异步与不阻塞要求
 
@@ -157,18 +117,18 @@ externaltools/
 
 ## 强取消
 
-这是内置工具和外置工具都必须满足的硬性要求：
+这是所有工具都必须满足的硬性要求：
 
 - 工具必须支持统一的 cancellation token 或等价取消信号，不能只依赖外层 `task.cancel()`。
 - 只要工具内部存在长任务、后台线程、子进程、轮询等待或外部命令，就必须能响应“暂停 / 取消”。
 - 对子进程必须保存句柄，并在用户暂停或取消时主动 `terminate()`；必要时在短暂等待后再 `kill()`。
 - 对下载、解压、复制、大扫描、大批量写入等长步骤，必须在阶段边界主动检查取消状态并尽快退出。
 - 收到暂停 / 取消请求后，优先给用户输出类似“用户已请求暂停，正在安全停止...”的中间状态，而不是长时间无响应。
-- 外置工具虽然不直接进入 callable tool 列表，也必须在其真实执行入口里实现同等的强取消能力；`toolskills/SKILL.md` 需要明确写出暂停 / 取消行为。
+- 驱动第三方安装的工具，其真实执行入口（handler 起的子进程、远端会话）也要实现同等强取消能力；`toolskills/SKILL.md` 需要明确写出暂停 / 取消行为。
 
 ## `toolskills/SKILL.md` 要求
 
-### 外置工具必须包含这四段
+### 驱动第三方安装的工具必须包含这四段
 
 - `## 何时使用`
 - `## 安装`
@@ -177,14 +137,14 @@ externaltools/
 
 必须说明：
 
-- `tools/<tool_id>/` 是注册目录，`externaltools/<tool_id>/` 是真实安装目录
+- `tools/<tool_id>/` 是注册与 handler，`externaltools/<tool_id>/` 是第三方本体所在
 - 临时下载和解压中转位于 `temp/<tool_id>/`
 - 安装命令
 - 更新命令
-- 如何从 `install_dir` 找到真实可执行入口
+- 如何从 `externaltools/<tool_id>/` 找到真实可执行入口
 - 常见失败场景和回退方法
 
-### 内置工具也要说明安装 / 更新
+### 纯仓库内工具也要说明安装 / 更新
 
 写法要明确：
 
@@ -195,8 +155,8 @@ externaltools/
 
 - `source.url` 填后续维护时真正会去看的地址。
 - `source.ref` 记录当前锁定的 tag / commit / version。
-- `external` 工具的 `current_version` 要明确说明当前外部安装对应的版本与比较规则。
-- `internal` 工具的 `current_version` 要明确说明它是仓库内工具，并说明更新时看哪些仓库内信号。
+- 驱动第三方安装的工具，`current_version` 要明确说明当前安装对应的版本与比较规则。
+- 纯仓库内实现的工具，`current_version` 要说明更新时看哪些仓库内信号。
 
 ## 治理
 
@@ -204,17 +164,14 @@ externaltools/
 
 推荐约定：
 
-- `internal` 默认 action id 用 `run`
-- `external` 默认 action id 用 `use`
+- 默认 action id 用 `run`
 
 ## 交付前检查
 
-- 资源能被发现
-- `external` 不会进入 callable tool 列表
-- `external` 的 `load_tool_context` 能返回安装目录
+- 资源能被发现，handler 能被装载成工具对象
 - `toolskills/SKILL.md` 已同时覆盖“使用 + 安装 + 更新”
-- 外置工具的 `install_dir` 在 `externaltools/<tool_id>/`
-- 外置工具的下载 / 缓存 / 解压中转目录在 `temp/<tool_id>/`
+- 驱动第三方安装的工具：本体在 `externaltools/<tool_id>/`，下载 / 缓存 / 解压中转目录在 `temp/<tool_id>/`
+- `load_tool_context(tool_id="<tool_id>")` 能取到参数契约与 toolskill 正文
 - 工具执行路径不会阻塞事件循环；长耗时步骤已异步化或移到后台线程 / 子进程
 - 网络、子进程和等待逻辑已设置明确超时，不会把整个项目卡住
 - 长时编排类工具已在 `resource.yaml` 声明 `timeout_policy.exempt_universal`；自持收尾类已声明 `self_enforced` 且 handler 确实消费 `timeout` 入参

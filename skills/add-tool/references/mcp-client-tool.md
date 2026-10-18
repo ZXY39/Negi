@@ -2,9 +2,9 @@
 
 适用条件：要接的外部能力**本身是一个 MCP server**（stdio 或 streamable-http），例如桌面自动化服务、厂商 CLI 自带的 MCP 包装。
 
-这条道产出一个普通 `internal` 工具：`tools/<tool_id>/main/tool.py` 里当 **MCP 客户端**，远端本体安装在 `externaltools/<tool_id>/`。**运行时不需要新增任何传输实现**——合同里的 `protocol: mcp` / `mcp.transport: embedded` 说的是模型面形状（`g3ku/resources/loader.py:138-143` 硬校验，写别的直接抛），跟进程间协议无关；官方 Python SDK 已在依赖里（`pyproject.toml:40`，`mcp>=1.26,<2`）。
+这条道产出一个普通工具：`tools/<tool_id>/main/tool.py` 里当 **MCP 客户端**，远端本体安装在 `externaltools/<tool_id>/`。**运行时不需要新增任何传输实现**——合同里的 `protocol: mcp` / `mcp.transport: embedded` 说的是模型面形状（`g3ku/resources/loader.py:138-143` 硬校验，写别的直接抛），跟进程间协议无关；官方 Python SDK 已在依赖里（`pyproject.toml:40`，`mcp>=1.26,<2`）。
 
-包成 internal 之后，候选池、`tools[]` 声明、hydration 提升、阶段记账、超时与取消全部走既有车道，不需要为它开任何特判。
+包成工具之后，候选池、`tools[]` 声明、hydration 提升、阶段记账、超时与取消全部走既有车道，不需要为它开任何特判。
 
 ## 一、先定注册粒度（这一步决定后面全部易用性）
 

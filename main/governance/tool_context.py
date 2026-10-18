@@ -26,10 +26,6 @@ PROMOTION_HELP = {
         "请从合同里的本轮候选工具名单中选择，或直接使用本轮可调用名单中的工具。"
     ),
     "not_promotable": "该工具不需要水合（常驻内置工具本轮直接可调用），请改用本轮可调用名单中的工具。",
-    "external_resource": (
-        "已注册的外部工具不进候选、不水合，也不会出现在本轮可调用名单里；"
-        "本次加载交付的就是安装目录与使用说明，按说明用 exec 执行。"
-    ),
 }
 
 
@@ -121,11 +117,7 @@ def apply_runtime_tool_context_projection(
     hydrated_hit = any(name in hydrated_names for name in target_names)
     projected["callable_this_turn"] = bool(callable_hit)
     if target_names:
-        if str(projected.get("tool_type") or "").strip().lower() == "external":
-            normalized_targets = []
-            projected["will_be_hydrated_next_turn"] = False
-            projected["promotion"] = "external_resource"
-        elif candidate_hit and not callable_hit and not hydrated_hit:
+        if candidate_hit and not callable_hit and not hydrated_hit:
             projected["will_be_hydrated_next_turn"] = bool(normalized_targets)
             projected["promotion"] = "promoted_next_turn" if normalized_targets else "not_promotable"
         else:
