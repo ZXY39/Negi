@@ -3,7 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 
 import pytest
-from g3ku.agent.tools.filesystem_mutation import FilesystemTool
+from g3ku.agent.tools.filesystem_mutation import FilesystemActionTool, FilesystemTool
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 
@@ -144,3 +144,44 @@ def test_looks_like_managed_artifact_covers_dot_prefixed_names(tmp_path: Path) -
     assert FilesystemTool._looks_like_managed_artifact(Path('attempt_counter.py')) is False
     assert FilesystemTool._looks_like_managed_artifact(Path('temperature_sensor.md')) is False
     assert FilesystemTool._looks_like_managed_artifact(Path('report.md')) is False
+
+
+def _flat_copy_tool(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> tuple[FilesystemActionTool, Path]:
+    workspace = tmp_path / 'workspace'
+    (workspace / 'temp').mkdir(parents=True)
+    monkeypatch.setattr(FilesystemTool, '_system_temp_roots', staticmethod(lambda: [tmp_path / 'system-temp']))
+    source = workspace / 'temp' / 'src.txt'
+    source.write_text('body', encoding='utf-8')
+    return FilesystemActionTool(FilesystemTool(workspace=workspace), action='copy'), workspace
+
+
+@pytest.mark.asyncio
+async def test_flat_copy_tool_creates_missing_destination_parents_by_default(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """默认值只住在被调方签名里：模型不填 create_parents 就必须按默认建父目录。"""
+    tool, workspace = _flat_copy_tool(tmp_path, monkeypatch)
+    destination = workspace / 'temp' / 'nested' / 'deep' / 'dst.txt'
+
+    result = await tool.execute(operations=[{'source': str(workspace / 'temp' / 'src.txt'), 'destination': str(destination)}])
+
+    assert 'destination parent does not exist' not in str(result), result
+    assert destination.read_text(encoding='utf-8') == 'body'
+
+
+@pytest.mark.asyncio
+async def test_flat_copy_tool_still_honours_an_explicit_create_parents_false(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    tool, workspace = _flat_copy_tool(tmp_path, monkeypatch)
+    destination = workspace / 'temp' / 'nested' / 'dst.txt'
+
+    result = await tool.execute(
+        operations=[{'source': str(workspace / 'temp' / 'src.txt'), 'destination': str(destination)}],
+        create_parents=False,
+    )
+
+    assert 'destination parent does not exist' in str(result), result
+    assert not destination.exists()

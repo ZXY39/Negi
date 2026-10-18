@@ -1653,6 +1653,16 @@ class FilesystemActionTool:
             'required': ['path', 'old_text', 'new_text'],
         }
 
+    @staticmethod
+    def _flag_defaults(kwargs: dict[str, Any], *names: str) -> dict[str, Any]:
+        """只转发模型真给了的开关。
+
+        把缺席的键读成 `None` 再传下去，会把被调方声明的默认值吃掉：
+        `create_parents` 的默认是 True，`bool(None)` 是 False，于是"往不存在的
+        父目录复制"这条默认档一直是坏的。默认值只住在被调方签名里。
+        """
+        return {name: kwargs[name] for name in names if kwargs.get(name) is not None}
+
     async def execute(self, __g3ku_runtime: dict[str, Any] | None = None, **kwargs: Any) -> str:
         runtime = __g3ku_runtime if isinstance(__g3ku_runtime, dict) else {}
         fallback_runtime = kwargs.pop('__g3ku_runtime', None)
@@ -1675,26 +1685,20 @@ class FilesystemActionTool:
         if self._action == 'copy':
             return await self._delegate.copy(
                 operations=kwargs.get('operations'),
-                overwrite=kwargs.get('overwrite'),
-                create_parents=kwargs.get('create_parents'),
-                continue_on_error=kwargs.get('continue_on_error'),
                 runtime=runtime,
+                **self._flag_defaults(kwargs, 'overwrite', 'create_parents', 'continue_on_error'),
             )
         if self._action == 'move':
             return await self._delegate.move(
                 operations=kwargs.get('operations'),
-                overwrite=kwargs.get('overwrite'),
-                create_parents=kwargs.get('create_parents'),
-                continue_on_error=kwargs.get('continue_on_error'),
                 runtime=runtime,
+                **self._flag_defaults(kwargs, 'overwrite', 'create_parents', 'continue_on_error'),
             )
         if self._action == 'delete':
             return await self._delegate.delete(
                 paths=kwargs.get('paths'),
-                recursive=kwargs.get('recursive'),
-                allow_missing=kwargs.get('allow_missing'),
-                continue_on_error=kwargs.get('continue_on_error'),
                 runtime=runtime,
+                **self._flag_defaults(kwargs, 'recursive', 'allow_missing', 'continue_on_error'),
             )
         if self._action == 'propose_patch':
             return self._delegate.propose_patch(
