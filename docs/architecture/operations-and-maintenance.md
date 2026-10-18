@@ -341,6 +341,14 @@ Provider retry troubleshooting note:
 
 当前 `exec` 在执行模式、白名单与审批判定之前增加宿主进程保护：常见 `Stop-Process` / `Spps` / `taskkill` / `pkill` / `killall` / `kill` / WMI-CIM terminate-delete / Python `os.kill` 等命令直接返回 `host-process termination` 错误；`full_access` 也不能绕过，白名单和操作者审批也不能放行。只读进程检查仍允许。保护是命令形态拦截，不是完整 OS 隔离；如果必须运行不可信的任意 native code 或外部二进制，仍应把任务放入独立 worker/container/低权限账户，并避免按进程名清理。
 
+这条边界拦的是**命令形态**，所以它同时会误伤"模型停掉自己起的测试服务"——2026-10-18 的会话里模型起了三个 Node 测试实例，自己停不掉，只能让用户手动结束。回收权因此改由**归属车道**承担，而不是放松这条边界：
+
+- `exec background=true`：运行时自己 spawn（POSIX `start_new_session`，Windows `CREATE_NEW_PROCESS_GROUP`），stdout/stderr 直接落 `owned-processes/<scope>/<…>.log`，立即返回 `pid` + `log_path`，并把 `{pid, create_time, cmd, log_path, owner_pid}` 登记进 `g3ku/runtime/owned_processes.py`。进程不再继承 exec 的管道，也不受 exec 超时/取消管辖。
+- `process_kill(pid)`（候选工具，水合后可用，`allowed_roles` = `ceo` + `execution`）：只认本 scope 的登记条目，校验 `create_time` 后整树终止，回日志尾部；未登记的 pid 一律拒绝并给出本 scope 台账。
+- 生命周期三处回收：会话清空（`clear_web_ceo_session_artifacts`）、任务终态（`MainRuntimeService._reap_task_owned_processes`）、运行时启动（`launcher._reap_owned_background_processes`，只收 `owner_pid` 已死的孤儿）。
+
+裸 shell 的 `kill` / `Stop-Process` 仍然拒绝：它是防手滑的护栏，不是沙箱（`powershell -File kill.ps1`、`node -e "process.kill(...)"` 本来就不命中正则）。正确做法是给"该杀的那些"一条正规出口，而不是拆掉护栏——拆掉之后 `exec` 就能杀掉正等着它返回的宿主，任务会停在 `waiting_tool_results`，只剩一条"异常停止"的恢复提示。
+
 恢复后重点确认：托管 worker 看门狗是否重新拉起 worker、`worker_leases` 是否清掉陈旧租约、任务是否出现 `metadata.recovery_notice`。如果是误杀宿主后的遗留任务，不要用全局 `python` 清理；只使用任务级 pause/cancel，或由 `exec` 超时/取消路径清理该次调用自己启动的子进程树。
 
 ### 重启后任务未自动恢复 / 出现“异常停止”toast

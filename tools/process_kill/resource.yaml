@@ -1,0 +1,41 @@
+schema_version: 1
+kind: tool
+name: process_kill
+display_name: Process Kill
+description: Stop a background process that exec started with background=true
+  (session/task-scoped ownership, not arbitrary pids).
+tool_result_delivery_contract: runtime_managed
+protocol: mcp
+mcp:
+  transport: embedded
+requires:
+  tools: []
+  bins: []
+  env: []
+permissions:
+  network: false
+  filesystem:
+  - workspace
+parameters:
+  type: object
+  properties:
+    pid:
+      type: integer
+      description: The pid returned by exec when it started the background process.
+        Only pids owned by the current session/task are accepted; a pid from another
+        session, another task, or the runtime itself is rejected.
+  required:
+  - pid
+governance:
+  display_name: Process Kill
+  description: Stop a background process owned by the current session/task.
+  risk_level: medium
+  destructive: true
+  allowed_roles:
+  - ceo
+  - execution
+exposure:
+  agent: true
+  main_runtime: true
+toolskill:
+  enabled: true

@@ -48,6 +48,12 @@ parameters:
         when that runtime field is available; otherwise it falls back to the process
         default cwd. When restrict_to_workspace is enabled, working_dir must stay
         inside the workspace.
+    background:
+      type: boolean
+      description: Start the command as a runtime-owned background process instead
+        of waiting for it. Returns pid + log_path immediately; stop it later with
+        process_kill(pid). Use this for servers, crawl drivers, or any long-lived
+        process instead of hand-detaching it.
   required:
   - command
 exposure:

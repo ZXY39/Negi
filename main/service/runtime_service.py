@@ -4966,9 +4966,30 @@ class MainRuntimeService:
         """任务期间用户对各节点追加的定向通知（终态心跳附带，会话模型对齐需求用）。"""
         return collect_task_user_node_supplements(str(task_id or '').strip(), store=self.store)
 
+    def _reap_task_owned_processes(self, task_id: str) -> None:
+        """任务终态回收该任务起的后台进程：`exec background` 的所有权随任务结束。"""
+        normalized_task_id = str(task_id or '').strip()
+        if not normalized_task_id:
+            return
+        try:
+            from g3ku.runtime import owned_processes
+
+            killed = owned_processes.reap_scope(
+                owned_processes.scope_key(session_key='', task_id=normalized_task_id)
+            )
+            if killed:
+                logger.info(
+                    'reaped task-owned background processes task={} pids={}',
+                    normalized_task_id,
+                    killed,
+                )
+        except Exception:
+            logger.exception('failed to reap owned background processes for task {}', normalized_task_id)
+
     def _enqueue_task_terminal_callback(self, task: TaskRecord) -> None:
         if self.execution_mode != 'worker':
             return
+        self._reap_task_owned_processes(str(getattr(task, 'task_id', '') or ''))
         payload = enrich_task_terminal_payload(
             build_task_terminal_payload(task),
             task=task,

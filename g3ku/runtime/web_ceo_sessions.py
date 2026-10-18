@@ -2416,6 +2416,14 @@ def clear_web_ceo_session_artifacts(*, session_id: str, task_service: Any | None
     clear_completed_continuity_snapshot(session_id)
     clear_actual_request_history(session_id)
     clear_turn_boundary_snapshots(session_id)
+    # 会话清空/删除时一起收掉它起过的后台进程：条目按 session_key 分 scope，
+    # 与上传目录同寿命。`session_id` 在这里就是 session_key（调用方口径）。
+    try:
+        from g3ku.runtime import owned_processes
+
+        owned_processes.reap_scope(owned_processes.scope_key(session_key=str(session_id or "")))
+    except Exception:
+        logger.exception("failed to reap owned background processes for session {}", session_id)
     upload_dir = upload_dir_for_session(session_id, create=False)
     if upload_dir.exists():
         shutil.rmtree(upload_dir, ignore_errors=True)

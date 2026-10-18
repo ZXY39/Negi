@@ -140,6 +140,20 @@ def _terminate_stale_web_runtime_processes() -> list[int]:
     return killed
 
 
+def _reap_owned_background_processes() -> list[int]:
+    """回收上一次运行时留下的后台进程。
+
+    `exec background` 的条目落在数据根下，运行时崩溃/被强杀后仍然存在。这里只
+    收 `owner_pid` 已死的条目——活着的运行时还握着自己的进程，不该被别人收走。
+    """
+    try:
+        from g3ku.runtime import owned_processes
+
+        return owned_processes.reap_orphans()
+    except Exception:
+        return []
+
+
 def holds_web_start_lock() -> bool:
     """本进程是否就是"这个工作区的 web 服务"。
 
@@ -236,6 +250,12 @@ def prepare_web_server_start(
         typer.echo(
             "[negi] terminated stale `negi web` runtime process(es): "
             + ", ".join(f"pid={pid}" for pid in stale_pids)
+        )
+    orphan_pids = _reap_owned_background_processes()
+    if orphan_pids:
+        typer.echo(
+            "[negi] reaped background process(es) whose owner runtime is gone: "
+            + ", ".join(f"pid={pid}" for pid in orphan_pids)
         )
     _acquire_web_start_lock(root, port=resolved_port)
 

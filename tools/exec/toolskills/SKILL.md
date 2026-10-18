@@ -17,6 +17,12 @@
 - 在 Windows + PowerShell 下，上述规则优先级更高：`python -c` 的一层命令行转义很容易把“真正的 Python 错误”混成 PowerShell 解析错误。若目标是稳定执行复杂逻辑，应把“写脚本”和“执行脚本”拆成两个动作。
 - 结果过长时，`exec` 通常只会返回 `head_preview`。不要把它当成稳定的本地文件正文证据；若需要引用具体本地文件片段，改用 `content_open(path=绝对路径, start_line, end_line)`。
 
+## 后台进程
+
+- 需要让服务、抓取驱动、浏览器或任何长驻进程活过本次调用时，传 `background: true`，不要自己用 `Start-Process` / `nohup` 手搓 detach：运行时会把 stdout/stderr 落到日志文件、立即返回 `pid` 与 `log_path`，并把这个进程登记进本会话/本任务的归属表。
+- 之后用普通 `exec` 读 `log_path` 看日志，用 `process_kill(pid=<pid>)` 停止它。裸 `kill` / `Stop-Process` / `taskkill` / `pkill` 会被宿主进程保护直接拒绝——那不是权限故障，是让你走这条正规出口。
+- 前台命令若留下持有输出管道的子进程，exec 会在 5s 宽限后杀掉整棵树并截断输出。这不是"后台失败"，是提示你改用 `background: true`。
+
 ## 路径规则
 
 - 若当前节点上下文提供了 `runtime_environment.task_temp_dir`，所有下载、抓取、缓存、解压、一次性脚本、调试输出和其他中间文件，默认都写到该任务级临时目录。

@@ -4,6 +4,7 @@ import asyncio
 import json
 import os
 import re
+import subprocess
 import tempfile
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -11,6 +12,7 @@ from typing import Any
 
 from g3ku.agent.tools.base import Tool
 from g3ku.deployment.data_root import data_g3ku_path, data_work_path
+from g3ku.runtime import owned_processes
 from g3ku.runtime.project_environment import apply_project_environment, resolve_project_environment
 from g3ku.runtime.tool_watchdog import coerce_timeout_argument, resolve_tool_watchdog_config
 from g3ku.utils.helpers import expand_path_anchor_tokens, model_data_root
@@ -40,9 +42,9 @@ _POST_EXIT_DRAIN_GRACE_SECONDS = 5.0
 _DRAIN_TIMEOUT_NOTE = (
     "命令主进程已退出，但其输出管道仍未关闭——有后台子/孙进程仍持有 stdout/stderr 写端。"
     "已等待 5s 宽限后杀掉进程树释放管道，上面的输出可能被截断。"
-    "若要让进程在后台常驻（服务/抓取驱动/浏览器），请 detach：把它的输出重定向到文件"
-    "（Windows `Start-Process -RedirectStandardOutput log.txt`，POSIX `nohup cmd >log 2>&1 &`）"
-    "再轮询该文件，而不是让它继承 exec 的输出管道。"
+    "若要让进程在后台常驻（服务/抓取驱动/浏览器），请改用 `background: true`：运行时会把它"
+    "detach、输出落日志文件，并返回 pid + log_path 供后续 process_kill 回收；不要手搓 "
+    "`Start-Process` / `nohup` 让它继承 exec 的输出管道。"
 )
 
 _PYTHON_INLINE_SYNTAX_NOTE = (
@@ -177,13 +179,13 @@ class ExecTool(Tool):
         shell_hint = (
             " The command already runs inside PowerShell on Windows (sh on POSIX): write the body "
             "directly, do NOT wrap it in another `powershell -Command`/`bash -c`. To leave a process "
-            "running in the background (server, crawl driver, browser), detach it — redirect its output "
-            "to a file (`Start-Process -RedirectStandardOutput log` / `nohup cmd >log 2>&1 &`) and poll "
-            "the file; a child left holding exec's output pipes is killed shortly after the call ends "
-            "and its output is truncated. For non-trivial Python, write a temp .py with filesystem_write "
-            "and run `python file.py`; avoid inline `python -c` with heavy quoting. "
-            "Host/runtime process termination is always blocked, including in full_access mode; "
-            "use process inspection and let exec timeout/cancellation clean up its own child."
+            "running in the background (server, crawl driver, browser), pass `background: true`: the "
+            "runtime detaches it, returns `pid` + `log_path`, and keeps ownership, so you can tail the "
+            "log with a normal exec and stop it later with process_kill. A foreground child left holding "
+            "exec's output pipes is killed shortly after the call ends. For non-trivial Python, write a "
+            "temp .py with filesystem_write and run `python file.py`; avoid inline `python -c` with heavy "
+            "quoting. Host/runtime process termination is always blocked, including in full_access mode; "
+            "raw kill spellings are rejected — stop the pids you started with process_kill."
         )
         if execution_mode == EXECUTION_MODE_FULL_ACCESS:
             return (
@@ -205,12 +207,25 @@ class ExecTool(Tool):
                 "working_dir": {
                     "type": "string",
                     "description": "Optional working directory for the command"
+                },
+                "background": {
+                    "type": "boolean",
+                    "description": (
+                        "Start the command as a runtime-owned background process instead of waiting for it. "
+                        "Returns pid + log_path immediately; stop it later with process_kill(pid)."
+                    ),
                 }
             },
             "required": ["command"]
         }
 
-    async def execute(self, command: str, working_dir: str | None = None, **kwargs: Any) -> str:
+    async def execute(
+        self,
+        command: str,
+        working_dir: str | None = None,
+        background: bool = False,
+        **kwargs: Any,
+    ) -> str:
         runtime = kwargs.pop("__g3ku_runtime", None) or {}
         effective_timeout = self._resolve_effective_timeout(kwargs.pop("timeout_seconds", None), runtime=runtime)
         try:
@@ -275,6 +290,14 @@ class ExecTool(Tool):
                     )
 
         env = self._build_subprocess_env(runtime=runtime, cwd=cwd)
+
+        if background:
+            return self._start_background(
+                command=command,
+                cwd=cwd,
+                env=env,
+                runtime=runtime,
+            )
 
         try:
             if os.name == "nt":
@@ -761,6 +784,74 @@ class ExecTool(Tool):
         )
         return "\n".join(lines)
 
+    def _start_background(
+        self,
+        *,
+        command: str,
+        cwd: str,
+        env: dict[str, str],
+        runtime: dict[str, Any],
+    ) -> str:
+        """启动一个运行时拥有的后台进程，并登记进归属表。
+
+        与前台车道只差三处：不接管道（stdout/stderr 直接落日志文件）、不等待
+        （Popen 后立即返回）、启动即登记。detach 之后它不再受 exec 的超时/取消
+        管辖，回收权交给 `process_kill` 与 scope 生命周期。
+        """
+        session_key = str(runtime.get("session_key") or "web:shared").strip() or "web:shared"
+        task_id = str(runtime.get("task_id") or "").strip()
+        scope = owned_processes.scope_key(session_key=session_key, task_id=task_id)
+        log_path = owned_processes.new_log_path(scope)
+        popen_kwargs: dict[str, Any] = {
+            "cwd": cwd,
+            "env": env,
+            "stdin": subprocess.DEVNULL,
+            "stderr": subprocess.STDOUT,
+        }
+        argv: Any
+        if os.name == "nt":
+            argv = self._windows_shell_argv(command)
+            popen_kwargs["creationflags"] = (
+                getattr(subprocess, "CREATE_NO_WINDOW", 0)
+                | getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
+            )
+        else:
+            argv = command
+            popen_kwargs["shell"] = True
+            popen_kwargs["start_new_session"] = True
+        try:
+            with open(log_path, "ab", buffering=0) as log_handle:
+                popen_kwargs["stdout"] = log_handle
+                process = subprocess.Popen(argv, **popen_kwargs)
+        except Exception as exc:
+            message = f"Failed to start background process: {exc}"
+            return self._build_payload(status="error", exit_code=None, error=message)
+        entry = owned_processes.register(
+            scope=scope,
+            pid=int(process.pid),
+            cmd=command,
+            log_path=str(log_path),
+            session_key=session_key,
+            task_id=task_id,
+            actor_role=str(runtime.get("actor_role") or ""),
+            owner_pid=os.getpid(),
+        )
+        return self._build_payload(
+            status="success",
+            exit_code=None,
+            stdout_text=f"started background pid {entry['pid']}",
+            extra_fields={
+                "background": True,
+                "pid": entry["pid"],
+                "log_path": str(log_path),
+            },
+            extra_notes=[
+                f"Background pid {entry['pid']} is owned by this "
+                f"{'task' if task_id else 'session'}; tail `{log_path}` with exec, "
+                f"stop it with process_kill(pid={entry['pid']})."
+            ],
+        )
+
     def _build_subprocess_env(self, *, runtime: dict[str, Any], cwd: str) -> dict[str, str]:
         env = os.environ.copy()
         temp_dir = str(self._canonical_temp_root(runtime))
@@ -1018,6 +1109,7 @@ class ExecTool(Tool):
         stdout_capture: _BoundedStreamCapture | None = None,
         stderr_capture: _BoundedStreamCapture | None = None,
         extra_notes: list[str] | None = None,
+        extra_fields: dict[str, Any] | None = None,
     ) -> str:
         def _merge(primary: str, fallback: str) -> str:
             normalized_primary = str(primary or "").strip()
@@ -1065,6 +1157,8 @@ class ExecTool(Tool):
         }
         if notes:
             payload["notes"] = notes
+        if extra_fields:
+            payload.update({str(key): value for key, value in dict(extra_fields).items()})
         if error:
             payload["error"] = error
         return json.dumps(payload, ensure_ascii=False)
