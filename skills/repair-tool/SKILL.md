@@ -57,7 +57,7 @@
 3. 如果工具是 `callable=true` 但依赖缺失，先把依赖修到满足。
 4. 如果依赖已经满足，但当前 turn 仍没注册上，继续做“刷新与复核”步骤。
 
-### B. 内置工具本体损坏
+### B. handler 本体损坏
 
 适用条件：
 
@@ -70,37 +70,24 @@
 2. 若 availability 取决于本地依赖，补 `requires.paths` / `requires.bins` / `requires.env`。
 3. 若工具依赖第三方本体，确认该本体不在 `tools/`，而在 `externaltools/<tool_id>/`。
 
-### C. 外置工具未安装或安装目录错误
+### C. 第三方本体未安装或位置错误
 
-适用条件：
-
-- `tool_type: external`
-
-处理方法：
-
-1. 检查 `install_dir` 是否位于 `externaltools/<tool_id>/`。
-2. 若不存在，使用 `exec` 安装到该目录。
-3. 下载、缓存、解压中转统一放到 `temp/<tool_id>/`。
-4. 若 `install_dir` 指到了 `tools/`、用户目录或全局目录，改回工作区内正确位置。
-5. 同步更新 `toolskills/SKILL.md` 的安装 / 更新说明。
-
-### D. 内置包装层 + 外部本体
-
-这一类最容易误判：包装层本身是完好的 internal 工具，缺的其实是 `externaltools/` 里的本体，于是表现为"工具在清单里但 `available=false`"。
+这一类最容易误判：handler 本身完好，缺的是 `externaltools/` 里的本体，于是表现为"工具在清单里但 `available=false`"。
 
 特征：
 
-- `tool_type: internal`
-- 可调用包装层在 `tools/<tool_id>/main/`
-- 第三方本体在 `externaltools/<tool_id>/`
+- 可调用 handler 在 `tools/<tool_id>/main/`
+- 第三方本体应在 `externaltools/<tool_id>/`
+- `resource.yaml` 用 `requires.bins` / `requires.paths` 声明那份安装的存在性
 
 处理方法：
 
-1. 保持包装层是 `internal`，不要硬改成纯 `external`。
-2. 把真实第三方工具安装到 `externaltools/<tool_id>/`。
-3. 在 `resource.yaml` 用 `requires.paths` 明确本地安装存在性。
-4. 在包装层代码里优先从 `externaltools/<tool_id>/` 自动定位本地可执行文件。
-5. 若需要浏览器、模型、运行时或其他大依赖，也要优先使用工作区内副本，而不是用户全局目录。
+1. 按 `toolskills/SKILL.md` 写明的安装目录确认本体在 `externaltools/<tool_id>/`。
+2. 若不存在，使用 `exec` 安装到该目录。
+3. 下载、缓存、解压中转统一放到 `temp/<tool_id>/`。
+4. 若本体落到了 `tools/`、用户目录或全局目录，移回工作区内的正确位置，并同步 handler 里拼路径的那一处。
+5. handler 优先从 `externaltools/<tool_id>/` 自动定位本地可执行文件；需要浏览器、模型、运行时等大依赖时同样用工作区内副本，不用用户全局目录。
+6. 同步更新 `toolskills/SKILL.md` 的安装 / 更新说明。
 
 ## 安装与修复操作
 

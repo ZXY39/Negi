@@ -2486,7 +2486,6 @@ def test_tool_provider_includes_hydrated_tools_even_when_selection_cache_exclude
             ),
         }
     )
-    service._external_tool_provider = lambda _node: {}
     service._builtin_tool_cache = None
     service._node_context_selection_cache = {
         ('task-hydrated-provider', 'node-hydrated-provider'): {
@@ -2746,7 +2745,6 @@ def test_tool_provider_covers_governance_visible_tools_when_frame_candidates_are
             ),
         }
     )
-    service._external_tool_provider = lambda _node: {}
     service._builtin_tool_cache = None
     service._node_context_selection_cache = {
         ('task-empty-cand', 'node-empty-cand'): {
@@ -2795,7 +2793,6 @@ def test_tool_provider_includes_candidate_tools_from_restored_selection() -> Non
             ),
         }
     )
-    service._external_tool_provider = lambda _node: {}
     service._builtin_tool_cache = None
     service._node_context_selection_cache = {
         ('task-restored-provider', 'node-restored-provider'): {
@@ -2844,7 +2841,6 @@ def test_tool_provider_restores_candidates_from_frame_when_cache_was_cleared() -
             ),
         }
     )
-    service._external_tool_provider = lambda _node: {}
     service._builtin_tool_cache = None
     service._node_context_selection_cache = {}
     service.log_service = _FakeLogService()

@@ -54,8 +54,7 @@ schema_version: 1
 kind: tool
 name: example_tool
 description: What the tool does.
-tool_type: internal | external
-install_dir: <external only>
+tool_type: internal
 source:
   type: ''
   url: ''
@@ -99,27 +98,24 @@ timeout_policy:            # 可选：统一 timeout 合同行为声明（缺省
 
 规则：
 
-- `tool_type` 缺省时按 `internal`
+- 工具只有一类：可执行资源。`tool_type` 缺省即 `internal`，写其他值会在发现阶段被拒（错误文案点名两条出路：包成工具、或改成 skill）
 - 工具是唯一的治理单位：一个目录 = 一条治理记录 = 一个 `tool_id` = 一个可调用执行器。没有 family / actions 分组层，`governance` 里也不要写分组名；`tool_id` 必须与 `name` 一致被调用与授权
 - 既没有 `governance` 块、也不在默认治理表（`main/governance/action_mapper.py` 的 `DEFAULT_TOOL_GOVERNANCE`）里的工具不会出现在 Tool 管理面与 exposure 名单里
-- `internal` 必须有 `main/tool.py`
-- `internal` 禁止写 `install_dir`
-- `external` 禁止有 `main/`
-- `external` 必须写 `install_dir`
-- `external.install_dir` 必须在 `tools/` 之外
-- `external` 禁止写 `source.vendor_dir`
+- 必须有 `main/tool.py`
+- `install_dir` 不是清单字段；发现阶段仍读取它，唯一用途是让陈旧记录被删除时连带收走它的安装目录
+- 第三方本体安装在 `externaltools/<tool_id>/`，不得出现在 `tools/` 内
 - `timeout_policy` 可选；与 handler 类属性是 OR 语义（清单只能追加豁免/自持/隐藏，不能撤销代码级合同）。`exempt_universal` 只给运行时长天然无界的长时编排工具，且要求强取消实现完整。合同细节见 `docs/architecture/tool-and-skill-system.md`「统一工具 Timeout 合同」
 
 ## Toolskill 规则
 
 - 所有工具都要提供 `toolskills/SKILL.md`
 - `toolskills/SKILL.md` 需要和 `resource.yaml`、实际实现保持一致；参数、默认行为、输出结构变化时必须同步更新
-- `external` 工具必须说明：
+- 驱动第三方安装的工具必须说明：
   - 何时使用
   - 如何安装
   - 如何更新
-  - 如何从 `install_dir` 使用
-- `internal` 工具必须说明：
+  - 如何从 `externaltools/<tool_id>/` 使用
+- 纯仓库内实现必须说明：
   - 代码位于 `main/`
   - 无需额外安装
   - 更新方式是修改仓库内实现

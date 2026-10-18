@@ -505,7 +505,6 @@ class MainRuntimeService:
         governance_store_path: Path | str | None = None,
         workspace_root: Path | str | None = None,
         resource_manager=None,
-        tool_provider: Callable[[NodeRecord], dict[str, Tool]] | None = None,
         execution_model_refs: list[str] | None = None,
         acceptance_model_refs: list[str] | None = None,
         default_max_depth: int = 10,
@@ -600,7 +599,6 @@ class MainRuntimeService:
         self.exec_approvals = ExecApprovalService(self.governance_store)
         self.resource_registry = MainRuntimeResourceRegistry(workspace_root=Path.cwd(), store=self.governance_store, resource_manager=resource_manager)
         self.policy_engine = MainRuntimePolicyEngine(store=self.governance_store, resource_registry=self.resource_registry)
-        self._external_tool_provider = tool_provider or (lambda _node: {})
         self._resource_manager = resource_manager
         self._resource_tree_state_cache: dict[str, dict[str, str]] | None = None
         self._resource_tree_state_checked_at: float = 0.0
@@ -6575,9 +6573,7 @@ class MainRuntimeService:
             if not bool(getattr(record, 'agent_visible', True)):
                 continue
             decision = self.policy_engine.evaluate_tool(subject=subject, tool_id=record.tool_id)
-            # callable=False 的注册资源（外部工具）没有 tool_instances 条目，永远进不了
-            # visible_names；它们的可见性只看授权，不看实例，否则管理端与占用检测会一起失明。
-            tool_visible = (not bool(getattr(record, 'callable', True))) or record.tool_id in visible_names
+            tool_visible = record.tool_id in visible_names
             metadata = dict(getattr(record, 'metadata', {}) or {})
             if decision.allowed and tool_visible:
                 tools.append(record)
@@ -10626,8 +10622,7 @@ class MainRuntimeService:
         for name in self._normalized_tool_name_list(visible_tool_names):
             if name:
                 selected_visible.add(name)
-        provided = dict(self._external_tool_provider(node) or {})
-        provided.update(self._builtin_tool_instances(actor_role=actor_role))
+        provided: dict[str, Tool] = dict(self._builtin_tool_instances(actor_role=actor_role))
         resource_manager = getattr(self, '_resource_manager', None)
         if resource_manager is not None:
             for name, tool in resource_manager.tool_instances().items():

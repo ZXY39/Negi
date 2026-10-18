@@ -1,19 +1,16 @@
 # Toolskill 编写检查清单
 
-## 一、工具模式
+## 一、工具形状
 
-- [ ] 已明确这是 `internal` 还是 `external`
-- [ ] `external` 未再放置 `main/`
-- [ ] `internal` 才包含 `main/tool.py`
+- [ ] `main/tool.py` 存在，且能被装载成工具对象
+- [ ] `tools/<tool_id>/` 下只有 `resource.yaml`、`main/`、`toolskills/`
+- [ ] 第三方本体（若有）在 `externaltools/<tool_id>/`，不在 `tools/` 内
 
 ## 二、`resource.yaml`
 
-- [ ] 已填写 `tool_type`
-- [ ] `external` 已填写 `install_dir`
-- [ ] `external.install_dir` 位于工作区根目录的 `externaltools/<tool_id>/`
-- [ ] `external` 的下载 / 缓存 / 解压中转目录约定为工作区根目录的 `temp/<tool_id>/`
-- [ ] `internal` 未填写 `install_dir`
-- [ ] `external` 未填写 `source.vendor_dir`
+- [ ] 已填写 `tool_type: internal`
+- [ ] 未填写 `install_dir`（发现阶段只把它当陈旧记录的清理线索）
+- [ ] 驱动第三方安装时，下载 / 缓存 / 解压中转目录约定为工作区根目录的 `temp/<tool_id>/`
 - [ ] 已填写 `source`
 - [ ] 已填写 `current_version`
 - [ ] 已填写 `governance`
@@ -22,10 +19,10 @@
 
 - [ ] 已说明包装层契约或注册契约
 - [ ] 已说明上游知识入口
-- [ ] 外置工具包含 `何时使用 / 安装 / 更新 / 使用` 四段
-- [ ] 内置工具已明确说明无需独立安装
+- [ ] 驱动第三方安装的工具包含 `何时使用 / 安装 / 更新 / 使用` 四段
+- [ ] 纯仓库内实现已明确说明无需独立安装
 - [ ] 已说明如何定位真实执行入口或仓库内实现位置
-- [ ] 已明确写出 `tools/<tool_id>/` 只负责注册，`externaltools/<tool_id>/` 才是真实安装目录
+- [ ] 已明确写出 `tools/<tool_id>/` 是注册与 handler、`externaltools/<tool_id>/` 是第三方本体所在
 - [ ] 已明确写出 `temp/<tool_id>/` 用于下载 / 缓存 / 解压中转
 
 ## 四、安装与更新信息
@@ -51,11 +48,10 @@
 - [ ] 子进程句柄已保存，暂停 / 取消时会主动 terminate / kill
 - [ ] 长任务阶段会主动检查取消状态并尽快退出
 - [ ] 暂停 / 取消时会给用户“正在安全停止...”之类的中间反馈
-- [ ] 外置工具的真实执行入口也实现了强取消，而不只是文档里提到
+- [ ] 驱动第三方安装时，真实执行入口（handler 的子进程 / 远端会话）也实现了强取消，而不只是文档里提到
 
 ## 七、最终验收
 
-- [ ] 工具可被资源发现
-- [ ] `external` 不进入 callable tool 列表
-- [ ] `load_tool_context` 能返回正确 `install_dir`
+- [ ] 工具可被资源发现，handler 能被装载成工具对象
+- [ ] `load_tool_context` 返回该工具的参数契约与 toolskill 正文
 - [ ] 删除 `tools/<tool_id>/` 后，系统仍可启动

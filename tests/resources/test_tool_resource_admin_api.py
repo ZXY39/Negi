@@ -109,18 +109,24 @@ def _raise_no_model_configured():
     raise ValueError("No model configured for role 'ceo'.")
 
 
-def _write_external_tool(workspace: Path, *, name: str = 'external_browser') -> None:
+def _write_installed_tool(workspace: Path, *, name: str = 'installed_tool') -> None:
+    """A third-party capability that was installed locally and wrapped as a tool.
+
+    There is no separate registration type for that: the handler is the tool, and the
+    install lives outside the registration tree under `externaltools/`.
+    """
     root = workspace / 'tools' / name
     (root / 'toolskills').mkdir(parents=True, exist_ok=True)
-    (workspace / '.g3ku' / 'external-tools' / name).mkdir(parents=True, exist_ok=True)
+    (root / 'main').mkdir(parents=True, exist_ok=True)
+    (workspace / 'externaltools' / name).mkdir(parents=True, exist_ok=True)
     (root / 'resource.yaml').write_text(
         f"""schema_version: 1
 kind: tool
 name: {name}
-display_name: External Browser
-description: Registered external browser automation tool.
-tool_type: external
-install_dir: .g3ku/external-tools/{name}
+display_name: Installed Tool
+description: Locally installed third-party capability wrapped as a tool.
+tool_type: internal
+tool_result_delivery_contract: direct_load_inline
 protocol: mcp
 mcp:
   transport: embedded
@@ -140,8 +146,8 @@ exposure:
   agent: true
   main_runtime: true
 governance:
-  display_name: External Browser
-  description: Registered external browser automation tool.
+  display_name: Installed Tool
+  description: Locally installed third-party capability wrapped as a tool.
   risk_level: medium
   destructive: false
   allowed_roles:
@@ -152,8 +158,37 @@ toolskill:
 """,
         encoding='utf-8',
     )
+    (root / 'main' / 'tool.py').write_text(
+        "from g3ku.agent.tools.base import Tool\n"
+        "\n"
+        "\n"
+        f"class _InstalledTool(Tool):\n"
+        "    hide_universal_timeout_parameter = True\n"
+        "\n"
+        "    @property\n"
+        "    def name(self):\n"
+        f"        return '{name}'\n"
+        "\n"
+        "    @property\n"
+        "    def description(self):\n"
+        "        return 'Fixture tool that reports its own installation state.'\n"
+        "\n"
+        "    @property\n"
+        "    def parameters(self):\n"
+        "        return {'type': 'object', 'properties': {}, 'required': []}\n"
+        "\n"
+        "    async def execute(self, **kwargs):\n"
+        "        return 'installed-tool-ok'\n"
+        "\n"
+        "\n"
+        "def build(runtime):\n"
+        "    return _InstalledTool()\n",
+        encoding='utf-8',
+    )
     (root / 'toolskills' / 'SKILL.md').write_text(
-        '# External Browser\n\n## 何时使用\n\nNeed a browser.\n\n## 安装\n\nInstall outside tools.\n\n## 更新\n\nPull upstream.\n\n## 使用\n\nUse install_dir.\n',
+        f'# {name}\n\n## 何时使用\n\nNeed the installed capability.\n\n## 安装\n\n'
+        'Install under externaltools/<tool_id>/ and drive it from main/tool.py.\n\n'
+        '## 更新\n\nPull upstream, then re-verify the handler.\n\n## 使用\n\nCall the tool.\n',
         encoding='utf-8',
     )
 
@@ -516,11 +551,11 @@ async def test_load_tool_context_marks_result_delivery_contract_violation_as_rep
 
 
 @pytest.mark.asyncio
-async def test_admin_endpoints_expose_external_tool_fields(tmp_path: Path):
+async def test_admin_endpoints_expose_installed_tool_fields(tmp_path: Path):
     workspace = tmp_path / 'workspace'
     (workspace / 'skills').mkdir(parents=True, exist_ok=True)
     (workspace / 'tools').mkdir(parents=True, exist_ok=True)
-    _write_external_tool(workspace)
+    _write_installed_tool(workspace)
 
     manager = ResourceManager(workspace, app_config=_resource_app_config())
     manager.reload_now(trigger='test-bind')
@@ -539,19 +574,19 @@ async def test_admin_endpoints_expose_external_tool_fields(tmp_path: Path):
         await service.startup()
         client = TestClient(_build_app(service))
 
-        item_response = client.get('/api/resources/tools/external_browser')
+        item_response = client.get('/api/resources/tools/installed_tool')
         assert item_response.status_code == 200
         item = item_response.json()['item']
-        assert item['tool_type'] == 'external'
-        assert item['callable'] is False
-        assert item['install_dir'] == str((workspace / '.g3ku' / 'external-tools' / 'external_browser').resolve())
+        assert item['tool_type'] == 'internal'
+        assert item['callable'] is True
+        assert item['install_dir'] is None
 
-        toolskill_response = client.get('/api/resources/tools/external_browser/toolskill')
+        toolskill_response = client.get('/api/resources/tools/installed_tool/toolskill')
         assert toolskill_response.status_code == 200
         payload = toolskill_response.json()
-        assert payload['tool_type'] == 'external'
-        assert payload['callable'] is False
-        assert payload['install_dir'] == str((workspace / '.g3ku' / 'external-tools' / 'external_browser').resolve())
+        assert payload['tool_type'] == 'internal'
+        assert payload['callable'] is True
+        assert payload['install_dir'] is None
         assert '## 安装' in payload['content']
     finally:
         await service.close()
@@ -4541,11 +4576,11 @@ async def test_admin_skill_delete_endpoint_rejects_running_task_usage(tmp_path: 
 
 
 @pytest.mark.asyncio
-async def test_admin_tool_delete_endpoint_removes_install_dir_and_syncs_catalog(tmp_path: Path):
+async def test_admin_tool_delete_endpoint_removes_registration_and_syncs_catalog(tmp_path: Path):
     workspace = tmp_path / 'workspace'
     (workspace / 'skills').mkdir(parents=True, exist_ok=True)
     (workspace / 'tools').mkdir(parents=True, exist_ok=True)
-    _write_external_tool(workspace, name='external_browser')
+    _write_installed_tool(workspace, name='installed_tool')
 
     manager = ResourceManager(workspace, app_config=_resource_app_config())
     manager.reload_now(trigger='test-bind')
@@ -4564,16 +4599,17 @@ async def test_admin_tool_delete_endpoint_removes_install_dir_and_syncs_catalog(
         await service.startup()
         client = TestClient(_build_app(service))
 
-        response = client.delete('/api/resources/tools/external_browser', params={'session_id': 'web:shared'})
+        response = client.delete('/api/resources/tools/installed_tool', params={'session_id': 'web:shared'})
 
         assert response.status_code == 200
         payload = response.json()['item']
-        assert payload['tool_id'] == 'external_browser'
+        assert payload['tool_id'] == 'installed_tool'
         assert payload['catalog_synced'] is False
-        assert payload['tool_ids'] == ['external_browser']
-        assert not (workspace / 'tools' / 'external_browser').exists()
-        assert not (workspace / '.g3ku' / 'external-tools' / 'external_browser').exists()
-        assert service.get_tool('external_browser') is None
+        assert payload['tool_ids'] == ['installed_tool']
+        assert not (workspace / 'tools' / 'installed_tool').exists()
+        # Deleting the registration does not reach into the third-party payload.
+        assert (workspace / 'externaltools' / 'installed_tool').exists()
+        assert service.get_tool('installed_tool') is None
     finally:
         await service.close()
         manager.close()
@@ -4584,7 +4620,7 @@ async def test_admin_tool_delete_endpoint_rejects_running_ceo_usage(tmp_path: Pa
     workspace = tmp_path / 'workspace'
     (workspace / 'skills').mkdir(parents=True, exist_ok=True)
     (workspace / 'tools').mkdir(parents=True, exist_ok=True)
-    _write_external_tool(workspace, name='external_browser')
+    _write_installed_tool(workspace, name='installed_tool')
 
     manager = ResourceManager(workspace, app_config=_resource_app_config())
     manager.reload_now(trigger='test-bind')
@@ -4629,20 +4665,20 @@ async def test_admin_tool_delete_endpoint_rejects_running_ceo_usage(tmp_path: Pa
             item.tool_id
             for item in service.list_visible_tools(actor_role='ceo', session_id=session_id)
         }
-        assert 'external_browser' in visible
+        assert 'installed_tool' in visible
         client = TestClient(_build_app(service))
 
-        response = client.delete('/api/resources/tools/external_browser', params={'session_id': 'web:shared'})
+        response = client.delete('/api/resources/tools/installed_tool', params={'session_id': 'web:shared'})
 
         assert response.status_code == 409
         payload = response.json()['detail']
         assert payload['code'] == 'tool_in_use'
-        assert payload['resource_id'] == 'external_browser'
+        assert payload['resource_id'] == 'installed_tool'
         assert not payload['usage']['tasks']
         assert payload['usage']['ceo_sessions'][0]['session_id'] == session_id
         assert payload['usage']['ceo_sessions'][0]['title'] == '删除测试会话'
-        assert (workspace / 'tools' / 'external_browser').exists()
-        assert service.get_tool('external_browser') is not None
+        assert (workspace / 'tools' / 'installed_tool').exists()
+        assert service.get_tool('installed_tool') is not None
     finally:
         await service.close()
         manager.close()
@@ -4680,7 +4716,7 @@ async def test_admin_endpoints_expose_builtin_tool_fields(tmp_path: Path):
         assert item['install_dir'] is None
         assert item['allowed_roles'] == ['ceo', 'execution', 'inspection']
 
-        # 样本换成自维护工具后没有安装段；安装指引透出由 external 车道用例覆盖。
+        # 样本换成自维护工具后没有安装段；安装段透出由 installed_tool 用例覆盖。
         toolskill_response = client.get('/api/resources/tools/web_fetch/toolskill')
         assert toolskill_response.status_code == 200
         payload = toolskill_response.json()
@@ -4998,7 +5034,7 @@ def test_resource_read_endpoints_work_without_configured_models(tmp_path: Path, 
     monkeypatch.chdir(workspace)
     ensure_startup_config_ready()
     _write_skill(workspace, name='demo_skill')
-    _write_external_tool(workspace, name='external_browser')
+    _write_installed_tool(workspace, name='installed_tool')
     _copy_repo_tools(workspace, 'memory_note', 'memory_update', 'memory_runtime')
 
     app = FastAPI()
@@ -5018,15 +5054,15 @@ def test_resource_read_endpoints_work_without_configured_models(tmp_path: Path, 
 
     tools_response = client.get('/api/resources/tools')
     assert tools_response.status_code == 200
-    assert any(item['tool_id'] == 'external_browser' for item in tools_response.json()['items'])
+    assert any(item['tool_id'] == 'installed_tool' for item in tools_response.json()['items'])
 
-    tool_response = client.get('/api/resources/tools/external_browser')
+    tool_response = client.get('/api/resources/tools/installed_tool')
     assert tool_response.status_code == 200
-    assert tool_response.json()['item']['tool_id'] == 'external_browser'
+    assert tool_response.json()['item']['tool_id'] == 'installed_tool'
 
-    toolskill_response = client.get('/api/resources/tools/external_browser/toolskill')
+    toolskill_response = client.get('/api/resources/tools/installed_tool/toolskill')
     assert toolskill_response.status_code == 200
-    assert '# External Browser' in str(toolskill_response.json().get('content') or '')
+    assert '# installed_tool' in str(toolskill_response.json().get('content') or '')
 
     memory_toolskill_response = client.get('/api/resources/tools/memory_update/toolskill')
     assert memory_toolskill_response.status_code == 200
@@ -5042,7 +5078,7 @@ def test_resource_write_endpoints_work_without_configured_models(tmp_path: Path,
     monkeypatch.chdir(workspace)
     ensure_startup_config_ready()
     _write_skill(workspace, name='demo_skill')
-    _write_external_tool(workspace, name='external_browser')
+    _write_installed_tool(workspace, name='installed_tool')
 
     app = FastAPI()
     app.include_router(admin_rest.router, prefix='/api')
@@ -5072,18 +5108,18 @@ def test_resource_write_endpoints_work_without_configured_models(tmp_path: Path,
     assert skill_file.json()['item']['catalog_synced'] is False
 
     tool_policy = client.put(
-        '/api/resources/tools/external_browser/policy',
+        '/api/resources/tools/installed_tool/policy',
         params={'session_id': 'web:shared'},
         json={'allowed_roles': ['execution']},
     )
     assert tool_policy.status_code == 200
     assert tool_policy.json()['item']['allowed_roles'] == ['execution']
 
-    tool_disable = client.post('/api/resources/tools/external_browser/disable', params={'session_id': 'web:shared'})
+    tool_disable = client.post('/api/resources/tools/installed_tool/disable', params={'session_id': 'web:shared'})
     assert tool_disable.status_code == 200
     assert tool_disable.json()['item']['enabled'] is False
 
-    tool_enable = client.post('/api/resources/tools/external_browser/enable', params={'session_id': 'web:shared'})
+    tool_enable = client.post('/api/resources/tools/installed_tool/enable', params={'session_id': 'web:shared'})
     assert tool_enable.status_code == 200
     assert tool_enable.json()['item']['enabled'] is True
 

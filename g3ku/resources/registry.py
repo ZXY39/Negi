@@ -193,7 +193,7 @@ class ResourceRegistry:
             mcp_transport=str(((data.get("mcp") or {}).get("transport") or "embedded")).strip().lower() or "embedded",
             tool_type=tool_type,
             install_dir=install_dir,
-            callable=tool_type == "internal",
+            callable=True,
             toolskills_root=toolskills_root if toolskills_root.exists() else None,
             toolskills_main_path=toolskills_main if toolskills_main.exists() else None,
             toolskills_references_root=(toolskills_root / "references") if (toolskills_root / "references").exists() else None,
@@ -229,58 +229,35 @@ class ResourceRegistry:
             descriptor.errors.append(
                 f"unsupported mcp.transport '{descriptor.mcp_transport}': only 'embedded' is allowed"
             )
-        if descriptor.tool_type not in {"internal", "external"}:
+        if descriptor.tool_type != "internal":
             descriptor.available = False
             descriptor.errors.append(
-                f"unsupported tool_type '{descriptor.tool_type}': only 'internal' or 'external' is allowed"
+                f"unsupported tool_type '{descriptor.tool_type}': a tool is an executable resource — "
+                "wrap the capability in main/tool.py, or register it as a skill"
             )
 
-        source = dict(data.get("source") or {})
-        source_vendor_dir = str(source.get("vendor_dir") or "").strip()
-        if descriptor.tool_type == "internal":
-            if data.get("install_dir") not in (None, ""):
-                descriptor.available = False
-                descriptor.errors.append("internal tool must not declare install_dir")
-        elif descriptor.tool_type == "external":
-            if source_vendor_dir:
-                descriptor.available = False
-                descriptor.errors.append("external tool must not declare source.vendor_dir")
-            if descriptor.install_dir is None:
-                descriptor.available = False
-                descriptor.errors.append("external tool requires install_dir")
-            else:
-                if self._is_relative_to(descriptor.install_dir, self.tools_dir.resolve()):
-                    descriptor.available = False
-                    descriptor.errors.append("external tool install_dir must be outside the tools directory")
-                elif not descriptor.install_dir.exists():
-                    descriptor.warnings.append("external tool install_dir does not exist yet")
-            if descriptor.main_root is not None:
-                descriptor.available = False
-                descriptor.errors.append(f"external tool must not contain main/: {root}")
-            # The tool id is the manifest name, never the directory name, and the spec
-            # anchors the install dir as externaltools/<tool_id>/. A divergence is silent
-            # everywhere else (RBAC rows, load_tool_context, delete) while toolskill prose
-            # points at the directory, so name it. Internal tools deliberately diverge
-            # (`task_fetch_cn` -> `task_list`), so this stays external-only.
-            if descriptor.name != root.name:
-                descriptor.warnings.append(
-                    f"external tool id differs from its registration directory: "
-                    f"name '{descriptor.name}' vs '{root.name}'"
-                )
+        if descriptor.install_dir is not None and self._is_relative_to(
+            descriptor.install_dir, self.tools_dir.resolve()
+        ):
+            # install_dir is a read-only trace of a third-party install: it keeps a stale
+            # record's uninstall cascade working. Third-party payloads belong under
+            # externaltools/<tool_id>/, never inside the registration tree.
+            descriptor.available = False
+            descriptor.errors.append("install_dir must live outside the tools directory")
+        elif descriptor.install_dir is not None and not descriptor.install_dir.exists():
+            descriptor.warnings.append("install_dir does not exist yet")
 
-        allowed_children = {self.manifest_name, "toolskills"}
-        if descriptor.tool_type == "internal":
-            allowed_children.add("main")
-        extra_children = [path.name for path in root.iterdir() if path.name not in allowed_children]
+        extra_children = [
+            path.name
+            for path in root.iterdir()
+            if path.name not in {self.manifest_name, "main", "toolskills"}
+        ]
         if extra_children:
             descriptor.warnings.append("unexpected root entries: " + ", ".join(sorted(extra_children)))
-        if descriptor.tool_type == "internal" and descriptor.entrypoint_path is None:
+        if descriptor.entrypoint_path is None:
             descriptor.available = False
             descriptor.errors.append(f"missing main/tool.py: {root}")
-        if descriptor.tool_type == "external" and descriptor.toolskills_main_path is None:
-            descriptor.available = False
-            descriptor.errors.append(f"external tool missing toolskills/SKILL.md: {root}")
-        elif descriptor.toolskill_enabled and descriptor.toolskills_main_path is None:
+        if descriptor.toolskill_enabled and descriptor.toolskills_main_path is None:
             descriptor.warnings.append(f"missing toolskills/SKILL.md: {root}")
         self._apply_tool_result_delivery_contract_requirements(descriptor)
         return descriptor

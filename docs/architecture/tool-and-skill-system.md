@@ -131,14 +131,14 @@ CEO/frontdoor 另有任务生命周期与分发控制类固定工具。治理记
 当前选择规则：
 
 - `candidate_tool_names` 的上界是 RBAC 治理可见集，**不是**本轮已构建的可执行对象字典：候选 = 治理可见工具 −（本轮 callable ∪ 已提升）。候选生成是 inventory-only，没有语义召回层。`candidate_skill_ids` 与它同一语义。
-- 由此得到一条必须成立的三态划分：**带执行器实例的**治理可见工具在任一时刻恰属于「本轮可调用」/「本轮可加载并在下一轮提升」/「不可见（RBAC 关闭或 repair-required）」之一。存在第四态（可加载、不提升、也调不动）就是水合合同被破坏，排查路径见 `context-and-cache-troubleshooting.md`「节点侧排查要点」。`tool_type: external` 不在这条划分内：按规范它不得带 handler（无 `main/`），因此永不会有执行器实例，也就不参与提升承诺——把它当第四态去"修"是误判，判据见本节"加载门控"里外部资源回退那一条。
+- 由此得到一条必须成立的三态划分：任一治理可见的工具在任一时刻恰属于「本轮可调用」/「本轮可加载并在下一轮提升」/「不可见（RBAC 关闭或 repair-required）」之一。存在第四态（可加载、不提升、也调不动）就是水合合同被破坏，排查路径见 `context-and-cache-troubleshooting.md`「节点侧排查要点」。
 - 普通候选数量由 RBAC 可见工具决定，节点与 CEO/frontdoor 都不按语义 top-k 截断。
 - 当 query 明显表达写入、改写、删除、移动、复制、补丁等变更意图时，本地候选打分优先推 `filesystem_write` / `filesystem_edit` / `filesystem_delete` / `filesystem_move` / `filesystem_copy` / `filesystem_propose_patch` 这类工具名；`exec` 虽然可作为固定 builtin 保持可调用，但在这类意图下不作为候选文件变更方案的首选。
 
 加载门控：
 
 - 精确 `tool_id` 加载对两类 concrete tool 开放：当前 canonical `candidate_tool_names` 中的，以及当前 `rbac_visible_tool_names` 中仍然 surfaced 的，都可以读取 toolskill / 参数说明。`load_tool_context(search_query=...)` 维持可见工具搜索路径，不是枚举所有 RBAC 可见工具的 API。`load_skill_context` 以当前 canonical skill candidate 集合为主门禁；候选未命中时回退查询实时治理可见集（`list_contract_visible_skill_resources`），命中即放行到服务层加载——这条回退让任务运行中途新注册的 skill（如 `skill-installer` 在节点运行中装入的）对当前节点立即可判定，RBAC 与 repair-required 语义仍由 `load_skill_context_v2` 强制；两边都未命中才返回「当前运行时技能未包含」门禁错误，该错误因此只表示“未注册/不可见”，不表示快照滞后。
-- `load_tool_context` 对 `tool_type: external` 的注册资源同样带一条实时治理回退，判据不同源：两份 canonical 名单都取“已实例化的执行器名字”，而外部工具按设计不产生执行器实例（`g3ku/resources/registry.py` 把 `callable` 定义为 `tool_type == "internal"`，`g3ku/resources/manager.py` 只给有实例的工具建 `tool_instances`），所以它在两份名单里恒缺席；门禁因此先回查 `list_visible_tools(actor_role, session_id)`，只在该名字命中一条 `tool_type=external` 的记录时放行，普通工具的候选门禁一字不改，RBAC 在回查处与 `load_tool_context_v2` 各判一次。放行后的载荷带 `promotion=external_resource`：外部工具不进候选、不水合、不会出现在本轮可调用名单，这一次加载交付的是 `install_dir` 与 toolskill 正文，真正的执行动作由正文自述（典型是经 `exec` 调安装目录里的驱动脚本）。清单解析失败的外部工具同样走这条车道，此时 `errors` 就是模型能拿到的唯一故障现场。契约测试：`tests/resources/test_external_tool_load_lane.py`。
+- 工具只有一类：可执行资源，`main/tool.py` 必须存在。第三方能力的本机安装放在 `externaltools/<tool_id>/`，由 `exec` 或某个工具的 handler 驱动；声明 `tool_type: external` 的清单在发现阶段就被拒，错误文案点名两条出路（包成工具、或改成 skill）。把外部 MCP 服务接成工具的合同归 `skills/add-tool/references/mcp-client-tool.md`，本文件不复述。`install_dir` 仍被读取，但不再属于任何清单要求：它只用于删除一条陈旧记录时连带收走它的安装目录。
 - 门禁与"不可用"类错误文本必须自带可判定信息，不能把模型推回猜名字：`load_tool_context` 的候选/可见门禁拒绝要枚举它自己要求的那份名单（`本轮候选工具：…` / `本轮候选技能：…`，有界上限、超出只报总数）；被拒名字若是该 `actor_role` 的 fixed builtin（`exec` 等常驻内置工具，本就没有 toolskill），先答"无需加载即可直接调用"再说别的——模型常把常驻工具当候选去加载。`tool not available` 要区分「本轮只是候选、尚未水化 → 先 `load_tool_context`」与「既不可调用也不在候选里」，并分别给出动作与两个名单。三条渲染入口共用 `g3ku/runtime/tool_error_guidance` 的 `availability_hint` / `no_load_needed_hint` / `format_name_group`，各调用点不自拼名单。
 - 只有普通 candidate tool load 会进入 hydration/promotion、占用 hydration LRU；对已经 callable、已经 hydrated、fixed builtin，或当前仅 RBAC 可见但不在 candidate 里的 direct-load lane，`load_tool_context` 都是 read-only toolskill 加载。
 - 例外：runtime 侧还有一条免模型的 hydration 触发——`exec` 结果发生输出截断（`stdout_truncated` / `stderr_truncated`）时，运行时自动把 `content_open` 水合到下一轮 callable，并在这条 exec 结果里注入提醒，让模型直接从"立即可用但截断的 exec"切换到"能按行/字符精确读本地文件的 content_open"，不必先手动 `load_tool_context`。若 `content_open` 不在当前 candidate 集合则静默跳过；同一结果只注入一次。
