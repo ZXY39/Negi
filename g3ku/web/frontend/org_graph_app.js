@@ -13906,10 +13906,17 @@ function resetCeoComposerState({ clearDraft = false, sessionId = activeSessionId
 }
 
 function resetCeoComposerForSessionChange(previousSessionId, nextSessionId) {
+    const previousId = String(previousSessionId || "").trim();
+    const nextId = String(nextSessionId || "").trim();
+    // 会话没换就不是"换会话"：`ceo.sessions.patch` / `ceo.sessions.snapshot` 在回合运行中
+    // 会随每一帧状态反复到达（同一 session_id），这里若无条件当切换处理，操作者刚点开的
+    // 模型与上下文面板会在下一次补丁时被关掉、面板里未保存的模型链草稿也一起丢掉。
+    // 真正切换会话时两个 id 必然不同，仍走下面的关闭 + 重读。
+    if (previousId && previousId === nextId) return false;
     closeCeoModelModePanel();
-    resetCeoModelSelection(nextSessionId);
-    void refreshCeoModelSelection(nextSessionId);
-    return switchCeoComposerDraft(previousSessionId, nextSessionId);
+    resetCeoModelSelection(nextId);
+    void refreshCeoModelSelection(nextId);
+    return switchCeoComposerDraft(previousId, nextId);
 }
 
 function resetCeoSessionState({ scrollToLatest = false } = {}) {
