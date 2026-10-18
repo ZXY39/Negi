@@ -49,6 +49,7 @@ from g3ku.runtime.chunk_compression_plan import (
     plan_compression_pass,
 )
 from g3ku.runtime.config_refresh import refresh_loop_runtime_config
+from g3ku.runtime.context.image_metrics import bmp_dimensions, webp_dimensions
 from g3ku.runtime.context.summarizer import estimate_tokens
 from g3ku.runtime.frontdoor.message_builder import (
     MEMORY_SNAPSHOT_ADOPTION_IDLE_REFRESH,
@@ -348,6 +349,10 @@ def _image_dimensions_from_bytes(data: bytes, *, mime_type: str = "") -> tuple[i
         width = int.from_bytes(data[6:8], "little")
         height = int.from_bytes(data[8:10], "little")
         return (width, height) if width > 0 and height > 0 else None
+    if normalized_mime == "image/webp":
+        return webp_dimensions(data)
+    if normalized_mime == "image/bmp":
+        return bmp_dimensions(data)
     if normalized_mime in {"image/jpeg", "image/jpg"} or data[:2] == b"\xFF\xD8":
         return _jpeg_dimensions(data)
     if len(data) >= 24 and data.startswith(b"\x89PNG\r\n\x1a\n"):
@@ -358,6 +363,10 @@ def _image_dimensions_from_bytes(data: bytes, *, mime_type: str = "") -> tuple[i
         width = int.from_bytes(data[6:8], "little")
         height = int.from_bytes(data[8:10], "little")
         return (width, height) if width > 0 and height > 0 else None
+    if len(data) >= 12 and data[:4] == b"RIFF" and data[8:12] == b"WEBP":
+        return webp_dimensions(data)
+    if len(data) >= 26 and data[:2] == b"BM":
+        return bmp_dimensions(data)
     return _jpeg_dimensions(data)
 
 
