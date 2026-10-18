@@ -70,7 +70,21 @@ class StubHTMLElement extends StubElement {
         if (selector === ".interaction-step") {
             return this._children.filter((child) => child.classList.contains("interaction-step"));
         }
-        return this._selectorLists[selector] || [];
+        if (Object.prototype.hasOwnProperty.call(this._selectorLists, selector)) {
+            return this._selectorLists[selector];
+        }
+        // 通用类选择器：压缩区分线的查找/摘除按 ".ceo-compression-divider" 这类
+        // 类名串扫直接子元素，与压缩测试文件的桩同口径。
+        const needles = String(selector || "").split(",").map((part) =>
+            part.trim().replace(/^\./, "").split(".").filter(Boolean)
+        ).filter((list) => list.length);
+        if (needles.length) {
+            return this._children.filter((child) => {
+                const classes = String(child.className || "").split(/\s+/).filter(Boolean);
+                return needles.some((list) => list.every((needle) => classes.includes(needle)));
+            });
+        }
+        return [];
     }
 
     addEventListener() {}
@@ -245,7 +259,7 @@ function loadApp() {
     context.window = context;
     vm.createContext(context);
     vm.runInContext(
-        `${TASK_VIEW_CODE}\n${APP_CODE}\nthis.__testExports = { renderCeoStageTraceIntoTurn, renderCeoToolEventsIntoTurn, applyCeoToolEventToTurn, patchCeoInflightTurn, finalizeCeoTurn, normalizeCeoSnapshotToolEvents, stageTraceStatus, displayTaskStageStatus, toggleCeoToolStepOutput, resolvePreferredCeoTraceContext, resolveFinalCeoTraceContext, normalizeCeoSnapshotCanonicalContext, renderPersistedCeoAssistantTurn, ceoLiveStreamResidual, applyCeoCompressionMarker, getActiveCeoTurn, createPendingCeoTurn, renderCeoSnapshotMessageRange, S, U };`,
+        `${TASK_VIEW_CODE}\n${APP_CODE}\nthis.__testExports = { renderCeoStageTraceIntoTurn, renderCeoToolEventsIntoTurn, applyCeoToolEventToTurn, patchCeoInflightTurn, finalizeCeoTurn, normalizeCeoSnapshotToolEvents, stageTraceStatus, displayTaskStageStatus, toggleCeoToolStepOutput, resolvePreferredCeoTraceContext, resolveFinalCeoTraceContext, normalizeCeoSnapshotCanonicalContext, renderPersistedCeoAssistantTurn, ceoLiveStreamResidual, applyCeoCompressionMarker, splitCeoTurnAtCompression, applyCeoInflightCompressionRule, getActiveCeoTurn, createPendingCeoTurn, renderCeoSnapshotMessageRange, S, U };`,
         context
     );
     context.__testExports.__context = context;
@@ -1661,4 +1675,119 @@ test("同一回合压第二次再切一刀，两条线各按自己的边界", ()
             ? `line:${el.dataset.ceoCompressionBoundary}` : `rail:${railOf(el).split('data-stage-id="frontdoor-stage-').length - 1}`)),
         ["rail:1", "line:1", "rail:2", "line:3", "rail:1"]
     );
+});
+
+test("压缩收在两跳空档时（已知阶段全部折入）照样切开活回合", () => {
+    const api = loadApp();
+    const feed = feedHarness(api);
+    api.patchCeoInflightTurn({
+        turn_id: "t1",
+        source: "user",
+        status: "running",
+        canonical_context_delta: { stages: [railStage(1, "第一"), railStage(2, "第二")] },
+    });
+    assert.equal(feed._children.length, 1);
+
+    // 边界 2 = 此刻回合最后一张已收尾的阶段卡：自动压缩跑在两跳之间的空档里，
+    // 下一张卡还没画出来。活回合必须照样切，否则之后整段都长在线上方。
+    assert.equal(api.applyCeoCompressionMarker("web:test", {
+        state: "completed", source: "auto",
+        stats: { turn_id: "t1", boundary_stage_index: 2 },
+    }), true);
+
+    const [head, divider, continuation] = feed._children;
+    assert.equal(feed._children.length, 3);
+    assert.match(String(divider.className), /ceo-compression-divider is-completed/);
+    assert.equal(divider.dataset.ceoCompressionBoundary, "2");
+    assert.deepEqual(
+        Array.from(railOf(head).matchAll(/data-stage-id="([^"]+)"/g), (m) => m[1]),
+        ["frontdoor-stage-1", "frontdoor-stage-2"]
+    );
+    assert.equal(railOf(continuation).includes("data-stage-id"), false, "续跑段此刻还没有阶段");
+    assert.equal(api.getActiveCeoTurn(null, "t1")?.el, continuation);
+
+    // 压缩之后跑出来的新阶段落在线下方的续跑段里，头段冻结不动。
+    api.patchCeoInflightTurn({
+        turn_id: "t1",
+        source: "user",
+        status: "running",
+        canonical_context_delta: { stages: [railStage(3, "第三")] },
+    });
+    assert.deepEqual(feed._children, [head, divider, continuation]);
+    assert.deepEqual(
+        Array.from(railOf(continuation).matchAll(/data-stage-id="([^"]+)"/g), (m) => m[1]),
+        ["frontdoor-stage-3"]
+    );
+    assert.equal(railOf(head).includes("frontdoor-stage-3"), false);
+});
+
+test("已收尾的回合在阶段全部折入时不切，线留在回合行之后", () => {
+    const api = loadApp();
+    const feed = feedHarness(api);
+    const turn = api.createPendingCeoTurn("history");
+    turn.turnId = "t1";
+    turn.finalized = true;
+    turn.lastExecutionTraceSummary = { stages: [railStage(1, "第一"), railStage(2, "第二")] };
+    api.S.ceoPendingTurns.push(turn);
+
+    assert.equal(api.splitCeoTurnAtCompression(turn, 2, "completed"), false);
+});
+
+test("重建时转录标记行改切进进行中回合，不留在行位置", () => {
+    const api = loadApp();
+    const feed = feedHarness(api);
+    const messages = [
+        {
+            role: "system",
+            content: "会话已压缩",
+            compression_marker: {
+                state: "completed", source: "auto",
+                stats: { turn_id: "t1", boundary_stage_index: 2 },
+            },
+        },
+    ];
+    api.renderCeoSnapshotMessageRange(messages, ["m:-:system:0"], 0, messages.length, "web:test");
+    assert.equal(feed._children.length, 1, "标记行先按行位置画一条");
+
+    api.patchCeoInflightTurn({
+        turn_id: "t1",
+        source: "user",
+        status: "running",
+        canonical_context_delta: { stages: [railStage(1, "第一"), railStage(2, "第二")] },
+    });
+    assert.equal(feed._children.length, 2);
+
+    api.applyCeoInflightCompressionRule(messages, { turn_id: "t1" });
+
+    const [head, divider, continuation] = feed._children;
+    assert.equal(feed._children.length, 3, "行位置那条被摘掉，只剩切进回合的一条");
+    assert.match(String(divider.className), /ceo-compression-divider is-completed/);
+    assert.deepEqual(
+        Array.from(railOf(head).matchAll(/data-stage-id="([^"]+)"/g), (m) => m[1]),
+        ["frontdoor-stage-1", "frontdoor-stage-2"]
+    );
+    assert.equal(api.getActiveCeoTurn(null, "t1")?.el, continuation);
+});
+
+test("切不开时保留按行位置画的那条线，不让线凭空消失", () => {
+    const api = loadApp();
+    const feed = feedHarness(api);
+    const messages = [
+        {
+            role: "system",
+            content: "会话已压缩",
+            compression_marker: {
+                state: "completed", source: "auto",
+                stats: { turn_id: "t1", boundary_stage_index: 2 },
+            },
+        },
+    ];
+    api.renderCeoSnapshotMessageRange(messages, ["m:-:system:0"], 0, messages.length, "web:test");
+    // inflight 帧还没有阶段轨道：无从切起，只能保住行位置那条。
+    api.patchCeoInflightTurn({ turn_id: "t1", source: "user", status: "running" });
+
+    api.applyCeoInflightCompressionRule(messages, { turn_id: "t1" });
+
+    assert.equal(feed._children.length, 2);
+    assert.match(String(feed._children[0].className), /ceo-compression-divider/);
 });

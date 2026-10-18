@@ -2504,16 +2504,36 @@ class RuntimeAgentSession:
         turn_id: str,
         boundary_stage_index: int,
     ) -> None:
-        """把压缩边界广播给实时车道，不落转录行——行仍由回合收尾那一次写盘落。
+        """把压缩边界广播给实时车道，同时把标记行当场记进内存账——但不单独落盘。
 
-        区分线要停在阶段轨道中间，就必须在摘要落地那一刻就把边界送出去；等收尾再发的话，
-        压缩之后跑出来的那一截阶段已经全画在线上方了。转录行没落成（进程中途死掉）时刷新
-        会把这条线撤掉：行才是事实源，帧只负责提前画。
+        区分线要停在阶段轨道中间，就必须在摘要落地那一刻把边界送出去；等收尾再发的话，
+        压缩之后跑出来的那一截阶段已经全画在线上方了。行也一样：只等收尾落行的话，
+        长回合中途一刷新，这条线就凭空消失到收尾为止。所以行在这里就 append 进内存账
+        （快照直接从内存账读转录，刷新当场可见），整份转录的重写仍由回合收尾或下一次
+        会话保存顺带完成——不为此多做一次全量写盘。收尾路径凭
+        `_frontdoor_compression_marker_appended_turn` 标志跳过重复落行；append 没写成时
+        标志不置位，收尾照旧补落，行为退回原样。转录行没落成（进程中途死掉且此后再无
+        保存）时刷新仍会把这条线撤掉：行才是事实源，帧只负责提前画。
         """
         stats: dict[str, Any] = {"boundary_stage_index": int(boundary_stage_index or 0)}
         normalized_turn_id = str(turn_id or "").strip()
         if normalized_turn_id:
             stats["turn_id"] = normalized_turn_id
+        store = getattr(self._loop, "sessions", None)
+        session_key = str(self._state.session_key or "").strip()
+        if store is not None and session_key:
+            try:
+                if self.append_context_compression_marker(
+                    state="completed",
+                    source="auto",
+                    stats=dict(stats),
+                    persisted_session=store.get_or_create(session_key),
+                ):
+                    self._frontdoor_compression_marker_appended_turn = normalized_turn_id
+            except Exception:
+                logger.opt(exception=True).warning(
+                    "Failed to stage context compression marker at announce"
+                )
         await self._emit(
             "context_compression_marker",
             compression_state="completed",
@@ -3305,12 +3325,17 @@ class RuntimeAgentSession:
                 marker_stats: dict[str, Any] = {"turn_id": turn_id}
                 if boundary_stage_index:
                     marker_stats["boundary_stage_index"] = boundary_stage_index
-                await self.emit_context_compression_marker(
-                    state="completed",
-                    source="auto",
-                    stats=marker_stats,
-                    persisted_session=persisted_session,
-                )
+                # 摘要落地那一刻行已经随 announce 记进内存账，本次收尾写盘顺带把它持久化；
+                # 只有那条道没写成（标志未置位）才在这里补落，避免同一回合落出两条线。
+                if str(getattr(self, "_frontdoor_compression_marker_appended_turn", "") or "").strip() == turn_id:
+                    setattr(self, "_frontdoor_compression_marker_appended_turn", "")
+                else:
+                    await self.emit_context_compression_marker(
+                        state="completed",
+                        source="auto",
+                        stats=marker_stats,
+                        persisted_session=persisted_session,
+                    )
             if self._state.session_key.startswith("web:"):
                 from g3ku.runtime.web_ceo_sessions import update_ceo_session_after_turn
 

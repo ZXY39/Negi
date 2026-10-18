@@ -3333,11 +3333,12 @@ def test_compression_boundary_index_is_the_last_swallowed_stage() -> None:
 
 
 @pytest.mark.asyncio
-async def test_announce_compression_boundary_broadcasts_without_a_row(tmp_path: Path) -> None:
-    """摘要一落地就广播边界，但转录行仍由收尾那次写盘落。
+async def test_announce_compression_boundary_stages_row_in_memory(tmp_path: Path) -> None:
+    """摘要一落地就广播边界，并把标记行当场记进内存账——但不单独落盘。
 
-    等收尾再广播的话，压缩之后跑出来的那一截阶段已经全画在线上方了；反过来要是这里就
-    落行，一个回合要重写两遍整份转录。
+    等收尾再广播的话，压缩之后跑出来的那一截阶段已经全画在线上方了；只广播不记账的话，
+    长回合中途一刷新线就凭空消失到收尾为止。快照直接从内存账读转录，所以行当场可见；
+    整份转录的重写仍由回合收尾或下一次保存顺带完成，一个压缩不多写一遍盘。
     """
     session = _idle_session(tmp_path)
     events: list[AgentEvent] = []
@@ -3355,7 +3356,14 @@ async def test_announce_compression_boundary_broadcasts_without_a_row(tmp_path: 
         for item in list(store.get_or_create("web:shared").messages or [])
         if isinstance(item.get("metadata"), dict) and item["metadata"].get("kind") == "context_compression"
     ]
-    assert rows == []
+    assert len(rows) == 1
+    assert rows[0]["metadata"]["compression_state"] == "completed"
+    assert rows[0]["metadata"]["source"] == "auto"
+    assert rows[0]["metadata"]["stats"] == {"boundary_stage_index": 7, "turn_id": "a1"}
+    # 收尾路径凭这个标志跳过重复落行。
+    assert str(getattr(session, "_frontdoor_compression_marker_appended_turn", "")) == "a1"
+    # 行记进账但不为它单独写盘：转录文件此刻还不该存在。
+    assert not store.has_transcript("web:shared")
     marker_events = [event for event in events if event.type == "context_compression_marker"]
     assert len(marker_events) == 1
     assert marker_events[0].payload == {

@@ -4225,7 +4225,15 @@ function settleCeoCompressionHeadText(turn) {
 function splitCeoTurnAtCompression(turn, boundary, state) {
     if (!turn?.el?.parentNode || !Number.isFinite(boundary) || boundary <= 0) return false;
     const { total, pre } = ceoCompressionStagesAroundBoundary(turn.lastExecutionTraceSummary?.stages, boundary);
-    if (!total || pre >= total) return false;
+    if (!total) return false;
+    // pre == total：此刻已知的阶段全部折进了摘要。自动压缩跑在两跳之间的空档里——
+    // 上一阶段刚收尾、下一张阶段卡还没画出来，所以"全在边界之下"不代表"回合已结束"。
+    // 活着的回合（finalize 未落）之后每一帧都长在它身上，必须照样切：头段整段冻结在
+    // 线上方，空续跑段接住之后的阶段与流式文字。只有已收尾的历史回合才放弃切分——
+    // 它之后不会再有内容，线留在气泡后面由 findCeoCompressionAnchor 兜底。
+    if (pre >= total && turn.finalized) return false;
+    // 这条规则已经在这个回合身上落过一次（重建吸收、或同一帧早前切过）：再切就是重复的线。
+    if (turn.compressionBoundary === boundary) return true;
     const dividerState = CEO_COMPRESSION_TEXT[state] ? state : "completed";
     const divider = buildCeoCompressionDividerElement(dividerState, {
         interactive: false,
@@ -4235,6 +4243,7 @@ function splitCeoTurnAtCompression(turn, boundary, state) {
     if (!divider) return false;
     if (!pre) {
         // 这一回合的阶段全在压缩之后：线挪到气泡之前，不切。
+        turn.compressionBoundary = boundary;
         mutateCeoFeed(() => {
             turn.el.parentNode.insertBefore(divider, turn.el);
             icons();
@@ -4301,6 +4310,29 @@ function applyCeoCompressionMarker(sessionId = "", marker = null) {
     // 钉底只在"线就是最后一条"时成立：插进历史里的那条不该把正在往上翻的人拽回底部。
     if (!anchorEl && S.ceoFeedFollowLatest !== false) scrollCeoFeedToBottom();
     return true;
+}
+
+// 刷新/重连后的整页重建：进行中回合由实时道画在 feed 尾部，而转录里的压缩标记行只能
+// 落在它前面（这一回合自己的行还没落盘）。按行位置画的那条线会把"压缩之后才跑出来的
+// 阶段"整段留在线上方。所以重建后要把这条规则从行位置摘下来，改按阶段边界切进进行中
+// 回合里——与实时帧 announce 当场的切法保持同一落点。
+function applyCeoInflightCompressionRule(messages = [], inflightTurn = null) {
+    const turnId = normalizeCeoTurnId(inflightTurn?.turn_id || "");
+    if (!turnId || !U.ceoFeed || typeof U.ceoFeed.querySelectorAll !== "function") return;
+    const rule = buildCeoCompressionRuleMap(messages).get(turnId);
+    const boundary = Number(rule?.boundary);
+    if (!rule || rule.state !== "completed" || !Number.isFinite(boundary) || boundary <= 0) return;
+    const turn = getActiveCeoTurn(null, turnId);
+    if (!turn) return;
+    const misplaced = Array.from(U.ceoFeed.querySelectorAll(`.${CEO_COMPRESSION_DIVIDER_CLASS}`)).find(
+        (el) => String(el.dataset?.ceoCompressionTurn || "") === turnId
+            && String(el.dataset?.ceoCompressionState || "") === "completed"
+            && String(el.dataset?.ceoCompressionBoundary || "") === String(boundary),
+    );
+    // 先切后摘：切不开（比如这一帧还没有阶段轨道）就保留按行位置画的那条，
+    // 宁可位置退一档也不能让线凭空消失。
+    const split = splitCeoTurnAtCompression(turn, boundary, rule.state);
+    if (split && misplaced?.parentNode) misplaced.remove();
 }
 
 function stopCeoContextCompressionPolling() {
@@ -8979,6 +9011,9 @@ function renderPersistedCeoAssistantTurn(item = {}, options = {}) {
                     turn.stageWindowFrom = null;
                     turn.compressionBoundary = null;
                 }
+            } else if (ruleDivider) {
+                // pre == 0：线落在气泡之前，不切段。同样记下边界，迟到帧不再补第二条。
+                turn.compressionBoundary = ruleBoundary;
             }
         }
     }
@@ -9567,6 +9602,8 @@ function renderCeoSnapshot(messages = [], inflightTurn = null, { sessionId = "",
             normalizedInflightTurn,
             { sessionId: targetSessionId, cacheField: "inflight_turn" }
         );
+        // 转录里进行中回合的压缩标记行改切进回合阶段轨道（见函数注）。
+        applyCeoInflightCompressionRule(messages, normalizedInflightTurn);
         const representedMessages = [
             ...normalizeCeoSnapshotUserMessages(messages),
             ...normalizeCeoSnapshotUserMessages(
