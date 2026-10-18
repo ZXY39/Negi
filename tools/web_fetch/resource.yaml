@@ -2,16 +2,22 @@ schema_version: 1
 kind: tool
 name: web_fetch
 display_name: Web Fetch
-description: Lightweight HTTP fetch for reading public web pages and extracting readable text without a browser runtime.
+description: &tool_description >-
+  Fetch one or more public web pages and extract readable text without a browser runtime.
+  Pass `url` for a single page, or `urls` (a list of URL strings, up to 20 per call) for a batch.
+  Every page that comes back is written in full to a text file and its row reports `saved_path`;
+  `text` is only an excerpt capped by `max_chars`. Set `include_text=false` to keep page bodies out
+  of the conversation and read or process the saved files instead. `save_dir` sends the files to a
+  directory you name; the default is `{temp}/web_fetch`.
 tool_result_delivery_contract: runtime_managed
 source:
   type: self_maintained
   url: ''
   ref: ''
 current_version:
-  number: 0.1.1
-  released_at: '2026-03-23'
-  summary: Negi self-maintained implementation for lightweight public web fetching.
+  number: 0.2.0
+  released_at: '2026-10-18'
+  summary: Batch URL fetching with the extracted text of every page landed on disk.
 tool_type: internal
 entry:
   module: tools.web_fetch.main.tool
@@ -26,7 +32,8 @@ permissions:
     notes: Only allow public http(s) targets. By default block private networks, loopback, local addresses, and localhost.
   filesystem:
     read: false
-    write: false
+    write: true
+    notes: Writes the extracted text of each fetched page into the caller's temp root, or into the directory named by `save_dir`.
   shell:
     execute: false
   model:
@@ -36,36 +43,49 @@ permissions:
 parameters_schema:
   type: object
   additionalProperties: false
-  required:
-    - url
+  required: []
   properties:
-    url:
-      type: string
-      description: Public http(s) URL to fetch.
+    urls:
+      type: array
+      items:
+        type: string
+      description: Public http(s) URLs to fetch in one call.
     max_chars:
       type: integer
       minimum: 500
       maximum: 20000
       default: 6000
-      description: Maximum characters of readable text to keep.
+      description: Maximum characters of readable text to keep inline per URL.
 executor:
   kind: python_object
   symbol: build
 parameters:
   type: object
   additionalProperties: false
-  required:
-    - url
+  required: []
   properties:
     url:
       type: string
-      description: Public http(s) URL to fetch.
+      description: One public http(s) URL to fetch. Pass `urls` instead when there is more than one; both are merged in order.
+    urls:
+      type: array
+      items:
+        type: string
+        description: A public http(s) URL.
+      description: Public http(s) URLs to fetch in one call, up to 20. Duplicated URLs are fetched once.
     max_chars:
       type: integer
       minimum: 500
       maximum: 20000
       default: 6000
-      description: Maximum characters of readable text to keep.
+      description: Maximum characters of readable text returned inline per URL. The file at `saved_path` is not capped by it.
+    include_text:
+      type: boolean
+      default: true
+      description: When false, no page body is returned inline; each row carries page metadata plus its `saved_path`.
+    save_dir:
+      type: string
+      description: Directory for the saved page text. A bare name or `{temp}/` prefix resolves under the task temp dir, a project-relative path or `{workspace}/` prefix under the project root, absolute paths are used as given. Default `{temp}/web_fetch`.
     # 注意：不要在此声明 timeout_seconds。web_fetch 是自持超时工具（self_enforced_timeout），
     # 统一 timeout 合同的 `timeout_seconds`（秒，支持小数）参数由运行时注入模型可见
     # schema，并由执行层解析后显式传入；清单不得自行声明带上限的 timeout（历史旧名
@@ -73,25 +93,63 @@ parameters:
 returns:
   type: object
   properties:
-    url:
-      type: string
-    status_code:
+    ok:
+      type: boolean
+    partial:
+      type: boolean
+    total:
       type: integer
-    content_type:
+    succeeded:
+      type: integer
+    failed:
+      type: integer
+    saved_files:
+      type: integer
+    save_dir:
       type: string
-    title:
+    summary:
       type: string
-    text:
-      type: string
+    items:
+      type: array
+      description: One row per requested URL, in the order requested.
+      items:
+        type: object
+        properties:
+          ok:
+            type: boolean
+          url:
+            type: string
+          final_url:
+            type: string
+          status_code:
+            type: integer
+          content_type:
+            type: string
+          title:
+            type: string
+          text:
+            type: string
+          text_chars_total:
+            type: integer
+          saved_path:
+            type: string
+          saved_truncated:
+            type: boolean
+          error:
+            type: string
 behavior_contract:
   summary:
     - Only fetch public http/https resources.
-    - By default extract readable text and truncate it to `max_chars`.
-    - Invalid URLs, private-network targets, or unsupported schemes return a direct tool error.
-    - Timeouts, network failures, and decode failures are returned as tool errors.
+    - Accept one `url` or a `urls` list; both are merged in order and deduplicated, up to 20 URLs per call.
+    - By default extract readable text and return an inline excerpt of it per URL, capped by `max_chars`; `include_text=false` returns no inline body.
+    - Write the full extracted text of every fetched page to a file named after its URL, under `{temp}/web_fetch` or under `save_dir`. A refetch of the same URL overwrites that file.
+    - An invalid URL, private-network target, or unsupported scheme fails only that URL: its row reports `ok=false` with the error and the other rows still deliver.
+    - A call where any URL failed reports `ok=false`; `partial=true` says some rows still delivered.
+    - The unified `timeout_seconds` bounds the whole call: each URL spends the remaining budget, so a batch does not stretch the wall clock per URL.
+    - Timeouts, network failures, and decode failures are reported per URL.
 governance:
   display_name: Web Fetch
-  description: Lightweight HTTP fetch for reading public web pages and extracting readable text without a browser runtime.
+  description: *tool_description
   risk_level: medium
   destructive: false
   allowed_roles:
