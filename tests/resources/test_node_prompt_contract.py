@@ -116,8 +116,9 @@ def test_node_runtime_contract_serializes_minimal_agent_facing_payload() -> None
     assert "hydrated_tools:" not in message["content"]
     # 候选只列名字：说明文字在 provider tools[] 的 function.description 里
     assert "candidate_tools: `filesystem_write`" in message["content"]
-    assert "candidate_skills: `tmux`" in message["content"]
-    assert "- `filesystem_write`: write file" not in message["content"]
+    # skill 名单不再进节点尾块：头部名单（system 首条）承载全量可见 skill，
+    # 新增可读的由 new_readable_skills 注入行点名。
+    assert "candidate_skills" not in message["content"]
     # 行为口径只在 node_runtime_contract_shared.md 说一次，块里不再抄第二份
     assert (
         'To use one, call `load_tool_context(tool_id="<tool_id>")` first and wait for the next round before calling it directly.'
@@ -184,10 +185,10 @@ def test_node_runtime_contract_renders_repair_required_sections_separately() -> 
         }
     ]
     assert "repair_required_tools:" in message["content"]
-    assert "repair_required_skills:" in message["content"]
-    # 条目留在块里，四句处置指令整段移出：节点道的载体是 `shared_repair_required.md`
+    # skill 的 repair 行已从尾块删除：load_skill_context 回执自带 repair 载荷
+    assert "repair_required_skills:" not in message["content"]
     assert "`agent_browser`: Browser automation Reason: missing required paths" in message["content"]
-    assert "`writing-skills`: Skill maintenance workflow Reason: missing required bins" in message["content"]
+    assert "`writing-skills`" not in message["content"]
     assert "Reference skill:" not in message["content"]
     assert "Use `load_tool_context(tool_id=\"<tool_id>\")` first." not in message["content"]
     assert "These skills must be repaired before viewing their body." not in message["content"]

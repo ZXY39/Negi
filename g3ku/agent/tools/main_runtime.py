@@ -60,48 +60,6 @@ def _candidate_gate_error(
     return f"Error: 当前运行时{label}未包含 `{target}`，只能加载本轮候选{label}" + (f"；{group}" if group else "")
 
 
-def _live_registered_skill_visible(
-    service: Any,
-    *,
-    actor_role: str,
-    session_id: str,
-    skill_id: str,
-) -> bool:
-    """Fallback probe against the live governance registry.
-
-    The per-round candidate snapshot (`candidate_skill_ids`) is built from the
-    runtime frame captured at node dispatch. Resources installed or registered
-    mid-run (e.g. by `skill-installer`) never enter that snapshot, so the gate
-    alone would reject them for the whole run. When the gate fails we re-check
-    live visibility here; RBAC and repair-required semantics stay enforced by
-    `load_skill_context_v2` downstream.
-    """
-    target = str(skill_id or "").strip()
-    if not target:
-        return False
-    for method_name in (
-        "list_contract_visible_skill_resources",
-        "list_visible_skill_resources",
-    ):
-        method = getattr(service, method_name, None)
-        if not callable(method):
-            continue
-        try:
-            records = method(actor_role=actor_role, session_id=session_id)
-        except Exception:
-            return False
-        for record in list(records or []):
-            record_id = (
-                record.get("skill_id")
-                if isinstance(record, dict)
-                else getattr(record, "skill_id", None)
-            )
-            if str(record_id or "").strip() == target:
-                return True
-        return False
-    return False
-
-
 def _live_registered_tool_visible(
     service: Any,
     *,
@@ -232,19 +190,9 @@ class LoadSkillContextTool(_MainRuntimeTool):
         skill_name = str(skill_id or "").strip()
         if not skill_name:
             return json.dumps({"ok": False, "error": "skill_id_required"}, ensure_ascii=False)
-        gate_error = _candidate_gate_error(
-            runtime=__g3ku_runtime,
-            field_name="candidate_skill_ids",
-            requested_id=skill_name,
-            label="技能",
-        )
-        if gate_error and not _live_registered_skill_visible(
-            service,
-            actor_role=_runtime_actor_role(__g3ku_runtime),
-            session_id=_runtime_session_key(__g3ku_runtime),
-            skill_id=skill_name,
-        ):
-            return gate_error
+        # skill 候选闸门已拆除：skill 不水合、按 id 直读，可见性由 `load_skill_context_v2`
+        # 按治理实时可见集强制（已删除 / 权限不允许 / 待修复三态回执）。回合初的
+        # `candidate_skill_ids` 快照只会拿 stale 名单误拒 mid-turn 授权的 skill。
         if hasattr(service, "load_skill_context_v2"):
             kwargs_v2: dict[str, Any] = {
                 "actor_role": _runtime_actor_role(__g3ku_runtime),

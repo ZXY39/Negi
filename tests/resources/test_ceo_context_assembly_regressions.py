@@ -990,9 +990,10 @@ async def test_message_builder_defaults_to_16_skill_and_tool_candidates_when_ass
         persisted_session=None,
     )
 
-    assert len(result.trace["selected_skills"]) == 16
+    # skill 名单不再做 top-k 语义筛选：选中集 = 全量可见（20 个全进头部名单）；
+    # 工具面仍按 `extension_tool_top_k`（默认 16）截断。
+    assert len(result.trace["selected_skills"]) == 20
     assert len(result.candidate_tool_names) == 16
-    assert result.trace["selected_skills"][0]["skill_id"] == "skill-00"
     assert result.candidate_tool_names[0] == "tool-00"
 
 
@@ -1378,8 +1379,10 @@ def test_frontdoor_dynamic_appendix_records_prefer_state_tool_contract_over_stal
     assert "candidate_tools:" not in contract_text
     assert "undeclared_candidates" not in contract_text
     assert "hydrated_tools:" not in contract_text
-    assert "candidate_skills (loadable with `load_skill_context`): `memory`" in contract_text
-    # skill/工具加载规则只在基础提示词里，契约不再抄第二份
+    # skill 名单不再进尾块（头部钉住块承载全量名单；此用例未钉，模型侧信号由
+    # new_readable_skills 注入行承载）；加载规则只在基础提示词里。
+    assert "candidate_skills" not in contract_text
+    assert "new_readable_skills" not in contract_text
     assert "Skills listed in `candidate_skills` do not hydrate" not in contract_text
     assert 'Call `load_skill_context(skill_id="<skill_id>")`' not in contract_text
 
@@ -1460,7 +1463,7 @@ def test_frontdoor_tool_contract_upsert_accepts_legacy_dict_and_writes_summary_t
     assert "callable_tools: `submit_next_stage`, `filesystem_write`" in str(updated[1]["content"] or "")
     stable_text = str(updated[0]["content"] or "")
     assert "candidate_tools:" in stable_text
-    assert "candidate_skills (loadable with `load_skill_context`): `memory`" in stable_text
+    assert "candidate_skills" not in stable_text
     # 静态规则与逐条描述都不再进正文：规则归基础提示词，描述归 provider tools[]
     assert "Skills listed in `candidate_skills` do not hydrate" not in stable_text
     assert "`agent_browser`" in stable_text
@@ -1582,11 +1585,12 @@ def test_frontdoor_tool_contract_renders_repair_required_sections_separately() -
         }
     ]
     assert "repair_required_tools:" in str(updated[0]["content"] or "")
-    assert "repair_required_skills:" in str(updated[0]["content"] or "")
+    # skill 的 repair 行已删：payload 仍带条目（机器状态），渲染交给 load 回执
+    assert "repair_required_skills:" not in str(updated[0]["content"] or "")
     contract_text = str(updated[0]["content"] or "")
     # 条目留在块里，处置指令整段移出：它是回合内常量，每跳重贴就是重复付费
     assert "`agent_browser`: Browser automation Reason: missing required paths" in contract_text
-    assert "`writing-skills`: Skill maintenance workflow Reason: missing required bins" in contract_text
+    assert "`writing-skills`" not in contract_text
     assert "Reference skill:" not in contract_text
     assert "These tools must be repaired before use." not in contract_text
     assert "Do not call `load_skill_context` until repaired." not in contract_text
@@ -1969,7 +1973,9 @@ async def test_message_builder_keeps_capability_snapshot_stable_when_semantic_sk
         user_content="same user turn",
     )
 
-    assert first.trace["selected_skills"] != second.trace["selected_skills"]
+    # skill 选中集不再随语义排序漂移（名单 = 全量可见）；工具排序仍随 query 变。
+    assert first.trace["selected_skills"] == second.trace["selected_skills"]
+    assert first.candidate_tool_names != second.candidate_tool_names
     assert first.turn_overlay_text == ""
     assert second.turn_overlay_text == ""
     assert first.dynamic_appendix_messages != second.dynamic_appendix_messages

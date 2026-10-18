@@ -26,9 +26,11 @@ RUNTIME_APPENDIX_HEADINGS = (FRONTDOOR_DYNAMIC_TOOL_CONTRACT_HEADING, FRONTDOOR_
 # system_prompt 文本（`message_builder` 拼 `## Capability Exposure Snapshot` 的同一位置），
 # 不是新消息项——因此尾部重铺那条路（`_with_dynamic_appendix_at_tail` 只剥"运行时块"）
 # 根本碰不到它，也就不需要第三套消息分类。
-# 刷新键 = 曝光 revision + 策略签名 + 临时目录：三者任一动了才重写头部，代价是那一次整段
-# 重算；没动就逐字节复用，名单/策略/路径每跳 0 计费。名单不进刷新键，所以它会过期——过期部
-# 分由尾块的 granted/unselected 两行按成员差声明，不出整份新名单。
+# 刷新键 = skill roster epoch + 策略签名 + 临时目录。epoch 只在重印边界（token 压缩、
+# 手动压缩、空闲窗口第一跳）递增——可见集在两次重印之间怎么变，头部都逐字节不动：
+# 新变为可读的 skill 由尾块的 `new_readable_skills` 注入块按轮点名（只增不减），
+# 被删/被收回的名字留在头部名单里直到下一次重印，模型去 load 时由
+# `load_skill_context` 的三态回执告知原因。
 FRONTDOOR_PINNED_CONTRACT_HEADING = '## Runtime Contract (pinned)'
 FRONTDOOR_PINNED_CONTRACT_KIND = 'frontdoor_runtime_pinned_contract'
 FRONTDOOR_PINNED_CONTRACT_TEXT_ATTR = '_frontdoor_pinned_contract_text'
@@ -42,14 +44,51 @@ FRONTDOOR_PINNED_CONTRACT_SKILLS_ATTR = '_frontdoor_pinned_contract_skill_ids'
 _PINNED_CONTRACT_STORE_LIMIT = 128
 _PINNED_CONTRACT_STORES: 'OrderedDict[str, dict[str, Any]]' = OrderedDict()
 
+# skill roster epoch：头部名单的重印计数。与 `tools[]` 的重印边界同源
+# （`_frontdoor_bundle_recommit_boundary` 返回 True 时 +1），两份名单共用一套
+# "什么时候允许变"的口径。双载体与钉住表同款。
+_SKILL_ROSTER_EPOCH_ATTR = '_frontdoor_skill_roster_epoch'
+_SKILL_ROSTER_EPOCH_STORE_LIMIT = 256
+_SKILL_ROSTER_EPOCH_STORES: 'OrderedDict[str, int]' = OrderedDict()
+
+
+def skill_roster_epoch_for(session: Any, *, session_key: str | None = None) -> int:
+    """当前 skill 名单的重印代数；没有记录时从 0 起。"""
+    raw = getattr(session, _SKILL_ROSTER_EPOCH_ATTR, None) if session is not None else None
+    try:
+        session_value = int(raw or 0)
+    except (TypeError, ValueError):
+        session_value = 0
+    key = str(session_key or '').strip()
+    if not key:
+        return session_value
+    stored = _SKILL_ROSTER_EPOCH_STORES.get(key)
+    if stored is None:
+        return session_value
+    return max(session_value, int(stored))
+
+
+def bump_skill_roster_epoch(session: Any, *, session_key: str | None = None) -> int:
+    """重印边界处 +1；返回新值。写失败不致命（进程表兜底）。"""
+    next_value = skill_roster_epoch_for(session, session_key=session_key) + 1
+    if session is not None:
+        try:
+            setattr(session, _SKILL_ROSTER_EPOCH_ATTR, next_value)
+        except Exception:
+            pass
+    key = str(session_key or '').strip()
+    if key:
+        _SKILL_ROSTER_EPOCH_STORES[key] = next_value
+        _SKILL_ROSTER_EPOCH_STORES.move_to_end(key)
+        while len(_SKILL_ROSTER_EPOCH_STORES) > _SKILL_ROSTER_EPOCH_STORE_LIMIT:
+            _SKILL_ROSTER_EPOCH_STORES.popitem(last=False)
+    return next_value
+
 
 def clear_pinned_contract_stores() -> None:
     """测试隔离：钉住表是进程级的，跨用例可见。"""
     _PINNED_CONTRACT_STORES.clear()
-
-
-def _render_name_list_for_pinned(items: list[Any] | None) -> str:
-    return _render_name_list(_normalized_name_list(items))
+    _SKILL_ROSTER_EPOCH_STORES.clear()
 
 
 def _exec_policy_signature(exec_runtime_policy: dict[str, Any] | None) -> str:
@@ -66,18 +105,20 @@ def pinned_contract_revision_key(
     *,
     exec_runtime_policy: dict[str, Any] | None,
     session_temp_dir: str | None,
-    contract_revision: str | None,
+    skill_roster_epoch: int,
 ) -> str:
-    """头部块的重印判据：只有三条结构性边界——曝光提交点、执行策略签名、会话临时目录。
+    """头部块的重印判据：只有三条结构性边界——roster epoch（随 token 压缩 / 手动压缩 /
+    空闲边界递增）、执行策略签名、会话临时目录。
 
-    名单本身**不进键**：本轮选中集与钉住集的成员差由尾块的 granted/unselected 两行表达。
-    把名单算进键会让每回合的语义挑选变成整段头部重写，而头部一改就顶掉它后面的全部前缀，
-    比尾块重复一遍贵得多。
+    可见集本身**不进键**：两次重印之间可见集怎么变，头部都逐字节不动——新增的可读
+    skill 由尾块 `new_readable_skills` 注入块按轮点名，被删/被收回的名字留在头部直到
+    下一次重印（`load_skill_context` 三态回执告知原因）。把可见集算进键会让一次资源
+    变化把整段头部（连同它后面的全部前缀）打掉。
     """
     digest = hashlib.sha256(
         '\n'.join(
             (
-                str(contract_revision or '').strip(),
+                str(int(skill_roster_epoch or 0)),
                 _exec_policy_signature(exec_runtime_policy),
                 str(session_temp_dir or '').strip(),
             )
@@ -86,29 +127,67 @@ def pinned_contract_revision_key(
     return f'pc:{digest}'
 
 
+def _normalize_skill_roster_items(items: list[Any] | None) -> list[dict[str, str]]:
+    """把名单入参归一成 `{skill_id, display_name, description}`，按 id 排序去重。
+
+    语义筛选删除后，"选哪个 skill"的判断在模型侧，描述是必要输入：名单渲染必须
+    带名称与一句话描述，纯 id 行不够用。
+    """
+    entries: dict[str, dict[str, str]] = {}
+    for item in list(items or []):
+        if isinstance(item, dict):
+            skill_id = str(item.get('skill_id') or '').strip()
+            display_name = str(item.get('display_name') or item.get('name') or '').strip()
+            description = str(item.get('description') or '').strip()
+        else:
+            skill_id = str(getattr(item, 'skill_id', '') or '').strip()
+            display_name = str(getattr(item, 'display_name', '') or getattr(item, 'name', '') or '').strip()
+            description = str(getattr(item, 'description', '') or '').strip()
+        if not skill_id or skill_id in entries:
+            continue
+        entries[skill_id] = {
+            'skill_id': skill_id,
+            'display_name': display_name or skill_id,
+            'description': description,
+        }
+    return [entries[key] for key in sorted(entries)]
+
+
 def render_pinned_contract_text(
     *,
-    skill_ids: list[Any] | None,
+    skill_items: list[Any] | None,
     exec_runtime_policy: dict[str, Any] | None,
     session_temp_dir: str | None,
+    include_extras: bool = True,
 ) -> str:
     """渲染钉住块；没有名单就返回空串。
 
-    名单是这块唯一的量（实盘 58 条 ≈ 307 token/跳），执行策略与会话临时目录各只一行。为两行
-    短声明去动头部是不划算的买卖——头部一改就顶掉身后全部前缀。所以名单为空时整块不钉，三段
-    声明照旧留在尾块（省略判定逐段看头部原文，头部没有就不省）。
+    名单是这块唯一的量，执行策略与会话临时目录各只一行。为两行短声明去动头部是不划算的
+    买卖——头部一改就顶掉身后全部前缀。所以名单为空时整块不钉，三段声明照旧留在尾块
+    （省略判定逐段看头部原文，头部没有就不省）。
 
-    名单按 id 排序：钉住的那份是"能加载哪些"的集合声明，不带每回合的语义排名，否则同名次
-    不同顺序会在头部改字节。尾块的 `candidate_skills` 仍按本轮选中顺序渲染。
+    名单是**钉住时点的全量可见 skill**（语义筛选已删，"选哪个"由模型按描述判断），
+    按 id 排序：钉住的那份是"能加载哪些"的集合声明，不带每回合的语义排名。两次重印
+    之间名单会过期——新增的靠尾块 `new_readable_skills` 注入块点名，消失的靠
+    `load_skill_context` 三态回执告知原因。
+
+    `include_extras=False` 只渲名单本体：节点道复用这份渲染函数钉自己的头部名单，
+    执行策略/临时目录/路径锚是会话道的三段声明，节点不进头部。
     """
-    normalized_skill_ids = _normalized_name_list(skill_ids)
-    if not normalized_skill_ids:
+    normalized_items = _normalize_skill_roster_items(skill_items)
+    if not normalized_items:
         return ''
     lines = [
         FRONTDOOR_PINNED_CONTRACT_HEADING,
         f'kind: {FRONTDOOR_PINNED_CONTRACT_KIND}',
-        f'candidate_skills (loadable with `load_skill_context`): {_render_name_list_for_pinned(sorted(normalized_skill_ids))}',
+        'candidate_skills (loadable with `load_skill_context`; `id | name | description`):',
     ]
+    lines.extend(
+        f'- `{item["skill_id"]}` | {item["display_name"]} | {item["description"]}'
+        for item in normalized_items
+    )
+    if not include_extras:
+        return '\n'.join(lines).strip()
     policy_line = _render_exec_runtime_policy(exec_runtime_policy)
     if policy_line:
         lines.append(policy_line)
@@ -208,11 +287,12 @@ def pinned_contract_state(session: Any, *, session_key: str | None = None) -> tu
 def frontdoor_pinned_contract_text(
     session: Any,
     *,
-    skill_ids: list[Any] | None,
+    skill_items: list[Any] | None,
     exec_runtime_policy: dict[str, Any] | None,
     session_temp_dir: str | None,
-    contract_revision: str | None,
+    skill_roster_epoch: int,
     session_key: str | None = None,
+    include_extras: bool = True,
 ) -> str:
     """注入侧唯一取数口：命中已钉住的内容就复用原文，否则重钉一次并记下判据键。
 
@@ -228,7 +308,7 @@ def frontdoor_pinned_contract_text(
     revision = pinned_contract_revision_key(
         exec_runtime_policy=exec_runtime_policy,
         session_temp_dir=session_temp_dir,
-        contract_revision=contract_revision,
+        skill_roster_epoch=skill_roster_epoch,
     )
     stored_text, _stored_skill_ids = _read_pinned_contract_entry(
         session,
@@ -238,9 +318,10 @@ def frontdoor_pinned_contract_text(
     if stored_text:
         return stored_text
     fresh = render_pinned_contract_text(
-        skill_ids=skill_ids,
+        skill_items=skill_items,
         exec_runtime_policy=exec_runtime_policy,
         session_temp_dir=session_temp_dir,
+        include_extras=include_extras,
     )
     if not fresh:
         return ''
@@ -249,7 +330,7 @@ def frontdoor_pinned_contract_text(
         session_key=str(session_key or '').strip(),
         revision=revision,
         text=fresh,
-        skill_ids=_normalized_name_list(skill_ids),
+        skill_ids=[item['skill_id'] for item in _normalize_skill_roster_items(skill_items)],
     )
     return fresh
 
@@ -257,36 +338,6 @@ def frontdoor_pinned_contract_text(
 def pinned_skill_ids_for(session: Any, *, session_key: str | None = None) -> list[str]:
     """钉住块里那份名单（差集算式的左操作数）。"""
     return pinned_contract_state(session, session_key=session_key)[1]
-
-
-def pinned_skill_difference(
-    *,
-    pinned_skill_ids: list[Any] | None,
-    round_skill_ids: list[Any] | None,
-) -> tuple[list[str], list[str]]:
-    """成员差，不是数量差：本轮选中但头部没声明的 / 头部声明了但本轮不再选中的。"""
-    pinned = _normalized_name_list(pinned_skill_ids)
-    current = _normalized_name_list(round_skill_ids)
-    granted = [name for name in current if name not in set(pinned)]
-    unselected = [name for name in pinned if name not in set(current)]
-    return granted, unselected
-
-
-def _render_candidate_skills_line(skill_ids: list[str]) -> str:
-    return f'candidate_skills (loadable with `load_skill_context`): {_render_name_list(skill_ids)}'
-
-
-def _roster_difference_too_wide(*, pinned_count: int, round_count: int, difference_count: int) -> bool:
-    """成员差覆盖到名单的三分之二时改回整份名单行。
-
-    实盘 5,005 跳里只有 21 跳名单变过（中位差 1 个名字），但有 3 跳的差达到 40–46 个——
-    那种跳上两行差集既不比整份名单便宜（一个名字 ≈ 5 token，58 个名字 ≈ 281 token），又把
-    "本轮真正能加载什么"写成一句否定式清单。阈值命中量 3/5,005，不触发时保持差集行。
-    """
-    base = max(int(pinned_count), int(round_count))
-    if base <= 0:
-        return False
-    return difference_count * 3 >= base * 2
 
 
 def split_pinned_contract_from_system_text(system_text: Any) -> tuple[str, str]:
@@ -500,23 +551,6 @@ def _render_repair_required_tool_section(items: list[dict[str, str]] | None) -> 
     return lines
 
 
-def _render_repair_required_skill_section(items: list[dict[str, str]] | None) -> list[str]:
-    """只列条目；处置顺序与参考 skill 名在稳定提示词里说一次。"""
-    normalized_items = _normalized_repair_required_skill_items(items)
-    if not normalized_items:
-        return []
-    lines = ['repair_required_skills:']
-    for item in normalized_items:
-        skill_id = str(item.get('skill_id') or '').strip()
-        description = str(item.get('description') or '').strip()
-        reason = str(item.get('reason') or '').strip()
-        detail = description if description else 'No description available.'
-        if reason:
-            detail = f'{detail} Reason: {reason}'
-        lines.append(f'- `{skill_id}`: {detail}')
-    return lines
-
-
 def _render_attachment_reopen_target_section(items: list[dict[str, str]] | None) -> list[str]:
     """只列句柄条目。七句固定规则与 `ceo_frontdoor.md`「异步任务的文件依赖」那组条款同义，
     留两份就是每跳重付一遍；规则的唯一归属是稳定提示词。
@@ -601,19 +635,22 @@ def _contract_revision_line(payload: dict[str, Any]) -> str:
 
 
 def _render_frontdoor_contract_summary(payload: dict[str, Any]) -> str:
-    """回合内常量部分：候选集、待修复、附件句柄、临时目录、执行策略。
+    """回合内常量部分：候选工具、待修复工具、附件句柄、临时目录、执行策略。
 
     省略判定是**逐段**的，不看"钉住块是否存在"这种整体开关：头部文本里出现了哪一段，尾块
     才省哪一段。整体开关会在装配点缺某项输入时（例如某条路径不传 `session_temp_dir`）把那条
     声明整段变没——省缓存省掉一条声明，比不省严重得多。缺的那段照旧在本块出现，宁可重复
     不可缺失。
+
+    skill 名单不再进尾块：头部钉住块带全量名单（id|名称|描述），两次重印之间新增的可读
+    skill 由 `new_readable_skills` 注入块按轮点名——它从会话台账重渲染，只增不减，
+    阶段裁撤也丢不掉。
     """
     candidate_tools = _normalized_candidate_tool_items(payload.get('candidate_tools'))
     repair_required_tools = _normalized_repair_required_tool_items(payload.get('repair_required_tools'))
-    repair_required_skills = _normalized_repair_required_skill_items(payload.get('repair_required_skills'))
     attachment_reopen_targets = _normalized_attachment_reopen_targets(payload.get('attachment_reopen_targets'))
+    new_readable_skill_items = _normalize_skill_roster_items(payload.get('new_readable_skill_items'))
     pinned_text = str(payload.get('pinned_contract_text') or '').strip()
-    pinned_roster = 'candidate_skills (loadable with' in pinned_text
     pinned_exec = 'exec_runtime_policy' in pinned_text
     pinned_temp = 'session_temp_dir:' in pinned_text
     pinned_anchor = 'path_anchor:' in pinned_text
@@ -622,40 +659,20 @@ def _render_frontdoor_contract_summary(payload: dict[str, Any]) -> str:
         f'kind: {FRONTDOOR_DYNAMIC_TOOL_CONTRACT_KIND}',
         _contract_revision_line(payload),
     ]
-    round_skill_ids = _normalized_name_list(payload.get('candidate_skill_ids'))
-    if not pinned_roster:
-        lines.append(_render_candidate_skills_line(round_skill_ids))
-    else:
-        # 头部名单在场时只印成员差：本轮名单 = (头部 − unselected) ∪ granted，信息完整，
-        # 不需要再抄一份全量。唯一例外是 `_roster_difference_too_wide` 的那一档（差到名单
-        # 三分之二以上），此时差集行既不比全量便宜、又把"本轮能加载什么"写成否定式。
-        pinned_skill_ids = _normalized_name_list(payload.get('pinned_skill_ids'))
-        granted, unselected = pinned_skill_difference(
-            pinned_skill_ids=pinned_skill_ids,
-            round_skill_ids=round_skill_ids,
+    if new_readable_skill_items:
+        lines.append(
+            'new_readable_skills (重印点之后新变为可读，可直接 `load_skill_context`; '
+            '`id | name | description`):'
         )
-        if _roster_difference_too_wide(
-            pinned_count=len(pinned_skill_ids),
-            round_count=len(round_skill_ids),
-            difference_count=len(granted) + len(unselected),
-        ):
-            lines.append(_render_candidate_skills_line(round_skill_ids))
-        else:
-            if granted:
-                lines.append(
-                    'granted_skills (本轮新增可见、头部名单里还没有，可直接 `load_skill_context`): '
-                    f'{_render_name_list(granted)}'
-                )
-            if unselected:
-                lines.append(
-                    f'unselected_skills (头部名单声明了但本轮没选进候选，本轮调不动): {_render_name_list(unselected)}'
-                )
+        lines.extend(
+            f'- `{item["skill_id"]}` | {item["display_name"]} | {item["description"]}'
+            for item in new_readable_skill_items
+        )
     lines.extend(
         [
             *_render_attachment_reopen_target_section(attachment_reopen_targets),
             *_render_candidate_tool_section(candidate_tools, payload.get('declared_tool_names')),
             *_render_repair_required_tool_section(repair_required_tools),
-            *_render_repair_required_skill_section(repair_required_skills),
         ]
     )
     if not pinned_exec:
@@ -757,6 +774,7 @@ class FrontdoorToolContract:
     contract_revision: str
     candidate_tool_items: list[dict[str, str]] | None = None
     candidate_skill_items: list[dict[str, str]] | None = None
+    new_readable_skill_items: list[dict[str, str]] | None = None
     repair_required_tool_items: list[dict[str, str]] | None = None
     repair_required_skill_items: list[dict[str, str]] | None = None
     exec_runtime_policy: dict[str, Any] | None = None
@@ -797,6 +815,9 @@ class FrontdoorToolContract:
         repair_required_skills = _normalized_repair_required_skill_items(self.repair_required_skill_items)
         if repair_required_skills:
             payload['repair_required_skills'] = repair_required_skills
+        new_readable_skills = _normalize_skill_roster_items(self.new_readable_skill_items)
+        if new_readable_skills:
+            payload['new_readable_skill_items'] = new_readable_skills
         pinned_text = str(self.pinned_contract_text or '').strip()
         if pinned_text:
             payload['pinned_contract_text'] = pinned_text
@@ -881,6 +902,7 @@ def build_frontdoor_tool_contract(
     visible_skill_ids: list[str] | None = None,
     candidate_skill_ids: list[str] | None = None,
     candidate_skill_items: list[dict[str, str]] | None = None,
+    new_readable_skill_items: list[dict[str, str]] | None = None,
     repair_required_tool_items: list[dict[str, str]] | None = None,
     repair_required_skill_items: list[dict[str, str]] | None = None,
     rbac_visible_tool_names: list[str] | None = None,
@@ -912,6 +934,7 @@ def build_frontdoor_tool_contract(
         contract_revision=str(contract_revision or '').strip(),
         candidate_tool_items=_normalized_candidate_tool_items(candidate_tool_items, fallback_names=candidate_names),
         candidate_skill_items=list(candidate_skill_items or []),
+        new_readable_skill_items=_normalize_skill_roster_items(new_readable_skill_items),
         repair_required_tool_items=_normalized_repair_required_tool_items(repair_required_tool_items),
         repair_required_skill_items=_normalized_repair_required_skill_items(repair_required_skill_items),
         exec_runtime_policy=dict(exec_runtime_policy) if isinstance(exec_runtime_policy, dict) else None,

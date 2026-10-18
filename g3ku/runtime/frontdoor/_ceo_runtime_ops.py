@@ -178,6 +178,7 @@ from main.runtime.tool_call_repair import (
 )
 from main.service.create_async_task_contract import normalize_create_async_task_file_targets
 
+from . import skill_roster as _skill_roster
 from ._ceo_support import CeoFrontDoorSupport
 from .canonical_context import (
     combine_canonical_context,
@@ -197,12 +198,14 @@ from .state_models import (
 from .tool_contract import (
     apply_pinned_contract_to_head,
     build_frontdoor_tool_contract,
+    bump_skill_roster_epoch,
     frontdoor_pinned_contract_text,
     is_frontdoor_tool_contract_echo_text,
     is_frontdoor_tool_contract_message,
     normalize_frontdoor_candidate_tool_items,
     pinned_contract_is_carried_by_head,
     pinned_skill_ids_for,
+    skill_roster_epoch_for,
     strip_frontdoor_tool_contract_echo,
     upsert_frontdoor_tool_contract_message,
 )
@@ -213,7 +216,6 @@ CeoGraphState = CeoPersistentState
 
 
 # 上一跳的工具车道：正常 / 心跳内部 / 定时内部。换车道是清单的重印边界之一。
-PROVIDER_BUNDLE_LANE_ATTR = "_frontdoor_provider_bundle_lane"
 _TASK_ID_PATTERN = re.compile(r"task:[A-Za-z0-9][\w:-]*")
 # 旧文案静默哨兵的字面值。P4 之后它不再是任何判据，只作为"该被清洗掉的噪声"保留一份：
 # 转录里仍存有历史轮次的这类尾巴，模型有模仿上下文的倾向，不剥就会当正文发给用户。
@@ -3658,28 +3660,77 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
         except Exception:
             return None
 
+    def _frontdoor_skill_roster_items(
+        self,
+        *,
+        session_key: Any,
+        skill_ids: list[Any] | None,
+    ) -> list[dict[str, str]]:
+        """把 state 里的 id 名单补全成渲染要用的 `id|名称|描述` 条目。
+
+        state 只带 id（state 键过归一化白名单，塞记录进去会被静默丢掉），描述从治理
+        实时可见集取——与 `message_builder` 回合起点渲染用的是同一份来源，同一批 id
+        渲出的字节逐字相同。重印只发生在 epoch 跳变时，这里的实时取数成本可忽略。
+        """
+        normalized_ids = [
+            str(item or "").strip()
+            for item in list(skill_ids or [])
+            if str(item or "").strip()
+        ]
+        if not normalized_ids:
+            return []
+        service = getattr(self._loop, "main_task_service", None)
+        lister = getattr(service, "list_contract_visible_skill_resources", None)
+        records_by_id: dict[str, Any] = {}
+        if callable(lister):
+            try:
+                records = lister(
+                    actor_role="ceo",
+                    session_id=str(session_key or "").strip() or "web:shared",
+                )
+            except Exception:
+                records = []
+            for record in list(records or []):
+                record_id = _skill_roster.normalize_skill_roster_item(record)
+                if record_id is not None:
+                    records_by_id[record_id["skill_id"]] = record
+        items: list[dict[str, str]] = []
+        for skill_id in normalized_ids:
+            record = records_by_id.get(skill_id)
+            if record is not None:
+                item = _skill_roster.normalize_skill_roster_item(record)
+                if item is not None:
+                    items.append(item)
+                    continue
+            # 记录取不到（mid-turn 被删）也要占位：头部名单是"钉住时点的全量"，
+            # 少一行会让重印结果与回合起点渲染的字节不一致。
+            items.append({"skill_id": skill_id, "display_name": skill_id, "description": ""})
+        return items
+
     def _frontdoor_pinned_contract(
         self,
         *,
         session_key: Any,
         skill_ids: list[Any] | None,
-        contract_revision: str | None,
         session: Any = None,
     ) -> tuple[str, list[str]]:
         """钉进头部的静态声明原文 + 它钉住的那份名单；空串＝本轮不钉，尾块照旧带全量。
 
         前门一个回合内有四条装配路（`message_builder` 的两条、回合起点的 send-preflight、
         同回合每一跳的 prompt contract），它们拿到的 session 实例与 state 形状各不相同，靠
-        `tool_contract` 里那张按 session_key 分桶的进程表对齐：只要三条刷新边界没动，四处
-        拿到的是同一串原文。头部一改就顶掉身后全部前缀，四处不一致比不钉严重。
+        `tool_contract` 里那张按 session_key 分桶的进程表对齐：只要刷新边界（roster epoch）
+        没动，四处拿到的是同一串原文。头部一改就顶掉身后全部前缀，四处不一致比不钉严重。
         """
         normalized_session_key = str(session_key or "").strip()
         pinned_text = frontdoor_pinned_contract_text(
             session,
-            skill_ids=list(skill_ids or []),
+            skill_items=self._frontdoor_skill_roster_items(
+                session_key=normalized_session_key,
+                skill_ids=list(skill_ids or []),
+            ),
             exec_runtime_policy=self._frontdoor_exec_runtime_policy(),
             session_temp_dir=self._ceo_session_temp_dir(normalized_session_key),
-            contract_revision=contract_revision,
+            skill_roster_epoch=skill_roster_epoch_for(session, session_key=normalized_session_key),
             session_key=normalized_session_key,
         )
         if not pinned_text:
@@ -3908,33 +3959,51 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
             renderable.append(str(getattr(tool, "name", "") or name).strip() or name)
         return renderable
 
-    def _frontdoor_bundle_recommit_boundary(self, *, session: Any, state: CeoGraphState) -> bool:
-        """tools[] 的唯一重新提交点：压缩（内联 preflight 的 token_compression 或手动压缩挂的
-        待重印标记）、换车道，以及距上次发送超过空闲窗口的第一跳。
+    def _frontdoor_live_visible_skills(self, session_key: Any) -> list[Any]:
+        """按轮检测的数据源：治理实时可见的 skill 记录（id+名称+描述）。
 
-        换车道必须重印：心跳/定时内部轮的工具面是刻意收窄的，钉住不能把上一车道的宽面
-        继承进来——那等于给内部轮多发一份它本来不该看见的执行面。标记读一次即清。
+        取不到（服务缺失/异常）返回空列表——注入块本轮为空，头部名单照旧，宁可少说
+        不可说错。
+        """
+        service = getattr(self._loop, "main_task_service", None)
+        lister = getattr(service, "list_contract_visible_skill_resources", None)
+        if not callable(lister):
+            return []
+        try:
+            return list(
+                lister(
+                    actor_role="ceo",
+                    session_id=str(session_key or "").strip() or "web:shared",
+                )
+                or []
+            )
+        except Exception:
+            return []
+
+    def _frontdoor_bundle_recommit_boundary(self, *, session: Any, state: CeoGraphState) -> bool:
+        """`tools[]` 与 skill 头部名单共用的唯一重新提交点：压缩（内联 preflight 的
+        token_compression 或手动压缩挂的待重印标记）与空闲窗口第一跳。
+
+        换车道**不再**重印：心跳/定时内部轮与外部轮共用同一份冻结名单，一次车道切换
+        不该把身后整段正文的缓存打掉（用户决策，保缓存命中）。内部轮的工具面收窄由
+        执行准入承担（派发字典 ∩ 当轮治理可见集），声明面保持冻结；skill 名单同理，
+        全量名单跨车道共享。
 
         空闲这条不自建标记：它读的是上一次发送的墙钟，而每一次发送都会推进它，所以一条
         回合内只可能在最前面那一跳成立。
+
+        返回 True 的同一处递增 skill roster epoch：skill 头部名单与 `tools[]` 共用一套
+        "什么时候允许变"的口径，两份名单在同一个跳上一起重印。
         """
-        metadata = _user_input_metadata(state.get("user_input"))
-        lane = (
-            "cron_internal"
-            if bool(state.get("cron_internal", metadata.get("cron_internal")))
-            else "heartbeat_internal"
-            if bool(state.get("heartbeat_internal", metadata.get("heartbeat_internal")))
-            else "normal"
-        )
-        prior_lane = str(getattr(session, PROVIDER_BUNDLE_LANE_ATTR, "") or "").strip() or "normal"
-        setattr(session, PROVIDER_BUNDLE_LANE_ATTR, lane)
         if bool(getattr(session, PENDING_PROVIDER_BUNDLE_RECOMMIT_ATTR, False)):
             setattr(session, PENDING_PROVIDER_BUNDLE_RECOMMIT_ATTR, False)
+            bump_skill_roster_epoch(session, session_key=str(state.get("session_key") or ""))
             return True
         if idle_boundary_exceeded(str(getattr(session, FRONTDOOR_LAST_SEND_AT_ATTR, "") or "")):
             self._adopt_frontdoor_idle_memory_snapshot(session)
+            bump_skill_roster_epoch(session, session_key=str(state.get("session_key") or ""))
             return True
-        return lane != prior_lane
+        return False
 
     def _adopt_frontdoor_idle_memory_snapshot(self, session: Any) -> None:
         """空闲边界把长期记忆快照读到最新：只重读盘，不冲刷复核窗口。
@@ -8008,13 +8077,19 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
             session=session,
             session_key=request_session_key,
             skill_ids=list(selected_skill_ids),
-            contract_revision=cache_family_revision,
         )
         stable_messages = apply_pinned_contract_to_head(stable_messages, pinned_contract_text)
         messages = apply_pinned_contract_to_head(messages, pinned_contract_text)
         # 头部先落，尾块才允许省略这三段：判据取头部原文，不取"本轮算出来了"。
         if not pinned_contract_is_carried_by_head(stable_messages, pinned_contract_text):
             pinned_contract_text, pinned_skill_ids = "", []
+        # 按轮注入：live 可见 − 头部名单 − 已注入台账。台账只增不减，块每轮从台账
+        # 整体重渲染，阶段裁撤丢不掉；被重印后的头部覆盖的条目自动摘除。
+        new_readable_skill_items = _skill_roster.new_readable_skill_items(
+            scope_key=f"session:{request_session_key}",
+            live_visible_skills=self._frontdoor_live_visible_skills(request_session_key),
+            covered_skill_ids=pinned_skill_ids,
+        )
         dynamic_appendix_messages = upsert_frontdoor_tool_contract_message(
             dynamic_appendix_messages,
             build_frontdoor_tool_contract(
@@ -8027,6 +8102,7 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
                 frontdoor_stage_state=dict(current_frontdoor_stage_state or {}),
                 visible_skill_ids=list(selected_skill_ids),
                 candidate_skill_ids=list(selected_skill_ids),
+                new_readable_skill_items=list(new_readable_skill_items),
                 repair_required_tool_items=list(repair_required_tool_items),
                 repair_required_skill_items=list(repair_required_skill_items),
                 rbac_visible_tool_names=list(rbac_visible_tool_names),

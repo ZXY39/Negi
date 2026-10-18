@@ -1203,7 +1203,7 @@ def test_path_anchor_contract_renders_from_one_source_across_lanes():
     assert node_policy['path_anchor_tokens'] == path_anchor_tokens()
 
     pinned = render_pinned_contract_text(
-        skill_ids=['alpha'],
+        skill_items=[{'skill_id': 'alpha', 'display_name': 'alpha', 'description': ''}],
         exec_runtime_policy=None,
         session_temp_dir='C:/proj/temp/ceo/web_ceo-x',
     )

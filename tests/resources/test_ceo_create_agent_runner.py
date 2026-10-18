@@ -2168,14 +2168,15 @@ async def test_create_agent_runner_graph_prepare_turn_keeps_candidate_tools_visi
     assert "callable_tools: `submit_next_stage`" in contract_text
     assert "`filesystem_write`" in contract_text
     assert "- `filesystem_write`: Write file content to disk." not in contract_text
-    # 名单钉在头部（每跳逐字节复用），尾块只在成员差出现时才声明它；两处都省=模型看不见候选集。
+    # 名单钉在头部（每跳逐字节复用，全量可见 + 描述）；尾块不再有 skill 名单机制。
     head_text = "\n".join(
         str(record.get("content") or "")
         for record in [dict(item) for item in list(prepared["messages"] or []) if isinstance(item, dict)]
         if str(record.get("role") or "").strip().lower() == "system"
     )
-    assert "candidate_skills (loadable with `load_skill_context`): `memory`" in head_text
-    assert "candidate_skills (loadable with `load_skill_context`)" not in contract_text
+    assert "candidate_skills (loadable with `load_skill_context`; `id | name | description`):" in head_text
+    assert "- `memory` |" in head_text
+    assert "candidate_skills" not in contract_text
     assert 'Call `load_skill_context(skill_id="<skill_id>")`' not in contract_text
     assert "visible_skill_ids" not in contract_text
     assert "rbac_visible_tool_names" not in contract_text

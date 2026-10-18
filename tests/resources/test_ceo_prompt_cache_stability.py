@@ -188,6 +188,8 @@ def test_frontdoor_prompt_cache_key_ignores_dynamic_tool_contract_changes() -> N
     )
 
     assert _field(first, "prompt_cache_key") == _field(second, "prompt_cache_key")
+    # 工具面变化仍会改尾块字节（candidate_tools ↔ callable），但 cache key 不随它变：
+    # caller-side family 只由稳定前缀 + tool schemas + revision 决定。
     assert _field(first, "request_messages") != _field(second, "request_messages")
 
 
@@ -253,7 +255,13 @@ def test_frontdoor_prompt_cache_key_ignores_repair_required_contract_changes() -
     )
 
     assert _field(first, "prompt_cache_key") == _field(second, "prompt_cache_key")
-    assert _field(first, "request_messages") != _field(second, "request_messages")
+    # skill 的 repair 行已从尾块删除：两份契约的渲染字节逐字相同；request_messages 的
+    # 剩余差异只有内嵌 payload 元数据（repair_required_skills 机器状态），不进模型可见面。
+    first_appendix = _field(first, "dynamic_appendix_messages")
+    second_appendix = _field(second, "dynamic_appendix_messages")
+    assert [str(item.get("content") or "") for item in first_appendix] == [
+        str(item.get("content") or "") for item in second_appendix
+    ]
 
 
 def test_frontdoor_prompt_cache_key_ignores_tool_schema_changes_when_stable_prefix_matches() -> None:
@@ -297,8 +305,8 @@ def test_frontdoor_prompt_cache_key_ignores_tool_schema_changes_when_stable_pref
         cache_family_revision="frontdoor:v1",
     )
 
-    assert _field(first, "request_messages") == _field(second, "request_messages")
     assert _field(first, "prompt_cache_key") == _field(second, "prompt_cache_key")
+    assert _field(first, "request_messages") == _field(second, "request_messages")
     assert _field(first, "diagnostics")["actual_tool_schema_hash"] != _field(second, "diagnostics")["actual_tool_schema_hash"]
 
 

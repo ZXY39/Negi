@@ -416,9 +416,10 @@ def test_ceo_frontdoor_refresh_dynamic_contract_state_keeps_repair_required_list
     assert len(contract_messages) == 2  # 一份稳定契约 + 一份活状态块
     assert is_frontdoor_tool_contract_message(contract_messages[0])
     assert "repair_required_tools:" in str(contract_messages[0]["content"] or "")
-    assert "repair_required_skills:" in str(contract_messages[0]["content"] or "")
     assert "agent_browser" in str(contract_messages[0]["content"] or "")
-    assert "writing-skills" in str(contract_messages[0]["content"] or "")
+    # skill 的 repair 行已删：payload 仍带条目（机器状态），渲染交给 load 回执
+    assert "repair_required_skills:" not in str(contract_messages[0]["content"] or "")
+    assert "writing-skills" not in str(contract_messages[0]["content"] or "")
     assert refreshed["repair_required_tool_items"] == [
         {
             "tool_id": "agent_browser",

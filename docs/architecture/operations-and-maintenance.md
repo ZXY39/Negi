@@ -427,7 +427,7 @@ worker 静默不等于 worker 死亡：空闲 worker 除心跳线程每 1–2s �
 - 排障顺序应先分层：
   - `contract_visible_skill_ids=[]`：优先怀疑 RBAC / governance / resource visibility 输入层
   - `contract_visible_skill_ids` 非空但 `candidate_skill_ids=[]`：优先怀疑 selector 或 contract/frame 重建链路
-  - 两者都非空但请求体里读不到任何技能名单（头部 `## Runtime Contract (pinned)` 没有 `candidate_skills` 行，尾块也没有）：优先怀疑钉住路没落上或动态 contract 重建/stale frame 恢复问题，按 `context-and-cache-troubleshooting.md`「静态声明钉在请求体头部」的症状条目查
+  - 两者都非空但请求体里读不到任何技能名单（头部 `## Runtime Contract (pinned)` 没有名单行，尾块也没有 `new_readable_skills`）：优先怀疑钉住路没落上或动态 contract 重建/stale frame 恢复问题，按 `context-and-cache-troubleshooting.md`「静态声明钉在请求体头部」的症状条目查
 
 ### 模型配置不生效
 

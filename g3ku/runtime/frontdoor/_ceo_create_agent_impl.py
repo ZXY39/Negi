@@ -3,16 +3,16 @@ from __future__ import annotations
 import json
 from typing import Any
 
-
 from g3ku.core.messages import UserInputMessage
 
-from ._ceo_runtime_ops import CeoFrontDoorRuntimeOps, _NO_RESUME, raise_frontdoor_approval_interrupt
+from . import skill_roster as _skill_roster
+from ._ceo_runtime_ops import _NO_RESUME, CeoFrontDoorRuntimeOps
+from .prompt_cache_contract import DEFAULT_CACHE_FAMILY_REVISION, build_frontdoor_prompt_contract
 from .state_models import (
     CeoRuntime,
     CeoRuntimeContext,
     initial_persistent_state,
 )
-from .prompt_cache_contract import DEFAULT_CACHE_FAMILY_REVISION, build_frontdoor_prompt_contract
 from .tool_contract import (
     build_frontdoor_tool_contract,
     merge_pinned_contract_into_system_text,
@@ -141,7 +141,6 @@ class CreateAgentCeoFrontDoorRunner(CeoFrontDoorRuntimeOps):
         return self._frontdoor_pinned_contract(
             session_key=state.get("session_key"),
             skill_ids=list(state.get("candidate_skill_ids") or []),
-            contract_revision=self._prompt_cache_family_revision(state),
         )
 
     def _effective_system_record(
@@ -308,6 +307,11 @@ class CreateAgentCeoFrontDoorRunner(CeoFrontDoorRuntimeOps):
             frontdoor_stage_state=dict(state.get("frontdoor_stage_state") or {}),
             visible_skill_ids=list(state.get("visible_skill_ids") or []),
             candidate_skill_ids=list(state.get("candidate_skill_ids") or []),
+            new_readable_skill_items=_skill_roster.new_readable_skill_items(
+                scope_key=f"session:{str(state.get('session_key') or '').strip()}",
+                live_visible_skills=self._frontdoor_live_visible_skills(state.get("session_key")),
+                covered_skill_ids=pinned_skill_ids,
+            ),
             repair_required_tool_items=list(state.get("repair_required_tool_items") or []),
             repair_required_skill_items=list(state.get("repair_required_skill_items") or []),
             rbac_visible_tool_names=list(state.get("rbac_visible_tool_names") or []),

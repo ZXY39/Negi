@@ -17,19 +17,20 @@ from typing import Any
 from loguru import logger
 
 from g3ku.agent.tools.base import Tool
+from g3ku.config.context_refresh import idle_boundary_exceeded
+from g3ku.config.live_runtime import get_runtime_config
 from g3ku.content import content_summary_and_ref, parse_content_envelope
 from g3ku.providers.base import (
     ToolCallRequest,
     provider_body_output_cap,
     provider_body_reasoning_effort,
 )
-from g3ku.runtime.tool_context_presence import kept_contract_index, kept_tool_contexts_from_frames
-from g3ku.runtime.tool_error_guidance import (
-    append_parameter_error_guidance,
-    availability_hint,
-    is_parameter_like_tool_exception,
+from g3ku.providers.fallback import (
+    DEFAULT_PROVIDER_ATTEMPT_TIMEOUT_SECONDS,
+    MODEL_RETRY_LIVE_STATES,
+    PUBLIC_PROVIDER_FAILURE_MESSAGE,
+    ModelProviderExhaustedError,
 )
-from g3ku.runtime.tool_result_status import is_error_like_tool_result
 from g3ku.runtime.chunk_compression_plan import (
     CHUNK_MAX_CHUNKS,
     COMPRESSION_MAX_PASS_ROUNDS,
@@ -37,28 +38,72 @@ from g3ku.runtime.chunk_compression_plan import (
     CompressionPass,
     plan_compression_pass,
 )
+from g3ku.runtime.frontdoor.skill_roster import (
+    new_readable_skill_items as _new_readable_skill_items,
+)
+from g3ku.runtime.frontdoor.tool_contract import (
+    bump_skill_roster_epoch as _bump_skill_roster_epoch,
+)
+from g3ku.runtime.frontdoor.tool_contract import (
+    frontdoor_pinned_contract_text as _frontdoor_pinned_contract_text,
+)
+from g3ku.runtime.frontdoor.tool_contract import (
+    merge_pinned_contract_into_system_text as _merge_pinned_contract_into_system_text,
+)
+from g3ku.runtime.frontdoor.tool_contract import (
+    pinned_contract_state as _pinned_contract_state,
+)
+from g3ku.runtime.frontdoor.tool_contract import (
+    skill_roster_epoch_for as _skill_roster_epoch_for,
+)
 from g3ku.runtime.stage_prompt_compaction import (
     STAGE_ARCHIVE_HEADING,
-    STAGE_COMPACT_PREFIXES as _STAGE_COMPACT_PREFIXES,
-    STAGE_EXTERNALIZED_PREFIXES as _STAGE_EXTERNALIZED_PREFIXES,
-    TOKEN_COMPACT_V2_PREFIX as _SHARED_TOKEN_COMPACT_V2_PREFIX,
     STAGE_REF_SELECTION_RULE,
     build_stage_archive_document,
-    compact_stage_prompt_messages_in_place as _shared_compact_stage_prompt_messages_in_place,
-    completed_stage_blocks as _shared_completed_stage_blocks,
-    is_stage_context_message as _shared_is_stage_context_message,
     render_stage_ref_candidate_block,
     render_stage_ref_index,
-    stage_archive_owner,
     split_stage_ref_selection,
+    stage_archive_owner,
     stage_created_at_ceiling,
-    stage_ledger_may_have_moved as _shared_stage_ledger_may_have_moved,
-    stage_message_call_ids as _shared_stage_message_call_ids,
-    stage_prompt_prefix as _shared_stage_prompt_prefix,
     stage_record_dict,
     stage_ref_candidates,
-    stage_transition_signature as _shared_stage_transition_signature,
     summarized_stage_ids,
+)
+from g3ku.runtime.stage_prompt_compaction import (
+    STAGE_COMPACT_PREFIXES as _STAGE_COMPACT_PREFIXES,
+)
+from g3ku.runtime.stage_prompt_compaction import (
+    STAGE_EXTERNALIZED_PREFIXES as _STAGE_EXTERNALIZED_PREFIXES,
+)
+from g3ku.runtime.stage_prompt_compaction import (
+    TOKEN_COMPACT_V2_PREFIX as _SHARED_TOKEN_COMPACT_V2_PREFIX,
+)
+from g3ku.runtime.stage_prompt_compaction import (
+    compact_stage_prompt_messages_in_place as _shared_compact_stage_prompt_messages_in_place,
+)
+from g3ku.runtime.stage_prompt_compaction import (
+    completed_stage_blocks as _shared_completed_stage_blocks,
+)
+from g3ku.runtime.stage_prompt_compaction import (
+    is_stage_context_message as _shared_is_stage_context_message,
+)
+from g3ku.runtime.stage_prompt_compaction import (
+    stage_ledger_may_have_moved as _shared_stage_ledger_may_have_moved,
+)
+from g3ku.runtime.stage_prompt_compaction import (
+    stage_message_call_ids as _shared_stage_message_call_ids,
+)
+from g3ku.runtime.stage_prompt_compaction import (
+    stage_prompt_prefix as _shared_stage_prompt_prefix,
+)
+from g3ku.runtime.stage_prompt_compaction import (
+    stage_transition_signature as _shared_stage_transition_signature,
+)
+from g3ku.runtime.tool_context_presence import kept_contract_index, kept_tool_contexts_from_frames
+from g3ku.runtime.tool_error_guidance import (
+    append_parameter_error_guidance,
+    availability_hint,
+    is_parameter_like_tool_exception,
 )
 from g3ku.runtime.tool_history import (
     align_compaction_keep_recent,
@@ -67,29 +112,53 @@ from g3ku.runtime.tool_history import (
     iter_compaction_atomic_groups,
     truncate_group_head_tail,
 )
+from g3ku.runtime.tool_result_status import is_error_like_tool_result
 from g3ku.runtime.tool_watchdog import (
     actor_role_allows_watchdog,
     resolve_effective_tool_timeout,
     run_tool_with_hard_timeout,
     run_tool_with_watchdog,
 )
+from main.errors import (
+    DistributionHoldError,
+    NodePausedError,
+    TaskPausedError,
+    describe_exception,
+    is_runtime_self_fault,
+)
 from main.governance.exec_tool_policy import EXEC_TOOL_ID
 from main.governance.tool_context import apply_runtime_tool_context_projection
-from main.errors import DistributionHoldError, NodePausedError, TaskPausedError, describe_exception, is_runtime_self_fault
-from main.models import NodeEvidenceItem, NodeFinalResult, RESULT_SCHEMA_VERSION, SpawnChildSpec, normalize_execution_stage_metadata
-from main.runtime.chat_backend import build_actual_request_diagnostics, build_stable_prompt_cache_key
-from main.runtime.model_route import LEASE_OUTCOME_CANCELLED, LEASE_OUTCOME_SUCCESS, RouteCandidateFilters
-from main.runtime.node_turn_controller import NodeTurnUnservableError
+from main.models import (
+    RESULT_SCHEMA_VERSION,
+    NodeEvidenceItem,
+    NodeFinalResult,
+    SpawnChildSpec,
+    normalize_execution_stage_metadata,
+)
+from main.protocol import now_iso
+from main.runtime import chat_backend as runtime_chat_backend
+from main.runtime import send_token_preflight as runtime_send_token_preflight
 from main.runtime.append_notice_context import (
     APPEND_NOTICE_CONTEXT_KEY,
     append_notice_tail_prefix_match,
-    is_append_notice_tail_message as _shared_is_append_notice_tail_message,
     build_append_notice_tail_messages,
     dedupe_append_notice_tail_messages,
     render_append_notice_must_preserve_block,
     roll_append_notice_context_for_compression_stage,
     score_append_notice_preservation,
     select_uncovered_append_notices,
+)
+from main.runtime.append_notice_context import (
+    is_append_notice_tail_message as _shared_is_append_notice_tail_message,
+)
+from main.runtime.chat_backend import (
+    build_actual_request_diagnostics,
+    build_stable_prompt_cache_key,
+)
+from main.runtime.model_route import (
+    LEASE_OUTCOME_CANCELLED,
+    LEASE_OUTCOME_SUCCESS,
+    RouteCandidateFilters,
 )
 from main.runtime.node_prompt_contract import (
     NodeRuntimeToolContract,
@@ -100,38 +169,22 @@ from main.runtime.node_prompt_contract import (
     strip_node_dynamic_contract_messages,
     upsert_node_dynamic_contract_message,
 )
+from main.runtime.node_turn_controller import NodeTurnUnservableError
 from main.runtime.pending_notice_state import (
     PENDING_NOTICE_STATE_KEY,
     RESUME_MODE_WAIT_FOR_CHILDREN,
     normalize_pending_notice_state,
 )
 from main.runtime.recovery_check import RecoveryCheckDecision, RecoveryCheckEngine
-from main.runtime.subtree_hold import (
-    DISTRIBUTION_ACTIVE_STATES,
-    make_epoch_state_lookup,
-    make_stale_hold_logger,
-    resolve_subtree_hold_epoch_id,
-    spawn_round_has_unmaterialized_entries,
-)
-from g3ku.providers.fallback import (
-    DEFAULT_PROVIDER_ATTEMPT_TIMEOUT_SECONDS,
-    MODEL_RETRY_LIVE_STATES,
-    PUBLIC_PROVIDER_FAILURE_MESSAGE,
-    ModelProviderExhaustedError,
-)
-from g3ku.config.context_refresh import idle_boundary_exceeded
-from g3ku.config.live_runtime import get_runtime_config
-from main.runtime import chat_backend as runtime_chat_backend
-from main.runtime import send_token_preflight as runtime_send_token_preflight
 from main.runtime.stage_budget import (
     DEFAULT_NON_BUDGET_STAGE_TOOLS,
     DEFAULT_STAGE_GATE_BYPASS_TOOLS,
     FINAL_RESULT_TOOL_NAME,
+    STAGE_BUDGET_EXHAUSTED_FREE_PASS_REMINDER,
+    STAGE_BUDGET_EXHAUSTION_PREDICTED_REMINDER_TEMPLATE,
     STAGE_TOOL_NAME,
     STAGE_TOOL_ROUND_BUDGET_MAX,
     STAGE_TOOL_ROUND_BUDGET_MIN,
-    STAGE_BUDGET_EXHAUSTED_FREE_PASS_REMINDER,
-    STAGE_BUDGET_EXHAUSTION_PREDICTED_REMINDER_TEMPLATE,
     STAGELESS_FREE_PASS_REMINDER,
     callable_tool_names_for_stage_iteration,
     response_tool_calls_count_against_stage_budget,
@@ -147,6 +200,13 @@ from main.runtime.stage_messages import (
     is_turn_only_system_note_message,
     strip_turn_only_system_note_messages,
 )
+from main.runtime.subtree_hold import (
+    DISTRIBUTION_ACTIVE_STATES,
+    make_epoch_state_lookup,
+    make_stale_hold_logger,
+    resolve_subtree_hold_epoch_id,
+    spawn_round_has_unmaterialized_entries,
+)
 from main.runtime.tool_call_repair import (
     XML_REPAIR_ATTEMPT_LIMIT,
     build_xml_tool_repair_message,
@@ -155,7 +215,6 @@ from main.runtime.tool_call_repair import (
     format_xml_repair_failure_reason,
     recover_tool_calls_from_json_payload,
 )
-from main.protocol import now_iso
 
 _ARTIFACT_REF_PATTERN = re.compile(r'artifact:(?:artifact:)?[A-Za-z0-9_-]+')
 _STAGE_HISTORY_ARCHIVE_SOURCE_KIND = 'stage_history_archive'
@@ -435,6 +494,22 @@ class ReActToolLoop:
                 message_history,
                 runtime_context=runtime_context,
             )
+            # skill 头部名单（节点道）：system 首条钉住"钉住时点的全量可见 skill"，
+            # 与会话道同一渲染函数、同一 epoch 语义。merge 是幂等的——epoch 不变时
+            # 逐字节复用，追加链的前缀探针（首两条）继续命中；epoch 在重印边界跳变
+            # 时头部改字节，链按 `same_turn_reassembled` 回投影重组装，代价就是那次
+            # 重印本该付的。
+            skill_roster_scope = f"node:{task.task_id}:{node.node_id}"
+            skill_roster_items = self._node_skill_roster_items(
+                runtime_context=runtime_context,
+                task_id=str(task.task_id),
+                node_id=str(node.node_id),
+            )
+            model_messages = self._apply_node_skill_roster_head(
+                model_messages,
+                scope_key=skill_roster_scope,
+                skill_items=skill_roster_items,
+            )
             current_tools = self._revoke_contract_absent_hydration_for_hop(
                 tools=current_tools,
                 task=task,
@@ -666,6 +741,13 @@ class ReActToolLoop:
                 # （距上次发送超过 `context_refresh.idle_minutes`，见 `g3ku/config/context_refresh.py`）。
                 # 空闲那一档确实会重付头部那一截，它是"被收回的名字不必等到下次压缩才退场"的价。
                 # 之后的跳按重印后的清单继续钉住。
+                # skill 头部名单与 tools[] 同源：同一个边界、同一个跳上重印。
+                _bump_skill_roster_epoch(None, session_key=skill_roster_scope)
+                request_messages = self._apply_node_skill_roster_head(
+                    request_messages,
+                    scope_key=skill_roster_scope,
+                    skill_items=skill_roster_items,
+                )
                 compression_provider_tool_names = self._normalized_name_list(
                     list(tool_schema_selection.get('pinned_provider_tool_names') or [])
                 ) or list(provider_tool_names)
@@ -3513,6 +3595,70 @@ class ReActToolLoop:
             'active_stage': dict(active_stage or {}) if isinstance(active_stage, dict) else None,
         }
 
+    def _node_skill_roster_items(
+        self,
+        *,
+        runtime_context: dict[str, Any] | None,
+        task_id: str,
+        node_id: str,
+    ) -> list[dict[str, str]]:
+        """节点头部名单的数据源：本轮 fresh payload 里的候选 skill 条目（含描述）。
+
+        fresh payload 由主运行时每轮按治理实时可见集现算，排序即可见集本身
+        （skill 侧已无 top-k 筛选）；取不到时回落到帧里的 `visible_skills` 记录。
+        """
+        runtime_context = dict(runtime_context or {}) if isinstance(runtime_context, dict) else {}
+        fresh_payload = (
+            dict(runtime_context.get('fresh_node_dynamic_contract_payload') or {})
+            if isinstance(runtime_context.get('fresh_node_dynamic_contract_payload'), dict)
+            else {}
+        )
+        items = [
+            item
+            for item in list(fresh_payload.get('candidate_skills') or [])
+            if isinstance(item, dict) and str(item.get('skill_id') or '').strip()
+        ]
+        if items:
+            return items
+        current_frame = self._runtime_frame(str(task_id or '').strip(), str(node_id or '').strip()) or {}
+        return [
+            item
+            for item in list(current_frame.get('visible_skills') or [])
+            if isinstance(item, dict) and str(item.get('skill_id') or '').strip()
+        ]
+
+    def _apply_node_skill_roster_head(
+        self,
+        messages: list[dict[str, Any]],
+        *,
+        scope_key: str,
+        skill_items: list[dict[str, str]],
+    ) -> list[dict[str, Any]]:
+        """把 skill 名单钉进 system 首条；名单没变时逐字节幂等，追加链不受扰。"""
+        base_messages = list(messages or [])
+        if not base_messages:
+            return base_messages
+        head = base_messages[0]
+        if not isinstance(head, dict) or str(head.get('role') or '').strip() != 'system':
+            return base_messages
+        epoch = _skill_roster_epoch_for(None, session_key=scope_key)
+        roster_text = _frontdoor_pinned_contract_text(
+            None,
+            skill_items=skill_items,
+            exec_runtime_policy=None,
+            session_temp_dir=None,
+            skill_roster_epoch=epoch,
+            session_key=scope_key,
+            include_extras=False,
+        )
+        if not roster_text:
+            return base_messages
+        new_head = dict(head)
+        new_head['content'] = _merge_pinned_contract_into_system_text(head.get('content'), roster_text)
+        if new_head['content'] == head.get('content'):
+            return base_messages
+        return [new_head, *base_messages[1:]]
+
     def _build_node_dynamic_contract(
         self,
         *,
@@ -3669,6 +3815,22 @@ class ReActToolLoop:
                 list(tool_schema_selection.get('declared_denied_tool_names') or [])
             ),
             exec_runtime_policy=exec_runtime_policy,
+            new_readable_skill_items=_new_readable_skill_items(
+                scope_key=(
+                    f"node:{getattr(node, 'task_id', '') or ''}:{getattr(node, 'node_id', '') or ''}"
+                ),
+                live_visible_skills=self._node_skill_roster_items(
+                    runtime_context=runtime_context,
+                    task_id=str(getattr(node, 'task_id', '') or ''),
+                    node_id=str(getattr(node, 'node_id', '') or ''),
+                ),
+                covered_skill_ids=_pinned_contract_state(
+                    None,
+                    session_key=(
+                        f"node:{getattr(node, 'task_id', '') or ''}:{getattr(node, 'node_id', '') or ''}"
+                    ),
+                )[1],
+            ),
         )
 
     def _refresh_node_dynamic_contract_message(

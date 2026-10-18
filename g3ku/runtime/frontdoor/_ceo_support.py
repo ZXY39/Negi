@@ -15,7 +15,6 @@ from g3ku.runtime.config_refresh import refresh_loop_runtime_config
 from g3ku.runtime.frontdoor.exposure_resolver import CeoExposureResolver
 from g3ku.runtime.frontdoor.message_builder import CeoMessageBuilder
 from g3ku.runtime.frontdoor.prompt_builder import CeoPromptBuilder
-from g3ku.runtime.frontdoor.tool_contract import is_frontdoor_tool_contract_message
 from g3ku.runtime.tool_error_guidance import (
     append_parameter_error_guidance,
     is_parameter_like_tool_exception,
@@ -35,9 +34,10 @@ from g3ku.runtime.web_ceo_sessions import (
 )
 from main.protocol import now_iso
 from main.runtime.chat_backend import ConfigChatBackend, sanitize_provider_messages
-from main.runtime.stage_messages import build_turn_only_system_note_message, is_turn_only_system_note_message, strip_turn_only_system_note_messages
+from main.runtime.stage_messages import (
+    build_turn_only_system_note_message,
+)
 from main.runtime.tool_call_repair import format_xml_repair_failure_reason
-
 
 _CREATE_ASYNC_TASK_CONTRACT_TYPE_ERROR_HINTS = (
     "should be array",

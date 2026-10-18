@@ -144,7 +144,7 @@ CEO/frontdoor 另有任务生命周期与分发控制类固定工具。治理记
 - 只有普通 candidate tool load 会进入 hydration/promotion、占用 hydration LRU；对已经 callable、已经 hydrated、fixed builtin，或当前仅 RBAC 可见但不在 candidate 里的 direct-load lane，`load_tool_context` 都是 read-only toolskill 加载。
 - 例外：runtime 侧还有一条免模型的 hydration 触发——`exec` 结果发生输出截断（`stdout_truncated` / `stderr_truncated`）时，运行时自动把 `content_open` 水合到下一轮 callable，并在这条 exec 结果里注入提醒，让模型直接从"立即可用但截断的 exec"切换到"能按行/字符精确读本地文件的 content_open"，不必先手动 `load_tool_context`。若 `content_open` 不在当前 candidate 集合则静默跳过；同一结果只注入一次。
 - 节点的可执行对象字典（`_tool_provider` 交付给执行循环的 `tools`）按治理可见集兜底构建，frame 里的候选被写成空时也不塌缩。这一条与上一条是一对：候选决定"能不能被提升"，对象字典决定"提升后能不能真被解析执行"，两者各自按治理可见集取上界，才不会出现"名字可见却调不动"。
-- repair-required 资源从普通候选中剥离：工具进 `repair_required_tools`（不进入 agent-facing `candidate_tools` / `callable_tools`），skill 进 `repair_required_skills`（不进入 `candidate_skills`）；这两个列表只影响 agent-facing runtime contract，不等于 provider-facing `tools[]` 变化。
+- repair-required 资源从普通候选中剥离：工具进 `repair_required_tools`（不进入 agent-facing `candidate_tools` / `callable_tools`），skill 进 `repair_required_skills`（机器状态，留在合同 payload 里供诊断；渲染行已从尾块删除——skill 待修复的信号由 `load_skill_context` 的 repair 载荷承载）。这些列表不影响 provider-facing `tools[]` 变化。
 
 exec 与 memory 工具：
 
@@ -171,7 +171,7 @@ exec 与 memory 工具：
 - 需要显式 `load_skill_context(skill_id="...")`
 - skill 加载是“当前轮立即消费正文”
 - 不走 hydration 状态机
-- 对 CEO/frontdoor，`frontdoor_runtime_tool_contract` 摘要会把 `candidate_skills` 明确标成“可通过 `load_skill_context` 读取正文”的候选，避免模型把它们误读成需要安装/水合的候选工具
+- 对 CEO/frontdoor，skill 的可读入口是头部钉住块的全量名单（`id | name | description`）与重印点之间的 `new_readable_skills` 注入段；`load_skill_context(skill_id="...")` 按 id 直读正文，避免模型把它们误读成需要安装/水合的候选工具
 - repair-required skill 有更强的门控：它仍可作为“待修复资源”出现在 agent-facing `repair_required_skills` 中，但修复完成前 `load_skill_context(...)` / `load_skill_context_v2(...)` 直接返回 repair-required 错误与修复指引（`skill_repair_required` payload 携带 `warnings` / `errors` / `next_actions`），不返回正文；遇到“模型知道这个 skill 存在却无法 load”，先检查 skill 资源本身的 `available` / warnings / errors，而不是先怀疑 selector 没选中
 - 节点运行中的 skill 自愈闭环依赖上面两条语义配合：候选快照在节点派发时定格（persisted frame），中途新装 skill 靠加载门禁的实时治理可见性回退获得真实状态——可加载则返回正文，`available=false`（如 `missing required bins`：`requires.bins` 声明了 `shutil.which` 解析不到的命令）则返回修复指引；节点用 `filesystem_*` 修正 manifest 声明或用 `exec` 补依赖（filesystem mutation 自动触发 `refresh_resource_paths` 重探可用性），再次 load 复核。改 `requires` 的判据只有两条——该项在本机实测已有，或该 skill 正文并不使用该项：可用性正是由这些项逐项算出（`shutil.which` / 环境变量 / 已注册工具），删掉一项等于让 `load_skill_context` 直接返回正文，所以"再 load 一次看有没有正文"这道复核对删声明无效；反删规则同时写在前门 §1.3、执行/验收节点共享修复块与 `create_async_task` 的实测可加载验收门槛三处，缺一处就留一条能把真实缺口报成已修复的路径。修复规则文本由 `main/prompts/shared_repair_required.md`（执行/验收节点提示词共享块）、`tools/skill-installer/toolskills/SKILL.md`（安装后三态复核）与 `skills/skill-creator/references/g3ku-resource-spec.md`（创建后三态复核 + `requires` 探测声明规则）承载
 
@@ -352,18 +352,18 @@ provider-facing schema 刻意保持最小：
 - 富文本说明留在尾部运行时合同里，provider `tools[]` 只保留 function calling 所需的最小 schema。repair-required 资源不靠轮换 provider `tools[]` 来表达：那两份清单只是运行时摘要侧的指引，清单稳定性优先于缓存连续性。
 - 说明性文本与不支持的 JSON Schema 组合子（`anyOf` / `oneOf` / `allOf`）在传输前被剥平，provider-facing schema 只保留 function calling 需要的最小形状；参数正确性的权威仍在运行时校验侧，不要假设线上那份 schema 还保留了内部合同的每个分支。若缓存缺失与 `actual_tool_schema_hash` 的大幅变化同时出现，先查 provider schema 是否从这份最小/稳定形态回归成了富文本形态。
 
-### Pinned Static Declarations（前门头部的钉住块）
+### Pinned Static Declarations（头部钉住块：skill 名单 / 执行策略 / 会话临时目录）
 
-三条回合内不变的声明——`candidate_skills`、`exec_runtime_policy`、`session_temp_dir`——在前门只声明一次：渲染成 `## Runtime Contract (pinned)`，并进请求体首条 system 文本的末尾（与 `## Capability Exposure Snapshot` 同一载体，不是新消息项，因此尾部重铺那条剥运行时块的路碰不到它）。尾块的省略判定**逐段**看头部原文里有没有那一段：有才省，缺的那段照旧整段留在尾块。判据取头部原文而不是"本轮算出来了"——前门一个回合内有四条装配路，任何一条没写进头部却照样让尾块省略，声明就在整份上下文里消失，模型看不到候选技能也不会报错。
+三条回合内不变的声明在前门只声明一次：渲染成 `## Runtime Contract (pinned)`，并进请求体首条 system 文本的末尾（与 `## Capability Exposure Snapshot` 同一载体，不是新消息项，因此尾部重铺那条剥运行时块的路碰不到它）。尾块的省略判定**逐段**看头部原文里有没有那一段：有才省，缺的那段照旧整段留在尾块。判据取头部原文而不是"本轮算出来了"——前门一个回合内有四条装配路，任何一条没写进头部却照样让尾块省略，声明就在整份上下文里消失，模型看不到候选技能也不会报错。
 
-- 名单是这块唯一的量：实盘 5,285 跳里 `candidate_skills` 一行中位 281 token、占整份稳定契约块 23.1%，而执行策略与会话临时目录各只一行。名单为空时整块不钉，三段声明全留在尾块：为两行短声明去动头部是不划算的买卖——头部一改就顶掉它身后的全部前缀。
-- 重钉边界三条：曝光提交点（`cache_family_revision`，即 capability snapshot 的 `exposure_revision`）、执行策略签名、会话临时目录。名单本身不进边界，且钉住那份按 id 排序——每回合的语义挑选会换顺序也会换成员，进边界就每回合顶掉头部。
-- 名单漂移的表达方式是差集，不是重印：尾块只在成员差非空时出 `granted_skills`（本轮新增可见、头部还没有）与 `unselected_skills`（头部声明了、本轮没选进候选，调不动）两行。头部因此会"过期"，这是设计状态而不是缺陷；只有三条边界动了才整段重印。
-- 差集覆盖到名单的三分之二时改回整份 `candidate_skills` 行（`_roster_difference_too_wide`）：一个名字 ≈ 5 token、整份名单 ≈ 281 token，差到几十个名字时两行否定式清单既不更便宜也更难读。实盘 5,005 跳里名单只变过 21 跳（中位差 1 个名字），其中 3 跳的差达到 40–46 个——这条分支的命中量就是那 3 跳。
+- **skill 名单是全量可见集，每行 `id | name | description`**：skill 侧没有 top-k 语义筛选（`assembly.skill_inventory_top_k` 已废弃），"选哪个 skill"的判断在模型侧按描述做，语义排序只服务工具面。名单按 id 排序；名单为空时整块不钉，三段声明全留在尾块。
+- **重印判据 = roster epoch + 执行策略签名 + 会话临时目录**。roster epoch 与 `tools[]` 的重印边界同源（`_frontdoor_bundle_recommit_boundary` 返回 True 时递增：token 压缩、手动压缩、空闲边界），可见集本身**不进判据**——两次重印之间可见集怎么变，头部都逐字节不动。节点道的 epoch 源是 `_node_bundle_recommit_reason`（`token_compression` / 空闲边界），名单块钉在节点 system 首条，渲染函数与会话道同一个。
+- **漂移的表达是按轮注入块，不是重印**：重印点之间新变为可读的 skill，由尾块契约里的 `new_readable_skills` 注入段（`id | name | description`）按轮点名。台账**只增不减**（权限收回/删除不缩块），块每轮从台账整体重渲染——阶段裁撤（`context_evicted`）不可能丢块；台账条目被重印后的头部名单覆盖后自动摘除（信息仍在头部，块不无限涨）。台账按作用域分桶：前门按 `session_key`，节点按 `task_id + node_id`（`g3ku/runtime/frontdoor/skill_roster.py`）。
+- **被删/被收回的名字留在头部名单里直到下一次重印**，模型去 `load_skill_context` 时由三态回执告知原因：`skill_deleted`（注册表无记录）/ `skill_not_permitted`（有记录但角色不可见）/ repair 载荷。skill 的候选闸门已拆除——可见性由 v2 的治理实时可见集强制，回合初 stale 快照不再误拒 mid-turn 授权的名字。
 - 载体有两份：会话对象属性，外加按 `session_key` 分桶的进程表（LRU 封顶）。同回合内不同装配路拿到的 session 不是同一实例，而 `state` 里的键会被归一化白名单静默丢掉、不能当载体；两份载体都读，判据键相同就复用同一串原文。
-- 重启会让进程表清空、首跳重算一次，但**重算不等于改字节**：三条边界没动时渲染出的还是同一串，头部逐字节不变。实盘一条真会话跨 3 小时 04 分并经过一次重启，`stable_prefix_hash` 前后同为 `deebf8c892ad`（记录数 39→41 只在末尾增长）。只有边界真动了才付出那一次头部重写。
+- 重启会让进程表清空、首跳重算一次，但**重算不等于改字节**：边界没动时渲染出的还是同一串，头部逐字节不变。只有边界真动了才付出那一次头部重写。
 - 合头部一律**先摘再拼**，摘的位置是抬头行的**首次**出现（不是末次）：续跑回合的头部来自上一跳请求体种子、本身已带一份块，直接追加会把同一份块叠两遍并永久留在携带正文里（实盘抓到过 11,379→12,960 字符的双块头部，之后每跳都带着）。
-- 节点车道的这份名单仍每跳进尾块：节点的运行时合同消息同时是机器状态（`extract_node_dynamic_contract_payload` 把 `candidate_skills` 交回派发与水合侧），把它移出正文会改掉派发行为，不是一次缓存搬家。
+- 节点道的 `candidate_skills` 仍留在运行时合同 **payload** 里（`extract_node_dynamic_contract_payload` 把它交回派发与水合侧，是机器状态），但不再渲染进尾块正文——渲染面由头部名单 + 注入块承载。删渲染行不动派发行为，不是一次缓存搬家。
 
 ## 10. 资源目录代检查与语义目录新鲜度
 

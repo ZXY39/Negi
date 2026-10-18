@@ -7684,7 +7684,22 @@ class MainRuntimeService:
         }
         record = visible.get(skill_name)
         if record is None:
-            return {'ok': False, 'error': f'Skill not visible: {skill_id}'}
+            # 三态回执：注册表里没有 = 已删除（治理记录随资源一起清掉）；
+            # 有记录但角色不可见 = 权限不允许。名单钉在头部、两次重印之间会过期，
+            # 模型按 stale 名单来 load 是常态，回执必须说清"为什么读不了"。
+            registry_getter = getattr(self.resource_registry, 'get_skill_resource', None)
+            registry_record = registry_getter(skill_name) if callable(registry_getter) else None
+            if registry_record is None:
+                return {
+                    'ok': False,
+                    'error': 'skill_deleted',
+                    'message': f'Skill 已删除：{skill_id}。名单里的这个名字已过期，不要再尝试。',
+                }
+            return {
+                'ok': False,
+                'error': 'skill_not_permitted',
+                'message': f'权限不允许：角色 {actor_role} 无权读取 {skill_id}。重试或改名都不会放行。',
+            }
         if self._skill_record_is_repair_required(record):
             return self._repair_required_skill_payload(record)
         path = Path(record.skill_doc_path) if record.skill_doc_path else None
@@ -7721,7 +7736,22 @@ class MainRuntimeService:
         }
         record = visible.get(skill_name)
         if record is None:
-            return {'ok': False, 'error': f'Skill not visible: {skill_id}'}
+            # 三态回执：注册表里没有 = 已删除（治理记录随资源一起清掉）；
+            # 有记录但角色不可见 = 权限不允许。名单钉在头部、两次重印之间会过期，
+            # 模型按 stale 名单来 load 是常态，回执必须说清"为什么读不了"。
+            registry_getter = getattr(self.resource_registry, 'get_skill_resource', None)
+            registry_record = registry_getter(skill_name) if callable(registry_getter) else None
+            if registry_record is None:
+                return {
+                    'ok': False,
+                    'error': 'skill_deleted',
+                    'message': f'Skill 已删除：{skill_id}。名单里的这个名字已过期，不要再尝试。',
+                }
+            return {
+                'ok': False,
+                'error': 'skill_not_permitted',
+                'message': f'权限不允许：角色 {actor_role} 无权读取 {skill_id}。重试或改名都不会放行。',
+            }
         if self._skill_record_is_repair_required(record):
             return self._repair_required_skill_payload(record)
         path = Path(record.skill_doc_path) if record.skill_doc_path else None

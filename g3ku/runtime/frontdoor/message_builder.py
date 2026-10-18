@@ -8,8 +8,6 @@ from datetime import datetime
 from types import SimpleNamespace
 from typing import Any
 
-from loguru import logger
-
 from g3ku.agent.markdown_memory import split_consolidation_block
 from g3ku.config.live_runtime import get_runtime_config
 from g3ku.core.timefmt import (
@@ -23,6 +21,26 @@ from g3ku.runtime.context.semantic_scope import semantic_catalog_rankings
 from g3ku.runtime.context.summarizer import score_query
 from g3ku.runtime.context.types import ContextAssemblyResult, RetrievedContextBundle
 from g3ku.runtime.core_tools import resolve_core_tool_targets
+from g3ku.runtime.frontdoor import skill_roster as _skill_roster
+from g3ku.runtime.frontdoor.canonical_context import (
+    combine_canonical_context,
+    materialize_transcript_view,
+    normalize_frontdoor_canonical_context,
+)
+from g3ku.runtime.frontdoor.capability_snapshot import CapabilitySnapshot, build_capability_snapshot
+from g3ku.runtime.frontdoor.cron_hidden_prompt import strip_cron_hidden_prompt
+from g3ku.runtime.frontdoor.prompt_cache_contract import DEFAULT_CACHE_FAMILY_REVISION
+from g3ku.runtime.frontdoor.raw_stage_renderer import retained_raw_stage_messages
+from g3ku.runtime.frontdoor.session_temp_dir import ceo_session_temp_dir
+from g3ku.runtime.frontdoor.tool_contract import (
+    build_frontdoor_tool_contract,
+    frontdoor_pinned_contract_text,
+    merge_pinned_contract_into_system_text,
+    pinned_contract_is_carried_by_head,
+    pinned_skill_ids_for,
+    skill_roster_epoch_for,
+    upsert_frontdoor_tool_contract_message,
+)
 from g3ku.runtime.message_token_estimation import estimate_message_tokens
 from g3ku.runtime.stage_prompt_compaction import (
     compact_stage_prompt_messages_in_place,
@@ -36,37 +54,17 @@ from g3ku.runtime.tool_visibility import (
     filter_tool_names_for_semantic_top_k,
     filter_visible_tools_for_semantic_top_k,
 )
-from g3ku.runtime.frontdoor.capability_snapshot import CapabilitySnapshot, build_capability_snapshot
-from g3ku.runtime.frontdoor.canonical_context import (
-    combine_canonical_context,
-    materialize_transcript_view,
-    normalize_frontdoor_canonical_context,
-)
-from g3ku.runtime.frontdoor.cron_hidden_prompt import strip_cron_hidden_prompt
-from g3ku.runtime.frontdoor.prompt_cache_contract import DEFAULT_CACHE_FAMILY_REVISION
-from g3ku.runtime.frontdoor.raw_stage_renderer import retained_raw_stage_messages
-from g3ku.runtime.frontdoor.session_temp_dir import ceo_session_temp_dir
-from g3ku.runtime.frontdoor.tool_contract import (
-    build_frontdoor_tool_contract,
-    frontdoor_pinned_contract_text,
-    merge_pinned_contract_into_system_text,
-    pinned_contract_is_carried_by_head,
-    pinned_skill_ids_for,
-    upsert_frontdoor_tool_contract_message,
-)
 from g3ku.runtime.web_ceo_sessions import (
     is_internal_ceo_user_message,
     is_prompt_visible_message,
-    is_history_visible_message,
     message_metadata,
     message_role,
     prompt_history_messages,
-    transcript_messages,
     trailing_turn_record,
+    transcript_messages,
 )
 from main.runtime.stage_budget import SILENT_TOOL_NAME
 
-DEFAULT_FRONTDOOR_SKILL_INVENTORY_TOP_K = 16
 DEFAULT_FRONTDOOR_EXTENSION_TOOL_TOP_K = 16
 
 # 动态 overlay 块头（跨轮可比性投影按这些常量识别并剥离，禁止散文匹配）。
@@ -1138,51 +1136,6 @@ class CeoMessageBuilder:
             filtered_count,
         )
 
-    def _select_skills(
-        self,
-        *,
-        visible_skills: list[Any],
-        top_k: int,
-        ranked_skill_ids: list[str] | None = None,
-    ) -> tuple[list[Any], list[dict[str, Any]]]:
-        ordered_skills = list(visible_skills or [])
-        if ranked_skill_ids is not None:
-            skill_map = {
-                self._skill_id(item): item
-                for item in list(visible_skills or [])
-                if self._skill_id(item)
-            }
-            ranked: list[Any] = []
-            seen: set[str] = set()
-            for skill_id in list(ranked_skill_ids or []):
-                item = skill_map.get(str(skill_id or '').strip())
-                if item is None:
-                    continue
-                normalized = self._skill_id(item)
-                if not normalized or normalized in seen:
-                    continue
-                seen.add(normalized)
-                ranked.append(SimpleNamespace(**item) if isinstance(item, dict) else item)
-            ordered_skills = ranked + [
-                (SimpleNamespace(**item) if isinstance(item, dict) else item)
-                for item in list(visible_skills or [])
-                if self._skill_id(item) not in seen
-            ]
-        selected = list(ordered_skills[: max(1, int(top_k or 1))])
-        semantic_rank_map = {
-            str(skill_id or '').strip(): index + 1
-            for index, skill_id in enumerate(list(ranked_skill_ids or []))
-            if str(skill_id or '').strip()
-        }
-        trace = [
-            {
-                'skill_id': self._skill_id(item),
-                'semantic_rank': semantic_rank_map.get(self._skill_id(item)),
-            }
-            for item in selected
-        ]
-        return selected, trace
-
     @staticmethod
     def _tool_is_registered_callable(record: Any, visible_name_set: set[str]) -> bool:
         return bool(str(getattr(record, 'tool_id', '') or '').strip() in visible_name_set)
@@ -1433,10 +1386,8 @@ class CeoMessageBuilder:
         main_service = getattr(self._loop, 'main_task_service', None)
         memory_manager = getattr(self._loop, 'memory_manager', None)
         assembly_cfg = getattr(getattr(self._loop, '_memory_runtime_settings', None), 'assembly', None)
-        inventory_top_k = max(
-            1,
-            int(getattr(assembly_cfg, 'skill_inventory_top_k', DEFAULT_FRONTDOOR_SKILL_INVENTORY_TOP_K) or DEFAULT_FRONTDOOR_SKILL_INVENTORY_TOP_K),
-        )
+        # `assembly.skill_inventory_top_k` 已废弃：skill 名单不再做 top-k 语义筛选，
+        # 头部钉住块带全量可见名单。字段保留在配置 schema 里仅为兼容存量配置文件。
         extension_top_k = max(
             0,
             int(getattr(assembly_cfg, 'extension_tool_top_k', DEFAULT_FRONTDOOR_EXTENSION_TOOL_TOP_K) or DEFAULT_FRONTDOOR_EXTENSION_TOOL_TOP_K),
@@ -1477,7 +1428,7 @@ class CeoMessageBuilder:
             query_text=query_text,
             visible_skills=visible_skills,
             visible_tools=semantic_visible_tools,
-            skill_limit=max(inventory_top_k * 4, len(visible_skills), inventory_top_k, 8),
+            skill_limit=max(len(visible_skills), 1),
             tool_limit=max(extension_top_k * 4, len(semantic_visible_tool_names), extension_top_k, 8),
         )
         semantic_elapsed_ms = self._elapsed_ms(semantic_started_at)
@@ -1487,16 +1438,13 @@ class CeoMessageBuilder:
             **dict(semantic_frontdoor.get('trace') or {}),
         }
         visible_only_mode = str(semantic_frontdoor.get('mode') or '').strip().lower() == 'unavailable'
+        # skill 名单不再做 top-k 语义筛选：头部钉住块带全量可见名单（id|名称|描述），
+        # "选哪个"由模型按描述判断。语义排序只服务工具面；skill 排序结果一律不消费。
+        # 选中集恒等于可见集，可见_only 分支与排序分支在此合流。
+        selected_skills = self._visible_only_skill_items(visible_skills)
+        skill_trace = self._visible_only_skill_trace(selected_skills)
         if visible_only_mode:
-            selected_skills = self._visible_only_skill_items(visible_skills)
-            skill_trace = self._visible_only_skill_trace(selected_skills)
             semantic_trace = {**semantic_trace, 'mode': 'visible_only', 'available': False}
-        else:
-            selected_skills, skill_trace = self._select_skills(
-                visible_skills=visible_skills,
-                top_k=inventory_top_k,
-                ranked_skill_ids=list(semantic_frontdoor.get('skill_ids') or []),
-            )
         split_prompt_builder = callable(getattr(self._prompt_builder, 'build_base_prompt', None))
         if split_prompt_builder:
             # 提示词的重新拉取跟着记忆块与 tools[] 的时钟走：这两个戳没动，稳定前缀就不该
@@ -1857,21 +1805,13 @@ class CeoMessageBuilder:
         判据键与 `prompt contract` 那条装配路必须逐字一致，否则两边各自重印、头部每跳都变，
         两侧共用 `tool_contract` 里的同一张进程表。
         """
-        skill_ids = [
-            self._skill_id(item)
-            for item in list(context_sources.get('selected_skills') or [])
-            if self._skill_id(item)
-        ]
         session_key = self._frontdoor_session_key(persisted_session)
         pinned_text = frontdoor_pinned_contract_text(
             persisted_session,
-            skill_ids=skill_ids,
+            skill_items=list(context_sources.get('selected_skills') or []),
             exec_runtime_policy=self._frontdoor_exec_runtime_policy(),
             session_temp_dir=ceo_session_temp_dir(session_key),
-            contract_revision=(
-                str(context_sources['capability_snapshot'].exposure_revision or '').strip()
-                or DEFAULT_CACHE_FAMILY_REVISION
-            ),
+            skill_roster_epoch=skill_roster_epoch_for(persisted_session, session_key=session_key),
             session_key=session_key,
         )
         if not pinned_text:
@@ -2044,6 +1984,11 @@ class CeoMessageBuilder:
                 for item in list(context_sources['selected_skills'] or [])
                 if self._skill_id(item)
             ],
+            new_readable_skill_items=_skill_roster.new_readable_skill_items(
+                scope_key=f"session:{self._frontdoor_session_key(persisted_session)}",
+                live_visible_skills=list(context_sources.get('selected_skills') or []),
+                covered_skill_ids=pinned_skill_ids,
+            ),
             candidate_skill_items=list(context_sources.get('candidate_skill_items') or []),
             repair_required_tool_items=list(context_sources.get('repair_required_tool_items') or []),
             repair_required_skill_items=list(context_sources.get('repair_required_skill_items') or []),
@@ -2388,6 +2333,11 @@ class CeoMessageBuilder:
                 for item in list(context_sources['selected_skills'] or [])
                 if self._skill_id(item)
             ],
+            new_readable_skill_items=_skill_roster.new_readable_skill_items(
+                scope_key=f"session:{self._frontdoor_session_key(persisted_session)}",
+                live_visible_skills=list(context_sources.get('selected_skills') or []),
+                covered_skill_ids=pinned_skill_ids,
+            ),
             candidate_skill_items=list(context_sources.get('candidate_skill_items') or []),
             repair_required_tool_items=list(context_sources.get('repair_required_tool_items') or []),
             repair_required_skill_items=list(context_sources.get('repair_required_skill_items') or []),
