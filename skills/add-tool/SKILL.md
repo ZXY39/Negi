@@ -7,6 +7,8 @@
 - `internal`：工具本体位于 `tools/<tool_id>/main/`，可直接进入 callable tool 列表。
 - `external`：第三方工具本体安装在工作区根目录的 `externaltools/<tool_id>/`，`tools/<tool_id>/` 只负责注册和说明，不包含第三方工具本体。
 
+外部能力**本身是一个 MCP server**（stdio / http）时，走 `references/mcp-client-tool.md`：产出一个 `internal` 工具，由它的 handler 当 MCP 客户端，远端本体仍安装在 `externaltools/<tool_id>/`。运行时不新增传输类型。
+
 ## 目标
 
 - 统一注册入口仍然是 `tools/<tool_id>/`。
@@ -223,6 +225,7 @@ externaltools/
 ## References
 
 - `references/toolskill-checklist.md`
+- `references/mcp-client-tool.md`
 - `skills/update-tool/SKILL.md`
 
 ## Parameter Contract Discipline
