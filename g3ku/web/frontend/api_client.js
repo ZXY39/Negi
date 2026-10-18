@@ -36,13 +36,19 @@ class ApiClient {
             case "bundle_password_invalid":
                 return "配置包口令不正确。";
             case "bundle_current_password_required":
-                return "导入会替换本机的解锁凭据，请先输入当前项目解锁口令。";
+                return "导入前先输入当前项目解锁口令，确认是这台机器的操作者。";
             case "bundle_current_password_invalid":
-                return "当前项目解锁口令不正确，导入未执行，配置没有改动。";
+                return "当前项目解锁口令不正确，导入未执行，本机内容没有改动。";
             case "bundle_project_password_unavailable":
                 return "这个项目没有设置解锁密码（只用环境变量主密钥解锁），请改用自定义导出口令。";
             case "bundle_password_required":
                 return "请输入口令。";
+            case "bundle_scope_empty":
+                return "请先勾选要导出或导入的范围（配置 / 记忆）。";
+            case "bundle_scope_not_in_package":
+                return "这个包里没有你勾选的那一面，请改勾选或换一个包。";
+            case "bundle_memory_store_missing":
+                return "这台机器还没有记忆库，导不出记忆。";
             case "bundle_file_invalid":
                 return "这个文件不是可用的配置包，或包内密钥已损坏。";
             case "bundle_version_unsupported":
@@ -442,9 +448,14 @@ class ApiClient {
         return data.item || null;
     }
 
-    static async exportConfigBundle({ password = "", useProjectPassword = true } = {}) {
+    static async exportConfigBundle({ password = "", useProjectPassword = true, includeConfig = true, includeMemory = false } = {}) {
         const data = await this._request("POST", "/api/bootstrap/config-bundle/export", {
-            body: { password, use_project_password: !!useProjectPassword },
+            body: {
+                password,
+                use_project_password: !!useProjectPassword,
+                include_config: !!includeConfig,
+                include_memory: !!includeMemory,
+            },
             timeoutMs: 60000,
         });
         return data.item || null;
@@ -454,12 +465,18 @@ class ApiClient {
         return this._buildUrl("/api/bootstrap/config-bundle/download", { filename }).toString();
     }
 
-    static async importConfigBundle(file, password, { confirmRunningWork = false, currentPassword = "" } = {}) {
+    static async importConfigBundle(
+        file,
+        password,
+        { confirmRunningWork = false, currentPassword = "", includeConfig = true, includeMemory = false } = {},
+    ) {
         const formData = new FormData();
         formData.append("file", file);
         formData.append("password", password);
         formData.append("confirm_running_work", confirmRunningWork ? "true" : "false");
         formData.append("current_password", currentPassword || "");
+        formData.append("include_config", includeConfig ? "true" : "false");
+        formData.append("include_memory", includeMemory ? "true" : "false");
         const data = await this._request("POST", "/api/bootstrap/config-bundle/import", {
             body: formData,
             timeoutMs: 180000,

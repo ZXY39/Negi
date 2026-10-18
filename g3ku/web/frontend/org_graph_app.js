@@ -777,6 +777,8 @@ const U = {
     configBundleDialog: document.getElementById("config-bundle-dialog"),
     configBundleClose: document.getElementById("config-bundle-close-btn"),
     configBundleUseProjectPassword: document.getElementById("config-bundle-use-project-password"),
+    configBundleExportConfig: document.getElementById("config-bundle-export-config"),
+    configBundleExportMemory: document.getElementById("config-bundle-export-memory"),
     configBundleExportPasswordField: document.getElementById("config-bundle-export-password-field"),
     configBundleExportConfirmField: document.getElementById("config-bundle-export-confirm-field"),
     configBundleExportPassword: document.getElementById("config-bundle-export-password"),
@@ -785,6 +787,8 @@ const U = {
     configBundleImportFile: document.getElementById("config-bundle-import-file"),
     configBundleImportPick: document.getElementById("config-bundle-import-pick-btn"),
     configBundleImportName: document.getElementById("config-bundle-import-name"),
+    configBundleImportConfig: document.getElementById("config-bundle-import-config"),
+    configBundleImportMemory: document.getElementById("config-bundle-import-memory"),
     configBundleImportPassword: document.getElementById("config-bundle-import-password"),
     configBundleImport: document.getElementById("config-bundle-import-btn"),
     passwordChangeBackdrop: document.getElementById("password-change-backdrop"),
@@ -12072,6 +12076,40 @@ function usesProjectBundlePassword() {
     return U.configBundleUseProjectPassword ? U.configBundleUseProjectPassword.checked !== false : true;
 }
 
+// 缺元素（未渲染/被裁掉）一律回默认值：配置在、记忆不在，与 HTML 的 checked 初始态一致。
+function bundleScopeState(configElement, memoryElement) {
+    const includeConfig = configElement ? configElement.checked !== false : true;
+    const includeMemory = memoryElement ? memoryElement.checked === true : false;
+    return { includeConfig, includeMemory };
+}
+
+function configBundleExportScopes() {
+    return bundleScopeState(U.configBundleExportConfig, U.configBundleExportMemory);
+}
+
+function configBundleImportScopes() {
+    return bundleScopeState(U.configBundleImportConfig, U.configBundleImportMemory);
+}
+
+function bundleScopeLabels(scopes) {
+    return [scopes.includeConfig ? "配置" : "", scopes.includeMemory ? "记忆" : ""].filter(Boolean).join("、");
+}
+
+function bundleScopeSummary(item) {
+    const memory = Number(item?.memory_entry_count || 0);
+    if (!memory) return "";
+    return `（配置 ${Number(item?.config_entry_count || 0)}、记忆 ${memory}）`;
+}
+
+function resetBundleScopeCheckboxes() {
+    [U.configBundleExportConfig, U.configBundleImportConfig].forEach((element) => {
+        if (element) element.checked = true;
+    });
+    [U.configBundleExportMemory, U.configBundleImportMemory].forEach((element) => {
+        if (element) element.checked = false;
+    });
+}
+
 function syncConfigBundlePasswordField() {
     const useProject = usesProjectBundlePassword();
     if (U.configBundleExportPasswordField) U.configBundleExportPasswordField.hidden = useProject;
@@ -12085,6 +12123,7 @@ function clearConfigBundleInputs() {
         });
     if (U.configBundleImportFile) U.configBundleImportFile.value = "";
     if (U.configBundleUseProjectPassword) U.configBundleUseProjectPassword.checked = true;
+    resetBundleScopeCheckboxes();
     syncConfigBundleFileName();
     syncConfigBundlePasswordField();
 }
@@ -12115,6 +12154,12 @@ function downloadConfigBundleFile(filename) {
 
 async function submitConfigBundleExport() {
     const useProject = usesProjectBundlePassword();
+    const scopes = configBundleExportScopes();
+    const scopeLabels = bundleScopeLabels(scopes);
+    if (!scopeLabels) {
+        showToast({ title: "请先勾选要导出的范围", kind: "error" });
+        return;
+    }
     const password = useProject ? "" : String(U.configBundleExportPassword?.value || "");
     const passwordConfirm = String(U.configBundleExportConfirm?.value || "");
     if (!useProject) {
@@ -12129,14 +12174,20 @@ async function submitConfigBundleExport() {
     }
     setConfigBundleBusy(true);
     try {
-        const item = await ApiClient.exportConfigBundle({ password, useProjectPassword: useProject });
+        const item = await ApiClient.exportConfigBundle({
+            password,
+            useProjectPassword: useProject,
+            includeConfig: scopes.includeConfig,
+            includeMemory: scopes.includeMemory,
+        });
         downloadConfigBundleFile(item?.filename);
         clearConfigBundleInputs();
+        const counts = `共 ${item?.entry_count || 0} 个文件${bundleScopeSummary(item)}`;
         showToast({
             title: "配置包已导出",
             text: useProject
-                ? `共 ${item?.entry_count || 0} 个文件，导入时输项目解锁密码。`
-                : `共 ${item?.entry_count || 0} 个文件。口令不会随文件另存，丢了无法导入。`,
+                ? `${counts}，导入时输项目解锁密码。`
+                : `${counts}。口令不会随文件另存，丢了无法导入。`,
             kind: "success",
         });
     } catch (error) {
@@ -12154,7 +12205,7 @@ function applyConfigBundleImportResult(item) {
     const versionNote = source && local && source !== local ? `包来自 ${source}，本机 ${local}。` : "";
     showToast({
         title: "配置包已导入",
-        text: `${versionNote}已还原 ${item?.entry_count || 0} 个文件，${item?.password_kept ? "解锁口令保持不变" : "解锁口令改成包口令"}；重启后 worker 才用新配置。`,
+        text: `${versionNote}已还原 ${item?.entry_count || 0} 个文件${bundleScopeSummary(item)}，${item?.password_kept ? "解锁口令保持不变" : "解锁口令改成包口令"}；重启后 worker 才用新配置。`,
         kind: "success",
     });
     window.setTimeout(() => window.location.reload(), 1500);
@@ -12163,8 +12214,14 @@ function applyConfigBundleImportResult(item) {
 async function submitConfigBundleImport() {
     const file = U.configBundleImportFile?.files?.[0];
     const password = String(U.configBundleImportPassword?.value || "");
+    const scopes = configBundleImportScopes();
+    const scopeLabels = bundleScopeLabels(scopes);
     if (!file) {
         showToast({ title: "请选择配置包文件", kind: "error" });
+        return;
+    }
+    if (!scopeLabels) {
+        showToast({ title: "请先勾选要导入的范围", kind: "error" });
         return;
     }
     if (!password) {
@@ -12181,12 +12238,13 @@ async function submitConfigBundleImport() {
     openConfirm({
         title: "确认导入配置包？",
         text: hasRunning
-            ? `检测到${summary}。导入会整体替换配置面，需要先暂停它们。`
-            : "导入会整体替换当前配置面；输入当前项目解锁口令，导入后仍用它解锁。",
+            ? `检测到${summary}。导入会整体替换${scopeLabels}，需要先暂停它们。`
+            : `导入会整体替换当前${scopeLabels}；输入当前项目解锁口令，导入后仍用它解锁。`,
         confirmLabel: "导入配置包",
         confirmKind: "danger",
         // 本机口令是这台机器自己的秘密，包不带着它走：先验一遍证明来的人知道，
         // 再把包里的新主密钥重裹到这把口令下——导入因此不再改项目口令。
+        // 只导记忆时这一步同样要验：往这台机写知识必须由知道本机口令的人发起。
         input: {
             label: "当前项目解锁口令",
             placeholder: "导入后继续用它解锁",
@@ -12209,6 +12267,8 @@ async function submitConfigBundleImport() {
             const item = await ApiClient.importConfigBundle(file, password, {
                 confirmRunningWork: !!checked,
                 currentPassword,
+                includeConfig: scopes.includeConfig,
+                includeMemory: scopes.includeMemory,
             });
             applyConfigBundleImportResult(item);
         },

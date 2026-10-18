@@ -1159,6 +1159,20 @@
                         </button>
                     </div>
                     <div class="project-settings-body">
+                        <div class="resource-field">
+                            <span class="resource-field-label">导出范围</span>
+                            <label class="ui-checkbox-row" for="config-bundle-export-config">
+                                <input id="config-bundle-export-config" class="ui-checkbox-input" type="checkbox"
+                                    checked>
+                                <span class="ui-checkbox-box" aria-hidden="true"></span>
+                                <span>配置</span>
+                            </label>
+                            <label class="ui-checkbox-row" for="config-bundle-export-memory">
+                                <input id="config-bundle-export-memory" class="ui-checkbox-input" type="checkbox">
+                                <span class="ui-checkbox-box" aria-hidden="true"></span>
+                                <span>记忆</span>
+                            </label>
+                        </div>
                         <label class="ui-checkbox-row" for="config-bundle-use-project-password">
                             <input id="config-bundle-use-project-password" class="ui-checkbox-input" type="checkbox"
                                 checked>
@@ -1176,14 +1190,28 @@
                                 autocomplete="new-password">
                         </label>
                         <button id="config-bundle-export-btn" class="toolbar-btn success" type="button">导出配置包</button>
-                        <p class="confirm-text">导出内容：项目配置、模型与 provider 凭据、密钥覆盖层、工具与技能开关、治理审批；不含任务、会话与日志。口令是包的唯一防线，拿到文件即可离线反复试。</p>
+                        <p class="confirm-text">配置＝项目配置、模型与 provider 凭据、密钥覆盖层、工具与技能开关、治理审批；记忆＝长期记忆库、笔记正文与常驻镜像。都不含任务、会话与日志。口令是包的唯一防线，拿到文件即可离线反复试。</p>
                         <div class="resource-field">
-                            <span class="resource-field-label">导入配置</span>
+                            <span class="resource-field-label">配置包文件</span>
                             <input id="config-bundle-import-file" class="resource-search" type="file"
                                 accept=".g3kucb" hidden>
                             <button id="config-bundle-import-pick-btn" class="toolbar-btn ghost" type="button"
                                 aria-controls="config-bundle-import-file">选择配置包</button>
                             <p id="config-bundle-import-name" class="config-bundle-file-name">未选择文件</p>
+                        </div>
+                        <div class="resource-field">
+                            <span class="resource-field-label">导入范围</span>
+                            <label class="ui-checkbox-row" for="config-bundle-import-config">
+                                <input id="config-bundle-import-config" class="ui-checkbox-input" type="checkbox"
+                                    checked>
+                                <span class="ui-checkbox-box" aria-hidden="true"></span>
+                                <span>配置</span>
+                            </label>
+                            <label class="ui-checkbox-row" for="config-bundle-import-memory">
+                                <input id="config-bundle-import-memory" class="ui-checkbox-input" type="checkbox">
+                                <span class="ui-checkbox-box" aria-hidden="true"></span>
+                                <span>记忆</span>
+                            </label>
                         </div>
                         <label class="resource-field">
                             <span class="resource-field-label">包口令</span>
@@ -1191,7 +1219,7 @@
                                 autocomplete="off">
                         </label>
                         <button id="config-bundle-import-btn" class="toolbar-btn danger" type="button">导入配置包</button>
-                        <p class="confirm-text">导入会整体替换配置面，解锁口令改成包口令，worker 重启后生效。</p>
+                        <p class="confirm-text">导入按勾选范围整体替换，不做合并：勾配置会换掉配置与密钥覆盖层，勾记忆会换掉这台机器整库记忆与笔记。设备已有解锁口令时导入后仍用它解锁。重启后 worker 才用新包内容。</p>
                     </div>
                 </section>
             </div>

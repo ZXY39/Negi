@@ -767,6 +767,7 @@ If Docker startup appears healthy but detached tasks never report back, inspect 
 Operator expectations:
 
 - `memory/` has no reset command: `negi memory cleanup-legacy` (dry-run unless `--apply`) removes legacy artifacts it lists, and `negi memory doctor` reports queue/health. Do not manually delete a subset of files.
+- 配置包 的 `memory` scope ships exactly four things — the store, the mirror, and the two note-body directories — so a restored deployment comes up with the source's knowledge but an **empty queue**: `queue.jsonl`, `ops.jsonl`, `failed.jsonl` and `review_state.json` never travel, and per-session review progress is keyed by session ids that only exist on the machine that wrote it. Import replaces the store whole and deletes no note the package omits; unowned bodies are removed by the runtime's own sweep. Contract: 见 `config-and-models.md`「Config Bundle Export And Import」.
 - The reset recreates baseline managed files and sync state, but it does not immediately rebuild tool/skill catalog retrieval inside the command itself.
 - After reset, user long-term memory is empty.
 - After reset, tool/skill semantic retrieval is also empty until the next runtime startup.

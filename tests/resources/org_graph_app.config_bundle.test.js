@@ -201,6 +201,10 @@ function mountDialogs(app) {
     U.configBundleClose = new StubHTMLElement();
     U.configBundleUseProjectPassword = new StubHTMLElement();
     U.configBundleUseProjectPassword.checked = true;
+    U.configBundleExportConfig = new StubHTMLElement();
+    U.configBundleExportConfig.checked = true;
+    U.configBundleExportMemory = new StubHTMLElement();
+    U.configBundleExportMemory.checked = false;
     U.configBundleExportPasswordField = new StubHTMLElement();
     U.configBundleExportPasswordField.hidden = true;
     U.configBundleExportConfirmField = new StubHTMLElement();
@@ -222,6 +226,10 @@ function mountDialogs(app) {
     U.configBundleImportPick = new StubHTMLElement();
     U.configBundleImportName = new StubHTMLElement();
     U.configBundleImportName.textContent = "未选择文件";
+    U.configBundleImportConfig = new StubHTMLElement();
+    U.configBundleImportConfig.checked = true;
+    U.configBundleImportMemory = new StubHTMLElement();
+    U.configBundleImportMemory.checked = false;
     U.configBundleImportPassword = new StubHTMLElement();
     U.configBundleImport = new StubHTMLElement();
 }
@@ -295,7 +303,9 @@ test("勾选态下不填任何口令就能导出，提交空口令", async () =>
 
     await app.submitConfigBundleExport();
 
-    assert.deepEqual(plain(app.calls), [["export", { password: "", useProjectPassword: true }]]);
+    assert.deepEqual(plain(app.calls), [
+        ["export", { password: "", useProjectPassword: true, includeConfig: true, includeMemory: false }],
+    ]);
     assert.equal(app.anchors.length, 1);
     assert.equal(app.toasts.at(-1).text, "共 6 个文件，导入时输项目解锁密码。");
 });
@@ -320,7 +330,9 @@ test("自定义口令导出成功后按服务端返回的文件名触发下载�
 
     await app.submitConfigBundleExport();
 
-    assert.deepEqual(plain(app.calls), [["export", { password: "secret-pass-123", useProjectPassword: false }]]);
+    assert.deepEqual(plain(app.calls), [
+        ["export", { password: "secret-pass-123", useProjectPassword: false, includeConfig: true, includeMemory: false }],
+    ]);
     assert.equal(app.anchors.length, 1);
     assert.deepEqual(app.anchors[0].clicks, [
         "http://localhost/api/bootstrap/config-bundle/download?filename=g3ku-config-bundle-20260924-010203.g3kucb",
@@ -385,7 +397,12 @@ test("无在跑工作时确认后按原样导入并刷新页面", async () => {
 
     assert.deepEqual(plain(app.calls), [
         ["exit-check"],
-        ["import", "bundle.g3kucb", "secret-pass-123", { confirmRunningWork: false, currentPassword: "local-pass-1" }],
+        ["import", "bundle.g3kucb", "secret-pass-123", {
+            confirmRunningWork: false,
+            currentPassword: "local-pass-1",
+            includeConfig: true,
+            includeMemory: false,
+        }],
         ["reload"],
     ]);
     assert.equal(app.toasts.at(-1).title, "配置包已导入");
@@ -457,8 +474,84 @@ test("有在跑工作时必须勾选暂停才提交", async () => {
         "import",
         "bundle.g3kucb",
         "secret-pass-123",
-        { confirmRunningWork: true, currentPassword: "local-pass-1" },
+        { confirmRunningWork: true, currentPassword: "local-pass-1", includeConfig: true, includeMemory: false },
     ]);
+});
+
+test("勾上记忆才提交 includeMemory，提示按面报数", async () => {
+    const sent = [];
+    const app = loadApp({
+        exportConfigBundle: async (options) => {
+            sent.push(plain(options));
+            return {
+                filename: "g3ku-config-bundle-20260924-010203.g3kucb",
+                entry_count: 9,
+                config_entry_count: 4,
+                memory_entry_count: 5,
+            };
+        },
+    });
+    app.U.configBundleExportMemory.checked = true;
+
+    await app.submitConfigBundleExport();
+
+    assert.deepEqual(sent, [{
+        password: "",
+        useProjectPassword: true,
+        includeConfig: true,
+        includeMemory: true,
+    }]);
+    assert.equal(app.toasts.at(-1).text, "共 9 个文件（配置 4、记忆 5），导入时输项目解锁密码。");
+});
+
+test("范围两颗都不勾时导出与导入都不提交", async () => {
+    const app = loadApp();
+    app.U.configBundleExportConfig.checked = false;
+    await app.submitConfigBundleExport();
+    assert.deepEqual(app.calls, []);
+    assert.equal(app.toasts.at(-1).title, "请先勾选要导出的范围");
+
+    app.U.configBundleImportFile.files = [{ name: "bundle.g3kucb" }];
+    app.U.configBundleImportPassword.value = "secret-pass-123";
+    app.U.configBundleImportConfig.checked = false;
+    await app.submitConfigBundleImport();
+    assert.equal(app.toasts.at(-1).title, "请先勾选要导入的范围");
+    assert.equal(app.confirmCalls.length, 0);
+});
+
+test("只勾记忆时确认文案与载荷都按记忆面走", async () => {
+    const app = loadApp();
+    app.U.configBundleImportFile.files = [{ name: "bundle.g3kucb" }];
+    app.U.configBundleImportPassword.value = "secret-pass-123";
+    app.U.configBundleImportConfig.checked = false;
+    app.U.configBundleImportMemory.checked = true;
+
+    await app.submitConfigBundleImport();
+    const confirm = app.confirmCalls.at(-1);
+    assert.match(confirm.text, /整体替换当前记忆/);
+
+    await confirm.onConfirm({ checked: false, value: "local-pass-1" });
+    await flush();
+    assert.deepEqual(plain(app.calls.find((call) => call[0] === "import")), [
+        "import",
+        "bundle.g3kucb",
+        "secret-pass-123",
+        { confirmRunningWork: false, currentPassword: "local-pass-1", includeConfig: false, includeMemory: true },
+    ]);
+});
+
+test("关窗把两颗范围复位成配置开、记忆关", () => {
+    const app = loadApp();
+    app.U.configBundleExportConfig.checked = false;
+    app.U.configBundleExportMemory.checked = true;
+    app.U.configBundleImportMemory.checked = true;
+
+    app.closeConfigBundleDialog();
+
+    assert.equal(app.U.configBundleExportConfig.checked, true);
+    assert.equal(app.U.configBundleExportMemory.checked, false);
+    assert.equal(app.U.configBundleImportConfig.checked, true);
+    assert.equal(app.U.configBundleImportMemory.checked, false);
 });
 
 test("配置包对话框的风险文案不被 max-height 裁剪", () => {

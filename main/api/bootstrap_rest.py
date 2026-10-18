@@ -16,6 +16,8 @@ from loguru import logger
 from g3ku.config.config_bundle import (
     BUNDLE_EXTENSION,
     BUNDLE_OUTPUT_DIR,
+    SCOPE_CONFIG,
+    SCOPE_MEMORY,
     export_bundle,
     import_bundle,
 )
@@ -315,6 +317,9 @@ _BUNDLE_ERROR_CODES: tuple[tuple[str, str, int], ...] = (
     ("bundle_current_password_required", "bundle_current_password_required", 400),
     ("bundle_current_password_invalid", "bundle_current_password_invalid", 400),
     ("unlock password is not configured", "bundle_project_password_unavailable", 400),
+    ("bundle_scope_not_in_package", "bundle_scope_not_in_package", 400),
+    ("bundle_scope_empty", "bundle_scope_empty", 400),
+    ("bundle_memory_store_missing", "bundle_memory_store_missing", 400),
     ("rejected", "bundle_path_rejected", 400),
     ("unsupported config bundle version", "bundle_version_unsupported", 400),
     ("config bundle", "bundle_file_invalid", 400),
@@ -342,7 +347,7 @@ async def _pause_running_work_for_bundle_import(confirmed: bool) -> None:
             status_code=409,
             detail={
                 "code": "running_work_requires_confirmation",
-                "message": "导入会整体替换配置面，请先确认暂停正在进行的所有对话和任务。",
+                "message": "导入会整体替换勾上的那一面，请先确认暂停正在进行的所有对话和任务。",
                 **snapshot,
             },
         )
@@ -503,17 +508,40 @@ async def bootstrap_exit(payload: dict | None = Body(default=None)):
     }
 
 
+def _bundle_flag(payload: dict, snake: str, camel: str, *, default: bool) -> bool:
+    raw = payload.get(snake)
+    if raw is None:
+        raw = payload.get(camel)
+    return default if raw is None else bool(raw)
+
+
+def _bundle_scopes(include_config: bool, include_memory: bool) -> tuple[str, ...]:
+    scopes = tuple(
+        scope for scope, selected in ((SCOPE_CONFIG, include_config), (SCOPE_MEMORY, include_memory))
+        if selected
+    )
+    if not scopes:
+        # 两颗都没勾：报错，而不是悄悄导出一份只有配置面的包。
+        raise HTTPException(status_code=400, detail="bundle_scope_empty")
+    return scopes
+
+
 @router.post("/bootstrap/config-bundle/export")
 async def bootstrap_config_bundle_export(payload: dict = Body(...)):
     raw = payload.get("use_project_password")
     if raw is None:
         raw = payload.get("useProjectPassword")
     use_project = True if raw is None else bool(raw)
+    scopes = _bundle_scopes(
+        _bundle_flag(payload, "include_config", "includeConfig", default=True),
+        _bundle_flag(payload, "include_memory", "includeMemory", default=False),
+    )
     try:
         item = export_bundle(
             Path.cwd(),
             password=str(payload.get("password") or ""),
             use_project_password=use_project,
+            scopes=scopes,
         )
     except Exception as exc:
         raise _bundle_http_exception(exc) from exc
@@ -537,7 +565,10 @@ async def bootstrap_config_bundle_import(
     password: str = Form(...),
     confirm_running_work: bool = Form(False),
     current_password: str = Form(""),
+    include_config: bool = Form(True),
+    include_memory: bool = Form(False),
 ):
+    scopes = _bundle_scopes(include_config, include_memory)
     try:
         await _pause_running_work_for_bundle_import(confirm_running_work)
     except HTTPException:
@@ -563,6 +594,7 @@ async def bootstrap_config_bundle_import(
                 archive_path=staged,
                 password=password,
                 current_password=str(current_password or ""),
+                scopes=scopes,
             )
         except Exception as exc:
             raise _bundle_http_exception(exc) from exc
@@ -580,8 +612,13 @@ async def bootstrap_config_bundle_import(
             "code": "runtime_refresh_crashed",
             "error": str(exc),
         }
-    logger.info("Config bundle imported: {} entries restored", item["entry_count"])
-    # 只有重启才让托管 worker 换掉内存里的旧主密钥，界面必须把这条说清楚。
+    logger.info(
+        "Config bundle imported: {} entries restored (scopes={})",
+        item["entry_count"],
+        ",".join(item["scopes"]),
+    )
+    # 只有重启才让托管 worker 换掉内存里的旧主密钥、也让记忆 worker 线程对齐新库，
+    # 界面必须把这条说清楚。
     return {"ok": True, "item": {**item, "refresh": refresh, "restart_required": True}}
 
 

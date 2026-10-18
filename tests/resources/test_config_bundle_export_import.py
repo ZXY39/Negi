@@ -3,6 +3,7 @@ from __future__ import annotations
 import base64
 import json
 import shutil
+import sqlite3
 from pathlib import Path
 
 import pytest
@@ -360,7 +361,7 @@ def test_preflight_rejects_master_key_that_cannot_read_overlay() -> None:
     }
 
     with pytest.raises(ValueError, match="secret overlay"):
-        config_bundle._preflight(payload)
+        config_bundle._preflight(payload, (config_bundle.SCOPE_CONFIG,))
 
 
 def _client() -> TestClient:
@@ -569,12 +570,14 @@ def test_bundle_envelope_shape_and_tamper_rejection(tmp_path: Path) -> None:
         "app_version",
         "created_at",
         "workspace_label",
+        "scopes",
         "key_source",
         "kdf",
         "salt_b64",
         "unlock_envelope",
         "payload_b64",
     }
+    assert envelope["scopes"] == ["config"]
     assert envelope["app_version"] == config_bundle.__version__
     # 手工按同一 KDF 复算一次，确认自定义口令就是这条车道的唯一凭据。
     key = derive_password_key(
@@ -598,3 +601,366 @@ def test_bundle_envelope_shape_and_tamper_rejection(tmp_path: Path) -> None:
             archive_path=tampered,
             password=BUNDLE_PASSWORD,
         )
+
+
+MEMORY_KEYS = {
+    "memory/memory_state.sqlite3",
+    "memory/MEMORY.md",
+    "memory/notes/note_alpha.md",
+    "memory/notes/note_beta.md",
+    "memory/index/note_category.md",
+}
+
+
+def _seed_memory(workspace: Path, *, marker: str, rows: int = 3) -> Path:
+    """记忆面：权威在 sqlite，正文在 notes/index 两个目录，镜像是常驻块读的那份文件。"""
+    mem = workspace / "memory"
+    (mem / "notes").mkdir(parents=True, exist_ok=True)
+    (mem / "index").mkdir(parents=True, exist_ok=True)
+    with sqlite3.connect(mem / "memory_state.sqlite3") as conn:
+        conn.execute("CREATE TABLE IF NOT EXISTS memories (memory_id TEXT PRIMARY KEY, memory_body TEXT NOT NULL)")
+        conn.execute("DELETE FROM memories")
+        conn.executemany(
+            "INSERT INTO memories (memory_id, memory_body) VALUES (?, ?)",
+            [(f"m{i}", f"{marker} body {i}") for i in range(rows)],
+        )
+    (mem / "MEMORY.md").write_text(f"# mirror of {marker}\n", encoding="utf-8")
+    for name in ("note_alpha", "note_beta"):
+        (mem / "notes" / f"{name}.md").write_text(f"{marker} body of {name}\n", encoding="utf-8")
+    (mem / "index" / "note_category.md").write_text(f"{marker} category body\n", encoding="utf-8")
+    return mem
+
+
+def _seed_memory_noise(mem_dir: Path, *, marker: str = "src") -> None:
+    """运行历史、在飞状态与取证备份：都不是记忆本身，不该跟包走。"""
+    (mem_dir / "ops.jsonl").write_text(f'{{"log": "{marker} round"}}\n', encoding="utf-8")
+    (mem_dir / "queue.jsonl").write_text(f'{{"op": "{marker} consolidate"}}\n', encoding="utf-8")
+    (mem_dir / "review_state.json").write_text(
+        json.dumps({"sessions": {f"{marker}:ceo-abc": {}}}), encoding="utf-8"
+    )
+    (mem_dir / "notes" / "note_alpha.md.bak.20261015-015857").write_text(
+        f"{marker} evidence\n", encoding="utf-8"
+    )
+
+
+def _memory_bodies(workspace: Path) -> list[str]:
+    with sqlite3.connect(workspace / "memory" / "memory_state.sqlite3") as conn:
+        return [str(row[0]) for row in conn.execute("SELECT memory_body FROM memories ORDER BY memory_id")]
+
+
+def _export_scopes(workspace: Path, scopes: tuple[str, ...]) -> Path:
+    return Path(
+        config_bundle.export_bundle(
+            workspace,
+            password=BUNDLE_PASSWORD,
+            use_project_password=False,
+            scopes=scopes,
+        )["path"]
+    )
+
+
+def _payload_of(archive: Path) -> dict:
+    envelope = json.loads(archive.read_text(encoding="utf-8"))
+    key = derive_password_key(
+        BUNDLE_PASSWORD,
+        salt=base64.b64decode(envelope["salt_b64"]),
+        n=int(envelope["kdf"]["n"]),
+        r=int(envelope["kdf"]["r"]),
+        p=int(envelope["kdf"]["p"]),
+    )
+    return json.loads(Fernet(key.encode()).decrypt(base64.b64decode(envelope["payload_b64"])).decode("utf-8"))
+
+
+def _rescoped(archive: Path, *, version: int, scopes: list[str] | None) -> Path:
+    """改写外层声明，模拟旧版本包与"声明与条目不符"的包：载荷里的字节不动。"""
+    envelope = json.loads(archive.read_text(encoding="utf-8"))
+    envelope["version"] = version
+    if scopes is None:
+        envelope.pop("scopes", None)
+    else:
+        envelope["scopes"] = scopes
+    forged = archive.with_name(f"forged-{version}-{archive.stem}.g3kucb")
+    forged.write_text(json.dumps(envelope), encoding="utf-8")
+    return forged
+
+
+def test_memory_scope_carries_store_mirror_and_notes_but_not_history(tmp_path: Path) -> None:
+    source = _write_workspace(tmp_path / "source")
+    _unlock(source)
+    mem = _seed_memory(source, marker="SRC")
+    _seed_memory_noise(mem)
+
+    archive = _export_scopes(source, (config_bundle.SCOPE_MEMORY,))
+
+    envelope = json.loads(archive.read_text(encoding="utf-8"))
+    payload = _payload_of(archive)
+    assert envelope["scopes"] == ["memory"]
+    assert set(payload["entries"]) == MEMORY_KEYS
+    # 只带记忆的包不必再拷一份主密钥：那面根本不动钥匙。
+    assert "master_key" not in payload
+
+
+def test_memory_scope_export_without_a_store_fails_before_writing(tmp_path: Path) -> None:
+    source = _write_workspace(tmp_path / "source")
+    _unlock(source)
+
+    with pytest.raises(ValueError, match="bundle_memory_store_missing"):
+        _export_scopes(source, (config_bundle.SCOPE_MEMORY,))
+
+    assert not (source / config_bundle.BUNDLE_OUTPUT_DIR).exists()
+
+
+def test_both_scopes_count_each_face_separately(tmp_path: Path) -> None:
+    source = _write_workspace(tmp_path / "source")
+    _unlock(source)
+    _seed_memory(source, marker="SRC")
+
+    summary = config_bundle.export_bundle(
+        source, password=BUNDLE_PASSWORD, use_project_password=False,
+        scopes=(config_bundle.SCOPE_CONFIG, config_bundle.SCOPE_MEMORY),
+    )
+
+    assert summary["scopes"] == ["config", "memory"]
+    assert summary["config_entry_count"] == len(summary["entries"]) - summary["memory_entry_count"]
+    assert summary["memory_entry_count"] == len(MEMORY_KEYS)
+
+
+def test_memory_only_import_replaces_memory_and_leaves_config_and_key(tmp_path: Path) -> None:
+    source = _write_workspace(tmp_path / "source")
+    _unlock(source)
+    _seed_memory(source, marker="SRC")
+    _seed_governance(source, "true")
+    archive = _export_scopes(source, (config_bundle.SCOPE_MEMORY,))
+
+    target = _write_workspace(tmp_path / "target")
+    (target / ".g3ku" / "config.json").write_text(
+        json.dumps({"web": {"port": 19001}, "resources": {"statePath": ".g3ku/resources.state.json"}}),
+        encoding="utf-8",
+    )
+    _seed_memory(target, marker="TGT", rows=7)
+    _seed_governance(target, "false")
+    service = get_bootstrap_security_service(target)
+    service.setup_initial_realm(password=TARGET_PASSWORD)
+    config_before = (target / ".g3ku" / "config.json").read_text(encoding="utf-8")
+    key_before = service.unwrap_with_password(TARGET_PASSWORD)
+
+    item = config_bundle.import_bundle(
+        target,
+        archive_path=archive,
+        password=BUNDLE_PASSWORD,
+        current_password=TARGET_PASSWORD,
+        scopes=(config_bundle.SCOPE_MEMORY,),
+    )
+
+    assert item["scopes"] == ["memory"]
+    assert item["config_entry_count"] == 0 and item["memory_entry_count"] == len(MEMORY_KEYS)
+    assert item["password_kept"] is True
+    assert item["status"] is None
+    # 记忆面整库换掉：条目、镜像、正文都来自包里
+    assert _memory_bodies(target) == _memory_bodies(source)
+    assert (target / "memory" / "MEMORY.md").read_text(encoding="utf-8") == "# mirror of SRC\n"
+    assert (target / "memory" / "notes" / "note_alpha.md").read_text(encoding="utf-8") == "SRC body of note_alpha\n"
+    # 配置面与钥匙一概没动
+    assert (target / ".g3ku" / "config.json").read_text(encoding="utf-8") == config_before
+    assert _read_governance(target, "ceo_frontdoor_regulatory_mode_enabled") == "false"
+    assert get_bootstrap_security_service(target).unwrap_with_password(TARGET_PASSWORD) == key_before
+
+
+def test_memory_only_import_leaves_the_targets_extra_notes_for_the_sweep(tmp_path: Path) -> None:
+    """整包替换换的是库；本机多出来的正文不属于任何行，交给运行时的 orphan 清扫，导入不删。"""
+    source = _write_workspace(tmp_path / "source")
+    _unlock(source)
+    _seed_memory_noise(_seed_memory(source, marker="SRC"))
+    archive = _export_scopes(source, (config_bundle.SCOPE_MEMORY,))
+
+    target = _write_workspace(tmp_path / "target")
+    mem = _seed_memory(target, marker="TGT")
+    _seed_memory_noise(mem, marker="target")
+    (mem / "notes" / "note_targets_own.md").write_text("target body\n", encoding="utf-8")
+
+    config_bundle.import_bundle(target, archive_path=archive, password=BUNDLE_PASSWORD,
+                                scopes=(config_bundle.SCOPE_MEMORY,))
+
+    assert (target / "memory" / "notes" / "note_targets_own.md").exists()
+    # 两本机各自的取证备份与流水都不动：包里没带，导入也就不碰。
+    assert (target / "memory" / "notes" / "note_alpha.md.bak.20261015-015857").read_text(
+        encoding="utf-8"
+    ) == "target evidence\n"
+    assert (target / "memory" / "ops.jsonl").read_text(encoding="utf-8") == '{"log": "target round"}\n'
+
+
+def test_memory_only_import_still_proves_the_local_password(tmp_path: Path) -> None:
+    source = _write_workspace(tmp_path / "source")
+    _unlock(source)
+    _seed_memory(source, marker="SRC")
+    archive = _export_scopes(source, (config_bundle.SCOPE_MEMORY,))
+
+    target = _write_workspace(tmp_path / "target")
+    _seed_memory(target, marker="TGT", rows=7)
+    get_bootstrap_security_service(target).setup_initial_realm(password=TARGET_PASSWORD)
+
+    with pytest.raises(ValueError, match="bundle_current_password_required"):
+        config_bundle.import_bundle(target, archive_path=archive, password=BUNDLE_PASSWORD,
+                                    scopes=(config_bundle.SCOPE_MEMORY,))
+
+    assert _memory_bodies(target) == [f"TGT body {i}" for i in range(7)]
+
+
+def test_import_rejects_a_scope_the_bundle_does_not_carry(tmp_path: Path) -> None:
+    source = _write_workspace(tmp_path / "source")
+    _unlock(source)
+    _seed_memory(source, marker="SRC")
+    archive = _export_scopes(source, (config_bundle.SCOPE_MEMORY,))
+
+    target = _write_workspace(tmp_path / "target")
+    _seed_memory(target, marker="TGT", rows=7)
+
+    with pytest.raises(ValueError, match="bundle_scope_not_in_package:config"):
+        config_bundle.import_bundle(
+            target,
+            archive_path=archive,
+            password=BUNDLE_PASSWORD,
+            scopes=(config_bundle.SCOPE_CONFIG, config_bundle.SCOPE_MEMORY),
+        )
+
+    assert _memory_bodies(target) == [f"TGT body {i}" for i in range(7)]
+
+
+def test_v2_bundle_without_scopes_still_imports_as_config_only(tmp_path: Path) -> None:
+    """已经导出过的 v2 文件不能因为我们多加了一面就失效。"""
+    source = _write_workspace(tmp_path / "source")
+    _unlock(source)
+    archive = _rescoped(_export_scopes(source, (config_bundle.SCOPE_CONFIG,)), version=2, scopes=None)
+
+    target = _write_workspace(tmp_path / "target")
+
+    item = config_bundle.import_bundle(target, archive_path=archive, password=BUNDLE_PASSWORD)
+
+    assert item["scopes"] == ["config"]
+    assert item["memory_entry_count"] == 0
+    assert json.loads((target / ".g3ku" / "config.json").read_text(encoding="utf-8"))["web"]["port"] == 18790
+
+
+def test_memory_entries_declared_config_only_are_rejected(tmp_path: Path) -> None:
+    """外层声明与条目不符（把记忆包伪装成 v2）整包拒，不能靠运气少写一面。"""
+    source = _write_workspace(tmp_path / "source")
+    _unlock(source)
+    _seed_memory(source, marker="SRC")
+    archive = _rescoped(_export_scopes(source, (config_bundle.SCOPE_MEMORY,)), version=2, scopes=None)
+
+    target = _write_workspace(tmp_path / "target")
+
+    with pytest.raises(ValueError, match="declared scopes"):
+        config_bundle.import_bundle(target, archive_path=archive, password=BUNDLE_PASSWORD)
+
+
+def test_memory_notes_land_on_the_targets_own_configured_paths(tmp_path: Path) -> None:
+    """包里只有逻辑名：目标机把 notes_dir 改到别处，正文要落去它自己算出来的那个目录。"""
+    source = _write_workspace(tmp_path / "source")
+    _unlock(source)
+    _seed_memory(source, marker="SRC")
+    archive = _export_scopes(source, (config_bundle.SCOPE_MEMORY,))
+
+    target = _write_workspace(tmp_path / "target")
+    mem = _seed_memory(target, marker="TGT")
+    shutil.rmtree(mem / "notes")
+    (mem / "private-notes").mkdir()
+    manifest = target / "tools" / "memory_runtime"
+    manifest.mkdir(parents=True)
+    (manifest / "resource.yaml").write_text(
+        "schema_version: 1\nkind: tool\nname: memory_runtime\nsettings:\n"
+        "  document:\n    memory_file: memory/MEMORY.md\n    notes_dir: memory/private-notes\n",
+        encoding="utf-8",
+    )
+
+    config_bundle.import_bundle(target, archive_path=archive, password=BUNDLE_PASSWORD,
+                                scopes=(config_bundle.SCOPE_MEMORY,))
+
+    assert (target / "memory" / "private-notes" / "note_alpha.md").read_text(encoding="utf-8").startswith("SRC")
+    assert not (target / "memory" / "notes").exists()
+
+
+def test_export_route_reports_scope_counts(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    workspace = _write_workspace(tmp_path / "source")
+    _unlock(workspace)
+    _seed_memory(workspace, marker="SRC")
+    monkeypatch.chdir(workspace)
+    client = _client()
+
+    config_only = client.post(
+        "/api/bootstrap/config-bundle/export",
+        json={"password": BUNDLE_PASSWORD, "use_project_password": False},
+    )
+    with_memory = client.post(
+        "/api/bootstrap/config-bundle/export",
+        json={
+            "password": BUNDLE_PASSWORD,
+            "use_project_password": False,
+            "include_config": False,
+            "include_memory": True,
+        },
+    )
+
+    assert config_only.json()["item"]["scopes"] == ["config"]
+    assert config_only.json()["item"]["memory_entry_count"] == 0
+    assert with_memory.json()["item"]["scopes"] == ["memory"]
+    assert with_memory.json()["item"]["memory_entry_count"] == len(MEMORY_KEYS)
+    assert with_memory.json()["item"]["config_entry_count"] == 0
+
+
+def test_export_route_rejects_a_bundle_with_nothing_checked(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    workspace = _write_workspace(tmp_path / "source")
+    _unlock(workspace)
+    monkeypatch.chdir(workspace)
+
+    empty = _client().post(
+        "/api/bootstrap/config-bundle/export",
+        json={"password": BUNDLE_PASSWORD, "include_config": False, "include_memory": False},
+    )
+
+    assert empty.status_code == 400
+    assert empty.json()["detail"] == "bundle_scope_empty"
+
+
+def test_import_route_applies_only_the_checked_scope(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    source = _write_workspace(tmp_path / "source")
+    _unlock(source)
+    _seed_memory(source, marker="SRC")
+    archive = Path(config_bundle.export_bundle(
+        source, password=BUNDLE_PASSWORD, use_project_password=False,
+        scopes=(config_bundle.SCOPE_CONFIG, config_bundle.SCOPE_MEMORY),
+    )["path"])
+
+    target = _write_workspace(tmp_path / "target")
+    (target / ".g3ku" / "config.json").write_text(
+        json.dumps({"web": {"port": 19001}, "resources": {"statePath": ".g3ku/resources.state.json"}}),
+        encoding="utf-8",
+    )
+    _seed_memory(target, marker="TGT", rows=7)
+    monkeypatch.chdir(target)
+    client = _client()
+
+    with archive.open("rb") as handle:
+        memory_only = client.post(
+            "/api/bootstrap/config-bundle/import",
+            data={"password": BUNDLE_PASSWORD, "include_config": "false", "include_memory": "true"},
+            files={"file": ("bundle.g3kucb", handle, "application/octet-stream")},
+        )
+
+    assert memory_only.status_code == 200
+    item = memory_only.json()["item"]
+    assert item["scopes"] == ["memory"]
+    assert item["memory_entry_count"] == len(MEMORY_KEYS)
+    assert item["restart_required"] is True
+    assert _memory_bodies(target) == _memory_bodies(source)
+    assert json.loads((target / ".g3ku" / "config.json").read_text(encoding="utf-8"))["web"]["port"] == 19001
+
+    with archive.open("rb") as handle:
+        refused = client.post(
+            "/api/bootstrap/config-bundle/import",
+            data={"password": BUNDLE_PASSWORD, "include_config": "false", "include_memory": "false"},
+            files={"file": ("bundle.g3kucb", handle, "application/octet-stream")},
+        )
+    assert refused.status_code == 400
+    assert refused.json()["detail"] == "bundle_scope_empty"
+

@@ -1,7 +1,8 @@
-"""口令加密的配置包：把一台部署的配置面导出成单文件，在另一台上还原。
+"""口令加密的配置包：把一台部署的配置面与记忆面导出成单文件，在另一台上还原。
 
-包内容只覆盖配置面（结构配置、provider 记录、密钥覆盖层、资源开关、治理库），
-不含任务、会话与取证数据。导出要求进程已解锁，因为包里必须带上主密钥本身。
+配置面（结构配置、provider 记录、密钥覆盖层、资源开关、治理库）和记忆面（记忆库、
+笔记正文、常驻镜像）是两颗独立勾选：没勾的一面既不进包也不落盘，勾上的面整体替换、
+不做合并。不含任务、会话与取证数据。导出要求进程已解锁，因为带配置面时包里必须有主密钥本身。
 """
 
 from __future__ import annotations
@@ -12,6 +13,7 @@ import os
 import shutil
 import sqlite3
 import tempfile
+from collections.abc import Sequence
 from contextlib import closing
 from datetime import UTC, datetime
 from pathlib import Path, PurePosixPath
@@ -20,6 +22,7 @@ from typing import Any
 from cryptography.fernet import InvalidToken
 
 from g3ku import __version__
+from g3ku.resources.tool_settings import MemoryRuntimeSettings, load_tool_settings_from_manifest
 from g3ku.security import (
     PASSWORD_KDF,
     derive_password_key,
@@ -29,18 +32,35 @@ from g3ku.security import (
 )
 
 BUNDLE_KIND = "g3ku-config-bundle"
-BUNDLE_VERSION = 2
+BUNDLE_VERSION = 3
+# v2 包只装配置面，继续认它：已经躺在操作员手上的文件不能因为我们多加了一面就失效。
+LEGACY_BUNDLE_VERSION = 2
+SUPPORTED_BUNDLE_VERSIONS = (LEGACY_BUNDLE_VERSION, BUNDLE_VERSION)
 BUNDLE_EXTENSION = ".g3kucb"
 BUNDLE_OUTPUT_DIR = ".g3ku/config-bundles"
 IMPORT_BACKUP_DIR = ".g3ku/config-bundle-imports"
 KEY_SOURCE_PROJECT_PASSWORD = "project_password"
 KEY_SOURCE_BUNDLE_PASSWORD = "bundle_password"
 
+SCOPE_CONFIG = "config"
+SCOPE_MEMORY = "memory"
+BUNDLE_SCOPES = (SCOPE_CONFIG, SCOPE_MEMORY)
+
 CONFIG_FILENAME = ".g3ku/config.json"
 RESOURCES_STATE_PATH = ".g3ku/resources.state.json"
 GOVERNANCE_STORE_PATH = ".g3ku/main-runtime/governance.sqlite3"
 SECRET_REALMS_DIR = ".g3ku/secret-realms"
 LLM_CONFIG_DIR = ".g3ku/llm-config"
+
+# 记忆面锚在运行时自己的 workspace 上，落点按 memory_runtime 清单跟随配置改写；
+# 包内只用下面这套逻辑名，导入时再映射回目标机自己算出来的路径。
+MEMORY_DIR_ROOT = "memory"
+MEMORY_MIRROR_KEY = "memory/MEMORY.md"
+MEMORY_STATE_DB_KEY = "memory/memory_state.sqlite3"
+MEMORY_NOTES_KEY = "memory/notes"
+MEMORY_INDEX_KEY = "memory/index"
+MEMORY_TOOL_NAME = "memory_runtime"
+MEMORY_NOTE_SUFFIXES = {".md"}
 
 # 信封锁的是源部署的登录口令，auto-unlock.key 是 bearer credential：两者都不进包，
 # 主密钥改由包内 payload 携带，导入时按包口令重新包裹。
@@ -49,6 +69,7 @@ SQLITE_SUFFIXES = {".sqlite3", ".db"}
 COMPANION_SUFFIXES = {".wal", ".shm"}
 
 CONFIG_BUNDLE_ROOT = ".g3ku"
+BUNDLE_ROOTS = (CONFIG_BUNDLE_ROOT, MEMORY_DIR_ROOT)
 
 
 def _now_iso() -> str:
@@ -113,6 +134,106 @@ def _relative_to(workspace: Path, path: Path) -> str:
     return path.resolve().relative_to(workspace.resolve()).as_posix()
 
 
+def _workspace_anchor(root: Path) -> Path:
+    """记忆与工具清单一律锚在 `agents.defaults.workspace`，不是包根的 cwd。
+
+    `g3ku/web/launcher.py` 启动时 chdir 到项目根，默认情况下两者重合；操作员改过这一项
+    时只有这个锚点能指到记忆真正在的目录，否则会导出一份空记忆而不是报错。
+    """
+    raw = str(_section(_section(_raw_config(root), "agents"), "defaults").get("workspace") or "").strip()
+    if not raw:
+        return root
+    path = Path(raw).expanduser()
+    return Path(os.path.normpath(str(path if path.is_absolute() else root / path)))
+
+
+def _memory_landing_paths(root: Path) -> dict[str, Path]:
+    """记忆面在这台机器上的四个落点，键就是包内逻辑名。"""
+    anchor = _workspace_anchor(root)
+    memory_file = MEMORY_MIRROR_KEY
+    notes_dir = MEMORY_NOTES_KEY
+    try:
+        # 清单缺失或读不动都回默认值：导入要能在还没走完解锁/种子流程的新设备上跑。
+        settings = load_tool_settings_from_manifest(anchor, MEMORY_TOOL_NAME, MemoryRuntimeSettings)
+        memory_file = str(settings.document.memory_file or "").strip() or memory_file
+        notes_dir = str(settings.document.notes_dir or "").strip() or notes_dir
+    except Exception:
+        pass
+    return {
+        MEMORY_MIRROR_KEY: anchor / memory_file,
+        MEMORY_STATE_DB_KEY: anchor / MEMORY_STATE_DB_KEY,
+        MEMORY_NOTES_KEY: anchor / notes_dir,
+        MEMORY_INDEX_KEY: anchor / MEMORY_INDEX_KEY,
+    }
+
+
+def _entry_scope(rel: str) -> str:
+    text = str(rel or "").strip().replace("\\", "/")
+    if text.startswith(f"{CONFIG_BUNDLE_ROOT}/"):
+        return SCOPE_CONFIG
+    if text.startswith(f"{MEMORY_DIR_ROOT}/"):
+        return SCOPE_MEMORY
+    return ""
+
+
+def _validate_scopes(scopes: Sequence[str] | None) -> tuple[str, ...]:
+    cleaned = {str(scope or "").strip().lower() for scope in (scopes or ())}
+    cleaned.discard("")
+    unknown = sorted(cleaned - set(BUNDLE_SCOPES))
+    if unknown:
+        raise ValueError(f"unknown bundle scope: {unknown[0]}")
+    if not cleaned:
+        raise ValueError("bundle_scope_empty")
+    return tuple(scope for scope in BUNDLE_SCOPES if scope in cleaned)
+
+
+def _envelope_scopes(envelope: dict[str, Any]) -> tuple[str, ...]:
+    if int(envelope.get("version") or 0) < BUNDLE_VERSION:
+        return (SCOPE_CONFIG,)
+    return _validate_scopes(envelope.get("scopes"))
+
+
+def _count_by_scope(rels: Sequence[str], scope: str) -> int:
+    return sum(1 for rel in rels if _entry_scope(rel) == scope)
+
+
+def _collect_config_entries(workspace: Path) -> dict[str, str]:
+    entries: dict[str, str] = {}
+    for path in _iter_source_files(workspace):
+        entries[_relative_to(workspace, path)] = _encode_file(path)
+    return entries
+
+
+def _collect_memory_entries(root: Path) -> dict[str, str]:
+    land = _memory_landing_paths(root)
+    entries: dict[str, str] = {}
+    for key in (MEMORY_MIRROR_KEY, MEMORY_STATE_DB_KEY):
+        path = land[key]
+        if path.is_file():
+            entries[key] = _encode_file(path)
+    if MEMORY_STATE_DB_KEY not in entries:
+        # 没有记忆库的"记忆面"会导出一份空知识，导入方却按整包替换理解它。
+        raise ValueError("bundle_memory_store_missing")
+    for key in (MEMORY_NOTES_KEY, MEMORY_INDEX_KEY):
+        directory = land[key]
+        if not directory.is_dir():
+            continue
+        for child in sorted(directory.iterdir()):
+            # 只带正文本体：`.bak.<stamp>` 是漂移取证，不是记忆。
+            if child.is_file() and child.suffix in MEMORY_NOTE_SUFFIXES:
+                entries[f"{key}/{child.name}"] = _encode_file(child)
+    return entries
+
+
+def _collect_entries(workspace: Path, scopes: tuple[str, ...]) -> dict[str, str]:
+    entries: dict[str, str] = {}
+    if SCOPE_CONFIG in scopes:
+        entries.update(_collect_config_entries(workspace))
+    if SCOPE_MEMORY in scopes:
+        entries.update(_collect_memory_entries(workspace))
+    return entries
+
+
 def _iter_source_files(workspace: Path) -> list[Path]:
     files: list[Path] = []
     for rel in bundle_paths(workspace):
@@ -154,13 +275,9 @@ def _restore_sqlite(blob: bytes, target: Path) -> None:
             read_conn.backup(write_conn)
 
 
-def _collect_entries(workspace: Path) -> dict[str, str]:
-    entries: dict[str, str] = {}
-    for path in _iter_source_files(workspace):
-        rel = _relative_to(workspace, path)
-        blob = _snapshot_sqlite(path) if path.suffix in SQLITE_SUFFIXES else path.read_bytes()
-        entries[rel] = base64.b64encode(blob).decode("ascii")
-    return entries
+def _encode_file(path: Path) -> str:
+    blob = _snapshot_sqlite(path) if path.suffix in SQLITE_SUFFIXES else path.read_bytes()
+    return base64.b64encode(blob).decode("ascii")
 
 
 def _validate_password(password: str) -> str:
@@ -175,15 +292,19 @@ def export_bundle(
     *,
     password: str = "",
     use_project_password: bool = True,
+    scopes: Sequence[str] | None = None,
 ) -> dict[str, Any]:
-    """Pack the config面 into one encrypted file.
+    """Pack the selected面 into one encrypted file.
 
-    With `use_project_password` the bundle key is the live master key and the
+    `scopes` decides what travels: 配置面 carries the wiring plus the master key,
+    记忆面 carries the memory store, its notes and the resident mirror. With
+    `use_project_password` the bundle key is the live master key and the
     password envelope travels inside the bundle, so the operator types nothing
     here and unlocks the import with their normal project password. The
     envelope is not secret material — it only turns a plaintext password into
     that key — so shipping it keeps the bundle protected by the password.
     """
+    clean_scopes = _validate_scopes(scopes if scopes is not None else (SCOPE_CONFIG,))
     root = (workspace or Path.cwd()).resolve()
     service = get_bootstrap_security_service(root)
     master_key = service.active_master_key()
@@ -205,13 +326,15 @@ def export_bundle(
 
     stamp = _stamp()
     created_at = _now_iso()
-    entries = _collect_entries(root)
-    payload = {
+    entries = _collect_entries(root, clean_scopes)
+    payload: dict[str, Any] = {
         "created_at": created_at,
         "workspace_label": root.name,
-        "master_key": master_key,
         "entries": entries,
     }
+    if SCOPE_CONFIG in clean_scopes:
+        # 只带记忆的包不必再拷一份主密钥：那面根本不动密钥，少一份副本就少一个泄漏面。
+        payload["master_key"] = master_key
     token = fernet_from_key(bundle_key).encrypt(
         json.dumps(payload, ensure_ascii=False, sort_keys=True).encode("utf-8")
     )
@@ -223,6 +346,7 @@ def export_bundle(
         "app_version": __version__,
         "created_at": created_at,
         "workspace_label": payload["workspace_label"],
+        "scopes": list(clean_scopes),
         "key_source": key_source,
         "kdf": {} if use_project_password else dict(PASSWORD_KDF),
         "salt_b64": base64.b64encode(salt).decode("ascii") if salt else "",
@@ -244,8 +368,11 @@ def export_bundle(
         "app_version": __version__,
         "workspace_label": payload["workspace_label"],
         "key_source": key_source,
+        "scopes": list(clean_scopes),
         "entries": sorted(entries),
         "entry_count": len(entries),
+        "config_entry_count": _count_by_scope(entries, SCOPE_CONFIG),
+        "memory_entry_count": _count_by_scope(entries, SCOPE_MEMORY),
         "bytes": path.stat().st_size,
     }
 
@@ -257,7 +384,7 @@ def _read_envelope(archive_path: Path) -> dict[str, Any]:
         raise ValueError("not a config bundle file") from exc
     if not isinstance(envelope, dict) or envelope.get("kind") != BUNDLE_KIND:
         raise ValueError("not a config bundle file")
-    if int(envelope.get("version") or 0) != BUNDLE_VERSION:
+    if int(envelope.get("version") or 0) not in SUPPORTED_BUNDLE_VERSIONS:
         raise ValueError("unsupported config bundle version")
     return envelope
 
@@ -289,21 +416,58 @@ def _decrypt_payload(envelope: dict[str, Any], password: str) -> dict[str, Any]:
 def _safe_relative_path(rel: str) -> PurePosixPath:
     text = str(rel or "").replace("\\", "/").strip()
     parts = PurePosixPath(text).parts
-    if not parts or parts[0] != CONFIG_BUNDLE_ROOT:
-        raise ValueError(f"bundle entry outside .g3ku rejected: {text}")
+    if not parts or parts[0] not in BUNDLE_ROOTS:
+        raise ValueError(f"bundle entry outside package roots rejected: {text}")
     if text.startswith("/") or ".." in parts or ":" in parts[0]:
         raise ValueError(f"unsafe bundle path rejected: {text}")
     return PurePosixPath(*parts)
 
 
-def _preflight(payload: dict[str, Any]) -> tuple[str, dict[str, str]]:
-    master_key = str(payload.get("master_key") or "").strip()
-    if not master_key:
-        raise ValueError("bundle carries no master key")
+def _memory_entry_target(land: dict[str, Path], rel: str) -> Path:
+    """包内逻辑名 → 这台机器的落点；路径由本机清单算，所以不跟包里的字节走。"""
+    for key, base in land.items():
+        if rel == key:
+            if key in (MEMORY_NOTES_KEY, MEMORY_INDEX_KEY):
+                raise ValueError(f"memory bundle entry must name a file: {rel}")
+            return base
+        prefix = f"{key}/"
+        if rel.startswith(prefix):
+            name = rel[len(prefix):]
+            if "/" in name or "\\" in name or ":" in name or name in {"", ".", ".."}:
+                raise ValueError(f"unsafe memory bundle path rejected: {rel}")
+            return base / name
+    raise ValueError(f"unsupported memory bundle path: {rel}")
+
+
+def _entry_targets(root: Path, rels: list[str]) -> dict[str, Path]:
+    land = _memory_landing_paths(root)
+    targets: dict[str, Path] = {}
+    for rel in rels:
+        pure = _safe_relative_path(rel)
+        targets[str(pure)] = (
+            _memory_entry_target(land, str(pure))
+            if _entry_scope(str(pure)) == SCOPE_MEMORY
+            else root.joinpath(*pure.parts)
+        )
+    return targets
+
+
+def _preflight(payload: dict[str, Any], scopes: tuple[str, ...]) -> tuple[str, list[str]]:
     entries = payload.get("entries")
     if not isinstance(entries, dict) or not entries:
-        raise ValueError("bundle carries no config files")
+        raise ValueError("bundle carries no files")
     targets = {str(key): _safe_relative_path(str(key)) for key in entries}
+    # 声明只有一面、条目却写着另一面：这种包要么是手工改过，要么版本对不上，整包拒。
+    foreign = [key for key in targets if _entry_scope(key) not in scopes]
+    if foreign:
+        raise ValueError(f"bundle entry does not match its declared scopes: {foreign[0]}")
+    rels = sorted(str(pure) for pure in targets.values())
+    master_key = str(payload.get("master_key") or "").strip()
+    if SCOPE_CONFIG not in scopes:
+        # 只导入记忆时一个密钥都不动，包里有没有主密钥因此与落盘无关。
+        return master_key, rels
+    if not master_key:
+        raise ValueError("bundle carries no master key")
     overlay = entries.get(f"{SECRET_REALMS_DIR}/default.enc")
     if overlay:
         # 先证伪：钥匙打不开覆盖层就整包拒绝，避免装出一个只读空视图的部署。
@@ -311,13 +475,12 @@ def _preflight(payload: dict[str, Any]) -> tuple[str, dict[str, str]]:
             fernet_from_key(master_key).decrypt(base64.b64decode(str(overlay)))
         except InvalidToken as exc:
             raise ValueError("bundle master key cannot decrypt its secret overlay") from exc
-    return master_key, targets
+    return master_key, rels
 
 
-def _backup_targets(workspace: Path, targets: dict[str, PurePosixPath], backup_root: Path) -> list[str]:
+def _backup_targets(targets: dict[str, Path], backup_root: Path) -> list[str]:
     backed_up: list[str] = []
-    for rel, pure in targets.items():
-        source = workspace.joinpath(*pure.parts)
+    for rel, source in targets.items():
         if not source.exists():
             continue
         destination = backup_root / rel
@@ -330,10 +493,10 @@ def _backup_targets(workspace: Path, targets: dict[str, PurePosixPath], backup_r
     return backed_up
 
 
-def _restore_backup(workspace: Path, backup_root: Path, backed_up: list[str]) -> None:
+def _restore_backup(backup_root: Path, targets: dict[str, Path], backed_up: list[str]) -> None:
     for rel in backed_up:
         source = backup_root / rel
-        target = workspace / rel
+        target = targets[rel]
         target.parent.mkdir(parents=True, exist_ok=True)
         if source.is_dir():
             shutil.copytree(source, target, dirs_exist_ok=True)
@@ -341,10 +504,9 @@ def _restore_backup(workspace: Path, backup_root: Path, backed_up: list[str]) ->
             shutil.copy2(source, target)
 
 
-def _write_entries(workspace: Path, entries: dict[str, str], targets: dict[str, PurePosixPath]) -> None:
-    for rel, pure in targets.items():
+def _write_entries(entries: dict[str, str], targets: dict[str, Path]) -> None:
+    for rel, target in targets.items():
         blob = base64.b64decode(str(entries[rel]))
-        target = workspace.joinpath(*pure.parts)
         if PurePosixPath(rel).suffix in SQLITE_SUFFIXES:
             _restore_sqlite(blob, target)
         else:
@@ -359,12 +521,15 @@ def import_bundle(
     archive_path: Path | str,
     password: str,
     current_password: str = "",
+    scopes: Sequence[str] | None = None,
 ) -> dict[str, Any]:
+    clean_scopes = _validate_scopes(scopes if scopes is not None else (SCOPE_CONFIG,))
     root = (workspace or Path.cwd()).resolve()
     security = get_bootstrap_security_service(root)
     # 本机已经有解锁口令时，导入先用它证身份，再用它重裹包里的新主密钥：
     # 「导入不改项目口令」是合同，而不是操作员要自己记住的副作用。
     # 没有口令（新装设备）才沿用包口令——那时包口令就是这台机器的第一个口令。
+    # 只带记忆同样过这道证明：往这台机写知识必须由知道本机口令的人发起。
     kept_password = ""
     if security.has_installed_envelope():
         clean_current = str(current_password or "")
@@ -375,31 +540,45 @@ def import_bundle(
         kept_password = clean_current
     envelope = _read_envelope(Path(archive_path))
     payload = _decrypt_payload(envelope, _validate_password(password))
-    master_key, targets = _preflight(payload)
-    entries = payload["entries"]
+    bundle_scopes = _envelope_scopes(envelope)
+    missing = [scope for scope in clean_scopes if scope not in bundle_scopes]
+    if missing:
+        # 勾了包里不存在的一面：宁可报错，也不能装出一个操作员以为"记忆已经带上"的空状态。
+        raise ValueError(f"bundle_scope_not_in_package:{missing[0]}")
+    master_key, declared_rels = _preflight(payload, bundle_scopes)
+    all_entries = payload["entries"]
+    applied_rels = [rel for rel in declared_rels if _entry_scope(rel) in clean_scopes]
+    entries = {rel: all_entries[rel] for rel in applied_rels}
+    targets = _entry_targets(root, applied_rels)
 
     backup_root = root / IMPORT_BACKUP_DIR / _stamp()
     backup_root.mkdir(parents=True, exist_ok=True)
-    backed_up = _backup_targets(root, targets, backup_root)
+    backed_up = _backup_targets(targets, backup_root)
+    status: dict[str, Any] | None = None
     try:
-        _write_entries(root, entries, targets)
-        status = security.install_master_key(
-            master_key=master_key,
-            password=kept_password or str(password),
-        )
+        _write_entries(entries, targets)
+        if SCOPE_CONFIG in clean_scopes:
+            status = security.install_master_key(
+                master_key=master_key,
+                password=kept_password or str(password),
+            )
     except Exception:
-        _restore_backup(root, backup_root, backed_up)
+        _restore_backup(backup_root, targets, backed_up)
         raise
     return {
         "entries": sorted(targets),
         "entry_count": len(targets),
+        "scopes": list(clean_scopes),
+        "config_entry_count": _count_by_scope(targets, SCOPE_CONFIG),
+        "memory_entry_count": _count_by_scope(targets, SCOPE_MEMORY),
         "backup_dir": str(backup_root),
         "created_at": str(payload.get("created_at") or ""),
         "workspace_label": str(payload.get("workspace_label") or ""),
         "source_app_version": str(envelope.get("app_version") or ""),
         "local_app_version": __version__,
         "key_source": str(envelope.get("key_source") or ""),
-        "password_kept": bool(kept_password),
+        # 没带配置面的包碰不到钥匙，"解锁口令保持不变"对它同样成立，界面照这句念。
+        "password_kept": bool(kept_password) or SCOPE_CONFIG not in clean_scopes,
         "status": status,
     }
 
@@ -407,9 +586,12 @@ def import_bundle(
 __all__ = [
     "BUNDLE_EXTENSION",
     "BUNDLE_KIND",
+    "BUNDLE_SCOPES",
     "IMPORT_BACKUP_DIR",
     "KEY_SOURCE_BUNDLE_PASSWORD",
     "KEY_SOURCE_PROJECT_PASSWORD",
+    "SCOPE_CONFIG",
+    "SCOPE_MEMORY",
     "bundle_paths",
     "export_bundle",
     "import_bundle",
