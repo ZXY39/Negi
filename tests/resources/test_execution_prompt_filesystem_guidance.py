@@ -87,7 +87,7 @@ def test_prompts_require_stage_summary_to_cover_facts_goals_and_lessons() -> Non
         "main/prompts/acceptance_execution.md",
     ):
         prompt = _lane_prompt(relative_path)
-        assert "`completed_stage_summary` 必须是对本阶段的简要概括" in prompt
+        assert "`completed_stage_summary` 必须是对刚结束那条阶段的简要概括" in prompt
         assert "本阶段已确认的事实" in prompt
         assert "剩下的目标" in prompt
         assert "从犯过的错误中总结出的经验教训" in prompt
