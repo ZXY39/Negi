@@ -6148,7 +6148,7 @@ class MainRuntimeService:
             'machine_cpu_safe_percent': max(0.0, float(getattr(parallelism, 'adaptive_machine_cpu_safe_percent', 55.0) or 55.0)),
             'machine_cpu_critical_percent': max(0.0, float(getattr(parallelism, 'adaptive_machine_cpu_critical_percent', 95.0) or 95.0)),
             'machine_memory_warn_percent': max(0.0, float(getattr(parallelism, 'adaptive_machine_memory_warn_percent', 88.0) or 88.0)),
-            'machine_memory_safe_percent': max(0.0, float(getattr(parallelism, 'adaptive_machine_memory_safe_percent', 95.0) or 95.0)),
+            'machine_memory_safe_percent': max(0.0, float(getattr(parallelism, 'adaptive_machine_memory_safe_percent', 75.0) or 75.0)),
             'machine_memory_critical_percent': max(0.0, float(getattr(parallelism, 'adaptive_machine_memory_critical_percent', 94.0) or 94.0)),
             'machine_disk_busy_warn_percent': max(0.0, float(getattr(parallelism, 'adaptive_machine_disk_busy_warn_percent', 70.0) or 70.0)),
             'machine_disk_busy_safe_percent': max(0.0, float(getattr(parallelism, 'adaptive_machine_disk_busy_safe_percent', 35.0) or 35.0)),

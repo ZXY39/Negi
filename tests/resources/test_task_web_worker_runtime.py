@@ -2316,7 +2316,22 @@ def test_worker_status_payload_preserves_easing_state_and_zero_target_limit(tmp_
 def test_adaptive_tool_budget_settings_default_safe_window_is_three() -> None:
     settings = MainRuntimeService._adaptive_tool_budget_settings(None)
     assert settings["safe_consecutive_samples"] == 3
-    assert settings["machine_memory_safe_percent"] == 95.0
+    assert settings["machine_memory_safe_percent"] == 75.0
+
+
+def test_adaptive_machine_pressure_defaults_keep_the_three_state_ladder() -> None:
+    """safe < warn < critical 是读数分档的前提。
+
+    safe 高于 warn 时 `machine_safe` 在 warn/critical 区间照样成立，机器侧降档
+    闸门永不生效——内存这条轴曾经这样躺着。
+    """
+    settings = MainRuntimeService._adaptive_tool_budget_settings(None)
+
+    for axis in ("machine_cpu", "machine_memory", "machine_disk_busy"):
+        safe = settings[f"{axis}_safe_percent"]
+        warn = settings[f"{axis}_warn_percent"]
+        critical = settings[f"{axis}_critical_percent"]
+        assert safe < warn < critical, f"{axis}: {safe}/{warn}/{critical}"
 
 
 def test_web_mode_worker_online_uses_relaxed_stale_window(tmp_path: Path):

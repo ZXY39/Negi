@@ -569,7 +569,10 @@ class NodeParallelismConfig(Base):
     adaptive_machine_cpu_safe_percent: float = 55.0
     adaptive_machine_cpu_critical_percent: float = 95.0
     adaptive_machine_memory_warn_percent: float = 88.0
-    adaptive_machine_memory_safe_percent: float = 95.0
+    # safe 必须在 warn 之下，三条轴同形（cpu 55/85、disk 35/70、sqlite 50/200）。
+    # 原先写 95.0，比 critical(94.0) 还高：`machine_safe` 判 `memory <= 95`，
+    # 于是内存这条轴的"已恢复"读数在 warn/critical 区间也成立，机器侧降档闸门永不生效。
+    adaptive_machine_memory_safe_percent: float = 75.0
     adaptive_machine_memory_critical_percent: float = 94.0
     adaptive_machine_disk_busy_warn_percent: float = 70.0
     adaptive_machine_disk_busy_safe_percent: float = 35.0

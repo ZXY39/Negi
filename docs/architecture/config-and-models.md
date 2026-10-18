@@ -119,6 +119,8 @@
 
 白名单对可选字段按「调过才落盘」写：与默认值相同的字段不落盘（不给操作员文件加噪声，存量文件也不会因此长出键），只有被改动的字段进文件，读侧由 pydantic 补回其余默认值。当前按该形状落盘的有 `agents.nodeParallelism`、`agents.toolDefaultTimeoutSeconds`、`mainRuntime.diskGuard`、`mainRuntime.duplicatePrecheck`、`mainRuntime.eventHistory`、`updateCheck`、非空时才落盘的 `models.loadBalanceGroups`，以及 `models.catalog[].reasoningContextEnabled`（这颗开关默认开，只有被操作员关掉的那一行写 `false`——它不落盘就等于下次保存把网关会 400 的那一行重新打开）。
 
+`agents.nodeParallelism` 里的机器压力读数分档是 `safe < warn < critical`，三条轴（cpu、memory、disk busy）同形，`tool_pressure_monitor` 按这个顺序把样本分成 `normal / warn / critical`，并要求连续 `safe` 采样才算机器侧恢复。写反的档位不会报错，只会静默失效：`machine_safe` 判的是 `读数 <= safe`，一旦 `safe` 高于 `warn`/`critical`，warn 与 critical 区间照样读成"已恢复"，机器侧那半条降档闸门就永远不落地。默认值由 `tests/resources/test_task_web_worker_runtime.py` 的分档用例钉住，改这三组数字要一起过它。
+
 「运行时字段显式性校验」要求白名单里每个叶子都在 `config.json` 出现，缺一个就拒绝加载。豁免前缀（`providers`、`mainRuntime`、`externalApi`、`qqBot`、`cron`、`stt`、`contextRefresh`、`agents.nodeParallelism`、`agents.toolDefaultTimeoutSeconds`、`updateCheck`、`models.loadBalanceGroups`）承担两类情况：存量文件本来没有这些节，以及取值可能来自 `G3KU_*` 环境变量而不是配置文件——被豁免的节没写就是不用，回落到 schema 默认。新增字段时两个判断都要重做：进不进白名单（决定它会不会被保存抹掉），要不要进豁免前缀（决定老文件还能不能加载）。
 
 ## 4. 配置热刷新
