@@ -39,7 +39,6 @@ from g3ku.agent.markdown_memory import (
     split_consolidation_block,
     validate_memory_document,
 )
-from g3ku.agent.memory_content_guard import scan_memory_candidate
 from g3ku.config.live_runtime import get_runtime_config
 from g3ku.providers.base import normalize_usage_payload
 from g3ku.providers.chatmodels import build_chat_model
@@ -5458,31 +5457,28 @@ class MemoryManager:
         decision_source: str,
         trigger_source: str,
     ) -> list[MemoryQueueRequest]:
-        """复核窗口入队的唯一出口：超容量就拆成多条 pending 行，逐条消化。"""
+        """复核窗口入队的唯一出口：超容量就拆成多条 pending 行，逐条消化。
+
+        入队侧不做载荷内容判定：一条记忆该不该成立归内部 memory agent，谁能把内容写进
+        这份共享前缀由审批模式与 RBAC 决定，不是一张正则表能替它回答的问题。
+        """
 
         max_tokens = self._memory_window_split_target_tokens()
         requests: list[MemoryQueueRequest] = []
-        blocked_rules: list[str] = []
         for piece in self._split_window_payload(payload_text, max_tokens=max_tokens):
             if not str(piece or "").strip():
                 continue
-            request = MemoryQueueRequest(
-                op="write",
-                decision_source=decision_source,
-                payload_text=piece,
-                created_at=self._now_iso(),
-                request_id=self._request_id("write"),
-                session_key=str(session_key or "").strip(),
-                trigger_source=trigger_source,
+            requests.append(
+                MemoryQueueRequest(
+                    op="write",
+                    decision_source=decision_source,
+                    payload_text=piece,
+                    created_at=self._now_iso(),
+                    request_id=self._request_id("write"),
+                    session_key=str(session_key or "").strip(),
+                    trigger_source=trigger_source,
+                )
             )
-            blocked, rule = scan_memory_candidate(piece)
-            if blocked:
-                # No model is waiting on this lane, so the piece is dropped here and
-                # only the ledger keeps the record.
-                self._reject_blocked_candidate(request, rule)
-                blocked_rules.append(rule)
-                continue
-            requests.append(request)
         for request in requests:
             await self._append_queue_request(request)
         if len(requests) > 1:
@@ -5491,13 +5487,6 @@ class MemoryManager:
                 len(requests),
                 str(session_key or "").strip(),
                 max_tokens,
-            )
-        if blocked_rules:
-            logger.warning(
-                "复核窗口有 {} 片被内容闸门拦下（rules={}）：session={}",
-                len(blocked_rules),
-                ",".join(sorted(set(blocked_rules))),
-                str(session_key or "").strip(),
             )
         return requests
 
@@ -5658,30 +5647,6 @@ class MemoryManager:
             return
         self._pop_review_session_state(session_key=normalized_session)
 
-    def _reject_blocked_candidate(self, request: MemoryQueueRequest, rule: str) -> dict[str, Any]:
-        """Keep a blocked candidate out of the queue, but not out of the ledger.
-
-        An enqueue-side refusal has no batch behind it, so the terminal row is written
-        from the single request: without it, "how much did the guard swallow, and what"
-        is unanswerable and a rule that misfires looks like silent memory amnesia.
-        """
-        processed_at = self._now_iso()
-        self._append_terminal_history(
-            batch=MemoryBatch(op=request.op, items=[request]),
-            status="discarded",
-            op=request.op,
-            processed_at=processed_at,
-            discard_reason="content_guard_blocked",
-            error=f"content guard blocked this candidate (rule: {rule}); it was never queued",
-        )
-        return {
-            "ok": False,
-            "status": "blocked",
-            "error": "content_guard_blocked",
-            "rule": rule,
-            "request_id": request.request_id,
-        }
-
     async def enqueue_operator_request(
         self,
         *,
@@ -5693,9 +5658,11 @@ class MemoryManager:
     ) -> dict[str, Any]:
         """The one door every memory write goes through, operator page included.
 
-        Two doors meant two sets of gates: the content scan, the capacity ladder, the ledger
-        row with before/after text and the note-ownership axes all lived on the queue side
+        Two doors meant two sets of gates: the capacity ladder, the ledger row with
+        before/after text and the note-ownership axes all lived on the queue side
         only. This is the shared entry; nothing writes the store from a request handler.
+        Admission is not decided here: the batch's own contract and the internal memory
+        agent own that judgement, and approval mode plus RBAC own who may submit at all.
         """
         normalized_op = str(op or "write").strip().lower()
         if normalized_op not in {"write", "delete"}:
@@ -5712,9 +5679,6 @@ class MemoryManager:
             trigger_source=str(trigger_source or "").strip(),
             request_id=self._request_id(normalized_op),
         )
-        blocked, rule = scan_memory_candidate(request.payload_text)
-        if blocked:
-            return self._reject_blocked_candidate(request, rule)
         await self._append_queue_request(request)
         return {"ok": True, "request_id": request.request_id, "status": "queued"}
 

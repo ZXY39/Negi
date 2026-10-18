@@ -280,23 +280,6 @@ test("memory_update queues into a memory notice instead of a tool row", () => {
     assert.equal(notice.children[2].className, "ceo-context-load-notice-risk-dot risk-low");
 });
 
-test("a content-guard refusal is announced with its rule and the high-risk dot", () => {
-    const { S, createPendingCeoTurn, maybeShowCeoContextLoadNotice, U } = loadApp();
-    const turn = createPendingCeoTurn("user");
-
-    const shown = maybeShowCeoContextLoadNotice(turn, {
-        toolName: "memory_update",
-        status: "success",
-        detailTexts: ['{"ok":false,"status":"blocked","error":"content_guard_blocked","rule":"impersonate_system","request_id":"write_cd34ef"}'],
-    });
-
-    assert.equal(shown, true);
-    const notice = U.ceoContextLoadNotice.children[0];
-    assert.match(notice.children[1].textContent, /被内容闸门拦下/);
-    assert.match(notice.children[1].textContent, /impersonate_system/);
-    assert.equal(notice.children[2].className, "ceo-context-load-notice-risk-dot risk-high");
-});
-
 test("an empty memory request says it was not queued", () => {
     const { S, createPendingCeoTurn, maybeShowCeoContextLoadNotice, U } = loadApp();
     const turn = createPendingCeoTurn("user");

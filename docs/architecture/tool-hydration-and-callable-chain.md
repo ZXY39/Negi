@@ -92,7 +92,7 @@
 - `read_completed_stage` **不存在的教训**：前门曾打算加一个按 `stage_index` 读回已裁撤阶段的内置工具，实盘验证否掉了——送给 provider 的工具 schema 由 `_selected_tool_schemas` 用 `loop.tools.get(name)` 从**全局**注册表解析，工具必须先在注册表里存在才可能进 schema（`bootstrap_bridge.register_default_tools` 里给 `silent` 写的那句注释就是这条），而阶段账本是每会话的：把带闭包的实例注册进全局表会让 A 会话的账本被 B 会话读到。最终形态是裁撤时导档 + 块带 `archive_ref` + `content_open` 回读，机制见 `runtime-overview.md`「stage_compaction」。要加前门内置工具时必须同时满足两点：全局注册表里有可解析的实例，且该实例不携带任何会话态。
 - 同一套 notice 车道覆盖 `memory_note` 与 `memory_update`：这两类“模型对上下文动一次手”的调用都不在阶段卡里画工具行，改成右上角那条 live-only pill。
   读笔记显示 `已加载 note:<句柄>`（kind=`note`、图标 `notebook-pen`、那颗点用品牌青 `#39c5bb`，因为读一份笔记不携带任何风险度含义）。
-  写记忆按入队门返回的真实结局分三档（kind=`memory`、图标 `brain`）：`已入队 <request_id>` 用 risk-low、内容为空没入队用 risk-medium、被内容闸门拦下用 risk-high 并把规则名写进文案。
+  写记忆按入队门返回的真实结局分两档（kind=`memory`、图标 `brain`）：`已入队 <request_id>` 用 risk-low、内容为空没入队用 risk-medium。入队门不做内容判定，所以 pill 上没有"被拒绝"这一档。
   pill 承诺的只是入队，成不成由记忆 worker 判定，所以文案里不许出现“已记住”；载荷读不出 `status` 时 pill 直接不出现。
   工具级失败（`status=error`）两种 kind 都不出 pill，行仍按普通工具渲染。
 - `load_tool_context` / `load_skill_context` 属于上下文加载型工具调用：写入 round 历史，但不增加当前阶段的 `tool_rounds_used`；节点与 CEO/frontdoor 记账同一规则，预算结论只看 `rounds[*].budget_counted` 与聚合后的 `tool_rounds_used`，不按 transcript 里的 loader 调用次数自行推断。CEO UI 上，成功 loader 调用在输入框上方显示短暂的 live-only notice（尽量带 `tool_id` / `skill_id`），不作为长期保留的工具步骤；loader 失败时仍优先检查原始 round/tool 数据与 runtime snapshot。
