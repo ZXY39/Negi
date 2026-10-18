@@ -2587,9 +2587,20 @@ class RuntimeAgentSession:
         （见 external_turns 模块 docstring）。
 
         自动压缩不算 hold：它在回合内部跑，那时本来就有回合在跑，判成 hold 会让自动车道
-        自己等自己。"""
+        自己等自己。
+
+        还有一个窗口只看 running 也漏：`_prompt_locked` 成功路径在 persist 转录之前就把
+        `is_running`/`status` 复位，之后才做压缩后的 memory review 冲刷并 emit
+        `message_end`——这段尾慢时（实盘 196.8s：2026-10-18 23:02 ext:qq-official 会话）
+        会话与空闲同形，但 `_turn_lock` 仍被本回合持有。窗口内 submit 走 started 起了
+        并发回合，其 executor 的 relay 与本回合 relay 同收一次 `message_end`，同一条
+        reply.final 双登记双投递（outbox 两条不同 id，闸门拦不住）。所以锁被持有也判
+        hold：窗口内的新消息回到 follow-up 排队，由仍在跑的回合链自己排水投递。"""
         status = str(getattr(self._state, "status", "") or "").strip().lower()
         if bool(getattr(self._state, "is_running", False)) or status == "running":
+            return "turn_running"
+        turn_lock = getattr(self, "_turn_lock", None)
+        if turn_lock is not None and turn_lock.locked():
             return "turn_running"
         manual = getattr(self, MANUAL_COMPRESSION_STATE_ATTR, None)
         if isinstance(manual, dict) and str(manual.get("status") or "").strip().lower() == MANUAL_COMPRESSION_RUNNING:

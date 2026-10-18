@@ -700,7 +700,7 @@ token preflight 估算、触发阈值、`effective_input_tokens` 真相车道、
 
 - 内联压缩进行中手动 pause 对该可见轮次是终态：运行时取消活跃的压缩生成，丢弃迟到的压缩结果，不让它更新基线或继续进入主 provider 发送。
 - 下一次激活（新用户输入、heartbeat 唤醒等）必须以当时的模型链与上下文窗口重新走 prepare → estimate → 可选压缩 → send。
-- 手动压缩跑在回合外，且只在点击那一刻会话正在跑时才先 pause，所以"压缩在途"在会话状态上表现为一个空闲会话（`is_running`/`status` 全为 false）。入站因此不能只问 running：`RuntimeAgentSession.frontdoor_inbound_hold()` 是它的超集，额外认手动压缩的运行态；自动压缩不算 hold（它跑在回合内，那时本来就有回合在跑，判成 hold 会让自动车道自己等自己）。
+- 手动压缩跑在回合外，且只在点击那一刻会话正在跑时才先 pause，所以"压缩在途"在会话状态上表现为一个空闲会话（`is_running`/`status` 全为 false）。收尾尾段是第二个空闲同形窗口：`_prompt_locked` 的成功路径在 persist 转录之前就复位 `is_running`/`status`，之后才做压缩后的 memory review 冲刷并 emit `message_end`，这段尾慢时（长会话上可达分钟级）`_turn_lock` 仍被本回合持有。入站因此不能只问 running：`RuntimeAgentSession.frontdoor_inbound_hold()` 是它的超集，额外认手动压缩的运行态与"回合锁仍被持有"；窗口内到达的入站走排队，由仍在跑的回合链自己排水投递——否则并发回合的 relay 与本回合 relay 同收一次 `message_end`，同一条 reply.final 双登记双投递（outbox 两条不同 id，账本侧判重拦不住）。自动压缩不算 hold（它跑在回合内，那时本来就有回合在跑，判成 hold 会让自动车道自己等自己）。
 - 三条入站车道问同一个判定，命中就绝不起回合：web WS 转入候选队列（`queue_follow_up_batch`）、渠道 `/api/v1`（QQ 官方 / onebot / openai-compat 都回环到这里）转入排队回执、heartbeat 沿用"忙则改期"。cron 刻意不加闸门：定时投递没有"稍后再说"的操作语义，排队等于把提醒改期到不可预期；它起的回合由下面的代号仲裁兜住，最坏情况是这一次压缩拒写而不是丢一次投递。
 - durable 基线每前进一次换一代（`_frontdoor_baseline_revision`，只在唯一前进点递增）。手动压缩记下读取输入时的代号，落盘前对不上就不写，并回报 `baseline_advanced`：不落"已压缩"区分线，UI 给专门的文案让人等这条回复结束后再压一次。
 - 为什么闸门还不够、必须再加代号：闸门只挡得住"压缩开始后到达的消息"，挡不住"压缩开始时已经在跑的回合"。渠道回合的任务刻意注册在 `None` 键上（真实键会让 pause 的 `cancel_session_tasks` 自我 gather 死锁），因此 pause 既停不掉它也等不到它，它照常会在摘要落盘之后用压缩前的种子把基线写回去。那种覆盖连摘要里的阶段收口水位线选择器一起抹掉，后果是压缩白做且收口也无从应用。宁可不缩，也不写一份"声称缩小、实际回退"的基线。

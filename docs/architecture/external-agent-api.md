@@ -36,7 +36,7 @@
 
 ## 4. 回合契约
 
-- `POST /sessions/{id}/messages` 异步提交：空闲 → 启动回合并返回 `{turn_id, status:"started"}`；会话被 hold（有回合在跑，**或该会话正在跑一次手动上下文压缩**）→ `queue_follow_up_batch` 排队并返回 `{status:"queued", receipt:"收到，将在当前任务中一并处理。", running_turn_id, queued_position}`。后两个字段是给调用方在**提交那一刻**分辨"追加还是撞车"用的：`running_turn_id` 就是你排在后面的那个回合（要停它走 `pause`/`cancel`），`queued_position` 是入队后的序号。渠道不因此丢消息：排队条目以转录 `pending` 行为 durable 记录，会话回到空闲后由派发通道发出（合同见 `runtime-overview.md`「压缩窗口：入站闸门与基线写入仲裁」）。
+- `POST /sessions/{id}/messages` 异步提交：空闲 → 启动回合并返回 `{turn_id, status:"started"}`；会话被 hold（有回合在跑、该会话正在跑一次手动上下文压缩，**或上一回合的收尾尾段仍在进行——running 已复位但回合锁仍持有**）→ `queue_follow_up_batch` 排队并返回 `{status:"queued", receipt:"收到，将在当前任务中一并处理。", running_turn_id, queued_position}`。后两个字段是给调用方在**提交那一刻**分辨"追加还是撞车"用的：`running_turn_id` 就是你排在后面的那个回合（要停它走 `pause`/`cancel`），`queued_position` 是入队后的序号。渠道不因此丢消息：排队条目以转录 `pending` 行为 durable 记录，会话回到空闲后由派发通道发出（合同见 `runtime-overview.md`「压缩窗口：入站闸门与基线写入仲裁」）。
 - `GET /sessions/{id}/state` 除运行档位外，还给"在不在动 / 在做什么 / 有没有在跑的任务 / 这轮怎么结束的"四档读数，合同与时间形状纪律见本节末「会话状态读数」。
 - `GET /sessions/{id}/turns/{turn_id}` 按回合 id 回读**转录里那一行的可见原文**（`text`/`created_at`/`usage`/`task_ids`/`source`/`silent_reply`）。判据是 assistant 行上的顶层 `turn_id`（落盘时写入），**它不等于外部提交回包里的 `turn_id`**——调用方要用 `reply.final` 带出的 `transcript_turn_id`，所以它 durable：调用方自己的上下文被压缩之后仍能取回原文。没有转录 → 404 `session_not_found`；有转录但该回合没存过 → 404 `turn_not_found`。内存里的 `TurnRecord` 只留 256 条终态记录且会淘汰，**不能**当历史读口用。
 - 执行走 `SessionRuntimeBridge.prompt/prompt_batch`（与 web/CLI/cron 同一语义基座）。

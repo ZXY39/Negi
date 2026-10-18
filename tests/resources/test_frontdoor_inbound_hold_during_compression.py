@@ -3,7 +3,8 @@
 钉住的合同（docs/FIX_PLAN_frontdoor-inbound-hold-during-compression.md）：
 
 - `frontdoor_inbound_hold` 是 `session_is_running` 的超集：有回合在跑 → `turn_running`；
-  手动压缩在跑 → `manual_context_compression`；自动压缩（跑在回合内）不算额外状态。
+  手动压缩在跑 → `manual_context_compression`；自动压缩（跑在回合内）不算额外状态；
+  收尾尾段（`is_running` 已复位但 `_turn_lock` 仍被本回合持有）→ `turn_running`。
 - 渠道车道（`/api/v1`，QQ 官方/onebot/openai-compat 都回环到这里）在 hold 期间
   必须走既有的排队分支：`{"status": "queued", "receipt": ...}` + `queue_follow_up_batch`，
   且一次 `prompt` 都不许发生；空闲后照常起回合。
@@ -213,7 +214,9 @@ async def test_channel_message_during_compression_queues_instead_of_starting_tur
         idempotency_key="k-d1",
     )
 
-    assert result == {"turn_id": None, "status": "queued", "receipt": QUEUED_RECEIPT_TEXT}
+    assert result["status"] == "queued"
+    assert result["turn_id"] is None
+    assert result["receipt"] == QUEUED_RECEIPT_TEXT
     assert session.queued == ["告诉我你的上下文结构"]
     assert session.queue_persist_flags == [True]
     assert bridge.prompts == [] and bridge.batches == []
@@ -262,6 +265,25 @@ def test_real_session_predicate_round_trips(tmp_path: Path) -> None:
     assert session.frontdoor_inbound_hold() == "manual_context_compression"
     session.state.is_running = True
     assert session.frontdoor_inbound_hold() == "turn_running"
+
+
+@pytest.mark.asyncio
+async def test_finalize_tail_with_released_running_state_still_holds_inbound(
+    tmp_path: Path,
+) -> None:
+    """2026-10-18 23:02 实盘事故（ext:qq-official:f8a8001865631301）：`_prompt_locked`
+    成功路径在 persist 转录之前就复位 `is_running`/`status`，之后才做压缩后的 memory
+    review 冲刷（实盘 196.4s）并 emit `message_end`。这个窗口里会话与空闲同形，但
+    `_turn_lock` 仍被本回合持有——入站必须仍判 hold，让新消息回 follow-up 排队由
+    仍在跑的回合链投递，而不是起并发回合把同一条 reply.final 双登记双投递。"""
+    session = _real_session(tmp_path, "ext:test-bridge:hold-finalize-tail")
+    async with session._turn_lock:
+        # 收尾尾段的形状：running 状态已复位，锁还在本回合手里。
+        session._state.is_running = False
+        session._state.status = "completed"
+        assert session.frontdoor_inbound_hold() == "turn_running"
+
+    assert session.frontdoor_inbound_hold() == ""
 
 
 # -- e) 队列的 durable 那一半：pending 行可重放 --------------------------------
