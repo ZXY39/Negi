@@ -94,11 +94,7 @@ def _cleanup_repository_legacy_default_parameters(facade: LLMConfigFacade) -> bo
                 "updated_at": datetime.now(UTC),
             }
         )
-        facade.repository.save(
-            facade._sanitize_record_for_storage(updated_record),
-            last_probe_status=summary.last_probe_status,
-        )
-        facade._store_record_secrets(updated_record)
+        facade._persist_record(updated_record, last_probe_status=summary.last_probe_status)
         changed = True
     return changed
 
@@ -143,11 +139,7 @@ def _migrate_custom_provider_records(facade: LLMConfigFacade) -> bool:
         except Exception:
             continue
         updated = record.model_copy(update={"updated_at": datetime.now(UTC)})
-        facade.repository.save(
-            facade._sanitize_record_for_storage(updated),
-            last_probe_status=summary.last_probe_status,
-        )
-        facade._store_record_secrets(updated)
+        facade._persist_record(updated, last_probe_status=summary.last_probe_status)
         changed = True
     return changed
 
@@ -234,9 +226,7 @@ def _build_record(
         created_at=existing.created_at if existing is not None else now,
         updated_at=now,
     )
-    facade.repository.save(facade._sanitize_record_for_storage(record), last_probe_status=None)
-    # 与 create/update 两条正常车道同序：密钥进加密覆盖层，盘上那份不带它。
-    facade._store_record_secrets(record)
+    facade._persist_record(record)
     return record.config_id
 
 

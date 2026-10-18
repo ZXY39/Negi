@@ -179,8 +179,7 @@ class LLMConfigFacade:
         )
         # 保存只做字段校验与落盘，不发真实推理：`last_probe_status=None` 表示这份配置
         # 还没被测过，落一次盘不会把旧的探测结果继续挂在新内容上。
-        self.repository.save(self._sanitize_record_for_storage(normalized), last_probe_status=None)
-        self._store_record_secrets(normalized)
+        self._persist_record(normalized)
         return self.get_config_record(normalized.config_id, include_secrets=True)
 
     def update_config_record(self, config_id: str, payload: dict[str, Any]) -> dict[str, Any]:
@@ -199,8 +198,7 @@ class LLMConfigFacade:
                 "updated_at": datetime.now(UTC),
             }
         )
-        self.repository.save(self._sanitize_record_for_storage(updated), last_probe_status=None)
-        self._store_record_secrets(updated)
+        self._persist_record(updated)
         return self.get_config_record(updated.config_id, include_secrets=True)
 
     def delete_config_record(self, config_id: str) -> None:
@@ -372,8 +370,7 @@ class LLMConfigFacade:
                 "updated_at": datetime.now(UTC),
             }
         )
-        self.repository.save(self._sanitize_record_for_storage(updated), last_probe_status=None)
-        self._store_record_secrets(updated)
+        self._persist_record(updated)
         binding.context_window_tokens = self._binding_context_window_tokens(updated)
         binding.request_timeout_seconds = self._binding_request_timeout_seconds(updated)
         return self.get_binding(config, model_key)
@@ -565,9 +562,14 @@ class LLMConfigFacade:
             next_headers = dict(headers_value)
         return record.model_copy(update={"auth": next_auth, "headers": next_headers})
 
-    def _store_record_secrets(self, record: NormalizedProviderConfig) -> None:
+    def _store_record_secrets(self, record: NormalizedProviderConfig) -> bool:
+        """把钥匙与请求头交给加密覆盖层；返回"覆盖层到底收没收"。
+
+        项目锁定时覆盖层写不进去，此时**不能**再清洗盘上那份——清洗了就是两头都没有，
+        模型直接变成"API key is required"。调用方一律走 `_persist_record`，判据只有一处。
+        """
         if not self.security.is_unlocked():
-            return
+            return False
         auth_payload = dict(record.auth)
         headers_payload = dict(record.headers)
         updates: dict[str, Any] = {}
@@ -580,6 +582,17 @@ class LLMConfigFacade:
         else:
             updates[self._llm_headers_overlay_key(record.config_id)] = None
         self.security.set_overlay_values(updates)
+        return True
+
+    def _persist_record(
+        self, record: NormalizedProviderConfig, *, last_probe_status: Any = None
+    ) -> Any:
+        """一条凭据记录唯一的落盘口：密钥先进覆盖层，收下了才把不带钥匙的那份写盘。"""
+        stored = self._store_record_secrets(record)
+        return self.repository.save(
+            self._sanitize_record_for_storage(record) if stored else record,
+            last_probe_status=last_probe_status,
+        )
 
     @staticmethod
     def _validate_binding_api_key_limits(

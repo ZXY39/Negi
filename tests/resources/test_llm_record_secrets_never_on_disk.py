@@ -1,9 +1,9 @@
-"""凭据记录落盘必须先去钥匙：明文 api_key 不许进 `records/*.json`。
+"""凭据记录落盘唯一的出口：密钥先有去处，才许把清洗过的版本写盘。
 
-覆盖层的存在理由就是"密钥不落明文盘"。正常创建/更新车道都先
-`_sanitize_record_for_storage` 再 `_store_record_secrets`；迁移与内联绑定归一那两条道
-曾经把整份记录（含 `_hydrate_record_secrets` 贴回来的明文钥匙）直接交给 `save()`，
-等于每次跑迁移就往盘上重印一遍密钥，而且从没进过覆盖层。
+覆盖层的存在理由是"密钥不落明文盘"。但反过来做顺序错了会造成另一种丢法：项目锁定时
+覆盖层写不进，若仍然照例清洗，密钥就既不在盘上也没进覆盖层——模型直接变成
+"API key is required"。所以判据是一句话：**收得下才洗**，并且这个判断只有一个作者
+（`LLMConfigFacade._persist_record`），其余车道一律走它。
 """
 
 from __future__ import annotations
@@ -19,11 +19,13 @@ from g3ku.llm_config.facade import LLMConfigFacade
 from g3ku.llm_config.migration import _cleanup_repository_legacy_default_parameters
 from g3ku.llm_config.models import NormalizedProviderConfig
 
-LIVE_RECORD_WRITE_FILES = (
+RECORD_WRITE_FILES = (
     "g3ku/config/loader.py",
     "g3ku/llm_config/facade.py",
     "g3ku/llm_config/migration.py",
 )
+
+LEGACY_PARAMETERS = {"max_tokens": 4096}
 
 
 def _workspace(tmp_path: Path) -> Path:
@@ -58,22 +60,46 @@ def _stored_raw(facade: LLMConfigFacade, config_id: str) -> dict:
     return json.loads(path.read_text(encoding="utf-8-sig"))
 
 
-def test_legacy_parameter_cleanup_does_not_reprint_the_key(tmp_path: Path) -> None:
+def test_unlocked_store_moves_the_key_off_disk(tmp_path: Path, monkeypatch) -> None:
     workspace = _workspace(tmp_path)
     facade = LLMConfigFacade(workspace)
-    # 4096 是旧版默认 max_tokens，正是这条清理道要改的形状。
-    facade.repository.save(_record("cfg-legacy", api_key="super-secret-key", parameters={"max_tokens": 4096}), last_probe_status=None)
+    monkeypatch.setattr(facade.security, "is_unlocked", lambda: True)
+    stored: dict[str, object] = {}
+    monkeypatch.setattr(
+        facade.security,
+        "set_overlay_values",
+        lambda updates: stored.update(updates),
+    )
+    facade.repository.save(_record("cfg-live", api_key="super-secret-key", parameters=LEGACY_PARAMETERS), last_probe_status=None)
 
     assert _cleanup_repository_legacy_default_parameters(facade) is True
 
-    stored = _stored_raw(facade, "cfg-legacy")
-    assert str((stored.get("auth") or {}).get("api_key") or "") == ""
-    assert stored.get("headers") in (None, {})
-    assert "max_tokens" not in (stored.get("parameters") or {})
+    stored_raw = _stored_raw(facade, "cfg-live")
+    assert str((stored_raw.get("auth") or {}).get("api_key") or "") == ""
+    assert stored_raw.get("headers") in (None, {})
+    assert "super-secret-key" in json.dumps(list(stored.values()), ensure_ascii=False)
 
 
-def test_inline_binding_migration_does_not_write_a_plaintext_key(tmp_path: Path) -> None:
+def test_locked_project_keeps_the_key_it_cannot_encrypt(tmp_path: Path, monkeypatch) -> None:
+    """锁定时覆盖层收不下钥匙，此时清洗等于把密钥丢两次。
+
+    实盘形状：管理页PUT 一颗模型的上下文窗口，内联绑定在保存时被归一成记录，
+    若那一步洗掉明文又没进覆盖层，下一次读取直接报 `api_key: API key is required`。
+    """
     workspace = _workspace(tmp_path)
+    facade = LLMConfigFacade(workspace)
+    monkeypatch.setattr(facade.security, "is_unlocked", lambda: False)
+    facade.repository.save(_record("cfg-locked", api_key="super-secret-key", parameters=LEGACY_PARAMETERS), last_probe_status=None)
+
+    assert _cleanup_repository_legacy_default_parameters(facade) is True
+
+    stored_raw = _stored_raw(facade, "cfg-locked")
+    assert str((stored_raw.get("auth") or {}).get("api_key") or "") == "super-secret-key"
+
+
+def test_inline_binding_migration_does_not_write_a_plaintext_key(tmp_path: Path, monkeypatch) -> None:
+    workspace = _workspace(tmp_path)
+    monkeypatch.chdir(workspace)
     config = Config.model_validate(
         {
             "agents": {"defaults": {"workspace": str(workspace)}},
@@ -92,40 +118,29 @@ def test_inline_binding_migration_does_not_write_a_plaintext_key(tmp_path: Path)
             },
         }
     )
+    facade = LLMConfigFacade(workspace)
+    monkeypatch.setattr(facade.security, "is_unlocked", lambda: True)
+    monkeypatch.setattr(facade.security, "set_overlay_values", lambda updates: None)
 
     assert _normalize_inline_model_bindings(config) is True
 
-    facade = LLMConfigFacade(workspace)
-    stored = _stored_raw(facade, config.models.catalog[0].llm_config_id)
-    assert str((stored.get("auth") or {}).get("api_key") or "") == ""
+    stored_raw = _stored_raw(LLMConfigFacade(workspace), config.models.catalog[0].llm_config_id)
+    assert str((stored_raw.get("auth") or {}).get("api_key") or "") == ""
 
 
-def test_every_live_record_write_sanitizes_before_saving(tmp_path: Path) -> None:
-    """`repository.save(` 的每一个活车道调用都必须先把钥匙摘掉。
+def test_record_writes_all_go_through_one_door() -> None:
+    """`repository.save(` 只能存在于 facade 的那一个出口里。
 
-    扫描而非逐条断言：这条不变量的失效方式正是"新加一处保存，忘了套清洗"。
+    扫文件而不是逐条断言：这条不变量的失效方式正是"新加一处保存，绕过了出口"。
     """
     root = Path(__file__).resolve().parents[2]
-    offenders: list[str] = []
-    for relative in LIVE_RECORD_WRITE_FILES:
+    counted = {}
+    for relative in RECORD_WRITE_FILES:
         source = (root / relative).read_text(encoding="utf-8")
-        for index in range(len(source)):
-            if not source.startswith("repository.save(", index):
-                continue
-            depth = 0
-            end = index + len("repository.save")
-            while end < len(source):
-                char = source[end]
-                if char == "(":
-                    depth += 1
-                elif char == ")":
-                    depth -= 1
-                    if depth == 0:
-                        break
-                end += 1
-            statement = source[index : end + 1]
-            if "_sanitize_record_for_storage" not in statement:
-                line_no = source[:index].count("\n") + 1
-                offenders.append(f"{relative}:{line_no}")
+        counted[relative] = source.count("repository.save(")
 
-    assert offenders == []
+    assert counted == {
+        "g3ku/config/loader.py": 0,
+        "g3ku/llm_config/facade.py": 1,
+        "g3ku/llm_config/migration.py": 0,
+    }
