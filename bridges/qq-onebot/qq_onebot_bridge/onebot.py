@@ -8,8 +8,10 @@ forward WebSocket, actions go through the HTTP API (``send_private_msg``,
 from __future__ import annotations
 
 import asyncio
+import ipaddress
 import json
 import logging
+import socket
 from typing import Any, Awaitable, Callable
 
 import httpx
@@ -18,6 +20,71 @@ import websockets
 logger = logging.getLogger("qq_onebot_bridge.onebot")
 
 EventCallback = Callable[[dict[str, Any]], Awaitable[None]]
+
+
+def _address_is_never_a_media_source(address: ipaddress.IPv4Address | ipaddress.IPv6Address) -> bool:
+    """地址族判否：这些段永远不可能是 QQ 媒体 donor。
+
+    回环只判 IPv6 的 ::1——示例配置的 donor 就是 IPv4 回环，拦它等于让默认部署收不到
+    附件；IPv4 回环因此留作可接受目标（与私网同档，见 `url_is_safe_media_source`）。
+    """
+    mapped = getattr(address, "ipv4_mapped", None) or address
+    if mapped.is_unspecified:
+        return True
+    if mapped.is_link_local:
+        return True
+    if mapped.is_reserved:
+        return True
+    if mapped.is_multicast:
+        return True
+    if address.version == 6 and address.is_loopback:
+        return True
+    return False
+
+
+def _resolve_violations(host: str, port: int) -> list[str]:
+    """Names the addresses that must not be fetched from an inbound URL."""
+    try:
+        infos = socket.getaddrinfo(host, port, proto=socket.IPPROTO_TCP)
+    except OSError as exc:
+        return [f"unresolvable: {exc.strerror or exc}"]
+    bad: list[str] = []
+    for info in infos:
+        raw = str(info[4][0] or "")
+        try:
+            address = ipaddress.ip_address(raw.split("%", 1)[0])
+        except ValueError:
+            bad.append(raw)
+            continue
+        if _address_is_never_a_media_source(address):
+            bad.append(raw)
+    return bad
+
+
+def url_is_safe_media_source(url: str) -> bool:
+    """入站 CQ 里的 URL 由消息发送者控制，抓取前先看一眼目标。
+
+    挡住的是"永远不可能是媒体源"的地址族：链路本地（含云元数据 169.254.169.254）、
+    保留段、组播、未指定地址，以及非 http(s)。回环与私网**不在这里拦**：OneBot 实现
+    自己就是本地服务（示例配置的 `http://127.0.0.1:3000`），群图片/文件的下载链接
+    常常由同一个本地 donor 发出，按私网一刀切会让参照桥的默认部署收不到任何附件。
+    抓取前解析一次并判地址，返回给调用方的是判否；真正连线上仍由 httpx 再解析一次
+    （TOCTOU 窗口存在，收紧到"连到已验证的 IP"需要换 transport，是另一档改动）。
+    """
+    try:
+        parsed = httpx.URL(str(url))
+    except Exception:
+        return False
+    scheme = str(parsed.scheme or "").lower()
+    host = str(parsed.host or "").strip()
+    if scheme not in {"http", "https"} or not host:
+        return False
+    port = int(parsed.port or (443 if scheme == "https" else 80))
+    violations = _resolve_violations(host, port)
+    if violations:
+        logger.warning("inbound media URL rejected: host=%s %s", host, ", ".join(violations[:3]))
+        return False
+    return True
 
 
 class OnebotClient:
@@ -55,6 +122,8 @@ class OnebotClient:
         """Stream-download ``url``; ``None`` on transport errors or when the
         body exceeds ``max_bytes`` (mirrors the /api/v1 per-attachment caps so
         oversized payloads are never submitted for a guaranteed 413)."""
+        if not await asyncio.to_thread(url_is_safe_media_source, str(url)):
+            return None
         try:
             async with self._http.stream("GET", str(url)) as response:
                 response.raise_for_status()

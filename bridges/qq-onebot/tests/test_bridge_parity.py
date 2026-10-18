@@ -662,3 +662,36 @@ async def test_outbound_attachment_failure_degrades_to_signed_link():
     assert onebot.private == [
         ("7", "日报已生成：日报\n📎 日报.docx: http://127.0.0.1:18790/api/ceo/media/original?token=t3")
     ]
+
+
+def test_inbound_media_url_guard_blocks_non_public_address_families():
+    from qq_onebot_bridge.onebot import url_is_safe_media_source
+
+    assert url_is_safe_media_source("http://169.254.169.254/latest/meta-data/") is False
+    assert url_is_safe_media_source("http://fe80::1/a.png") is False
+    assert url_is_safe_media_source("http://[::1]:18790/api/tasks") is False
+    assert url_is_safe_media_source("http://255.255.255.255/x") is False
+    assert url_is_safe_media_source("file:///etc/passwd") is False
+    assert url_is_safe_media_source("not-a-url") is False
+    # 示例配置的本地 donor（IPv4 回环）不许被误杀：那是参照桥的默认部署形状。
+    assert url_is_safe_media_source("http://127.0.0.1:3000/media/a.png") is True
+
+
+@pytest.mark.asyncio
+async def test_download_bytes_refuses_a_metadata_url_without_fetching(monkeypatch):
+    from qq_onebot_bridge.onebot import OnebotClient
+
+    client = OnebotClient(ws_url="ws://fake", http_url="http://fake")
+    attempted: list[str] = []
+
+    def _fake_stream(method, url, **kwargs):
+        attempted.append(str(url))
+        raise AssertionError("guard must reject before the transport")
+
+    monkeypatch.setattr(client._http, "stream", _fake_stream)
+
+    result = await client.download_bytes("http://169.254.169.254/latest/meta-data/iam/", max_bytes=1024)
+
+    assert result is None
+    assert attempted == []
+    await client.close()
