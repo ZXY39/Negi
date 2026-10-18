@@ -70,7 +70,7 @@
 
 - 进程被硬杀时正在跑的工具批，恢复后逐条决定"能不能替模型重放这一次调用"。唯一的判据是工具自己的声明：`Tool.rerun_safe` 类属性，或 `resource.yaml` 顶层 `recovery_policy.rerun_safe: true`（布尔）。两条车道与 timeout 标志同构，`ManifestBackedTool` / `EmbeddedMCPTool` 按「handler 属性 OR 清单声明」解析；代码内置工具（无清单目录的那批，如 `spawn_child_nodes`）只能走类属性。
 - **缺省即最重**：没有声明的工具一律按"副作用可能已经落地"处理，判给模型裁定，运行时不代劳重放。这条是合同的全部价值所在——今后新加的工具（含用户装的、外部注册的）默认落在这一档，作者想让它可自动重放就必须先证明重复调用无危害再声明。本轮取不到该工具对象（尚未水合成 callable）同样按无声明处理。
-- 声明放不轻两条代码判档，它们先于声明执行：`exec` / `shell` 固定交给模型；filesystem 写族按磁盘证据判（能证已完成记 `verified_done`，证不了记模型裁定，"已经写对了"比"再写一遍"更安全）。判档语义与整条恢复链路的其余部分归 `main-task-runtime.md`「Node-Level Pause and Recovery」。
+- 声明放不轻两条代码判档，它们先于声明执行：`exec` / `shell` 固定交给模型；filesystem 写族按磁盘证据判，证据必须是**那次调用真正要产生的终态**，不是"目标那儿有东西"——`filesystem_write` 比正文与请求内容相等，`filesystem_copy` 比目标字节等于源字节（覆盖拷贝被打断时目标本来就在，按存在判完成会把半截正文钉成已结清、永不重试；目录拷贝一次 stat 证不了整棵树，因此走模型裁定），`filesystem_move` 要求目标在且源已消失，`filesystem_delete` 要求目标不在。能证才记 `verified_done`，证不了记模型裁定，"已经写对了"比"再写一遍"更安全。判档语义与整条恢复链路的其余部分归 `main-task-runtime.md`「Node-Level Pause and Recovery」。
 - 一句声明要对应一种可证明的理由，而不是"看起来无害"：纯读（`content*` / `filesystem_stat` / `load_*_context` / `task_*` 读类 / `memory_note` / `perf_inspect_cn`）、写但按 `tool_call_id` 归键（`spawn_child_nodes` 命中父节点 `spawn_operations` 缓存）、或重跑由账本判为已应用（`submit_next_stage`：恢复车道先问 `log_service.stage_transition_already_applied`，账本里已有同一 `stage_goal` 就记 `verified_done` 只补结果、不执行；活动阶段仍持有未送达调用时提交点直接拒绝推进。顺序保证与两个计数器见 `main-task-runtime.md`「Node-Level Pause and Recovery」）。会另起一行记录、再发一条消息、再排一个定时器的那类（`cron` 的 add、`task_append_notice`、`create_async_task`、`memory_update`、`manage_task_nodes`、`model_config`、`skill-installer`、`task_delete`）都不声明。全仓名单由 `tests/resources/test_tool_manifest_contracts.py` 钉住；工具作者在 `skills/add-tool/SKILL.md` 的清单里逐条对照。
 
 ### 阶段门控与 callable 收紧

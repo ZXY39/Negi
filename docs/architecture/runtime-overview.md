@@ -310,6 +310,7 @@ worker 进程（任务执行侧）把任务态变化推给 web 进程（浏览�
 主要由 `RuntimeAgentSession` 和 `g3ku/session/manager.py` 协调。frontdoor continuity 的写盘与恢复覆盖所有 frontdoor 会话命名空间（`web:`、`china:`、`cron:`、`ext:`），渠道会话（含存量 `china:*` 归档）的基线同样跨进程重启存活；恢复顺序详见 `context-and-cache-troubleshooting.md`「Baseline 合同与恢复顺序」。
 
 审批中断的恢复通过持久化的 `graph_state` 重建：中断时 `_pause_for_frontdoor_interrupt` 把**预览前**的完整图状态以 `{"version": 2, "state": ...}` 存入 paused execution context 的 `graph_state` 字段；恢复时 `resume_turn` 读回该快照、校验版本后从 `review_tool_calls` 节点以 resume 决定重入（等价于在中断点重放）。存「预览前」而非「预览后」状态的原因：阶段预览对 `_record_frontdoor_stage_round` 非幂等——用预览后状态重建会二次记账（round 重复、阶段预算提前耗尽）。无标记 / 缺失 / 损坏的快照显式报错 `frontdoor_interrupt_resume_snapshot_unavailable` 且不清除 paused 快照，不回退成新 turn；跨进程重启后的恢复依赖该落盘快照。
+批审的裁决粒度是**一条工具调用**，不是整批：`submit_batch_review` 必须覆盖每个 `review_item` 恰好一次，随后 `reject` 的条目从执行名单里摘掉并就地生成一条合成拒绝结果（正文 `Error: 用户不允许运行此工具。`，带操作者补充说明时一并附上），`approve` 的条目与免审条目照常执行。`tool_call_payloads` 始终是整批原名单，真正执行的是 `executable_tool_call_payloads`，两者之差由 `_merge_ordered_tool_results` 按原顺序合并回消息，所以每一条 tool_call 都有一个 tool 结果收尾——不允许出现挂空的调用。执行侧只认这两个键，把整批读成「批准即全跑」会让被拒的调用照样落地。
 
 ### 任务侧
 

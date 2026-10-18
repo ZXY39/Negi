@@ -411,6 +411,7 @@ preflight 判定：
 - 节点 restart / resume 后的第一跳新请求可以复用“已经过 token compression 的 actual request scaffold”；这是合法延续路径，不是 context loss。
 - 节点 diagnostics 的 top-level 字段同样在 compaction 后切到“最终真正要发的 request”，压缩前 hybrid 判断保留在 `pre_compaction_*`。
 - 节点侧不把 inline image `data:` URL 的 base64 字符串按普通文本估 token；当前轮 `content_open` 刚打开多张图片而下一跳超窗时，优先从 `estimated_image_tokens` / `image_count` 解释，不要再把根因归结为”base64 文本被算爆”。
+- 图片按块计价的尺寸只从表头读，来源是 `g3ku/runtime/context/image_metrics.py` 这一份（前门与发送预检两条估算车道都调它，各留各的落点映射）：png / gif / jpeg / webp（`VP8 `、`VP8L`、`VP8X` 三种容器）/ bmp 能读出真实画布尺寸，读不出的格式回落成 512×512 默认单块。判"这块到底算了几个 tile"要先确认格式在这份名单里——表头解析不到 ≠ 图片小，被 media 面收下的格式一旦缺席名单，超窗判据就按一块的钱放行一次实际上是四块、八块的请求。
 - 节点侧 `token_compression` 是一次 helper LLM 调用（诊断 `compression_helper_call` 记录历史条数与 usage，压缩载荷带 `task_goal`）：helper 不属于节点的 actual-request / `observed_input_truth` 链，按 provider 调用计数取证时注意它多出的一次发送；helper 失败或空摘要按 preflight 错误让节点发送失败（`applied` 保持 `false`、诊断带 `error`）。
 - 节点压缩不做 marker-only 改写：压缩真正生效时 `applied=true`、`mode=llm`、压缩块 `kind=node_token_compaction_llm`；实际请求没有压缩块却带压缩诊断，按回归排查。
 
