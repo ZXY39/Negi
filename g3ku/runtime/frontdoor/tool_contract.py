@@ -440,6 +440,11 @@ def _normalized_attachment_reopen_targets(items: list[Any] | None) -> list[dict[
     for item in list(items or []):
         if not isinstance(item, dict):
             continue
+        # 末道闸门：无论句柄从哪条路进来（本回合上传、历史 metadata、继承的
+        # 任务状态），`kind=audio` 一律不进契约。语音的内容在正文转写里，
+        # 音频本身只服务气泡回放，模型没有读它的能力。
+        if str(item.get('kind') or '').strip().lower() == 'audio':
+            continue
         path = str(item.get('path') or '').strip()
         ref = str(item.get('ref') or '').strip()
         if not path and not ref:

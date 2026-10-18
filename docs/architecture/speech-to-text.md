@@ -35,7 +35,7 @@ QQ 侧：桥下载语音附件字节 → **进程内**直接调用引擎（桥�
 
 转写成功后，**带标记的那一条**才把解码后的 WAV 作为普通会话附件再交一次：网页侧由前端在自动发送分支里调用既有上传车道，QQ 侧由桥把 `kind:"audio"` 附件随回合走 `/api/v1`。**手动模式用完即扔**——那段文字会被用户改，改完当普通文本发出，留下录音就等于让音频和文本各说一套（气泡上播的是原话，T 展开的是改后的话）。渠道侧的字节来自引擎的 `SttResult.wav_bytes`——存的必须是解码后的 WAV 而不是收到的原始字节，因为语音条的真身是腾讯 silk，浏览器播不了。`wav_bytes` 只在进程内传递，刻意排除在 `as_dict()` 之外。渲染层据此把这条用户消息画成语音条（时长 + 播放 + 右端一颗 `T` 展开转写，转写落在条下方），而不是把标记文字摊在正文里——转写文本的可见性由气泡的展开动作决定，正文里的标记只服务于模型。细节在 `web-and-admin.md`「Composer Voice Input」与「Attachment Bubble Rendering Contract」。
 
-**音频进的是模型的可见面之外**：附件说明行与 `UserInputMessage.attachments` 都跳过 `kind=='audio'`（`websocket_ceo._model_visible_uploads`、`external_v1._build_external_user_message`）。理由是内容已经在正文的转写里，多一行本地路径只会让模型以为要去打开一个文件。`metadata` 里保留它，历史回放才播得出来。
+**音频进的是模型的可见面之外**：附件说明行、`UserInputMessage.attachments` 与运行时合同的 `attachment_reopen_targets` 都跳过 `kind=='audio'`（`websocket_ceo._model_visible_uploads`、`external_v1._build_external_user_message`、`CeoFrontDoorRuntimeOps._web_ceo_uploaded_files_note`、`CeoMessageBuilder._attachment_reopen_targets_from_uploads`，末道闸门在 `tool_contract._normalized_attachment_reopen_targets`）。理由是内容已经在正文的转写里，多一行本地路径只会让模型以为要去打开一个文件。这条边界必须每处一致：只堵前两处时，语音句柄会随历史 metadata 每跳重复进合同（还占掉 8 条 reopen 名额），模型据此去 `content_describe` / `ffmpeg` 解一个它读不了的二进制，最后回用户一句"我听不了这条语音"——而转写就在同一轮正文第一行。`metadata` 里保留它，历史回放才播得出来。
 
 `/api/ceo/transcribe` 自身仍然不落盘（见 `/ceo/transcribe` 的测试）；留下字节的是随后那次普通附件落盘。**落盘前统一压成 MP3**（`audio.encode_to_mp3`，mono 32k）：PCM 是 32 KB/秒，一条 60 秒上限的录音就是 2 MB，而这份字节只是给人回放的素材。实测 22.85 秒样本 731 KB → 92 KB（8×）、编码 0.18 秒；选 MP3 而不是更小的 WebM/Opus，是因为后者在 Safari 里播不出来。压缩发生在两个写入接缝（网页 `_store_uploaded_file`、渠道 `_compressed_voice_clip`），**都是"压不动就原样留 WAV"**：没有 ffmpeg、字节不是 WAV、或大得不像语音条时一律退回——ffmpeg 在这套系统里始终是可选依赖，不许因为存储优化把语音打回错误。
 

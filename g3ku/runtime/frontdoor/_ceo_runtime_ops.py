@@ -1106,10 +1106,17 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
             kind = str(item.get("kind") or "").strip().lower()
             name = str(item.get("name") or item.get("path") or "").strip()
             path = str(item.get("path") or "").strip()
+            if kind == "audio":
+                # 语音条的内容已经在正文的转写里；留一行路径只会让模型以为还有个
+                # 没读的附件要去打开（实测它为此跑过 content_describe/ffmpeg）。
+                # 音频仍留在 metadata 里供气泡回放，只是不进模型可见面。
+                continue
             if kind == "image":
                 lines.append(f"- image: {name} (local path: {path})")
             else:
                 lines.append(f"- file: {name} (local path: {path})")
+        if len(lines) == 1:
+            return ""
         lines.append("You may inspect the local file paths above when helpful.")
         return "\n".join(lines)
 

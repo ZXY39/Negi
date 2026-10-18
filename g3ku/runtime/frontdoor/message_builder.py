@@ -924,6 +924,11 @@ class CeoMessageBuilder:
         for raw in list(uploads or []):
             if not isinstance(raw, dict):
                 continue
+            # 语音条不是"可以重开的附件"：它的内容已经在正文的转写里，而句柄一旦
+            # 进契约就会每跳重复出现（历史消息也参与收集），既占满 8 条名额，
+            # 又诱使模型去解码一个它读不了的音频文件。音频只服务气泡回放。
+            if str(raw.get('kind') or '').strip().lower() == 'audio':
+                continue
             path = str(raw.get('path') or '').strip()
             ref = str(raw.get('ref') or '').strip()
             if not path and not ref:

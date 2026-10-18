@@ -1747,6 +1747,163 @@ async def test_message_builder_surfaces_current_and_historical_attachment_reopen
     assert "copy the exact `path:` or `ref:` into `create_async_task.task`" not in contract_text
 
 
+def test_frontdoor_tool_contract_drops_audio_attachment_reopen_targets() -> None:
+    """末道闸门：`kind=audio` 从句柄进来也不渲染，别的附件照常渲染。"""
+    contract = build_frontdoor_tool_contract(
+        callable_tool_names=["create_async_task", "content_open"],
+        candidate_tool_names=[],
+        candidate_tool_items=[],
+        hydrated_tool_names=[],
+        frontdoor_stage_state={
+            "active_stage_id": "stage:1",
+            "transition_required": False,
+            "stages": [{"stage_id": "stage:1", "status": "active", "stage_goal": "dispatch"}],
+        },
+        visible_skill_ids=[],
+        candidate_skill_ids=[],
+        rbac_visible_tool_names=["create_async_task", "content_open"],
+        rbac_visible_skill_ids=[],
+        contract_revision="frontdoor:v1",
+        attachment_reopen_targets=[
+            {
+                "name": "voice-1.mp3",
+                "kind": "audio",
+                "mime_type": "audio/mpeg",
+                "path": "D:/Uploads/voice-1.mp3",
+            },
+            {
+                "name": "resume.docx",
+                "kind": "file",
+                "mime_type": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                "path": "D:/Uploads/resume.docx",
+            },
+        ],
+    )
+
+    payload = contract.to_message_payload()
+    contract_text = str(upsert_frontdoor_tool_contract_message([], contract)[0]["content"] or "")
+
+    assert payload["attachment_reopen_targets"] == [
+        {
+            "name": "resume.docx",
+            "kind": "file",
+            "mime_type": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+            "path": "D:/Uploads/resume.docx",
+        }
+    ]
+    assert "voice-1.mp3" not in contract_text
+    assert "resume.docx" in contract_text
+
+
+@pytest.mark.asyncio
+async def test_message_builder_excludes_voice_clip_from_attachment_reopen_targets(
+    tmp_path: Path,
+) -> None:
+    """语音条的转写已在正文里，音频句柄不得进契约（也不占 8 条名额）。"""
+    prompt_builder = _PromptBuilder()
+    memory_manager = _MemoryManager(response="")
+    builder = CeoMessageBuilder(loop=_loop(memory_manager), prompt_builder=prompt_builder)
+
+    history_voice = tmp_path / "voice-prior.mp3"
+    history_voice.write_bytes(b"ID3history")
+    current_voice = tmp_path / "voice-current.mp3"
+    current_voice.write_bytes(b"ID3current")
+    current_file = tmp_path / "notes.txt"
+    current_file.write_text("notes", encoding="utf-8")
+
+    persisted_session = Session(key="web:shared")
+    persisted_session.add_message(
+        "user",
+        "用户语音，机器识别结果：prior",
+        metadata={
+            "web_ceo_raw_text": "用户语音，机器识别结果：prior",
+            "web_ceo_uploads": [
+                {
+                    "path": str(history_voice),
+                    "name": history_voice.name,
+                    "mime_type": "audio/mpeg",
+                    "kind": "audio",
+                    "size": history_voice.stat().st_size,
+                }
+            ],
+        },
+    )
+    persisted_session.add_message("assistant", "acknowledged")
+
+    result = await builder.build_for_ceo(
+        session=_session(),
+        query_text="inspect uploads",
+        exposure={"skills": [], "tools": [], "tool_names": ["create_async_task", "content_open"]},
+        persisted_session=persisted_session,
+        user_content="inspect uploads",
+        user_metadata={
+            "web_ceo_raw_text": "inspect uploads",
+            "web_ceo_uploads": [
+                {
+                    "path": str(current_voice),
+                    "name": current_voice.name,
+                    "mime_type": "audio/mpeg",
+                    "kind": "audio",
+                    "size": current_voice.stat().st_size,
+                },
+                {
+                    "path": str(current_file),
+                    "name": current_file.name,
+                    "mime_type": "text/plain",
+                    "kind": "file",
+                    "size": current_file.stat().st_size,
+                },
+            ],
+        },
+    )
+
+    contract_messages = [
+        item
+        for item in list(result.dynamic_appendix_messages or [])
+        if is_frontdoor_tool_contract_message(item)
+    ]
+    assert contract_messages
+    payload = frontdoor_tool_contract_payload_from_message(contract_messages[0])
+    assert payload is not None
+    assert payload["attachment_reopen_targets"] == [
+        {
+            "name": current_file.name,
+            "kind": "file",
+            "mime_type": "text/plain",
+            "path": str(current_file),
+        }
+    ]
+    contract_text = "\n".join(str(item["content"] or "") for item in contract_messages)
+    assert current_voice.name not in contract_text
+    assert str(current_voice) not in contract_text
+    assert history_voice.name not in contract_text
+    assert str(history_voice) not in contract_text
+    assert str(current_file) in contract_text
+
+
+def test_web_ceo_uploaded_files_note_skips_voice_clip() -> None:
+    from g3ku.runtime.frontdoor._ceo_runtime_ops import CeoFrontDoorRuntimeOps
+
+    audio = {
+        "name": "voice-1.mp3",
+        "path": "D:/Uploads/voice-1.mp3",
+        "kind": "audio",
+        "mime_type": "audio/mpeg",
+    }
+    document = {
+        "name": "a.pdf",
+        "path": "D:/Uploads/a.pdf",
+        "kind": "file",
+        "mime_type": "application/pdf",
+    }
+
+    assert CeoFrontDoorRuntimeOps._web_ceo_uploaded_files_note([audio]) == ""
+    note = CeoFrontDoorRuntimeOps._web_ceo_uploaded_files_note([audio, document])
+    assert "voice-1.mp3" not in note
+    assert "a.pdf" in note
+    assert note.startswith("Uploaded attachments:")
+
+
 @pytest.mark.asyncio
 async def test_message_builder_keeps_capability_snapshot_stable_when_semantic_skill_selection_changes(
     monkeypatch: pytest.MonkeyPatch,
