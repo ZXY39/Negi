@@ -317,59 +317,74 @@ class LLMConfigFacade:
         if binding is None or not str(getattr(binding, "llm_config_id", "") or "").strip():
             raise ValueError(f"Unknown model key: {model_key}")
         config_fields = {"provider_id", "default_model", "base_url", "api_key", "parameters", "extra_headers", "extra_options"}
+        # `binding` 是 config.models.catalog 里的活对象。先算后写：任何一步判否（重名、
+        # 并发上限、draft 校验）都必须发生在这份 pending 落到 binding 之前，否则管理端
+        # 收到 400 却不重载 config，进程内已经生效而磁盘还是旧值——"没保存成功却已改"。
+        pending: dict[str, Any] = {}
         next_config_id = str(draft_payload.get("config_id") or draft_payload.get("llm_config_id") or "").strip()
+        effective_config_id = next_config_id or str(binding.llm_config_id or "").strip()
         if next_config_id and next_config_id != binding.llm_config_id:
             self.repository.get(next_config_id)
-            binding.llm_config_id = next_config_id
+            pending["llm_config_id"] = next_config_id
         if "enabled" in draft_payload:
-            binding.enabled = bool(draft_payload.get("enabled"))
+            pending["enabled"] = bool(draft_payload.get("enabled"))
         if "description" in draft_payload:
-            binding.description = str(draft_payload.get("description") or "").strip()
+            pending["description"] = str(draft_payload.get("description") or "").strip()
         if "name" in draft_payload:
-            binding.name = self._validate_binding_name_unique(
+            pending["name"] = self._validate_binding_name_unique(
                 config,
                 draft_payload.get("name"),
                 exclude_key=model_key,
             )
         if "retry_on" in draft_payload:
-            binding.retry_on = split_retry_keywords(draft_payload.get("retry_on")) or list(DEFAULT_RETRY_ON_KEYWORDS)
+            pending["retry_on"] = split_retry_keywords(draft_payload.get("retry_on")) or list(DEFAULT_RETRY_ON_KEYWORDS)
         if "retry_count" in draft_payload:
-            binding.retry_count = int(draft_payload.get("retry_count") or 0)
+            pending["retry_count"] = int(draft_payload.get("retry_count") or 0)
         if "single_api_key_max_concurrency" in draft_payload or "singleApiKeyMaxConcurrency" in draft_payload:
             raw_limit = draft_payload.get("single_api_key_max_concurrency")
             if raw_limit is None and "singleApiKeyMaxConcurrency" in draft_payload:
                 raw_limit = draft_payload.get("singleApiKeyMaxConcurrency")
-            binding.single_api_key_max_concurrency = normalize_single_api_key_max_concurrency(raw_limit)
+            next_limit = normalize_single_api_key_max_concurrency(raw_limit)
+        else:
+            next_limit = getattr(binding, "single_api_key_max_concurrency", None)
         if "image_multimodal_enabled" in draft_payload or "imageMultimodalEnabled" in draft_payload:
             raw_enabled = draft_payload.get("image_multimodal_enabled")
             if raw_enabled is None and "imageMultimodalEnabled" in draft_payload:
                 raw_enabled = draft_payload.get("imageMultimodalEnabled")
-            binding.image_multimodal_enabled = bool(raw_enabled)
-        current = self._hydrate_record_secrets(self.repository.get(binding.llm_config_id))
-        binding.context_window_tokens = self._binding_context_window_tokens(current)
-        binding.request_timeout_seconds = self._binding_request_timeout_seconds(current)
+            pending["image_multimodal_enabled"] = bool(raw_enabled)
+        current = self._hydrate_record_secrets(self.repository.get(effective_config_id))
         merged = self._merge_draft(current, draft_payload, replace_parameters=False)
-        binding.single_api_key_max_concurrency = self._validate_binding_api_key_limits(
+        pending_limit = self._validate_binding_api_key_limits(
             api_key=str(merged.api_key or ""),
-            value=getattr(binding, "single_api_key_max_concurrency", None),
+            value=next_limit,
         )
+        # 记录没改动时，这两个读数仍按现记录重取一次（绑定面改 enabled/name 也要看到
+        # 与磁盘一致的窗口与超时）。
+        pending["context_window_tokens"] = self._binding_context_window_tokens(current)
+        pending["request_timeout_seconds"] = self._binding_request_timeout_seconds(current)
 
-        if not any(key in draft_payload for key in config_fields):
+        touches_record = any(key in draft_payload for key in config_fields)
+        if touches_record:
+            validation = self.config_service.validate_draft(merged)
+            if not validation.valid or validation.normalized_preview is None:
+                detail = "; ".join(
+                    f"{err.field}: {err.message or err.code or 'invalid'}" for err in (validation.errors or [])
+                ).strip()
+                raise ValueError(f"Draft validation failed: {detail}" if detail else "Draft validation failed")
+            updated = validation.normalized_preview.model_copy(
+                update={
+                    "config_id": current.config_id,
+                    "created_at": current.created_at,
+                    "updated_at": datetime.now(UTC),
+                }
+            )
+
+        pending["single_api_key_max_concurrency"] = pending_limit
+        for field, value in pending.items():
+            setattr(binding, field, value)
+        if not touches_record:
             return self.get_binding(config, model_key)
 
-        validation = self.config_service.validate_draft(merged)
-        if not validation.valid or validation.normalized_preview is None:
-            detail = "; ".join(
-                f"{err.field}: {err.message or err.code or 'invalid'}" for err in (validation.errors or [])
-            ).strip()
-            raise ValueError(f"Draft validation failed: {detail}" if detail else "Draft validation failed")
-        updated = validation.normalized_preview.model_copy(
-            update={
-                "config_id": current.config_id,
-                "created_at": current.created_at,
-                "updated_at": datetime.now(UTC),
-            }
-        )
         self._persist_record(updated)
         binding.context_window_tokens = self._binding_context_window_tokens(updated)
         binding.request_timeout_seconds = self._binding_request_timeout_seconds(updated)

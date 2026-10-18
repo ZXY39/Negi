@@ -198,3 +198,55 @@ def test_deleting_the_last_binding_drops_its_overlay_credential(tmp_path, monkey
 
     assert facade.repository.has_record("cfg-live") is False
     assert released == ["llm_config.cfg-live."]
+
+
+def _two_binding_config(workspace) -> Config:
+    return Config.model_validate(
+        {
+            "agents": {"defaults": {"workspace": str(workspace)}},
+            "models": {
+                "catalog": [
+                    {"key": "live-model", "llm_config_id": "cfg-live", "enabled": True, "name": "Live", "description": "原说明"},
+                    {"key": "other-model", "llm_config_id": "cfg-live", "enabled": True, "name": "Taken"},
+                ],
+                "roles": {"ceo": ["live-model"], "execution": [], "inspection": [], "memory": []},
+            },
+        }
+    )
+
+
+def test_failed_binding_update_leaves_the_in_memory_binding_untouched(tmp_path) -> None:
+    """判否之后不许在活对象上留下半个改动：管理端拿 400 却不重载 config。"""
+    workspace = _workspace(tmp_path)
+    facade = _facade(workspace)
+    _save_record(facade, "cfg-live", provider_id="openai", model="demo-model")
+    config = _two_binding_config(workspace)
+    binding = config.get_managed_model("live-model")
+    before = (binding.enabled, binding.name, binding.description, binding.retry_count)
+
+    with pytest.raises(ValueError, match="配置名称已存在"):
+        facade.update_binding(
+            config,
+            model_key="live-model",
+            draft_payload={"enabled": False, "description": "改了但没存", "name": "Taken"},
+        )
+
+    assert (binding.enabled, binding.name, binding.description, binding.retry_count) == before
+
+
+def test_unparsable_retry_count_does_not_half_apply_a_binding_update(tmp_path) -> None:
+    workspace = _workspace(tmp_path)
+    facade = _facade(workspace)
+    _save_record(facade, "cfg-live", provider_id="openai", model="demo-model")
+    config = _two_binding_config(workspace)
+    binding = config.get_managed_model("live-model")
+    before = (binding.enabled, binding.name, binding.description, binding.retry_count)
+
+    with pytest.raises((ValueError, TypeError)):
+        facade.update_binding(
+            config,
+            model_key="live-model",
+            draft_payload={"enabled": False, "retry_count": "abc"},
+        )
+
+    assert (binding.enabled, binding.name, binding.description, binding.retry_count) == before
