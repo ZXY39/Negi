@@ -1862,7 +1862,7 @@ class CeoMessageBuilder:
             persisted_session,
             skill_ids=skill_ids,
             exec_runtime_policy=self._frontdoor_exec_runtime_policy(),
-            session_temp_dir=ceo_session_temp_dir(getattr(self._loop, 'workspace', None), session_key),
+            session_temp_dir=ceo_session_temp_dir(session_key),
             contract_revision=(
                 str(context_sources['capability_snapshot'].exposure_revision or '').strip()
                 or DEFAULT_CACHE_FAMILY_REVISION

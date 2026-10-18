@@ -1,10 +1,11 @@
-"""CEO 前门会话级临时目录（temp/ceo/<session>）的注入与契约渲染回归。
+"""CEO 前门会话级临时目录（<数据根>/temp/ceo/<session>）的注入与契约渲染回归。
 
 背景：web CEO 会话此前没有 task_temp_dir，模型经 exec 重定向落盘的临时文件
-散落在工作区根目录（如 `.tmp_skills_*.txt`）。本文件覆盖三件事：
+散落在工作区根目录（如 `.tmp_skills_*.txt`）。本文件覆盖四件事：
 1. `ceo_session_temp_dir` 的路径解析与会话键规范化；
-2. `_build_tool_runtime_context` 注入 `task_temp_dir`（exec 默认 cwd 的数据源）；
-3. 运行时工具契约渲染 `session_temp_dir:` 行，供模型获知绝对落点。
+2. 临时目录挂数据根而不是项目根（两根分叉时的落点）；
+3. `_build_tool_runtime_context` 注入 `task_temp_dir`（exec 默认 cwd 的数据源）；
+4. 运行时工具契约渲染 `session_temp_dir:` 行，供模型获知绝对落点。
 """
 
 from __future__ import annotations
@@ -12,6 +13,8 @@ from __future__ import annotations
 from pathlib import Path
 from types import SimpleNamespace
 
+from g3ku.deployment import data_root as data_root_module
+from g3ku.deployment.data_root import data_work_path
 from g3ku.runtime.frontdoor.session_temp_dir import ceo_session_temp_dir
 from g3ku.runtime.frontdoor.tool_contract import (
     build_frontdoor_tool_contract,
@@ -21,19 +24,36 @@ from g3ku.runtime.frontdoor.tool_contract import (
 SESSION_KEY = 'web:ceo-57836448a1d7'
 
 
-def test_ceo_session_temp_dir_sanitizes_session_key(tmp_path: Path) -> None:
-    workspace = tmp_path / 'workspace'
-    workspace.mkdir()
+def test_ceo_session_temp_dir_sanitizes_session_key() -> None:
+    result = ceo_session_temp_dir(SESSION_KEY)
 
-    result = ceo_session_temp_dir(workspace, SESSION_KEY)
-
-    assert result == str(workspace / 'temp' / 'ceo' / 'web_ceo-57836448a1d7')
+    assert Path(result) == data_work_path('temp', 'ceo') / 'web_ceo-57836448a1d7'
 
 
-def test_ceo_session_temp_dir_falls_back_to_shared(tmp_path: Path) -> None:
-    result = ceo_session_temp_dir(tmp_path, '')
+def test_ceo_session_temp_dir_falls_back_to_shared() -> None:
+    result = ceo_session_temp_dir('')
 
-    assert result == str(tmp_path / 'temp' / 'ceo' / 'shared')
+    assert Path(result) == data_work_path('temp', 'ceo') / 'shared'
+
+
+def test_ceo_session_temp_dir_anchored_to_data_root_when_it_diverges(monkeypatch, tmp_path: Path) -> None:
+    """数据根与项目根分叉时，会话临时目录必须走数据根那一侧。
+
+    换锚前的形状是 `<项目根>/temp/ceo/<会话>`：设了自定义数据目录的安装里，
+    会话中间产物仍留在安装根，与 `temp/tasks/` 分家。
+    """
+    data_dir = tmp_path / 'D-data'
+    install_root = tmp_path / 'install'
+    install_root.mkdir()
+    monkeypatch.setenv(data_root_module.DATA_DIR_ENV, str(data_dir))
+    data_root_module.reset_cache()
+    try:
+        result = ceo_session_temp_dir(SESSION_KEY)
+    finally:
+        data_root_module.reset_cache()
+
+    assert Path(result) == data_dir / 'temp' / 'ceo' / 'web_ceo-57836448a1d7'
+    assert install_root not in Path(result).parents
 
 
 def test_frontdoor_contract_renders_session_temp_dir(tmp_path: Path) -> None:
@@ -101,4 +121,4 @@ def test_ceo_runtime_context_injects_session_task_temp_dir(tmp_path: Path) -> No
 
     context = ops._build_tool_runtime_context(state={}, runtime=runtime)
 
-    assert context['task_temp_dir'] == str(workspace / 'temp' / 'ceo' / 'web_ceo-57836448a1d7')
+    assert context['task_temp_dir'] == str(data_work_path('temp', 'ceo') / 'web_ceo-57836448a1d7')

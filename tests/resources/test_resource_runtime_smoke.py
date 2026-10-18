@@ -18,6 +18,7 @@ from g3ku.agent.tools.filesystem_mutation import FilesystemTool
 from g3ku.agent.tools.propose_patch import parse_patch_artifact
 from g3ku.content import ContentNavigationService, content_summary_and_ref, parse_content_envelope
 from g3ku.content.navigation import _ALWAYS_INLINE_TOOL_RESULT_SOURCES
+from g3ku.deployment.data_root import data_work_path
 from g3ku.resources import ResourceManager
 from g3ku.resources.loader import ResourceLoader
 from g3ku.resources.registry import ResourceRegistry
@@ -727,9 +728,9 @@ async def test_filesystem_write_keeps_rejected_body_in_landing_park(tmp_path: Pa
         result = await tool.execute(path='broken.py', content=bad_body)
         assert 'validation failed' in result
         assert 'preserved at' in result
-        target = workspace / 'temp' / 'broken.py'
+        target = data_work_path('temp').resolve() / 'broken.py'
         assert not target.exists()
-        parked = list((workspace / 'temp' / 'landing-park').glob('*/broken.py'))
+        parked = list((data_work_path('temp').resolve() / 'landing-park').glob('*/broken.py'))
         assert len(parked) == 1
         assert parked[0].read_text(encoding='utf-8') == bad_body
     finally:
@@ -761,7 +762,7 @@ async def test_filesystem_write_blocks_mistyped_project_prefix(tmp_path: Path):
         assert 'Body preserved at' in blocked
         assert not bad_target.exists()
         assert not typo_root.exists()
-        parked = list((workspace / 'temp' / 'landing-park').glob('*/a.py'))
+        parked = list((data_work_path('temp').resolve() / 'landing-park').glob('*/a.py'))
         assert len(parked) == 1
         assert parked[0].read_text(encoding='utf-8') == body
     finally:

@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Any
 
 from g3ku.agent.tools.base import Tool
+from g3ku.deployment.data_root import data_g3ku_path, data_work_path
 from g3ku.runtime.project_environment import apply_project_environment, resolve_project_environment
 from g3ku.runtime.tool_watchdog import coerce_timeout_argument, resolve_tool_watchdog_config
 from g3ku.utils.helpers import expand_path_anchor_tokens, model_data_root
@@ -842,7 +843,19 @@ class ExecTool(Tool):
         configured = str(self.temp_root or "").strip()
         if configured:
             return Path(configured).expanduser().resolve()
-        return self._workspace_root() / "temp"
+        # 与 `_workspace_root()` 同形 resolve：`task_temp_dir` 的准入判据是词法
+        # relative_to，两边归一程度不一致会把合法路径判否、静默退回项目根。
+        return data_work_path("temp").resolve()
+
+    def _is_allowed_temp_target(self, path: Path) -> bool:
+        """临时目录准入：项目根内，或数据根的 `temp/` 之下。
+
+        只放开 `temp/` 这一支，不放开整个数据根——数据根另一侧住着任务库、日志与
+        配置束，把它们交给模型写路径不在本次范围内。
+        """
+        return self._is_within_workspace(path, self._workspace_root()) or self._is_within_workspace(
+            path, self._temp_root()
+        )
 
     def _runtime_task_temp_root(self, runtime: dict[str, Any] | None = None) -> Path | None:
         payload = runtime if isinstance(runtime, dict) else {}
@@ -853,7 +866,7 @@ class ExecTool(Tool):
             resolved = Path(raw).expanduser().resolve()
         except Exception:
             return None
-        if not self._is_within_workspace(resolved, self._workspace_root()):
+        if not self._is_allowed_temp_target(resolved):
             return None
         return resolved
 
@@ -874,6 +887,7 @@ class ExecTool(Tool):
         return [
             workspace_root / "tmp",
             workspace_root / ".g3ku" / "tmp",
+            data_g3ku_path("tmp"),
         ]
 
     @staticmethod

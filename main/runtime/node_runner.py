@@ -14,6 +14,7 @@ from typing import Any, Callable
 from loguru import logger
 
 from g3ku.agent.tools.base import Tool
+from g3ku.deployment.data_root import data_work_path
 from g3ku.runtime.kept_contract_snapshot import (
     resolve_kept_contracts,
     tool_results_by_call_from_rows,
@@ -4135,10 +4136,7 @@ class NodeRunner:
             workspace_root=self._workspace_root(),
             process_cwd=self._process_cwd(),
         )
-        workspace_root = Path(
-            project_environment.get('workspace_root') or self._workspace_root()
-        ).expanduser().resolve()
-        task_temp_dir = str(self._task_temp_dir(getattr(task, 'task_id', None), fallback_root=workspace_root))
+        task_temp_dir = str(self._task_temp_dir(getattr(task, 'task_id', None)))
         return {
             'session_key': task.session_id,
             'task_id': task.task_id,
@@ -4214,9 +4212,10 @@ class NodeRunner:
             return Path(shell).name
         return 'sh'
 
-    def _task_temp_dir(self, task_id: str | None, *, fallback_root: Path | None = None) -> Path:
-        base_root = Path(fallback_root or self._workspace_root()).expanduser().resolve()
-        fallback = (base_root / 'temp').resolve()
+    def _task_temp_dir(self, task_id: str | None) -> Path:
+        # 兜底落点与 `MainRuntimeService._temp_root()`、`log_service._fallback_task_temp_dir()`
+        # 同一个根（数据根/temp），不再挂工作区。
+        fallback = data_work_path('temp').resolve()
         normalized_task_id = str(task_id or '').strip()
         if not normalized_task_id:
             return fallback
@@ -4245,7 +4244,7 @@ class NodeRunner:
         workspace_root = Path(
             project_environment.get('workspace_root') or self._workspace_root()
         ).expanduser().resolve()
-        task_temp_dir = str(self._task_temp_dir(getattr(task, 'task_id', None), fallback_root=workspace_root))
+        task_temp_dir = str(self._task_temp_dir(getattr(task, 'task_id', None)))
         return {
             'os_family': self._os_family(),
             'shell_family': str(project_environment.get('shell_family') or self._shell_family()),

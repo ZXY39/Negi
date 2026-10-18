@@ -12,6 +12,7 @@ from typer.testing import CliRunner
 import g3ku.cli.commands as commands
 import g3ku.web.launcher as launcher
 import g3ku.web.main as web_main
+from g3ku.deployment.data_root import DATA_DIR_ENV, reset_cache as reset_data_root_cache
 from g3ku.deployment.runtime_startup import (
     BOOTSTRAP_PASSWORD_ENV,
     auto_unlock_from_env,
@@ -52,8 +53,26 @@ class _SecurityStub:
 def test_ensure_persistent_workspace_dirs_creates_runtime_and_resource_roots(tmp_path: Path) -> None:
     ensure_persistent_workspace_dirs(tmp_path)
 
-    for relative in (".g3ku", "memory", "sessions", "temp", "externaltools", "skills", "tools"):
+    for relative in (".g3ku", "memory", "sessions", "externaltools", "skills", "tools"):
         assert (tmp_path / relative).is_dir()
+
+
+def test_startup_creates_temp_on_data_root_not_workspace(monkeypatch, tmp_path: Path) -> None:
+    """启动建目录时 temp 挂数据根：在安装根 mkdir 一个空 temp 会让"临时文件已搬走"
+    看上去没实现，也让清理面多一个永远存在的空壳。"""
+    data_dir = tmp_path / "D-data"
+    workspace = tmp_path / "install"
+    workspace.mkdir()
+    monkeypatch.setenv(DATA_DIR_ENV, str(data_dir))
+    reset_data_root_cache()
+    try:
+        created = ensure_persistent_workspace_dirs(workspace)
+    finally:
+        reset_data_root_cache()
+
+    assert (data_dir / "temp").is_dir()
+    assert not (workspace / "temp").exists()
+    assert Path(created["temp"]) == data_dir / "temp"
 
 
 def test_seed_workspace_resources_copies_missing_files_without_overwriting(tmp_path: Path) -> None:

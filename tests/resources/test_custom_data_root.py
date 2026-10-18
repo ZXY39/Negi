@@ -403,3 +403,67 @@ def test_pick_endpoint_degrades_when_unavailable(clean_env, monkeypatch) -> None
 
     assert response.status_code == 503
     assert response.json()["detail"]["code"] == "dir_picker_unavailable"
+
+
+def test_temp_anchors_follow_data_root_when_it_diverges(clean_env) -> None:
+    """两条工具车道的规范临时根一起挂数据根。
+
+    换锚前这些位置各自拼 `workspace/'temp'`，设了自定义数据目录的安装里只有
+    `temp/tasks` 走，`temp/ceo` 与 exec/filesystem 的临时根仍留在安装根。
+    """
+    monkeypatch, tmp_path = clean_env
+    data_dir = tmp_path / "D-data"
+    dr.write_data_root_pointer(data_dir)
+    workspace = tmp_path / "install"
+    workspace.mkdir()
+
+    from g3ku.agent.tools.filesystem_mutation import FilesystemTool
+    from g3ku.agent.tools.shell import ExecTool
+    from g3ku.runtime.frontdoor.session_temp_dir import ceo_session_temp_dir
+
+    exec_tool = ExecTool(workspace_root=str(workspace))
+    fs_tool = FilesystemTool(workspace=workspace)
+    data_temp = (data_dir / "temp").resolve()
+
+    assert exec_tool._temp_root() == data_temp
+    assert fs_tool._temp_root() == data_temp
+    assert data_temp != (workspace / "temp").resolve()
+    assert Path(ceo_session_temp_dir("web:ceo-1")) == data_dir / "temp" / "ceo" / "web_ceo-1"
+    # 运行时的第二处临时落点（`.g3ku/tmp`）也换根，且仍在拒写名单里。
+    assert dr.data_g3ku_path("tmp") in exec_tool._legacy_temp_roots()
+
+
+def test_temp_dir_outside_workspace_admitted_only_under_temp(clean_env) -> None:
+    """准入判据放开的是 `<数据根>/temp/**`，不是整个数据根。
+
+    这两处原本是静默丢弃门：不在项目根内就把 `task_temp_dir` 当没给、退回
+    `<项目根>/temp`，写入照样成功但落点不动，所以必须逐值钉住。
+    """
+    monkeypatch, tmp_path = clean_env
+    data_dir = tmp_path / "D-data"
+    dr.write_data_root_pointer(data_dir)
+    workspace = tmp_path / "install"
+    workspace.mkdir()
+
+    from g3ku.agent.tools.filesystem_mutation import FilesystemTool
+    from g3ku.agent.tools.shell import ExecTool
+
+    exec_tool = ExecTool(workspace_root=str(workspace))
+    fs_tool = FilesystemTool(workspace=workspace)
+    data_temp = (data_dir / "temp").resolve()
+
+    for inside in (data_dir / "temp" / "ceo" / "web_ceo-1", data_dir / "temp" / "tasks" / "task_abc"):
+        runtime = {"task_temp_dir": str(inside)}
+        assert exec_tool._runtime_task_temp_root(runtime) == inside.resolve()
+        assert fs_tool._canonical_temp_root(runtime) == inside.resolve()
+
+    for outside in (data_dir / ".g3ku" / "main-runtime", workspace.parent / "elsewhere"):
+        runtime = {"task_temp_dir": str(outside)}
+        assert exec_tool._runtime_task_temp_root(runtime) is None
+        assert fs_tool._canonical_temp_root(runtime) == data_temp
+
+    # 存量 meta 里仍写着安装根 temp 的任务照旧可用（判据是"或"，不是替换）。
+    legacy = workspace / "temp" / "tasks" / "task_old"
+    runtime = {"task_temp_dir": str(legacy)}
+    assert exec_tool._runtime_task_temp_root(runtime) == legacy.resolve()
+    assert fs_tool._canonical_temp_root(runtime) == legacy.resolve()

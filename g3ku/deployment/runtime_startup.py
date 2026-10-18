@@ -7,6 +7,7 @@ from typing import Any
 
 from loguru import logger
 
+from g3ku.deployment.data_root import data_work_path
 from g3ku.security import BOOTSTRAP_MASTER_KEY_ENV, get_bootstrap_security_service
 from g3ku.utils.helpers import ensure_dir, sync_workspace_templates
 
@@ -16,7 +17,6 @@ PERSISTENT_WORKSPACE_DIRS = (
     ".g3ku",
     "memory",
     "sessions",
-    "temp",
     "externaltools",
     "skills",
     "tools",
@@ -29,6 +29,10 @@ def ensure_persistent_workspace_dirs(workspace: Path) -> dict[str, str]:
     for relative in PERSISTENT_WORKSPACE_DIRS:
         path = ensure_dir(root / relative)
         created[relative] = str(path)
+    # temp 挂数据根而不是工作区：在安装根 mkdir 一个空 temp 会让"临时文件已搬走"
+    # 看上去没实现。默认解析（未设数据目录）时两者同路径，容器与存量安装不受影响。
+    temp_path = ensure_dir(data_work_path("temp"))
+    created["temp"] = str(temp_path)
     sync_workspace_templates(root, silent=True)
     return created
 

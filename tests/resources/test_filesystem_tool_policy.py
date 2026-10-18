@@ -133,7 +133,7 @@ async def test_filesystem_blocks_dot_prefixed_tmp_named_write_at_workspace_root(
     result = await tool.write(path=str(target), content='leaked', runtime={})
 
     assert result.startswith('Error:')
-    assert str(workspace / 'temp') in result
+    assert str(tool._temp_root()) in result
     assert not target.exists()
 
 

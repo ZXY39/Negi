@@ -1,4 +1,5 @@
 from g3ku.agent.tools.shell import ExecTool
+from g3ku.deployment.data_root import data_work_path
 from g3ku.resources.tool_settings import ExecToolSettings, runtime_tool_settings
 
 
@@ -9,7 +10,7 @@ def build(runtime):
     return ExecTool(
         working_dir=None,
         workspace_root=str(runtime.workspace),
-        temp_root=str(runtime.workspace / 'temp'),
+        temp_root=str(data_work_path('temp')),
         externaltools_root=str(runtime.workspace / 'externaltools'),
         restrict_to_workspace=settings.restrict_to_workspace,
         enable_safety_guard=settings.enable_safety_guard,

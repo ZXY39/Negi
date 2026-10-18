@@ -3631,13 +3631,14 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
         super().__init__(loop=loop)
 
     def _ceo_session_temp_dir(self, session_key: Any) -> str:
-        """会话级临时目录 `<workspace>/temp/ceo/<safe_session_key>`。
+        """会话级临时目录 `<数据根>/temp/ceo/<safe_session_key>`。
 
         注入为工具 runtime 的 `task_temp_dir`：exec 未显式传 working_dir 时以它
         为默认 cwd，filesystem/exec 的路径策略也以它为临时内容的规范落点，
         避免临时文件散落到工作区根目录。目录惰性创建（exec/filesystem 写入时 mkdir）。
+        锚是数据根而不是项目根，与 `temp/tasks/` 同根。
         """
-        return ceo_session_temp_dir(getattr(self._loop, "workspace", None), session_key)
+        return ceo_session_temp_dir(session_key)
 
     def _frontdoor_exec_runtime_policy(self) -> dict[str, Any] | None:
         main_service = getattr(self._loop, "main_task_service", None)

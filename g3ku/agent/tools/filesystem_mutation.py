@@ -11,6 +11,7 @@ import tempfile
 from pathlib import Path
 from typing import Any
 
+from g3ku.deployment.data_root import data_g3ku_path, data_work_path
 from g3ku.resources.tool_settings import FilesystemToolSettings, runtime_tool_settings
 from g3ku.runtime.project_environment import apply_project_environment
 from g3ku.utils.helpers import model_data_root, resolve_model_path
@@ -323,7 +324,17 @@ class FilesystemTool:
         return Path(self._workspace or Path.cwd()).expanduser().resolve()
 
     def _temp_root(self) -> Path:
-        return self._workspace_root() / 'temp'
+        # resolve 与 `_workspace_root()` 同形：下面的准入判据是词法 relative_to，
+        # 两边归一程度不一致会把合法的数据根路径判否、静默退回项目根。
+        return data_work_path('temp').resolve()
+
+    def _is_allowed_temp_target(self, path: Path) -> bool:
+        """临时目录准入：项目根内，或数据根的 `temp/` 之下。
+
+        只放开 `temp/` 这一支，不放开整个数据根——数据根另一侧住着任务库、日志与
+        配置束，把它们交给模型写路径不在本次范围内。
+        """
+        return _is_relative_to(path, self._workspace_root()) or _is_relative_to(path, self._temp_root())
 
     def _canonical_temp_root(self, runtime: dict[str, Any] | None = None) -> Path:
         payload = runtime if isinstance(runtime, dict) else {}
@@ -333,7 +344,7 @@ class FilesystemTool:
                 candidate = Path(raw).expanduser().resolve(strict=False)
             except Exception:
                 candidate = None
-            if candidate is not None and _is_relative_to(candidate, self._workspace_root()):
+            if candidate is not None and self._is_allowed_temp_target(candidate):
                 return candidate
         return self._temp_root()
 
@@ -356,6 +367,7 @@ class FilesystemTool:
         return [
             workspace_root / 'tmp',
             workspace_root / '.g3ku' / 'tmp',
+            data_g3ku_path('tmp'),
         ]
 
     @staticmethod

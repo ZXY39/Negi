@@ -21,6 +21,7 @@ from g3ku.content import (
     parse_content_envelope,
 )
 from g3ku.content.navigation import INLINE_CHAR_LIMIT
+from g3ku.deployment.data_root import data_work_path
 from g3ku.providers.base import provider_body_output_cap, provider_body_reasoning_effort
 from g3ku.providers.fallback import MODEL_RETRY_LIVE_STATES, MODEL_RETRY_STATE_WAITING_UPSTREAM
 from g3ku.runtime.kept_contract_snapshot import (
@@ -772,12 +773,11 @@ class TaskLogService:
         state['frames'] = []
         return cls._sanitize_runtime_state(state)
 
-    def _workspace_root_for_runtime_meta(self) -> Path:
-        workspace = getattr(self._content_store, '_workspace', None) if self._content_store is not None else None
-        return Path(workspace).resolve(strict=False) if workspace is not None else Path.cwd().resolve()
-
     def _fallback_task_temp_dir(self) -> str:
-        return str((self._workspace_root_for_runtime_meta() / 'temp').resolve(strict=False))
+        # 与 MainRuntimeService._temp_root() 同一个根：`_effective_task_temp_dir` 靠
+        # 比对这两个值识别"meta 里只是兜底、并非每任务目录"，两边不同根会让它把
+        # 整个 temp 根当成某任务的目录去做对账/删除。
+        return str(data_work_path('temp').resolve(strict=False))
 
     def _normalize_task_temp_dir(self, value: Any) -> str:
         raw = str(value or '').strip()

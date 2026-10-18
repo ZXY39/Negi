@@ -272,7 +272,7 @@ def test_exec_tool_blocks_downloads_outside_managed_dirs(tmp_path, monkeypatch) 
     )
 
     assert error is not None
-    assert str(workspace / 'temp') in error
+    assert str(tool._temp_root()) in error
     assert str(workspace / 'externaltools') in error
 
 

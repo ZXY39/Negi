@@ -21,12 +21,19 @@ from __future__ import annotations
 import argparse
 import shutil
 import sqlite3
+import sys
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
 
-DEFAULT_RUNTIME_DB = REPO_ROOT / '.g3ku' / 'main-runtime' / 'runtime.sqlite3'
-DEFAULT_TASKS_ROOT = REPO_ROOT / 'temp' / 'tasks'
+from g3ku.deployment.data_root import data_g3ku_path, data_work_path
+
+# 默认值跟随数据根：设了自定义数据目录的安装里，任务库与 temp/tasks 都不在安装根，
+# 按仓库根取默认会让下面的「库与目录属同一安装」守卫直接拒跑。
+DEFAULT_RUNTIME_DB = data_g3ku_path('main-runtime', 'runtime.sqlite3')
+DEFAULT_TASKS_ROOT = data_work_path('temp', 'tasks')
 
 
 def parse_args() -> argparse.Namespace:

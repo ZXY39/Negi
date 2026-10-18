@@ -12,6 +12,7 @@ from loguru import logger
 
 from g3ku.agent.tools.registry import ToolRegistry
 from g3ku.bus.events import InboundMessage, OutboundMessage
+from g3ku.deployment.data_root import data_g3ku_path
 from g3ku.runtime.bootstrap_bridge import RuntimeBootstrapBridge
 from g3ku.runtime.cancellation import ToolCancellationToken
 from g3ku.runtime.manager import SessionRuntimeManager
@@ -88,9 +89,7 @@ class AgentRuntimeEngine:
         self.main_task_service = None
         self._runtime_closed = False
 
-        temp_root = self.workspace / '.g3ku' / 'tmp'
-        temp_root.mkdir(parents=True, exist_ok=True)
-        self.temp_dir = temp_root
+        self.temp_dir = data_g3ku_path('tmp', create=True)
 
         manager_cls = session_manager_cls or type(session_manager) if session_manager is not None else None
         if session_manager is not None:

@@ -129,8 +129,8 @@
 
 目录分两个根：
 
-- **安装根**：进程 cwd（`negi web` 启动时固定为代码检出目录）。承载代码与 `skills/`、`tools/`、`externaltools/`，配置和密钥材料——`.g3ku/config.json`、`.g3ku/llm-config/`（主密钥信封与 `auto-unlock.key`）、`.g3ku/secret-realms/`、`resources.state.json`、`resource-locks/`、`start.lock`、`internal-callback.json`——以及按 `config.workspace_path`（`agents.defaults.workspace`，默认 `.`）或 `Path.cwd()` 解析的其余状态：`memory/`、`sessions/`、`temp/ceo/`、`.g3ku/cron/`、`.g3ku/errors/`、`.g3ku/audit.jsonl`、`.g3ku/memory-requests/`、`.g3ku/cache/`、`.g3ku/tmp/`、`.g3ku/logs/`、`.g3ku/external-sessions/`、`.g3ku/external-uploads/`、`.g3ku/external-outbox/`。换数据根不带动这些。密钥材料的滚动副本在 `.g3ku/llm-config-backups/`（按 UTC 时间戳分代，保留最近 12 代），凭据动作的留证流水在 `.g3ku/security-events.jsonl`——两者都不进 git，也不随数据根迁移。
-- **数据根**：只收体积数据，判据是解析入口——经 `g3ku/deployment/data_root.py` 的 `data_root()` / `data_g3ku_path()` / `data_work_path()` / `resolve_data_path()` 落盘的那几类：`.g3ku/main-runtime/`（任务库、artifacts、deliverables、governance 库、`managed-worker.log`）、其余 `.g3ku/web-ceo-*` sidecar、`.g3ku/stt/`、`temp/tasks/`。新增挂载点不走这四个函数之一就会静默留在安装根。
+- **安装根**：进程 cwd（`negi web` 启动时固定为代码检出目录）。承载代码与 `skills/`、`tools/`、`externaltools/`，配置和密钥材料——`.g3ku/config.json`、`.g3ku/llm-config/`（主密钥信封与 `auto-unlock.key`）、`.g3ku/secret-realms/`、`resources.state.json`、`resource-locks/`、`start.lock`、`internal-callback.json`——以及按 `config.workspace_path`（`agents.defaults.workspace`，默认 `.`）或 `Path.cwd()` 解析的其余状态：`memory/`、`sessions/`、`.g3ku/cron/`、`.g3ku/errors/`、`.g3ku/audit.jsonl`、`.g3ku/memory-requests/`、`.g3ku/cache/`、`.g3ku/logs/`、`.g3ku/external-sessions/`、`.g3ku/external-uploads/`、`.g3ku/external-outbox/`。换数据根不带动这些。密钥材料的滚动副本在 `.g3ku/llm-config-backups/`（按 UTC 时间戳分代，保留最近 12 代），凭据动作的留证流水在 `.g3ku/security-events.jsonl`——两者都不进 git，也不随数据根迁移。
+- **数据根**：只收体积数据与临时内容，判据是解析入口——经 `g3ku/deployment/data_root.py` 的 `data_root()` / `data_g3ku_path()` / `data_work_path()` / `resolve_data_path()` 落盘的那几类：`.g3ku/main-runtime/`（任务库、artifacts、deliverables、governance 库、`managed-worker.log`）、其余 `.g3ku/web-ceo-*` sidecar、`.g3ku/stt/`、`.g3ku/tmp/`（运行时自身的 scratch，如提示词留痕）、`temp/`（任务级 `temp/tasks/`、会话级 `temp/ceo/`、写失败正文的 `landing-park/`，以及 `exec` 交给子进程的 `TMP`/`TEMP`/`TMPDIR`）。新增挂载点不走这四个函数之一就会静默留在安装根。
 
 两半都写成 `.g3ku/<相对路径>` 的形状，但根不同，因此**自定义过数据目录的安装在盘上有两个 `.g3ku`**：`<安装根>/.g3ku/` 与 `<数据根>/.g3ku/`。数据根那一侧同样带 `.g3ku` 这一层（`<数据根>/.g3ku/main-runtime/`，不是 `<数据根>/main-runtime/`）；`temp/` 则直接挂数据根。未配置时数据根等于安装根，两个 `.g3ku` 合一，也就是历史布局本身，换锚因此不产生迁移、也不改变相对布局。
 
@@ -202,7 +202,10 @@
 - `temp/tasks/`（数据根）
   任务临时目录，每个任务一个 `task_<id>` 子目录；根目录解析与隔离规则见 `runtime-overview.md`「任务侧」。任务进入终态（success/failed）后该目录**默认原样保留**；仅当开启 `main_runtime.disk_guard.terminal_temp_dir_cleanup_enabled`（环境变量 `G3KU_TERMINAL_TEMP_DIR_CLEANUP_ENABLED=1`）时才随终态清理硬删（保留清单与行为契约见 `runtime-overview.md`「磁盘写保护与治理」）。孤儿目录（`runtime.sqlite3` 的 tasks 表中已无对应任务却残留的 `task_*` 目录，含从未走到终态的卡死任务遗留）用 `scripts/cleanup_orphan_task_temp_dirs.py` 清理：默认 dry-run 只报数；`--apply` 删除空孤儿；非空孤儿要么 `--apply --move-non-empty` 移入 `temp/tasks_orphan_backup/`（可逆），要么 `--apply --purge-non-empty` 直接删除（不可逆）。清理脚本以 runtime 库的 `tasks` 表为唯一判据，因此判据缺失即停：库文件不存在、`tasks` 表读不出、或 `--apply` 时 `--tasks-root` 不在 `--runtime-db` 所属安装根之下，脚本一律拒绝执行，不按空任务集继续——空集不等于「没有任务」，按空集判定会把在库任务目录当成孤儿。`--purge-non-empty` 没有交互确认步骤，它的护栏是 `--apply` 与该开关都必须显式给出、缺省 dry-run，以及上面那条拒绝判据。由于终态后目录保留，`temp/tasks/` 会随任务累积增长，磁盘紧张时优先按该脚本处置而非手删。
 
-- `temp/ceo/`（安装根：CEO 循环按 `config.workspace_path` 解析，与 `temp/tasks/` 不同根）  CEO/frontdoor 会话级临时目录，每个会话一个 `<safe_session_key>` 子目录（如 `web_ceo-xxxx`）。作为 CEO 会话工具 runtime 的 `task_temp_dir`：`exec` 缺省 cwd 与临时文件规范落点，避免临时产物散落到工作区根目录。解析与惰性创建规则见 `runtime-overview.md`「任务侧」。该目录不保证持久保留：正式交付物禁止以此为最终落点（此约束同时写进 CEO 提示词契约）。
+- `temp/ceo/`（数据根）  CEO/frontdoor 会话级临时目录，每个会话一个 `<safe_session_key>` 子目录（如 `web_ceo-xxxx`）。作为 CEO 会话工具 runtime 的 `task_temp_dir`：`exec` 缺省 cwd 与临时文件规范落点，避免临时产物散落到工作区根目录。它与 `temp/tasks/` 同根，因此设了自定义数据目录的安装里两条 temp 车道一起离开安装根；`temp` 也不在启动建目录的名单里，安装根不会再长出一个空 `temp/`。解析与惰性创建规则见 `runtime-overview.md`「任务侧」。该目录不保证持久保留：正式交付物禁止以此为最终落点（此约束同时写进 CEO 提示词契约）。
+
+- `.g3ku/tmp/`（数据根）
+  运行时自身的 scratch（提示词留痕等），由 `AgentRuntimeEngine` 在构造时按数据根创建。它同时在工具的路径监禁名单里——模型要写临时内容仍被引导到 `temp/` 那一个规范根，这个目录只给运行时自己用。
 
 - `landing-park/`（在上述两个临时根之下）
   写/改的落地校验不通过时，被拒正文在回滚前复制到这里（`park-XXXX/<原名>`），工具结果仍报 error 并给出该绝对路径。它不是新的存储层：随所属临时根一起保留或清理，磁盘紧张时按父目录的既有口径处置即可。行为契约见 `tool-and-skill-system.md`「Model Path Anchoring Contract」。
