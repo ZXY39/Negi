@@ -202,6 +202,8 @@ function loadApp(apiClientOverrides = {}) {
             showCeoModelChainPane,
             cancelCeoModelChainSwitch,
             confirmCeoModelChainSwitch,
+            resetCeoComposerForSessionChange,
+            applyCeoSessionPatch,
         };`,
         context
     );
@@ -491,6 +493,35 @@ test("无激活会话时不打开面板", () => {
 
     assert.equal(app.S.ceoModelSelection.panelOpen, false);
     assert.deepEqual(writesOf(app), []);
+});
+
+test("运行中的会话补丁不关面板：active_session_id 没变就不算换会话", () => {
+    const app = loadApp();
+    mountControl(app);
+    app.openCeoModelModePanel();
+    assert.equal(app.U.ceoModelModePanel.hidden, false);
+
+    // 回合运行中 ceo.sessions.patch 随每一帧状态反复到达，带的还是同一个 active_session_id；
+    // 以前这条路径被当成换会话，操作者刚点开的面板会在下一帧被关掉。
+    app.applyCeoSessionPatch({
+        item: { session_id: "web:test", is_running: true },
+        active_session_id: "web:test",
+        active_session_family: "local",
+    });
+
+    assert.equal(app.S.ceoModelSelection.panelOpen, true);
+    assert.equal(app.U.ceoModelModePanel.hidden, false);
+});
+
+test("真正切到别的会话时面板照旧关闭", () => {
+    const app = loadApp();
+    mountControl(app);
+    app.openCeoModelModePanel();
+
+    app.resetCeoComposerForSessionChange("web:test", "web:other");
+
+    assert.equal(app.S.ceoModelSelection.panelOpen, false);
+    assert.equal(app.U.ceoModelModePanel.hidden, true);
 });
 
 test("打开面板停在正在使用的板块：固定生效直接进指定模型列表", () => {

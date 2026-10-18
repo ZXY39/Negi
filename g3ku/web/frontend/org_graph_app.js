@@ -10219,7 +10219,7 @@ function buildCeoContextLoadNotice(toolName = "", targetId = "") {
         : "\u5df2\u52a0\u8f7d\u5de5\u5177\u4e0a\u4e0b\u6587";
 }
 
-// 写侧的三种真实结局都来自同一个入队门的返回：queued / ignored / blocked。
+// 写侧的真实结局都来自同一个入队门的返回：queued / ignored。
 // 气泡只承诺这一层——入队不等于记住，成不成由记忆 worker 判定，所以文案不许写成"已记住"。
 function buildCeoMemoryNotice(payload = null) {
     const status = String(payload?.status || "").trim().toLowerCase();
@@ -10229,10 +10229,6 @@ function buildCeoMemoryNotice(payload = null) {
     }
     if (status === "ignored") {
         return { text: "这条记忆请求内容为空，没有入队", riskLevel: "medium" };
-    }
-    if (status === "blocked") {
-        const rule = String(payload?.rule || "").trim();
-        return { text: rule ? `记忆请求被内容闸门拦下（规则：${rule}）` : "记忆请求被内容闸门拦下", riskLevel: "high" };
     }
     return null;
 }
@@ -13970,10 +13966,17 @@ function resetCeoComposerState({ clearDraft = false, sessionId = activeSessionId
 }
 
 function resetCeoComposerForSessionChange(previousSessionId, nextSessionId) {
+    const previousId = String(previousSessionId || "").trim();
+    const nextId = String(nextSessionId || "").trim();
+    // 会话没换就不是"换会话"：`ceo.sessions.patch` / `ceo.sessions.snapshot` 在回合运行中
+    // 会随每一帧状态反复到达（同一 session_id），这里若无条件当切换处理，操作者刚点开的
+    // 模型与上下文面板会在下一次补丁时被关掉、面板里未保存的模型链草稿也一起丢掉。
+    // 真正切换会话时两个 id 必然不同，仍走下面的关闭 + 重读。
+    if (previousId && previousId === nextId) return false;
     closeCeoModelModePanel();
-    resetCeoModelSelection(nextSessionId);
-    void refreshCeoModelSelection(nextSessionId);
-    return switchCeoComposerDraft(previousSessionId, nextSessionId);
+    resetCeoModelSelection(nextId);
+    void refreshCeoModelSelection(nextId);
+    return switchCeoComposerDraft(previousId, nextId);
 }
 
 function resetCeoSessionState({ scrollToLatest = false } = {}) {
