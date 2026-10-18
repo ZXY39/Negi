@@ -9,10 +9,13 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 from typing import Any, Awaitable, Callable
 
 import httpx
 import websockets
+
+logger = logging.getLogger("qq_onebot_bridge.onebot")
 
 EventCallback = Callable[[dict[str, Any]], Awaitable[None]]
 
@@ -84,7 +87,13 @@ class OnebotClient:
                         except json.JSONDecodeError:
                             continue
                         if isinstance(event, dict):
-                            await on_event(event)
+                            try:
+                                await on_event(event)
+                            except Exception:
+                                # 一条入站消息的处理失败只丢那一条。这里的异常会穿过
+                                # receive_events、穿过 gather、把整个桥进程带走——而桥
+                                # 没有监督者重拉，QQ 侧从此再没有任何回复。
+                                logger.exception("bridge event handler failed for event %s", str(event)[:200])
             except (OSError, websockets.WebSocketException):
                 pass
             finally:
