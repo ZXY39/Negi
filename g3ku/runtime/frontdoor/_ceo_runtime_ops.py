@@ -8312,7 +8312,10 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
                     await emit_snapshot()
 
             model_retry_status_handler = _handle_frontdoor_model_retry_status
-        normalized_provider_tool_names = self._frontdoor_provider_visible_tool_names(
+        # 发请求前的最后一次收窄：只摘"渲不出参数表"的名字。判据必须与渲染器同源
+        # （活实例或删除前快照），用"活实例"当判据会把刚删掉的名字从钉住清单里永久摘掉，
+        # 于是这一跳断前缀、下一跳也回不来——删除就退化成了立即删名。
+        normalized_provider_tool_names = self._frontdoor_schema_renderable_tool_names(
             list(state_for_request.get("provider_tool_names") or state_for_request.get("tool_names") or [])
         )
         if normalized_provider_tool_names:
