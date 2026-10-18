@@ -1132,13 +1132,22 @@ async def test_execution_root_replay_semantic_selection_includes_split_tools_wit
     # 族名不再是工具：台账里残留的旧族名既不提升，也不进发给模型的清单。
     assert 'filesystem' not in emitted_tool_names
     assert 'content' not in emitted_tool_names
-    assert 'filesystem_write' in emitted_tool_names
-    assert 'filesystem_edit' in emitted_tool_names
-    assert 'filesystem_propose_patch' in emitted_tool_names
-    assert 'content_describe' in emitted_tool_names
-    assert 'content_search' in emitted_tool_names
-    assert 'content_open' in emitted_tool_names
-    assert 'memory_update' in emitted_tool_names
+    # 钉死：非压缩跳的 tools[] 与上一跳逐成员相同，水合名不并入——filesystem_write
+    # 等已水合、走可调用面执行，参数契约由 load 返回承载；声明在压缩跳才吸收。
+    assert emitted_tool_names == [
+        'stop_tool_execution',
+        'submit_next_stage',
+        'submit_final_result',
+        'spawn_child_nodes',
+        'load_tool_context_v2',
+    ]
+    assert 'filesystem_write' not in emitted_tool_names
+    assert 'filesystem_edit' not in emitted_tool_names
+    assert 'filesystem_propose_patch' not in emitted_tool_names
+    assert 'content_describe' not in emitted_tool_names
+    assert 'content_search' not in emitted_tool_names
+    assert 'content_open' not in emitted_tool_names
+    assert 'memory_update' not in emitted_tool_names
 
 
 @pytest.mark.asyncio

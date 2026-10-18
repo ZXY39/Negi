@@ -6829,22 +6829,12 @@ class MainRuntimeService:
             if normalized_name not in pinned_provider_tool_names:
                 pinned_provider_tool_names.append(normalized_name)
         if prior_provider_tool_names:
-            # 冻结只允许"补"，不允许"删"：当轮已经 callable 的名字必须带着参数表出现在
-            # 清单里，否则模型手里只剩一个名字、拼不出合法调用；而删名一律留到压缩跳重印，
-            # 这样每跳的可复用前缀只可能因为"新增能力"变，不会因为曝光收窄被打断。
-            frozen_provider_tool_names = list(prior_provider_tool_names)
-            for candidate_name in [
-                *model_visible_callable_tool_names,
-                *selected_tool_names,
-                *promoted_only_hydrated_executor_names,
-                *provider_visible_tool_names,
-            ]:
-                normalized_name = str(candidate_name or '').strip()
-                if not normalized_name:
-                    continue
-                if normalized_name not in frozen_provider_tool_names:
-                    frozen_provider_tool_names.append(normalized_name)
-            provider_tool_names = frozen_provider_tool_names
+            # 钉死：非压缩跳一个名字不增删（与前门同形）。当轮新可用的名字靠尾块
+            # `undeclared_candidates` 点名，调用的参数契约由 `load_tool_context`
+            # 返回承载（`parameters_schema` / `parameter_contract_markdown`）；
+            # 声明在 token 压缩那一跳重取（react_loop 压缩段）时一次性吸收，
+            # 可复用前缀只会在重印点断。
+            provider_tool_names = list(prior_provider_tool_names)
             provider_tool_bundle_mode = 'pinned_frozen'
         else:
             provider_tool_names = list(pinned_provider_tool_names)

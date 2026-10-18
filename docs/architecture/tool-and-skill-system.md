@@ -336,7 +336,7 @@ The surfaced `message` executor is absent from the resource/tool contract entire
 
 - **CEO/frontdoor**：首跳按当轮 RBAC 可见工具全集播种，之后钉住。重印边界四条——内联压缩（preflight 报 `token_compression`）、手动压缩（车道路在 session 上挂 `PENDING_PROVIDER_BUNDLE_RECOMMIT_ATTR`，读一次即清）、**换车道**（正常 ↔ 心跳/定时内部轮；内部轮的工具面是刻意收窄的，继承上一车道的宽面等于给内部轮多发一份执行面）、**空闲边界**（距上一次真实发送超过 `contextRefresh.idleMinutes`）。
 - **执行/验收节点**：同样首跳按角色 RBAC 全集播种后钉住，重印边界两条——`token_compression` 与空闲边界（判据在 `ReActToolLoop._node_bundle_recommit_reason`，两条都命中时报 `token_compression`，因为那一跳正文已被整段重写、重印不再额外破缓存）。空闲那条读数用回合内的局部变量计时，不落盘：进程重启本身就是重新播种的边界，落盘只会多一个每跳读数。
-- 两条车道的钉住都是**只补不删**：当轮新增能力即时并入（否则模型手里只剩名字、拼不出合法参数表），删名一律推迟到重印点；压缩那一跳正文已被 `[TOKEN_COMPACT_V2]` 整段重写，可复用前缀反正断在那里，重印不额外破缓存。**空闲那一档不一样，它确实重付头部那一截**——这是维护者按实测代价接受的交换：被收回的名字不该等到下次压缩才退场。声明侧渲染脱离派发字典：清单里的名字若当轮没有派发资格（RBAC 收回），参数表取自 `declared_denied_tool_schemas`（按资源管理器里现存的实例取）；实例已经不在的（资源被删除）取删除前抄下的快照。两条来源合起来保证"清单里还有名字"就等于"这一跳还能渲出参数表"，见下一条。
+- 两条车道的钉住都是**完全冻结**：重印边界之前一个名字不增删——节点只在 token 压缩那一跳重取清单（react_loop 压缩段重新播种），前门另加手动压缩与换车道、空闲窗口（前门多这几档是维护者按实测代价接受的交换：被收回的名字不该等到下次压缩才退场，空闲那一档确实重付头部那一截）。当轮新增能力**不进清单**：靠尾块 `undeclared_candidates` 点名，调用的参数契约由 `load_tool_context` 返回承载（`parameters_schema` / `parameter_contract_markdown` / `example_arguments`），声明在重印点一次性吸收。声明侧渲染脱离派发字典：清单里的名字若当轮没有派发资格（RBAC 收回），参数表取自 `declared_denied_tool_schemas`（按资源管理器里现存的实例取）；实例已经不在的（资源被删除）取删除前抄下的快照。两条来源合起来保证"清单里还有名字"就等于"这一跳还能渲出参数表"，见下一条。
 
 漂移规则：
 
