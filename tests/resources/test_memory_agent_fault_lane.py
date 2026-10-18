@@ -351,3 +351,33 @@ async def test_the_success_signal_requeues_a_provider_park_but_never_an_agent_fa
         assert after["write_fault"]["status"] == "parked"
     finally:
         manager.close()
+
+
+@pytest.mark.asyncio
+async def test_a_commit_fault_keeps_the_queue_row(tmp_path: Path, monkeypatch) -> None:
+    """提交抛错时队列行必须还在。
+
+    销行若在提交之前，`_commit_validated_write` 的三条 re-raise 路径（镜像校验回滚、
+    归并失败、快照文档 ValueError）就吃掉这一批"记住"的要求：异常穿出 run_due_batch_once
+    被 worker 的裸 except 吞掉，既没有停车记录也没有终态行，队列里那一行已经没了。
+    """
+    mod = _module()
+    manager = _manager(tmp_path)
+    try:
+        _use_runtime_config(mod, tmp_path, monkeypatch)
+        _paint(manager)
+        _stage_attempt(manager, monkeypatch, payload=_valid_add(manager))
+
+        def _commit_boom(_validated) -> None:
+            raise ValueError("boom while committing the validated write")
+
+        monkeypatch.setattr(manager, "_commit_validated_write", _commit_boom)
+        await manager._append_queue_request(_batch(manager).items[0])
+
+        with pytest.raises(ValueError, match="boom while committing"):
+            await manager.run_due_batch_once(now_iso="2026-04-25T00:00:40+08:00")
+
+        queued = manager._read_queue_requests()
+        assert [str(item.request_id) for item in queued] == ["write_1"], "请求行被提前销掉了"
+    finally:
+        manager.close()

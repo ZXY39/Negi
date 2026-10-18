@@ -6676,8 +6676,13 @@ class MemoryManager:
                     request_artifact_paths=list(result.get("request_artifact_paths") or []),
                 )
 
-            self._drop_request_ids({item.request_id for item in batch.items})
+            # 先提交、后销队列行：`_commit_validated_write` 是显式会抛的（镜像校验失败
+            # 回滚 SQLite 后 re、归并提交失败 re、快照文档校验 ValueError），而外层
+            # worker 只有 `except Exception: continue`。队列行若在提交前就删掉，抛错时
+            # 这批"记住/修改/忘记"既没停车记录也没终态行，无痕消失——库里回滚了、请求
+            # 却没了。反向窗口（提交成功、销行前崩溃）只是一次重放，代价小一个量级。
             self._commit_validated_write(result["validated"])
+            self._drop_request_ids({item.request_id for item in batch.items})
             # 成功信号：清掉本批 request_id 对应的停车记录（终于成功了），
             # 并把停车区里最早的一条 provider/瞬时错误批次重新入队尾（无成功信号则永不自动重试）。
             self._purge_failed_records_for_request_ids({item.request_id for item in batch.items})
