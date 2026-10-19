@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import importlib
 import re
+from datetime import date
 from pathlib import Path
 
 import pytest
@@ -204,6 +205,9 @@ def test_content_that_copies_the_rendered_prefix_is_cleaned(tmp_path: Path) -> N
         _paint(manager)
         session = _session(manager)
         tools = _tools(manager, session)
+        # 落地那行的日期前缀由运行时按 row.updated_at 现算，所以期望值跟着当天走；
+        # 提交体里那份 261018 是「模型抄了渲染前缀」的样本，它必须被摘掉再重钉。
+        stamped = date.today().strftime("%y%m%d")
 
         staged = tools["memory_apply_batch"].invoke(
             {"rewrites": [{"line": 1, "content": "1| 261018:改好之后的正文内容", "minimal_memory": "改->好"}]}
@@ -217,8 +221,9 @@ def test_content_that_copies_the_rendered_prefix_is_cleaned(tmp_path: Path) -> N
             session=session,
         )
         document = validated.document_text
-        assert "261018:改好之后的正文内容" in document
-        assert "261018:261018" not in document
+        assert f"{stamped}:改好之后的正文内容" in document
+        assert "261018:改好之后的正文内容" not in document
+        assert not re.search(r"\d{6}:\d{6}:", document), document
         assert "1|" not in document
     finally:
         manager.close()

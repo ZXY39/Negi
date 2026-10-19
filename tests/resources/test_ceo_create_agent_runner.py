@@ -4117,6 +4117,12 @@ def test_frontdoor_provider_tool_bundle_pins_and_recommits_only_at_compression()
     assert re_add_after_recommit["provider_tool_names"] == ["exec", "web_fetch"]
     assert re_add_after_recommit["provider_tool_bundle_mode"] == "pinned_recommitted"
 
+    seeded = resolve([], ["exec", "web_fetch"])
+    # 没有可沿用的钉住声明时按当轮全集播种：新会话首跳、以及编辑重发/Fork 截断到
+    # 会话开头之后那一跳（空基线载荷会把声明面与头部一起撤掉）都走这一支。
+    assert seeded["provider_tool_names"] == ["exec", "web_fetch"]
+    assert seeded["provider_tool_bundle_mode"] == "pinned_seeded"
+
 def test_frontdoor_denied_names_use_live_grant_not_turn_snapshot() -> None:
     """denied_tools 必须对照实时授权，不是回合内缓存的 capability_snapshot。
 

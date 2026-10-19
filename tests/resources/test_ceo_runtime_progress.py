@@ -7645,7 +7645,9 @@ async def test_ceo_frontdoor_prepare_turn_heartbeat_inherits_previous_tool_state
     )
 
     assert state_update["tool_names"] == ["create_async_task", "task_list", "filesystem_write"]
-    assert state_update["provider_tool_names"] == ["create_async_task", "task_list", "filesystem_write", "web_fetch"]
+    # 换车道不是重印边界：`tools[]` 沿用外部轮钉住的声明，候选里的 `web_fetch` 不并进来。
+    # 收窄落在执行准入与派发面（合同见 test_frontdoor_internal_turn_contract.py）。
+    assert state_update["provider_tool_names"] == ["create_async_task", "task_list", "filesystem_write"]
     assert state_update["candidate_tool_names"] == ["web_fetch"]
     assert state_update["candidate_tool_items"] == [{"tool_id": "web_fetch", "description": "fetch web pages"}]
     assert state_update["hydrated_tool_names"] == ["filesystem_write"]
@@ -7704,15 +7706,18 @@ async def test_ceo_frontdoor_prepare_turn_heartbeat_inherits_previous_tool_state
     inherited_head_text = str(
         (list(state_update["frontdoor_request_body_messages"] or [{}])[0] or {}).get("content") or ""
     )
-    assert "candidate_skills (loadable with `load_skill_context`): `find-skills`" in inherited_head_text
-    assert "candidate_skills (loadable with `load_skill_context`)" not in contract_text
+    assert "candidate_skills (loadable with `load_skill_context`; `id | name | description`):" in inherited_head_text
+    assert "candidate_skills" not in contract_text
     # skill 加载规则只在基础提示词里说一次，契约不再抄第二份
     assert 'Call `load_skill_context(skill_id="<skill_id>")`' not in contract_text
-    # `web_fetch` 带着参数表在 tools[] 上、又不在 callable_tools 里，就是可推导的候选：
-    # 整表不再重列，只有"能 load 但还没进 tools[]"的滞后差集才占一行。
+    # 钉住的 tools[] 不吸收候选，`web_fetch` 这一跳能 load 却没有参数表：
+    # 它既不把整份候选表重列，也不靠说明文本承载，只在尾块那条滞后差集里点名一次。
     assert "candidate_tools:" not in contract_text
-    assert "undeclared_candidates" not in contract_text
-    # 候选工具的说明改由 provider tools[] 的 function.description 承载，正文不再抄第二份
+    lag_line = next(
+        line for line in contract_text.splitlines() if line.startswith("undeclared_candidates")
+    )
+    assert "`web_fetch`" in lag_line
+    # 候选的说明文本不抄进正文：这个名字的参数表由 `load_tool_context` 的返回承载
     assert "`web_fetch`: fetch web pages" not in contract_text
 
 
@@ -7856,7 +7861,8 @@ async def test_ceo_frontdoor_prepare_turn_cron_inherits_previous_tool_state_with
     )
 
     assert state_update["tool_names"] == ["create_async_task", "task_list", "filesystem_write"]
-    assert state_update["provider_tool_names"] == ["create_async_task", "task_list", "filesystem_write", "web_fetch"]
+    # 定时轮与心跳轮同一条：车道切换不重印，钉住的 `tools[]` 不并候选。
+    assert state_update["provider_tool_names"] == ["create_async_task", "task_list", "filesystem_write"]
     assert state_update["candidate_tool_names"] == ["web_fetch"]
     assert state_update["candidate_tool_items"] == [{"tool_id": "web_fetch", "description": "fetch web pages"}]
     assert state_update["hydrated_tool_names"] == ["filesystem_write"]
@@ -7948,15 +7954,18 @@ async def test_ceo_frontdoor_prepare_turn_cron_inherits_previous_tool_state_with
     inherited_head_text = str(
         (list(state_update["frontdoor_request_body_messages"] or [{}])[0] or {}).get("content") or ""
     )
-    assert "candidate_skills (loadable with `load_skill_context`): `find-skills`" in inherited_head_text
-    assert "candidate_skills (loadable with `load_skill_context`)" not in contract_text
+    assert "candidate_skills (loadable with `load_skill_context`; `id | name | description`):" in inherited_head_text
+    assert "candidate_skills" not in contract_text
     # skill 加载规则只在基础提示词里说一次，契约不再抄第二份
     assert 'Call `load_skill_context(skill_id="<skill_id>")`' not in contract_text
-    # `web_fetch` 带着参数表在 tools[] 上、又不在 callable_tools 里，就是可推导的候选：
-    # 整表不再重列，只有"能 load 但还没进 tools[]"的滞后差集才占一行。
+    # 钉住的 tools[] 不吸收候选，`web_fetch` 这一跳能 load 却没有参数表：
+    # 它既不把整份候选表重列，也不靠说明文本承载，只在尾块那条滞后差集里点名一次。
     assert "candidate_tools:" not in contract_text
-    assert "undeclared_candidates" not in contract_text
-    # 候选工具的说明改由 provider tools[] 的 function.description 承载，正文不再抄第二份
+    lag_line = next(
+        line for line in contract_text.splitlines() if line.startswith("undeclared_candidates")
+    )
+    assert "`web_fetch`" in lag_line
+    # 候选的说明文本不抄进正文：这个名字的参数表由 `load_tool_context` 的返回承载
     assert "`web_fetch`: fetch web pages" not in contract_text
 
 
@@ -8050,12 +8059,12 @@ async def test_ceo_frontdoor_prepare_turn_internal_turn_without_prior_baseline_f
         _frontdoor_canonical_context={"active_stage_id": "", "transition_required": False, "stages": []},
         _compression_state={},
         _semantic_context_state={},
-        _frontdoor_hydrated_tool_names=["filesystem_write"],
+        _frontdoor_hydrated_tool_names=[],
         _frontdoor_selection_debug={"query_text": "prior visible request"},
         _frontdoor_capability_snapshot_exposure_revision="exp:prior",
-        _frontdoor_visible_tool_ids=["filesystem_write"],
+        _frontdoor_visible_tool_ids=[],
         _frontdoor_visible_skill_ids=["find-skills"],
-        _frontdoor_provider_tool_schema_names=["filesystem_write"],
+        _frontdoor_provider_tool_schema_names=[],
     )
     runtime = SimpleNamespace(
         context=CeoRuntimeContext(
@@ -8068,14 +8077,15 @@ async def test_ceo_frontdoor_prepare_turn_internal_turn_without_prior_baseline_f
 
     state_update = await runner._graph_prepare_turn(
         {
-            "tool_names": ["filesystem_write"],
-            "provider_tool_names": ["filesystem_write"],
+            # 无基线那一跳拿到的是回合起点的图状态：工具面全空，治理可见集由本轮重新读出来。
+            "tool_names": [],
+            "provider_tool_names": [],
             "candidate_tool_names": ["web_fetch"],
             "candidate_tool_items": [{"tool_id": "web_fetch", "description": "fetch web pages"}],
-            "hydrated_tool_names": ["filesystem_write"],
+            "hydrated_tool_names": [],
             "visible_skill_ids": ["find-skills"],
             "candidate_skill_ids": ["find-skills"],
-            "rbac_visible_tool_names": ["filesystem_write", "web_fetch"],
+            "rbac_visible_tool_names": ["exec"],
             "rbac_visible_skill_ids": ["find-skills"],
             "cache_family_revision": "exp:prior",
             "frontdoor_selection_debug": {"query_text": "prior visible request"},
@@ -8109,6 +8119,7 @@ async def test_ceo_frontdoor_prepare_turn_internal_turn_without_prior_baseline_f
     ]
     assert captured["builder_kwargs"]["user_content"] == heartbeat_event_bundle
     assert state_update["tool_names"] == ["exec"]
+    # 没有可沿用的钉住声明 → 按当轮治理可见集播种（pinned_seeded），而不是继承上一轮的清单。
     assert state_update["provider_tool_names"] == ["exec"]
     assert state_update["pending_provider_tool_names"] == []
     assert state_update["provider_tool_exposure_pending"] is False

@@ -445,6 +445,7 @@ def _truncation_stub():
         def __init__(self):
             self.queued_follow_up_messages = ["stale"]
             self.messages = ["stale-agent-message"]
+            self.session_key = "web:truncate-test"
 
     stub = SimpleNamespace()
     stub._state = _State()
@@ -464,6 +465,16 @@ def _truncation_stub():
     stub._frontdoor_actual_request_message_count = 3
     stub._frontdoor_actual_tool_schema_hash = "h"
     stub._frontdoor_restore_source = "completed_continuity"
+    # 钉住载体（截断前那一跳留下的工具面与头部名单）
+    stub._frontdoor_provider_tool_schema_names = ["create_async_task", "filesystem_write"]
+    stub._frontdoor_hydrated_tool_names = ["web_fetch"]
+    stub._frontdoor_visible_tool_ids = ["create_async_task", "filesystem_write", "web_fetch"]
+    stub._frontdoor_visible_skill_ids = ["find-skills"]
+    stub._frontdoor_capability_snapshot_exposure_revision = "exp:stale"
+    stub._frontdoor_pinned_contract_text = "## Runtime Contract (pinned)\nold head"
+    stub._frontdoor_pinned_contract_revision = "rev:stale"
+    stub._frontdoor_pinned_contract_skill_ids = ["find-skills"]
+    stub._frontdoor_skill_roster_epoch = 4
     stub._frontdoor_baseline_sync_decision = "allowed"
     stub._frontdoor_token_compression_applied_turn = True
     stub._frontdoor_previous_actual_request_path = "p.json"
@@ -482,6 +493,8 @@ def _truncation_stub():
     stub._active_user_batch_inputs = ["x"]
     stub._clear_user_batch_context = lambda: calls.append("clear_batch")
     stub._last_verified_task_ids = ["task:a"]
+    # 空基线分支要按载荷归一那三份名单，用真静态方法而不是再造一份。
+    stub._normalized_name_list = staticmethod(RuntimeAgentSession._normalized_name_list)
     stub._assistant_stream_pending_text = "p"
     stub._assistant_stream_last_emitted_text = "e"
     stub._assistant_segment_open = True
@@ -489,28 +502,51 @@ def _truncation_stub():
 
 
 def test_apply_history_truncation_state_empty_baseline_resets_everything():
+    from g3ku.runtime.frontdoor import tool_contract as tc
+
     session_cls, stub, calls = _truncation_stub()
-    payload = {"frontdoor_request_body_messages": [], "frontdoor_history_shrink_reason": "user_edit_truncation"}
+    payload = history_edit._empty_continuity_payload()
     # 空基线:_restore 返回 False(用 stub 的 lambda 模拟既有行为)。
     stub._restore_frontdoor_state_from_payload = lambda *_a, **_k: False
-    session_cls.apply_history_truncation_state(stub, payload, removed_turn_ids=["t2"])
-    assert stub._frontdoor_request_body_messages == []
-    assert stub._frontdoor_stage_state == {}
-    from g3ku.runtime.frontdoor.canonical_context import default_frontdoor_canonical_context
+    # 钉住头部还有第二载体（按 session_key 分桶的进程表），只清会话属性挡不住。
+    tc._write_pinned_contract_entry(
+        None,
+        session_key="web:truncate-test",
+        revision="rev:store",
+        text="stored head",
+        skill_ids=["find-skills"],
+    )
+    tc.bump_skill_roster_epoch(None, session_key="web:truncate-test")
+    try:
+        session_cls.apply_history_truncation_state(stub, payload, removed_turn_ids=["t2"])
+        assert stub._frontdoor_request_body_messages == []
+        assert stub._frontdoor_stage_state == {}
+        from g3ku.runtime.frontdoor.canonical_context import default_frontdoor_canonical_context
 
-    assert stub._frontdoor_canonical_context == default_frontdoor_canonical_context()
-    assert stub._frontdoor_history_shrink_reason == "user_edit_truncation"
-    assert stub._frontdoor_restore_source == "none"
-    assert stub._frontdoor_actual_request_message_count == 0
-    assert stub._state.queued_follow_up_messages == []
-    assert stub._state.messages == []
-    assert stub._frontdoor_turn_usage == {"t1": {"input_tokens": 1}}  # 只删被截轮
-    assert stub._preserved_inflight_turn is None
-    assert stub._paused_cleared is True
-    assert stub._active_turn_id is None
-    assert calls == ["clear_batch"]
-    assert stub._frontdoor_previous_actual_request_path == ""
-    assert stub._frontdoor_completed_continuity_bridge_pending is False
+        assert stub._frontdoor_canonical_context == default_frontdoor_canonical_context()
+        assert stub._frontdoor_history_shrink_reason == "user_edit_truncation"
+        assert stub._frontdoor_restore_source == "none"
+        assert stub._frontdoor_actual_request_message_count == 0
+        assert stub._state.queued_follow_up_messages == []
+        assert stub._state.messages == []
+        assert stub._frontdoor_turn_usage == {"t1": {"input_tokens": 1}}  # 只删被截轮
+        assert stub._preserved_inflight_turn is None
+        assert stub._paused_cleared is True
+        assert stub._active_turn_id is None
+        assert calls == ["clear_batch"]
+        assert stub._frontdoor_previous_actual_request_path == ""
+        assert stub._frontdoor_completed_continuity_bridge_pending is False
+        # 空基线载荷里那份"清单清空"必须真的落到会话对象上：早退挡过它一次。
+        assert stub._frontdoor_provider_tool_schema_names == []
+        assert stub._frontdoor_hydrated_tool_names == []
+        assert stub._frontdoor_visible_tool_ids == []
+        assert stub._frontdoor_visible_skill_ids == []
+        assert stub._frontdoor_capability_snapshot_exposure_revision == ""
+        # 头部两份载体一起撤，下一跳按当轮全量名单重钉，而不是复用截断前那串字节。
+        assert tc.pinned_contract_state(stub, session_key="web:truncate-test") == ("", [])
+        assert tc.skill_roster_epoch_for(stub, session_key="web:truncate-test") == 0
+    finally:
+        tc.clear_pinned_contract_stores()
 
 
 def test_apply_history_truncation_state_nonempty_baseline_uses_restore_path():
@@ -531,6 +567,9 @@ def test_apply_history_truncation_state_nonempty_baseline_uses_restore_path():
     assert stub._state.queued_follow_up_messages == []
     assert stub._preserved_inflight_turn is None
     assert stub._paused_cleared is True
+    # 保留着基线时不碰钉住载体：截断退回那一轮的原样，清单跟着它。
+    assert stub._frontdoor_provider_tool_schema_names == ["create_async_task", "filesystem_write"]
+    assert stub._frontdoor_pinned_contract_text == "## Runtime Contract (pinned)\nold head"
 
 
 # ---------- 每轮边界快照 hook（_sync_completed_continuity_snapshot） ----------

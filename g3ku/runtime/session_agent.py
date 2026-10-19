@@ -708,6 +708,29 @@ class RuntimeAgentSession:
             self._frontdoor_restore_source = "none"
             self._frontdoor_baseline_sync_decision = ""
             self._frontdoor_token_compression_applied_turn = False
+            # 空基线载荷里这三份名单本来就是空的，但恢复路径读到空基线就早退
+            # （`_restore_frontdoor_state_from_payload`），一份都没落到会话对象上。
+            # 不补这一步，截断后那一跳继续沿用截断前钉住的 `tools[]` 与头部名单：
+            # 派发面点到的新名字不在清单里，得先 load 一次才调得动。按当轮全集重播种
+            # 多付的是 `system` + `tools[]` 那一截字节，正文本来就已随基线清空重付。
+            self._frontdoor_hydrated_tool_names = self._normalized_name_list(
+                (payload or {}).get("hydrated_tool_names")
+            )
+            self._frontdoor_visible_tool_ids = self._normalized_name_list(
+                (payload or {}).get("visible_tool_ids")
+            )
+            self._frontdoor_visible_skill_ids = self._normalized_name_list(
+                (payload or {}).get("visible_skill_ids")
+            )
+            self._frontdoor_provider_tool_schema_names = self._normalized_name_list(
+                (payload or {}).get("provider_tool_schema_names")
+            )
+            self._frontdoor_capability_snapshot_exposure_revision = str(
+                (payload or {}).get("capability_snapshot_exposure_revision") or ""
+            ).strip()
+            from g3ku.runtime.frontdoor.tool_contract import drop_pinned_contract_state
+
+            drop_pinned_contract_state(self, session_key=self._state.session_key)
         self._frontdoor_previous_actual_request_path = ""
         self._frontdoor_previous_actual_request_history = []
         self._frontdoor_completed_continuity_bridge_pending = False

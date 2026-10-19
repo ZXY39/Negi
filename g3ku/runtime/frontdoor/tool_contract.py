@@ -91,6 +91,28 @@ def clear_pinned_contract_stores() -> None:
     _SKILL_ROSTER_EPOCH_STORES.clear()
 
 
+def drop_pinned_contract_state(session: Any, *, session_key: str | None = None) -> None:
+    """撤掉这一条会话的钉住头部与 roster epoch，两份载体一起撤。
+
+    截断到会话开头要用它：空基线之后头部必须按当轮全量名单重钉。只清会话对象那一份
+    挡不住——`skill_roster_epoch_for` 取 max(会话值, 表值)，`_pinned_entries` 也读表，
+    表里残留的那一份会让下一跳继续复用截断前的头部字节。
+    """
+    if session is not None:
+        try:
+            setattr(session, FRONTDOOR_PINNED_CONTRACT_TEXT_ATTR, '')
+            setattr(session, FRONTDOOR_PINNED_CONTRACT_REVISION_ATTR, '')
+            setattr(session, FRONTDOOR_PINNED_CONTRACT_SKILLS_ATTR, [])
+            setattr(session, _SKILL_ROSTER_EPOCH_ATTR, 0)
+        except Exception:
+            pass
+    key = str(session_key or '').strip()
+    if not key:
+        return
+    _PINNED_CONTRACT_STORES.pop(key, None)
+    _SKILL_ROSTER_EPOCH_STORES.pop(key, None)
+
+
 def _exec_policy_signature(exec_runtime_policy: dict[str, Any] | None) -> str:
     payload = dict(exec_runtime_policy or {})
     if not payload:
