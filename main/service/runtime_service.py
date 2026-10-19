@@ -195,6 +195,10 @@ _WORKER_STATUS_ACTIVE_TASK_STALE_AFTER_SECONDS = 60.0
 _WORKER_STATUS_STARTING_GRACE_SECONDS = 10.0
 _WORKER_STATUS_CALLBACK_RETRY_DELAYS = [0.0, 0.5, 2.0, 5.0]
 _WORKER_STATUS_CALLBACK_TIMEOUT_SECONDS = 2.0
+# 声明侧参数表载体的上限。常态是 0 条：只有"名字还在钉住清单里、参数表却只剩上一跳原文可取"
+# 时才有条目（实例被删且没留快照、或派发字典被收窄）。超限按名字序截断——被截掉的那条下一次
+# 自己回退去读工件，退化成"没有载体"，不会因此把名字挤出清单。
+_DECLARATION_BACKFILL_MAX_ENTRIES = 32
 # 终态/失速/分发错误三条 outbox 车道共用：2.0s 在 web 侧跑模型探测或抢
 # runtime.sqlite3 写锁时必然超时，而超时会让事件一路滞留到下次进程重启才补投
 # （2026-09-23 task:543e0f15d798 滞留 1h39m、task:7e2a270eec34 滞留 10h16m）。
@@ -6825,6 +6829,7 @@ class MainRuntimeService:
         prior_provider_tool_names: list[str] = []
         prior_history_shrink_reason = ''
         prior_actual_request_ref = ''
+        prior_declaration_backfill: dict[str, Any] = {}
         if callable(read_runtime_frame):
             prior_frame = read_runtime_frame(str(task_id or '').strip(), str(node_id or '').strip())
             if isinstance(prior_frame, dict):
@@ -6840,6 +6845,11 @@ class MainRuntimeService:
                 ]
                 prior_history_shrink_reason = str(prior_frame.get('history_shrink_reason') or '').strip()
                 prior_actual_request_ref = str(prior_frame.get('actual_request_ref') or '').strip()
+                prior_declaration_backfill = dict(
+                    dict(prior_frame.get('model_visible_tool_selection_trace') or {}).get(
+                        'declaration_schema_backfill'
+                    ) or {}
+                )
         selected_tool_names: list[str] = []
         for name in prior_selected_tool_names:
             if name in model_visible_callable_tool_names and name not in selected_tool_names:
@@ -6892,7 +6902,13 @@ class MainRuntimeService:
         resource_manager = getattr(self, '_resource_manager', None)
         instance_getter = getattr(resource_manager, 'tool_instances', None)
         declared_instances = dict(instance_getter() or {}) if callable(instance_getter) else {}
+        # 名字离开清单的最后一道阻力是载体：参数表的两档来源都不稳——删除前快照在进程里、
+        # 重启即空，上一跳原文在工件里、会被内存/磁盘保护降级。所以凡靠原文才渲出来的名字，
+        # 随 selection trace 一起落进帧（`declaration_schema_backfill`），下一跳先读载体、
+        # 读不到才碰工件。装在 trace 里是刻意的：那个 dict 已整份持久化，而新增帧字段要跟
+        # 七个归一化写点，漏一个就是"存了等于没存"。
         declared_denied_tool_schemas: dict[str, Any] = {}
+        declaration_backfill: dict[str, Any] = {}
         last_sent_schema_index: dict[str, Any] | None = None
         for candidate_name in provider_tool_names:
             normalized_name = str(candidate_name or '').strip()
@@ -6908,9 +6924,15 @@ class MainRuntimeService:
             if isinstance(retired_schema, dict):
                 declared_denied_tool_schemas[normalized_name] = retired_schema
                 continue
+            carried_schema = prior_declaration_backfill.get(normalized_name)
+            if isinstance(carried_schema, dict):
+                declared_denied_tool_schemas[normalized_name] = carried_schema
+                declaration_backfill[normalized_name] = carried_schema
+                continue
             # 第四源：上一跳真正发出去的那份原文。快照是进程内的，重启即清空，而重启之后的
             # 第一跳仍可能带着上一跳钉住的清单——原文是逐字节的历史事实，用它就等于"这一跳
             # 与上一跳相同"。只在活实例与快照都拿不到时才读盘，常态跳一次 IO 都不加。
+            # 取到原文就顺手写回载体（见下方 `declaration_schema_backfill`），别让下一跳重读。
             if last_sent_schema_index is None:
                 last_sent_schema_index = self._node_last_sent_tool_schema_index(
                     actual_request_ref=prior_actual_request_ref,
@@ -6918,6 +6940,7 @@ class MainRuntimeService:
             last_sent_schema = last_sent_schema_index.get(normalized_name)
             if isinstance(last_sent_schema, dict):
                 declared_denied_tool_schemas[normalized_name] = last_sent_schema
+                declaration_backfill[normalized_name] = last_sent_schema
         # 尾块只点名"无权限或资源已下架"：仍被授权、只是本轮没有派发资格的名字不进这份
         # 文案——模型调它拿到的是"先 load_tool_context"那一档，措辞得跟真实处置一致。
         declared_denied_tool_names = [
@@ -6925,6 +6948,13 @@ class MainRuntimeService:
             for name in declared_denied_tool_schemas
             if name not in live_granted_tool_names
         ]
+        # 载体有界：它只为"名字还在钉住清单里、参数表却只剩原文可取"那几条存东西，常态是
+        # 空表。超限按名字序截断，被截掉的下一次自然回去读工件——退化成没有载体，不会退场。
+        if len(declaration_backfill) > _DECLARATION_BACKFILL_MAX_ENTRIES:
+            declaration_backfill = {
+                name: declaration_backfill[name]
+                for name in sorted(declaration_backfill)[:_DECLARATION_BACKFILL_MAX_ENTRIES]
+            }
         provider_tool_membership_changed = provider_tool_names != list(prior_provider_tool_names)
         provider_tool_bundle_seeded = bool(provider_tool_membership_changed)
         exposure = {
@@ -6993,6 +7023,7 @@ class MainRuntimeService:
                 'top_k': int((selection.trace or {}).get('top_k', 0) or 0),
                 'final_schema_chars': int(final_schema_chars),
                 **dict(selection.trace or {}),
+                'declaration_schema_backfill': declaration_backfill,
             },
         }
 

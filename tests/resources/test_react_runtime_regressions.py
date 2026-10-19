@@ -2760,6 +2760,51 @@ def test_execution_provider_bundle_falls_back_to_last_sent_schema_bytes() -> Non
     assert 'lane4-schema-tool' in bundle
     assert selection['declared_denied_tool_schemas']['lane4-schema-tool']['function']['name'] == 'lane4-schema-tool'
     assert 'lane4-schema-tool' in list(selection['declared_denied_tool_names'] or [])
+    # 原文取到的那份要落进载体，下一跳不必再读盘
+    assert selection['trace']['declaration_schema_backfill']['lane4-schema-tool']['function']['name'] == 'lane4-schema-tool'
+
+
+def test_execution_provider_bundle_reads_the_carrier_before_the_artifact() -> None:
+    """载体（帧里的 selection trace）优先于工件：快照空了也不该再付一次读盘。
+
+    载体装在 `model_visible_tool_selection_trace` 里是刻意的——那个 dict 已经整份持久化；
+    新开帧字段要跟七个归一化写点，漏一个就是"存了等于没存"。
+    """
+    carried = {'lane4-schema-tool': {'type': 'function', 'function': {'name': 'lane4-schema-tool', 'parameters': {}}}}
+    service, visible_tools = _collapsed_bundle_selector_service()
+    service._resource_manager = SimpleNamespace(tool_instances=lambda: {})
+    service.log_service.upsert_frame(
+        'task-pin',
+        {
+            'node_id': 'node-pin',
+            'provider_tool_names': ['exec', 'lane4-schema-tool'],
+            'actual_request_ref': 'artifact:last-sent',
+            'model_visible_tool_selection_trace': {'declaration_schema_backfill': carried},
+        },
+    )
+
+    def _fail_resolve(ref: str) -> str:
+        raise AssertionError('carrier hit must not read the artifact')
+
+    service.log_service.resolve_content_ref = _fail_resolve
+
+    selection = service._select_model_visible_tool_schema_payload(
+        task_id='task-pin',
+        node_id='node-pin',
+        node_kind='execution',
+        visible_tools=visible_tools,
+        runtime_context={
+            'task_id': 'task-pin',
+            'node_id': 'node-pin',
+            'session_key': 'web:shared',
+            'actor_role': 'execution',
+        },
+    )
+
+    assert 'lane4-schema-tool' in list(selection['provider_tool_names'] or [])
+    assert selection['declared_denied_tool_schemas'] == carried
+    # 用过之后继续带着，否则下一跳又只剩读盘
+    assert selection['trace']['declaration_schema_backfill'] == carried
 
 
 def test_execution_provider_bundle_last_sent_tier_needs_a_prior_artifact_ref() -> None:

@@ -592,9 +592,7 @@ class TaskLogService:
             ),
             'model_visible_tool_names': cls._normalized_name_list(snapshot.get('model_visible_tool_names') or []),
             'provider_tool_names': cls._normalized_name_list(
-                snapshot.get('provider_tool_names')
-                or snapshot.get('model_visible_tool_names')
-                or []
+                snapshot.get('provider_tool_names') or []
             ),
             'hydrated_executor_state': _hydrated_ledger_state(
                 snapshot.get('hydrated_executor_state'),
@@ -657,11 +655,7 @@ class TaskLogService:
                     or []
                 ),
                 'model_visible_tool_names': list(frame.get('model_visible_tool_names') or []),
-                'provider_tool_names': list(
-                    frame.get('provider_tool_names')
-                    or frame.get('model_visible_tool_names')
-                    or []
-                ),
+                'provider_tool_names': list(frame.get('provider_tool_names') or []),
                 'hydrated_executor_state': _hydrated_ledger_state(
                     frame.get('hydrated_executor_state'),
                     frame.get('hydrated_executor_names'),
@@ -5369,11 +5363,7 @@ class TaskLogService:
                 ],
                 'provider_tool_names': [
                     str(item or '').strip()
-                    for item in list(
-                        next_frame.get('provider_tool_names')
-                        or next_frame.get('model_visible_tool_names')
-                        or []
-                    )
+                    for item in list(next_frame.get('provider_tool_names') or [])
                     if str(item or '').strip()
                 ],
                 'hydrated_executor_names': [
@@ -5595,7 +5585,7 @@ class TaskLogService:
             ],
             'provider_tool_names': [
                 str(item or '').strip()
-                for item in list(payload.get('provider_tool_names') or payload.get('model_visible_tool_names') or [])
+                for item in list(payload.get('provider_tool_names') or [])
                 if str(item or '').strip()
             ],
             'hydrated_executor_names': [
@@ -6402,7 +6392,7 @@ class TaskLogService:
             ],
             'provider_tool_names': [
                 str(item or '').strip()
-                for item in list(payload.get('provider_tool_names') or payload.get('model_visible_tool_names') or [])
+                for item in list(payload.get('provider_tool_names') or [])
                 if str(item or '').strip()
             ],
             'hydrated_executor_names': [
