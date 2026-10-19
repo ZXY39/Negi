@@ -3924,7 +3924,7 @@ class ReActToolLoop:
         self._hydrate_node_skill_roster_notice(node=node)
         message, _delivered = _skill_roster_notice.deliver_for_scope(
             scope,
-            list(skill_roster_items or []),
+            _skill_roster_notice.readable_skill_items(list(skill_roster_items or [])),
             now=now_iso(),
             # 头部钉住块那份名单算"已宣布"：否则节点第一跳会重播整份名单。
             covered_skill_ids=_pinned_skill_ids_for(None, session_key=scope),
@@ -3956,12 +3956,13 @@ class ReActToolLoop:
         )
         stage_id = f"comp:{hashlib.sha1(signature.encode('utf-8')).hexdigest()[:12]}"
         self._hydrate_node_skill_roster_notice(node=node)
+        readable_items = _skill_roster_notice.readable_skill_items(list(skill_roster_items or []))
         message = _skill_roster_notice.carry_for_scope(
             scope,
             compression_stage_id=stage_id,
             readable_skill_ids=[
                 str((item or {}).get('skill_id') or '').strip()
-                for item in list(skill_roster_items or [])
+                for item in readable_items
                 if isinstance(item, dict) and str((item or {}).get('skill_id') or '').strip()
             ],
             now=now_iso(),

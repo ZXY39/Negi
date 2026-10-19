@@ -4007,7 +4007,9 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
 
     def _readable_frontdoor_skill_ids(self, session_key: Any) -> list[str]:
         readable: list[str] = []
-        for record in list(self._frontdoor_live_visible_skills(session_key) or []):
+        for record in list(
+            _skill_roster_notice.readable_skill_items(self._frontdoor_live_visible_skills(session_key)) or []
+        ):
             normalized = _skill_roster.normalize_skill_roster_item(record)
             if normalized is None or normalized["skill_id"] in readable:
                 continue
@@ -4032,7 +4034,9 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
         normalized_session_key = str(session_key or "").strip()
         message, delivered = _skill_roster_notice.deliver_for_scope(
             scope,
-            self._frontdoor_live_visible_skills(session_key),
+            _skill_roster_notice.readable_skill_items(
+                self._frontdoor_live_visible_skills(session_key)
+            ),
             now=now_iso(),
             # 头部钉住块那份名单算"已宣布"：否则第一跳会把整份名单重播一遍。
             # 钉住表按裸 session_key 分桶（`session:` 前缀只是台账的作用域写法），

@@ -385,6 +385,24 @@ def test_continuity_snapshot_keeps_the_notice_ledger() -> None:
     assert records[0]["delivered_at"] == "2026-10-19T10:00:01+08:00"
 
 
+def test_repair_required_skill_is_not_announced_until_it_loads() -> None:
+    """`available=False`（repair-required）不算"新增可读"：宣布了模型也 load 不出正文。
+
+    这类名字不进台账，所以被修好之后真可读的那一跳还是会宣布一次。
+    """
+    head = _pin_head(["alpha"])
+    history = [{"role": "system", "content": head}, {"role": "user", "content": "hi"}]
+
+    runner = _frontdoor_runner([{**_item("broken"), "available": False}, _item("alpha")])
+    quiet = runner._apply_frontdoor_skill_roster_notice(history, session_key=SESSION_KEY)
+    assert _notice_texts(quiet) == []
+    assert notice.notice_context_for(SCOPE)["records"] == []
+
+    fixed = _frontdoor_runner([{**_item("broken"), "available": True}, _item("alpha")])
+    texts = _notice_texts(fixed._apply_frontdoor_skill_roster_notice(quiet, session_key=SESSION_KEY))
+    assert len(texts) == 1 and "- `broken`" in texts[0]
+
+
 def test_frontdoor_delivery_publishes_one_internal_row_event() -> None:
     """会话流那边发一条内部行事件；它只是显示面，模型侧那份提示不依赖它。"""
     published: list[tuple[str, dict]] = []

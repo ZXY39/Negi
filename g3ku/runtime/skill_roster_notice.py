@@ -164,6 +164,25 @@ def normalize_skill_roster_notice_context(payload: Any) -> dict[str, Any]:
     }
 
 
+def readable_skill_items(records: list[Any]) -> list[Any]:
+    """只留"真能 load 出正文"的那些。
+
+    `available=False` 属 repair-required（如 `missing required bins`）：头部钉住名单本来就不带
+    它，它的出口是 `load_skill_context` 的 repair 载荷。宣布成"新增可读"会让模型去 load 一个
+    修不好的技能。这类名字**不进台账**，所以之后被修好、真的可读时还是会宣布一次。
+    """
+    readable: list[Any] = []
+    for item in list(records or []):
+        if isinstance(item, dict):
+            available = item.get('available', True)
+        else:
+            available = getattr(item, 'available', True)
+        if available is False or str(available).strip().lower() in {'false', '0'}:
+            continue
+        readable.append(item)
+    return readable
+
+
 def record_live_skills(
     context: Any,
     live_skills: list[Any],
@@ -366,6 +385,7 @@ __all__ = [
     'normalize_notice_record',
     'normalize_skill_roster_notice_context',
     'pending_notice_records',
+    'readable_skill_items',
     'record_live_skills',
     'render_carried_text',
     'render_notice_lines',
