@@ -113,6 +113,59 @@ def test_internal_turn_keeps_stage_tool_callable_without_active_stage() -> None:
     assert "submit_next_stage" in callable_names
 
 
+def test_stale_compression_reason_is_not_a_recommit_boundary() -> None:
+    """跨轮残留的 `token_compression` 不再被当重印判据，也不递增 skill roster epoch。
+
+    实盘（10-19 18:21:28 / 18:22:08 / 18:24:21 / 18:24:29）：一条会话压缩过一次之后，
+    连续四个用户轮每轮都按当轮 RBAC 改 `tools[]` 名册。判据读的是会话级持久值
+    `_frontdoor_history_shrink_reason`，而它没有消费点——一次压缩把"只有边界能改名册"
+    稀释成了"每轮都能改"。现在重印只认消耗式标记。
+    """
+    ops = _ops()
+    session = SimpleNamespace()
+    session_key = "web:shared"
+    setattr(session, FRONTDOOR_LAST_SEND_AT_ATTR, now_iso())
+    setattr(session, "_frontdoor_history_shrink_reason", "token_compression")
+    epoch_before = skill_roster_epoch_for(session, session_key=session_key)
+    state = {"session_key": session_key}
+
+    assert ops._frontdoor_bundle_recommit_boundary(session=session, state=state) is False
+    assert skill_roster_epoch_for(session, session_key=session_key) == epoch_before
+
+    frozen = CeoFrontDoorRuntimeOps._refresh_frontdoor_provider_tool_bundle(
+        prior_provider_tool_names=["exec", "web_fetch"],
+        desired_provider_tool_names=["exec"],
+        prior_history_shrink_reason="token_compression",
+        recommit_boundary=False,
+    )
+    # 权限收窄只关执行准入：名字继续带参数表，等真正的重印边界一次性吸收
+    assert frozen["provider_tool_names"] == ["exec", "web_fetch"]
+    assert frozen["provider_tool_bundle_mode"] == "pinned_frozen"
+
+    recommit = CeoFrontDoorRuntimeOps._refresh_frontdoor_provider_tool_bundle(
+        prior_provider_tool_names=["exec", "web_fetch"],
+        desired_provider_tool_names=["exec"],
+        prior_history_shrink_reason="token_compression",
+        recommit_boundary=True,
+    )
+    assert recommit["provider_tool_names"] == ["exec"]
+    assert recommit["provider_tool_bundle_mode"] == "pinned_recommitted"
+
+
+def test_inline_compression_raises_the_one_shot_recommit_marker() -> None:
+    """内联压缩挂的是一次性标记，被下一跳消费后就没了——重印只发生一次。"""
+    ops = _ops()
+    session = SimpleNamespace()
+    session_key = "web:shared"
+    setattr(session, FRONTDOOR_LAST_SEND_AT_ATTR, now_iso())
+    state = {"session_key": session_key}
+    setattr(session, PENDING_PROVIDER_BUNDLE_RECOMMIT_ATTR, True)
+
+    assert ops._frontdoor_bundle_recommit_boundary(session=session, state=state) is True
+    assert bool(getattr(session, PENDING_PROVIDER_BUNDLE_RECOMMIT_ATTR, False)) is False
+    assert ops._frontdoor_bundle_recommit_boundary(session=session, state=state) is False
+
+
 def test_internal_turn_skill_read_is_narrowed_by_live_governed_set() -> None:
     """头部名单冻结（看得见），load 按治理实时可见集裁决（调不动 → skill_not_permitted）。"""
     record = SimpleNamespace(skill_id="frozen-in-head", skill_doc_path="", display_name="Frozen")

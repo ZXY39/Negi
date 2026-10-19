@@ -91,3 +91,26 @@ def index_schemas_by_name(schemas: Any) -> dict[str, dict[str, Any]]:
         if name and name not in index:
             index[name] = schema
     return index
+
+
+def placeholder_tool_schema(tool_name: str) -> dict[str, Any]:
+    """参数表四档都取不到时的占位：名字留在 `tools[]`，参数表明示没带出来。
+
+    钉住的是**成员**，不是编造契约。断点位置与"直接删名"完全一样（都从这一条的起始字节起
+    断），所以占位不省缓存；它省的是语义——清单成员只在重印边界变，资源删除/重启这种
+    边界之外的事件不许让一个名字悄悄离开 `tools[]`。空 `properties` 加这句描述，模型调它
+    拿到的仍是执行准入那一层的真实回执，不会靠猜参数打出去。两条车道共用本函数，
+    占位形状因此也是同一份字节。
+    """
+    name = _normalize(tool_name)
+    return {
+        "type": "function",
+        "function": {
+            "name": name,
+            "description": (
+                "Parameter table is not carried into this turn. "
+                "Do not guess its arguments; use another tool."
+            ),
+            "parameters": {"type": "object", "properties": {}},
+        },
+    }
