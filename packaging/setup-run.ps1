@@ -10,7 +10,8 @@
 #>
 param(
     [string]$Dir,
-    [switch]$Quiet
+    [switch]$Quiet,
+    [switch]$NoUninstallEntry
 )
 
 $ErrorActionPreference = 'Stop'
@@ -41,5 +42,12 @@ if (-not [System.IO.Path]::IsPathRooted($Dir)) {
 }
 
 Write-Host "[setup] 安装到 $Dir" -ForegroundColor Cyan
-& $installer -Dir $Dir
+if ($NoUninstallEntry) {
+    # Negi-Setup.exe owns the Add/Remove Programs row, so install.ps1 must not add
+    # its own: two "Negi" entries that uninstall differently is worse than none.
+    & $installer -Dir $Dir -NoUninstallEntry
+}
+else {
+    & $installer -Dir $Dir
+}
 exit $LASTEXITCODE

@@ -91,8 +91,10 @@ function Stop-NegiManagedPythonProcesses {
     }
     Write-Host "[negi] Force-stopping remaining Negi processes..." -ForegroundColor Yellow
     foreach ($process in $processes) {
-        # $processes 是发 graceful exit 之前拍的快照；等轮询结束再回来时，
-        # 其中不少 PID 已经自己退干净了。按实况跳过，别把"已经不在了"报成停止失败。
+        # $processes is a snapshot taken before the graceful exit was requested; by
+        # the time the polling loop ends many of those PIDs have already exited on
+        # their own. Check liveness here so "already gone" is not reported as a
+        # failed stop.
         if (-not (Get-Process -Id $process.ProcessId -ErrorAction SilentlyContinue)) {
             continue
         }

@@ -41,15 +41,15 @@ SolidCompression=yes
 WizardStyle=modern
 CloseApplications=no
 
-[Tasks]
-Name: "keepdata"; Description: "卸载时保留配置、会话与任务数据（推荐）"; Flags: checked
-
 [Files]
 Source: "..\install.ps1"; DestDir: "{tmp}"; Flags: deleteafterinstall
 Source: "setup-run.ps1"; DestDir: "{tmp}"; Flags: deleteafterinstall
 
 [Run]
-Filename: "{sys}\WindowsPowerShell\v1.0\powershell.exe"; Parameters: "-NoProfile -ExecutionPolicy Bypass -File ""{tmp}\setup-run.ps1"" -Dir ""{code:TargetDir}"" -Quiet"; StatusMsg: "正在安装 Negi：取代码并建立环境（首次会下载依赖）……"; Flags: runhidden waituntilterminates
+; [Run] waits for the process to exit by default; the install must finish before
+; the wizard can report success.
+Filename: "{sys}\WindowsPowerShell\v1.0\powershell.exe"; Parameters: "-NoProfile -ExecutionPolicy Bypass -File ""{tmp}\setup-run.ps1"" -Dir ""{code:TargetDir}"" -Quiet -NoUninstallEntry"; StatusMsg: "正在安装 Negi：取代码并建立环境（首次会下载依赖）……"; Flags: runhidden
+Filename: "{app}\negi.cmd"; Parameters: "start --window"; Description: "启动 Negi（独立窗口）"; Flags: postinstall nowait skipifsilent skipifdoesntexist runhidden
 
 [Code]
 function TargetDir(Param: String): String;
@@ -57,18 +57,7 @@ begin
   Result := WizardDirValue;
 end;
 
-function UninstallArgs(Param: String): String;
-begin
-  // The keep/purge decision belongs to uninstall.ps1, which also refuses to
-  // delete a directory it cannot prove is Negi's.
-  if WizardIsTaskSelected('keepdata') then
-    Result := '-KeepData -Yes'
-  else
-    Result := '-PurgeData -Yes';
-end;
-
 [UninstallRun]
-Filename: "{sys}\WindowsPowerShell\v1.0\powershell.exe"; Parameters: "-NoProfile -ExecutionPolicy Bypass -File ""{app}\uninstall.ps1"" {code:UninstallArgs}"; RunOnceId: "NegiUninstallScript"; StatusMsg: "正在停止服务并按你的选择处理数据……"; Flags: runhidden waituntilterminates
-
-[Run]
-Filename: "{app}\negi.cmd"; Description: "启动 Negi"; Flags: postinstall nowait skipifsilent runhidden
+; No data flag: the keep/purge choice is made at uninstall time, so it belongs to
+; uninstall.ps1, which also refuses to delete a directory it cannot prove is Negi's.
+Filename: "{sys}\WindowsPowerShell\v1.0\powershell.exe"; Parameters: "-NoProfile -ExecutionPolicy Bypass -File ""{app}\uninstall.ps1"""; RunOnceId: "NegiUninstallScript"; Flags: runhidden
