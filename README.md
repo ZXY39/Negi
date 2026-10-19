@@ -97,6 +97,8 @@ curl -LsSf https://github.com/ZXY39/Negi/releases/latest/download/install.sh | b
 
 安装结束时脚本还会做三件事：把 `negi` 命令装进 `~/.local/bin`（该目录不在 PATH 上时补这一条，用 `-NoPath` / `--no-path` 跳过）、在桌面与开始菜单各放一个 Negi 图标（`-NoShortcut` / `--no-shortcut` 跳过）、在系统的「已安装的应用」里登记一条卸载项。
 
+Windows 上不想开终端的话，同一个发布页还有 `Negi-Setup-<版本>.exe`：双击后向导只问安装目录，其余与上面完全同源（跑的就是同一份 `install.ps1`，同样那三件事）。已经装过的设备再跑一次它，就是升级那台设备——它认得现有的安装根，会把目录页停在真正装着的位置，也会把图标与命令桩换成新版。这个 exe 未签名，Windows 首次运行会提示「Windows 已保护你的电脑」，点「更多信息」→「仍要运行」即可。
+
 取不到 `github.com` 时，可改用镜像通道获取同一脚本，仓库地址与参数不变：
 
 ```powershell
