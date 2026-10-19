@@ -5870,6 +5870,11 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
             "provider_tool_exposure_commit_reason": str(
                 state.get("provider_tool_exposure_commit_reason") or ""
             ).strip(),
+            "frontdoor_pinned_schema_placeholders": [
+                str(item or "").strip()
+                for item in list(state.get("frontdoor_pinned_schema_placeholders") or [])
+                if str(item or "").strip()
+            ],
             "stable_prefix_hash": str(diagnostics.get("stable_prefix_hash") or "").strip(),
             "dynamic_appendix_hash": str(diagnostics.get("dynamic_appendix_hash") or "").strip(),
             "observed_input_truth": copy.deepcopy(observed_input_truth),
@@ -7418,6 +7423,9 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
                 )
             tools_by_name[name] = tool
         rendered = _provider_tool_schemas(tools_by_name)
+        # 占位是一次渲染期的事实，落进 state 让这一跳的工件把它记下来：没有可数落点的
+        # 兜底等于没有兜底——"名字还在"与"名字是占位"在工具哈希上看不出区别。
+        state["frontdoor_pinned_schema_placeholders"] = list(placeholder_names)
         # 整表只在两种情况下重写：这一跳出现过取不到参数表的名字（占位字节也要被下一跳
         # 逐字节复用），或名单成员与整表当前覆盖的那份不同（＝重印边界）。常态跳不重建
         # 字典，比较用的是整表自己的键，不另开一份平行名单。
