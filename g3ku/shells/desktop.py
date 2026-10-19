@@ -1,0 +1,116 @@
+"""桌面窗口壳：把本地 Web 界面装进一个原生窗口，不依赖用户的浏览器。
+
+壳是无状态的——它只是指向已启动服务的一扇窗。关窗不停服务（停止仍是界面里那颗
+退出按钮），再点一次图标就重新开一扇。承载方式是 WebView2：Windows 11 自带运行
+时，所以壳不打包任何浏览器内核。
+
+`http://127.0.0.1` 在 WebView2 里是安全上下文，`navigator.mediaDevices` 因此存在；
+但麦克风权限要宿主点头，而 pywebview 不注册 `PermissionRequested`。这里的做法是在
+`loaded` 回调里补挂——该回调由 WinForms 的 NavigationCompleted 触发，跑在 UI 线程
+上，而 `CoreWebView2` 只允许在 UI 线程访问。
+"""
+
+from __future__ import annotations
+
+from typing import Any
+
+WINDOW_TITLE = "Negi"
+WINDOW_WIDTH = 1280
+WINDOW_HEIGHT = 860
+MICROPHONE_PERMISSION = "Microphone"
+PERMISSION_ALLOWED = 1
+
+
+def shell_url(port: int | None = None) -> str:
+    """界面地址。绑定地址可以是 0.0.0.0，可点击的地址只能是回环。"""
+    resolved = port
+    if resolved is None:
+        from g3ku.config.loader import load_config
+
+        try:
+            resolved = int(load_config().web.port or 0)
+        except Exception:
+            resolved = 0
+    if not resolved:
+        resolved = 18790
+    return f"http://127.0.0.1:{resolved}/"
+
+
+def server_reachable(url: str, timeout: float = 2.0) -> bool:
+    """窗口只对"已经在服务"的地址开，否则用户看到的是一页连接错误。"""
+    import urllib.request
+
+    probe = url.rstrip("/") + "/api/bootstrap/status"
+    try:
+        with urllib.request.urlopen(probe, timeout=timeout) as resp:
+            return int(getattr(resp, "status", 200) or 200) < 400
+    except Exception:
+        return False
+
+
+def import_error() -> str:
+    """能开壳返回空串，否则返回指明缺哪一环的一句话。"""
+    import os
+    import sys
+
+    if sys.platform != "win32":
+        return "桌面窗口目前只在 Windows 上提供；这台机器请用浏览器打开界面地址。"
+    try:
+        import webview  # noqa: F401
+    except Exception as exc:
+        return (
+            f"桌面窗口需要 pywebview（已随 Windows 安装声明），当前导入失败：{exc}。"
+            "可在安装目录执行 uv sync --frozen 补齐依赖。"
+        )
+    if not os.path.exists(os.path.join(sys.prefix, "Scripts", "pythonw.exe")):
+        return "找不到 pythonw.exe，桌面窗口无法在无控制台状态下启动。"
+    return ""
+
+
+def _attach_microphone_permission(window: Any) -> str:
+    """给 WebView2 补一个麦克风授权回调；返回一句给操作员看的判读。"""
+    try:
+        core = window.native.webview.CoreWebView2
+    except Exception as exc:
+        return f"未能接管权限回调，麦克风可能被静默拒绝：{type(exc).__name__}"
+
+    def on_request(_sender: Any, args: Any) -> None:
+        if str(args.PermissionKind) == MICROPHONE_PERMISSION:
+            args.State = PERMISSION_ALLOWED
+
+    try:
+        core.PermissionRequested += on_request
+    except Exception as exc:
+        return f"权限回调注册失败：{type(exc).__name__}"
+    return "麦克风权限已交给界面按需申请"
+
+
+def run_desktop_shell(url: str | None = None, *, port: int | None = None) -> int:
+    """开一扇指向本地服务的窗口，窗口关闭即返回。"""
+    problem = import_error()
+    if problem:
+        print(f"[negi] {problem}")
+        return 1
+
+    import webview
+
+    target = url or shell_url(port)
+    window = webview.create_window(
+        WINDOW_TITLE,
+        url=target,
+        width=WINDOW_WIDTH,
+        height=WINDOW_HEIGHT,
+    )
+
+    def on_loaded() -> None:
+        print(f"[negi] 窗口已连接 {target}；{_attach_microphone_permission(window)}")
+
+    window.events.loaded += on_loaded
+    print(f"[negi] 正在打开桌面窗口 {target}")
+    try:
+        webview.start()
+    except Exception as exc:
+        print(f"[negi] 桌面窗口启动失败：{type(exc).__name__}: {exc}")
+        print("[negi] 可以先用浏览器打开同一个地址：negi")
+        return 1
+    return 0

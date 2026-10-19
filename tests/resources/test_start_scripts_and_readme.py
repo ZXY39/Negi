@@ -143,3 +143,18 @@ def test_uninstaller_keeps_its_bom_for_cjk_dialog_text() -> None:
     # It is never piped through iex, so the BOM that kills install.ps1 is what
     # keeps this one readable.
     assert (REPO_ROOT / "uninstall.ps1").read_bytes().startswith(BOM)
+
+
+def test_every_shipped_powershell_script_is_ascii_or_bom_marked() -> None:
+    # The two rules above generalize: a script that is executed by path and carries
+    # non-ASCII text needs the BOM, and the one the `iwr | iex` channel pipes needs
+    # to stay pure ASCII. packaging\setup-run.ps1 is the wizard's hand-off into
+    # install.ps1 and prints Chinese, so it is exactly as exposed as uninstall.ps1
+    # was - which is why the check walks the folder instead of naming files.
+    scripts = list(REPO_ROOT.glob("*.ps1")) + list((REPO_ROOT / "packaging").glob("*.ps1"))
+    offenders = []
+    for path in sorted(scripts):
+        raw = path.read_bytes()
+        if any(byte > 127 for byte in raw) and not raw.startswith(BOM):
+            offenders.append(str(path.relative_to(REPO_ROOT)))
+    assert offenders == [], offenders

@@ -368,7 +368,37 @@ def _wait_for_web_ready(child: object, port: int) -> bool:
     return False
 
 
-def _launch_web(web_args: list[str], *, port: int, open_browser: bool, hidden: bool) -> int:
+def _open_desktop_window(port: int) -> bool:
+    """Hand the window to the desktop shell instead of a browser tab.
+
+    The shell is a GUI process, so it goes out through ``pythonw`` detached: a
+    console interpreter would pop a black window behind the very window we are
+    trying to be. Closing the shell leaves the server running either way.
+    """
+    pythonw = VENV_PYTHON.with_name("pythonw.exe" if os.name == "nt" else "python")
+    if not pythonw.exists():
+        print(f"[negi] {pythonw} is missing; opening the browser instead", flush=True)
+        return _open_browser(_web_url(port))
+    popen_kwargs: dict[str, object] = {
+        "cwd": str(PROJECT_ROOT),
+        "stdin": subprocess.DEVNULL,
+        "stdout": subprocess.DEVNULL,
+        "stderr": subprocess.DEVNULL,
+    }
+    if os.name == "nt":
+        popen_kwargs["creationflags"] = subprocess.DETACHED_PROCESS | subprocess.CREATE_NEW_PROCESS_GROUP
+    else:
+        popen_kwargs["start_new_session"] = True
+    try:
+        subprocess.Popen([str(pythonw), "-m", "g3ku", "window", "--port", str(port)], **popen_kwargs)
+    except Exception as exc:
+        print(f"[negi] could not open the desktop window: {exc}; using the browser", flush=True)
+        return _open_browser(_web_url(port))
+    print(f"[negi] desktop window starting against {_web_url(port)}", flush=True)
+    return True
+
+
+def _launch_web(web_args: list[str], *, port: int, open_browser: bool, hidden: bool, open_window: bool = False) -> int:
     console_log_stream = _open_runtime_console_log_stream()
     if console_log_stream is not None:
         print(f"[negi] web runtime stdout/stderr appending to {RUNTIME_CONSOLE_LOG_FILE}", flush=True)
@@ -381,7 +411,9 @@ def _launch_web(web_args: list[str], *, port: int, open_browser: bool, hidden: b
             _print_web_start_failure(returncode)
             return returncode
         _print_web_ready_banner(port)
-        if open_browser:
+        if open_window:
+            _open_desktop_window(port)
+        elif open_browser:
             _open_browser(_web_url(port))
         if hidden:
             # Nobody owns this console: the server keeps running after this
@@ -399,20 +431,37 @@ def _launch_web(web_args: list[str], *, port: int, open_browser: bool, hidden: b
                 pass
 
 
+def _take_window_flag(args: list[str]) -> tuple[list[str], bool]:
+    if "--window" not in args:
+        return args, False
+    return [part for part in args if part != "--window"], True
+
+
 def _run_start(extra_args: list[str]) -> int:
     # `--hidden` is still consumed so a shortcut written by an earlier install
     # keeps working, but start always detaches: a server the operator launched by
     # typing `negi` must outlive the window it was started from. Watching the
-    # process itself is what `negi web` is for.
+    # process itself is what `negi web` is for. `--window` swaps the browser tab
+    # for the desktop shell; the server lane is identical either way.
     web_args, _ = _take_hidden_flag(list(extra_args))
+    web_args, want_window = _take_window_flag(web_args)
     port = _web_bind_port(_port_override(web_args))
     if _probe_web_ready(port):
         url = _web_url(port)
         print(f"[negi] Negi is already running on port {port}: {url}", flush=True)
-        _open_browser(url)
+        if want_window:
+            _open_desktop_window(port)
+        else:
+            _open_browser(url)
         return 0
     print(f"[negi] Negi is not running yet; starting the web UI on port {port}", flush=True)
-    return _launch_web(["web", *web_args], port=port, open_browser=True, hidden=True)
+    return _launch_web(
+        ["web", *web_args],
+        port=port,
+        open_browser=not want_window,
+        hidden=True,
+        open_window=want_window,
+    )
 
 
 def main(argv: list[str] | None = None) -> int:

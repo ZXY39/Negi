@@ -14,7 +14,8 @@ param(
     [switch]$NoStart,
     [switch]$Upgrade,
     [switch]$NoPath,
-    [switch]$NoShortcut
+    [switch]$NoShortcut,
+    [switch]$NoUninstallEntry
 )
 
 $ErrorActionPreference = 'Stop'
@@ -413,9 +414,11 @@ function Install-DesktopIcons {
     foreach ($target in $targets) {
         $link = $shell.CreateShortcut($target)
         # pythonw allocates no console, so the icon starts Negi without the
-        # window flash a .cmd or -WindowStyle Hidden would still show.
+        # window flash a .cmd or -WindowStyle Hidden would still show. `--window`
+        # asks for the desktop shell; it falls back to the browser when the shell
+        # cannot start, so the icon never ends up doing nothing.
         $link.TargetPath = $pythonw
-        $link.Arguments = """$Root\negi_bootstrap.py"" start"
+        $link.Arguments = """$Root\negi_bootstrap.py"" start --window"
         $link.WorkingDirectory = $Root
         $link.Description = 'Start Negi and open the browser'
         if ($IconPath) { $link.IconLocation = "$IconPath,0" }
@@ -455,7 +458,14 @@ Install-Environment -uv $uv -Root $Dir
 $icon = Copy-NegiIcon -Root $Dir
 Install-EntryPoint -Root $Dir
 if (-not $NoShortcut) { Install-DesktopIcons -Root $Dir -IconPath $icon }
-Write-UninstallRegistryEntry -Root $Dir -IconPath $icon
+if ($NoUninstallEntry) {
+    # The setup program owns the Add/Remove Programs entry when it drives this
+    # script; writing both would show two "Negi" rows that uninstall differently.
+    Write-Step 'installed-apps entry skipped (-NoUninstallEntry; the setup program owns it)'
+}
+else {
+    Write-UninstallRegistryEntry -Root $Dir -IconPath $icon
+}
 Write-Step 'from any terminal now on: negi'
 
 if ($NoStart) {
