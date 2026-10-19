@@ -334,7 +334,14 @@ def _spawn_web_runtime(args: list[str], *, hidden: bool, console_log_stream: obj
         popen_kwargs["stdin"] = subprocess.DEVNULL
         popen_kwargs["env"] = env if env is not None else dict(os.environ)
         if os.name == "nt":
-            popen_kwargs["creationflags"] = subprocess.DETACHED_PROCESS | subprocess.CREATE_NEW_PROCESS_GROUP
+            # CREATE_NO_WINDOW, not DETACHED_PROCESS: the venv's python.exe is a
+            # redirector that spawns the real interpreter as its child (measured:
+            # launched pid != running pid). A detached parent has no console at all,
+            # so Windows gives that child a fresh visible one - and that process is
+            # the server, so closing the "extra" window kills Negi. An invisible
+            # console is inherited by the child instead. The new process group keeps
+            # Ctrl+C in this terminal from reaching the server.
+            popen_kwargs["creationflags"] = subprocess.CREATE_NO_WINDOW | subprocess.CREATE_NEW_PROCESS_GROUP
         else:
             popen_kwargs["start_new_session"] = True
     return subprocess.Popen([str(VENV_PYTHON), "-m", "g3ku", *args], **popen_kwargs)

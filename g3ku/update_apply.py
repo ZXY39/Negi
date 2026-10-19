@@ -245,7 +245,11 @@ def _spawn_detached(*args: str, sink_path: Path | None = None) -> None:
     target = sink_path or LOG_FILE
     kwargs: dict[str, object] = {"cwd": str(PROJECT_ROOT), "stdin": subprocess.DEVNULL}
     if os.name == "nt":
-        kwargs["creationflags"] = subprocess.DETACHED_PROCESS | subprocess.CREATE_NEW_PROCESS_GROUP
+        # CREATE_NO_WINDOW rather than DETACHED_PROCESS: the venv python.exe is a
+        # redirector that spawns the real interpreter as its child, and a child with
+        # no console at all gets a fresh visible one - which is the relaunched server
+        # itself, so the "leftover" window closing it would stop the service.
+        kwargs["creationflags"] = subprocess.CREATE_NO_WINDOW | subprocess.CREATE_NEW_PROCESS_GROUP
     else:
         kwargs["start_new_session"] = True
     try:

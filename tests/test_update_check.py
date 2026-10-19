@@ -630,3 +630,29 @@ def test_release_tag_probe_never_opens_its_own_console_window(monkeypatch) -> No
         assert captured["kwargs"].get("creationflags") == subprocess.CREATE_NO_WINDOW
     else:
         assert "creationflags" not in captured["kwargs"]
+
+
+def test_relaunch_never_hands_the_server_its_own_console_window(monkeypatch, tmp_path: Path) -> None:
+    # 「重启并更新」重拉起的也是 venv 重定向器：DETACHED_PROCESS 让真解释器自己
+    # 分配一个可见控制台，那个窗一关服务就没了。后台化一律用 CREATE_NO_WINDOW。
+    import g3ku.update_apply as apply_mod
+
+    captured = {}
+
+    class _Popen:
+        def __init__(self, argv, **kwargs):
+            captured["argv"] = list(argv)
+            captured["kwargs"] = kwargs
+
+    monkeypatch.setattr(apply_mod, "LOG_FILE", tmp_path / "update-apply.log")
+    monkeypatch.setattr(apply_mod.subprocess, "Popen", _Popen)
+
+    apply_mod._spawn_detached("-m", "g3ku", "web")
+
+    assert captured["argv"][1:4] == ["-m", "g3ku", "web"]
+    if os.name == "nt":
+        flags = captured["kwargs"]["creationflags"]
+        assert flags == subprocess.CREATE_NO_WINDOW | subprocess.CREATE_NEW_PROCESS_GROUP
+        assert not flags & subprocess.DETACHED_PROCESS
+    else:
+        assert captured["kwargs"]["start_new_session"] is True

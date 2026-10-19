@@ -190,9 +190,13 @@ def test_spawned_child_keeps_the_cmdline_shape_the_reaper_matches(monkeypatch) -
 
     assert captured['argv'][1:4] == ['-m', 'g3ku', 'web']
     if os.name == 'nt':
-        assert captured['kwargs']['creationflags'] == (
-            subprocess.DETACHED_PROCESS | subprocess.CREATE_NEW_PROCESS_GROUP
-        )
+        # 后台化必须用 CREATE_NO_WINDOW，不能是 DETACHED_PROCESS：venv 的 python.exe
+        # 是重定向器（实测启动 PID != 运行 PID），真解释器是它的子进程。父进程完全没有
+        # 控制台时，Windows 会给那个子进程新建一个可见控制台——而它就是服务本身，
+        # 用户关掉"多出来的黑窗"等于杀掉 Negi。
+        flags = captured['kwargs']['creationflags']
+        assert flags == subprocess.CREATE_NO_WINDOW | subprocess.CREATE_NEW_PROCESS_GROUP
+        assert not flags & subprocess.DETACHED_PROCESS
     else:
         assert captured['kwargs']['start_new_session'] is True
 
