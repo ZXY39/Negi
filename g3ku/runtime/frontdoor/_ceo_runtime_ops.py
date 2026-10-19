@@ -269,7 +269,11 @@ FRONTDOOR_NODE_ERROR_AUTO_STAGE_BUDGET = 10
 class FrontdoorExecutionBundle:
     base_stage_state: dict[str, Any]
     mutable_stage_state: dict[str, Any]
+    # 执行准入面：本轮 callable（常驻内置 + 契约在场的水合名 + 控制工具）。
     visible_tools: dict[str, Tool]
+    # 声明面：钉住的 `tools[]` 名字解析出的实例（+ 控制工具）。只用来渲染 provider
+    # schema，不参与准入——两者分源是 `tools[]` 钉死的直接推论。
+    declared_tools: dict[str, Tool]
     runtime_context: dict[str, Any]
     on_progress: Any
 
@@ -3787,6 +3791,8 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
             "hydrated_tool_names": list(state.get("hydrated_tool_names") or []),
             # 给拒绝文案用：撞进来路已收的工具时，要能说"是无权限"而不是"还没水合"。
             "declared_denied_tool_names": self._frontdoor_declared_denied_tool_names_for_state(state),
+            # 可加载面（钉住的 tools[]）：声明里有、callable 里没有的名字，拒绝文案要给 load 指引。
+            "declared_tool_names": list(state.get("provider_tool_names") or []),
             "rbac_visible_tool_names": list(state.get("rbac_visible_tool_names") or []),
             "rbac_visible_skill_ids": list(state.get("rbac_visible_skill_ids") or []),
             "channel": getattr(session, "_channel", "cli"),
@@ -3817,17 +3823,18 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
         }
 
     def _frontdoor_dispatch_tool_names(self, state: CeoGraphState) -> list[str]:
-        """派发名单＝模型可见 `tools[]` 的名字源：钉住的声明 ∩ 当轮治理可见 −「契约不在场的水合工具」。
+        """声明名单＝模型可见 `tools[]` 的名字源：钉住的声明 ∩ 当轮治理可见 −「契约不在场的水合工具」。
 
-        `tools[]` 全程钉死（重印边界之前一个名字不增删，回合起点也不并入新增），所以这份
-        名单**不并**水合台账——mid-turn 注册的工具在声明吸收它之前，参数表不进 `tools[]`，
-        靠尾块 `undeclared_candidates` 点名、load 返回的参数契约供模型参考；可执行名单另算，
-        见 `_frontdoor_executable_tool_names`。
+        这份名单是**可加载面**，不是准入面：`tools[]` 全程钉死（重印边界之前一个名字
+        不增删，回合起点也不并入新增），所以它不并水合台账——mid-turn 注册的工具在声明
+        吸收它之前，参数表不进 `tools[]`，靠尾块 `undeclared_candidates` 点名、load 返回
+        的参数契约供模型参考。真正放行调用的是 `_frontdoor_executable_tool_names`（本轮
+        callable），两者分源。
 
         清单可以滞后（删名推迟到压缩重印），执行准入不行——声明滞后绝不能变成权限滞后。
         治理可见集取不到时按当轮 callable pool 收，不拿声明兜底（宁可窄不可宽）。
 
-        撤销必须落到这一层才算"不允许调用"：实盘只改尾部契约时，那一跳的 callable 行里
+        撤销必须落到准入层才算"不允许调用"：实盘只改尾部契约时，那一跳的 callable 行里
         已没有 `perf_inspect`，而 stage2 仍把它调用成功（派发与声明解耦），规则只剩文案效果。
         常驻内置与控制/加载器不在水合台账里，不受这条影响；裁撤但被 `keep_tools` 留住的
         名字由同一判据判成在场，因此不会被摘。
@@ -3846,26 +3853,43 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
         return dispatch
 
     def _frontdoor_executable_tool_names(self, state: CeoGraphState) -> list[str]:
-        """可执行名单＝派发名单 ∪ 契约在场的水合名。
+        """执行准入＝本轮 callable（常驻内置 + 契约在场的水合名）；控制工具另行注入执行束。
 
-        `tools[]` 钉死后模型可见面与执行准入分源：mid-turn 注册的工具参数表不进
-        `tools[]`，但 load 成功落账后（台账 + 尾块 `callable_tools` 点名）执行准入必须
-        放行，否则 load 是死出口。kept 名单已过契约在场判据，load 准入又按治理实时
-        可见校验过，并入不放大权限。模型可见 schema 面的钉住由
-        `_frontdoor_tool_schemas_for_state` 滤回派发名单保证。
+        `tools[]` 是声明面、`callable_tools` 是准入面，两者不同义：声明里的名字在
+        `load_tool_context` 成功落账（下一跳进 callable）之前调用一律被拒，回执引导先
+        load。这是"先读契约再调"的唯一落点——只在尾块点名、执行侧照旧放行，规则就只剩
+        文案效果（`perf_inspect` 那例）。`submit_next_stage` / `silent` 是合成实例，
+        由 `_frontdoor_execution_bundle` 直接装进对象字典，不在这份名单里。
+
+        RBAC 收回要当跳生效：声明名被收回时仍挂在钉住的 `tools[]` 上（清单滞后），所以
+        声明名在 callable 之上再与当轮治理可见集求交，宁可窄不可宽。非声明名（mid-turn
+        注册后 load 落账的）不受这道交约束——回合初快照本来就没有它，按快照误拒会把
+        "load 成功却调不动"重新造出来。缺 callable 视图（`tool_names` 键缺失的旁路/老
+        快照）才退回派发名单，避免整束塌成空、回合一个工具都调不动。
         """
-        dispatch = self._frontdoor_dispatch_tool_names(state)
-        kept, _revoked = self._frontdoor_contract_presence_partition(
-            state,
-            state.get("hydrated_tool_names"),
+        if not isinstance(state, dict):
+            return []
+        callable_names = [
+            name
+            for name in self._frontdoor_callable_tool_names_for_state(state)
+            # 控制工具是执行束里另装的合成实例（`_frontdoor_execution_bundle`），不在
+            # registry 里，留在这份名单只会让按名取实例空转、污染排障视图。
+            if name not in {STAGE_TOOL_NAME, SILENT_TOOL_NAME}
+        ]
+        if not callable_names and "tool_names" not in state:
+            return self._frontdoor_dispatch_tool_names(state)
+        granted = self._normalized_tool_name_state_list(list(state.get("rbac_visible_tool_names") or []))
+        if not granted:
+            return callable_names
+        declared = set(
+            self._normalized_tool_name_state_list(list(state.get("provider_tool_names") or []))
         )
-        executable = list(dispatch)
-        seen = set(dispatch)
-        for name in kept:
-            if name not in seen:
-                executable.append(name)
-                seen.add(name)
-        return executable
+        granted_set = set(granted)
+        return [
+            name
+            for name in callable_names
+            if name not in declared or name in granted_set
+        ]
 
     def _frontdoor_live_granted_tool_names(self, *, session_key: str) -> list[str]:
         """实时读一次"这个角色现在被允许哪些工具"。
@@ -4020,11 +4044,12 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
             reason=MEMORY_SNAPSHOT_ADOPTION_IDLE_REFRESH,
         )
     def _registered_tools_for_state(self, state: CeoGraphState) -> dict[str, Tool]:
-        """执行束的工具实例表：按**可执行名单**取名（派发 ∪ 契约在场的水合名）。
+        """执行束的工具实例表：按**可执行名单**（本轮 callable）取名。
 
-        `tools[]` 钉死后这条与模型可见 schema 面分源——schema 由
-        `_frontdoor_tool_schemas_for_state` 滤回钉住的派发名单，这里保留水合名，
-        mid-turn 注册的工具 load 落账后执行准入才放行。
+        `tools[]` 钉死后声明面与准入面分源——provider schema 由
+        `_frontdoor_tool_schemas_for_state` 按钉住的派发名单单独取实例（`declared_tools`），
+        这里只放本轮真能调的名字。声明里未 load 的工具不在这里，调用会得到
+        `tool not available` 与先 `load_tool_context` 的指引。
         """
         return self._registered_tools(
             self._frontdoor_provider_visible_tool_names(self._frontdoor_executable_tool_names(state))
@@ -7178,13 +7203,13 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
         runtime: CeoRuntime,
     ) -> list[dict[str, Any]]:
         execution_bundle = self._frontdoor_execution_bundle(state=state, runtime=runtime)
-        # `tools[]` 全程钉死：执行束按可执行集组装（含水合名），参数表必须滤回钉住的
-        # 派发名单——mid-turn 注册的工具在声明于重印边界吸收它之前，schema 不进 `tools[]`。
+        # `tools[]` 全程钉死：声明面单独取实例（`declared_tools`），不经过执行束——执行束
+        # 已按本轮 callable 收窄，拿它渲染会把参数表一起收掉，钉住语义当场失效。
         keep = set(self._frontdoor_dispatch_tool_names(state))
         keep.update({STAGE_TOOL_NAME, SILENT_TOOL_NAME})
         pinned_visible = {
             name: tool
-            for name, tool in execution_bundle.visible_tools.items()
+            for name, tool in execution_bundle.declared_tools.items()
             if str(name or "").strip() in keep
         }
         return _provider_tool_schemas(pinned_visible)
@@ -7236,6 +7261,18 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
             STAGE_TOOL_NAME: SubmitNextStageTool(_submit_stage),
             SILENT_TOOL_NAME: SilentTool(),
         }
+        # 声明面与准入面分源：schema 用的实例按钉住的派发名单单独解析（同一道
+        # `_frontdoor_provider_visible_tool_names` 契约投影校验），控制工具复用同一份
+        # 实例；两者分家后 `tools[]` 不随 callable 收窄。
+        declared_tools = {
+            **self._registered_tools(
+                self._frontdoor_provider_visible_tool_names(
+                    self._frontdoor_dispatch_tool_names(state)
+                )
+            ),
+            STAGE_TOOL_NAME: all_tools[STAGE_TOOL_NAME],
+            SILENT_TOOL_NAME: all_tools[SILENT_TOOL_NAME],
+        }
         stage_gate = self._frontdoor_stage_gate({"frontdoor_stage_state": mutable_stage_state})
         visible_tools = visible_tools_for_stage_iteration(
             all_tools,
@@ -7248,6 +7285,7 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
             base_stage_state=base_stage_state,
             mutable_stage_state=mutable_stage_state,
             visible_tools=visible_tools,
+            declared_tools=declared_tools,
             runtime_context=runtime_context,
             on_progress=runtime_context.get("on_progress"),
         )
@@ -9358,6 +9396,7 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
                     callable_names=list(visible_tools.keys()),
                     candidate_names=(runtime_context or {}).get("candidate_tool_names") or [],
                     denied_names=(runtime_context or {}).get("declared_denied_tool_names") or [],
+                    declared_names=(runtime_context or {}).get("declared_tool_names") or [],
                 )
                 return await _error_result(payload, f"tool not available: {tool_name}" + (f"\n{hint}" if hint else ""))
             async with semaphore:
