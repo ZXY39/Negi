@@ -97,8 +97,14 @@ def availability_hint(
     callable_names: Any = None,
     candidate_names: Any = None,
     denied_names: Any = None,
+    declared_names: Any = None,
 ) -> str:
-    """名称被拒时说明"什么能用"：候选未水化、纯未知名、已声明但无权限三者的修法不同，必须分开讲。"""
+    """名称被拒时说明"什么能用"：候选未水化、纯未知名、已声明但无权限三者的修法不同，必须分开讲。
+
+    `declared_names` 是钉住的 `tools[]` 名单（可加载面）。它比候选集宽：语义 top-k 没选中
+    的名字照样能按名 load，所以"声明里有、callable 里没有"一律先给 load 指引，不落到
+    "未知名字"那一档——否则模型会以为这个能力不存在。
+    """
     name = str(requested or "").strip()
     denied_list = _availability_name_list(denied_names)
     if name and name in set(denied_list):
@@ -110,8 +116,10 @@ def availability_hint(
         )
     callable_list = _availability_name_list(callable_names)
     candidate_list = _availability_name_list(candidate_names)
+    declared_list = _availability_name_list(declared_names)
     parts: list[str] = []
-    if name and name in set(candidate_list):
+    loadable_names = set(candidate_list) | set(declared_list)
+    if name and name in loadable_names:
         parts.append(_NOT_HYDRATED_NOTE.format(name=name))
     group = _format_availability_group(_AVAILABILITY_CALLABLE_PREFIX, callable_list)
     if group:
