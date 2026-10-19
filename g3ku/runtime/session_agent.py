@@ -630,11 +630,14 @@ class RuntimeAgentSession:
         self._frontdoor_visible_tool_ids = self._normalized_name_list(payload.get("visible_tool_ids"))
         self._frontdoor_visible_skill_ids = self._normalized_name_list(payload.get("visible_skill_ids"))
         # 一次性提示的台账：基线里已经带着投过的那条提示，台账跟着基线走才不会
-        # 重启后重复投、也不会截断后把名字永久忘掉。
-        _skill_roster_notice.set_notice_context(
-            f"session:{str(getattr(getattr(self, 'state', None), 'session_key', '') or '').strip()}",
-            payload.get("skill_roster_notice_context"),
-        )
+        # 重启后重复投、也不会截断后把名字永久忘掉。**载荷没带这个键时不动**——
+        # 有些基线载荷（如手动压缩重写出来的那份）本来就不带它，无条件覆盖等于把
+        # 台账抹掉，压缩那一跳就没有名字可搬，退场判定也会误读成"全部不可读"。
+        if "skill_roster_notice_context" in payload:
+            _skill_roster_notice.set_notice_context(
+                f"session:{str(getattr(getattr(self, 'state', None), 'session_key', '') or '').strip()}",
+                payload.get("skill_roster_notice_context"),
+            )
         self._frontdoor_provider_tool_schema_names = self._normalized_name_list(
             payload.get("provider_tool_schema_names")
         )

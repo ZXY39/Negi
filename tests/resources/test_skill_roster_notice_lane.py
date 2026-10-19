@@ -403,6 +403,60 @@ def test_repair_required_skill_is_not_announced_until_it_loads() -> None:
     assert len(texts) == 1 and "- `broken`" in texts[0]
 
 
+def test_restore_without_the_notice_key_keeps_the_ledger() -> None:
+    """载荷没带这个键时不许清空台账：手动压缩重写出来的基线载荷本来就不带它。"""
+    from g3ku.runtime.session_agent import RuntimeAgentSession
+
+    context, _ = notice.record_live_skills({}, [_item("beta")], now="2026-10-19T10:00:00+08:00")
+    context = notice.mark_records_delivered(context, ["beta"], now="2026-10-19T10:00:01+08:00")
+    notice.set_notice_context(SCOPE, context)
+
+    state = SimpleNamespace(session_key=SESSION_KEY)
+    stub = SimpleNamespace(
+        state=state,
+        _normalized_name_list=staticmethod(RuntimeAgentSession._normalized_name_list),
+        _restorable_frontdoor_request_body_messages=staticmethod(
+            RuntimeAgentSession._restorable_frontdoor_request_body_messages
+        ),
+        _adopt_compression_state=lambda *args: dict(args[-1] or {}),
+        _recompute_frontdoor_completed_continuity_bridge_pending=lambda **_kwargs: None,
+    )
+    payload = {"frontdoor_request_body_messages": [{"role": "user", "content": "hi"}]}
+    assert RuntimeAgentSession._restore_frontdoor_state_from_payload(
+        stub, payload, source="completed_continuity", allow_continuity_bridge=False
+    ) is True
+    assert [r["skill_id"] for r in notice.notice_context_for(SCOPE)["records"]] == ["beta"]
+
+    # 载荷带了键时以载荷为准（截断/回滚要靠这条把台账拉回该轮边界的样子）
+    payload_with = dict(payload)
+    payload_with["skill_roster_notice_context"] = {"records": [], "carried_stages": []}
+    RuntimeAgentSession._restore_frontdoor_state_from_payload(
+        stub, payload_with, source="completed_continuity", allow_continuity_bridge=False
+    )
+    assert notice.notice_context_for(SCOPE)["records"] == []
+
+
+def test_manual_compression_carry_appends_to_the_durable_baseline() -> None:
+    """手动压缩那一跳：仍可读的名字要补回 durable 基线，读不到的不补。"""
+    runner = _frontdoor_runner([_item("beta")])
+    context, _ = notice.record_live_skills({}, [_item("beta"), _item("gone")], now="2026-10-19T10:00:00+08:00")
+    context = notice.mark_records_delivered(context, ["beta", "gone"], now="2026-10-19T10:00:01+08:00")
+    notice.set_notice_context(SCOPE, context)
+    session = SimpleNamespace(
+        _frontdoor_request_body_messages=[{"role": "user", "content": "hi"}],
+        _active_turn_id="turn-manual-1",
+    )
+
+    runner._carry_manual_compression_notice_into_baseline(session=session, session_key=SESSION_KEY)
+
+    baseline = list(session._frontdoor_request_body_messages)
+    assert len(baseline) == 2 and str(baseline[-1]["content"]).startswith(MARKER)
+    assert "beta" in baseline[-1]["content"] and "gone" not in baseline[-1]["content"]
+    # 同一次压缩不再补第二份
+    runner._carry_manual_compression_notice_into_baseline(session=session, session_key=SESSION_KEY)
+    assert len(session._frontdoor_request_body_messages) == 2
+
+
 def test_frontdoor_delivery_publishes_one_internal_row_event() -> None:
     """会话流那边发一条内部行事件；它只是显示面，模型侧那份提示不依赖它。"""
     published: list[tuple[str, dict]] = []

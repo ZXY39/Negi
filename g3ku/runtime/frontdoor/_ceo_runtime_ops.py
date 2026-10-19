@@ -7875,6 +7875,16 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
         user_input = _persistent_user_input_payload(state.get("user_input"))
         user_content = _user_input_content(user_input)
         session = runtime.context.session
+        # 手动压缩跑在回合外，够不到发送路径那一次压缩搬运；它挂的待重印标记在本跳
+        # 的边界判定里被消费，所以要**先**把仍可读的名字补回 durable 基线，这一跳的
+        # 种子/装配才读得到它。标记本身留给下面的边界判定消费（一处消费两次读会错位）。
+        prepare_session_key = str(getattr(getattr(session, "state", None), "session_key", "") or "").strip()
+        manual_recommit_pending = bool(getattr(session, PENDING_PROVIDER_BUNDLE_RECOMMIT_ATTR, False))
+        if manual_recommit_pending:
+            self._carry_manual_compression_notice_into_baseline(
+                session=session,
+                session_key=prepare_session_key,
+            )
         metadata = _user_input_metadata(user_input)
         builder_user_metadata = dict(metadata or {})
         batch_query_text = str(metadata.get("web_ceo_batch_query_text") or "").strip()
@@ -8266,9 +8276,6 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
             desired_provider_tool_names = self._frontdoor_provider_visible_tool_names(
                 provider_tool_seed_names
             )
-            prepare_session_key = str(getattr(getattr(session, "state", None), "session_key", "") or "").strip()
-            # 待重印标记在下面这次边界判定里就被消费掉了，所以先在这儿抄一份。
-            manual_recommit_pending = bool(getattr(session, PENDING_PROVIDER_BUNDLE_RECOMMIT_ATTR, False))
             provider_tool_exposure = self._refresh_frontdoor_provider_tool_bundle(
                 prior_provider_tool_names=self._normalized_tool_name_state_list(
                     state.get("provider_tool_names")
@@ -8282,13 +8289,6 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
                 ).strip(),
                 recommit_boundary=self._frontdoor_bundle_recommit_boundary(session=session, state=state),
             )
-            if manual_recommit_pending:
-                # 手动压缩跑在回合外，产出整段正文重写——一次性提示随之离开上下文。它挂的
-                # 待重印标记在本跳被消费，同一跳把仍可读的名字补回 durable 基线尾部。
-                self._carry_manual_compression_notice_into_baseline(
-                    session=session,
-                    session_key=prepare_session_key,
-                )
             runtime_visible_tool_names = list(provider_tool_exposure.get("provider_tool_names") or [])
             tool_schemas = self._selected_tool_schemas(runtime_visible_tool_names)
             stable_messages = self._prompt_message_records(getattr(assembly, "stable_messages", None)) or list(messages)
