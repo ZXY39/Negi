@@ -4248,9 +4248,6 @@ class NodeRunner:
             workspace_root=self._workspace_root(),
             process_cwd=self._process_cwd(),
         )
-        workspace_root = Path(
-            project_environment.get('workspace_root') or self._workspace_root()
-        ).expanduser().resolve()
         task_temp_dir = str(self._task_temp_dir(getattr(task, 'task_id', None)))
         return {
             'os_family': self._os_family(),
@@ -4264,7 +4261,7 @@ class NodeRunner:
             'project_python_hint': str(project_environment.get('project_python_hint') or ''),
             'task_temp_dir': task_temp_dir,
             'path_policy': {
-                **path_anchor_policy(workspace_root),
+                **path_anchor_policy(),
                 'filesystem_requires_absolute_path': False,
                 'content_requires_absolute_path': False,
                 'exec_default_working_dir': 'task_temp_dir',

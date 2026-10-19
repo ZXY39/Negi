@@ -16,7 +16,6 @@ candidate 的「排除已提升」规则挡在门外，模型 load 它只会拿�
 from __future__ import annotations
 
 import json
-from pathlib import Path
 from types import SimpleNamespace
 
 from g3ku.runtime.context.execution_tool_selection import build_execution_tool_selection
@@ -1198,7 +1197,7 @@ def test_path_anchor_contract_renders_from_one_source_across_lanes():
         f'path_anchor_rule: {PATH_ANCHOR_RULE_TEXT}',
     ]
 
-    node_policy = path_anchor_policy(None)
+    node_policy = path_anchor_policy()
     assert node_policy['path_anchor_rule'] == PATH_ANCHOR_RULE_TEXT
     assert node_policy['path_anchor_tokens'] == path_anchor_tokens()
 
@@ -1210,7 +1209,6 @@ def test_path_anchor_contract_renders_from_one_source_across_lanes():
     for line in frontdoor_lines:
         assert line in pinned
 
-    # `{data}` 只在数据根与项目根真的分离时被列出
-    assert '{data}' not in node_policy['path_anchor_tokens']
-    divergent = path_anchor_policy(Path('D:/definitely-not-the-project-root'))
-    assert '{data}' in divergent['path_anchor_tokens']
+    # `{data}` 无条件列出：数据根与项目根重合时它是同一个目录，但仍是唯一的交付锚名。
+    # 按分离与否增减 token，就等于让操作员第一次设置数据目录那一跳重付一遍头部前缀。
+    assert '{data}' in node_policy['path_anchor_tokens']

@@ -234,7 +234,7 @@ def test_exec_tool_resolves_anchor_tokens_in_working_dir(tmp_path) -> None:
 async def test_exec_tool_reports_unavailable_anchor_token(tmp_path, monkeypatch) -> None:
     workspace = tmp_path / 'workspace'
     workspace.mkdir()
-    monkeypatch.setattr(shell_module, 'model_data_root', lambda _workspace: None)
+    monkeypatch.setattr(shell_module, 'model_data_root', lambda: None)
     tool = ExecTool(workspace_root=str(workspace))
 
     payload = json.loads(await tool.execute(command='echo hi', working_dir='{data}'))

@@ -10,7 +10,7 @@
 - `prompt` 是当前节点的直接任务；`core_requirement` 是整棵任务树的核心需求。你在完成 `prompt` 时，不得偏离 `core_requirement`。
 - `goal` 是一句话意图，`prompt` 是可执行指令；两者不一致时以 `prompt` 为准，用 `goal` 校偏。根节点的 `goal` 就是 `core_requirement`。
 {{> shared_tool_discipline.md}}
-- **正式交付物禁止只落在 temp 系目录**：`task_temp_dir`（形如 `<workspace>/temp/…`）只用于中间产物与脚本，不保证持久保留。任务要求的正式产出（报告、文档、数据产物等）必须落盘到任务提示词或用户明确指定的持久路径（如桌面指定文件夹），并在 `submit_final_result` 的 `answer` 与 `evidence` 中给出该绝对路径；若任务未指定持久落点，默认写入 `runtime_environment.workspace_root` 的 `output/` 目录（不存在则创建），同样在最终结果中显式声明绝对路径。禁止"只写 temp 目录后在最终输出里引用该 temp 路径"作为交付。
+- **正式交付物禁止只落在 temp 系目录**：`task_temp_dir`（形如 `<workspace>/temp/…`）只用于中间产物与脚本。任务要求的正式产出（报告、文档、数据产物等）必须落盘到任务提示词或用户明确指定的持久路径（如桌面指定文件夹），并在 `submit_final_result` 的 `answer` 与 `evidence` 中给出该绝对路径；两者都没给持久落点时，按 `runtime_environment.path_policy.path_anchor_rule` 给出的默认交付落点写（不存在则创建），同样在最终结果中显式声明绝对路径。禁止"只写 temp 目录后在最终输出里引用该 temp 路径"作为交付。
 - 当前节点可调用的工具已经按权限与节点选择结果预过滤；只使用本轮实际提供给你的工具，不要假设其他工具仍然可调用。
 
 - 当工具能帮助你完成节点目标时，优先使用工具。

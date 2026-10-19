@@ -326,7 +326,7 @@ worker 进程（任务执行侧）把任务态变化推给 web 进程（浏览�
 - 任何不提供 workspace 的调用方（尤其是测试和一次性脚本）都会把任务目录落在数据根的 `temp/tasks/` 下；未配置数据根时那就是进程 cwd。测试通过构造参数 `workspace_root=tmp_path` 显式隔离，`tests/resources/conftest.py` 的 autouse fixture 再把数据根钉到 per-test 临时目录（`G3KU_DATA_DIR`）并替换 cwd 回退，保证测试运行既不向真实仓库写 `task_*` 目录，也不落到安装侧的存储。
 - 测试任务的记录只存在于 pytest 的临时数据库里，其遗留目录不会被任何生产清理路径回收；这类孤儿目录用 `scripts/cleanup_orphan_task_temp_dirs.py` 处理，见 `operations-and-maintenance.md`「关键状态文件与目录」。
 
-CEO/frontdoor 会话没有 `task_id`，其工具 runtime 注入的 `task_temp_dir` 解析为会话级目录 `<数据根>/temp/ceo/<safe_session_key>`（与任务级 `temp/tasks/` 同根；`session_key` 里的 `:` 等不安全字符按 `sessions/` 落盘同一口径规范化，如 `web:ceo-xxxx` → `web_ceo-xxxx`；无会话键时回退 `temp/ceo/shared`）。它与任务级 `temp/tasks/` 共用同一套下游约束：`exec` 未显式传 `working_dir` 时以它作默认 cwd，`exec`/`filesystem` 的路径策略以它作临时内容规范落点，目录惰性创建（exec 用作 cwd 或 filesystem 写入时才 mkdir）。该目录同时以 `session_temp_dir:` 行暴露进 frontdoor 运行时工具合同，让模型知道临时文件的绝对落点，避免经 `exec` 重定向散落到工作区根目录；合同渲染与临时文件落盘规则详见 `tool-and-skill-system.md`「四个概念必须分清」。该目录不保证持久保留：正式交付物禁止以此为最终落点，落点约束见 `tool-and-skill-system.md`「四个概念必须分清」与 frontdoor 提示词契约。
+CEO/frontdoor 会话没有 `task_id`，其工具 runtime 注入的 `task_temp_dir` 解析为会话级目录 `<数据根>/temp/ceo/<safe_session_key>`（与任务级 `temp/tasks/` 同根；`session_key` 里的 `:` 等不安全字符按 `sessions/` 落盘同一口径规范化，如 `web:ceo-xxxx` → `web_ceo-xxxx`；无会话键时回退 `temp/ceo/shared`）。它与任务级 `temp/tasks/` 共用同一套下游约束：`exec` 未显式传 `working_dir` 时以它作默认 cwd，`exec`/`filesystem` 的路径策略以它作临时内容规范落点，目录惰性创建（exec 用作 cwd 或 filesystem 写入时才 mkdir）。该目录同时以 `session_temp_dir:` 行暴露进 frontdoor 运行时工具合同，让模型知道临时文件的绝对落点，避免经 `exec` 重定向散落到工作区根目录；合同渲染与临时文件落盘规则详见 `tool-and-skill-system.md`「Model Path Anchoring Contract」。该目录不是交付落点，正式交付物的落点（含默认落点与"不依赖任何自动清理"这条判据）由同一文档持有。
 
 主要由以下模块协同：
 

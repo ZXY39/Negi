@@ -902,7 +902,7 @@ class ExecTool(Tool):
             working_dir,
             workspace=workspace_root,
             temp_root=self._canonical_temp_root(runtime),
-            data_root=model_data_root(workspace_root),
+            data_root=model_data_root(),
         )
         return str(Path(expanded).expanduser())
 

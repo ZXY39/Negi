@@ -794,13 +794,13 @@ def test_anchor_typo_correction_flags_only_mistyped_prefix(tmp_path: Path):
     assert tool._anchor_typo_correction(tmp_path / 'Users' / 'Adminiistrator' / 'notes' / 'n.md') is None
 
 
-def test_model_data_root_hides_the_redundant_token(tmp_path: Path):
+def test_model_data_root_is_listed_even_when_it_matches_the_project_root():
     from g3ku.deployment.data_root import data_root
-    from g3ku.utils.helpers import model_data_root
+    from g3ku.utils.helpers import model_data_root, path_anchor_policy, path_anchor_tokens
 
-    root = Path(data_root())
-    assert model_data_root(root) is None
-    assert model_data_root(tmp_path / 'elsewhere') == root
+    assert model_data_root() == Path(data_root())
+    assert '{data}' in path_anchor_tokens()
+    assert '{data}' in path_anchor_policy()['path_anchor_tokens']
 
 
 @pytest.mark.asyncio

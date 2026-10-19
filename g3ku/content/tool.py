@@ -33,7 +33,7 @@ class ContentTool:
                 raw_path,
                 workspace=self._workspace,
                 temp_root=self._runtime_temp_root(runtime),
-                data_root=model_data_root(self._workspace),
+                data_root=model_data_root(),
             )
         except ValueError:
             return raw_path

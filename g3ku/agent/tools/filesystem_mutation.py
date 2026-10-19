@@ -90,7 +90,7 @@ def _resolve_path(
         path,
         workspace=workspace,
         temp_root=temp_root,
-        data_root=model_data_root(workspace),
+        data_root=model_data_root(),
     )
     resolved = candidate.resolve()
     if allowed_dir is not None:

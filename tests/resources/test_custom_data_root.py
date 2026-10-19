@@ -223,7 +223,7 @@ def test_web_ceo_storage_follows_data_root(clean_env) -> None:
     assert ceo.upload_dir_for_session("web:ceo-x").parent == data_dir / ".g3ku" / "web-ceo-uploads"
     assert str(data_dir) in str(ceo.turn_boundary_dir_for_session("web:ceo-x"))
     assert str(data_dir) in str(ceo.completed_continuity_snapshot_path_for_session("web:ceo-x"))
-    # 会话工作区（agent 沙箱、output/）不随数据根迁移。
+    # 会话工作区（agent 沙箱）不随数据根迁移；交付默认落点是数据根下的 `output/`。
     assert ceo.workspace_path() == Path(os.path.normpath(str(tmp_path)))
 
 
