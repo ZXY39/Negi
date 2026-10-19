@@ -2708,6 +2708,80 @@ def test_execution_provider_bundle_keeps_dispatch_absent_granted_tool_declared()
     assert selection['declared_denied_tool_names'] == []
 
 
+def test_execution_provider_bundle_falls_back_to_last_sent_schema_bytes() -> None:
+    """活实例与删除前快照都没有：用上一跳真正发出的原文兜住，名字照旧留在清单里。
+
+    快照是进程内的、重启即清空，而重启后的第一跳仍带着上一跳钉住的清单；删名等于在重印
+    边界之外换束。原文是逐字节的历史事实，复用它不断前缀。这份文案侧仍按"无权限或资源已
+    下架"点名（该名字不在本角色治理可见集里），成员不动。
+    """
+    service, visible_tools = _collapsed_bundle_selector_service()
+    service._resource_manager = SimpleNamespace(tool_instances=lambda: {})
+    service.log_service.upsert_frame(
+        'task-pin',
+        {
+            'node_id': 'node-pin',
+            'provider_tool_names': ['exec', 'lane4-schema-tool'],
+            'actual_request_ref': 'artifact:last-sent',
+        },
+    )
+    service.log_service.resolve_content_ref = lambda ref: json.dumps(
+        {
+            'actual_tool_schemas': [
+                {'type': 'function', 'function': {'name': 'lane4-schema-tool', 'parameters': {}}},
+            ]
+        }
+    )
+
+    selection = service._select_model_visible_tool_schema_payload(
+        task_id='task-pin',
+        node_id='node-pin',
+        node_kind='execution',
+        visible_tools=visible_tools,
+        runtime_context={
+            'task_id': 'task-pin',
+            'node_id': 'node-pin',
+            'session_key': 'web:shared',
+            'actor_role': 'execution',
+        },
+    )
+
+    bundle = list(selection['provider_tool_names'] or [])
+    assert 'lane4-schema-tool' in bundle
+    assert selection['declared_denied_tool_schemas']['lane4-schema-tool']['function']['name'] == 'lane4-schema-tool'
+    assert 'lane4-schema-tool' in list(selection['declared_denied_tool_names'] or [])
+
+
+def test_execution_provider_bundle_last_sent_tier_needs_a_prior_artifact_ref() -> None:
+    """没有上一跳引用时不读盘、不炸，退化成原来的"渲不出就退场"。"""
+    service, visible_tools = _collapsed_bundle_selector_service()
+    service._resource_manager = SimpleNamespace(tool_instances=lambda: {})
+    service.log_service.upsert_frame(
+        'task-pin',
+        {'node_id': 'node-pin', 'provider_tool_names': ['exec', 'lane4-schema-tool']},
+    )
+
+    def _fail_resolve(ref: str) -> str:
+        raise AssertionError('must not read the artifact without a ref')
+
+    service.log_service.resolve_content_ref = _fail_resolve
+
+    selection = service._select_model_visible_tool_schema_payload(
+        task_id='task-pin',
+        node_id='node-pin',
+        node_kind='execution',
+        visible_tools=visible_tools,
+        runtime_context={
+            'task_id': 'task-pin',
+            'node_id': 'node-pin',
+            'session_key': 'web:shared',
+            'actor_role': 'execution',
+        },
+    )
+
+    assert 'lane4-schema-tool' not in selection['declared_denied_tool_schemas']
+
+
 def test_react_iteration_bundle_filter_keys_on_renderable_schema_not_dispatch_dict() -> None:
     """组装侧的存留判据取"渲不渲得出参数表"，不是"本轮有没有派发资格"。"""
     exec_tool = _ModelSchemaRecordingTool(name='exec', authoritative_description='exec', model_description='exec')

@@ -64,3 +64,30 @@ def clear_tool_schemas() -> None:
     """测试与运维重置用：清空全部快照。"""
     with _lock:
         _entries.clear()
+
+
+def schema_name(schema: Any) -> str:
+    """取一份 provider schema 的工具名，wrapped 与扁平两种形状同源。
+
+    落盘的 `actual_tool_schemas` 与活实例渲出来的形状可能不同（`{"type":"function",
+    "function":{...}}` 与 `{"type":"function","name":...,"parameters":...}` 是同一逻辑
+    契约的两种表示），按名字索引必须两边都认，否则上一跳原文里的名字会查不出来。
+    """
+    if not isinstance(schema, dict):
+        return ""
+    inner = schema.get("function")
+    if isinstance(inner, dict):
+        return _normalize(inner.get("name"))
+    return _normalize(schema.get("name"))
+
+
+def index_schemas_by_name(schemas: Any) -> dict[str, dict[str, Any]]:
+    """把一份 schema 列表按工具名索引；重名保留第一份，非 dict 与无名条目丢弃。"""
+    index: dict[str, dict[str, Any]] = {}
+    for schema in list(schemas or []):
+        if not isinstance(schema, dict):
+            continue
+        name = schema_name(schema)
+        if name and name not in index:
+            index[name] = schema
+    return index

@@ -28,7 +28,11 @@ from g3ku.content.navigation import RESOURCE_URI_SCHEME
 from g3ku.deployment.data_root import data_root, data_work_path, ensure_dir, resolve_data_path
 from g3ku.llm_config.runtime_resolver import resolve_chat_target
 from g3ku.resources.models import ResourceKind
-from g3ku.resources.retired_schemas import lookup_tool_schema, record_tool_schema
+from g3ku.resources.retired_schemas import (
+    index_schemas_by_name,
+    lookup_tool_schema,
+    record_tool_schema,
+)
 from g3ku.resources.tool_settings import (
     MemoryRuntimeSettings,
     raw_tool_settings_from_descriptor,
@@ -6683,6 +6687,36 @@ class MainRuntimeService:
             if name in visible_name_set
         ]
 
+    def _node_last_sent_tool_schema_index(self, *, actual_request_ref: str) -> dict[str, Any]:
+        """上一跳实际发出的 `tools[]` 原文，按工具名索引；拿不到就返回空表。
+
+        只在"清单里的名字既无活实例也无删除前快照"时被调用，用作最后一档兜底：原文是
+        逐字节的历史事实，复用它不会改变 `tools[]` 的字节，也就不会在重印边界之外断前缀。
+        工件被内存/磁盘保护降级成 minimal 时原文本就不在，返回空表——那一跳允许名字退场一次，
+        下一个重印边界自然收敛，不为此新增任何拒绝面。
+        """
+        ref = str(actual_request_ref or '').strip()
+        if not ref:
+            return {}
+        resolver = getattr(getattr(self, 'log_service', None), 'resolve_content_ref', None)
+        if not callable(resolver):
+            return {}
+        try:
+            text = str(resolver(ref) or '')
+        except Exception:
+            return {}
+        if not text:
+            return {}
+        try:
+            payload = json.loads(text)
+        except Exception:
+            return {}
+        if not isinstance(payload, dict):
+            return {}
+        return index_schemas_by_name(
+            list(payload.get('actual_tool_schemas') or payload.get('tool_schemas') or [])
+        )
+
     def _select_model_visible_tool_schema_payload(
         self,
         *,
@@ -6790,6 +6824,7 @@ class MainRuntimeService:
         prior_selected_tool_names: list[str] = []
         prior_provider_tool_names: list[str] = []
         prior_history_shrink_reason = ''
+        prior_actual_request_ref = ''
         if callable(read_runtime_frame):
             prior_frame = read_runtime_frame(str(task_id or '').strip(), str(node_id or '').strip())
             if isinstance(prior_frame, dict):
@@ -6808,6 +6843,7 @@ class MainRuntimeService:
                     if str(item or '').strip()
                 ]
                 prior_history_shrink_reason = str(prior_frame.get('history_shrink_reason') or '').strip()
+                prior_actual_request_ref = str(prior_frame.get('actual_request_ref') or '').strip()
         selected_tool_names: list[str] = []
         for name in prior_selected_tool_names:
             if name in model_visible_callable_tool_names and name not in selected_tool_names:
@@ -6861,6 +6897,7 @@ class MainRuntimeService:
         instance_getter = getattr(resource_manager, 'tool_instances', None)
         declared_instances = dict(instance_getter() or {}) if callable(instance_getter) else {}
         declared_denied_tool_schemas: dict[str, Any] = {}
+        last_sent_schema_index: dict[str, Any] | None = None
         for candidate_name in provider_tool_names:
             normalized_name = str(candidate_name or '').strip()
             if not normalized_name or normalized_name in dispatched_tool_names:
@@ -6870,10 +6907,21 @@ class MainRuntimeService:
                 declared_denied_tool_schemas[normalized_name] = to_schema()
                 continue
             # 实例已经不在（资源被删除）：取删除前抄下的那一份，`tools[]` 才能与上一跳
-            # 逐字节相同。没有快照就让名字离开清单——发一份猜出来的 schema 比断缓存更糟。
+            # 逐字节相同。
             retired_schema = lookup_tool_schema(normalized_name)
             if isinstance(retired_schema, dict):
                 declared_denied_tool_schemas[normalized_name] = retired_schema
+                continue
+            # 第四源：上一跳真正发出去的那份原文。快照是进程内的，重启即清空，而重启之后的
+            # 第一跳仍可能带着上一跳钉住的清单——原文是逐字节的历史事实，用它就等于"这一跳
+            # 与上一跳相同"。只在活实例与快照都拿不到时才读盘，常态跳一次 IO 都不加。
+            if last_sent_schema_index is None:
+                last_sent_schema_index = self._node_last_sent_tool_schema_index(
+                    actual_request_ref=prior_actual_request_ref,
+                )
+            last_sent_schema = last_sent_schema_index.get(normalized_name)
+            if isinstance(last_sent_schema, dict):
+                declared_denied_tool_schemas[normalized_name] = last_sent_schema
         # 尾块只点名"无权限或资源已下架"：仍被授权、只是本轮没有派发资格的名字不进这份
         # 文案——模型调它拿到的是"先 load_tool_context"那一档，措辞得跟真实处置一致。
         declared_denied_tool_names = [
