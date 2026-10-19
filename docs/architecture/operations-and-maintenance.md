@@ -55,7 +55,9 @@
 
 ### 首选一键启动脚本
 
-入口按"越靠前越不需要知道细节"排：任意目录的 `negi`（= `negi start`）→ 桌面/开始菜单图标（同一条 `start`）→ 安装目录里的 `start-negi.*`（带参数的显式启动）→ `negi web` / `negi worker`（拆开验证某一环节时用）。
+入口按"越靠前越不需要知道细节"排：任意目录的 `negi`（= `negi start`）→ 桌面/开始菜单图标（同一条 `start --window`，开原生窗口）→ 安装目录里的 `start-negi.*`（带参数的显式启动）→ `negi web` / `negi worker`（拆开验证某一环节时用）。
+
+桌面窗口壳（`g3ku/shells/desktop.py`，命令 `negi window`）只是**指向已启动服务的一扇 WebView2 窗**：它不承载服务、不拥有服务生命周期，关窗不停服务，再点一次图标就重开一扇。承载用系统自带的 WebView2 运行时（Win11 预装），不打包浏览器内核；依赖 `pywebview` 带 `sys_platform == 'win32'` 标记，Linux / macOS 的安装不会被它和它的 .NET 互操作依赖拖进去。两个必须知道的点：`http://127.0.0.1` 在 WebView2 里是安全上下文，所以 `navigator.mediaDevices` 存在（实测 `secure:true / mediaDevices:true`）；但 pywebview 不注册 `PermissionRequested`，麦克风要在 `loaded` 回调里补挂——该回调跑在 UI 线程，而 `CoreWebView2` 只允许在 UI 线程访问，在别的线程上取它会抛 `InvalidOperationException`。外链由 pywebview 的 `NewWindowRequested` 交给系统浏览器，壳里不需要额外代码。开不了壳（非 Windows、依赖缺失、运行时异常）时 `start --window` 一律回落到浏览器，不会点了没反应。
 
 - Windows PowerShell: `.\start-negi.ps1`
 - Linux / macOS: `./start-negi.sh`

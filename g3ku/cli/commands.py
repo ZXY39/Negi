@@ -343,6 +343,21 @@ def web(
 
 
 @app.command()
+def window(
+    port: int | None = typer.Option(None, "--port", "-p", help="Web port to attach the window to. Defaults to web.port from project config."),
+):
+    """Open the Negi desktop window (WebView2) against a running server."""
+    from g3ku.shells.desktop import run_desktop_shell, server_reachable, shell_url
+
+    target = shell_url(port)
+    if not server_reachable(target):
+        console.print(f"[yellow]Negi 没有在 {target} 上运行[/yellow]")
+        console.print("  先启动服务：[bold]negi[/bold]（它会起服务并打开窗口或浏览器）")
+        raise typer.Exit(code=1)
+    raise typer.Exit(code=run_desktop_shell(url=target))
+
+
+@app.command()
 def worker():
     """Start the background task worker."""
     asyncio.run(run_worker_runtime())
