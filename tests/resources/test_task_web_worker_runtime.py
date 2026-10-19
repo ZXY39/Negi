@@ -10698,6 +10698,7 @@ def test_task_model_call_event_persists_provider_tool_bundle_in_actual_request_a
             "web_fetch",
         ],
         provider_tool_bundle_seeded=True,
+        provider_tool_bundle_mode="pinned_seeded",
         provider_tool_exposure_revision="pte:tool-revision",
         provider_tool_exposure_commit_reason="token_compression",
     )
@@ -10709,6 +10710,7 @@ def test_task_model_call_event_persists_provider_tool_bundle_in_actual_request_a
     assert model_call["callable_tool_names"] == ["submit_next_stage"]
     assert model_call["provider_tool_names"] == ["submit_next_stage", "web_fetch"]
     assert model_call["provider_tool_bundle_seeded"] is True
+    assert model_call["provider_tool_bundle_mode"] == "pinned_seeded"
     assert model_call["provider_tool_exposure_revision"] == "pte:tool-revision"
     assert model_call["provider_tool_exposure_commit_reason"] == "token_compression"
     assert actual_request_ref.startswith("artifact:")
@@ -10717,6 +10719,7 @@ def test_task_model_call_event_persists_provider_tool_bundle_in_actual_request_a
     assert actual_request_payload["callable_tool_names"] == ["submit_next_stage"]
     assert actual_request_payload["provider_tool_names"] == ["submit_next_stage", "web_fetch"]
     assert actual_request_payload["provider_tool_bundle_seeded"] is True
+    assert actual_request_payload["provider_tool_bundle_mode"] == "pinned_seeded"
     assert actual_request_payload["provider_tool_exposure_revision"] == "pte:tool-revision"
     assert actual_request_payload["provider_tool_exposure_commit_reason"] == "token_compression"
 

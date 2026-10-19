@@ -91,6 +91,37 @@ def clear_pinned_contract_stores() -> None:
     _SKILL_ROSTER_EPOCH_STORES.clear()
 
 
+def pinned_head_carrier(*, session_key: str) -> dict[str, Any]:
+    """把当前钉住的头部导成可持久化的载荷；没钉住就返回空表。
+
+    节点道没有会话侧车那样的载体，耐久那份是节点自己的 selection trace（整份已持久化）。
+    导出内容与 `restore_pinned_contract_state` 的入参同形，读写两侧不允许各自拼字段。
+    """
+    text, revision, skill_ids = _pinned_contract_entry_from_store(session_key=str(session_key or "").strip())
+    if not text or not revision:
+        return {}
+    return {
+        "text": text,
+        "revision": revision,
+        "skill_ids": list(skill_ids),
+        "epoch": skill_roster_epoch_for(None, session_key=str(session_key or "").strip()),
+    }
+
+
+def _pinned_contract_entry_from_store(*, session_key: str) -> tuple[str, str, list[Any]]:
+    """进程表里那一份（会话对象之外的第二载体）；节点道只用这一份。"""
+    key = str(session_key or "").strip()
+    stored = _PINNED_CONTRACT_STORES.get(key) if key else None
+    if not isinstance(stored, dict):
+        return "", "", []
+    text = stored.get(FRONTDOOR_PINNED_CONTRACT_TEXT_ATTR)
+    return (
+        text if isinstance(text, str) else "",
+        str(stored.get(FRONTDOOR_PINNED_CONTRACT_REVISION_ATTR) or "").strip(),
+        list(stored.get(FRONTDOOR_PINNED_CONTRACT_SKILLS_ATTR) or []),
+    )
+
+
 def restore_pinned_contract_state(
     session: Any,
     *,
