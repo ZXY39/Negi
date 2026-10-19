@@ -215,7 +215,7 @@ function loadWatchContext() {
     context.__reloads = 0;
     vm.createContext(context);
     vm.runInContext(
-        `${APP_CODE}\nthis.__testExports = { watchApplyUpdateFinish, stopUpdateApplyWatch, updateApplyTargetVersion };`,
+        `${APP_CODE}\nthis.__testExports = { watchApplyUpdateFinish, stopUpdateApplyWatch, updateApplyTargetVersion, updateApplyProgressText };`,
         context
     );
     vm.runInContext(
@@ -240,7 +240,9 @@ test("apply 的自动恢复是真的：目标版本回来就刷新页面", async
     ctx.__testExports.watchApplyUpdateFinish("1.0.12", { intervalMs: 5, timeoutMs: 5000 });
     await nap(40);
     assert.equal(ctx.__reloads, 0, "还在 started 不该刷新");
-    assert.deepEqual(ctx.__toasts, [], "started 不该报错");
+    // started 期间只许有进度 toast，不许出现报错或成功 toast。
+    assert.deepEqual(ctx.__toasts.filter((item) => item.kind !== "info"), [], "started 不该报错");
+    assert.match(ctx.__toasts.at(-1).text, /已等 \d+ 秒/, "进行中的 toast 要带页面自己计的秒数");
 
     ctx.ApiClient = {
         getUpdateStatus: async () => ({ current_version: "1.0.12", last_apply: { outcome: "ok", ref: "v1.0.12" } }),
@@ -276,4 +278,49 @@ test("目标版本号容得下 v 前缀", () => {
     assert.equal(ctx.__testExports.updateApplyTargetVersion("v1.0.12"), "1.0.12");
     assert.equal(ctx.__testExports.updateApplyTargetVersion("1.0.12"), "1.0.12");
     assert.equal(ctx.__testExports.updateApplyTargetVersion(""), "");
+});
+
+test("设置行跟着阶段说话，没有阶段时仍只说\"升级执行中\"", () => {
+    const api = loadApp();
+    const base = { has_ledger: true, newer: true, current_version: "1.0.11", latest_tag: "v1.0.12" };
+
+    assert.equal(api.updateApplyOutcomeText({ ...base, last_apply: { outcome: "started", detail: "port=18790" } }), "升级执行中");
+    assert.equal(
+        api.updateApplyOutcomeText({ ...base, last_apply: { outcome: "started", stage: "upgrading" } }),
+        "升级执行中：正在下载新版本并同步依赖"
+    );
+});
+
+test("进度文案：一个阶段名 + 页面自己计的秒数，不叠执行体的那份耗时", () => {
+    const ctx = loadWatchContext();
+    const text = ctx.__testExports.updateApplyProgressText;
+
+    assert.equal(text(null, 0), "正在更新 · 已等 0 秒");
+    assert.equal(text({ stage: "requesting_exit" }, 3), "正在暂停进行中的对话与任务 · 已等 3 秒");
+    assert.equal(text({ stage: "upgrading", detail: "已 42s" }, 42), "正在下载新版本并同步依赖 · 已等 42 秒");
+    assert.equal(text({ stage: "nope" }, 7), "正在更新 · 已等 7 秒");
+});
+
+test("停机窗口里 toast 继续走字，阶段停在最后一次读到的那一步", async () => {
+    const ctx = loadWatchContext();
+    let reachable = true;
+    ctx.ApiClient = {
+        getUpdateStatus: async () => {
+            if (!reachable) throw new TypeError("Failed to fetch");
+            return { current_version: "1.0.11", last_apply: { outcome: "started", stage: "upgrading" } };
+        },
+    };
+
+    ctx.__testExports.watchApplyUpdateFinish("1.0.12", { intervalMs: 100, timeoutMs: 8000 });
+    await nap(1100);
+    reachable = false;
+    const before = ctx.__toasts.at(-1).text;
+    await nap(1200);
+    const after = ctx.__toasts.at(-1).text;
+
+    assert.match(before, /正在下载新版本并同步依赖 · 已等 \d+ 秒/);
+    assert.match(after, /正在下载新版本并同步依赖 · 已等 \d+ 秒/);
+    assert.notEqual(after, before, "服务不可达期间秒数要继续涨，界面不能像卡住");
+    assert.deepEqual(ctx.__toasts.filter((item) => item.kind === "error"), [], "停机窗口不是失败");
+    ctx.__testExports.stopUpdateApplyWatch();
 });

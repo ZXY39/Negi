@@ -39,6 +39,9 @@ STARTUP_GRACE_SECONDS = 3.0
 # 上限取"最慢一次升级"的量级（下载 + uv sync 实测到 2 分钟级），留足余量。
 APPLY_IN_FLIGHT_SECONDS = 600.0
 
+# 执行体自己的起点，用于把"已等多少秒"写进阶段记录；0 = 还没进 run()。
+_RUN_STARTED_MONOTONIC = 0.0
+
 
 def _log(message: str) -> None:
     try:
@@ -50,24 +53,37 @@ def _log(message: str) -> None:
         pass
 
 
-def _record(outcome: str, ref: str, detail: str = "") -> None:
+def _record(outcome: str, ref: str, detail: str = "", stage: str = "") -> None:
     """把这一跳的结局写给 web 侧读，界面才有"没升级成"可说。
 
     `apply` 端点在踢起执行体那一刻只能回 `restarting: true`；之后执行体无论停在
     哪一步，前端都看不见（实盘两次都是"正在重启"挂在那里，真相在日志里 2 秒就
     结束了）。终态码：started / ok / upgrade_failed / exit_refused / port_busy /
     port_unknown / not_this_service。
+
+    中间阶段一律带 `outcome="started"` 再配一个 `stage`：单飞闸门判的就是
+    `outcome == "started"`，把阶段写成新终态会让用户在升级途中再踢一次执行体。
     """
     from datetime import datetime
 
     from g3ku.update_check import write_apply_result
 
-    write_apply_result({
+    payload = {
         "at": datetime.now().astimezone().isoformat(timespec="seconds"),
         "ref": ref,
         "outcome": outcome,
         "detail": detail,
-    })
+    }
+    if stage:
+        payload["stage"] = stage
+        payload["stage_at"] = payload["at"]
+        if _RUN_STARTED_MONOTONIC:
+            payload["elapsed_seconds"] = round(time.monotonic() - _RUN_STARTED_MONOTONIC, 1)
+    write_apply_result(payload)
+
+
+def _stage(ref: str, stage: str, detail: str = "") -> None:
+    _record("started", ref, detail, stage=stage)
 
 
 def _read_config_port() -> int | None:
@@ -218,6 +234,8 @@ def _run_upgrade(ref: str) -> bool:
                     _log(f"upgrade timed out after {elapsed}s; killed")
                     return False
                 _log(f"upgrade still running at {elapsed}s (无新输出多半卡在下载/网络)")
+                # 心跳同时刷新阶段记录：这一段正是服务停着的时段，页面只能靠它说话。
+                _stage(ref, "upgrading", f"已 {elapsed}s")
     except OSError as exc:
         _log(f"upgrade errored: {exc}")
         return False
@@ -318,10 +336,12 @@ def spawn_runner(ref: str, *, port: int | None = None, pause_running_work: bool 
     if not pause_running_work:
         args.append("--no-pause")
     _spawn_detached(*args)
-    _record("started", ref, f"port={port} pause_running_work={pause_running_work}")
+    _record("started", ref, f"port={port} pause_running_work={pause_running_work}", stage="requested")
 
 
 def run(ref: str, *, port: int | None = None, pause_running_work: bool = True) -> int:
+    global _RUN_STARTED_MONOTONIC
+    _RUN_STARTED_MONOTONIC = time.monotonic()
     _log(f"apply start ref={ref} pause_running_work={pause_running_work}")
     resolved = _resolve_port(port)
     if resolved is None:
@@ -333,24 +353,28 @@ def run(ref: str, *, port: int | None = None, pause_running_work: bool = True) -
         _record("not_this_service", ref, f"port {resolved}")
         return 5
     time.sleep(STARTUP_GRACE_SECONDS)
+    _stage(ref, "requesting_exit", f"port={resolved}")
     label = _request_exit(resolved, pause_running_work)
     _log(f"exit request: {label}")
     if label.startswith("exit_refused"):
         # 服务仍在跑（未确认暂停）：不动代码，用户侧保持原状。
         _record("exit_refused", ref, label)
         return 2
+    _stage(ref, "waiting_exit", label)
     if not _wait_for_release(resolved):
         _log(f"abort: port {resolved} still busy after {EXIT_WAIT_SECONDS}s; leaving the running service alone")
         _record("port_busy", ref, f"{label}; port {resolved} still busy")
         return 3
+    _stage(ref, "upgrading", "取新代码并同步环境")
     upgraded = _run_upgrade(ref)
     if not upgraded:
         _log("upgrade failed; relaunching the previous version")
+    _stage(ref, "relaunching", f"port={resolved}")
     _relaunch_web(resolved)
     if upgraded:
-        _record("ok", ref, f"relaunched on port {resolved}")
+        _record("ok", ref, f"relaunched on port {resolved}", stage="ok")
     else:
-        _record("upgrade_failed", ref, f"{label}; install -Upgrade 非零退出，旧版本已重新拉起")
+        _record("upgrade_failed", ref, f"{label}; install -Upgrade 非零退出，旧版本已重新拉起", stage="upgrade_failed")
     return 0 if upgraded else 1
 
 

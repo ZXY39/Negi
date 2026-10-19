@@ -17789,8 +17789,13 @@ const UPDATE_APPLY_OUTCOME_TEXT = {
 function updateApplyOutcomeText(item) {
     // apply 端点回的是"已踢起执行体"，不是"升级成功"。执行体把终态写进结果文件，
     // 这里照实说，否则失败时界面永远停在"正在重启"。ok 与没有记录都不占这一行。
-    const outcome = item?.last_apply?.outcome;
+    const apply = item?.last_apply;
+    const outcome = apply?.outcome;
     if (!outcome || outcome === "ok") return "";
+    if (outcome === "started") {
+        const stage = UPDATE_APPLY_STAGE_TEXT[String(apply?.stage || "").trim()] || "";
+        return stage ? `升级执行中：${stage}` : "升级执行中";
+    }
     return UPDATE_APPLY_OUTCOME_TEXT[outcome] || `升级未完成：${outcome}`;
 }
 
@@ -17874,12 +17879,35 @@ function stopUpdateApplyWatch() {
     }
 }
 
+const UPDATE_APPLY_STAGE_TEXT = {
+    requested: "已排入更新队列",
+    requesting_exit: "正在暂停进行中的对话与任务",
+    waiting_exit: "等待服务退出",
+    upgrading: "正在下载新版本并同步依赖",
+    relaunching: "正在重新拉起服务",
+    ok: "更新完成",
+};
+
+function updateApplyProgressText(apply, waitedSeconds) {
+    // 执行体在服务停着的时段里仍会续写阶段记录，所以这里读到的可能是几秒前的
+    // 阶段；秒数是页面自己从点击那刻起的。一个概念只放一个带标签的数：进度用
+    // 页面的计时，执行体那句"已 42s"的 detail 不再叠上来。
+    const stage = String(apply?.stage || "").trim();
+    const label = UPDATE_APPLY_STAGE_TEXT[stage] || "正在更新";
+    const seconds = Math.max(0, Math.floor(Number(waitedSeconds) || 0));
+    return `${label} · 已等 ${seconds} 秒`;
+}
+
 function watchApplyUpdateFinish(targetVersion, { intervalMs = UPDATE_APPLY_WATCH_INTERVAL_MS, timeoutMs = UPDATE_APPLY_WATCH_TIMEOUT_MS } = {}) {
     // 确认框那句"服务回来本页会自动恢复"要真的做到：目标版本回来就自己刷新一次。
     // 停机期间 getUpdateStatus 会直接抛，吞掉继续等即可。
     const deadline = Date.now() + timeoutMs;
+    const startedAt = Date.now();
+    let lastApply = null;
     stopUpdateApplyWatch();
+    showToast({ title: `更新到 v${targetVersion}`, text: updateApplyProgressText(null, 0), kind: "info", persistent: true, spin: true });
     updateApplyWatchTimer = setInterval(async () => {
+        const waited = (Date.now() - startedAt) / 1000;
         if (Date.now() > deadline) {
             stopUpdateApplyWatch();
             showToast({ title: "更新未完成", text: `服务没在预期时间内回到 v${targetVersion}，请看 .g3ku/logs/update-apply.log。`, kind: "error", persistent: true });
@@ -17889,15 +17917,19 @@ function watchApplyUpdateFinish(targetVersion, { intervalMs = UPDATE_APPLY_WATCH
         try {
             item = await ApiClient.getUpdateStatus();
         } catch {
+            // 服务正在停机窗口里：阶段读数停在最后一次成功获取的那一步。
+            showToast({ title: `更新到 v${targetVersion}`, text: updateApplyProgressText(lastApply, waited), kind: "info", persistent: true, spin: true });
             return;
         }
         if (!item) return;
+        lastApply = item.last_apply || lastApply;
         const outcome = String(item.last_apply?.outcome || "");
         if (outcome && outcome !== "ok" && outcome !== "started") {
             stopUpdateApplyWatch();
+            const stageLabel = UPDATE_APPLY_STAGE_TEXT[String(item.last_apply?.stage || "")] || "";
             showToast({
                 title: "更新未完成",
-                text: item.last_apply?.detail || `执行体停在 ${outcome}`,
+                text: `${item.last_apply?.detail || `执行体停在 ${outcome}`}${stageLabel ? ` · 停在${stageLabel}` : ""}`,
                 kind: "error",
                 persistent: true,
             });
@@ -17908,7 +17940,10 @@ function watchApplyUpdateFinish(targetVersion, { intervalMs = UPDATE_APPLY_WATCH
             stopUpdateApplyWatch();
             showToast({ title: `已更新到 v${targetVersion}`, text: "正在刷新页面。", kind: "success" });
             window.location.reload();
+            // reload() 立刻返回：不 return 的话下面那句进度 toast 会把成功提示盖掉。
+            return;
         }
+        showToast({ title: `更新到 v${targetVersion}`, text: updateApplyProgressText(item.last_apply, waited), kind: "info", persistent: true, spin: true });
     }, intervalMs);
 }
 

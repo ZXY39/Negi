@@ -612,6 +612,30 @@ def test_apply_gate_expires_with_the_window(tmp_path: Path, monkeypatch):
     assert apply_mod.apply_in_flight() is None
 
 
+def test_run_writes_a_stage_trail_and_keeps_the_single_flight_gate(monkeypatch, tmp_path: Path) -> None:
+    # 页面在停机窗口里唯一能读到的就是这份阶段记录，所以每一步都要落盘；而中间
+    # 阶段必须仍是 outcome="started"，否则单飞闸门会在升级途中放行第二次点击。
+    import g3ku.update_apply as apply_mod
+    import g3ku.update_check as check_mod
+
+    written: list[dict] = []
+    monkeypatch.setattr(check_mod, "write_apply_result", lambda payload, path=None: written.append(payload))
+    monkeypatch.setattr(apply_mod, "_log", lambda message: None)
+    monkeypatch.setattr(apply_mod.time, "sleep", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(apply_mod, "_probe_self", lambda port: True)
+    monkeypatch.setattr(apply_mod, "_request_exit", lambda port, pause: "exit_accepted_200")
+    monkeypatch.setattr(apply_mod, "_wait_for_release", lambda port: True)
+    monkeypatch.setattr(apply_mod, "_run_upgrade", lambda ref: True)
+    monkeypatch.setattr(apply_mod, "_relaunch_web", lambda port=None: None)
+
+    assert apply_mod.run("v9.9.9", port=18999) == 0
+
+    stages = [item.get("stage") for item in written if item.get("stage")]
+    assert stages == ["requesting_exit", "waiting_exit", "upgrading", "relaunching", "ok"]
+    assert [item["outcome"] for item in written] == ["started", "started", "started", "started", "ok"]
+    assert all("elapsed_seconds" in item for item in written)
+
+
 def test_release_tag_probe_never_opens_its_own_console_window(monkeypatch) -> None:
     # 图标启动的宿主是 pythonw：没有控制台可继承，探测里起的 git 会自己分配一个
     # 控制台，于是"静默启动"变成服务起来几秒后弹一个黑窗（台账为空时首轮必查）。
