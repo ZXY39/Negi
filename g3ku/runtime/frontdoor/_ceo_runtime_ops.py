@@ -4029,12 +4029,15 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
         scope = self._frontdoor_skill_roster_notice_scope(session_key)
         if not scope:
             return base_messages
+        normalized_session_key = str(session_key or "").strip()
         message, delivered = _skill_roster_notice.deliver_for_scope(
             scope,
             self._frontdoor_live_visible_skills(session_key),
             now=now_iso(),
             # 头部钉住块那份名单算"已宣布"：否则第一跳会把整份名单重播一遍。
-            covered_skill_ids=pinned_skill_ids_for(None, session_key=scope),
+            # 钉住表按裸 session_key 分桶（`session:` 前缀只是台账的作用域写法），
+            # 拿前缀键去查会取回空名单，把全部技能当成新增。
+            covered_skill_ids=pinned_skill_ids_for(None, session_key=normalized_session_key),
         )
         if message is None:
             return base_messages

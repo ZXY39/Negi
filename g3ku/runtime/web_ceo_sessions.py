@@ -27,6 +27,7 @@ from g3ku.runtime.session_keys import (
     is_channel_session_key,
     parse_china_session_key,
 )
+from g3ku.runtime.skill_roster_notice import normalize_skill_roster_notice_context
 from g3ku.utils.helpers import ensure_dir, safe_filename
 
 DEFAULT_CEO_SESSION_TITLE = "新会话"
@@ -1197,6 +1198,11 @@ def _normalized_completed_continuity_snapshot(payload: Any) -> dict[str, Any] | 
         "capability_snapshot_exposure_revision": str(payload.get("capability_snapshot_exposure_revision") or "").strip(),
         "visible_tool_ids": _normalized_name_list(payload.get("visible_tool_ids")),
         "visible_skill_ids": _normalized_name_list(payload.get("visible_skill_ids")),
+        # 一次性提示的台账：这份载荷是白名单装配的，不在这儿列出就永远落不了盘，
+        # 于是每次重启都会把已经宣布过的技能再宣布一遍。
+        "skill_roster_notice_context": normalize_skill_roster_notice_context(
+            payload.get("skill_roster_notice_context")
+        ),
         "provider_tool_schema_names": _normalized_name_list(payload.get("provider_tool_schema_names")),
         "frontdoor_restore_source": restore_source,
         "frontdoor_baseline_sync_decision": baseline_sync_decision,
