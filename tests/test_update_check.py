@@ -1,4 +1,7 @@
+import os
+import subprocess
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -607,3 +610,23 @@ def test_apply_gate_expires_with_the_window(tmp_path: Path, monkeypatch):
     )
 
     assert apply_mod.apply_in_flight() is None
+
+
+def test_release_tag_probe_never_opens_its_own_console_window(monkeypatch) -> None:
+    # 图标启动的宿主是 pythonw：没有控制台可继承，探测里起的 git 会自己分配一个
+    # 控制台，于是"静默启动"变成服务起来几秒后弹一个黑窗（台账为空时首轮必查）。
+    captured = {}
+
+    def _fake_run(command, **kwargs):
+        captured["command"] = list(command)
+        captured["kwargs"] = kwargs
+        return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr(subprocess, "run", _fake_run)
+
+    assert fetch_latest_release_tag(Path.cwd()) is None
+    assert captured["command"][:2] == ["git", "ls-remote"]
+    if os.name == "nt":
+        assert captured["kwargs"].get("creationflags") == subprocess.CREATE_NO_WINDOW
+    else:
+        assert "creationflags" not in captured["kwargs"]

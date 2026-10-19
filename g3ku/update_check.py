@@ -55,6 +55,13 @@ def latest_release_tag(ls_remote_output: str) -> str | None:
 
 
 def fetch_latest_release_tag(project_root: Path, timeout: float = 2.0) -> str | None:
+    # 桌面图标那条链上，宿主是 pythonw：没有控制台可继承，所以这里起的 git 会
+    # 自己分配一个控制台窗口，用户在服务起来几秒后看到一个黑窗（检查台账为空时
+    # 首轮就会跑）。标记只在 Windows 上有；真终端下子进程仍继承父控制台。
+    popen_kwargs: dict[str, Any] = {}
+    create_no_window = getattr(subprocess, "CREATE_NO_WINDOW", None)
+    if create_no_window is not None and os.name == "nt":
+        popen_kwargs["creationflags"] = create_no_window
     try:
         completed = subprocess.run(
             ["git", "ls-remote", "--tags", "origin"],
@@ -64,6 +71,7 @@ def fetch_latest_release_tag(project_root: Path, timeout: float = 2.0) -> str | 
             encoding="utf-8",
             errors="replace",
             timeout=timeout,
+            **popen_kwargs,
         )
     except (OSError, subprocess.TimeoutExpired):
         return None
