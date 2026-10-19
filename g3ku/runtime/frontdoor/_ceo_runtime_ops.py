@@ -7177,17 +7177,44 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
         state: CeoGraphState,
         runtime: CeoRuntime,
     ) -> list[dict[str, Any]]:
+        # `tools[]` 的名字源就是**钉住的声明**本身：执行束按可执行集组装（含水合名、也随治理
+        # 收回变窄），拿它当模型可见名单会让"收回一个工具"变成"这一跳少一条 schema"——清单
+        # 排在正文最前面，等于一次权限动作把身后全部存活正文重铺。参数表按名字取：执行束里的
+        # 实例优先，其次注册表活实例，再次删除前快照，三条都经同一个投影函数，字节与上一跳
+        # 一致。可执行名单另有自己的判据（`_frontdoor_executable_tool_names`），执行准入与声明
+        # 自始分源。state 带不出钉住声明（未播种的调用方）才退回当轮派发名单，那是播种一支。
+        keep = self._normalized_tool_name_state_list(
+            list(state.get("provider_tool_names") or [])
+        ) or self._frontdoor_dispatch_tool_names(state)
+        for forced in (STAGE_TOOL_NAME, SILENT_TOOL_NAME):
+            if forced not in keep:
+                keep.append(forced)
         execution_bundle = self._frontdoor_execution_bundle(state=state, runtime=runtime)
-        # `tools[]` 全程钉死：执行束按可执行集组装（含水合名），参数表必须滤回钉住的
-        # 派发名单——mid-turn 注册的工具在声明于重印边界吸收它之前，schema 不进 `tools[]`。
-        keep = set(self._frontdoor_dispatch_tool_names(state))
-        keep.update({STAGE_TOOL_NAME, SILENT_TOOL_NAME})
-        pinned_visible = {
-            name: tool
-            for name, tool in execution_bundle.visible_tools.items()
-            if str(name or "").strip() in keep
-        }
-        return _provider_tool_schemas(pinned_visible)
+        bundle_tools = dict(execution_bundle.visible_tools or {})
+        registry = getattr(self._loop, "tools", None)
+        registry_lookup = getattr(registry, "get", None)
+        retired_lookup = lookup_tool_schema
+        tools_by_name: dict[str, Any] = {}
+        for name in keep:
+            tool = bundle_tools.get(name)
+            if tool is None and callable(registry_lookup):
+                try:
+                    tool = registry_lookup(name)
+                except Exception:
+                    tool = None
+            if tool is None:
+                retired = retired_lookup(name) if callable(retired_lookup) else None
+                if not isinstance(retired, dict):
+                    continue
+                tool = SimpleNamespace(
+                    name=name,
+                    description="",
+                    parameters={},
+                    to_model_schema=lambda payload=retired: payload,
+                )
+            if tool is not None:
+                tools_by_name[name] = tool
+        return _provider_tool_schemas(tools_by_name)
 
     def _frontdoor_execution_bundle(
         self,

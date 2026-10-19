@@ -1037,3 +1037,57 @@ async def test_completed_frontdoor_stages_are_not_externalized_into_archives(tmp
         assert service.list_artifacts("frontdoor-stage-archive:web:frontdoor-archive-demo") == []
     finally:
         await service.close()
+
+
+class _DeclarationOnlyTool:
+    """最小工具替身：只提供 provider 投影要读的字段。"""
+
+    def __init__(self, name: str) -> None:
+        self.name = name
+        self.description = name
+        self.model_description = name
+
+    def to_model_schema(self) -> dict:
+        return {
+            "type": "function",
+            "function": {
+                "name": self.name,
+                "description": self.description,
+                "parameters": {"type": "object", "properties": {}},
+            },
+        }
+
+
+def test_frontdoor_tools_render_from_the_frozen_declaration_when_governance_revokes(monkeypatch) -> None:
+    """治理收回只关执行准入：钉住声明里那条名字必须继续带着参数表出现在 `tools[]`。
+
+    清单排在正文最前面，名字掉一条等于把身后全部存活正文重铺；而参数表的实例来自注册表，
+    不在收窄后的派发字典里也照样渲得出。顺序按钉住清单，不按执行束的字典序重排。
+    """
+    registry = {
+        "record_tool": _DeclarationOnlyTool("record_tool"),
+        "web_fetch": _DeclarationOnlyTool("web_fetch"),
+    }
+    runner = CreateAgentCeoFrontDoorRunner(loop=SimpleNamespace(tools=registry))
+    monkeypatch.setattr(runner, "_build_tool_runtime_context", lambda **kwargs: {})
+    monkeypatch.setattr(runner, "_registered_tools", lambda tool_names: {})
+    state = {
+        "session_key": "web:frontdoor-declaration",
+        "provider_tool_names": ["record_tool", "web_fetch"],
+        "tool_names": ["record_tool", "web_fetch"],
+        # 当轮治理只授权 record_tool：web_fetch 被收回
+        "rbac_visible_tool_names": ["record_tool"],
+        "hydrated_tool_names": [],
+        "messages": [],
+        "frontdoor_stage_state": {},
+    }
+
+    schemas = runner._frontdoor_tool_schemas_for_state(
+        state=state,
+        runtime=SimpleNamespace(context=SimpleNamespace()),
+    )
+
+    names = [str((item.get("function") or {}).get("name") or "") for item in schemas]
+    assert "web_fetch" not in runner._frontdoor_dispatch_tool_names(state)
+    assert "web_fetch" in names
+    assert names[:2] == ["record_tool", "web_fetch"]
