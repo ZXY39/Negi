@@ -22,10 +22,12 @@ from g3ku.runtime.frontdoor.skill_roster import normalize_skill_roster_item
 
 SKILL_ROSTER_NOTICE_MARKER = '[SKILL_ROSTER_NOTICE_V1]'
 SKILL_ROSTER_NOTICE_ROLE = 'user'
-SKILL_ROSTER_NOTICE_HEADING = '本会话新增可读技能：'
-SKILL_ROSTER_NOTICE_LOAD_HINT = '需要正文时用 `load_skill_context(skill_id="...")` 取。'
+# 模型可见文案一律英文：这条提示会长期留在可复用前缀里，措辞只写"该做什么"
+# （名字 + 一句描述 + 取正文的入口），并限定作用域在本会话，不写运行时承诺。
+SKILL_ROSTER_NOTICE_HEADING = 'Skills newly readable in this session:'
+SKILL_ROSTER_NOTICE_LOAD_HINT = 'Use `load_skill_context(skill_id="...")` to read a skill body.'
 # 压缩跳带过去的那一段：抬头写明它没被压缩移出，模型不必再猜名单是否还有效。
-SKILL_ROSTER_CARRIED_HEADING = '### 会话内新增可读技能（仍可读，未随压缩移出）'
+SKILL_ROSTER_CARRIED_HEADING = '### Skills newly readable in this session (still readable; kept across compaction)'
 
 SKILL_ROSTER_NOTICE_CONTEXT_KEY = 'skill_roster_notice_context'
 
@@ -70,8 +72,12 @@ def deliver_for_scope(
     *,
     now: str,
     covered_skill_ids: list[Any] | None = None,
-) -> dict[str, Any] | None:
-    """每跳唯一动作：记账 + 有未宣布的就投一条。返回 None 表示本轮不追加提示。"""
+) -> tuple[dict[str, Any] | None, list[dict[str, str]]]:
+    """每跳唯一动作：记账 + 有未宣布的就投一条。
+
+    返回（消息或 None，本次宣布的条目）；None 表示本轮不追加提示。调用方拿条目去发
+    前端事件，两条信息同源，不再回头扫文本。
+    """
     context, _fresh = record_live_skills(
         notice_context_for(scope_key),
         live_skills,
@@ -81,7 +87,7 @@ def deliver_for_scope(
     pending = pending_notice_records(context)
     if not pending:
         set_notice_context(scope_key, context)
-        return None
+        return None, []
     message = build_notice_message(pending)
     if message is not None:
         context = mark_records_delivered(
@@ -90,7 +96,7 @@ def deliver_for_scope(
             now=now,
         )
     set_notice_context(scope_key, context)
-    return message
+    return message, (pending if message is not None else [])
 
 
 def carry_for_scope(
@@ -241,8 +247,6 @@ def render_notice_lines(records: list[Any], *, heading: str) -> list[str]:
         detail = description or 'No description available.'
         lines.append(f'- `{skill_id}` | {display_name} | {detail}')
     return lines
-
-
 def render_notice_text(records: list[Any]) -> str:
     lines = [*render_notice_lines(records, heading=SKILL_ROSTER_NOTICE_HEADING), SKILL_ROSTER_NOTICE_LOAD_HINT]
     return '\n'.join([SKILL_ROSTER_NOTICE_MARKER, *lines]).strip()

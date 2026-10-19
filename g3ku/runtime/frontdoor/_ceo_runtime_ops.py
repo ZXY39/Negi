@@ -130,7 +130,7 @@ from g3ku.runtime.web_ceo_sessions import (
 )
 from main.governance.tool_context import apply_runtime_tool_context_projection
 from main.models import normalize_execution_policy_metadata
-from main.protocol import now_iso
+from main.protocol import build_envelope, now_iso
 from main.runtime.chat_backend import (
     build_actual_request_diagnostics,
     build_prompt_cache_diagnostics,
@@ -4029,7 +4029,7 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
         scope = self._frontdoor_skill_roster_notice_scope(session_key)
         if not scope:
             return base_messages
-        message = _skill_roster_notice.deliver_for_scope(
+        message, delivered = _skill_roster_notice.deliver_for_scope(
             scope,
             self._frontdoor_live_visible_skills(session_key),
             now=now_iso(),
@@ -4038,7 +4038,47 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
         )
         if message is None:
             return base_messages
+        self._emit_frontdoor_skill_roster_notice_event(session_key=session_key, records=delivered)
         return [*base_messages, message]
+
+    def _emit_frontdoor_skill_roster_notice_event(self, *, session_key: str, records: list[dict[str, Any]]) -> None:
+        """会话流里画一条内部行（与心跳 ack 同一族 system 行），不是用户气泡。
+
+        事件是实时信号，不进持久转录行：刷新后这行会像 `ceo.internal.ack` 一样消失，
+        名单本身在 Skill 管理页照旧可见。模型侧那份持久提示不依赖这条事件。
+        """
+        if not records:
+            return
+        service = getattr(self._loop, "main_task_service", None)
+        registry = getattr(service, "registry", None)
+        publisher = getattr(registry, "publish_ceo", None)
+        seq_of = getattr(registry, "next_ceo_seq", None)
+        if not callable(publisher) or not callable(seq_of):
+            return
+        # 信封在 try 外面装配：装配本身出错（缺字段、名字拼错）必须炸出来，
+        # 只有往外发那一步允许失败——否则这条内部行会永远静默消失。
+        envelope = build_envelope(
+            channel="ceo",
+            session_id=str(session_key or "").strip(),
+            seq=int(seq_of(str(session_key or "").strip())),
+            type="ceo.skill.roster_notice",
+            data={
+                "items": [
+                    {
+                        "skill_id": str(record.get("skill_id") or "").strip(),
+                        "display_name": str(record.get("display_name") or "").strip(),
+                        "description": str(record.get("description") or "").strip(),
+                    }
+                    for record in list(records or [])
+                    if str(record.get("skill_id") or "").strip()
+                ]
+            },
+        )
+        try:
+            publisher(str(session_key or "").strip(), envelope)
+        except Exception:
+            # 显示面失败不许影响这一跳能发出去：提示本体已经在历史里了。
+            pass
 
     def _carry_frontdoor_skill_roster_notice_on_compaction(
         self,

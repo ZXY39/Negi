@@ -306,6 +306,107 @@ def test_node_notice_injected_once_per_node() -> None:
     assert len(third) == len(second)
 
 
+def test_node_ledger_is_persisted_to_node_metadata() -> None:
+    """节点台账必须落到 `node.metadata`：那一写是"重启/续跑后不重复投"的唯一依据。"""
+    written: dict[str, dict] = {}
+
+    class _MetadataLogService:
+        def read_runtime_frame(self, task_id, node_id):
+            return None
+
+        def upsert_frame(self, task_id, frame, publish_snapshot=False):
+            return None
+
+        def update_node_metadata(self, node_id, metadata_mutator):
+            next_metadata = metadata_mutator({})
+            written[node_id] = next_metadata
+            return SimpleNamespace(node_id=node_id, metadata=next_metadata)
+
+    loop = ReActToolLoop(chat_backend=SimpleNamespace(), log_service=_MetadataLogService(), max_iterations=2)
+    node = _node()
+    loop._apply_node_skill_roster_head(
+        [{"role": "system", "content": "node system"}],
+        scope_key=f"node:{node.task_id}:{node.node_id}",
+        skill_items=[_item("alpha")],
+    )
+    loop._apply_node_skill_roster_notice(
+        [{"role": "system", "content": "node system"}],
+        node=node,
+        skill_roster_items=[_item("alpha"), _item("beta")],
+    )
+
+    stored = written[node.node_id]["skill_roster_notice_context"]
+    delivered = [record for record in stored["records"] if record["skill_id"] == "beta"]
+    assert delivered and delivered[0]["delivered_at"]
+    assert delivered[0]["superseded_at"] == ""
+
+    # 重启语义：进程表清空后从 metadata 恢复，同一个 beta 不再投第二份
+    notice.clear_skill_roster_notice_stores()
+    node.metadata = {notice.SKILL_ROSTER_NOTICE_CONTEXT_KEY: stored}
+    again = loop._apply_node_skill_roster_notice(
+        [{"role": "system", "content": "node system"}],
+        node=node,
+        skill_roster_items=[_item("alpha"), _item("beta")],
+    )
+    assert _notice_texts(again) == []
+
+
+def test_frontdoor_delivery_publishes_one_internal_row_event() -> None:
+    """会话流那边发一条内部行事件；它只是显示面，模型侧那份提示不依赖它。"""
+    published: list[tuple[str, dict]] = []
+
+    class _Registry:
+        def next_ceo_seq(self, session_id: str) -> int:
+            return 7
+
+        def publish_ceo(self, session_id: str, envelope: dict) -> None:
+            published.append((session_id, envelope))
+
+    service = SimpleNamespace(
+        list_contract_visible_skill_resources=lambda *, actor_role, session_id: [_item("alpha"), _item("beta")],
+        list_effective_tool_names=lambda *, actor_role, session_id: ["exec", "submit_next_stage"],
+        _current_exec_runtime_policy_payload=lambda: {},
+        registry=_Registry(),
+    )
+    runner = create_agent_impl.CreateAgentCeoFrontDoorRunner(loop=SimpleNamespace(main_task_service=service))
+    _pin_head(["alpha"])
+    runner._apply_frontdoor_skill_roster_notice(
+        [{"role": "user", "content": "hello"}], session_key=SESSION_KEY
+    )
+
+    assert len(published) == 1
+    session_id, envelope = published[0]
+    assert session_id == SESSION_KEY
+    assert envelope["type"] == "ceo.skill.roster_notice"
+    assert [item["skill_id"] for item in envelope["data"]["items"]] == ["beta"]
+    assert envelope["seq"] == 7
+
+    # 已宣布过的不再发第二条
+    runner._apply_frontdoor_skill_roster_notice(
+        [{"role": "user", "content": "hello"}], session_key=SESSION_KEY
+    )
+    assert len(published) == 1
+
+
+def test_notice_copy_is_english_and_scope_bounded() -> None:
+    """模型可见文案：英文、限定"本会话"、只给取正文入口，不写运行时承诺。"""
+    text = notice.render_notice_text(
+        [{"skill_id": "beta", "display_name": "Beta", "description": "beta 的描述。"}]
+    )
+    assert text.startswith(notice.SKILL_ROSTER_NOTICE_MARKER)
+    assert "Skills newly readable in this session:" in text
+    assert "load_skill_context(skill_id=" in text
+    assert "in this session" in text
+    assert "[G3KU_" not in text
+    for promise in ("已为你保留", "will be kept for you", "I will"):
+        assert promise not in text
+    carried = notice.render_carried_text(
+        [{"skill_id": "beta", "display_name": "Beta", "description": "beta 的描述。"}]
+    )
+    assert "kept across compaction" in carried
+    assert "load_skill_context" not in carried
+
+
 def test_node_compression_carry_appends_after_compacted_baseline() -> None:
     loop = _node_loop()
     node = _node()

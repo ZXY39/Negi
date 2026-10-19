@@ -3077,6 +3077,11 @@ textarea {
     border-color: color-mix(in srgb, var(--brand-primary) 24%, transparent);
 }
 
+/* 新增可读技能内部行：与心跳/cron 同族，只换描边色，不再造一套盒子。 */
+.ceo-internal-ack.is-skill-notice .msg-content {
+    border-color: color-mix(in srgb, var(--status-success-text, var(--brand-primary)) 24%, transparent);
+}
+
 .ceo-internal-ack-content {
     white-space: pre-wrap;
     word-break: break-word;

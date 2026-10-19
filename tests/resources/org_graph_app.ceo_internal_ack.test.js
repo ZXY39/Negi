@@ -120,7 +120,7 @@ function loadApp() {
     context.window = context;
     vm.createContext(context);
     vm.runInContext(
-        `${APP_CODE}\nthis.__testExports = { handleCeoInternalAck, S, U, getPatchSnapshotCalls: () => globalThis.__patchSnapshotCalls || 0 };`,
+        `${APP_CODE}\nthis.__testExports = { handleCeoInternalAck, handleCeoSkillRosterNotice, ceoSkillRosterNoticeLabel, S, U, getPatchSnapshotCalls: () => globalThis.__patchSnapshotCalls || 0 };`,
         context
     );
     context.__testExports.U.ceoFeed = new StubHTMLElement();
@@ -166,4 +166,37 @@ test("handleCeoInternalAck renders a special bubble and keeps pending turns unto
     assert.match(String(U.ceoFeed.appended[0].className || ""), /ceo-internal-ack/);
     assert.match(String(U.ceoFeed.appended[0].innerHTML || ""), /task_terminal/);
     assert.equal(getPatchSnapshotCalls(), 0);
+});
+
+test("ceoSkillRosterNoticeLabel names up to three skills and counts the rest", () => {
+    const { ceoSkillRosterNoticeLabel } = loadApp();
+
+    assert.equal(
+        ceoSkillRosterNoticeLabel([{ skill_id: "alpha" }, { skill_id: "beta" }]),
+        "Skills newly readable in this session: alpha, beta"
+    );
+    assert.equal(
+        ceoSkillRosterNoticeLabel([{ skill_id: "a" }, { skill_id: "b" }, { skill_id: "c" }, { skill_id: "d" }]),
+        "Skills newly readable in this session: a, b, c +1 more"
+    );
+    assert.equal(ceoSkillRosterNoticeLabel([]), "");
+});
+
+test("handleCeoSkillRosterNotice renders an internal system row, never a user bubble", () => {
+    const { handleCeoSkillRosterNotice, S, U } = loadApp();
+
+    handleCeoSkillRosterNotice({
+        items: [{ skill_id: "zz-probe", display_name: "Probe", description: "probe" }],
+    });
+
+    assert.equal(U.ceoFeed.appended.length, 1);
+    const row = U.ceoFeed.appended[0];
+    assert.match(String(row.className || ""), /message system/);
+    assert.match(String(row.className || ""), /ceo-internal-ack is-skill-notice/);
+    assert.doesNotMatch(String(row.className || ""), /\buser\b/);
+    // 装配走 DOM + textContent：不拼 HTML，系统注入不该带任何可解析标记
+    const content = row.children[0];
+    assert.equal(String(content.textContent || ""), "Skills newly readable in this session: zz-probe");
+    assert.equal(String(content._innerHTML || ""), "");
+    assert.equal(S.ceoPendingTurns.length, 0);
 });

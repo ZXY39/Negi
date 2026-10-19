@@ -3922,7 +3922,7 @@ class ReActToolLoop:
         if not scope:
             return base_messages
         self._hydrate_node_skill_roster_notice(node=node)
-        message = _skill_roster_notice.deliver_for_scope(
+        message, _delivered = _skill_roster_notice.deliver_for_scope(
             scope,
             list(skill_roster_items or []),
             now=now_iso(),

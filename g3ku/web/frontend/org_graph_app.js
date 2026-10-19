@@ -7980,6 +7980,33 @@ function handleCeoInternalAck(payload = {}) {
     }, { scrollMode: "preserve" });
 }
 
+function ceoSkillRosterNoticeLabel(items = []) {
+    const names = (Array.isArray(items) ? items : [])
+        .map((item) => String(item?.skill_id || "").trim())
+        .filter(Boolean);
+    if (!names.length) return "";
+    if (names.length <= 3) return `Skills newly readable in this session: ${names.join(", ")}`;
+    return `Skills newly readable in this session: ${names.slice(0, 3).join(", ")} +${names.length - 3} more`;
+}
+
+// 会话中途新增可读技能：模型侧那份提示落在历史里（只投一次），这里只是同一件事的
+// 人可见内部行——套用户气泡会把系统注入写成用户说过的话，与 provenance 规矩打架。
+function handleCeoSkillRosterNotice(payload = {}) {
+    const label = ceoSkillRosterNoticeLabel(payload?.items || []);
+    if (!label || !U.ceoFeed) return null;
+    return mutateCeoFeed(() => {
+        const el = document.createElement("div");
+        el.className = "message system ceo-internal-ack is-skill-notice";
+        const content = document.createElement("div");
+        content.className = "msg-content ceo-internal-ack-content";
+        content.textContent = label;
+        el.appendChild(content);
+        ceoFeedAppendHost().appendChild(el);
+        icons();
+        return el;
+    }, { scrollMode: "preserve" });
+}
+
 function resetCeoFeed() {
     if (!U.ceoFeed) return;
     U.ceoFeed.innerHTML = "";
@@ -15021,6 +15048,9 @@ function initCeoWs() {
         if (payload.type === "ceo.error" && effectiveSessionId === activeSessionId()) handleCeoError(payload.data || {});
         if (payload.type === "ceo.internal.ack" && effectiveSessionId === activeSessionId()) {
             handleCeoInternalAck(payload.data || {});
+        }
+        if (payload.type === "ceo.skill.roster_notice" && effectiveSessionId === activeSessionId()) {
+            handleCeoSkillRosterNotice(payload.data || {});
         }
         if (payload.type === "ceo.reasoning.delta") {
             applyCeoReasoningDelta(payload.data || {}, { sessionId: effectiveSessionId });
