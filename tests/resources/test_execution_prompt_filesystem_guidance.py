@@ -92,3 +92,25 @@ def test_prompts_require_stage_summary_to_cover_facts_goals_and_lessons() -> Non
         assert "剩下的目标" in prompt
         assert "从犯过的错误中总结出的经验教训" in prompt
         assert "剩余差距" not in prompt
+
+
+def test_delivery_landing_is_stated_once_and_promises_no_cleanup() -> None:
+    """交付默认落点只住在 `path_anchor_rule` 里；提示词指向它，不抄第二份，也不承诺清理。
+
+    承诺"temp 会被清理"在两条车道上都不是默认发生的运行时行为，印出来只会让模型
+    以为有人替它收尾。
+    """
+    from g3ku.utils.helpers import PATH_ANCHOR_RULE_TEXT
+
+    assert "默认落 `{data}/output/`" in PATH_ANCHOR_RULE_TEXT
+
+    for relative_path in (
+        "g3ku/runtime/prompts/ceo_frontdoor.md",
+        "main/prompts/node_execution.md",
+        "main/prompts/acceptance_execution.md",
+    ):
+        prompt = _lane_prompt(relative_path)
+        assert "path_anchor_rule" in prompt
+        assert "`output/` 目录" not in prompt
+        assert "不保证持久保留" not in prompt
+        assert "temp 目录会被清理" not in prompt

@@ -79,22 +79,20 @@ def expand_path_anchor_tokens(
     return text
 
 
-def model_data_root(workspace: Path | None) -> Path | None:
-    """Return the data root only when it really diverges from the project root.
+def model_data_root() -> Path | None:
+    """The data root as a model-facing anchor, listed on every install.
 
-    While both resolve to the same directory, a second name for it gives the model two
-    tokens with one meaning, so it is withheld until it carries distinct information.
+    Withholding it while the data root and the project root coincide leaves the default
+    install with no delivery anchor at all, so the model reads the project root as
+    "either side works" and leaves deliverables there. Growing the token set later, when
+    an operator first picks a data directory, rewrites the pinned contract head and makes
+    every live session re-send its prefix once; listing the token always pays that break
+    at the moment the text already changes.
     """
     try:
         from g3ku.deployment.data_root import data_root
 
-        root = Path(data_root())
-    except Exception:
-        return None
-    if workspace is None:
-        return root
-    try:
-        return None if root.resolve() == Path(workspace).resolve() else root
+        return Path(data_root())
     except Exception:
         return None
 
@@ -104,26 +102,22 @@ PATH_ANCHOR_RULE_TEXT = (
     '绝对路径按给定使用，任何一层都不重写。不要逐字重抄整条绝对前缀——它比短写法更容易打错。'
     '锚点 token 只整体用作路径开头，塞进一条绝对路径的中段不会得到你想要的位置；'
     'token 只在路径参数里展开，命令正文里的 token 原样交给 shell。'
-    '`{data}` 只在数据根与项目根分离时可用。'
+    '`{data}` 是数据根；未设置数据目录时它与项目根是同一个目录，这不代表两个落点可以互换。'
+    '正式交付物默认落 `{data}/output/`，用户或任务指定了别的位置才按指定的绝对路径写。'
 )
 
 
-def path_anchor_tokens(*, include_data: bool = False) -> str:
+def path_anchor_tokens() -> str:
     """The token set advertised to the model; the resolver is the real authority."""
-    tokens = ['{workspace}', '{temp}']
-    if include_data:
-        tokens.append('{data}')
-    return ' | '.join(tokens)
+    return ' | '.join(['{workspace}', '{temp}', '{data}'])
 
 
-def path_anchor_policy(workspace: Path | None) -> dict[str, Any]:
+def path_anchor_policy() -> dict[str, Any]:
     """Single source for the path anchoring contract, shared by both lanes."""
     return {
         'relative_paths_bind_to_workspace': True,
         'bare_filename_binds_to_task_temp_dir': True,
-        'path_anchor_tokens': path_anchor_tokens(
-            include_data=workspace is not None and model_data_root(workspace) is not None
-        ),
+        'path_anchor_tokens': path_anchor_tokens(),
         'path_anchor_rule': PATH_ANCHOR_RULE_TEXT,
     }
 

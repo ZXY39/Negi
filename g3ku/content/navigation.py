@@ -1677,7 +1677,7 @@ class ContentNavigationService:
             raw,
             workspace=self._workspace,
             temp_root=temp_root,
-            data_root=model_data_root(self._workspace),
+            data_root=model_data_root(),
         )
         resolved = candidate.resolve()
         if self._allowed_dir is not None:

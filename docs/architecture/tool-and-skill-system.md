@@ -389,11 +389,15 @@ skill / tool 目录可能被编辑器、git 或外部进程直接改动，注册
 - `{temp}/<相对路径>` → 同第一条。
 - 绝对路径 → 逐字节按给定使用，任何一层都不重写、不 re-base。
 
-两个 token 挂两个根：`{workspace}` 是项目根，`{temp}` 是数据根的 `temp/`——任务级 `<数据根>/temp/tasks/<任务>`、会话级 `<数据根>/temp/ceo/<会话>`。`exec` 给子进程的 `TMP`/`TEMP`/`TMPDIR`/`G3KU_TMP_DIR`/`G3KU_TEMP_DIR` 与写失败正文的 `landing-park` 都跟着 `{temp}` 那一个根，所以模型 spawn 的脚本中间产物也落在数据根一侧。`task_temp_dir` 的准入判据是「在项目根内**或**在 `<数据根>/temp/` 之下」：前者让存量 meta 里仍写着安装根 temp 的任务照旧可用，后者把临时内容放出去；数据根的其余部分（任务库、日志、配置束）不在模型可写面内。该判据与 `restrict_to_workspace` 开关无关，两条车道各自无条件生效，判否的一侧静默回落到规范临时根而不是报错。
+三个 token 挂三个根：`{workspace}` 是项目根，`{temp}` 是数据根的 `temp/`——任务级 `<数据根>/temp/tasks/<任务>`、会话级 `<数据根>/temp/ceo/<会话>`，`{data}` 是数据根本身。`exec` 给子进程的 `TMP`/`TEMP`/`TMPDIR`/`G3KU_TMP_DIR`/`G3KU_TEMP_DIR` 与写失败正文的 `landing-park` 都跟着 `{temp}` 那一个根，所以模型 spawn 的脚本中间产物也落在数据根一侧。`task_temp_dir` 的准入判据是「在项目根内**或**在 `<数据根>/temp/` 之下」：前者让存量 meta 里仍写着安装根 temp 的任务照旧可用，后者把临时内容放出去；数据根的其余部分（任务库、日志、配置束）不在模型可写面内。该判据与 `restrict_to_workspace` 开关无关，两条车道各自无条件生效，判否的一侧静默回落到规范临时根而不是报错。
 
 判据是「有没有目录段」，不是「像不像临时文件」：裸文件名没有可供推理的锚，模型的意图就是自己的 scratch 目录；而带目录段的形态绝大多数指向仓库内文件，把它默认进临时目录会让一次源码写入在错误位置返回成功。
 
-`{data}` 只在解析出的数据根与项目根不重合时出现在合同和 schema 里。两根重合时这个 token 整段不渲染，写它得到的是明确的「该运行时不可用」，而不是被静默折成项目根——同一条合同不必让模型在两个同值名字之间猜权威。
+`{data}` 无条件出现在合同、`path_anchor_tokens` 与 schema 里，包括数据根与项目根重合的安装。两个根重合时它们指向同一个目录，但职责不同：`{workspace}` 是仓库与沙箱锚，`{data}` 是交付与体积数据锚。按两根是否重合增减 token 会让模型在默认安装里根本没有交付锚名，把项目根读成"放哪边都一样"；而操作员第一次设置数据目录时新增那一行会把钉住头部改写一次，每个在跑的会话因此重付一遍前缀。
+
+正式交付物的默认落点是 `{data}/output/`。用户或任务指定了别的位置就按指定的绝对路径写；`output/` 不存在时由写入方创建。这条路径只在本文档与 `PATH_ANCHOR_RULE_TEXT` 里各存一份表述，三条模型可见提示词（`ceo_frontdoor.md`、「执行节点」、「验收节点」）都只指向 `path_anchor_rule`，不抄第二份。
+
+任务临时目录与会话临时目录都不是交付落点，这条判据不依赖任何自动清理动作：任务临时目录随终态回收只在 `G3KU_TERMINAL_TEMP_DIR_CLEANUP_ENABLED` 开启时发生（默认关闭，见 `operations-and-maintenance.md`「关键状态文件与目录」），会话临时目录没有任何清理车道——删会话带走的是连续性快照、请求取证、回合边界与上传目录，不含 `temp/ceo/<会话>`。提示词里印"temp 会被清理"会让模型以为运行时替它收尾，是一句做不到的承诺。
 
 展开只发生在路径参数上：`exec` 的 `command` 正文原样交给 shell，写在里面的 token 不展开。锚点代表一个绝对前缀，整体用作路径开头才有意义——塞进一条绝对路径的中段，展开后得到的仍是无效位置。
 
@@ -402,7 +406,7 @@ skill / tool 目录可能被编辑器、git 或外部进程直接改动，注册
 1. 落点闸门判的是解析后的绝对路径，与输入形态无关。legacy `workspace/tmp`、越界使用系统临时目录、`tools/` 注册面、托管产物必须落 temp 这四道闸门对四种形态同样生效；放开相对路径不削弱任何一条守卫，也不依赖「模型给的是绝对路径」这个假设。
 2. 工具结果回显的始终是解析后的绝对路径，模型侧、轨道侧和审计面读到的都是落点而不是输入串。
 3. 项目根的锚是 `agents.defaults.workspace` 的一次性解析，不随进程当前目录漂移（解析与冻结口径见 `config-and-models.md`「`agents`」；从二级 worktree 起进程时锚即那棵 worktree，见 `operations-and-maintenance.md`「关键状态文件与目录」）。临时根另有自己的锚：`g3ku/deployment/data_root.py` 解析出的数据根，两条车道都调同一个函数取它，不在各自模块里拼路径。
-4. 两条车道的合同出自同一个渲染点，不允许各自措辞：`g3ku/utils/helpers.py` 的 `PATH_ANCHOR_RULE_TEXT` 与 `path_anchor_tokens()` 是唯一来源，节点道把它们放进 `runtime_environment.path_policy`（含 `path_anchor_tokens`，数据根分离时这里多列一个 `{data}`），CEO 前门把它们放进合同块的 `path_anchor` / `path_anchor_rule` 两行（静态句随钉住块进头部，头部没带时照旧落尾块）。`ceo_frontdoor.md` 不复述落点规则，只指向 `path_anchor_rule`。回归用例钉住"两处渲染的规则句逐字节相同"。
+4. 两条车道的合同出自同一个渲染点，不允许各自措辞：`g3ku/utils/helpers.py` 的 `PATH_ANCHOR_RULE_TEXT` 与 `path_anchor_tokens()` 是唯一来源，节点道把它们放进 `runtime_environment.path_policy`（含 `path_anchor_tokens`，三个 token 恒定列出），CEO 前门把它们放进合同块的 `path_anchor` / `path_anchor_rule` 两行（静态句随钉住块进头部，头部没带时照旧落尾块）。`ceo_frontdoor.md` 不复述落点规则，只指向 `path_anchor_rule`。回归用例钉住"两处渲染的规则句逐字节相同"。
 
 例外：`create_async_task.file_targets[].path` 只接受已存在的绝对路径。派发方携带的是跨任务作用度的用户附件，绑到某一个任务的临时目录会指错目标（同 `web-and-admin.md`「Image Upload Gating」）。
 
