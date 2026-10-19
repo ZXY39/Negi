@@ -265,15 +265,29 @@ def _call_spans(source: str, needle: str) -> list[str]:
     return spans
 
 
-def test_every_probe_child_is_told_not_to_open_a_console() -> None:
-    # 图标用 pythonw 起 bootstrap：它自己没有控制台可继承，所以每个探测子进程
-    # （解释器版本探测、依赖探测、uv sync）都会另开一个黑窗，用户看到的是连弹几
-    # 下才出浏览器。真终端下加这个标记不改变行为——子进程照样继承父控制台。
+def test_probe_children_are_quiet_and_the_command_handoff_is_not(monkeypatch) -> None:
+    # 探测子进程（版本/依赖检查、uv sync）不许自己开控制台：图标那条的宿主是
+    # pythonw，没有可继承的控制台，每个探测都会弹一个黑窗。
+    # 但把命令交给 `-m g3ku ...` 那一处必须反过来：实测带上 CREATE_NO_WINDOW 后
+    # 子进程拿不到终端句柄，`negi status` / `--version` 会一个字都不输出。
     source = (REPO_ROOT / 'negi_bootstrap.py').read_text(encoding='utf-8')
     spans = _call_spans(source, 'subprocess.run(')
     assert spans, 'expected probe calls in negi_bootstrap.py'
-    unflagged = [span.splitlines()[0] for span in spans if '_no_window_flags()' not in span]
-    assert unflagged == [], unflagged
+    handoffs = [span for span in spans if '"-m", "g3ku", *args' in span]
+    probes = [span for span in spans if '"-m", "g3ku", *args' not in span]
+    assert len(handoffs) == 1, handoffs
+    assert all('_no_window_flags()' in span for span in probes), probes
+    assert '_no_window_flags()' not in handoffs[0]
+
+    captured = {}
+
+    def _fake_run(command, **kwargs):
+        captured['kwargs'] = kwargs
+        return SimpleNamespace(returncode=0)
+
+    monkeypatch.setattr(negi_bootstrap.subprocess, 'run', _fake_run)
+    negi_bootstrap.main(['status'])
+    assert 'creationflags' not in captured['kwargs']
 
 
 def test_probe_helpers_pass_the_flag_at_runtime(monkeypatch) -> None:

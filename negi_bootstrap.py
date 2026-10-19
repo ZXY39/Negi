@@ -33,12 +33,16 @@ RUNTIME_IMPORT_PROBES = (
 
 
 def _no_window_flags() -> dict[str, int]:
-    """Never let a child allocate its own console.
+    """Keep a silent probe child from opening its own console.
 
     The desktop shortcut runs this file under ``pythonw``, which has no console to
     inherit, so every console child (the interpreter probes, ``uv sync``) would pop
-    its own black window on the way to the browser. Under a real terminal the child
-    still inherits it, so typed commands keep printing where the operator is looking.
+    its own black window on the way to the browser.
+
+    This applies to probes only. The command handoff (``negi status``, ``agent``,
+    ``--version``) must NOT carry it: measured here, a child started with
+    ``CREATE_NO_WINDOW`` loses the terminal handles it would otherwise inherit and
+    prints nothing at all, which turns every typed command into a silent run.
     """
     if os.name == "nt":
         return {"creationflags": subprocess.CREATE_NO_WINDOW}
@@ -435,7 +439,6 @@ def main(argv: list[str] | None = None) -> int:
         completed = subprocess.run(
             [str(VENV_PYTHON), "-m", "g3ku", *args],
             cwd=str(PROJECT_ROOT),
-            **_no_window_flags(),
         )
         return int(completed.returncode or 0)
     except KeyboardInterrupt:
