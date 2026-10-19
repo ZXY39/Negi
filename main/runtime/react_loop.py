@@ -509,9 +509,11 @@ class ReActToolLoop:
                 skill_items=skill_roster_items,
             )
             # 新增可读 skill 的一次性提示：节点每跳只在这里检测与投递（与会话道同口径）。
+            # 投递的那条同时落进 message_history，让它活过重启/续跑的历史重建。
             model_messages = self._apply_node_skill_roster_notice(
                 model_messages,
                 node=node,
+                message_history=message_history,
                 skill_roster_items=skill_roster_items,
             )
             current_tools = self._revoke_contract_absent_hydration_for_hop(
@@ -3910,12 +3912,17 @@ class ReActToolLoop:
         messages: list[dict[str, Any]],
         *,
         node,
+        message_history: list[dict[str, Any]] | None = None,
         skill_roster_items: list[dict[str, str]] | None = None,
     ) -> list[dict[str, Any]]:
         """新增可读 skill 的一次性提示：落在本轮历史末尾（运行时块之前），投过就不再投。
 
         检测与投递只在这一处发生（与会话道同口径）。旧机制的失效原因就是一条回合内
         多个装配点共用一次消耗式读，先跑的把差集领走、落请求体那处永远拿空。
+
+        这条消息同时写进 `message_history`：只挂在发送投影上的话，它只在本跳的
+        append 链里活着——重启或续跑时历史从落盘的 `latest_runtime_messages_ref`
+        重建，那份投影不在里面，而台账已记"投递过"，名字就从此不再出现。
         """
         base_messages = list(messages or [])
         scope = self._node_skill_roster_notice_scope(node)
@@ -3932,6 +3939,8 @@ class ReActToolLoop:
         if message is None:
             return base_messages
         self._persist_node_skill_roster_notice(node=node)
+        if isinstance(message_history, list):
+            message_history.append(dict(message))
         return [*base_messages, message]
 
     def _carry_node_skill_roster_notice_on_compaction(

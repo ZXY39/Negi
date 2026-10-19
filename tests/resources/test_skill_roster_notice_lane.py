@@ -367,6 +367,37 @@ def test_node_ledger_is_persisted_to_node_metadata() -> None:
     assert _notice_texts(again) == []
 
 
+def test_node_notice_message_lands_in_durable_history() -> None:
+    """投递的那条要写进 `message_history`：只挂发送投影的话，重启/续跑重建历史后它就不在了，
+    而台账已记"投过" ⇒ 那个名字从此再也不会出现。"""
+    loop = _node_loop()
+    node = _node()
+    history = [{"role": "system", "content": "node system"}, {"role": "user", "content": "go"}]
+    loop._apply_node_skill_roster_head(
+        list(history), scope_key=f"node:{node.task_id}:{node.node_id}", skill_items=[_item("alpha")]
+    )
+
+    body = loop._apply_node_skill_roster_notice(
+        list(history),
+        node=node,
+        message_history=history,
+        skill_roster_items=[_item("alpha"), _item("beta")],
+    )
+    assert len(_notice_texts(body)) == 1
+    assert len(history) == 3 and len(_notice_texts(history)) == 1
+    assert history[-1] is not body[-1] and history[-1]["content"] == body[-1]["content"]
+
+    # 下一跳的历史已经带着这条：不再补第二条，正文里也只有一份。
+    next_body = loop._apply_node_skill_roster_notice(
+        list(history),
+        node=node,
+        message_history=history,
+        skill_roster_items=[_item("alpha"), _item("beta")],
+    )
+    assert len(history) == 3
+    assert len(_notice_texts(next_body)) == 1
+
+
 def test_continuity_snapshot_keeps_the_notice_ledger() -> None:
     """连续性侧车是按白名单装配的：台账不在名单里就永远落不了盘（重启即重复宣布）。"""
     from g3ku.runtime.web_ceo_sessions import _normalized_completed_continuity_snapshot
