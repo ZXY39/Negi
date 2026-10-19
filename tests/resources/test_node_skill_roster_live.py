@@ -231,3 +231,70 @@ def test_runtime_service_supplier_reads_governed_visible_set() -> None:
         {"skill_id": "alpha", "display_name": "Alpha", "description": "第一句。第二句。"},
         {"skill_id": "beta", "display_name": "beta", "description": ""},
     ]
+
+
+def test_pinned_head_rides_the_frame_trace_and_is_read_back_after_the_store_empties() -> None:
+    """钉头原文与 roster epoch 装进已整份持久化的 selection trace；进程载体空了（重启或 LRU
+    顶掉）从帧读回，而不是按当轮可见集重渲——头部是首条消息，重渲一行就顶掉身后全部前缀。
+    """
+    loop = _loop()
+    task_id, node_id = "task-head-durable", "node-head-durable"
+    scope = f"node:{task_id}:{node_id}"
+    base_messages = [{"role": "system", "content": "node system"}, {"role": "user", "content": "demo"}]
+
+    head_first = loop._apply_node_skill_roster_head(
+        list(base_messages), scope_key=scope, skill_items=[_item("alpha"), _item("beta")]
+    )
+    carrier = loop._node_pinned_head_carrier(scope)
+    assert carrier["skill_ids"] == ["alpha", "beta"]
+    assert carrier["text"] and carrier["revision"]
+    assert carrier["epoch"] == 0
+
+    loop._log_service.upsert_frame(
+        task_id,
+        {"node_id": node_id, "model_visible_tool_selection_trace": {"pinned_head": carrier}},
+    )
+
+    # 进程重启 / LRU 顶掉：两份进程载体都空了。
+    clear_pinned_contract_stores()
+    assert loop._node_pinned_head_carrier(scope) == {}
+
+    loop._restore_node_pinned_head_from_frame(task_id=task_id, node_id=node_id, scope_key=scope)
+    assert loop._node_pinned_head_carrier(scope) == carrier
+
+    # 停机期间删掉 beta：可见集只剩 alpha，头部仍逐字节复用钉住的那份。
+    head_after = loop._apply_node_skill_roster_head(
+        list(base_messages), scope_key=scope, skill_items=[_item("alpha")]
+    )
+    assert head_after[0]["content"] == head_first[0]["content"]
+    assert "`beta`" in head_after[0]["content"]
+
+
+def test_restore_node_pinned_head_never_overwrites_a_live_pin() -> None:
+    """帧是兜底源：进程里已经钉着（本回合刚跨过重印边界）时不得被旧原文拉回去。"""
+    loop = _loop()
+    task_id, node_id = "task-head-live", "node-head-live"
+    scope = f"node:{task_id}:{node_id}"
+    base_messages = [{"role": "system", "content": "node system"}, {"role": "user", "content": "demo"}]
+
+    head_live = loop._apply_node_skill_roster_head(
+        list(base_messages), scope_key=scope, skill_items=[_item("alpha")]
+    )
+    stale = {
+        "text": "## Runtime Contract (pinned)\nkind: frontdoor_runtime_pinned_contract\n- `stale` | Stale | 旧",
+        "revision": "pc:stale",
+        "skill_ids": ["stale"],
+        "epoch": 7,
+    }
+    loop._log_service.upsert_frame(
+        task_id, {"node_id": node_id, "model_visible_tool_selection_trace": {"pinned_head": stale}}
+    )
+
+    loop._restore_node_pinned_head_from_frame(task_id=task_id, node_id=node_id, scope_key=scope)
+
+    assert loop._node_pinned_head_carrier(scope)["skill_ids"] == ["alpha"]
+    head_after = loop._apply_node_skill_roster_head(
+        list(base_messages), scope_key=scope, skill_items=[_item("alpha")]
+    )
+    assert head_after[0]["content"] == head_live[0]["content"]
+    assert "stale" not in head_after[0]["content"]

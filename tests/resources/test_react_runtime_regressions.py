@@ -847,6 +847,8 @@ async def test_execution_first_turn_does_not_emit_all_visible_tool_schemas(tmp_p
                 'stop_tool_execution',
             ]
             assert frame.get('model_visible_tool_selection_trace', {}).get('stage_locked_to_submit_next_stage') is False
+            # 钉头原文与 roster epoch 必须随这份 trace 一起落盘（载体缺失＝重启后那一跳只能重渲头部）。
+            assert 'pinned_head' in frame.get('model_visible_tool_selection_trace', {})
             return LLMResponse(
                 content='',
                 tool_calls=[

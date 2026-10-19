@@ -49,7 +49,13 @@ from g3ku.runtime.frontdoor.tool_contract import (
     merge_pinned_contract_into_system_text as _merge_pinned_contract_into_system_text,
 )
 from g3ku.runtime.frontdoor.tool_contract import (
+    pinned_head_carrier as _pinned_head_carrier,
+)
+from g3ku.runtime.frontdoor.tool_contract import (
     pinned_skill_ids_for as _pinned_skill_ids_for,
+)
+from g3ku.runtime.frontdoor.tool_contract import (
+    restore_pinned_contract_state as _restore_pinned_contract_state,
 )
 from g3ku.runtime.frontdoor.tool_contract import (
     skill_roster_epoch_for as _skill_roster_epoch_for,
@@ -503,6 +509,11 @@ class ReActToolLoop:
                 task_id=str(task.task_id),
                 node_id=str(node.node_id),
             )
+            self._restore_node_pinned_head_from_frame(
+                task_id=str(task.task_id),
+                node_id=str(node.node_id),
+                scope_key=skill_roster_scope,
+            )
             model_messages = self._apply_node_skill_roster_head(
                 model_messages,
                 scope_key=skill_roster_scope,
@@ -938,7 +949,13 @@ class ReActToolLoop:
                     'provider_tool_exposure_commit_reason': str(
                         tool_schema_selection.get('provider_tool_exposure_commit_reason') or ''
                     ),
-                    'model_visible_tool_selection_trace': dict(tool_schema_selection.get('trace') or {}),
+                    # 钉住的头部原文与 roster epoch 跟着这份 trace 一起落盘（trace 已整份持久化，
+                    # 新增帧顶层字段要跟七个归一化写点）：进程载体是 LRU 有界的，重启或顶掉之后
+                    # 下一跳只能重渲头部，而头部是首条消息——重渲一行就顶掉身后全部存活正文。
+                    'model_visible_tool_selection_trace': {
+                        **dict(tool_schema_selection.get('trace') or {}),
+                        'pinned_head': self._node_pinned_head_carrier(skill_roster_scope),
+                    },
                     'exec_runtime_policy': (
                         dict(dynamic_contract_payload.get('exec_runtime_policy') or {})
                         if isinstance(dynamic_contract_payload.get('exec_runtime_policy'), dict)
@@ -1253,6 +1270,11 @@ class ReActToolLoop:
                 provider_tool_names=list(provider_tool_names),
                 provider_tool_bundle_seeded=bool(
                     dict(tool_schema_selection.get('trace') or {}).get('provider_tool_bundle_seeded')
+                ),
+                provider_tool_bundle_mode=str(
+                    tool_schema_selection.get('provider_tool_bundle_mode')
+                    or dict(tool_schema_selection.get('trace') or {}).get('provider_tool_bundle_mode')
+                    or ''
                 ),
                 provider_tool_exposure_revision=str(
                     tool_schema_selection.get('provider_tool_exposure_revision') or ''
@@ -3676,6 +3698,43 @@ class ReActToolLoop:
             for item in list(current_frame.get('visible_skills') or [])
             if isinstance(item, dict) and str(item.get('skill_id') or '').strip()
         ]
+
+    def _node_pinned_head_carrier(self, scope_key: str) -> dict[str, Any]:
+        """当前钉住的节点头部原文与 roster epoch，导成可落帧的载荷（没钉住＝空表）。"""
+        try:
+            return dict(_pinned_head_carrier(session_key=str(scope_key or "").strip()) or {})
+        except Exception:
+            return {}
+
+    def _restore_node_pinned_head_from_frame(
+        self,
+        *,
+        task_id: str,
+        node_id: str,
+        scope_key: str,
+    ) -> bool:
+        """进程载体空了（worker 重启、钉住表 LRU 顶掉）时，从帧里那份 trace 读回钉住头部。
+
+        只在进程里确实没有的时候读：本回合刚跨过重印边界时帧里还是旧原文，覆盖回去等于把
+        刚重印的那一遍抹掉。读回来写进按 `node:<task>:<node>` 分桶的进程表那份载体（节点没有
+        会话对象）；epoch 按持久值设置而不是从头计，否则判据键与存下的原文对不上。
+        """
+        key = str(scope_key or "").strip()
+        if not key or self._node_pinned_head_carrier(key):
+            return False
+        frame = self._runtime_frame(str(task_id or "").strip(), str(node_id or "").strip()) or {}
+        carrier = dict(frame.get("model_visible_tool_selection_trace") or {}).get("pinned_head") or {}
+        if not isinstance(carrier, dict) or not carrier:
+            return False
+        _restore_pinned_contract_state(
+            None,
+            session_key=key,
+            text=carrier.get("text"),
+            revision=carrier.get("revision"),
+            skill_ids=carrier.get("skill_ids"),
+            epoch=carrier.get("epoch"),
+        )
+        return True
 
     def _apply_node_skill_roster_head(
         self,
