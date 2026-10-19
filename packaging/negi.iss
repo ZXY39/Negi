@@ -17,15 +17,16 @@
 #define MyAppName "Negi"
 #define MyAppPublisher "ZXY39"
 #define MyAppURL "https://github.com/ZXY39/Negi"
+#define AppGuid "7B4F0C6E-2D91-4C58-9A73-5E1C0D8A4F62"
 
 [Setup]
-AppId={{7B4F0C6E-2D91-4C58-9A73-5E1C0D8A4F62}
+AppId={{{#AppGuid}
 AppName={#MyAppName}
 AppVersion={#Version}
 AppPublisher={#MyAppPublisher}
 AppPublisherURL={#MyAppURL}
 AppSupportURL={#MyAppURL}/issues
-DefaultDirName={%USERPROFILE}\Negi
+DefaultDirName={code:SuggestRoot}
 DefaultGroupName={#MyAppName}
 DisableProgramGroupPage=yes
 DisableWelcomePage=no
@@ -52,6 +53,28 @@ Filename: "{sys}\WindowsPowerShell\v1.0\powershell.exe"; Parameters: "-NoProfile
 Filename: "{app}\negi.cmd"; Parameters: "start --window"; Description: "启动 Negi（独立窗口）"; Flags: postinstall nowait skipifsilent skipifdoesntexist runhidden
 
 [Code]
+function SuggestRoot(Param: String): String;
+var
+  Found: String;
+begin
+  // The folder page is a default, not a decision: on a device that already runs
+  // Negi from another folder, accepting %USERPROFILE%\Negi would put a second root
+  // beside the live one - two trees, one port, one pointer. Inno remembers this
+  // setup's own previous directory, so what is added here is the row install.ps1
+  // wrote for a device that was installed from the terminal.
+  Result := '';
+  if RegQueryStringValue(HKCU,
+       'Software\Microsoft\Windows\CurrentVersion\Uninstall\{' + '{#AppGuid}' + '}_is1',
+       'InstallLocation', Found) then
+    Result := Found;
+  if (Result = '') and RegQueryStringValue(HKCU,
+       'Software\Microsoft\Windows\CurrentVersion\Uninstall\{#MyAppName}',
+       'InstallLocation', Found) then
+    Result := Found;
+  if Result = '' then
+    Result := ExpandConstant('{%USERPROFILE}\Negi');
+end;
+
 function TargetDir(Param: String): String;
 begin
   Result := WizardDirValue;

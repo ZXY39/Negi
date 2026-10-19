@@ -427,6 +427,24 @@ function Install-DesktopIcons {
     }
 }
 
+function Get-SetupExeOwner {
+    param([string]$Root)
+    # Inno Setup registers its uninstall key as '<AppId>_is1' and stores the chosen
+    # folder in InstallLocation. A row like that means the setup program owns how
+    # this install is uninstalled, so this script must not add a second row named
+    # 'Negi' pointing at uninstall.ps1: two rows for one install, removing it two
+    # different ways, is worse than either one alone.
+    $parent = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall'
+    if (-not (Test-Path -LiteralPath $parent)) { return '' }
+    $wanted = $Root.TrimEnd('\')
+    foreach ($entry in (Get-ChildItem -LiteralPath $parent -ErrorAction SilentlyContinue)) {
+        if ($entry.PSChildName -notlike '*_is1') { continue }
+        $location = (Get-ItemProperty -LiteralPath $entry.PSPath -Name InstallLocation -ErrorAction SilentlyContinue).InstallLocation
+        if ($location -and ($location.TrimEnd('\') -ieq $wanted)) { return $entry.PSChildName }
+    }
+    return ''
+}
+
 function Write-UninstallRegistryEntry {
     param([string]$Root, [string]$IconPath)
     $sizeBytes = Get-TreeSizeBytes -Path $Root
@@ -458,7 +476,24 @@ Install-Environment -uv $uv -Root $Dir
 $icon = Copy-NegiIcon -Root $Dir
 Install-EntryPoint -Root $Dir
 if (-not $NoShortcut) { Install-DesktopIcons -Root $Dir -IconPath $icon }
-if ($NoUninstallEntry) {
+$setupExeOwner = Get-SetupExeOwner -Root $Dir
+if ($setupExeOwner) {
+    # The setup program's row already describes this folder. Retire the row an older
+    # install.ps1 wrote for it, but only when that row really points here - a device
+    # that also keeps a script-installed copy elsewhere must not lose its entry.
+    $legacyLocation = ''
+    if (Test-Path -LiteralPath $UninstallKey) {
+        $legacyLocation = (Get-ItemProperty -LiteralPath $UninstallKey -Name InstallLocation -ErrorAction SilentlyContinue).InstallLocation
+    }
+    if ($legacyLocation -and ($legacyLocation.TrimEnd('\') -ieq $Dir.TrimEnd('\'))) {
+        Remove-Item -LiteralPath $UninstallKey -Recurse -Force
+        Write-Step "installed-apps row for this folder retired; $setupExeOwner owns uninstalling now"
+    }
+    else {
+        Write-Step "installed apps entry: left to $setupExeOwner"
+    }
+}
+elseif ($NoUninstallEntry) {
     # The setup program owns the Add/Remove Programs entry when it drives this
     # script; writing both would show two "Negi" rows that uninstall differently.
     Write-Step 'installed-apps entry skipped (-NoUninstallEntry; the setup program owns it)'

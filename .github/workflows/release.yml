@@ -30,8 +30,40 @@ jobs:
             *) gh api --jq .message "repos/$GITHUB_REPOSITORY/git/commits/$2" > release-notes.md ;;
           esac
           [ -s release-notes.md ] || printf 'Negi %s\n' "$GITHUB_REF_NAME" > release-notes.md
-          printf '\nThe two attached files are the one-line install and upgrade entry scripts. Full source is in the Source code archive at the bottom of this page.\n' >> release-notes.md
+          printf '\nThe two attached scripts are the one-line install and upgrade entry points (`iwr ... | iex`). Negi-Setup-<version>.exe is the same install.ps1 behind a folder-picking wizard, for a device that should not open a terminal; the Windows job attaches it. Full source is in the Source code archive at the bottom of this page.\n' >> release-notes.md
           gh release create "$GITHUB_REF_NAME" install.ps1 install.sh \
             --title "$GITHUB_REF_NAME" \
             --notes-file release-notes.md \
             || { gh release upload "$GITHUB_REF_NAME" install.ps1 install.sh --clobber; gh release edit "$GITHUB_REF_NAME" --notes-file release-notes.md; }
+
+  # The wizard is a second front end to install.ps1, so it is built from the tagged
+  # checkout and carries that checkout's own scripts. Unsigned on purpose: a valid
+  # certificate would still show a SmartScreen prompt until the download reputation
+  # accumulates, so it buys nothing a person installing their own tool needs.
+  windows-installer:
+    name: Build Negi-Setup.exe
+    needs: installer-assets
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Inno Setup
+        run: choco install innosetup --no-progress --yes
+      - name: Build the wizard
+        shell: pwsh
+        run: |
+          $version = $env:GITHUB_REF_NAME.TrimStart('v')
+          $declared = ''
+          $init = Get-Content -LiteralPath 'g3ku\__init__.py' -Raw
+          if ($init -match '__version__\s*=\s*"([^"]+)"') { $declared = $Matches[1] }
+          if ($declared -ne $version) {
+              throw "tag is $env:GITHUB_REF_NAME but g3ku/__init__.py declares '$declared': the asset name would not match the release"
+          }
+          .\packaging\build-setup.ps1 -Version $version
+          $exe = Join-Path 'dist' "Negi-Setup-$version.exe"
+          if (-not (Test-Path -LiteralPath $exe)) { throw "build-setup.ps1 reported success but $exe is missing" }
+          "SETUP_ASSET=$exe" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+      - name: Attach the installer to the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: pwsh
+        run: gh release upload $env:GITHUB_REF_NAME $env:SETUP_ASSET --clobber
