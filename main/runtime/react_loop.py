@@ -3344,6 +3344,7 @@ class ReActToolLoop:
         if str(node_kind or '').strip().lower() not in _STAGE_BUDGET_NODE_KINDS:
             return selected_tools, selection_payload
         declaration_only_names: set[str] = set()
+        declaration_renderable_names: set[str] = set()
         selector = getattr(self, '_model_visible_tool_schema_selector', None)
         if callable(selector):
             raw_selection = selector(
@@ -3359,6 +3360,14 @@ class ReActToolLoop:
                 declaration_only_names = {
                     str(item or '').strip()
                     for item in list(raw_selection.get('declared_denied_tool_names') or [])
+                    if str(item or '').strip()
+                }
+                # 能不能留在 `tools[]` 取决于"这一跳渲不渲得出参数表"，不是"本轮有没有派发
+                # 资格"：水合收回会让仍被授权的名字离开派发字典，跟着删名等于在重印边界之外
+                # 换束。`declaration_only_names` 只服务尾块文案那一份。
+                declaration_renderable_names = {
+                    str(item or '').strip()
+                    for item in list(raw_selection.get('declared_denied_tool_schemas') or {})
                     if str(item or '').strip()
                 }
                 selection_payload['declared_denied_tool_names'] = sorted(declaration_only_names)
@@ -3386,7 +3395,7 @@ class ReActToolLoop:
                 ):
                     normalized = str(item or '').strip()
                     if not normalized or normalized in seen_provider_names or (
-                        normalized not in visible_tools and normalized not in declaration_only_names
+                        normalized not in visible_tools and normalized not in declaration_renderable_names
                     ):
                         continue
                     seen_provider_names.add(normalized)
@@ -3479,7 +3488,7 @@ class ReActToolLoop:
         provider_tool_names = [
             name
             for name in provider_tool_names
-            if name in visible_tools or name in declaration_only_names
+            if name in visible_tools or name in declaration_renderable_names
         ]
         if not provider_tool_names:
             provider_tool_names = list(model_visible_callable_tool_names)

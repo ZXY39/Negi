@@ -2660,6 +2660,99 @@ def test_execution_provider_bundle_keeps_revoked_tool_declared_and_flags_it() ->
     assert selection['declared_denied_tool_schemas']['web_fetch']['function']['name'] == 'web_fetch'
 
 
+def test_execution_provider_bundle_keeps_dispatch_absent_granted_tool_declared() -> None:
+    """仍被授权、只是本轮没进派发字典的名字：参数表要补，尾块文案不写它。
+
+    水合收回把名字摘出派发字典是执行层的卫生动作；跟着把它从 `tools[]` 删掉等于在重印
+    边界之外换束——清单排在正文最前面，删名会把它身后全部存活正文重铺一次。而模型真去调
+    它拿到的是"先 load_tool_context"那一档，不是"无权限或已下架"，所以 `denied_tools`
+    那份文案必须继续只装真失去授权的名字。
+    """
+    service, visible_tools = _collapsed_bundle_selector_service()
+    service._resource_manager = SimpleNamespace(
+        tool_instances=lambda: {'content_describe': _ModelSchemaRecordingTool(
+            name='content_describe',
+            authoritative_description='describe content',
+            model_description='describe content',
+        )}
+    )
+    service.log_service.upsert_frame(
+        'task-pin',
+        {
+            'node_id': 'node-pin',
+            'provider_tool_names': ['exec', 'content_describe'],
+        },
+    )
+
+    selection = service._select_model_visible_tool_schema_payload(
+        task_id='task-pin',
+        node_id='node-pin',
+        node_kind='execution',
+        visible_tools=visible_tools,
+        runtime_context={
+            'task_id': 'task-pin',
+            'node_id': 'node-pin',
+            'session_key': 'web:shared',
+            'actor_role': 'execution',
+        },
+    )
+
+    bundle = list(selection['provider_tool_names'] or [])
+    assert selection['provider_tool_bundle_mode'] == 'pinned_frozen'
+    # 派发字典里没有 content_describe，但名字留在清单里，参数表从资源管理器补出来
+    assert 'content_describe' not in visible_tools
+    assert 'content_describe' in bundle
+    assert selection['declared_denied_tool_schemas']['content_describe']['function']['name'] == 'content_describe'
+    # 它没有被收回授权，所以不进"无权限/已下架"那份名单
+    assert 'content_describe' in list(selection['trace']['rbac_visible_tool_names'] or [])
+    assert selection['declared_denied_tool_names'] == []
+
+
+def test_react_iteration_bundle_filter_keys_on_renderable_schema_not_dispatch_dict() -> None:
+    """组装侧的存留判据取"渲不渲得出参数表"，不是"本轮有没有派发资格"。"""
+    exec_tool = _ModelSchemaRecordingTool(name='exec', authoritative_description='exec', model_description='exec')
+    declared_schemas = {
+        'content_open': {'type': 'function', 'function': {'name': 'content_open', 'parameters': {}}},
+    }
+
+    def _selection(*, schemas: dict[str, object]) -> dict[str, object]:
+        return {
+            'tool_names': ['exec'],
+            'provider_tool_names': ['exec', 'content_open'],
+            'pinned_provider_tool_names': ['exec'],
+            'provider_tool_bundle_mode': 'pinned_frozen',
+            'declared_denied_tool_names': [],
+            'declared_denied_tool_schemas': schemas,
+            'trace': {},
+        }
+
+    loop = ReActToolLoop(chat_backend=object(), log_service=_FakeLogService(), max_iterations=1)
+    loop._model_visible_tool_schema_selector = lambda **kwargs: _selection(schemas=declared_schemas)
+
+    _selected, payload = loop._model_visible_tools_for_iteration(
+        task_id='task-render',
+        node_id='node-render',
+        node_kind='execution',
+        visible_tools={'exec': exec_tool},
+        stage_gate={},
+        runtime_context={},
+    )
+    assert payload['provider_tool_names'] == ['exec', 'content_open']
+    assert payload['provider_tool_bundle_mode'] == 'pinned_frozen'
+
+    # 补不出参数表（实例没了又没有快照）时，名字照旧离开清单
+    loop._model_visible_tool_schema_selector = lambda **kwargs: _selection(schemas={})
+    _selected_empty, payload_empty = loop._model_visible_tools_for_iteration(
+        task_id='task-render',
+        node_id='node-render',
+        node_kind='execution',
+        visible_tools={'exec': exec_tool},
+        stage_gate={},
+        runtime_context={},
+    )
+    assert payload_empty['provider_tool_names'] == ['exec']
+
+
 def _collapsed_bundle_selector_service():
     visible_tools = {
         'submit_next_stage': _StageProtocolNoopTool('submit_next_stage'),

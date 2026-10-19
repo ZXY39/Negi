@@ -6842,12 +6842,20 @@ class MainRuntimeService:
         else:
             provider_tool_names = list(pinned_provider_tool_names)
             provider_tool_bundle_mode = 'pinned_seeded'
-        # 权限收回只关执行准入，不摘清单上的名字：派发字典按当轮 RBAC 取数，名字一旦
-        # 失去权限就拿不到实例、渲不出参数表，所以声明侧自带一份不依赖派发字典的
-        # schema。资源被整体禁用（实例根本不存在）时无从声明，只能让这个名字离开清单。
+        # 权限收回只关执行准入，不摘清单上的名字：派发字典按当轮资格取数，名字一旦从里面
+        # 消失就渲不出参数表，所以声明侧自带一份不依赖派发字典的 schema。这里的判据是
+        # "这一跳能不能从派发字典渲出来"，不是"还在不在授权名单里"——水合收回、候选塌缩都会
+        # 让仍被授权的名字离开派发字典，那属执行层卫生；清单排在正文最前面，删名等于把它
+        # 身后全部存活正文重铺一次。资源被整体禁用（实例与快照都没有）时无从声明，只能让它
+        # 离开清单。
         live_granted_tool_names = {
             name
             for name in [*visible_rbac_tool_names, *always_callable_tool_names]
+        }
+        dispatched_tool_names = {
+            str(name or '').strip()
+            for name in dict(visible_tools or {})
+            if str(name or '').strip()
         }
         resource_manager = getattr(self, '_resource_manager', None)
         instance_getter = getattr(resource_manager, 'tool_instances', None)
@@ -6855,7 +6863,7 @@ class MainRuntimeService:
         declared_denied_tool_schemas: dict[str, Any] = {}
         for candidate_name in provider_tool_names:
             normalized_name = str(candidate_name or '').strip()
-            if not normalized_name or normalized_name in live_granted_tool_names:
+            if not normalized_name or normalized_name in dispatched_tool_names:
                 continue
             to_schema = getattr(declared_instances.get(normalized_name), 'to_model_schema', None)
             if callable(to_schema):
@@ -6866,7 +6874,13 @@ class MainRuntimeService:
             retired_schema = lookup_tool_schema(normalized_name)
             if isinstance(retired_schema, dict):
                 declared_denied_tool_schemas[normalized_name] = retired_schema
-        declared_denied_tool_names = list(declared_denied_tool_schemas.keys())
+        # 尾块只点名"无权限或资源已下架"：仍被授权、只是本轮没有派发资格的名字不进这份
+        # 文案——模型调它拿到的是"先 load_tool_context"那一档，措辞得跟真实处置一致。
+        declared_denied_tool_names = [
+            name
+            for name in declared_denied_tool_schemas
+            if name not in live_granted_tool_names
+        ]
         provider_tool_membership_changed = provider_tool_names != list(prior_provider_tool_names)
         provider_tool_bundle_seeded = bool(provider_tool_membership_changed)
         exposure = {
