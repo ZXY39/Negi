@@ -18,6 +18,8 @@ from __future__ import annotations
 import json
 from types import SimpleNamespace
 
+from g3ku.agent.tools.base import Tool
+from g3ku.agent.tools.registry import ToolRegistry
 from g3ku.runtime.context.execution_tool_selection import build_execution_tool_selection
 from g3ku.runtime.frontdoor import _ceo_create_agent_impl as create_agent_impl
 from g3ku.runtime.frontdoor._ceo_runtime_ops import CeoFrontDoorRuntimeOps
@@ -34,6 +36,7 @@ from g3ku.runtime.tool_context_presence import (
     normalize_kept_tool_contexts,
     partition_contract_presence,
 )
+from g3ku.runtime.tool_error_guidance import availability_hint
 from g3ku.runtime.web_ceo_sessions import _normalized_completed_continuity_snapshot
 from main.models import normalize_execution_stage_metadata
 from main.monitoring.log_service import TaskLogService
@@ -45,6 +48,28 @@ from main.service.runtime_service import MainRuntimeService
 TOOL_ID = "filesystem_write"
 FINGERPRINT = "sha256:" + "a" * 64
 OTHER_ID = "content_open"
+
+
+class _FakeTool(Tool):
+    """只服务 schema/实例解析断言的极简工具：声明面与准入面分源时不碰真实 handler。"""
+
+    def __init__(self, name: str) -> None:
+        self._name = name
+
+    @property
+    def name(self) -> str:
+        return self._name
+
+    @property
+    def description(self) -> str:
+        return f"{self._name} fixture tool"
+
+    @property
+    def parameters(self) -> dict:
+        return {"type": "object", "properties": {}}
+
+    async def execute(self, **kwargs: object) -> str:
+        return ""
 
 
 def _loader_message(tool_id: str = TOOL_ID, fingerprint: str = FINGERPRINT, *, ok: bool = True) -> dict:
@@ -799,6 +824,145 @@ def test_dispatch_stays_pinned_while_executable_set_carries_hydrated_tool() -> N
     }
     assert ops._frontdoor_dispatch_tool_names(state) == ["exec"]
     assert ops._frontdoor_executable_tool_names(state) == ["exec", TOOL_ID]
+
+
+# ---------------------------------------------------------------------------
+# 准入面 = 本轮 callable：声明面（tools[]）宽于准入面，不 load 就不许调
+# ---------------------------------------------------------------------------
+
+
+def test_executable_rejects_declared_tool_that_was_never_loaded() -> None:
+    """声明里有参数表 ≠ 本轮能调：`tools[]` 是可加载面，`callable_tools` 才是准入面。
+
+    实盘形态（web:ceo-670a38bb01b3）：`windows_mcp` 从首跳就在 `tools[]` 里、从没
+    load 过，却成功调用了 4 次。这条钉住修正后的边界：声明面照旧（钉死不缩水），
+    准入面只认 callable。
+    """
+
+    ops = _ops()
+    state = {
+        "messages": [],
+        "provider_tool_names": ["exec", OTHER_ID],
+        "rbac_visible_tool_names": ["exec", OTHER_ID],
+        "tool_names": ["exec"],
+        "hydrated_tool_names": [],
+    }
+    assert ops._frontdoor_dispatch_tool_names(state) == ["exec", OTHER_ID]
+    assert ops._frontdoor_executable_tool_names(state) == ["exec"]
+
+
+def test_executable_keeps_fixed_builtins_without_hydration() -> None:
+    """常驻内置不进台账，也不受"先 load"约束。"""
+
+    ops = _ops()
+    state = {
+        "messages": [],
+        "provider_tool_names": ["exec", "load_tool_context"],
+        "rbac_visible_tool_names": ["exec", "load_tool_context"],
+        "tool_names": ["exec", "load_tool_context"],
+        "hydrated_tool_names": [],
+    }
+    assert ops._frontdoor_executable_tool_names(state) == ["exec", "load_tool_context"]
+
+
+def test_executable_drops_declared_hydrated_tool_revoked_by_rbac() -> None:
+    """RBAC 收回当跳生效：名字还挂在钉住的 `tools[]` 上（清单滞后），准入立刻关。"""
+
+    ops = _ops()
+    state = {
+        "messages": _loader_messages(),
+        "provider_tool_names": ["exec", TOOL_ID],
+        "rbac_visible_tool_names": ["exec"],
+        "tool_names": ["exec", TOOL_ID],
+        "hydrated_tool_names": [TOOL_ID],
+    }
+    assert ops._frontdoor_executable_tool_names(state) == ["exec"]
+
+
+def test_executable_keeps_mid_turn_hydrated_tool_absent_from_stale_snapshot() -> None:
+    """mid-turn 注册的工具本来就不在回合初治理快照里，按快照误拒会让 load 变成死出口。"""
+
+    ops = _ops()
+    state = {
+        "messages": _loader_messages(),
+        "provider_tool_names": ["exec"],
+        "rbac_visible_tool_names": ["exec"],
+        "tool_names": ["exec", TOOL_ID],
+        "hydrated_tool_names": [TOOL_ID],
+    }
+    assert TOOL_ID not in set(ops._frontdoor_dispatch_tool_names(state))
+    assert ops._frontdoor_executable_tool_names(state) == ["exec", TOOL_ID]
+
+
+def test_executable_falls_back_to_dispatch_without_callable_view() -> None:
+    """旁路/老快照没有 `tool_names` 键：退回声明面，避免整束塌成空。"""
+
+    ops = _ops()
+    state = {
+        "messages": [],
+        "provider_tool_names": ["exec", OTHER_ID],
+        "rbac_visible_tool_names": ["exec", OTHER_ID],
+    }
+    assert ops._frontdoor_executable_tool_names(state) == ["exec", OTHER_ID]
+
+
+def test_execution_bundle_keeps_declared_surface_wider_than_admission() -> None:
+    """`tools[]` 不随 callable 收窄：声明面单独取实例（`declared_tools`），执行束只放
+    本轮能调的名字。两者混用会让钉死语义当场失效（schema 从 32 掉到 12）。"""
+
+    registry = ToolRegistry()
+    for name in ("exec", OTHER_ID):
+        registry.register(_FakeTool(name))
+    ops = CeoFrontDoorRuntimeOps.__new__(CeoFrontDoorRuntimeOps)
+    ops._loop = SimpleNamespace(tools=registry, app_config=None)
+    ops._build_tool_runtime_context = lambda **_: {}
+    state = dict(initial_persistent_state(user_input={"content": "x", "metadata": {}}))
+    state.update(
+        {
+            "messages": [],
+            "provider_tool_names": ["exec", OTHER_ID],
+            "rbac_visible_tool_names": ["exec", OTHER_ID],
+            "tool_names": ["exec"],
+            "hydrated_tool_names": [],
+        }
+    )
+    bundle = ops._frontdoor_execution_bundle(
+        state=state,
+        runtime=SimpleNamespace(context=SimpleNamespace()),
+    )
+    assert set(bundle.declared_tools) >= {"exec", OTHER_ID, STAGE_TOOL_NAME}
+    assert OTHER_ID not in bundle.visible_tools
+    assert "exec" in bundle.visible_tools
+    schema_names = [item["function"]["name"] for item in ops._frontdoor_tool_schemas_for_state(state=state, runtime=SimpleNamespace(context=SimpleNamespace()))]
+    assert OTHER_ID in schema_names
+
+
+def test_rejection_hint_guides_load_for_declared_unloaded_tool() -> None:
+    """语义 top-k 没选中的声明名也要给 load 指引，不能落成"未知名字"。"""
+
+    hint = availability_hint(
+        requested=OTHER_ID,
+        callable_names=["exec"],
+        candidate_names=[],
+        denied_names=[],
+        declared_names=["exec", OTHER_ID],
+    )
+    assert OTHER_ID in hint
+    assert "load_tool_context" in hint
+
+
+def test_rejection_hint_prefers_denied_over_declared() -> None:
+    """无权限优先于"没加载"：这两句给的动作完全不同。"""
+
+    hint = availability_hint(
+        requested=OTHER_ID,
+        callable_names=["exec"],
+        candidate_names=[],
+        denied_names=[OTHER_ID],
+        declared_names=["exec", OTHER_ID],
+    )
+    assert "无权限" in hint
+    assert "load_tool_context" not in hint
 
 
 def _eviction_batch_state(*, keep_tools: list[str] | None = None) -> dict:
