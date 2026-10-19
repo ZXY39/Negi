@@ -6835,11 +6835,7 @@ class MainRuntimeService:
                 ]
                 prior_provider_tool_names = [
                     str(item or '').strip()
-                    for item in list(
-                        prior_frame.get('provider_tool_names')
-                        or prior_frame.get('model_visible_tool_names')
-                        or []
-                    )
+                    for item in list(prior_frame.get('provider_tool_names') or [])
                     if str(item or '').strip()
                 ]
                 prior_history_shrink_reason = str(prior_frame.get('history_shrink_reason') or '').strip()

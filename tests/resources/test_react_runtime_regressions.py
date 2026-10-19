@@ -996,6 +996,16 @@ async def test_execution_root_replay_semantic_selection_includes_split_tools_wit
         'task-root-replay-budget',
         {
             'node_id': 'node-root-replay-budget',
+            # 上一跳钉住的声明有自己的字段；`model_visible_tool_names` 是当轮 callable 视图，
+            # 拿它当清单源会让一次帧字段缺失就把 `tools[]` 收成 callable 大小（实盘 19↔20
+            # 来回摆那批的形态），所以夹具两份都带上。
+            'provider_tool_names': [
+                'stop_tool_execution',
+                'submit_next_stage',
+                'submit_final_result',
+                'spawn_child_nodes',
+                'load_tool_context_v2',
+            ],
             'model_visible_tool_names': [
                 'stop_tool_execution',
                 'submit_next_stage',
@@ -2780,6 +2790,55 @@ def test_execution_provider_bundle_last_sent_tier_needs_a_prior_artifact_ref() -
     )
 
     assert 'lane4-schema-tool' not in selection['declared_denied_tool_schemas']
+
+
+def test_ruler_identity_uses_predicted_member_not_chain_head() -> None:
+    """usage-first 的身份锚点按"这一发落到的那颗"判；链首在异构组里是错锚点。
+
+    实盘形态：组 v4 链首那颗的回执名是 deepseek-v4-flash，节点被粘在 glm-5.2-2（回执
+    sensenova-6.8-flash-lite）上，旧判据 53/53 跳判否，尺子永久停在 preview 全量重估。
+    """
+    match = ReActToolLoop._ruler_identity_matches_previous
+
+    # 有预测：按预测那颗判，与链首是谁无关
+    assert match(
+        previous_provider_model='sensenova-6.8-flash-lite',
+        predicted_provider_model='openai:sensenova-6.8-flash-lite',
+        chain_provider_model='openai:deepseek-v4-flash',
+    ) is True
+    # 预测到的是另一颗 ⇒ 真换了成员，锚点这次该停用
+    assert match(
+        previous_provider_model='sensenova-6.8-flash-lite',
+        predicted_provider_model='openai:deepseek-v4-flash',
+        chain_provider_model='openai:deepseek-v4-flash',
+    ) is False
+    # 没预测到成员、链首名又对不上：按上一跳回执继续用锚点（重绑那跳本来就是一次合法 miss）
+    assert match(
+        previous_provider_model='sensenova-6.8-flash-lite',
+        predicted_provider_model='',
+        chain_provider_model='openai:deepseek-v4-flash',
+    ) is True
+    # 首跳没有上一跳回执：不启用锚点，走 preview
+    assert match(
+        previous_provider_model='',
+        predicted_provider_model='openai:sensenova-6.8-flash-lite',
+        chain_provider_model='openai:sensenova-6.8-flash-lite',
+    ) is False
+
+
+def test_peek_hop_ruler_carries_the_predicted_member_key() -> None:
+    """预测口把成员名一起带出来，尺子的身份判据才有得用。"""
+
+    class _Controller:
+        def peek_hop_windows(self, *, node_id: str, route_plan):  # noqa: ANN001
+            return {'group_key': 'v4', 'model_key': 'glm-5.2-2', 'min_window': 390000}
+
+    loop = ReActToolLoop(chat_backend=object(), log_service=_FakeLogService(), max_iterations=1)
+    loop._node_turn_controller = _Controller()
+
+    ruler = loop._peek_hop_ruler(node_id='node-ruler', route_plan=object())
+
+    assert ruler == {'windows': [390000], 'source': 'group:v4', 'model_key': 'glm-5.2-2'}
 
 
 def test_react_iteration_bundle_filter_keys_on_renderable_schema_not_dispatch_dict() -> None:

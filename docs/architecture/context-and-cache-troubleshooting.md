@@ -368,7 +368,7 @@ CEO/frontdoor 在真正发 provider 请求前有最后一层 token preflight。�
 | `anchor_projection_shrink_tokens` | 锚点从真实 usage 里扣回的体量：只在阶段过期点那一跳非 0，非 0 而读数仍按裁撤前规模报＝扣回没生效（见「同 turn 的 append-only 规则被破坏」锚点同源不变量） |
 | `delta_estimate_tokens` | 相对上一请求的增量估算 |
 | `comparable_to_previous_request` | 为 `false` 说明触发源退回 preview-only 估算（usage-first 合同的前提不成立）；先查不可比原因，而不是先怀疑阈值 |
-| `estimate_source=usage_plus_delta` | 可 append-only 比对且上一请求 usage 真值可用：触发源＝上一请求有效输入（input + cache read）＋增量估算，preview 不覆盖它 |
+| `estimate_source=usage_plus_delta` | 可 append-only 比对且上一请求 usage 真值可用：触发源＝上一请求有效输入（input + cache read）＋增量估算，preview 不覆盖它。这条前提要求"上一跳与这一跳是同一颗模型"判得对——身份按下一段那把尺子的同一优先序取，不取链首 |
 | `estimate_source=preview_estimate` | usage 缺失或请求不可比对（首跳 / 重启 / schema churn / 压缩后首跳）时的兜底车道，不是默认 |
 | `observed_input_truth.source=preflight_estimate` | provider 未给出可用输入侧 usage，runtime 用最终 send 时估算兜底；预期回退，不自动是 cache bug |
 | `pre_compaction_*` | top-level `final_request_tokens` / `estimated_total_tokens` 已是压缩后值时，用它们解释“为什么这轮会先压缩” |
@@ -396,6 +396,8 @@ execution / acceptance 节点在真正发 provider 请求前也走最后一层 n
 | `notice_preservation` | 压缩对"中途变更要求"的保真读数（`open_count` / `hit_count` / `miss_count` / `rolled_stage_id`）|
 
 压缩尺子的合同（一条，两个载体都要读它）：尺子 = **这一发落到的那颗模型的窗口**；落点是负载均衡组时，取那个组里最小的那颗成员窗口。压缩发生在选择之前，而选择又拿压缩后的体量当筛选条件（`required_context_window_tokens`），所以"打到谁"只能预测：准入侧 `ModelLoadBalancer.peek_selection()` / `NodeTurnController.peek_hop_windows()` 用与 `select()` 同一份资格判据（组启用、成员还在计划里、粘滞成员仍合格），但不看 permit、不看限流、也不看尺寸。组内取最小的理由：请求一旦超过某颗成员的窗口，准入就不把它授予这一跳，组内可用成员随之变少，攒到没人塞得下就是把共享队列钉死的那类停摆。direct 链位与没有回合准入的车道（前门、记忆）**不取整条链最小**，而是按链首那颗自己——拿链尾的窗口去压链首的请求，等于让一条不相干的记录压低本轮预算（实盘 2026-10-13 CEO 链：链首 500,000 被链尾 390,000 压成 296,400 触发线，而不是它自己的 380,000）。链前进到塞不下的成员由那条尺寸筛处理（见 `runtime-overview.md`「Chat provider 超时与重试边界」），不由尺子提前买单。链首那颗也读不到窗口时才退回链级最小：一个 0 会把尺子打到硬门 `context_window_tokens <= 25000` 以下，等于让一条坏记录把该节点后续所有跳全部拒发。预测偏大不会误发：授予那侧仍按尺寸筛成员，塞不下时落 `node_turn_admission_fault:` 暂停，下一跳用新尺子自愈。
+
+同一次预测还给出**这一发的模型身份**，usage-first 锚点用它判"上一跳与这一跳是不是同一颗"：优先预测成员的回执上游名，预测不到用上一跳回执名，两者都没有才用链首。链首在异构组里是错的锚点——成员的回执上游名可以各不相同，节点被粘在非链首成员上时"同一颗吗"永远判否，锚点整条链静默停用、每跳退回全量 preview（实盘：一条链 53/53 跳 `comparable_to_previous_request=false`，兄弟节点只在链首那一跳 false）。用上一跳回执名的代价是：真重绑的那一跳锚点偏一跳，而那一跳本来就要按新命名空间重铺，不额外付钱。判据落在哪一支可由 `ruler_source` 分桶（`group:<key>`＝有预测，`chain_head:<key>`＝没有）。
 
 预检拒发这一跳不会发出请求，所以该节点在 `task_model_calls` 里没有对应行；它落一条以 `send_preflight_fault:` 开头、带 `预估=`/`本轮发送窗口=` 的错误行，并把节点转成可恢复错误暂停（判据与打回循环的隔离见 `main-task-runtime.md`「自愿失败、blocked 判决与判决文本」）。两种成因要先分开再处置：`estimated_total_tokens` 真的大于 `context_window_tokens` 且历史无可压缩段，是声明窗口或历史规模的问题；`token compression helper returned an empty summary` 是 helper 那一跳的回包形态故障（与"思考顶满输出"同源），此时预估与窗口的差值可能并不大。恢复该节点前，两者都不会因为 resume 而自行消失。
 

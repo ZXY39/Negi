@@ -10296,10 +10296,16 @@ async def test_resume_react_state_keeps_canonical_messages_separate_from_provide
 
 
 @pytest.mark.asyncio
-async def test_model_visible_tool_selection_refreshes_provider_tool_bundle_from_current_visible_tools(
+async def test_model_visible_tool_selection_keeps_pinned_bundle_when_current_visible_tools_grow(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ):
+    """钉住的 `tools[]` 不跟当轮可见集走，也不跟阶段压缩走。
+
+    旧口径是"按当轮可见工具刷新清单"，钉死合同落地后它反过来：成员只在 token 压缩与空闲
+    边界重取，阶段压缩任何一侧都不轮转。能力层（`tool_names`）仍照轮刷新，两层的分工由这
+    条测试钉住。
+    """
     service = MainRuntimeService(
         chat_backend=_DummyChatBackend(),
         workspace_root=tmp_path,
@@ -10384,13 +10390,15 @@ async def test_model_visible_tool_selection_refreshes_provider_tool_bundle_from_
             runtime_context={},
         )
 
+        # 能力层照轮刷新（web_fetch 当轮真能用），声明层不跟着动：清单排在正文最前面，
+        # 换束等于把身后全部存活正文重铺一次，成员只在重印边界（token 压缩 / 空闲）变。
         assert "web_fetch" in list(selection.get("tool_names") or [])
         assert selection["provider_tool_names"] == [
             "submit_next_stage",
             "content_open",
-            "web_fetch",
         ]
-        assert selection["trace"]["provider_tool_bundle_seeded"] is True
+        assert selection["provider_tool_bundle_mode"] == "pinned_frozen"
+        assert selection["trace"]["provider_tool_bundle_seeded"] is False
         assert selection["trace"]["pending_provider_tool_names"] == []
         assert selection["trace"]["provider_tool_exposure_pending"] is False
         assert selection["trace"]["provider_tool_exposure_commit_reason"] == ""
@@ -10410,11 +10418,11 @@ async def test_model_visible_tool_selection_refreshes_provider_tool_bundle_from_
         assert repeated_selection["provider_tool_names"] == [
             "submit_next_stage",
             "content_open",
-            "web_fetch",
         ]
         assert repeated_selection["trace"]["provider_tool_exposure_commit_reason"] == ""
         assert repeated_selection["trace"]["pending_provider_tool_names"] == []
 
+        # 阶段压缩不是重印点：它两侧都不轮转 `tools[]`。
         stage_compaction_selection = service._select_model_visible_tool_schema_payload(
             task_id=record.task_id,
             node_id=root.node_id,
@@ -10426,11 +10434,13 @@ async def test_model_visible_tool_selection_refreshes_provider_tool_bundle_from_
         assert stage_compaction_selection["provider_tool_names"] == [
             "submit_next_stage",
             "content_open",
-            "web_fetch",
         ]
         assert stage_compaction_selection["trace"]["provider_tool_exposure_commit_reason"] == ""
         assert stage_compaction_selection["trace"]["pending_provider_tool_names"] == []
 
+        # 选择器自己不重播种：带得上清单就逐成员沿用。压缩那一跳的重印发生在 react_loop 的
+        # 重印分支（它取 `pinned_provider_tool_names`，即"此刻重播种会得到什么"），这里能看到
+        # 那份 desired 集已经把 web_fetch 吸收好了。
         token_compaction_selection = service._select_model_visible_tool_schema_payload(
             task_id=record.task_id,
             node_id=root.node_id,
@@ -10442,8 +10452,8 @@ async def test_model_visible_tool_selection_refreshes_provider_tool_bundle_from_
         assert token_compaction_selection["provider_tool_names"] == [
             "submit_next_stage",
             "content_open",
-            "web_fetch",
         ]
+        assert "web_fetch" in list(token_compaction_selection["pinned_provider_tool_names"] or [])
         assert token_compaction_selection["trace"]["pending_provider_tool_names"] == []
         assert token_compaction_selection["trace"]["provider_tool_exposure_commit_reason"] == ""
     finally:

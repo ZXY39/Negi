@@ -6774,6 +6774,7 @@ class ReActToolLoop:
         tool_choice: str | dict[str, Any] | None,
         parallel_tool_calls: bool | None,
         allow_usage_ground_truth: bool = True,
+        predicted_provider_model: str = '',
     ) -> dict[str, Any]:
         preview_error = ""
         preview_payload: dict[str, Any] | None = None
@@ -6819,8 +6820,11 @@ class ReActToolLoop:
             previous_provider_model = str(previous_truth.get('provider_model') or '').strip()
             if (
                 previous_effective_input_tokens > 0
-                and previous_provider_model
-                and self._provider_models_match(previous_provider_model, str(provider_model or '').strip())
+                and self._ruler_identity_matches_previous(
+                    previous_provider_model=previous_provider_model,
+                    predicted_provider_model=str(predicted_provider_model or '').strip(),
+                    chain_provider_model=str(provider_model or '').strip(),
+                )
             ):
                 previous_record = self._resolve_previous_node_actual_request_record(
                     task_id=task_id,
@@ -7042,13 +7046,53 @@ class ReActToolLoop:
         current_model = current_raw.split(':', 1)[1].strip() if ':' in current_raw else current_raw
         return bool(previous_model and current_model and previous_model == current_model)
 
+    @staticmethod
+    def _ruler_identity_matches_previous(
+        *,
+        previous_provider_model: str,
+        predicted_provider_model: str,
+        chain_provider_model: str,
+    ) -> bool:
+        """usage-first 的身份判据：这一发**大概率落到哪颗**，不是链上排第一那颗。
+
+        链首在异构负载均衡组里是错的锚点：成员的回执上游名可以各不相同，节点被粘在非链首
+        成员上时"上一跳与这一跳同一颗模型"永远判否，usage-first 整条链静默停用、每跳退回
+        全量 preview（实盘：一条链 53/53 跳 False）。预测得到成员就按那颗判；预测不到就没有
+        "换了颗"的证据，按上一跳那颗继续用锚点——真重绑那一跳本来就是一次合法 miss，代价只有
+        一跳的锚点偏差，而窗口那侧仍按尺寸筛成员。判据落在哪一支可由 `ruler_source` 读数分桶
+        （`group:<key>`＝有预测，`chain_head:<key>`＝没有）。
+        """
+        previous_raw = str(previous_provider_model or '').strip()
+        if not previous_raw:
+            return False
+        predicted_raw = str(predicted_provider_model or '').strip()
+        if predicted_raw:
+            return ReActToolLoop._provider_models_match(previous_raw, predicted_raw)
+        if ReActToolLoop._provider_models_match(previous_raw, str(chain_provider_model or '').strip()):
+            return True
+        return bool(previous_raw)
+
+    def _predicted_ruler_provider_model(self, *, hop_ruler: dict[str, Any] | None, config: Any) -> str:
+        """把预测成员解析成上游模型名（与 usage 回执同口径）；预测不到返回空串。"""
+        predicted_key = str((hop_ruler or {}).get('model_key') or '').strip()
+        if not predicted_key or config is None:
+            return ''
+        try:
+            resolved = runtime_chat_backend.resolve_send_model_context_window_info(
+                config=config,
+                model_refs=[predicted_key],
+            )
+        except Exception:
+            return ''
+        return str(getattr(resolved, 'provider_model', '') or '').strip()
+
     def _peek_hop_ruler(self, *, node_id: str, route_plan: Any) -> dict[str, Any] | None:
         """问准入"这一跳大概率落到哪个组"，把那个组的最小成员窗口当压缩尺子。
 
-        返回 `{'windows': [int], 'source': 'group:<key>'}`；没有准入、这一跳落在 direct 链位、
-        或问不出结果时返回 None——那时尺子由 `chat_backend` 按**这一发落到的那颗**（链首）
-        自己的窗口定，不再取整条链最小。这里不新增任何拒绝面：预测失败的代价是尺子口径，
-        不是节点停住。
+        返回 `{'windows': [int], 'source': 'group:<key>', 'model_key': str}`；没有准入、这一跳
+        落在 direct 链位、或问不出结果时返回 None——那时尺子由 `chat_backend` 按**这一发落到的
+        那颗**（链首）自己的窗口定，不再取整条链最小。这里不新增任何拒绝面：预测失败的代价是
+        尺子口径，不是节点停住。
         """
         controller = getattr(self, '_node_turn_controller', None)
         peek = getattr(controller, 'peek_hop_windows', None)
@@ -7063,7 +7107,8 @@ class ReActToolLoop:
         window = int(predicted.get('min_window') or 0)
         if window <= 0:
             return None
-        return {'windows': [window], 'source': f"group:{str(predicted.get('group_key') or '').strip()}"}
+        return {'windows': [window], 'source': f"group:{str(predicted.get('group_key') or '').strip()}",
+                'model_key': str(predicted.get('model_key') or '').strip()}
 
     async def _apply_node_send_token_preflight(
         self,
@@ -7121,6 +7166,10 @@ class ReActToolLoop:
             config=config,
             model_refs=normalized_model_refs,
             provider_model=str(getattr(info, "provider_model", "") or "").strip(),
+            predicted_provider_model=self._predicted_ruler_provider_model(
+                hop_ruler=hop_ruler,
+                config=config,
+            ),
             request_messages=request_messages,
             tool_schemas=tool_schemas,
             prompt_cache_key=str(prompt_cache_key or "").strip(),
