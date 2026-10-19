@@ -20,6 +20,7 @@ from g3ku.core.results import RunResult
 from g3ku.core.state import AgentState, StructuredError
 from g3ku.prompt_trace import render_output_trace
 from g3ku.providers.fallback import MODEL_RETRY_LIVE_STATES
+from g3ku.runtime import skill_roster_notice as _skill_roster_notice
 from g3ku.runtime.cancellation import ToolCancellationToken
 from g3ku.runtime.frontdoor.canonical_context import (
     TRANSCRIPT_CC_UPSERT_FIELD,
@@ -628,6 +629,12 @@ class RuntimeAgentSession:
         ).strip()
         self._frontdoor_visible_tool_ids = self._normalized_name_list(payload.get("visible_tool_ids"))
         self._frontdoor_visible_skill_ids = self._normalized_name_list(payload.get("visible_skill_ids"))
+        # 一次性提示的台账：基线里已经带着投过的那条提示，台账跟着基线走才不会
+        # 重启后重复投、也不会截断后把名字永久忘掉。
+        _skill_roster_notice.set_notice_context(
+            f"session:{str(getattr(getattr(self, 'state', None), 'session_key', '') or '').strip()}",
+            payload.get("skill_roster_notice_context"),
+        )
         self._frontdoor_provider_tool_schema_names = self._normalized_name_list(
             payload.get("provider_tool_schema_names")
         )
@@ -715,6 +722,15 @@ class RuntimeAgentSession:
             # 多付的是 `system` + `tools[]` 那一截字节，正文本来就已随基线清空重付。
             self._frontdoor_hydrated_tool_names = self._normalized_name_list(
                 (payload or {}).get("hydrated_tool_names")
+            )
+            # 截断到会话开头：基线里没有那条提示，台账也必须回到"没投过"，否则那个名字
+            # 从此再不会出现（只清历史不清台账 = 永久遗忘）。
+            _skill_roster_notice.set_notice_context(
+                f"session:{str(getattr(getattr(self, 'state', None), 'session_key', '') or '').strip()}",
+                _skill_roster_notice.drop_records_after(
+                    (payload or {}).get("skill_roster_notice_context"),
+                    cutoff_iso=str((payload or {}).get("updated_at") or "").strip(),
+                ),
             )
             self._frontdoor_visible_tool_ids = self._normalized_name_list(
                 (payload or {}).get("visible_tool_ids")
@@ -938,6 +954,10 @@ class RuntimeAgentSession:
                 ),
                 "visible_skill_ids": list(
                     self._normalized_name_list(getattr(self, "_frontdoor_visible_skill_ids", []))
+                ),
+                # 新增可读 skill 的一次性提示台账：重启/续跑后靠它不重复投。
+                "skill_roster_notice_context": _skill_roster_notice.notice_context_for(
+                    f"session:{str(session_key or '').strip()}"
                 ),
                 "provider_tool_schema_names": list(
                     self._normalized_name_list(

@@ -43,6 +43,7 @@ from g3ku.providers.responses_protocol_helpers import (
     _prompt_cache_key as _preview_prompt_cache_key,
 )
 from g3ku.resources.retired_schemas import lookup_tool_schema
+from g3ku.runtime import skill_roster_notice as _skill_roster_notice
 from g3ku.runtime.chunk_compression_plan import (
     CHUNK_MAX_CHUNKS,
     COMPRESSION_MAX_PASS_ROUNDS,
@@ -1857,7 +1858,27 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
         tool_schemas: list[Any] | None = None,
     ) -> dict[str, Any]:
         state_for_request = dict(state or {})
-        request_messages = list(state_for_request.get("messages") or [])
+        # 新增可读 skill 的一次性提示：检测与投递只在这一处（每跳的发送准备）发生，
+        # 并且和落账同一步——追加进本轮历史，请求体与 durable 基线都从它派生。
+        # 其它装配点（state 刷新、回合起点装配）一律不读台账，否则先跑的把差集领走、
+        # 落请求体那处永远拿空（旧机制就是这么失效的）。
+        request_messages = self._apply_frontdoor_skill_roster_notice(
+            list(state_for_request.get("messages") or []),
+            session_key=str(state_for_request.get("session_key") or "").strip(),
+        )
+        delivered_message = (
+            request_messages[-1]
+            if len(request_messages) > len(list(state_for_request.get("messages") or []))
+            else None
+        )
+        state_for_request["messages"] = list(request_messages)
+        if delivered_message is not None and state_for_request.get("frontdoor_live_request_messages"):
+            # 这条车道另有带多模态块的活历史：只能追加，不能拿纯文本历史覆盖它，
+            # 否则上传图片的那一段结构就在这次赋值里被抹掉。
+            state_for_request["frontdoor_live_request_messages"] = [
+                *list(state_for_request.get("frontdoor_live_request_messages") or []),
+                dict(delivered_message),
+            ]
         durable_request_messages = [dict(item) for item in list(request_messages or []) if isinstance(item, dict)]
         prompt_cache_key = str(state_for_request.get("prompt_cache_key") or "")
         prompt_cache_diagnostics = dict(state_for_request.get("prompt_cache_diagnostics") or {})
@@ -3978,6 +3999,94 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
             )
         except Exception:
             return []
+
+    def _frontdoor_skill_roster_notice_scope(self, session_key: Any) -> str:
+        """前门台账作用域：按会话一条，与节点道 `node:<task>:<node>` 同构。"""
+        normalized = str(session_key or "").strip()
+        return f"session:{normalized}" if normalized else ""
+
+    def _readable_frontdoor_skill_ids(self, session_key: Any) -> list[str]:
+        readable: list[str] = []
+        for record in list(self._frontdoor_live_visible_skills(session_key) or []):
+            normalized = _skill_roster.normalize_skill_roster_item(record)
+            if normalized is None or normalized["skill_id"] in readable:
+                continue
+            readable.append(normalized["skill_id"])
+        return readable
+
+    def _apply_frontdoor_skill_roster_notice(
+        self,
+        messages: list[dict[str, Any]] | None,
+        *,
+        session_key: Any,
+    ) -> list[dict[str, Any]]:
+        """检测 + 一次性投递，只在这一处发生（真正落请求体的装配路径上）。
+
+        旧机制一条回合内四个装配点共用一次消耗式读，先跑的把差集领走、落请求体那处
+        永远拿空，提示因此从未上线。这里同时把"读者唯一"钉成结构：其它装配点不再读台账。
+        """
+        base_messages = list(messages or [])
+        scope = self._frontdoor_skill_roster_notice_scope(session_key)
+        if not scope:
+            return base_messages
+        message = _skill_roster_notice.deliver_for_scope(
+            scope,
+            self._frontdoor_live_visible_skills(session_key),
+            now=now_iso(),
+            # 头部钉住块那份名单算"已宣布"：否则第一跳会把整份名单重播一遍。
+            covered_skill_ids=pinned_skill_ids_for(None, session_key=scope),
+        )
+        if message is None:
+            return base_messages
+        return [*base_messages, message]
+
+    def _carry_frontdoor_skill_roster_notice_on_compaction(
+        self,
+        messages: list[dict[str, Any]] | None,
+        *,
+        session_key: Any,
+        compression_stage_id: str,
+    ) -> list[dict[str, Any]]:
+        """压缩跳：把仍可读的名字带到压缩产物之后，不可读的在那一跳退场。"""
+        base_messages = list(messages or [])
+        scope = self._frontdoor_skill_roster_notice_scope(session_key)
+        stage_id = str(compression_stage_id or "").strip()
+        if not scope or not base_messages or not stage_id:
+            return base_messages
+        message = _skill_roster_notice.carry_for_scope(
+            scope,
+            compression_stage_id=stage_id,
+            readable_skill_ids=self._readable_frontdoor_skill_ids(session_key),
+            now=now_iso(),
+        )
+        if message is None:
+            return base_messages
+        return [*base_messages, message]
+
+    def _carry_manual_compression_notice_into_baseline(self, *, session: Any, session_key: str) -> None:
+        """手动压缩跑在回合外，够不到发送路径那一次搬运；在消费待重印标记的这一跳补。
+
+        补的是 durable 基线本身——下一跳的请求体由它派生，提示因此重新进上下文。
+        """
+        if not session_key:
+            return
+        baseline = [
+            dict(item)
+            for item in list(getattr(session, "_frontdoor_request_body_messages", []) or [])
+            if isinstance(item, dict)
+        ]
+        if not baseline:
+            return
+        carried = self._carry_frontdoor_skill_roster_notice_on_compaction(
+            baseline,
+            session_key=session_key,
+            compression_stage_id=(
+                "manual:" + str(getattr(session, "_active_turn_id", "") or now_iso()).strip()
+            ),
+        )
+        if len(carried) == len(baseline):
+            return
+        setattr(session, "_frontdoor_request_body_messages", list(carried))
 
     def _frontdoor_bundle_recommit_boundary(self, *, session: Any, state: CeoGraphState) -> bool:
         """`tools[]` 与 skill 头部名单共用的唯一重新提交点：压缩（内联 preflight 的
@@ -8072,6 +8181,9 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
             desired_provider_tool_names = self._frontdoor_provider_visible_tool_names(
                 provider_tool_seed_names
             )
+            prepare_session_key = str(getattr(getattr(session, "state", None), "session_key", "") or "").strip()
+            # 待重印标记在下面这次边界判定里就被消费掉了，所以先在这儿抄一份。
+            manual_recommit_pending = bool(getattr(session, PENDING_PROVIDER_BUNDLE_RECOMMIT_ATTR, False))
             provider_tool_exposure = self._refresh_frontdoor_provider_tool_bundle(
                 prior_provider_tool_names=self._normalized_tool_name_state_list(
                     state.get("provider_tool_names")
@@ -8085,6 +8197,13 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
                 ).strip(),
                 recommit_boundary=self._frontdoor_bundle_recommit_boundary(session=session, state=state),
             )
+            if manual_recommit_pending:
+                # 手动压缩跑在回合外，产出整段正文重写——一次性提示随之离开上下文。它挂的
+                # 待重印标记在本跳被消费，同一跳把仍可读的名字补回 durable 基线尾部。
+                self._carry_manual_compression_notice_into_baseline(
+                    session=session,
+                    session_key=prepare_session_key,
+                )
             runtime_visible_tool_names = list(provider_tool_exposure.get("provider_tool_names") or [])
             tool_schemas = self._selected_tool_schemas(runtime_visible_tool_names)
             stable_messages = self._prompt_message_records(getattr(assembly, "stable_messages", None)) or list(messages)
@@ -8109,13 +8228,9 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
         # 头部先落，尾块才允许省略这三段：判据取头部原文，不取"本轮算出来了"。
         if not pinned_contract_is_carried_by_head(stable_messages, pinned_contract_text):
             pinned_contract_text, pinned_skill_ids = "", []
-        # 按轮注入：live 可见 − 头部名单 − 已注入台账。台账只增不减，块每轮从台账
-        # 整体重渲染，阶段裁撤丢不掉；被重印后的头部覆盖的条目自动摘除。
-        new_readable_skill_items = _skill_roster.new_readable_skill_items(
-            scope_key=f"session:{request_session_key}",
-            live_visible_skills=self._frontdoor_live_visible_skills(request_session_key),
-            covered_skill_ids=pinned_skill_ids,
-        )
+        # 新增可读 skill 的提示不在这里检测：检测与投递只发生在真正落请求体的那一处
+        # （`_frontdoor_prompt_contract`）。旧机制一条回合内四个装配点共用一次消耗式读，
+        # 先跑的把差集领走，落请求体那处永远拿空——提示因此从未上线。
         dynamic_appendix_messages = upsert_frontdoor_tool_contract_message(
             dynamic_appendix_messages,
             build_frontdoor_tool_contract(
@@ -8128,7 +8243,6 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
                 frontdoor_stage_state=dict(current_frontdoor_stage_state or {}),
                 visible_skill_ids=list(selected_skill_ids),
                 candidate_skill_ids=list(selected_skill_ids),
-                new_readable_skill_items=list(new_readable_skill_items),
                 repair_required_tool_items=list(repair_required_tool_items),
                 repair_required_skill_items=list(repair_required_skill_items),
                 rbac_visible_tool_names=list(rbac_visible_tool_names),
@@ -8592,6 +8706,18 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
                     tool_schemas=actual_tool_schemas,
                 )
                 request_messages = list(preflight.request_messages)
+                # 压缩把整份正文重写了，一次性提示会随之离开上下文。那一跳可复用前缀反正
+                # 已经断在这里，把仍可读的名字带到压缩产物之后不额外付缓存；读不到的名字
+                # 在这同一跳退场（不写"已下架"行，裁决归 load_skill_context 三态回执）。
+                request_messages = self._carry_frontdoor_skill_roster_notice_on_compaction(
+                    request_messages,
+                    session_key=str(state_for_request.get("session_key") or "").strip(),
+                    compression_stage_id=(
+                        f"turn:{str(getattr(runtime_session, '_active_turn_id', '') or '').strip()}:comp"
+                        if runtime_session is not None
+                        else ""
+                    ),
+                )
                 durable_request_messages = strip_multimodal_blocks_from_message_records(request_messages)
                 if runtime_session is not None and dict(preflight.diagnostics or {}).get("applied"):
                     # 按 turn 记账，回合收尾时据此落「会话已压缩」区分线。用 turn_id 而不是
@@ -9159,6 +9285,7 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
                 # 回显裁剪开关见 stage_prompt_compaction.ECHO_STRIP_ENABLED；关闭时
                 # 尾部契约/阶段块片段随回复原样放行，避免合法内联引用被齐根截断。
                 text = strip_frontdoor_tool_contract_echo(text)
+                text = _skill_roster_notice.strip_skill_roster_notice_echo(text)
                 text = strip_stage_block_echo(text)
             if not text:
                 return {

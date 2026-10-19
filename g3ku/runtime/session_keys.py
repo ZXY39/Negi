@@ -5,6 +5,7 @@ import re
 from dataclasses import dataclass
 
 from g3ku.runtime.frontdoor.tool_contract import strip_frontdoor_tool_contract_echo
+from g3ku.runtime.skill_roster_notice import strip_skill_roster_notice_echo
 from g3ku.runtime.stage_prompt_compaction import ECHO_STRIP_ENABLED, strip_stage_block_echo
 
 """Channel-agnostic session key rules.
@@ -229,6 +230,7 @@ def sanitize_channel_outbound_text(text: str) -> str:
         # 回显裁剪开关见 stage_prompt_compaction.ECHO_STRIP_ENABLED；关闭时
         # 契约/阶段块回显原样放行（[SESSION EVENTS] 截断不受开关影响）。
         cleaned = strip_frontdoor_tool_contract_echo(cleaned)
+        cleaned = strip_skill_roster_notice_echo(cleaned)
         cleaned = strip_stage_block_echo(cleaned)
     marker_index = cleaned.find(SESSION_EVENTS_MARKER)
     if marker_index >= 0:

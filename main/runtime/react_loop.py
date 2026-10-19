@@ -31,15 +31,13 @@ from g3ku.providers.fallback import (
     PUBLIC_PROVIDER_FAILURE_MESSAGE,
     ModelProviderExhaustedError,
 )
+from g3ku.runtime import skill_roster_notice as _skill_roster_notice
 from g3ku.runtime.chunk_compression_plan import (
     CHUNK_MAX_CHUNKS,
     COMPRESSION_MAX_PASS_ROUNDS,
     COMPRESSION_MODE_CHUNKED,
     CompressionPass,
     plan_compression_pass,
-)
-from g3ku.runtime.frontdoor.skill_roster import (
-    new_readable_skill_items as _new_readable_skill_items,
 )
 from g3ku.runtime.frontdoor.tool_contract import (
     bump_skill_roster_epoch as _bump_skill_roster_epoch,
@@ -51,7 +49,7 @@ from g3ku.runtime.frontdoor.tool_contract import (
     merge_pinned_contract_into_system_text as _merge_pinned_contract_into_system_text,
 )
 from g3ku.runtime.frontdoor.tool_contract import (
-    pinned_contract_state as _pinned_contract_state,
+    pinned_skill_ids_for as _pinned_skill_ids_for,
 )
 from g3ku.runtime.frontdoor.tool_contract import (
     skill_roster_epoch_for as _skill_roster_epoch_for,
@@ -510,6 +508,12 @@ class ReActToolLoop:
                 scope_key=skill_roster_scope,
                 skill_items=skill_roster_items,
             )
+            # 新增可读 skill 的一次性提示：节点每跳只在这里检测与投递（与会话道同口径）。
+            model_messages = self._apply_node_skill_roster_notice(
+                model_messages,
+                node=node,
+                skill_roster_items=skill_roster_items,
+            )
             current_tools = self._revoke_contract_absent_hydration_for_hop(
                 tools=current_tools,
                 task=task,
@@ -727,6 +731,13 @@ class ReActToolLoop:
                 token_preflight_diagnostics,
             )
             if adopted_compacted_baseline is not None:
+                # 压缩把整份正文重写了，一次性提示可能随之离开上下文；那一跳可复用前缀
+                # 反正已经断在这里，把仍可读的名字带到压缩产物之后不额外付缓存。
+                adopted_compacted_baseline = self._carry_node_skill_roster_notice_on_compaction(
+                    adopted_compacted_baseline,
+                    node=node,
+                    skill_roster_items=skill_roster_items,
+                )
                 previous_actual_request_messages = adopted_compacted_baseline
                 request_seed_source = 'same_turn_token_compacted'
             if stage_compaction_hop and not str(history_shrink_reason or '').strip():
@@ -3853,30 +3864,112 @@ class ReActToolLoop:
                 list(tool_schema_selection.get('declared_denied_tool_names') or [])
             ),
             exec_runtime_policy=exec_runtime_policy,
-            new_readable_skill_items=_new_readable_skill_items(
-                scope_key=(
-                    f"node:{getattr(node, 'task_id', '') or ''}:{getattr(node, 'node_id', '') or ''}"
-                ),
-                # 同一跳的头部名单与本块共用一份取样：supplier 每跳只问一次，
-                # 两处看到的必须是同一份 live 集，否则"头部已覆盖"与"块里还列着"
-                # 会在同一跳里自相矛盾。
-                live_visible_skills=(
-                    list(skill_roster_items)
-                    if isinstance(skill_roster_items, list)
-                    else self._node_skill_roster_items(
-                        runtime_context=runtime_context,
-                        task_id=str(getattr(node, 'task_id', '') or ''),
-                        node_id=str(getattr(node, 'node_id', '') or ''),
-                    )
-                ),
-                covered_skill_ids=_pinned_contract_state(
-                    None,
-                    session_key=(
-                        f"node:{getattr(node, 'task_id', '') or ''}:{getattr(node, 'node_id', '') or ''}"
-                    ),
-                )[1],
-            ),
         )
+
+    def _node_skill_roster_notice_scope(self, node) -> str:
+        task_id = str(getattr(node, 'task_id', '') or '').strip()
+        node_id = str(getattr(node, 'node_id', '') or '').strip()
+        if not task_id or not node_id:
+            return ''
+        return f'node:{task_id}:{node_id}'
+
+    def _hydrate_node_skill_roster_notice(self, *, node) -> None:
+        """进程表空而节点 metadata 有 ⇒ 补一份。重启/续跑后靠这个不重复投。"""
+        scope = self._node_skill_roster_notice_scope(node)
+        if not scope or _skill_roster_notice.notice_context_for(scope)['records']:
+            return
+        metadata = getattr(node, 'metadata', None)
+        stored = metadata.get(_skill_roster_notice.SKILL_ROSTER_NOTICE_CONTEXT_KEY) if isinstance(metadata, dict) else None
+        if isinstance(stored, dict) and list(stored.get('records') or []):
+            _skill_roster_notice.set_notice_context(scope, stored)
+
+    def _persist_node_skill_roster_notice(self, *, node) -> None:
+        scope = self._node_skill_roster_notice_scope(node)
+        if not scope:
+            return
+        context = _skill_roster_notice.notice_context_for(scope)
+        if not context['records']:
+            return
+        mutator = getattr(self._log_service, 'update_node_metadata', None)
+        if not callable(mutator):
+            return
+
+        def _mutate(metadata: dict[str, Any]) -> dict[str, Any]:
+            next_metadata = dict(metadata or {})
+            next_metadata[_skill_roster_notice.SKILL_ROSTER_NOTICE_CONTEXT_KEY] = context
+            return next_metadata
+
+        try:
+            mutator(str(getattr(node, 'node_id', '') or ''), _mutate)
+        except Exception:
+            # 落盘失败只影响"重启后是否重复投一条同样内容的提示"，不影响本跳能发出去。
+            pass
+
+    def _apply_node_skill_roster_notice(
+        self,
+        messages: list[dict[str, Any]],
+        *,
+        node,
+        skill_roster_items: list[dict[str, str]] | None = None,
+    ) -> list[dict[str, Any]]:
+        """新增可读 skill 的一次性提示：落在本轮历史末尾（运行时块之前），投过就不再投。
+
+        检测与投递只在这一处发生（与会话道同口径）。旧机制的失效原因就是一条回合内
+        多个装配点共用一次消耗式读，先跑的把差集领走、落请求体那处永远拿空。
+        """
+        base_messages = list(messages or [])
+        scope = self._node_skill_roster_notice_scope(node)
+        if not scope:
+            return base_messages
+        self._hydrate_node_skill_roster_notice(node=node)
+        message = _skill_roster_notice.deliver_for_scope(
+            scope,
+            list(skill_roster_items or []),
+            now=now_iso(),
+            # 头部钉住块那份名单算"已宣布"：否则节点第一跳会重播整份名单。
+            covered_skill_ids=_pinned_skill_ids_for(None, session_key=scope),
+        )
+        if message is None:
+            return base_messages
+        self._persist_node_skill_roster_notice(node=node)
+        return [*base_messages, message]
+
+    def _carry_node_skill_roster_notice_on_compaction(
+        self,
+        baseline: list[dict[str, Any]],
+        *,
+        node,
+        skill_roster_items: list[dict[str, str]] | None,
+    ) -> list[dict[str, Any]]:
+        """压缩跳：把仍可读的新增 skill 名单带到压缩产物之后，不可读的在那一跳退场。
+
+        压缩段号取压缩产物自身的形状签名——同一次压缩被反复沿用不会搬第二份，
+        而真的又压了一次（正文再次整段重写）会再搬一遍，那正是需要的行为。
+        """
+        base_messages = list(baseline or [])
+        scope = self._node_skill_roster_notice_scope(node)
+        if not scope or not base_messages:
+            return base_messages
+        signature = '|'.join(
+            f"{str((item or {}).get('role') or '')}:{len(str((item or {}).get('content') or ''))}"
+            for item in base_messages
+        )
+        stage_id = f"comp:{hashlib.sha1(signature.encode('utf-8')).hexdigest()[:12]}"
+        self._hydrate_node_skill_roster_notice(node=node)
+        message = _skill_roster_notice.carry_for_scope(
+            scope,
+            compression_stage_id=stage_id,
+            readable_skill_ids=[
+                str((item or {}).get('skill_id') or '').strip()
+                for item in list(skill_roster_items or [])
+                if isinstance(item, dict) and str((item or {}).get('skill_id') or '').strip()
+            ],
+            now=now_iso(),
+        )
+        if message is None:
+            return base_messages
+        self._persist_node_skill_roster_notice(node=node)
+        return [*base_messages, message]
 
     def _refresh_node_dynamic_contract_message(
         self,

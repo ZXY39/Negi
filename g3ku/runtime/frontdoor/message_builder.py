@@ -21,7 +21,6 @@ from g3ku.runtime.context.semantic_scope import semantic_catalog_rankings
 from g3ku.runtime.context.summarizer import score_query
 from g3ku.runtime.context.types import ContextAssemblyResult, RetrievedContextBundle
 from g3ku.runtime.core_tools import resolve_core_tool_targets
-from g3ku.runtime.frontdoor import skill_roster as _skill_roster
 from g3ku.runtime.frontdoor.canonical_context import (
     combine_canonical_context,
     materialize_transcript_view,
@@ -1984,11 +1983,6 @@ class CeoMessageBuilder:
                 for item in list(context_sources['selected_skills'] or [])
                 if self._skill_id(item)
             ],
-            new_readable_skill_items=_skill_roster.new_readable_skill_items(
-                scope_key=f"session:{self._frontdoor_session_key(persisted_session)}",
-                live_visible_skills=list(context_sources.get('selected_skills') or []),
-                covered_skill_ids=pinned_skill_ids,
-            ),
             candidate_skill_items=list(context_sources.get('candidate_skill_items') or []),
             repair_required_tool_items=list(context_sources.get('repair_required_tool_items') or []),
             repair_required_skill_items=list(context_sources.get('repair_required_skill_items') or []),
@@ -2333,11 +2327,6 @@ class CeoMessageBuilder:
                 for item in list(context_sources['selected_skills'] or [])
                 if self._skill_id(item)
             ],
-            new_readable_skill_items=_skill_roster.new_readable_skill_items(
-                scope_key=f"session:{self._frontdoor_session_key(persisted_session)}",
-                live_visible_skills=list(context_sources.get('selected_skills') or []),
-                covered_skill_ids=pinned_skill_ids,
-            ),
             candidate_skill_items=list(context_sources.get('candidate_skill_items') or []),
             repair_required_tool_items=list(context_sources.get('repair_required_tool_items') or []),
             repair_required_skill_items=list(context_sources.get('repair_required_skill_items') or []),

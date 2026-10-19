@@ -28,7 +28,7 @@ RUNTIME_APPENDIX_HEADINGS = (FRONTDOOR_DYNAMIC_TOOL_CONTRACT_HEADING, FRONTDOOR_
 # 根本碰不到它，也就不需要第三套消息分类。
 # 刷新键 = skill roster epoch + 策略签名 + 临时目录。epoch 只在重印边界（token 压缩、
 # 手动压缩、空闲窗口第一跳）递增——可见集在两次重印之间怎么变，头部都逐字节不动：
-# 新变为可读的 skill 由尾块的 `new_readable_skills` 注入块按轮点名（只增不减），
+# 新变为可读的 skill 由一次性持久提示落进历史（`g3ku/runtime/skill_roster_notice.py`），
 # 被删/被收回的名字留在头部名单里直到下一次重印，模型去 load 时由
 # `load_skill_context` 的三态回执告知原因。
 FRONTDOOR_PINNED_CONTRACT_HEADING = '## Runtime Contract (pinned)'
@@ -133,7 +133,7 @@ def pinned_contract_revision_key(
     空闲边界递增）、执行策略签名、会话临时目录。
 
     可见集本身**不进键**：两次重印之间可见集怎么变，头部都逐字节不动——新增的可读
-    skill 由尾块 `new_readable_skills` 注入块按轮点名，被删/被收回的名字留在头部直到
+    skill 由一次性持久提示落进历史（`g3ku/runtime/skill_roster_notice.py`），被删/被收回的名字留在头部直到
     下一次重印（`load_skill_context` 三态回执告知原因）。把可见集算进键会让一次资源
     变化把整段头部（连同它后面的全部前缀）打掉。
     """
@@ -190,7 +190,7 @@ def render_pinned_contract_text(
 
     名单是**钉住时点的全量可见 skill**（语义筛选已删，"选哪个"由模型按描述判断），
     按 id 排序：钉住的那份是"能加载哪些"的集合声明，不带每回合的语义排名。两次重印
-    之间名单会过期——新增的靠尾块 `new_readable_skills` 注入块点名，消失的靠
+    之间名单会过期——新增的靠一次性持久提示点名，消失的靠
     `load_skill_context` 三态回执告知原因。
 
     `include_extras=False` 只渲名单本体：节点道复用这份渲染函数钉自己的头部名单，
@@ -664,14 +664,13 @@ def _render_frontdoor_contract_summary(payload: dict[str, Any]) -> str:
     声明整段变没——省缓存省掉一条声明，比不省严重得多。缺的那段照旧在本块出现，宁可重复
     不可缺失。
 
-    skill 名单不再进尾块：头部钉住块带全量名单（id|名称|描述），两次重印之间新增的可读
-    skill 由 `new_readable_skills` 注入块按轮点名——它从会话台账重渲染，只增不减，
-    阶段裁撤也丢不掉。
+    skill 名单不再进尾块：头部钉住块带全量名单（id|名称|描述），重印点之间新变为可读
+    的 skill 由一次性持久提示落进历史（`g3ku/runtime/skill_roster_notice.py`）——
+    投一次就不再每跳重印，压缩那一跳按台账把它带过压缩产物。
     """
     candidate_tools = _normalized_candidate_tool_items(payload.get('candidate_tools'))
     repair_required_tools = _normalized_repair_required_tool_items(payload.get('repair_required_tools'))
     attachment_reopen_targets = _normalized_attachment_reopen_targets(payload.get('attachment_reopen_targets'))
-    new_readable_skill_items = _normalize_skill_roster_items(payload.get('new_readable_skill_items'))
     pinned_text = str(payload.get('pinned_contract_text') or '').strip()
     pinned_exec = 'exec_runtime_policy' in pinned_text
     pinned_temp = 'session_temp_dir:' in pinned_text
@@ -681,15 +680,6 @@ def _render_frontdoor_contract_summary(payload: dict[str, Any]) -> str:
         f'kind: {FRONTDOOR_DYNAMIC_TOOL_CONTRACT_KIND}',
         _contract_revision_line(payload),
     ]
-    if new_readable_skill_items:
-        lines.append(
-            'new_readable_skills (重印点之后新变为可读，可直接 `load_skill_context`; '
-            '`id | name | description`):'
-        )
-        lines.extend(
-            f'- `{item["skill_id"]}` | {item["display_name"]} | {item["description"]}'
-            for item in new_readable_skill_items
-        )
     lines.extend(
         [
             *_render_attachment_reopen_target_section(attachment_reopen_targets),
@@ -796,7 +786,6 @@ class FrontdoorToolContract:
     contract_revision: str
     candidate_tool_items: list[dict[str, str]] | None = None
     candidate_skill_items: list[dict[str, str]] | None = None
-    new_readable_skill_items: list[dict[str, str]] | None = None
     repair_required_tool_items: list[dict[str, str]] | None = None
     repair_required_skill_items: list[dict[str, str]] | None = None
     exec_runtime_policy: dict[str, Any] | None = None
@@ -837,9 +826,6 @@ class FrontdoorToolContract:
         repair_required_skills = _normalized_repair_required_skill_items(self.repair_required_skill_items)
         if repair_required_skills:
             payload['repair_required_skills'] = repair_required_skills
-        new_readable_skills = _normalize_skill_roster_items(self.new_readable_skill_items)
-        if new_readable_skills:
-            payload['new_readable_skill_items'] = new_readable_skills
         pinned_text = str(self.pinned_contract_text or '').strip()
         if pinned_text:
             payload['pinned_contract_text'] = pinned_text
@@ -924,7 +910,6 @@ def build_frontdoor_tool_contract(
     visible_skill_ids: list[str] | None = None,
     candidate_skill_ids: list[str] | None = None,
     candidate_skill_items: list[dict[str, str]] | None = None,
-    new_readable_skill_items: list[dict[str, str]] | None = None,
     repair_required_tool_items: list[dict[str, str]] | None = None,
     repair_required_skill_items: list[dict[str, str]] | None = None,
     rbac_visible_tool_names: list[str] | None = None,
@@ -956,7 +941,6 @@ def build_frontdoor_tool_contract(
         contract_revision=str(contract_revision or '').strip(),
         candidate_tool_items=_normalized_candidate_tool_items(candidate_tool_items, fallback_names=candidate_names),
         candidate_skill_items=list(candidate_skill_items or []),
-        new_readable_skill_items=_normalize_skill_roster_items(new_readable_skill_items),
         repair_required_tool_items=_normalized_repair_required_tool_items(repair_required_tool_items),
         repair_required_skill_items=_normalized_repair_required_skill_items(repair_required_skill_items),
         exec_runtime_policy=dict(exec_runtime_policy) if isinstance(exec_runtime_policy, dict) else None,

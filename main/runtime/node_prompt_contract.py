@@ -76,37 +76,6 @@ def _normalized_candidate_skill_items(
     return ordered
 
 
-def _normalized_new_readable_skill_items(items: list[Any] | None) -> list[dict[str, str]]:
-    """注入块的载荷归一：`{skill_id, display_name, description}` 三元组。
-
-    不能复用 `_normalized_candidate_skill_items`：那个形状是给 `candidate_skills` 用的
-    （只带 id + 描述，名字由 tools[]/头部名单承载），而注入块的点名语义要求
-    id | 名称 | 描述 三项俱全——名字被抹掉就退化成两列，模型认不出是什么 skill。
-    """
-    ordered: list[dict[str, str]] = []
-    seen: set[str] = set()
-    for item in list(items or []):
-        if isinstance(item, dict):
-            skill_id = str(item.get('skill_id') or '').strip()
-            display_name = str(item.get('display_name') or item.get('name') or '').strip()
-            description = str(item.get('description') or '').strip()
-        else:
-            skill_id = str(item or '').strip()
-            display_name = ''
-            description = ''
-        if not skill_id or skill_id in seen:
-            continue
-        seen.add(skill_id)
-        ordered.append(
-            {
-                'skill_id': skill_id,
-                'display_name': display_name or skill_id,
-                'description': description,
-            }
-        )
-    return ordered
-
-
 def _normalized_repair_required_tool_items(items: list[Any] | None) -> list[dict[str, str]]:
     ordered: list[dict[str, str]] = []
     seen: set[str] = set()
@@ -190,27 +159,6 @@ def _render_candidate_tool_section(items: list[dict[str, str]] | None, declared_
     )
 
 
-def _render_candidate_skill_section(items: list[dict[str, str]] | None) -> list[str]:
-    """名单制，与前门 `candidate_skills` 同形；"skill 不水合、按 id 直接读正文"
-    的口径在 `node_runtime_contract_shared.md` 里说一次。
-    """
-    normalized_items = _normalized_candidate_skill_items(items)
-    if not normalized_items:
-        return ['candidate_skills: none']
-    return [f'candidate_skills: {_render_name_list([str(item.get("skill_id") or "") for item in normalized_items])}']
-
-
-def _render_new_readable_skill_section(items: list[Any] | None) -> list[str]:
-    """重印点之后新变为可读的 skill 注入行；空名单整段省略。
-
-    与 `skill_roster.render_new_readable_skills_lines` 同一文案，这里按节点
-    payload 的形状再归一一次（两车道共用一套措辞）。
-    """
-    from g3ku.runtime.frontdoor.skill_roster import render_new_readable_skills_lines
-
-    return render_new_readable_skills_lines(items)
-
-
 def _render_repair_required_tool_section(items: list[dict[str, str]] | None) -> list[str]:
     """只列条目；四句处置指令的归属是 `shared_repair_required.md`「工具待修复规则」。"""
     normalized_items = _normalized_repair_required_tool_items(items)
@@ -225,23 +173,6 @@ def _render_repair_required_tool_section(items: list[dict[str, str]] | None) -> 
         if reason:
             detail = f'{detail} Reason: {reason}'
         lines.append(f'- `{tool_id}`: {detail}')
-    return lines
-
-
-def _render_repair_required_skill_section(items: list[dict[str, str]] | None) -> list[str]:
-    """只列条目；处置顺序的归属是 `shared_repair_required.md`「技能待修复规则」。"""
-    normalized_items = _normalized_repair_required_skill_items(items)
-    if not normalized_items:
-        return []
-    lines = ['repair_required_skills:']
-    for item in normalized_items:
-        skill_id = str(item.get('skill_id') or '').strip()
-        description = str(item.get('description') or '').strip()
-        reason = str(item.get('reason') or '').strip()
-        detail = description if description else 'No description available.'
-        if reason:
-            detail = f'{detail} Reason: {reason}'
-        lines.append(f'- `{skill_id}`: {detail}')
     return lines
 
 
@@ -292,15 +223,14 @@ def _render_node_dynamic_contract_summary(payload: dict[str, Any]) -> str:
     `node_runtime_contract_shared.md`，工具描述见 provider `tools[]`。
 
     skill 名单不进这份尾块：节点头部（system 首条）钉住全量可见名单
-    （id|名称|描述），两次重印之间新增的可读 skill 由 `new_readable_skills`
-    注入行按轮点名（台账只增不减，见 `skill_roster.py`）。
+    （id|名称|描述），重印点之间新变为可读的 skill 由一次性持久提示落进节点历史
+    （`g3ku/runtime/skill_roster_notice.py`，与会话道同一渲染函数）。
     `candidate_skills` 仍留在 payload 里——它是派发与水合侧的机器状态。
     """
     lines = [
         NODE_DYNAMIC_CONTRACT_HEADING,
         f'kind: {NODE_DYNAMIC_CONTRACT_KIND}',
         *_render_candidate_tool_section(payload.get('candidate_tools'), payload.get('declared_tool_names')),
-        *_render_new_readable_skill_section(payload.get('new_readable_skill_items')),
         *_render_repair_required_tool_section(payload.get('repair_required_tools')),
         _render_exec_runtime_policy(payload.get('exec_runtime_policy')),
     ]
@@ -379,7 +309,6 @@ class NodeRuntimeToolContract:
     skill_visibility_diagnostics: dict[str, Any] | None = None
     candidate_tool_items: list[dict[str, str]] | None = None
     candidate_skill_items: list[dict[str, str]] | None = None
-    new_readable_skill_items: list[dict[str, str]] | None = None
     repair_required_tool_items: list[dict[str, str]] | None = None
     repair_required_skill_items: list[dict[str, str]] | None = None
     exec_runtime_policy: dict[str, Any] | None = None
@@ -407,11 +336,6 @@ class NodeRuntimeToolContract:
         repair_required_skills = _normalized_repair_required_skill_items(self.repair_required_skill_items)
         if repair_required_skills:
             payload['repair_required_skills'] = repair_required_skills
-        new_readable_skills = _normalized_new_readable_skill_items(
-            list(self.new_readable_skill_items or []),
-        )
-        if new_readable_skills:
-            payload['new_readable_skill_items'] = new_readable_skills
         if self.contract_visible_skill_ids is not None:
             payload['contract_visible_skill_ids'] = _normalized_name_list(
                 list(self.contract_visible_skill_ids or [])

@@ -17,7 +17,6 @@ from types import SimpleNamespace
 import pytest
 
 from g3ku.runtime.frontdoor import _ceo_create_agent_impl as create_agent_impl
-from g3ku.runtime.frontdoor.skill_roster import clear_skill_roster_ledgers
 from g3ku.runtime.frontdoor.tool_contract import (
     FRONTDOOR_PINNED_CONTRACT_HEADING,
     apply_pinned_contract_to_head,
@@ -33,15 +32,16 @@ from g3ku.runtime.frontdoor.tool_contract import (
     skill_roster_epoch_for,
     split_pinned_contract_from_system_text,
 )
+from g3ku.runtime.skill_roster_notice import clear_skill_roster_notice_stores
 
 
 @pytest.fixture(autouse=True)
 def _isolate_pinned_contract_stores():
     clear_pinned_contract_stores()
-    clear_skill_roster_ledgers()
+    clear_skill_roster_notice_stores()
     yield
     clear_pinned_contract_stores()
-    clear_skill_roster_ledgers()
+    clear_skill_roster_notice_stores()
 
 
 def _contract_text(contract) -> str:
@@ -170,8 +170,11 @@ def test_tail_must_not_omit_when_head_cannot_carry_the_block() -> None:
 
 
 def test_tail_has_no_skill_roster_mechanism_anymore() -> None:
-    """尾块不再有 skill 名单机制：candidate/granted/unselected/repair 行全删；
-    注入段只在 payload 带了 `new_readable_skill_items` 时出现。"""
+    """尾块不再有 skill 名单机制：candidate/granted/unselected/repair/new_readable 行全删。
+
+    重印点之间新变为可读的 skill 由一次性持久提示落进历史，见
+    `tests/resources/test_skill_roster_notice_lane.py`。
+    """
     pinned = _pinned(skill_items=_items(*[f"skill-{index}" for index in range(12)]))
     tail = build_frontdoor_tool_contract(
         callable_tool_names=["exec"],
@@ -197,24 +200,6 @@ def test_tail_has_no_skill_roster_mechanism_anymore() -> None:
     assert "new_readable_skills" not in text
     assert "exec_runtime_policy" not in text
     assert "session_temp_dir" not in text
-
-    injected = build_frontdoor_tool_contract(
-        callable_tool_names=["exec"],
-        candidate_tool_names=["exec"],
-        hydrated_tool_names=["exec"],
-        frontdoor_stage_state={},
-        candidate_skill_ids=["skill-0"],
-        visible_skill_ids=["skill-0"],
-        rbac_visible_tool_names=["exec"],
-        rbac_visible_skill_ids=["skill-0"],
-        new_readable_skill_items=_items("fresh-skill"),
-        contract_revision="rev-1",
-        pinned_contract_text=pinned,
-        pinned_skill_ids=pinned_skill_ids_for(None, session_key="web:pinned"),
-    )
-    injected_text = _contract_text(injected)
-    assert "new_readable_skills" in injected_text
-    assert "`fresh-skill` | Fresh-Skill | fresh-skill 的描述。" in injected_text
 
 
 def test_epoch_store_is_scoped_by_session_key() -> None:

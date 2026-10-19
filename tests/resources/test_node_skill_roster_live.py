@@ -14,8 +14,8 @@ from types import SimpleNamespace
 
 import pytest
 
-from g3ku.runtime.frontdoor.skill_roster import clear_skill_roster_ledgers
 from g3ku.runtime.frontdoor.tool_contract import clear_pinned_contract_stores
+from g3ku.runtime.skill_roster_notice import clear_skill_roster_notice_stores
 from main.runtime.node_runner import NodeRunner
 from main.runtime.react_loop import ReActToolLoop
 from main.service.runtime_service import MainRuntimeService
@@ -42,10 +42,10 @@ def _item(skill_id: str, description: str = "") -> dict[str, str]:
 
 @pytest.fixture(autouse=True)
 def _isolate_process_stores():
-    clear_skill_roster_ledgers()
+    clear_skill_roster_notice_stores()
     clear_pinned_contract_stores()
     yield
-    clear_skill_roster_ledgers()
+    clear_skill_roster_notice_stores()
     clear_pinned_contract_stores()
 
 
@@ -74,11 +74,14 @@ def _tool_schema_selection() -> dict:
 
 
 def test_supplier_feeds_each_hop_while_head_stays_frozen() -> None:
-    """第二跳 supplier 多出 beta：注入块点名 beta，头部字节不动。"""
+    """第二跳 supplier 多出 beta：提示落进历史一次，头部字节不动。"""
     loop = _loop()
     task_id, node_id = "task-live-roster", "node-live-roster"
     scope = f"node:{task_id}:{node_id}"
-    node = _node(task_id, node_id)
+    node = SimpleNamespace(
+        task_id=task_id, node_id=node_id, depth=0, node_kind="execution",
+        can_spawn_children=False, metadata={},
+    )
     hops = [[_item("alpha")], [_item("alpha"), _item("beta")]]
     sampled: list[int] = []
 
@@ -90,24 +93,21 @@ def test_supplier_feeds_each_hop_while_head_stays_frozen() -> None:
     runtime_context = {"live_skill_roster_supplier": supplier}
     base_messages = [{"role": "system", "content": "node system"}, {"role": "user", "content": '{"prompt":"demo"}'}]
 
-    # 第一跳：头部钉住 alpha，注入块空（alpha 已被头部覆盖）。
+    # 第一跳：头部钉住 alpha，没有新名字 ⇒ 不投提示。
     items_first = loop._node_skill_roster_items(
         runtime_context=runtime_context, task_id=task_id, node_id=node_id
     )
     head_first = loop._apply_node_skill_roster_head(
         list(base_messages), scope_key=scope, skill_items=items_first
     )
-    contract_first = loop._build_node_dynamic_contract(
-        node=node,
-        message_history=list(base_messages),
-        tool_schema_selection=_tool_schema_selection(),
-        stage_gate={},
-        runtime_context=runtime_context,
-        skill_roster_items=items_first,
+    history_first = loop._apply_node_skill_roster_notice(
+        list(base_messages), node=node, skill_roster_items=items_first
     )
     assert [item["skill_id"] for item in items_first] == ["alpha"]
     assert "`alpha`" in head_first[0]["content"]
-    assert contract_first.new_readable_skill_items == []
+    assert not any(
+        str(item.get("content") or "").startswith("[SKILL_ROSTER_NOTICE_V1]") for item in history_first
+    )
 
     # 第二跳：supplier 返回 [alpha, beta]；头部 epoch 未变 → 复用已钉原文。
     items_second = loop._node_skill_roster_items(
@@ -116,24 +116,30 @@ def test_supplier_feeds_each_hop_while_head_stays_frozen() -> None:
     head_second = loop._apply_node_skill_roster_head(
         list(base_messages), scope_key=scope, skill_items=items_second
     )
-    contract_second = loop._build_node_dynamic_contract(
-        node=node,
-        message_history=list(base_messages),
-        tool_schema_selection=_tool_schema_selection(),
-        stage_gate={},
-        runtime_context=runtime_context,
-        skill_roster_items=items_second,
+    history_second = loop._apply_node_skill_roster_notice(
+        list(base_messages), node=node, skill_roster_items=items_second
     )
 
     assert [item["skill_id"] for item in items_second] == ["alpha", "beta"]
     # 头部：逐字节不动，且不含 beta
     assert head_second[0]["content"] == head_first[0]["content"]
     assert "`beta`" not in head_second[0]["content"]
-    # 注入块：只点名新变为可读的 beta（id + 名称 + 描述）
-    assert [item["skill_id"] for item in contract_second.new_readable_skill_items] == ["beta"]
-    rendered = contract_second.to_message()["content"]
-    assert "new_readable_skills (" in rendered
-    assert "- `beta` | Beta | beta 的描述。" in rendered
+    # 提示：恰好一条，只点名新变为可读的 beta（id + 名称 + 描述）
+    injected = [
+        str(item.get("content") or "")
+        for item in history_second
+        if str(item.get("content") or "").startswith("[SKILL_ROSTER_NOTICE_V1]")
+    ]
+    assert len(injected) == 1
+    assert "- `beta` | Beta | beta 的描述。" in injected[0]
+    # 第三跳：同一个 beta 不再投第二份
+    history_third = loop._apply_node_skill_roster_notice(
+        list(history_second), node=node, skill_roster_items=items_second
+    )
+    assert len([
+        item for item in history_third
+        if str(item.get("content") or "").startswith("[SKILL_ROSTER_NOTICE_V1]")
+    ]) == 1
     # 每跳各问一次 supplier（不是回合初快照复用）
     assert len(sampled) == 2
 

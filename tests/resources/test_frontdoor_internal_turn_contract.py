@@ -19,7 +19,6 @@ from types import SimpleNamespace
 import pytest
 
 from g3ku.runtime.frontdoor._ceo_runtime_ops import CeoFrontDoorRuntimeOps
-from g3ku.runtime.frontdoor.skill_roster import clear_skill_roster_ledgers
 from g3ku.runtime.frontdoor.tool_contract import (
     clear_pinned_contract_stores,
     skill_roster_epoch_for,
@@ -28,6 +27,7 @@ from g3ku.runtime.session_agent import (
     FRONTDOOR_LAST_SEND_AT_ATTR,
     PENDING_PROVIDER_BUNDLE_RECOMMIT_ATTR,
 )
+from g3ku.runtime.skill_roster_notice import clear_skill_roster_notice_stores
 from main.protocol import now_iso
 from main.service.runtime_service import MainRuntimeService
 
@@ -35,10 +35,10 @@ from main.service.runtime_service import MainRuntimeService
 @pytest.fixture(autouse=True)
 def _isolate_process_stores():
     clear_pinned_contract_stores()
-    clear_skill_roster_ledgers()
+    clear_skill_roster_notice_stores()
     yield
     clear_pinned_contract_stores()
-    clear_skill_roster_ledgers()
+    clear_skill_roster_notice_stores()
 
 
 def _ops() -> CeoFrontDoorRuntimeOps:

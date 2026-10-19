@@ -5,7 +5,6 @@ from typing import Any
 
 from g3ku.core.messages import UserInputMessage
 
-from . import skill_roster as _skill_roster
 from ._ceo_runtime_ops import _NO_RESUME, CeoFrontDoorRuntimeOps
 from .prompt_cache_contract import DEFAULT_CACHE_FAMILY_REVISION, build_frontdoor_prompt_contract
 from .state_models import (
@@ -307,11 +306,6 @@ class CreateAgentCeoFrontDoorRunner(CeoFrontDoorRuntimeOps):
             frontdoor_stage_state=dict(state.get("frontdoor_stage_state") or {}),
             visible_skill_ids=list(state.get("visible_skill_ids") or []),
             candidate_skill_ids=list(state.get("candidate_skill_ids") or []),
-            new_readable_skill_items=_skill_roster.new_readable_skill_items(
-                scope_key=f"session:{str(state.get('session_key') or '').strip()}",
-                live_visible_skills=self._frontdoor_live_visible_skills(state.get("session_key")),
-                covered_skill_ids=pinned_skill_ids,
-            ),
             repair_required_tool_items=list(state.get("repair_required_tool_items") or []),
             repair_required_skill_items=list(state.get("repair_required_skill_items") or []),
             rbac_visible_tool_names=list(state.get("rbac_visible_tool_names") or []),
