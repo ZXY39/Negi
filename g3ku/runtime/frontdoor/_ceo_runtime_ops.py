@@ -8392,38 +8392,30 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
         prompt_scope = "ceo_frontdoor"
         live_request_messages = self._prompt_message_records(messages)
         if session_request_body_messages:
-            continuity_bridge = {"pending": False, "enabled": False}
+            continuity_bridge = {"carried": False}
             consume_continuity_bridge = getattr(session, "_consume_completed_continuity_bridge", None)
             if callable(consume_continuity_bridge):
-                continuity_bridge = dict(
-                    consume_continuity_bridge(
-                        current_visible_tool_ids=rbac_visible_tool_names,
-                        current_visible_skill_ids=rbac_visible_skill_ids,
-                    )
-                    or {}
-                )
+                continuity_bridge = dict(consume_continuity_bridge() or {})
             live_request_messages = self._fresh_turn_live_request_messages_from_previous_actual_request(
                 session=session,
                 stable_messages=stable_messages,
                 live_request_messages=live_request_messages,
             )
-            if bool(continuity_bridge.get("enabled")):
+            if bool(continuity_bridge.get("carried")):
                 cache_family_revision = str(
                     continuity_bridge.get("exposure_revision") or cache_family_revision or ""
                 ).strip()
-            seeded_provider_tool_names: list[str] | None = None
-            if not (bool(continuity_bridge.get("pending")) and not bool(continuity_bridge.get("enabled"))):
-                tool_schemas, seeded_provider_tool_names = (
-                    self._fresh_turn_tool_schema_seed_from_previous_actual_request(
-                        session=session,
-                        tool_schemas=tool_schemas,
-                        expected_schema_names=(
-                            list(continuity_bridge.get("provider_tool_schema_names") or [])
-                            if bool(continuity_bridge.get("enabled"))
-                            else list(runtime_visible_tool_names)
-                        ),
-                    )
+            tool_schemas, seeded_provider_tool_names = (
+                self._fresh_turn_tool_schema_seed_from_previous_actual_request(
+                    session=session,
+                    tool_schemas=tool_schemas,
+                    expected_schema_names=(
+                        list(continuity_bridge.get("provider_tool_schema_names") or [])
+                        if bool(continuity_bridge.get("carried"))
+                        else list(runtime_visible_tool_names)
+                    ),
                 )
+            )
             if seeded_provider_tool_names:
                 runtime_visible_tool_names = list(seeded_provider_tool_names)
         contract = build_frontdoor_prompt_contract(

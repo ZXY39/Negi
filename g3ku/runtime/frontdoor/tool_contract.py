@@ -91,6 +91,52 @@ def clear_pinned_contract_stores() -> None:
     _SKILL_ROSTER_EPOCH_STORES.clear()
 
 
+def restore_pinned_contract_state(
+    session: Any,
+    *,
+    session_key: str,
+    text: Any,
+    revision: Any,
+    skill_ids: list[Any] | None,
+    epoch: Any,
+) -> None:
+    """把钉住的头部原文与重印代数放回两份载体（重启/续跑恢复用）。
+
+    只写会话对象挡不住第二个装配点：`skill_roster_epoch_for` 取 max(会话值, 表值)、
+    `_pinned_entries` 也读表。epoch 必须按持久值设置而不是从头计——写回 0 会让判据键与
+    存下的原文对不上，恢复就等于没恢复。原文不 strip：那串字节是上一跳真发出去的内容。
+    """
+    pinned_text = str(text or "")
+    normalized_revision = str(revision or "").strip()
+    normalized_skill_ids = _normalized_name_list(skill_ids)
+    try:
+        normalized_epoch = max(0, int(epoch or 0))
+    except (TypeError, ValueError):
+        normalized_epoch = 0
+    if session is not None:
+        try:
+            setattr(session, FRONTDOOR_PINNED_CONTRACT_TEXT_ATTR, pinned_text)
+            setattr(session, FRONTDOOR_PINNED_CONTRACT_REVISION_ATTR, normalized_revision)
+            setattr(session, FRONTDOOR_PINNED_CONTRACT_SKILLS_ATTR, list(normalized_skill_ids))
+            setattr(session, _SKILL_ROSTER_EPOCH_ATTR, normalized_epoch)
+        except Exception:
+            pass
+    if pinned_text and normalized_revision:
+        _write_pinned_contract_entry(
+            None,
+            session_key=str(session_key or "").strip(),
+            revision=normalized_revision,
+            text=pinned_text,
+            skill_ids=list(normalized_skill_ids),
+        )
+    key = str(session_key or "").strip()
+    if key:
+        _SKILL_ROSTER_EPOCH_STORES[key] = normalized_epoch
+        _SKILL_ROSTER_EPOCH_STORES.move_to_end(key)
+        while len(_SKILL_ROSTER_EPOCH_STORES) > _SKILL_ROSTER_EPOCH_STORE_LIMIT:
+            _SKILL_ROSTER_EPOCH_STORES.popitem(last=False)
+
+
 def drop_pinned_contract_state(session: Any, *, session_key: str | None = None) -> None:
     """撤掉这一条会话的钉住头部与 roster epoch，两份载体一起撤。
 
