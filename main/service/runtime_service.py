@@ -6736,7 +6736,9 @@ class MainRuntimeService:
         except Exception:
             return ''
         artifact_id = str(getattr(artifact, 'artifact_id', '') or '').strip()
-        return f'artifact:{artifact_id}' if artifact_id else ''
+        # 存储侧的 artifact_id 本身就带 `artifact:` 前缀；手拼会把引用写成
+        # `artifact:artifact:<hex>`（旧格式仍可解析，但那是别人踩过的坑）。走同一个规范化函数。
+        return artifact_ref_from_id(artifact_id)
 
     def _pinned_tool_schema_bundle_index(self, *, bundle_ref: str) -> dict[str, Any]:
         """读回钉住清单的整表原字节，按工具名索引；拿不到返回空表。"""

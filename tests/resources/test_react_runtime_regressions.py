@@ -2953,6 +2953,37 @@ def test_execution_provider_bundle_rewrites_the_seed_bundle_only_when_the_list_c
     assert seeded['trace']['declaration_schema_ref_fault'] == 0
 
 
+def test_execution_provider_bundle_ref_is_not_double_prefixed() -> None:
+    """存储侧交回的 id 本身已带 `artifact:`，写引用时不许再拼一层前缀。
+
+    实盘抓到过一次：帧里落的是 `artifact:artifact:0a4aa582fc07`。旧格式仍解析得到，
+    所以这一格不会立刻报错——正是这类"看着没事、等兼容层哪天收掉就断"的形状要钉住。
+    """
+    class _NamespacedIdStore:
+        def create_or_replace_singleton_text_artifact(self, **kwargs):
+            return SimpleNamespace(artifact_id='artifact:0a4aa582fc07')
+
+    service, visible_tools = _collapsed_bundle_selector_service()
+    service._resource_manager = SimpleNamespace(tool_instances=lambda: {})
+    service.artifact_store = _NamespacedIdStore()
+    service.log_service.upsert_frame('task-pin', {'node_id': 'node-pin'})
+
+    selection = service._select_model_visible_tool_schema_payload(
+        task_id='task-pin',
+        node_id='node-pin',
+        node_kind='execution',
+        visible_tools=visible_tools,
+        runtime_context={
+            'task_id': 'task-pin',
+            'node_id': 'node-pin',
+            'session_key': 'web:shared',
+            'actor_role': 'execution',
+        },
+    )
+
+    assert selection['trace']['declaration_schema_ref'] == 'artifact:0a4aa582fc07'
+
+
 def test_ruler_identity_uses_predicted_member_not_chain_head() -> None:
     """usage-first 的身份锚点按"这一发落到的那颗"判；链首在异构组里是错锚点。
 
