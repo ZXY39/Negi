@@ -42,7 +42,11 @@ from g3ku.providers.responses_protocol_helpers import (
 from g3ku.providers.responses_protocol_helpers import (
     _prompt_cache_key as _preview_prompt_cache_key,
 )
-from g3ku.resources.retired_schemas import lookup_tool_schema
+from g3ku.resources.retired_schemas import (
+    index_schemas_by_name,
+    lookup_tool_schema,
+    placeholder_tool_schema,
+)
 from g3ku.runtime import skill_roster_notice as _skill_roster_notice
 from g3ku.runtime.chunk_compression_plan import (
     CHUNK_MAX_CHUNKS,
@@ -3476,10 +3480,13 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
             if str(item or "").strip()
         ]
         prior_membership = set(prior)
-        # 唯一的重新提交点：这一跳正文已被 `[TOKEN_COMPACT_V2]` 整段重写（内联压缩），
-        # 或手动压缩车道刚落完基线（它不经过 preflight，所以靠 recommit_boundary 显式接住）。
-        # 可复用前缀反正已经断在这里，重印参数表不额外破缓存。
-        at_recommit_boundary = bool(recommit_boundary) or str(prior_history_shrink_reason or "").strip() == "token_compression"
+        # 唯一的重新提交点由调用方以**消耗式**信号给进来（`recommit_boundary`：手动压缩与内联
+        # 压缩挂的同一枚待重印标记、空闲窗口第一跳）。这一跳正文反正已被整段重写，可复用前缀
+        # 断在这里，重印参数表不额外破缓存。
+        # 这里不再读 `prior_history_shrink_reason` 当判据：那条值是会话级残留，一次压缩之后
+        # 每轮都还在（实盘 10-19 18:21:28 / 18:22:08 / 18:24:21 / 18:24:29 连续四跳各自改
+        # 名册），等于把"只有重印边界能改名册"稀释成"每个用户轮都能改"。该字段只留作取证读数。
+        at_recommit_boundary = bool(recommit_boundary)
         if not prior:
             active = list(desired)
             provider_tool_bundle_mode = "pinned_seeded"
@@ -3517,10 +3524,14 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
         commit_reason: str = "",
     ) -> dict[str, Any]:
         _ = pending_provider_tool_names
+        # `commit_reason="token_compression"` 在这里代表"这一跳就是压缩跳"——一次性、由调用方
+        # 明说，所以它可以直接充当重印判据。生产不走这条：它挂消耗式标记并由
+        # `_frontdoor_bundle_recommit_boundary` 消费，避免跨轮残留把判据粘住。
         return cls._refresh_frontdoor_provider_tool_bundle(
             prior_provider_tool_names=active_provider_tool_names,
             desired_provider_tool_names=desired_provider_tool_names,
             prior_history_shrink_reason=commit_reason,
+            recommit_boundary=str(commit_reason or "").strip() == "token_compression",
         )
 
     @classmethod
@@ -7371,12 +7382,18 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
         for forced in (STAGE_TOOL_NAME, SILENT_TOOL_NAME):
             if forced not in keep:
                 keep.append(forced)
+        keep_names = [str(name or "").strip() for name in keep if str(name or "").strip()]
         execution_bundle = self._frontdoor_execution_bundle(state=state, runtime=runtime)
         declared_tools = dict(execution_bundle.declared_tools or {})
         registry = getattr(self._loop, "tools", None)
         registry_lookup = getattr(registry, "get", None)
         retired_lookup = lookup_tool_schema
+        session = getattr(getattr(runtime, "context", None), "session", None)
+        # 整表引用：上一次名单真的变化时渲出来的原字节。实例与删除前快照都是进程内的，
+        # 重启即空，而钉住的名单会从会话基线里活过来——没有这一档，重启后那一跳只能删名。
+        bundled_schemas = dict(getattr(session, "_frontdoor_pinned_tool_schema_bundle", None) or {})
         tools_by_name: dict[str, Any] = {}
+        placeholder_names: list[str] = []
         for name in keep:
             tool = declared_tools.get(name)
             if tool is None and callable(registry_lookup):
@@ -7386,16 +7403,28 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
                     tool = None
             if tool is None:
                 retired = retired_lookup(name) if callable(retired_lookup) else None
-                if not isinstance(retired, dict):
-                    continue
+                bundled = bundled_schemas.get(name)
+                payload = retired if isinstance(retired, dict) else bundled
+                if not isinstance(payload, dict):
+                    # 三档全空：名字留住，参数表明示这一跳没带出来。删名与占位的断点位置
+                    # 相同（都从这一条的起始字节起断），占位不省缓存，省的是语义。
+                    payload = placeholder_tool_schema(name)
+                    placeholder_names.append(name)
                 tool = SimpleNamespace(
                     name=name,
                     description="",
                     parameters={},
-                    to_model_schema=lambda payload=retired: payload,
+                    to_model_schema=lambda payload=payload: payload,
                 )
             tools_by_name[name] = tool
-        return _provider_tool_schemas(tools_by_name)
+        rendered = _provider_tool_schemas(tools_by_name)
+        # 整表只在两种情况下重写：这一跳出现过取不到参数表的名字（占位字节也要被下一跳
+        # 逐字节复用），或名单成员与整表当前覆盖的那份不同（＝重印边界）。常态跳不重建
+        # 字典，比较用的是整表自己的键，不另开一份平行名单。
+        bundle_changed = placeholder_names or sorted(keep_names) != sorted(bundled_schemas.keys())
+        if session is not None and bundle_changed:
+            setattr(session, "_frontdoor_pinned_tool_schema_bundle", dict(index_schemas_by_name(rendered)))
+        return rendered
 
     def _frontdoor_execution_bundle(
         self,
@@ -8899,6 +8928,11 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
                     # 与跨轮残留的 frontdoor_history_shrink_reason 是两个概念。
                     if runtime_session is not None:
                         setattr(runtime_session, "_frontdoor_token_compression_applied_turn", True)
+                        # 正文整段被重写，可复用前缀反正断在这一跳：把"下一跳允许重印名单"挂成
+                        # 一次性标记，交给 `_frontdoor_bundle_recommit_boundary` 消费。判据不再
+                        # 读会话级残留的 `frontdoor_history_shrink_reason`——那条一次压缩之后
+                        # 每一轮都还在，等于把"只有重印边界能改名册"稀释成"每轮都能改"。
+                        setattr(runtime_session, PENDING_PROVIDER_BUNDLE_RECOMMIT_ATTR, True)
                     current_provider_tool_names = self._frontdoor_provider_visible_tool_names(
                         list(state_for_request.get("provider_tool_names") or [])
                     )

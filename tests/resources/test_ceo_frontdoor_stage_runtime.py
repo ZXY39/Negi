@@ -486,8 +486,18 @@ async def test_frontdoor_without_valid_stage_keeps_runtime_visible_tools_stable(
         runtime=SimpleNamespace(context=SimpleNamespace()),
     )
 
-    assert _frontdoor_schema_names(no_stage_tools) == {STAGE_TOOL_NAME, SILENT_TOOL_NAME, "record_tool"}
-    assert _frontdoor_schema_names(exhausted_tools) == {STAGE_TOOL_NAME, SILENT_TOOL_NAME, "record_tool"}
+    # 这条真正在比的是"两个阶段状态渲出同一份清单"。名字渲不出参数表时不再离开 `tools[]`：
+    # 删名与占位的断点位置相同（都从这一条的起始字节起断），而清单成员只许在重印边界变，
+    # 所以取不到的名字以占位留在原位（参数表空 + 说明这跳没带出来）。
+    expected_names = {
+        STAGE_TOOL_NAME,
+        SILENT_TOOL_NAME,
+        "record_tool",
+        "load_tool_context",
+        "filesystem_write",
+    }
+    assert _frontdoor_schema_names(no_stage_tools) == expected_names
+    assert _frontdoor_schema_names(exhausted_tools) == expected_names
 
 def test_frontdoor_stage_state_snapshot_preserves_archive_refs() -> None:
     snapshot = CreateAgentCeoFrontDoorRunner(loop=SimpleNamespace())._frontdoor_stage_state_snapshot(
@@ -1091,3 +1101,42 @@ def test_frontdoor_tools_render_from_the_frozen_declaration_when_governance_revo
     assert "web_fetch" not in runner._frontdoor_dispatch_tool_names(state)
     assert "web_fetch" in names
     assert names[:2] == ["record_tool", "web_fetch"]
+
+
+def test_frontdoor_keeps_a_pinned_name_with_a_placeholder_when_no_source_has_it() -> None:
+    """资源被真删、快照与整表引用都取不到：名字留在 `tools[]`，参数表明示没带出来。
+
+    删名与占位的断点位置相同（都从这一条的起始字节起断），所以这一档不省缓存，管的是语义：
+    清单成员只在重印边界变。占位渲出来后随即记进整表引用，下一跳复用同一份字节。
+    """
+    session = SimpleNamespace()
+    runtime = SimpleNamespace(context=SimpleNamespace(session=session))
+    state = {
+        "session_key": "web:frontdoor-deleted",
+        "provider_tool_names": ["record_tool", "vanished_tool"],
+        "tool_names": ["record_tool"],
+        "rbac_visible_tool_names": ["record_tool"],
+        "hydrated_tool_names": [],
+        "messages": [],
+        "frontdoor_stage_state": {},
+    }
+    runner = CreateAgentCeoFrontDoorRunner(
+        loop=SimpleNamespace(tools={"record_tool": _DeclarationOnlyTool("record_tool")})
+    )
+    runner._build_tool_runtime_context = lambda **kwargs: {}
+    runner._registered_tools = lambda tool_names: {}
+
+    first = runner._frontdoor_tool_schemas_for_state(state=state, runtime=runtime)
+    first_names = [str((item.get("function") or {}).get("name") or "") for item in first]
+    assert "vanished_tool" in first_names
+    placeholder = next(item for item in first if (item.get("function") or {}).get("name") == "vanished_tool")
+    assert placeholder["function"]["parameters"] == {"type": "object", "properties": {}}
+    assert "not carried into this turn" in placeholder["function"]["description"]
+    # 名字仍不在可执行名单里：占位不扩能力
+    assert "vanished_tool" not in runner._frontdoor_executable_tool_names(state)
+
+    # 这一跳记下的整表就是下一跳的原字节来源，不必再走占位
+    bundle = getattr(session, "_frontdoor_pinned_tool_schema_bundle", None)
+    assert isinstance(bundle, dict) and "vanished_tool" in bundle
+    second = runner._frontdoor_tool_schemas_for_state(state=state, runtime=runtime)
+    assert second == first
