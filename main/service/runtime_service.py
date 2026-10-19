@@ -703,6 +703,9 @@ class MainRuntimeService:
         )
         self._apply_model_route_plans(initial_execution_routes, initial_acceptance_routes, revision=0)
         self.node_runner._tool_snapshot_supplier = self._tool_watchdog_snapshot_supplier
+        # 节点道 skill 名单的每跳取数口：react_loop 无 service 引用，只能由这里递进去
+        # （与 `_tool_snapshot_supplier` 同一条 side-channel）。
+        self.node_runner._skill_roster_supplier = self._node_skill_roster_supplier
         # `keep_tools` 的保留正文与 `load_tool_context` 必须同一条渲染（同一个 tool_id 解析、同一
         # 份指纹输入），否则块内正文与重新 load 出来的指纹不一致，重复读守卫就认不出
         # "这一跳已经在场"。与前门读 `main_task_service.get_tool_toolskill` 同一条通道。
@@ -10132,6 +10135,35 @@ class MainRuntimeService:
 
     def _actor_role_for_node(self, node: NodeRecord) -> str:
         return 'inspection' if node.node_kind == 'acceptance' else 'execution'
+
+    def _node_skill_roster_supplier(self, *, task, node: NodeRecord) -> list[dict[str, str]]:
+        """节点道**每跳**现算的 skill 名单（`{skill_id, display_name, description}`）。
+
+        与 `_node_context_selection_inputs` 同一个取数口（治理实时可见集），但刻意不经过
+        回合级缓存：mid-turn 新装/新授权的 skill 必须下一跳就能被点名。react_loop 没有
+        service 引用，所以由 `NodeRunner._runtime_context` 把它塞进
+        `live_skill_roster_supplier`，由 react_loop 每跳调用一次。
+
+        描述保留原文（头部名单按原文渲染，注入块自己截首句）；取数异常不在这里吞——
+        调用侧统一回落回合初快照，避免半份名单被当成权威可见集。
+        """
+        actor_role = self._actor_role_for_node(node)
+        session_id = str(getattr(task, 'session_id', '') or 'web:shared').strip() or 'web:shared'
+        items: list[dict[str, str]] = []
+        for record in list(
+            self.list_contract_visible_skill_resources(actor_role=actor_role, session_id=session_id) or []
+        ):
+            skill_id = str(getattr(record, 'skill_id', '') or '').strip()
+            if not skill_id:
+                continue
+            items.append(
+                {
+                    'skill_id': skill_id,
+                    'display_name': str(getattr(record, 'display_name', '') or skill_id).strip() or skill_id,
+                    'description': str(getattr(record, 'description', '') or '').strip(),
+                }
+            )
+        return items
 
     @staticmethod
     def _node_context_selection_cache_key(

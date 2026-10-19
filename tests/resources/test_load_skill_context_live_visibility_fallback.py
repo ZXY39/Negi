@@ -63,15 +63,26 @@ def _runtime_kwargs(runtime: dict | None) -> dict:
 
 
 @pytest.mark.asyncio
-async def test_gate_rejects_skill_missing_from_snapshot_and_live_registry():
-    service = _StubService(visible_records=[], payload={"ok": True})
+async def test_tool_defers_visibility_to_v2_even_when_snapshot_and_registry_lack_the_name():
+    """候选闸门已拆：tool 层不自己否决，读不了的原因由 v2 按治理可见集回三态。"""
+    payload = {
+        "ok": False,
+        "error": "skill_not_permitted",
+        "message": "权限不允许：角色 execution 无权读取 mid-run-installed。",
+    }
+    service = _StubService(visible_records=[], payload=payload)
     tool = _make_tool(service)
 
     result = await tool.execute(skill_id="mid-run-installed", **_runtime_kwargs(dict(RUNTIME_CONTRACT)))
 
-    assert "当前运行时技能未包含" in result
-    assert "mid-run-installed" in result
-    assert service.v2_calls == []
+    assert json.loads(result) == payload
+    assert service.v2_calls == [
+        {
+            "actor_role": "execution",
+            "session_id": "web:shared",
+            "skill_id": "mid-run-installed",
+        }
+    ]
 
 
 @pytest.mark.asyncio

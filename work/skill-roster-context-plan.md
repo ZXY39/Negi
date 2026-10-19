@@ -1,7 +1,7 @@
 # Skill 名单上下文改造计划（头部全量名单 + 按轮注入）
 
 日期：2026-10-19
-状态：计划已确认，未开工。用户拍板：头部名单带描述；节点道加头部名单、实现对齐会话道；换车道不改 `tools[]`/skill 名单（保缓存命中）——此项放 **P2**，等另一会话的 tool[] 修复落地并同步版本后再做。
+状态：**已全部落地**（P1 + P2-1 见 `e617e56`；P2-2 复核与节点道每跳 live 检测见文末「落地记录」）。用户拍板：头部名单带描述；节点道加头部名单、实现对齐会话道；换车道不改 `tools[]`/skill 名单（保缓存命中）——此项放 **P2**，等另一会话的 tool[] 修复落地并同步版本后再做。
 
 ## 背景与问题
 
@@ -108,3 +108,15 @@
 | `repair_required_skills` 尾块行 | 删（load 回执覆盖） |
 | 换车道 | 不改名单；实现放 P2，等 tool[] 修复 + 版本同步 |
 | top-16 语义筛选 | 删除；`skill_inventory_top_k` 字段废弃保留 |
+
+## 落地记录（2026-10-19，收尾）
+
+| 批次 | 内容 | 落点 |
+|---|---|---|
+| P1 + P2-1 | 头部全量名单、roster epoch、按轮注入、节点头部名单、load 三态、尾块 skill 机制下线、换车道出重印边界 | `e617e56` |
+| 收尾-1 | 节点道 roster 检测从**回合粒度**改为**每跳**：`MainRuntimeService._node_skill_roster_supplier` → `NodeRunner._runtime_context['live_skill_roster_supplier']` → `ReActLoop._node_skill_roster_items`（supplier 抛错/缺失回落回合初 fresh payload → 帧）。同一跳头部名单与注入块共用一份取样；头部字节仍由 roster epoch 冻结。 | `react_loop.py` / `node_runner.py` / `runtime_service.py` |
+| 收尾-2 | P2-2 内部轮复核：换车道不重印（断言化）、声明面冻结而派发面按治理可见集收窄、内部轮无活动阶段仍保留阶段工具、skill 读取按治理实时可见集裁决（三态回执）。复核结论与断言见 `tests/resources/test_frontdoor_internal_turn_contract.py`。 | 同上 + `_ceo_runtime_ops.py` 注释 |
+| 收尾-3 | 注入块载荷补回 `display_name`：节点侧原先走 `_normalized_candidate_skill_items` 会把名字抹成 id，与「id \| 名称 \| 描述」的点名语义不符。 | `node_prompt_contract.py` |
+| 收尾-4 | 文档对齐：`tool-and-skill-system.md` / `context-and-cache-troubleshooting.md` / `runtime-overview.md` / `tool-hydration-and-callable-chain.md` 里"换车道是重印边界"的残留全部改掉（代码早已去掉，文档滞后）。 | `docs/architecture/` |
+
+遗留（非本计划）：`tests/resources/test_ceo_frontdoor_context_retention.py` 两例与 `test_export_node_prompt_rounds.py` 一例在 `e617e56` 上已红（`_FakeTaskStore` 缺 `get_node_pause_flags`、contract suffix 归一化），与本系列无关。

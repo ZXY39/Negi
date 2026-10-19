@@ -553,6 +553,7 @@ class ReActToolLoop:
                 tool_schema_selection=tool_schema_selection,
                 stage_gate=stage_gate,
                 runtime_context=runtime_context,
+                skill_roster_items=skill_roster_items,
             )
             dynamic_contract_payload = dynamic_contract.to_message_payload()
             selected_skill_ids = self._normalized_name_list(
@@ -3602,12 +3603,39 @@ class ReActToolLoop:
         task_id: str,
         node_id: str,
     ) -> list[dict[str, str]]:
-        """节点头部名单的数据源：本轮 fresh payload 里的候选 skill 条目（含描述）。
+        """节点头部名单与注入块的数据源：**每跳**现算的治理实时可见集。
 
-        fresh payload 由主运行时每轮按治理实时可见集现算，排序即可见集本身
-        （skill 侧已无 top-k 筛选）；取不到时回落到帧里的 `visible_skills` 记录。
+        react_loop 自己没有 service 引用，所以实时取数口由主运行时以 supplier 的形式
+        从 `runtime_context` 递进来（`live_skill_roster_supplier`，与
+        `tool_snapshot_supplier` 同一个 side-channel 形状）。supplier 在每一跳被调用，
+        mid-turn 新装/新授权的 skill 下一跳就能进注入块，不再等下一回合。
+
+        头部名单的字节稳定性不受影响：`frontdoor_pinned_contract_text` 按 roster epoch
+        命中已钉原文，epoch 不变时无论传什么名单都复用同一串字节——换 live 集只影响
+        重印点那一次重钉（那时本来就该钉 live 全量）。
+
+        supplier 缺失或抛错时回落到回合初的 fresh payload，再回落到帧里的
+        `visible_skills` 记录（回合粒度，行为与改造前一致）。
         """
         runtime_context = dict(runtime_context or {}) if isinstance(runtime_context, dict) else {}
+        supplier = runtime_context.get('live_skill_roster_supplier')
+        if callable(supplier):
+            try:
+                supplied = supplier()
+            except Exception as exc:  # noqa: BLE001 - 取数失败不得炸回合
+                logger.debug(
+                    'live skill roster supplier failed (task={} node={}): {}',
+                    task_id,
+                    node_id,
+                    exc,
+                )
+                supplied = None
+            if isinstance(supplied, list):
+                return [
+                    dict(item)
+                    for item in supplied
+                    if isinstance(item, dict) and str(item.get('skill_id') or '').strip()
+                ]
         fresh_payload = (
             dict(runtime_context.get('fresh_node_dynamic_contract_payload') or {})
             if isinstance(runtime_context.get('fresh_node_dynamic_contract_payload'), dict)
@@ -3667,6 +3695,7 @@ class ReActToolLoop:
         tool_schema_selection: dict[str, Any],
         stage_gate: dict[str, Any],
         runtime_context: dict[str, Any] | None = None,
+        skill_roster_items: list[dict[str, str]] | None = None,
     ) -> NodeRuntimeToolContract:
         existing_payload = extract_node_dynamic_contract_payload(message_history) or {}
         current_frame = self._runtime_frame(
@@ -3819,10 +3848,17 @@ class ReActToolLoop:
                 scope_key=(
                     f"node:{getattr(node, 'task_id', '') or ''}:{getattr(node, 'node_id', '') or ''}"
                 ),
-                live_visible_skills=self._node_skill_roster_items(
-                    runtime_context=runtime_context,
-                    task_id=str(getattr(node, 'task_id', '') or ''),
-                    node_id=str(getattr(node, 'node_id', '') or ''),
+                # 同一跳的头部名单与本块共用一份取样：supplier 每跳只问一次，
+                # 两处看到的必须是同一份 live 集，否则"头部已覆盖"与"块里还列着"
+                # 会在同一跳里自相矛盾。
+                live_visible_skills=(
+                    list(skill_roster_items)
+                    if isinstance(skill_roster_items, list)
+                    else self._node_skill_roster_items(
+                        runtime_context=runtime_context,
+                        task_id=str(getattr(node, 'task_id', '') or ''),
+                        node_id=str(getattr(node, 'node_id', '') or ''),
+                    )
                 ),
                 covered_skill_ids=_pinned_contract_state(
                     None,

@@ -76,6 +76,37 @@ def _normalized_candidate_skill_items(
     return ordered
 
 
+def _normalized_new_readable_skill_items(items: list[Any] | None) -> list[dict[str, str]]:
+    """注入块的载荷归一：`{skill_id, display_name, description}` 三元组。
+
+    不能复用 `_normalized_candidate_skill_items`：那个形状是给 `candidate_skills` 用的
+    （只带 id + 描述，名字由 tools[]/头部名单承载），而注入块的点名语义要求
+    id | 名称 | 描述 三项俱全——名字被抹掉就退化成两列，模型认不出是什么 skill。
+    """
+    ordered: list[dict[str, str]] = []
+    seen: set[str] = set()
+    for item in list(items or []):
+        if isinstance(item, dict):
+            skill_id = str(item.get('skill_id') or '').strip()
+            display_name = str(item.get('display_name') or item.get('name') or '').strip()
+            description = str(item.get('description') or '').strip()
+        else:
+            skill_id = str(item or '').strip()
+            display_name = ''
+            description = ''
+        if not skill_id or skill_id in seen:
+            continue
+        seen.add(skill_id)
+        ordered.append(
+            {
+                'skill_id': skill_id,
+                'display_name': display_name or skill_id,
+                'description': description,
+            }
+        )
+    return ordered
+
+
 def _normalized_repair_required_tool_items(items: list[Any] | None) -> list[dict[str, str]]:
     ordered: list[dict[str, str]] = []
     seen: set[str] = set()
@@ -376,7 +407,7 @@ class NodeRuntimeToolContract:
         repair_required_skills = _normalized_repair_required_skill_items(self.repair_required_skill_items)
         if repair_required_skills:
             payload['repair_required_skills'] = repair_required_skills
-        new_readable_skills = _normalized_candidate_skill_items(
+        new_readable_skills = _normalized_new_readable_skill_items(
             list(self.new_readable_skill_items or []),
         )
         if new_readable_skills:

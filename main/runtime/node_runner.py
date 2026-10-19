@@ -4167,6 +4167,13 @@ class NodeRunner:
                 if callable(getattr(self, '_tool_snapshot_supplier', None))
                 else None
             ),
+            # skill 名单的每跳实时取数口：react_loop 没有 service 引用，节点道的 live
+            # 检测只能靠主运行时递进来的闭包。取数失败由调用侧回落回合初快照。
+            'live_skill_roster_supplier': (
+                (lambda: self._skill_roster_supplier(task=task, node=node))
+                if callable(getattr(self, '_skill_roster_supplier', None))
+                else None
+            ),
         }
 
     def _tool_watchdog_runtime_config(self) -> dict[str, Any]:

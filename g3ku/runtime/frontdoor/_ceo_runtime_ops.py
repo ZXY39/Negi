@@ -215,7 +215,6 @@ CeoGraphState = CeoPersistentState
 
 
 
-# 上一跳的工具车道：正常 / 心跳内部 / 定时内部。换车道是清单的重印边界之一。
 _TASK_ID_PATTERN = re.compile(r"task:[A-Za-z0-9][\w:-]*")
 # 旧文案静默哨兵的字面值。P4 之后它不再是任何判据，只作为"该被清洗掉的噪声"保留一份：
 # 转录里仍存有历史轮次的这类尾巴，模型有模仿上下文的倾向，不剥就会当正文发给用户。
@@ -3463,8 +3462,8 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
             active = list(desired)
             provider_tool_bundle_mode = "pinned_recommitted"
         else:
-            # 钉住＝完全冻结：重印边界（token 压缩、手动压缩、换车道、空闲窗口第一跳）
-            # 之前 `tools[]` 一个名字不增删，回合起点也不并入新增。期间新工具靠尾块
+            # 钉住＝完全冻结：重印边界（token 压缩、手动压缩、空闲窗口第一跳）之前
+            # `tools[]` 一个名字不增删，回合起点也不并入新增，换车道同样不重印。期间新工具靠尾块
             # `undeclared_candidates` 点名（清单到压缩那一跳才重印），可执行面走水合
             # 台账，模型调用的参数契约由 load 返回承载——见 `tool-and-skill-system.md`
             # 「清单滞后不是权限滞后」。

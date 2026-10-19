@@ -4894,7 +4894,12 @@ async def test_load_tool_context_tool_rejects_non_visible_runtime_target() -> No
 
 
 @pytest.mark.asyncio
-async def test_load_skill_context_tool_rejects_non_candidate_runtime_target() -> None:
+async def test_load_skill_context_tool_ignores_stale_candidate_snapshot() -> None:
+    """skill 候选闸门已拆：回合初的 `candidate_skill_ids` 快照不得拒人。
+
+    可见性由 `load_skill_context_v2` 按治理实时可见集强制（已删除 / 权限不允许 / 待修复
+    三态回执）；tool 层若还拿回合初快照拦，mid-turn 新授权的 skill 会被 stale 名单误拒。
+    """
     service = _RuntimeToolService()
     tool = LoadSkillContextTool(lambda: service)
 
@@ -4908,8 +4913,13 @@ async def test_load_skill_context_tool_rejects_non_candidate_runtime_target() ->
         },
     )
 
-    assert rendered.startswith("Error:")
-    assert service.load_skill_calls == []
+    payload = json.loads(rendered)
+    assert payload["ok"] is True
+    assert payload["skill_id"] == "find-skills"
+    # 请求照样落到 v2 可见性通道（那里才有治理口径），tool 层不自己裁决
+    assert service.load_skill_calls == [
+        {"actor_role": "execution", "session_id": "web:shared", "skill_id": "find-skills"}
+    ]
 
 
 @pytest.mark.asyncio
