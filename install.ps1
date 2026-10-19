@@ -14,7 +14,8 @@ param(
     [switch]$NoStart,
     [switch]$Upgrade,
     [switch]$NoPath,
-    [switch]$NoShortcut
+    [switch]$NoShortcut,
+    [switch]$NoUninstallEntry
 )
 
 $ErrorActionPreference = 'Stop'
@@ -457,7 +458,14 @@ Install-Environment -uv $uv -Root $Dir
 $icon = Copy-NegiIcon -Root $Dir
 Install-EntryPoint -Root $Dir
 if (-not $NoShortcut) { Install-DesktopIcons -Root $Dir -IconPath $icon }
-Write-UninstallRegistryEntry -Root $Dir -IconPath $icon
+if ($NoUninstallEntry) {
+    # The setup program owns the Add/Remove Programs entry when it drives this
+    # script; writing both would show two "Negi" rows that uninstall differently.
+    Write-Step 'installed-apps entry skipped (-NoUninstallEntry; the setup program owns it)'
+}
+else {
+    Write-UninstallRegistryEntry -Root $Dir -IconPath $icon
+}
 Write-Step 'from any terminal now on: negi'
 
 if ($NoStart) {
