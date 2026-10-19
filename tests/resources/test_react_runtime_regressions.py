@@ -2808,7 +2808,11 @@ def test_execution_provider_bundle_reads_the_carrier_before_the_artifact() -> No
 
 
 def test_execution_provider_bundle_last_sent_tier_needs_a_prior_artifact_ref() -> None:
-    """没有上一跳引用时不读盘、不炸，退化成原来的"渲不出就退场"。"""
+    """没有上一跳引用、也没有整表引用时不读盘、不炸；名字留住，参数表明示没带出来。
+
+    这条原来断言"渲不出就退场"。判据改成不许退场：删名与占位的断点位置完全相同（都从这一条
+    的起始字节起断），所以占位不省缓存，省的是语义——清单成员只在重印边界变。
+    """
     service, visible_tools = _collapsed_bundle_selector_service()
     service._resource_manager = SimpleNamespace(tool_instances=lambda: {})
     service.log_service.upsert_frame(
@@ -2834,7 +2838,119 @@ def test_execution_provider_bundle_last_sent_tier_needs_a_prior_artifact_ref() -
         },
     )
 
-    assert 'lane4-schema-tool' not in selection['declared_denied_tool_schemas']
+    assert 'lane4-schema-tool' in list(selection['provider_tool_names'] or [])
+    placeholder = selection['declared_denied_tool_schemas']['lane4-schema-tool']
+    assert placeholder['function']['name'] == 'lane4-schema-tool'
+    assert placeholder['function']['parameters'] == {'type': 'object', 'properties': {}}
+    assert selection['trace']['declaration_schema_placeholders'] == ['lane4-schema-tool']
+
+
+def test_execution_provider_bundle_reads_the_seed_bundle_before_the_last_sent_artifact() -> None:
+    """整表引用排在"上一跳原文"之前：那份按 kind 被逐跳剪，剪掉的一刻第五档就空了。
+
+    第三/第四档（进程内快照、逐名载体）都空时，先读清单变化那跳存下的 singleton 整表；
+    只有它也没有，才回去读上一跳原文。
+    """
+    bundled = {'type': 'function', 'function': {'name': 'lane5-bundle-tool', 'parameters': {'type': 'object'}}}
+    service, visible_tools = _collapsed_bundle_selector_service()
+    service._resource_manager = SimpleNamespace(tool_instances=lambda: {})
+    service.log_service.upsert_frame(
+        'task-pin',
+        {
+            'node_id': 'node-pin',
+            'provider_tool_names': ['exec', 'lane5-bundle-tool'],
+            'actual_request_ref': 'artifact:last-sent',
+            'model_visible_tool_selection_trace': {'declaration_schema_ref': 'artifact:bundle-1'},
+        },
+    )
+
+    def _resolve(ref: str) -> str:
+        if str(ref or '') == 'artifact:bundle-1':
+            return json.dumps({'tool_schemas': [bundled]})
+        raise AssertionError('bundle hit must not read the last-sent artifact')
+
+    service.log_service.resolve_content_ref = _resolve
+
+    selection = service._select_model_visible_tool_schema_payload(
+        task_id='task-pin',
+        node_id='node-pin',
+        node_kind='execution',
+        visible_tools=visible_tools,
+        runtime_context={
+            'task_id': 'task-pin',
+            'node_id': 'node-pin',
+            'session_key': 'web:shared',
+            'actor_role': 'execution',
+        },
+    )
+
+    assert 'lane5-bundle-tool' in list(selection['provider_tool_names'] or [])
+    assert selection['declared_denied_tool_schemas']['lane5-bundle-tool'] == bundled
+    # 用过之后继续带着，否则下一跳又只剩读盘
+    assert selection['trace']['declaration_schema_backfill'] == {'lane5-bundle-tool': bundled}
+    assert selection['trace']['declaration_schema_placeholders'] == []
+
+
+def test_execution_provider_bundle_rewrites_the_seed_bundle_only_when_the_list_changes() -> None:
+    """整表只在名单变化的那一跳重写；冻结跳一次 IO 都不加，且引用原样带下去。"""
+    writes: list[dict] = []
+
+    class _FakeArtifactStore:
+        def create_or_replace_singleton_text_artifact(self, **kwargs):
+            writes.append(kwargs)
+            return SimpleNamespace(artifact_id='bundle-new')
+
+    service, visible_tools = _collapsed_bundle_selector_service()
+    service._resource_manager = SimpleNamespace(tool_instances=lambda: {})
+    service.artifact_store = _FakeArtifactStore()
+    service.log_service.upsert_frame(
+        'task-pin',
+        {
+            'node_id': 'node-pin',
+            'provider_tool_names': ['exec', 'content_describe'],
+            'model_visible_tool_selection_trace': {'declaration_schema_ref': 'artifact:bundle-old'},
+        },
+    )
+
+    frozen = service._select_model_visible_tool_schema_payload(
+        task_id='task-pin',
+        node_id='node-pin',
+        node_kind='execution',
+        visible_tools=visible_tools,
+        runtime_context={
+            'task_id': 'task-pin',
+            'node_id': 'node-pin',
+            'session_key': 'web:shared',
+            'actor_role': 'execution',
+        },
+    )
+
+    assert frozen['provider_tool_bundle_mode'] == 'pinned_frozen'
+    assert writes == []
+    # 没重写也要把上一份引用带着，否则下一跳的第五档凭空消失
+    assert frozen['trace']['declaration_schema_ref'] == 'artifact:bundle-old'
+
+    service.log_service.upsert_frame(
+        'task-pin',
+        {'node_id': 'node-pin'},  # 无钉住声明＝这一跳重播种
+    )
+    seeded = service._select_model_visible_tool_schema_payload(
+        task_id='task-pin',
+        node_id='node-pin',
+        node_kind='execution',
+        visible_tools=visible_tools,
+        runtime_context={
+            'task_id': 'task-pin',
+            'node_id': 'node-pin',
+            'session_key': 'web:shared',
+            'actor_role': 'execution',
+        },
+    )
+
+    assert seeded['provider_tool_bundle_mode'] == 'pinned_seeded'
+    assert len(writes) == 1
+    assert seeded['trace']['declaration_schema_ref'] == 'artifact:bundle-new'
+    assert seeded['trace']['declaration_schema_ref_fault'] == 0
 
 
 def test_ruler_identity_uses_predicted_member_not_chain_head() -> None:

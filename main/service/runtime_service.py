@@ -31,6 +31,7 @@ from g3ku.resources.models import ResourceKind
 from g3ku.resources.retired_schemas import (
     index_schemas_by_name,
     lookup_tool_schema,
+    placeholder_tool_schema,
     record_tool_schema,
 )
 from g3ku.resources.tool_settings import (
@@ -199,6 +200,10 @@ _WORKER_STATUS_CALLBACK_TIMEOUT_SECONDS = 2.0
 # 时才有条目（实例被删且没留快照、或派发字典被收窄）。超限按名字序截断——被截掉的那条下一次
 # 自己回退去读工件，退化成"没有载体"，不会因此把名字挤出清单。
 _DECLARATION_BACKFILL_MAX_ENTRIES = 32
+# 清单渲染发生变化的那一跳，把整表原字节存成一份内容引用。它的 kind 必须与
+# `task_actual_request` 不同：`_prune_stale_actual_request_artifacts` 按 kind 剪枝，同 kind
+# 会被逐跳删掉，而那正是"上一跳原文"这一档会空的原因。
+_PINNED_SCHEMA_BUNDLE_KIND = 'pinned_tool_schema_bundle'
 # 终态/失速/分发错误三条 outbox 车道共用：2.0s 在 web 侧跑模型探测或抢
 # runtime.sqlite3 写锁时必然超时，而超时会让事件一路滞留到下次进程重启才补投
 # （2026-09-23 task:543e0f15d798 滞留 1h39m、task:7e2a270eec34 滞留 10h16m）。
@@ -6691,6 +6696,80 @@ class MainRuntimeService:
             if name in visible_name_set
         ]
 
+    def _persist_pinned_tool_schema_bundle(
+        self,
+        *,
+        task_id: str,
+        node_id: str,
+        schemas_by_name: dict[str, Any],
+    ) -> str:
+        """把整张渲染好的 `tools[]` 原字节存成内容引用，返回 ref；任何失败返回空串。
+
+        只在清单发生变化的那一跳调用：那一刻每条参数表都拿得到，存下来是零成本的，
+        而它之后就是唯一不会消失的那份——活实例会因删除消失、删除前快照随进程清空、
+        上一跳原文会被逐跳剪枝。存的是 list 而不是 dict，读侧与 `actual_tool_schemas`
+        共用同一个按名索引函数。
+        """
+        if not schemas_by_name:
+            return ''
+        store = getattr(self, 'artifact_store', None)
+        create_singleton = getattr(store, 'create_or_replace_singleton_text_artifact', None)
+        if not callable(create_singleton):
+            return ''
+        payload = {
+            'task_id': str(task_id or ''),
+            'node_id': str(node_id or ''),
+            'tool_schemas': [schemas_by_name[name] for name in schemas_by_name],
+        }
+        try:
+            # singleton：同 (task, node, kind) 只留一份，重写就地覆盖——清单每变一次跟着换，
+            # 不逐跳累积，也不会被按 kind 的剪枝扫到。
+            artifact = create_singleton(
+                task_id=str(task_id or '').strip(),
+                node_id=str(node_id or '').strip(),
+                kind=_PINNED_SCHEMA_BUNDLE_KIND,
+                title='pinned tools[] schema bundle',
+                content=json.dumps(payload, ensure_ascii=False, sort_keys=True),
+                extension='.json',
+                mime_type='application/json',
+            )
+        except Exception:
+            return ''
+        artifact_id = str(getattr(artifact, 'artifact_id', '') or '').strip()
+        return f'artifact:{artifact_id}' if artifact_id else ''
+
+    def _pinned_tool_schema_bundle_index(self, *, bundle_ref: str) -> dict[str, Any]:
+        """读回钉住清单的整表原字节，按工具名索引；拿不到返回空表。"""
+        ref = str(bundle_ref or '').strip()
+        if not ref:
+            return {}
+        resolver = getattr(getattr(self, 'log_service', None), 'resolve_content_ref', None)
+        if not callable(resolver):
+            return {}
+        try:
+            text = str(resolver(ref) or '')
+        except Exception:
+            return {}
+        if not text:
+            return {}
+        try:
+            payload = json.loads(text)
+        except Exception:
+            return {}
+        if not isinstance(payload, dict):
+            return {}
+        return index_schemas_by_name(list(payload.get('tool_schemas') or []))
+
+    @staticmethod
+    def _placeholder_pinned_tool_schema(name: str) -> dict[str, Any]:
+        """四档都取不到时的最后一格：与 `retired_schemas.placeholder_tool_schema` 同一份字节。
+
+        钉住的是成员，不是编造契约——空 `properties` 加一句实话，模型调它拿到的仍是执行准入
+        的拒绝回执。断点位置与"直接删名"完全相同（都从这一条的起始字节起断），所以这格不省
+        缓存，省的是语义：名字不会在重印边界之外悄悄消失。两条车道共用这一个生成器。
+        """
+        return placeholder_tool_schema(name)
+
     def _node_last_sent_tool_schema_index(self, *, actual_request_ref: str) -> dict[str, Any]:
         """上一跳实际发出的 `tools[]` 原文，按工具名索引；拿不到就返回空表。
 
@@ -6830,9 +6909,11 @@ class MainRuntimeService:
         prior_history_shrink_reason = ''
         prior_actual_request_ref = ''
         prior_declaration_backfill: dict[str, Any] = {}
+        prior_declaration_schema_ref = ''
         if callable(read_runtime_frame):
             prior_frame = read_runtime_frame(str(task_id or '').strip(), str(node_id or '').strip())
             if isinstance(prior_frame, dict):
+                prior_trace = dict(prior_frame.get('model_visible_tool_selection_trace') or {})
                 prior_selected_tool_names = [
                     str(item or '').strip()
                     for item in list(prior_frame.get('model_visible_tool_names') or [])
@@ -6850,6 +6931,12 @@ class MainRuntimeService:
                         'declaration_schema_backfill'
                     ) or {}
                 )
+                prior_declaration_schema_ref = str(
+                    dict(prior_frame.get('model_visible_tool_selection_trace') or {}).get(
+                        'declaration_schema_ref'
+                    )
+                    or ''
+                ).strip()
         selected_tool_names: list[str] = []
         for name in prior_selected_tool_names:
             if name in model_visible_callable_tool_names and name not in selected_tool_names:
@@ -6909,7 +6996,9 @@ class MainRuntimeService:
         # 七个归一化写点，漏一个就是"存了等于没存"。
         declared_denied_tool_schemas: dict[str, Any] = {}
         declaration_backfill: dict[str, Any] = {}
+        declaration_placeholders: list[str] = []
         last_sent_schema_index: dict[str, Any] | None = None
+        bundle_schema_index: dict[str, Any] | None = None
         for candidate_name in provider_tool_names:
             normalized_name = str(candidate_name or '').strip()
             if not normalized_name or normalized_name in dispatched_tool_names:
@@ -6929,10 +7018,21 @@ class MainRuntimeService:
                 declared_denied_tool_schemas[normalized_name] = carried_schema
                 declaration_backfill[normalized_name] = carried_schema
                 continue
-            # 第四源：上一跳真正发出去的那份原文。快照是进程内的，重启即清空，而重启之后的
-            # 第一跳仍可能带着上一跳钉住的清单——原文是逐字节的历史事实，用它就等于"这一跳
-            # 与上一跳相同"。只在活实例与快照都拿不到时才读盘，常态跳一次 IO 都不加。
-            # 取到原文就顺手写回载体（见下方 `declaration_schema_backfill`），别让下一跳重读。
+            # 第四源：清单变化那一跳存下的整表引用。它不是"上一跳原文"——那份按 kind 被逐跳
+            # 剪掉，剪掉的那一刻这档就空了；整表引用只在名单真变时重写，所以重启、剪枝、
+            # 删除三者叠加也还在。
+            if bundle_schema_index is None:
+                bundle_schema_index = self._pinned_tool_schema_bundle_index(
+                    bundle_ref=prior_declaration_schema_ref
+                )
+            bundled_schema = bundle_schema_index.get(normalized_name)
+            if isinstance(bundled_schema, dict):
+                declared_denied_tool_schemas[normalized_name] = bundled_schema
+                declaration_backfill[normalized_name] = bundled_schema
+                continue
+            # 第五源：上一跳真正发出去的那份原文（旧清单还没有整表引用时的过渡档）。原文是
+            # 逐字节的历史事实，复用它不会改变 `tools[]` 的字节。取到就顺手写回载体，
+            # 别让下一跳重读。
             if last_sent_schema_index is None:
                 last_sent_schema_index = self._node_last_sent_tool_schema_index(
                     actual_request_ref=prior_actual_request_ref,
@@ -6941,6 +7041,14 @@ class MainRuntimeService:
             if isinstance(last_sent_schema, dict):
                 declared_denied_tool_schemas[normalized_name] = last_sent_schema
                 declaration_backfill[normalized_name] = last_sent_schema
+                continue
+            # 五档全空：名字留在清单里，参数表明示这一跳没带出来。删名与占位在缓存上等价
+            # （断点都从这一条的起始字节开始），差别全在语义——他要的是"四个来源都取不到
+            # 也不许退场"。
+            declared_denied_tool_schemas[normalized_name] = self._placeholder_pinned_tool_schema(
+                normalized_name
+            )
+            declaration_placeholders.append(normalized_name)
         # 尾块只点名"无权限或资源已下架"：仍被授权、只是本轮没有派发资格的名字不进这份
         # 文案——模型调它拿到的是"先 load_tool_context"那一档，措辞得跟真实处置一致。
         declared_denied_tool_names = [
@@ -6957,6 +7065,29 @@ class MainRuntimeService:
             }
         provider_tool_membership_changed = provider_tool_names != list(prior_provider_tool_names)
         provider_tool_bundle_seeded = bool(provider_tool_membership_changed)
+        # 整表引用只在名单真的变了时重写——常态跳一次 IO 都不加。写失败就沿用上一份引用并
+        # 记一次可数控数：静默降级等于让"五档全空"重新变成可达。
+        declaration_schema_ref = str(prior_declaration_schema_ref or '')
+        declaration_schema_ref_fault = 0
+        if provider_tool_bundle_mode != 'pinned_frozen' and provider_tool_names:
+            rendered_schemas: dict[str, Any] = {}
+            bundle_visible_tools = dict(visible_tools or {})
+            for bundle_name in provider_tool_names:
+                bundle_tool = bundle_visible_tools.get(bundle_name)
+                bundle_to_schema = getattr(bundle_tool, 'to_model_schema', None)
+                if callable(bundle_to_schema):
+                    rendered_schemas[bundle_name] = bundle_to_schema()
+                elif bundle_name in declared_denied_tool_schemas:
+                    rendered_schemas[bundle_name] = declared_denied_tool_schemas[bundle_name]
+            written_ref = self._persist_pinned_tool_schema_bundle(
+                task_id=task_id,
+                node_id=node_id,
+                schemas_by_name=rendered_schemas,
+            )
+            if written_ref:
+                declaration_schema_ref = written_ref
+            else:
+                declaration_schema_ref_fault = 1
         exposure = {
             'provider_tool_names': list(provider_tool_names),
             'desired_provider_tool_names': list(pinned_provider_tool_names),
@@ -7024,6 +7155,9 @@ class MainRuntimeService:
                 'final_schema_chars': int(final_schema_chars),
                 **dict(selection.trace or {}),
                 'declaration_schema_backfill': declaration_backfill,
+                'declaration_schema_ref': declaration_schema_ref,
+                'declaration_schema_placeholders': list(declaration_placeholders),
+                'declaration_schema_ref_fault': int(declaration_schema_ref_fault),
             },
         }
 
