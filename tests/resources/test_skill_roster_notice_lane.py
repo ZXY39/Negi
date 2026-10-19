@@ -65,16 +65,32 @@ def _notice_texts(messages: list[dict]) -> list[str]:
 
 
 def _pin_head(skill_ids: list[str]) -> str:
-    """把头部钉住块按这份名单钉一次（真实会话的第一跳就是这么起的）。"""
+    """按真实前门口径钉头部：**裸 session_key**（`session:` 前缀只是台账作用域写法）。
+
+    曾经把前缀键传给钉住表，测试里 covered 取得到、线上取不到，于是新会话第一跳
+    把整份名单重播了一遍——键径必须与 `_frontdoor_pinned_contract` 一致。
+    """
     return frontdoor_pinned_contract_text(
         None,
         skill_items=[_item(skill_id) for skill_id in skill_ids],
         exec_runtime_policy=None,
         session_temp_dir=None,
-        skill_roster_epoch=skill_roster_epoch_for(None, session_key=SCOPE),
-        session_key=SCOPE,
+        skill_roster_epoch=skill_roster_epoch_for(None, session_key=SESSION_KEY),
+        session_key=SESSION_KEY,
         include_extras=False,
     )
+
+
+def test_frontdoor_first_hop_of_new_session_stays_silent() -> None:
+    """新会话第一跳：头部已带全量名单 ⇒ 一条提示都不发（不重播名单）。"""
+    head = _pin_head(["alpha", "beta"])
+    runner = _frontdoor_runner([_item("alpha"), _item("beta")])
+    messages = runner._apply_frontdoor_skill_roster_notice(
+        [{"role": "system", "content": head}, {"role": "user", "content": "hi"}],
+        session_key=SESSION_KEY,
+    )
+    assert _notice_texts(messages) == []
+    assert notice.notice_context_for(SCOPE)["records"] == []
 
 
 def test_frontdoor_notice_injected_once_and_appended_to_history_end() -> None:
@@ -349,6 +365,24 @@ def test_node_ledger_is_persisted_to_node_metadata() -> None:
         skill_roster_items=[_item("alpha"), _item("beta")],
     )
     assert _notice_texts(again) == []
+
+
+def test_continuity_snapshot_keeps_the_notice_ledger() -> None:
+    """连续性侧车是按白名单装配的：台账不在名单里就永远落不了盘（重启即重复宣布）。"""
+    from g3ku.runtime.web_ceo_sessions import _normalized_completed_continuity_snapshot
+
+    context, _ = notice.record_live_skills({}, [_item("beta")], now="2026-10-19T10:00:00+08:00")
+    context = notice.mark_records_delivered(context, ["beta"], now="2026-10-19T10:00:01+08:00")
+    snapshot = _normalized_completed_continuity_snapshot(
+        {
+            "frontdoor_request_body_messages": [{"role": "user", "content": "hi"}],
+            "skill_roster_notice_context": context,
+        }
+    )
+    assert "skill_roster_notice_context" in snapshot
+    records = snapshot["skill_roster_notice_context"]["records"]
+    assert [item["skill_id"] for item in records] == ["beta"]
+    assert records[0]["delivered_at"] == "2026-10-19T10:00:01+08:00"
 
 
 def test_frontdoor_delivery_publishes_one_internal_row_event() -> None:
