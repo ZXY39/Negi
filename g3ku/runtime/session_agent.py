@@ -641,6 +641,19 @@ class RuntimeAgentSession:
         self._frontdoor_provider_tool_schema_names = self._normalized_name_list(
             payload.get("provider_tool_schema_names")
         )
+        # 钉住的头部原文与重印代数：载荷没带这些键时不动——手动压缩重写出来的那份本来就不带，
+        # 覆盖成空等于下一跳整段重渲头部（头部一改就顶掉身后全部前缀）。
+        if "pinned_contract_text" in payload or "skill_roster_epoch" in payload:
+            from g3ku.runtime.frontdoor.tool_contract import restore_pinned_contract_state
+
+            restore_pinned_contract_state(
+                self,
+                session_key=str(getattr(getattr(self, "state", None), "session_key", "") or "").strip(),
+                text=payload.get("pinned_contract_text"),
+                revision=payload.get("pinned_contract_revision"),
+                skill_ids=payload.get("pinned_contract_skill_ids"),
+                epoch=payload.get("skill_roster_epoch"),
+            )
         self._frontdoor_model_retry_status = None
         self._frontdoor_restore_source = str(source or "none").strip() or "none"
         self._frontdoor_baseline_sync_decision = str(
@@ -873,35 +886,24 @@ class RuntimeAgentSession:
         self._frontdoor_completed_continuity_bridge_pending = False
         return "none"
 
-    def _consume_completed_continuity_bridge(
-        self,
-        *,
-        current_visible_tool_ids: Any,
-        current_visible_skill_ids: Any,
-    ) -> dict[str, Any]:
+    def _consume_completed_continuity_bridge(self) -> dict[str, Any]:
+        """续跑首跳把上一跳的钉住名单与曝光锚带给这一跳；能力集变化不再摘掉它。
+
+        `tools[]` 只在重印边界（token 压缩、手动压缩、空闲窗口第一跳）改名册，而重启不是
+        边界——摘名等于在这一跳重铺清单，身后全部存活正文跟着重付（实盘对照：纯重启那一跳
+        835 uncached，同时带能力变化那一跳 10,452）。权限收回的承载点是执行准入与尾块
+        `denied_tools`，见 `tool-and-skill-system.md`「Provider Tool Surface」。
+
+        带不带来得起来只由结构性判据决定（上一跳 artifact 还在盘、名单与锚非空），那一条
+        已由 `_recompute_frontdoor_completed_continuity_bridge_pending` 把守，这里不叠第二道。
+        """
         if not self._frontdoor_completed_continuity_bridge_pending:
-            return {"pending": False, "enabled": False}
+            return {"carried": False}
         self._frontdoor_completed_continuity_bridge_pending = False
-        stored_tool_ids = self._normalized_name_list(
-            self._frontdoor_visible_tool_ids,
-            sort_values=True,
-        )
-        stored_skill_ids = self._normalized_name_list(
-            self._frontdoor_visible_skill_ids,
-            sort_values=True,
-        )
-        current_tool_ids = self._normalized_name_list(current_visible_tool_ids, sort_values=True)
-        current_skill_ids = self._normalized_name_list(current_visible_skill_ids, sort_values=True)
-        enabled = stored_tool_ids == current_tool_ids and stored_skill_ids == current_skill_ids
         return {
-            "pending": True,
-            "enabled": enabled,
-            "exposure_revision": (
-                self._frontdoor_capability_snapshot_exposure_revision if enabled else ""
-            ),
-            "provider_tool_schema_names": (
-                list(self._frontdoor_provider_tool_schema_names) if enabled else []
-            ),
+            "carried": True,
+            "exposure_revision": str(self._frontdoor_capability_snapshot_exposure_revision or ""),
+            "provider_tool_schema_names": list(self._frontdoor_provider_tool_schema_names),
         }
 
     def _sync_completed_continuity_snapshot(self, *, source_reason: str, internal_turn: bool = False) -> None:
@@ -966,6 +968,24 @@ class RuntimeAgentSession:
                     self._normalized_name_list(
                         getattr(self, "_frontdoor_provider_tool_schema_names", [])
                     )
+                ),
+                # 钉进头部的静态声明原文与它的重印代数。不落盘的话，重启后第一跳只能按当轮
+                # 可见集重渲头部——可见集在停机期间动过一次（增删 skill）就让头部少一行或多
+                # 一行，头部一改身后全部前缀重付。名单过期本身由一次性提示与
+                # `load_skill_context` 三态回执承载，不是重渲头部的理由。
+                "pinned_contract_text": str(
+                    getattr(self, "_frontdoor_pinned_contract_text", "") or ""
+                ),
+                "pinned_contract_revision": str(
+                    getattr(self, "_frontdoor_pinned_contract_revision", "") or ""
+                ).strip(),
+                "pinned_contract_skill_ids": list(
+                    self._normalized_name_list(
+                        getattr(self, "_frontdoor_pinned_contract_skill_ids", [])
+                    )
+                ),
+                "skill_roster_epoch": int(
+                    getattr(self, "_frontdoor_skill_roster_epoch", 0) or 0
                 ),
                 "frontdoor_restore_source": str(
                     getattr(self, "_frontdoor_restore_source", "none") or "none"

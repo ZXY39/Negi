@@ -4326,43 +4326,127 @@ def test_build_frontdoor_request_artifact_payload_includes_provider_tool_exposur
     assert payload["provider_tool_exposure_commit_reason"] == "token_compression"
 
 
-def test_runtime_agent_session_completed_continuity_bridge_requires_exact_visible_sets() -> None:
+def test_runtime_agent_session_completed_continuity_bridge_survives_capability_change() -> None:
+    """续跑首跳的可见能力集变了，也不许摘掉钉住的那份名单与曝光锚。
+
+    摘名等于在这一跳重铺 `tools[]`（清单排在正文最前面，成员一变身后全部重付），而重启不是
+    重印边界。能力收回的承载点是执行准入与尾块 `denied_tools`，不是清单。
+    """
     session = RuntimeAgentSession(
         SimpleNamespace(model="demo", reasoning_effort=None, multi_agent_runner=None),
         session_key="web:shared",
         channel="web",
         chat_id="shared",
     )
-    session._frontdoor_completed_continuity_bridge_pending = True
     session._frontdoor_capability_snapshot_exposure_revision = "exp:demo"
     session._frontdoor_visible_tool_ids = ["exec", "web_fetch"]
     session._frontdoor_visible_skill_ids = ["web-access"]
     session._frontdoor_provider_tool_schema_names = ["exec", "web_fetch"]
 
-    matched = session._consume_completed_continuity_bridge(
-        current_visible_tool_ids=["web_fetch", "exec"],
-        current_visible_skill_ids=["web-access"],
-    )
-
-    assert matched == {
-        "pending": True,
-        "enabled": True,
+    expected = {
+        "carried": True,
         "exposure_revision": "exp:demo",
         "provider_tool_schema_names": ["exec", "web_fetch"],
     }
 
-    session._frontdoor_completed_continuity_bridge_pending = True
-    mismatched = session._consume_completed_continuity_bridge(
-        current_visible_tool_ids=["exec", "web_fetch", "filesystem_write"],
-        current_visible_skill_ids=["web-access"],
-    )
+    for label, current_tool_ids, current_skill_ids in (
+        ("tool added", ["exec", "web_fetch", "filesystem_write"], ["web-access"]),
+        ("tool revoked", ["exec"], ["web-access"]),
+        ("skill added", ["exec", "web_fetch"], ["web-access", "writing-plans"]),
+        ("skill revoked", ["exec", "web_fetch"], []),
+        ("reordered", ["web_fetch", "exec"], ["web-access"]),
+    ):
+        session._frontdoor_completed_continuity_bridge_pending = True
+        assert session._consume_completed_continuity_bridge() == expected, label
 
-    assert mismatched == {
-        "pending": True,
-        "enabled": False,
-        "exposure_revision": "",
-        "provider_tool_schema_names": [],
-    }
+    session._frontdoor_completed_continuity_bridge_pending = True
+    consumed_once = session._consume_completed_continuity_bridge()
+    # 消耗式：同一份基线只在续跑第一跳带一次，之后按当轮名单走。
+    assert consumed_once == expected
+    assert session._consume_completed_continuity_bridge() == {"carried": False}
+
+    session._frontdoor_completed_continuity_bridge_pending = False
+    assert session._consume_completed_continuity_bridge() == {"carried": False}
+
+
+def test_completed_continuity_snapshot_carries_pinned_head_into_restored_session(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """重启后第一跳的头部原文必须还是上一跳发出去的那份，即使停机期间可见 skill 集变过。
+
+    钉住块与 roster epoch 都是进程内的，不落盘就只能按当轮可见集重渲；头部是第一条消息，
+    少一行就让身后全部存活正文重付（实盘 10-19 22:35:35 那一跳删掉一个探针 skill，头部少
+    一行、清单少一名，该跳 10,452 uncached，同会话下一跳回到 2,281）。
+    """
+    from g3ku.runtime.frontdoor import tool_contract as tc
+
+    monkeypatch.setattr(web_ceo_sessions, "workspace_path", lambda: tmp_path)
+    tc.clear_pinned_contract_stores()
+    session_key = "web:shared"
+    temp_dir = "C:/temp/ceo/web_shared"
+    baseline = [
+        {"role": "system", "content": "SYSTEM"},
+        {"role": "user", "content": "continuity question"},
+        {"role": "assistant", "content": "continuity answer"},
+    ]
+    loop = SimpleNamespace(model="demo", reasoning_effort=None, multi_agent_runner=None, sessions=SimpleNamespace())
+    pinned_text = tc.frontdoor_pinned_contract_text(
+        None,
+        skill_items=[
+            {"skill_id": "alpha", "display_name": "Alpha", "description": "first"},
+            {"skill_id": "beta", "display_name": "Beta", "description": "second"},
+        ],
+        exec_runtime_policy=None,
+        session_temp_dir=temp_dir,
+        skill_roster_epoch=3,
+        session_key=session_key,
+    )
+    assert "beta" in pinned_text
+
+    writer = RuntimeAgentSession(loop, session_key=session_key, channel="web", chat_id="shared")
+    writer._frontdoor_request_body_messages = list(baseline)
+    writer._frontdoor_provider_tool_schema_names = ["exec"]
+    writer._frontdoor_capability_snapshot_exposure_revision = "exp:continuity"
+    writer._frontdoor_visible_tool_ids = ["exec"]
+    writer._frontdoor_visible_skill_ids = ["alpha", "beta"]
+    # 会话属性是钉住块的第二载体（`_write_pinned_contract_entry` 与 epoch 都写这两份）。
+    writer._frontdoor_pinned_contract_text = pinned_text
+    writer._frontdoor_pinned_contract_revision = tc.pinned_contract_revision_key(
+        exec_runtime_policy=None, session_temp_dir=temp_dir, skill_roster_epoch=3
+    )
+    writer._frontdoor_pinned_contract_skill_ids = ["alpha", "beta"]
+    writer._frontdoor_skill_roster_epoch = 3
+    writer._sync_completed_continuity_snapshot(source_reason="actual_request_sync")
+
+    # 重启：进程内两份载体全空，只有磁盘快照活下来。
+    tc.clear_pinned_contract_stores()
+    restored = RuntimeAgentSession(loop, session_key=session_key, channel="web", chat_id="shared")
+    assert restored._frontdoor_request_body_messages == baseline
+    assert tc.skill_roster_epoch_for(restored, session_key=session_key) == 3
+
+    # 停机期间删掉 beta：可见集只剩 alpha，头部仍必须逐字节复用钉住的那份。
+    replayed = tc.frontdoor_pinned_contract_text(
+        restored,
+        skill_items=[{"skill_id": "alpha", "display_name": "Alpha", "description": "first"}],
+        exec_runtime_policy=None,
+        session_temp_dir=temp_dir,
+        skill_roster_epoch=tc.skill_roster_epoch_for(restored, session_key=session_key),
+        session_key=session_key,
+    )
+    assert replayed == pinned_text
+
+    # 真的到了重印边界才重渲，钉住不是永久冻结。
+    tc.bump_skill_roster_epoch(restored, session_key=session_key)
+    reprint = tc.frontdoor_pinned_contract_text(
+        restored,
+        skill_items=[{"skill_id": "alpha", "display_name": "Alpha", "description": "first"}],
+        exec_runtime_policy=None,
+        session_temp_dir=temp_dir,
+        skill_roster_epoch=tc.skill_roster_epoch_for(restored, session_key=session_key),
+        session_key=session_key,
+    )
+    assert "beta" not in reprint
 
 
 def test_fresh_turn_tool_schema_seed_skips_expected_bridge_when_previous_names_do_not_match(

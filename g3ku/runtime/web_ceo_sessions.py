@@ -1009,6 +1009,13 @@ def _normalized_name_list(values: Any) -> list[str]:
     return normalized
 
 
+def _normalized_skill_roster_epoch(value: Any) -> int:
+    try:
+        return max(0, int(value or 0))
+    except (TypeError, ValueError):
+        return 0
+
+
 def _normalized_message_records(values: Any) -> list[dict[str, Any]]:
     return [dict(item) for item in list(values or []) if isinstance(item, dict)]
 
@@ -1204,6 +1211,13 @@ def _normalized_completed_continuity_snapshot(payload: Any) -> dict[str, Any] | 
             payload.get("skill_roster_notice_context")
         ),
         "provider_tool_schema_names": _normalized_name_list(payload.get("provider_tool_schema_names")),
+        # 钉进头部的静态声明原文与重印代数。同样是白名单装配：不列出来就落不了盘，
+        # 于是重启后第一跳按当轮可见集重渲头部，头部一改身后全部前缀重付。
+        # 原文不 strip——那是上一跳真发出去的字节。
+        "pinned_contract_text": str(payload.get("pinned_contract_text") or ""),
+        "pinned_contract_revision": str(payload.get("pinned_contract_revision") or "").strip(),
+        "pinned_contract_skill_ids": _normalized_name_list(payload.get("pinned_contract_skill_ids")),
+        "skill_roster_epoch": _normalized_skill_roster_epoch(payload.get("skill_roster_epoch")),
         "frontdoor_restore_source": restore_source,
         "frontdoor_baseline_sync_decision": baseline_sync_decision,
         "updated_at": updated_at,
