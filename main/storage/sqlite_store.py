@@ -96,6 +96,14 @@ class SQLiteTaskStore:
         self._setup()
         self._read_conn = self._open_read_conn()
         self._light_read_conn = self._open_read_conn()
+        # 读车道现场（纯观测，不参与任何判据）：CANTOPEN 只在**某一条**连接上发生时，
+        # 光靠异常文本分不清"库打不开"还是"这条连接的句柄没了"。这里记下每条读车道的
+        # 建立时刻与建立者 pid，失败时连同"另一条车道同一时刻跑同一条 SQL 的结果"一起打出来。
+        self._read_lane_stamps: dict[str, dict[str, Any]] = {
+            'read': self._lane_stamp('read'),
+            'light': self._lane_stamp('light'),
+        }
+        self._read_lane_cantopen_counts: dict[str, int] = {}
         self._writer_thread = threading.Thread(
             target=self._writer_loop,
             name=f'sqlite-task-store-writer:{self.path.name}',
@@ -3717,7 +3725,12 @@ class SQLiteTaskStore:
 
     def _fetchone(self, sql: str, params: tuple[object, ...] = ()) -> sqlite3.Row | None:
         row, _elapsed = self._fetch_one_on(
-            self._read_conn, self._read_lock, sql, params, self._query_section('sqlite.query.fetchone', sql)
+            self._read_conn,
+            self._read_lock,
+            sql,
+            params,
+            self._query_section('sqlite.query.fetchone', sql),
+            lane='read',
         )
         return row
 
@@ -3728,12 +3741,18 @@ class SQLiteTaskStore:
             sql,
             params,
             self._query_section('sqlite.query.fetchone.light', sql),
+            lane='light',
         )
         return row
 
     def _fetchall(self, sql: str, params: tuple[object, ...] = ()) -> list[sqlite3.Row]:
         rows, _elapsed = self._fetch_many_on(
-            self._read_conn, self._read_lock, sql, params, self._query_section('sqlite.query.fetchall', sql)
+            self._read_conn,
+            self._read_lock,
+            sql,
+            params,
+            self._query_section('sqlite.query.fetchall', sql),
+            lane='read',
         )
         return rows
 
@@ -3744,6 +3763,7 @@ class SQLiteTaskStore:
             sql,
             params,
             self._query_section('sqlite.query.fetchall.light', sql),
+            lane='light',
         )
         return rows
 
@@ -3754,6 +3774,7 @@ class SQLiteTaskStore:
         sql: str,
         params: tuple[object, ...],
         section: str,
+        lane: str = '',
     ) -> tuple[sqlite3.Row | None, float]:
         started_mono = time.perf_counter()
         started_at = datetime.now().astimezone().isoformat(timespec='seconds')
@@ -3761,7 +3782,12 @@ class SQLiteTaskStore:
             try:
                 row = conn.execute(sql, params).fetchone()
             except sqlite3.Error as exc:
-                self._log_sqlite_query_error(scope='read', sql=sql, exc=exc)
+                self._log_sqlite_query_error(
+                    scope='read',
+                    sql=sql,
+                    exc=exc,
+                    detail=self._read_lane_failure_detail(lane, exc, sql, params),
+                )
                 raise
         elapsed_ms = max(0.0, (time.perf_counter() - started_mono) * 1000.0)
         self._update_runtime_metrics(sqlite_query_latency_ms=elapsed_ms)
@@ -3775,6 +3801,7 @@ class SQLiteTaskStore:
         sql: str,
         params: tuple[object, ...],
         section: str,
+        lane: str = '',
     ) -> tuple[list[sqlite3.Row], float]:
         started_mono = time.perf_counter()
         started_at = datetime.now().astimezone().isoformat(timespec='seconds')
@@ -3782,7 +3809,12 @@ class SQLiteTaskStore:
             try:
                 rows = list(conn.execute(sql, params).fetchall())
             except sqlite3.Error as exc:
-                self._log_sqlite_query_error(scope='read', sql=sql, exc=exc)
+                self._log_sqlite_query_error(
+                    scope='read',
+                    sql=sql,
+                    exc=exc,
+                    detail=self._read_lane_failure_detail(lane, exc, sql, params),
+                )
                 raise
         elapsed_ms = max(0.0, (time.perf_counter() - started_mono) * 1000.0)
         self._update_runtime_metrics(sqlite_query_latency_ms=elapsed_ms)
@@ -3828,13 +3860,76 @@ class SQLiteTaskStore:
             return 'UNKNOWN'
         return str(token[0] or 'UNKNOWN').upper()
 
-    def _log_sqlite_query_error(self, *, scope: str, sql: str, exc: sqlite3.Error) -> None:
+    def _lane_stamp(self, lane: str) -> dict[str, Any]:
+        return {
+            'lane': lane,
+            'created_at': datetime.now().astimezone().isoformat(timespec='seconds'),
+            'created_mono': time.perf_counter(),
+            'created_pid': os.getpid(),
+        }
+
+    def _other_read_lane(self, lane: str) -> tuple[str, sqlite3.Connection, threading.RLock]:
+        if lane == 'light':
+            return 'read', self._read_conn, self._read_lock
+        return 'light', self._light_read_conn, self._light_read_lock
+
+    def _read_lane_failure_detail(self, lane: str, exc: BaseException, sql: str, params: tuple[object, ...]) -> str:
+        """读车道 CANTOPEN 的现场。只在 CANTOPEN 时构造，别的错误返回空串。
+
+        要回答的问题只有一个：**同一个进程、同一个库文件，另一条读车道此刻能不能跑同一条
+        SQL**。能 ⇒ "库/路径/环境打不开"整类解释作废，坏的是这条连接自己的句柄；
+        不能 ⇒ 才是文件级问题。取另一条车道的锁必须非阻塞：`refresh_read_snapshot` 是按
+        read→light 的顺序拿的，反向阻塞拿会咬成死锁。
+        """
+        if not lane:
+            return ''
+        errorname = str(getattr(exc, 'sqlite_errorname', '') or '')
+        if not errorname.startswith('SQLITE_CANTOPEN') and int(getattr(exc, 'sqlite_errorcode', 0) or 0) != 14:
+            return ''
+        parts: list[str] = [f'lane={lane}', f'pid={os.getpid()}', f'thread={threading.current_thread().name}']
+        stamp = dict(self._read_lane_stamps.get(lane) or {})
+        created_mono = stamp.get('created_mono')
+        if created_mono is not None:
+            parts.append(f'conn_age_s={time.perf_counter() - float(created_mono):.1f}')
+            parts.append(f'conn_created_pid={stamp.get("created_pid")}')
+            same_pid = 'yes' if stamp.get('created_pid') == os.getpid() else 'NO'
+            parts.append(f'same_pid_as_now={same_pid}')
+        try:
+            parts.append(f'db_bytes={os.path.getsize(str(self.path))}')
+        except OSError as side_exc:
+            parts.append(f'db_bytes=ERR:{type(side_exc).__name__}')
+        for suffix in ('-wal', '-shm'):
+            side_path = f'{self.path}{suffix}'
+            try:
+                parts.append(f'{suffix}_bytes={os.path.getsize(side_path)}')
+            except OSError:
+                parts.append(f'{suffix}=missing')
+        other_lane, other_conn, other_lock = self._other_read_lane(lane)
+        if other_lock.acquire(blocking=False):
+            try:
+                rows = other_conn.execute(sql, params).fetchall()
+                parts.append(f'cross_check[{other_lane}]=ok:{len(rows)}')
+            except sqlite3.Error as other_exc:
+                parts.append(
+                    f'cross_check[{other_lane}]=failed:{getattr(other_exc, "sqlite_errorname", type(other_exc).__name__)}'
+                )
+            finally:
+                other_lock.release()
+        else:
+            parts.append(f'cross_check[{other_lane}]=busy')
+        count = int(self._read_lane_cantopen_counts.get(lane, 0)) + 1
+        self._read_lane_cantopen_counts[lane] = count
+        parts.append(f'lane_cantopen_occurrences={count}')
+        return ' '.join(str(item) for item in parts)
+
+    def _log_sqlite_query_error(self, *, scope: str, sql: str, exc: sqlite3.Error, detail: str = '') -> None:
         logger.opt(exception=exc).error(
-            f'sqlite {scope} query failed: operation={{}} sqlite_errorcode={{}} sqlite_errorname={{}} path={{}}',
+            f'sqlite {scope} query failed: operation={{}} sqlite_errorcode={{}} sqlite_errorname={{}} path={{}} {{}}',
             self._sqlite_operation_name(sql),
             getattr(exc, 'sqlite_errorcode', None),
             getattr(exc, 'sqlite_errorname', None),
             str(self.path),
+            detail,
         )
 
     def _update_runtime_metrics(self, **values: float) -> None:
