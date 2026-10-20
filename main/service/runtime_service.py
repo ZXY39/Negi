@@ -7001,24 +7001,39 @@ class MainRuntimeService:
         declaration_placeholders: list[str] = []
         last_sent_schema_index: dict[str, Any] | None = None
         bundle_schema_index: dict[str, Any] | None = None
+        # 阶段 0 观测先行：逐名记来源，并记"这一跳有多少名字需要兜底"作分母。没有分母，
+        # 命中 0 分不清"这档没用"与"这档压根没机会"，阶段 4 的退役排期就没有判据。
+        schema_source_hits = {
+            'instance': 0,
+            'retired': 0,
+            'backfill': 0,
+            'bundle': 0,
+            'last_sent': 0,
+            'placeholder': 0,
+        }
+        schema_fallback_opportunities = 0
         for candidate_name in provider_tool_names:
             normalized_name = str(candidate_name or '').strip()
             if not normalized_name or normalized_name in dispatched_tool_names:
                 continue
+            schema_fallback_opportunities += 1
             to_schema = getattr(declared_instances.get(normalized_name), 'to_model_schema', None)
             if callable(to_schema):
                 declared_denied_tool_schemas[normalized_name] = to_schema()
+                schema_source_hits['instance'] += 1
                 continue
             # 实例已经不在（资源被删除）：取删除前抄下的那一份，`tools[]` 才能与上一跳
             # 逐字节相同。
             retired_schema = lookup_tool_schema(normalized_name)
             if isinstance(retired_schema, dict):
                 declared_denied_tool_schemas[normalized_name] = retired_schema
+                schema_source_hits['retired'] += 1
                 continue
             carried_schema = prior_declaration_backfill.get(normalized_name)
             if isinstance(carried_schema, dict):
                 declared_denied_tool_schemas[normalized_name] = carried_schema
                 declaration_backfill[normalized_name] = carried_schema
+                schema_source_hits['backfill'] += 1
                 continue
             # 第四源：清单变化那一跳存下的整表引用。它不是"上一跳原文"——那份按 kind 被逐跳
             # 剪掉，剪掉的那一刻这档就空了；整表引用只在名单真变时重写，所以重启、剪枝、
@@ -7031,6 +7046,7 @@ class MainRuntimeService:
             if isinstance(bundled_schema, dict):
                 declared_denied_tool_schemas[normalized_name] = bundled_schema
                 declaration_backfill[normalized_name] = bundled_schema
+                schema_source_hits['bundle'] += 1
                 continue
             # 第五源：上一跳真正发出去的那份原文（旧清单还没有整表引用时的过渡档）。原文是
             # 逐字节的历史事实，复用它不会改变 `tools[]` 的字节。取到就顺手写回载体，
@@ -7043,6 +7059,7 @@ class MainRuntimeService:
             if isinstance(last_sent_schema, dict):
                 declared_denied_tool_schemas[normalized_name] = last_sent_schema
                 declaration_backfill[normalized_name] = last_sent_schema
+                schema_source_hits['last_sent'] += 1
                 continue
             # 五档全空：名字留在清单里，参数表明示这一跳没带出来。删名与占位在缓存上等价
             # （断点都从这一条的起始字节开始），差别全在语义——他要的是"四个来源都取不到
@@ -7050,6 +7067,7 @@ class MainRuntimeService:
             declared_denied_tool_schemas[normalized_name] = self._placeholder_pinned_tool_schema(
                 normalized_name
             )
+            schema_source_hits['placeholder'] += 1
             declaration_placeholders.append(normalized_name)
         # 尾块只点名"无权限或资源已下架"：仍被授权、只是本轮没有派发资格的名字不进这份
         # 文案——模型调它拿到的是"先 load_tool_context"那一档，措辞得跟真实处置一致。
@@ -7159,6 +7177,9 @@ class MainRuntimeService:
                 'declaration_schema_ref': declaration_schema_ref,
                 'declaration_schema_placeholders': list(declaration_placeholders),
                 'declaration_schema_ref_fault': int(declaration_schema_ref_fault),
+                # 阶段 0 观测读数，装在 trace 里（整份 dict 原样持久化，零归一化写点）。
+                'schema_source_hits': dict(schema_source_hits),
+                'schema_source_fallback_opportunities': int(schema_fallback_opportunities),
             },
         }
 

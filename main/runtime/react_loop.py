@@ -20,6 +20,7 @@ from g3ku.agent.tools.base import Tool
 from g3ku.config.context_refresh import idle_boundary_exceeded
 from g3ku.config.live_runtime import get_runtime_config
 from g3ku.content import content_summary_and_ref, parse_content_envelope
+from g3ku.resources.retired_schemas import schema_name as _provider_schema_name
 from g3ku.providers.base import (
     ToolCallRequest,
     provider_body_output_cap,
@@ -559,6 +560,12 @@ class ReActToolLoop:
                 provider_tool_names=provider_tool_names,
                 current_tools=current_tools,
                 tool_schema_selection=tool_schema_selection,
+            )
+            self._record_node_wire_tool_schema_readings(
+                task_id=task.task_id,
+                node_id=node.node_id,
+                tool_schema_selection=tool_schema_selection,
+                tool_schemas=tool_schemas,
             )
             # 声明里带着但派发字典没有的名字：执行侧照旧拒，拒绝文案要能说出"是无权限"。
             runtime_context['declared_denied_tool_names'] = self._normalized_name_list(
@@ -3363,6 +3370,85 @@ class ReActToolLoop:
             if isinstance(schema, dict):
                 rendered.append(schema)
         return rendered
+
+    @staticmethod
+    def _node_wire_tool_schema_readings(tool_schemas: list[Any] | None) -> dict[str, Any]:
+        """线上这份 `tools[]` 的三枚读数：内容哈希、**按位置**的名字序列哈希、逐名内容哈希。
+
+        `actual_tool_schema_hash` 由 `_tool_signature_hash` 算，签名按名字排序之后才哈希
+        （`main/runtime/chat_backend.py:463-477`）⇒ 对顺序盲。钉住要守的是"成员没变而字节变"，
+        所以顺序与逐名各另存一枚；都是新增字段，不动 `_tool_signature_hash` 本体。
+        """
+        payload = [dict(item) for item in list(tool_schemas or []) if isinstance(item, dict)]
+        names = [_provider_schema_name(item) for item in payload]
+        item_hashes: dict[str, str] = {}
+        for name, item in zip(names, payload):
+            if not name or name in item_hashes:
+                continue
+            item_hashes[name] = hashlib.sha256(
+                json.dumps(item, ensure_ascii=False, sort_keys=True).encode('utf-8')
+            ).hexdigest()[:16]
+        return {
+            'content_hash': str(
+                runtime_chat_backend.build_actual_request_diagnostics(
+                    request_messages=[],
+                    tool_schemas=payload,
+                ).get('actual_tool_schema_hash')
+                or ''
+            ).strip(),
+            'sequence_hash': hashlib.sha256(
+                json.dumps(list(names), ensure_ascii=False).encode('utf-8')
+            ).hexdigest(),
+            'item_hashes': item_hashes,
+        }
+
+    def _record_node_wire_tool_schema_readings(
+        self,
+        *,
+        task_id: str,
+        node_id: str,
+        tool_schema_selection: dict[str, Any],
+        tool_schemas: list[Any] | None,
+    ) -> None:
+        """把当跳 wire 读数挂进 trace（trace 整份落帧，零归一化写点），名单未变而字节变了就点名。
+
+        比对只在两侧都有读数且序列哈希相同的那一跳成立：序列不同说明跨过了重印边界，那不是
+        回归。链首没有可比对象——**没比对不等于通过**。
+        """
+        readings = self._node_wire_tool_schema_readings(tool_schemas)
+        trace = tool_schema_selection.get('trace')
+        if not isinstance(trace, dict):
+            trace = {}
+            tool_schema_selection['trace'] = trace
+        trace['wire_tool_schema_hash'] = readings['content_hash']
+        trace['wire_tool_name_sequence_hash'] = readings['sequence_hash']
+        trace['wire_tool_schema_item_hashes'] = dict(readings['item_hashes'])
+        prior_trace = dict(
+            (self._runtime_frame(str(task_id or '').strip(), str(node_id or '').strip()) or {}).get(
+                'model_visible_tool_selection_trace'
+            )
+            or {}
+        )
+        previous_sequence = str(prior_trace.get('wire_tool_name_sequence_hash') or '').strip()
+        previous_content = str(prior_trace.get('wire_tool_schema_hash') or '').strip()
+        if not previous_sequence or not previous_content:
+            return
+        if previous_sequence != readings['sequence_hash'] or previous_content == readings['content_hash']:
+            return
+        previous_items = dict(prior_trace.get('wire_tool_schema_item_hashes') or {})
+        changed_names = [
+            name
+            for name, digest in list(readings['item_hashes'].items())
+            if str(previous_items.get(name) or '') and str(previous_items.get(name)) != digest
+        ]
+        logger.warning(
+            'node tools[] bytes changed outside a reprint boundary: task={} node={} previous={} current={} changed={}',
+            str(task_id or '').strip(),
+            str(node_id or '').strip(),
+            previous_content[:16],
+            readings['content_hash'][:16],
+            ','.join(changed_names) or '(unknown)',
+        )
 
     def _model_visible_tools_for_iteration(
         self,

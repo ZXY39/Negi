@@ -46,6 +46,7 @@ from g3ku.resources.retired_schemas import (
     index_schemas_by_name,
     lookup_tool_schema,
     placeholder_tool_schema,
+    schema_name,
 )
 from g3ku.runtime import skill_roster_notice as _skill_roster_notice
 from g3ku.runtime.chunk_compression_plan import (
@@ -5875,6 +5876,18 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
                 for item in list(state.get("frontdoor_pinned_schema_placeholders") or [])
                 if str(item or "").strip()
             ],
+            # 阶段 0 观测读数。上面那份 `tool_schemas` 是预检按 `_selected_tool_schemas` 另渲
+            # 的记录面，`wire_*` 三枚才是真发出去的那一份——两组并存正是为了能直接读出它们的差，
+            # 而不是再靠人记住"这两本账不同源"。
+            "frontdoor_tool_schema_hits": dict(state.get("frontdoor_tool_schema_hits") or {}),
+            "frontdoor_tool_schema_fallback_opportunities": int(
+                state.get("frontdoor_tool_schema_fallback_opportunities") or 0
+            ),
+            "wire_tool_schema_hash": str(state.get("frontdoor_wire_tool_schema_hash") or "").strip(),
+            "wire_tool_name_sequence_hash": str(
+                state.get("frontdoor_wire_tool_name_sequence_hash") or ""
+            ).strip(),
+            "wire_tool_schema_item_hashes": dict(state.get("frontdoor_wire_tool_schema_item_hashes") or {}),
             "stable_prefix_hash": str(diagnostics.get("stable_prefix_hash") or "").strip(),
             "dynamic_appendix_hash": str(diagnostics.get("dynamic_appendix_hash") or "").strip(),
             "observed_input_truth": copy.deepcopy(observed_input_truth),
@@ -7400,21 +7413,32 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
         bundled_schemas = dict(getattr(session, "_frontdoor_pinned_tool_schema_bundle", None) or {})
         tools_by_name: dict[str, Any] = {}
         placeholder_names: list[str] = []
+        schema_source_hits = {"declared": 0, "registry": 0, "retired": 0, "bundle": 0, "placeholder": 0}
         for name in keep:
             tool = declared_tools.get(name)
-            if tool is None and callable(registry_lookup):
+            if tool is not None:
+                schema_source_hits["declared"] += 1
+            elif callable(registry_lookup):
                 try:
                     tool = registry_lookup(name)
                 except Exception:
                     tool = None
+                if tool is not None:
+                    schema_source_hits["registry"] += 1
             if tool is None:
                 retired = retired_lookup(name) if callable(retired_lookup) else None
                 bundled = bundled_schemas.get(name)
-                payload = retired if isinstance(retired, dict) else bundled
-                if not isinstance(payload, dict):
+                if isinstance(retired, dict):
+                    payload = retired
+                    schema_source_hits["retired"] += 1
+                elif isinstance(bundled, dict):
+                    payload = bundled
+                    schema_source_hits["bundle"] += 1
+                else:
                     # 三档全空：名字留住，参数表明示这一跳没带出来。删名与占位的断点位置
                     # 相同（都从这一条的起始字节起断），占位不省缓存，省的是语义。
                     payload = placeholder_tool_schema(name)
+                    schema_source_hits["placeholder"] += 1
                     placeholder_names.append(name)
                 tool = SimpleNamespace(
                     name=name,
@@ -7427,6 +7451,14 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
         # 占位是一次渲染期的事实，落进 state 让这一跳的工件把它记下来：没有可数落点的
         # 兜底等于没有兜底——"名字还在"与"名字是占位"在工具哈希上看不出区别。
         state["frontdoor_pinned_schema_placeholders"] = list(placeholder_names)
+        # 按档计数与机会分母：`bundle` / `placeholder` 两档今天在发送道上恒为 0——发送前的
+        # 可渲染性闸门（`_frontdoor_schema_renderable_tool_names`）按"活实例 ∪ 删除前快照"
+        # 先摘名，判据比这里窄，需要这两档的名字根本走不到渲染器。读数把这层不可见固定下来，
+        # 也给出塌缩前后的对照基线。
+        state["frontdoor_tool_schema_hits"] = dict(schema_source_hits)
+        state["frontdoor_tool_schema_fallback_opportunities"] = int(
+            schema_source_hits["retired"] + schema_source_hits["bundle"] + schema_source_hits["placeholder"]
+        )
         # 整表只在两种情况下重写：这一跳出现过取不到参数表的名字（占位字节也要被下一跳
         # 逐字节复用），或名单成员与整表当前覆盖的那份不同（＝重印边界）。常态跳不重建
         # 字典，比较用的是整表自己的键，不另开一份平行名单。
@@ -7434,6 +7466,76 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
         if session is not None and bundle_changed:
             setattr(session, "_frontdoor_pinned_tool_schema_bundle", dict(index_schemas_by_name(rendered)))
         return rendered
+
+    @staticmethod
+    def _frontdoor_wire_tool_schema_readings(tool_schemas: list[Any] | None) -> dict[str, Any]:
+        """线上那份 `tools[]` 的三枚读数：内容哈希、**按位置**的名字序列哈希、逐名内容哈希。
+
+        工件里的 `actual_tool_schema_hash` 走 `_tool_signature_hash`，签名是按名字排序之后才
+        哈希的（`main/runtime/chat_backend.py:463-477`）⇒ 它对 tools[] 的顺序是盲的。钉住清单
+        要守的恰恰是"成员没变而字节变"，所以顺序与逐名各另存一枚。都是新增字段，不动
+        `_tool_signature_hash` 本体（它另有消费者）。
+        """
+        payload = [dict(item) for item in list(tool_schemas or []) if isinstance(item, dict)]
+        names = [schema_name(item) for item in payload]
+        item_hashes: dict[str, str] = {}
+        for name, item in zip(names, payload):
+            if not name or name in item_hashes:
+                continue
+            item_hashes[name] = hashlib.sha256(
+                json.dumps(item, ensure_ascii=False, sort_keys=True).encode("utf-8")
+            ).hexdigest()[:16]
+        return {
+            "content_hash": str(
+                build_actual_request_diagnostics(
+                    request_messages=[],
+                    tool_schemas=payload,
+                ).get("actual_tool_schema_hash")
+                or ""
+            ).strip(),
+            "sequence_hash": hashlib.sha256(
+                json.dumps(list(names), ensure_ascii=False).encode("utf-8")
+            ).hexdigest(),
+            "item_hashes": item_hashes,
+        }
+
+    def _record_frontdoor_wire_tool_schema_readings(
+        self,
+        *,
+        session: Any,
+        state: dict[str, Any],
+        tool_schemas: list[Any] | None,
+    ) -> None:
+        """把当跳线上 `tools[]` 的读数写进 state，并在"名单与顺序都没动、字节却变了"时点名。
+
+        比对只在两侧都有读数、且序列哈希相同的那一跳成立：序列不同说明跨过了重印边界（名单
+        本来就该变），那不是回归。首跳与存量会话（上一跳还没这份字段）直接跳过——**没有可比
+        对象不等于通过**，判读时按"未比对"记。
+        """
+        readings = self._frontdoor_wire_tool_schema_readings(tool_schemas)
+        state["frontdoor_wire_tool_schema_hash"] = readings["content_hash"]
+        state["frontdoor_wire_tool_name_sequence_hash"] = readings["sequence_hash"]
+        state["frontdoor_wire_tool_schema_item_hashes"] = dict(readings["item_hashes"])
+        previous = self._frontdoor_latest_actual_request_record(session=session, state=None) or {}
+        previous_sequence = str(previous.get("wire_tool_name_sequence_hash") or "").strip()
+        previous_content = str(previous.get("wire_tool_schema_hash") or "").strip()
+        if not previous_sequence or not previous_content:
+            return
+        if previous_sequence != readings["sequence_hash"] or previous_content == readings["content_hash"]:
+            return
+        previous_items = dict(previous.get("wire_tool_schema_item_hashes") or {})
+        changed_names = [
+            name
+            for name, digest in list(readings["item_hashes"].items())
+            if str(previous_items.get(name) or "") and str(previous_items.get(name)) != digest
+        ]
+        logger.warning(
+            "frontdoor tools[] bytes changed outside a reprint boundary: session_key={} previous={} current={} changed={}",
+            str(getattr(getattr(session, "state", None), "session_key", "") or "").strip(),
+            previous_content[:16],
+            readings["content_hash"][:16],
+            ",".join(changed_names) or "(unknown)",
+        )
 
     def _frontdoor_execution_bundle(
         self,
@@ -8753,6 +8855,14 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
         if follow_up_update:
             state_for_request = {**state_for_request, **follow_up_update}
         tool_schemas = self._frontdoor_tool_schemas_for_state(state=state_for_request, runtime=runtime)
+        # 阶段 0 观测先行：对**线上这一份**取读数并比对，不用预检那份（预检走
+        # `_selected_tool_schemas`，名单比 wire 少两颗合成控制工具，拿它当断言对象会永远
+        # 读不到"控制工具字节变了"这一类事实）。
+        self._record_frontdoor_wire_tool_schema_readings(
+            session=getattr(getattr(runtime, "context", None), "session", None),
+            state=state_for_request,
+            tool_schemas=tool_schemas,
+        )
         while True:
             preflight_snapshot = self._frontdoor_send_preflight_snapshot(
                 state=state_for_request,
