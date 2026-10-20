@@ -104,7 +104,7 @@ from g3ku.runtime.stage_prompt_compaction import (
 from g3ku.runtime.stage_prompt_compaction import (
     stage_transition_signature as _shared_stage_transition_signature,
 )
-from g3ku.runtime.tool_context_presence import kept_contract_index, kept_tool_contexts_from_frames
+from g3ku.runtime.tool_context_presence import contract_presence_index
 from g3ku.runtime.tool_error_guidance import (
     append_parameter_error_guidance,
     availability_hint,
@@ -2650,7 +2650,6 @@ class ReActToolLoop:
                     actor_role=str((runtime_context or {}).get('actor_role') or '').strip(),
                     session_id=str((runtime_context or {}).get('session_key') or '').strip(),
                     request_messages=list(request_messages or []),
-                    node=node,
                 )
             )
         except Exception:
@@ -8267,48 +8266,17 @@ class ReActToolLoop:
         except Exception:
             return
 
-    @classmethod
-    def _latest_load_tool_context_messages_by_tool_id(
-        cls,
+    @staticmethod
+    def _latest_contract_fingerprints_by_tool_id(
         messages: list[dict[str, Any]],
-        *,
-        kept_stage_contexts: Any = None,
-    ) -> dict[str, dict[str, Any]]:
-        """在场的 toolskill 契约载体，与 callable 收窄共用同一判据。
+    ) -> dict[str, str]:
+        """在场的 toolskill 契约：``tool_id -> fingerprint``，与 callable 收窄共用同一判据函数。
 
-        除了未压缩的 loader 结果行，阶段块里保留的正文（`kept_tool_contexts`）同样算
-        在场。两处必须同判据，否则裁撤后重读被放行、同一份正文在上下文里出现两次。
+        判据只认模型眼前的 `[TOOL_CONTRACT_V1:…]` 块（两条投递道都印它），阶段台账里保留的
+        正文不再算在场（D9）。两处必须同判据，否则裁撤后重读被放行、同一份正文在上下文里
+        出现两次。
         """
-        latest: dict[str, dict[str, Any]] = {}
-        for message in reversed(list(messages or [])):
-            if not isinstance(message, dict):
-                continue
-            if str((message or {}).get("role") or "").strip().lower() != "tool":
-                continue
-            tool_name = str((message or {}).get("name") or "").strip()
-            if tool_name not in {"load_tool_context", "load_tool_context_v2"}:
-                continue
-            payload = cls._tool_message_json_payload(message)
-            if not bool(payload.get("ok")):
-                continue
-            tool_id = str(payload.get("tool_id") or "").strip()
-            fingerprint = str(payload.get("tool_context_fingerprint") or "").strip()
-            if not tool_id or not fingerprint or tool_id in latest:
-                continue
-            latest[tool_id] = dict(message or {})
-        for tool_id, fingerprint in kept_contract_index(kept_stage_contexts).items():
-            if not tool_id or not fingerprint or tool_id in latest:
-                continue
-            latest[tool_id] = {
-                "role": "tool",
-                "name": "load_tool_context",
-                "content": json.dumps(
-                    {"ok": True, "tool_id": tool_id, "tool_context_fingerprint": fingerprint},
-                    ensure_ascii=False,
-                ),
-                "carried_by": "kept_stage_context",
-            }
-        return latest
+        return contract_presence_index(request_messages=list(messages or []))
 
     @staticmethod
     def _load_tool_context_repeat_repair_message() -> str:
@@ -8373,12 +8341,7 @@ class ReActToolLoop:
                 list(runtime_context.get("rbac_visible_tool_names") or current_frame.get("rbac_visible_tool_names") or [])
             )
         )
-        latest_messages = self._latest_load_tool_context_messages_by_tool_id(
-            message_history,
-            kept_stage_contexts=kept_tool_contexts_from_frames(
-                (getattr(node, "metadata", None) or {}).get("execution_stages")
-            ),
-        )
+        latest_fingerprints = self._latest_contract_fingerprints_by_tool_id(message_history)
         base_probe = {
             "recorded_at": now_iso(),
             "stage": "load_tool_context_direct_read_violations",
@@ -8386,7 +8349,7 @@ class ReActToolLoop:
             "message_history_chars": self._approx_message_history_chars(message_history),
             "response_tool_call_count": len(list(response_tool_calls or [])),
             "requested_tool_ids": requested_tool_ids[:8],
-            "latest_load_tool_context_message_count": len(latest_messages),
+            "latest_contract_fingerprint_count": len(latest_fingerprints),
             "candidate_tool_count": len(candidate_tool_names),
             "callable_tool_count": len(callable_tool_names),
             "hydrated_tool_count": len(hydrated_tool_names),
@@ -8435,11 +8398,10 @@ class ReActToolLoop:
                     continue
                 resolved_tool_id = str(current_payload.get("tool_id") or requested_tool_id).strip()
                 current_fingerprint = str(current_payload.get("tool_context_fingerprint") or "").strip()
-                latest_tool_message = latest_messages.get(resolved_tool_id)
-                if not latest_tool_message or not current_fingerprint:
+                latest_fingerprint = str(latest_fingerprints.get(resolved_tool_id) or "").strip()
+                if not latest_fingerprint or not current_fingerprint:
                     continue
-                latest_payload = self._tool_message_json_payload(latest_tool_message)
-                if str(latest_payload.get("tool_context_fingerprint") or "").strip() != current_fingerprint:
+                if latest_fingerprint != current_fingerprint:
                     continue
                 violations.append(
                     {

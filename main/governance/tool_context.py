@@ -42,38 +42,24 @@ def _normalized_runtime_name_list(values: Any) -> list[str]:
 
 
 def build_tool_context_fingerprint(payload: dict[str, Any] | None) -> str:
+    """契约修订身份 = toolskill 源正文 + 参数表源，两样都是**源**，不是本轮视角。
+
+    刻意不含（前三项是派生/运行时注入，掺进来会让同一份正文算出多个指纹，重复读守卫与
+    在场判据从此判不准；实盘：同一工具同长度正文出现 2-4 个指纹）：
+
+    - `parameter_contract_markdown` / `required_parameters` / `example_arguments`：
+      都从 `parameters_schema` 派生，源已在哈希里，再派生一遍等于给渲染器加一个改号入口。
+    - `exec_runtime_policy`：治理模式，配置刷新就变，正文一个字没动。
+    - `warnings` / `errors`：`errors` 里含 repair 原因，是本轮状态。
+    - `callable` / `available` / `repair_required` / promotion 系列：本轮视角。
+    """
     normalized = dict(payload or {}) if isinstance(payload, dict) else {}
     if not normalized:
         return ""
     fingerprint_payload = {
         "tool_id": str(normalized.get("tool_id") or "").strip(),
         "content": str(normalized.get("content") or ""),
-        "parameter_contract_markdown": str(normalized.get("parameter_contract_markdown") or ""),
-        "required_parameters": [
-            str(item or "").strip()
-            for item in list(normalized.get("required_parameters") or [])
-            if str(item or "").strip()
-        ],
-        "example_arguments": normalized.get("example_arguments") or {},
-        "warnings": [
-            str(item or "").strip()
-            for item in list(normalized.get("warnings") or [])
-            if str(item or "").strip()
-        ],
-        "errors": [
-            str(item or "").strip()
-            for item in list(normalized.get("errors") or [])
-            if str(item or "").strip()
-        ],
-        "exec_runtime_policy": (
-            dict(normalized.get("exec_runtime_policy") or {})
-            if isinstance(normalized.get("exec_runtime_policy"), dict)
-            else None
-        ),
-        # 刻意不含 callable / available / repair_required / callable_now /
-        # will_be_hydrated_next_turn / hydration_targets：那几项是"本轮视角"，逐轮会变。
-        # 指纹的身份是契约正文，重复读守卫拿它跨轮比对，掺进轮次状态后同一份正文会算出
-        # 两个指纹，守卫就再也拦不住重读（实盘：同一工具同长度正文出现 2-4 个指纹）。
+        "parameters_schema": normalized.get("parameters_schema") or {},
     }
     encoded = json.dumps(
         fingerprint_payload,

@@ -36,7 +36,7 @@ from g3ku.runtime.stage_prompt_compaction import (
     stage_archive_owner,
     stage_record_dict,
 )
-from g3ku.runtime.tool_context_presence import normalize_kept_tool_contexts
+from g3ku.runtime.kept_contract_snapshot import normalize_kept_tool_contexts
 from main.ids import new_stage_id, new_stage_round_id
 from main.models import (
     FAILURE_CLASS_BUSINESS_UNPASSED,

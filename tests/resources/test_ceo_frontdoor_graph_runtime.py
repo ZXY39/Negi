@@ -7,6 +7,7 @@ import pytest
 
 from g3ku.runtime.frontdoor import _ceo_create_agent_impl as create_agent_impl
 from g3ku.runtime.frontdoor import _ceo_runtime_ops as ceo_runtime_ops
+from g3ku.runtime.tool_contract_block import attach_tool_contract_block
 from g3ku.agent.tools.base import Tool
 from main.governance.tool_context import build_tool_context_fingerprint
 
@@ -365,7 +366,10 @@ async def test_frontdoor_duplicate_load_tool_context_guard_blocks_same_uncompres
                     "role": "tool",
                     "tool_call_id": "call-old",
                     "name": "load_tool_context",
-                    "content": json.dumps(current_payload, ensure_ascii=False),
+                    # 交付形态与真车道同形：`content` 里装着契约块，判据只认它。
+                    "content": json.dumps(
+                        attach_tool_contract_block(current_payload), ensure_ascii=False
+                    ),
                 }
             ],
             "tool_names": ["load_tool_context", "exec"],

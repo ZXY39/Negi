@@ -1,8 +1,13 @@
 """刀一：契约在场即能力 —— 在场判据、撤销回写台账、重复读守卫同判据。
 
-不变量：一个工具在某一跳能不能被调用，取决于它的 toolskill 契约正文在这一跳是不是在场。
-判据只有一个函数（`g3ku/runtime/tool_context_presence.py`），两个载体都喂给它：
-未被压缩删除的 loader 结果行、阶段台账里的 `kept_tool_contexts` 条目。
+不变量：一个工具在某一跳能不能被调用，取决于它的 toolskill 契约**标记块**在这一跳是不是
+在模型可见上下文里。判据只有一个函数（`g3ku/runtime/tool_context_presence.py`），载体也
+只有这一个：请求视图消息里的 `[TOOL_CONTRACT_V1:<tool_id>:<fingerprint>]` 块。
+
+> 本次改造（`docs/FIX_PLAN_tool_hydration_contract_presence.md` D9）把阶段台账里的
+> `kept_tool_contexts` 从在场载体里摘掉了——正文不在模型眼前就不算在场，裁撤即离场、下次
+> 调用重新拿契约。留在本文件里的 keep 用例只测**生产端**（提交点快照、账本字段、回放字节），
+> 那批东西按计划在 Stage 5 随整条 keep 通道一并删除。
 
 覆盖 `docs/FIX_PLAN_contract-presence-capability.md` §4 的 1–6 项（刀一能覆盖的部分）。
 撤销**必须回写台账**（不只是收窄视图）：只收窄视图的话，该名字既不在 callable、又被
@@ -29,16 +34,16 @@ from g3ku.runtime.kept_contract_snapshot import (
     FAILURE_STAGE_NOT_LOADED,
     build_kept_contract_snapshot,
     keep_closure_fields,
+    kept_tool_contexts_from_frames,
+    normalize_kept_tool_contexts,
     resolve_kept_contracts,
 )
 from g3ku.runtime.stage_prompt_compaction import KEPT_CONTRACT_HEADING, completed_stage_blocks
+from g3ku.runtime.tool_contract_block import render_tool_contract_block
 from g3ku.runtime.tool_context_presence import (
     contract_presence,
     contract_presence_index,
-    kept_contract_index,
-    kept_tool_contexts_from_frames,
     loader_contract_index,
-    normalize_kept_tool_contexts,
     partition_contract_presence,
 )
 from g3ku.runtime.tool_error_guidance import availability_hint
@@ -51,7 +56,7 @@ from main.runtime.react_loop import ReActToolLoop
 from main.service.runtime_service import MainRuntimeService
 
 TOOL_ID = "filesystem_write"
-FINGERPRINT = "sha256:" + "a" * 64
+FINGERPRINT = "tcf:" + "a" * 16
 OTHER_ID = "content_open"
 
 
@@ -78,9 +83,19 @@ class _FakeTool(Tool):
 
 
 def _loader_message(tool_id: str = TOOL_ID, fingerprint: str = FINGERPRINT, *, ok: bool = True) -> dict:
-    payload = {"ok": ok, "tool_id": tool_id}
-    if ok:
-        payload["tool_context_fingerprint"] = fingerprint
+    """投递形态与真车道同形：JSON 信封的 `content` 字段里装着契约块。
+
+    失败载荷不含块——判据据此判不在场。
+    """
+    if not ok:
+        payload = {"ok": False, "tool_id": tool_id, "error": "Tool not visible"}
+    else:
+        payload = {
+            "ok": True,
+            "tool_id": tool_id,
+            "tool_context_fingerprint": fingerprint,
+            "content": render_tool_contract_block(tool_id, fingerprint, f"# {tool_id}\n契约正文"),
+        }
     return {"role": "tool", "name": "load_tool_context", "content": json.dumps(payload, ensure_ascii=False)}
 
 
@@ -97,45 +112,40 @@ def _kept_stages(tool_id: str = TOOL_ID, fingerprint: str = FINGERPRINT) -> list
 
 
 # ---------------------------------------------------------------------------
-# §2.1 共享判据：两个载体、失败载荷、skill 不参与
+# §2.1 共享判据：只有一个载体（块），失败载荷不算，skill 与台账正文都不参与
 # ---------------------------------------------------------------------------
 
 
-def test_contract_presence_accepts_both_carriers() -> None:
+def test_contract_presence_accepts_the_block_carrier_only() -> None:
     present, fingerprint = contract_presence(TOOL_ID, request_messages=[_loader_message()])
     assert present is True
     assert fingerprint == FINGERPRINT
 
-    present, fingerprint = contract_presence(TOOL_ID, kept_stage_contexts=_kept_stages())
-    assert present is True
-    assert fingerprint == FINGERPRINT
-
-    present, fingerprint = contract_presence(TOOL_ID, request_messages=[], kept_stage_contexts=[])
+    # 阶段台账里的保留正文不再算在场（D9）：判据不再接受那个参数，签名里都没有它。
+    present, fingerprint = contract_presence(TOOL_ID, request_messages=[])
     assert present is False
     assert fingerprint == ""
 
 
-def test_contract_presence_index_merges_carriers_and_skips_failures() -> None:
+def test_contract_presence_index_skips_failures_and_ledger_entries() -> None:
     index = contract_presence_index(
-        request_messages=[_loader_message(ok=False), _loader_message(OTHER_ID, "sha256:bbb")],
-        kept_stage_contexts=_kept_stages("skill_backed_tool", "sha256:ccc"),
+        request_messages=[_loader_message(ok=False), _loader_message(OTHER_ID, "tcf:" + "b" * 16)],
     )
     assert OTHER_ID in index
-    assert "skill_backed_tool" in index
     assert TOOL_ID not in index
     assert loader_contract_index([_loader_message(ok=False)]) == {}
-    assert kept_contract_index([{"tool_id": "", "tool_context_fingerprint": "x"}]) == {}
+    # 台账条目本身还能归一化（生产端 Stage 5 才删），但它不再进在场索引。
+    assert normalize_kept_tool_contexts([{"tool_id": "", "tool_context_fingerprint": "x"}]) == []
 
     present, absent = partition_contract_presence([OTHER_ID, "skill_backed_tool", "filesystem_delete"], index=index)
-    assert present == [OTHER_ID, "skill_backed_tool"]
-    assert absent == ["filesystem_delete"]
+    assert present == [OTHER_ID]
+    assert absent == ["skill_backed_tool", "filesystem_delete"]
 
 
 def test_skill_contexts_do_not_participate_in_presence() -> None:
     """skill 不水合、没有 callable 可摘，所以保留 skill 正文不构成在场证据。"""
     stages = [{"stage_id": "s1", "kept_skill_contexts": [{"skill_id": TOOL_ID, "body": "正文"}]}]
-    present, _ = contract_presence(TOOL_ID, kept_stage_contexts=stages)
-    assert present is False
+    assert contract_presence(TOOL_ID, request_messages=[]) [0] is False
     assert kept_tool_contexts_from_frames({"stages": stages}) == []
     assert normalize_kept_tool_contexts([{"tool_id": " x ", "body": "b"}])[0]["tool_id"] == "x"
 
@@ -243,8 +253,12 @@ def test_node_contract_present_hydration_stays_callable() -> None:
     assert frame["hydration_revoked_executor_names"] == []
 
 
-def test_node_kept_stage_context_keeps_tool_callable() -> None:
-    """§4.2 合成一条保留契约条目（刀二才写真身）⇒ 仍在 callable、不撤销。"""
+def test_node_kept_stage_context_no_longer_keeps_tool_callable() -> None:
+    """D9 之后阶段台账里的保留正文**不再撑起 callable**：块不在眼前就撤。
+
+    这正是删掉这条道的理由——正文留在账本里、模型却读不到，判据说"在场"而模型下一次调用
+    撞墙，就是"看得见名字却调不动"那类漂移。裁撤即离场，下次调用重新拿契约。
+    """
     service, log_service = _node_service(hydrated=[TOOL_ID])
     present = service._node_hydrated_executor_names(
         task_id="task-cp",
@@ -252,16 +266,15 @@ def test_node_kept_stage_context_keeps_tool_callable() -> None:
         actor_role="execution",
         session_id="web:shared",
         request_messages=[],
-        kept_stage_contexts=_kept_stages(),
     )
-    assert present == [TOOL_ID]
+    assert present == []
     frame = log_service.read_runtime_frame("task-cp", "node-cp")
-    assert frame["hydration_revoked_executor_names"] == []
-    assert frame["hydrated_executor_state"] == [TOOL_ID]
+    assert frame["hydration_revoked_executor_names"] == [TOOL_ID]
+    assert frame["hydrated_executor_state"] == []
 
 
-def test_node_kept_context_is_read_from_stage_ledger() -> None:
-    """阶段账本的家在 `node.metadata['execution_stages']`，callable 组装必须从那里读保留正文。"""
+def test_node_stage_ledger_alone_does_not_make_tool_callable() -> None:
+    """账本里留着条目、请求里没有块 ⇒ 不可调用（旧行为是这一条就能撑起 callable）。"""
     service, _log = _node_service(hydrated=[TOOL_ID])
     node = _node_obj()
     node.metadata = {"execution_stages": {"stages": _kept_stages()}}
@@ -270,7 +283,16 @@ def test_node_kept_context_is_read_from_stage_ledger() -> None:
         node=node,
         request_messages=[],
     )
-    assert TOOL_ID in callable_names
+    assert TOOL_ID not in callable_names
+    # 对照要用**没被上一跳撤销过**的台账：第一次调用已经把不在场的名字写回台账了，
+    # 拿同一份 service 再跑一次只会读到空台账（那是台账机制自己的账，不是判据）。
+    healed_service, _healed_log = _node_service(hydrated=[TOOL_ID])
+    with_block = healed_service._callable_tool_names_for_node(
+        task=_task_obj(),
+        node=node,
+        request_messages=[_loader_message()],
+    )
+    assert TOOL_ID in with_block
 
 
 def test_node_revoked_name_returns_to_candidate() -> None:
@@ -413,15 +435,14 @@ def test_frontdoor_callable_drops_contract_absent_hydration() -> None:
     assert TOOL_ID in ops._frontdoor_callable_tool_names_for_state(present_state)
 
 
-def test_frontdoor_kept_context_counts_as_present() -> None:
+def test_frontdoor_kept_context_does_not_count_as_present() -> None:
+    """D9：账本里留着正文、请求里没有块 ⇒ 判不在场并撤销（旧行为是它算在场）。"""
     ops = _ops()
     state = _frontdoor_state(hydrated=[TOOL_ID], messages=[], stages=_kept_stages())
-    assert TOOL_ID in ops._frontdoor_callable_tool_names_for_state(state)
-    # 只断言"仍在 callable"在未修改的树上是假绿（今日什么都不滤，它当然在）。加上判据侧的
-    # 断言：在场的是**保留正文**这个载体，名字既不 revoked 也留在台账里，才证明是它撑住的。
+    assert TOOL_ID not in ops._frontdoor_callable_tool_names_for_state(state)
     kept, revoked = ops._frontdoor_contract_presence_partition(state, list(state["hydrated_tool_names"]))
-    assert kept == [TOOL_ID]
-    assert revoked == []
+    assert kept == []
+    assert revoked == [TOOL_ID]
 
 
 def test_frontdoor_partition_reports_revoked_names() -> None:
@@ -548,34 +569,27 @@ def test_canonical_context_carries_kept_tool_contexts() -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_duplicate_guards_count_kept_context_as_present() -> None:
-    """§4.2 后半：两条车道的重读守卫共用同一在场判据 ⇒ 块内保留正文算在场。
+def test_duplicate_guards_share_the_block_presence_index() -> None:
+    """§4.2 后半：两条车道的重读守卫与 callable 收窄共用同一个在场判据（只认块）。
 
-    算在场才会拒重读；不算在场就放行、同一份正文在上下文里出现两次。
-    载体本身（loader 行）也要能被同一 helper 认出来，否则守卫换了判据就失配。
+    同判据才会拒重读；判据口径不同就会放行、同一份正文在上下文里出现两次。台账里保留的
+    正文不再算在场（D9），守卫也就不会因为账本里有正文而拒读一次"模型其实读不到"的重读。
     """
     loader_history = [_loader_message()]
-    kept = _kept_stages()
 
-    from_loader = ReActToolLoop._latest_load_tool_context_messages_by_tool_id(loader_history)
-    assert TOOL_ID in from_loader
-    assert TOOL_ID in CeoFrontDoorRuntimeOps._latest_frontdoor_load_tool_context_messages_by_tool_id(loader_history)
+    from_loader = ReActToolLoop._latest_contract_fingerprints_by_tool_id(loader_history)
+    assert from_loader[TOOL_ID] == FINGERPRINT
+    assert CeoFrontDoorRuntimeOps._frontdoor_contract_fingerprint_index(loader_history)[TOOL_ID] == FINGERPRINT
 
     unrelated = [{"role": "tool", "name": "load_tool_context", "content": json.dumps({"ok": True, "tool_id": "z"})}]
-    # 对照条：只交 loader 载体、不交保留正文时守卫认不出 TOOL_ID（这条 loader 行连
-    # fingerprint 都没有，本就不算契约载体）。带 `kept_stage_contexts` 的那两条断言在下面
-    # §4.2 里要求 TOOL_ID **在场**，与此处 `== {}` 不能同时成立，故对照只跑无保留正文的一侧。
-    assert ReActToolLoop._latest_load_tool_context_messages_by_tool_id(unrelated) == {}
-    assert CeoFrontDoorRuntimeOps._latest_frontdoor_load_tool_context_messages_by_tool_id(unrelated) == {}
+    assert ReActToolLoop._latest_contract_fingerprints_by_tool_id(unrelated) == {}
+    assert CeoFrontDoorRuntimeOps._frontdoor_contract_fingerprint_index(unrelated) == {}
 
-    node_from_kept = ReActToolLoop._latest_load_tool_context_messages_by_tool_id(unrelated, kept_stage_contexts=kept)
-    assert TOOL_ID in node_from_kept
-    assert node_from_kept[TOOL_ID]["name"] == "load_tool_context"
-    frontdoor_from_kept = CeoFrontDoorRuntimeOps._latest_frontdoor_load_tool_context_messages_by_tool_id(
-        unrelated,
-        kept_stage_contexts=kept,
-    )
-    assert TOOL_ID in frontdoor_from_kept
+    # 对照条：只有账本正文、没有块 ⇒ 守卫认不出 TOOL_ID。
+    kept = _kept_stages()
+    ledger_only = [{"role": "tool", "name": "submit_next_stage", "content": json.dumps({"kept_tool_contexts": kept})}]
+    assert ReActToolLoop._latest_contract_fingerprints_by_tool_id(ledger_only) == {}
+    assert CeoFrontDoorRuntimeOps._frontdoor_contract_fingerprint_index(ledger_only) == {}
 
 
 # ---------------------------------------------------------------------------
@@ -666,21 +680,16 @@ def test_kept_contract_block_bytes_do_not_follow_resource_file_edits(tmp_path) -
     assert completed_stage_blocks(ledger)[0]["content"] == rendered
     assert "改过的契约正文" not in rendered
 
-    # 裁撤后的下一跳：请求视图里再没有 loader 行，撑住 callable 的只有账本那一份正文。
+    # 裁撤后的下一跳：请求视图里再没有块，账本那份正文**不再撑住 callable**（D9）。
+    # 块字节稳定性仍是账本自己的契约（写手活到 Stage 5），但它与能力已经脱钩。
     service, log_service = _node_service(hydrated=[TOOL_ID])
     node = _node_obj()
     node.metadata = {"execution_stages": ledger}
-    assert TOOL_ID in service._callable_tool_names_for_node(task=_task_obj(), node=node, request_messages=[])
-    assert log_service.read_runtime_frame("task-cp", "node-cp")["hydration_revoked_executor_names"] == []
+    assert TOOL_ID not in service._callable_tool_names_for_node(task=_task_obj(), node=node, request_messages=[])
+    assert log_service.read_runtime_frame("task-cp", "node-cp")["hydration_revoked_executor_names"] == [TOOL_ID]
 
-    # 同一份账本喂给重复读守卫 ⇒ 认得出这一跳已经在场，重读判成重复读、不再产第二份。
-    kept_index = ReActToolLoop._latest_load_tool_context_messages_by_tool_id(
-        [],
-        kept_stage_contexts=kept_tool_contexts_from_frames(ledger),
-    )
-    assert TOOL_ID in kept_index
-    assert kept_index[TOOL_ID]["name"] == "load_tool_context"
-
+    # 守卫同判据：只有账本、没有块 ⇒ 认不出这一跳在场，重读不会被判成重复读。
+    assert ReActToolLoop._latest_contract_fingerprints_by_tool_id([]) == {}
 
 
 def test_revoked_contract_absent_names_return_to_candidate_view() -> None:
@@ -747,6 +756,11 @@ def _evicted_stage_state(*, kept_entries: list[dict] | None = None) -> dict:
 
 
 def _loader_messages() -> list[dict]:
+    """一条**真在场**的 loader 行：JSON 信封的 `content` 里装着契约块。
+
+    只带 `tool_context_fingerprint` 键而没有块，在新判据下等于"不在场"，那会让下面这批
+    用例假绿（裁撤对照、钉住派发都依赖这一行本来是在场的）。
+    """
     return [
         {
             "role": "tool",
@@ -757,6 +771,9 @@ def _loader_messages() -> list[dict]:
                     "ok": True,
                     "tool_id": TOOL_ID,
                     "tool_context_fingerprint": "tcf:fixture-presence",
+                    "content": render_tool_contract_block(
+                        TOOL_ID, "tcf:fixture-presence", "# fixture toolskill body"
+                    ),
                 },
                 ensure_ascii=False,
             ),
@@ -778,8 +795,12 @@ def test_partition_treats_evicted_stage_loader_row_as_absent() -> None:
     assert kept == []
 
 
-def test_partition_kept_context_overrides_stage_eviction() -> None:
-    """被 keep_tools 点名的正文仍然在场 ⇒ 不撤销。"""
+def test_partition_kept_context_no_longer_overrides_stage_eviction() -> None:
+    """裁撤掉的那条阶段即使点名 keep 过，正文也不再算在场（D9 摘掉第二载体）。
+
+    与上一条对照跑：同一份消息、只把 `kept_tool_contexts` 撤掉，撤销结论不变——说明撑住
+    它的是块，不是账本。
+    """
 
     ops = _ops()
     state = {
@@ -793,8 +814,8 @@ def test_partition_kept_context_overrides_stage_eviction() -> None:
         ),
     }
     kept, revoked = ops._frontdoor_contract_presence_partition(state, [TOOL_ID])
-    assert kept == [TOOL_ID]
-    assert revoked == []
+    assert kept == []
+    assert revoked == [TOOL_ID]
 
 
 def test_dispatch_excludes_contract_absent_hydrated_tool() -> None:
@@ -1125,11 +1146,12 @@ async def test_graph_execute_tools_records_revocation_in_the_eviction_batch(monk
     assert TOOL_ID in [str(item.get("tool_id") or "") for item in list(result["candidate_tool_items"] or [])]
 
 
-async def test_graph_execute_tools_keeps_named_contract_in_the_eviction_batch(monkeypatch) -> None:
-    """同批点名 `keep_tools` ⇒ 正文行虽被裁走，台账不撤销、块里带着正文。
+async def test_graph_execute_tools_named_contract_is_revoked_in_the_eviction_batch(monkeypatch) -> None:
+    """同批点名 `keep_tools`：正文仍被写进台账（生产端 Stage 5 才删），但**不再撑住 callable**。
 
-    写回到裁后视图的反面用例：在场证据从 loader 行换成 `kept_tool_contexts`，判据读不到
-    那份账本就会把模型点名留住的工具一起撤掉——留不留得住只看这一条。
+    D9 之后在场证据只有块。裁撤把 loader 行摘走，台账里那份正文判不到在场 ⇒ 名字照常撤销、
+    回到候选，模型下一次调用走冲动路径重新拿契约。留正文不留能力，正是这次删掉这条道的理由：
+    模型看得见"留住了"，调起来却被拒，就是漂移。
     """
 
     def _payload_getter(tool_id: str) -> dict:
@@ -1153,11 +1175,12 @@ async def test_graph_execute_tools_keeps_named_contract_in_the_eviction_batch(mo
     assert evicted["context_evicted"] is True
     assert [item["tool_id"] for item in list(evicted.get("kept_tool_contexts") or [])] == [TOOL_ID]
     assert "call-load-1" not in _surviving_tool_call_ids(result)
-    assert result["hydration_revoked_executor_names"] == []
-    assert TOOL_ID in list(result["hydrated_tool_names"] or [])
-    assert TOOL_ID in list(result["tool_names"] or [])
-    assert TOOL_ID not in list(result["candidate_tool_names"] or [])
-    # 块里必须真的带着正文：只有标题没有正文的保留契约等于把撤销藏进渲染里。
+    # 撤销照常发生：账本里那份正文不再是第二载体。
+    assert result["hydration_revoked_executor_names"] == [TOOL_ID]
+    assert TOOL_ID not in list(result["hydrated_tool_names"] or [])
+    assert TOOL_ID not in list(result["tool_names"] or [])
+    assert TOOL_ID in list(result["candidate_tool_names"] or [])
+    # 台账仍带着正文（写手还活着，Stage 5 整条删）——只是它不再等于能力。
     rendered = "\n".join(str(item.get("content") or "") for item in list(result["messages"] or []))
     assert KEPT_CONTRACT_HEADING in rendered
     assert "保留的契约正文" in rendered
@@ -1328,7 +1351,8 @@ def test_presence_revocation_subtracts_the_dispatch_dict_before_selection() -> N
     assert "filesystem_stat" not in kept
     assert "exec" in kept and "content_open" in kept
     assert calls and calls[0]["request_messages"] == []
-    assert calls[0]["node"] is not None
+    # 判据不再需要 node：阶段账本不是在场载体，所以也不用为它按 node_id 重读存储。
+    assert "node" not in calls[0]
 
     # 判据跑不起来 ⇒ 照旧不撤（撤销是收紧，不是本轮可用性的前提）
     def _boom(**kwargs):
@@ -1408,17 +1432,14 @@ def test_presence_revocation_subtracts_the_dispatch_dict_before_selection() -> N
     assert calls and "filesystem_stat" not in kept_cheap
 
 
-def test_node_kept_context_is_read_from_store_not_the_opening_node_snapshot() -> None:
-    """裁撤之后，保留正文只存在于**存储里那份**账本，传入的 node 常是循环开局的快照。
+def test_node_presence_never_reads_the_stage_ledger_again() -> None:
+    """保留正文这条道以前要"按 node_id 重读存储"才判得出在场；现在两种读法都不算在场。
 
-    实盘 task:91b09176d70a：阶段 1 的 `kept_tool_contexts` 已带 1980 字正文落库，同一跳不重载直调
-    仍被撤（`Error: tool not available … 尚未水化，请先 load_tool_context`）——判据读的是传进来的
-    node 对象，那份 metadata 还停在任务开始时刻，`execution_stages` 里没有这条阶段。react_loop 取
-    阶段态一律按 node_id 重读存储（`_execution_stage_state_for_runtime`），保留正文这条道同口径。
+    旧用例（实盘 task:91b09176d70a）钉的是"读传进来的 node 快照会把已落库的正文读成空"。
+    D9 之后判据不再读那份账本，读快照还是读存储都不改变结论——撤就撤到底，模型下一次调用
+    重新拿契约。这条用例把口径钉死：**账本内容不参与在场**。
     """
     service, log_service = _node_service(hydrated=[TOOL_ID])
-    stale_node = _node_obj()
-    stale_node.metadata = {}
     fresh_node = SimpleNamespace(
         node_id="node-cp",
         metadata={"execution_stages": {"stages": _kept_stages()}},
@@ -1431,25 +1452,11 @@ def test_node_kept_context_is_read_from_store_not_the_opening_node_snapshot() ->
         actor_role="execution",
         session_id="web:shared",
         request_messages=[],
-        node=stale_node,
     )
-    assert present == [TOOL_ID]
+    assert present == []
     frame = log_service.read_runtime_frame("task-cp", "node-cp")
-    assert frame["hydration_revoked_executor_names"] == []
-    assert frame["hydrated_executor_state"] == [TOOL_ID]
-
-    # 存储里没有这个节点时退回传入对象，别把已有正文读成空。
-    service.store = SimpleNamespace(get_node=lambda node_id: None)
-    node_with_ledger = _node_obj()
-    node_with_ledger.metadata = {"execution_stages": {"stages": _kept_stages()}}
-    assert service.revoke_contract_absent_node_hydration(
-        task_id="task-cp",
-        node_id="node-cp",
-        actor_role="execution",
-        session_id="web:shared",
-        request_messages=[],
-        node=node_with_ledger,
-    ) == [TOOL_ID]
+    assert frame["hydration_revoked_executor_names"] == [TOOL_ID]
+    assert frame["hydrated_executor_state"] == []
 
 
 def test_path_anchor_contract_renders_from_one_source_across_lanes():

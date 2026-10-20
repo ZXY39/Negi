@@ -4,6 +4,7 @@ import json
 from typing import Any, Callable
 
 from g3ku.agent.tools.base import Tool
+from g3ku.runtime.tool_contract_block import attach_tool_contract_block
 from g3ku.runtime.tool_error_guidance import format_name_group, no_load_needed_hint
 from main.governance.tool_context import apply_runtime_tool_context_projection
 
@@ -290,4 +291,6 @@ class LoadToolContextTool(_MainRuntimeTool):
                 # 前门提升与节点提升都读不到 hydration_targets，load 就白做了。
                 live_visible_tool_names=[tool_name] if live_visible_via_fallback else None,
             )
-        return json.dumps(payload, ensure_ascii=False)
+        # 成功的 load 结果把契约块写进 `content`（在场判据只认它）；失败/搜索态没有契约
+        # 可交付，`attach_tool_contract_block` 原样返回载荷，信封形状不变。
+        return json.dumps(attach_tool_contract_block(payload), ensure_ascii=False)

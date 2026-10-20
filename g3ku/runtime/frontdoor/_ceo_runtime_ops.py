@@ -109,11 +109,9 @@ from g3ku.runtime.stage_prompt_compaction import (
     strip_stage_block_echo,
     summarized_stage_ids,
 )
+from g3ku.runtime.kept_contract_snapshot import normalize_kept_tool_contexts
 from g3ku.runtime.tool_context_presence import (
     contract_presence_index,
-    kept_contract_index,
-    kept_tool_contexts_from_frames,
-    normalize_kept_tool_contexts,
     partition_contract_presence,
 )
 from g3ku.runtime.tool_error_guidance import availability_hint
@@ -4258,11 +4256,14 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
         state: CeoGraphState | dict[str, Any] | None,
         hydrated_tool_names: Any,
     ) -> tuple[list[str], list[str]]:
-        """把已水合名单按「契约正文这一跳在不在场」分两组。
+        """把已水合名单按「契约标记块这一跳在不在场」分两组。
 
-        在场判据取的是**本轮请求视图**（`state['messages']`）加阶段台账里保留的正文，
-        不是消息里曾经出现过的全部历史：阶段肉身被裁撤后正文离开请求，工具就该立刻
-        不可调用；下一跳重新 load 才还得回来。
+        在场判据取的是**本轮请求视图**（`state['messages']`）里的 `[TOOL_CONTRACT_V1:…]`
+        块，不是消息里曾经出现过的全部历史：阶段肉身被裁撤后块离开请求，工具就该立刻
+        不可调用；下一跳重新拿契约才还得回来。
+
+        阶段台账里保留的正文**不再算在场**（D9）：正文不在模型眼前就不算，第二载体正是
+        「看得见名字却调不动」那类漂移的来源。
 
         前门的 callable 在三个算点各自重算（装配路的 message_builder、
         `_refresh_prompt_cache_state`、发送预检），所以判据必须收在这一个方法里，
@@ -4279,14 +4280,7 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
             # 比凭"读不到"就摘掉能力安全。空列表不算缺失——空列表是"这跳确实没有正文"。
             return hydrated, []
         messages = self._frontdoor_view_without_evicted_stage_rows(state, list(state.get("messages") or []))
-        kept_contexts = kept_tool_contexts_from_frames(self._frontdoor_stage_state_snapshot(state))
-        # 阶段台账在家有两份归一化产物（stage_state 与 canonical），装配路自己也是
-        # 「stage_state 空就回退 canonical」（见 `_graph_prepare_turn` 的 seed 裁剪）。
-        # 只读一份会在 stage_state 恰好为空的那一跳把保留正文读成没有，判成不在场。
-        kept_contexts.extend(
-            kept_tool_contexts_from_frames(state.get("frontdoor_canonical_context"))
-        )
-        index = contract_presence_index(request_messages=messages, kept_stage_contexts=kept_contexts)
+        index = contract_presence_index(request_messages=messages)
         return partition_contract_presence(hydrated, index=index)
 
     def _frontdoor_view_without_evicted_stage_rows(
@@ -4303,8 +4297,9 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
         文档禁止的第四态，且执行照旧放行。
 
         这里不依赖调用方交来哪一份视图：按阶段账本自己把裁撤阶段的 call id 集合摘出来，
-        成对剔除这些行。保留过的正文另有载体（`kept_tool_contexts` → 在场索引），
-        所以剔除不会把该留的能力判没。
+        成对剔除这些行。剔除认的是**行**（`tool_call_id`）而不是 loader 名字——冲动调用
+        投进的契约块同样属于那条阶段，裁走时一起走；裁走即离场，下一次调用重新拿契约
+        （D9 之后没有"保留正文"这第二载体，撑住能力的只有眼前这份块）。
         """
         try:
             from g3ku.runtime.stage_prompt_compaction import extract_call_id, stage_round_call_ids
@@ -4685,48 +4680,16 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
             runtime=runtime_context,
         )
 
-    @classmethod
-    def _latest_frontdoor_load_tool_context_messages_by_tool_id(
-        cls,
+    @staticmethod
+    def _frontdoor_contract_fingerprint_index(
         messages: list[dict[str, Any]] | None,
-        *,
-        kept_stage_contexts: Any = None,
-    ) -> dict[str, dict[str, Any]]:
-        """与节点道 `_latest_load_tool_context_messages_by_tool_id` 同一在场判据。
+    ) -> dict[str, str]:
+        """在场契约的 ``tool_id -> fingerprint``，与 callable 收窄共用同一个判据函数。
 
-        阶段块里保留的正文（`kept_tool_contexts`）也算在场：判据不同口径时会放行重读，
-        同一份正文在同一次请求里出现两份。
+        两处必须同判据，否则裁撤后重读被放行、同一份正文在上下文里出现两次。阶段台账里
+        保留的正文不算在场（D9）——判据只认模型眼前那份块。
         """
-        latest: dict[str, dict[str, Any]] = {}
-        for message in reversed(list(messages or [])):
-            if not isinstance(message, dict):
-                continue
-            if str((message or {}).get("role") or "").strip().lower() != "tool":
-                continue
-            tool_name = str((message or {}).get("name") or "").strip()
-            if tool_name not in {"load_tool_context", "load_tool_context_v2"}:
-                continue
-            payload = cls._tool_context_hydration_payload((message or {}).get("content"))
-            if not isinstance(payload, dict) or not bool(payload.get("ok")):
-                continue
-            tool_id = str(payload.get("tool_id") or "").strip()
-            fingerprint = str(payload.get("tool_context_fingerprint") or "").strip()
-            if not tool_id or not fingerprint or tool_id in latest:
-                continue
-            latest[tool_id] = dict(message or {})
-        for tool_id, fingerprint in kept_contract_index(kept_stage_contexts).items():
-            if not tool_id or not fingerprint or tool_id in latest:
-                continue
-            latest[tool_id] = {
-                "role": "tool",
-                "name": "load_tool_context",
-                "content": json.dumps(
-                    {"ok": True, "tool_id": tool_id, "tool_context_fingerprint": fingerprint},
-                    ensure_ascii=False,
-                ),
-                "carried_by": "kept_stage_context",
-            }
-        return latest
+        return contract_presence_index(request_messages=list(messages or []))
 
     @staticmethod
     def _load_tool_context_duplicate_repair_text() -> str:
@@ -4776,17 +4739,12 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
         current_fingerprint = str(current_payload.get("tool_context_fingerprint") or "").strip()
         if not current_fingerprint:
             return ""
-        latest_messages = self._latest_frontdoor_load_tool_context_messages_by_tool_id(
-            list(state.get("messages") or []),
-            kept_stage_contexts=kept_tool_contexts_from_frames(self._frontdoor_stage_state_snapshot(state)),
-        )
-        latest_message = latest_messages.get(resolved_tool_id)
-        if latest_message is None:
+        latest_fingerprint = self._frontdoor_contract_fingerprint_index(
+            list(state.get("messages") or [])
+        ).get(resolved_tool_id)
+        if not latest_fingerprint:
             return ""
-        latest_payload = self._tool_context_hydration_payload(latest_message.get("content"))
-        if not isinstance(latest_payload, dict):
-            return ""
-        if str(latest_payload.get("tool_context_fingerprint") or "").strip() != current_fingerprint:
+        if str(latest_fingerprint).strip() != current_fingerprint:
             return ""
         return self._load_tool_context_duplicate_repair_text()
 

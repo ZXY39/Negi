@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Any
 
 from g3ku.core.results import ContentEnvelope, ContentHandle
+from g3ku.runtime.tool_contract_block import contract_text_length
 from g3ku.utils.helpers import model_data_root, resolve_model_path
 
 INLINE_CHAR_LIMIT = 6000
@@ -447,8 +448,25 @@ def _should_keep_inline_search_tool_result(payload: dict[str, Any]) -> bool:
     return _inline_tool_payload_fits_limits(payload)
 
 
+def _should_keep_inline_tool_contract(value: Any) -> bool:
+    """契约块必须原样留在上下文里。
+
+    块被换成 6 行预览信封时，在场判据看不见它——该工具从此**永远水合不上且没有任何报错**，
+    症状只是"某些工具反复走冲动调用"（D10）。26 份 toolskill 实测最大 6001 字符（
+    `manage_task_nodes`，正好压在 `INLINE_CHAR_LIMIT` 上），上限沿用 always-inline 那档
+    16000，留一倍以上余量；真顶到上限时靠 `tool_contract_presence` 读数发现，不靠猜。
+
+    判据按**内容**而不是按 `tool_result:<名>` 枚举：投递道是"任何已授权工具都可能带块"，
+    列名字迟早漏一条，而且名字拼错（`*_cn`）在这里是静默失效。
+    """
+    length = contract_text_length(value)
+    return 0 < length <= OPEN_EXCERPT_CHAR_LIMIT
+
+
 def _should_keep_inline_tool_result(value: Any, *, source_kind: str) -> bool:
     normalized = str(source_kind or "").strip().lower()
+    if _should_keep_inline_tool_contract(value):
+        return True
     if normalized in _ALWAYS_INLINE_TOOL_RESULT_SOURCES:
         return len(_stringify(value)) <= OPEN_EXCERPT_CHAR_LIMIT
     if _should_keep_inline_direct_load_tool_result(value, source_kind=source_kind):

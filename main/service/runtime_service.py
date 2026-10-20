@@ -49,7 +49,6 @@ from g3ku.runtime.core_tools import configured_core_tools, resolve_core_tool_tar
 from g3ku.runtime.memory_scope import DEFAULT_WEB_MEMORY_SCOPE, normalize_memory_scope
 from g3ku.runtime.tool_context_presence import (
     contract_presence_index,
-    kept_tool_contexts_from_frames,
     partition_contract_presence,
 )
 from g3ku.runtime.tool_visibility import (
@@ -7512,11 +7511,10 @@ class MainRuntimeService:
         actor_role: str,
         session_id: str,
         request_messages: list[dict[str, Any]] | None = None,
-        kept_stage_contexts: Any = None,
     ) -> list[str]:
         """本轮可调用的已水合执行器名。
 
-        RBAC 之后再过一道**契约在场判据**：正文不在当次请求视图里的名字要从台账里摘掉，
+        RBAC 之后再过一道**契约在场判据**：标记块不在当次请求视图里的名字要从台账里摘掉，
         而不只是从视图里收窄。只收窄视图会造出文档禁止的第 4 态——该名字既不在 callable、
         又被 candidate 的「排除已提升」规则挡在门外，模型 load 它只会拿到没有出口的
         `already_hydrated`。
@@ -7547,10 +7545,7 @@ class MainRuntimeService:
             return hydrated
         present, absent = partition_contract_presence(
             hydrated,
-            index=contract_presence_index(
-                request_messages=request_messages,
-                kept_stage_contexts=kept_stage_contexts or [],
-            ),
+            index=contract_presence_index(request_messages=request_messages),
         )
         if absent:
             self._revoke_node_hydration_for_absent_contracts(
@@ -7559,34 +7554,6 @@ class MainRuntimeService:
                 revoked_executor_names=absent,
             )
         return present
-
-    def _node_stage_kept_tool_contexts(self, node: Any) -> list[dict[str, Any]]:
-        """节点阶段台账里保留下来的契约正文（在场判据的第二个载体）。
-
-        阶段账本的家在 `node.metadata['execution_stages']`，不在 runtime frame：帧的白名单
-        不收这个键，去帧里读会永远读出空、裁撤过的正文于是永远判成不在场。
-
-        取数必须按 node_id 重读存储：传进来的 node 常常是循环开局那份快照，而 `keep_tools` 的正文
-        是这一跳的 `submit_next_stage` 才写进去的——读快照等于把模型点名留住的正文读成空，留住的
-        工具照样被撤（实盘 task:91b09176d70a）。读不到该节点才退回传入对象。
-        """
-        candidates: list[Any] = []
-        node_id = str(getattr(node, 'node_id', '') or '').strip()
-        getter = getattr(getattr(self, 'store', None), 'get_node', None)
-        if node_id and callable(getter):
-            try:
-                candidates.append(getter(node_id))
-            except Exception:
-                pass
-        candidates.append(node)
-        for candidate in candidates:
-            metadata = getattr(candidate, 'metadata', None)
-            if not isinstance(metadata, dict):
-                continue
-            collected = kept_tool_contexts_from_frames(metadata.get('execution_stages'))
-            if collected:
-                return collected
-        return []
 
     def _revoke_node_hydration_for_absent_contracts(
         self,
@@ -7639,8 +7606,6 @@ class MainRuntimeService:
         actor_role: str,
         session_id: str,
         request_messages: list[dict[str, Any]],
-        kept_stage_contexts: Any = None,
-        node: Any = None,
     ) -> list[str]:
         """按**当次请求视图**判在场并回写台账，返回这一跳仍然在场的水合名。
 
@@ -7651,18 +7616,12 @@ class MainRuntimeService:
         撤销从这一跳起对**下一跳**生效：同批已派发的工具照旧执行完，与 `drop` 要账本结清
         才落标记的既有闸门同口径。
         """
-        effective_kept_contexts = (
-            kept_stage_contexts
-            if kept_stage_contexts is not None
-            else self._node_stage_kept_tool_contexts(node)
-        )
         return self._node_hydrated_executor_names(
             task_id=task_id,
             node_id=node_id,
             actor_role=actor_role,
             session_id=session_id,
             request_messages=list(request_messages or []),
-            kept_stage_contexts=effective_kept_contexts,
         )
 
     def _callable_tool_names_for_node(
@@ -7672,7 +7631,6 @@ class MainRuntimeService:
         node: Any,
         visible_tool_names: list[str] | None = None,
         request_messages: list[dict[str, Any]] | None = None,
-        kept_stage_contexts: Any = None,
     ) -> list[str]:
         session_id = str(getattr(task, 'session_id', '') or 'web:shared').strip() or 'web:shared'
         actor_role = self._actor_role_for_node(node)
@@ -7693,18 +7651,12 @@ class MainRuntimeService:
             if name not in seen:
                 callable_names.append(name)
                 seen.add(name)
-        effective_kept_stage_contexts = (
-            kept_stage_contexts
-            if kept_stage_contexts is not None
-            else self._node_stage_kept_tool_contexts(node)
-        )
         for name in self._node_hydrated_executor_names(
             task_id=str(getattr(task, 'task_id', '') or getattr(node, 'task_id', '') or '').strip(),
             node_id=str(getattr(node, 'node_id', '') or '').strip(),
             actor_role=actor_role,
             session_id=session_id,
             request_messages=request_messages,
-            kept_stage_contexts=effective_kept_stage_contexts,
         ):
             if name not in seen:
                 callable_names.append(name)

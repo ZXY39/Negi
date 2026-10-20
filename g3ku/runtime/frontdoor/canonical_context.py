@@ -6,7 +6,7 @@ import json
 from typing import Any
 
 from g3ku.runtime.kept_contract_snapshot import normalize_kept_skill_contexts
-from g3ku.runtime.tool_context_presence import normalize_kept_tool_contexts
+from g3ku.runtime.kept_contract_snapshot import normalize_kept_tool_contexts
 
 RAW_REPRESENTATION = "raw"
 COMPACT_REPRESENTATION = "compact"

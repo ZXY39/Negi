@@ -500,6 +500,79 @@ def resolve_kept_contracts(
     return snapshot
 
 
+# 台账条目的形状助手。它们在 D9 之后**不再进在场判据**（判据只认标记块），留下的唯一理由
+# 是 `submit_next_stage` 与日志读数还在读写这份账本；Stage 5 删除生产端时随本模块一并摘。
+def _iter_kept_entries(kept_stage_contexts: Any) -> list[dict[str, Any]]:
+    """接受三种形态：条目平表、阶段列表（每项带 ``kept_tool_contexts``）、单阶段字典。"""
+    items = list(kept_stage_contexts or [])
+    entries: list[dict[str, Any]] = []
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        nested = item.get(KEPT_TOOL_CONTEXTS_FIELD)
+        if isinstance(nested, list):
+            entries.extend([entry for entry in nested if isinstance(entry, dict)])
+            continue
+        if str(item.get(TOOL_ID_FIELD) or "").strip():
+            entries.append(item)
+    return entries
+
+
+def kept_contract_index(kept_stage_contexts: Any) -> dict[str, str]:
+    """阶段块里的条目：``tool_id -> fingerprint``，同名取后出现的条目。**不参与在场**。"""
+    index: dict[str, str] = {}
+    for entry in _iter_kept_entries(kept_stage_contexts):
+        tool_id = str(entry.get(TOOL_ID_FIELD) or "").strip()
+        if not tool_id:
+            continue
+        index[tool_id] = str(entry.get(FINGERPRINT_FIELD) or "").strip()
+    return index
+
+
+def normalize_kept_tool_contexts(raw: Any) -> list[dict[str, Any]]:
+    """保留契约条目的归一化白名单：只留 ``tool_id`` / fingerprint / 正文。
+
+    裁撤掉的阶段块里那段正文是**提交点的一次性快照**（刀二写入），逐轮只回放账本、
+    不重读资源文件——否则运营者改一次 toolskill 就改动块字节，而块在中间位置，它之后
+    的前缀全断。这里漏一个键等于逐轮抹掉一个键。
+    """
+    normalized: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for entry in _iter_kept_entries(raw):
+        tool_id = str(entry.get(TOOL_ID_FIELD) or "").strip()
+        if not tool_id or tool_id in seen:
+            continue
+        seen.add(tool_id)
+        normalized.append(
+            {
+                TOOL_ID_FIELD: tool_id,
+                FINGERPRINT_FIELD: str(entry.get(FINGERPRINT_FIELD) or "").strip(),
+                BODY_FIELD: str(entry.get(BODY_FIELD) or ""),
+            }
+        )
+    return normalized
+
+
+def kept_tool_contexts_for_stages(stages: Iterable[Any] | None) -> list[dict[str, Any]]:
+    """把阶段台账里各阶段的 ``kept_tool_contexts`` 摊平成一份列表。"""
+    collected: list[dict[str, Any]] = []
+    for stage in list(stages or []):
+        if not isinstance(stage, dict):
+            continue
+        collected.extend(_iter_kept_entries(stage.get(KEPT_TOOL_CONTEXTS_FIELD)))
+    return collected
+
+
+def kept_tool_contexts_from_frames(payload: Any) -> list[dict[str, Any]]:
+    """从阶段状态载荷（节点 ``execution_stages`` / 前门 ``frontdoor_stage_state``）取保留条目。"""
+    if not isinstance(payload, dict):
+        return []
+    stages = payload.get("stages")
+    if not isinstance(stages, list):
+        return []
+    return kept_tool_contexts_for_stages(stages)
+
+
 __all__ = [
     "KEEP_CONTRACT_NOT_DROPPED_NOTE",
     "KEPT_SKILL_CONTEXTS_FIELD",
@@ -510,7 +583,11 @@ __all__ = [
     "collect_stage_loader_names",
     "complete_keep_snapshot",
     "keep_closure_fields",
+    "kept_contract_index",
+    "kept_tool_contexts_for_stages",
+    "kept_tool_contexts_from_frames",
     "normalize_kept_skill_contexts",
+    "normalize_kept_tool_contexts",
     "render_kept_skill_context",
     "render_kept_tool_context",
     "resolve_kept_contracts",
