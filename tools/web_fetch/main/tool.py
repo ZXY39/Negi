@@ -353,7 +353,7 @@ class WebFetchTool:
             text,
             workspace=self.workspace,
             temp_root=temp_root,
-            data_root=model_data_root(self.workspace),
+            data_root=model_data_root(),
         )
 
     @staticmethod
