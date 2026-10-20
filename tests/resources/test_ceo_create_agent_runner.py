@@ -1873,6 +1873,15 @@ async def test_create_agent_runner_graph_prepare_turn_keeps_contract_present_too
         "callable_tool_names": ["submit_next_stage", "load_tool_context", "filesystem_write", "silent"],
         "candidate_tool_names": [],
         "contract_present_tool_names": ["filesystem_write"],
+        # D15 的两档读数：在场那份带自己的修订与本跳暂存份数；清扫计数缺省空。
+        "tool_contract_presence": {
+            "present": [
+                {"tool": "filesystem_write", "fingerprint": "sha256:" + "a" * 64, "staged_count": 0}
+            ],
+            "absent": [],
+            "stale_rev": [],
+        },
+        "staged_swept_tool_ids": [],
     }
     contract_messages = [
         dict(item)

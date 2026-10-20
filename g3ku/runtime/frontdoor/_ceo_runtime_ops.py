@@ -103,7 +103,12 @@ from g3ku.runtime.stage_prompt_compaction import (
     strip_stage_block_echo,
     summarized_stage_ids,
 )
-from g3ku.runtime.tool_context_presence import contract_presence_index
+from g3ku.runtime.tool_context_presence import (
+    contract_index_from_revisions,
+    contract_presence_index,
+    contract_presence_reading,
+    loader_contract_revisions,
+)
 from g3ku.runtime.tool_error_guidance import availability_hint
 from g3ku.runtime.tool_history import (
     align_compaction_keep_recent,
@@ -7250,17 +7255,71 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
             ",".join(changed_names) or "(unknown)",
         )
 
-    def _advance_frontdoor_stash_hop(self, session: Any) -> dict[str, Any]:
-        """推进前门侧的暂存时钟（只在还留着条目时）。与节点道同一条规则。"""
+    def _advance_frontdoor_stash_hop(self, session: Any) -> tuple[dict[str, Any], list[str]]:
+        """推进前门侧的暂存时钟（只在还留着条目时）。与节点道同一条规则、同一份清扫。
+
+        过了严格一跳的条目一并清掉，并把被清的名字回给调用方（D15 的 `abandoned` 档）：
+        不清的话它们整回合都留在会话载体里，而"这批为什么没跑"没有任何地方看得见。
+        """
         carrier = getattr(session, '_frontdoor_tool_arg_stash', {}) or {}
-        if not tool_arg_stash.carrier_container(carrier):
-            return carrier
-        if not isinstance(carrier, dict):
-            carrier = {}
-        next_carrier = dict(carrier)
-        next_carrier[tool_arg_stash.STASH_HOP_KEY] = tool_arg_stash.read_hop(carrier) + 1
+        container = tool_arg_stash.carrier_container(carrier)
+        if not container:
+            return carrier, []
+        next_hop = tool_arg_stash.read_hop(carrier) + 1
+        swept_container, dropped_scopes = tool_arg_stash.sweep_expired(
+            container,
+            current_hop=next_hop,
+            present_tool_ids=None,
+        )
+        next_carrier = tool_arg_stash.build_carrier(swept_container, hop=next_hop)
         setattr(session, '_frontdoor_tool_arg_stash', next_carrier)
-        return next_carrier
+        # 清扫发生在执行阶段，而 `frontdoor_selection_debug` 在下一跳的调用前写：把被清的
+        # 名字暂存在会话上，由那一跳的读数带走（进程内交接，不落盘——落盘的读数只有那一份）。
+        setattr(session, '_frontdoor_stash_swept', [
+            tool_arg_stash.scope_tool_id(scope) for scope in dropped_scopes
+        ])
+        return next_carrier, [tool_arg_stash.scope_tool_id(scope) for scope in dropped_scopes]
+
+    def _frontdoor_contract_presence_reading(
+        self,
+        *,
+        state: CeoGraphState | dict[str, Any] | None,
+        candidate_tool_names: list[str],
+        session: Any,
+    ) -> dict[str, Any]:
+        """D15 的每跳在场读数，落在 `frontdoor_selection_debug`（这份已整份持久化）。
+
+        视图与在场权威同源：走 `_frontdoor_contract_presence_index` 那一条（`state['messages']`
+        去掉已裁撤阶段的行）。读数若另取一份视图，就会报出与准入不同的在场集合——那正是本次
+        改造要消灭的形状。
+        """
+        view = self._frontdoor_view_without_evicted_stage_rows(
+            state, list((state or {}).get("messages") or [])
+        )
+        revisions = loader_contract_revisions(view)
+        index = contract_index_from_revisions(revisions)
+        session_key = str(getattr(getattr(session, 'state', None), 'session_key', '') or '').strip()
+        container = tool_arg_stash.read_container(
+            getattr(session, '_frontdoor_tool_arg_stash', None) or {}
+        )
+
+        def _staged_count_of(tool_id: str) -> int:
+            if not session_key:
+                return 0
+            return int(
+                tool_arg_stash.staged_count(
+                    container,
+                    scope_key=tool_arg_stash.session_scope_key(session_key, tool_id),
+                )
+                or 0
+            )
+
+        return contract_presence_reading(
+            [*list(index), *list(candidate_tool_names or [])],
+            index=index,
+            revisions=revisions,
+            staged_count_of=_staged_count_of,
+        )
 
     def _frontdoor_impulse_contract_content(
         self,
@@ -8124,6 +8183,14 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
             frontdoor_selection_debug["callable_tool_names"] = list(callable_tool_names)
             frontdoor_selection_debug["candidate_tool_names"] = list(candidate_tool_names)
             frontdoor_selection_debug["contract_present_tool_names"] = list(contract_present_tool_names)
+            frontdoor_selection_debug["tool_contract_presence"] = self._frontdoor_contract_presence_reading(
+                state=internal_presence_state,
+                candidate_tool_names=candidate_tool_names,
+                session=session,
+            )
+            frontdoor_selection_debug["staged_swept_tool_ids"] = list(
+                getattr(session, '_frontdoor_stash_swept', []) or []
+            )
             messages = self._prompt_message_records(request_body_seed_messages)
             has_current_turn_user_content = bool(self._content_text(current_turn_user_content).strip())
             # 末位是不是本轮用户回合：内部规则行（心跳规则/cron 提醒正文）现在落在 user
@@ -8249,6 +8316,12 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
                 "callable_tool_names": [],
                 "candidate_tool_names": list(candidate_tool_names),
                 "contract_present_tool_names": list(contract_present_tool_names),
+                "tool_contract_presence": self._frontdoor_contract_presence_reading(
+                    state=assembly_presence_state,
+                    candidate_tool_names=candidate_tool_names,
+                    session=session,
+                ),
+                "staged_swept_tool_ids": list(getattr(session, '_frontdoor_stash_swept', []) or []),
             }
             tool_names = list(
                 getattr(assembly, "tool_names", None)
@@ -8258,8 +8331,7 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
             callable_tool_names = self._frontdoor_callable_tool_names_for_state(
                 {
                     **assembly_presence_state,
-                    "rbac_visible_tool_names": rbac_visible_tool_names,
-                    "tool_names": tool_names,
+                    "rbac_visible_tool_names": rbac_visible_tool_names,                    "tool_names": tool_names,
                     "repair_required_tool_items": repair_required_tool_items,
                 },
             )
@@ -9533,8 +9605,8 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
         runtime_context['impulse_batch_totals'] = impulse_batch_totals
         runtime_context['impulse_delivered_tools'] = {}
         # 暂存时钟在投递之前推进：本轮落的条目要按推进后的跳序记，下一跳才正好可消费。
-        runtime_context['tool_arg_stash_carrier'] = self._advance_frontdoor_stash_hop(
-            (runtime_context or {}).get('runtime_session')
+        runtime_context['tool_arg_stash_carrier'], runtime_context['tool_arg_stash_swept'] = (
+            self._advance_frontdoor_stash_hop((runtime_context or {}).get('runtime_session'))
         )
         on_progress = execution_bundle.on_progress
         analysis_text = str(state.get("analysis_text") or "").strip()

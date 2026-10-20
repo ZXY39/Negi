@@ -1005,6 +1005,9 @@ class TaskLogService:
                     ephemeral=bool(tool_message.get('ephemeral') or live_state.get('ephemeral')),
                     payload={
                         'parsed_payload': self._parse_tool_result_payload(content),
+                        # 这次调用实际走的道（D15）：normal / reused / corrected / illegal_reuse。
+                        # 由执行侧按 call 交接，不在这里用回执文本反推。
+                        'execution_path': str(live_state.get('execution_path') or 'normal'),
                     },
                 )
                 self._store.upsert_task_node_tool_result(record)

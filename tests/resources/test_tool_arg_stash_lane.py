@@ -22,7 +22,6 @@ from g3ku.runtime.tool_arg_stash import (
     STASH_HOP_KEY,
     args_digest,
     build_carrier,
-    bump_hop,
     carrier_container,
     consume_entries,
     drop_scope,
@@ -231,8 +230,9 @@ def test_carrier_keeps_container_and_hop_together() -> None:
     carrier = build_carrier(container, hop=1)
     assert carrier_container(carrier) == container
     assert read_hop(carrier) == 1
-    bumped = bump_hop(carrier)
-    assert read_hop(bumped) == 2
+    # 时钟推进走同一次 `build_carrier`：推进与条目写回分两次落盘的话，重启后 hop 比条目新，
+    # 暂存会被判成"还没到期"或"已经过期"两种都不对的样子（两条车道的 `advance_*_stash_hop`）。
+    assert read_hop(build_carrier(container, hop=read_hop(carrier) + 1)) == 2
     # 空容器不占字节，但**跳序必须留着**：时钟一丢，下一条暂存就永远等不到自己那一跳。
     assert build_carrier({}, hop=4) == {STASH_HOP_KEY: 4}
     assert build_carrier({}, hop=0) == {}

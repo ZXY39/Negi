@@ -51,18 +51,39 @@ def loader_payload(message: Any) -> dict[str, Any] | None:
     return {TOOL_ID_FIELD: tool_id, FINGERPRINT_FIELD: fingerprint}
 
 
-def loader_contract_index(request_messages: Iterable[Any] | None) -> dict[str, str]:
-    """请求视图里在场的契约：``tool_id -> fingerprint``，同一目标取最近一条。"""
-    index: dict[str, str] = {}
-    for message in reversed(list(request_messages or [])):
+def loader_contract_revisions(request_messages: Iterable[Any] | None) -> dict[str, list[str]]:
+    """一次扫描得到每个名字在这一跳视图里出现过的**全部**修订（按出现顺序）。
+
+    在场索引只留最近一条，所以"同一篇正文里带着两个修订的块"这种形状只有在这份表里看得见
+    （D15 的 `stale_rev` 档）。调用方要同时拿两档时用这一份再派生索引，别扫第二遍。
+    """
+    by_tool: dict[str, list[str]] = {}
+    for message in list(request_messages or []):
         payload = loader_payload(message)
         if payload is None:
             continue
         tool_id = str(payload.get(TOOL_ID_FIELD) or "").strip()
-        if not tool_id or tool_id in index:
+        if not tool_id:
             continue
-        index[tool_id] = str(payload.get(FINGERPRINT_FIELD) or "").strip()
-    return index
+        fingerprint = str(payload.get(FINGERPRINT_FIELD) or "").strip()
+        revisions = by_tool.setdefault(tool_id, [])
+        if fingerprint not in revisions:
+            revisions.append(fingerprint)
+    return by_tool
+
+
+def contract_index_from_revisions(revisions: dict[str, list[str]] | None) -> dict[str, str]:
+    """由修订表派生在场索引：同一目标取最近一条。"""
+    return {
+        str(tool_id): str((items or [""])[-1])
+        for tool_id, items in dict(revisions or {}).items()
+        if str(tool_id or "").strip()
+    }
+
+
+def loader_contract_index(request_messages: Iterable[Any] | None) -> dict[str, str]:
+    """请求视图里在场的契约：``tool_id -> fingerprint``，同一目标取最近一条。"""
+    return contract_index_from_revisions(loader_contract_revisions(request_messages))
 
 
 def contract_presence_index(
@@ -150,14 +171,72 @@ def stale_rev_tool_ids(
     return stale
 
 
+def contract_presence_reading(
+    tool_ids: Iterable[Any] | None,
+    *,
+    index: dict[str, str] | None = None,
+    revisions: dict[str, list[str]] | None = None,
+    request_messages: Iterable[Any] | None = None,
+    staged_count_of: Any = None,
+) -> dict[str, Any]:
+    """这一跳的在场读数（D15）：`present` / `absent` / `stale_rev` 三档。
+
+    台账删掉之后没有"状态"可查，排障要的是能从耐久工件里按当次请求视图重算的**派生读数**，
+    所以这里不落任何新状态。`index` / `revisions` 传哪个都行，两个都传则不再扫第二遍消息
+    （每跳的在场判定本来只扫一次，读数不能把它变成两次）。
+
+    `stale_rev` 是"视图里同时存在两个修订"的名字（D10 吞块 / D2 换式的可见形状）。
+    "我照旧块发了调用而源已经改了"这一档不在这里，它落在**每次调用**的审计行上
+    （`execution_path` 旁边的 fingerprint 字段）：判它要重建该工具的 toolskill 载荷，摊到
+    每一跳的每个在场名字上就是给全部跳加磁盘与 schema 开销，而它只在模型真照着某个块发
+    调用时才有后果。
+    """
+    effective_revisions = (
+        revisions
+        if revisions is not None
+        else loader_contract_revisions(request_messages)
+    )
+    effective_index = (
+        index
+        if index is not None
+        else contract_index_from_revisions(effective_revisions)
+    )
+    present: list[dict[str, Any]] = []
+    absent: list[str] = []
+    seen: set[str] = set()
+    for raw in list(tool_ids or []):
+        name = str(raw or "").strip()
+        if not name or name in seen:
+            continue
+        seen.add(name)
+        fingerprint = str(effective_index.get(name) or "").strip()
+        if not fingerprint:
+            absent.append(name)
+            continue
+        item: dict[str, Any] = {"tool": name, "fingerprint": fingerprint}
+        if callable(staged_count_of):
+            item["staged_count"] = int(staged_count_of(name) or 0)
+        present.append(item)
+
+    stale = sorted(
+        str(tool_id)
+        for tool_id, items in dict(effective_revisions or {}).items()
+        if len([item for item in list(items or []) if str(item or "").strip()]) > 1
+    )
+    return {"present": present, "absent": absent, "stale_rev": stale}
+
+
 __all__ = [
     "BODY_FIELD",
     "FINGERPRINT_FIELD",
     "LOADER_TOOL_NAMES",
     "TOOL_ID_FIELD",
+    "contract_index_from_revisions",
     "contract_presence",
     "contract_presence_index",
+    "contract_presence_reading",
     "loader_contract_index",
+    "loader_contract_revisions",
     "loader_payload",
     "partition_contract_presence",
     "stale_rev_tool_ids",

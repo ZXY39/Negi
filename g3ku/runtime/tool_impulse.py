@@ -33,6 +33,9 @@ LOOP_INTERNAL_RUNTIME_KEYS = frozenset(
     {
         "tool_contract_presence",
         "tool_arg_stash_carrier",
+        "tool_arg_stash_swept",
+        "tool_execution_paths",
+        "reuse_batch_in_progress",
         "impulse_delivered_tools",
         "impulse_staged_call_ids",
         "impulse_batch_totals",
@@ -129,6 +132,21 @@ REUSE_PLAN_EXPLICIT_ARGS = "explicit_args"
 REUSE_PLAN_NO_STASH = "no_stash"
 REUSE_PLAN_CONTRACT_ABSENT = "contract_absent"
 
+# 审计用的"这次调用实际走的道"（D15）。五档里 `abandoned` 不挂在任何一次调用上——它是
+# "暂存过却再没被调用"，由跳针推进时的清扫统计记（见 `staged_swept_tool_ids`）。
+EXECUTION_PATH_NORMAL = "normal"
+EXECUTION_PATH_REUSED = "reused"
+EXECUTION_PATH_CORRECTED = "corrected"
+EXECUTION_PATH_ILLEGAL_REUSE = "illegal_reuse"
+EXECUTION_PATH_ABANDONED = "abandoned"
+EXECUTION_PATHS = (
+    EXECUTION_PATH_NORMAL,
+    EXECUTION_PATH_REUSED,
+    EXECUTION_PATH_CORRECTED,
+    EXECUTION_PATH_ILLEGAL_REUSE,
+    EXECUTION_PATH_ABANDONED,
+)
+
 REUSE_NO_STASH_NOTE = (
     'No staged arguments for "{tool}" to reuse (the tool was not called in your previous turn, '
     "or the staged set expired). Call it with arguments."
@@ -221,6 +239,12 @@ __all__ = [
     "REUSE_PLAN_EXPLICIT_ARGS",
     "REUSE_PLAN_NO_STASH",
     "aggregate_reuse_results",
+    "EXECUTION_PATHS",
+    "EXECUTION_PATH_ABANDONED",
+    "EXECUTION_PATH_CORRECTED",
+    "EXECUTION_PATH_ILLEGAL_REUSE",
+    "EXECUTION_PATH_NORMAL",
+    "EXECUTION_PATH_REUSED",
     "impulse_receipt",
     "plan_reuse_execution",
     "render_staged_targets",

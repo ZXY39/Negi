@@ -7901,15 +7901,30 @@ class MainRuntimeService:
             hop=tool_arg_stash.read_hop(metadata if isinstance(metadata, dict) else {}),
         )
 
-    def advance_node_stash_hop(self, node_id: str) -> dict[str, Any]:
+    def advance_node_stash_hop(self, node_id: str) -> tuple[dict[str, Any], list[str]]:
         """每跳推进一次跳序，但**只在还有暂存条目时**推进并落盘。
 
         没条目就没东西要老化，白写一次节点行；有时不推进，条目就永远停在"上一跳"之外。
+
+        顺带清掉过了严格一跳的条目（否则它们整回合留在载体里，每跳都重抄进节点 metadata），
+        并把被清的名字回给调用方——那是 D15 的 `abandoned` 档：暂存过却再没被调用。清扫是
+        静默的，所以必须自带一个可数落点，不然"模型为什么没用这批"永远查不到。
         """
         carrier = self.node_stash_carrier(node_id)
-        if not tool_arg_stash.carrier_container(carrier):
-            return carrier
-        return self.persist_node_stash_carrier(node_id, tool_arg_stash.bump_hop(carrier))
+        container = tool_arg_stash.carrier_container(carrier)
+        if not container:
+            return carrier, []
+        next_hop = tool_arg_stash.read_hop(carrier) + 1
+        swept_container, dropped_scopes = tool_arg_stash.sweep_expired(
+            container,
+            current_hop=next_hop,
+            present_tool_ids=None,
+        )
+        next_carrier = self.persist_node_stash_carrier(
+            node_id,
+            tool_arg_stash.build_carrier(swept_container, hop=next_hop),
+        )
+        return next_carrier, [tool_arg_stash.scope_tool_id(scope) for scope in dropped_scopes]
 
     def persist_node_stash_carrier(self, node_id: str, carrier: Any) -> dict[str, Any]:
         """写回载体。按 node_id 重读存储再改，避免把循环开局那份快照的其它键覆盖掉。"""

@@ -117,18 +117,6 @@ def read_hop(carrier: Any) -> int:
         return 0
 
 
-def bump_hop(carrier: Any) -> dict[str, Any]:
-    """推进跳序（严格一跳的时钟）。
-
-    调用方只在**载体里还有暂存条目**时推进：没有条目就没有要老化的东西，不必每跳多写一次
-    节点行。推进必须与条目写回同一次落盘——分两次写的话，重启后 hop 比条目新，暂存会被判成
-    "还没到期"或"已经过期"两种都不对的样子。
-    """
-    next_carrier = dict(carrier) if isinstance(carrier, dict) else {}
-    next_carrier[STASH_HOP_KEY] = read_hop(next_carrier) + 1
-    return next_carrier
-
-
 def normalize_tool_arg_stash(payload: Any) -> dict[str, Any]:
     """持久化入口的形状闸门：两条车道的载体都先过这里再落盘。
 
@@ -392,7 +380,6 @@ __all__ = [
     "STASH_CONTAINER_KEY",
     "STASH_HOP_KEY",
     "args_digest",
-    "bump_hop",
     "build_carrier",
     "carrier_container",
     "consume_entries",
