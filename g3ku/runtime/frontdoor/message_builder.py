@@ -208,7 +208,7 @@ class CeoMessageBuilder:
     RESERVED_INTERNAL_TOOLS: tuple[str, ...] = ("stop_tool_execution",)
     # 与 RESERVED_INTERNAL_TOOLS 的区别只在一点：这些名字**不要求已经可见**，因此
     # 不依赖任何 tools/*/resource.yaml 声明族。RESERVED_INTERNAL_TOOLS 只保证
-    # 「已可见时不被语义 top-k 挤掉」，不具备注入能力 —— 照它加是加不进 schema 的。
+    # 「已可见时排在本轮 callable 最前面」，不具备注入能力 —— 照它加是加不进 schema 的。
     # 目前唯一的成员是静默收尾信号：它是前门的合同的一部分，不是可被选中的能力。
     ALWAYS_CALLABLE_INTERNAL_TOOLS: tuple[str, ...] = (SILENT_TOOL_NAME,)
     FIXED_BUILTIN_TOOL_NAMES: tuple[str, ...] = CEO_FIXED_BUILTIN_TOOL_NAMES
@@ -1438,7 +1438,8 @@ class CeoMessageBuilder:
         }
         visible_only_mode = str(semantic_frontdoor.get('mode') or '').strip().lower() == 'unavailable'
         # skill 名单不再做 top-k 语义筛选：头部钉住块带全量可见名单（id|名称|描述），
-        # "选哪个"由模型按描述判断。语义排序只服务工具面；skill 排序结果一律不消费。
+        # "选哪个"由模型按描述判断。工具面同样没有语义排序（`semantic_catalog_rankings` 恒返回
+        # unavailable，`_select_tools` 那条按 query 打分的支路不可达）；skill 排序结果一律不消费。
         # 选中集恒等于可见集，可见_only 分支与排序分支在此合流。
         selected_skills = self._visible_only_skill_items(visible_skills)
         skill_trace = self._visible_only_skill_trace(selected_skills)

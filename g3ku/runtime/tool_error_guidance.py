@@ -101,8 +101,8 @@ def availability_hint(
 ) -> str:
     """名称被拒时说明"什么能用"：候选未水化、纯未知名、已声明但无权限三者的修法不同，必须分开讲。
 
-    `declared_names` 是钉住的 `tools[]` 名单（可加载面）。它比候选集宽：语义 top-k 没选中
-    的名字照样能按名 load，所以"声明里有、callable 里没有"一律先给 load 指引，不落到
+    `declared_names` 是钉住的 `tools[]` 名单（可加载面）。它比候选集宽：钉住清单里没进本轮
+    callable 的名字照样能按名 load，所以"声明里有、callable 里没有"一律先给 load 指引，不落到
     "未知名字"那一档——否则模型会以为这个能力不存在。
     """
     name = str(requested or "").strip()
