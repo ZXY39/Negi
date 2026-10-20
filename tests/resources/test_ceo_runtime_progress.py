@@ -7705,9 +7705,11 @@ async def test_ceo_frontdoor_prepare_turn_heartbeat_inherits_previous_tool_state
     assert len(contract_messages) == 2  # 一份稳定契约 + 一份活状态块
     contract_text = "\n".join(str(item["content"] or "") for item in contract_messages)
     assert (
-        "callable_tools: `create_async_task`, `task_list`, `filesystem_write`, `silent`, `submit_next_stage`"
-        in contract_text
+        list(state_update["frontdoor_selection_debug"]["callable_tool_names"])
+        == ["create_async_task", "task_list", "filesystem_write", "silent", "submit_next_stage"]
     )
+    # D11：callable 不再渲成模型可见的一行，上一跳继承来的那份只在上面的读数里可见。
+    assert "callable_tools:" not in contract_text
     assert "hydrated_tools:" not in contract_text
     # 名单钉在请求体头部的 system 里（每跳逐字节复用），尾块不得再抄第二份。
     inherited_head_text = str(
@@ -7962,9 +7964,11 @@ async def test_ceo_frontdoor_prepare_turn_cron_inherits_previous_tool_state_with
     assert len(contract_messages) == 2  # 一份稳定契约 + 一份活状态块
     contract_text = "\n".join(str(item["content"] or "") for item in contract_messages)
     assert (
-        "callable_tools: `create_async_task`, `task_list`, `filesystem_write`, `silent`, `submit_next_stage`"
-        in contract_text
+        list(state_update["frontdoor_selection_debug"]["callable_tool_names"])
+        == ["create_async_task", "task_list", "filesystem_write", "silent", "submit_next_stage"]
     )
+    # D11：callable 不再渲成模型可见的一行，上一跳继承来的那份只在上面的读数里可见。
+    assert "callable_tools:" not in contract_text
     assert "hydrated_tools:" not in contract_text
     # 名单钉在请求体头部的 system 里（每跳逐字节复用），尾块不得再抄第二份。
     inherited_head_text = str(

@@ -2035,7 +2035,7 @@ async def test_ceo_frontdoor_prepare_turn_keeps_messages_uncompacted(
         if isinstance(message, dict) and is_frontdoor_tool_contract_message(dict(message))
     ]
     assert len(contract_payloads) == 2  # 一份稳定契约 + 一份活状态块
-    assert "callable_tools: `submit_next_stage`" in "\n".join(
+    assert "callable_tools:" not in "\n".join(
         str(item.get("content") or "") for item in contract_payloads
     )
     assert "summary_text" not in state_update
@@ -2417,7 +2417,7 @@ async def test_graph_prepare_turn_real_session_path_drops_summary_fields(
         if isinstance(message, dict) and is_frontdoor_tool_contract_message(dict(message))
     ]
     assert len(contract_payloads) == 2  # 一份稳定契约 + 一份活状态块
-    assert "callable_tools: `submit_next_stage`" in "\n".join(
+    assert "callable_tools:" not in "\n".join(
         str(item.get("content") or "") for item in contract_payloads
     )
     assert "summary_text" not in result

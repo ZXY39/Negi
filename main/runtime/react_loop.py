@@ -33,6 +33,7 @@ from g3ku.providers.fallback import (
 )
 from g3ku.resources.retired_schemas import schema_name as _provider_schema_name
 from g3ku.runtime import skill_roster_notice as _skill_roster_notice
+from g3ku.runtime import tool_arg_stash
 from g3ku.runtime.chunk_compression_plan import (
     CHUNK_MAX_CHUNKS,
     COMPRESSION_MAX_PASS_ROUNDS,
@@ -118,7 +119,19 @@ from g3ku.runtime.tool_history import (
     iter_compaction_atomic_groups,
     truncate_group_head_tail,
 )
-from g3ku.runtime.tool_impulse import IMPULSE_INVALID, IMPULSE_REJECT, tool_facing_runtime_context
+from g3ku.runtime.tool_impulse import (
+    IMPULSE_INVALID,
+    IMPULSE_REJECT,
+    REUSE_PLAN_CONTRACT_ABSENT,
+    REUSE_PLAN_EXECUTE,
+    REUSE_PLAN_EXPLICIT_ARGS,
+    REUSE_PLAN_NO_STASH,
+    aggregate_reuse_results,
+    plan_reuse_execution,
+    reuse_refusal_text,
+    split_reuse_arguments,
+    tool_facing_runtime_context,
+)
 from g3ku.runtime.tool_result_status import is_error_like_tool_result
 from g3ku.runtime.tool_visibility import NODE_NEVER_CONTRACT_TOOL_NAMES
 from g3ku.runtime.tool_watchdog import (
@@ -5057,7 +5070,154 @@ class ReActToolLoop:
                 staged_ids.add(call_id)
         return str(result.get('content') or '').strip() or None
 
+    def _persist_node_stash_carrier(
+        self,
+        *,
+        node_id: str,
+        carrier: Any,
+        runtime_context: dict[str, Any],
+    ) -> None:
+        """把消费后的载体落回节点行，并让本轮后续调用读到同一份。"""
+        service = getattr(self, '_tool_impulse_service', None)
+        persist = getattr(service, 'persist_node_stash_carrier', None)
+        if not callable(persist):
+            return
+        try:
+            runtime_context['tool_arg_stash_carrier'] = persist(node_id, carrier) or {}
+        except Exception:
+            pass
+
+    async def _reuse_args_execution(
+        self,
+        *,
+        tools: dict[str, Any],
+        tool_name: str,
+        arguments: dict[str, Any],
+        runtime_context: dict[str, Any],
+    ) -> str | None:
+        """`reuse_args=true` 这一跳：把当轮全部暂存入参跑完，聚合成一个结果（D7）。
+
+        返回 None 表示"这不是复用调用"，调用方按普通路径走。四类答案互斥：显式入参优先
+        （C3）、契约不在场（C2，一份都不跑）、没有可复用条目（C1）、执行整批。C1/C2 不退
+        预算以外的账、也**不计一轮**（D8：字段误用不是任务失败，计预算会让模型从此绕开
+        这条通道）。每份结果各自走单次调用的渲染与外置闸门后再聚合（D7-5），失败项只让
+        自己那一项 `ok:false`，顶层 `ok` 表示"这批跑了"。
+        """
+        reuse_requested, explicit_arguments = split_reuse_arguments(arguments)
+        if not reuse_requested:
+            return None
+        name = str(tool_name or '').strip()
+        if not name:
+            return None
+        if tools.get(name) is None:
+            # 名字本轮就没有实例（无权限/已下架）：交回普通路径出那条带名单的拒绝回执，
+            # 而不是拿 N 份暂存入参各撞一次。
+            return None
+        task_id = str(runtime_context.get('task_id') or '').strip()
+        node_id = str(runtime_context.get('node_id') or '').strip()
+        carrier = runtime_context.get('tool_arg_stash_carrier') or {}
+        container = tool_arg_stash.read_container(carrier)
+        hop = tool_arg_stash.read_hop(carrier)
+        presence = runtime_context.get('tool_contract_presence')
+        fingerprint = ''
+        if isinstance(presence, dict):
+            fingerprint = str(presence.get(name) or '').strip()
+        scope_key = _stash_node_scope_key(task_id, node_id, name)
+        plan = plan_reuse_execution(
+            reuse_requested=True,
+            explicit_arguments=explicit_arguments,
+            contract_present=bool(fingerprint),
+            staged_entries=tool_arg_stash.peek_entries(
+                container,
+                scope_key=scope_key,
+                current_hop=hop,
+                fingerprint=fingerprint,
+            ),
+        )
+        kind = str(plan.get('kind') or '').strip()
+        if kind == REUSE_PLAN_EXPLICIT_ARGS:
+            executed = await self._execute_tool(
+                tools=tools,
+                tool_name=name,
+                arguments=dict(plan.get('arguments') or {}),
+                runtime_context=runtime_context,
+            )
+            next_container, _dropped = tool_arg_stash.consume_entries(
+                container,
+                scope_key=scope_key,
+                current_hop=hop,
+                fingerprint=fingerprint,
+            )
+            self._persist_node_stash_carrier(
+                node_id=node_id,
+                carrier=tool_arg_stash.build_carrier(next_container, hop=hop),
+                runtime_context=runtime_context,
+            )
+            return f"{reuse_refusal_text(kind, name)}\n\n{executed}"
+        if kind in {REUSE_PLAN_NO_STASH, REUSE_PLAN_CONTRACT_ABSENT}:
+            staged_ids = runtime_context.get('impulse_staged_call_ids')
+            call_id = str(runtime_context.get('current_tool_call_id') or '').strip()
+            if isinstance(staged_ids, set) and call_id:
+                staged_ids.add(call_id)
+            if kind == REUSE_PLAN_CONTRACT_ABSENT and container.get(scope_key):
+                self._persist_node_stash_carrier(
+                    node_id=node_id,
+                    carrier=tool_arg_stash.build_carrier(
+                        tool_arg_stash.drop_scope(container, scope_key=scope_key),
+                        hop=hop,
+                    ),
+                    runtime_context=runtime_context,
+                )
+            return reuse_refusal_text(kind, name)
+        if kind != REUSE_PLAN_EXECUTE:
+            return None
+        entries = [dict(item) for item in list(plan.get('entries') or []) if isinstance(item, dict)]
+        items: list[dict[str, Any]] = []
+        for index, entry in enumerate(entries):
+            entry_arguments = dict(entry.get(tool_arg_stash.ARGS_FIELD) or {})
+            try:
+                rendered = await self._execute_tool(
+                    tools=tools,
+                    tool_name=name,
+                    arguments=entry_arguments,
+                    runtime_context=runtime_context,
+                )
+            except Exception as exc:
+                # 一份抛异常只作废那一份：整批 raise 出去，模型看到的就还是"这批没跑"，
+                # 于是重发 reuse_args 把已成功的那些再跑一遍。
+                rendered = f'Error: {describe_exception(exc)}'
+            text = str(rendered or '')
+            item: dict[str, Any] = {
+                'index': index,
+                'args_digest': str(entry.get(tool_arg_stash.DIGEST_FIELD) or tool_arg_stash.args_digest(entry_arguments)),
+                'ok': not is_error_like_tool_result(text),
+            }
+            item['error' if item['ok'] is False else 'result'] = text
+            items.append(item)
+        next_container, _consumed = tool_arg_stash.consume_entries(
+            container,
+            scope_key=scope_key,
+            current_hop=hop,
+            fingerprint=fingerprint,
+        )
+        self._persist_node_stash_carrier(
+            node_id=node_id,
+            carrier=tool_arg_stash.build_carrier(next_container, hop=hop),
+            runtime_context=runtime_context,
+        )
+        return aggregate_reuse_results(tool_name=name, items=items)
+
     async def _execute_tool_raw(self, *, tools: dict[str, Tool], tool_name: str, arguments: dict[str, Any], runtime_context: dict[str, Any]) -> Any:
+        # `reuse_args=true` 的整批执行排在契约投递之前：复用调用带的是"上一跳已校验过的入参"，
+        # 而投递那条路会把这一跳整批换成"交契约+暂存"，两者同时命中就会把复用请求再暂存一次。
+        reuse_content = await self._reuse_args_execution(
+            tools=tools,
+            tool_name=tool_name,
+            arguments=arguments,
+            runtime_context=runtime_context,
+        )
+        if reuse_content is not None:
+            return reuse_content
         # 契约不在场而名字已授权：这一跳**不执行**，交契约 + 暂存入参（D3）。排在阶段闸门
         # 之前，因为这条豁免是按状态而不是按名字——闸门今天会把"没开阶段就调它"先拒掉。
         impulse_content = await self._impulse_contract_content(

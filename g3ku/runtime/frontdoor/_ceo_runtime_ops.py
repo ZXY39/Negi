@@ -9,6 +9,7 @@ import json
 import math
 import re
 import uuid
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -110,7 +111,18 @@ from g3ku.runtime.tool_history import (
     iter_compaction_atomic_groups,
     truncate_group_head_tail,
 )
-from g3ku.runtime.tool_impulse import IMPULSE_REJECT, IMPULSE_STAGED
+from g3ku.runtime.tool_impulse import (
+    IMPULSE_REJECT,
+    IMPULSE_STAGED,
+    REUSE_PLAN_CONTRACT_ABSENT,
+    REUSE_PLAN_EXECUTE,
+    REUSE_PLAN_EXPLICIT_ARGS,
+    REUSE_PLAN_NO_STASH,
+    aggregate_reuse_results,
+    plan_reuse_execution,
+    reuse_refusal_text,
+    split_reuse_arguments,
+)
 from g3ku.runtime.tool_visibility import CEO_FIXED_BUILTIN_TOOL_NAMES, CEO_NEVER_CONTRACT_TOOL_NAMES
 from g3ku.runtime.web_ceo_sessions import (
     WEB_CEO_IMAGE_UPLOAD_MAX_BYTES,
@@ -1564,9 +1576,9 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
             return records, durable
         last_role = str(records[-1].get("role") or "").strip().lower() if records else ""
         if last_role == "user":
-            # 末位是当轮契约/阶段闸门块时，直接把 content 换掉会让这一跳收不到 callable_tools，
-            # 契约在场即能力的口径就断了。节点道（react_loop 同名载体）一直是折叠口径：原文字
-            # 并进首个 text 块，两条道按同一形状发。
+            # 末位是当轮契约/阶段闸门块时，直接把 content 换掉会让这一跳收不到活状态行
+            # （denied_tools、活动阶段），契约在场即能力的口径就断了。节点道（react_loop
+            # 同名载体）一直是折叠口径：原文字并进首个 text 块，两条道按同一形状发。
             existing_text = self._content_text(records[-1].get("content")).strip()
             if existing_text and isinstance(blocks[0], dict) and blocks[0].get("type") == "text":
                 blocks = [
@@ -3820,7 +3832,7 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
     def _frontdoor_executable_tool_names(self, state: CeoGraphState) -> list[str]:
         """执行准入＝本轮 callable（常驻内置 + 契约在场的名字）；控制工具另行注入执行束。
 
-        `tools[]` 是声明面、`callable_tools` 是准入面，两者不同义：声明里的名字在
+        `tools[]` 是声明面、callable 集是准入面，两者不同义：声明里的名字在
         `load_tool_context` 把契约送进上下文（下一跳在场、进 callable）之前调用一律被拒，
         回执引导先 load。这是"先读契约再调"的唯一落点——只在尾块点名、执行侧照旧放行，
         规则就只剩文案效果（`perf_inspect` 那例）。`submit_next_stage` / `silent` 是合成实例，
@@ -3900,7 +3912,7 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
         名单源只有钉住声明：denied_tools 的语义是"`tools[]` 里带着参数表、但实时授权读
         不放行"。mid-turn 注册的名字不在 `tools[]` 里，被 RBAC 收回时不进这一行——
         它的出口是工具态收尾的实时卫生（`_frontdoor_tool_state_after_tool_results`）：
-        下一跳起从 `tool_names` 摘除，`callable_tools` 不再点名；治理重新放行时由同一处
+        下一跳起从 `tool_names` 摘除，callable 集不再含它；治理重新放行时由同一处
         的发现出口送回候选。
         """
         return self._frontdoor_declared_denied_tool_names(
@@ -7313,6 +7325,117 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
             str(result.get('content') or ''),
         )
 
+    async def _frontdoor_reuse_args_execution(
+        self,
+        *,
+        tool_name: str,
+        arguments: dict[str, Any],
+        state: CeoGraphState | dict[str, Any] | None,
+        runtime_context: dict[str, Any],
+        execute_one: Callable[[dict[str, Any]], Awaitable[str]],
+    ) -> str | None:
+        """前门道的 `reuse_args=true`：把当轮全部暂存入参跑完，聚合成一个结果（D7）。
+
+        与节点道同一套判定（`plan_reuse_execution`）、同一套回执，差别只在作用域键是会话
+        级、以及执行走本车道已有的单次调用（每份结果先各自渲染与外置，再聚合）。返回
+        None 表示这不是复用调用，调用方按普通路径走。
+        """
+        reuse_requested, explicit_arguments = split_reuse_arguments(arguments)
+        if not reuse_requested:
+            return None
+        name = str(tool_name or '').strip()
+        if not name:
+            return None
+        session = (runtime_context or {}).get('runtime_session')
+        session_key = str(
+            (runtime_context or {}).get('session_key') or getattr(session, 'session_key', '') or 'web:shared'
+        ).strip() or 'web:shared'
+        carrier = (
+            runtime_context.get('tool_arg_stash_carrier')
+            or getattr(session, '_frontdoor_tool_arg_stash', {})
+            or {}
+        )
+        container = tool_arg_stash.read_container(carrier)
+        hop = tool_arg_stash.read_hop(carrier)
+        scope_key = tool_arg_stash.session_scope_key(session_key, name)
+        view = self._frontdoor_view_without_evicted_stage_rows(state, list((state or {}).get('messages') or []))
+        fingerprint = str(contract_presence_index(request_messages=view).get(name) or '').strip()
+        plan = plan_reuse_execution(
+            reuse_requested=True,
+            explicit_arguments=explicit_arguments,
+            contract_present=bool(fingerprint),
+            staged_entries=tool_arg_stash.peek_entries(
+                container,
+                scope_key=scope_key,
+                current_hop=hop,
+                fingerprint=fingerprint,
+            ),
+        )
+        kind = str(plan.get('kind') or '').strip()
+        if kind == REUSE_PLAN_EXPLICIT_ARGS:
+            executed_text = await execute_one(dict(plan.get('arguments') or {}))
+            self._persist_frontdoor_stash_container(
+                container=tool_arg_stash.consume_entries(
+                    container,
+                    scope_key=scope_key,
+                    current_hop=hop,
+                    fingerprint=fingerprint,
+                )[0],
+                hop=hop,
+                session=session,
+                runtime_context=runtime_context,
+            )
+            return f"{reuse_refusal_text(kind, name)}\n\n{executed_text}"
+        if kind in {REUSE_PLAN_NO_STASH, REUSE_PLAN_CONTRACT_ABSENT}:
+            if kind == REUSE_PLAN_CONTRACT_ABSENT and container.get(scope_key):
+                self._persist_frontdoor_stash_container(
+                    container=tool_arg_stash.drop_scope(container, scope_key=scope_key),
+                    hop=hop,
+                    session=session,
+                    runtime_context=runtime_context,
+                )
+            return reuse_refusal_text(kind, name)
+        if kind != REUSE_PLAN_EXECUTE:
+            return None
+        entries = [dict(item) for item in list(plan.get('entries') or []) if isinstance(item, dict)]
+        items: list[dict[str, Any]] = []
+        for index, entry in enumerate(entries):
+            entry_arguments = dict(entry.get(tool_arg_stash.ARGS_FIELD) or {})
+            text = str(await execute_one(entry_arguments) or '')
+            item: dict[str, Any] = {
+                'index': index,
+                'args_digest': str(entry.get(tool_arg_stash.DIGEST_FIELD) or tool_arg_stash.args_digest(entry_arguments)),
+                'ok': self._tool_status(text) == 'success',
+            }
+            item['error' if item['ok'] is False else 'result'] = text
+            items.append(item)
+        self._persist_frontdoor_stash_container(
+            container=tool_arg_stash.consume_entries(
+                container,
+                scope_key=scope_key,
+                current_hop=hop,
+                fingerprint=fingerprint,
+            )[0],
+            hop=hop,
+            session=session,
+            runtime_context=runtime_context,
+        )
+        return aggregate_reuse_results(tool_name=name, items=items)
+
+    def _persist_frontdoor_stash_container(
+        self,
+        *,
+        container: dict[str, Any],
+        hop: int,
+        session: Any,
+        runtime_context: dict[str, Any],
+    ) -> None:
+        """消费后的载体同时写回会话对象与本轮 runtime_context，避免同跳两份读口径。"""
+        next_carrier = tool_arg_stash.build_carrier(container, hop=hop)
+        if session is not None:
+            setattr(session, '_frontdoor_tool_arg_stash', next_carrier)
+        runtime_context['tool_arg_stash_carrier'] = next_carrier
+
     def _frontdoor_execution_bundle(
         self,
         *,
@@ -9523,6 +9646,51 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
                     declared_names=(runtime_context or {}).get("declared_tool_names") or [],
                 )
                 return await _error_result(payload, f"tool not available: {tool_name}" + (f"\n{hint}" if hint else ""))
+            async def _reuse_execute_one(call_arguments: dict[str, Any]) -> str:
+                async with semaphore:
+                    (
+                        _raw_result,
+                        reuse_text,
+                        _status,
+                        _started_at,
+                        _finished_at,
+                        _elapsed,
+                    ) = await self._execute_tool_call_with_raw_result(
+                        tool=tool,
+                        tool_name=tool_name,
+                        arguments=_normalize_frontdoor_tool_arguments(tool_name, dict(call_arguments or {})),
+                        runtime_context=runtime_context,
+                        on_progress=on_progress,
+                        tool_call_id=str(payload.get("id") or "").strip() or None,
+                    )
+                return str(reuse_text or "")
+
+            reuse_content = await self._frontdoor_reuse_args_execution(
+                tool_name=tool_name,
+                arguments=dict(payload.get("arguments") or {}),
+                state=state,
+                runtime_context=runtime_context,
+                execute_one=_reuse_execute_one,
+            )
+            if reuse_content is not None:
+                # 复用调用与冲动投递同形：一条 call id 恰好一个结果块，宽限提醒不再叠加
+                # （预算仍按本轮一次计，批次内部的 N 份不额外占轮）。
+                return {
+                    "tool_call_id": str(payload.get("id") or "").strip(),
+                    "tool_name": tool_name,
+                    "status": self._tool_status(reuse_content),
+                    "raw_result": reuse_content,
+                    "result_text": reuse_content,
+                    "free_pass_kind": free_pass_kind,
+                    "tool_message": self._tool_result_message(
+                        tool_call_id=str(payload.get("id") or ""),
+                        tool_name=tool_name or "tool",
+                        content=reuse_content,
+                        started_at="",
+                        finished_at="",
+                        elapsed_seconds=None,
+                    ),
+                }
             async with semaphore:
                 raw_result, result_text, status, started_at, finished_at, elapsed_seconds = await self._execute_tool_call_with_raw_result(
                     tool=tool,

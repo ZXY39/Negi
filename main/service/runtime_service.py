@@ -8063,7 +8063,7 @@ class MainRuntimeService:
             contract_block=block,
             outcome=IMPULSE_STAGED,
             staged_count=staged_count,
-            targets_text=render_staged_targets(pending_container, scope_key=scope_key, tool_name=normalized_tool),
+            targets_text=render_staged_targets(pending_container, scope_key=scope_key),
             batch_position=batch_position,
             batch_total=batch_total,
         )

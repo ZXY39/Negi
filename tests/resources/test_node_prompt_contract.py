@@ -108,7 +108,9 @@ def test_node_runtime_contract_serializes_minimal_agent_facing_payload() -> None
     # 活状态只在尾块里，稳定块一份都没有
     gate_content = contract.to_stage_gate_message()["content"]
     assert gate_content.startswith("## Runtime Stage Gate")
-    assert "callable_tools: `exec`" in gate_content
+    # D11：callable 面不再渲成一行（水合不再拦路），装配层的载荷仍是执行准入的读点。
+    assert "callable_tools:" not in gate_content
+    assert list(contract.to_message_payload().get("callable_tool_names") or []) == ["exec"]
     assert "hydrated_tools:" not in gate_content
     assert "callable_tools:" not in message["content"]
     assert "hydrated_tools:" not in message["content"]
@@ -346,7 +348,7 @@ def test_node_stage_gate_lists_declared_but_denied_tools() -> None:
     )
 
     gate_content = contract.to_stage_gate_message()["content"]
-    assert "callable_tools: `exec`" in gate_content
+    assert "callable_tools:" not in gate_content
     assert "denied_tools" in gate_content
     assert "web_fetch" in gate_content.split("denied_tools", 1)[1]
     assert "无权限" in gate_content

@@ -112,7 +112,8 @@ def availability_hint(
         # 但执行准入已经关掉——不说清就会变成反复重试或换个名字再试。
         return (
             f"`{name}` 的参数表仍在本次 tools[] 声明里，但你当前角色已无权限调用它，"
-            "重试或改名都不会放行；请改用 `callable_tools` 列出的工具，或换一种达成路径"
+            "重试或改名都不会放行；请改用下面「当前可直接调用的工具」名单里的工具，"
+            "或换一种达成路径"
         )
     callable_list = _availability_name_list(callable_names)
     candidate_list = _availability_name_list(candidate_names)

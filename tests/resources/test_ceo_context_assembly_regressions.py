@@ -1180,9 +1180,10 @@ async def test_message_builder_appends_frontdoor_runtime_tool_contract_to_dynami
     assert gate_text.startswith("## Runtime Stage Gate")
     assert '"message_type"' not in contract_text
     assert '"callable_tool_names"' not in contract_text
-    assert "`filesystem_write`" in contract_text
-    # 每跳重写的活状态只在尾块里，稳定块里一份都没有
-    assert "callable_tools:" in gate_text and "callable_tools:" not in stable_text
+    # D11：callable 面不再渲染成行（水合不再拦路 ⇒ 该行无信息量），名字只由 `tools[]`
+    # 与请求视图里的契约块承载；活状态尾块只留拦得住的那两面。
+    assert "callable_tools:" not in contract_text
+    assert "denied_tools" not in gate_text
     assert "stage_summary:" in gate_text and "stage_summary:" not in stable_text
     assert 'load_tool_context(tool_id="filesystem_write")' not in contract_text
     # 候选整表不再重列：这份样本里 filesystem_write 已经 callable、池子为空，所以候选行
@@ -1283,9 +1284,12 @@ def test_frontdoor_dynamic_appendix_records_prefer_state_tool_contract_over_stal
     contract_text = "\n".join(str(item["content"] or "") for item in contract_messages)
     assert contract_messages[0]["role"] == "user"
     assert contract_text.startswith("## Runtime Tool Contract")
-    # callable 由 state 重算：`filesystem_write` 的契约块在 `messages` 里 ⇒ 在场 ⇒ 上名单；
-    # 陈旧尾块消息自报的 `exec` 不被采信。
-    assert "callable_tools: `filesystem_write`, `silent`" in contract_text
+    # callable 由 state 重算：`filesystem_write` 的契约块在 `messages` 里 ⇒ 在场 ⇒ 进名单；
+    # 陈旧尾块消息自报的 `exec` 不被采信。D11 后这一面不再渲染成行，判据落在消息自带的
+    # 载荷上（装配层算出的那份，而不是文本）。
+    contract_payload = contract_messages[0].get("_frontdoor_tool_contract_payload") or {}
+    assert list(contract_payload.get("callable_tool_names") or []) == ["filesystem_write", "silent"]
+    assert "callable_tools:" not in contract_text
     # 空池不再打 `candidate_tools: none` 这一行占位
     assert "candidate_tools:" not in contract_text
     assert "undeclared_candidates" not in contract_text
@@ -1369,7 +1373,14 @@ def test_frontdoor_tool_contract_upsert_accepts_legacy_dict_and_writes_summary_t
     assert str(updated[0]["content"] or "").startswith("## Runtime Tool Contract")
     assert '"message_type"' not in str(updated[0]["content"] or "")
     assert str(updated[1]["content"] or "").startswith("## Runtime Stage Gate")
-    assert "callable_tools: `submit_next_stage`, `filesystem_write`" in str(updated[1]["content"] or "")
+    # D11：callable 名单不再渲染成行，装配层算出的那份只留在载荷里（执行准入读它，模型侧
+    # 由请求视图里的契约块决定）。
+    assert "callable_tools:" not in str(updated[1]["content"] or "")
+    upserted_payload = updated[0].get("_frontdoor_tool_contract_payload") or {}
+    assert list(upserted_payload.get("callable_tool_names") or []) == [
+        "submit_next_stage",
+        "filesystem_write",
+    ]
     stable_text = str(updated[0]["content"] or "")
     assert "candidate_tools:" in stable_text
     assert "candidate_skills" not in stable_text
@@ -4003,7 +4014,10 @@ def test_frontdoor_stage_gate_lists_declared_but_denied_tools() -> None:
     )
 
     gate = contract.to_stage_gate_message()["content"]
-    assert "callable_tools: `exec`" in gate
+    # D11：本轮可调用面不再渲进尾块——契约不在场也不拦路，那行只剩噪声；拦得住的
+    # denied_tools 必须仍在。
+    assert "callable_tools:" not in gate
+    assert list((contract.to_message_payload().get("callable_tool_names") or [])) == ["exec"]
     assert "denied_tools" in gate
     assert "web_fetch" in gate.split("denied_tools", 1)[1]
     assert "无权限" in gate

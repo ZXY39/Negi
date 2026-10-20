@@ -1706,7 +1706,9 @@ async def test_create_agent_graph_execute_tools_makes_loaded_contract_callable()
     ]
     assert len(contract_messages) == 2  # 一份稳定契约 + 一份活状态块
     contract_text = "\n".join(str(item["content"] or "") for item in contract_messages)
-    assert "callable_tools: `load_tool_context`, `filesystem_write`, `silent`" in contract_text
+    assert "callable_tools:" not in contract_text
+    # 这一跳的 callable 读点是上面的 `result["tool_names"]`：契约块随 load 结果进入请求视图
+    # 之后，名字才留在这份名单里。
     assert "hydrated_tools:" not in contract_text
     # 静态规则不再抄进契约：加载/复读语义只由基础提示词 `ceo_frontdoor.md` 承载
     assert "load_tool_context_help:" not in contract_text
@@ -1879,7 +1881,9 @@ async def test_create_agent_runner_graph_prepare_turn_keeps_contract_present_too
     ]
     assert len(contract_messages) == 2  # 一份稳定契约 + 一份活状态块
     contract_text = "\n".join(str(item["content"] or "") for item in contract_messages)
-    assert "callable_tools: `submit_next_stage`" in contract_text
+    # D11：callable 面不再渲成模型可见的一行（水合不再拦路 ⇒ 该行无信息量），上面
+    # `frontdoor_selection_debug.callable_tool_names` 才是这一跳的读点。
+    assert "callable_tools:" not in contract_text
     # 空池不再占一行 `candidate_tools: none`
     assert "candidate_tools:" not in contract_text
     assert "undeclared_candidates" not in contract_text
@@ -2066,10 +2070,8 @@ async def test_create_agent_runner_graph_prepare_turn_keeps_normal_ceo_tools_for
     ]
     assert len(contract_messages) == 2  # 一份稳定契约 + 一份活状态块
     contract_text = "\n".join(str(item["content"] or "") for item in contract_messages)
-    assert (
-        "callable_tools: `create_async_task`, `task_list`, `cron`, `silent`, `submit_next_stage`"
-        in contract_text
-    )
+    # D11：callable 面不再渲成一行，读点是下面的 `frontdoor_selection_debug`。
+    assert "callable_tools:" not in contract_text
     assert list(prepared["frontdoor_selection_debug"]["callable_tool_names"]) == [
         "create_async_task",
         "task_list",
@@ -2157,11 +2159,16 @@ async def test_create_agent_runner_graph_prepare_turn_keeps_candidate_tools_visi
     ]
     assert len(contract_messages) == 2  # 一份稳定契约 + 一份活状态块
     contract_text = "\n".join(str(item["content"] or "") for item in contract_messages)
-    assert "callable_tools: `submit_next_stage`" in contract_text
     # 契约不在场的候选不进 callable，但声明面照旧钉住：`tools[]` 仍带着这个名字，
-    # 模型看得见它、也能直接 load 拿契约（候选 = 已授权 − callable）。
+    # 模型看得见它、也能直接调用拿契约（候选 = 已授权 − callable）。D11 后这一面的读点
+    # 是 `frontdoor_selection_debug.callable_tool_names`，尾块不再渲成模型可见的一行。
+    assert list(prepared["frontdoor_selection_debug"]["callable_tool_names"]) == [
+        "submit_next_stage",
+        "load_tool_context",
+        "silent",
+    ]
+    assert "callable_tools:" not in contract_text
     assert "filesystem_write" in list(prepared["provider_tool_names"] or [])
-    assert "callable_tools: `submit_next_stage`, `load_tool_context`, `silent`" in contract_text
     assert "- `filesystem_write`: Write file content to disk." not in contract_text
     # 名单钉在头部（每跳逐字节复用，全量可见 + 描述）；尾块不再有 skill 名单机制。
     head_text = "\n".join(
@@ -2409,9 +2416,10 @@ async def test_create_agent_runner_graph_prepare_turn_recovers_paused_manual_con
     ]
     assert len(contract_messages) == 2  # 一份稳定契约 + 一份活状态块
     contract_text = "\n".join(str(item["content"] or "") for item in contract_messages)
-    # 恢复出来的这一跳：`filesystem_write` 的块在请求视图里 ⇒ 在场 ⇒ 上 callable；
-    # 活动阶段已存在，阶段工具由 `## Runtime Stage Gate` 与执行束另行供给，不进这一行。
-    assert "callable_tools: `load_tool_context`, `filesystem_write`, `silent`" in contract_text
+    # 恢复出来的这一跳：`filesystem_write` 的块在请求视图里 ⇒ 在场 ⇒ 进 callable（上面
+    # `contract_present_tool_names` 那条已经在钉这件事）。D11 后 callable 不再渲成一行。
+    assert "callable_tools:" not in contract_text
+    assert "filesystem_write" in list(prepared["frontdoor_selection_debug"]["callable_tool_names"] or [])
 
 
 def test_runtime_agent_session_paused_snapshot_keeps_frontdoor_runtime_context() -> None:
@@ -4190,7 +4198,7 @@ def test_frontdoor_send_contract_prints_declared_denied_tools_line() -> None:
     stage_gate_texts = [
         str(item.get("content") or "")
         for item in list(contract.dynamic_appendix_messages)
-        if "callable_tools" in str(item.get("content") or "")
+        if "frontdoor_runtime_stage_gate" in str(item.get("content") or "")
     ]
     assert len(stage_gate_texts) == 1
     assert "denied_tools" in stage_gate_texts[0]

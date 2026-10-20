@@ -238,11 +238,14 @@ def _render_node_dynamic_contract_summary(payload: dict[str, Any]) -> str:
 
 
 def _render_node_stage_gate_summary(payload: dict[str, Any]) -> str:
-    """每跳重写的活状态：本轮真可调用集、活动阶段轨道。排在请求体末位。"""
+    """每跳重写的活状态：不可调名字与活动阶段轨道。排在请求体末位。
+
+    与前门同一口径删掉 `callable_tools`：契约不在场不再是"调不动"，而是"这一跳先拿契约"，
+    列一份每跳变化的名单没有可执行动作，只能靠模型自己去比对。
+    """
     lines = [
         NODE_DYNAMIC_STAGE_GATE_HEADING,
         f'kind: {NODE_DYNAMIC_STAGE_GATE_KIND}',
-        f'callable_tools: {_render_name_list(payload.get("callable_tool_names"))}',
     ]
     denied_tool_names = _normalized_name_list(payload.get('denied_tool_names'))
     if denied_tool_names:

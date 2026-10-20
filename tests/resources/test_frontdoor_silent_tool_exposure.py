@@ -143,19 +143,16 @@ def test_visible_turns_are_told_the_silent_tool_is_the_only_exit() -> None:
     """静默出口措辞的唯一载体 = 基础提示词（一份规则一个家）。
 
     23:25 与 01:17 两次实盘的成因都是"上下文里残留的旧契约"被当成权威，所以这句说明
-    不再抄进每轮重渲染的契约；契约里只留"`silent` 在 callable 名单里"这一条事实。
+    不再抄进每轮重渲染的契约。D11 之后连"`silent` 在 callable 名单里"这条事实也不再由
+    契约点名——可调用面不渲染，模型看见的名字源是 `tools[]`（`submit_next_stage` / `silent`
+    两颗合成控制工具恒定在内），对象可解析性由下面的执行束用例钉。
     """
     rendered = _contract(['exec', SILENT_TOOL_NAME])
-    assert f'`{SILENT_TOOL_NAME}`' in rendered  # 名单仍点名，工具没注册就消失
+    assert 'callable_tools:' not in rendered
     assert 'silent_help:' not in rendered
     prompt = _CEO_FRONTDOOR_PROMPT.read_text(encoding='utf-8')
     assert '没有文本写法' in prompt
     assert '不占阶段预算' in prompt  # 免阶段那半句已归注入名单，这里只留预算与出口措辞
-
-
-def test_silent_help_follows_the_callable_list() -> None:
-    """工具没注册时不能继续叫模型去调它 —— 名单是唯一事实源，措辞不再是第二处。"""
-    assert SILENT_TOOL_NAME not in _contract(['exec'])
 
 
 def test_execution_bundle_resolves_the_silent_tool_object() -> None:
