@@ -25,7 +25,12 @@ from g3ku.runtime.frontdoor import _ceo_create_agent_impl as create_agent_impl
 from g3ku.runtime.frontdoor._ceo_runtime_ops import CeoFrontDoorRuntimeOps
 from g3ku.runtime.frontdoor.message_builder import CeoMessageBuilder
 from g3ku.runtime.frontdoor.state_models import initial_persistent_state
-from g3ku.runtime.kept_contract_snapshot import build_kept_contract_snapshot
+from g3ku.runtime.kept_contract_snapshot import (
+    FAILURE_STAGE_NOT_LOADED,
+    build_kept_contract_snapshot,
+    keep_closure_fields,
+    resolve_kept_contracts,
+)
 from g3ku.runtime.stage_prompt_compaction import KEPT_CONTRACT_HEADING, completed_stage_blocks
 from g3ku.runtime.tool_context_presence import (
     contract_presence,
@@ -968,8 +973,8 @@ def test_rejection_hint_prefers_denied_over_declared() -> None:
 def _eviction_batch_state(*, keep_tools: list[str] | None = None) -> dict:
     """一条活动阶段：本阶段 load 过 TOOL_ID，正文行还挂在 `messages` 里，本批要点名裁撤。
 
-    轮次记录带 `arguments.tool_id` 与成功状态：`keep_tools` 的名字只认这份记录，少了它
-    keep 那条会被整批拒绝（回执改成"没留"），夹具就测不到留住的那条道。
+    轮次记录带 `arguments.tool_id` 与成功状态：`keep_tools` 的名字只认这份记录，少了它那条
+    名字按 `stage_never_loaded` 忽略（回执点名、不写正文），阶段照常用于夹具的两条道。
     """
     stage_arguments = {
         "stage_goal": "run the selected tool calls",
@@ -1156,6 +1161,103 @@ async def test_graph_execute_tools_keeps_named_contract_in_the_eviction_batch(mo
     rendered = "\n".join(str(item.get("content") or "") for item in list(result["messages"] or []))
     assert KEPT_CONTRACT_HEADING in rendered
     assert "保留的契约正文" in rendered
+
+
+def test_resolve_kept_contracts_ignores_names_the_closing_stage_never_loaded() -> None:
+    """认不出的保留名只是忽略并点名，绝不打回这次提交。
+
+    实盘 `task:6cf4917d4734`：187 次 `submit_next_stage` 里 8 次被 `keep_*` 拒掉，其中 2 次
+    是名字点错（`keep_tools: exec, content_search was not loaded during the stage you are
+    closing`）。那两次提交里阶段其实已经结清了，模型还要为一条可有可无的保留再付一次阶段
+    切换与一次整批重放。
+    """
+    asked: list[str] = []
+
+    def _payload_getter(tool_id: str) -> dict:
+        asked.append(tool_id)
+        return {
+            "tool_id": tool_id,
+            "content": f"# {tool_id}\n\n保留的契约正文\n",
+            "parameter_contract_markdown": "",
+            "required_parameters": [],
+            "example_arguments": {},
+            "warnings": [],
+            "errors": [],
+        }
+
+    stage = {
+        "rounds": [
+            {
+                "tools": [
+                    {
+                        "tool_name": "load_tool_context",
+                        "status": "success",
+                        "arguments": {"tool_id": TOOL_ID},
+                    }
+                ]
+            }
+        ]
+    }
+
+    snapshot = resolve_kept_contracts(
+        stage,
+        keep_tools=[TOOL_ID, OTHER_ID],
+        keep_skills=["sn-never-loaded"],
+        tool_payload_getter=_payload_getter,
+    )
+
+    assert [item["tool_id"] for item in list(snapshot["tool_contexts"] or [])] == [TOOL_ID]
+    assert list(snapshot["skill_contexts"] or []) == []
+    assert [
+        (item["kind"], item["name"], item["reason"]) for item in list(snapshot["failures"] or [])
+    ] == [
+        ("tool", OTHER_ID, FAILURE_STAGE_NOT_LOADED),
+        ("skill", "sn-never-loaded", FAILURE_STAGE_NOT_LOADED),
+    ]
+    # 没 load 过的名字连取正文都不许去取：资源文件里那份内容从未在本阶段在场过，
+    # 补进保留块等于让模型用一次点名换到一条它没见过的契约。
+    assert asked == [TOOL_ID]
+
+    fields = keep_closure_fields(snapshot)
+    assert fields["kept_tools"] == [TOOL_ID]
+    assert OTHER_ID in str(fields.get("note") or "")
+
+
+async def test_graph_execute_tools_closes_the_stage_when_a_keep_name_is_unrecognized(monkeypatch) -> None:
+    """前门同一条口径：点错名字的那批照样结清阶段，回执逐条点名。
+
+    两条车道共用 `resolve_kept_contracts`，这里的断言与节点道唯一有差别的是回执必须随
+    `stage_closure` 出帧——模型不看台账，只看这一句才知道自己没留住。
+    """
+
+    def _payload_getter(tool_id: str) -> dict:
+        return {
+            "tool_id": tool_id,
+            "content": f"# {tool_id}\n\n保留的契约正文\n",
+            "parameter_contract_markdown": "",
+            "required_parameters": [],
+            "example_arguments": {},
+            "warnings": [],
+            "errors": [],
+        }
+
+    result = await _run_graph_eviction_batch(
+        monkeypatch,
+        _eviction_batch_state(keep_tools=[TOOL_ID, OTHER_ID]),
+        tool_payload_getter=_payload_getter,
+    )
+
+    evicted = result["frontdoor_stage_state"]["stages"][0]
+    assert evicted["context_evicted"] is True
+    assert [item["tool_id"] for item in list(evicted.get("kept_tool_contexts") or [])] == [TOOL_ID]
+
+    receipt = ""
+    for item in list(result.get("messages") or []):
+        if str(item.get("role") or "") == "tool" and str(item.get("name") or "") == STAGE_TOOL_NAME:
+            receipt = str(item.get("content") or "")
+    assert receipt, "submit_next_stage 的回执没进消息列表"
+    assert FAILURE_STAGE_NOT_LOADED in receipt
+    assert TOOL_ID in receipt
 
 
 

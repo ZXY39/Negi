@@ -8058,8 +8058,8 @@ class NodeRunner:
         缓存顶掉。
 
         取不到正文的那几条**不写条目**、工具保持撤销态（安全方向天然正确），由
-        `keep_closure_fields` 在回执里逐条点名。未知名字在这里就抛 `ValueError`，走
-        `tool_error_guidance` 回贴车道，回执里枚举判据实际使用的那份名单。
+        `keep_closure_fields` 在回执里逐条点名。本阶段没加载过的名字同样只是点名后忽略，
+        不打回这次提交——阶段已经结清，为一个可有可无的名字重付一次切换没有意义。
         """
         if not (normalize_keep_contract_names(keep_tools) or normalize_keep_contract_names(keep_skills)):
             return {}
@@ -8071,8 +8071,8 @@ class NodeRunner:
         payload = metadata.get('execution_stages') if isinstance(metadata, dict) else {}
         state = normalize_execution_stage_metadata(payload)
         # 归属判据与前门共用 `closing_stage_target`，包括"没有可结清的阶段"那一支：照样交给
-        # `resolve_kept_contracts`，它对空名单点名的拒绝文案两车道同形——两条车道在这里分叉，
-        # 模型收到的就是两种合同。
+        # `resolve_kept_contracts`，它对认不出的名字统一记一条 `stage_never_loaded` 失败而不
+        # 打回提交——两条车道在这里分叉，模型收到的就是两种合同。
         closing_stage = closing_stage_target(state)
         try:
             rows = list(self._store.list_task_node_tool_results(task_id, node_id) or [])

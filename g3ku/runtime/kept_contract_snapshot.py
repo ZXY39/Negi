@@ -11,7 +11,8 @@
 
 提取失败（缺文件、资源改名、repair-required）时该条**不写**：工具保持撤销态，模型必须
 重新 load —— 这是安全方向；回执里点名"未能保留：X（原因）"，绝不静默留一条空正文让模型
-以为留住了。
+以为留住了。名字压根不在这条阶段的 loader 记录里时同样不写，但它**不打回这次提交**：阶段
+照常结清，回执里按 `stage_never_loaded` 点名这一条（认下的其余名字照常保留）。
 """
 
 from __future__ import annotations
@@ -42,6 +43,9 @@ FAILURE_SKILL_BODY_EMPTY = "skill_body_empty"
 # 提交落点收到了名字、却没收到任何对应的快照交代（绕过工具层的写入者，如恢复重放）。
 # 这一条必须存在，否则"名字被接受 + 账本里没正文"就是模型读不到的空承诺。
 FAILURE_NOT_RESOLVED = "keep_not_resolved_at_submit"
+# 本阶段的 loader 记录里没有这个名字。它不再打死整单提交：名字被忽略、其余照旧保留，
+# 由回执逐条点名（模型本来就拿不到"这条阶段加载过哪些名字"的第二份读数）。
+FAILURE_STAGE_NOT_LOADED = "stage_never_loaded"
 
 _EMPTY_TOOL_REGISTRY: Any = None
 
@@ -61,6 +65,11 @@ KEEP_CONTRACT_FAILURE_REASON_TEXT = {
     FAILURE_SKILL_NOT_FOUND: "技能正文取不到（资源改名或已删除）",
     FAILURE_SKILL_BODY_EMPTY: "技能正文为空，留不下任何东西",
     FAILURE_NOT_RESOLVED: "这次的提交落点没有做保留快照，正文一条都没写下，要用的话得重新 load",
+    FAILURE_STAGE_NOT_LOADED: (
+        "this closing stage never loaded that contract, so there is no body to carry over; "
+        "the name was ignored and the stage closed normally - load it inside the stage whose "
+        "contract you want kept, then name it in that stage's submit_next_stage"
+    ),
 }
 
 
@@ -431,26 +440,6 @@ def keep_closure_fields(snapshot: Any) -> dict[str, Any]:
     return fields
 
 
-def keep_contract_name_error(field: str, unknown: list[str], allowed: list[str]) -> str:
-    """未知保留名的拒绝文案：点名错在哪，并枚举这条判据自己依据的那份名单。
-
-    只说"名字不合法"等于让模型再猜一轮：它不知道本阶段到底 load 过什么。枚举的是**判据
-    实际使用的集合**（被移除阶段的 loader 记录），不是全量可见集——后者会把模型引向
-    " load 别的工具再保留"的死路。
-    """
-    names = ", ".join([str(item or "").strip() for item in list(unknown or []) if str(item or "").strip()])
-    if allowed:
-        allowed_text = f"{field} may only name what this closing stage actually loaded: " + ", ".join(
-            [str(item or "").strip() for item in list(allowed or []) if str(item or "").strip()]
-        )
-    else:
-        allowed_text = (
-            f"{field} may only name what this closing stage actually loaded, "
-            "and this stage has no such loader record - nothing can be kept"
-        )
-    return f"{field}: {names} was not loaded during the stage you are closing. {allowed_text}"
-
-
 def resolve_kept_contracts(
     stage: Any,
     *,
@@ -462,24 +451,31 @@ def resolve_kept_contracts(
     resource_manager: Any = None,
     workspace_root: Path | None = None,
 ) -> dict[str, Any]:
-    """一条阶段的 `keep_*` 收口：校验名字 → 一次性取正文 → 带回执字段。
+    """一条阶段的 `keep_*` 收口：认名字 → 一次性取正文 → 带回执字段。
 
-    两条车道的提交落点共用这份判据，拒绝口径与回执形状因此只有一处定义。名字不在本阶段
-    loader 记录里时整批拒绝（不做"保留能认的那几条"）：半收半拒会让模型读到与它提交内容
-    不一致的结果。
+    两条车道的提交落点共用这份判据，保留口径与回执形状因此只有一处定义。名字不在本阶段
+    loader 记录里时**不拒绝这次提交**：这条按 `stage_never_loaded` 记一笔失败、其余名字照常
+    保留，阶段照常结清。留着点错名字就打回整单会让模型为了一个可有可无的名字重付一次
+    阶段切换，而"哪些没留下"回执已经逐条点名，模型不需要靠失败重放才知道。
     """
     loaded_tool_names, loaded_skill_names = collect_stage_loader_names(
         stage,
         tool_results_by_call=tool_results_by_call,
     )
-    requested_tools = list(keep_tools or [])
-    requested_skills = list(keep_skills or [])
-    unknown_tools = [name for name in requested_tools if name not in set(loaded_tool_names)]
-    unknown_skills = [name for name in requested_skills if name not in set(loaded_skill_names)]
-    if unknown_tools:
-        raise ValueError(keep_contract_name_error("keep_tools", unknown_tools, loaded_tool_names))
-    if unknown_skills:
-        raise ValueError(keep_contract_name_error("keep_skills", unknown_skills, loaded_skill_names))
+    known_tools = set(loaded_tool_names)
+    known_skills = set(loaded_skill_names)
+    requested_tools = _dedup_names(keep_tools)
+    requested_skills = _dedup_names(keep_skills)
+    ignored = [
+        {"kind": "tool", "name": name, "reason": FAILURE_STAGE_NOT_LOADED}
+        for name in requested_tools
+        if name not in known_tools
+    ]
+    ignored.extend(
+        {"kind": "skill", "name": name, "reason": FAILURE_STAGE_NOT_LOADED}
+        for name in requested_skills
+        if name not in known_skills
+    )
     if not requested_tools and not requested_skills:
         return {
             "tool_contexts": [],
@@ -488,14 +484,17 @@ def resolve_kept_contracts(
             "loaded_tool_names": loaded_tool_names,
             "loaded_skill_names": loaded_skill_names,
         }
+    # 只给认下的名字取正文：没 load 过的名字即使资源文件里存在，也不许从磁盘补一份正文
+    # 进保留块——那等于让模型用一次点名换到一条本阶段从未在场过的契约。
     snapshot = build_kept_contract_snapshot(
-        tool_ids=requested_tools,
-        skill_ids=requested_skills,
+        tool_ids=[name for name in requested_tools if name in known_tools],
+        skill_ids=[name for name in requested_skills if name in known_skills],
         tool_payload_getter=tool_payload_getter,
         skill_body_getter=skill_body_getter,
         resource_manager=resource_manager,
         workspace_root=workspace_root,
     )
+    snapshot["failures"] = [*(snapshot.get("failures") or []), *ignored]
     snapshot["loaded_tool_names"] = loaded_tool_names
     snapshot["loaded_skill_names"] = loaded_skill_names
     return snapshot
@@ -511,7 +510,6 @@ __all__ = [
     "collect_stage_loader_names",
     "complete_keep_snapshot",
     "keep_closure_fields",
-    "keep_contract_name_error",
     "normalize_kept_skill_contexts",
     "render_kept_skill_context",
     "render_kept_tool_context",

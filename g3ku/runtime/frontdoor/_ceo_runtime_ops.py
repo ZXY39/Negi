@@ -6493,8 +6493,9 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
                 if drop_completed_stage_tool_detail and normalized_summary:
                     current["context_evicted"] = True
                     # 保留正文只在裁撤**真的落了**的那一条阶段上写：没裁撤就没有块，正文
-                    # 写进账本也无处渲染，反而会留下一份"看着留住了"的假证据。取不到的那
-                    # 几条由 `resolve_kept_contracts` 挡在门外（不写条目），工具保持撤销态。
+                    # 写进账本也无处渲染，反而会留下一份"看着留住了"的假证据。取不到的、以及
+                    # 本阶段压根没加载过的那几条由 `resolve_kept_contracts` 挡在门外（不写条目），
+                    # 工具保持撤销态。
                     normalized_kept_tool_contexts = normalize_kept_tool_contexts(kept_tool_contexts)
                     if normalized_kept_tool_contexts:
                         current[KEPT_TOOL_CONTEXTS_FIELD] = normalized_kept_tool_contexts
