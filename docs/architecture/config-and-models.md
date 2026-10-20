@@ -43,7 +43,7 @@
 - `loadBalanceGroups`
   可选节。组名 → `{enabled, maxRetryRounds, modelKeys}`：组内成员平级，运行时按综合负载选一个并把节点粘滞绑上去；`maxRetryRounds` 是该组内每个成员的完整 key pass 预算，非负整数（不填按 1，0 与 1 等价），负数是配置错误而不是需要夹断的输入
 
-`catalog[]` 条目另有 `quotaPoolKey`：operator 显式声明「这几条 binding 共享同一个上游配额账户」。不填时运行时只按解析到的 endpoint + API key 指纹自动合并；不按 provider 名称猜测共享。
+`catalog[]` 条目另有 `quotaPoolKey`：operator 显式声明「这几条 binding 共享同一个上游配额账户」。不填时运行时只按解析到的 endpoint + API key 指纹自动合并；不按 provider 名称猜测共享。这个值同时出现在路由的成员视图（`RouteMemberView.quota_pool_key`）上，与桶指纹同源——成员视图读不到它时按「身份未声明」处理，而不是按「不共享」处理。
 
 ### `providers`
 
