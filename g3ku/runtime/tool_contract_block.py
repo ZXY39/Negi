@@ -96,37 +96,43 @@ def attach_tool_contract_block(payload: dict[str, Any] | None) -> dict[str, Any]
     return next_payload
 
 
-def parse_tool_contract_blocks(text: Any) -> list[tuple[str, str]]:
-    """按出现顺序取出 `(tool_id, fingerprint)`；正文里的同名块头不参与边界判定。"""
-    content = str(text or "")
-    if MARKER_NAME not in content:
+def _leading_block_pairs(text: str) -> list[tuple[str, str]]:
+    """只认**开头**那一块：`^[TOOL_CONTRACT_V1:<tool>:<fp>] … [/TOOL_CONTRACT_V1]`。
+
+    锚在开头而不是全文扫，是因为块里的正文本身可能出现一颗长得一样的块头（别的工具的
+    toolskill 里抄了一段示例）。全文扫会把那颗假头当成第二份契约认下来，等于让一份契约
+    正文替另一个工具声明"我的契约在场了"——在场只是三道闸门里的一道，但这条不变量
+    （执行发生在契约对模型可见之后）正是本次改造的全部依据，不能让正文自己造出来。
+    """
+    if not text or MARKER_CLOSE not in text:
         return []
-    pairs: list[tuple[str, str]] = []
-    for match in _BLOCK_HEADER_RE.finditer(content):
-        tool_id = _normalized_text(match.group(1))
-        fingerprint = _normalized_text(match.group(2))
-        if tool_id and fingerprint:
-            pairs.append((tool_id, fingerprint))
-    return pairs
+    stripped = text.lstrip()
+    match = _BLOCK_HEADER_RE.match(stripped)
+    if match is None:
+        return []
+    if MARKER_CLOSE not in stripped:
+        return []
+    tool_id = _normalized_text(match.group(1))
+    fingerprint = _normalized_text(match.group(2))
+    if not tool_id or not fingerprint:
+        return []
+    return [(tool_id, fingerprint)]
 
 
-def contract_text_segments(value: Any) -> list[str]:
-    """一条结果里值得扫块的位置：整串文本，以及 JSON 信封的 `content` 字段。
+def _candidate_contract_texts(value: Any) -> list[str]:
+    """一条结果里值得判块的位置。先做子串预筛，再决定要不要花一次 JSON 解析。
 
-    两条投递道都经 `json.dumps`，块在模型看到的是转义形态；判据要先拿到未转义的那份文本
-    才能比 fingerprint，所以信封形态必须单独取字段，不能只扫整串。
+    在场判据每跳对**每一条**工具行都跑，历史里绝大多数行不是契约。块头本身不含任何会被
+    转义的字符，所以 `MARKER_NAME in text` 这一步在整串上就等价于在字段上，用它把
+    `json.loads` 挡在真正的契约行之前——去掉 loader 名字闸门换来的那点开销就在这里补回。
     """
     if isinstance(value, dict):
-        segments: list[str] = []
         content = value.get(CONTRACT_CONTENT_FIELD)
-        if isinstance(content, str):
-            segments.append(content)
-        segments.append(json.dumps(value, ensure_ascii=False, default=str))
-        return segments
+        return [content] if isinstance(content, str) and MARKER_NAME in content else []
     text = str(value or "")
-    if not text:
+    if not text or MARKER_NAME not in text:
         return []
-    segments = [text]
+    candidates = [text]
     stripped = text.strip()
     if stripped.startswith("{"):
         try:
@@ -136,16 +142,14 @@ def contract_text_segments(value: Any) -> list[str]:
         if isinstance(parsed, dict):
             content = parsed.get(CONTRACT_CONTENT_FIELD)
             if isinstance(content, str):
-                segments.append(content)
-    return segments
+                candidates.insert(0, content)
+    return candidates
 
 
 def contract_pairs_from_value(value: Any) -> list[tuple[str, str]]:
-    """一条结果里的在场对子。闭标签必须存在——半截块（外置信封截断）不算在场。"""
-    for segment in contract_text_segments(value):
-        if MARKER_CLOSE not in segment:
-            continue
-        pairs = parse_tool_contract_blocks(segment)
+    """一条结果里的在场对子。半截块（外置信封截断、缺闭标签）不算在场。"""
+    for segment in _candidate_contract_texts(value):
+        pairs = _leading_block_pairs(segment)
         if pairs:
             return pairs
     return []
@@ -153,8 +157,11 @@ def contract_pairs_from_value(value: Any) -> list[tuple[str, str]]:
 
 def contract_text_length(value: Any) -> int:
     """契约文本的字符数，给外置闸门判上限用（不含信封元数据）。"""
-    best = 0
-    for segment in contract_text_segments(value):
-        if parse_tool_contract_blocks(segment):
-            best = max(best, len(segment))
-    return best
+    candidates = _candidate_contract_texts(value)
+    for segment in candidates:
+        if _leading_block_pairs(segment):
+            return len(segment)
+    for segment in candidates:
+        if MARKER_NAME in segment:
+            return len(segment)
+    return 0

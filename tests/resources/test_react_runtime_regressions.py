@@ -19,6 +19,7 @@ from g3ku.resources.models import ResourceKind, ToolResourceDescriptor
 from g3ku.resources.registry import ResourceRegistry
 from g3ku.runtime.context.node_context_selection import NodeContextSelectionResult
 from g3ku.runtime.stage_prompt_compaction import STAGE_COMPACT_PREFIX
+from g3ku.runtime.tool_contract_block import attach_tool_contract_block
 from g3ku.runtime.tool_history import analyze_tool_call_history
 from main.errors import TaskPausedError
 from main.monitoring.log_service import (
@@ -5542,7 +5543,8 @@ async def test_load_tool_context_direct_read_guard_blocks_duplicate_inline_tools
                 "role": "tool",
                 "tool_call_id": "call-old",
                 "name": "load_tool_context",
-                "content": json.dumps(prior_payload, ensure_ascii=False),
+                # 交付形态与真车道同形：块写在 `content` 里，判据只认那一颗头。
+                "content": json.dumps(attach_tool_contract_block(prior_payload), ensure_ascii=False),
             }
         ],
         runtime_context={
@@ -5598,7 +5600,9 @@ async def test_load_tool_context_direct_read_guard_allows_refresh_when_fingerpri
     prior_payload = {
         "ok": True,
         "tool_id": "exec",
-        "content": "# exec",
+        # 修订身份现在只看源正文 + 参数表（D2）。`exec_runtime_policy` 已退出哈希，
+        # "换了修订"必须是正文真的变了，不能再靠治理模式制造号差。
+        "content": "# exec\n\nOld toolskill revision.\n",
         "parameter_contract_markdown": "## Parameter Contract",
         "required_parameters": ["command"],
         "example_arguments": {"command": "pwd"},
@@ -5626,7 +5630,8 @@ async def test_load_tool_context_direct_read_guard_allows_refresh_when_fingerpri
                 "role": "tool",
                 "tool_call_id": "call-old",
                 "name": "load_tool_context",
-                "content": json.dumps(prior_payload, ensure_ascii=False),
+                # 上一版正文确实留在上下文里（带块），只是修订不同 ⇒ 允许重读。
+                "content": json.dumps(attach_tool_contract_block(prior_payload), ensure_ascii=False),
             }
         ],
         runtime_context={
