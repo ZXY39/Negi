@@ -25,6 +25,31 @@ NODE_FIXED_BUILTIN_TOOL_NAMES: tuple[str, ...] = (
     "load_tool_context",
 )
 
+# 常驻内置（两条车道并集）+ 控制/加载器信号：它们没有 toolskill，也就没有「契约在场」与
+# 「复用暂存入参」可言，`reuse_args` 只加在有契约且有入参的工具上（D6/D13）。
+#
+# 这几个名字的正本在 `main/runtime/stage_budget.py`。这里不 import 它：
+# `base → tool_visibility → main.runtime…` 会经 `main/__init__.py` 绕回 `base`，是个真循环。
+# 等价性由 `tests/resources/test_reuse_args_surface.py` 逐名钉住——漂移在测试里红，而不是
+# 悄悄少加/多加一个字段。
+_NON_HYDRATABLE_EXTRA_TOOL_NAMES: frozenset[str] = frozenset(
+    {
+        "silent",
+        "wait_tool_execution",
+        "stop_tool_execution",
+        "load_tool_context",
+        "load_tool_context_v2",
+        "load_skill_context",
+        "load_skill_context_v2",
+    }
+)
+
+NON_HYDRATABLE_TOOL_NAMES: frozenset[str] = (
+    frozenset(CEO_FIXED_BUILTIN_TOOL_NAMES)
+    | frozenset(NODE_FIXED_BUILTIN_TOOL_NAMES)
+    | _NON_HYDRATABLE_EXTRA_TOOL_NAMES
+)
+
 
 def _normalized_tool_name(value: Any) -> str:
     return str(value or "").strip()
@@ -58,6 +83,7 @@ def fixed_builtin_tool_name_set_for_actor_role(actor_role: str) -> set[str]:
 __all__ = [
     "CEO_FIXED_BUILTIN_TOOL_NAMES",
     "NODE_FIXED_BUILTIN_TOOL_NAMES",
+    "NON_HYDRATABLE_TOOL_NAMES",
     "fixed_builtin_tool_name_set_for_actor_role",
     "normalized_tool_name_list",
     "normalized_tool_name_set",

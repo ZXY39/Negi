@@ -3,6 +3,51 @@
 from abc import ABC, abstractmethod
 from typing import Any
 
+from g3ku.runtime.tool_visibility import NON_HYDRATABLE_TOOL_NAMES
+
+# 模型可见面上的入参复用字段。它只是入参传输优化，不构成授权：执行前照旧重跑 RBAC /
+# repair-required / 存在性校验。语义只写在**函数级** description —— 参数级 description
+# 会被 provider 边界整层剥掉（`g3ku/json_schema_utils.py` 的 sanitize_provider_parameters_schema
+# 对每一层的 `description` 键都 `continue`），写在那里等于在一条车道上不存在。
+REUSE_ARGS_PARAMETER_NAME = "reuse_args"
+REUSE_ARGS_MODEL_DESCRIPTION_SENTENCE = (
+    "Supports reuse_args=true to re-run the arguments staged by your previous call to this tool."
+)
+
+
+def tool_declares_reuse_args(tool: Any) -> bool:
+    """`reuse_args` 该不该出现在这个工具的模型可见 schema 上——两条投影点共用同一判定。
+
+    确定性推导，不读任何声明位：常驻内置/控制/加载器没有契约可言（D13 同源的那批名字），
+    无参工具没有可暂存的东西。两边都满足才加。
+    """
+    name = str(getattr(tool, "name", "") or "").strip()
+    if not name or name in NON_HYDRATABLE_TOOL_NAMES:
+        return False
+    schema = getattr(tool, "model_parameters", None)
+    if not isinstance(schema, dict):
+        schema = getattr(tool, "parameters", None)
+    if not isinstance(schema, dict):
+        return False
+    properties = schema.get("properties")
+    return bool(isinstance(properties, dict) and properties)
+
+
+def _with_reuse_args_parameter(schema: Any) -> Any:
+    """把可选的 `reuse_args` 并进模型可见参数表；**永不进 `required`**。
+
+    不写参数级 description：provider 边界逐层剥掉它，写了只在一条车道上存在，模型读到的
+    两份 schema 会不同形。语义由函数级 description 那一句承担。
+    """
+    if not isinstance(schema, dict):
+        return schema
+    properties = schema.get("properties")
+    if not isinstance(properties, dict) or REUSE_ARGS_PARAMETER_NAME in properties:
+        return schema
+    injected = dict(schema)
+    injected["properties"] = {**properties, REUSE_ARGS_PARAMETER_NAME: {"type": "boolean"}}
+    return injected
+
 
 class Tool(ABC):
     """
@@ -202,12 +247,17 @@ class Tool(ABC):
 
     def to_model_schema(self) -> dict[str, Any]:
         """Convert tool to a model-visible function schema separate from validation."""
+        parameters = self._model_parameters_with_universal_timeout()
+        description = str(self.model_description or "").strip()
+        if tool_declares_reuse_args(self):
+            parameters = _with_reuse_args_parameter(parameters)
+            description = f"{description} {REUSE_ARGS_MODEL_DESCRIPTION_SENTENCE}".strip()
         return {
             "type": "function",
             "function": {
                 "name": self.name,
-                "description": self.model_description,
-                "parameters": self._model_parameters_with_universal_timeout(),
+                "description": description,
+                "parameters": parameters,
             },
         }
 
