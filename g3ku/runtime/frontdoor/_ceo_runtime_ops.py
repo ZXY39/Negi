@@ -49,6 +49,7 @@ from g3ku.resources.retired_schemas import (
     schema_name,
 )
 from g3ku.runtime import skill_roster_notice as _skill_roster_notice
+from g3ku.runtime import tool_arg_stash
 from g3ku.runtime.chunk_compression_plan import (
     CHUNK_MAX_CHUNKS,
     COMPRESSION_MAX_PASS_ROUNDS,
@@ -121,6 +122,7 @@ from g3ku.runtime.tool_history import (
     iter_compaction_atomic_groups,
     truncate_group_head_tail,
 )
+from g3ku.runtime.tool_impulse import IMPULSE_REJECT, IMPULSE_STAGED
 from g3ku.runtime.tool_visibility import CEO_FIXED_BUILTIN_TOOL_NAMES
 from g3ku.runtime.web_ceo_sessions import (
     WEB_CEO_IMAGE_UPLOAD_MAX_BYTES,
@@ -7495,6 +7497,81 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
             ",".join(changed_names) or "(unknown)",
         )
 
+    def _advance_frontdoor_stash_hop(self, session: Any) -> dict[str, Any]:
+        """推进前门侧的暂存时钟（只在还留着条目时）。与节点道同一条规则。"""
+        carrier = getattr(session, '_frontdoor_tool_arg_stash', {}) or {}
+        if not tool_arg_stash.carrier_container(carrier):
+            return carrier
+        if not isinstance(carrier, dict):
+            carrier = {}
+        next_carrier = dict(carrier)
+        next_carrier[tool_arg_stash.STASH_HOP_KEY] = tool_arg_stash.read_hop(carrier) + 1
+        setattr(session, '_frontdoor_tool_arg_stash', next_carrier)
+        return next_carrier
+
+    def _frontdoor_impulse_contract_content(
+        self,
+        *,
+        tool_name: str,
+        arguments: dict[str, Any],
+        state: CeoGraphState | dict[str, Any] | None,
+        runtime_context: dict[str, Any],
+    ) -> tuple[str, str] | None:
+        """未水合工具被直接调用时的一跳：交契约 + 暂存入参，**不执行**（D3）。
+
+        返回 `(kind, content)`，kind ∈ `staged` / `invalid` / `failed`；`None` 表示这
+        不是"没水合"这一类（已在水合面里、常驻内置、或投递不可用），调用方按原路走。
+        `failed` 只在校验投递本身抛异常时出现——那种情况下**不放行执行**，否则正好破掉
+        "执行发生在契约可见之后"这条不变量。
+        """
+        name = str(tool_name or '').strip()
+        if not name or name in CEO_FIXED_BUILTIN_TOOL_NAMES:
+            return None
+        session = (runtime_context or {}).get('runtime_session')
+        if session is None:
+            return None
+        service = getattr(self._loop, 'main_task_service', None)
+        deliver = getattr(service, 'deliver_impulse_contract', None) if service is not None else None
+        if not callable(deliver):
+            return None
+        view = self._frontdoor_view_without_evicted_stage_rows(state, list((state or {}).get('messages') or []))
+        if name in contract_presence_index(request_messages=view):
+            return None
+        session_key = str(
+            (runtime_context or {}).get('session_key') or getattr(session, 'session_key', '') or 'web:shared'
+        ).strip() or 'web:shared'
+        delivered = runtime_context.get('impulse_delivered_tools')
+        if not isinstance(delivered, dict):
+            delivered = {}
+            runtime_context['impulse_delivered_tools'] = delivered
+        position = int(delivered.get(name, 0) or 0) + 1
+        totals = runtime_context.get('impulse_batch_totals')
+        batch_total = int(totals.get(name, position) or position) if isinstance(totals, dict) else position
+        carrier = runtime_context.get('tool_arg_stash_carrier') or getattr(session, '_frontdoor_tool_arg_stash', {}) or {}
+        try:
+            result = deliver(
+                actor_role='ceo',
+                session_id=session_key,
+                tool_id=name,
+                arguments=dict(arguments or {}),
+                scope_key=tool_arg_stash.session_scope_key(session_key, name),
+                carrier=carrier,
+                batch_position=position,
+                batch_total=max(position, batch_total),
+                runtime_context=runtime_context,
+            )
+        except Exception as exc:
+            return ('failed', f'could not deliver the contract for {name}: {exc}')
+        if not isinstance(result, dict) or str(result.get('outcome') or '').strip() == IMPULSE_REJECT:
+            return None
+        setattr(session, '_frontdoor_tool_arg_stash', result.get('carrier') or {})
+        runtime_context['tool_arg_stash_carrier'] = result.get('carrier') or {}
+        delivered[name] = position
+        return (
+            str(result.get('outcome') or IMPULSE_STAGED),
+            str(result.get('content') or ''),
+        )
+
     def _frontdoor_execution_bundle(
         self,
         *,
@@ -9618,6 +9695,18 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
 
         execution_bundle = self._frontdoor_execution_bundle(state=state, runtime=runtime)
         runtime_context = execution_bundle.runtime_context
+        # 冲动投递的同批记账：每个工具在这一批里被调了几次，回执要说"第 i / n 份"（D4）。
+        impulse_batch_totals: dict[str, int] = {}
+        for pending_payload in list(executable_tool_call_payloads or []):
+            pending_name = str((pending_payload or {}).get('name') or '').strip()
+            if pending_name:
+                impulse_batch_totals[pending_name] = impulse_batch_totals.get(pending_name, 0) + 1
+        runtime_context['impulse_batch_totals'] = impulse_batch_totals
+        runtime_context['impulse_delivered_tools'] = {}
+        # 暂存时钟在投递之前推进：本轮落的条目要按推进后的跳序记，下一跳才正好可消费。
+        runtime_context['tool_arg_stash_carrier'] = self._advance_frontdoor_stash_hop(
+            (runtime_context or {}).get('runtime_session')
+        )
         on_progress = execution_bundle.on_progress
         analysis_text = str(state.get("analysis_text") or "").strip()
         if analysis_text:
@@ -9694,6 +9783,32 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
                 return await _error_result(payload, duplicate_load_error)
             tool = visible_tools.get(tool_name)
             if tool is None:
+                impulse = self._frontdoor_impulse_contract_content(
+                    tool_name=tool_name,
+                    arguments=dict(payload.get("arguments") or {}),
+                    state=state,
+                    runtime_context=runtime_context,
+                )
+                if impulse is not None:
+                    kind, impulse_content = impulse
+                    if kind == "failed":
+                        return await _error_result(payload, impulse_content)
+                    return {
+                        "tool_call_id": str(payload.get("id") or "").strip(),
+                        "tool_name": tool_name,
+                        "status": "success",
+                        "raw_result": impulse_content,
+                        "result_text": impulse_content,
+                        "free_pass_kind": free_pass_kind,
+                        "tool_message": self._tool_result_message(
+                            tool_call_id=str(payload.get("id") or ""),
+                            tool_name=tool_name or "tool",
+                            content=impulse_content,
+                            started_at="",
+                            finished_at="",
+                            elapsed_seconds=None,
+                        ),
+                    }
                 hint = availability_hint(
                     requested=tool_name,
                     callable_names=list(visible_tools.keys()),

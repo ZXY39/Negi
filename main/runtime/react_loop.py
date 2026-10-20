@@ -118,7 +118,7 @@ from g3ku.runtime.tool_history import (
     iter_compaction_atomic_groups,
     truncate_group_head_tail,
 )
-from g3ku.runtime.tool_impulse import IMPULSE_INVALID, IMPULSE_REJECT
+from g3ku.runtime.tool_impulse import IMPULSE_INVALID, IMPULSE_REJECT, tool_facing_runtime_context
 from g3ku.runtime.tool_result_status import is_error_like_tool_result
 from g3ku.runtime.tool_visibility import NODE_FIXED_BUILTIN_TOOL_NAMES
 from g3ku.runtime.tool_watchdog import (
@@ -5148,26 +5148,6 @@ class ReActToolLoop:
         except Exception:
             return
 
-    # 循环自己的跳级状态：判据索引、暂存载体与同批计数。它们只服务于准入与记账，
-    # 不进工具可见的 `__g3ku_runtime`——在场索引随契约数量增长，逐次调用都带一份既没用
-    # 也压不动的字典，等于把上下文预算的账算到每个工具头上。
-    _LOOP_INTERNAL_RUNTIME_KEYS = frozenset(
-        {
-            'tool_contract_presence',
-            'tool_arg_stash_carrier',
-            'impulse_delivered_tools',
-            'impulse_staged_call_ids',
-            'impulse_batch_totals',
-        }
-    )
-
-    def _tool_facing_runtime_context(self, runtime_context: dict[str, Any]) -> dict[str, Any]:
-        return {
-            key: value
-            for key, value in dict(runtime_context or {}).items()
-            if key not in self._LOOP_INTERNAL_RUNTIME_KEYS
-        }
-
     def _advance_node_stash_hop(self, node: Any) -> dict[str, Any]:
         service = getattr(self, '_tool_impulse_service', None)
         advance = getattr(service, 'advance_node_stash_hop', None) if service is not None else None
@@ -5311,7 +5291,7 @@ class ReActToolLoop:
         execute_kwargs = self._normalize_tool_call_arguments(arguments)
         runtime_param_name = self._runtime_context_parameter_name(tool)
         if runtime_param_name is not None:
-            execute_kwargs[runtime_param_name] = self._tool_facing_runtime_context(runtime_context)
+            execute_kwargs[runtime_param_name] = tool_facing_runtime_context(runtime_context)
         # 统一 timeout 合同：显式传参 > 全局默认（无上限）。自持工具（持有子进程/
         # 网络会话，需要结构化收尾）自己消费该值；豁免工具（如 spawn_child_nodes、
         # wait/stop_tool_execution）不套任何外层时限，仅可经任务级取消链中断；

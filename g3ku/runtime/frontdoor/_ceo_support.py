@@ -19,6 +19,7 @@ from g3ku.runtime.tool_error_guidance import (
     append_parameter_error_guidance,
     is_parameter_like_tool_exception,
 )
+from g3ku.runtime.tool_impulse import tool_facing_runtime_context
 from g3ku.runtime.tool_result_status import is_error_like_tool_result
 from g3ku.runtime.tool_watchdog import (
     actor_role_allows_watchdog,
@@ -747,7 +748,7 @@ class CeoFrontDoorSupport:
             else session_cancel_token
         )
         per_call_runtime = {
-            **runtime_context,
+            **tool_facing_runtime_context(runtime_context),
             "tool_name": tool_name,
             "cancel_token": per_call_cancel_token,
             **({"tool_call_id": normalized_tool_call_id} if normalized_tool_call_id else {}),

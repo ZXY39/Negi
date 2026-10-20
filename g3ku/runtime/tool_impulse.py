@@ -25,6 +25,27 @@ IMPULSE_STAGED = "staged"
 IMPULSE_INVALID = "invalid"
 IMPULSE_REJECT = "reject"
 
+# 循环/前门自己的跳级状态：在场索引、暂存载体、同批计数。它们只服务准入与记账，**不进**
+# 工具可见的 `__g3ku_runtime`——在场索引随契约数量增长，逐次调用都带一份既没用又压不动的
+# 字典，等于把上下文预算的账算到每个工具头上。两条车道共用这一份名单。
+LOOP_INTERNAL_RUNTIME_KEYS = frozenset(
+    {
+        "tool_contract_presence",
+        "tool_arg_stash_carrier",
+        "impulse_delivered_tools",
+        "impulse_staged_call_ids",
+        "impulse_batch_totals",
+    }
+)
+
+
+def tool_facing_runtime_context(runtime_context: Any) -> dict[str, Any]:
+    return {
+        key: value
+        for key, value in dict(runtime_context or {}).items()
+        if str(key or "").strip() not in LOOP_INTERNAL_RUNTIME_KEYS
+    }
+
 # 不可逆/外显类工具：`reuse_args=true` 会把当轮**全部**暂存执行掉，所以首次回执必须把每一
 # 份目标都列出来（D16）。列不全＝模型看不见自己要批量做什么。
 IRREVERSIBLE_TOOL_NAMES = frozenset(
@@ -120,7 +141,9 @@ __all__ = [
     "IMPULSE_REJECT",
     "IMPULSE_STAGED",
     "IRREVERSIBLE_TOOL_NAMES",
+    "LOOP_INTERNAL_RUNTIME_KEYS",
     "impulse_receipt",
     "must_enumerate_targets",
     "render_staged_targets",
+    "tool_facing_runtime_context",
 ]
