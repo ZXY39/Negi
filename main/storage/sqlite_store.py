@@ -3914,6 +3914,7 @@ class SQLiteTaskStore:
         # 写车道也答不上 ⇒ 这个进程对这个库的 I/O 整体已经不可用。
         parts.append(self._cross_check_label('write', self._conn, self._lock, sql, params))
         parts.append(self._fresh_open_check(sql, params))
+        parts.append(self._fd_budget_probe())
         count = int(self._read_lane_cantopen_counts.get(lane, 0)) + 1
         self._read_lane_cantopen_counts[lane] = count
         parts.append(f'lane_cantopen_occurrences={count}')
@@ -3938,6 +3939,30 @@ class SQLiteTaskStore:
             return f'cross_check[{label}]=failed:{getattr(exc, "sqlite_errorname", type(exc).__name__)}'
         finally:
             lock.release()
+
+    def _fd_budget_probe(self, limit: int = 512) -> str:
+        """这个进程还开得出多少个文件 —— 直接回答"CRT fd 表满没满"。
+
+        靶子用本模块自己的源码文件：它与那个库无关、必然可读，所以开不出来只说明进程
+        资源见底，而不是这个路径有问题。数完全部关掉，不留占用。
+        """
+        target = os.path.abspath(__file__)
+        opened: list[int] = []
+        tail = ''
+        try:
+            for _ in range(int(limit)):
+                try:
+                    opened.append(os.open(target, os.O_RDONLY))
+                except OSError as exc:
+                    tail = f',{type(exc).__name__}:{getattr(exc, "errno", "")}'
+                    break
+        finally:
+            for fd in opened:
+                try:
+                    os.close(fd)
+                except OSError:
+                    pass
+        return f'fd_budget={len(opened)}{tail}'
 
     def _fresh_open_check(self, sql: str, params: tuple[object, ...]) -> str:
         """这个进程此刻新开一条连接能不能读。ok ⇒ "新开被挡"整类解释作废。"""
