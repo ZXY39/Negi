@@ -129,31 +129,6 @@ def _latest_execution_stage_goal(node: NodeRecord) -> str:
     return max(scored, key=lambda item: (item[0], item[1]))[2]
 
 
-def _hydrated_ledger_state(raw_state: Any, raw_names: Any, raw_revoked: Any) -> list[str]:
-    """水合台账的唯一读口径：`state or names` 的回退必须再减一次撤销名单。
-
-    `hydrated_executor_names` 是本轮选择派生的 promoted 视图，它不知道正文还在不在场；
-    撤销只清 state 的话，这份回退就把刚撤掉的名字原样复活，选择、派发字典与节点详情读到的
-    都是"已水合且可调"（实盘 task:92ad2fe69148：同一条帧上 revoked 与 hydrated 并列）。
-    """
-    collected: list[str] = []
-    seen: set[str] = set()
-    for item in list(raw_state or raw_names or []):
-        normalized = str(item or '').strip()
-        if not normalized or normalized in seen:
-            continue
-        seen.add(normalized)
-        collected.append(normalized)
-    revoked = {
-        str(item or '').strip()
-        for item in list(raw_revoked or [])
-        if str(item or '').strip()
-    }
-    if not revoked:
-        return collected
-    return [name for name in collected if name not in revoked]
-
-
 _EXECUTION_STAGE_METADATA_KEY = 'execution_stages'
 _EXECUTION_STAGE_TOOL_NAME = STAGE_TOOL_NAME
 _EXECUTION_STAGE_MODE_SELF = '自主执行'
@@ -486,12 +461,8 @@ class TaskLogService:
             'skill_visibility_diagnostics': {},
             'rbac_visible_tool_names': [],
             'rbac_visible_skill_ids': [],
-            'hydrated_executor_state': [],
             'model_visible_tool_names': [],
             'provider_tool_names': [],
-            'hydrated_executor_names': [],
-            'hydration_revoked_executor_names': [],
-            'hydration_evicted_executor_names': [],
             'lightweight_tool_ids': [],
             'model_visible_tool_selection_trace': {},
             'exec_runtime_policy': {},
@@ -584,18 +555,6 @@ class TaskLogService:
             'provider_tool_names': cls._normalized_name_list(
                 snapshot.get('provider_tool_names') or []
             ),
-            'hydrated_executor_state': _hydrated_ledger_state(
-                snapshot.get('hydrated_executor_state'),
-                snapshot.get('hydrated_executor_names'),
-                snapshot.get('hydration_revoked_executor_names'),
-            ),
-            'hydrated_executor_names': cls._normalized_name_list(snapshot.get('hydrated_executor_names') or []),
-            'hydration_revoked_executor_names': cls._normalized_name_list(
-                snapshot.get('hydration_revoked_executor_names') or []
-            ),
-            'hydration_evicted_executor_names': cls._normalized_name_list(
-                snapshot.get('hydration_evicted_executor_names') or []
-            ),
             'lightweight_tool_ids': cls._normalized_name_list(snapshot.get('lightweight_tool_ids') or []),
             'provider_tool_bundle_seeded': bool(snapshot.get('provider_tool_bundle_seeded')),
             'model_visible_tool_selection_trace': dict(snapshot.get('model_visible_tool_selection_trace') or {}),
@@ -646,14 +605,6 @@ class TaskLogService:
                 ),
                 'model_visible_tool_names': list(frame.get('model_visible_tool_names') or []),
                 'provider_tool_names': list(frame.get('provider_tool_names') or []),
-                'hydrated_executor_state': _hydrated_ledger_state(
-                    frame.get('hydrated_executor_state'),
-                    frame.get('hydrated_executor_names'),
-                    frame.get('hydration_revoked_executor_names'),
-                ),
-                'hydrated_executor_names': list(frame.get('hydrated_executor_names') or []),
-                'hydration_revoked_executor_names': list(frame.get('hydration_revoked_executor_names') or []),
-                'hydration_evicted_executor_names': list(frame.get('hydration_evicted_executor_names') or []),
                 'lightweight_tool_ids': list(frame.get('lightweight_tool_ids') or []),
                 'provider_tool_bundle_seeded': bool(
                     dict(frame.get('model_visible_tool_selection_trace') or {}).get('provider_tool_bundle_seeded')
@@ -669,7 +620,6 @@ class TaskLogService:
                 snapshot['candidate_tool_names'],
                 snapshot['model_visible_tool_names'],
                 snapshot['provider_tool_names'],
-                snapshot['hydrated_executor_names'],
                 snapshot['lightweight_tool_ids'],
             ]
         ):
@@ -5437,11 +5387,6 @@ class TaskLogService:
                     for item in list(next_frame.get('rbac_visible_skill_ids') or [])
                     if str(item or '').strip()
                 ],
-                'hydrated_executor_state': _hydrated_ledger_state(
-                    next_frame.get('hydrated_executor_state'),
-                    next_frame.get('hydrated_executor_names'),
-                    next_frame.get('hydration_revoked_executor_names'),
-                ),
                 'model_visible_tool_names': [
                     str(item or '').strip()
                     for item in list(next_frame.get('model_visible_tool_names') or [])
@@ -5450,21 +5395,6 @@ class TaskLogService:
                 'provider_tool_names': [
                     str(item or '').strip()
                     for item in list(next_frame.get('provider_tool_names') or [])
-                    if str(item or '').strip()
-                ],
-                'hydrated_executor_names': [
-                    str(item or '').strip()
-                    for item in list(next_frame.get('hydrated_executor_names') or [])
-                    if str(item or '').strip()
-                ],
-                'hydration_revoked_executor_names': [
-                    str(item or '').strip()
-                    for item in list(next_frame.get('hydration_revoked_executor_names') or [])
-                    if str(item or '').strip()
-                ],
-                'hydration_evicted_executor_names': [
-                    str(item or '').strip()
-                    for item in list(next_frame.get('hydration_evicted_executor_names') or [])
                     if str(item or '').strip()
                 ],
                 'lightweight_tool_ids': [
@@ -5659,11 +5589,6 @@ class TaskLogService:
                 for item in list(payload.get('rbac_visible_skill_ids') or [])
                 if str(item or '').strip()
             ],
-            'hydrated_executor_state': _hydrated_ledger_state(
-                payload.get('hydrated_executor_state'),
-                payload.get('hydrated_executor_names'),
-                payload.get('hydration_revoked_executor_names'),
-            ),
             'model_visible_tool_names': [
                 str(item or '').strip()
                 for item in list(payload.get('model_visible_tool_names') or [])
@@ -5672,21 +5597,6 @@ class TaskLogService:
             'provider_tool_names': [
                 str(item or '').strip()
                 for item in list(payload.get('provider_tool_names') or [])
-                if str(item or '').strip()
-            ],
-            'hydrated_executor_names': [
-                str(item or '').strip()
-                for item in list(payload.get('hydrated_executor_names') or [])
-                if str(item or '').strip()
-            ],
-            'hydration_revoked_executor_names': [
-                str(item or '').strip()
-                for item in list(payload.get('hydration_revoked_executor_names') or [])
-                if str(item or '').strip()
-            ],
-            'hydration_evicted_executor_names': [
-                str(item or '').strip()
-                for item in list(payload.get('hydration_evicted_executor_names') or [])
                 if str(item or '').strip()
             ],
             'lightweight_tool_ids': [
@@ -6466,11 +6376,6 @@ class TaskLogService:
                 for item in list(payload.get('rbac_visible_skill_ids') or [])
                 if str(item or '').strip()
             ],
-            'hydrated_executor_state': _hydrated_ledger_state(
-                payload.get('hydrated_executor_state'),
-                payload.get('hydrated_executor_names'),
-                payload.get('hydration_revoked_executor_names'),
-            ),
             'model_visible_tool_names': [
                 str(item or '').strip()
                 for item in list(payload.get('model_visible_tool_names') or [])
@@ -6479,21 +6384,6 @@ class TaskLogService:
             'provider_tool_names': [
                 str(item or '').strip()
                 for item in list(payload.get('provider_tool_names') or [])
-                if str(item or '').strip()
-            ],
-            'hydrated_executor_names': [
-                str(item or '').strip()
-                for item in list(payload.get('hydrated_executor_names') or [])
-                if str(item or '').strip()
-            ],
-            'hydration_revoked_executor_names': [
-                str(item or '').strip()
-                for item in list(payload.get('hydration_revoked_executor_names') or [])
-                if str(item or '').strip()
-            ],
-            'hydration_evicted_executor_names': [
-                str(item or '').strip()
-                for item in list(payload.get('hydration_evicted_executor_names') or [])
                 if str(item or '').strip()
             ],
             'lightweight_tool_ids': [
@@ -6574,29 +6464,9 @@ class TaskLogService:
             'skill_visibility_diagnostics': TaskLogService._sanitize_skill_visibility_diagnostics(
                 payload.get('skill_visibility_diagnostics') or {}
             ),
-            'hydrated_executor_state': _hydrated_ledger_state(
-                payload.get('hydrated_executor_state'),
-                payload.get('hydrated_executor_names'),
-                payload.get('hydration_revoked_executor_names'),
-            ),
             'model_visible_tool_names': [
                 str(item or '').strip()
                 for item in list(payload.get('model_visible_tool_names') or [])
-                if str(item or '').strip()
-            ],
-            'hydrated_executor_names': [
-                str(item or '').strip()
-                for item in list(payload.get('hydrated_executor_names') or [])
-                if str(item or '').strip()
-            ],
-            'hydration_revoked_executor_names': [
-                str(item or '').strip()
-                for item in list(payload.get('hydration_revoked_executor_names') or [])
-                if str(item or '').strip()
-            ],
-            'hydration_evicted_executor_names': [
-                str(item or '').strip()
-                for item in list(payload.get('hydration_evicted_executor_names') or [])
                 if str(item or '').strip()
             ],
             'lightweight_tool_ids': [

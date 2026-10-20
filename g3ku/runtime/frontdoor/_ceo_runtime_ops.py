@@ -102,10 +102,7 @@ from g3ku.runtime.stage_prompt_compaction import (
     strip_stage_block_echo,
     summarized_stage_ids,
 )
-from g3ku.runtime.tool_context_presence import (
-    contract_presence_index,
-    partition_contract_presence,
-)
+from g3ku.runtime.tool_context_presence import contract_presence_index
 from g3ku.runtime.tool_error_guidance import availability_hint
 from g3ku.runtime.tool_history import (
     align_compaction_keep_recent,
@@ -586,13 +583,6 @@ def _merged_interrupt_values(state: dict[str, Any], payload: dict[str, Any]) -> 
         values["frontdoor_canonical_context"] = dict(interrupt_state.get("frontdoor_canonical_context") or {})
     if isinstance(interrupt_state.get("compression_state"), dict):
         values["compression_state"] = dict(interrupt_state.get("compression_state") or {})
-    hydrated_tool_names = interrupt_state.get("hydrated_tool_names")
-    if isinstance(hydrated_tool_names, list):
-        values["hydrated_tool_names"] = [
-            str(item or "").strip()
-            for item in list(hydrated_tool_names or [])
-            if str(item or "").strip()
-        ]
     if isinstance(interrupt_state.get("frontdoor_selection_debug"), dict):
         values["frontdoor_selection_debug"] = dict(interrupt_state.get("frontdoor_selection_debug") or {})
     return values
@@ -665,49 +655,6 @@ def _model_visible_tool_contract(tool: Tool) -> tuple[str, dict[str, Any] | None
     model_description = str(getattr(tool, "model_description", "") or tool.description)
     model_parameters = getattr(tool, "model_parameters", None)
     return model_description, model_parameters if isinstance(model_parameters, dict) else tool.parameters
-
-
-def revive_contract_absent_candidates(
-    *,
-    candidate_names: Any,
-    revoked_names: Any,
-    hydrated_names: Any,
-    callable_names: Any,
-    visible_names: Any,
-) -> list[str]:
-    """把"契约不在场而被撤销"的名字并回本回合候选视图。
-
-    候选集是回合初快照，而撤销发生在回合中途：不并回去，该名字就既不在 callable
-    也不在 candidate——文档禁止的第四态（`tool-and-skill-system.md`「candidate tools」
-    三态划分）。更糟的是提升门禁只认 `candidate_hit`，于是回合内重新 load 永远拿到
-    `not_in_this_turn_candidates`，"必须重新 load 后才能调"这条出口在本回合内不可达
-    （实盘 web:ceo-3b51dc5c5b4e：裁撤后连续 4 跳两个名单都不含 perf_inspect，
-    重载回执 promotion=not_in_this_turn_candidates）。
-
-    只并"确实还治理可见、且当前既不可调也未水合"的名字：刚重新提升的、权限已收回的
-    都不该出现在候选里。
-    """
-    def _names(values: Any) -> list[str]:
-        collected: list[str] = []
-        for raw in list(values or []):
-            name = str(raw or "").strip()
-            if name and name not in collected:
-                collected.append(name)
-        return collected
-
-    candidate = _names(candidate_names)
-    candidate_set = set(candidate)
-    hydrated_set = set(_names(hydrated_names))
-    callable_set = set(_names(callable_names))
-    visible_set = set(_names(visible_names))
-    revived: list[str] = []
-    for name in _names(revoked_names):
-        if name in candidate_set or name in hydrated_set or name in callable_set:
-            continue
-        if visible_set and name not in visible_set:
-            continue
-        revived.append(name)
-    return [*candidate, *revived] if revived else candidate
 
 
 def _provider_visible_tool_contract(tool: Tool) -> tuple[str, dict[str, Any] | None]:
@@ -3796,6 +3743,9 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
             state.get("model_refs") or self._resolve_ceo_model_refs_for_session(session.state.session_key) or []
         )
         image_enabled, image_model_name = self._ceo_image_multimodal_for_request(turn_model_refs)
+        # 在场索引随 runtime context 交给执行道：参数错误指针与冲动投递都读这一份，
+        # 每条消费路各自重扫历史就会在同一跳里长出两个答案。
+        contract_presence = self._frontdoor_contract_presence_index(state)
         return {
             "on_progress": runtime.context.on_progress,
             "emit_lifecycle": True,
@@ -3810,8 +3760,8 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
             "callable_tool_names": list(state.get("tool_names") or []),
             "candidate_tool_names": self._frontdoor_candidate_tool_view(state),
             "candidate_skill_ids": list(state.get("candidate_skill_ids") or []),
-            "hydrated_tool_names": list(state.get("hydrated_tool_names") or []),
-            # 给拒绝文案用：撞进来路已收的工具时，要能说"是无权限"而不是"还没水合"。
+            "tool_contract_presence": contract_presence,
+            # 给拒绝文案用：撞进来路已收的工具时，要能说"是无权限"而不是"契约不在场"。
             "declared_denied_tool_names": self._frontdoor_declared_denied_tool_names_for_state(state),
             # 可加载面（钉住的 tools[]）：声明里有、callable 里没有的名字，拒绝文案要给 load 指引。
             "declared_tool_names": list(state.get("provider_tool_names") or []),
@@ -3845,41 +3795,35 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
         }
 
     def _frontdoor_dispatch_tool_names(self, state: CeoGraphState) -> list[str]:
-        """声明名单＝模型可见 `tools[]` 的名字源：钉住的声明 ∩ 当轮治理可见 −「契约不在场的水合工具」。
+        """声明名单＝模型可见 `tools[]` 的名字源：钉住的声明 ∩ 当轮治理可见。
 
         这份名单是**可加载面**，不是准入面：`tools[]` 全程钉死（重印边界之前一个名字
-        不增删，回合起点也不并入新增），所以它不并水合台账——mid-turn 注册的工具在声明
-        吸收它之前，参数表不进 `tools[]`，靠尾块 `undeclared_candidates` 点名、load 返回
-        的参数契约供模型参考。真正放行调用的是 `_frontdoor_executable_tool_names`（本轮
+        不增删，回合起点也不并入新增），所以它不并本轮新落的名字——mid-turn 注册的工具在
+        声明吸收它之前，参数表不进 `tools[]`，靠尾块 `undeclared_candidates` 点名、load
+        返回的参数契约供模型参考。真正放行调用的是 `_frontdoor_executable_tool_names`（本轮
         callable），两者分源。
+
+        这里**不**按契约在场筛名字：在场是逐跳变化的（一次 load 就多一个名字、一次裁撤就少
+        一个），拿它减声明名就等于让 `tools[]` 每跳改成员，钉住语义当场失效、前缀缓存按跳
+        断。契约不在场的代价只付在准入面——调它会被拒并拿回契约，而不是从声明面消失。
 
         清单可以滞后（删名推迟到压缩重印），执行准入不行——声明滞后绝不能变成权限滞后。
         治理可见集取不到时按当轮 callable pool 收，不拿声明兜底（宁可窄不可宽）。
-
-        撤销必须落到准入层才算"不允许调用"：实盘只改尾部契约时，那一跳的 callable 行里
-        已没有 `perf_inspect`，而 stage2 仍把它调用成功（派发与声明解耦），规则只剩文案效果。
-        常驻内置与控制/加载器不在水合台账里，不受这条影响。
         """
         declared = self._normalized_tool_name_state_list(list(state.get("provider_tool_names") or []))
         granted = self._normalized_tool_name_state_list(list(state.get("rbac_visible_tool_names") or []))
         if granted:
             granted_set = set(granted)
-            dispatch = [name for name in declared if name in granted_set]
-        else:
-            dispatch = self._normalized_tool_name_state_list(list(state.get("tool_names") or []))
-        _kept, revoked = self._frontdoor_contract_presence_partition(state, state.get("hydrated_tool_names"))
-        if revoked:
-            revoked_set = set(revoked)
-            dispatch = [name for name in dispatch if name not in revoked_set]
-        return dispatch
+            return [name for name in declared if name in granted_set]
+        return self._normalized_tool_name_state_list(list(state.get("tool_names") or []))
 
     def _frontdoor_executable_tool_names(self, state: CeoGraphState) -> list[str]:
-        """执行准入＝本轮 callable（常驻内置 + 契约在场的水合名）；控制工具另行注入执行束。
+        """执行准入＝本轮 callable（常驻内置 + 契约在场的名字）；控制工具另行注入执行束。
 
         `tools[]` 是声明面、`callable_tools` 是准入面，两者不同义：声明里的名字在
-        `load_tool_context` 成功落账（下一跳进 callable）之前调用一律被拒，回执引导先
-        load。这是"先读契约再调"的唯一落点——只在尾块点名、执行侧照旧放行，规则就只剩
-        文案效果（`perf_inspect` 那例）。`submit_next_stage` / `silent` 是合成实例，
+        `load_tool_context` 把契约送进上下文（下一跳在场、进 callable）之前调用一律被拒，
+        回执引导先 load。这是"先读契约再调"的唯一落点——只在尾块点名、执行侧照旧放行，
+        规则就只剩文案效果（`perf_inspect` 那例）。`submit_next_stage` / `silent` 是合成实例，
         由 `_frontdoor_execution_bundle` 直接装进对象字典，不在这份名单里。
 
         RBAC 收回要当跳生效：声明名被收回时仍挂在钉住的 `tools[]` 上（清单滞后），所以
@@ -3954,9 +3898,10 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
         装配层算出来的那一行就会在落请求体前被覆盖掉。
 
         名单源只有钉住声明：denied_tools 的语义是"`tools[]` 里带着参数表、但实时授权读
-        不放行"。mid-turn 注册的水合名不在 `tools[]` 里，被 RBAC 收回时不进这一行——
+        不放行"。mid-turn 注册的名字不在 `tools[]` 里，被 RBAC 收回时不进这一行——
         它的出口是工具态收尾的实时卫生（`_frontdoor_tool_state_after_tool_results`）：
-        下一跳起从 `tool_names` 与台账里摘除，`callable_tools` 不再点名。
+        下一跳起从 `tool_names` 摘除，`callable_tools` 不再点名；治理重新放行时由同一处
+        的发现出口送回候选。
         """
         return self._frontdoor_declared_denied_tool_names(
             declared_tool_names=self._frontdoor_schema_renderable_tool_names(
@@ -4241,37 +4186,36 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
         snapshot = self._frontdoor_stage_state_snapshot(normalized_state)
         return bool(str(snapshot.get("active_stage_id") or "").strip()) and not bool(snapshot.get("transition_required"))
 
-    def _frontdoor_contract_presence_partition(
+    def _frontdoor_contract_presence_index(
         self,
         state: CeoGraphState | dict[str, Any] | None,
-        hydrated_tool_names: Any,
-    ) -> tuple[list[str], list[str]]:
-        """把已水合名单按「契约标记块这一跳在不在场」分两组。
+    ) -> dict[str, str]:
+        """这一跳在场的契约 ``tool_id -> fingerprint``。
 
-        在场判据取的是**本轮请求视图**（`state['messages']`）里的 `[TOOL_CONTRACT_V1:…]`
-        块，不是消息里曾经出现过的全部历史：阶段肉身被裁撤后块离开请求，工具就该立刻
-        不可调用；下一跳重新拿契约才还得回来。
-
-        阶段台账里保留的正文**不再算在场**（D9）：正文不在模型眼前就不算，第二载体正是
-        「看得见名字却调不动」那类漂移的来源。
+        判据只读**本轮请求视图**（`state['messages']` 去掉已裁撤阶段的那些行）里的
+        `[TOOL_CONTRACT_V1:…]` 块，不是消息里曾经出现过的全部历史：阶段肉身被裁撤后块
+        离开请求，工具就该立刻不可调用；下一跳重新拿契约才还得回来。阶段台账里保留的正文
+        **不算在场**（D9）——正文不在模型眼前就不算，第二载体正是「看得见名字却调不动」
+        那类漂移的来源。
 
         前门的 callable 在三个算点各自重算（装配路的 message_builder、
-        `_refresh_prompt_cache_state`、发送预检），所以判据必须收在这一个方法里，
-        三个算点各自调它 —— 只在装配层过滤等于没写（`tool-and-skill-system.md` 里
-        「合同分裂」那条教训）。
+        `_refresh_prompt_cache_state`、发送预检），所以判据必须收在这一个方法里，三个算点
+        各自调它——只在装配层过滤等于没写（`tool-and-skill-system.md` 里「合同分裂」那条教训）。
+
+        不缓存：前门的 `state` 是 session 的持久状态、跨跳活着，把这份跳级字典挂在它上面
+        下一跳就读到陈旧结果；200×6KB 的视图重算实测 ~0.17 ms，每条装配路各算一次。
         """
-        hydrated = self._normalized_hydrated_tool_names(hydrated_tool_names)
-        if not hydrated:
-            return [], []
-        if not isinstance(state, dict):
-            return hydrated, []
-        if "messages" not in state:
-            # 请求视图压根没交进来（旁路调用、老快照），退回今日行为：判据缺失时不撤销，
-            # 比凭"读不到"就摘掉能力安全。空列表不算缺失——空列表是"这跳确实没有正文"。
-            return hydrated, []
-        messages = self._frontdoor_view_without_evicted_stage_rows(state, list(state.get("messages") or []))
-        index = contract_presence_index(request_messages=messages)
-        return partition_contract_presence(hydrated, index=index)
+        view = self._frontdoor_view_without_evicted_stage_rows(
+            state, list((state or {}).get("messages") or [])
+        )
+        return contract_presence_index(request_messages=view)
+
+    def _frontdoor_contract_present_names(
+        self,
+        state: CeoGraphState | dict[str, Any] | None,
+    ) -> list[str]:
+        """在场 ``tool_id`` 的列表：前门每条装配路唯一的在场权威，callable 与 candidate 都只认它。"""
+        return list(self._frontdoor_contract_presence_index(state))
 
     def _frontdoor_view_without_evicted_stage_rows(
         self,
@@ -4282,9 +4226,8 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
 
         实盘（web:ceo-09057e72cac8）暴露的是两份视图不同源：裁撤发生在**请求体重建**
         （`_trim_frontdoor_seed_stage_compaction`）时，而 `state["messages"]` 还是裁撤前那份，
-        于是判据读得到正文 ⇒ 台账不记撤销 ⇒ `hydration_revoked_executor_names` 全空 ⇒
-        候选并回没有输入；渲染却用裁切后的视图 ⇒ callable 少了它、candidate 也没有 ⇒
-        文档禁止的第四态，且执行照旧放行。
+        于是判据读得到正文 ⇒ 名字仍被当在场、继续留在 callable；渲染却用裁切后的视图 ⇒
+        模型眼前已经没有契约，执行照旧放行。
 
         这里不依赖调用方交来哪一份视图：按阶段账本自己把裁撤阶段的 call id 集合摘出来，
         成对剔除这些行。剔除认的是**行**（`tool_call_id`）而不是 loader 名字——冲动调用
@@ -4316,45 +4259,48 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
             filtered.append(message)
         return filtered
 
-    def _merge_frontdoor_contract_revocations(
+    @staticmethod
+    def _frontdoor_repair_required_tool_name_set(
+        state: CeoGraphState | dict[str, Any] | None,
+    ) -> set[str]:
+        """state 上带 `repair_required_tool_items` 时，这一档既不进 callable 也不进 candidate。
+
+        这份键只有装配把回合级 context sources 挂进 state 时才有；取不到就是空集，那时
+        待修复工具仍可能凭一个旧契约块进 callable——执行侧照样被 `RepairRequiredTool`
+        拒掉并给出修复原因，所以这是"少一层提前收窄"，不是无契约放行。
+        """
+        if not isinstance(state, dict):
+            return set()
+        return {
+            str(item.get("tool_id") or "").strip()
+            for item in list(state.get("repair_required_tool_items") or [])
+            if isinstance(item, dict) and str(item.get("tool_id") or "").strip()
+        }
+
+    def _frontdoor_candidate_tool_view(
         self,
         state: CeoGraphState | dict[str, Any] | None,
-        *,
-        kept_tool_names: Any,
-        revoked_tool_names: Any,
     ) -> list[str]:
-        """撤销记录的台账合并：新撤销的并进记录、重新在场的移出记录。
-
-        记录必须与 `hydrated_tool_names` 一起进 session persistent state
-        （FIX_PLAN §2.3「前门：同一字段进 session persistent state」）：装配路只收窄台账
-        不留记录，取证时就分不清「模型没 load 过」和「load 过但正文离开上下文被撤了」。
-        """
-        previous = state.get("hydration_revoked_executor_names") if isinstance(state, dict) else None
-        recorded = self._normalized_hydrated_tool_names(previous)
-        for name in list(self._normalized_hydrated_tool_names(revoked_tool_names) or []):
-            if name not in recorded:
-                recorded.append(name)
-        for name in list(self._normalized_hydrated_tool_names(kept_tool_names) or []):
-            if name in recorded:
-                recorded.remove(name)
-        return recorded
-
-    @staticmethod
-    def _frontdoor_candidate_tool_view(state: CeoGraphState | dict[str, Any] | None) -> list[str]:
-        """本回合生效的候选视图 = 回合初候选快照 ∪ 契约缺席被撤销的名字。
+        """本回合生效的候选视图 = 治理可见集 −（本轮 callable ∪ 待修复）。
 
         三个消费点（提升门禁 runtime context、尾块渲染、重复读守卫）必须读同一份，
         否则会出现"合同里看得见、门禁说不在候选"的分裂。
+
+        契约缺席的名字不需要一条单独的"并回"规则：不在场就进不了 callable，同一个减法
+        在这一刻把它留在候选里——「既不可调也不可读」的第四态在这份表达式下构造不出来。
         """
         if not isinstance(state, dict):
             return []
-        return revive_contract_absent_candidates(
-            candidate_names=state.get("candidate_tool_names"),
-            revoked_names=state.get("hydration_revoked_executor_names"),
-            hydrated_names=state.get("hydrated_tool_names"),
-            callable_names=state.get("tool_names"),
-            visible_names=state.get("rbac_visible_tool_names"),
+        granted = self._normalized_tool_name_state_list(
+            list(state.get("rbac_visible_tool_names") or [])
+            or [
+                *list(state.get("tool_names") or []),
+                *list(state.get("candidate_tool_names") or []),
+            ]
         )
+        excluded = self._frontdoor_callable_tool_names_for_state(state)
+        excluded_set = set(excluded) | self._frontdoor_repair_required_tool_name_set(state)
+        return [name for name in granted if name not in excluded_set]
 
     def _frontdoor_callable_tool_names_for_state(
         self,
@@ -4362,19 +4308,33 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
         *,
         tool_names: list[str] | None = None,
     ) -> list[str]:
-        raw_names = tool_names
-        if raw_names is None and isinstance(state, dict):
-            raw_names = list(state.get("tool_names") or [])
-        normalized = self._normalized_tool_name_state_list(raw_names)
-        if isinstance(state, dict) and normalized:
-            # 契约不在场的水合名从 callable 里摘掉。常驻内置（exec / loader / 控制工具）
-            # 不在水合台账里，因此不受这条判据影响。
-            _kept, revoked = self._frontdoor_contract_presence_partition(state, state.get("hydrated_tool_names"))
-            if revoked:
-                revoked_set = set(revoked)
-                normalized = [name for name in normalized if name not in revoked_set]
-        # 静默收尾信号恒可调用：它是回合收尾合同的一部分，不随阶段态、曝光层或
-        # 候选池水化而消失。缺了它模型只剩「把正文写短一点」这一种伪静默手段。
+        normalized_state = state if isinstance(state, dict) else {}
+        pool = self._normalized_tool_name_state_list(
+            tool_names
+            if tool_names is not None
+            else list(normalized_state.get("tool_names") or [])
+        )
+        # 治理可见集优先，取不到才退回本轮 callable 快照（沿用既有约定）。
+        granted = self._normalized_tool_name_state_list(
+            list(normalized_state.get("rbac_visible_tool_names") or [])
+        ) or pool
+        present_set = set(self._frontdoor_contract_present_names(normalized_state))
+        repair_required_set = self._frontdoor_repair_required_tool_name_set(normalized_state)
+        # callable = 常驻内置 ∪（治理可见 ∩ 契约在场 ∩ 非待修复）。常驻内置不交在场判据：
+        # 它们没有 toolskill，契约块永远不会出现在请求里（exec / loader / 控制信号）。
+        normalized: list[str] = []
+        seen: set[str] = set()
+        for name in [*pool, *granted]:
+            if not name or name in seen:
+                continue
+            seen.add(name)
+            if name in CEO_FIXED_BUILTIN_TOOL_NAMES:
+                normalized.append(name)
+                continue
+            if name in present_set and name not in repair_required_set:
+                normalized.append(name)
+        # 静默收尾信号恒可调用：它是回合收尾合同的一部分，不随阶段态或曝光层而消失。
+        # 缺了它模型只剩「把正文写短一点」这一种伪静默手段。
         if SILENT_TOOL_NAME not in normalized:
             normalized = [*normalized, SILENT_TOOL_NAME]
         if isinstance(state, dict) and (
@@ -4605,7 +4565,7 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
         return {}
 
     @staticmethod
-    def _normalized_hydrated_tool_names(raw: Any) -> list[str]:
+    def _normalized_tool_name_state_list(raw: Any) -> list[str]:
         normalized: list[str] = []
         for item in list(raw or []):
             name = str(item or "").strip()
@@ -4614,27 +4574,8 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
         return normalized
 
     @staticmethod
-    def _normalized_tool_name_state_list(raw: Any) -> list[str]:
-        return CeoFrontDoorRuntimeOps._normalized_hydrated_tool_names(raw)
-
-    @staticmethod
     def _normalized_candidate_tool_items(raw: Any, *, fallback_names: list[str] | None = None) -> list[dict[str, str]]:
         return normalize_frontdoor_candidate_tool_items(raw, fallback_names=fallback_names)
-
-    @staticmethod
-    def _tool_context_hydration_payload(raw_result: Any) -> dict[str, Any] | None:
-        if isinstance(raw_result, dict):
-            return dict(raw_result)
-        if isinstance(raw_result, str):
-            text = str(raw_result or "").strip()
-            if not text or not text.startswith("{"):
-                return None
-            try:
-                parsed = json.loads(text)
-            except Exception:
-                return None
-            return dict(parsed) if isinstance(parsed, dict) else None
-        return None
 
     def _current_load_tool_context_payload_for_frontdoor(
         self,
@@ -4706,17 +4647,20 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
         if requested_tool_id in set(candidate_tool_names):
             return ""
         callable_tool_names = self._normalized_tool_name_state_list(state.get("tool_names"))
-        hydrated_tool_names = self._normalized_tool_name_state_list(state.get("hydrated_tool_names"))
+        contract_present_tool_names = self._frontdoor_contract_present_names(state)
         visible_tool_names = self._normalized_tool_name_state_list(state.get("rbac_visible_tool_names"))
         if requested_tool_id not in set(visible_tool_names):
             return ""
-        if requested_tool_id not in set(callable_tool_names) and requested_tool_id not in set(hydrated_tool_names):
+        if (
+            requested_tool_id not in set(callable_tool_names)
+            and requested_tool_id not in set(contract_present_tool_names)
+        ):
             return ""
         effective_runtime_context = {
             **dict(runtime_context or {}),
             "candidate_tool_names": list(candidate_tool_names),
             "callable_tool_names": list(callable_tool_names),
-            "hydrated_tool_names": list(hydrated_tool_names),
+            "contract_present_tool_names": list(contract_present_tool_names),
             "rbac_visible_tool_names": list(visible_tool_names),
         }
         current_payload = self._current_load_tool_context_payload_for_frontdoor(
@@ -4738,56 +4682,13 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
             return ""
         return self._load_tool_context_duplicate_repair_text()
 
-    def _frontdoor_hydrated_tool_limit_value(self) -> int:
-        main_service = getattr(self._loop, "main_task_service", None)
-        supplier = getattr(main_service, "_hydrated_tool_limit_value", None) if main_service is not None else None
-        if callable(supplier):
-            try:
-                return max(1, int(supplier() or 16))
-            except Exception:
-                pass
-        try:
-            value = int(
-                getattr(main_service, "_hydrated_tool_limit", getattr(self, "_hydrated_tool_limit", 16)) or 16
-            )
-        except Exception:
-            value = 16
-        return max(1, value)
-
-    def _frontdoor_hydrated_tool_lru(
-        self,
-        *,
-        existing_tool_names: Any,
-        incoming_tool_names: Any,
-        visible_tool_names: list[str] | None = None,
-    ) -> list[str]:
-        visible_name_set = {
-            str(item or "").strip()
-            for item in list(visible_tool_names or [])
-            if str(item or "").strip()
-        }
-        existing = self._normalized_hydrated_tool_names(existing_tool_names)
-        incoming = self._normalized_hydrated_tool_names(incoming_tool_names)
-        if visible_name_set:
-            existing = [name for name in existing if name in visible_name_set]
-            incoming = [name for name in incoming if name in visible_name_set]
-        if not incoming:
-            limit = self._frontdoor_hydrated_tool_limit_value()
-            return existing[-limit:]
-        next_state = [name for name in existing if name not in incoming]
-        next_state.extend(incoming)
-        limit = self._frontdoor_hydrated_tool_limit_value()
-        if len(next_state) > limit:
-            next_state = next_state[-limit:]
-        return next_state
-
     @classmethod
     def _runtime_session_frontdoor_state(
         cls,
         state: CeoGraphState | None,
         *,
         preview_pending_tool_round: bool = False,
-    ) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any], dict[str, Any], list[str]]:
+    ) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any], dict[str, Any]]:
         frontdoor_canonical_context = cls._frontdoor_canonical_context_snapshot(state)
         frontdoor_stage_state = cls._frontdoor_stage_state_snapshot(state)
         if preview_pending_tool_round and isinstance(state, dict):
@@ -4800,17 +4701,11 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
             if isinstance(state, dict)
             else cls._default_compression_state()
         )
-        hydrated_tool_names = (
-            cls._normalized_hydrated_tool_names(state.get("hydrated_tool_names"))
-            if isinstance(state, dict)
-            else []
-        )
         return (
             frontdoor_stage_state,
             frontdoor_canonical_context,
             compression_state,
             {},
-            hydrated_tool_names,
         )
 
     @classmethod
@@ -4828,24 +4723,23 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
         raw_value = state.get("frontdoor_selection_debug")
         return dict(raw_value) if isinstance(raw_value, dict) else {}
 
-    @classmethod
     def _inherited_internal_turn_contract_state(
-        cls,
+        self,
         *,
         state: CeoGraphState | None,
         session: Any | None,
     ) -> dict[str, Any]:
         if not isinstance(state, dict):
             return {}
-        tool_names = cls._normalized_tool_name_state_list(state.get("tool_names"))
+        tool_names = self._normalized_tool_name_state_list(state.get("tool_names"))
         if not tool_names:
             return {}
         provider_tool_names = (
-            cls._normalized_tool_name_state_list(state.get("provider_tool_names"))
+            self._normalized_tool_name_state_list(state.get("provider_tool_names"))
             or list(tool_names)
         )
-        candidate_tool_names = cls._frontdoor_candidate_tool_view(state)
-        candidate_tool_items = cls._normalized_candidate_tool_items(
+        candidate_tool_names = self._frontdoor_candidate_tool_view(state)
+        candidate_tool_items = self._normalized_candidate_tool_items(
             state.get("candidate_tool_items"),
             fallback_names=candidate_tool_names,
         )
@@ -4858,33 +4752,29 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
             )
             if isinstance(item, dict)
         ]
-        hydrated_tool_names = cls._normalized_hydrated_tool_names(
-            state.get("hydrated_tool_names")
-            or getattr(session, "_frontdoor_hydrated_tool_names", [])
-        )
-        visible_skill_ids = cls._normalized_tool_name_state_list(
+        visible_skill_ids = self._normalized_tool_name_state_list(
             state.get("visible_skill_ids")
             or getattr(session, "_frontdoor_visible_skill_ids", [])
         )
         candidate_skill_ids = (
-            cls._normalized_tool_name_state_list(state.get("candidate_skill_ids"))
+            self._normalized_tool_name_state_list(state.get("candidate_skill_ids"))
             or list(visible_skill_ids)
         )
         rbac_visible_tool_names = (
-            cls._normalized_tool_name_state_list(
+            self._normalized_tool_name_state_list(
                 state.get("rbac_visible_tool_names")
                 or getattr(session, "_frontdoor_visible_tool_ids", [])
             )
             or list(provider_tool_names)
         )
         rbac_visible_skill_ids = (
-            cls._normalized_tool_name_state_list(
+            self._normalized_tool_name_state_list(
                 state.get("rbac_visible_skill_ids")
                 or getattr(session, "_frontdoor_visible_skill_ids", [])
             )
             or list(visible_skill_ids)
         )
-        selection_debug = cls._frontdoor_selection_debug_snapshot(state)
+        selection_debug = self._frontdoor_selection_debug_snapshot(state)
         if not selection_debug:
             raw_debug = getattr(session, "_frontdoor_selection_debug", None)
             selection_debug = dict(raw_debug) if isinstance(raw_debug, dict) else {}
@@ -4895,7 +4785,7 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
         )
         provider_tool_exposure_revision = str(
             state.get("provider_tool_exposure_revision") or ""
-        ).strip() or cls._provider_tool_exposure_revision(provider_tool_names)
+        ).strip() or self._provider_tool_exposure_revision(provider_tool_names)
         repair_required_tool_items = [
             dict(item)
             for item in list(state.get("repair_required_tool_items") or [])
@@ -4928,7 +4818,6 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
             "candidate_tool_names": list(candidate_tool_names),
             "candidate_tool_items": list(candidate_tool_items),
             "attachment_reopen_targets": list(attachment_reopen_targets),
-            "hydrated_tool_names": list(hydrated_tool_names),
             "visible_skill_ids": list(visible_skill_ids),
             "candidate_skill_ids": list(candidate_skill_ids),
             "rbac_visible_tool_names": list(rbac_visible_tool_names),
@@ -5015,7 +4904,6 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
             frontdoor_canonical_context,
             compression_state,
             _semantic_context_state,
-            hydrated_tool_names,
         ) = self._runtime_session_frontdoor_state(
             state,
             preview_pending_tool_round=preview_pending_tool_round,
@@ -5031,7 +4919,6 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
             adopt(compression_state) if callable(adopt) else compression_state,
         )
         setattr(target_session, "_semantic_context_state", {})
-        setattr(target_session, "_frontdoor_hydrated_tool_names", list(hydrated_tool_names))
         if isinstance(state, dict):
             setattr(
                 target_session,
@@ -5909,7 +5796,6 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
         self,
         *,
         state: dict[str, Any],
-        tool_results: list[dict[str, Any]],
     ) -> dict[str, Any]:
         tool_names = self._normalized_tool_name_state_list(state.get("tool_names"))
         candidate_tool_names = self._normalized_tool_name_state_list(state.get("candidate_tool_names"))
@@ -5917,57 +5803,9 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
             state.get("candidate_tool_items"),
             fallback_names=candidate_tool_names,
         )
-        hydrated_tool_names = self._normalized_tool_name_state_list(state.get("hydrated_tool_names"))
         visible_tool_names = self._normalized_tool_name_state_list(
             state.get("rbac_visible_tool_names")
             or [*tool_names, *candidate_tool_names]
-        )
-        promotion_targets: list[str] = []
-        for tool_result in list(tool_results or []):
-            tool_name = str(tool_result.get("tool_name") or "").strip()
-            if tool_name not in {"load_tool_context", "load_tool_context_v2"}:
-                continue
-            raw_payload = self._tool_context_hydration_payload(tool_result.get("raw_result"))
-            if not isinstance(raw_payload, dict) or not bool(raw_payload.get("ok")):
-                continue
-            targets = self._normalized_tool_name_state_list(raw_payload.get("hydration_targets"))
-            for name in targets:
-                # 提升准入只信 payload 的 hydration_targets：它是服务端按治理**实时**
-                # 可见集算出来的（回合中途注册的工具不在 candidate 快照里，若在这里
-                # 再加一道 candidate 门槛，"有权限但没排上"的工具会变成 load 成功也
-                # 提升不了的死区）。常驻内置不进水合台账的规则保留。
-                if name in CEO_FIXED_BUILTIN_TOOL_NAMES:
-                    continue
-                if name not in promotion_targets:
-                    promotion_targets.append(name)
-        hydrated_tool_names = self._frontdoor_hydrated_tool_lru(
-            existing_tool_names=hydrated_tool_names,
-            incoming_tool_names=promotion_targets,
-            # 刚提升的名字是本跳实时探针放行的，不在回合初 rbac 快照里；不并进可见集
-            # 的话 LRU 会按 stale 快照把它们当场滤掉，提升等于没发生。
-            visible_tool_names=[*visible_tool_names, *promotion_targets],
-        )
-        # 契约在场撤销回写台账（前门的台账就是 `hydrated_tool_names` 本身）：不在场的名字
-        # 留在水合集里就等于既不在 callable、又被 candidate 的「排除已水合」规则挡在门外，
-        # 模型 load 它只会拿到没有出口的 `already_hydrated`。撤销原因另记一个字段，不与
-        # LRU 淘汰混用。
-        promoted_now = set(promotion_targets)
-        # 本轮刚 load 成功的名字**不进判据**：它的正文就在同批工具结果里，下一跳才进请求视图，
-        # 拿这一跳的 messages 判它必然判成不在场（§2.3「撤销从下一跳起生效；同批已派发执行
-        # 的照旧执行完」）。这里只判上一跳就带着的那些名字。
-        carried_hydrated_tool_names = [name for name in hydrated_tool_names if name not in promoted_now]
-        kept_hydrated_tool_names, revoked_hydrated_tool_names = self._frontdoor_contract_presence_partition(
-            state,
-            carried_hydrated_tool_names,
-        )
-        hydrated_tool_names = [
-            *kept_hydrated_tool_names,
-            *[name for name in hydrated_tool_names if name in promoted_now],
-        ]
-        recorded_revoked = self._merge_frontdoor_contract_revocations(
-            state,
-            kept_tool_names=hydrated_tool_names,
-            revoked_tool_names=revoked_hydrated_tool_names,
         )
         visible_name_set = set(visible_tool_names)
         if visible_name_set:
@@ -5978,30 +5816,27 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
                 for item in list(candidate_tool_items or [])
                 if str(item.get("tool_id") or "").strip() in visible_name_set
             ]
-        revoked_name_set = set(revoked_hydrated_tool_names)
-        if revoked_name_set:
-            # 撤销必须同时移出 callable 池：只减 hydrated 名单的话，名字还留在 tool_names 里，
-            # 下一跳合同照旧把它当可调用来渲染，判据等于没生效。
-            tool_names = [name for name in tool_names if name not in revoked_name_set]
-        for name in list(hydrated_tool_names or []):
-            if name not in tool_names:
-                tool_names.append(name)
-        hydrated_set = set(hydrated_tool_names)
+        # callable 由这一跳的请求视图重算：load 送进的契约块就在同批工具结果里，它落进
+        # `state["messages"]` 之后自然在场——没有台账需要在这段里喂。
+        # 阶段工具是 callable 渲染端的注入项，不进 `tool_names` 这一池：那池的口径是
+        # builder 的 callable，历来不含它。
+        tool_names = [
+            name
+            for name in self._frontdoor_callable_tool_names_for_state(
+                {**dict(state or {}), "tool_names": tool_names}
+            )
+            if name != STAGE_TOOL_NAME
+        ]
+        # candidate = 治理可见 −（callable ∪ 待修复）。契约缺席的名字在这一刻就回到候选：
+        # 不在场进不了 callable，同一个减法把它留在候选里，回合内重新 load 的出口始终可达。
+        # 待修复那一档不进候选——builder 侧本来就把它们摘出去，这里重新派生必须同口径。
+        excluded_from_candidate = set(tool_names) | self._frontdoor_repair_required_tool_name_set(state)
         candidate_tool_names = [
             name
-            for name in candidate_tool_names
-            if name not in hydrated_set
+            for name in visible_tool_names
+            if name not in excluded_from_candidate
         ]
-        # 撤销掉的必须在这一刻并回候选：候选池是回合初快照，回合中途只减不并的话，
-        # 该名字既不可调也不可读，提升门禁的 candidate_hit 永远假 ⇒ 回合内重载救不回。
-        candidate_tool_names = revive_contract_absent_candidates(
-            candidate_names=candidate_tool_names,
-            revoked_names=revoked_hydrated_tool_names,
-            hydrated_names=hydrated_tool_names,
-            callable_names=tool_names,
-            visible_names=visible_tool_names,
-        )
-        # 实时台账卫生与发现出口共用一次治理实时读；读不到就都跳过（宁可滞后再说，
+        # 实时卫生与发现出口共用一次治理实时读；读不到就都跳过（宁可滞后再说，
         # 也不拿失败当收回）。声明名的收回走 denied_tools + 重印边界，不在这里摘。
         live_granted = self._frontdoor_live_granted_tool_names(
             session_key=str(state.get("session_key") or ""),
@@ -6011,23 +5846,22 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
             declared_set = set(
                 self._normalized_tool_name_state_list(state.get("provider_tool_names"))
             )
-            # 卫生：非声明的水合名被 RBAC 收回时当跳出 callable 与台账——它不在
+            # 卫生：非声明的名字被 RBAC 收回时当跳出 callable——它不在
             # `tools[]` 里，denied_tools 点不到名，留在 callable 只会让模型拿着
             # "可调用"的预告去撞一次拒绝。RBAC 重新放行后由下面的发现出口重新
             # 送回候选，模型重新 load 即可。
             rbac_dropped = [
                 name
-                for name in hydrated_tool_names
-                if name not in declared_set and name not in live_granted_set
+                for name in tool_names
+                if name not in declared_set
+                and name not in live_granted_set
+                and name not in CEO_FIXED_BUILTIN_TOOL_NAMES
             ]
             if rbac_dropped:
                 rbac_dropped_set = set(rbac_dropped)
-                hydrated_tool_names = [
-                    name for name in hydrated_tool_names if name not in rbac_dropped_set
-                ]
                 tool_names = [name for name in tool_names if name not in rbac_dropped_set]
-            # 发现：治理实时放行、但既不在 `tools[]`（钉住声明未吸收）、也不可调用、
-            # 也未水合的名字，并回候选——尾块把它渲成 `undeclared_candidates`
+            # 发现：治理实时放行、但既不在 `tools[]`（钉住声明未吸收）、也不可调用的名字，
+            # 并回候选——尾块把它渲成 `undeclared_candidates`
             # （"能 load 但参数表还没进本次 tools[]，清单到压缩那一跳才重印"），
             # 模型 load 拿到正文与参数契约后即可调用。
             live_undeclared = [
@@ -6036,7 +5870,6 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
                 if name
                 and name not in declared_set
                 and name not in set(tool_names)
-                and name not in set(hydrated_tool_names)
                 and name not in CEO_FIXED_BUILTIN_TOOL_NAMES
             ]
             for name in live_undeclared:
@@ -6048,9 +5881,10 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
             for item in list(candidate_tool_items or [])
             if str(item.get("tool_id") or "").strip() in candidate_name_set
         ]
-        # 并回来的名字在回合初快照里没有条目（它当时已水合，条目被摘掉），只按 names 过滤的话
-        # 尾块 `candidate_tools` 那行就永远少它一个——那一行读的是 items。补名字级条目即可：
-        # 说明文字由 provider `tools[]` 的 description 承载，这里不抄第二份。
+        # 掉出 callable 的名字在回合初快照里没有条目（它当时在 callable 面上，条目被摘掉），
+        # 只按 names 过滤的话尾块 `candidate_tools` 那行就永远少它一个——那一行读的是
+        # items。补名字级条目即可：说明文字由 provider `tools[]` 的 description 承载，
+        # 这里不抄第二份。
         item_names = {str(item.get("tool_id") or "").strip() for item in candidate_tool_items}
         for name in candidate_tool_names:
             if name and name not in item_names:
@@ -6060,8 +5894,6 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
             "tool_names": list(tool_names),
             "candidate_tool_names": list(candidate_tool_names),
             "candidate_tool_items": list(candidate_tool_items),
-            "hydrated_tool_names": list(hydrated_tool_names),
-            "hydration_revoked_executor_names": list(recorded_revoked),
         }
 
     def _refresh_frontdoor_dynamic_contract_state(
@@ -8110,9 +7942,6 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
         compression_state_payload = dict(current_compression_state or self._default_compression_state())
         frontdoor_history_shrink_reason_from_prepare = ""
         turn_overlay_section_count = 0
-        # 装配这一跳撤掉的名字，随 persistent state 一起落记录（见下面的返回）：只收窄
-        # 台账不留账，取证时分不清「没 load 过」和「load 过但正文离开上下文」。
-        contract_revoked_tool_names: list[str] = []
         if inherited_internal_contract_state:
             attachment_reopen_targets = [
                 dict(item)
@@ -8126,7 +7955,6 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
                 for item in list(inherited_internal_contract_state.get("candidate_tool_items") or [])
                 if isinstance(item, dict)
             ]
-            hydrated_tool_names = list(inherited_internal_contract_state.get("hydrated_tool_names") or [])
             rbac_visible_tool_names = list(inherited_internal_contract_state.get("rbac_visible_tool_names") or [])
             rbac_visible_skill_ids = list(inherited_internal_contract_state.get("rbac_visible_skill_ids") or [])
             repair_required_tool_items = [
@@ -8142,25 +7970,29 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
             frontdoor_selection_debug = dict(
                 inherited_internal_contract_state.get("frontdoor_selection_debug") or {}
             )
-            tool_names = list(inherited_internal_contract_state.get("tool_names") or [])
-            # 内部轮（心跳 / cron）继承上一轮的 callable、候选与水合台账，继承的那份同样要过
-            # 在场判据（FIX_PLAN §2.3 末条）：压缩把正文摘掉的那一跳，内部轮不能照旧调用
-            # 无契约的工具，也不能把撤掉的名字留在 inherited 的 tool_names 行里。
-            hydrated_tool_names, _revoked_internal_hydrated = self._frontdoor_contract_presence_partition(
-                {
-                    "messages": list(request_body_seed_messages or checkpoint_messages or []),
-                    "frontdoor_stage_state": current_frontdoor_stage_state,
-                    "frontdoor_canonical_context": current_frontdoor_canonical_context,
-                },
-                hydrated_tool_names,
-            )
-            contract_revoked_tool_names = list(_revoked_internal_hydrated or [])
-            if contract_revoked_tool_names:
-                revoked_name_set = set(contract_revoked_tool_names)
-                tool_names = [name for name in tool_names if name not in revoked_name_set]
+            inherited_tool_names = list(inherited_internal_contract_state.get("tool_names") or [])
+            # 内部轮（心跳 / cron）继承上一轮的 callable 与候选，继承的那份同样要过在场判据
+            # （FIX_PLAN §2.3 末条）：压缩把正文摘掉的那一跳，内部轮不能照旧调用无契约的工具，
+            # 也不能把不在场的名字留在 inherited 的 tool_names 行里。
+            # 请求视图取 builder 真正会用的那一份：有续跑种子就用种子，没有才回到检查点消息。
+            internal_presence_state = {
+                "messages": list(request_body_seed_messages or checkpoint_messages or []),
+                "frontdoor_stage_state": current_frontdoor_stage_state,
+                "frontdoor_canonical_context": current_frontdoor_canonical_context,
+                "rbac_visible_tool_names": rbac_visible_tool_names,
+                "tool_names": inherited_tool_names,
+                "repair_required_tool_items": repair_required_tool_items,
+            }
+            contract_present_tool_names = self._frontdoor_contract_present_names(internal_presence_state)
+            present_set = set(contract_present_tool_names)
+            tool_names = [
+                name
+                for name in inherited_tool_names
+                if name in CEO_FIXED_BUILTIN_TOOL_NAMES or name in present_set
+            ]
             callable_tool_names = self._frontdoor_callable_tool_names_for_state(
                 {
-                    "frontdoor_stage_state": current_frontdoor_stage_state,
+                    **internal_presence_state,
                     "cron_internal": cron_internal,
                     "heartbeat_internal": heartbeat_internal,
                 },
@@ -8168,7 +8000,7 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
             )
             frontdoor_selection_debug["callable_tool_names"] = list(callable_tool_names)
             frontdoor_selection_debug["candidate_tool_names"] = list(candidate_tool_names)
-            frontdoor_selection_debug["hydrated_tool_names"] = list(hydrated_tool_names)
+            frontdoor_selection_debug["contract_present_tool_names"] = list(contract_present_tool_names)
             messages = self._prompt_message_records(request_body_seed_messages)
             has_current_turn_user_content = bool(self._content_text(current_turn_user_content).strip())
             # 末位是不是本轮用户回合：内部规则行（心跳规则/cron 提醒正文）现在落在 user
@@ -8212,34 +8044,18 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
                 actor_role="ceo",
                 session_id=session.state.session_key,
             )
-            seeded_hydrated_tool_names = (
-                list(getattr(session, "_frontdoor_hydrated_tool_names", []) or [])
-                or list(state.get("hydrated_tool_names") or [])
-            )
-            if not seeded_hydrated_tool_names and paused_manual_snapshot:
-                seeded_hydrated_tool_names = [
-                    str(item or "").strip()
-                    for item in list(paused_manual_snapshot.get("hydrated_tool_names") or [])
-                    if str(item or "").strip()
-                ]
-            hydrated_tool_names = self._frontdoor_hydrated_tool_lru(
-                existing_tool_names=seeded_hydrated_tool_names,
-                incoming_tool_names=[],
-                visible_tool_names=list(exposure.get("tool_names") or []),
-            )
-            # 装配路也必须过同一判据：builder 用这份 hydrated 组 callable 与 candidate，
-            # 少过滤一次就等于三个算点里有两个口径不同（合同分裂）。
+            # 装配路也过同一条在场判据：builder 用这份在场名单组 callable 与 candidate，
+            # 少算一次就等于三个算点里有两个口径不同（合同分裂）。
             # 请求视图取 builder 真正会用的那一份：有续跑种子就用种子（走这条时
             # `checkpoint_messages` 已被置空），没有种子才回到状态里的那份消息。
-            hydrated_tool_names, _revoked_hydrated = self._frontdoor_contract_presence_partition(
-                {
-                    "messages": list(request_body_seed_messages or checkpoint_messages or []),
-                    "frontdoor_stage_state": current_frontdoor_stage_state,
-                    "frontdoor_canonical_context": current_frontdoor_canonical_context,
-                },
-                hydrated_tool_names,
-            )
-            contract_revoked_tool_names = list(_revoked_hydrated or [])
+            assembly_presence_state = {
+                "messages": list(request_body_seed_messages or checkpoint_messages or []),
+                "frontdoor_stage_state": current_frontdoor_stage_state,
+                "frontdoor_canonical_context": current_frontdoor_canonical_context,
+                "cron_internal": cron_internal,
+                "heartbeat_internal": heartbeat_internal,
+            }
+            contract_present_tool_names = self._frontdoor_contract_present_names(assembly_presence_state)
             assembly = await self._builder.build_for_ceo(
                 session=session,
                 query_text=builder_query_text,
@@ -8253,7 +8069,7 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
                 frontdoor_stage_state=current_frontdoor_stage_state,
                 frontdoor_canonical_context=current_frontdoor_canonical_context,
                 semantic_context_state={},
-                hydrated_tool_names=list(hydrated_tool_names),
+                contract_present_tool_names=list(contract_present_tool_names),
             )
             selected_skill_ids = [
                 str(item.get("skill_id") or "").strip()
@@ -8309,7 +8125,7 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
                 "capability_snapshot": dict(getattr(assembly, "trace", {}).get("capability_snapshot") or {}),
                 "callable_tool_names": [],
                 "candidate_tool_names": list(candidate_tool_names),
-                "hydrated_tool_names": list(hydrated_tool_names),
+                "contract_present_tool_names": list(contract_present_tool_names),
             }
             tool_names = list(
                 getattr(assembly, "tool_names", None)
@@ -8318,11 +8134,11 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
             )
             callable_tool_names = self._frontdoor_callable_tool_names_for_state(
                 {
-                    "frontdoor_stage_state": current_frontdoor_stage_state,
-                    "cron_internal": cron_internal,
-                    "heartbeat_internal": heartbeat_internal,
+                    **assembly_presence_state,
+                    "rbac_visible_tool_names": rbac_visible_tool_names,
+                    "tool_names": tool_names,
+                    "repair_required_tool_items": repair_required_tool_items,
                 },
-                tool_names=tool_names,
             )
             frontdoor_selection_debug["callable_tool_names"] = list(callable_tool_names)
             messages = list(assembly.model_messages or [])
@@ -8403,7 +8219,6 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
                 callable_tool_names=list(callable_tool_names),
                 candidate_tool_names=list(candidate_tool_names),
                 candidate_tool_items=list(candidate_tool_items),
-                hydrated_tool_names=list(hydrated_tool_names),
                 frontdoor_stage_state=dict(current_frontdoor_stage_state or {}),
                 visible_skill_ids=list(selected_skill_ids),
                 candidate_skill_ids=list(selected_skill_ids),
@@ -8586,14 +8401,6 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
                 for item in list(repair_required_skill_items or [])
                 if isinstance(item, dict)
             ],
-            "hydrated_tool_names": list(hydrated_tool_names),
-            # 装配这一跳的撤销记录进 session persistent state（FIX_PLAN §2.3）：漏这一份
-            # 就等于撤销只活在收窄后的视图里，下一跳没人知道它为什么少了。
-            "hydration_revoked_executor_names": self._merge_frontdoor_contract_revocations(
-                state,
-                kept_tool_names=hydrated_tool_names,
-                revoked_tool_names=contract_revoked_tool_names,
-            ),
             "visible_skill_ids": list(selected_skill_ids),
             "candidate_skill_ids": list(selected_skill_ids),
             "rbac_visible_tool_names": list(rbac_visible_tool_names),
@@ -9525,7 +9332,6 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
             preview_frontdoor_canonical_context,
             preview_compression_state,
             _preview_semantic_context_state,
-            _preview_hydrated_tool_names,
         ) = self._runtime_session_frontdoor_state(
             preview_state,
             preview_pending_tool_round=True,
@@ -9535,11 +9341,6 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
             "frontdoor_stage_state": preview_frontdoor_stage_state,
             "frontdoor_canonical_context": preview_frontdoor_canonical_context,
             "compression_state": preview_compression_state,
-            "hydrated_tool_names": [
-                str(item or "").strip()
-                for item in list(state.get("hydrated_tool_names") or [])
-                if str(item or "").strip()
-            ],
             "tool_call_payloads": [
                 dict(item)
                 for item in list(state.get("tool_call_payloads") or [])
@@ -9885,16 +9686,15 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
             messages = stage_compacted_messages
         authoritative_request_body_messages = self._durable_frontdoor_request_body_messages(messages)
         # 工具态写回读**这一跳之后**的视图：裁撤与写回同批时，写回早于阶段账本落地就会读成
-        # "还没裁"，于是台账不记撤销、名字留在 hydrated 里，而下一跳的渲染/派发读的是裁后的
-        # 视图 ⇒ 同一份状态里出现 `already_callable` 回执与 `tool not available` 两种答案。
-        # 这里把新的阶段态与裁后的消息一并交进去，台账、候选、回执、执行四者从此同源。
+        # "还没裁"，于是名字仍被当在场，而下一跳的渲染/派发读的是裁后的视图 ⇒ 同一份状态里
+        # 出现 `already_callable` 回执与 `tool not available` 两种答案。这里把新的阶段态与
+        # 裁后的消息一并交进去，在场判据、候选、回执、执行四者从此同源。
         updated_tool_contract_state = self._frontdoor_tool_state_after_tool_results(
             state={
                 **dict(state or {}),
                 "messages": messages,
                 "frontdoor_stage_state": frontdoor_stage_state,
             },
-            tool_results=tool_results,
         )
 
         used_tools = list(state.get("used_tools") or [])

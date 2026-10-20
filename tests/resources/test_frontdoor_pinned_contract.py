@@ -179,7 +179,6 @@ def test_tail_has_no_skill_roster_mechanism_anymore() -> None:
     tail = build_frontdoor_tool_contract(
         callable_tool_names=["exec"],
         candidate_tool_names=["exec"],
-        hydrated_tool_names=["exec"],
         frontdoor_stage_state={},
         candidate_skill_ids=[f"skill-{index}" for index in range(12)],
         visible_skill_ids=[f"skill-{index}" for index in range(12)],
@@ -277,7 +276,6 @@ def _canonical_state(**overrides) -> dict[str, object]:
         "tool_names": [],
         "candidate_tool_names": [],
         "candidate_tool_items": [],
-        "hydrated_tool_names": [],
         "visible_skill_ids": list(BASE_ROSTER),
         "candidate_skill_ids": list(BASE_ROSTER),
         "rbac_visible_tool_names": [],

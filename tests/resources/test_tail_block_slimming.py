@@ -49,7 +49,6 @@ def _frontdoor_pair(**overrides) -> list[dict]:
     kwargs = dict(
         callable_tool_names=['exec', 'submit_next_stage'],
         candidate_tool_names=['web_fetch', 'memory_note'],
-        hydrated_tool_names=['exec'],
         frontdoor_stage_state=_stage_state(True),
         candidate_skill_ids=['find-skills'],
         visible_skill_ids=['find-skills'],
@@ -77,7 +76,6 @@ def _node_pair(**overrides) -> list[dict]:
             'transition_required': False,
             'active_stage': {'stage_id': 'stage:1', 'stage_goal': 'dispatch', 'tool_round_budget': 12},
         },
-        hydrated_executor_names=['exec'],
         lightweight_tool_ids=[],
         selection_trace={},
         declared_tool_names=['exec', 'submit_next_stage', 'web_fetch', 'memory_note'],
@@ -134,10 +132,12 @@ def test_fixed_disposal_prose_left_the_tail_on_both_lanes() -> None:
     )
     for text in (_text(_frontdoor_pair(**overrides)), _text(_node_pair(**overrides))):
         assert 'repair_required_tools:' in text
-        assert 'repair_required_skills:' in text
-        # 条目留在块里
+        # 待修复工具条目留在块里
         assert '`agent_browser`: Browser automation Reason: missing required paths' in text
-        assert '`writing-skills`: Skill maintenance workflow Reason: missing required bins' in text
+        # skill 名单整条离开尾块（头部钉住块承载全量、新增可读走一次性持久提示），
+        # 待修复 skill 不再在尾块逐条打印。
+        assert 'repair_required_skills:' not in text
+        assert '`writing-skills`' not in text
         # 回合内不变的处置文案一份都不许出现
         assert 'Reference skill:' not in text
         assert 'These tools must be repaired before use.' not in text

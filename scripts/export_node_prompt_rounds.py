@@ -27,18 +27,6 @@ from main.runtime.react_loop import ReActToolLoop
 import main.runtime.react_loop as react_loop_module
 
 
-def _normalized_names(items: list[Any] | None) -> list[str]:
-    ordered: list[str] = []
-    seen: set[str] = set()
-    for item in list(items or []):
-        normalized = str(item or "").strip()
-        if not normalized or normalized in seen:
-            continue
-        seen.add(normalized)
-        ordered.append(normalized)
-    return ordered
-
-
 class _FakeTaskStore:
     def __init__(self, *, task: Any, node: Any) -> None:
         self._task = task
@@ -343,8 +331,6 @@ def _seed_runtime_frame(log_service: _RecordingLogService, *, task_id: str, node
             "candidate_tool_names": ["filesystem_write"],
             "rbac_visible_tool_names": ["load_tool_context", "filesystem_write", "submit_final_result"],
             "rbac_visible_skill_ids": ["tmux"],
-            "hydrated_executor_state": [],
-            "hydrated_executor_names": [],
         },
         publish_snapshot=False,
     )
@@ -395,14 +381,12 @@ def _build_selector(log_service: _RecordingLogService):
         visible_tools: dict[str, Tool],
         runtime_context: dict[str, Any],
     ) -> dict[str, Any]:
-        _ = node_kind, runtime_context
-        frame = log_service.read_runtime_frame(task_id, node_id)
-        hydrated = _normalized_names(
-            list(frame.get("hydrated_executor_state") or []) or list(frame.get("hydrated_executor_names") or [])
-        )
+        _ = node_kind
+        runtime_payload = dict(runtime_context or {})
+        presence = dict(runtime_payload.get("tool_contract_presence") or {})
         callable_tool_names = ["load_tool_context", "submit_final_result"]
         candidate_tool_names = ["filesystem_write"]
-        if "filesystem_write" in hydrated:
+        if "filesystem_write" in presence:
             callable_tool_names = ["load_tool_context", "filesystem_write", "submit_final_result"]
             candidate_tool_names = []
         callable_tool_names = [name for name in callable_tool_names if name in visible_tools]
@@ -410,7 +394,6 @@ def _build_selector(log_service: _RecordingLogService):
         return {
             "tool_names": list(callable_tool_names),
             "candidate_tool_names": list(candidate_tool_names),
-            "hydrated_executor_names": list(hydrated),
             "lightweight_tool_ids": ["filesystem"],
             "trace": {
                 "mode": "export_node_prompt_rounds",
@@ -420,30 +403,6 @@ def _build_selector(log_service: _RecordingLogService):
         }
 
     return _selector
-
-
-def _build_hydration_promoter(log_service: _RecordingLogService):
-    def _promoter(*, task_id: str, node_id: str, raw_result: dict[str, Any], **kwargs: Any) -> None:
-        _ = kwargs
-        tool_id = str((raw_result or {}).get("tool_id") or "").strip()
-        if not tool_id:
-            return
-
-        def _mutate(frame: dict[str, Any]) -> dict[str, Any]:
-            hydrated = _normalized_names(
-                list(frame.get("hydrated_executor_state") or []) or list(frame.get("hydrated_executor_names") or [])
-            )
-            if tool_id not in hydrated:
-                hydrated.append(tool_id)
-            return {
-                **dict(frame or {}),
-                "hydrated_executor_state": list(hydrated),
-                "hydrated_executor_names": list(hydrated),
-            }
-
-        log_service.update_frame(task_id, node_id, _mutate, publish_snapshot=False)
-
-    return _promoter
 
 
 async def _export_rounds(*, output_dir: Path) -> dict[str, Any]:
@@ -482,7 +441,6 @@ async def _export_rounds(*, output_dir: Path) -> dict[str, Any]:
     backend = _RecordingChatBackend(log_service=log_service)
     loop = ReActToolLoop(chat_backend=backend, log_service=log_service, max_iterations=4)
     loop._model_visible_tool_schema_selector = _build_selector(log_service)
-    loop._tool_context_hydration_promoter = _build_hydration_promoter(log_service)
 
     async def _submit(payload: dict[str, Any]) -> dict[str, Any]:
         return dict(payload or {})

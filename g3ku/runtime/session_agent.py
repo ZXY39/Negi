@@ -220,7 +220,6 @@ class RuntimeAgentSession:
         self._frontdoor_canonical_context: dict[str, Any] = default_frontdoor_canonical_context()
         self._compression_state: dict[str, Any] = {}
         self._semantic_context_state: dict[str, Any] = {}
-        self._frontdoor_hydrated_tool_names: list[str] = []
         self._frontdoor_repair_required_tool_items: list[dict[str, Any]] = []
         self._frontdoor_repair_required_skill_items: list[dict[str, Any]] = []
         self._frontdoor_selection_debug: dict[str, Any] = {}
@@ -622,9 +621,6 @@ class RuntimeAgentSession:
             payload.get("compression_state") or payload.get("compression") or {}
         )
         self._semantic_context_state = dict(payload.get("semantic_context_state") or {})
-        self._frontdoor_hydrated_tool_names = self._normalized_name_list(
-            payload.get("hydrated_tool_names")
-        )
         self._frontdoor_capability_snapshot_exposure_revision = str(
             payload.get("capability_snapshot_exposure_revision") or ""
         ).strip()
@@ -746,9 +742,6 @@ class RuntimeAgentSession:
             # 不补这一步，截断后那一跳继续沿用截断前钉住的 `tools[]` 与头部名单：
             # 派发面点到的新名字不在清单里，得先 load 一次才调得动。按当轮全集重播种
             # 多付的是 `system` + `tools[]` 那一截字节，正文本来就已随基线清空重付。
-            self._frontdoor_hydrated_tool_names = self._normalized_name_list(
-                (payload or {}).get("hydrated_tool_names")
-            )
             # 截断到会话开头：基线里没有那条提示，台账也必须回到"没投过"，否则那个名字
             # 从此再不会出现（只清历史不清台账 = 永久遗忘）。
             _skill_roster_notice.set_notice_context(
@@ -966,9 +959,6 @@ class RuntimeAgentSession:
                 "compression_state": copy.deepcopy(getattr(self, "_compression_state", None) or {}),
                 "semantic_context_state": copy.deepcopy(
                     getattr(self, "_semantic_context_state", None) or {}
-                ),
-                "hydrated_tool_names": list(
-                    self._normalized_name_list(getattr(self, "_frontdoor_hydrated_tool_names", []))
                 ),
                 "capability_snapshot_exposure_revision": str(
                     getattr(self, "_frontdoor_capability_snapshot_exposure_revision", "") or ""
@@ -3077,13 +3067,6 @@ class RuntimeAgentSession:
             snapshot["assistant_text"] = str(self._state.latest_message)
         if self._state.last_error is not None:
             snapshot["last_error"] = asdict(self._state.last_error)
-        hydrated_tool_names = [
-            str(item or "").strip()
-            for item in list(getattr(self, "_frontdoor_hydrated_tool_names", []) or [])
-            if str(item or "").strip()
-        ]
-        if hydrated_tool_names:
-            snapshot["hydrated_tool_names"] = hydrated_tool_names
         repair_required_tool_items = [
             dict(item)
             for item in list(getattr(self, "_frontdoor_repair_required_tool_items", []) or [])
@@ -3164,7 +3147,6 @@ class RuntimeAgentSession:
             and "last_error" not in snapshot
             and "frontdoor_stage_state" not in snapshot
             and "frontdoor_canonical_context" not in snapshot
-            and "hydrated_tool_names" not in snapshot
             and "repair_required_tool_items" not in snapshot
             and "repair_required_skill_items" not in snapshot
             and "frontdoor_request_body_messages" not in snapshot
@@ -3705,14 +3687,12 @@ class RuntimeAgentSession:
         frontdoor_stage_state = interrupt_values.get("frontdoor_stage_state")
         frontdoor_canonical_context = interrupt_values.get("frontdoor_canonical_context")
         compression_state = interrupt_values.get("compression_state")
-        hydrated_tool_names = interrupt_values.get("hydrated_tool_names")
         repair_required_tool_items = interrupt_values.get("repair_required_tool_items")
         repair_required_skill_items = interrupt_values.get("repair_required_skill_items")
         frontdoor_selection_debug = interrupt_values.get("frontdoor_selection_debug")
         preserved_frontdoor_stage_state = getattr(self, "_frontdoor_stage_state", None)
         preserved_frontdoor_canonical_context = getattr(self, "_frontdoor_canonical_context", None)
         preserved_compression_state = getattr(self, "_compression_state", None)
-        preserved_hydrated_tool_names = getattr(self, "_frontdoor_hydrated_tool_names", None)
         preserved_repair_required_tool_items = getattr(self, "_frontdoor_repair_required_tool_items", None)
         preserved_repair_required_skill_items = getattr(self, "_frontdoor_repair_required_skill_items", None)
         preserved_frontdoor_selection_debug = getattr(self, "_frontdoor_selection_debug", None)
@@ -3738,11 +3718,6 @@ class RuntimeAgentSession:
             else {}
         )
         self._semantic_context_state = {}
-        self._frontdoor_hydrated_tool_names = [
-            str(item or "").strip()
-            for item in list(hydrated_tool_names or preserved_hydrated_tool_names or [])
-            if str(item or "").strip()
-        ]
         self._frontdoor_repair_required_tool_items = [
             dict(item)
             for item in list(repair_required_tool_items or preserved_repair_required_tool_items or [])

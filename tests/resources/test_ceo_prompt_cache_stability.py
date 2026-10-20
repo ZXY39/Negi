@@ -155,7 +155,6 @@ def test_frontdoor_prompt_cache_key_ignores_dynamic_tool_contract_changes() -> N
         callable_tool_names=["exec"],
         candidate_tool_names=["filesystem_write"],
         candidate_tool_items=[{"tool_id": "filesystem_write", "description": "Write file content"}],
-        hydrated_tool_names=[],
         frontdoor_stage_state={"active_stage_id": "stage:1", "transition_required": False, "stages": []},
         candidate_skill_ids=["memory"],
         contract_revision="frontdoor:v1",
@@ -164,7 +163,6 @@ def test_frontdoor_prompt_cache_key_ignores_dynamic_tool_contract_changes() -> N
         callable_tool_names=["exec", "filesystem_write"],
         candidate_tool_names=[],
         candidate_tool_items=[],
-        hydrated_tool_names=["filesystem_write"],
         frontdoor_stage_state={"active_stage_id": "stage:1", "transition_required": False, "stages": []},
         candidate_skill_ids=["memory"],
         contract_revision="frontdoor:v1",
@@ -215,7 +213,6 @@ def test_frontdoor_prompt_cache_key_ignores_repair_required_contract_changes() -
         repair_required_tool_items=[
             {"tool_id": "agent_browser", "description": "Browser automation", "reason": "missing required paths"}
         ],
-        hydrated_tool_names=[],
         frontdoor_stage_state={"active_stage_id": "stage:1", "transition_required": False, "stages": []},
         candidate_skill_ids=[],
         repair_required_skill_items=[],
@@ -228,7 +225,6 @@ def test_frontdoor_prompt_cache_key_ignores_repair_required_contract_changes() -
         repair_required_tool_items=[
             {"tool_id": "agent_browser", "description": "Browser automation", "reason": "missing required paths"}
         ],
-        hydrated_tool_names=[],
         frontdoor_stage_state={"active_stage_id": "stage:1", "transition_required": False, "stages": []},
         candidate_skill_ids=[],
         repair_required_skill_items=[
@@ -317,7 +313,6 @@ def test_frontdoor_prompt_contract_keeps_same_turn_contract_history_append_only(
         callable_tool_names=["exec", "submit_next_stage"],
         candidate_tool_names=[],
         candidate_tool_items=[],
-        hydrated_tool_names=[],
         frontdoor_stage_state={"active_stage_id": "stage:1", "transition_required": False, "stages": []},
         candidate_skill_ids=[],
         contract_revision="frontdoor:v1",
@@ -429,7 +424,6 @@ def test_frontdoor_prompt_contract_appends_dynamic_appendix_at_tail_for_main_lan
         callable_tool_names=["submit_next_stage"],
         candidate_tool_names=["web_fetch"],
         candidate_tool_items=[{"tool_id": "web_fetch", "description": "HTTP fetch helper"}],
-        hydrated_tool_names=[],
         frontdoor_stage_state={},
         contract_revision="frontdoor:v1",
     ).to_message()
@@ -481,7 +475,6 @@ def test_frontdoor_tool_contract_stage_summary_omits_round_counters_and_trace_fi
     payload = build_frontdoor_tool_contract(
         callable_tool_names=["exec"],
         candidate_tool_names=["filesystem_write"],
-        hydrated_tool_names=["exec"],
         frontdoor_stage_state={
             "active_stage_id": "frontdoor-stage-2",
             "transition_required": False,

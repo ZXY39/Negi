@@ -135,7 +135,7 @@ def test_skill_contexts_do_not_participate_in_presence() -> None:
 
 
 # ---------------------------------------------------------------------------
-# 节点车道：撤销回写台账 + candidate 复位 + 重新 load 恢复
+# 节点车道：契约在场即能力 + candidate 复位 + 存量台账数据不得复活
 # ---------------------------------------------------------------------------
 
 
@@ -167,10 +167,11 @@ class _NodeLogService:
 
 def _node_service(
     *,
-    hydrated: list[str],
+    legacy_ledger: list[str] | None = None,
     stages: dict | None = None,
     visible: list[str] | None = None,
 ) -> tuple[MainRuntimeService, _NodeLogService]:
+    """`legacy_ledger` 只用来播种**存量**台账字段：这些用例要钉的是"旧数据不再撑起能力"。"""
     service = object.__new__(MainRuntimeService)
     log_service = _NodeLogService()
     service.log_service = log_service
@@ -189,8 +190,8 @@ def _node_service(
         {
             "node_id": "node-cp",
             "node_kind": "execution",
-            "hydrated_executor_state": list(hydrated),
-            "hydrated_executor_names": list(hydrated),
+            "hydrated_executor_state": list(legacy_ledger or []),
+            "hydrated_executor_names": list(legacy_ledger or []),
             "execution_stages": dict(stages or {}),
             "messages": [],
         },
@@ -206,52 +207,69 @@ def _task_obj() -> SimpleNamespace:
     return SimpleNamespace(task_id="task-cp", session_id="web:shared", metadata={})
 
 
-def test_node_contract_absent_hydration_is_removed_from_ledger() -> None:
-    """§4.1 契约被裁撤 + 未 keep ⇒ 不在 callable，且**台账**被回写。"""
-    service, log_service = _node_service(hydrated=[TOOL_ID])
-    present = service._node_hydrated_executor_names(
-        task_id="task-cp",
-        node_id="node-cp",
+def test_node_contract_absent_tool_is_not_callable() -> None:
+    """块不在请求视图里 ⇒ 不在 callable，且没有任何跨跳状态能把它捞回来。"""
+    service, _log = _node_service(legacy_ledger=[TOOL_ID])
+    present = service.contract_present_tool_names_for_node(
         actor_role="execution",
         session_id="web:shared",
         request_messages=[],
     )
     assert present == []
+    assert TOOL_ID not in service._callable_tool_names_for_node(
+        task=_task_obj(),
+        node=_node_obj(),
+        request_messages=[],
+    )
 
-    frame = log_service.read_runtime_frame("task-cp", "node-cp")
-    assert TOOL_ID not in list(frame["hydrated_executor_state"] or [])
-    assert frame["hydration_revoked_executor_names"] == [TOOL_ID]
 
-
-def test_node_contract_present_hydration_stays_callable() -> None:
-    service, log_service = _node_service(hydrated=[TOOL_ID])
-    present = service._node_hydrated_executor_names(
-        task_id="task-cp",
-        node_id="node-cp",
+def test_node_contract_present_tool_is_callable() -> None:
+    service, _log = _node_service()
+    present = service.contract_present_tool_names_for_node(
         actor_role="execution",
         session_id="web:shared",
         request_messages=[_loader_message()],
     )
     assert present == [TOOL_ID]
-    frame = log_service.read_runtime_frame("task-cp", "node-cp")
-    assert frame["hydration_revoked_executor_names"] == []
+    assert TOOL_ID in service._callable_tool_names_for_node(
+        task=_task_obj(),
+        node=_node_obj(),
+        request_messages=[_loader_message()],
+    )
+
+
+def test_node_presence_requires_request_view() -> None:
+    """调用方没有当次请求视图时按空集处理：宁可不放行，不可无契约放行。"""
+    service, _log = _node_service(legacy_ledger=[TOOL_ID])
+    assert service.contract_present_tool_names_for_node(
+        actor_role="execution",
+        session_id="web:shared",
+        request_messages=None,
+    ) == []
+
+
+def test_node_presence_follows_granted_order_and_drops_ungranted_blocks() -> None:
+    """在场索引里可能有上一跳留下的名字，治理已收回的不得进 callable。"""
+    service, _log = _node_service(visible=[STAGE_TOOL_NAME, "submit_final_result"])
+    present = service.contract_present_tool_names_for_node(
+        actor_role="execution",
+        session_id="web:shared",
+        request_messages=[_loader_message(OTHER_ID), _loader_message()],
+    )
+    assert present == []
 
 
 def test_node_stage_ledger_alone_does_not_make_tool_callable() -> None:
-    """账本里留着条目、请求里没有块 ⇒ 不可调用（旧行为是这一条就能撑起 callable）。"""
-    service, _log = _node_service(hydrated=[TOOL_ID])
+    """存量阶段账本里留着保留正文、请求里没有块 ⇒ 不可调用（旧行为是这一条就能撑起 callable）。"""
+    service, _log = _node_service()
     node = _node_obj()
     node.metadata = {"execution_stages": {"stages": _kept_stages()}}
-    callable_names = service._callable_tool_names_for_node(
+    assert TOOL_ID not in service._callable_tool_names_for_node(
         task=_task_obj(),
         node=node,
         request_messages=[],
     )
-    assert TOOL_ID not in callable_names
-    # 对照要用**没被上一跳撤销过**的台账：第一次调用已经把不在场的名字写回台账了，
-    # 拿同一份 service 再跑一次只会读到空台账（那是台账机制自己的账，不是判据）。
-    healed_service, _healed_log = _node_service(hydrated=[TOOL_ID])
-    with_block = healed_service._callable_tool_names_for_node(
+    with_block = service._callable_tool_names_for_node(
         task=_task_obj(),
         node=node,
         request_messages=[_loader_message()],
@@ -259,102 +277,69 @@ def test_node_stage_ledger_alone_does_not_make_tool_callable() -> None:
     assert TOOL_ID in with_block
 
 
-def test_node_revoked_name_returns_to_candidate() -> None:
-    """§0.3 撤销后名字自动回到 candidate：candidate = 治理可见 −（callable ∪ 已提升）。"""
-    service, _log = _node_service(hydrated=[TOOL_ID])
-    node, task = _node_obj(), _task_obj()
-    assert TOOL_ID in service._callable_tool_names_for_node(task=task, node=node)
-
-    callable_names = service._callable_tool_names_for_node(task=task, node=node, request_messages=[])
-    assert TOOL_ID not in callable_names
-
+def test_absent_tool_returns_to_candidates() -> None:
+    """candidate = 已授权 − callable：不在场的名字必须回到候选，否则既不可调也不可读（第 4 态）。"""
+    service, _log = _node_service()
     visible = service.list_effective_tool_names(actor_role="execution", session_id="web:shared")
+    fixed = [
+        name
+        for name in visible
+        if name in {STAGE_TOOL_NAME, "submit_final_result", "exec"}
+    ]
     selection = build_execution_tool_selection(
         prompt="p",
         goal="g",
         core_requirement="g",
         visible_tool_items=[],
         visible_tool_names=list(visible),
-        always_callable_tool_names=[name for name in visible if name != TOOL_ID],
-        promoted_tool_names=[],
+        always_callable_tool_names=list(fixed),
+        contract_present_tool_names=[],
         schema_size_by_executor={name: 100 for name in visible},
     )
     assert TOOL_ID in list(selection.candidate_tool_names or [])
-    assert TOOL_ID not in list(selection.hydrated_tool_names or [])
+    assert TOOL_ID not in list(selection.callable_tool_names or [])
 
-
-def test_node_reload_clears_revocation_and_restores_promotion() -> None:
-    """§4.1 后半：重新 load 后恢复提升。"""
-    service, log_service = _node_service(hydrated=[TOOL_ID])
-    service._node_hydrated_executor_names(
-        task_id="task-cp",
-        node_id="node-cp",
-        actor_role="execution",
-        session_id="web:shared",
-        request_messages=[],
+    present_selection = build_execution_tool_selection(
+        prompt="p",
+        goal="g",
+        core_requirement="g",
+        visible_tool_items=[],
+        visible_tool_names=list(visible),
+        always_callable_tool_names=list(fixed),
+        contract_present_tool_names=[TOOL_ID],
+        schema_size_by_executor={name: 100 for name in visible},
     )
-    frame = log_service.read_runtime_frame("task-cp", "node-cp")
-    assert TOOL_ID in frame["hydration_revoked_executor_names"]
-    assert TOOL_ID not in frame["hydrated_executor_state"]
+    assert TOOL_ID in list(present_selection.callable_tool_names or [])
+    assert TOOL_ID not in list(present_selection.candidate_tool_names or [])
 
-    service._promote_tool_context_hydration(
-        task_id="task-cp",
-        node_id="node-cp",
-        tool_call=SimpleNamespace(name="load_tool_context", arguments={"tool_id": TOOL_ID}),
-        raw_result={"ok": True, "tool_id": TOOL_ID, "hydration_targets": [TOOL_ID]},
-        runtime_context={
-            "session_key": "web:shared",
-            "actor_role": "execution",
-            "candidate_tool_names": [TOOL_ID],
-        },
+
+def test_legacy_ledger_keys_leave_the_frame_whitelist() -> None:
+    """五颗台账键都必须从帧白名单里消失：存量 payload 带着它们进来，归一化后不得复活。"""
+    legacy_keys = (
+        "hydrated_executor_state",
+        "hydrated_executor_names",
+        "hydration_revoked_executor_names",
+        "hydration_evicted_executor_names",
     )
-    frame = log_service.read_runtime_frame("task-cp", "node-cp")
-    assert frame["hydrated_executor_state"] == [TOOL_ID]
-    assert TOOL_ID not in list(frame["hydration_revoked_executor_names"] or [])
-
-
-def test_node_revocation_does_not_touch_lru_eviction_field() -> None:
-    """§4.5 LRU 淘汰与契约撤销是两种原因，混在一起下次就分不出账。"""
-    service, log_service = _node_service(hydrated=[TOOL_ID])
-    log_service.update_frame(
-        "task-cp",
-        "node-cp",
-        lambda frame: {**frame, "hydration_evicted_executor_names": [OTHER_ID]},
-    )
-    service._node_hydrated_executor_names(
-        task_id="task-cp",
-        node_id="node-cp",
-        actor_role="execution",
-        session_id="web:shared",
-        request_messages=[],
-    )
-    frame = log_service.read_runtime_frame("task-cp", "node-cp")
-    assert frame["hydration_revoked_executor_names"] == [TOOL_ID]
-    assert list(frame["hydration_evicted_executor_names"] or []) == [OTHER_ID]
-
-
-def test_revocation_field_survives_node_frame_normalization() -> None:
-    """§4.6 白名单漏一份 = 逐轮被抹掉，可观测症状是"撤销没生效"。"""
     payload = TaskLogService._sanitize_runtime_frame(
-        {
-            "node_id": "n",
-            "hydrated_executor_state": ["a"],
-            "hydration_revoked_executor_names": ["b"],
-        }
+        {"node_id": "n", **{key: ["a"] for key in legacy_keys}, "callable_tool_names": [TOOL_ID]}
     )
-    assert payload["hydration_revoked_executor_names"] == ["b"]
+    for key in legacy_keys:
+        assert key not in payload, key
+    assert payload["callable_tool_names"] == [TOOL_ID]
 
     record = TaskProjectionRuntimeFrameRecord(task_id="t", node_id="n", payload=payload)
     hydrated = TaskLogService._hydrate_runtime_frame_record(object.__new__(TaskLogService), record)
-    assert hydrated["hydration_revoked_executor_names"] == ["b"]
+    for key in legacy_keys:
+        assert key not in hydrated, key
 
-    snapshot = TaskLogService._sanitize_callable_tool_snapshot(
-        {"hydrated_executor_state": ["a"], "hydration_revoked_executor_names": ["b"]}
-    )
-    assert snapshot["hydration_revoked_executor_names"] == ["b"]
+    snapshot = TaskLogService._sanitize_callable_tool_snapshot({key: ["a"] for key in legacy_keys})
+    for key in legacy_keys:
+        assert key not in snapshot, key
 
     default_frame = TaskLogService._default_frame(node_id="n")
-    assert default_frame["hydration_revoked_executor_names"] == []
+    for key in legacy_keys:
+        assert key not in default_frame, key
 
 
 # ---------------------------------------------------------------------------
@@ -362,14 +347,26 @@ def test_revocation_field_survives_node_frame_normalization() -> None:
 # ---------------------------------------------------------------------------
 
 
-def _frontdoor_state(*, hydrated: list[str], messages: list[dict], stages: list[dict] | None = None) -> dict:
+def _frontdoor_state(
+    *,
+    pool: list[str] | None = None,
+    messages: list[dict],
+    stages: list[dict] | None = None,
+    legacy_hydrated: list[str] | None = None,
+) -> dict:
+    """`pool` 是已授权池（治理可见 ∪ 本轮声明），不是"可调用来"：可调用来只由块在场决定。
+
+    `legacy_hydrated` 只用来播种**已删除**的台账键，钉的是"存量状态带着它们也不影响判据"。
+    """
+    granted = ["exec", *(pool if pool is not None else [TOOL_ID])]
     state = initial_persistent_state(user_input={"content": "q"})
-    state["tool_names"] = ["exec", *hydrated]
-    state["hydrated_tool_names"] = list(hydrated)
-    state["provider_tool_names"] = ["exec", *hydrated]
+    state["tool_names"] = list(granted)
+    state["provider_tool_names"] = list(granted)
     state["candidate_tool_names"] = []
-    state["rbac_visible_tool_names"] = ["exec", *hydrated]
+    state["rbac_visible_tool_names"] = list(granted)
     state["messages"] = list(messages)
+    if legacy_hydrated is not None:
+        state["hydrated_tool_names"] = list(legacy_hydrated)
     # 真实图状态始终带 model_refs（`state_models.CeoPersistentState.model_refs`），
     # `_refresh_prompt_cache_state` 只在状态缺它时才回落到读磁盘配置取模型。测试里没有
     # `.g3ku/config.json`，不钉住这一份就会在算点二上 FileNotFoundError——那是取模型，
@@ -390,35 +387,30 @@ def _ops() -> CeoFrontDoorRuntimeOps:
     return ops
 
 
-def test_frontdoor_callable_drops_contract_absent_hydration() -> None:
+def test_frontdoor_callable_requires_the_contract_block() -> None:
     ops = _ops()
-    state = _frontdoor_state(hydrated=[TOOL_ID], messages=[])
-    assert TOOL_ID not in ops._frontdoor_callable_tool_names_for_state(state)
+    assert TOOL_ID not in ops._frontdoor_callable_tool_names_for_state(
+        _frontdoor_state(messages=[])
+    )
+    assert TOOL_ID in ops._frontdoor_callable_tool_names_for_state(
+        _frontdoor_state(messages=[_loader_message()])
+    )
 
-    present_state = _frontdoor_state(hydrated=[TOOL_ID], messages=[_loader_message()])
-    assert TOOL_ID in ops._frontdoor_callable_tool_names_for_state(present_state)
 
+def test_frontdoor_legacy_ledger_state_does_not_count_as_present() -> None:
+    """存量状态留着 `hydrated_tool_names` 与保留正文、请求里没有块 ⇒ 判不在场。
 
-def test_frontdoor_legacy_kept_context_does_not_count_as_present() -> None:
-    """存量账本里留着 `kept_tool_contexts`、请求里没有块 ⇒ 判不在场并撤销。
-
-    keep 通道已整条删除，但历史帧仍带着那个键；这条用例钉的是"判据只认块"，
+    两条通道都已整条删除，但历史会话还带着这些键；这条钉的是"判据只认块"，
     存量数据不会被读成第二载体。
     """
     ops = _ops()
-    state = _frontdoor_state(hydrated=[TOOL_ID], messages=[], stages=_kept_stages())
+    state = _frontdoor_state(
+        messages=[],
+        stages=_kept_stages(),
+        legacy_hydrated=[TOOL_ID],
+    )
+    assert ops._frontdoor_contract_present_names(state) == []
     assert TOOL_ID not in ops._frontdoor_callable_tool_names_for_state(state)
-    kept, revoked = ops._frontdoor_contract_presence_partition(state, list(state["hydrated_tool_names"]))
-    assert kept == []
-    assert revoked == [TOOL_ID]
-
-
-def test_frontdoor_partition_reports_revoked_names() -> None:
-    ops = _ops()
-    state = _frontdoor_state(hydrated=[TOOL_ID], messages=[])
-    kept, revoked = ops._frontdoor_contract_presence_partition(state, list(state["hydrated_tool_names"]))
-    assert kept == []
-    assert revoked == [TOOL_ID]
 
 
 def test_frontdoor_three_compute_points_agree() -> None:
@@ -428,13 +420,12 @@ def test_frontdoor_three_compute_points_agree() -> None:
     """
     ops = _ops()
     runner = create_agent_impl.CreateAgentCeoFrontDoorRunner(loop=SimpleNamespace(main_task_service=None))
-    state = _frontdoor_state(hydrated=[TOOL_ID], messages=[])
+    state = _frontdoor_state(messages=[])
 
-    # 算点一：装配路 —— message_builder 用经判据筛过的 hydrated 组 callable。
-    kept_hydrated, _revoked = ops._frontdoor_contract_presence_partition(state, list(state["hydrated_tool_names"]))
+    # 算点一：装配路 —— message_builder 用经判据筛过的在场名组 callable。
     assembly_names = CeoMessageBuilder._callable_tool_names(
         visible_tool_names=list(state["rbac_visible_tool_names"]),
-        hydrated_tool_names=list(kept_hydrated),
+        contract_present_tool_names=ops._frontdoor_contract_present_names(state),
     )
 
     # 算点二：缓存刷新（动态尾部合同的 callable 行由同一个 helper 得出）。
@@ -454,64 +445,64 @@ def test_frontdoor_internal_rounds_apply_same_filter() -> None:
     """§4.4 内部轮继承的 callable 也必须过同一在场判据。"""
     ops = _ops()
     for flag in ("heartbeat_internal", "cron_internal"):
-        state = _frontdoor_state(hydrated=[TOOL_ID], messages=[])
-        state[flag] = True
-        assert TOOL_ID not in ops._frontdoor_callable_tool_names_for_state(state), flag
-        present = _frontdoor_state(hydrated=[TOOL_ID], messages=[_loader_message()])
-        present[flag] = True
-        assert TOOL_ID in ops._frontdoor_callable_tool_names_for_state(present), flag
+        assert TOOL_ID not in ops._frontdoor_callable_tool_names_for_state(
+            {**_frontdoor_state(messages=[]), flag: True}
+        ), flag
+        assert TOOL_ID in ops._frontdoor_callable_tool_names_for_state(
+            {**_frontdoor_state(messages=[_loader_message()]), flag: True}
+        ), flag
 
 
-def test_frontdoor_after_tool_results_writes_revoked_into_state() -> None:
+def test_frontdoor_absent_tool_stays_in_the_candidate_view() -> None:
+    """不在场的名字必须同时满足：不进 callable、仍在候选里可见（第 4 态禁止）。"""
     ops = _ops()
-    state = _frontdoor_state(hydrated=[TOOL_ID], messages=[])
-    state["candidate_tool_names"] = []
-    state["candidate_tool_items"] = []
-    after = ops._frontdoor_tool_state_after_tool_results(state=state, tool_results=[])
-    assert TOOL_ID not in list(after["hydrated_tool_names"] or [])
-    assert after["hydration_revoked_executor_names"] == [TOOL_ID]
-    assert TOOL_ID not in list(after["tool_names"] or [])
-    # 名字并回候选还得有条目：尾块那行只认 items。
+    state = _frontdoor_state(messages=[])
+    state["candidate_tool_items"] = [{"tool_id": TOOL_ID, "display_name": TOOL_ID, "description": TOOL_ID}]
+    after = ops._frontdoor_tool_state_after_tool_results(state=state)
+    assert TOOL_ID not in ops._frontdoor_callable_tool_names_for_state(after)
+    assert TOOL_ID in ops._frontdoor_candidate_tool_view(after)
     assert TOOL_ID in [str(item.get("tool_id") or "") for item in list(after["candidate_tool_items"] or [])]
 
 
-def test_frontdoor_hydration_after_successful_load_is_not_revoked() -> None:
-    """本轮刚 load 成功的名字其契约就在同批结果里，不得被当场撤销。"""
+def test_frontdoor_writes_no_ledger_state_key() -> None:
+    """工具态回写不得再产出任何台账键：写侧一旦复活，判据就有了第二份账。"""
     ops = _ops()
-    state = _frontdoor_state(hydrated=[], messages=[_loader_message()])
+    state = _frontdoor_state(messages=[], legacy_hydrated=[TOOL_ID])
+    after = ops._frontdoor_tool_state_after_tool_results(state=state)
+    for key in ("hydrated_tool_names", "hydration_revoked_executor_names", "hydration_evicted_executor_names"):
+        assert key not in after, key
+
+
+def test_frontdoor_successful_load_needs_no_promotion_bookkeeping() -> None:
+    """load 的契约就在同批工具结果里：调用方把结果消息一并交进来，在场判据当跳就能转真。"""
+    ops = _ops()
+    state = _frontdoor_state(messages=[])
     state["candidate_tool_names"] = [TOOL_ID]
-    # candidate 是治理可见集减出来的（FIX_PLAN §0.3「candidate = 治理可见 −（callable ∪ 已提升)」），
-    # 所以候选里的名字必然也在 `rbac_visible_tool_names`。helper 按 hydrated 拼可见集，
-    # 这条用例 hydrated 为空就漏了它——水合 LRU 会先把不在可见集里的名字滤掉（既有口径），
-    # 那是夹具自相矛盾，不是判据把刚 load 的名字撤了。
-    state["rbac_visible_tool_names"] = ["exec", TOOL_ID]
-    after = ops._frontdoor_tool_state_after_tool_results(
-        state=state,
-        tool_results=[
-            {
-                "tool_name": "load_tool_context",
-                "raw_result": {
-                    "ok": True,
-                    "tool_id": TOOL_ID,
-                    "hydration_targets": [TOOL_ID],
-                    "tool_context_fingerprint": FINGERPRINT,
-                },
-            }
-        ],
-    )
-    assert after["hydrated_tool_names"] == [TOOL_ID]
-    assert after["hydration_revoked_executor_names"] == []
+    hop_state = {**state, "messages": list(state["messages"]) + [_loader_message()]}
+    after = ops._frontdoor_tool_state_after_tool_results(state=hop_state)
+    # 回写返回的是**局部更新**（tool_names / candidate_*），生产侧把它并进整份 state 再读；
+    # 判据要读消息视图，所以这里并的是带结果的那一份。
+    merged = {**hop_state, **after}
+    assert TOOL_ID in ops._frontdoor_callable_tool_names_for_state(merged)
 
 
-def test_frontdoor_revoked_field_survives_session_normalization() -> None:
-    """§4.6 前门两份归一化白名单都要留位。"""
+def test_frontdoor_legacy_field_leaves_session_normalization() -> None:
+    """会话归一化与前门持久状态都不得再携带台账键（存量键进来即被丢）。"""
     snapshot = _normalized_completed_continuity_snapshot(
-        {"hydrated_tool_names": ["a"], "hydration_revoked_executor_names": ["b"], "updated_at": "t"}
+        {
+            "hydrated_tool_names": ["a"],
+            "hydration_revoked_executor_names": ["b"],
+            "visible_tool_ids": ["exec"],
+            "updated_at": "t",
+        }
     )
-    assert snapshot["hydration_revoked_executor_names"] == ["b"]
+    assert "hydrated_tool_names" not in snapshot
+    assert "hydration_revoked_executor_names" not in snapshot
+    assert snapshot["visible_tool_ids"] == ["exec"]
 
     state = initial_persistent_state(user_input={"content": "q"})
-    assert state["hydration_revoked_executor_names"] == []
+    assert "hydrated_tool_names" not in state
+    assert "hydration_revoked_executor_names" not in state
 
 
 # ---------------------------------------------------------------------------
@@ -542,53 +533,28 @@ def test_duplicate_guards_share_the_block_presence_index() -> None:
     assert CeoFrontDoorRuntimeOps._frontdoor_contract_fingerprint_index(ledger_only) == {}
 
 
-def test_revoked_contract_absent_names_return_to_candidate_view() -> None:
-    """撤销必须把名字并回候选视图：否则回合内既不可调也不可读（第四态）。"""
+def test_frontdoor_candidate_view_is_granted_minus_callable() -> None:
+    """candidate = 治理可见 −（callable ∪ 待修复）：契约缺席的名字当跳就回到候选（第 4 态禁止）。
 
-    from g3ku.runtime.frontdoor._ceo_runtime_ops import revive_contract_absent_candidates
+    台账时代靠 `revive_contract_absent_candidates` 把撤销名并回候选；现在候选直接从
+    同一个判据派生，不需要"并回"这一步，也就不存在"只减不并"造成的回合内死区。
+    """
+    ops = _ops()
+    state = _frontdoor_state(messages=[_loader_message(OTHER_ID, "tcf:" + "b" * 16)])
+    state["tool_names"] = ["exec", TOOL_ID, OTHER_ID]
+    state["provider_tool_names"] = ["exec", TOOL_ID, OTHER_ID]
+    state["rbac_visible_tool_names"] = ["exec", TOOL_ID, OTHER_ID, "perf_inspect"]
+    state["repair_required_tool_items"] = [{"tool_id": "perf_inspect", "display_name": "perf_inspect"}]
 
-    revived = revive_contract_absent_candidates(
-        candidate_names=["content_open", "cron"],
-        revoked_names=["perf_inspect"],
-        hydrated_names=[],
-        callable_names=["submit_next_stage", "exec"],
-        visible_names=["content_open", "cron", "perf_inspect", "exec"],
-    )
-    assert revived == ["content_open", "cron", "perf_inspect"]
+    callable_names = ops._frontdoor_callable_tool_names_for_state(state)
+    assert OTHER_ID in callable_names
+    assert TOOL_ID not in callable_names
 
-    # 已重新提升的、当前可调的、权限已收回的：都不该并回候选
-    for kwargs in (
-        {"hydrated_names": ["perf_inspect"]},
-        {"callable_names": ["submit_next_stage", "exec", "perf_inspect"]},
-        {"visible_names": ["content_open", "cron"]},
-    ):
-        base = {
-            "candidate_names": ["content_open", "cron"],
-            "revoked_names": ["perf_inspect"],
-            "hydrated_names": [],
-            "callable_names": ["submit_next_stage", "exec"],
-            "visible_names": ["content_open", "cron", "perf_inspect", "exec"],
-        }
-        base.update(kwargs)
-        assert "perf_inspect" not in revive_contract_absent_candidates(**base)
-
-
-def test_frontdoor_candidate_view_reads_state_revoked_field() -> None:
-    """三个消费点共用的视图方法：读 state 上的撤销记录，不要求调用方自己并集。"""
-
-    from g3ku.runtime.frontdoor._ceo_runtime_ops import CeoFrontDoorRuntimeOps
-
-    view = CeoFrontDoorRuntimeOps._frontdoor_candidate_tool_view(
-        {
-            "candidate_tool_names": ["content_open"],
-            "hydration_revoked_executor_names": ["perf_inspect"],
-            "hydrated_tool_names": [],
-            "tool_names": ["exec", "submit_next_stage"],
-            "rbac_visible_tool_names": ["content_open", "perf_inspect", "exec"],
-        }
-    )
-    assert "perf_inspect" in view and "content_open" in view
-    assert CeoFrontDoorRuntimeOps._frontdoor_candidate_tool_view(None) == []
+    view = ops._frontdoor_candidate_tool_view(state)
+    assert TOOL_ID in view
+    # 待修复那一档 builder 侧本来就摘出去，候选里也不该出现。
+    assert "perf_inspect" not in view
+    assert ops._frontdoor_candidate_tool_view(None) == []
 
 
 def _evicted_stage_state() -> dict:
@@ -629,22 +595,28 @@ def _loader_messages() -> list[dict]:
     ]
 
 
-def test_partition_treats_evicted_stage_loader_row_as_absent() -> None:
-    """判据必须与渲染同源：裁撤阶段的正文行虽在 state['messages'] 里，也算不在场。
+def test_presence_view_excludes_evicted_stage_loader_row() -> None:
+    """判据必须与渲染同源：裁撤阶段的正文行虽在 `state['messages']` 里，也算不在场。
 
-    实盘 web:ceo-09057e72cac8 上，裁撤发生在请求体重建时，而判据读裁撤前的视图，
-    于是台账不记撤销、候选并回没有输入，尾部契约与候选同时缺这个名字（第四态）。
+    实盘 web:ceo-09057e72cac8 上，裁撤发生在请求体重建时，而判据读裁撤前的视图，于是名字
+    仍被当在场、继续留在 callable，渲染却用裁后的视图 ⇒ 模型眼前已经没有契约还能被放行。
+    台账时代这条还要"记撤销 + 并回候选"两步，现在裁走即离场，一步判据就够了。
     """
 
     ops = _ops()
     state = {"messages": _loader_messages(), "frontdoor_stage_state": _evicted_stage_state()}
-    kept, revoked = ops._frontdoor_contract_presence_partition(state, [TOOL_ID])
-    assert revoked == [TOOL_ID]
-    assert kept == []
+    assert ops._frontdoor_contract_present_names(state) == []
+    kept = {"messages": _loader_messages(), "frontdoor_stage_state": {"stages": [], "active_stage_id": ""}}
+    assert ops._frontdoor_contract_present_names(kept) == [TOOL_ID]
 
 
-def test_dispatch_excludes_contract_absent_hydrated_tool() -> None:
-    """撤销必须落到执行层：只改尾部契约时，那一跳的 callable 已不含它、调用却仍成功。"""
+def test_evicted_tool_leaves_the_admission_surface_not_the_declaration() -> None:
+    """裁撤当跳必须把名字从**准入面**摘掉（调它只拿契约），但声明面钉死不跟着抖。
+
+    实盘（perf_inspect 那例）的症状是尾块 callable 行已不含它、调用却仍成功——所以 enforce
+    必须在执行准入层。反过来，把在场差集套到 `tools[]` 上会让钉住的清单每跳改成员：一次 load
+    多一个名字、一次裁撤少一个，前缀缓存按跳断，所以这里断的是两面**分别**的答案。
+    """
 
     ops = _ops()
     state = {
@@ -653,16 +625,15 @@ def test_dispatch_excludes_contract_absent_hydrated_tool() -> None:
         "provider_tool_names": ["exec", TOOL_ID],
         "rbac_visible_tool_names": ["exec", TOOL_ID],
         "tool_names": ["exec", TOOL_ID],
-        "hydrated_tool_names": [TOOL_ID],
     }
-    names = ops._frontdoor_dispatch_tool_names(state)
-    assert TOOL_ID not in names
-    assert "exec" in names
+    assert TOOL_ID not in ops._frontdoor_executable_tool_names(state)
+    assert "exec" in ops._frontdoor_executable_tool_names(state)
+    assert ops._frontdoor_dispatch_tool_names(state) == ["exec", TOOL_ID]
 
 
-def test_dispatch_stays_pinned_while_executable_set_carries_hydrated_tool() -> None:
-    """`tools[]` 全程钉死：派发名单（schema 面）不并水合名；可执行名单（执行准入面）
-    并入契约在场的水合名——mid-turn 注册的工具 load 落账后即可调用，但参数表要等
+def test_dispatch_stays_pinned_while_executable_set_carries_present_tool() -> None:
+    """`tools[]` 全程钉死：派发名单（schema 面）不并在场名；可执行名单（执行准入面）
+    并入契约在场的名——mid-turn 注册的工具 load 落账后即可调用，但参数表要等
     声明在重印边界吸收它才进 `tools[]`。"""
 
     ops = _ops()
@@ -671,7 +642,6 @@ def test_dispatch_stays_pinned_while_executable_set_carries_hydrated_tool() -> N
         "provider_tool_names": ["exec"],
         "rbac_visible_tool_names": ["exec"],
         "tool_names": ["exec", TOOL_ID],
-        "hydrated_tool_names": [TOOL_ID],
     }
     assert ops._frontdoor_dispatch_tool_names(state) == ["exec"]
     assert ops._frontdoor_executable_tool_names(state) == ["exec", TOOL_ID]
@@ -696,14 +666,13 @@ def test_executable_rejects_declared_tool_that_was_never_loaded() -> None:
         "provider_tool_names": ["exec", OTHER_ID],
         "rbac_visible_tool_names": ["exec", OTHER_ID],
         "tool_names": ["exec"],
-        "hydrated_tool_names": [],
     }
     assert ops._frontdoor_dispatch_tool_names(state) == ["exec", OTHER_ID]
     assert ops._frontdoor_executable_tool_names(state) == ["exec"]
 
 
-def test_executable_keeps_fixed_builtins_without_hydration() -> None:
-    """常驻内置不进台账，也不受"先 load"约束。"""
+def test_executable_keeps_fixed_builtins_without_a_contract() -> None:
+    """常驻内置没有 toolskill，也就从不受"先有契约块"约束。"""
 
     ops = _ops()
     state = {
@@ -711,12 +680,11 @@ def test_executable_keeps_fixed_builtins_without_hydration() -> None:
         "provider_tool_names": ["exec", "load_tool_context"],
         "rbac_visible_tool_names": ["exec", "load_tool_context"],
         "tool_names": ["exec", "load_tool_context"],
-        "hydrated_tool_names": [],
     }
     assert ops._frontdoor_executable_tool_names(state) == ["exec", "load_tool_context"]
 
 
-def test_executable_drops_declared_hydrated_tool_revoked_by_rbac() -> None:
+def test_executable_drops_declared_present_tool_revoked_by_rbac() -> None:
     """RBAC 收回当跳生效：名字还挂在钉住的 `tools[]` 上（清单滞后），准入立刻关。"""
 
     ops = _ops()
@@ -725,12 +693,11 @@ def test_executable_drops_declared_hydrated_tool_revoked_by_rbac() -> None:
         "provider_tool_names": ["exec", TOOL_ID],
         "rbac_visible_tool_names": ["exec"],
         "tool_names": ["exec", TOOL_ID],
-        "hydrated_tool_names": [TOOL_ID],
     }
     assert ops._frontdoor_executable_tool_names(state) == ["exec"]
 
 
-def test_executable_keeps_mid_turn_hydrated_tool_absent_from_stale_snapshot() -> None:
+def test_executable_keeps_mid_turn_tool_absent_from_stale_snapshot() -> None:
     """mid-turn 注册的工具本来就不在回合初治理快照里，按快照误拒会让 load 变成死出口。"""
 
     ops = _ops()
@@ -739,14 +706,17 @@ def test_executable_keeps_mid_turn_hydrated_tool_absent_from_stale_snapshot() ->
         "provider_tool_names": ["exec"],
         "rbac_visible_tool_names": ["exec"],
         "tool_names": ["exec", TOOL_ID],
-        "hydrated_tool_names": [TOOL_ID],
     }
     assert TOOL_ID not in set(ops._frontdoor_dispatch_tool_names(state))
     assert ops._frontdoor_executable_tool_names(state) == ["exec", TOOL_ID]
 
 
-def test_executable_falls_back_to_dispatch_without_callable_view() -> None:
-    """旁路/老快照没有 `tool_names` 键：退回声明面，避免整束塌成空。"""
+def test_executable_collapses_to_fixed_builtins_without_callable_view() -> None:
+    """旁路/老快照没有 `tool_names` 键时**不**退回声明面。
+
+    台账时代退回声明面是为了"别整束塌成空"；在场判据接管后这条退路等于在无契约放行，
+    而塌成空不是死局：模型直接调用那一个工具，冲动路径就把契约送回来，下一跳自然可调。
+    """
 
     ops = _ops()
     state = {
@@ -754,7 +724,7 @@ def test_executable_falls_back_to_dispatch_without_callable_view() -> None:
         "provider_tool_names": ["exec", OTHER_ID],
         "rbac_visible_tool_names": ["exec", OTHER_ID],
     }
-    assert ops._frontdoor_executable_tool_names(state) == ["exec", OTHER_ID]
+    assert ops._frontdoor_executable_tool_names(state) == ["exec"]
 
 
 def test_execution_bundle_keeps_declared_surface_wider_than_admission() -> None:
@@ -774,7 +744,6 @@ def test_execution_bundle_keeps_declared_surface_wider_than_admission() -> None:
             "provider_tool_names": ["exec", OTHER_ID],
             "rbac_visible_tool_names": ["exec", OTHER_ID],
             "tool_names": ["exec"],
-            "hydrated_tool_names": [],
         }
     )
     bundle = ops._frontdoor_execution_bundle(
@@ -935,14 +904,14 @@ def _surviving_tool_call_ids(result: dict) -> set[str]:
     }
 
 
-async def test_graph_execute_tools_records_revocation_in_the_eviction_batch(monkeypatch) -> None:
-    """裁撤落地的那一批就必须把撤销写回台账，不能等下一批或下一回合。
+async def test_graph_execute_tools_returns_the_evicted_tool_to_candidates(monkeypatch) -> None:
+    """裁撤落地的那一批就必须让名字离开准入，不能等下一批或下一回合。
 
     实盘 web:ceo-1e834a45b8e7（main 45b10c13）：`submit_next_stage(drop=true, 带总结)`
-    这一跳把阶段裁了，随后尾部契约与派发名单都少了它，但 `hydration_revoked_executor_names`
-    全空、`hydrated_tool_names` 仍留着它 ⇒ 模型再 load 拿到 `already_callable` 而没有正文，
-    执行侧回 `tool not available`——正是文档禁止的那对组合，第四态没消除。
-    根因是节点体内的先后：工具态写回读的是裁撤前的阶段视图，而阶段账本在它之后才算完。
+    这一跳把阶段裁了，工具态写回读的是裁撤前的阶段视图 ⇒ 名字仍被当在场，模型再 load 拿到
+    `already_callable` 而没有正文，执行侧却回 `tool not available`（第四态）。
+    根因是节点体内的先后：写回早于阶段账本落地。台账删除后同一条时间线只剩判据一次读取，
+    这条用例钉的是"当跳同源"，不再钉撤销记录。
     """
     result = await _run_graph_eviction_batch(monkeypatch, _eviction_batch_state())
 
@@ -951,192 +920,72 @@ async def test_graph_execute_tools_records_revocation_in_the_eviction_batch(monk
     assert evicted["context_evicted"] is True
     assert "call-load-1" not in _surviving_tool_call_ids(result)
 
-    assert result["hydration_revoked_executor_names"] == [TOOL_ID]
-    assert TOOL_ID not in list(result["hydrated_tool_names"] or [])
     assert TOOL_ID not in list(result["tool_names"] or [])
     assert TOOL_ID in list(result["candidate_tool_names"] or [])
-    # 提升门禁与重复读守卫读的是这份候选视图：含它 ⇒ 下一跳 load 答 `candidate_hit`
-    # 并当场提升，不会再给出没有正文的 `already_callable` 回执。
-    assert TOOL_ID in CeoFrontDoorRuntimeOps._frontdoor_candidate_tool_view(result)
+    # 候选视图（提升门禁与重复读守卫共用的那份）也必须含它，否则重载没有出口。
+    assert TOOL_ID in _ops()._frontdoor_candidate_tool_view(result)
     # 尾块 `candidate_tools` 那行读的是 `candidate_tool_items`：只并名字不补条目，这一行就少它
-    # 一个（实盘 web:ceo-fb4616acbe9d 的 010401 跳：门禁收下重载并答 `promoted_next_turn`，
-    # 模型看到的候选名单里却没有它——出路存在但对模型不可见，等于没有出路）。
+    # 一个（实盘 web:ceo-fb4616acbe9d 的 010401 跳：出路存在但对模型不可见，等于没有出路）。
     assert TOOL_ID in [str(item.get("tool_id") or "") for item in list(result["candidate_tool_items"] or [])]
 
 
 # ---------------------------------------------------------------------------
-# 节点车道：撤销必须早于本轮选择与派发字典，且不许被 promoted 视图复活
+# 节点车道：在场判据必须在派发字典与选择之前生效，且不被任何跨跳视图复活
 # ---------------------------------------------------------------------------
 
 
-def test_frame_read_does_not_resurrect_revoked_hydration() -> None:
-    """台账被撤空后，不许由本轮 promoted 视图把它复活。
+def test_node_presence_reads_only_the_request_view() -> None:
+    """判据只读传进来的请求视图：既不水合整帧，也不按 node_id 重读存储。
 
-    `hydrated_executor_state` 的取值是 `state or names`，而 `hydrated_executor_names` 是本轮
-    选择派生的视图：撤销只清 state 的话读出来又是整份视图，选择与派发照旧把无契约的工具
-    当已水合。实盘 task:92ad2fe69148 的同一条帧上 `revoked` 与 `hydrated` 并列就是这么来的。
-    """
-    frame = TaskLogService._sanitize_runtime_frame(
-        {
-            "node_id": "node-cp",
-            "hydrated_executor_state": [],
-            "hydrated_executor_names": ["filesystem_stat", "content_open"],
-            "hydration_revoked_executor_names": ["filesystem_stat"],
-        }
-    )
-    assert frame["hydrated_executor_state"] == ["content_open"]
-    assert "filesystem_stat" not in frame["hydrated_executor_state"]
-    # 两份来源同时缺 state 时也要同一口径：promoted 视图里带着已撤销的名字，读出来得减掉。
-    only_names = TaskLogService._sanitize_runtime_frame(
-        {
-            "node_id": "node-cp",
-            "hydrated_executor_names": ["filesystem_stat"],
-            "hydration_revoked_executor_names": ["filesystem_stat"],
-        }
-    )
-    assert only_names["hydrated_executor_state"] == []
-
-
-def test_presence_revocation_subtracts_the_dispatch_dict_before_selection() -> None:
-    """判据要摘的是**本轮派发字典**：只清台账的话，同一跳的字典仍带着该工具。
-
-    实盘 task:92ad2fe69148：01:37:03 那跳正文已离开投影、帧里也记了
-    `hydration_revoked_executor_names=['filesystem_stat']`，而发出去的 callable 仍含它、
-    候选没有它，01:37:07 直接调用还成功了——选择与准入读的都是撤销前的台账视图。
+    台账时代这条要读帧里的 `hydrated_executor_state`（每跳还要防着 promoted 视图把它复活），
+    实盘 task:92ad2fe69148 的"callable 仍含已裁工具"就来自那份撤销前的视图。现在没有跨跳
+    状态可读，读口只剩一个 ⇒ 两类复活、两类白付的读法一起消失。
     """
 
-    class _Logs:
-        def __init__(self) -> None:
-            self._frame = {"node_id": "node-cp", "hydrated_executor_state": ["filesystem_stat"]}
+    class _ExplodingLogService:
+        def read_runtime_frame(self, *_args, **_kwargs):
+            raise AssertionError("presence must not hydrate a frame")
 
-        def read_runtime_frame(self, task_id: str, node_id: str) -> dict:
-            return dict(self._frame)
+        def read_runtime_frame_payload(self, *_args, **_kwargs):
+            raise AssertionError("presence must not hydrate a frame")
 
-    loop = ReActToolLoop(chat_backend=SimpleNamespace(), log_service=_Logs(), max_iterations=2)
-    calls: list[dict] = []
+    service, _log = _node_service()
+    service.log_service = _ExplodingLogService()
+    reads: list[str] = []
+    service.store = SimpleNamespace(get_node=lambda node_id: reads.append(str(node_id)) or _node_obj())
 
-    def _revoker(**kwargs):
-        calls.append(kwargs)
-        return []
-
-    loop._tool_contract_presence_revoker = _revoker
-    tools = {"exec": object(), "filesystem_stat": object(), "content_open": object()}
-    kept = loop._revoke_contract_absent_hydration_for_hop(
-        tools=tools,
-        task=SimpleNamespace(task_id="task-cp"),
-        node=SimpleNamespace(node_id="node-cp"),
-        runtime_context={"actor_role": "execution", "session_key": "web:shared"},
-        request_messages=[],
-    )
-    assert "filesystem_stat" not in kept
-    assert "exec" in kept and "content_open" in kept
-    assert calls and calls[0]["request_messages"] == []
-    # 判据不再需要 node：阶段账本不是在场载体，所以也不用为它按 node_id 重读存储。
-    assert "node" not in calls[0]
-
-    # 判据跑不起来 ⇒ 照旧不撤（撤销是收紧，不是本轮可用性的前提）
-    def _boom(**kwargs):
-        raise RuntimeError("judgement unavailable")
-
-    loop._tool_contract_presence_revoker = _boom
-    kept_after_failure = loop._revoke_contract_absent_hydration_for_hop(
-        tools=tools,
-        task=SimpleNamespace(task_id="task-cp"),
-        node=SimpleNamespace(node_id="node-cp"),
-        runtime_context={"actor_role": "execution", "session_key": "web:shared"},
-        request_messages=[],
-    )
-    assert "filesystem_stat" in kept_after_failure
-
-    # 台账为空时根本不调判据：没有水合能力可撤，别为不存在的名字读一遍整份请求体。
-    calls.clear()
-    loop._tool_contract_presence_revoker = _revoker
-    empty_logs = _Logs()
-    empty_logs._frame = {"node_id": "node-cp", "hydrated_executor_state": []}
-    loop._log_service = empty_logs
-    loop._revoke_contract_absent_hydration_for_hop(
-        tools=tools,
-        task=SimpleNamespace(task_id="task-cp"),
-        node=SimpleNamespace(node_id="node-cp"),
-        runtime_context={"actor_role": "execution", "session_key": "web:shared"},
-        request_messages=[],
-    )
-    assert calls == []
-
-    # promoted 视图不算台账：state 空、names 里带着名字（哪怕是刚被撤的），本跳都不该把它
-    # 当成待撤对象去读整份请求体——否则从没水合过的工具会被判成撤销目标。
-    calls.clear()
-    revived_logs = _Logs()
-    revived_logs._frame = {
-        "node_id": "node-cp",
-        "hydrated_executor_state": [],
-        "hydrated_executor_names": ["filesystem_stat"],
-        "hydration_revoked_executor_names": ["filesystem_stat"],
-    }
-    loop._log_service = revived_logs
-    kept_after_revive = loop._revoke_contract_absent_hydration_for_hop(
-        tools=tools,
-        task=SimpleNamespace(task_id="task-cp"),
-        node=SimpleNamespace(node_id="node-cp"),
-        runtime_context={"actor_role": "execution", "session_key": "web:shared"},
-        request_messages=[],
-    )
-    assert calls == []
-    assert "filesystem_stat" in kept_after_revive
-
-    # 有 payload 读口时不许走整帧水合：判据每跳一次，读整份会话历史是白付的钱。
-    class _PayloadLogs(_Logs):
-        def __init__(self) -> None:
-            super().__init__()
-            self.hydrated_reads = 0
-
-        def read_runtime_frame(self, task_id: str, node_id: str) -> dict:
-            self.hydrated_reads += 1
-            return dict(self._frame)
-
-        def read_runtime_frame_payload(self, task_id: str, node_id: str) -> dict:
-            return dict(self._frame)
-
-    cheap_logs = _PayloadLogs()
-    cheap_logs._frame = {"node_id": "node-cp", "hydrated_executor_state": ["filesystem_stat"]}
-    loop._log_service = cheap_logs
-    calls.clear()
-    kept_cheap = loop._revoke_contract_absent_hydration_for_hop(
-        tools=tools,
-        task=SimpleNamespace(task_id="task-cp"),
-        node=SimpleNamespace(node_id="node-cp"),
-        runtime_context={"actor_role": "execution", "session_key": "web:shared"},
-        request_messages=[],
-    )
-    assert cheap_logs.hydrated_reads == 0
-    assert calls and "filesystem_stat" not in kept_cheap
-
-
-def test_node_presence_never_reads_the_stage_ledger_again() -> None:
-    """保留正文这条道以前要"按 node_id 重读存储"才判得出在场；现在两种读法都不算在场。
-
-    旧用例（实盘 task:91b09176d70a）钉的是"读传进来的 node 快照会把已落库的正文读成空"。
-    D9 之后判据不再读那份账本，读快照还是读存储都不改变结论——撤就撤到底，模型下一次调用
-    重新拿契约。这条用例把口径钉死：**账本内容不参与在场**。
-    """
-    service, log_service = _node_service(hydrated=[TOOL_ID])
-    fresh_node = SimpleNamespace(
-        node_id="node-cp",
-        metadata={"execution_stages": {"stages": _kept_stages()}},
-    )
-    service.store = SimpleNamespace(get_node=lambda node_id: fresh_node if node_id == "node-cp" else None)
-
-    present = service.revoke_contract_absent_node_hydration(
-        task_id="task-cp",
-        node_id="node-cp",
+    assert service.contract_present_tool_names_for_node(
         actor_role="execution",
         session_id="web:shared",
         request_messages=[],
+    ) == []
+    assert service.contract_present_tool_names_for_node(
+        actor_role="execution",
+        session_id="web:shared",
+        request_messages=[_loader_message()],
+    ) == [TOOL_ID]
+    assert reads == []
+
+
+def test_node_presence_never_reads_the_stage_ledger_again() -> None:
+    """账本内容不参与在场：带着保留正文的存量元数据也不改变结论。
+
+    旧用例（实盘 task:91b09176d70a）钉的是"读传进来的 node 快照会把已落库的正文读成空"。
+    判据不再读那本账 ⇒ 撤就撤到底，模型下一次调用重新拿契约；这条把口径钉死。
+    """
+    service, _log = _node_service()
+    node = _node_obj()
+    node.metadata = {"execution_stages": {"stages": _kept_stages()}}
+    assert TOOL_ID not in service._callable_tool_names_for_node(
+        task=_task_obj(),
+        node=node,
+        request_messages=[],
     )
-    assert present == []
-    frame = log_service.read_runtime_frame("task-cp", "node-cp")
-    assert frame["hydration_revoked_executor_names"] == [TOOL_ID]
-    assert frame["hydrated_executor_state"] == []
+    assert TOOL_ID in service._callable_tool_names_for_node(
+        task=_task_obj(),
+        node=node,
+        request_messages=[_loader_message()],
+    )
 
 
 def test_path_anchor_contract_renders_from_one_source_across_lanes():

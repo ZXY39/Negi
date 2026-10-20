@@ -154,7 +154,6 @@ def test_frontdoor_renderer_counts_schema_sources_with_denominator() -> None:
     state = {
         "provider_tool_names": ["live_tool", "declared_tool", "bundled_tool", "vanished_tool"],
         "session_key": "web:renderer-counts",
-        "hydrated_tool_names": [],
         "rbac_visible_tool_names": [],
         "messages": [],
         "frontdoor_stage_state": {},

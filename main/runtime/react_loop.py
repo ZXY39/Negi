@@ -229,6 +229,9 @@ _STAGE_HISTORY_ARCHIVE_SOURCE_KIND = 'stage_history_archive'
 _COMPACT_HISTORY_STEP_MAX_CHARS = 160
 _ORPHAN_TOOL_RESULT_THRESHOLD = 3
 _STAGE_SPAWN_TOOL_NAME = 'spawn_child_nodes'
+# exec 截断提醒的幂等标记：这句只出现在这里注入的提醒开头，同一结果第二次注入按它判。
+# 文案不许写"已自动加载"——台账删除后没有任何东西被自动加载，契约要模型自己取。
+_EXEC_TRUNCATION_REOPEN_MARKER = '⚠️ exec 输出未整篇交付到本轮上下文。'
 _READ_ONLY_REPEAT_SOFT_REJECT_LIMIT = 3
 _INVALID_FINAL_SUBMISSION_LIMIT = 5
 _INVALID_STAGE_SUBMISSION_LIMIT = 5
@@ -530,13 +533,6 @@ class ReActToolLoop:
                 node=node,
                 message_history=message_history,
                 skill_roster_items=skill_roster_items,
-            )
-            current_tools = self._revoke_contract_absent_hydration_for_hop(
-                tools=current_tools,
-                task=task,
-                node=node,
-                runtime_context=runtime_context,
-                request_messages=model_messages,
             )
             # 每跳只算一次在场索引（D12），下传给这一跳的所有消费点（执行准入、冲动投递、
             # 观测读数）。各消费点各自重算会造出"同一轮里两个答案"，那正是本次要消灭的漂移。
@@ -899,21 +895,6 @@ class ReActToolLoop:
                         call_ids=tool_history.orphan_tool_result_ids,
                         strike_count=orphan_tool_result_strikes,
                     )
-            # hydrated_executor_state 是节点生命周期级的水合台账，唯一作者是
-            # runtime_service._promote_tool_context_hydration（它负责 LRU 与淘汰记录）。
-            # 这里只把它带过本帧：用它本轮的 promoted 视图覆写，会让任何一次曝光收窄
-            # （RBAC 抖动、对象字典塌缩）永久抹掉台账，而 names 才是本轮视图。
-            #
-            # 契约在场撤销不在这里跑：它已经在本跳的选择之前跑过一次（见
-            # `_revoke_contract_absent_hydration_for_hop`），判据同一跳只该判一次，
-            # 而且必须在选择与派发字典之前判——在这儿判到的结论只能留给下一跳。
-            prior_frame_for_hydration = self._runtime_frame(task.task_id, node.node_id) or {}
-            prior_hydrated_state = self._normalized_name_list(
-                list(prior_frame_for_hydration.get('hydrated_executor_state') or [])
-            )
-            prior_revoked_state = self._normalized_name_list(
-                list(prior_frame_for_hydration.get('hydration_revoked_executor_names') or [])
-            )
             self._log_service.upsert_frame(
                 task.task_id,
                 {
@@ -954,9 +935,6 @@ class ReActToolLoop:
                     ),
                     'rbac_visible_skill_ids': list(selected_skill_ids),
                     'lightweight_tool_ids': list(tool_schema_selection.get('lightweight_tool_ids') or []),
-                    'hydrated_executor_state': prior_hydrated_state,
-                    'hydration_revoked_executor_names': prior_revoked_state,
-                    'hydrated_executor_names': list(tool_schema_selection.get('hydrated_executor_names') or []),
                     'model_visible_tool_names': list(tool_schema_selection.get('tool_names') or list(model_visible_tools.keys())),
                     'provider_tool_names': list(provider_tool_names),
                     'pending_provider_tool_names': list(
@@ -1744,19 +1722,7 @@ class ReActToolLoop:
                     response_tool_calls=response_tool_calls,
                     runtime_context=runtime_context,
                 )
-                self._promote_tool_context_hydration_after_results(
-                    task_id=task.task_id,
-                    node_id=node.node_id,
-                    response_tool_calls=response_tool_calls,
-                    results=results,
-                    runtime_context=runtime_context,
-                )
-                self._auto_hydrate_content_open_on_exec_truncation(
-                    task_id=task.task_id,
-                    node_id=node.node_id,
-                    results=results,
-                    runtime_context=runtime_context,
-                )
+                self._remind_content_open_reopen_on_exec_truncation(results=results)
                 assistant_body = None if synthetic_tool_calls_used else response.content
                 assistant_sent_body = self._externalize_message_content(
                     assistant_body,
@@ -2634,60 +2600,6 @@ class ReActToolLoop:
         )
         return prepared_history
 
-    def _revoke_contract_absent_hydration_for_hop(
-        self,
-        *,
-        tools: dict[str, Any],
-        task: Any,
-        node: Any,
-        runtime_context: dict[str, Any],
-        request_messages: list[dict[str, Any]],
-    ) -> dict[str, Any]:
-        """按本轮请求投影判契约在场，撤掉不在场的水合能力，并把它们摘出**本轮派发字典**。
-
-        台账回写由 `runtime_service.revoke_contract_absent_node_hydration` 完成，本方法只负责
-        把它接在选择之前：选择用台账组 callable、执行按这份字典准入，两者都在同一跳里消费，
-        判据排在它们之后就等于让"正文已离开上下文"的这一跳照旧宣传并放行该工具。固定内置与
-        控制/加载器不进水合台账，因此不在摘除范围内。
-        """
-        revoker = getattr(self, '_tool_contract_presence_revoker', None)
-        current_tools = dict(tools or {})
-        if not callable(revoker) or not current_tools:
-            return current_tools
-        task_id = str(getattr(task, 'task_id', '') or '').strip()
-        node_id = str(getattr(node, 'node_id', '') or '').strip()
-        # 只读帧正文：`read_runtime_frame` 会顺带把 messages_ref 指向的整份会话历史读盘解码，
-        # 判据每跳都要跑，不该为了一份名单付一次历史水合。
-        payload_reader = getattr(self._log_service, 'read_runtime_frame_payload', None)
-        frame = payload_reader(task_id, node_id) if callable(payload_reader) else None
-        if not isinstance(frame, dict):
-            frame = self._runtime_frame(task_id, node_id) or {}
-        # 台账只认 `hydrated_executor_state`（每跳由帧写入）。`hydrated_executor_names` 是本轮
-        # 选择派生的 promoted 视图，拿它当台账会把从没水合过的工具判成待撤对象。
-        ledger = self._normalized_name_list(frame.get('hydrated_executor_state') or [])
-        if not ledger:
-            # 没有水合能力可撤时不必读整份请求体判在场。
-            return current_tools
-        try:
-            present = self._normalized_name_list(
-                revoker(
-                    task_id=task_id,
-                    node_id=node_id,
-                    actor_role=str((runtime_context or {}).get('actor_role') or '').strip(),
-                    session_id=str((runtime_context or {}).get('session_key') or '').strip(),
-                    request_messages=list(request_messages or []),
-                )
-            )
-        except Exception:
-            # 判据跑不起来就照旧不撤：撤销是收紧，不是本轮的可用性前提。
-            return current_tools
-        present_set = set(present)
-        revoked_now = [name for name in ledger if name not in present_set]
-        if not revoked_now:
-            return current_tools
-        revoked_set = set(revoked_now)
-        return {name: tool for name, tool in current_tools.items() if name not in revoked_set}
-
     def _runtime_frame(self, task_id: str, node_id: str) -> dict[str, Any] | None:
         frame = self._log_service.read_runtime_frame(task_id, node_id)
         return dict(frame or {}) if frame is not None else None
@@ -3498,7 +3410,6 @@ class ReActToolLoop:
             'provider_tool_exposure_revision': '',
             'provider_tool_exposure_commit_reason': '',
             'lightweight_tool_ids': [],
-            'hydrated_executor_names': [],
             'trace': {},
         }
         if str(node_kind or '').strip().lower() not in _STAGE_BUDGET_NODE_KINDS:
@@ -3584,11 +3495,6 @@ class ReActToolLoop:
                 selection_payload['lightweight_tool_ids'] = [
                     str(item or '').strip()
                     for item in list(raw_selection.get('lightweight_tool_ids') or [])
-                    if str(item or '').strip()
-                ]
-                selection_payload['hydrated_executor_names'] = [
-                    str(item or '').strip()
-                    for item in list(raw_selection.get('hydrated_executor_names') or [])
                     if str(item or '').strip()
                 ]
                 selection_payload['candidate_tool_names'] = [
@@ -4043,7 +3949,6 @@ class ReActToolLoop:
             contract_visible_skill_ids=contract_visible_skill_ids,
             skill_visibility_diagnostics=skill_visibility_diagnostics,
             stage_payload=self._stage_prompt_payload_from_gate(stage_gate),
-            hydrated_executor_names=self._normalized_name_list(list(tool_schema_selection.get('hydrated_executor_names') or [])),
             lightweight_tool_ids=self._normalized_name_list(list(tool_schema_selection.get('lightweight_tool_ids') or [])),
             selection_trace=dict(tool_schema_selection.get('trace') or {}),
             denied_tool_names=self._normalized_name_list(
@@ -4181,45 +4086,6 @@ class ReActToolLoop:
         )
         return upsert_node_dynamic_contract_message(message_history, contract)
 
-    def _promote_tool_context_hydration_after_results(
-        self,
-        *,
-        task_id: str,
-        node_id: str,
-        response_tool_calls: list[Any],
-        results: list[dict[str, Any]],
-        runtime_context: dict[str, Any],
-    ) -> None:
-        promoter = getattr(self, '_tool_context_hydration_promoter', None)
-        if not callable(promoter):
-            return
-        for result in list(results or []):
-            if not isinstance(result, dict):
-                continue
-            live_state = dict(result.get('live_state') or {}) if isinstance(result.get('live_state'), dict) else {}
-            if str(live_state.get('status') or '').strip().lower() != 'success':
-                continue
-            raw_result = self._tool_context_hydration_payload(result.get('raw_result'))
-            if not isinstance(raw_result, dict) or not bool(raw_result.get('ok')):
-                continue
-            tool_message = dict(result.get('tool_message') or {}) if isinstance(result.get('tool_message'), dict) else {}
-            tool_name = str(tool_message.get('name') or live_state.get('tool_name') or '').strip()
-            if tool_name not in {'load_tool_context', 'load_tool_context_v2'}:
-                continue
-            hydrated_tool_id = str(raw_result.get('tool_id') or '').strip()
-            if not hydrated_tool_id:
-                continue
-            promoter(
-                task_id=str(task_id or '').strip(),
-                node_id=str(node_id or '').strip(),
-                tool_call=SimpleNamespace(
-                    name=tool_name,
-                    arguments={'tool_id': hydrated_tool_id},
-                ),
-                raw_result=dict(raw_result),
-                runtime_context=dict(runtime_context or {}),
-            )
-
     @staticmethod
     def _tool_context_hydration_payload(raw_result: Any) -> dict[str, Any] | None:
         if isinstance(raw_result, dict):
@@ -4235,25 +4101,18 @@ class ReActToolLoop:
             return dict(parsed) if isinstance(parsed, dict) else None
         return None
 
-    def _auto_hydrate_content_open_on_exec_truncation(
+    def _remind_content_open_reopen_on_exec_truncation(
         self,
         *,
-        task_id: str,
-        node_id: str,
         results: list[dict[str, Any]],
-        runtime_context: dict[str, Any],
     ) -> int:
-        """exec 结果被截断时自动水合 content_open，并在该结果里注入提醒。
+        """exec 结果被截断时在该结果里注入读取指引。
 
         背景：exec 是执行/CEO 节点里立即可用的 fixed builtin，但长输出只返 head/tail
-        preview；content_open 能按行/字符精确读本地文件，却是需 hydration 的候选工具。
-        这里在 exec 截断时代替模型水合 content_open（复用现有水合核心，构造合成为
-        load_tool_context 的调用通过其闸门），下一轮即可调，并在本轮 exec 结果里告知
-        模型。返回本次注入提醒的次数（幂等：同一结果只注入一次）。
+        preview；content_open 能按行/字符精确读本地文件，却是带 toolskill 的候选工具，
+        契约不在场时调用它先取回契约。这里只在本轮 exec 结果里把这条出路告知模型。
+        返回本次注入提醒的次数（幂等：同一结果只注入一次）。
         """
-        promoter = getattr(self, '_tool_context_hydration_promoter', None)
-        if not callable(promoter):
-            return 0
         reminded_count = 0
         for result in list(results or []):
             if not isinstance(result, dict):
@@ -4275,21 +4134,13 @@ class ReActToolLoop:
             ):
                 continue
             raw_content = str(tool_message.get('content') or '')
-            if '已自动加载 content_open' in raw_content:
+            if _EXEC_TRUNCATION_REOPEN_MARKER in raw_content:
                 continue  # 已在注入过提醒，避免重复
-            promoter(
-                task_id=str(task_id or '').strip(),
-                node_id=str(node_id or '').strip(),
-                tool_call=SimpleNamespace(
-                    name='load_tool_context',
-                    arguments={'tool_id': 'content_open'},
-                ),
-                raw_result={'ok': True, 'tool_id': 'content_open'},
-                runtime_context=dict(runtime_context or {}),
-            )
             reminder = (
-                "\n\n⚠️ exec 输出未整篇交付到本轮上下文。"
-                "已自动加载 content_open 工具，下一轮可直接调用它按区间精确读取、避免截断：\n"
+                f"\n\n{_EXEC_TRUNCATION_REOPEN_MARKER}"
+                "content_open 能按行/字符精确读取本地文件，但它的契约说明不在本轮上下文里："
+                "直接调用它，这一跳会先把契约说明返回给你（那一跳不执行），"
+                "或先 load_tool_context(tool_id=\"content_open\") 再调用：\n"
                 "  content_open(path=<目标路径>, start_line=<起>, end_line=<止>)   # 多行源码（grep -n 给行号）\n"
                 "  content_open(path=<目标路径>, start_char=<起>, end_char=<止>)  # 单行/需字符定位\n"
                 "结果已被外置时，上面这条结果文本自带 `content_open(ref=...)`，按那个 ref 复开即可；"
@@ -4450,14 +4301,6 @@ class ReActToolLoop:
         callable_tool_names = self._normalized_name_list(
             list(runtime_context.get('callable_tool_names') or current_frame.get('callable_tool_names') or [])
         )
-        hydrated_executor_names = self._normalized_name_list(
-            list(
-                runtime_context.get('hydrated_executor_names')
-                or current_frame.get('hydrated_executor_names')
-                or current_frame.get('hydrated_executor_state')
-                or []
-            )
-        )
         full_callable_tool_names = self._normalized_name_list(
             list(
                 runtime_context.get('full_callable_tool_names')
@@ -4488,7 +4331,6 @@ class ReActToolLoop:
                 'candidate_skill_ids': list(candidate_skill_ids),
                 'rbac_visible_tool_names': list(rbac_visible_tool_names),
                 'callable_tool_names': list(callable_tool_names),
-                'hydrated_executor_names': list(hydrated_executor_names),
                 'full_callable_tool_names': list(full_callable_tool_names),
                 'prior_overflow_signatures': sorted(prior_overflow_signatures or set()),
                 'stage_turn_granted': granted,
@@ -4692,28 +4534,6 @@ class ReActToolLoop:
                             stage_free_pass_kind=stage_free_pass_kind,
                         ),
                     )
-                    promoter = getattr(self, '_tool_context_hydration_promoter', None)
-                    hydration_payload = self._tool_context_hydration_payload(raw_result)
-                    if (
-                        callable(promoter)
-                        and str(getattr(call, 'name', '') or '').strip() in {'load_tool_context', 'load_tool_context_v2'}
-                        and isinstance(hydration_payload, dict)
-                        and bool(hydration_payload.get('ok'))
-                        and str(hydration_payload.get('tool_id') or '').strip()
-                    ):
-                        promoter(
-                            task_id=str(task.task_id or '').strip(),
-                            node_id=str(node.node_id or '').strip(),
-                            tool_call=SimpleNamespace(
-                                name=str(getattr(call, 'name', '') or '').strip(),
-                                arguments={'tool_id': str(hydration_payload.get('tool_id') or '').strip()},
-                            ),
-                            raw_result=dict(hydration_payload),
-                            runtime_context=_call_runtime_context(
-                                call,
-                                stage_turn_granted=stage_turn_granted,
-                            ),
-                        )
                     tool_content = self._render_tool_message_content(
                         raw_result,
                         runtime_context=runtime_context,
@@ -8485,16 +8305,6 @@ class ReActToolLoop:
                 list(runtime_context.get("callable_tool_names") or current_frame.get("callable_tool_names") or [])
             )
         )
-        hydrated_tool_names = set(
-            self._normalized_name_list(
-                list(
-                    runtime_context.get("hydrated_executor_names")
-                    or current_frame.get("hydrated_executor_names")
-                    or current_frame.get("hydrated_executor_state")
-                    or []
-                )
-            )
-        )
         full_callable_tool_names = set(
             self._normalized_name_list(
                 list(
@@ -8520,7 +8330,6 @@ class ReActToolLoop:
             "latest_contract_fingerprint_count": len(latest_fingerprints),
             "candidate_tool_count": len(candidate_tool_names),
             "callable_tool_count": len(callable_tool_names),
-            "hydrated_tool_count": len(hydrated_tool_names),
             "full_callable_tool_count": len(full_callable_tool_names),
             "visible_tool_count": len(visible_tool_names),
         }
@@ -8545,7 +8354,6 @@ class ReActToolLoop:
                     continue
                 if (
                     requested_tool_id not in callable_tool_names
-                    and requested_tool_id not in hydrated_tool_names
                     and requested_tool_id not in full_callable_tool_names
                 ):
                     continue
@@ -8557,7 +8365,6 @@ class ReActToolLoop:
                         **dict(runtime_context or {}),
                         "candidate_tool_names": list(candidate_tool_names),
                         "callable_tool_names": list(callable_tool_names),
-                        "hydrated_executor_names": list(hydrated_tool_names),
                         "full_callable_tool_names": list(full_callable_tool_names),
                         "rbac_visible_tool_names": list(visible_tool_names),
                     },

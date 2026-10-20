@@ -17,8 +17,40 @@ from g3ku.runtime.stage_prompt_compaction import (
     completed_stage_blocks,
     retained_completed_stage_ids,
 )
+from g3ku.runtime.tool_contract_block import render_tool_contract_block
 from main.runtime.stage_budget import SILENT_TOOL_NAME, STAGE_TOOL_NAME
 from main.service.runtime_service import MainRuntimeService
+
+
+RECORD_TOOL_FINGERPRINT = "tcf:" + "a" * 16
+
+
+def _state_with_record_tool_contract(state: dict) -> dict:
+    """把 `record_tool` 的契约块放进请求视图：台账删除后，在场才是可调用的唯一凭据。
+
+    这几条用例测的是阶段闸门（宽限一次、预算耗尽后拦第二次），不是在场判据，所以夹具
+    必须自己把"这个工具本轮有契约"这件事做实。
+    """
+    block = render_tool_contract_block(
+        "record_tool",
+        RECORD_TOOL_FINGERPRINT,
+        "# record_tool\n\nFixture contract body.\n",
+    )
+    message = {
+        "role": "tool",
+        "name": "load_tool_context",
+        "tool_call_id": "call-load-record-tool",
+        "content": json.dumps(
+            {
+                "ok": True,
+                "tool_id": "record_tool",
+                "tool_context_fingerprint": RECORD_TOOL_FINGERPRINT,
+                "content": block,
+            },
+            ensure_ascii=False,
+        ),
+    }
+    return {**state, "messages": [*list(state.get("messages") or []), message]}
 
 
 def test_initial_persistent_state_tracks_frontdoor_stage_state() -> None:
@@ -330,10 +362,12 @@ async def test_frontdoor_stage_gate_graces_first_stageless_tool_then_blocks_the_
     monkeypatch.setattr(runner, "_build_tool_runtime_context", lambda **kwargs: {"on_progress": _noop_progress})
     monkeypatch.setattr(runner, "_execute_tool_call_with_raw_result", _execute_tool_call)
 
-    state = {
-        **initial_persistent_state(user_input={"content": "hello", "metadata": {}}),
-        "tool_names": ["record_tool"],
-    }
+    state = _state_with_record_tool_contract(
+        {
+            **initial_persistent_state(user_input={"content": "hello", "metadata": {}}),
+            "tool_names": ["record_tool"],
+        }
+    )
     tools = runner._frontdoor_tool_schemas_for_state(
         state=state,
         runtime=SimpleNamespace(context=SimpleNamespace()),
@@ -382,11 +416,13 @@ async def test_frontdoor_stage_budget_exhaustion_updates_gate_and_blocks_next_or
     monkeypatch.setattr(runner, "_build_tool_runtime_context", lambda **kwargs: {"on_progress": _noop_progress})
     monkeypatch.setattr(runner, "_execute_tool_call_with_raw_result", _execute_tool_call)
 
-    active_state = {
-        **initial_persistent_state(user_input={"content": "hello", "metadata": {}}),
-        "tool_names": ["record_tool"],
-        "frontdoor_stage_state": _active_frontdoor_stage_state(budget=1),
-    }
+    active_state = _state_with_record_tool_contract(
+        {
+            **initial_persistent_state(user_input={"content": "hello", "metadata": {}}),
+            "tool_names": ["record_tool"],
+            "frontdoor_stage_state": _active_frontdoor_stage_state(budget=1),
+        }
+    )
     tools = runner._frontdoor_tool_schemas_for_state(
         state=active_state,
         runtime=SimpleNamespace(context=SimpleNamespace()),

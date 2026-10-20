@@ -27,7 +27,6 @@ def test_frontdoor_contract_guides_models_to_copy_reopen_targets_into_file_targe
         callable_tool_names=["create_async_task", "content_open"],
         candidate_tool_names=[],
         candidate_tool_items=[],
-        hydrated_tool_names=[],
         frontdoor_stage_state={
             "active_stage_id": "stage:1",
             "transition_required": False,

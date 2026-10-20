@@ -188,7 +188,6 @@ def _make_runner_state(monkeypatch: pytest.MonkeyPatch, runner: CreateAgentCeoFr
         _frontdoor_canonical_context={"active_stage_id": "", "transition_required": False, "stages": []},
         _compression_state={},
         _semantic_context_state={},
-        _frontdoor_hydrated_tool_names=[],
         _emit_state_snapshot=lambda: None,
     )
     runtime = SimpleNamespace(
@@ -209,7 +208,6 @@ def _make_runner_state(monkeypatch: pytest.MonkeyPatch, runner: CreateAgentCeoFr
         "provider_tool_names": [],
         "candidate_tool_names": [],
         "candidate_tool_items": [],
-        "hydrated_tool_names": [],
         "visible_skill_ids": [],
         "candidate_skill_ids": [],
         "rbac_visible_tool_names": [],

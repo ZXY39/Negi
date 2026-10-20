@@ -259,7 +259,6 @@ class CreateAgentCeoFrontDoorRunner(CeoFrontDoorRuntimeOps):
         required_list_fields = (
             "tool_names",
             "candidate_tool_names",
-            "hydrated_tool_names",
             "visible_skill_ids",
             "candidate_skill_ids",
             "rbac_visible_tool_names",
@@ -302,7 +301,6 @@ class CreateAgentCeoFrontDoorRunner(CeoFrontDoorRuntimeOps):
             callable_tool_names=list(callable_tool_names),
             candidate_tool_names=list(candidate_tool_names),
             candidate_tool_items=list(candidate_tool_items),
-            hydrated_tool_names=list(state.get("hydrated_tool_names") or []),
             frontdoor_stage_state=dict(state.get("frontdoor_stage_state") or {}),
             visible_skill_ids=list(state.get("visible_skill_ids") or []),
             candidate_skill_ids=list(state.get("candidate_skill_ids") or []),
@@ -747,10 +745,7 @@ class CreateAgentCeoFrontDoorRunner(CeoFrontDoorRuntimeOps):
             "dispatched_task_ids": dispatched_task_ids,
             "synthetic_tool_calls_used": False,
         }
-        should_update_frontdoor_tool_state = (
-            "candidate_tool_names" in state
-            or "hydrated_tool_names" in state
-        )
+        should_update_frontdoor_tool_state = "candidate_tool_names" in state
         if should_update_frontdoor_tool_state:
             result["tool_names"] = self._normalized_tool_name_state_list(state.get("tool_names"))
             result["candidate_tool_names"] = self._normalized_tool_name_state_list(state.get("candidate_tool_names"))
@@ -763,7 +758,6 @@ class CreateAgentCeoFrontDoorRunner(CeoFrontDoorRuntimeOps):
                 for item in list(state.get("attachment_reopen_targets") or [])
                 if isinstance(item, dict)
             ]
-            result["hydrated_tool_names"] = self._normalized_tool_name_state_list(state.get("hydrated_tool_names"))
             result["visible_skill_ids"] = self._normalized_tool_name_state_list(state.get("visible_skill_ids"))
             result["candidate_skill_ids"] = self._normalized_tool_name_state_list(state.get("candidate_skill_ids"))
             result["rbac_visible_tool_names"] = self._normalized_tool_name_state_list(state.get("rbac_visible_tool_names"))
@@ -803,7 +797,6 @@ class CreateAgentCeoFrontDoorRunner(CeoFrontDoorRuntimeOps):
                 preview_frontdoor_canonical_context,
                 preview_compression_state,
                 preview_semantic_context_state,
-                _preview_hydrated_tool_names,
             ) = self._runtime_session_frontdoor_state(
                 preview_state,
                 preview_pending_tool_round=True,

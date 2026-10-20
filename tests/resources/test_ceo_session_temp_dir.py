@@ -61,7 +61,6 @@ def test_frontdoor_contract_renders_session_temp_dir(tmp_path: Path) -> None:
     contract = build_frontdoor_tool_contract(
         callable_tool_names=['exec'],
         candidate_tool_names=[],
-        hydrated_tool_names=[],
         frontdoor_stage_state={},
         session_temp_dir=session_temp,
     )
@@ -78,7 +77,6 @@ def test_frontdoor_contract_omits_session_temp_dir_when_absent() -> None:
     contract = build_frontdoor_tool_contract(
         callable_tool_names=['exec'],
         candidate_tool_names=[],
-        hydrated_tool_names=[],
         frontdoor_stage_state={},
     )
 

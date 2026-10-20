@@ -2322,7 +2322,6 @@ def test_web_ceo_continuity_snapshot_round_trip_and_clear(tmp_path: Path, monkey
         "frontdoor_canonical_context": {"active_stage_id": "", "transition_required": False, "stages": []},
         "compression_state": {"status": "ready", "text": "ok", "source": "semantic"},
         "semantic_context_state": {"summary_text": "summary", "needs_refresh": False},
-        "hydrated_tool_names": ["web_fetch"],
         "capability_snapshot_exposure_revision": "exp:demo",
         "visible_tool_ids": ["exec", "web_fetch"],
         "visible_skill_ids": ["web-access"],
@@ -2372,7 +2371,6 @@ def test_web_ceo_continuity_snapshot_strips_multimodal_blocks_from_frontdoor_req
             "frontdoor_canonical_context": {"active_stage_id": "", "transition_required": False, "stages": []},
             "compression_state": {},
             "semantic_context_state": {},
-            "hydrated_tool_names": [],
             "capability_snapshot_exposure_revision": "exp:demo",
             "visible_tool_ids": ["exec"],
             "visible_skill_ids": [],
@@ -2411,7 +2409,6 @@ def test_completed_continuity_snapshot_round_trips_token_preflight_diagnostics(t
             "estimate_source": "usage_plus_delta",
             "effective_input_tokens": 24000,
         },
-        "hydrated_tool_names": ["web_fetch"],
         "capability_snapshot_exposure_revision": "exp:demo",
         "visible_tool_ids": ["exec", "web_fetch"],
         "visible_skill_ids": ["web-access"],
@@ -2448,7 +2445,6 @@ def test_clear_web_ceo_session_artifacts_clears_completed_continuity_snapshot(
             "frontdoor_canonical_context": {"active_stage_id": "", "transition_required": False, "stages": []},
             "compression_state": {},
             "semantic_context_state": {},
-            "hydrated_tool_names": [],
             "capability_snapshot_exposure_revision": "exp:demo",
             "visible_tool_ids": ["exec"],
             "visible_skill_ids": [],
@@ -2495,6 +2491,8 @@ def test_runtime_agent_session_restores_completed_continuity_snapshot_from_disk(
             "frontdoor_canonical_context": {"active_stage_id": "", "transition_required": False, "stages": []},
             "compression_state": {"status": "ready", "text": "ok", "source": "semantic"},
             "semantic_context_state": {"summary_text": "summary", "needs_refresh": False},
+            # 存量快照带着已废止的台账键：写侧的白名单不收它，恢复出来的会话不能因为它
+            # 长出一个能力来源。
             "hydrated_tool_names": ["web_fetch"],
             "capability_snapshot_exposure_revision": "exp:demo",
             "visible_tool_ids": ["exec", "web_fetch"],
@@ -2520,7 +2518,7 @@ def test_runtime_agent_session_restores_completed_continuity_snapshot_from_disk(
     assert session._frontdoor_stage_state == {"active_stage_id": "stage-1", "transition_required": False, "stages": []}
     assert session._compression_state == {"status": "ready", "text": "ok", "source": "semantic"}
     assert session._semantic_context_state == {"summary_text": "summary", "needs_refresh": False}
-    assert session._frontdoor_hydrated_tool_names == ["web_fetch"]
+    assert not hasattr(session, "_frontdoor_hydrated_tool_names")
 
 
 def test_runtime_agent_session_execution_context_snapshot_strips_multimodal_frontdoor_baseline(
@@ -7431,7 +7429,6 @@ async def test_ceo_frontdoor_prepare_turn_continues_full_context_and_appends_hid
         _frontdoor_canonical_context={"active_stage_id": "", "transition_required": False, "stages": []},
         _compression_state={},
         _semantic_context_state={},
-        _frontdoor_hydrated_tool_names=[],
         _frontdoor_selection_debug={},
     )
     runtime = SimpleNamespace(
@@ -7606,7 +7603,6 @@ async def test_ceo_frontdoor_prepare_turn_heartbeat_inherits_previous_tool_state
         _frontdoor_canonical_context={"active_stage_id": "", "transition_required": False, "stages": []},
         _compression_state={},
         _semantic_context_state={},
-        _frontdoor_hydrated_tool_names=["filesystem_write"],
         _frontdoor_selection_debug={"query_text": "prior visible request", "tool_selection": {"source": "prior"}},
         _frontdoor_capability_snapshot_exposure_revision="exp:prior",
         _frontdoor_visible_tool_ids=["create_async_task", "task_list", "filesystem_write", "web_fetch"],
@@ -7632,7 +7628,9 @@ async def test_ceo_frontdoor_prepare_turn_heartbeat_inherits_previous_tool_state
             "provider_tool_exposure_commit_reason": "",
             "candidate_tool_names": ["web_fetch"],
             "candidate_tool_items": [{"tool_id": "web_fetch", "description": "fetch web pages"}],
-            "hydrated_tool_names": ["filesystem_write"],
+            # 请求视图与 session 基线同源：候选视图（治理可见 − callable）按这份消息算在场，
+            # 内部轮继承的 callable 与候选才不会分裂成"同一个名字两行都点名"。
+            "messages": list(existing_baseline),
             "visible_skill_ids": ["find-skills"],
             "candidate_skill_ids": ["find-skills"],
             "rbac_visible_tool_names": ["create_async_task", "task_list", "filesystem_write", "web_fetch"],
@@ -7658,7 +7656,8 @@ async def test_ceo_frontdoor_prepare_turn_heartbeat_inherits_previous_tool_state
     assert state_update["provider_tool_names"] == ["create_async_task", "task_list", "filesystem_write"]
     assert state_update["candidate_tool_names"] == ["web_fetch"]
     assert state_update["candidate_tool_items"] == [{"tool_id": "web_fetch", "description": "fetch web pages"}]
-    assert state_update["hydrated_tool_names"] == ["filesystem_write"]
+    # 继承回来的那一跳不产出任何台账键：能力只由请求视图里的那颗块决定。
+    assert "hydrated_tool_names" not in state_update
     assert state_update["visible_skill_ids"] == ["find-skills"]
     assert state_update["candidate_skill_ids"] == ["find-skills"]
     assert state_update["rbac_visible_tool_names"] == ["create_async_task", "task_list", "filesystem_write", "web_fetch"]
@@ -7674,7 +7673,7 @@ async def test_ceo_frontdoor_prepare_turn_heartbeat_inherits_previous_tool_state
         "submit_next_stage",
     ]
     assert state_update["frontdoor_selection_debug"]["candidate_tool_names"] == ["web_fetch"]
-    assert state_update["frontdoor_selection_debug"]["hydrated_tool_names"] == ["filesystem_write"]
+    assert state_update["frontdoor_selection_debug"]["contract_present_tool_names"] == ["filesystem_write"]
     assert _body_without_pinned_head(state_update["frontdoor_request_body_messages"]) == [
         *existing_baseline,
         {
@@ -7826,7 +7825,6 @@ async def test_ceo_frontdoor_prepare_turn_cron_inherits_previous_tool_state_with
         _frontdoor_canonical_context={"active_stage_id": "", "transition_required": False, "stages": []},
         _compression_state={},
         _semantic_context_state={},
-        _frontdoor_hydrated_tool_names=["filesystem_write"],
         _frontdoor_selection_debug={"query_text": "prior visible request", "tool_selection": {"source": "prior"}},
         _frontdoor_capability_snapshot_exposure_revision="exp:prior",
         _frontdoor_visible_tool_ids=["create_async_task", "task_list", "filesystem_write", "web_fetch"],
@@ -7852,7 +7850,9 @@ async def test_ceo_frontdoor_prepare_turn_cron_inherits_previous_tool_state_with
             "provider_tool_exposure_commit_reason": "",
             "candidate_tool_names": ["web_fetch"],
             "candidate_tool_items": [{"tool_id": "web_fetch", "description": "fetch web pages"}],
-            "hydrated_tool_names": ["filesystem_write"],
+            # 请求视图与 session 基线同源：候选视图（治理可见 − callable）按这份消息算在场，
+            # 内部轮继承的 callable 与候选才不会分裂成"同一个名字两行都点名"。
+            "messages": list(existing_baseline),
             "visible_skill_ids": ["find-skills"],
             "candidate_skill_ids": ["find-skills"],
             "rbac_visible_tool_names": ["create_async_task", "task_list", "filesystem_write", "web_fetch"],
@@ -7880,7 +7880,8 @@ async def test_ceo_frontdoor_prepare_turn_cron_inherits_previous_tool_state_with
     assert state_update["provider_tool_names"] == ["create_async_task", "task_list", "filesystem_write"]
     assert state_update["candidate_tool_names"] == ["web_fetch"]
     assert state_update["candidate_tool_items"] == [{"tool_id": "web_fetch", "description": "fetch web pages"}]
-    assert state_update["hydrated_tool_names"] == ["filesystem_write"]
+    # 继承回来的那一跳不产出任何台账键：能力只由请求视图里的那颗块决定。
+    assert "hydrated_tool_names" not in state_update
     assert state_update["visible_skill_ids"] == ["find-skills"]
     assert state_update["candidate_skill_ids"] == ["find-skills"]
     assert state_update["rbac_visible_tool_names"] == ["create_async_task", "task_list", "filesystem_write", "web_fetch"]
@@ -7896,7 +7897,7 @@ async def test_ceo_frontdoor_prepare_turn_cron_inherits_previous_tool_state_with
         "submit_next_stage",
     ]
     assert state_update["frontdoor_selection_debug"]["candidate_tool_names"] == ["web_fetch"]
-    assert state_update["frontdoor_selection_debug"]["hydrated_tool_names"] == ["filesystem_write"]
+    assert state_update["frontdoor_selection_debug"]["contract_present_tool_names"] == ["filesystem_write"]
     from g3ku.core.timefmt import render_epoch_ms_local
 
     delivered_at_text = render_epoch_ms_local(1_777_000_000_000)
@@ -8074,7 +8075,6 @@ async def test_ceo_frontdoor_prepare_turn_internal_turn_without_prior_baseline_f
         _frontdoor_canonical_context={"active_stage_id": "", "transition_required": False, "stages": []},
         _compression_state={},
         _semantic_context_state={},
-        _frontdoor_hydrated_tool_names=[],
         _frontdoor_selection_debug={"query_text": "prior visible request"},
         _frontdoor_capability_snapshot_exposure_revision="exp:prior",
         _frontdoor_visible_tool_ids=[],
@@ -8097,7 +8097,6 @@ async def test_ceo_frontdoor_prepare_turn_internal_turn_without_prior_baseline_f
             "provider_tool_names": [],
             "candidate_tool_names": ["web_fetch"],
             "candidate_tool_items": [{"tool_id": "web_fetch", "description": "fetch web pages"}],
-            "hydrated_tool_names": [],
             "visible_skill_ids": ["find-skills"],
             "candidate_skill_ids": ["find-skills"],
             "rbac_visible_tool_names": ["exec"],
@@ -8879,14 +8878,14 @@ def test_context_assembly_always_keeps_tool_execution_control_tools_visible() ->
             "skill-installer",
             "stop_tool_execution",
         ],
-        hydrated_tool_names=["create_async_task"],
+        contract_present_tool_names=["skill-installer"],
     )
 
     assert "stop_tool_execution" in selected
     assert "wait_tool_execution" not in selected
     assert "create_async_task" in selected
-    # RESERVED 排在最前，FIXED 其次，水合名随后：常驻名不靠被选中，也不占水合读数。
-    assert selected[0] == "stop_tool_execution"
+    # RESERVED 排在最前，FIXED 其次，在场名随后：常驻名不靠被选中，也不要求契约块在场。
+    assert selected == ["stop_tool_execution", "create_async_task", "skill-installer", "silent"]
 
 
 def _prepare_turn_batch_harness(monkeypatch, tmp_path: Path, *, capture_builder: dict | None = None):
@@ -8980,7 +8979,6 @@ def _prepare_turn_batch_session(loop, *, batch_inputs: list) -> SimpleNamespace:
         _frontdoor_canonical_context={"active_stage_id": "", "transition_required": False, "stages": []},
         _compression_state={},
         _semantic_context_state={},
-        _frontdoor_hydrated_tool_names=[],
         _frontdoor_selection_debug={},
         _active_user_batch_inputs=batch_inputs,
     )

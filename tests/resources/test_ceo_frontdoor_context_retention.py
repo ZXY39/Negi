@@ -132,7 +132,6 @@ async def test_prepare_turn_reuses_session_context_window_for_new_user_turn(
         },
         _compression_state={"status": "", "text": "", "source": "", "needs_recheck": False},
         _semantic_context_state={"summary_text": "", "needs_refresh": False},
-        _frontdoor_hydrated_tool_names=[],
         _frontdoor_selection_debug={},
     )
     runtime = SimpleNamespace(
@@ -230,7 +229,6 @@ async def test_prepare_turn_passes_session_request_body_as_direct_continuation_s
         _frontdoor_canonical_context={},
         _compression_state={"status": "", "text": "", "source": "", "needs_recheck": False},
         _semantic_context_state={"summary_text": "", "needs_refresh": False},
-        _frontdoor_hydrated_tool_names=[],
         _frontdoor_selection_debug={},
     )
     runtime = SimpleNamespace(
@@ -343,7 +341,6 @@ async def test_prepare_turn_prefers_session_request_body_seed_over_visible_check
         },
         _compression_state={"status": "", "text": "", "source": "", "needs_recheck": False},
         _semantic_context_state={"summary_text": "", "needs_refresh": False},
-        _frontdoor_hydrated_tool_names=[],
         _frontdoor_selection_debug={},
     )
     runtime = SimpleNamespace(
@@ -451,7 +448,6 @@ async def test_prepare_turn_recovers_request_body_seed_from_paused_snapshot_when
         _frontdoor_canonical_context={},
         _compression_state={"status": "", "text": "", "source": "", "needs_recheck": False},
         _semantic_context_state={"summary_text": "", "needs_refresh": False},
-        _frontdoor_hydrated_tool_names=[],
         _frontdoor_selection_debug={},
     )
     runtime = SimpleNamespace(
@@ -775,7 +771,6 @@ async def test_prepare_turn_quarantines_unexpected_context_shrink_without_reason
         _frontdoor_canonical_context={"active_stage_id": "", "transition_required": False, "stages": []},
         _compression_state={},
         _semantic_context_state={},
-        _frontdoor_hydrated_tool_names=[],
         _frontdoor_selection_debug={},
     )
     runtime = SimpleNamespace(
@@ -891,7 +886,6 @@ async def test_prepare_turn_ignores_runtime_only_tool_metadata_when_checking_con
         _frontdoor_canonical_context={"active_stage_id": "", "transition_required": False, "stages": []},
         _compression_state={},
         _semantic_context_state={},
-        _frontdoor_hydrated_tool_names=[],
         _frontdoor_selection_debug={},
     )
     runtime = SimpleNamespace(
@@ -1013,7 +1007,6 @@ async def test_prepare_turn_allows_shorter_context_after_followup_token_compress
         _frontdoor_canonical_context={"active_stage_id": "", "transition_required": False, "stages": []},
         _compression_state={},
         _semantic_context_state={},
-        _frontdoor_hydrated_tool_names=[],
         _frontdoor_selection_debug={},
     )
     runtime = SimpleNamespace(
@@ -1122,7 +1115,6 @@ async def test_prepare_turn_uses_previous_actual_request_history_for_followup_to
         _frontdoor_canonical_context={"active_stage_id": "", "transition_required": False, "stages": []},
         _compression_state={},
         _semantic_context_state={},
-        _frontdoor_hydrated_tool_names=[],
         _frontdoor_selection_debug={},
     )
     runtime = SimpleNamespace(
@@ -1204,7 +1196,6 @@ async def test_prepare_turn_allows_shorter_context_with_pending_token_compressio
         _frontdoor_canonical_context={"active_stage_id": "", "transition_required": False, "stages": []},
         _compression_state={},
         _semantic_context_state={},
-        _frontdoor_hydrated_tool_names=[],
         _frontdoor_selection_debug={},
     )
     runtime = SimpleNamespace(
@@ -1283,7 +1274,6 @@ async def test_prepare_turn_heartbeat_continues_previous_request_body_and_append
         _frontdoor_canonical_context={"active_stage_id": "", "transition_required": False, "stages": []},
         _compression_state={},
         _semantic_context_state={},
-        _frontdoor_hydrated_tool_names=[],
         _frontdoor_selection_debug={},
     )
     runtime = SimpleNamespace(
@@ -1401,7 +1391,6 @@ async def test_prepare_turn_ignores_stale_turn_only_note_when_checking_context_s
         _frontdoor_canonical_context={"active_stage_id": "", "transition_required": False, "stages": []},
         _compression_state={},
         _semantic_context_state={},
-        _frontdoor_hydrated_tool_names=[],
         _frontdoor_selection_debug={},
     )
     runtime = SimpleNamespace(

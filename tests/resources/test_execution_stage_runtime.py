@@ -966,7 +966,6 @@ async def test_prepare_node_context_selection_restores_callable_tools_from_persi
                     visible_skills=[],
                     candidate_skill_ids=[],
                     stage_payload={},
-                    hydrated_executor_names=[],
                     lightweight_tool_ids=[],
                     selection_trace={"mode": "persisted_frame_restore"},
                 ).to_message(),

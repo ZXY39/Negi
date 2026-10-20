@@ -18,6 +18,7 @@ from g3ku.runtime.frontdoor.message_builder import (
     memory_snapshot_provenance,
 )
 from g3ku.runtime.frontdoor.prompt_builder import CeoPromptBuilder
+from g3ku.runtime.tool_contract_block import render_tool_contract_block
 from main.runtime.stage_budget import SILENT_TOOL_NAME
 from g3ku.runtime.frontdoor.tool_contract import (
     build_frontdoor_tool_contract,
@@ -26,6 +27,28 @@ from g3ku.runtime.frontdoor.tool_contract import (
     upsert_frontdoor_tool_contract_message,
 )
 from g3ku.session.manager import Session
+
+
+CONTRACT_FINGERPRINT = "tcf:" + "a" * 16
+
+
+def _loader_message(tool_id: str, fingerprint: str = CONTRACT_FINGERPRINT) -> dict:
+    """投递形态与真车道同形：JSON 信封的 `content` 字段里装着契约块。
+
+    块在场就是这一跳能调用它的唯一依据，前门判据按 `state["messages"]` 读它。
+    """
+    payload = {
+        "ok": True,
+        "tool_id": tool_id,
+        "tool_context_fingerprint": fingerprint,
+        "content": render_tool_contract_block(tool_id, fingerprint, f"# {tool_id}\n契约正文"),
+    }
+    return {
+        "role": "tool",
+        "name": "load_tool_context",
+        "tool_call_id": f"call_load_{tool_id}",
+        "content": json.dumps(payload, ensure_ascii=False),
+    }
 
 
 class _PromptBuilder:
@@ -960,7 +983,7 @@ async def test_message_builder_keeps_fixed_builtin_resource_tools_out_of_the_can
 
 
 @pytest.mark.asyncio
-async def test_message_builder_promotes_hydrated_tools_into_callable_list() -> None:
+async def test_message_builder_adds_contract_present_tools_to_callable_list() -> None:
     prompt_builder = _PromptBuilder()
     memory_manager = _MemoryManager(response="")
     builder = CeoMessageBuilder(loop=_loop(memory_manager), prompt_builder=prompt_builder)
@@ -985,7 +1008,7 @@ async def test_message_builder_promotes_hydrated_tools_into_callable_list() -> N
             ],
         },
         persisted_session=None,
-        hydrated_tool_names=["filesystem_write"],
+        contract_present_tool_names=["filesystem_write"],
     )
 
     assert result.tool_names == ["load_tool_context", "filesystem_write", SILENT_TOOL_NAME]
@@ -995,7 +1018,7 @@ async def test_message_builder_promotes_hydrated_tools_into_callable_list() -> N
 
 
 @pytest.mark.asyncio
-async def test_message_builder_promotes_hydrated_content_tools_back_into_callable_list() -> None:
+async def test_message_builder_adds_contract_present_content_tool_to_callable_list() -> None:
     prompt_builder = _PromptBuilder()
     memory_manager = _MemoryManager(response="")
     builder = CeoMessageBuilder(loop=_loop(memory_manager), prompt_builder=prompt_builder)
@@ -1016,7 +1039,7 @@ async def test_message_builder_promotes_hydrated_content_tools_back_into_callabl
             ],
         },
         persisted_session=None,
-        hydrated_tool_names=["content_open"],
+        contract_present_tool_names=["content_open"],
     )
 
     assert result.tool_names == ["load_tool_context", "content_open", SILENT_TOOL_NAME]
@@ -1135,7 +1158,7 @@ async def test_message_builder_appends_frontdoor_runtime_tool_contract_to_dynami
             "tool_names": ["exec", "filesystem_write", "load_tool_context"],
         },
         persisted_session=None,
-        hydrated_tool_names=["filesystem_write"],
+        contract_present_tool_names=["filesystem_write"],
     )
 
     contract_messages = [
@@ -1160,7 +1183,6 @@ async def test_message_builder_appends_frontdoor_runtime_tool_contract_to_dynami
     assert "`filesystem_write`" in contract_text
     # 每跳重写的活状态只在尾块里，稳定块里一份都没有
     assert "callable_tools:" in gate_text and "callable_tools:" not in stable_text
-    assert "hydrated_tools:" not in gate_text and "callable_tools:" in gate_text
     assert "stage_summary:" in gate_text and "stage_summary:" not in stable_text
     assert 'load_tool_context(tool_id="filesystem_write")' not in contract_text
     # 候选整表不再重列：这份样本里 filesystem_write 已经 callable、池子为空，所以候选行
@@ -1195,7 +1217,6 @@ async def test_message_builder_appends_frontdoor_runtime_tool_contract_with_exec
             "tool_names": ["exec", "load_tool_context"],
         },
         persisted_session=None,
-        hydrated_tool_names=["exec"],
     )
 
     contract_messages = [
@@ -1221,13 +1242,13 @@ def test_frontdoor_dynamic_appendix_records_prefer_state_tool_contract_over_stal
 
     records = runner._dynamic_appendix_message_records_for_state(
         state={
-            "tool_names": ["submit_next_stage", "filesystem_write"],
+            "tool_names": ["filesystem_write"],
             "candidate_tool_names": [],
             "candidate_tool_items": [],
-            "hydrated_tool_names": ["filesystem_write"],
+            "messages": [_loader_message("filesystem_write")],
             "visible_skill_ids": ["memory"],
             "candidate_skill_ids": ["memory"],
-            "rbac_visible_tool_names": ["submit_next_stage", "filesystem_write"],
+            "rbac_visible_tool_names": ["filesystem_write"],
             "rbac_visible_skill_ids": ["memory"],
             "frontdoor_stage_state": {
                 "active_stage_id": "stage:1",
@@ -1262,11 +1283,12 @@ def test_frontdoor_dynamic_appendix_records_prefer_state_tool_contract_over_stal
     contract_text = "\n".join(str(item["content"] or "") for item in contract_messages)
     assert contract_messages[0]["role"] == "user"
     assert contract_text.startswith("## Runtime Tool Contract")
-    assert "callable_tools: `submit_next_stage`, `filesystem_write`" in contract_text
+    # callable 由 state 重算：`filesystem_write` 的契约块在 `messages` 里 ⇒ 在场 ⇒ 上名单；
+    # 陈旧尾块消息自报的 `exec` 不被采信。
+    assert "callable_tools: `filesystem_write`, `silent`" in contract_text
     # 空池不再打 `candidate_tools: none` 这一行占位
     assert "candidate_tools:" not in contract_text
     assert "undeclared_candidates" not in contract_text
-    assert "hydrated_tools:" not in contract_text
     # skill 名单不再进尾块（头部钉住块承载全量名单；此用例未钉，模型侧信号由
     # new_readable_skills 注入行承载）；加载规则只在基础提示词里。
     assert "candidate_skills" not in contract_text
@@ -1316,7 +1338,6 @@ def test_frontdoor_tool_contract_upsert_accepts_legacy_dict_and_writes_summary_t
         callable_tool_names=["submit_next_stage", "filesystem_write"],
         candidate_tool_names=["agent_browser"],
         candidate_tool_items=[{"tool_id": "agent_browser", "description": "Browser automation"}],
-        hydrated_tool_names=["filesystem_write"],
         frontdoor_stage_state={
             "active_stage_id": "stage:1",
             "transition_required": False,
@@ -1369,7 +1390,7 @@ def test_frontdoor_tool_contract_upsert_accepts_legacy_dict_and_writes_summary_t
             "description": "Browser automation",
         }
     ]
-    assert payload["hydrated_tool_names"] == ["filesystem_write"]
+    assert "hydrated_tool_names" not in payload
     assert payload["candidate_skill_ids"] == ["memory"]
     assert "visible_skill_ids" not in payload
     assert "rbac_visible_tool_names" not in payload
@@ -1432,7 +1453,6 @@ def test_frontdoor_tool_contract_renders_repair_required_sections_separately() -
                 "reason": "missing required paths",
             }
         ],
-        hydrated_tool_names=[],
         frontdoor_stage_state={
             "active_stage_id": "stage:1",
             "transition_required": False,
@@ -1496,7 +1516,6 @@ def test_frontdoor_tool_contract_renders_attachment_reopen_targets() -> None:
         callable_tool_names=["create_async_task", "content_open"],
         candidate_tool_names=[],
         candidate_tool_items=[],
-        hydrated_tool_names=[],
         frontdoor_stage_state={
             "active_stage_id": "stage:1",
             "transition_required": False,
@@ -1645,7 +1664,6 @@ def test_frontdoor_tool_contract_drops_audio_attachment_reopen_targets() -> None
         callable_tool_names=["create_async_task", "content_open"],
         candidate_tool_names=[],
         candidate_tool_items=[],
-        hydrated_tool_names=[],
         frontdoor_stage_state={
             "active_stage_id": "stage:1",
             "transition_required": False,
@@ -3370,7 +3388,6 @@ async def test_ceo_context_assembly_injects_memory_snapshot_without_legacy_memor
         query_text="记住这个规则",
         exposure={"tool_names": ["memory_update", "memory_note"], "tools": [], "skills": []},
         user_content="记住这个规则",
-        hydrated_tool_names=[],
     )
 
     overlay = "\n\n".join(result["turn_overlay_parts"])
@@ -3417,7 +3434,6 @@ async def test_frontdoor_uses_frozen_memory_snapshot_only_once_per_turn() -> Non
         query_text="remember this rule",
         exposure={"tool_names": ["memory_update", "memory_note"], "tools": [], "skills": []},
         user_content="remember this rule",
-        hydrated_tool_names=[],
     )
 
     overlay = "\n\n".join(result["turn_overlay_parts"])
@@ -3505,7 +3521,6 @@ async def _collect(builder: CeoMessageBuilder, session: SimpleNamespace) -> dict
         query_text="ordinary question",
         exposure={"tool_names": ["memory_update"], "tools": [], "skills": []},
         user_content="ordinary question",
-        hydrated_tool_names=[],
     )
 
 
@@ -3983,7 +3998,6 @@ def test_frontdoor_stage_gate_lists_declared_but_denied_tools() -> None:
     contract = build_frontdoor_tool_contract(
         callable_tool_names=["exec"],
         candidate_tool_names=[],
-        hydrated_tool_names=[],
         frontdoor_stage_state={},
         denied_tool_names=["web_fetch"],
     )
@@ -3997,7 +4011,6 @@ def test_frontdoor_stage_gate_lists_declared_but_denied_tools() -> None:
     clean = build_frontdoor_tool_contract(
         callable_tool_names=["exec"],
         candidate_tool_names=[],
-        hydrated_tool_names=[],
         frontdoor_stage_state={},
     )
     assert "denied_tools" not in clean.to_stage_gate_message()["content"]

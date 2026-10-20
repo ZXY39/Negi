@@ -51,7 +51,7 @@ def test_message_builder_injects_silent_without_visibility_precondition() -> Non
     所以照它加根本进不了 schema。silent 不依赖曝光层。"""
     names = CeoMessageBuilder._callable_tool_names(
         visible_tool_names=['create_async_task', 'exec'],
-        hydrated_tool_names=None,
+        contract_present_tool_names=None,
     )
     assert SILENT_TOOL_NAME in names
     assert 'stop_tool_execution' not in names  # 未声明族 ⇒ RESERVED 不具备注入能力
@@ -130,7 +130,6 @@ def _contract(callable_names: list[str]) -> str:
 
     payload = {
         'callable_tool_names': callable_names,
-        'hydrated_tool_names': [],
         'candidate_skill_ids': [],
         'candidate_tools': [],
     }

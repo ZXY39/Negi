@@ -774,7 +774,7 @@ def _render_frontdoor_contract_summary(payload: dict[str, Any]) -> str:
 
 
 def _render_frontdoor_stage_gate_summary(payload: dict[str, Any]) -> str:
-    """每跳活的状态：本轮真可调用集、水合集、活动阶段轨道。排在请求体末位。"""
+    """每跳活的状态：本轮真可调用集、活动阶段轨道。排在请求体末位。"""
     lines = [
         FRONTDOOR_DYNAMIC_STAGE_GATE_HEADING,
         f'kind: {FRONTDOOR_DYNAMIC_STAGE_GATE_KIND}',
@@ -854,7 +854,6 @@ def _active_stage_summary(frontdoor_stage_state: dict[str, Any] | None) -> dict[
 class FrontdoorToolContract:
     callable_tool_names: list[str]
     candidate_tool_names: list[str]
-    hydrated_tool_names: list[str]
     stage_summary: dict[str, Any]
     visible_skill_ids: list[str]
     candidate_skill_ids: list[str]
@@ -883,7 +882,6 @@ class FrontdoorToolContract:
                 list(self.candidate_tool_items or []),
                 fallback_names=list(self.candidate_tool_names),
             ),
-            'hydrated_tool_names': list(self.hydrated_tool_names),
             'candidate_skill_ids': list(self.candidate_skill_ids),
             'stage_summary': dict(self.stage_summary),
             'contract_revision': str(self.contract_revision or '').strip(),
@@ -982,7 +980,6 @@ def build_frontdoor_tool_contract(
     callable_tool_names: list[str] | None,
     candidate_tool_names: list[str] | None,
     candidate_tool_items: list[dict[str, str]] | None = None,
-    hydrated_tool_names: list[str] | None,
     frontdoor_stage_state: dict[str, Any] | None,
     visible_skill_ids: list[str] | None = None,
     candidate_skill_ids: list[str] | None = None,
@@ -1009,7 +1006,6 @@ def build_frontdoor_tool_contract(
     return FrontdoorToolContract(
         callable_tool_names=callable_names,
         candidate_tool_names=candidate_names,
-        hydrated_tool_names=_normalized_name_list(hydrated_tool_names),
         stage_summary=_active_stage_summary(frontdoor_stage_state),
         visible_skill_ids=_normalized_name_list(visible_skill_ids),
         candidate_skill_ids=_normalized_name_list(candidate_skill_ids),

@@ -8,9 +8,9 @@ PARAMETER_ERROR_GUIDANCE_TEMPLATE = (
     '请先调用 load_tool_context(tool_id="{tool_name}") 查看该工具的详细说明、参数契约和示例后，再重新使用该工具。'
 )
 
-# 说明已在本轮上下文里的工具不能被再引导去 load_tool_context——同版本重复读取会被
-# 守卫拒绝（节点道与 frontdoor 的「禁止重复读取」），指针于是指向一条必死调用。
-# 这种情形改为给出 toolskill 文件路径，让模型用 content_open 定点读需要的那一段。
+# 契约块已在当次请求视图里的工具不能再被引导去 load：同版本重复读取会被守卫拒绝
+# （节点道与前门共用同一条在场判据），指针于是指向一条必死调用。这种情形改为给出
+# toolskill 文件路径，让模型用 content_open 定点读需要的那一段。
 PARAMETER_SKILL_REOPEN_GUIDANCE_TEMPLATE = (
     '该工具的说明已在本轮上下文中，重复 load_tool_context 会被拒绝。'
     '请改用 content_open(path="{path}") 查看参数契约与示例后再重新提交。'
@@ -44,8 +44,8 @@ _AVAILABILITY_CALLABLE_PREFIX = '当前可直接调用的工具：'
 _AVAILABILITY_CANDIDATE_PREFIX = '本轮其他候选工具（排名选中，可加载）：'
 _AVAILABILITY_NAME_MAX = 20
 _NOT_HYDRATED_NOTE = (
-    '「{name}」尚未水化，因此不可直接调用；'
-    '请先 load_tool_context(tool_id="{name}") 后再使用。'
+    '「{name}」的契约说明不在本轮上下文里：直接调用会先把说明返回给你（那一跳不执行），'
+    '也可以先 load_tool_context(tool_id="{name}") 取回说明再调用。'
 )
 _NO_LOAD_NEEDED_NOTE = '「{name}」是常驻内置工具，无需加载说明即可直接调用；它没有可加载的 toolskill。'
 
@@ -288,23 +288,25 @@ def _toolskill_path(tool: Any) -> str:
         return ""
 
 
-def _tool_context_names(runtime_context: Any, *keys: str) -> set[str]:
+def _contract_present_in_context(tool_name: str, runtime_context: Any) -> bool:
+    """契约块在这一跳是否已在模型眼前——判据只有一份，读跳起点算好的那份视图。
+
+    工具可见的 `__g3ku_runtime` 里这颗键已被 `tool_facing_runtime_context` 剥掉，所以这里
+    拿到的是循环级 runtime_context；旁路调用（没算过在场视图）按不在场处理，走 load 指引。
+    """
     if not isinstance(runtime_context, dict):
-        return set()
-    names: set[str] = set()
-    for key in keys:
-        value = runtime_context.get(key)
-        if isinstance(value, (list, tuple, set)):
-            names.update(str(item or "").strip() for item in value if str(item or "").strip())
-    return names
+        return False
+    presence = runtime_context.get("tool_contract_presence")
+    if not isinstance(presence, dict):
+        return False
+    return str(tool_name or "").strip() in presence
 
 
 def _parameter_repair_pointer(tool_name: str, *, tool: Any, runtime_context: Any) -> str:
-    """说明文档指针三分支：已在上下文 → content_open 定点读；否则 → load_tool_context。"""
+    """说明文档指针两分支：契约已在上下文 → 别再 load（会被重复读守卫拒）；否则 → load。"""
     normalized_tool_name = str(tool_name or "").strip()
     path = _toolskill_path(tool) if tool is not None else ""
-    hydrated = _tool_context_names(runtime_context, "hydrated_executor_names", "hydrated_tool_names")
-    if path and normalized_tool_name in hydrated:
+    if path and _contract_present_in_context(normalized_tool_name, runtime_context):
         return PARAMETER_SKILL_REOPEN_GUIDANCE_TEMPLATE.format(path=path)
     return PARAMETER_ERROR_GUIDANCE_TEMPLATE.format(tool_name=normalized_tool_name)
 
