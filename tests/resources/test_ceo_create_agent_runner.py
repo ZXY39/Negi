@@ -11,6 +11,7 @@ from g3ku.config.schema import MemoryAssemblyConfig
 from g3ku.core.messages import UserInputMessage
 from g3ku.runtime.frontdoor import _ceo_create_agent_impl as create_agent_impl
 from g3ku.runtime.frontdoor import _ceo_runtime_ops as ceo_runtime_ops
+from g3ku.runtime.tool_contract_block import render_tool_contract_block
 from g3ku.runtime.frontdoor import ceo_runner
 from g3ku.runtime.frontdoor import prompt_cache_contract
 from g3ku.runtime.frontdoor.canonical_context import combine_canonical_context
@@ -1590,9 +1591,12 @@ async def test_create_agent_graph_execute_tools_promotes_loaded_tool_context_int
                 "callable_now": True,
                 "will_be_hydrated_next_turn": True,
                 # 真 loader 的 ok 载荷必带 fingerprint（`main/governance/tool_context.py`
-                # 的 build_tool_context_fingerprint），在场判据按 tool_id + fingerprint 认正文
-                # ——两条车道的重读守卫一直也是这么要求的，缺它就不算契约载体。
+                # 的 build_tool_context_fingerprint），且交付时把契约**块**写进 `content`
+                # ——在场判据只认那颗块头，fingerprint 键本身不再算载体。
                 "tool_context_fingerprint": "sha256:" + "a" * 64,
+                "content": render_tool_contract_block(
+                    tool_id, "sha256:" + "a" * 64, f"# {tool_id}\n契约正文"
+                ),
                 "hydration_targets": [tool_id],
             }
 
@@ -1830,6 +1834,9 @@ async def test_create_agent_runner_graph_prepare_turn_seeds_session_hydrated_too
                     "ok": True,
                     "tool_id": "filesystem_write",
                     "tool_context_fingerprint": "sha256:" + "a" * 64,
+                    "content": render_tool_contract_block(
+                        "filesystem_write", "sha256:" + "a" * 64, "# filesystem_write\n契约正文"
+                    ),
                 },
                 ensure_ascii=False,
             ),
@@ -2297,6 +2304,9 @@ async def test_create_agent_runner_graph_prepare_turn_recovers_paused_manual_con
                             "ok": True,
                             "tool_id": "filesystem_write",
                             "tool_context_fingerprint": "sha256:" + "a" * 64,
+                            "content": render_tool_contract_block(
+                                "filesystem_write", "sha256:" + "a" * 64, "# filesystem_write\n契约正文"
+                            ),
                         },
                         ensure_ascii=False,
                     ),

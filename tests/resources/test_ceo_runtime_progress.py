@@ -26,6 +26,7 @@ from g3ku.runtime import web_ceo_sessions
 from g3ku.runtime.api import ceo_sessions, websocket_ceo
 from g3ku.runtime.frontdoor import _ceo_create_agent_impl as create_agent_impl
 from g3ku.runtime.frontdoor._ceo_support import CeoFrontDoorSupport
+from g3ku.runtime.tool_contract_block import render_tool_contract_block
 from g3ku.runtime.frontdoor.ceo_runner import CeoFrontDoorRunner
 from g3ku.runtime.frontdoor.message_builder import CeoMessageBuilder
 from g3ku.runtime.frontdoor.state_models import CeoFrontdoorInterrupted, CeoPendingInterrupt
@@ -7548,6 +7549,13 @@ async def test_ceo_frontdoor_prepare_turn_heartbeat_inherits_previous_tool_state
                     "ok": True,
                     "tool_id": "filesystem_write",
                     "tool_context_fingerprint": "tcf:fixture-filesystem-write",
+                    # 在场判据只认块：交付行必须带 `[TOOL_CONTRACT_V1:…]`，光有
+                    # fingerprint 键是改造前的形状。
+                    "content": render_tool_contract_block(
+                        "filesystem_write",
+                        "tcf:fixture-filesystem-write",
+                        "# filesystem_write\n契约正文",
+                    ),
                 },
                 ensure_ascii=False,
             ),
@@ -7761,6 +7769,13 @@ async def test_ceo_frontdoor_prepare_turn_cron_inherits_previous_tool_state_with
                     "ok": True,
                     "tool_id": "filesystem_write",
                     "tool_context_fingerprint": "tcf:fixture-filesystem-write",
+                    # 在场判据只认块：交付行必须带 `[TOOL_CONTRACT_V1:…]`，光有
+                    # fingerprint 键是改造前的形状。
+                    "content": render_tool_contract_block(
+                        "filesystem_write",
+                        "tcf:fixture-filesystem-write",
+                        "# filesystem_write\n契约正文",
+                    ),
                 },
                 ensure_ascii=False,
             ),
