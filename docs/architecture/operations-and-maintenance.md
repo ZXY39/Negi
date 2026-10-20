@@ -791,3 +791,11 @@ Operator expectations:
 - On startup, the runtime should rebuild catalog retrieval automatically by syncing the resource catalog back into the unified context store.
 
 If tool/skill retrieval does not return after restart, first inspect resource runtime initialization and then confirm that the memory runtime reaches a healthy catalog-bridge state.
+
+## 11. 读口报 `SQLITE_CANTOPEN`：先分"库打不开"还是"临时目录建不出文件"
+
+- 异常文本是 `unable to open database file`，而日志里印的 path 是**库文件的绝对路径**，于是"库坏了"与"SQLite 建不出自己的排序临时文件"在文本上完全同形。判据只能来自"这条语句是否需要落盘"，不能来自异常消息。
+- 哪些读需要落盘：带 `ORDER BY` 的大表扫描（`list_worker_status`、`list_nodes`、`task_disk_usage` 摘要、`perf_samples` 读数）。主键点查与 `count(*)` 不落盘。所以**"部分端点 200、部分稳定 500"是这条故障的正常形状**，不要按端点差异去归因。
+- 读车道失败时现场打一行诊断，判读顺序：`spill=` 与 `point=` 先对——`spill=failed:SQLITE_CANTOPEN` 而 `point=ok` ⇒ 临时目录这条路坏了，库没事；两者都失败 ⇒ 才往库文件、句柄、路径方向查。`cross_check[<另一条车道>]` 证的是"是不是只有一条连接坏"，`conn_age_s` 证"是不是运行中才坏"。
+- 两个会把人带偏的读数：`tempfile.gettempdir()` 在候选目录不可写时**静默回落到工作目录**，于是打印出一个明明可写的路径；`os.access(dir, W_OK)` 只看 ACL，过滤驱动拦截下仍返回 True。落点假设一律用"真建一个文件""真做一次需要落盘的排序"来判。`PRAGMA temp_directory` 在当前 SQLite build 取不到行，`create temp table` 可以全程留在内存里，两者都不能当证据。
+- 运行时不把临时目录锚到数据根：进程继承启动者的 `TMP` / `TEMP`。所以同一家伙在一种启动方式下好好的、另一种下就读不出数，先比环境而不是比代码。两条处置：把 `TMP` / `TEMP` 指到确定可写的目录再起进程（改的是整条进程树，SQLite 与 `tempfile` 一起对上）；或对单条连接 `PRAGMA temp_store=MEMORY`（只挡住 spill，排序量特别大时把内存压力搬进进程）。
