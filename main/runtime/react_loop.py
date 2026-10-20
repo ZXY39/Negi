@@ -120,7 +120,7 @@ from g3ku.runtime.tool_history import (
 )
 from g3ku.runtime.tool_impulse import IMPULSE_INVALID, IMPULSE_REJECT, tool_facing_runtime_context
 from g3ku.runtime.tool_result_status import is_error_like_tool_result
-from g3ku.runtime.tool_visibility import NODE_FIXED_BUILTIN_TOOL_NAMES
+from g3ku.runtime.tool_visibility import NODE_NEVER_CONTRACT_TOOL_NAMES
 from g3ku.runtime.tool_watchdog import (
     actor_role_allows_watchdog,
     resolve_effective_tool_timeout,
@@ -5161,13 +5161,13 @@ class ReActToolLoop:
     def _impulse_contract_applicable(self, *, tool_name: str, runtime_context: dict[str, Any]) -> bool:
         """这一跳是不是"授权了但契约没在场"的调用。
 
-        常驻内置不进判据（D13）；块已经在上下文里就不是冲动调用。判据视图缺失
-        （`tool_contract_presence` 没被写过，例如旁路调用）时**不**走冲动路径——
-        按状态豁免闸门却在上下文其实带着契约时把调用降级成"只交契约"，等于让模型
-        白多等一跳。
+        常驻内置与循环自己注入的控制信号不进判据（D13）；块已经在上下文里就不是冲动
+        调用。判据视图缺失（`tool_contract_presence` 没被写过，例如旁路调用）时**不**走
+        冲动路径——按状态豁免闸门却在上下文其实带着契约时把调用降级成"只交契约"，等于让
+        模型白多等一跳。
         """
         name = str(tool_name or '').strip()
-        if not name or name in NODE_FIXED_BUILTIN_TOOL_NAMES:
+        if not name or name in NODE_NEVER_CONTRACT_TOOL_NAMES:
             return False
         presence = runtime_context.get('tool_contract_presence')
         if not isinstance(presence, dict):

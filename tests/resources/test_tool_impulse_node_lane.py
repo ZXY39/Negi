@@ -286,6 +286,12 @@ def test_breaker_predicate_excludes_impulse_applicable_names(tmp_path: Path) -> 
     )
     # 常驻内置永不冲动（判据视图为空也不拦它）。
     assert loop._impulse_contract_applicable(tool_name="exec", runtime_context=_context()) is False
+    # 循环注入的控制信号也没有契约可交：把它们算成冲动调用，等于让重复调用熔断
+    # 对 `submit_message_distribution` / `submit_notice_inspection_decision` 失明。
+    for control_name in ("submit_message_distribution", "submit_notice_inspection_decision", "silent"):
+        assert loop._impulse_contract_applicable(tool_name=control_name, runtime_context=_context()) is False
+    # 前门的常驻内置在节点道是带 toolskill 的资源工具，必须仍能被冲动投递救回来。
+    assert loop._impulse_contract_applicable(tool_name="memory_note", runtime_context=_context()) is True
     # 判据视图缺失（旁路调用）时不走冲动路径，也不该被熔断豁免误伤。
     context = _context()
     context.pop("tool_contract_presence")

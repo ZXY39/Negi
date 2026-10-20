@@ -24,15 +24,22 @@ from g3ku.agent.tools.base import (
 from g3ku.runtime.frontdoor._ceo_runtime_ops import _provider_tool_schema
 from g3ku.runtime.tool_visibility import (
     CEO_FIXED_BUILTIN_TOOL_NAMES,
-    NON_HYDRATABLE_TOOL_NAMES,
+    CEO_NEVER_CONTRACT_TOOL_NAMES,
     NODE_FIXED_BUILTIN_TOOL_NAMES,
+    NODE_NEVER_CONTRACT_TOOL_NAMES,
+    NON_HYDRATABLE_TOOL_NAMES,
 )
+from main.runtime import internal_tools
 from main.runtime.react_loop import ReActToolLoop
 from main.runtime.stage_budget import (
     CONTEXT_LOADER_STAGE_TOOL_NAMES,
     CONTROL_STAGE_TOOL_NAMES,
     SILENT_TOOL_NAME,
 )
+
+
+async def _callback(*_args: object, **_kwargs: object) -> dict:
+    return {}
 
 
 class _FixtureTool(Tool):
@@ -166,6 +173,48 @@ def test_non_hydratable_set_matches_the_authoritative_constants() -> None:
         assert name in NON_HYDRATABLE_TOOL_NAMES, name
     for name in (*CEO_FIXED_BUILTIN_TOOL_NAMES, *NODE_FIXED_BUILTIN_TOOL_NAMES):
         assert name in NON_HYDRATABLE_TOOL_NAMES, name
+
+
+def test_every_loop_injected_control_tool_is_exempt() -> None:
+    """控制信号工具由循环注入、没有 toolskill，`reuse_args` 对它们是一条永不兑现的承诺。
+
+    正本取 `main/runtime/internal_tools.py` 里的类，逐个实例化读 `.name`：新增一颗控制
+    信号而忘了进豁免名单，就在这里红，而不是悄悄在 wire 上多印一个字段。
+    """
+    names = {
+        str(tool.name or '').strip()
+        for tool in (
+            internal_tools.SilentTool(),
+            internal_tools.SpawnChildNodesTool(_callback),
+            internal_tools.SubmitFinalResultTool(_callback, node_kind='execution'),
+            internal_tools.SubmitMessageDistributionTool(_callback),
+            internal_tools.SubmitNextStageTool(_callback),
+            internal_tools.SubmitNoticeInspectionDecisionTool(_callback),
+        )
+    }
+    assert '' not in names
+    payload_parameters = {
+        "type": "object",
+        "properties": {"payload": {"type": "string"}},
+        "required": ["payload"],
+    }
+    for name in sorted(names):
+        assert name in NON_HYDRATABLE_TOOL_NAMES, name
+        assert name in NODE_NEVER_CONTRACT_TOOL_NAMES, name
+        # 带真实入参也不该带字段：投递路径对它们一律 reject，字段就是一个永不兑现的承诺。
+        assert tool_declares_reuse_args(_FixtureTool(name, parameters=payload_parameters)) is False, name
+
+
+def test_node_lane_exemption_does_not_reuse_the_ceo_names() -> None:
+    """前门的常驻内置在节点道是带 toolskill 的资源工具，不能跟着一起豁免。
+
+    `memory_note` / `task_summary` 这类名字若在节点道被当成"永不带契约"，冲动路径就不会
+    给它们送契约；Stage 5 的在场闸门一上，这批工具会在节点上成批失能（D13）。
+    """
+    for name in ("memory_note", "task_summary", "task_progress", "create_async_task"):
+        assert name in CEO_FIXED_BUILTIN_TOOL_NAMES, name
+        assert name not in NODE_NEVER_CONTRACT_TOOL_NAMES, name
+        assert name in CEO_NEVER_CONTRACT_TOOL_NAMES, name
 
 
 def test_universal_timeout_surface_is_untouched() -> None:

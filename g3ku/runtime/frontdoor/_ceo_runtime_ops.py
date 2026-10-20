@@ -123,7 +123,7 @@ from g3ku.runtime.tool_history import (
     truncate_group_head_tail,
 )
 from g3ku.runtime.tool_impulse import IMPULSE_REJECT, IMPULSE_STAGED
-from g3ku.runtime.tool_visibility import CEO_FIXED_BUILTIN_TOOL_NAMES
+from g3ku.runtime.tool_visibility import CEO_FIXED_BUILTIN_TOOL_NAMES, CEO_NEVER_CONTRACT_TOOL_NAMES
 from g3ku.runtime.web_ceo_sessions import (
     WEB_CEO_IMAGE_UPLOAD_MAX_BYTES,
     actual_request_dir_for_session,
@@ -7525,7 +7525,7 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
         "执行发生在契约可见之后"这条不变量。
         """
         name = str(tool_name or '').strip()
-        if not name or name in CEO_FIXED_BUILTIN_TOOL_NAMES:
+        if not name or name in CEO_NEVER_CONTRACT_TOOL_NAMES:
             return None
         session = (runtime_context or {}).get('runtime_session')
         if session is None:
