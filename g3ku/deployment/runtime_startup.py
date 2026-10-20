@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 import shutil
+import tempfile
 from pathlib import Path
 from typing import Any
 
@@ -13,6 +14,7 @@ from g3ku.utils.helpers import ensure_dir, sync_workspace_templates
 
 BOOTSTRAP_PASSWORD_ENV = "G3KU_BOOTSTRAP_PASSWORD"
 RESOURCE_SEED_ROOT_ENV = "G3KU_RESOURCE_SEED_ROOT"
+RUNTIME_TEMP_DIR_PARTS = ("temp",)
 PERSISTENT_WORKSPACE_DIRS = (
     ".g3ku",
     "memory",
@@ -21,6 +23,45 @@ PERSISTENT_WORKSPACE_DIRS = (
     "skills",
     "tools",
 )
+
+
+def runtime_temp_dir() -> Path:
+    """数据根一侧的临时工作区，与 `ensure_persistent_workspace_dirs` 建的是同一个目录。"""
+    return ensure_dir(data_work_path(*RUNTIME_TEMP_DIR_PARTS))
+
+
+def anchor_process_temp_dir() -> str:
+    """把进程的临时目录指向数据根的 `temp/`；返回锚到的目录，锚不上返回空串并保持继承到的环境不动。
+
+    SQLite 在 Windows 上按 `TMP` / `TEMP` 找临时目录，排序超过内存就在那儿建文件。建不出来
+    报的是 `SQLITE_CANTOPEN`，而异常文本里印的是**库文件的绝对路径**，长得像"库打不开"：
+    带 `ORDER BY` 的读（worker 状态、节点表、磁盘摘要、`perf_samples`）会稳定失败，而主键
+    点查照旧成功。启动者的环境里那个目录可能不可写（容器、被安全策略拦下的解释器、被清理
+    过的 `%TEMP%`），所以落点由运行时自己定，不继承调用者。
+
+    可写性用真建一个文件判：`os.access(dir, W_OK)` 只看 ACL，过滤驱动拦截下它仍返回 True。
+    锚不上就保持继承到的环境不动并打一行——数据目录本身只读时，把 `TMP` 指过去只会把一个
+    可能还能用的环境换成一定能坏的。
+    """
+    target: Path | None = None
+    try:
+        target = runtime_temp_dir()
+        probe = target / ".g3ku-write-probe"
+        probe.write_text("probe", encoding="utf-8")
+        probe.unlink()
+    except OSError as exc:
+        shown = str(target) if target is not None else ""
+        logger.warning(
+            f"Runtime temp anchor skipped: data-root temp not writable path={shown} "
+            f"{type(exc).__name__}:{getattr(exc, 'errno', '')}"
+        )
+        return ""
+    value = str(target)
+    for name in ("TMP", "TEMP", "TMPDIR"):
+        os.environ[name] = value
+    tempfile.tempdir = value
+    logger.info(f"Runtime temp anchored: {value}")
+    return value
 
 
 def ensure_persistent_workspace_dirs(workspace: Path) -> dict[str, str]:

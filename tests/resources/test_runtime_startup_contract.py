@@ -102,14 +102,23 @@ def test_auto_unlock_from_env_uses_password_when_master_key_is_absent(monkeypatc
 
 def test_web_command_forwards_no_worker(monkeypatch) -> None:
     captured: dict[str, object] = {}
+    anchored: list[str] = []
 
     monkeypatch.setattr("g3ku.shells.web.run_web_shell", lambda **kwargs: captured.update(kwargs))
+    # 入口锚定改的是真进程环境（TMP/TEMP/TMPDIR 与 tempfile.tempdir），CliRunner 不还原，
+    # 让它会污染同会话里后面那些按临时目录判读写用例。这里换成记录桩：既钉住"入口锚定过"，
+    # 又不把环境留给后面。锚定本身的行为由 test_runtime_temp_anchor.py 钉。
+    monkeypatch.setattr(
+        "g3ku.deployment.runtime_startup.anchor_process_temp_dir",
+        lambda: anchored.append("entry") or "",
+    )
 
     runner = CliRunner()
     result = runner.invoke(commands.app, ["web", "--no-worker"])
 
     assert result.exit_code == 0
     assert captured["with_worker"] is False
+    assert anchored == ["entry"]
 
 
 def test_prepare_web_server_start_uses_explicit_callback_env(monkeypatch, tmp_path: Path) -> None:

@@ -330,6 +330,10 @@ def web(
     with_worker: bool = typer.Option(True, "--with-worker/--no-worker", help="Allow the web process to manage a local task worker."),
 ):
     """Start Negi Web UI."""
+    from g3ku.deployment.runtime_startup import anchor_process_temp_dir
+
+    anchor_process_temp_dir()
+
     from g3ku.shells.web import run_web_shell
 
     run_web_shell(
@@ -360,6 +364,10 @@ def window(
 @app.command()
 def worker():
     """Start the background task worker."""
+    from g3ku.deployment.runtime_startup import anchor_process_temp_dir
+
+    anchor_process_temp_dir()
+
     asyncio.run(run_worker_runtime())
 
 
