@@ -1618,6 +1618,124 @@ test("压缩在新回合第一跳触发时，线挪到整个气泡之前，不�
     );
 });
 
+test("boundary 0（本次折的是更早的历史）线也落在气泡之前，不追到回合之后", () => {
+    const api = loadApp();
+    const feed = feedHarness(api);
+    api.patchCeoInflightTurn({
+        turn_id: "t1",
+        source: "user",
+        status: "running",
+        canonical_context_delta: { stages: [railStage(1, "第一"), railStage(2, "第二")] },
+    });
+
+    // boundary 0 是"本回合没有任何阶段被折进摘要"的合法取值：整条回合都在线下方。
+    // 旧实现把它当成"没有边界"⇒ 退回 findCeoCompressionAnchor 追到回合之后，
+    // 于是压缩之后跑出来的阶段全在线上方。
+    assert.equal(api.applyCeoCompressionMarker("web:test", {
+        state: "completed", source: "auto",
+        stats: { turn_id: "t1", boundary_stage_index: 0 },
+    }), true);
+
+    const [divider, bubble] = feed._children;
+    assert.match(String(divider.className), /ceo-compression-divider is-completed/);
+    assert.equal(divider.dataset.ceoCompressionBoundary, undefined, "0 不写进 dataset：它是「无边界」的同义写法");
+    assert.equal(bubble.getAttribute("data-ceo-key"), "turn:t1", "回合整段在线下方，不切");
+
+    // 压缩之后的新阶段继续长在线下方。
+    api.patchCeoInflightTurn({
+        turn_id: "t1",
+        source: "user",
+        status: "running",
+        canonical_context_delta: { stages: [railStage(1, "第一"), railStage(2, "第二"), railStage(3, "第三")] },
+    });
+    assert.deepEqual(
+        Array.from(railOf(bubble).matchAll(/data-stage-id="([^"]+)"/g), (m) => m[1]),
+        ["frontdoor-stage-1", "frontdoor-stage-2", "frontdoor-stage-3"]
+    );
+    assert.equal(feed._children[0], divider, "线仍在该回合之前");
+});
+
+test("压缩帧比首条 turn patch 先到：认领那条还没 turn_id 的实时气泡，线照样切开", () => {
+    const api = loadApp();
+    const feed = feedHarness(api);
+    // 本地刚发出、服务端还没回第一帧：气泡存在但还没有 turn_id。
+    api.patchCeoInflightTurn({
+        source: "user",
+        status: "running",
+        canonical_context_delta: { stages: [railStage(1, "第一"), railStage(2, "第二")] },
+    });
+
+    assert.equal(api.applyCeoCompressionMarker("web:test", {
+        state: "completed", source: "auto",
+        stats: { turn_id: "t-late", boundary_stage_index: 2 },
+    }), true);
+
+    assert.equal(feed._children.length, 3, "必须切开，而不是把线追到 feed 尾部");
+    const [head, divider, continuation] = feed._children;
+    assert.match(String(divider.className), /ceo-compression-divider/);
+    assert.equal(head.getAttribute("data-ceo-key"), "turn:t-late#pre-2");
+    assert.equal(continuation.getAttribute("data-ceo-key"), "turn:t-late");
+    // 认领之后随后的 turn patch 直接落到续跑段上，不再另起一条。
+    api.patchCeoInflightTurn({
+        turn_id: "t-late",
+        source: "user",
+        status: "running",
+        canonical_context_delta: {
+            stages: [railStage(1, "第一"), railStage(2, "第二"), railStage(3, "第三")],
+        },
+    });
+    assert.equal(feed._children.length, 3);
+    assert.deepEqual(
+        Array.from(railOf(head).matchAll(/data-stage-id="([^"]+)"/g), (m) => m[1]),
+        ["frontdoor-stage-1", "frontdoor-stage-2"]
+    );
+    assert.deepEqual(
+        Array.from(railOf(continuation).matchAll(/data-stage-id="([^"]+)"/g), (m) => m[1]),
+        ["frontdoor-stage-3"]
+    );
+});
+
+test("压缩之后的上方冻结：头段不再收帧，新阶段与新插话都只长在线下方", () => {
+    const api = loadApp();
+    const feed = feedHarness(api);
+    api.patchCeoInflightTurn({
+        turn_id: "t1",
+        source: "user",
+        status: "running",
+        canonical_context_delta: { stages: [railStage(1, "第一"), railStage(2, "第二")] },
+    });
+    api.applyCeoCompressionMarker("web:test", {
+        state: "completed", source: "auto",
+        stats: { turn_id: "t1", boundary_stage_index: 2 },
+    });
+    const [head, divider, continuation] = feed._children;
+
+    // 之后每一帧都带全量阶段（增量合并的基线就是全量）：上方必须一动不动。
+    for (const count of [3, 4, 5]) {
+        const stages = [];
+        for (let index = 1; index <= count; index += 1) stages.push(railStage(index, `第${index}`));
+        api.patchCeoInflightTurn({
+            turn_id: "t1",
+            source: "user",
+            status: "running",
+            canonical_context_delta: { stages },
+        });
+        assert.deepEqual(
+            Array.from(railOf(head).matchAll(/data-stage-id="([^"]+)"/g), (m) => m[1]),
+            ["frontdoor-stage-1", "frontdoor-stage-2"],
+            `第 ${count} 帧之后上方仍只有边界前那两张卡`
+        );
+        assert.equal(feed._children.length, 3, "上方不会被追加新气泡");
+        assert.equal(feed._children[0], head);
+        assert.equal(feed._children[1], divider);
+        assert.equal(feed._children[2], continuation);
+    }
+    assert.deepEqual(
+        Array.from(railOf(continuation).matchAll(/data-stage-id="([^"]+)"/g), (m) => m[1]),
+        ["frontdoor-stage-3", "frontdoor-stage-4", "frontdoor-stage-5"]
+    );
+});
+
 test("重建按转录里的边界键把线放回阶段中间，标记行不再画第二条", () => {
     const api = loadApp();
     const feed = feedHarness(api);
@@ -1769,7 +1887,7 @@ test("重建时转录标记行改切进进行中回合，不留在行位置", ()
     assert.equal(api.getActiveCeoTurn(null, "t1")?.el, continuation);
 });
 
-test("切不开时保留按行位置画的那条线，不让线凭空消失", () => {
+test("轨道还没到时也先切，线不追到回合之后；轨道一到就补切", () => {
     const api = loadApp();
     const feed = feedHarness(api);
     const messages = [
@@ -1783,11 +1901,34 @@ test("切不开时保留按行位置画的那条线，不让线凭空消失", ()
         },
     ];
     api.renderCeoSnapshotMessageRange(messages, ["m:-:system:0"], 0, messages.length, "web:test");
-    // inflight 帧还没有阶段轨道：无从切起，只能保住行位置那条。
+    // inflight 帧还没有阶段轨道：这一截就是压缩那一刻的界面，必须整段冻在线上方。
+    // 旧行为是把线留在转录行的位置（回合之后），压缩后跑出来的阶段就全跑到线上方了。
     api.patchCeoInflightTurn({ turn_id: "t1", source: "user", status: "running" });
 
     api.applyCeoInflightCompressionRule(messages, { turn_id: "t1" });
 
-    assert.equal(feed._children.length, 2);
-    assert.match(String(feed._children[0].className), /ceo-compression-divider/);
+    assert.equal(feed._children.length, 3, "行位置那条被摘掉，换成切进回合的一条");
+    const [head, divider, continuation] = feed._children;
+    assert.match(String(divider.className), /ceo-compression-divider/);
+    assert.equal(divider.dataset.ceoCompressionBoundary, "2");
+    assert.equal(api.getActiveCeoTurn(null, "t1")?.el, continuation);
+
+    // 轨道第一次到达：<= boundary 的卡补回头段，续跑段只留边界之后的。
+    api.patchCeoInflightTurn({
+        turn_id: "t1",
+        source: "user",
+        status: "running",
+        canonical_context_delta: {
+            stages: [railStage(1, "第一"), railStage(2, "第二"), railStage(3, "第三")],
+        },
+    });
+
+    assert.deepEqual(
+        Array.from(railOf(head).matchAll(/data-stage-id="([^"]+)"/g), (m) => m[1]),
+        ["frontdoor-stage-1", "frontdoor-stage-2"]
+    );
+    assert.deepEqual(
+        Array.from(railOf(continuation).matchAll(/data-stage-id="([^"]+)"/g), (m) => m[1]),
+        ["frontdoor-stage-3"]
+    );
 });

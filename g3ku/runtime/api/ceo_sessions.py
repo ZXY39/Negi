@@ -649,23 +649,28 @@ async def create_ceo_session(payload: dict | None = Body(default=None)):
 
 
 def _assert_edit_fork_runtime_idle(runtime_session) -> None:
-    """编辑重发/Fork 的运行态复验：任何进行中回合迹象一律 409。
+    """编辑重发/Fork 的运行态复验：有活的执行体一律 409。
 
     与快照侧防御型显示总开关（websocket_ceo._session_fully_stable_for_history_edit）
     同一语义；truncate 在拿锁前与锁内各调用一次（心跳可能先抢到锁）。
+
+    判据是「有没有活的执行体」，不是「状态字段像不像空闲」：暂停、出错、空闲、已完成
+    都已经停下，截断源转录是安全的；只有真在跑、等审批、压缩在途、还有待发补充时才拦。
+    这里曾把 `status == "running"` 与 `paused` 一并拦掉，于是暂停/出错之后按钮虽然
+    看得见，点下去仍然 409——与快照侧一起构成「暂停了却改不了刚才那句」。
     """
     if runtime_session is None:
         return
     state = getattr(runtime_session, "state", None)
     if bool(getattr(state, "is_running", False)):
         raise HTTPException(status_code=409, detail="ceo_turn_in_progress")
-    if str(getattr(state, "status", "") or "").strip().lower() == "running":
-        raise HTTPException(status_code=409, detail="ceo_turn_in_progress")
-    if bool(getattr(state, "paused", False)):
-        raise HTTPException(status_code=409, detail="ceo_turn_in_progress")
     if list(getattr(state, "queued_follow_up_messages", []) or []):
         raise HTTPException(status_code=409, detail="ceo_turn_in_progress")
     if list(getattr(state, "pending_interrupts", []) or []):
+        raise HTTPException(status_code=409, detail="ceo_turn_in_progress")
+    # 回合外的手动压缩：is_running 为假，但它正在改转录，截断会让摘要基线错位。
+    compression = getattr(runtime_session, "_compression_state", None)
+    if isinstance(compression, dict) and str(compression.get("status") or "").strip().lower() == "running":
         raise HTTPException(status_code=409, detail="ceo_turn_in_progress")
 
 

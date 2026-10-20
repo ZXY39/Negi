@@ -187,8 +187,14 @@ test("model retry toast hides when live inflight retry state clears", () => {
 });
 
 test("primary button stays in pause state while compression is running", () => {
-    const { syncCeoPrimaryButton, S, U } = loadApp();
-    S.ceoTurnActive = true;
+    const { syncCeoPrimaryButton, setCeoSessionSnapshotCache, S, U } = loadApp();
+    // 压缩在途 = 会话没停稳：主按钮必须留着暂停入口。判据现算自会话级 compression，
+    // 不再依赖调用方先把 S.ceoTurnActive 写成 true（那个布尔量逐帧被抹）。
+    S.activeSessionId = "web:test";
+    S.ceoSessions = [{ session_id: "web:test", is_readonly: false }];
+    setCeoSessionSnapshotCache("web:test", {
+        compression: { status: "running", source: "auto" },
+    });
     U.ceoInput.value = "";
 
     syncCeoPrimaryButton();

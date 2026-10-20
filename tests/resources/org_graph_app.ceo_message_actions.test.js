@@ -129,6 +129,24 @@ class StubHTMLElement extends StubElement {
     }
 }
 
+// 页面里的元素是解析 HTML 建出来的，句柄随用随有；这里让 querySelector 按需长出子元素，
+// 装配路径就不必为了测试桩去改写。
+class LazyStubHTMLElement extends StubHTMLElement {
+    querySelector(selector) {
+        if (!this._qs[selector]) {
+            // 子元素也用同一套桩：装配路径会给它们挂监听、塞子节点。
+            const child = new LazyStubHTMLElement();
+            child._feed = this._feed;
+            this._qs[selector] = child;
+        }
+        return this._qs[selector];
+    }
+
+    addEventListener() {}
+
+    focus() {}
+}
+
 class FeedStub extends StubHTMLElement {
     constructor() {
         super();
@@ -173,11 +191,18 @@ function loadApp() {
             getElementById: () => null,
             querySelector: () => null,
             querySelectorAll: () => [],
-            createElement: () => new StubHTMLElement(),
+            // 建出来的元素按需长出子元素：暂停收尾补出的回复行会走 renderPersistedCeoAssistantTurn
+            // 那条完整装配路径（assistant-text / interaction-flow / 元信息行），少了这些
+            // 句柄整页重建会直接抛。
+            createElement: () => new LazyStubHTMLElement(),
             addEventListener: () => {},
         },
         Element: StubElement,
         HTMLElement: StubHTMLElement,
+        HTMLButtonElement: StubHTMLElement,
+        HTMLInputElement: StubHTMLElement,
+        HTMLTextAreaElement: StubHTMLElement,
+        HTMLSelectElement: StubHTMLElement,
         URLSearchParams,
         URL,
         AbortController,

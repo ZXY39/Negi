@@ -929,19 +929,24 @@ def _rewrite_turn_snapshot_media(
 def _session_fully_stable_for_history_edit(session: Any, turn_payload: dict[str, Any] | None) -> bool:
     """编辑重发/Fork 按钮的防御型显示总开关。
 
-    任何进行中请求/回合的迹象（用户轮、heartbeat/cron 内部轮、排队 follow-up、
-    待审批中断）都要求整体隐藏按钮；端点侧另有 409 复验。
+    判据是「源会话当前没有活的执行体」，而不是「状态字段长得像空闲」：暂停、出错、
+    空闲、已完成都是稳定态（`is_running=False` 且没有在途中断/排队/在飞快照），
+    只有真的在跑、等审批、压缩在途或还有待发补充时才整体隐藏按钮。
+
+    这里曾把 `status == "running"` 与 `paused` 一并当成不稳定，于是暂停/出错之后
+    `is_running` 早就是 False，按钮却整批消失，只能靠刷新后另一次快照才回来。
     """
     state = getattr(session, "state", None)
     if bool(getattr(state, "is_running", False)):
         return False
-    if str(getattr(state, "status", "") or "").strip().lower() == "running":
-        return False
-    if bool(getattr(state, "paused", False)):
-        return False
     if list(getattr(state, "pending_interrupts", []) or []):
         return False
     if list(getattr(state, "queued_follow_up_messages", []) or []):
+        return False
+    # 手动压缩跑在回合外：`is_running` 是 False，但它正在改转录，编辑重发会让它的
+    # 摘要基线落在被截断的历史上。压缩在途同样不是稳定态。
+    compression = getattr(session, "_compression_state", None)
+    if isinstance(compression, dict) and str(compression.get("status") or "").strip().lower() == "running":
         return False
     payload = turn_payload if isinstance(turn_payload, dict) else {}
     for lane in ("inflight_turn", "preserved_turn"):

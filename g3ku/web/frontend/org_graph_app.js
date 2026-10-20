@@ -4222,26 +4222,29 @@ function settleCeoCompressionHeadText(turn) {
 // 实时道：把正在跑的那个回合就地切成两段——头段冻结在边界之前那几阶段，续跑段接住之后
 // 的每一帧（阶段、流式文字、用量）。中间夹一条 feed 级的线，于是"压缩之后才发进来的用户
 // 插话"按它既有的"插到当前气泡之前"规则落点，天然就落到了线下方。
+//
+// 判据分三种，都只为同一件事服务：**线上方定住，线下方继续长**。
+//   - boundary 0，或已知阶段全在边界之下 ⇒ 这一回合没有任何阶段被折进摘要，整条气泡都在
+//     线下方，线插在气泡之前，不切；
+//   - 轨道还没到（total 0 且 boundary > 0）⇒ 不知道哪几阶段被折，但"当前已渲染的这一截"
+//     就是压缩那一刻的界面，必须整段冻在线上方；照切，续跑段不设阶段窗口兜住之后的一切；
+//   - 有阶段在线上方 ⇒ 按 stage_index 切，头段只留 <= boundary 的那几张卡。
+// 唯一不切的是已收尾的历史回合：它之后不会再有内容，线交给 findCeoCompressionAnchor 兜底。
 function splitCeoTurnAtCompression(turn, boundary, state) {
-    if (!turn?.el?.parentNode || !Number.isFinite(boundary) || boundary <= 0) return false;
-    const { total, pre } = ceoCompressionStagesAroundBoundary(turn.lastExecutionTraceSummary?.stages, boundary);
-    if (!total) return false;
-    // pre == total：此刻已知的阶段全部折进了摘要。自动压缩跑在两跳之间的空档里——
-    // 上一阶段刚收尾、下一张阶段卡还没画出来，所以"全在边界之下"不代表"回合已结束"。
-    // 活着的回合（finalize 未落）之后每一帧都长在它身上，必须照样切：头段整段冻结在
-    // 线上方，空续跑段接住之后的阶段与流式文字。只有已收尾的历史回合才放弃切分——
-    // 它之后不会再有内容，线留在气泡后面由 findCeoCompressionAnchor 兜底。
-    if (pre >= total && turn.finalized) return false;
+    if (!turn?.el?.parentNode || !Number.isFinite(boundary) || boundary < 0) return false;
+    if (turn.finalized) return false;
     // 这条规则已经在这个回合身上落过一次（重建吸收、或同一帧早前切过）：再切就是重复的线。
     if (turn.compressionBoundary === boundary) return true;
+    const { total, pre } = ceoCompressionStagesAroundBoundary(turn.lastExecutionTraceSummary?.stages, boundary);
     const dividerState = CEO_COMPRESSION_TEXT[state] ? state : "completed";
+    const turnId = String(turn.turnId || "");
     const divider = buildCeoCompressionDividerElement(dividerState, {
         interactive: false,
-        turnId: String(turn.turnId || ""),
-        boundary,
+        turnId,
+        boundary: boundary > 0 ? boundary : "",
     });
     if (!divider) return false;
-    if (!pre) {
+    if (boundary === 0 || (total > 0 && !pre)) {
         // 这一回合的阶段全在压缩之后：线挪到气泡之前，不切。
         turn.compressionBoundary = boundary;
         mutateCeoFeed(() => {
@@ -4255,13 +4258,19 @@ function splitCeoTurnAtCompression(turn, boundary, state) {
     if (!continuation?.el?.parentNode) return false;
     const head = turn;
     const summary = head.lastExecutionTraceSummary;
-    head.stageWindowTo = boundary;
+    // 轨道未知时两头都不设窗口：被折的那几张卡随时可能才第一次到达，按 boundary 把它们
+    // 筛掉就等于让它们彻底不出现；宁可让续跑段先把它们画出来，等轨道真到了再补切。
+    const knownStages = total > 0;
+    if (knownStages) head.stageWindowTo = boundary;
     freezeCeoCompressionHeadKey(head.el, boundary);
     // 头段不再收帧：回合身份让给续跑段，之后的 finalize / 插话锚点都落在它身上。
     head.finalized = true;
-    continuation.stageWindowFrom = boundary + 1;
+    continuation.stageWindowFrom = knownStages ? boundary + 1 : null;
     continuation.turnId = head.turnId;
     continuation.compressionBoundary = boundary;
+    // 还没切的那一半先记在续跑段身上：轨道第一次到达时由
+    // reconcileDeferredCeoCompressionSplit 把 <= boundary 的卡补回头段。
+    if (!knownStages) continuation.compressionHead = head;
     // 续跑段立刻顶上门牌：视图状态还原与"线插在哪一回合后面"的查找都按 key 认，
     // 等下一帧才补的话，中间这段时间这条气泡是匿名的。
     if (head.turnId && continuation.el?.setAttribute) {
@@ -4282,6 +4291,51 @@ function splitCeoTurnAtCompression(turn, boundary, state) {
     return true;
 }
 
+// 压缩帧要切的那个实时回合。turn_id 对得上就用它；对不上时认下**唯一那条还没拿到
+// turn_id 的实时气泡**——手动暂停/首帧竞态里，标记帧可能比第一条 turn patch 先到，
+// 此时本地气泡还是匿名的，放过它就只能把线追到 feed 尾部，之后的新阶段全在线上方。
+function ceoLiveTurnForCompressionMarker(turnId = "") {
+    const normalizedTurnId = normalizeCeoTurnId(turnId);
+    if (!normalizedTurnId) return null;
+    // 必须自己核对 id：getActiveCeoTurn(null, turnId) 在 id 对不上时会退化成
+    // "随便给我一条活跃回合"，拿它当命中就等于把线切到了别的回合身上。
+    const matched = getActiveCeoTurn(null, normalizedTurnId);
+    if (matched && normalizeCeoTurnId(matched.turnId) === normalizedTurnId) return matched;
+    const anonymous = S.ceoPendingTurns.filter(
+        (turn) => turn && !turn.finalized && !normalizeCeoTurnId(turn.turnId),
+    );
+    if (anonymous.length !== 1) return null;
+    const claimed = anonymous[0];
+    claimed.turnId = normalizedTurnId;
+    if (claimed.el?.setAttribute) claimed.el.setAttribute("data-ceo-key", `turn:${normalizedTurnId}`);
+    return claimed;
+}
+
+// 压缩帧到达时这一回合还没有阶段轨道（首跳就压缩、或轨道帧还没到）：线已经画在气泡
+// 之间了，但两半都没法按 stage_index 分——于是续跑段先把整份轨道画出来，等轨道第一次
+// 到达时再补切一次：<= boundary 的卡搬回头段，续跑段只留边界之后的。
+// 不补这一步，压缩之后新跑出来的阶段会跟被折进去的那些混在同一段里，界面上看不出
+// 哪些是"已经压过的历史"、哪些是"压缩之后的新内容"——正是用户报的那个形状。
+function reconcileDeferredCeoCompressionSplit(turn) {
+    const head = turn?.compressionHead;
+    if (!head || turn.finalized) return false;
+    const boundary = Number(turn.compressionBoundary);
+    if (!Number.isFinite(boundary) || boundary < 0) return false;
+    const summary = turn.lastExecutionTraceSummary;
+    const { total, pre } = ceoCompressionStagesAroundBoundary(summary?.stages, boundary);
+    // 轨道还没到、或一张被折的卡都没有（压缩折的是更早的历史）：整段留在续跑段就是对的。
+    if (!total || !pre) return false;
+    turn.compressionHead = null;
+    head.stageWindowTo = boundary;
+    turn.stageWindowFrom = boundary + 1;
+    mutateCeoFeed(() => {
+        renderCeoStageTraceIntoTurn(head, summary);
+        settleCeoCompressionHeadText(head);
+        renderCeoStageTraceIntoTurn(turn, summary);
+    }, { scrollMode: "preserve" });
+    return true;
+}
+
 function applyCeoCompressionMarker(sessionId = "", marker = null) {
     // 终态那条线的本体是刚落盘的转录行；这一帧只负责让它在实时车道当场出现，
     // 不等整页重建。事件在写盘成功之后才广播，所以"画了线"不会先于"有这条行"。
@@ -4294,8 +4348,10 @@ function applyCeoCompressionMarker(sessionId = "", marker = null) {
     const stats = (marker || {}).stats || {};
     const turnId = String((marker || {}).turn_id || stats.turn_id || "").trim();
     const boundary = Number(stats.boundary_stage_index);
-    if (state === "completed" && Number.isFinite(boundary) && boundary > 0) {
-        const turn = getActiveCeoTurn(null, turnId);
+    // boundary 0 也是有效落点（本次压缩折的是更早的历史，整条回合都在线下方）：
+    // 把它当成"没有边界"就会退回追 feed 尾部，压缩之后跑出来的内容全在线上方。
+    if (state === "completed" && Number.isFinite(boundary) && boundary >= 0) {
+        const turn = ceoLiveTurnForCompressionMarker(turnId);
         if (turn && splitCeoTurnAtCompression(turn, boundary, state)) return true;
     }
     const dividerBoundary = Number.isFinite(boundary) && boundary > 0 ? boundary : "";
@@ -6422,12 +6478,54 @@ function discardCeoQueuedFollowUp(entryId) {
     return releaseCeoQueuedFollowUp(entryId, { refillComposer: false });
 }
 
+// 暂停入口的可见性判据：这条会话此刻是否还「不在稳定态」。
+// 只认权威事实，不认某一次帧有没有带上下文——S.ceoTurnActive 是逐帧被赋值的一个
+// 布尔量，心跳帧、内部轮收尾、缓存重建都会把它抹成 false，于是暂停按钮在回合仍在
+// 跑的时候一闪一闪（按不下去）。反过来，报错停下的会话没有任何东西会把那个布尔量
+// 置回 false，按钮就永久挂在屏幕上。所以这里每次现算：服务端状态、在飞快照、目录里
+// 的运行标记、压缩在途、待审批中断，任一为真就是非稳定态。
+function activeCeoSessionIsNonStable() {
+    const sessionId = activeSessionId();
+    if (!sessionId) return false;
+    // 目录里的 is_running 是服务端会话目录的读数（含心跳内部轮），但它会滞后：
+    // 只当作「在跑」的正向证据，不当否定证据。
+    if (activeSessionItem()?.is_running === true) return true;
+    const entry = getCeoSessionSnapshotCache(sessionId);
+    const inflight = normalizeCeoSnapshotInflight(entry?.inflight_turn);
+    const inflightStatus = String(inflight?.status || "").trim().toLowerCase();
+    if (inflightStatus === "running" || inflightStatus === "in_progress" || inflightStatus === "active") return true;
+    // 等审批是「回合没结束」的另一种形态：`is_running` 已经是 false，但这一轮还没走完，
+    // 必须留着暂停入口（此时按下去走的是中断/放弃那条路）。
+    if (ceoApprovalInterruptsFromSnapshotEntry(entry).length) return true;
+    if (typeof ceoSessionHasActiveApprovalBlockingState === "function"
+        && ceoSessionHasActiveApprovalBlockingState(sessionId)) return true;
+    // 压缩在途同样是「没停稳」：回合外的压缩 is_running 为假，但那段时间里新消息
+    // 会被挡住，用户需要一个可见的暂停入口。
+    if (!!activeCeoSessionCompressionState()) return true;
+    // 本地已经建了回合元素、还在等第一段内容：这一条是上面那些读数全都滞后时的兜底
+    // （刚发出消息、服务端还没回第一帧）。只认仍挂着加载态的回合——已经流式出正文的
+    // 回合有服务端帧撑着，而一个「未定稿但早已有内容」的回合如果永远等不到 final
+    // （内部轮），拿它当判据会让暂停按钮重新变成永久挂着。
+    return S.ceoPendingTurns.some((turn) => {
+        if (!turn || turn.finalized) return false;
+        return !!turn.textEl?.classList?.contains?.("assistant-text-loading");
+    });
+}
+
+// 暂停入口能不能按：本地回合未收尾（含派发闸门认的"还有未了结的活"）或权威读数说
+// 会话没停稳，两者取并——任一为真都必须能按下去。这里不写回 S.ceoTurnActive：那个
+// 布尔量还兼着"草稿入队还是直发"的判据，见 applyCeoState 的注释。
+function ceoSessionPauseAvailable() {
+    return !!S.ceoTurnActive || activeCeoSessionIsNonStable();
+}
+
 function syncCeoPrimaryButton() {
     syncCeoFeedTurnActiveClass();
     syncCeoAttachButton();
     if (!U.ceoSend) return;
+    const pauseAvailable = ceoSessionPauseAvailable();
     if (!activeSessionCanMessage()) {
-        if (S.ceoTurnActive) {
+        if (pauseAvailable) {
             // 归档渠道会话禁止发送，但运行中的回合必须能暂停：只读早期返回
             // 曾把唯一的暂停入口也禁掉，导致渠道回合无法在网页暂停。
             const label = S.ceoPauseBusy ? "暂停中" : "暂停";
@@ -6444,7 +6542,7 @@ function syncCeoPrimaryButton() {
     }
     const composerText = String(U.ceoInput?.value || "").trim();
     const hasComposerPayload = !!composerText || normalizeUploadList(S.ceoUploads).length > 0;
-    const isPause = !!S.ceoTurnActive && !hasComposerPayload;
+    const isPause = pauseAvailable && !hasComposerPayload;
     const label = S.ceoPauseBusy ? "暂停中" : isPause ? "暂停" : "发送";
     const icon = isPause ? "pause" : "send";
     U.ceoSend.innerHTML = `<i data-lucide="${icon}"></i> ${label}`;
@@ -6454,35 +6552,40 @@ function syncCeoPrimaryButton() {
         || !!S.ceoSessionBusy
         || !!S.ceoSessionCatalogBusy
         || !activeSessionId()
-        || (!S.ceoTurnActive && !hasComposerPayload)
+        || (!pauseAvailable && !hasComposerPayload)
     );
     U.ceoSend.setAttribute("aria-label", isPause ? "暂停当前 Leader 会话" : "发送消息");
     icons();
 }
 
-function finalizePausedCeoTurn(text = "已暂停", { source = null, landTranscriptRows = false } = {}) {
+function finalizePausedCeoTurn(text = "已暂停", { source = null, landTranscriptRows = false, turnId = "" } = {}) {
     const hasExplicitSource = source !== null && source !== undefined && String(source || "").trim();
     const normalizedSource = hasExplicitSource ? normalizeCeoTurnSource(source) : null;
-    const normalizedTurnId = normalizeCeoTurnId(arguments?.[1]?.turnId || "");
+    const normalizedTurnId = normalizeCeoTurnId(turnId);
     const turn = pullActiveCeoTurn(normalizedSource, normalizedTurnId);
-    if (!turn?.textEl || !turn.flowEl) return false;
-    mutateCeoFeed(() => {
-        turn.finalized = true;
-        turn.liveStreamText = "";
-        renderCeoLiveStreamTextIntoTurn(turn);
-        turn.textEl.textContent = String(text || "已暂停");
-        turn.textEl.classList.remove("pending");
-        if (turn.steps > 0) {
-            turn.flowEl.hidden = false;
-            turn.flowEl.open = true;
-            updateCeoTurnMeta(turn, "已暂停");
-        } else {
-            turn.flowEl.hidden = true;
-        }
-        setCeoTurnUsageCollapsed(turn, true);
-    }, { scrollMode: "preserve" });
+    // live 元素可能已经不在（心跳内部轮、或这一跳在别处被摘掉），但那不代表这一回合
+    // 没发生过。收尾的两半——气泡就地定稿、缓存补转录行——必须各自独立：早退一次，
+    // 随后补发的门槛帧会按缓存整页重建，把这一回合的用户行、回复行和阶段卡一起抹掉，
+    // 用户只能刷新才重新看见。
+    if (turn?.textEl && turn?.flowEl) {
+        mutateCeoFeed(() => {
+            turn.finalized = true;
+            turn.liveStreamText = "";
+            renderCeoLiveStreamTextIntoTurn(turn);
+            turn.textEl.textContent = String(text || "已暂停");
+            turn.textEl.classList.remove("pending");
+            if (turn.steps > 0) {
+                turn.flowEl.hidden = false;
+                turn.flowEl.open = true;
+                updateCeoTurnMeta(turn, "已暂停");
+            } else {
+                turn.flowEl.hidden = true;
+            }
+            setCeoTurnUsageCollapsed(turn, true);
+        }, { scrollMode: "preserve" });
+    }
     const sessionId = activeSessionId();
-    patchCeoSessionSnapshotCache(sessionId, (entry) => {
+    const landedRows = patchCeoSessionSnapshotCache(sessionId, (entry) => {
         const inflightTurn = normalizeCeoSnapshotInflight(entry?.inflight_turn);
         if (!inflightTurn) return entry || {};
         const inflightSource = String(inflightTurn?.source || "").trim().toLowerCase();
@@ -6509,15 +6612,22 @@ function finalizePausedCeoTurn(text = "已暂停", { source = null, landTranscri
             inflightTurn?.user_messages,
             inflightTurn?.user_message
         ).map((item) => (item.turn_id || !laneTurnId ? item : { ...item, turn_id: laneTurnId }));
+        // 阶段轨道优先取 live 回合自己渲染出的那份；live 元素已经不在时回退到在飞快照
+        // 携带的轨道。少了这一步，暂停后重建出来的回复行没有轨道，阶段卡整段消失。
+        const pausedTraceContext = turn?.lastExecutionTraceSummary
+            || normalizeCeoSnapshotCanonicalContext(inflightTurn?.canonical_context_delta)
+            || normalizeCeoSnapshotCanonicalContext(inflightTurn?.canonical_context)
+            || null;
         const payload = buildFinalizedCeoTurnPayload(sessionId, {
             normalizedSource: normalizedSource || inflightSource,
-            normalizedTurnId,
+            normalizedTurnId: laneTurnId,
             finalUserMessages: laneUserMessages,
-            finalTraceContext: turn?.lastExecutionTraceSummary || null,
+            finalTraceContext: pausedTraceContext,
             finalCanonicalContext: null,
             text,
             meta: turn?.usage ? { usage: turn.usage } : {},
             completedAt: new Date().toISOString(),
+            status: "paused",
         });
         return {
             ...(entry || {}),
@@ -6525,7 +6635,7 @@ function finalizePausedCeoTurn(text = "已暂停", { source = null, landTranscri
             inflight_turn: payload.inflight_turn,
         };
     });
-    return true;
+    return !!turn?.textEl || !!landedRows;
 }
 
 function isCeoApprovalPauseSourceLegacy(source = "") {
@@ -6664,7 +6774,11 @@ function handleCeoError(payload = {}) {
 }
 
 function requestCeoPause() {
-    if (!S.ceoTurnActive || S.ceoPauseBusy) return;
+    if (S.ceoPauseBusy) return;
+    if (!ceoSessionPauseAvailable()) {
+        syncCeoPrimaryButton();
+        return;
+    }
     if (!S.ceoWs || S.ceoWs.readyState !== WebSocket.OPEN) {
         addMsg("Connection is not ready yet. Please try again in a moment.", "system");
         initCeoWs();
@@ -6826,7 +6940,9 @@ function maybeDispatchQueuedCeoFollowUps() {
 function handleCeoPrimaryAction() {
     const text = String(U.ceoInput?.value || "");
     const uploads = normalizeUploadList(S.ceoUploads);
-    if (S.ceoTurnActive && !text.trim() && !uploads.length) {
+    // 主按钮的两种语义由「会话是否还在跑」决定，而那个判据要现算：只看缓存的
+    // S.ceoTurnActive，会在它被某一帧抹掉的瞬间把暂停点成一次空发送。
+    if (ceoSessionPauseAvailable() && !text.trim() && !uploads.length) {
         requestCeoPause();
         return;
     }
@@ -7354,7 +7470,9 @@ function applyCeoEditForkGates(payload = {}, sessionId = "") {
 }
 
 function ceoHistoryEditBusyReason() {
-    if (S.ceoTurnActive) return "回合进行中（含心跳内部轮），请等待结束或先暂停。";
+    // 现算而不是读 S.ceoTurnActive：那个布尔量是逐帧写的，被心跳帧抹掉时这里会
+    // 放行一次必然被服务端 409 拒掉的点击；反过来它卡住时又会挡住已经停稳的会话。
+    if (activeCeoSessionIsNonStable()) return "回合进行中（含心跳内部轮），请等待结束或先暂停。";
     if (S.ceoSessionBusy || S.ceoSessionCatalogBusy) return "会话操作进行中，请稍后再试。";
     if (S.ceoUploadBusy) return "附件仍在上传，请稍候再试。";
     if (S.ceoPauseBusy) return "暂停请求进行中，请稍后再试。";
@@ -8786,6 +8904,8 @@ function patchCeoInflightTurn(snapshot = null, { sessionId = "", cacheField = "i
             renderCeoAssistantTextIntoTurn(turn, snapshot?.assistant_text || "", { status });
         }
         const stageRoundCount = renderCeoStageTraceIntoTurn(turn, preferredCanonicalContext);
+        // 压缩帧早于轨道到达时留下的半切状态：轨道一落地就把 <= boundary 的卡补回头段。
+        reconcileDeferredCeoCompressionSplit(turn);
         if (!stageRoundCount) {
             const timelineActive = !!turn?.lastExecutionTraceSummary
                 || (turn?.listEl instanceof HTMLElement && turn.listEl.children.length > 0);
@@ -9358,7 +9478,7 @@ function ceoFeedMatchesIncrementalFinalize(messageKeys = [], turn = null) {
     return true;
 }
 
-function buildFinalizedCeoTurnPayload(sessionId, { normalizedSource = "", normalizedTurnId = "", finalUserMessages = [], finalTraceContext = null, finalCanonicalContext = null, text = "", meta = null, completedAt = "" } = {}) {
+function buildFinalizedCeoTurnPayload(sessionId, { normalizedSource = "", normalizedTurnId = "", finalUserMessages = [], finalTraceContext = null, finalCanonicalContext = null, text = "", meta = null, completedAt = "", status = "" } = {}) {
     // finalize 三个旧分支的缓存写入统一为一次计算:消息列表与 inflight 清空只在此处构建。
     const entry = getCeoSessionSnapshotCache(sessionId);
     const inflightTurn = normalizeCeoSnapshotInflight(entry?.inflight_turn);
@@ -9382,12 +9502,22 @@ function buildFinalizedCeoTurnPayload(sessionId, { normalizedSource = "", normal
     // 元信息(token 用量 + 完成时间)不再依赖服务端快照补齐。
     const completedTimestamp = String(completedAt || "").trim();
     const silentReply = meta?.silent_reply === true;
+    // 暂停收尾写的这一行必须是「暂停的回复行」而不是「正常的最终回复」：刷新后服务端
+    // 归档行带 status=paused，缓存行不带的话，同一回合在暂停后与刷新后是两种画法
+    // （前者普通气泡、后者带暂停标记），阶段卡的渲染分支也不同。
+    const rowStatus = String(status || "").trim().toLowerCase();
+    const rowTurnId = normalizeCeoTurnId(normalizedTurnId || inflightTurn?.turn_id || "");
     messages = appendCeoSessionSnapshotMessage(messages, {
         role: "assistant",
         // 静默回合的正文要留在缓存行里：那是折叠行「展开」的内容，也是与后端快照
         // 一致的形状（后端已不再抹空）。抹成 "" 会让刷新后折叠行展开出空白。
         content: String(text || "").trim() || (silentReply ? "" : "Done."),
         ...(silentReply ? { silent_reply: true, silent_reason: String(meta?.silent_reason || "") } : {}),
+        ...(rowStatus ? { status: rowStatus } : {}),
+        // turn_id 是这一行参与门槛帧（回复行 Fork）与去重（同 turn 的 preserved_turn）
+        // 的唯一身份。缺了它，暂停收尾补出来的回复行既等不到 Fork 章，也不会阻止同一
+        // 回合被 preserved_turn 再画一遍。
+        ...(rowTurnId ? { turn_id: rowTurnId } : {}),
         canonical_context: persistedCanonicalContext,
         canonical_context_delta: finalTraceContext,
         usage: meta?.usage || null,

@@ -285,11 +285,14 @@ test("final 带 user_messages 且 DOM 对齐时增量收尾:既有节点引用�
     assert.equal(newUserEl.getAttribute("data-ceo-key"), "m:-:user:1");
     // 缓存与渲染记录同步更新:4 条消息,keys = 头两条 + 新用户 + 最终答复。
     assert.equal(api.S.ceoSnapshotCache["s1"].messages.length, 4);
+    // 收尾写进缓存的回复行带 turn_id：服务端快照里那一行本来就有，缓存不带的话
+    // 同一回合的 key 在刷新前后会从 m:-:assistant:0 变成 m:t1:assistant:0，展开态
+    // 与滚动锚点就都还原不回来。
     assert.deepEqual(api.S.ceoFeedRenderedMessageKeys.map(String), [
         "m:-:user:0",
         "m:t0:assistant:0",
         "m:-:user:1",
-        "m:-:assistant:0",
+        "m:t1:assistant:0",
     ]);
     assert.equal(api.S.ceoFeedRenderSessionId, "s1");
     assert.ok(api.S.ceoFeedRenderSignature.length > 0);
@@ -318,7 +321,7 @@ test("DOM 与记录不一致时回退全量快照重建,渲染记录对齐新消
         "m:-:user:0",
         "m:-:assistant:0",
         "m:-:user:1",
-        "m:-:assistant:1",
+        "m:t1:assistant:0",
     ]);
 });
 

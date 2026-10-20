@@ -122,9 +122,18 @@ def test_stability_gate_rejects_running_and_pending_lanes():
     assert websocket_ceo._session_fully_stable_for_history_edit(
         _idle_session_stub(pending_interrupts=[{"id": "a"}]), {}
     ) is False
+    # 暂停 / 出错 / 空闲都是稳定态：`is_running` 已经为假，截断源转录是安全的。
+    # 这里曾把 paused 与 status=="running" 一并当成不稳定，于是暂停之后按钮整批消失，
+    # 只能刷新等下一次快照——正是「暂停了却改不了刚才那句」的另一半。
     assert websocket_ceo._session_fully_stable_for_history_edit(
         _idle_session_stub(paused=True), {}
-    ) is False
+    ) is True
+    assert websocket_ceo._session_fully_stable_for_history_edit(
+        _idle_session_stub(status="paused", paused=True), {}
+    ) is True
+    assert websocket_ceo._session_fully_stable_for_history_edit(
+        _idle_session_stub(status="error"), {}
+    ) is True
     # inflight/preserved lane 存在(含 heartbeat 内部轮)即不稳定。
     assert websocket_ceo._session_fully_stable_for_history_edit(
         stable, {"inflight_turn": {"turn_id": "h1", "status": "running"}}
@@ -132,6 +141,16 @@ def test_stability_gate_rejects_running_and_pending_lanes():
     assert websocket_ceo._session_fully_stable_for_history_edit(
         stable, {"preserved_turn": {"turn_id": "p1"}}
     ) is False
+
+
+def test_stability_gate_rejects_compression_in_flight():
+    # 回合外的手动压缩：`is_running` 是假，但它正在改转录，编辑重发会让摘要基线错位。
+    compressing = _idle_session_stub()
+    compressing._compression_state = {"status": "running", "source": "manual_context_compression"}
+    assert websocket_ceo._session_fully_stable_for_history_edit(compressing, {}) is False
+    finished = _idle_session_stub()
+    finished._compression_state = {"status": "completed", "source": "manual_context_compression"}
+    assert websocket_ceo._session_fully_stable_for_history_edit(finished, {}) is True
 
 
 def test_session_edit_fork_gates_channel_and_stability_short_circuit(tmp_path, monkeypatch):
@@ -147,10 +166,11 @@ def test_session_edit_fork_gates_channel_and_stability_short_circuit(tmp_path, m
         session, "ext:qq:1", messages, turn_payload={}, is_channel_session=True, agent=None
     ) == (None, None)
     # 非稳定态:只收编辑资格，Fork 资格照发（源会话零变更，回合在跑也能复制前缀）。
+    # 暂停/出错不在这一组里：它们已经停下，编辑资格照发（见稳定性总开关那条用例）。
     for unstable in (
         _idle_session_stub(is_running=True),
-        _idle_session_stub(paused=True),
         _idle_session_stub(pending_interrupts=[{"id": "a"}]),
+        _idle_session_stub(queued_follow_up_messages=["x"]),
     ):
         edit_gates, fork_gates = websocket_ceo._session_edit_fork_gates(
             unstable,

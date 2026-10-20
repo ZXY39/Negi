@@ -3350,7 +3350,10 @@ textarea {
    按钮本身一直在，只有外面那圈胶囊描边按悬停显形。 */
 
 /* 回合进行中(含心跳内部轮)只隐藏编辑:它要改源会话转录。
-   Fork 是只读前缀复制、源会话零变更，运行/暂停/等审批中都留着可点。 */
+   Fork 是只读前缀复制、源会话零变更，运行/暂停/等审批中都留着可点。
+   暂停/出错之后这个类会跟着 S.ceoTurnActive 一起摘掉（判据是会话是否仍在跑，
+   见 org_graph_app.js 的 activeCeoSessionIsNonStable），所以刚暂停那一回合的
+   编辑按钮不需要在这里豁免。 */
 .ceo-turn-active .msg-action-edit {
     display: none;
 }

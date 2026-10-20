@@ -160,6 +160,39 @@ def test_truncate_blocked_with_queued_follow_ups(env):
     assert response.json()["detail"] == "ceo_turn_in_progress"
 
 
+def test_truncate_allowed_after_manual_pause(env):
+    """手动暂停之后 `is_running` 已经为假：这一轮真的停了，编辑重发必须能落地。
+
+    暂停收尾会把 status 落成 completed、paused 落成 False，但等审批那条路会留下
+    status=="paused"、paused=True——那是"回合还没结束"，必须继续拦（见下一条）。
+    """
+    env.runtime.state.is_running = False
+    env.runtime.state.status = "completed"
+    env.runtime.state.paused = False
+    response = env.client.post(f"/api/ceo/sessions/{env.key}/truncate", json={"turn_id": "t2"})
+    assert response.status_code == 200, response.text
+
+
+def test_truncate_allowed_after_runtime_error(env):
+    # 出错终止同样是稳定态：会话真的停了，按钮不该被一个状态字符串挡住。
+    env.runtime.state.is_running = False
+    env.runtime.state.status = "error"
+    env.runtime.state.paused = False
+    response = env.client.post(f"/api/ceo/sessions/{env.key}/truncate", json={"turn_id": "t2"})
+    assert response.status_code == 200, response.text
+
+
+def test_truncate_blocked_while_awaiting_approval(env):
+    # 等审批：paused=True 表示这一轮还没走完，截断会把它连同待审批调用一起切掉。
+    env.runtime.state.is_running = False
+    env.runtime.state.status = "paused"
+    env.runtime.state.paused = True
+    env.runtime.state.pending_interrupts = [{"id": "approval"}]
+    response = env.client.post(f"/api/ceo/sessions/{env.key}/truncate", json={"turn_id": "t2"})
+    assert response.status_code == 409
+    assert response.json()["detail"] == "ceo_turn_in_progress"
+
+
 def test_truncate_blocked_by_unfinished_task_inside_the_region(env):
     # 首次派发落在被截断区间内（t2 自己的回复轮）且任务仍未跑完 → 409。
     messages = env.manager.get_or_create(env.key).messages
@@ -286,3 +319,33 @@ def test_assert_edit_fork_runtime_idle_rejects_pending_interrupts():
     runtime.state.pending_interrupts = []
     ceo_sessions._assert_edit_fork_runtime_idle(runtime)  # 不抛
     ceo_sessions._assert_edit_fork_runtime_idle(None)  # 无 live 对象放行
+
+
+def test_assert_edit_fork_runtime_idle_allows_settled_states():
+    """暂停 / 出错 / 空闲都已停下：截断源转录安全，复验必须放行。
+
+    判据是「有没有活的执行体」。这里曾把 `status == "running"` 与 `paused` 一并拦掉，
+    于是暂停之后按钮虽然看得见，点下去仍然 409（与快照侧总开关一起构成「暂停了却
+    改不了刚才那句」）。
+    """
+    for settled in (
+        {"is_running": False, "status": "paused", "paused": True},
+        {"is_running": False, "status": "error", "paused": False},
+        {"is_running": False, "status": "completed", "paused": False},
+        {"is_running": False, "status": "idle", "paused": False},
+    ):
+        runtime = _RuntimeSessionStub()
+        for key, value in settled.items():
+            setattr(runtime.state, key, value)
+        ceo_sessions._assert_edit_fork_runtime_idle(runtime)  # 不抛
+
+
+def test_assert_edit_fork_runtime_idle_rejects_compression_in_flight():
+    # 回合外的手动压缩：is_running 为假，但它正在改转录。
+    runtime = _RuntimeSessionStub()
+    runtime._compression_state = {"status": "running", "source": "manual_context_compression"}
+    with pytest.raises(HTTPException) as excinfo:
+        ceo_sessions._assert_edit_fork_runtime_idle(runtime)
+    assert excinfo.value.status_code == 409
+    runtime._compression_state = {"status": "completed"}
+    ceo_sessions._assert_edit_fork_runtime_idle(runtime)  # 不抛

@@ -1,4 +1,4 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 import asyncio
 import copy
@@ -3997,7 +3997,14 @@ class RuntimeAgentSession:
             self._state.paused = True
             self._state.status = "paused"
             if not already_paused:
-                await self._emit("control_ack", action="pause", accepted=True)
+                # 与手动暂停同一条确认帧：带 turn_id 前端才认领得到「已暂停」那一回合。
+                cancelled_turn_id = str(self._active_turn_id or "").strip()
+                await self._emit(
+                    "control_ack",
+                    action="pause",
+                    accepted=True,
+                    **({"turn_id": cancelled_turn_id} if cancelled_turn_id else {}),
+                )
             await self._emit("agent_end", session_key=self._state.session_key, status="paused")
             if not already_paused:
                 await self._emit_state_snapshot()
@@ -4711,6 +4718,11 @@ class RuntimeAgentSession:
             if manual
             else None
         )
+        # ack 必须带上这一轮的 turn_id：手动暂停没有 ceo.reply.final，前端只能靠这条
+        # 确认帧把「已暂停」气泡和用户行认领到正确的回合上。缺了它，前端只能拿缓存里
+        # 那条本地在飞帧（没有 turn_id）去猜，于是刚暂停那一回合的编辑/Fork 门槛永远
+        # 落不到行上，只能刷新重取快照。
+        paused_turn_id = str((paused_snapshot or {}).get("turn_id") or self._active_turn_id or "").strip()
         if manual:
             self._set_paused_execution_context(paused_snapshot)
         await self._emit_safe_stop_notice("pause")
@@ -4734,11 +4746,11 @@ class RuntimeAgentSession:
             if pausing_active_compression:
                 # 线跟着刚归档的那一回合落：turn_id 取自同一份暂停快照，也就是转录里
                 # `manual_pause_archive` 那行用的同一个 id。
-                paused_turn_id = str((paused_snapshot or {}).get("turn_id") or "").strip()
+                compression_turn_id = str((paused_snapshot or {}).get("turn_id") or "").strip()
                 await self.emit_context_compression_marker(
                     state="paused",
                     source="auto",
-                    stats={"turn_id": paused_turn_id} if paused_turn_id else None,
+                    stats={"turn_id": compression_turn_id} if compression_turn_id else None,
                 )
                 # 摘要任务可能在 cancel_session_tasks 里被直接掐掉，来不及走自己的
                 # finally；这里替它收口，否则下一回合会被一个已无人认领的代际挡住。
@@ -4757,6 +4769,7 @@ class RuntimeAgentSession:
             action="pause",
             accepted=True,
             source=self._internal_prompt_source() or "user",
+            **({"turn_id": paused_turn_id} if paused_turn_id else {}),
         )
         await self._emit_state_snapshot()
 

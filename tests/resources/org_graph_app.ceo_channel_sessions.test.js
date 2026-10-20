@@ -242,15 +242,18 @@ test("applyCeoSessionPatch routes legacy-shaped items with channel key prefixes 
 test("syncCeoPrimaryButton shows an enabled pause button for readonly channel sessions with a running turn", () => {
     const { S, U, syncCeoPrimaryButton } = loadApp();
 
-    const channelSession = extChannelItem();
-    S.activeSessionId = channelSession.session_id;
-    S.ceoSessions = [channelSession];
+    // 暂停入口的判据是「会话是否还在跑」的权威读数（目录 is_running / 在飞快照 /
+    // 待审批 / 压缩在途），不是某个帧随手写下的布尔量——后者会被心跳帧与内部轮收尾
+    // 抹掉，按钮就一闪一闪。这里给目录行盖上运行标记。
+    const runningItem = extChannelItem({ is_running: true });
+    S.activeSessionId = runningItem.session_id;
+    S.ceoSessions = [runningItem];
     S.ceoLocalSessions = [];
-    S.ceoChannelGroups = [{ channel_id: "ext:qq-official", label: "外部桥接 · qq-official", items: [channelSession] }];
+    S.ceoChannelGroups = [{ channel_id: "ext:qq-official", label: "外部桥接 · qq-official", items: [runningItem] }];
     U.ceoSend = makeButtonElement();
     U.ceoInput = { value: "" };
 
-    S.ceoTurnActive = true;
+    S.ceoTurnActive = false;
     S.ceoPauseBusy = false;
     syncCeoPrimaryButton();
 
@@ -264,7 +267,10 @@ test("syncCeoPrimaryButton shows an enabled pause button for readonly channel se
     assert.equal(U.ceoSend.disabled, true);
     assert.ok(U.ceoSend.innerHTML.includes("暂停中"));
 
-    // 空闲渠道会话：回到只读禁用态。
+    // 空闲渠道会话（目录行不再报运行）：回到只读禁用态。
+    const idleItem = extChannelItem();
+    S.ceoSessions = [idleItem];
+    S.ceoChannelGroups = [{ channel_id: "ext:qq-official", label: "外部桥接 · qq-official", items: [idleItem] }];
     S.ceoTurnActive = false;
     S.ceoPauseBusy = false;
     syncCeoPrimaryButton();
