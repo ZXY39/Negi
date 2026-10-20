@@ -86,6 +86,7 @@ def test_cantopen_on_light_lane_reports_the_other_lane_result(store: SQLiteTaskS
     assert 'open_probe=' in joined and 'shm=' in joined
     assert 'shm_map=' in joined
     assert 'db_handles=' in joined
+    assert 'cwd_exists=' in joined and 'tmpdir=' in joined and 'rel_open=' in joined
     assert 'conn_age_s=' in joined
     assert 'lane_cantopen_occurrences=1' in joined
     assert f'pid={__import__("os").getpid()}' in joined

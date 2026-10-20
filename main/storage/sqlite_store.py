@@ -8,6 +8,7 @@ import os
 import re
 import sys
 import sqlite3
+import tempfile
 import threading
 import time
 from datetime import datetime
@@ -3917,6 +3918,7 @@ class SQLiteTaskStore:
         parts.append(self._fd_budget_probe())
         parts.append(self._open_path_probe())
         parts.append(self._mapping_probe())
+        parts.append(self._environment_probe())
         parts.append(self._db_handle_count())
         count = int(self._read_lane_cantopen_counts.get(lane, 0)) + 1
         self._read_lane_cantopen_counts[lane] = count
@@ -3971,6 +3973,42 @@ class SQLiteTaskStore:
             joined_flags = '+'.join(flags)
             probes.append(f'{label}={joined_flags}')
         return 'open_probe=' + ' '.join(probes)
+
+    def _environment_probe(self) -> str:
+        """工作目录、临时目录、相对路径打开这三件事。
+
+        绝对路径的普通打开与 shm 映射都已经证明成功，还剩下的可能是：进程的工作目录被
+        删了（相对打开与建临时文件都会失败，而绝对路径没事），或临时目录不可写。SQLite 在
+        首条语句上会建自己的临时文件，这两类都表现为 SQLITE_CANTOPEN。
+        """
+        parts: list[str] = []
+        try:
+            cwd = os.getcwd()
+            parts.append(f'cwd_exists={"yes" if os.path.isdir(cwd) else "NO"}')
+        except OSError as exc:
+            parts.append(f'cwd_exists=NO:{type(exc).__name__}')
+        tmp_dir = tempfile.gettempdir()
+        tmp_ok = 'yes' if os.path.isdir(tmp_dir) else 'NO'
+        write_state = ''
+        try:
+            handle, probe_path = tempfile.mkstemp(prefix='store-probe-', dir=tmp_dir)
+            os.close(handle)
+            os.unlink(probe_path)
+            write_state = 'ok'
+        except OSError as exc:
+            write_state = f'{type(exc).__name__}:{getattr(exc, "errno", "")}'
+        parts.append(f'tmpdir={tmp_dir}(dir={tmp_ok},write={write_state})')
+        relative = os.path.relpath(str(self.path))
+        try:
+            if relative.startswith('..'):
+                parts.append('rel_open=n/a(outside cwd)')
+            else:
+                handle = os.open(relative, os.O_RDONLY)
+                os.close(handle)
+                parts.append('rel_open=ok')
+        except OSError as exc:
+            parts.append(f'rel_open={type(exc).__name__}:{getattr(exc, "errno", "")}')
+        return ' '.join(parts)
 
     def _mapping_probe(self) -> str:
         """能不能把 `-shm` 映射进本进程。
