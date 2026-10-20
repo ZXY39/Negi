@@ -39,6 +39,7 @@ from g3ku.resources.tool_settings import (
     raw_tool_settings_from_descriptor,
     validate_tool_settings,
 )
+from g3ku.runtime import tool_arg_stash
 from g3ku.runtime.context.execution_tool_selection import build_execution_tool_selection
 from g3ku.runtime.context.node_context_selection import (
     NodeContextSelectionResult,
@@ -50,6 +51,15 @@ from g3ku.runtime.memory_scope import DEFAULT_WEB_MEMORY_SCOPE, normalize_memory
 from g3ku.runtime.tool_context_presence import (
     contract_presence_index,
     partition_contract_presence,
+)
+from g3ku.runtime.tool_contract_block import render_tool_contract
+from g3ku.runtime.tool_error_guidance import append_parameter_error_guidance
+from g3ku.runtime.tool_impulse import (
+    IMPULSE_INVALID,
+    IMPULSE_REJECT,
+    IMPULSE_STAGED,
+    impulse_receipt,
+    render_staged_targets,
 )
 from g3ku.runtime.tool_visibility import (
     NODE_FIXED_BUILTIN_TOOL_NAMES,
@@ -8100,6 +8110,134 @@ class MainRuntimeService:
         if fingerprint:
             payload['tool_context_fingerprint'] = fingerprint
         return payload
+
+    def deliver_impulse_contract(
+        self,
+        *,
+        actor_role: str,
+        session_id: str,
+        tool_id: str,
+        arguments: dict[str, Any],
+        scope_key: str,
+        carrier: Any,
+        batch_position: int = 1,
+        batch_total: int = 1,
+        runtime_context: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        """未水合工具被直接调用时的那一跳：交契约、暂存入参、**不执行**（D3）。
+
+        两条车道都调这里，所以回执文本、校验口径、暂存规则只有一份。三种结果：
+
+        - `staged`：入参校验通过 ⇒ 落 stash、带契约块与 `reuse_args` 提示，本轮不占预算；
+        - `invalid`：校验失败 ⇒ 带契约块与参数错误，不落 stash，占一轮；
+        - `reject`：这不是"没水合"这一类（名字无权限、资源下架、repair-required、压根没
+          这个名字）⇒ 空内容返回，调用方保留自己原有的拒绝回执。
+
+        跳序从载体里读，不接受调用方传 hop：时钟与条目必须同刻，让外部传一个数字就是给
+        "条目永远等不到自己那一跳"留口子。
+        """
+        normalized_tool = str(tool_id or '').strip()
+        hop = tool_arg_stash.read_hop(carrier)
+        rejected: dict[str, Any] = {
+            'outcome': IMPULSE_REJECT,
+            'content': '',
+            'carrier': carrier if isinstance(carrier, dict) else {},
+            'staged_count': 0,
+            'executed': False,
+        }
+        if not normalized_tool:
+            return rejected
+        visible = self._visible_tool_map(actor_role=actor_role, session_id=session_id)
+        if normalized_tool not in visible:
+            return rejected
+        instance = self._resource_manager.get_tool(normalized_tool) if self._resource_manager is not None else None
+        if instance is None:
+            return rejected
+        payload = self.get_tool_toolskill(normalized_tool)
+        if not isinstance(payload, dict) or bool(payload.get('repair_required')):
+            return rejected
+        fingerprint = build_tool_context_fingerprint(payload)
+        if not fingerprint:
+            return rejected
+        block = render_tool_contract({**payload, 'tool_context_fingerprint': fingerprint})
+        if not block:
+            return rejected
+
+        try:
+            validation_errors = instance.validate_params(arguments)
+        except Exception as exc:
+            validation_errors = None
+            guidance = append_parameter_error_guidance(
+                f'Error validating {normalized_tool}: {exc}',
+                tool_name=normalized_tool,
+                tool=instance,
+                arguments=arguments,
+                runtime_context=runtime_context,
+            )
+            receipt = impulse_receipt(
+                tool_name=normalized_tool,
+                contract_block=block,
+                outcome=IMPULSE_INVALID,
+                batch_position=batch_position,
+                batch_total=batch_total,
+                parameter_error_text=guidance,
+            )
+            return {
+                'outcome': IMPULSE_INVALID,
+                'content': receipt['content'],
+                'carrier': carrier if isinstance(carrier, dict) else {},
+                'staged_count': 0,
+                'executed': False,
+            }
+        if validation_errors:
+            guidance = append_parameter_error_guidance(
+                'Error: ' + '; '.join(validation_errors),
+                tool_name=normalized_tool,
+                tool=instance,
+                arguments=arguments,
+                runtime_context=runtime_context,
+            )
+            receipt = impulse_receipt(
+                tool_name=normalized_tool,
+                contract_block=block,
+                outcome=IMPULSE_INVALID,
+                batch_position=batch_position,
+                batch_total=batch_total,
+                parameter_error_text=guidance,
+            )
+            return {
+                'outcome': IMPULSE_INVALID,
+                'content': receipt['content'],
+                'carrier': carrier if isinstance(carrier, dict) else {},
+                'staged_count': 0,
+                'executed': False,
+            }
+
+        next_container, _entry, staged_count = tool_arg_stash.stage_args(
+            tool_arg_stash.carrier_container(carrier),
+            scope_key=scope_key,
+            args=arguments,
+            fingerprint=fingerprint,
+            staged_at=now_iso(),
+            staged_hop=hop,
+        )
+        receipt = impulse_receipt(
+            tool_name=normalized_tool,
+            contract_block=block,
+            outcome=IMPULSE_STAGED,
+            staged_count=staged_count,
+            targets_text=render_staged_targets(next_container, scope_key=scope_key, tool_name=normalized_tool),
+            batch_position=batch_position,
+            batch_total=batch_total,
+        )
+        return {
+            'outcome': IMPULSE_STAGED,
+            'content': receipt['content'],
+            'carrier': tool_arg_stash.build_carrier(next_container, hop=hop),
+            'staged_count': staged_count,
+            'fingerprint': fingerprint,
+            'executed': False,
+        }
 
     def list_skill_resources(self) -> list[Any]:
         return list(self.resource_registry.list_skill_resources())

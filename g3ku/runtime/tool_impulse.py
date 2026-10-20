@@ -73,15 +73,19 @@ def impulse_receipt(
     """
     blocks: list[str] = []
     if batch_position > 1:
+        # D4：同轮同工具只发一份完整块。第 2..N 份带块等于把同一篇正文按调用次数
+        # 放大进历史，而在场判据只需要那一次出现。
         blocks.append(
             f'Contract for "{tool_name}": see the first result for this tool in this batch. '
             f"These arguments were staged (set {batch_position} of {batch_total})."
         )
         if outcome == IMPULSE_INVALID and parameter_error_text:
             blocks.append(parameter_error_text)
-        return {"content": "\n\n".join([contract_block, *blocks]) if contract_block else "\n\n".join(blocks),
-                "outcome": outcome,
-                "executed": False}
+        return {
+            "content": "\n\n".join(blocks),
+            "outcome": outcome,
+            "executed": False,
+        }
 
     if outcome == IMPULSE_INVALID:
         blocks.append(
