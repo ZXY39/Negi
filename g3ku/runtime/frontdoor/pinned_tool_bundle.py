@@ -195,6 +195,37 @@ def bundle_names_for_session(session_key: str) -> list[str]:
         return list(entry.get("names") or []) if entry else []
 
 
+def clear_pinned_tool_bundles() -> None:
+    """清空进程表（测试隔离用）。
+
+    这份表按 `session_key` 分桶且活在整个进程里，而用例的数据根每支换一个目录：上一支用例
+    写下的整表文件此时已不在，条目却还指着它——读回来的是别人家的字节。
+    """
+    with _lock:
+        _entries.clear()
+
+
+def index_for_session(session_key: str) -> dict[str, dict[str, Any]]:
+    """按 session_key 取整表索引（会话属性为空时的第二份载体）。
+
+    必须有这一份：同一回合里不同装配路拿到的 session 对象不是同一个实例，只认会话属性的话，
+    换一个对象就读不到整表，于是又去读活实例——单源就在这个装配点破了。
+    """
+    key = str(session_key or "").strip()
+    if not key:
+        return {}
+    with _lock:
+        entry = _entries.get(key)
+        if not entry:
+            return {}
+        entry_ref = dict(entry.get("index") or {})
+        path = str(entry.get("path") or "")
+        revision = str(entry.get("revision") or "")
+    if entry_ref:
+        return entry_ref
+    return read_pinned_tool_bundle_index(session_key=key, path=path, revision=revision)
+
+
 def has_bundled_schema(*, session_key: str, session: Any = None, name: str) -> bool:
     """这个名字能不能从整表供出参数表（闸门放行用的判据）。
 

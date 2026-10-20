@@ -1205,15 +1205,15 @@ async def test_ceo_frontdoor_call_model_persists_actual_request_to_disk(
 ) -> None:
     runner = CeoFrontDoorRunner(loop=SimpleNamespace())
 
-    monkeypatch.setattr(runner, "_frontdoor_tool_schemas_for_state", lambda **kwargs: [])
+    # 记录面就是发送面：预检不再另渲一份代理数组，工件里 `tool_schemas` 那份由渲染器（＝线上
+    # 那一份）供出，所以替身给的是投影后的线上形状。
     monkeypatch.setattr(
         runner,
-        "_selected_tool_schemas",
-        lambda tool_names: [
+        "_frontdoor_tool_schemas_for_state",
+        lambda **kwargs: [
             {
-                "name": str((list(tool_names or []) or ["submit_next_stage"])[0]),
-                "description": "",
-                "parameters": {"type": "object"},
+                "type": "function",
+                "function": {"name": "submit_next_stage", "description": "", "parameters": {"type": "object"}},
             }
         ],
     )
@@ -1307,6 +1307,9 @@ async def test_ceo_frontdoor_call_model_persists_actual_request_to_disk(
     assert payload["frontdoor_history_shrink_reason"] == update["frontdoor_history_shrink_reason"]
     assert payload["request_messages"]
     assert payload["tool_schemas"]
+    # 记录口径跟着工件落盘：读到 `wire` 才说明这份 `tool_schemas` 就是发送体那一份，
+    # 与切换前那批 `proxy` 记录不可比这件事也因此可查。
+    assert payload["tools_record_basis"] == "wire"
     assert payload["provider_request_meta"] == {
         "provider": "responses",
         "endpoint": "https://example.test/v1/responses",
@@ -1332,15 +1335,15 @@ async def test_frontdoor_actual_request_trace_round_trips_usage_ground_truth(
 ) -> None:
     runner = CeoFrontDoorRunner(loop=SimpleNamespace())
 
-    monkeypatch.setattr(runner, "_frontdoor_tool_schemas_for_state", lambda **kwargs: [])
+    # 记录面就是发送面：预检不再另渲一份代理数组，工件里 `tool_schemas` 那份由渲染器（＝线上
+    # 那一份）供出，所以替身给的是投影后的线上形状。
     monkeypatch.setattr(
         runner,
-        "_selected_tool_schemas",
-        lambda tool_names: [
+        "_frontdoor_tool_schemas_for_state",
+        lambda **kwargs: [
             {
-                "name": str((list(tool_names or []) or ["submit_next_stage"])[0]),
-                "description": "",
-                "parameters": {"type": "object"},
+                "type": "function",
+                "function": {"name": "submit_next_stage", "description": "", "parameters": {"type": "object"}},
             }
         ],
     )
@@ -1451,18 +1454,16 @@ async def test_ceo_frontdoor_call_model_falls_back_to_preflight_truth_when_usage
     tmp_path: Path,
 ) -> None:
     runner = CeoFrontDoorRunner(loop=SimpleNamespace())
-    monkeypatch.setattr(runner, "_frontdoor_tool_schemas_for_state", lambda **kwargs: [])
+    # 记录面就是发送面：预检不再另渲，替身直接给线上那一份投影后的形状。
     monkeypatch.setattr(
         runner,
-        "_selected_tool_schemas",
-        lambda names: [
+        "_frontdoor_tool_schemas_for_state",
+        lambda **kwargs: [
             {
-                "name": str((list(names or []) or ["submit_next_stage"])[0]),
-                "description": "",
-                "parameters": {"type": "object"},
+                "type": "function",
+                "function": {"name": "submit_next_stage", "description": "", "parameters": {"type": "object"}},
             }
         ],
-        raising=False,
     )
     monkeypatch.setattr(web_ceo_sessions, "workspace_path", lambda: tmp_path)
     monkeypatch.setattr(
@@ -1695,7 +1696,24 @@ async def test_ceo_frontdoor_call_model_keeps_provider_tool_schema_set_stable_wh
 ) -> None:
     runner = CeoFrontDoorRunner(loop=SimpleNamespace())
 
-    monkeypatch.setattr(runner, "_frontdoor_tool_schemas_for_state", lambda **kwargs: [])
+    # 这份用例的合同是"阶段要切换时，交给 `tools[]` 渲染器的名字集合不塌"。单源化之后渲染器
+    # 就是唯一的参数表来源（预检不再另渲一份），所以探针打在渲染器收到的名单上——打在哪一份
+    # 数组上都必须是同一份，这正是本次改造要买的性质。
+    renderer_name_sets: list[list[str]] = []
+
+    def _schemas_for_state(*, state, runtime):
+        names = [
+            str(name or "").strip()
+            for name in list(state.get("provider_tool_names") or state.get("tool_names") or [])
+            if str(name or "").strip()
+        ]
+        renderer_name_sets.append(names)
+        return [
+            {"type": "function", "function": {"name": name, "description": "", "parameters": {"type": "object"}}}
+            for name in names
+        ]
+
+    monkeypatch.setattr(runner, "_frontdoor_tool_schemas_for_state", _schemas_for_state)
     monkeypatch.setattr(
         runner,
         "_resolve_frontdoor_send_model_context_window",
@@ -1708,15 +1726,6 @@ async def test_ceo_frontdoor_call_model_keeps_provider_tool_schema_set_stable_wh
         },
         raising=False,
     )
-
-    selected_tool_schema_requests: list[list[str]] = []
-
-    def _capture_selected_tool_schemas(tool_names):
-        normalized = [str(name or "").strip() for name in list(tool_names or []) if str(name or "").strip()]
-        selected_tool_schema_requests.append(normalized)
-        return [{"name": name, "parameters": {"type": "object"}} for name in normalized]
-
-    monkeypatch.setattr(runner, "_selected_tool_schemas", _capture_selected_tool_schemas)
 
     async def _call_model_with_tools(**kwargs):
         _ = kwargs
@@ -1777,8 +1786,8 @@ async def test_ceo_frontdoor_call_model_keeps_provider_tool_schema_set_stable_wh
         ),
     )
 
-    assert selected_tool_schema_requests
-    assert selected_tool_schema_requests[-1] == ["exec", "load_tool_context", "submit_next_stage"]
+    assert renderer_name_sets
+    assert renderer_name_sets[-1] == ["exec", "load_tool_context", "submit_next_stage"]
     replaced_messages = [dict(item) for item in list(update["messages"] or []) if isinstance(item, dict)]
     # Turn-only tool contract must not be persisted into state messages, even when a
     # stage transition is required; the latest request still exposes it at its tail.

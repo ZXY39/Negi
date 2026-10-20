@@ -59,6 +59,7 @@ from g3ku.runtime.tool_visibility import (
 from g3ku.security import get_bootstrap_security_service
 from g3ku.update_apply import WEB_LOG_FILE
 from g3ku.utils.api_keys import parse_api_keys, resolve_api_key_concurrency_layout
+from g3ku.utils.helpers import tools_bundle_single_source_enabled
 from g3ku.web.worker_control import managed_worker_snapshot
 from main.errors import TaskPausedError
 from main.governance import (
@@ -204,6 +205,9 @@ _DECLARATION_BACKFILL_MAX_ENTRIES = 32
 # `task_actual_request` 不同：`_prune_stale_actual_request_artifacts` 按 kind 剪枝，同 kind
 # 会被逐跳删掉，而那正是"上一跳原文"这一档会空的原因。
 _PINNED_SCHEMA_BUNDLE_KIND = 'pinned_tool_schema_bundle'
+# 整表按名索引的进程内缓存上限。一个键对应一份清单（32 条 ≈ 16 KB），64 份 ≈ 1 MB，
+# 而健康路径本来一次工件读都不该有——这个数只是给"每跳都重读整表"留的天花板。
+_PINNED_BUNDLE_INDEX_CACHE_LIMIT = 64
 # 终态/失速/分发错误三条 outbox 车道共用：2.0s 在 web 侧跑模型探测或抢
 # runtime.sqlite3 写锁时必然超时，而超时会让事件一路滞留到下次进程重启才补投
 # （2026-09-23 task:543e0f15d798 滞留 1h39m、task:7e2a270eec34 滞留 10h16m）。
@@ -689,6 +693,8 @@ class MainRuntimeService:
         ) if adaptive_budget_enabled else None
         react_loop._adaptive_tool_budget_controller = self.adaptive_tool_budget_controller
         react_loop._model_visible_tool_schema_selector = self._select_model_visible_tool_schema_payload
+        # 重印跳的整表重写发生在 react_loop（那里才知道新名单），选择器只知道"帧里有没有 prior"。
+        react_loop._pinned_tool_schema_bundle_persister = self._persist_pinned_tool_schema_bundle
         react_loop._tool_context_hydration_promoter = self._promote_tool_context_hydration
         react_loop._tool_contract_presence_revoker = self.revoke_contract_absent_node_hydration
         self._pending_task_delete_confirmations: dict[str, dict[str, Any]] = {}
@@ -6702,25 +6708,35 @@ class MainRuntimeService:
         task_id: str,
         node_id: str,
         schemas_by_name: dict[str, Any],
-    ) -> str:
-        """把整张渲染好的 `tools[]` 原字节存成内容引用，返回 ref；任何失败返回空串。
+        build_reason: str = '',
+    ) -> dict[str, Any]:
+        """把整张渲染好的 `tools[]` 原字节存成内容引用，返回 {ref, revision, names}。
 
         只在清单发生变化的那一跳调用：那一刻每条参数表都拿得到，存下来是零成本的，
         而它之后就是唯一不会消失的那份——活实例会因删除消失、删除前快照随进程清空、
         上一跳原文会被逐跳剪枝。存的是 list 而不是 dict，读侧与 `actual_tool_schemas`
         共用同一个按名索引函数。
+
+        singleton 是就地覆盖、复用同一个 artifact_id ⇒ **ref 不随内容变**（`revision` 才随
+        内容变，取落盘文本的 sha256）。只按 ref 做进程内缓存会在重印之后继续供旧字节。
+        任何失败返回空表：调用侧记一次可数控数，不静默退化。
         """
         if not schemas_by_name:
-            return ''
+            return {}
         store = getattr(self, 'artifact_store', None)
         create_singleton = getattr(store, 'create_or_replace_singleton_text_artifact', None)
         if not callable(create_singleton):
-            return ''
+            return {}
+        names = [str(name or '').strip() for name in schemas_by_name if str(name or '').strip()]
         payload = {
             'task_id': str(task_id or ''),
             'node_id': str(node_id or ''),
+            'names': names,
             'tool_schemas': [schemas_by_name[name] for name in schemas_by_name],
+            'built_at': now_iso(),
+            'build_reason': str(build_reason or '').strip(),
         }
+        text = json.dumps(payload, ensure_ascii=False, sort_keys=True)
         try:
             # singleton：同 (task, node, kind) 只留一份，重写就地覆盖——清单每变一次跟着换，
             # 不逐跳累积，也不会被按 kind 的剪枝扫到。
@@ -6729,22 +6745,39 @@ class MainRuntimeService:
                 node_id=str(node_id or '').strip(),
                 kind=_PINNED_SCHEMA_BUNDLE_KIND,
                 title='pinned tools[] schema bundle',
-                content=json.dumps(payload, ensure_ascii=False, sort_keys=True),
+                content=text,
                 extension='.json',
                 mime_type='application/json',
             )
         except Exception:
-            return ''
+            return {}
         artifact_id = str(getattr(artifact, 'artifact_id', '') or '').strip()
         # 存储侧的 artifact_id 本身就带 `artifact:` 前缀；手拼会把引用写成
         # `artifact:artifact:<hex>`（旧格式仍可解析，但那是别人踩过的坑）。走同一个规范化函数。
-        return artifact_ref_from_id(artifact_id)
+        return {
+            'ref': artifact_ref_from_id(artifact_id),
+            'revision': hashlib.sha256(text.encode('utf-8')).hexdigest(),
+            'names': names,
+        }
 
-    def _pinned_tool_schema_bundle_index(self, *, bundle_ref: str) -> dict[str, Any]:
-        """读回钉住清单的整表原字节，按工具名索引；拿不到返回空表。"""
+    def _pinned_tool_schema_bundle_index(self, *, bundle_ref: str, bundle_revision: str = '') -> dict[str, Any]:
+        """读回钉住清单的整表原字节，按工具名索引；拿不到返回空表。
+
+        进程内缓存的键是 `(ref, revision)`：singleton 就地覆盖复用同一个 ref，只按 ref 缓存会
+        在重印之后继续供旧字节。revision 为空（存量帧里没这个字段）时不写缓存、每次读盘，
+        宁可能一次多读也不供可能过期的内容。
+        """
         ref = str(bundle_ref or '').strip()
         if not ref:
             return {}
+        revision = str(bundle_revision or '').strip()
+        cache = getattr(self, '_pinned_bundle_index_cache', None)
+        if not isinstance(cache, dict):
+            cache = {}
+            self._pinned_bundle_index_cache = cache
+        cache_key = (ref, revision)
+        if revision and cache_key in cache:
+            return dict(cache[cache_key])
         resolver = getattr(getattr(self, 'log_service', None), 'resolve_content_ref', None)
         if not callable(resolver):
             return {}
@@ -6760,7 +6793,96 @@ class MainRuntimeService:
             return {}
         if not isinstance(payload, dict):
             return {}
-        return index_schemas_by_name(list(payload.get('tool_schemas') or []))
+        index = index_schemas_by_name(list(payload.get('tool_schemas') or []))
+        if revision and index:
+            cache[cache_key] = dict(index)
+            while len(cache) > _PINNED_BUNDLE_INDEX_CACHE_LIMIT:
+                cache.pop(next(iter(cache)))
+        return index
+
+    def _build_node_pinned_tool_bundle(
+        self,
+        *,
+        task_id: str,
+        node_id: str,
+        provider_tool_names: list[str],
+        visible_tools: dict[str, Any] | None = None,
+        prior_bundle_index: dict[str, Any] | None = None,
+        fallback_schemas: dict[str, Any] | None = None,
+        build_reason: str = '',
+        prior_index_first: bool = False,
+    ) -> dict[str, Any]:
+        """按"这一跳拿得到的字节"重建整表并落盘，返回 {ref, revision, index, placeholders}。
+
+        来源次序按重建的**目的**分两种：
+        - 播种/边界重印（`prior_index_first=False`）：派发字典里的实例 → 资源管理器里的活实例
+          （RBAC 收回、水合撤窄时实例还在）→ 上一份整表 → 调用方给的声明侧兜底。整表在重印
+          边界就是该换新字节的那一刻，运维在 Tool Admin 里改的参数定义在这一跳被吸收。
+        - 兼容重建（`prior_index_first=True`，冻结跳发现整表缺名）：先原样复用上一份整表，只为
+          缺的那个名字去读实例。否则一次无关的增删会顺带把别人的字节换掉——那就是"在重印边界
+          之外断前缀"，正是单源化要消灭的形状。
+
+        写的那刻成员名单与渲染结果同源，所以读侧可以只信它。
+        """
+        resource_manager = getattr(self, '_resource_manager', None)
+        instance_getter = getattr(resource_manager, 'tool_instances', None)
+        declared_instances = dict(instance_getter() or {}) if callable(instance_getter) else {}
+        bundle_visible_tools = dict(visible_tools or {})
+        prior_index = dict(prior_bundle_index or {})
+        fallback = dict(fallback_schemas or {})
+        rendered: dict[str, Any] = {}
+        placeholders: list[str] = []
+        for candidate_name in provider_tool_names:
+            normalized_name = str(candidate_name or '').strip()
+            if not normalized_name or normalized_name in rendered:
+                continue
+            payload: Any = None
+            live_sources = (bundle_visible_tools.get(normalized_name), declared_instances.get(normalized_name))
+            carried_sources = (prior_index, fallback)
+            sources: tuple[Any, ...]
+            carried: Any
+            if prior_index_first:
+                sources = (*carried_sources, live_sources[0], live_sources[1])
+            else:
+                sources = (live_sources[0], live_sources[1], *carried_sources)
+            for source in sources:
+                if isinstance(source, dict):
+                    carried = source.get(normalized_name)
+                    if isinstance(carried, dict):
+                        payload = carried
+                        break
+                    continue
+                to_schema = getattr(source, 'to_model_schema', None)
+                if not callable(to_schema):
+                    continue
+                try:
+                    payload = to_schema()
+                except Exception:
+                    payload = None
+                if isinstance(payload, dict):
+                    break
+            if not isinstance(payload, dict):
+                # 三份来源都取不到才占位。占位跟着进整表（阶段 2 既定语义）：不写进整表的话，
+                # 下一跳又会缺名重建一次并再记一次 fault，"冻结跳零 IO"与 fault 信噪比一起塌。
+                payload = self._placeholder_pinned_tool_schema(normalized_name)
+                placeholders.append(normalized_name)
+            rendered[normalized_name] = payload
+        if not rendered:
+            return {}
+        persisted = self._persist_pinned_tool_schema_bundle(
+            task_id=task_id,
+            node_id=node_id,
+            schemas_by_name=rendered,
+            build_reason=build_reason,
+        )
+        if not persisted.get('ref'):
+            return {'ref': '', 'revision': '', 'index': dict(rendered), 'placeholders': placeholders}
+        return {
+            'ref': persisted['ref'],
+            'revision': persisted.get('revision') or '',
+            'index': dict(rendered),
+            'placeholders': placeholders,
+        }
 
     @staticmethod
     def _placeholder_pinned_tool_schema(name: str) -> dict[str, Any]:
@@ -6912,6 +7034,7 @@ class MainRuntimeService:
         prior_actual_request_ref = ''
         prior_declaration_backfill: dict[str, Any] = {}
         prior_declaration_schema_ref = ''
+        prior_declaration_bundle_revision = ''
         if callable(read_runtime_frame):
             prior_frame = read_runtime_frame(str(task_id or '').strip(), str(node_id or '').strip())
             if isinstance(prior_frame, dict):
@@ -6936,6 +7059,14 @@ class MainRuntimeService:
                 prior_declaration_schema_ref = str(
                     dict(prior_frame.get('model_visible_tool_selection_trace') or {}).get(
                         'declaration_schema_ref'
+                    )
+                    or ''
+                ).strip()
+                # 单源化后整表的缓存键是 (ref, revision)；存量帧没有 revision 时读空串，
+                # 读侧会退化成"每次读盘"，宁可能一次多读也不供可能过期的内容。
+                prior_declaration_bundle_revision = str(
+                    dict(prior_frame.get('model_visible_tool_selection_trace') or {}).get(
+                        'bundle_revision'
                     )
                     or ''
                 ).strip()
@@ -7012,7 +7143,87 @@ class MainRuntimeService:
             'placeholder': 0,
         }
         schema_fallback_opportunities = 0
+        # 单源化读路径（开关 `G3KU_TOOLS_BUNDLE_SINGLE_SOURCE`，默认关）：参数表只有整表这一个
+        # 来源。派发字典内的名字也一样——它们今天由 `react_loop` 现场 `to_model_schema()`，
+        # 于是"同名工具被编辑"会在重印边界之外改字节；改读整表后编辑要到边界才被吸收。
+        # 整表缺名（含存量第一份整表还没有后来新增的成员）时，这一跳就地按当轮可见源重建并
+        # 重写整表：代价等于一次预算内的重印，而不是把名字悄悄摘掉或落回活实例。
+        single_source_bundles = tools_bundle_single_source_enabled()
+        bundle_index: dict[str, Any] = {}
+        bundle_placeholder_names: list[str] = []
+        bundle_force_reprint = False
+        bundle_compat_rebuild = False
+        bundle_rebuilt_in_place = False
+        rebuilt_ref = ''
+        rebuilt_revision = ''
+        if single_source_bundles:
+            bundle_index = self._pinned_tool_schema_bundle_index(
+                bundle_ref=prior_declaration_schema_ref,
+                bundle_revision=prior_declaration_bundle_revision,
+            )
+            missing_bundle_names = [
+                str(name or '').strip()
+                for name in provider_tool_names
+                if str(name or '').strip() and str(name or '').strip() not in bundle_index
+            ]
+            # 兼容重建与首跳播种要分得开：前者是"整表已经有了、却缺后来新增的成员（或整表
+            # 读不出来）"，每个在飞节点最多一次；后者是新节点的常态。混记会把灰度期的正常
+            # 收口读成故障，也把真兼容缺口淹在播种量里。
+            bundle_compat_rebuild = bool(prior_declaration_schema_ref) and (
+                not bundle_index or bool(missing_bundle_names)
+            )
+            if not bundle_index or missing_bundle_names:
+                rebuilt = self._build_node_pinned_tool_bundle(
+                    task_id=str(task_id or '').strip(),
+                    node_id=str(node_id or '').strip(),
+                    provider_tool_names=provider_tool_names,
+                    visible_tools=visible_tools,
+                    prior_bundle_index=bundle_index,
+                    build_reason='forced_reprint',
+                    prior_index_first=bundle_compat_rebuild,
+                )
+                bundle_index = dict(rebuilt.get('index') or {})
+                # 占位是"重建也拿不到参数表"的落点：它跟着定影进整表，并单独可数——
+                # `declaration_schema_placeholders` 记的是回填链那五档全空，两件事不能混一栏。
+                bundle_placeholder_names = [
+                    str(name or '').strip()
+                    for name in list(rebuilt.get('placeholders') or [])
+                    if str(name or '').strip()
+                ]
+                rebuilt_ref = str(rebuilt.get('ref') or '').strip()
+                rebuilt_revision = str(rebuilt.get('revision') or '').strip()
+                bundle_rebuilt_in_place = bool(rebuilt_ref and bundle_index)
+                if not bundle_rebuilt_in_place:
+                    # 写盘失败：这一跳照旧按重建出来的字节发（下一跳还会重建），但**不退回活实例**
+                    # ——回退等于把"整表说的是什么"和"线上发的是什么"再次分家。缺的名字就地
+                    # 定影成占位，配一条带坐标的 WARNING 与 `bundle_fault` 计数。
+                    bundle_force_reprint = True
+                    logger.warning(
+                        'node pinned tools[] bundle could not be persisted, serving this hop from memory: '
+                        'task={} node={} names={}',
+                        str(task_id or '').strip(),
+                        str(node_id or '').strip(),
+                        len(provider_tool_names),
+                    )
+                    for missing_name in provider_tool_names:
+                        normalized_name = str(missing_name or '').strip()
+                        if not normalized_name or normalized_name in bundle_index:
+                            continue
+                        bundle_index[normalized_name] = self._placeholder_pinned_tool_schema(normalized_name)
+                        bundle_placeholder_names.append(normalized_name)
+            else:
+                for bundle_name in provider_tool_names:
+                    normalized_name = str(bundle_name or '').strip()
+                    if not normalized_name or normalized_name in dispatched_tool_names:
+                        continue
+                    schema_fallback_opportunities += 1
+                    schema_source_hits['bundle'] += 1
+                    declared_denied_tool_schemas[normalized_name] = bundle_index[normalized_name]
+        # 五档回填链整段只在开关关闭时走：单源那支上面已经把 `declared_denied_tool_schemas`
+        # 按名单填好了，这里首行 `break` 就是"一档也不进"。阶段 4 退役旧档时这段连着删。
         for candidate_name in provider_tool_names:
+            if single_source_bundles:
+                break
             normalized_name = str(candidate_name or '').strip()
             if not normalized_name or normalized_name in dispatched_tool_names:
                 continue
@@ -7040,7 +7251,8 @@ class MainRuntimeService:
             # 删除三者叠加也还在。
             if bundle_schema_index is None:
                 bundle_schema_index = self._pinned_tool_schema_bundle_index(
-                    bundle_ref=prior_declaration_schema_ref
+                    bundle_ref=prior_declaration_schema_ref,
+                    bundle_revision=prior_declaration_bundle_revision,
                 )
             bundled_schema = bundle_schema_index.get(normalized_name)
             if isinstance(bundled_schema, dict):
@@ -7071,9 +7283,16 @@ class MainRuntimeService:
             declaration_placeholders.append(normalized_name)
         # 尾块只点名"无权限或资源已下架"：仍被授权、只是本轮没有派发资格的名字不进这份
         # 文案——模型调它拿到的是"先 load_tool_context"那一档，措辞得跟真实处置一致。
+        # 单源化后判据直接落在名单上（"在 `tools[]` 里"对整表供出的名字恒真），不再靠
+        # "声明侧自带了 schema"这件事反推可渲染性；两种写法在开关关闭时同形。
+        denied_source_names = (
+            [str(name or '').strip() for name in provider_tool_names if str(name or '').strip()]
+            if single_source_bundles
+            else list(declared_denied_tool_schemas)
+        )
         declared_denied_tool_names = [
             name
-            for name in declared_denied_tool_schemas
+            for name in denied_source_names
             if name not in live_granted_tool_names
         ]
         # 载体有界：它只为"名字还在钉住清单里、参数表却只剩原文可取"那几条存东西，常态是
@@ -7088,25 +7307,28 @@ class MainRuntimeService:
         # 整表引用只在名单真的变了时重写——常态跳一次 IO 都不加。写失败就沿用上一份引用并
         # 记一次可数控数：静默降级等于让"五档全空"重新变成可达。
         declaration_schema_ref = str(prior_declaration_schema_ref or '')
+        declaration_bundle_revision = str(prior_declaration_bundle_revision or '')
+        if bundle_rebuilt_in_place:
+            # 缺名重建已经在本跳写过整表，不再重写一次。
+            declaration_schema_ref = rebuilt_ref
+            declaration_bundle_revision = rebuilt_revision
         declaration_schema_ref_fault = 0
         if provider_tool_bundle_mode != 'pinned_frozen' and provider_tool_names:
-            rendered_schemas: dict[str, Any] = {}
-            bundle_visible_tools = dict(visible_tools or {})
-            for bundle_name in provider_tool_names:
-                bundle_tool = bundle_visible_tools.get(bundle_name)
-                bundle_to_schema = getattr(bundle_tool, 'to_model_schema', None)
-                if callable(bundle_to_schema):
-                    rendered_schemas[bundle_name] = bundle_to_schema()
-                elif bundle_name in declared_denied_tool_schemas:
-                    rendered_schemas[bundle_name] = declared_denied_tool_schemas[bundle_name]
-            written_ref = self._persist_pinned_tool_schema_bundle(
-                task_id=task_id,
-                node_id=node_id,
-                schemas_by_name=rendered_schemas,
+            built = self._build_node_pinned_tool_bundle(
+                task_id=str(task_id or '').strip(),
+                node_id=str(node_id or '').strip(),
+                provider_tool_names=provider_tool_names,
+                visible_tools=visible_tools,
+                prior_bundle_index=bundle_index,
+                fallback_schemas=declared_denied_tool_schemas,
+                build_reason='seeded',
             )
-            if written_ref:
-                declaration_schema_ref = written_ref
-            else:
+            if built.get('ref'):
+                declaration_schema_ref = str(built.get('ref') or '')
+                declaration_bundle_revision = str(built.get('revision') or '')
+                if built.get('index'):
+                    bundle_index = dict(built.get('index') or {})
+            elif not bundle_rebuilt_in_place:
                 declaration_schema_ref_fault = 1
         exposure = {
             'provider_tool_names': list(provider_tool_names),
@@ -7135,6 +7357,11 @@ class MainRuntimeService:
             'provider_tool_bundle_mode': provider_tool_bundle_mode,
             'declared_denied_tool_names': list(declared_denied_tool_names),
             'declared_denied_tool_schemas': dict(declared_denied_tool_schemas),
+            # 单源化后 wire 上那份 `tools[]` 的字节源就是这份整表索引（含派发字典内的名字），
+            # 由 `react_loop` 按名单顺序取；开关关闭时它为空，渲染仍走活实例。
+            'pinned_tool_bundle_index': dict(bundle_index) if single_source_bundles else {},
+            'pinned_tool_bundle_ref': declaration_schema_ref,
+            'pinned_tool_bundle_revision': declaration_bundle_revision,
             'candidate_tool_names': candidate_tool_names,
             'lightweight_tool_ids': list(selection.lightweight_tool_ids or []),
             'hydrated_executor_names': list(promoted_only_hydrated_executor_names),
@@ -7180,6 +7407,14 @@ class MainRuntimeService:
                 # 阶段 0 观测读数，装在 trace 里（整份 dict 原样持久化，零归一化写点）。
                 'schema_source_hits': dict(schema_source_hits),
                 'schema_source_fallback_opportunities': int(schema_fallback_opportunities),
+                # 下一跳读整表要用这对值当缓存键：ref 就地覆盖后不变，revision 才随内容变。
+                'bundle_ref': declaration_schema_ref,
+                'bundle_revision': declaration_bundle_revision,
+                # 两类重建分开计（§5.4）：`bundle_compat_rebuild` 是整表缺成员/读不出的兼容
+                # 重建，`bundle_fault` 是整表写不出去（这一跳只能按内存里重建的字节发）。
+                'bundle_compat_rebuild': int(bool(bundle_compat_rebuild)),
+                'bundle_fault': int(bool(bundle_force_reprint) or int(declaration_schema_ref_fault or 0)),
+                'bundle_placeholder_names': list(dict.fromkeys(bundle_placeholder_names)),
             },
         }
 

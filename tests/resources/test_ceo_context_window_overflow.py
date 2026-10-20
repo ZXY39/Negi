@@ -721,7 +721,16 @@ async def test_graph_call_model_token_compression_keeps_prior_provider_tool_sche
     runner = CreateAgentCeoFrontDoorRunner(loop=SimpleNamespace())
     persisted_calls: list[dict[str, object]] = []
 
-    monkeypatch.setattr(runner, "_frontdoor_tool_schemas_for_state", lambda **_: [])
+    # 渲染器就是 `tools[]` 的唯一来源（预检不再另渲一份），所以替身按钉住名单出字节，
+    # 这条用例断言的"压缩跳不换成员"才仍然打在名单上。
+    monkeypatch.setattr(
+        runner,
+        "_frontdoor_tool_schemas_for_state",
+        lambda *, state, runtime: [
+            {"type": "function", "function": {"name": str(name), "parameters": {"type": "object"}}}
+            for name in list(state.get("provider_tool_names") or state.get("tool_names") or [])
+        ],
+    )
     monkeypatch.setattr(
         runner,
         "_resolve_frontdoor_send_model_context_window",
@@ -731,14 +740,6 @@ async def test_graph_call_model_token_compression_keeps_prior_provider_tool_sche
             "context_window_tokens": 32000,
         },
         raising=False,
-    )
-    monkeypatch.setattr(
-        runner,
-        "_selected_tool_schemas",
-        lambda tool_names: [
-            {"type": "function", "function": {"name": str(name), "parameters": {"type": "object"}}}
-            for name in list(tool_names or [])
-        ],
     )
 
     def _estimate(**kwargs):

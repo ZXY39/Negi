@@ -1,5 +1,6 @@
 ﻿"""Utility functions for g3ku."""
 
+import os
 import re
 from datetime import datetime
 from pathlib import Path
@@ -119,6 +120,23 @@ def path_anchor_policy() -> dict[str, Any]:
         'bare_filename_binds_to_task_temp_dir': True,
         'path_anchor_tokens': path_anchor_tokens(),
         'path_anchor_rule': PATH_ANCHOR_RULE_TEXT,
+    }
+
+
+TOOLS_BUNDLE_SINGLE_SOURCE_ENV = "G3KU_TOOLS_BUNDLE_SINGLE_SOURCE"
+
+
+def tools_bundle_single_source_enabled() -> bool:
+    """`tools[]` 参数表是否只从钉住整表取字节（单源化读路径的灰度开关）。
+
+    两条车道读同一个函数：开关若各读各的，两车道会跑出不同形状的清单，而这条改造要买的
+    正是"同一份声明在两条道上同形"。默认关；旧档退役时这个函数与它的分支一起删。
+    """
+    return str(os.getenv(TOOLS_BUNDLE_SINGLE_SOURCE_ENV, "") or "").strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
     }
 
 

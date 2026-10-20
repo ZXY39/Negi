@@ -134,6 +134,7 @@ from g3ku.runtime.web_ceo_sessions import (
     strip_multimodal_blocks_from_message_records,
     trailing_turn_record,
 )
+from g3ku.utils.helpers import tools_bundle_single_source_enabled
 from main.governance.tool_context import apply_runtime_tool_context_projection
 from main.models import normalize_execution_policy_metadata
 from main.protocol import build_envelope, now_iso
@@ -1865,7 +1866,7 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
         *,
         state: CeoGraphState,
         runtime: CeoRuntime,
-        tool_schemas: list[Any] | None = None,
+        tool_schemas: list[Any],
     ) -> dict[str, Any]:
         state_for_request = dict(state or {})
         # 新增可读 skill 的一次性提示：检测与投递只在这一处（每跳的发送准备）发生，
@@ -1893,19 +1894,19 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
         prompt_cache_key = str(state_for_request.get("prompt_cache_key") or "")
         prompt_cache_diagnostics = dict(state_for_request.get("prompt_cache_diagnostics") or {})
         actual_tool_schemas: list[dict[str, Any]] = []
+        # 记录口径随工件一起落盘：存量记录是 `proxy`（预检另渲的那份），跨口径那一跳的哈希不可比。
+        actual_tools_record_basis = "wire"
         if hasattr(self, "_frontdoor_prompt_contract"):
             try:
-                # 声明名单直接交给渲染器：活实例优先、删掉的名字取删除前快照。
-                # 先过 `_frontdoor_provider_visible_tool_names` 会把没有实例的名字摘掉，
-                # 删除就变成"下一跳少一条工具表"——正是要避免的那种断缓存。
-                provider_tool_schema_names = list(
-                    state_for_request.get("provider_tool_names") or state_for_request.get("tool_names") or []
-                )
-                try:
-                    tool_schemas = self._selected_tool_schemas(provider_tool_schema_names)
-                except Exception:
-                    tool_schemas = []
-                actual_tool_schemas = list(tool_schemas or [])
+                # 方案 C：估算面与记录面用的就是调用方传进来的那一份**线上**数组。这里原来无条件
+                # 覆盖成 `_selected_tool_schemas(...)` 的另渲结果，于是工件 `tool_schemas`、
+                # `actual_tool_schema_hash`、`prompt_cache_key` 的输入与 token 估算一直在读一份比
+                # 线上少名单尾部两颗合成控制工具的数组——诊断读到的是代理，不是发送体。
+                # cache key 本身对 `tool_schemas` 不敏感（`chat_backend.build_stable_prompt_cache_key`
+                # 丢弃该参数），这条不敏感由 `test_prompt_cache_key_is_insensitive_to_tool_schemas` 钉住：
+                # 它哪天红了，就说明有人让 key 变成 tool-aware，那时再拆记录用形参。
+                tool_schemas = [dict(item) for item in list(tool_schemas or []) if isinstance(item, dict)]
+                actual_tool_schemas = list(tool_schemas)
                 request_contract = self._frontdoor_prompt_contract(
                     state=dict(state_for_request or {}),
                     provider_model=str((list(state_for_request.get("model_refs") or []) or [""])[0] or "").strip(),
@@ -2003,6 +2004,8 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
                     if isinstance(item, dict)
                 ],
                 current_tool_schemas=actual_tool_schemas,
+                previous_tools_record_basis=str(latest_record.get("tools_record_basis") or "proxy").strip(),
+                current_tools_record_basis=str(actual_tools_record_basis).strip(),
                 stage_state=dict(state_for_request.get("frontdoor_stage_state") or {}),
             )
         # 锚点取的是上一跳的真实 usage，其中含这一跳已被阶段裁撤掉的工具肉身；
@@ -3350,6 +3353,8 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
         previous_tool_schemas: list[dict[str, Any]] | None,
         current_tool_schemas: list[dict[str, Any]] | None,
         stage_state: dict[str, Any] | None = None,
+        previous_tools_record_basis: str = "proxy",
+        current_tools_record_basis: str = "proxy",
     ) -> tuple[int, bool, int]:
         """返回 (本跳相对上一跳的增量, 是否可比, 上一跳被阶段裁撤掉的投影体量)。
 
@@ -3401,8 +3406,14 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
             ).get("actual_tool_schema_hash")
             or ""
         ).strip()
-        if previous_tool_schema_hash != current_tool_schema_hash:
+        if previous_tool_schema_hash != current_tool_schema_hash and str(
+            previous_tools_record_basis or "proxy"
+        ) == str(current_tools_record_basis or "proxy"):
             return 0, False, 0
+        # 两侧记录口径不同（切换记录面对齐的那一跳会遇到：旧记录是 proxy 那份 31 名数组，
+        # 当跳是 wire 那份 33 名）⇒ 工具哈希不等不再单独构成"不可比"。代价是这一跳万一线上
+        # 字节真的也变了，这一条比对放行了；线上一致性由 wire 三枚读数与
+        # `tools[] bytes changed outside a reprint boundary` 那条 WARNING 负责，不放给估算面。
         normalized_previous_tool_schemas = [
             dict(item)
             for item in list(previous_tool_schemas or [])
@@ -3970,12 +3981,19 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
         不放行"。mid-turn 注册的水合名不在 `tools[]` 里，被 RBAC 收回时不进这一行——
         它的出口是工具态收尾的实时卫生（`_frontdoor_tool_state_after_tool_results`）：
         下一跳起从 `tool_names` 与台账里摘除，`callable_tools` 不再点名。
+
+        单源化之后不再过可渲染性那道筛：参数表由整表供出，名单里的每个名字这一跳都带着
+        一份字节（供不出的那份是占位），所以"在 `tools[]` 里"对钉住名单恒真。这与节点侧
+        `declared_denied_tool_names` 的判据同形。
         """
-        return self._frontdoor_declared_denied_tool_names(
-            declared_tool_names=self._frontdoor_schema_renderable_tool_names(
-                list(state.get("provider_tool_names") or []),
+        declared_tool_names = list(state.get("provider_tool_names") or [])
+        if not tools_bundle_single_source_enabled():
+            declared_tool_names = self._frontdoor_schema_renderable_tool_names(
+                declared_tool_names,
                 session_key=str(state.get("session_key") or "").strip(),
-            ),
+            )
+        return self._frontdoor_declared_denied_tool_names(
+            declared_tool_names=declared_tool_names,
             granted_tool_names=self._frontdoor_live_granted_tool_names(
                 session_key=str(state.get("session_key") or ""),
             ),
@@ -5893,19 +5911,22 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
             "provider_tool_exposure_commit_reason": str(
                 state.get("provider_tool_exposure_commit_reason") or ""
             ).strip(),
-            "frontdoor_pinned_schema_placeholders": [
+            "bundle_placeholder_names": [
                 str(item or "").strip()
-                for item in list(state.get("frontdoor_pinned_schema_placeholders") or [])
+                for item in list(state.get("bundle_placeholder_names") or [])
                 if str(item or "").strip()
             ],
-            # 阶段 0 观测读数。上面那份 `tool_schemas` 是预检按 `_selected_tool_schemas` 另渲
-            # 的记录面，`wire_*` 三枚才是真发出去的那一份——两组并存正是为了能直接读出它们的差，
-            # 而不是再靠人记住"这两本账不同源"。
+            # 单源化后这两组读数是同一本账：`tool_schemas` 就是发送体里那一份（预检不再另渲），
+            # `wire_*` 三枚则是它的哈希/序列哈希/逐名哈希，外加整表重写的分类计数。
             "frontdoor_tool_schema_hits": dict(state.get("frontdoor_tool_schema_hits") or {}),
             "frontdoor_tool_schema_fallback_opportunities": int(
                 state.get("frontdoor_tool_schema_fallback_opportunities") or 0
             ),
+            "bundle_compat_rebuild": int(state.get("bundle_compat_rebuild") or 0),
+            "bundle_fault": int(state.get("bundle_fault") or 0),
             "wire_tool_schema_hash": str(state.get("frontdoor_wire_tool_schema_hash") or "").strip(),
+            # 与上一跳记录比对时要认得两侧口径（存量记录是 proxy，切换后是 wire）。
+            "tools_record_basis": str(state.get("frontdoor_tools_record_basis") or "proxy").strip(),
             "wire_tool_name_sequence_hash": str(
                 state.get("frontdoor_wire_tool_name_sequence_hash") or ""
             ).strip(),
@@ -7404,6 +7425,102 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
             raise RuntimeError(f"missing merged tool result for {tool_call_id or '<unknown>'}")
         return merged
 
+    def _frontdoor_rebuild_pinned_tool_bundle(
+        self,
+        *,
+        keep_names: list[str],
+        declared_tools: dict[str, Any],
+        registry_lookup: Any,
+        prior_index: dict[str, Any] | None = None,
+        prior_index_first: bool = False,
+    ) -> dict[str, Any]:
+        """按"这一跳拿得到的字节"重建整表：声明面实例 → 注册表活实例 → 删除前快照 → 旧整表 → 占位。
+
+        重建只发生在重印边界或整表缺名那一跳，代价等于一次预算内的重印。前四种来源都取不到才
+        占位，且占位跟着进整表定影：不写进去的话，下一跳又会缺名重建一次并再记一次 fault，
+        "冻结跳零 IO"与 fault 的信噪比一起塌。
+
+        `prior_index_first` 按重建的目的换次序：边界/播种要让编辑在这一跳被吸收，所以先读实例；
+        冻结跳上的兼容重建只是补一个缺名，先原样复用旧整表，否则一次无关的增删会顺带把别人的
+        字节换掉——那正是"在重印边界之外断前缀"。
+        """
+        placeholders: list[str] = []
+        index: dict[str, Any] = {}
+        fallback_index = dict(prior_index or {})
+        for name in keep_names:
+            normalized = str(name or "").strip()
+            if not normalized or normalized in index:
+                continue
+            carried = fallback_index.get(normalized)
+            if prior_index_first and isinstance(carried, dict):
+                index[normalized] = dict(carried)
+                continue
+            payload: Any = None
+            candidates = [declared_tools.get(normalized)]
+            candidates.append(registry_lookup(normalized) if callable(registry_lookup) else None)
+            for source in candidates:
+                if not callable(getattr(source, "to_model_schema", None)):
+                    continue
+                try:
+                    payload = _provider_tool_schema(source)
+                except Exception:
+                    payload = None
+                if isinstance(payload, dict):
+                    break
+            if not isinstance(payload, dict):
+                retired = lookup_tool_schema(normalized)
+                if isinstance(retired, dict):
+                    carrier = SimpleNamespace(
+                        name=normalized,
+                        description="",
+                        parameters={},
+                        to_model_schema=lambda value=retired: value,
+                    )
+                    try:
+                        payload = _provider_tool_schema(carrier)
+                    except Exception:
+                        payload = None
+            if not isinstance(payload, dict):
+                payload = carried
+            if not isinstance(payload, dict):
+                payload = placeholder_tool_schema(normalized)
+                placeholders.append(normalized)
+            index[normalized] = dict(payload)
+        return {"index": index, "placeholders": placeholders}
+
+    def _persist_frontdoor_pinned_tool_bundle(
+        self,
+        *,
+        session: Any,
+        session_key: str,
+        keep_names: list[str],
+        rendered: list[dict[str, Any]],
+        build_reason: str,
+    ) -> dict[str, Any]:
+        """把这一跳渲出的整表原字节写进会话级 singleton 文件，并换上新 revision。"""
+        index = index_schemas_by_name(rendered)
+        if session is not None:
+            setattr(session, "_frontdoor_pinned_tool_schema_bundle", dict(index))
+        written = pinned_tool_bundle.write_pinned_tool_bundle(
+            session_key=str(session_key or "").strip(),
+            provider_tool_names=list(keep_names or index.keys()),
+            rendered_tool_schemas=list(rendered or []),
+            build_reason=str(build_reason or "").strip(),
+        )
+        if session is not None:
+            if written.get("path"):
+                setattr(session, "_frontdoor_pinned_tool_bundle_path", str(written.get("path") or ""))
+                setattr(session, "_frontdoor_pinned_tool_bundle_revision", str(written.get("revision") or ""))
+                setattr(session, "_frontdoor_pinned_tool_bundle_fault", 0)
+            else:
+                setattr(session, "_frontdoor_pinned_tool_bundle_fault", 1)
+                logger.warning(
+                    "frontdoor pinned tools[] bundle could not be persisted: session_key={} names={}",
+                    str(session_key or "").strip(),
+                    len(list(keep_names or [])),
+                )
+        return written
+
     def _frontdoor_tool_schemas_for_state(
         self,
         *,
@@ -7433,6 +7550,84 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
         # 整表引用：上一次名单真的变化时渲出来的原字节。实例与删除前快照都是进程内的，
         # 重启即空，而钉住的名单会从会话基线里活过来——没有这一档，重启后那一跳只能删名。
         bundled_schemas = dict(getattr(session, "_frontdoor_pinned_tool_schema_bundle", None) or {})
+        # 单源化（开关 `G3KU_TOOLS_BUNDLE_SINGLE_SOURCE`，默认关）：参数表只有整表这一个来源，
+        # 声明面/注册表的活实例只在"构建整表"的那一刻被读。于是同名工具被编辑不再于冻结跳
+        # 改字节；整表缺名（含存量第一份还没有后来的成员）就地重建，重建也拿不到才占位。
+        if tools_bundle_single_source_enabled():
+            # 整表的载体按车道是两份：会话属性 + 按 session_key 分桶的进程表。同一回合内不同
+            # 装配路拿到的 session 不是同一个实例，只认会话属性的话，换一个对象就读不到整表，
+            # 于是回退去读活实例——单源就在那个装配点破了，所以这一份不是性能优化而是正确性。
+            bundle_session_key = str(state.get("session_key") or "").strip()
+            bundle_ref_path = str(getattr(session, "_frontdoor_pinned_tool_bundle_path", "") or "").strip()
+            if not bundled_schemas:
+                bundled_schemas = pinned_tool_bundle.index_for_session(bundle_session_key)
+            # "从没写过"与"写过但读不出来"在索引上都表现为空表，处置却不同：后者是故障，必须
+            # 当场可数（满盘写坏的那种载体就是 0 字节）。路径在、内容读不出 ⇒ 读不到。
+            bundle_read_fault = bool(bundle_ref_path and not bundled_schemas)
+            if bundle_read_fault:
+                logger.warning(
+                    "frontdoor pinned tools[] bundle could not be read, forcing a reprint: session_key={} path={}",
+                    bundle_session_key,
+                    bundle_ref_path,
+                )
+            bundle_mode = str(state.get("provider_tool_bundle_mode") or "").strip()
+            at_boundary = (
+                bundle_mode != "pinned_frozen"
+                if bundle_mode
+                else sorted(keep_names) != sorted(bundled_schemas.keys())
+            )
+            missing_names = [name for name in keep_names if not isinstance(bundled_schemas.get(name), dict)]
+            rebuilt_placeholders: list[str] = []
+            compat_rebuild = bool(bundled_schemas and missing_names)
+            if at_boundary or missing_names or not bundled_schemas:
+                rebuilt = self._frontdoor_rebuild_pinned_tool_bundle(
+                    keep_names=keep_names,
+                    declared_tools=declared_tools,
+                    registry_lookup=registry_lookup,
+                    prior_index=bundled_schemas,
+                    prior_index_first=compat_rebuild,
+                )
+                if rebuilt.get("index"):
+                    bundled_schemas = dict(rebuilt["index"])
+                    rebuilt_placeholders = list(rebuilt.get("placeholders") or [])
+                    self._persist_frontdoor_pinned_tool_bundle(
+                        session=session,
+                        session_key=bundle_session_key,
+                        keep_names=keep_names,
+                        rendered=[bundled_schemas[name] for name in keep_names if name in bundled_schemas],
+                        build_reason=self._frontdoor_bundle_build_reason(
+                            bundle_mode=bundle_mode,
+                            seeded=not bundle_ref_path and not compat_rebuild,
+                            compat_rebuild=compat_rebuild or bundle_read_fault,
+                        ),
+                    )
+            single_source_rendered: list[dict[str, Any]] = []
+            for name in keep_names:
+                payload = bundled_schemas.get(name)
+                if isinstance(payload, dict):
+                    single_source_rendered.append(dict(payload))
+                    continue
+                # 连重建都没拿到（写盘也失败的分支）：名字留在清单里落占位，不静默摘名。
+                single_source_rendered.append(dict(placeholder_tool_schema(name)))
+                rebuilt_placeholders.append(str(name))
+            state["bundle_placeholder_names"] = list(rebuilt_placeholders)
+            # 两类重建分开计：`bundle_compat_rebuild` 是"整表里没有后来新增的成员/整表读不出"
+            # 这种兼容重建（每个在飞会话一次），`bundle_fault` 是载体本身读不出或写不出去。
+            # 读不出同时进这两栏是真的（既重建了、也是故障），但写失败只进 fault、边界重印
+            # 只进 rebuild——混成一栏会把灰度期的正常收口读成故障风暴。
+            state["bundle_compat_rebuild"] = int(compat_rebuild or bundle_read_fault)
+            state["bundle_fault"] = int(
+                bundle_read_fault or bool(getattr(session, "_frontdoor_pinned_tool_bundle_fault", 0))
+            )
+            state["frontdoor_tool_schema_hits"] = {
+                "declared": 0,
+                "registry": 0,
+                "retired": 0,
+                "bundle": len(keep_names) - len(rebuilt_placeholders),
+                "placeholder": len(rebuilt_placeholders),
+            }
+            state["frontdoor_tool_schema_fallback_opportunities"] = len(rebuilt_placeholders)
+            return single_source_rendered
         tools_by_name: dict[str, Any] = {}
         placeholder_names: list[str] = []
         schema_source_hits = {"declared": 0, "registry": 0, "retired": 0, "bundle": 0, "placeholder": 0}
@@ -7472,46 +7667,39 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
         rendered = _provider_tool_schemas(tools_by_name)
         # 占位是一次渲染期的事实，落进 state 让这一跳的工件把它记下来：没有可数落点的
         # 兜底等于没有兜底——"名字还在"与"名字是占位"在工具哈希上看不出区别。
-        state["frontdoor_pinned_schema_placeholders"] = list(placeholder_names)
-        # 按档计数与机会分母：`bundle` / `placeholder` 两档今天在发送道上恒为 0——发送前的
-        # 可渲染性闸门（`_frontdoor_schema_renderable_tool_names`）按"活实例 ∪ 删除前快照"
-        # 先摘名，判据比这里窄，需要这两档的名字根本走不到渲染器。读数把这层不可见固定下来，
-        # 也给出塌缩前后的对照基线。
+        state["bundle_placeholder_names"] = list(placeholder_names)
+        state["bundle_compat_rebuild"] = 0
+        # 按档计数与机会分母：开关关闭这一支保持阶段 1 的形状（参数表仍按实例→快照→整表取），
+        # 读数词汇与单源那支一致，灰度两侧能直接对着比。
         state["frontdoor_tool_schema_hits"] = dict(schema_source_hits)
         state["frontdoor_tool_schema_fallback_opportunities"] = int(
             schema_source_hits["retired"] + schema_source_hits["bundle"] + schema_source_hits["placeholder"]
         )
-        # 整表只在两种情况下重写：这一跳出现过取不到参数表的名字（占位字节也要被下一跳
-        # 逐字节复用），或名单成员与整表当前覆盖的那份不同（＝重印边界）。常态跳不重建
-        # 字典，比较用的是整表自己的键，不另开一份平行名单。
+        # 整表在名单变化或出现过占位的那一跳重写（常态跳不写盘）。
         bundle_changed = placeholder_names or sorted(keep_names) != sorted(bundled_schemas.keys())
         if session is not None and bundle_changed:
-            bundle_index = dict(index_schemas_by_name(rendered))
-            setattr(session, "_frontdoor_pinned_tool_schema_bundle", bundle_index)
-            # 阶段 1 纯加固：整表在重写这一刻同步落一份会话级 singleton 文件。活实例与删除前
-            # 快照都是进程内的、重启即空，而钉住的名单会从连续性侧车里活过来——没有这份文件，
-            # 重启后那一跳只能把名字摘掉。读路径仍走会话属性，本阶段不改。
-            # build_reason 这一版只有"名单/占位变了"一种触发；阶段 2 把写手搬到重印边界分支后
-            # 换成计划里那组枚举值（seeded / token_compression / manual_compaction / idle_boundary /
-            # forced_reprint）。
-            written = pinned_tool_bundle.write_pinned_tool_bundle(
+            self._persist_frontdoor_pinned_tool_bundle(
+                session=session,
                 session_key=str(state.get("session_key") or "").strip(),
-                provider_tool_names=keep_names,
-                rendered_tool_schemas=rendered,
+                keep_names=keep_names,
+                rendered=rendered,
                 build_reason="membership_changed",
             )
-            if written:
-                setattr(session, "_frontdoor_pinned_tool_bundle_path", written["path"])
-                setattr(session, "_frontdoor_pinned_tool_bundle_revision", written["revision"])
-                setattr(session, "_frontdoor_pinned_tool_bundle_fault", 0)
-            else:
-                setattr(session, "_frontdoor_pinned_tool_bundle_fault", 1)
-                logger.warning(
-                    "frontdoor pinned tools[] bundle could not be persisted: session_key={} names={}",
-                    str(state.get("session_key") or "").strip(),
-                    len(keep_names),
-                )
+        state["bundle_fault"] = int(bool(getattr(session, "_frontdoor_pinned_tool_bundle_fault", 0)))
         return rendered
+
+    @staticmethod
+    def _frontdoor_bundle_build_reason(*, bundle_mode: str, seeded: bool, compat_rebuild: bool) -> str:
+        """整表这次重写的原因，落在工件里可读的三档：首次播种 / 边界重印 / 兼容重建。
+
+        兼容重建（整表缺后来新增的成员，或整表读不出来）每在飞会话只发生一次；把它和边界重印
+        混成一档，灰度期就分不清"正常收口"与"载体坏了"。
+        """
+        if seeded:
+            return "seeded"
+        if compat_rebuild:
+            return "forced_reprint"
+        return str(bundle_mode or "membership_changed")
 
     @staticmethod
     def _frontdoor_wire_tool_schema_readings(tool_schemas: list[Any] | None) -> dict[str, Any]:
@@ -7560,6 +7748,9 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
         """
         readings = self._frontdoor_wire_tool_schema_readings(tool_schemas)
         state["frontdoor_wire_tool_schema_hash"] = readings["content_hash"]
+        # 方案 C 之后工件里那份 `tool_schemas` 就是发送体那一份；存量记录没有这个键，读侧按
+        # `proxy`（预检另渲的那份）处理，比对时不拿工具哈希相等当硬条件。
+        state["frontdoor_tools_record_basis"] = "wire"
         state["frontdoor_wire_tool_name_sequence_hash"] = readings["sequence_hash"]
         state["frontdoor_wire_tool_schema_item_hashes"] = dict(readings["item_hashes"])
         previous = self._frontdoor_latest_actual_request_record(session=session, state=None) or {}
@@ -8554,19 +8745,22 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
                 cache_family_revision = str(
                     continuity_bridge.get("exposure_revision") or cache_family_revision or ""
                 ).strip()
-            tool_schemas, seeded_provider_tool_names = (
-                self._fresh_turn_tool_schema_seed_from_previous_actual_request(
-                    session=session,
-                    tool_schemas=tool_schemas,
-                    expected_schema_names=(
-                        list(continuity_bridge.get("provider_tool_schema_names") or [])
-                        if bool(continuity_bridge.get("carried"))
-                        else list(runtime_visible_tool_names)
-                    ),
+            if not tools_bundle_single_source_enabled():
+                # 上一跳原文整表复用是前门的第五档：单源化后它的位置由钉住整表顶掉，两份
+                # 来源并存就会让"整表说的是什么"和"线上发的是什么"再次分家。
+                tool_schemas, seeded_provider_tool_names = (
+                    self._fresh_turn_tool_schema_seed_from_previous_actual_request(
+                        session=session,
+                        tool_schemas=tool_schemas,
+                        expected_schema_names=(
+                            list(continuity_bridge.get("provider_tool_schema_names") or [])
+                            if bool(continuity_bridge.get("carried"))
+                            else list(runtime_visible_tool_names)
+                        ),
+                    )
                 )
-            )
-            if seeded_provider_tool_names:
-                runtime_visible_tool_names = list(seeded_provider_tool_names)
+                if seeded_provider_tool_names:
+                    runtime_visible_tool_names = list(seeded_provider_tool_names)
         contract = build_frontdoor_prompt_contract(
             scope=prompt_scope,
             provider_model=provider_model,
@@ -8664,6 +8858,10 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
             "frontdoor_selection_debug": frontdoor_selection_debug,
             "tool_names": list(tool_names),
             "provider_tool_names": list(runtime_visible_tool_names),
+            # 渲染器用它判"这一跳是不是重印边界"（单源化后整表只在该写的时候写）。
+            # 另一条装配分支不带这个键时，渲染器回退到"名单与整表键集是否不同"——成员只在
+            # 边界变，两种写法同义；不回退成"取数失败也算边界"。
+            "provider_tool_bundle_mode": str(provider_tool_exposure.get("provider_tool_bundle_mode") or "").strip(),
             "pending_provider_tool_names": list(
                 provider_tool_exposure.get("pending_provider_tool_names") or []
             ),

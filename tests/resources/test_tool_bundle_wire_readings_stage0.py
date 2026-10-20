@@ -16,9 +16,11 @@ from __future__ import annotations
 
 from types import SimpleNamespace
 
+import pytest
 from loguru import logger
 
 from g3ku.runtime.frontdoor._ceo_create_agent_impl import CreateAgentCeoFrontDoorRunner
+from g3ku.utils.helpers import tools_bundle_single_source_enabled
 from main.runtime import react_loop as rl
 
 
@@ -126,6 +128,7 @@ def test_frontdoor_warns_only_when_membership_same_and_bytes_differ() -> None:
         runner_cls._frontdoor_latest_actual_request_record = original
 
 
+@pytest.mark.skipif(tools_bundle_single_source_enabled(), reason="单源化开关打开后这一档退役：它钉的是回填链的取数次序")
 def test_frontdoor_renderer_counts_schema_sources_with_denominator() -> None:
     class _LiveTool:
         name = "live_tool"

@@ -1138,8 +1138,8 @@ def test_frontdoor_keeps_a_pinned_name_with_a_placeholder_when_no_source_has_it(
     # 这一跳记下的整表就是下一跳的原字节来源，不必再走占位
     bundle = getattr(session, "_frontdoor_pinned_tool_schema_bundle", None)
     assert isinstance(bundle, dict) and "vanished_tool" in bundle
-    assert state["frontdoor_pinned_schema_placeholders"] == ["vanished_tool"]
+    assert state["bundle_placeholder_names"] == ["vanished_tool"]
     second = runner._frontdoor_tool_schemas_for_state(state=state, runtime=runtime)
     assert second == first
     # 占位是可数的：第二跳由整表供着，名单就清空，不留跨跳残值
-    assert state["frontdoor_pinned_schema_placeholders"] == []
+    assert state["bundle_placeholder_names"] == []

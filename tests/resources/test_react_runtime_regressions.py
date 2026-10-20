@@ -20,6 +20,7 @@ from g3ku.resources.registry import ResourceRegistry
 from g3ku.runtime.context.node_context_selection import NodeContextSelectionResult
 from g3ku.runtime.stage_prompt_compaction import STAGE_COMPACT_PREFIX
 from g3ku.runtime.tool_history import analyze_tool_call_history
+from g3ku.utils.helpers import tools_bundle_single_source_enabled
 from main.errors import TaskPausedError
 from main.monitoring.log_service import (
     _EXECUTION_STAGE_MODE_SELF,
@@ -2624,6 +2625,7 @@ def test_execution_provider_bundle_freezes_when_exposure_collapses() -> None:
     assert 'content' not in bundle
 
 
+@pytest.mark.skipif(tools_bundle_single_source_enabled(), reason="单源化开关打开后这一档退役：它钉的是回填链的取数次序")
 def test_execution_provider_bundle_keeps_revoked_tool_declared_and_flags_it() -> None:
     """RBAC 收回只该关掉执行准入，不该把名字从钉住的清单里摘走。
 
@@ -2671,6 +2673,7 @@ def test_execution_provider_bundle_keeps_revoked_tool_declared_and_flags_it() ->
     assert selection['declared_denied_tool_schemas']['web_fetch']['function']['name'] == 'web_fetch'
 
 
+@pytest.mark.skipif(tools_bundle_single_source_enabled(), reason="单源化开关打开后这一档退役：它钉的是回填链的取数次序")
 def test_execution_provider_bundle_keeps_dispatch_absent_granted_tool_declared() -> None:
     """仍被授权、只是本轮没进派发字典的名字：参数表要补，尾块文案不写它。
 
@@ -2719,6 +2722,7 @@ def test_execution_provider_bundle_keeps_dispatch_absent_granted_tool_declared()
     assert selection['declared_denied_tool_names'] == []
 
 
+@pytest.mark.skipif(tools_bundle_single_source_enabled(), reason="单源化开关打开后这一档退役：它钉的是回填链的取数次序")
 def test_execution_provider_bundle_falls_back_to_last_sent_schema_bytes() -> None:
     """活实例与删除前快照都没有：用上一跳真正发出的原文兜住，名字照旧留在清单里。
 
@@ -2765,6 +2769,7 @@ def test_execution_provider_bundle_falls_back_to_last_sent_schema_bytes() -> Non
     assert selection['trace']['declaration_schema_backfill']['lane4-schema-tool']['function']['name'] == 'lane4-schema-tool'
 
 
+@pytest.mark.skipif(tools_bundle_single_source_enabled(), reason="单源化开关打开后这一档退役：它钉的是回填链的取数次序")
 def test_execution_provider_bundle_reads_the_carrier_before_the_artifact() -> None:
     """载体（帧里的 selection trace）优先于工件：快照空了也不该再付一次读盘。
 
@@ -2808,6 +2813,7 @@ def test_execution_provider_bundle_reads_the_carrier_before_the_artifact() -> No
     assert selection['trace']['declaration_schema_backfill'] == carried
 
 
+@pytest.mark.skipif(tools_bundle_single_source_enabled(), reason="单源化开关打开后这一档退役：它钉的是回填链的取数次序")
 def test_execution_provider_bundle_last_sent_tier_needs_a_prior_artifact_ref() -> None:
     """没有上一跳引用、也没有整表引用时不读盘、不炸；名字留住，参数表明示没带出来。
 
@@ -2846,6 +2852,7 @@ def test_execution_provider_bundle_last_sent_tier_needs_a_prior_artifact_ref() -
     assert selection['trace']['declaration_schema_placeholders'] == ['lane4-schema-tool']
 
 
+@pytest.mark.skipif(tools_bundle_single_source_enabled(), reason="单源化开关打开后这一档退役：它钉的是回填链的取数次序")
 def test_execution_provider_bundle_reads_the_seed_bundle_before_the_last_sent_artifact() -> None:
     """整表引用排在"上一跳原文"之前：那份按 kind 被逐跳剪，剪掉的一刻第五档就空了。
 
@@ -2892,6 +2899,7 @@ def test_execution_provider_bundle_reads_the_seed_bundle_before_the_last_sent_ar
     assert selection['trace']['declaration_schema_placeholders'] == []
 
 
+@pytest.mark.skipif(tools_bundle_single_source_enabled(), reason="单源化开关打开后这一档退役：它钉的是回填链的取数次序")
 def test_execution_provider_bundle_rewrites_the_seed_bundle_only_when_the_list_changes() -> None:
     """整表只在名单变化的那一跳重写；冻结跳一次 IO 都不加，且引用原样带下去。"""
     writes: list[dict] = []

@@ -4582,7 +4582,17 @@ async def test_graph_call_model_fresh_turn_reuses_previous_message_artifact_pref
     monkeypatch.setattr(runner._resolver, "resolve_for_actor", _resolve_for_actor)
     monkeypatch.setattr(runner._builder, "build_for_ceo", _build_for_ceo)
     monkeypatch.setattr(runner, "_resolve_ceo_model_refs", lambda: ["openai_codex:gpt-test"])
-    monkeypatch.setattr(runner, "_frontdoor_tool_schemas_for_state", lambda **_: [])
+    monkeypatch.setattr(
+        runner,
+        "_frontdoor_tool_schemas_for_state",
+        lambda *, state, runtime: [
+            {
+                "type": "function",
+                "function": {"name": str(name), "description": "", "parameters": {"type": "object"}},
+            }
+            for name in list(state.get("provider_tool_names") or state.get("tool_names") or [])
+        ],
+    )
     monkeypatch.setattr(
         runner,
         "_resolve_frontdoor_send_model_context_window",
@@ -4793,7 +4803,17 @@ async def test_graph_call_model_runs_token_preflight_after_fresh_turn_seed_and_b
             for name in list(tool_names or [])
         ],
     )
-    monkeypatch.setattr(runner, "_frontdoor_tool_schemas_for_state", lambda **_: [])
+    monkeypatch.setattr(
+        runner,
+        "_frontdoor_tool_schemas_for_state",
+        lambda *, state, runtime: [
+            {
+                "type": "function",
+                "function": {"name": str(name), "description": "", "parameters": {"type": "object"}},
+            }
+            for name in list(state.get("provider_tool_names") or state.get("tool_names") or [])
+        ],
+    )
     monkeypatch.setattr(runner, "_call_model_with_tools", _call_model_with_tools)
     monkeypatch.setattr(runner, "_checkpoint_safe_model_response_payload", lambda _message: {"ok": True})
     monkeypatch.setattr(runner, "_persist_frontdoor_actual_request", lambda **_: {})
@@ -5835,7 +5855,17 @@ async def test_graph_call_model_fresh_turn_reuses_previous_message_artifact_pref
         },
         raising=False,
     )
-    monkeypatch.setattr(runner, "_frontdoor_tool_schemas_for_state", lambda **_: [])
+    monkeypatch.setattr(
+        runner,
+        "_frontdoor_tool_schemas_for_state",
+        lambda *, state, runtime: [
+            {
+                "type": "function",
+                "function": {"name": str(name), "description": "", "parameters": {"type": "object"}},
+            }
+            for name in list(state.get("provider_tool_names") or state.get("tool_names") or [])
+        ],
+    )
     monkeypatch.setattr(runner, "_call_model_with_tools", _call_model_with_tools)
     monkeypatch.setattr(runner, "_checkpoint_safe_model_response_payload", lambda _message: {"ok": True})
     monkeypatch.setattr(runner, "_persist_frontdoor_actual_request", lambda **_: {})
@@ -7338,7 +7368,17 @@ async def test_graph_call_model_restarts_with_refreshed_model_refs_after_runtime
     runner = create_agent_impl.CreateAgentCeoFrontDoorRunner(loop=loop)
     seen_model_refs: list[list[str]] = []
 
-    monkeypatch.setattr(runner, "_frontdoor_tool_schemas_for_state", lambda **_: [])
+    monkeypatch.setattr(
+        runner,
+        "_frontdoor_tool_schemas_for_state",
+        lambda *, state, runtime: [
+            {
+                "type": "function",
+                "function": {"name": str(name), "description": "", "parameters": {"type": "object"}},
+            }
+            for name in list(state.get("provider_tool_names") or state.get("tool_names") or [])
+        ],
+    )
     monkeypatch.setattr(
         runner,
         "_frontdoor_prompt_contract",
@@ -7420,7 +7460,17 @@ async def test_graph_call_model_stops_retrying_provider_chain_exhaustion_after_l
         await real_sleep(0)
 
     monkeypatch.setattr(ceo_runtime_ops.asyncio, "sleep", _fake_sleep)
-    monkeypatch.setattr(runner, "_frontdoor_tool_schemas_for_state", lambda **_: [])
+    monkeypatch.setattr(
+        runner,
+        "_frontdoor_tool_schemas_for_state",
+        lambda *, state, runtime: [
+            {
+                "type": "function",
+                "function": {"name": str(name), "description": "", "parameters": {"type": "object"}},
+            }
+            for name in list(state.get("provider_tool_names") or state.get("tool_names") or [])
+        ],
+    )
     monkeypatch.setattr(
         runner,
         "_frontdoor_prompt_contract",

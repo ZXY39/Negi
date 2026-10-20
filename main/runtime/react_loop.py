@@ -31,6 +31,7 @@ from g3ku.providers.fallback import (
     PUBLIC_PROVIDER_FAILURE_MESSAGE,
     ModelProviderExhaustedError,
 )
+from g3ku.resources.retired_schemas import placeholder_tool_schema
 from g3ku.resources.retired_schemas import schema_name as _provider_schema_name
 from g3ku.runtime import skill_roster_notice as _skill_roster_notice
 from g3ku.runtime.chunk_compression_plan import (
@@ -788,6 +789,7 @@ class ReActToolLoop:
                         provider_tool_names=compression_provider_tool_names,
                         current_tools=current_tools,
                         tool_schema_selection=tool_schema_selection,
+                        reprint=True,
                     )
                     compression_prompt_cache_key = self._execution_prompt_cache_key(
                         model_messages=model_messages,
@@ -816,6 +818,63 @@ class ReActToolLoop:
                         provider_tool_exposure_revision = self._provider_tool_exposure_revision(
                             provider_tool_names
                         )
+                        # 重印跳把新名单的字节写回整表：整表是单源化之后唯一的参数表来源，
+                        # 不在这里重写它就会一直供节点第一跳的旧字节，新成员在整表里没有条目
+                        # （旧实现把这段写在服务侧的选择器里，条件却是"帧里没有 prior 名单"，
+                        # 而重印跳帧里带的还是旧名单 ⇒ 一次也不会触发）。
+                        recommitter = getattr(self, '_pinned_tool_schema_bundle_persister', None)
+                        recommitted_bundle: dict[str, Any] = {}
+                        ordered_schemas: dict[str, Any] = {}
+                        recommit_placeholders: list[str] = []
+                        if compression_tool_schemas:
+                            for schema_item in compression_tool_schemas:
+                                if not isinstance(schema_item, dict):
+                                    continue
+                                ordered_schemas[_provider_schema_name(dict(schema_item))] = dict(schema_item)
+                        if compression_provider_tool_names and compression_tool_schemas:
+                            for missing_name in [
+                                str(item or '').strip()
+                                for item in compression_provider_tool_names
+                                if str(item or '').strip() and str(item or '').strip() not in ordered_schemas
+                            ]:
+                                logger.warning(
+                                    'node reprint could not render a pinned tools[] name: task={} node={} name={}',
+                                    task.task_id,
+                                    node.node_id,
+                                    missing_name,
+                                )
+                                # 占位跟着进新整表定影：不写进去的话，下一跳又缺名重建一次并
+                                # 再记一次数，"冻结跳零 IO"与读数的信噪比一起塌。
+                                ordered_schemas[missing_name] = placeholder_tool_schema(missing_name)
+                                recommit_placeholders.append(missing_name)
+                        if callable(recommitter) and ordered_schemas:
+                            try:
+                                recommitted_bundle = dict(
+                                    recommitter(
+                                        task_id=task.task_id,
+                                        node_id=node.node_id,
+                                        schemas_by_name=ordered_schemas,
+                                        build_reason=str(bundle_recommit_reason or 'token_compression'),
+                                    )
+                                    or {}
+                                )
+                            except Exception:
+                                recommitted_bundle = {}
+                        if not recommitted_bundle.get('ref') and ordered_schemas:
+                            # 写不出去也不能丢：这一跳照旧按刚重建的字节发（回退读活实例等于
+                            # 让"整表说的"与"线上发的"再次分家），缺的那次写记成可数的故障。
+                            logger.warning(
+                                'node pinned tools[] bundle could not be persisted after a reprint: '
+                                'task={} node={} names={}',
+                                task.task_id,
+                                node.node_id,
+                                len(ordered_schemas),
+                            )
+                        recommitted_bundle = {
+                            **dict(recommitted_bundle or {}),
+                            'index': dict(ordered_schemas),
+                            'fault': int(bool(ordered_schemas) and not recommitted_bundle.get('ref')),
+                        }
                         tool_schema_selection = {
                             **dict(tool_schema_selection or {}),
                             'provider_tool_names': list(provider_tool_names),
@@ -834,6 +893,30 @@ class ReActToolLoop:
                                 'provider_tool_bundle_recommit_reason': bundle_recommit_reason,
                             },
                         }
+                        if ordered_schemas:
+                            # 渲染器这一跳起就读这份重建后的整表：名单与字节在同一次重印里换掉。
+                            tool_schema_selection['pinned_tool_bundle_index'] = dict(ordered_schemas)
+                            tool_schema_selection['pinned_tool_bundle_ref'] = str(
+                                recommitted_bundle.get('ref') or ''
+                            )
+                            tool_schema_selection['pinned_tool_bundle_revision'] = str(
+                                recommitted_bundle.get('revision') or ''
+                            )
+                            tool_schema_selection['trace'] = {
+                                **dict(tool_schema_selection.get('trace') or {}),
+                                'bundle_ref': str(recommitted_bundle.get('ref') or ''),
+                                'bundle_revision': str(recommitted_bundle.get('revision') or ''),
+                                'bundle_fault': int(recommitted_bundle.get('fault') or 0),
+                                'bundle_placeholder_names': list(recommit_placeholders),
+                            }
+                        # 读数要描述这一跳真正发出去的那份数组：swap 之前算的那一份已经不代表
+                        # wire，重算一次再落帧。
+                        self._record_node_wire_tool_schema_readings(
+                            task_id=task.task_id,
+                            node_id=node.node_id,
+                            tool_schema_selection=tool_schema_selection,
+                            tool_schemas=tool_schemas,
+                        )
                         token_preflight_diagnostics = {
                             **dict(token_preflight_diagnostics or {}),
                             'estimated_total_tokens': compression_final_tokens,
@@ -3352,15 +3435,46 @@ class ReActToolLoop:
         provider_tool_names: list[str],
         current_tools: dict[str, Any],
         tool_schema_selection: dict[str, Any] | None,
+        reprint: bool = False,
     ) -> list[dict[str, Any]]:
         """按清单顺序渲染发给 provider 的 schema。
 
-        派发字典里没有的名字取声明侧自带的 schema：RBAC 收回只关掉执行准入，工具实例不
-        再进本轮字典（所以调不动），但清单继续带着参数表——删名会把身后正文整段重铺。
-        两边都拿不到 schema 的名字才真的离开清单（例如资源被整体禁用）。
+        单源化（整表非空）时每个名字的参数表都取自钉住整表，一个名字都不离开清单：供不出的
+        落占位。开关关闭时保持旧形状——派发字典里没有的名字取声明侧自带的 schema（RBAC 收回
+        只关掉执行准入，工具实例不再进本轮字典，所以调不动，但清单继续带着参数表；删名会把
+        身后正文整段重铺），两边都拿不到 schema 的名字才真的离开清单。
         """
         denied_schemas = dict((tool_schema_selection or {}).get('declared_denied_tool_schemas') or {})
+        bundle_index = dict((tool_schema_selection or {}).get('pinned_tool_bundle_index') or {})
         rendered: list[dict[str, Any]] = []
+        if bundle_index:
+            # 单源化：参数表只从钉住整表取，派发字典里的名字也一样。否则运维在 Tool Admin 里
+            # 改一颗工具的参数定义，这一跳就现场渲出新字节——在重印边界之外断前缀。
+            for name in provider_tool_names:
+                normalized = str(name or '').strip()
+                fresh_schema: Any = None
+                if reprint:
+                    # 重印跳是"按当轮实例重建整表"的合法时刻：编辑要在这一跳被吸收，之后跟着
+                    # 新整表重新冻结。没进派发字典的名字（被收回、本轮不合格）仍取整表那份，
+                    # 否则名单里一次无关的增删会顺带把别人的字节换掉。
+                    to_schema = getattr(current_tools.get(normalized), 'to_model_schema', None)
+                    if callable(to_schema):
+                        try:
+                            fresh_schema = to_schema()
+                        except Exception:
+                            fresh_schema = None
+                schema = fresh_schema if isinstance(fresh_schema, dict) else bundle_index.get(normalized)
+                if isinstance(schema, dict):
+                    rendered.append(schema)
+                    continue
+                # 整表供不出这个名字：留名落占位，不回退去读活实例（回退等于把"整表说的"与
+                # "线上发的"再次分家），也不许静默摘名（摘名会把身后正文整段重铺）。
+                logger.warning(
+                    'node tools[] name is missing from the pinned bundle: name={} fallback=placeholder',
+                    normalized,
+                )
+                rendered.append(placeholder_tool_schema(normalized))
+            return rendered
         for name in provider_tool_names:
             to_schema = getattr(current_tools.get(name), 'to_model_schema', None)
             if callable(to_schema):
@@ -3468,6 +3582,11 @@ class ReActToolLoop:
             'provider_tool_bundle_mode': '',
             'declared_denied_tool_names': [],
             'declared_denied_tool_schemas': {},
+            # `selection_payload` 是逐字段新建的固定键集：选择器返回的新键不在这儿就会被
+            # 静默丢掉（历史上压缩跳的"唯一重新提交点"就是这么一次也没生效过的）。
+            'pinned_tool_bundle_index': {},
+            'pinned_tool_bundle_ref': '',
+            'pinned_tool_bundle_revision': '',
             'pending_provider_tool_names': [],
             'provider_tool_exposure_pending': False,
             'provider_tool_exposure_revision': '',
@@ -3509,6 +3628,15 @@ class ReActToolLoop:
                 selection_payload['declared_denied_tool_schemas'] = dict(
                     raw_selection.get('declared_denied_tool_schemas') or {}
                 )
+                selection_payload['pinned_tool_bundle_index'] = dict(
+                    raw_selection.get('pinned_tool_bundle_index') or {}
+                )
+                selection_payload['pinned_tool_bundle_ref'] = str(
+                    raw_selection.get('pinned_tool_bundle_ref') or ''
+                ).strip()
+                selection_payload['pinned_tool_bundle_revision'] = str(
+                    raw_selection.get('pinned_tool_bundle_revision') or ''
+                ).strip()
                 requested_names: list[str] = []
                 seen_requested_names: set[str] = set()
                 for item in list(raw_selection.get('tool_names') or []):

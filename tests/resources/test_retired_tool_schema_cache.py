@@ -1,9 +1,12 @@
 """删除工具不再立即打断可复用前缀。
 
-删除会把实例从资源快照里摘掉，而 `tools[]` 是按活实例现渲的。没有快照时，下一跳的工具表
-就比上一跳少一条，provider 前缀从工具表那一截整段断裂——一次删除等于让身后全部正文重付。
-权限收回不会断，因为实例还在、参数表由声明侧继续供着；删除现在走同一条待遇：删除前抄一份
-`to_model_schema()`，渲染侧在名字没有活实例时取回同一份字节，直到重印点把名字移出清单。
+删除会把实例从资源快照里摘掉，而 `tools[]` 的参数表要有名字在名单里才发得出。没有快照时，
+下一跳的工具表就比上一跳少一条（开关关闭那一路），provider 前缀从工具表那一截整段断裂——
+一次删除等于让身后全部正文重付。权限收回不会断，因为实例还在、参数表由声明侧继续供着；
+删除现在走同一条待遇：删除前抄一份 `to_model_schema()`，渲染侧在名字没有活实例时取回同一份
+字节，直到重印点把名字移出清单。`G3KU_TOOLS_BUNDLE_SINGLE_SOURCE` 打开后参数表只从钉住整表取
+（见 `docs/architecture/tool-and-skill-system.md`「参数表的来源」），这份快照是整表还没建起来
+时的那一档来源。
 """
 
 from __future__ import annotations
@@ -18,6 +21,7 @@ from g3ku.resources.retired_schemas import (
     record_tool_schema,
 )
 from g3ku.runtime.frontdoor import _ceo_create_agent_impl as create_agent_impl
+from g3ku.utils.helpers import tools_bundle_single_source_enabled
 from main.service.runtime_service import MainRuntimeService
 
 
@@ -121,9 +125,14 @@ def test_deleted_tool_still_named_in_denied_tools_until_repaint():
     # 实例没了、快照还在：名字仍在 `tools[]` 里，所以仍然点名
     assert runner._frontdoor_declared_denied_tool_names_for_state(state) == ["win_mcp"]
 
-    # 快照也没了：渲不出参数表，这一行不能再提它
+    # 快照也没了：开关关闭时渲不出参数表，这一行不能再提它；单源化之后这个名字仍带着整表
+    # 定影下来的占位参数表，"在 `tools[]` 里"对钉住名单恒真，所以尾块照旧点名（计划里写明
+    # 这是尾块正文的一次真实变化）。
     clear_tool_schemas()
-    assert runner._frontdoor_declared_denied_tool_names_for_state(state) == []
+    if tools_bundle_single_source_enabled():
+        assert runner._frontdoor_declared_denied_tool_names_for_state(state) == ["win_mcp"]
+    else:
+        assert runner._frontdoor_declared_denied_tool_names_for_state(state) == []
 
 
 def test_delete_records_schema_before_the_instance_disappears(tmp_path):

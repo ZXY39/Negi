@@ -17,6 +17,7 @@ import pytest
 from g3ku.resources import retired_schemas
 from g3ku.runtime.frontdoor import pinned_tool_bundle
 from g3ku.runtime.frontdoor._ceo_create_agent_impl import CreateAgentCeoFrontDoorRunner
+from g3ku.utils.helpers import tools_bundle_single_source_enabled
 
 
 class _SchemaTool:
@@ -83,6 +84,7 @@ def isolated_bundle_store(tmp_path, monkeypatch):
     retired_schemas.clear_tool_schemas()
 
 
+@pytest.mark.skipif(tools_bundle_single_source_enabled(), reason="单源化开关打开后这一档退役：它钉的是回填链的取数次序")
 def test_renderer_persists_bundle_and_records_path_and_revision(tmp_path) -> None:
     session_key = "web:persist"
     session = _session(session_key)
