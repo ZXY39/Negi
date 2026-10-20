@@ -9,7 +9,7 @@ Start here when you are new to the repository or when a change crosses subsystem
 3. `operations-and-maintenance.md` when you need to run, debug, or deploy the system
 4. `context-and-cache-troubleshooting.md` when the change touches prompt caching, context retention, append-only request growth, or request artifact forensics
 5. `tool-and-skill-system.md`
-6. `tool-hydration-and-callable-chain.md` when the change touches tool hydration and promotion, parameter-error guidance, the universal tool timeout, or stage gating
+6. `tool-hydration-and-callable-chain.md` when the change touches contract presence and delivery, the staged-argument reuse lane, parameter-error guidance, the universal tool timeout, or stage gating
 7. `web-and-admin.md`
 8. `heartbeat-system.md` when the change touches heartbeat turns, task terminal / stall / distribution-error wakeups, or shutdown-resume session wakes
 9. `config-and-models.md` when the change touches runtime config, provider/model routing, or model bindings
@@ -30,7 +30,7 @@ Start here when you are new to the repository or when a change crosses subsystem
 - `tool-and-skill-system.md`
   Use for the four tool/skill concepts, fixed builtin tool contracts, candidate tools, skill loading, tool RBAC, and resource-directory generation checks.
 - `tool-hydration-and-callable-chain.md`
-  Use for how one successful `load_tool_context` becomes a next-turn callable: hydration ledger, promotion and re-read, parameter-error lane, externalized result envelope, universal tool timeout, tool rerun-safe declaration for the recovery lane, stage gating, and the context→callable chain.
+  Use for what makes a tool callable this hop (contract presence), the delivery hop that returns the contract and stages arguments, the `reuse_args` batch lane, re-read and fingerprints, parameter-error lane, externalized result envelope, universal tool timeout, tool rerun-safe declaration for the recovery lane, stage gating, and the context→callable chain.
 - `web-and-admin.md`
   Use for websocket contracts, frontend/backend responsibility boundaries, and operator-visible UI behavior.
 - `heartbeat-system.md`
@@ -83,8 +83,8 @@ Start here when you are new to the repository or when a change crosses subsystem
 - Same task result pushed to the channel multiple times → `heartbeat-system.md`「Task Terminal Repair Contract」
 - Channel/bridge reply emits `## Runtime Tool Contract` or `[STAGE_*]` stage-block/internal context text -> `runtime-overview.md`「frontdoor 与任务运行时的关系」(回显守卫) + `external-agent-api.md` (outbound sanitize contract)
 - 请求体里阶段块成批堆在上下文最前面、与自己的用户消息/最终回复脱节 → `runtime-overview.md`「stage_compaction」（块锚点三级取定与顺序不变量）
-- 工具上一轮还能调、这一轮从 `callable_tools` 消失，但仍留在 `tools[]` 上（既不在 `denied_tools`、也不在 `undeclared_candidates`），且 `hydration_evicted_executor_names` 里没有它 → 不是 LRU 也不是权限收回，而是它的 toolskill 正文被阶段裁撤或压缩移出上下文，按"契约不在 ⇒ 能力不在"被撤销；判据、两个载体与 `keep_tools` 保留道见 `tool-hydration-and-callable-chain.md`「hydrated tools」
-- 裁撤后阶段块里没有 `## 保留契约` 段、或 `keep_tools` 点了名字却没留住 → 先确认同批带了 `drop_completed_stage_tool_detail=true` 与 `completed_stage_summary`（不带 drop 时 `keep_*` 按参数非法/忽略处理），再看该名字是否属于本阶段真的加载过的目标集；提取失败不写条目，回执会点名，机制见 `tool-hydration-and-callable-chain.md`「阶段门控与 callable 收紧」
+- 工具上一轮还直接执行、这一轮调用它只交回契约不产出结果，名字却仍留在 `tools[]` 上（既不在 `denied_tools`、也不在 `undeclared_candidates`）→ 它的 toolskill 契约块被阶段裁撤或压缩移出了上下文，按"契约不在 ⇒ 那一跳先交回契约"处理，下一跳起照旧可调；判据与唯一载体见 `tool-hydration-and-callable-chain.md`「契约在场与 callable」，读数是 `tool_contract_presence`
+- 一批里 `reuse_args=true` 只跑出比暂存份数少的结果、或整批报"没有可复用的入参" → 先确认这是**上一跳**落的条目（严格一跳），再比该工具当轮在场指纹与条目里的指纹是否同修订；份数与执行数都记在工具行的 `execution_path`/`items` 上，机制见 `tool-hydration-and-callable-chain.md`「入参暂存与 `reuse_args` 批量执行」
 - 第三方桥接应用接入（/api/v1 鉴权、外部会话、事件流、主动推送不到达）→ `external-agent-api.md`「常见排障入口」
 - 外部 agent 看不见全部会话、或要把某个 token 的可见范围收回去 → `external-agent-api.md`「启用与鉴权」的跨桥作用域一档
 - 会话转录/Web UI 有回复但渠道端（QQ 等）收不到、回合跑坏了渠道端静默、渠道「能收不能发」、重启后旧提醒补投或重复 → `external-agent-api.md`「回合契约」终态不变量 +「出站路由（主动推送）」+「持久 outbox」+「内置官方 QQ 适配器」
@@ -157,7 +157,7 @@ Start here when you are new to the repository or when a change crosses subsystem
 - 项目一启动会话就自动回一条几小时前的旧任务结果、或某个任务结果迟迟没汇报却也没报错 → `heartbeat-system.md`「Task Terminal Repair Contract」（终态 outbox 投递耐久性与 `abandoned` 留痕）+ `operations-and-maintenance.md`「会话无回复」
 - 会话该静默却发话、或该发话却整轮无声；模型写了像哨兵的文本却没静默 → `runtime-overview.md`「3.3 静默回复（`silent` 工具）」+ `web-and-admin.md`「CEO Turn Silent Reply Contract」
 - 新增常驻内置控制工具后模型从不使用它、或调用即报错 → `tool-and-skill-system.md`「3.1.1 为什么"常驻"需要独立机制」
-- 某工具上一轮还能调、这一轮报 `tool not available`，且 `load_tool_context` 回 `ok:true` 也不把它提升 → `tool-hydration-and-callable-chain.md`「hydrated tools」「加载门控」+ `context-and-cache-troubleshooting.md`「节点侧排查要点」（压缩不是这条的原因；名字仍在 `tools[]` 里而本轮调不动，是水合台账被淘汰的合法状态，见 `tool-and-skill-system.md`「Provider Tool Surface」）
+- 某工具这一轮报 `tool not available`，而名字仍挂在 `tools[]` 里 → 那是权限收回或资源下架（`denied_tools` 应当点名它），不是契约不在场；契约不在场的形态不报错，而是那一跳交回契约。两条判据与读数见 `tool-hydration-and-callable-chain.md`「契约在场与 callable」+ `context-and-cache-troubleshooting.md`「节点侧排查要点」
 - 相邻跳 provider `tools[]` 成员在变、且没有真实授权变化（缓存命中随之掉）→ `tool-and-skill-system.md`「Provider Tool Surface」+ `context-and-cache-troubleshooting.md`「跨普通 fresh turn 的 tool schema churn」
 - 前缀与 `tools[]` 逐字相同而命中掉了、要数"这一跳跳了几档/为什么跳"，或日志里按 `Model route selected` 统计档位却读出 0 次跨档 → `context-and-cache-troubleshooting.md`「跨档跳的未命中按台账的档位归属读」；组名与成员对不上先读 `GET /api/models/load-balance/status` 的 `group_drift_count`
 - 重启后第一跳把头部名单或 `tools[]` 重铺了一遍（停机期间增删过 skill/工具，该跳非缓存 input 冲高、下一跳就回血）→ `context-and-cache-troubleshooting.md`「重启后继续，不能退回 transcript/history fallback」+ `tool-and-skill-system.md`「Pinned Static Declarations」
@@ -240,7 +240,7 @@ These rules prevent the docs from re-accumulating redundancy. Every edit to this
 | Memory queue state/file semantics (`runtime-overview`); queue/reset operator workflows (`operations-and-maintenance`) | both, split as shown |
 | Heartbeat continuation contract, cron at-most-once delivery, task terminal repair (including terminal-outbox delivery durability and the `abandoned` state), node-error, distribution-error, and task-stall detection/delivery | `heartbeat-system.md` |
 | Tool/skill four concepts, fixed builtin tool contracts, candidate tools and candidate skills, frontdoor head-pinned static declarations (`candidate_skills` / `exec_runtime_policy` / `session_temp_dir`) and their three reprint boundaries, Tool Admin RBAC semantics, provider-facing `tools[]` surface contract (frontdoor live RBAC superset vs node pinned bundle and its single reprint point), duplicate-call guard, resource-directory generation checks and semantic catalog freshness, always-callable resident internal control tools (`silent`, and why fixed-builtin membership does not inject a tool), skill policy role contract (write-side normalization with 400, read-side per-row degradation, and the empty-set fallback that differs from tools) | `tool-and-skill-system.md` |
-| Tool hydration ledger and promotion, re-read and fingerprints, parameter-error guidance lane, externalized tool result envelope, universal tool timeout contract, tool rerun-safe declaration for the recovery lane, stage gating and callable tightening, context→callable chain | `tool-hydration-and-callable-chain.md` |
+| Contract presence as the callability authority, contract delivery and the staged-argument `reuse_args` batch lane, re-read and fingerprints, parameter-error guidance lane, externalized tool result envelope, universal tool timeout contract, tool rerun-safe declaration for the recovery lane, stage gating and callable tightening, context→callable chain | `tool-hydration-and-callable-chain.md` |
 | Actual-request forensics, 线体角色合同（一条请求里 system 至多一份且只能在首位）, append-only rule, cache-miss triage, token preflight diagnostics | `context-and-cache-troubleshooting.md` |
 | Websocket/UI contracts, composer/media rendering, image upload gating, frontend theme and layout contract, model config admin draft contract, log audit event sink and audit page contract, node detail redraw expansion-state contract, node output content-read API contract, per-call model-call ledger (its writer lanes and `call_kind`) and the Token统计 window, exec approval and command-allowlist admin surface (`/api/resources/tools/exec-*` paths, 503-is-not-empty, the frontend↔mounted-route parity guard), container deployment, frontend vendor asset state (tracked manifest vs data-root probe overlay) | `web-and-admin.md` |
 | Config schema, hot refresh, model bindings, secret location, deployment unlock, config bundle export/import, role route entries and load-balance group config semantics | `config-and-models.md` |
