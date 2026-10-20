@@ -239,8 +239,11 @@ def test_sqlite_task_store_logs_sqlite_errorcode_and_name_for_read_queries(
     finally:
         store.close()
 
-    assert captured["message"] == "sqlite read query failed: operation={} sqlite_errorcode={} sqlite_errorname={} path={}"
-    assert captured["args"] == ("SELECT", 10, "SQLITE_IOERR", str(store.path))
+    assert captured["message"] == (
+        "sqlite read query failed: operation={} sqlite_errorcode={} sqlite_errorname={} path={} {}"
+    )
+    # 末格是"仅在 SQLITE_CANTOPEN 时才拼"的车道诊断，普通 I/O 错误这里是空串
+    assert captured["args"] == ("SELECT", 10, "SQLITE_IOERR", str(store.path), "")
     exc = captured["exception"]
     assert isinstance(exc, sqlite3.OperationalError)
     assert getattr(exc, "sqlite_errorcode", None) == 10

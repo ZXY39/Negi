@@ -87,7 +87,9 @@ def test_cantopen_on_light_lane_reports_the_other_lane_result(store: SQLiteTaskS
     assert 'shm_map=' in joined
     assert 'db_handles=' in joined
     assert 'cwd_exists=' in joined and 'tmpdir=' in joined and 'rel_open=' in joined
-    assert 'scratch_db=ok:1' in joined and 'sqlite_temp_directory=' in joined
+    assert 'spill=ok:' in joined and 'point=ok' in joined
+    assert 'env_tmp=' in joined and 'env_temp=' in joined
+    assert 'sqlite_temp_directory=' not in joined and 'scratch_temp=' not in joined
     assert 'live_header=' in joined
     assert 'conn_age_s=' in joined
     assert 'lane_cantopen_occurrences=1' in joined
@@ -165,3 +167,25 @@ def test_cross_check_never_blocks_when_other_lane_is_busy(store: SQLiteTaskStore
 
     joined = '\n'.join(capture.lines)
     assert 'cross_check[light]=busy' in joined
+
+
+def test_spill_probe_isolates_the_temp_dir_from_the_database(
+    store: SQLiteTaskStore,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """临时目录不可用而库是好的：探针必须报 `spill=failed:SQLITE_CANTOPEN` 且 `point=ok`。
+
+    `SQLITE_CANTOPEN` 的消息里印的是库的绝对路径，所以"库打不开"与"排序临时文件建不出来"
+    在异常文本上完全同形——这条用例钉住的就是把两者切开的那一格。
+    """
+    missing = tmp_path / 'temp-dir-that-does-not-exist'
+    monkeypatch.setenv('TMP', str(missing))
+    monkeypatch.setenv('TEMP', str(missing))
+
+    detail = store._scratch_db_check()
+
+    assert 'spill=failed:SQLITE_CANTOPEN' in detail
+    assert 'point=ok' in detail
+    env_line = store._environment_probe()
+    assert repr(str(missing)) in env_line

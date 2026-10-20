@@ -4000,6 +4000,9 @@ class SQLiteTaskStore:
         except OSError as exc:
             write_state = f'{type(exc).__name__}:{getattr(exc, "errno", "")}'
         parts.append(f'tmpdir={tmp_dir}(dir={tmp_ok},write={write_state})')
+        # SQLite 在 Windows 上按这两个变量找临时目录，而 tempfile 不可用时会静默回落到
+        # 工作目录：只印 gettempdir() 会把"被拦的那条路"显示成一个可写的目录。
+        parts.append(f'env_tmp={os.environ.get("TMP", "")!r} env_temp={os.environ.get("TEMP", "")!r}')
         relative = os.path.relpath(str(self.path))
         try:
             if relative.startswith('..'):
@@ -4012,37 +4015,46 @@ class SQLiteTaskStore:
             parts.append(f'rel_open={type(exc).__name__}:{getattr(exc, "errno", "")}')
         return ' '.join(parts)
 
-    def _scratch_db_check(self) -> str:
-        """在另一块临时小库上跑同样的动作，把"这个 WAL 库的问题"与"本进程里 SQLite 的
-        临时文件机制坏了"切开。
+    # 排序输入 ~4.9 MB：实测 1.4 MB 还在内存里排，3.4 MB 起才落盘，留一倍余量。
+    _SPILL_PROBE_ROWS = 12000
+    _SPILL_PROBE_WIDTH = 400
 
-        `PRAGMA temp_store_directory` 在 SQLite 里是**进程级**默认值：任何代码把它指到
-        一个后来消失的目录，之后每条需要临时文件的新连接都会报 SQLITE_CANTOPEN，而已经
-        缓存在内存里的页照样读得出来 —— 正是现网观察到的不对称。所以这里除了建表，还
-        把当前的 temp_directory 读回来。
+    def _scratch_db_check(self) -> str:
+        """真做一次"必须落盘的排序"，把 SQLite 自己的临时目录这条路验一遍。
+
+        排序超过内存里的合并缓冲就建临时文件，建不出来报的是 `SQLITE_CANTOPEN` —— 消息里
+        印的却是**库文件的绝对路径**，长得像"库打不开"。所以这条探针必须同时给两个读数：
+        spill（需要临时文件）与 point（不需要）。只 spill 失败 ⇒ 临时目录这条路坏了，库没事。
+
+        不能用 `tempfile.gettempdir()` 判：那些目录不可写时它静默回落到工作目录，于是探针
+        自己"可写"而 SQLite 仍然失败。也不能用 `PRAGMA temp_directory`：本 build 取不到行。
         """
         try:
             with tempfile.TemporaryDirectory(prefix='store-probe-') as probe_dir:
                 scratch = os.path.join(probe_dir, 'scratch.sqlite3')
                 con = sqlite3.connect(scratch, timeout=3)
                 try:
-                    con.execute('create table t(a)')
-                    con.execute('insert into t values (1)')
-                    rows = con.execute('select count(*) from t').fetchone()[0]
-                    temp_dir = con.execute('pragma temp_directory').fetchone()
+                    con.execute('create table t(a integer primary key, v text)')
+                    tail = 'x' * self._SPILL_PROBE_WIDTH
+                    con.executemany(
+                        'insert into t(a, v) values(?, ?)',
+                        ((index, f'{index:06d}{tail}') for index in range(self._SPILL_PROBE_ROWS)),
+                    )
                     try:
-                        con.execute('create temp table tt(a)')
-                        temp_state = 'ok'
-                    except sqlite3.Error as temp_exc:
-                        temp_state = f'failed:{getattr(temp_exc, "sqlite_errorname", type(temp_exc).__name__)}'
+                        rows = con.execute('select count(*) from (select v from t order by v)').fetchone()[0]
+                        spill_state = f'ok:{rows}'
+                    except sqlite3.Error as spill_exc:
+                        spill_state = f'failed:{getattr(spill_exc, "sqlite_errorname", type(spill_exc).__name__)}'
+                    try:
+                        con.execute('select v from t where a=1').fetchone()
+                        point_state = 'ok'
+                    except sqlite3.Error as point_exc:
+                        point_state = f'failed:{getattr(point_exc, "sqlite_errorname", type(point_exc).__name__)}'
                 finally:
                     con.close()
-                return (
-                    f'scratch_db=ok:{rows} scratch_temp={temp_state} '
-                    f'sqlite_temp_directory={temp_dir!r}'
-                )
+                return f'spill={spill_state} point={point_state}'
         except Exception as exc:
-            return f'scratch_db={type(exc).__name__}:{str(exc)[:60]}'
+            return f'spill=probe_error:{type(exc).__name__}:{str(exc)[:60]}'
 
     def _live_header_check(self) -> str:
         """新开一条连接只读库头（不碰任何表）——能答说明文件头与 VFS 是通的。"""
