@@ -28,6 +28,7 @@ from g3ku.runtime.session_keys import (
     parse_china_session_key,
 )
 from g3ku.runtime.skill_roster_notice import normalize_skill_roster_notice_context
+from g3ku.runtime.tool_arg_stash import normalize_tool_arg_stash
 from g3ku.utils.helpers import ensure_dir, safe_filename
 
 DEFAULT_CEO_SESSION_TITLE = "新会话"
@@ -1210,6 +1211,9 @@ def _normalized_completed_continuity_snapshot(payload: Any) -> dict[str, Any] | 
         "skill_roster_notice_context": normalize_skill_roster_notice_context(
             payload.get("skill_roster_notice_context")
         ),
+        # 入参暂存（`reuse_args` 的可复用面）。这份载荷是白名单装配的：不在这儿列出来就
+        # 永远落不了盘，重启后模型填 reuse_args 只会读到"没有可复用入参"。
+        "tool_arg_stash": normalize_tool_arg_stash(payload.get("tool_arg_stash")),
         "provider_tool_schema_names": _normalized_name_list(payload.get("provider_tool_schema_names")),
         # 钉进头部的静态声明原文与重印代数。同样是白名单装配：不列出来就落不了盘，
         # 于是重启后第一跳按当轮可见集重渲头部，头部一改身后全部前缀重付。

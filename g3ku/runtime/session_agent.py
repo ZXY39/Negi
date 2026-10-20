@@ -21,6 +21,7 @@ from g3ku.core.state import AgentState, StructuredError
 from g3ku.prompt_trace import render_output_trace
 from g3ku.providers.fallback import MODEL_RETRY_LIVE_STATES
 from g3ku.runtime import skill_roster_notice as _skill_roster_notice
+from g3ku.runtime import tool_arg_stash as _tool_arg_stash
 from g3ku.runtime.cancellation import ToolCancellationToken
 from g3ku.runtime.frontdoor.canonical_context import (
     TRANSCRIPT_CC_UPSERT_FIELD,
@@ -638,6 +639,11 @@ class RuntimeAgentSession:
                 f"session:{str(getattr(getattr(self, 'state', None), 'session_key', '') or '').strip()}",
                 payload.get("skill_roster_notice_context"),
             )
+        # 入参暂存与 roster 同一条纪律：**载荷没带这个键时不动**。基线载荷里缺键不等于
+        # "模型没暂存过任何东西"，覆盖成空会把刚拿到的可复用入参抹掉；而带键时按归一化
+        # 形状收，脏条目不进执行侧。
+        if "tool_arg_stash" in payload:
+            self._frontdoor_tool_arg_stash = _tool_arg_stash.normalize_tool_arg_stash(payload)
         self._frontdoor_provider_tool_schema_names = self._normalized_name_list(
             payload.get("provider_tool_schema_names")
         )
@@ -747,6 +753,12 @@ class RuntimeAgentSession:
                     (payload or {}).get("skill_roster_notice_context"),
                     cutoff_iso=str((payload or {}).get("updated_at") or "").strip(),
                 ),
+            )
+            # 同一刀也要落在暂存上：留着截断点之后暂存的入参，等于让一段已被抹掉的
+            # "将来"还能被执行一次。
+            self._frontdoor_tool_arg_stash = _tool_arg_stash.drop_staged_after(
+                _tool_arg_stash.normalize_tool_arg_stash(payload or {}),
+                cutoff_iso=str((payload or {}).get("updated_at") or "").strip(),
             )
             self._frontdoor_visible_tool_ids = self._normalized_name_list(
                 (payload or {}).get("visible_tool_ids")
@@ -964,6 +976,9 @@ class RuntimeAgentSession:
                 "skill_roster_notice_context": _skill_roster_notice.notice_context_for(
                     f"session:{str(session_key or '').strip()}"
                 ),
+                # 入参暂存（`reuse_args` 的可复用面）与 roster 同一条路落盘：不落盘的后果
+                # 不是"少一份状态"，而是模型下一跳填了 reuse_args 却被告知没有可复用入参。
+                "tool_arg_stash": dict(getattr(self, "_frontdoor_tool_arg_stash", {}) or {}),
                 "provider_tool_schema_names": list(
                     self._normalized_name_list(
                         getattr(self, "_frontdoor_provider_tool_schema_names", [])
