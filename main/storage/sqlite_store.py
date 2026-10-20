@@ -3916,6 +3916,8 @@ class SQLiteTaskStore:
         parts.append(self._fresh_open_check(sql, params))
         parts.append(self._fd_budget_probe())
         parts.append(self._open_path_probe())
+        parts.append(self._mapping_probe())
+        parts.append(self._db_handle_count())
         count = int(self._read_lane_cantopen_counts.get(lane, 0)) + 1
         self._read_lane_cantopen_counts[lane] = count
         parts.append(f'lane_cantopen_occurrences={count}')
@@ -3969,6 +3971,49 @@ class SQLiteTaskStore:
             joined_flags = '+'.join(flags)
             probes.append(f'{label}={joined_flags}')
         return 'open_probe=' + ' '.join(probes)
+
+    def _mapping_probe(self) -> str:
+        """能不能把 `-shm` 映射进本进程。
+
+        普通 `os.open` 已经证明路径/共享/权限都没问题，而 SQLite 打开 WAL 库比那多一步：
+        它要把 shm 建立 section 并映射视图。Windows 上这一步失败（页文件配额、section
+        数上限等）在 SQLite 里就表现成 SQLITE_CANTOPEN，所以必须单独测并把 winerror 带出来。
+        """
+        import mmap as mmap_module
+
+        shm_path = f'{self.path}-shm'
+        try:
+            handle = os.open(shm_path, os.O_RDWR)
+        except OSError as exc:
+            return f'shm_map=open_failed:{type(exc).__name__}:{getattr(exc, "winerror", "")}'
+        try:
+            with mmap_module.mmap(handle, 0) as view:
+                _ = view[:4]
+            return 'shm_map=ok'
+        except OSError as exc:
+            return f'shm_map={type(exc).__name__}:winerror={getattr(exc, "winerror", "")}'
+        finally:
+            try:
+                os.close(handle)
+            except OSError:
+                pass
+
+    def _db_handle_count(self) -> str:
+        """本进程现在持有几个指向这个库（含 wal/shm）的文件句柄——泄漏会直接显形。"""
+        try:
+            import psutil
+        except Exception:
+            return 'db_handles=n/a'
+        try:
+            target = os.path.normcase(os.path.abspath(str(self.path)))
+            hits = 0
+            for entry in psutil.Process().open_files():
+                path = os.path.normcase(str(entry.path))
+                if path.startswith(target):
+                    hits += 1
+            return f'db_handles={hits}'
+        except Exception as exc:
+            return f'db_handles=ERR:{type(exc).__name__}'
 
     def _fd_budget_probe(self, limit: int = 512) -> str:
         """这个进程还开得出多少个文件 —— 直接回答"CRT fd 表满没满"。
