@@ -3919,6 +3919,8 @@ class SQLiteTaskStore:
         parts.append(self._open_path_probe())
         parts.append(self._mapping_probe())
         parts.append(self._environment_probe())
+        parts.append(self._scratch_db_check())
+        parts.append(self._live_header_check())
         parts.append(self._db_handle_count())
         count = int(self._read_lane_cantopen_counts.get(lane, 0)) + 1
         self._read_lane_cantopen_counts[lane] = count
@@ -4009,6 +4011,56 @@ class SQLiteTaskStore:
         except OSError as exc:
             parts.append(f'rel_open={type(exc).__name__}:{getattr(exc, "errno", "")}')
         return ' '.join(parts)
+
+    def _scratch_db_check(self) -> str:
+        """在另一块临时小库上跑同样的动作，把"这个 WAL 库的问题"与"本进程里 SQLite 的
+        临时文件机制坏了"切开。
+
+        `PRAGMA temp_store_directory` 在 SQLite 里是**进程级**默认值：任何代码把它指到
+        一个后来消失的目录，之后每条需要临时文件的新连接都会报 SQLITE_CANTOPEN，而已经
+        缓存在内存里的页照样读得出来 —— 正是现网观察到的不对称。所以这里除了建表，还
+        把当前的 temp_directory 读回来。
+        """
+        try:
+            with tempfile.TemporaryDirectory(prefix='store-probe-') as probe_dir:
+                scratch = os.path.join(probe_dir, 'scratch.sqlite3')
+                con = sqlite3.connect(scratch, timeout=3)
+                try:
+                    con.execute('create table t(a)')
+                    con.execute('insert into t values (1)')
+                    rows = con.execute('select count(*) from t').fetchone()[0]
+                    temp_dir = con.execute('pragma temp_directory').fetchone()
+                    try:
+                        con.execute('create temp table tt(a)')
+                        temp_state = 'ok'
+                    except sqlite3.Error as temp_exc:
+                        temp_state = f'failed:{getattr(temp_exc, "sqlite_errorname", type(temp_exc).__name__)}'
+                finally:
+                    con.close()
+                return (
+                    f'scratch_db=ok:{rows} scratch_temp={temp_state} '
+                    f'sqlite_temp_directory={temp_dir!r}'
+                )
+        except Exception as exc:
+            return f'scratch_db={type(exc).__name__}:{str(exc)[:60]}'
+
+    def _live_header_check(self) -> str:
+        """新开一条连接只读库头（不碰任何表）——能答说明文件头与 VFS 是通的。"""
+        try:
+            con = sqlite3.connect(f'file:{self.path}?mode=ro', uri=True, timeout=3)
+        except Exception as exc:
+            return f'live_header=connect_failed:{type(exc).__name__}'
+        try:
+            journal = con.execute('pragma journal_mode').fetchone()
+            page = con.execute('pragma page_size').fetchone()
+            return f'live_header=journal={journal!r} page_size={page!r}'
+        except sqlite3.Error as exc:
+            return f'live_header=failed:{getattr(exc, "sqlite_errorname", type(exc).__name__)}'
+        finally:
+            try:
+                con.close()
+            except Exception:
+                pass
 
     def _mapping_probe(self) -> str:
         """能不能把 `-shm` 映射进本进程。
