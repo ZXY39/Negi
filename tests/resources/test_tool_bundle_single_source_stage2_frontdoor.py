@@ -84,6 +84,17 @@ def _names(schemas: list[dict]) -> list[str]:
     return [str((item.get('function') or {}).get('name') or '') for item in schemas]
 
 
+def _schema_payload(name: str, description: str) -> dict:
+    return {
+        'type': 'function',
+        'function': {
+            'name': name,
+            'description': description,
+            'parameters': {'type': 'object', 'properties': {'q': {'type': 'string'}}},
+        },
+    }
+
+
 @pytest.fixture(autouse=True)
 def isolated_store(tmp_path, monkeypatch):
     monkeypatch.setenv('G3KU_TOOLS_BUNDLE_SINGLE_SOURCE', '1')
@@ -186,6 +197,77 @@ def test_denied_tools_names_a_pinned_placeholder_name() -> None:
     }
 
     assert runner._frontdoor_declared_denied_tool_names_for_state(state) == ['ghost']
+
+
+def test_delta_estimate_stays_incomparable_when_both_sides_share_one_basis() -> None:
+    """同一口径下工具哈希不等 ⇒ 照旧判不可比（放宽只认口径变化这一件事）。"""
+    runner = CreateAgentCeoFrontDoorRunner(loop=SimpleNamespace())
+    previous_messages = [
+        {'role': 'system', 'content': 'SYSTEM'},
+        {'role': 'user', 'content': 'hello'},
+    ]
+    current_messages = [*previous_messages, {'role': 'user', 'content': 'next ' * 40}]
+
+    _delta, comparable, _shrink = runner._frontdoor_append_only_delta_estimate_tokens(
+        previous_request_messages=previous_messages,
+        current_request_messages=current_messages,
+        previous_tool_schemas=[_schema_payload('alpha', 'v1')],
+        current_tool_schemas=[_schema_payload('alpha', 'v2')],
+        previous_tools_record_basis='wire',
+        current_tools_record_basis='wire',
+    )
+
+    assert comparable is False
+
+
+def test_delta_estimate_survives_the_record_basis_switch() -> None:
+    """C-1：口径从 proxy 换到 wire 那一跳，工具哈希必然不等，但比对不能因此作废。
+
+    `comparable=False` 会把这一跳的 usage-first 估算整条换成全量 preview，并连带
+    `required_context_window_tokens`（路由成员筛）与压缩触发判定——一条纯口径变化不该
+    让这些下游跟着动。
+    """
+    runner = CreateAgentCeoFrontDoorRunner(loop=SimpleNamespace())
+    previous_messages = [
+        {'role': 'system', 'content': 'SYSTEM'},
+        {'role': 'user', 'content': 'hello'},
+    ]
+    current_messages = [*previous_messages, {'role': 'user', 'content': 'next ' * 40}]
+
+    delta, comparable, _shrink = runner._frontdoor_append_only_delta_estimate_tokens(
+        previous_request_messages=previous_messages,
+        current_request_messages=current_messages,
+        # proxy 那份比 wire 少尾部两颗合成控制工具，哈希因此不同
+        previous_tool_schemas=[_schema_payload('alpha', 'v1')],
+        current_tool_schemas=[_schema_payload('alpha', 'v1'), _schema_payload('silent', 'reply nothing')],
+        previous_tools_record_basis='proxy',
+        current_tools_record_basis='wire',
+    )
+
+    assert comparable is True
+    assert delta > 0
+
+
+def test_delta_estimate_defaults_to_proxy_for_legacy_records() -> None:
+    """不传口径参数（存量记录的读法）时，两侧都按 proxy 比对：哈希不等仍判不可比。
+
+    默认值就是 legacy 语义，这条断言替"旧工件没有这个键"那一档兜住读侧。
+    """
+    runner = CreateAgentCeoFrontDoorRunner(loop=SimpleNamespace())
+    previous_messages = [
+        {'role': 'system', 'content': 'SYSTEM'},
+        {'role': 'user', 'content': 'hello'},
+    ]
+    current_messages = [*previous_messages, {'role': 'user', 'content': 'next ' * 40}]
+
+    _delta, comparable, _shrink = runner._frontdoor_append_only_delta_estimate_tokens(
+        previous_request_messages=previous_messages,
+        current_request_messages=current_messages,
+        previous_tool_schemas=[_schema_payload('alpha', 'v1')],
+        current_tool_schemas=[_schema_payload('alpha', 'v2')],
+    )
+
+    assert comparable is False
 
 
 def test_prompt_cache_key_is_insensitive_to_tool_schemas() -> None:
