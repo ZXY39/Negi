@@ -772,7 +772,6 @@ class MemoryAssemblyConfig(Base):
 
     skill_inventory_top_k: int = 16
     extension_tool_top_k: int = 16
-    node_tool_top_k: int = 16
     frontdoor_compaction_max_context_tokens: int = Field(default=200000, ge=1)
     frontdoor_compaction_trigger_ratio: float = Field(default=0.10, ge=0.0, le=1.0)
     frontdoor_interrupt_approval_enabled: bool = False
