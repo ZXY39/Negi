@@ -3915,6 +3915,7 @@ class SQLiteTaskStore:
         parts.append(self._cross_check_label('write', self._conn, self._lock, sql, params))
         parts.append(self._fresh_open_check(sql, params))
         parts.append(self._fd_budget_probe())
+        parts.append(self._open_path_probe())
         count = int(self._read_lane_cantopen_counts.get(lane, 0)) + 1
         self._read_lane_cantopen_counts[lane] = count
         parts.append(f'lane_cantopen_occurrences={count}')
@@ -3939,6 +3940,35 @@ class SQLiteTaskStore:
             return f'cross_check[{label}]=failed:{getattr(exc, "sqlite_errorname", type(exc).__name__)}'
         finally:
             lock.release()
+
+    def _open_path_probe(self) -> str:
+        """直接用 `os.open` 试库文件与它的 wal/shm，各两种权限。
+
+        SQLite 打开一个 WAL 库需要把 `-shm` 以读写方式打开；`os.open` 只做普通打开。
+        两者结果不一致就能把范围切开：普通打开也失败 ⇒ 是路径/共享/锁的问题（与 SQLite
+        无关）；普通打开全成功而 SQLite 失败 ⇒ 是它自己那套打开标志或 wal-index 状态。
+        """
+        probes: list[str] = []
+        for label, target in (
+            ('db', str(self.path)),
+            ('wal', f'{self.path}-wal'),
+            ('shm', f'{self.path}-shm'),
+        ):
+            flags: list[str] = []
+            for mode_name, flag in (('R', os.O_RDONLY), ('RW', getattr(os, 'O_RDWR', 2))):
+                try:
+                    handle = os.open(target, flag)
+                except FileNotFoundError:
+                    flags.append(f'{mode_name}:missing')
+                    continue
+                except OSError as exc:
+                    flags.append(f'{mode_name}:{type(exc).__name__}:{getattr(exc, "errno", "")}')
+                    continue
+                os.close(handle)
+                flags.append(mode_name)
+            joined_flags = '+'.join(flags)
+            probes.append(f'{label}={joined_flags}')
+        return 'open_probe=' + ' '.join(probes)
 
     def _fd_budget_probe(self, limit: int = 512) -> str:
         """这个进程还开得出多少个文件 —— 直接回答"CRT fd 表满没满"。
