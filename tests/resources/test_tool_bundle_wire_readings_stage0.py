@@ -18,7 +18,6 @@ from types import SimpleNamespace
 
 from loguru import logger
 
-from g3ku.runtime.frontdoor import _ceo_runtime_ops as fd_ops
 from g3ku.runtime.frontdoor._ceo_create_agent_impl import CreateAgentCeoFrontDoorRunner
 from main.runtime import react_loop as rl
 

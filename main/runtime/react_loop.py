@@ -20,7 +20,6 @@ from g3ku.agent.tools.base import Tool
 from g3ku.config.context_refresh import idle_boundary_exceeded
 from g3ku.config.live_runtime import get_runtime_config
 from g3ku.content import content_summary_and_ref, parse_content_envelope
-from g3ku.resources.retired_schemas import schema_name as _provider_schema_name
 from g3ku.providers.base import (
     ToolCallRequest,
     provider_body_output_cap,
@@ -32,6 +31,7 @@ from g3ku.providers.fallback import (
     PUBLIC_PROVIDER_FAILURE_MESSAGE,
     ModelProviderExhaustedError,
 )
+from g3ku.resources.retired_schemas import schema_name as _provider_schema_name
 from g3ku.runtime import skill_roster_notice as _skill_roster_notice
 from g3ku.runtime.chunk_compression_plan import (
     CHUNK_MAX_CHUNKS,
