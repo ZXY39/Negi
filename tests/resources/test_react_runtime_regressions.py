@@ -8,7 +8,11 @@ from types import SimpleNamespace
 import pytest
 import yaml
 
-from g3ku.agent.tools.base import Tool
+from g3ku.agent.tools.base import (
+    REUSE_ARGS_MODEL_DESCRIPTION_SENTENCE,
+    REUSE_ARGS_PARAMETER_NAME,
+    Tool,
+)
 from g3ku.agent.tools.main_runtime import LoadSkillContextTool, LoadToolContextTool
 from g3ku.content import ContentNavigationService, parse_content_envelope
 from g3ku.providers.base import LLMResponse, ToolCallRequest
@@ -436,7 +440,10 @@ def test_tool_model_visible_schema_falls_back_to_runtime_schema_when_unset() -> 
         "type": "function",
         "function": {
             "name": "model_visible_schema_tool",
-            "description": "Use the runtime schema when no model-only schema override is defined.",
+            "description": (
+                "Use the runtime schema when no model-only schema override is defined. "
+                + REUSE_ARGS_MODEL_DESCRIPTION_SENTENCE
+            ),
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -451,6 +458,8 @@ def test_tool_model_visible_schema_falls_back_to_runtime_schema_when_unset() -> 
                             "Pass an explicit larger value for legitimately long-running work; there is no upper cap."
                         ),
                     },
+                    # 入参复用字段：派生、可选、不带参数级 description（provider 会逐层剥掉）。
+                    REUSE_ARGS_PARAMETER_NAME: {"type": "boolean"},
                 },
                 "required": ["task"],
             },
@@ -646,7 +655,7 @@ def test_compact_schema_manifest_backed_tool_uses_normalized_model_visible_overr
     tool = ManifestBackedTool(descriptor, handler=lambda **kwargs: kwargs)
     schema = tool.to_model_schema()["function"]
 
-    assert schema["description"] == "Compact manifest-backed description."
+    assert schema["description"] == f"Compact manifest-backed description. {REUSE_ARGS_MODEL_DESCRIPTION_SENTENCE}"
     assert schema["parameters"]["type"] == "object"
     assert schema["parameters"]["required"] == ["summary"]
     assert schema["parameters"]["properties"]["summary"]["type"] == "string"
@@ -685,17 +694,24 @@ def test_tool_model_visible_schema_falls_back_to_authoritative_schema() -> None:
         == "Full contract description."
     )
     # 统一 timeout 合同：模型可见 schema 在验证合同之上统一追加可选 timeout_seconds 参数，
-    # 其余部分与权威验证合同保持一致。
+    # `reuse_args` 同源（派生、可选、不进 required），其余部分与权威验证合同保持一致。
     model_schema = tool.to_model_schema()
     model_properties = dict(model_schema["function"]["parameters"]["properties"])
     assert "timeout_seconds" in model_properties
+    assert REUSE_ARGS_PARAMETER_NAME in model_properties
     stripped_schema = {
         "type": model_schema["type"],
         "function": {
             **model_schema["function"],
+            # 两个派生注入都不属于权威合同：先剥字段，再剥函数级那句。
+            "description": "Full schema description.",
             "parameters": {
                 **model_schema["function"]["parameters"],
-                "properties": {k: v for k, v in model_properties.items() if k != "timeout_seconds"},
+                "properties": {
+                    key: value
+                    for key, value in model_properties.items()
+                    if key not in {"timeout_seconds", REUSE_ARGS_PARAMETER_NAME}
+                },
             },
         },
     }
@@ -749,7 +765,9 @@ def test_tool_model_visible_schema_uses_override_without_changing_validation_con
 
     assert tool.to_schema()["function"]["description"] == "Authoritative execution contract."
     assert tool.to_schema()["function"]["parameters"]["required"] == ["full_value"]
-    assert tool.to_model_schema()["function"]["description"] == "Compact model-facing contract."
+    assert tool.to_model_schema()["function"]["description"] == (
+        f"Compact model-facing contract. {REUSE_ARGS_MODEL_DESCRIPTION_SENTENCE}"
+    )
     assert tool.to_model_schema()["function"]["parameters"]["required"] == ["summary"]
     assert tool.validate_params({"summary": "preview"}) == ["missing required full_value"]
 
@@ -803,7 +821,9 @@ def test_embedded_mcp_tool_prefers_handler_model_visible_contract() -> None:
 
     tool = EmbeddedMCPTool(descriptor, _DynamicTool())
 
-    assert tool.to_model_schema()["function"]["description"] == "Runtime model-facing contract."
+    assert tool.to_model_schema()["function"]["description"] == (
+        f"Runtime model-facing contract. {REUSE_ARGS_MODEL_DESCRIPTION_SENTENCE}"
+    )
     assert tool.to_model_schema()["function"]["parameters"]["required"] == ["summary"]
 
 

@@ -1504,8 +1504,18 @@ def test_filesystem_edit_provider_visible_schema_is_a_flat_text_pair(tmp_path: P
         required = ['path', 'old_text', 'new_text']
 
         assert list((schema or {}).get('required') or []) == required
-        declared = {name: payload for name, payload in properties.items() if name != 'timeout_seconds'}
+        # Derived model-surface fields are optional by contract: the universal timeout
+        # argument and `reuse_args` are injected for every tool, so the flatness check
+        # compares only what the tool itself declares.
+        declared = {
+            name: payload
+            for name, payload in properties.items()
+            if name not in {'timeout_seconds', 'reuse_args'}
+        }
         assert set(declared) == set(required)
+        assert 'reuse_args' in properties
+        assert properties['reuse_args'].get('type') == 'boolean'
+        assert 'reuse_args' not in (schema or {}).get('required') or []
         # No object on the model surface: a nested locator beside a required
         # sibling is where a replacement gets put into the locator instead.
         assert all((payload or {}).get('type') != 'object' for payload in declared.values())
