@@ -59,6 +59,7 @@ from g3ku.runtime.chunk_compression_plan import (
 from g3ku.runtime.config_refresh import refresh_loop_runtime_config
 from g3ku.runtime.context.image_metrics import bmp_dimensions, webp_dimensions
 from g3ku.runtime.context.summarizer import estimate_tokens
+from g3ku.runtime.frontdoor import pinned_tool_bundle
 from g3ku.runtime.frontdoor.message_builder import (
     MEMORY_SNAPSHOT_ADOPTION_IDLE_REFRESH,
     MEMORY_WRITE_HINT_HEADER,
@@ -3973,23 +3974,34 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
         return self._frontdoor_declared_denied_tool_names(
             declared_tool_names=self._frontdoor_schema_renderable_tool_names(
                 list(state.get("provider_tool_names") or []),
+                session_key=str(state.get("session_key") or "").strip(),
             ),
             granted_tool_names=self._frontdoor_live_granted_tool_names(
                 session_key=str(state.get("session_key") or ""),
             ),
         )
 
-    def _frontdoor_schema_renderable_tool_names(self, tool_names: list[str] | None) -> list[str]:
+    def _frontdoor_schema_renderable_tool_names(
+        self,
+        tool_names: list[str] | None,
+        *,
+        session_key: str = "",
+        session: Any = None,
+    ) -> list[str]:
         """清单里这一跳**真能渲出参数表**的名字。
 
         `denied_tools` 的措辞是"`tools[]` 里带着参数表，但这一跳调不动"，所以它只装真的
-        在 `tools[]` 里的名字。判据与 `_selected_tool_schemas` 同源：活实例，或删除前抄下
-        的那份 schema 快照。两者都没有的名字（例如资源被卸载且没留过快照）渲不出参数表，
-        写进这一行只会让模型拿着"参数表在场"的说明去撞一个不存在的名字。
+        在 `tools[]` 里的名字。判据与渲染器同源：活实例、删除前抄下的那份 schema 快照，
+        或钉住整表里供得出的字节（阶段 1 放行，`pinned_tool_bundle`）。两者都没有的名字
+        （例如资源被卸载且没留过快照、整表里也没这份）渲不出参数表，写进这一行只会让模型
+        拿着"参数表在场"的说明去撞一个不存在的名字。
 
-        判据用注册表里的存在性而不是真去渲一遍 schema：`_selected_tool_schemas` 跳过
-        一个名字的条件就是既无实例也无快照，而这段每跳要跑好几处（装配、预检、发送前
-        重建），按名字做一次字典查找就够了。
+        注意预检用的 `_selected_tool_schemas` 仍是"实例 ∪ 快照"两颗源、没有整表档：那份数组
+        今天只服务估算与记录面，比 wire 少名字，等阶段 2 单源后一起收掉。
+
+        判据用注册表里的存在性而不是真去渲一遍 schema：发送侧渲染器跳过一个名字的条件就是
+        这三份来源都取不到，而这段每跳要跑好几处（装配、预检、发送前重建），按名字做一次
+        字典查找就够了。
         """
         normalized = [
             str(item or "").strip()
@@ -4008,9 +4020,19 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
             except Exception:
                 tool = None
             if tool is None:
-                if lookup_tool_schema(name) is None:
+                if lookup_tool_schema(name) is not None:
+                    renderable.append(name)
                     continue
-                renderable.append(name)
+                # 阶段 1（Q-A）：钉住整表里供得出参数表的名字也算可渲染。今天这份判据比渲染器
+                # 窄（渲染器还会读整表与占位），所以"既无实例也无快照"的名字在进渲染器之前
+                # 就被摘掉——删一颗工具因此每跳少一条，前缀从那条的起始字节断一次。放行只决定
+                # 名字留不留，不动渲染顺序。
+                if pinned_tool_bundle.has_bundled_schema(
+                    session_key=session_key,
+                    session=session,
+                    name=name,
+                ):
+                    renderable.append(name)
                 continue
             renderable.append(str(getattr(tool, "name", "") or name).strip() or name)
         return renderable
@@ -7464,7 +7486,31 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
         # 字典，比较用的是整表自己的键，不另开一份平行名单。
         bundle_changed = placeholder_names or sorted(keep_names) != sorted(bundled_schemas.keys())
         if session is not None and bundle_changed:
-            setattr(session, "_frontdoor_pinned_tool_schema_bundle", dict(index_schemas_by_name(rendered)))
+            bundle_index = dict(index_schemas_by_name(rendered))
+            setattr(session, "_frontdoor_pinned_tool_schema_bundle", bundle_index)
+            # 阶段 1 纯加固：整表在重写这一刻同步落一份会话级 singleton 文件。活实例与删除前
+            # 快照都是进程内的、重启即空，而钉住的名单会从连续性侧车里活过来——没有这份文件，
+            # 重启后那一跳只能把名字摘掉。读路径仍走会话属性，本阶段不改。
+            # build_reason 这一版只有"名单/占位变了"一种触发；阶段 2 把写手搬到重印边界分支后
+            # 换成计划里那组枚举值（seeded / token_compression / manual_compaction / idle_boundary /
+            # forced_reprint）。
+            written = pinned_tool_bundle.write_pinned_tool_bundle(
+                session_key=str(state.get("session_key") or "").strip(),
+                provider_tool_names=keep_names,
+                rendered_tool_schemas=rendered,
+                build_reason="membership_changed",
+            )
+            if written:
+                setattr(session, "_frontdoor_pinned_tool_bundle_path", written["path"])
+                setattr(session, "_frontdoor_pinned_tool_bundle_revision", written["revision"])
+                setattr(session, "_frontdoor_pinned_tool_bundle_fault", 0)
+            else:
+                setattr(session, "_frontdoor_pinned_tool_bundle_fault", 1)
+                logger.warning(
+                    "frontdoor pinned tools[] bundle could not be persisted: session_key={} names={}",
+                    str(state.get("session_key") or "").strip(),
+                    len(keep_names),
+                )
         return rendered
 
     @staticmethod
@@ -8474,6 +8520,7 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
                 denied_tool_names=self._frontdoor_declared_denied_tool_names(
                     declared_tool_names=self._frontdoor_schema_renderable_tool_names(
                         list(runtime_visible_tool_names or []),
+                        session_key=str(state.get("session_key") or "").strip(),
                     ),
                     granted_tool_names=self._frontdoor_live_granted_tool_names(
                         session_key=str(state.get("session_key") or ""),
@@ -8835,7 +8882,9 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
         # （活实例或删除前快照），用"活实例"当判据会把刚删掉的名字从钉住清单里永久摘掉，
         # 于是这一跳断前缀、下一跳也回不来——删除就退化成了立即删名。
         normalized_provider_tool_names = self._frontdoor_schema_renderable_tool_names(
-            list(state_for_request.get("provider_tool_names") or state_for_request.get("tool_names") or [])
+            list(state_for_request.get("provider_tool_names") or state_for_request.get("tool_names") or []),
+            session_key=str(state_for_request.get("session_key") or "").strip(),
+            session=getattr(getattr(runtime, "context", None), "session", None),
         )
         if normalized_provider_tool_names:
             state_for_request = {

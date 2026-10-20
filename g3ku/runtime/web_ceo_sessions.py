@@ -1218,6 +1218,9 @@ def _normalized_completed_continuity_snapshot(payload: Any) -> dict[str, Any] | 
         "pinned_contract_revision": str(payload.get("pinned_contract_revision") or "").strip(),
         "pinned_contract_skill_ids": _normalized_name_list(payload.get("pinned_contract_skill_ids")),
         "skill_roster_epoch": _normalized_skill_roster_epoch(payload.get("skill_roster_epoch")),
+        # 白名单装配：不在这儿列出来的键永远落不了盘（钉住头部那四个键就是这么补的）。
+        "pinned_tool_bundle_path": str(payload.get("pinned_tool_bundle_path") or "").strip(),
+        "pinned_tool_bundle_revision": str(payload.get("pinned_tool_bundle_revision") or "").strip(),
         "frontdoor_restore_source": restore_source,
         "frontdoor_baseline_sync_decision": baseline_sync_decision,
         "updated_at": updated_at,
@@ -2436,6 +2439,14 @@ def clear_web_ceo_session_artifacts(*, session_id: str, task_service: Any | None
     clear_completed_continuity_snapshot(session_id)
     clear_actual_request_history(session_id)
     clear_turn_boundary_snapshots(session_id)
+    # 钉住整表的 singleton 文件与会话同寿命：会话删掉后还留着，同一个 key 再被复用时会把
+    # 上一段对话的参数表当成这一段的兜底源。
+    try:
+        from g3ku.runtime.frontdoor import pinned_tool_bundle
+
+        pinned_tool_bundle.forget_pinned_tool_bundle(str(session_id or ""))
+    except Exception:
+        logger.exception("failed to drop pinned tools[] bundle for session {}", session_id)
     # 会话清空/删除时一起收掉它起过的后台进程：条目按 session_key 分 scope，
     # 与上传目录同寿命。`session_id` 在这里就是 session_key（调用方口径）。
     try:

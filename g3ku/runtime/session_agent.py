@@ -654,6 +654,17 @@ class RuntimeAgentSession:
                 skill_ids=payload.get("pinned_contract_skill_ids"),
                 epoch=payload.get("skill_roster_epoch"),
             )
+        # 钉住整表的载体：载荷真带了路径才动，且只在进程内载体为空时覆盖（与钉住头部同一条
+        # 纪律）——本回合刚跨过重印边界时属性里那份是刚重渲的，被旧文件盖回去等于抹掉重印。
+        if "pinned_tool_bundle_path" in payload:
+            from g3ku.runtime.frontdoor.pinned_tool_bundle import restore_pinned_tool_bundle_state
+
+            restore_pinned_tool_bundle_state(
+                self,
+                session_key=str(getattr(getattr(self, "state", None), "session_key", "") or "").strip(),
+                path=payload.get("pinned_tool_bundle_path"),
+                revision=payload.get("pinned_tool_bundle_revision"),
+            )
         self._frontdoor_model_retry_status = None
         self._frontdoor_restore_source = str(source or "none").strip() or "none"
         self._frontdoor_baseline_sync_decision = str(
@@ -978,6 +989,15 @@ class RuntimeAgentSession:
                 ),
                 "pinned_contract_revision": str(
                     getattr(self, "_frontdoor_pinned_contract_revision", "") or ""
+                ).strip(),
+                # 钉住整表本体不在侧车里——它约 16 KB，而基线载荷每跳都可能重写。侧车只带
+                # 路径与内容 revision（先例：`frontdoor_actual_request_path`），重启后按这对
+                # 值把文件读回来。
+                "pinned_tool_bundle_path": str(
+                    getattr(self, "_frontdoor_pinned_tool_bundle_path", "") or ""
+                ).strip(),
+                "pinned_tool_bundle_revision": str(
+                    getattr(self, "_frontdoor_pinned_tool_bundle_revision", "") or ""
                 ).strip(),
                 "pinned_contract_skill_ids": list(
                     self._normalized_name_list(
