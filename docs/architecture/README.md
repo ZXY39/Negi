@@ -159,6 +159,7 @@ Start here when you are new to the repository or when a change crosses subsystem
 - 新增常驻内置控制工具后模型从不使用它、或调用即报错 → `tool-and-skill-system.md`「3.1.1 为什么"常驻"需要独立机制」
 - 某工具上一轮还能调、这一轮报 `tool not available`，且 `load_tool_context` 回 `ok:true` 也不把它提升 → `tool-hydration-and-callable-chain.md`「hydrated tools」「加载门控」+ `context-and-cache-troubleshooting.md`「节点侧排查要点」（压缩不是这条的原因；名字仍在 `tools[]` 里而本轮调不动，是水合台账被淘汰的合法状态，见 `tool-and-skill-system.md`「Provider Tool Surface」）
 - 相邻跳 provider `tools[]` 成员在变、且没有真实授权变化（缓存命中随之掉）→ `tool-and-skill-system.md`「Provider Tool Surface」+ `context-and-cache-troubleshooting.md`「跨普通 fresh turn 的 tool schema churn」
+- 前缀与 `tools[]` 逐字相同而命中掉了、要数"这一跳跳了几档/为什么跳"，或日志里按 `Model route selected` 统计档位却读出 0 次跨档 → `context-and-cache-troubleshooting.md`「跨档跳的未命中按台账的档位归属读」；组名与成员对不上先读 `GET /api/models/load-balance/status` 的 `group_drift_count`
 - 重启后第一跳把头部名单或 `tools[]` 重铺了一遍（停机期间增删过 skill/工具，该跳非缓存 input 冲高、下一跳就回血）→ `context-and-cache-troubleshooting.md`「重启后继续，不能退回 transcript/history fallback」+ `tool-and-skill-system.md`「Pinned Static Declarations」
 - 工具被收回后模型仍带着那份参数表，或想知道这个滞后最长多久才消 → `tool-and-skill-system.md`「Provider Tool Surface」（钉住全冻结，增删都落在压缩或空闲边界）+ `config-and-models.md`「context_refresh」
 - 升级旧实例后，某条工具的角色/启停看起来回到默认，或工具停用后没有任何东西把它捞回来 → `tool-and-skill-system.md`「Tool Admin RBAC」（一次性展开迁移；核心工具允许停用、禁止删除，且没有自动拉起）

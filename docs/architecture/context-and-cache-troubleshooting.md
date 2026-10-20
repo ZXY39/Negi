@@ -245,6 +245,14 @@ Heartbeat / cron 不在主 CEO/frontdoor 路径上使用单独的短 `ceo_heartb
 - 不变量：`CeoPromptBuilder.build_base_prompt(cache_stamp=...)` 的复用戳是「记忆块采纳时间 + `capability_snapshot.exposure_revision`」，即记忆块与 `tools[]` 各自决定何时换字节的那两个时钟；戳不动就返回同一份渲染结果，戳一动就重新读盘。注入值是 `stage_budget.ceo_stage_free_tool_names()`（免阶段名单，代码常量的派生值），不随轮变化，也不与本轮可见面取交集。空戳不缓存：新会话与不走这条装配路的调用方每次都读盘。
 - 症状：改了 `ceo_frontdoor.md` 而某个活会话毫无反应＝预期行为，它要等下一次记忆采纳或曝光变化；新开一个会话立刻带新措辞。判"这一跳用的到底是哪份提示词"要比 `system` 字节与文件 mtime 的先后，别拿提交时间当依据。
 
+### 3.20 跨档跳的未命中按台账的档位归属读，不按 worker 日志
+
+- 数据源：`task_model_calls.payload_json` 里逐跳的 `route_admission_group` / `route_admission_index`（这一跳被授到链上哪一格）、`route_served_group` / `route_served_index`（真正把请求发出去时绑的档）、`route_escalation_count` / `route_escalation_reason`（这一跳沿链前进过几次、最后一次为什么）、`route_throttle_dimensions`（这一跳吃过的限流维度）。成员级归属在 `delta_usage_by_model[].route_index` / `.group_key` / `.quota_bucket_index`。负载均衡本体见 `runtime-overview.md`「节点模型路由与准入绑定」。
+- 哨兵语义：`''` 与 `-1` 表示这一跳**没有租约**。前门车道与辅助车道跑在没有 balancer 的进程里，恒为哨兵；`0` 是合法的链首格号，所以缺省绝不能是 `0`，否则"没有租约"会被读成"落在第一档"。
+- 判读形状：`route_admission_group != route_served_group` 的跳即跨档跳。同档内换成员不算跨档（格号不变），而同一网关下换成员也不换缓存命名空间，所以档位这条轴对缓存的影响只落在跨档那一跳；把两者混在一起数，会把"清单没变、命中掉了"错归给轮换。
+- 为什么必须有这几格：worker 日志会滚掉，而且**升档那一跳不打 `Model route selected`**（它只打 `Model node binding rebound`），所以按 `selected` 行的 `route_index` 统计档位分布会把跨档跳读成 0 —— 这个 0 命中不代表没发生。要用日志交叉核对时，锚点是 `Model route lease released` 的 `route_index=` 与 `escalations=`。
+- 症状：台账读出的组名与成员对不上（某跳 `route_served_group` 里的成员其实属于另一组）＝进程内组表与配置不一致，先读 `GET /api/models/load-balance/status` 的 `group_drift_count`，非 0 时任何档位归因都不可信，判据本体见 `runtime-overview.md`「节点模型路由与准入绑定」。
+
 ## 4. Prompt Cache Family 与 Actual Request
 
 本节是 actual request 的取证合同：family/key 语义、per-request 取证顺序、baseline 与恢复顺序、shrink 原因边界。
