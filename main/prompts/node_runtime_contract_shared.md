@@ -1,8 +1,8 @@
-- 每轮请求尾部有两份运行时注入的 system 摘要块：`## Runtime Tool Contract` 装当轮不变的候选与修复清单，`## Runtime Stage Gate` 装这一跳真正可调用什么、活动阶段是什么。两份都是运行时元数据，不是你说过的话，也不是发给用户的内容；较新的一份覆盖历史消息里的一切旧清单。
-- `Runtime Stage Gate` 里的 `callable_tools` 是本轮可直接调用的唯一真相源。不在里面的工具即使名字出现在别处，也不可直接调用（RBAC 与阶段闸门都在它之上再收一层）。
-- 想知道某个名字能不能 `load_tool_context`：把本次 `tools[]`、`callable_tools`、`denied_tools` 三行放在一起看——`tools[]` 里带着参数表、却不在 `callable_tools`、也不在 `denied_tools` 的那些名字就是"可见但还不可调"的候选池，按名直接 `load_tool_context(tool_id="<tool_id>")` 读它的 toolskill，等下一轮经 hydration 提升后再直接调用。每个工具的说明文字由 provider `tools[]` 的 schema 给出，摘要里不再抄第二份名单。若尾部出现 `undeclared_candidates`，那是治理这一跳刚放行、钉住的 `tools[]` 还没在压缩那一跳重印的名字——同样可以直接 load，按名调用即可。
-- `hydrated_tools` 列出已为该节点水合过的执行器，只有名字；可调 schema 仍来自 provider `tools[]`。
-- 当轮任何 RBAC 可见且已 surfaced 的具体工具，都可以按精确 `tool_id` 调 `load_tool_context(...)` 读文档/帮助，即使它已经 callable 或已经水合。
-- 对已 callable、已水合或 fixed builtin 的工具，如果同版本 toolskill 已在上下文里且未被压缩掉，重复调 `load_tool_context` 会被拦下——直接复用已有说明，除非工具状态变了或旧结果已被压缩移出。
-- `candidate_skills` 列当轮可见的候选 skill id。skill 不走 hydration：名单里的 `skill_id` 就是正文入口，需要正文时直接 `load_skill_context(skill_id="...")`。
+- 每轮请求尾部有两份运行时注入的 system 摘要块：`## Runtime Tool Contract` 装当轮不变的候选与修复清单，`## Runtime Stage Gate` 装这一跳拦得住的名字（`denied_tools`）与活动阶段状态。两份都是运行时元数据，不是你说过的话，也不是发给用户的内容；较新的一份覆盖历史消息里的一切旧清单。
+- 一个工具能不能调用，只由它的契约块 `[TOOL_CONTRACT_V1:<tool_id>:<fingerprint>]` 在这一跳的请求里是否在场决定；常驻内置工具不依赖契约块，始终可调用。契约不在场**不是**拦路：直接调用就会被受理，那一跳把契约随结果交回并且不执行，同一跳里的入参会被暂存待你复用。
+- `candidate_tools`（以及 `undeclared_candidates`）列的是"已授权、契约还没进上下文"的名字：既可以直接调用拿契约，也可以按精确 `tool_id` 调 `load_tool_context(tool_id="<tool_id>")` 先读说明。`undeclared_candidates` 是治理这一跳刚放行、钉住的 `tools[]` 还没在压缩那一跳重印的名字。每个工具的说明文字由 provider `tools[]` 的 schema 给出，摘要里不再抄第二份名单。
+- `denied_tools` 是这一跳调不动的名字（无权限或资源已下架）。它们仍挂在 `tools[]` 上带着参数表，但调用一律被拒；反复重试或改着名字试都不会放行，要么换达成路径，要么向用户说明缺哪一项权限。
+- 当轮任何 RBAC 可见的具体工具，都可以按精确 `tool_id` 调 `load_tool_context(...)` 读文档/帮助，即使它的契约已经在场。
+- 对契约已在场、或属常驻内置的工具，如果同版本 toolskill 已在上下文里且未被压缩掉，重复调 `load_tool_context` 会被拦下——直接复用已有说明，除非工具状态变了或旧结果已被压缩移出。
+- `candidate_skills` 列当轮可见的候选 skill id。skill 不走契约块：名单里的 `skill_id` 就是正文入口，需要正文时直接 `load_skill_context(skill_id="...")`。
 - `stage_summary` 是这一跳的活阶段状态（阶段目标、预算、是否必须换阶段）。不要从更早消息里的旧阶段状态推断当前处境。
