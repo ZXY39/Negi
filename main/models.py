@@ -272,6 +272,12 @@ class ModelTokenUsageRecord(TokenUsageSummary):
     model_key: str = ''
     provider_id: str = ''
     provider_model: str = ''
+    # 这一发实际落在负载均衡链的哪一格、哪个组、哪个配额桶。三者都是**成员身份**属性，
+    # 所以按 model_key 合并时取首个非哨兵值。哨兵：-1 / '' = 这一发没有租约（前门车道与
+    # 辅助车道不经过 balancer，结构上恒为哨兵，不是漏写）。
+    route_index: int = -1
+    group_key: str = ''
+    quota_bucket_index: int = -1
 
 
 class TaskArtifactRecord(Model):

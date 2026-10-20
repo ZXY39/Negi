@@ -164,6 +164,10 @@ class ModelRouteLease:
     sticky_rebind_reason: str = ""
     max_retry_rounds: int = 1
     passes_used: int = 0
+    # 该成员在本组内的稳定配额桶序号（-1 = 身份不可解析）。桶身份已经由
+    # `quota_bucket_key` 算好，这里只把它的序号形式带到 lease 上，让逐跳台账能记录
+    # "这一发占的是哪一份配额"，不必下游再反查 balancer 内部表。
+    quota_bucket_index: int = -1
 
     @property
     def held_permit(self) -> Any:
@@ -255,4 +259,8 @@ def _member_view_for(config: Any, model_key: str) -> RouteMemberView:
         enabled=bool(getattr(managed, "enabled", True)),
         context_window_tokens=int(getattr(managed, "context_window_tokens", 0) or 0),
         image_multimodal_enabled=bool(getattr(managed, "image_multimodal_enabled", False)),
+        # operator 显式声明的共享账户身份。以前这里不填，字段声明了却恒为空——今天能工作
+        # 只是因为 runtime_service 绕过 route view 直接读配置，任何基于 route view 做桶
+        # 感知的代码都会静默读到 ""。
+        quota_pool_key=str(getattr(managed, "quota_pool_key", "") or "").strip(),
     )

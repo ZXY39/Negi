@@ -11671,6 +11671,10 @@ class MainRuntimeService:
             'model_route_groups': groups,
             'model_route_config_revision': int(raw.get('config_revision') or 0),
             'model_route_binding_count': len(list(raw.get('node_bindings') or [])),
+            # 组表漂移：注册键与组自带 group_key 不一致、或一颗成员被两个组同时认领。
+            # 非 0 就意味着日志里的 group= 与台账的档位归因不再可信，必须先查它。
+            'model_route_group_drift_count': int(raw.get('group_drift_count') or 0),
+            'model_route_group_drift_findings': list(raw.get('group_drift_findings') or []),
         }
 
     def _node_turn_snapshot(self) -> dict[str, Any]:

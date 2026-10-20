@@ -1282,6 +1282,20 @@ class ReActToolLoop:
                 provider_tool_exposure_commit_reason=str(
                     tool_schema_selection.get('provider_tool_exposure_commit_reason') or ''
                 ),
+                # 逐跳路由归属：读的是这一跳的回合租约（`node_turn_lease`）。节点在授予时
+                # 拿到准入档，真正把请求打出去时记下服务档，组内换人不改格号、跨档才计数。
+                # 没有租约的跳（direct 模型）保持哨兵，别写成第 0 档。
+                route_admission_group=str(getattr(node_turn_lease, 'admission_group_key', '') or ''),
+                route_admission_index=int(getattr(node_turn_lease, 'admission_route_index', -1)),
+                route_served_group=str(getattr(node_turn_lease, 'served_group_key', '') or ''),
+                route_served_index=int(getattr(node_turn_lease, 'served_route_index', -1)),
+                route_escalation_count=int(getattr(node_turn_lease, 'escalation_count', 0)),
+                route_escalation_reason=str(getattr(node_turn_lease, 'escalation_reason', '') or ''),
+                route_throttle_dimensions=",".join(
+                    str(item or '').strip()
+                    for item in list(getattr(node_turn_lease, 'throttle_dimensions', []) or [])
+                    if str(item or '').strip()
+                ),
                 request_seed_source=str(request_seed_source or ''),
                 request_seed_message_count=int(request_seed_message_count or 0),
                 provider_request_meta=getattr(response, 'provider_request_meta', None),
