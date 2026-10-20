@@ -3876,10 +3876,13 @@ class SQLiteTaskStore:
     def _read_lane_failure_detail(self, lane: str, exc: BaseException, sql: str, params: tuple[object, ...]) -> str:
         """读车道 CANTOPEN 的现场。只在 CANTOPEN 时构造，别的错误返回空串。
 
-        要回答的问题只有一个：**同一个进程、同一个库文件，另一条读车道此刻能不能跑同一条
-        SQL**。能 ⇒ "库/路径/环境打不开"整类解释作废，坏的是这条连接自己的句柄；
-        不能 ⇒ 才是文件级问题。取另一条车道的锁必须非阻塞：`refresh_read_snapshot` 是按
-        read→light 的顺序拿的，反向阻塞拿会咬成死锁。
+        三个判据按区分力排序，全部只读、锁非阻塞：
+        1. `cross_check[另一条读车道]` —— 另一条也坏 ⇒ 不是单条连接被弄坏。
+        2. `cross_check[write]` —— 写车道能答 ⇒ 文件在本进程里开着，坏的只是新开的读连接。
+        3. `fresh_open` —— 本进程此刻新开连接能读 ⇒ "这个进程打不开这个文件"作废，方向
+           改去查那两条已存在的连接；不能 ⇒ 才是进程级的打开问题。
+        取锁一律非阻塞：`refresh_read_snapshot` 按 read→light 的顺序拿，写线程持 `self._lock`，
+        阻塞拿会把诊断变成一次停顿，反向还可能咬成死锁。
         """
         if not lane:
             return ''
@@ -3905,22 +3908,53 @@ class SQLiteTaskStore:
             except OSError:
                 parts.append(f'{suffix}=missing')
         other_lane, other_conn, other_lock = self._other_read_lane(lane)
-        if other_lock.acquire(blocking=False):
-            try:
-                rows = other_conn.execute(sql, params).fetchall()
-                parts.append(f'cross_check[{other_lane}]=ok:{len(rows)}')
-            except sqlite3.Error as other_exc:
-                parts.append(
-                    f'cross_check[{other_lane}]=failed:{getattr(other_exc, "sqlite_errorname", type(other_exc).__name__)}'
-                )
-            finally:
-                other_lock.release()
-        else:
-            parts.append(f'cross_check[{other_lane}]=busy')
+        parts.append(self._cross_check_label(other_lane, other_conn, other_lock, sql, params))
+        # 两条读车道同时坏 ⇒ 问题不再是"某条连接被弄坏"。这一项把范围切成两种：
+        # 写车道能答 ⇒ 文件在这个进程里是开着的，坏的只是"新开的读连接"；
+        # 写车道也答不上 ⇒ 这个进程对这个库的 I/O 整体已经不可用。
+        parts.append(self._cross_check_label('write', self._conn, self._lock, sql, params))
+        parts.append(self._fresh_open_check(sql, params))
         count = int(self._read_lane_cantopen_counts.get(lane, 0)) + 1
         self._read_lane_cantopen_counts[lane] = count
         parts.append(f'lane_cantopen_occurrences={count}')
         return ' '.join(str(item) for item in parts)
+
+    def _cross_check_label(
+        self,
+        label: str,
+        conn: sqlite3.Connection,
+        lock: threading.RLock,
+        sql: str,
+        params: tuple[object, ...],
+    ) -> str:
+        """在另一条车道上跑同一条 SQL。锁一律非阻塞拿：`refresh_read_snapshot` 与写线程都
+        可能正持着它们，阻塞拿会把诊断本身变成一次停顿，反向还会咬成死锁。"""
+        if not lock.acquire(blocking=False):
+            return f'cross_check[{label}]=busy'
+        try:
+            rows = conn.execute(sql, params).fetchall()
+            return f'cross_check[{label}]=ok:{len(rows)}'
+        except sqlite3.Error as exc:
+            return f'cross_check[{label}]=failed:{getattr(exc, "sqlite_errorname", type(exc).__name__)}'
+        finally:
+            lock.release()
+
+    def _fresh_open_check(self, sql: str, params: tuple[object, ...]) -> str:
+        """这个进程此刻新开一条连接能不能读。ok ⇒ "新开被挡"整类解释作废。"""
+        try:
+            probe = sqlite3.connect(str(self.path), timeout=1.0)
+        except Exception as open_exc:
+            return f'fresh_open=connect_failed:{type(open_exc).__name__}'
+        try:
+            rows = probe.execute(sql, params).fetchall()
+            return f'fresh_open=ok:{len(rows)}'
+        except sqlite3.Error as exc:
+            return f'fresh_open=failed:{getattr(exc, "sqlite_errorname", type(exc).__name__)}'
+        finally:
+            try:
+                probe.close()
+            except Exception:
+                pass
 
     def _log_sqlite_query_error(self, *, scope: str, sql: str, exc: sqlite3.Error, detail: str = '') -> None:
         logger.opt(exception=exc).error(
