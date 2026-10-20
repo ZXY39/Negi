@@ -29,8 +29,6 @@ def _loop() -> SimpleNamespace:
         memory_manager=_MemoryManager(),
         _memory_runtime_settings=SimpleNamespace(
             assembly=SimpleNamespace(
-                skill_inventory_top_k=8,
-                extension_tool_top_k=6,
                 core_tools=[],
             )
         ),

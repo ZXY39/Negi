@@ -1799,19 +1799,8 @@ async def test_create_agent_runner_graph_prepare_turn_seeds_session_hydrated_too
             candidate_tool_items=[],
             trace={
                 "selected_skills": [],
-                "semantic_frontdoor": {
-                    "queries": {
-                        "raw_query": "hello",
-                        "skill_query": "hello skill",
-                        "tool_query": "hello tool",
-                    },
-                    "dense": {
-                        "skills": [{"record_id": "skill:demo"}],
-                        "tools": [{"record_id": "tool:filesystem", "tool_id": "filesystem_write"}],
-                    },
-                },
                 "tool_selection": {
-                    "mode": "dense_only",
+                    "mode": "inventory_only",
                     "candidate_tool_names": [],
                 },
                 "capability_snapshot": {
@@ -1858,19 +1847,8 @@ async def test_create_agent_runner_graph_prepare_turn_seeds_session_hydrated_too
     assert prepared["frontdoor_selection_debug"] == {
         "query_text": "hello",
         "raw_turn_query_text": "hello",
-        "semantic_frontdoor": {
-            "queries": {
-                "raw_query": "hello",
-                "skill_query": "hello skill",
-                "tool_query": "hello tool",
-            },
-            "dense": {
-                "skills": [{"record_id": "skill:demo"}],
-                "tools": [{"record_id": "tool:filesystem", "tool_id": "filesystem_write"}],
-            },
-        },
         "tool_selection": {
-            "mode": "dense_only",
+            "mode": "inventory_only",
             "candidate_tool_names": [],
         },
         "capability_snapshot": {
@@ -1939,7 +1917,6 @@ async def test_create_agent_runner_graph_prepare_turn_keeps_cron_internal_event_
             candidate_tool_items=[],
             trace={
                 "selected_skills": [],
-                "semantic_frontdoor": {},
                 "tool_selection": {},
                 "capability_snapshot": {
                     "visible_tool_ids": ["cron"],
@@ -2027,7 +2004,6 @@ async def test_create_agent_runner_graph_prepare_turn_keeps_normal_ceo_tools_for
             repair_required_skill_items=[],
             trace={
                 "selected_skills": [],
-                "semantic_frontdoor": {},
                 "tool_selection": {},
                 "capability_snapshot": {
                     "visible_tool_ids": ["create_async_task", "task_list", "cron"],
@@ -2130,9 +2106,8 @@ async def test_create_agent_runner_graph_prepare_turn_keeps_candidate_tools_visi
             candidate_tool_items=[{"tool_id": "filesystem_write", "description": "Write file content to disk."}],
             trace={
                 "selected_skills": [{"skill_id": "memory"}],
-                "semantic_frontdoor": {},
                 "tool_selection": {
-                    "mode": "dense_only",
+                    "mode": "inventory_only",
                     "candidate_tool_names": ["filesystem_write"],
                 },
                 "capability_snapshot": {
@@ -2229,8 +2204,7 @@ async def test_create_agent_runner_graph_prepare_turn_persists_request_body_with
             candidate_tool_items=[],
             trace={
                 "selected_skills": [],
-                "semantic_frontdoor": {},
-                "tool_selection": {"mode": "dense_only", "candidate_tool_names": []},
+                "tool_selection": {"mode": "inventory_only", "candidate_tool_names": []},
                 "capability_snapshot": {
                     "visible_tool_ids": ["submit_next_stage", "load_tool_context", "filesystem_write"],
                     "visible_skill_ids": [],
@@ -2391,8 +2365,7 @@ async def test_create_agent_runner_graph_prepare_turn_recovers_paused_manual_con
             candidate_tool_items=[],
             trace={
                 "selected_skills": [],
-                "semantic_frontdoor": {},
-                "tool_selection": {"mode": "dense_only", "candidate_tool_names": []},
+                "tool_selection": {"mode": "inventory_only", "candidate_tool_names": []},
                 "capability_snapshot": {
                     "visible_tool_ids": ["submit_next_stage", "load_tool_context", "filesystem_write"],
                     "visible_skill_ids": [],
@@ -3208,15 +3181,6 @@ def test_create_agent_runner_syncs_frontdoor_selection_debug_into_inflight_snaps
             "hydrated_tool_names": ["filesystem_write"],
             "frontdoor_selection_debug": {
                 "query_text": "create a markdown file",
-                "semantic_frontdoor": {
-                    "queries": {
-                        "raw_query": "create a markdown file",
-                        "tool_query": "filesystem write markdown file",
-                    },
-                    "dense": {
-                        "tools": [{"record_id": "tool:filesystem", "tool_id": "filesystem_write"}],
-                    },
-                },
                 "tool_selection": {"candidate_tool_names": ["filesystem_write"]},
             },
         },
@@ -3228,15 +3192,6 @@ def test_create_agent_runner_syncs_frontdoor_selection_debug_into_inflight_snaps
     assert isinstance(snapshot, dict)
     assert snapshot["frontdoor_selection_debug"] == {
         "query_text": "create a markdown file",
-        "semantic_frontdoor": {
-            "queries": {
-                "raw_query": "create a markdown file",
-                "tool_query": "filesystem write markdown file",
-            },
-            "dense": {
-                "tools": [{"record_id": "tool:filesystem", "tool_id": "filesystem_write"}],
-            },
-        },
         "tool_selection": {"candidate_tool_names": ["filesystem_write"]},
     }
 
@@ -4610,7 +4565,6 @@ async def test_graph_call_model_fresh_turn_reuses_previous_message_artifact_pref
             candidate_tool_items=[],
             trace={
                 "selected_skills": [],
-                "semantic_frontdoor": {},
                 "tool_selection": {},
                 "capability_snapshot": {
                     "visible_tool_ids": ["exec", "submit_next_stage"],
@@ -4801,7 +4755,6 @@ async def test_graph_call_model_runs_token_preflight_after_fresh_turn_seed_and_b
             candidate_tool_items=[],
             trace={
                 "selected_skills": [],
-                "semantic_frontdoor": {},
                 "tool_selection": {},
                 "capability_snapshot": {
                     "visible_tool_ids": ["exec", "submit_next_stage"],
@@ -4979,7 +4932,6 @@ async def test_prepare_turn_promotes_uploaded_image_only_into_live_request_when_
             candidate_tool_items=[],
             trace={
                 "selected_skills": [],
-                "semantic_frontdoor": {},
                 "tool_selection": {},
                 "capability_snapshot": {
                     "visible_tool_ids": ["submit_next_stage"],
@@ -5107,7 +5059,6 @@ async def test_prepare_turn_keeps_uploaded_image_as_text_only_when_binding_disab
             candidate_tool_items=[],
             trace={
                 "selected_skills": [],
-                "semantic_frontdoor": {},
                 "tool_selection": {},
                 "capability_snapshot": {
                     "visible_tool_ids": ["submit_next_stage"],
@@ -5677,7 +5628,6 @@ async def test_prepare_turn_rejects_oversized_uploaded_image_when_binding_enable
             candidate_tool_items=[],
             trace={
                 "selected_skills": [],
-                "semantic_frontdoor": {},
                 "tool_selection": {},
                 "capability_snapshot": {
                     "visible_tool_ids": ["submit_next_stage"],
@@ -5858,7 +5808,6 @@ async def test_graph_call_model_fresh_turn_reuses_previous_message_artifact_pref
             candidate_tool_items=[],
             trace={
                 "selected_skills": [],
-                "semantic_frontdoor": {},
                 "tool_selection": {},
                 "capability_snapshot": {
                     "visible_tool_ids": ["exec", "submit_next_stage"],
@@ -6209,7 +6158,6 @@ async def test_prepare_turn_keeps_provider_schema_hash_stable_when_web_fetch_is_
             ],
             trace={
                 "selected_skills": [],
-                "semantic_frontdoor": {},
                 "tool_selection": {},
                 "capability_snapshot": {
                     "visible_tool_ids": ["exec", "submit_next_stage", "web_fetch"],

@@ -131,9 +131,9 @@ CEO/frontdoor 另有任务生命周期与分发控制类固定工具。治理记
 
 当前选择规则：
 
-- `candidate_tool_names` 的上界是 RBAC 治理可见集，**不是**本轮已构建的可执行对象字典：候选 = 治理可见工具 −（本轮 callable ∪ 已提升）。候选生成是 inventory-only，没有语义召回层。`candidate_skill_ids` 与它同一语义。
+- `candidate_tool_names` 的上界是 RBAC 治理可见集，**不是**本轮已构建的可执行对象字典：候选 = 治理可见工具 −（本轮 callable ∪ 已提升）。候选生成只做一次集合差。`candidate_skill_ids` 与它同一语义。
 - 由此得到一条必须成立的三态划分：任一治理可见的工具在任一时刻恰属于「本轮可调用」/「本轮可加载并在下一轮提升」/「不可见（RBAC 关闭或 repair-required）」之一。存在第四态（可加载、不提升、也调不动）就是水合合同被破坏，排查路径见 `context-and-cache-troubleshooting.md`「节点侧排查要点」。
-- 普通候选数量由 RBAC 可见工具决定，节点与 CEO/frontdoor 都不按语义 top-k 截断。
+- 普通候选数量由 RBAC 可见工具决定，节点与 CEO/frontdoor 都不截断、不排名。
 - 候选集与候选顺序只由集合差决定：两条车道都按治理可见集的原有顺序给出，不按 query 增减意图权重、不打分。写意图 query 下 `filesystem_write` / `filesystem_edit` / `filesystem_delete` / `filesystem_move` / `filesystem_copy` / `filesystem_propose_patch` 出现在候选里，是因为它们在可见集里且尚未提升，不是因为被排序提前；`exec` 是固定 builtin、常驻 callable，所以任何意图下它都不进取予候选。唯一还按 query 排序的地方是 `load_tool_context(search_query=...)` 的搜索面（`runtime_service._search_visible_tools`），它是搜索结果的排序，不参与候选生成。
 
 加载门控：
@@ -356,7 +356,7 @@ provider-facing schema 刻意保持最小：
 
 三条回合内不变的声明在前门只声明一次：渲染成 `## Runtime Contract (pinned)`，并进请求体首条 system 文本的末尾（与 `## Capability Exposure Snapshot` 同一载体，不是新消息项，因此尾部重铺那条剥运行时块的路碰不到它）。尾块的省略判定**逐段**看头部原文里有没有那一段：有才省，缺的那段照旧整段留在尾块。判据取头部原文而不是"本轮算出来了"——前门一个回合内有四条装配路，任何一条没写进头部却照样让尾块省略，声明就在整份上下文里消失，模型看不到候选技能也不会报错。
 
-- **skill 名单是全量可见集，每行 `id | name | description`**：skill 侧没有 top-k 语义筛选（`assembly.skill_inventory_top_k` 已废弃），"选哪个 skill"的判断在模型侧按描述做；工具面同样没有语义筛选——`message_builder._select_tools` 里那份按 query 的打分住在不可达支路上（`semantic_catalog_rankings` 恒返回 unavailable），两条车道的候选因此都是全量可见集。名单按 id 排序；名单为空时整块不钉，三段声明全留在尾块。
+- **skill 名单是全量可见集，每行 `id | name | description`**："选哪个 skill"的判断在模型侧按描述做；工具面同样按可见集全量给出，没有按 query 的筛选或名额。名单按 id 排序；名单为空时整块不钉，三段声明全留在尾块。
 - **重印判据 = roster epoch + 执行策略签名 + 会话临时目录**。roster epoch 与 `tools[]` 的重印边界同源（`_frontdoor_bundle_recommit_boundary` 返回 True 时递增：token 压缩、手动压缩、空闲边界），可见集本身**不进判据**——两次重印之间可见集怎么变，头部都逐字节不动。节点道的 epoch 源是 `_node_bundle_recommit_reason`（`token_compression` / 空闲边界），名单块钉在节点 system 首条，渲染函数与会话道同一个。
 - **漂移的表达是一次性持久提示，不是重印也不是每跳重铺**：重印点之间新变为可读的 skill，由 `g3ku/runtime/skill_roster_notice.py` 渲染成一条 `[SKILL_ROSTER_NOTICE_V1]` 消息（每行 `id | 名称 | 一句话描述`，末句给取正文的入口），落在本轮历史末尾、两份运行时块之前。投递的那条同时写进该车道自己的 durable 载体（前门＝请求体基线，节点＝`message_history`，随逐跳落盘的节点历史一起持久化），因此之后每跳都待在可复用前缀里，不再重铺。节点侧只挂发送投影时它靠同回合 append 链带着，历史重建（重启、续跑）后就不在上下文里了，而台账已记"投过" ⇒ 那个名字从此不再出现；头部字节不受影响，因为重印判据里没有可见集。**检测与投递每跳只有一处**：前门在 `_frontdoor_send_preflight_snapshot`，节点在 `ReActToolLoop._apply_node_skill_roster_notice`（同一跳先由 `_apply_node_skill_roster_head` 钉住头部）。其它装配点不读台账——一条回合内多个装配点共用一次消耗式读时，先跑的把差集领走、真正落请求体那处永远拿空。live 取样：前门 `_frontdoor_live_visible_skills`，节点每跳经 `runtime_context['live_skill_roster_supplier']`（supplier 由 `MainRuntimeService._node_skill_roster_supplier` 注入、`NodeRunner._runtime_context` 递进，取数失败才回落帧里的 `visible_skills`）。台账字段 `skill_id / recorded_at / delivered_at / superseded_at` 是"是否已宣布"的唯一判据，不靠扫渲染文本；作用域分桶为前门 `session:<session_key>`、节点 `node:<task_id>:<node_id>`。头部钉住块里那份名单算"已宣布"，所以第一跳不会重播整份名单，被头部吸收的条目同时从台账摘掉（块不无限涨）。台账落盘：前门写连续性侧车 `skill_roster_notice_context`，节点写 `node.metadata`，因此重启与 pause-resume 后不重复投。恢复方向**只在载荷真带这个键时**才覆盖进程表——手动压缩重写出的基线载荷本来就不带它，无条件覆盖等于抹掉台账，那一跳就没有名字可搬（排查"压缩后没带回名单"时先看侧车里这个键在不在）。手动压缩的搬运点在回合起点：待重印标记被消费之前先把名单补回 durable 基线，这样同一跳的种子就带着它。
 - **压缩跳搬运，也是退场点**：内联 `token_compression` 采纳处，以及手动压缩（待重印标记被消费的那一跳），把"已宣布且本会话仍可读"的名字重新追加到压缩产物之后；同一次压缩只搬一份，段号记在 `carried_stages`。读不到的名字写 `superseded_at` 退场，不写"已下架"行——它的最终裁决归 `load_skill_context` 三态回执。这一跳的可复用前缀反正已经断在整段正文重写上，所以带这一份不额外付缓存。阶段裁撤碰不到它：提示不是阶段块。编辑重发/Fork 截断按 `recorded_at` 撤回晚于截断点的台账条目，与历史同源，否则那个名字从此再也不会出现。

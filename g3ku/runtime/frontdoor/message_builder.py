@@ -17,10 +17,7 @@ from g3ku.core.timefmt import (
     strip_arrival_time_stamp,
 )
 from g3ku.llm_config.runtime_resolver import resolve_chat_target
-from g3ku.runtime.context.semantic_scope import semantic_catalog_rankings
-from g3ku.runtime.context.summarizer import score_query
 from g3ku.runtime.context.types import ContextAssemblyResult, RetrievedContextBundle
-from g3ku.runtime.core_tools import resolve_core_tool_targets
 from g3ku.runtime.frontdoor.canonical_context import (
     combine_canonical_context,
     materialize_transcript_view,
@@ -50,8 +47,6 @@ from g3ku.runtime.stage_prompt_compaction import (
 )
 from g3ku.runtime.tool_visibility import (
     CEO_FIXED_BUILTIN_TOOL_NAMES,
-    filter_tool_names_for_semantic_top_k,
-    filter_visible_tools_for_semantic_top_k,
 )
 from g3ku.runtime.web_ceo_sessions import (
     is_internal_ceo_user_message,
@@ -64,7 +59,6 @@ from g3ku.runtime.web_ceo_sessions import (
 )
 from main.runtime.stage_budget import SILENT_TOOL_NAME
 
-DEFAULT_FRONTDOOR_EXTENSION_TOOL_TOP_K = 16
 
 # 动态 overlay 块头（跨轮可比性投影按这些常量识别并剥离，禁止散文匹配）。
 MEMORY_WRITE_HINT_HEADER = "## 长期记忆写入提示"
@@ -413,24 +407,6 @@ class CeoMessageBuilder:
             ids.append(tool_id)
         return ids
 
-    @classmethod
-    def _semantic_tool_selection_inputs(
-        cls,
-        *,
-        visible_tools: list[Any],
-        visible_tool_names: list[str],
-    ) -> tuple[list[dict[str, Any]], list[str]]:
-        excluded_tool_names = set(cls.FIXED_BUILTIN_TOOL_NAMES)
-        filtered_tools = filter_visible_tools_for_semantic_top_k(
-            visible_tools,
-            excluded_tool_names=excluded_tool_names,
-        )
-        filtered_tool_names = filter_tool_names_for_semantic_top_k(
-            visible_tool_names,
-            excluded_tool_names=excluded_tool_names,
-        )
-        return filtered_tools, filtered_tool_names
-
     @staticmethod
     def _capability_snapshot(exposure: dict[str, Any]) -> CapabilitySnapshot:
         existing = exposure.get('capability_snapshot')
@@ -460,100 +436,6 @@ class CeoMessageBuilder:
             l0 = str(getattr(item, 'l0', '') or '').strip()
             description = str(getattr(item, 'description', '') or '').strip()
         return cls._first_sentence(l0 or description)
-
-    @classmethod
-    def _build_turn_skill_overlay(
-        cls,
-        *,
-        selected_skills: list[Any],
-        capability_snapshot: CapabilitySnapshot,
-        visible_only_mode: bool,
-    ) -> str:
-        skill_ids = [cls._skill_id(item) for item in list(selected_skills or []) if cls._skill_id(item)]
-        if not skill_ids:
-            return ''
-        all_visible_skill_ids = set(capability_snapshot.visible_skill_ids)
-        selected_skill_ids = set(skill_ids)
-        if visible_only_mode and selected_skill_ids == all_visible_skill_ids and len(skill_ids) == len(all_visible_skill_ids):
-            lines = [
-                '## 本轮可见技能摘要',
-                '- 当前语义排序不可用，因此下面按完整可见技能集给出摘要。',
-                '- 如果当前还没有活动阶段且你需要使用工具，必须把 `submit_next_stage` 与目标工具在同一条消息里一起提交（`submit_next_stage` 先执行，工具记入新阶段首轮）。',
-                '- 如需读取某个 skill 的完整正文，仍然只能在当前已经存在活动阶段后调用 `load_skill_context`。',
-            ]
-        else:
-            lines = [
-                '## 本轮最相关的技能',
-                '- 这些摘要来自当前轮稳定的可见能力曝光。',
-                '- 如果当前还没有活动阶段且你需要使用工具，必须把 `submit_next_stage` 与目标工具在同一条消息里一起提交（`submit_next_stage` 先执行，工具记入新阶段首轮）。',
-                '- 如需读取某个 skill 的完整正文，仍然只能在当前已经存在活动阶段后调用 `load_skill_context`。',
-            ]
-        for item in list(selected_skills or []):
-            skill_id = cls._skill_id(item)
-            if not skill_id:
-                continue
-            label = cls._skill_label(item)
-            summary = cls._skill_summary(item)
-            if summary:
-                lines.append(f'- `{skill_id}` ({label}): {summary}')
-            else:
-                lines.append(f'- `{skill_id}` ({label})')
-        return '\n'.join(lines)
-
-    @classmethod
-    def _build_turn_tool_overlay(
-        cls,
-        *,
-        selected_tool_items: list[dict[str, str]],
-        capability_snapshot: CapabilitySnapshot,
-        visible_only_mode: bool,
-    ) -> str:
-        tool_items = [
-            {
-                'tool_id': str((item or {}).get('tool_id') or '').strip(),
-                'description': str((item or {}).get('description') or '').strip(),
-            }
-            for item in list(selected_tool_items or [])
-            if str((item or {}).get('tool_id') or '').strip()
-        ]
-        tool_names = [str(item.get('tool_id') or '').strip() for item in tool_items if str(item.get('tool_id') or '').strip()]
-        if not tool_names:
-            return ''
-        all_visible_tool_names = set(capability_snapshot.visible_tool_ids)
-        selected_tool_name_set = set(tool_names)
-        if visible_only_mode and selected_tool_name_set == all_visible_tool_names and len(tool_names) == len(all_visible_tool_names):
-            lines = [
-                '## 本轮候选工具',
-                '- 当前语义排序不可用，因此下面列出完整的可见具体工具集合。',
-                '- 如果当前还没有活动阶段且你需要使用工具，必须把 `submit_next_stage` 与目标工具在同一条消息里一起提交（`submit_next_stage` 先执行，工具记入新阶段首轮）。',
-                '- 在当前已经存在活动阶段后，任意当前 RBAC 可见且已 surfaced 的具体工具名都可以调用 `load_tool_context(tool_id="...")` 读取 toolskill / 参数说明。',
-                '- 如果该工具当前只出现在 `candidate_tools` 中，读取后仍需等待下一轮 hydration 后才可直接调用。',
-                '- 对已 callable、已 hydrated 或 fixed builtin 的工具，如果上下文里已经有同版本且未压缩的 toolskill，不要重复调用 `load_tool_context`。',
-            ]
-        else:
-            lines = [
-                '## 本轮候选工具',
-                '- 下面是本轮候选具体工具。',
-                '- 如果当前还没有活动阶段且你需要使用工具，必须把 `submit_next_stage` 与目标工具在同一条消息里一起提交（`submit_next_stage` 先执行，工具记入新阶段首轮）。',
-                '- 在当前已经存在活动阶段后，任意当前 RBAC 可见且已 surfaced 的具体工具名都可以调用 `load_tool_context(tool_id="...")` 读取 toolskill / 参数说明。',
-                '- 如果该工具当前只出现在 `candidate_tools` 中，读取后仍需等待下一轮 hydration 后才可直接调用。',
-                '- 对已 callable、已 hydrated 或 fixed builtin 的工具，如果上下文里已经有同版本且未压缩的 toolskill，不要重复调用 `load_tool_context`。',
-            ]
-        lines.append(
-            'candidate_tools = '
-            + json.dumps(
-                [
-                    {
-                        'tool_id': str(item.get('tool_id') or '').strip(),
-                        'description': str(item.get('description') or '').strip(),
-                    }
-                    for item in tool_items
-                ],
-                ensure_ascii=False,
-                indent=2,
-            )
-        )
-        return '\n'.join(lines)
 
     @classmethod
     def _callable_tool_names(
@@ -1180,162 +1062,10 @@ class CeoMessageBuilder:
             return str(match.group(1) or '').strip()
         return value
 
-    def _select_tools(
-        self,
-        *,
-        query_text: str,
-        visible_names: list[str],
-        visible_tools: list[Any],
-        core_tools: set[str],
-        extension_top_k: int,
-        ranked_tool_ids: list[str] | None = None,
-    ) -> tuple[list[str], dict[str, Any]]:
-        visible_set = {str(name).strip() for name in visible_names if str(name).strip()}
-        if not visible_set:
-            return [], {
-                'mode': 'disabled',
-                'reserved_internal_tool_names': [],
-                'fixed_builtin_tool_names': [],
-                'candidate_tool_names': [],
-            }
-        raw_core_entries = {str(name).strip() for name in list(core_tools or []) if str(name).strip()}
-        core_resolution = resolve_core_tool_targets(core_tools, visible_tools)
-        reserved = [name for name in visible_names if name in self.RESERVED_INTERNAL_TOOLS and name in visible_set]
-        reserved_set = set(reserved)
-        selected = {
-            name
-            for name in visible_set
-            if (name in core_resolution.tool_ids or name in raw_core_entries) and name not in reserved_set
-        }
-        if extension_top_k <= 0:
-            ordered = reserved + [name for name in visible_names if name in selected]
-            return ordered, {
-                'mode': 'core_only',
-                'reserved_internal_tool_names': reserved,
-                'fixed_builtin_tool_names': sorted(selected),
-                'candidate_tool_names': [],
-            }
-
-        if ranked_tool_ids is not None:
-            picked_extension: list[str] = []
-            for executor_name in list(ranked_tool_ids or []):
-                normalized = str(executor_name or '').strip()
-                if (
-                    not normalized
-                    or normalized not in visible_set
-                    or normalized in selected
-                    or normalized in picked_extension
-                    or normalized in reserved_set
-                ):
-                    continue
-                picked_extension.append(normalized)
-                if len(picked_extension) >= extension_top_k:
-                    break
-
-            if len(picked_extension) < extension_top_k:
-                for name in visible_names:
-                    normalized = str(name or '').strip()
-                    if (
-                        normalized
-                        and normalized in visible_set
-                        and normalized not in selected
-                        and normalized not in picked_extension
-                        and normalized not in reserved_set
-                    ):
-                        picked_extension.append(normalized)
-                        if len(picked_extension) >= extension_top_k:
-                            break
-
-            ordered = (
-                reserved
-                + [name for name in visible_names if name in selected]
-                + [name for name in visible_names if name in picked_extension]
-            )
-            return ordered, {
-                'mode': 'dense_only',
-                'reserved_internal_tool_names': reserved,
-                'fixed_builtin_tool_names': sorted(selected),
-                'candidate_tool_names': picked_extension,
-            }
-
-        visible_index = {
-            str(name or '').strip(): index
-            for index, name in enumerate(list(visible_names or []))
-            if str(name or '').strip()
-        }
-        record_by_tool_id = self._tool_record_map(visible_tools)
-        ext_scored: list[tuple[float, int, str]] = []
-        record_by_tool_id = self._tool_record_map(visible_tools)
-        for name in visible_names:
-            normalized = str(name or '').strip()
-            if (
-                not normalized
-                or normalized not in visible_set
-                or normalized in core_resolution.tool_ids
-                or normalized in raw_core_entries
-                or normalized in reserved_set
-            ):
-                continue
-            record = record_by_tool_id.get(normalized)
-            display_name = str(getattr(record, 'display_name', '') or '').strip()
-            description = str(getattr(record, 'description', '') or '').strip()
-            score = score_query(
-                query_text,
-                normalized,
-                display_name or normalized,
-                description,
-            )
-            for hint in self.EXTENSION_TOOL_HINTS.get(normalized, ()):
-                if hint and hint.lower() in str(query_text or '').lower():
-                    score += 5.0
-            score += self._tool_intent_bonus(
-                tool_name=normalized,
-                query_text=query_text,
-            )
-            ext_scored.append((score, visible_index.get(normalized, len(visible_index) + 10_000), normalized))
-        ext_scored.sort(key=lambda item: (-item[0], item[1], item[2]))
-
-        picked_extension: list[str] = []
-        for _score, _visible_rank, name in ext_scored:
-            if len(picked_extension) >= extension_top_k:
-                break
-            if name in selected or name in picked_extension:
-                continue
-            picked_extension.append(name)
-        if not picked_extension:
-            for name in visible_names:
-                normalized = str(name or '').strip()
-                if (
-                    not normalized
-                    or normalized not in visible_set
-                    or normalized in selected
-                    or normalized in picked_extension
-                    or normalized in reserved_set
-                ):
-                    continue
-                picked_extension.append(normalized)
-                if len(picked_extension) >= extension_top_k:
-                    break
-
-        ordered = (
-            reserved
-            + [name for name in visible_names if name in selected]
-            + [name for name in visible_names if name in picked_extension]
-        )
-        return ordered, {
-            'mode': 'rbac_fallback',
-            'reserved_internal_tool_names': reserved,
-            'fixed_builtin_tool_names': sorted(selected),
-            'candidate_tool_names': picked_extension,
-        }
-
     @staticmethod
     def _visible_only_skill_trace(visible_skills: list[Any]) -> list[dict[str, Any]]:
         return [
-            {
-                'skill_id': CeoMessageBuilder._skill_id(item),
-                'semantic_rank': None,
-            }
+            {'skill_id': CeoMessageBuilder._skill_id(item)}
             for item in list(visible_skills or [])
             if CeoMessageBuilder._skill_id(item)
         ]
@@ -1378,19 +1108,10 @@ class CeoMessageBuilder:
         user_content: Any | None,
         hydrated_tool_names: list[str] | None = None,
     ) -> dict[str, Any]:
-        semantic_started_at = 0.0
-        semantic_elapsed_ms = 0.0
         retrieval_started_at = 0.0
         retrieval_elapsed_ms = 0.0
         main_service = getattr(self._loop, 'main_task_service', None)
         memory_manager = getattr(self._loop, 'memory_manager', None)
-        assembly_cfg = getattr(getattr(self._loop, '_memory_runtime_settings', None), 'assembly', None)
-        # `assembly.skill_inventory_top_k` 已废弃：skill 名单不再做 top-k 语义筛选，
-        # 头部钉住块带全量可见名单。字段保留在配置 schema 里仅为兼容存量配置文件。
-        extension_top_k = max(
-            0,
-            int(getattr(assembly_cfg, 'extension_tool_top_k', DEFAULT_FRONTDOOR_EXTENSION_TOOL_TOP_K) or DEFAULT_FRONTDOOR_EXTENSION_TOOL_TOP_K),
-        )
         visible_tool_names = [
             str(name or '').strip()
             for name in list(exposure.get('tool_names') or [])
@@ -1415,36 +1136,11 @@ class CeoMessageBuilder:
         memory_write_terms = self._detect_memory_write_intent(query_text)
         visible_skills = list(exposure.get('skills') or [])
         visible_tools = list(exposure.get('tools') or [])
-        semantic_visible_tools, semantic_visible_tool_names = self._semantic_tool_selection_inputs(
-            visible_tools=visible_tools,
-            visible_tool_names=visible_tool_names,
-        )
         capability_snapshot = self._capability_snapshot(exposure)
-        semantic_started_at = time.perf_counter()
-        semantic_frontdoor = await semantic_catalog_rankings(
-            loop=self._loop,
-            memory_manager=memory_manager,
-            query_text=query_text,
-            visible_skills=visible_skills,
-            visible_tools=semantic_visible_tools,
-            skill_limit=max(len(visible_skills), 1),
-            tool_limit=max(extension_top_k * 4, len(semantic_visible_tool_names), extension_top_k, 8),
-        )
-        semantic_elapsed_ms = self._elapsed_ms(semantic_started_at)
-        semantic_trace = {
-            'mode': str(semantic_frontdoor.get('mode') or '').strip(),
-            'available': bool(semantic_frontdoor.get('available', False)),
-            **dict(semantic_frontdoor.get('trace') or {}),
-        }
-        visible_only_mode = str(semantic_frontdoor.get('mode') or '').strip().lower() == 'unavailable'
-        # skill 名单不再做 top-k 语义筛选：头部钉住块带全量可见名单（id|名称|描述），
-        # "选哪个"由模型按描述判断。工具面同样没有语义排序（`semantic_catalog_rankings` 恒返回
-        # unavailable，`_select_tools` 那条按 query 打分的支路不可达）；skill 排序结果一律不消费。
-        # 选中集恒等于可见集，可见_only 分支与排序分支在此合流。
+        # 名单与候选都不按 query 排序：可见集原样给全，"选哪个"由模型按描述判断，
+        # 收窄由执行准入与 load 承担。skill 侧头部钉住块带全量可见名单（id|名称|描述）。
         selected_skills = self._visible_only_skill_items(visible_skills)
         skill_trace = self._visible_only_skill_trace(selected_skills)
-        if visible_only_mode:
-            semantic_trace = {**semantic_trace, 'mode': 'visible_only', 'available': False}
         split_prompt_builder = callable(getattr(self._prompt_builder, 'build_base_prompt', None))
         if split_prompt_builder:
             # 提示词的重新拉取跟着记忆块与 tools[] 的时钟走：这两个戳没动，稳定前缀就不该
@@ -1477,53 +1173,38 @@ class CeoMessageBuilder:
         if memory_write_terms and memory_write_visible:
             turn_overlay_parts.append(self._memory_write_hint_block(memory_write_terms))
 
-        if visible_only_mode:
-            selected_tool_names = []
-            seen_tool_names: set[str] = set()
-            for name in visible_tool_names:
-                normalized = str(name or '').strip()
-                if not normalized or normalized in seen_tool_names:
-                    continue
-                seen_tool_names.add(normalized)
-                selected_tool_names.append(normalized)
-            tool_trace = {
-                'mode': 'visible_only',
-                'reserved_internal_tool_names': [
-                    name for name in selected_tool_names if name in self.RESERVED_INTERNAL_TOOLS
-                ],
-                'fixed_builtin_tool_names': [
-                    name
-                    for name in selected_tool_names
-                    if name in self.FIXED_BUILTIN_TOOL_NAMES
-                ],
-                'hydrated_tool_names': [
-                    name
-                    for name in selected_tool_names
-                    if name in callable_tool_name_set
-                    and name not in self.RESERVED_INTERNAL_TOOLS
-                    and name not in self.FIXED_BUILTIN_TOOL_NAMES
-                ],
-                'candidate_tool_names': [
-                    name
-                    for name in selected_tool_names
-                    if name not in callable_tool_name_set
-                    and name not in self.RESERVED_INTERNAL_TOOLS
-                ],
-            }
-        else:
-            ranked_tool_ids = [
-                str(tool_id or '').strip()
-                for tool_id in list(semantic_frontdoor.get('tool_ids') or [])
-                if str(tool_id or '').strip()
-            ]
-            selected_tool_names, tool_trace = self._select_tools(
-                query_text=query_text,
-                visible_names=visible_tool_names,
-                visible_tools=visible_tools,
-                core_tools=set(callable_tool_names),
-                extension_top_k=extension_top_k,
-                ranked_tool_ids=(ranked_tool_ids if ranked_tool_ids else None),
-            )
+        selected_tool_names = []
+        seen_tool_names: set[str] = set()
+        for name in visible_tool_names:
+            normalized = str(name or '').strip()
+            if not normalized or normalized in seen_tool_names:
+                continue
+            seen_tool_names.add(normalized)
+            selected_tool_names.append(normalized)
+        tool_trace = {
+            'mode': 'inventory_only',
+            'reserved_internal_tool_names': [
+                name for name in selected_tool_names if name in self.RESERVED_INTERNAL_TOOLS
+            ],
+            'fixed_builtin_tool_names': [
+                name
+                for name in selected_tool_names
+                if name in self.FIXED_BUILTIN_TOOL_NAMES
+            ],
+            'hydrated_tool_names': [
+                name
+                for name in selected_tool_names
+                if name in callable_tool_name_set
+                and name not in self.RESERVED_INTERNAL_TOOLS
+                and name not in self.FIXED_BUILTIN_TOOL_NAMES
+            ],
+            'candidate_tool_names': [
+                name
+                for name in selected_tool_names
+                if name not in callable_tool_name_set
+                and name not in self.RESERVED_INTERNAL_TOOLS
+            ],
+        }
         candidate_tool_names = [
             str(name or '').strip()
             for name in list(tool_trace.get('candidate_tool_names') or [])
@@ -1648,7 +1329,6 @@ class CeoMessageBuilder:
             'memory_snapshot_text': memory_snapshot_text,
             'selected_skills': selected_skills,
             'skill_trace': skill_trace,
-            'semantic_trace': semantic_trace,
             'external_trace': external_trace,
             'selected_tool_names': candidate_tool_names,
             'selected_tool_items': candidate_tool_items,
@@ -1672,7 +1352,6 @@ class CeoMessageBuilder:
             'same_session_turn_memory_filtered_count': same_session_turn_memory_filtered_count,
             'user_content': user_content if user_content is not None else query_text,
             'span_timings_ms': {
-                'semantic_catalog_rankings': semantic_elapsed_ms,
                 'retrieve_context_bundle': retrieval_elapsed_ms,
             },
         }
@@ -2050,7 +1729,6 @@ class CeoMessageBuilder:
         inject_elapsed_ms = self._elapsed_ms(inject_started_at)
         frontdoor_spans_ms = {
             'collect_context_sources': collect_elapsed_ms,
-            'semantic_catalog_rankings': float((context_sources.get('span_timings_ms') or {}).get('semantic_catalog_rankings', 0.0) or 0.0),
             'retrieve_context_bundle': float((context_sources.get('span_timings_ms') or {}).get('retrieve_context_bundle', 0.0) or 0.0),
             'resolve_history_injection': history_elapsed_ms,
             'inject_turn_context': inject_elapsed_ms,
@@ -2058,7 +1736,6 @@ class CeoMessageBuilder:
         trace = {
             'selected_skills': list(context_sources['skill_trace']),
             'tool_selection': dict(context_sources['tool_trace']),
-            'semantic_frontdoor': dict(context_sources['semantic_trace']),
             'external_tools': list(context_sources['external_trace']),
             'capability_snapshot': {
                 'exposure_revision': str(context_sources['capability_snapshot'].exposure_revision or ''),
@@ -2371,7 +2048,6 @@ class CeoMessageBuilder:
         inject_elapsed_ms = self._elapsed_ms(inject_started_at)
         frontdoor_spans_ms = {
             'collect_context_sources': collect_elapsed_ms,
-            'semantic_catalog_rankings': float((context_sources.get('span_timings_ms') or {}).get('semantic_catalog_rankings', 0.0) or 0.0),
             'retrieve_context_bundle': float((context_sources.get('span_timings_ms') or {}).get('retrieve_context_bundle', 0.0) or 0.0),
             'resolve_history_injection': history_elapsed_ms,
             'inject_turn_context': inject_elapsed_ms,
@@ -2380,7 +2056,6 @@ class CeoMessageBuilder:
         trace = {
             'selected_skills': list(context_sources['skill_trace']),
             'tool_selection': dict(context_sources['tool_trace']),
-            'semantic_frontdoor': dict(context_sources['semantic_trace']),
             'external_tools': list(context_sources['external_trace']),
             'capability_snapshot': {
                 'exposure_revision': str(context_sources['capability_snapshot'].exposure_revision or ''),

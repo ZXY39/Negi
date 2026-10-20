@@ -101,48 +101,12 @@ class _MemoryManager:
         )
 
 
-class _SemanticMemoryManager(_MemoryManager):
-    def __init__(
-        self,
-        *,
-        response: str = "",
-        skill_record_ids: list[str] | None = None,
-        tool_record_ids: list[str] | None = None,
-    ) -> None:
-        super().__init__(response=response)
-        self.skill_record_ids = list(skill_record_ids or [])
-        self.tool_record_ids = list(tool_record_ids or [])
-        self.semantic_calls: list[dict[str, object]] = []
-        self.store = SimpleNamespace(_dense_enabled=True)
-
-    async def semantic_search_context_records(
-        self,
-        *,
-        namespace_prefix=None,
-        query: str,
-        limit: int = 8,
-        context_type: str | None = None,
-    ):
-        self.semantic_calls.append(
-            {
-                "namespace_prefix": namespace_prefix,
-                "query": query,
-                "limit": limit,
-                "context_type": context_type,
-            }
-        )
-        record_ids = self.skill_record_ids if context_type == "skill" else self.tool_record_ids
-        return [SimpleNamespace(record_id=record_id) for record_id in record_ids[: max(limit, 0)]]
-
-
 def _loop(memory_manager: _MemoryManager) -> SimpleNamespace:
     return SimpleNamespace(
         main_task_service=None,
         memory_manager=memory_manager,
         _memory_runtime_settings=SimpleNamespace(
             assembly=SimpleNamespace(
-                skill_inventory_top_k=8,
-                extension_tool_top_k=6,
                 core_tools=[],
             )
         ),
@@ -404,17 +368,14 @@ def test_capability_snapshot_exposure_revision_ignores_warning_and_install_dir_c
 
 
 @pytest.mark.asyncio
-async def test_message_builder_dense_unavailable_exposes_all_visible_skills_and_tools_even_when_top_k_is_one() -> None:
+async def test_message_builder_exposes_all_visible_skills_and_tools_without_any_shortlist() -> None:
     prompt_builder = _PromptBuilder()
-    memory_manager = _SemanticMemoryManager(response="")
-    memory_manager.store = SimpleNamespace(_dense_enabled=False)
+    memory_manager = _MemoryManager(response="")
     loop = SimpleNamespace(
         main_task_service=None,
         memory_manager=memory_manager,
         _memory_runtime_settings=SimpleNamespace(
             assembly=SimpleNamespace(
-                skill_inventory_top_k=1,
-                extension_tool_top_k=1,
                 core_tools=[],
             )
         ),
@@ -446,23 +407,19 @@ async def test_message_builder_dense_unavailable_exposes_all_visible_skills_and_
     # `silent` 是常驻内置控制工具：上下文选择一条都没选中时它照样可调用。
     assert result.tool_names == [SILENT_TOOL_NAME]
     assert result.candidate_tool_names == ["filesystem", "agent_browser", "web_fetch"]
-    assert result.trace["semantic_frontdoor"]["mode"] == "visible_only"
     assert result.trace["retrieval_scope"]["mode"] == "disabled"
     assert result.trace["retrieval_scope"]["allowed_skill_record_ids"] == []
     assert result.trace["retrieval_scope"]["allowed_resource_record_ids"] == []
 
 
-async def test_message_builder_dense_unavailable_retrieval_scope_includes_dict_visible_skill_ids() -> None:
+async def test_message_builder_retrieval_scope_includes_dict_visible_skill_ids() -> None:
     prompt_builder = _PromptBuilder()
-    memory_manager = _SemanticMemoryManager(response="")
-    memory_manager.store = SimpleNamespace(_dense_enabled=False)
+    memory_manager = _MemoryManager(response="")
     loop = SimpleNamespace(
         main_task_service=None,
         memory_manager=memory_manager,
         _memory_runtime_settings=SimpleNamespace(
             assembly=SimpleNamespace(
-                skill_inventory_top_k=1,
-                extension_tool_top_k=1,
                 core_tools=[],
             )
         ),
@@ -488,7 +445,6 @@ async def test_message_builder_dense_unavailable_retrieval_scope_includes_dict_v
         persisted_session=None,
     )
 
-    assert result.trace["semantic_frontdoor"]["mode"] == "visible_only"
     assert result.trace["retrieval_scope"]["mode"] == "disabled"
     assert result.trace["retrieval_scope"]["allowed_skill_record_ids"] == []
     assert [item["skill_id"] for item in result.trace["selected_skills"]] == [
@@ -504,35 +460,35 @@ async def test_message_builder_keeps_control_tools_visible_in_tool_selection() -
         prompt_builder=_PromptBuilder(),
     )
 
-    selected, trace = builder._select_tools(
+    result = await builder.build_for_ceo(
+        session=_session(),
         query_text="install a skill and maybe stop it if needed",
-        visible_names=[
-            "create_async_task",
-            "skill-installer",
-            "stop_tool_execution",
-        ],
-        visible_tools=[],
-        core_tools={"create_async_task"},
-        extension_top_k=1,
+        exposure={
+            "skills": [],
+            "tools": [],
+            "tool_names": [
+                "create_async_task",
+                "skill-installer",
+                "stop_tool_execution",
+            ],
+        },
+        persisted_session=None,
     )
 
-    assert "stop_tool_execution" in selected
-    assert "wait_tool_execution" not in selected
-    assert trace["reserved_internal_tool_names"] == ["stop_tool_execution"]
+    assert "stop_tool_execution" in result.tool_names
+    assert "wait_tool_execution" not in result.tool_names
+    assert result.trace["tool_selection"]["reserved_internal_tool_names"] == ["stop_tool_execution"]
 
 
 @pytest.mark.asyncio
-async def test_message_builder_dense_unavailable_renders_l0_only_skill_and_external_tool_summaries() -> None:
-    memory_manager = _SemanticMemoryManager(response="")
-    memory_manager.store = SimpleNamespace(_dense_enabled=False)
+async def test_message_builder_renders_l0_only_skill_and_external_tool_summaries() -> None:
+    memory_manager = _MemoryManager(response="")
     loop = SimpleNamespace(
         workspace=Path.cwd(),
         main_task_service=None,
         memory_manager=memory_manager,
         _memory_runtime_settings=SimpleNamespace(
             assembly=SimpleNamespace(
-                skill_inventory_top_k=1,
-                extension_tool_top_k=1,
                 core_tools=[],
             )
         ),
@@ -579,17 +535,14 @@ async def test_message_builder_dense_unavailable_renders_l0_only_skill_and_exter
 
 
 @pytest.mark.asyncio
-async def test_message_builder_dense_unavailable_renders_l0_style_for_object_skills() -> None:
-    memory_manager = _SemanticMemoryManager(response="")
-    memory_manager.store = SimpleNamespace(_dense_enabled=False)
+async def test_message_builder_renders_l0_style_for_object_skills() -> None:
+    memory_manager = _MemoryManager(response="")
     loop = SimpleNamespace(
         workspace=Path.cwd(),
         main_task_service=None,
         memory_manager=memory_manager,
         _memory_runtime_settings=SimpleNamespace(
             assembly=SimpleNamespace(
-                skill_inventory_top_k=1,
-                extension_tool_top_k=1,
                 core_tools=[],
             )
         ),
@@ -624,17 +577,14 @@ async def test_message_builder_dense_unavailable_renders_l0_style_for_object_ski
 
 
 @pytest.mark.asyncio
-async def test_message_builder_dense_unavailable_keeps_non_callable_external_tool_with_empty_install_dir() -> None:
-    memory_manager = _SemanticMemoryManager(response="")
-    memory_manager.store = SimpleNamespace(_dense_enabled=False)
+async def test_message_builder_keeps_non_callable_external_tool_with_empty_install_dir() -> None:
+    memory_manager = _MemoryManager(response="")
     loop = SimpleNamespace(
         workspace=Path.cwd(),
         main_task_service=None,
         memory_manager=memory_manager,
         _memory_runtime_settings=SimpleNamespace(
             assembly=SimpleNamespace(
-                skill_inventory_top_k=1,
-                extension_tool_top_k=1,
                 core_tools=[],
             )
         ),
@@ -671,17 +621,14 @@ async def test_message_builder_dense_unavailable_keeps_non_callable_external_too
 
 
 @pytest.mark.asyncio
-async def test_message_builder_dense_unavailable_renders_l0_only_for_unavailable_callable_tool_resource() -> None:
-    memory_manager = _SemanticMemoryManager(response="")
-    memory_manager.store = SimpleNamespace(_dense_enabled=False)
+async def test_message_builder_renders_l0_only_for_unavailable_callable_tool_resource() -> None:
+    memory_manager = _MemoryManager(response="")
     loop = SimpleNamespace(
         workspace=Path.cwd(),
         main_task_service=None,
         memory_manager=memory_manager,
         _memory_runtime_settings=SimpleNamespace(
             assembly=SimpleNamespace(
-                skill_inventory_top_k=1,
-                extension_tool_top_k=1,
                 core_tools=[],
             )
         ),
@@ -757,11 +704,7 @@ async def test_message_builder_renders_external_tool_context_for_unavailable_cal
 @pytest.mark.asyncio
 async def test_message_builder_uses_memory_write_hint_without_memory_retrieval_overlay() -> None:
     prompt_builder = _PromptBuilder()
-    memory_manager = _SemanticMemoryManager(
-        response="remembered browser workflow",
-        skill_record_ids=["skill:focused-skill"],
-        tool_record_ids=["tool:agent_browser"],
-    )
+    memory_manager = _MemoryManager(response="remembered browser workflow")
     builder = CeoMessageBuilder(loop=_loop(memory_manager), prompt_builder=prompt_builder)
 
     result = await builder.build_for_ceo(
@@ -945,9 +888,7 @@ async def test_message_builder_prefers_specific_filesystem_candidates_for_write_
 
 
 @pytest.mark.asyncio
-async def test_message_builder_defaults_to_16_skill_and_tool_candidates_when_assembly_top_k_fields_are_missing(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
+async def test_message_builder_gives_every_visible_skill_and_tool_without_truncation() -> None:
     prompt_builder = _PromptBuilder()
     memory_manager = _MemoryManager(response="")
     loop = SimpleNamespace(
@@ -960,18 +901,6 @@ async def test_message_builder_defaults_to_16_skill_and_tool_candidates_when_ass
         ),
     )
     builder = CeoMessageBuilder(loop=loop, prompt_builder=prompt_builder)
-
-    async def _semantic_rankings(**kwargs):
-        _ = kwargs
-        return {
-            "mode": "dense_only",
-            "available": True,
-            "skill_ids": [f"skill-{index:02d}" for index in range(20)],
-            "tool_ids": [f"tool-{index:02d}" for index in range(20)],
-            "trace": {},
-        }
-
-    monkeypatch.setattr(message_builder_module, "semantic_catalog_rankings", _semantic_rankings)
 
     result = await builder.build_for_ceo(
         session=_session(),
@@ -990,33 +919,17 @@ async def test_message_builder_defaults_to_16_skill_and_tool_candidates_when_ass
         persisted_session=None,
     )
 
-    # skill 名单不再做 top-k 语义筛选：选中集 = 全量可见（20 个全进头部名单）；
-    # 工具面仍按 `extension_tool_top_k`（默认 16）截断。
+    # 名单与候选都不截断：20 个可见技能、20 个可见工具全部带出，顺序就是可见集顺序。
     assert len(result.trace["selected_skills"]) == 20
-    assert len(result.candidate_tool_names) == 16
+    assert len(result.candidate_tool_names) == 20
     assert result.candidate_tool_names[0] == "tool-00"
 
 
 @pytest.mark.asyncio
-async def test_message_builder_excludes_fixed_builtin_resource_tools_from_semantic_tool_selection_inputs(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
+async def test_message_builder_keeps_fixed_builtin_resource_tools_out_of_the_candidate_list() -> None:
     prompt_builder = _PromptBuilder()
     memory_manager = _MemoryManager(response="")
     builder = CeoMessageBuilder(loop=_loop(memory_manager), prompt_builder=prompt_builder)
-    captured: dict[str, object] = {}
-
-    async def _semantic_rankings(**kwargs):
-        captured.update(kwargs)
-        return {
-            "mode": "dense_only",
-            "available": True,
-            "skill_ids": [],
-            "tool_ids": ["agent_browser"],
-            "trace": {},
-        }
-
-    monkeypatch.setattr(message_builder_module, "semantic_catalog_rankings", _semantic_rankings)
 
     result = await builder.build_for_ceo(
         session=_session(),
@@ -1040,13 +953,6 @@ async def test_message_builder_excludes_fixed_builtin_resource_tools_from_semant
         persisted_session=None,
     )
 
-    semantic_visible_tools = list(captured.get("visible_tools") or [])
-    semantic_tool_ids = [
-        str((item or {}).get("tool_id") if isinstance(item, dict) else getattr(item, "tool_id", "") or "").strip()
-        for item in semantic_visible_tools
-    ]
-
-    assert semantic_tool_ids == ["agent_browser"]
     assert result.candidate_tool_names[0] == "agent_browser"
     assert "exec" not in result.candidate_tool_names
     assert "memory_update" not in result.candidate_tool_names
@@ -1059,37 +965,28 @@ async def test_message_builder_promotes_hydrated_tools_into_callable_list() -> N
     memory_manager = _MemoryManager(response="")
     builder = CeoMessageBuilder(loop=_loop(memory_manager), prompt_builder=prompt_builder)
 
-    async def _semantic_rankings(**kwargs):
-        _ = kwargs
-        return {"mode": "unavailable", "available": False, "trace": {}}
-
-    original = message_builder_module.semantic_catalog_rankings
-    message_builder_module.semantic_catalog_rankings = _semantic_rankings
-    try:
-        result = await builder.build_for_ceo(
-            session=_session(),
-            query_text="write the skill manifest",
-            exposure={
-                "skills": [],
-                "tools": [
-                    _tool_resource_record("content_open", "Open content by ref or path."),
-                    _tool_resource_record("content_search", "Search content by ref or path."),
-                    _tool_resource_record("filesystem_write", "Write a file with full content."),
-                    _tool_resource_record("agent_browser", "Browser automation via semantic shortlist."),
-                ],
-                "tool_names": [
-                    "load_tool_context",
-                    "content_open",
-                    "content_search",
-                    "filesystem_write",
-                    "agent_browser",
-                ],
-            },
-            persisted_session=None,
-            hydrated_tool_names=["filesystem_write"],
-        )
-    finally:
-        message_builder_module.semantic_catalog_rankings = original
+    result = await builder.build_for_ceo(
+        session=_session(),
+        query_text="write the skill manifest",
+        exposure={
+            "skills": [],
+            "tools": [
+                _tool_resource_record("content_open", "Open content by ref or path."),
+                _tool_resource_record("content_search", "Search content by ref or path."),
+                _tool_resource_record("filesystem_write", "Write a file with full content."),
+                _tool_resource_record("agent_browser", "Browser automation."),
+            ],
+            "tool_names": [
+                "load_tool_context",
+                "content_open",
+                "content_search",
+                "filesystem_write",
+                "agent_browser",
+            ],
+        },
+        persisted_session=None,
+        hydrated_tool_names=["filesystem_write"],
+    )
 
     assert result.tool_names == ["load_tool_context", "filesystem_write", SILENT_TOOL_NAME]
     assert "content_open" in result.candidate_tool_names
@@ -1103,33 +1000,24 @@ async def test_message_builder_promotes_hydrated_content_tools_back_into_callabl
     memory_manager = _MemoryManager(response="")
     builder = CeoMessageBuilder(loop=_loop(memory_manager), prompt_builder=prompt_builder)
 
-    async def _semantic_rankings(**kwargs):
-        _ = kwargs
-        return {"mode": "unavailable", "available": False, "trace": {}}
-
-    original = message_builder_module.semantic_catalog_rankings
-    message_builder_module.semantic_catalog_rankings = _semantic_rankings
-    try:
-        result = await builder.build_for_ceo(
-            session=_session(),
-            query_text="inspect the uploaded artifact",
-            exposure={
-                "skills": [],
-                "tools": [
-                    _tool_resource_record("content_open", "Open content by ref or path."),
-                    _tool_resource_record("content_search", "Search content by ref or path."),
-                ],
-                "tool_names": [
-                    "load_tool_context",
-                    "content_open",
-                    "content_search",
-                ],
-            },
-            persisted_session=None,
-            hydrated_tool_names=["content_open"],
-        )
-    finally:
-        message_builder_module.semantic_catalog_rankings = original
+    result = await builder.build_for_ceo(
+        session=_session(),
+        query_text="inspect the uploaded artifact",
+        exposure={
+            "skills": [],
+            "tools": [
+                _tool_resource_record("content_open", "Open content by ref or path."),
+                _tool_resource_record("content_search", "Search content by ref or path."),
+            ],
+            "tool_names": [
+                "load_tool_context",
+                "content_open",
+                "content_search",
+            ],
+        },
+        persisted_session=None,
+        hydrated_tool_names=["content_open"],
+    )
 
     assert result.tool_names == ["load_tool_context", "content_open", SILENT_TOOL_NAME]
     assert result.candidate_tool_names == ["content_search"]
@@ -1909,18 +1797,14 @@ def test_web_ceo_uploaded_files_note_skips_voice_clip() -> None:
 
 
 @pytest.mark.asyncio
-async def test_message_builder_keeps_capability_snapshot_stable_when_semantic_skill_selection_changes(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
+async def test_message_builder_keeps_stable_prefix_identical_across_different_queries() -> None:
     prompt_builder = _SplitPromptBuilder()
-    memory_manager = _SemanticMemoryManager(response="")
+    memory_manager = _MemoryManager(response="")
     loop = SimpleNamespace(
         main_task_service=None,
         memory_manager=memory_manager,
         _memory_runtime_settings=SimpleNamespace(
             assembly=SimpleNamespace(
-                skill_inventory_top_k=1,
-                extension_tool_top_k=1,
                 core_tools=[],
             )
         ),
@@ -1938,26 +1822,6 @@ async def test_message_builder_keeps_capability_snapshot_stable_when_semantic_sk
         "tool_names": ["filesystem", "agent_browser", "web_fetch"],
     }
 
-    async def _semantic_rankings(*, query_text: str, **kwargs) -> dict[str, object]:
-        _ = kwargs
-        if query_text == "focused browser workflow":
-            return {
-                "mode": "dense_only",
-                "available": True,
-                "skill_ids": ["focused-skill", "secondary-skill"],
-                "tool_ids": ["agent_browser", "web_fetch"],
-                "trace": {"queries": {"raw_query": query_text}},
-            }
-        return {
-            "mode": "dense_only",
-            "available": True,
-            "skill_ids": ["secondary-skill", "focused-skill"],
-            "tool_ids": ["web_fetch", "agent_browser"],
-            "trace": {"queries": {"raw_query": query_text}},
-        }
-
-    monkeypatch.setattr("g3ku.runtime.frontdoor.message_builder.semantic_catalog_rankings", _semantic_rankings)
-
     first = await builder.build_for_ceo(
         session=_session(),
         query_text="focused browser workflow",
@@ -1973,12 +1837,12 @@ async def test_message_builder_keeps_capability_snapshot_stable_when_semantic_sk
         user_content="same user turn",
     )
 
-    # skill 选中集不再随语义排序漂移（名单 = 全量可见）；工具排序仍随 query 变。
+    # 名单与候选都等于全量可见集，因此换一个 query 不产生新的稳定前缀字节。
     assert first.trace["selected_skills"] == second.trace["selected_skills"]
-    assert first.candidate_tool_names != second.candidate_tool_names
+    assert first.candidate_tool_names == second.candidate_tool_names
     assert first.turn_overlay_text == ""
     assert second.turn_overlay_text == ""
-    assert first.dynamic_appendix_messages != second.dynamic_appendix_messages
+    assert first.dynamic_appendix_messages == second.dynamic_appendix_messages
     assert first.stable_messages[0] == second.stable_messages[0]
     assert first.trace["capability_snapshot"] == second.trace["capability_snapshot"]
     assert first.cache_family_revision == second.cache_family_revision
@@ -2379,7 +2243,6 @@ async def test_message_builder_trace_includes_frontdoor_context_span_timings() -
 
     assert set(spans) == {
         "collect_context_sources",
-        "semantic_catalog_rankings",
         "retrieve_context_bundle",
         "resolve_history_injection",
         "inject_turn_context",
@@ -3491,8 +3354,6 @@ async def test_ceo_context_assembly_injects_memory_snapshot_without_legacy_memor
         main_task_service=None,
         _memory_runtime_settings=SimpleNamespace(
             assembly=SimpleNamespace(
-                skill_inventory_top_k=16,
-                extension_tool_top_k=16,
                 core_tools=["memory_update", "memory_note"],
             )
         ),
@@ -3540,8 +3401,6 @@ async def test_frontdoor_uses_frozen_memory_snapshot_only_once_per_turn() -> Non
         main_task_service=None,
         _memory_runtime_settings=SimpleNamespace(
             assembly=SimpleNamespace(
-                skill_inventory_top_k=16,
-                extension_tool_top_k=16,
                 core_tools=["memory_update", "memory_note"],
             )
         ),
@@ -3578,8 +3437,6 @@ async def test_ceo_context_assembly_keeps_memory_snapshot_out_of_turn_overlay_an
         main_task_service=None,
         _memory_runtime_settings=SimpleNamespace(
             assembly=SimpleNamespace(
-                skill_inventory_top_k=16,
-                extension_tool_top_k=16,
                 core_tools=["memory_update", "memory_note"],
             )
         ),

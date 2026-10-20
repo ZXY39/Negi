@@ -26,12 +26,6 @@ NODE_FIXED_BUILTIN_TOOL_NAMES: tuple[str, ...] = (
 )
 
 
-def _item_value(item: Any, key: str) -> Any:
-    if isinstance(item, dict):
-        return item.get(key)
-    return getattr(item, key, None)
-
-
 def _normalized_tool_name(value: Any) -> str:
     return str(value or "").strip()
 
@@ -61,39 +55,9 @@ def fixed_builtin_tool_name_set_for_actor_role(actor_role: str) -> set[str]:
     return set()
 
 
-def filter_tool_names_for_semantic_top_k(
-    tool_names: list[str] | tuple[str, ...] | None,
-    *,
-    excluded_tool_names: list[str] | tuple[str, ...] | set[str] | None,
-) -> list[str]:
-    excluded = normalized_tool_name_set(excluded_tool_names)
-    return [
-        name
-        for name in normalized_tool_name_list(list(tool_names or []))
-        if name not in excluded
-    ]
-
-
-def filter_visible_tools_for_semantic_top_k(
-    visible_tools: list[Any] | None,
-    *,
-    excluded_tool_names: list[str] | tuple[str, ...] | set[str] | None,
-) -> list[dict[str, Any]]:
-    excluded = normalized_tool_name_set(excluded_tool_names)
-    filtered: list[dict[str, Any]] = []
-    for record in list(visible_tools or []):
-        tool_id = _normalized_tool_name(_item_value(record, "tool_id"))
-        if not tool_id or tool_id in excluded:
-            continue
-        filtered.append({"tool_id": tool_id})
-    return filtered
-
-
 __all__ = [
     "CEO_FIXED_BUILTIN_TOOL_NAMES",
     "NODE_FIXED_BUILTIN_TOOL_NAMES",
-    "filter_tool_names_for_semantic_top_k",
-    "filter_visible_tools_for_semantic_top_k",
     "fixed_builtin_tool_name_set_for_actor_role",
     "normalized_tool_name_list",
     "normalized_tool_name_set",

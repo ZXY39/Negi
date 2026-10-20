@@ -8858,27 +8858,20 @@ def test_websocket_build_ceo_snapshot_hides_pending_user_messages_while_running_
 
 
 def test_context_assembly_always_keeps_tool_execution_control_tools_visible() -> None:
-    service = CeoMessageBuilder(
-        loop=SimpleNamespace(),
-        prompt_builder=SimpleNamespace(build=lambda **kwargs: ""),
-    )
-
-    selected, trace = service._select_tools(
-        query_text="install a skill and maybe stop it if needed",
-        visible_names=[
+    selected = CeoMessageBuilder._callable_tool_names(
+        visible_tool_names=[
             "create_async_task",
             "skill-installer",
             "stop_tool_execution",
         ],
-        visible_tools=[],
-        core_tools={"create_async_task"},
-        extension_top_k=1,
+        hydrated_tool_names=["create_async_task"],
     )
 
     assert "stop_tool_execution" in selected
     assert "wait_tool_execution" not in selected
     assert "create_async_task" in selected
-    assert trace["reserved_internal_tool_names"] == ["stop_tool_execution"]
+    # RESERVED 排在最前，FIXED 其次，水合名随后：常驻名不靠被选中，也不占水合读数。
+    assert selected[0] == "stop_tool_execution"
 
 
 def _prepare_turn_batch_harness(monkeypatch, tmp_path: Path, *, capture_builder: dict | None = None):

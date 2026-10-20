@@ -8262,7 +8262,6 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
             frontdoor_selection_debug = {
                 "query_text": str(builder_query_text or "").strip(),
                 "raw_turn_query_text": str(query_text or "").strip(),
-                "semantic_frontdoor": dict(getattr(assembly, "trace", {}).get("semantic_frontdoor") or {}),
                 "tool_selection": dict(getattr(assembly, "trace", {}).get("tool_selection") or {}),
                 "selected_skills": list(getattr(assembly, "trace", {}).get("selected_skills") or []),
                 "capability_snapshot": dict(getattr(assembly, "trace", {}).get("capability_snapshot") or {}),
