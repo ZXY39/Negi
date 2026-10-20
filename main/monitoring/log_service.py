@@ -24,12 +24,6 @@ from g3ku.content.navigation import INLINE_CHAR_LIMIT
 from g3ku.deployment.data_root import data_work_path
 from g3ku.providers.base import provider_body_output_cap, provider_body_reasoning_effort
 from g3ku.providers.fallback import MODEL_RETRY_LIVE_STATES, MODEL_RETRY_STATE_WAITING_UPSTREAM
-from g3ku.runtime.kept_contract_snapshot import (
-    complete_keep_snapshot,
-    keep_closure_fields,
-    normalize_kept_skill_contexts,
-    normalize_kept_tool_contexts,
-)
 from g3ku.runtime.stage_prompt_compaction import (
     STAGE_CLOSURE_INACTIVE_NOTES,
     build_stage_archive_document,
@@ -84,10 +78,6 @@ from main.runtime.append_notice_context import (
     roll_append_notice_context_for_compression_stage,
 )
 from main.runtime.chat_backend import build_actual_request_diagnostics
-from main.runtime.internal_tools import (
-    keep_contracts_require_drop_error,
-    normalize_keep_contract_names,
-)
 from main.runtime.send_token_preflight import (
     build_runtime_estimated_input_truth,
     build_runtime_observed_input_truth,
@@ -3347,22 +3337,7 @@ class TaskLogService:
         key_refs: list[dict[str, Any]] | None = None,
         final: bool = False,
         drop_completed_stage_tool_detail: bool = False,
-        keep_tools: list[str] | None = None,
-        keep_skills: list[str] | None = None,
-        kept_snapshot: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
-        normalized_keep_tools = normalize_keep_contract_names(keep_tools)
-        normalized_keep_skills = normalize_keep_contract_names(keep_skills)
-        # 名字与正文对账：模型点名的每一条要么带着正文进来、要么带着失败原因进来，
-        # 第三条路（收下名字却什么都没写）是一条模型读不到的空承诺。取不到的那几条不写
-        # 条目、工具保持撤销态，这是安全方向。
-        kept_snapshot_payload = complete_keep_snapshot(
-            kept_snapshot,
-            keep_tools=normalized_keep_tools,
-            keep_skills=normalized_keep_skills,
-        )
-        normalized_kept_tool_contexts = normalize_kept_tool_contexts(kept_snapshot_payload.get("tool_contexts"))
-        normalized_kept_skill_contexts = normalize_kept_skill_contexts(kept_snapshot_payload.get("skill_contexts"))
         with self._task_lock(task_id):
             task = self._require_task(task_id)
             node = self._store.get_node(node_id)
@@ -3382,12 +3357,6 @@ class TaskLogService:
                 raise ValueError(
                     f'tool_round_budget must not exceed {STAGE_TOOL_ROUND_BUDGET_MAX}'
                 )
-            # 与 `drop requires non-empty summary` 同一处再收一次：绕过工具层的写入者
-            # （恢复重放、内部补开阶段）也不能把 `keep_*` 落在一条不裁撤的阶段上——那是一句
-            # 空承诺，名字无处可写，模型却会按"留住了"行事。
-            keep_gate_error = keep_contracts_require_drop_error(normalized_keep_tools, normalized_keep_skills)
-            if keep_gate_error and not drop_completed_stage_tool_detail:
-                raise ValueError(keep_gate_error)
             state = self._execution_stage_state(node)
             active = self._active_execution_stage(state)
             if (
@@ -3459,13 +3428,6 @@ class TaskLogService:
                         # 绕过工具层的写入者不能造出"肉身和总结一起消失"的黑洞态。
                         'context_evicted': stage_evicts,
                     }
-                    # 保留正文只写在裁撤**真落**的那条阶段上：没裁撤就没有阶段块，正文写进
-                    # 账本也无处渲染，留下的只是一份"看着像留住了"的假证据。
-                    if stage_evicts:
-                        if normalized_kept_tool_contexts:
-                            stage_update['kept_tool_contexts'] = normalized_kept_tool_contexts
-                        if normalized_kept_skill_contexts:
-                            stage_update['kept_skill_contexts'] = normalized_kept_skill_contexts
                     current = stage.model_copy(update=stage_update)
                 stages.append(current)
             closing_index = next(
@@ -3540,9 +3502,6 @@ class TaskLogService:
                     'evicted': bool(closing_stage is not None and closing_stage.context_evicted is True),
                     'archive_ref': str(closing_stage.archive_ref or '') if closing_stage is not None else '',
                     'reason': reason,
-                    # 保留契约的落地回执（与前门同形）：留下的是名字列表，取不到的逐条点名
-                    # 原因。没有这一段，模型只能按参数倒推"我点了名就一定留住了"。
-                    **keep_closure_fields(kept_snapshot_payload),
                     # 与前门同一份落空说明：结果属动态尾部，工具 schema 是两车道共享的
                     # provider 前缀，改它会整体失效一次缓存。
                     **({} if reason == 'applied' else {'note': STAGE_CLOSURE_INACTIVE_NOTES[reason]}),

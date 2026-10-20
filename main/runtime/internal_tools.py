@@ -23,59 +23,6 @@ def build_detail_level_schema(*, description: str) -> dict[str, Any]:
     }
 
 
-def build_keep_contract_list_schema(*, description: str) -> dict[str, Any]:
-    """`keep_tools` / `keep_skills` 的共用形状。
-
-    两条车道三份 schema 由同一个构造函数产出，`parameters` 与 `model_parameters` 只有
-    description 不同：约束词表必须逐字镜像（`test_control_tool_model_schema_parity.py`），
-    而字段级 description 在出 provider 前会被 `sanitize_provider_parameters_schema` 整体
-    剥掉，所以真正的语义只写在工具级 `model_description` 与三份提示词里。
-    """
-    return {
-        'type': 'array',
-        'description': str(description or '').strip(),
-        'items': {'type': 'string', 'minLength': 1},
-    }
-
-
-def normalize_keep_contract_names(value: Any) -> list[str]:
-    """`keep_tools` / `keep_skills` 的取值口径：去空、去重、保序。
-
-    三条车道（执行 / 验收 / CEO 前门）与两个提交落点共用这一份，名字列表在这里定形后
-    才进账本，所以「模型交的名字」与「回执点名的名字」永远同形。
-    """
-    collected: list[str] = []
-    seen: set[str] = set()
-    for raw in list(value or []):
-        name = str(raw or "").strip()
-        if not name or name in seen:
-            continue
-        seen.add(name)
-        collected.append(name)
-    return collected
-
-
-KEEP_CONTRACT_DROP_GATE_ERROR = (
-    'keep_tools / keep_skills require drop_completed_stage_tool_detail=true in the same call: '
-    'without the drop nothing leaves the context, so there is no stage block to keep a contract in. '
-    'Either set drop_completed_stage_tool_detail=true with a non-empty completed_stage_summary, or '
-    'send the raw rows on and drop these names'
-)
-
-
-def keep_contracts_require_drop_error(keep_tools: Any, keep_skills: Any) -> str:
-    """`keep_*` 只在裁撤为真时才有意义——判据只有一份。
-
-    工具层的 `validate_params` 与两条车道的提交落点（`log_service.submit_next_stage` /
-    `_submit_frontdoor_next_stage_state`）都调它，与 `drop requires non-empty
-    completed_stage_summary` 同一口径：绕过工具层的写入者也造不出「参数被静默吞掉」的态，
-    因为不裁撤时这个名字根本无处可写。
-    """
-    if not (normalize_keep_contract_names(keep_tools) or normalize_keep_contract_names(keep_skills)):
-        return ''
-    return KEEP_CONTRACT_DROP_GATE_ERROR
-
-
 class SubmitNextStageTool(Tool):
     hide_universal_timeout_parameter = True
     # 重跑会被 log_service.submit_next_stage 的状态闸门拒掉：刚开的活动阶段没有
@@ -105,9 +52,10 @@ class SubmitNextStageTool(Tool):
     def model_description(self) -> str:
         return (
             'Start the next stage for the current node. '
-            'keep_tools / keep_skills only apply with drop_completed_stage_tool_detail=true, which drops '
-            'the closing stage\'s raw tool args/outputs from every later turn — only your summary and kept '
-            'contracts survive; content_open on the block\'s archive_ref reads them back.'
+            'drop_completed_stage_tool_detail=true drops the closing stage\'s raw tool '
+            'args/outputs from every later turn; content_open on the block\'s archive_ref '
+            'reads them back. A tool whose contract left context is called directly: that '
+            'call returns the contract.'
         )
 
     @property
@@ -169,34 +117,15 @@ class SubmitNextStageTool(Tool):
                         'Set true to drop the raw arguments and outputs of every tool call in the stage '
                         'you are closing. They do not just disappear from the next stage — they stop being '
                         'sent in every later turn as well, unless you read them back yourself. What stays '
-                        'in context is your completed_stage_summary (rendered as the stage block) plus only '
-                        'the tools and skills you name in keep_tools / keep_skills. Requires a non-empty '
-                        'completed_stage_summary in this same call. The full round-by-round record is still '
-                        'exported to the file pointed at by the block\'s archive_ref, and content_open is '
-                        'the only way to read it back. So set true only when your summary fully replaces '
-                        'those rows; if a later step might need verbatim arguments, error text, line numbers '
-                        'or output body, leave it false (default) and keep the rows in context.'
+                        'in context is your completed_stage_summary (rendered as the stage block). Requires '
+                        'a non-empty completed_stage_summary in this same call. The full round-by-round '
+                        'record is still exported to the file pointed at by the block\'s archive_ref, and '
+                        'content_open is the only way to read it back. So set true only when your summary '
+                        'fully replaces those rows; if a later step might need verbatim arguments, error '
+                        'text, line numbers or output body, leave it false (default) and keep the rows in '
+                        'context.'
                     ),
                 },
-                'keep_tools': build_keep_contract_list_schema(
-                    description=(
-                        'Names of hydrated tools whose contract body this closing stage still grants the '
-                        'ability to call. Only read when drop_completed_stage_tool_detail is true; with '
-                        'drop false the call is rejected rather than silently ignoring these names. Each '
-                        'name must be a tool this stage loaded via load_tool_context. A tool you do not '
-                        'name loses its contract with the raw rows: it leaves the callable list and goes '
-                        'back to the candidate pool, and you must load it again to call it.'
-                    ),
-                ),
-                'keep_skills': build_keep_contract_list_schema(
-                    description=(
-                        'Names of skills whose workflow body you want kept next to the stage block after '
-                        'dropping this stage\'s raw rows. Only read when drop_completed_stage_tool_detail '
-                        'is true. Each name must be a skill this stage loaded via load_skill_context. '
-                        'Skills are never hydrated, so keeping one changes no callable list — it only '
-                        'keeps the text in context.'
-                    ),
-                ),
             },
             'required': ['stage_goal', 'tool_round_budget'],
         }
@@ -245,12 +174,6 @@ class SubmitNextStageTool(Tool):
                         'rows until summary compression replaces that history.'
                     ),
                 },
-                'keep_tools': build_keep_contract_list_schema(
-                    description='Hydrated tools this closing stage loaded and must stay callable after the drop.',
-                ),
-                'keep_skills': build_keep_contract_list_schema(
-                    description='Skills this closing stage loaded and whose body must stay in context after the drop.',
-                ),
             },
             'required': ['stage_goal', 'tool_round_budget'],
         }
@@ -275,24 +198,6 @@ class SubmitNextStageTool(Tool):
                 'drop_completed_stage_tool_detail requires a non-empty completed_stage_summary '
                 'in the same call'
             )
-        # keep_* 挂在不裁撤的提交上是一条空承诺：正文本来就在上下文里，没有块可以放它，
-        # 收下名字会让模型以为「留住了」而下一跳发现工具仍在 callable 是理所当然。
-        drop_gate_error = keep_contracts_require_drop_error(
-            source.get('keep_tools'),
-            source.get('keep_skills'),
-        )
-        if drop_gate_error and not bool(source.get('drop_completed_stage_tool_detail')):
-            errors.append(drop_gate_error)
-        for field in ('keep_tools', 'keep_skills'):
-            value = source.get(field)
-            if value is None:
-                continue
-            if not isinstance(value, list):
-                errors.append(f'{field} must be an array of names')
-                continue
-            for index, item in enumerate(value):
-                if not str(item or '').strip():
-                    errors.append(f'{field}[{index}] must not be empty')
         return errors
 
     async def execute(
@@ -303,13 +208,9 @@ class SubmitNextStageTool(Tool):
         key_refs: list[dict[str, Any]] | None = None,
         final: bool = False,
         drop_completed_stage_tool_detail: bool = False,
-        keep_tools: list[str] | None = None,
-        keep_skills: list[str] | None = None,
         **kwargs: Any,
     ) -> str:
         _ = kwargs
-        normalized_keep_tools = normalize_keep_contract_names(keep_tools)
-        normalized_keep_skills = normalize_keep_contract_names(keep_skills)
         callback_args: tuple[Any, ...] = (
             str(stage_goal or '').strip(),
             int(tool_round_budget or 0),
@@ -318,16 +219,7 @@ class SubmitNextStageTool(Tool):
             bool(final),
             bool(drop_completed_stage_tool_detail),
         )
-        callback_kwargs: dict[str, Any] = {}
-        if normalized_keep_tools or normalized_keep_skills:
-            # 只在模型真点名保留时才多带这两个关键字：六元回调是三条车道（执行 / 验收 /
-            # CEO 前门）与既有夹具共用的签名，无条件多塞会打断每一个没改过的闭包，而
-            # 「没点名」那一路本来就不需要读它们。
-            callback_kwargs = {
-                'keep_tools': normalized_keep_tools,
-                'keep_skills': normalized_keep_skills,
-            }
-        result = await self._submit_callback(*callback_args, **callback_kwargs)
+        result = await self._submit_callback(*callback_args)
         return json.dumps(result, ensure_ascii=False, sort_keys=True)
 
 

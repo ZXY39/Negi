@@ -21,7 +21,6 @@ from g3ku.content.navigation import (
     OPEN_EXCERPT_CHAR_LIMIT,
     _should_keep_inline_tool_result,
 )
-from g3ku.runtime.kept_contract_snapshot import normalize_kept_tool_contexts
 from g3ku.runtime.tool_context_presence import (
     contract_presence,
     contract_presence_index,
@@ -170,10 +169,18 @@ def test_partition_keeps_input_order_and_dedupes() -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_kept_stage_context_is_not_a_presence_carrier() -> None:
-    kept = normalize_kept_tool_contexts([{"tool_id": TOOL_ID, "tool_context_fingerprint": FINGERPRINT, "body": BODY}])
-    assert kept[0]["tool_id"] == TOOL_ID
-    assert contract_presence(TOOL_ID, request_messages=[])[0] is False
+def test_stage_ledger_entry_is_not_a_presence_carrier() -> None:
+    """账本里的保留正文不算在场：判据只有块这一个载体。
+
+    通道已整条删除，这条断言留着是给"从存量帧/旧节点元数据里读回 `kept_tool_contexts`
+    再喂进判据"这条路把关——存量数据仍带这个键，pydantic 按默认忽略，判据也必须照旧
+    只认块字节。
+    """
+    legacy_stage = {
+        "stage_id": "frontdoor-stage-1",
+        "kept_tool_contexts": [{"tool_id": TOOL_ID, "tool_context_fingerprint": FINGERPRINT, "body": BODY}],
+    }
+    assert contract_presence(TOOL_ID, request_messages=[legacy_stage])[0] is False
     assert contract_presence_index(request_messages=[]) == {}
 
 

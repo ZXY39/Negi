@@ -8,8 +8,7 @@
 `g3ku/runtime/tool_context_block.py`）。两条投递道（`load_tool_context(_v2)` 与未水合
 工具的冲动调用）都印同一个块，所以判据不需要知道是谁送的。
 
-阶段台账里的 `kept_tool_contexts` **不再算在场**——正文不在模型眼前就不算，v1 的第二
-载体已按 D9 摘除；裁撤即离场，下次调用走冲动路径重新拿契约（无感自愈）。
+裁撤即离场，下次调用走冲动路径重新拿契约（无感自愈）。
 
 skill **不参与**本判据：skill 没有 callable 可摘。
 
@@ -29,7 +28,6 @@ LOADER_TOOL_NAMES = frozenset({"load_tool_context", "load_tool_context_v2"})
 
 TOOL_ID_FIELD = "tool_id"
 FINGERPRINT_FIELD = "tool_context_fingerprint"
-KEPT_TOOL_CONTEXTS_FIELD = "kept_tool_contexts"
 BODY_FIELD = "body"
 
 
@@ -155,7 +153,6 @@ def stale_rev_tool_ids(
 __all__ = [
     "BODY_FIELD",
     "FINGERPRINT_FIELD",
-    "KEPT_TOOL_CONTEXTS_FIELD",
     "LOADER_TOOL_NAMES",
     "TOOL_ID_FIELD",
     "contract_presence",

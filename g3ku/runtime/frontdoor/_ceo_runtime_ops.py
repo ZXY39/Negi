@@ -70,15 +70,6 @@ from g3ku.runtime.frontdoor.message_builder import (
 from g3ku.runtime.frontdoor.token_preflight_compaction import (
     FrontdoorTokenPreflightResult,
 )
-from g3ku.runtime.kept_contract_snapshot import (
-    KEEP_CONTRACT_NOT_DROPPED_NOTE,
-    KEPT_SKILL_CONTEXTS_FIELD,
-    KEPT_TOOL_CONTEXTS_FIELD,
-    keep_closure_fields,
-    normalize_kept_skill_contexts,
-    normalize_kept_tool_contexts,
-    resolve_kept_contracts,
-)
 from g3ku.runtime.message_token_estimation import estimate_message_tokens
 from g3ku.runtime.project_environment import current_project_environment
 from g3ku.runtime.session_agent import (
@@ -144,8 +135,6 @@ from main.runtime.chat_backend import (
 from main.runtime.internal_tools import (
     SilentTool,
     SubmitNextStageTool,
-    keep_contracts_require_drop_error,
-    normalize_keep_contract_names,
 )
 from main.runtime.send_token_preflight import (
     build_runtime_estimated_input_truth,
@@ -3869,8 +3858,7 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
 
         撤销必须落到准入层才算"不允许调用"：实盘只改尾部契约时，那一跳的 callable 行里
         已没有 `perf_inspect`，而 stage2 仍把它调用成功（派发与声明解耦），规则只剩文案效果。
-        常驻内置与控制/加载器不在水合台账里，不受这条影响；裁撤但被 `keep_tools` 留住的
-        名字由同一判据判成在场，因此不会被摘。
+        常驻内置与控制/加载器不在水合台账里，不受这条影响。
         """
         declared = self._normalized_tool_name_state_list(list(state.get("provider_tool_names") or []))
         granted = self._normalized_tool_name_state_list(list(state.get("rbac_visible_tool_names") or []))
@@ -6166,15 +6154,6 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
             # "没裁过"，模型点了名也不会生效（与 canonical 归一化器同一口径）。
             if raw_stage.get("context_evicted") is True:
                 normalized_stage["context_evicted"] = True
-            # 保留契约正文同样要过白名单：它是在场判据的第二个载体，漏一次等于逐轮被抹掉，
-            # 症状是"留了正文还是被撤销"。空列表不写，与 canonical 同口径省体积。
-            kept_tool_contexts = normalize_kept_tool_contexts(raw_stage.get("kept_tool_contexts"))
-            if kept_tool_contexts:
-                normalized_stage["kept_tool_contexts"] = kept_tool_contexts
-            # 保留的技能正文同一条通道（只服务渲染、不进在场判据），同样要过白名单。
-            kept_skill_contexts = normalize_kept_skill_contexts(raw_stage.get("kept_skill_contexts"))
-            if kept_skill_contexts:
-                normalized_stage["kept_skill_contexts"] = kept_skill_contexts
             normalized_stages.append(normalized_stage)
         if active_stage_id and not any(
             str(stage.get("stage_id") or "").strip() == active_stage_id
@@ -6286,17 +6265,6 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
         closing_stage_id = self._frontdoor_closing_stage_id(stage_state)
         normalized_summary = str(arguments.get("completed_stage_summary") or "").strip()
         drop_detail = bool(arguments.get("drop_completed_stage_tool_detail"))
-        keep_tools = normalize_keep_contract_names(arguments.get("keep_tools"))
-        keep_skills = normalize_keep_contract_names(arguments.get("keep_skills"))
-        # 正文提取只在提交点做一次，取的是**即将关闭**那条阶段的 loader 记录。渲染侧此后
-        # 逐轮回放账本，不再读资源文件——块在历史中段，重读会让运营者的一次资源编辑把
-        # 它之后的整段前缀缓存顶掉。
-        kept_snapshot = self._frontdoor_resolve_kept_contracts(
-            self._frontdoor_closing_stage(self._frontdoor_stage_state_snapshot({"frontdoor_stage_state": stage_state})),
-            drop_detail=drop_detail,
-            keep_tools=keep_tools,
-            keep_skills=keep_skills,
-        )
         next_state, next_stage = self._submit_frontdoor_next_stage_state(
             stage_state,
             stage_goal=str(arguments.get("stage_goal") or ""),
@@ -6311,10 +6279,6 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
             preamble_text=preamble_text,
             system_generated=system_generated,
             drop_completed_stage_tool_detail=drop_detail,
-            keep_tools=keep_tools,
-            keep_skills=keep_skills,
-            kept_tool_contexts=list(kept_snapshot.get("tool_contexts") or []),
-            kept_skill_contexts=list(kept_snapshot.get("skill_contexts") or []),
         )
         if drop_detail and archive:
             self._frontdoor_archive_evicted_stage(
@@ -6346,45 +6310,11 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
                 ),
                 "evicted": bool(closed and closed.get("context_evicted") is True),
                 "reason": reason,
-                # 保留契约的落地回执：留下的是名字，不是"你以为你留住了"。取不到的那几条
-                # 逐条点名原因，模型才会知道得重新 load。
-                **keep_closure_fields(kept_snapshot),
                 # 落空时在结果里自带一句可读说明：schema 描述两车道共用，改它会整体失效
                 # provider 前缀，而结果属动态尾部，模型不必再靠猜。
                 **({} if reason == "applied" else {"note": STAGE_CLOSURE_INACTIVE_NOTES[reason]}),
             }
         return next_state, payload
-
-    def _frontdoor_resolve_kept_contracts(
-        self,
-        closing_stage: dict[str, Any] | None,
-        *,
-        drop_detail: bool,
-        keep_tools: list[str],
-        keep_skills: list[str],
-    ) -> dict[str, Any]:
-        """前门道的 `keep_*` 收口：正文由主运行时按治理记录渲染，指纹与 `load_tool_context` 同一条。
-
-        没有裁撤、没有点名、或这条阶段压根没被结清时，返回空快照 + 一句说明：名字无处可写，
-        回执必须说清"没留"，不能让模型按参数倒推出"留住了"。
-        """
-        if not keep_tools and not keep_skills:
-            return {}
-        if not drop_detail:
-            return {"failures": [], "note": KEEP_CONTRACT_NOT_DROPPED_NOTE}
-        tool_payload_getter = None
-        main_service = getattr(self._loop, "main_task_service", None)
-        getter = getattr(main_service, "get_tool_toolskill", None)
-        if callable(getter):
-            tool_payload_getter = getter
-        return resolve_kept_contracts(
-            closing_stage,
-            keep_tools=keep_tools,
-            keep_skills=keep_skills,
-            tool_payload_getter=tool_payload_getter,
-            resource_manager=getattr(self._loop, "resource_manager", None),
-            workspace_root=getattr(self._loop, "workspace", None),
-        )
 
     @classmethod
     def _submit_frontdoor_next_stage_state(
@@ -6399,29 +6329,18 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
         preamble_text: str = "",
         system_generated: bool = False,
         drop_completed_stage_tool_detail: bool = False,
-        keep_tools: list[str] | None = None,
-        keep_skills: list[str] | None = None,
-        kept_tool_contexts: list[dict[str, Any]] | None = None,
-        kept_skill_contexts: list[dict[str, Any]] | None = None,
     ) -> tuple[dict[str, Any], dict[str, Any]]:
         normalized_state = cls._frontdoor_stage_state_snapshot({"frontdoor_stage_state": stage_state})
         normalized_goal = str(stage_goal or "").strip()
         normalized_budget = max(STAGE_TOOL_ROUND_BUDGET_MIN, int(tool_round_budget or 0))
         normalized_summary = str(completed_stage_summary or "").strip()
         normalized_key_refs = [dict(item) for item in list(key_refs or []) if isinstance(item, dict)]
-        normalized_keep_tools = normalize_keep_contract_names(keep_tools)
-        normalized_keep_skills = normalize_keep_contract_names(keep_skills)
         if not normalized_goal:
             raise ValueError("stage_goal must not be empty")
         if normalized_budget > STAGE_TOOL_ROUND_BUDGET_MAX:
             raise ValueError(
                 f"tool_round_budget must not exceed {STAGE_TOOL_ROUND_BUDGET_MAX}"
             )
-        # 与 `drop requires non-empty summary` 同一处再收一次：绕过工具层的写入者不能
-        # 造出「名字收下了、正文无处可写」的空承诺态。
-        keep_gate_error = keep_contracts_require_drop_error(normalized_keep_tools, normalized_keep_skills)
-        if keep_gate_error and not drop_completed_stage_tool_detail:
-            raise ValueError(keep_gate_error)
 
         active_stage_id = str(normalized_state.get("active_stage_id") or "").strip()
         active_stage = next(
@@ -6465,16 +6384,6 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
                 # 所以落盘不会给每条阶段添一个布尔键。
                 if drop_completed_stage_tool_detail and normalized_summary:
                     current["context_evicted"] = True
-                    # 保留正文只在裁撤**真的落了**的那一条阶段上写：没裁撤就没有块，正文
-                    # 写进账本也无处渲染，反而会留下一份"看着留住了"的假证据。取不到的、以及
-                    # 本阶段压根没加载过的那几条由 `resolve_kept_contracts` 挡在门外（不写条目），
-                    # 工具保持撤销态。
-                    normalized_kept_tool_contexts = normalize_kept_tool_contexts(kept_tool_contexts)
-                    if normalized_kept_tool_contexts:
-                        current[KEPT_TOOL_CONTEXTS_FIELD] = normalized_kept_tool_contexts
-                    normalized_kept_skill_contexts = normalize_kept_skill_contexts(kept_skill_contexts)
-                    if normalized_kept_skill_contexts:
-                        current[KEPT_SKILL_CONTEXTS_FIELD] = normalized_kept_skill_contexts
             stages.append(current)
 
         next_stage_index = max((int(stage.get("stage_index") or 0) for stage in stages), default=0) + 1
@@ -7589,8 +7498,6 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
             key_refs: list[dict[str, Any]] | None = None,
             final: bool = False,
             drop_completed_stage_tool_detail: bool = False,
-            keep_tools: list[str] | None = None,
-            keep_skills: list[str] | None = None,
         ) -> dict[str, Any]:
             # 与 durable 侧重建共用同一个入口，差别只在 `archive=False`：归档要落在
             # durable 账本那一步，写在一份会被覆盖掉的工作副本上只会多留一份没人引用的文件。
@@ -7604,8 +7511,6 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
                     "key_refs": key_refs or [],
                     "final": final,
                     "drop_completed_stage_tool_detail": drop_completed_stage_tool_detail,
-                    "keep_tools": list(keep_tools or []),
-                    "keep_skills": list(keep_skills or []),
                 },
                 preamble_text=str(state.get("analysis_text") or "").strip(),
                 archive=False,
