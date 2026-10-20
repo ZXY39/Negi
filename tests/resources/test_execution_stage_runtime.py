@@ -652,10 +652,8 @@ async def test_selector_precompute_is_shared_by_tool_exposure_and_message_enrich
     async def _fake_build_node_context_selection(**kwargs):
         selector_calls.append(dict(kwargs))
         return NodeContextSelectionResult(
-            mode="dense_rerank",
             selected_skill_ids=["tmux"],
             selected_tool_names=["content"],
-            trace={"mode": "dense_rerank"},
         )
 
     monkeypatch.setattr(
@@ -737,12 +735,10 @@ async def test_enrich_node_messages_moves_repair_required_tools_and_skills_into_
     async def _fake_build_node_context_selection(**kwargs):
         _ = kwargs
         return NodeContextSelectionResult(
-            mode="dense_rerank",
             selected_skill_ids=["broken_skill"],
             selected_tool_names=[],
             candidate_skill_ids=["broken_skill"],
             candidate_tool_names=["agent_browser"],
-            trace={"mode": "dense_rerank"},
         )
 
     monkeypatch.setattr(
@@ -813,10 +809,8 @@ async def test_tool_provider_uses_full_visible_tool_fallback_when_selector_retur
     async def _fake_build_node_context_selection(**kwargs):
         _ = kwargs
         return NodeContextSelectionResult(
-            mode="visible_only",
             selected_skill_ids=[],
             selected_tool_names=["content", "filesystem_stat"],
-            trace={"mode": "visible_only"},
         )
 
     monkeypatch.setattr(
@@ -865,10 +859,8 @@ async def test_node_build_tools_preserves_protocol_tools_when_callable_tools_are
     async def _fake_build_node_context_selection(**kwargs):
         _ = kwargs
         return NodeContextSelectionResult(
-            mode="dense_rerank",
             selected_skill_ids=[],
             selected_tool_names=["content"],
-            trace={"mode": "dense_rerank"},
         )
 
     monkeypatch.setattr(
@@ -994,7 +986,6 @@ async def test_prepare_node_context_selection_restores_callable_tools_from_persi
     selection = await service._prepare_node_context_selection(task=task, node=node)
     provided = service._tool_provider(node)
 
-    assert selection.trace["mode"] == "persisted_frame_restore"
     assert selection.selected_tool_names == ["content"]
     # 治理可见的两条记录都进对象字典：没有分组层就没有"家族 id 要摘掉"这回事，
     # selection 只决定 callable，不决定字典上界。
@@ -1039,12 +1030,10 @@ async def test_prepare_node_context_selection_recomputes_when_cached_skill_visib
             "goal": "load web skills",
             "core_requirement": "load web skills",
             "selection": NodeContextSelectionResult(
-                mode="dense_rerank",
                 selected_skill_ids=[],
                 selected_tool_names=["web_fetch"],
                 candidate_skill_ids=[],
                 candidate_tool_names=["web_fetch"],
-                trace={"mode": "dense_rerank"},
             ),
         }
     }
@@ -1070,12 +1059,10 @@ async def test_prepare_node_context_selection_recomputes_when_cached_skill_visib
     async def _fake_build_node_context_selection(**kwargs):
         selector_calls.append(dict(kwargs))
         return NodeContextSelectionResult(
-            mode="dense_rerank",
             selected_skill_ids=["web-access"],
             selected_tool_names=["web_fetch"],
             candidate_skill_ids=["web-access", "multi-search-engine"],
             candidate_tool_names=["web_fetch"],
-            trace={"mode": "dense_rerank"},
         )
 
     monkeypatch.setattr(
@@ -1160,12 +1147,10 @@ async def test_prepare_node_context_selection_ignores_persisted_frame_when_live_
     async def _fake_build_node_context_selection(**kwargs):
         selector_calls.append(dict(kwargs))
         return NodeContextSelectionResult(
-            mode="dense_rerank",
             selected_skill_ids=["web-access"],
             selected_tool_names=["web_fetch"],
             candidate_skill_ids=["web-access"],
             candidate_tool_names=["web_fetch"],
-            trace={"mode": "dense_rerank"},
         )
 
     monkeypatch.setattr(

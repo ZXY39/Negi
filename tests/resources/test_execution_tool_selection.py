@@ -72,7 +72,6 @@ def test_selector_does_not_promote_non_builtin_candidates_without_hydration() ->
             "submit_final_result",
             "spawn_child_nodes",
         ],
-        top_k=1,
     )
 
     assert result.hydrated_tool_names == [
@@ -86,10 +85,9 @@ def test_selector_does_not_promote_non_builtin_candidates_without_hydration() ->
         "memory_note",
         "web_fetch",
     ]
-    assert result.trace["selected_executor_scores"] == []
 
 
-def test_selector_promoted_tools_remain_concrete_and_do_not_consume_top_k_budget() -> None:
+def test_selector_promoted_tools_remain_concrete() -> None:
     result = build_execution_tool_selection(
         prompt="apply patch and inspect docs",
         goal="apply patch and inspect docs",
@@ -113,7 +111,6 @@ def test_selector_promoted_tools_remain_concrete_and_do_not_consume_top_k_budget
             "spawn_child_nodes",
         ],
         promoted_tool_names=["filesystem_propose_patch", "content_open"],
-        top_k=1,
     )
 
     assert result.hydrated_tool_names == [
@@ -128,7 +125,6 @@ def test_selector_promoted_tools_remain_concrete_and_do_not_consume_top_k_budget
         "filesystem_propose_patch",
         "content_open",
     ]
-    assert result.trace["selected_executor_scores"] == []
 
 
 def test_selector_accepts_runtime_helper_dict_shape_tools() -> None:

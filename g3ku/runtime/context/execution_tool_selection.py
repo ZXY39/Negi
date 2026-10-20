@@ -42,10 +42,7 @@ def build_execution_tool_selection(
     always_callable_tool_names: list[str],
     promoted_tool_names: list[str] | None = None,
     schema_size_by_executor: dict[str, int] | None = None,
-    max_schema_chars: int | None = None,
-    top_k: int = 8,
 ) -> ExecutionToolSelectionResult:
-    del max_schema_chars
     normalized_visible_names = _normalized_names(list(visible_tool_names or []))
     visible_name_set = set(normalized_visible_names)
 
@@ -94,8 +91,5 @@ def build_execution_tool_selection(
             "selected_always_callable_tool_names": selected_always_callable_tool_names,
             "selected_promoted_tool_names": selected_promoted_tool_names,
             "candidate_tool_names": list(candidate_tool_names),
-            "candidate_executor_scores": [],
-            "selected_executor_scores": [],
-            "top_k": max(1, int(top_k or 1)),
         },
     )

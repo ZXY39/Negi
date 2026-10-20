@@ -7153,7 +7153,6 @@ class MainRuntimeService:
                 'provider_tool_membership_changed': bool(provider_tool_membership_changed),
                 'declared_denied_tool_names': list(declared_denied_tool_names),
                 'base_schema_chars': int(selection.schema_chars),
-                'top_k': int((selection.trace or {}).get('top_k', 0) or 0),
                 'final_schema_chars': int(final_schema_chars),
                 **dict(selection.trace or {}),
                 'declaration_schema_backfill': declaration_backfill,
@@ -10685,22 +10684,6 @@ class MainRuntimeService:
         }
 
     @staticmethod
-    def _node_message_payload(messages: list[dict[str, Any]]) -> dict[str, Any] | None:
-        for message in list(messages or []):
-            if str(message.get('role') or '').strip().lower() != 'user':
-                continue
-            raw_content = message.get('content')
-            if not isinstance(raw_content, str):
-                continue
-            try:
-                payload = json.loads(raw_content)
-            except Exception:
-                continue
-            if isinstance(payload, dict):
-                return payload
-        return None
-
-    @staticmethod
     def _normalized_tool_name_list(items: list[Any]) -> list[str]:
         ordered: list[str] = []
         seen: set[str] = set()
@@ -10744,7 +10727,6 @@ class MainRuntimeService:
         messages = [item for item in list(frame.get('messages') or []) if isinstance(item, dict)]
         if not messages:
             return None
-        payload = self._node_message_payload(messages) or {}
         dynamic_contract_payload = extract_node_dynamic_contract_payload(messages) or {}
         required_list_fields = (
             'callable_tool_names',
@@ -10831,12 +10813,10 @@ class MainRuntimeService:
             if name and name not in restored_selected_tool_names:
                 restored_selected_tool_names.append(name)
         selection = NodeContextSelectionResult(
-            mode='persisted_frame_restore',
             selected_skill_ids=selected_skill_ids,
             selected_tool_names=restored_selected_tool_names,
             candidate_skill_ids=candidate_skill_ids,
             candidate_tool_names=candidate_tool_names,
-            trace={'mode': 'persisted_frame_restore'},
         )
         session_key = str(getattr(task, 'session_id', '') or 'web:shared').strip() or 'web:shared'
         actor_role = self._actor_role_for_node(node)
@@ -10867,9 +10847,6 @@ class MainRuntimeService:
             'candidate_skill_items': candidate_skill_items,
             'visible_tool_records': list(self.list_visible_tools(actor_role=actor_role, session_id=session_key) or []),
             'visible_tool_names': visible_tool_names,
-            'prompt': str(payload.get('prompt') or getattr(node, 'prompt', '') or '').strip(),
-            'goal': str(payload.get('goal') or getattr(node, 'goal', '') or '').strip(),
-            'core_requirement': str(payload.get('core_requirement') or '').strip(),
             'selection': selection,
         }
 
@@ -10879,10 +10856,6 @@ class MainRuntimeService:
         visible_skills = list(self.list_contract_visible_skill_resources(actor_role=actor_role, session_id=session_key) or [])
         visible_tool_records = list(self.list_visible_tools(actor_role=actor_role, session_id=session_key) or [])
         visible_tool_names = list(self.list_effective_tool_names(actor_role=actor_role, session_id=session_key) or [])
-        task_metadata = task.metadata if isinstance(getattr(task, 'metadata', None), dict) else {}
-        prompt = str(getattr(node, 'prompt', '') or '').strip()
-        goal = str(getattr(node, 'goal', '') or '').strip()
-        core_requirement = str(task_metadata.get('core_requirement') or prompt or goal).strip()
         return {
             'session_key': session_key,
             'actor_role': actor_role,
@@ -10895,9 +10868,6 @@ class MainRuntimeService:
             ),
             'visible_tool_records': visible_tool_records,
             'visible_tool_names': visible_tool_names,
-            'prompt': prompt,
-            'goal': goal,
-            'core_requirement': core_requirement,
         }
 
     async def _prepare_node_context_selection(self, *, task, node: NodeRecord) -> NodeContextSelectionResult:
@@ -10942,13 +10912,7 @@ class MainRuntimeService:
                 return restored['selection']
         inputs = self._node_context_selection_inputs(task=task, node=node)
         selection = await build_node_context_selection(
-            loop=getattr(self, '_react_loop', None),
-            memory_manager=getattr(self, 'memory_manager', None),
-            prompt=str(inputs.get('prompt') or ''),
-            goal=str(inputs.get('goal') or ''),
-            core_requirement=str(inputs.get('core_requirement') or ''),
             visible_skills=list(inputs.get('visible_skills') or []),
-            visible_tool_records=list(inputs.get('visible_tool_records') or []),
             visible_tool_names=list(inputs.get('visible_tool_names') or []),
         )
         if cache_key is not None:

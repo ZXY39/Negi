@@ -2511,7 +2511,6 @@ def test_tool_provider_includes_hydrated_tools_even_when_selection_cache_exclude
     service._node_context_selection_cache = {
         ('task-hydrated-provider', 'node-hydrated-provider'): {
             'selection': NodeContextSelectionResult(
-                mode='dense_rerank',
                 selected_tool_names=['content_open'],
                 candidate_tool_names=['content_open', 'filesystem_write'],
             )
@@ -3178,7 +3177,6 @@ def test_tool_provider_covers_governance_visible_tools_when_frame_candidates_are
     service._node_context_selection_cache = {
         ('task-empty-cand', 'node-empty-cand'): {
             'selection': NodeContextSelectionResult(
-                mode='dense_rerank',
                 selected_tool_names=[],
                 candidate_tool_names=[],
             )
@@ -3226,7 +3224,6 @@ def test_tool_provider_includes_candidate_tools_from_restored_selection() -> Non
     service._node_context_selection_cache = {
         ('task-restored-provider', 'node-restored-provider'): {
             'selection': NodeContextSelectionResult(
-                mode='persisted_frame_restore',
                 selected_tool_names=['load_tool_context'],
                 candidate_tool_names=['content_open', 'content_search'],
             )
@@ -6352,7 +6349,7 @@ async def test_react_loop_uses_latest_model_refs_from_supplier_between_turns() -
 
 
 @pytest.mark.asyncio
-async def test_enrich_node_messages_visible_only_fallback_injects_all_visible_skills_without_memory_overlay(
+async def test_enrich_node_messages_injects_all_visible_skills_without_memory_overlay(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     selector_calls: list[dict[str, object]] = []
@@ -6369,10 +6366,8 @@ async def test_enrich_node_messages_visible_only_fallback_injects_all_visible_sk
     async def _fake_build_node_context_selection(**kwargs):
         selector_calls.append(dict(kwargs))
         return NodeContextSelectionResult(
-            mode="visible_only",
             selected_skill_ids=["skill-creator", "tmux"],
             selected_tool_names=["filesystem_write"],
-            trace={"mode": "visible_only"},
         )
 
     monkeypatch.setattr(
@@ -6409,13 +6404,7 @@ async def test_enrich_node_messages_visible_only_fallback_injects_all_visible_sk
 
     assert selector_calls == [
         {
-            "loop": None,
-            "memory_manager": service.memory_manager,
-            "prompt": "where is the plan",
-            "goal": "where is the plan",
-            "core_requirement": "where is the plan",
             "visible_skills": service.list_visible_skill_resources(actor_role="execution", session_id="web:ceo-origin"),
-            "visible_tool_records": service.list_visible_tools(actor_role="execution", session_id="web:ceo-origin"),
             "visible_tool_names": ["filesystem_write"],
         }
     ]
@@ -6475,12 +6464,10 @@ async def test_enrich_node_messages_uses_selector_narrowed_skills_without_memory
     async def _fake_build_node_context_selection(**kwargs):
         _ = kwargs
         return NodeContextSelectionResult(
-            mode="dense_rerank",
             selected_skill_ids=["tmux", "skill-creator"],
             selected_tool_names=["content_open"],
             candidate_skill_ids=["tmux", "skill-creator"],
             candidate_tool_names=["content_open"],
-            trace={"mode": "dense_rerank"},
         )
 
     monkeypatch.setattr(
@@ -6545,12 +6532,10 @@ async def test_enrich_node_messages_reports_hydrated_callable_tools_separately_f
     async def _fake_build_node_context_selection(**kwargs):
         _ = kwargs
         return NodeContextSelectionResult(
-            mode="dense_rerank",
             selected_skill_ids=["tmux"],
             selected_tool_names=["content_open", "exec"],
             candidate_skill_ids=["tmux"],
             candidate_tool_names=["content_open", "exec"],
-            trace={"mode": "dense_rerank"},
         )
 
     monkeypatch.setattr(
@@ -6621,12 +6606,10 @@ async def test_enrich_node_messages_includes_exec_runtime_policy_in_dynamic_cont
     async def _fake_build_node_context_selection(**kwargs):
         _ = kwargs
         return NodeContextSelectionResult(
-            mode="dense_rerank",
             selected_skill_ids=["tmux"],
             selected_tool_names=["content"],
             candidate_skill_ids=["tmux"],
             candidate_tool_names=["content"],
-            trace={"mode": "dense_rerank"},
         )
 
     monkeypatch.setattr(
@@ -6692,12 +6675,10 @@ async def test_enrich_node_messages_exposes_full_callable_tools_without_valid_st
     async def _fake_build_node_context_selection(**kwargs):
         _ = kwargs
         return NodeContextSelectionResult(
-            mode="dense_rerank",
             selected_skill_ids=["tmux"],
             selected_tool_names=["content"],
             candidate_skill_ids=["tmux"],
             candidate_tool_names=["content"],
-            trace={"mode": "dense_rerank"},
         )
 
     monkeypatch.setattr(
@@ -6779,12 +6760,10 @@ async def test_enrich_node_messages_never_injects_memory_retrieval_overlay(
     async def _fake_build_node_context_selection(**kwargs):
         _ = kwargs
         return NodeContextSelectionResult(
-            mode="dense_rerank",
             selected_skill_ids=["tmux"],
             selected_tool_names=["filesystem"],
             candidate_skill_ids=["tmux"],
             candidate_tool_names=["filesystem"],
-            trace={"mode": "dense_rerank"},
         )
 
     monkeypatch.setattr(
@@ -6863,12 +6842,10 @@ async def test_enrich_node_messages_still_applies_selector_when_unified_context_
     async def _fake_build_node_context_selection(**kwargs):
         _ = kwargs
         return NodeContextSelectionResult(
-            mode="dense_rerank",
             selected_skill_ids=["tmux"],
             selected_tool_names=["content"],
             candidate_skill_ids=["tmux"],
             candidate_tool_names=["content"],
-            trace={"mode": "dense_rerank"},
         )
 
     monkeypatch.setattr(
