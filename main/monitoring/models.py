@@ -362,6 +362,15 @@ class TaskModelCallRecord(Model):
     # 这类回包不会回 usage 块，所以三个 token 口径全是 0——没有这个标志，前端只能把
     # 它渲染成一个像"这次没花钱"的真 0，事后也分不出断流与内部 429 重试。
     stream_incomplete: bool = False
+    # 逐跳路由归属（档位、组、升档、限流维度）。哨兵与写侧一致：'' / -1 表示这一跳
+    # 没有租约（前门与辅助车道结构上恒为哨兵），不是"读失败"。
+    route_admission_group: str = ''
+    route_admission_index: int = -1
+    route_served_group: str = ''
+    route_served_index: int = -1
+    route_escalation_count: int = 0
+    route_escalation_reason: str = ''
+    route_throttle_dimensions: str = ''
 
 
 class TaskProjectionRoundRecord(Model):

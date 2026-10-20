@@ -1714,6 +1714,15 @@ class TaskQueryService:
             first_token_ms=_optional_int(payload.get('first_token_ms')),
             thinking_tokens=_optional_int(payload.get('thinking_tokens')),
             stream_incomplete=bool(payload.get('stream_incomplete') or False),
+            # 缺键（本次改造之前的历史行）落哨兵而不是落 0：-1 读得出"这一跳没有租约"，
+            # 0 会被读成"服务的是档位 0"。
+            route_admission_group=str(payload.get('route_admission_group') or '').strip(),
+            route_admission_index=int(payload.get('route_admission_index', -1)),
+            route_served_group=str(payload.get('route_served_group') or '').strip(),
+            route_served_index=int(payload.get('route_served_index', -1)),
+            route_escalation_count=int(payload.get('route_escalation_count') or 0),
+            route_escalation_reason=str(payload.get('route_escalation_reason') or '').strip(),
+            route_throttle_dimensions=str(payload.get('route_throttle_dimensions') or '').strip(),
         )
 
     def _recent_model_calls(self, task_id: str, *, limit: int | None = 50) -> list[TaskModelCallRecord]:

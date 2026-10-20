@@ -8,6 +8,9 @@
    2.9 行/分 ⇒ 不锚定则一整页 34 分钟往后漂）。
 4) `size` 是闸门：夹到 1..200，不给"顺手拉全量账本"留口子（实盘单任务 49,758 行 / 123.9 MB）。
 5) 深页偏移便宜是这条车道成立的前提（实盘 offset=49,458 取 100 行 3.5 ms），这里钉住行为。
+6) 行是**按字段手工重建**的（`_model_call_record`），所以台账里每加一格，这里就得同步加一格，
+   否则数据在库里而页面上没有。逐跳路由归属七格与成员级三键由本文件钉住，历史行缺键时落
+   哨兵 `-1` / `''`（不落 0，0 会被读成"服务的是档位 0"）。
 """
 
 from __future__ import annotations
@@ -137,6 +140,70 @@ def test_size_is_a_gate_and_page_clamps_to_the_last_page(tmp_path: Path) -> None
     assert beyond['size'] == 100 and beyond['page'] == 9 and beyond['total_pages'] == 9
     assert len(beyond['model_calls']) == 100
     assert _indexes(beyond) == list(range(0, 100))
+
+
+def _append_route_tier_row(store: SQLiteTaskStore, index: int) -> None:
+    """一条带租约归属的行：写侧七个键按 `TaskLogService` 的原样形状落库。"""
+    store.append_task_model_call(
+        task_id=TASK_ID,
+        node_id=NODE_ID,
+        created_at='2026-10-01T12:00:00+08:00',
+        payload={
+            'call_index': index,
+            'node_id': NODE_ID,
+            'delta_usage': {},
+            'delta_usage_by_model': [
+                {'model_key': 'deepseek-flash-2', 'group_key': 'flash', 'route_index': 0, 'quota_bucket_index': 1},
+            ],
+            'route_admission_group': 'flash',
+            'route_admission_index': 0,
+            'route_served_group': 'v4',
+            'route_served_index': 1,
+            'route_escalation_count': 1,
+            'route_escalation_reason': 'route_entry',
+            'route_throttle_dimensions': 'tpm_rpm,rps',
+        },
+    )
+
+
+def test_page_carries_the_route_tier_attribution_of_each_hop(tmp_path: Path) -> None:
+    """档位归属必须活过明细页这一层：投影是按字段手工重建的，漏一格就整格读不到。"""
+    store, query_service = _build(tmp_path, calls=1)
+    _append_route_tier_row(store, 1)
+
+    page = query_service.get_task_model_call_page(TASK_ID, page=1, size=100)
+
+    assert page is not None
+    row = page['model_calls'][1]
+    assert row['route_admission_group'] == 'flash'
+    assert row['route_admission_index'] == 0
+    assert row['route_served_group'] == 'v4'
+    assert row['route_served_index'] == 1
+    assert row['route_escalation_count'] == 1
+    assert row['route_escalation_reason'] == 'route_entry'
+    assert row['route_throttle_dimensions'] == 'tpm_rpm,rps'
+    # 成员级三键走 model_validate，本来就是通的；钉在这里是因为它们是同一份归属的另一半
+    member = row['delta_usage_by_model'][0]
+    assert member['group_key'] == 'flash' and member['route_index'] == 0
+    assert member['quota_bucket_index'] == 1
+
+
+def test_page_rows_from_before_the_attribution_land_on_sentinels(tmp_path: Path) -> None:
+    """本次改造之前的历史行缺这七个键：档位读成 -1（没有租约），不能读成 0（档位 0）。"""
+    store, query_service = _build(tmp_path, calls=2)
+
+    page = query_service.get_task_model_call_page(TASK_ID, page=1, size=100)
+
+    assert page is not None
+    assert len(page['model_calls']) == 2
+    for row in page['model_calls']:
+        assert row['route_admission_index'] == -1
+        assert row['route_served_index'] == -1
+        assert row['route_admission_group'] == ''
+        assert row['route_served_group'] == ''
+        assert row['route_escalation_count'] == 0
+        assert row['route_escalation_reason'] == ''
+        assert row['route_throttle_dimensions'] == ''
 
 
 def test_missing_task_returns_none(tmp_path: Path) -> None:

@@ -248,6 +248,7 @@ Heartbeat / cron 不在主 CEO/frontdoor 路径上使用单独的短 `ceo_heartb
 ### 3.20 跨档跳的未命中按台账的档位归属读，不按 worker 日志
 
 - 数据源：`task_model_calls.payload_json` 里逐跳的 `route_admission_group` / `route_admission_index`（这一跳被授到链上哪一格）、`route_served_group` / `route_served_index`（真正把请求发出去时绑的档）、`route_escalation_count` / `route_escalation_reason`（这一跳沿链前进过几次、最后一次为什么）、`route_throttle_dimensions`（这一跳吃过的限流维度）。成员级归属在 `delta_usage_by_model[].route_index` / `.group_key` / `.quota_bucket_index`。负载均衡本体见 `runtime-overview.md`「节点模型路由与准入绑定」。
+- 网页读口：`GET /api/tasks/{task_id}/model-call-page` 每行同名带这七列。这条车道是**按字段手工重建行**的，所以台账再加一格必须同步 `main/monitoring/query_service.py` 里的那一处重建，否则数据在库里而页面上没有；契约由 `tests/resources/test_task_model_call_page_lane.py` 从明细页进口钉住。
 - 哨兵语义：`''` 与 `-1` 表示这一跳**没有租约**。前门车道与辅助车道跑在没有 balancer 的进程里，恒为哨兵；`0` 是合法的链首格号，所以缺省绝不能是 `0`，否则"没有租约"会被读成"落在第一档"。
 - 判读形状：`route_admission_group != route_served_group` 的跳即跨档跳。同档内换成员不算跨档（格号不变），而同一网关下换成员也不换缓存命名空间，所以档位这条轴对缓存的影响只落在跨档那一跳；把两者混在一起数，会把"清单没变、命中掉了"错归给轮换。
 - 为什么必须有这几格：worker 日志会滚掉，而且**升档那一跳不打 `Model route selected`**（它只打 `Model node binding rebound`），所以按 `selected` 行的 `route_index` 统计档位分布会把跨档跳读成 0 —— 这个 0 命中不代表没发生。要用日志交叉核对时，锚点是 `Model route lease released` 的 `route_index=` 与 `escalations=`。
