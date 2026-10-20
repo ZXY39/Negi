@@ -1212,8 +1212,10 @@ def _normalized_completed_continuity_snapshot(payload: Any) -> dict[str, Any] | 
             payload.get("skill_roster_notice_context")
         ),
         # 入参暂存（`reuse_args` 的可复用面）。这份载荷是白名单装配的：不在这儿列出来就
-        # 永远落不了盘，重启后模型填 reuse_args 只会读到"没有可复用入参"。
+        # 永远落不了盘，重启后模型填 reuse_args 只会读到"没有可复用入参"。跳序必须与条目
+        # 同刻存：少了跳序，重启后第一跳就把刚暂存的那份判成过期。
         "tool_arg_stash": normalize_tool_arg_stash(payload.get("tool_arg_stash")),
+        "tool_arg_stash_hop": int(payload.get("tool_arg_stash_hop") or 0),
         "provider_tool_schema_names": _normalized_name_list(payload.get("provider_tool_schema_names")),
         # 钉进头部的静态声明原文与重印代数。同样是白名单装配：不列出来就落不了盘，
         # 于是重启后第一跳按当轮可见集重渲头部，头部一改身后全部前缀重付。

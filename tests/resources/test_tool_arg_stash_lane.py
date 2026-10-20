@@ -17,8 +17,13 @@ from pathlib import Path
 
 from g3ku.runtime.tool_arg_stash import (
     ARGS_FIELD,
+    STAGED_AT_FIELD,
     STASH_CONTAINER_KEY,
+    STASH_HOP_KEY,
     args_digest,
+    build_carrier,
+    bump_hop,
+    carrier_container,
     consume_entries,
     drop_scope,
     drop_staged_after,
@@ -26,6 +31,7 @@ from g3ku.runtime.tool_arg_stash import (
     normalize_tool_arg_stash,
     peek_entries,
     read_container,
+    read_hop,
     session_scope_key,
     stage_args,
     staged_count,
@@ -213,3 +219,31 @@ def test_normalize_accepts_bare_container_and_wrapped_forms() -> None:
     assert wrapped == bare
     assert normalize_tool_arg_stash(None) == {}
     assert normalize_tool_arg_stash({"tool_arg_stash": "not-a-dict"}) == {}
+
+
+# ---------------------------------------------------------------------------
+# 跳序：严格一跳的时钟，必须与条目同刻落盘
+# ---------------------------------------------------------------------------
+
+
+def test_carrier_keeps_container_and_hop_together() -> None:
+    container = _stage({}, {"path": "/abs/a"}, hop=1)
+    carrier = build_carrier(container, hop=1)
+    assert carrier_container(carrier) == container
+    assert read_hop(carrier) == 1
+    bumped = bump_hop(carrier)
+    assert read_hop(bumped) == 2
+    # 空容器不占字节，但**跳序必须留着**：时钟一丢，下一条暂存就永远等不到自己那一跳。
+    assert build_carrier({}, hop=4) == {STASH_HOP_KEY: 4}
+    assert build_carrier({}, hop=0) == {}
+
+
+def test_rewound_session_keeps_the_clock_monotonic() -> None:
+    """回截历史不后退时钟：否则被截断那跳之前暂存的条目会复活。"""
+    carrier = build_carrier({SCOPE: [{"args": {"path": "/old"}, "staged_hop": 1, STAGED_AT_FIELD: "2026-10-20T09:00:00+08:00"}]}, hop=3)
+    rewound = build_carrier(
+        drop_staged_after(carrier_container(carrier), cutoff_iso="2026-10-20T08:00:00+08:00"),
+        hop=read_hop(carrier),
+    )
+    assert read_hop(rewound) == 3
+    assert carrier_container(rewound) == {}

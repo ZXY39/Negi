@@ -76,6 +76,59 @@ def args_digest(args: Any) -> str:
     return f"arg:{hashlib.sha256(encoded).hexdigest()[:16]}"
 
 
+STASH_HOP_KEY = "tool_arg_stash_hop"
+
+
+def carrier_container(carrier: Any) -> dict[str, list[dict[str, Any]]]:
+    """从载体取容器（归一化后的）。
+
+    两种形态都接受：规范载体（容器挂在 `tool_arg_stash` 键下）与裸容器（旧版侧车直接就是
+    scope 表）——读侧宽进，写侧只出规范形态。
+    """
+    if isinstance(carrier, dict) and STASH_CONTAINER_KEY in carrier:
+        return normalize_tool_arg_stash(carrier.get(STASH_CONTAINER_KEY))
+    return normalize_tool_arg_stash(carrier)
+
+
+def build_carrier(container: Any, *, hop: int = 0) -> dict[str, Any]:
+    """载体 = 容器 + 跳序，两者同刻落盘。空容器不写键（省字节，也省"看着有其实是空"）。
+
+    跳序**只要非零就保留**，哪怕容器已经空了：条目清空后如果连时钟一起丢，下一次推进就从
+    0 起，而新条目是按旧时钟记的 hop 落的——两者错配之后，那份暂存永远等不到属于自己的
+    那一跳，`reuse_args` 就永久读不到入参。一个整数的字节换这条不变量，值。
+    """
+    normalized = normalize_tool_arg_stash(container)
+    carrier: dict[str, Any] = {}
+    if normalized:
+        carrier[STASH_CONTAINER_KEY] = normalized
+    hop_value = int(hop or 0)
+    if hop_value:
+        carrier[STASH_HOP_KEY] = hop_value
+    return carrier
+
+
+def read_hop(carrier: Any) -> int:
+    """当前跳序。载体里没有就当 0——条目落盘时记的 hop 与它同源自同一份载体。"""
+    if not isinstance(carrier, dict):
+        return 0
+    try:
+        return int(carrier.get(STASH_HOP_KEY) or 0)
+    except (TypeError, ValueError):
+        return 0
+
+
+def bump_hop(carrier: Any) -> dict[str, Any]:
+    """推进跳序（严格一跳的时钟）。
+
+    调用方只在**载体里还有暂存条目**时推进：没有条目就没有要老化的东西，不必每跳多写一次
+    节点行。推进必须与条目写回同一次落盘——分两次写的话，重启后 hop 比条目新，暂存会被判成
+    "还没到期"或"已经过期"两种都不对的样子。
+    """
+    next_carrier = dict(carrier) if isinstance(carrier, dict) else {}
+    next_carrier[STASH_HOP_KEY] = read_hop(next_carrier) + 1
+    return next_carrier
+
+
 def normalize_tool_arg_stash(payload: Any) -> dict[str, Any]:
     """持久化入口的形状闸门：两条车道的载体都先过这里再落盘。
 
@@ -337,7 +390,11 @@ __all__ = [
     "STAGED_AT_FIELD",
     "STAGED_HOP_FIELD",
     "STASH_CONTAINER_KEY",
+    "STASH_HOP_KEY",
     "args_digest",
+    "bump_hop",
+    "build_carrier",
+    "carrier_container",
     "consume_entries",
     "drop_scope",
     "drop_staged_after",
@@ -346,6 +403,7 @@ __all__ = [
     "normalize_tool_arg_stash",
     "peek_entries",
     "read_container",
+    "read_hop",
     "session_scope_key",
     "scope_key_has_shape",
     "scope_tool_id",
