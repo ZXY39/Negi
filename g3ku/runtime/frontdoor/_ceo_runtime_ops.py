@@ -75,6 +75,7 @@ from g3ku.runtime.kept_contract_snapshot import (
     KEPT_TOOL_CONTEXTS_FIELD,
     keep_closure_fields,
     normalize_kept_skill_contexts,
+    normalize_kept_tool_contexts,
     resolve_kept_contracts,
 )
 from g3ku.runtime.message_token_estimation import estimate_message_tokens
@@ -109,7 +110,6 @@ from g3ku.runtime.stage_prompt_compaction import (
     strip_stage_block_echo,
     summarized_stage_ids,
 )
-from g3ku.runtime.kept_contract_snapshot import normalize_kept_tool_contexts
 from g3ku.runtime.tool_context_presence import (
     contract_presence_index,
     partition_contract_presence,

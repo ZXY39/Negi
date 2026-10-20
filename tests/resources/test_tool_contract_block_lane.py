@@ -22,6 +22,13 @@ from g3ku.content.navigation import (
     _should_keep_inline_tool_result,
 )
 from g3ku.runtime.kept_contract_snapshot import normalize_kept_tool_contexts
+from g3ku.runtime.tool_context_presence import (
+    contract_presence,
+    contract_presence_index,
+    loader_payload,
+    partition_contract_presence,
+    stale_rev_tool_ids,
+)
 from g3ku.runtime.tool_contract_block import (
     MARKER_CLOSE,
     MARKER_NAME,
@@ -31,13 +38,6 @@ from g3ku.runtime.tool_contract_block import (
     contract_text_length,
     render_tool_contract,
     render_tool_contract_block,
-)
-from g3ku.runtime.tool_context_presence import (
-    contract_presence,
-    contract_presence_index,
-    loader_payload,
-    partition_contract_presence,
-    stale_rev_tool_ids,
 )
 
 TOOL_ID = "filesystem_edit"

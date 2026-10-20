@@ -39,13 +39,13 @@ from g3ku.runtime.kept_contract_snapshot import (
     resolve_kept_contracts,
 )
 from g3ku.runtime.stage_prompt_compaction import KEPT_CONTRACT_HEADING, completed_stage_blocks
-from g3ku.runtime.tool_contract_block import render_tool_contract_block
 from g3ku.runtime.tool_context_presence import (
     contract_presence,
     contract_presence_index,
     loader_contract_index,
     partition_contract_presence,
 )
+from g3ku.runtime.tool_contract_block import render_tool_contract_block
 from g3ku.runtime.tool_error_guidance import availability_hint
 from g3ku.runtime.web_ceo_sessions import _normalized_completed_continuity_snapshot
 from main.models import normalize_execution_stage_metadata
