@@ -700,6 +700,9 @@ class MainRuntimeService:
         react_loop._model_visible_tool_schema_selector = self._select_model_visible_tool_schema_payload
         react_loop._tool_context_hydration_promoter = self._promote_tool_context_hydration
         react_loop._tool_contract_presence_revoker = self.revoke_contract_absent_node_hydration
+        # 冲动调用投递与入参暂存：节点道只有这条循环能拿到 service，载体（node.metadata）
+        # 也在这里读写，跳序与时序才不会分叉。
+        react_loop._tool_impulse_service = self
         self._pending_task_delete_confirmations: dict[str, dict[str, Any]] = {}
         self._react_loop = react_loop
         initial_execution_routes = self._initial_model_routes(app_config, 'execution')
@@ -8111,6 +8114,52 @@ class MainRuntimeService:
             payload['tool_context_fingerprint'] = fingerprint
         return payload
 
+    def node_stash_carrier(self, node_id: str) -> dict[str, Any]:
+        """节点载体的读口：跳序与条目都从 `node.metadata` 里来（整份 JSON 落库）。"""
+        node = self.store.get_node(str(node_id or '').strip()) if node_id else None
+        metadata = getattr(node, 'metadata', None)
+        return tool_arg_stash.build_carrier(
+            tool_arg_stash.carrier_container(metadata if isinstance(metadata, dict) else {}),
+            hop=tool_arg_stash.read_hop(metadata if isinstance(metadata, dict) else {}),
+        )
+
+    def advance_node_stash_hop(self, node_id: str) -> dict[str, Any]:
+        """每跳推进一次跳序，但**只在还有暂存条目时**推进并落盘。
+
+        没条目就没东西要老化，白写一次节点行；有时不推进，条目就永远停在"上一跳"之外。
+        """
+        carrier = self.node_stash_carrier(node_id)
+        if not tool_arg_stash.carrier_container(carrier):
+            return carrier
+        return self.persist_node_stash_carrier(node_id, tool_arg_stash.bump_hop(carrier))
+
+    def persist_node_stash_carrier(self, node_id: str, carrier: Any) -> dict[str, Any]:
+        """写回载体。按 node_id 重读存储再改，避免把循环开局那份快照的其它键覆盖掉。"""
+        normalized_node_id = str(node_id or '').strip()
+        if not normalized_node_id:
+            return {}
+        next_carrier = tool_arg_stash.build_carrier(
+            tool_arg_stash.carrier_container(carrier),
+            hop=tool_arg_stash.read_hop(carrier),
+        )
+
+        def _mutate(record: Any) -> Any:
+            metadata = dict(getattr(record, 'metadata', None) or {})
+            metadata.pop(tool_arg_stash.STASH_CONTAINER_KEY, None)
+            metadata.pop(tool_arg_stash.STASH_HOP_KEY, None)
+            metadata.update(next_carrier)
+            record.metadata = metadata
+            return record
+
+        updated = self.store.update_node(normalized_node_id, _mutate)
+        if updated is None:
+            return {}
+        metadata = getattr(updated, 'metadata', None)
+        return tool_arg_stash.build_carrier(
+            tool_arg_stash.carrier_container(metadata if isinstance(metadata, dict) else {}),
+            hop=tool_arg_stash.read_hop(metadata if isinstance(metadata, dict) else {}),
+        )
+
     def deliver_impulse_contract(
         self,
         *,
@@ -8213,27 +8262,37 @@ class MainRuntimeService:
                 'executed': False,
             }
 
-        next_container, _entry, staged_count = tool_arg_stash.stage_args(
-            tool_arg_stash.carrier_container(carrier),
-            scope_key=scope_key,
-            args=arguments,
-            fingerprint=fingerprint,
-            staged_at=now_iso(),
-            staged_hop=hop,
-        )
+        pending_container = tool_arg_stash.carrier_container(carrier)
+        existing_digests = {
+            str(entry.get(tool_arg_stash.DIGEST_FIELD) or '').strip()
+            for entry in tool_arg_stash.peek_entries(pending_container, scope_key=scope_key, current_hop=hop + 1)
+        }
+        # 同一跳里签名完全相同的重复调用只入一条（D5）：否则 `reuse_args=true` 会把同一份
+        # 入参执行两遍，而模型看到的两份回执是分开的两条消息，它没有理由知道要合并。
+        if tool_arg_stash.args_digest(arguments) not in existing_digests:
+            pending_container, _entry, staged_count = tool_arg_stash.stage_args(
+                pending_container,
+                scope_key=scope_key,
+                args=arguments,
+                fingerprint=fingerprint,
+                staged_at=now_iso(),
+                staged_hop=hop,
+            )
+        else:
+            staged_count = tool_arg_stash.staged_count(pending_container, scope_key=scope_key)
         receipt = impulse_receipt(
             tool_name=normalized_tool,
             contract_block=block,
             outcome=IMPULSE_STAGED,
             staged_count=staged_count,
-            targets_text=render_staged_targets(next_container, scope_key=scope_key, tool_name=normalized_tool),
+            targets_text=render_staged_targets(pending_container, scope_key=scope_key, tool_name=normalized_tool),
             batch_position=batch_position,
             batch_total=batch_total,
         )
         return {
             'outcome': IMPULSE_STAGED,
             'content': receipt['content'],
-            'carrier': tool_arg_stash.build_carrier(next_container, hop=hop),
+            'carrier': tool_arg_stash.build_carrier(pending_container, hop=hop),
             'staged_count': staged_count,
             'fingerprint': fingerprint,
             'executed': False,

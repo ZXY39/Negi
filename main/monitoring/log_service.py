@@ -28,6 +28,7 @@ from g3ku.runtime.kept_contract_snapshot import (
     complete_keep_snapshot,
     keep_closure_fields,
     normalize_kept_skill_contexts,
+    normalize_kept_tool_contexts,
 )
 from g3ku.runtime.stage_prompt_compaction import (
     STAGE_CLOSURE_INACTIVE_NOTES,
@@ -36,7 +37,6 @@ from g3ku.runtime.stage_prompt_compaction import (
     stage_archive_owner,
     stage_record_dict,
 )
-from g3ku.runtime.kept_contract_snapshot import normalize_kept_tool_contexts
 from main.ids import new_stage_id, new_stage_round_id
 from main.models import (
     FAILURE_CLASS_BUSINESS_UNPASSED,
@@ -3616,6 +3616,73 @@ class TaskLogService:
             self._sync_execution_stage_frame_locked(task_id=task_id, node_id=node_id, state=next_state)
             self.refresh_task_view(task_id, mark_unread=True)
             return next_round.model_dump(mode='json')
+
+    def refund_execution_stage_round(self, task_id: str, node_id: str, round_id: str) -> bool:
+        """退还一次回合预算：那一轮里没有任何调用真的执行过（D3）。
+
+        判定放在调用方（它才知道每个调用的结果），这里只做记账纠正。不退还的话，模型为
+        "先拿契约"这一跳付掉一轮预算——那是机制自己的代价被算成模型的错，而契约在场时
+        同一批调用本就不占预算。
+        """
+        target_round_id = str(round_id or '').strip()
+        if not target_round_id:
+            return False
+        with self._task_lock(task_id):
+            task = self._require_task(task_id)
+            node = self._store.get_node(node_id)
+            if node is None:
+                return False
+            state = self._execution_stage_state(node)
+            active = self._active_execution_stage(state)
+            if active is None:
+                return False
+            target = next(
+                (
+                    item
+                    for item in list(active.rounds or [])
+                    if str(item.get('round_id') if isinstance(item, dict) else getattr(item, 'round_id', '')) == target_round_id
+                ),
+                None,
+            )
+            if target is None or not bool(
+                target.get('budget_counted') if isinstance(target, dict) else getattr(target, 'budget_counted', False)
+            ):
+                return False
+            stages: list[ExecutionStageRecord] = []
+            for stage in list(state.stages or []):
+                current = stage
+                if str(stage.stage_id or '').strip() == str(active.stage_id or '').strip():
+                    rounds = [
+                        item.model_copy(update={'budget_counted': False})
+                        if str(getattr(item, 'round_id', '') or '') == target_round_id
+                        else item
+                        for item in list(stage.rounds or [])
+                    ]
+                    current = stage.model_copy(
+                        update={
+                            'rounds': rounds,
+                            'tool_rounds_used': max(0, int(stage.tool_rounds_used or 0) - 1),
+                        }
+                    )
+                stages.append(current)
+            refunded = next(
+                (item for item in stages if str(item.stage_id or '').strip() == str(active.stage_id or '').strip()),
+                None,
+            )
+            next_state = ExecutionStageState(
+                active_stage_id=str(state.active_stage_id or '').strip(),
+                transition_required=bool(
+                    refunded is not None
+                    and int(refunded.tool_round_budget or 0) > 0
+                    and int(refunded.tool_rounds_used or 0) >= int(refunded.tool_round_budget or 0)
+                ),
+                stages=stages,
+                pending_orphan_rounds=list(state.pending_orphan_rounds or []),
+            )
+            self._persist_execution_stage_state_locked(task=task, node_id=node_id, state=next_state)
+            self._sync_execution_stage_frame_locked(task_id=task_id, node_id=node_id, state=next_state)
+            self.refresh_task_view(task_id, mark_unread=True)
+            return True
 
     def mark_execution_stage_contains_spawn(self, task_id: str, node_id: str) -> dict[str, Any] | None:
         with self._task_lock(task_id):

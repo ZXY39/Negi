@@ -104,6 +104,7 @@ from g3ku.runtime.stage_prompt_compaction import (
 from g3ku.runtime.stage_prompt_compaction import (
     stage_transition_signature as _shared_stage_transition_signature,
 )
+from g3ku.runtime.tool_arg_stash import node_scope_key as _stash_node_scope_key
 from g3ku.runtime.tool_context_presence import contract_presence_index
 from g3ku.runtime.tool_error_guidance import (
     append_parameter_error_guidance,
@@ -117,7 +118,9 @@ from g3ku.runtime.tool_history import (
     iter_compaction_atomic_groups,
     truncate_group_head_tail,
 )
+from g3ku.runtime.tool_impulse import IMPULSE_INVALID, IMPULSE_REJECT
 from g3ku.runtime.tool_result_status import is_error_like_tool_result
+from g3ku.runtime.tool_visibility import NODE_FIXED_BUILTIN_TOOL_NAMES
 from g3ku.runtime.tool_watchdog import (
     actor_role_allows_watchdog,
     resolve_effective_tool_timeout,
@@ -535,6 +538,18 @@ class ReActToolLoop:
                 runtime_context=runtime_context,
                 request_messages=model_messages,
             )
+            # 每跳只算一次在场索引（D12），下传给这一跳的所有消费点（执行准入、冲动投递、
+            # 观测读数）。各消费点各自重算会造出"同一轮里两个答案"，那正是本次要消灭的漂移。
+            contract_presence = contract_presence_index(request_messages=model_messages)
+            runtime_context['tool_contract_presence'] = contract_presence
+            # 暂存时钟：只在还留着条目时推进并落盘。不推进，条目就永远等不到自己那一跳；
+            # 每跳都推则是在没有东西可老化的时候白写一次节点行。
+            runtime_context['tool_arg_stash_carrier'] = self._advance_node_stash_hop(node)
+            # 同一跳内每个工具只发一份完整契约块（D4）；这里建的那份表被本跳所有调用共享
+            # （`_call_runtime_context` 是浅拷贝， mutate 对同批可见）。
+            runtime_context['impulse_delivered_tools'] = {}
+            # 校验通过、只交契约的调用 id：回合预算要退还它们（D3），所以先记下来。
+            runtime_context['impulse_staged_call_ids'] = set()
             stage_gate = self._execution_stage_gate(
                 task_id=task.task_id,
                 node_id=node.node_id,
@@ -1599,6 +1614,10 @@ class ReActToolLoop:
                     signature = f"{tool_name}:{json.dumps(arguments, ensure_ascii=False, sort_keys=True)}"
                     if tool_name in self._CONTROL_TOOL_NAMES or tool_name in {STAGE_TOOL_NAME, FINAL_RESULT_TOOL_NAME}:
                         continue
+                    # 未水合工具的调用这一跳不执行（只交契约+暂存），不该进重复调用熔断：
+                    # 撞两次同样的"先给契约"被软拒，等于把机制自己的代价算成模型的错（D3）。
+                    if self._impulse_contract_applicable(tool_name=tool_name, runtime_context=runtime_context):
+                        continue
                     repeated_signature = breaker.register(signature)
                     if repeated_signature:
                         duplicate_call_violations.append(
@@ -1717,6 +1736,13 @@ class ReActToolLoop:
                     },
                     prior_overflow_signatures=self._overflowed_search_signatures(message_history),
                     max_parallel_tool_calls=max_parallel_tool_calls,
+                )
+                self._refund_stage_round_for_non_executed_calls(
+                    task_id=task.task_id,
+                    node_id=node.node_id,
+                    active_round_payload=active_round_payload,
+                    response_tool_calls=response_tool_calls,
+                    runtime_context=runtime_context,
                 )
                 self._promote_tool_context_hydration_after_results(
                     task_id=task.task_id,
@@ -4404,6 +4430,14 @@ class ReActToolLoop:
             )
         )
         current_frame = self._runtime_frame(str(task.task_id or ''), str(node.node_id or '')) or {}
+        # 同批每个工具各调了几次：冲动回执要说"第 i / n 份"，n 只能从这一批的调用里数出来
+        # （D4/C6）。放到 runtime_context 里，逐条调用共享同一份计数。
+        impulse_batch_totals: dict[str, int] = {}
+        for call in list(response_tool_calls or []):
+            call_name = str(getattr(call, 'name', '') or '').strip()
+            if call_name:
+                impulse_batch_totals[call_name] = impulse_batch_totals.get(call_name, 0) + 1
+        runtime_context['impulse_batch_totals'] = impulse_batch_totals
         candidate_tool_names = self._normalized_name_list(
             list(runtime_context.get('candidate_tool_names') or current_frame.get('candidate_tool_names') or [])
         )
@@ -5079,7 +5113,161 @@ class ReActToolLoop:
         source_kind = str(handle.get('source_kind') or result.get('source_kind') or '').strip().lower()
         return source_kind == _STAGE_HISTORY_ARCHIVE_SOURCE_KIND
 
+    def _refund_stage_round_for_non_executed_calls(
+        self,
+        *,
+        task_id: str,
+        node_id: str,
+        active_round_payload: dict[str, Any] | None,
+        response_tool_calls: list[Any],
+        runtime_context: dict[str, Any],
+    ) -> None:
+        """这一轮的调用**一个都没执行**（只交契约+暂存）⇒ 退还那一轮预算（D3）。
+
+        只要有一个真执行过的调用混在同一轮里，就不退——预算度量的是"模型干了活"，
+        不是"模型发了几条消息"。
+        """
+        round_id = str((active_round_payload or {}).get('round_id') or '').strip()
+        staged_ids = runtime_context.get('impulse_staged_call_ids')
+        if not round_id or not isinstance(staged_ids, set) or not staged_ids:
+            return
+        if not bool((active_round_payload or {}).get('budget_counted', True)):
+            return
+        visible_calls = [
+            call for call in list(response_tool_calls or []) if str(getattr(call, 'name', '') or '').strip()
+        ]
+        if not visible_calls:
+            return
+        if not all(str(getattr(call, 'id', '') or '').strip() in staged_ids for call in visible_calls):
+            return
+        refund = getattr(self._log_service, 'refund_execution_stage_round', None)
+        if not callable(refund):
+            return
+        try:
+            refund(str(task_id or ''), str(node_id or ''), round_id)
+        except Exception:
+            return
+
+    # 循环自己的跳级状态：判据索引、暂存载体与同批计数。它们只服务于准入与记账，
+    # 不进工具可见的 `__g3ku_runtime`——在场索引随契约数量增长，逐次调用都带一份既没用
+    # 也压不动的字典，等于把上下文预算的账算到每个工具头上。
+    _LOOP_INTERNAL_RUNTIME_KEYS = frozenset(
+        {
+            'tool_contract_presence',
+            'tool_arg_stash_carrier',
+            'impulse_delivered_tools',
+            'impulse_staged_call_ids',
+            'impulse_batch_totals',
+        }
+    )
+
+    def _tool_facing_runtime_context(self, runtime_context: dict[str, Any]) -> dict[str, Any]:
+        return {
+            key: value
+            for key, value in dict(runtime_context or {}).items()
+            if key not in self._LOOP_INTERNAL_RUNTIME_KEYS
+        }
+
+    def _advance_node_stash_hop(self, node: Any) -> dict[str, Any]:
+        service = getattr(self, '_tool_impulse_service', None)
+        advance = getattr(service, 'advance_node_stash_hop', None) if service is not None else None
+        if not callable(advance):
+            return {}
+        try:
+            return dict(advance(str(getattr(node, 'node_id', '') or '').strip()) or {})
+        except Exception:
+            return {}
+
+    def _impulse_contract_applicable(self, *, tool_name: str, runtime_context: dict[str, Any]) -> bool:
+        """这一跳是不是"授权了但契约没在场"的调用。
+
+        常驻内置不进判据（D13）；块已经在上下文里就不是冲动调用。判据视图缺失
+        （`tool_contract_presence` 没被写过，例如旁路调用）时**不**走冲动路径——
+        按状态豁免闸门却在上下文其实带着契约时把调用降级成"只交契约"，等于让模型
+        白多等一跳。
+        """
+        name = str(tool_name or '').strip()
+        if not name or name in NODE_FIXED_BUILTIN_TOOL_NAMES:
+            return False
+        presence = runtime_context.get('tool_contract_presence')
+        if not isinstance(presence, dict):
+            return False
+        return name not in presence
+
+    async def _impulse_contract_content(
+        self,
+        *,
+        tools: dict[str, Any],
+        tool_name: str,
+        arguments: dict[str, Any],
+        runtime_context: dict[str, Any],
+    ) -> str | None:
+        """交契约并暂存入参；返回 None 表示"这一跳按原路径走"（已水合、或不是工具调用问题）。
+
+        投递本身抛异常时**不放行执行**：未水合还让它跑过去，就正好破掉本次改造要立的
+        不变量（执行发生在契约对模型可见之后）。
+        """
+        service = getattr(self, '_tool_impulse_service', None)
+        deliver = getattr(service, 'deliver_impulse_contract', None) if service is not None else None
+        if not callable(deliver) or not self._impulse_contract_applicable(
+            tool_name=tool_name, runtime_context=runtime_context
+        ):
+            return None
+        name = str(tool_name or '').strip()
+        task_id = str(runtime_context.get('task_id') or '').strip()
+        node_id = str(runtime_context.get('node_id') or '').strip()
+        if not task_id or not node_id:
+            return None
+        delivered = runtime_context.get('impulse_delivered_tools')
+        if not isinstance(delivered, dict):
+            delivered = {}
+            runtime_context['impulse_delivered_tools'] = delivered
+        position = int(delivered.get(name, 0) or 0) + 1
+        totals = runtime_context.get('impulse_batch_totals')
+        batch_total = int(totals.get(name, position) or position) if isinstance(totals, dict) else position
+        try:
+            result = deliver(
+                actor_role=str(runtime_context.get('actor_role') or 'execution').strip() or 'execution',
+                session_id=str(runtime_context.get('session_key') or runtime_context.get('session_id') or 'web:shared').strip(),
+                tool_id=name,
+                arguments=dict(arguments or {}),
+                scope_key=_stash_node_scope_key(task_id, node_id, name),
+                carrier=runtime_context.get('tool_arg_stash_carrier') or {},
+                batch_position=position,
+                batch_total=max(position, batch_total),
+                runtime_context=runtime_context,
+            )
+        except Exception as exc:
+            return f'Error: could not deliver the contract for {name}: {describe_exception(exc)}'
+        if not isinstance(result, dict):
+            return None
+        if str(result.get('outcome') or '').strip() == IMPULSE_REJECT:
+            return None
+        persist = getattr(service, 'persist_node_stash_carrier', None)
+        if callable(persist):
+            try:
+                runtime_context['tool_arg_stash_carrier'] = persist(node_id, result.get('carrier')) or {}
+            except Exception:
+                pass
+        delivered[name] = position
+        if str(result.get('outcome') or '').strip() != IMPULSE_INVALID:
+            staged_ids = runtime_context.get('impulse_staged_call_ids')
+            call_id = str(runtime_context.get('current_tool_call_id') or '').strip()
+            if isinstance(staged_ids, set) and call_id:
+                staged_ids.add(call_id)
+        return str(result.get('content') or '').strip() or None
+
     async def _execute_tool_raw(self, *, tools: dict[str, Tool], tool_name: str, arguments: dict[str, Any], runtime_context: dict[str, Any]) -> Any:
+        # 契约不在场而名字已授权：这一跳**不执行**，交契约 + 暂存入参（D3）。排在阶段闸门
+        # 之前，因为这条豁免是按状态而不是按名字——闸门今天会把"没开阶段就调它"先拒掉。
+        impulse_content = await self._impulse_contract_content(
+            tools=tools,
+            tool_name=tool_name,
+            arguments=arguments,
+            runtime_context=runtime_context,
+        )
+        if impulse_content is not None:
+            return impulse_content
         stage_gate_error = self._execution_tool_gate_error(tool_name=tool_name, runtime_context=runtime_context)
         if stage_gate_error:
             return f'Error: {stage_gate_error}'
@@ -5123,7 +5311,7 @@ class ReActToolLoop:
         execute_kwargs = self._normalize_tool_call_arguments(arguments)
         runtime_param_name = self._runtime_context_parameter_name(tool)
         if runtime_param_name is not None:
-            execute_kwargs[runtime_param_name] = runtime_context
+            execute_kwargs[runtime_param_name] = self._tool_facing_runtime_context(runtime_context)
         # 统一 timeout 合同：显式传参 > 全局默认（无上限）。自持工具（持有子进程/
         # 网络会话，需要结构化收尾）自己消费该值；豁免工具（如 spawn_child_nodes、
         # wait/stop_tool_execution）不套任何外层时限，仅可经任务级取消链中断；
