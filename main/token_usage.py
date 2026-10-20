@@ -78,10 +78,33 @@ def merge_token_usage_by_model(records: Iterable[object], *, tracked: bool | Non
                 calls_with_usage=summary.calls_with_usage,
                 calls_without_usage=summary.calls_without_usage,
                 is_partial=summary.is_partial,
+                # 负载均衡归属是**成员身份**，不是计数：同一颗成员在这一跳里被试多次也只
+                # 属于同一个组/同一格，所以取首个非哨兵值，不求和也不平均。整组都是哨兵
+                # 就是"这一发没有租约"（前门/辅助车道），不要拿 0 去填。
+                route_index=_first_declared(items, 'route_index', -1),
+                group_key=_first_declared(items, 'group_key', ''),
+                quota_bucket_index=_first_declared(items, 'quota_bucket_index', -1),
             )
         )
     merged.sort(key=lambda item: (-known_total_tokens(item), str(getattr(item, 'model_key', '') or '')))
     return merged
+
+
+def _first_declared(items: list[object], field_name: str, sentinel):
+    """取第一个不等于哨兵的值；全为哨兵则返回哨兵。"""
+    for item in items:
+        value = getattr(item, field_name, sentinel)
+        if value != sentinel:
+            return value
+    return sentinel
+
+
+def _as_slot(value: object) -> int:
+    """链上格号/桶序号：非数值或负值收敛成哨兵 -1（= 没有租约，不是第 0 格）。"""
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return -1
+    numeric = int(value)
+    return numeric if numeric >= 0 else -1
 
 
 def build_token_usage_from_attempts(attempts: Iterable[LLMModelAttempt], *, tracked: bool):
@@ -106,6 +129,9 @@ def build_token_usage_from_attempts(attempts: Iterable[LLMModelAttempt], *, trac
                 calls_with_usage=1 if has_usage else 0,
                 calls_without_usage=0 if has_usage else 1,
                 is_partial=not has_usage,
+                route_index=_as_slot(getattr(attempt, 'route_index', -1)),
+                group_key=str(getattr(attempt, 'group_key', '') or '').strip(),
+                quota_bucket_index=_as_slot(getattr(attempt, 'quota_bucket_index', -1)),
             )
         )
     merged = merge_token_usage_by_model(records, tracked=True)

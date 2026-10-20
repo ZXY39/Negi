@@ -24,6 +24,8 @@ from collections import deque
 from dataclasses import dataclass, field
 from typing import Any, Callable, Protocol
 
+from loguru import logger
+
 from g3ku.providers.fallback import is_retryable_model_error
 from main.runtime.model_route import (
     LEASE_OUTCOME_SUCCESS,
@@ -55,6 +57,10 @@ QUOTA_BUCKET_CACHE_TTL_SECONDS = 60.0
 
 THROTTLE_DIMENSION_RPM = "rpm"
 THROTTLE_DIMENSION_TPM = "tpm"
+# 上游把两个维度写在同一句话里（实测文案 `inference exceeds tpm/rpm limit`）。它既不是
+# 纯 rpm 也不是纯 tpm，按"两者之一"处理：等待时长取更保守的那档，所以必须单独成档，
+# 否则判定顺序里 rpm 先命中，复合文案会被静默归成 rpm（今日实测这类 623 行）。
+THROTTLE_DIMENSION_TPM_RPM = "tpm_rpm"
 THROTTLE_DIMENSION_RPS = "rps"
 THROTTLE_DIMENSION_TOKEN = "token"
 THROTTLE_DIMENSION_UNKNOWN = "unknown"
@@ -83,6 +89,8 @@ def classify_throttle_dimension(error_text: str) -> str:
     `is_request_shape_error` 的同款注释）。
     """
     lowered = str(error_text or "").lower()
+    if "rpm" in lowered and "tpm" in lowered:
+        return THROTTLE_DIMENSION_TPM_RPM
     if "rpm" in lowered:
         return THROTTLE_DIMENSION_RPM
     if "tpm" in lowered:
@@ -158,6 +166,30 @@ class _MemberMetrics:
         }
 
 
+def find_group_drift(groups: dict[str, ResolvedLoadBalanceGroup]) -> list[str]:
+    """组表自不自洽：注册用的键必须等于组自带的 group_key，成员不能同时属于两个组。
+
+    返回可直接打印的描述列表（空 = 自洽）。这两条正是"档位归因"的地基：日志与台账里的
+    `group=` 来自组对象，而调用方是按字典键找到它的，两者一旦错位，授予的成员就和打印的
+    组名不是同一个东西，而今天没有任何一处会注意到这件事。
+    """
+    findings: list[str] = []
+    owner_by_member: dict[str, str] = {}
+    for group_key, group in dict(groups or {}).items():
+        declared_key = str(getattr(group, "group_key", "") or "").strip()
+        if declared_key and declared_key != str(group_key or "").strip():
+            findings.append(f"key={group_key} declares group={declared_key}")
+        for member in list(getattr(group, "members", []) or []):
+            model_key = str(getattr(member, "model_key", "") or "").strip()
+            if not model_key:
+                continue
+            previous = owner_by_member.get(model_key)
+            if previous is not None and previous != str(group_key):
+                findings.append(f"member={model_key} owned by {previous} and {group_key}")
+            owner_by_member[model_key] = str(group_key)
+    return findings
+
+
 class ModelLoadBalancer:
     def __init__(
         self,
@@ -178,6 +210,7 @@ class ModelLoadBalancer:
         self._members: dict[str, _MemberState] = {}
         self._bindings: dict[str, _NodeBinding] = {}
         self._quota_bucket_cache: dict[str, tuple[float, list[str]]] = {}
+        self._group_drift_findings: list[str] = []
 
     # ------------------------------------------------------------------ 配置
 
@@ -189,7 +222,19 @@ class ModelLoadBalancer:
         描述的是上游，与本地配置是否改过无关，所以配置刷新本身不清任何观测。
         """
         with self._lock:
+            previous_findings = list(self._group_drift_findings)
             self._groups = dict(groups or {})
+            self._group_drift_findings = find_group_drift(self._groups)
+            if self._group_drift_findings and self._group_drift_findings != previous_findings:
+                # 组表与自身声明不一致：注册方（route plan）给的键、或成员被两个组同时认领。
+                # 现网实测过这种形态——准入行打印 group=v4 而授予的成员属于另一个组，且
+                # 一直到重启才消失。让它不可能静默：可数、可告警，档位归因才不会建立在
+                # 一个没人知道的错位上。配置会周期性重刷，所以只在漂移集合变化时打一行。
+                logger.warning(
+                    "Model route group drift: {} finding(s): {}",
+                    len(self._group_drift_findings),
+                    "; ".join(self._group_drift_findings[:6]),
+                )
             self._config_revision = int(config_revision or 0)
             self._quota_bucket_cache.clear()
             live_members = {
@@ -562,6 +607,8 @@ class ModelLoadBalancer:
                 }
             return {
                 "config_revision": int(self._config_revision),
+                "group_drift_count": len(self._group_drift_findings),
+                "group_drift_findings": list(self._group_drift_findings[:6]),
                 "groups": groups_payload,
                 "node_bindings": [
                     {
@@ -612,6 +659,11 @@ class ModelLoadBalancer:
             model_key=str(model_key),
             key_index=int(getattr(permit, "key_index", 0) or 0),
             quota_bucket_key=self._primary_bucket(model_key),
+            # 桶序号必须在**整组**成员上算：`_bucket_index_map` 是按传入列表首次出现的桶
+            # 编号的，只丢一颗成员进去会恒为 0——一个恒 0 的字段和一个没填的字段一样没用。
+            quota_bucket_index=self._bucket_index_map([member.model_key for member in group.members]).get(
+                str(model_key or "").strip(), -1
+            ),
             selection_reason="sticky_reuse" if sticky else "least_load",
             config_revision=int(self._config_revision),
             permit=permit,

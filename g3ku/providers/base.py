@@ -46,6 +46,13 @@ class LLMModelAttempt:
     # 首 token 耗时（毫秒）：从请求发出到首个流式分片到达。只有流式路径能测到，
     # 非流式请求与未接入诊断的 provider 保持 None（前端显示 "--"）。
     first_token_ms: float | None = None
+    # 负载均衡归属：这一发 attempt 绑到的链上格号/组名/配额桶序号。由咽喉点在 provider
+    # 调用处从当跳租约盖上来；没有租约（前门车道、辅助车道、embedded 无 controller）保持
+    # 哨兵 -1/''。`_normalize_model_attempts` 逐字段重建 attempt，新字段必须同时报过去，
+    # 否则这里写进去的值会在归一化那一步被静默丢弃。
+    route_index: int = -1
+    group_key: str = ""
+    quota_bucket_index: int = -1
 
 
 @dataclass

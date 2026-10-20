@@ -496,9 +496,22 @@ def _normalize_model_attempts(attempts: list[LLMModelAttempt] | None) -> list[LL
                 finish_reason=str(getattr(attempt, 'finish_reason', 'stop') or 'stop'),
                 duration_ms=_normalize_optional_ms(getattr(attempt, 'duration_ms', None)),
                 first_token_ms=_normalize_optional_ms(getattr(attempt, 'first_token_ms', None)),
+                # 负载均衡归属：这张清单是逐字段重建 attempt 的，新字段不报进来就会被静默
+                # 归一成哨兵值，落库时看起来像"这一发没有租约"。
+                route_index=_normalize_route_slot(getattr(attempt, 'route_index', -1)),
+                group_key=str(getattr(attempt, 'group_key', '') or '').strip(),
+                quota_bucket_index=_normalize_route_slot(getattr(attempt, 'quota_bucket_index', -1)),
             )
         )
     return normalized_attempts
+
+
+def _normalize_route_slot(value: Any) -> int:
+    """链上格号/桶序号：非数值或负值一律收敛成哨兵 -1（= 这一发没有租约）。"""
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return -1
+    numeric = int(value)
+    return numeric if numeric >= 0 else -1
 
 
 def _normalize_optional_ms(value: Any) -> float | None:
@@ -1606,11 +1619,22 @@ class ConfigChatBackend:
                             ]
                         # 耗时归属：同一次 provider 请求产生的 attempt 共享该请求的墙钟耗时；
                         # 首 token 耗时只有 provider 的流式诊断能给（非流式请求保持 None）。
+                        bound_route_lease = getattr(node_turn_lease, 'route_lease', None)
                         for attempt in response_attempts:
                             if attempt.duration_ms is None:
                                 attempt.duration_ms = attempt_duration_ms
                             if attempt.first_token_ms is None and attempt_first_token_ms is not None:
                                 attempt.first_token_ms = attempt_first_token_ms
+                            # 负载均衡归属：只有这一发确实打在**当前绑定的那颗成员**上才盖章，
+                            # 否则保持哨兵——那意味着这一发不是这个租约服务的（direct 模型、
+                            # 前门/辅助车道无租约），写成别的档就是把观测造假。
+                            if (
+                                bound_route_lease is not None
+                                and str(getattr(bound_route_lease, 'model_key', '') or '') == str(attempt.model_key or '')
+                            ):
+                                attempt.route_index = int(bound_route_lease.route_index)
+                                attempt.group_key = str(bound_route_lease.group_key or '')
+                                attempt.quota_bucket_index = int(getattr(bound_route_lease, 'quota_bucket_index', -1))
                         attempts.extend(response_attempts)
                         response.attempts = list(attempts)
                         response.visible_text_streamed = bool(

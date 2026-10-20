@@ -1315,6 +1315,10 @@ async def get_model_load_balance_status():
         'worker_online': bool(payload.get('worker_online')),
         'config_revision': int(payload.get('model_route_config_revision') or 0),
         'node_binding_count': int(payload.get('model_route_binding_count') or 0),
+        # 非 0 = 这个 worker 内存里的组表与它自己声明的不一致（键错位或成员被两组认领）。
+        # 出现时日志里的 group= 与台账的档位归因都不可信，先查这个再查别的。
+        'group_drift_count': int(payload.get('model_route_group_drift_count') or 0),
+        'group_drift_findings': list(payload.get('model_route_group_drift_findings') or []),
         'groups': list(payload.get('model_route_groups') or []),
     }
 

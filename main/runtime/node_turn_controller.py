@@ -4,14 +4,18 @@ import asyncio
 import threading
 import time
 from collections import deque
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any, Callable
 
 from loguru import logger
 
 from main.runtime.model_key_concurrency import ModelKeyConcurrencyController, ModelKeyPermitLease
-from main.runtime.model_load_balancer import ModelLoadBalancer
+from main.runtime.model_load_balancer import (
+    ModelLoadBalancer,
+    classify_throttle_dimension,
+    is_rate_limited,
+)
 from main.runtime.model_route import (
     LEASE_OUTCOME_BUILD_FAILED,
     LEASE_OUTCOME_CANCELLED,
@@ -85,6 +89,20 @@ class NodeTurnLease:
     route_lease: ModelRouteLease | None = None
     # 准入阶段已经算好的候选硬性要求，chat_backend 的后续选择沿用同一份。
     route_filters: RouteCandidateFilters | None = None
+    # ---- 逐跳路由归属观测（只读台账用，不参与任何判据）----
+    # 准入落点与 `route_index`/`group_key` 的区别：后两者会被组内换人和升档改写，
+    # 而"这一跳本来被授到哪一档"只在第一次授予时记一次，之后不再动。
+    admission_route_index: int = -1
+    admission_group_key: str = ""
+    # 真正把请求发出去时绑的档（换过人就算成后来那个）。
+    served_route_index: int = -1
+    served_group_key: str = ""
+    # 这一跳内 route_index 前进过几次、最后一次为什么。词表沿用现有 release/rebind
+    # 的字面值（group_exhausted / route_entry），不发明新词。
+    escalation_count: int = 0
+    escalation_reason: str = ""
+    # 这一跳吃过的限流维度集合（rps/tpm/rpm/tpm_rpm/token/unknown），按首次出现顺序。
+    throttle_dimensions: list[str] = field(default_factory=list)
 
     @property
     def selected_model_ref(self) -> str:
@@ -274,10 +292,13 @@ class NodeTurnController:
         lease.route_lease = None
         lease.initial_model_permit = None
         logger.info(
-            "Model route lease released: group={} selected_model_key={} outcome={} node_id={} error={}",
+            "Model route lease released: group={} selected_model_key={} route_index={} outcome={} "
+            "escalations={} node_id={} error={}",
             route_lease.group_key,
             route_lease.model_key,
+            int(route_lease.route_index),
             str(outcome or ''),
+            int(lease.escalation_count),
             lease.node_id,
             str(error or '')[:200],
         )
@@ -300,6 +321,7 @@ class NodeTurnController:
         plan = lease.route_plan
         if plan is None:
             return None
+        previous_index = int(lease.route_index)
         target_index = int(lease.route_index if route_index is None else route_index)
         route = plan.route_at(target_index)
         if route is None or not route.is_load_balance:
@@ -327,6 +349,11 @@ class NodeTurnController:
                 lease.initial_model_permit = None
                 return None
             lease.route_index = target_index
+            if int(target_index) > previous_index:
+                # 链上前进一格 = 跨档（组内换人不计，那一格号不变）。这是台账里
+                # `route_escalation_count` 的唯一增点，词表沿用调用方传进来的 reason。
+                lease.escalation_count += 1
+                lease.escalation_reason = str(rebind_reason or "route_entry")
             lease.group_key = str(next_lease.group_key)
             lease.model_ref = str(next_lease.model_key)
             lease.key_index = int(next_lease.key_index)
@@ -370,7 +397,13 @@ class NodeTurnController:
         """通知 balancer「这一发真的要打到 provider 了」：reserved 转成速率样本。"""
         if lease is None or self._balancer is None:
             return
-        self._balancer.record_request_start(lease.route_lease)
+        route_lease = lease.route_lease
+        if route_lease is not None:
+            # 服务档：只有真的发出去的那一发才算。组内换人/升档之后再发，读到的就是后来
+            # 那个档；从没发出去过的跳保持哨兵。
+            lease.served_route_index = int(route_lease.route_index)
+            lease.served_group_key = str(route_lease.group_key or "")
+        self._balancer.record_request_start(route_lease)
 
     def record_route_outcome(
         self,
@@ -381,7 +414,15 @@ class NodeTurnController:
     ) -> None:
         if lease is None or self._balancer is None:
             return
-        self._balancer.record_outcome(lease.route_lease, status_code=status_code, error_text=error_text)
+        route_lease = lease.route_lease
+        if route_lease is not None and is_rate_limited(status_code, error_text):
+            # 限流维度：balancer 内部早就分类过（它只把它存进 throttle_events 然后裁掉，
+            # 全仓没有读者）。这里按同一份判据把它留到**这一跳**的观察面上——后续"该等多久"
+            # 的改动唯一的读数来源就是它。按首次出现顺序去重。
+            dimension = classify_throttle_dimension(error_text)
+            if dimension not in lease.throttle_dimensions:
+                lease.throttle_dimensions.append(dimension)
+        self._balancer.record_outcome(route_lease, status_code=status_code, error_text=error_text)
 
     def poke(self) -> None:
         wake_event = self._wake_event
@@ -762,6 +803,11 @@ class NodeTurnController:
             route_plan=route_plan,
             route_lease=route_lease,
             route_filters=filters,
+            # 准入落点只在授予这一刻记一次：`route_index`/`group_key` 之后会被组内换人和
+            # 升档改写，而"这一跳本来被授到哪一档"必须保持原值。无租约（direct 模型、
+            # 前门/辅助车道）保持哨兵，不写成第 0 档。
+            admission_route_index=int(route_lease.route_index) if route_lease is not None else -1,
+            admission_group_key=str(route_lease.group_key) if route_lease is not None else "",
         )
         self._running_leases[lease.lease_id] = lease
         if route_lease is not None:

@@ -10724,6 +10724,108 @@ def test_task_model_call_event_persists_provider_tool_bundle_in_actual_request_a
     assert actual_request_payload["provider_tool_exposure_commit_reason"] == "token_compression"
 
 
+def test_task_model_call_row_records_route_tier_attribution_and_sentinels(tmp_path: Path) -> None:
+    """逐跳路由归属必须活到落库那一格：台账行 + actual-request 两份载荷都要有。
+
+    哨兵单独测一遍：没传路由观察值（前门/辅助/message-distribution 这些没有租约的车道）
+    时读出来必须是 ''/-1，不能是 ''/0——0 会被读成"落在链首第一档"。
+    """
+    service = MainRuntimeService(
+        chat_backend=_DummyChatBackend(),
+        workspace_root=tmp_path,
+        store_path=tmp_path / "runtime.sqlite3",
+        files_base_dir=tmp_path / "tasks",
+        artifact_dir=tmp_path / "artifacts",
+        governance_store_path=tmp_path / "governance.sqlite3",
+        execution_mode="web",
+    )
+
+    record = asyncio.run(_create_web_task(service))
+
+    service.log_service.append_node_output(
+        record.task_id,
+        record.root_node_id,
+        content='{"status":"success"}',
+        tool_calls=[],
+        usage_attempts=[
+            LLMModelAttempt(
+                model_key="plain-direct",
+                provider_id="openai",
+                provider_model="plain-direct",
+                usage={"input_tokens": 10, "output_tokens": 5},
+            )
+        ],
+        model_messages=[{"role": "system", "content": "s"}, {"role": "user", "content": "u"}],
+        request_messages=[{"role": "system", "content": "s"}, {"role": "user", "content": "u"}],
+        prompt_cache_key="stable-cache-key-no-lease",
+        request_message_count=2,
+        request_message_chars=20,
+    )
+
+    service.log_service.append_node_output(
+        record.task_id,
+        record.root_node_id,
+        content='{"status":"success"}',
+        tool_calls=[],
+        usage_attempts=[
+            LLMModelAttempt(
+                model_key="deepseek-v4-flash-3",
+                provider_id="openai",
+                provider_model="deepseek-v4-flash-3",
+                usage={"input_tokens": 400, "output_tokens": 20, "cache_hit_tokens": 100},
+                route_index=1,
+                group_key="v4",
+                quota_bucket_index=0,
+            )
+        ],
+        model_messages=[{"role": "system", "content": "s"}, {"role": "user", "content": "u"}],
+        request_messages=[{"role": "system", "content": "s"}, {"role": "user", "content": "u"}],
+        prompt_cache_key="stable-cache-key-route-tier",
+        request_message_count=2,
+        request_message_chars=20,
+        actual_tool_schemas=[{"name": "submit_next_stage", "description": "", "parameters": {"type": "object"}}],
+        callable_tool_names=["submit_next_stage"],
+        provider_tool_names=["submit_next_stage"],
+        provider_tool_bundle_seeded=True,
+        provider_tool_bundle_mode="pinned_frozen",
+        route_admission_group="flash",
+        route_admission_index=0,
+        route_served_group="v4",
+        route_served_index=1,
+        route_escalation_count=1,
+        route_escalation_reason="route_entry",
+        route_throttle_dimensions="rps,tpm",
+    )
+    calls = service.store.list_task_model_calls(record.task_id, limit=None)
+    escalated = calls[-1]["payload"]
+    without_lease = calls[-2]["payload"]
+
+    assert escalated["route_admission_group"] == "flash"
+    assert escalated["route_admission_index"] == 0
+    assert escalated["route_served_group"] == "v4"
+    assert escalated["route_served_index"] == 1
+    assert escalated["route_escalation_count"] == 1
+    assert escalated["route_escalation_reason"] == "route_entry"
+    assert escalated["route_throttle_dimensions"] == "rps,tpm"
+    # 准入档 ≠ 服务档 就是"这一跳跳了档"，不靠日志考古也能数。
+    assert escalated["route_admission_group"] != escalated["route_served_group"]
+    assert escalated["delta_usage_by_model"][0]["group_key"] == "v4"
+    assert escalated["delta_usage_by_model"][0]["route_index"] == 1
+    assert escalated["delta_usage_by_model"][0]["quota_bucket_index"] == 0
+
+    assert without_lease["route_admission_group"] == ""
+    assert without_lease["route_admission_index"] == -1
+    assert without_lease["route_served_index"] == -1
+    assert without_lease["route_escalation_count"] == 0
+    assert without_lease["route_throttle_dimensions"] == ""
+    assert without_lease["delta_usage_by_model"][0]["group_key"] == ""
+    assert without_lease["delta_usage_by_model"][0]["route_index"] == -1
+
+    actual_request_payload = json.loads(service.log_service.resolve_content_ref(str(escalated["actual_request_ref"])))
+    assert actual_request_payload["route_served_group"] == "v4"
+    assert actual_request_payload["route_escalation_count"] == 1
+
+
 def test_live_tree_payload_keeps_acceptance_node_kind(tmp_path: Path):
     service = MainRuntimeService(
         chat_backend=_DummyChatBackend(),
