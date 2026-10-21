@@ -1332,10 +1332,7 @@ def test_consolidation_records_survive_into_the_memory_surfaces() -> None:
 
 
 def test_memory_operation_chips_use_one_color_per_operation() -> None:
-    css = "\n".join(
-        (REPO_ROOT / name).read_text(encoding="utf-8")
-        for name in ("g3ku/web/frontend/org_graph.css", "g3ku/web/frontend/org_graph_redesign.css")
-    )
+    css = (REPO_ROOT / "g3ku/web/frontend/org_graph.css").read_text(encoding="utf-8")
     colors = {}
     for match in re.finditer(r'\.memory-op-chip\[data-op="(\w+)"\]', css):
         brace = css.index("{", match.end())

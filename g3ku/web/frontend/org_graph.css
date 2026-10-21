@@ -3114,11 +3114,10 @@ textarea {
 /* 静默回合（模型调用 silent 工具）：整条响应折成一行「静默消息 HH:MM:SS」+ 下箭头。
    折叠行是 turn 元素的直接子节点、在 .msg-content 气泡**外面**，所以折叠时气泡连
    它的底/边框/内边距一起不出现（用户明确不要给这一行套壳），点开才露出正文与轨道。 */
-/* .message 本身是 flex 行（V2 band 的 [data-ui-version="v2"] .message 还带
-   align-items: flex-end），折叠行不改成纵向就会和气泡并排、把内容挤到右边、线掉到
-   左下角。第二个选择器是为压过 V2 那条同级规则，单写类名会被它盖住。 */
+/* .message 本身是 flex 行，并带 align-items: flex-end；折叠行不改成纵向就会和气泡
+   并排、把内容挤到右边、线掉到左下角。第二个选择器用三档类名压过 .message.message。 */
 .ceo-silent-message,
-[data-ui-version="v2"] .message.ceo-silent-message {
+.message.message.ceo-silent-message {
     flex-direction: column;
     align-items: stretch;
 }
@@ -14427,6 +14426,25 @@ textarea {
     flex: 0 0 auto;
 }
 
+/* 窄屏：顶栏自身横向滚动，不引入抽屉层。 */
+@media (max-width: 900px) {
+    :root .sidebar {
+        padding-right: var(--ui-space-3);
+        padding-left: var(--ui-space-3);
+        overflow-x: auto;
+        overflow-y: hidden;
+        scrollbar-width: none;
+    }
+
+    :root .sidebar::-webkit-scrollbar {
+        display: none;
+    }
+
+    :root .sidebar-footer {
+        margin-left: auto;
+    }
+}
+
 /* 9. 按钮 */
 :root .toolbar-btn {
     height: 36px;
@@ -16366,4 +16384,119 @@ textarea {
         padding-right: var(--ui-space-3);
         padding-left: var(--ui-space-3);
     }
+}
+
+/* ---- 设置弹窗与 QQ 沙箱（V2 合并后的最终值） ------------------------------- */
+
+/* 设置弹窗沿用 confirm 皮肤，只补分节、右上角叉号与底部左右按钮位。 */
+.project-settings-dialog {
+    position: relative;
+    width: min(460px, calc(100vw - 48px));
+}
+
+.project-settings-dialog .confirm-header {
+    padding-right: 36px;
+}
+
+.dialog-close-btn.dialog-close-btn {
+    position: absolute;
+    top: 20px;
+    right: 20px;
+    width: 28px;
+    height: 28px;
+    padding: 0;
+    border-radius: var(--ui-radius-control);
+    color: var(--ui-text-secondary);
+}
+
+.dialog-close-btn.dialog-close-btn svg {
+    width: 16px;
+    height: 16px;
+}
+
+.project-settings-body {
+    display: flex;
+    flex-direction: column;
+    gap: var(--ui-space-5);
+    max-height: min(420px, calc(100vh - 240px));
+    padding: 0;
+    overflow-y: auto;
+}
+
+.project-settings-actions {
+    display: flex;
+    align-items: center;
+    gap: var(--ui-space-3);
+}
+
+/* 版本信息与「检查更新 / 重启并更新」同一行，靠右；窗口很窄时省略号收尾，
+   完整内容在 title 里。 */
+.project-settings-update-line {
+    margin: 0 0 0 auto;
+    min-width: 0;
+    color: var(--ui-text-secondary);
+    font-size: 13px;
+    text-align: right;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
+.project-settings-footer {
+    justify-content: flex-end;
+}
+
+/* 隐藏的 file input 由「选择配置包」按钮代挑，回显只当状态行用。 */
+.config-bundle-file-name {
+    margin: 0;
+    color: var(--ui-text-secondary);
+    font-size: 13px;
+    word-break: break-all;
+}
+
+/* 配置包对话框的两段风险文案必须整段读完：正文和段落各自都带 max-height +
+   overflow-y:auto，套起来就是"看得到但读不全"。这里放开段落自己的裁剪，
+   并把正文上限抬到视口高度，只有窗口真的很矮时才退回滚动。 */
+#config-bundle-dialog .confirm-text {
+    max-height: none;
+    overflow-y: visible;
+    padding-right: 0;
+}
+
+#config-bundle-dialog .project-settings-body {
+    max-height: min(86vh, 920px);
+}
+
+/* 官方 QQ 机器人账号卡里的沙箱勾选项并入输入档（38px 高、控制圆角、同一表面色）。
+   状态徽标复用 .status-badge，配色由生命周期色给出，这里不再上一次色。 */
+.qq-bot-sandbox {
+    border-radius: var(--ui-radius-control);
+    border-color: var(--ui-border);
+    background-color: var(--ui-bg-input);
+    color: var(--ui-text-secondary);
+    font-size: 13px;
+}
+
+.qq-bot-sandbox:hover {
+    border-color: var(--ui-border-strong);
+}
+
+.qq-bot-sandbox:has(.qq-bot-sandbox-input:checked) {
+    border-color: color-mix(in srgb, var(--ui-brand) 55%, transparent);
+    background-color: var(--ui-brand-soft);
+    color: var(--ui-text);
+}
+
+.qq-bot-sandbox-input {
+    border-color: var(--ui-border-strong);
+    background-color: var(--ui-bg-surface);
+}
+
+.qq-bot-sandbox-input:checked {
+    border-color: var(--ui-brand);
+    background-color: var(--ui-brand);
+}
+
+.qq-bot-sandbox-input:checked::after {
+    border-color: var(--ui-on-brand);
 }

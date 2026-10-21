@@ -6,8 +6,8 @@ const { readFrontendSources } = require("./support/frontend_sources.js");
 
 const APP_PATH = "g3ku/web/frontend/org_graph_app.js";
 const APP_CODE = readFrontendSources(["app"]).join("\n");
-const V2_CSS_PATH = "g3ku/web/frontend/org_graph_redesign.css";
-const V2_CSS_CODE = fs.readFileSync(V2_CSS_PATH, "utf8");
+const BASE_CSS_PATH = "g3ku/web/frontend/org_graph.css";
+const BASE_CSS_CODE = fs.readFileSync(BASE_CSS_PATH, "utf8");
 
 class StubElement {
     constructor() {
@@ -557,8 +557,8 @@ test("关窗把两颗范围复位成配置开、记忆关", () => {
 
 test("配置包对话框的风险文案不被 max-height 裁剪", () => {
     const rule = (selector) => {
-        const match = V2_CSS_CODE.match(
-            new RegExp(`\\[data-ui-version="v2"\\] ${selector.replace(/[.#]/g, "\\$&")} \\{([^}]*)\\}`)
+        const match = BASE_CSS_CODE.match(
+            new RegExp(`${selector.replace(/[.#]/g, "\\$&")} \\{([^}]*)\\}`)
         );
         return match ? match[1] : null;
     };

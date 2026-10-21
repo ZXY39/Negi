@@ -30,7 +30,6 @@ def test_ceo_approval_viewport_is_centered_above_chat_input() -> None:
 def test_approval_viewport_stays_a_positioning_container() -> None:
     """审批浮层只许有一张面：容器画底会在卡片两侧拉出一块比弹窗更宽的空白。"""
     base_css = (REPO_ROOT / "g3ku/web/frontend/org_graph.css").read_text(encoding="utf-8")
-    v2_css = (REPO_ROOT / "g3ku/web/frontend/org_graph_redesign.css").read_text(encoding="utf-8")
 
     def block(css: str, selector: str) -> str:
         assert selector in css, f"缺少规则块：{selector}"
@@ -42,11 +41,12 @@ def test_approval_viewport_stays_a_positioning_container() -> None:
     assert "--ui-bg-elevated" not in viewport
 
     # 重试提示条自己是可见的面，不能被同一条"容器不画底"顺手清空。
-    assert "background: var(--ui-bg-elevated);" in block(v2_css, '[data-ui-version="v2"] .model-retry-toast {')
+    toast = re.search(r"\.model-retry-toast \{[^}]*background: var\(--ui-bg-elevated\);", base_css)
+    assert toast, "重试提示条缺少可见底色"
 
 
 def test_app_sidebars_use_compact_160px_width_before_mobile_stack() -> None:
-    # 只查真正加载的样式表：org_graph.html 挂 org_graph.css 与 org_graph_redesign.css。
+    # 只查真正加载的样式表：org_graph.html 只挂 org_graph.css。
     css_files = [
         REPO_ROOT / "g3ku/web/frontend/org_graph.css",
     ]
@@ -70,7 +70,7 @@ def test_navigation_bar_always_shows_labels_without_compact_mode() -> None:
     """顶部那条栏没有"收起名称"这档：品牌名与每个导航项的文字恒显示，也没有那颗按钮。"""
     html = (REPO_ROOT / "g3ku/web/frontend/org_graph.html").read_text(encoding="utf-8")
     app_js = (REPO_ROOT / "g3ku/web/frontend/org_graph_app.js").read_text(encoding="utf-8")
-    v2_css = (REPO_ROOT / "g3ku/web/frontend/org_graph_redesign.css").read_text(encoding="utf-8")
+    base_css = (REPO_ROOT / "g3ku/web/frontend/org_graph.css").read_text(encoding="utf-8")
 
     assert 'id="sidebar-toggle"' not in html
     for needle in (
@@ -83,4 +83,4 @@ def test_navigation_bar_always_shows_labels_without_compact_mode() -> None:
         "readSidebarPreference",
     ):
         assert needle not in app_js, needle
-    assert ".sidebar.is-collapsed" not in v2_css
+    assert ".sidebar.is-collapsed" not in base_css

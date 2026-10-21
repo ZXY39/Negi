@@ -3,7 +3,7 @@ const assert = require("node:assert/strict");
 const fs = require("node:fs");
 
 // 勾选框样式台账：前端每个 `type="checkbox"` 落点都必须落进下面三档之一
-//   ui         —— 套通用自绘组件（org_graph_redesign.css 的 .ui-checkbox-input + .ui-checkbox-box）
+//   ui         —— 套通用自绘组件（org_graph.css 的 .ui-checkbox-input + .ui-checkbox-box）
 //   specialist —— 面板自己的自绘规则（会话批量、图像多模态、QQ 沙箱）
 //   hidden     —— 按设计不画盒子（角色药丸把 input 藏掉）或纯隐藏字段
 // 新加勾选框没登记进任何一档 = 界面上会冒出一颗系统默认方框，这条用例负责拦住。
@@ -98,9 +98,7 @@ test("通用自绘组件与三档专用规则都还在样式里", () => {
 test("不存在裸 input[type=checkbox] 全局兜底规则", () => {
     // 这条断言钉的是判据本身：一旦有人加了全局兜底，"某颗没样式"的读法就全变了，
     // 台账必须重新分档而不是继续按现状登记。
-    const css = ["org_graph.css", "org_graph_redesign.css"]
-        .map((name) => fs.readFileSync(`g3ku/web/frontend/${name}`, "utf8"))
-        .join("\n");
+    const css = fs.readFileSync("g3ku/web/frontend/org_graph.css", "utf8");
     const bare = css.match(/(^[^\n{}]*?)input\[type=["']?checkbox["']?\][^{]*\{/gm) || [];
     const globalOnly = bare.filter((hit) => !/[.\[]/.test(hit.split("input[")[0]));
     assert.deepEqual(globalOnly, []);
