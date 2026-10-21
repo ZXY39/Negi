@@ -27,6 +27,20 @@ jobs:
       - name: Run tests
         run: uv run python -m pytest tests/ -q
 
+  frontend:
+    name: Frontend (Node)
+    runs-on: windows-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+      # 前端用例不在 pytest 里；Node 原生 test runner 作为合并前硬门禁。
+      - name: Run frontend tests
+        shell: bash
+        run: node --test tests/resources/*.test.js
+
   lint:
     name: Lint (ruff)
     runs-on: ubuntu-latest
