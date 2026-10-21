@@ -2,6 +2,7 @@ const test = require("node:test");
 const assert = require("node:assert/strict");
 const fs = require("node:fs");
 const vm = require("node:vm");
+const { readFrontendSources } = require("./support/frontend_sources.js");
 
 // 任务卡片 token 数只许往前这条契约：
 // 服务端那一格（任务行 token_usage）是加性累加，所以任何写者带来更小的数必然是旧数据——
@@ -10,8 +11,8 @@ const vm = require("node:vm");
 
 const TASKS_PATH = "g3ku/web/frontend/org_graph_tasks.js";
 const APP_PATH = "g3ku/web/frontend/org_graph_app.js";
-const TASKS_CODE = fs.readFileSync(TASKS_PATH, "utf8");
-const APP_CODE = fs.readFileSync(APP_PATH, "utf8");
+const TASKS_CODE = readFrontendSources(["tasks"]).join("\n");
+const APP_CODE = readFrontendSources(["app"]).join("\n");
 
 function sliceBetween(code, startMarker, endMarker, label) {
     const start = code.indexOf(startMarker);

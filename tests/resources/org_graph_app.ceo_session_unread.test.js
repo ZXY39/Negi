@@ -2,6 +2,7 @@ const test = require("node:test");
 const assert = require("node:assert/strict");
 const fs = require("node:fs");
 const vm = require("node:vm");
+const { readFrontendSources } = require("./support/frontend_sources.js");
 
 // CEO 会话 unread 状态机:切换会话后原会话「一次性豁免」契约。
 // 背景:列表通道(ceo.sessions.patch/snapshot、REST)的 message_count 滞后于聊天通道渲染,
@@ -11,7 +12,7 @@ const vm = require("node:vm");
 // 覆盖:基线 diff、豁免消费、一次性语义、多槽互不覆盖、无增量不消费、窗口过期、hydration 守卫、真实切换接线。
 
 const APP_PATH = "g3ku/web/frontend/org_graph_app.js";
-const APP_CODE = fs.readFileSync(APP_PATH, "utf8");
+const APP_CODE = readFrontendSources(["app"]).join("\n");
 
 class StubElement {}
 class StubHTMLElement extends StubElement {

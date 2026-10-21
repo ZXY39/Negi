@@ -2,6 +2,7 @@ const test = require("node:test");
 const assert = require("node:assert/strict");
 const fs = require("node:fs");
 const vm = require("node:vm");
+const { readFrontendSources } = require("./support/frontend_sources.js");
 
 // 轮次下拉框的展开状态必须活过任务树重绘：renderTree 会整块替换 U.tree，
 // 下拉框身份（select.id → shell.dataset.selectId）一旦随机化，刷新就等于把它
@@ -9,7 +10,7 @@ const vm = require("node:vm");
 // 打开，且只在它真的开着时动手。见 org_graph_task_view.js 的 treeRoundSelectId。
 
 const APP_PATH = "g3ku/web/frontend/org_graph_app.js";
-const APP_CODE = fs.readFileSync(APP_PATH, "utf8");
+const APP_CODE = readFrontendSources(["app"]).join("\n");
 
 class HTMLElementStub {
     constructor() {

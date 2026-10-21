@@ -2,13 +2,14 @@ const test = require("node:test");
 const assert = require("node:assert/strict");
 const fs = require("node:fs");
 const vm = require("node:vm");
+const { readFrontendSources } = require("./support/frontend_sources.js");
 
 // 工具输出框滚动位置保持:用户在回翻输出时,新输出/每秒时长刷新/整段重建都不得
 // 把他正在读的位置清零。覆盖三处:setCeoToolStepOutput 的原位文本同步、
 // hydrate 的填充、以及 renderCeoStageTraceIntoTurn 整段重建的嵌套滚动还原。
 
 const APP_PATH = "g3ku/web/frontend/org_graph_app.js";
-const APP_CODE = fs.readFileSync(APP_PATH, "utf8");
+const APP_CODE = readFrontendSources(["app"]).join("\n");
 
 class StubElement {}
 class StubButtonElement extends StubElement {}

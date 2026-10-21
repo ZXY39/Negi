@@ -2,9 +2,10 @@ const test = require("node:test");
 const assert = require("node:assert/strict");
 const fs = require("node:fs");
 const vm = require("node:vm");
+const { readFrontendSources } = require("./support/frontend_sources.js");
 
 const APP_PATH = "g3ku/web/frontend/org_graph_app.js";
-const APP_CODE = fs.readFileSync(APP_PATH, "utf8");
+const APP_CODE = readFrontendSources(["app"]).join("\n");
 
 // 聊天里的 markdown 列表：模型常把每一项用空行断开、正文再另起一段。逐行匹配会把
 // 这样一个列表切成 N 个 <ol>，浏览器于是把每一项都编号成 1（实盘 2026-09-25 的

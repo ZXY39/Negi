@@ -2,6 +2,7 @@ const test = require("node:test");
 const assert = require("node:assert/strict");
 const fs = require("node:fs");
 const vm = require("node:vm");
+const { readFrontendSources } = require("./support/frontend_sources.js");
 
 // inflight/preserved 回合的 user_messages 气泡落位契约：
 // - 批次里带原始时间戳的消息按时间插入到已渲染气泡之间，不得一律追加到流末尾
@@ -10,7 +11,7 @@ const vm = require("node:vm");
 // - 带时间戳的气泡在 DOM 上留 data-ceo-timestamp 供上面的比较使用。
 
 const APP_PATH = "g3ku/web/frontend/org_graph_app.js";
-const APP_CODE = fs.readFileSync(APP_PATH, "utf8");
+const APP_CODE = readFrontendSources(["app"]).join("\n");
 
 class StubElement {}
 

@@ -2,13 +2,14 @@ const test = require("node:test");
 const assert = require("node:assert/strict");
 const fs = require("node:fs");
 const vm = require("node:vm");
+const { readFrontendSources } = require("./support/frontend_sources.js");
 
 const APP_PATH = "g3ku/web/frontend/org_graph_app.js";
 const API_CLIENT_PATH = "g3ku/web/frontend/api_client.js";
 const HTML_PATH = "g3ku/web/frontend/org_graph.html";
 const CSS_PATH = "g3ku/web/frontend/org_graph.css";
 
-const APP_CODE = fs.readFileSync(process.env.ORG_GRAPH_APP || APP_PATH, "utf8");
+const APP_CODE = readFrontendSources(["app"]).join("\n");
 const API_CLIENT_CODE = fs.readFileSync(API_CLIENT_PATH, "utf8");
 const HTML_CODE = fs.readFileSync(HTML_PATH, "utf8");
 const CSS_CODE = fs.readFileSync(CSS_PATH, "utf8");

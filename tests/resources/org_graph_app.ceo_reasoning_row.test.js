@@ -2,6 +2,7 @@ const test = require("node:test");
 const assert = require("node:assert/strict");
 const fs = require("node:fs");
 const vm = require("node:vm");
+const { readFrontendSources } = require("./support/frontend_sources.js");
 
 // CEO 思维链实时行这一车道的单测：只切片加载被测函数，其余依赖给最小桩。
 // 覆盖四件真实踩过或容易被改回去的事：段号变了要整段重来（同跳重发/换链不能叠两份）、
@@ -10,7 +11,7 @@ const vm = require("node:vm");
 const APP_PATH = "g3ku/web/frontend/org_graph_app.js";
 const CSS_PATH = "g3ku/web/frontend/org_graph.css";
 // 这台机器上工作树是 CRLF，按 `\n}\n` 切函数体必须先把换行归一，否则切片全部失配。
-const APP_CODE = fs.readFileSync(APP_PATH, "utf8").replace(/\r\n/g, "\n");
+const APP_CODE = readFrontendSources(["app"]).join("\n").replace(/\r\n/g, "\n");
 const CSS_CODE = fs.readFileSync(CSS_PATH, "utf8").replace(/\r\n/g, "\n");
 
 const NAMES = [

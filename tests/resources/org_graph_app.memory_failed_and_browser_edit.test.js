@@ -2,12 +2,13 @@ const test = require("node:test");
 const assert = require("node:assert/strict");
 const fs = require("node:fs");
 const vm = require("node:vm");
+const { readFrontendSources } = require("./support/frontend_sources.js");
 
 // 记忆管理:失败停车区卡片(红色 + 重试图标 + 错误历史)与「当前记忆」浏览器编辑模式
 // (操作列 / 勾选 / 全选 / mutationsEnabled 门控)的渲染契约。
 
 const APP_PATH = "g3ku/web/frontend/org_graph_app.js";
-const APP_CODE = fs.readFileSync(APP_PATH, "utf8");
+const APP_CODE = readFrontendSources(["app"]).join("\n");
 
 class StubElement {}
 class StubHTMLElement extends StubElement {

@@ -2,9 +2,10 @@ const test = require("node:test");
 const assert = require("node:assert/strict");
 const fs = require("node:fs");
 const vm = require("node:vm");
+const { readFrontendSources } = require("./support/frontend_sources.js");
 
 const APP_PATH = "g3ku/web/frontend/org_graph_app.js";
-const APP_CODE = fs.readFileSync(APP_PATH, "utf8");
+const APP_CODE = readFrontendSources(["app"]).join("\n");
 
 // P1/P4 前端契约：渠道会话的识别、分组、补丁路由与「只读但可暂停」按钮语义。
 // 这些分支若被 revert，必须在这里失败——此前仅有后端测试覆盖（审查报告 C2）。

@@ -2,6 +2,7 @@ const test = require("node:test");
 const assert = require("node:assert/strict");
 const fs = require("node:fs");
 const vm = require("node:vm");
+const { readFrontendSources } = require("./support/frontend_sources.js");
 
 // 用户消息编辑重发/Fork 的前端契约:
 // - buildCeoUserMessageEditMarkup:用户气泡那颗是裸按钮(can_edit_fork),web: 会话才产出(R1);
@@ -17,7 +18,7 @@ const vm = require("node:vm");
 // - finalizePausedCeoTurn:暂停收尾把用户行落进快照缓存,门槛帧才有行可 flag(R9)。
 
 const APP_PATH = "g3ku/web/frontend/org_graph_app.js";
-const APP_CODE = fs.readFileSync(APP_PATH, "utf8");
+const APP_CODE = readFrontendSources(["app"]).join("\n");
 
 class StubElement {}
 

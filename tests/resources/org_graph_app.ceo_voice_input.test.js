@@ -2,11 +2,12 @@ const test = require("node:test");
 const assert = require("node:assert/strict");
 const fs = require("node:fs");
 const vm = require("node:vm");
+const { readFrontendSources } = require("./support/frontend_sources.js");
 
 const APP_PATH = "g3ku/web/frontend/org_graph_app.js";
 const HTML_PATH = "g3ku/web/frontend/org_graph.html";
 // Windows 上经 autocrlf 检出为 CRLF；断言按 LF 匹配，读入后统一归一化行尾。
-const APP_CODE = fs.readFileSync(APP_PATH, "utf8").replace(/\r\n/g, "\n");
+const APP_CODE = readFrontendSources(["app"]).join("\n").replace(/\r\n/g, "\n");
 const APP_HTML = fs.readFileSync(HTML_PATH, "utf8").replace(/\r\n/g, "\n");
 
 class StubElement {

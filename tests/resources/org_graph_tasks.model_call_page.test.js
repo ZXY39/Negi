@@ -2,6 +2,7 @@ const test = require("node:test");
 const assert = require("node:assert/strict");
 const fs = require("node:fs");
 const vm = require("node:vm");
+const { readFrontendSources } = require("./support/frontend_sources.js");
 
 // 模型调用明细「点了才加载」的车道契约：
 // 1) 底栏页号按整本账本算（`total_model_calls`），不是按已加载行数算；
@@ -14,7 +15,7 @@ const vm = require("node:vm");
 // 其余函数按源码顺序整段取真实现。
 
 const TASKS_PATH = "g3ku/web/frontend/org_graph_tasks.js";
-const TASKS_CODE = fs.readFileSync(TASKS_PATH, "utf8");
+const TASKS_CODE = readFrontendSources(["tasks"]).join("\n");
 
 function makeContext(state) {
     const context = {

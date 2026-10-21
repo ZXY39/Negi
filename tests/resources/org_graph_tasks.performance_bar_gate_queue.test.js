@@ -2,6 +2,7 @@ const test = require("node:test");
 const assert = require("node:assert/strict");
 const fs = require("node:fs");
 const vm = require("node:vm");
+const { readFrontendSources } = require("./support/frontend_sources.js");
 
 // 任务大厅性能条两件事：
 // 1)「节点队列」读回合闸，三个数各带标签：运行=占住的闸位（entry_gate_running_total）、
@@ -14,7 +15,7 @@ const vm = require("node:vm");
 //    判停更（≥15s 才翻），标签带时长。
 
 const TASKS_PATH = "g3ku/web/frontend/org_graph_tasks.js";
-const TASKS_CODE = fs.readFileSync(TASKS_PATH, "utf8");
+const TASKS_CODE = readFrontendSources(["tasks"]).join("\n");
 
 function createPerfBar(initialMetrics, initialNowMs = 1_700_000_000_000) {
     let clockMs = initialNowMs;

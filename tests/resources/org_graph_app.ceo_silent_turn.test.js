@@ -2,6 +2,7 @@ const test = require("node:test");
 const assert = require("node:assert/strict");
 const fs = require("node:fs");
 const vm = require("node:vm");
+const { readFrontendSources } = require("./support/frontend_sources.js");
 
 // 静默回合（模型输出 [G3KU_SILENT]）的会话框契约：
 // - 阶段轨道与工具步骤照常展示，只隐藏回复气泡本身；
@@ -9,8 +10,8 @@ const vm = require("node:vm");
 
 const TASK_VIEW_PATH = "g3ku/web/frontend/org_graph_task_view.js";
 const APP_PATH = "g3ku/web/frontend/org_graph_app.js";
-const TASK_VIEW_CODE = fs.readFileSync(TASK_VIEW_PATH, "utf8");
-const APP_CODE = fs.readFileSync(APP_PATH, "utf8");
+const TASK_VIEW_CODE = readFrontendSources(["task_view"]).join("\n");
+const APP_CODE = readFrontendSources(["app"]).join("\n");
 
 class StubElement {}
 

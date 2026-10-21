@@ -2,9 +2,10 @@ const test = require("node:test");
 const assert = require("node:assert/strict");
 const fs = require("node:fs");
 const vm = require("node:vm");
+const { readFrontendSources } = require("./support/frontend_sources.js");
 
 const TASKS_PATH = "g3ku/web/frontend/org_graph_tasks.js";
-const TASKS_CODE = fs.readFileSync(TASKS_PATH, "utf8");
+const TASKS_CODE = readFrontendSources(["tasks"]).join("\n");
 
 function loadTasksModule({ requestTaskAction } = {}) {
     const context = {

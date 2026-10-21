@@ -2,13 +2,14 @@ const test = require("node:test");
 const assert = require("node:assert/strict");
 const fs = require("node:fs");
 const vm = require("node:vm");
+const { readFrontendSources } = require("./support/frontend_sources.js");
 
 // 会话视图状态保持(展开态 + 锚定滚动):renderCeoSnapshot 全量重建前后的捕获/还原契约。
 // 覆盖:阶段展开态、轮次工具选中、Interaction Flow 容器与"展开全部"、锚定滚动、
 // 跨会话捕获保护、round key 为空时的工具选中分域隔离。
 
 const APP_PATH = "g3ku/web/frontend/org_graph_app.js";
-const APP_CODE = fs.readFileSync(APP_PATH, "utf8");
+const APP_CODE = readFrontendSources(["app"]).join("\n");
 
 class StubElement {}
 class StubHTMLElement extends StubElement {

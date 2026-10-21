@@ -2,14 +2,15 @@ const test = require("node:test");
 const assert = require("node:assert/strict");
 const fs = require("node:fs");
 const vm = require("node:vm");
+const { readFrontendSources } = require("./support/frontend_sources.js");
 
 // 首屏窗口化渲染契约：尾部窗口、向上分页（滚动补偿）、锚点扩展、跨会话守卫。
 // 渲染器与深 DOM 依赖全部替换为轻量 stub，专测窗口数学与 key 对齐。
 
 const APP_PATH = "g3ku/web/frontend/org_graph_app.js";
-const APP_CODE = fs.readFileSync(APP_PATH, "utf8");
+const APP_CODE = readFrontendSources(["app"]).join("\n");
 const TASK_VIEW_PATH = "g3ku/web/frontend/org_graph_task_view.js";
-const TASK_VIEW_CODE = fs.readFileSync(TASK_VIEW_PATH, "utf8");
+const TASK_VIEW_CODE = readFrontendSources(["task_view"]).join("\n");
 
 class StubNode {
     constructor() {

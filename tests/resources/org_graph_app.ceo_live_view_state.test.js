@@ -2,6 +2,7 @@ const test = require("node:test");
 const assert = require("node:assert/strict");
 const fs = require("node:fs");
 const vm = require("node:vm");
+const { readFrontendSources } = require("./support/frontend_sources.js");
 
 // 直播回合视图状态保持:renderCeoStageTraceIntoTurn 整段重建前后的展开态捕获/还原,
 // 以及 mutateCeoFeed preserve 模式的锚定滚动/贴底跟随契约。
@@ -11,8 +12,8 @@ const vm = require("node:vm");
 const TASK_VIEW_PATH = "g3ku/web/frontend/org_graph_task_view.js";
 const APP_PATH = "g3ku/web/frontend/org_graph_app.js";
 const CSS_PATH = "g3ku/web/frontend/org_graph.css";
-const TASK_VIEW_CODE = fs.readFileSync(TASK_VIEW_PATH, "utf8");
-const APP_CODE = fs.readFileSync(APP_PATH, "utf8");
+const TASK_VIEW_CODE = readFrontendSources(["task_view"]).join("\n");
+const APP_CODE = readFrontendSources(["app"]).join("\n");
 const APP_CSS = fs.readFileSync(CSS_PATH, "utf8");
 
 class StubElement {}

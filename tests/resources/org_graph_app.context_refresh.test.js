@@ -3,13 +3,14 @@ const assert = require("node:assert/strict");
 const fs = require("node:fs");
 const path = require("node:path");
 const vm = require("node:vm");
+const { readFrontendSources } = require("./support/frontend_sources.js");
 
 // 模型页「上下文信息更新时间」的契约：入口在模型页头部动作组、弹窗默认启用 + 120 分钟、
 // 草稿与服务端读数分开，只有点「应用」才发 PUT；失败不关窗。
 
 const ROOT = path.resolve(__dirname, "..", "..");
-const APP_CODE = fs.readFileSync(path.join(ROOT, "g3ku/web/frontend/org_graph_app.js"), "utf8");
-const API_CODE = fs.readFileSync(path.join(ROOT, "g3ku/web/frontend/api_client.js"), "utf8");
+const APP_CODE = readFrontendSources(["app"]).join("\n");
+const API_CODE = readFrontendSources(["api_client"]).join("\n");
 const HTML = fs.readFileSync(path.join(ROOT, "g3ku/web/frontend/org_graph.html"), "utf8");
 
 function stubElement(extra = {}) {

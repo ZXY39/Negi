@@ -2,6 +2,7 @@ const test = require("node:test");
 const assert = require("node:assert/strict");
 const fs = require("node:fs");
 const vm = require("node:vm");
+const { readFrontendSources } = require("./support/frontend_sources.js");
 
 // 主按钮的暂停语义：只要当前会话「不在稳定态」就一直显示暂停；会话真的停下
 // （含报错终止）就必须回到发送。判据必须现算，不能读某一帧随手写下的布尔量——
@@ -9,7 +10,7 @@ const vm = require("node:vm");
 // 会话没有任何东西会把它置回 false，按钮就永久挂在屏幕上。
 
 const APP_PATH = "g3ku/web/frontend/org_graph_app.js";
-const APP_CODE = fs.readFileSync(APP_PATH, "utf8");
+const APP_CODE = readFrontendSources(["app"]).join("\n");
 const SESSION_ID = "web:ceo-btn-s1";
 const PAUSED = "\u6682\u505c";
 const PAUSING = "\u6682\u505c\u4e2d";

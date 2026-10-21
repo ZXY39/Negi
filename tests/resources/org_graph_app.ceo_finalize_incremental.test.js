@@ -2,6 +2,7 @@ const test = require("node:test");
 const assert = require("node:assert/strict");
 const fs = require("node:fs");
 const vm = require("node:vm");
+const { readFrontendSources } = require("./support/frontend_sources.js");
 
 // finalize 增量渲染契约:
 // - final 带 user_messages 且 DOM 与记录完全对齐时,只补挂新用户气泡 + 就地收尾回合,
@@ -11,7 +12,7 @@ const vm = require("node:vm");
 // - 同一签名快照重复推送时 renderCeoSnapshot 跳过重建。
 
 const APP_PATH = "g3ku/web/frontend/org_graph_app.js";
-const APP_CODE = fs.readFileSync(APP_PATH, "utf8");
+const APP_CODE = readFrontendSources(["app"]).join("\n");
 
 class StubElement {}
 

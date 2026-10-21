@@ -2,6 +2,7 @@ const test = require("node:test");
 const assert = require("node:assert/strict");
 const fs = require("node:fs");
 const vm = require("node:vm");
+const { readFrontendSources } = require("./support/frontend_sources.js");
 
 // 按模型明细不再由任务详情快照带过来（那一格冷页扫全任务明细行实测 4447 ms，会拖住
 // "点开任务"），改为 Token 统计窗口一打开就自己取窄接口。两条契约：
@@ -10,7 +11,7 @@ const vm = require("node:vm");
 //    ——那是在宣称服务端没有这份数据，而它只是在飞。
 
 const TASKS_PATH = "g3ku/web/frontend/org_graph_tasks.js";
-const TASKS_CODE = fs.readFileSync(TASKS_PATH, "utf8");
+const TASKS_CODE = readFrontendSources(["tasks"]).join("\n");
 
 function slice(fromMarker, toMarker) {
     const start = TASKS_CODE.indexOf(fromMarker);

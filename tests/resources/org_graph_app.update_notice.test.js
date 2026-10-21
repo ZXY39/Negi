@@ -2,12 +2,13 @@ const test = require("node:test");
 const assert = require("node:assert/strict");
 const fs = require("node:fs");
 const vm = require("node:vm");
+const { readFrontendSources } = require("./support/frontend_sources.js");
 
 // 新版本提醒的渲染契约：红点只认台账里的 `newer`；"从未检查"与"检查失败"都不亮，
 // 也不能被写成"已是最新"。设置面板的「重启并更新」按钮同样只在新版本时出现。
 
 const APP_PATH = "g3ku/web/frontend/org_graph_app.js";
-const APP_CODE = fs.readFileSync(APP_PATH, "utf8");
+const APP_CODE = readFrontendSources(["app"]).join("\n");
 
 class StubElement {}
 class StubHTMLElement extends StubElement {

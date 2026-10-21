@@ -2,6 +2,7 @@ const test = require("node:test");
 const assert = require("node:assert/strict");
 const fs = require("node:fs");
 const vm = require("node:vm");
+const { readFrontendSources } = require("./support/frontend_sources.js");
 
 // 气泡元信息契约(token 用量 + 时间 + 复制按钮,点击消息才显形):
 // - setCeoTurnUsage sticky:后续不带 usage 的调用不得清空历史回合的 usage 行(R1);
@@ -12,7 +13,7 @@ const vm = require("node:vm");
 // - 每条有正文的气泡都带 .msg-copy-btn,轨道回合把它和 usage 放在同一行(R7)。
 
 const APP_PATH = "g3ku/web/frontend/org_graph_app.js";
-const APP_CODE = fs.readFileSync(APP_PATH, "utf8");
+const APP_CODE = readFrontendSources(["app"]).join("\n");
 
 class StubElement {}
 

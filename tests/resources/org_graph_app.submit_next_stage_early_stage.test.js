@@ -2,12 +2,13 @@ const test = require("node:test");
 const assert = require("node:assert/strict");
 const fs = require("node:fs");
 const vm = require("node:vm");
+const { readFrontendSources } = require("./support/frontend_sources.js");
 
 // submit_next_stage 的结果体就是新阶段的完整头信息：前端要在这一帧立刻切到
 // 阶段显示，而不是继续挂工具卡片等下一个 canonical 增量帧。
 
 const APP_PATH = "g3ku/web/frontend/org_graph_app.js";
-const APP_CODE = fs.readFileSync(APP_PATH, "utf8");
+const APP_CODE = readFrontendSources(["app"]).join("\n");
 
 class StubElement {}
 class StubHTMLElement extends StubElement {

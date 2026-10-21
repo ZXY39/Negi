@@ -2,13 +2,14 @@ const test = require("node:test");
 const assert = require("node:assert/strict");
 const fs = require("node:fs");
 const vm = require("node:vm");
+const { readFrontendSources } = require("./support/frontend_sources.js");
 
 // 图标趟的规模契约：lucide 会把 data-lucide 连属性复制到生成的 <svg> 上，于是
 // `[data-lucide]` 永不清空、每次 createIcons() 都按整份文档重画所有图标。
 // icons() 必须在每趟结束后摘掉已渲染 svg 上的标记，让下一趟只处理真正待渲染的 <i>。
 
 const APP_PATH = "g3ku/web/frontend/org_graph_app.js";
-const APP_CODE = fs.readFileSync(APP_PATH, "utf8");
+const APP_CODE = readFrontendSources(["app"]).join("\n");
 
 class StubElement {}
 class StubHTMLElement extends StubElement {

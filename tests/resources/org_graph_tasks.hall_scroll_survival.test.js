@@ -2,6 +2,7 @@ const test = require("node:test");
 const assert = require("node:assert/strict");
 const fs = require("node:fs");
 const vm = require("node:vm");
+const { readFrontendSources } = require("./support/frontend_sources.js");
 
 // 任务大厅滚动存活契约：
 // 1) worker 心跳时间戳（workerLastSeenAt）不参与渲染签名——它每秒变化但不改变
@@ -9,7 +10,7 @@ const vm = require("node:vm");
 // 2) 合法重建（状态/数据变化）后必须还原同页滚动位置；翻页才从顶部开始。
 
 const TASKS_PATH = "g3ku/web/frontend/org_graph_tasks.js";
-const TASKS_CODE = fs.readFileSync(TASKS_PATH, "utf8");
+const TASKS_CODE = readFrontendSources(["tasks"]).join("\n");
 
 function makeStubEl() {
     return {

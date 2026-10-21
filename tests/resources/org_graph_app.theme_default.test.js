@@ -2,13 +2,14 @@ const test = require("node:test");
 const assert = require("node:assert/strict");
 const fs = require("node:fs");
 const vm = require("node:vm");
+const { readFrontendSources } = require("./support/frontend_sources.js");
 
 // 主题默认档：首访（无存储/存储不可用/存了非法值）一律浅色，只有显式存过 dark
 // 才回到深色；静态 HTML 的初值要和 JS 的默认档一致，否则解锁页会先闪一帧深色。
 
 const APP_PATH = "g3ku/web/frontend/org_graph_app.js";
 const HTML_PATH = "g3ku/web/frontend/org_graph.html";
-const APP_CODE = fs.readFileSync(APP_PATH, "utf8");
+const APP_CODE = readFrontendSources(["app"]).join("\n");
 const HTML_CODE = fs.readFileSync(HTML_PATH, "utf8");
 
 function makeContext({ storedTheme = undefined, storageBroken = false } = {}) {

@@ -2,9 +2,10 @@ const test = require("node:test");
 const assert = require("node:assert/strict");
 const fs = require("node:fs");
 const vm = require("node:vm");
+const { readFrontendSources } = require("./support/frontend_sources.js");
 
 const APP_PATH = "g3ku/web/frontend/org_graph_app.js";
-const APP_CODE = fs.readFileSync(APP_PATH, "utf8");
+const APP_CODE = readFrontendSources(["app"]).join("\n");
 const MODEL_CALL_LABEL = "\u6b63\u5728\u8bf7\u6c42 CEO \u6a21\u578b\u751f\u6210\u4e0b\u4e00\u6b65\u54cd\u5e94...";
 const PROCESSING_LABEL = "\u5904\u7406\u4e2d...";
 

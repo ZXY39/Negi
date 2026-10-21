@@ -2,6 +2,7 @@ const test = require("node:test");
 const assert = require("node:assert/strict");
 const fs = require("node:fs");
 const vm = require("node:vm");
+const { readFrontendSources } = require("./support/frontend_sources.js");
 
 // 手动暂停之后服务端依次推：ceo.control_ack → ceo.state(completed) → ceo.turn.patch(inflight=null)
 // → ceo.edit_fork.gates。这条车道必须让"刚被暂停的那一回合"留在会话面上：用户气泡、
@@ -9,7 +10,7 @@ const vm = require("node:vm");
 // 编辑按钮（门槛帧按 turn_id 落 flag，行上没有 turn_id 就永远等不到按钮）。
 
 const APP_PATH = "g3ku/web/frontend/org_graph_app.js";
-const APP_CODE = fs.readFileSync(APP_PATH, "utf8");
+const APP_CODE = readFrontendSources(["app"]).join("\n");
 const SESSION_ID = "web:ceo-pause-s1";
 
 class StubElement {}

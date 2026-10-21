@@ -2,11 +2,12 @@ const test = require("node:test");
 const assert = require("node:assert/strict");
 const fs = require("node:fs");
 const vm = require("node:vm");
+const { readFrontendSources } = require("./support/frontend_sources.js");
 
 const TASK_VIEW_PATH = "g3ku/web/frontend/org_graph_task_view.js";
 const APP_PATH = "g3ku/web/frontend/org_graph_app.js";
-const TASK_VIEW_CODE = fs.readFileSync(TASK_VIEW_PATH, "utf8");
-const APP_CODE = fs.readFileSync(APP_PATH, "utf8");
+const TASK_VIEW_CODE = readFrontendSources(["task_view"]).join("\n");
+const APP_CODE = readFrontendSources(["app"]).join("\n");
 
 const MISSING_TEXT = "完整入参已不在账本里，这里只有调用提示";
 const LONG_COMMAND = "Get-ChildItem -Path C:\\ab\\h2\\packages -Recurse -Filter package.json | Select-Object -ExpandProperty FullName";

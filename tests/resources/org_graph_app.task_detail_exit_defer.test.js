@@ -2,6 +2,7 @@ const test = require("node:test");
 const assert = require("node:assert/strict");
 const fs = require("node:fs");
 const vm = require("node:vm");
+const { readFrontendSources } = require("./support/frontend_sources.js");
 
 // 任务详情返回大厅的时序契约：详情退出的重步骤（视图状态捕获、大 DOM 拆除、
 // 持久化调度）推迟到下一个宏任务，时序对齐「侧栏绕行两跳回大厅」——点击帧
@@ -11,7 +12,7 @@ const vm = require("node:vm");
 // 的 leavingTaskDetails 分支。
 
 const APP_PATH = "g3ku/web/frontend/org_graph_app.js";
-const APP_CODE = fs.readFileSync(APP_PATH, "utf8");
+const APP_CODE = readFrontendSources(["app"]).join("\n");
 
 function makeEl() {
     const classes = new Set();

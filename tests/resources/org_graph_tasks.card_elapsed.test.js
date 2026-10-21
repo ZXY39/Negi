@@ -2,6 +2,7 @@ const test = require("node:test");
 const assert = require("node:assert/strict");
 const fs = require("node:fs");
 const vm = require("node:vm");
+const { readFrontendSources } = require("./support/frontend_sources.js");
 
 // 任务卡片总耗时契约：
 // 1) 只显示分钟精度的数字（如 15h30m），小于 1 小时只到分钟；
@@ -9,7 +10,7 @@ const vm = require("node:vm");
 // 3) 暂停（blocked）以 updated_at 定格——暂停期间数字不增长。
 
 const TASKS_PATH = "g3ku/web/frontend/org_graph_tasks.js";
-const TASKS_CODE = fs.readFileSync(TASKS_PATH, "utf8");
+const TASKS_CODE = readFrontendSources(["tasks"]).join("\n");
 
 function loadHelpers(statusKeyFn) {
     const context = {

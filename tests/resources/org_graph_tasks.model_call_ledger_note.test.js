@@ -2,6 +2,7 @@ const test = require("node:test");
 const assert = require("node:assert/strict");
 const fs = require("node:fs");
 const vm = require("node:vm");
+const { readFrontendSources } = require("./support/frontend_sources.js");
 
 // 「任务开始以来共 N 次调用」这条文案的契约：
 // 1) N 必须来自服务端计数（summary.total_model_calls），不能是明细行的长度——
@@ -10,7 +11,7 @@ const vm = require("node:vm");
 // 3) 计数缺失时不声称"任务开始以来"，只说"已收到多少条明细"。
 
 const TASKS_PATH = "g3ku/web/frontend/org_graph_tasks.js";
-const TASKS_CODE = fs.readFileSync(TASKS_PATH, "utf8");
+const TASKS_CODE = readFrontendSources(["tasks"]).join("\n");
 
 function loadNoteHelper() {
     const context = {

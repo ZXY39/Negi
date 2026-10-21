@@ -2,6 +2,7 @@ const test = require("node:test");
 const assert = require("node:assert/strict");
 const fs = require("node:fs");
 const vm = require("node:vm");
+const { readFrontendSources } = require("./support/frontend_sources.js");
 
 // 节点详情「工具刷新不折掉已展开内容」合同:
 // 同一节点重绘时,阶段卡/初始提示词的 details 开合、以及每张卡里**按轮**选中的工具面板
@@ -10,9 +11,9 @@ const vm = require("node:vm");
 const TASK_VIEW_PATH = "g3ku/web/frontend/org_graph_task_view.js";
 const APP_PATH = "g3ku/web/frontend/org_graph_app.js";
 const TASKS_PATH = "g3ku/web/frontend/org_graph_tasks.js";
-const TASK_VIEW_CODE = fs.readFileSync(TASK_VIEW_PATH, "utf8");
-const APP_CODE = fs.readFileSync(APP_PATH, "utf8");
-const TASKS_CODE = fs.readFileSync(TASKS_PATH, "utf8");
+const TASK_VIEW_CODE = readFrontendSources(["task_view"]).join("\n");
+const APP_CODE = readFrontendSources(["app"]).join("\n");
+const TASKS_CODE = readFrontendSources(["tasks"]).join("\n");
 
 function matches(el, selector) {
     const parts = String(selector || "").split(",").map((s) => s.trim()).filter(Boolean);

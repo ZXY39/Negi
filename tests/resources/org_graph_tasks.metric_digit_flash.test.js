@@ -2,6 +2,7 @@ const test = require("node:test");
 const assert = require("node:assert/strict");
 const fs = require("node:fs");
 const vm = require("node:vm");
+const { readFrontendSources } = require("./support/frontend_sources.js");
 
 // 任务卡片 token 增长的逐位呼吸契约：
 // 卡片上的数最多到 10 位，而一次模型调用只动最低几位，所以动画只许落在
@@ -9,7 +10,7 @@ const vm = require("node:vm");
 
 const TASKS_PATH = "g3ku/web/frontend/org_graph_tasks.js";
 const CSS_PATH = "g3ku/web/frontend/org_graph.css";
-const TASKS_CODE = fs.readFileSync(TASKS_PATH, "utf8");
+const TASKS_CODE = readFrontendSources(["tasks"]).join("\n");
 
 function loadHelper() {
     const context = {console, JSON, Number, String};

@@ -7,13 +7,14 @@ const sameJson = (actual, expected, message) => assert.equal(JSON.stringify(actu
 const fs = require("node:fs");
 const path = require("node:path");
 const vm = require("node:vm");
+const { readFrontendSources } = require("./support/frontend_sources.js");
 
 // 模型页对「负载均衡组」的契约：route_entries 的读取与回写、左侧组配置列的渲染与增删改、
 // 拖进链的 group 记号，以及提交时带上整份组集合（而不是只有被链引用的那份）。
 
 const ROOT = path.resolve(__dirname, "..", "..");
-const APP_CODE = fs.readFileSync(path.join(ROOT, "g3ku/web/frontend/org_graph_app.js"), "utf8");
-const API_CODE = fs.readFileSync(path.join(ROOT, "g3ku/web/frontend/api_client.js"), "utf8");
+const APP_CODE = readFrontendSources(["app"]).join("\n");
+const API_CODE = readFrontendSources(["api_client"]).join("\n");
 
 function baseContext(elements = {}) {
     return {

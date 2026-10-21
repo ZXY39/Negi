@@ -2,12 +2,13 @@ const test = require("node:test");
 const assert = require("node:assert/strict");
 const fs = require("node:fs");
 const vm = require("node:vm");
+const { readFrontendSources } = require("./support/frontend_sources.js");
 
 const TASK_VIEW_PATH = "g3ku/web/frontend/org_graph_task_view.js";
 const APP_PATH = "g3ku/web/frontend/org_graph_app.js";
 const CSS_PATH = "g3ku/web/frontend/org_graph.css";
-const TASK_VIEW_CODE = fs.readFileSync(TASK_VIEW_PATH, "utf8");
-const APP_CODE = fs.readFileSync(APP_PATH, "utf8");
+const TASK_VIEW_CODE = readFrontendSources(["task_view"]).join("\n");
+const APP_CODE = readFrontendSources(["app"]).join("\n");
 
 const DEAD_REF = "path:temp/tasks/task_c7f1dbfae6e2/verify6_out.txt";
 const CLEANED_TEXT = "完整输出已被清理，仅保留预览片段";
