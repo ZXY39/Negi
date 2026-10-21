@@ -10,7 +10,18 @@ const FRONTEND_DIR = path.resolve(__dirname, "..", "..", "..", "g3ku", "web", "f
 // 不要为了省事把有顶层副作用的脚本塞进别的 bundle。
 const FRONTEND_BUNDLES = Object.freeze({
     vendor: ["vendor/lucide.min.js"],
-    api_client: ["api_client.js"],
+    api_client: [
+        "api/core.js",
+        "api/bootstrap.js",
+        "api/ceo.js",
+        "api/tasks.js",
+        "api/models.js",
+        "api/memory.js",
+        "api/audit.js",
+        "api/resources.js",
+        "api/external.js",
+        "api_client.js",
+    ],
     bootstrap: ["org_graph_bootstrap.js"],
     task_view: ["org_graph_task_view.js"],
     app: ["org_graph_app.js"],

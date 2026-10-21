@@ -2,9 +2,10 @@ const test = require("node:test");
 const assert = require("node:assert/strict");
 const fs = require("node:fs");
 const vm = require("node:vm");
+const { readFrontendSources } = require("./support/frontend_sources.js");
 
 const CLIENT_PATH = "g3ku/web/frontend/api_client.js";
-const CLIENT_CODE = fs.readFileSync(CLIENT_PATH, "utf8");
+const CLIENT_CODE = readFrontendSources(["api_client"]).join("\n");
 
 // 删除请求不允许带客户端超时：服务端要先 rmtree 目录再重建资源树，耗时不可预估。
 // 10s 默认超时会把"已经删成功"的请求报成 Request timeout（实盘症状），

@@ -10,7 +10,7 @@ const HTML_PATH = "g3ku/web/frontend/org_graph.html";
 const CSS_PATH = "g3ku/web/frontend/org_graph.css";
 
 const APP_CODE = readFrontendSources(["app"]).join("\n");
-const API_CLIENT_CODE = fs.readFileSync(API_CLIENT_PATH, "utf8");
+const API_CLIENT_CODE = readFrontendSources(["api_client"]).join("\n");
 const HTML_CODE = fs.readFileSync(HTML_PATH, "utf8");
 const CSS_CODE = fs.readFileSync(CSS_PATH, "utf8");
 
