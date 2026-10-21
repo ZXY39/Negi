@@ -602,7 +602,7 @@ test("未就绪的首点先下载、下完才继续，被关掉的设备不碰�
 });
 
 test("录音入口先问就绪，再要麦克风权限", () => {
-    const source = fs.readFileSync("g3ku/web/frontend/org_graph_app.js", "utf8").replace(/\r\n/g, "\n");
+    const source = APP_CODE;
     const start = source.slice(source.indexOf("async function startCeoVoiceCapture"));
     assert.ok(
         start.indexOf("ensureCeoVoiceEngine()") < start.indexOf("navigator.mediaDevices.getUserMedia("),
