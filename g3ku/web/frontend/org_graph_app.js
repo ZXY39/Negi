@@ -4201,6 +4201,14 @@ function removeCeoCompressionLiveDivider() {
 
 function syncCeoCompressionDivider() {
     if (!U.ceoFeed || typeof U.ceoFeed.querySelector !== "function") return;
+    // 整页重建/回合收尾会在批次中间写缓存并触发这里；若当场 append，线会落在
+    // 第一条已渲染消息之后，随后 79 条消息都长在它下面。批次内只记位，等最外层
+    // 批次结束再挂，线才始终在 feed 尾部。
+    if (ceoFeedBatchDepth > 0) {
+        ceoCompressionSyncQueued = true;
+        return;
+    }
+    ceoCompressionSyncQueued = false;
     ensureCeoContextCompressionPolling();
     const state = activeCeoSessionCompressionState();
     const running = !!state;
@@ -8041,6 +8049,7 @@ function scrollCeoFeedToBottom() {
 }
 
 let ceoFeedBatchDepth = 0;
+let ceoCompressionSyncQueued = false;
 
 // preserve 模式的滚动快照:贴底标志 + 上滚时的元素锚点 + 像素兜底。
 // 旧实现是纯像素 clamp(min(prevTop, maxTop)):直播重建导致内容高度变化(展开的
@@ -8107,6 +8116,11 @@ function withCeoFeedBatch(mutator, { scrollMode = "preserve" } = {}) {
         ceoFeedBatchDepth = Math.max(0, ceoFeedBatchDepth - 1);
     }
     if (ceoFeedBatchDepth > 0) return result;
+    // 批次内只排队一次；把 live-only 的 running 线放到所有消息之后，再算滚动。
+    if (ceoCompressionSyncQueued) {
+        ceoCompressionSyncQueued = false;
+        syncCeoCompressionDivider();
+    }
     if (scrollMode === "bottom") {
         scrollCeoFeedToBottom();
     } else {

@@ -232,7 +232,7 @@ function loadApp() {
             refreshCeoComposerUsageEstimate, syncCeoModelModePanelUsage,
             startCeoContextCompressionPolling, applyCeoContextCompressionStatus,
             adoptCeoContextCompression, mirrorCeoContextCompression,
-            convertCeoRunningDividerToTerminal,
+            convertCeoRunningDividerToTerminal, withCeoFeedBatch,
             CEO_BRAIN_LONG_PRESS_MS, CEO_COMPRESSION_POLL_FAIL_LIMIT,
         };`,
         context
@@ -1056,4 +1056,26 @@ test("P1-b 终局就地改线：running -> completed，不先消失", () => {
     assert.equal(after[0].dataset.ceoCompressionState, "completed");
     assert.match(after[0].innerHTML, /会话已压缩/);
     assert.equal(String(after[0].className).includes("is-completed"), true);
+});
+
+test("P1-b 批次内 sync 延迟到批次结束，running 线在 feed 尾部", () => {
+    const api = loadApp();
+    api.S.ceoContextCompressionStatus = "running";
+    api.S.ceoContextCompressionSessionId = "web:test";
+    const feed = new api.StubHTMLElement();
+    api.U.ceoFeed = feed;
+
+    api.withCeoFeedBatch(() => {
+        const first = new api.StubHTMLElement();
+        first.className = "message system";
+        feed.appendChild(first);
+        api.syncCeoCompressionDivider();
+        const second = new api.StubHTMLElement();
+        second.className = "message system";
+        feed.appendChild(second);
+    });
+
+    assert.equal(feed.children.length, 3);
+    assert.equal(String(feed.children[2].className).includes("is-running"), true);
+    assert.equal(feed.children[2].dataset.ceoCompressionState, "running");
 });
