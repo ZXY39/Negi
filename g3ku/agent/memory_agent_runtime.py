@@ -3374,6 +3374,8 @@ class MemoryManager:
             "- retirements 每条必须给出 line（这条记忆在「待归并记忆」里的编号）和落进的 note_ref，"
             "编号只能取上面列出的那些。\n"
             "- 找不到分类的记忆不要退场；全都没有去处时单独提交 no_consolidation_reason。\n"
+            "- 分类 note 正文内部按 ## 方法论 / ## 经验教训 / ## 用户偏好 分节，顺序固定、空节可省；"
+            "方法论那一节每行保留判定条件（什么情况该打开它），不能只写主题词。\n"
             f"{repair_block}"
         )
 
