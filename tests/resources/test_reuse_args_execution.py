@@ -25,7 +25,6 @@ from g3ku.runtime import tool_arg_stash
 from g3ku.runtime.frontdoor._ceo_runtime_ops import CeoFrontDoorRuntimeOps
 from g3ku.runtime.frontdoor.tool_contract import _render_frontdoor_stage_gate_summary
 from g3ku.runtime.tool_contract_block import render_tool_contract_block
-from g3ku.runtime.tool_result_status import is_error_like_tool_result
 from g3ku.runtime.tool_impulse import (
     REUSE_PLAN_CONTRACT_ABSENT,
     REUSE_PLAN_EXECUTE,
@@ -34,6 +33,7 @@ from g3ku.runtime.tool_impulse import (
     plan_reuse_execution,
     split_reuse_arguments,
 )
+from g3ku.runtime.tool_result_status import is_error_like_tool_result
 from main.models import NodeRecord
 from main.runtime.node_prompt_contract import _render_node_stage_gate_summary
 from main.runtime.react_loop import ReActToolLoop
