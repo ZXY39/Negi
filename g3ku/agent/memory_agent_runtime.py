@@ -243,7 +243,7 @@ class MemoryStrategyV2:
     def __init__(self, config: Any):
         self.config = config
         self._review_interval_turns = max(int(getattr(config.queue, "review_interval_turns", 10) or 10), 1)
-        self._document_max_chars = max(int(getattr(config.document, "document_max_chars", 20000) or 20000), 1)
+        self._document_max_chars = max(int(getattr(config.document, "document_max_chars", 42000) or 42000), 1)
 
     def classify_memory_payload(
         self,
@@ -2231,7 +2231,7 @@ class MemoryManager:
         validate_memory_document(
             entries_text,
             summary_max_chars=int(getattr(self.config.document, "summary_max_chars", 300) or 300),
-            document_max_chars=max(int(getattr(self.config.document, "document_max_chars", 20000) or 20000), 1),
+            document_max_chars=max(int(getattr(self.config.document, "document_max_chars", 42000) or 42000), 1),
         )
 
     def _managed_document_text(self, entries_text: str) -> str:
@@ -2341,7 +2341,7 @@ class MemoryManager:
                     "changed": False,
                     "resident_chars_after": self._resident_memory_chars(),
                     "compress_trigger_chars": int(getattr(self.config.document, "compress_trigger_chars", 16000) or 16000),
-                    "document_max_chars": int(getattr(self.config.document, "document_max_chars", 20000) or 20000),
+                    "document_max_chars": int(getattr(self.config.document, "document_max_chars", 42000) or 42000),
                 }
             rows_before = repo.list_memories()
             if not repo.mark_uncompressed(target_id):
@@ -2360,7 +2360,7 @@ class MemoryManager:
             "changed": True,
             "resident_chars_after": self._resident_memory_chars(),
             "compress_trigger_chars": int(getattr(self.config.document, "compress_trigger_chars", 16000) or 16000),
-            "document_max_chars": int(getattr(self.config.document, "document_max_chars", 20000) or 20000),
+            "document_max_chars": int(getattr(self.config.document, "document_max_chars", 42000) or 42000),
         }
 
     async def update_note(self, ref: str, *, body: str) -> dict[str, Any]:
@@ -2392,7 +2392,7 @@ class MemoryManager:
         snapshot_text = self.snapshot_text()
         entries_text, consolidation_text = split_consolidation_block(snapshot_text)
         summary_limit = int(getattr(self.config.document, "summary_max_chars", 300) or 300)
-        document_limit = int(getattr(self.config.document, "document_max_chars", 20000) or 20000)
+        document_limit = int(getattr(self.config.document, "document_max_chars", 42000) or 42000)
         document_error = ""
         document_valid = True
         try:
@@ -3099,7 +3099,7 @@ class MemoryManager:
         validate_memory_document(
             document_text,
             summary_max_chars=int(getattr(self.config.document, "summary_max_chars", 300) or 300),
-            document_max_chars=int(getattr(self.config.document, "document_max_chars", 20000) or 20000),
+            document_max_chars=int(getattr(self.config.document, "document_max_chars", 42000) or 42000),
         )
         note_refs = self._legacy_note_refs_from_text(document_text)
         missing_refs = sorted(ref for ref in note_refs if ref not in note_writes and ref not in self._note_file_refs())
@@ -5918,14 +5918,18 @@ class MemoryManager:
             "- 所有修改用一次 memory_apply_batch 交清；预览不对可以改完重交，后一版覆盖前一版并作废它的确认。\n"
             "- 行号就是正文每行开头的 `N|`，填进 rewrites/deletes/inspired_lines，不要把它抄进 content。\n"
             "- adds 条目必须包含 content、minimal_memory 和 decision_source。\n"
-            "- content 写法按来源分：decision_source=user 写成陈述句（用户偏好什么、某对象是什么），"
-            "不要写成给自己的命令；decision_source=self 写成条件+要求（当……时，要……）。\n"
+            "- content 写法按类型分：用户偏好写成陈述句（用户偏好什么、某对象是什么），"
+            "不要写成给自己的命令；经验教训写成条件+要求（当……时，要……）；"
+            "方法论写成读取时机+触发条件——步骤说不清就挂 note_play_ 开头的 note，说得清就不挂。\n"
+            "- decision_source 照实填（user=用户本轮亲口给的，self=你复核提炼的），"
+            "它只决定来源标记，不决定写法，也不决定存活。\n"
             "- rewrites 条目必须包含 line（正文行首那个行号）、content 和 minimal_memory；"
             "系统保留原来源并维护该行的日期。\n"
             "- delete 请求要解析成当前正文里的行号，并把这些行号放进 deletes。\n"
             "- delete 批次没有零变更出口：目标内容已不在当前正文里（已被改写或被更早的批次删掉）时，"
             "单独提交 already_satisfied 说明已满足，不要提交 noop_reason。\n"
-            "- note_upserts 只写需要新增或整体重写的 note，新建的名字必须以 `note_` 开头。\n"
+            "- note_upserts 只写需要新增或整体重写的 note，新建的名字必须以 `note_` 开头"
+            "（方法论用 `note_play_` 前缀）。\n"
             "- note_edits 改已有 note 的局部：{note名: [{old_text, new_text}]}，old_text 必须唯一命中一次，"
             "new_text 留空即删掉这段。改一两个段落用 note_edits，不要用 note_upserts 重交整份。\n"
             "- 归并区列出的分类 note 也可以这样改（内容错误或过时时）；不要新建分类 note，"
@@ -5933,7 +5937,8 @@ class MemoryManager:
             "- 整个分类要摘掉时把它那一行末尾括号里的句柄放进 category_deletes（写分类名也算命中）；"
             "这一批会删掉归进该分类的全部已退场记忆，分类 note 正文与归档文件都不删。\n"
             "- inspired_lines 可选，填当前正文里对本批判断有实质帮助的行号。\n"
-            "- minimal_memory 写成 `条件->要求关键词`。\n"
+            "- minimal_memory 写成 `条件->要求关键词`；方法论无 note 时右侧写做法本身，"
+            "有 note 时右侧写 `读 note_play_xxx`，两种都保留箭头左侧的触发条件。\n"
             "- 一条记忆要挂 note 时，在 adds/rewrites 条目里给 `note_ref`（note 文件名，不带 .md）；"
             "正文里写 `ref:` 或 `见noteid:` 不再建立关系，会被打回。\n"
             "- 正文里 `note:` 后面那串是读取句柄，`memory_read_note` 两种写法都认；写 note 用上面那个文件名。\n"
@@ -6238,7 +6243,7 @@ class MemoryManager:
             )
 
         document_text = "".join(format_memory_entry(entry) for entry in after_entries)
-        document_limit = max(int(getattr(self.config.document, "document_max_chars", 20000) or 20000), 1)
+        document_limit = max(int(getattr(self.config.document, "document_max_chars", 42000) or 42000), 1)
         try:
             validate_memory_document(
                 document_text,
