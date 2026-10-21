@@ -17,8 +17,10 @@ def _run_node_script(script: str) -> dict[str, object]:
         encoding="utf-8",
         capture_output=True,
         cwd=REPO_ROOT,
-        check=True,
+        check=False,
     )
+    if completed.returncode != 0:
+        raise AssertionError(completed.stderr.strip() or completed.stdout.strip())
     return json.loads(completed.stdout.strip())
 
 
@@ -28,7 +30,7 @@ def test_org_graph_app_blocks_role_chain_save_until_required_scopes_are_filled()
         const fs = require("fs");
         const vm = require("vm");
 
-        const APP_CODE = fs.readFileSync("g3ku/web/frontend/org_graph_app.js", "utf8");
+        const APP_CODE = ["g3ku/web/frontend/models/role-store.js", "g3ku/web/frontend/org_graph_app.js"].map((name) => fs.readFileSync(name, "utf8")).join("\\n");
 
         class StubElement {
           constructor(id = "") {
@@ -159,6 +161,7 @@ def test_org_graph_app_blocks_role_chain_save_until_required_scopes_are_filled()
           addMsg: () => {},
           showToast: (payload) => {
             toastCalls.push(payload);
+            elements["app-toast-text"].textContent = String(payload?.text || "");
           },
           patchCeoSessionRuntimeState: () => false,
           setCeoSessionSnapshotCache: () => ({}),

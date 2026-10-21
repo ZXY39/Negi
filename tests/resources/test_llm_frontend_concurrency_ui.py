@@ -214,7 +214,7 @@ def test_api_client_maps_duplicate_binding_name_error_code_to_clear_message() ->
         global.fetch = () => {
           throw new Error("fetch should not be called in this test");
         };
-        const code = fs.readFileSync("g3ku/web/frontend/api_client.js", "utf8");
+        const code = ["g3ku/web/frontend/client_api/core.js", "g3ku/web/frontend/client_api/models.js", "g3ku/web/frontend/api_client.js"].map((name) => fs.readFileSync(name, "utf8")).join("\\n");
         vm.runInThisContext(code);
 
         console.log(JSON.stringify({
@@ -236,7 +236,7 @@ def test_api_client_maps_empty_model_chain_backend_message_to_clear_text() -> No
         global.fetch = () => {
           throw new Error("fetch should not be called in this test");
         };
-        const code = fs.readFileSync("g3ku/web/frontend/api_client.js", "utf8");
+        const code = ["g3ku/web/frontend/client_api/core.js", "g3ku/web/frontend/client_api/models.js", "g3ku/web/frontend/api_client.js"].map((name) => fs.readFileSync(name, "utf8")).join("\\n");
         vm.runInThisContext(code);
 
         console.log(JSON.stringify({
@@ -268,7 +268,7 @@ def test_api_client_update_llm_binding_returns_item_and_runtime_refresh() -> Non
             },
           }),
         });
-        const code = fs.readFileSync("g3ku/web/frontend/api_client.js", "utf8");
+        const code = ["g3ku/web/frontend/client_api/core.js", "g3ku/web/frontend/client_api/models.js", "g3ku/web/frontend/api_client.js"].map((name) => fs.readFileSync(name, "utf8")).join("\\n");
         vm.runInThisContext(code);
 
         ApiClient.updateLlmBinding("m", { retry_count: 4 }).then((value) => {
@@ -294,7 +294,7 @@ def test_api_client_update_managed_model_uses_extended_timeout_for_save_requests
         global.fetch = () => {
           throw new Error("fetch should not be called in this test");
         };
-        const code = fs.readFileSync("g3ku/web/frontend/api_client.js", "utf8");
+        const code = ["g3ku/web/frontend/client_api/core.js", "g3ku/web/frontend/client_api/models.js", "g3ku/web/frontend/api_client.js"].map((name) => fs.readFileSync(name, "utf8")).join("\\n");
         vm.runInThisContext(code);
 
         const captured = [];
@@ -326,7 +326,7 @@ def test_api_client_update_llm_config_uses_extended_timeout_for_save_requests() 
         global.fetch = () => {
           throw new Error("fetch should not be called in this test");
         };
-        const code = fs.readFileSync("g3ku/web/frontend/api_client.js", "utf8");
+        const code = ["g3ku/web/frontend/client_api/core.js", "g3ku/web/frontend/client_api/models.js", "g3ku/web/frontend/api_client.js"].map((name) => fs.readFileSync(name, "utf8")).join("\\n");
         vm.runInThisContext(code);
 
         const captured = [];
@@ -367,7 +367,7 @@ def test_api_client_delete_llm_binding_returns_runtime_refresh() -> None:
             },
           }),
         });
-        const code = fs.readFileSync("g3ku/web/frontend/api_client.js", "utf8");
+        const code = ["g3ku/web/frontend/client_api/core.js", "g3ku/web/frontend/client_api/models.js", "g3ku/web/frontend/api_client.js"].map((name) => fs.readFileSync(name, "utf8")).join("\\n");
         vm.runInThisContext(code);
 
         ApiClient.deleteLlmBinding("m").then((value) => {
