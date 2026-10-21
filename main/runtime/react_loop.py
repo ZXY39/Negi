@@ -5438,7 +5438,7 @@ class ReActToolLoop:
             for index, entry in enumerate(entries):
                 entry_arguments = dict(entry.get(tool_arg_stash.ARGS_FIELD) or {})
                 try:
-                    rendered = await self._execute_tool(
+                    rendered, entry_status = await self._execute_tool_with_status(
                         tools=tools,
                         tool_name=name,
                         arguments=entry_arguments,
@@ -5447,12 +5447,13 @@ class ReActToolLoop:
                 except Exception as exc:
                     # 一份抛异常只作废那一份：整批 raise 出去，模型看到的就还是"这批没跑"，
                     # 于是重发 reuse_args 把已成功的那些再跑一遍。
-                    rendered = f'Error: {describe_exception(exc)}'
+                    rendered, entry_status = f'Error: {describe_exception(exc)}', 'error'
                 text = str(rendered or '')
                 item: dict[str, Any] = {
                     'index': index,
                     'args_digest': str(entry.get(tool_arg_stash.DIGEST_FIELD) or tool_arg_stash.args_digest(entry_arguments)),
-                    'ok': not is_error_like_tool_result(text),
+                    # 成败取执行侧按**原始结果**算出的那个（外置后的信封文本认不出失败）。
+                    'ok': entry_status != 'error',
                 }
                 item['error' if item['ok'] is False else 'result'] = text
                 items.append(item)
@@ -5590,28 +5591,58 @@ class ReActToolLoop:
         tool_name: str,
         delivery_metadata: dict[str, Any] | None = None,
     ) -> str:
+        text, _status = self._render_tool_message_with_status(
+            result,
+            runtime_context=runtime_context,
+            tool_name=tool_name,
+            delivery_metadata=delivery_metadata,
+        )
+        return text
+
+    def _render_tool_message_with_status(
+        self,
+        result: Any,
+        *,
+        runtime_context: dict[str, Any],
+        tool_name: str,
+        delivery_metadata: dict[str, Any] | None = None,
+    ) -> tuple[str, str]:
+        """渲染 + 外置，并把**按原始结果**算出的成败一起带出来。
+
+        批量执行不能拿渲染后的文本反推成败：超出内联额度的失败结果会被换成
+        `Tool call failed: …` 信封（`g3ku/content/navigation.py` 的 opening），它既不以
+        "Error" 开头也不是 JSON，文本判据会把它读成成功。
+        """
         rendered = result if isinstance(result, str) else self._render_tool_result(result)
         metadata = dict(delivery_metadata or {})
         metadata.setdefault(
             'tool_status',
             self._tool_message_status(result if result is not None else rendered),
         )
-        return self._externalize_message_content(
+        text = self._externalize_message_content(
             rendered,
             runtime_context=runtime_context,
             display_name=f'tool:{tool_name}',
             source_kind=f'tool_result:{tool_name}',
             delivery_metadata=metadata,
         )
+        return text, str(metadata.get('tool_status') or 'success')
 
-    async def _execute_tool(self, *, tools: dict[str, Tool], tool_name: str, arguments: dict[str, Any], runtime_context: dict[str, Any]) -> str:
+    async def _execute_tool_with_status(
+        self,
+        *,
+        tools: dict[str, Tool],
+        tool_name: str,
+        arguments: dict[str, Any],
+        runtime_context: dict[str, Any],
+    ) -> tuple[str, str]:
         result = await self._execute_tool_raw(
             tools=tools,
             tool_name=tool_name,
             arguments=arguments,
             runtime_context=runtime_context,
         )
-        return self._render_tool_message_content(
+        return self._render_tool_message_with_status(
             result,
             runtime_context=runtime_context,
             tool_name=tool_name,
@@ -5621,6 +5652,15 @@ class ReActToolLoop:
                 arguments=arguments,
             ),
         )
+
+    async def _execute_tool(self, *, tools: dict[str, Tool], tool_name: str, arguments: dict[str, Any], runtime_context: dict[str, Any]) -> str:
+        text, _status = await self._execute_tool_with_status(
+            tools=tools,
+            tool_name=tool_name,
+            arguments=arguments,
+            runtime_context=runtime_context,
+        )
+        return text
 
     @staticmethod
     def _tool_result_delivery_metadata(*, tools: dict[str, Tool], tool_name: str, arguments: dict[str, Any] | None = None) -> dict[str, Any]:
