@@ -3415,6 +3415,8 @@ class TaskLogService:
                     )
                 )
             grafted_used = sum(1 for round_item in grafted_rounds if bool(round_item.budget_counted))
+            # 模型提交的预算是"接下来还能用多少轮"；宽限轮由运行时自动并入，
+            # 不从模型侧扣预算，也不需要模型在总结或目标里为它们留位。
             next_stage = ExecutionStageRecord(
                 stage_id=new_stage_id(),
                 stage_index=next_stage_index,
@@ -3429,8 +3431,8 @@ class TaskLogService:
                 archive_ref='',
                 archive_stage_index_start=0,
                 archive_stage_index_end=0,
-                tool_round_budget=normalized_budget,
-                tool_rounds_used=min(normalized_budget, grafted_used),
+                tool_round_budget=normalized_budget + grafted_used,
+                tool_rounds_used=grafted_used,
                 created_at=now,
                 finished_at='',
                 rounds=grafted_rounds,

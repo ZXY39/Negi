@@ -54,21 +54,19 @@ STAGE_TURN_END_SUMMARY_POINTER = "本阶段结论已随当轮最终回复交付�
 # 宽限执行(free-pass)提醒:撞闸工具照常执行、结果正常返回时追加到 result_text 的说明。
 # 无活动阶段与预算耗尽两情形文案不同(记账归属分别为待入账孤儿轮 / 本阶段溢出轮)。
 STAGELESS_FREE_PASS_REMINDER = (
-    "[Stage gate reminder] This call ran under a grace pass with no active stage; the result was returned "
-    "normally and booked as a pending round. If you need to keep calling tools next round, you must submit "
-    "submit_next_stage in the same batch; otherwise next round's calls will be blocked."
+    "[Stage gate reminder] This call ran without an active stage; the result was returned normally. "
+    "If you need to keep calling tools next round, you must submit submit_next_stage in the same batch; "
+    "otherwise next round's calls will be blocked."
 )
 STAGE_BUDGET_EXHAUSTED_FREE_PASS_REMINDER = (
-    "[Stage gate reminder] The current stage's budget is exhausted; this call ran under a grace pass and is "
-    "booked as an overflow round of this stage (it does not count against the budget). If you need to keep "
-    "calling tools next round, you must submit submit_next_stage in the same batch to open the next stage; "
-    "otherwise calls will be blocked."
+    "[Stage gate reminder] The current stage's budget is exhausted; this call ran anyway and the result was "
+    "returned normally. If you need to keep calling tools next round, you must submit submit_next_stage in the "
+    "same batch to open the next stage; otherwise calls will be blocked."
 )
 STAGE_BUDGET_EXHAUSTION_PREDICTED_REMINDER_TEMPLATE = (
     "[Stage budget] The current stage's tool-round budget will be exhausted after this round "
     "({used}/{budget} used up). If you need to keep calling tools next round, submit them in the same batch "
-    "as submit_next_stage; a lone call still runs once under a grace pass and is booked as an overflow round "
-    "of this stage, and only a lone call after that is blocked."
+    "as submit_next_stage; a lone call still runs once, and only a lone call after that is blocked."
 )
 
 

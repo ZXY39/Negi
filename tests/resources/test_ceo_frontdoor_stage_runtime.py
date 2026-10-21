@@ -383,7 +383,8 @@ async def test_frontdoor_stage_gate_graces_first_stageless_tool_then_blocks_the_
     )
     first_text = str(first_row.get("content") or "")
     assert first_text.startswith('{\"ok\": true, \"value\": \"alpha\"}')
-    assert "grace pass with no active stage" in first_text
+    assert "This call ran without an active stage" in first_text
+    assert "booked as a pending round" not in first_text
     assert executed == ["alpha"]
     assert list((first_update.get("frontdoor_stage_state") or {}).get("pending_orphan_rounds") or [])
 
@@ -479,7 +480,7 @@ async def test_frontdoor_stage_budget_exhaustion_updates_gate_and_blocks_next_or
         call_id="call-tool-2",
     )
     grace_text = str(grace_row.get("content") or "")
-    assert "The current stage's budget is exhausted" in grace_text and "ran under a grace pass" in grace_text
+    assert "The current stage's budget is exhausted" in grace_text and "this call ran anyway" in grace_text
     assert executed == ["alpha", "beta"]
 
     blocked_state = {**exhausted_state, "frontdoor_stage_state": grace_update["frontdoor_stage_state"]}

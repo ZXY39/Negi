@@ -51,10 +51,8 @@ def _execution_stage_budget_accounting_note(active: dict[str, Any]) -> str:
     note = (
         ' Budget accounting is decided by the runtime, never guessed from tool names: '
         f'the only tools that do not add to this stage `tool_rounds_used` are {non_budget_tools}. '
-        'Whether a call is allowed still follows the stage gate and what the runtime returns: a gated ordinary '
-        'tool call runs once under a grace pass the first time (the result comes back normally with a grace '
-        'reminder; without an active stage it books a pending round, on an exhausted stage it books an overflow '
-        'round), and only a later violation is hard-blocked. '
+        'Whether a call is allowed still follows the stage gate and what the runtime returns: a lone ordinary '
+        'tool call runs once, and only a later violation is hard-blocked. '
         'Whether a recorded round cost budget is decided only by `budget_counted` on that round, which is the '
         'authoritative field; `tool_rounds_used` counts rounds with `budget_counted=true`.'
     )
@@ -85,7 +83,7 @@ def build_ceo_stage_overlay(stage_gate: dict[str, Any] | None) -> str | None:
             f'(pass a concise `stage_goal` and a `tool_round_budget` between {STAGE_TOOL_ROUND_BUDGET_MIN} and '
             f'{STAGE_TOOL_ROUND_BUDGET_MAX}): `submit_next_stage` runs first, then the target tool lands as the '
             'first round of the new stage and counts against its budget. '
-            'A lone ordinary tool call only gets one grace pass; the next violation is blocked. '
+            'A lone ordinary tool call runs once without an active stage; the next lone call is blocked. '
             'If this round needs no tool, reply directly.'
         )
     used = int(active.get('tool_rounds_used') or 0)
@@ -178,32 +176,20 @@ def build_execution_stage_overlay(*, node_kind: str, stage_gate: dict[str, Any])
         return None
     active = stage_gate.get('active_stage') if isinstance(stage_gate.get('active_stage'), dict) else None
     if not isinstance(active, dict):
-        pending_note = ''
-        pending = list(stage_gate.get('pending_orphan_rounds') or []) if isinstance(stage_gate, dict) else []
-        if pending:
-            pending_counted = sum(1 for item in pending if bool(item.get('budget_counted')))
-            pending_note = (
-                f' You already have {len(pending)} grace rounds pending accounting ({pending_counted} of them will '
-                'consume budget); the next `submit_next_stage` merges them into the new stage and charges its '
-                'budget, so cover them in stage_goal / completed_stage_summary and set tool_round_budget to at '
-                f'least {len(pending)} plus the rounds you still need.'
-            )
         if normalized_kind == 'acceptance':
             return (
                 'There is no active stage. If you need tools, submit `submit_next_stage` in the same message as '
                 f'the target tool (write a clear `stage_goal` and a `tool_round_budget` between '
                 f'{STAGE_TOOL_ROUND_BUDGET_MIN} and {STAGE_TOOL_ROUND_BUDGET_MAX}): submit_next_stage runs first, '
                 'then the target tools book the first round of the new stage and count against its budget. '
-                'A lone ordinary tool call only gets one grace pass; the next violation is blocked.'
-                f'{pending_note}'
+                'A lone ordinary tool call runs once without an active stage; the next lone call is blocked.'
             )
         return (
             'There is no active stage. If you need tools, submit `submit_next_stage` in the same message as '
             f'the target tool (write a clear `stage_goal` and a `tool_round_budget` between '
             f'{STAGE_TOOL_ROUND_BUDGET_MIN} and {STAGE_TOOL_ROUND_BUDGET_MAX}): submit_next_stage runs first, '
             'then the target tools book the first round of the new stage and count against its budget. '
-            'A lone ordinary tool call only gets one grace pass; the next violation is blocked.'
-            f'{pending_note}'
+            'A lone ordinary tool call runs once without an active stage; the next lone call is blocked.'
         )
     used = int(active.get('tool_rounds_used') or 0)
     budget = int(active.get('tool_round_budget') or 0)
@@ -228,8 +214,7 @@ def build_execution_stage_overlay(*, node_kind: str, stage_gate: dict[str, Any])
                 'creating it, weigh the checks already done and never repeat the previous budget '
                 f'{previous_budget or budget} mechanically; if the previous stage did not converge, raise the '
                 f'budget for the remaining verification work, but never above {STAGE_TOOL_ROUND_BUDGET_MAX}. '
-                'A lone ordinary tool call only gets one grace pass (booked as an overflow round of this stage); '
-                'the next violation is blocked.'
+                'A lone ordinary tool call runs once; the next lone call is blocked. '
                 f'{_execution_stage_budget_accounting_note(active)}'
             )
         return (
@@ -240,8 +225,7 @@ def build_execution_stage_overlay(*, node_kind: str, stage_gate: dict[str, Any])
             'weigh the overall goal and the completed stage results and never repeat the previous budget '
             f'{previous_budget or budget} mechanically; if the previous stage did not converge, raise the budget '
             f'for the remaining work, but never above {STAGE_TOOL_ROUND_BUDGET_MAX}. '
-            'A lone ordinary tool call only gets one grace pass (booked as an overflow round of this stage); '
-            'the next violation is blocked.'
+            'A lone ordinary tool call runs once; the next lone call is blocked. '
             f'{_execution_stage_budget_accounting_note(active)}'
         )
     if normalized_kind == 'acceptance':

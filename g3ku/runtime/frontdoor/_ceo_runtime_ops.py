@@ -6222,6 +6222,7 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
         preamble_text: str = "",
         system_generated: bool = False,
         drop_completed_stage_tool_detail: bool = False,
+        include_pending_in_budget: bool = True,
     ) -> tuple[dict[str, Any], dict[str, Any]]:
         normalized_state = cls._frontdoor_stage_state_snapshot({"frontdoor_stage_state": stage_state})
         normalized_goal = str(stage_goal or "").strip()
@@ -6296,6 +6297,16 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
         grafted_used = sum(
             1 for round_item in grafted_rounds if bool(round_item.get("budget_counted"))
         )
+        stage_budget = (
+            normalized_budget + grafted_used
+            if include_pending_in_budget
+            else normalized_budget
+        )
+        stage_rounds_used = (
+            grafted_used
+            if include_pending_in_budget
+            else min(normalized_budget, grafted_used)
+        )
         next_stage = {
             "stage_id": next_stage_id,
             "stage_index": next_stage_index,
@@ -6308,8 +6319,8 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
             "completed_stage_summary": "",
             "final_stage": bool(final),
             "key_refs": [],
-            "tool_round_budget": normalized_budget,
-            "tool_rounds_used": min(normalized_budget, grafted_used),
+            "tool_round_budget": stage_budget,
+            "tool_rounds_used": stage_rounds_used,
             "created_at": now,
             "finished_at": "",
             "rounds": grafted_rounds,
@@ -6881,6 +6892,7 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
             final=False,
             preamble_text=first_round_text,
             system_generated=True,
+            include_pending_in_budget=False,
         )
         return absorbed
 
@@ -10026,7 +10038,7 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
                         on_progress=on_progress,
                         tool_call_id=str(payload.get("id") or "").strip() or None,
                     )
-                return str(reuse_text or "")
+                return str(reuse_text or ""), str(status or "success")
 
             reuse_content = await self._frontdoor_reuse_args_execution(
                 tool_name=tool_name,

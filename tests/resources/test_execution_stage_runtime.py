@@ -436,7 +436,8 @@ async def test_execution_stage_predicted_reminder_skips_batch_that_already_opens
             f"budget will be exhausted after this round "
             f"({STAGE_TOOL_ROUND_BUDGET_MIN - 1}/{STAGE_TOOL_ROUND_BUDGET_MIN} used up)"
         ) in predicted
-        assert "a lone call still runs once under a grace pass and is booked as an overflow round" in predicted
+        assert "a lone call still runs once" in predicted
+        assert "only a lone call after that is blocked" in predicted
 
         # 同批已含 submit_next_stage：那批普通工具记到新阶段上，按旧阶段预算算出的预告失配。
         assert _predicted([SimpleNamespace(name=STAGE_TOOL_NAME, id='call-2', arguments={}), *ordinary]) == ''
@@ -2228,6 +2229,7 @@ async def test_free_pass_stageless_records_orphan_and_grafts_on_next_stage(tmp_p
         assert snap['pending_orphan_rounds'] == []
         assert len(snap['active_stage']['rounds']) == 1
         assert snap['active_stage']['rounds'][0]['orphan_grafted'] is True
+        assert snap['active_stage']['tool_round_budget'] == 11
         assert snap['active_stage']['tool_rounds_used'] == 1
     finally:
         await service.close()

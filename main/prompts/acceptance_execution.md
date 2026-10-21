@@ -15,7 +15,7 @@
 - `execution_policy` 适用于信息收集、内容编写、工具执行、代码处理等各种任务，而不只是一类特定任务。
 - 若 `execution_policy.mode="focus"`，验收目标是确认关键结果与必要验证是否已经完成；不要仅因未做边缘扩展或系统性全量操作就直接判定失败。
 - 若 `execution_policy.mode="coverage"`，仍先检查关键结果与必要验证；如任务目标明确要求补漏、扩展范围或系统性覆盖，则需据此判断是否完成。
-- 是否允许调用仍以系统门控和工具返回为准（撞闸的普通工具首次宽限执行一次并记溢出轮，宽限用尽后才被硬拦）。
+- 是否允许调用仍以系统门控和工具返回为准（撞闸的普通工具首次仍会执行一次，再次违规才被硬拦）。
 - 校验 `task_node_detail` 时，优先依据其返回的完整执行轨迹字段（`arguments_text` 完整入参、`output_text` 出参正文、`output_ref` 外置完整出参）以及 `final_output_ref`、`check_result_ref` 判断。
 - 优先基于输出摘要、结构化结果和证据摘要判断；只有这些信息不足以完成校验时，才使用 `content_search` / `content_open` 访问 `artifact:` 引用。
 - 出参正文超限时 `output_text` 只给预览并置 `output_truncated`，完整正文按 `output_ref` 用 `content_search` / `content_open` 局部打开，不要用整段轨迹代替局部核对。

@@ -638,7 +638,7 @@ async def test_graph_execute_tools_free_passes_first_ordinary_tool_without_activ
     assert pending[0]["budget_counted"] is True
     assert pending[0]["tool_names"] == ["echo_tool"]
     assert len(tool_messages) == 1
-    assert "grace pass with no active stage" in str(tool_messages[0]["content"])
+    assert "This call ran without an active stage" in str(tool_messages[0]["content"])
 
 
 @pytest.mark.asyncio
@@ -905,6 +905,7 @@ async def test_graph_execute_tools_grafts_pending_orphan_rounds_into_new_stage(
     assert stage_state["active_stage_id"] == "frontdoor-stage-1"
     assert stage_state["pending_orphan_rounds"] == []
     stage = stage_state["stages"][0]
+    assert stage["tool_round_budget"] == 11
     assert stage["tool_rounds_used"] == 2
     assert len(stage["rounds"]) == 2
     assert stage["rounds"][0]["orphan_grafted"] is True
@@ -1116,8 +1117,9 @@ async def test_graph_execute_tools_attaches_predicted_exhaustion_reminder_on_las
     assert (
         "The current stage's tool-round budget will be exhausted after this round (1/2 used up)" in content
     )
-    # 预告必须说清单调仍会宽限一次，否则模型读到的是与执行期政策相反的威胁。
-    assert "a lone call still runs once under a grace pass and is booked as an overflow round" in content
+    # 预告必须说清单调仍会执行一次，否则模型读到的是与执行期政策相反的威胁。
+    assert "a lone call still runs once" in content
+    assert "only a lone call after that is blocked" in content
     assert "otherwise next round's calls will be blocked" not in content
     assert result["frontdoor_stage_state"]["stages"][0]["tool_rounds_used"] == 2
 

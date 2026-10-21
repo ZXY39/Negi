@@ -62,7 +62,7 @@ def test_ceo_prompt_builder_includes_co_batch_stage_protocol_and_free_pass_rule(
     prompt = CeoPromptBuilder(loop=SimpleNamespace(workspace=r'D:\projects\G3KU')).build(skills=[])
 
     assert '必须把 `submit_next_stage` 与目标工具在同一条消息里一起提交' in prompt
-    assert '无活动阶段下单独调用普通工具只有一次宽限执行机会' in prompt
+    assert '无活动阶段下单独调用普通工具只有一次机会' in prompt
 
 
 def test_ceo_prompt_builder_visible_skills_block_requires_active_stage() -> None:

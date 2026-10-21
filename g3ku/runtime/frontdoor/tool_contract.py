@@ -678,23 +678,14 @@ def _render_stage_summary(stage_summary: dict[str, Any] | None) -> str:
     active_stage_id = str(payload.get('active_stage_id') or '').strip() or 'none'
     transition_required = bool(payload.get('transition_required'))
     active_stage = dict(payload.get('active_stage') or {}) if isinstance(payload.get('active_stage'), dict) else {}
-    pending = [dict(item) for item in list(payload.get('pending_orphan_rounds') or []) if isinstance(item, dict)]
-    pending_counted = sum(1 for round_item in pending if bool(round_item.get('budget_counted')))
     if not active_stage:
         # 两种状态的处置指令（"没有活动阶段""预算耗尽"）都在 `ceo_frontdoor.md` 的阶段闸门
         # 那组条款里写死了，这里只报状态本身；把整段英文处置意见每跳重贴一遍是尾块里最贵
-        # 的一句废话。待入账轮数是状态量，留着。
-        rendered = (
+        # 的一句废话。宽限轮的并入与预算记账由运行时完成，模型侧不需要读这段账。
+        return (
             f'stage_summary: active_stage_id={active_stage_id}; '
             f'transition_required={transition_required}'
         )
-        if pending:
-            rendered += (
-                f' {len(pending)} grace round(s) are still unbooked (of which {pending_counted} will consume budget); '
-                'they will be merged into the new stage you open with the next `submit_next_stage`: cover them in '
-                f'stage_goal / completed_stage_summary and set tool_round_budget to at least {len(pending)} + the rounds you still need.'
-            )
-        return rendered
     parts = [
         f'active_stage_id={active_stage_id}',
         f'transition_required={transition_required}',

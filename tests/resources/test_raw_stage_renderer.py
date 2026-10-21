@@ -251,7 +251,7 @@ def test_retained_raw_stage_messages_normalization_of_full_stage() -> None:
     assert round_two["tool_names"] == ["cat", "ls"]
     assert round_two["tool_call_ids"] == ["c1"]
     assert round_two["budget_counted"] is True
-    assert round_two["orphan_grafted"] is False
+    assert "orphan_grafted" not in round_two
 
     normalized_tool = round_two["tools"][0]
     assert normalized_tool == {
