@@ -51,6 +51,7 @@
 省掉「契约不在场那一跳」的唯一主动手段：派发方在派生时点名几个工具，运行时把它们的契约块直接写进目标节点的 bootstrap。
 
 - 名单**只来自派发方声明**：`create_async_task.seed_tools`（根执行节点）与 `spawn_child_nodes.children[].seed_tools`（子执行节点），两处都是可选数组，缺省即不预置。运行时不给任何机械默认——按 node_kind 猜、按历史高频填都不做。猜错的预置是纯上下文浪费，而机械表会把一次猜测固化进持久历史。验收节点没有这条车道。
+- "这个字段该怎么用"写在**工具级 description** 上（`create_async_task` 的 `resource.yaml` 顶层 `description`、`SpawnChildNodesTool.model_description`），不是写在字段 description 上：`sanitize_provider_parameters_schema` 会递归删掉 parameters 里的每一处 `description`，实测到模型的 `tools[]` 里字段只剩名字和类型。字段级文案留在权威面（校验与治理读它），模型面靠工具级那一句——搬回字段里就等于删掉说明。
 - 载体是**一条独立 user 消息、正文恰好一个块**。块头必须落在 `lstrip()` 后的第一个字符处，多块塞同一条只有第一个被认；块前垫任何说明文字都会让它认不出。不用 `role=tool`（没有配对的 `tool_use`），也不塞进 bootstrap 的那份 JSON payload——判据在 dict 上只取 `content` 键，且整串以 `{` 开头就不是块头。
 - 落位在 `system + payload` 之后、每跳重写的活状态块之前，因此进的是稳定前缀。同一节点两次构造逐字节相同的前提是 **toolskill 源在这两次之间没变**：块在构建时现渲染，节点行里不存原文。
 - 渲染复用唯一那条链（`get_tool_toolskill` → `build_tool_context_fingerprint` → `render_tool_contract`）。另写一份渲染或自算指纹的后果是在场判据认不出预置的那一份，而症状只是「节点仍然两跳」，一路没有报错。

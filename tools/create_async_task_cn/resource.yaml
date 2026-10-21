@@ -2,7 +2,7 @@
 kind: tool
 display_name: "创建异步任务"
 name: create_async_task
-description: Create a background task in the main runtime.
+description: Create a background task in the main runtime. Optional `seed_tools` names tools whose contracts the root node gets in its first request, so its first call runs directly instead of spending a hop fetching the contract; the result reports every declared name the runtime did not seed.
 tool_result_delivery_contract: runtime_managed
 source:
   type: ''

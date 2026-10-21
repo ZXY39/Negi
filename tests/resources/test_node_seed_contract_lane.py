@@ -629,6 +629,38 @@ async def test_dispatched_receipt_is_persisted_on_the_child_node(tmp_path: Path)
         await _shutdown(service, manager)
 
 
+def test_seed_tools_guidance_lives_where_the_provider_does_not_strip_it() -> None:
+    """字段级 description 到不了模型：`sanitize_provider_parameters_schema` 递归删掉它。
+
+    实盘一份前门请求体里 `create_async_task.file_targets` 只剩 `{"type":"array",...}`，
+    一个字说明都没有。所以"派发方该怎么用这个字段"必须写在**工具级** description 上；
+    这条用例钉住它在那一层，而不是被搬回字段里悄悄失效。
+    """
+    from g3ku.json_schema_utils import normalize_openai_tool_definition
+    from main.runtime.internal_tools import SpawnChildNodesTool
+
+    tool = SpawnChildNodesTool(lambda *_args, **_kwargs: [])
+    function = normalize_openai_tool_definition(tool.to_model_schema())['function']
+    assert 'seed_tools' in str(function['description'])
+    serialized_parameters = json.dumps(function['parameters'], ensure_ascii=False)
+    assert 'seed_tools' in serialized_parameters, '字段名要过闸'
+    assert 'Optional. Tool names whose contracts' not in serialized_parameters, '字段说明不该以为能过闸'
+
+
+def test_create_async_task_seed_hint_is_the_tool_level_description() -> None:
+    """`create_async_task` 是资源工具，模型面文字来自 `resource.yaml` 顶层 `description`。
+
+    `governance.description` 是同一段文字的治理侧副本，不参与模型面渲染，所以说明要落在前者。
+    """
+    import yaml
+
+    manifest = yaml.safe_load(
+        (REPO_ROOT / 'tools' / 'create_async_task_cn' / 'resource.yaml').read_text(encoding='utf-8-sig')
+    )
+    assert 'seed_tools' in str(manifest.get('description') or '')
+    assert 'seed_tools' not in str((manifest.get('governance') or {}).get('description') or '')
+
+
 def test_spawn_child_spec_keeps_the_declared_names_through_validation() -> None:
     """pydantic 基类默认忽略多余键：只改工具 schema 不改模型，名单会被静默吞掉。"""
     spec = SpawnChildSpec.model_validate(
