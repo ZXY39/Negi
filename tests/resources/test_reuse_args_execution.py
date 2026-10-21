@@ -490,6 +490,7 @@ async def test_frontdoor_reuse_aggregates_through_the_same_planner() -> None:
         state={"messages": [_presence_message()]},
         runtime_context=runtime_context,
         execute_one=_execute_one,
+        call_id="call-fd-1",
     )
 
     payload = json.loads(str(content or "{}"))
@@ -498,6 +499,86 @@ async def test_frontdoor_reuse_aggregates_through_the_same_planner() -> None:
     assert payload["failed"] == 0
     assert seen == ["a", "b"]
     assert [item["ok"] for item in payload["items"]] == [True, True]
+    # 道按 call id 记一次，供阶段记录行落盘；下游不必用回执文本反推。
+    assert runtime_context["tool_execution_paths"] == {"call-fd-1": "reused"}
+
+
+@pytest.mark.asyncio
+async def test_frontdoor_plain_recall_after_staging_is_marked_corrected() -> None:
+    """上一跳暂存过、这一跳带**同一份**入参直接调 ⇒ `corrected` + `staged_replay=identical`。
+
+    这一格存在的唯一理由是：`corrected` 一个词把"该用 reuse 没用"和"本来就该换参数重发"
+    混成了同一个数，而基线要数的正是前者。
+    """
+    session_scope = tool_arg_stash.session_scope_key("web:shared", TOOL_ID)
+    carrier = _carrier(hop=3, staged=[{"value": "a"}], scope_key=session_scope)
+    session = SimpleNamespace(session_key="web:shared", _frontdoor_tool_arg_stash=carrier)
+    ops = CeoFrontDoorRuntimeOps.__new__(CeoFrontDoorRuntimeOps)
+
+    async def _unused(_arguments: dict) -> tuple[str, str]:  # pragma: no cover
+        raise AssertionError("plain call must not execute through the reuse branch")
+
+    runtime_context = {
+        "session_key": "web:shared",
+        "runtime_session": session,
+        "tool_arg_stash_carrier": carrier,
+    }
+    content = await ops._frontdoor_reuse_args_execution(
+        tool_name=TOOL_ID,
+        arguments={"value": "a"},
+        state={"messages": [_presence_message()]},
+        runtime_context=runtime_context,
+        execute_one=_unused,
+        call_id="call-fd-2",
+    )
+    assert content is None
+    assert runtime_context["tool_execution_paths"] == {"call-fd-2": "corrected"}
+    assert runtime_context["tool_staged_replay"] == {"call-fd-2": "identical"}
+
+    other_context = {
+        "session_key": "web:shared",
+        "runtime_session": session,
+        "tool_arg_stash_carrier": carrier,
+    }
+    await ops._frontdoor_reuse_args_execution(
+        tool_name=TOOL_ID,
+        arguments={"value": "different"},
+        state={"messages": [_presence_message()]},
+        runtime_context=other_context,
+        execute_one=_unused,
+        call_id="call-fd-3",
+    )
+    assert other_context["tool_execution_paths"] == {"call-fd-3": "corrected"}
+    assert other_context["tool_staged_replay"] == {"call-fd-3": "new_args"}
+
+
+@pytest.mark.asyncio
+async def test_frontdoor_plain_call_without_staging_records_nothing() -> None:
+    """容器里没有这个名字的条目时，普通调用一个键都不写，也不摊在场视图。"""
+    session_scope = tool_arg_stash.session_scope_key("web:shared", TOOL_ID)
+    empty_carrier = _carrier(hop=3, staged=[], scope_key=session_scope)
+    session = SimpleNamespace(session_key="web:shared", _frontdoor_tool_arg_stash=empty_carrier)
+    runtime_context: dict = {
+        "session_key": "web:shared",
+        "runtime_session": session,
+        "tool_arg_stash_carrier": empty_carrier,
+    }
+    ops = CeoFrontDoorRuntimeOps.__new__(CeoFrontDoorRuntimeOps)
+
+    async def _unused(_arguments: dict) -> tuple[str, str]:  # pragma: no cover
+        raise AssertionError("plain call must not execute through the reuse branch")
+
+    content = await ops._frontdoor_reuse_args_execution(
+        tool_name=TOOL_ID,
+        arguments={"value": "a"},
+        state=None,
+        runtime_context=runtime_context,
+        execute_one=_unused,
+        call_id="call-fd-4",
+    )
+    assert content is None
+    assert "tool_execution_paths" not in runtime_context
+    assert "tool_staged_replay" not in runtime_context
 
 
 @pytest.mark.asyncio

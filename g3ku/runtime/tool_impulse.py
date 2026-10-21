@@ -17,9 +17,10 @@
 from __future__ import annotations
 
 import json
-from typing import Any
+from typing import Any, Callable
 
 from g3ku.agent.tools.base import REUSE_ARGS_PARAMETER_NAME
+from g3ku.runtime.tool_arg_stash import DIGEST_FIELD
 
 IMPULSE_STAGED = "staged"
 IMPULSE_INVALID = "invalid"
@@ -162,6 +163,35 @@ REUSE_CONTRACT_ABSENT_NOTE = (
 )
 REUSE_EXPLICIT_ARGS_NOTE = "reuse_args ignored: executed with the arguments you provided."
 
+# `execution_path` 的补格（D15）：`corrected` 一个词分不开两种完全不同的东西——模型把
+# **同一份**已暂存的入参又重发一遍（该用 reuse 没用），和它改了参数重新调（本来就该重发，
+# 因为 reuse 会跑全部份数）。基线要把 reuse 缺口数出来，靠的就是这一格。判据放在这里，
+# 两条车道共用一份，避免两边各写一个摘要口径。
+STAGED_REPLAY_FIELD = "staged_replay"
+STAGED_REPLAY_IDENTICAL = "identical"
+STAGED_REPLAY_NEW_ARGS = "new_args"
+
+
+def staged_replay_kind(
+    *,
+    staged_entries: list[dict[str, Any]] | None,
+    arguments: Any,
+    digest_of: Callable[[Any], str],
+) -> str:
+    """这一跳的显式入参是不是就是某一份已经暂存的入参。
+
+    摘要必须由调用方给（`tool_arg_stash.args_digest`），因为暂存条目里存的那个摘要才是
+    权威——用另一个函数算，折叠规则一变就悄悄错配。
+    """
+    entries = [dict(item) for item in list(staged_entries or []) if isinstance(item, dict)]
+    if not entries:
+        return ""
+    digest = str(digest_of(arguments) or "").strip()
+    for entry in entries:
+        if str(entry.get(DIGEST_FIELD) or "").strip() == digest:
+            return STAGED_REPLAY_IDENTICAL
+    return STAGED_REPLAY_NEW_ARGS
+
 
 def split_reuse_arguments(arguments: Any) -> tuple[bool, dict[str, Any]]:
     """拆出 `reuse_args` 标记与剩余显式入参；标记本身永远不当业务入参传下去。"""
@@ -267,6 +297,9 @@ __all__ = [
     "REUSE_PLAN_EXECUTE",
     "REUSE_PLAN_EXPLICIT_ARGS",
     "REUSE_PLAN_NO_STASH",
+    "STAGED_REPLAY_FIELD",
+    "STAGED_REPLAY_IDENTICAL",
+    "STAGED_REPLAY_NEW_ARGS",
     "aggregate_reuse_results",
     "EXECUTION_PATHS",
     "EXECUTION_PATH_ABANDONED",
@@ -278,5 +311,6 @@ __all__ = [
     "plan_reuse_execution",
     "reuse_refusal_text",
     "split_reuse_arguments",
+    "staged_replay_kind",
     "tool_facing_runtime_context",
 ]

@@ -119,16 +119,22 @@ from g3ku.runtime.tool_history import (
 )
 from g3ku.runtime.tool_impulse import (
     CONTRACT_DELIVERY_FIELD,
+    EXECUTION_PATH_CORRECTED,
+    EXECUTION_PATH_ILLEGAL_REUSE,
+    EXECUTION_PATH_NORMAL,
+    EXECUTION_PATH_REUSED,
     IMPULSE_REJECT,
     IMPULSE_STAGED,
     REUSE_PLAN_CONTRACT_ABSENT,
     REUSE_PLAN_EXECUTE,
     REUSE_PLAN_EXPLICIT_ARGS,
     REUSE_PLAN_NO_STASH,
+    STAGED_REPLAY_FIELD,
     aggregate_reuse_results,
     plan_reuse_execution,
     reuse_refusal_text,
     split_reuse_arguments,
+    staged_replay_kind,
 )
 from g3ku.runtime.tool_visibility import CEO_FIXED_BUILTIN_TOOL_NAMES, CEO_NEVER_CONTRACT_TOOL_NAMES
 from g3ku.runtime.web_ceo_sessions import (
@@ -6485,6 +6491,15 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
         contract_delivery = str(result.get(CONTRACT_DELIVERY_FIELD) or "").strip()
         if contract_delivery:
             item[CONTRACT_DELIVERY_FIELD] = contract_delivery
+        # 这次调用实际走的道（D15）与"同一份入参重发"补格。阶段记录是前门唯一的耐久落点：
+        # 节点那边有 `task_node_tool_result.payload.execution_path` 可按行查，前门没有那种
+        # 行，不在这儿落就等于只能用回执文本反推——而文本反推已经被证明会数错。
+        execution_path = str(result.get("execution_path") or "").strip()
+        if execution_path:
+            item["execution_path"] = execution_path
+        staged_replay = str(result.get(STAGED_REPLAY_FIELD) or "").strip()
+        if staged_replay:
+            item[STAGED_REPLAY_FIELD] = staged_replay
         return item
 
     def _frontdoor_stage_state_after_tool_cycle(
@@ -7655,6 +7670,7 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
         state: CeoGraphState | dict[str, Any] | None,
         runtime_context: dict[str, Any],
         execute_one: Callable[[dict[str, Any]], Awaitable[tuple[str, str]]],
+        call_id: str = "",
     ) -> str | None:
         """前门道的 `reuse_args=true`：把当轮全部暂存入参跑完，聚合成一个结果（D7）。
 
@@ -7662,10 +7678,12 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
         级、以及执行走本车道已有的单次调用（每份结果先各自渲染与外置，再聚合）。逐项
         `ok` 取执行侧状态：外置后的失败信封不以 `Error` 开头，文本判据认不出来。
         返回 None 表示这不是复用调用，调用方按普通路径走。
+
+        这一层是前门道上唯一知道"这次到底走了哪条道"的地方，所以 D15 的 `execution_path`
+        与补格 `staged_replay` 在这里按 call id 记一次，交给执行结果行落盘——下游不许拿
+        回执文本反推。
         """
         reuse_requested, explicit_arguments = split_reuse_arguments(arguments)
-        if not reuse_requested:
-            return None
         name = str(tool_name or '').strip()
         if not name:
             return None
@@ -7681,24 +7699,64 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
         container = tool_arg_stash.read_container(carrier)
         hop = tool_arg_stash.read_hop(carrier)
         scope_key = tool_arg_stash.session_scope_key(session_key, name)
-        view = self._frontdoor_view_without_evicted_stage_rows(state, list((state or {}).get('messages') or []))
-        presence_index = runtime_context.get('tool_contract_presence')
-        if not isinstance(presence_index, dict):
-            presence_index = contract_presence_index(request_messages=view)
-        fingerprint = str(presence_index.get(name) or '').strip()
+        resolved: dict[str, Any] = {}
+
+        def _staged_view() -> tuple[list[dict[str, Any]], str]:
+            # 在场视图与权威同源：走 `_frontdoor_contract_presence_index` 那一条。
+            # 只在容器里真有该名字时才摊这份视图——普通调用一律零成本返回。
+            if 'entries' not in resolved:
+                view = self._frontdoor_view_without_evicted_stage_rows(
+                    state, list((state or {}).get('messages') or [])
+                )
+                presence_index = runtime_context.get('tool_contract_presence')
+                if not isinstance(presence_index, dict):
+                    presence_index = contract_presence_index(request_messages=view)
+                fingerprint = str(presence_index.get(name) or '').strip()
+                resolved['entries'] = tool_arg_stash.peek_entries(
+                    container,
+                    scope_key=scope_key,
+                    current_hop=hop,
+                    fingerprint=fingerprint,
+                )
+                resolved['fingerprint'] = fingerprint
+            return list(resolved['entries']), str(resolved['fingerprint'] or '')
+
+        if not reuse_requested:
+            if container.get(scope_key):
+                entries, _fingerprint = _staged_view()
+                if entries:
+                    self._record_frontdoor_execution_path(
+                        runtime_context,
+                        call_id,
+                        EXECUTION_PATH_CORRECTED,
+                        staged_replay=staged_replay_kind(
+                            staged_entries=entries,
+                            arguments=dict(arguments or {}),
+                            digest_of=tool_arg_stash.args_digest,
+                        ),
+                    )
+            return None
+        staged_entries, fingerprint = _staged_view()
         plan = plan_reuse_execution(
             reuse_requested=True,
             explicit_arguments=explicit_arguments,
             contract_present=bool(fingerprint),
-            staged_entries=tool_arg_stash.peek_entries(
-                container,
-                scope_key=scope_key,
-                current_hop=hop,
-                fingerprint=fingerprint,
-            ),
+            staged_entries=staged_entries,
         )
         kind = str(plan.get('kind') or '').strip()
         if kind == REUSE_PLAN_EXPLICIT_ARGS:
+            # 带 reuse 又给显式入参：字段误用。刚为它暂存过东西 ⇒ 模型主动改参数重调
+            # （`corrected`）；纯误填算非法复用。两者在排障上是两回事（与节点道同判据）。
+            self._record_frontdoor_execution_path(
+                runtime_context,
+                call_id,
+                EXECUTION_PATH_CORRECTED if staged_entries else EXECUTION_PATH_ILLEGAL_REUSE,
+                staged_replay=staged_replay_kind(
+                    staged_entries=staged_entries,
+                    arguments=explicit_arguments,
+                    digest_of=tool_arg_stash.args_digest,
+                ) if staged_entries else "",
+            )
             executed_text, _executed_status = await execute_one(dict(plan.get('arguments') or {}))
             self._persist_frontdoor_stash_container(
                 container=tool_arg_stash.consume_entries(
@@ -7713,6 +7771,7 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
             )
             return f"{reuse_refusal_text(kind, name)}\n\n{executed_text}"
         if kind in {REUSE_PLAN_NO_STASH, REUSE_PLAN_CONTRACT_ABSENT}:
+            self._record_frontdoor_execution_path(runtime_context, call_id, EXECUTION_PATH_ILLEGAL_REUSE)
             if kind == REUSE_PLAN_CONTRACT_ABSENT and container.get(scope_key):
                 self._persist_frontdoor_stash_container(
                     container=tool_arg_stash.drop_scope(container, scope_key=scope_key),
@@ -7723,6 +7782,7 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
             return reuse_refusal_text(kind, name)
         if kind != REUSE_PLAN_EXECUTE:
             return None
+        self._record_frontdoor_execution_path(runtime_context, call_id, EXECUTION_PATH_REUSED)
         entries = [dict(item) for item in list(plan.get('entries') or []) if isinstance(item, dict)]
         items: list[dict[str, Any]] = []
         for index, entry in enumerate(entries):
@@ -7748,6 +7808,35 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
             runtime_context=runtime_context,
         )
         return aggregate_reuse_results(tool_name=name, items=items)
+
+    def _record_frontdoor_execution_path(
+        self,
+        runtime_context: dict[str, Any],
+        call_id: str,
+        path: str,
+        *,
+        staged_replay: str = "",
+    ) -> None:
+        """按 call id 记下这次调用实际走的道，供执行结果行落盘（D15 与 `staged_replay` 补格）。
+
+        只有这一层知道"批量语义生效 / 字段误用 / 改参数重调 / 同一份入参重发"，而审计行在
+        阶段记录那侧按 call 落，所以在这里交接一次——下游用回执文本反推会得到另一套数。
+        """
+        key = str(call_id or '').strip()
+        if not key or not str(path or '').strip():
+            return
+        paths = runtime_context.get('tool_execution_paths')
+        if not isinstance(paths, dict):
+            paths = {}
+            runtime_context['tool_execution_paths'] = paths
+        paths[key] = str(path).strip()
+        replay = str(staged_replay or '').strip()
+        if replay:
+            rows = runtime_context.get('tool_staged_replay')
+            if not isinstance(rows, dict):
+                rows = {}
+                runtime_context['tool_staged_replay'] = rows
+            rows[key] = replay
 
     def _persist_frontdoor_stash_container(
         self,
@@ -9959,6 +10048,24 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
 
         async def _run_single(payload: dict[str, Any]) -> dict[str, Any]:
             tool_name = str(payload.get("name") or "")
+
+            def _impulse_ledger_fields() -> dict[str, str]:
+                """这次调用实际走的道（D15）与"同一份入参重发"补格，按 call id 取。
+
+                记号由 `_frontdoor_reuse_args_execution` 在判定那一刻写下；没记过就是普通
+                执行。三个返回点都带上它，阶段记录才有一条完整可数的道。
+                """
+                call_key = str(payload.get("id") or "").strip()
+                fields = {
+                    "execution_path": str(
+                        (runtime_context.get("tool_execution_paths") or {}).get(call_key)
+                        or EXECUTION_PATH_NORMAL
+                    )
+                }
+                replay = str((runtime_context.get("tool_staged_replay") or {}).get(call_key) or "").strip()
+                if replay:
+                    fields[STAGED_REPLAY_FIELD] = replay
+                return fields
             gate_error = self._frontdoor_stage_gate_error(
                 tool_name=tool_name,
                 stage_state=mutable_stage_state,
@@ -10010,6 +10117,7 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
                         "result_text": impulse_content,
                         "free_pass_kind": free_pass_kind,
                         CONTRACT_DELIVERY_FIELD: kind,
+                        **_impulse_ledger_fields(),
                         "tool_message": self._tool_result_message(
                             tool_call_id=str(payload.get("id") or ""),
                             tool_name=tool_name or "tool",
@@ -10063,6 +10171,7 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
                     "raw_result": reuse_content,
                     "result_text": reuse_content,
                     "free_pass_kind": free_pass_kind,
+                    **_impulse_ledger_fields(),
                     "tool_message": self._tool_result_message(
                         tool_call_id=str(payload.get("id") or ""),
                         tool_name=tool_name or "tool",
@@ -10118,6 +10227,7 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
                 "raw_result": result_payload.get("raw_result"),
                 "result_text": result_text,
                 "free_pass_kind": free_pass_kind,
+                **_impulse_ledger_fields(),
                 "tool_message": self._tool_result_message(
                     tool_call_id=str(payload.get("id") or ""),
                     tool_name=tool_name or "tool",

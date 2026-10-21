@@ -241,6 +241,32 @@ async def test_execution_path_records_correction_after_staging(tmp_path: Path) -
 
     assert tool.seen == ["fresh"]
     assert runtime_context["tool_execution_paths"] == {"call-1": EXECUTION_PATH_CORRECTED}
+    # 换了参数再调是本来就该重发，reuse 会跑全部份数；这一格把它和"原样重发"分开。
+    assert runtime_context["tool_staged_replay"] == {"call-1": "new_args"}
+
+
+@pytest.mark.asyncio
+async def test_correction_replaying_the_staged_arguments_is_marked_identical(tmp_path: Path) -> None:
+    """带**同一份**已暂存的入参直接调 ⇒ `corrected` + `staged_replay=identical`。
+
+    这一档就是"该用 reuse 没用"，是要拿真基线去数的缺口；判据与摘要口径共用
+    `tool_arg_stash.args_digest`，所以暂存时的折叠规则一变也不会错配。
+    """
+    service = _service(tmp_path)
+    loop = _loop(service)
+    tool = _EchoTool()
+    runtime_context = _context(carrier=_carrier(hop=4, staged=[{"value": "staged"}]))
+
+    await loop._execute_tool_raw(
+        tools={TOOL_ID: tool},
+        tool_name=TOOL_ID,
+        arguments={"value": "staged"},
+        runtime_context=runtime_context,
+    )
+
+    assert tool.seen == ["staged"]
+    assert runtime_context["tool_execution_paths"] == {"call-1": EXECUTION_PATH_CORRECTED}
+    assert runtime_context["tool_staged_replay"] == {"call-1": "identical"}
 
 
 @pytest.mark.asyncio

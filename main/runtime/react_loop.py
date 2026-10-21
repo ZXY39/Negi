@@ -137,11 +137,13 @@ from g3ku.runtime.tool_impulse import (
     REUSE_PLAN_EXECUTE,
     REUSE_PLAN_EXPLICIT_ARGS,
     REUSE_PLAN_NO_STASH,
+    STAGED_REPLAY_FIELD,
     PreRenderedToolResult,
     aggregate_reuse_results,
     plan_reuse_execution,
     reuse_refusal_text,
     split_reuse_arguments,
+    staged_replay_kind,
     tool_facing_runtime_context,
 )
 from g3ku.runtime.tool_result_status import is_error_like_tool_result
@@ -4794,6 +4796,15 @@ class ReActToolLoop:
                             dict(runtime_context.get('tool_execution_paths') or {}).get(str(call.id or ''))
                             or EXECUTION_PATH_NORMAL
                         ),
+                        # 补格：`corrected` 一个词分不开"同一份入参重发"（该用 reuse 没用）
+                        # 和"换了参数再调"（本来就该重发）。没记过就不写这个键。
+                        **(
+                            {STAGED_REPLAY_FIELD: _replay_marked}
+                            if (_replay_marked := str(
+                                dict(runtime_context.get('tool_staged_replay') or {}).get(str(call.id or '')) or ''
+                            ).strip())
+                            else {}
+                        ),
                         # 只交契约、没执行（冲动投递）：Web 面把该行画成"加载 tool"卡片。
                         **({CONTRACT_DELIVERY_FIELD: contract_delivery} if contract_delivery else {}),
                     },
@@ -5307,11 +5318,18 @@ class ReActToolLoop:
             staged_count_of=_staged_count_of,
         )
 
-    def _record_tool_execution_path(self, runtime_context: dict[str, Any], path: str) -> None:
+    def _record_tool_execution_path(
+        self,
+        runtime_context: dict[str, Any],
+        path: str,
+        *,
+        staged_replay: str = "",
+    ) -> None:
         """记下这次调用实际走的道，按 call id 索引，供审计行落盘（D15 `execution_path`）。
 
         只有 `_execute_tool_raw` 这一层知道"这是复用批 / 字段误用 / 改参数重调"，而审计行在
         log_service 那侧按 call 落，所以在这里交接一次，不让下游用回执文本反推。
+        `staged_replay` 是补格：`corrected` 一个词分不开"同一份入参重发"和"换了参数再调"。
         """
         call_id = str(runtime_context.get('current_tool_call_id') or '').strip()
         if not call_id or not path:
@@ -5321,6 +5339,13 @@ class ReActToolLoop:
             paths = {}
             runtime_context['tool_execution_paths'] = paths
         paths[call_id] = path
+        replay = str(staged_replay or '').strip()
+        if replay:
+            rows = runtime_context.get('tool_staged_replay')
+            if not isinstance(rows, dict):
+                rows = {}
+                runtime_context['tool_staged_replay'] = rows
+            rows[call_id] = replay
 
     def _node_staged_entries(self, *, container: Any, runtime_context: dict[str, Any], tool_name: str) -> list[dict[str, Any]]:
         """这一跳可消费的暂存条目（严格一跳 + 同修订）。"""
@@ -5365,12 +5390,21 @@ class ReActToolLoop:
                 # 复用批内部逐份执行时**不判**：那条路走的是同一个 call id，判了就把刚写下的
                 # `reused` 盖成 `corrected`，批量语义在审计里反而看不见。
                 carrier = runtime_context.get('tool_arg_stash_carrier') or {}
-                if self._node_staged_entries(
+                staged = self._node_staged_entries(
                     container=tool_arg_stash.read_container(carrier),
                     runtime_context=runtime_context,
                     tool_name=name,
-                ):
-                    self._record_tool_execution_path(runtime_context, EXECUTION_PATH_CORRECTED)
+                )
+                if staged:
+                    self._record_tool_execution_path(
+                        runtime_context,
+                        EXECUTION_PATH_CORRECTED,
+                        staged_replay=staged_replay_kind(
+                            staged_entries=staged,
+                            arguments=arguments,
+                            digest_of=tool_arg_stash.args_digest,
+                        ),
+                    )
             return None
         name = str(tool_name or '').strip()
         if not name:

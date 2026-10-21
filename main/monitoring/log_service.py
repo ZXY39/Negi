@@ -31,7 +31,7 @@ from g3ku.runtime.stage_prompt_compaction import (
     stage_archive_owner,
     stage_record_dict,
 )
-from g3ku.runtime.tool_impulse import CONTRACT_DELIVERY_FIELD
+from g3ku.runtime.tool_impulse import CONTRACT_DELIVERY_FIELD, STAGED_REPLAY_FIELD
 from main.ids import new_stage_id, new_stage_round_id
 from main.models import (
     FAILURE_CLASS_BUSINESS_UNPASSED,
@@ -1009,6 +1009,13 @@ class TaskLogService:
                         # 这次调用实际走的道（D15）：normal / reused / corrected / illegal_reuse。
                         # 由执行侧按 call 交接，不在这里用回执文本反推。
                         'execution_path': str(live_state.get('execution_path') or 'normal'),
+                        # 补格（`corrected` 的第二读法：同一份入参重发 / 换了参数再调）。
+                        # 没记过就不写这个键，省得读者以为空串是一档状态。
+                        **(
+                            {STAGED_REPLAY_FIELD: str(live_state.get(STAGED_REPLAY_FIELD) or '').strip()}
+                            if str(live_state.get(STAGED_REPLAY_FIELD) or '').strip()
+                            else {}
+                        ),
                         # 只交契约、没执行：节点详情据此把该行画成"加载 tool"卡片。
                         **(
                             {CONTRACT_DELIVERY_FIELD: str(live_state.get(CONTRACT_DELIVERY_FIELD) or '').strip()}
