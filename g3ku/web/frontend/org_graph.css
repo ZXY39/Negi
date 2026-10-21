@@ -13346,6 +13346,29 @@ textarea {
     flex: 0 0 auto;
 }
 
+/* ≥900px 两栏：左主面板 + QQ 面板，右列 token 面板跨两行并按内容排高。
+   stretch 会把右栏钉在网格容器高度上（比左栏两行还矮 44px），面板是
+   overflow:hidden，末尾卡片既看不见也滚不出来；展开签发表单时列表会被压到 36px。 */
+@media (min-width: 900px) {
+    .external-api-shell {
+        display: grid;
+        grid-template-columns: minmax(0, 1fr) minmax(0, 420px);
+        gap: var(--ui-space-4);
+        align-items: start;
+    }
+
+    .external-master-panel,
+    .qq-bot-panel {
+        grid-column: 1;
+    }
+
+    .external-tokens-panel {
+        grid-column: 2;
+        grid-row: 1 / span 2;
+        align-self: start;
+    }
+}
+
 .external-master-panel .panel-header {
     align-items: center;
 }
@@ -13465,6 +13488,9 @@ textarea {
     align-items: center;
     gap: 6px;
     flex: 0 0 auto;
+    color: var(--ui-text-muted);
+    font-size: 12px;
+    white-space: nowrap;
 }
 
 .external-token-main {
@@ -13491,6 +13517,15 @@ textarea {
     align-items: center;
     justify-content: space-between;
     gap: var(--space-3);
+}
+
+/* 「可会话范围」不是原生下拉：org_graph_external.js 渲染完调 enhanceResourceSelects()，
+   由 buildResourceSelect 把 <select> 包成应用自有的 .resource-select-shell（触发器 +
+   自定义菜单），尺寸直接吃 40px 控件档。这里只定宽——shell 默认 width:100%，
+   在行内 flex 里会随文案浮动。 */
+.external-token-actions .resource-select-shell {
+    width: 118px;
+    flex: 0 0 auto;
 }
 
 .external-token-tools {

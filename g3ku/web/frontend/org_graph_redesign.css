@@ -1309,45 +1309,6 @@
     }
 }
 
-@media (min-width: 900px) {
-    [data-ui-version="v2"] .external-api-shell {
-        display: grid;
-        grid-template-columns: minmax(0, 1fr) minmax(0, 420px);
-        gap: var(--ui-space-4);
-        align-items: start;
-    }
-
-    [data-ui-version="v2"] .external-master-panel,
-    [data-ui-version="v2"] .qq-bot-panel {
-        grid-column: 1;
-    }
-
-    [data-ui-version="v2"] .external-tokens-panel {
-        grid-column: 2;
-        grid-row: 1 / span 2;
-        /* 按内容排高，不跟左栏对齐：stretch 实测把右栏钉在网格容器的高度上
-           （比左栏两行还矮 44px），面板是 overflow:hidden，末尾卡片既看不见也滚不出来；
-           展开签发表单时列表还会被压到 36px。 */
-        align-self: start;
-    }
-}
-
-/* 「可会话范围」不是原生下拉：org_graph_external.js 渲染完调 enhanceResourceSelects()，
-   由 buildResourceSelect 把 <select> 包成应用自有的 .resource-select-shell（触发器 +
-   自定义菜单），尺寸直接吃 §56 的 40px 控件档。这里只定宽——shell 默认 width:100%，
-   在行内 flex 里会随文案浮动。菜单开成 portal（select 上的 data-resource-select-portal），
-   因为面板是 overflow:hidden、外层 shell 又是滚动口，最后一张卡的菜单不挂到 body 就被裁。 */
-[data-ui-version="v2"] .external-row-scope {
-    color: var(--ui-text-muted);
-    font-size: 12px;
-    white-space: nowrap;
-}
-
-[data-ui-version="v2"] .external-token-actions .resource-select-shell {
-    width: 118px;
-    flex: 0 0 auto;
-}
-
 /* 21. 任务卡片 */
 [data-ui-version="v2"] .project-card {
     padding: var(--ui-space-4);
