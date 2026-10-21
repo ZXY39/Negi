@@ -12515,6 +12515,7 @@ function ensureMemoryBrowserUi() {
     U.memoryBrowserDeleteBackdrop = drawer.querySelector("#memory-delete-backdrop");
     U.memoryBrowserDeleteSubtitle = drawer.querySelector("#memory-delete-subtitle");
     U.memoryBrowserDeleteNotes = drawer.querySelector("#memory-delete-notes");
+    U.memoryBrowserDeleteHint = drawer.querySelector(".memory-delete-hint");
     U.memoryBrowserDeleteConfirm = drawer.querySelector("[data-memory-delete-confirm]");
     drawer.querySelectorAll("[data-memory-delete-close], [data-memory-delete-cancel]").forEach((button) => {
         button.addEventListener("click", () => closeMemoryDeleteDialog());
@@ -12822,20 +12823,19 @@ function renderMemoryDeleteDialog() {
         subtitle.textContent = `将删除 ${state.memoryIds.length} 条记忆；删除后 MEMORY.md 镜像会同步重建，操作不可撤销。`;
     }
     const notesHost = U.memoryBrowserDeleteNotes;
+    const hasNotes = !!(state.notes || []).length;
+    if (U.memoryBrowserDeleteHint) U.memoryBrowserDeleteHint.hidden = !hasNotes;
     if (notesHost) {
-        if (!state.notes.length) {
-            notesHost.innerHTML = '<div class="memory-delete-notes-empty">这批记忆没有关联笔记。</div>';
-        } else {
-            notesHost.innerHTML = state.notes.map((note) => `
-                <div class="memory-delete-note-row${note.expanded ? " is-expanded" : ""}">
-                    <span class="memory-delete-note-ref">${esc(note.ref)}</span>
-                    <button type="button" class="toolbar-btn ghost memory-delete-note-expand" data-delete-note-expand="${esc(note.ref)}" aria-expanded="${note.expanded ? "true" : "false"}">
-                        ${note.expanded ? "收起" : "展开内容"}
-                    </button>
-                    ${note.expanded ? `<pre class="memory-delete-note-body">${note.loading ? "正在加载 note 正文..." : esc(String(note.body || "").trim() || "（空 note）")}</pre>` : ""}
-                </div>
-            `).join("");
-        }
+        // 这批记忆不持有 note 时整段不出现：没有动作也没有内容的段落只会把确认框撑高
+        notesHost.innerHTML = hasNotes ? state.notes.map((note) => `
+            <div class="memory-delete-note-row${note.expanded ? " is-expanded" : ""}">
+                <span class="memory-delete-note-ref">${esc(note.ref)}</span>
+                <button type="button" class="toolbar-btn ghost memory-delete-note-expand" data-delete-note-expand="${esc(note.ref)}" aria-expanded="${note.expanded ? "true" : "false"}">
+                    ${note.expanded ? "收起" : "展开内容"}
+                </button>
+                ${note.expanded ? `<pre class="memory-delete-note-body">${note.loading ? "正在加载 note 正文..." : esc(String(note.body || "").trim() || "（空 note）")}</pre>` : ""}
+            </div>
+        `).join("") : "";
     }
     const confirmButton = U.memoryBrowserDeleteConfirm;
     if (confirmButton) confirmButton.disabled = !!state.busy;

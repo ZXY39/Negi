@@ -11345,12 +11345,6 @@ textarea {
     padding-right: 4px;
 }
 
-.memory-delete-notes-empty {
-    font-size: 0.85rem;
-    color: var(--text-muted);
-    padding: 6px 2px;
-}
-
 .memory-delete-note-row {
     display: flex;
     align-items: center;

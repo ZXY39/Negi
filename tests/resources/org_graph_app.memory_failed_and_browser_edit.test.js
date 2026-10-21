@@ -184,6 +184,7 @@ function stubBrowserUi(api) {
         "memoryBrowserDeleteBackdrop",
         "memoryBrowserDeleteSubtitle",
         "memoryBrowserDeleteNotes",
+        "memoryBrowserDeleteHint",
         "memoryBrowserDeleteConfirm",
     ].forEach((key) => {
         api.U[key] = new StubHTMLElement();
@@ -320,6 +321,8 @@ test("delete dialog lists owned notes read-only and the request carries no note 
         { memory_id: "Ef56Gh", memory_body: "没有 note 的记忆", minimal_memory: "e->f" },
     ];
 
+    // 桩里的 hidden 默认就是 false，先拨成 true 才测得出"渲染确实把它写回可见"
+    api.U.memoryBrowserDeleteHint.hidden = true;
     api.openMemoryDeleteDialog(["Ab12Z9", "Cd34W8"]);
     // 归属读 `note_ref` 列，两条合并成一个条目；正文里的 legacy 记号不算关系
     // （notes 数组是 vm realm 里 map 出来的，比较前先在测试侧重新包一层）
@@ -332,6 +335,13 @@ test("delete dialog lists owned notes read-only and the request carries no note 
     assert.match(html, /data-delete-note-expand="note_ports"/);
     assert.equal(api.U.memoryBrowserDeleteDialog.hidden, false);
     assert.equal(api.U.memoryBrowserDeleteConfirm.disabled, false);
+    assert.equal(api.U.memoryBrowserDeleteHint.hidden, false);
+
+    // 选中的记忆不持有 note：回收说明与空占位都不出现，确认框只剩标题与按钮
+    api.openMemoryDeleteDialog(["Ef56Gh"]);
+    assert.deepEqual([...api.S.memoryBrowser.deleteDialog.notes], []);
+    assert.equal(api.U.memoryBrowserDeleteHint.hidden, true);
+    assert.equal(api.U.memoryBrowserDeleteNotes.innerHTML, "");
 
     const calls = [];
     api.ApiClient.deleteCurrentMemories = async (memoryIds, reason) => {

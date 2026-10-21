@@ -489,6 +489,10 @@ def test_memory_browser_edit_mode_adds_guarded_bulk_operations_with_confirm_dial
     assert "data-delete-note-expand=" in app_js
     assert "memory-delete-hint" in app_js
     assert ".memory-delete-hint {" in css
+    # 不持有 note 的选中项：说明行与空占位整段不出现
+    assert "U.memoryBrowserDeleteHint.hidden = !hasNotes" in app_js
+    assert "这批记忆没有关联笔记" not in app_js
+    assert ".memory-delete-notes-empty" not in css
     # 扫正文判关联笔记那条道已经不成立（记号被写闸禁止、启动时也会被剥掉），整面摘掉
     assert "memoryNoteRefsInText" not in app_js
     assert "data-delete-notes-master" not in app_js
