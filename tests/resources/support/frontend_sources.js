@@ -37,7 +37,7 @@ const FRONTEND_BUNDLES = Object.freeze({
         "ceo/ws-router.js",
         "org_graph_app.js",
     ],
-    tasks: ["tasks/hall-store.js", "tasks/hall-view.js", "org_graph_tasks.js"],
+    tasks: ["tasks/hall-store.js", "tasks/hall-view.js", "tasks/ws-router.js", "org_graph_tasks.js"],
     resources: ["org_graph_resources.js"],
     governance: ["org_graph_ceo_governance.js"],
     llm: ["org_graph_llm.js"],
