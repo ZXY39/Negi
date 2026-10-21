@@ -72,15 +72,15 @@
 - 普通用户快速启动项目
 - 本地单机直接拉起 Web 与托管 worker
 - 让脚本自动处理 `.venv`、依赖安装、基础配置兜底与已有托管进程重启
+
+维护上要记住：
+
+- 这些入口脚本是普通用户首选入口
 - 回收既有进程由**解释器**执行：`negi_bootstrap.reap_existing_runtime_processes`，`start-negi.cmd` / `start-negi.ps1` / `negi web` 共用这一处；`start-negi.sh` 保留自己的 POSIX 实现（同一端点、同一超时、同样先优雅后强杀）。`negi.ps1` / `negi.sh` / `install.ps1` / `install.sh` 自己不杀进程。回收不能挂在 `.ps1` 上：未签名的 `.ps1` 会被机器策略整份拒掉（实测 `UnauthorizedAccess`，而 `Get-ExecutionPolicy` 仍报 RemoteSigned），入口一被拦，回收逻辑也跟着消失；`.cmd` 直接 exec `negi_bootstrap.py`，所以它在策略下仍然起得来。三个必须知道的判据：
   - **不能把启动器自己算进名单**：`.cmd` 用绝对路径调 `negi_bootstrap.py`，启动器自己的命令行同时命中「checkout 根」与 `negi_bootstrap.py web`。要排除的是一对 PID（venv 的 `python.exe` 是重定向器，cmdline 命中的是父进程，真正执行代码的是它的子进程）；漏掉任何一个，强杀那一步都会打死回收者本身——入口以 exit 1 静默消失、一个字都不打印，看起来像"脚本起不来"。
   - **优雅退出的端口要按候选找**：回收按 checkout 收、不按端口收。操作者这次换了 `-Port` 时旧实例还听在旧端口上，只打目标端口等于没发请求、回收会退化成强杀（异常中断）。候选顺序是目标端口 → 旧实例记下的端口（`.g3ku/internal-callback.json` 里的回调地址，web 启动时由 launcher 写入）→ 配置端口 → 默认 `18790`。
   - **强杀以"杀完还在不在"判定**：`taskkill /T` 收父进程时子进程已经跟着走了，排在后面的子 PID 再杀一次会报"找不到进程"；只有杀完仍活着才值得报一行失败。
   端口是否被占的权威判据仍是 `Get-NetTCPConnection -LocalPort 18790`：`netstat` 里状态列在地址之后，用 `LISTENING.*<port>` 这种模式永远匹配不到。
-
-维护上要记住：
-
-- 这些入口脚本是普通用户首选入口
 - 它们会在启动前默认清理当前仓库下已有的 negi web / worker 进程，但**先请求优雅退出**：向 `POST /api/bootstrap/exit`（`pause_running_work=true`）发起请求并等待运行时把全部会话与任务持久化暂停、自行退出；只有在接口不可达、返回失败或等待超时（约 40 秒）时才回退到强制杀进程。因此“重跑启动脚本”对运行中的工作是一次优雅暂停而不是异常中断，下次启动会自动恢复（生命周期合同见 `main-task-runtime.md`「Graceful Shutdown Pause and Startup Auto-Resume」）
 - 强制回退路径（强杀）对应的是异常中断：下次启动任务走恢复清洗，任务卡片会以 toast 提示「本任务遇到异常停止」；toast 可点击关闭（UI 合同见 `web-and-admin.md`「Task Recovery Notice UI Contract」）
 - 它们最终都进入 `negi_bootstrap.py` 的 web 分支，由它起 `python -m g3ku web`
