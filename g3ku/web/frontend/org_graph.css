@@ -4454,23 +4454,26 @@ textarea {
 }
 
 .chat-input-area {
-    width: min(960px, calc(100% - (2 * clamp(18px, 5vw, 80px))));
-    margin: 0;
-    padding: 0;
+    width: min(50vw, 100%);
+    margin: 0 auto;
+    padding: 12px 0 20px;
     border: 0;
     border-radius: 0;
     background-color: transparent;
     box-shadow: none;
     display: grid;
-    grid-template-columns: minmax(0, 1fr) auto;
-    gap: 12px;
-    align-items: end;
+    grid-template-columns: minmax(0, 1fr);
+    gap: var(--ui-space-2);
+    align-items: center;
     backdrop-filter: none;
     position: absolute;
-    left: 50%;
-    transform: translateX(-50%);
-    bottom: 24px;
+    inset: auto 0 0;
+    transform: none;
     z-index: 2;
+}
+
+.chat-input-area > * {
+    min-width: 0;
 }
 
 .ceo-scroll-to-latest-btn {
@@ -4549,6 +4552,9 @@ textarea {
     flex-direction: column;
     gap: var(--space-3);
     position: relative;
+    width: auto;
+    max-width: none;
+    margin: 0;
     --ceo-input-leading-size: 58px;
     --ceo-context-usage-size: 34px;
     --ceo-input-leading-inner-gap: 10px;
@@ -4558,9 +4564,9 @@ textarea {
 
 .ceo-input-row {
     display: grid;
-    grid-template-columns: auto minmax(0, 1fr) auto;
-    gap: var(--ceo-input-row-gap);
-    align-items: end;
+    grid-template-columns: minmax(0, 1fr);
+    gap: var(--ui-space-2);
+    align-items: center;
     position: relative;
     z-index: 1;
 }
@@ -4570,7 +4576,7 @@ textarea {
    左侧按钮顶部的点击区。 */
 .ceo-input-resize-handle {
     position: absolute;
-    grid-column: 2;
+    grid-column: 1;
     grid-row: 1;
     top: 0;
     left: 0;
@@ -4601,9 +4607,69 @@ textarea {
 .ceo-input-leading-group {
     display: inline-flex;
     align-items: center;
-    gap: var(--ceo-input-leading-inner-gap);
-    /* 模型与上下文面板的锚点：绝对定位面板左对齐脑图标并向上展开。 */
-    position: relative;
+    /* 左右对称各留 28px = 原 8px 内缩 + 一颗 40px 的图标，与发送键的右侧留白同值。 */
+    position: absolute;
+    left: 28px;
+    bottom: 8px;
+    z-index: 2;
+    gap: var(--ui-space-2);
+}
+
+/* 输入区左下三颗控件走 40px 控件档；v2 用 id 压过基础类，这里保留 id 选择器。 */
+#ceo-context-usage-brain,
+#ceo-attach-btn,
+#ceo-voice-btn {
+    width: 40px;
+    height: 40px;
+    min-height: 40px;
+    padding: 0;
+    border: 1px solid var(--ui-border);
+    border-radius: var(--ui-radius-control);
+    background: var(--ui-bg-surface);
+    box-shadow: none;
+}
+
+#ceo-context-usage-brain:hover,
+#ceo-attach-btn:hover,
+#ceo-voice-btn:hover {
+    background: var(--ui-neutral-soft);
+    border-color: var(--ui-border-strong);
+}
+
+#ceo-voice-btn.is-recording {
+    color: #ef4444;
+    border-color: color-mix(in srgb, #ef4444 55%, var(--ui-border-strong));
+    background: color-mix(in srgb, #ef4444 12%, var(--ui-bg-surface));
+}
+
+#ceo-context-usage-brain::after {
+    content: none;
+}
+
+#ceo-context-usage-brain .ceo-context-usage-brain-ring {
+    --ceo-brain-ring-radius: calc(var(--ui-radius-control) - 1px);
+}
+
+#ceo-attach-btn svg,
+#ceo-voice-btn svg {
+    width: 18px;
+    height: 18px;
+}
+
+/* 发送/暂停坐在输入框内部的右下角，与左下角的脑图标、附件同一带。 */
+#ceo-send-btn {
+    position: absolute;
+    right: 28px;
+    bottom: 8px;
+    z-index: 2;
+    height: 40px;
+    min-height: 40px;
+    padding: 0 var(--ui-space-3);
+    gap: var(--ui-space-2);
+    border: 1px solid transparent;
+    border-radius: var(--ui-radius-control);
+    font-size: 13px;
+    font-weight: 600;
 }
 
 /* 脑图标既是入口也是用量表：悬停只负责露出长按提示，不提亮、不上浮；
@@ -6281,17 +6347,28 @@ textarea {
 
 .chat-input-area textarea {
     flex: 1;
-    background: color-mix(in srgb, var(--bg-app) 74%, var(--bg-panel) 26%);
-    border: 1px solid color-mix(in srgb, var(--border-color) 78%, transparent);
-    border-radius: 22px;
-    padding: 16px 18px;
-    color: var(--text-primary);
+    background: var(--ui-bg-input);
+    border: 1px solid var(--ui-border);
+    border-radius: var(--ui-radius-control);
+    padding: 10px var(--ui-space-3) 52px;
+    color: var(--ui-text);
     resize: none;
-    min-height: 58px;
-    max-height: 200px;
+    min-height: 120px;
+    max-height: 180px;
     overflow-y: auto;
-    box-shadow: var(--shadow-md);
+    font-size: 13px;
+    line-height: 20px;
+    box-shadow: none;
     transition: border-color 0.18s ease, box-shadow 0.18s ease, background-color 0.18s ease;
+}
+
+/* 全局 textarea 规则在活动层里是 (0,1,1) 且在基础表之后，本表必须用 id 压住
+   输入框的 52px 控件带与 13px 字号，否则文字会排到按钮底下。 */
+#ceo-input {
+    padding: 10px var(--ui-space-3) 52px;
+    color: var(--ui-text);
+    font-size: 13px;
+    line-height: 20px;
 }
 
 .chat-input-area textarea:focus {
@@ -6523,14 +6600,16 @@ textarea {
     }
 
     .chat-input-area {
-        width: calc(100% - 32px);
+        width: 100%;
         margin: 0;
-        bottom: 16px;
+        bottom: 0;
+        padding-right: var(--ui-space-3);
+        padding-left: var(--ui-space-3);
     }
 
     .ceo-input-row {
-        grid-template-columns: auto minmax(0, 1fr) auto;
-        gap: var(--ceo-input-row-gap);
+        grid-template-columns: minmax(0, 1fr);
+        gap: var(--ui-space-2);
     }
 
     .ceo-composer {
