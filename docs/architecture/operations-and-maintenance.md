@@ -64,7 +64,7 @@
 
 桌面窗口壳（`g3ku/shells/desktop.py`，命令 `negi window`）只是**指向已启动服务的一扇 WebView2 窗**：它不承载服务、不拥有服务生命周期，关窗不停服务，再点一次图标就重开一扇。承载用系统自带的 WebView2 运行时（Win11 预装），不打包浏览器内核；依赖 `pywebview` 带 `sys_platform == 'win32'` 标记，Linux / macOS 的安装不会被它和它的 .NET 互操作依赖拖进去。两个必须知道的点：`http://127.0.0.1` 在 WebView2 里是安全上下文，所以 `navigator.mediaDevices` 存在（实测 `secure:true / mediaDevices:true`）；但 pywebview 不注册 `PermissionRequested`，麦克风要在 `loaded` 回调里补挂——该回调跑在 UI 线程，而 `CoreWebView2` 只允许在 UI 线程访问，在别的线程上取它会抛 `InvalidOperationException`。外链由 pywebview 的 `NewWindowRequested` 交给系统浏览器，壳里不需要额外代码。开不了壳（非 Windows、依赖缺失、运行时异常）时 `start --window` 一律回落到浏览器，不会点了没反应。
 
-- Windows PowerShell: `.\start-negi.ps1`
+- Windows: `start-negi.cmd`（不经过 PowerShell）；`.\start-negi.ps1` 是同一语义的糖
 - Linux / macOS: `./start-negi.sh`
 
 适合：
@@ -72,14 +72,18 @@
 - 普通用户快速启动项目
 - 本地单机直接拉起 Web 与托管 worker
 - 让脚本自动处理 `.venv`、依赖安装、基础配置兜底与已有托管进程重启
-- 回收既有进程的点**只有两处**：`start-negi.ps1` 的 `Stop-NegiManagedPythonProcesses` 与 `start-negi.sh:118-119`；`negi.ps1` / `negi.sh` / `install.ps1` / `install.sh` 都不杀进程，排查"启动时为什么把我的实例关了"只看这两处。两边语义已对齐：先发 `POST /api/bootstrap/exit` 优雅退出并轮询，再对残留 PID 动手，且**动手前按实况判存活**（sh 用 `kill -0`，ps 用 `Get-Process`）。ps 侧曾按"发优雅退出之前拍的那份快照"逐个 `Stop-Process`，等待窗口里已自退的 PID 会被掐第二下并报 `Failed to stop PID <n>: 找不到进程标识符`——那是噪音不是故障（`main` 上 `d7fd6f62` 修掉，同时把"确实还活着却没掐掉"才报警告作为判据）。别把这条误读成"端口被别的进程占着"：端口是否被占的权威判据是 `Get-NetTCPConnection -LocalPort 18790`，`netstat` 里状态列在地址之后，用 `LISTENING.*<port>` 这种模式永远匹配不到。
+- 回收既有进程由**解释器**执行：`negi_bootstrap.reap_existing_runtime_processes`，`start-negi.cmd` / `start-negi.ps1` / `negi web` 共用这一处；`start-negi.sh` 保留自己的 POSIX 实现（同一端点、同一超时、同样先优雅后强杀）。`negi.ps1` / `negi.sh` / `install.ps1` / `install.sh` 自己不杀进程。回收不能挂在 `.ps1` 上：未签名的 `.ps1` 会被机器策略整份拒掉（实测 `UnauthorizedAccess`，而 `Get-ExecutionPolicy` 仍报 RemoteSigned），入口一被拦，回收逻辑也跟着消失；`.cmd` 直接 exec `negi_bootstrap.py`，所以它在策略下仍然起得来。三个必须知道的判据：
+  - **不能把启动器自己算进名单**：`.cmd` 用绝对路径调 `negi_bootstrap.py`，启动器自己的命令行同时命中「checkout 根」与 `negi_bootstrap.py web`。要排除的是一对 PID（venv 的 `python.exe` 是重定向器，cmdline 命中的是父进程，真正执行代码的是它的子进程）；漏掉任何一个，强杀那一步都会打死回收者本身——入口以 exit 1 静默消失、一个字都不打印，看起来像"脚本起不来"。
+  - **优雅退出的端口要按候选找**：回收按 checkout 收、不按端口收。操作者这次换了 `-Port` 时旧实例还听在旧端口上，只打目标端口等于没发请求、回收会退化成强杀（异常中断）。候选顺序是目标端口 → 旧实例记下的端口（`.g3ku/internal-callback.json` 里的回调地址，web 启动时由 launcher 写入）→ 配置端口 → 默认 `18790`。
+  - **强杀以"杀完还在不在"判定**：`taskkill /T` 收父进程时子进程已经跟着走了，排在后面的子 PID 再杀一次会报"找不到进程"；只有杀完仍活着才值得报一行失败。
+  端口是否被占的权威判据仍是 `Get-NetTCPConnection -LocalPort 18790`：`netstat` 里状态列在地址之后，用 `LISTENING.*<port>` 这种模式永远匹配不到。
 
 维护上要记住：
 
-- 这两个脚本是普通用户首选入口
-- 它们会在启动前默认清理当前仓库下已有的 negi web / worker 进程，但**先请求优雅退出**：脚本向 `POST /api/bootstrap/exit`（`pause_running_work=true`）发起请求并等待运行时把全部会话与任务持久化暂停、自行退出；只有在接口不可达、返回失败或等待超时（约 40 秒）时才回退到强制杀进程。因此“重跑启动脚本”对运行中的工作是一次优雅暂停而不是异常中断，下次启动会自动恢复（生命周期合同见 `main-task-runtime.md`「Graceful Shutdown Pause and Startup Auto-Resume」）
+- 这些入口脚本是普通用户首选入口
+- 它们会在启动前默认清理当前仓库下已有的 negi web / worker 进程，但**先请求优雅退出**：向 `POST /api/bootstrap/exit`（`pause_running_work=true`）发起请求并等待运行时把全部会话与任务持久化暂停、自行退出；只有在接口不可达、返回失败或等待超时（约 40 秒）时才回退到强制杀进程。因此“重跑启动脚本”对运行中的工作是一次优雅暂停而不是异常中断，下次启动会自动恢复（生命周期合同见 `main-task-runtime.md`「Graceful Shutdown Pause and Startup Auto-Resume」）
 - 强制回退路径（强杀）对应的是异常中断：下次启动任务走恢复清洗，任务卡片会以 toast 提示「本任务遇到异常停止」；toast 可点击关闭（UI 合同见 `web-and-admin.md`「Task Recovery Notice UI Contract」）
-- 它们最终仍然是调用 `g3ku` bootstrap，再进入 `negi web`
+- 它们最终都进入 `negi_bootstrap.py` 的 web 分支，由它起 `python -m g3ku web`
 - 当脚本使用 reload 模式时，Web 侧自动托管 worker 会关闭；这时要单独运行 `negi worker`
 - `negi.cmd` / `negi.ps1` / `negi.sh` 是 CLI 透传包装；无参调用走 `start`：先探端口，已在跑就只打印地址并打开浏览器（**不打断正在工作的实例**），没在跑才启动服务，等就绪后打开浏览器。`start` **一律后台化**（`CREATE_NO_WINDOW | CREATE_NEW_PROCESS_GROUP`，与「重启并更新」的重拉起同一形态），所以起完关掉那个终端窗口项目照跑，图标与手敲 `negi` 是同一条语义。**后台化不许用 `DETACHED_PROCESS`**：uv 托管的 venv 里 `.venv\Scripts\python.exe` 是重定向器，真解释器是它的**子进程**（实测启动 PID ≠ 运行 PID）；父进程完全没有控制台时 Windows 会给那个子进程新建一个**可见**控制台，而它就是服务本身——用户关掉"多出来的黑窗"等于杀掉 Negi。`CREATE_NO_WINDOW` 下真解释器根本没有控制台（实测 `GetConsoleWindow()` 返回 0），既看不见也关不掉。想用自己的 Ctrl+C 停服务走显式 `web`（前台、控制台附着；实时输出本来就一直在 `console.log`，终端不滚日志）。三条路最终都是 `python -m g3ku web`，所以进程判据与单实例锁的归属判断都不变。任何入口的 web 启动都会在终端报告结果：成功横幅带 URL，失败横幅带子进程退出码和 `.g3ku/logs/console.log` 指引。横幅的"成功"只代表监听端口已生效；运行时是否还在预热看 `/api/bootstrap/status` 的 `runtime_bootstrapping`（合同见 `web-and-admin.md`「Local Startup And Launcher Contract」）。探针盯的端口是"配置端口与 `--port` 合并后的那一个"，只读配置会让非默认端口在服务正常时打印假失败
 - web 启动在拿单实例锁（`.g3ku/start.lock`）之前会先自愈：杀掉本工作区残留的 negi web 服务进程（`-m g3ku web` 或 `-c ...run_web_server_entrypoint...` 形态，按 venv python 路径或进程 cwd 归属本工作区）。因此“端口/锁被占”不是永久失败：再次启动会替换残留实例；若报错里 `pid=unknown`（持有者在加锁与写元数据之间被杀），用 `netstat` 查 web 端口定位占用者
@@ -120,7 +124,7 @@
 1. 检查 `.g3ku/config.json`
 2. 运行 `negi status`
 3. 运行一次 `negi agent -m "test"`
-4. 在任意目录输入 `negi` 启动项目（开发机上装过就有这条命令；没有时回退到安装目录里的 `.\start-negi.ps1` / `./start-negi.sh`）
+4. 在任意目录输入 `negi` 启动项目（开发机上装过就有这条命令；没有时回退到安装目录里的 `start-negi.cmd` / `.\start-negi.ps1` / `./start-negi.sh`）
 5. 确认 Web API、任务面板、模型配置页能正常返回
 
 如果你要拆开验证启动链路，或排查“是脚本包装层问题还是 Web/runtime 本身问题”，再回退到手动运行 `negi web` / `negi worker`。
@@ -740,7 +744,7 @@ Queue-head recovery caveats that matter during operations:
 
 Negi has two supported operator startup modes:
 
-- direct local startup through `start-negi.ps1` / `start-negi.sh`
+- direct local startup through `start-negi.cmd` / `start-negi.ps1` / `start-negi.sh`
 - container startup through `compose.yaml`
 
 For the container path, the maintenance contract is:

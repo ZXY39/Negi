@@ -1,3 +1,4 @@
+import json
 import os
 import shutil
 import subprocess
@@ -219,6 +220,8 @@ def test_main_routes_web_with_its_own_port_and_no_browser(monkeypatch) -> None:
         return 0
 
     monkeypatch.setattr(negi_bootstrap, '_launch_web', _capture)
+    monkeypatch.setattr(negi_bootstrap, 'reap_existing_runtime_processes', lambda port, **_k: {'remaining': []})
+    monkeypatch.setattr(negi_bootstrap, '_wait_port_quiet', lambda port, **_k: True)
 
     assert negi_bootstrap.main(['web', '--port', '9123']) == 0
     assert seen == {
@@ -321,3 +324,225 @@ def test_web_bind_default_is_loopback_and_the_container_lane_stays_explicit() ->
     repo_root = Path(__file__).resolve().parents[2]
     entrypoint = (repo_root / "docker" / "web-entrypoint.sh").read_text(encoding="utf-8")
     assert "--host 0.0.0.0" in entrypoint
+
+
+# ---------------------------------------------------------------------------
+# 入口脚本与旧实例回收：回收从 `start-negi.ps1` 搬进解释器之后，三条入口（.cmd / .ps1 /
+# `negi web`）共用同一份语义。未签名的 .ps1 会被机器策略整份拒掉（实测 UnauthorizedAccess），
+# 那时只有不依赖 PowerShell 的这条道还能起。
+
+
+def test_entry_switches_are_translated_in_one_place(monkeypatch) -> None:
+    monkeypatch.setattr(negi_bootstrap, 'os', SimpleNamespace(
+        name=os.name, environ={'G3KU_PROMPT_TRACE': '1', 'G3KU_WEB_KEEP_WORKER': '1'}, chdir=lambda _p: None
+    ))
+
+    args, want_browser, wants_help = negi_bootstrap._apply_web_entry_flags([
+        '-BindHost', '0.0.0.0', '-Port', '9123', '-OpenBrowser', '-PromptLog', '-KeepWorker', '-Reload',
+    ])
+
+    assert wants_help is False
+    assert want_browser is True
+    # 交给 `python -m g3ku web` 的必须是 CLI 形状；PowerShell 形状只活在入口脚本那一段。
+    assert args == ['--host', '0.0.0.0', '--port', '9123', '--reload']
+    assert negi_bootstrap.os.environ['G3KU_PROMPT_TRACE'] == '1'
+    assert negi_bootstrap.os.environ['G3KU_WEB_KEEP_WORKER'] == '1'
+
+    # 没给开关时两个变量要被清掉：子进程继承的是这一份环境，留着就是"这次没要求却还在记提示词"。
+    plain_args, plain_browser, _ = negi_bootstrap._apply_web_entry_flags(['--port', '9124'])
+    assert plain_args == ['--port', '9124']
+    assert plain_browser is False
+    assert 'G3KU_PROMPT_TRACE' not in negi_bootstrap.os.environ
+    assert 'G3KU_WEB_KEEP_WORKER' not in negi_bootstrap.os.environ
+
+
+def test_entry_help_prints_usage_without_touching_the_port(monkeypatch) -> None:
+    _patch_env(monkeypatch)
+
+    def _forbidden(*_args, **_kwargs):
+        raise AssertionError('help must not reap instances or bind anything')
+
+    monkeypatch.setattr(negi_bootstrap, 'reap_existing_runtime_processes', _forbidden)
+    monkeypatch.setattr(negi_bootstrap, '_launch_web', _forbidden)
+
+    assert negi_bootstrap.main(['web', '-Help']) == 0
+
+
+def test_port_override_prefers_the_last_occurrence() -> None:
+    # `start-negi.cmd` 把默认端口写在前面、操作员的追在后面；取第一次会让回收与就绪探测
+    # 盯着默认端口，而服务实际绑在自定义端口上，看着就像"起不来"。
+    assert negi_bootstrap._port_override(['web', '--port', '18790', '--port', '9555']) == 9555
+
+
+def test_reaper_matches_all_three_shapes_but_only_this_checkout() -> None:
+    root = str(negi_bootstrap.PROJECT_ROOT)
+    assert negi_bootstrap._runtime_cmdline_is_managed(f'{root}\\.venv\\Scripts\\python.exe -m g3ku web', root=root)
+    assert negi_bootstrap._runtime_cmdline_is_managed(f'{root}/.venv/bin/python -m g3ku worker', root=root)
+    assert negi_bootstrap._runtime_cmdline_is_managed(f'{root}/.venv/bin/python negi_bootstrap.py web', root=root)
+    # 形状对但别的安装：不收，否则一台机器两个 checkout 会互相杀。
+    assert not negi_bootstrap._runtime_cmdline_is_managed(
+        'C:\\other\\Negi\\.venv\\bin\\python -m g3ku web', root=root
+    )
+    assert not negi_bootstrap._runtime_cmdline_is_managed(f'{root}\\.venv\\Scripts\\python.exe -m g3ku status', root=root)
+
+
+def test_reap_stops_the_old_instance_gracefully_without_killing(monkeypatch) -> None:
+    states = [[11, 12], [], [], []]
+    calls = []
+    monkeypatch.setattr(negi_bootstrap, '_managed_runtime_processes', lambda: list(states.pop(0) if states else []))
+    monkeypatch.setattr(negi_bootstrap, '_request_runtime_exit', lambda port, **_k: calls.append(port) or True)
+
+    def _no_kill(pid):
+        raise AssertionError(f'graceful exit worked; must not force-kill pid {pid}')
+
+    monkeypatch.setattr(negi_bootstrap, '_terminate_runtime_process', _no_kill)
+
+    lines: list[str] = []
+    report = negi_bootstrap.reap_existing_runtime_processes(18790, graceful_timeout=0.2, print_lines=lines)
+
+    assert calls == [18790]
+    assert report['found'] == [11, 12]
+    assert report['graceful'] is True
+    assert report['remaining'] == []
+    assert any('Restarting existing Negi' in line for line in lines)
+
+
+def test_reap_force_kills_only_the_pids_it_asked_to_stop(monkeypatch) -> None:
+    # 快照之后新出现的 PID 不动手：那是别人家的（或刚被拉起的）进程，只收拾"我让它退而它没退"的。
+    killed = []
+    states = [[21, 22], [21, 22, 30], [30], [30]]
+    monkeypatch.setattr(negi_bootstrap, '_managed_runtime_processes', lambda: list(states.pop(0) if states else []))
+    monkeypatch.setattr(negi_bootstrap, '_request_runtime_exit', lambda port, **_k: False)
+    monkeypatch.setattr(negi_bootstrap, '_terminate_runtime_process', lambda pid: killed.append(pid) or True)
+    monkeypatch.setattr(negi_bootstrap.time, 'sleep', lambda _s: None)
+
+    lines: list[str] = []
+    report = negi_bootstrap.reap_existing_runtime_processes(18790, graceful_timeout=0.0, print_lines=lines)
+
+    assert sorted(killed) == [21, 22]
+    assert report['graceful'] is False
+    assert report['remaining'] == [30]
+
+
+def test_reaper_never_targets_the_launcher_itself(monkeypatch) -> None:
+    # 入口用绝对路径调 `negi_bootstrap.py` 时，启动器自己的命令行同时命中「checkout 根」
+    # 与 `negi_bootstrap.py web` 两条判据。把自己算进回收名单，`taskkill /T` 会在回收途中
+    # 杀掉回收者本身：入口以 exit 1 静默消失、一个字都不打印，看起来像"脚本起不来"
+    # （实测 `start-negi.cmd` 必现；同一个文件用相对路径调用时不带 checkout 根，所以不复现）。
+    # 要排除的是一对 PID：venv 的 python.exe 是重定向器，cmdline 命中判据的是父进程，
+    # 真正跑这段代码的是它的子进程（启动 PID ≠ 运行 PID）。
+    self_pids = [os.getpid(), os.getppid()]
+    other = max(self_pids) + 1000
+    if os.name == 'nt':
+        stdout = ''.join(f'{pid}\r\n' for pid in self_pids) + f'{other}\r\n'
+    else:
+        root = str(negi_bootstrap.PROJECT_ROOT)
+        stdout = ''.join(
+            f'{pid} {root}/.venv/bin/python -m g3ku web\n' for pid in [*self_pids, other]
+        )
+    monkeypatch.setattr(
+        negi_bootstrap,
+        '_run_capture',
+        lambda argv, **_kwargs: subprocess.CompletedProcess(argv, 0, stdout, ''),
+    )
+    assert negi_bootstrap._managed_runtime_processes() == [other]
+
+    killed = []
+    monkeypatch.setattr(negi_bootstrap, '_request_runtime_exit', lambda _port, **_k: False)
+    monkeypatch.setattr(
+        negi_bootstrap, '_terminate_runtime_process', lambda pid: killed.append(pid) or True
+    )
+    monkeypatch.setattr(negi_bootstrap.time, 'sleep', lambda _s: None)
+
+    report = negi_bootstrap.reap_existing_runtime_processes(18790, graceful_timeout=0.0)
+
+    assert report['found'] == [other]
+    assert killed == [other]
+
+
+def test_reap_asks_the_old_port_when_the_operator_changed_the_target_port(monkeypatch) -> None:
+    # 回收按 checkout 收、不按端口收：这次换 `-Port 18800` 时旧实例还听在 18790 上。
+    # 只打新端口等于没发请求，回收会退化成强杀——那是异常中断，正是优雅退出要避免的形状。
+    asked = []
+    states = [[11], []]
+    monkeypatch.setattr(negi_bootstrap, '_managed_runtime_processes', lambda: list(states.pop(0) if states else []))
+    monkeypatch.setattr(negi_bootstrap, '_recorded_runtime_port', lambda: 0)
+    monkeypatch.setattr(negi_bootstrap, '_load_bootstrap_config', lambda: {'web': {'port': 18790}})
+    monkeypatch.setattr(
+        negi_bootstrap, '_request_runtime_exit', lambda port, **_k: asked.append(port) or port == 18790
+    )
+
+    def _no_kill(pid):
+        raise AssertionError(f'graceful exit worked; must not force-kill pid {pid}')
+
+    monkeypatch.setattr(negi_bootstrap, '_terminate_runtime_process', _no_kill)
+    monkeypatch.setattr(negi_bootstrap.time, 'sleep', lambda _s: None)
+
+    report = negi_bootstrap.reap_existing_runtime_processes(18800, graceful_timeout=0.1)
+
+    assert asked == [18800, 18790]
+    assert report['graceful'] is True
+
+
+def test_reap_reads_the_port_the_old_instance_recorded(monkeypatch, tmp_path) -> None:
+    # 旧实例启动时会把含端口的回调地址写进 `.g3ku/internal-callback.json`（worker 回传终态用）。
+    # 配置还是 18790、旧实例却在 18800 上时，这是唯一能拿到旧端口的读数。
+    (tmp_path / '.g3ku').mkdir()
+    (tmp_path / '.g3ku' / 'internal-callback.json').write_text(
+        json.dumps({'url': 'http://127.0.0.1:18800/api/internal/task-terminal', 'token': 't'}),
+        encoding='utf-8',
+    )
+    monkeypatch.setattr(negi_bootstrap, 'PROJECT_ROOT', tmp_path)
+    monkeypatch.setattr(negi_bootstrap, '_load_bootstrap_config', lambda: {'web': {'port': 18790}})
+
+    assert negi_bootstrap._runtime_exit_ports(18790) == [18790, 18800]
+
+
+def test_reap_does_not_report_a_pid_that_vanished_during_the_kill(monkeypatch) -> None:
+    # `taskkill /T` 收父进程时子进程已经跟着走了，排在后面的子 PID 再杀一次会报
+    # "找不到进程"；只有**杀完仍活着**才算失败，否则每次重启都刷一行假故障。
+    lines: list[str] = []
+    states = [[21], [21], []]
+    monkeypatch.setattr(negi_bootstrap, '_managed_runtime_processes', lambda: list(states.pop(0) if states else []))
+    monkeypatch.setattr(negi_bootstrap, '_request_runtime_exit', lambda _port, **_k: False)
+    monkeypatch.setattr(negi_bootstrap, '_terminate_runtime_process', lambda _pid: False)
+    monkeypatch.setattr(negi_bootstrap, '_process_exists', lambda _pid: False)
+    monkeypatch.setattr(negi_bootstrap.time, 'sleep', lambda _s: None)
+
+    report = negi_bootstrap.reap_existing_runtime_processes(18790, graceful_timeout=0.0, print_lines=lines)
+
+    assert report['forced'] == [21]
+    assert report['remaining'] == []
+    assert not any('Failed to stop' in line for line in lines)
+
+
+def test_main_refuses_to_start_when_a_second_instance_would_fight_the_port(monkeypatch) -> None:
+    _patch_env(monkeypatch)
+    monkeypatch.setattr(
+        negi_bootstrap,
+        '_launch_web',
+        lambda *_a, **_k: (_ for _ in ()).throw(AssertionError('must not spawn while the port is held')),
+    )
+    monkeypatch.setattr(
+        negi_bootstrap, 'reap_existing_runtime_processes', lambda port, **_k: {'found': [5], 'remaining': [5]}
+    )
+
+    assert negi_bootstrap.main(['web']) == 1
+
+
+def test_the_cmd_entry_boots_without_powershell_and_the_ps1_keeps_no_reaper() -> None:
+    """入口契约：`.cmd` 不碰 PowerShell，`.ps1` 不再自带回收逻辑。
+
+    这台机器上未签名的 `.ps1` 会被策略整份拒掉（实测 `UnauthorizedAccess`，而
+    `Get-ExecutionPolicy` 仍报 RemoteSigned），所以"双击/命令行起不来"必须有第二条道；
+    第二条道同时得带上回收，否则旧实例占着端口与新锁，起得来的那个反而是在坏状态上跑。
+    """
+    cmd = (REPO_ROOT / 'start-negi.cmd').read_text(encoding='utf-8')
+    ps1 = (REPO_ROOT / 'start-negi.ps1').read_text(encoding='utf-8')
+
+    assert '-executionpolicy' not in cmd.lower() and '-file' not in cmd.lower()
+    assert 'negi_bootstrap.py' in cmd and ' web ' in cmd
+    for gone in ('Stop-NegiManagedPythonProcesses', 'Assert-StartPreconditions', 'Get-NegiManagedPythonProcesses'):
+        assert gone not in ps1, gone
+    # 回收只剩解释器一处。
+    assert 'reap_existing_runtime_processes' in (REPO_ROOT / 'negi_bootstrap.py').read_text(encoding='utf-8')

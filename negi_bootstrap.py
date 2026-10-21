@@ -3,13 +3,15 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
 import shutil
+import signal
 import subprocess
 import sys
 import time
+import urllib.parse
 import urllib.request
 from pathlib import Path
-
 
 PROJECT_ROOT = Path(__file__).resolve().parent
 VENV_DIR = PROJECT_ROOT / ".venv"
@@ -243,7 +245,12 @@ def _port_override(args: list[str]) -> int | None:
     The readiness probe has to watch the port the child will actually bind: the
     config value alone makes every non-default port look like a startup failure
     while the server is running fine.
+
+    取**最后一次**出现：`start-negi.cmd` 为了不做 batch 参数拆解，先把默认端口写在前面，
+    操作员给的 `-Port` 追在后面（typer 也是后者赢）。取第一次会让回收与就绪探测盯着默认端口，
+    而服务实际绑在自定义端口上——看着像"起不来"。
     """
+    resolved: int | None = None
     for index, part in enumerate(args):
         value: str | None = None
         if part in ("--port", "-p") and index + 1 < len(args):
@@ -253,10 +260,10 @@ def _port_override(args: list[str]) -> int | None:
         if value is None:
             continue
         try:
-            return int(str(value).strip())
+            resolved = int(str(value).strip())
         except ValueError:
             return None
-    return None
+    return resolved
 
 
 def _web_bind_port(port_override: int | None = None) -> int:
@@ -275,6 +282,215 @@ def _probe_web_ready(port: int) -> bool:
             return int(getattr(resp, "status", 200) or 200) < 400
     except Exception:
         return False
+
+
+# 与 `start-negi.sh` 的匹配式同一条 token 形状，也与 AGENTS.md 冻结项「`python -m g3ku web|worker`
+# 是 reaper 认的 cmdline」对齐：`_spawn_web_runtime` 故意按这个形状起，任何别的进程形状都会留下
+# 占着端口与启动锁的孤儿。第三种形状是"直接跑 negi_bootstrap.py web"（旧快捷方式）。
+RUNTIME_CMDLINE_PATTERN = r"-m\s+g3ku\s+web\b|-m\s+g3ku\s+worker\b|negi_bootstrap\.py\"?\s+web\b"
+_GRACEFUL_EXIT_TIMEOUT_SECONDS = 40.0
+_GRACEFUL_EXIT_POLL_SECONDS = 0.5
+
+
+def _runtime_cmdline_is_managed(command_line: object, *, root: object = None) -> bool:
+    """是不是"这个 checkout 起的 Negi 运行时"。
+
+    两道判据缺一不可：cmdline 形状认进程在干什么，根路径把它限定在本安装里——一台机器上并存两个
+    checkout 时，只按形状就会把别人家的实例收掉。Windows 路径大小写不敏感，按小写比。
+    """
+    text = str(command_line or "")
+    if root is not None and str(root).lower() not in text.lower():
+        return False
+    return bool(re.search(RUNTIME_CMDLINE_PATTERN, text))
+
+
+def _wait_port_quiet(port: int, *, timeout: float = 10.0, poll: float = 0.5) -> bool:
+    """等这台端口的 HTTP 不再应答。
+
+    回收轮询看的是进程，端口刚释放时 listen 套接字可能还在 TIME_WAIT 之外短暂应答；不等一下
+    就把"旧实例还活着"报给操作员是假警报。判据用我们本来就有的 `/api/bootstrap/status`，
+    不再为端口另开一次进程查询。
+    """
+    deadline = time.monotonic() + max(0.0, float(timeout))
+    while True:
+        if not _probe_web_ready(port):
+            return True
+        if time.monotonic() >= deadline:
+            return False
+        time.sleep(max(0.05, float(poll)))
+
+
+def _run_capture(argv: list[str]) -> subprocess.CompletedProcess:
+    try:
+        return subprocess.run(
+            argv,
+            capture_output=True,
+            text=True,
+            timeout=20,
+            **_no_window_flags(),
+        )
+    except Exception as exc:  # noqa: BLE001 - a missing probe tool must not block a start
+        return subprocess.CompletedProcess(argv, 1, "", f"{type(exc).__name__}:{exc}")
+
+
+def _managed_runtime_processes() -> list[int]:
+    """本 checkout 起着的 web/worker 进程 PID（与启动器旧实现同一判据，但不含自己）。
+
+    入口用绝对路径调这个文件时，**启动器自己的命令行**同时命中「checkout 根」与
+    `negi_bootstrap.py web` 两条判据。把自己算进回收名单，下面的 `taskkill /T` 就会
+    在回收途中杀掉正在回收的进程本身：入口以 exit 1 静默消失、一个字都不打印，看起来
+    像"脚本起不来"（实测：同一个文件用相对路径调用则不复现——相对 argv 不含 checkout 根）。
+
+    要排除的是**一对** PID：venv 的 `python.exe` 是重定向器，真正执行本文件的解释器是
+    它的子进程（实测启动 PID ≠ 运行 PID）。`os.getpid()` 只是那个子进程，cmdline 命中
+    判据的却是父进程，所以父 PID 必须一起排除，否则强杀那一步仍然打到自己。
+    """
+    self_pids = {os.getpid(), os.getppid()}
+    if os.name == "nt":
+        # PowerShell 单引号里反斜杠是字面量，`.NET` 正则要的 `\s` 原样传即可（多倍成一个
+        # 反斜杠就变成"匹配一个反斜杠再加 s"，扫不到任何进程——看着像"没有旧实例"）。
+        # 根路径用 [regex]::Escape 现算：它含点号与反斜杠，直接塞进正则会被当元字符。
+        escaped_root = str(PROJECT_ROOT).replace("'", "''")
+        script = (
+            "$root = [regex]::Escape('" + escaped_root + "')\n"
+            "Get-CimInstance Win32_Process | Where-Object "
+            "{ $_.Name -like 'python*' -and $_.CommandLine -and $_.CommandLine -match $root -and "
+            "$_.CommandLine -match '" + RUNTIME_CMDLINE_PATTERN + "' } "
+            "| ForEach-Object { $_.ProcessId }"
+        )
+        completed = _run_capture(["powershell.exe", "-NoProfile", "-Command", script])
+        pids = [int(token) for token in completed.stdout.split() if token.strip().isdigit()]
+        return [pid for pid in pids if pid not in self_pids]
+    completed = _run_capture(["ps", "-eo", "pid=,args="])
+    pids: list[int] = []
+    for line in completed.stdout.splitlines():
+        parts = line.strip().split(None, 1)
+        if len(parts) != 2 or not parts[0].isdigit():
+            continue
+        if _runtime_cmdline_is_managed(parts[1], root=PROJECT_ROOT):
+            pids.append(int(parts[0]))
+    return [pid for pid in pids if pid not in self_pids]
+
+
+def _request_runtime_exit(port: int, *, timeout: float = 20.0) -> bool:
+    """`POST /api/bootstrap/exit`：让运行时自己停车并退出（与启动器旧实现同一入口）。"""
+    body = json.dumps({"pause_running_work": True}).encode("utf-8")
+    request = urllib.request.Request(
+        f"http://127.0.0.1:{port}/api/bootstrap/exit",
+        data=body,
+        method="POST",
+        headers={"Content-Type": "application/json"},
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=timeout) as resp:
+            return int(getattr(resp, "status", 200) or 200) < 400
+    except Exception:
+        return False
+
+
+def _terminate_runtime_process(pid: int) -> bool:
+    if os.name == "nt":
+        # `/T` 是必需的：venv 的 `python.exe` 是重定向器，真解释器是它的**子进程**
+        # （实测启动 PID != 运行 PID）。只 `/F` 杀父会留下孤儿服务占着端口，然后
+        # "端口还被占"变成永久起不来。
+        completed = _run_capture(["taskkill", "/PID", str(int(pid)), "/T", "/F"])
+        return completed.returncode == 0
+    try:
+        os.kill(int(pid), signal.SIGKILL)
+    except OSError:
+        return False
+    return True
+
+
+def _recorded_runtime_port() -> int:
+    """上一个实例自己记下的端口：web 启动时 launcher 会把含端口的回调地址写进
+    `.g3ku/internal-callback.json`（给 worker 回传终态用）。读不到就是 0。"""
+    try:
+        payload = json.loads((PROJECT_ROOT / ".g3ku" / "internal-callback.json").read_text(encoding="utf-8"))
+        host_port = urllib.parse.urlparse(str((payload or {}).get("url") or "")).port
+    except Exception:
+        return 0
+    return int(host_port or 0)
+
+
+def _runtime_exit_ports(port: int) -> list[int]:
+    """优雅退出要打到的候选端口：这次要绑的端口，再加旧实例记下的端口、配置端口与默认端口。
+
+    回收按 checkout 收、不按端口收；操作者这次换了 `-Port` 时旧实例仍听在旧端口上，
+    只打目标端口等于没发请求，回收就会退化成强杀——那是异常中断（下次启动走恢复清洗、
+    任务卡提示"异常停止"），正是优雅退出这一步要避免的形状。
+    """
+    candidates = [int(port)]
+    try:
+        configured = int((_load_bootstrap_config().get("web") or {}).get("port") or 0)
+    except (TypeError, ValueError):
+        configured = 0
+    for candidate in (_recorded_runtime_port(), configured, DEFAULT_WEB_PORT):
+        if candidate and candidate not in candidates:
+            candidates.append(candidate)
+    return candidates
+
+
+def _process_exists(pid: int) -> bool:
+    if os.name == "nt":
+        completed = _run_capture(["tasklist", "/FI", f"PID eq {int(pid)}", "/NH"])
+        return str(int(pid)) in str(completed.stdout or "")
+    try:
+        os.kill(int(pid), 0)
+    except OSError:
+        return False
+    return True
+
+
+def reap_existing_runtime_processes(
+    port: int,
+    *,
+    graceful_timeout: float = _GRACEFUL_EXIT_TIMEOUT_SECONDS,
+    poll: float = _GRACEFUL_EXIT_POLL_SECONDS,
+    print_lines: list[str] | None = None,
+) -> dict[str, object]:
+    """启动前回收本 checkout 的旧实例：先优雅退出并轮询，残留才动手（`start-negi.sh` 同语义）。
+
+    回收不能活在 `start-negi.ps1` 里：入口被机器策略拦下时（未签名的 .ps1 被拒）谁都起不来，
+    而 `negi web` 这条道也不会经过它。放在解释器侧，`.cmd` / `.ps1` / `negi web` 共用一次回收。
+    """
+    lines = print_lines if print_lines is not None else []
+    found = _managed_runtime_processes()
+    if not found:
+        return {"found": [], "graceful": False, "forced": [], "remaining": []}
+    lines.append("[negi] Restarting existing Negi web/worker processes...")
+    graceful = False
+    for exit_port in _runtime_exit_ports(port):
+        if _request_runtime_exit(exit_port):
+            graceful = True
+            break
+    if graceful:
+        lines.append("[negi] Graceful exit requested; waiting for the runtime to pause all work and stop...")
+        deadline = time.monotonic() + max(0.0, float(graceful_timeout))
+        while time.monotonic() < deadline:
+            if not _managed_runtime_processes():
+                return {"found": found, "graceful": True, "forced": [], "remaining": []}
+            time.sleep(max(0.05, float(poll)))
+    remaining = _managed_runtime_processes()
+    if remaining:
+        lines.append("[negi] Force-stopping remaining Negi processes...")
+    forced: list[int] = []
+    failed: list[int] = []
+    for pid in remaining:
+        if pid not in found:
+            # 快照之后新出现的 PID 不动手；只收拾"我让它退出而它没退"的那批。
+            continue
+        if _terminate_runtime_process(pid) or not _process_exists(pid):
+            # `taskkill /T` 收父进程时已经把子进程带走了；排在后面的子 PID 再杀一次会
+            # 报"找不到进程"，但那不是失败——只有**杀完仍活着**才算失败。
+            forced.append(pid)
+        else:
+            failed.append(pid)
+    if failed:
+        lines.append(f"[negi] Failed to stop PID(s): {', '.join(str(pid) for pid in failed)}")
+    time.sleep(1.0)
+    return {"found": found, "graceful": graceful, "forced": forced, "remaining": _managed_runtime_processes()}
+
 
 
 def _web_url(port: int) -> str:
@@ -437,6 +653,91 @@ def _take_window_flag(args: list[str]) -> tuple[list[str], bool]:
     return [part for part in args if part != "--window"], True
 
 
+def _take_bool_flag(args: list[str], name: str) -> tuple[list[str], bool]:
+    """`--flag/--no-flag` 两种写法都收，返回剩余参数与是否置真。"""
+    positive = name
+    negative = f"--no-{name.lstrip('-')}"
+    found = False
+    kept = []
+    for part in args:
+        if part == positive:
+            found = True
+            continue
+        if part == negative:
+            found = False
+            continue
+        kept.append(part)
+    return kept, found
+
+
+# `start-negi.ps1` / `start-negi.cmd` 的开关是 PowerShell 形状（`-PromptLog`，大小写不敏感）。
+# 翻译表放在解释器侧只写一次：入口脚本因此可以是薄壳，`.cmd` 也不必用 batch 循环去拆参数——
+# Windows 上 batch 的字符串处理正是最容易静默错一个开关的地方。
+WEB_ENTRY_SWITCH_ALIASES: dict[str, str] = {
+    "-bindhost": "--host",
+    "-host": "--host",
+    "-port": "--port",
+    "-openbrowser": "--open-browser",
+    "-promptlog": "--prompt-log",
+    "-keepworker": "--keep-worker",
+    "-reload": "--reload",
+}
+WEB_ENTRY_HELP_SWITCHES = frozenset({"-h", "-help", "--help"})
+
+WEB_ENTRY_USAGE = """Usage: start-negi [-BindHost HOST] [-Port PORT] [-OpenBrowser] [-PromptLog] [-Reload] [-KeepWorker]
+
+  -BindHost      Web bind host. Default: 127.0.0.1
+  -Port          Web bind port. Default: 18790
+  -OpenBrowser   Open the browser once the runtime answers
+  -PromptLog     Enable G3KU_PROMPT_TRACE=1
+  -Reload        Web auto-reload (managed worker auto-start is disabled)
+  -KeepWorker    Leave the managed worker running when the web server exits
+"""
+
+
+def _normalize_web_entry_switches(web_args: list[str]) -> tuple[list[str], bool]:
+    """把入口脚本的开关统一成 CLI 形状；返回净化后的参数与"只要帮助"。"""
+    kept: list[str] = []
+    wants_help = False
+    for part in web_args:
+        lowered = str(part).lower()
+        if lowered in WEB_ENTRY_HELP_SWITCHES:
+            wants_help = True
+            continue
+        alias = WEB_ENTRY_SWITCH_ALIASES.get(lowered)
+        kept.append(alias if alias else str(part))
+    return kept, wants_help
+
+
+def _apply_web_entry_flags(web_args: list[str]) -> tuple[list[str], bool, bool]:
+    """归一入口开关并落到子进程环境。
+
+    返回 `(CLI 参数, 是否开浏览器, 是否只要帮助)`。`G3KU_PROMPT_TRACE` 与
+    `G3KU_WEB_KEEP_WORKER` 的读取点各自只有一处（provider/engine、worker_control），在这里设
+    一次就够，不需要每个入口脚本各写一份；没给开关时把两个变量清掉，免得上一支 shell 里残留的
+    值被无声继承下来。
+
+    `--host/--port` 不在这里摘：它们要原样交给 `python -m g3ku web`（typer 是唯一判据源），
+    只有端口需要在这里读一次，好让回收与就绪探测看着同一个端口。
+    """
+    web_args, wants_help = _normalize_web_entry_switches(list(web_args))
+    web_args, want_browser = _take_bool_flag(web_args, "--open-browser")
+    web_args, want_prompt_log = _take_bool_flag(web_args, "--prompt-log")
+    web_args, want_keep_worker = _take_bool_flag(web_args, "--keep-worker")
+    for name in ("G3KU_PROMPT_TRACE", "G3KU_WEB_KEEP_WORKER"):
+        os.environ.pop(name, None)
+    if want_prompt_log:
+        os.environ["G3KU_PROMPT_TRACE"] = "1"
+    if want_keep_worker:
+        os.environ["G3KU_WEB_KEEP_WORKER"] = "1"
+    return web_args, want_browser, wants_help
+
+
+def _print_reap_lines(lines: list[str]) -> None:
+    for line in lines:
+        print(line, flush=True)
+
+
 def _run_start(extra_args: list[str]) -> int:
     # `--hidden` is still consumed so a shortcut written by an earlier install
     # keeps working, but start always detaches: a server the operator launched by
@@ -478,11 +779,35 @@ def main(argv: list[str] | None = None) -> int:
         if command == "start":
             return _run_start(args[1:])
         if command == "web":
-            web_args = args[1:]
+            # 旧实例的回收在解释器侧做（原只在 `start-negi.ps1` 里）：入口脚本可能因机器策略根本
+            # 跑不起来（未签名的 .ps1 被拒），`negi.cmd` / `negi web` 这条道仍要能起，且三条道
+            # 必须同一语义。
+            web_args, want_browser, wants_help = _apply_web_entry_flags(args[1:])
+            if wants_help:
+                print(WEB_ENTRY_USAGE, flush=True)
+                return 0
+            port = _web_bind_port(_port_override(web_args))
+            reap_lines: list[str] = []
+            report = reap_existing_runtime_processes(port, print_lines=reap_lines)
+            _print_reap_lines(reap_lines)
+            leftovers = [int(pid) for pid in list(report.get("remaining") or [])]
+            if leftovers:
+                print(
+                    "[negi] existing Negi process(es) refused to stop: "
+                    f"{', '.join(str(pid) for pid in leftovers)}; not starting a second instance",
+                    flush=True,
+                )
+                return 1
+            if not _wait_port_quiet(port):
+                print(
+                    f"[negi] port {port} still answers after the reaper finished; another server holds it",
+                    flush=True,
+                )
+                return 1
             return _launch_web(
                 ["web", *web_args],
-                port=_web_bind_port(_port_override(web_args)),
-                open_browser=False,
+                port=port,
+                open_browser=want_browser,
                 hidden=False,
             )
         completed = subprocess.run(

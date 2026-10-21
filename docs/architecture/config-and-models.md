@@ -59,7 +59,7 @@
 
 出厂默认只绑回环，因为**管理面这套接口没有鉴权依赖**（`main/api` 全局没有 `Depends`，唯一那道门是首屏锁定中间件 `web/main.py`），而它能删任务、改模型配置与密钥、写 exec 命令白名单。把 host 显式写成 `0.0.0.0` 等于把这些动作开放给整个网段——容器车道就是这么显式传的（`docker/web-entrypoint.sh` 带 `--host 0.0.0.0`），那是"外面另有边界"的部署形态，不是本机默认。
 
-取值优先级：`negi web --host` > `config.json` 的 `web.host` > schema 默认；`start-negi.ps1` / `start-negi.sh` 自己显式传 `127.0.0.1`，`g3ku/web/launcher.py` 在前两者都空时兜底回环。已经写在 `config.json` 里的值优先于默认，所以一台盘上已经是 `0.0.0.0` 的设备不会被默认改动收回去——那要操作员自己改那一行，或按上面的边界自己承担。
+取值优先级：`negi web --host` > `config.json` 的 `web.host` > schema 默认；`start-negi.cmd` / `start-negi.ps1` / `start-negi.sh` 自己显式传 `127.0.0.1`，`g3ku/web/launcher.py` 在前两者都空时兜底回环。已经写在 `config.json` 里的值优先于默认，所以一台盘上已经是 `0.0.0.0` 的设备不会被默认改动收回去——那要操作员自己改那一行，或按上面的边界自己承担。
 
 ### `resources`
 

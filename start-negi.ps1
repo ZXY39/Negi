@@ -16,14 +16,13 @@ Set-StrictMode -Version Latest
 
 $scriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
 $bootstrapScript = Join-Path $scriptDir "negi.ps1"
-$rootPattern = [regex]::Escape($scriptDir)
 
 function Show-Usage {
     @"
 Usage: .\start-negi.ps1 [-BindHost HOST] [-Port PORT] [-OpenBrowser] [-PromptLog] [-Reload] [-KeepWorker] [-h|--help]
 
 Quick start:
-  .\start-negi.ps1
+  .\start-negi.ps1          (or start-negi.cmd, which needs no PowerShell script permission)
 
 Common options:
   -BindHost      Web bind host. Default: 127.0.0.1
@@ -41,118 +40,38 @@ if ($Help -or ($ExtraArgs -contains "--help")) {
     exit 0
 }
 
-function Get-NegiManagedPythonProcesses {
-    Get-CimInstance Win32_Process | Where-Object {
-        $_.Name -like "python*" -and
-        $_.CommandLine -and
-        $_.CommandLine -match $rootPattern -and
-        (
-            $_.CommandLine -match 'negi_bootstrap\.py"?\s+web' -or
-            $_.CommandLine -match '-m\s+g3ku\s+web' -or
-            $_.CommandLine -match '-m\s+g3ku\s+worker'
-        )
-    }
-}
-
-function Request-NegiGracefulExit {
-    param([int]$Port = 18790)
-    try {
-        $body = '{"pause_running_work":true}'
-        $null = Invoke-RestMethod `
-            -Uri "http://127.0.0.1:$Port/api/bootstrap/exit" `
-            -Method Post `
-            -ContentType "application/json" `
-            -Body $body `
-            -TimeoutSec 20 `
-            -ErrorAction Stop
-        return $true
-    } catch {
-        return $false
-    }
-}
-
-function Stop-NegiManagedPythonProcesses {
-    param([int]$Port = 18790)
-    $processes = @(Get-NegiManagedPythonProcesses)
-    if (-not $processes) {
-        return 0
-    }
-    Write-Host "[negi] Restarting existing Negi web/worker processes..." -ForegroundColor Yellow
-    if (Request-NegiGracefulExit -Port $Port) {
-        Write-Host "[negi] Graceful exit requested; waiting for the runtime to pause all work and stop..." -ForegroundColor Yellow
-        $deadline = (Get-Date).AddSeconds(40)
-        while ((Get-Date) -lt $deadline) {
-            $remaining = @(Get-NegiManagedPythonProcesses)
-            if (-not $remaining) {
-                return $processes.Count
-            }
-            Start-Sleep -Milliseconds 500
-        }
-    }
-    Write-Host "[negi] Force-stopping remaining Negi processes..." -ForegroundColor Yellow
-    foreach ($process in $processes) {
-        # $processes is a snapshot taken before the graceful exit was requested; by
-        # the time the polling loop ends many of those PIDs have already exited on
-        # their own. Check liveness here so "already gone" is not reported as a
-        # failed stop.
-        if (-not (Get-Process -Id $process.ProcessId -ErrorAction SilentlyContinue)) {
-            continue
-        }
-        try {
-            Stop-Process -Id $process.ProcessId -Force -ErrorAction Stop
-        } catch {
-            if (Get-Process -Id $process.ProcessId -ErrorAction SilentlyContinue) {
-                Write-Warning "[negi] Failed to stop PID $($process.ProcessId): $($_.Exception.Message)"
-            }
-        }
-    }
-    Start-Sleep -Seconds 2
-    return $processes.Count
-}
-
-function Assert-StartPreconditions {
-    if (-not (Test-Path $bootstrapScript)) {
-        throw "[negi] Missing launcher script: $bootstrapScript"
-    }
-
-    $existingWeb = @(Get-NetTCPConnection -LocalPort $Port -State Listen -ErrorAction SilentlyContinue)
-    if ($existingWeb.Count -gt 0) {
-        $pids = ($existingWeb | Select-Object -ExpandProperty OwningProcess | Sort-Object -Unique) -join ", "
-        throw "[negi] Port $Port is already in use by PID(s): $pids. Stop the existing process before starting Negi."
-    }
-
-    $existingManaged = @(Get-NegiManagedPythonProcesses)
-    if ($existingManaged.Count -gt 0) {
-        $summary = $existingManaged |
-            Select-Object ProcessId, CommandLine |
-            ForEach-Object { "PID=$($_.ProcessId) $($_.CommandLine)" }
-        throw "[negi] Existing Negi web/worker processes are still running after restart attempt:`n$($summary -join "`n")"
-    }
-}
-
-[void](Stop-NegiManagedPythonProcesses -Port $Port)
-Assert-StartPreconditions
-
+# This script only translates switches into CLI flags. Reaping the old instance, waiting for
+# the port to go quiet and reporting a failed start all live in `negi_bootstrap.py`'s web
+# branch (`reap_existing_runtime_processes`). Keeping that here would be wrong: an unsigned
+# .ps1 can be refused outright by the machine's script policy (measured UnauthorizedAccess),
+# and the recovery would disappear with it - while `negi.cmd` / `negi web` never pass here.
 $webArgs = @("web", "--host", $BindHost, "--port", "$Port")
-
-if ($PromptLog) {
-    $env:G3KU_PROMPT_TRACE = "1"
-    Write-Host "[negi] Prompt logging enabled via G3KU_PROMPT_TRACE=1." -ForegroundColor Yellow
-} else {
-    Remove-Item Env:G3KU_PROMPT_TRACE -ErrorAction SilentlyContinue
-}
-
-if ($OpenBrowser) {
-    Start-Job -ScriptBlock {
-        param($TargetUrl)
-        Start-Sleep -Seconds 3
-        Start-Process $TargetUrl | Out-Null
-    } -ArgumentList "http://${BindHost}:$Port" | Out-Null
-}
 
 if ($Reload) {
     $webArgs += "--reload"
 }
+
+if ($PromptLog) {
+    $webArgs += "--prompt-log"
+    Write-Host "[negi] Prompt logging enabled via G3KU_PROMPT_TRACE=1." -ForegroundColor Yellow
+}
+
+if ($KeepWorker) {
+    $webArgs += "--keep-worker"
+    Write-Host "[negi] KeepWorker enabled; web-managed worker will be left running when the web server exits." -ForegroundColor Yellow
+}
+
+if ($OpenBrowser) {
+    # Opening the browser also happens runtime-side: only the runtime knows the server is
+    # actually ready, while this script could only guess with a fixed delay.
+    $webArgs += "--open-browser"
+}
+
+# Clear switches left over from a previous shell; otherwise "this run passed no -PromptLog"
+# still records prompts. The child inherits this environment, and the Python side sets them
+# back only when the CLI flags ask for it.
+Remove-Item Env:G3KU_PROMPT_TRACE -ErrorAction SilentlyContinue
+Remove-Item Env:G3KU_WEB_KEEP_WORKER -ErrorAction SilentlyContinue
 
 Write-Host "[negi] Project root: $scriptDir"
 if ($Reload) {
@@ -162,14 +81,6 @@ if ($Reload) {
 }
 Write-Host "[negi] Starting web server on http://${BindHost}:$Port ..."
 
-if ($KeepWorker) {
-    $env:G3KU_WEB_KEEP_WORKER = "1"
-    Write-Host "[negi] KeepWorker enabled; web-managed worker will be left running when the web server exits." -ForegroundColor Yellow
-} else {
-    Remove-Item Env:G3KU_WEB_KEEP_WORKER -ErrorAction SilentlyContinue
-}
-
-$webExitCode = 0
 & $bootstrapScript @webArgs
 $webExitCode = if ($LASTEXITCODE -is [int]) { $LASTEXITCODE } else { 0 }
 

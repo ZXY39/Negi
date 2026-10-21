@@ -68,10 +68,14 @@ def test_start_negi_shell_script_has_richer_help_text() -> None:
 
 def test_wrappers_exec_the_bootstrapper_by_its_current_name() -> None:
     # 入口是三层链：start-negi.* → negi.* → negi_bootstrap.py。任何一环按旧名 exec，
-    # 双击启动就会指向一个升级后不存在的文件。
+    # 双击启动就会指向一个升级后不存在的文件。`.cmd` 是机器脚本策略无关的那条道，
+    # 直接 exec `negi_bootstrap.py`（不经 PowerShell）。
     assert '"negi.ps1"' in _read("start-negi.ps1")
     assert "/negi.sh" in _read("start-negi.sh")
-    assert "start-negi.ps1" in _read("start-negi.cmd")
+    cmd_text = _read("start-negi.cmd")
+    assert "negi_bootstrap.py" in cmd_text
+    assert "-executionpolicy" not in cmd_text.lower()
+    assert "-file" not in cmd_text.lower()
     for wrapper in ("negi.ps1", "negi.sh", "negi.cmd"):
         assert "negi_bootstrap.py" in _read(wrapper), wrapper
 
@@ -79,11 +83,12 @@ def test_wrappers_exec_the_bootstrapper_by_its_current_name() -> None:
 def test_stale_process_reaper_keeps_both_cmdline_shapes() -> None:
     # 入口名换成 negi，进程形状没换：托管 worker、升级后重拉起与容器入口都用 `-m g3ku`，
     # 只有走包装启动的那一跳才是 negi_bootstrap.py。判据少一条就会留下占着端口的实例。
-    ps_text = _read("start-negi.ps1")
+    # Windows 侧的回收在解释器里（`.ps1` 会被脚本策略整份拒掉，回收不能挂在那儿）。
+    boot_text = _read("negi_bootstrap.py")
     sh_text = _read("start-negi.sh")
-    assert r"-m\s+g3ku\s+web" in ps_text
-    assert r"-m\s+g3ku\s+worker" in ps_text
-    assert r"negi_bootstrap\.py" in ps_text
+    assert r"-m\s+g3ku\s+web" in boot_text
+    assert r"-m\s+g3ku\s+worker" in boot_text
+    assert r"negi_bootstrap\.py" in boot_text
     assert "/-m[[:space:]]+g3ku[[:space:]]+web/" in sh_text
     assert "/-m[[:space:]]+g3ku[[:space:]]+worker/" in sh_text
     assert r"negi_bootstrap\.py" in sh_text
