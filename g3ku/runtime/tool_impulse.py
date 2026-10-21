@@ -20,7 +20,6 @@ import json
 from typing import Any
 
 from g3ku.agent.tools.base import REUSE_ARGS_PARAMETER_NAME
-from g3ku.runtime.tool_arg_stash import staged_targets
 
 IMPULSE_STAGED = "staged"
 IMPULSE_INVALID = "invalid"
@@ -50,22 +49,20 @@ def tool_facing_runtime_context(runtime_context: Any) -> dict[str, Any]:
         if str(key or "").strip() not in LOOP_INTERNAL_RUNTIME_KEYS
     }
 
-def _render_args_line(args: Any) -> str:
-    """一份入参一行，按内容完整渲染、不截断（撑爆的情形属计划 §5-5，要停下回报而不是悄悄裁）。
+def _staged_sets_line(*, tool_name: str, staged_count: int, batch_total: int) -> str:
+    """这一批最终会被 `reuse_args` 执行多少份；两数不等只可能是同签名折叠。
 
-    枚举对**所有**工具都做，不只计划点名的那批不可逆工具：`exec`、`filesystem_write` 这类
-    同样有副作用，而"这一批会跑掉什么"只在列全目标时才可核对。
+    不列目标清单：回执紧贴在发起它们的那条 assistant 行之后，模型自己那几条
+    `tool_calls[].function.arguments` 就在同一请求视图里（实盘 202,788 条这样的行），再抄一遍
+    是纯重复且长留历史；裁撤把工具肉身移走时，那行入参与这条回执成对离场，所以清单也兜不住
+    任何"入参已不在场"的窗口。模型真正推不出来的是**份数**（同批同签名会被折叠成一条）。
     """
-    return json.dumps(args, ensure_ascii=False, sort_keys=True, default=str)
-
-
-def render_staged_targets(container: dict[str, Any], *, scope_key: str) -> str:
-    """枚举该 scope 下全部已暂存入参。"""
-    entries = staged_targets(container, scope_key=scope_key)
-    if not entries:
-        return ""
-    lines = [f"  - {_render_args_line(entry.get('args'))}" for entry in entries]
-    return "\n".join(lines)
+    if batch_total > staged_count:
+        return (
+            f'Staged sets for "{tool_name}": {staged_count} '
+            f"({batch_total} calls; identical argument sets count once)."
+        )
+    return f'Staged sets for "{tool_name}": {staged_count}.'
 
 
 def impulse_receipt(
@@ -74,7 +71,6 @@ def impulse_receipt(
     contract_block: str,
     outcome: str,
     staged_count: int = 0,
-    targets_text: str = "",
     batch_position: int = 1,
     batch_total: int = 1,
     parameter_error_text: str = "",
@@ -94,6 +90,15 @@ def impulse_receipt(
         )
         if outcome == IMPULSE_INVALID and parameter_error_text:
             blocks.append(parameter_error_text)
+        elif batch_position == batch_total:
+            # 只有最后一条看得到这一批的最终份数（投递是逐条发生的）。
+            blocks.append(
+                _staged_sets_line(
+                    tool_name=tool_name,
+                    staged_count=staged_count,
+                    batch_total=batch_total,
+                )
+            )
         return {
             "content": "\n\n".join(blocks),
             "outcome": outcome,
@@ -110,14 +115,15 @@ def impulse_receipt(
     else:
         blocks.append(
             f'Tool contract for "{tool_name}" loaded - the tool is now callable.\n'
-            f"This call's arguments passed validation and were staged (sets: {staged_count}).\n"
-            f"Next turn: set reuse_args=true to execute all staged sets, or call with new arguments "
-            "(staged sets are overwritten)."
+            "This call's arguments passed validation and were staged."
         )
-        if targets_text:
-            blocks.append(f"Staged sets that reuse_args=true would execute:\n{targets_text}")
+        if batch_position == batch_total:
             blocks.append(
-                "To run only some of them, do not use reuse_args - call the tool with the arguments you want."
+                _staged_sets_line(
+                    tool_name=tool_name,
+                    staged_count=staged_count,
+                    batch_total=batch_total,
+                )
             )
     content = "\n\n".join([contract_block, *blocks]) if contract_block else "\n\n".join(blocks)
     return {"content": content, "outcome": outcome, "executed": False}
@@ -247,7 +253,6 @@ __all__ = [
     "EXECUTION_PATH_REUSED",
     "impulse_receipt",
     "plan_reuse_execution",
-    "render_staged_targets",
     "reuse_refusal_text",
     "split_reuse_arguments",
     "tool_facing_runtime_context",

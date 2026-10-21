@@ -57,7 +57,6 @@ from g3ku.runtime.tool_impulse import (
     IMPULSE_REJECT,
     IMPULSE_STAGED,
     impulse_receipt,
-    render_staged_targets,
 )
 from g3ku.runtime.tool_visibility import (
     NODE_FIXED_BUILTIN_TOOL_NAMES,
@@ -8058,12 +8057,17 @@ class MainRuntimeService:
         pending_container = tool_arg_stash.carrier_container(carrier)
         existing_digests = {
             str(entry.get(tool_arg_stash.DIGEST_FIELD) or '').strip()
-            for entry in tool_arg_stash.peek_entries(pending_container, scope_key=scope_key, current_hop=hop + 1)
+            for entry in tool_arg_stash.peek_entries(
+                pending_container,
+                scope_key=scope_key,
+                current_hop=hop + 1,
+                fingerprint=fingerprint,
+            )
         }
         # 同一跳里签名完全相同的重复调用只入一条（D5）：否则 `reuse_args=true` 会把同一份
         # 入参执行两遍，而模型看到的两份回执是分开的两条消息，它没有理由知道要合并。
         if tool_arg_stash.args_digest(arguments) not in existing_digests:
-            pending_container, _entry, staged_count = tool_arg_stash.stage_args(
+            pending_container, _entry, _staged_total = tool_arg_stash.stage_args(
                 pending_container,
                 scope_key=scope_key,
                 args=arguments,
@@ -8071,14 +8075,21 @@ class MainRuntimeService:
                 staged_at=now_iso(),
                 staged_hop=hop,
             )
-        else:
-            staged_count = tool_arg_stash.staged_count(pending_container, scope_key=scope_key)
+        # 份数只数**下一跳真会被执行**的条目：容器里可能还留着上一跳过期或别的修订的条目，
+        # 按 list 长度报会把永远不会跑的那些算进去（`staged_count` 就是长度，别用它报数）。
+        staged_count = len(
+            tool_arg_stash.peek_entries(
+                pending_container,
+                scope_key=scope_key,
+                current_hop=hop + 1,
+                fingerprint=fingerprint,
+            )
+        )
         receipt = impulse_receipt(
             tool_name=normalized_tool,
             contract_block=block,
             outcome=IMPULSE_STAGED,
             staged_count=staged_count,
-            targets_text=render_staged_targets(pending_container, scope_key=scope_key),
             batch_position=batch_position,
             batch_total=batch_total,
         )

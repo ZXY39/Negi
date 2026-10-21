@@ -129,7 +129,9 @@ def test_impulsive_call_stages_into_the_session_carrier(tmp_path: Path) -> None:
     kind, content = outcome
     assert kind == IMPULSE_STAGED
     assert MARKER_NAME in content
-    assert "reuse_args=true" in content
+    assert "passed validation and were staged" in content
+    # 这份上下文模拟"同批两条调用"，本条是第一条：份数只在末条报（那一刻才看得见整批）。
+    assert "Staged sets for" not in content
     # 关键：回执说"已暂存"，stash 里就必须真的有——模型下一跳读的是会话那个属性。
     stored_container = tool_arg_stash.carrier_container(getattr(session, "_frontdoor_tool_arg_stash"))
     assert tool_arg_stash.staged_count(stored_container, scope_key=SCOPE) == 1

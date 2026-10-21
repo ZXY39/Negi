@@ -12,15 +12,13 @@
 
 from __future__ import annotations
 
-import json
 from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
 
-from g3ku.runtime import tool_arg_stash
 from g3ku.runtime.frontdoor.prompt_builder import CeoPromptBuilder
-from g3ku.runtime.tool_impulse import impulse_receipt, render_staged_targets
+from g3ku.runtime.tool_impulse import impulse_receipt
 from main.prompts import load_prompt
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -107,37 +105,36 @@ def test_presence_wording_replaces_the_callable_line() -> None:
         assert "不执行" in text
 
 
-def _receipt(container: dict, scope_key: str) -> str:
+def _receipt(*, staged_count: int, batch_total: int = 1, batch_position: int = 1) -> str:
     return impulse_receipt(
         tool_name="filesystem_delete",
         contract_block="[TOOL_CONTRACT_V1:filesystem_delete:tcf:aaaa] 契约正文",
         outcome="staged",
-        staged_count=3,
-        targets_text=render_staged_targets(container, scope_key=scope_key),
+        staged_count=staged_count,
+        batch_position=batch_position,
+        batch_total=batch_total,
     )["content"]
 
 
-def test_impulse_receipt_enumerates_every_staged_target(tmp_path: Path) -> None:
-    container: dict = {}
-    for path in ("reports/a.txt", "reports/b.txt", "reports/c.txt"):
-        container, _item, _count = tool_arg_stash.stage_args(
-            container,
-            scope_key="scope-1",
-            args={"path": path, "recursive": False},
-            fingerprint="tcf:aaaaaaaaaaaaaaaa",
-            staged_hop=3,
-        )
+def test_impulse_receipt_reports_the_count_and_does_not_echo_the_arguments() -> None:
+    """回执只说"这一批会跑几份"，不抄入参。
 
-    content = _receipt(container, "scope-1")
+    模型自己那条 `tool_calls[].function.arguments` 就在同一请求视图里（实盘 202,788 条），
+    枚举是纯重复且长留历史；裁撤移走工具肉身时那一行与这条回执成对离场，所以它也兜不住
+    任何"入参已不在场"的窗口。
+    """
+    content = _receipt(staged_count=3, batch_total=3, batch_position=3)
 
-    assert "sets: 3" in content
-    for path in ("reports/a.txt", "reports/b.txt", "reports/c.txt"):
-        assert path in content
-    assert json.dumps({"path": "reports/a.txt", "recursive": False}, ensure_ascii=False) in content
+    assert "Staged sets for \"filesystem_delete\": 3." in content
+    assert "Next turn" not in content
+    assert "To run only some of them" not in content
 
 
-def test_impulse_receipt_without_stash_omits_the_target_block() -> None:
-    """容器空 ⇒ 不凭空造目标行：列出的必须真是已暂存的那几份。"""
-    content = _receipt({}, "scope-1")
+def test_impulse_receipt_explains_when_calls_outnumber_the_sets() -> None:
+    """`sets` 与调用条数不等只可能是同签名折叠——这是模型唯一推不出来的那个数。"""
+    content = _receipt(staged_count=2, batch_total=3, batch_position=3)
 
-    assert "Staged sets that reuse_args=true would execute" not in content
+    assert (
+        'Staged sets for "filesystem_delete": 2 (3 calls; identical argument sets count once).'
+        in content
+    )

@@ -98,9 +98,9 @@ def test_valid_arguments_are_staged_and_the_contract_is_delivered(tmp_path: Path
     # 块必须在，且带工具名与修订——判据下一跳就认这一颗头。
     assert MARKER_NAME in content and MARKER_CLOSE in content
     assert f"{TOOL_ID}:" in content
-    assert "reuse_args=true" in content
-    # 暂存目标要枚举出来（批量语义唯一的安全阀）。
-    assert "/abs/a" in content
+    # 份数报最终值；**不**枚举入参：模型自己那条 tool_calls 就在同一请求视图里，再抄一遍是重复。
+    assert f'Staged sets for "{TOOL_ID}": 1.' in content
+    assert "/abs/a" not in content
     assert tool_arg_stash.staged_count(tool_arg_stash.carrier_container(result["carrier"]), scope_key=SCOPE) == 1
 
 
@@ -133,6 +133,42 @@ def test_same_tool_second_call_in_the_batch_points_at_the_first_block(tmp_path: 
     # 但两份都真的进了 stash，顺序保持。
     entries = tool_arg_stash.staged_count(tool_arg_stash.carrier_container(second["carrier"]), scope_key=SCOPE)
     assert entries == 2
+
+
+def test_last_receipt_reports_the_final_count_and_the_folding(tmp_path: Path) -> None:
+    """同批同签名折叠成一条 ⇒ 最后一条回执要说清"N 份 / M 次调用"。
+
+    这是模型唯一推不出来的数：它数得出自己发了几条，但数不出哪几条会被折叠。
+    """
+    service = _service(_ValidatingTool(), tmp_path)
+    first = _deliver(service, {"path": "/a", "new_text": "1"}, {}, batch_position=1, batch_total=2)
+    second = _deliver(
+        service,
+        {"path": "/a", "new_text": "1"},
+        first["carrier"],
+        batch_position=2,
+        batch_total=2,
+    )
+
+    assert second["staged_count"] == 1
+    assert f'Staged sets for "{TOOL_ID}": 1 (2 calls; identical argument sets count once).' in second["content"]
+    # 第一条（非末条）不报份数：那一刻的"1 份"只是半批，报出来就是假事实。
+    assert "Staged sets for" not in first["content"]
+
+
+def test_count_excludes_entries_that_will_never_be_consumed(tmp_path: Path) -> None:
+    """容器里可能还躺着上一跳过期或别的修订的条目——份数只数下一跳真会跑的那些。"""
+    service = _service(_ValidatingTool(), tmp_path)
+    seeded = _deliver(service, {"path": "/old", "new_text": "x"}, {}, )
+    stale_container = tool_arg_stash.carrier_container(seeded["carrier"])
+    carrier = tool_arg_stash.build_carrier(stale_container, hop=5)
+
+    result = _deliver(service, {"path": "/new", "new_text": "y"}, carrier)
+
+    assert result["staged_count"] == 1
+    assert f'Staged sets for "{TOOL_ID}": 1.' in result["content"]
+    # 容器里确实还是两条，只是旧那条下一跳不可消费（严格一跳）。
+    assert tool_arg_stash.staged_count(tool_arg_stash.carrier_container(result["carrier"]), scope_key=SCOPE) == 2
 
 
 # ---------------------------------------------------------------------------

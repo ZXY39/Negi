@@ -20,7 +20,6 @@ from types import SimpleNamespace
 from g3ku.agent.tools.base import Tool
 from g3ku.runtime import tool_arg_stash
 from g3ku.runtime.tool_contract_block import MARKER_CLOSE, MARKER_NAME
-from g3ku.runtime.tool_impulse import IMPULSE_STAGED
 from main.models import NodeRecord
 from main.runtime.react_loop import ReActToolLoop
 from main.service.runtime_service import MainRuntimeService
@@ -162,7 +161,8 @@ async def test_impulsive_call_returns_contract_and_stages_without_executing(tmp_
 
     assert _ExplodingTool.calls == 0
     assert MARKER_NAME in content and MARKER_CLOSE in content
-    assert "reuse_args=true" in content
+    # 回执只报份数；"怎么复用"住在提示词规则里，不在每次投递时复读。
+    assert f'Staged sets for "{TOOL_ID}": 1.' in content
     # 暂存真进了载体，并且下一跳可消费。
     carrier = context["tool_arg_stash_carrier"]
     container = tool_arg_stash.carrier_container(carrier)
@@ -266,7 +266,7 @@ async def test_impulse_bypasses_the_stage_gate_with_no_active_stage(tmp_path: Pa
 
     assert "需先开阶段" not in content
     assert "Error: " not in content
-    assert IMPULSE_STAGED == IMPULSE_STAGED and "reuse_args=true" in content
+    assert f'Staged sets for "{TOOL_ID}": 1.' in content
 
 
 # ---------------------------------------------------------------------------
