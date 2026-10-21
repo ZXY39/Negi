@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
 from typing import Any
 
@@ -10,6 +11,7 @@ from main.models import normalize_execution_policy_metadata
 from main.service.create_async_task_contract import (
     normalize_create_async_task_file_targets,
     normalize_create_async_task_inbound_params,
+    normalize_create_async_task_seed_tools,
     validate_create_async_task_file_targets,
 )
 
@@ -66,6 +68,22 @@ def _duplicate_rejection_text(precheck: dict[str, Any]) -> str:
     )
 
 
+def _seed_tools_receipt_line(service, record, declared: list[str]) -> str:
+    """声明过才回执；没声明时整行不出现——空回执对派发方是纯噪音。
+
+    `accepted` 与 `dropped` 两键恒在：省略与「全被丢弃」在派发方看来无法区分。
+    """
+    if not declared:
+        return ''
+    root = service.get_node(str(getattr(record, 'root_node_id', '') or '').strip()) if record is not None else None
+    receipt = dict((getattr(root, 'metadata', None) or {}).get('seed_receipt') or {})
+    payload = {
+        'accepted': list(receipt.get('accepted') or []),
+        'dropped': list(receipt.get('dropped') or []),
+    }
+    return f'\nseed_tools: {json.dumps(payload, ensure_ascii=False)}'
+
+
 class _CreateAsyncTaskHandler(Tool):
     def __init__(self, service) -> None:
         self._service = service
@@ -115,6 +133,7 @@ class _CreateAsyncTaskHandler(Tool):
         normalized_core_requirement = str(core_requirement or kwargs.get('core_requirement') or '').strip() or str(task or '').strip()
         normalized_execution_policy = normalize_execution_policy_metadata(kwargs.get('execution_policy'))
         normalized_file_targets = normalize_create_async_task_file_targets(kwargs.get('file_targets'))
+        normalized_seed_tools = normalize_create_async_task_seed_tools(kwargs.get('seed_tools'))
         file_target_errors = validate_create_async_task_file_targets(normalized_file_targets)
         if file_target_errors:
             raise ValueError('; '.join(file_target_errors))
@@ -169,6 +188,7 @@ class _CreateAsyncTaskHandler(Tool):
                 'core_requirement': normalized_core_requirement,
                 'execution_policy': normalized_execution_policy.model_dump(mode='json'),
                 'file_targets': normalized_file_targets,
+                'seed_tools': normalized_seed_tools,
                 'final_acceptance': {
                     'required': requires_final_acceptance,
                     'prompt': final_acceptance_prompt,
@@ -177,7 +197,7 @@ class _CreateAsyncTaskHandler(Tool):
                 },
             },
         )
-        return f'创建任务成功{record.task_id}'
+        return f'创建任务成功{record.task_id}' + _seed_tools_receipt_line(self._service, record, normalized_seed_tools)
 
 
 def build(runtime):

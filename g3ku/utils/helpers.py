@@ -188,6 +188,24 @@ def render_candidate_tool_line(
     ]
 
 
+def normalize_seed_tool_names(value: Any) -> list[str]:
+    """工具名列表的规范形：strip、去空、去重、**保序**。
+
+    保序是判据的一部分而不是排版：预置契约在体积超限时按这个顺序裁剪，顺序就是优先级。
+    住在叶子模块是因为派发侧（`create_async_task` 的入参归一化）和运行时侧（节点预置解析）
+    都要用同一份语义——放在 `main.runtime.*` 会让 contract 模块反向拖进整个运行时图。
+    """
+    ordered: list[str] = []
+    seen: set[str] = set()
+    for item in list(value or []):
+        name = str(item or '').strip()
+        if not name or name in seen:
+            continue
+        seen.add(name)
+        ordered.append(name)
+    return ordered
+
+
 def resolve_model_path(
     raw_path: str | Path,
     *,

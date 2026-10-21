@@ -401,6 +401,17 @@ class SpawnChildNodesTool(Tool):
                     'type': 'string',
                     'description': 'Prompt for the acceptance node. Required only when requires_acceptance=true.',
                 },
+                'seed_tools': {
+                    'type': 'array',
+                    'description': (
+                        'Optional. Tool names whose contracts should be delivered in this child node\'s first '
+                        'request so the first call can execute directly. Runtime filters by the node\'s role and '
+                        'reports every dropped name back on this child. Omit when unsure.'
+                    ),
+                    'items': {
+                        'type': 'string',
+                    },
+                },
             },
             'required': ['goal', 'prompt', 'execution_policy'],
         }
@@ -433,6 +444,10 @@ class SpawnChildNodesTool(Tool):
                 ),
                 'requires_acceptance': {'type': 'boolean'},
                 'acceptance_prompt': {'type': 'string'},
+                'seed_tools': {
+                    'type': 'array',
+                    'items': {'type': 'string'},
+                },
             },
             'required': ['goal', 'prompt', 'execution_policy'],
         }

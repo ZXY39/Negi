@@ -60,14 +60,15 @@ from g3ku.runtime.tool_impulse import (
 )
 from g3ku.runtime.tool_visibility import (
     NODE_FIXED_BUILTIN_TOOL_NAMES,
+    NODE_NEVER_CONTRACT_TOOL_NAMES,
     fixed_builtin_tool_name_set_for_actor_role,
 )
 from g3ku.security import get_bootstrap_security_service
 from g3ku.update_apply import WEB_LOG_FILE
 from g3ku.utils.api_keys import parse_api_keys, resolve_api_key_concurrency_layout
-from g3ku.utils.helpers import tools_bundle_single_source_enabled
+from g3ku.utils.helpers import normalize_seed_tool_names, tools_bundle_single_source_enabled
 from g3ku.web.worker_control import managed_worker_snapshot
-from main.errors import TaskPausedError
+from main.errors import TaskPausedError, describe_exception
 from main.governance import (
     GovernanceStore,
     MainRuntimePolicyEngine,
@@ -120,6 +121,7 @@ from main.runtime.node_prompt_contract import (
     inject_node_dynamic_contract_message,
 )
 from main.runtime.node_runner import NodeRunner
+from main.runtime.node_seed_contracts import seed_drop_reason, trim_seed_contracts
 from main.runtime.node_turn_controller import NodeTurnController
 from main.runtime.react_loop import ReActToolLoop
 from main.runtime.stage_budget import STAGE_TOOL_NAME, callable_tool_names_for_stage_iteration
@@ -726,6 +728,7 @@ class MainRuntimeService:
             context_preparer=self._prepare_node_context_selection,
             context_finalizer=self._clear_node_context_selection,
             workspace_root_getter=lambda: self._workspace_root(),
+            seed_contract_metadata_builder=self.build_node_seed_metadata,
         )
         self._apply_model_route_plans(initial_execution_routes, initial_acceptance_routes, revision=0)
         self.node_runner._tool_snapshot_supplier = self._tool_watchdog_snapshot_supplier
@@ -1660,6 +1663,15 @@ class MainRuntimeService:
             metadata=metadata,
         )
         record, root = self.log_service.initialize_task(record, root)
+        # 根节点的预置判据在派发这一刻算：`create_async_task` 的结果文本要带上回执，
+        # 而回执必须来自与首跳同一个判据实现，不能让派发方读到一份推不出来的答案。
+        seed_metadata = self.build_node_seed_metadata(
+            task=record,
+            node_kind='execution',
+            declared=list((record.metadata or {}).get('seed_tools') or []),
+        )
+        if seed_metadata:
+            root = self.log_service.update_node_metadata(root.node_id, lambda current: {**current, **seed_metadata}) or root
         final_acceptance = normalize_final_acceptance_metadata((record.metadata or {}).get('final_acceptance'))
         if final_acceptance.required and not str(final_acceptance.node_id or '').strip():
             acceptance = self.node_runner.create_acceptance_node(
@@ -9915,6 +9927,97 @@ class MainRuntimeService:
             resource_manager=self._resource_manager,
         )
 
+    def resolve_node_seed_contracts(
+        self,
+        *,
+        task,
+        node_kind: str,
+        declared: list[str] | None,
+    ) -> dict[str, Any]:
+        """派发方声明的工具名 → 预置契约消息 + 回执。纯读，不落任何跨跳状态。
+
+        渲染链与 loader / 冲动路径**同一个**（`get_tool_toolskill` →
+        `build_tool_context_fingerprint` → `render_tool_contract`）：自己拼块或自算指纹都会让
+        字节对不上，而症状只是「节点仍然走冲动路径」，查不出来。
+
+        闸门按**目标节点的角色**实时可见集判，与名单来源无关。声明过的名字必须出现在
+        `accepted` 或 `dropped` 之一——没有第三条静默丢弃的路。
+        """
+        names = normalize_seed_tool_names(declared)
+        if not names:
+            return {'seed_tools': [], 'messages': [], 'accepted': [], 'dropped': []}
+        actor_role = 'inspection' if str(node_kind or '').strip().lower() == 'acceptance' else 'execution'
+        session_id = str(getattr(task, 'session_id', '') or 'web:shared').strip() or 'web:shared'
+        visible_names = {
+            str(name or '').strip()
+            for name in list(self.list_effective_tool_names(actor_role=actor_role, session_id=session_id) or [])
+            if str(name or '').strip()
+        }
+        candidates: list[dict[str, Any]] = []
+        dropped: list[dict[str, str]] = []
+        for name in names:
+            payload = self.get_tool_toolskill(name)
+            record_exists = self._raw_tool(name) is not None
+            has_payload = isinstance(payload, dict)
+            fingerprint = ''
+            block = ''
+            if has_payload:
+                fingerprint = build_tool_context_fingerprint(payload)
+                if fingerprint:
+                    block = render_tool_contract({**payload, 'tool_context_fingerprint': fingerprint})
+            reason = seed_drop_reason(
+                is_never_contract=name in NODE_NEVER_CONTRACT_TOOL_NAMES,
+                is_known=record_exists,
+                is_visible=name in visible_names,
+                is_repair_required=bool(payload.get('repair_required')) if has_payload else False,
+                has_toolskill_body=bool(str(payload.get('content') or '').strip()) if has_payload else False,
+                rendered_block=block,
+            )
+            if reason:
+                dropped.append({'tool': name, 'reason': reason})
+                continue
+            candidates.append({'tool': name, 'rev': fingerprint, 'chars': len(block), 'content': block})
+        kept, size_dropped = trim_seed_contracts(candidates)
+        dropped.extend(size_dropped)
+        return {
+            'seed_tools': [str(item.get('tool') or '') for item in kept],
+            'messages': [{'role': 'user', 'content': str(item.get('content') or '')} for item in kept],
+            'accepted': [
+                {
+                    'tool': str(item.get('tool') or ''),
+                    'rev': str(item.get('rev') or ''),
+                    'chars': int(item.get('chars') or 0),
+                }
+                for item in kept
+            ],
+            'dropped': dropped,
+        }
+
+    def build_node_seed_metadata(self, *, task, node_kind: str, declared: list[str] | None) -> dict[str, Any]:
+        """派发时要落进节点 metadata 的那一份预置判据；未声明时返回空 dict。
+
+        解析失败**不阻断派生**（预置是优化不是前置条件）：此时名单照原样留下、回执整份缺席，
+        只记 `seed_error`——给读不出来的名字编一条 reason 就是把「我不知道」解析成否定判决。
+        首跳构建时会重新解析一次并把结果写进 `seeded_*` 观测，那里才是节点真正拿到的东西。
+        """
+        names = normalize_seed_tool_names(declared)
+        if not names:
+            return {}
+        try:
+            resolved = self.resolve_node_seed_contracts(task=task, node_kind=node_kind, declared=names)
+        except Exception as exc:
+            return {'seed_tools': names, 'seed_error': describe_exception(exc)}
+        accepted = list(resolved.get('accepted') or [])
+        dropped = list(resolved.get('dropped') or [])
+        return {
+            'seed_tools': list(resolved.get('seed_tools') or []),
+            'seed_receipt': {'accepted': accepted, 'dropped': dropped},
+            # 观测从派发这一刻就有初值：节点被建出来却没被驱动过时，「没声明」「声明了全被拒」
+            # 与「预置成功了」在库里必须长得不一样。
+            'seeded_contracts': accepted,
+            'seeded_dropped': dropped,
+        }
+
     def _prepare_tool_resource_delete(self, tool_id: str) -> dict[str, Any]:
         record = self._raw_tool(tool_id)
         if record is None:
@@ -11526,6 +11629,71 @@ class MainRuntimeService:
             return None
         return self._current_exec_runtime_policy_payload()
 
+    def _with_node_seed_contract_messages(
+        self,
+        *,
+        task,
+        node: NodeRecord,
+        messages: list[dict[str, Any]],
+    ) -> list[dict[str, Any]]:
+        """把预置契约插在 system + payload 之后、验收尾块之前，并记下这一跳真正拿到了什么。
+
+        一条消息恰好一个块：`_leading_block_pairs` 的块头锚定在 `lstrip()` 后的第一个字符处，
+        多块同一条只有第一个被认，其余静默失效。块原文就是 `content`，前面不许垫任何说明文字。
+
+        观测在这里写而不是照抄派发时的回执：那是节点**实际收到**的那一份。toolskill 源或授权在
+        派发与首跳之间变过时，两份会不同，而这份差异只有在这里才看得见。
+        """
+        declared = list((getattr(node, 'metadata', None) or {}).get('seed_tools') or [])
+        if not declared:
+            return messages
+        resolved = self.resolve_node_seed_contracts(
+            task=task,
+            node_kind=str(getattr(node, 'node_kind', '') or ''),
+            declared=declared,
+        )
+        seed_messages = [dict(item) for item in list(resolved.get('messages') or []) if isinstance(item, dict)]
+        # 构建期只补新出现的丢弃，派发时那一份要留着：两个时刻的 reason 合在一起才是这条名单
+        # 的完整判据账，只留后半段会让「派发时就被拒」看起来像从没声明过。
+        prior_dropped = [
+            dict(item)
+            for item in list((getattr(node, 'metadata', None) or {}).get('seeded_dropped') or [])
+            if isinstance(item, dict)
+        ]
+        seen_dropped = {str(item.get('tool') or '').strip() for item in prior_dropped}
+        dropped_lane = list(prior_dropped)
+        for item in list(resolved.get('dropped') or []):
+            if not isinstance(item, dict):
+                continue
+            if str(item.get('tool') or '').strip() in seen_dropped:
+                continue
+            dropped_lane.append(dict(item))
+        observations = {
+            'seeded_contracts': list(resolved.get('accepted') or []),
+            'seeded_dropped': dropped_lane,
+        }
+        try:
+            self.log_service.update_node_metadata(
+                str(node.node_id),
+                lambda current: {**dict(current or {}), **observations},
+            )
+        except Exception as exc:
+            logger.warning('title=node_seed_observation_metadata_failed node_id={} error={}', str(node.node_id), describe_exception(exc))
+        try:
+            self.log_service.update_frame(
+                str(getattr(task, 'task_id', '') or '').strip(),
+                str(node.node_id),
+                lambda frame: {**dict(frame or {}), **observations},
+                publish_snapshot=False,
+            )
+        except Exception as exc:
+            logger.warning('title=node_seed_observation_frame_failed node_id={} error={}', str(node.node_id), describe_exception(exc))
+        if not seed_messages:
+            return messages
+        base = list(messages or [])
+        insert_at = 2 if len(base) >= 2 else len(base)
+        return [*base[:insert_at], *seed_messages, *base[insert_at:]]
+
     async def _enrich_node_messages(self, *, task, node: NodeRecord, messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
         selection = await self._prepare_node_context_selection(task=task, node=node)
         cached = self._cached_node_context_selection_entry(task=task, node=node)
@@ -11649,7 +11817,7 @@ class MainRuntimeService:
                     list(declared_frame.get('provider_tool_names') or [])
                 )
         enriched = inject_node_dynamic_contract_message(
-            list(messages or []),
+            self._with_node_seed_contract_messages(task=task, node=node, messages=list(messages or [])),
             NodeRuntimeToolContract(
                 node_id=str(getattr(node, 'node_id', '') or '').strip(),
                 node_kind=str(getattr(node, 'node_kind', '') or '').strip(),

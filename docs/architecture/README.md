@@ -158,6 +158,7 @@ Start here when you are new to the repository or when a change crosses subsystem
 - 会话该静默却发话、或该发话却整轮无声；模型写了像哨兵的文本却没静默 → `runtime-overview.md`「3.3 静默回复（`silent` 工具）」+ `web-and-admin.md`「CEO Turn Silent Reply Contract」
 - 新增常驻内置控制工具后模型从不使用它、或调用即报错 → `tool-and-skill-system.md`「3.1.1 为什么"常驻"需要独立机制」
 - 某工具这一轮报 `tool not available`，而名字仍挂在 `tools[]` 里 → 那是权限收回或资源下架（`denied_tools` 应当点名它），不是契约不在场；契约不在场的形态不报错，而是那一跳交回契约。两条判据与读数见 `tool-hydration-and-callable-chain.md`「契约在场与 callable」+ `context-and-cache-troubleshooting.md`「节点侧排查要点」
+- 节点声明了 `seed_tools` 却仍两跳、或派发方读到一份空的/缺席的预置回执 → `tool-hydration-and-callable-chain.md`「派发时预置契约」（`seeded_contracts` / `seeded_dropped` 两份读数的判读口径也在那里）
 - 相邻跳 provider `tools[]` 成员在变、且没有真实授权变化（缓存命中随之掉）→ `tool-and-skill-system.md`「Provider Tool Surface」+ `context-and-cache-troubleshooting.md`「跨普通 fresh turn 的 tool schema churn」
 - 前缀与 `tools[]` 逐字相同而命中掉了、要数"这一跳跳了几档/为什么跳"，或日志里按 `Model route selected` 统计档位却读出 0 次跨档 → `context-and-cache-troubleshooting.md`「跨档跳的未命中按台账的档位归属读」；组名与成员对不上先读 `GET /api/models/load-balance/status` 的 `group_drift_count`
 - 重启后第一跳把头部名单或 `tools[]` 重铺了一遍（停机期间增删过 skill/工具，该跳非缓存 input 冲高、下一跳就回血）→ `context-and-cache-troubleshooting.md`「重启后继续，不能退回 transcript/history fallback」+ `tool-and-skill-system.md`「Pinned Static Declarations」

@@ -5335,6 +5335,12 @@ class TaskLogService:
                 'partial_child_results': [dict(item) for item in list(next_frame.get('partial_child_results') or []) if isinstance(item, dict)],
                 'tool_calls': [dict(item) for item in list(next_frame.get('tool_calls') or []) if isinstance(item, dict)],
                 'child_pipelines': [dict(item) for item in list(next_frame.get('child_pipelines') or []) if isinstance(item, dict)],
+                'seeded_contracts': [
+                    dict(item) for item in list(next_frame.get('seeded_contracts') or []) if isinstance(item, dict)
+                ],
+                'seeded_dropped': [
+                    dict(item) for item in list(next_frame.get('seeded_dropped') or []) if isinstance(item, dict)
+                ],
                 'callable_tool_snapshots': self._sanitize_callable_tool_snapshots(next_frame.get('callable_tool_snapshots') or []),
                 'visible_skills': [
                     {
@@ -5543,6 +5549,13 @@ class TaskLogService:
             'partial_child_results': [dict(item) for item in list(payload.get('partial_child_results') or []) if isinstance(item, dict)],
             'tool_calls': [dict(item) for item in list(payload.get('tool_calls') or []) if isinstance(item, dict)],
             'child_pipelines': [dict(item) for item in list(payload.get('child_pipelines') or []) if isinstance(item, dict)],
+            # 帧字段按枚举过沙，四处读点各建一份字典：漏一处就等于把这两份读数删掉。
+            'seeded_contracts': [
+                dict(item) for item in list(payload.get('seeded_contracts') or []) if isinstance(item, dict)
+            ],
+            'seeded_dropped': [
+                dict(item) for item in list(payload.get('seeded_dropped') or []) if isinstance(item, dict)
+            ],
             'callable_tool_snapshots': callable_tool_snapshots,
             'visible_skills': [
                 {
@@ -6323,6 +6336,14 @@ class TaskLogService:
             ],
             'active_round_started_at': str(payload.get('active_round_started_at') or ''),
             'messages': [dict(item) for item in list(payload.get('messages') or []) if isinstance(item, dict)],
+            # 本函数按枚举键清洗，漏一个键等于删一个键：节点预置契约的两份读数要过沙，
+            # 否则界面与排障读到的永远是空——而「没预置」与「预置了但没生效」正是靠它区分。
+            'seeded_contracts': [
+                dict(item) for item in list(payload.get('seeded_contracts') or []) if isinstance(item, dict)
+            ],
+            'seeded_dropped': [
+                dict(item) for item in list(payload.get('seeded_dropped') or []) if isinstance(item, dict)
+            ],
             # 本函数按枚举键清洗，漏一个键等于删一个键：messages 指针必须过沙。
             'messages_ref': str(payload.get('messages_ref') or ''),
             'messages_count': int(payload.get('messages_count') or 0),
@@ -6445,6 +6466,13 @@ class TaskLogService:
             'stage_total_steps': int(payload.get('stage_total_steps') or 0),
             'tool_calls': [dict(item) for item in list(payload.get('tool_calls') or []) if isinstance(item, dict)],
             'child_pipelines': [dict(item) for item in list(payload.get('child_pipelines') or []) if isinstance(item, dict)],
+            # 公开投影也要带这两份读数：界面读的就是这一层，漏一处就等于面板永远空。
+            'seeded_contracts': [
+                dict(item) for item in list(payload.get('seeded_contracts') or []) if isinstance(item, dict)
+            ],
+            'seeded_dropped': [
+                dict(item) for item in list(payload.get('seeded_dropped') or []) if isinstance(item, dict)
+            ],
             'callable_tool_snapshots': TaskLogService._sanitize_callable_tool_snapshots(
                 payload.get('callable_tool_snapshots') or []
             ),

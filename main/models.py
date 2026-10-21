@@ -203,6 +203,8 @@ class SpawnChildSpec(Model):
     execution_policy: ExecutionPolicyState
     acceptance_prompt: str = ''
     requires_acceptance: bool | None = None
+    # 顺序即优先级：体积超限时按这个顺序裁剪，所以它不是排版字段。
+    seed_tools: list[str] = Field(default_factory=list)
 
 
 class SpawnChildFailureInfo(Model):
@@ -225,6 +227,9 @@ class SpawnChildResult(Model):
     # spawn review 拦截的机器可读标记：True 表示该分支未创建、未执行，
     # 父节点必须按 node_output 中的 reason/suggestion 处置，不得视为已完成分支。
     review_blocked: bool = False
+    # 预置契约回执：只在派发方声明过 seed_tools 时出现（exclude_none 让未声明时整键消失），
+    # 出现时 accepted / dropped 两键恒在。
+    seed_tools: dict[str, Any] | None = None
 
 
 class TokenUsageSummary(Model):

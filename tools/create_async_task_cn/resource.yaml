@@ -55,6 +55,14 @@ parameters:
     final_acceptance_prompt:
       type: string
       description: Required when `requires_final_acceptance=true`.
+    seed_tools:
+      type: array
+      description: >-
+        Optional. Tool names whose contracts should be delivered in the root execution node's first
+        request so the first call can execute directly. Runtime filters by the node's role and reports
+        every dropped name in the result. Omit when unsure.
+      items:
+        type: string
   required: [task, core_requirement, execution_policy]
 governance:
   display_name: Create Async Task

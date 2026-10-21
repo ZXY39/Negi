@@ -1,6 +1,6 @@
 # Negi 契约在场与 callable 链路
 
-本文负责"工具凭什么在这一跳可调用"这条链：契约在场判据与它的唯一载体、契约不在场时的投递与入参暂存/复用、参数错误与状态分类、外置工具结果信封、统一工具 Timeout 合同、阶段门控，以及从上下文到 callable tools 的完整链路。
+本文负责"工具凭什么在这一跳可调用"这条链：契约在场判据与它的唯一载体、契约不在场时的投递与入参暂存/复用、派发时预置契约、参数错误与状态分类、外置工具结果信封、统一工具 Timeout 合同、阶段门控，以及从上下文到 callable tools 的完整链路。
 四个概念的边界定义、fixed builtin 工具的逐项合同与 RBAC 如何得出候选集合，归 `tool-and-skill-system.md`；前门与节点的上下文压缩合同归 `runtime-overview.md`。
 
 ## 1. 契约在场与 callable
@@ -9,7 +9,7 @@
 
 ### 在场的唯一载体
 
-- 载体只有 `[TOOL_CONTRACT_V1:<tool_id>:<fingerprint>]` 标记块，写在两条投递道的工具结果正文里：`load_tool_context(_v2)` 的结果行，和"契约不在场却直接调用"那条投递回执。两者经同一个渲染函数产出，逐字节相同，所以判据不需要知道是谁送的（`g3ku/runtime/tool_contract_block.py` 渲染、`g3ku/runtime/tool_context_presence.py` 解析）。
+- 载体只有 `[TOOL_CONTRACT_V1:<tool_id>:<fingerprint>]` 标记块，三条投递道都产出它：`load_tool_context(_v2)` 的结果行、「契约不在场却直接调用」那条投递回执，以及派发时预置进节点 bootstrap 的独立消息（见「派发时预置契约」）。前两条落在工具结果正文里，第三条落在一条独立 user 消息里——三条经**同一个**渲染函数产出，逐字节相同，所以判据不需要知道是谁送的（`g3ku/runtime/tool_contract_block.py` 渲染、`g3ku/runtime/tool_context_presence.py` 解析）。
 - 判据按**当次请求视图**现算，每跳只扫一次（`main/runtime/react_loop.py` 的 `loader_contract_revisions` 与 `g3ku/runtime/frontdoor/_ceo_runtime_ops.py` 的在场索引各算各道的那一次），结果下传给本跳全部消费点：执行准入、投递判据、观测读数。同一跳里出现两个答案是这层设计禁止的。
 - 阶段账本里留存的正文**不算在场**：正文不在模型眼前就不算。第二载体正是"看得见名字却调不动"这类漂移的来源。
 - 常驻内置与循环自己注入的控制信号不进判据（`CEO_NEVER_CONTRACT_TOOL_NAMES` / `NODE_NEVER_CONTRACT_TOOL_NAMES`，`g3ku/runtime/tool_visibility.py`）：`silent`、`submit_next_stage`、`wait_tool_execution` 这些没有 toolskill 的名字一旦进判据就被判成"契约不在场"，整个回合锁死。名单漏一处就是一起事故。
@@ -45,6 +45,22 @@
 - 执行侧仍按当轮重新认定可得性：名字不在本轮实例表里（无权限/已下架）时整批交回普通路径，出那条带名单的拒绝回执，一份都不撞。
 - 三类非法复用各有文案，且都**不计一轮预算**（字段误用不是任务失败，计预算会让模型从此绕开这条通道）：无暂存可复用、契约已离场（连带清掉该 scope）、`reuse_args` 与显式入参同时给（按显式入参跑一次并说明被忽略）。前两类把调用 id 记进"本轮未执行"集合，由同一条轮末退款通道退还预算。
 - 跳针推进时清扫过了严格一跳的条目，并把被清的名字交给观测读数（`staged_swept_tool_ids`）：模型暂存过却再没调用，是"批量语义没生效"的唯一证据，清扫本身静默进行，没有这个计数就查不到。
+
+### 派发时预置契约
+
+省掉「契约不在场那一跳」的唯一主动手段：派发方在派生时点名几个工具，运行时把它们的契约块直接写进目标节点的 bootstrap。
+
+- 名单**只来自派发方声明**：`create_async_task.seed_tools`（根执行节点）与 `spawn_child_nodes.children[].seed_tools`（子执行节点），两处都是可选数组，缺省即不预置。运行时不给任何机械默认——按 node_kind 猜、按历史高频填都不做。猜错的预置是纯上下文浪费，而机械表会把一次猜测固化进持久历史。验收节点没有这条车道。
+- 载体是**一条独立 user 消息、正文恰好一个块**。块头必须落在 `lstrip()` 后的第一个字符处，多块塞同一条只有第一个被认；块前垫任何说明文字都会让它认不出。不用 `role=tool`（没有配对的 `tool_use`），也不塞进 bootstrap 的那份 JSON payload——判据在 dict 上只取 `content` 键，且整串以 `{` 开头就不是块头。
+- 落位在 `system + payload` 之后、每跳重写的活状态块之前，因此进的是稳定前缀。同一节点两次构造逐字节相同的前提是 **toolskill 源在这两次之间没变**：块在构建时现渲染，节点行里不存原文。
+- 渲染复用唯一那条链（`get_tool_toolskill` → `build_tool_context_fingerprint` → `render_tool_contract`）。另写一份渲染或自算指纹的后果是在场判据认不出预置的那一份，而症状只是「节点仍然两跳」，一路没有报错。
+- 预置只投递契约，**不写 `tool_arg_stash`**：没有入参可暂存，写了会让首跳的 `reuse_args=true` 命中一份不属于它的暂存。
+- 陈旧块**不自愈**。在场判据按名字判、不按指纹判，所以 toolskill 源改动后该节点照旧首跳执行，只是读到一份过期契约；`stale_rev` 要同一视图里出现两个不同修订才有读数，也就是要等一次当前修订被投进来。新维护者常把它读成「旧块会被判不在场、自动重投」——不是这条。
+- 两个字符上界（`NODE_SEED_CONTRACT_SINGLE_CHAR_LIMIT` / `NODE_SEED_CONTRACT_TOTAL_CHAR_LIMIT`）是**预算不是闸门**。外置判定只作用在 `source_kind=tool_result:*` 上，预置这条 user 消息根本不经过它，所以超限的后果是前缀变胖，不是块被换成信封。超限削名单，不上调上界。
+- 丢弃必须回执。每个被声明的名字都出现在 `accepted` 或 `dropped` 之一，`dropped` 项带八种 `reason` 之一：`already_always_callable` / `unknown_tool` / `repair_required` / `not_visible_for_role` / `no_toolskill` / `render_empty` / `single_char_limit` / `total_char_limit`。优先级有两处不可交换：`unknown_tool` 与 `repair_required` 都早于 `not_visible_for_role`——拼错的名字与待修复资源在治理可见集里同样缺席，顺序反了就把「改名」「可以提示修复」两类不同的纠正动作都说成「这个角色用不了，别再报它」。判据按**目标节点角色**的实时可见集走，与名单来源无关。
+- 回执落在派发方的工具结果里：`create_async_task` 在结果文本追加一行 `seed_tools: {accepted, dropped}`，`spawn_child_nodes` 在每个 child 结果上带同名对象。两键恒在（`dropped` 为空时是空数组），但**只在派发方真的声明过时才出现**——没声明却回一份空回执，与「全被丢弃」在派发方看来同形。预置被拒不阻断任务创建或派生；解析自身失败时回执整份缺席，只在节点行留 `seed_error`，不替读不出来的名字编原因。
+- 两份读数落 `node.metadata` 并同步进 runtime frame：`seeded_contracts`（`tool` / `rev` / `chars`）与 `seeded_dropped`。派发时写初值，首跳构建时按**实际交付**覆盖 `seeded_contracts`、并把新出现的丢弃并进 `seeded_dropped`，于是「派发时就被拒」与「派发时被接受、构建时印不出来」在同一处看得见。帧字段按枚举过沙，写记录 / hydrate / 公开投影各建一份字典，漏一处不是报错而是**永远读不到**。
+- 前门车道不接这条：长会话的首跳成本被后续几十跳摊薄，节点是每个节点都付一次。
 
 ### 交付被切割时的复开提醒
 

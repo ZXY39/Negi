@@ -246,6 +246,7 @@ class NodeRunner:
         context_preparer=None,
         context_finalizer=None,
         workspace_root_getter=None,
+        seed_contract_metadata_builder=None,
     ) -> None:
         self._store = store
         self._log_service = log_service
@@ -276,6 +277,7 @@ class NodeRunner:
         self._context_preparer = context_preparer
         self._context_finalizer = context_finalizer
         self._workspace_root_getter = workspace_root_getter
+        self._seed_contract_metadata_builder = seed_contract_metadata_builder
         self.nested_node_executor = None
         self.cancel_node_subtree_executor = None
         # 活性问持有者，不问投影：派发器是唯一说得出「这个节点此刻有没有人在驱动」的一方。
@@ -6366,6 +6368,10 @@ class NodeRunner:
                 fallback_reason=self._spawn_exception_text(RuntimeError('child node missing')),
                 error_source='runtime',
             )
+            # 回执从节点行现读而不是从 entry 记账里读：名单与判据的家在节点 metadata，
+            # 交付这一跳只是把它转述给派发方。重放/恢复那一跳也走同一条口，不会给出两份答案。
+            if result.seed_tools is None:
+                result.seed_tools = self._seed_receipt_for_node(str(entry.get('child_node_id') or '').strip())
             results.append(result)
         return results
 
@@ -7544,6 +7550,29 @@ class NodeRunner:
             node_metadata.get('execution_policy', task_metadata.get('execution_policy'))
         )
 
+    def _seed_contract_metadata(self, *, task, node_kind: str, declared: list[str] | None) -> dict[str, Any]:
+        """派发时算一次预置契约，把最终名单与回执写成要落进节点 metadata 的那一份。
+
+        预置是优化不是前置条件：解析失败**不阻断派生**，此时整份回执缺席并留 `seed_error`，
+        而不是替被丢的名字编一个原因。判据只有一份实现（服务层的
+        `build_node_seed_metadata`），根节点与子节点走同一条口，否则两处会出现两套优先级。
+        """
+        builder = self._seed_contract_metadata_builder
+        if not callable(builder):
+            return {}
+        return dict(builder(task=task, node_kind=node_kind, declared=declared) or {})
+
+    def _seed_receipt_for_node(self, node_id: str) -> dict[str, Any] | None:
+        """派发回执：只在派发方真的声明过名单时给，未声明时交 None 让字段整个消失。"""
+        node = self._store.get_node(node_id) if str(node_id or '').strip() else None
+        receipt = dict((getattr(node, 'metadata', None) or {}).get('seed_receipt') or {})
+        if not receipt:
+            return None
+        return {
+            'accepted': list(receipt.get('accepted') or []),
+            'dropped': list(receipt.get('dropped') or []),
+        }
+
     def _create_execution_child(
         self,
         *,
@@ -7566,6 +7595,7 @@ class NodeRunner:
             'spawn_owner_round_id': str(owner_round_id or '').strip(),
             'spawn_owner_entry_index': int(owner_entry_index),
             'spawn_owner_kind': 'child',
+            **self._seed_contract_metadata(task=task, node_kind=KIND_EXECUTION, declared=spec.seed_tools),
         }
         child = NodeRecord(
             node_id=new_node_id(),

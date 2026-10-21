@@ -4,6 +4,7 @@ import json
 from pathlib import Path
 from typing import Any
 
+from g3ku.utils.helpers import normalize_seed_tool_names
 from main.models import build_execution_policy_schema, normalize_execution_policy_metadata
 
 
@@ -51,6 +52,40 @@ CREATE_ASYNC_TASK_FINAL_ACCEPTANCE_PROMPT_DESCRIPTION = (
     "Final acceptance instructions. Required only when "
     "`requires_final_acceptance=true`."
 )
+
+CREATE_ASYNC_TASK_SEED_TOOLS_DESCRIPTION = (
+    "Optional. Tool names whose contracts should be delivered in the root execution node's first "
+    "request so the first call can execute directly. Runtime filters by the node's role and reports "
+    "every dropped name in the result. Omit when unsure."
+)
+
+
+def normalize_create_async_task_seed_tools(value: Any) -> list[str]:
+    """`seed_tools` 的规范形：list、JSON 数组字符串或单个名字都收，strip、去重、保序。
+
+    保序就是优先级：体积超限时按这个顺序裁剪。字符串容错与 `file_targets` 同源——某些协议
+    绑定会把数组发成 `'["a","b"]'`。
+    """
+    raw_items: list[Any]
+    if value in (None, ""):
+        raw_items = []
+    elif isinstance(value, str):
+        stripped = value.strip()
+        if not stripped:
+            raw_items = []
+        elif stripped.startswith("[") and stripped.endswith("]"):
+            try:
+                parsed = json.loads(stripped)
+            except Exception:
+                parsed = None
+            raw_items = parsed if isinstance(parsed, list) else [stripped]
+        else:
+            raw_items = [stripped]
+    elif isinstance(value, (list, tuple)):
+        raw_items = list(value)
+    else:
+        raw_items = []
+    return normalize_seed_tool_names(raw_items)
 
 
 def normalize_create_async_task_file_targets(value: Any) -> list[dict[str, str]]:
@@ -162,6 +197,8 @@ def normalize_create_async_task_inbound_params(params: dict[str, Any] | None) ->
                 # (artifact: prefix → ref, otherwise → path) per the existing
                 # file_targets normalization rules.
                 payload["file_targets"] = normalize_create_async_task_file_targets(stripped_targets)
+    if "seed_tools" in payload:
+        payload["seed_tools"] = normalize_create_async_task_seed_tools(payload.get("seed_tools"))
     return payload
 
 
@@ -204,6 +241,13 @@ def build_create_async_task_parameters() -> dict[str, Any]:
             "final_acceptance_prompt": {
                 "type": "string",
                 "description": CREATE_ASYNC_TASK_FINAL_ACCEPTANCE_PROMPT_DESCRIPTION,
+            },
+            "seed_tools": {
+                "type": "array",
+                "description": CREATE_ASYNC_TASK_SEED_TOOLS_DESCRIPTION,
+                "items": {
+                    "type": "string",
+                },
             },
         },
         "required": ["task", "core_requirement", "execution_policy"],
