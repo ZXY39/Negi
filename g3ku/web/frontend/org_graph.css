@@ -14657,3 +14657,428 @@ textarea {
         min-height: 0;
     }
 }
+
+/* ---- 任务页（V2 合并后的最终值） ------------------------------------------- */
+
+/* 大厅卡片网格按宽度自适应列数。 */
+.project-card-grid {
+    grid-template-columns: repeat(auto-fill, minmax(300px, 1fr));
+    gap: var(--ui-space-4);
+    row-gap: var(--ui-space-6);
+    column-gap: 18px;
+}
+
+.project-card.project-card {
+    padding: var(--ui-space-4);
+    gap: var(--ui-space-3);
+    background: var(--ui-bg-surface);
+    border: 1px solid var(--ui-border);
+    border-radius: var(--ui-radius-card);
+    box-shadow: none;
+    transition: border-color 160ms var(--ui-motion-ease), box-shadow 160ms var(--ui-motion-ease),
+        transform 160ms var(--ui-motion-ease);
+}
+
+.project-card.project-card:hover {
+    transform: translateY(-2px);
+    border-color: var(--ui-border-strong);
+    box-shadow: var(--ui-shadow-sm);
+}
+
+.project-card.project-card.is-selected,
+.project-card.project-card.is-multi-mode {
+    border-color: var(--ui-brand);
+}
+
+.pc-title {
+    display: -webkit-box;
+    -webkit-box-orient: vertical;
+    -webkit-line-clamp: 2;
+    overflow: hidden;
+    font-size: 14px;
+    font-weight: 600;
+    line-height: 1.5;
+    color: var(--ui-text);
+}
+
+.pc-task-id-value {
+    max-width: 160px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.pc-created-at,
+.pc-field-label {
+    font-size: 12px;
+    color: var(--ui-text-muted);
+}
+
+.pc-metrics {
+    gap: var(--ui-space-3);
+}
+
+.pc-metric {
+    min-height: 62px;
+    padding: 10px 12px;
+    gap: 2px;
+    border: 1px solid var(--ui-border);
+    border-radius: var(--ui-radius-control);
+    background: var(--ui-bg-subtle);
+}
+
+.pc-metric-label {
+    font-size: 11px;
+}
+
+.pc-metric-value {
+    font-size: 13px;
+    line-height: 1.3;
+    color: var(--ui-text);
+    font-variant-numeric: tabular-nums;
+    overflow-wrap: anywhere;
+}
+
+@media (max-width: 639.98px) {
+    .pc-metrics {
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+    }
+}
+
+/* 状态栏：压力状态与资源读数共用一颗胶囊，压力档位由数值颜色表达。 */
+.task-performance-bar > .task-performance-item:nth-child(1),
+.task-performance-bar > .task-performance-item:nth-child(2) {
+    background: var(--ui-bg-surface);
+    box-shadow: none;
+}
+
+@media (min-width: 768px) {
+    .task-performance-bar > .task-performance-item:nth-child(1) {
+        margin-right: calc(var(--ui-space-2) * -1);
+        border-top-right-radius: 0;
+        border-bottom-right-radius: 0;
+        border-right-color: transparent;
+    }
+
+    .task-performance-bar > .task-performance-item:nth-child(2) {
+        border-top-left-radius: 0;
+        border-bottom-left-radius: 0;
+        border-left-color: transparent;
+    }
+}
+
+.task-performance-item--state[data-state="normal"] .task-performance-value {
+    color: var(--ui-success);
+}
+
+.task-performance-item--state[data-state="easing"] .task-performance-value {
+    color: var(--ui-brand);
+}
+
+.task-performance-item--state[data-state="throttled"] .task-performance-value {
+    color: var(--ui-warning);
+}
+
+.task-performance-item--state[data-state="critical"] .task-performance-value,
+.task-performance-item--state[data-state="unfresh"] .task-performance-value,
+.task-performance-item--state[data-state="stale"] .task-performance-value,
+.task-performance-item--state[data-state="starting"] .task-performance-value,
+.task-performance-item--state[data-state="offline"] .task-performance-value {
+    color: var(--ui-danger);
+}
+
+/* CPU / 内存 / 磁盘读数各自按紧张度着色。 */
+.task-performance-metric.is-warning {
+    color: var(--ui-warning);
+}
+
+.task-performance-metric.is-critical {
+    color: var(--ui-danger);
+}
+
+/* 排序与树深度：外层框去掉，标签加箭头合成一颗 40px 按钮，下拉面板固定在按钮正下方。 */
+.task-sort-setting,
+.task-depth-setting {
+    min-height: 0;
+    padding: 0;
+    gap: 0;
+    border: 0;
+    border-radius: 0;
+    background: transparent;
+    box-shadow: none;
+}
+
+.task-depth-setting-main.task-depth-setting-main {
+    position: relative;
+    display: inline-flex;
+    align-items: center;
+    gap: var(--ui-space-2);
+    flex: 0 0 auto;
+    height: 40px;
+    padding: 0 var(--ui-space-2) 0 var(--ui-space-3);
+    border: 1px solid var(--ui-border);
+    border-radius: var(--ui-radius-control);
+    background: var(--ui-bg-surface);
+    cursor: pointer;
+}
+
+.task-depth-setting-main:hover {
+    border-color: var(--ui-border-strong);
+    background: var(--ui-neutral-soft);
+}
+
+/* 触发区铺满整颗按钮：点标签文字也要能展开下拉。 */
+.task-depth-setting .resource-select-shell,
+.task-sort-setting .resource-select-shell {
+    position: absolute;
+    inset: 0;
+    width: auto;
+    flex: none;
+}
+
+.task-depth-setting .task-depth-label,
+.task-sort-setting .task-depth-label {
+    font-size: 13px;
+    font-weight: 600;
+    color: var(--ui-text);
+    pointer-events: none;
+}
+
+.task-depth-setting .resource-select-trigger,
+.task-sort-setting .resource-select-trigger {
+    display: flex;
+    align-items: center;
+    justify-content: flex-end;
+    width: 100%;
+    height: 100%;
+    min-height: 0;
+    padding: 0 var(--ui-space-2) 0 0;
+    border: 0;
+    border-radius: var(--ui-radius-control);
+    background: transparent;
+    box-shadow: none;
+    color: var(--ui-text);
+}
+
+.task-depth-setting .resource-select-trigger:hover,
+.task-sort-setting .resource-select-trigger:hover {
+    background: transparent;
+}
+
+/* 当前选项不在按钮上展示，点开才在下方出现下拉面板。 */
+.task-depth-setting .resource-select-value,
+.task-sort-setting .resource-select-value {
+    display: none;
+}
+
+.task-depth-setting .resource-select-icon,
+.task-sort-setting .resource-select-icon {
+    width: 16px;
+    height: 16px;
+}
+
+/* 下拉面板与按钮同宽：shell 已铺满按钮，left/right 归零即等宽。 */
+.task-depth-setting .resource-select-menu,
+.task-sort-setting .resource-select-menu {
+    left: 0;
+    right: 0;
+    transform: none;
+    width: auto;
+    min-width: 0;
+    gap: 2px;
+    padding: var(--ui-space-1);
+    border-radius: var(--ui-radius-card);
+    box-shadow: var(--ui-shadow-dialog);
+}
+
+/* 任务大厅头部：多选 → 排序 → 树深度靠左成组，性能读数推到右端。 */
+#view-tasks-list .task-header-main {
+    position: absolute;
+    min-height: 0;
+    margin: 0;
+}
+
+#view-tasks-list .task-header-actions {
+    justify-content: flex-start;
+    margin-left: 0;
+    width: 100%;
+}
+
+#view-tasks-list #task-multi-toggle {
+    order: 0;
+}
+
+#view-tasks-list .task-toolbar-preferences {
+    order: 1;
+}
+
+#view-tasks-list #task-performance-bar {
+    order: 2;
+    justify-content: flex-end;
+}
+
+@media (min-width: 1200px) {
+    #view-tasks-list .content-header {
+        flex-wrap: nowrap;
+    }
+
+    #view-tasks-list .task-performance-bar {
+        flex: 1 1 auto;
+        min-width: 0;
+        flex-wrap: nowrap;
+    }
+
+    #view-tasks-list .task-header-actions {
+        flex: 0 0 auto;
+        flex-wrap: nowrap;
+    }
+}
+
+/* 任务详情头部：返回、状态、初始提示词、活跃节点与操作按钮恒一行，只压缩提示词宽度。 */
+.task-detail-header {
+    align-items: center;
+    flex-wrap: nowrap;
+    gap: var(--ui-space-2);
+    min-height: 56px;
+    padding: 8px var(--ui-space-4);
+}
+
+.task-detail-header > * {
+    flex: 0 0 auto;
+    min-width: 0;
+}
+
+.task-detail-header .task-prompt-disclosure {
+    flex: 1 1 auto;
+    min-width: 0;
+}
+
+.task-detail-header .header-actions {
+    display: flex;
+    align-items: center;
+    gap: var(--ui-space-2);
+}
+
+/* 头部控件统一 40px 高、控制圆角、表面底。 */
+.task-detail-header .task-detail-pill:not(.status-badge):not(.task-prompt-disclosure),
+.task-detail-header .task-detail-back-btn {
+    height: 40px;
+    min-height: 40px;
+    padding: 0 var(--ui-space-3);
+    border: 1px solid var(--ui-border);
+    border-radius: var(--ui-radius-control);
+    background: var(--ui-bg-surface);
+    box-shadow: none;
+    font-size: 13px;
+}
+
+.task-detail-header .task-detail-back-btn.task-detail-back-btn {
+    width: 40px;
+    padding: 0;
+}
+
+.task-detail-header .task-detail-pill-label,
+.task-detail-header .task-detail-pill-value,
+.task-detail-header .task-prompt-text {
+    font-size: 13px;
+}
+
+/* 状态胶囊挂 .status-badge 的 24px 标签档，这里只抬盒子；底色与描边由生命周期色给出。 */
+.task-detail-header .status-badge.status-badge {
+    height: 40px;
+    min-height: 40px;
+    padding: 0 var(--ui-space-3);
+    border-radius: var(--ui-radius-control);
+    box-shadow: none;
+}
+
+.task-detail-header .task-prompt-disclosure {
+    padding: 0;
+    border: 1px solid var(--ui-border);
+    border-radius: var(--ui-radius-control);
+    background: var(--ui-bg-surface);
+    box-shadow: none;
+    font-size: 13px;
+}
+
+/* 折叠态清掉两处 42px min-height 才锁得到 40px；展开态不给 height，提示词整块撑开。 */
+.task-detail-header .task-prompt-disclosure:not([open]) {
+    height: 40px;
+    min-height: 0;
+}
+
+.task-detail-header .task-prompt-disclosure:not([open]) .task-prompt-summary {
+    height: 100%;
+    min-height: 0;
+    font-size: 13px;
+}
+
+/* 树节点与搜索框跟随大控件档。 */
+.task-trace-round-chip {
+    font-size: 13px;
+    border-radius: var(--ui-radius-control);
+}
+
+.execution-tree-node-pause-action {
+    border-radius: var(--ui-radius-control);
+}
+
+.task-tree-search-input,
+.task-token-call-search {
+    font-size: 13px;
+    border-radius: var(--ui-radius-control);
+}
+
+.task-tree-search-input {
+    border: 1px solid var(--ui-border);
+    background: var(--ui-bg-surface);
+    box-shadow: none;
+}
+
+/* 两个搜索框是 type="search"：关掉原生 searchfield 外观并把 color-scheme 锚到当前主题，
+   否则深色下原生白底会盖掉上面的实色底。Esc 收起下拉由 keydown 处理，不依赖原生清空键。 */
+.task-tree-search-input,
+.task-token-call-search {
+    appearance: none;
+    -webkit-appearance: none;
+    color-scheme: var(--ui-color-scheme);
+}
+
+/* 执行树节点按状态上实色淡档：底 = --ui-*-soft，文字仍是主文本色。
+   只给 .execution-tree-node 上色；.execution-tree-item 是包住整棵子树的 <li>，
+   给它上底会把一片子树染成一个大方块。 */
+.execution-tree-node[data-status="running"],
+.execution-tree-node[data-status="in_progress"],
+.execution-tree-node[data-status="inspecting"] {
+    background: var(--ui-brand-soft);
+    border-color: color-mix(in srgb, var(--ui-brand) 50%, transparent);
+}
+
+.execution-tree-node[data-status="success"],
+.execution-tree-node[data-status="completed"],
+.execution-tree-node[data-status="passed"] {
+    background: var(--ui-success-soft);
+    border-color: color-mix(in srgb, var(--ui-success) 50%, transparent);
+}
+
+.execution-tree-node[data-status="failed"],
+.execution-tree-node[data-status="error"] {
+    background: var(--ui-danger-soft);
+    border-color: color-mix(in srgb, var(--ui-danger) 50%, transparent);
+}
+
+.execution-tree-node.execution-tree-node--distribution-blocked {
+    background: var(--ui-warning-soft);
+    border-color: color-mix(in srgb, var(--ui-warning) 50%, transparent);
+}
+
+/* 状态规则写死了描边色，选中态要在它之后把品牌描边抬回来。 */
+.execution-tree-node.selected {
+    border-color: var(--ui-brand);
+    box-shadow: var(--ui-shadow-md);
+}
+
+/* 卡内状态徽标改表面底：状态色由文字与描边承担。 */
+.execution-tree-node.execution-tree-node .status-badge.status-badge {
+    background: var(--ui-bg-surface);
+}
