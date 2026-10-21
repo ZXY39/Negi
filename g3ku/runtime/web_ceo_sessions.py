@@ -1212,6 +1212,9 @@ def _normalized_completed_continuity_snapshot(payload: Any) -> dict[str, Any] | 
         # 同刻存：少了跳序，重启后第一跳就把刚暂存的那份判成过期。
         "tool_arg_stash": normalize_tool_arg_stash(payload.get("tool_arg_stash")),
         "tool_arg_stash_hop": int(payload.get("tool_arg_stash_hop") or 0),
+        # 每跳的观测读数（在场三档 / 清扫计数）。这份载荷是白名单装配的：不列出来就落不了盘，
+        # 而 CEO-only 回合没有 task/node 帧、请求工件里也只有 request_messages。
+        "frontdoor_selection_debug": dict(payload.get("frontdoor_selection_debug") or {}),
         "provider_tool_schema_names": _normalized_name_list(payload.get("provider_tool_schema_names")),
         # 钉进头部的静态声明原文与重印代数。同样是白名单装配：不列出来就落不了盘，
         # 于是重启后第一跳按当轮可见集重渲头部，头部一改身后全部前缀重付。

@@ -319,6 +319,26 @@ def test_frontdoor_hop_advance_sweeps_and_stashes_the_reading(tmp_path: Path) ->
     assert getattr(session, "_frontdoor_stash_swept") == [TOOL_ID]
 
 
+def test_completed_continuity_snapshot_keeps_the_selection_debug_reading() -> None:
+    # 前门回合没有 task/node 帧，请求工件里也只有 request_messages：读数不在这份白名单里
+    # 就只活在内存，重启即丢。这里钉的是"落盘面"，不是读数内容。
+    from g3ku.runtime.web_ceo_sessions import _normalized_completed_continuity_snapshot
+
+    snapshot = _normalized_completed_continuity_snapshot(
+        {
+            "session_key": "web:shared",
+            "frontdoor_selection_debug": {
+                "tool_contract_presence": {"present": [TOOL_ID], "absent": [], "stale_rev": []},
+                "staged_swept_tool_ids": [TOOL_ID],
+            },
+        }
+    )
+
+    assert snapshot is not None
+    assert snapshot["frontdoor_selection_debug"]["staged_swept_tool_ids"] == [TOOL_ID]
+    assert snapshot["frontdoor_selection_debug"]["tool_contract_presence"]["present"] == [TOOL_ID]
+
+
 def _frontdoor_carrier(*, hop: int) -> dict:
     container, _item, _count = tool_arg_stash.stage_args(
         {},

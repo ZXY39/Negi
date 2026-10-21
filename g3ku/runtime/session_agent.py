@@ -967,6 +967,11 @@ class RuntimeAgentSession:
                 "frontdoor_canonical_context": copy.deepcopy(
                     getattr(self, "_frontdoor_canonical_context", None) or {}
                 ),
+                # 每跳的观测读数（在场三档 / 清扫计数）。CEO-only 回合既没有 task/node 帧，
+                # 请求工件里又只有 request_messages——不在这份载荷里落盘，读数就只活在内存。
+                "frontdoor_selection_debug": copy.deepcopy(
+                    getattr(self, "_frontdoor_selection_debug", None) or {}
+                ),
                 "compression_state": copy.deepcopy(getattr(self, "_compression_state", None) or {}),
                 "semantic_context_state": copy.deepcopy(
                     getattr(self, "_semantic_context_state", None) or {}
