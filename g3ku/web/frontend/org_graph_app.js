@@ -11734,39 +11734,6 @@ function addNotice(notice, _bump = true) {
 }
 
 
-function clearToastTimers() {
-    if (S.toastState.timeoutId) window.clearTimeout(S.toastState.timeoutId);
-    if (S.toastState.intervalId) window.clearInterval(S.toastState.intervalId);
-    S.toastState.timeoutId = null;
-    S.toastState.intervalId = null;
-}
-
-function closeToast() {
-    clearToastTimers();
-    if (!U.toast) return;
-    U.toast.hidden = true;
-    U.toast.className = "app-toast";
-    if (U.toastClose) U.toastClose.hidden = false;
-}
-
-function showToast({ title = "操作成功", text = "修改已生效", kind = "success", durationMs = 3000, persistent = false, spin = false } = {}) {
-    if (!U.toast || !U.toastTitle || !U.toastText || !U.toastClose) return;
-    clearToastTimers();
-    const sticky = persistent || durationMs <= 0;
-    U.toastTitle.textContent = title;
-    U.toastText.textContent = text;
-    U.toast.hidden = false;
-    U.toast.setAttribute("role", kind === "error" ? "alert" : "status");
-    // 进行中的 toast 是唯一进度信号，给一个关闭键等于让用户自己把它抹掉。
-    U.toastClose.hidden = !!spin;
-    if (U.toastIcon) U.toastIcon.hidden = !spin;
-    if (!sticky) {
-        S.toastState.timeoutId = window.setTimeout(closeToast, durationMs);
-    }
-    U.toast.className = `app-toast is-open is-${kind}`;
-    icons();
-}
-
 function syncDetailSaveButton(kind) {
     const isSkill = kind === "skill";
     const root = isSkill ? U.skillDetail : U.toolDetail;
@@ -11794,91 +11761,6 @@ function setSkillDirty(next = true) {
 function setToolDirty(next = true) {
     S.toolDirty = !!next;
     renderToolActions();
-}
-
-function openConfirm({ title, text, confirmLabel = "确认", confirmKind = "danger", onConfirm, onClose = null, returnFocus = null, checkbox = null, input = null }) {
-    S.confirmState = {
-        onConfirm,
-        onClose,
-        returnFocus,
-        checkbox: checkbox && typeof checkbox === "object" ? checkbox : null,
-        input: input && typeof input === "object" ? input : null,
-        accepted: false,
-    };
-    U.confirmTitle.textContent = title;
-    U.confirmText.textContent = text;
-    if (U.confirmInputRow && U.confirmInput) {
-        const inputEnabled = !!(input && typeof input === "object");
-        U.confirmInputRow.hidden = !inputEnabled;
-        U.confirmInput.disabled = false;
-        U.confirmInput.value = "";
-        if (inputEnabled && U.confirmInputLabel) {
-            U.confirmInputLabel.textContent = input.label || "";
-        }
-        if (inputEnabled && input.placeholder) {
-            U.confirmInput.setAttribute("placeholder", input.placeholder);
-        }
-    }
-    if (U.confirmOptions && U.confirmCheckbox && U.confirmCheckboxLabel && U.confirmCheckboxHint) {
-        const enabled = !!(checkbox && typeof checkbox === "object");
-        U.confirmOptions.hidden = !enabled;
-        if (enabled) {
-            U.confirmCheckbox.checked = !!checkbox.checked;
-            U.confirmCheckbox.disabled = false;
-            U.confirmCheckboxLabel.textContent = checkbox.label || "同时删除此对话创建的所有任务记录";
-            U.confirmCheckboxHint.textContent = checkbox.hint || "";
-            if (U.confirmCheckboxDetails) {
-                const detailText = String(checkbox.details || "").trim();
-                U.confirmCheckboxDetails.hidden = !detailText;
-                U.confirmCheckboxDetails.textContent = detailText;
-            }
-        } else {
-            U.confirmCheckbox.checked = false;
-            U.confirmCheckbox.disabled = false;
-            U.confirmCheckboxLabel.textContent = "同时删除此对话创建的所有任务记录";
-            U.confirmCheckboxHint.textContent = "";
-            if (U.confirmCheckboxDetails) {
-                U.confirmCheckboxDetails.hidden = true;
-                U.confirmCheckboxDetails.textContent = "";
-            }
-        }
-    }
-    U.confirmAccept.textContent = confirmLabel;
-    U.confirmAccept.className = `toolbar-btn ${confirmKind}`;
-    U.confirmBackdrop.hidden = false;
-    U.confirmBackdrop.classList.add("is-open");
-    window.requestAnimationFrame(() => {
-        if (S.confirmState?.input) {
-            U.confirmInput?.focus();
-            return;
-        }
-        U.confirmCancel?.focus();
-    });
-}
-
-function requestInlineConfirm({ title, text, confirmLabel = "确认", confirmKind = "danger", returnFocus = null, checkbox = null }) {
-    const focusTarget = returnFocus || (document.activeElement instanceof HTMLElement ? document.activeElement : null);
-    return new Promise((resolve) => {
-        let settled = false;
-        openConfirm({
-            title,
-            text,
-            confirmLabel,
-            confirmKind,
-            returnFocus: focusTarget,
-            checkbox,
-            onConfirm: async ({ checked }) => {
-                if (settled) return;
-                settled = true;
-                resolve({ confirmed: true, checked: !!checked });
-            },
-            onClose: () => {
-                if (settled) return;
-                settled = true;
-                resolve({ confirmed: false, checked: false });
-            },
-        });
-    });
 }
 
 function resourceDeleteErrorText(error) {
@@ -12308,53 +12190,6 @@ function buildResourceSelect(select) {
 function enhanceResourceSelects() {
     syncResourceSelectMenuPortals();
     document.querySelectorAll("select.resource-select").forEach((select) => buildResourceSelect(select));
-}
-
-function closeConfirm({ restoreFocus = true } = {}) {
-    const returnFocus = S.confirmState?.returnFocus;
-    const onClose = S.confirmState?.onClose;
-    const accepted = !!S.confirmState?.accepted;
-    S.confirmState = null;
-    if (U.confirmOptions) U.confirmOptions.hidden = true;
-    if (U.confirmInputRow) U.confirmInputRow.hidden = true;
-    if (U.confirmInput) {
-        U.confirmInput.value = "";
-        U.confirmInput.disabled = false;
-    }
-    if (U.confirmCheckbox) {
-        U.confirmCheckbox.checked = false;
-        U.confirmCheckbox.disabled = false;
-    }
-    if (U.confirmCheckboxHint) U.confirmCheckboxHint.textContent = "";
-    U.confirmBackdrop.hidden = true;
-    U.confirmBackdrop.classList.remove("is-open");
-    if (!accepted && typeof onClose === "function") {
-        try {
-            onClose();
-        } catch (error) {
-            void error;
-        }
-    }
-    if (restoreFocus) returnFocus?.focus?.();
-}
-
-async function acceptConfirm() {
-    if (!S.confirmState?.onConfirm) return;
-    U.confirmAccept.disabled = true;
-    U.confirmCancel.disabled = true;
-    if (U.confirmCheckbox) U.confirmCheckbox.disabled = true;
-    try {
-        S.confirmState.accepted = true;
-        await S.confirmState.onConfirm({ checked: !!U.confirmCheckbox?.checked, value: String(U.confirmInput?.value || "") });
-        closeConfirm();
-    } catch (error) {
-        if (S.confirmState) S.confirmState.accepted = false;
-        showToast({ title: "操作失败", text: error?.message || "Unknown error", kind: "error" });
-    } finally {
-        U.confirmAccept.disabled = false;
-        U.confirmCancel.disabled = false;
-        if (U.confirmCheckbox) U.confirmCheckbox.disabled = false;
-    }
 }
 
 function finalizeProjectExit() {

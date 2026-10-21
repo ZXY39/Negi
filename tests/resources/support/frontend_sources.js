@@ -24,7 +24,7 @@ const FRONTEND_BUNDLES = Object.freeze({
     ],
     bootstrap: ["org_graph_bootstrap.js"],
     task_view: ["org_graph_task_view.js"],
-    app: ["org_graph_app.js"],
+    app: ["ui/toast.js", "ui/confirm.js", "org_graph_app.js"],
     tasks: ["org_graph_tasks.js"],
     resources: ["org_graph_resources.js"],
     governance: ["org_graph_ceo_governance.js"],
