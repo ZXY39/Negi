@@ -694,6 +694,59 @@ def test_create_async_task_seed_hint_is_the_tool_level_description() -> None:
     assert 'seed_tools' not in str((manifest.get('governance') or {}).get('description') or '')
 
 
+@pytest.mark.asyncio
+async def test_spawn_round_delivery_attaches_the_child_receipt(tmp_path: Path) -> None:
+    """父节点收到的那一侧：回执必须穿过**交付漏斗**，不是只躺在子节点 metadata 里。
+
+    `spawn_child_nodes` 的结果整轮由 `_spawn_round_results_from_entries` 重建后交付，
+    前面两条用例分别证了"写进 metadata"和"读得出来"，中间这一层按字段重建结果对象，
+    漏了它就只有子节点自己知道预置过什么，派发方永远等不到判据。
+    """
+    service, manager = _build_service(tmp_path)
+    try:
+        record, root = await _make_task(service, seed_tools=['seed_a'])
+        task = service.get_task(record.task_id)
+        parent = service.get_node(root.node_id)
+        seeded = service.node_runner._create_execution_child(
+            task=task,
+            parent=parent,
+            spec=SpawnChildSpec(goal='seeded child', prompt='p', execution_policy={'mode': 'focus'}, seed_tools=['seed_b', 'seed_typo']),
+        )
+        plain = service.node_runner._create_execution_child(
+            task=task,
+            parent=parent,
+            spec=SpawnChildSpec(goal='plain child', prompt='q', execution_policy={'mode': 'focus'}),
+        )
+        entries = [
+            {'goal': 'seeded child', 'child_node_id': seeded.node_id, 'requires_acceptance': False},
+            {'goal': 'plain child', 'child_node_id': plain.node_id, 'requires_acceptance': False},
+        ]
+
+        results = service.node_runner._spawn_round_results_from_entries(
+            task_id=record.task_id,
+            entries=entries,
+            specs=[
+                SpawnChildSpec(goal='seeded child', prompt='p', execution_policy={'mode': 'focus'}, seed_tools=['seed_b', 'seed_typo']),
+                SpawnChildSpec(goal='plain child', prompt='q', execution_policy={'mode': 'focus'}),
+            ],
+        )
+        assert len(results) == 2
+        by_goal = {item.goal: item for item in results}
+
+        receipt = by_goal['seeded child'].seed_tools
+        assert receipt is not None, '交付漏斗没把回执挂上，派发方看不见判据'
+        assert [item['tool'] for item in receipt['accepted']] == ['seed_b']
+        assert receipt['dropped'] == [{'tool': 'seed_typo', 'reason': 'unknown_tool'}]
+        # 派发方真声明过就要有判据，哪怕全被丢：这里 accepted 非空、dropped 非空，两键都在。
+        assert set(receipt) == {'accepted', 'dropped'}
+
+        # 没声明的那条子分支：键整个不存在，而不是回一份空回执。
+        dumped = {item.goal: item.model_dump(mode='json', exclude_none=True) for item in results}
+        assert 'seed_tools' not in dumped['plain child']
+    finally:
+        await _shutdown(service, manager)
+
+
 def test_spawn_child_spec_keeps_the_declared_names_through_validation() -> None:
     """pydantic 基类默认忽略多余键：只改工具 schema 不改模型，名单会被静默吞掉。"""
     spec = SpawnChildSpec.model_validate(
