@@ -3033,6 +3033,15 @@ textarea {
 
 /* 模型回复不再装进气泡：正文直接印在会话面上并占满整列（左右只剩 feed 自己的 12px 内缩）。
    用户消息与内部轮状态条（.ceo-internal-ack）仍保留盒子；阶段轨道是另一个盒子，不受这条影响。 */
+/* 模型回复不装盒：本表在后，不补一条同档规则的话 V2 的盒子会把基础层顶回去。
+   :not() 排除内部轮状态条——它不是回复，仍要自己的虚线盒。 */
+.message.system .msg-content:not(.ceo-internal-ack-content) {
+    padding: 0;
+    border: 0;
+    border-radius: 0;
+    background: transparent;
+}
+
 .message.system .msg-content {
     width: 100%;
     max-width: 100%;
@@ -5518,11 +5527,17 @@ textarea {
     color: var(--ui-text-secondary);
 }
 
+/* 容器只负责占位，可见的面是每条 chip。再画一层底和描边，
+   就会在 chip 的圆角外面露出一圈更方的盒子。 */
 .ceo-follow-up-queue {
     display: flex;
     flex-direction: column;
     gap: 10px;
-    margin-inline-start: calc(var(--ceo-input-leading-width) + var(--ceo-input-row-gap));
+    margin-inline-start: 0;
+    background: transparent;
+    border: 0;
+    border-radius: 0;
+    box-shadow: none;
 }
 
 .ceo-follow-up-queue-title {
@@ -12694,7 +12709,14 @@ textarea {
     color: var(--text-secondary);
 }
 
+/* 只负责把审批卡钉在输入框上方：它是 left:0/right:0 的绝对定位条，
+   宽度跟着输入区（50vw）走，而可见的审批卡 .ceo-approval-toast 最宽只有 560px 居中。
+   容器再画一层底，就会在卡片两侧拉出一整块比弹窗宽、还压在消息流上的空白面。 */
 .ceo-approval-viewport {
+    background: transparent;
+    border: 0;
+    border-radius: 0;
+    box-shadow: none;
     position: absolute;
     left: 0;
     right: 0;

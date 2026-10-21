@@ -899,16 +899,6 @@
     line-height: 1.7;
 }
 
-/* 模型回复不装盒（V2 层，合同见 org_graph.css 的 .message.system .msg-content）：
-   本表在后面，不补一条同档规则的话 V2 的盒子会把基础层顶回去。
-   :not() 排除内部轮状态条——它不是回复，仍要自己的虚线盒。 */
-[data-ui-version="v2"] .message.system .msg-content:not(.ceo-internal-ack-content) {
-    padding: 0;
-    border: 0;
-    border-radius: 0;
-    background: transparent;
-}
-
 [data-ui-version="v2"] .message.user .msg-content {
     max-width: 100%;
     background: var(--ui-brand-soft);
@@ -1116,26 +1106,6 @@
     border-radius: var(--ui-radius-card);
     box-shadow: none;
     color: var(--ui-text-secondary);
-}
-
-/* .ceo-approval-viewport 只负责把审批卡钉在输入框上方：它是 left:0/right:0 的绝对定位条，
-   宽度跟着输入区（50vw）走，而可见的审批卡 .ceo-approval-toast 最宽只有 560px 居中。
-   容器再画一层底，就会在卡片两侧拉出一整块比弹窗宽、还压在消息流上的空白面。 */
-[data-ui-version="v2"] .ceo-approval-viewport {
-    background: transparent;
-    border: 0;
-    border-radius: 0;
-    box-shadow: none;
-}
-
-/* 待发送队列同理：容器只负责占位，可见的面是每条 chip。
-   容器再画一层底和描边，就会在 chip 的圆角外面露出一圈更方的盒子。 */
-[data-ui-version="v2"] .ceo-follow-up-queue {
-    margin-inline-start: 0;
-    background: transparent;
-    border: 0;
-    border-radius: 0;
-    box-shadow: none;
 }
 
 [data-ui-version="v2"] .ceo-follow-up-chip {
