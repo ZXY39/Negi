@@ -60,9 +60,16 @@ function loadTasksModule({ requestTaskAction } = {}) {
     };
     context.window = context;
     vm.createContext(context);
+    // performTaskBatchAction 住在 tasks/hall-store.js（bundle 的第一段），单独切它；
+    // 任务侧仍从 taskActionText 切到 loadTaskDetail，避免把真实的 loadTasks 带进来盖掉桩。
+    const batchStart = TASKS_CODE.indexOf("async function performTaskBatchAction");
+    const batchEnd = TASKS_CODE.indexOf("function handleTaskEvent");
     const start = TASKS_CODE.indexOf("function taskActionText");
     const end = TASKS_CODE.indexOf("async function loadTaskDetail");
-    vm.runInContext(TASKS_CODE.slice(start, end), context);
+    vm.runInContext(
+        TASKS_CODE.slice(batchStart, batchEnd) + "\n" + TASKS_CODE.slice(start, end),
+        context,
+    );
     return context;
 }
 
