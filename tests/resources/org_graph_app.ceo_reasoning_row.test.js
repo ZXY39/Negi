@@ -242,8 +242,8 @@ test("快照里 reasoning 为空时把这一行收起", () => {
 test("车道进口接线：帧名、快照恢复、历史汇总三处都接上", () => {
     // 上面那些用例是把函数单独喂进 vm 的；这条钉的是"帧真能走到函数"那段接线，
     // 断在哪一处，界面上就一个字都不会动。
-    assert.match(APP_CODE, /payload\.type === "ceo\.reasoning\.delta"/);
-    assert.match(APP_CODE, /payload\.type === "ceo\.reasoning\.delta"[\s\S]{0,120}?applyCeoReasoningDelta\(/);
+    assert.match(APP_CODE, /"ceo\.reasoning\.delta":\s*handleCeoReasoningDeltaFrame/);
+    assert.match(APP_CODE, /function handleCeoReasoningDeltaFrame\([\s\S]{0,300}?applyCeoReasoningDelta\(/);
     assert.match(APP_CODE, /applyCeoThinkingFromInflightSnapshot\(turn, snapshot\?\.reasoning\)/);
     assert.match(APP_CODE, /renderCeoThinkingSummaryFromSnapshot\([^;]{0,80}item\?\.thinking\)/);
     // 进行中快照的可见性判据要认思考读数，否则内部轮仍然只有一条静态转圈

@@ -23,11 +23,19 @@ const VISIBLE_TURN_FRAMES = [
 ];
 
 function dispatchSlice(typeName) {
-    const marker = `if (payload.type === "${typeName}"`;
-    const start = APP_CODE.indexOf(marker);
+    const tableStart = APP_CODE.indexOf("const CEO_WS_HANDLERS =");
+    assert.notEqual(tableStart, -1, "ceo ws handler table is missing");
+    const marker = `"${typeName}":`;
+    const start = APP_CODE.indexOf(marker, tableStart);
     assert.notEqual(start, -1, `${typeName} is no longer dispatched on the ceo ws lane`);
-    const next = APP_CODE.indexOf("if (payload.type === ", start + marker.length);
-    return APP_CODE.slice(start, next === -1 ? start + 600 : next);
+    const lineEnd = APP_CODE.indexOf("\n", start);
+    const entry = APP_CODE.slice(start, lineEnd === -1 ? start + 200 : lineEnd);
+    const direct = entry.match(/:\s*(handle\w+)/);
+    if (!direct) return entry;
+    const fnStart = APP_CODE.indexOf(`function ${direct[1]}(`);
+    assert.notEqual(fnStart, -1, `${direct[1]} handler is missing`);
+    const fnEnd = APP_CODE.indexOf("\nfunction ", fnStart + 10);
+    return entry + APP_CODE.slice(fnStart, fnEnd === -1 ? fnStart + 2000 : fnEnd);
 }
 
 test("every visible-turn CEO frame is scoped to one session", () => {

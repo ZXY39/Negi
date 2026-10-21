@@ -508,7 +508,7 @@ test("R7 接线静态契约:委托/时序/横幅/HTML 元素", () => {
     assert.ok(forkBody.includes('title: "Fork 失败"'), "Fork 失败侧没有提示");
     // 收尾后服务端补发的门槛帧必须有分发。
     assert.ok(
-        APP_CODE.includes('payload.type === "ceo.edit_fork.gates"'),
+        APP_CODE.includes('"ceo.edit_fork.gates":'),
         "WS 分发缺少 ceo.edit_fork.gates 处理"
     );
 });
