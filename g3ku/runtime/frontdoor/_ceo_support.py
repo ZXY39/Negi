@@ -19,7 +19,7 @@ from g3ku.runtime.tool_error_guidance import (
     append_parameter_error_guidance,
     is_parameter_like_tool_exception,
 )
-from g3ku.runtime.tool_impulse import tool_facing_runtime_context
+from g3ku.runtime.tool_impulse import PreRenderedToolResult, tool_facing_runtime_context
 from g3ku.runtime.tool_result_status import is_error_like_tool_result
 from g3ku.runtime.tool_watchdog import (
     actor_role_allows_watchdog,
@@ -537,6 +537,8 @@ class CeoFrontDoorSupport:
         tool: Tool | None = None,
         delivery_metadata: dict[str, Any] | None = None,
     ) -> str:
+        if isinstance(result, PreRenderedToolResult):
+            return str(result)
         rendered = result if isinstance(result, str) else self._render_tool_result(result)
         metadata = dict(delivery_metadata or self._tool_result_delivery_metadata(tool=tool))
         metadata.setdefault(

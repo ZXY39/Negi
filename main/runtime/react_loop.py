@@ -137,6 +137,7 @@ from g3ku.runtime.tool_impulse import (
     REUSE_PLAN_EXECUTE,
     REUSE_PLAN_EXPLICIT_ARGS,
     REUSE_PLAN_NO_STASH,
+    PreRenderedToolResult,
     aggregate_reuse_results,
     plan_reuse_execution,
     reuse_refusal_text,
@@ -5425,7 +5426,8 @@ class ReActToolLoop:
                 carrier=tool_arg_stash.build_carrier(next_container, hop=hop),
                 runtime_context=runtime_context,
             )
-            return f"{reuse_refusal_text(kind, name)}\n\n{executed}"
+            refusal_text = f"{reuse_refusal_text(kind, name)}\n\n{executed}"
+            return PreRenderedToolResult(refusal_text, status=self._tool_message_status(refusal_text))
         if kind in {REUSE_PLAN_NO_STASH, REUSE_PLAN_CONTRACT_ABSENT}:
             self._record_tool_execution_path(runtime_context, EXECUTION_PATH_ILLEGAL_REUSE)
             staged_ids = runtime_context.get('impulse_staged_call_ids')
@@ -5441,7 +5443,8 @@ class ReActToolLoop:
                     ),
                     runtime_context=runtime_context,
                 )
-            return reuse_refusal_text(kind, name)
+            refusal_text = reuse_refusal_text(kind, name)
+            return PreRenderedToolResult(refusal_text, status=self._tool_message_status(refusal_text))
         if kind != REUSE_PLAN_EXECUTE:
             return None
         self._record_tool_execution_path(runtime_context, EXECUTION_PATH_REUSED)
@@ -5627,7 +5630,12 @@ class ReActToolLoop:
         批量执行不能拿渲染后的文本反推成败：超出内联额度的失败结果会被换成
         `Tool call failed: …` 信封（`g3ku/content/navigation.py` 的 opening），它既不以
         "Error" 开头也不是 JSON，文本判据会把它读成成功。
+
+        `PreRenderedToolResult` 已经是逐份限界后的最终文本（复用聚合），原样透传：
+        再按单条结果判一次外置闸门会把整批收成一个信封。
         """
+        if isinstance(result, PreRenderedToolResult):
+            return str(result), result.status
         rendered = result if isinstance(result, str) else self._render_tool_result(result)
         metadata = dict(delivery_metadata or {})
         metadata.setdefault(

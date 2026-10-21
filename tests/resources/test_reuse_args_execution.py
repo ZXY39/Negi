@@ -76,6 +76,16 @@ class _BatchTool(Tool):
         return json.dumps({"ok": True, "value": value}, ensure_ascii=False)
 
 
+class _SizedBatchTool(_BatchTool):
+    """结果大小由 value 控制：big 触发单份外置，mid 让聚合体越过 6000。"""
+
+    async def execute(self, value: str = "", **kwargs) -> str:
+        _ = kwargs
+        self.seen.append(str(value))
+        size = {"big": 7000, "mid1": 3000, "mid2": 3000}.get(str(value), 5)
+        return json.dumps({"ok": True, "value": "x" * size, "tag": str(value)}, ensure_ascii=False)
+
+
 def _service(tmp_path: Path) -> MainRuntimeService:
     service = MainRuntimeService(
         chat_backend=SimpleNamespace(),
@@ -165,6 +175,7 @@ async def test_reuse_executes_every_staged_set_in_order(tmp_path: Path) -> None:
     payload = json.loads(content)
     assert payload["ok"] is True
     assert payload["executed"] == 3
+    assert payload["failed"] == 0
     assert [item["index"] for item in payload["items"]] == [0, 1, 2]
     assert [item["result"] for item in payload["items"]] == [
         json.dumps({"ok": True, "value": "a"}, ensure_ascii=False),
@@ -191,10 +202,50 @@ async def test_one_failing_item_does_not_fail_the_batch(tmp_path: Path) -> None:
 
     assert payload["ok"] is True
     assert payload["executed"] == 3
+    assert payload["failed"] == 1
     assert [item["ok"] for item in payload["items"]] == [True, False, True]
     assert "disk full" in str(payload["items"][1]["error"])
     assert "result" not in payload["items"][1]
     assert tool.seen == ["a", "boom", "c"]
+
+
+@pytest.mark.asyncio
+async def test_reuse_delivery_keeps_aggregate_whole(tmp_path: Path) -> None:
+    """每份结果各自过外置闸门；聚合体本身整包透传，不变成第二个信封。"""
+    service = _service(tmp_path)
+    loop = ReActToolLoop(
+        chat_backend=SimpleNamespace(),
+        log_service=SimpleNamespace(_content_store=service.content_store),
+        max_iterations=2,
+    )
+    loop._tool_impulse_service = service
+    tool = _SizedBatchTool()
+    runtime_context = _context(
+        carrier=_carrier(hop=4, staged=[{"value": "big"}, {"value": "mid1"}, {"value": "mid2"}]),
+        contract_present=True,
+    )
+
+    raw = await _run(loop, tool, {"reuse_args": True}, runtime_context)
+    delivered = loop._render_tool_message_content(
+        raw,
+        runtime_context=runtime_context,
+        tool_name=TOOL_ID,
+        delivery_metadata=loop._tool_result_delivery_metadata(
+            tools={TOOL_ID: tool},
+            tool_name=TOOL_ID,
+            arguments={"reuse_args": True},
+        ),
+    )
+
+    assert len(str(delivered)) > 6000
+    assert str(delivered) == str(raw)
+    payload = json.loads(str(delivered))
+    assert payload["executed"] == 3
+    assert payload["failed"] == 0
+    # 大份在单次闸门处分、成为自己的信封；两份中份内联进 items。
+    assert "result externalized" in payload["items"][0]["result"]
+    assert "externalized" not in payload["items"][1]["result"]
+    assert "externalized" not in payload["items"][2]["result"]
 
 
 @pytest.mark.asyncio
@@ -427,10 +478,10 @@ async def test_frontdoor_reuse_aggregates_through_the_same_planner() -> None:
     }
     seen: list[str] = []
 
-    async def _execute_one(arguments: dict) -> str:
+    async def _execute_one(arguments: dict) -> tuple[str, str]:
         value = str((arguments or {}).get("value"))
         seen.append(value)
-        return json.dumps({"ok": True, "value": value}, ensure_ascii=False)
+        return json.dumps({"ok": True, "value": value}, ensure_ascii=False), "success"
 
     ops = CeoFrontDoorRuntimeOps.__new__(CeoFrontDoorRuntimeOps)
     content = await ops._frontdoor_reuse_args_execution(
@@ -444,8 +495,44 @@ async def test_frontdoor_reuse_aggregates_through_the_same_planner() -> None:
     payload = json.loads(str(content or "{}"))
     assert payload["ok"] is True
     assert payload["executed"] == 2
+    assert payload["failed"] == 0
     assert seen == ["a", "b"]
     assert [item["ok"] for item in payload["items"]] == [True, True]
+
+
+@pytest.mark.asyncio
+async def test_frontdoor_reuse_item_status_comes_from_execution() -> None:
+    """外置后的失败信封不以 Error 开头；逐项 ok 必须取执行侧状态。"""
+    session_scope = tool_arg_stash.session_scope_key("web:shared", TOOL_ID)
+    carrier = _carrier(hop=3, staged=[{"value": "big"}], scope_key=session_scope)
+    session = SimpleNamespace(session_key="web:shared", _frontdoor_tool_arg_stash=carrier)
+    runtime_context = {
+        "session_key": "web:shared",
+        "runtime_session": session,
+        "tool_arg_stash_carrier": carrier,
+    }
+
+    async def _execute_one(arguments: dict) -> tuple[str, str]:
+        _ = arguments
+        return (
+            "Tool call failed: tool:filesystem_write error output externalized "
+            "(1 lines, 7000 chars).",
+            "error",
+        )
+
+    ops = CeoFrontDoorRuntimeOps.__new__(CeoFrontDoorRuntimeOps)
+    content = await ops._frontdoor_reuse_args_execution(
+        tool_name=TOOL_ID,
+        arguments={"reuse_args": True},
+        state={"messages": [_presence_message()]},
+        runtime_context=runtime_context,
+        execute_one=_execute_one,
+    )
+
+    payload = json.loads(str(content or "{}"))
+    assert payload["items"][0]["ok"] is False
+    assert "error" in payload["items"][0]
+    assert payload["failed"] == 1
 
 
 def test_oversized_failure_keeps_its_failed_status(tmp_path: Path) -> None:

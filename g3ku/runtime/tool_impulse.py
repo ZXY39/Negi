@@ -212,22 +212,44 @@ def reuse_refusal_text(kind: str, tool_name: str) -> str:
     return template.format(tool=str(tool_name or "").strip())
 
 
-def aggregate_reuse_results(*, tool_name: str, items: list[dict[str, Any]]) -> str:
+class PreRenderedToolResult(str):
+    """模型面文本已经逐份渲染并过完外置闸门的工具结果。
+
+    交付层对它只做透传：复用批的聚合体必须整包进入上下文，不能再按单条结果判一次
+    外置闸门。
+    """
+
+    status: str
+
+    def __new__(cls, text: str, *, status: str = "success") -> "PreRenderedToolResult":
+        instance = super().__new__(cls, text)
+        instance.status = str(status or "success")
+        return instance
+
+
+def aggregate_reuse_results(*, tool_name: str, items: list[dict[str, Any]]) -> PreRenderedToolResult:
     """N 份结果聚成**一个** tool_result（一个 call id 恰好一个结果块）。
 
     顶层 `ok` 只回答"这批跑了"，逐项成败在内层：把任何一份的失败抬到顶层，模型就会以为
-    整批没执行，于是重发 reuse_args 再跑一遍已成功的那些。
+    整批没执行，于是重发 reuse_args 再跑一遍已成功的那些。`failed` 是失败份数，让模型
+    不必逐项扫读也能看到失败。每份 item 已各自限界，聚合体以 `PreRenderedToolResult`
+    返回，交付层整包透传、不再外置。
     """
     normalized = [dict(item) for item in list(items or []) if isinstance(item, dict)]
-    return json.dumps(
-        {
-            "ok": True,
-            "tool": str(tool_name or "").strip(),
-            "executed": len(normalized),
-            "items": normalized,
-        },
-        ensure_ascii=False,
-        sort_keys=True,
+    failed = sum(1 for item in normalized if item.get("ok") is False)
+    return PreRenderedToolResult(
+        json.dumps(
+            {
+                "ok": True,
+                "tool": str(tool_name or "").strip(),
+                "executed": len(normalized),
+                "failed": failed,
+                "items": normalized,
+            },
+            ensure_ascii=False,
+            sort_keys=True,
+        ),
+        status="success",
     )
 
 
@@ -237,6 +259,7 @@ __all__ = [
     "IMPULSE_REJECT",
     "IMPULSE_STAGED",
     "LOOP_INTERNAL_RUNTIME_KEYS",
+    "PreRenderedToolResult",
     "REUSE_CONTRACT_ABSENT_NOTE",
     "REUSE_EXPLICIT_ARGS_NOTE",
     "REUSE_NO_STASH_NOTE",

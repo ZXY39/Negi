@@ -7636,13 +7636,14 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
         arguments: dict[str, Any],
         state: CeoGraphState | dict[str, Any] | None,
         runtime_context: dict[str, Any],
-        execute_one: Callable[[dict[str, Any]], Awaitable[str]],
+        execute_one: Callable[[dict[str, Any]], Awaitable[tuple[str, str]]],
     ) -> str | None:
         """前门道的 `reuse_args=true`：把当轮全部暂存入参跑完，聚合成一个结果（D7）。
 
         与节点道同一套判定（`plan_reuse_execution`）、同一套回执，差别只在作用域键是会话
-        级、以及执行走本车道已有的单次调用（每份结果先各自渲染与外置，再聚合）。返回
-        None 表示这不是复用调用，调用方按普通路径走。
+        级、以及执行走本车道已有的单次调用（每份结果先各自渲染与外置，再聚合）。逐项
+        `ok` 取执行侧状态：外置后的失败信封不以 `Error` 开头，文本判据认不出来。
+        返回 None 表示这不是复用调用，调用方按普通路径走。
         """
         reuse_requested, explicit_arguments = split_reuse_arguments(arguments)
         if not reuse_requested:
@@ -7680,7 +7681,7 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
         )
         kind = str(plan.get('kind') or '').strip()
         if kind == REUSE_PLAN_EXPLICIT_ARGS:
-            executed_text = await execute_one(dict(plan.get('arguments') or {}))
+            executed_text, _executed_status = await execute_one(dict(plan.get('arguments') or {}))
             self._persist_frontdoor_stash_container(
                 container=tool_arg_stash.consume_entries(
                     container,
@@ -7708,11 +7709,12 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
         items: list[dict[str, Any]] = []
         for index, entry in enumerate(entries):
             entry_arguments = dict(entry.get(tool_arg_stash.ARGS_FIELD) or {})
-            text = str(await execute_one(entry_arguments) or '')
+            text, entry_status = await execute_one(entry_arguments)
+            text = str(text or '')
             item: dict[str, Any] = {
                 'index': index,
                 'args_digest': str(entry.get(tool_arg_stash.DIGEST_FIELD) or tool_arg_stash.args_digest(entry_arguments)),
-                'ok': self._tool_status(text) == 'success',
+                'ok': str(entry_status or 'success') == 'success',
             }
             item['error' if item['ok'] is False else 'result'] = text
             items.append(item)
@@ -10007,12 +10009,12 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
                     declared_names=(runtime_context or {}).get("declared_tool_names") or [],
                 )
                 return await _error_result(payload, f"tool not available: {tool_name}" + (f"\n{hint}" if hint else ""))
-            async def _reuse_execute_one(call_arguments: dict[str, Any]) -> str:
+            async def _reuse_execute_one(call_arguments: dict[str, Any]) -> tuple[str, str]:
                 async with semaphore:
                     (
                         _raw_result,
                         reuse_text,
-                        _status,
+                        status,
                         _started_at,
                         _finished_at,
                         _elapsed,
