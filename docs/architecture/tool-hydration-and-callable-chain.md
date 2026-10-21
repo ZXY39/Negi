@@ -140,6 +140,7 @@
 frontdoor 边界：
 
 - frontdoor 的 callable tool 集合不只来自 fixed builtin，还包含当次请求视图里契约在场的那些名字；`candidate_tool_names` 是"已授权 − callable"。一个工具同时出现在 candidate 列表和在场名单里，说明同一跳算了两次判据。
+- 在场读数按**每跳装配后的请求视图**重算，写点在 `call_model`：`prepare_turn` 每回合只跑一次，本轮 `load_tool_context` 的工具行只在后续跳进入请求。读数随完成态快照落进 `.g3ku/web-ceo-continuity/<session>.json` 的 `frontdoor_selection_debug`（白名单装配），CEO-only 回合没有 task/node 帧，这份侧车是它唯一的落盘点；`contract_present_tool_names` 是装配前交给 builder 的输入，与读数各算各的，两者不一致不表示判据分裂。
 - 排查"`load_tool_context` 之后仍调不动"：先看当次请求视图里那块契约的**抬头**是否真的在（`tool_contract_presence` 读数，落在 `frontdoor_selection_debug.tool_contract_presence` 与 runtime frame 的 `model_visible_tool_selection_trace.tool_contract_presence`），再对照 `tool_names` / `candidate_tool_names`；稳定 bootstrap 文本与当前 snapshot 冲突时以 snapshot 为准。模型反复对同一 callable / fixed-builtin 工具再次 load 时，先检查消息历史里是否还保留同一 resolved `tool_id` 且 fingerprint 未变化的未压缩结果——那是预期中的 duplicate direct-load 软拦截，不是 registry 丢失。
 - 线上 frontdoor 表现与测试 helper 不一致时，先确认 runner 是否真的走自研步骤循环；生产只有这一条执行路径。
 

@@ -814,7 +814,7 @@ Web-specific artifact locations kept here:
 
 - Every CEO/frontdoor `call_model` round writes the full provider-facing request to `.g3ku/web-ceo-requests/<session>/...json`, including internal lanes such as `token_compression`.
 - Inflight / paused CEO snapshots expose only the latest `actual_request_path`, hash/count fields, and a short `actual_request_history`.
-- Reopened completed sessions restore baseline state from a compact sidecar at `.g3ku/web-ceo-continuity/<session>.json`.
+- Reopened completed sessions restore baseline state from a compact sidecar at `.g3ku/web-ceo-continuity/<session>.json`. The sidecar also carries `frontdoor_selection_debug`, the only durable landing for the per-hop `tool_contract_presence` reading and `staged_swept_tool_ids` on CEO-only turns (those produce no task/node frames; see `tool-hydration-and-callable-chain.md`).
 
 ## Verification Pointers
 
