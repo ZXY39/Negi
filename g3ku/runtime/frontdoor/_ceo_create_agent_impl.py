@@ -563,6 +563,7 @@ class CreateAgentCeoFrontDoorRunner(CeoFrontDoorRuntimeOps):
             request_messages=request_messages,
             model_refs=model_refs,
             tool_schemas=tool_schemas,
+            compression_source="manual_context_compression",
         )
         diagnostics = dict(result.diagnostics or {})
         post_tokens = int(result.final_request_tokens or 0)

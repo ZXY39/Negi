@@ -2378,6 +2378,7 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
         request_messages: list[dict[str, Any]],
         model_refs: list[str],
         tool_schemas: list[dict[str, Any]],
+        compression_source: str = "token_compression",
     ) -> FrontdoorTokenPreflightResult:
         body_messages, contract_messages = self._split_request_body_and_tool_contract_messages(request_messages)
         normalized_body = [dict(item) for item in body_messages if isinstance(item, dict)]
@@ -2547,7 +2548,7 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
             compression_state = {
                 "status": "running",
                 "text": "上下文压缩中（分块）" if chunked_mode else "上下文压缩中",
-                "source": "token_compression",
+                "source": compression_source,
                 "needs_recheck": False,
             }
             await self._emit_frontdoor_runtime_snapshot(
@@ -2897,7 +2898,7 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
                     "compression_state": {
                         "status": "running",
                         "text": f"{progress_text}（重试 {empty_response_retry_count}）",
-                        "source": "token_compression",
+                        "source": compression_source,
                         "needs_recheck": False,
                     },
                 },
@@ -2973,7 +2974,7 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
                         "compression_state": {
                             "status": "running",
                             "text": progress,
-                            "source": "token_compression",
+                            "source": compression_source,
                             "needs_recheck": False,
                         },
                     },
@@ -3042,7 +3043,7 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
                     "compression_state": {
                         "status": "running",
                         "text": "上下文压缩中（归并分块摘要）",
-                        "source": "token_compression",
+                        "source": compression_source,
                         "needs_recheck": False,
                     },
                 },

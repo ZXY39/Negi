@@ -180,6 +180,7 @@ def _patch_compression_runner(monkeypatch, runner, *, applied: bool, context_win
 
     async def _fake_compress(**kwargs):
         calls["compression_request_messages"] = list(kwargs["request_messages"])
+        calls["compression_source"] = kwargs.get("compression_source")
         return FrontdoorTokenPreflightResult(
             request_messages=[{"role": "assistant", "content": "[TOKEN_COMPACT_V2]\n摘要"}],
             final_request_tokens=9_000,
@@ -237,6 +238,9 @@ def test_compress_session_context_rewrites_durable_baseline(monkeypatch) -> None
     # 摘要结果写回基线，并且工件带上手写压缩的泳道标记。
     assert calls["persisted_messages"] == [{"role": "assistant", "content": "[TOKEN_COMPACT_V2]\n摘要"}]
     assert calls["persisted_lane"] == "manual_context_compression"
+    # 会话级 compression.source 必须保持手动泳道：摘要器内部会发 running 状态，
+    # 若写成 token_compression，刷新后的前端会拒绝认领手动任务并丢掉轮询。
+    assert calls["compression_source"] == "manual_context_compression"
     # shrink 原因必须随工件一起落，工件自己就说得清这次缩短是谁做的。
     assert calls["persisted_shrink_reason"] == "token_compression"
     # 收口与证据引用计数必须随工件落盘：手动车道没有 provider 回执，这条工件是唯一能
