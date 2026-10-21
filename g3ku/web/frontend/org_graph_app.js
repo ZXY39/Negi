@@ -3609,18 +3609,6 @@ function normalizeCeoModelRetryStatus(value = null) {
     return next;
 }
 
-function ceoAssistantTurnAlreadyPersisted(turnId = "", { messages = null, sessionId = "" } = {}) {
-    const normalizedTurnId = normalizeCeoTurnId(turnId);
-    if (!normalizedTurnId) return false;
-    const sourceMessages = Array.isArray(messages)
-        ? messages
-        : (getCeoSessionSnapshotCache(sessionId || activeSessionId())?.messages || []);
-    return trimCeoSessionSnapshotMessages(sourceMessages).some((item) => (
-        String(item?.role || "").trim().toLowerCase() === "assistant"
-        && normalizeCeoTurnId(item?.turn_id || "") === normalizedTurnId
-    ));
-}
-
 function hasActiveCeoComposerUsageEstimate(sessionId = activeSessionId()) {
     const key = String(sessionId || "").trim();
     if (!key) return false;
@@ -6512,21 +6500,6 @@ function syncCeoFeedTurnActiveClass() {
     U.ceoScrollToLatestBtn?.classList?.toggle("is-breathing", !!S.ceoTurnActive);
 }
 
-function findCeoSnapshotMessageByTurnId(sessionId, turnId) {
-    const key = String(sessionId || "").trim();
-    const target = String(turnId || "").trim();
-    if (!key || !target) return null;
-    const entry = getCeoSessionSnapshotCache(key);
-    const messages = Array.isArray(entry?.messages) ? entry.messages : [];
-    for (let index = messages.length - 1; index >= 0; index -= 1) {
-        const item = messages[index];
-        if (!item || typeof item !== "object") continue;
-        if (String(item?.role || "").trim().toLowerCase() !== "user") continue;
-        if (String(item?.turn_id || "").trim() === target) return item;
-    }
-    return null;
-}
-
 function applyCeoEditForkGates(payload = {}, sessionId = "") {
     // 回合收尾后服务端补发的权威门槛：把它落到缓存里对应的行上，再走
     // renderCeoSnapshot 的签名重建，编辑/Fork 按钮就不必等手动刷新才出现。
@@ -7161,12 +7134,6 @@ function addMsg(text, role, { markdown = false, attachments = [], scrollMode = "
     }, { scrollMode });
 }
 
-function ceoMessageTimestampMs(value = "") {
-    const text = String(value || "").trim();
-    if (!text) return NaN;
-    return Date.parse(text);
-}
-
 function placeCeoUserBubbleByTimestamp(el, timestamp = "") {
     // inflight/preserved 回合携带的 user_messages 是"当前批次"而不是"刚刚发送"：批次里
     // 可能混着更早排队的消息，一律 append 会让旧提问冒到最新回复下面，读起来像用户重发。
@@ -7433,22 +7400,6 @@ function renderCeoSilentTurn(turn, { text = "", timestamp = "" } = {}) {
 // 为什么需要它：xhigh 档一跳能想 84 秒而界面只有一个转圈（实测 3,037 output 中 2,591
 // token 是不可见思考）。这一行折叠时只占一行：耗时 + 思考 token + 最新一行；展开才给
 // 固定高度的滚动窗。全文只活在内存里，回合结束即弃，所以历史行不再带展开能力。
-function normalizeCeoSnapshotReasoning(raw = null) {
-    // 进行中快照里的那份有界读数（重连时恢复这一行用）；全文不在其中，也不该在。
-    if (!raw || typeof raw !== "object") return null;
-    const seconds = Number(raw.seconds || 0);
-    const chars = Number(raw.chars || 0);
-    const tailLine = String(raw.tail_line || "");
-    if (!seconds && !chars && !tailLine.trim()) return null;
-    return {
-        attempt: Number(raw.attempt || 0),
-        seconds,
-        chars,
-        est_tokens: Number(raw.est_tokens || 0),
-        tail_line: tailLine,
-    };
-}
-
 function ensureCeoThinkingLineEl(turn) {
     if (turn?.thinkingLineEl?.isConnected) return turn.thinkingLineEl;
     if (!turn?.el) return null;
@@ -8507,90 +8458,6 @@ function restoreCeoFeedScroll(viewState = null) {
     });
 }
 
-function buildCeoMessageKeyList(messages = []) {
-    // 与 renderCeoSnapshot 的消息打 key 规则完全一致:m:{turn_id|-}:{role}:{出现次序}。
-    const counters = {};
-    return (Array.isArray(messages) ? messages : []).map((item) => {
-        if (!item || typeof item !== "object") return "";
-        const role = String(item.role || "").trim().toLowerCase();
-        const base = String(item.turn_id || "-").trim() || "-";
-        const counterKey = `${base}:${role}`;
-        const occ = Number(counters[counterKey] || 0);
-        counters[counterKey] = occ + 1;
-        return `m:${base}:${role}:${occ}`;
-    });
-}
-
-function buildCeoRenderSignature(messages = [], inflightTurn = null, preservedTurn = null) {
-    // 快照/重建的内容签名:相同签名 = 同一渲染输入,重建可以安全跳过。
-    // 签名覆盖完整渲染面(messages 内容 + live turn 关键字段),漏字段会导致陈旧渲染。
-    const projectMessage = (item) => {
-        if (!item || typeof item !== "object") return null;
-        return [
-            String(item.role || "").trim().toLowerCase(),
-            String(item.turn_id || "").trim(),
-            String(item.status || "").trim().toLowerCase(),
-            item.canonical_context ? 1 : 0,
-            item.canonical_context_delta ? 1 : 0,
-            String(item.content || ""),
-            // usage/timestamp 参与签名:缓存先行渲染(可能缺元数据)后到达的
-            // 服务端权威快照必须触发重建,否则元信息永远停留在缺失状态。
-            item.usage && typeof item.usage === "object" ? JSON.stringify(item.usage) : "",
-            String(item.timestamp || ""),
-            // 编辑/Fork 按钮标志参与签名:flag 迟到(缓存渲染无 flag、权威快照
-            // 有 flag,或任务派发后 flag 收回)必须触发重建。
-            item.can_edit_fork === true ? 1 : 0,
-            item.can_fork_reply === true ? 1 : 0,
-            item.task_dispatched === true ? 1 : 0,
-        ];
-    };
-    const projectTrace = (context) => {
-        // 阶段轨道参与签名:live 回合只渲染 canonical_context_delta,而该增量在
-        // assistant_text/usage 未变时也会长出新的阶段与工具轮。开关失效就会让
-        // 切回会话时的缓存先行渲染占住签名,把携带新阶段的权威快照整份跳过。
-        // 只投影会改像素的骨架字段(阶段/状态/工具名与状态/输出长度),不搬输出正文。
-        const stages = Array.isArray(context?.stages) ? context.stages : [];
-        if (!stages.length) return null;
-        return stages.map((stage) => [
-            String(stage?.stage_id || "").trim() || String(stage?.stage_index ?? ""),
-            String(stage?.status || "").trim().toLowerCase(),
-            (Array.isArray(stage?.rounds) ? stage.rounds : []).map((round) => (
-                (Array.isArray(round?.tools) ? round.tools : []).map((step) => [
-                    String(step?.tool_name || "").trim(),
-                    String(step?.status || "").trim().toLowerCase(),
-                    String(step?.output_text || "").length,
-                ])
-            )),
-        ]);
-    };
-    const projectTurn = (snapshot) => {
-        if (!snapshot || typeof snapshot !== "object") return null;
-        const retryStatus = snapshot.model_retry_status && typeof snapshot.model_retry_status === "object"
-            ? snapshot.model_retry_status
-            : null;
-        return [
-            String(snapshot.source || "").trim().toLowerCase(),
-            String(snapshot.turn_id || "").trim(),
-            String(snapshot.status || "").trim().toLowerCase(),
-            String(snapshot.assistant_text || "").slice(0, 20000),
-            retryStatus ? Number(retryStatus.retry_count || 0) : -1,
-            retryStatus ? String(retryStatus.state || "") : "",
-            snapshot.usage && typeof snapshot.usage === "object" ? JSON.stringify(snapshot.usage) : "",
-            projectTrace(snapshot.canonical_context_delta || snapshot.canonical_context || null),
-        ];
-    };
-    try {
-        return JSON.stringify({
-            messages: (Array.isArray(messages) ? messages : []).map(projectMessage),
-            inflight: projectTurn(inflightTurn),
-            preserved: projectTurn(preservedTurn),
-        });
-    } catch (error) {
-        void error;
-        return "";
-    }
-}
-
 function ceoFeedMatchesIncrementalFinalize(messageKeys = [], turn = null) {
     // 增量 finalize 的前置契约:DOM 与记录的消息 key 完全一致,且最后一个
     // 子元素就是待收尾的回合元素。任何分歧(promote 过 follow-up、手动发送、
@@ -8981,11 +8848,6 @@ function createPendingCeoTurn(source = "user", { scrollMode = "preserve" } = {})
     }, { scrollMode });
 }
 
-function normalizeCeoTurnSource(source = "") {
-    const normalized = String(source || "").trim().toLowerCase();
-    return normalized || "user";
-}
-
 function isCeoApprovalInterruptValue(value = null) {
     const kind = String(value?.kind || "").trim();
     return kind === "frontdoor_tool_approval" || kind === "frontdoor_tool_approval_batch";
@@ -9022,10 +8884,6 @@ function ceoTurnSourceMatches(expectedSource = "", actualSource = "") {
     const sameVisibleUserLane = (expected === "user" || expected === "approval")
         && (actual === "user" || actual === "approval");
     return sameVisibleUserLane;
-}
-
-function normalizeCeoTurnId(turnId = "") {
-    return String(turnId || "").trim();
 }
 
 function findActiveCeoTurnIndex({ source = null, turnId = "" } = {}) {
@@ -9202,16 +9060,6 @@ function formatCeoTokenCount(value) {
     }
     const m = n / 1000000;
     return `${m >= 100 ? Math.round(m) : m.toFixed(1)}M`;
-}
-
-function normalizeCeoTurnUsage(usage = null) {
-    if (!usage || typeof usage !== "object") return null;
-    const input = Number(usage?.input_tokens ?? usage?.inputTokens ?? 0) || 0;
-    const output = Number(usage?.output_tokens ?? usage?.outputTokens ?? 0) || 0;
-    const cache = Number(usage?.cache_hit_tokens ?? usage?.cacheHitTokens ?? 0) || 0;
-    const calls = Number(usage?.call_count ?? usage?.callCount ?? 0) || 0;
-    if (!input && !output && !cache) return null;
-    return { input_tokens: input, output_tokens: output, cache_hit_tokens: cache, call_count: calls };
 }
 
 function setCeoTurnUsage(turn, usage = null, { completedAt = "" } = {}) {
