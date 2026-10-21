@@ -1389,6 +1389,12 @@ def _serialize_tool_event(event: AgentEvent) -> dict[str, Any] | None:
         'is_update': is_update,
         'kind': str(payload.get('kind') or '').strip(),
         'source': source,
+        # 冲动投递那一跳没有执行工具：前端据此弹"已加载工具"并跳过工具行。
+        **(
+            {'contract_delivery': str(data.get('contract_delivery') or '').strip()}
+            if str(data.get('contract_delivery') or '').strip()
+            else {}
+        ),
     }
 
 

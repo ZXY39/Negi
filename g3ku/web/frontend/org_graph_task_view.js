@@ -1293,6 +1293,7 @@ function normalizeSummaryTraceToolCall(step, index = 0) {
         attempted_tools: Array.isArray(step?.attempted_tools) ? step.attempted_tools.map((item) => String(item || "")) : [],
         evidence: Array.isArray(step?.evidence) ? step.evidence.filter((item) => item && typeof item === "object") : [],
         lost_result_summary: String(step?.lost_result_summary || ""),
+        contract_delivery: String(step?.contract_delivery || ""),
     };
 }
 
@@ -1430,6 +1431,7 @@ function buildNodeExecutionTrace(node, detail, liveFrame = null) {
             attempted_tools: Array.isArray(step?.attempted_tools) ? step.attempted_tools.map((item) => String(item || "")) : [],
             evidence: Array.isArray(step?.evidence) ? step.evidence.filter((item) => item && typeof item === "object") : [],
             lost_result_summary: String(step?.lost_result_summary || ""),
+            contract_delivery: String(step?.contract_delivery || ""),
         })),
         stages,
         live_tool_calls: normalizeLiveToolCalls(liveFrame),
@@ -1496,6 +1498,7 @@ function normalizeExecutionStageTrace(stage, index = 0) {
                 attempted_tools: Array.isArray(step?.attempted_tools) ? step.attempted_tools.map((item) => String(item || "")) : [],
                 evidence: Array.isArray(step?.evidence) ? step.evidence.filter((item) => item && typeof item === "object") : [],
                 lost_result_summary: String(step?.lost_result_summary || ""),
+                contract_delivery: String(step?.contract_delivery || ""),
             })),
         })).filter((round) => Array.isArray(round?.tools) && round.tools.length),
     };
@@ -1623,14 +1626,17 @@ function contextLoadBodyFromStep(step) {
 
 // 上下文加载器按「加载 skill / 加载 tool + 风险度配色」呈现；失败轮保留原始工具名与参数车道，
 // 否则错误正文会被当成空正文。哪个名字算加载器、风险度怎么取，都复用会话提醒那一份判定。
+// 冲动投递（未水合工具被直接调用）那一行的 tool_name 是目标工具本身，契约由它交回，
+// 所以也按同一张「加载 tool」卡片画，目标名从 tool_name 直接取。
 function contextLoadDisplayFor(step) {
     if (typeof ceoContextLoaderKind !== "function") return null;
     const toolName = String(step?.tool_name || "").trim();
-    const kind = ceoContextLoaderKind(toolName);
+    const contractDelivery = String(step?.contract_delivery || "").trim();
+    const kind = contractDelivery ? "tool" : ceoContextLoaderKind(toolName);
     if (!kind) return null;
     if (CONTEXT_LOAD_HIDDEN_STATUSES.has(String(step?.status || "").trim().toLowerCase())) return null;
-    let targetId = "";
-    if (typeof extractCeoContextLoadTarget === "function") {
+    let targetId = contractDelivery ? toolName : "";
+    if (!targetId && typeof extractCeoContextLoadTarget === "function") {
         targetId = [step?.output_text, step?.arguments_text]
             .map((raw) => String(extractCeoContextLoadTarget(toolName, String(raw || "")) || "").trim())
             .find(Boolean) || "";

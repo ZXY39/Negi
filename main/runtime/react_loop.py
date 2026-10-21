@@ -126,6 +126,7 @@ from g3ku.runtime.tool_history import (
     truncate_group_head_tail,
 )
 from g3ku.runtime.tool_impulse import (
+    CONTRACT_DELIVERY_FIELD,
     EXECUTION_PATH_CORRECTED,
     EXECUTION_PATH_ILLEGAL_REUSE,
     EXECUTION_PATH_NORMAL,
@@ -574,6 +575,8 @@ class ReActToolLoop:
             runtime_context['impulse_staged_call_ids'] = set()
             # 每次调用实际走的道（D15 审计），按 call id 索引，随工具行一起落盘。
             runtime_context['tool_execution_paths'] = {}
+            # 只交契约、没执行的那批调用：Web 面据此把行画成"加载 tool"卡片而不是普通调用。
+            runtime_context['tool_contract_deliveries'] = {}
             stage_gate = self._execution_stage_gate(
                 task_id=task.task_id,
                 node_id=node.node_id,
@@ -4770,6 +4773,9 @@ class ReActToolLoop:
                     result_content=tool_content,
                     ephemeral=ephemeral,
                 )
+                contract_delivery = str(
+                    dict(runtime_context.get('tool_contract_deliveries') or {}).get(str(call.id or '')) or ''
+                ).strip()
                 return {
                     'index': index,
                     'raw_result': raw_result,
@@ -4787,6 +4793,8 @@ class ReActToolLoop:
                             dict(runtime_context.get('tool_execution_paths') or {}).get(str(call.id or ''))
                             or EXECUTION_PATH_NORMAL
                         ),
+                        # 只交契约、没执行（冲动投递）：Web 面把该行画成"加载 tool"卡片。
+                        **({CONTRACT_DELIVERY_FIELD: contract_delivery} if contract_delivery else {}),
                     },
                     'tool_message': {
                         'role': 'tool',
@@ -5234,9 +5242,16 @@ class ReActToolLoop:
             except Exception:
                 pass
         delivered[name] = position
-        if str(result.get('outcome') or '').strip() != IMPULSE_INVALID:
+        call_id = str(runtime_context.get('current_tool_call_id') or '').strip()
+        outcome = str(result.get('outcome') or '').strip()
+        deliveries = runtime_context.get('tool_contract_deliveries')
+        if not isinstance(deliveries, dict):
+            deliveries = {}
+            runtime_context['tool_contract_deliveries'] = deliveries
+        if call_id and outcome:
+            deliveries[call_id] = outcome
+        if outcome != IMPULSE_INVALID:
             staged_ids = runtime_context.get('impulse_staged_call_ids')
-            call_id = str(runtime_context.get('current_tool_call_id') or '').strip()
             if isinstance(staged_ids, set) and call_id:
                 staged_ids.add(call_id)
         return str(result.get('content') or '').strip() or None

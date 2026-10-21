@@ -259,3 +259,30 @@ def test_reject_outcome_falls_through_to_the_existing_refusal(tmp_path: Path) ->
         )
         is None
     )
+
+
+def test_round_tool_entry_carries_the_contract_delivery_marker(tmp_path: Path) -> None:
+    """阶段账本要带上"只交契约、没执行"这颗标记，Web 轨道才能把行画成"加载 tool"。"""
+    ops = _ops(_service(tmp_path))
+    payload = {"id": "call-1", "name": TOOL_ID, "arguments": {"path": "/a", "new_text": "x"}}
+
+    delivered = ops._frontdoor_round_tool_entry(
+        payload=payload,
+        result={
+            "tool_call_id": "call-1",
+            "tool_name": TOOL_ID,
+            "status": "success",
+            "result_text": "[TOOL_CONTRACT_V1:filesystem_edit:tcf:abc]\nbody\n[/TOOL_CONTRACT_V1]",
+            "contract_delivery": IMPULSE_STAGED,
+            "tool_message": {"started_at": "", "finished_at": "", "elapsed_seconds": None},
+        },
+        source="user",
+    )
+    assert delivered["contract_delivery"] == IMPULSE_STAGED
+
+    executed = ops._frontdoor_round_tool_entry(
+        payload=payload,
+        result={"tool_call_id": "call-1", "tool_name": TOOL_ID, "status": "success", "result_text": "ok"},
+        source="user",
+    )
+    assert "contract_delivery" not in executed

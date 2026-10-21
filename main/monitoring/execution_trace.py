@@ -6,6 +6,7 @@ from datetime import datetime, timezone
 from typing import Any
 
 from g3ku.content import parse_content_envelope
+from g3ku.runtime.tool_impulse import CONTRACT_DELIVERY_FIELD
 from main.models import NodeRecord, normalize_execution_stage_metadata
 from main.monitoring.models import TaskProjectionToolResultRecord
 
@@ -34,7 +35,13 @@ def build_execution_trace(
             tool_name = str(call.get('name') or 'tool')
             record = tool_result_map.get(tool_call_id)
             live_state = dict(live_tool_call_map.get(tool_call_id) or {})
-            payload = dict(record.payload.get('parsed_payload') or {}) if record is not None else {}
+            record_payload = dict(record.payload or {}) if record is not None else {}
+            payload = dict(record_payload.get('parsed_payload') or {})
+            contract_delivery = str(
+                record_payload.get(CONTRACT_DELIVERY_FIELD)
+                or live_state.get(CONTRACT_DELIVERY_FIELD)
+                or ''
+            ).strip()
             # 入参的家是投影行；行内 arguments 只在"这一拍刚写、还没执行回来"和迁移前的
             # 存量条目里存在，两种都由下面的兜底读到。
             arguments_text = str(record.arguments_text or '') if record is not None else ''
@@ -83,6 +90,7 @@ def build_execution_trace(
                     or str(live_state.get('finished_at') or '')
                     or ''
                 ),
+                **({CONTRACT_DELIVERY_FIELD: contract_delivery} if contract_delivery else {}),
             }
             if isinstance(payload, dict):
                 step['recovery_decision'] = str(payload.get('recovery_decision') or '').strip()

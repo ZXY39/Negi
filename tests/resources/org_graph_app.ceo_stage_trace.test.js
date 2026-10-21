@@ -629,6 +629,32 @@ test("ceo loader tool live events still show notices when serialized output_text
     assert.deepEqual(scheduled.map((item) => item.delay), [10000]);
 });
 
+test("a direct contract delivery raises the tool notice and creates no live tool row", () => {
+    const { applyCeoToolEventToTurn, U, S } = loadApp();
+    const turn = makeTurn({ text: "" });
+    S.tools = [{ tool_id: "filesystem_edit", risk_level: "high" }];
+    U.ceoContextLoadNotice = new StubHTMLElement();
+    U.ceoContextLoadNotice.hidden = true;
+
+    const rendered = applyCeoToolEventToTurn(turn, {
+        tool_name: "filesystem_edit",
+        status: "success",
+        text: "",
+        contract_delivery: "staged",
+        tool_call_id: "call-contract-delivery",
+        source: "user",
+    });
+
+    // 那一跳没有执行工具：既不建普通工具行，也不当成静默——只弹 loader 同款 notice。
+    assert.equal(rendered, null);
+    assert.equal(turn.listEl.children.length, 0);
+    assert.equal(U.ceoContextLoadNotice.hidden, false);
+    assert.equal(U.ceoContextLoadNotice.children.length, 1);
+    assert.equal(U.ceoContextLoadNotice.children[0].dataset.noticeKind, "tool");
+    assert.equal(U.ceoContextLoadNotice.children[0].children[1].textContent, "已加载工具 filesystem_edit");
+    assert.equal(U.ceoContextLoadNotice.children[0].dataset.riskLevel, "high");
+});
+
 test("ceo stage trace shows stage rail directly with per-stage collapse by default", () => {
     const { renderCeoStageTraceIntoTurn } = loadApp();
     const turn = makeTurn({ text: "" });

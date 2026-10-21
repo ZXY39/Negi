@@ -297,3 +297,26 @@ def test_non_marker_events_do_not_invent_a_marker_frame(harness):
         harness.submit(harness.relay(_tool_event(0)))
         harness.submit(asyncio.sleep(0.3))
     assert "ceo.compression.marker" not in harness.frame_types()
+
+
+def test_tool_event_serializes_contract_delivery_marker():
+    """冲动投递那一跳的实时帧要带标记；前端据此弹 notice 并跳过普通工具行。"""
+    delivered = wcz._serialize_tool_event(
+        AgentEvent(
+            type="tool_execution_end",
+            timestamp="2026-10-21T00:00:00",
+            payload={"tool_name": "filesystem_edit", "data": {"contract_delivery": "staged"}},
+        )
+    )
+    assert delivered is not None
+    assert delivered["contract_delivery"] == "staged"
+
+    plain = wcz._serialize_tool_event(
+        AgentEvent(
+            type="tool_execution_end",
+            timestamp="2026-10-21T00:00:00",
+            payload={"tool_name": "exec", "data": {}},
+        )
+    )
+    assert plain is not None
+    assert "contract_delivery" not in plain

@@ -205,7 +205,7 @@ Start here when you are new to the repository or when a change crosses subsystem
 - 用户气泡的「编辑」或模型回复元信息行里的「Fork」要刷新网页才出现、会话被暂停/审批/压缩挡住输入时找不到 Fork 入口、点了按钮提示「当前不可编辑」、或点击消息后用量/复制仍不显形 → `web-and-admin.md`「Message Edit-Resend And Session Fork Contract」+「Per-Turn Token Usage Contract」
 - 回合进行中发的补充没被回答、待发送条目上的「插话 / 编辑 / 删除」行为疑问、撤下后条目又被画回来，或条目挂着不动、点删除只回 `follow_up_not_queued` → `web-and-admin.md`「Queued Follow-Ups」
 - 回合卡在半截、下方一直转圈，刷新网页才同步到最终回复（本地与渠道会话同症状，转录里其实已有完整回复）→ `web-and-admin.md`「CEO Websocket Lane Failure Contract」
-- 节点详情页的「加载 skill / 加载 tool」chip 风险色全部同一档、或展开看不到正文 → `web-and-admin.md`「Context Loader Notices」
+- 节点详情页的「加载 skill / 加载 tool」chip 风险色全部同一档、展开看不到正文，或契约不在场时直接调用工具的那一行仍画成普通工具行（会话轨道/节点卡片） → `web-and-admin.md`「Context Loader Notices」
 - 工具面板的「参数」只有 48 字调用提示、超长入参点开也不回补 → `web-and-admin.md`「CEO Stage Trace Round Rendering Contract」（`arguments_truncated` 标记与 `tool-arguments` 按需回取车道）
 - 翻看工具输出时新输出把输出框滚动条顶回顶部 → `web-and-admin.md`「CEO Feed View State And Scroll Preservation Contract」
 - 模型正在输出最终内容时整页被定住无法滚动（上翻每一帧都被拽回底部）、或回合进行中的流式文本要等收尾才从阶段卡里搬到外面 → `web-and-admin.md`「Streamed Reply Delta Contract」+「CEO Feed View State And Scroll Preservation Contract」

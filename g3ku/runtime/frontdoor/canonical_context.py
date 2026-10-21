@@ -76,6 +76,12 @@ def _normalize_tool(tool: Any) -> dict[str, Any]:
         # 入参被投影清空过就要一路带出去：这份白名单每重建一次工具行，漏一个字段
         # 前端就少一条"还能去取全量"的线索。
         **({"arguments_truncated": True} if item.get("arguments_truncated") is True else {}),
+        # 只交契约、没执行的调用：漏掉它，Web 轨道就把它画成一次普通工具调用。
+        **(
+            {"contract_delivery": _as_str(item.get("contract_delivery"))}
+            if _as_str(item.get("contract_delivery"))
+            else {}
+        ),
     }
 
 

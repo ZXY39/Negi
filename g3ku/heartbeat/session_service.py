@@ -1246,6 +1246,11 @@ class WebSessionHeartbeatService:
             "tool_call_id": str(payload.get("tool_call_id") or data.get("tool_call_id") or ""),
             "is_error": is_error,
             "source": "heartbeat",
+            **(
+                {"contract_delivery": str(data.get("contract_delivery") or "").strip()}
+                if str(data.get("contract_delivery") or "").strip()
+                else {}
+            ),
         }
 
     def _publish_ceo(self, session_id: str, event_type: str, data: dict[str, Any] | None = None) -> None:

@@ -642,6 +642,116 @@ async def test_graph_execute_tools_free_passes_first_ordinary_tool_without_activ
 
 
 @pytest.mark.asyncio
+async def test_graph_execute_tools_marks_direct_contract_delivery(
+    monkeypatch,
+) -> None:
+    """契约不在场的直接调用：实时帧带 `contract_delivery`，阶段账本同样带，工具不执行。"""
+    session = SimpleNamespace(session_key="web:shared", _frontdoor_tool_arg_stash={})
+    delivered: list[dict[str, object]] = []
+    progress_events: list[dict[str, object]] = []
+
+    def _deliver_impulse_contract(**kwargs):
+        delivered.append(dict(kwargs))
+        tool_id = str(kwargs.get("tool_id") or "")
+        block = render_tool_contract_block(tool_id, "tcf:delivery", "contract body")
+        return {
+            "outcome": "staged",
+            "content": f'{block}\n\nTool contract for "{tool_id}" loaded - the tool is now callable.',
+            "carrier": {},
+            "staged_count": 1,
+            "executed": False,
+            "fingerprint": "tcf:delivery",
+        }
+
+    runner = create_agent_impl.CreateAgentCeoFrontDoorRunner(
+        loop=SimpleNamespace(main_task_service=SimpleNamespace(deliver_impulse_contract=_deliver_impulse_contract))
+    )
+
+    def _registered_tools_for_state(state):
+        _ = state
+        return {}
+
+    async def _on_progress(content, *, tool_hint=False, event_kind=None, event_data=None):
+        _ = content, tool_hint
+        progress_events.append({"kind": event_kind, "data": dict(event_data or {})})
+
+    monkeypatch.setattr(runner, "_registered_tools_for_state", _registered_tools_for_state)
+    monkeypatch.setattr(
+        runner,
+        "_build_tool_runtime_context",
+        lambda **kwargs: {
+            "on_progress": _on_progress,
+            "runtime_session": session,
+            "session_key": "web:shared",
+            "actor_role": "ceo",
+        },
+    )
+
+    async def _must_not_execute(**kwargs):
+        _ = kwargs
+        raise AssertionError("a contract delivery must not execute the tool")
+
+    monkeypatch.setattr(runner, "_execute_tool_call_with_raw_result", _must_not_execute)
+
+    result = await runner._graph_execute_tools(
+        {
+            "messages": [],
+            "tool_names": ["filesystem_edit"],
+            "candidate_tool_names": ["filesystem_edit"],
+            "visible_skill_ids": [],
+            "candidate_skill_ids": [],
+            "rbac_visible_tool_names": ["filesystem_edit"],
+            "rbac_visible_skill_ids": [],
+            "frontdoor_stage_state": {
+                "active_stage_id": "frontdoor-stage-1",
+                "transition_required": False,
+                "stages": [
+                    {
+                        "stage_id": "frontdoor-stage-1",
+                        "stage_index": 1,
+                        "stage_goal": "edit a file",
+                        "tool_round_budget": 10,
+                        "tool_rounds_used": 0,
+                        "status": "active",
+                        "rounds": [],
+                    }
+                ],
+            },
+            "tool_call_payloads": [
+                {"id": "call-delivery-1", "name": "filesystem_edit", "arguments": {"path": "/a"}}
+            ],
+            "used_tools": [],
+            "route_kind": "direct_reply",
+            "parallel_enabled": False,
+            "max_parallel_tool_calls": 1,
+            "synthetic_tool_calls_used": False,
+            "response_payload": {"content": "", "tool_calls": []},
+            "session_key": "web:shared",
+        },
+        runtime=SimpleNamespace(context=SimpleNamespace(session=session)),
+    )
+
+    assert len(delivered) == 1
+    tool_message = next(
+        dict(message)
+        for message in list(result["messages"])
+        if str(message.get("role") or "").strip().lower() == "tool"
+    )
+    assert "TOOL_CONTRACT_V1:filesystem_edit:tcf:delivery" in str(tool_message.get("content") or "")
+
+    rounds = result["frontdoor_stage_state"]["stages"][0]["rounds"]
+    assert rounds[0]["tools"][0]["contract_delivery"] == "staged"
+
+    delivery_events = [
+        event for event in progress_events
+        if str(event["data"].get("contract_delivery") or "").strip()
+    ]
+    assert len(delivery_events) == 1
+    assert delivery_events[0]["kind"] == "tool_result"
+    assert delivery_events[0]["data"]["contract_delivery"] == "staged"
+
+
+@pytest.mark.asyncio
 async def test_graph_execute_tools_blocks_ordinary_tool_after_free_pass_consumed(
     monkeypatch,
 ) -> None:

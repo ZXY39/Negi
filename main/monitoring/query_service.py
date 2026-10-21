@@ -6,6 +6,7 @@ from contextlib import contextmanager
 from datetime import datetime, timezone
 from typing import Any, Iterable, Iterator
 
+from g3ku.runtime.tool_impulse import CONTRACT_DELIVERY_FIELD
 from main.models import (
     ModelTokenUsageRecord,
     NodeRecord,
@@ -1285,6 +1286,7 @@ class TaskQueryService:
             output_text = str(step.get('output_text') or '').strip()
         elif not output_text and output_ref:
             output_text = 'output captured in ref'
+        contract_delivery = str(step.get(CONTRACT_DELIVERY_FIELD) or '').strip()
         return {
             'tool_call_id': str(step.get('tool_call_id') or '').strip(),
             'tool_name': str(step.get('tool_name') or '').strip() or 'tool',
@@ -1295,6 +1297,7 @@ class TaskQueryService:
             'started_at': str(step.get('started_at') or ''),
             'finished_at': str(step.get('finished_at') or ''),
             'elapsed_seconds': step.get('elapsed_seconds'),
+            **({CONTRACT_DELIVERY_FIELD: contract_delivery} if contract_delivery else {}),
             'recovery_decision': str(step.get('recovery_decision') or '').strip(),
             'related_tool_call_ids': [
                 str(item or '').strip()

@@ -199,3 +199,21 @@ def test_eviction_mark_survives_both_summary_builders() -> None:
     assert written["stages"][0]["context_evicted"] is True
     assert read_back["stages"][0]["context_evicted"] is True
     assert "context_evicted" not in untouched["stages"][0]
+
+
+def test_contract_delivery_marker_survives_both_summary_builders() -> None:
+    """只交契约的那一行必须带着标记穿过摘要与读投影：节点详情靠它画"加载 tool"卡片。
+
+    完整轨迹在场时读 `execution_trace`（那条由 `build_execution_trace` 带标记），缺席时
+    读这份摘要；两条道都要带，且未标记的行不涨体积。
+    """
+    delivered_trace = json.loads(json.dumps(_TRACE))
+    delivered_trace["stages"][0]["rounds"][0]["tools"][0]["contract_delivery"] = "staged"
+
+    written = build_execution_trace_summary(delivered_trace)
+    read_back = TaskQueryService._sanitize_execution_trace_summary(written)
+    untouched = build_execution_trace_summary(_TRACE)
+
+    assert written["stages"][0]["rounds"][0]["tools"][0]["contract_delivery"] == "staged"
+    assert read_back["stages"][0]["rounds"][0]["tools"][0]["contract_delivery"] == "staged"
+    assert "contract_delivery" not in untouched["stages"][0]["rounds"][0]["tools"][0]

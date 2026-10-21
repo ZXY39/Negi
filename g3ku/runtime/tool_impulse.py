@@ -25,6 +25,10 @@ IMPULSE_STAGED = "staged"
 IMPULSE_INVALID = "invalid"
 IMPULSE_REJECT = "reject"
 
+# 调用行上的投递标记：这一跳没有执行工具，只是把契约交回。Web 面据此把该行画成
+# "加载 tool" 卡片（会话侧另弹 notice），而不是一次普通工具调用。值取上面的 outcome。
+CONTRACT_DELIVERY_FIELD = "contract_delivery"
+
 # 循环/前门自己的跳级状态：在场索引、暂存载体、同批计数。它们只服务准入与记账，**不进**
 # 工具可见的 `__g3ku_runtime`——在场索引随契约数量增长，逐次调用都带一份既没用又压不动的
 # 字典，等于把上下文预算的账算到每个工具头上。两条车道共用这一份名单。
@@ -38,6 +42,7 @@ LOOP_INTERNAL_RUNTIME_KEYS = frozenset(
         "impulse_delivered_tools",
         "impulse_staged_call_ids",
         "impulse_batch_totals",
+        "tool_contract_deliveries",
     }
 )
 
@@ -227,6 +232,7 @@ def aggregate_reuse_results(*, tool_name: str, items: list[dict[str, Any]]) -> s
 
 
 __all__ = [
+    "CONTRACT_DELIVERY_FIELD",
     "IMPULSE_INVALID",
     "IMPULSE_REJECT",
     "IMPULSE_STAGED",

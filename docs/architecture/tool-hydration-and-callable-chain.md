@@ -17,7 +17,7 @@
 
 ### 契约不在场时发生什么
 
-- 这一跳不执行工具，改为返回：该工具的契约块 + 一句"已受理"的回执。入参校验通过时**同批暂存**该调用；回执**只报份数、不抄入参**——发起这些调用的那条 assistant 行就在同一请求视图里，抄一遍是纯重复。份数在**这批最后一条**回执里给最终值（投递是逐条发生的，第一条那一刻只看得见半批；末条本身校验失败也照报），两数不等时写成 `2 (from 3 calls)`：同批同签名会折叠成一条，校验失败的那条也不入库，两种都会让份数少于调用数——回执只给两个事实，原因由模型对着自己的行判。校验失败时不暂存，只把参数错误原样贴回。
+- 这一跳不执行工具，改为返回：该工具的契约块 + 一句"已受理"的回执。这条结果行带运行时标记 `contract_delivery`（值 `staged` / `invalid`），Web 面据此把它画成"加载 tool"而不是一次普通工具调用——会话侧弹 loader 同款 notice 且不上轨道，节点详情用 loader chip；展示合同归 `web-and-admin.md`「Context Loader Notices」。入参校验通过时**同批暂存**该调用；回执**只报份数、不抄入参**——发起这些调用的那条 assistant 行就在同一请求视图里，抄一遍是纯重复。份数在**这批最后一条**回执里给最终值（投递是逐条发生的，第一条那一刻只看得见半批；末条本身校验失败也照报），两数不等时写成 `2 (from 3 calls)`：同批同签名会折叠成一条，校验失败的那条也不入库，两种都会让份数少于调用数——回执只给两个事实，原因由模型对着自己的行判。校验失败时不暂存，只把参数错误原样贴回。
 - 同一跳同一工具只发一份完整契约块，第 2..N 份只说"见本批第一条"。按调用次数放大正文等于把同一篇东西复制进历史。
 - 这一批若一个工具都没真执行，整轮阶段预算退还（判据在 `main/runtime/react_loop.py` 的轮末退款分支，按"这轮全部调用都只交契约"判定）。预算度量的是"模型干了活"，不是"模型发了几条消息"，所以混进一个真执行过的调用就不退。
 - 裁撤或压缩把块移出上下文 ⇒ 该名字立刻不在 callable 里，同时重新回到候选。这条不通知、不报错：下一次调用它就走上面那条投递路径自愈。**能力面随上下文收缩是当前设计的正常形状**，不是抖动缺陷。
@@ -109,7 +109,7 @@
   写记忆按入队门返回的真实结局分两档（kind=`memory`、图标 `brain`）：`已入队 <request_id>` 用 risk-low、内容为空没入队用 risk-medium。入队门不做内容判定，所以 pill 上没有"被拒绝"这一档。
   pill 承诺的只是入队，成不成由记忆 worker 判定，所以文案里不许出现“已记住”；载荷读不出 `status` 时 pill 直接不出现。
   工具级失败（`status=error`）两种 kind 都不出 pill，行仍按普通工具渲染。
-- `load_tool_context` / `load_skill_context` 属于上下文加载型工具调用：写入 round 历史，但不增加当前阶段的 `tool_rounds_used`；节点与 CEO/frontdoor 记账同一规则，预算结论只看 `rounds[*].budget_counted` 与聚合后的 `tool_rounds_used`，不按 transcript 里的 loader 调用次数自行推断。CEO UI 上，成功 loader 调用在输入框上方显示短暂的 live-only notice（尽量带 `tool_id` / `skill_id`），不作为长期保留的工具步骤；loader 失败时仍优先检查原始 round/tool 数据与 runtime snapshot。
+- `load_tool_context` / `load_skill_context` 属于上下文加载型工具调用：写入 round 历史，但不增加当前阶段的 `tool_rounds_used`；节点与 CEO/frontdoor 记账同一规则，预算结论只看 `rounds[*].budget_counted` 与聚合后的 `tool_rounds_used`，不按 transcript 里的 loader 调用次数自行推断。CEO UI 上，成功 loader 调用在输入框上方显示短暂的 live-only notice（尽量带 `tool_id` / `skill_id`），不作为长期保留的工具步骤；契约不在场时的直接调用投递（结果带 `contract_delivery`）走同一画法，notice 目标是那次被加载的工具名。loader 失败时仍优先检查原始 round/tool 数据与 runtime snapshot。
 - 前门要区分两份工具集合：`tool_names` 保存阶段内可恢复的完整 callable pool；“当前轮合同暴露给模型的 callable tools”要通过前门 callable-tool helper 结合 `frontdoor_stage_state` 再算一次。不要把前者直接当作当前轮模型可见函数列表；无有效阶段时 `submit_next_stage` 的置首只影响 agent-facing 合同，provider `tools[]` 始终不同步收紧。
 - `frontdoor_stage_state`、`compression_state`、`tool_arg_stash`（暂存载体与跳序）是受保护运行时状态：工具合同刷新不能覆盖、清空或重置这些字段。
 

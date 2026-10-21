@@ -10232,6 +10232,16 @@ function isCeoContextLoaderToolName(toolName = "") {
     return !!ceoContextLoaderKind(toolName);
 }
 
+// 未水合工具被直接调用时，那一跳没有执行工具，只把契约交回。它与 loader 同一族：
+// 会话不画普通工具行、改弹 notice；节点详情画「加载 tool」卡片。标记由运行时按调用行落盘。
+function isCeoContractDeliveryStep(step = null) {
+    return !!String(step?.contract_delivery || "").trim();
+}
+
+function isCeoContextLoadStep(step = null) {
+    return isCeoContextLoaderToolName(step?.tool_name) || isCeoContractDeliveryStep(step);
+}
+
 // `silent` 是控制信号不是活动：它既不进 live 步骤也不进阶段轨道。展开气泡里看到
 // "模型调用了 silent"没有信息量（静默本身已由折叠行表达），失败时还会误导成任务出错。
 function isCeoSilentToolName(toolName = "") {
@@ -10460,20 +10470,23 @@ function ensureCeoContextLoadNoticeKeys(turn) {
     return turn.contextLoadNoticeKeys;
 }
 
-function maybeShowCeoContextLoadNotice(turn, { toolName = "", status = "", detailTexts = [] } = {}) {
+function maybeShowCeoContextLoadNotice(turn, { toolName = "", status = "", detailTexts = [], targetId: providedTargetId = "" } = {}) {
     const normalizedTool = String(toolName || "").trim().toLowerCase();
     const loaderKind = ceoContextLoaderKind(normalizedTool);
     const normalizedStatus = String(status || "").trim().toLowerCase();
     if (!loaderKind || normalizedStatus !== "success") return false;
     if (String(turn?.source || "").trim().toLowerCase() === "history") return false;
     const keys = ensureCeoContextLoadNoticeKeys(turn);
-    let targetId = "";
+    // 直接调用投递的那一行，tool_name 是被加载的工具本身；目标由 marked step 直接给出。
+    let resolvedTargetId = String(providedTargetId || "").trim();
     let payload = null;
     for (const candidate of Array.isArray(detailTexts) ? detailTexts : []) {
         payload = parseJsonObjectText(candidate) || payload;
-        targetId = extractCeoContextLoadTarget(normalizedTool, candidate);
-        if (targetId) break;
+        if (!resolvedTargetId) {
+            resolvedTargetId = extractCeoContextLoadTarget(normalizedTool, candidate);
+        }
     }
+    const targetId = resolvedTargetId;
     const memoryNotice = loaderKind === "memory" ? buildCeoMemoryNotice(payload) : null;
     // 读不出 status 就不弹：写记忆这件事宁可没提示，也不能给出一条编出来的"已提交"。
     if (loaderKind === "memory" && !memoryNotice) return false;
@@ -10503,7 +10516,8 @@ function filterCeoInteractionFlowSummary(summary = null) {
                             const toolName = String(step?.tool_name || "").trim().toLowerCase();
                             const status = String(step?.status || "").trim().toLowerCase();
                             if (isCeoSilentToolName(toolName)) return false;
-                            return !isCeoContextLoaderToolName(toolName) || status === "error";
+                            // 直接调用投递与 loader 同族：成功的加载动作不上普通工具行。
+                            return !isCeoContextLoadStep(step) || status === "error";
                         }),
                     }))
                     .filter((round) => Array.isArray(round?.tools) && round.tools.length),
@@ -10518,9 +10532,11 @@ function maybeShowCeoContextLoadNoticesFromSummary(turn, summary = null) {
     normalizedSummary.stages.forEach((stage) => {
         (Array.isArray(stage?.rounds) ? stage.rounds : []).forEach((round) => {
             (Array.isArray(round?.tools) ? round.tools : []).forEach((step) => {
+                const contractDelivery = isCeoContractDeliveryStep(step);
                 maybeShowCeoContextLoadNotice(turn, {
-                    toolName: step?.tool_name || "",
+                    toolName: contractDelivery ? "load_tool_context" : (step?.tool_name || ""),
                     status: step?.status || "",
+                    targetId: contractDelivery ? String(step?.tool_name || "") : "",
                     detailTexts: [step?.output_text || "", step?.arguments_text || ""],
                 });
             });
@@ -11083,6 +11099,23 @@ function applyCeoToolEventToTurn(turn, event = {}) {
     const toolName = String(event.tool_name || "tool").trim() || "tool";
     const rawText = String(event.text || "").trim();
     if (isCeoSilentToolName(toolName)) return null;
+    // 直接调用投递：tool_name 是被加载的工具本身，按 loader 的同一画法弹「已加载工具 X」，
+    // 并且不建普通工具行（那一跳没有执行工具）。
+    const contractDelivery = String(event.contract_delivery || "").trim();
+    if (contractDelivery && status !== "error") {
+        maybeShowCeoContextLoadNotice(turn, {
+            toolName: "load_tool_context",
+            status,
+            targetId: toolName,
+            detailTexts: [
+                rawText,
+                String(event.output_text || "").trim(),
+                String(event.output_preview_text || "").trim(),
+                String(event.arguments_text || "").trim(),
+            ],
+        });
+        return null;
+    }
     if (isCeoContextLoaderToolName(toolName) && status !== "error") {
         maybeShowCeoContextLoadNotice(turn, {
             toolName,

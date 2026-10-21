@@ -118,6 +118,7 @@ from g3ku.runtime.tool_history import (
     truncate_group_head_tail,
 )
 from g3ku.runtime.tool_impulse import (
+    CONTRACT_DELIVERY_FIELD,
     IMPULSE_REJECT,
     IMPULSE_STAGED,
     REUSE_PLAN_CONTRACT_ABSENT,
@@ -6463,6 +6464,10 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
         elapsed_seconds = result.get("elapsed_seconds", tool_message.get("elapsed_seconds"))
         if isinstance(elapsed_seconds, (int, float)):
             item["elapsed_seconds"] = float(elapsed_seconds)
+        # 只交契约、没执行的那一行：轨道据此把它画成"加载 tool"，而不是普通工具调用。
+        contract_delivery = str(result.get(CONTRACT_DELIVERY_FIELD) or "").strip()
+        if contract_delivery:
+            item[CONTRACT_DELIVERY_FIELD] = contract_delivery
         return item
 
     def _frontdoor_stage_state_after_tool_cycle(
@@ -9963,6 +9968,20 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
                     kind, impulse_content = impulse
                     if kind == "failed":
                         return await _error_result(payload, impulse_content)
+                    # 这一跳没有执行工具，只交回契约；实时帧要带上同一条标记，前端才能把
+                    # 它画成"加载 tool"并从工具行里摘出去。
+                    impulse_event_data = self._tool_result_progress_event_data(
+                        tool_name=tool_name,
+                        result_text=impulse_content,
+                        tool_call_id=str(payload.get("id") or "").strip() or None,
+                    )
+                    impulse_event_data[CONTRACT_DELIVERY_FIELD] = kind
+                    await self._emit_progress(
+                        on_progress,
+                        impulse_content,
+                        event_kind="tool_result",
+                        event_data=impulse_event_data,
+                    )
                     return {
                         "tool_call_id": str(payload.get("id") or "").strip(),
                         "tool_name": tool_name,
@@ -9970,6 +9989,7 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
                         "raw_result": impulse_content,
                         "result_text": impulse_content,
                         "free_pass_kind": free_pass_kind,
+                        CONTRACT_DELIVERY_FIELD: kind,
                         "tool_message": self._tool_result_message(
                             tool_call_id=str(payload.get("id") or ""),
                             tool_name=tool_name or "tool",

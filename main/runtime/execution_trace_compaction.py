@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from typing import Any
 
+from g3ku.runtime.tool_impulse import CONTRACT_DELIVERY_FIELD
 
 _PREVIEW_CHAR_LIMIT = 160
 _RAW_OUTPUT_FALLBACK_PREVIEW_LIMIT = 24
@@ -112,6 +113,12 @@ def compact_tool_step_for_summary(step: dict[str, Any] | None) -> dict[str, Any]
     source = str(step.get("source") or "").strip()
     if source:
         payload["source"] = source
+
+    # 展示标记不是簿记位：摘要档是节点详情在完整轨迹缺席时唯一读的那份，
+    # 漏了它"加载 tool"卡片就退回成一次普通工具调用。
+    contract_delivery = str(step.get(CONTRACT_DELIVERY_FIELD) or "").strip()
+    if contract_delivery:
+        payload[CONTRACT_DELIVERY_FIELD] = contract_delivery
 
     return payload
 

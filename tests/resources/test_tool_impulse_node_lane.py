@@ -131,6 +131,7 @@ def _context(*, presence: dict | None = None, carrier: dict | None = None, batch
         'impulse_delivered_tools': {},
         'impulse_staged_call_ids': set(),
         'impulse_batch_totals': batch_totals or {TOOL_ID: 1},
+        'tool_contract_deliveries': {},
         'current_tool_call_id': 'call-1',
         # 没开阶段：闸门今天会先把非豁免工具的调用拒掉。
         'stage_turn_granted': False,
@@ -169,6 +170,8 @@ async def test_impulsive_call_returns_contract_and_stages_without_executing(tmp_
     assert tool_arg_stash.staged_count(container, scope_key=SCOPE) == 1
     assert len(tool_arg_stash.peek_entries(container, scope_key=SCOPE, current_hop=1)) == 1
     assert context["impulse_staged_call_ids"] == {"call-1"}
+    # Web 面靠这颗按调用行落盘的标记把该行画成"加载 tool"，而不是一次普通工具调用。
+    assert context["tool_contract_deliveries"] == {"call-1": "staged"}
 
 
 async def test_tool_already_visible_in_context_executes_normally(tmp_path: Path) -> None:
@@ -228,6 +231,8 @@ async def test_invalid_arguments_stay_out_of_the_stash(tmp_path: Path) -> None:
     ) == 0
     # 校验失败占一轮预算（不免计，否则模型零成本换着错法重试）。
     assert context["impulse_staged_call_ids"] == set()
+    # 参数错了也还是"只交契约"的一行；卡片族仍按加载 tool 画。
+    assert context["tool_contract_deliveries"] == {"call-1": "invalid"}
 
 
 # ---------------------------------------------------------------------------
@@ -310,3 +315,42 @@ async def test_identical_repeated_impulse_stages_once(tmp_path: Path) -> None:
 
     container = tool_arg_stash.carrier_container(context["tool_arg_stash_carrier"])
     assert tool_arg_stash.staged_count(container, scope_key=SCOPE) == 1
+
+
+def test_execution_trace_keeps_the_delivery_marker() -> None:
+    """展示标记必须穿过投影行落盘与轨迹重建，否则节点详情画不出"加载 tool"卡片。"""
+    from main.models import NodeOutputEntry
+    from main.monitoring.execution_trace import build_execution_trace
+    from main.monitoring.models import TaskProjectionToolResultRecord
+    from main.protocol import now_iso
+
+    node = NodeRecord(
+        node_id=NODE_ID,
+        task_id=TASK_ID,
+        root_node_id=NODE_ID,
+        goal="g",
+        prompt="p",
+        status="success",
+        output=[
+            NodeOutputEntry(
+                seq=1,
+                content="",
+                tool_calls=[{"id": "call-1", "name": TOOL_ID, "arguments": {"path": "/a"}}],
+                created_at=now_iso(),
+            )
+        ],
+        created_at=now_iso(),
+        updated_at=now_iso(),
+    )
+    record = TaskProjectionToolResultRecord(
+        task_id=TASK_ID,
+        node_id=NODE_ID,
+        tool_call_id="call-1",
+        tool_name=TOOL_ID,
+        status="success",
+        payload={"parsed_payload": {}, "contract_delivery": "staged"},
+    )
+
+    trace = build_execution_trace(node, tool_results=[record], live_tool_calls=[])
+
+    assert trace["tool_steps"][0]["contract_delivery"] == "staged"
