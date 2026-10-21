@@ -608,6 +608,7 @@ async def test_frontdoor_reuse_item_status_comes_from_execution() -> None:
         state={"messages": [_presence_message()]},
         runtime_context=runtime_context,
         execute_one=_execute_one,
+        call_id="call-fd-5",
     )
 
     payload = json.loads(str(content or "{}"))

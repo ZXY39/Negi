@@ -7670,7 +7670,7 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
         state: CeoGraphState | dict[str, Any] | None,
         runtime_context: dict[str, Any],
         execute_one: Callable[[dict[str, Any]], Awaitable[tuple[str, str]]],
-        call_id: str = "",
+        call_id: str,
     ) -> str | None:
         """前门道的 `reuse_args=true`：把当轮全部暂存入参跑完，聚合成一个结果（D7）。
 
@@ -10160,6 +10160,7 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
                 state=state,
                 runtime_context=runtime_context,
                 execute_one=_reuse_execute_one,
+                call_id=str(payload.get("id") or "").strip(),
             )
             if reuse_content is not None:
                 # 复用调用与冲动投递同形：一条 call id 恰好一个结果块，宽限提醒不再叠加
