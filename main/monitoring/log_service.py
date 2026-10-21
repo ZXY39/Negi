@@ -24,11 +24,6 @@ from g3ku.content.navigation import INLINE_CHAR_LIMIT
 from g3ku.deployment.data_root import data_work_path
 from g3ku.providers.base import provider_body_output_cap, provider_body_reasoning_effort
 from g3ku.providers.fallback import MODEL_RETRY_LIVE_STATES, MODEL_RETRY_STATE_WAITING_UPSTREAM
-from g3ku.runtime.kept_contract_snapshot import (
-    complete_keep_snapshot,
-    keep_closure_fields,
-    normalize_kept_skill_contexts,
-)
 from g3ku.runtime.stage_prompt_compaction import (
     STAGE_CLOSURE_INACTIVE_NOTES,
     build_stage_archive_document,
@@ -36,7 +31,6 @@ from g3ku.runtime.stage_prompt_compaction import (
     stage_archive_owner,
     stage_record_dict,
 )
-from g3ku.runtime.tool_context_presence import normalize_kept_tool_contexts
 from main.ids import new_stage_id, new_stage_round_id
 from main.models import (
     FAILURE_CLASS_BUSINESS_UNPASSED,
@@ -84,10 +78,6 @@ from main.runtime.append_notice_context import (
     roll_append_notice_context_for_compression_stage,
 )
 from main.runtime.chat_backend import build_actual_request_diagnostics
-from main.runtime.internal_tools import (
-    keep_contracts_require_drop_error,
-    normalize_keep_contract_names,
-)
 from main.runtime.send_token_preflight import (
     build_runtime_estimated_input_truth,
     build_runtime_observed_input_truth,
@@ -137,31 +127,6 @@ def _latest_execution_stage_goal(node: NodeRecord) -> str:
     if not scored:
         return ''
     return max(scored, key=lambda item: (item[0], item[1]))[2]
-
-
-def _hydrated_ledger_state(raw_state: Any, raw_names: Any, raw_revoked: Any) -> list[str]:
-    """水合台账的唯一读口径：`state or names` 的回退必须再减一次撤销名单。
-
-    `hydrated_executor_names` 是本轮选择派生的 promoted 视图，它不知道正文还在不在场；
-    撤销只清 state 的话，这份回退就把刚撤掉的名字原样复活，选择、派发字典与节点详情读到的
-    都是"已水合且可调"（实盘 task:92ad2fe69148：同一条帧上 revoked 与 hydrated 并列）。
-    """
-    collected: list[str] = []
-    seen: set[str] = set()
-    for item in list(raw_state or raw_names or []):
-        normalized = str(item or '').strip()
-        if not normalized or normalized in seen:
-            continue
-        seen.add(normalized)
-        collected.append(normalized)
-    revoked = {
-        str(item or '').strip()
-        for item in list(raw_revoked or [])
-        if str(item or '').strip()
-    }
-    if not revoked:
-        return collected
-    return [name for name in collected if name not in revoked]
 
 
 _EXECUTION_STAGE_METADATA_KEY = 'execution_stages'
@@ -496,12 +461,8 @@ class TaskLogService:
             'skill_visibility_diagnostics': {},
             'rbac_visible_tool_names': [],
             'rbac_visible_skill_ids': [],
-            'hydrated_executor_state': [],
             'model_visible_tool_names': [],
             'provider_tool_names': [],
-            'hydrated_executor_names': [],
-            'hydration_revoked_executor_names': [],
-            'hydration_evicted_executor_names': [],
             'lightweight_tool_ids': [],
             'model_visible_tool_selection_trace': {},
             'exec_runtime_policy': {},
@@ -594,18 +555,6 @@ class TaskLogService:
             'provider_tool_names': cls._normalized_name_list(
                 snapshot.get('provider_tool_names') or []
             ),
-            'hydrated_executor_state': _hydrated_ledger_state(
-                snapshot.get('hydrated_executor_state'),
-                snapshot.get('hydrated_executor_names'),
-                snapshot.get('hydration_revoked_executor_names'),
-            ),
-            'hydrated_executor_names': cls._normalized_name_list(snapshot.get('hydrated_executor_names') or []),
-            'hydration_revoked_executor_names': cls._normalized_name_list(
-                snapshot.get('hydration_revoked_executor_names') or []
-            ),
-            'hydration_evicted_executor_names': cls._normalized_name_list(
-                snapshot.get('hydration_evicted_executor_names') or []
-            ),
             'lightweight_tool_ids': cls._normalized_name_list(snapshot.get('lightweight_tool_ids') or []),
             'provider_tool_bundle_seeded': bool(snapshot.get('provider_tool_bundle_seeded')),
             'model_visible_tool_selection_trace': dict(snapshot.get('model_visible_tool_selection_trace') or {}),
@@ -656,14 +605,6 @@ class TaskLogService:
                 ),
                 'model_visible_tool_names': list(frame.get('model_visible_tool_names') or []),
                 'provider_tool_names': list(frame.get('provider_tool_names') or []),
-                'hydrated_executor_state': _hydrated_ledger_state(
-                    frame.get('hydrated_executor_state'),
-                    frame.get('hydrated_executor_names'),
-                    frame.get('hydration_revoked_executor_names'),
-                ),
-                'hydrated_executor_names': list(frame.get('hydrated_executor_names') or []),
-                'hydration_revoked_executor_names': list(frame.get('hydration_revoked_executor_names') or []),
-                'hydration_evicted_executor_names': list(frame.get('hydration_evicted_executor_names') or []),
                 'lightweight_tool_ids': list(frame.get('lightweight_tool_ids') or []),
                 'provider_tool_bundle_seeded': bool(
                     dict(frame.get('model_visible_tool_selection_trace') or {}).get('provider_tool_bundle_seeded')
@@ -679,7 +620,6 @@ class TaskLogService:
                 snapshot['candidate_tool_names'],
                 snapshot['model_visible_tool_names'],
                 snapshot['provider_tool_names'],
-                snapshot['hydrated_executor_names'],
                 snapshot['lightweight_tool_ids'],
             ]
         ):
@@ -1065,6 +1005,9 @@ class TaskLogService:
                     ephemeral=bool(tool_message.get('ephemeral') or live_state.get('ephemeral')),
                     payload={
                         'parsed_payload': self._parse_tool_result_payload(content),
+                        # 这次调用实际走的道（D15）：normal / reused / corrected / illegal_reuse。
+                        # 由执行侧按 call 交接，不在这里用回执文本反推。
+                        'execution_path': str(live_state.get('execution_path') or 'normal'),
                     },
                 )
                 self._store.upsert_task_node_tool_result(record)
@@ -3347,22 +3290,7 @@ class TaskLogService:
         key_refs: list[dict[str, Any]] | None = None,
         final: bool = False,
         drop_completed_stage_tool_detail: bool = False,
-        keep_tools: list[str] | None = None,
-        keep_skills: list[str] | None = None,
-        kept_snapshot: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
-        normalized_keep_tools = normalize_keep_contract_names(keep_tools)
-        normalized_keep_skills = normalize_keep_contract_names(keep_skills)
-        # 名字与正文对账：模型点名的每一条要么带着正文进来、要么带着失败原因进来，
-        # 第三条路（收下名字却什么都没写）是一条模型读不到的空承诺。取不到的那几条不写
-        # 条目、工具保持撤销态，这是安全方向。
-        kept_snapshot_payload = complete_keep_snapshot(
-            kept_snapshot,
-            keep_tools=normalized_keep_tools,
-            keep_skills=normalized_keep_skills,
-        )
-        normalized_kept_tool_contexts = normalize_kept_tool_contexts(kept_snapshot_payload.get("tool_contexts"))
-        normalized_kept_skill_contexts = normalize_kept_skill_contexts(kept_snapshot_payload.get("skill_contexts"))
         with self._task_lock(task_id):
             task = self._require_task(task_id)
             node = self._store.get_node(node_id)
@@ -3382,12 +3310,6 @@ class TaskLogService:
                 raise ValueError(
                     f'tool_round_budget must not exceed {STAGE_TOOL_ROUND_BUDGET_MAX}'
                 )
-            # 与 `drop requires non-empty summary` 同一处再收一次：绕过工具层的写入者
-            # （恢复重放、内部补开阶段）也不能把 `keep_*` 落在一条不裁撤的阶段上——那是一句
-            # 空承诺，名字无处可写，模型却会按"留住了"行事。
-            keep_gate_error = keep_contracts_require_drop_error(normalized_keep_tools, normalized_keep_skills)
-            if keep_gate_error and not drop_completed_stage_tool_detail:
-                raise ValueError(keep_gate_error)
             state = self._execution_stage_state(node)
             active = self._active_execution_stage(state)
             if (
@@ -3459,13 +3381,6 @@ class TaskLogService:
                         # 绕过工具层的写入者不能造出"肉身和总结一起消失"的黑洞态。
                         'context_evicted': stage_evicts,
                     }
-                    # 保留正文只写在裁撤**真落**的那条阶段上：没裁撤就没有阶段块，正文写进
-                    # 账本也无处渲染，留下的只是一份"看着像留住了"的假证据。
-                    if stage_evicts:
-                        if normalized_kept_tool_contexts:
-                            stage_update['kept_tool_contexts'] = normalized_kept_tool_contexts
-                        if normalized_kept_skill_contexts:
-                            stage_update['kept_skill_contexts'] = normalized_kept_skill_contexts
                     current = stage.model_copy(update=stage_update)
                 stages.append(current)
             closing_index = next(
@@ -3540,9 +3455,6 @@ class TaskLogService:
                     'evicted': bool(closing_stage is not None and closing_stage.context_evicted is True),
                     'archive_ref': str(closing_stage.archive_ref or '') if closing_stage is not None else '',
                     'reason': reason,
-                    # 保留契约的落地回执（与前门同形）：留下的是名字列表，取不到的逐条点名
-                    # 原因。没有这一段，模型只能按参数倒推"我点了名就一定留住了"。
-                    **keep_closure_fields(kept_snapshot_payload),
                     # 与前门同一份落空说明：结果属动态尾部，工具 schema 是两车道共享的
                     # provider 前缀，改它会整体失效一次缓存。
                     **({} if reason == 'applied' else {'note': STAGE_CLOSURE_INACTIVE_NOTES[reason]}),
@@ -3616,6 +3528,73 @@ class TaskLogService:
             self._sync_execution_stage_frame_locked(task_id=task_id, node_id=node_id, state=next_state)
             self.refresh_task_view(task_id, mark_unread=True)
             return next_round.model_dump(mode='json')
+
+    def refund_execution_stage_round(self, task_id: str, node_id: str, round_id: str) -> bool:
+        """退还一次回合预算：那一轮里没有任何调用真的执行过（D3）。
+
+        判定放在调用方（它才知道每个调用的结果），这里只做记账纠正。不退还的话，模型为
+        "先拿契约"这一跳付掉一轮预算——那是机制自己的代价被算成模型的错，而契约在场时
+        同一批调用本就不占预算。
+        """
+        target_round_id = str(round_id or '').strip()
+        if not target_round_id:
+            return False
+        with self._task_lock(task_id):
+            task = self._require_task(task_id)
+            node = self._store.get_node(node_id)
+            if node is None:
+                return False
+            state = self._execution_stage_state(node)
+            active = self._active_execution_stage(state)
+            if active is None:
+                return False
+            target = next(
+                (
+                    item
+                    for item in list(active.rounds or [])
+                    if str(item.get('round_id') if isinstance(item, dict) else getattr(item, 'round_id', '')) == target_round_id
+                ),
+                None,
+            )
+            if target is None or not bool(
+                target.get('budget_counted') if isinstance(target, dict) else getattr(target, 'budget_counted', False)
+            ):
+                return False
+            stages: list[ExecutionStageRecord] = []
+            for stage in list(state.stages or []):
+                current = stage
+                if str(stage.stage_id or '').strip() == str(active.stage_id or '').strip():
+                    rounds = [
+                        item.model_copy(update={'budget_counted': False})
+                        if str(getattr(item, 'round_id', '') or '') == target_round_id
+                        else item
+                        for item in list(stage.rounds or [])
+                    ]
+                    current = stage.model_copy(
+                        update={
+                            'rounds': rounds,
+                            'tool_rounds_used': max(0, int(stage.tool_rounds_used or 0) - 1),
+                        }
+                    )
+                stages.append(current)
+            refunded = next(
+                (item for item in stages if str(item.stage_id or '').strip() == str(active.stage_id or '').strip()),
+                None,
+            )
+            next_state = ExecutionStageState(
+                active_stage_id=str(state.active_stage_id or '').strip(),
+                transition_required=bool(
+                    refunded is not None
+                    and int(refunded.tool_round_budget or 0) > 0
+                    and int(refunded.tool_rounds_used or 0) >= int(refunded.tool_round_budget or 0)
+                ),
+                stages=stages,
+                pending_orphan_rounds=list(state.pending_orphan_rounds or []),
+            )
+            self._persist_execution_stage_state_locked(task=task, node_id=node_id, state=next_state)
+            self._sync_execution_stage_frame_locked(task_id=task_id, node_id=node_id, state=next_state)
+            self.refresh_task_view(task_id, mark_unread=True)
+            return True
 
     def mark_execution_stage_contains_spawn(self, task_id: str, node_id: str) -> dict[str, Any] | None:
         with self._task_lock(task_id):
@@ -5411,11 +5390,6 @@ class TaskLogService:
                     for item in list(next_frame.get('rbac_visible_skill_ids') or [])
                     if str(item or '').strip()
                 ],
-                'hydrated_executor_state': _hydrated_ledger_state(
-                    next_frame.get('hydrated_executor_state'),
-                    next_frame.get('hydrated_executor_names'),
-                    next_frame.get('hydration_revoked_executor_names'),
-                ),
                 'model_visible_tool_names': [
                     str(item or '').strip()
                     for item in list(next_frame.get('model_visible_tool_names') or [])
@@ -5424,21 +5398,6 @@ class TaskLogService:
                 'provider_tool_names': [
                     str(item or '').strip()
                     for item in list(next_frame.get('provider_tool_names') or [])
-                    if str(item or '').strip()
-                ],
-                'hydrated_executor_names': [
-                    str(item or '').strip()
-                    for item in list(next_frame.get('hydrated_executor_names') or [])
-                    if str(item or '').strip()
-                ],
-                'hydration_revoked_executor_names': [
-                    str(item or '').strip()
-                    for item in list(next_frame.get('hydration_revoked_executor_names') or [])
-                    if str(item or '').strip()
-                ],
-                'hydration_evicted_executor_names': [
-                    str(item or '').strip()
-                    for item in list(next_frame.get('hydration_evicted_executor_names') or [])
                     if str(item or '').strip()
                 ],
                 'lightweight_tool_ids': [
@@ -5633,11 +5592,6 @@ class TaskLogService:
                 for item in list(payload.get('rbac_visible_skill_ids') or [])
                 if str(item or '').strip()
             ],
-            'hydrated_executor_state': _hydrated_ledger_state(
-                payload.get('hydrated_executor_state'),
-                payload.get('hydrated_executor_names'),
-                payload.get('hydration_revoked_executor_names'),
-            ),
             'model_visible_tool_names': [
                 str(item or '').strip()
                 for item in list(payload.get('model_visible_tool_names') or [])
@@ -5646,21 +5600,6 @@ class TaskLogService:
             'provider_tool_names': [
                 str(item or '').strip()
                 for item in list(payload.get('provider_tool_names') or [])
-                if str(item or '').strip()
-            ],
-            'hydrated_executor_names': [
-                str(item or '').strip()
-                for item in list(payload.get('hydrated_executor_names') or [])
-                if str(item or '').strip()
-            ],
-            'hydration_revoked_executor_names': [
-                str(item or '').strip()
-                for item in list(payload.get('hydration_revoked_executor_names') or [])
-                if str(item or '').strip()
-            ],
-            'hydration_evicted_executor_names': [
-                str(item or '').strip()
-                for item in list(payload.get('hydration_evicted_executor_names') or [])
                 if str(item or '').strip()
             ],
             'lightweight_tool_ids': [
@@ -6440,11 +6379,6 @@ class TaskLogService:
                 for item in list(payload.get('rbac_visible_skill_ids') or [])
                 if str(item or '').strip()
             ],
-            'hydrated_executor_state': _hydrated_ledger_state(
-                payload.get('hydrated_executor_state'),
-                payload.get('hydrated_executor_names'),
-                payload.get('hydration_revoked_executor_names'),
-            ),
             'model_visible_tool_names': [
                 str(item or '').strip()
                 for item in list(payload.get('model_visible_tool_names') or [])
@@ -6453,21 +6387,6 @@ class TaskLogService:
             'provider_tool_names': [
                 str(item or '').strip()
                 for item in list(payload.get('provider_tool_names') or [])
-                if str(item or '').strip()
-            ],
-            'hydrated_executor_names': [
-                str(item or '').strip()
-                for item in list(payload.get('hydrated_executor_names') or [])
-                if str(item or '').strip()
-            ],
-            'hydration_revoked_executor_names': [
-                str(item or '').strip()
-                for item in list(payload.get('hydration_revoked_executor_names') or [])
-                if str(item or '').strip()
-            ],
-            'hydration_evicted_executor_names': [
-                str(item or '').strip()
-                for item in list(payload.get('hydration_evicted_executor_names') or [])
                 if str(item or '').strip()
             ],
             'lightweight_tool_ids': [
@@ -6548,29 +6467,9 @@ class TaskLogService:
             'skill_visibility_diagnostics': TaskLogService._sanitize_skill_visibility_diagnostics(
                 payload.get('skill_visibility_diagnostics') or {}
             ),
-            'hydrated_executor_state': _hydrated_ledger_state(
-                payload.get('hydrated_executor_state'),
-                payload.get('hydrated_executor_names'),
-                payload.get('hydration_revoked_executor_names'),
-            ),
             'model_visible_tool_names': [
                 str(item or '').strip()
                 for item in list(payload.get('model_visible_tool_names') or [])
-                if str(item or '').strip()
-            ],
-            'hydrated_executor_names': [
-                str(item or '').strip()
-                for item in list(payload.get('hydrated_executor_names') or [])
-                if str(item or '').strip()
-            ],
-            'hydration_revoked_executor_names': [
-                str(item or '').strip()
-                for item in list(payload.get('hydration_revoked_executor_names') or [])
-                if str(item or '').strip()
-            ],
-            'hydration_evicted_executor_names': [
-                str(item or '').strip()
-                for item in list(payload.get('hydration_evicted_executor_names') or [])
                 if str(item or '').strip()
             ],
             'lightweight_tool_ids': [

@@ -8,7 +8,7 @@ from typing import Any
 @dataclass(slots=True)
 class ExecutionToolSelectionResult:
     lightweight_tool_ids: list[str]
-    hydrated_tool_names: list[str]
+    callable_tool_names: list[str]
     candidate_tool_names: list[str]
     schema_chars: int
     trace: dict[str, Any] = field(default_factory=dict)
@@ -40,27 +40,31 @@ def build_execution_tool_selection(
     visible_tool_items: list[Any],
     visible_tool_names: list[str],
     always_callable_tool_names: list[str],
-    promoted_tool_names: list[str] | None = None,
+    contract_present_tool_names: list[str] | None = None,
     schema_size_by_executor: dict[str, int] | None = None,
 ) -> ExecutionToolSelectionResult:
+    """本轮可调用集 = 常驻内置 ∪ 契约在场；候选 = 治理可见 − 可调用。
+
+    水合台账已删除，所以这里没有任何"上一跳记住的状态"：入参全部来自当次请求视图重算。
+    """
     normalized_visible_names = _normalized_names(list(visible_tool_names or []))
     visible_name_set = set(normalized_visible_names)
 
-    hydrated_tool_names: list[str] = []
-    seen_hydrated: set[str] = set()
+    callable_tool_names: list[str] = []
+    seen_callable: set[str] = set()
 
-    def _append_hydrated(values: list[str] | None) -> list[str]:
+    def _append_callable(values: list[str] | None) -> list[str]:
         appended: list[str] = []
         for value in _normalized_names(values):
-            if value not in visible_name_set or value in seen_hydrated:
+            if value not in visible_name_set or value in seen_callable:
                 continue
-            seen_hydrated.add(value)
-            hydrated_tool_names.append(value)
+            seen_callable.add(value)
+            callable_tool_names.append(value)
             appended.append(value)
         return appended
 
-    selected_always_callable_tool_names = _append_hydrated(always_callable_tool_names)
-    selected_promoted_tool_names = _append_hydrated(promoted_tool_names)
+    selected_always_callable_tool_names = _append_callable(always_callable_tool_names)
+    selected_contract_present_tool_names = _append_callable(contract_present_tool_names)
 
     lightweight_tool_ids: list[str] = []
     for item in list(visible_tool_items or []):
@@ -71,25 +75,25 @@ def build_execution_tool_selection(
     candidate_tool_names = [
         name
         for name in normalized_visible_names
-        if name not in set(hydrated_tool_names)
+        if name not in set(callable_tool_names)
     ]
 
     return ExecutionToolSelectionResult(
         lightweight_tool_ids=lightweight_tool_ids,
-        hydrated_tool_names=hydrated_tool_names,
+        callable_tool_names=callable_tool_names,
         candidate_tool_names=candidate_tool_names,
         schema_chars=sum(
             max(0, int((schema_size_by_executor or {}).get(name, 0) or 0))
-            for name in hydrated_tool_names
+            for name in callable_tool_names
         ),
         trace={
             "prompt": str(prompt or ""),
             "goal": str(goal or ""),
             "core_requirement": str(core_requirement or ""),
             "always_callable_tool_names": list(always_callable_tool_names or []),
-            "promoted_tool_names": list(promoted_tool_names or []),
+            "contract_present_tool_names": list(contract_present_tool_names or []),
             "selected_always_callable_tool_names": selected_always_callable_tool_names,
-            "selected_promoted_tool_names": selected_promoted_tool_names,
+            "selected_contract_present_tool_names": selected_contract_present_tool_names,
             "candidate_tool_names": list(candidate_tool_names),
         },
     )

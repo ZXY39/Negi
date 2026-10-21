@@ -67,7 +67,7 @@ def _with_dynamic_appendix_at_tail(
     ]
     # The carried body must never retain a stale contract or a stale turn-only
     # note. The appendix is always appended at the tail: it carries live state
-    # (`callable_tools` and `stage_summary` are rewritten on every stage
+    # (`denied_tools` and `stage_summary` are rewritten on every stage
     # transition), and anchoring it earlier drops everything behind it out of
     # the provider's prefix cache. Tail placement matches the node lane
     # (`upsert_node_dynamic_contract_message`); a contract echoed at the

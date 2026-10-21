@@ -15,6 +15,7 @@ from fastapi.testclient import TestClient
 import g3ku.shells.web as web_shell
 from g3ku.agent.tools.base import Tool
 from g3ku.providers.base import LLMModelAttempt, LLMResponse, ToolCallRequest
+from g3ku.runtime.tool_contract_block import render_tool_contract_block
 from main.api.internal_rest import router as internal_router
 from main.api.rest import router as rest_router
 from main.api.websocket_task import router as task_ws_router
@@ -4520,8 +4521,29 @@ async def test_spawn_children_materializes_batch_children_before_pipeline_comple
         await service.close()
 
 
+def _contract_block_message(tool_id: str, fingerprint: str = "tcf:" + "a" * 16) -> dict:
+    """投递形态与真车道同形：JSON 信封的 `content` 里装着 `[TOOL_CONTRACT_V1:...]` 块。
+
+    在场判据只认这一份载体，台账里跨跳记住的名字已不再是能力来源。
+    """
+    return {
+        "role": "tool",
+        "name": "load_tool_context",
+        "tool_call_id": f"call-{tool_id}",
+        "content": json.dumps(
+            {
+                "ok": True,
+                "tool_id": tool_id,
+                "tool_context_fingerprint": fingerprint,
+                "content": render_tool_contract_block(tool_id, fingerprint, f"# {tool_id}\n契约正文"),
+            },
+            ensure_ascii=False,
+        ),
+    }
+
+
 @pytest.mark.asyncio
-async def test_execution_node_build_messages_appends_dynamic_tool_contract_after_hydration(tmp_path: Path):
+async def test_execution_node_build_messages_appends_dynamic_tool_contract_when_contract_present(tmp_path: Path):
     service = MainRuntimeService(
         chat_backend=_DummyChatBackend(),
         workspace_root=tmp_path,
@@ -4560,8 +4582,6 @@ async def test_execution_node_build_messages_appends_dynamic_tool_contract_after
                 "candidate_tool_names": [],
                 "selected_skill_ids": [],
                 "candidate_skill_ids": [],
-                "hydrated_executor_state": ["filesystem_write"],
-                "hydrated_executor_names": ["filesystem_write"],
             },
             publish_snapshot=False,
         )
@@ -4574,9 +4594,19 @@ async def test_execution_node_build_messages_appends_dynamic_tool_contract_after
         assert str(messages[-2]["content"] or "").startswith("## Runtime Tool Contract")
         payload = extract_node_dynamic_contract_payload(messages)
         assert payload is not None
-        assert "filesystem_write" in payload["callable_tool_names"]
-        assert "filesystem_write" not in payload["candidate_tools"]
-        assert payload["hydrated_executor_names"] == ["filesystem_write"]
+        # 台账键不再进契约 payload：帧白名单与契约都不带水合名单。
+        assert "hydrated_executor_names" not in payload
+        # 契约在场即能力：带 [TOOL_CONTRACT_V1] 块的那一跳才可调用，不带块就不放行。
+        assert "filesystem_write" in service._callable_tool_names_for_node(
+            task=task,
+            node=root,
+            request_messages=[_contract_block_message("filesystem_write")],
+        )
+        assert "filesystem_write" not in service._callable_tool_names_for_node(
+            task=task,
+            node=root,
+            request_messages=[],
+        )
     finally:
         await service.close()
 
@@ -4621,8 +4651,6 @@ async def test_execution_node_build_messages_exposes_full_callable_tools_without
                 "candidate_tool_names": ["filesystem_write"],
                 "selected_skill_ids": [],
                 "candidate_skill_ids": [],
-                "hydrated_executor_state": ["filesystem_write"],
-                "hydrated_executor_names": ["filesystem_write"],
             },
             publish_snapshot=False,
         )
@@ -4635,14 +4663,27 @@ async def test_execution_node_build_messages_exposes_full_callable_tools_without
         assert str(messages[-2]["content"] or "").startswith("## Runtime Tool Contract")
         payload = extract_node_dynamic_contract_payload(messages)
         assert payload is not None
-        assert payload["callable_tool_names"] == ["submit_next_stage", "filesystem_write"]
+        assert "hydrated_executor_names" not in payload
         assert "model_visible_tool_selection_trace" not in payload
+        # 无活动阶段不把可调用集锁死到 submit_next_stage 一颗；带契约块的 granted 工具当跳可调。
+        callable_with_block = service._callable_tool_names_for_node(
+            task=task,
+            node=root,
+            request_messages=[_contract_block_message("filesystem_write")],
+        )
+        assert "filesystem_write" in callable_with_block
+        assert callable_with_block != ["submit_next_stage"]
+        assert "filesystem_write" not in service._callable_tool_names_for_node(
+            task=task,
+            node=root,
+            request_messages=[],
+        )
     finally:
         await service.close()
 
 
 @pytest.mark.asyncio
-async def test_acceptance_node_build_messages_appends_dynamic_tool_contract_after_hydration(tmp_path: Path):
+async def test_acceptance_node_build_messages_appends_dynamic_tool_contract_when_contract_present(tmp_path: Path):
     service = MainRuntimeService(
         chat_backend=_DummyChatBackend(),
         workspace_root=tmp_path,
@@ -4690,8 +4731,6 @@ async def test_acceptance_node_build_messages_appends_dynamic_tool_contract_afte
                 "candidate_tool_names": [],
                 "selected_skill_ids": [],
                 "candidate_skill_ids": [],
-                "hydrated_executor_state": ["content_open"],
-                "hydrated_executor_names": ["content_open"],
             },
             publish_snapshot=False,
         )
@@ -4704,8 +4743,19 @@ async def test_acceptance_node_build_messages_appends_dynamic_tool_contract_afte
         assert str(messages[-2]["content"] or "").startswith("## Runtime Tool Contract")
         payload = extract_node_dynamic_contract_payload(messages)
         assert payload is not None
-        assert "content_open" in payload["callable_tool_names"]
-        assert payload["hydrated_executor_names"] == ["content_open"]
+        # 台账键不再进契约 payload。
+        assert "hydrated_executor_names" not in payload
+        # 验收车道同判据：content_open 带契约块才可调用，无块不放行。
+        assert "content_open" in service._callable_tool_names_for_node(
+            task=task,
+            node=acceptance,
+            request_messages=[_contract_block_message("content_open")],
+        )
+        assert "content_open" not in service._callable_tool_names_for_node(
+            task=task,
+            node=acceptance,
+            request_messages=[],
+        )
     finally:
         await service.close()
 
@@ -7183,7 +7233,7 @@ def test_runtime_messages_artifact_accumulates_per_round_callable_snapshots(tmp_
     assert snapshots[1]["active_round_id"] == "round:2"
     assert snapshots[1]["callable_tool_names"] == ["submit_next_stage", "filesystem_edit"]
     assert snapshots[1]["candidate_tool_names"] == ["filesystem_write"]
-    assert snapshots[1]["hydrated_executor_names"] == ["filesystem_edit"]
+    assert "hydrated_executor_names" not in snapshots[1]
     assert snapshots[1]["lightweight_tool_ids"] == ["filesystem", "content"]
     assert snapshots[1]["model_visible_tool_selection_trace"]["final_schema_chars"] == 1600
 
@@ -9164,9 +9214,8 @@ async def test_runtime_frame_persists_model_visible_tool_selection_fields(tmp_pa
             "spawn_child_nodes",
             "web_fetch",
         ]
-        assert runtime_frame.get("hydrated_executor_names") == [
-            "web_fetch",
-        ]
+        # 台账键不再进帧白名单：存量 payload 带着它进来，读回来也不该复活。
+        assert "hydrated_executor_names" not in runtime_frame
         assert runtime_frame.get("lightweight_tool_ids") == [
             "web_fetch",
             "agent_browser",
@@ -10361,7 +10410,7 @@ async def test_model_visible_tool_selection_keeps_pinned_bundle_when_current_vis
         monkeypatch.setattr(
             "main.service.runtime_service.build_execution_tool_selection",
             lambda **_kwargs: SimpleNamespace(
-                hydrated_tool_names=[
+                callable_tool_names=[
                     "submit_next_stage",
                     "content_open",
                     "web_fetch",
@@ -10522,7 +10571,7 @@ async def test_model_visible_tool_selection_preserves_prior_provider_order_when_
         monkeypatch.setattr(
             "main.service.runtime_service.build_execution_tool_selection",
             lambda **_kwargs: SimpleNamespace(
-                hydrated_tool_names=[
+                callable_tool_names=[
                     "submit_next_stage",
                     "content_open",
                     "web_fetch",

@@ -4,6 +4,7 @@ import json
 from typing import Any, Callable
 
 from g3ku.agent.tools.base import Tool
+from g3ku.runtime.tool_contract_block import attach_tool_contract_block
 
 
 def _runtime_session_key(runtime: dict[str, Any] | None) -> str:
@@ -131,4 +132,4 @@ class LoadToolContextTool(_ProjectServiceTool):
         if gate_error:
             return gate_error
         payload = service.load_tool_context(actor_role='ceo', session_id=session_id, tool_id=str(tool_id or '').strip())
-        return json.dumps(payload, ensure_ascii=False)
+        return json.dumps(attach_tool_contract_block(payload), ensure_ascii=False)

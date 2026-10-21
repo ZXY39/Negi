@@ -34,6 +34,7 @@ from g3ku.providers.fallback import (
 from g3ku.resources.retired_schemas import placeholder_tool_schema
 from g3ku.resources.retired_schemas import schema_name as _provider_schema_name
 from g3ku.runtime import skill_roster_notice as _skill_roster_notice
+from g3ku.runtime import tool_arg_stash
 from g3ku.runtime.chunk_compression_plan import (
     CHUNK_MAX_CHUNKS,
     COMPRESSION_MAX_PASS_ROUNDS,
@@ -105,7 +106,13 @@ from g3ku.runtime.stage_prompt_compaction import (
 from g3ku.runtime.stage_prompt_compaction import (
     stage_transition_signature as _shared_stage_transition_signature,
 )
-from g3ku.runtime.tool_context_presence import kept_contract_index, kept_tool_contexts_from_frames
+from g3ku.runtime.tool_arg_stash import node_scope_key as _stash_node_scope_key
+from g3ku.runtime.tool_context_presence import (
+    contract_index_from_revisions,
+    contract_presence_index,
+    contract_presence_reading,
+    loader_contract_revisions,
+)
 from g3ku.runtime.tool_error_guidance import (
     append_parameter_error_guidance,
     availability_hint,
@@ -118,7 +125,25 @@ from g3ku.runtime.tool_history import (
     iter_compaction_atomic_groups,
     truncate_group_head_tail,
 )
+from g3ku.runtime.tool_impulse import (
+    EXECUTION_PATH_CORRECTED,
+    EXECUTION_PATH_ILLEGAL_REUSE,
+    EXECUTION_PATH_NORMAL,
+    EXECUTION_PATH_REUSED,
+    IMPULSE_INVALID,
+    IMPULSE_REJECT,
+    REUSE_PLAN_CONTRACT_ABSENT,
+    REUSE_PLAN_EXECUTE,
+    REUSE_PLAN_EXPLICIT_ARGS,
+    REUSE_PLAN_NO_STASH,
+    aggregate_reuse_results,
+    plan_reuse_execution,
+    reuse_refusal_text,
+    split_reuse_arguments,
+    tool_facing_runtime_context,
+)
 from g3ku.runtime.tool_result_status import is_error_like_tool_result
+from g3ku.runtime.tool_visibility import NODE_NEVER_CONTRACT_TOOL_NAMES
 from g3ku.runtime.tool_watchdog import (
     actor_role_allows_watchdog,
     resolve_effective_tool_timeout,
@@ -227,6 +252,9 @@ _STAGE_HISTORY_ARCHIVE_SOURCE_KIND = 'stage_history_archive'
 _COMPACT_HISTORY_STEP_MAX_CHARS = 160
 _ORPHAN_TOOL_RESULT_THRESHOLD = 3
 _STAGE_SPAWN_TOOL_NAME = 'spawn_child_nodes'
+# exec 截断提醒的幂等标记：这句只出现在这里注入的提醒开头，同一结果第二次注入按它判。
+# 文案不许写"已自动加载"——台账删除后没有任何东西被自动加载，契约要模型自己取。
+_EXEC_TRUNCATION_REOPEN_MARKER = '⚠️ exec 输出未整篇交付到本轮上下文。'
 _READ_ONLY_REPEAT_SOFT_REJECT_LIMIT = 3
 _INVALID_FINAL_SUBMISSION_LIMIT = 5
 _INVALID_STAGE_SUBMISSION_LIMIT = 5
@@ -529,13 +557,23 @@ class ReActToolLoop:
                 message_history=message_history,
                 skill_roster_items=skill_roster_items,
             )
-            current_tools = self._revoke_contract_absent_hydration_for_hop(
-                tools=current_tools,
-                task=task,
-                node=node,
-                runtime_context=runtime_context,
-                request_messages=model_messages,
-            )
+            # 每跳只算一次在场索引（D12），下传给这一跳的所有消费点（执行准入、冲动投递、
+            # 观测读数）。各消费点各自重算会造出"同一轮里两个答案"，那正是本次要消灭的漂移。
+            # 修订表与索引同源：读数要的是"同一名字在视图里出现过几个修订"，扫第二遍消息
+            # 等于把这一跳的判定成本翻倍。
+            contract_revisions = loader_contract_revisions(model_messages)
+            contract_presence = contract_index_from_revisions(contract_revisions)
+            runtime_context['tool_contract_presence'] = contract_presence
+            # 暂存时钟：只在还留着条目时推进并落盘。不推进，条目就永远等不到自己那一跳；
+            # 每跳都推则是在没有东西可老化的时候白写一次节点行。
+            runtime_context['tool_arg_stash_carrier'] = self._advance_node_stash_hop(node, runtime_context)
+            # 同一跳内每个工具只发一份完整契约块（D4）；这里建的那份表被本跳所有调用共享
+            # （`_call_runtime_context` 是浅拷贝， mutate 对同批可见）。
+            runtime_context['impulse_delivered_tools'] = {}
+            # 校验通过、只交契约的调用 id：回合预算要退还它们（D3），所以先记下来。
+            runtime_context['impulse_staged_call_ids'] = set()
+            # 每次调用实际走的道（D15 审计），按 call id 索引，随工具行一起落盘。
+            runtime_context['tool_execution_paths'] = {}
             stage_gate = self._execution_stage_gate(
                 task_id=task.task_id,
                 node_id=node.node_id,
@@ -967,21 +1005,6 @@ class ReActToolLoop:
                         call_ids=tool_history.orphan_tool_result_ids,
                         strike_count=orphan_tool_result_strikes,
                     )
-            # hydrated_executor_state 是节点生命周期级的水合台账，唯一作者是
-            # runtime_service._promote_tool_context_hydration（它负责 LRU 与淘汰记录）。
-            # 这里只把它带过本帧：用它本轮的 promoted 视图覆写，会让任何一次曝光收窄
-            # （RBAC 抖动、对象字典塌缩）永久抹掉台账，而 names 才是本轮视图。
-            #
-            # 契约在场撤销不在这里跑：它已经在本跳的选择之前跑过一次（见
-            # `_revoke_contract_absent_hydration_for_hop`），判据同一跳只该判一次，
-            # 而且必须在选择与派发字典之前判——在这儿判到的结论只能留给下一跳。
-            prior_frame_for_hydration = self._runtime_frame(task.task_id, node.node_id) or {}
-            prior_hydrated_state = self._normalized_name_list(
-                list(prior_frame_for_hydration.get('hydrated_executor_state') or [])
-            )
-            prior_revoked_state = self._normalized_name_list(
-                list(prior_frame_for_hydration.get('hydration_revoked_executor_names') or [])
-            )
             self._log_service.upsert_frame(
                 task.task_id,
                 {
@@ -1022,9 +1045,6 @@ class ReActToolLoop:
                     ),
                     'rbac_visible_skill_ids': list(selected_skill_ids),
                     'lightweight_tool_ids': list(tool_schema_selection.get('lightweight_tool_ids') or []),
-                    'hydrated_executor_state': prior_hydrated_state,
-                    'hydration_revoked_executor_names': prior_revoked_state,
-                    'hydrated_executor_names': list(tool_schema_selection.get('hydrated_executor_names') or []),
                     'model_visible_tool_names': list(tool_schema_selection.get('tool_names') or list(model_visible_tools.keys())),
                     'provider_tool_names': list(provider_tool_names),
                     'pending_provider_tool_names': list(
@@ -1045,6 +1065,21 @@ class ReActToolLoop:
                     'model_visible_tool_selection_trace': {
                         **dict(tool_schema_selection.get('trace') or {}),
                         'pinned_head': self._node_pinned_head_carrier(skill_roster_scope),
+                        # 删台账之后没有状态可查，排障要靠这份按当次请求视图重算的派生读数：
+                        # 谁在场（带它自己那份修订和本跳暂存份数）、谁被裁走、谁的块撞了修订。
+                        'tool_contract_presence': self._node_contract_presence_reading(
+                            index=contract_presence,
+                            revisions=contract_revisions,
+                            candidate_tool_names=list(
+                                tool_schema_selection.get('candidate_tool_names') or []
+                            ),
+                            carrier=runtime_context.get('tool_arg_stash_carrier'),
+                            task_id=task.task_id,
+                            node_id=node.node_id,
+                        ),
+                        # D15 的 `abandoned` 档：上一跳暂存过、这一跳没被调用因而被清扫的名字。
+                        # 清扫本身是静默的，这一行就是它唯一的可数落点。
+                        'staged_swept_tool_ids': list(runtime_context.get('tool_arg_stash_swept') or []),
                     },
                     'exec_runtime_policy': (
                         dict(dynamic_contract_payload.get('exec_runtime_policy') or {})
@@ -1682,6 +1717,10 @@ class ReActToolLoop:
                     signature = f"{tool_name}:{json.dumps(arguments, ensure_ascii=False, sort_keys=True)}"
                     if tool_name in self._CONTROL_TOOL_NAMES or tool_name in {STAGE_TOOL_NAME, FINAL_RESULT_TOOL_NAME}:
                         continue
+                    # 未水合工具的调用这一跳不执行（只交契约+暂存），不该进重复调用熔断：
+                    # 撞两次同样的"先给契约"被软拒，等于把机制自己的代价算成模型的错（D3）。
+                    if self._impulse_contract_applicable(tool_name=tool_name, runtime_context=runtime_context):
+                        continue
                     repeated_signature = breaker.register(signature)
                     if repeated_signature:
                         duplicate_call_violations.append(
@@ -1801,19 +1840,14 @@ class ReActToolLoop:
                     prior_overflow_signatures=self._overflowed_search_signatures(message_history),
                     max_parallel_tool_calls=max_parallel_tool_calls,
                 )
-                self._promote_tool_context_hydration_after_results(
+                self._refund_stage_round_for_non_executed_calls(
                     task_id=task.task_id,
                     node_id=node.node_id,
+                    active_round_payload=active_round_payload,
                     response_tool_calls=response_tool_calls,
-                    results=results,
                     runtime_context=runtime_context,
                 )
-                self._auto_hydrate_content_open_on_exec_truncation(
-                    task_id=task.task_id,
-                    node_id=node.node_id,
-                    results=results,
-                    runtime_context=runtime_context,
-                )
+                self._remind_content_open_reopen_on_exec_truncation(results=results)
                 assistant_body = None if synthetic_tool_calls_used else response.content
                 assistant_sent_body = self._externalize_message_content(
                     assistant_body,
@@ -2691,61 +2725,6 @@ class ReActToolLoop:
         )
         return prepared_history
 
-    def _revoke_contract_absent_hydration_for_hop(
-        self,
-        *,
-        tools: dict[str, Any],
-        task: Any,
-        node: Any,
-        runtime_context: dict[str, Any],
-        request_messages: list[dict[str, Any]],
-    ) -> dict[str, Any]:
-        """按本轮请求投影判契约在场，撤掉不在场的水合能力，并把它们摘出**本轮派发字典**。
-
-        台账回写由 `runtime_service.revoke_contract_absent_node_hydration` 完成，本方法只负责
-        把它接在选择之前：选择用台账组 callable、执行按这份字典准入，两者都在同一跳里消费，
-        判据排在它们之后就等于让"正文已离开上下文"的这一跳照旧宣传并放行该工具。固定内置与
-        控制/加载器不进水合台账，因此不在摘除范围内。
-        """
-        revoker = getattr(self, '_tool_contract_presence_revoker', None)
-        current_tools = dict(tools or {})
-        if not callable(revoker) or not current_tools:
-            return current_tools
-        task_id = str(getattr(task, 'task_id', '') or '').strip()
-        node_id = str(getattr(node, 'node_id', '') or '').strip()
-        # 只读帧正文：`read_runtime_frame` 会顺带把 messages_ref 指向的整份会话历史读盘解码，
-        # 判据每跳都要跑，不该为了一份名单付一次历史水合。
-        payload_reader = getattr(self._log_service, 'read_runtime_frame_payload', None)
-        frame = payload_reader(task_id, node_id) if callable(payload_reader) else None
-        if not isinstance(frame, dict):
-            frame = self._runtime_frame(task_id, node_id) or {}
-        # 台账只认 `hydrated_executor_state`（每跳由帧写入）。`hydrated_executor_names` 是本轮
-        # 选择派生的 promoted 视图，拿它当台账会把从没水合过的工具判成待撤对象。
-        ledger = self._normalized_name_list(frame.get('hydrated_executor_state') or [])
-        if not ledger:
-            # 没有水合能力可撤时不必读整份请求体判在场。
-            return current_tools
-        try:
-            present = self._normalized_name_list(
-                revoker(
-                    task_id=task_id,
-                    node_id=node_id,
-                    actor_role=str((runtime_context or {}).get('actor_role') or '').strip(),
-                    session_id=str((runtime_context or {}).get('session_key') or '').strip(),
-                    request_messages=list(request_messages or []),
-                    node=node,
-                )
-            )
-        except Exception:
-            # 判据跑不起来就照旧不撤：撤销是收紧，不是本轮的可用性前提。
-            return current_tools
-        present_set = set(present)
-        revoked_now = [name for name in ledger if name not in present_set]
-        if not revoked_now:
-            return current_tools
-        revoked_set = set(revoked_now)
-        return {name: tool for name, tool in current_tools.items() if name not in revoked_set}
-
     def _runtime_frame(self, task_id: str, node_id: str) -> dict[str, Any] | None:
         frame = self._log_service.read_runtime_frame(task_id, node_id)
         return dict(frame or {}) if frame is not None else None
@@ -3592,7 +3571,6 @@ class ReActToolLoop:
             'provider_tool_exposure_revision': '',
             'provider_tool_exposure_commit_reason': '',
             'lightweight_tool_ids': [],
-            'hydrated_executor_names': [],
             'trace': {},
         }
         if str(node_kind or '').strip().lower() not in _STAGE_BUDGET_NODE_KINDS:
@@ -3687,11 +3665,6 @@ class ReActToolLoop:
                 selection_payload['lightweight_tool_ids'] = [
                     str(item or '').strip()
                     for item in list(raw_selection.get('lightweight_tool_ids') or [])
-                    if str(item or '').strip()
-                ]
-                selection_payload['hydrated_executor_names'] = [
-                    str(item or '').strip()
-                    for item in list(raw_selection.get('hydrated_executor_names') or [])
                     if str(item or '').strip()
                 ]
                 selection_payload['candidate_tool_names'] = [
@@ -4146,7 +4119,6 @@ class ReActToolLoop:
             contract_visible_skill_ids=contract_visible_skill_ids,
             skill_visibility_diagnostics=skill_visibility_diagnostics,
             stage_payload=self._stage_prompt_payload_from_gate(stage_gate),
-            hydrated_executor_names=self._normalized_name_list(list(tool_schema_selection.get('hydrated_executor_names') or [])),
             lightweight_tool_ids=self._normalized_name_list(list(tool_schema_selection.get('lightweight_tool_ids') or [])),
             selection_trace=dict(tool_schema_selection.get('trace') or {}),
             denied_tool_names=self._normalized_name_list(
@@ -4284,45 +4256,6 @@ class ReActToolLoop:
         )
         return upsert_node_dynamic_contract_message(message_history, contract)
 
-    def _promote_tool_context_hydration_after_results(
-        self,
-        *,
-        task_id: str,
-        node_id: str,
-        response_tool_calls: list[Any],
-        results: list[dict[str, Any]],
-        runtime_context: dict[str, Any],
-    ) -> None:
-        promoter = getattr(self, '_tool_context_hydration_promoter', None)
-        if not callable(promoter):
-            return
-        for result in list(results or []):
-            if not isinstance(result, dict):
-                continue
-            live_state = dict(result.get('live_state') or {}) if isinstance(result.get('live_state'), dict) else {}
-            if str(live_state.get('status') or '').strip().lower() != 'success':
-                continue
-            raw_result = self._tool_context_hydration_payload(result.get('raw_result'))
-            if not isinstance(raw_result, dict) or not bool(raw_result.get('ok')):
-                continue
-            tool_message = dict(result.get('tool_message') or {}) if isinstance(result.get('tool_message'), dict) else {}
-            tool_name = str(tool_message.get('name') or live_state.get('tool_name') or '').strip()
-            if tool_name not in {'load_tool_context', 'load_tool_context_v2'}:
-                continue
-            hydrated_tool_id = str(raw_result.get('tool_id') or '').strip()
-            if not hydrated_tool_id:
-                continue
-            promoter(
-                task_id=str(task_id or '').strip(),
-                node_id=str(node_id or '').strip(),
-                tool_call=SimpleNamespace(
-                    name=tool_name,
-                    arguments={'tool_id': hydrated_tool_id},
-                ),
-                raw_result=dict(raw_result),
-                runtime_context=dict(runtime_context or {}),
-            )
-
     @staticmethod
     def _tool_context_hydration_payload(raw_result: Any) -> dict[str, Any] | None:
         if isinstance(raw_result, dict):
@@ -4338,25 +4271,18 @@ class ReActToolLoop:
             return dict(parsed) if isinstance(parsed, dict) else None
         return None
 
-    def _auto_hydrate_content_open_on_exec_truncation(
+    def _remind_content_open_reopen_on_exec_truncation(
         self,
         *,
-        task_id: str,
-        node_id: str,
         results: list[dict[str, Any]],
-        runtime_context: dict[str, Any],
     ) -> int:
-        """exec 结果被截断时自动水合 content_open，并在该结果里注入提醒。
+        """exec 结果被截断时在该结果里注入读取指引。
 
         背景：exec 是执行/CEO 节点里立即可用的 fixed builtin，但长输出只返 head/tail
-        preview；content_open 能按行/字符精确读本地文件，却是需 hydration 的候选工具。
-        这里在 exec 截断时代替模型水合 content_open（复用现有水合核心，构造合成为
-        load_tool_context 的调用通过其闸门），下一轮即可调，并在本轮 exec 结果里告知
-        模型。返回本次注入提醒的次数（幂等：同一结果只注入一次）。
+        preview；content_open 能按行/字符精确读本地文件，却是带 toolskill 的候选工具，
+        契约不在场时调用它先取回契约。这里只在本轮 exec 结果里把这条出路告知模型。
+        返回本次注入提醒的次数（幂等：同一结果只注入一次）。
         """
-        promoter = getattr(self, '_tool_context_hydration_promoter', None)
-        if not callable(promoter):
-            return 0
         reminded_count = 0
         for result in list(results or []):
             if not isinstance(result, dict):
@@ -4378,21 +4304,13 @@ class ReActToolLoop:
             ):
                 continue
             raw_content = str(tool_message.get('content') or '')
-            if '已自动加载 content_open' in raw_content:
+            if _EXEC_TRUNCATION_REOPEN_MARKER in raw_content:
                 continue  # 已在注入过提醒，避免重复
-            promoter(
-                task_id=str(task_id or '').strip(),
-                node_id=str(node_id or '').strip(),
-                tool_call=SimpleNamespace(
-                    name='load_tool_context',
-                    arguments={'tool_id': 'content_open'},
-                ),
-                raw_result={'ok': True, 'tool_id': 'content_open'},
-                runtime_context=dict(runtime_context or {}),
-            )
             reminder = (
-                "\n\n⚠️ exec 输出未整篇交付到本轮上下文。"
-                "已自动加载 content_open 工具，下一轮可直接调用它按区间精确读取、避免截断：\n"
+                f"\n\n{_EXEC_TRUNCATION_REOPEN_MARKER}"
+                "content_open 能按行/字符精确读取本地文件，但它的契约说明不在本轮上下文里："
+                "直接调用它，这一跳会先把契约说明返回给你（那一跳不执行），"
+                "或先 load_tool_context(tool_id=\"content_open\") 再调用：\n"
                 "  content_open(path=<目标路径>, start_line=<起>, end_line=<止>)   # 多行源码（grep -n 给行号）\n"
                 "  content_open(path=<目标路径>, start_char=<起>, end_char=<止>)  # 单行/需字符定位\n"
                 "结果已被外置时，上面这条结果文本自带 `content_open(ref=...)`，按那个 ref 复开即可；"
@@ -4533,6 +4451,14 @@ class ReActToolLoop:
             )
         )
         current_frame = self._runtime_frame(str(task.task_id or ''), str(node.node_id or '')) or {}
+        # 同批每个工具各调了几次：冲动回执要说"第 i / n 份"，n 只能从这一批的调用里数出来
+        # （D4/C6）。放到 runtime_context 里，逐条调用共享同一份计数。
+        impulse_batch_totals: dict[str, int] = {}
+        for call in list(response_tool_calls or []):
+            call_name = str(getattr(call, 'name', '') or '').strip()
+            if call_name:
+                impulse_batch_totals[call_name] = impulse_batch_totals.get(call_name, 0) + 1
+        runtime_context['impulse_batch_totals'] = impulse_batch_totals
         candidate_tool_names = self._normalized_name_list(
             list(runtime_context.get('candidate_tool_names') or current_frame.get('candidate_tool_names') or [])
         )
@@ -4544,14 +4470,6 @@ class ReActToolLoop:
         )
         callable_tool_names = self._normalized_name_list(
             list(runtime_context.get('callable_tool_names') or current_frame.get('callable_tool_names') or [])
-        )
-        hydrated_executor_names = self._normalized_name_list(
-            list(
-                runtime_context.get('hydrated_executor_names')
-                or current_frame.get('hydrated_executor_names')
-                or current_frame.get('hydrated_executor_state')
-                or []
-            )
         )
         full_callable_tool_names = self._normalized_name_list(
             list(
@@ -4583,7 +4501,6 @@ class ReActToolLoop:
                 'candidate_skill_ids': list(candidate_skill_ids),
                 'rbac_visible_tool_names': list(rbac_visible_tool_names),
                 'callable_tool_names': list(callable_tool_names),
-                'hydrated_executor_names': list(hydrated_executor_names),
                 'full_callable_tool_names': list(full_callable_tool_names),
                 'prior_overflow_signatures': sorted(prior_overflow_signatures or set()),
                 'stage_turn_granted': granted,
@@ -4787,28 +4704,6 @@ class ReActToolLoop:
                             stage_free_pass_kind=stage_free_pass_kind,
                         ),
                     )
-                    promoter = getattr(self, '_tool_context_hydration_promoter', None)
-                    hydration_payload = self._tool_context_hydration_payload(raw_result)
-                    if (
-                        callable(promoter)
-                        and str(getattr(call, 'name', '') or '').strip() in {'load_tool_context', 'load_tool_context_v2'}
-                        and isinstance(hydration_payload, dict)
-                        and bool(hydration_payload.get('ok'))
-                        and str(hydration_payload.get('tool_id') or '').strip()
-                    ):
-                        promoter(
-                            task_id=str(task.task_id or '').strip(),
-                            node_id=str(node.node_id or '').strip(),
-                            tool_call=SimpleNamespace(
-                                name=str(getattr(call, 'name', '') or '').strip(),
-                                arguments={'tool_id': str(hydration_payload.get('tool_id') or '').strip()},
-                            ),
-                            raw_result=dict(hydration_payload),
-                            runtime_context=_call_runtime_context(
-                                call,
-                                stage_turn_granted=stage_turn_granted,
-                            ),
-                        )
                     tool_content = self._render_tool_message_content(
                         raw_result,
                         runtime_context=runtime_context,
@@ -4887,6 +4782,11 @@ class ReActToolLoop:
                         'finished_at': finished_at,
                         'elapsed_seconds': elapsed_seconds,
                         'ephemeral': ephemeral,
+                        # 这次调用实际走的道（复用批 / 改参数重调 / 非法复用），缺省 normal。
+                        'execution_path': str(
+                            dict(runtime_context.get('tool_execution_paths') or {}).get(str(call.id or ''))
+                            or EXECUTION_PATH_NORMAL
+                        ),
                     },
                     'tool_message': {
                         'role': 'tool',
@@ -5208,7 +5108,390 @@ class ReActToolLoop:
         source_kind = str(handle.get('source_kind') or result.get('source_kind') or '').strip().lower()
         return source_kind == _STAGE_HISTORY_ARCHIVE_SOURCE_KIND
 
+    def _refund_stage_round_for_non_executed_calls(
+        self,
+        *,
+        task_id: str,
+        node_id: str,
+        active_round_payload: dict[str, Any] | None,
+        response_tool_calls: list[Any],
+        runtime_context: dict[str, Any],
+    ) -> None:
+        """这一轮的调用**一个都没执行**（只交契约+暂存）⇒ 退还那一轮预算（D3）。
+
+        只要有一个真执行过的调用混在同一轮里，就不退——预算度量的是"模型干了活"，
+        不是"模型发了几条消息"。
+        """
+        round_id = str((active_round_payload or {}).get('round_id') or '').strip()
+        staged_ids = runtime_context.get('impulse_staged_call_ids')
+        if not round_id or not isinstance(staged_ids, set) or not staged_ids:
+            return
+        if not bool((active_round_payload or {}).get('budget_counted', True)):
+            return
+        visible_calls = [
+            call for call in list(response_tool_calls or []) if str(getattr(call, 'name', '') or '').strip()
+        ]
+        if not visible_calls:
+            return
+        if not all(str(getattr(call, 'id', '') or '').strip() in staged_ids for call in visible_calls):
+            return
+        refund = getattr(self._log_service, 'refund_execution_stage_round', None)
+        if not callable(refund):
+            return
+        try:
+            refund(str(task_id or ''), str(node_id or ''), round_id)
+        except Exception:
+            return
+
+    def _advance_node_stash_hop(self, node: Any, runtime_context: dict[str, Any]) -> dict[str, Any]:
+        service = getattr(self, '_tool_impulse_service', None)
+        advance = getattr(service, 'advance_node_stash_hop', None) if service is not None else None
+        if not callable(advance):
+            return {}
+        try:
+            result = advance(str(getattr(node, 'node_id', '') or '').strip())
+        except Exception:
+            return {}
+        if isinstance(result, tuple):
+            carrier, swept_tool_ids = (result[0] or {}), list(result[1] or [])
+        else:
+            # 旁路注入的 service 桩（测试替身）仍返回旧形状：按"没有清扫"处理，不猜。
+            carrier, swept_tool_ids = (result or {}), []
+        runtime_context['tool_arg_stash_swept'] = [
+            str(name or '').strip() for name in swept_tool_ids if str(name or '').strip()
+        ]
+        return dict(carrier or {})
+
+    def _impulse_contract_applicable(self, *, tool_name: str, runtime_context: dict[str, Any]) -> bool:
+        """这一跳是不是"授权了但契约没在场"的调用。
+
+        常驻内置与循环自己注入的控制信号不进判据（D13）；块已经在上下文里就不是冲动
+        调用。判据视图缺失（`tool_contract_presence` 没被写过，例如旁路调用）时**不**走
+        冲动路径——按状态豁免闸门却在上下文其实带着契约时把调用降级成"只交契约"，等于让
+        模型白多等一跳。
+        """
+        name = str(tool_name or '').strip()
+        if not name or name in NODE_NEVER_CONTRACT_TOOL_NAMES:
+            return False
+        presence = runtime_context.get('tool_contract_presence')
+        if not isinstance(presence, dict):
+            return False
+        return name not in presence
+
+    async def _impulse_contract_content(
+        self,
+        *,
+        tools: dict[str, Any],
+        tool_name: str,
+        arguments: dict[str, Any],
+        runtime_context: dict[str, Any],
+    ) -> str | None:
+        """交契约并暂存入参；返回 None 表示"这一跳按原路径走"（已水合、或不是工具调用问题）。
+
+        投递本身抛异常时**不放行执行**：未水合还让它跑过去，就正好破掉本次改造要立的
+        不变量（执行发生在契约对模型可见之后）。
+        """
+        service = getattr(self, '_tool_impulse_service', None)
+        deliver = getattr(service, 'deliver_impulse_contract', None) if service is not None else None
+        if not callable(deliver) or not self._impulse_contract_applicable(
+            tool_name=tool_name, runtime_context=runtime_context
+        ):
+            return None
+        name = str(tool_name or '').strip()
+        task_id = str(runtime_context.get('task_id') or '').strip()
+        node_id = str(runtime_context.get('node_id') or '').strip()
+        if not task_id or not node_id:
+            return None
+        delivered = runtime_context.get('impulse_delivered_tools')
+        if not isinstance(delivered, dict):
+            delivered = {}
+            runtime_context['impulse_delivered_tools'] = delivered
+        position = int(delivered.get(name, 0) or 0) + 1
+        totals = runtime_context.get('impulse_batch_totals')
+        batch_total = int(totals.get(name, position) or position) if isinstance(totals, dict) else position
+        try:
+            result = deliver(
+                actor_role=str(runtime_context.get('actor_role') or 'execution').strip() or 'execution',
+                session_id=str(runtime_context.get('session_key') or runtime_context.get('session_id') or 'web:shared').strip(),
+                tool_id=name,
+                arguments=dict(arguments or {}),
+                scope_key=_stash_node_scope_key(task_id, node_id, name),
+                carrier=runtime_context.get('tool_arg_stash_carrier') or {},
+                batch_position=position,
+                batch_total=max(position, batch_total),
+                runtime_context=runtime_context,
+            )
+        except Exception as exc:
+            return f'Error: could not deliver the contract for {name}: {describe_exception(exc)}'
+        if not isinstance(result, dict):
+            return None
+        if str(result.get('outcome') or '').strip() == IMPULSE_REJECT:
+            return None
+        persist = getattr(service, 'persist_node_stash_carrier', None)
+        if callable(persist):
+            try:
+                runtime_context['tool_arg_stash_carrier'] = persist(node_id, result.get('carrier')) or {}
+            except Exception:
+                pass
+        delivered[name] = position
+        if str(result.get('outcome') or '').strip() != IMPULSE_INVALID:
+            staged_ids = runtime_context.get('impulse_staged_call_ids')
+            call_id = str(runtime_context.get('current_tool_call_id') or '').strip()
+            if isinstance(staged_ids, set) and call_id:
+                staged_ids.add(call_id)
+        return str(result.get('content') or '').strip() or None
+
+    def _persist_node_stash_carrier(
+        self,
+        *,
+        node_id: str,
+        carrier: Any,
+        runtime_context: dict[str, Any],
+    ) -> None:
+        """把消费后的载体落回节点行，并让本轮后续调用读到同一份。"""
+        service = getattr(self, '_tool_impulse_service', None)
+        persist = getattr(service, 'persist_node_stash_carrier', None)
+        if not callable(persist):
+            return
+        try:
+            runtime_context['tool_arg_stash_carrier'] = persist(node_id, carrier) or {}
+        except Exception:
+            pass
+
+    def _node_contract_presence_reading(
+        self,
+        *,
+        index: dict[str, str],
+        revisions: dict[str, list[str]],
+        candidate_tool_names: list[str],
+        carrier: Any,
+        task_id: str,
+        node_id: str,
+    ) -> dict[str, Any]:
+        """D15 的每跳在场读数，落在已经整份持久化的 selection trace 里。
+
+        `absent` 用的是候选名单（已授权但块不在场），不是治理全集——后者每跳都要重算一遍
+        才能塞进这个位置，而它回答不了任何"这一跳为什么调不动"。
+        """
+        container = tool_arg_stash.read_container(carrier)
+
+        def _staged_count_of(tool_id: str) -> int:
+            return int(
+                tool_arg_stash.staged_count(
+                    container,
+                    scope_key=_stash_node_scope_key(task_id, node_id, tool_id),
+                )
+                or 0
+            )
+
+        return contract_presence_reading(
+            [*list(index or {}), *list(candidate_tool_names or [])],
+            index=index,
+            revisions=revisions,
+            staged_count_of=_staged_count_of,
+        )
+
+    def _record_tool_execution_path(self, runtime_context: dict[str, Any], path: str) -> None:
+        """记下这次调用实际走的道，按 call id 索引，供审计行落盘（D15 `execution_path`）。
+
+        只有 `_execute_tool_raw` 这一层知道"这是复用批 / 字段误用 / 改参数重调"，而审计行在
+        log_service 那侧按 call 落，所以在这里交接一次，不让下游用回执文本反推。
+        """
+        call_id = str(runtime_context.get('current_tool_call_id') or '').strip()
+        if not call_id or not path:
+            return
+        paths = runtime_context.get('tool_execution_paths')
+        if not isinstance(paths, dict):
+            paths = {}
+            runtime_context['tool_execution_paths'] = paths
+        paths[call_id] = path
+
+    def _node_staged_entries(self, *, container: Any, runtime_context: dict[str, Any], tool_name: str) -> list[dict[str, Any]]:
+        """这一跳可消费的暂存条目（严格一跳 + 同修订）。"""
+        carrier = runtime_context.get('tool_arg_stash_carrier') or {}
+        presence = runtime_context.get('tool_contract_presence')
+        fingerprint = ''
+        if isinstance(presence, dict):
+            fingerprint = str(presence.get(str(tool_name or '').strip()) or '').strip()
+        return tool_arg_stash.peek_entries(
+            container,
+            scope_key=_stash_node_scope_key(
+                str(runtime_context.get('task_id') or '').strip(),
+                str(runtime_context.get('node_id') or '').strip(),
+                str(tool_name or '').strip(),
+            ),
+            current_hop=tool_arg_stash.read_hop(carrier),
+            fingerprint=fingerprint,
+        )
+
+    async def _reuse_args_execution(
+        self,
+        *,
+        tools: dict[str, Any],
+        tool_name: str,
+        arguments: dict[str, Any],
+        runtime_context: dict[str, Any],
+    ) -> str | None:
+        """`reuse_args=true` 这一跳：把当轮全部暂存入参跑完，聚合成一个结果（D7）。
+
+        返回 None 表示"这不是复用调用"，调用方按普通路径走。四类答案互斥：显式入参优先
+        （C3）、契约不在场（C2，一份都不跑）、没有可复用条目（C1）、执行整批。C1/C2 不退
+        预算以外的账、也**不计一轮**（D8：字段误用不是任务失败，计预算会让模型从此绕开
+        这条通道）。每份结果各自走单次调用的渲染与外置闸门后再聚合（D7-5），失败项只让
+        自己那一项 `ok:false`，顶层 `ok` 表示"这批跑了"。
+        """
+        reuse_requested, explicit_arguments = split_reuse_arguments(arguments)
+        if not reuse_requested:
+            name = str(tool_name or '').strip()
+            if name and tools.get(name) is not None and not runtime_context.get('reuse_batch_in_progress'):
+                # 上一跳刚为这个名字暂存过入参，这一跳却带着新参数直接调 ⇒ `corrected`。
+                # 审计要靠这条区分"批量语义生效"和"模型干脆绕开批量通道"。
+                # 复用批内部逐份执行时**不判**：那条路走的是同一个 call id，判了就把刚写下的
+                # `reused` 盖成 `corrected`，批量语义在审计里反而看不见。
+                carrier = runtime_context.get('tool_arg_stash_carrier') or {}
+                if self._node_staged_entries(
+                    container=tool_arg_stash.read_container(carrier),
+                    runtime_context=runtime_context,
+                    tool_name=name,
+                ):
+                    self._record_tool_execution_path(runtime_context, EXECUTION_PATH_CORRECTED)
+            return None
+        name = str(tool_name or '').strip()
+        if not name:
+            return None
+        if tools.get(name) is None:
+            # 名字本轮就没有实例（无权限/已下架）：交回普通路径出那条带名单的拒绝回执，
+            # 而不是拿 N 份暂存入参各撞一次。
+            return None
+        task_id = str(runtime_context.get('task_id') or '').strip()
+        node_id = str(runtime_context.get('node_id') or '').strip()
+        carrier = runtime_context.get('tool_arg_stash_carrier') or {}
+        container = tool_arg_stash.read_container(carrier)
+        hop = tool_arg_stash.read_hop(carrier)
+        presence = runtime_context.get('tool_contract_presence')
+        fingerprint = ''
+        if isinstance(presence, dict):
+            fingerprint = str(presence.get(name) or '').strip()
+        scope_key = _stash_node_scope_key(task_id, node_id, name)
+        staged_entries = tool_arg_stash.peek_entries(
+            container,
+            scope_key=scope_key,
+            current_hop=hop,
+            fingerprint=fingerprint,
+        )
+        plan = plan_reuse_execution(
+            reuse_requested=True,
+            explicit_arguments=explicit_arguments,
+            contract_present=bool(fingerprint),
+            staged_entries=staged_entries,
+        )
+        kind = str(plan.get('kind') or '').strip()
+        if kind == REUSE_PLAN_EXPLICIT_ARGS:
+            # 带着 `reuse_args` 又给显式入参：字段误用。若上一跳确实为它暂存过东西，这是
+            # 模型主动改参数重调（`corrected`）；纯误填则算非法复用，两者在排障上是两回事。
+            self._record_tool_execution_path(
+                runtime_context,
+                EXECUTION_PATH_CORRECTED if staged_entries else EXECUTION_PATH_ILLEGAL_REUSE,
+            )
+            executed = await self._execute_tool(
+                tools=tools,
+                tool_name=name,
+                arguments=dict(plan.get('arguments') or {}),
+                runtime_context=runtime_context,
+            )
+            next_container, _dropped = tool_arg_stash.consume_entries(
+                container,
+                scope_key=scope_key,
+                current_hop=hop,
+                fingerprint=fingerprint,
+            )
+            self._persist_node_stash_carrier(
+                node_id=node_id,
+                carrier=tool_arg_stash.build_carrier(next_container, hop=hop),
+                runtime_context=runtime_context,
+            )
+            return f"{reuse_refusal_text(kind, name)}\n\n{executed}"
+        if kind in {REUSE_PLAN_NO_STASH, REUSE_PLAN_CONTRACT_ABSENT}:
+            self._record_tool_execution_path(runtime_context, EXECUTION_PATH_ILLEGAL_REUSE)
+            staged_ids = runtime_context.get('impulse_staged_call_ids')
+            call_id = str(runtime_context.get('current_tool_call_id') or '').strip()
+            if isinstance(staged_ids, set) and call_id:
+                staged_ids.add(call_id)
+            if kind == REUSE_PLAN_CONTRACT_ABSENT and container.get(scope_key):
+                self._persist_node_stash_carrier(
+                    node_id=node_id,
+                    carrier=tool_arg_stash.build_carrier(
+                        tool_arg_stash.drop_scope(container, scope_key=scope_key),
+                        hop=hop,
+                    ),
+                    runtime_context=runtime_context,
+                )
+            return reuse_refusal_text(kind, name)
+        if kind != REUSE_PLAN_EXECUTE:
+            return None
+        self._record_tool_execution_path(runtime_context, EXECUTION_PATH_REUSED)
+        entries = [dict(item) for item in list(plan.get('entries') or []) if isinstance(item, dict)]
+        items: list[dict[str, Any]] = []
+        # 整批共用同一个 call id 的记账位：批内逐份执行不得再判一次道（见上面那条豁免）。
+        runtime_context['reuse_batch_in_progress'] = True
+        try:
+            for index, entry in enumerate(entries):
+                entry_arguments = dict(entry.get(tool_arg_stash.ARGS_FIELD) or {})
+                try:
+                    rendered = await self._execute_tool(
+                        tools=tools,
+                        tool_name=name,
+                        arguments=entry_arguments,
+                        runtime_context=runtime_context,
+                    )
+                except Exception as exc:
+                    # 一份抛异常只作废那一份：整批 raise 出去，模型看到的就还是"这批没跑"，
+                    # 于是重发 reuse_args 把已成功的那些再跑一遍。
+                    rendered = f'Error: {describe_exception(exc)}'
+                text = str(rendered or '')
+                item: dict[str, Any] = {
+                    'index': index,
+                    'args_digest': str(entry.get(tool_arg_stash.DIGEST_FIELD) or tool_arg_stash.args_digest(entry_arguments)),
+                    'ok': not is_error_like_tool_result(text),
+                }
+                item['error' if item['ok'] is False else 'result'] = text
+                items.append(item)
+        finally:
+            runtime_context.pop('reuse_batch_in_progress', None)
+        next_container, _consumed = tool_arg_stash.consume_entries(
+            container,
+            scope_key=scope_key,
+            current_hop=hop,
+            fingerprint=fingerprint,
+        )
+        self._persist_node_stash_carrier(
+            node_id=node_id,
+            carrier=tool_arg_stash.build_carrier(next_container, hop=hop),
+            runtime_context=runtime_context,
+        )
+        return aggregate_reuse_results(tool_name=name, items=items)
+
     async def _execute_tool_raw(self, *, tools: dict[str, Tool], tool_name: str, arguments: dict[str, Any], runtime_context: dict[str, Any]) -> Any:
+        # `reuse_args=true` 的整批执行排在契约投递之前：复用调用带的是"上一跳已校验过的入参"，
+        # 而投递那条路会把这一跳整批换成"交契约+暂存"，两者同时命中就会把复用请求再暂存一次。
+        reuse_content = await self._reuse_args_execution(
+            tools=tools,
+            tool_name=tool_name,
+            arguments=arguments,
+            runtime_context=runtime_context,
+        )
+        if reuse_content is not None:
+            return reuse_content
+        # 契约不在场而名字已授权：这一跳**不执行**，交契约 + 暂存入参（D3）。排在阶段闸门
+        # 之前，因为这条豁免是按状态而不是按名字——闸门今天会把"没开阶段就调它"先拒掉。
+        impulse_content = await self._impulse_contract_content(
+            tools=tools,
+            tool_name=tool_name,
+            arguments=arguments,
+            runtime_context=runtime_context,
+        )
+        if impulse_content is not None:
+            return impulse_content
         stage_gate_error = self._execution_tool_gate_error(tool_name=tool_name, runtime_context=runtime_context)
         if stage_gate_error:
             return f'Error: {stage_gate_error}'
@@ -5252,7 +5535,7 @@ class ReActToolLoop:
         execute_kwargs = self._normalize_tool_call_arguments(arguments)
         runtime_param_name = self._runtime_context_parameter_name(tool)
         if runtime_param_name is not None:
-            execute_kwargs[runtime_param_name] = runtime_context
+            execute_kwargs[runtime_param_name] = tool_facing_runtime_context(runtime_context)
         # 统一 timeout 合同：显式传参 > 全局默认（无上限）。自持工具（持有子进程/
         # 网络会话，需要结构化收尾）自己消费该值；豁免工具（如 spawn_child_nodes、
         # wait/stop_tool_execution）不套任何外层时限，仅可经任务级取消链中断；
@@ -8395,48 +8678,17 @@ class ReActToolLoop:
         except Exception:
             return
 
-    @classmethod
-    def _latest_load_tool_context_messages_by_tool_id(
-        cls,
+    @staticmethod
+    def _latest_contract_fingerprints_by_tool_id(
         messages: list[dict[str, Any]],
-        *,
-        kept_stage_contexts: Any = None,
-    ) -> dict[str, dict[str, Any]]:
-        """在场的 toolskill 契约载体，与 callable 收窄共用同一判据。
+    ) -> dict[str, str]:
+        """在场的 toolskill 契约：``tool_id -> fingerprint``，与 callable 收窄共用同一判据函数。
 
-        除了未压缩的 loader 结果行，阶段块里保留的正文（`kept_tool_contexts`）同样算
-        在场。两处必须同判据，否则裁撤后重读被放行、同一份正文在上下文里出现两次。
+        判据只认模型眼前的 `[TOOL_CONTRACT_V1:…]` 块（两条投递道都印它），阶段台账里保留的
+        正文不再算在场（D9）。两处必须同判据，否则裁撤后重读被放行、同一份正文在上下文里
+        出现两次。
         """
-        latest: dict[str, dict[str, Any]] = {}
-        for message in reversed(list(messages or [])):
-            if not isinstance(message, dict):
-                continue
-            if str((message or {}).get("role") or "").strip().lower() != "tool":
-                continue
-            tool_name = str((message or {}).get("name") or "").strip()
-            if tool_name not in {"load_tool_context", "load_tool_context_v2"}:
-                continue
-            payload = cls._tool_message_json_payload(message)
-            if not bool(payload.get("ok")):
-                continue
-            tool_id = str(payload.get("tool_id") or "").strip()
-            fingerprint = str(payload.get("tool_context_fingerprint") or "").strip()
-            if not tool_id or not fingerprint or tool_id in latest:
-                continue
-            latest[tool_id] = dict(message or {})
-        for tool_id, fingerprint in kept_contract_index(kept_stage_contexts).items():
-            if not tool_id or not fingerprint or tool_id in latest:
-                continue
-            latest[tool_id] = {
-                "role": "tool",
-                "name": "load_tool_context",
-                "content": json.dumps(
-                    {"ok": True, "tool_id": tool_id, "tool_context_fingerprint": fingerprint},
-                    ensure_ascii=False,
-                ),
-                "carried_by": "kept_stage_context",
-            }
-        return latest
+        return contract_presence_index(request_messages=list(messages or []))
 
     @staticmethod
     def _load_tool_context_repeat_repair_message() -> str:
@@ -8477,16 +8729,6 @@ class ReActToolLoop:
                 list(runtime_context.get("callable_tool_names") or current_frame.get("callable_tool_names") or [])
             )
         )
-        hydrated_tool_names = set(
-            self._normalized_name_list(
-                list(
-                    runtime_context.get("hydrated_executor_names")
-                    or current_frame.get("hydrated_executor_names")
-                    or current_frame.get("hydrated_executor_state")
-                    or []
-                )
-            )
-        )
         full_callable_tool_names = set(
             self._normalized_name_list(
                 list(
@@ -8501,12 +8743,7 @@ class ReActToolLoop:
                 list(runtime_context.get("rbac_visible_tool_names") or current_frame.get("rbac_visible_tool_names") or [])
             )
         )
-        latest_messages = self._latest_load_tool_context_messages_by_tool_id(
-            message_history,
-            kept_stage_contexts=kept_tool_contexts_from_frames(
-                (getattr(node, "metadata", None) or {}).get("execution_stages")
-            ),
-        )
+        latest_fingerprints = self._latest_contract_fingerprints_by_tool_id(message_history)
         base_probe = {
             "recorded_at": now_iso(),
             "stage": "load_tool_context_direct_read_violations",
@@ -8514,10 +8751,9 @@ class ReActToolLoop:
             "message_history_chars": self._approx_message_history_chars(message_history),
             "response_tool_call_count": len(list(response_tool_calls or [])),
             "requested_tool_ids": requested_tool_ids[:8],
-            "latest_load_tool_context_message_count": len(latest_messages),
+            "latest_contract_fingerprint_count": len(latest_fingerprints),
             "candidate_tool_count": len(candidate_tool_names),
             "callable_tool_count": len(callable_tool_names),
-            "hydrated_tool_count": len(hydrated_tool_names),
             "full_callable_tool_count": len(full_callable_tool_names),
             "visible_tool_count": len(visible_tool_names),
         }
@@ -8542,7 +8778,6 @@ class ReActToolLoop:
                     continue
                 if (
                     requested_tool_id not in callable_tool_names
-                    and requested_tool_id not in hydrated_tool_names
                     and requested_tool_id not in full_callable_tool_names
                 ):
                     continue
@@ -8554,7 +8789,6 @@ class ReActToolLoop:
                         **dict(runtime_context or {}),
                         "candidate_tool_names": list(candidate_tool_names),
                         "callable_tool_names": list(callable_tool_names),
-                        "hydrated_executor_names": list(hydrated_tool_names),
                         "full_callable_tool_names": list(full_callable_tool_names),
                         "rbac_visible_tool_names": list(visible_tool_names),
                     },
@@ -8563,11 +8797,10 @@ class ReActToolLoop:
                     continue
                 resolved_tool_id = str(current_payload.get("tool_id") or requested_tool_id).strip()
                 current_fingerprint = str(current_payload.get("tool_context_fingerprint") or "").strip()
-                latest_tool_message = latest_messages.get(resolved_tool_id)
-                if not latest_tool_message or not current_fingerprint:
+                latest_fingerprint = str(latest_fingerprints.get(resolved_tool_id) or "").strip()
+                if not latest_fingerprint or not current_fingerprint:
                     continue
-                latest_payload = self._tool_message_json_payload(latest_tool_message)
-                if str(latest_payload.get("tool_context_fingerprint") or "").strip() != current_fingerprint:
+                if latest_fingerprint != current_fingerprint:
                     continue
                 violations.append(
                     {

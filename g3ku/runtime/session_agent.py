@@ -21,6 +21,7 @@ from g3ku.core.state import AgentState, StructuredError
 from g3ku.prompt_trace import render_output_trace
 from g3ku.providers.fallback import MODEL_RETRY_LIVE_STATES
 from g3ku.runtime import skill_roster_notice as _skill_roster_notice
+from g3ku.runtime import tool_arg_stash as _tool_arg_stash
 from g3ku.runtime.cancellation import ToolCancellationToken
 from g3ku.runtime.frontdoor.canonical_context import (
     TRANSCRIPT_CC_UPSERT_FIELD,
@@ -219,7 +220,6 @@ class RuntimeAgentSession:
         self._frontdoor_canonical_context: dict[str, Any] = default_frontdoor_canonical_context()
         self._compression_state: dict[str, Any] = {}
         self._semantic_context_state: dict[str, Any] = {}
-        self._frontdoor_hydrated_tool_names: list[str] = []
         self._frontdoor_repair_required_tool_items: list[dict[str, Any]] = []
         self._frontdoor_repair_required_skill_items: list[dict[str, Any]] = []
         self._frontdoor_selection_debug: dict[str, Any] = {}
@@ -621,9 +621,6 @@ class RuntimeAgentSession:
             payload.get("compression_state") or payload.get("compression") or {}
         )
         self._semantic_context_state = dict(payload.get("semantic_context_state") or {})
-        self._frontdoor_hydrated_tool_names = self._normalized_name_list(
-            payload.get("hydrated_tool_names")
-        )
         self._frontdoor_capability_snapshot_exposure_revision = str(
             payload.get("capability_snapshot_exposure_revision") or ""
         ).strip()
@@ -637,6 +634,15 @@ class RuntimeAgentSession:
             _skill_roster_notice.set_notice_context(
                 f"session:{str(getattr(getattr(self, 'state', None), 'session_key', '') or '').strip()}",
                 payload.get("skill_roster_notice_context"),
+            )
+        # 入参暂存与 roster 同一条纪律：**载荷没带这个键时不动**。基线载荷里缺键不等于
+        # "模型没暂存过任何东西"，覆盖成空会把刚拿到的可复用入参抹掉；而带键时按归一化
+        # 形状收，脏条目不进执行侧。跳序与条目同刻还原——只还原条目不还原跳序，重启后
+        # 第一跳就会把"上一跳刚暂存的"判成过期（或反过来判成还没到期）。
+        if "tool_arg_stash" in payload or "tool_arg_stash_hop" in payload:
+            self._frontdoor_tool_arg_stash = _tool_arg_stash.build_carrier(
+                payload.get("tool_arg_stash"),
+                hop=_tool_arg_stash.read_hop(payload),
             )
         self._frontdoor_provider_tool_schema_names = self._normalized_name_list(
             payload.get("provider_tool_schema_names")
@@ -747,9 +753,6 @@ class RuntimeAgentSession:
             # 不补这一步，截断后那一跳继续沿用截断前钉住的 `tools[]` 与头部名单：
             # 派发面点到的新名字不在清单里，得先 load 一次才调得动。按当轮全集重播种
             # 多付的是 `system` + `tools[]` 那一截字节，正文本来就已随基线清空重付。
-            self._frontdoor_hydrated_tool_names = self._normalized_name_list(
-                (payload or {}).get("hydrated_tool_names")
-            )
             # 截断到会话开头：基线里没有那条提示，台账也必须回到"没投过"，否则那个名字
             # 从此再不会出现（只清历史不清台账 = 永久遗忘）。
             _skill_roster_notice.set_notice_context(
@@ -758,6 +761,15 @@ class RuntimeAgentSession:
                     (payload or {}).get("skill_roster_notice_context"),
                     cutoff_iso=str((payload or {}).get("updated_at") or "").strip(),
                 ),
+            )
+            # 同一刀也要落在暂存上：留着截断点之后暂存的入参，等于让一段已被抹掉的
+            # "将来"还能被执行一次。
+            self._frontdoor_tool_arg_stash = _tool_arg_stash.build_carrier(
+                _tool_arg_stash.drop_staged_after(
+                    _tool_arg_stash.carrier_container(payload or {}),
+                    cutoff_iso=str((payload or {}).get("updated_at") or "").strip(),
+                ),
+                hop=_tool_arg_stash.read_hop(payload),
             )
             self._frontdoor_visible_tool_ids = self._normalized_name_list(
                 (payload or {}).get("visible_tool_ids")
@@ -959,9 +971,6 @@ class RuntimeAgentSession:
                 "semantic_context_state": copy.deepcopy(
                     getattr(self, "_semantic_context_state", None) or {}
                 ),
-                "hydrated_tool_names": list(
-                    self._normalized_name_list(getattr(self, "_frontdoor_hydrated_tool_names", []))
-                ),
                 "capability_snapshot_exposure_revision": str(
                     getattr(self, "_frontdoor_capability_snapshot_exposure_revision", "") or ""
                 ).strip(),
@@ -974,6 +983,15 @@ class RuntimeAgentSession:
                 # 新增可读 skill 的一次性提示台账：重启/续跑后靠它不重复投。
                 "skill_roster_notice_context": _skill_roster_notice.notice_context_for(
                     f"session:{str(session_key or '').strip()}"
+                ),
+                # 入参暂存（`reuse_args` 的可复用面）与 roster 同一条路落盘：不落盘的后果
+                # 不是"少一份状态"，而是模型下一跳填了 reuse_args 却被告知没有可复用入参。
+                # 容器与跳序两个键：侧车是白名单装配的，少列一个就静默不落盘。
+                "tool_arg_stash": _tool_arg_stash.carrier_container(
+                    getattr(self, "_frontdoor_tool_arg_stash", {}) or {}
+                ),
+                "tool_arg_stash_hop": _tool_arg_stash.read_hop(
+                    getattr(self, "_frontdoor_tool_arg_stash", {}) or {}
                 ),
                 "provider_tool_schema_names": list(
                     self._normalized_name_list(
@@ -3069,13 +3087,6 @@ class RuntimeAgentSession:
             snapshot["assistant_text"] = str(self._state.latest_message)
         if self._state.last_error is not None:
             snapshot["last_error"] = asdict(self._state.last_error)
-        hydrated_tool_names = [
-            str(item or "").strip()
-            for item in list(getattr(self, "_frontdoor_hydrated_tool_names", []) or [])
-            if str(item or "").strip()
-        ]
-        if hydrated_tool_names:
-            snapshot["hydrated_tool_names"] = hydrated_tool_names
         repair_required_tool_items = [
             dict(item)
             for item in list(getattr(self, "_frontdoor_repair_required_tool_items", []) or [])
@@ -3156,7 +3167,6 @@ class RuntimeAgentSession:
             and "last_error" not in snapshot
             and "frontdoor_stage_state" not in snapshot
             and "frontdoor_canonical_context" not in snapshot
-            and "hydrated_tool_names" not in snapshot
             and "repair_required_tool_items" not in snapshot
             and "repair_required_skill_items" not in snapshot
             and "frontdoor_request_body_messages" not in snapshot
@@ -3697,14 +3707,12 @@ class RuntimeAgentSession:
         frontdoor_stage_state = interrupt_values.get("frontdoor_stage_state")
         frontdoor_canonical_context = interrupt_values.get("frontdoor_canonical_context")
         compression_state = interrupt_values.get("compression_state")
-        hydrated_tool_names = interrupt_values.get("hydrated_tool_names")
         repair_required_tool_items = interrupt_values.get("repair_required_tool_items")
         repair_required_skill_items = interrupt_values.get("repair_required_skill_items")
         frontdoor_selection_debug = interrupt_values.get("frontdoor_selection_debug")
         preserved_frontdoor_stage_state = getattr(self, "_frontdoor_stage_state", None)
         preserved_frontdoor_canonical_context = getattr(self, "_frontdoor_canonical_context", None)
         preserved_compression_state = getattr(self, "_compression_state", None)
-        preserved_hydrated_tool_names = getattr(self, "_frontdoor_hydrated_tool_names", None)
         preserved_repair_required_tool_items = getattr(self, "_frontdoor_repair_required_tool_items", None)
         preserved_repair_required_skill_items = getattr(self, "_frontdoor_repair_required_skill_items", None)
         preserved_frontdoor_selection_debug = getattr(self, "_frontdoor_selection_debug", None)
@@ -3730,11 +3738,6 @@ class RuntimeAgentSession:
             else {}
         )
         self._semantic_context_state = {}
-        self._frontdoor_hydrated_tool_names = [
-            str(item or "").strip()
-            for item in list(hydrated_tool_names or preserved_hydrated_tool_names or [])
-            if str(item or "").strip()
-        ]
         self._frontdoor_repair_required_tool_items = [
             dict(item)
             for item in list(repair_required_tool_items or preserved_repair_required_tool_items or [])

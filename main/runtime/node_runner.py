@@ -15,13 +15,8 @@ from loguru import logger
 
 from g3ku.agent.tools.base import Tool
 from g3ku.deployment.data_root import data_work_path
-from g3ku.runtime.kept_contract_snapshot import (
-    resolve_kept_contracts,
-    tool_results_by_call_from_rows,
-)
 from g3ku.runtime.memory_scope import normalize_memory_scope
 from g3ku.runtime.project_environment import current_project_environment
-from g3ku.runtime.stage_prompt_compaction import closing_stage_target
 from g3ku.utils.helpers import PATH_ANCHOR_RULE_TEXT, path_anchor_policy
 from main.errors import (
     DistributionHoldError,
@@ -40,7 +35,6 @@ from main.models import (
     SpawnChildSpec,
     TokenUsageSummary,
     normalize_execution_policy_metadata,
-    normalize_execution_stage_metadata,
     normalize_final_acceptance_metadata,
     normalize_result_payload,
 )
@@ -75,7 +69,6 @@ from main.runtime.internal_tools import (
     SubmitMessageDistributionTool,
     SubmitNextStageTool,
     SubmitNoticeInspectionDecisionTool,
-    normalize_keep_contract_names,
 )
 from main.runtime.node_prompt_contract import extract_node_dynamic_contract_payload
 from main.runtime.pending_notice_state import (
@@ -7998,16 +7991,7 @@ class NodeRunner:
         key_refs: list[dict[str, Any]],
         final: bool,
         drop_completed_stage_tool_detail: bool = False,
-        keep_tools: list[str] | None = None,
-        keep_skills: list[str] | None = None,
     ) -> dict[str, Any]:
-        kept_snapshot = self._resolve_kept_stage_contracts(
-            task_id=task_id,
-            node_id=node_id,
-            drop_completed_stage_tool_detail=bool(drop_completed_stage_tool_detail),
-            keep_tools=keep_tools,
-            keep_skills=keep_skills,
-        )
         stage = self._log_service.submit_next_stage(
             task_id,
             node_id,
@@ -8017,9 +8001,6 @@ class NodeRunner:
             key_refs=[dict(item) for item in list(key_refs or []) if isinstance(item, dict)],
             final=False,
             drop_completed_stage_tool_detail=bool(drop_completed_stage_tool_detail),
-            keep_tools=list(keep_tools or []),
-            keep_skills=list(keep_skills or []),
-            kept_snapshot=kept_snapshot,
         )
         result = {
             'stage_id': str(stage.get('stage_id') or ''),
@@ -8038,62 +8019,6 @@ class NodeRunner:
             # 不必再凭参数倒推（与前门 stage_closure 同形）。
             result['stage_closure'] = dict(closure)
         return result
-
-    def _resolve_kept_stage_contracts(
-        self,
-        *,
-        task_id: str,
-        node_id: str,
-        drop_completed_stage_tool_detail: bool,
-        keep_tools: list[str] | None,
-        keep_skills: list[str] | None,
-    ) -> dict[str, Any]:
-        """节点道的 `keep_*` 收口：正文在**提交点**一次性取好，此后逐轮只回放账本。
-
-        为什么要在这里取而不是 `log_service.submit_next_stage` 里：那条阶段的轮次落在
-        `node.metadata['execution_stages']`、加载器入参落在 `task_node_tool_results`
-        （那里只有 `arguments_text`，阶段轮次只带 call id），而提交一落地这条阶段就带着
-        `context_evicted` 走掉了——名字集合必须在结清之前拼出来。渲染侧从此不碰资源文件：
-        块在历史中段，逐轮重读会让运营者改一次 `toolskills/SKILL.md` 就把它之后的整段前缀
-        缓存顶掉。
-
-        取不到正文的那几条**不写条目**、工具保持撤销态（安全方向天然正确），由
-        `keep_closure_fields` 在回执里逐条点名。本阶段没加载过的名字同样只是点名后忽略，
-        不打回这次提交——阶段已经结清，为一个可有可无的名字重付一次切换没有意义。
-        """
-        if not (normalize_keep_contract_names(keep_tools) or normalize_keep_contract_names(keep_skills)):
-            return {}
-        if not drop_completed_stage_tool_detail:
-            # 没裁撤时这个名字无处可写，交给提交落点的 drop 闸门按同一口径报错。
-            return {}
-        node = self._store.get_node(str(node_id or '').strip())
-        metadata = getattr(node, 'metadata', None)
-        payload = metadata.get('execution_stages') if isinstance(metadata, dict) else {}
-        state = normalize_execution_stage_metadata(payload)
-        # 归属判据与前门共用 `closing_stage_target`，包括"没有可结清的阶段"那一支：照样交给
-        # `resolve_kept_contracts`，它对认不出的名字统一记一条 `stage_never_loaded` 失败而不
-        # 打回提交——两条车道在这里分叉，模型收到的就是两种合同。
-        closing_stage = closing_stage_target(state)
-        try:
-            rows = list(self._store.list_task_node_tool_results(task_id, node_id) or [])
-        except Exception:
-            rows = []
-        getter = getattr(self, '_tool_toolskill_payload_getter', None)
-        workspace_root = None
-        if callable(self._workspace_root_getter):
-            try:
-                workspace_root = Path(self._workspace_root_getter())
-            except Exception:
-                workspace_root = None
-        return resolve_kept_contracts(
-            closing_stage,
-            tool_results_by_call=tool_results_by_call_from_rows(rows),
-            keep_tools=list(keep_tools or []),
-            keep_skills=list(keep_skills or []),
-            tool_payload_getter=getter if callable(getter) else None,
-            resource_manager=getattr(self._react_loop, 'resource_manager', None),
-            workspace_root=workspace_root,
-        )
 
     @staticmethod
     async def _submit_final_result(payload: dict[str, Any]) -> dict[str, Any]:

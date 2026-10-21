@@ -6,6 +6,7 @@ from typing import Any
 
 from g3ku.runtime.project_environment import current_project_environment, format_python_env_reference
 from g3ku.runtime.tool_visibility import CEO_FIXED_BUILTIN_TOOL_NAMES
+from main.prompts import INCLUDE_RE, load_prompt
 from main.runtime.stage_budget import (
     FINAL_RESULT_TOOL_NAME,
     SILENT_TOOL_NAME,
@@ -96,8 +97,12 @@ class CeoPromptBuilder:
         ).strip()
 
     def _read_prompt(self, name: str) -> str:
+        # `{{> x.md}}` 走节点道同一个展开器：五条全局工具规则只在
+        # `main/prompts/shared_tool_reuse_rules.md` 存在一份，两条车道读到的字节必然相同。
+        # 抄第二份的话，改一条规则要记得改两处，而第二处没有任何东西会替 reminders 报警。
         path = self._repo_prompt_dir / name
-        return path.read_text(encoding='utf-8').strip()
+        text = path.read_text(encoding='utf-8').strip()
+        return INCLUDE_RE.sub(lambda match: load_prompt(match.group(1).strip()), text).strip()
 
     @staticmethod
     def _visible_skills_block(skills: list[Any]) -> str:

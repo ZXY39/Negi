@@ -447,7 +447,6 @@ def test_frontdoor_live_contract_rewrite_only_moves_the_tail() -> None:
         return build_frontdoor_tool_contract(
             callable_tool_names=["exec", "submit_next_stage"],
             candidate_tool_names=[],
-            hydrated_tool_names=["exec"],
             frontdoor_stage_state={
                 "active_stage_id": stage_id,
                 "stages": [

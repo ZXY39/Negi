@@ -10,7 +10,7 @@ NODE_DYNAMIC_CONTRACT_KIND = 'node_runtime_tool_contract'
 NODE_DYNAMIC_CONTRACT_HEADING = '## Runtime Tool Contract'
 NODE_DYNAMIC_CONTRACT_PAYLOAD_KEY = '_node_runtime_tool_contract_payload'
 # 与前门 FrontdoorToolContract 同形：回合内常量的候选/修复/策略留在这份契约里，
-# 每跳重写的 callable / hydrated / 活动阶段单独成块落在请求体末位，重写只顶掉它自己。
+# 每跳重写的 callable / 活动阶段单独成块落在请求体末位，重写只顶掉它自己。
 NODE_DYNAMIC_STAGE_GATE_KIND = 'node_runtime_stage_gate'
 NODE_DYNAMIC_STAGE_GATE_HEADING = '## Runtime Stage Gate'
 NODE_RUNTIME_APPENDIX_HEADINGS = (NODE_DYNAMIC_CONTRACT_HEADING, NODE_DYNAMIC_STAGE_GATE_HEADING)
@@ -238,11 +238,14 @@ def _render_node_dynamic_contract_summary(payload: dict[str, Any]) -> str:
 
 
 def _render_node_stage_gate_summary(payload: dict[str, Any]) -> str:
-    """每跳重写的活状态：本轮真可调用集、水合集、活动阶段轨道。排在请求体末位。"""
+    """每跳重写的活状态：不可调名字与活动阶段轨道。排在请求体末位。
+
+    与前门同一口径删掉 `callable_tools`：契约不在场不再是"调不动"，而是"这一跳先拿契约"，
+    列一份每跳变化的名单没有可执行动作，只能靠模型自己去比对。
+    """
     lines = [
         NODE_DYNAMIC_STAGE_GATE_HEADING,
         f'kind: {NODE_DYNAMIC_STAGE_GATE_KIND}',
-        f'callable_tools: {_render_name_list(payload.get("callable_tool_names"))}',
     ]
     denied_tool_names = _normalized_name_list(payload.get('denied_tool_names'))
     if denied_tool_names:
@@ -300,7 +303,6 @@ class NodeRuntimeToolContract:
     visible_skills: list[dict[str, str]]
     candidate_skill_ids: list[str]
     stage_payload: dict[str, Any]
-    hydrated_executor_names: list[str]
     lightweight_tool_ids: list[str]
     selection_trace: dict[str, Any]
     contract_visible_skill_ids: list[str] | None = None
@@ -327,7 +329,6 @@ class NodeRuntimeToolContract:
                 list(self.candidate_skill_items or []),
                 fallback_ids=list(self.candidate_skill_ids or []),
             ),
-            'hydrated_executor_names': _normalized_name_list(list(self.hydrated_executor_names or [])),
             'execution_stage': _stable_stage_payload(self.stage_payload),
         }
         repair_required_tools = _normalized_repair_required_tool_items(self.repair_required_tool_items)

@@ -11,6 +11,7 @@ from g3ku.config.schema import MemoryAssemblyConfig
 from g3ku.core.messages import UserInputMessage
 from g3ku.runtime.frontdoor import _ceo_create_agent_impl as create_agent_impl
 from g3ku.runtime.frontdoor import _ceo_runtime_ops as ceo_runtime_ops
+from g3ku.runtime.tool_contract_block import render_tool_contract_block
 from g3ku.runtime.frontdoor import ceo_runner
 from g3ku.runtime.frontdoor import prompt_cache_contract
 from g3ku.runtime.frontdoor.canonical_context import combine_canonical_context
@@ -148,13 +149,33 @@ def _stub_live_runtime_model(
     )
 
 
+def _contract_block_message(tool_id: str, *, fingerprint: str = "sha256:" + "a" * 64) -> dict[str, object]:
+    """上一跳 `load_tool_context` 的结果行：块在请求视图里 ⇒ 这一跳在场 ⇒ 可调用。
+
+    投递形态与真车道同形（JSON 信封的 `content` 字段装着契约块），判据只认这颗块。
+    """
+    return {
+        "role": "tool",
+        "name": "load_tool_context",
+        "tool_call_id": f"call_load_{tool_id}",
+        "content": json.dumps(
+            {
+                "ok": True,
+                "tool_id": tool_id,
+                "tool_context_fingerprint": fingerprint,
+                "content": render_tool_contract_block(tool_id, fingerprint, f"# {tool_id}\n契约正文"),
+            },
+            ensure_ascii=False,
+        ),
+    }
+
+
 def _canonical_frontdoor_state(**overrides) -> dict[str, object]:
     state: dict[str, object] = {
         "messages": [],
         "tool_names": [],
         "candidate_tool_names": [],
         "candidate_tool_items": [],
-        "hydrated_tool_names": [],
         "visible_skill_ids": [],
         "candidate_skill_ids": [],
         "rbac_visible_tool_names": [],
@@ -506,7 +527,7 @@ def test_initial_persistent_state_tracks_stage_state_and_runtime_marker() -> Non
         "transition_required": False,
         "stages": [],
     }
-    assert state["hydrated_tool_names"] == []
+    assert "hydrated_tool_names" not in state
     assert state["agent_runtime"] == "create_agent"
 
 
@@ -1429,7 +1450,6 @@ async def test_create_agent_runner_run_turn_wires_frontdoor_stage_and_compressio
         _last_route_kind="task_dispatch",
         _frontdoor_stage_state={},
         _compression_state={},
-        _frontdoor_hydrated_tool_names=[],
     )
 
     async def _fake_run_step_loop(*, state, runtime, entry, resume_decision=None):
@@ -1439,7 +1459,6 @@ async def test_create_agent_runner_run_turn_wires_frontdoor_stage_and_compressio
             "route_kind": "self_execute",
             "final_output": "ok",
             "verified_task_ids": ["task:demo-123"],
-            "hydrated_tool_names": ["filesystem_write"],
             "frontdoor_stage_state": {
                 "active_stage_id": "frontdoor-stage-1",
                 "transition_required": False,
@@ -1460,7 +1479,6 @@ async def test_create_agent_runner_run_turn_wires_frontdoor_stage_and_compressio
     assert output == "ok"
     assert session._last_route_kind == "self_execute"
     assert session._last_verified_task_ids == ["task:demo-123"]
-    assert session._frontdoor_hydrated_tool_names == ["filesystem_write"]
     assert session._frontdoor_stage_state["active_stage_id"] == "frontdoor-stage-1"
     assert session._compression_state == {"status": "", "text": "", "source": ""}
     assert session._semantic_context_state == {}
@@ -1473,7 +1491,6 @@ async def test_create_agent_runner_resume_turn_wires_frontdoor_stage_and_compres
         _last_route_kind="task_dispatch",
         _frontdoor_stage_state={},
         _compression_state={},
-        _frontdoor_hydrated_tool_names=[],
         paused_execution_context_snapshot=lambda: {
             "graph_state": {"version": 2, "state": {"approval_request": {"kind": "frontdoor_tool_approval"}}}
         },
@@ -1486,7 +1503,6 @@ async def test_create_agent_runner_resume_turn_wires_frontdoor_stage_and_compres
             "route_kind": "direct_reply",
             "final_output": "approved",
             "verified_task_ids": [],
-            "hydrated_tool_names": ["filesystem_write"],
             "frontdoor_stage_state": {
                 "active_stage_id": "",
                 "transition_required": True,
@@ -1506,7 +1522,6 @@ async def test_create_agent_runner_resume_turn_wires_frontdoor_stage_and_compres
 
     assert output == "approved"
     assert session._last_route_kind == "direct_reply"
-    assert session._frontdoor_hydrated_tool_names == ["filesystem_write"]
     assert session._frontdoor_stage_state["active_stage_id"] == ""
     assert session._frontdoor_stage_state["transition_required"] is False
     assert session._frontdoor_stage_state["stages"][0]["status"] == "completed"
@@ -1514,7 +1529,7 @@ async def test_create_agent_runner_resume_turn_wires_frontdoor_stage_and_compres
 
 
 @pytest.mark.asyncio
-async def test_create_agent_postprocess_does_not_promote_loaded_tool_context_into_next_turn_state() -> None:
+async def test_create_agent_postprocess_does_not_make_contract_absent_tool_callable() -> None:
     runner = create_agent_impl.CreateAgentCeoFrontDoorRunner(loop=SimpleNamespace(main_task_service=None))
 
     result = await runner._postprocess_completed_tool_cycle(
@@ -1549,7 +1564,6 @@ async def test_create_agent_postprocess_does_not_promote_loaded_tool_context_int
             "route_kind": "direct_reply",
             "tool_names": ["load_tool_context"],
             "candidate_tool_names": ["filesystem_write", "agent_browser"],
-            "hydrated_tool_names": [],
             "candidate_skill_ids": [],
             "visible_skill_ids": [],
             "rbac_visible_tool_names": ["load_tool_context", "filesystem_write", "agent_browser"],
@@ -1557,14 +1571,15 @@ async def test_create_agent_postprocess_does_not_promote_loaded_tool_context_int
         }
     )
 
+    # 结果正文里没有 `[TOOL_CONTRACT_V1:…]` 块 ⇒ 这一跳不在场：既不进 callable，也不从候选里摘走。
     assert result is not None
-    assert result["hydrated_tool_names"] == []
+    assert "hydrated_tool_names" not in result
     assert result["tool_names"] == ["load_tool_context"]
     assert result["candidate_tool_names"] == ["filesystem_write", "agent_browser"]
 
 
 @pytest.mark.asyncio
-async def test_create_agent_graph_execute_tools_promotes_loaded_tool_context_into_next_turn_state() -> None:
+async def test_create_agent_graph_execute_tools_makes_loaded_contract_callable() -> None:
     class _InlineLoadTool(Tool):
         @property
         def name(self) -> str:
@@ -1590,9 +1605,12 @@ async def test_create_agent_graph_execute_tools_promotes_loaded_tool_context_int
                 "callable_now": True,
                 "will_be_hydrated_next_turn": True,
                 # 真 loader 的 ok 载荷必带 fingerprint（`main/governance/tool_context.py`
-                # 的 build_tool_context_fingerprint），在场判据按 tool_id + fingerprint 认正文
-                # ——两条车道的重读守卫一直也是这么要求的，缺它就不算契约载体。
+                # 的 build_tool_context_fingerprint），且交付时把契约**块**写进 `content`
+                # ——在场判据只认那颗块头，fingerprint 键本身不再算载体。
                 "tool_context_fingerprint": "sha256:" + "a" * 64,
+                "content": render_tool_contract_block(
+                    tool_id, "sha256:" + "a" * 64, f"# {tool_id}\n契约正文"
+                ),
                 "hydration_targets": [tool_id],
             }
 
@@ -1623,7 +1641,6 @@ async def test_create_agent_graph_execute_tools_promotes_loaded_tool_context_int
                     {"tool_id": "filesystem_write", "description": "Write file content to disk."},
                     {"tool_id": "agent_browser", "description": "Browser automation via semantic shortlist."},
                 ],
-                hydrated_tool_names=[],
                 visible_skill_ids=[],
                 candidate_skill_ids=[],
                 rbac_visible_tool_names=["load_tool_context", "filesystem_write", "agent_browser"],
@@ -1668,8 +1685,8 @@ async def test_create_agent_graph_execute_tools_promotes_loaded_tool_context_int
         )
 
     assert result["next_step"] == "call_model"
-    assert result["hydrated_tool_names"] == ["filesystem_write"]
-    assert result["tool_names"] == ["load_tool_context", "filesystem_write"]
+    assert "hydrated_tool_names" not in result
+    assert result["tool_names"] == ["load_tool_context", "filesystem_write", "silent"]
     assert result["candidate_tool_names"] == ["agent_browser"]
     assert result["candidate_tool_items"] == [
         {
@@ -1689,7 +1706,9 @@ async def test_create_agent_graph_execute_tools_promotes_loaded_tool_context_int
     ]
     assert len(contract_messages) == 2  # 一份稳定契约 + 一份活状态块
     contract_text = "\n".join(str(item["content"] or "") for item in contract_messages)
-    assert "callable_tools: `load_tool_context`, `filesystem_write`" in contract_text
+    assert "callable_tools:" not in contract_text
+    # 这一跳的 callable 读点是上面的 `result["tool_names"]`：契约块随 load 结果进入请求视图
+    # 之后，名字才留在这份名单里。
     assert "hydrated_tools:" not in contract_text
     # 静态规则不再抄进契约：加载/复读语义只由基础提示词 `ceo_frontdoor.md` 承载
     assert "load_tool_context_help:" not in contract_text
@@ -1749,21 +1768,14 @@ def test_frontdoor_stage_state_after_tool_cycle_ignores_raw_result_when_writing_
     assert "raw_result" not in round_tool
 
 
-def test_frontdoor_default_hydrated_tool_limit_is_16() -> None:
-    runner = create_agent_impl.CreateAgentCeoFrontDoorRunner(loop=SimpleNamespace(main_task_service=None))
-
-    assert runner._frontdoor_hydrated_tool_limit_value() == 16
-
-
 @pytest.mark.asyncio
-async def test_create_agent_runner_graph_prepare_turn_seeds_session_hydrated_tools() -> None:
+async def test_create_agent_runner_graph_prepare_turn_keeps_contract_present_tool_callable() -> None:
     session = RuntimeAgentSession(
         SimpleNamespace(model="demo", reasoning_effort=None, multi_agent_runner=None),
         session_key="web:shared",
         channel="web",
         chat_id="shared",
     )
-    session._frontdoor_hydrated_tool_names = ["filesystem_write"]
 
     runner = create_agent_impl.CreateAgentCeoFrontDoorRunner(
         loop=SimpleNamespace(
@@ -1818,9 +1830,8 @@ async def test_create_agent_runner_graph_prepare_turn_seeds_session_hydrated_too
     runner._selected_tool_schemas = lambda tool_names: [{"name": name, "parameters": {"type": "object"}} for name in list(tool_names or [])]
 
     prepared_state = initial_persistent_state(user_input={"content": "hello", "metadata": {}})
-    # 台账跨回合带着名字走，正文也得跟着走：装配路按**当次请求视图**判在场
-    # （FIX_PLAN §0 不变量），这里补上上一跳那条 load_tool_context 的结果行，测的才是
-    # 「种子hydrated + 正文在场 ⇒ 继续可调」这条真路径。少了这一行就等于测撤销。
+    # 装配路按**当次请求视图**判在场（FIX_PLAN §0 不变量）：这里放上上一跳那条
+    # load_tool_context 的结果行，测的是「正文在场 ⇒ 下一回合继续可调」这条真路径。
     prepared_state["messages"] = [
         {
             "role": "tool",
@@ -1830,6 +1841,9 @@ async def test_create_agent_runner_graph_prepare_turn_seeds_session_hydrated_too
                     "ok": True,
                     "tool_id": "filesystem_write",
                     "tool_context_fingerprint": "sha256:" + "a" * 64,
+                    "content": render_tool_contract_block(
+                        "filesystem_write", "sha256:" + "a" * 64, "# filesystem_write\n契约正文"
+                    ),
                 },
                 ensure_ascii=False,
             ),
@@ -1841,8 +1855,8 @@ async def test_create_agent_runner_graph_prepare_turn_seeds_session_hydrated_too
         runtime=SimpleNamespace(context=SimpleNamespace(session=session)),
     )
 
-    assert prepared["hydrated_tool_names"] == ["filesystem_write"]
-    assert prepared["hydration_revoked_executor_names"] == []
+    assert "hydrated_tool_names" not in prepared
+    assert "hydration_revoked_executor_names" not in prepared
     assert prepared["tool_names"] == ["submit_next_stage", "load_tool_context", "filesystem_write"]
     assert prepared["frontdoor_selection_debug"] == {
         "query_text": "hello",
@@ -1858,7 +1872,16 @@ async def test_create_agent_runner_graph_prepare_turn_seeds_session_hydrated_too
         "selected_skills": [],
         "callable_tool_names": ["submit_next_stage", "load_tool_context", "filesystem_write", "silent"],
         "candidate_tool_names": [],
-        "hydrated_tool_names": ["filesystem_write"],
+        "contract_present_tool_names": ["filesystem_write"],
+        # D15 的两档读数：在场那份带自己的修订与本跳暂存份数；清扫计数缺省空。
+        "tool_contract_presence": {
+            "present": [
+                {"tool": "filesystem_write", "fingerprint": "sha256:" + "a" * 64, "staged_count": 0}
+            ],
+            "absent": [],
+            "stale_rev": [],
+        },
+        "staged_swept_tool_ids": [],
     }
     contract_messages = [
         dict(item)
@@ -1867,7 +1890,9 @@ async def test_create_agent_runner_graph_prepare_turn_seeds_session_hydrated_too
     ]
     assert len(contract_messages) == 2  # 一份稳定契约 + 一份活状态块
     contract_text = "\n".join(str(item["content"] or "") for item in contract_messages)
-    assert "callable_tools: `submit_next_stage`" in contract_text
+    # D11：callable 面不再渲成模型可见的一行（水合不再拦路 ⇒ 该行无信息量），上面
+    # `frontdoor_selection_debug.callable_tool_names` 才是这一跳的读点。
+    assert "callable_tools:" not in contract_text
     # 空池不再占一行 `candidate_tools: none`
     assert "candidate_tools:" not in contract_text
     assert "undeclared_candidates" not in contract_text
@@ -2021,20 +2046,25 @@ async def test_create_agent_runner_graph_prepare_turn_keeps_normal_ceo_tools_for
         lambda tool_names: [{"name": name, "parameters": {"type": "object"}} for name in list(tool_names or [])]
     )
 
+    prepared_state = initial_persistent_state(
+        user_input={
+            "content": "Create an async task that continues the scheduled work.",
+            "metadata": {
+                "cron_internal": True,
+                "cron_job_id": "job-88",
+                "cron_max_runs": 1,
+                "cron_delivery_index": 1,
+                "cron_delivered_runs": 0,
+                "cron_reminder_text": "Create an async task that continues the scheduled work.",
+            },
+        }
+    )
+    # 内部轮继承的那份 callable 同样要过在场判据：`cron` 有 toolskill，上一跳 load 过它，
+    # 契约块才在这份请求视图里。
+    prepared_state["messages"] = [_contract_block_message("cron")]
+
     prepared = await runner._graph_prepare_turn(
-        state=initial_persistent_state(
-            user_input={
-                "content": "Create an async task that continues the scheduled work.",
-                "metadata": {
-                    "cron_internal": True,
-                    "cron_job_id": "job-88",
-                    "cron_max_runs": 1,
-                    "cron_delivery_index": 1,
-                    "cron_delivered_runs": 0,
-                    "cron_reminder_text": "Create an async task that continues the scheduled work.",
-                },
-            }
-        ),
+        state=prepared_state,
         runtime=SimpleNamespace(context=SimpleNamespace(session=session)),
     )
 
@@ -2049,10 +2079,8 @@ async def test_create_agent_runner_graph_prepare_turn_keeps_normal_ceo_tools_for
     ]
     assert len(contract_messages) == 2  # 一份稳定契约 + 一份活状态块
     contract_text = "\n".join(str(item["content"] or "") for item in contract_messages)
-    assert (
-        "callable_tools: `create_async_task`, `task_list`, `cron`, `silent`, `submit_next_stage`"
-        in contract_text
-    )
+    # D11：callable 面不再渲成一行，读点是下面的 `frontdoor_selection_debug`。
+    assert "callable_tools:" not in contract_text
     assert list(prepared["frontdoor_selection_debug"]["callable_tool_names"]) == [
         "create_async_task",
         "task_list",
@@ -2140,8 +2168,16 @@ async def test_create_agent_runner_graph_prepare_turn_keeps_candidate_tools_visi
     ]
     assert len(contract_messages) == 2  # 一份稳定契约 + 一份活状态块
     contract_text = "\n".join(str(item["content"] or "") for item in contract_messages)
-    assert "callable_tools: `submit_next_stage`" in contract_text
-    assert "`filesystem_write`" in contract_text
+    # 契约不在场的候选不进 callable，但声明面照旧钉住：`tools[]` 仍带着这个名字，
+    # 模型看得见它、也能直接调用拿契约（候选 = 已授权 − callable）。D11 后这一面的读点
+    # 是 `frontdoor_selection_debug.callable_tool_names`，尾块不再渲成模型可见的一行。
+    assert list(prepared["frontdoor_selection_debug"]["callable_tool_names"]) == [
+        "submit_next_stage",
+        "load_tool_context",
+        "silent",
+    ]
+    assert "callable_tools:" not in contract_text
+    assert "filesystem_write" in list(prepared["provider_tool_names"] or [])
     assert "- `filesystem_write`: Write file content to disk." not in contract_text
     # 名单钉在头部（每跳逐字节复用，全量可见 + 描述）；尾块不再有 skill 名单机制。
     head_text = "\n".join(
@@ -2287,20 +2323,9 @@ async def test_create_agent_runner_graph_prepare_turn_recovers_paused_manual_con
             "frontdoor_request_body_messages": [
                 # 暂停快照在产线里就是连请求体一起存的
                 # （`_session_frontdoor_context_window_snapshot` 读 `frontdoor_request_body_messages`）。
-                # 水合台账要跨回合活着，它对应的契约正文也得在这份请求体里；装配路按当次
-                # 请求视图判在场（FIX_PLAN §0 不变量），少了这条就会被撤掉水合。
-                {
-                    "role": "tool",
-                    "name": "load_tool_context",
-                    "content": json.dumps(
-                        {
-                            "ok": True,
-                            "tool_id": "filesystem_write",
-                            "tool_context_fingerprint": "sha256:" + "a" * 64,
-                        },
-                        ensure_ascii=False,
-                    ),
-                }
+                # 装配路按当次请求视图判在场（FIX_PLAN §0 不变量）：契约块在这份请求体里，
+                # 恢复出来的那一跳才继续可调。
+                _contract_block_message("filesystem_write")
             ],
             "compression": {
                 "status": "running",
@@ -2308,14 +2333,12 @@ async def test_create_agent_runner_graph_prepare_turn_recovers_paused_manual_con
                 "source": "token_compression",
                 "needs_recheck": False,
             },
-            "hydrated_tool_names": ["filesystem_write"],
         }
     )
     session._frontdoor_stage_state = {}
     session._frontdoor_canonical_context = {}
     session._compression_state = {}
     session._semantic_context_state = {}
-    session._frontdoor_hydrated_tool_names = []
 
     runner = create_agent_impl.CreateAgentCeoFrontDoorRunner(
         loop=SimpleNamespace(
@@ -2390,11 +2413,11 @@ async def test_create_agent_runner_graph_prepare_turn_recovers_paused_manual_con
     assert captured_builder_kwargs["frontdoor_stage_state"]["active_stage_id"] == "frontdoor-stage-1"
     assert captured_builder_kwargs["frontdoor_canonical_context"]["stages"][0]["stage_id"] == "frontdoor-stage-0"
     assert captured_builder_kwargs["semantic_context_state"] == {}
-    assert captured_builder_kwargs["hydrated_tool_names"] == ["filesystem_write"]
+    assert captured_builder_kwargs["contract_present_tool_names"] == ["filesystem_write"]
     assert prepared["frontdoor_stage_state"]["active_stage_id"] == "frontdoor-stage-1"
     assert prepared["compression_state"]["status"] == "running"
     assert "semantic_context_state" not in prepared
-    assert prepared["hydrated_tool_names"] == ["filesystem_write"]
+    assert "hydrated_tool_names" not in prepared
     contract_messages = [
         dict(item)
         for item in list(prepared["dynamic_appendix_messages"])
@@ -2402,26 +2425,10 @@ async def test_create_agent_runner_graph_prepare_turn_recovers_paused_manual_con
     ]
     assert len(contract_messages) == 2  # 一份稳定契约 + 一份活状态块
     contract_text = "\n".join(str(item["content"] or "") for item in contract_messages)
-    assert "callable_tools: `submit_next_stage`, `load_tool_context`, `filesystem_write`" in contract_text
-    assert "hydrated_tools:" not in contract_text
-
-
-def test_runtime_agent_session_inflight_snapshot_keeps_frontdoor_hydrated_tool_names() -> None:
-    session = RuntimeAgentSession(
-        SimpleNamespace(model="demo", reasoning_effort=None, multi_agent_runner=None),
-        session_key="web:shared",
-        channel="web",
-        chat_id="shared",
-    )
-    session._state.is_running = True
-    session._state.status = "running"
-    session._state.latest_message = "working"
-    session._frontdoor_hydrated_tool_names = ["filesystem_write"]
-
-    snapshot = session.inflight_turn_snapshot()
-
-    assert isinstance(snapshot, dict)
-    assert snapshot["hydrated_tool_names"] == ["filesystem_write"]
+    # 恢复出来的这一跳：`filesystem_write` 的块在请求视图里 ⇒ 在场 ⇒ 进 callable（上面
+    # `contract_present_tool_names` 那条已经在钉这件事）。D11 后 callable 不再渲成一行。
+    assert "callable_tools:" not in contract_text
+    assert "filesystem_write" in list(prepared["frontdoor_selection_debug"]["callable_tool_names"] or [])
 
 
 def test_runtime_agent_session_paused_snapshot_keeps_frontdoor_runtime_context() -> None:
@@ -2474,7 +2481,6 @@ def test_runtime_agent_session_paused_snapshot_keeps_frontdoor_runtime_context()
         "needs_recheck": False,
     }
     session._semantic_context_state = {}
-    session._frontdoor_hydrated_tool_names = ["filesystem_write"]
 
     snapshot = session._build_execution_context_snapshot(
         allow_manual_pause=True,
@@ -2486,7 +2492,7 @@ def test_runtime_agent_session_paused_snapshot_keeps_frontdoor_runtime_context()
     assert snapshot["frontdoor_canonical_context"]["stages"][0]["stage_id"] == "frontdoor-stage-0"
     assert snapshot["compression"]["source"] == "token_compression"
     assert "semantic_context_state" not in snapshot
-    assert snapshot["hydrated_tool_names"] == ["filesystem_write"]
+    assert "hydrated_tool_names" not in snapshot
 
 
 def test_runtime_agent_session_persists_paused_request_body_baseline(
@@ -2659,7 +2665,6 @@ def test_runtime_agent_session_restore_prefers_paused_over_inflight_over_complet
             "frontdoor_token_preflight_diagnostics": {"final_request_tokens": 42},
             "frontdoor_actual_request_path": continuity_record["path"],
             "frontdoor_actual_request_history": [continuity_record],
-            "hydrated_tool_names": ["filesystem_write"],
             "visible_tool_ids": ["filesystem_write"],
             "visible_skill_ids": ["writing-skills"],
             "provider_tool_schema_names": ["filesystem_write"],
@@ -2676,7 +2681,6 @@ def test_runtime_agent_session_restore_prefers_paused_over_inflight_over_complet
             "frontdoor_token_preflight_diagnostics": {"final_request_tokens": 64},
             "actual_request_path": inflight_record["path"],
             "actual_request_history": [inflight_record],
-            "hydrated_tool_names": ["exec"],
             "visible_tool_ids": ["exec"],
             "visible_skill_ids": ["find-skills"],
             "provider_tool_schema_names": ["exec"],
@@ -2692,7 +2696,6 @@ def test_runtime_agent_session_restore_prefers_paused_over_inflight_over_complet
             "frontdoor_token_preflight_diagnostics": {"final_request_tokens": 80},
             "actual_request_path": paused_record["path"],
             "actual_request_history": [paused_record],
-            "hydrated_tool_names": ["agent_browser"],
             "visible_tool_ids": ["agent_browser"],
             "visible_skill_ids": ["writing-plans"],
             "provider_tool_schema_names": ["agent_browser"],
@@ -2712,7 +2715,6 @@ def test_runtime_agent_session_restore_prefers_paused_over_inflight_over_complet
     assert restored._frontdoor_token_preflight_diagnostics == {"final_request_tokens": 80}
     assert restored._frontdoor_actual_request_path == paused_record["path"]
     assert restored._frontdoor_actual_request_history == [paused_record]
-    assert restored._frontdoor_hydrated_tool_names == ["agent_browser"]
     assert restored._frontdoor_visible_tool_ids == ["agent_browser"]
     assert restored._frontdoor_visible_skill_ids == ["writing-plans"]
     assert restored._frontdoor_provider_tool_schema_names == ["agent_browser"]
@@ -2805,7 +2807,6 @@ def test_runtime_agent_session_enriches_completed_continuity_restore_with_matchi
             "frontdoor_token_preflight_diagnostics": {"final_request_tokens": 42},
             "frontdoor_actual_request_path": "",
             "frontdoor_actual_request_history": [],
-            "hydrated_tool_names": ["exec"],
             "visible_tool_ids": ["exec"],
             "visible_skill_ids": ["writing-plans"],
             "provider_tool_schema_names": ["exec"],
@@ -2886,7 +2887,6 @@ def test_runtime_agent_session_replaces_stale_completed_continuity_trace_with_ne
             "frontdoor_history_shrink_reason": "",
             "frontdoor_actual_request_path": stale_record["path"],
             "frontdoor_actual_request_history": [stale_record],
-            "hydrated_tool_names": ["exec"],
             "visible_tool_ids": ["exec"],
             "visible_skill_ids": ["writing-plans"],
             "provider_tool_schema_names": ["exec"],
@@ -2944,7 +2944,6 @@ def test_runtime_agent_session_keeps_completed_continuity_restore_without_trace_
             "frontdoor_request_body_messages": list(continuity_baseline),
             "frontdoor_actual_request_path": "",
             "frontdoor_actual_request_history": [],
-            "hydrated_tool_names": ["exec"],
             "visible_tool_ids": ["exec"],
             "visible_skill_ids": ["writing-plans"],
             "provider_tool_schema_names": ["exec"],
@@ -3097,7 +3096,6 @@ async def test_graph_finalize_turn_strips_all_frontdoor_tool_contract_snapshots_
             "message_type": "frontdoor_runtime_tool_contract",
             "callable_tool_names": ["submit_next_stage"],
             "candidate_tools": [],
-            "hydrated_tool_names": [],
             "candidate_skill_ids": [],
             "stage_summary": {"active_stage_id": "", "transition_required": False},
             "contract_revision": "frontdoor:v1",
@@ -3178,7 +3176,6 @@ def test_create_agent_runner_syncs_frontdoor_selection_debug_into_inflight_snaps
             "frontdoor_stage_state": {"active_stage_id": "", "transition_required": False, "stages": []},
             "compression_state": {"status": "", "text": "", "source": "", "needs_recheck": False},
             "semantic_context_state": {},
-            "hydrated_tool_names": ["filesystem_write"],
             "frontdoor_selection_debug": {
                 "query_text": "create a markdown file",
                 "tool_selection": {"candidate_tool_names": ["filesystem_write"]},
@@ -3213,7 +3210,6 @@ def test_create_agent_runner_syncs_frontdoor_actual_request_trace_into_inflight_
             "frontdoor_stage_state": {"active_stage_id": "", "transition_required": False, "stages": []},
             "compression_state": {"status": "", "text": "", "source": "", "needs_recheck": False},
             "semantic_context_state": {},
-            "hydrated_tool_names": [],
             "frontdoor_actual_request_path": str(Path("D:/tmp/frontdoor-request.json")),
             "frontdoor_actual_request_history": [
                 {
@@ -3280,7 +3276,6 @@ def test_create_agent_runner_sync_keeps_previous_actual_request_baseline_for_pre
             "frontdoor_stage_state": {"active_stage_id": "", "transition_required": False, "stages": []},
             "compression_state": {"status": "", "text": "", "source": "", "needs_recheck": False},
             "semantic_context_state": {},
-            "hydrated_tool_names": [],
             "frontdoor_request_body_messages": [
                 {"role": "system", "content": "SYSTEM"},
                 {"role": "user", "content": "old question"},
@@ -3344,7 +3339,6 @@ def test_create_agent_runner_sync_allows_finalize_to_extend_existing_actual_requ
             "frontdoor_stage_state": {"active_stage_id": "", "transition_required": False, "stages": []},
             "compression_state": {"status": "", "text": "", "source": "", "needs_recheck": False},
             "semantic_context_state": {},
-            "hydrated_tool_names": [],
             "frontdoor_request_body_messages": [
                 {"role": "system", "content": "SYSTEM"},
                 {"role": "user", "content": "old question"},
@@ -3410,7 +3404,6 @@ def test_create_agent_runner_sync_blocks_internal_only_heartbeat_baseline_regres
             "frontdoor_stage_state": {"active_stage_id": "", "transition_required": False, "stages": []},
             "compression_state": {"status": "", "text": "", "source": "", "needs_recheck": False},
             "semantic_context_state": {},
-            "hydrated_tool_names": [],
             "heartbeat_internal": True,
             "frontdoor_request_body_messages": [
                 {
@@ -3494,7 +3487,6 @@ def test_create_agent_runner_sync_allows_appending_legitimate_heartbeat_continua
             "frontdoor_stage_state": {"active_stage_id": "", "transition_required": False, "stages": []},
             "compression_state": {"status": "", "text": "", "source": "", "needs_recheck": False},
             "semantic_context_state": {},
-            "hydrated_tool_names": [],
             "heartbeat_internal": True,
             "frontdoor_request_body_messages": list(updated_baseline),
             "frontdoor_actual_request_path": "D:/tmp/heartbeat-request.json",
@@ -3871,7 +3863,6 @@ def test_restart_restored_trace_reuses_previous_actual_request_scaffold_for_next
             "frontdoor_request_body_messages": list(continuity_baseline),
             "frontdoor_actual_request_path": "",
             "frontdoor_actual_request_history": [],
-            "hydrated_tool_names": ["submit_next_stage"],
             "visible_tool_ids": ["submit_next_stage"],
             "visible_skill_ids": ["writing-plans"],
             "provider_tool_schema_names": ["submit_next_stage"],
@@ -4102,7 +4093,7 @@ def test_frontdoor_denied_names_use_live_grant_not_turn_snapshot() -> None:
 
 
 def test_frontdoor_finalize_drops_rbac_revoked_mid_turn_tool_from_callable() -> None:
-    """非声明的水合名被 RBAC 收回时，收尾当跳把它摘出 callable 与台账。
+    """非声明的在场名被 RBAC 收回时，收尾当跳把它摘出 callable。
 
     它不在 `tools[]` 里，denied_tools 点不到名；留在 callable 只会让模型拿着
     "可调用"的预告去撞一次拒绝。RBAC 重新放行后由发现出口重新送回候选。
@@ -4115,33 +4106,21 @@ def test_frontdoor_finalize_drops_rbac_revoked_mid_turn_tool_from_callable() -> 
     )
     state = {
         "session_key": "web:shared",
-        "messages": [
-            {
-                "role": "tool",
-                "name": "load_tool_context",
-                "content": json.dumps(
-                    {
-                        "ok": True,
-                        "tool_id": "windows_mcp",
-                        "tool_context_fingerprint": "tcf:fixture-presence",
-                    },
-                    ensure_ascii=False,
-                ),
-            }
-        ],
+        # 契约块真的在请求视图里：这一跳 `windows_mcp` 本来在场、本来可调，
+        # 于是被摘下的原因只能是 RBAC，而不是"从没 load 过"。
+        "messages": [_contract_block_message("windows_mcp")],
         "provider_tool_names": ["exec"],
         "rbac_visible_tool_names": ["exec", "windows_mcp"],
         "tool_names": ["exec", "windows_mcp"],
-        "hydrated_tool_names": ["windows_mcp"],
     }
+    assert "windows_mcp" in runner._frontdoor_contract_present_names(state)
 
-    result = runner._frontdoor_tool_state_after_tool_results(
-        state=state,
-        tool_results=[],
-    )
+    result = runner._frontdoor_tool_state_after_tool_results(state=state)
 
     assert result["tool_names"] == ["exec"]
-    assert result["hydrated_tool_names"] == []
+    # callable 只在场判据这一份账：工具态写回不产出任何 hydration 键。
+    assert "hydrated_tool_names" not in result
+    assert "hydration_revoked_executor_names" not in result
 
 
 def test_frontdoor_finalize_surfaces_live_visible_undeclared_tool_in_candidates() -> None:
@@ -4156,22 +4135,18 @@ def test_frontdoor_finalize_surfaces_live_visible_undeclared_tool_in_candidates(
     )
     state = {
         "session_key": "web:shared",
+        "messages": [],
         "provider_tool_names": ["exec"],
         "rbac_visible_tool_names": ["exec"],
         "tool_names": ["exec"],
-        "hydrated_tool_names": [],
         "candidate_tool_names": [],
     }
 
-    result = runner._frontdoor_tool_state_after_tool_results(
-        state=state,
-        tool_results=[],
-    )
+    result = runner._frontdoor_tool_state_after_tool_results(state=state)
 
     assert "fresh_tool" in result["candidate_tool_names"]
     assert {"tool_id": "fresh_tool", "description": ""} in result["candidate_tool_items"]
     assert "fresh_tool" not in result["tool_names"]
-    assert "fresh_tool" not in result["hydrated_tool_names"]
 
 
 def test_frontdoor_dispatch_stays_live_while_declaration_is_pinned() -> None:
@@ -4232,7 +4207,7 @@ def test_frontdoor_send_contract_prints_declared_denied_tools_line() -> None:
     stage_gate_texts = [
         str(item.get("content") or "")
         for item in list(contract.dynamic_appendix_messages)
-        if "callable_tools" in str(item.get("content") or "")
+        if "frontdoor_runtime_stage_gate" in str(item.get("content") or "")
     ]
     assert len(stage_gate_texts) == 1
     assert "denied_tools" in stage_gate_texts[0]
@@ -4642,7 +4617,6 @@ async def test_graph_call_model_fresh_turn_reuses_previous_message_artifact_pref
         _frontdoor_canonical_context={"active_stage_id": "", "transition_required": False, "stages": []},
         _compression_state={"status": "", "text": "", "source": "", "needs_recheck": False},
         _semantic_context_state={"summary_text": "", "needs_refresh": False},
-        _frontdoor_hydrated_tool_names=[],
         _frontdoor_selection_debug={},
         _frontdoor_previous_actual_request_path=str(previous_request_path),
         _frontdoor_previous_actual_request_history=[{"path": str(previous_request_path), "turn_id": "turn-old"}],
@@ -4865,7 +4839,6 @@ async def test_graph_call_model_runs_token_preflight_after_fresh_turn_seed_and_b
         _frontdoor_canonical_context={"active_stage_id": "", "transition_required": False, "stages": []},
         _compression_state={"status": "", "text": "", "source": "", "needs_recheck": False},
         _semantic_context_state={"summary_text": "", "needs_refresh": False},
-        _frontdoor_hydrated_tool_names=[],
         _frontdoor_selection_debug={},
         _frontdoor_previous_actual_request_path=str(previous_request_path),
         _frontdoor_previous_actual_request_history=[{"path": str(previous_request_path), "turn_id": "turn-old"}],
@@ -4992,7 +4965,6 @@ async def test_prepare_turn_promotes_uploaded_image_only_into_live_request_when_
         _frontdoor_canonical_context={"active_stage_id": "", "transition_required": False, "stages": []},
         _compression_state={"status": "", "text": "", "source": "", "needs_recheck": False},
         _semantic_context_state={"summary_text": "", "needs_refresh": False},
-        _frontdoor_hydrated_tool_names=[],
         _frontdoor_selection_debug={},
     )
     runtime = SimpleNamespace(
@@ -5119,7 +5091,6 @@ async def test_prepare_turn_keeps_uploaded_image_as_text_only_when_binding_disab
         _frontdoor_canonical_context={"active_stage_id": "", "transition_required": False, "stages": []},
         _compression_state={"status": "", "text": "", "source": "", "needs_recheck": False},
         _semantic_context_state={"summary_text": "", "needs_refresh": False},
-        _frontdoor_hydrated_tool_names=[],
         _frontdoor_selection_debug={},
     )
     runtime = SimpleNamespace(
@@ -5191,7 +5162,6 @@ def test_prompt_contract_keeps_attachment_reopen_targets_in_request_messages(
             "provider_tool_exposure_commit_reason": "",
             "candidate_tool_names": [],
             "candidate_tool_items": [],
-            "hydrated_tool_names": [],
             "visible_skill_ids": [],
             "candidate_skill_ids": [],
             "rbac_visible_tool_names": ["submit_next_stage"],
@@ -5676,7 +5646,6 @@ async def test_prepare_turn_rejects_oversized_uploaded_image_when_binding_enable
         _frontdoor_canonical_context={"active_stage_id": "", "transition_required": False, "stages": []},
         _compression_state={"status": "", "text": "", "source": "", "needs_recheck": False},
         _semantic_context_state={"summary_text": "", "needs_refresh": False},
-        _frontdoor_hydrated_tool_names=[],
         _frontdoor_selection_debug={},
     )
     runtime = SimpleNamespace(
@@ -5905,7 +5874,6 @@ async def test_graph_call_model_fresh_turn_reuses_previous_message_artifact_pref
         _frontdoor_canonical_context={"active_stage_id": "", "transition_required": False, "stages": []},
         _compression_state={"status": "", "text": "", "source": "", "needs_recheck": False},
         _semantic_context_state={"summary_text": "", "needs_refresh": False},
-        _frontdoor_hydrated_tool_names=[],
         _frontdoor_selection_debug={},
         _frontdoor_previous_actual_request_path=str(previous_request_path),
         _frontdoor_previous_actual_request_history=[{"path": str(previous_request_path), "turn_id": "turn-old"}],
@@ -5987,7 +5955,6 @@ def test_create_agent_runner_sync_preserves_durable_frontdoor_canonical_context(
             "frontdoor_canonical_context": durable_canonical_context,
             "compression_state": {"status": "", "text": "", "source": "", "needs_recheck": False},
             "semantic_context_state": {},
-            "hydrated_tool_names": [],
         },
         session=session,
     )
@@ -6161,10 +6128,6 @@ async def test_prepare_turn_keeps_provider_schema_hash_stable_when_web_fetch_is_
         ["web_fetch"],
         [],
     ]
-    assembly_hydrated_sets = [
-        [],
-        ["web_fetch"],
-    ]
 
     async def _build_for_ceo(**kwargs):
         build_index = len(captured_builds)
@@ -6201,7 +6164,7 @@ async def test_prepare_turn_keeps_provider_schema_hash_stable_when_web_fetch_is_
     runner._resolver = SimpleNamespace(resolve_for_actor=_resolve_for_actor)
     runner._builder = SimpleNamespace(build_for_ceo=_build_for_ceo)
 
-    def _session_with_hydrated_names(names: list[str]) -> SimpleNamespace:
+    def _assembly_session() -> SimpleNamespace:
         return SimpleNamespace(
             state=SimpleNamespace(session_key=session_key),
             _memory_channel="web",
@@ -6216,21 +6179,16 @@ async def test_prepare_turn_keeps_provider_schema_hash_stable_when_web_fetch_is_
             _frontdoor_canonical_context={"active_stage_id": "", "transition_required": False, "stages": []},
             _compression_state={"status": "", "text": "", "source": "", "needs_recheck": False},
             _semantic_context_state={"summary_text": "", "needs_refresh": False},
-            _frontdoor_hydrated_tool_names=list(names),
             _frontdoor_selection_debug={},
         )
 
     first_prepared = await runner._graph_prepare_turn(
         initial_persistent_state(user_input={"content": "collect sources", "metadata": {}}),
-        runtime=SimpleNamespace(
-            context=SimpleNamespace(session=_session_with_hydrated_names(assembly_hydrated_sets[0]))
-        ),
+        runtime=SimpleNamespace(context=SimpleNamespace(session=_assembly_session())),
     )
     second_prepared = await runner._graph_prepare_turn(
         initial_persistent_state(user_input={"content": "collect sources", "metadata": {}}),
-        runtime=SimpleNamespace(
-            context=SimpleNamespace(session=_session_with_hydrated_names(assembly_hydrated_sets[1]))
-        ),
+        runtime=SimpleNamespace(context=SimpleNamespace(session=_assembly_session())),
     )
 
     assert first_prepared["provider_tool_names"] == ["exec", "submit_next_stage", "web_fetch"]

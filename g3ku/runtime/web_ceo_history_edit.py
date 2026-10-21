@@ -387,7 +387,6 @@ def _empty_continuity_payload() -> dict[str, Any]:
         "frontdoor_canonical_context": {},
         "compression_state": {},
         "semantic_context_state": {},
-        "hydrated_tool_names": [],
         "capability_snapshot_exposure_revision": "",
         "visible_tool_ids": [],
         "visible_skill_ids": [],

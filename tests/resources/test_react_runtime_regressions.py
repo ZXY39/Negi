@@ -8,7 +8,11 @@ from types import SimpleNamespace
 import pytest
 import yaml
 
-from g3ku.agent.tools.base import Tool
+from g3ku.agent.tools.base import (
+    REUSE_ARGS_MODEL_DESCRIPTION_SENTENCE,
+    REUSE_ARGS_PARAMETER_NAME,
+    Tool,
+)
 from g3ku.agent.tools.main_runtime import LoadSkillContextTool, LoadToolContextTool
 from g3ku.content import ContentNavigationService, parse_content_envelope
 from g3ku.providers.base import LLMResponse, ToolCallRequest
@@ -19,6 +23,7 @@ from g3ku.resources.models import ResourceKind, ToolResourceDescriptor
 from g3ku.resources.registry import ResourceRegistry
 from g3ku.runtime.context.node_context_selection import NodeContextSelectionResult
 from g3ku.runtime.stage_prompt_compaction import STAGE_COMPACT_PREFIX
+from g3ku.runtime.tool_contract_block import attach_tool_contract_block
 from g3ku.runtime.tool_history import analyze_tool_call_history
 from g3ku.utils.helpers import tools_bundle_single_source_enabled
 from main.errors import TaskPausedError
@@ -436,7 +441,10 @@ def test_tool_model_visible_schema_falls_back_to_runtime_schema_when_unset() -> 
         "type": "function",
         "function": {
             "name": "model_visible_schema_tool",
-            "description": "Use the runtime schema when no model-only schema override is defined.",
+            "description": (
+                "Use the runtime schema when no model-only schema override is defined. "
+                + REUSE_ARGS_MODEL_DESCRIPTION_SENTENCE
+            ),
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -451,6 +459,8 @@ def test_tool_model_visible_schema_falls_back_to_runtime_schema_when_unset() -> 
                             "Pass an explicit larger value for legitimately long-running work; there is no upper cap."
                         ),
                     },
+                    # 入参复用字段：派生、可选、不带参数级 description（provider 会逐层剥掉）。
+                    REUSE_ARGS_PARAMETER_NAME: {"type": "boolean"},
                 },
                 "required": ["task"],
             },
@@ -646,7 +656,7 @@ def test_compact_schema_manifest_backed_tool_uses_normalized_model_visible_overr
     tool = ManifestBackedTool(descriptor, handler=lambda **kwargs: kwargs)
     schema = tool.to_model_schema()["function"]
 
-    assert schema["description"] == "Compact manifest-backed description."
+    assert schema["description"] == f"Compact manifest-backed description. {REUSE_ARGS_MODEL_DESCRIPTION_SENTENCE}"
     assert schema["parameters"]["type"] == "object"
     assert schema["parameters"]["required"] == ["summary"]
     assert schema["parameters"]["properties"]["summary"]["type"] == "string"
@@ -685,17 +695,24 @@ def test_tool_model_visible_schema_falls_back_to_authoritative_schema() -> None:
         == "Full contract description."
     )
     # 统一 timeout 合同：模型可见 schema 在验证合同之上统一追加可选 timeout_seconds 参数，
-    # 其余部分与权威验证合同保持一致。
+    # `reuse_args` 同源（派生、可选、不进 required），其余部分与权威验证合同保持一致。
     model_schema = tool.to_model_schema()
     model_properties = dict(model_schema["function"]["parameters"]["properties"])
     assert "timeout_seconds" in model_properties
+    assert REUSE_ARGS_PARAMETER_NAME in model_properties
     stripped_schema = {
         "type": model_schema["type"],
         "function": {
             **model_schema["function"],
+            # 两个派生注入都不属于权威合同：先剥字段，再剥函数级那句。
+            "description": "Full schema description.",
             "parameters": {
                 **model_schema["function"]["parameters"],
-                "properties": {k: v for k, v in model_properties.items() if k != "timeout_seconds"},
+                "properties": {
+                    key: value
+                    for key, value in model_properties.items()
+                    if key not in {"timeout_seconds", REUSE_ARGS_PARAMETER_NAME}
+                },
             },
         },
     }
@@ -749,7 +766,9 @@ def test_tool_model_visible_schema_uses_override_without_changing_validation_con
 
     assert tool.to_schema()["function"]["description"] == "Authoritative execution contract."
     assert tool.to_schema()["function"]["parameters"]["required"] == ["full_value"]
-    assert tool.to_model_schema()["function"]["description"] == "Compact model-facing contract."
+    assert tool.to_model_schema()["function"]["description"] == (
+        f"Compact model-facing contract. {REUSE_ARGS_MODEL_DESCRIPTION_SENTENCE}"
+    )
     assert tool.to_model_schema()["function"]["parameters"]["required"] == ["summary"]
     assert tool.validate_params({"summary": "preview"}) == ["missing required full_value"]
 
@@ -803,7 +822,9 @@ def test_embedded_mcp_tool_prefers_handler_model_visible_contract() -> None:
 
     tool = EmbeddedMCPTool(descriptor, _DynamicTool())
 
-    assert tool.to_model_schema()["function"]["description"] == "Runtime model-facing contract."
+    assert tool.to_model_schema()["function"]["description"] == (
+        f"Runtime model-facing contract. {REUSE_ARGS_MODEL_DESCRIPTION_SENTENCE}"
+    )
     assert tool.to_model_schema()["function"]["parameters"]["required"] == ["summary"]
 
 
@@ -1016,7 +1037,6 @@ async def test_execution_root_replay_semantic_selection_includes_split_tools_wit
                 'spawn_child_nodes',
                 'load_tool_context_v2',
             ],
-            'hydrated_executor_names': ['filesystem_write', 'content_describe', 'filesystem', 'content'],
         },
     )
     fake_log_service.execution_stage_gate_snapshot = lambda task_id, node_id: {
@@ -1142,11 +1162,11 @@ async def test_execution_root_replay_semantic_selection_includes_split_tools_wit
     assert 'submit_final_result' in emitted_tool_names
     assert 'spawn_child_nodes' in emitted_tool_names
     assert 'load_tool_context_v2' in emitted_tool_names
-    # 族名不再是工具：台账里残留的旧族名既不提升，也不进发给模型的清单。
+    # 族名不再是工具：旧族名既不进 callable，也不进发给模型的清单。
     assert 'filesystem' not in emitted_tool_names
     assert 'content' not in emitted_tool_names
-    # 钉死：非压缩跳的 tools[] 与上一跳逐成员相同，水合名不并入——filesystem_write
-    # 等已水合、走可调用面执行，参数契约由 load 返回承载；声明在压缩跳才吸收。
+    # 钉死：非压缩跳的 tools[] 与上一跳逐成员相同，候选名不并入——filesystem_write 等待
+    # load 或冲动调用把契约带回来才走可调用面，参数契约由 load 返回承载；声明在压缩跳才吸收。
     assert emitted_tool_names == [
         'stop_tool_execution',
         'submit_next_stage',
@@ -1705,310 +1725,6 @@ def test_execution_selector_keeps_full_callable_tools_when_transition_required()
     assert selection['trace']['stage_locked_to_submit_next_stage'] is False
 
 
-@pytest.mark.parametrize('loader_tool_name', ['load_tool_context', 'load_tool_context_v2'])
-def test_promotes_selected_tool_next_turn_after_load_tool_context_variants(
-    monkeypatch: pytest.MonkeyPatch,
-    loader_tool_name: str,
-) -> None:
-    visible_tools = {
-        'load_tool_context': _ModelSchemaRecordingTool(
-            name='load_tool_context',
-            authoritative_description='load tool context authoritative schema',
-            model_description='load tool context compact schema',
-        ),
-        'load_tool_context_v2': _ModelSchemaRecordingTool(
-            name='load_tool_context_v2',
-            authoritative_description='load tool context v2 authoritative schema',
-            model_description='load tool context v2 compact schema',
-        ),
-        'filesystem_write': _ModelSchemaRecordingTool(
-            name='filesystem_write',
-            authoritative_description='filesystem write authoritative schema',
-            model_description='filesystem write compact model schema ' + ('F' * 1200),
-        ),
-        'submit_next_stage': _StageProtocolNoopTool('submit_next_stage'),
-        'submit_final_result': _submit_final_result_tool(),
-        'spawn_child_nodes': _StageProtocolNoopTool('spawn_child_nodes'),
-    }
-    monkeypatch.setattr(
-        runtime_service_module,
-        'build_execution_tool_selection',
-        lambda **kwargs: SimpleNamespace(
-            hydrated_tool_names=[
-                'submit_next_stage',
-                'submit_final_result',
-                'spawn_child_nodes',
-                loader_tool_name,
-            ],
-            lightweight_tool_ids=['filesystem_write'],
-            schema_chars=321,
-            trace={'mode': 'test'},
-        ),
-    )
-
-    log_service = _FakeLogService()
-    log_service.execution_stage_prompt_payload = lambda task_id, node_id: {
-        'has_active_stage': True,
-        'transition_required': False,
-        'active_stage': {'stage_id': 'stage-1'},
-    }
-    service = object.__new__(MainRuntimeService)
-    service.log_service = log_service
-    service.store = SimpleNamespace(
-        get_task=lambda task_id: SimpleNamespace(
-            task_id=task_id,
-            session_id='web:shared',
-            metadata={'core_requirement': 'inspect project files'},
-        ),
-        get_node=lambda node_id: SimpleNamespace(
-            node_id=node_id,
-            prompt='inspect project files',
-            goal='inspect project files',
-            node_kind='execution',
-        ),
-    )
-    service.execution_visible_tool_lightweight_items = lambda *, actor_role, session_id: [
-        {
-            'tool_id': 'filesystem_write',
-            'display_name': 'Filesystem Write',
-            'description': 'Inspect files',
-            'l0': 'Inspect files',
-            'l1': 'Inspect files',
-        }
-    ]
-    service.list_visible_tools = lambda *, actor_role, session_id: [
-        SimpleNamespace(tool_id='filesystem_write')
-    ]
-
-    loop = ReActToolLoop(chat_backend=SimpleNamespace(), log_service=log_service, max_iterations=2)
-    loop._tool_context_hydration_promoter = service._promote_tool_context_hydration
-
-    first_selection = service._select_model_visible_tool_schema_payload(
-        task_id='task-tool-hydration',
-        node_id='node-tool-hydration',
-        node_kind='execution',
-        visible_tools=visible_tools,
-        runtime_context={
-            'task_id': 'task-tool-hydration',
-            'node_id': 'node-tool-hydration',
-            'session_key': 'web:shared',
-            'actor_role': 'execution',
-        },
-    )
-
-    assert first_selection['lightweight_tool_ids'] == ['filesystem_write']
-    assert loader_tool_name in first_selection['tool_names']
-    assert 'filesystem_write' not in first_selection['tool_names']
-    assert first_selection['trace']['base_schema_chars'] == 321
-    assert first_selection['trace']['final_schema_chars'] == first_selection['schema_chars']
-
-    log_service.upsert_frame(
-        'task-tool-hydration',
-        {
-            'node_id': 'node-tool-hydration',
-            'model_visible_tool_names': list(first_selection['tool_names']),
-            'hydrated_executor_names': [],
-            'candidate_tool_names': ['filesystem_write'],
-        },
-    )
-
-    loop._promote_tool_context_hydration_after_results(
-        task_id='task-tool-hydration',
-        node_id='node-tool-hydration',
-        response_tool_calls=[
-            ToolCallRequest(
-                id='call-load-tool-context',
-                name=loader_tool_name,
-                arguments={'tool_id': 'filesystem'},
-            )
-        ],
-        results=[
-            {
-                'live_state': {
-                    'tool_call_id': 'call-load-tool-context',
-                    'tool_name': loader_tool_name,
-                    'status': 'success',
-                },
-                'tool_message': {
-                    'role': 'tool',
-                    'tool_call_id': 'call-load-tool-context',
-                    'name': loader_tool_name,
-                    'content': json.dumps({'ok': True, 'tool_id': 'filesystem'}, ensure_ascii=False),
-                },
-                'raw_result': {
-                    'ok': True,
-                    'tool_id': 'filesystem',
-                },
-            }
-        ],
-        runtime_context={
-            'task_id': 'task-tool-hydration',
-            'node_id': 'node-tool-hydration',
-            'session_key': 'web:shared',
-            'actor_role': 'execution',
-            'candidate_tool_names': ['filesystem_write'],
-        },
-    )
-
-    promoted_frame = log_service.read_runtime_frame('task-tool-hydration', 'node-tool-hydration')
-    assert promoted_frame.get('hydrated_executor_names') in (None, [])
-
-    next_selection = service._select_model_visible_tool_schema_payload(
-        task_id='task-tool-hydration',
-        node_id='node-tool-hydration',
-        node_kind='execution',
-        visible_tools=visible_tools,
-        runtime_context={
-            'task_id': 'task-tool-hydration',
-            'node_id': 'node-tool-hydration',
-            'session_key': 'web:shared',
-            'actor_role': 'execution',
-        },
-    )
-
-    assert next_selection['tool_names'] == [
-        'submit_next_stage',
-        'submit_final_result',
-        'spawn_child_nodes',
-        loader_tool_name,
-    ]
-    assert next_selection['schema_chars'] == first_selection['schema_chars']
-    assert next_selection['trace']['base_schema_chars'] == 321
-    assert next_selection['trace']['final_schema_chars'] == next_selection['schema_chars']
-    assert next_selection['trace']['promoted_hydrated_executor_names'] == []
-
-
-def test_promote_tool_context_hydration_keeps_executor_requests_precise() -> None:
-    log_service = _FakeLogService()
-    service = object.__new__(MainRuntimeService)
-    service.log_service = log_service
-    service.store = SimpleNamespace(
-        get_task=lambda task_id: SimpleNamespace(task_id=task_id, session_id='web:shared', metadata={}),
-        get_node=lambda node_id: SimpleNamespace(node_id=node_id, node_kind='execution'),
-    )
-    service.list_visible_tools = lambda *, actor_role, session_id: [
-        SimpleNamespace(tool_id='filesystem_write'),
-        SimpleNamespace(tool_id='filesystem_edit'),
-        SimpleNamespace(tool_id='filesystem_propose_patch'),
-    ]
-    log_service.upsert_frame('task-hydration-precise', {'node_id': 'node-hydration-precise'})
-
-    service._promote_tool_context_hydration(
-        task_id='task-hydration-precise',
-        node_id='node-hydration-precise',
-        tool_call=SimpleNamespace(name='load_tool_context', arguments={'tool_id': 'filesystem_write'}),
-        raw_result={'ok': True, 'tool_id': 'filesystem_write'},
-        runtime_context={
-            'session_key': 'web:shared',
-            'actor_role': 'execution',
-            'candidate_tool_names': ['filesystem_write'],
-        },
-    )
-
-    promoted_frame = log_service.read_runtime_frame('task-hydration-precise', 'node-hydration-precise')
-    assert promoted_frame['hydrated_executor_names'] == ['filesystem_write']
-    assert promoted_frame['hydrated_executor_state'] == ['filesystem_write']
-
-
-def test_promote_tool_context_hydration_rejects_family_names() -> None:
-    log_service = _FakeLogService()
-    service = object.__new__(MainRuntimeService)
-    service.log_service = log_service
-    service.store = SimpleNamespace(
-        get_task=lambda task_id: SimpleNamespace(task_id=task_id, session_id='web:shared', metadata={}),
-        get_node=lambda node_id: SimpleNamespace(node_id=node_id, node_kind='execution'),
-    )
-    # 治理面只有一层：可见的是具体工具，旧族名不再是任何一条记录。
-    service.list_visible_tools = lambda *, actor_role, session_id: [
-        SimpleNamespace(tool_id='filesystem_write'),
-        SimpleNamespace(tool_id='filesystem_edit'),
-        SimpleNamespace(tool_id='filesystem_propose_patch'),
-    ]
-    log_service.upsert_frame('task-hydration-family', {'node_id': 'node-hydration-family'})
-
-    service._promote_tool_context_hydration(
-        task_id='task-hydration-family',
-        node_id='node-hydration-family',
-        tool_call=SimpleNamespace(name='load_tool_context', arguments={'tool_id': 'filesystem'}),
-        raw_result={'ok': True, 'tool_id': 'filesystem'},
-        runtime_context={
-            'session_key': 'web:shared',
-            'actor_role': 'execution',
-            'candidate_tool_names': ['filesystem'],
-        },
-    )
-
-    promoted_frame = log_service.read_runtime_frame('task-hydration-family', 'node-hydration-family')
-    assert promoted_frame.get('hydrated_executor_names') in (None, [])
-
-
-def test_promote_tool_context_hydration_applies_lru_limit() -> None:
-    log_service = _FakeLogService()
-    service = object.__new__(MainRuntimeService)
-    service.log_service = log_service
-    service._hydrated_tool_limit = 3
-    service.store = SimpleNamespace(
-        get_task=lambda task_id: SimpleNamespace(task_id=task_id, session_id='web:shared', metadata={}),
-        get_node=lambda node_id: SimpleNamespace(node_id=node_id, node_kind='execution'),
-    )
-    service.list_visible_tools = lambda *, actor_role, session_id: [
-        SimpleNamespace(tool_id='filesystem_write'),
-        SimpleNamespace(tool_id='content_open'),
-        SimpleNamespace(tool_id='agent_browser'),
-        SimpleNamespace(tool_id='web_fetch'),
-    ]
-    log_service.upsert_frame('task-hydration-lru', {'node_id': 'node-hydration-lru'})
-
-    for tool_id in ['filesystem_write', 'content_open', 'agent_browser', 'web_fetch']:
-        service._promote_tool_context_hydration(
-            task_id='task-hydration-lru',
-            node_id='node-hydration-lru',
-            tool_call=SimpleNamespace(name='load_tool_context', arguments={'tool_id': tool_id}),
-            raw_result={'ok': True, 'tool_id': tool_id},
-            runtime_context={
-                'session_key': 'web:shared',
-                'actor_role': 'execution',
-                'candidate_tool_names': ['filesystem_write', 'content_open', 'agent_browser', 'web_fetch'],
-            },
-        )
-
-    promoted_frame = log_service.read_runtime_frame('task-hydration-lru', 'node-hydration-lru')
-    assert promoted_frame['hydrated_executor_names'] == [
-        'content_open',
-        'agent_browser',
-        'web_fetch',
-    ]
-    assert promoted_frame['hydrated_executor_state'] == [
-        'content_open',
-        'agent_browser',
-        'web_fetch',
-    ]
-
-    service._promote_tool_context_hydration(
-        task_id='task-hydration-lru',
-        node_id='node-hydration-lru',
-        tool_call=SimpleNamespace(name='load_tool_context', arguments={'tool_id': 'content_open'}),
-        raw_result={'ok': True, 'tool_id': 'content_open'},
-        runtime_context={
-            'session_key': 'web:shared',
-            'actor_role': 'execution',
-            'candidate_tool_names': ['filesystem_write', 'content_open', 'agent_browser', 'web_fetch'],
-        },
-    )
-
-    promoted_frame = log_service.read_runtime_frame('task-hydration-lru', 'node-hydration-lru')
-    assert promoted_frame['hydrated_executor_names'] == [
-        'agent_browser',
-        'web_fetch',
-        'content_open',
-    ]
-    assert promoted_frame['hydrated_executor_state'] == [
-        'agent_browser',
-        'web_fetch',
-        'content_open',
-    ]
-
-
 def test_load_tool_context_projection_reports_promotion_and_keeps_fingerprint_stable() -> None:
     """同一份 toolskill 正文，跨轮状态不同也必须算出同一个指纹。
 
@@ -2034,7 +1750,6 @@ def test_load_tool_context_projection_reports_promotion_and_keeps_fingerprint_st
         runtime={
             'candidate_tool_names': ['content_open'],
             'callable_tool_names': ['exec'],
-            'hydrated_executor_names': [],
         },
     )
     already_callable = apply_runtime_tool_context_projection(
@@ -2043,13 +1758,12 @@ def test_load_tool_context_projection_reports_promotion_and_keeps_fingerprint_st
         runtime={
             'candidate_tool_names': [],
             'callable_tool_names': ['content_open'],
-            'hydrated_executor_names': ['content_open'],
         },
     )
     hidden = apply_runtime_tool_context_projection(
         dict(payload),
         requested_tool_id='content_open',
-        runtime={'candidate_tool_names': [], 'callable_tool_names': ['exec'], 'hydrated_executor_names': []},
+        runtime={'candidate_tool_names': [], 'callable_tool_names': ['exec']},
     )
 
     assert promotable['promotion'] == 'promoted_next_turn'
@@ -2095,235 +1809,7 @@ def test_hydration_targets_reject_names_that_are_not_the_visible_tool() -> None:
     ) == ['content_open']
 
 
-def test_promote_tool_context_hydration_skips_fixed_builtin_executors() -> None:
-    log_service = _FakeLogService()
-    service = object.__new__(MainRuntimeService)
-    service.log_service = log_service
-    service.store = SimpleNamespace(
-        get_task=lambda task_id: SimpleNamespace(task_id=task_id, session_id='web:shared', metadata={}),
-        get_node=lambda node_id: SimpleNamespace(node_id=node_id, node_kind='execution'),
-    )
-    service.list_visible_tools = lambda *, actor_role, session_id: [
-        SimpleNamespace(tool_id='exec'),
-        SimpleNamespace(tool_id='agent_browser'),
-    ]
-    log_service.upsert_frame('task-hydration-fixed-builtin', {'node_id': 'node-hydration-fixed-builtin'})
-
-    service._promote_tool_context_hydration(
-        task_id='task-hydration-fixed-builtin',
-        node_id='node-hydration-fixed-builtin',
-        tool_call=SimpleNamespace(name='load_tool_context', arguments={'tool_id': 'exec'}),
-        raw_result={'ok': True, 'tool_id': 'exec'},
-        runtime_context={
-            'session_key': 'web:shared',
-            'actor_role': 'execution',
-            'candidate_tool_names': ['exec'],
-        },
-    )
-
-    promoted_frame = log_service.read_runtime_frame('task-hydration-fixed-builtin', 'node-hydration-fixed-builtin')
-    assert promoted_frame.get('hydrated_executor_names') in (None, [])
-    assert promoted_frame.get('hydrated_executor_state') in (None, [])
-
-
-def test_main_runtime_service_default_hydrated_tool_limit_is_16() -> None:
-    service = object.__new__(MainRuntimeService)
-
-    assert service._hydrated_tool_limit_value() == 16
-
-
-def test_promote_tool_context_hydration_uses_successful_result_without_matching_call_id() -> None:
-    promoted_calls: list[dict[str, object]] = []
-    loop = ReActToolLoop(chat_backend=SimpleNamespace(), log_service=_FakeLogService(), max_iterations=2)
-    loop._tool_context_hydration_promoter = lambda **kwargs: promoted_calls.append(dict(kwargs))
-
-    loop._promote_tool_context_hydration_after_results(
-        task_id='task-result-driven-hydration',
-        node_id='node-result-driven-hydration',
-        response_tool_calls=[
-            ToolCallRequest(
-                id='call-original',
-                name='load_tool_context',
-                arguments={'tool_id': 'filesystem_write'},
-            )
-        ],
-        results=[
-            {
-                'live_state': {
-                    'tool_call_id': 'call-original|fc_extra_suffix',
-                    'tool_name': 'load_tool_context',
-                    'status': 'success',
-                },
-                'tool_message': {
-                    'role': 'tool',
-                    'tool_call_id': 'call-original|fc_extra_suffix',
-                    'name': 'load_tool_context',
-                    'content': json.dumps({'ok': True, 'tool_id': 'filesystem_write'}, ensure_ascii=False),
-                },
-                'raw_result': {
-                    'ok': True,
-                    'tool_id': 'filesystem_write',
-                },
-            }
-        ],
-        runtime_context={
-            'task_id': 'task-result-driven-hydration',
-            'node_id': 'node-result-driven-hydration',
-            'session_key': 'web:shared',
-            'actor_role': 'execution',
-        },
-    )
-
-    assert len(promoted_calls) == 1
-    promoted = promoted_calls[0]
-    assert getattr(promoted['tool_call'], 'name') == 'load_tool_context'
-    assert getattr(promoted['tool_call'], 'arguments') == {'tool_id': 'filesystem_write'}
-    assert promoted['raw_result'] == {'ok': True, 'tool_id': 'filesystem_write'}
-
-
-def test_promote_tool_context_hydration_accepts_json_string_result_payload() -> None:
-    promoted_calls: list[dict[str, object]] = []
-    loop = ReActToolLoop(chat_backend=SimpleNamespace(), log_service=_FakeLogService(), max_iterations=2)
-    loop._tool_context_hydration_promoter = lambda **kwargs: promoted_calls.append(dict(kwargs))
-
-    loop._promote_tool_context_hydration_after_results(
-        task_id='task-result-driven-hydration-json',
-        node_id='node-result-driven-hydration-json',
-        response_tool_calls=[
-            ToolCallRequest(
-                id='call-original-json',
-                name='load_tool_context',
-                arguments={'tool_id': 'filesystem_write'},
-            )
-        ],
-        results=[
-            {
-                'live_state': {
-                    'tool_call_id': 'call-original-json|fc_extra_suffix',
-                    'tool_name': 'load_tool_context',
-                    'status': 'success',
-                },
-                'tool_message': {
-                    'role': 'tool',
-                    'tool_call_id': 'call-original-json|fc_extra_suffix',
-                    'name': 'load_tool_context',
-                    'content': json.dumps({'ok': True, 'tool_id': 'filesystem_write'}, ensure_ascii=False),
-                },
-                'raw_result': json.dumps({'ok': True, 'tool_id': 'filesystem_write'}, ensure_ascii=False),
-            }
-        ],
-        runtime_context={
-            'task_id': 'task-result-driven-hydration-json',
-            'node_id': 'node-result-driven-hydration-json',
-            'session_key': 'web:shared',
-            'actor_role': 'execution',
-        },
-    )
-
-    assert len(promoted_calls) == 1
-    promoted = promoted_calls[0]
-    assert getattr(promoted['tool_call'], 'arguments') == {'tool_id': 'filesystem_write'}
-    assert promoted['raw_result'] == {'ok': True, 'tool_id': 'filesystem_write'}
-
-
-@pytest.mark.asyncio
-async def test_execute_tool_calls_promotes_tool_context_hydration_immediately() -> None:
-    class _InlineLoadTool(Tool):
-        @property
-        def name(self) -> str:
-            return 'load_tool_context'
-
-        @property
-        def description(self) -> str:
-            return 'inline load tool context'
-
-        @property
-        def parameters(self) -> dict[str, object]:
-            return {'type': 'object', 'properties': {}, 'required': []}
-
-        async def execute(self, **kwargs):
-            _ = kwargs
-            return {'ok': True, 'tool_id': 'filesystem_write'}
-
-    promoted_calls: list[dict[str, object]] = []
-    loop = ReActToolLoop(chat_backend=SimpleNamespace(), log_service=_FakeLogService(), max_iterations=2)
-    loop._tool_context_hydration_promoter = lambda **kwargs: promoted_calls.append(dict(kwargs))
-
-    task = SimpleNamespace(task_id='task-inline-hydration')
-    node = SimpleNamespace(node_id='node-inline-hydration', depth=0, node_kind='execution')
-    response_tool_calls = [
-        ToolCallRequest(
-            id='call-inline-load-tool-context',
-            name='load_tool_context',
-            arguments={'tool_id': 'filesystem_write'},
-        )
-    ]
-    tools = {'load_tool_context': _InlineLoadTool()}
-
-    await loop._execute_tool_calls(
-        task=task,
-        node=node,
-        response_tool_calls=response_tool_calls,
-        tools=tools,
-        runtime_context={'task_id': task.task_id, 'node_id': node.node_id, 'actor_role': 'execution'},
-    )
-
-    assert len(promoted_calls) == 1
-    promoted = promoted_calls[0]
-    assert getattr(promoted['tool_call'], 'name') == 'load_tool_context'
-    assert getattr(promoted['tool_call'], 'arguments') == {'tool_id': 'filesystem_write'}
-    assert promoted['raw_result']['tool_id'] == 'filesystem_write'
-
-
-@pytest.mark.asyncio
-async def test_execute_tool_calls_promotes_tool_context_hydration_immediately_from_json_string() -> None:
-    class _InlineLoadTool(Tool):
-        @property
-        def name(self) -> str:
-            return 'load_tool_context'
-
-        @property
-        def description(self) -> str:
-            return 'inline load tool context'
-
-        @property
-        def parameters(self) -> dict[str, object]:
-            return {'type': 'object', 'properties': {}, 'required': []}
-
-        async def execute(self, **kwargs):
-            _ = kwargs
-            return json.dumps({'ok': True, 'tool_id': 'filesystem_write'}, ensure_ascii=False)
-
-    promoted_calls: list[dict[str, object]] = []
-    loop = ReActToolLoop(chat_backend=SimpleNamespace(), log_service=_FakeLogService(), max_iterations=2)
-    loop._tool_context_hydration_promoter = lambda **kwargs: promoted_calls.append(dict(kwargs))
-
-    task = SimpleNamespace(task_id='task-inline-hydration-json')
-    node = SimpleNamespace(node_id='node-inline-hydration-json', depth=0, node_kind='execution')
-    response_tool_calls = [
-        ToolCallRequest(
-            id='call-inline-load-tool-context-json',
-            name='load_tool_context',
-            arguments={'tool_id': 'filesystem_write'},
-        )
-    ]
-    tools = {'load_tool_context': _InlineLoadTool()}
-
-    await loop._execute_tool_calls(
-        task=task,
-        node=node,
-        response_tool_calls=response_tool_calls,
-        tools=tools,
-        runtime_context={'task_id': task.task_id, 'node_id': node.node_id, 'actor_role': 'execution'},
-    )
-
-    assert len(promoted_calls) == 1
-    promoted = promoted_calls[0]
-    assert getattr(promoted['tool_call'], 'arguments') == {'tool_id': 'filesystem_write'}
-    assert promoted['raw_result']['tool_id'] == 'filesystem_write'
-
-
-def test_execution_selector_promotes_concrete_tools_and_ignores_stale_monolith_names() -> None:
+def test_execution_selector_admits_contract_present_concrete_tools_and_ignores_stale_monolith_names() -> None:
     visible_tools = {
         'filesystem_write': _ModelSchemaRecordingTool(
             name='filesystem_write',
@@ -2395,12 +1881,12 @@ def test_execution_selector_promotes_concrete_tools_and_ignores_stale_monolith_n
         {
             'node_id': 'node-split-preference',
             'model_visible_tool_names': list(first_selection['tool_names']),
-            # 台账里同时留着旧单体名/族名与拆出来的具体工具名
-            'hydrated_executor_names': ['filesystem', 'content', 'filesystem_write', 'content_describe'],
         },
     )
 
-    hydrated_selection = service._select_model_visible_tool_schema_payload(
+    # 下一跳：拆出来的具体工具的契约块进了请求视图（`tool_contract_presence` 是跳起点算好的
+    # 在场索引）；视图里同时残留旧单体名/族名的块——它们不在治理可见集里，有块也不放行。
+    present_selection = service._select_model_visible_tool_schema_payload(
         task_id='task-split-preference',
         node_id='node-split-preference',
         node_kind='execution',
@@ -2410,18 +1896,23 @@ def test_execution_selector_promotes_concrete_tools_and_ignores_stale_monolith_n
             'node_id': 'node-split-preference',
             'session_key': 'web:shared',
             'actor_role': 'execution',
+            'tool_contract_presence': {
+                'filesystem_write': 'tcf:aaaaaaaaaaaaaaaa',
+                'content_describe': 'tcf:bbbbbbbbbbbbbbbb',
+                'filesystem': 'tcf:cccccccccccccccc',
+                'content': 'tcf:dddddddddddddddd',
+            },
         },
     )
 
-    assert 'filesystem' not in hydrated_selection['tool_names']
-    assert 'content' not in hydrated_selection['tool_names']
-    assert 'filesystem_write' in hydrated_selection['tool_names']
-    assert 'content_describe' in hydrated_selection['tool_names']
-    assert hydrated_selection['hydrated_executor_names'] == ['filesystem_write', 'content_describe']
-    assert hydrated_selection['trace']['promoted_hydrated_executor_names'] == ['filesystem_write', 'content_describe']
+    assert 'filesystem' not in present_selection['tool_names']
+    assert 'content' not in present_selection['tool_names']
+    assert 'filesystem_write' in present_selection['tool_names']
+    assert 'content_describe' in present_selection['tool_names']
+    assert present_selection['trace']['contract_present_tool_names'] == ['filesystem_write', 'content_describe']
 
 
-def test_execution_selector_preserves_concrete_hydrated_tool_names_without_family_rewrite() -> None:
+def test_execution_selector_preserves_concrete_contract_present_tool_names_without_family_rewrite() -> None:
     visible_tools = {
         'task_list': _ModelSchemaRecordingTool(
             name='task_list',
@@ -2434,13 +1925,6 @@ def test_execution_selector_preserves_concrete_hydrated_tool_names_without_famil
     }
 
     log_service = _FakeLogService()
-    log_service.upsert_frame(
-        'task-concrete-hydration',
-        {
-            'node_id': 'node-concrete-hydration',
-            'hydrated_executor_names': ['task_list'],
-        },
-    )
     service = object.__new__(MainRuntimeService)
     service.log_service = log_service
     service.store = SimpleNamespace(
@@ -2467,15 +1951,18 @@ def test_execution_selector_preserves_concrete_hydrated_tool_names_without_famil
     ]
 
     selection = service._select_model_visible_tool_schema_payload(
-        task_id='task-concrete-hydration',
-        node_id='node-concrete-hydration',
+        task_id='task-concrete-presence',
+        node_id='node-concrete-presence',
         node_kind='execution',
         visible_tools=visible_tools,
         runtime_context={
-            'task_id': 'task-concrete-hydration',
-            'node_id': 'node-concrete-hydration',
+            'task_id': 'task-concrete-presence',
+            'node_id': 'node-concrete-presence',
             'session_key': 'web:shared',
             'actor_role': 'execution',
+            # 在场索引的键必须是具体工具 id：族名/单体名不在这个键空间里，选择器也不许把
+            # 具体 id 折回族名。
+            'tool_contract_presence': {'task_list': 'tcf:aaaaaaaaaaaaaaaa'},
         },
     )
 
@@ -2485,78 +1972,23 @@ def test_execution_selector_preserves_concrete_hydrated_tool_names_without_famil
         'spawn_child_nodes',
         'task_list',
     ]
-    assert selection['hydrated_executor_names'] == ['task_list']
-    assert selection['trace']['promoted_hydrated_executor_names'] == ['task_list']
-
-
-def test_tool_provider_includes_hydrated_tools_even_when_selection_cache_excludes_them() -> None:
-    service = object.__new__(MainRuntimeService)
-    service.store = SimpleNamespace(
-        get_task=lambda task_id: SimpleNamespace(task_id=task_id, session_id='web:shared', metadata={}),
-    )
-    service._resource_manager = SimpleNamespace(
-        tool_instances=lambda: {
-            'content_open': _ModelSchemaRecordingTool(
-                name='content_open',
-                authoritative_description='content open authoritative schema',
-                model_description='content open model schema',
-            ),
-            'filesystem_write': _ModelSchemaRecordingTool(
-                name='filesystem_write',
-                authoritative_description='filesystem write authoritative schema',
-                model_description='filesystem write model schema',
-            ),
-        }
-    )
-    service._builtin_tool_cache = None
-    service._node_context_selection_cache = {
-        ('task-hydrated-provider', 'node-hydrated-provider'): {
-            'selection': NodeContextSelectionResult(
-                selected_tool_names=['content_open'],
-                candidate_tool_names=['content_open', 'filesystem_write'],
-            )
-        }
-    }
-    service.log_service = _FakeLogService()
-    service.log_service.upsert_frame(
-        'task-hydrated-provider',
-        {
-            'node_id': 'node-hydrated-provider',
-            'hydrated_executor_names': ['filesystem_write'],
-        },
-    )
-    service.list_effective_tool_names = lambda *, actor_role, session_id: ['content_open', 'filesystem_write']
-    service.list_visible_tools = lambda *, actor_role, session_id: []
-    service._actor_role_for_node = lambda node: 'execution'
-
-    node = SimpleNamespace(
-        task_id='task-hydrated-provider',
-        node_id='node-hydrated-provider',
-        node_kind='execution',
-        can_spawn_children=False,
-    )
-    provided = service._tool_provider(node)
-
-    assert 'content_open' in provided
-    assert 'filesystem_write' in provided
+    assert selection['trace']['contract_present_tool_names'] == ['task_list']
+    assert selection['trace']['full_callable_tool_names'] == [
+        'submit_next_stage',
+        'submit_final_result',
+        'spawn_child_nodes',
+        'task_list',
+    ]
 
 
 def test_execution_selector_keeps_governance_visible_executors_promotable_after_bundle_collapse() -> None:
     """候选的上界是治理可见集，不是本轮已构建的对象字典。
 
-    对象字典塌缩到只剩常驻工具时，旧实现把候选算成空集：那些执行器既不在 callable、也不在
-    candidate，于是 load 被提升门禁拒（not candidate_hit）、调用又被拒（tool not available），
+    对象字典塌缩到只剩常驻工具时，若候选只按对象字典算，那些执行器会既不在 callable、也不在
+    candidate：load 被提升门禁拒（not candidate_hit）、调用又被拒（tool not available），
     且文案给不出候选组——实盘里这条死区最长挂了 42 分钟。
     """
     service, visible_tools = _collapsed_bundle_selector_service()
-    # 台账里残留旧单体名：它既不是治理记录、也没有实例，三处都不该出现。
-    service.log_service.upsert_frame(
-        'task-collapse',
-        {
-            'node_id': 'node-collapse',
-            'hydrated_executor_names': ['content'],
-        },
-    )
 
     selection = service._select_model_visible_tool_schema_payload(
         task_id='task-collapse',
@@ -2568,10 +2000,12 @@ def test_execution_selector_keeps_governance_visible_executors_promotable_after_
             'node_id': 'node-collapse',
             'session_key': 'web:shared',
             'actor_role': 'execution',
+            # 请求视图里残留着旧单体名的契约块：它既不是治理记录、也没有实例，三处都不该出现。
+            'tool_contract_presence': {'content': 'tcf:cccccccccccccccc'},
         },
     )
 
-    # 治理可见、尚未水合的执行器仍可被提升
+    # 治理可见、契约不在场的执行器仍留在候选里，可以 load 回来
     assert 'content_describe' in selection['candidate_tool_names']
     assert 'content_search' in selection['candidate_tool_names']
     # callable 面不因治理可见而变宽；provider 清单是按角色钉住的说明书，本来就含这些名字
@@ -2586,9 +2020,9 @@ def test_execution_selector_keeps_governance_visible_executors_promotable_after_
 def test_execution_provider_bundle_freezes_when_exposure_collapses() -> None:
     """非提交跳的清单只允许"补"，不允许"删"。
 
-    清单排在整段上下文最前面，成员一变就把身后正文全部重铺。当轮曝光字典塌缩
-    （候选重排、水合被 LRU 挤掉）都不构成删名的理由——删名要等到 token 压缩那一跳
-    重印；而当轮真的可用的名字必须并进清单，否则模型手里只剩名字、没有参数表。
+    清单排在整段上下文最前面，成员一变就把身后正文全部重铺。当轮曝光字典塌缩（候选重排、
+    契约离场）都不构成删名的理由——删名要等到 token 压缩那一跳重印；而当轮真的可用的名字
+    必须并进清单，否则模型手里只剩名字、没有参数表。
     """
     service, visible_tools = _collapsed_bundle_selector_service()
     service.log_service.upsert_frame(
@@ -2596,8 +2030,6 @@ def test_execution_provider_bundle_freezes_when_exposure_collapses() -> None:
         {
             'node_id': 'node-pin',
             'provider_tool_names': ['exec', 'content_describe', 'content_search'],
-            # 台账里还留着旧单体名：补名单也不许把它带进清单
-            'hydrated_executor_names': ['content'],
         },
     )
 
@@ -2611,6 +2043,8 @@ def test_execution_provider_bundle_freezes_when_exposure_collapses() -> None:
             'node_id': 'node-pin',
             'session_key': 'web:shared',
             'actor_role': 'execution',
+            # 视图里还留着旧单体名的契约块：补名单也不许把它带进清单
+            'tool_contract_presence': {'content': 'tcf:cccccccccccccccc'},
         },
     )
 
@@ -2667,7 +2101,7 @@ def test_execution_provider_bundle_keeps_revoked_tool_declared_and_flags_it() ->
     # 本轮 RBAC 已不再把 web_fetch 给 execution，但名字必须还留在清单里
     assert 'web_fetch' not in list(selection['trace']['rbac_visible_tool_names'] or [])
     assert 'web_fetch' in bundle
-    # 并且要说清它是"无权限"，不是"没水合"
+    # 并且要说清它是"无权限"，不是"契约不在场"
     assert selection['declared_denied_tool_names'] == ['web_fetch']
     assert 'web_fetch' in selection['declared_denied_tool_schemas']
     assert selection['declared_denied_tool_schemas']['web_fetch']['function']['name'] == 'web_fetch'
@@ -2677,7 +2111,7 @@ def test_execution_provider_bundle_keeps_revoked_tool_declared_and_flags_it() ->
 def test_execution_provider_bundle_keeps_dispatch_absent_granted_tool_declared() -> None:
     """仍被授权、只是本轮没进派发字典的名字：参数表要补，尾块文案不写它。
 
-    水合收回把名字摘出派发字典是执行层的卫生动作；跟着把它从 `tools[]` 删掉等于在重印
+    契约不在场把名字摘出派发字典是执行层的卫生动作；跟着把它从 `tools[]` 删掉等于在重印
     边界之外换束——清单排在正文最前面，删名会把它身后全部存活正文重铺一次。而模型真去调
     它拿到的是"先 load_tool_context"那一档，不是"无权限或已下架"，所以 `denied_tools`
     那份文案必须继续只装真失去授权的名字。
@@ -3193,7 +2627,7 @@ def test_tool_provider_covers_governance_visible_tools_when_frame_candidates_are
     service.log_service = _FakeLogService()
     service.log_service.upsert_frame(
         'task-empty-cand',
-        {'node_id': 'node-empty-cand', 'candidate_tool_names': [], 'hydrated_executor_names': []},
+        {'node_id': 'node-empty-cand', 'candidate_tool_names': []},
     )
     # 资源目录里还留着已删除的旧单体实例，但它不再是治理可见工具。
     service.list_effective_tool_names = lambda *, actor_role, session_id: ['content_open', 'content_search']
@@ -3288,8 +2722,6 @@ def test_tool_provider_restores_candidates_from_frame_when_cache_was_cleared() -
             'candidate_skill_ids': [],
             'rbac_visible_tool_names': ['load_tool_context', 'content_open', 'content_search'],
             'rbac_visible_skill_ids': [],
-            'hydrated_executor_state': ['content_open'],
-            'hydrated_executor_names': ['content_open'],
             'messages': [
                 {'role': 'system', 'content': 'system'},
                 {'role': 'user', 'content': '{"prompt":"verify framework"}'},
@@ -3962,7 +3394,6 @@ async def test_execute_tool_calls_allows_submit_next_stage_and_passes_runtime_co
             "tool_contract_enforced": True,
             "rbac_visible_tool_names": [],
             "callable_tool_names": [],
-            "hydrated_executor_names": [],
             "full_callable_tool_names": [],
             "prior_overflow_signatures": [],
             "stage_free_pass_kind": "",
@@ -4487,7 +3918,6 @@ async def test_react_loop_writes_before_model_frame_before_chat_dispatch() -> No
             "tool_names": ["submit_final_result"],
             "candidate_tool_names": ["filesystem_write"],
             "lightweight_tool_ids": [],
-            "hydrated_executor_names": [],
             "trace": {"rbac_visible_tool_names": ["submit_final_result", "filesystem_write"]},
         },
     )
@@ -4507,92 +3937,6 @@ async def test_react_loop_writes_before_model_frame_before_chat_dispatch() -> No
 
     assert result.status == "success"
     assert result.answer == "done"
-
-
-@pytest.mark.asyncio
-async def test_react_loop_keeps_durable_hydration_state_across_frame_writes() -> None:
-    """水合台账是节点生命周期级的：本轮 promoted 视图窄于台账时，帧写入不得抹掉台账。
-
-    视图（hydrated_executor_names）与台账（hydrated_executor_state）是两件事；把前者写进后者，
-    会让一次曝光收窄永久变成"已水合工具掉出 callable 且 load 救不回来"。
-    """
-    log_service = _FakeLogService()
-    final_tool = _submit_final_result_tool()
-    task_id = "task-hydration-state-durable"
-    node_id = "node-hydration-state-durable"
-    log_service.upsert_frame(
-        task_id,
-        {
-            "node_id": node_id,
-            "depth": 0,
-            "node_kind": "execution",
-            "phase": "after_tools",
-            "messages": [],
-            "hydrated_executor_state": ["content_open"],
-            "hydrated_executor_names": ["content_open"],
-        },
-    )
-
-    seen: list[dict[str, object]] = []
-
-    class _Backend:
-        async def chat(self, **kwargs):
-            _ = kwargs
-            frame = log_service.read_runtime_frame(task_id, node_id)
-            seen.append(dict(frame or {}))
-            return LLMResponse(
-                content="",
-                tool_calls=[
-                    ToolCallRequest(
-                        id="call:final",
-                        name="submit_final_result",
-                        arguments={
-                            "status": "success",
-                            "delivery_status": "final",
-                            "summary": "done",
-                            "answer": "done",
-                            "evidence": [],
-                            "remaining_work": [],
-                            "blocking_reason": "",
-                        },
-                    )
-                ],
-                finish_reason="tool_calls",
-                usage={"input_tokens": 8, "output_tokens": 3},
-            )
-
-    loop = ReActToolLoop(chat_backend=_Backend(), log_service=log_service, max_iterations=2)
-    loop._visible_tools_for_iteration = lambda **kwargs: dict(kwargs.get("tools") or {})
-    # 本轮视图为空（例如对象字典塌缩过），台账必须仍然带着 content_open
-    loop._model_visible_tools_for_iteration = lambda **kwargs: (
-        {"submit_final_result": final_tool},
-        {
-            "tool_names": ["submit_final_result"],
-            "candidate_tool_names": ["content_open"],
-            "lightweight_tool_ids": [],
-            "hydrated_executor_names": [],
-            "trace": {"rbac_visible_tool_names": ["submit_final_result", "content_open"]},
-        },
-    )
-
-    result = await loop.run(
-        task=SimpleNamespace(task_id=task_id),
-        node=SimpleNamespace(node_id=node_id, depth=0, node_kind="execution"),
-        messages=[
-            {"role": "system", "content": "system"},
-            {"role": "user", "content": '{"task_id":"task-hydration-state-durable","goal":"demo"}'},
-        ],
-        tools={"submit_final_result": final_tool},
-        model_refs=["fake"],
-        runtime_context={"task_id": task_id, "node_id": node_id},
-        max_iterations=2,
-    )
-
-    assert result.status == "success"
-    assert seen, "backend never saw a before_model frame"
-    assert seen[0].get("phase") == "before_model"
-    assert seen[0].get("hydrated_executor_state") == ["content_open"]
-    assert seen[0].get("hydrated_executor_names") == []
 
 
 @pytest.mark.asyncio
@@ -4642,7 +3986,6 @@ async def test_react_loop_writes_candidate_skill_items_into_before_model_frame()
             ],
         },
         stage_payload={},
-        hydrated_executor_names=[],
         lightweight_tool_ids=[],
         selection_trace={},
     ).to_message()
@@ -4709,7 +4052,6 @@ async def test_react_loop_writes_candidate_skill_items_into_before_model_frame()
             "tool_names": ["submit_final_result"],
             "candidate_tool_names": ["filesystem_write"],
             "lightweight_tool_ids": [],
-            "hydrated_executor_names": [],
             "trace": {"rbac_visible_tool_names": ["submit_final_result", "filesystem_write"]},
         },
     )
@@ -4748,7 +4090,6 @@ def test_build_node_dynamic_contract_does_not_resurrect_stale_candidate_tools_wh
         candidate_skill_items=[],
         candidate_tool_items=[{"tool_id": "filesystem_write", "description": "write file"}],
         stage_payload={},
-        hydrated_executor_names=[],
         lightweight_tool_ids=[],
         selection_trace={},
     ).to_message()
@@ -4770,8 +4111,6 @@ def test_build_node_dynamic_contract_does_not_resurrect_stale_candidate_tools_wh
             "candidate_tool_items": [{"tool_id": "filesystem_write", "description": "write file"}],
             "selected_skill_ids": [],
             "candidate_skill_ids": [],
-            "hydrated_executor_state": ["web_fetch"],
-            "hydrated_executor_names": ["web_fetch"],
         },
         publish_snapshot=False,
     )
@@ -4786,7 +4125,6 @@ def test_build_node_dynamic_contract_does_not_resurrect_stale_candidate_tools_wh
         tool_schema_selection={
             "tool_names": ["submit_next_stage"],
             "candidate_tool_names": [],
-            "hydrated_executor_names": ["web_fetch"],
             "lightweight_tool_ids": [],
             "trace": {},
         },
@@ -4812,7 +4150,6 @@ def test_build_node_dynamic_contract_does_not_resurrect_stale_candidate_skills_w
         candidate_skill_ids=["tmux"],
         candidate_skill_items=[{"skill_id": "tmux", "description": "terminal workflow"}],
         stage_payload={},
-        hydrated_executor_names=[],
         lightweight_tool_ids=[],
         selection_trace={},
     ).to_message()
@@ -4835,8 +4172,6 @@ def test_build_node_dynamic_contract_does_not_resurrect_stale_candidate_skills_w
             "selected_skill_ids": [],
             "candidate_skill_ids": [],
             "candidate_skill_items": [{"skill_id": "tmux", "description": "terminal workflow"}],
-            "hydrated_executor_state": [],
-            "hydrated_executor_names": [],
         },
         publish_snapshot=False,
     )
@@ -4851,7 +4186,6 @@ def test_build_node_dynamic_contract_does_not_resurrect_stale_candidate_skills_w
         tool_schema_selection={
             "tool_names": ["submit_next_stage"],
             "candidate_tool_names": [],
-            "hydrated_executor_names": [],
             "lightweight_tool_ids": [],
             "trace": {},
         },
@@ -4902,7 +4236,6 @@ def test_build_node_dynamic_contract_uses_fresh_message_skill_contract_when_boot
             ],
         },
         stage_payload={},
-        hydrated_executor_names=[],
         lightweight_tool_ids=[],
         selection_trace={},
     ).to_message()
@@ -4923,8 +4256,6 @@ def test_build_node_dynamic_contract_uses_fresh_message_skill_contract_when_boot
             "candidate_skill_items": [],
             "contract_visible_skill_ids": [],
             "skill_visibility_diagnostics": {"registry_skill_ids": [], "entries": []},
-            "hydrated_executor_state": [],
-            "hydrated_executor_names": [],
         },
         publish_snapshot=False,
     )
@@ -4939,7 +4270,6 @@ def test_build_node_dynamic_contract_uses_fresh_message_skill_contract_when_boot
         tool_schema_selection={
             "tool_names": ["submit_next_stage", "load_skill_context"],
             "candidate_tool_names": ["content"],
-            "hydrated_executor_names": [],
             "lightweight_tool_ids": [],
             "trace": {},
         },
@@ -4998,8 +4328,6 @@ def test_build_node_dynamic_contract_prefers_fresh_runtime_seeded_skill_contract
             "candidate_skill_items": [],
             "contract_visible_skill_ids": [],
             "skill_visibility_diagnostics": {"registry_skill_ids": [], "entries": []},
-            "hydrated_executor_state": [],
-            "hydrated_executor_names": [],
         },
         publish_snapshot=False,
     )
@@ -5010,7 +4338,6 @@ def test_build_node_dynamic_contract_prefers_fresh_runtime_seeded_skill_contract
         tool_schema_selection={
             "tool_names": ["submit_next_stage", "load_skill_context"],
             "candidate_tool_names": ["content"],
-            "hydrated_executor_names": [],
             "lightweight_tool_ids": [],
             "trace": {},
         },
@@ -5071,7 +4398,6 @@ async def test_react_loop_before_model_frame_keeps_candidate_tool_items_aligned_
         candidate_skill_items=[],
         candidate_tool_items=[{"tool_id": "filesystem_write", "description": "write file"}],
         stage_payload={},
-        hydrated_executor_names=[],
         lightweight_tool_ids=[],
         selection_trace={},
     ).to_message()
@@ -5111,7 +4437,6 @@ async def test_react_loop_before_model_frame_keeps_candidate_tool_items_aligned_
             "tool_names": ["submit_final_result"],
             "candidate_tool_names": [],
             "lightweight_tool_ids": [],
-            "hydrated_executor_names": ["web_fetch"],
             "trace": {"rbac_visible_tool_names": ["submit_final_result", "filesystem_write", "web_fetch"]},
         },
     )
@@ -5153,7 +4478,6 @@ async def test_react_loop_before_model_frame_keeps_candidate_skill_items_aligned
         candidate_skill_ids=["tmux"],
         candidate_skill_items=[{"skill_id": "tmux", "description": "terminal workflow"}],
         stage_payload={},
-        hydrated_executor_names=[],
         lightweight_tool_ids=[],
         selection_trace={},
     ).to_message()
@@ -5214,7 +4538,6 @@ async def test_react_loop_before_model_frame_keeps_candidate_skill_items_aligned
             "tool_names": ["submit_final_result"],
             "candidate_tool_names": [],
             "lightweight_tool_ids": [],
-            "hydrated_executor_names": [],
             "trace": {"rbac_visible_tool_names": ["submit_final_result"]},
         },
     )
@@ -5376,8 +4699,21 @@ async def test_execute_tool_calls_injects_rbac_visible_tool_names_into_runtime_c
                     "value": value,
                     "rbac_visible_tool_names": runtime.get("rbac_visible_tool_names"),
                     "callable_tool_names": runtime.get("callable_tool_names"),
-                    "hydrated_executor_names": runtime.get("hydrated_executor_names"),
+                    "candidate_tool_names": runtime.get("candidate_tool_names"),
                     "full_callable_tool_names": runtime.get("full_callable_tool_names"),
+                    # 循环自己那批记账键（在场索引、暂存时钟、冲动计数）不该出现在工具道里
+                    "loop_internal_keys": sorted(
+                        key
+                        for key in runtime
+                        if key
+                        in {
+                            "tool_contract_presence",
+                            "tool_arg_stash_carrier",
+                            "impulse_delivered_tools",
+                            "impulse_staged_call_ids",
+                            "impulse_batch_totals",
+                        }
+                    ),
                 },
                 ensure_ascii=False,
             )
@@ -5389,7 +4725,7 @@ async def test_execute_tool_calls_injects_rbac_visible_tool_names_into_runtime_c
             "node_id": "node-runtime-rbac",
             "rbac_visible_tool_names": ["exec", "load_tool_context"],
             "callable_tool_names": ["load_tool_context"],
-            "hydrated_executor_names": ["exec"],
+            "candidate_tool_names": ["filesystem_write"],
             "model_visible_tool_selection_trace": {"full_callable_tool_names": ["load_tool_context", "exec"]},
         },
     )
@@ -5400,15 +4736,25 @@ async def test_execute_tool_calls_injects_rbac_visible_tool_names_into_runtime_c
         node=SimpleNamespace(node_id="node-runtime-rbac", depth=0, node_kind="execution"),
         response_tool_calls=[SimpleNamespace(id="call-runtime-rbac", name="capture_runtime", arguments={"value": "demo"})],
         tools={"capture_runtime": _RuntimeCaptureTool()},
-        runtime_context={"session_key": "web:shared", "actor_role": "execution", "node_kind": "execution"},
+        runtime_context={
+            "session_key": "web:shared",
+            "actor_role": "execution",
+            "node_kind": "execution",
+            "tool_contract_presence": {"exec": "tcf:aaaaaaaaaaaaaaaa"},
+            "tool_arg_stash_carrier": {"filesystem_write": {"hop": 1}},
+            "impulse_delivered_tools": {"filesystem_write"},
+            "impulse_staged_call_ids": {"call-runtime-rbac"},
+            "impulse_batch_totals": {"capture_runtime": 1},
+        },
     )
 
     payload = json.loads(str(results[0]["raw_result"] or ""))
     assert payload["value"] == "demo"
     assert payload["rbac_visible_tool_names"] == ["exec", "load_tool_context"]
     assert payload["callable_tool_names"] == ["load_tool_context"]
-    assert payload["hydrated_executor_names"] == ["exec"]
+    assert payload["candidate_tool_names"] == ["filesystem_write"]
     assert payload["full_callable_tool_names"] == ["load_tool_context", "exec"]
+    assert payload["loop_internal_keys"] == []
 
 
 @pytest.mark.asyncio
@@ -5550,7 +4896,8 @@ async def test_load_tool_context_direct_read_guard_blocks_duplicate_inline_tools
                 "role": "tool",
                 "tool_call_id": "call-old",
                 "name": "load_tool_context",
-                "content": json.dumps(prior_payload, ensure_ascii=False),
+                # 交付形态与真车道同形：块写在 `content` 里，判据只认那一颗头。
+                "content": json.dumps(attach_tool_contract_block(prior_payload), ensure_ascii=False),
             }
         ],
         runtime_context={
@@ -5606,7 +4953,9 @@ async def test_load_tool_context_direct_read_guard_allows_refresh_when_fingerpri
     prior_payload = {
         "ok": True,
         "tool_id": "exec",
-        "content": "# exec",
+        # 修订身份现在只看源正文 + 参数表（D2）。`exec_runtime_policy` 已退出哈希，
+        # "换了修订"必须是正文真的变了，不能再靠治理模式制造号差。
+        "content": "# exec\n\nOld toolskill revision.\n",
         "parameter_contract_markdown": "## Parameter Contract",
         "required_parameters": ["command"],
         "example_arguments": {"command": "pwd"},
@@ -5634,7 +4983,8 @@ async def test_load_tool_context_direct_read_guard_allows_refresh_when_fingerpri
                 "role": "tool",
                 "tool_call_id": "call-old",
                 "name": "load_tool_context",
-                "content": json.dumps(prior_payload, ensure_ascii=False),
+                # 上一版正文确实留在上下文里（带块），只是修订不同 ⇒ 允许重读。
+                "content": json.dumps(attach_tool_contract_block(prior_payload), ensure_ascii=False),
             }
         ],
         runtime_context={
@@ -5703,7 +5053,6 @@ def test_refresh_node_dynamic_contract_restores_skill_candidates_from_frame_afte
             }
         ],
         stage_payload={},
-        hydrated_executor_names=[],
         lightweight_tool_ids=[],
         selection_trace={},
     ).to_message()
@@ -5738,7 +5087,6 @@ def test_refresh_node_dynamic_contract_restores_skill_candidates_from_frame_afte
         tool_schema_selection={
             "tool_names": ["submit_next_stage", "load_skill_context"],
             "candidate_tool_names": ["content"],
-            "hydrated_executor_names": [],
             "lightweight_tool_ids": [],
             "trace": {},
         },
@@ -5786,7 +5134,6 @@ def test_node_dynamic_contract_injection_keeps_request_only_message_after_bootst
                 "rounds": [{"round_id": "round-1"}],
             },
         },
-        hydrated_executor_names=["filesystem_write"],
         lightweight_tool_ids=["filesystem"],
         selection_trace={
             "mode": "execution_tool_selection",
@@ -5825,7 +5172,7 @@ def test_node_dynamic_contract_injection_keeps_request_only_message_after_bootst
             "description": "terminal workflow",
         }
     ]
-    assert payload["hydrated_executor_names"] == ["filesystem_write"]
+    assert payload["callable_tool_names"] == ["submit_next_stage"]
     assert "model_visible_tool_selection_trace" not in payload
 
 
@@ -5841,7 +5188,6 @@ def test_node_token_compaction_keeps_append_notice_tail_before_compact_block() -
         candidate_skill_ids=[],
         candidate_skill_items=[],
         stage_payload={},
-        hydrated_executor_names=[],
         lightweight_tool_ids=[],
         selection_trace={},
     ).to_message()
@@ -6534,16 +5880,22 @@ async def test_enrich_node_messages_uses_selector_narrowed_skills_without_memory
 
 
 @pytest.mark.asyncio
-async def test_enrich_node_messages_reports_hydrated_callable_tools_separately_from_candidates(
+async def test_enrich_node_messages_keeps_contract_absent_tools_out_of_callable_at_bootstrap(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """引导装配手上没有当次请求视图，在场判据按空集走：callable 只剩常驻内置。
+
+    治理可见但契约不在场的工具必须留在候选（load 或冲动调用把契约带回来），不许因为它
+    在选中集里就当成"这一跳可直接调用"——派发字典是节点唯一的执行准入。
+    """
+
     async def _fake_build_node_context_selection(**kwargs):
         _ = kwargs
         return NodeContextSelectionResult(
             selected_skill_ids=["tmux"],
             selected_tool_names=["content_open", "exec"],
             candidate_skill_ids=["tmux"],
-            candidate_tool_names=["content_open", "exec"],
+            candidate_tool_names=["content_open", "exec", "filesystem_write"],
         )
 
     monkeypatch.setattr(
@@ -6561,13 +5913,6 @@ async def test_enrich_node_messages_reports_hydrated_callable_tools_separately_f
         'transition_required': False,
         'active_stage': {'stage_id': 'stage-1'},
     }
-    service.log_service.upsert_frame(
-        'task-hydrated-payload',
-        {
-            'node_id': 'node-hydrated-payload',
-            'hydrated_executor_names': ['filesystem_write'],
-        },
-    )
     service.list_visible_tools = lambda *, actor_role, session_id: [
         SimpleNamespace(tool_id='content_open'),
         SimpleNamespace(tool_id='filesystem_write'),
@@ -6576,10 +5921,10 @@ async def test_enrich_node_messages_reports_hydrated_callable_tools_separately_f
         SimpleNamespace(skill_id='tmux', display_name='tmux', description='terminal workflow'),
     ]
     service.list_effective_tool_names = lambda *, actor_role, session_id: ['content_open', 'filesystem_write', 'load_tool_context']
-    task = SimpleNamespace(task_id='task-hydrated-payload', session_id="web:ceo-origin", metadata={})
+    task = SimpleNamespace(task_id='task-presence-payload', session_id="web:ceo-origin", metadata={})
     node = SimpleNamespace(
-        task_id='task-hydrated-payload',
-        node_id='node-hydrated-payload',
+        task_id='task-presence-payload',
+        node_id='node-presence-payload',
         prompt="terminal workflow",
         goal="terminal workflow",
         node_kind="execution",
@@ -6598,12 +5943,17 @@ async def test_enrich_node_messages_reports_hydrated_callable_tools_separately_f
     dynamic_payload = extract_node_dynamic_contract_payload(enriched)
     assert dynamic_payload is not None
     assert dynamic_payload["message_type"] == "node_runtime_tool_contract"
-    assert dynamic_payload["callable_tool_names"] == ["load_tool_context", "filesystem_write"]
+    # 请求视图里没有契约块，callable 只剩常驻内置 loader
+    assert dynamic_payload["callable_tool_names"] == ["load_tool_context"]
     assert dynamic_payload["candidate_tools"] == [
         {
             "tool_id": "content_open",
             "description": "",
-        }
+        },
+        {
+            "tool_id": "filesystem_write",
+            "description": "",
+        },
     ]
 
 
@@ -6704,13 +6054,6 @@ async def test_enrich_node_messages_exposes_full_callable_tools_without_valid_st
         'transition_required': False,
         'active_stage': None,
     }
-    service.log_service.upsert_frame(
-        'task-stage-locked-payload',
-        {
-            'node_id': 'node-stage-locked-payload',
-            'hydrated_executor_names': ['filesystem_write'],
-        },
-    )
     service.list_visible_tools = lambda *, actor_role, session_id: [
         SimpleNamespace(tool_id='content'),
         SimpleNamespace(tool_id='filesystem'),
@@ -6741,7 +6084,8 @@ async def test_enrich_node_messages_exposes_full_callable_tools_without_valid_st
     dynamic_payload = extract_node_dynamic_contract_payload(enriched)
     assert dynamic_payload is not None
     assert dynamic_payload["message_type"] == "node_runtime_tool_contract"
-    assert dynamic_payload["callable_tool_names"] == ["submit_next_stage", "load_tool_context", "filesystem_write"]
+    # 没有有效阶段：callable 不被阶段闸收成只剩 submit_next_stage，控制信号 + 常驻内置全在
+    assert dynamic_payload["callable_tool_names"] == ["submit_next_stage", "load_tool_context"]
     assert dynamic_payload["candidate_tools"] == [
         {
             "tool_id": "content",
@@ -9220,14 +8564,8 @@ async def test_node_second_tool_round_request_carries_no_stale_contract_or_note(
     assert _note_count(non_tail) == 0
 
 
-def test_auto_hydrate_content_open_on_exec_truncation() -> None:
+def test_remind_content_open_reopen_on_exec_truncation() -> None:
     loop = ReActToolLoop.__new__(ReActToolLoop)
-    promotions: list[dict[str, object]] = []
-
-    def _promoter(**kwargs: object) -> None:
-        promotions.append(dict(kwargs))
-
-    loop._tool_context_hydration_promoter = _promoter
 
     results = [
         {
@@ -9247,30 +8585,22 @@ def test_auto_hydrate_content_open_on_exec_truncation() -> None:
         },
     ]
 
-    reminded = loop._auto_hydrate_content_open_on_exec_truncation(
-        task_id="t1", node_id="n1", results=results, runtime_context={}
-    )
+    reminded = loop._remind_content_open_reopen_on_exec_truncation(results=results)
 
     assert reminded == 1
-    assert len(promotions) == 1
-    call = promotions[0]
-    tool_call = call["tool_call"]
-    assert getattr(tool_call, "name") == "load_tool_context"
-    assert getattr(tool_call, "arguments") == {"tool_id": "content_open"}
-    assert call["raw_result"] == {"ok": True, "tool_id": "content_open"}
     # 只在截断的 exec 结果里注入提醒，且保留原有内容前缀。
     assert results[0]["tool_message"]["content"].startswith("<EXEC_TRUNC>")
-    assert "已自动加载 content_open" in results[0]["tool_message"]["content"]
+    content = str(results[0]["tool_message"]["content"])
+    assert "exec 输出未整篇交付到本轮上下文" in content
+    # 文案承诺的出路必须真存在：没有任何"自动加载"，模型自己取契约。
+    assert "已自动加载" not in content
+    assert 'load_tool_context(tool_id="content_open")' in content
     # 非截断 exec 与其它工具不被改动。
     assert results[1]["tool_message"]["content"] == "<EXEC_OK>"
     assert results[2]["tool_message"]["content"] == "<OPEN>"
 
-    # 幂等：同一结果再次处理不再重复水合/注入。
-    reminded_again = loop._auto_hydrate_content_open_on_exec_truncation(
-        task_id="t1", node_id="n1", results=results, runtime_context={}
-    )
-    assert reminded_again == 0
-    assert len(promotions) == 1
+    # 幂等：同一结果再次处理不再重复注入。
+    assert loop._remind_content_open_reopen_on_exec_truncation(results=results) == 0
 
 
 def test_exec_truncation_reminder_fires_on_inline_budget_cut() -> None:
@@ -9280,8 +8610,6 @@ def test_exec_truncation_reminder_fires_on_inline_budget_cut() -> None:
     看不见这次切割，模型既没拿到整篇也没被告知能复开。
     """
     loop = ReActToolLoop.__new__(ReActToolLoop)
-    promotions: list[dict[str, object]] = []
-    loop._tool_context_hydration_promoter = lambda **kwargs: promotions.append(dict(kwargs))
 
     results = [
         {
@@ -9305,14 +8633,11 @@ def test_exec_truncation_reminder_fires_on_inline_budget_cut() -> None:
         },
     ]
 
-    reminded = loop._auto_hydrate_content_open_on_exec_truncation(
-        task_id="t1", node_id="n1", results=results, runtime_context={}
-    )
+    reminded = loop._remind_content_open_reopen_on_exec_truncation(results=results)
 
     assert reminded == 1
-    assert len(promotions) == 1
     content = str(results[0]["tool_message"]["content"])
-    assert "已自动加载 content_open" in content
+    assert "exec 输出未整篇交付到本轮上下文" in content
     assert "content_search" in content
     # 整篇交付的那条不被改动。
     assert results[1]["tool_message"]["content"] == "<WHOLE>"
@@ -9650,7 +8975,6 @@ async def test_node_loop_keeps_revoked_tool_declared_but_still_refuses_it() -> N
                 }
             },
             "candidate_tool_names": [],
-            "hydrated_executor_names": [],
             "lightweight_tool_ids": [],
             "pending_provider_tool_names": [],
             "provider_tool_exposure_pending": False,

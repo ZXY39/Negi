@@ -18,9 +18,8 @@ from main.governance.exec_tool_policy import (
 # callable_now（治理层"对该角色可调用"），本轮真不真的能调要另看曝光集，两者被混成
 # 一件事，模型于是反复拿到"说它可用、调它报错"的循环。
 PROMOTION_HELP = {
-    "promoted_next_turn": "已记录水合，下一轮可直接调用；本轮仍不可调用。",
+    "promoted_next_turn": "契约说明已随本次加载进入上下文，下一跳可直接调用；本轮仍不可调用。",
     "already_callable": "本轮已可直接调用，无需再加载本说明。",
-    "already_hydrated": "该工具已在水合台账内，但不在本轮可调用名单里；请改用本轮可调用名单中的工具。",
     "not_in_this_turn_candidates": (
         "该名字不在本轮候选工具里，本次加载只返回说明、不会提升它；"
         "请从合同里的本轮候选工具名单中选择，或直接使用本轮可调用名单中的工具。"
@@ -42,38 +41,24 @@ def _normalized_runtime_name_list(values: Any) -> list[str]:
 
 
 def build_tool_context_fingerprint(payload: dict[str, Any] | None) -> str:
+    """契约修订身份 = toolskill 源正文 + 参数表源，两样都是**源**，不是本轮视角。
+
+    刻意不含（前三项是派生/运行时注入，掺进来会让同一份正文算出多个指纹，重复读守卫与
+    在场判据从此判不准；实盘：同一工具同长度正文出现 2-4 个指纹）：
+
+    - `parameter_contract_markdown` / `required_parameters` / `example_arguments`：
+      都从 `parameters_schema` 派生，源已在哈希里，再派生一遍等于给渲染器加一个改号入口。
+    - `exec_runtime_policy`：治理模式，配置刷新就变，正文一个字没动。
+    - `warnings` / `errors`：`errors` 里含 repair 原因，是本轮状态。
+    - `callable` / `available` / `repair_required` / promotion 系列：本轮视角。
+    """
     normalized = dict(payload or {}) if isinstance(payload, dict) else {}
     if not normalized:
         return ""
     fingerprint_payload = {
         "tool_id": str(normalized.get("tool_id") or "").strip(),
         "content": str(normalized.get("content") or ""),
-        "parameter_contract_markdown": str(normalized.get("parameter_contract_markdown") or ""),
-        "required_parameters": [
-            str(item or "").strip()
-            for item in list(normalized.get("required_parameters") or [])
-            if str(item or "").strip()
-        ],
-        "example_arguments": normalized.get("example_arguments") or {},
-        "warnings": [
-            str(item or "").strip()
-            for item in list(normalized.get("warnings") or [])
-            if str(item or "").strip()
-        ],
-        "errors": [
-            str(item or "").strip()
-            for item in list(normalized.get("errors") or [])
-            if str(item or "").strip()
-        ],
-        "exec_runtime_policy": (
-            dict(normalized.get("exec_runtime_policy") or {})
-            if isinstance(normalized.get("exec_runtime_policy"), dict)
-            else None
-        ),
-        # 刻意不含 callable / available / repair_required / callable_now /
-        # will_be_hydrated_next_turn / hydration_targets：那几项是"本轮视角"，逐轮会变。
-        # 指纹的身份是契约正文，重复读守卫拿它跨轮比对，掺进轮次状态后同一份正文会算出
-        # 两个指纹，守卫就再也拦不住重读（实盘：同一工具同长度正文出现 2-4 个指纹）。
+        "parameters_schema": normalized.get("parameters_schema") or {},
     }
     encoded = json.dumps(
         fingerprint_payload,
@@ -109,38 +94,25 @@ def apply_runtime_tool_context_projection(
     runtime_payload = runtime if isinstance(runtime, dict) else {}
     candidate_names = set(_normalized_runtime_name_list(runtime_payload.get("candidate_tool_names")))
     live_visible_names = set(_normalized_runtime_name_list(live_visible_tool_names))
-    callable_names = set(
-        _normalized_runtime_name_list(
-            runtime_payload.get("callable_tool_names")
-            or runtime_payload.get("tool_names")
-        )
-    )
-    hydrated_names = set(
-        _normalized_runtime_name_list(
-            runtime_payload.get("hydrated_executor_names")
-            or runtime_payload.get("hydrated_tool_names")
-        )
-    )
+    # callable 视图只取 `callable_tool_names`：两条车道的这一跳 callable 已经是
+    # 「常驻内置 ∪ 契约在场」的结果（见 runtime_service._select_model_visible_tool_schema_payload
+    # 与 _frontdoor_callable_tool_names_for_state）。回退到 `tool_names` 会拿"已授权"当
+    # "可调用来"，而水合台账删除后这两个集合不再相同——回执就会对模型谎称"本轮已可直接调用"。
+    callable_names = set(_normalized_runtime_name_list(runtime_payload.get("callable_tool_names")))
     normalized_targets = _normalized_runtime_name_list(projected.get("hydration_targets"))
     candidate_hit = any(
         name in candidate_names or name in live_visible_names for name in target_names
     )
     callable_hit = any(name in callable_names for name in target_names)
-    hydrated_hit = any(name in hydrated_names for name in target_names)
     projected["callable_this_turn"] = bool(callable_hit)
     if target_names:
-        if candidate_hit and not callable_hit and not hydrated_hit:
+        if candidate_hit and not callable_hit:
             projected["will_be_hydrated_next_turn"] = bool(normalized_targets)
             projected["promotion"] = "promoted_next_turn" if normalized_targets else "not_promotable"
         else:
             normalized_targets = []
             projected["will_be_hydrated_next_turn"] = False
-            if callable_hit:
-                projected["promotion"] = "already_callable"
-            elif hydrated_hit:
-                projected["promotion"] = "already_hydrated"
-            else:
-                projected["promotion"] = "not_in_this_turn_candidates"
+            projected["promotion"] = "already_callable" if callable_hit else "not_in_this_turn_candidates"
         help_text = PROMOTION_HELP.get(str(projected.get("promotion") or ""))
         if help_text:
             projected["promotion_help"] = help_text

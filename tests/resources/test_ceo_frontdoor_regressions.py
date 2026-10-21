@@ -16,6 +16,7 @@ from g3ku.config.schema import MemoryAssemblyConfig
 from g3ku.runtime.frontdoor._ceo_create_agent_impl import CreateAgentCeoFrontDoorRunner
 from g3ku.runtime.frontdoor.ceo_runner import CeoFrontDoorRunner
 from g3ku.runtime.session_agent import RuntimeAgentSession
+from g3ku.runtime.tool_contract_block import render_tool_contract_block
 from g3ku.session.manager import SessionManager
 from main.runtime.internal_tools import SilentTool
 from main.runtime.stage_messages import build_ceo_stage_reply_bounce_message
@@ -109,6 +110,48 @@ class _RecordingTool(Tool):
         _ = kwargs
         self._sink.append((self._name, value))
         return json.dumps({"ok": True, "tool": self._name, "value": value}, ensure_ascii=False)
+
+
+class _ContractLoadTool(Tool):
+    """真把契约放进请求视图的 `load_tool_context` 替身。
+
+    在场判据取代台账后，"注册了就能调"不再成立；这几条用例测的是无阶段直发、XML 调用
+    解析与修复，所以契约得靠正当途径进场：让模型先 load 一次，回执里的 `[TOOL_CONTRACT_V1]`
+    块落进消息，下一跳该工具就真在场。
+    """
+
+    def __init__(self, tool_id: str) -> None:
+        self._tool_id = tool_id
+
+    @property
+    def name(self) -> str:
+        return "load_tool_context"
+
+    @property
+    def description(self) -> str:
+        return "load a tool contract"
+
+    @property
+    def parameters(self) -> dict[str, object]:
+        return {
+            "type": "object",
+            "properties": {"tool_id": {"type": "string"}},
+            "required": ["tool_id"],
+        }
+
+    async def execute(self, tool_id: str = "", **kwargs) -> str:
+        _ = kwargs
+        resolved = str(tool_id or self._tool_id).strip() or self._tool_id
+        fingerprint = "tcf:" + ((resolved or "tool") * 20)[:16]
+        return json.dumps(
+            {
+                "ok": True,
+                "tool_id": resolved,
+                "tool_context_fingerprint": fingerprint,
+                "content": render_tool_contract_block(resolved, fingerprint, f"# {resolved}\n契约正文"),
+            },
+            ensure_ascii=False,
+        )
 
 
 class _CountTool(Tool):
@@ -285,7 +328,12 @@ async def test_ceo_frontdoor_runner_directly_executes_visible_tool_without_stage
                             "stage_goal": "Create the CEO stage before using record_tool",
                             "tool_round_budget": 2,
                         },
-                    )
+                    ),
+                    ToolCallRequest(
+                        id="call-load-1",
+                        name="load_tool_context",
+                        arguments={"tool_id": "record_tool"},
+                    ),
                 ],
                 finish_reason="tool_calls",
             ),
@@ -309,7 +357,7 @@ async def test_ceo_frontdoor_runner_directly_executes_visible_tool_without_stage
         _checkpointer=None,
         _store=None,
         main_task_service=None,
-        tools=_FakeToolRegistry([_RecordingTool("record_tool", executed)]),
+        tools=_FakeToolRegistry([_RecordingTool("record_tool", executed), _ContractLoadTool("record_tool")]),
         max_iterations=8,
         resource_manager=None,
         tool_execution_manager=None,
@@ -318,11 +366,11 @@ async def test_ceo_frontdoor_runner_directly_executes_visible_tool_without_stage
 
     async def _resolve_for_actor(*, actor_role: str, session_id: str):
         _ = actor_role, session_id
-        return {"skills": [], "tool_families": [], "tool_names": ["record_tool"]}
+        return {"skills": [], "tool_families": [], "tool_names": ["record_tool", "load_tool_context"]}
 
     async def _build_for_ceo(**kwargs):
         _ = kwargs
-        return _assembly_result(tool_names=["record_tool"])
+        return _assembly_result(tool_names=["record_tool", "load_tool_context"])
 
     monkeypatch.setattr(runner._resolver, "resolve_for_actor", _resolve_for_actor)
     monkeypatch.setattr(runner._builder, "build_for_ceo", _build_for_ceo)
@@ -676,7 +724,12 @@ async def test_ceo_frontdoor_runner_executes_xml_tool_call_directly_without_repa
                             "stage_goal": "Open a stage before issuing XML tool syntax",
                             "tool_round_budget": 2,
                         },
-                    )
+                    ),
+                    ToolCallRequest(
+                        id="call-load-1",
+                        name="load_tool_context",
+                        arguments={"tool_id": "record_tool"},
+                    ),
                 ],
                 finish_reason="tool_calls",
             ),
@@ -694,7 +747,7 @@ async def test_ceo_frontdoor_runner_executes_xml_tool_call_directly_without_repa
         _checkpointer=None,
         _store=None,
         main_task_service=None,
-        tools=_FakeToolRegistry([_RecordingTool("record_tool", executed)]),
+        tools=_FakeToolRegistry([_RecordingTool("record_tool", executed), _ContractLoadTool("record_tool")]),
         max_iterations=8,
         resource_manager=None,
         tool_execution_manager=None,
@@ -703,11 +756,11 @@ async def test_ceo_frontdoor_runner_executes_xml_tool_call_directly_without_repa
 
     async def _resolve_for_actor(*, actor_role: str, session_id: str):
         _ = actor_role, session_id
-        return {"skills": [], "tool_families": [], "tool_names": ["record_tool"]}
+        return {"skills": [], "tool_families": [], "tool_names": ["record_tool", "load_tool_context"]}
 
     async def _build_for_ceo(**kwargs):
         _ = kwargs
-        return _assembly_result(tool_names=["record_tool"])
+        return _assembly_result(tool_names=["record_tool", "load_tool_context"])
 
     monkeypatch.setattr(runner._resolver, "resolve_for_actor", _resolve_for_actor)
     monkeypatch.setattr(runner._builder, "build_for_ceo", _build_for_ceo)
@@ -763,7 +816,12 @@ async def test_ceo_frontdoor_runner_repairs_xml_tool_call_via_json_payload_after
                             "stage_goal": "Open a stage before repairing the XML payload",
                             "tool_round_budget": 2,
                         },
-                    )
+                    ),
+                    ToolCallRequest(
+                        id="call-load-1",
+                        name="load_tool_context",
+                        arguments={"tool_id": "count_tool"},
+                    ),
                 ],
                 finish_reason="tool_calls",
             ),
@@ -786,7 +844,7 @@ async def test_ceo_frontdoor_runner_repairs_xml_tool_call_via_json_payload_after
         _checkpointer=None,
         _store=None,
         main_task_service=None,
-        tools=_FakeToolRegistry([_CountTool(executed)]),
+        tools=_FakeToolRegistry([_CountTool(executed), _ContractLoadTool("count_tool")]),
         max_iterations=8,
         resource_manager=None,
         tool_execution_manager=None,
@@ -795,11 +853,11 @@ async def test_ceo_frontdoor_runner_repairs_xml_tool_call_via_json_payload_after
 
     async def _resolve_for_actor(*, actor_role: str, session_id: str):
         _ = actor_role, session_id
-        return {"skills": [], "tool_families": [], "tool_names": ["count_tool"]}
+        return {"skills": [], "tool_families": [], "tool_names": ["count_tool", "load_tool_context"]}
 
     async def _build_for_ceo(**kwargs):
         _ = kwargs
-        return _assembly_result(tool_names=["count_tool"])
+        return _assembly_result(tool_names=["count_tool", "load_tool_context"])
 
     monkeypatch.setattr(runner._resolver, "resolve_for_actor", _resolve_for_actor)
     monkeypatch.setattr(runner._builder, "build_for_ceo", _build_for_ceo)
@@ -868,11 +926,11 @@ async def test_ceo_frontdoor_runner_retries_empty_turn_until_valid_result(monkey
 
     async def _resolve_for_actor(*, actor_role: str, session_id: str):
         _ = actor_role, session_id
-        return {"skills": [], "tool_families": [], "tool_names": ["record_tool"]}
+        return {"skills": [], "tool_families": [], "tool_names": ["record_tool", "load_tool_context"]}
 
     async def _build_for_ceo(**kwargs):
         _ = kwargs
-        return _assembly_result(tool_names=["record_tool"])
+        return _assembly_result(tool_names=["record_tool", "load_tool_context"])
 
     monkeypatch.setattr(runner._resolver, "resolve_for_actor", _resolve_for_actor)
     monkeypatch.setattr(runner._builder, "build_for_ceo", _build_for_ceo)

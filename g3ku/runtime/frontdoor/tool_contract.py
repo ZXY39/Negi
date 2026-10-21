@@ -15,8 +15,8 @@ from g3ku.utils.helpers import (
 FRONTDOOR_DYNAMIC_TOOL_CONTRACT_KIND = 'frontdoor_runtime_tool_contract'
 FRONTDOOR_DYNAMIC_TOOL_CONTRACT_HEADING = '## Runtime Tool Contract'
 FRONTDOOR_DYNAMIC_TOOL_CONTRACT_PAYLOAD_KEY = '_frontdoor_tool_contract_payload'
-# 活状态块：`callable_tools` / `stage_summary` 每次阶段切换都重写
-# （实盘 1001 跳里分别 301 与 362 次），其余段一回合内是常量。拆成两份后，重写只
+# 活状态块：`denied_tools` / `stage_summary` 每次阶段切换都按当轮状态重算
+# （实盘 1001 跳里 stage_summary 重写 362 次），其余段一回合内是常量。拆成两份后，重写只
 # 顶掉这份小块的字节，稳定块与它前面的携带正文继续命中前缀缓存。
 FRONTDOOR_DYNAMIC_STAGE_GATE_KIND = 'frontdoor_runtime_stage_gate'
 FRONTDOOR_DYNAMIC_STAGE_GATE_HEADING = '## Runtime Stage Gate'
@@ -774,13 +774,17 @@ def _render_frontdoor_contract_summary(payload: dict[str, Any]) -> str:
 
 
 def _render_frontdoor_stage_gate_summary(payload: dict[str, Any]) -> str:
-    """每跳活的状态：本轮真可调用集、水合集、活动阶段轨道。排在请求体末位。"""
+    """每跳活的状态：不可调名字与活动阶段轨道。排在请求体末位。
+
+    `callable_tools` 那行删掉了：准入面就是"钉住的 `tools[]` 减去 `denied_tools` 减去契约
+    不在场"，而契约不在场不再是死路——直接调用那一个工具就会把它的契约带回来。列一份每跳
+    变化的名单既不可推导不动作，又要每跳重付一遍。
+    """
     lines = [
         FRONTDOOR_DYNAMIC_STAGE_GATE_HEADING,
         f'kind: {FRONTDOOR_DYNAMIC_STAGE_GATE_KIND}',
         # `contract_revision` 整回合不变，已在上一块出现过；两块各印一份等于每跳为同一个
         # 值付两遍，而它在这条道没有消费者（曝光 revision 的刷新判据在头部键里算）。
-        f'callable_tools: {_render_name_list(payload.get("callable_tool_names"))}',
     ]
     denied_tool_names = _normalized_name_list(payload.get('denied_tool_names'))
     if denied_tool_names:
@@ -854,7 +858,6 @@ def _active_stage_summary(frontdoor_stage_state: dict[str, Any] | None) -> dict[
 class FrontdoorToolContract:
     callable_tool_names: list[str]
     candidate_tool_names: list[str]
-    hydrated_tool_names: list[str]
     stage_summary: dict[str, Any]
     visible_skill_ids: list[str]
     candidate_skill_ids: list[str]
@@ -883,7 +886,6 @@ class FrontdoorToolContract:
                 list(self.candidate_tool_items or []),
                 fallback_names=list(self.candidate_tool_names),
             ),
-            'hydrated_tool_names': list(self.hydrated_tool_names),
             'candidate_skill_ids': list(self.candidate_skill_ids),
             'stage_summary': dict(self.stage_summary),
             'contract_revision': str(self.contract_revision or '').strip(),
@@ -982,7 +984,6 @@ def build_frontdoor_tool_contract(
     callable_tool_names: list[str] | None,
     candidate_tool_names: list[str] | None,
     candidate_tool_items: list[dict[str, str]] | None = None,
-    hydrated_tool_names: list[str] | None,
     frontdoor_stage_state: dict[str, Any] | None,
     visible_skill_ids: list[str] | None = None,
     candidate_skill_ids: list[str] | None = None,
@@ -1009,7 +1010,6 @@ def build_frontdoor_tool_contract(
     return FrontdoorToolContract(
         callable_tool_names=callable_names,
         candidate_tool_names=candidate_names,
-        hydrated_tool_names=_normalized_name_list(hydrated_tool_names),
         stage_summary=_active_stage_summary(frontdoor_stage_state),
         visible_skill_ids=_normalized_name_list(visible_skill_ids),
         candidate_skill_ids=_normalized_name_list(candidate_skill_ids),

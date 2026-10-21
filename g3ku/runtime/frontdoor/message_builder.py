@@ -442,7 +442,7 @@ class CeoMessageBuilder:
         cls,
         *,
         visible_tool_names: list[str],
-        hydrated_tool_names: list[str] | None = None,
+        contract_present_tool_names: list[str] | None = None,
     ) -> list[str]:
         visible = [
             str(item or '').strip()
@@ -458,7 +458,7 @@ class CeoMessageBuilder:
                 continue
             seen.add(normalized)
             ordered.append(normalized)
-        for name in list(hydrated_tool_names or []):
+        for name in list(contract_present_tool_names or []):
             normalized = str(name or '').strip()
             if not normalized or normalized not in visible_set or normalized in seen:
                 continue
@@ -1106,7 +1106,7 @@ class CeoMessageBuilder:
         query_text: str,
         exposure: dict[str, Any],
         user_content: Any | None,
-        hydrated_tool_names: list[str] | None = None,
+        contract_present_tool_names: list[str] | None = None,
     ) -> dict[str, Any]:
         retrieval_started_at = 0.0
         retrieval_elapsed_ms = 0.0
@@ -1119,7 +1119,7 @@ class CeoMessageBuilder:
         ]
         callable_tool_names = self._callable_tool_names(
             visible_tool_names=visible_tool_names,
-            hydrated_tool_names=list(hydrated_tool_names or []),
+            contract_present_tool_names=list(contract_present_tool_names or []),
         )
         callable_tool_name_set = set(callable_tool_names)
 
@@ -1191,7 +1191,7 @@ class CeoMessageBuilder:
                 for name in selected_tool_names
                 if name in self.FIXED_BUILTIN_TOOL_NAMES
             ],
-            'hydrated_tool_names': [
+            'contract_present_tool_names': [
                 name
                 for name in selected_tool_names
                 if name in callable_tool_name_set
@@ -1336,7 +1336,7 @@ class CeoMessageBuilder:
             'repair_required_tool_items': repair_required_tool_items,
             'repair_required_skill_items': repair_required_skill_items,
             'callable_tool_names': callable_tool_names,
-            'hydrated_tool_names': [
+            'contract_present_tool_names': [
                 name
                 for name in callable_tool_names
                 if name not in self.RESERVED_INTERNAL_TOOLS
@@ -1651,7 +1651,6 @@ class CeoMessageBuilder:
             callable_tool_names=list(context_sources['callable_tool_names']),
             candidate_tool_names=list(context_sources['selected_tool_names']),
             candidate_tool_items=list(context_sources.get('selected_tool_items') or []),
-            hydrated_tool_names=list(context_sources['hydrated_tool_names']),
             frontdoor_stage_state=dict(context_sources.get('frontdoor_stage_state') or {}),
             visible_skill_ids=[
                 self._skill_id(item)
@@ -1834,7 +1833,7 @@ class CeoMessageBuilder:
         frontdoor_stage_state: dict[str, Any] | None = None,
         frontdoor_canonical_context: dict[str, Any] | None = None,
         semantic_context_state: dict[str, Any] | None = None,
-        hydrated_tool_names: list[str] | None = None,
+        contract_present_tool_names: list[str] | None = None,
         ephemeral_tail_messages: list[dict[str, Any]] | None = None,
     ) -> ContextAssemblyResult:
         collect_started_at = time.perf_counter()
@@ -1843,7 +1842,7 @@ class CeoMessageBuilder:
             query_text=query_text,
             exposure=exposure,
             user_content=user_content,
-            hydrated_tool_names=hydrated_tool_names,
+            contract_present_tool_names=contract_present_tool_names,
         )
         collect_elapsed_ms = self._elapsed_ms(collect_started_at)
 
@@ -1993,7 +1992,6 @@ class CeoMessageBuilder:
             callable_tool_names=list(context_sources['callable_tool_names']),
             candidate_tool_names=list(context_sources['selected_tool_names']),
             candidate_tool_items=list(context_sources.get('selected_tool_items') or []),
-            hydrated_tool_names=list(context_sources['hydrated_tool_names']),
             frontdoor_stage_state=normalized_frontdoor_stage_state,
             visible_skill_ids=[
                 self._skill_id(item)

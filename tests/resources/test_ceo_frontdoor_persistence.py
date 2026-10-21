@@ -386,7 +386,6 @@ def test_ceo_frontdoor_refresh_dynamic_contract_state_keeps_repair_required_list
             "provider_tool_names": ["submit_next_stage", "exec"],
             "candidate_tool_names": [],
             "candidate_tool_items": [],
-            "hydrated_tool_names": [],
             "visible_skill_ids": [],
             "candidate_skill_ids": [],
             "rbac_visible_tool_names": ["submit_next_stage", "exec", "agent_browser"],
@@ -1142,8 +1141,7 @@ async def test_ceo_frontdoor_call_model_rebuilds_request_messages_from_stable_an
                             "message_type": "frontdoor_runtime_tool_contract",
                             "callable_tool_names": ["submit_next_stage"],
                             "candidate_tool_names": [],
-                            "hydrated_tool_names": [],
-                            "visible_skill_ids": [],
+                                            "visible_skill_ids": [],
                             "candidate_skill_ids": [],
                             "rbac_visible_tool_names": ["submit_next_stage"],
                             "rbac_visible_skill_ids": [],
@@ -1162,7 +1160,6 @@ async def test_ceo_frontdoor_call_model_rebuilds_request_messages_from_stable_an
             "repair_overlay_text": "repair only",
             "tool_names": ["submit_next_stage"],
             "candidate_tool_names": [],
-            "hydrated_tool_names": [],
             "visible_skill_ids": [],
             "candidate_skill_ids": [],
             "rbac_visible_tool_names": ["submit_next_stage"],
@@ -1278,7 +1275,6 @@ async def test_ceo_frontdoor_call_model_persists_actual_request_to_disk(
             "tool_names": ["submit_next_stage"],
             "candidate_tool_names": [],
             "candidate_tool_items": [],
-            "hydrated_tool_names": [],
             "visible_skill_ids": [],
             "candidate_skill_ids": [],
             "rbac_visible_tool_names": ["submit_next_stage"],
@@ -1408,7 +1404,6 @@ async def test_frontdoor_actual_request_trace_round_trips_usage_ground_truth(
             "tool_names": ["submit_next_stage"],
             "candidate_tool_names": [],
             "candidate_tool_items": [],
-            "hydrated_tool_names": [],
             "visible_skill_ids": [],
             "candidate_skill_ids": [],
             "rbac_visible_tool_names": ["submit_next_stage"],
@@ -1521,7 +1516,6 @@ async def test_ceo_frontdoor_call_model_falls_back_to_preflight_truth_when_usage
             "tool_names": ["submit_next_stage"],
             "candidate_tool_names": [],
             "candidate_tool_items": [],
-            "hydrated_tool_names": [],
             "visible_skill_ids": [],
             "candidate_skill_ids": [],
             "rbac_visible_tool_names": ["submit_next_stage"],
@@ -1600,7 +1594,6 @@ async def test_ceo_frontdoor_call_model_keeps_request_messages_append_only_insid
             "message_type": "frontdoor_runtime_tool_contract",
             "callable_tool_names": ["submit_next_stage"],
             "candidate_tools": [],
-            "hydrated_tool_names": [],
             "candidate_skill_ids": [],
             "stage_summary": {"active_stage_id": "", "transition_required": False},
             "contract_revision": "frontdoor:v1",
@@ -1641,7 +1634,6 @@ async def test_ceo_frontdoor_call_model_keeps_request_messages_append_only_insid
             "tool_names": ["submit_next_stage"],
             "candidate_tool_names": [],
             "candidate_tool_items": [],
-            "hydrated_tool_names": [],
             "visible_skill_ids": [],
             "candidate_skill_ids": [],
             "rbac_visible_tool_names": ["submit_next_stage"],
@@ -1751,7 +1743,6 @@ async def test_ceo_frontdoor_call_model_keeps_provider_tool_schema_set_stable_wh
             "tool_names": ["exec", "load_tool_context", "submit_next_stage"],
             "candidate_tool_names": [],
             "candidate_tool_items": [],
-            "hydrated_tool_names": [],
             "visible_skill_ids": [],
             "candidate_skill_ids": [],
             "rbac_visible_tool_names": ["exec", "load_tool_context", "submit_next_stage"],
@@ -2053,7 +2044,7 @@ async def test_ceo_frontdoor_prepare_turn_keeps_messages_uncompacted(
         if isinstance(message, dict) and is_frontdoor_tool_contract_message(dict(message))
     ]
     assert len(contract_payloads) == 2  # 一份稳定契约 + 一份活状态块
-    assert "callable_tools: `submit_next_stage`" in "\n".join(
+    assert "callable_tools:" not in "\n".join(
         str(item.get("content") or "") for item in contract_payloads
     )
     assert "summary_text" not in state_update
@@ -2435,7 +2426,7 @@ async def test_graph_prepare_turn_real_session_path_drops_summary_fields(
         if isinstance(message, dict) and is_frontdoor_tool_contract_message(dict(message))
     ]
     assert len(contract_payloads) == 2  # 一份稳定契约 + 一份活状态块
-    assert "callable_tools: `submit_next_stage`" in "\n".join(
+    assert "callable_tools:" not in "\n".join(
         str(item.get("content") or "") for item in contract_payloads
     )
     assert "summary_text" not in result

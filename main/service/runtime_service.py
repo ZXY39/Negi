@@ -20,6 +20,7 @@ import httpx
 from loguru import logger
 
 from g3ku.agent.tools.base import Tool
+from g3ku.agent.tools.repair_required import RepairRequiredTool
 from g3ku.agent.tools.tool_execution_control import StopToolExecutionTool
 from g3ku.config.live_runtime import get_runtime_config
 from g3ku.config.loader import get_config_path
@@ -39,6 +40,7 @@ from g3ku.resources.tool_settings import (
     raw_tool_settings_from_descriptor,
     validate_tool_settings,
 )
+from g3ku.runtime import tool_arg_stash
 from g3ku.runtime.context.execution_tool_selection import build_execution_tool_selection
 from g3ku.runtime.context.node_context_selection import (
     NodeContextSelectionResult,
@@ -47,10 +49,14 @@ from g3ku.runtime.context.node_context_selection import (
 from g3ku.runtime.context.summarizer import layered_body_payload, score_query
 from g3ku.runtime.core_tools import configured_core_tools, resolve_core_tool_targets
 from g3ku.runtime.memory_scope import DEFAULT_WEB_MEMORY_SCOPE, normalize_memory_scope
-from g3ku.runtime.tool_context_presence import (
-    contract_presence_index,
-    kept_tool_contexts_from_frames,
-    partition_contract_presence,
+from g3ku.runtime.tool_context_presence import contract_presence_index
+from g3ku.runtime.tool_contract_block import render_tool_contract
+from g3ku.runtime.tool_error_guidance import append_parameter_error_guidance
+from g3ku.runtime.tool_impulse import (
+    IMPULSE_INVALID,
+    IMPULSE_REJECT,
+    IMPULSE_STAGED,
+    impulse_receipt,
 )
 from g3ku.runtime.tool_visibility import (
     NODE_FIXED_BUILTIN_TOOL_NAMES,
@@ -695,8 +701,9 @@ class MainRuntimeService:
         react_loop._model_visible_tool_schema_selector = self._select_model_visible_tool_schema_payload
         # 重印跳的整表重写发生在 react_loop（那里才知道新名单），选择器只知道"帧里有没有 prior"。
         react_loop._pinned_tool_schema_bundle_persister = self._persist_pinned_tool_schema_bundle
-        react_loop._tool_context_hydration_promoter = self._promote_tool_context_hydration
-        react_loop._tool_contract_presence_revoker = self.revoke_contract_absent_node_hydration
+        # 冲动调用投递与入参暂存：节点道只有这条循环能拿到 service，载体（node.metadata）
+        # 也在这里读写，跳序与时序才不会分叉。
+        react_loop._tool_impulse_service = self
         self._pending_task_delete_confirmations: dict[str, dict[str, Any]] = {}
         self._react_loop = react_loop
         initial_execution_routes = self._initial_model_routes(app_config, 'execution')
@@ -725,10 +732,6 @@ class MainRuntimeService:
         # 节点道 skill 名单的每跳取数口：react_loop 无 service 引用，只能由这里递进去
         # （与 `_tool_snapshot_supplier` 同一条 side-channel）。
         self.node_runner._skill_roster_supplier = self._node_skill_roster_supplier
-        # `keep_tools` 的保留正文与 `load_tool_context` 必须同一条渲染（同一个 tool_id 解析、同一
-        # 份指纹输入），否则块内正文与重新 load 出来的指纹不一致，重复读守卫就认不出
-        # "这一跳已经在场"。与前门读 `main_task_service.get_tool_toolskill` 同一条通道。
-        self.node_runner._tool_toolskill_payload_getter = self.get_tool_toolskill
         self.node_runner.distribution_delivery_callback = self._deliver_distribution_message
         self.node_runner._tool_default_timeout_seconds = self._tool_default_timeout_seconds(app_config)
         self.task_actor_service = TaskActorService(
@@ -6971,12 +6974,21 @@ class MainRuntimeService:
             visible_tool_names=visible_rbac_tool_names,
         )
         lightweight_items = list(stable_lightweight_items)
-        hydrated_executor_names = self._node_hydrated_executor_names(
-            task_id=str(task_id or '').strip(),
-            node_id=str(node_id or '').strip(),
-            actor_role=actor_role,
-            session_id=session_id,
-        )
+        # 本轮的在场视图：跳起点算一次（react_loop 把它放进 runtime_context），四条装配路
+        # 共用同一份，不再各算各的（D12）。水合台账已删，这里没有任何跨跳记忆。
+        presence_by_tool_id = runtime_payload.get('tool_contract_presence')
+        if not isinstance(presence_by_tool_id, dict):
+            presence_by_tool_id = {}
+        repair_required_tool_names = {
+            str(name or '').strip()
+            for name, tool in dict(visible_tools or {}).items()
+            if isinstance(tool, RepairRequiredTool)
+        }
+        contract_present_tool_names = [
+            name
+            for name in membership_visible_tool_names
+            if name in presence_by_tool_id and name not in repair_required_tool_names
+        ]
         always_callable_tool_names: list[str] = []
         lightweight_executor_names = {
             str((item or {}).get('tool_id') or '').strip()
@@ -6998,13 +7010,6 @@ class MainRuntimeService:
             if name in lightweight_executor_names or name in always_callable_tool_names:
                 continue
             always_callable_tool_names.append(name)
-        promoted_hydrated_executor_names = self._canonicalize_execution_promoted_tool_names(
-            tool_names=list(hydrated_executor_names),
-            visible_tool_items=lightweight_items,
-        )
-        promoted_only_hydrated_executor_names = [
-            name for name in promoted_hydrated_executor_names if name not in always_callable_tool_names
-        ]
         schema_size_by_executor = {
             name: len(json.dumps(tool.to_model_schema(), ensure_ascii=False, sort_keys=True))
             for name, tool in dict(visible_tools or {}).items()
@@ -7016,10 +7021,10 @@ class MainRuntimeService:
             visible_tool_items=list(lightweight_items),
             visible_tool_names=list(membership_visible_tool_names),
             always_callable_tool_names=list(always_callable_tool_names),
-            promoted_tool_names=list(promoted_hydrated_executor_names),
+            contract_present_tool_names=list(contract_present_tool_names),
             schema_size_by_executor=schema_size_by_executor,
         )
-        full_callable_tool_names = self._normalized_tool_name_list(list(selection.hydrated_tool_names or []))
+        full_callable_tool_names = self._normalized_tool_name_list(list(selection.callable_tool_names or []))
         model_visible_callable_tool_names = self._model_visible_callable_tool_names_for_node(
             task_id=str(task_id or '').strip(),
             node_id=str(node_id or '').strip(),
@@ -7364,7 +7369,6 @@ class MainRuntimeService:
             'pinned_tool_bundle_revision': declaration_bundle_revision,
             'candidate_tool_names': candidate_tool_names,
             'lightweight_tool_ids': list(selection.lightweight_tool_ids or []),
-            'hydrated_executor_names': list(promoted_only_hydrated_executor_names),
             'pending_provider_tool_names': list(exposure.get('pending_provider_tool_names') or []),
             'provider_tool_exposure_pending': bool(exposure.get('provider_tool_exposure_pending')),
             'provider_tool_exposure_revision': str(exposure.get('provider_tool_exposure_revision') or ''),
@@ -7382,8 +7386,7 @@ class MainRuntimeService:
                     list(model_visible_callable_tool_names) == [STAGE_TOOL_NAME]
                     and list(full_callable_tool_names) != [STAGE_TOOL_NAME]
                 ),
-                'requested_promoted_hydrated_executor_names': list(hydrated_executor_names),
-                'promoted_hydrated_executor_names': list(promoted_only_hydrated_executor_names),
+                'contract_present_tool_names': list(contract_present_tool_names),
                 'candidate_tool_names': list(candidate_tool_names),
                 'desired_provider_tool_names': list(exposure.get('desired_provider_tool_names') or []),
                 'prior_provider_tool_names': list(prior_provider_tool_names),
@@ -7481,22 +7484,6 @@ class MainRuntimeService:
         return str(dict(runtime_context or {}).get('actor_role') or default_role).strip() or default_role
 
     @staticmethod
-    def _normalized_hydrated_executor_names(raw_names: Any) -> list[str]:
-        normalized: list[str] = []
-        for raw_name in list(raw_names or []):
-            name = str(raw_name or '').strip()
-            if name and name not in normalized:
-                normalized.append(name)
-        return normalized
-
-    def _hydrated_tool_limit_value(self) -> int:
-        try:
-            value = int(getattr(self, '_hydrated_tool_limit', 16) or 16)
-        except Exception:
-            value = 16
-        return max(1, value)
-
-    @staticmethod
     def _fixed_builtin_tool_name_set_for_actor_role(actor_role: str) -> set[str]:
         return fixed_builtin_tool_name_set_for_actor_role(actor_role)
 
@@ -7585,27 +7572,6 @@ class MainRuntimeService:
             return []
         return [requested_name]
 
-    def _apply_hydrated_executor_lru(
-        self,
-        *,
-        frame: dict[str, Any],
-        incoming_executor_names: list[str],
-    ) -> tuple[list[str], list[str]]:
-        existing = self._normalized_hydrated_executor_names(
-            list(frame.get('hydrated_executor_state') or []) or list(frame.get('hydrated_executor_names') or [])
-        )
-        incoming = self._normalized_hydrated_executor_names(incoming_executor_names)
-        if not incoming:
-            return existing, []
-        next_state = [name for name in existing if name not in incoming]
-        next_state.extend(incoming)
-        limit = self._hydrated_tool_limit_value()
-        evicted: list[str] = []
-        if len(next_state) > limit:
-            evicted = list(next_state[:-limit])
-            next_state = next_state[-limit:]
-        return next_state, evicted
-
     def _tool_context_contract_payload(
         self,
         *,
@@ -7648,87 +7614,6 @@ class MainRuntimeService:
             descriptor=descriptor,
         )
 
-    def _promote_tool_context_hydration(
-        self,
-        *,
-        task_id: str,
-        node_id: str,
-        tool_call: Any,
-        raw_result: dict[str, Any],
-        runtime_context: dict[str, Any],
-    ) -> None:
-        tool_name = str(getattr(tool_call, 'name', '') or '').strip()
-        if tool_name not in {'load_tool_context', 'load_tool_context_v2'}:
-            return
-        payload = dict(raw_result or {})
-        if not bool(payload.get('ok')):
-            return
-        normalized_arguments = self._normalize_tool_call_arguments(getattr(tool_call, 'arguments', {}))
-        requested_tool_id = str(
-            normalized_arguments.get('tool_id')
-            or payload.get('tool_id')
-            or ''
-        ).strip()
-        resolved_tool_id = str(payload.get('tool_id') or requested_tool_id or '').strip()
-        if not requested_tool_id:
-            return
-        store = getattr(self, 'store', None)
-        get_task = getattr(store, 'get_task', None) if store is not None else None
-        get_node = getattr(store, 'get_node', None) if store is not None else None
-        task = get_task(str(task_id or '').strip()) if callable(get_task) else None
-        node = get_node(str(node_id or '').strip()) if callable(get_node) else None
-        session_id = self._tool_context_session_id(runtime_context=dict(runtime_context or {}), task=task)
-        actor_role = self._tool_context_actor_role(
-            runtime_context=dict(runtime_context or {}),
-            node_kind=str(getattr(node, 'node_kind', '') or runtime_context.get('node_kind') or ''),
-        )
-        log_service = getattr(self, 'log_service', None)
-        # load 的准入只看"治理可见"，不再要求本轮排进候选：下面的工具查表本身就是按
-        # actor_role 筛过的，多一道候选门槛只会让"有权限但本轮没排上"的工具变成
-        # 调不动也 load 不动的死区。水合数量的上限交给 LRU 管，不由排名管。
-        visible_tool_map = self._visible_tool_map(actor_role=actor_role, session_id=session_id)
-        visible_tool = visible_tool_map.get(requested_tool_id) or visible_tool_map.get(resolved_tool_id)
-        if visible_tool is None:
-            return
-        promoted_executor_names = self._normalized_tool_name_list(payload.get('hydration_targets'))
-        if not promoted_executor_names:
-            promoted_executor_names = self._tool_context_hydration_targets(
-                requested_tool_id=requested_tool_id,
-                visible_tool=visible_tool,
-                actor_role=actor_role,
-            )
-        if not promoted_executor_names:
-            return
-        update_frame = getattr(log_service, 'update_frame', None)
-        if not callable(update_frame):
-            return
-
-        def _mutate(frame: dict[str, Any]) -> dict[str, Any]:
-            next_frame = dict(frame or {})
-            hydrated_state, evicted = self._apply_hydrated_executor_lru(
-                frame=next_frame,
-                incoming_executor_names=promoted_executor_names,
-            )
-            next_frame['hydrated_executor_state'] = list(hydrated_state)
-            next_frame['hydrated_executor_names'] = list(hydrated_state)
-            next_frame['hydration_evicted_executor_names'] = list(evicted)
-            # 重新 load 成功就是"正文回到这一跳"，撤销记录必须一并清掉，否则下一跳
-            # 仍按上一跳的缺席结论把它挡在 callable 外。
-            pending_revoked = self._normalized_hydrated_executor_names(
-                next_frame.get('hydration_revoked_executor_names') or []
-            )
-            if pending_revoked:
-                promoted_name_set = {str(name or '').strip() for name in list(promoted_executor_names or [])}
-                kept_revoked = [name for name in pending_revoked if name not in promoted_name_set]
-                if kept_revoked:
-                    next_frame['hydration_revoked_executor_names'] = kept_revoked
-                else:
-                    next_frame.pop('hydration_revoked_executor_names', None)
-            return next_frame
-
-        update_frame(str(task_id or '').strip(), str(node_id or '').strip(), _mutate, publish_snapshot=True)
-        self._clear_node_context_selection(task_id=str(task_id or '').strip(), node_id=str(node_id or '').strip())
-
     @staticmethod
     def _execution_control_tool_names(*, node_kind: str, can_spawn_children: bool) -> list[str]:
         normalized_node_kind = str(node_kind or '').strip().lower()
@@ -7739,166 +7624,32 @@ class MainRuntimeService:
             ordered.append('spawn_child_nodes')
         return ordered
 
-    def _node_hydrated_executor_names(
+    def contract_present_tool_names_for_node(
         self,
         *,
-        task_id: str,
-        node_id: str,
         actor_role: str,
         session_id: str,
-        request_messages: list[dict[str, Any]] | None = None,
-        kept_stage_contexts: Any = None,
+        request_messages: list[dict[str, Any]] | None,
     ) -> list[str]:
-        """本轮可调用的已水合执行器名。
+        """这一跳契约块在场、且治理放行的名字，按治理可见集的顺序返回。
 
-        RBAC 之后再过一道**契约在场判据**：正文不在当次请求视图里的名字要从台账里摘掉，
-        而不只是从视图里收窄。只收窄视图会造出文档禁止的第 4 态——该名字既不在 callable、
-        又被 candidate 的「排除已提升」规则挡在门外，模型 load 它只会拿到没有出口的
-        `already_hydrated`。
-
-        `request_messages=None` 表示调用方手上没有当次请求视图（例如对象字典构建），此时
-        照台账返回：撤销由带视图的那次调用落台账，下一跳自然生效。
+        判据只读当次请求视图，没有任何跨跳台账需要回写：块不在眼前就是不在线，下一次调用
+        自己会把契约带回来。`request_messages=None` 表示调用方手上没有当次请求视图（例如
+        对象字典构建），按空集返回——宁可不放行，不可无契约放行。
         """
-        log_service = getattr(self, 'log_service', None)
-        read_runtime_frame = getattr(log_service, 'read_runtime_frame', None)
-        if not callable(read_runtime_frame):
+        if request_messages is None:
             return []
-        frame = read_runtime_frame(str(task_id or '').strip(), str(node_id or '').strip()) or {}
-        visible_tool_names = {
+        index = contract_presence_index(request_messages=request_messages)
+        if not index:
+            return []
+        visible_names = [
             str(name or '').strip()
             for name in list(self.list_effective_tool_names(actor_role=actor_role, session_id=session_id) or [])
             if str(name or '').strip()
-        }
-        raw_hydrated_names = list(frame.get('hydrated_executor_state') or []) or list(frame.get('hydrated_executor_names') or [])
-        if not visible_tool_names:
-            hydrated = self._normalized_hydrated_executor_names(raw_hydrated_names)
-        else:
-            hydrated: list[str] = []
-            for raw_name in raw_hydrated_names:
-                name = str(raw_name or '').strip()
-                if name and name in visible_tool_names and name not in hydrated:
-                    hydrated.append(name)
-        if request_messages is None:
-            return hydrated
-        present, absent = partition_contract_presence(
-            hydrated,
-            index=contract_presence_index(
-                request_messages=request_messages,
-                kept_stage_contexts=kept_stage_contexts or [],
-            ),
-        )
-        if absent:
-            self._revoke_node_hydration_for_absent_contracts(
-                task_id=str(task_id or '').strip(),
-                node_id=str(node_id or '').strip(),
-                revoked_executor_names=absent,
-            )
-        return present
-
-    def _node_stage_kept_tool_contexts(self, node: Any) -> list[dict[str, Any]]:
-        """节点阶段台账里保留下来的契约正文（在场判据的第二个载体）。
-
-        阶段账本的家在 `node.metadata['execution_stages']`，不在 runtime frame：帧的白名单
-        不收这个键，去帧里读会永远读出空、裁撤过的正文于是永远判成不在场。
-
-        取数必须按 node_id 重读存储：传进来的 node 常常是循环开局那份快照，而 `keep_tools` 的正文
-        是这一跳的 `submit_next_stage` 才写进去的——读快照等于把模型点名留住的正文读成空，留住的
-        工具照样被撤（实盘 task:91b09176d70a）。读不到该节点才退回传入对象。
-        """
-        candidates: list[Any] = []
-        node_id = str(getattr(node, 'node_id', '') or '').strip()
-        getter = getattr(getattr(self, 'store', None), 'get_node', None)
-        if node_id and callable(getter):
-            try:
-                candidates.append(getter(node_id))
-            except Exception:
-                pass
-        candidates.append(node)
-        for candidate in candidates:
-            metadata = getattr(candidate, 'metadata', None)
-            if not isinstance(metadata, dict):
-                continue
-            collected = kept_tool_contexts_from_frames(metadata.get('execution_stages'))
-            if collected:
-                return collected
-        return []
-
-    def _revoke_node_hydration_for_absent_contracts(
-        self,
-        *,
-        task_id: str,
-        node_id: str,
-        revoked_executor_names: list[str],
-    ) -> None:
-        """把契约不在场的水合名回写台账：从 `hydrated_executor_state` 摘掉、记进
-        `hydration_revoked_executor_names`。
-
-        撤销原因必须**另起一个字段**，不复用 `hydration_evicted_executor_names`：LRU 淘汰
-        与契约撤销是两种原因，混在一起下次就分不出账。
-        """
-        log_service = getattr(self, 'log_service', None)
-        update_frame = getattr(log_service, 'update_frame', None)
-        if not callable(update_frame) or not list(revoked_executor_names or []):
-            return
-        revoked = {str(name or '').strip() for name in list(revoked_executor_names or []) if str(name or '').strip()}
-        if not revoked:
-            return
-
-        def _mutate(frame: dict[str, Any]) -> dict[str, Any]:
-            next_frame = dict(frame or {})
-            for state_key in ('hydrated_executor_state', 'hydrated_executor_names'):
-                next_frame[state_key] = [
-                    name
-                    for name in self._normalized_hydrated_executor_names(next_frame.get(state_key) or [])
-                    if str(name or '').strip() not in revoked
-                ]
-            recorded = self._normalized_hydrated_executor_names(next_frame.get('hydration_revoked_executor_names') or [])
-            for name in sorted(revoked):
-                if name not in recorded:
-                    recorded.append(name)
-            next_frame['hydration_revoked_executor_names'] = recorded
-            return next_frame
-
-        try:
-            update_frame(str(task_id or '').strip(), str(node_id or '').strip(), _mutate, publish_snapshot=False)
-        except Exception:
-            # 台账回写失败不能把本轮 callable 判据打回原样：宁可调不到，不可无契约可调。
-            return
-        self._clear_node_context_selection(task_id=str(task_id or '').strip(), node_id=str(node_id or '').strip())
-
-    def revoke_contract_absent_node_hydration(
-        self,
-        *,
-        task_id: str,
-        node_id: str,
-        actor_role: str,
-        session_id: str,
-        request_messages: list[dict[str, Any]],
-        kept_stage_contexts: Any = None,
-        node: Any = None,
-    ) -> list[str]:
-        """按**当次请求视图**判在场并回写台账，返回这一跳仍然在场的水合名。
-
-        唯一带请求视图的调用点在 `react_loop` 里（请求组装完、写帧之前）。判据必须用请求
-        视图而不是帧里存着的上一跳正文：阶段裁撤只作用在渲染出来的请求上，台账里的正文
-        照旧留着，拿台账判会永远判成"在场"。
-
-        撤销从这一跳起对**下一跳**生效：同批已派发的工具照旧执行完，与 `drop` 要账本结清
-        才落标记的既有闸门同口径。
-        """
-        effective_kept_contexts = (
-            kept_stage_contexts
-            if kept_stage_contexts is not None
-            else self._node_stage_kept_tool_contexts(node)
-        )
-        return self._node_hydrated_executor_names(
-            task_id=task_id,
-            node_id=node_id,
-            actor_role=actor_role,
-            session_id=session_id,
-            request_messages=list(request_messages or []),
-            kept_stage_contexts=effective_kept_contexts,
-        )
+        ]
+        if not visible_names:
+            return sorted(index)
+        return [name for name in visible_names if name in index]
 
     def _callable_tool_names_for_node(
         self,
@@ -7907,7 +7658,6 @@ class MainRuntimeService:
         node: Any,
         visible_tool_names: list[str] | None = None,
         request_messages: list[dict[str, Any]] | None = None,
-        kept_stage_contexts: Any = None,
     ) -> list[str]:
         session_id = str(getattr(task, 'session_id', '') or 'web:shared').strip() or 'web:shared'
         actor_role = self._actor_role_for_node(node)
@@ -7928,18 +7678,10 @@ class MainRuntimeService:
             if name not in seen:
                 callable_names.append(name)
                 seen.add(name)
-        effective_kept_stage_contexts = (
-            kept_stage_contexts
-            if kept_stage_contexts is not None
-            else self._node_stage_kept_tool_contexts(node)
-        )
-        for name in self._node_hydrated_executor_names(
-            task_id=str(getattr(task, 'task_id', '') or getattr(node, 'task_id', '') or '').strip(),
-            node_id=str(getattr(node, 'node_id', '') or '').strip(),
+        for name in self.contract_present_tool_names_for_node(
             actor_role=actor_role,
             session_id=session_id,
             request_messages=request_messages,
-            kept_stage_contexts=effective_kept_stage_contexts,
         ):
             if name not in seen:
                 callable_names.append(name)
@@ -8383,6 +8125,231 @@ class MainRuntimeService:
         if fingerprint:
             payload['tool_context_fingerprint'] = fingerprint
         return payload
+
+    def node_stash_carrier(self, node_id: str) -> dict[str, Any]:
+        """节点载体的读口：跳序与条目都从 `node.metadata` 里来（整份 JSON 落库）。"""
+        node = self.store.get_node(str(node_id or '').strip()) if node_id else None
+        metadata = getattr(node, 'metadata', None)
+        return tool_arg_stash.build_carrier(
+            tool_arg_stash.carrier_container(metadata if isinstance(metadata, dict) else {}),
+            hop=tool_arg_stash.read_hop(metadata if isinstance(metadata, dict) else {}),
+        )
+
+    def advance_node_stash_hop(self, node_id: str) -> tuple[dict[str, Any], list[str]]:
+        """每跳推进一次跳序，但**只在还有暂存条目时**推进并落盘。
+
+        没条目就没东西要老化，白写一次节点行；有时不推进，条目就永远停在"上一跳"之外。
+
+        顺带清掉过了严格一跳的条目（否则它们整回合留在载体里，每跳都重抄进节点 metadata），
+        并把被清的名字回给调用方——那是 D15 的 `abandoned` 档：暂存过却再没被调用。清扫是
+        静默的，所以必须自带一个可数落点，不然"模型为什么没用这批"永远查不到。
+        """
+        carrier = self.node_stash_carrier(node_id)
+        container = tool_arg_stash.carrier_container(carrier)
+        if not container:
+            return carrier, []
+        next_hop = tool_arg_stash.read_hop(carrier) + 1
+        swept_container, dropped_scopes = tool_arg_stash.sweep_expired(
+            container,
+            current_hop=next_hop,
+            present_tool_ids=None,
+        )
+        next_carrier = self.persist_node_stash_carrier(
+            node_id,
+            tool_arg_stash.build_carrier(swept_container, hop=next_hop),
+        )
+        return next_carrier, [tool_arg_stash.scope_tool_id(scope) for scope in dropped_scopes]
+
+    def persist_node_stash_carrier(self, node_id: str, carrier: Any) -> dict[str, Any]:
+        """写回载体。按 node_id 重读存储再改，避免把循环开局那份快照的其它键覆盖掉。"""
+        normalized_node_id = str(node_id or '').strip()
+        if not normalized_node_id:
+            return {}
+        next_carrier = tool_arg_stash.build_carrier(
+            tool_arg_stash.carrier_container(carrier),
+            hop=tool_arg_stash.read_hop(carrier),
+        )
+
+        def _mutate(record: Any) -> Any:
+            metadata = dict(getattr(record, 'metadata', None) or {})
+            metadata.pop(tool_arg_stash.STASH_CONTAINER_KEY, None)
+            metadata.pop(tool_arg_stash.STASH_HOP_KEY, None)
+            metadata.update(next_carrier)
+            record.metadata = metadata
+            return record
+
+        updated = self.store.update_node(normalized_node_id, _mutate)
+        if updated is None:
+            return {}
+        metadata = getattr(updated, 'metadata', None)
+        return tool_arg_stash.build_carrier(
+            tool_arg_stash.carrier_container(metadata if isinstance(metadata, dict) else {}),
+            hop=tool_arg_stash.read_hop(metadata if isinstance(metadata, dict) else {}),
+        )
+
+    def deliver_impulse_contract(
+        self,
+        *,
+        actor_role: str,
+        session_id: str,
+        tool_id: str,
+        arguments: dict[str, Any],
+        scope_key: str,
+        carrier: Any,
+        batch_position: int = 1,
+        batch_total: int = 1,
+        runtime_context: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        """未水合工具被直接调用时的那一跳：交契约、暂存入参、**不执行**（D3）。
+
+        两条车道都调这里，所以回执文本、校验口径、暂存规则只有一份。三种结果：
+
+        - `staged`：入参校验通过 ⇒ 落 stash、带契约块与 `reuse_args` 提示，本轮不占预算；
+        - `invalid`：校验失败 ⇒ 带契约块与参数错误，不落 stash，占一轮；
+        - `reject`：这不是"没水合"这一类（名字无权限、资源下架、repair-required、压根没
+          这个名字）⇒ 空内容返回，调用方保留自己原有的拒绝回执。
+
+        跳序从载体里读，不接受调用方传 hop：时钟与条目必须同刻，让外部传一个数字就是给
+        "条目永远等不到自己那一跳"留口子。
+        """
+        normalized_tool = str(tool_id or '').strip()
+        hop = tool_arg_stash.read_hop(carrier)
+        rejected: dict[str, Any] = {
+            'outcome': IMPULSE_REJECT,
+            'content': '',
+            'carrier': carrier if isinstance(carrier, dict) else {},
+            'staged_count': 0,
+            'executed': False,
+        }
+        if not normalized_tool:
+            return rejected
+        visible = self._visible_tool_map(actor_role=actor_role, session_id=session_id)
+        if normalized_tool not in visible:
+            return rejected
+        instance = self._resource_manager.get_tool(normalized_tool) if self._resource_manager is not None else None
+        if instance is None:
+            return rejected
+        payload = self.get_tool_toolskill(normalized_tool)
+        if not isinstance(payload, dict) or bool(payload.get('repair_required')):
+            return rejected
+        fingerprint = build_tool_context_fingerprint(payload)
+        if not fingerprint:
+            return rejected
+        block = render_tool_contract({**payload, 'tool_context_fingerprint': fingerprint})
+        if not block:
+            return rejected
+
+        pending_container = tool_arg_stash.carrier_container(carrier)
+        # 份数是**整批**的属性，不是这一条的：校验失败的那条也要能把"这批最终几份"报出来，
+        # 否则末条恰好失败时，模型只看到前几条的 `set i < n`，拼不出会跑多少。
+        consumable_count = len(
+            tool_arg_stash.peek_entries(
+                pending_container,
+                scope_key=scope_key,
+                current_hop=hop + 1,
+                fingerprint=fingerprint,
+            )
+        )
+
+        try:
+            validation_errors = instance.validate_params(arguments)
+        except Exception as exc:
+            validation_errors = None
+            guidance = append_parameter_error_guidance(
+                f'Error validating {normalized_tool}: {exc}',
+                tool_name=normalized_tool,
+                tool=instance,
+                arguments=arguments,
+                runtime_context=runtime_context,
+            )
+            receipt = impulse_receipt(
+                tool_name=normalized_tool,
+                contract_block=block,
+                outcome=IMPULSE_INVALID,
+                staged_count=consumable_count,
+                batch_position=batch_position,
+                batch_total=batch_total,
+                parameter_error_text=guidance,
+            )
+            return {
+                'outcome': IMPULSE_INVALID,
+                'content': receipt['content'],
+                'carrier': carrier if isinstance(carrier, dict) else {},
+                'staged_count': 0,
+                'executed': False,
+            }
+        if validation_errors:
+            guidance = append_parameter_error_guidance(
+                'Error: ' + '; '.join(validation_errors),
+                tool_name=normalized_tool,
+                tool=instance,
+                arguments=arguments,
+                runtime_context=runtime_context,
+            )
+            receipt = impulse_receipt(
+                tool_name=normalized_tool,
+                contract_block=block,
+                outcome=IMPULSE_INVALID,
+                staged_count=consumable_count,
+                batch_position=batch_position,
+                batch_total=batch_total,
+                parameter_error_text=guidance,
+            )
+            return {
+                'outcome': IMPULSE_INVALID,
+                'content': receipt['content'],
+                'carrier': carrier if isinstance(carrier, dict) else {},
+                'staged_count': 0,
+                'executed': False,
+            }
+
+        pending_container = tool_arg_stash.carrier_container(carrier)
+        existing_digests = {
+            str(entry.get(tool_arg_stash.DIGEST_FIELD) or '').strip()
+            for entry in tool_arg_stash.peek_entries(
+                pending_container,
+                scope_key=scope_key,
+                current_hop=hop + 1,
+                fingerprint=fingerprint,
+            )
+        }
+        # 同一跳里签名完全相同的重复调用只入一条（D5）：否则 `reuse_args=true` 会把同一份
+        # 入参执行两遍，而模型看到的两份回执是分开的两条消息，它没有理由知道要合并。
+        if tool_arg_stash.args_digest(arguments) not in existing_digests:
+            pending_container, _entry, _staged_total = tool_arg_stash.stage_args(
+                pending_container,
+                scope_key=scope_key,
+                args=arguments,
+                fingerprint=fingerprint,
+                staged_at=now_iso(),
+                staged_hop=hop,
+            )
+        # 份数只数**下一跳真会被执行**的条目：容器里可能还留着上一跳过期或别的修订的条目，
+        # 按 list 长度报会把永远不会跑的那些算进去（`staged_count` 就是长度，别用它报数）。
+        staged_count = len(
+            tool_arg_stash.peek_entries(
+                pending_container,
+                scope_key=scope_key,
+                current_hop=hop + 1,
+                fingerprint=fingerprint,
+            )
+        )
+        receipt = impulse_receipt(
+            tool_name=normalized_tool,
+            contract_block=block,
+            outcome=IMPULSE_STAGED,
+            staged_count=staged_count,
+            batch_position=batch_position,
+            batch_total=batch_total,
+        )
+        return {
+            'outcome': IMPULSE_STAGED,
+            'content': receipt['content'],
+            'carrier': tool_arg_stash.build_carrier(pending_container, hop=hop),
+            'staged_count': staged_count,
+            'fingerprint': fingerprint,
+            'executed': False,
+        }
 
     def list_skill_resources(self) -> list[Any]:
         return list(self.resource_registry.list_skill_resources())
@@ -11563,7 +11530,6 @@ class MainRuntimeService:
         selection = await self._prepare_node_context_selection(task=task, node=node)
         cached = self._cached_node_context_selection_entry(task=task, node=node)
         inputs = cached or self._node_context_selection_inputs(task=task, node=node)
-        session_key = str(inputs.get('session_key') or getattr(task, 'session_id', '') or 'web:shared').strip() or 'web:shared'
         visible_skills = list(inputs.get('visible_skills') or [])
         contract_visible_skill_ids = [
             str(item or '').strip()
@@ -11701,12 +11667,6 @@ class MainRuntimeService:
                 repair_required_tool_items=repair_required_tool_items,
                 repair_required_skill_items=repair_required_skill_items,
                 stage_payload=stage_payload,
-                hydrated_executor_names=self._node_hydrated_executor_names(
-                    task_id=str(getattr(task, 'task_id', '') or '').strip(),
-                    node_id=str(getattr(node, 'node_id', '') or '').strip(),
-                    actor_role=self._actor_role_for_node(node),
-                    session_id=session_key,
-                ),
                 lightweight_tool_ids=[],
                 selection_trace={
                     'mode': 'node_context_enricher',

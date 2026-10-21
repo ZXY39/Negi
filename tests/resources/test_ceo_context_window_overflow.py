@@ -80,7 +80,6 @@ async def test_graph_call_model_attempts_token_compression_before_context_window
         "provider_tool_names": [],
         "candidate_tool_names": [],
         "candidate_tool_items": [],
-        "hydrated_tool_names": [],
         "visible_skill_ids": [],
         "candidate_skill_ids": [],
         "rbac_visible_tool_names": [],
@@ -147,7 +146,6 @@ async def test_graph_call_model_surfaces_resolution_error_when_context_window_is
         "provider_tool_names": [],
         "candidate_tool_names": [],
         "candidate_tool_items": [],
-        "hydrated_tool_names": [],
         "visible_skill_ids": [],
         "candidate_skill_ids": [],
         "rbac_visible_tool_names": [],
@@ -667,7 +665,6 @@ async def test_graph_call_model_runs_llm_token_compression_before_main_send(
         _frontdoor_canonical_context={"active_stage_id": "", "transition_required": False, "stages": []},
         _compression_state={},
         _semantic_context_state={},
-        _frontdoor_hydrated_tool_names=[],
         _emit_state_snapshot=lambda: None,
     )
     runtime = SimpleNamespace(
@@ -695,7 +692,6 @@ async def test_graph_call_model_runs_llm_token_compression_before_main_send(
         "provider_tool_names": [],
         "candidate_tool_names": [],
         "candidate_tool_items": [],
-        "hydrated_tool_names": [],
         "visible_skill_ids": [],
         "candidate_skill_ids": [],
         "rbac_visible_tool_names": [],
@@ -769,7 +765,6 @@ async def test_graph_call_model_token_compression_keeps_prior_provider_tool_sche
         _frontdoor_canonical_context={"active_stage_id": "", "transition_required": False, "stages": []},
         _compression_state={},
         _semantic_context_state={},
-        _frontdoor_hydrated_tool_names=[],
         _emit_state_snapshot=lambda: None,
     )
     runtime = SimpleNamespace(
@@ -801,7 +796,6 @@ async def test_graph_call_model_token_compression_keeps_prior_provider_tool_sche
         "provider_tool_exposure_commit_reason": "",
         "candidate_tool_names": [],
         "candidate_tool_items": [],
-        "hydrated_tool_names": [],
         "visible_skill_ids": [],
         "candidate_skill_ids": [],
         "rbac_visible_tool_names": [],
@@ -869,7 +863,6 @@ async def test_graph_call_model_token_compression_keeps_repair_required_contract
         repair_required_tool_items=[
             {"tool_id": "agent_browser", "description": "Browser automation", "reason": "missing required paths"}
         ],
-        hydrated_tool_names=[],
         frontdoor_stage_state={"active_stage_id": "", "transition_required": False, "stages": []},
         candidate_skill_ids=[],
         repair_required_skill_items=[
@@ -885,7 +878,6 @@ async def test_graph_call_model_token_compression_keeps_repair_required_contract
         _frontdoor_canonical_context={"active_stage_id": "", "transition_required": False, "stages": []},
         _compression_state={},
         _semantic_context_state={},
-        _frontdoor_hydrated_tool_names=[],
         _emit_state_snapshot=lambda: None,
     )
     runtime = SimpleNamespace(
@@ -920,7 +912,6 @@ async def test_graph_call_model_token_compression_keeps_repair_required_contract
         "provider_tool_names": [],
         "candidate_tool_names": [],
         "candidate_tool_items": [],
-        "hydrated_tool_names": [],
         "visible_skill_ids": [],
         "candidate_skill_ids": [],
         "rbac_visible_tool_names": [],
@@ -976,7 +967,6 @@ async def test_graph_call_model_discards_late_compression_result_after_pause(
             self._frontdoor_canonical_context = {"active_stage_id": "", "transition_required": False, "stages": []}
             self._compression_state = {}
             self._semantic_context_state = {}
-            self._frontdoor_hydrated_tool_names = []
             self._active_cancel_token = cancel_token
             self._active_frontdoor_compression_generation = None
             self._cancelled_frontdoor_compression_generations: set[int] = set()
@@ -1040,7 +1030,6 @@ async def test_graph_call_model_discards_late_compression_result_after_pause(
         "provider_tool_names": [],
         "candidate_tool_names": [],
         "candidate_tool_items": [],
-        "hydrated_tool_names": [],
         "visible_skill_ids": [],
         "candidate_skill_ids": [],
         "rbac_visible_tool_names": [],

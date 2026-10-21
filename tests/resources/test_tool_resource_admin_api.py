@@ -2442,7 +2442,6 @@ def test_recreate_runtime_session_enriches_completed_continuity_only_restore_wit
             'frontdoor_history_shrink_reason': '',
             'frontdoor_actual_request_path': '',
             'frontdoor_actual_request_history': [],
-            'hydrated_tool_names': ['exec'],
             'visible_tool_ids': ['exec'],
             'visible_skill_ids': ['writing-plans'],
             'provider_tool_schema_names': ['exec'],

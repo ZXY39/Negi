@@ -7,6 +7,7 @@ import pytest
 
 from g3ku.runtime.frontdoor import _ceo_create_agent_impl as create_agent_impl
 from g3ku.runtime.frontdoor import _ceo_runtime_ops as ceo_runtime_ops
+from g3ku.runtime.tool_contract_block import attach_tool_contract_block, render_tool_contract_block
 from g3ku.agent.tools.base import Tool
 from main.governance.tool_context import build_tool_context_fingerprint
 
@@ -96,6 +97,8 @@ def test_graph_review_tool_calls_interrupt_payload_includes_runtime_contract_and
             },
             "compression_state": {"status": "running", "text": "compressing", "source": "user"},
             "semantic_context_state": {"summary_text": "summary", "needs_refresh": False},
+            # 存量会话状态里残留的台账键：裁决卡片的载荷只从 approval_request 与下面几份
+            # 快照拼装，不铺 `**state`，所以这些键一律不得出现在评审卡片上。
             "hydrated_tool_names": ["filesystem_write"],
             "frontdoor_selection_debug": {"tool_selection": {"candidate_tool_names": ["filesystem_write"]}},
         },
@@ -138,7 +141,7 @@ def test_graph_review_tool_calls_interrupt_payload_includes_runtime_contract_and
     ]
     assert payload["compression_state"] == {"status": "running", "text": "compressing", "source": "user"}
     assert "semantic_context_state" not in payload
-    assert payload["hydrated_tool_names"] == ["filesystem_write"]
+    assert "hydrated_tool_names" not in payload
     assert payload["tool_call_payloads"] == [
         {
             "id": "call-1",
@@ -268,61 +271,85 @@ def test_merge_ordered_tool_results_preserves_original_tool_call_order() -> None
     assert [item["tool_name"] for item in merged] == ["content_open", "exec", "agent_browser"]
 
 
-def test_frontdoor_tool_state_after_tool_results_skips_fixed_builtin_hydration_targets() -> None:
-    runner = create_agent_impl.CreateAgentCeoFrontDoorRunner(loop=SimpleNamespace())
+def _contract_load_row(tool_id: str, *, tool_call_id: str = "call-load-1") -> dict:
+    """一条**真在场**的 load 行：JSON 信封的 `content` 里装着 `[TOOL_CONTRACT_V1:…]` 块。
 
-    result = runner._frontdoor_tool_state_after_tool_results(
-        state={
-            "tool_names": ["load_tool_context", "exec"],
-            "candidate_tool_names": ["agent_browser"],
-            "hydrated_tool_names": [],
-            "rbac_visible_tool_names": ["load_tool_context", "exec", "agent_browser"],
-        },
-        tool_results=[
+    只带 `tool_context_fingerprint` 键而没有块，在场判据读成"不在场"，用例会因此假绿。
+    """
+    fingerprint = "tcf:" + ((tool_id or "tool") * 20)[:16]
+    return {
+        "role": "tool",
+        "name": "load_tool_context",
+        "tool_call_id": tool_call_id,
+        "content": json.dumps(
             {
-                "tool_name": "load_tool_context",
-                "raw_result": {"ok": True, "hydration_targets": ["exec"]},
-            }
-        ],
-    )
-
-    assert result == {
-        "tool_names": ["load_tool_context", "exec"],
-        "candidate_tool_names": ["agent_browser"],
-        "candidate_tool_items": [{"tool_id": "agent_browser", "description": ""}],
-        "hydrated_tool_names": [],
-        # 契约在场撤销的台账字段：这份状态没带 `messages`（判据缺请求视图 ⇒ 不撤销），
-        # 所以是空列表而不是缺席。它是返回合同的固定成员，逐轮要能读到撤销记录。
-        "hydration_revoked_executor_names": [],
+                "ok": True,
+                "tool_id": tool_id,
+                "tool_context_fingerprint": fingerprint,
+                "content": render_tool_contract_block(tool_id, fingerprint, f"# {tool_id}\n契约正文"),
+            },
+            ensure_ascii=False,
+        ),
     }
 
 
-def test_frontdoor_tool_state_promotes_mid_turn_registered_tool_without_candidate_hit() -> None:
-    """回合中途注册的工具不在 candidate 快照里，payload 的 hydration_targets 由服务端
-    按治理实时可见集算出；提升准入信 payload，不再加 candidate 门槛（否则 load 成功也
-    提升不了，mid-turn 注册要到下一回合才能用）。"""
+def test_frontdoor_tool_state_after_tool_results_reads_presence_not_load_payload_targets() -> None:
+    """常驻内置没有 toolskill，零契约块也留在 callable；带 toolskill 的名字只由块在场决定。
+
+    `load` 回执里的 `hydration_targets` 不记账：同一份状态转真的唯一入口是请求视图里
+    的那一行契约块。
+    """
+    runner = create_agent_impl.CreateAgentCeoFrontDoorRunner(loop=SimpleNamespace())
+
+    base_state = {
+        "tool_names": ["load_tool_context", "exec"],
+        "candidate_tool_names": ["agent_browser"],
+        "rbac_visible_tool_names": ["load_tool_context", "exec", "agent_browser"],
+        "messages": [],
+    }
+
+    result = runner._frontdoor_tool_state_after_tool_results(state=dict(base_state))
+
+    assert result == {
+        "tool_names": ["load_tool_context", "exec", "silent"],
+        "candidate_tool_names": ["agent_browser"],
+        "candidate_tool_items": [{"tool_id": "agent_browser", "description": ""}],
+    }
+
+    # 契约块进了请求视图：同一个名字当跳从候选转进 callable，不需要任何一步"提升"记账。
+    hop_state = {**base_state, "messages": [_contract_load_row("agent_browser")]}
+    promoted = runner._frontdoor_tool_state_after_tool_results(state=hop_state)
+    assert "agent_browser" in promoted["tool_names"]
+    assert promoted["candidate_tool_names"] == []
+    assert promoted["candidate_tool_items"] == []
+
+
+def test_frontdoor_tool_state_promotes_mid_turn_registered_tool_by_contract_presence() -> None:
+    """回合中途注册的工具：候选里没有它（回合初快照没这个名），load 把块送进请求视图后
+    就当跳可调——提升不再信 load 回执的 `hydration_targets`，也不再要 candidate 命中。"""
 
     runner = create_agent_impl.CreateAgentCeoFrontDoorRunner(loop=SimpleNamespace())
 
-    result = runner._frontdoor_tool_state_after_tool_results(
-        state={
-            "tool_names": ["load_tool_context"],
-            "candidate_tool_names": [],
-            "hydrated_tool_names": [],
-            "rbac_visible_tool_names": ["load_tool_context"],
-        },
-        tool_results=[
-            {
-                "tool_name": "load_tool_context",
-                "raw_result": {"ok": True, "hydration_targets": ["windows_mcp"]},
-            }
-        ],
-    )
+    base_state = {
+        "tool_names": ["load_tool_context", "windows_mcp"],
+        "candidate_tool_names": [],
+        "rbac_visible_tool_names": ["load_tool_context", "windows_mcp"],
+        "messages": [],
+    }
 
-    assert result["hydrated_tool_names"] == ["windows_mcp"]
+    # 没有块 ⇒ 不提升：候选视图把它留在原地，模型仍有一条 load 的出口可达。
+    absent = runner._frontdoor_tool_state_after_tool_results(state=dict(base_state))
+    assert "windows_mcp" not in absent["tool_names"]
+    assert absent["candidate_tool_names"] == ["windows_mcp"]
+
+    hop_state = {**base_state, "messages": [_contract_load_row("windows_mcp")]}
+    result = runner._frontdoor_tool_state_after_tool_results(state=hop_state)
+
     assert "windows_mcp" in result["tool_names"]
     assert "windows_mcp" not in result["candidate_tool_names"]
-    assert result["hydration_revoked_executor_names"] == []
+    # 台账键不再由工具态写回产出：写侧一旦复活，在场判据就有了第二份账。
+    for legacy_key in ("hydrated_tool_names", "hydration_revoked_executor_names"):
+        assert legacy_key not in result
 
 
 @pytest.mark.asyncio
@@ -365,12 +392,14 @@ async def test_frontdoor_duplicate_load_tool_context_guard_blocks_same_uncompres
                     "role": "tool",
                     "tool_call_id": "call-old",
                     "name": "load_tool_context",
-                    "content": json.dumps(current_payload, ensure_ascii=False),
+                    # 交付形态与真车道同形：`content` 里装着契约块，判据只认它。
+                    "content": json.dumps(
+                        attach_tool_contract_block(current_payload), ensure_ascii=False
+                    ),
                 }
             ],
             "tool_names": ["load_tool_context", "exec"],
             "candidate_tool_names": [],
-            "hydrated_tool_names": [],
             "rbac_visible_tool_names": ["load_tool_context", "exec"],
         },
         runtime_context={"session_key": "web:shared", "actor_role": "ceo"},
@@ -449,7 +478,6 @@ async def test_frontdoor_duplicate_load_tool_context_guard_allows_refresh_when_f
             ],
             "tool_names": ["load_tool_context", "exec"],
             "candidate_tool_names": [],
-            "hydrated_tool_names": [],
             "rbac_visible_tool_names": ["load_tool_context", "exec"],
         },
         runtime_context={"session_key": "web:shared", "actor_role": "ceo"},
@@ -486,7 +514,6 @@ async def test_graph_execute_tools_executes_runtime_submit_next_stage_and_persis
             "messages": [],
             "tool_names": [],
             "candidate_tool_names": [],
-            "hydrated_tool_names": [],
             "visible_skill_ids": [],
             "candidate_skill_ids": [],
             "rbac_visible_tool_names": [],
@@ -574,7 +601,6 @@ async def test_graph_execute_tools_free_passes_first_ordinary_tool_without_activ
             "messages": [],
             "tool_names": ["echo_tool"],
             "candidate_tool_names": [],
-            "hydrated_tool_names": [],
             "visible_skill_ids": [],
             "candidate_skill_ids": [],
             "rbac_visible_tool_names": ["echo_tool"],
@@ -643,7 +669,6 @@ async def test_graph_execute_tools_blocks_ordinary_tool_after_free_pass_consumed
         "messages": [],
         "tool_names": ["echo_tool"],
         "candidate_tool_names": [],
-        "hydrated_tool_names": [],
         "visible_skill_ids": [],
         "candidate_skill_ids": [],
         "rbac_visible_tool_names": ["echo_tool"],
@@ -736,7 +761,6 @@ async def test_graph_execute_tools_grafts_pending_orphan_rounds_into_new_stage(
             "messages": [],
             "tool_names": ["echo_tool"],
             "candidate_tool_names": [],
-            "hydrated_tool_names": [],
             "visible_skill_ids": [],
             "candidate_skill_ids": [],
             "rbac_visible_tool_names": ["echo_tool"],
@@ -841,7 +865,6 @@ async def test_graph_execute_tools_attaches_overflow_round_when_budget_exhausted
             "messages": [],
             "tool_names": ["echo_tool"],
             "candidate_tool_names": [],
-            "hydrated_tool_names": [],
             "visible_skill_ids": [],
             "candidate_skill_ids": [],
             "rbac_visible_tool_names": ["echo_tool"],
@@ -925,7 +948,6 @@ def _execute_tools_state(
         "messages": [],
         "tool_names": ["echo_tool"],
         "candidate_tool_names": [],
-        "hydrated_tool_names": [],
         "visible_skill_ids": [],
         "candidate_skill_ids": [],
         "rbac_visible_tool_names": ["echo_tool"],
@@ -1077,7 +1099,6 @@ async def test_graph_execute_tools_rejects_extra_submit_next_stage_in_same_batch
             "messages": [],
             "tool_names": ["echo_tool"],
             "candidate_tool_names": [],
-            "hydrated_tool_names": [],
             "visible_skill_ids": [],
             "candidate_skill_ids": [],
             "rbac_visible_tool_names": ["echo_tool"],
@@ -1175,7 +1196,6 @@ async def test_graph_execute_tools_allows_submit_next_stage_mixed_with_other_too
             "messages": [],
             "tool_names": ["echo_tool"],
             "candidate_tool_names": [],
-            "hydrated_tool_names": [],
             "visible_skill_ids": [],
             "candidate_skill_ids": [],
             "rbac_visible_tool_names": ["echo_tool"],
@@ -1261,7 +1281,6 @@ async def test_graph_execute_tools_executes_only_approved_calls_and_merges_synth
             "messages": [],
             "tool_names": ["echo_tool"],
             "candidate_tool_names": [],
-            "hydrated_tool_names": [],
             "visible_skill_ids": [],
             "candidate_skill_ids": [],
             "rbac_visible_tool_names": ["echo_tool"],
@@ -1421,7 +1440,6 @@ async def test_rejected_batch_item_never_reaches_the_tool_executor(monkeypatch) 
         "messages": [],
         "tool_names": ["content_open", "exec", "echo_tool"],
         "candidate_tool_names": [],
-        "hydrated_tool_names": [],
         "visible_skill_ids": [],
         "candidate_skill_ids": [],
         "rbac_visible_tool_names": ["content_open", "exec", "echo_tool"],

@@ -38,7 +38,7 @@ def test_selector_keeps_only_internal_protocol_and_fixed_builtin_tools_callable(
         ],
     )
 
-    assert result.hydrated_tool_names == [
+    assert result.callable_tool_names == [
         "submit_next_stage",
         "submit_final_result",
         "spawn_child_nodes",
@@ -47,7 +47,7 @@ def test_selector_keeps_only_internal_protocol_and_fixed_builtin_tools_callable(
     assert result.candidate_tool_names == ["filesystem_write"]
 
 
-def test_selector_does_not_promote_non_builtin_candidates_without_hydration() -> None:
+def test_selector_keeps_contract_absent_tools_out_of_callable() -> None:
     result = build_execution_tool_selection(
         prompt="write files and inspect memory",
         goal="write files and inspect memory",
@@ -74,7 +74,7 @@ def test_selector_does_not_promote_non_builtin_candidates_without_hydration() ->
         ],
     )
 
-    assert result.hydrated_tool_names == [
+    assert result.callable_tool_names == [
         "submit_next_stage",
         "submit_final_result",
         "spawn_child_nodes",
@@ -87,7 +87,7 @@ def test_selector_does_not_promote_non_builtin_candidates_without_hydration() ->
     ]
 
 
-def test_selector_promoted_tools_remain_concrete() -> None:
+def test_selector_contract_present_tools_are_callable() -> None:
     result = build_execution_tool_selection(
         prompt="apply patch and inspect docs",
         goal="apply patch and inspect docs",
@@ -110,10 +110,10 @@ def test_selector_promoted_tools_remain_concrete() -> None:
             "submit_final_result",
             "spawn_child_nodes",
         ],
-        promoted_tool_names=["filesystem_propose_patch", "content_open"],
+        contract_present_tool_names=["filesystem_propose_patch", "content_open"],
     )
 
-    assert result.hydrated_tool_names == [
+    assert result.callable_tool_names == [
         "submit_next_stage",
         "submit_final_result",
         "spawn_child_nodes",
@@ -121,7 +121,7 @@ def test_selector_promoted_tools_remain_concrete() -> None:
         "content_open",
     ]
     assert result.candidate_tool_names == ["memory_note"]
-    assert result.trace["selected_promoted_tool_names"] == [
+    assert result.trace["selected_contract_present_tool_names"] == [
         "filesystem_propose_patch",
         "content_open",
     ]
@@ -164,7 +164,7 @@ def test_selector_accepts_runtime_helper_dict_shape_tools() -> None:
     )
 
     assert result.lightweight_tool_ids == ["filesystem_write", "exec"]
-    assert result.hydrated_tool_names == [
+    assert result.callable_tool_names == [
         "submit_next_stage",
         "submit_final_result",
         "spawn_child_nodes",

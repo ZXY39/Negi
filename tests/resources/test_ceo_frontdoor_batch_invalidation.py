@@ -117,7 +117,6 @@ async def _run_batch(monkeypatch, *, mutate_before_failing: bool) -> list[str]:
             "tool_names": ["exec", STAGE_TOOL_NAME, "probe_tool", "load_tool_context"],
             "candidate_tool_names": [],
             "candidate_tool_items": [],
-            "hydrated_tool_names": [],
             "rbac_visible_tool_names": ["exec", STAGE_TOOL_NAME, "probe_tool"],
             "visible_skill_ids": [],
             "candidate_skill_ids": [],

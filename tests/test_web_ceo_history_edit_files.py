@@ -467,7 +467,6 @@ def _truncation_stub():
     stub._frontdoor_restore_source = "completed_continuity"
     # 钉住载体（截断前那一跳留下的工具面与头部名单）
     stub._frontdoor_provider_tool_schema_names = ["create_async_task", "filesystem_write"]
-    stub._frontdoor_hydrated_tool_names = ["web_fetch"]
     stub._frontdoor_visible_tool_ids = ["create_async_task", "filesystem_write", "web_fetch"]
     stub._frontdoor_visible_skill_ids = ["find-skills"]
     stub._frontdoor_capability_snapshot_exposure_revision = "exp:stale"
@@ -538,7 +537,6 @@ def test_apply_history_truncation_state_empty_baseline_resets_everything():
         assert stub._frontdoor_completed_continuity_bridge_pending is False
         # 空基线载荷里那份"清单清空"必须真的落到会话对象上：早退挡过它一次。
         assert stub._frontdoor_provider_tool_schema_names == []
-        assert stub._frontdoor_hydrated_tool_names == []
         assert stub._frontdoor_visible_tool_ids == []
         assert stub._frontdoor_visible_skill_ids == []
         assert stub._frontdoor_capability_snapshot_exposure_revision == ""
@@ -589,7 +587,6 @@ def _continuity_hook_stub(session_key="web:ceo-hook", turn_id="turn-h1"):
     stub._frontdoor_canonical_context = {}
     stub._compression_state = {}
     stub._semantic_context_state = {}
-    stub._frontdoor_hydrated_tool_names = []
     stub._frontdoor_capability_snapshot_exposure_revision = ""
     stub._frontdoor_visible_tool_ids = []
     stub._frontdoor_visible_skill_ids = []
@@ -660,7 +657,6 @@ def test_sync_completed_continuity_snapshot_without_turn_id_skips_boundary(works
     ):
         setattr(stub, name, {})
     stub._frontdoor_actual_request_history = []
-    stub._frontdoor_hydrated_tool_names = []
     stub._frontdoor_visible_tool_ids = []
     stub._frontdoor_visible_skill_ids = []
     stub._frontdoor_provider_tool_schema_names = []

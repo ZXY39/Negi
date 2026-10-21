@@ -67,7 +67,6 @@ def _tool_schema_selection() -> dict:
     return {
         "tool_names": ["submit_next_stage"],
         "candidate_tool_names": [],
-        "hydrated_executor_names": [],
         "lightweight_tool_ids": [],
         "trace": {},
     }

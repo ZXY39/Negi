@@ -6,6 +6,7 @@ from types import SimpleNamespace
 import pytest
 
 from g3ku.agent.tools.main_runtime import LoadToolContextTool
+from g3ku.runtime.tool_contract_block import attach_tool_contract_block
 from main.governance.tool_context import build_tool_context_fingerprint
 from main.models import NodeRecord, TaskRecord
 from main.protocol import now_iso
@@ -123,7 +124,7 @@ async def test_react_loop_records_memory_probe_before_direct_load_repeat_check()
                 "role": "tool",
                 "tool_call_id": "call-old",
                 "name": "load_tool_context",
-                "content": json.dumps(prior_payload, ensure_ascii=False),
+                "content": json.dumps(attach_tool_contract_block(prior_payload), ensure_ascii=False),
             }
         ],
         runtime_context={
@@ -143,7 +144,7 @@ async def test_react_loop_records_memory_probe_before_direct_load_repeat_check()
     assert probe["stage"] == "load_tool_context_direct_read_violations"
     assert probe["message_history_count"] == 1
     assert probe["response_tool_call_count"] == 1
-    assert probe["latest_load_tool_context_message_count"] == 1
+    assert probe["latest_contract_fingerprint_count"] == 1
     assert probe["requested_tool_ids"] == ["exec"]
 
 

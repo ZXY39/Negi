@@ -187,7 +187,6 @@ def test_tail_contract_blocks_no_longer_render_the_roster_line() -> None:
         tool_schema_selection={
             "tool_names": ["submit_next_stage"],
             "candidate_tool_names": [],
-            "hydrated_executor_names": [],
             "lightweight_tool_ids": [],
             "trace": {},
         },

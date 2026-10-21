@@ -205,13 +205,13 @@ def _resource_tool(tmp_path, *, with_toolskill: bool):
     return tool, str(path or '')
 
 
-def test_hydrated_resource_tool_is_pointed_at_content_open_not_load_tool_context(tmp_path) -> None:
+def test_contract_present_resource_tool_is_pointed_at_content_open_not_load_tool_context(tmp_path) -> None:
     tool, path = _resource_tool(tmp_path, with_toolskill=True)
 
     guidance = parameter_error_guidance(
         'filesystem_write',
         tool=tool,
-        runtime_context={'hydrated_executor_names': ['filesystem_write']},
+        runtime_context={'tool_contract_presence': {'filesystem_write': 'tcf:aaaaaaaaaaaaaaaa'}},
     )
 
     assert 'content_open' in guidance
@@ -219,13 +219,13 @@ def test_hydrated_resource_tool_is_pointed_at_content_open_not_load_tool_context
     assert 'load_tool_context(tool_id=' not in guidance
 
 
-def test_not_yet_hydrated_resource_tool_keeps_the_load_pointer(tmp_path) -> None:
+def test_contract_absent_resource_tool_keeps_the_load_pointer(tmp_path) -> None:
     tool, _path = _resource_tool(tmp_path, with_toolskill=True)
 
     guidance = parameter_error_guidance(
         'filesystem_write',
         tool=tool,
-        runtime_context={'hydrated_executor_names': []},
+        runtime_context={'tool_contract_presence': {}},
     )
 
     assert guidance == PARAMETER_ERROR_GUIDANCE_TEMPLATE.format(tool_name='filesystem_write')
@@ -244,7 +244,7 @@ def test_acceptance_flag_does_not_suppress_the_content_open_pointer(tmp_path) ->
         'filesystem_write',
         tool=tool,
         runtime_context={
-            'hydrated_executor_names': ['filesystem_write'],
+            'tool_contract_presence': {'filesystem_write': 'tcf:aaaaaaaaaaaaaaaa'},
             'enforce_content_ref_allowlist': True,
             'allowed_content_refs': [],
         },
@@ -260,7 +260,7 @@ def test_missing_toolskill_file_falls_back_to_the_load_pointer(tmp_path) -> None
     guidance = parameter_error_guidance(
         'filesystem_write',
         tool=tool,
-        runtime_context={'hydrated_executor_names': ['filesystem_write']},
+        runtime_context={'tool_contract_presence': {'filesystem_write': 'tcf:aaaaaaaaaaaaaaaa'}},
     )
 
     assert guidance == PARAMETER_ERROR_GUIDANCE_TEMPLATE.format(tool_name='filesystem_write')
@@ -276,8 +276,10 @@ def test_availability_hint_separates_not_hydrated_from_unknown_name() -> None:
         candidate_names=['web_search', 'image_search'],
     )
 
-    # 候选未水化 → 给出加载动作；同时列出可调用与全部候选（含它自己，便于改选别的）。
-    assert '「web_search」尚未水化' in hint
+    # 契约不在场 → 给出两条真实出路（直接调用先取回说明 / 先 load），同时列出可调用与全部
+    # 候选（含它自己，便于改选别的）。
+    assert '「web_search」的契约说明不在本轮上下文里' in hint
+    assert 'load_tool_context(tool_id="web_search")' in hint
     assert '当前可直接调用的工具：exec、content_open' in hint
     assert '本轮其他候选工具（排名选中，可加载）：web_search、image_search' in hint
 

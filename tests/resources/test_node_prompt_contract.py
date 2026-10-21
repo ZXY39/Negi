@@ -42,7 +42,6 @@ def test_upsert_node_dynamic_contract_message_replaces_existing_contract_message
         candidate_skill_ids=["memory"],
         candidate_skill_items=[{"skill_id": "memory", "description": "memory help"}],
         stage_payload={"goal": "write file"},
-        hydrated_executor_names=["filesystem_write"],
         lightweight_tool_ids=["filesystem"],
         selection_trace={"mode": "execution_tool_selection"},
     )
@@ -59,7 +58,7 @@ def test_upsert_node_dynamic_contract_message_replaces_existing_contract_message
     assert payload["callable_tool_names"] == ["filesystem_write"]
     assert payload["candidate_tools"] == []
     assert payload["candidate_skills"] == [{"skill_id": "memory", "description": "memory help"}]
-    assert payload["hydrated_executor_names"] == ["filesystem_write"]
+    assert "hydrated_executor_names" not in payload
     assert "visible_skills" not in payload
     assert "lightweight_tool_ids" not in payload
     assert "model_visible_tool_selection_trace" not in payload
@@ -78,7 +77,6 @@ def test_node_runtime_contract_serializes_minimal_agent_facing_payload() -> None
         candidate_skill_ids=["tmux"],
         candidate_skill_items=[{"skill_id": "tmux", "description": "terminal workflow"}],
         stage_payload={},
-        hydrated_executor_names=["filesystem_write"],
         lightweight_tool_ids=["filesystem"],
         selection_trace={"mode": "execution_tool_selection"},
     )
@@ -98,7 +96,7 @@ def test_node_runtime_contract_serializes_minimal_agent_facing_payload() -> None
             "description": "terminal workflow",
         }
     ]
-    assert payload["hydrated_executor_names"] == ["filesystem_write"]
+    assert "hydrated_executor_names" not in payload
     assert "visible_skills" not in payload
     assert "lightweight_tool_ids" not in payload
     assert "model_visible_tool_selection_trace" not in payload
@@ -110,7 +108,9 @@ def test_node_runtime_contract_serializes_minimal_agent_facing_payload() -> None
     # 活状态只在尾块里，稳定块一份都没有
     gate_content = contract.to_stage_gate_message()["content"]
     assert gate_content.startswith("## Runtime Stage Gate")
-    assert "callable_tools: `exec`" in gate_content
+    # D11：callable 面不再渲成一行（水合不再拦路），装配层的载荷仍是执行准入的读点。
+    assert "callable_tools:" not in gate_content
+    assert list(contract.to_message_payload().get("callable_tool_names") or []) == ["exec"]
     assert "hydrated_tools:" not in gate_content
     assert "callable_tools:" not in message["content"]
     assert "hydrated_tools:" not in message["content"]
@@ -160,7 +160,6 @@ def test_node_runtime_contract_renders_repair_required_sections_separately() -> 
             }
         ],
         stage_payload={},
-        hydrated_executor_names=[],
         lightweight_tool_ids=[],
         selection_trace={"mode": "execution_tool_selection"},
     )
@@ -218,7 +217,6 @@ def test_inject_node_dynamic_contract_message_appends_contract_to_request_tail()
                 "tool_round_budget": 6,
             },
         },
-        hydrated_executor_names=[],
         lightweight_tool_ids=[],
         selection_trace={"mode": "execution_tool_selection"},
     )
@@ -239,7 +237,7 @@ def test_inject_node_dynamic_contract_message_appends_contract_to_request_tail()
     payload = extract_node_dynamic_contract_payload(injected)
     assert payload is not None
     assert payload["candidate_skills"] == [{"skill_id": "tmux", "description": "terminal workflow"}]
-    assert payload["hydrated_executor_names"] == []
+    assert "hydrated_executor_names" not in payload
 
 
 def test_model_echo_of_contract_heading_with_tool_calls_is_not_a_contract_message() -> None:
@@ -344,14 +342,13 @@ def test_node_stage_gate_lists_declared_but_denied_tools() -> None:
         visible_skills=[],
         candidate_skill_ids=[],
         stage_payload={},
-        hydrated_executor_names=[],
         lightweight_tool_ids=[],
         selection_trace={},
         denied_tool_names=["web_fetch"],
     )
 
     gate_content = contract.to_stage_gate_message()["content"]
-    assert "callable_tools: `exec`" in gate_content
+    assert "callable_tools:" not in gate_content
     assert "denied_tools" in gate_content
     assert "web_fetch" in gate_content.split("denied_tools", 1)[1]
     assert "无权限" in gate_content
