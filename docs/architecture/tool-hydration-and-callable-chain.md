@@ -61,6 +61,7 @@
 - 丢弃必须回执。每个被声明的名字都出现在 `accepted` 或 `dropped` 之一，`dropped` 项带八种 `reason` 之一：`already_always_callable` / `unknown_tool` / `repair_required` / `not_visible_for_role` / `no_toolskill` / `render_empty` / `single_char_limit` / `total_char_limit`。优先级有两处不可交换：`unknown_tool` 与 `repair_required` 都早于 `not_visible_for_role`——拼错的名字与待修复资源在治理可见集里同样缺席，顺序反了就把「改名」「可以提示修复」两类不同的纠正动作都说成「这个角色用不了，别再报它」。判据按**目标节点角色**的实时可见集走，与名单来源无关。
 - 回执落在派发方的工具结果里：`create_async_task` 在结果文本追加一行 `seed_tools: {accepted, dropped}`，`spawn_child_nodes` 在每个 child 结果上带同名对象。两键恒在（`dropped` 为空时是空数组），但**只在派发方真的声明过时才出现**——没声明却回一份空回执，与「全被丢弃」在派发方看来同形。预置被拒不阻断任务创建或派生；解析自身失败时回执整份缺席，只在节点行留 `seed_error`，不替读不出来的名字编原因。
 - 两份读数落 `node.metadata` 并同步进 runtime frame：`seeded_contracts`（`tool` / `rev` / `chars`）与 `seeded_dropped`。派发时写初值，首跳构建时按**实际交付**覆盖 `seeded_contracts`、并把新出现的丢弃并进 `seeded_dropped`，于是「派发时就被拒」与「派发时被接受、构建时印不出来」在同一处看得见。帧字段按枚举过沙，写记录 / hydrate / 公开投影各建一份字典，漏一处不是报错而是**永远读不到**。
+- 这两份读数在帧里是**写一次、后续继承**的量：首跳之后每跳的 `upsert_frame` 都不带它们，而枚举式 sanitize 会把"没带"补成空列表——不继承的话实时那一份就在首跳后被抹平，而节点行照旧是对的（两条面不一致时只有帧会骗人）。保留规则与 `messages_ref` 同源：写方没带就不换存量。
 - 前门车道不接这条：长会话的首跳成本被后续几十跳摊薄，节点是每个节点都付一次。
 
 ### 交付被切割时的复开提醒

@@ -5291,6 +5291,24 @@ class TaskLogService:
             **self._default_frame(node_id=node_id, depth=int(payload.get('depth') or 0), node_kind=str(payload.get('node_kind') or 'execution'), phase=str(payload.get('phase') or '')),
             **payload,
         }
+        # 预置契约读数是「节点建出来时定一次」的量：写帧的那些跳（react_loop 每次 upsert_frame）
+        # 根本不带它，而本函数按枚举键清洗会把没带的补成空列表，于是首跳之后帧里就把它抹平了。
+        # 库里对 `messages_ref` 用的是同一条意规则——写方没带就不换。这里按「空 ⇒ 继承存量」处理：
+        # 一个节点要么全程同一份读数，要么一直是空，不存在需要把非空清回空的写。
+        if not next_frame.get('seeded_contracts') and not next_frame.get('seeded_dropped'):
+            try:
+                existing = self._store.get_task_runtime_frame(task.task_id, node_id)
+            except Exception:
+                existing = None
+            existing_payload = dict((getattr(existing, 'payload', None) or {}) if existing is not None else {})
+            for carried_key in ('seeded_contracts', 'seeded_dropped'):
+                carried = [
+                    dict(item)
+                    for item in list(existing_payload.get(carried_key) or [])
+                    if isinstance(item, dict)
+                ]
+                if carried:
+                    next_frame[carried_key] = carried
         runnable = bool(
             str(next_frame.get('phase') or '') in {'before_model', 'waiting_tool_results', 'after_model', 'message_distribution'}
             or self._frame_has_active_tools(next_frame)

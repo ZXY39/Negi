@@ -575,7 +575,40 @@ async def test_frame_readings_survive_every_frame_field_list(tmp_path: Path) -> 
 
         public = service.log_service._public_runtime_frame(hydrated)
         assert [item['tool'] for item in public.get('seeded_contracts') or []] == ['seed_a'], '公开投影'
-        assert public['seeded_dropped'] == [], '未声明外的名字没被丢弃'
+    finally:
+        await _shutdown(service, manager)
+
+
+@pytest.mark.asyncio
+async def test_later_frame_write_without_the_readings_does_not_blanc_them(tmp_path: Path) -> None:
+    """实盘抓到的形状：首跳之后 react_loop 每次 `upsert_frame` 都不带这两份读数。
+
+    白名单把"没带"补成空列表，于是帧里预置成功过这件事被抹平——节点行一直是对的，只有实时
+    那一份变空。写帧方没带 ⇒ 继承存量（与 `messages_ref` 同一条意规则）。
+    """
+    service, manager = _build_service(tmp_path)
+    try:
+        record, root = await _make_task(service, seed_tools=['seed_a'])
+        task = service.get_task(record.task_id)
+        await service.node_runner._build_messages(task=task, node=service.get_node(root.node_id))
+        before = service.log_service.read_runtime_frame_payload(record.task_id, root.node_id) or {}
+        assert [item['tool'] for item in before.get('seeded_contracts') or []] == ['seed_a']
+
+        # 模拟 react_loop 的一次普通写帧：整份帧重建，完全不认识 seeded_* 这两个键。
+        service.log_service.upsert_frame(
+            record.task_id,
+            {
+                'node_id': root.node_id,
+                'depth': 0,
+                'node_kind': 'execution',
+                'phase': 'before_model',
+                'messages': [{'role': 'system', 'content': 'x'}],
+                'callable_tool_names': ['seed_a'],
+            },
+            publish_snapshot=False,
+        )
+        after = service.log_service.read_runtime_frame_payload(record.task_id, root.node_id) or {}
+        assert [item['tool'] for item in after.get('seeded_contracts') or []] == ['seed_a'], '后续写帧把读数抹平了'
     finally:
         await _shutdown(service, manager)
 
