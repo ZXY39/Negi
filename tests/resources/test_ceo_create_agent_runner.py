@@ -9,25 +9,23 @@ from g3ku.agent.tools.base import Tool
 from g3ku.agent.tools.memory_update import MemoryUpdateTool
 from g3ku.config.schema import MemoryAssemblyConfig
 from g3ku.core.messages import UserInputMessage
+from g3ku.runtime import web_ceo_sessions
 from g3ku.runtime.frontdoor import _ceo_create_agent_impl as create_agent_impl
 from g3ku.runtime.frontdoor import _ceo_runtime_ops as ceo_runtime_ops
-from g3ku.runtime.tool_contract_block import render_tool_contract_block
-from g3ku.runtime.frontdoor import ceo_runner
-from g3ku.runtime.frontdoor import prompt_cache_contract
+from g3ku.runtime.frontdoor import ceo_runner, prompt_cache_contract
 from g3ku.runtime.frontdoor.canonical_context import combine_canonical_context
-from g3ku.runtime.frontdoor.prompt_cache_contract import (
-    DEFAULT_CACHE_FAMILY_REVISION,
-    FrontdoorPromptContract,
-)
 from g3ku.runtime.frontdoor.state_models import CeoFrontdoorInterrupted, initial_persistent_state
 from g3ku.runtime.frontdoor.tool_contract import (
     clear_pinned_contract_stores,
     is_frontdoor_tool_contract_message,
     split_pinned_contract_from_system_text,
 )
-from g3ku.runtime import web_ceo_sessions
 from g3ku.runtime.session_agent import RuntimeAgentSession
-from main.runtime.chat_backend import build_actual_request_diagnostics, build_prompt_cache_diagnostics
+from g3ku.runtime.tool_contract_block import render_tool_contract_block
+from main.runtime.chat_backend import (
+    build_actual_request_diagnostics,
+    build_prompt_cache_diagnostics,
+)
 
 
 @pytest.fixture(autouse=True)
@@ -1795,12 +1793,15 @@ async def test_create_agent_runner_graph_prepare_turn_keeps_contract_present_too
         }
 
     async def _build_for_ceo(**kwargs):
-        _ = kwargs
+        # 真实装配器会把本回合的活行（上一跳 load_tool_context 的结果）带进请求视图；
+        # 读数按装配后的视图算，夹具必须同形，否则测的是"模型看不到契约"那种形状。
+        model_messages = [
+            *[dict(item) for item in list(kwargs.get("checkpoint_messages") or [])],
+            {"role": "system", "content": "system"},
+            {"role": "user", "content": "hello"},
+        ]
         return SimpleNamespace(
-            model_messages=[
-                {"role": "system", "content": "system"},
-                {"role": "user", "content": "hello"},
-            ],
+            model_messages=model_messages,
             stable_messages=[
                 {"role": "system", "content": "system"},
                 {"role": "user", "content": "hello"},
@@ -1899,6 +1900,99 @@ async def test_create_agent_runner_graph_prepare_turn_keeps_contract_present_too
     assert "visible_skill_ids" not in contract_text
     assert "rbac_visible_tool_names" not in contract_text
     assert "rbac_visible_skill_ids" not in contract_text
+
+
+@pytest.mark.asyncio
+async def test_create_agent_runner_presence_reading_follows_the_assembled_request_view() -> None:
+    """读数必须按装配后的请求视图算，而不是按续跑种子。
+
+    实盘形状：上一跳 `load_tool_context` 的结果只在本回合活行的末尾出现，续跑种子
+    （上一回合的基线）里没有它。若读数只看种子，就会把模型眼前明明看得见的契约报成
+    absent——D15 的三档读数也就失去了排障价值。
+    """
+    session = RuntimeAgentSession(
+        SimpleNamespace(model="demo", reasoning_effort=None, multi_agent_runner=None),
+        session_key="web:shared",
+        channel="web",
+        chat_id="shared",
+    )
+    runner = create_agent_impl.CreateAgentCeoFrontDoorRunner(
+        loop=SimpleNamespace(
+            sessions=SimpleNamespace(get_or_create=lambda session_key: SimpleNamespace(session_key=session_key)),
+            main_task_service=None,
+            tools=SimpleNamespace(get=lambda *_: None, tool_names=[]),
+            provider_name="openai",
+            model="gpt-test",
+        )
+    )
+    live_contract_row = {
+        "role": "tool",
+        "name": "load_tool_context",
+        "content": json.dumps(
+            {
+                "ok": True,
+                "tool_id": "filesystem_write",
+                "tool_context_fingerprint": "sha256:" + "b" * 64,
+                "content": render_tool_contract_block(
+                    "filesystem_write", "sha256:" + "b" * 64, "# filesystem_write\n契约正文"
+                ),
+            },
+            ensure_ascii=False,
+        ),
+    }
+
+    async def _resolve_for_actor(**kwargs):
+        _ = kwargs
+        return {
+            "skills": [],
+            "tool_families": [],
+            "tool_names": ["submit_next_stage", "load_tool_context", "filesystem_write"],
+        }
+
+    async def _build_for_ceo(**kwargs):
+        # 种子只有上一回合的对话；本回合的活行由装配器追加进请求视图。
+        return SimpleNamespace(
+            model_messages=[
+                *[dict(item) for item in list(kwargs.get("request_body_seed_messages") or [])],
+                dict(live_contract_row),
+                {"role": "user", "content": "hello"},
+            ],
+            stable_messages=[{"role": "system", "content": "system"}],
+            dynamic_appendix_messages=[],
+            tool_names=["submit_next_stage", "load_tool_context", "filesystem_write"],
+            candidate_tool_names=[],
+            candidate_tool_items=[],
+            trace={
+                "selected_skills": [],
+                "tool_selection": {"mode": "inventory_only", "candidate_tool_names": []},
+                "capability_snapshot": {
+                    "visible_tool_ids": ["submit_next_stage", "load_tool_context", "filesystem_write"],
+                    "visible_skill_ids": [],
+                },
+            },
+            cache_family_revision="frontdoor:v1",
+            turn_overlay_text="",
+        )
+
+    runner._resolver = SimpleNamespace(resolve_for_actor=_resolve_for_actor)
+    runner._builder = SimpleNamespace(build_for_ceo=_build_for_ceo)
+    runner._resolve_ceo_model_refs = lambda: ["openai:gpt-4.1"]
+    runner._selected_tool_schemas = lambda tool_names: [{"name": name, "parameters": {"type": "object"}} for name in list(tool_names or [])]
+    # 续跑种子存在，但它不含本回合刚加载的契约。
+    session._frontdoor_request_body_messages = [
+        {"role": "system", "content": "system"},
+        {"role": "user", "content": "上一回合"},
+        {"role": "assistant", "content": "好"},
+    ]
+
+    prepared = await runner._graph_prepare_turn(
+        state=initial_persistent_state(user_input={"content": "hello", "metadata": {}}),
+        runtime=SimpleNamespace(context=SimpleNamespace(session=session)),
+    )
+
+    presence = prepared["frontdoor_selection_debug"]["tool_contract_presence"]
+    assert [item["tool"] for item in presence["present"]] == ["filesystem_write"]
+    assert "filesystem_write" not in presence["absent"]
 
 
 @pytest.mark.asyncio

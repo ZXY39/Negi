@@ -8795,6 +8795,19 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
                     previous_tokens=previous_tokens,
                     next_tokens=next_tokens,
                 )
+        if frontdoor_selection_debug:
+            # 读数按**装配后**的请求视图重算。上一份基线在续跑前会被阶段压缩改写，本轮
+            # 刚加载的工具行又是装配时才拼进请求的——只读种子会让读数与本跳真正发出去的
+            # 视图分叉（实盘：上一跳加载的契约在下一跳被报成 absent，模型那边却看得见）。
+            frontdoor_selection_debug["tool_contract_presence"] = self._frontdoor_contract_presence_reading(
+                state={
+                    "messages": messages,
+                    "frontdoor_stage_state": current_frontdoor_stage_state,
+                    "frontdoor_canonical_context": current_frontdoor_canonical_context,
+                },
+                candidate_tool_names=list(frontdoor_selection_debug.get("candidate_tool_names") or []),
+                session=session,
+            )
         parallel_enabled, max_parallel_tool_calls = self._parallel_tool_settings()
         return {
             "session_key": str(getattr(session.state, "session_key", "") or ""),
