@@ -10,9 +10,9 @@ if not exist "%BOOTSTRAP%" (
   exit /b 1
 )
 
-rem Deliberately no PowerShell here: an unsigned .ps1 can be refused outright by the
-rem machine's script policy, and this entry must still boot. Defaults come first so an
-rem operator-supplied -Port / -BindHost in %* wins, and the switch names are translated
-rem by negi_bootstrap.py (one table, shared with start-negi.ps1).
+rem Deliberately no PowerShell here: a .ps1 can be refused before it runs (measured: an
+rem unsigned script with a low-integrity label is rejected even under RemoteSigned), and
+rem this entry must still boot. Defaults come first so an operator-supplied -Port /
+rem -BindHost in %* wins; negi_bootstrap.py translates the switch names (one table).
 "%PY%" "%BOOTSTRAP%" web -BindHost 127.0.0.1 -Port 18790 %*
 exit /b %ERRORLEVEL%

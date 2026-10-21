@@ -76,7 +76,7 @@
 维护上要记住：
 
 - 这些入口脚本是普通用户首选入口
-- 回收既有进程由**解释器**执行：`negi_bootstrap.reap_existing_runtime_processes`，`start-negi.cmd` / `start-negi.ps1` / `negi web` 共用这一处；`start-negi.sh` 保留自己的 POSIX 实现（同一端点、同一超时、同样先优雅后强杀）。`negi.ps1` / `negi.sh` / `install.ps1` / `install.sh` 自己不杀进程。回收不能挂在 `.ps1` 上：未签名的 `.ps1` 会被机器策略整份拒掉（实测 `UnauthorizedAccess`，而 `Get-ExecutionPolicy` 仍报 RemoteSigned），入口一被拦，回收逻辑也跟着消失；`.cmd` 直接 exec `negi_bootstrap.py`，所以它在策略下仍然起得来。三个必须知道的判据：
+- 回收既有进程由**解释器**执行：`negi_bootstrap.reap_existing_runtime_processes`，`start-negi.cmd` / `start-negi.ps1` / `negi web` 共用这一处；`start-negi.sh` 保留自己的 POSIX 实现（同一端点、同一超时、同样先优雅后强杀）。`negi.ps1` / `negi.sh` / `install.ps1` / `install.sh` 自己不杀进程。回收不能挂在 `.ps1` 上：`.ps1` 可能在执行前就被整份拒掉（实测：带低完整性标签的未签名脚本，即使策略是 RemoteSigned 也报 `UnauthorizedAccess`），入口一被拦，回收逻辑也跟着消失；`.cmd` 直接 exec `negi_bootstrap.py`，不经过 PowerShell，所以它在这类环境里仍然起得来。三个必须知道的判据：
   - **不能把启动器自己算进名单**：`.cmd` 用绝对路径调 `negi_bootstrap.py`，启动器自己的命令行同时命中「checkout 根」与 `negi_bootstrap.py web`。要排除的是一对 PID（venv 的 `python.exe` 是重定向器，cmdline 命中的是父进程，真正执行代码的是它的子进程）；漏掉任何一个，强杀那一步都会打死回收者本身——入口以 exit 1 静默消失、一个字都不打印，看起来像"脚本起不来"。
   - **优雅退出的端口要按候选找**：回收按 checkout 收、不按端口收。操作者这次换了 `-Port` 时旧实例还听在旧端口上，只打目标端口等于没发请求、回收会退化成强杀（异常中断）。候选顺序是目标端口 → 旧实例记下的端口（`.g3ku/internal-callback.json` 里的回调地址，web 启动时由 launcher 写入）→ 配置端口 → 默认 `18790`。
   - **强杀以"杀完还在不在"判定**：`taskkill /T` 收父进程时子进程已经跟着走了，排在后面的子 PID 再杀一次会报"找不到进程"；只有杀完仍活着才值得报一行失败。

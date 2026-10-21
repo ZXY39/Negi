@@ -328,8 +328,9 @@ def test_web_bind_default_is_loopback_and_the_container_lane_stays_explicit() ->
 
 # ---------------------------------------------------------------------------
 # 入口脚本与旧实例回收：回收从 `start-negi.ps1` 搬进解释器之后，三条入口（.cmd / .ps1 /
-# `negi web`）共用同一份语义。未签名的 .ps1 会被机器策略整份拒掉（实测 UnauthorizedAccess），
-# 那时只有不依赖 PowerShell 的这条道还能起。
+# `negi web`）共用同一份语义。.ps1 可能在执行前就被整份拒掉（实测：带低完整性标签的未签名
+# 脚本，即使策略是 RemoteSigned 也报 UnauthorizedAccess），那时只有不依赖 PowerShell 的这条道
+# 还能起。
 
 
 def test_entry_switches_are_translated_in_one_place(monkeypatch) -> None:
@@ -533,8 +534,8 @@ def test_main_refuses_to_start_when_a_second_instance_would_fight_the_port(monke
 def test_the_cmd_entry_boots_without_powershell_and_the_ps1_keeps_no_reaper() -> None:
     """入口契约：`.cmd` 不碰 PowerShell，`.ps1` 不再自带回收逻辑。
 
-    这台机器上未签名的 `.ps1` 会被策略整份拒掉（实测 `UnauthorizedAccess`，而
-    `Get-ExecutionPolicy` 仍报 RemoteSigned），所以"双击/命令行起不来"必须有第二条道；
+    `.ps1` 可能在执行前就被整份拒掉（实测：带低完整性标签的未签名脚本，即使策略是
+    RemoteSigned 也报 `UnauthorizedAccess`），所以"双击/命令行起不来"必须有第二条道；
     第二条道同时得带上回收，否则旧实例占着端口与新锁，起得来的那个反而是在坏状态上跑。
     """
     cmd = (REPO_ROOT / 'start-negi.cmd').read_text(encoding='utf-8')

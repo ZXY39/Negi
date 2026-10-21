@@ -42,9 +42,10 @@ if ($Help -or ($ExtraArgs -contains "--help")) {
 
 # This script only translates switches into CLI flags. Reaping the old instance, waiting for
 # the port to go quiet and reporting a failed start all live in `negi_bootstrap.py`'s web
-# branch (`reap_existing_runtime_processes`). Keeping that here would be wrong: an unsigned
-# .ps1 can be refused outright by the machine's script policy (measured UnauthorizedAccess),
-# and the recovery would disappear with it - while `negi.cmd` / `negi web` never pass here.
+# branch (`reap_existing_runtime_processes`). Keeping that here would be wrong: a .ps1 can be
+# refused before it runs (measured: an unsigned script with a low-integrity label is rejected
+# even under RemoteSigned), and the recovery would disappear with it - while `negi.cmd` /
+# `negi web` never pass here.
 $webArgs = @("web", "--host", $BindHost, "--port", "$Port")
 
 if ($Reload) {
