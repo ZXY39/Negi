@@ -2484,8 +2484,8 @@ async def uncompress_current_memory(request: Request, payload: dict | None = Bod
 async def delete_current_memories(request: Request, payload: dict | None = Body(default=None)):
     """管理页删除同样只入队：由记忆 agent 决定删除还是归并，正文不再被硬删。
 
-    `note_refs` 仍是操作员勾选的关联笔记，写进请求里交给 agent 处理（笔记的删除归
-    note 所有权那条道判定，不由请求处理器直接 unlink）。
+    请求里不带笔记：note 文件的回收只认所有权列（`note_ref` / `consolidated_into`），
+    在端点里 unlink 会留下指向空文件的指针。
     """
     manager = _runtime_memory_manager()
     body = dict(payload or {})
@@ -2498,10 +2498,6 @@ async def delete_current_memories(request: Request, payload: dict | None = Body(
             status_code=400,
             detail={'code': 'memory_current_invalid_id', 'message': 'memory_ids is required'},
         )
-    raw_note_refs = body.get('note_refs')
-    if not isinstance(raw_note_refs, list):
-        raw_note_refs = [raw_note_refs] if raw_note_refs else []
-    note_refs = [str(item or '').strip() for item in raw_note_refs if str(item or '').strip()]
     enqueue = getattr(manager, 'enqueue_operator_request', None)
     if not callable(enqueue):
         raise HTTPException(
@@ -2518,8 +2514,6 @@ async def delete_current_memories(request: Request, payload: dict | None = Body(
         '操作员在管理页要求删除长期记忆：' + '、'.join(_delete_line_label(memory_id) for memory_id in memory_ids) + '。',
         f'原因：{reason}',
     ]
-    if note_refs:
-        request_lines.append('同时删除这些关联笔记：' + '、'.join(note_refs) + '。')
     request_lines.append('只处理上面点名的记忆，其它记忆保持不变。')
     try:
         queued = await enqueue(
@@ -2552,7 +2546,6 @@ async def delete_current_memories(request: Request, payload: dict | None = Body(
                 'reason': reason,
                 'request_id': str(request.headers.get('x-request-id') or '').strip(),
                 'memory_ids': memory_ids,
-                'note_refs_requested': note_refs,
                 'queued_request_id': item['request_id'],
                 'queue_status': item['status'],
                 'result': 'queued',

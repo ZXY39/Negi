@@ -431,12 +431,12 @@ def test_current_memory_delete_enqueues_one_request_per_action(stub_env, monkeyp
     op, _source, payload_text, trigger_source = manager.calls[0]
     assert op == "delete" and trigger_source == "admin_ui_delete"
     assert "id:Ab12Z9" in payload_text and "id:missing" in payload_text and "cleanup" in payload_text
-    # 勾选的笔记只是给 agent 的上下文：笔记文件不在这条请求里被 unlink，
-    # 否则 agent 拒删时会留下指向不存在文件的指针。
-    assert "note_keep" in payload_text
+    # 笔记不进请求体：界面没有这个动作，回收只认所有权列。多余的 note_refs 字段照旧被忽略。
+    assert "note_keep" not in payload_text
     audit = _audit_lines(workspace)
     assert audit[0]["action"] == "delete_current_memories"
     assert audit[0]["memory_ids"] == ["Ab12Z9", "missing"]
+    assert "note_refs_requested" not in audit[0]
     assert audit[0]["queued_request_id"] == "delete_1"
 
     empty = client.post("/api/memory/current/delete", json={"memory_ids": []})

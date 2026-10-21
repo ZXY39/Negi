@@ -147,6 +147,8 @@ function loadApp() {
             memoryBrowserToggleSelectAll,
             runMemoryBrowserUncompress,
             runMemoryBrowserDelete,
+            openMemoryDeleteDialog,
+            renderMemoryDeleteDialog,
             runMemoryBrowserEditSave,
             pushedToasts: () => __toasts,
             resetToasts: () => { __toasts.length = 0; },
@@ -178,6 +180,11 @@ function stubBrowserUi(api) {
         "memoryBrowserEditDialog",
         "memoryBrowserEditBackdrop",
         "memoryBrowserEditSave",
+        "memoryBrowserDeleteDialog",
+        "memoryBrowserDeleteBackdrop",
+        "memoryBrowserDeleteSubtitle",
+        "memoryBrowserDeleteNotes",
+        "memoryBrowserDeleteConfirm",
     ].forEach((key) => {
         api.U[key] = new StubHTMLElement();
     });
@@ -302,6 +309,39 @@ test("browser row shows note ownership from the column, not from projected text"
     // 所以这里不再拿 consolidated_into 兜底，否则等于把已迁走的记忆又画回常驻面。
     assert.match(html, /data-memory-note-ref="note_ports"[^>]*>note:note_ports</);
     assert.equal((html.match(/memory-note-ownership-chip/g) || []).length, 1);
+});
+
+test("delete dialog lists owned notes read-only and the request carries no note refs", async () => {
+    const api = loadApp();
+    stubBrowserUi(api);
+    api.S.memoryBrowser.items = [
+        { memory_id: "Ab12Z9", memory_body: "第一条 ref:note_legacy", minimal_memory: "a->b", note_ref: "note_ports" },
+        { memory_id: "Cd34W8", memory_body: "第二条也指着同一份 note", minimal_memory: "c->d", note_ref: "note_ports" },
+        { memory_id: "Ef56Gh", memory_body: "没有 note 的记忆", minimal_memory: "e->f" },
+    ];
+
+    api.openMemoryDeleteDialog(["Ab12Z9", "Cd34W8"]);
+    // 归属读 `note_ref` 列，两条合并成一个条目；正文里的 legacy 记号不算关系
+    // （notes 数组是 vm realm 里 map 出来的，比较前先在测试侧重新包一层）
+    assert.deepEqual([...api.S.memoryBrowser.deleteDialog.notes].map((note) => note.ref), ["note_ports"]);
+    const html = api.U.memoryBrowserDeleteNotes.innerHTML;
+    assert.match(html, /note_ports/);
+    assert.doesNotMatch(html, /note_legacy/);
+    assert.doesNotMatch(html, /type="checkbox"/);
+    assert.doesNotMatch(html, /仍被其他记忆引用/);
+    assert.match(html, /data-delete-note-expand="note_ports"/);
+    assert.equal(api.U.memoryBrowserDeleteDialog.hidden, false);
+    assert.equal(api.U.memoryBrowserDeleteConfirm.disabled, false);
+
+    const calls = [];
+    api.ApiClient.deleteCurrentMemories = async (memoryIds, reason) => {
+        calls.push([[...memoryIds], reason]);
+        return { ok: true, item: { status: "queued" } };
+    };
+    api.globalRef().loadMemoryBrowser = async () => {};
+    await api.runMemoryBrowserDelete(["Ab12Z9", "Cd34W8"]);
+    assert.deepEqual(calls, [[["Ab12Z9", "Cd34W8"], "manual-ui"]]);
+    assert.equal(api.pushedToasts().at(-1).title, "已提交删除");
 });
 
 test("browser list adds select and action columns in edit mode", () => {

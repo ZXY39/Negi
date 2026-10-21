@@ -11322,21 +11322,18 @@ textarea {
     z-index: 110;
 }
 
-/* 删除记忆确认对话框：关联笔记勾选列表 */
+/* 删除记忆确认对话框：关联笔记只读列表（回收归所有权，这里不提供动作） */
 .memory-delete-body {
     display: flex;
     flex-direction: column;
     gap: var(--space-3);
 }
 
-.memory-delete-master {
-    display: inline-flex;
-    align-items: center;
-    gap: 8px;
-    font-size: 0.9rem;
-    color: var(--text-primary);
-    cursor: pointer;
-    user-select: none;
+.memory-delete-hint {
+    margin: 0;
+    font-size: 0.82rem;
+    line-height: 1.6;
+    color: var(--text-muted);
 }
 
 .memory-delete-notes {
@@ -11373,25 +11370,10 @@ textarea {
     flex: 1 1 100%;
 }
 
-.memory-delete-note-check {
-    display: inline-flex;
-    align-items: center;
-}
-
 .memory-delete-note-ref {
     font-size: 0.85rem;
     font-weight: 600;
     color: var(--text-primary);
-}
-
-.memory-delete-note-shared {
-    font-size: 0.72rem;
-    padding: 2px 8px;
-    border-radius: 999px;
-    border: 1px solid color-mix(in srgb, #f59e0b 40%, var(--border-color));
-    background: color-mix(in srgb, #f59e0b 12%, var(--bg-panel));
-    color: color-mix(in srgb, #f59e0b 70%, var(--text-primary));
-    white-space: nowrap;
 }
 
 .memory-delete-note-expand {

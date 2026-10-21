@@ -454,7 +454,9 @@ def test_memory_failed_action_reports_progress_with_a_spinning_toast() -> None:
 def test_memory_browser_edit_mode_adds_guarded_bulk_operations_with_confirm_dialogs() -> None:
     html_source = (REPO_ROOT / "g3ku/web/frontend/org_graph.html").read_text(encoding="utf-8")
     app_js = (REPO_ROOT / "g3ku/web/frontend/org_graph_app.js").read_text(encoding="utf-8")
-    api_client_js = (REPO_ROOT / "g3ku/web/frontend/api_client.js").read_text(encoding="utf-8")
+    # 方法体住在 client_api/memory.js，api_client.js 只做 domain 拼装——读后者会钉住错误的载体
+    memory_api_js = (REPO_ROOT / "g3ku/web/frontend/client_api/memory.js").read_text(encoding="utf-8")
+    core_api_js = (REPO_ROOT / "g3ku/web/frontend/client_api/core.js").read_text(encoding="utf-8")
     css = (REPO_ROOT / "g3ku/web/frontend/org_graph.css").read_text(encoding="utf-8")
     admin_rest_py = (REPO_ROOT / "main/api/admin_rest.py").read_text(encoding="utf-8")
     _ = html_source
@@ -477,14 +479,24 @@ def test_memory_browser_edit_mode_adds_guarded_bulk_operations_with_confirm_dial
     assert "data-memory-row-delete=" in app_js
     assert "删除选中" in app_js
 
-    # 删除走专用确认对话框（关联笔记可勾选/展开/悬空引用警告），保存走内部弹窗二次确认
+    # 删除走专用确认对话框。关联笔记是只读列表：归属读 `note_ref` 列，回收由所有权决定，
+    # 对话框不提供任何删除笔记的动作。
     delete_fragment = _fragment(app_js, "function requestMemoryBrowserDelete(", "async function runMemoryBrowserDelete(")
     assert "openMemoryDeleteDialog(ids)" in delete_fragment
     assert 'id="memory-delete-dialog"' in app_js
-    assert "data-delete-notes-master" in app_js
-    assert "data-delete-note-ref=" in app_js
+    dialog_fragment = _fragment(app_js, "function openMemoryDeleteDialog(memoryIds)", "function closeMemoryDeleteDialog()")
+    assert 'String(item?.note_ref || "")' in dialog_fragment
     assert "data-delete-note-expand=" in app_js
-    assert "仍被其他记忆引用" in app_js
+    assert "memory-delete-hint" in app_js
+    assert ".memory-delete-hint {" in css
+    # 扫正文判关联笔记那条道已经不成立（记号被写闸禁止、启动时也会被剥掉），整面摘掉
+    assert "memoryNoteRefsInText" not in app_js
+    assert "data-delete-notes-master" not in app_js
+    assert 'data-delete-note-ref="' not in app_js
+    assert "同步删除" not in app_js
+    assert "仍被其他记忆引用" not in app_js
+    assert ".memory-delete-master" not in css
+    assert ".memory-delete-note-shared" not in css
     assert "function confirmMemoryDeleteDialog()" in app_js
     assert "function toggleDeleteNoteExpand(ref)" in app_js
     save_fragment = _fragment(app_js, "function requestMemoryBrowserEditSave()", "async function runMemoryBrowserEditSave(")
@@ -496,11 +508,11 @@ def test_memory_browser_edit_mode_adds_guarded_bulk_operations_with_confirm_dial
     assert "!!S.memoryBrowser.editMode && !!S.memoryBrowser.mutationsEnabled" in app_js
 
     # API 客户端与后端端点（新记忆运维面不受 env 门控，仅遗留 retry-head 保留）
-    assert "updateCurrentMemory" in api_client_js
-    assert "deleteCurrentMemories" in api_client_js
-    assert '"/api/memory/current/update"' in api_client_js
-    assert '"/api/memory/current/delete"' in api_client_js
-    assert "mutationsEnabled: Boolean(data.mutations_enabled" in api_client_js
+    assert "updateCurrentMemory" in memory_api_js
+    assert "deleteCurrentMemories" in memory_api_js
+    assert '"/api/memory/current/update"' in memory_api_js
+    assert '"/api/memory/current/delete"' in memory_api_js
+    assert "mutationsEnabled: Boolean(data.mutations_enabled" in memory_api_js
     assert "@router.post('/memory/current/update')" in admin_rest_py
     assert "@router.post('/memory/current/delete')" in admin_rest_py
     update_route = _admin_route_fragment(admin_rest_py, "@router.post('/memory/current/update')")
@@ -509,9 +521,11 @@ def test_memory_browser_edit_mode_adds_guarded_bulk_operations_with_confirm_dial
     assert "_memory_admin_mutations_enabled()" not in delete_route
     assert "_append_memory_admin_audit_event(" in update_route
     assert "_append_memory_admin_audit_event(" in delete_route
-    assert "note_refs" in api_client_js
-    assert "memory_current_update_failed" in api_client_js
-    assert "memory_current_delete_failed" in api_client_js
+    # 删除请求不再携带笔记：界面没有这个动作，端点也不接受这个字段
+    assert "note_refs" not in memory_api_js
+    assert "note_refs" not in delete_route
+    assert "memory_current_update_failed" in core_api_js
+    assert "memory_current_delete_failed" in core_api_js
 
     # 编辑对话框样式
     assert ".memory-browser-edit-dialog {" in css

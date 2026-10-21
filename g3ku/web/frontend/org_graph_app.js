@@ -465,7 +465,6 @@ const S = {
         deleteDialog: {
             open: false,
             memoryIds: [],
-            syncNotes: true,
             notes: [],
             busy: false,
         },
@@ -12429,11 +12428,7 @@ function ensureMemoryBrowserUi() {
                 <button type="button" class="toolbar-btn ghost" data-memory-delete-close>取消</button>
             </div>
             <div class="detail-modal-body memory-delete-body">
-                <label class="memory-delete-master">
-                    <input type="checkbox" class="ui-checkbox-input" data-delete-notes-master aria-label="同步删除关联笔记" />
-                    <span class="ui-checkbox-box" aria-hidden="true"></span>
-                    <span>同步删除关联笔记</span>
-                </label>
+                <p class="memory-delete-hint">笔记不在这里删除：被删记忆独占的笔记会在提交后由所有权回收自动清理，仍被其他记忆持有的保持原样。</p>
                 <div id="memory-delete-notes" class="memory-delete-notes"></div>
             </div>
             <div class="detail-modal-footer memory-browser-edit-footer">
@@ -12519,26 +12514,12 @@ function ensureMemoryBrowserUi() {
     U.memoryBrowserDeleteDialog = drawer.querySelector("#memory-delete-dialog");
     U.memoryBrowserDeleteBackdrop = drawer.querySelector("#memory-delete-backdrop");
     U.memoryBrowserDeleteSubtitle = drawer.querySelector("#memory-delete-subtitle");
-    U.memoryBrowserDeleteMaster = drawer.querySelector("[data-delete-notes-master]");
     U.memoryBrowserDeleteNotes = drawer.querySelector("#memory-delete-notes");
     U.memoryBrowserDeleteConfirm = drawer.querySelector("[data-memory-delete-confirm]");
     drawer.querySelectorAll("[data-memory-delete-close], [data-memory-delete-cancel]").forEach((button) => {
         button.addEventListener("click", () => closeMemoryDeleteDialog());
     });
     U.memoryBrowserDeleteBackdrop?.addEventListener("click", () => closeMemoryDeleteDialog());
-    U.memoryBrowserDeleteMaster?.addEventListener("change", () => {
-        S.memoryBrowser.deleteDialog.syncNotes = !!U.memoryBrowserDeleteMaster.checked;
-        renderMemoryDeleteDialog();
-    });
-    U.memoryBrowserDeleteNotes?.addEventListener("change", (e) => {
-        if (!(e.target instanceof Element)) return;
-        const checkbox = e.target.closest("[data-delete-note-ref]");
-        if (!checkbox) return;
-        const ref = String(checkbox.dataset.deleteNoteRef || "").trim();
-        const note = (S.memoryBrowser.deleteDialog.notes || []).find((item) => item.ref === ref);
-        if (!note) return;
-        note.checked = !!checkbox.checked;
-    });
     U.memoryBrowserDeleteNotes?.addEventListener("click", (e) => {
         if (!(e.target instanceof Element)) return;
         const expandTrigger = e.target.closest("[data-delete-note-expand]");
@@ -12790,50 +12771,26 @@ function requestMemoryBrowserDelete(memoryIds, scope = "bulk") {
     openMemoryDeleteDialog(ids);
 }
 
-// 解析记忆正文里的 note 引用（ref:note_xxx 与 见noteid:note_xxx 两种写法）
-function memoryNoteRefsInText(text) {
-    const refs = [];
-    const pattern = /(?:\bref:|见noteid:)(note_[a-z0-9_]+)/g;
-    const value = String(text || "");
-    let match = pattern.exec(value);
-    while (match) {
-        const ref = String(match[1] || "").trim();
-        if (ref && !refs.includes(ref)) refs.push(ref);
-        match = pattern.exec(value);
-    }
-    return refs;
-}
-
 function openMemoryDeleteDialog(memoryIds) {
     const items = Array.isArray(S.memoryBrowser.items) ? S.memoryBrowser.items : [];
     const idSet = new Set(memoryIds);
-    const selectedBodies = items.filter((item) => idSet.has(String(item?.memory_id || "").trim()));
-    const otherBodies = items.filter((item) => !idSet.has(String(item?.memory_id || "").trim()));
     const refs = [];
-    selectedBodies.forEach((item) => {
-        memoryNoteRefsInText(item?.memory_body).forEach((ref) => {
-            if (!refs.includes(ref)) refs.push(ref);
-        });
-    });
-    const sharedRefs = [];
-    otherBodies.forEach((item) => {
-        memoryNoteRefsInText(item?.memory_body).forEach((ref) => {
-            if (!sharedRefs.includes(ref)) sharedRefs.push(ref);
-        });
+    items.forEach((item) => {
+        if (!idSet.has(String(item?.memory_id || "").trim())) return;
+        // 归属读 `note_ref` 列：正文里的记号已被写闸禁止、启动时也被剥掉，扫文本恒得空集。
+        const ref = String(item?.note_ref || "").trim();
+        if (ref && !refs.includes(ref)) refs.push(ref);
     });
     S.memoryBrowser.deleteDialog = {
         open: true,
         memoryIds,
-        syncNotes: refs.length > 0,
         busy: false,
         notes: refs.map((ref) => ({
             ref,
-            checked: !sharedRefs.includes(ref),
             expanded: false,
             body: "",
             loaded: false,
             loading: false,
-            shared: sharedRefs.includes(ref),
         })),
     };
     renderMemoryDeleteDialog();
@@ -12841,7 +12798,7 @@ function openMemoryDeleteDialog(memoryIds) {
 
 function closeMemoryDeleteDialog() {
     if (S.memoryBrowser.deleteDialog.busy) return;
-    S.memoryBrowser.deleteDialog = { open: false, memoryIds: [], syncNotes: true, notes: [], busy: false };
+    S.memoryBrowser.deleteDialog = { open: false, memoryIds: [], notes: [], busy: false };
     renderMemoryDeleteDialog();
 }
 
@@ -12864,11 +12821,6 @@ function renderMemoryDeleteDialog() {
     if (subtitle) {
         subtitle.textContent = `将删除 ${state.memoryIds.length} 条记忆；删除后 MEMORY.md 镜像会同步重建，操作不可撤销。`;
     }
-    const master = U.memoryBrowserDeleteMaster;
-    if (master) {
-        master.checked = !!state.syncNotes;
-        master.disabled = !!state.busy || !state.notes.length;
-    }
     const notesHost = U.memoryBrowserDeleteNotes;
     if (notesHost) {
         if (!state.notes.length) {
@@ -12876,12 +12828,7 @@ function renderMemoryDeleteDialog() {
         } else {
             notesHost.innerHTML = state.notes.map((note) => `
                 <div class="memory-delete-note-row${note.expanded ? " is-expanded" : ""}">
-                    <label class="memory-delete-note-check">
-                        <input type="checkbox" class="ui-checkbox-input" data-delete-note-ref="${esc(note.ref)}"${note.checked ? " checked" : ""}${!state.syncNotes || state.busy ? " disabled" : ""} aria-label="同步删除笔记 ${esc(note.ref)}" />
-                        <span class="ui-checkbox-box" aria-hidden="true"></span>
-                    </label>
                     <span class="memory-delete-note-ref">${esc(note.ref)}</span>
-                    ${note.shared ? '<span class="memory-delete-note-shared" title="删除后其他记忆仍引用该笔记，引用将悬空">仍被其他记忆引用</span>' : ""}
                     <button type="button" class="toolbar-btn ghost memory-delete-note-expand" data-delete-note-expand="${esc(note.ref)}" aria-expanded="${note.expanded ? "true" : "false"}">
                         ${note.expanded ? "收起" : "展开内容"}
                     </button>
@@ -12922,12 +12869,9 @@ async function toggleDeleteNoteExpand(ref) {
 function confirmMemoryDeleteDialog() {
     const state = S.memoryBrowser.deleteDialog;
     if (!state.open || state.busy) return;
-    const noteRefs = state.syncNotes
-        ? (state.notes || []).filter((note) => note.checked).map((note) => note.ref)
-        : [];
     state.busy = true;
     renderMemoryDeleteDialog();
-    void runMemoryBrowserDelete(state.memoryIds, noteRefs);
+    void runMemoryBrowserDelete(state.memoryIds);
 }
 
 async function runMemoryBrowserUncompress(memoryId) {
@@ -12960,13 +12904,13 @@ async function runMemoryBrowserUncompress(memoryId) {
     }
 }
 
-async function runMemoryBrowserDelete(memoryIds, noteRefs = []) {
+async function runMemoryBrowserDelete(memoryIds) {
     const ids = [...new Set((Array.isArray(memoryIds) ? memoryIds : []).map((id) => String(id || "").trim()).filter(Boolean))];
     if (!ids.length || S.memoryBrowser.actionBusy) return;
     S.memoryBrowser.actionBusy = `delete:${ids.length}`;
     renderMemoryBrowserList();
     try {
-        const result = await ApiClient.deleteCurrentMemories(ids, "manual-ui", noteRefs);
+        const result = await ApiClient.deleteCurrentMemories(ids, "manual-ui");
         const status = String(result?.item?.status || "").trim();
         showToast({
             title: status === "queued" ? "已提交删除" : "删除请求未被受理",
@@ -12979,7 +12923,7 @@ async function runMemoryBrowserDelete(memoryIds, noteRefs = []) {
         const selected = { ...(S.memoryBrowser.selected || {}) };
         ids.forEach((id) => delete selected[id]);
         S.memoryBrowser.selected = selected;
-        S.memoryBrowser.deleteDialog = { open: false, memoryIds: [], syncNotes: true, notes: [], busy: false };
+        S.memoryBrowser.deleteDialog = { open: false, memoryIds: [], notes: [], busy: false };
         renderMemoryDeleteDialog();
         await loadMemoryBrowser();
     } catch (error) {

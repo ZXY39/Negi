@@ -67,11 +67,10 @@
         });
     },
 
-    async deleteCurrentMemories(memoryIds, reason = "manual-ui", noteRefs = []) {
+    async deleteCurrentMemories(memoryIds, reason = "manual-ui") {
         return this._request("POST", "/api/memory/current/delete", {
             body: {
                 memory_ids: Array.isArray(memoryIds) ? memoryIds : [memoryIds],
-                note_refs: Array.isArray(noteRefs) ? noteRefs : [],
                 reason,
             },
         });

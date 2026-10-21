@@ -42,8 +42,6 @@ const LEDGER = [
     { token: "qq-bot-sandbox-input", tier: "specialist" },
     { token: "ceo-voice-autosend", tier: "ui" },
     { token: "data-memory-row-select", tier: "ui" },
-    { token: "data-delete-notes-master", tier: "ui" },
-    { token: "data-delete-note-ref", tier: "ui" },
     { token: "class=\"skill-role\"", tier: "hidden" },
     { token: "tool-role tool-role-input", tier: "hidden" },
     { token: "name=\"enabled\"", tier: "hidden" },
