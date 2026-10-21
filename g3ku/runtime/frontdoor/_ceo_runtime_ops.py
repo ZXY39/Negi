@@ -7347,7 +7347,10 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
         if not callable(deliver):
             return None
         view = self._frontdoor_view_without_evicted_stage_rows(state, list((state or {}).get('messages') or []))
-        if name in contract_presence_index(request_messages=view):
+        presence_index = runtime_context.get('tool_contract_presence')
+        if not isinstance(presence_index, dict):
+            presence_index = contract_presence_index(request_messages=view)
+        if name in presence_index:
             return None
         session_key = str(
             (runtime_context or {}).get('session_key') or getattr(session, 'session_key', '') or 'web:shared'
@@ -7418,7 +7421,10 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
         hop = tool_arg_stash.read_hop(carrier)
         scope_key = tool_arg_stash.session_scope_key(session_key, name)
         view = self._frontdoor_view_without_evicted_stage_rows(state, list((state or {}).get('messages') or []))
-        fingerprint = str(contract_presence_index(request_messages=view).get(name) or '').strip()
+        presence_index = runtime_context.get('tool_contract_presence')
+        if not isinstance(presence_index, dict):
+            presence_index = contract_presence_index(request_messages=view)
+        fingerprint = str(presence_index.get(name) or '').strip()
         plan = plan_reuse_execution(
             reuse_requested=True,
             explicit_arguments=explicit_arguments,
@@ -9604,6 +9610,9 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
                 impulse_batch_totals[pending_name] = impulse_batch_totals.get(pending_name, 0) + 1
         runtime_context['impulse_batch_totals'] = impulse_batch_totals
         runtime_context['impulse_delivered_tools'] = {}
+        # 在场索引每跳只算一次（D12），下传给这一批每一次投递/复用判定。state 在工具阶段不变，
+        # 逐条重扫全历史（median 视图 0.08 ms、最大 578 条 0.6 ms）在 30 连发时是纯浪费。
+        runtime_context['tool_contract_presence'] = self._frontdoor_contract_presence_index(state)
         # 暂存时钟在投递之前推进：本轮落的条目要按推进后的跳序记，下一跳才正好可消费。
         runtime_context['tool_arg_stash_carrier'], runtime_context['tool_arg_stash_swept'] = (
             self._advance_frontdoor_stash_hop((runtime_context or {}).get('runtime_session'))

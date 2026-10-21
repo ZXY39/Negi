@@ -25,6 +25,7 @@ from g3ku.runtime import tool_arg_stash
 from g3ku.runtime.frontdoor._ceo_runtime_ops import CeoFrontDoorRuntimeOps
 from g3ku.runtime.frontdoor.tool_contract import _render_frontdoor_stage_gate_summary
 from g3ku.runtime.tool_contract_block import render_tool_contract_block
+from g3ku.runtime.tool_result_status import is_error_like_tool_result
 from g3ku.runtime.tool_impulse import (
     REUSE_PLAN_CONTRACT_ABSENT,
     REUSE_PLAN_EXECUTE,
@@ -445,3 +446,29 @@ async def test_frontdoor_reuse_aggregates_through_the_same_planner() -> None:
     assert payload["executed"] == 2
     assert seen == ["a", "b"]
     assert [item["ok"] for item in payload["items"]] == [True, True]
+
+
+def test_oversized_failure_keeps_its_failed_status(tmp_path: Path) -> None:
+    """失败结果被外置成 `Tool call failed: …` 信封后，文本判据认不出失败。
+
+    批量项不能拿渲染文本反推成败，否则一份 7 KB 的失败载荷会被报成 `ok:true`——正常路径
+    也按原始结果算状态，两处必须同源。
+    """
+    service = _service(tmp_path)
+    loop = _loop(service)
+    runtime_context = _context(carrier=_carrier(hop=4, staged=[{"value": "a"}]), contract_present=True)
+
+    text, status = loop._render_tool_message_with_status(
+        {"ok": False, "error": "disk full", "padding": "x" * 7000},
+        runtime_context=runtime_context,
+        tool_name=TOOL_ID,
+    )
+
+    assert status == "error"
+    # 旧判据在**外置信封**文本上失效——这是批量项不能拿渲染文本反推成败的原因。
+    assert (
+        is_error_like_tool_result(
+            "Tool call failed: exec error output externalized (artifact:abc) — open with content_open(ref=...)"
+        )
+        is False
+    )
