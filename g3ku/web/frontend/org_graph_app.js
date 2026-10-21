@@ -43,6 +43,8 @@ const CEO_BRAIN_LONG_PRESS_MS = 2000;
 const CEO_COMPRESSION_POLL_MS = 1000;
 // 连续这么多次轮询失败才放弃跟踪；单次超时不算（大会话收尾会占住事件循环数秒）。
 const CEO_COMPRESSION_POLL_FAIL_LIMIT = 5;
+// 缓存镜像里的 running 超过这个时长未被状态帧/轮询确认，按幽灵线处理。
+const CEO_COMPRESSION_STALE_MS = 10 * 60 * 1000;
 const CEO_COMPRESSION_DIVIDER_CLASS = "ceo-compression-divider";
 const CEO_COMPRESSION_RETRY_LABEL = "重新压缩";
 const CEO_COMPRESSION_RETRY_TITLE = "重新压缩当前上下文：会先停手，再按这颗模型的窗口压一次";
@@ -3649,6 +3651,9 @@ function normalizeCeoSnapshotCompression(compression = null) {
     if (source) next.source = source;
     const text = String(compression?.text || "").trim();
     if (text) next.text = text;
+    // 缓存里的 running 需要过期保护；seen_at 由前端在每次状态帧/轮询确认 running 时刷新。
+    const seenAt = Number(compression?.seen_at);
+    if (Number.isFinite(seenAt)) next.seen_at = seenAt;
     return next;
 }
 
@@ -3702,8 +3707,13 @@ function normalizeCeoSnapshotCompressionMarker(marker = null) {
     // 这样随后才到的实时帧不会在同一回合后面再画一条。
     const turnId = String(marker?.stats?.turn_id || "").trim();
     if (turnId) next.turn_id = turnId;
-    const boundary = Number(marker?.stats?.boundary_stage_index);
-    if (Number.isFinite(boundary) && boundary > 0) next.boundary_stage_index = boundary;
+    // 0 是有效落点（本次压缩只折了更早的历史），不是“没有边界”。
+    // 缺键/null/空串才表示没有边界；不要把 Number(null) 的 0 当成显式值。
+    const rawBoundary = marker?.stats?.boundary_stage_index;
+    if (rawBoundary !== undefined && rawBoundary !== null && rawBoundary !== "") {
+        const boundary = Number(rawBoundary);
+        if (Number.isFinite(boundary) && boundary >= 0) next.boundary_stage_index = boundary;
+    }
     return next;
 }
 
@@ -4034,16 +4044,31 @@ function activeCeoSessionCompressionState() {
     // 回合外的手动压缩没有 inflight turn，进度只存在于本机发起状态里；自动压缩仍读快照。
     if (activeCeoManualCompressionRunning()) return { status: "running", source: "manual_context_compression" };
     const cacheEntry = getCeoSessionSnapshotCache(activeSessionId());
+    // 缓存里的 running 必须有新鲜度：页面切走/断线/终局回调丢失时，不能让它永久复活。
+    const cacheFreshness = (compression) => {
+        const seenAt = Number(compression?.seen_at);
+        if (Number.isFinite(seenAt)) return seenAt;
+        // 测试桩的 Date 没有 parse；生产环境的 cached_at 是 ISO 串。
+        const cachedAt = typeof Date.parse === "function"
+            ? Date.parse(String(cacheEntry?.cached_at || ""))
+            : NaN;
+        return Number.isFinite(cachedAt) ? cachedAt : Date.now();
+    };
     // 会话级载体优先：回合内自动压缩的进行中状态同时也发在 payload.compression 上，
     // 而 inflight 那条道对内联轮（heartbeat）会被回合闸门整帧丢掉。
     const sessionCompression = normalizeCeoSnapshotCompression(cacheEntry?.compression);
-    if (String(sessionCompression?.status || "").trim().toLowerCase() === "running") return sessionCompression;
+    if (String(sessionCompression?.status || "").trim().toLowerCase() === "running") {
+        const freshness = cacheFreshness(sessionCompression);
+        if (Number.isFinite(freshness) && Date.now() - freshness <= CEO_COMPRESSION_STALE_MS) return sessionCompression;
+    }
     const inflightTurn = normalizeCeoSnapshotInflight(cacheEntry?.inflight_turn);
     const inflightStatus = String(inflightTurn?.status || "").trim().toLowerCase();
     if (inflightStatus && !["running", "in_progress", "active"].includes(inflightStatus)) return null;
     const compression = normalizeCeoSnapshotCompression(inflightTurn?.compression);
     if (!compression) return null;
-    return String(compression.status || "").trim().toLowerCase() === "running" ? compression : null;
+    if (String(compression.status || "").trim().toLowerCase() !== "running") return null;
+    const freshness = cacheFreshness(compression);
+    return Number.isFinite(freshness) && Date.now() - freshness <= CEO_COMPRESSION_STALE_MS ? compression : null;
 }
 
 // 图标自绘而不是取 lucide 字形：loader-circle 是中心对称圆环，转起来看不出动静；
@@ -4099,13 +4124,14 @@ function syncCeoCompressionRetryAffordances() {
     });
 }
 
-function buildCeoCompressionDividerElement(state, { interactive = true, turnId = "", boundary = "" } = {}) {
+function buildCeoCompressionDividerElement(state, { interactive = true, turnId = "", boundary = "", origin = "" } = {}) {
     if (!CEO_COMPRESSION_TEXT[state]) return null;
     const el = document.createElement("div");
     el.className = `message system ${CEO_COMPRESSION_DIVIDER_CLASS} is-${state}`;
     el.dataset.ceoCompressionState = state;
     if (turnId) el.dataset.ceoCompressionTurn = turnId;
     if (boundary !== "" && boundary !== null) el.dataset.ceoCompressionBoundary = String(boundary);
+    if (origin) el.dataset.ceoCompressionOrigin = String(origin);
     el.setAttribute("role", "status");
     el.setAttribute("aria-live", state === "running" ? "polite" : "off");
     el.innerHTML = ceoCompressionDividerInner(state, { interactive });
@@ -4113,9 +4139,9 @@ function buildCeoCompressionDividerElement(state, { interactive = true, turnId =
 }
 
 function appendCeoCompressionDivider(state, options = {}) {
-    const { anchorEl = null } = options;
+    const { anchorEl = null, origin = "" } = options;
     if (!U.ceoFeed) return null;
-    const el = buildCeoCompressionDividerElement(state, options);
+    const el = buildCeoCompressionDividerElement(state, { ...options, origin });
     if (!el) return null;
     const anchorParent = anchorEl?.parentNode || null;
     mutateCeoFeed(() => {
@@ -4159,10 +4185,17 @@ function ceoCompressionDividerExists(turnId, state, boundary = "") {
 }
 
 function removeCeoCompressionLiveDivider() {
-    if (typeof U.ceoFeed?.querySelector !== "function") return false;
-    const el = U.ceoFeed.querySelector(`.${CEO_COMPRESSION_DIVIDER_CLASS}.is-running`);
-    if (!el) return false;
-    el.remove();
+    if (!U.ceoFeed) return false;
+    const selector = `.${CEO_COMPRESSION_DIVIDER_CLASS}.is-running`;
+    const first = typeof U.ceoFeed.querySelector === "function" ? U.ceoFeed.querySelector(selector) : null;
+    const all = typeof U.ceoFeed.querySelectorAll === "function"
+        ? Array.from(U.ceoFeed.querySelectorAll(selector))
+        : [];
+    // 测试桩的 querySelector 会造节点、querySelectorAll 不会；两边取并集，
+    // 真实 DOM 里 Set 去重，桩里也能把 querySelector 造出的那条摘掉。
+    const rows = [...new Set([first, ...all].filter(Boolean))];
+    if (!rows.length) return false;
+    rows.forEach((el) => el?.remove?.());
     return true;
 }
 
@@ -4197,6 +4230,25 @@ function ceoCompressionStagesAroundBoundary(stages, boundary) {
         total: indexes.length,
         pre: indexes.filter((value) => value <= boundary).length,
     };
+}
+
+// 放置唯一判据：实时道与重建道都只消费这里的结果。
+// boundary 0 是有效落点；null/缺失表示“没有边界”，退回行位置。
+function resolveCeoCompressionPlacement(rule, turn = null) {
+    const boundary = Number(rule?.boundary);
+    if (!Number.isFinite(boundary)) return { mode: "row-position" };
+    if (boundary === 0) return { mode: "before-turn" };
+    const { total, pre } = ceoCompressionStagesAroundBoundary(turn?.stages, boundary);
+    if (!total) {
+        return turn?.live && !turn?.finalized
+            ? { mode: "split", headWindowTo: null, tailWindowFrom: null }
+            : { mode: "after-turn" };
+    }
+    if (pre === 0) return { mode: "before-turn" };
+    if (pre >= total) {
+        return { mode: "after-turn", headWindowTo: boundary, tailWindowFrom: boundary + 1 };
+    }
+    return { mode: "split", headWindowTo: boundary, tailWindowFrom: boundary + 1 };
 }
 
 function freezeCeoCompressionHeadKey(el, boundary) {
@@ -4235,7 +4287,13 @@ function splitCeoTurnAtCompression(turn, boundary, state) {
     if (turn.finalized) return false;
     // 这条规则已经在这个回合身上落过一次（重建吸收、或同一帧早前切过）：再切就是重复的线。
     if (turn.compressionBoundary === boundary) return true;
-    const { total, pre } = ceoCompressionStagesAroundBoundary(turn.lastExecutionTraceSummary?.stages, boundary);
+    const stages = turn.lastExecutionTraceSummary?.stages;
+    const placement = resolveCeoCompressionPlacement({ boundary }, {
+        stages,
+        live: true,
+        finalized: false,
+    });
+    if (placement.mode === "row-position") return false;
     const dividerState = CEO_COMPRESSION_TEXT[state] ? state : "completed";
     const turnId = String(turn.turnId || "");
     const divider = buildCeoCompressionDividerElement(dividerState, {
@@ -4244,8 +4302,8 @@ function splitCeoTurnAtCompression(turn, boundary, state) {
         boundary: boundary > 0 ? boundary : "",
     });
     if (!divider) return false;
-    if (boundary === 0 || (total > 0 && !pre)) {
-        // 这一回合的阶段全在压缩之后：线挪到气泡之前，不切。
+    if (placement.mode === "before-turn") {
+        // 这一回合的阶段全在压缩之后（或 boundary 0）：线挪到气泡之前，不切。
         turn.compressionBoundary = boundary;
         mutateCeoFeed(() => {
             turn.el.parentNode.insertBefore(divider, turn.el);
@@ -4260,7 +4318,7 @@ function splitCeoTurnAtCompression(turn, boundary, state) {
     const summary = head.lastExecutionTraceSummary;
     // 轨道未知时两头都不设窗口：被折的那几张卡随时可能才第一次到达，按 boundary 把它们
     // 筛掉就等于让它们彻底不出现；宁可让续跑段先把它们画出来，等轨道真到了再补切。
-    const knownStages = total > 0;
+    const knownStages = !!ceoCompressionStagesAroundBoundary(stages, boundary).total;
     if (knownStages) head.stageWindowTo = boundary;
     freezeCeoCompressionHeadKey(head.el, boundary);
     // 头段不再收帧：回合身份让给续跑段，之后的 finalize / 插话锚点都落在它身上。
@@ -4375,20 +4433,25 @@ function applyCeoCompressionMarker(sessionId = "", marker = null) {
 function applyCeoInflightCompressionRule(messages = [], inflightTurn = null) {
     const turnId = normalizeCeoTurnId(inflightTurn?.turn_id || "");
     if (!turnId || !U.ceoFeed || typeof U.ceoFeed.querySelectorAll !== "function") return;
-    const rule = buildCeoCompressionRuleMap(messages).get(turnId);
-    const boundary = Number(rule?.boundary);
-    if (!rule || rule.state !== "completed" || !Number.isFinite(boundary) || boundary <= 0) return;
-    const turn = getActiveCeoTurn(null, turnId);
-    if (!turn) return;
-    const misplaced = Array.from(U.ceoFeed.querySelectorAll(`.${CEO_COMPRESSION_DIVIDER_CLASS}`)).find(
-        (el) => String(el.dataset?.ceoCompressionTurn || "") === turnId
-            && String(el.dataset?.ceoCompressionState || "") === "completed"
-            && String(el.dataset?.ceoCompressionBoundary || "") === String(boundary),
-    );
-    // 先切后摘：切不开（比如这一帧还没有阶段轨道）就保留按行位置画的那条，
-    // 宁可位置退一档也不能让线凭空消失。
-    const split = splitCeoTurnAtCompression(turn, boundary, rule.state);
-    if (split && misplaced?.parentNode) misplaced.remove();
+    const rules = (buildCeoCompressionPlan(messages).rulesByTurn.get(turnId) || [])
+        .filter((rule) => rule.state === "completed" && Number.isFinite(Number(rule.boundary)));
+    if (!rules.length) return;
+    rules.forEach((rule) => {
+        const boundary = Number(rule.boundary);
+        const turn = getActiveCeoTurn(null, turnId);
+        if (!turn) return;
+        const dividerBoundary = boundary > 0 ? String(boundary) : "";
+        const candidates = Array.from(U.ceoFeed.querySelectorAll(`.${CEO_COMPRESSION_DIVIDER_CLASS}`))
+            .filter((el) => String(el.dataset?.ceoCompressionTurn || "") === turnId
+                && String(el.dataset?.ceoCompressionState || "") === "completed"
+                && String(el.dataset?.ceoCompressionBoundary || "") === dividerBoundary);
+        const misplaced = candidates.find((el) => el.dataset?.ceoCompressionOrigin === "row")
+            || candidates[0];
+        // 先切后摘：切不开（比如这一帧还没有阶段轨道）就保留按行位置画的那条，
+        // 宁可位置退一档也不能让线凭空消失。
+        const split = splitCeoTurnAtCompression(turn, boundary, rule.state);
+        if (split && misplaced?.parentNode) misplaced.remove();
+    });
 }
 
 function stopCeoContextCompressionPolling() {
@@ -4420,6 +4483,23 @@ function applyCeoContextCompressionStatus(payload = {}) {
     if (status !== "running") {
         stopCeoContextCompressionPolling();
         S.ceoContextCompressionSessionId = "";
+    }
+    if (status === "running") {
+        mirrorCeoContextCompression(sessionId, {
+            status: "running",
+            source: "manual_context_compression",
+        });
+    } else {
+        if (previous === "running") {
+            // 先就地改成终态，避免“先删线、再等重连”的空白窗口。
+            if (status === "completed" || status === "paused") {
+                convertCeoRunningDividerToTerminal(status);
+            } else {
+                removeCeoCompressionLiveDivider();
+            }
+        }
+        // 终局写 null 清缓存，防止 activeCeoSessionCompressionState 从旧镜像复活 running。
+        if (sessionId) setCeoSessionSnapshotCache(sessionId, { compression: null });
     }
     if (previous === "running" && status !== "running") {
         if (status === "not_needed" || status === "failed") {
@@ -4487,6 +4567,43 @@ function ensureCeoContextCompressionPolling() {
     startCeoContextCompressionPolling(key);
 }
 
+// running 状态随快照缓存落 sessionStorage：刷新后能先挂线，不必等整份 snapshot.ceo。
+// seen_at 每次确认 running 都刷新；终局写 null 清键。
+function mirrorCeoContextCompression(sessionId, compression) {
+    const key = String(sessionId || "").trim();
+    if (!key) return;
+    const normalized = normalizeCeoSnapshotCompression(compression);
+    if (!normalized) {
+        setCeoSessionSnapshotCache(key, { compression: null });
+        return;
+    }
+    setCeoSessionSnapshotCache(key, {
+        compression: { ...normalized, seen_at: Date.now() },
+    });
+}
+
+// 终局不再先删线等重连：把当前 running 线就地改成终态，重连快照到达后由整页重建替换。
+function convertCeoRunningDividerToTerminal(state) {
+    if (!U.ceoFeed) return false;
+    if (state !== "completed" && state !== "paused") return false;
+    const selector = `.${CEO_COMPRESSION_DIVIDER_CLASS}.is-running`;
+    const first = typeof U.ceoFeed.querySelector === "function" ? U.ceoFeed.querySelector(selector) : null;
+    const all = typeof U.ceoFeed.querySelectorAll === "function"
+        ? Array.from(U.ceoFeed.querySelectorAll(selector))
+        : [];
+    const el = [first, ...all].find(Boolean);
+    if (!el) return false;
+    const classes = new Set(String(el.className || "").split(/\s+/).filter(Boolean));
+    classes.delete("is-running");
+    classes.add(`is-${state}`);
+    el.className = [...classes].join(" ");
+    if (el.dataset) el.dataset.ceoCompressionState = state;
+    el.setAttribute?.("aria-live", "off");
+    el.innerHTML = ceoCompressionDividerInner(state, { interactive: false });
+    syncCeoCompressionRetryAffordances();
+    return true;
+}
+
 async function beginCeoContextCompression(sessionId) {
     const key = String(sessionId || "").trim();
     if (!key) return;
@@ -4494,6 +4611,10 @@ async function beginCeoContextCompression(sessionId) {
     S.ceoContextCompressionSessionId = key;
     S.ceoContextCompressionStatus = "running";
     S.ceoContextCompressionCancelRequested = false;
+    mirrorCeoContextCompression(key, {
+        status: "running",
+        source: "manual_context_compression",
+    });
     syncCeoCompressionDivider();
     try {
         const payload = await ApiClient.startCeoContextCompression(key);
@@ -4768,6 +4889,8 @@ function renderCeoSessionLoadingState(sessionId, session = null) {
     hideCeoContextLoadNotice();
     const title = String(session?.title || session?.channel_id || sessionId || "conversation").trim() || "conversation";
     addMsg(`Loading ${title}...`, "system", { scrollMode: "bottom" });
+    // resetCeoFeed 会抹掉 live-only 的 running 线；无缓存时的冷启动必须在这里补挂。
+    syncCeoCompressionDivider();
 }
 
 function renderCeoSessionSnapshotFromCache(sessionId, { scrollToLatest = true } = {}) {
@@ -6690,6 +6813,7 @@ function adoptCeoContextCompression(sessionId, compression) {
     S.ceoContextCompressionSessionId = key;
     S.ceoContextCompressionStatus = "running";
     S.ceoContextCompressionCancelRequested = false;
+    mirrorCeoContextCompression(key, normalized);
     syncCeoCompressionDivider();
 }
 
@@ -6700,6 +6824,12 @@ function applyCeoState(state = {}, meta = {}) {
     const running = !!state?.is_running || status === "running";
     const paused = !!state?.paused || status === "paused";
     adoptCeoContextCompression(activeSessionId(), state?.compression);
+    // 自动压缩不经过 adopt（没有手动任务），但每次 state 帧报告 running 时都要刷新
+    // 缓存新鲜度，否则长压缩会被 TTL 误判成幽灵线。
+    const stateCompression = normalizeCeoSnapshotCompression(state?.compression);
+    if (String(stateCompression?.status || "").trim().toLowerCase() === "running") {
+        mirrorCeoContextCompression(activeSessionId(), stateCompression);
+    }
     // 候选条以 runtime 的队列为真相：换标签页/重启后 sessionStorage 里没有的东西，
     // 也要在输入框上方看得见（它已经落在转录里，只是还没成回合）。
     if (adoptCeoServerQueuedFollowUpsFromState(state)) renderQueuedCeoFollowUps(activeSessionId());
@@ -9092,6 +9222,93 @@ restoreCeoInflightTurn = function approvalAwareRestoreCeoInflightTurn(
     });
 };
 
+function planHistoryCompressionSegments(stages, rules = []) {
+    const before = [];
+    const splits = [];
+    const after = [];
+    let previousBoundary = null;
+    [...rules]
+        .filter((rule) => rule && rule.state === "completed" && Number.isFinite(Number(rule.boundary)))
+        .sort((left, right) => Number(left.boundary) - Number(right.boundary))
+        .forEach((rule) => {
+            const placement = resolveCeoCompressionPlacement(rule, {
+                stages,
+                live: false,
+                finalized: true,
+            });
+            if (placement.mode === "before-turn") {
+                before.push(rule);
+                return;
+            }
+            if (placement.mode !== "split") {
+                after.push(rule);
+                return;
+            }
+            const boundary = Number(rule.boundary);
+            if (previousBoundary !== null && boundary <= previousBoundary) return;
+            splits.push({
+                rule,
+                boundary,
+                windowFrom: previousBoundary === null ? null : previousBoundary + 1,
+                windowTo: boundary,
+            });
+            previousBoundary = boundary;
+        });
+    return { before, splits, after };
+}
+
+function createHistoryCompressionHead(turnId, split) {
+    const head = createPendingCeoTurn("history", { scrollMode: "preserve" });
+    if (!head) return null;
+    head.stageWindowFrom = split.windowFrom;
+    head.stageWindowTo = split.windowTo;
+    head.finalized = true;
+    if (turnId && head.el?.setAttribute) {
+        head.el.setAttribute("data-ceo-key", `turn:${turnId}#pre-${split.boundary}`);
+    }
+    S.ceoPendingTurns.push(head);
+    return head;
+}
+
+function buildHistoryCompressionDivider(rule, turnId) {
+    return buildCeoCompressionDividerElement(rule?.state || "completed", {
+        interactive: false,
+        turnId,
+        boundary: Number(rule?.boundary) > 0 ? Number(rule.boundary) : "",
+    });
+}
+
+function placeHistoryCompressionAroundElement(el, rules, turnId) {
+    if (!el?.parentNode || !rules?.length) return false;
+    const segments = planHistoryCompressionSegments([], rules);
+    const parent = el.parentNode;
+    [...segments.before].reverse().forEach((rule) => {
+        const divider = buildHistoryCompressionDivider(rule, turnId);
+        if (divider) parent.insertBefore(divider, el);
+    });
+    let anchor = el;
+    segments.after.forEach((rule) => {
+        const divider = buildHistoryCompressionDivider(rule, turnId);
+        if (!divider) return;
+        parent.insertBefore(divider, anchor.nextSibling || null);
+        anchor = divider;
+    });
+    icons();
+    return true;
+}
+
+function assistantRowHostsCompressionRule(item = {}) {
+    const status = String(item?.status || "").trim().toLowerCase();
+    if (status === "paused" || item?.silent_reply === true) return true;
+    const hasDelta = item?.canonical_context_delta !== null && item?.canonical_context_delta !== undefined;
+    const canonical = hasDelta
+        ? normalizeCeoSnapshotCanonicalContext(item.canonical_context_delta)
+        : normalizeCeoSnapshotCanonicalContext(item.canonical_context);
+    if (canonical) return true;
+    // 无轨道的纯文本行也能承载 completed 线：total=0 时按“回合结束”约定放前/后。
+    return !!String(item?.turn_id || "").trim();
+}
+
 function renderPersistedCeoAssistantTurn(item = {}, options = {}) {
     const hasDelta = item?.canonical_context_delta !== null && item?.canonical_context_delta !== undefined;
     const canonicalContext = hasDelta
@@ -9108,62 +9325,58 @@ function renderPersistedCeoAssistantTurn(item = {}, options = {}) {
     const historyUsage = item?.usage || null;
     const canForkReply = item?.can_fork_reply === true;
     const forkTurnId = String(item?.turn_id || "").trim();
+    const messageKey = String(options.key || "");
+    const rules = (Array.isArray(options.compressionRules) ? options.compressionRules : [])
+        .filter((rule) => rule && rule.state === "completed" && Number.isFinite(Number(rule.boundary)));
+    const tagMessage = (el = null) => {
+        const host = ceoFeedAppendHost();
+        const target = el
+            || host?.lastElementChild
+            || (host?.children || [])[Math.max(0, (host?.children || []).length - 1)]
+            || null;
+        if (!target || !messageKey || typeof target.setAttribute !== "function") return;
+        target.setAttribute("data-ceo-key", messageKey);
+        if (target.dataset && typeof target.dataset.ceoKey !== "string") {
+            try { target.dataset.ceoKey = messageKey; } catch (error) { void error; }
+        }
+    };
     if (status !== "paused" && !canonicalContext && !silentReply) {
         // 无轨道兜底气泡同样携带元信息(完成时间 + token 用量),同样是点击才显形。
         // 静默回合不走这条：它有自己的折叠行，落到下方共用路径渲染，避免两处装配。
-        addMsg(content, "system", { markdown: true, scrollMode: "preserve", timestamp: historyTimestamp, usage: historyUsage, turnId: forkTurnId, canForkReply });
-        renderCeoThinkingSummaryFromSnapshot(ceoFeedAppendHost()?.lastElementChild, item?.thinking);
-        return;
+        const el = addMsg(content, "system", { markdown: true, scrollMode: "preserve", timestamp: historyTimestamp, usage: historyUsage, turnId: forkTurnId, canForkReply });
+        renderCeoThinkingSummaryFromSnapshot(el, item?.thinking);
+        if (rules.length) placeHistoryCompressionAroundElement(el, rules, forkTurnId);
+        tagMessage(el);
+        return rules.length > 0;
     }
     const turn = createPendingCeoTurn("history", { scrollMode: "preserve" });
     if (!turn) {
         if (!silentReply) {
-            addMsg(content, "system", { markdown: true, scrollMode: "preserve", timestamp: historyTimestamp, usage: historyUsage, turnId: forkTurnId, canForkReply });
+            const el = addMsg(content, "system", { markdown: true, scrollMode: "preserve", timestamp: historyTimestamp, usage: historyUsage, turnId: forkTurnId, canForkReply });
+            if (rules.length) placeHistoryCompressionAroundElement(el, rules, forkTurnId);
+            tagMessage(el);
         }
-        return;
+        return rules.length > 0;
     }
     const historyTurnId = normalizeCeoTurnId(item?.turn_id || "");
     if (historyTurnId && turn.el && typeof turn.el.setAttribute === "function") {
         turn.el.setAttribute("data-ceo-key", `turn:${historyTurnId}`);
     }
     S.ceoPendingTurns.push(turn);
-    // 重建道：区分线按转录里的边界键放回这一回合的阶段中间（或气泡之前），而不是照抄
-    // 转录行的位置——自动压缩的行是在收尾时落在整回合之后的，那个位置本身就是错的。
-    const rule = options.compressionRule || null;
-    const ruleBoundary = Number(rule?.boundary);
-    let headTurn = null;
-    let ruleDivider = null;
-    let absorbedRule = false;
-    if (rule && rule.state === "completed" && Number.isFinite(ruleBoundary) && ruleBoundary > 0) {
-        const { total, pre } = ceoCompressionStagesAroundBoundary(canonicalContext?.stages, ruleBoundary);
-        if (total && pre < total) {
-            absorbedRule = true;
-            ruleDivider = buildCeoCompressionDividerElement("completed", {
-                interactive: false,
-                turnId: historyTurnId,
-                boundary: ruleBoundary,
-            });
-            if (pre && ruleDivider) {
-                turn.stageWindowFrom = ruleBoundary + 1;
-                turn.compressionBoundary = ruleBoundary;
-                headTurn = createPendingCeoTurn("history", { scrollMode: "preserve" });
-                if (headTurn) {
-                    headTurn.stageWindowTo = ruleBoundary;
-                    headTurn.finalized = true;
-                    S.ceoPendingTurns.push(headTurn);
-                    if (historyTurnId && headTurn.el?.setAttribute) {
-                        headTurn.el.setAttribute("data-ceo-key", `turn:${historyTurnId}#pre-${ruleBoundary}`);
-                    }
-                } else {
-                    turn.stageWindowFrom = null;
-                    turn.compressionBoundary = null;
-                }
-            } else if (ruleDivider) {
-                // pre == 0：线落在气泡之前，不切段。同样记下边界，迟到帧不再补第二条。
-                turn.compressionBoundary = ruleBoundary;
-            }
-        }
+    // 重建道：区分线按转录里的边界键放回这一回合的阶段中间（或气泡之前/之后），
+    // 而不是照抄转录行的位置——自动压缩的行是在摘要落地时落的，可能在回复行之前。
+    const segments = planHistoryCompressionSegments(canonicalContext?.stages, rules);
+    const headEntries = [];
+    for (const split of segments.splits) {
+        const head = createHistoryCompressionHead(historyTurnId, split);
+        if (head) headEntries.push({ head, split });
+        else segments.after.push(split.rule);
     }
+    const lastBoundary = headEntries.length
+        ? headEntries[headEntries.length - 1].split.boundary
+        : null;
+    turn.stageWindowFrom = lastBoundary === null ? null : lastBoundary + 1;
+    if (lastBoundary !== null) turn.compressionBoundary = lastBoundary;
     withCeoFeedBatch(() => {
         if (silentReply) renderCeoSilentTurn(turn, { text: content, timestamp: historyTimestamp });
         else renderCeoAssistantTextIntoTurn(turn, content || (status === "paused" ? "已暂停" : ""), { status });
@@ -9178,34 +9391,50 @@ function renderPersistedCeoAssistantTurn(item = {}, options = {}) {
             canForkReply,
             sessionId: activeSessionId(),
         });
-        if (headTurn) {
-            renderCeoStageTraceIntoTurn(headTurn, canonicalContext);
-            settleCeoCompressionHeadText(headTurn);
+        const parent = turn.el?.parentNode;
+        if (parent) {
+            // createPendingCeoTurn 先把每个头段追加到了 feed 尾部；这里按顺序搬到基础气泡之前。
+            headEntries.forEach(({ head }) => {
+                if (head.el?.parentNode === parent) parent.removeChild(head.el);
+            });
+            const firstEl = headEntries[0]?.head?.el || turn.el;
+            // 倒序插到 firstEl 之前，最终顺序仍是升序。
+            [...segments.before].reverse().forEach((rule) => {
+                const divider = buildHistoryCompressionDivider(rule, historyTurnId);
+                if (divider) parent.insertBefore(divider, firstEl);
+            });
+            headEntries.forEach(({ head, split }) => {
+                renderCeoStageTraceIntoTurn(head, canonicalContext);
+                settleCeoCompressionHeadText(head);
+                parent.insertBefore(head.el, turn.el);
+                const divider = buildHistoryCompressionDivider(split.rule, historyTurnId);
+                if (divider) parent.insertBefore(divider, turn.el);
+            });
+            let anchor = turn.el;
+            segments.after.forEach((rule) => {
+                const divider = buildHistoryCompressionDivider(rule, historyTurnId);
+                if (!divider) return;
+                parent.insertBefore(divider, anchor.nextSibling || null);
+                anchor = divider;
+            });
+            icons();
         }
-        if (ruleDivider && turn.el?.parentNode) {
-            const parent = turn.el.parentNode;
-            if (headTurn) {
-                parent.removeChild(headTurn.el);
-                parent.insertBefore(headTurn.el, turn.el);
-            }
-            parent.insertBefore(ruleDivider, turn.el);
-        }
-        icons();
     }, { scrollMode: "preserve" });
+    if (messageKey) tagMessage(turn.el);
     if (status === "paused") {
         if (historyTurnId) {
             // 留档给续跑轮接管：后端复用同一个 turn_id 续跑，这条气泡就是那一轮的上一半。
             S.ceoPausedArchiveTurns[historyTurnId] = turn;
         }
         finalizePausedCeoTurn(content || "已暂停", { source: "history" });
-        return absorbedRule;
+        return headEntries.length > 0;
     }
     // meta 带上 usage/timestamp:随后的 finalizeCeoTurn 写缓存与 usage 行时
     // 用历史值而非当前时间,保证刷新后完成时间稳定。
     // silent_reason 必须一起带上：finalize 走 buildFinalizedCeoTurnPayload 重写缓存行，
     // 缺了它这一行的 silent_reason 就落成空串，刷新后审计面看不到静默理由。
     finalizeCeoTurn(content, { source: "history", usage: historyUsage, timestamp: historyTimestamp, silent_reply: silentReply, silent_reason: silentReason });
-    return absorbedRule;
+    return headEntries.length > 0;
 }
 
 // ---- CEO 会话视图状态保持 -----------------------------------------------------
@@ -9526,31 +9755,50 @@ function buildFinalizedCeoTurnPayload(sessionId, { normalizedSource = "", normal
     return { messages, inflight_turn: inflightMatchesSource ? null : inflightTurn };
 }
 
-// 转录行里的位置不代表线的真正位置：自动压缩的行是在整回合收尾时落的。所以先把所有
-// 标记行按 turn_id 收成一张规则表，渲染到那一回合时由它把线放回阶段边界；被这样安置过
-// 的标记行不再在原地画第二条。
-function buildCeoCompressionRuleMap(messages) {
-    const rules = new Map();
+// 转录行里的位置不代表线的真正位置：自动压缩的行是在摘要落地时落的，可能在回复行之前。
+// 先把完成态标记按 turn_id 收成规则表，再把规则交给该回合**最后一条** assistant 行；
+// 被它接管的标记行在按行渲染时直接跳过，避免“先按行画一条、再按边界画一条”。
+// 输入必须是全量 messages（分页窗口只决定渲染哪一段，不参与规则计算）。
+function buildCeoCompressionPlan(messages) {
+    const markers = [];
+    const rulesByTurn = new Map();
+    const lastAssistantRowByTurn = new Map();
     (Array.isArray(messages) ? messages : []).forEach((item, index) => {
+        const turnId = String(item?.turn_id || "").trim();
+        if (item?.role === "assistant" && turnId && assistantRowHostsCompressionRule(item)) {
+            lastAssistantRowByTurn.set(turnId, index);
+        }
         const marker = normalizeCeoSnapshotCompressionMarker(item?.compression_marker);
-        const turnId = String(marker?.turn_id || "");
-        if (!marker || !turnId) return;
-        rules.set(turnId, {
+        if (!marker || marker.state !== "completed") return;
+        const markerTurnId = String(marker.turn_id || "").trim();
+        if (!markerTurnId) return;
+        const boundary = Number(marker.boundary_stage_index);
+        if (!Number.isFinite(boundary)) return;
+        const rule = {
             rowIndex: index,
             state: marker.state,
-            turnId,
-            boundary: Number(marker.boundary_stage_index) || 0,
-        });
+            turnId: markerTurnId,
+            boundary,
+            source: marker.source || "",
+        };
+        const list = rulesByTurn.get(markerTurnId) || [];
+        list.push(rule);
+        rulesByTurn.set(markerTurnId, list);
+        markers.push(rule);
     });
-    return rules;
+    rulesByTurn.forEach((list) => list.sort((left, right) => left.boundary - right.boundary));
+    const consumedMarkerRows = new Set();
+    markers.forEach((rule) => {
+        if (lastAssistantRowByTurn.has(rule.turnId)) consumedMarkerRows.add(rule.rowIndex);
+    });
+    return { rulesByTurn, lastAssistantRowByTurn, consumedMarkerRows };
 }
 
 function renderCeoSnapshotMessageRange(messages, keys, fromIndex, toIndex, targetSessionId) {
     // 渲染 messages[fromIndex,toIndex) 到 ceoFeedAppendHost()；首屏窗口与
     // 分页补渲染共用。key 由 buildCeoMessageKeyList 全局算好传入，occ 计数
     // 与整列一致，窗口起点无关。
-    const compressionRules = buildCeoCompressionRuleMap(messages);
-    const absorbedMarkerRows = new Set();
+    const compressionPlan = buildCeoCompressionPlan(messages);
     for (let index = fromIndex; index < toIndex; index += 1) {
         const item = messages[index];
         const role = String(item?.role || "").trim().toLowerCase();
@@ -9580,28 +9828,31 @@ function renderCeoSnapshotMessageRange(messages, keys, fromIndex, toIndex, targe
             continue;
         }
         if (role === "assistant") {
-            const rule = compressionRules.get(String(item?.turn_id || "").trim()) || null;
-            const absorbed = renderPersistedCeoAssistantTurn(item, rule ? { compressionRule: rule } : {});
-            if (absorbed && rule) absorbedMarkerRows.add(rule.rowIndex);
-            tagRendered();
+            const turnId = String(item?.turn_id || "").trim();
+            const isLastRowForTurn = !!turnId && compressionPlan.lastAssistantRowByTurn.get(turnId) === index;
+            const rules = isLastRowForTurn ? (compressionPlan.rulesByTurn.get(turnId) || []) : [];
+            renderPersistedCeoAssistantTurn(item, {
+                compressionRules: rules,
+                key: String(keys[index] || ""),
+            });
+            // assistant 行的 key 由 renderPersistedCeoAssistantTurn 打在基础气泡上；
+            // 这里不能再 tagRendered：线可能在气泡之后，lastElementChild 会是线而不是气泡。
             continue;
         }
         if (role === "system" && content.trim()) {
             const marker = normalizeCeoSnapshotCompressionMarker(item?.compression_marker);
             if (marker) {
-                const turnId = String(marker.turn_id || "");
-                const boundary = Number(marker.boundary_stage_index) || "";
-                // 已经被那一回合安置过（或分页时画过一条同边界的线）就不再补第二条。
-                const alreadyPlaced = absorbedMarkerRows.has(index)
-                    || (turnId && ceoCompressionDividerExists(turnId, marker.state, boundary));
-                if (!alreadyPlaced) {
-                    appendCeoCompressionDivider(marker.state, {
-                        interactive: false,
-                        turnId,
-                        boundary,
-                    });
-                    tagRendered();
-                }
+                // 被 assistant 行接管的标记不再按行位置画；消费方可能不在当前窗口，
+                // 它进入窗口时会在边界处画线（plan 按全量 messages 计算）。
+                if (compressionPlan.consumedMarkerRows.has(index)) continue;
+                const rawBoundary = Number(marker.boundary_stage_index);
+                appendCeoCompressionDivider(marker.state, {
+                    interactive: false,
+                    turnId: String(marker.turn_id || ""),
+                    boundary: Number.isFinite(rawBoundary) && rawBoundary > 0 ? rawBoundary : "",
+                    origin: "row",
+                });
+                tagRendered();
             } else {
                 addMsg(content, "system", { markdown: true, scrollMode: "preserve" });
                 tagRendered();
@@ -15173,7 +15424,11 @@ function initCeoWs() {
             // 会话级压缩载体每帧覆盖一次，缺键就当成"没有在进行中"：缓存是合并语义，
             // 不显式覆盖的话，压缩结束后的那一帧不会把上一帧的 running 摘掉，线会留在屏上。
             if (effectiveSessionId) {
-                setCeoSessionSnapshotCache(effectiveSessionId, { compression: payload.data?.compression || null });
+                const patchCompression = normalizeCeoSnapshotCompression(payload.data?.compression);
+                const compressionForCache = String(patchCompression?.status || "").trim().toLowerCase() === "running"
+                    ? { ...patchCompression, seen_at: Date.now() }
+                    : null;
+                setCeoSessionSnapshotCache(effectiveSessionId, { compression: compressionForCache });
             }
             const patchEntry = {
                 session_id: effectiveSessionId,

@@ -1958,3 +1958,178 @@ test("轨道还没到时也先切，线不追到回合之后；轨道一到就�
         ["frontdoor-stage-3"]
     );
 });
+
+// ---- P1-b：重建道按全量 plan 放置，标记行不再先画一条 ----
+
+const compressionMarker = (turnId, boundary) => ({
+    role: "system",
+    content: "会话已压缩",
+    compression_marker: {
+        state: "completed",
+        source: "auto",
+        stats: boundary === null ? { turn_id: turnId } : { turn_id: turnId, boundary_stage_index: boundary },
+    },
+});
+const assistantWithStages = (turnId, indexes) => ({
+    role: "assistant",
+    content: "答复",
+    turn_id: turnId,
+    canonical_context: { stages: indexes.map((i) => railStage(i, `第${i}`)) },
+});
+const compressionRows = (feed) => feed._children.filter((el) => String(el.className || "").includes("ceo-compression-divider"));
+const stageCount = (el) => (railOf(el).match(/data-stage-id="/g) || []).length;
+
+test("P1-b 新行序 + 跨边界：只画一条线，并切成两张阶段卡", () => {
+    const api = loadApp();
+    const feed = feedHarness(api);
+    const messages = [
+        { role: "user", content: "问" },
+        compressionMarker("t1", 1),
+        assistantWithStages("t1", [1, 2]),
+    ];
+    api.renderCeoSnapshotMessageRange(messages, ["m:-:user:0", "m:-:system:0", "m:t1:assistant:0"], 0, messages.length, "web:test");
+
+    const rows = compressionRows(feed);
+    assert.equal(rows.length, 1);
+    assert.equal(rows[0].dataset.ceoCompressionBoundary, "1");
+    assert.deepEqual(feed._children.map((el) => {
+        if (String(el.className).includes("user")) return "user";
+        if (String(el.className).includes("ceo-compression-divider")) return `LINE(${el.dataset.ceoCompressionBoundary})`;
+        return `assistant:${stageCount(el)}`;
+    }), ["user", "assistant:1", "LINE(1)", "assistant:1"]);
+    assert.equal(compressionRows(feed)[0], feed._children[2]);
+});
+
+test("P1-b 新行序 + 全部折入：线在回合之后，不重复", () => {
+    const api = loadApp();
+    const feed = feedHarness(api);
+    const messages = [
+        { role: "user", content: "问" },
+        compressionMarker("t1", 2),
+        assistantWithStages("t1", [1, 2]),
+    ];
+    api.renderCeoSnapshotMessageRange(messages, ["m:-:user:0", "m:-:system:0", "m:t1:assistant:0"], 0, messages.length, "web:test");
+
+    assert.equal(compressionRows(feed).length, 1);
+    assert.equal(feed._children[0].className.includes("user"), true);
+    assert.equal(stageCount(feed._children[1]), 2);
+    assert.equal(compressionRows(feed)[0], feed._children[feed._children.length - 1]);
+});
+
+test("P1-b 新行序 + boundary 0：线在回合之前", () => {
+    const api = loadApp();
+    const feed = feedHarness(api);
+    const messages = [
+        { role: "user", content: "问" },
+        compressionMarker("t1", 0),
+        assistantWithStages("t1", [1, 2]),
+    ];
+    api.renderCeoSnapshotMessageRange(messages, ["m:-:user:0", "m:-:system:0", "m:t1:assistant:0"], 0, messages.length, "web:test");
+
+    assert.equal(compressionRows(feed).length, 1);
+    assert.equal(compressionRows(feed)[0].dataset.ceoCompressionBoundary, undefined);
+    assert.equal(feed._children[1], compressionRows(feed)[0]);
+    assert.equal(stageCount(feed._children[2]), 2);
+});
+
+test("P1-b 旧行序：标记行被吸收，不在回合后再画一条", () => {
+    const api = loadApp();
+    const feed = feedHarness(api);
+    const messages = [
+        { role: "user", content: "问" },
+        assistantWithStages("t1", [1, 2]),
+        compressionMarker("t1", 2),
+    ];
+    api.renderCeoSnapshotMessageRange(messages, ["m:-:user:0", "m:t1:assistant:0", "m:-:system:0"], 0, messages.length, "web:test");
+
+    assert.equal(compressionRows(feed).length, 1);
+    assert.equal(compressionRows(feed)[0].dataset.ceoCompressionBoundary, "2");
+    assert.equal(compressionRows(feed)[0], feed._children[feed._children.length - 1]);
+});
+
+test("P1-b 同回合两条规则：两条线按 boundary 升序，各自切段", () => {
+    const api = loadApp();
+    const feed = feedHarness(api);
+    const messages = [
+        { role: "user", content: "问" },
+        compressionMarker("t1", 1),
+        compressionMarker("t1", 3),
+        assistantWithStages("t1", [1, 2, 3, 4]),
+    ];
+    api.renderCeoSnapshotMessageRange(
+        messages,
+        ["m:-:user:0", "m:-:system:0", "m:-:system:1", "m:t1:assistant:0"],
+        0,
+        messages.length,
+        "web:test",
+    );
+
+    const rows = compressionRows(feed);
+    assert.deepEqual(rows.map((el) => el.dataset.ceoCompressionBoundary), ["1", "3"]);
+    assert.deepEqual(feed._children.map((el) => {
+        if (String(el.className).includes("user")) return "user";
+        if (String(el.className).includes("ceo-compression-divider")) return `LINE(${el.dataset.ceoCompressionBoundary})`;
+        return `assistant:${stageCount(el)}`;
+    }), ["user", "assistant:1", "LINE(1)", "assistant:2", "LINE(3)", "assistant:1"]);
+});
+
+test("P1-b 旧行序 + boundary 0：线在回合之前", () => {
+    const api = loadApp();
+    const feed = feedHarness(api);
+    const messages = [
+        { role: "user", content: "问" },
+        assistantWithStages("t1", [1, 2]),
+        compressionMarker("t1", 0),
+    ];
+    api.renderCeoSnapshotMessageRange(messages, ["m:-:user:0", "m:t1:assistant:0", "m:-:system:0"], 0, messages.length, "web:test");
+
+    assert.equal(compressionRows(feed).length, 1);
+    assert.equal(feed._children[1], compressionRows(feed)[0]);
+    assert.equal(stageCount(feed._children[2]), 2);
+});
+
+test("P1-b total=0 已收尾：按约定放在回合之后", () => {
+    const api = loadApp();
+    const feed = feedHarness(api);
+    const messages = [
+        { role: "user", content: "问" },
+        compressionMarker("t1", 2),
+        { role: "assistant", content: "答复", turn_id: "t1" },
+    ];
+    api.renderCeoSnapshotMessageRange(messages, ["m:-:user:0", "m:-:system:0", "m:t1:assistant:0"], 0, messages.length, "web:test");
+
+    assert.equal(compressionRows(feed).length, 1);
+    assert.equal(compressionRows(feed)[0].dataset.ceoCompressionBoundary, "2");
+    assert.equal(compressionRows(feed)[0], feed._children[feed._children.length - 1]);
+});
+
+test("P1-b 孤儿标记：没有对应 assistant 行时仍按行位置画", () => {
+    const api = loadApp();
+    const feed = feedHarness(api);
+    const messages = [
+        { role: "user", content: "问" },
+        compressionMarker("tX", 2),
+        assistantWithStages("t1", [1, 2, 3]),
+    ];
+    api.renderCeoSnapshotMessageRange(messages, ["m:-:user:0", "m:-:system:0", "m:t1:assistant:0"], 0, messages.length, "web:test");
+
+    assert.equal(compressionRows(feed).length, 1);
+    assert.equal(compressionRows(feed)[0], feed._children[1]);
+    assert.equal(stageCount(feed._children[2]), 3);
+});
+
+test("P1-b 分页跨窗口：标记先到、assistant 后到仍只有一条线", () => {
+    const api = loadApp();
+    const feed = feedHarness(api);
+    const messages = [
+        { role: "user", content: "问" },
+        compressionMarker("t1", 1),
+        assistantWithStages("t1", [1, 2]),
+    ];
+    const keys = ["m:-:user:0", "m:-:system:0", "m:t1:assistant:0"];
+    api.renderCeoSnapshotMessageRange(messages, keys, 0, 2, "web:test");
+    assert.equal(compressionRows(feed).length, 0, "被 assistant 接管的标记行在窗口内不画");
+    api.renderCeoSnapshotMessageRange(messages, keys, 2, 3, "web:test");
+    assert.equal(compressionRows(feed).length, 1);
+    assert.equal(compressionRows(feed)[0].dataset.ceoCompressionBoundary, "1");
+});
