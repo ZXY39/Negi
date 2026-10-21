@@ -46,7 +46,7 @@
 参数：
 - `adds?: Array<{ content: string, minimal_memory: string, decision_source: "user" | "self", note_ref?: string }>`
   - 仅用于“独立的新记忆”
-  - `decision_source` 必填：`user` = 用户在本轮明确要求记住，`self` = 你自主复核提炼。该值决定记忆的来源标记，`user` 来源的行不参与压缩清理、`self` 来源的参与，标错会直接改变记忆存活
+  - `decision_source` 必填：`user` = 用户在本轮明确要求记住，`self` = 你自主复核提炼。该值决定这一行的来源标记，也决定它按下面「记忆写法规范」里的哪一支来写
   - `note_ref` 可选：这条记忆挂哪份 note，填 note 文件名（不带 `.md`）。这是关系的唯一写法
   - 当候选与旧记忆重复时，禁止单独使用 add，可选择以下任意一种处理方式：
     1. `rewrites` 覆盖旧记忆
