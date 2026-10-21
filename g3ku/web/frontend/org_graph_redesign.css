@@ -1128,24 +1128,6 @@
     box-shadow: none;
 }
 
-/* 待发送附件条同理：容器只负责占位，可见的面是每条 chip。
-   容器是输入区的网格子项，天然拉满整行宽度，再画一层底就会比 chip 本身宽出一截。 */
-[data-ui-version="v2"] .ceo-upload-list {
-    background: transparent;
-    border: 0;
-    border-radius: 0;
-    box-shadow: none;
-    color: var(--ui-text-secondary);
-}
-
-/* chip 的面与聊天里发出去的附件气泡（.chat-attachment-file）取同一档：
-   内缩 10px/12px、圆角 18px，待发送和已发送看起来是同一个东西。 */
-[data-ui-version="v2"] .ceo-upload-chip {
-    padding: 10px 12px;
-    border-radius: 18px;
-    box-shadow: none;
-}
-
 /* 待发送队列同理：容器只负责占位，可见的面是每条 chip。
    容器再画一层底和描边，就会在 chip 的圆角外面露出一圈更方的盒子。 */
 [data-ui-version="v2"] .ceo-follow-up-queue {
