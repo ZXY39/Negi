@@ -1996,6 +1996,61 @@ async def test_create_agent_runner_presence_reading_follows_the_assembled_reques
 
 
 @pytest.mark.asyncio
+async def test_create_agent_runner_call_model_node_refreshes_presence_reading_each_hop() -> None:
+    """跳内读数必须由 call_model 刷新：prepare_turn 每回合只跑一次。
+
+    第二跳起请求视图里才有本回合的 `load_tool_context` 结果；若读数只留在 prepare
+    那份，模型已经能调用的工具会被永久报成 absent。
+    """
+    session = RuntimeAgentSession(
+        SimpleNamespace(model="demo", reasoning_effort=None, multi_agent_runner=None),
+        session_key="web:shared",
+        channel="web",
+        chat_id="shared",
+    )
+    runner = create_agent_impl.CreateAgentCeoFrontDoorRunner(loop=SimpleNamespace())
+
+    async def _fake_graph_call_model(state, *, runtime):
+        _ = state, runtime
+        return {"final_output": "ok", "next_step": "finalize"}
+
+    runner._graph_call_model = _fake_graph_call_model  # type: ignore[method-assign]
+
+    state = initial_persistent_state(user_input={"content": "hi", "metadata": {}})
+    state["frontdoor_selection_debug"] = {
+        "query_text": "hi",
+        "candidate_tool_names": ["filesystem_write"],
+    }
+    state["messages"] = [
+        {
+            "role": "tool",
+            "name": "load_tool_context",
+            "content": json.dumps(
+                {
+                    "ok": True,
+                    "tool_id": "filesystem_write",
+                    "tool_context_fingerprint": "sha256:" + "c" * 64,
+                    "content": render_tool_contract_block(
+                        "filesystem_write", "sha256:" + "c" * 64, "# filesystem_write\n契约正文"
+                    ),
+                },
+                ensure_ascii=False,
+            ),
+        }
+    ]
+
+    update = await runner._node_call_model(
+        state,
+        SimpleNamespace(context=SimpleNamespace(session=session)),
+    )
+
+    presence = update["frontdoor_selection_debug"]["tool_contract_presence"]
+    assert [item["tool"] for item in presence["present"]] == ["filesystem_write"]
+    assert presence["absent"] == []
+    assert update["frontdoor_selection_debug"]["candidate_tool_names"] == ["filesystem_write"]
+
+
+@pytest.mark.asyncio
 async def test_create_agent_runner_graph_prepare_turn_keeps_cron_internal_event_out_of_user_messages() -> None:
     session = RuntimeAgentSession(
         SimpleNamespace(model="demo", reasoning_effort=None, multi_agent_runner=None),

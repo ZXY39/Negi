@@ -784,7 +784,20 @@ class CreateAgentCeoFrontDoorRunner(CeoFrontDoorRuntimeOps):
         return update
 
     async def _node_call_model(self, state, runtime) -> dict[str, Any]:
-        return await self._graph_call_model(state, runtime=runtime)
+        update = await self._graph_call_model(state, runtime=runtime)
+        debug = self._frontdoor_selection_debug_snapshot(state)
+        if debug:
+            # 每跳重算一次读数：prepare_turn 每回合只跑一次，其后各跳直接回到 call_model，
+            # 只靠 prepare 那份读数会把本回合刚加载的契约永远报成 absent。
+            session = getattr(getattr(runtime, "context", None), "session", None)
+            debug["tool_contract_presence"] = self._frontdoor_contract_presence_reading(
+                state=state,
+                candidate_tool_names=list(debug.get("candidate_tool_names") or []),
+                session=session,
+            )
+            debug["staged_swept_tool_ids"] = list(getattr(session, "_frontdoor_stash_swept", []) or [])
+            update["frontdoor_selection_debug"] = debug
+        return update
 
     async def _node_normalize_model_output(self, state, runtime) -> dict[str, Any]:
         current_state = dict(state or {})
