@@ -745,6 +745,11 @@ test("压缩 toast 让位给会话流区分线，长按进度条与提示进入 
     assert.match(CSS_CODE, /\.message\.ceo-compression-divider\s*\{[^}]*\}/);
     assert.match(CSS_CODE, /--ceo-context-compress-color:\s*#39c5bb/);
     assert.match(CSS_CODE, /\.ceo-compression-divider\.is-running[^}]*animation/);
+    // 压缩中的光效必须两侧对称：只挂 ::after 会让左半段静止。
+    assert.match(
+        CSS_CODE,
+        /\.ceo-compression-divider\.is-running \.ceo-compression-divider-inner::before,\s*\.ceo-compression-divider\.is-running \.ceo-compression-divider-inner::after\s*\{[^}]*animation/
+    );
 });
 
 test("区分线两端留白且文字居中，图标自绘旋转，长按 2 秒、悬停不发亮", () => {

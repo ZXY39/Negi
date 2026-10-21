@@ -5886,6 +5886,7 @@ textarea {
     }
 }
 
+.ceo-compression-divider.is-running .ceo-compression-divider-inner::before,
 .ceo-compression-divider.is-running .ceo-compression-divider-inner::after {
     animation: ceo-compression-pulse 1.4s ease-in-out infinite;
 }
