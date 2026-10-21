@@ -1059,27 +1059,6 @@
     }
 }
 
-/* 19. 页面主体宽度与内边距：内边距只加在页面容器上，面板层已扁平 */
-[data-ui-version="v2"] .resource-layout,
-[data-ui-version="v2"] .memory-layout,
-[data-ui-version="v2"] .external-api-shell,
-[data-ui-version="v2"] .llm-page-layout {
-    width: 100%;
-    /* 角色链固定 4 列，模型页要按 4 张卡各 ~260px 反推宽度，不能沿用 1440px 限宽。 */
-    max-width: min(100%, 1760px);
-    margin-right: auto;
-    margin-left: auto;
-    padding-right: var(--ui-space-6);
-    padding-left: var(--ui-space-6);
-}
-
-[data-ui-version="v2"] .memory-layout,
-[data-ui-version="v2"] .external-api-shell,
-[data-ui-version="v2"] .llm-page-layout {
-    padding-top: var(--ui-space-5);
-    padding-bottom: var(--ui-space-6);
-}
-
 /* 20. 卡片网格：任务大厅按宽度自适应列数，其余页面走白名单断点 */
 [data-ui-version="v2"] .project-card-grid {
     grid-template-columns: repeat(auto-fill, minmax(300px, 1fr));
@@ -1376,15 +1355,6 @@
 /* 26. 小屏页面降级 */
 @media (max-width: 767.98px) {
 
-    [data-ui-version="v2"] .task-list-panel,
-    [data-ui-version="v2"] .resource-list-panel,
-    [data-ui-version="v2"] .memory-layout,
-    [data-ui-version="v2"] .external-api-shell,
-    [data-ui-version="v2"] .llm-page-layout {
-        padding-right: var(--ui-space-4);
-        padding-left: var(--ui-space-4);
-    }
-
     [data-ui-version="v2"] .content-header {
         padding-right: var(--ui-space-4);
         padding-left: var(--ui-space-4);
@@ -1572,20 +1542,6 @@
     }
 }
 
-/* 30. 记忆管理与日志审计的标题说明不再占据头部 */
-[data-ui-version="v2"] #view-memory .content-header .subtitle {
-    display: none;
-}
-
-/* 31. 面板扁平后收紧页面留白；会话列表与日志审计保持原样 */
-[data-ui-version="v2"] .resource-layout,
-[data-ui-version="v2"] .llm-page-layout,
-[data-ui-version="v2"] .memory-layout,
-[data-ui-version="v2"] .external-api-shell {
-    padding-right: var(--ui-space-3);
-    padding-left: var(--ui-space-3);
-}
-
 /* 32. 会话卡片按内容高度排列，不被列高压缩成重叠 */
 [data-ui-version="v2"] .ceo-session-list > .ceo-session-card {
     flex: 0 0 auto;
@@ -1640,18 +1596,6 @@
     clip-path: inset(50%);
     white-space: nowrap;
     border: 0;
-}
-
-/* 35. 刷新按钮固定到头部左端，右侧只留其余操作 */
-[data-ui-version="v2"] .content-header #skill-refresh-btn,
-[data-ui-version="v2"] .content-header #tool-refresh-btn,
-[data-ui-version="v2"] .content-header #memory-refresh-btn,
-[data-ui-version="v2"] .content-header #model-refresh-btn,
-[data-ui-version="v2"] .content-header #external-refresh-btn {
-    position: absolute;
-    left: var(--ui-space-6);
-    top: 50%;
-    transform: translateY(-50%);
 }
 
 /* 36. 页面滚动条统一走日志那一套：继承全局 scrollbar-width: thin 与

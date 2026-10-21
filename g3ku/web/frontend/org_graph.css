@@ -6747,9 +6747,13 @@ textarea {
     display: grid;
     grid-template-columns: minmax(220px, 260px) minmax(240px, 300px) minmax(0, 1fr);
     gap: var(--space-6);
-    padding: var(--space-6) var(--space-8);
+    padding: var(--ui-space-5) var(--ui-space-3) var(--ui-space-6);
     min-height: calc(100vh - 120px);
     align-items: stretch;
+    width: 100%;
+    max-width: min(100%, 1760px);
+    margin-right: auto;
+    margin-left: auto;
 }
 
 .llm-bindings-panel,
@@ -9737,6 +9741,14 @@ textarea {
     min-height: 0;
 }
 
+@media (max-width: 767.98px) {
+    .task-list-panel,
+    .resource-list-panel {
+        padding-right: var(--ui-space-4);
+        padding-left: var(--ui-space-4);
+    }
+}
+
 .task-list-panel .project-toolbar {
     flex-shrink: 0;
 }
@@ -10080,8 +10092,12 @@ textarea {
     display: grid;
     grid-template-columns: minmax(300px, 380px) minmax(0, 1fr);
     gap: var(--space-6);
-    padding: var(--space-6) var(--space-8);
     height: calc(100vh - 110px);
+    width: 100%;
+    max-width: min(100%, 1760px);
+    margin-right: auto;
+    margin-left: auto;
+    padding: var(--ui-space-6) var(--ui-space-3);
 }
 
 .resource-layout.model-simple-layout {
@@ -10486,11 +10502,15 @@ textarea {
 .memory-layout {
     display: grid;
     grid-template-columns: repeat(2, minmax(0, 1fr));
+    width: 100%;
+    max-width: min(100%, 1760px);
+    margin-right: auto;
+    margin-left: auto;
+    padding: var(--ui-space-3) var(--ui-space-3) var(--ui-space-6);
     /* 窄屏折成单列后，左列栈自己撑不出行高：它的子列允许缩到 0，
        auto 行因此量成 0px，整块队列面板看不见。行高交给容器分。 */
     grid-auto-rows: minmax(0, 1fr);
     gap: var(--space-4);
-    padding: var(--space-4);
     flex: 1 1 auto;
     min-height: 0;
 }
@@ -13446,9 +13466,13 @@ textarea {
     display: flex;
     flex-direction: column;
     gap: var(--space-4);
-    padding: 0 var(--space-4) var(--space-4);
     min-height: 0;
     overflow-y: auto;
+    width: 100%;
+    max-width: min(100%, 1760px);
+    margin-right: auto;
+    margin-left: auto;
+    padding: var(--ui-space-5) var(--ui-space-3) var(--ui-space-6);
 }
 
 /* 窄窗（<900px）走这条单列道：面板默认 flex-shrink:1，会被压到滚动口高度以内，
@@ -13949,6 +13973,21 @@ textarea {
 
 #view-audit .content-header .subtitle {
     display: none;
+}
+
+#view-memory .content-header .subtitle {
+    display: none;
+}
+
+.content-header #skill-refresh-btn,
+.content-header #tool-refresh-btn,
+.content-header #memory-refresh-btn,
+.content-header #model-refresh-btn,
+.content-header #external-refresh-btn {
+    position: absolute;
+    left: var(--ui-space-6);
+    top: 50%;
+    transform: translateY(-50%);
 }
 
 .content-header #audit-refresh-btn {
