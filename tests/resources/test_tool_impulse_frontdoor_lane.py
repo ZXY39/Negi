@@ -326,6 +326,22 @@ def test_round_tool_entry_carries_the_impulse_ledger_marks(tmp_path: Path) -> No
     )
     assert replayed["execution_path"] == "corrected"
     assert replayed["staged_replay"] == "identical"
+    assert "reuse_flag_ignored" not in replayed
+
+    ignored_flag = ops._frontdoor_round_tool_entry(
+        payload=payload,
+        result={
+            "tool_call_id": "call-1",
+            "tool_name": TOOL_ID,
+            "status": "success",
+            "result_text": "reuse_args ignored: executed with the arguments you provided.",
+            "execution_path": "corrected",
+            "staged_replay": "new_args",
+            "reuse_flag_ignored": True,
+        },
+        source="user",
+    )
+    assert ignored_flag["reuse_flag_ignored"] is True
 
 
 def test_reuse_branch_requires_a_call_id(tmp_path: Path) -> None:

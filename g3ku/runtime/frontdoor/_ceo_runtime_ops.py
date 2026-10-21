@@ -125,6 +125,7 @@ from g3ku.runtime.tool_impulse import (
     EXECUTION_PATH_REUSED,
     IMPULSE_REJECT,
     IMPULSE_STAGED,
+    REUSE_FLAG_IGNORED_FIELD,
     REUSE_PLAN_CONTRACT_ABSENT,
     REUSE_PLAN_EXECUTE,
     REUSE_PLAN_EXPLICIT_ARGS,
@@ -6500,6 +6501,8 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
         staged_replay = str(result.get(STAGED_REPLAY_FIELD) or "").strip()
         if staged_replay:
             item[STAGED_REPLAY_FIELD] = staged_replay
+        if bool(result.get(REUSE_FLAG_IGNORED_FIELD)):
+            item[REUSE_FLAG_IGNORED_FIELD] = True
         return item
 
     def _frontdoor_stage_state_after_tool_cycle(
@@ -7756,6 +7759,7 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
                     arguments=explicit_arguments,
                     digest_of=tool_arg_stash.args_digest,
                 ) if staged_entries else "",
+                reuse_flag_ignored=True,
             )
             executed_text, _executed_status = await execute_one(dict(plan.get('arguments') or {}))
             self._persist_frontdoor_stash_container(
@@ -7816,11 +7820,14 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
         path: str,
         *,
         staged_replay: str = "",
+        reuse_flag_ignored: bool = False,
     ) -> None:
         """按 call id 记下这次调用实际走的道，供执行结果行落盘（D15 与 `staged_replay` 补格）。
 
         只有这一层知道"批量语义生效 / 字段误用 / 改参数重调 / 同一份入参重发"，而审计行在
         阶段记录那侧按 call 落，所以在这里交接一次——下游用回执文本反推会得到另一套数。
+        `reuse_flag_ignored` 再分一刀：打了标记却被显式参数顶掉，和根本没打标记，在
+        `corrected` 里是同一个词，可它们要修的地方完全不同（schema 形状 vs 模型的取舍）。
         """
         key = str(call_id or '').strip()
         if not key or not str(path or '').strip():
@@ -7837,6 +7844,12 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
                 rows = {}
                 runtime_context['tool_staged_replay'] = rows
             rows[key] = replay
+        if reuse_flag_ignored:
+            ignored = runtime_context.get('tool_reuse_flag_ignored')
+            if not isinstance(ignored, dict):
+                ignored = {}
+                runtime_context['tool_reuse_flag_ignored'] = ignored
+            ignored[key] = True
 
     def _persist_frontdoor_stash_container(
         self,
@@ -10065,6 +10078,8 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
                 replay = str((runtime_context.get("tool_staged_replay") or {}).get(call_key) or "").strip()
                 if replay:
                     fields[STAGED_REPLAY_FIELD] = replay
+                if (runtime_context.get("tool_reuse_flag_ignored") or {}).get(call_key):
+                    fields[REUSE_FLAG_IGNORED_FIELD] = True
                 return fields
             gate_error = self._frontdoor_stage_gate_error(
                 tool_name=tool_name,

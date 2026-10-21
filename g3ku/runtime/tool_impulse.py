@@ -170,6 +170,10 @@ REUSE_EXPLICIT_ARGS_NOTE = "reuse_args ignored: executed with the arguments you 
 STAGED_REPLAY_FIELD = "staged_replay"
 STAGED_REPLAY_IDENTICAL = "identical"
 STAGED_REPLAY_NEW_ARGS = "new_args"
+# 第三格：模型确实打了 `reuse_args`，但同时给了显式入参 ⇒ 标记被忽略（C3）。
+# 它和"根本没打标记"在 `corrected` 里是同一个词，可修法的方向完全相反：一个是形状
+# 不允许（schema 里业务参数照旧必填），一个是主动选了重发。没有这一格就只能猜。
+REUSE_FLAG_IGNORED_FIELD = "reuse_flag_ignored"
 
 
 def staged_replay_kind(
@@ -297,6 +301,7 @@ __all__ = [
     "REUSE_PLAN_EXECUTE",
     "REUSE_PLAN_EXPLICIT_ARGS",
     "REUSE_PLAN_NO_STASH",
+    "REUSE_FLAG_IGNORED_FIELD",
     "STAGED_REPLAY_FIELD",
     "STAGED_REPLAY_IDENTICAL",
     "STAGED_REPLAY_NEW_ARGS",

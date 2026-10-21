@@ -31,7 +31,11 @@ from g3ku.runtime.stage_prompt_compaction import (
     stage_archive_owner,
     stage_record_dict,
 )
-from g3ku.runtime.tool_impulse import CONTRACT_DELIVERY_FIELD, STAGED_REPLAY_FIELD
+from g3ku.runtime.tool_impulse import (
+    CONTRACT_DELIVERY_FIELD,
+    REUSE_FLAG_IGNORED_FIELD,
+    STAGED_REPLAY_FIELD,
+)
 from main.ids import new_stage_id, new_stage_round_id
 from main.models import (
     FAILURE_CLASS_BUSINESS_UNPASSED,
@@ -1014,6 +1018,12 @@ class TaskLogService:
                         **(
                             {STAGED_REPLAY_FIELD: str(live_state.get(STAGED_REPLAY_FIELD) or '').strip()}
                             if str(live_state.get(STAGED_REPLAY_FIELD) or '').strip()
+                            else {}
+                        ),
+                        # 打了标记却被显式参数顶掉（形状不允许），与"根本没打标记"分开数。
+                        **(
+                            {REUSE_FLAG_IGNORED_FIELD: True}
+                            if bool(live_state.get(REUSE_FLAG_IGNORED_FIELD))
                             else {}
                         ),
                         # 只交契约、没执行：节点详情据此把该行画成"加载 tool"卡片。

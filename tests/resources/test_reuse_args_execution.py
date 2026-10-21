@@ -317,6 +317,9 @@ async def test_explicit_arguments_win_and_are_reported(tmp_path: Path) -> None:
 
     assert content.startswith("reuse_args ignored")
     assert tool.seen == ["explicit"]
+    # 形状记两格：打了标记又被显式参数顶掉 ≠ 根本没打标记；参数与暂存不同 ⇒ new_args。
+    assert runtime_context["tool_reuse_flag_ignored"] == {"call-reuse-1": True}
+    assert runtime_context["tool_staged_replay"] == {"call-reuse-1": "new_args"}
     # 被忽略的暂存不留着：下一次 reuse_args 会跑出模型以为已经跑过的东西。
     assert service.node_stash_carrier(NODE_ID).get(tool_arg_stash.STASH_CONTAINER_KEY, {}).get(SCOPE) in (None, [])
 
@@ -550,6 +553,45 @@ async def test_frontdoor_plain_recall_after_staging_is_marked_corrected() -> Non
     )
     assert other_context["tool_execution_paths"] == {"call-fd-3": "corrected"}
     assert other_context["tool_staged_replay"] == {"call-fd-3": "new_args"}
+
+
+@pytest.mark.asyncio
+async def test_frontdoor_reuse_flag_with_args_is_counted_apart() -> None:
+    """打 `reuse_args` 又给显式入参 ⇒ 标记被忽略，这一档要和"没打标记"分开数。
+
+    实盘见过模型在思考里写明"用 reuse_args=true 重跑"，落到调用体却是整套参数——因为
+    schema 里业务参数照旧必填。两种 `corrected` 要修的地方完全不同，混成一个数就只能猜。
+    """
+    session_scope = tool_arg_stash.session_scope_key("web:shared", TOOL_ID)
+    carrier = _carrier(hop=3, staged=[{"value": "a"}], scope_key=session_scope)
+    session = SimpleNamespace(session_key="web:shared", _frontdoor_tool_arg_stash=carrier)
+    runtime_context = {
+        "session_key": "web:shared",
+        "runtime_session": session,
+        "tool_arg_stash_carrier": carrier,
+    }
+    seen: list[str] = []
+
+    async def _execute_one(arguments: dict) -> tuple[str, str]:
+        value = str((arguments or {}).get("value"))
+        seen.append(value)
+        return "ok", "success"
+
+    ops = CeoFrontDoorRuntimeOps.__new__(CeoFrontDoorRuntimeOps)
+    content = await ops._frontdoor_reuse_args_execution(
+        tool_name=TOOL_ID,
+        arguments={"reuse_args": True, "value": "explicit"},
+        state={"messages": [_presence_message()]},
+        runtime_context=runtime_context,
+        execute_one=_execute_one,
+        call_id="call-fd-6",
+    )
+
+    assert str(content or "").startswith("reuse_args ignored")
+    assert seen == ["explicit"]
+    assert runtime_context["tool_execution_paths"] == {"call-fd-6": "corrected"}
+    assert runtime_context["tool_reuse_flag_ignored"] == {"call-fd-6": True}
+    assert runtime_context["tool_staged_replay"] == {"call-fd-6": "new_args"}
 
 
 @pytest.mark.asyncio

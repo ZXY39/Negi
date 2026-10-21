@@ -133,6 +133,7 @@ from g3ku.runtime.tool_impulse import (
     EXECUTION_PATH_REUSED,
     IMPULSE_INVALID,
     IMPULSE_REJECT,
+    REUSE_FLAG_IGNORED_FIELD,
     REUSE_PLAN_CONTRACT_ABSENT,
     REUSE_PLAN_EXECUTE,
     REUSE_PLAN_EXPLICIT_ARGS,
@@ -4805,8 +4806,14 @@ class ReActToolLoop:
                             ).strip())
                             else {}
                         ),
-                        # 只交契约、没执行（冲动投递）：Web 面把该行画成"加载 tool"卡片。
+                        # 打了 `reuse_args` 却被自己的显式参数顶掉：与"没打标记"分开数。
+                        **(
+                            {REUSE_FLAG_IGNORED_FIELD: True}
+                            if (runtime_context.get('tool_reuse_flag_ignored') or {}).get(str(call.id or ''))
+                            else {}
+                        ),
                         **({CONTRACT_DELIVERY_FIELD: contract_delivery} if contract_delivery else {}),
+                        # 只交契约、没执行（冲动投递）：Web 面把该行画成"加载 tool"卡片。
                     },
                     'tool_message': {
                         'role': 'tool',
@@ -5324,6 +5331,7 @@ class ReActToolLoop:
         path: str,
         *,
         staged_replay: str = "",
+        reuse_flag_ignored: bool = False,
     ) -> None:
         """记下这次调用实际走的道，按 call id 索引，供审计行落盘（D15 `execution_path`）。
 
@@ -5346,6 +5354,12 @@ class ReActToolLoop:
                 rows = {}
                 runtime_context['tool_staged_replay'] = rows
             rows[call_id] = replay
+        if reuse_flag_ignored:
+            ignored = runtime_context.get('tool_reuse_flag_ignored')
+            if not isinstance(ignored, dict):
+                ignored = {}
+                runtime_context['tool_reuse_flag_ignored'] = ignored
+            ignored[call_id] = True
 
     def _node_staged_entries(self, *, container: Any, runtime_context: dict[str, Any], tool_name: str) -> list[dict[str, Any]]:
         """这一跳可消费的暂存条目（严格一跳 + 同修订）。"""
@@ -5442,6 +5456,16 @@ class ReActToolLoop:
             self._record_tool_execution_path(
                 runtime_context,
                 EXECUTION_PATH_CORRECTED if staged_entries else EXECUTION_PATH_ILLEGAL_REUSE,
+                staged_replay=(
+                    staged_replay_kind(
+                        staged_entries=staged_entries,
+                        arguments=explicit_arguments,
+                        digest_of=tool_arg_stash.args_digest,
+                    )
+                    if staged_entries
+                    else ""
+                ),
+                reuse_flag_ignored=True,
             )
             executed = await self._execute_tool(
                 tools=tools,
