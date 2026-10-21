@@ -264,6 +264,11 @@ async def slow_request_log_middleware(request: Request, call_next):
 WEB_DIR = Path(__file__).resolve().parent
 FRONTEND_DIR = WEB_DIR / 'frontend'
 FRONTEND_ENTRY = FRONTEND_DIR / 'org_graph.html'
+# catch-all 路由只交付静态资源；未列出的后缀回落到 SPA 入口，避免误提交的
+# 调试导出物（.txt/.py 等）被任何未认证客户端直接下载。
+FRONTEND_ASSET_SUFFIXES = frozenset(
+    {'.js', '.css', '.html', '.json', '.ico', '.svg', '.png', '.woff', '.woff2', '.ttf'}
+)
 FRONTEND_NO_CACHE_HEADERS = {
     'Cache-Control': 'no-store, no-cache, must-revalidate, max-age=0',
     'Pragma': 'no-cache',
@@ -303,7 +308,11 @@ async def serve_frontend_file(full_path: str):
         candidate.relative_to(FRONTEND_DIR.resolve())
     except ValueError as exc:
         raise HTTPException(status_code=404, detail='Not found') from exc
-    if candidate.exists() and candidate.is_file():
+    if (
+        candidate.exists()
+        and candidate.is_file()
+        and candidate.suffix.lower() in FRONTEND_ASSET_SUFFIXES
+    ):
         return FileResponse(str(candidate), headers=FRONTEND_NO_CACHE_HEADERS)
     return _frontend_index_response()
 

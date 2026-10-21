@@ -89,3 +89,7 @@ image_help.txt
 .claude/launch.json
 
 !docs/FIX_PLAN_model-load-balancing.md
+
+# 前端目录只放静态资源，调试导出物不入库
+g3ku/web/frontend/*.txt
+g3ku/web/frontend/*.py
