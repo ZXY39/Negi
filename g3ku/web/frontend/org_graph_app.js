@@ -16,7 +16,6 @@ const TREE_SCALE_FACTOR = 1.12;
 const TREE_FOCUS_SCALE = 1.2;
 // 定位命中节点的放大脉冲动画时长，与 .task-tree-node-locate 的 CSS 动画保持一致
 const TREE_LOCATE_HIGHLIGHT_MS = 1200;
-const RESOURCE_PAGE_SIZES = [20, 50, 100];
 const TASK_MODEL_CALLS_PAGE_SIZE = 100;
 const TASK_DEPTH_PRESET_VALUES = Object.freeze([0, 1, 2, 3, 4, 5]);
 const TASK_DEPTH_PRESET_MAX = TASK_DEPTH_PRESET_VALUES[TASK_DEPTH_PRESET_VALUES.length - 1];
@@ -370,27 +369,6 @@ const S = {
     treeFitOnNextRender: false,
     treeLocateHighlight: null,
     selectedNodeId: null,
-    contextRiskCatalogRequest: null,
-    skills: [],
-    selectedSkill: null,
-    skillFiles: [],
-    skillContents: {},
-    skillFileLoads: {},
-    selectedSkillFile: "",
-    skillBusy: false,
-    skillDirty: false,
-    skillAutosaveTimerId: null,
-    skillAutosavePending: false,
-    skillPage: 1,
-    skillPageSize: RESOURCE_PAGE_SIZES[0],
-    tools: [],
-    selectedTool: null,
-    toolBusy: false,
-    toolDirty: false,
-    toolAutosaveTimerId: null,
-    toolAutosavePending: false,
-    toolPage: 1,
-    toolPageSize: RESOURCE_PAGE_SIZES[0],
     memoryLoadedOnce: false,
     memoryBusy: false,
     memoryError: "",
@@ -2603,7 +2581,7 @@ function syncResourcePagination(kind, meta) {
     const prevBtn = isSkill ? U.skillPagePrev : U.toolPagePrev;
     const nextBtn = isSkill ? U.skillPageNext : U.toolPageNext;
     const pageSizeSelect = isSkill ? U.skillPageSize : U.toolPageSize;
-    const pageSize = isSkill ? S.skillPageSize : S.toolPageSize;
+    const pageSize = isSkill ? ResourcesState.skillPageSize : ResourcesState.toolPageSize;
 
     if (pageInfo) {
         pageInfo.textContent = meta.total
@@ -2620,12 +2598,12 @@ function syncResourcePagination(kind, meta) {
 }
 
 function resetSkillPagination() {
-    S.skillPage = 1;
+    ResourcesState.skillPage = 1;
     renderSkills();
 }
 
 function resetToolPagination() {
-    S.toolPage = 1;
+    ResourcesState.toolPage = 1;
     renderTools();
 }
 
@@ -2664,29 +2642,29 @@ function setTaskPageSize(value) {
 }
 
 function setSkillPage(page) {
-    const meta = paginateResources(filterSkills(), page, S.skillPageSize);
-    S.skillPage = meta.currentPage;
+    const meta = paginateResources(filterSkills(), page, ResourcesState.skillPageSize);
+    ResourcesState.skillPage = meta.currentPage;
     renderSkills();
     U.skillList?.scrollTo?.({ top: 0, behavior: "auto" });
 }
 
 function setToolPage(page) {
-    const meta = paginateResources(filterTools(), page, S.toolPageSize);
-    S.toolPage = meta.currentPage;
+    const meta = paginateResources(filterTools(), page, ResourcesState.toolPageSize);
+    ResourcesState.toolPage = meta.currentPage;
     renderTools();
     U.toolList?.scrollTo?.({ top: 0, behavior: "auto" });
 }
 
 function setSkillPageSize(value) {
-    S.skillPageSize = normalizeResourcePageSize(value, S.skillPageSize);
-    S.skillPage = 1;
+    ResourcesState.skillPageSize = normalizeResourcePageSize(value, ResourcesState.skillPageSize);
+    ResourcesState.skillPage = 1;
     renderSkills();
     U.skillList?.scrollTo?.({ top: 0, behavior: "auto" });
 }
 
 function setToolPageSize(value) {
-    S.toolPageSize = normalizeResourcePageSize(value, S.toolPageSize);
-    S.toolPage = 1;
+    ResourcesState.toolPageSize = normalizeResourcePageSize(value, ResourcesState.toolPageSize);
+    ResourcesState.toolPage = 1;
     renderTools();
     U.toolList?.scrollTo?.({ top: 0, behavior: "auto" });
 }
@@ -2697,7 +2675,7 @@ function ensureSkillPageForItem(skillId) {
     const items = filterSkills();
     const index = items.findIndex((item) => item.skill_id === targetId);
     if (index < 0) return;
-    S.skillPage = Math.floor(index / S.skillPageSize) + 1;
+    ResourcesState.skillPage = Math.floor(index / ResourcesState.skillPageSize) + 1;
 }
 
 function ensureToolPageForItem(toolId) {
@@ -2706,7 +2684,7 @@ function ensureToolPageForItem(toolId) {
     const items = filterTools();
     const index = items.findIndex((item) => item.tool_id === targetId);
     if (index < 0) return;
-    S.toolPage = Math.floor(index / S.toolPageSize) + 1;
+    ResourcesState.toolPage = Math.floor(index / ResourcesState.toolPageSize) + 1;
 }
 
 function applyTaskDefaultsPayload(payload = {}) {
@@ -6533,13 +6511,13 @@ function resolveCeoContextLoadNoticeRiskLevel(kind = "", targetId = "") {
     const normalizedKind = String(kind || "").trim().toLowerCase();
     const normalizedTargetId = String(targetId || "").trim();
     if (normalizedKind === "skill") {
-        const match = (Array.isArray(S.skills) ? S.skills : []).find((item) => (
+        const match = (Array.isArray(ResourcesState.skills) ? ResourcesState.skills : []).find((item) => (
             String(item?.skill_id || "").trim() === normalizedTargetId
         ));
         return normalizeNoticeRiskLevel(match?.risk_level || "medium");
     }
     if (normalizedKind === "tool") {
-        const records = Array.isArray(S.tools) ? S.tools : [];
+        const records = Array.isArray(ResourcesState.tools) ? ResourcesState.tools : [];
         for (const record of records) {
             const level = toolCatalogRiskLevel(record, normalizedTargetId);
             if (level) return level;
@@ -7559,8 +7537,8 @@ function syncDetailSaveButton(kind) {
     const root = isSkill ? U.skillDetail : U.toolDetail;
     const button = root?.querySelector(isSkill ? "#skill-modal-save" : "#tool-modal-save");
     const hint = root?.querySelector(".resource-draft-hint");
-    const dirty = isSkill ? S.skillDirty : S.toolDirty;
-    const busy = isSkill ? S.skillBusy : S.toolBusy;
+    const dirty = isSkill ? ResourcesState.skillDirty : ResourcesState.toolDirty;
+    const busy = isSkill ? ResourcesState.skillBusy : ResourcesState.toolBusy;
 
     if (button) {
         button.textContent = busy ? "保存中…" : "保存";
@@ -7574,12 +7552,12 @@ function syncDetailSaveButton(kind) {
 }
 
 function setSkillDirty(next = true) {
-    S.skillDirty = !!next;
+    ResourcesState.skillDirty = !!next;
     renderSkillActions();
 }
 
 function setToolDirty(next = true) {
-    S.toolDirty = !!next;
+    ResourcesState.toolDirty = !!next;
     renderToolActions();
 }
 
@@ -9322,24 +9300,6 @@ function ensureTaskTokenUi() {
 
 
 
-function setDrawerOpen(backdrop, drawer, open) {
-    const wasOpen = !!drawer?.classList.contains("is-open");
-    backdrop?.classList.toggle("is-open", open);
-    drawer?.classList.toggle("is-open", open);
-    backdrop?.setAttribute("aria-hidden", open ? "false" : "true");
-    drawer?.setAttribute("aria-hidden", open ? "false" : "true");
-    if (open && drawer && !wasOpen) {
-        drawer.__returnFocus = document.activeElement instanceof HTMLElement ? document.activeElement : null;
-        window.requestAnimationFrame(() => {
-            const focusTarget = drawer.querySelector("[data-modal-close], button, input, textarea, select");
-            focusTarget?.focus?.();
-        });
-    }
-    if (!open && drawer?.__returnFocus?.focus) {
-        drawer.__returnFocus.focus();
-    }
-}
-
 function syncActionButton(button, { idleLabel, busyLabel, busy = false, disabled = false } = {}) {
     if (!button) return;
     button.textContent = busy ? (busyLabel || idleLabel || button.textContent || "") : (idleLabel || button.textContent || "");
@@ -9350,22 +9310,22 @@ function renderSkillActions() {
     syncActionButton(U.skillRefresh, {
         idleLabel: "刷新",
         busyLabel: "刷新中...",
-        busy: S.skillBusy,
-        disabled: S.skillBusy,
+        busy: ResourcesState.skillBusy,
+        disabled: ResourcesState.skillBusy,
     });
     syncActionButton(U.skillSave, {
         idleLabel: "保存",
         busyLabel: "保存中...",
-        busy: S.skillBusy,
-        disabled: S.skillBusy || !S.selectedSkill || !S.skillDirty,
+        busy: ResourcesState.skillBusy,
+        disabled: ResourcesState.skillBusy || !ResourcesState.selectedSkill || !ResourcesState.skillDirty,
     });
     const deleteButton = U.skillDetail?.querySelector("#skill-delete-btn");
     if (deleteButton) {
-        deleteButton.textContent = S.skillBusy ? "删除中..." : "删除";
-        deleteButton.disabled = S.skillBusy || !S.selectedSkill;
+        deleteButton.textContent = ResourcesState.skillBusy ? "删除中..." : "删除";
+        deleteButton.disabled = ResourcesState.skillBusy || !ResourcesState.selectedSkill;
     }
-    const toggleButton = U.skillDetail?.querySelector(S.selectedSkill?.enabled ? "#skill-disable-btn" : "#skill-enable-btn");
-    if (toggleButton) toggleButton.disabled = S.skillBusy || !S.selectedSkill;
+    const toggleButton = U.skillDetail?.querySelector(ResourcesState.selectedSkill?.enabled ? "#skill-disable-btn" : "#skill-enable-btn");
+    if (toggleButton) toggleButton.disabled = ResourcesState.skillBusy || !ResourcesState.selectedSkill;
     syncDetailSaveButton("skill");
 }
 
@@ -9373,57 +9333,57 @@ function renderToolActions() {
     syncActionButton(U.toolRefresh, {
         idleLabel: "刷新",
         busyLabel: "刷新中...",
-        busy: S.toolBusy,
-        disabled: S.toolBusy,
+        busy: ResourcesState.toolBusy,
+        disabled: ResourcesState.toolBusy,
     });
     syncActionButton(U.toolSave, {
         idleLabel: "保存",
         busyLabel: "保存中...",
-        busy: S.toolBusy,
-        disabled: S.toolBusy || !S.selectedTool || !S.toolDirty,
+        busy: ResourcesState.toolBusy,
+        disabled: ResourcesState.toolBusy || !ResourcesState.selectedTool || !ResourcesState.toolDirty,
     });
     const deleteButton = U.toolDetail?.querySelector("#tool-delete-btn");
     if (deleteButton) {
-        if (S.selectedTool?.is_core) {
+        if (ResourcesState.selectedTool?.is_core) {
             deleteButton.textContent = "核心工具不可删除";
             deleteButton.disabled = true;
         } else {
-            deleteButton.textContent = S.toolBusy ? "删除中..." : "删除";
-            deleteButton.disabled = S.toolBusy || !S.selectedTool;
+            deleteButton.textContent = ResourcesState.toolBusy ? "删除中..." : "删除";
+            deleteButton.disabled = ResourcesState.toolBusy || !ResourcesState.selectedTool;
         }
     }
-    const toggleButton = U.toolDetail?.querySelector(S.selectedTool?.enabled ? "#tool-disable-btn" : "#tool-enable-btn");
+    const toggleButton = U.toolDetail?.querySelector(ResourcesState.selectedTool?.enabled ? "#tool-disable-btn" : "#tool-enable-btn");
     if (toggleButton) {
-        toggleButton.disabled = S.toolBusy || !S.selectedTool;
+        toggleButton.disabled = ResourcesState.toolBusy || !ResourcesState.selectedTool;
     }
     syncDetailSaveButton("tool");
 }
 
 
 function clearSkillSelection() {
-    if (S.skillAutosaveTimerId) {
-        window.clearTimeout(S.skillAutosaveTimerId);
-        S.skillAutosaveTimerId = null;
+    if (ResourcesState.skillAutosaveTimerId) {
+        window.clearTimeout(ResourcesState.skillAutosaveTimerId);
+        ResourcesState.skillAutosaveTimerId = null;
     }
-    S.skillAutosavePending = false;
-    S.selectedSkill = null;
-    S.skillFiles = [];
-    S.skillContents = {};
-    S.skillFileLoads = {};
-    S.selectedSkillFile = "";
-    S.skillDirty = false;
+    ResourcesState.skillAutosavePending = false;
+    ResourcesState.selectedSkill = null;
+    ResourcesState.skillFiles = [];
+    ResourcesState.skillContents = {};
+    ResourcesState.skillFileLoads = {};
+    ResourcesState.selectedSkillFile = "";
+    ResourcesState.skillDirty = false;
     renderSkills();
     renderSkillDetail();
 }
 
 function clearToolSelection() {
-    if (S.toolAutosaveTimerId) {
-        window.clearTimeout(S.toolAutosaveTimerId);
-        S.toolAutosaveTimerId = null;
+    if (ResourcesState.toolAutosaveTimerId) {
+        window.clearTimeout(ResourcesState.toolAutosaveTimerId);
+        ResourcesState.toolAutosaveTimerId = null;
     }
-    S.toolAutosavePending = false;
-    S.selectedTool = null;
-    S.toolDirty = false;
+    ResourcesState.toolAutosavePending = false;
+    ResourcesState.selectedTool = null;
+    ResourcesState.toolDirty = false;
     renderTools();
     renderToolDetail();
 }
@@ -10925,14 +10885,14 @@ function bindTaskHall() {
 function bindResourcePages() {
     [U.skillSearch, U.skillRisk, U.skillStatus].forEach((el) => el?.addEventListener(el.tagName === "INPUT" ? "input" : "change", resetSkillPagination));
     U.skillPageSize?.addEventListener("change", (e) => setSkillPageSize(e.target.value));
-    U.skillPagePrev?.addEventListener("click", () => setSkillPage(S.skillPage - 1));
-    U.skillPageNext?.addEventListener("click", () => setSkillPage(S.skillPage + 1));
+    U.skillPagePrev?.addEventListener("click", () => setSkillPage(ResourcesState.skillPage - 1));
+    U.skillPageNext?.addEventListener("click", () => setSkillPage(ResourcesState.skillPage + 1));
     U.skillRefresh?.addEventListener("click", () => void refreshSkills());
     U.skillSave?.addEventListener("click", () => void saveSkill());
     [U.toolSearch, U.toolStatus, U.toolRisk].forEach((el) => el?.addEventListener(el.tagName === "INPUT" ? "input" : "change", resetToolPagination));
     U.toolPageSize?.addEventListener("change", (e) => setToolPageSize(e.target.value));
-    U.toolPagePrev?.addEventListener("click", () => setToolPage(S.toolPage - 1));
-    U.toolPageNext?.addEventListener("click", () => setToolPage(S.toolPage + 1));
+    U.toolPagePrev?.addEventListener("click", () => setToolPage(ResourcesState.toolPage - 1));
+    U.toolPageNext?.addEventListener("click", () => setToolPage(ResourcesState.toolPage + 1));
     U.toolRefresh?.addEventListener("click", () => void refreshTools());
     U.toolSave?.addEventListener("click", () => void saveTool());
     U.modelBackdrop?.addEventListener("click", clearModelSelection);
@@ -11003,8 +10963,8 @@ function bindGlobalOverlays() {
             clearModelSelection();
             return;
         }
-        if (S.selectedSkill) clearSkillSelection();
-        if (S.selectedTool) clearToolSelection();
+        if (ResourcesState.selectedSkill) clearSkillSelection();
+        if (ResourcesState.selectedTool) clearToolSelection();
     });
 }
 

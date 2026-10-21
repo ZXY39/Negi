@@ -110,6 +110,7 @@ function loadApp() {
         ${APP_CODE}
         this.__testExports = {
             S,
+            ResourcesState,
             U,
             createPendingCeoTurn,
             maybeShowCeoContextLoadNotice,
@@ -195,8 +196,8 @@ test("successful contract deliveries stay out of the visible stage rail", () => 
 });
 
 test("a direct-load step renders as the load-tool card with its own tool id", () => {
-    const { S, contextLoadDisplayFor } = loadApp();
-    S.tools = [{ tool_id: "filesystem_edit", risk_level: "high" }];
+    const { ResourcesState, S, contextLoadDisplayFor } = loadApp();
+    ResourcesState.tools = [{ tool_id: "filesystem_edit", risk_level: "high" }];
 
     const display = contextLoadDisplayFor({
         tool_call_id: "call-1",
@@ -215,8 +216,8 @@ test("a direct-load step renders as the load-tool card with its own tool id", ()
 });
 
 test("the node card uses the load-tool chip and skips the arguments panel", () => {
-    const { S, normalizeExecutionStageTrace, renderExecutionRoundToolChip, renderExecutionRoundToolPanel } = loadApp();
-    S.tools = [{ tool_id: "filesystem_edit", risk_level: "high" }];
+    const { ResourcesState, S, normalizeExecutionStageTrace, renderExecutionRoundToolChip, renderExecutionRoundToolPanel } = loadApp();
+    ResourcesState.tools = [{ tool_id: "filesystem_edit", risk_level: "high" }];
     const stage = normalizeExecutionStageTrace(_canonicalContext().stages[0], 0);
     const round = stage.rounds[0];
     const step = round.tools[0];
@@ -269,8 +270,8 @@ test("node detail keeps the marker on flat tool steps", () => {
 });
 
 test("a direct delivery raises the same tool notice as load_tool_context", () => {
-    const { S, U, createPendingCeoTurn, maybeShowCeoContextLoadNotice } = loadApp();
-    S.tools = [{ tool_id: "filesystem_edit", risk_level: "high" }];
+    const { ResourcesState, S, U, createPendingCeoTurn, maybeShowCeoContextLoadNotice } = loadApp();
+    ResourcesState.tools = [{ tool_id: "filesystem_edit", risk_level: "high" }];
     const turn = createPendingCeoTurn("user");
     S.ceoPendingTurns = [turn];
 

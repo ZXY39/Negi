@@ -22,6 +22,19 @@ def _fragment(source: str, start_marker: str, end_marker: str) -> str:
     return source[start:end]
 
 
+
+_MEMORY_JS_FILES = (
+    "g3ku/web/frontend/org_graph_app.js",
+    "g3ku/web/frontend/memory/store.js",
+    "g3ku/web/frontend/memory/actions.js",
+    "g3ku/web/frontend/memory/view.js",
+)
+
+
+def _memory_js() -> str:
+    return "\n".join(_source(name) for name in _MEMORY_JS_FILES)
+
+
 def _admin_route_fragment(source: str, route: str) -> str:
     start = source.index(route)
     end = source.find("\n\n@router", start + 1)
@@ -31,7 +44,7 @@ def _admin_route_fragment(source: str, route: str) -> str:
 
 
 def test_memory_page_renders_note_ref_trigger() -> None:
-    app_js = _source("g3ku/web/frontend/org_graph_app.js")
+    app_js = _memory_js()
     css = _source("g3ku/web/frontend/org_graph.css")
 
     assert r"const NOTE_REF_RE = /(?:\bref:|见noteid:)(note_[a-z0-9_]+)\b/g;" in app_js
@@ -74,8 +87,8 @@ def test_memory_page_renders_note_ref_trigger() -> None:
 
 
 def test_memory_page_note_preview_edit_is_confirmed_and_has_no_delete() -> None:
-    app_js = _source("g3ku/web/frontend/org_graph_app.js")
-    api_client_js = _source("g3ku/web/frontend/api_client.js")
+    app_js = _memory_js()
+    api_client_js = _source("g3ku/web/frontend/client_api/memory.js")
     admin_rest_py = _source("main/api/admin_rest.py")
     preview_fragment = _fragment(
         app_js,
@@ -89,7 +102,7 @@ def test_memory_page_note_preview_edit_is_confirmed_and_has_no_delete() -> None:
     assert "data-memory-note-edit-save" in preview_fragment
     assert 'id="memory-note-edit-body"' in preview_fragment
     assert "<textarea" in preview_fragment
-    save_fragment = _fragment(app_js, "function requestMemoryNoteSave()", "async function runMemoryNoteSave(")
+    save_fragment = _fragment(app_js, "function requestMemoryNoteSave()", "function closeMemoryNotePreview(")
     assert "openConfirm({" in save_fragment
     assert 'ApiClient.updateMemoryNote(ref, body, "manual-ui")' in app_js
     assert "updateMemoryNote" in api_client_js
@@ -105,7 +118,7 @@ def test_memory_page_note_preview_edit_is_confirmed_and_has_no_delete() -> None:
 
 
 def test_memory_page_full_detail_preview_uses_centered_grouped_modal_and_scrollable_text_regions() -> None:
-    app_js = _source("g3ku/web/frontend/org_graph_app.js")
+    app_js = _memory_js()
     css = _source("g3ku/web/frontend/org_graph.css")
     # 详情抽屉本身保持只读；记忆浏览器（含受门控的编辑对话框）在独立函数中
     preview_fragment = _fragment(
@@ -139,7 +152,7 @@ def test_memory_page_full_detail_preview_uses_centered_grouped_modal_and_scrolla
 
 
 def test_memory_page_detail_group_titles_use_utf8_chinese_labels() -> None:
-    app_js = _source("g3ku/web/frontend/org_graph_app.js")
+    app_js = _memory_js()
 
     # 86b2a9d0 起已处理详情将原 基础信息/模型与用量 合并为单个 基础信息 分组
     assert "基础信息" in app_js
@@ -148,11 +161,17 @@ def test_memory_page_detail_group_titles_use_utf8_chinese_labels() -> None:
 
 
 def test_memory_page_note_preview_admin_api_and_client_contract(monkeypatch: pytest.MonkeyPatch) -> None:
-    api_client_js = _source("g3ku/web/frontend/api_client.js")
+    api_client_js = "\n".join(
+        _source(name)
+        for name in (
+            "g3ku/web/frontend/client_api/core.js",
+            "g3ku/web/frontend/client_api/memory.js",
+        )
+    )
     admin_rest_py = _source("main/api/admin_rest.py")
     route_fragment = _admin_route_fragment(admin_rest_py, "@router.get('/memory/notes/{ref}')")
 
-    assert "static async getMemoryNote(ref)" in api_client_js
+    assert "async getMemoryNote(ref)" in api_client_js
     assert "`/api/memory/notes/${encodeURIComponent(ref)}`" in api_client_js
     assert "memory_note_not_found" in api_client_js
     assert "未找到对应的记忆 note" in api_client_js
@@ -247,8 +266,8 @@ def test_memory_note_read_endpoint_admits_the_resident_handle(monkeypatch: pytes
 
 def test_consolidation_note_browser_wires_the_read_only_lane() -> None:
     html = _source("g3ku/web/frontend/org_graph.html")
-    app_js = _source("g3ku/web/frontend/org_graph_app.js")
-    api_js = _source("g3ku/web/frontend/api_client.js")
+    app_js = _memory_js()
+    api_js = _source("g3ku/web/frontend/client_api/memory.js")
     admin_py = _source("main/api/admin_rest.py")
     runtime_py = _source("g3ku/agent/memory_agent_runtime.py")
 

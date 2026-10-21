@@ -122,7 +122,7 @@ function loadApp() {
     vm.createContext(context);
     vm.runInContext(
         `${APP_CODE}
-        this.__testExports = { S, U, createPendingCeoTurn, maybeShowCeoContextLoadNotice, showCeoContextLoadNotice, resolveCeoContextLoadNoticeRiskLevel, isCeoContextLoaderToolName, ceoContextLoaderKind };`,
+        this.__testExports = { S, U, ResourcesState, createPendingCeoTurn, maybeShowCeoContextLoadNotice, showCeoContextLoadNotice, resolveCeoContextLoadNoticeRiskLevel, isCeoContextLoaderToolName, ceoContextLoaderKind };`,
         context
     );
     context.__testExports.U.ceoContextLoadNotice = new StubHTMLElement();
@@ -166,16 +166,16 @@ test("context load notice renders type icon before text and keeps risk dot metad
 });
 
 test("risk level resolves from the tool record that owns the target id", () => {
-    const { S, resolveCeoContextLoadNoticeRiskLevel } = loadApp();
+    const { ResourcesState, S, resolveCeoContextLoadNoticeRiskLevel } = loadApp();
     // 资源目录一行一个工具：风险度直接读工具记录的 risk_level，
     // 没有 actions / executor_names 中间层可以回查。
-    S.tools = [
+    ResourcesState.tools = [
         { tool_id: "filesystem_edit", risk_level: "high" },
         { tool_id: "filesystem_stat", risk_level: "low" },
         { tool_id: "content_open", risk_level: "low" },
         { tool_id: "memory_runtime", risk_level: "" },
     ];
-    S.skills = [{ skill_id: "find-skills", risk_level: "high" }];
+    ResourcesState.skills = [{ skill_id: "find-skills", risk_level: "high" }];
 
     assert.equal(resolveCeoContextLoadNoticeRiskLevel("tool", "filesystem_edit"), "high");
     assert.equal(resolveCeoContextLoadNoticeRiskLevel("tool", "filesystem_stat"), "low");
@@ -191,8 +191,8 @@ test("risk level resolves from the tool record that owns the target id", () => {
 });
 
 test("context load notice renders the risk level of the tool record it loaded", () => {
-    const { S, createPendingCeoTurn, maybeShowCeoContextLoadNotice, U } = loadApp();
-    S.tools = [
+    const { ResourcesState, S, createPendingCeoTurn, maybeShowCeoContextLoadNotice, U } = loadApp();
+    ResourcesState.tools = [
         { tool_id: "filesystem_write", risk_level: "high" },
         { tool_id: "content_open", risk_level: "low" },
     ];

@@ -254,10 +254,11 @@ def test_frontend_wires_the_page_lane_without_polluting_the_window() -> None:
     """
     root = Path(rest.__file__).resolve().parents[2]
     tasks_js = (root / 'g3ku/web/frontend/org_graph_tasks.js').read_text(encoding='utf-8')
+    hall_store_js = (root / 'g3ku/web/frontend/tasks/hall-store.js').read_text(encoding='utf-8')
     app_js = (root / 'g3ku/web/frontend/org_graph_app.js').read_text(encoding='utf-8')
-    api_js = (root / 'g3ku/web/frontend/api_client.js').read_text(encoding='utf-8')
+    api_js = (root / 'g3ku/web/frontend/client_api/tasks.js').read_text(encoding='utf-8')
 
-    live_branch = tasks_js[tasks_js.index('if (payload.type === "task.model.call")'):]
+    live_branch = hall_store_js[hall_store_js.index('if (payload.type === "task.model.call")'):]
     live_branch = live_branch[:live_branch.index('if (payload.type === "task.live.patch")')]
     assert 'isTaskModelCallHistorical()' in live_branch, '实时合流没在快照态早退'
 

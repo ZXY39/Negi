@@ -34,6 +34,7 @@ def _memory_frontend_source() -> str:
     return "\n".join(
         (REPO_ROOT / name).read_text(encoding="utf-8")
         for name in (
+            "g3ku/web/frontend/resources/store.js",
             "g3ku/web/frontend/org_graph_app.js",
             "g3ku/web/frontend/memory/store.js",
             "g3ku/web/frontend/memory/actions.js",
@@ -61,7 +62,7 @@ _APP_SANDBOX = """
 const fs = require("fs");
 const vm = require("vm");
 
-const appCode = ["g3ku/web/frontend/org_graph_app.js", "g3ku/web/frontend/memory/store.js", "g3ku/web/frontend/memory/actions.js", "g3ku/web/frontend/memory/view.js"].map((name) => fs.readFileSync(name, "utf8")).join("\\n");
+const appCode = ["g3ku/web/frontend/resources/store.js", "g3ku/web/frontend/org_graph_app.js", "g3ku/web/frontend/memory/store.js", "g3ku/web/frontend/memory/actions.js", "g3ku/web/frontend/memory/view.js"].map((name) => fs.readFileSync(name, "utf8")).join("\\n");
 
 class StubElement {}
 class StubHTMLElement extends StubElement {}
@@ -184,7 +185,7 @@ def test_memory_cards_show_only_status_and_time_then_open_full_detail_modal() ->
         const fs = require("fs");
         const vm = require("vm");
 
-        const appCode = ["g3ku/web/frontend/org_graph_app.js", "g3ku/web/frontend/memory/store.js", "g3ku/web/frontend/memory/actions.js", "g3ku/web/frontend/memory/view.js"].map((name) => fs.readFileSync(name, "utf8")).join("\\n");
+        const appCode = ["g3ku/web/frontend/resources/store.js", "g3ku/web/frontend/org_graph_app.js", "g3ku/web/frontend/memory/store.js", "g3ku/web/frontend/memory/actions.js", "g3ku/web/frontend/memory/view.js"].map((name) => fs.readFileSync(name, "utf8")).join("\\n");
 
         class StubElement {}
         class StubHTMLElement extends StubElement {}
@@ -562,7 +563,7 @@ def test_memory_processed_card_renders_discarded_rows_as_no_change_status_only()
         const fs = require("fs");
         const vm = require("vm");
 
-        const appCode = ["g3ku/web/frontend/org_graph_app.js", "g3ku/web/frontend/memory/store.js", "g3ku/web/frontend/memory/actions.js", "g3ku/web/frontend/memory/view.js"].map((name) => fs.readFileSync(name, "utf8")).join("\\n");
+        const appCode = ["g3ku/web/frontend/resources/store.js", "g3ku/web/frontend/org_graph_app.js", "g3ku/web/frontend/memory/store.js", "g3ku/web/frontend/memory/actions.js", "g3ku/web/frontend/memory/view.js"].map((name) => fs.readFileSync(name, "utf8")).join("\\n");
 
         class StubElement {}
         class StubHTMLElement extends StubElement {}
@@ -656,7 +657,7 @@ def test_memory_processed_applied_row_renders_operation_chip_and_time_only() -> 
         const fs = require("fs");
         const vm = require("vm");
 
-        const appCode = ["g3ku/web/frontend/org_graph_app.js", "g3ku/web/frontend/memory/store.js", "g3ku/web/frontend/memory/actions.js", "g3ku/web/frontend/memory/view.js"].map((name) => fs.readFileSync(name, "utf8")).join("\\n");
+        const appCode = ["g3ku/web/frontend/resources/store.js", "g3ku/web/frontend/org_graph_app.js", "g3ku/web/frontend/memory/store.js", "g3ku/web/frontend/memory/actions.js", "g3ku/web/frontend/memory/view.js"].map((name) => fs.readFileSync(name, "utf8")).join("\\n");
 
         class StubElement {}
         class StubHTMLElement extends StubElement {}
@@ -748,7 +749,7 @@ def test_memory_processed_card_prefers_non_readonly_operation_labels_over_applie
         const fs = require("fs");
         const vm = require("vm");
 
-        const appCode = ["g3ku/web/frontend/org_graph_app.js", "g3ku/web/frontend/memory/store.js", "g3ku/web/frontend/memory/actions.js", "g3ku/web/frontend/memory/view.js"].map((name) => fs.readFileSync(name, "utf8")).join("\\n");
+        const appCode = ["g3ku/web/frontend/resources/store.js", "g3ku/web/frontend/org_graph_app.js", "g3ku/web/frontend/memory/store.js", "g3ku/web/frontend/memory/actions.js", "g3ku/web/frontend/memory/view.js"].map((name) => fs.readFileSync(name, "utf8")).join("\\n");
 
         class StubElement {}
         class StubHTMLElement extends StubElement {}
@@ -844,7 +845,7 @@ def test_memory_processed_noop_and_discarded_batches_render_as_no_change() -> No
         const fs = require("fs");
         const vm = require("vm");
 
-        const appCode = ["g3ku/web/frontend/org_graph_app.js", "g3ku/web/frontend/memory/store.js", "g3ku/web/frontend/memory/actions.js", "g3ku/web/frontend/memory/view.js"].map((name) => fs.readFileSync(name, "utf8")).join("\\n");
+        const appCode = ["g3ku/web/frontend/resources/store.js", "g3ku/web/frontend/org_graph_app.js", "g3ku/web/frontend/memory/store.js", "g3ku/web/frontend/memory/actions.js", "g3ku/web/frontend/memory/view.js"].map((name) => fs.readFileSync(name, "utf8")).join("\\n");
 
         class StubElement {}
         class StubHTMLElement extends StubElement {}
@@ -969,7 +970,7 @@ def test_memory_processed_detail_preview_uses_noop_reason_in_summary_slot() -> N
         const fs = require("fs");
         const vm = require("vm");
 
-        const appCode = ["g3ku/web/frontend/org_graph_app.js", "g3ku/web/frontend/memory/store.js", "g3ku/web/frontend/memory/actions.js", "g3ku/web/frontend/memory/view.js"].map((name) => fs.readFileSync(name, "utf8")).join("\\n");
+        const appCode = ["g3ku/web/frontend/resources/store.js", "g3ku/web/frontend/org_graph_app.js", "g3ku/web/frontend/memory/store.js", "g3ku/web/frontend/memory/actions.js", "g3ku/web/frontend/memory/view.js"].map((name) => fs.readFileSync(name, "utf8")).join("\\n");
 
         class StubElement {}
         class StubHTMLElement extends StubElement {}
@@ -1063,7 +1064,7 @@ def test_memory_processed_detail_preview_prefers_change_preview_and_uses_change_
         const fs = require("fs");
         const vm = require("vm");
 
-        const appCode = ["g3ku/web/frontend/org_graph_app.js", "g3ku/web/frontend/memory/store.js", "g3ku/web/frontend/memory/actions.js", "g3ku/web/frontend/memory/view.js"].map((name) => fs.readFileSync(name, "utf8")).join("\\n");
+        const appCode = ["g3ku/web/frontend/resources/store.js", "g3ku/web/frontend/org_graph_app.js", "g3ku/web/frontend/memory/store.js", "g3ku/web/frontend/memory/actions.js", "g3ku/web/frontend/memory/view.js"].map((name) => fs.readFileSync(name, "utf8")).join("\\n");
 
         class StubElement {}
         class StubHTMLElement extends StubElement {}
@@ -1165,7 +1166,7 @@ def test_memory_processed_card_uses_write_mode_to_render_rewrite_as_modify() -> 
         const fs = require("fs");
         const vm = require("vm");
 
-        const appCode = ["g3ku/web/frontend/org_graph_app.js", "g3ku/web/frontend/memory/store.js", "g3ku/web/frontend/memory/actions.js", "g3ku/web/frontend/memory/view.js"].map((name) => fs.readFileSync(name, "utf8")).join("\\n");
+        const appCode = ["g3ku/web/frontend/resources/store.js", "g3ku/web/frontend/org_graph_app.js", "g3ku/web/frontend/memory/store.js", "g3ku/web/frontend/memory/actions.js", "g3ku/web/frontend/memory/view.js"].map((name) => fs.readFileSync(name, "utf8")).join("\\n");
 
         class StubElement {}
         class StubHTMLElement extends StubElement {}

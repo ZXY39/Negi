@@ -5,7 +5,11 @@ const path = require("node:path");
 const vm = require("node:vm");
 
 const RESOURCES_PATH = "g3ku/web/frontend/org_graph_resources.js";
-const RESOURCES_CODE = fs.readFileSync(RESOURCES_PATH, "utf8");
+const RESOURCES_STORE_PATH = "g3ku/web/frontend/resources/store.js";
+const RESOURCES_VIEW_CODE = fs.readFileSync(RESOURCES_PATH, "utf8");
+const RESOURCES_CODE = [RESOURCES_STORE_PATH, RESOURCES_PATH]
+    .map((file) => fs.readFileSync(file, "utf8"))
+    .join("\n");
 const TOOLS_ROOT = path.resolve(__dirname, "..", "..", "tools");
 
 // GET /api/resources/tools 现在一行就是一个工具：记录上没有 actions / executor_names /
@@ -131,13 +135,6 @@ function loadResources() {
         Element: StubElement,
         HTMLElement: StubHTMLElement,
         HTMLInputElement: StubHTMLInputElement,
-        S: {
-            tools: [],
-            toolPage: 1,
-            toolPageSize: 50,
-            selectedTool: null,
-            toolDirty: false,
-        },
         U: {
             toolSearch: new StubHTMLInputElement("tool-search-input"),
             toolStatus: new StubHTMLInputElement("tool-status-filter"),
@@ -194,6 +191,7 @@ function loadResources() {
     vm.runInContext(
         `${RESOURCES_CODE}
         this.__testExports = {
+            ResourcesState,
             applyExecToolExecutionMode,
             execToolExecutionMode,
             execToolModeLabel,
@@ -207,15 +205,14 @@ function loadResources() {
     );
     return {
         ...context.__testExports,
-        S: context.S,
         U: context.U,
         ApiClient: context.ApiClient,
     };
 }
 
 test("renderTools renders one row per tool with the tool's own status, risk and core tags", () => {
-    const { S, U, renderTools } = loadResources();
-    S.tools = [
+    const { ResourcesState, U, renderTools } = loadResources();
+    ResourcesState.tools = [
         toolRecord({
             tool_id: "content_open",
             display_name: "Content Open",
@@ -255,8 +252,8 @@ test("renderTools renders one row per tool with the tool's own status, risk and 
 });
 
 test("renderTools hides tools the agent cannot see instead of hiding single actions by name", () => {
-    const { S, U, renderTools } = loadResources();
-    S.tools = [
+    const { ResourcesState, U, renderTools } = loadResources();
+    ResourcesState.tools = [
         toolRecord({
             tool_id: "memory_update",
             display_name: "Update Memory",
@@ -296,15 +293,15 @@ test("renderTools hides tools the agent cannot see instead of hiding single acti
     U.toolSearch.value = "";
     U.toolRisk.value = "all";
     U.toolStatus.value = "all";
-    S.tools = [toolRecord({ tool_id: "content", display_name: "Legacy Content", risk_level: "low" })];
+    ResourcesState.tools = [toolRecord({ tool_id: "content", display_name: "Legacy Content", risk_level: "low" })];
     renderTools();
     assert.equal(U.toolList.children.length, 1);
     assert.match(U.toolList.children[0].innerHTML, /Legacy Content/);
 });
 
 test("filterTools matches the tool record's own risk level and searchable fields", () => {
-    const { S, U, filterTools } = loadResources();
-    S.tools = [
+    const { ResourcesState, U, filterTools } = loadResources();
+    ResourcesState.tools = [
         toolRecord({
             tool_id: "content_open",
             display_name: "Content Open",
@@ -349,7 +346,7 @@ test("filterTools matches the tool record's own risk level and searchable fields
 
     // 状态筛选逻辑不变：禁用/不可用各自独立成档。
     U.toolSearch.value = "";
-    S.tools.push(toolRecord({ tool_id: "cron", display_name: "Cron Schedule", enabled: false }));
+    ResourcesState.tools.push(toolRecord({ tool_id: "cron", display_name: "Cron Schedule", enabled: false }));
     U.toolStatus.value = "disabled";
     assert.deepEqual(ids(), ["cron"]);
     U.toolStatus.value = "all";
@@ -368,8 +365,8 @@ test("the legacy content tool family is gone from both the repository and the fr
 });
 
 test("renderToolDetail shows the split content tool without any action layer", () => {
-    const { S, U, renderToolDetail } = loadResources();
-    S.selectedTool = toolRecord({
+    const { ResourcesState, U, renderToolDetail } = loadResources();
+    ResourcesState.selectedTool = toolRecord({
         tool_id: "content_open",
         display_name: "Content Open",
         description: "Open one excerpt from a content ref or absolute file path.",
@@ -397,8 +394,8 @@ test("renderToolDetail shows the split content tool without any action layer", (
 });
 
 test("renderToolDetail renders one role visibility group driven by the tool's own allowed_roles", () => {
-    const { S, U, renderToolDetail } = loadResources();
-    S.selectedTool = toolRecord({
+    const { ResourcesState, U, renderToolDetail } = loadResources();
+    ResourcesState.selectedTool = toolRecord({
         tool_id: "filesystem_write",
         display_name: "Filesystem Write",
         description: "Write file content to disk.",
@@ -421,15 +418,15 @@ test("renderToolDetail renders one role visibility group driven by the tool's ow
     assert.doesNotMatch(html, /当前工具对所有角色禁用。/);
 
     // 角色全空时给出整工具级提示，而不是 per-action 提示。
-    S.selectedTool.allowed_roles = [];
+    ResourcesState.selectedTool.allowed_roles = [];
     renderToolDetail();
     assert.match(U.toolDetail.innerHTML, /当前工具对所有角色禁用。/);
     assert.doesNotMatch(U.toolDetail.innerHTML, /当前 action 对所有角色禁用。/);
 });
 
 test("renderToolDetail lets operators disable a core tool but never delete it", () => {
-    const { S, U, renderToolDetail } = loadResources();
-    S.selectedTool = toolRecord({
+    const { ResourcesState, U, renderToolDetail } = loadResources();
+    ResourcesState.selectedTool = toolRecord({
         tool_id: "content_open",
         display_name: "Content Open",
         description: "Open one excerpt from a content ref or absolute file path.",
@@ -452,7 +449,7 @@ test("renderToolDetail lets operators disable a core tool but never delete it", 
 
     // 非核心工具：启停与删除都可点。
     const plain = loadResources();
-    plain.S.selectedTool = toolRecord({
+    plain.ResourcesState.selectedTool = toolRecord({
         tool_id: "filesystem_write",
         display_name: "Filesystem Write",
         description: "Write file content to disk.",
@@ -470,8 +467,8 @@ test("renderToolDetail lets operators disable a core tool but never delete it", 
 });
 
 test("renderToolDetail shows exec execution mode controls for exec", () => {
-    const { S, U, renderToolDetail } = loadResources();
-    S.selectedTool = toolRecord({
+    const { ResourcesState, U, renderToolDetail } = loadResources();
+    ResourcesState.selectedTool = toolRecord({
         tool_id: "exec",
         display_name: "Exec Runtime",
         description: "Execute shell commands.",
@@ -498,7 +495,7 @@ test("renderToolDetail shows exec execution mode controls for exec", () => {
 });
 
 test("saveTool sends allowed_roles and execution_mode for exec", async () => {
-    const { S, saveTool, ApiClient } = loadResources();
+    const { ResourcesState, saveTool, ApiClient } = loadResources();
     const calls = [];
     ApiClient.updateToolPolicy = async (toolId, payload) => {
         calls.push({ toolId, payload });
@@ -517,7 +514,7 @@ test("saveTool sends allowed_roles and execution_mode for exec", async () => {
         }),
     ];
 
-    S.selectedTool = toolRecord({
+    ResourcesState.selectedTool = toolRecord({
         tool_id: "exec",
         display_name: "Exec Runtime",
         description: "Execute shell commands.",
@@ -527,7 +524,7 @@ test("saveTool sends allowed_roles and execution_mode for exec", async () => {
         metadata: { execution_mode: "full_access" },
         exec_runtime_policy: { mode: "full_access" },
     });
-    S.toolDirty = true;
+    ResourcesState.toolDirty = true;
 
     await saveTool({ showProgressToast: false, showSuccessToast: false, reopenDetail: false });
 
@@ -541,7 +538,7 @@ test("saveTool sends allowed_roles and execution_mode for exec", async () => {
 });
 
 test("saveTool sends allowed_roles without execution_mode for a non-exec tool", async () => {
-    const { S, saveTool, ApiClient } = loadResources();
+    const { ResourcesState, saveTool, ApiClient } = loadResources();
     const calls = [];
     ApiClient.updateToolPolicy = async (toolId, payload) => {
         calls.push({ toolId, payload });
@@ -550,7 +547,7 @@ test("saveTool sends allowed_roles without execution_mode for a non-exec tool", 
     ApiClient.reloadResources = async () => ({ ok: true });
     ApiClient.getTools = async () => [];
 
-    S.selectedTool = toolRecord({
+    ResourcesState.selectedTool = toolRecord({
         tool_id: "filesystem_write",
         display_name: "Filesystem Write",
         description: "Write file content to disk.",
@@ -559,7 +556,7 @@ test("saveTool sends allowed_roles without execution_mode for a non-exec tool", 
         allowed_roles: ["ceo", "execution", "inspection"],
         enabled: false,
     });
-    S.toolDirty = true;
+    ResourcesState.toolDirty = true;
 
     await saveTool({ showProgressToast: false, showSuccessToast: false, reopenDetail: false });
 
@@ -571,8 +568,8 @@ test("saveTool sends allowed_roles without execution_mode for a non-exec tool", 
 });
 
 test("applyExecToolExecutionMode updates localized summary for immediate rerender", () => {
-    const { S, U, renderToolDetail, applyExecToolExecutionMode, execToolExecutionMode, execToolModeLabel, execToolModeSummary } = loadResources();
-    S.selectedTool = toolRecord({
+    const { ResourcesState, U, renderToolDetail, applyExecToolExecutionMode, execToolExecutionMode, execToolModeLabel, execToolModeSummary } = loadResources();
+    ResourcesState.selectedTool = toolRecord({
         tool_id: "exec",
         display_name: "Exec Runtime",
         description: "Execute shell commands.",
@@ -590,15 +587,45 @@ test("applyExecToolExecutionMode updates localized summary for immediate rerende
     // 没有 policy 也没有 metadata 时回落 governed。
     assert.equal(execToolExecutionMode(toolRecord({ tool_id: "exec" })), "governed");
 
-    applyExecToolExecutionMode(S.selectedTool, "governed");
+    applyExecToolExecutionMode(ResourcesState.selectedTool, "governed");
     renderToolDetail();
 
-    assert.equal(S.selectedTool.metadata.execution_mode, "governed");
-    assert.equal(S.selectedTool.exec_runtime_policy.mode, "governed");
+    assert.equal(ResourcesState.selectedTool.metadata.execution_mode, "governed");
+    assert.equal(ResourcesState.selectedTool.exec_runtime_policy.mode, "governed");
     assert.match(U.toolDetail.innerHTML, /继续应用 exec 侧护栏/);
 
     // 非 exec 工具不受影响：旧值 exec_runtime 已废弃。
     const other = toolRecord({ tool_id: "exec_runtime", display_name: "Exec Runtime Legacy" });
     applyExecToolExecutionMode(other, "governed");
     assert.equal(other.metadata.execution_mode, undefined);
+});
+
+test("resource list, selection, draft and paging state live in the resources store", () => {
+    // 资源页曾是完全的「假模块」：21 个状态键全部挂在共享 S 上。
+    // 现在状态归 resources/store.js，视图只读写 ResourcesState。
+    const storeKeys = [
+        "contextRiskCatalogRequest",
+        "skills", "selectedSkill", "skillFiles", "skillContents", "skillFileLoads",
+        "selectedSkillFile", "skillBusy", "skillDirty", "skillAutosaveTimerId",
+        "skillAutosavePending", "skillPage", "skillPageSize",
+        "tools", "selectedTool", "toolBusy", "toolDirty", "toolAutosaveTimerId",
+        "toolAutosavePending", "toolPage", "toolPageSize",
+    ];
+    const { ResourcesState } = loadResources();
+    for (const key of storeKeys) {
+        assert.ok(Object.prototype.hasOwnProperty.call(ResourcesState, key), `${key} 由 store 拥有`);
+    }
+    assert.doesNotMatch(RESOURCES_VIEW_CODE, /\bS\./);
+});
+
+test("renderTools writes the clamped page and page size back to the store", () => {
+    const { ResourcesState, renderTools } = loadResources();
+    ResourcesState.tools = [toolRecord({ tool_id: "content_open", display_name: "Content Open" })];
+    ResourcesState.toolPage = 0;
+    ResourcesState.toolPageSize = 0;
+
+    renderTools();
+
+    assert.equal(ResourcesState.toolPage, 1);
+    assert.equal(ResourcesState.toolPageSize, 50);
 });

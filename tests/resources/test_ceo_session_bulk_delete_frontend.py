@@ -49,7 +49,7 @@ def test_ceo_session_bulk_delete_css_contract() -> None:
     assert re.search(r"\.compact-resource-header-actions\s*>\s*\.resource-select-shell\s+\.resource-select-trigger\s*\{[^}]*height:\s*42px;", css, flags=re.MULTILINE)
     assert re.search(r"\.compact-resource-header-actions\s*>\s*\.resource-select-shell\s+\.resource-select-trigger\s*\{[^}]*border-radius:\s*14px;", css, flags=re.MULTILINE)
     assert re.search(r"\.compact-resource-header-actions\s*>\s*\.resource-header-search\s*\{[^}]*height:\s*42px;", css, flags=re.MULTILINE)
-    assert re.search(r"\.resource-list\s*\{[^}]*padding:\s*var\(--space-4\)\s+var\(--space-4\)\s+var\(--space-4\);", css, flags=re.MULTILINE)
+    assert re.search(r"\.resource-list\s*\{[^}]*padding:\s*var\(--ui-space-4\);", css, flags=re.MULTILINE)
     generic_search_index = css.index(".resource-search,\n.resource-select {")
     compact_search_override_index = css.rfind(".compact-resource-header-actions > .resource-header-search {")
     compact_select_override_index = css.rfind(".compact-resource-header-actions > .resource-select-shell .resource-select-trigger {")

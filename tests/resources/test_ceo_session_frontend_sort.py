@@ -15,9 +15,11 @@ def _run_node_script(script: str) -> dict[str, object]:
         text=True,
         encoding="utf-8",
         capture_output=True,
-        check=True,
+        check=False,
         cwd=REPO_ROOT,
     )
+    if completed.returncode != 0:
+        raise AssertionError(completed.stderr.strip() or completed.stdout.strip())
     return json.loads(completed.stdout.strip())
 
 
@@ -27,7 +29,7 @@ def test_ceo_local_sessions_sort_by_created_at_not_latest_resume_activity() -> N
         const fs = require("fs");
         const vm = require("vm");
 
-        const appCode = fs.readFileSync("g3ku/web/frontend/org_graph_app.js", "utf8");
+        const appCode = ["g3ku/web/frontend/resources/store.js", "g3ku/web/frontend/ceo/sessions-panel.js", "g3ku/web/frontend/org_graph_app.js"].map((name) => fs.readFileSync(name, "utf8")).join("\\n");
 
         class StubElement {}
         class StubHTMLElement extends StubElement {}

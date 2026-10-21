@@ -173,9 +173,15 @@ def test_audit_js_badge_semantics() -> None:
 
 
 def test_api_client_exposes_audit_events_only() -> None:
-    api_client_js = _source("g3ku/web/frontend/api_client.js")
+    api_client_js = "\n".join(
+        _source(name)
+        for name in (
+            "g3ku/web/frontend/client_api/core.js",
+            "g3ku/web/frontend/client_api/audit.js",
+        )
+    )
 
-    assert "static async getAuditEvents(" in api_client_js
+    assert "async getAuditEvents(" in api_client_js
     assert '"/api/audit/events"' in api_client_js
     assert "audit_events_read_failed" in api_client_js
     assert "审计事件暂时不可读取，请稍后刷新。" in api_client_js

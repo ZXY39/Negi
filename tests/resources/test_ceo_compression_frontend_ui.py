@@ -19,7 +19,13 @@ def test_ceo_compression_ui_uses_shared_primary_pause_button() -> None:
 
 def test_compression_progress_renders_as_feed_divider_not_composer_toast() -> None:
     html = (REPO_ROOT / "g3ku/web/frontend/org_graph.html").read_text(encoding="utf-8")
-    app_js = (REPO_ROOT / "g3ku/web/frontend/org_graph_app.js").read_text(encoding="utf-8")
+    app_js = "\n".join(
+        (REPO_ROOT / name).read_text(encoding="utf-8")
+        for name in (
+            "g3ku/web/frontend/ceo/compression.js",
+            "g3ku/web/frontend/org_graph_app.js",
+        )
+    )
     css = (REPO_ROOT / "g3ku/web/frontend/org_graph.css").read_text(encoding="utf-8")
 
     assert "ceo-compression-toast" not in html

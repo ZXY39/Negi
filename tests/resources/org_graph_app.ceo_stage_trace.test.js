@@ -260,7 +260,7 @@ function loadApp() {
     context.window = context;
     vm.createContext(context);
     vm.runInContext(
-        `${TASK_VIEW_CODE}\n${APP_CODE}\nthis.__testExports = { renderCeoStageTraceIntoTurn, renderCeoToolEventsIntoTurn, applyCeoToolEventToTurn, patchCeoInflightTurn, finalizeCeoTurn, normalizeCeoSnapshotToolEvents, stageTraceStatus, displayTaskStageStatus, toggleCeoToolStepOutput, resolvePreferredCeoTraceContext, resolveFinalCeoTraceContext, normalizeCeoSnapshotCanonicalContext, renderPersistedCeoAssistantTurn, ceoLiveStreamResidual, applyCeoCompressionMarker, splitCeoTurnAtCompression, applyCeoInflightCompressionRule, getActiveCeoTurn, createPendingCeoTurn, renderCeoSnapshotMessageRange, S, U };`,
+        `${TASK_VIEW_CODE}\n${APP_CODE}\nthis.__testExports = { renderCeoStageTraceIntoTurn, renderCeoToolEventsIntoTurn, applyCeoToolEventToTurn, patchCeoInflightTurn, finalizeCeoTurn, normalizeCeoSnapshotToolEvents, stageTraceStatus, displayTaskStageStatus, toggleCeoToolStepOutput, resolvePreferredCeoTraceContext, resolveFinalCeoTraceContext, normalizeCeoSnapshotCanonicalContext, renderPersistedCeoAssistantTurn, ceoLiveStreamResidual, applyCeoCompressionMarker, splitCeoTurnAtCompression, applyCeoInflightCompressionRule, getActiveCeoTurn, createPendingCeoTurn, renderCeoSnapshotMessageRange, S, U, ResourcesState };`,
         context
     );
     context.__testExports.__context = context;
@@ -435,12 +435,12 @@ test("ceo stage trace renders real stage goal from true frontdoor stage data", (
 });
 
 test("ceo stage trace drops loader-only rounds and falls back to the empty stage placeholder", () => {
-    const { renderCeoStageTraceIntoTurn, U, S } = loadApp();
+    const { ResourcesState, renderCeoStageTraceIntoTurn, U, S } = loadApp();
     const turn = makeTurn({ text: "" });
 
     U.ceoContextLoadNotice = new StubHTMLElement();
     U.ceoContextLoadNotice.hidden = true;
-    S.skills = [{ skill_id: "skill-creator", risk_level: "high" }];
+    ResourcesState.skills = [{ skill_id: "skill-creator", risk_level: "high" }];
 
     const renderedSteps = renderCeoStageTraceIntoTurn(turn, {
         stages: [
@@ -497,12 +497,12 @@ test("ceo legacy tool flow hides submit_next_stage events until stage trace arri
 });
 
 test("ceo loader tool events stack tool and skill notices in separate columns for ten seconds", () => {
-    const { applyCeoToolEventToTurn, U, __context, S } = loadApp();
+    const { ResourcesState, applyCeoToolEventToTurn, U, __context, S } = loadApp();
     const turn = makeTurn({ text: "" });
     const scheduled = [];
 
-    S.tools = [{ tool_id: "filesystem_write", display_name: "Filesystem Write", risk_level: "high" }];
-    S.skills = [{ skill_id: "find-skills", risk_level: "low" }];
+    ResourcesState.tools = [{ tool_id: "filesystem_write", display_name: "Filesystem Write", risk_level: "high" }];
+    ResourcesState.skills = [{ skill_id: "find-skills", risk_level: "low" }];
 
     __context.setTimeout = (callback, delay) => {
         scheduled.push({ callback, delay });
@@ -554,12 +554,12 @@ test("ceo loader tool events stack tool and skill notices in separate columns fo
 });
 
 test("ceo stage trace hides successful loader tools from interaction flow rendering", () => {
-    const { renderCeoStageTraceIntoTurn, U, S } = loadApp();
+    const { ResourcesState, renderCeoStageTraceIntoTurn, U, S } = loadApp();
     const turn = makeTurn({ text: "" });
 
     U.ceoContextLoadNotice = new StubHTMLElement();
     U.ceoContextLoadNotice.hidden = true;
-    S.tools = [{ tool_id: "filesystem_write", display_name: "Filesystem Write", risk_level: "medium" }];
+    ResourcesState.tools = [{ tool_id: "filesystem_write", display_name: "Filesystem Write", risk_level: "medium" }];
 
     const renderedSteps = renderCeoStageTraceIntoTurn(turn, {
         stages: [
@@ -599,11 +599,11 @@ test("ceo stage trace hides successful loader tools from interaction flow render
 });
 
 test("ceo loader tool live events still show notices when serialized output_text carries the loader payload", () => {
-    const { applyCeoToolEventToTurn, U, __context, S } = loadApp();
+    const { ResourcesState, applyCeoToolEventToTurn, U, __context, S } = loadApp();
     const turn = makeTurn({ text: "" });
     const scheduled = [];
 
-    S.tools = [{ tool_id: "filesystem_write", display_name: "Filesystem Write", risk_level: "high" }];
+    ResourcesState.tools = [{ tool_id: "filesystem_write", display_name: "Filesystem Write", risk_level: "high" }];
 
     __context.setTimeout = (callback, delay) => {
         scheduled.push({ callback, delay });
@@ -631,9 +631,9 @@ test("ceo loader tool live events still show notices when serialized output_text
 });
 
 test("a direct contract delivery raises the tool notice and creates no live tool row", () => {
-    const { applyCeoToolEventToTurn, U, S } = loadApp();
+    const { ResourcesState, applyCeoToolEventToTurn, U, S } = loadApp();
     const turn = makeTurn({ text: "" });
-    S.tools = [{ tool_id: "filesystem_edit", risk_level: "high" }];
+    ResourcesState.tools = [{ tool_id: "filesystem_edit", risk_level: "high" }];
     U.ceoContextLoadNotice = new StubHTMLElement();
     U.ceoContextLoadNotice.hidden = true;
 
@@ -1143,11 +1143,11 @@ test("finalize keeps the current turn's live stage trace when the payload omits 
 });
 
 test("ceo stage trace never shows the silent control call as a step", () => {
-    const { renderCeoStageTraceIntoTurn, U, S } = loadApp();
+    const { ResourcesState, renderCeoStageTraceIntoTurn, U, S } = loadApp();
     const turn = makeTurn({ text: "" });
     U.ceoContextLoadNotice = new StubHTMLElement();
     U.ceoContextLoadNotice.hidden = true;
-    S.tools = [];
+    ResourcesState.tools = [];
 
     const renderedSteps = renderCeoStageTraceIntoTurn(turn, {
         stages: [
@@ -1176,11 +1176,11 @@ test("ceo stage trace never shows the silent control call as a step", () => {
 });
 
 test("ceo silent tool live event creates no interaction step", () => {
-    const { applyCeoToolEventToTurn, U, S } = loadApp();
+    const { ResourcesState, applyCeoToolEventToTurn, U, S } = loadApp();
     const turn = makeTurn({ text: "" });
     U.ceoContextLoadNotice = new StubHTMLElement();
     U.ceoContextLoadNotice.hidden = true;
-    S.tools = [];
+    ResourcesState.tools = [];
 
     assert.equal(applyCeoToolEventToTurn(turn, { tool_name: "silent", status: "success", text: "已静默" }), null);
     assert.equal(turn.listEl.innerHTML, "");

@@ -58,7 +58,7 @@ function loadUi() {
     context.window = context;
     vm.createContext(context);
     vm.runInContext(
-        `${APP_CODE}\nthis.__testExports = { S, U, showToast, closeToast, openConfirm, closeConfirm, acceptConfirm, requestInlineConfirm };`,
+        `${APP_CODE}\nthis.__testExports = { S, U, showToast, closeToast, openConfirm, closeConfirm, acceptConfirm, requestInlineConfirm, setDrawerOpen };`,
         context
     );
     return { ...context.__testExports, __context: context };
@@ -201,4 +201,42 @@ test("确认框接受时把勾选与输入值交给 onConfirm，失败则走错�
     assert.equal(toastRefs.text.textContent, "boom");
     assert.equal(ui.S.confirmState.accepted, false);
     ui.closeToast();
+});
+
+test("抽屉原语开关都写 is-open 与 aria-hidden，并在开时接手、关时归还焦点", () => {
+    const ui = loadUi();
+    const backdrop = new StubHTMLElement();
+    const drawer = new StubHTMLElement();
+    const focusable = new StubHTMLElement();
+    const trigger = new StubHTMLElement();
+    let focusableFocused = 0;
+    let triggerFocused = 0;
+    focusable.focus = () => { focusableFocused += 1; };
+    trigger.focus = () => { triggerFocused += 1; };
+    drawer.querySelector = (selector) => String(selector).includes("data-modal-close") ? focusable : null;
+    ui.__context.document.activeElement = trigger;
+
+    ui.setDrawerOpen(backdrop, drawer, false);
+    assert.equal(backdrop.classList.contains("is-open"), false);
+    assert.equal(backdrop.getAttribute("aria-hidden"), "true");
+    assert.equal(triggerFocused, 0, "从未打开过就没有可归还的焦点");
+
+    ui.setDrawerOpen(backdrop, drawer, true);
+    assert.equal(backdrop.classList.contains("is-open"), true);
+    assert.equal(drawer.classList.contains("is-open"), true);
+    assert.equal(backdrop.getAttribute("aria-hidden"), "false");
+    assert.equal(drawer.getAttribute("aria-hidden"), "false");
+    assert.equal(focusableFocused, 1);
+
+    ui.setDrawerOpen(backdrop, drawer, false);
+    assert.equal(backdrop.classList.contains("is-open"), false);
+    assert.equal(drawer.getAttribute("aria-hidden"), "true");
+    assert.equal(triggerFocused, 1);
+
+    // 已打开时重复 open 不再抢焦点，焦点仍留给用户正在操作的元素。
+    ui.setDrawerOpen(backdrop, drawer, true);
+    const focusCountAfterReopen = focusableFocused;
+    ui.setDrawerOpen(backdrop, drawer, true);
+    assert.equal(focusableFocused, focusCountAfterReopen);
+    assert.equal(triggerFocused, 1);
 });

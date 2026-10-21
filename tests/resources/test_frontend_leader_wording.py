@@ -8,9 +8,15 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 
 def test_frontend_model_and_session_wording_matches_latest_copy() -> None:
     html = (REPO_ROOT / "g3ku/web/frontend/org_graph.html").read_text(encoding="utf-8")
-    app_js = (REPO_ROOT / "g3ku/web/frontend/org_graph_app.js").read_text(encoding="utf-8")
+    app_js = "\n".join(
+        (REPO_ROOT / name).read_text(encoding="utf-8")
+        for name in (
+            "g3ku/web/frontend/org_graph_app.js",
+            "g3ku/web/frontend/models/role-view.js",
+        )
+    )
     llm_js = (REPO_ROOT / "g3ku/web/frontend/org_graph_llm.js").read_text(encoding="utf-8")
-    api_client_js = (REPO_ROOT / "g3ku/web/frontend/api_client.js").read_text(encoding="utf-8")
+    api_client_js = (REPO_ROOT / "g3ku/web/frontend/client_api/core.js").read_text(encoding="utf-8")
 
     assert "会话列表" in html
     assert "Leader 回合" in html
