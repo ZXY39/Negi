@@ -265,7 +265,13 @@ def test_read_model_rebuild_streams_nodes_instead_of_materializing_them(tmp_path
     service.store.iter_nodes = counting  # type: ignore[method-assign]
     service.store.list_nodes = _no_whole_task_materialize  # type: ignore[method-assign]
 
-    task = service.log_service.sync_task_read_models('task:stream1', externalize_execution_trace=False)
+    task = service.log_service.sync_task_read_models(
+        'task:stream1',
+        externalize_execution_trace=False,
+        # 默认档只重建投影落后的行（这里 upsert_node 没写过投影，四行其实都落后，
+        # 但那条路走 get_node 逐行取）；force=True 才走整任务流式迭代这条车道。
+        force=True,
+    )
 
     assert task is not None
     assert seen == ['node:0', 'node:1', 'node:2', 'node:3']

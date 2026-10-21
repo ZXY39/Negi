@@ -142,7 +142,7 @@ def test_resource_headers_and_ceo_bulk_actions_follow_latest_layout() -> None:
     assert "将自动保存" not in app_js
     assert "resource-select-option-check" not in app_js
     assert '(isCoreTool && agentVisible && role === "ceo")' not in resources_js
-    assert '当前 action 对所有角色禁用。' in resources_js
+    assert '当前工具对所有角色禁用。' in resources_js
 
     # The China channel subsystem and its "通信配置" panel have been removed;
     # the web UI exposes external channel access via the External Agent API.

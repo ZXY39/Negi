@@ -9006,7 +9006,9 @@ async def test_ceo_frontdoor_prepare_turn_merges_prompt_batch_sibling_contents_i
     文本与图片块必须按顺序并入当前回合模型请求，末条输入排最后。"""
     captured: dict[str, object] = {}
     loop, runner = _prepare_turn_batch_harness(monkeypatch, tmp_path, capture_builder=captured)
-    monkeypatch.setattr(runner, "_ceo_image_multimodal_enabled_for_model_refs", lambda refs: True)
+    # 装配层按"这一发落到的那颗"判收不收图（`_ceo_image_multimodal_for_request`）；
+    # 整条链的 AND 只服务显示，不门这里。
+    monkeypatch.setattr(runner, "_ceo_image_multimodal_for_request", lambda refs: (True, "gpt-4.1"))
 
     sibling_blocks = [
         {"type": "text", "text": "较早的消息"},

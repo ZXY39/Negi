@@ -199,7 +199,6 @@ async def _run_batch(behaviour: str) -> tuple[list[str], _Logs]:
             ToolCallRequest(id="call-probe", name="probe_tool", arguments={}),
         ],
         tools={STAGE_TOOL_NAME: _StageTool(behaviour=behaviour, logs=logs), "probe_tool": _ProbeTool()},
-        allowed_content_refs=[],
         runtime_context={"task_id": TASK_ID, "node_id": NODE_ID, "actor_role": "execution"},
     )
     contents = [str((item.get("tool_message") or {}).get("content") or "") for item in results]

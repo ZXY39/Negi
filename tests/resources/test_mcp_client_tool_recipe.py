@@ -242,10 +242,19 @@ async def test_recipe_template_shape_runs_as_a_negi_tool(tmp_path: Path) -> None
                 args=self._server_command[1:],
                 env=_spawn_env(self._server_env),
             )
-            try:
-                return await _asyncio.wait_for(self._call(params, limit, runtime, arguments), timeout=limit)
-            except _asyncio.TimeoutError:
+            call = _asyncio.ensure_future(self._call(params, limit, runtime, arguments))
+            done, _pending = await _asyncio.wait({call}, timeout=limit)
+            if not done:
+                # stdio_client 的清理在取消时会把自己的 BrokenResourceError 包成
+                # ExceptionGroup 抛出来，那会把 wait_for 的 TimeoutError 顶掉。
+                # 自己收口：取消后把清理异常吃掉，超时仍然是一条普通错误回执。
+                call.cancel()
+                try:
+                    await call
+                except (_asyncio.CancelledError, BaseExceptionGroup):
+                    pass
                 return f'Error: {self.name} 超过 {limit:.0f}s 未返回，远端调用已被放弃'
+            return call.result()
 
         async def _call(
             self,

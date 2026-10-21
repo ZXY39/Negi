@@ -1297,10 +1297,10 @@ async def test_prepare_turn_heartbeat_continues_previous_request_body_and_append
 
     assert prepared["heartbeat_internal"] is True
     builder_seed = list(captured["builder_kwargs"]["request_body_seed_messages"])
-    assert [message["role"] for message in builder_seed] == ["system", "user", "assistant", "system"]
+    assert [message["role"] for message in builder_seed] == ["system", "user", "assistant", "user"]
     assert builder_seed[:3] == existing_baseline
     assert builder_seed[3] == {
-        "role": "system",
+        "role": "user",
         "content": "HEARTBEAT STABLE RULES",
         "metadata": {
             "source": "heartbeat",
@@ -1313,7 +1313,7 @@ async def test_prepare_turn_heartbeat_continues_previous_request_body_and_append
         ("system", "SYSTEM"),
         ("user", "u1"),
         ("assistant", "a1"),
-        ("system", "HEARTBEAT STABLE RULES"),
+        ("user", "HEARTBEAT STABLE RULES"),
         ("user", "## EVENT BUNDLE\n- task completed"),
     ]
     assert prepared["frontdoor_request_body_messages"] == prepared["messages"]
@@ -1473,7 +1473,7 @@ async def test_normalize_model_output_never_finalizes_repeated_tool_contract_ech
 
 
 @pytest.mark.asyncio
-async def test_normalize_model_output_strips_contract_suffix_from_visible_answer() -> None:
+async def test_normalize_model_output_keeps_embedded_contract_echo_while_stripping_is_disabled() -> None:
     runner = CeoFrontDoorRunner(loop=SimpleNamespace())
     contract = (
         "## Runtime Tool Contract\n"
@@ -1498,4 +1498,6 @@ async def test_normalize_model_output_strips_contract_suffix_from_visible_answer
     normalized = await runner._graph_normalize_model_output(state, runtime=SimpleNamespace())
 
     assert normalized["next_step"] == "finalize"
-    assert normalized["final_output"] == "Visible answer"
+    # ECHO_STRIP_ENABLED=False 期间嵌在正文后的回显不再被齐根截断（合法内联引用
+    # 共用同一条裁剪判据）。standalone 回显仍由修复守卫处理，见上一条用例。
+    assert normalized["final_output"] == "Visible answer\n\n" + contract

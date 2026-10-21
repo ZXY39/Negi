@@ -149,9 +149,9 @@ async def test_react_loop_survives_non_mapping_submit_final_result_arguments() -
                 finish_reason="tool_calls",
                 usage={"input_tokens": 8, "output_tokens": 3},
             )
-            # 一次无效最终提交只记一 strike 后续跑（`_INVALID_FINAL_SUBMISSION_LIMIT` = 5），
-            # 所以排 5 份同样的坏响应：本用例要测的是「非 mapping 参数不崩循环」，终点必须
-            # 落在 strike 预算到顶。迭代上限先到的话拿到的是 RuntimeError，不是失败态。
+            # 同一份坏载荷连续第 3 次被拒就收口（identical-streak 守卫先于
+            # `_INVALID_FINAL_SUBMISSION_LIMIT` = 5 生效）。排 5 份坏响应只是确保
+            # 终点落在失败态而不是迭代上限的 RuntimeError。
             self._responses = [invalid_final] * 5
 
         async def chat(self, **kwargs):
@@ -174,4 +174,4 @@ async def test_react_loop_survives_non_mapping_submit_final_result_arguments() -
 
     assert result.status == "failed"
     assert result.delivery_status == "blocked"
-    assert len(requests) == 5
+    assert len(requests) == 3

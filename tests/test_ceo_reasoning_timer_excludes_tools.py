@@ -137,9 +137,11 @@ def test_tool_execution_window_does_not_add_to_thinking_seconds() -> None:
         stub._reasoning_started_monotonic -= 30.0
         assert _thinking_line_seconds(stub) == pytest.approx(frozen, abs=0.6)
 
-        # 下一跳真的又想了一会儿：新的一段接上，回合累计继续涨。
+        # 下一跳真的又想了一会儿：新的一段接上，回合累计继续涨。思考的终点是
+        # "最后一个思维块到达"，所以要喂一块才会重新走表。
         stub._begin_assistant_reasoning_segment()
         stub._reasoning_started_monotonic = asyncio.get_running_loop().time() - 5.0
+        await stub._handle_assistant_reasoning_delta("再想一会儿")
         assert _thinking_line_seconds(stub) == pytest.approx(frozen + 5.0, abs=0.6)
 
     asyncio.run(run())

@@ -69,6 +69,10 @@ def _make_service(state: str) -> TaskActorService:
         set_node_pause_state=lambda *args, **kwargs: None,
     )
     service._distribution_runtime_state = lambda task_id: {"state": state}  # type: ignore[attr-defined]
+    # 没有半路断掉的验收回合：`run_task` 的兜底重派发要问一句才继续走根节点。
+    service._node_runner = SimpleNamespace(  # type: ignore[attr-defined]
+        resumable_final_acceptance_node_id=lambda task_id: "",
+    )
 
     def _ensure_driver(task_id: str) -> None:
         calls["ensure_driver"] += 1

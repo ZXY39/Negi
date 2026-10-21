@@ -15,6 +15,7 @@ if str(REPO_ROOT) not in sys.path:
 
 from g3ku.agent.tools.base import Tool
 from g3ku.providers.base import LLMResponse, ToolCallRequest
+from g3ku.runtime.tool_contract_block import render_tool_contract_block
 from main.protocol import now_iso
 from main.prompts import load_prompt
 from main.runtime.chat_backend import SendModelContextWindowInfo
@@ -39,6 +40,10 @@ class _FakeTaskStore:
     def get_node(self, node_id: str) -> Any:
         _ = node_id
         return self._node
+
+    def get_node_pause_flags(self, node_id: str) -> dict[str, object] | None:
+        _ = node_id
+        return None
 
 
 class _RecordingLogService:
@@ -209,11 +214,19 @@ class _LoadToolContextTool(Tool):
 
     async def execute(self, *, tool_id: str, **kwargs: Any) -> str:
         _ = kwargs
+        normalized_tool_id = str(tool_id or "").strip()
+        # 契约在场只看这条结果里的标记块；返回一份不带块的小 JSON 等于"加载了但下一跳
+        # 仍然不在场"，导出脚本演示的加载→调用链路会断在这里。
+        block = render_tool_contract_block(
+            normalized_tool_id,
+            "tcf:export-demo",
+            "description: Write a file to the workspace.",
+        )
         return json.dumps(
             {
                 "ok": True,
-                "tool_id": str(tool_id or "").strip(),
-                "description": "Write a file to the workspace.",
+                "tool_id": normalized_tool_id,
+                "content": block,
             },
             ensure_ascii=False,
         )

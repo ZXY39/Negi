@@ -45,9 +45,20 @@ def _stage(index: int, *, summary: str = "", rounds: list[dict] | None = None) -
     }
 
 
-def _view(stage_count: int, *, revise_last: bool = False) -> dict:
+def _view(
+    stage_count: int,
+    *,
+    revise_last: bool = False,
+    revise_index: int | None = None,
+    revise_indices: set[int] | None = None,
+) -> dict:
+    revised = set(revise_indices or ())
+    if revise_index is not None:
+        revised.add(revise_index)
+    if revise_last:
+        revised.add(stage_count)
     stages = [
-        _stage(index, summary=f"summary {index} revised" if (revise_last and index == stage_count) else "")
+        _stage(index, summary=f"summary {index} revised" if index in revised else "")
         for index in range(1, stage_count + 1)
     ]
     return project_canonical_context_for_transcript({"active_stage_id": "", "stages": stages})
@@ -76,16 +87,16 @@ def _delta_row(content: str, payload: dict, **extra) -> dict:
 
 def test_encode_apply_roundtrip_on_prefix_growth_and_tail_revision() -> None:
     v4 = _view(4)
-    v5 = _view(5)
+    # 新增 stage-5 的同时，已完成的 stage-2 正文被改写：两处都要进 upsert，
+    # 否则重放出的视图表示层与存量不一致。
+    v5 = _view(5, revise_index=2)
     payload = encode_cc_upsert(v4, v5)
     assert payload is not None
-    # 新增 stage-5 同时窗口外移：stage-2 在上一视图里还是 raw，本视图已是 compact，
-    # 属于真实 revise，必须进 upsert（否则重放出的视图表示层与存量不一致）。
     assert [stage["stage_id"] for stage in payload["upsert"]] == ["frontdoor-stage-2", "frontdoor-stage-5"]
     assert apply_cc_upsert(v4, payload) == v5
 
-    # 尾部 revise（active 定稿 / raw→compact 单向窗口移动）走原位替换。
-    v5r = _view(5, revise_last=True)
+    # 尾部 revise（active 定稿）：stage-2 的改写保持不变，只换 stage-5 这份载荷。
+    v5r = _view(5, revise_indices={2, 5})
     payload = encode_cc_upsert(v5, v5r)
     assert payload is not None
     assert [stage["stage_id"] for stage in payload["upsert"]] == ["frontdoor-stage-5"]

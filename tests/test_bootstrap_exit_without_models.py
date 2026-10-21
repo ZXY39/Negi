@@ -39,6 +39,8 @@ async def test_exit_endpoint_shuts_down_instead_of_500_without_models(monkeypatc
 
     monkeypatch.setattr(bootstrap_api, "get_agent", _boom)
     monkeypatch.setattr(bootstrap_api, "_assert_unlocked", lambda: None)
+    # 退出端点是先问"这条道能不能退"再动手：重载车道由 uvicorn 自己收。
+    monkeypatch.setattr(bootstrap_api, "can_request_server_shutdown", lambda: True)
     monkeypatch.setattr(bootstrap_api, "shutdown_web_runtime", _shutdown_runtime)
     monkeypatch.setattr(bootstrap_api, "request_server_shutdown", _request_shutdown)
 

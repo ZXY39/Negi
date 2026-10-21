@@ -138,7 +138,7 @@ def _loop_with(controller: object):
 
 
 def test_hop_ruler_carries_the_predicted_group_window_and_source() -> None:
-    """尺子的两个字段都要往下传：窗口给压缩，来源给归因（帧里有，故障正文里没有）。"""
+    """尺子的三个字段都要往下传：窗口给压缩，来源与成员给归因（帧里有，故障正文里没有）。"""
     plan = object()
     controller = _PeekController({"group_key": "group_1", "model_key": "m_small", "min_window": 390000})
     loop = _loop_with(controller)
@@ -146,6 +146,7 @@ def test_hop_ruler_carries_the_predicted_group_window_and_source() -> None:
     assert loop._peek_hop_ruler(node_id="node:1", route_plan=plan) == {
         "windows": [390000],
         "source": "group:group_1",
+        "model_key": "m_small",
     }
     assert controller.calls == [("node:1", plan)]
 

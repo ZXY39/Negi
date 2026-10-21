@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import subprocess
 import sys
 from datetime import datetime, timedelta, timezone
@@ -119,7 +120,8 @@ def test_compact_script_dry_run_and_apply(tmp_path):
     before = db_path.stat().st_mtime_ns
     proc = subprocess.run(
         [py, str(SCRIPT), '--runtime-db', str(db_path), '--retention-days', '14'],
-        capture_output=True, text=True, timeout=120,
+        capture_output=True, text=True, encoding='utf-8', timeout=120,
+        env={**os.environ, 'PYTHONIOENCODING': 'utf-8'},
     )
     assert proc.returncode == 0
     assert 'dry-run' in proc.stdout
@@ -127,7 +129,8 @@ def test_compact_script_dry_run_and_apply(tmp_path):
     # apply：裁掉旧任务行
     proc = subprocess.run(
         [py, str(SCRIPT), '--runtime-db', str(db_path), '--retention-days', '14', '--apply', '--backup'],
-        capture_output=True, text=True, timeout=300,
+        capture_output=True, text=True, encoding='utf-8', timeout=300,
+        env={**os.environ, 'PYTHONIOENCODING': 'utf-8'},
     )
     assert proc.returncode == 0, proc.stdout + proc.stderr
     assert '裁剪完成' in proc.stdout

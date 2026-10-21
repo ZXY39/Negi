@@ -5,6 +5,7 @@ from types import SimpleNamespace
 
 import g3ku.runtime.frontdoor.prompt_builder as prompt_builder_module
 import main.runtime.node_runner as node_runner_module
+from g3ku.deployment.data_root import data_work_path
 from g3ku.runtime.frontdoor.prompt_builder import CeoPromptBuilder
 from main.runtime.node_runner import NodeRunner
 
@@ -106,7 +107,7 @@ def test_node_runner_runtime_context_and_prompt_contract_include_project_python(
 
     assert runtime_context['project_python'] == r'C:\Python314\python.exe'
     assert runtime_context['project_python_hint'] == r"& 'C:\Python314\python.exe'"
-    assert runtime_context['task_temp_dir'].endswith(r'G3KU\temp')
+    assert runtime_context['task_temp_dir'] == str(data_work_path('temp').resolve())
     assert runtime_context['model_refs'] == ['execution_model']
     assert runtime_context['provider_model'] == 'execution_model'
     assert 'runtime_environment' in prompt

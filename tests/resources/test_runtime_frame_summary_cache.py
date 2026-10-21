@@ -80,11 +80,15 @@ def _reference_summary(service: TaskLogService) -> dict:
     """按"逐行读正文并装配"的旧口径算出摘要，用来证明缓存输出逐字一致。"""
     records = list(service._store.list_task_runtime_frames(TASK_ID))
     meta = service.read_task_runtime_meta(TASK_ID) or service._default_runtime_meta()
+    dispatch_limits = dict(meta.get('dispatch_limits') or {})
+    # 共享池已经拆成独立读数（`dispatch_pool`），不再留在角色上限表里。
+    dispatch_pool = int(dispatch_limits.pop('pool', 0) or 0)
     return {
         'active_node_ids': [r.node_id for r in records if bool(r.active)],
         'runnable_node_ids': [r.node_id for r in records if bool(r.runnable)],
         'waiting_node_ids': [r.node_id for r in records if bool(r.waiting)],
-        'dispatch_limits': dict(meta.get('dispatch_limits') or {}),
+        'dispatch_limits': dispatch_limits,
+        'dispatch_pool': dispatch_pool,
         'dispatch_running': dict(meta.get('dispatch_running') or {}),
         'dispatch_queued': dict(meta.get('dispatch_queued') or {}),
         'governance': dict(meta.get('governance') or {}),
