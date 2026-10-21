@@ -85,10 +85,9 @@ test("ui 档的每个落点都带组件 class 与紧邻的自绘盒子", () => {
 });
 
 test("通用自绘组件与三档专用规则都还在样式里", () => {
-    const redesign = fs.readFileSync("g3ku/web/frontend/org_graph_redesign.css", "utf8");
     const base = fs.readFileSync("g3ku/web/frontend/org_graph.css", "utf8");
 
-    assert.match(redesign, /\[data-ui-version="v2"\] \.ui-checkbox-input:checked \+ \.ui-checkbox-box/);
+    assert.match(base, /:root \.ui-checkbox-input:checked \+ \.ui-checkbox-box/);
     assert.match(base, /\.ceo-session-checkbox input:checked \+ \.ceo-session-checkbox__box/);
     assert.match(base, /\.llm-image-checkbox-input input:checked \+ \.llm-image-checkbox-indicator/);
     assert.match(base, /\.qq-bot-sandbox-input:checked::after/);
