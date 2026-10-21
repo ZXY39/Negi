@@ -30,6 +30,18 @@ def _admin_route_fragment(source: str, route: str) -> str:
     return source[start:end]
 
 
+def _memory_frontend_source() -> str:
+    return "\n".join(
+        (REPO_ROOT / name).read_text(encoding="utf-8")
+        for name in (
+            "g3ku/web/frontend/org_graph_app.js",
+            "g3ku/web/frontend/memory/store.js",
+            "g3ku/web/frontend/memory/actions.js",
+            "g3ku/web/frontend/memory/view.js",
+        )
+    )
+
+
 def _run_node_script(script: str) -> dict[str, object]:
     completed = subprocess.run(
         ["node", "-"],
@@ -37,9 +49,11 @@ def _run_node_script(script: str) -> dict[str, object]:
         text=True,
         encoding="utf-8",
         capture_output=True,
-        check=True,
+        check=False,
         cwd=REPO_ROOT,
     )
+    if completed.returncode != 0:
+        raise AssertionError(completed.stderr.strip() or completed.stdout.strip())
     return json.loads(completed.stdout.strip())
 
 
@@ -47,7 +61,7 @@ _APP_SANDBOX = """
 const fs = require("fs");
 const vm = require("vm");
 
-const appCode = fs.readFileSync("g3ku/web/frontend/org_graph_app.js", "utf8");
+const appCode = ["g3ku/web/frontend/org_graph_app.js", "g3ku/web/frontend/memory/store.js", "g3ku/web/frontend/memory/actions.js", "g3ku/web/frontend/memory/view.js"].map((name) => fs.readFileSync(name, "utf8")).join("\\n");
 
 class StubElement {}
 class StubHTMLElement extends StubElement {}
@@ -124,7 +138,8 @@ def test_memory_management_view_uses_detail_modal_and_toasts_instead_of_page_ban
     html_source = (REPO_ROOT / "g3ku/web/frontend/org_graph.html").read_text(encoding="utf-8")
     memory_html = _memory_view_fragment(html_source)
     rendered_memory_html = html_module.unescape(memory_html)
-    app_js = (REPO_ROOT / "g3ku/web/frontend/org_graph_app.js").read_text(encoding="utf-8")
+    app_js = _memory_frontend_source()
+    store_js = (REPO_ROOT / "g3ku/web/frontend/memory/store.js").read_text(encoding="utf-8")
 
     assert 'id="view-memory"' in memory_html
     assert 'id="memory-refresh-btn"' in memory_html
@@ -140,13 +155,13 @@ def test_memory_management_view_uses_detail_modal_and_toasts_instead_of_page_ban
     assert "function closeMemoryDetailPreview()" in app_js
     assert 'data-memory-detail-open' in app_js
     assert 'role="button"' in app_js
-    assert "renderMemoryView();" in app_js
+    assert "renderMemoryView();" in store_js
     assert "showToast({" in app_js
     assert "memory-detail-preview-drawer" not in rendered_memory_html
 
 
 def test_memory_management_view_preserves_memory_only_auto_refresh() -> None:
-    app_js = (REPO_ROOT / "g3ku/web/frontend/org_graph_app.js").read_text(encoding="utf-8")
+    app_js = _memory_frontend_source()
     # 轮询与三列加载住在 memory/store.js；视图切换仍在 app.js。
     store_js = (REPO_ROOT / "g3ku/web/frontend/memory/store.js").read_text(encoding="utf-8")
 
@@ -169,7 +184,7 @@ def test_memory_cards_show_only_status_and_time_then_open_full_detail_modal() ->
         const fs = require("fs");
         const vm = require("vm");
 
-        const appCode = fs.readFileSync("g3ku/web/frontend/org_graph_app.js", "utf8");
+        const appCode = ["g3ku/web/frontend/org_graph_app.js", "g3ku/web/frontend/memory/store.js", "g3ku/web/frontend/memory/actions.js", "g3ku/web/frontend/memory/view.js"].map((name) => fs.readFileSync(name, "utf8")).join("\\n");
 
         class StubElement {}
         class StubHTMLElement extends StubElement {}
@@ -359,7 +374,7 @@ def test_memory_management_view_uses_read_only_queue_endpoints_with_safe_error_m
 def test_memory_management_view_keeps_admin_mutations_hidden_by_default() -> None:
     html_source = (REPO_ROOT / "g3ku/web/frontend/org_graph.html").read_text(encoding="utf-8")
     memory_html = _memory_view_fragment(html_source)
-    app_js = (REPO_ROOT / "g3ku/web/frontend/org_graph_app.js").read_text(encoding="utf-8")
+    app_js = _memory_frontend_source()
 
     assert 'id="memory-admin-actions"' in memory_html
     assert 'id="memory-admin-actions" hidden aria-hidden="true"' in memory_html
@@ -379,7 +394,7 @@ def test_memory_management_view_keeps_admin_mutations_hidden_by_default() -> Non
 def test_memory_failed_panel_is_hidden_by_default_and_gated_by_mutations_flag() -> None:
     html_source = (REPO_ROOT / "g3ku/web/frontend/org_graph.html").read_text(encoding="utf-8")
     memory_html = _memory_view_fragment(html_source)
-    app_js = (REPO_ROOT / "g3ku/web/frontend/org_graph_app.js").read_text(encoding="utf-8")
+    app_js = _memory_frontend_source()
     css = (REPO_ROOT / "g3ku/web/frontend/org_graph.css").read_text(encoding="utf-8")
     admin_rest_py = (REPO_ROOT / "main/api/admin_rest.py").read_text(encoding="utf-8")
 
@@ -403,11 +418,12 @@ def test_memory_failed_panel_is_hidden_by_default_and_gated_by_mutations_flag() 
 
     # 手动重试/放弃按钮受 mutationsEnabled 门控；放弃有二次确认弹窗
     assert "S.memoryFailedMutationsEnabled" in app_js
+    actions_js = (REPO_ROOT / "g3ku/web/frontend/memory/actions.js").read_text(encoding="utf-8")
     assert "function requestMemoryFailedDiscard(failedId)" in app_js
     assert 'title: "放弃失败记忆"' in app_js
-    assert "function runMemoryFailedAction(action, failedId)" in app_js
-    assert "retryMemoryFailed" in app_js
-    assert "discardMemoryFailed" in app_js
+    assert "function runMemoryFailedAction(action, failedId)" in actions_js
+    assert "retryMemoryFailed" in actions_js
+    assert "discardMemoryFailed" in actions_js
 
     # 失败重试/放弃面不受 env 门控（审计 + 前端二次确认即防护），仅遗留 retry-head 保留门控
     assert "@router.post('/memory/failed/{failed_id}/retry')" in admin_rest_py
@@ -425,15 +441,13 @@ def test_memory_failed_panel_is_hidden_by_default_and_gated_by_mutations_flag() 
 
 
 def test_memory_failed_action_reports_progress_with_a_spinning_toast() -> None:
-    app_js = (REPO_ROOT / "g3ku/web/frontend/org_graph_app.js").read_text(encoding="utf-8")
+    app_js = _memory_frontend_source()
     css = (REPO_ROOT / "g3ku/web/frontend/org_graph.css").read_text(encoding="utf-8")
     api_js = (REPO_ROOT / "g3ku/web/frontend/client_api/memory.js").read_text(encoding="utf-8")
 
-    action_body = _fragment(
-        app_js,
-        "async function runMemoryFailedAction(action, failedId)",
-        "function requestMemoryFailedDiscard(failedId)",
-    )
+    # 写路径住在 memory/actions.js；它是该文件最后一个函数，切到文件末尾即可。
+    actions_js = (REPO_ROOT / "g3ku/web/frontend/memory/actions.js").read_text(encoding="utf-8")
+    action_body = actions_js[actions_js.index("async function runMemoryFailedAction(action, failedId)"):]
     # 进行中 toast 必须排在 await 之前发出去，否则这段时间界面就是没有反馈的冻结。
     assert action_body.index("正在删除待处理记忆") < action_body.index("await ApiClient.discardMemoryFailed(")
     assert action_body.index("正在删除待处理记忆") < action_body.index("await ApiClient.retryMemoryFailed(")
@@ -458,7 +472,7 @@ def test_memory_failed_action_reports_progress_with_a_spinning_toast() -> None:
 
 def test_memory_browser_edit_mode_adds_guarded_bulk_operations_with_confirm_dialogs() -> None:
     html_source = (REPO_ROOT / "g3ku/web/frontend/org_graph.html").read_text(encoding="utf-8")
-    app_js = (REPO_ROOT / "g3ku/web/frontend/org_graph_app.js").read_text(encoding="utf-8")
+    app_js = _memory_frontend_source()
     # 方法体住在 client_api/memory.js，api_client.js 只做 domain 拼装——读后者会钉住错误的载体
     memory_api_js = (REPO_ROOT / "g3ku/web/frontend/client_api/memory.js").read_text(encoding="utf-8")
     core_api_js = (REPO_ROOT / "g3ku/web/frontend/client_api/core.js").read_text(encoding="utf-8")
@@ -486,7 +500,7 @@ def test_memory_browser_edit_mode_adds_guarded_bulk_operations_with_confirm_dial
 
     # 删除走专用确认对话框。关联笔记是只读列表：归属读 `note_ref` 列，回收由所有权决定，
     # 对话框不提供任何删除笔记的动作。
-    delete_fragment = _fragment(app_js, "function requestMemoryBrowserDelete(", "async function runMemoryBrowserDelete(")
+    delete_fragment = _fragment(app_js, "function requestMemoryBrowserDelete(", "function openMemoryDeleteDialog(")
     assert "openMemoryDeleteDialog(ids)" in delete_fragment
     assert 'id="memory-delete-dialog"' in app_js
     dialog_fragment = _fragment(app_js, "function openMemoryDeleteDialog(memoryIds)", "function closeMemoryDeleteDialog()")
@@ -508,7 +522,7 @@ def test_memory_browser_edit_mode_adds_guarded_bulk_operations_with_confirm_dial
     assert ".memory-delete-note-shared" not in css
     assert "function confirmMemoryDeleteDialog()" in app_js
     assert "function toggleDeleteNoteExpand(ref)" in app_js
-    save_fragment = _fragment(app_js, "function requestMemoryBrowserEditSave()", "async function runMemoryBrowserEditSave(")
+    save_fragment = _fragment(app_js, "function requestMemoryBrowserEditSave()", "function toggleMemoryBrowserSort(")
     assert "openConfirm({" in save_fragment
     assert 'title: "保存记忆修改"' in save_fragment
 
@@ -548,7 +562,7 @@ def test_memory_processed_card_renders_discarded_rows_as_no_change_status_only()
         const fs = require("fs");
         const vm = require("vm");
 
-        const appCode = fs.readFileSync("g3ku/web/frontend/org_graph_app.js", "utf8");
+        const appCode = ["g3ku/web/frontend/org_graph_app.js", "g3ku/web/frontend/memory/store.js", "g3ku/web/frontend/memory/actions.js", "g3ku/web/frontend/memory/view.js"].map((name) => fs.readFileSync(name, "utf8")).join("\\n");
 
         class StubElement {}
         class StubHTMLElement extends StubElement {}
@@ -642,7 +656,7 @@ def test_memory_processed_applied_row_renders_operation_chip_and_time_only() -> 
         const fs = require("fs");
         const vm = require("vm");
 
-        const appCode = fs.readFileSync("g3ku/web/frontend/org_graph_app.js", "utf8");
+        const appCode = ["g3ku/web/frontend/org_graph_app.js", "g3ku/web/frontend/memory/store.js", "g3ku/web/frontend/memory/actions.js", "g3ku/web/frontend/memory/view.js"].map((name) => fs.readFileSync(name, "utf8")).join("\\n");
 
         class StubElement {}
         class StubHTMLElement extends StubElement {}
@@ -734,7 +748,7 @@ def test_memory_processed_card_prefers_non_readonly_operation_labels_over_applie
         const fs = require("fs");
         const vm = require("vm");
 
-        const appCode = fs.readFileSync("g3ku/web/frontend/org_graph_app.js", "utf8");
+        const appCode = ["g3ku/web/frontend/org_graph_app.js", "g3ku/web/frontend/memory/store.js", "g3ku/web/frontend/memory/actions.js", "g3ku/web/frontend/memory/view.js"].map((name) => fs.readFileSync(name, "utf8")).join("\\n");
 
         class StubElement {}
         class StubHTMLElement extends StubElement {}
@@ -830,7 +844,7 @@ def test_memory_processed_noop_and_discarded_batches_render_as_no_change() -> No
         const fs = require("fs");
         const vm = require("vm");
 
-        const appCode = fs.readFileSync("g3ku/web/frontend/org_graph_app.js", "utf8");
+        const appCode = ["g3ku/web/frontend/org_graph_app.js", "g3ku/web/frontend/memory/store.js", "g3ku/web/frontend/memory/actions.js", "g3ku/web/frontend/memory/view.js"].map((name) => fs.readFileSync(name, "utf8")).join("\\n");
 
         class StubElement {}
         class StubHTMLElement extends StubElement {}
@@ -955,7 +969,7 @@ def test_memory_processed_detail_preview_uses_noop_reason_in_summary_slot() -> N
         const fs = require("fs");
         const vm = require("vm");
 
-        const appCode = fs.readFileSync("g3ku/web/frontend/org_graph_app.js", "utf8");
+        const appCode = ["g3ku/web/frontend/org_graph_app.js", "g3ku/web/frontend/memory/store.js", "g3ku/web/frontend/memory/actions.js", "g3ku/web/frontend/memory/view.js"].map((name) => fs.readFileSync(name, "utf8")).join("\\n");
 
         class StubElement {}
         class StubHTMLElement extends StubElement {}
@@ -1049,7 +1063,7 @@ def test_memory_processed_detail_preview_prefers_change_preview_and_uses_change_
         const fs = require("fs");
         const vm = require("vm");
 
-        const appCode = fs.readFileSync("g3ku/web/frontend/org_graph_app.js", "utf8");
+        const appCode = ["g3ku/web/frontend/org_graph_app.js", "g3ku/web/frontend/memory/store.js", "g3ku/web/frontend/memory/actions.js", "g3ku/web/frontend/memory/view.js"].map((name) => fs.readFileSync(name, "utf8")).join("\\n");
 
         class StubElement {}
         class StubHTMLElement extends StubElement {}
@@ -1138,7 +1152,7 @@ def test_memory_processed_detail_preview_prefers_change_preview_and_uses_change_
 
 
 def test_memory_management_view_no_longer_uses_result_summary_wording() -> None:
-    app_js = (REPO_ROOT / "g3ku/web/frontend/org_graph_app.js").read_text(encoding="utf-8")
+    app_js = _memory_frontend_source()
     legacy_label = "".join(["结", "果", "摘", "要"])
 
     assert legacy_label not in app_js
@@ -1151,7 +1165,7 @@ def test_memory_processed_card_uses_write_mode_to_render_rewrite_as_modify() -> 
         const fs = require("fs");
         const vm = require("vm");
 
-        const appCode = fs.readFileSync("g3ku/web/frontend/org_graph_app.js", "utf8");
+        const appCode = ["g3ku/web/frontend/org_graph_app.js", "g3ku/web/frontend/memory/store.js", "g3ku/web/frontend/memory/actions.js", "g3ku/web/frontend/memory/view.js"].map((name) => fs.readFileSync(name, "utf8")).join("\\n");
 
         class StubElement {}
         class StubHTMLElement extends StubElement {}
@@ -1494,8 +1508,9 @@ def test_memory_edit_send_clear_only_when_the_field_actually_changed() -> None:
 
     判据写在两处，任何一处退回旧读法都会把操作员的一次清空变成"保持不变"。
     """
-    source = (REPO_ROOT / "g3ku/web/frontend/org_graph_app.js").read_text(encoding="utf-8")
+    source = (REPO_ROOT / "g3ku/web/frontend/memory/actions.js").read_text(encoding="utf-8")
+    app_js = _memory_frontend_source()
 
     assert "const minimalChanged = minimal.trim() !== originalMinimal;" in source
     assert 'minimalMemory: minimalChanged ? minimal.trim() : null' in source
-    assert "最小记忆（minimal_memory，留空即清空）" in source
+    assert "最小记忆（minimal_memory，留空即清空）" in app_js
