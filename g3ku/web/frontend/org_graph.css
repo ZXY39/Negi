@@ -13777,6 +13777,39 @@ textarea {
 .audit-feed-panel {
     flex: 1 1 auto;
     min-height: 0;
+    width: 100%;
+    max-width: none;
+    margin-right: 0;
+    margin-left: 0;
+    padding-right: var(--ui-space-6);
+    padding-left: var(--ui-space-6);
+    background: transparent;
+    border: 0;
+    border-radius: 0;
+    box-shadow: none;
+}
+
+#view-audit .audit-feed-panel {
+    padding-right: var(--ui-space-6);
+    padding-left: var(--ui-space-6);
+}
+
+@media (max-width: 767.98px) {
+    #view-audit .audit-feed-panel {
+        padding-right: var(--ui-space-4);
+        padding-left: var(--ui-space-4);
+    }
+}
+
+#view-audit .content-header .subtitle {
+    display: none;
+}
+
+.content-header #audit-refresh-btn {
+    position: absolute;
+    left: var(--ui-space-6);
+    top: 50%;
+    transform: translateY(-50%);
 }
 
 .audit-feed-panel .memory-footer {
@@ -13800,10 +13833,11 @@ textarea {
     align-items: center;
     flex-wrap: wrap;
     gap: var(--space-1) var(--space-3);
-    padding: var(--space-1) var(--space-2);
-    border-bottom: 1px solid var(--border-color);
+    padding: var(--ui-space-2);
+    border-bottom: 1px solid var(--ui-border);
     font-family: ui-monospace, "Cascadia Mono", Consolas, monospace;
-    font-size: 0.8rem;
+    font-size: 12px;
+    color: var(--ui-text-secondary);
 }
 
 /* 可读性：隔行底色 + 悬停高亮，长列表更易横向对读 */
@@ -13812,7 +13846,7 @@ textarea {
 }
 
 .audit-log-line:hover {
-    background: color-mix(in srgb, var(--brand-primary) 10%, transparent);
+    background: var(--ui-neutral-soft);
 }
 
 .audit-log-line .audit-log-time {

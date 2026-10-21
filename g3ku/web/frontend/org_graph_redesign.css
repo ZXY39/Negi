@@ -1,7 +1,7 @@
 /* V2 视觉层：只覆盖 org_graph.css，回滚时移除本文件的 <link> 与 <html data-ui-version="v2"> 即可。 */
 
 /* 1. 基础 token（与主题无关） */
-[data-ui-version="v2"] {
+:root {
     --ui-space-1: 4px;
     --ui-space-2: 8px;
     --ui-space-3: 12px;
@@ -36,7 +36,7 @@
 }
 
 /* 2. 深色主题（默认档是亮色，深色只在存过偏好时生效） */
-[data-ui-version="v2"][data-theme="dark"] {
+[data-theme="dark"] {
     --ui-bg-canvas: #121212;
     --ui-bg-surface: #191919;
     --ui-bg-elevated: #212121;
@@ -87,7 +87,7 @@
    压深后本体对纯白 ≥4.5:1；淡底取本体 30% 混白（旧的 26% 档太浅，且 rgba 叠白
    会再被提亮一档），本体文字在其上约 3.0:1。文字与自身浓底要同时到 4.5:1 在
    数学上不可能（底色里掺的就是文字色），所以淡底档按 3:1 定，不再往深走。 */
-[data-ui-version="v2"][data-theme="light"] {
+[data-theme="light"] {
     --ui-bg-canvas: #f6f6f6;
     --ui-bg-surface: #ffffff;
     --ui-bg-elevated: #ffffff;
@@ -136,7 +136,7 @@
 
 /* 5. 旧 token 重定向。org_graph.css 的上千条规则消费的是下面这些变量，
    在此一次性改锚即可让两个主题同步换肤，无需逐条覆盖旧规则。 */
-[data-ui-version="v2"] {
+:root {
     --space-1: var(--ui-space-1);
     --space-2: var(--ui-space-2);
     --space-3: var(--ui-space-3);
@@ -606,8 +606,7 @@
 
 [data-ui-version="v2"] .resource-list-panel:not(.detail-drawer),
 [data-ui-version="v2"] .resource-detail-panel:not(.detail-drawer),
-[data-ui-version="v2"] .memory-column,
-[data-ui-version="v2"] .audit-feed-panel {
+[data-ui-version="v2"] .memory-column {
     background: transparent;
     border: 0;
     border-radius: 0;
@@ -1253,18 +1252,6 @@
     padding-left: var(--ui-space-6);
 }
 
-/* 日志行是终端式单行摘要，横向铺满视口才有意义：页面越宽读到越多正文，
-   缩小浏览器缩放时不再出现两侧空白。左右内缩与顶栏刷新按钮对齐；选择器要带上
-   .resource-detail-panel 才能压过第 11 节面板扁平化那条给的 padding: 0。 */
-[data-ui-version="v2"] .resource-detail-panel.audit-feed-panel {
-    width: 100%;
-    max-width: none;
-    margin-right: 0;
-    margin-left: 0;
-    padding-right: var(--ui-space-6);
-    padding-left: var(--ui-space-6);
-}
-
 [data-ui-version="v2"] .memory-layout,
 [data-ui-version="v2"] .external-api-shell,
 [data-ui-version="v2"] .llm-page-layout {
@@ -1604,18 +1591,6 @@
     color: var(--ui-text-muted);
 }
 
-/* 25. 日志审计 */
-[data-ui-version="v2"] .audit-log-line {
-    padding: var(--ui-space-2);
-    border-bottom: 1px solid var(--ui-border);
-    font-size: 12px;
-    color: var(--ui-text-secondary);
-}
-
-[data-ui-version="v2"] .audit-log-line:hover {
-    background: var(--ui-neutral-soft);
-}
-
 /* 26. 小屏页面降级 */
 @media (max-width: 767.98px) {
 
@@ -1623,8 +1598,7 @@
     [data-ui-version="v2"] .resource-list-panel,
     [data-ui-version="v2"] .memory-layout,
     [data-ui-version="v2"] .external-api-shell,
-    [data-ui-version="v2"] .llm-page-layout,
-    [data-ui-version="v2"] .resource-detail-panel.audit-feed-panel {
+    [data-ui-version="v2"] .llm-page-layout {
         padding-right: var(--ui-space-4);
         padding-left: var(--ui-space-4);
     }
@@ -1817,8 +1791,7 @@
 }
 
 /* 30. 记忆管理与日志审计的标题说明不再占据头部 */
-[data-ui-version="v2"] #view-memory .content-header .subtitle,
-[data-ui-version="v2"] #view-audit .content-header .subtitle {
+[data-ui-version="v2"] #view-memory .content-header .subtitle {
     display: none;
 }
 
@@ -1892,8 +1865,7 @@
 [data-ui-version="v2"] .content-header #tool-refresh-btn,
 [data-ui-version="v2"] .content-header #memory-refresh-btn,
 [data-ui-version="v2"] .content-header #model-refresh-btn,
-[data-ui-version="v2"] .content-header #external-refresh-btn,
-[data-ui-version="v2"] .content-header #audit-refresh-btn {
+[data-ui-version="v2"] .content-header #external-refresh-btn {
     position: absolute;
     left: var(--ui-space-6);
     top: 50%;
