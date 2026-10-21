@@ -14864,6 +14864,7 @@ textarea {
     font-size: 13px;
 }
 
+
 /* ---- 页面头部与页头控件（V2 合并后的最终值） -------------------------------
    头部只留 60px 工具条，h1 视觉隐藏但仍保留可访问名；五个页面的刷新按钮、
    搜索框、Skill/Tool 的范围选择器统一 40px 控件档。 */
@@ -16162,5 +16163,207 @@ textarea {
         width: min(288px, calc(100vw - 24px));
         height: auto;
         box-shadow: var(--ui-shadow-dialog);
+    }
+}
+/* ---- CEO 聊天区与提示条（V2 合并后的最终值） ------------------------------- */
+
+.chat-wrapper {
+    min-width: 0;
+    background: var(--ui-bg-canvas);
+}
+
+/* 16. 聊天列：填满可用宽度，不做居中阅读轴（没有 max-width 档）。左右是同一档对称
+   内缩：回复不装盒之后，正文直接顶在面板左边就是贴着会话栏，所以给到 max(40px, 5%)
+   ——按面板宽自缩放，窄面板由下面两条断点收回。底部留白由 --ceo-composer-inset
+   提供（前端按悬浮输入区的实测高度写上来），固定值只兜住控件的静止高度。 */
+.chat-feed {
+    width: 100%;
+    max-width: none;
+    margin: 0;
+    padding: var(--ui-space-6) max(40px, 5%) var(--ceo-composer-inset, 96px);
+    gap: var(--ui-space-5);
+}
+
+.message.message {
+    width: 100%;
+    max-width: none;
+    margin-right: 0;
+    margin-left: 0;
+    align-items: flex-end;
+}
+
+.message.system {
+    justify-content: flex-start;
+}
+
+.message:not(.user) {
+    justify-content: flex-start;
+}
+
+.message.user {
+    justify-content: flex-end;
+    flex-direction: row;
+}
+
+.message .msg-content.msg-content {
+    max-width: 100%;
+    padding: var(--ui-space-3) var(--ui-space-4);
+    border: 1px solid var(--ui-border);
+    border-radius: var(--ui-radius-control);
+    background: var(--ui-bg-surface);
+    box-shadow: none;
+    color: var(--ui-text);
+    font-size: 14px;
+    line-height: 1.7;
+}
+
+.message.user .msg-content.msg-content {
+    max-width: 100%;
+    background: var(--ui-brand-soft);
+    /* 描边比 §57 节点卡的 50% 再降一档：那里的描边承担「运行中/检验中」这个状态，
+       满色才读得出；用户气泡的身份已经由 --ui-brand-soft 底色说完，描边只需要把
+       圆角盒收住，50% 会让气泡比同屏任何一条模型输出都抢眼。 */
+    border-color: color-mix(in srgb, var(--ui-brand) 30%, transparent);
+    color: var(--ui-text);
+}
+
+.message .msg-content p,
+.message .msg-content li {
+    line-height: 1.7;
+}
+
+.message .msg-content p + p {
+    margin-top: var(--ui-space-3);
+}
+
+.message .msg-content ul,
+.message .msg-content ol {
+    gap: var(--ui-space-2);
+}
+
+.message .msg-content pre {
+    max-width: 100%;
+    overflow-x: auto;
+}
+
+.message .msg-content img {
+    max-width: 100%;
+    height: auto;
+}
+
+/* 语音条跟用户气泡同一个身份：底色说身份，描边只收圆角。 */
+.msg-voice-bubble {
+    padding: var(--ui-space-3) var(--ui-space-4);
+    border-radius: var(--ui-radius-control);
+    background: var(--ui-brand-soft);
+    border: 1px solid color-mix(in srgb, var(--ui-brand) 30%, transparent);
+    color: var(--ui-text);
+}
+
+.msg-voice-play {
+    width: 32px;
+    height: 32px;
+    background: var(--ui-brand);
+    color: var(--ui-on-brand);
+}
+
+.msg-voice-duration {
+    color: var(--ui-text-secondary);
+}
+
+.msg-voice-transcript {
+    color: var(--ui-text-secondary);
+    font-size: 13px;
+}
+
+/* 分色不能并进上面那条共享规则：属性选择器压过基础类，动作文字会被染成正文灰，
+   于是语音条上唯一一个动作看起来像文字。 */
+.msg-voice-transcript-toggle {
+    color: var(--ui-brand);
+}
+
+.msg-voice-transcript-toggle:hover {
+    background: var(--ui-brand-soft);
+}
+
+.msg-voice-transcript-toggle[aria-expanded="true"] {
+    background: var(--ui-brand);
+    color: var(--ui-on-brand);
+}
+
+.model-retry-toast {
+    background: var(--ui-bg-elevated);
+    border: 1px solid var(--ui-border);
+    border-radius: var(--ui-radius-card);
+    box-shadow: none;
+    color: var(--ui-text-secondary);
+}
+
+.ceo-follow-up-chip {
+    border-radius: var(--ui-radius-control);
+    box-shadow: none;
+}
+
+/* 编辑重发横幅与上下文提示条同理：容器只负责占位，可见的面是里面的 chip。
+   容器再画一层底和描边，就会在 chip 的圆角外面露出一圈更方的盒子。
+   chip 是这条横幅唯一的面，圆角与 .app-toast 的 16px 同档。 */
+.ceo-edit-resend-chip {
+    border-radius: var(--ui-radius-control);
+    box-shadow: none;
+}
+
+/* .ceo-context-load-notice 只负责定位，可见的小弹窗是里面的 item；
+   给容器上底色和描边会拉出一条与弹窗无关的长条。 */
+.ceo-context-load-notice {
+    width: min(420px, calc(100% - 24px));
+    background: transparent;
+    border: 0;
+    border-radius: 0;
+    box-shadow: none;
+}
+
+.ceo-context-load-notice-item {
+    background: var(--ui-bg-elevated);
+    border: 1px solid var(--ui-border);
+    border-radius: var(--ui-radius-card);
+    box-shadow: var(--ui-shadow-sm);
+    color: var(--ui-text-secondary);
+}
+
+.ceo-approval-viewport,
+.model-retry-toast,
+.ceo-edit-resend-banner {
+    grid-column: 1 / -1;
+    width: 100%;
+    margin: 0;
+}
+
+/* 51. 「处理中...」占位回合与正式回合同宽：气泡无条件吃满整列（宽度规则见
+   org_graph.css 的 .ceo-turn-message .msg-content），这里只收一下占位态的内边距。 */
+.ceo-turn-message .msg-content:has(> .assistant-text-loading) {
+    padding: var(--ui-space-3);
+}
+
+#ceo-attach-btn,
+#ceo-voice-btn,
+#ceo-context-usage-brain {
+    font-size: 13px;
+}
+
+.msg-action-btn {
+    border-radius: var(--ui-radius-control);
+}
+
+@media (max-width: 1023.98px) {
+    .chat-feed {
+        padding-right: var(--ui-space-5);
+        padding-left: var(--ui-space-5);
+    }
+}
+
+@media (max-width: 767.98px) {
+    .chat-feed {
+        padding-right: var(--ui-space-3);
+        padding-left: var(--ui-space-3);
     }
 }
