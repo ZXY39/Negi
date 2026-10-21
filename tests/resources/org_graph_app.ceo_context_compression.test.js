@@ -231,7 +231,8 @@ function loadApp() {
             findCeoCompressionAnchor, normalizeCeoSnapshotCompressionMarker,
             refreshCeoComposerUsageEstimate, syncCeoModelModePanelUsage,
             startCeoContextCompressionPolling, applyCeoContextCompressionStatus,
-            adoptCeoContextCompression,
+            adoptCeoContextCompression, mirrorCeoContextCompression,
+            convertCeoRunningDividerToTerminal,
             CEO_BRAIN_LONG_PRESS_MS, CEO_COMPRESSION_POLL_FAIL_LIMIT,
         };`,
         context
@@ -993,4 +994,61 @@ test("转录标记把 stats.turn_id 带下来，没有 stats 的老行不受影�
     })), JSON.stringify({ state: "completed", source: "manual" }));
     assert.equal(api.normalizeCeoSnapshotCompressionMarker({ state: "running" }), null);
     assert.equal(api.findCeoCompressionAnchor(""), null);
+});
+
+// ---- P1-b：running 缓存新鲜度与终局就地过渡 ----
+
+test("P1-b 标记归一化保留 boundary 0（0 是有效落点）", () => {
+    const api = loadApp();
+    const marker = api.normalizeCeoSnapshotCompressionMarker({
+        state: "completed",
+        source: "auto",
+        stats: { turn_id: "a1", boundary_stage_index: 0 },
+    });
+    assert.equal(marker.boundary_stage_index, 0);
+    const absent = api.normalizeCeoSnapshotCompressionMarker({
+        state: "completed",
+        source: "auto",
+        stats: { turn_id: "a1" },
+    });
+    assert.equal(absent.boundary_stage_index, undefined);
+});
+
+test("P1-b running 缓存镜像带 seen_at，过期旧镜像不画线", () => {
+    const api = loadApp();
+    api.mirrorCeoContextCompression("web:test", {
+        status: "running",
+        source: "manual_context_compression",
+    });
+    const cached = api.getCeoSessionSnapshotCache("web:test");
+    assert.equal(typeof cached.compression.seen_at, "number");
+    assert.equal(api.activeCeoSessionCompressionState().status, "running");
+
+    api.S.ceoContextCompressionStatus = "";
+    api.S.ceoContextCompressionSessionId = "";
+    api.setCeoSessionSnapshotCache("web:test", {
+        compression: {
+            status: "running",
+            source: "manual_context_compression",
+            seen_at: -999999999,
+        },
+    });
+    assert.equal(api.activeCeoSessionCompressionState(), null);
+});
+
+test("P1-b 终局就地改线：running -> completed，不先消失", () => {
+    const api = loadApp();
+    api.S.ceoContextCompressionStatus = "running";
+    api.S.ceoContextCompressionSessionId = "web:test";
+    api.syncCeoCompressionDivider();
+    const before = dividers(api.U.ceoFeed);
+    assert.equal(before.length, 1);
+    assert.equal(before[0].dataset.ceoCompressionState, "running");
+
+    assert.equal(api.convertCeoRunningDividerToTerminal("completed"), true);
+    const after = dividers(api.U.ceoFeed);
+    assert.equal(after.length, 1);
+    assert.equal(after[0].dataset.ceoCompressionState, "completed");
+    assert.match(after[0].innerHTML, /会话已压缩/);
+    assert.equal(String(after[0].className).includes("is-completed"), true);
 });
