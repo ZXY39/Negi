@@ -8004,6 +8004,18 @@ class MainRuntimeService:
         if not block:
             return rejected
 
+        pending_container = tool_arg_stash.carrier_container(carrier)
+        # 份数是**整批**的属性，不是这一条的：校验失败的那条也要能把"这批最终几份"报出来，
+        # 否则末条恰好失败时，模型只看到前几条的 `set i < n`，拼不出会跑多少。
+        consumable_count = len(
+            tool_arg_stash.peek_entries(
+                pending_container,
+                scope_key=scope_key,
+                current_hop=hop + 1,
+                fingerprint=fingerprint,
+            )
+        )
+
         try:
             validation_errors = instance.validate_params(arguments)
         except Exception as exc:
@@ -8019,6 +8031,7 @@ class MainRuntimeService:
                 tool_name=normalized_tool,
                 contract_block=block,
                 outcome=IMPULSE_INVALID,
+                staged_count=consumable_count,
                 batch_position=batch_position,
                 batch_total=batch_total,
                 parameter_error_text=guidance,
@@ -8042,6 +8055,7 @@ class MainRuntimeService:
                 tool_name=normalized_tool,
                 contract_block=block,
                 outcome=IMPULSE_INVALID,
+                staged_count=consumable_count,
                 batch_position=batch_position,
                 batch_total=batch_total,
                 parameter_error_text=guidance,

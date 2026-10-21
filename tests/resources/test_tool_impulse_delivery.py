@@ -151,9 +151,31 @@ def test_last_receipt_reports_the_final_count_and_the_folding(tmp_path: Path) ->
     )
 
     assert second["staged_count"] == 1
-    assert f'Staged sets for "{TOOL_ID}": 1 (2 calls; identical argument sets count once).' in second["content"]
+    assert f'Staged sets for "{TOOL_ID}": 1 (from 2 calls).' in second["content"]
     # 第一条（非末条）不报份数：那一刻的"1 份"只是半批，报出来就是假事实。
     assert "Staged sets for" not in first["content"]
+
+
+def test_a_failed_last_call_still_reports_the_batch_count(tmp_path: Path) -> None:
+    """末条校验失败：它不入 stash，但整批的最终份数仍要在这一条里报出来。"""
+
+    class _SecondCallInvalid:
+        def validate_params(self, params):
+            return [] if params.get("new_text") == "ok" else ["missing new_text"]
+
+    service = _service(_SecondCallInvalid(), tmp_path)
+    first = _deliver(service, {"path": "/a", "new_text": "ok"}, {}, batch_position=1, batch_total=2)
+    second = _deliver(
+        service,
+        {"path": "/b"},
+        first["carrier"],
+        batch_position=2,
+        batch_total=2,
+    )
+
+    assert second["outcome"] == IMPULSE_INVALID
+    assert "failed validation and were not staged (set 2 of 2)" in second["content"]
+    assert f'Staged sets for "{TOOL_ID}": 1 (from 2 calls).' in second["content"]
 
 
 def test_count_excludes_entries_that_will_never_be_consumed(tmp_path: Path) -> None:

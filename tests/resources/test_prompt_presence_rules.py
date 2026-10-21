@@ -130,11 +130,24 @@ def test_impulse_receipt_reports_the_count_and_does_not_echo_the_arguments() -> 
     assert "To run only some of them" not in content
 
 
-def test_impulse_receipt_explains_when_calls_outnumber_the_sets() -> None:
-    """`sets` 与调用条数不等只可能是同签名折叠——这是模型唯一推不出来的那个数。"""
+def test_impulse_receipt_reports_counts_when_calls_outnumber_the_sets() -> None:
+    """份数少于调用数时把两个数都给出来；原因（折叠/校验失败）由模型对着自己的行判。"""
     content = _receipt(staged_count=2, batch_total=3, batch_position=3)
 
-    assert (
-        'Staged sets for "filesystem_delete": 2 (3 calls; identical argument sets count once).'
-        in content
-    )
+    assert 'Staged sets for "filesystem_delete": 2 (from 3 calls).' in content
+
+
+def test_a_failed_last_call_still_reports_the_batch_count() -> None:
+    """末条恰好校验失败：不报的话模型手里只有若干 `set i of n`，拼不出会跑多少。"""
+    content = impulse_receipt(
+        tool_name="filesystem_delete",
+        contract_block="",
+        outcome="invalid",
+        staged_count=1,
+        batch_position=3,
+        batch_total=3,
+        parameter_error_text="Error: missing path",
+    )["content"]
+
+    assert "failed validation and were not staged (set 3 of 3)" in content
+    assert 'Staged sets for "filesystem_delete": 1 (from 3 calls).' in content

@@ -50,18 +50,17 @@ def tool_facing_runtime_context(runtime_context: Any) -> dict[str, Any]:
     }
 
 def _staged_sets_line(*, tool_name: str, staged_count: int, batch_total: int) -> str:
-    """这一批最终会被 `reuse_args` 执行多少份；两数不等只可能是同签名折叠。
+    """这一批最终会被 `reuse_args` 执行多少份，以及它是从几条调用来的。
 
     不列目标清单：回执紧贴在发起它们的那条 assistant 行之后，模型自己那几条
     `tool_calls[].function.arguments` 就在同一请求视图里（实盘 202,788 条这样的行），再抄一遍
     是纯重复且长留历史；裁撤把工具肉身移走时，那行入参与这条回执成对离场，所以清单也兜不住
-    任何"入参已不在场"的窗口。模型真正推不出来的是**份数**（同批同签名会被折叠成一条）。
+    任何"入参已不在场"的窗口。模型真正推不出来的是**份数**：同批同签名会折叠成一条，校验失败
+    的那条也不入库，两种都会让份数少于调用数——所以这里只说两个事实（几份、几条调用），
+    不替运行时猜是哪一种。
     """
-    if batch_total > staged_count:
-        return (
-            f'Staged sets for "{tool_name}": {staged_count} '
-            f"({batch_total} calls; identical argument sets count once)."
-        )
+    if staged_count and batch_total > staged_count:
+        return f'Staged sets for "{tool_name}": {staged_count} (from {batch_total} calls).'
     return f'Staged sets for "{tool_name}": {staged_count}.'
 
 
@@ -80,52 +79,47 @@ def impulse_receipt(
     返回 `{"content": ..., "outcome": ..., "executed": False}`：`executed` 恒为假——这条
     路径不跑工具，调用方的"未执行不进熔断/去重"判据就认这个字段。
     """
+    is_last_of_batch = int(batch_position or 0) == int(batch_total or 0)
     blocks: list[str] = []
     if batch_position > 1:
         # D4：同轮同工具只发一份完整块。第 2..N 份带块等于把同一篇正文按调用次数
         # 放大进历史，而在场判据只需要那一次出现。
         blocks.append(
-            f'Contract for "{tool_name}": see the first result for this tool in this batch. '
-            f"These arguments were staged (set {batch_position} of {batch_total})."
+            f'Contract for "{tool_name}": see the first result for this tool in this batch.'
         )
-        if outcome == IMPULSE_INVALID and parameter_error_text:
-            blocks.append(parameter_error_text)
-        elif batch_position == batch_total:
-            # 只有最后一条看得到这一批的最终份数（投递是逐条发生的）。
-            blocks.append(
-                _staged_sets_line(
-                    tool_name=tool_name,
-                    staged_count=staged_count,
-                    batch_total=batch_total,
-                )
-            )
-        return {
-            "content": "\n\n".join(blocks),
-            "outcome": outcome,
-            "executed": False,
-        }
-
     if outcome == IMPULSE_INVALID:
-        blocks.append(
-            f'Tool contract for "{tool_name}" loaded - the tool is now callable.\n'
-            "This call's arguments failed validation. Nothing was staged."
-        )
+        if batch_position > 1:
+            blocks.append(
+                f"These arguments failed validation and were not staged "
+                f"(set {batch_position} of {batch_total})."
+            )
+        else:
+            blocks.append(
+                f'Tool contract for "{tool_name}" loaded - the tool is now callable.\n'
+                "This call's arguments failed validation. Nothing was staged."
+            )
         if parameter_error_text:
             blocks.append(parameter_error_text)
+    elif batch_position > 1:
+        blocks.append(f"These arguments were staged (set {batch_position} of {batch_total}).")
     else:
         blocks.append(
             f'Tool contract for "{tool_name}" loaded - the tool is now callable.\n'
             "This call's arguments passed validation and were staged."
         )
-        if batch_position == batch_total:
-            blocks.append(
-                _staged_sets_line(
-                    tool_name=tool_name,
-                    staged_count=staged_count,
-                    batch_total=batch_total,
-                )
+    if is_last_of_batch and (outcome != IMPULSE_INVALID or batch_total > 1):
+        # 份数只在最后一条报：投递逐条发生，前面的条只看得见半批。末条恰好失败时也要报，
+        # 否则模型只握着若干 `set i of n`，拼不出下一跳会跑多少。
+        blocks.append(
+            _staged_sets_line(
+                tool_name=tool_name,
+                staged_count=staged_count,
+                batch_total=batch_total,
             )
-    content = "\n\n".join([contract_block, *blocks]) if contract_block else "\n\n".join(blocks)
+        )
+    # D4：同批第 2..N 条**不带块**——块只有这一跳那一份，重复带等于按调用次数放大正文。
+    head = contract_block if contract_block and batch_position <= 1 else ""
+    content = "\n\n".join([head, *blocks]) if head else "\n\n".join(blocks)
     return {"content": content, "outcome": outcome, "executed": False}
 
 
