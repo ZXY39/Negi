@@ -14218,6 +14218,26 @@ function initializeUiPreferences() {
 }
 
 function bind() {
+    bindProjectSettings();
+    bindCeoFeedAndNav();
+    bindMemoryAndAudit();
+    bindTaskDetailLanes();
+    bindCeoSessionsPanel();
+    bindCeoComposerAndFeedActions();
+    bindModelPage();
+    bindTaskHall();
+    bindResourcePages();
+    bindGlobalOverlays();
+    renderPendingCeoUploads();
+    syncCeoInputHeight();
+    syncCeoComposerReadonlyState();
+    renderCeoSessions();
+    syncCeoSessionPanelState();
+    renderTaskSessionScope();
+    syncCeoPrimaryButton();
+}
+
+function bindProjectSettings() {
     U.theme?.addEventListener("click", toggleTheme);
     bindModelRetryToastExpansion();
     U.projectSettings?.addEventListener("click", () => openProjectSettingsDialog());
@@ -14247,6 +14267,10 @@ function bind() {
         closeProjectSettingsDialog();
         void requestProjectExit();
     });
+}
+
+
+function bindCeoFeedAndNav() {
     U.ceoFeed?.addEventListener("scroll", handleCeoFeedScrollEvent, { passive: true });
     ["wheel", "pointerdown", "keydown", "touchstart"].forEach((type) => {
         U.ceoFeed?.addEventListener(type, handleCeoFeedUserGesture, { passive: true });
@@ -14255,6 +14279,10 @@ function bind() {
     updateCeoScrollToLatestButton();
     U.nav.forEach((btn) => btn.addEventListener("click", () => switchView(btn.dataset.view)));
     U.backToTasks?.addEventListener("click", () => switchView("tasks"));
+}
+
+
+function bindMemoryAndAudit() {
     U.memoryRefresh?.addEventListener("click", () => void loadMemoryView({ force: true }));
     U.memoryViewCurrent?.addEventListener("click", () => void openMemoryBrowser());
     U.memoryIndexNotes?.addEventListener("click", () => void openMemoryNoteBrowser());
@@ -14332,6 +14360,10 @@ function bind() {
         e.preventDefault();
         openMemoryDetailPreview(detailTrigger.dataset.memoryDetailOpen || "", detailTrigger.dataset.memoryDetailKey || "");
     }));
+}
+
+
+function bindTaskDetailLanes() {
     U.taskTokenButton?.addEventListener("click", () => setTaskTokenStatsOpen(true));
     U.taskTokenClose?.addEventListener("click", () => setTaskTokenStatsOpen(false));
     U.taskTokenBackdrop?.addEventListener("click", () => setTaskTokenStatsOpen(false));
@@ -14374,6 +14406,10 @@ function bind() {
         refreshTaskTokenCallTable();
     });
     U.nodeContextDisclosure?.addEventListener("toggle", () => void handleNodeContextDisclosureToggle());
+}
+
+
+function bindCeoSessionsPanel() {
     U.ceoSessionPanelToggle?.addEventListener("click", () => setCeoSessionPanelExpanded(!S.ceoSessionPanelExpanded));
     U.ceoNewSession?.addEventListener("click", () => void createNewCeoSession());
     U.ceoSessionTabLocal?.addEventListener("click", () => setCeoSessionTab("local"));
@@ -14452,6 +14488,10 @@ function bind() {
     U.ceoSessionList?.addEventListener("dragover", (event) => updateCeoSessionCardDropTarget(event));
     U.ceoSessionList?.addEventListener("drop", (event) => finishCeoSessionCardDrag(event));
     U.ceoSessionList?.addEventListener("dragend", () => cancelCeoSessionCardDrag());
+}
+
+
+function bindCeoComposerAndFeedActions() {
     U.ceoSend?.addEventListener("click", handleCeoPrimaryAction);
     U.ceoAttach?.addEventListener("click", () => {
         if (S.ceoUploadBusy) return;
@@ -14558,6 +14598,10 @@ function bind() {
     U.ceoInputResizeHandle?.addEventListener("pointerdown", beginCeoInputResize);
     watchCeoComposerInset();
     window.addEventListener("resize", () => scheduleSyncCeoComposerUsageOutline());
+}
+
+
+function bindModelPage() {
     U.modelRefresh?.addEventListener("click", () => void loadModels());
     U.modelCreate?.addEventListener("click", startCreateModel);
     U.modelRolesCancel?.addEventListener("click", cancelModelRoleEditing);
@@ -14851,6 +14895,10 @@ function bind() {
             toggle.classList.toggle("checked", e.target.checked);
         }
     });
+}
+
+
+function bindTaskHall() {
     U.taskDepthSelect?.addEventListener("change", (e) => {
         const nextValue = String(e.target.value || "").trim();
         if (nextValue === TASK_DEPTH_CUSTOM_VALUE) {
@@ -14931,6 +14979,10 @@ function bind() {
         }
     });
     U.taskDetailBackdrop?.addEventListener("click", () => clearAgentSelection());
+}
+
+
+function bindResourcePages() {
     [U.skillSearch, U.skillRisk, U.skillStatus].forEach((el) => el?.addEventListener(el.tagName === "INPUT" ? "input" : "change", resetSkillPagination));
     U.skillPageSize?.addEventListener("change", (e) => setSkillPageSize(e.target.value));
     U.skillPagePrev?.addEventListener("click", () => setSkillPage(S.skillPage - 1));
@@ -14946,6 +14998,10 @@ function bind() {
     U.modelBackdrop?.addEventListener("click", clearModelSelection);
     U.skillBackdrop?.addEventListener("click", clearSkillSelection);
     U.toolBackdrop?.addEventListener("click", clearToolSelection);
+}
+
+
+function bindGlobalOverlays() {
     U.toastClose?.addEventListener("click", closeToast);
     U.confirmBackdrop?.addEventListener("click", (e) => {
         if (e.target === U.confirmBackdrop) closeConfirm();
@@ -15010,13 +15066,6 @@ function bind() {
         if (S.selectedSkill) clearSkillSelection();
         if (S.selectedTool) clearToolSelection();
     });
-    renderPendingCeoUploads();
-    syncCeoInputHeight();
-    syncCeoComposerReadonlyState();
-    renderCeoSessions();
-    syncCeoSessionPanelState();
-    renderTaskSessionScope();
-    syncCeoPrimaryButton();
 }
 
 let __g3kuAppInitialized = false;
