@@ -198,7 +198,10 @@ def test_llm_detail_editor_renders_image_multimodal_before_concurrency_button_in
 
 
 def test_memory_role_fixed_concurrency_reuses_segmented_label_shell_styling() -> None:
-    app_js = (REPO_ROOT / "g3ku/web/frontend/org_graph_app.js").read_text(encoding="utf-8")
+    app_js = "\n".join(
+        (REPO_ROOT / name).read_text(encoding="utf-8")
+        for name in ("g3ku/web/frontend/org_graph_app.js", "g3ku/web/frontend/models/role-view.js")
+    )
     app_css = (REPO_ROOT / "g3ku/web/frontend/org_graph.css").read_text(encoding="utf-8")
 
     assert "model-role-limit-fixed-track" in app_js
