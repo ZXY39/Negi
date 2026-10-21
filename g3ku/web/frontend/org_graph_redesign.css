@@ -741,12 +741,6 @@
     color: var(--ui-text);
 }
 
-[data-ui-version="v2"] .resource-pagination {
-    gap: var(--ui-space-2);
-    padding: var(--ui-space-3) 0 0;
-    border-top: 1px solid var(--ui-border);
-}
-
 /* 15. CEO 外壳：会话列两态由网格列宽控制，不使用 auto */
 [data-ui-version="v2"] .ceo-shell {
     --ui-ceo-session-width: 92px;
@@ -1063,11 +1057,8 @@
 [data-ui-version="v2"] .project-card-grid {
     grid-template-columns: repeat(auto-fill, minmax(300px, 1fr));
     gap: var(--ui-space-4);
-}
-
-[data-ui-version="v2"] .resource-list {
-    grid-template-columns: minmax(0, 1fr);
-    gap: var(--ui-space-3);
+    row-gap: var(--ui-space-6);
+    column-gap: 18px;
 }
 
 [data-ui-version="v2"] .model-routing-grid {
@@ -1081,17 +1072,7 @@
     gap: var(--ui-space-4);
 }
 
-@media (min-width: 768px) {
-    [data-ui-version="v2"] .resource-list {
-        grid-template-columns: repeat(2, minmax(0, 1fr));
-    }
-}
-
 @media (min-width: 1024px) {
-    [data-ui-version="v2"] .resource-list {
-        grid-template-columns: repeat(3, minmax(0, 1fr));
-    }
-
     [data-ui-version="v2"] .model-routing-grid {
         grid-template-columns: repeat(2, minmax(0, 1fr));
     }
@@ -1103,7 +1084,6 @@
 
 @media (min-width: 1200px) {
 
-    [data-ui-version="v2"] .resource-list,
     [data-ui-version="v2"] .model-routing-grid {
         grid-template-columns: repeat(4, minmax(0, 1fr));
     }
@@ -1185,61 +1165,6 @@
     [data-ui-version="v2"] .pc-metrics {
         grid-template-columns: repeat(2, minmax(0, 1fr));
     }
-}
-
-/* 22. Skill / Tool 卡片 */
-[data-ui-version="v2"] .resource-list {
-    padding: var(--ui-space-4);
-}
-
-[data-ui-version="v2"] .resource-list-item {
-    display: flex;
-    flex-direction: column;
-    gap: var(--ui-space-2);
-    padding: var(--ui-space-4);
-    border: 1px solid var(--ui-border);
-    border-radius: var(--ui-radius-card);
-    background: var(--ui-bg-surface);
-    box-shadow: none;
-}
-
-[data-ui-version="v2"] .resource-list-item:hover,
-[data-ui-version="v2"] .resource-list-item.active,
-[data-ui-version="v2"] .resource-list-item.selected {
-    border-color: var(--ui-brand);
-    background: var(--ui-bg-surface);
-    box-shadow: none;
-}
-
-[data-ui-version="v2"] .resource-list-item.selected {
-    background: var(--ui-brand-soft);
-}
-
-[data-ui-version="v2"] .resource-list-title {
-    display: -webkit-box;
-    -webkit-box-orient: vertical;
-    -webkit-line-clamp: 2;
-    overflow: hidden;
-    font-size: 14px;
-    font-weight: 600;
-    line-height: 1.45;
-    color: var(--ui-text);
-}
-
-[data-ui-version="v2"] .resource-list-subtitle {
-    display: -webkit-box;
-    -webkit-box-orient: vertical;
-    -webkit-line-clamp: 3;
-    overflow: hidden;
-    font-size: 12px;
-    line-height: 1.5;
-    color: var(--ui-text-secondary);
-}
-
-[data-ui-version="v2"] .resource-list-meta {
-    margin-top: auto;
-    font-size: 12px;
-    color: var(--ui-text-muted);
 }
 
 /* 23. 模型配置 */
@@ -1772,13 +1697,6 @@
 [data-ui-version="v2"] .ceo-shell.is-session-panel-expanded .ceo-session-bulk-toggle {
     height: 40px;
     min-height: 40px;
-}
-
-/* 40. 卡片网格间距：行距加倍、列距加一半 */
-[data-ui-version="v2"] .project-card-grid,
-[data-ui-version="v2"] .resource-list {
-    row-gap: var(--ui-space-6);
-    column-gap: 18px;
 }
 
 /* 41. 状态类侧边粗线已在各处删除；这里只兜底旧样式里同类的强调条。
