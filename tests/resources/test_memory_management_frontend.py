@@ -147,16 +147,18 @@ def test_memory_management_view_uses_detail_modal_and_toasts_instead_of_page_ban
 
 def test_memory_management_view_preserves_memory_only_auto_refresh() -> None:
     app_js = (REPO_ROOT / "g3ku/web/frontend/org_graph_app.js").read_text(encoding="utf-8")
+    # 轮询与三列加载住在 memory/store.js；视图切换仍在 app.js。
+    store_js = (REPO_ROOT / "g3ku/web/frontend/memory/store.js").read_text(encoding="utf-8")
 
     assert 'viewMemory: document.getElementById("view-memory")' in app_js
     assert "MEMORY_VIEW_POLL_MS = 15000" in app_js
-    assert "function startMemoryViewAutoRefresh()" in app_js
-    assert "function stopMemoryViewAutoRefresh()" in app_js
-    assert 'if (S.view !== "memory") return;' in app_js
-    assert 'void loadMemoryView({ quiet: true });' in app_js
+    assert "function startMemoryViewAutoRefresh()" in store_js
+    assert "function stopMemoryViewAutoRefresh()" in store_js
+    assert 'if (S.view !== "memory") return;' in store_js
+    assert 'void loadMemoryView({ quiet: true });' in store_js
     assert 'if (view === "memory") startMemoryViewAutoRefresh();' in app_js
     assert 'else stopMemoryViewAutoRefresh();' in app_js
-    assert "function maybeToastMemoryAlerts(" in app_js
+    assert "function maybeToastMemoryAlerts(" in store_js
     assert "openMemoryDetailPreview(detailTrigger.dataset.memoryDetailOpen" in app_js
     assert "closeMemoryDetailPreview();" in app_js
 

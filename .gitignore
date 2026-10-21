@@ -93,3 +93,7 @@ image_help.txt
 # 前端目录只放静态资源，调试导出物不入库
 g3ku/web/frontend/*.txt
 g3ku/web/frontend/*.py
+
+# Frontend memory-page module (the runtime memory store stays ignored above)
+!g3ku/web/frontend/memory/
+!g3ku/web/frontend/memory/**
