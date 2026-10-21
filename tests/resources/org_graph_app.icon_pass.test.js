@@ -11,27 +11,20 @@ const { readFrontendSources } = require("./support/frontend_sources.js");
 const APP_PATH = "g3ku/web/frontend/org_graph_app.js";
 const APP_CODE = readFrontendSources(["app"]).join("\n");
 
-class StubElement {}
-class StubHTMLElement extends StubElement {
+const {
+    StubElement,
+    StubHTMLElement: BaseStubHTMLElement,
+} = require("./support/frontend_stub.js");
+
+class StubHTMLElement extends BaseStubHTMLElement {
     constructor(tag = "DIV", attrs = {}) {
-        super();
-        this.tagName = tag;
-        this.attributes = { ...attrs };
+        super(tag, attrs);
         this.removed = [];
-        this.dataset = {};
-        this.className = "";
-        this.children = [];
-    }
-
-    setAttribute(name, value) { this.attributes[name] = String(value); }
-
-    getAttribute(name) {
-        return Object.prototype.hasOwnProperty.call(this.attributes, name) ? this.attributes[name] : null;
     }
 
     removeAttribute(name) {
         this.removed.push(name);
-        delete this.attributes[name];
+        super.removeAttribute(name);
     }
 }
 

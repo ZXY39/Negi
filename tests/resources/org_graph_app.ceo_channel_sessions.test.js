@@ -10,32 +10,15 @@ const APP_CODE = readFrontendSources(["app"]).join("\n");
 // P1/P4 前端契约：渠道会话的识别、分组、补丁路由与「只读但可暂停」按钮语义。
 // 这些分支若被 revert，必须在这里失败——此前仅有后端测试覆盖（审查报告 C2）。
 
-class StubElement {}
-class StubHTMLElement extends StubElement {}
-class StubHTMLButtonElement extends StubHTMLElement {}
-class StubHTMLInputElement extends StubHTMLElement {}
-class StubHTMLTextAreaElement extends StubHTMLElement {}
-class StubHTMLSelectElement extends StubHTMLElement {}
-
-class StubDocument {
-    getElementById() {
-        return null;
-    }
-
-    querySelector() {
-        return null;
-    }
-
-    querySelectorAll() {
-        return [];
-    }
-
-    addEventListener() {}
-
-    createElement() {
-        return {};
-    }
-}
+const {
+    StubElement,
+    StubHTMLElement,
+    StubDocument,
+    StubHTMLButtonElement,
+    StubHTMLInputElement,
+    StubHTMLTextAreaElement,
+    StubHTMLSelectElement,
+} = require("./support/frontend_stub.js");
 
 function makeButtonElement() {
     return {

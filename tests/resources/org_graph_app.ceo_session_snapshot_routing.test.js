@@ -9,32 +9,15 @@ const APP_PATH = "g3ku/web/frontend/org_graph_app.js";
 const TASK_VIEW_CODE = readFrontendSources(["task_view"]).join("\n");
 const APP_CODE = readFrontendSources(["app"]).join("\n");
 
-class StubElement {}
-class StubHTMLElement extends StubElement {}
-class StubHTMLButtonElement extends StubHTMLElement {}
-class StubHTMLInputElement extends StubHTMLElement {}
-class StubHTMLTextAreaElement extends StubHTMLElement {}
-class StubHTMLSelectElement extends StubHTMLElement {}
-
-class StubDocument {
-    getElementById() {
-        return null;
-    }
-
-    querySelector() {
-        return null;
-    }
-
-    querySelectorAll() {
-        return [];
-    }
-
-    addEventListener() {}
-
-    createElement() {
-        return {};
-    }
-}
+const {
+    StubElement,
+    StubHTMLElement,
+    StubDocument,
+    StubHTMLButtonElement,
+    StubHTMLInputElement,
+    StubHTMLTextAreaElement,
+    StubHTMLSelectElement,
+} = require("./support/frontend_stub.js");
 
 function loadApp() {
     class StubWebSocket {

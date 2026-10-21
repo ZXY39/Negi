@@ -7,78 +7,15 @@ const { readFrontendSources } = require("./support/frontend_sources.js");
 const APP_PATH = "g3ku/web/frontend/org_graph_app.js";
 const APP_CODE = readFrontendSources(["app"]).join("\n");
 
-class StubElement {}
-class StubHTMLElement extends StubElement {
-    constructor() {
-        super();
-        this.className = "";
-        this.hidden = false;
-        this.textContent = "";
-        this._innerHTML = "";
-        this.children = [];
-        this.classList = {
-            add: (...tokens) => {
-                const classes = new Set(String(this.className || "").split(/\s+/).filter(Boolean));
-                tokens.forEach((token) => classes.add(token));
-                this.className = [...classes].join(" ");
-            },
-            remove: (...tokens) => {
-                const classes = new Set(String(this.className || "").split(/\s+/).filter(Boolean));
-                tokens.forEach((token) => classes.delete(token));
-                this.className = [...classes].join(" ");
-            },
-            contains: (token) => String(this.className || "").split(/\s+/).includes(token),
-        };
-    }
-
-    appendChild(child) {
-        this.children.push(child);
-        return child;
-    }
-
-    querySelector() {
-        return null;
-    }
-
-    querySelectorAll() {
-        return [];
-    }
-
-    addEventListener() {}
-
-    set innerHTML(value) {
-        this._innerHTML = String(value);
-    }
-
-    get innerHTML() {
-        return this._innerHTML;
-    }
-}
-
-class StubHTMLButtonElement extends StubHTMLElement {}
-class StubHTMLInputElement extends StubHTMLElement {}
-class StubHTMLTextAreaElement extends StubHTMLElement {}
-class StubHTMLSelectElement extends StubHTMLElement {}
-
-class StubDocument {
-    getElementById() {
-        return null;
-    }
-
-    querySelector() {
-        return null;
-    }
-
-    querySelectorAll() {
-        return [];
-    }
-
-    addEventListener() {}
-
-    createElement() {
-        return new StubHTMLElement();
-    }
-}
+const {
+    StubElement,
+    StubHTMLElement,
+    StubDocument,
+    StubHTMLButtonElement,
+    StubHTMLInputElement,
+    StubHTMLTextAreaElement,
+    StubHTMLSelectElement,
+} = require("./support/frontend_stub.js");
 
 function loadApp() {
     const context = {

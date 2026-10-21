@@ -9,50 +9,15 @@ const HTML_PATH = "g3ku/web/frontend/org_graph.html";
 const APP_CODE = readFrontendSources(["app"]).join("\n");
 const HTML_CODE = fs.readFileSync(HTML_PATH, "utf8");
 
-class StubElement {}
-class StubHTMLElement extends StubElement {
-    constructor() {
-        super();
-        this.className = "";
-        this._innerHTML = "";
-    }
-
-    set innerHTML(value) {
-        this._innerHTML = String(value);
-    }
-
-    get innerHTML() {
-        return this._innerHTML;
-    }
-
-    querySelector() {
-        return null;
-    }
-}
-class StubHTMLButtonElement extends StubHTMLElement {}
-class StubHTMLInputElement extends StubHTMLElement {}
-class StubHTMLTextAreaElement extends StubHTMLElement {}
-class StubHTMLSelectElement extends StubHTMLElement {}
-
-class StubDocument {
-    getElementById() {
-        return null;
-    }
-
-    querySelector() {
-        return null;
-    }
-
-    querySelectorAll() {
-        return [];
-    }
-
-    addEventListener() {}
-
-    createElement() {
-        return new StubHTMLElement();
-    }
-}
+const {
+    StubElement,
+    StubHTMLElement,
+    StubDocument,
+    StubHTMLButtonElement,
+    StubHTMLInputElement,
+    StubHTMLTextAreaElement,
+    StubHTMLSelectElement,
+} = require("./support/frontend_stub.js");
 
 function loadApp() {
     const context = {
