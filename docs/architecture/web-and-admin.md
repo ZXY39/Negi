@@ -14,6 +14,17 @@ When debugging behavior, first identify which side owns the state transition:
 - If the issue is display text, interaction wiring, or DOM updates, start in `g3ku/web/frontend/*`.
 - If the issue is data shape, status lifecycle, or permissions, start in API/runtime services.
 
+## Frontend Script Layout And Test Loading
+
+The console is a classic-script page: no bundler, no ES modules. `org_graph.html` is the single load order, and every script shares the global lexical scope, so a module can only see a binding another script declared before its first call, not before its own load.
+
+- `org_graph_app.js` still owns the `S`/`U` registries, `bind()` and the per-surface wiring. It consumes the modules below; it does not redefine their entry points.
+- Shared modules, in page order: `ui/toast.js` (`showToast` / `closeToast`), `ui/confirm.js` (`openConfirm` / `closeConfirm` / `acceptConfirm` / `requestInlineConfirm`), `ceo/compression.js` (marker normalization, one placement resolver, live divider, manual poll, terminal transition), `ceo/feed-model.js` (message keys, render signature, turn id/usage and reasoning normalization), `ceo/feed-view.js` (upward paging, stick-to-bottom follow, scroll snapshots, rebuild view state), `ceo/sessions-panel.js` (visibility, unread exemptions, bulk actions, drag ordering, card rendering), `ceo/session-store.js` (snapshot normalization, cache persistence, cache render entry), `ceo/ws-router.js` (CEO frame table; each entry keeps its own session guard, while connection lifecycle stays in `initCeoWs`).
+- `client_api/core.js` owns the only request path (URL, timeout, abort, error-code normalization). `client_api/<domain>.js` declares endpoints and response normalization; `api_client.js` is the facade that extends `ApiCore` and mixes the domains in with `Object.assign`. The facade's method names and signatures are a contract for every call site.
+- The frontend module directory is `client_api/`, never `api/`: `g3ku/web/main.py::serve_frontend_file` rejects every path under `/api/` for the backend namespace, so a module served from `api/` is a 404 and the page dies with `ApiClient is not defined`.
+- Adding a frontend module takes two edits: put its `<script>` in `org_graph.html` at the call-order position, and list it in the matching bundle of `tests/resources/support/frontend_sources.js`. Bundles are subsettable and mirror the page order; `tests/resources/frontend_manifest.test.js` fails when a page script is unregistered, missing on disk, or out of order.
+- Tests read source through `readFrontendSources([...]).join("\n")`, not by reading `org_graph_app.js` directly. Shared DOM stubs live in `tests/resources/support/frontend_stub.js`; suites keep their local overrides until their module lands.
+
 ## External Agent API Assembly
 
 The channel-agnostic headless surface for third-party bridges is mounted alongside the web/admin routers:
