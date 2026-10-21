@@ -10,16 +10,18 @@ const fs = require("node:fs");
 // 「保留原生盒子只染 accent-color」这一档已经清空：那四颗（语音自动发送、记忆页三处）
 // 都换成了通用组件，样式面只剩一套自绘盒子可讲。
 
-const FILES = [
-    "g3ku/web/frontend/org_graph.html",
-    "g3ku/web/frontend/org_graph_app.js",
-    "g3ku/web/frontend/org_graph_tasks.js",
-    "g3ku/web/frontend/org_graph_task_view.js",
-    "g3ku/web/frontend/org_graph_llm.js",
-    "g3ku/web/frontend/org_graph_resources.js",
-    "g3ku/web/frontend/org_graph_external.js",
-    "g3ku/web/frontend/org_graph_ceo_governance.js",
-];
+// 勾选框可能出现在任何前端脚本里；按目录遍历，新增模块不需要再登记一次。
+const FRONTEND_DIR = "g3ku/web/frontend";
+function collectFrontendFiles(dir) {
+    return fs.readdirSync(dir, { withFileTypes: true }).flatMap((entry) => {
+        const path = `${dir}/${entry.name}`;
+        if (entry.isDirectory()) {
+            return entry.name === "vendor" ? [] : collectFrontendFiles(path);
+        }
+        return /\.(js|html)$/.test(entry.name) ? [path] : [];
+    });
+}
+const FILES = collectFrontendFiles(FRONTEND_DIR);
 
 // 每个落点的稳定标记（不按行号，行号会漂）。
 const LEDGER = [
