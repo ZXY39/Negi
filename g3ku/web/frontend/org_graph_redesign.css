@@ -1030,25 +1030,6 @@
     column-gap: 18px;
 }
 
-[data-ui-version="v2"] .model-routing-grid {
-    grid-template-columns: minmax(0, 1fr);
-    gap: var(--ui-space-4);
-}
-
-@media (min-width: 1024px) {
-    [data-ui-version="v2"] .model-routing-grid {
-        grid-template-columns: repeat(2, minmax(0, 1fr));
-    }
-
-}
-
-@media (min-width: 1200px) {
-
-    [data-ui-version="v2"] .model-routing-grid {
-        grid-template-columns: repeat(4, minmax(0, 1fr));
-    }
-}
-
 /* 21. 任务卡片 */
 [data-ui-version="v2"] .project-card {
     padding: var(--ui-space-4);
@@ -1125,92 +1106,6 @@
     [data-ui-version="v2"] .pc-metrics {
         grid-template-columns: repeat(2, minmax(0, 1fr));
     }
-}
-
-/* 23. 模型配置 */
-[data-ui-version="v2"] .llm-page-layout {
-    grid-template-columns: minmax(0, 1fr);
-    gap: var(--ui-space-4);
-}
-
-@media (min-width: 1024px) {
-    [data-ui-version="v2"] .llm-page-layout {
-        grid-template-columns: 240px 280px minmax(0, 1fr);
-        gap: var(--ui-space-5);
-    }
-}
-
-[data-ui-version="v2"] .model-group-list {
-    display: flex;
-    flex-direction: column;
-    gap: var(--ui-space-2);
-    padding: var(--ui-space-2);
-    flex: 1;
-    overflow-y: auto;
-}
-
-[data-ui-version="v2"] .model-group-item {
-    gap: var(--ui-space-1);
-    padding: var(--ui-space-3);
-    border: 1px solid var(--ui-border);
-    border-radius: var(--ui-radius-card);
-    background: var(--ui-bg-elevated);
-}
-
-[data-ui-version="v2"] .model-group-item.is-editing:hover {
-    border-color: color-mix(in srgb, var(--ui-accent) 45%, var(--ui-border));
-}
-
-[data-ui-version="v2"] .model-group-item.is-incomplete {
-    border-color: color-mix(in srgb, var(--ui-danger) 45%, var(--ui-border));
-}
-
-[data-ui-version="v2"] .model-group-name {
-    font-size: 13px;
-    color: var(--ui-text-primary);
-}
-
-[data-ui-version="v2"] .model-group-member-option {
-    font-size: 12px;
-    color: var(--ui-text-primary);
-}
-
-[data-ui-version="v2"] .model-group-member-option.is-selected span {
-    color: var(--ui-accent);
-}
-
-[data-ui-version="v2"] .model-group-dialog-members {
-    border: 1px solid var(--ui-border);
-    border-radius: var(--ui-radius-control);
-    background: var(--ui-bg-surface);
-}
-
-[data-ui-version="v2"] .model-group-dialog-error {
-    color: var(--ui-danger);
-}
-
-[data-ui-version="v2"] .model-chain-slide.is-group-tile {
-    border-color: color-mix(in srgb, var(--ui-accent) 40%, var(--ui-border));
-    background: color-mix(in srgb, var(--ui-accent) 6%, var(--ui-bg-elevated));
-}
-
-[data-ui-version="v2"] .model-chain-slide.is-group-tile.is-incomplete {
-    border-color: color-mix(in srgb, var(--ui-danger) 45%, var(--ui-border));
-}
-
-[data-ui-version="v2"] .model-shared-list {
-    display: flex;
-    flex-direction: column;
-    gap: var(--ui-space-1);
-    padding: var(--ui-space-2);
-}
-
-[data-ui-version="v2"] .model-chain-card {
-    padding: var(--ui-space-4);
-    border: 1px solid var(--ui-border);
-    border-radius: var(--ui-radius-card);
-    background: var(--ui-bg-surface);
-    box-shadow: none;
 }
 
 /* 26. 小屏页面降级 */
@@ -1531,69 +1426,6 @@
     border-left: 0;
 }
 
-/* 42. 模型页：目录标题与搜索框对齐右侧角色卡标题，条目样式与模型链一致 */
-[data-ui-version="v2"] .llm-bindings-panel .panel-header .subtitle,
-[data-ui-version="v2"] .llm-groups-panel .panel-header .subtitle {
-    display: none;
-}
-
-[data-ui-version="v2"] .llm-bindings-panel,
-[data-ui-version="v2"] .llm-groups-panel {
-    padding: 0;
-}
-
-[data-ui-version="v2"] .llm-bindings-panel .panel-header,
-[data-ui-version="v2"] .llm-groups-panel .panel-header {
-    align-items: center;
-    padding: 0 0 var(--ui-space-3);
-    border-bottom: 0;
-}
-
-[data-ui-version="v2"] .model-shared-actions {
-    width: auto;
-    min-width: 220px;
-}
-
-[data-ui-version="v2"] .llm-groups-panel .model-shared-actions {
-    min-width: 0;
-}
-
-[data-ui-version="v2"] .llm-bindings-panel .panel-header h3,
-[data-ui-version="v2"] .llm-groups-panel .panel-header h3,
-[data-ui-version="v2"] .model-chain-card .card-header h3 {
-    font-size: 16px;
-    font-weight: 700;
-    line-height: 42px;
-}
-
-[data-ui-version="v2"] .model-shared-list {
-    display: grid;
-    grid-auto-rows: min-content;
-    gap: var(--ui-space-3);
-    padding: 0;
-}
-
-[data-ui-version="v2"] .llm-binding-card.model-available-item {
-    padding: var(--ui-space-4);
-    border: 1px solid var(--ui-border);
-    border-radius: var(--ui-radius-control);
-    background: var(--ui-bg-subtle);
-    box-shadow: none;
-}
-
-[data-ui-version="v2"] .llm-binding-card.model-available-item:hover {
-    border-color: var(--ui-border-strong);
-    background: var(--ui-bg-elevated);
-    transform: none;
-    box-shadow: none;
-}
-
-[data-ui-version="v2"] .model-available-item .resource-list-title {
-    font-size: 14px;
-    font-weight: 700;
-    color: var(--ui-text);
-}
-
 /* 46. 任务大厅头部：多选 → 排序 → 树深度靠左成组，树深度之后的性能读数
    推到右端。h1 已经视觉隐藏，但 .task-header-main 仍在流里占一行宽，会把
    多选推到左内边距 + 标题宽度 + gap 之后；其他页的刷新按钮是绝对定位在
@@ -1622,11 +1454,6 @@
     order: 2;
     /* 旧样式在 ≤1100px 把读数改回左对齐，这里不分宽度一律靠右 */
     justify-content: flex-end;
-}
-
-[data-ui-version="v2"] #view-models #model-refresh-btn {
-    position: static;
-    transform: none;
 }
 
 /* 48. 会话卡片拖动中：来源卡压暗，落位卡亮一圈品牌环。位置指示只用环，
@@ -1926,8 +1753,6 @@
 [data-ui-version="v2"] #ceo-context-usage-brain,
 [data-ui-version="v2"] .nav-item,
 [data-ui-version="v2"] .ceo-session-select,
-[data-ui-version="v2"] .model-available-main,
-[data-ui-version="v2"] .model-chain-main,
 [data-ui-version="v2"] .task-trace-round-chip {
     font-size: 13px;
 }
@@ -2011,104 +1836,6 @@
    状态色由文字与描边承担（状态文字本来就在）。 */
 [data-ui-version="v2"] .execution-tree-node .status-badge {
     background: var(--ui-bg-surface);
-}
-
-/* 58. .toolbar-btn.success 不再做「实心强调」档：旧层给它的是品牌填充 +
-   color-mix(..., transparent) 半透描边 + 同色光晕投影，在亮色压深后读起来就是一块
-   蓝绿。现在它和普通控件档同形：表面底、--ui-border 描边、主文本色、无光晕，
-   hover 走中性底。用这个类的按钮一起变普通：编辑模型链 / 保存并连接 /
-   签发桥接 token / 签发 / 确定 / 保存 / 确认修改 / 添加 / 启用模型。
-   #model-roles-save-btn 在旧层另有一条同色的 id 规则，必须一起压住。 */
-[data-ui-version="v2"] .toolbar-btn.success,
-[data-ui-version="v2"] #model-roles-save-btn {
-    background: var(--ui-bg-surface);
-    border: 1px solid var(--ui-border);
-    color: var(--ui-text);
-    box-shadow: none;
-}
-
-[data-ui-version="v2"] .toolbar-btn.success:hover:not(:disabled),
-[data-ui-version="v2"] #model-roles-save-btn:hover:not(:disabled) {
-    background: var(--ui-neutral-soft);
-    border-color: var(--ui-border-strong);
-    color: var(--ui-text);
-    box-shadow: none;
-}
-
-[data-ui-version="v2"] .toolbar-btn.success:disabled,
-[data-ui-version="v2"] #model-roles-save-btn:disabled {
-    background: var(--ui-bg-subtle);
-    border-color: var(--ui-border);
-    color: var(--ui-text-disabled);
-}
-
-/* 59. 模型配置头部的「是否为图像多模态」与同排控件同档：旧层给它 46px 高 +
-   14px 圆角 + --border-strong 描边，而同一行里的模型列表按钮 36px、最大上下文
-   输入框 38px 都是 8px 圆角，整行就它突出来一块。 */
-[data-ui-version="v2"] .llm-image-checkbox-control {
-    height: 38px;
-    padding: 0 var(--ui-space-3);
-    border: 1px solid var(--ui-border);
-    border-radius: var(--ui-radius-control);
-    background: var(--ui-bg-surface);
-    color: var(--ui-text);
-    font-size: 13px;
-}
-
-/* 行内档（模型列表那一行的紧凑版）跟着换圆角与描边，高度留它自己的 34px。 */
-[data-ui-version="v2"] .llm-image-checkbox-control--inline {
-    height: 34px;
-    min-height: 34px;
-    padding: 0 var(--ui-space-2);
-}
-
-/* 60. 模型配置弹窗内的下拉与「获取模型列表」按钮收到 §10/§59 的 38px 档：
-   §56 把下拉 trigger 全局锁在 40px、按钮档是 36px，而这张表单里的输入框和
-   「是否为图像多模态」勾选块都是 38px，同一行会排出三种高度。 */
-[data-ui-version="v2"] .model-config-shell .resource-select-trigger,
-[data-ui-version="v2"] .model-config-shell .llm-fetch-btn {
-    height: 38px;
-    min-height: 38px;
-}
-
-/* 61. 模型页两列按窗口高度铺到底：旧层在这一页叠了四个互不相干的魔数——容器
-   min-height: calc(100vh - 120px)、面板 min-height: 72vh、模型列表 max-height:
-   calc(100dvh - 320px)、角色链 max-height: min(42dvh, 420px)。1280×690 实测模型
-   列表停在 560（面板可用到 662）、四列角色链停在 460，底部空一整条；而头部一旦
-   换行（编辑模型链时展开的最大轮数条）容器就顶出 .main-content 的 overflow:hidden，
-   最后一行再也滚不到。改成容器 flex:1 吃满剩余高度、列表 flex:1 且解除 max-height，
-   两列收在同一条基线上，滚动只发生在列表内部。只作用于 ≥1024px 的两列档：窄屏是
-   模型列表压角色链的单列，撑满会各分半窗，留旧行为。 */
-@media (min-width: 1024px) {
-    [data-ui-version="v2"] .llm-page-layout {
-        flex: 1 1 auto;
-        min-height: 0;
-    }
-
-    [data-ui-version="v2"] .llm-bindings-panel,
-    [data-ui-version="v2"] .llm-groups-panel,
-    [data-ui-version="v2"] .llm-routes-panel {
-        min-height: 0;
-    }
-
-    [data-ui-version="v2"] .model-shared-list,
-    [data-ui-version="v2"] .model-group-list,
-    [data-ui-version="v2"] .model-routing-grid,
-    [data-ui-version="v2"] .model-chain-list {
-        flex: 1 1 auto;
-        max-height: none;
-    }
-
-    /* 角色链的容器有两个渲染方：org_graph_llm.js 用 .role-chain-section，
-       org_graph_app.js 用 .model-role-section。旧层只给后者配了 flex:1 +
-       min-height:0，所以模型页实盘走的那一份是普通 block——列表按内容长到
-       498px，把 530px 的卡片顶穿（scrollHeight 576），底部照样看不见。 */
-    [data-ui-version="v2"] .model-chain-card > .role-chain-section {
-        display: flex;
-        flex-direction: column;
-        flex: 1 1 auto;
-        min-height: 0;
-    }
 }
 
 /* 62. toast 的关闭键是这一行的定高来源：§11 的 .icon-btn 是 36px 见方，比 20px

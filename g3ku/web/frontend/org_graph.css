@@ -11546,50 +11546,6 @@ textarea {
     stroke-width: 2.4;
 }
 
-.memory-op-chip[data-op="add"] {
-    color: #047857;
-}
-
-.memory-op-chip[data-op="rewrite"] {
-    color: #b45309;
-}
-
-.memory-op-chip[data-op="delete"] {
-    color: #b91c1c;
-}
-
-/* 摘除分类导航与删除同族：两者都以"一行离开常驻块"结束，深一档区别在它一次带走的是
-   一个分类背后的全部退场行。这套调色板已没有空着的色相，另开冷色会让它读起来像 note 那一族。 */
-.memory-op-chip[data-op="category_purge"] {
-    color: #7f1d1d;
-}
-
-.memory-op-chip[data-op="note_upsert"] {
-    color: #6d28d9;
-}
-
-.memory-op-chip[data-op="note_edit"] {
-    color: #1d4ed8;
-}
-
-.memory-op-chip[data-op="note_reaped"] {
-    color: #4b5563;
-}
-
-.memory-op-chip[data-op="category_note"] {
-    color: #0e7490;
-}
-
-.memory-op-chip[data-op="consolidate"] {
-    color: #a16207;
-}
-
-/* 容量降级是机器动作，不是谁改了内容：颜色与"记忆退场"分开，否则两种完全不同的事看起来一样。
-   玫红是这套调色板里唯一没被占用的色相，灰色会跟"回收 Note"糊在一起。 */
-.memory-op-chip[data-op="compress_for_capacity"] {
-    color: #be185d;
-}
-
 .memory-card-minimal-trailing {
     display: flex;
     align-items: center;
@@ -14430,4 +14386,274 @@ textarea {
 
 .memory-op-chip[data-op="nochange"] {
     color: var(--ui-text-secondary);
+}
+.memory-op-chip[data-op="note_edit"] {
+    color: #1d4ed8;
+}
+
+.memory-op-chip[data-op="note_reaped"] {
+    color: #4b5563;
+}
+
+.memory-op-chip[data-op="category_note"] {
+    color: #0e7490;
+}
+
+/* 容量降级是机器把渲染换成摘要，谁也没改内容；玫红是这套调色板唯一空着的色相，
+   用灰色会跟"回收 Note"看起来像同一件事。 */
+.memory-op-chip[data-op="compress_for_capacity"] {
+    color: #be185d;
+}
+
+/* ---- 模型配置页（V2 合并后的最终值） --------------------------------------- */
+
+/* 「成功」按钮与普通控件同形：表面底、--ui-border 描边、主文本色、无光晕。 */
+.toolbar-btn.success,
+#model-roles-save-btn {
+    background: var(--ui-bg-surface);
+    border: 1px solid var(--ui-border);
+    color: var(--ui-text);
+    box-shadow: none;
+}
+
+.toolbar-btn.success:hover:not(:disabled),
+#model-roles-save-btn:hover:not(:disabled) {
+    background: var(--ui-neutral-soft);
+    border-color: var(--ui-border-strong);
+    color: var(--ui-text);
+    box-shadow: none;
+}
+
+.toolbar-btn.success:disabled,
+#model-roles-save-btn:disabled {
+    background: var(--ui-bg-subtle);
+    border-color: var(--ui-border);
+    color: var(--ui-text-disabled);
+}
+
+/* 模型页刷新键跟其他页一样留在流内（页头已把它绝对定位到左内边距）。 */
+#view-models #model-refresh-btn {
+    position: static;
+    transform: none;
+}
+
+/* 窄屏单列；≥1024px 是「模型组 / 模型目录 / 角色链」三列。 */
+.llm-page-layout {
+    grid-template-columns: minmax(0, 1fr);
+    gap: var(--ui-space-4);
+}
+
+@media (min-width: 1024px) {
+    .llm-page-layout.llm-page-layout {
+        grid-template-columns: 240px 280px minmax(0, 1fr);
+        gap: var(--ui-space-5);
+    }
+}
+
+/* 左侧目录与模型列表取消面板壳：只有列表本身是可见的面。 */
+.llm-bindings-panel,
+.llm-groups-panel {
+    padding: 0;
+}
+
+.llm-bindings-panel .panel-header.panel-header,
+.llm-groups-panel .panel-header.panel-header {
+    align-items: center;
+    padding: 0 0 var(--ui-space-3);
+    border-bottom: 0;
+}
+
+.llm-bindings-panel .panel-header .subtitle,
+.llm-groups-panel .panel-header .subtitle {
+    display: none;
+}
+
+.llm-bindings-panel .panel-header h3,
+.llm-groups-panel .panel-header h3,
+.model-chain-card .card-header h3 {
+    font-size: 16px;
+    font-weight: 700;
+    line-height: 42px;
+}
+
+.model-shared-actions {
+    width: auto;
+    min-width: 220px;
+}
+
+.llm-groups-panel .model-shared-actions {
+    min-width: 0;
+}
+
+.model-group-list {
+    display: flex;
+    flex-direction: column;
+    gap: var(--ui-space-2);
+    padding: var(--ui-space-2);
+    flex: 1;
+    overflow-y: auto;
+}
+
+.model-group-item {
+    gap: var(--ui-space-1);
+    padding: var(--ui-space-3);
+    border: 1px solid var(--ui-border);
+    border-radius: var(--ui-radius-card);
+    background: var(--ui-bg-elevated);
+}
+
+.model-group-item.is-editing:hover {
+    border-color: color-mix(in srgb, var(--ui-accent) 45%, var(--ui-border));
+}
+
+.model-group-item.is-incomplete {
+    border-color: color-mix(in srgb, var(--ui-danger) 45%, var(--ui-border));
+}
+
+.model-group-name {
+    font-size: 13px;
+    color: var(--ui-text-primary);
+}
+
+.model-group-member-option {
+    font-size: 12px;
+    color: var(--ui-text-primary);
+}
+
+.model-group-member-option.is-selected span {
+    color: var(--ui-accent);
+}
+
+.model-group-dialog-members {
+    border: 1px solid var(--ui-border);
+    border-radius: var(--ui-radius-control);
+    background: var(--ui-bg-surface);
+}
+
+.model-group-dialog-error {
+    color: var(--ui-danger);
+}
+
+/* 模型目录：条目按单列排，与角色链里的模型行同形。 */
+.model-shared-list {
+    display: grid;
+    grid-auto-rows: min-content;
+    gap: var(--ui-space-3);
+    padding: 0;
+}
+
+.llm-binding-card.model-available-item {
+    padding: var(--ui-space-4);
+    border: 1px solid var(--ui-border);
+    border-radius: var(--ui-radius-control);
+    background: var(--ui-bg-subtle);
+    box-shadow: none;
+}
+
+.llm-binding-card.model-available-item:hover {
+    border-color: var(--ui-border-strong);
+    background: var(--ui-bg-elevated);
+    transform: none;
+    box-shadow: none;
+}
+
+.model-available-item .resource-list-title {
+    font-size: 14px;
+    font-weight: 700;
+    color: var(--ui-text);
+}
+
+.model-available-main,
+.model-chain-main {
+    font-size: 13px;
+}
+
+/* 角色链卡片。 */
+.model-routing-grid {
+    grid-template-columns: minmax(0, 1fr);
+    gap: var(--ui-space-4);
+}
+
+@media (min-width: 1024px) {
+    .model-routing-grid {
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+    }
+}
+
+@media (min-width: 1200px) {
+    .model-routing-grid {
+        grid-template-columns: repeat(4, minmax(0, 1fr));
+    }
+}
+
+.model-chain-card {
+    padding: var(--ui-space-4);
+    border: 1px solid var(--ui-border);
+    border-radius: var(--ui-radius-card);
+    background: var(--ui-bg-surface);
+    box-shadow: none;
+}
+
+.model-chain-slide.is-group-tile {
+    border-color: color-mix(in srgb, var(--ui-accent) 40%, var(--ui-border));
+    background: color-mix(in srgb, var(--ui-accent) 6%, var(--ui-bg-elevated));
+}
+
+.model-chain-slide.is-group-tile.is-incomplete {
+    border-color: color-mix(in srgb, var(--ui-danger) 45%, var(--ui-border));
+}
+
+/* 模型配置弹窗：勾选块与同一行的输入框、下拉、获取按钮统一 38px 档。 */
+.llm-image-checkbox-control {
+    height: 38px;
+    padding: 0 var(--ui-space-3);
+    border: 1px solid var(--ui-border);
+    border-radius: var(--ui-radius-control);
+    background: var(--ui-bg-surface);
+    color: var(--ui-text);
+    font-size: 13px;
+}
+
+.llm-image-checkbox-control--inline {
+    height: 34px;
+    min-height: 34px;
+    padding: 0 var(--ui-space-2);
+}
+
+.model-config-shell .resource-select-trigger.resource-select-trigger,
+.model-config-shell .llm-fetch-btn.llm-fetch-btn {
+    height: 38px;
+    min-height: 38px;
+}
+
+/* ≥1024px 两列档：容器吃满剩余高度，两列收在同一条基线上，滚动只发生在列表内部。
+   窄屏是模型列表压角色链的单列，撑满会各分半窗，保留内容高度。 */
+@media (min-width: 1024px) {
+    .llm-page-layout {
+        flex: 1 1 auto;
+        min-height: 0;
+    }
+
+    .llm-bindings-panel,
+    .llm-groups-panel,
+    .llm-routes-panel {
+        min-height: 0;
+    }
+
+    .model-shared-list,
+    .model-group-list,
+    .model-routing-grid,
+    .model-chain-list {
+        flex: 1 1 auto;
+        max-height: none;
+    }
+
+    /* 角色链的容器有两个渲染方：org_graph_llm.js 用 .role-chain-section，
+       org_graph_app.js 用 .model-role-section；两个都撑满卡内剩余高度。 */
+    .model-chain-card > .role-chain-section {
+        display: flex;
+        flex-direction: column;
+        flex: 1 1 auto;
+        min-height: 0;
+    }
 }

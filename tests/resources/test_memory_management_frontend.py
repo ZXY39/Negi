@@ -290,16 +290,16 @@ def test_memory_card_css_uses_full_width_and_compact_centered_content() -> None:
 
 
 def test_memory_queue_card_keeps_natural_height_and_two_line_body() -> None:
-    v2_css = (REPO_ROOT / "g3ku/web/frontend/org_graph_redesign.css").read_text(encoding="utf-8")
+    css = (REPO_ROOT / "g3ku/web/frontend/org_graph.css").read_text(encoding="utf-8")
     card = _fragment(
-        v2_css,
-        '[data-ui-version="v2"] .memory-card-queue {',
-        '[data-ui-version="v2"] .memory-card-queue .memory-card-head {',
+        css,
+        ".memory-card-queue {",
+        ".memory-card-queue .memory-card-head {",
     )
     body = _fragment(
-        v2_css,
-        '[data-ui-version="v2"] .memory-card-queue .memory-card-body {',
-        "/* 44.",
+        css,
+        ".memory-card-queue .memory-card-body {",
+        ".memory-card-minimal-status .status-badge {",
     )
     # .memory-list 是定高滚动容器：卡片允许收缩就会连正文一起被截成半行，
     # 撑不下只能交给列表出滚动条。
@@ -320,7 +320,10 @@ def test_memory_layout_gives_the_stacked_queue_column_a_real_row() -> None:
 
 
 def test_memory_management_view_uses_read_only_queue_endpoints_with_safe_error_messages() -> None:
-    api_client_js = (REPO_ROOT / "g3ku/web/frontend/api_client.js").read_text(encoding="utf-8")
+    api_client_js = "\n".join(
+        (REPO_ROOT / name).read_text(encoding="utf-8")
+        for name in ("g3ku/web/frontend/client_api/memory.js", "g3ku/web/frontend/client_api/core.js")
+    )
     admin_rest_py = (REPO_ROOT / "main/api/admin_rest.py").read_text(encoding="utf-8")
     queue_route = _admin_route_fragment(admin_rest_py, "@router.get('/memory/queue')")
     processed_route = _admin_route_fragment(admin_rest_py, "@router.get('/memory/processed')")
@@ -422,7 +425,7 @@ def test_memory_failed_panel_is_hidden_by_default_and_gated_by_mutations_flag() 
 def test_memory_failed_action_reports_progress_with_a_spinning_toast() -> None:
     app_js = (REPO_ROOT / "g3ku/web/frontend/org_graph_app.js").read_text(encoding="utf-8")
     css = (REPO_ROOT / "g3ku/web/frontend/org_graph.css").read_text(encoding="utf-8")
-    api_js = (REPO_ROOT / "g3ku/web/frontend/api_client.js").read_text(encoding="utf-8")
+    api_js = (REPO_ROOT / "g3ku/web/frontend/client_api/memory.js").read_text(encoding="utf-8")
 
     action_body = _fragment(
         app_js,
@@ -445,8 +448,8 @@ def test_memory_failed_action_reports_progress_with_a_spinning_toast() -> None:
     )
 
     # 这两次变更会把整本台账全量重写，客户端不能比服务端先放弃再报「失败」。
-    discard_call = _fragment(api_js, "static async discardMemoryFailed(", "\n    }")
-    retry_call = _fragment(api_js, "static async retryMemoryFailed(", "\n    }")
+    discard_call = _fragment(api_js, "async discardMemoryFailed(", "\n    }")
+    retry_call = _fragment(api_js, "async retryMemoryFailed(", "\n    }")
     assert "timeoutMs: 30000" in discard_call
     assert "timeoutMs: 30000" in retry_call
 
@@ -1329,9 +1332,20 @@ def test_consolidation_records_survive_into_the_memory_surfaces() -> None:
 
 
 def test_memory_operation_chips_use_one_color_per_operation() -> None:
-    css = (REPO_ROOT / "g3ku/web/frontend/org_graph.css").read_text(encoding="utf-8")
-    colors = dict(re.findall(r'\.memory-op-chip\[data-op="(\w+)"\]\s*\{\s*color:\s*([^;]+);', css))
+    css = "\n".join(
+        (REPO_ROOT / name).read_text(encoding="utf-8")
+        for name in ("g3ku/web/frontend/org_graph.css", "g3ku/web/frontend/org_graph_redesign.css")
+    )
+    colors = {}
+    for match in re.finditer(r'\.memory-op-chip\[data-op="(\w+)"\]', css):
+        brace = css.index("{", match.end())
+        block = css[brace:css.index("}", brace)]
+        color = re.search(r"color:\s*([^;]+);", block)
+        if color:
+            colors[match.group(1)] = color.group(1).strip()
 
+    # 每个操作都有自己的着色，只有「摘除整节」与「删一条」按同一风险档共用 danger：
+    # 两者都以「一行离开常驻块」结束，不同之处由文字说明。
     assert set(colors) == {
         "add",
         "rewrite",
@@ -1343,25 +1357,21 @@ def test_memory_operation_chips_use_one_color_per_operation() -> None:
         "consolidate",
         "category_purge",
         "compress_for_capacity",
+        "nochange",
     }
     assert len(set(colors.values())) == 10
+    assert colors["delete"] == colors["category_purge"] == "var(--ui-danger)"
+    assert colors["rewrite"] == "var(--ui-warning)"
+    assert colors["add"] == "var(--ui-success)"
+    assert colors["note_upsert"] == "var(--ui-info)"
     # 记忆退场是黄：它既不是新增也不是删除，而是这条正文搬进了分类 note
-    assert colors["consolidate"] == "#a16207"
-    # 摘除分类导航与删除同族（都是一行离开常驻块），深一档表示一次带走整个分类；
-    # 调色板里已没有空色相，开冷色会把它挤进 note 那一族
-    assert colors["category_purge"] == "#7f1d1d"
+    assert colors["consolidate"] == "var(--ui-retire)"
     # 容量降级是机器把渲染换成摘要，谁也没改内容；玫红是这套调色板唯一空着的色相，
     # 用灰色就会和"回收 Note"看起来像同一件事。
     assert colors["compress_for_capacity"] == "#be185d"
-
-    # v2 界面下描边与底色都跟着 currentColor，所以这支黄要有自己的 token，
-    # 两个主题块各给一个值：浅色档的 #a16207 已经贴着"修改"的 #9a6d17，深色档另给亮黄
-    redesign = (REPO_ROOT / "g3ku/web/frontend/org_graph_redesign.css").read_text(encoding="utf-8")
-    assert '[data-ui-version="v2"] .memory-op-chip[data-op="consolidate"]' in redesign
-    assert "color: var(--ui-retire);" in redesign
-    assert redesign.count("--ui-retire:") == 2
-    # v2 按风险档上色而不是按操作逐支上色：摘除整节与删一条同档，共用 danger token
-    assert '[data-ui-version="v2"] .memory-op-chip[data-op="category_purge"]' in redesign
+    # 无变化不与任何操作共用色：它什么也没发生
+    assert colors["nochange"] == "var(--ui-text-secondary)"
+    assert css.count("--ui-retire:") == 2
 
 
 def test_memory_processed_card_renders_a_category_purge_as_its_own_operation() -> None:
