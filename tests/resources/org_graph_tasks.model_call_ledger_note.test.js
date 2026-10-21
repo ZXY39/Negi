@@ -22,7 +22,7 @@ function loadNoteHelper() {
         formatTokenCount: (value) => String(value),
     };
     const start = TASKS_CODE.indexOf("function taskModelCallLedgerNote");
-    const end = TASKS_CODE.indexOf("function renderTaskTokenStats");
+    const end = TASKS_CODE.indexOf("function taskModelCallRowKey");
     assert.ok(start > 0 && end > start, "ledger note helper slice not found");
     vm.createContext(context);
     vm.runInContext(TASKS_CODE.slice(start, end), context);

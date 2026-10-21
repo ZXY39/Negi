@@ -23,7 +23,7 @@ const FRONTEND_BUNDLES = Object.freeze({
         "api_client.js",
     ],
     bootstrap: ["org_graph_bootstrap.js"],
-    task_view: ["tasks/tree-store.js", "org_graph_task_view.js"],
+    task_view: ["tasks/tree-store.js", "tasks/tree-view.js", "org_graph_task_view.js"],
     app: [
         "ui/toast.js",
         "ui/confirm.js",
@@ -37,7 +37,7 @@ const FRONTEND_BUNDLES = Object.freeze({
         "ceo/ws-router.js",
         "org_graph_app.js",
     ],
-    tasks: ["tasks/hall-store.js", "org_graph_tasks.js"],
+    tasks: ["tasks/hall-store.js", "tasks/hall-view.js", "org_graph_tasks.js"],
     resources: ["org_graph_resources.js"],
     governance: ["org_graph_ceo_governance.js"],
     llm: ["org_graph_llm.js"],

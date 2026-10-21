@@ -78,10 +78,14 @@ function loadRenderModule({ diskMetrics = null } = {}) {
     vm.createContext(context);
     // 切片从字节格式化/大小排序帮助函数开始：渲染签名引用它们（任务卡片
     // 「占用大小」与按大小排序契约），必须与签名函数同域加载。
+    // renderTasks 住在 tasks/hall-view.js（bundle 的第二段），单独切它；
+    // 其余辅助函数仍从 tasks.js 的 formatTaskBytes..loadTasks 切。
+    const renderStart = TASKS_CODE.indexOf("function renderTasks");
+    const renderEnd = TASKS_CODE.indexOf("function renderTaskTokenStats");
     const start = TASKS_CODE.indexOf("function formatTaskBytes");
     const end = TASKS_CODE.indexOf("async function loadTasks");
     assert.ok(start > 0 && end > start, "render slice not found");
-    vm.runInContext(TASKS_CODE.slice(start, end), context);
+    vm.runInContext(TASKS_CODE.slice(renderStart, renderEnd) + "\n" + TASKS_CODE.slice(start, end), context);
     return context;
 }
 

@@ -43,6 +43,7 @@ function makeContext(state) {
         formatTokenCount: (value) => String(Number(value || 0).toLocaleString("en-US")),
         esc: (value) => String(value ?? ""),
         normalizeTaskModelCall: (raw) => ({ ...(raw && typeof raw === "object" ? raw : {}) }),
+        renderTaskTokenStats: () => {},
         showToast: () => {},
         S: state,
         U: { taskTokenContent: { innerHTML: "", querySelector: () => null } },
