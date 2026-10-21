@@ -601,6 +601,47 @@ def test_the_warming_lane_is_operator_only(tmp_path: Path) -> None:
         manager.close()
 
 
+def test_this_batches_own_rows_are_exempt_from_the_post_commit_pass(tmp_path: Path) -> None:
+    """The exemption is a promise the commit lane has to keep, not just a pool parameter.
+
+    A memory written in this very commit is the newest thing in the block. Downgrading it
+    on the pass that follows the write means the reader never sees the full body the model
+    just produced. The pool already honours `exclude_ids`; this pins that the commit lane
+    passes them.
+    """
+    module = _module()
+    manager = _manager(tmp_path, trigger=200, target=150)
+    try:
+        old_id = _add(manager, body="旧规则" + "内" * 115, minimal="旧->词", now_iso="2026-04-25T00:00:01+08:00")
+        _set_compressed(manager, [old_id])
+        _paint(manager)
+
+        write = module._MemoryValidatedWrite(
+            document_text="",
+            note_writes={},
+            note_refs_written=[],
+            memory_chars_after=0,
+            document_preview="",
+            adds=[
+                {
+                    "content": "新的一条" + "外" * 200,
+                    "minimal_memory": "新的->词",
+                    "decision_source": "user",
+                }
+            ],
+        )
+        manager._commit_validated_write(write)
+
+        fresh = [row for row in manager._memory_repo.list_memories() if str(row["memory_id"]) != old_id]
+        assert len(fresh) == 1
+        assert write.compressed_memory_ids == [], "这一批刚写的行本轮不许被降级"
+        assert bool(fresh[0]["is_compressed"]) is False
+        assert manager._resident_memory_chars() > 150, "让不出位置才升级到归并，不是悄悄收工"
+        assert manager._queued_consolidation_request() is not None, "压缩让不出位置时下一级必须接上"
+    finally:
+        manager.close()
+
+
 def test_the_capacity_rung_is_recorded_per_memory_in_the_ledger(tmp_path: Path) -> None:
     """`capacity_action` names the rung and every downgraded row carries what it gave back."""
     module = _module()

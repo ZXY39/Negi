@@ -4049,7 +4049,16 @@ class MemoryManager:
                     validated.reaped_notes.append({"note_ref": ref, "reason": reason})
 
             _record_reaped(self._cleanup_orphan_notes_locked())
-            compression_result = self._run_post_commit_compression_locked(now_iso=now_iso)
+            # Rows this commit just wrote are exempt from this round's compression: they are
+            # the newest bytes in the block, and demoting one here hides the body the model
+            # produced before any reader ever saw it.
+            written_this_commit = sorted(
+                surviving_ids - {str(row.get("memory_id") or "").strip() for row in rows_before}
+            )
+            compression_result = self._run_post_commit_compression_locked(
+                now_iso=now_iso,
+                exclude_ids=written_this_commit,
+            )
             _record_reaped(self._cleanup_orphan_notes_locked())
             validated.memory_chars_after = self._resident_memory_chars()
             validated.document_preview = self._document_preview(self.snapshot_text())
@@ -4098,8 +4107,8 @@ class MemoryManager:
             kept_rows.append(payload)
         return kept_rows, changed
 
-    def _run_post_commit_compression_locked(self, *, now_iso: str) -> dict[str, Any]:
-        return self._compress_memory_snapshot_if_needed(now_iso=now_iso)
+    def _run_post_commit_compression_locked(self, *, now_iso: str, exclude_ids: list[str] | None = None) -> dict[str, Any]:
+        return self._compress_memory_snapshot_if_needed(now_iso=now_iso, exclude_ids=exclude_ids)
 
     def _queued_consolidation_request(self) -> MemoryQueueRequest | None:
         for row in self._read_queue_requests():
@@ -4245,12 +4254,19 @@ class MemoryManager:
             self._rebuild_memory_snapshot_from_sqlite(now_iso=now_iso)
         return compressed
 
-    def _compress_memory_snapshot_if_needed(self, *, now_iso: str | None = None) -> dict[str, Any]:
+    def _compress_memory_snapshot_if_needed(
+        self,
+        *,
+        now_iso: str | None = None,
+        exclude_ids: list[str] | None = None,
+    ) -> dict[str, Any]:
         """Over the trigger line: compress first, consolidate only if compressing ran out.
 
         Nothing is ever deleted here. The delete lane used to retire 18 memories in one
         machine pass with the model never knowing. `deleted_by_compression_ids` stays in the
         result shape (and stays empty) because the ledger and the admin surface read it.
+        `exclude_ids` carries the rows this very commit wrote: downgrading them on the pass
+        that follows the write would hide the full body before any reader ever saw it.
         """
         effective_now = str(now_iso or self._now_iso()).strip()
         trigger = int(getattr(self.config.document, "compress_trigger_chars", 16000) or 16000)
@@ -4273,7 +4289,7 @@ class MemoryManager:
         # memory in the resident block where the model still reads it. Consolidation asks a
         # model to rewrite several memories into a category note and takes them out of sight,
         # so it only runs once compression has no room left to give.
-        compressed = self._compress_pool_to_target(now_iso=effective_now, target=target)
+        compressed = self._compress_pool_to_target(now_iso=effective_now, target=target, exclude_ids=exclude_ids)
         if compressed:
             result["compression_triggered"] = True
             result["compressed_memory_ids"] = [str(item.get("memory_id") or "") for item in compressed]
