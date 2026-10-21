@@ -52,7 +52,7 @@ global.U = { tree: {}, adMessages: {} };
 global.ApiClient = {};
 global.showToast = () => {};
 global.isAbortLike = () => false;
-const code = fs.readFileSync("g3ku/web/frontend/org_graph_task_view.js", "utf8");
+const code = ["g3ku/web/frontend/tasks/tree-store.js", "g3ku/web/frontend/tasks/tree-view.js", "g3ku/web/frontend/tasks/node-detail-store.js", "g3ku/web/frontend/tasks/node-detail.js", "g3ku/web/frontend/org_graph_task_view.js"].map((name) => fs.readFileSync(name, "utf8")).join("\\n");
 vm.runInThisContext(code);
 global.renderTree = () => {};
 """
@@ -337,7 +337,14 @@ def test_distribution_affected_node_ids_only_cover_frozen_subtrees() -> None:
 
 def test_distribution_tree_line_css_scoped_to_affected_edges() -> None:
     css = (REPO_ROOT / "g3ku" / "web" / "frontend" / "org_graph.css").read_text(encoding="utf-8")
-    js = (REPO_ROOT / "g3ku" / "web" / "frontend" / "org_graph_task_view.js").read_text(encoding="utf-8")
+    js = "\n".join(
+        (REPO_ROOT / "g3ku" / "web" / "frontend" / name).read_text(encoding="utf-8")
+        for name in (
+            "tasks/tree-view.js",
+            "tasks/node-detail.js",
+            "org_graph_task_view.js",
+        )
+    )
     # 旧实现：分发期间全局覆写四个连线变量，整棵树变黄——必须已移除。
     assert ".execution-tree.execution-tree--distribution-active {" not in css
     # 新实现：分发色只作用于受影响节点之间的连线。

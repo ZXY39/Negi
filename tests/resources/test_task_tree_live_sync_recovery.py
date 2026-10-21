@@ -92,7 +92,7 @@ def test_degenerate_subtree_payload_does_not_destroy_tree_and_falls_back_to_full
         };
         global.showToast = () => {};
         global.isAbortLike = () => false;
-        const code = fs.readFileSync("g3ku/web/frontend/org_graph_task_view.js", "utf8");
+        const code = ["g3ku/web/frontend/tasks/tree-store.js", "g3ku/web/frontend/tasks/tree-view.js", "g3ku/web/frontend/tasks/node-detail-store.js", "g3ku/web/frontend/tasks/node-detail.js", "g3ku/web/frontend/org_graph_task_view.js"].map((name) => fs.readFileSync(name, "utf8")).join("\\n");
         vm.runInThisContext(code);
         global.renderTree = () => {};
 
@@ -160,7 +160,7 @@ def test_well_formed_subtree_payload_still_merges() -> None:
         global.ApiClient = { getTaskTreeSnapshot: async () => ({}) };
         global.showToast = () => {};
         global.isAbortLike = () => false;
-        const code = fs.readFileSync("g3ku/web/frontend/org_graph_task_view.js", "utf8");
+        const code = ["g3ku/web/frontend/tasks/tree-store.js", "g3ku/web/frontend/tasks/tree-view.js", "g3ku/web/frontend/tasks/node-detail-store.js", "g3ku/web/frontend/tasks/node-detail.js", "g3ku/web/frontend/org_graph_task_view.js"].map((name) => fs.readFileSync(name, "utf8")).join("\\n");
         vm.runInThisContext(code);
         global.renderTree = () => {};
 
@@ -273,7 +273,7 @@ def test_render_tree_self_heal_reloads_snapshot_with_retry_budget() -> None:
         };
         global.showToast = () => {};
         global.isAbortLike = () => false;
-        const code = fs.readFileSync("g3ku/web/frontend/org_graph_task_view.js", "utf8");
+        const code = ["g3ku/web/frontend/tasks/tree-store.js", "g3ku/web/frontend/tasks/tree-view.js", "g3ku/web/frontend/tasks/node-detail-store.js", "g3ku/web/frontend/tasks/node-detail.js", "g3ku/web/frontend/org_graph_task_view.js"].map((name) => fs.readFileSync(name, "utf8")).join("\\n");
         vm.runInThisContext(code);
         global.renderTree = () => {};
 

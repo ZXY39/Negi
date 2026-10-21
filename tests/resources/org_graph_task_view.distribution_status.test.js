@@ -1,10 +1,10 @@
 const test = require("node:test");
 const assert = require("node:assert/strict");
-const fs = require("node:fs");
 const vm = require("node:vm");
+const { readFrontendSources } = require("./support/frontend_sources.js");
 
-const VIEW_PATH = "g3ku/web/frontend/org_graph_task_view.js";
-const viewCode = fs.readFileSync(VIEW_PATH, "utf8");
+// 任务视图按页面顺序由多个文件组成，纯函数可能住在 tree-store / node-detail 里。
+const viewCode = readFrontendSources(["task_view"]).join("\n");
 
 // org_graph_task_view.js 是经典脚本（挂全局），这里用自动补全的 Proxy 桩喂给它，
 // 只为把纯函数取出来断言标签合同；不模拟渲染，渲染契约由 test_task_tree_frontend_sync.py 覆盖。

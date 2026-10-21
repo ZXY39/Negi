@@ -19,9 +19,11 @@ def _run_node_script(script: str) -> dict[str, object]:
         text=True,
         encoding="utf-8",
         capture_output=True,
-        check=True,
+        check=False,
         cwd=REPO_ROOT,
     )
+    if completed.returncode != 0:
+        raise AssertionError(completed.stderr.strip() or completed.stdout.strip())
     return json.loads(completed.stdout.strip())
 
 
@@ -51,7 +53,7 @@ def test_rendered_tree_builds_from_normalized_snapshot() -> None:
         global.showToast = () => {};
         global.isAbortLike = () => false;
         global.renderTree = () => {};
-        const code = fs.readFileSync("g3ku/web/frontend/org_graph_task_view.js", "utf8");
+        const code = ["g3ku/web/frontend/tasks/tree-store.js", "g3ku/web/frontend/tasks/tree-view.js", "g3ku/web/frontend/tasks/node-detail-store.js", "g3ku/web/frontend/tasks/node-detail.js", "g3ku/web/frontend/org_graph_task_view.js"].map((name) => fs.readFileSync(name, "utf8")).join("\\n");
         vm.runInThisContext(code);
         global.renderTree = () => {};
 
@@ -132,7 +134,7 @@ def test_tree_node_pause_always_confirms_and_only_sends_confirmed_cascade() -> N
         global.renderTree = () => {};
         global.openConfirm = (options) => { confirmation = options; };
         global.window.confirm = () => { throw new Error("native confirmation must not be used"); };
-        const code = fs.readFileSync("g3ku/web/frontend/org_graph_task_view.js", "utf8");
+        const code = ["g3ku/web/frontend/tasks/tree-store.js", "g3ku/web/frontend/tasks/tree-view.js", "g3ku/web/frontend/tasks/node-detail-store.js", "g3ku/web/frontend/tasks/node-detail.js", "g3ku/web/frontend/org_graph_task_view.js"].map((name) => fs.readFileSync(name, "utf8")).join("\\n");
         vm.runInThisContext(code);
 
         const activeParent = {
@@ -238,7 +240,7 @@ def test_task_pause_projects_over_non_terminal_tree_nodes_without_mutating_node_
         global.showToast = () => {};
         global.isAbortLike = () => false;
         global.renderTree = () => {};
-        const code = fs.readFileSync("g3ku/web/frontend/org_graph_task_view.js", "utf8");
+        const code = ["g3ku/web/frontend/tasks/tree-store.js", "g3ku/web/frontend/tasks/tree-view.js", "g3ku/web/frontend/tasks/node-detail-store.js", "g3ku/web/frontend/tasks/node-detail.js", "g3ku/web/frontend/org_graph_task_view.js"].map((name) => fs.readFileSync(name, "utf8")).join("\\n");
         vm.runInThisContext(code);
 
         applyTaskTreeSnapshotPayload({
@@ -399,7 +401,7 @@ def test_ensure_task_tree_subtree_uses_new_snapshot_endpoint() -> None:
         global.showToast = () => {};
         global.isAbortLike = () => false;
         global.renderTree = () => {};
-        const code = fs.readFileSync("g3ku/web/frontend/org_graph_task_view.js", "utf8");
+        const code = ["g3ku/web/frontend/tasks/tree-store.js", "g3ku/web/frontend/tasks/tree-view.js", "g3ku/web/frontend/tasks/node-detail-store.js", "g3ku/web/frontend/tasks/node-detail.js", "g3ku/web/frontend/org_graph_task_view.js"].map((name) => fs.readFileSync(name, "utf8")).join("\\n");
         vm.runInThisContext(code);
         global.renderTree = () => {};
 
@@ -450,7 +452,7 @@ def test_sync_task_tree_header_counts_non_terminal_non_waiting_nodes() -> None:
         global.showToast = () => {};
         global.isAbortLike = () => false;
         global.renderTree = () => {};
-        const code = fs.readFileSync("g3ku/web/frontend/org_graph_task_view.js", "utf8");
+        const code = ["g3ku/web/frontend/tasks/tree-store.js", "g3ku/web/frontend/tasks/tree-view.js", "g3ku/web/frontend/tasks/node-detail-store.js", "g3ku/web/frontend/tasks/node-detail.js", "g3ku/web/frontend/org_graph_task_view.js"].map((name) => fs.readFileSync(name, "utf8")).join("\\n");
         vm.runInThisContext(code);
         global.renderTree = () => {};
         S.liveFrameMap = indexTaskLiveFrames([
@@ -547,7 +549,7 @@ def test_task_status_helpers_treat_unpassed_as_non_failed_without_continue_actio
         global.window = global;
         global.S = {};
         global.U = {};
-        const appCode = fs.readFileSync("g3ku/web/frontend/org_graph_app.js", "utf8");
+        const appCode = ["g3ku/web/frontend/ui/toast.js", "g3ku/web/frontend/ui/confirm.js", "g3ku/web/frontend/ceo/model-panel.js", "g3ku/web/frontend/ceo/composer.js", "g3ku/web/frontend/ceo/compression.js", "g3ku/web/frontend/ceo/feed-model.js", "g3ku/web/frontend/ceo/feed-view.js", "g3ku/web/frontend/ceo/sessions-panel.js", "g3ku/web/frontend/ceo/session-store.js", "g3ku/web/frontend/ceo/ws-router.js", "g3ku/web/frontend/memory/store.js", "g3ku/web/frontend/memory/actions.js", "g3ku/web/frontend/memory/view.js", "g3ku/web/frontend/models/role-store.js", "g3ku/web/frontend/models/role-view.js", "g3ku/web/frontend/models/actions.js", "g3ku/web/frontend/org_graph_app.js"].map((name) => fs.readFileSync(name, "utf8")).join("\\n");
         const pStatusStart = appCode.indexOf("const pStatus");
         const helperStart = appCode.indexOf("const canPause");
         const helperEnd = appCode.indexOf("function normalizeTokenUsage");
@@ -556,7 +558,7 @@ def test_task_status_helpers_treat_unpassed_as_non_failed_without_continue_actio
 
         global.taskWorkerControlsAvailable = () => true;
 
-        const tasksCode = fs.readFileSync("g3ku/web/frontend/org_graph_tasks.js", "utf8");
+        const tasksCode = ["g3ku/web/frontend/tasks/hall-store.js", "g3ku/web/frontend/tasks/hall-view.js", "g3ku/web/frontend/tasks/ws-router.js", "g3ku/web/frontend/org_graph_tasks.js"].map((name) => fs.readFileSync(name, "utf8")).join("\\n");
         const labelStart = tasksCode.indexOf("function taskStatusLabel");
         const labelEnd = tasksCode.indexOf("function getSelectedTasks");
         const actionStart = tasksCode.indexOf("function taskActionTone");
@@ -613,14 +615,14 @@ def test_task_status_helpers_match_completed_and_unpassed_selection_buckets() ->
         global.window = global;
         global.S = {};
         global.U = {};
-        const appCode = fs.readFileSync("g3ku/web/frontend/org_graph_app.js", "utf8");
+        const appCode = ["g3ku/web/frontend/ui/toast.js", "g3ku/web/frontend/ui/confirm.js", "g3ku/web/frontend/ceo/model-panel.js", "g3ku/web/frontend/ceo/composer.js", "g3ku/web/frontend/ceo/compression.js", "g3ku/web/frontend/ceo/feed-model.js", "g3ku/web/frontend/ceo/feed-view.js", "g3ku/web/frontend/ceo/sessions-panel.js", "g3ku/web/frontend/ceo/session-store.js", "g3ku/web/frontend/ceo/ws-router.js", "g3ku/web/frontend/memory/store.js", "g3ku/web/frontend/memory/actions.js", "g3ku/web/frontend/memory/view.js", "g3ku/web/frontend/models/role-store.js", "g3ku/web/frontend/models/role-view.js", "g3ku/web/frontend/models/actions.js", "g3ku/web/frontend/org_graph_app.js"].map((name) => fs.readFileSync(name, "utf8")).join("\\n");
         const pStatusStart = appCode.indexOf("const pStatus");
         const helperStart = appCode.indexOf("const canPause");
         const helperEnd = appCode.indexOf("function normalizeTokenUsage");
         vm.runInThisContext(appCode.slice(pStatusStart, helperStart));
         vm.runInThisContext(appCode.slice(helperStart, helperEnd));
 
-        const tasksCode = fs.readFileSync("g3ku/web/frontend/org_graph_tasks.js", "utf8");
+        const tasksCode = ["g3ku/web/frontend/tasks/hall-store.js", "g3ku/web/frontend/tasks/hall-view.js", "g3ku/web/frontend/tasks/ws-router.js", "g3ku/web/frontend/org_graph_tasks.js"].map((name) => fs.readFileSync(name, "utf8")).join("\\n");
         const labelStart = tasksCode.indexOf("function taskStatusLabel");
         const labelEnd = tasksCode.indexOf("function getSelectedTasks");
         vm.runInThisContext(tasksCode.slice(labelStart, labelEnd));
@@ -659,7 +661,7 @@ def test_task_status_helpers_ignore_legacy_continuation_metadata() -> None:
         global.window = global;
         global.S = {};
         global.U = {};
-        const appCode = fs.readFileSync("g3ku/web/frontend/org_graph_app.js", "utf8");
+        const appCode = ["g3ku/web/frontend/ui/toast.js", "g3ku/web/frontend/ui/confirm.js", "g3ku/web/frontend/ceo/model-panel.js", "g3ku/web/frontend/ceo/composer.js", "g3ku/web/frontend/ceo/compression.js", "g3ku/web/frontend/ceo/feed-model.js", "g3ku/web/frontend/ceo/feed-view.js", "g3ku/web/frontend/ceo/sessions-panel.js", "g3ku/web/frontend/ceo/session-store.js", "g3ku/web/frontend/ceo/ws-router.js", "g3ku/web/frontend/memory/store.js", "g3ku/web/frontend/memory/actions.js", "g3ku/web/frontend/memory/view.js", "g3ku/web/frontend/models/role-store.js", "g3ku/web/frontend/models/role-view.js", "g3ku/web/frontend/models/actions.js", "g3ku/web/frontend/org_graph_app.js"].map((name) => fs.readFileSync(name, "utf8")).join("\\n");
         const pStatusStart = appCode.indexOf("const pStatus");
         const helperStart = appCode.indexOf("const canPause");
         const helperEnd = appCode.indexOf("function normalizeTokenUsage");
@@ -668,7 +670,7 @@ def test_task_status_helpers_ignore_legacy_continuation_metadata() -> None:
 
         global.taskWorkerControlsAvailable = () => true;
 
-        const tasksCode = fs.readFileSync("g3ku/web/frontend/org_graph_tasks.js", "utf8");
+        const tasksCode = ["g3ku/web/frontend/tasks/hall-store.js", "g3ku/web/frontend/tasks/hall-view.js", "g3ku/web/frontend/tasks/ws-router.js", "g3ku/web/frontend/org_graph_tasks.js"].map((name) => fs.readFileSync(name, "utf8")).join("\\n");
         const labelStart = tasksCode.indexOf("function taskStatusLabel");
         const labelEnd = tasksCode.indexOf("function getSelectedTasks");
         const actionStart = tasksCode.indexOf("function taskActionTone");
@@ -676,7 +678,7 @@ def test_task_status_helpers_ignore_legacy_continuation_metadata() -> None:
         vm.runInThisContext(tasksCode.slice(labelStart, labelEnd));
         vm.runInThisContext(tasksCode.slice(actionStart, actionEnd));
 
-        const taskViewCode = fs.readFileSync("g3ku/web/frontend/org_graph_task_view.js", "utf8");
+        const taskViewCode = ["g3ku/web/frontend/tasks/tree-store.js", "g3ku/web/frontend/tasks/tree-view.js", "g3ku/web/frontend/tasks/node-detail-store.js", "g3ku/web/frontend/tasks/node-detail.js", "g3ku/web/frontend/org_graph_task_view.js"].map((name) => fs.readFileSync(name, "utf8")).join("\\n");
         const detailStatusStart = taskViewCode.indexOf("function taskDetailStatusLabel");
         const detailStatusEnd = taskViewCode.indexOf("function taskInitialPromptText");
         vm.runInThisContext(taskViewCode.slice(detailStatusStart, detailStatusEnd));
@@ -790,15 +792,15 @@ def test_render_task_token_stats_paginates_model_calls_and_uses_chinese_labels()
           taskTokenButton: { title: "" },
         };
 
-        const appCode = fs.readFileSync("g3ku/web/frontend/org_graph_app.js", "utf8");
+        const appCode = ["g3ku/web/frontend/ui/toast.js", "g3ku/web/frontend/ui/confirm.js", "g3ku/web/frontend/ceo/model-panel.js", "g3ku/web/frontend/ceo/composer.js", "g3ku/web/frontend/ceo/compression.js", "g3ku/web/frontend/ceo/feed-model.js", "g3ku/web/frontend/ceo/feed-view.js", "g3ku/web/frontend/ceo/sessions-panel.js", "g3ku/web/frontend/ceo/session-store.js", "g3ku/web/frontend/ceo/ws-router.js", "g3ku/web/frontend/memory/store.js", "g3ku/web/frontend/memory/actions.js", "g3ku/web/frontend/memory/view.js", "g3ku/web/frontend/models/role-store.js", "g3ku/web/frontend/models/role-view.js", "g3ku/web/frontend/models/actions.js", "g3ku/web/frontend/org_graph_app.js"].map((name) => fs.readFileSync(name, "utf8")).join("\\n");
         const tokenStart = appCode.indexOf("const EMPTY_TOKEN_USAGE");
         const tokenEnd = appCode.indexOf("function ensureTaskTokenUi");
         vm.runInThisContext(appCode.slice(tokenStart, tokenEnd));
         global.S.modelCatalog = global.S.modelCatalog || { catalog: [] };
-        vm.runInThisContext(appCode.slice(appCode.indexOf("function ceoModelDisplayTitle"), appCode.indexOf("function ceoCurrentUsageEstimate")));
+        vm.runInThisContext(fs.readFileSync("g3ku/web/frontend/ceo/model-panel.js", "utf8"));
 
-        const tasksCode = fs.readFileSync("g3ku/web/frontend/org_graph_tasks.js", "utf8");
-        const tokenStatsStart = tasksCode.indexOf("function taskModelDisplayName");
+        const tasksCode = ["g3ku/web/frontend/tasks/hall-store.js", "g3ku/web/frontend/tasks/hall-view.js", "g3ku/web/frontend/tasks/ws-router.js", "g3ku/web/frontend/org_graph_tasks.js"].map((name) => fs.readFileSync(name, "utf8")).join("\\n");
+        const tokenStatsStart = tasksCode.indexOf("function renderTasks");
         const tokenStatsEnd = tasksCode.indexOf("async function loadTaskDetail");
         vm.runInThisContext(tasksCode.slice(tokenStatsStart, tokenStatsEnd));
 
@@ -930,15 +932,15 @@ def test_render_task_token_stats_sorts_model_calls_by_time_desc() -> None:
           taskTokenButton: { title: "" },
         };
 
-        const appCode = fs.readFileSync("g3ku/web/frontend/org_graph_app.js", "utf8");
+        const appCode = ["g3ku/web/frontend/ui/toast.js", "g3ku/web/frontend/ui/confirm.js", "g3ku/web/frontend/ceo/model-panel.js", "g3ku/web/frontend/ceo/composer.js", "g3ku/web/frontend/ceo/compression.js", "g3ku/web/frontend/ceo/feed-model.js", "g3ku/web/frontend/ceo/feed-view.js", "g3ku/web/frontend/ceo/sessions-panel.js", "g3ku/web/frontend/ceo/session-store.js", "g3ku/web/frontend/ceo/ws-router.js", "g3ku/web/frontend/memory/store.js", "g3ku/web/frontend/memory/actions.js", "g3ku/web/frontend/memory/view.js", "g3ku/web/frontend/models/role-store.js", "g3ku/web/frontend/models/role-view.js", "g3ku/web/frontend/models/actions.js", "g3ku/web/frontend/org_graph_app.js"].map((name) => fs.readFileSync(name, "utf8")).join("\\n");
         const tokenStart = appCode.indexOf("const EMPTY_TOKEN_USAGE");
         const tokenEnd = appCode.indexOf("function ensureTaskTokenUi");
         vm.runInThisContext(appCode.slice(tokenStart, tokenEnd));
         global.S.modelCatalog = global.S.modelCatalog || { catalog: [] };
-        vm.runInThisContext(appCode.slice(appCode.indexOf("function ceoModelDisplayTitle"), appCode.indexOf("function ceoCurrentUsageEstimate")));
+        vm.runInThisContext(fs.readFileSync("g3ku/web/frontend/ceo/model-panel.js", "utf8"));
 
-        const tasksCode = fs.readFileSync("g3ku/web/frontend/org_graph_tasks.js", "utf8");
-        const tokenStatsStart = tasksCode.indexOf("function taskModelDisplayName");
+        const tasksCode = ["g3ku/web/frontend/tasks/hall-store.js", "g3ku/web/frontend/tasks/hall-view.js", "g3ku/web/frontend/tasks/ws-router.js", "g3ku/web/frontend/org_graph_tasks.js"].map((name) => fs.readFileSync(name, "utf8")).join("\\n");
+        const tokenStatsStart = tasksCode.indexOf("function renderTasks");
         const tokenStatsEnd = tasksCode.indexOf("async function loadTaskDetail");
         vm.runInThisContext(tasksCode.slice(tokenStatsStart, tokenStatsEnd));
 
@@ -1002,15 +1004,15 @@ def test_render_task_token_stats_search_filters_all_records_not_current_page() -
           taskTokenButton: { title: "" },
         };
 
-        const appCode = fs.readFileSync("g3ku/web/frontend/org_graph_app.js", "utf8");
+        const appCode = ["g3ku/web/frontend/ui/toast.js", "g3ku/web/frontend/ui/confirm.js", "g3ku/web/frontend/ceo/model-panel.js", "g3ku/web/frontend/ceo/composer.js", "g3ku/web/frontend/ceo/compression.js", "g3ku/web/frontend/ceo/feed-model.js", "g3ku/web/frontend/ceo/feed-view.js", "g3ku/web/frontend/ceo/sessions-panel.js", "g3ku/web/frontend/ceo/session-store.js", "g3ku/web/frontend/ceo/ws-router.js", "g3ku/web/frontend/memory/store.js", "g3ku/web/frontend/memory/actions.js", "g3ku/web/frontend/memory/view.js", "g3ku/web/frontend/models/role-store.js", "g3ku/web/frontend/models/role-view.js", "g3ku/web/frontend/models/actions.js", "g3ku/web/frontend/org_graph_app.js"].map((name) => fs.readFileSync(name, "utf8")).join("\\n");
         const tokenStart = appCode.indexOf("const EMPTY_TOKEN_USAGE");
         const tokenEnd = appCode.indexOf("function ensureTaskTokenUi");
         vm.runInThisContext(appCode.slice(tokenStart, tokenEnd));
         global.S.modelCatalog = global.S.modelCatalog || { catalog: [] };
-        vm.runInThisContext(appCode.slice(appCode.indexOf("function ceoModelDisplayTitle"), appCode.indexOf("function ceoCurrentUsageEstimate")));
+        vm.runInThisContext(fs.readFileSync("g3ku/web/frontend/ceo/model-panel.js", "utf8"));
 
-        const tasksCode = fs.readFileSync("g3ku/web/frontend/org_graph_tasks.js", "utf8");
-        const tokenStatsStart = tasksCode.indexOf("function taskModelDisplayName");
+        const tasksCode = ["g3ku/web/frontend/tasks/hall-store.js", "g3ku/web/frontend/tasks/hall-view.js", "g3ku/web/frontend/tasks/ws-router.js", "g3ku/web/frontend/org_graph_tasks.js"].map((name) => fs.readFileSync(name, "utf8")).join("\\n");
+        const tokenStatsStart = tasksCode.indexOf("function renderTasks");
         const tokenStatsEnd = tasksCode.indexOf("async function loadTaskDetail");
         vm.runInThisContext(tasksCode.slice(tokenStatsStart, tokenStatsEnd));
 
@@ -1120,15 +1122,15 @@ def test_render_task_token_stats_search_supports_call_index() -> None:
           taskTokenButton: { title: "" },
         };
 
-        const appCode = fs.readFileSync("g3ku/web/frontend/org_graph_app.js", "utf8");
+        const appCode = ["g3ku/web/frontend/ui/toast.js", "g3ku/web/frontend/ui/confirm.js", "g3ku/web/frontend/ceo/model-panel.js", "g3ku/web/frontend/ceo/composer.js", "g3ku/web/frontend/ceo/compression.js", "g3ku/web/frontend/ceo/feed-model.js", "g3ku/web/frontend/ceo/feed-view.js", "g3ku/web/frontend/ceo/sessions-panel.js", "g3ku/web/frontend/ceo/session-store.js", "g3ku/web/frontend/ceo/ws-router.js", "g3ku/web/frontend/memory/store.js", "g3ku/web/frontend/memory/actions.js", "g3ku/web/frontend/memory/view.js", "g3ku/web/frontend/models/role-store.js", "g3ku/web/frontend/models/role-view.js", "g3ku/web/frontend/models/actions.js", "g3ku/web/frontend/org_graph_app.js"].map((name) => fs.readFileSync(name, "utf8")).join("\\n");
         const tokenStart = appCode.indexOf("const EMPTY_TOKEN_USAGE");
         const tokenEnd = appCode.indexOf("function ensureTaskTokenUi");
         vm.runInThisContext(appCode.slice(tokenStart, tokenEnd));
         global.S.modelCatalog = global.S.modelCatalog || { catalog: [] };
-        vm.runInThisContext(appCode.slice(appCode.indexOf("function ceoModelDisplayTitle"), appCode.indexOf("function ceoCurrentUsageEstimate")));
+        vm.runInThisContext(fs.readFileSync("g3ku/web/frontend/ceo/model-panel.js", "utf8"));
 
-        const tasksCode = fs.readFileSync("g3ku/web/frontend/org_graph_tasks.js", "utf8");
-        const tokenStatsStart = tasksCode.indexOf("function taskModelDisplayName");
+        const tasksCode = ["g3ku/web/frontend/tasks/hall-store.js", "g3ku/web/frontend/tasks/hall-view.js", "g3ku/web/frontend/tasks/ws-router.js", "g3ku/web/frontend/org_graph_tasks.js"].map((name) => fs.readFileSync(name, "utf8")).join("\\n");
+        const tokenStatsStart = tasksCode.indexOf("function renderTasks");
         const tokenStatsEnd = tasksCode.indexOf("async function loadTaskDetail");
         vm.runInThisContext(tasksCode.slice(tokenStatsStart, tokenStatsEnd));
 
@@ -1214,16 +1216,16 @@ def test_render_task_token_stats_labels_models_with_user_config_names() -> None:
           taskTokenButton: { title: "" },
         };
 
-        const appCode = fs.readFileSync("g3ku/web/frontend/org_graph_app.js", "utf8");
+        const appCode = ["g3ku/web/frontend/ui/toast.js", "g3ku/web/frontend/ui/confirm.js", "g3ku/web/frontend/ceo/model-panel.js", "g3ku/web/frontend/ceo/composer.js", "g3ku/web/frontend/ceo/compression.js", "g3ku/web/frontend/ceo/feed-model.js", "g3ku/web/frontend/ceo/feed-view.js", "g3ku/web/frontend/ceo/sessions-panel.js", "g3ku/web/frontend/ceo/session-store.js", "g3ku/web/frontend/ceo/ws-router.js", "g3ku/web/frontend/memory/store.js", "g3ku/web/frontend/memory/actions.js", "g3ku/web/frontend/memory/view.js", "g3ku/web/frontend/models/role-store.js", "g3ku/web/frontend/models/role-view.js", "g3ku/web/frontend/models/actions.js", "g3ku/web/frontend/org_graph_app.js"].map((name) => fs.readFileSync(name, "utf8")).join("\\n");
         const tokenStart = appCode.indexOf("const EMPTY_TOKEN_USAGE");
         const tokenEnd = appCode.indexOf("function ensureTaskTokenUi");
         vm.runInThisContext(appCode.slice(tokenStart, tokenEnd));
         global.S.modelCatalog = global.S.modelCatalog || { catalog: [] };
         // modelDisplayTitle 定义在 ceoModelDisplayTitle 之前：起点必须含它，否则桩里缺被依赖函数。
-        vm.runInThisContext(appCode.slice(appCode.indexOf("function modelDisplayTitle"), appCode.indexOf("function ceoCurrentUsageEstimate")));
+        vm.runInThisContext(fs.readFileSync("g3ku/web/frontend/ceo/model-panel.js", "utf8"));
 
-        const tasksCode = fs.readFileSync("g3ku/web/frontend/org_graph_tasks.js", "utf8");
-        const tokenStatsStart = tasksCode.indexOf("function taskModelDisplayName");
+        const tasksCode = ["g3ku/web/frontend/tasks/hall-store.js", "g3ku/web/frontend/tasks/hall-view.js", "g3ku/web/frontend/tasks/ws-router.js", "g3ku/web/frontend/org_graph_tasks.js"].map((name) => fs.readFileSync(name, "utf8")).join("\\n");
+        const tokenStatsStart = tasksCode.indexOf("function renderTasks");
         const tokenStatsEnd = tasksCode.indexOf("async function loadTaskDetail");
         vm.runInThisContext(tasksCode.slice(tokenStatsStart, tokenStatsEnd));
 
@@ -1322,12 +1324,12 @@ def test_render_task_token_stats_labels_call_kind_and_filters_by_it() -> None:
           taskTokenButton: { title: "" },
         };
 
-        const appCode = fs.readFileSync("g3ku/web/frontend/org_graph_app.js", "utf8");
+        const appCode = ["g3ku/web/frontend/ui/toast.js", "g3ku/web/frontend/ui/confirm.js", "g3ku/web/frontend/ceo/model-panel.js", "g3ku/web/frontend/ceo/composer.js", "g3ku/web/frontend/ceo/compression.js", "g3ku/web/frontend/ceo/feed-model.js", "g3ku/web/frontend/ceo/feed-view.js", "g3ku/web/frontend/ceo/sessions-panel.js", "g3ku/web/frontend/ceo/session-store.js", "g3ku/web/frontend/ceo/ws-router.js", "g3ku/web/frontend/memory/store.js", "g3ku/web/frontend/memory/actions.js", "g3ku/web/frontend/memory/view.js", "g3ku/web/frontend/models/role-store.js", "g3ku/web/frontend/models/role-view.js", "g3ku/web/frontend/models/actions.js", "g3ku/web/frontend/org_graph_app.js"].map((name) => fs.readFileSync(name, "utf8")).join("\\n");
         vm.runInThisContext(appCode.slice(appCode.indexOf("const EMPTY_TOKEN_USAGE"), appCode.indexOf("function ensureTaskTokenUi")));
-        vm.runInThisContext(appCode.slice(appCode.indexOf("function modelDisplayTitle"), appCode.indexOf("function ceoCurrentUsageEstimate")));
+        vm.runInThisContext(fs.readFileSync("g3ku/web/frontend/ceo/model-panel.js", "utf8"));
 
-        const tasksCode = fs.readFileSync("g3ku/web/frontend/org_graph_tasks.js", "utf8");
-        vm.runInThisContext(tasksCode.slice(tasksCode.indexOf("function taskModelDisplayName"), tasksCode.indexOf("async function loadTaskDetail")));
+        const tasksCode = ["g3ku/web/frontend/tasks/hall-store.js", "g3ku/web/frontend/tasks/hall-view.js", "g3ku/web/frontend/tasks/ws-router.js", "g3ku/web/frontend/org_graph_tasks.js"].map((name) => fs.readFileSync(name, "utf8")).join("\\n");
+        vm.runInThisContext(tasksCode.slice(tasksCode.indexOf("function renderTasks"), tasksCode.indexOf("async function loadTaskDetail")));
 
         const readKindCells = (markup) => {
           const tableBody = markup.match(/<tbody>([\\s\\S]*?)<\\/tbody>/)?.[1] || "";
@@ -1418,15 +1420,15 @@ def test_render_task_token_stats_freezes_auto_refresh_while_open() -> None:
           taskTokenButton: { title: "" },
         };
 
-        const appCode = fs.readFileSync("g3ku/web/frontend/org_graph_app.js", "utf8");
+        const appCode = ["g3ku/web/frontend/ui/toast.js", "g3ku/web/frontend/ui/confirm.js", "g3ku/web/frontend/ceo/model-panel.js", "g3ku/web/frontend/ceo/composer.js", "g3ku/web/frontend/ceo/compression.js", "g3ku/web/frontend/ceo/feed-model.js", "g3ku/web/frontend/ceo/feed-view.js", "g3ku/web/frontend/ceo/sessions-panel.js", "g3ku/web/frontend/ceo/session-store.js", "g3ku/web/frontend/ceo/ws-router.js", "g3ku/web/frontend/memory/store.js", "g3ku/web/frontend/memory/actions.js", "g3ku/web/frontend/memory/view.js", "g3ku/web/frontend/models/role-store.js", "g3ku/web/frontend/models/role-view.js", "g3ku/web/frontend/models/actions.js", "g3ku/web/frontend/org_graph_app.js"].map((name) => fs.readFileSync(name, "utf8")).join("\\n");
         const tokenStart = appCode.indexOf("const EMPTY_TOKEN_USAGE");
         const tokenEnd = appCode.indexOf("function ensureTaskTokenUi");
         vm.runInThisContext(appCode.slice(tokenStart, tokenEnd));
         global.S.modelCatalog = global.S.modelCatalog || { catalog: [] };
-        vm.runInThisContext(appCode.slice(appCode.indexOf("function ceoModelDisplayTitle"), appCode.indexOf("function ceoCurrentUsageEstimate")));
+        vm.runInThisContext(fs.readFileSync("g3ku/web/frontend/ceo/model-panel.js", "utf8"));
 
-        const tasksCode = fs.readFileSync("g3ku/web/frontend/org_graph_tasks.js", "utf8");
-        const tokenStatsStart = tasksCode.indexOf("function taskModelDisplayName");
+        const tasksCode = ["g3ku/web/frontend/tasks/hall-store.js", "g3ku/web/frontend/tasks/hall-view.js", "g3ku/web/frontend/tasks/ws-router.js", "g3ku/web/frontend/org_graph_tasks.js"].map((name) => fs.readFileSync(name, "utf8")).join("\\n");
+        const tokenStatsStart = tasksCode.indexOf("function renderTasks");
         const tokenStatsEnd = tasksCode.indexOf("async function loadTaskDetail");
         vm.runInThisContext(tasksCode.slice(tokenStatsStart, tokenStatsEnd));
 
@@ -1504,15 +1506,15 @@ def test_refresh_task_token_call_table_rerenders_only_table_region() -> None:
           taskTokenButton: { title: "" },
         };
 
-        const appCode = fs.readFileSync("g3ku/web/frontend/org_graph_app.js", "utf8");
+        const appCode = ["g3ku/web/frontend/ui/toast.js", "g3ku/web/frontend/ui/confirm.js", "g3ku/web/frontend/ceo/model-panel.js", "g3ku/web/frontend/ceo/composer.js", "g3ku/web/frontend/ceo/compression.js", "g3ku/web/frontend/ceo/feed-model.js", "g3ku/web/frontend/ceo/feed-view.js", "g3ku/web/frontend/ceo/sessions-panel.js", "g3ku/web/frontend/ceo/session-store.js", "g3ku/web/frontend/ceo/ws-router.js", "g3ku/web/frontend/memory/store.js", "g3ku/web/frontend/memory/actions.js", "g3ku/web/frontend/memory/view.js", "g3ku/web/frontend/models/role-store.js", "g3ku/web/frontend/models/role-view.js", "g3ku/web/frontend/models/actions.js", "g3ku/web/frontend/org_graph_app.js"].map((name) => fs.readFileSync(name, "utf8")).join("\\n");
         const tokenStart = appCode.indexOf("const EMPTY_TOKEN_USAGE");
         const tokenEnd = appCode.indexOf("function ensureTaskTokenUi");
         vm.runInThisContext(appCode.slice(tokenStart, tokenEnd));
         global.S.modelCatalog = global.S.modelCatalog || { catalog: [] };
-        vm.runInThisContext(appCode.slice(appCode.indexOf("function ceoModelDisplayTitle"), appCode.indexOf("function ceoCurrentUsageEstimate")));
+        vm.runInThisContext(fs.readFileSync("g3ku/web/frontend/ceo/model-panel.js", "utf8"));
 
-        const tasksCode = fs.readFileSync("g3ku/web/frontend/org_graph_tasks.js", "utf8");
-        const tokenStatsStart = tasksCode.indexOf("function taskModelDisplayName");
+        const tasksCode = ["g3ku/web/frontend/tasks/hall-store.js", "g3ku/web/frontend/tasks/hall-view.js", "g3ku/web/frontend/tasks/ws-router.js", "g3ku/web/frontend/org_graph_tasks.js"].map((name) => fs.readFileSync(name, "utf8")).join("\\n");
+        const tokenStatsStart = tasksCode.indexOf("function renderTasks");
         const tokenStatsEnd = tasksCode.indexOf("async function loadTaskDetail");
         vm.runInThisContext(tasksCode.slice(tokenStatsStart, tokenStatsEnd));
 
@@ -1604,13 +1606,13 @@ def test_task_token_ledger_refresh_refetches_and_keys_rows_by_node_and_index() -
         };
         global.showToast = (options) => toasts.push(options);
 
-        const appCode = fs.readFileSync("g3ku/web/frontend/org_graph_app.js", "utf8");
+        const appCode = ["g3ku/web/frontend/ui/toast.js", "g3ku/web/frontend/ui/confirm.js", "g3ku/web/frontend/ceo/model-panel.js", "g3ku/web/frontend/ceo/composer.js", "g3ku/web/frontend/ceo/compression.js", "g3ku/web/frontend/ceo/feed-model.js", "g3ku/web/frontend/ceo/feed-view.js", "g3ku/web/frontend/ceo/sessions-panel.js", "g3ku/web/frontend/ceo/session-store.js", "g3ku/web/frontend/ceo/ws-router.js", "g3ku/web/frontend/memory/store.js", "g3ku/web/frontend/memory/actions.js", "g3ku/web/frontend/memory/view.js", "g3ku/web/frontend/models/role-store.js", "g3ku/web/frontend/models/role-view.js", "g3ku/web/frontend/models/actions.js", "g3ku/web/frontend/org_graph_app.js"].map((name) => fs.readFileSync(name, "utf8")).join("\\n");
         vm.runInThisContext(appCode.slice(appCode.indexOf("const EMPTY_TOKEN_USAGE"), appCode.indexOf("function ensureTaskTokenUi")));
         global.S.modelCatalog = global.S.modelCatalog || { catalog: [] };
-        vm.runInThisContext(appCode.slice(appCode.indexOf("function ceoModelDisplayTitle"), appCode.indexOf("function ceoCurrentUsageEstimate")));
+        vm.runInThisContext(fs.readFileSync("g3ku/web/frontend/ceo/model-panel.js", "utf8"));
 
-        const tasksCode = fs.readFileSync("g3ku/web/frontend/org_graph_tasks.js", "utf8");
-        vm.runInThisContext(tasksCode.slice(tasksCode.indexOf("function taskModelDisplayName"), tasksCode.indexOf("async function loadTaskDetail")));
+        const tasksCode = ["g3ku/web/frontend/tasks/hall-store.js", "g3ku/web/frontend/tasks/hall-view.js", "g3ku/web/frontend/tasks/ws-router.js", "g3ku/web/frontend/org_graph_tasks.js"].map((name) => fs.readFileSync(name, "utf8")).join("\\n");
+        vm.runInThisContext(tasksCode.slice(tasksCode.indexOf("function renderTasks"), tasksCode.indexOf("async function loadTaskDetail")));
 
         (async () => {
           // 同序号不同节点共存，同节点同序号只被替换一次。
@@ -1830,12 +1832,12 @@ def test_render_tasks_uses_effective_input_tokens_for_task_card_metric() -> None
         global.setTaskCardMenuOpen = () => {};
         global.runTaskAction = async () => {};
 
-        const appCode = fs.readFileSync("g3ku/web/frontend/org_graph_app.js", "utf8");
+        const appCode = ["g3ku/web/frontend/ui/toast.js", "g3ku/web/frontend/ui/confirm.js", "g3ku/web/frontend/ceo/model-panel.js", "g3ku/web/frontend/ceo/composer.js", "g3ku/web/frontend/ceo/compression.js", "g3ku/web/frontend/ceo/feed-model.js", "g3ku/web/frontend/ceo/feed-view.js", "g3ku/web/frontend/ceo/sessions-panel.js", "g3ku/web/frontend/ceo/session-store.js", "g3ku/web/frontend/ceo/ws-router.js", "g3ku/web/frontend/memory/store.js", "g3ku/web/frontend/memory/actions.js", "g3ku/web/frontend/memory/view.js", "g3ku/web/frontend/models/role-store.js", "g3ku/web/frontend/models/role-view.js", "g3ku/web/frontend/models/actions.js", "g3ku/web/frontend/org_graph_app.js"].map((name) => fs.readFileSync(name, "utf8")).join("\\n");
         const appStart = appCode.indexOf("const canPause");
         const appEnd = appCode.indexOf("function ensureTaskTokenUi");
         vm.runInThisContext(appCode.slice(appStart, appEnd));
 
-        const tasksCode = fs.readFileSync("g3ku/web/frontend/org_graph_tasks.js", "utf8");
+        const tasksCode = ["g3ku/web/frontend/tasks/hall-store.js", "g3ku/web/frontend/tasks/hall-view.js", "g3ku/web/frontend/tasks/ws-router.js", "g3ku/web/frontend/org_graph_tasks.js"].map((name) => fs.readFileSync(name, "utf8")).join("\\n");
         vm.runInThisContext(tasksCode);
 
         renderTasks();
@@ -1909,15 +1911,15 @@ def test_render_task_token_stats_uses_effective_input_tokens_for_hit_rate() -> N
           taskTokenButton: { title: "" },
         };
 
-        const appCode = fs.readFileSync("g3ku/web/frontend/org_graph_app.js", "utf8");
+        const appCode = ["g3ku/web/frontend/ui/toast.js", "g3ku/web/frontend/ui/confirm.js", "g3ku/web/frontend/ceo/model-panel.js", "g3ku/web/frontend/ceo/composer.js", "g3ku/web/frontend/ceo/compression.js", "g3ku/web/frontend/ceo/feed-model.js", "g3ku/web/frontend/ceo/feed-view.js", "g3ku/web/frontend/ceo/sessions-panel.js", "g3ku/web/frontend/ceo/session-store.js", "g3ku/web/frontend/ceo/ws-router.js", "g3ku/web/frontend/memory/store.js", "g3ku/web/frontend/memory/actions.js", "g3ku/web/frontend/memory/view.js", "g3ku/web/frontend/models/role-store.js", "g3ku/web/frontend/models/role-view.js", "g3ku/web/frontend/models/actions.js", "g3ku/web/frontend/org_graph_app.js"].map((name) => fs.readFileSync(name, "utf8")).join("\\n");
         const tokenStart = appCode.indexOf("const canPause");
         const tokenEnd = appCode.indexOf("function ensureTaskTokenUi");
         vm.runInThisContext(appCode.slice(tokenStart, tokenEnd));
         global.S.modelCatalog = global.S.modelCatalog || { catalog: [] };
-        vm.runInThisContext(appCode.slice(appCode.indexOf("function ceoModelDisplayTitle"), appCode.indexOf("function ceoCurrentUsageEstimate")));
+        vm.runInThisContext(fs.readFileSync("g3ku/web/frontend/ceo/model-panel.js", "utf8"));
 
-        const tasksCode = fs.readFileSync("g3ku/web/frontend/org_graph_tasks.js", "utf8");
-        const tokenStatsStart = tasksCode.indexOf("function taskModelDisplayName");
+        const tasksCode = ["g3ku/web/frontend/tasks/hall-store.js", "g3ku/web/frontend/tasks/hall-view.js", "g3ku/web/frontend/tasks/ws-router.js", "g3ku/web/frontend/org_graph_tasks.js"].map((name) => fs.readFileSync(name, "utf8")).join("\\n");
+        const tokenStatsStart = tasksCode.indexOf("function renderTasks");
         const tokenStatsEnd = tasksCode.indexOf("async function loadTaskDetail");
         vm.runInThisContext(tasksCode.slice(tokenStatsStart, tokenStatsEnd));
 
@@ -1945,7 +1947,7 @@ def test_format_node_detail_heading_prefixes_node_id_before_title() -> None:
         global.showToast = () => {};
         global.isAbortLike = () => false;
         global.renderTree = () => {};
-        const code = fs.readFileSync("g3ku/web/frontend/org_graph_task_view.js", "utf8");
+        const code = ["g3ku/web/frontend/tasks/tree-store.js", "g3ku/web/frontend/tasks/tree-view.js", "g3ku/web/frontend/tasks/node-detail-store.js", "g3ku/web/frontend/tasks/node-detail.js", "g3ku/web/frontend/org_graph_task_view.js"].map((name) => fs.readFileSync(name, "utf8")).join("\\n");
         vm.runInThisContext(code);
 
         const sample = {
@@ -1984,7 +1986,7 @@ def test_build_node_execution_trace_uses_summary_execution_trace_when_full_trace
           const parsed = Number.parseInt(String(value ?? ""), 10);
           return Number.isFinite(parsed) ? parsed : fallback;
         };
-        const code = fs.readFileSync("g3ku/web/frontend/org_graph_task_view.js", "utf8");
+        const code = ["g3ku/web/frontend/tasks/tree-store.js", "g3ku/web/frontend/tasks/tree-view.js", "g3ku/web/frontend/tasks/node-detail-store.js", "g3ku/web/frontend/tasks/node-detail.js", "g3ku/web/frontend/org_graph_task_view.js"].map((name) => fs.readFileSync(name, "utf8")).join("\\n");
         vm.runInThisContext(code);
 
         const trace = buildNodeExecutionTrace(
@@ -2048,7 +2050,7 @@ def test_build_node_execution_trace_preserves_summary_stage_budget() -> None:
           const parsed = Number.parseInt(String(value ?? ""), 10);
           return Number.isFinite(parsed) ? parsed : fallback;
         };
-        const code = fs.readFileSync("g3ku/web/frontend/org_graph_task_view.js", "utf8");
+        const code = ["g3ku/web/frontend/tasks/tree-store.js", "g3ku/web/frontend/tasks/tree-view.js", "g3ku/web/frontend/tasks/node-detail-store.js", "g3ku/web/frontend/tasks/node-detail.js", "g3ku/web/frontend/org_graph_task_view.js"].map((name) => fs.readFileSync(name, "utf8")).join("\\n");
         vm.runInThisContext(code);
 
         const trace = buildNodeExecutionTrace(
@@ -2102,7 +2104,7 @@ def test_build_node_execution_trace_preserves_summary_round_boundaries() -> None
           const parsed = Number.parseInt(String(value ?? ""), 10);
           return Number.isFinite(parsed) ? parsed : fallback;
         };
-        const code = fs.readFileSync("g3ku/web/frontend/org_graph_task_view.js", "utf8");
+        const code = ["g3ku/web/frontend/tasks/tree-store.js", "g3ku/web/frontend/tasks/tree-view.js", "g3ku/web/frontend/tasks/node-detail-store.js", "g3ku/web/frontend/tasks/node-detail.js", "g3ku/web/frontend/org_graph_task_view.js"].map((name) => fs.readFileSync(name, "utf8")).join("\\n");
         vm.runInThisContext(code);
 
         const trace = buildNodeExecutionTrace(
@@ -2184,7 +2186,7 @@ def test_build_node_execution_trace_prefers_detail_final_output_when_full_trace_
           const parsed = Number.parseInt(String(value ?? ""), 10);
           return Number.isFinite(parsed) ? parsed : fallback;
         };
-        const code = fs.readFileSync("g3ku/web/frontend/org_graph_task_view.js", "utf8");
+        const code = ["g3ku/web/frontend/tasks/tree-store.js", "g3ku/web/frontend/tasks/tree-view.js", "g3ku/web/frontend/tasks/node-detail-store.js", "g3ku/web/frontend/tasks/node-detail.js", "g3ku/web/frontend/org_graph_task_view.js"].map((name) => fs.readFileSync(name, "utf8")).join("\\n");
         vm.runInThisContext(code);
 
         const trace = buildNodeExecutionTrace(
@@ -2228,7 +2230,7 @@ def test_build_node_execution_trace_falls_back_to_acceptance_final_output_when_c
           const parsed = Number.parseInt(String(value ?? ""), 10);
           return Number.isFinite(parsed) ? parsed : fallback;
         };
-        const code = fs.readFileSync("g3ku/web/frontend/org_graph_task_view.js", "utf8");
+        const code = ["g3ku/web/frontend/tasks/tree-store.js", "g3ku/web/frontend/tasks/tree-view.js", "g3ku/web/frontend/tasks/node-detail-store.js", "g3ku/web/frontend/tasks/node-detail.js", "g3ku/web/frontend/org_graph_task_view.js"].map((name) => fs.readFileSync(name, "utf8")).join("\\n");
         vm.runInThisContext(code);
 
         const trace = buildNodeExecutionTrace(
@@ -2273,7 +2275,7 @@ def test_build_node_execution_trace_falls_back_to_failure_reason_when_failed_wit
           const parsed = Number.parseInt(String(value ?? ""), 10);
           return Number.isFinite(parsed) ? parsed : fallback;
         };
-        const code = fs.readFileSync("g3ku/web/frontend/org_graph_task_view.js", "utf8");
+        const code = ["g3ku/web/frontend/tasks/tree-store.js", "g3ku/web/frontend/tasks/tree-view.js", "g3ku/web/frontend/tasks/node-detail-store.js", "g3ku/web/frontend/tasks/node-detail.js", "g3ku/web/frontend/org_graph_task_view.js"].map((name) => fs.readFileSync(name, "utf8")).join("\\n");
         vm.runInThisContext(code);
 
         const trace = buildNodeExecutionTrace(
@@ -2326,7 +2328,7 @@ def test_build_execution_trace_steps_use_stage_goal_as_stage_title_without_dupli
           const parsed = Number.parseInt(String(value ?? ""), 10);
           return Number.isFinite(parsed) ? parsed : fallback;
         };
-        const code = fs.readFileSync("g3ku/web/frontend/org_graph_task_view.js", "utf8");
+        const code = ["g3ku/web/frontend/tasks/tree-store.js", "g3ku/web/frontend/tasks/tree-view.js", "g3ku/web/frontend/tasks/node-detail-store.js", "g3ku/web/frontend/tasks/node-detail.js", "g3ku/web/frontend/org_graph_task_view.js"].map((name) => fs.readFileSync(name, "utf8")).join("\\n");
         vm.runInThisContext(code);
 
         const trace = buildNodeExecutionTrace(
@@ -2408,7 +2410,7 @@ _LOADER_CHIP_NODE_STUBS = """
           return table[String(id)] || "medium";
         };
         global.ceoContextLoadNoticeIconName = (kind) => (kind === "skill" ? "sparkles" : "wrench");
-        const code = fs.readFileSync("g3ku/web/frontend/org_graph_task_view.js", "utf8");
+        const code = ["g3ku/web/frontend/tasks/tree-store.js", "g3ku/web/frontend/tasks/tree-view.js", "g3ku/web/frontend/tasks/node-detail-store.js", "g3ku/web/frontend/tasks/node-detail.js", "g3ku/web/frontend/org_graph_task_view.js"].map((name) => fs.readFileSync(name, "utf8")).join("\\n");
         vm.runInThisContext(code);
 """
 
@@ -2546,7 +2548,7 @@ def test_build_execution_trace_steps_label_summary_rounds_by_spawn_presence() ->
           const parsed = Number.parseInt(String(value ?? ""), 10);
           return Number.isFinite(parsed) ? parsed : fallback;
         };
-        const code = fs.readFileSync("g3ku/web/frontend/org_graph_task_view.js", "utf8");
+        const code = ["g3ku/web/frontend/tasks/tree-store.js", "g3ku/web/frontend/tasks/tree-view.js", "g3ku/web/frontend/tasks/node-detail-store.js", "g3ku/web/frontend/tasks/node-detail.js", "g3ku/web/frontend/org_graph_task_view.js"].map((name) => fs.readFileSync(name, "utf8")).join("\\n");
         vm.runInThisContext(code);
 
         const trace = buildNodeExecutionTrace(
@@ -2623,7 +2625,7 @@ def test_build_execution_trace_steps_label_mixed_full_round_as_with_children() -
           const parsed = Number.parseInt(String(value ?? ""), 10);
           return Number.isFinite(parsed) ? parsed : fallback;
         };
-        const code = fs.readFileSync("g3ku/web/frontend/org_graph_task_view.js", "utf8");
+        const code = ["g3ku/web/frontend/tasks/tree-store.js", "g3ku/web/frontend/tasks/tree-view.js", "g3ku/web/frontend/tasks/node-detail-store.js", "g3ku/web/frontend/tasks/node-detail.js", "g3ku/web/frontend/org_graph_task_view.js"].map((name) => fs.readFileSync(name, "utf8")).join("\\n");
         vm.runInThisContext(code);
 
         const trace = buildNodeExecutionTrace(
@@ -2706,7 +2708,7 @@ def test_summary_execution_trace_defaults_running_when_stage_or_tool_lacks_compl
           const parsed = Number.parseInt(String(value ?? ""), 10);
           return Number.isFinite(parsed) ? parsed : fallback;
         };
-        const code = fs.readFileSync("g3ku/web/frontend/org_graph_task_view.js", "utf8");
+        const code = ["g3ku/web/frontend/tasks/tree-store.js", "g3ku/web/frontend/tasks/tree-view.js", "g3ku/web/frontend/tasks/node-detail-store.js", "g3ku/web/frontend/tasks/node-detail.js", "g3ku/web/frontend/org_graph_task_view.js"].map((name) => fs.readFileSync(name, "utf8")).join("\\n");
         vm.runInThisContext(code);
 
         const trace = buildNodeExecutionTrace(
@@ -2766,7 +2768,7 @@ def test_render_trace_step_status_label_override_preserves_success_color() -> No
           const parsed = Number.parseInt(String(value ?? ""), 10);
           return Number.isFinite(parsed) ? parsed : fallback;
         };
-        const code = fs.readFileSync("g3ku/web/frontend/org_graph_task_view.js", "utf8");
+        const code = ["g3ku/web/frontend/tasks/tree-store.js", "g3ku/web/frontend/tasks/tree-view.js", "g3ku/web/frontend/tasks/node-detail-store.js", "g3ku/web/frontend/tasks/node-detail.js", "g3ku/web/frontend/org_graph_task_view.js"].map((name) => fs.readFileSync(name, "utf8")).join("\\n");
         vm.runInThisContext(code);
 
         const html = renderTraceStep({
@@ -2813,7 +2815,7 @@ def test_render_execution_stage_rounds_show_completed_round_and_tool_result_labe
           const parsed = Number.parseInt(String(value ?? ""), 10);
           return Number.isFinite(parsed) ? parsed : fallback;
         };
-        const code = fs.readFileSync("g3ku/web/frontend/org_graph_task_view.js", "utf8");
+        const code = ["g3ku/web/frontend/tasks/tree-store.js", "g3ku/web/frontend/tasks/tree-view.js", "g3ku/web/frontend/tasks/node-detail-store.js", "g3ku/web/frontend/tasks/node-detail.js", "g3ku/web/frontend/org_graph_task_view.js"].map((name) => fs.readFileSync(name, "utf8")).join("\\n");
         vm.runInThisContext(code);
 
         const html = renderExecutionStageRounds({
@@ -2878,7 +2880,7 @@ def test_summary_execution_trace_preview_fields_render_tool_arguments_and_output
           const parsed = Number.parseInt(String(value ?? ""), 10);
           return Number.isFinite(parsed) ? parsed : fallback;
         };
-        const code = fs.readFileSync("g3ku/web/frontend/org_graph_task_view.js", "utf8");
+        const code = ["g3ku/web/frontend/tasks/tree-store.js", "g3ku/web/frontend/tasks/tree-view.js", "g3ku/web/frontend/tasks/node-detail-store.js", "g3ku/web/frontend/tasks/node-detail.js", "g3ku/web/frontend/org_graph_task_view.js"].map((name) => fs.readFileSync(name, "utf8")).join("\\n");
         vm.runInThisContext(code);
 
         const trace = buildNodeExecutionTrace(
@@ -2944,7 +2946,7 @@ def test_summary_execution_trace_round_with_tool_names_only_renders_placeholder_
           const parsed = Number.parseInt(String(value ?? ""), 10);
           return Number.isFinite(parsed) ? parsed : fallback;
         };
-        const code = fs.readFileSync("g3ku/web/frontend/org_graph_task_view.js", "utf8");
+        const code = ["g3ku/web/frontend/tasks/tree-store.js", "g3ku/web/frontend/tasks/tree-view.js", "g3ku/web/frontend/tasks/node-detail-store.js", "g3ku/web/frontend/tasks/node-detail.js", "g3ku/web/frontend/org_graph_task_view.js"].map((name) => fs.readFileSync(name, "utf8")).join("\\n");
         vm.runInThisContext(code);
 
         const trace = buildNodeExecutionTrace(
@@ -3064,7 +3066,7 @@ def test_summary_execution_trace_no_tool_records_skips_empty_round_shells() -> N
           const parsed = Number.parseInt(String(value ?? ""), 10);
           return Number.isFinite(parsed) ? parsed : fallback;
         };
-        const code = fs.readFileSync("g3ku/web/frontend/org_graph_task_view.js", "utf8");
+        const code = ["g3ku/web/frontend/tasks/tree-store.js", "g3ku/web/frontend/tasks/tree-view.js", "g3ku/web/frontend/tasks/node-detail-store.js", "g3ku/web/frontend/tasks/node-detail.js", "g3ku/web/frontend/org_graph_task_view.js"].map((name) => fs.readFileSync(name, "utf8")).join("\\n");
         vm.runInThisContext(code);
 
         const trace = buildNodeExecutionTrace(
@@ -3127,7 +3129,7 @@ def test_execution_trace_round_status_supports_warning_and_interrupted() -> None
           const parsed = Number.parseInt(String(value ?? ""), 10);
           return Number.isFinite(parsed) ? parsed : fallback;
         };
-        const code = fs.readFileSync("g3ku/web/frontend/org_graph_task_view.js", "utf8");
+        const code = ["g3ku/web/frontend/tasks/tree-store.js", "g3ku/web/frontend/tasks/tree-view.js", "g3ku/web/frontend/tasks/node-detail-store.js", "g3ku/web/frontend/tasks/node-detail.js", "g3ku/web/frontend/org_graph_task_view.js"].map((name) => fs.readFileSync(name, "utf8")).join("\\n");
         vm.runInThisContext(code);
 
         console.log(JSON.stringify({
@@ -3169,7 +3171,7 @@ def test_render_execution_stage_rounds_show_recovery_check_panel_fields() -> Non
           const parsed = Number.parseInt(String(value ?? ""), 10);
           return Number.isFinite(parsed) ? parsed : fallback;
         };
-        const code = fs.readFileSync("g3ku/web/frontend/org_graph_task_view.js", "utf8");
+        const code = ["g3ku/web/frontend/tasks/tree-store.js", "g3ku/web/frontend/tasks/tree-view.js", "g3ku/web/frontend/tasks/node-detail-store.js", "g3ku/web/frontend/tasks/node-detail.js", "g3ku/web/frontend/org_graph_task_view.js"].map((name) => fs.readFileSync(name, "utf8")).join("\\n");
         vm.runInThisContext(code);
 
         const html = renderExecutionStageRounds({
@@ -3274,7 +3276,7 @@ def test_load_selected_node_latest_context_preserves_detail_and_context_scroll()
           if (options.artifactContent !== false) artifactContent.scrollTop = Number(state.artifactContentScrollTop || 0);
         };
         global.scheduleTaskDetailSessionPersist = () => {};
-        const code = fs.readFileSync("g3ku/web/frontend/org_graph_task_view.js", "utf8");
+        const code = ["g3ku/web/frontend/tasks/tree-store.js", "g3ku/web/frontend/tasks/tree-view.js", "g3ku/web/frontend/tasks/node-detail-store.js", "g3ku/web/frontend/tasks/node-detail.js", "g3ku/web/frontend/org_graph_task_view.js"].map((name) => fs.readFileSync(name, "utf8")).join("\\n");
         vm.runInThisContext(code);
 
         loadSelectedNodeLatestContext({ force: true }).then((payload) => {
@@ -3369,7 +3371,7 @@ def test_show_agent_does_not_auto_refresh_latest_context_when_disclosure_is_open
         global.syncArtifactsForSelectedNode = () => {};
         global.liveFramesByNodeId = () => new Map();
         global.buildNodeExecutionTrace = () => ({ final_output: "", acceptance_result: "" });
-        const code = fs.readFileSync("g3ku/web/frontend/org_graph_task_view.js", "utf8");
+        const code = ["g3ku/web/frontend/tasks/tree-store.js", "g3ku/web/frontend/tasks/tree-view.js", "g3ku/web/frontend/tasks/node-detail-store.js", "g3ku/web/frontend/tasks/node-detail.js", "g3ku/web/frontend/org_graph_task_view.js"].map((name) => fs.readFileSync(name, "utf8")).join("\\n");
         vm.runInThisContext(code);
         global.renderExecutionTrace = () => false;
         global.renderMessageList = () => false;
@@ -3452,7 +3454,7 @@ def test_render_artifacts_uses_status_icons_instead_of_plain_change_text() -> No
           .replaceAll("'", "&#39;");
         global.renderArtifactHeading = () => {};
         global.refreshTaskDetailScrollRegions = () => {};
-        const code = fs.readFileSync("g3ku/web/frontend/org_graph_task_view.js", "utf8");
+        const code = ["g3ku/web/frontend/tasks/tree-store.js", "g3ku/web/frontend/tasks/tree-view.js", "g3ku/web/frontend/tasks/node-detail-store.js", "g3ku/web/frontend/tasks/node-detail.js", "g3ku/web/frontend/org_graph_task_view.js"].map((name) => fs.readFileSync(name, "utf8")).join("\\n");
         vm.runInThisContext(code);
 
         renderArtifacts();
@@ -3554,7 +3556,7 @@ def test_ensure_task_node_detail_refetches_stale_flattened_summary_cache() -> No
         };
         global.showToast = () => {};
         global.isAbortLike = () => false;
-        const code = fs.readFileSync("g3ku/web/frontend/org_graph_task_view.js", "utf8");
+        const code = ["g3ku/web/frontend/tasks/tree-store.js", "g3ku/web/frontend/tasks/tree-view.js", "g3ku/web/frontend/tasks/node-detail-store.js", "g3ku/web/frontend/tasks/node-detail.js", "g3ku/web/frontend/org_graph_task_view.js"].map((name) => fs.readFileSync(name, "utf8")).join("\\n");
         vm.runInThisContext(code);
 
         ensureTaskNodeDetail("node:1").then((detail) => {
@@ -3582,7 +3584,7 @@ def test_api_client_get_task_node_detail_requests_full_payload_with_distinct_cac
         global.fetch = () => {
           throw new Error("fetch should not be called in this test");
         };
-        const code = fs.readFileSync("g3ku/web/frontend/api_client.js", "utf8");
+        const code = ["g3ku/web/frontend/client_api/core.js", "g3ku/web/frontend/client_api/models.js", "g3ku/web/frontend/client_api/tasks.js", "g3ku/web/frontend/api_client.js"].map((name) => fs.readFileSync(name, "utf8")).join("\\n");
         vm.runInThisContext(code);
 
         let captured = null;
@@ -3660,7 +3662,7 @@ def test_ensure_task_node_detail_upgrades_summary_cache_to_full_detail() -> None
         };
         global.showToast = () => {};
         global.isAbortLike = () => false;
-        const code = fs.readFileSync("g3ku/web/frontend/org_graph_task_view.js", "utf8");
+        const code = ["g3ku/web/frontend/tasks/tree-store.js", "g3ku/web/frontend/tasks/tree-view.js", "g3ku/web/frontend/tasks/node-detail-store.js", "g3ku/web/frontend/tasks/node-detail.js", "g3ku/web/frontend/org_graph_task_view.js"].map((name) => fs.readFileSync(name, "utf8")).join("\\n");
         vm.runInThisContext(code);
 
         ensureTaskNodeDetail("node:1").then((detail) => {
@@ -3739,7 +3741,7 @@ def test_ensure_task_node_detail_refreshes_terminal_cache_when_patch_summary_is_
         };
         global.showToast = () => {};
         global.isAbortLike = () => false;
-        const code = fs.readFileSync("g3ku/web/frontend/org_graph_task_view.js", "utf8");
+        const code = ["g3ku/web/frontend/tasks/tree-store.js", "g3ku/web/frontend/tasks/tree-view.js", "g3ku/web/frontend/tasks/node-detail-store.js", "g3ku/web/frontend/tasks/node-detail.js", "g3ku/web/frontend/org_graph_task_view.js"].map((name) => fs.readFileSync(name, "utf8")).join("\\n");
         vm.runInThisContext(code);
 
         ensureTaskNodeDetail("node:1").then((detail) => {
@@ -3789,7 +3791,7 @@ def test_handle_task_terminal_refreshes_selected_node_detail() -> None:
           const parsed = Number.parseInt(String(value ?? ""), 10);
           return Number.isFinite(parsed) ? parsed : fallback;
         };
-        const taskViewCode = fs.readFileSync("g3ku/web/frontend/org_graph_task_view.js", "utf8");
+        const taskViewCode = ["g3ku/web/frontend/tasks/tree-store.js", "g3ku/web/frontend/tasks/tree-view.js", "g3ku/web/frontend/tasks/node-detail-store.js", "g3ku/web/frontend/tasks/node-detail.js", "g3ku/web/frontend/org_graph_task_view.js"].map((name) => fs.readFileSync(name, "utf8")).join("\\n");
         vm.runInThisContext(taskViewCode);
         global.captureTaskDetailViewState = () => ({ scrollTop: 12 });
         global.stashTaskDetailViewState = () => {};
@@ -3798,7 +3800,7 @@ def test_handle_task_terminal_refreshes_selected_node_detail() -> None:
           showAgentCalls.push({ nodeId: String(node?.node_id || ""), forceRefresh: !!options?.forceRefresh });
           return Promise.resolve();
         };
-        const tasksCode = fs.readFileSync("g3ku/web/frontend/org_graph_tasks.js", "utf8");
+        const tasksCode = ["g3ku/web/frontend/tasks/hall-store.js", "g3ku/web/frontend/tasks/hall-view.js", "g3ku/web/frontend/tasks/ws-router.js", "g3ku/web/frontend/org_graph_tasks.js"].map((name) => fs.readFileSync(name, "utf8")).join("\\n");
         vm.runInThisContext(tasksCode);
 
         handleTaskEvent({
@@ -3963,7 +3965,7 @@ def test_render_tree_shows_distribution_notice_and_scoped_connector_mode() -> No
           const text = String(value ?? "").trim();
           return text || emptyText;
         };
-        const code = fs.readFileSync("g3ku/web/frontend/org_graph_task_view.js", "utf8");
+        const code = ["g3ku/web/frontend/tasks/tree-store.js", "g3ku/web/frontend/tasks/tree-view.js", "g3ku/web/frontend/tasks/node-detail-store.js", "g3ku/web/frontend/tasks/node-detail.js", "g3ku/web/frontend/org_graph_task_view.js"].map((name) => fs.readFileSync(name, "utf8")).join("\\n");
         vm.runInThisContext(code);
 
         renderTree();
@@ -4129,7 +4131,7 @@ def test_render_tree_marks_only_affected_subtree_connectors_during_distribution(
           const text = String(value ?? "").trim();
           return text || emptyText;
         };
-        const code = fs.readFileSync("g3ku/web/frontend/org_graph_task_view.js", "utf8");
+        const code = ["g3ku/web/frontend/tasks/tree-store.js", "g3ku/web/frontend/tasks/tree-view.js", "g3ku/web/frontend/tasks/node-detail-store.js", "g3ku/web/frontend/tasks/node-detail.js", "g3ku/web/frontend/org_graph_task_view.js"].map((name) => fs.readFileSync(name, "utf8")).join("\\n");
         vm.runInThisContext(code);
 
         renderTree();
@@ -4323,7 +4325,7 @@ def test_render_tree_shows_failed_distribution_notice_with_red_variant() -> None
           const text = String(value ?? "").trim();
           return text || emptyText;
         };
-        const code = fs.readFileSync("g3ku/web/frontend/org_graph_task_view.js", "utf8");
+        const code = ["g3ku/web/frontend/tasks/tree-store.js", "g3ku/web/frontend/tasks/tree-view.js", "g3ku/web/frontend/tasks/node-detail-store.js", "g3ku/web/frontend/tasks/node-detail.js", "g3ku/web/frontend/org_graph_task_view.js"].map((name) => fs.readFileSync(name, "utf8")).join("\\n");
         vm.runInThisContext(code);
 
         renderTree();
@@ -4456,7 +4458,7 @@ def test_render_tree_hides_distribution_notice_when_only_node_pending_notice_rem
           const text = String(value ?? "").trim();
           return text || emptyText;
         };
-        const code = fs.readFileSync("g3ku/web/frontend/org_graph_task_view.js", "utf8");
+        const code = ["g3ku/web/frontend/tasks/tree-store.js", "g3ku/web/frontend/tasks/tree-view.js", "g3ku/web/frontend/tasks/node-detail-store.js", "g3ku/web/frontend/tasks/node-detail.js", "g3ku/web/frontend/org_graph_task_view.js"].map((name) => fs.readFileSync(name, "utf8")).join("\\n");
         vm.runInThisContext(code);
 
         renderTree();
@@ -4491,7 +4493,7 @@ def test_build_execution_trace_steps_no_longer_inserts_notice_pseudo_stage() -> 
         };
         global.formatCompactTime = (value) => String(value || "");
         global.displayTaskStageStatus = (value) => String(value || "");
-        const code = fs.readFileSync("g3ku/web/frontend/org_graph_task_view.js", "utf8");
+        const code = ["g3ku/web/frontend/tasks/tree-store.js", "g3ku/web/frontend/tasks/tree-view.js", "g3ku/web/frontend/tasks/node-detail-store.js", "g3ku/web/frontend/tasks/node-detail.js", "g3ku/web/frontend/org_graph_task_view.js"].map((name) => fs.readFileSync(name, "utf8")).join("\\n");
         vm.runInThisContext(code);
 
         const steps = buildExecutionTraceSteps(
@@ -4646,7 +4648,7 @@ def test_render_tree_hides_resume_ready_notice_after_pending_message_lands_on_no
           const text = String(value ?? "").trim();
           return text || emptyText;
         };
-        const code = fs.readFileSync("g3ku/web/frontend/org_graph_task_view.js", "utf8");
+        const code = ["g3ku/web/frontend/tasks/tree-store.js", "g3ku/web/frontend/tasks/tree-view.js", "g3ku/web/frontend/tasks/node-detail-store.js", "g3ku/web/frontend/tasks/node-detail.js", "g3ku/web/frontend/org_graph_task_view.js"].map((name) => fs.readFileSync(name, "utf8")).join("\\n");
         vm.runInThisContext(code);
 
         renderTree();
@@ -4781,7 +4783,7 @@ def test_render_tree_shows_pending_notice_banner_for_resume_ready_without_mode()
           const text = String(value ?? "").trim();
           return text || emptyText;
         };
-        const code = fs.readFileSync("g3ku/web/frontend/org_graph_task_view.js", "utf8");
+        const code = ["g3ku/web/frontend/tasks/tree-store.js", "g3ku/web/frontend/tasks/tree-view.js", "g3ku/web/frontend/tasks/node-detail-store.js", "g3ku/web/frontend/tasks/node-detail.js", "g3ku/web/frontend/org_graph_task_view.js"].map((name) => fs.readFileSync(name, "utf8")).join("\\n");
         vm.runInThisContext(code);
 
         renderTree();
@@ -4947,7 +4949,7 @@ def test_render_tree_marks_barrier_blocked_nodes() -> None:
           const text = String(value ?? "").trim();
           return text || emptyText;
         };
-        const code = fs.readFileSync("g3ku/web/frontend/org_graph_task_view.js", "utf8");
+        const code = ["g3ku/web/frontend/tasks/tree-store.js", "g3ku/web/frontend/tasks/tree-view.js", "g3ku/web/frontend/tasks/node-detail-store.js", "g3ku/web/frontend/tasks/node-detail.js", "g3ku/web/frontend/org_graph_task_view.js"].map((name) => fs.readFileSync(name, "utf8")).join("\\n");
         vm.runInThisContext(code);
 
         renderTree();
@@ -4981,7 +4983,7 @@ def test_build_node_message_list_steps_renders_message_and_distribution_details(
           return text || emptyText;
         };
         global.formatCompactTime = (value) => String(value || "");
-        const code = fs.readFileSync("g3ku/web/frontend/org_graph_task_view.js", "utf8");
+        const code = ["g3ku/web/frontend/tasks/tree-store.js", "g3ku/web/frontend/tasks/tree-view.js", "g3ku/web/frontend/tasks/node-detail-store.js", "g3ku/web/frontend/tasks/node-detail.js", "g3ku/web/frontend/org_graph_task_view.js"].map((name) => fs.readFileSync(name, "utf8")).join("\\n");
         vm.runInThisContext(code);
 
         const steps = buildNodeMessageListSteps({
@@ -5057,7 +5059,7 @@ def test_build_spawn_review_trace_steps_formats_blocked_and_allowed_results() ->
           const text = String(value ?? "").trim();
           return text || emptyText;
         };
-        const code = fs.readFileSync("g3ku/web/frontend/org_graph_task_view.js", "utf8");
+        const code = ["g3ku/web/frontend/tasks/tree-store.js", "g3ku/web/frontend/tasks/tree-view.js", "g3ku/web/frontend/tasks/node-detail-store.js", "g3ku/web/frontend/tasks/node-detail.js", "g3ku/web/frontend/org_graph_task_view.js"].map((name) => fs.readFileSync(name, "utf8")).join("\\n");
         vm.runInThisContext(code);
 
         const steps = buildSpawnReviewTraceSteps([
@@ -5198,7 +5200,7 @@ def test_build_execution_tree_from_snapshot_keeps_undispatched_acceptance_visibl
           const text = String(value ?? "").trim();
           return text || emptyText;
         };
-        const code = fs.readFileSync("g3ku/web/frontend/org_graph_task_view.js", "utf8");
+        const code = ["g3ku/web/frontend/tasks/tree-store.js", "g3ku/web/frontend/tasks/tree-view.js", "g3ku/web/frontend/tasks/node-detail-store.js", "g3ku/web/frontend/tasks/node-detail.js", "g3ku/web/frontend/org_graph_task_view.js"].map((name) => fs.readFileSync(name, "utf8")).join("\\n");
         vm.runInThisContext(code);
         const tree = buildExecutionTreeFromSnapshot("node:root");
         const child = (tree?.children || []).find((item) => item.node_id === "node:child");
@@ -5276,7 +5278,7 @@ def test_build_execution_tree_from_snapshot_keeps_activated_acceptance_visible_a
           const text = String(value ?? "").trim();
           return text || emptyText;
         };
-        const code = fs.readFileSync("g3ku/web/frontend/org_graph_task_view.js", "utf8");
+        const code = ["g3ku/web/frontend/tasks/tree-store.js", "g3ku/web/frontend/tasks/tree-view.js", "g3ku/web/frontend/tasks/node-detail-store.js", "g3ku/web/frontend/tasks/node-detail.js", "g3ku/web/frontend/org_graph_task_view.js"].map((name) => fs.readFileSync(name, "utf8")).join("\\n");
         vm.runInThisContext(code);
         const tree = buildExecutionTreeFromSnapshot("node:root");
         const child = Array.isArray(tree?.children) ? tree.children.find((item) => item.node_id === "node:child") : null;
@@ -5388,7 +5390,7 @@ def test_build_execution_tree_from_snapshot_labels_nodes_by_live_turn_activity()
           const text = String(value ?? "").trim();
           return text || emptyText;
         };
-        const code = fs.readFileSync("g3ku/web/frontend/org_graph_task_view.js", "utf8");
+        const code = ["g3ku/web/frontend/tasks/tree-store.js", "g3ku/web/frontend/tasks/tree-view.js", "g3ku/web/frontend/tasks/node-detail-store.js", "g3ku/web/frontend/tasks/node-detail.js", "g3ku/web/frontend/org_graph_task_view.js"].map((name) => fs.readFileSync(name, "utf8")).join("\\n");
         vm.runInThisContext(code);
         const tree = buildExecutionTreeFromSnapshot("node:root");
         const byId = new Map();
@@ -5432,7 +5434,7 @@ def test_tree_round_select_id_is_stable_and_selector_safe() -> None:
         const vm = require("vm");
         global.window = global;
         global.S = {};
-        const code = fs.readFileSync("g3ku/web/frontend/org_graph_task_view.js", "utf8");
+        const code = ["g3ku/web/frontend/tasks/tree-store.js", "g3ku/web/frontend/tasks/tree-view.js", "g3ku/web/frontend/tasks/node-detail-store.js", "g3ku/web/frontend/tasks/node-detail.js", "g3ku/web/frontend/org_graph_task_view.js"].map((name) => fs.readFileSync(name, "utf8")).join("\\n");
         vm.runInThisContext(code);
         console.log(JSON.stringify({
           first: treeRoundSelectId("node:1a2b/c d"),
@@ -5497,7 +5499,7 @@ def test_sync_selected_task_node_detail_status_follows_live_frames() -> None:
           const text = String(value ?? "").trim();
           return text || emptyText;
         };
-        const code = fs.readFileSync("g3ku/web/frontend/org_graph_task_view.js", "utf8");
+        const code = ["g3ku/web/frontend/tasks/tree-store.js", "g3ku/web/frontend/tasks/tree-view.js", "g3ku/web/frontend/tasks/node-detail-store.js", "g3ku/web/frontend/tasks/node-detail.js", "g3ku/web/frontend/org_graph_task_view.js"].map((name) => fs.readFileSync(name, "utf8")).join("\\n");
         vm.runInThisContext(code);
         const snapshot = () => [U.adStatus.textContent, U.adStatus.dataset.status];
         syncSelectedTaskNodeDetailStatus(buildExecutionTreeFromSnapshot());
@@ -5538,7 +5540,7 @@ def test_build_execution_trace_steps_excludes_spawn_review_rounds() -> None:
           const parsed = Number.parseInt(String(value ?? ""), 10);
           return Number.isFinite(parsed) ? parsed : fallback;
         };
-        const code = fs.readFileSync("g3ku/web/frontend/org_graph_task_view.js", "utf8");
+        const code = ["g3ku/web/frontend/tasks/tree-store.js", "g3ku/web/frontend/tasks/tree-view.js", "g3ku/web/frontend/tasks/node-detail-store.js", "g3ku/web/frontend/tasks/node-detail.js", "g3ku/web/frontend/org_graph_task_view.js"].map((name) => fs.readFileSync(name, "utf8")).join("\\n");
         vm.runInThisContext(code);
 
         const steps = buildExecutionTraceSteps({
@@ -5596,7 +5598,7 @@ def test_render_execution_stage_rounds_use_horizontal_strip_and_full_width_panel
           const parsed = Number.parseInt(String(value ?? ""), 10);
           return Number.isFinite(parsed) ? parsed : fallback;
         };
-        const code = fs.readFileSync("g3ku/web/frontend/org_graph_task_view.js", "utf8");
+        const code = ["g3ku/web/frontend/tasks/tree-store.js", "g3ku/web/frontend/tasks/tree-view.js", "g3ku/web/frontend/tasks/node-detail-store.js", "g3ku/web/frontend/tasks/node-detail.js", "g3ku/web/frontend/org_graph_task_view.js"].map((name) => fs.readFileSync(name, "utf8")).join("\\n");
         vm.runInThisContext(code);
 
         const html = renderExecutionStageRounds({
@@ -5696,7 +5698,7 @@ def test_set_trace_round_active_tool_prefetches_full_output_for_active_panel() -
           element.textContent = "FULL OUTPUT";
           return element.textContent;
         };
-        const code = fs.readFileSync("g3ku/web/frontend/org_graph_task_view.js", "utf8");
+        const code = ["g3ku/web/frontend/tasks/tree-store.js", "g3ku/web/frontend/tasks/tree-view.js", "g3ku/web/frontend/tasks/node-detail-store.js", "g3ku/web/frontend/tasks/node-detail.js", "g3ku/web/frontend/org_graph_task_view.js"].map((name) => fs.readFileSync(name, "utf8")).join("\\n");
         vm.runInThisContext(code);
 
         const chip = new HTMLElementStub();
@@ -5752,7 +5754,13 @@ def test_ceo_composer_html_includes_brain_long_press_controls() -> None:
 def test_model_retry_toasts_are_wired_for_ceo_and_task_node_views() -> None:
     html = (REPO_ROOT / "g3ku/web/frontend/org_graph.html").read_text(encoding="utf-8")
     app_js = (REPO_ROOT / "g3ku/web/frontend/org_graph_app.js").read_text(encoding="utf-8")
-    task_view_js = (REPO_ROOT / "g3ku/web/frontend/org_graph_task_view.js").read_text(encoding="utf-8")
+    task_view_js = "\n".join(
+        (REPO_ROOT / name).read_text(encoding="utf-8")
+        for name in (
+            "g3ku/web/frontend/org_graph_task_view.js",
+            "g3ku/web/frontend/tasks/node-detail.js",
+        )
+    )
     css = (REPO_ROOT / "g3ku/web/frontend/org_graph.css").read_text(encoding="utf-8")
 
     assert 'id="ceo-model-retry-toast"' in html
@@ -5789,7 +5797,7 @@ def test_stage_body_renders_round_narration_text_and_stage_summary() -> None:
         };
         global.readableText = (value, options = {}) => String(value ?? "").trim() || String(options.emptyText || "");
         global.formatCompactTime = (value) => String(value || "");
-        const code = fs.readFileSync("g3ku/web/frontend/org_graph_task_view.js", "utf8");
+        const code = ["g3ku/web/frontend/tasks/tree-store.js", "g3ku/web/frontend/tasks/tree-view.js", "g3ku/web/frontend/tasks/node-detail-store.js", "g3ku/web/frontend/tasks/node-detail.js", "g3ku/web/frontend/org_graph_task_view.js"].map((name) => fs.readFileSync(name, "utf8")).join("\\n");
         vm.runInThisContext(code);
 
         const summary = normalizeSummaryExecutionTrace({
@@ -5852,7 +5860,7 @@ def test_stage_tool_panel_renders_full_arguments_instead_of_the_hint() -> None:
         };
         global.readableText = (value, options = {}) => String(value ?? "").trim() || String(options.emptyText || "");
         global.formatCompactTime = (value) => String(value || "");
-        const code = fs.readFileSync("g3ku/web/frontend/org_graph_task_view.js", "utf8");
+        const code = ["g3ku/web/frontend/tasks/tree-store.js", "g3ku/web/frontend/tasks/tree-view.js", "g3ku/web/frontend/tasks/node-detail-store.js", "g3ku/web/frontend/tasks/node-detail.js", "g3ku/web/frontend/org_graph_task_view.js"].map((name) => fs.readFileSync(name, "utf8")).join("\\n");
         vm.runInThisContext(code);
 
         const stage = normalizeExecutionStageTrace({
@@ -5899,7 +5907,7 @@ def test_tree_node_search_matches_id_or_goal_and_ranks_exact_prefix_above_contai
         global.window = global;
         global.S = { treeNodesById: {} };
         global.U = {};
-        const code = fs.readFileSync("g3ku/web/frontend/org_graph_task_view.js", "utf8");
+        const code = ["g3ku/web/frontend/tasks/tree-store.js", "g3ku/web/frontend/tasks/tree-view.js", "g3ku/web/frontend/tasks/node-detail-store.js", "g3ku/web/frontend/tasks/node-detail.js", "g3ku/web/frontend/org_graph_task_view.js"].map((name) => fs.readFileSync(name, "utf8")).join("\\n");
         vm.runInThisContext(code);
 
         S.treeNodesById = {
@@ -5951,7 +5959,7 @@ def test_tree_node_search_result_rows_carry_goal_node_id_and_status() -> None:
             return element;
           },
         };
-        const code = fs.readFileSync("g3ku/web/frontend/org_graph_task_view.js", "utf8");
+        const code = ["g3ku/web/frontend/tasks/tree-store.js", "g3ku/web/frontend/tasks/tree-view.js", "g3ku/web/frontend/tasks/node-detail-store.js", "g3ku/web/frontend/tasks/node-detail.js", "g3ku/web/frontend/org_graph_task_view.js"].map((name) => fs.readFileSync(name, "utf8")).join("\\n");
         vm.runInThisContext(code);
 
         const match = {
@@ -6055,7 +6063,7 @@ def test_task_tree_snapshot_chunked_load_merges_all_chunks_and_renders_once() ->
             };
           },
         };
-        const code = fs.readFileSync("g3ku/web/frontend/org_graph_task_view.js", "utf8");
+        const code = ["g3ku/web/frontend/tasks/tree-store.js", "g3ku/web/frontend/tasks/tree-view.js", "g3ku/web/frontend/tasks/node-detail-store.js", "g3ku/web/frontend/tasks/node-detail.js", "g3ku/web/frontend/org_graph_task_view.js"].map((name) => fs.readFileSync(name, "utf8")).join("\\n");
         vm.runInThisContext(code);
         global.renderTree = () => { renderCount += 1; };
         (async () => {
@@ -6165,7 +6173,7 @@ def test_task_tree_snapshot_chunked_load_shows_progress_notice_for_large_tree() 
             return resultPayload;
           },
         };
-        const code = fs.readFileSync("g3ku/web/frontend/org_graph_task_view.js", "utf8");
+        const code = ["g3ku/web/frontend/tasks/tree-store.js", "g3ku/web/frontend/tasks/tree-view.js", "g3ku/web/frontend/tasks/node-detail-store.js", "g3ku/web/frontend/tasks/node-detail.js", "g3ku/web/frontend/org_graph_task_view.js"].map((name) => fs.readFileSync(name, "utf8")).join("\\n");
         vm.runInThisContext(code);
         global.renderTree = () => {};
         (async () => {
@@ -6260,7 +6268,7 @@ def test_task_tree_load_notice_updates_numbers_for_single_chunk_when_visible() -
             },
           }),
         };
-        const code = fs.readFileSync("g3ku/web/frontend/org_graph_task_view.js", "utf8");
+        const code = ["g3ku/web/frontend/tasks/tree-store.js", "g3ku/web/frontend/tasks/tree-view.js", "g3ku/web/frontend/tasks/node-detail-store.js", "g3ku/web/frontend/tasks/node-detail.js", "g3ku/web/frontend/org_graph_task_view.js"].map((name) => fs.readFileSync(name, "utf8")).join("\\n");
         vm.runInThisContext(code);
         global.renderTree = () => {};
         (async () => {
@@ -6351,7 +6359,7 @@ def test_task_tree_in_place_refresh_never_shows_load_notice() -> None:
             },
           }),
         };
-        const code = fs.readFileSync("g3ku/web/frontend/org_graph_task_view.js", "utf8");
+        const code = ["g3ku/web/frontend/tasks/tree-store.js", "g3ku/web/frontend/tasks/tree-view.js", "g3ku/web/frontend/tasks/node-detail-store.js", "g3ku/web/frontend/tasks/node-detail.js", "g3ku/web/frontend/org_graph_task_view.js"].map((name) => fs.readFileSync(name, "utf8")).join("\\n");
         vm.runInThisContext(code);
         global.renderTree = () => {};
         (async () => {
@@ -6423,7 +6431,7 @@ def test_task_tree_load_notice_aligns_to_tree_search_box() -> None:
         const anchor = { getBoundingClientRect: () => anchorRect };
         global.document = { querySelector: (selector) => (anchorRect && selector === ".task-tree-search-input" ? anchor : null) };
         global.U = { taskLoadNotice: notice, taskLoadNoticeText: { textContent: "" } };
-        const code = fs.readFileSync("g3ku/web/frontend/org_graph_task_view.js", "utf8");
+        const code = ["g3ku/web/frontend/tasks/tree-store.js", "g3ku/web/frontend/tasks/tree-view.js", "g3ku/web/frontend/tasks/node-detail-store.js", "g3ku/web/frontend/tasks/node-detail.js", "g3ku/web/frontend/org_graph_task_view.js"].map((name) => fs.readFileSync(name, "utf8")).join("\\n");
         vm.runInThisContext(code);
         showTaskTreeLoadNotice("正在打开任务：加载中 (3/600)");
         const firstMargin = notice.style.marginTop;
@@ -6474,7 +6482,7 @@ def test_load_task_detail_announces_tree_load_only_for_real_opens() -> None:
         """
         const fs = require("fs");
         const vm = require("vm");
-        const source = fs.readFileSync("g3ku/web/frontend/org_graph_tasks.js", "utf8");
+        const source = ["g3ku/web/frontend/tasks/hall-store.js", "g3ku/web/frontend/tasks/hall-view.js", "g3ku/web/frontend/tasks/ws-router.js", "g3ku/web/frontend/org_graph_tasks.js"].map((name) => fs.readFileSync(name, "utf8")).join("\\n");
         const start = source.indexOf("async function loadTaskDetail");
         if (start < 0) throw new Error("loadTaskDetail not found");
         const tail = source.slice(start);
@@ -6536,7 +6544,7 @@ def test_task_recovery_notice_dismissal_survives_page_reload() -> None:
         global.window = global;
         global.S = {};
         global.U = {};
-        const code = fs.readFileSync("g3ku/web/frontend/org_graph_task_view.js", "utf8");
+        const code = ["g3ku/web/frontend/tasks/tree-store.js", "g3ku/web/frontend/tasks/tree-view.js", "g3ku/web/frontend/tasks/node-detail-store.js", "g3ku/web/frontend/tasks/node-detail.js", "g3ku/web/frontend/org_graph_task_view.js"].map((name) => fs.readFileSync(name, "utf8")).join("\\n");
         vm.runInThisContext(code);
 
         const NOTICE = "本任务遇到异常停止，已回退到稳定步骤继续。";
@@ -6656,7 +6664,7 @@ def test_fit_task_tree_anchors_root_when_tree_cannot_fit() -> None:
         };
         global.executionTreeNodeSelector = (nodeId) => `.execution-tree-node[data-id="${nodeId}"]`;
 
-        vm.runInThisContext(fs.readFileSync("g3ku/web/frontend/org_graph_task_view.js", "utf8"));
+        vm.runInThisContext(["g3ku/web/frontend/tasks/tree-store.js", "g3ku/web/frontend/tasks/tree-view.js", "g3ku/web/frontend/tasks/node-detail-store.js", "g3ku/web/frontend/tasks/node-detail.js", "g3ku/web/frontend/org_graph_task_view.js"].map((name) => fs.readFileSync(name, "utf8")).join("\\n"));
         const applied = fitTaskTreeToView();
         const rootRect = rootEl.getBoundingClientRect();
         console.log(JSON.stringify({
@@ -6694,7 +6702,7 @@ def test_distribution_progress_denominator_excludes_terminal_blocked_nodes() -> 
             "node:c": { node_id: "node:c", status: "in_progress" },
           },
         };
-        vm.runInThisContext(fs.readFileSync("g3ku/web/frontend/org_graph_task_view.js", "utf8"));
+        vm.runInThisContext(["g3ku/web/frontend/tasks/tree-store.js", "g3ku/web/frontend/tasks/tree-view.js", "g3ku/web/frontend/tasks/node-detail-store.js", "g3ku/web/frontend/tasks/node-detail.js", "g3ku/web/frontend/org_graph_task_view.js"].map((name) => fs.readFileSync(name, "utf8")).join("\\n"));
         const summary = summarizeDistributionProgress({
           state: "distributing",
           blocked_node_ids: ["node:a", "node:b", "node:c"],
@@ -6805,13 +6813,13 @@ def test_render_task_token_stats_marks_aborted_stream_rows_as_no_usage() -> None
           taskTokenButton: { title: "" },
         };
 
-        const appCode = fs.readFileSync("g3ku/web/frontend/org_graph_app.js", "utf8");
+        const appCode = ["g3ku/web/frontend/ui/toast.js", "g3ku/web/frontend/ui/confirm.js", "g3ku/web/frontend/ceo/model-panel.js", "g3ku/web/frontend/ceo/composer.js", "g3ku/web/frontend/ceo/compression.js", "g3ku/web/frontend/ceo/feed-model.js", "g3ku/web/frontend/ceo/feed-view.js", "g3ku/web/frontend/ceo/sessions-panel.js", "g3ku/web/frontend/ceo/session-store.js", "g3ku/web/frontend/ceo/ws-router.js", "g3ku/web/frontend/memory/store.js", "g3ku/web/frontend/memory/actions.js", "g3ku/web/frontend/memory/view.js", "g3ku/web/frontend/models/role-store.js", "g3ku/web/frontend/models/role-view.js", "g3ku/web/frontend/models/actions.js", "g3ku/web/frontend/org_graph_app.js"].map((name) => fs.readFileSync(name, "utf8")).join("\\n");
         vm.runInThisContext(appCode.slice(appCode.indexOf("const EMPTY_TOKEN_USAGE"), appCode.indexOf("function ensureTaskTokenUi")));
         global.S.modelCatalog = global.S.modelCatalog || { catalog: [] };
-        vm.runInThisContext(appCode.slice(appCode.indexOf("function ceoModelDisplayTitle"), appCode.indexOf("function ceoCurrentUsageEstimate")));
+        vm.runInThisContext(fs.readFileSync("g3ku/web/frontend/ceo/model-panel.js", "utf8"));
 
-        const tasksCode = fs.readFileSync("g3ku/web/frontend/org_graph_tasks.js", "utf8");
-        vm.runInThisContext(tasksCode.slice(tasksCode.indexOf("function taskModelDisplayName"), tasksCode.indexOf("async function loadTaskDetail")));
+        const tasksCode = ["g3ku/web/frontend/tasks/hall-store.js", "g3ku/web/frontend/tasks/hall-view.js", "g3ku/web/frontend/tasks/ws-router.js", "g3ku/web/frontend/org_graph_tasks.js"].map((name) => fs.readFileSync(name, "utf8")).join("\\n");
+        vm.runInThisContext(tasksCode.slice(tasksCode.indexOf("function renderTasks"), tasksCode.indexOf("async function loadTaskDetail")));
 
         renderTaskTokenStats();
         const html = U.taskTokenContent.innerHTML;
