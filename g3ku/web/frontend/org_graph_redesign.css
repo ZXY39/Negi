@@ -575,8 +575,7 @@
 }
 
 [data-ui-version="v2"] .resource-list-panel:not(.detail-drawer),
-[data-ui-version="v2"] .resource-detail-panel:not(.detail-drawer),
-[data-ui-version="v2"] .memory-column {
+[data-ui-version="v2"] .resource-detail-panel:not(.detail-drawer) {
     background: transparent;
     border: 0;
     border-radius: 0;
@@ -1036,20 +1035,11 @@
     gap: var(--ui-space-4);
 }
 
-[data-ui-version="v2"] .memory-layout {
-    display: grid;
-    grid-template-columns: minmax(0, 1fr);
-    gap: var(--ui-space-4);
-}
-
 @media (min-width: 1024px) {
     [data-ui-version="v2"] .model-routing-grid {
         grid-template-columns: repeat(2, minmax(0, 1fr));
     }
 
-    [data-ui-version="v2"] .memory-layout {
-        grid-template-columns: 1.15fr 0.85fr;
-    }
 }
 
 @media (min-width: 1200px) {
@@ -1221,30 +1211,6 @@
     border-radius: var(--ui-radius-card);
     background: var(--ui-bg-surface);
     box-shadow: none;
-}
-
-/* 24. 记忆管理 */
-[data-ui-version="v2"] .memory-column {
-    min-height: 0;
-}
-
-[data-ui-version="v2"] .memory-card {
-    border: 1px solid var(--ui-border);
-    border-radius: var(--ui-radius-control);
-    background: var(--ui-bg-elevated);
-    box-shadow: none;
-}
-
-[data-ui-version="v2"] .memory-card-title {
-    font-size: 14px;
-    font-weight: 600;
-    color: var(--ui-text);
-}
-
-[data-ui-version="v2"] .memory-card-meta,
-[data-ui-version="v2"] .memory-card-meta-label {
-    font-size: 12px;
-    color: var(--ui-text-muted);
 }
 
 /* 26. 小屏页面降级 */
@@ -1462,24 +1428,6 @@
 /* 36. 页面滚动条统一走日志那一套：继承全局 scrollbar-width: thin 与
    --scrollbar-thumb / transparent 轨道，不做逐页覆盖，也不随悬停变化。 */
 
-/* 38. 记忆管理：列标题上移、去掉列说明，操作组靠左 */
-[data-ui-version="v2"] .memory-layout {
-    padding-top: var(--ui-space-3);
-}
-
-[data-ui-version="v2"] .memory-column .panel-header {
-    padding: var(--ui-space-2) var(--ui-space-1);
-}
-
-[data-ui-version="v2"] .memory-column .panel-header .subtitle {
-    display: none;
-}
-
-[data-ui-version="v2"] #view-memory #memory-refresh-btn {
-    position: static;
-    transform: none;
-}
-
 /* 39. 会话面板折叠态：展开按钮与下方控件同宽，箭头居中 */
 [data-ui-version="v2"] .ceo-session-panel-toggle {
     display: inline-flex;
@@ -1644,122 +1592,6 @@
     font-size: 14px;
     font-weight: 700;
     color: var(--ui-text);
-}
-
-/* 43. 待处理记忆：长卡片显示状态 / 来源 / 时间 / 正文，一屏约两张，其余滚动 */
-[data-ui-version="v2"] .memory-card-queue {
-    display: flex;
-    flex-direction: column;
-    /* 列表是定高滚动容器，卡片被压缩会连正文一起截半行；撑不住就交给列表滚 */
-    flex: 0 0 auto;
-    gap: var(--ui-space-3);
-    padding: var(--ui-space-4);
-    border: 1px solid var(--ui-border);
-    border-radius: var(--ui-radius-card);
-    background: var(--ui-bg-elevated);
-    box-shadow: none;
-}
-
-[data-ui-version="v2"] .memory-card-queue .memory-card-head {
-    display: flex;
-    align-items: center;
-    gap: var(--ui-space-2);
-}
-
-[data-ui-version="v2"] .memory-card-queue .memory-card-source {
-    font-size: 12px;
-    font-weight: 600;
-    color: var(--ui-text-secondary);
-}
-
-[data-ui-version="v2"] .memory-card-queue .memory-card-time {
-    margin-left: auto;
-    font-size: 12px;
-    color: var(--ui-text-muted);
-}
-
-[data-ui-version="v2"] .memory-card-queue .memory-card-body {
-    display: -webkit-box;
-    -webkit-box-orient: vertical;
-    -webkit-line-clamp: 2;
-    line-clamp: 2;
-    overflow: hidden;
-    min-height: 0;
-    /* 正文固定占两行：不足两行也撑满，队列卡片等高、不留整块空白 */
-    height: 44px;
-    margin: 0;
-    padding: 0;
-    border-top: 0;
-    font-size: 13px;
-    line-height: 22px;
-    color: var(--ui-text-secondary);
-    white-space: pre-wrap;
-    overflow-wrap: anywhere;
-}
-
-/* 44. 「无变更」徽标与 删除/修改/增加 操作 chip 同一套盒子 */
-[data-ui-version="v2"] .memory-card-minimal-status .status-badge {
-    height: 24px;
-    padding: 2px 10px;
-    gap: 5px;
-    border: 1px solid currentColor;
-    background: color-mix(in srgb, currentColor 9%, var(--ui-bg-surface));
-}
-
-/* 45. 记忆页：刷新在最左、查看记忆紧随其后；操作 chip 全部同一盒子 */
-[data-ui-version="v2"] #view-memory #memory-refresh-btn {
-    order: -1;
-}
-
-[data-ui-version="v2"] .memory-op-chip {
-    display: inline-flex;
-    align-items: center;
-    height: 24px;
-    min-height: 24px;
-    padding: 2px 10px;
-    gap: 5px;
-    border: 1px solid currentColor;
-    border-radius: var(--ui-radius-pill);
-    background: color-mix(in srgb, currentColor 9%, var(--ui-bg-surface));
-    font-size: 12px;
-    font-weight: 700;
-    line-height: 1.25;
-    white-space: nowrap;
-}
-
-[data-ui-version="v2"] .memory-op-chip svg {
-    width: 14px;
-    height: 14px;
-    flex: 0 0 auto;
-    color: inherit;
-}
-
-/* 描边与底色都走 currentColor，所以按操作风险度上色会同时作用到图标和文字。
-   v2 按风险档上色而不是按操作逐支上色，摘除整节与删一条同档，因此共用 danger token */
-[data-ui-version="v2"] .memory-op-chip[data-op="delete"],
-[data-ui-version="v2"] .memory-op-chip[data-op="category_purge"] {
-    color: var(--ui-danger);
-}
-
-[data-ui-version="v2"] .memory-op-chip[data-op="rewrite"] {
-    color: var(--ui-warning);
-}
-
-[data-ui-version="v2"] .memory-op-chip[data-op="add"] {
-    color: var(--ui-success);
-}
-
-[data-ui-version="v2"] .memory-op-chip[data-op="note_upsert"] {
-    color: var(--ui-info);
-}
-
-/* 记忆退场是正文搬进分类 note，既不是新增也不是删除，所以单独一支黄 */
-[data-ui-version="v2"] .memory-op-chip[data-op="consolidate"] {
-    color: var(--ui-retire);
-}
-
-[data-ui-version="v2"] .memory-op-chip[data-op="nochange"] {
-    color: var(--ui-text-secondary);
 }
 
 /* 46. 任务大厅头部：多选 → 排序 → 树深度靠左成组，树深度之后的性能读数
@@ -2103,7 +1935,6 @@
 [data-ui-version="v2"] .ceo-session-tab,
 [data-ui-version="v2"] .task-trace-round-chip,
 [data-ui-version="v2"] .msg-action-btn,
-[data-ui-version="v2"] .memory-op-chip,
 [data-ui-version="v2"] .execution-tree-node-pause-action,
 [data-ui-version="v2"] .task-tree-search-input,
 [data-ui-version="v2"] .task-token-call-search {
