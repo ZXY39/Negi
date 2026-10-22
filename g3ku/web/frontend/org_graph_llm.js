@@ -261,7 +261,7 @@
     S.modelCatalog.catalog = chatBindings.map((item) => ({ ...item, key: trim(item.key) }));
     S.modelCatalog.items = chatBindings.map((item) => trim(item.key));
     S.modelCatalog.roles = normalizeAllModelRoles(state.routes || EMPTY_MODEL_ROLES());
-    // 组是模型页左侧那一列的数据源；编辑会话里不能覆盖草稿，否则弹窗刚填的配置会被刷新冲掉。
+    // 组是模型页左侧那一列的数据源；草稿会话里不能覆盖草稿，否则弹窗刚填的配置会被刷新冲掉。
     S.modelCatalog.loadBalanceGroups = copyGroupMap(state.loadBalanceGroups);
     if (!S.modelCatalog.roleEditing) {
       S.modelCatalog.loadBalanceGroupDrafts = copyGroupMap(S.modelCatalog.loadBalanceGroups);
@@ -293,8 +293,7 @@
     if (state.saving) return hint("正在保存模型配置...");
     if (state.error) return hint(`模型配置出错：${state.error}`, true);
     if (!state.bindings.length) return hint("还没有保存的配置。点击“添加配置”开始添加。", false);
-    if (S.modelCatalog.roleEditing && S.modelCatalog.rolesDirty) return hint("模型链已修改，点击“保存模型链”提交。", false);
-    if (S.modelCatalog.roleEditing) return hint("拖拽左侧模型到右侧角色列，完成后点击“保存模型链”。", false);
+    if (S.modelCatalog.rolesDirty) return hint("模型链有未保存的修改，点“保存”提交，或点“取消修改”放弃。", false);
     return hint("点击左侧配置可查看对应 JSON 配置；点击“添加配置”可新建配置。", false);
   }
 
@@ -1329,12 +1328,11 @@
     }
 
     U.llmBindingsList.innerHTML = items.map((item) => {
-      const canDrag = S.modelCatalog.roleEditing;
       const metaRow = item.record_missing
         ? '<div class="model-inline-meta"><span class="policy-chip risk-high">凭据记录缺失</span></div>'
         : "";
       return `
-        <article class="llm-binding-card model-available-item${trim(item.key) === trim(llmState().editor.bindingKey) ? " is-selected" : ""}" data-model-available-key="${escv(item.key)}" data-model-open="${escv(item.key)}"${canDrag ? ' draggable="true"' : ""}>
+        <article class="llm-binding-card model-available-item${trim(item.key) === trim(llmState().editor.bindingKey) ? " is-selected" : ""}" data-model-available-key="${escv(item.key)}" data-model-open="${escv(item.key)}" draggable="true">
           <button type="button" class="model-available-main" data-model-open="${escv(item.key)}">
             <span class="resource-list-title">${escv(bindingTitle(item))}</span>
             <span class="resource-list-subtitle">${escv(item.api_base || "")}</span>
@@ -1346,7 +1344,6 @@
 
   function renderRoutes() {
     if (!U.modelRoleEditors) return;
-    const editing = !!S.modelCatalog.roleEditing;
     U.modelRoleEditors.innerHTML = MODEL_SCOPES.map((scope) => {
       const chain = modelScopeChain(scope.key);
       return `
@@ -1357,7 +1354,7 @@
           <div class="role-chain-section">
             <div class="model-chain-list" data-model-chain-list="${scope.key}">${chain.length ? chain.map((ref, index) => {
               // 一跳是一个组时不能当成模型 key 渲染：bindingMap 里没有它，会画成一块写着 group:x 的假模型卡。
-              if (isGroupRef(ref)) return renderModelGroupChainTile(scope.key, groupKeyFromRef(ref), index, editing);
+              if (isGroupRef(ref)) return renderModelGroupChainTile(scope.key, groupKeyFromRef(ref), index);
               const item = llmState().bindingMap[trim(ref)] || modelRefItem(ref);
               const key = trim(item?.key || ref);
               const badges = [index === 0
@@ -1365,8 +1362,8 @@
                 : '<span class="policy-chip neutral">候选</span>'];
               if (item && item.enabled === false) badges.push('<span class="policy-chip neutral">已禁用</span>');
               if (!item) badges.push('<span class="policy-chip neutral">未托管</span>');
-              return `<article class="model-chain-slide${editing ? ' is-editing' : ''}"${editing ? ' draggable="true"' : ''} data-model-chain-ref="${escv(key)}" data-scope="${scope.key}"><button type="button" class="model-chain-main" data-model-open="${escv(key)}"><span class="resource-list-title">${escv(bindingTitle(item) || key)}</span><span class="resource-list-subtitle">${escv(item?.api_base || "")}</span><span class="model-inline-meta">${badges.join("")}</span></button>${editing ? `<button type="button" class="model-chain-remove" data-model-chain-action="remove" data-scope="${scope.key}" data-index="${index}" title="移除" aria-label="移除模型"><i data-lucide="x"></i></button>` : ''}</article>`;
-            }).join("") : `<div class="empty-state compact">${editing ? '把左侧模型拖到这里，编排当前角色链。' : '点击“编辑模型链”后再调整角色链。'}</div>`}</div>
+              return `<article class="model-chain-slide is-editing" draggable="true" data-model-chain-ref="${escv(key)}" data-scope="${scope.key}"><button type="button" class="model-chain-main" data-model-open="${escv(key)}"><span class="resource-list-title">${escv(bindingTitle(item) || key)}</span><span class="resource-list-subtitle">${escv(item?.api_base || "")}</span><span class="model-inline-meta">${badges.join("")}</span></button><button type="button" class="model-chain-remove" data-model-chain-action="remove" data-scope="${scope.key}" data-index="${index}" title="移除" aria-label="移除模型"><i data-lucide="x"></i></button></article>`;
+            }).join("") : `<div class="empty-state compact">把左侧模型拖到这里，编排当前角色链。</div>`}</div>
           </div>
         </section>`;
     }).join("");
@@ -1377,17 +1374,18 @@
     const state = llmState();
     refs();
     projectRoutes();
+    const dirty = !!S.modelCatalog.rolesDirty;
     if (U.modelRolesCancel) {
-      U.modelRolesCancel.hidden = !S.modelCatalog.roleEditing;
+      U.modelRolesCancel.hidden = !dirty;
       U.modelRolesCancel.disabled = state.loading || state.saving;
     }
     if (U.modelRolesSave) {
+      U.modelRolesSave.hidden = !dirty;
       U.modelRolesSave.disabled = state.loading || state.saving;
-      U.modelRolesSave.textContent = S.modelCatalog.roleEditing ? (S.modelCatalog.rolesDirty ? "保存模型链" : "完成编辑") : "编辑模型链";
     }
-    const iterationsOpen = !!S.modelCatalog.roleEditing && !!S.modelCatalog.roleIterationsOpen;
+    const iterationsOpen = !!S.modelCatalog.roleIterationsOpen;
     if (U.modelIterationsToggle) {
-      U.modelIterationsToggle.hidden = !S.modelCatalog.roleEditing;
+      U.modelIterationsToggle.hidden = false;
       U.modelIterationsToggle.disabled = state.loading || state.saving;
       U.modelIterationsToggle.setAttribute("aria-expanded", iterationsOpen ? "true" : "false");
     }
@@ -1819,13 +1817,11 @@
       if (open) void openDetailModal(open.dataset.modelOpen);
     });
     U.llmBindingsList.addEventListener("dragstart", (event) => {
-      if (!S.modelCatalog.roleEditing) return;
       const item = event.target.closest("[data-model-available-key]");
       if (!item) return;
       beginModelDrag(item, { ref: String(item.dataset.modelAvailableKey || ""), source: "available" }, event.dataTransfer);
     });
     U.llmBindingsList.addEventListener("dragover", (event) => {
-      if (!S.modelCatalog.roleEditing) return;
       const dragState = S.modelCatalog.dragState;
       if (!dragState?.ref || dragState.source !== "chain") return;
       const list = event.target.closest("[data-model-available-list]");
@@ -1837,7 +1833,6 @@
       startModelAutoScroll(list, event.clientY);
     });
     U.llmBindingsList.addEventListener("drop", (event) => {
-      if (!S.modelCatalog.roleEditing) return;
       const dragState = S.modelCatalog.dragState;
       if (!dragState?.ref || dragState.source !== "chain") return;
       const list = event.target.closest("[data-model-available-list]");
@@ -1848,7 +1843,6 @@
       removeRoleChainItem(dragState.scope, dragState.ref);
     });
     U.llmBindingsList.addEventListener("dragleave", (event) => {
-      if (!S.modelCatalog.roleEditing) return;
       const dragState = S.modelCatalog.dragState;
       if (!dragState?.ref) return;
       const zone = event.target instanceof Element ? event.target.closest("[data-model-available-list]") : null;
@@ -1883,7 +1877,8 @@
         S.modelCatalog.roleIterationDrafts[scope] = next;
       });
       syncModelRoleDraftState();
-      if (U.modelRolesSave) U.modelRolesSave.textContent = S.modelCatalog.rolesDirty ? "保存模型链" : "完成编辑";
+      if (U.modelRolesSave) U.modelRolesSave.hidden = !S.modelCatalog.rolesDirty;
+      if (U.modelRolesCancel) U.modelRolesCancel.hidden = !S.modelCatalog.rolesDirty;
       renderHint();
     });
     U.llmEditorBackdrop?.addEventListener("click", closeEditor);
@@ -2044,11 +2039,7 @@
     handleBindingJsonEditorInput,
   };
   window.handleModelRoleEditorAction = async function handleModelRoleEditorAction() {
-    if (!S.modelCatalog.roleEditing) {
-      startModelRoleEditing();
-      renderAll();
-      return;
-    }
+    if (!S.modelCatalog.rolesDirty) return;
     if (U.modelIterationsInput && !U.modelIterationsInput.hidden) {
       const raw = String(U.modelIterationsInput.value || "").trim();
       const parsed = raw === "" ? -1 : Number.parseInt(raw, 10);
@@ -2064,11 +2055,6 @@
     } catch (error) {
       llmState().error = error.message || "保存失败";
       showToast({ title: "保存失败", text: llmState().error, kind: "error" });
-      renderAll();
-      return;
-    }
-    if (!S.modelCatalog.rolesDirty) {
-      cancelModelRoleEditing();
       renderAll();
       return;
     }

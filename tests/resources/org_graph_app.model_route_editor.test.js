@@ -315,9 +315,9 @@ test("组列列出所有组并标出未加入链的那份", () => {
     assert.doesNotMatch(sharedRow, /个成员|每成员 \d+ 轮/);
     // 整张卡是点击区（rows 是按 <article 切开的，这里只匹配属性）。
     assert.match(sharedRow, /data-group-edit="g_shared"/);
-    // 非编辑态：不可拖、没有删除按钮。
-    assert.doesNotMatch(sharedRow, /draggable="true"/);
-    assert.doesNotMatch(sharedRow, /data-group-delete/);
+    // 卡随时可拖、随时可删：没有「进入编辑」这一步，草稿会话在第一次交互时开启。
+    assert.match(sharedRow, /draggable="true"/);
+    assert.match(sharedRow, /data-group-delete="g_shared"/);
 });
 
 test("新建组先弹窗，点确定才落草稿并自动进入链编辑会话", () => {

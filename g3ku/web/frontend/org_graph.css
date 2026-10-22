@@ -8269,16 +8269,28 @@ textarea {
 }
 
 .project-select-toggle {
-    display: none;
+    display: inline-flex;
     align-items: center;
     gap: var(--space-2);
     font-size: 0.875rem;
     color: var(--text-secondary);
     cursor: pointer;
+    opacity: 0;
+    transition: opacity 120ms var(--ui-motion-ease);
 }
 
-.project-select-toggle.is-visible {
-    display: inline-flex;
+/* 勾选框不靠「多选模式」显形：悬停或键盘聚焦时出现，选中后常驻。 */
+.project-card:hover .project-select-toggle,
+.project-card:focus-within .project-select-toggle,
+.project-card.is-selected .project-select-toggle {
+    opacity: 1;
+}
+
+.task-selection-count {
+    align-self: center;
+    font-size: 13px;
+    color: var(--ui-text-secondary);
+    white-space: nowrap;
 }
 
 .pc-actions {
@@ -16628,10 +16640,11 @@ textarea {
 #view-models .llm-bindings-panel .panel-header,
 #view-models .model-chain-card > .card-header {
     flex: 0 0 auto;
-    align-items: flex-start;
-    min-height: 42px;
+    align-items: center;
+    /* 48 = 38px 输入档 + 10px 下衬：三列列头同高，列表才从同一条基线开始。 */
+    min-height: 48px;
     margin-bottom: 0;
-    padding: 0 0 10px;
+    padding: 0 12px 10px 0;
     border-bottom: 0;
 }
 #view-models .llm-groups-panel .panel-header h3,
@@ -16643,14 +16656,18 @@ textarea {
     line-height: 1.35;
     letter-spacing: -0.01em;
 }
-/* 模型列表列：标题一行，搜索框独占下一行；标题留在左端，不被列布局居中。 */
+/* 模型列表列：标题在左、搜索框占满剩下的宽度，右缘与本列卡片同线；
+   列头因此与另两列同高，三条列表从同一条基线开始。 */
 #view-models .llm-bindings-panel .panel-header.model-shared-header {
-    flex-direction: column;
-    align-items: stretch;
-    gap: 8px;
+    flex-direction: row;
+    align-items: center;
+    gap: var(--ui-space-2);
+}
+#view-models .llm-bindings-panel .panel-header.model-shared-header > div:first-child {
+    flex: 0 0 auto;
 }
 #view-models .llm-bindings-panel .model-shared-actions {
-    width: 100%;
+    flex: 1 1 auto;
     min-width: 0;
 }
 #view-models .llm-bindings-panel .model-shared-actions .resource-search {
@@ -16666,6 +16683,8 @@ textarea {
 #view-models .model-chain-list {
     padding: 0;
     gap: var(--ui-space-2);
+    /* 滚动条槽恒定预留：列头那 12px 右衬才一直对得上卡片右缘。 */
+    scrollbar-gutter: stable;
 }
 #view-models .model-chain-card {
     gap: 0;
@@ -16712,6 +16731,18 @@ textarea {
     border-radius: var(--ui-radius-card);
     background: color-mix(in srgb, var(--ui-brand) 4%, transparent);
     box-shadow: 0 0 0 3px color-mix(in srgb, var(--ui-brand) 12%, transparent);
+}
+/* 「保存」只在脏状态出现，出现就是这一页唯一的重心，所以填重点色；
+   其余 .toolbar-btn.success 仍按扁平控件档画（见上文 V2 最终值那段）。 */
+#view-models #model-roles-save-btn {
+    border-color: var(--ui-brand);
+    background: var(--ui-brand);
+    color: var(--ui-on-brand);
+}
+#view-models #model-roles-save-btn:hover:not(:disabled) {
+    border-color: var(--ui-brand);
+    background: color-mix(in srgb, var(--ui-brand) 88%, var(--ui-on-brand));
+    color: var(--ui-on-brand);
 }
 /* 卡片内三级文字：标题 13/600、副标题 12 灰、元信息 chip 12。 */
 #view-models .model-group-name,

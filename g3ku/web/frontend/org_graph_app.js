@@ -273,9 +273,7 @@ const S = {
     traceOutputContentByKey: {},
     traceOutputRequestsByKey: {},
     selectedTaskIds: new Set(),
-    multiSelectMode: false,
     taskFilterMenuOpen: false,
-    taskBatchMenuOpen: false,
     taskBusy: false,
     taskPage: 1,
     taskPageSize: RESOURCE_PAGE_SIZES[0],
@@ -345,6 +343,9 @@ const S = {
         search: "",
         selectedModelKey: "",
         mode: "view",
+        // 草稿会话由第一次交互自动开启（models/actions.js 的 ensureModelRoleDraftSession）：
+        // 页面上没有「进入编辑」这一步。读侧仍按「有会话读草稿、没会话读服务端」分流，
+        // 所以这颗初始值是 false，不是漏改。
         roleEditing: false,
         rolesDirty: false,
         dragState: null,
@@ -612,14 +613,12 @@ const U = {
     taskPageInfo: document.getElementById("task-page-info"),
     taskPagePrev: document.getElementById("task-page-prev"),
     taskPageNext: document.getElementById("task-page-next"),
-    taskMultiToggle: document.getElementById("task-multi-toggle"),
+    taskSelectionCount: document.getElementById("task-selection-count"),
+    taskClearSelection: document.getElementById("task-clear-selection"),
     taskSortSelect: document.getElementById("task-sort-select"),
     taskFilterWrap: document.getElementById("task-filter-wrap"),
     taskFilterTrigger: document.getElementById("task-filter-menu-trigger"),
     taskFilterMenu: document.getElementById("task-filter-menu"),
-    taskBatchWrap: document.getElementById("task-batch-wrap"),
-    taskBatchTrigger: document.getElementById("task-batch-menu-trigger"),
-    taskBatchMenu: document.getElementById("task-batch-menu"),
     backToTasks: document.getElementById("back-to-tasks"),
     tdTitle: document.getElementById("td-prompt-text"),
     tdPromptDisclosure: document.getElementById("td-prompt-disclosure"),
@@ -10609,19 +10608,17 @@ function bindModelPage() {
         }
         // 移出链的叉号在组卡内部，必须先判它；否则点叉号会被下面那条"整张卡都可点"的
         // 分支吃掉，只会把配置弹窗弹出来。
-        if (S.modelCatalog.roleEditing) {
-            const action = e.target.closest("[data-model-chain-action]");
-            if (action) {
-                const scope = String(action.dataset.scope || "");
-                const index = Number(action.dataset.index || -1);
-                const chain = modelScopeChain(scope);
-                if (!scope || index < 0 || index >= chain.length) return;
-                if (action.dataset.modelChainAction === "remove") {
-                    chain.splice(index, 1);
-                    updateRoleChainDraft(scope, chain);
-                }
-                return;
+        const action = e.target.closest("[data-model-chain-action]");
+        if (action) {
+            const scope = String(action.dataset.scope || "");
+            const index = Number(action.dataset.index || -1);
+            const chain = modelScopeChain(scope);
+            if (!scope || index < 0 || index >= chain.length) return;
+            if (action.dataset.modelChainAction === "remove") {
+                chain.splice(index, 1);
+                updateRoleChainDraft(scope, chain);
             }
+            return;
         }
         // 组卡的整张卡都是点击区，查看态也允许打开配置看成员与预算。
         const groupEdit = e.target.closest("[data-group-edit]");
@@ -10632,11 +10629,6 @@ function bindModelPage() {
     });
     U.modelGroupCreate?.addEventListener("click", () => openLoadBalanceGroupDialog());
     U.modelGroupList?.addEventListener("click", (e) => {
-        if (!S.modelCatalog.roleEditing) {
-            const edit = e.target.closest("[data-group-edit]");
-            if (edit) openLoadBalanceGroupDialog(String(edit.dataset.groupEdit || ""));
-            return;
-        }
         // 「删除」在卡片内部，必须先判它，否则点删除会顺手把配置弹窗弹出来。
         const del = e.target.closest("[data-group-delete]");
         if (del) {
@@ -10670,7 +10662,6 @@ function bindModelPage() {
     });
     // 组行拖进右侧任意角色链：ref 用 group token，链上的落位与模型走同一套 drop 逻辑。
     U.modelGroupList?.addEventListener("dragstart", (e) => {
-        if (!S.modelCatalog.roleEditing) return;
         const item = e.target.closest("[data-model-group-ref]");
         if (!item) return;
         beginModelDrag(
@@ -10681,13 +10672,11 @@ function bindModelPage() {
     });
     U.modelGroupList?.addEventListener("dragend", finishModelDrag);
     U.modelRoleEditors?.addEventListener("input", (e) => {
-        if (!S.modelCatalog.roleEditing) return;
         const field = e.target.closest("[data-model-role-iterations], [data-model-role-limit-input]");
         if (!(field instanceof HTMLElement)) return;
         syncRoleIterationDraftsFromInputs({ requireValid: false });
     });
     U.modelRoleEditors?.addEventListener("change", (e) => {
-        if (!S.modelCatalog.roleEditing) return;
         const field = e.target.closest("[data-model-role-iterations], [data-model-role-limit-input], [data-model-role-limit-mode]");
         if (!(field instanceof HTMLElement)) return;
         if (field.matches("[data-model-role-limit-mode]")) {
@@ -10713,12 +10702,10 @@ function bindModelPage() {
         renderRoleLimitsBar();
     });
     U.modelRoleLimitsBar?.addEventListener("input", (e) => {
-        if (!S.modelCatalog.roleEditing) return;
         if (!e.target.closest("[data-model-role-limit-input]")) return;
         syncRoleIterationDraftsFromInputs({ requireValid: false });
     });
     U.modelRoleLimitsBar?.addEventListener("change", (e) => {
-        if (!S.modelCatalog.roleEditing) return;
         if (!e.target.closest("[data-model-role-limit-input]")) return;
         try {
             syncRoleIterationDraftsFromInputs({ requireValid: true });
@@ -10729,7 +10716,6 @@ function bindModelPage() {
         }
     });
     U.modelRoleEditors?.addEventListener("dragstart", (e) => {
-        if (!S.modelCatalog.roleEditing) return;
         const chainItem = e.target.closest("[data-model-chain-ref]");
         if (!chainItem) return;
         beginModelDrag(chainItem, {
@@ -10739,7 +10725,6 @@ function bindModelPage() {
         }, e.dataTransfer);
     });
     U.modelRoleEditors?.addEventListener("dragover", (e) => {
-        if (!S.modelCatalog.roleEditing) return;
         const dragState = S.modelCatalog.dragState;
         if (!dragState?.ref) return;
         const chainList = resolveModelChainDropList(e.target);
@@ -10766,7 +10751,6 @@ function bindModelPage() {
         startModelAutoScroll(chainList, e.clientY);
     });
     U.modelRoleEditors?.addEventListener("drop", (e) => {
-        if (!S.modelCatalog.roleEditing) return;
         const dragState = S.modelCatalog.dragState;
         if (!dragState?.ref) return;
         const chainList = resolveModelChainDropList(e.target);
@@ -10787,7 +10771,6 @@ function bindModelPage() {
         else insertRoleChainItem(scope, dragState.ref, targetIndex);
     });
     U.modelRoleEditors?.addEventListener("dragleave", (e) => {
-        if (!S.modelCatalog.roleEditing) return;
         const dragState = S.modelCatalog.dragState;
         if (!dragState?.ref) return;
         const zone = e.target instanceof Element ? (e.target.closest(".model-chain-card") || resolveModelChainDropList(e.target)) : null;
@@ -10799,7 +10782,6 @@ function bindModelPage() {
     });
     U.modelRoleEditors?.addEventListener("dragend", finishModelDrag);
     U.modelList?.addEventListener("dragstart", (e) => {
-        if (!S.modelCatalog.roleEditing) return;
         const availableItem = e.target.closest("[data-model-available-key]");
         if (!availableItem) return;
         beginModelDrag(availableItem, {
@@ -10808,7 +10790,6 @@ function bindModelPage() {
         }, e.dataTransfer);
     });
     U.modelList?.addEventListener("dragover", (e) => {
-        if (!S.modelCatalog.roleEditing) return;
         const dragState = S.modelCatalog.dragState;
         if (!dragState?.ref || dragState.source !== "chain") return;
         const availableList = e.target.closest("[data-model-available-list]");
@@ -10825,7 +10806,6 @@ function bindModelPage() {
         startModelAutoScroll(availableList, e.clientY);
     });
     U.modelList?.addEventListener("drop", (e) => {
-        if (!S.modelCatalog.roleEditing) return;
         const dragState = S.modelCatalog.dragState;
         if (!dragState?.ref || dragState.source !== "chain") return;
         const availableList = e.target.closest("[data-model-available-list]");
@@ -10836,7 +10816,6 @@ function bindModelPage() {
         removeRoleChainItem(dragState.scope, dragState.ref);
     });
     U.modelList?.addEventListener("dragleave", (e) => {
-        if (!S.modelCatalog.roleEditing) return;
         const dragState = S.modelCatalog.dragState;
         if (!dragState?.ref) return;
         const zone = e.target instanceof Element ? e.target.closest("[data-model-available-list]") : null;
@@ -10910,26 +10889,11 @@ function bindTaskHall() {
     U.taskPageSize?.addEventListener("change", (e) => setTaskPageSize(e.target.value));
     U.taskPagePrev?.addEventListener("click", () => setTaskPage(S.taskPage - 1));
     U.taskPageNext?.addEventListener("click", () => setTaskPage(S.taskPage + 1));
-    U.taskMultiToggle?.addEventListener("click", () => setMultiSelectMode(!S.multiSelectMode));
+    U.taskClearSelection?.addEventListener("click", () => clearTaskSelection());
     U.taskFilterTrigger?.addEventListener("click", (e) => {
         e.stopPropagation();
         setTaskMenuOpen("filter", !S.taskFilterMenuOpen);
     });
-    U.taskBatchTrigger?.addEventListener("click", (e) => {
-        e.stopPropagation();
-        setTaskMenuOpen("batch", !S.taskBatchMenuOpen);
-    });
-    if (U.taskBatchMenu && !U.taskBatchMenu.querySelector('[data-batch-action="retry"]')) {
-        const retryButton = document.createElement("button");
-        retryButton.className = "toolbar-menu-item success";
-        retryButton.type = "button";
-        retryButton.setAttribute("role", "menuitem");
-        retryButton.dataset.batchAction = "retry";
-        retryButton.textContent = "重试";
-        const deleteButton = U.taskBatchMenu.querySelector('[data-batch-action="delete"]');
-        if (deleteButton) U.taskBatchMenu.insertBefore(retryButton, deleteButton);
-        else U.taskBatchMenu.appendChild(retryButton);
-    }
     U.taskFilterMenu?.querySelectorAll("[data-select-bucket]")?.forEach((button) => button.addEventListener("click", () => {
         S.selectedTaskIds = new Set(S.tasks.filter((task) => statusBucketMatches(task, button.dataset.selectBucket)).map((task) => task.task_id));
         closeTaskMenus();
@@ -10938,7 +10902,7 @@ function bindTaskHall() {
     document.addEventListener("visibilitychange", () => {
         if (typeof ensureTaskListVisibleReconcile === "function") ensureTaskListVisibleReconcile();
     });
-    U.taskBatchMenu?.querySelectorAll("[data-batch-action]")?.forEach((button) => button.addEventListener("click", async () => {
+    U.taskToolbar?.querySelectorAll("[data-batch-action]")?.forEach((button) => button.addEventListener("click", async () => {
         await runTaskBatchAction(button.dataset.batchAction, { returnFocus: button });
     }));
     U.taskTreeResetRounds?.addEventListener("click", () => resetTaskTreeRoundSelections());

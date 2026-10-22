@@ -319,8 +319,6 @@
                     </div>
                     <div class="task-header-actions">
                         <div id="task-performance-bar" class="task-performance-bar" aria-live="polite"></div>
-                        <button id="task-multi-toggle" class="toolbar-btn" type="button"
-                            aria-pressed="false">多选</button>
                         <div class="task-toolbar-preferences">
                             <div class="task-session-scope" role="group" aria-label="任务范围">
                                 <button id="task-session-current-btn" class="task-session-scope-btn" type="button"
@@ -361,11 +359,14 @@
                     <section class="resource-list-panel task-list-panel full-width-panel">
                         <div class="project-list-container">
                             <div id="task-toolbar" class="project-toolbar" hidden>
+                                <span id="task-selection-count" class="task-selection-count" aria-live="polite"></span>
                                 <div class="project-toolbar-group">
-                                    <div id="task-filter-wrap" class="toolbar-dropdown" hidden>
+                                    <div id="task-filter-wrap" class="toolbar-dropdown">
                                         <button id="task-filter-menu-trigger" class="toolbar-btn ghost" type="button"
-                                            aria-haspopup="menu" aria-expanded="false">选择</button>
+                                            aria-haspopup="menu" aria-expanded="false">按状态选</button>
                                         <div id="task-filter-menu" class="toolbar-menu" role="menu" hidden>
+                                            <button class="toolbar-menu-item" type="button" role="menuitem"
+                                                data-select-bucket="all">全部任务</button>
                                             <button class="toolbar-menu-item" type="button" role="menuitem"
                                                 data-select-bucket="paused">已暂停</button>
                                             <button class="toolbar-menu-item" type="button" role="menuitem"
@@ -380,20 +381,10 @@
                                                 data-select-bucket="running">进行中</button>
                                         </div>
                                     </div>
-                                    <div id="task-batch-wrap" class="toolbar-dropdown" hidden>
-                                        <button id="task-batch-menu-trigger" class="toolbar-btn ghost" type="button"
-                                            aria-haspopup="menu" aria-expanded="false">批量操作</button>
-                                        <div id="task-batch-menu" class="toolbar-menu" role="menu" hidden>
-                                            <button class="toolbar-menu-item warn" type="button" role="menuitem"
-                                                data-batch-action="pause">暂停</button>
-                                            <button class="toolbar-menu-item success" type="button" role="menuitem"
-                                                data-batch-action="resume">开始</button>
-                                            <button class="toolbar-menu-item success" type="button" role="menuitem"
-                                                data-batch-action="retry">重试</button>
-                                            <button class="toolbar-menu-item danger" type="button" role="menuitem"
-                                                data-batch-action="delete">删除</button>
-                                        </div>
-                                    </div>
+                                    <button class="toolbar-btn ghost" type="button" data-batch-action="pause">暂停</button>
+                                    <button class="toolbar-btn ghost" type="button" data-batch-action="resume">开始</button>
+                                    <button class="toolbar-btn ghost danger" type="button" data-batch-action="delete">删除</button>
+                                    <button id="task-clear-selection" class="toolbar-btn ghost" type="button">取消选择</button>
                                 </div>
                             </div>
                             <div id="task-card-grid" class="project-card-grid">
@@ -617,8 +608,8 @@
                         <button id="llm-config-create-btn" class="toolbar-btn ghost" type="button">添加配置</button>
                         <button id="model-iterations-toggle-btn" class="toolbar-btn ghost" type="button" hidden aria-expanded="false">最大轮数</button>
                         <input id="model-iterations-value-input" class="spinless-number-input model-iterations-toolbar-input" type="number" min="-1" step="1" inputmode="numeric" value="-1" title="-1 代表不限制" aria-label="最大轮数" hidden>
-                        <button id="model-roles-save-btn" class="toolbar-btn success" type="button">编辑模型链</button>
-                        <button id="model-roles-cancel-btn" class="toolbar-btn ghost" type="button" hidden>取消</button>
+                        <button id="model-roles-save-btn" class="toolbar-btn success" type="button" hidden>保存</button>
+                        <button id="model-roles-cancel-btn" class="toolbar-btn ghost" type="button" hidden>取消修改</button>
                         <button id="model-context-refresh-btn" class="toolbar-btn ghost" type="button"
                             aria-haspopup="dialog" aria-controls="context-refresh-dialog">上下文信息更新时间</button>
                     </div>

@@ -10,6 +10,7 @@ function taskStatusLabel(task) {
 
 function statusBucketMatches(task, bucketKey) {
     const status = taskStatusKey(task);
+    if (bucketKey === "all") return true;
     if (bucketKey === "paused") return status === "blocked";
     if (bucketKey === "completed") return status === "success";
     if (bucketKey === "failed") return status === "failed";
@@ -24,14 +25,9 @@ function getSelectedTasks() {
 }
 
 function setTaskMenuVisibility() {
-    const filterOpen = !!(S.multiSelectMode && S.taskFilterMenuOpen);
-    const batchOpen = !!(S.multiSelectMode && S.taskBatchMenuOpen);
-    if (U.taskFilterWrap) U.taskFilterWrap.hidden = !S.multiSelectMode;
-    if (U.taskBatchWrap) U.taskBatchWrap.hidden = !S.multiSelectMode;
+    const filterOpen = S.taskFilterMenuOpen && !U.taskToolbar?.hidden;
     if (U.taskFilterMenu) U.taskFilterMenu.hidden = !filterOpen;
-    if (U.taskBatchMenu) U.taskBatchMenu.hidden = !batchOpen;
     U.taskFilterTrigger?.setAttribute("aria-expanded", filterOpen ? "true" : "false");
-    U.taskBatchTrigger?.setAttribute("aria-expanded", batchOpen ? "true" : "false");
 }
 
 function closeTaskCardMenus({ restoreFocus = false } = {}) {
@@ -75,28 +71,20 @@ function setTaskCardMenuOpen(taskId, open, { restoreFocus = false } = {}) {
 
 function setTaskMenuOpen(kind, open) {
     if (open) closeTaskCardMenus();
-    if (kind === "filter") {
-        S.taskFilterMenuOpen = !!open;
-        if (open) S.taskBatchMenuOpen = false;
-    } else {
-        S.taskBatchMenuOpen = !!open;
-        if (open) S.taskFilterMenuOpen = false;
-    }
+    S.taskFilterMenuOpen = kind === "filter" ? !!open : false;
     setTaskMenuVisibility();
 }
 
 function closeTaskMenus({ restoreFocus = false } = {}) {
-    const hadToolbarOpen = !!(S.taskFilterMenuOpen || S.taskBatchMenuOpen);
+    const hadToolbarOpen = !!S.taskFilterMenuOpen;
     S.taskFilterMenuOpen = false;
-    S.taskBatchMenuOpen = false;
     setTaskMenuVisibility();
     const cardClosed = closeTaskCardMenus({ restoreFocus });
     return hadToolbarOpen || cardClosed;
 }
 
-function setMultiSelectMode(enabled) {
-    S.multiSelectMode = !!enabled;
-    if (!S.multiSelectMode) S.selectedTaskIds.clear();
+function clearTaskSelection() {
+    S.selectedTaskIds.clear();
     closeTaskMenus();
     renderTasks();
 }
@@ -110,7 +98,6 @@ function toggleTaskSelection(taskId) {
 function syncTaskSelection() {
     const ids = new Set(S.tasks.map((task) => task.task_id));
     [...S.selectedTaskIds].forEach((id) => !ids.has(id) && S.selectedTaskIds.delete(id));
-    if (!S.multiSelectMode) S.selectedTaskIds.clear();
 }
 
 function isTaskDetailVisible() {
@@ -853,7 +840,7 @@ function taskGridRenderSignature(meta) {
         // 磁盘紧急横幅由快照数据驱动，属于可见状态，需要能触发重建。
         diskEmergencyActive: !!taskWorkerStatusMetrics()?.disk_emergency_active,
         taskBusy: !!S.taskBusy,
-        multiSelectMode: !!S.multiSelectMode,
+        selectedTaskCount: S.selectedTaskIds.size,
         sortMode: String(S.taskSortMode || "time"),
         emptyText: taskSessionEmptyText(),
         selectedTaskIds: [...S.selectedTaskIds].map((id) => String(id || "")).sort(),
@@ -903,16 +890,15 @@ async function loadTasks() {
 function updateTaskToolbar() {
     syncTaskSelection();
     const selected = getSelectedTasks();
-    if (U.taskToolbar) U.taskToolbar.hidden = !S.multiSelectMode;
-    if (U.taskMultiToggle) {
-        U.taskMultiToggle.setAttribute("aria-pressed", S.multiSelectMode ? "true" : "false");
-        U.taskMultiToggle.classList.toggle("active", S.multiSelectMode);
-    }
+    // 批量条常驻：「按状态选」是从冷页面建选区的唯一快路，藏在选区后面就永远点不到。
+    if (U.taskToolbar) U.taskToolbar.hidden = !S.tasks.length;
+    if (U.taskSelectionCount) U.taskSelectionCount.textContent = `已选 ${selected.length} 个任务`;
+    if (U.taskClearSelection) U.taskClearSelection.disabled = S.taskBusy || !selected.length;
     const filterButtons = [...(U.taskFilterMenu?.querySelectorAll("[data-select-bucket]") || [])];
     filterButtons.forEach((button) => {
         button.disabled = S.taskBusy || !S.tasks.some((task) => statusBucketMatches(task, button.dataset.selectBucket));
     });
-    const batchButtons = [...(U.taskBatchMenu?.querySelectorAll("[data-batch-action]") || [])];
+    const batchButtons = [...(U.taskToolbar?.querySelectorAll("[data-batch-action]") || [])];
     batchButtons.forEach((button) => {
         const action = button.dataset.batchAction;
         const workerReady = !["pause", "resume"].includes(String(action || "")) || taskWorkerControlsAvailable();

@@ -18,9 +18,8 @@ function renderModelHint() {
     if (S.modelCatalog.saving) return hint("正在保存...");
     if (S.modelCatalog.error) return hint(`模型配置错误：${S.modelCatalog.error}`, true);
     if (!S.modelCatalog.catalog.length) return hint("当前还没有配置，请先添加配置。", false);
-    if (S.modelCatalog.roleEditing && S.modelCatalog.rolesDirty) return hint("正在修改模型链，请点击“保存”应用修改。", false);
-    if (S.modelCatalog.roleEditing) return hint("已进入模型链编辑模式，可拖动、移除或加入模型后再点击“保存”。", false);
-    return hint("点击“修改模型链”后再调整角色链；点击模型可打开配置弹窗。", false);
+    if (S.modelCatalog.rolesDirty) return hint("模型链有未保存的修改，点“保存”提交，或点“取消修改”放弃。", false);
+    return hint("直接拖动模型到角色链、或从角色链拖回模型列表即可调整；改动后点“保存”提交。", false);
 }
 
 function loadBalanceGroupWindowSummary(members) {
@@ -67,11 +66,11 @@ function renderLoadBalanceGroupWindowAlignment(members) {
     return chips.join("");
 }
 
-function renderModelGroupChainTile(scopeKey, groupKey, index, editing) {
+function renderModelGroupChainTile(scopeKey, groupKey, index) {
     const group = activeLoadBalanceGroups()[groupKey] || {};
     const members = group.model_keys || [];
     return `
-        <article class="model-chain-slide is-group-tile${editing ? " is-editing" : ""}${members.length ? "" : " is-incomplete"}"${editing ? ' draggable="true"' : ""} data-model-chain-ref="${esc(groupRefToken(groupKey))}" data-scope="${esc(scopeKey)}" data-group-key="${esc(groupKey)}" data-group-edit="${esc(groupKey)}">
+        <article class="model-chain-slide is-group-tile is-editing${members.length ? "" : " is-incomplete"}" draggable="true" data-model-chain-ref="${esc(groupRefToken(groupKey))}" data-scope="${esc(scopeKey)}" data-group-key="${esc(groupKey)}" data-group-edit="${esc(groupKey)}">
             <div class="model-chain-main">
                 <span class="resource-list-title">${esc(groupKey)}</span>
                 <span class="resource-list-subtitle">组内平级 · 按综合负载选成员 · 节点绑定后粘滞</span>
@@ -82,7 +81,7 @@ function renderModelGroupChainTile(scopeKey, groupKey, index, editing) {
                     ${!members.length ? '<span class="policy-chip risk-high">成员为空，保存会被拒绝</span>' : ""}
                 </span>
             </div>
-            ${editing ? `<button type="button" class="model-chain-remove" data-model-chain-action="remove" data-scope="${esc(scopeKey)}" data-index="${index}" title="移出链" aria-label="移出链"><i data-lucide="x"></i></button>` : ""}
+            <button type="button" class="model-chain-remove" data-model-chain-action="remove" data-scope="${esc(scopeKey)}" data-index="${index}" title="移出链" aria-label="移出链"><i data-lucide="x"></i></button>
         </article>`;
 }
 
@@ -163,7 +162,6 @@ function syncLoadBalanceGroupDialogSummary() {
 
 function renderModelGroupColumn() {
     if (!U.modelGroupList) return;
-    const editing = !!S.modelCatalog.roleEditing;
     if (U.modelGroupCreate) U.modelGroupCreate.disabled = S.modelCatalog.loading || S.modelCatalog.saving;
     const groups = activeLoadBalanceGroups();
     const usage = loadBalanceGroupUsageCounts();
@@ -184,11 +182,11 @@ function renderModelGroupColumn() {
             : '<span class="policy-chip risk-high">成员为空，保存会被拒绝</span>';
         // 整张卡都是打开配置的点击区，只有「删除」例外。
         return `
-            <article class="model-group-item${editing ? " is-editing" : ""}${members.length ? "" : " is-incomplete"}"${editing ? ' draggable="true"' : ""} data-model-group-key="${esc(key)}" data-model-group-ref="${esc(groupRefToken(key))}" data-group-edit="${esc(key)}">
+            <article class="model-group-item is-editing${members.length ? "" : " is-incomplete"}" draggable="true" data-model-group-key="${esc(key)}" data-model-group-ref="${esc(groupRefToken(key))}" data-group-edit="${esc(key)}">
                 <div class="model-group-head">
                     <span class="model-group-name">${esc(key)}</span>
                     <span class="policy-chip neutral">${usedIn ? `已在 ${usedIn} 条链` : "未加入链"}</span>
-                    ${editing ? `<button type="button" class="toolbar-btn ghost small" data-group-delete="${esc(key)}">删除</button>` : ""}
+                    <button type="button" class="toolbar-btn ghost small" data-group-delete="${esc(key)}">删除</button>
                 </div>
                 <div class="model-inline-meta">${memberChips}</div>
                 ${group.enabled === false ? '<div class="model-inline-meta"><span class="policy-chip neutral">已禁用</span></div>' : ""}
@@ -198,7 +196,6 @@ function renderModelGroupColumn() {
 
 function renderModelRoleEditors() {
     if (!U.modelRoleEditors) return;
-    const editing = !!S.modelCatalog.roleEditing;
     U.modelRoleEditors.innerHTML = MODEL_SCOPES.map((scope) => {
         const chain = modelScopeChain(scope.key);
         const maxIterations = modelScopeIterations(scope.key);
@@ -206,7 +203,7 @@ function renderModelRoleEditors() {
         const chainMarkup = chain.length
             ? chain.map((ref, index) => {
                 if (isGroupRef(ref)) {
-                    return renderModelGroupChainTile(scope.key, groupKeyFromRef(ref), index, editing);
+                    return renderModelGroupChainTile(scope.key, groupKeyFromRef(ref), index);
                 }
                 const item = modelRefItem(ref);
                 const modelKey = String(item?.key || ref).trim();
@@ -214,17 +211,17 @@ function renderModelRoleEditors() {
                 if (item?.enabled === false) badges.push('<span class="policy-chip neutral">已禁用</span>');
                 if (!item) badges.push('<span class="policy-chip neutral">未托管</span>');
                 return `
-                    <article class="model-chain-slide${editing ? " is-editing" : ""}"${editing ? ' draggable="true"' : ''} data-model-chain-ref="${esc(modelKey)}" data-scope="${scope.key}">
-                        ${editing ? '<button type="button" class="model-chain-handle" aria-label="拖动调整顺序"><span class="model-chain-grip" aria-hidden="true">&#9776;</span></button>' : ''}
+                    <article class="model-chain-slide is-editing" draggable="true" data-model-chain-ref="${esc(modelKey)}" data-scope="${scope.key}">
+                        <button type="button" class="model-chain-handle" aria-label="拖动调整顺序"><span class="model-chain-grip" aria-hidden="true">&#9776;</span></button>
                         <button type="button" class="model-chain-main" data-model-open="${esc(modelKey)}">
                             <span class="resource-list-title">${esc(modelKey)}</span>
                             <span class="resource-list-subtitle">${esc(item?.provider_model || ref)}</span>
                             <span class="model-inline-meta">${badges.join("")}</span>
                         </button>
-                        ${editing ? `<button type="button" class="toolbar-btn ghost small" data-model-chain-action="remove" data-scope="${scope.key}" data-index="${index}">移除</button>` : ''}
+                        <button type="button" class="toolbar-btn ghost small" data-model-chain-action="remove" data-scope="${scope.key}" data-index="${index}">移除</button>
                     </article>`;
             }).join("")
-            : `<div class="empty-state compact">${editing ? '从下方共享模型列表拖入，构建当前角色链。' : '点击“修改模型链”后再调整当前角色链。'}</div>`;
+            : `<div class="empty-state compact">把模型从下面的列表拖进来，即可编排当前角色链。</div>`;
 
         return `
             <section class="model-chain-card">
@@ -244,7 +241,6 @@ function renderModelRoleEditors() {
                                 step="1"
                                 inputmode="numeric"
                                 value="${esc(String(maxIterations))}"
-                                ${editing ? "" : "disabled"}
                                 data-model-role-iterations="${scope.key}"
                             >
                         </label>
@@ -260,7 +256,6 @@ function renderModelRoleEditors() {
 
 function renderModelList() {
     if (!U.modelList) return;
-    const editing = !!S.modelCatalog.roleEditing;
     const catalog = filterModels().sort((left, right) => String(left.key || "").localeCompare(String(right.key || "")));
     if (!catalog.length) {
         const emptyText = S.modelCatalog.search
@@ -277,7 +272,7 @@ function renderModelList() {
         const stateChips = [usageMarkup];
         if (item.enabled === false) stateChips.push('<span class="policy-chip neutral">已禁用</span>');
         return `
-            <article class="model-available-item ${usedScopes.length ? "is-in-chain" : ""}"${editing ? ' draggable="true"' : ''} data-model-available-key="${esc(item.key)}">
+            <article class="model-available-item ${usedScopes.length ? "is-in-chain" : ""}" draggable="true" data-model-available-key="${esc(item.key)}">
                 <div class="model-shared-item-head">
                     <button type="button" class="model-available-main" data-model-open="${esc(item.key)}">
                         <span class="resource-list-title">${esc(item.key)}</span>
@@ -286,7 +281,7 @@ function renderModelList() {
                     <button type="button" class="toolbar-btn ghost small" data-model-open="${esc(item.key)}">配置</button>
                 </div>
                 <div class="model-inline-meta">${stateChips.join("")}</div>
-                <div class="resource-empty-copy">${editing ? '拖动当前模型到上方任意角色链即可加入。' : '点击“修改模型链”后，可拖动当前模型到任意角色链。'}</div>
+                <div class="resource-empty-copy">拖动当前模型到上方任意角色链即可加入。</div>
             </article>`;
     }).join("");
 }
@@ -431,16 +426,13 @@ function renderModelCatalog() {
     if (U.modelRefresh) U.modelRefresh.disabled = S.modelCatalog.loading || S.modelCatalog.saving;
     if (U.modelCreate) U.modelCreate.disabled = S.modelCatalog.loading || S.modelCatalog.saving;
     if (U.modelRolesCancel) {
-        U.modelRolesCancel.hidden = !S.modelCatalog.roleEditing;
+        U.modelRolesCancel.hidden = !S.modelCatalog.rolesDirty;
         U.modelRolesCancel.disabled = S.modelCatalog.loading || S.modelCatalog.saving;
     }
     if (U.modelRolesSave) {
         U.modelRolesSave.disabled = S.modelCatalog.loading || S.modelCatalog.saving;
-        U.modelRolesSave.textContent = S.modelCatalog.saving
-            ? "正在保存..."
-            : S.modelCatalog.roleEditing
-                ? "保存"
-                : "修改模型链";
+        U.modelRolesSave.hidden = !S.modelCatalog.rolesDirty;
+        U.modelRolesSave.textContent = S.modelCatalog.saving ? "正在保存..." : "保存";
     }
     renderModelHint();
     renderModelGroupColumn();

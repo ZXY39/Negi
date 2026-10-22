@@ -190,6 +190,12 @@ function syncModelRoleDraftState() {
     const iterationsChanged = !modelRoleIterationsEqual(S.modelCatalog.roleIterationDrafts, S.modelCatalog.roleIterations);
     const concurrencyChanged = !modelRoleConcurrencyEqual(S.modelCatalog.roleConcurrencyDrafts, S.modelCatalog.roleConcurrency);
     S.modelCatalog.rolesDirty = !!S.modelCatalog.roleEditing && (rolesChanged || iterationsChanged || concurrencyChanged);
+    // 头部那颗「保存 / 取消修改」跟着这颗脏位走：所有改动都从这里收口，
+    // 所以不必等整页重绘（拖动与输入路径只重画局部，头部会留在旧状态）。
+    const save = document.getElementById("model-roles-save-btn");
+    if (save) save.hidden = !S.modelCatalog.rolesDirty;
+    const cancel = document.getElementById("model-roles-cancel-btn");
+    if (cancel) cancel.hidden = !S.modelCatalog.rolesDirty;
 }
 
 function modelCatalogHeadersKey(headers) {

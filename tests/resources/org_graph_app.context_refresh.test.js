@@ -139,9 +139,10 @@ test("入口在模型页动作组，且不挂进模型链那颗按钮的状态�
     const actions = HTML.match(/<div class="resource-header-actions model-page-actions">[\s\S]*?<\/div>/);
     assert.ok(actions, "模型页头部动作组必须存在");
     assert.match(actions[0], /id="model-context-refresh-btn"[^>]*>上下文信息更新时间</);
-    // 「编辑模型链」那颗会在三种文案间切换，空闲刷新按钮必须是独立的一颗。
-    const saveTag = actions[0].match(/id="model-roles-save-btn"[^>]*>([^<]*)</);
-    assert.equal(saveTag[1], "编辑模型链");
+    // 「保存」只在脏状态出现（HTML 里默认 hidden），空闲刷新按钮必须是独立的一颗。
+    const saveTag = actions[0].match(/id="model-roles-save-btn"([^>]*)>([^<]*)</);
+    assert.equal(saveTag[2], "保存");
+    assert.match(saveTag[1], / type="button" hidden$/);
 });
 
 test("弹窗按事实描述：默认启用、默认 120 分钟、只有应用才提交", () => {

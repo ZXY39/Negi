@@ -112,7 +112,7 @@ function confirmLoadBalanceGroupDialog() {
         return rejectLoadBalanceGroupDialog("每成员重试次数必须是不小于 0 的整数");
     }
     // 建组就是模型链编辑会话的一部分：不在会话里先开一份，草稿才有地方落。
-    if (!S.modelCatalog.roleEditing) startModelRoleEditing();
+    ensureModelRoleDraftSession();
     const drafts = S.modelCatalog.loadBalanceGroupDrafts;
     const payload = { enabled: true, max_retry_rounds: rounds, model_keys: [...dialog.modelKeys] };
     if (dialog.editingKey && dialog.editingKey !== name) {
@@ -130,7 +130,7 @@ function confirmLoadBalanceGroupDialog() {
 }
 
 function deleteLoadBalanceGroupDraft(groupKey) {
-    if (!S.modelCatalog.roleEditing) startModelRoleEditing();
+    ensureModelRoleDraftSession();
     const drafts = S.modelCatalog.loadBalanceGroupDrafts;
     if (!drafts[groupKey]) return false;
     delete drafts[groupKey];
@@ -285,7 +285,8 @@ function clearModelDragDecorations() {
 
 function beginModelDrag(item, { scope = "", ref = "", source = "available" } = {}, dataTransfer = null) {
     const modelRef = String(ref || "").trim();
-    if (!S.modelCatalog.roleEditing || !item || !modelRef) return false;
+    if (!item || !modelRef) return false;
+    ensureModelRoleDraftSession();
     S.modelCatalog.dragState = {
         scope: String(scope || ""),
         ref: modelRef,
@@ -476,7 +477,7 @@ function removeRoleChainItem(scope, modelKey) {
 }
 
 function updateRoleChainDraft(scope, nextChain) {
-    if (!S.modelCatalog.roleEditing) return;
+    ensureModelRoleDraftSession();
     S.modelCatalog.roleDrafts[scope] = normalizeModelRoleChain(nextChain);
     syncModelRoleDraftState();
     renderModelHint();
@@ -486,7 +487,7 @@ function updateRoleChainDraft(scope, nextChain) {
 }
 
 function updateRoleIterationDraft(scope, value, { render = true } = {}) {
-    if (!S.modelCatalog.roleEditing) return false;
+    ensureModelRoleDraftSession();
     const normalizedScope = String(scope || "").trim();
     if (!normalizedScope) return false;
     if (value == null || String(value).trim() === "") {
@@ -555,13 +556,24 @@ function syncRoleIterationDraftsFromInputs({ requireValid = false } = {}) {
     return changed;
 }
 
-function startModelRoleEditing() {
+function seedModelRoleDraftSession() {
     S.modelCatalog.roleEditing = true;
     S.modelCatalog.roleDrafts = cloneModelRoles(S.modelCatalog.roles);
     S.modelCatalog.roleIterationDrafts = cloneRoleIterations(S.modelCatalog.roleIterations);
     S.modelCatalog.roleConcurrencyDrafts = cloneRoleConcurrency(S.modelCatalog.roleConcurrency);
     S.modelCatalog.loadBalanceGroupDrafts = cloneLoadBalanceGroups(S.modelCatalog.loadBalanceGroups);
     syncModelRoleDraftState();
+}
+
+// 页面上没有「进入编辑」这一步：第一次拖动 / 移除 / 改轮数 / 建组就落进草稿会话。
+// 读侧仍是「有会话读草稿、没会话读服务端」，CEO 面板那类不碰模型页的消费者不会读到空草稿。
+function ensureModelRoleDraftSession() {
+    if (S.modelCatalog.roleEditing) return;
+    seedModelRoleDraftSession();
+}
+
+function startModelRoleEditing() {
+    seedModelRoleDraftSession();
     renderModelCatalog();
 }
 
@@ -576,7 +588,7 @@ function cancelModelRoleEditing() {
     closeLoadBalanceGroupDialog();
     finishModelDrag();
     renderModelCatalog();
-    hint("已取消模型链修改。", false);
+    hint("已放弃未保存的模型链修改。", false);
 }
 
 async function persistModelRoleChains(scopes = MODEL_SCOPES.map((item) => item.key), successText = "模型链已保存。", { useDrafts = false } = {}) {
