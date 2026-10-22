@@ -5080,6 +5080,10 @@ function sliceCeoRailStages(stages, turn) {
 
 function renderCeoStageTraceIntoTurn(turn, canonicalContext = null, { interruptedStageMarker = false } = {}) {
     if (!turn?.listEl || !turn?.flowEl) return 0;
+    const turns = Array.isArray(turn?.turns) ? turn.turns : [];
+    if (turns.length) {
+        return renderCeoTurnsIntoTurn(turn, turns, { interruptedStageMarker });
+    }
     const summary = filterCeoInteractionFlowSummary(canonicalContext);
     if (!summary?.stages?.length) {
         // 无新增量(如阶段刚提交但轮次尚未进入增量)时保留已渲染的时间线,
@@ -5232,6 +5236,7 @@ function patchCeoInflightTurn(snapshot = null, { sessionId = "", cacheField = "i
     if (!turn?.textEl || !turn?.flowEl) return false;
     if (turnId && turn.turnId && turnId !== turn.turnId) {
         turn.lastExecutionTraceSummary = null;
+        turn.turns = [];
         turn.liveStreamText = "";
         // 跨 turn 复用同一回合对象时清空 sticky 元数据,避免上一轮的
         // token 用量/完成时间泄漏到新轮次的元信息里。
@@ -5247,6 +5252,7 @@ function patchCeoInflightTurn(snapshot = null, { sessionId = "", cacheField = "i
             turn.el.setAttribute("data-ceo-key", `turn:${normalizeCeoTurnId(turnId)}`);
         }
     }
+    turn.turns = Array.isArray(snapshot?.turns) ? snapshot.turns : [];
     // live inflight 只渲染本轮 delta（或本轮已渲染的 summary），不回退 full，
     // 避免新 turn 继承上一轮阶段；跨 turn 时 lastExecutionTraceSummary 已在上面被清空；
     // preserved 保留 full 回退。delta 与已渲染轨道做增量合并,保证阶段累计可见
@@ -5268,7 +5274,9 @@ function patchCeoInflightTurn(snapshot = null, { sessionId = "", cacheField = "i
             turn.liveStreamText = "";
             renderCeoAssistantTextIntoTurn(turn, snapshot?.assistant_text || "", { status });
         }
-        const stageRoundCount = renderCeoStageTraceIntoTurn(turn, preferredCanonicalContext);
+        const stageRoundCount = turn.turns.length
+            ? renderCeoTurnsIntoTurn(turn, turn.turns)
+            : renderCeoStageTraceIntoTurn(turn, preferredCanonicalContext);
         // 压缩帧早于轨道到达时留下的半切状态：轨道一落地就把 <= boundary 的卡补回头段。
         reconcileDeferredCeoCompressionSplit(turn);
         if (!stageRoundCount) {

@@ -51,6 +51,7 @@ from g3ku.runtime.frontdoor.canonical_context import (
 from g3ku.runtime.frontdoor.canonical_context import (
     ui_canonical_context_delta_from_views as _ui_canonical_context_delta_from_views,
 )
+from g3ku.runtime.frontdoor.turns import frontdoor_turns_for_turn
 from g3ku.runtime.session_keys import (
     EXTERNAL_SESSION_KEY_PREFIX,
     is_channel_session_key,
@@ -590,6 +591,13 @@ def _build_live_turn_payload(
     )
     inflight_turn = _rewrite_turn_snapshot_media(session_id, inflight_turn)
     preserved_turn = _rewrite_turn_snapshot_media(session_id, preserved_turn)
+    session_turns = list(getattr(session, "_frontdoor_turns", []) or [])
+    for turn_snapshot in (inflight_turn, preserved_turn):
+        if not isinstance(turn_snapshot, dict):
+            continue
+        selected = frontdoor_turns_for_turn(session_turns, turn_snapshot.get("turn_id"))
+        if selected:
+            turn_snapshot["turns"] = copy.deepcopy(selected)
     payload: dict[str, Any] = {"inflight_turn": inflight_turn}
     if preserved_turn is not None:
         payload["preserved_turn"] = preserved_turn
