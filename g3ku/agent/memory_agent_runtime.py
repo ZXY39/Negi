@@ -24,15 +24,15 @@ from pydantic import BaseModel, create_model
 
 from g3ku.agent.file_locks import _release_file_lock, _try_acquire_file_lock
 from g3ku.agent.markdown_memory import (
-    CONSOLIDATION_SCOPE_LINE_MAX_CHARS,
     CATEGORY_HANDLE_PREFIX,
-    MemoryEntry,
+    CONSOLIDATION_SCOPE_LINE_MAX_CHARS,
     ORDINARY_HANDLE_PREFIX,
+    MemoryEntry,
     compact_date,
     consolidation_scope_line,
     format_memory_entry,
-    note_file_name,
     normalize_note_ref,
+    note_file_name,
     note_handle,
     parse_memory_document,
     render_consolidation_block,
@@ -44,9 +44,12 @@ from g3ku.providers.base import normalize_usage_payload
 from g3ku.providers.chatmodels import build_chat_model
 from g3ku.runtime.chunk_compression_plan import resolve_chunk_capacity
 from g3ku.runtime.context.summarizer import estimate_tokens
-from main.runtime.chat_backend import build_actual_request_diagnostics, resolve_send_model_context_window_info
-from main.runtime.send_token_preflight import estimate_runtime_provider_request_preview_tokens
 from main.prompts import load_prompt
+from main.runtime.chat_backend import (
+    build_actual_request_diagnostics,
+    resolve_send_model_context_window_info,
+)
+from main.runtime.send_token_preflight import estimate_runtime_provider_request_preview_tokens
 
 # 只服务**入站文本**的两处：legacy import 的候选校验与存量迁移的剥离。新写路径的关系落在
 # `note_ref` 列，渲染出来的是从名字派生的句柄，任何判据都不再扫正文里的 `ref:` / `见noteid:`。
@@ -5311,6 +5314,53 @@ class MemoryManager:
         return f"fingerprint:{hashlib.sha256(fingerprint_source.encode('utf-8')).hexdigest()[:24]}"
 
     @staticmethod
+    def _review_turn_tool_record_key(tool: dict[str, Any]) -> str:
+        tool_call_id = str(tool.get("tool_call_id") or "").strip()
+        if tool_call_id:
+            return tool_call_id
+        fingerprint_source = json.dumps(
+            {
+                "tool_name": str(tool.get("tool_name") or "").strip(),
+                "arguments_text": str(tool.get("arguments_text") or "").strip(),
+                "output_head": str(tool.get("output_text") or "").strip()[:64],
+            },
+            ensure_ascii=False,
+            sort_keys=True,
+        )
+        return f"fingerprint:{hashlib.sha256(fingerprint_source.encode('utf-8')).hexdigest()[:24]}"
+
+    @staticmethod
+    def _collect_turn_tool_records(turns: list[dict[str, Any]] | None) -> list[dict[str, Any]]:
+        records: list[dict[str, Any]] = []
+        for turn in list(turns or []):
+            if not isinstance(turn, dict):
+                continue
+            mid_text = str(turn.get("text") or "").strip()
+            for tool in list(turn.get("tools") or []):
+                if not isinstance(tool, dict):
+                    continue
+                tool_name = str(tool.get("tool_name") or "").strip()
+                if not tool_name:
+                    continue
+                status = str(tool.get("status") or "").strip().lower()
+                records.append(
+                    {
+                        "key": MemoryManager._review_turn_tool_record_key(tool),
+                        "tool_call_id": str(tool.get("tool_call_id") or "").strip(),
+                        "turn_id": str(turn.get("turn_id") or "").strip(),
+                        "seq": int(turn.get("seq") or 0),
+                        "mid_text": mid_text,
+                        "tool_name": tool_name,
+                        "status": status or "unknown",
+                        "is_error": bool(status) and status != "success",
+                        "arguments_text": str(tool.get("arguments_text") or "").strip(),
+                        "output_preview_text": str(tool.get("output_text") or "").strip(),
+                        "output_text": str(tool.get("output_text") or "").strip(),
+                    }
+                )
+        return records
+
+    @staticmethod
     def _collect_visible_tool_records(canonical_summary: dict[str, Any] | None) -> list[dict[str, Any]]:
         """Collect user-visible tool records from canonical stages that still carry rounds."""
 
@@ -5517,6 +5567,7 @@ class MemoryManager:
         canonical_summary: dict[str, Any] | None,
         stage_delta: dict[str, Any] | None = None,
         tool_records: list[dict[str, Any]] | None = None,
+        turns: list[dict[str, Any]] | None = None,
     ) -> str:
         _ = compression_summary
         parts = [f"[turn_id] {str(turn_id or '').strip() or '(unknown)'}"]
@@ -5528,14 +5579,20 @@ class MemoryManager:
         if normalized_user_messages:
             parts.append("user_messages:")
             parts.extend(f"- {item}" for item in normalized_user_messages)
-        stage_payload = MemoryManager._merge_review_stage_payload(
-            canonical_summary=canonical_summary,
-            stage_delta=stage_delta,
-            tool_records=tool_records,
-        )
-        if isinstance(stage_payload, dict) and stage_payload:
-            parts.append("stages:")
-            parts.append(json.dumps(stage_payload, ensure_ascii=False, indent=2))
+        if turns:
+            turn_records = MemoryManager._collect_turn_tool_records(turns)
+            if turn_records:
+                parts.append("tool_records:")
+                parts.append(json.dumps(turn_records, ensure_ascii=False, indent=2))
+        else:
+            stage_payload = MemoryManager._merge_review_stage_payload(
+                canonical_summary=canonical_summary,
+                stage_delta=stage_delta,
+                tool_records=tool_records,
+            )
+            if isinstance(stage_payload, dict) and stage_payload:
+                parts.append("stages:")
+                parts.append(json.dumps(stage_payload, ensure_ascii=False, indent=2))
         assistant = str(assistant_text or "").strip()
         if assistant:
             parts.append("assistant_text:")
@@ -5551,6 +5608,37 @@ class MemoryManager:
         """
 
         value = str(section or "")
+        tool_marker = "\ntool_records:\n"
+        if tool_marker in value:
+            head, _, body_and_tail = value.partition(tool_marker)
+            try:
+                records, consumed = json.JSONDecoder().raw_decode(body_and_tail)
+            except ValueError:
+                return [value]
+            if not isinstance(records, list) or len(records) < 2:
+                return [value]
+            tail = body_and_tail[consumed:]
+            record_sizes = [
+                max(1, estimate_tokens(json.dumps(record, ensure_ascii=False, indent=2)))
+                for record in records
+            ]
+            budget = max(1, max_tokens - estimate_tokens(f"{head}{tool_marker}{tail}"))
+            if sum(record_sizes) <= budget:
+                return [value]
+            sections: list[str] = []
+            group: list[Any] = []
+            used_tokens = 0
+            for record, size in zip(records, record_sizes):
+                if group and used_tokens + size > budget:
+                    sections.append(f"{head}{tool_marker}{json.dumps(group, ensure_ascii=False, indent=2)}{tail}")
+                    group = [record]
+                    used_tokens = size
+                else:
+                    group.append(record)
+                    used_tokens += size
+            if group:
+                sections.append(f"{head}{tool_marker}{json.dumps(group, ensure_ascii=False, indent=2)}{tail}")
+            return sections or [value]
         marker = "\nstages:\n"
         head_end = value.find(marker)
         if head_end < 0:
@@ -5720,6 +5808,7 @@ class MemoryManager:
         assistant_text: str,
         compression_summary: dict[str, Any] | None,
         canonical_summary: dict[str, Any] | None,
+        turns: list[dict[str, Any]] | None = None,
     ) -> dict[str, Any]:
         normalized_session = str(session_key or "").strip()
         if not normalized_session:
@@ -5737,7 +5826,11 @@ class MemoryManager:
             if str(key or "").strip()
         ]
         reported_tool_key_set = set(reported_tool_keys)
-        collected_tool_records = self._collect_visible_tool_records(canonical_summary)
+        collected_tool_records = (
+            self._collect_turn_tool_records(turns)
+            if turns
+            else self._collect_visible_tool_records(canonical_summary)
+        )
         new_tool_records = [
             record for record in collected_tool_records if record["key"] not in reported_tool_key_set
         ]
@@ -5746,9 +5839,13 @@ class MemoryManager:
         next_reported_tool_keys = (
             reported_tool_keys + [str(record.get("key") or "").strip() for record in new_tool_records]
         )[-_REVIEW_REPORTED_TOOL_ID_CAP:]
-        stage_summary_delta, next_stage_versions = self._compact_review_stage_summary_delta(
-            canonical_summary=canonical_summary,
-            stage_versions=stage_versions,
+        stage_summary_delta, next_stage_versions = (
+            (None, stage_versions)
+            if turns
+            else self._compact_review_stage_summary_delta(
+                canonical_summary=canonical_summary,
+                stage_versions=stage_versions,
+            )
         )
         pending_turns = [
             dict(item)
@@ -5763,6 +5860,7 @@ class MemoryManager:
             canonical_summary=canonical_summary,
             stage_delta=stage_summary_delta,
             tool_records=new_tool_records,
+            turns=turns,
         )
         if not payload_text:
             return {"ok": True, "status": "ignored", "reason": "empty_turn"}
@@ -5930,6 +6028,7 @@ class MemoryManager:
         turn_id: str,
         compression_summary: dict[str, Any] | None = None,
         canonical_summary: dict[str, Any] | None = None,
+        turns: list[dict[str, Any]] | None = None,
     ) -> dict[str, Any]:
         _ = channel, chat_id
         return await self.record_turn_for_review(
@@ -5939,6 +6038,7 @@ class MemoryManager:
             assistant_text=assistant_text,
             compression_summary=compression_summary,
             canonical_summary=canonical_summary,
+            turns=turns,
         )
 
     async def enqueue_pre_compression_flush(

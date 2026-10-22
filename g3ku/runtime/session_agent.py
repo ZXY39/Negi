@@ -39,7 +39,7 @@ from g3ku.runtime.frontdoor.message_builder import (
     adopt_memory_snapshot,
 )
 from g3ku.runtime.frontdoor.state_models import CeoFrontdoorInterrupted
-from g3ku.runtime.frontdoor.turns import normalize_frontdoor_turns
+from g3ku.runtime.frontdoor.turns import frontdoor_turns_for_turn, normalize_frontdoor_turns
 from main.runtime.stage_budget import STAGE_TURN_END_SUMMARY_POINTER
 
 _CONTROL_TOOL_NAMES = {"stop_tool_execution"}
@@ -4296,13 +4296,18 @@ class RuntimeAgentSession:
                     else:
                         user_messages = []
                     try:
+                        review_turn_id = self._current_turn_id(user_input)
                         await self._loop.memory_manager.record_turn_for_review(
                             session_key=self._state.session_key,
-                            turn_id=self._current_turn_id(user_input),
+                            turn_id=review_turn_id,
                             user_messages=user_messages,
                             assistant_text=output,
                             compression_summary=self._compression_snapshot(),
                             canonical_summary=self._frontdoor_visible_canonical_context_snapshot(),
+                            turns=frontdoor_turns_for_turn(
+                                getattr(self, "_frontdoor_turns", None),
+                                review_turn_id,
+                            ),
                         )
                     except Exception:
                         await self._emit(
