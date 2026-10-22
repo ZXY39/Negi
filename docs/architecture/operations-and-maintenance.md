@@ -354,7 +354,7 @@ Provider retry troubleshooting note:
 
 当前 `exec` 在执行模式、白名单与审批判定之前增加宿主进程保护：常见 `Stop-Process` / `Spps` / `taskkill` / `pkill` / `killall` / `kill` / WMI-CIM terminate-delete / Python `os.kill` 等命令直接返回 `host-process termination` 错误；`full_access` 也不能绕过，白名单和操作者审批也不能放行。只读进程检查仍允许。保护是命令形态拦截，不是完整 OS 隔离；如果必须运行不可信的任意 native code 或外部二进制，仍应把任务放入独立 worker/container/低权限账户，并避免按进程名清理。
 
-这条边界拦的是**命令形态**，所以它同时会误伤"模型停掉自己起的测试服务"——2026-10-18 的会话里模型起了三个 Node 测试实例，自己停不掉，只能让用户手动结束。回收权因此改由**归属车道**承担，而不是放松这条边界：
+这条边界拦的是**命令形态**，所以它同时会误伤"模型停掉自己起的测试服务"——实盘一条会话里模型起了三个 Node 测试实例，自己停不掉，只能让用户手动结束。回收权因此住在**归属车道**上，这条边界本身不放松：
 
 - `exec background=true`：运行时自己 spawn（POSIX `start_new_session`，Windows `CREATE_NEW_PROCESS_GROUP`），stdout/stderr 直接落 `owned-processes/<scope>/<…>.log`，立即返回 `pid` + `log_path`，并把 `{pid, create_time, cmd, log_path, owner_pid}` 登记进 `g3ku/runtime/owned_processes.py`。进程不再继承 exec 的管道，也不受 exec 超时/取消管辖。
 - `process_kill(pid)`（候选工具，水合后可用，`allowed_roles` = `ceo` + `execution`）：只认本 scope 的登记条目，校验 `create_time` 后整树终止，回日志尾部；未登记的 pid 一律拒绝并给出本 scope 台账。
