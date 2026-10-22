@@ -1,7 +1,8 @@
 """Check docs/architecture against the structural invariants in README「Maintenance Rules」.
 
 Reports leaf sections over the size limit, pointers whose topic phrase resolves to no
-heading, and pointers naming a doc file that does not exist. Exit 1 on any error.
+heading, pointers naming a doc file that does not exist, and — as warnings only — the
+rule 4 wording family (calendar dates and changelog phrasing). Exit 1 on any error.
 
     python scripts/check_architecture_docs.py [docs/architecture]
 """
@@ -16,6 +17,37 @@ LEAF_LIMIT_BYTES = 25 * 1024
 STRIP = re.compile('[\\s，。、；：“”‘’（）`*_#>|/\\\\.,:;!？!?(){}<>-]+')
 HEADING = re.compile(r'^(#{1,6}) (.+)$')
 POINTER = re.compile(r'`([a-z0-9\-]+\.md)`\s*[「"]([^\n]{3,90}?)[」"]')
+CALENDAR_DATE = re.compile(r'\b20\d{2}-\d{2}(?:-\d{2})?\b')
+CHANGELOG = re.compile(r'不再|曾经|以前|已拆除|\bused to\b|\bpreviously\b|\bno longer\b', re.IGNORECASE)
+# Sections whose job is to quote are exempt from the wording family: the rule list quotes the
+# banned words to define them, and the symptom indexes quote operators verbatim because those
+# phrases are the search entry. Calendar dates are never exempt.
+WORDING_EXEMPT_LABELS = ('Debugging Entry Points', 'Maintenance Rules', '常见排障入口')
+BE_VERBS = frozenset({'be', 'been', 'being', 'is', 'are', 'was', 'were', 'am'})
+
+
+def changelog_hit(line: str):
+    """First rule-4 phrase in the line; passive "be used to gate" is not changelog wording."""
+    for m in CHANGELOG.finditer(line):
+        if m.group(0).lower() != 'used to':
+            return m
+        prev = line[:m.start()].rstrip().split()
+        if not prev or prev[-1].lower().strip('.,;:') not in BE_VERBS:
+            return m
+    return None
+
+
+def wording_exempt(lines: list[str]) -> list[bool]:
+    """Per line: True when an enclosing heading is one of the quoting sections."""
+    stack: list[tuple[int, str]] = []
+    flags = []
+    for line in lines:
+        if (m := HEADING.match(line)):
+            level = len(m.group(1))
+            stack = [(lv, ti) for (lv, ti) in stack if lv < level]
+            stack.append((level, m.group(2).strip()))
+        flags.append(any(label in title for (_l, title) in stack for label in WORDING_EXEMPT_LABELS))
+    return flags
 
 
 def norm(text: str) -> str:
@@ -80,6 +112,17 @@ def main(argv: list[str]) -> int:
                 errors.append(f'{f}:{ln} leaf section "{title[:44]}" is {span / 1024:.1f} KB '
                               f'(> {LEAF_LIMIT_BYTES // 1024} KB)')
         print(f'{f:42} {size / 1024:7.1f} KB   biggest leaf {biggest / 1024:5.1f} KB  {biggest_title[:34]}')
+
+    for f in files:
+        exempt = wording_exempt(contents[f])
+        for i, line in enumerate(contents[f]):
+            if (d := CALENDAR_DATE.search(line)):
+                warnings.append(f'{f}:{i + 1} calendar date "{d.group(0)}" — rule 4: no incident dates')
+                continue
+            if exempt[i]:
+                continue
+            if (c := changelog_hit(line)):
+                warnings.append(f'{f}:{i + 1} changelog wording "{c.group(0)}" — rule 4: write the current contract')
 
     for f in files:
         for i, line in enumerate(contents[f]):
