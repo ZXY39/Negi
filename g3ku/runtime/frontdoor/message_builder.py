@@ -8,6 +8,7 @@ from datetime import datetime
 from types import SimpleNamespace
 from typing import Any
 
+from g3ku.agent.markdown_memory import split_consolidation_block
 from g3ku.config.live_runtime import get_runtime_config
 from g3ku.core.timefmt import (
     MESSAGE_ARRIVAL_TIME_MARKER,
@@ -70,8 +71,6 @@ MEMORY_SNAPSHOT_TEXT_ATTR = "_frontdoor_memory_snapshot_text"
 MEMORY_SNAPSHOT_ADOPTED_AT_ATTR = "_frontdoor_memory_snapshot_adopted_at"
 MEMORY_SNAPSHOT_ADOPTION_REASON_ATTR = "_frontdoor_memory_snapshot_adoption_reason"
 MEMORY_SNAPSHOT_ADOPTION_FIRST_REQUEST = "session_first_request"
-# 压缩把提示行重写后，下一跳用整份文档重建基座。
-MEMORY_SNAPSHOT_ADOPTION_REBASE = "compression_rebase"
 
 
 def _read_memory_snapshot_text(session: Any, memory_manager: Any) -> str | None:
@@ -111,27 +110,11 @@ def adopt_memory_snapshot(session: Any, *, memory_manager: Any, reason: str) -> 
 
 
 def adopted_memory_snapshot_text(session: Any, *, memory_manager: Any) -> str:
-    """基座取数口：本会话已采纳过就只读冻结值，否则先采纳一次。"""
+    """注入侧唯一取数口：本会话已采纳过就只读冻结值，否则先采纳一次。"""
     frozen = getattr(session, MEMORY_SNAPSHOT_TEXT_ATTR, None)
     if isinstance(frozen, str):
         return frozen
     return adopt_memory_snapshot(session, memory_manager=memory_manager, reason=MEMORY_SNAPSHOT_ADOPTION_FIRST_REQUEST)
-
-
-MEMORY_SNAPSHOT_HEADING = "## 长期记忆"
-
-
-def is_memory_snapshot_message(record: Any) -> bool:
-    """旧载体的识别：基座块曾经注入在 message index 1。
-
-    存量请求体、侧车与续跑种子里仍有它；发送准备点按这个判据剥离，把基座迁到通知车道的
-    尾部消息，会话基座因此不再占着头部。
-    """
-    if not isinstance(record, dict):
-        return False
-    if str(record.get("role") or "").strip().lower() != "assistant":
-        return False
-    return str(record.get("content") or "").strip().startswith(f"{MEMORY_SNAPSHOT_HEADING}\n")
 
 
 def memory_snapshot_provenance(session: Any) -> dict[str, Any]:
@@ -349,6 +332,34 @@ class CeoMessageBuilder:
                 '- 不要把临时任务状态、猜测或未经确认的推断写入永久记忆。',
             ]
         )
+
+    @staticmethod
+    def _memory_snapshot_stable_message(memory_snapshot_text: str) -> dict[str, Any] | None:
+        snapshot_text = str(memory_snapshot_text or '').strip()
+        if not snapshot_text:
+            return None
+        entries_text, consolidation_text = split_consolidation_block(snapshot_text)
+        # Both halves travel verbatim. The block used to be re-rendered here because the
+        # painted mirror carried ids and `YYYY/M/D-source：` headers a reader never needed;
+        # one line per memory prints neither, so a second rendering would only invent bytes
+        # at message index 1 - the exact cache break the freeze exists to prevent.
+        content = entries_text.strip()
+        if consolidation_text:
+            content = f"{content}\n{consolidation_text.strip()}".strip()
+        if not content:
+            return None
+        return {
+            "role": "assistant",
+            "content": f"## 长期记忆\n{content}".strip(),
+        }
+
+    @staticmethod
+    def _is_memory_snapshot_message(record: dict[str, Any] | None) -> bool:
+        if not isinstance(record, dict):
+            return False
+        if str(record.get("role") or "").strip().lower() != "assistant":
+            return False
+        return str(record.get("content") or "").strip().startswith("## 长期记忆\n")
 
     @staticmethod
     def _retrieved_memory_resolution_hint_block() -> str:
@@ -1151,6 +1162,11 @@ class CeoMessageBuilder:
             if str(name or '').strip()
         }
         turn_overlay_parts: list[str] = []
+        memory_snapshot_text = (
+            adopted_memory_snapshot_text(session, memory_manager=memory_manager)
+            if memory_manager is not None
+            else ""
+        )
         if memory_write_terms and memory_write_visible:
             turn_overlay_parts.append(self._memory_write_hint_block(memory_write_terms))
 
@@ -1307,6 +1323,7 @@ class CeoMessageBuilder:
             'capability_snapshot': capability_snapshot,
             'memory_write_terms': memory_write_terms,
             'memory_write_visible': memory_write_visible,
+            'memory_snapshot_text': memory_snapshot_text,
             'selected_skills': selected_skills,
             'skill_trace': skill_trace,
             'external_trace': external_trace,
@@ -1485,12 +1502,16 @@ class CeoMessageBuilder:
         user_content: Any,
         split_prompt_builder: bool,
         turn_overlay_parts: list[str],
+        memory_snapshot_text: str,
         current_user_in_history: bool,
         pinned_contract_text: str = '',
     ) -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]], str]:
         turn_overlay_text = self._join_turn_overlay_sections(turn_overlay_parts)
         system_prompt = merge_pinned_contract_into_system_text(system_prompt, pinned_contract_text)
         stable_messages: list[dict[str, Any]] = [{"role": "system", "content": system_prompt}]
+        memory_snapshot_message = self._memory_snapshot_stable_message(memory_snapshot_text)
+        if memory_snapshot_message is not None:
+            stable_messages.append(memory_snapshot_message)
         stable_messages.extend(history_messages)
         has_user_content = bool(self._content_text(user_content).strip())
         if not current_user_in_history and has_user_content:
@@ -1523,6 +1544,7 @@ class CeoMessageBuilder:
         request_body_seed_messages: list[dict[str, Any]],
         user_content: Any,
         turn_overlay_parts: list[str],
+        memory_snapshot_text: str,
         query_text: str,
         user_metadata: dict[str, Any] | None,
         pinned_contract_text: str = "",
@@ -1531,8 +1553,16 @@ class CeoMessageBuilder:
         stable_messages = [
             dict(item)
             for item in self._request_body_seed_records(request_body_seed_messages)
-            if not is_memory_snapshot_message(item)
+            if not self._is_memory_snapshot_message(item)
         ]
+        memory_snapshot_message = self._memory_snapshot_stable_message(memory_snapshot_text)
+        if memory_snapshot_message is not None:
+            insert_at = 1 if stable_messages and str(stable_messages[0].get("role") or "").strip().lower() == "system" else 0
+            stable_messages = [
+                *list(stable_messages[:insert_at]),
+                memory_snapshot_message,
+                *list(stable_messages[insert_at:]),
+            ]
         # 钉住的静态声明并进 system 文本尾部：它不是消息项，因此尾部重铺那条剥契约的路
         # 碰不到它；字节只在刷新键变化时改一次。这条路的头部来自上一跳的请求体种子，已经带着
         # 上一跳那份块，必须先摘再拼——直接 concat 会让续跑回合每轮多叠一份（实盘 06:15 抓到）。
@@ -1603,6 +1633,7 @@ class CeoMessageBuilder:
             request_body_seed_messages=request_body_seed_messages,
             user_content=context_sources['user_content'],
             turn_overlay_parts=turn_overlay_parts,
+            memory_snapshot_text=str(context_sources.get('memory_snapshot_text') or ''),
             query_text=query_text,
             user_metadata=user_metadata,
             pinned_contract_text=pinned_contract_text,
@@ -1948,6 +1979,7 @@ class CeoMessageBuilder:
             user_content=context_sources['user_content'],
             split_prompt_builder=bool(context_sources['split_prompt_builder']),
             turn_overlay_parts=turn_overlay_parts,
+            memory_snapshot_text=str(context_sources.get('memory_snapshot_text') or ''),
             current_user_in_history=bool(history_state['current_user_in_history']),
             pinned_contract_text=pinned_contract_text,
         )
