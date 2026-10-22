@@ -7,6 +7,7 @@ from types import SimpleNamespace
 
 from fastapi import APIRouter, BackgroundTasks, Body, HTTPException
 
+from g3ku.runtime import skill_roster_notice as _skill_roster_notice
 from g3ku.runtime.ceo_catalog_offload import (
     build_ceo_session_catalog_async,
     run_off_event_loop,
@@ -1294,6 +1295,12 @@ async def _execute_manual_context_compression(agent, runtime_session, *, pause_f
     # 手动车道产出的是 `[TOKEN_COMPACT_V2]` 全量正文重写，可复用前缀反正已经断在这里：
     # 挂一个待重印标记，让下一跳顺手把 tools[] 按当前 RBAC 重取一次（钉住期间只有压缩跳重印）。
     setattr(runtime_session, PENDING_PROVIDER_BUNDLE_RECOMMIT_ATTR, True)
+    # 压缩会重写历史；记忆游标归零，下一跳用整份文档重建尾部基座。
+    notice_scope = _skill_roster_notice.session_scope_key(
+        getattr(getattr(runtime_session, "state", None), "session_key", "")
+    )
+    if notice_scope:
+        _skill_roster_notice.reset_memory_cursor(notice_scope)
 
 
 @router.post("/ceo/sessions/{session_id}/compress-context")

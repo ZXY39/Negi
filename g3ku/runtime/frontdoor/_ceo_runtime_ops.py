@@ -62,8 +62,13 @@ from g3ku.runtime.context.image_metrics import bmp_dimensions, webp_dimensions
 from g3ku.runtime.context.summarizer import estimate_tokens
 from g3ku.runtime.frontdoor import pinned_tool_bundle
 from g3ku.runtime.frontdoor.message_builder import (
+    MEMORY_SNAPSHOT_ADOPTED_AT_ATTR,
+    MEMORY_SNAPSHOT_ADOPTION_FIRST_REQUEST,
+    MEMORY_SNAPSHOT_ADOPTION_REBASE,
     MEMORY_WRITE_HINT_HEADER,
     RETRIEVED_MEMORY_HINT_HEADER,
+    adopt_memory_snapshot,
+    is_memory_snapshot_message,
     memory_snapshot_provenance,
 )
 from g3ku.runtime.frontdoor.token_preflight_compaction import (
@@ -1836,14 +1841,10 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
         # 并且和落账同一步——追加进本轮历史，请求体与 durable 基线都从它派生。
         # 其它装配点（state 刷新、回合起点装配）一律不读台账，否则先跑的把差集领走、
         # 落请求体那处永远拿空（旧机制就是这么失效的）。
-        request_messages = self._apply_frontdoor_skill_roster_notice(
+        request_messages, delivered_message = self._apply_frontdoor_skill_roster_notice(
             list(state_for_request.get("messages") or []),
             session_key=str(state_for_request.get("session_key") or "").strip(),
-        )
-        delivered_message = (
-            request_messages[-1]
-            if len(request_messages) > len(list(state_for_request.get("messages") or []))
-            else None
+            session=getattr(getattr(runtime, "context", None), "session", None),
         )
         state_for_request["messages"] = list(request_messages)
         if delivered_message is not None and state_for_request.get("frontdoor_live_request_messages"):
@@ -4039,8 +4040,7 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
 
     def _frontdoor_skill_roster_notice_scope(self, session_key: Any) -> str:
         """前门台账作用域：按会话一条，与节点道 `node:<task>:<node>` 同构。"""
-        normalized = str(session_key or "").strip()
-        return f"session:{normalized}" if normalized else ""
+        return _skill_roster_notice.session_scope_key(session_key)
 
     def _readable_frontdoor_skill_ids(self, session_key: Any) -> list[str]:
         readable: list[str] = []
@@ -4058,17 +4058,37 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
         messages: list[dict[str, Any]] | None,
         *,
         session_key: Any,
+        session: Any = None,
     ) -> list[dict[str, Any]]:
         """检测 + 一次性投递，只在这一处发生（真正落请求体的装配路径上）。
 
         旧机制一条回合内四个装配点共用一次消耗式读，先跑的把差集领走、落请求体那处
         永远拿空，提示因此从未上线。这里同时把"读者唯一"钉成结构：其它装配点不再读台账。
+
+        基座迁移也在这里：存量请求体里的 `## 长期记忆` 块被剥离，并把该会话的记忆游标
+        置为未初始化，下一次投递用整份文档重建基座（落在尾部，而不是头部）。
         """
-        base_messages = list(messages or [])
+        base_messages = [
+            dict(item)
+            for item in list(messages or [])
+            if isinstance(item, dict)
+        ]
+        stripped_base = any(is_memory_snapshot_message(item) for item in base_messages)
+        if stripped_base:
+            base_messages = [
+                item for item in base_messages if not is_memory_snapshot_message(item)
+            ]
         scope = self._frontdoor_skill_roster_notice_scope(session_key)
         if not scope:
             return base_messages
+        if stripped_base:
+            _skill_roster_notice.reset_memory_cursor(scope)
         normalized_session_key = str(session_key or "").strip()
+        memory_provider = None
+        if session is not None:
+            memory_provider = lambda **kwargs: self._frontdoor_memory_notice_provider(  # noqa: E731
+                session=session, **kwargs
+            )
         message, delivered = _skill_roster_notice.deliver_for_scope(
             scope,
             _skill_roster_notice.readable_skill_items(
@@ -4079,21 +4099,25 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
             # 钉住表按裸 session_key 分桶（`session:` 前缀只是台账的作用域写法），
             # 拿前缀键去查会取回空名单，把全部技能当成新增。
             covered_skill_ids=pinned_skill_ids_for(None, session_key=normalized_session_key),
-            memory_provider=self._frontdoor_memory_notice_provider,
+            memory_provider=memory_provider,
         )
         if message is None:
-            return base_messages
+            return base_messages, None
         self._emit_frontdoor_skill_roster_notice_event(session_key=session_key, records=delivered)
-        return [*base_messages, message]
+        return [*base_messages, message], message
 
     def _frontdoor_memory_notice_provider(
-        self, *, since_rev: int, base_rev: int, initialized: bool = False
+        self,
+        *,
+        since_rev: int,
+        base_rev: int,
+        initialized: bool = False,
+        session: Any = None,
     ) -> dict[str, Any] | None:
         """长期记忆增量：与 skill 名单同一条通知消息、同一个游标。
 
-        首次投递（`initialized=False`）只对齐到当前修订——会话 index 1 的冻结快照就是
-        这份文档，再投一遍整篇会把同一份内容放两次。对齐也把 `initialized` 记为真，
-        所以"首跳时还没有任何修订"的会话不会因此漏掉第一条真实修订。
+        首次投递（`initialized=False`）或压缩后的重投，把整份文档作为基座放进尾部；
+        其余跳只投 `rev` 之后的增量。基座不再注入 message index 1。
         """
         manager = getattr(self._loop, "memory_manager", None)
         if manager is None or not callable(getattr(manager, "memory_notice_delta", None)):
@@ -4103,13 +4127,43 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
         except Exception:
             return None
         if not initialized:
-            return {"rev": latest, "from_rev": 0, "text": "", "rebase": False, "align": True}
+            document_text = str(manager.snapshot_text() or "").strip()
+            if not document_text:
+                return {"rev": latest, "from_rev": 0, "text": "", "rebase": False, "align": True}
+            self._record_memory_base_provenance(
+                session,
+                manager=manager,
+                reason=(
+                    MEMORY_SNAPSHOT_ADOPTION_REBASE
+                    if str(getattr(session, MEMORY_SNAPSHOT_ADOPTED_AT_ATTR, "") or "").strip()
+                    else MEMORY_SNAPSHOT_ADOPTION_FIRST_REQUEST
+                ),
+            )
+            return {"rev": latest, "from_rev": 0, "text": document_text, "rebase": True}
         if latest <= int(since_rev or 0):
             return {"rev": latest, "from_rev": int(since_rev), "text": "", "rebase": False}
         try:
-            return manager.memory_notice_delta(since_rev=int(since_rev))
+            delta = manager.memory_notice_delta(since_rev=int(since_rev))
         except Exception:
             return None
+        if isinstance(delta, dict) and delta.get("rebase"):
+            self._record_memory_base_provenance(
+                session,
+                manager=manager,
+                reason=MEMORY_SNAPSHOT_ADOPTION_REBASE,
+            )
+        return delta
+
+    def _record_memory_base_provenance(
+        self, session: Any, *, manager: Any, reason: str
+    ) -> None:
+        """把线上那份基座写进 artifact 的 `memory_snapshot` 溯源；失败只影响读数。"""
+        if session is None:
+            return
+        try:
+            adopt_memory_snapshot(session, memory_manager=manager, reason=reason)
+        except Exception:
+            return
 
     def _emit_frontdoor_skill_roster_notice_event(self, *, session_key: str, records: list[dict[str, Any]]) -> None:
         """会话流里画一条内部行（与心跳 ack 同一族 system 行），不是用户气泡。

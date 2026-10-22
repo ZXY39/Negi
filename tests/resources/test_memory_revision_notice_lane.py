@@ -14,6 +14,7 @@ from types import SimpleNamespace
 
 from g3ku.runtime.frontdoor._ceo_runtime_ops import CeoFrontDoorRuntimeOps
 from g3ku.runtime.skill_roster_notice import (
+    MEMORY_BASE_HEADING,
     MEMORY_NOTICE_HEADING,
     RUNTIME_NOTICE_MARKER,
     clear_skill_roster_notice_stores,
@@ -231,19 +232,20 @@ def test_notice_lane_rebase_replaces_the_cursor_base() -> None:
     assert notice_context_for(scope)["memory_cursor"] == {"rev": 9, "base_rev": 9, "initialized": True}
 
 
-def test_frontdoor_provider_aligns_the_first_cursor_without_replaying_history() -> None:
+def test_frontdoor_provider_delivers_the_base_once_then_deltas() -> None:
     ops = object.__new__(CeoFrontDoorRuntimeOps)
     ops._loop = SimpleNamespace(
         memory_manager=SimpleNamespace(
-            latest_memory_revision=lambda: 9,
-            memory_notice_delta=lambda since_rev: {"rev": 9, "text": "增量", "rebase": False},
+            latest_memory_revision=lambda: 8,
+            snapshot_text=lambda **_: "261022:基座行",
+            memory_notice_delta=lambda since_rev: {"rev": 8, "text": "增量", "rebase": False},
         )
     )
     first = ops._frontdoor_memory_notice_provider(since_rev=0, base_rev=0, initialized=False)
-    assert first == {"rev": 9, "from_rev": 0, "text": "", "rebase": False, "align": True}
-    later = ops._frontdoor_memory_notice_provider(since_rev=8, base_rev=8, initialized=True)
-    assert later == {"rev": 9, "text": "增量", "rebase": False}
-    assert ops._frontdoor_memory_notice_provider(since_rev=9, base_rev=9, initialized=True)["text"] == ""
+    assert first == {"rev": 8, "from_rev": 0, "text": "261022:基座行", "rebase": True}
+    later = ops._frontdoor_memory_notice_provider(since_rev=7, base_rev=8, initialized=True)
+    assert later == {"rev": 8, "text": "增量", "rebase": False}
+    assert ops._frontdoor_memory_notice_provider(since_rev=8, base_rev=8, initialized=True)["text"] == ""
 
 
 def test_first_revision_after_an_empty_alignment_is_still_delivered() -> None:
@@ -255,6 +257,7 @@ def test_first_revision_after_an_empty_alignment_is_still_delivered() -> None:
     ops._loop = SimpleNamespace(
         memory_manager=SimpleNamespace(
             latest_memory_revision=lambda: revision["latest"],
+            snapshot_text=lambda **_: "",
             memory_notice_delta=lambda since_rev: {
                 "rev": revision["latest"],
                 "text": revision["text"],
@@ -284,3 +287,46 @@ def test_first_revision_after_an_empty_alignment_is_still_delivered() -> None:
     )
     assert second is not None
     assert "第一条真实记忆" in str(second.get("content") or "")
+
+
+def test_rebased_memory_base_uses_its_own_heading() -> None:
+    clear_skill_roster_notice_stores()
+    scope = "session:web:base"
+
+    def provider(**_kwargs):
+        return {"rev": 3, "text": "261022:基座行", "rebase": True}
+
+    message, _ = deliver_for_scope(
+        scope,
+        [],
+        now="2026-04-25T00:00:00+08:00",
+        memory_provider=provider,
+    )
+    content = str(message.get("content") or "")
+    assert MEMORY_BASE_HEADING in content
+    assert MEMORY_NOTICE_HEADING not in content
+
+
+def test_legacy_head_block_is_recognized_and_the_cursor_can_be_reset() -> None:
+    from g3ku.runtime.frontdoor.message_builder import is_memory_snapshot_message
+    from g3ku.runtime.skill_roster_notice import (
+        notice_context_for,
+        reset_memory_cursor,
+        session_scope_key,
+    )
+
+    assert is_memory_snapshot_message(
+        {"role": "assistant", "content": "## 长期记忆\n261022:旧基座"}
+    )
+    assert not is_memory_snapshot_message(
+        {"role": "user", "content": "[RUNTIME_NOTICE]\n\n### Long-term memory (full snapshot)\n261022:新版"}
+    )
+
+    clear_skill_roster_notice_stores()
+    scope = session_scope_key("web:legacy")
+    reset_memory_cursor(scope)
+    assert notice_context_for(scope)["memory_cursor"] == {
+        "rev": 0,
+        "base_rev": 0,
+        "initialized": False,
+    }

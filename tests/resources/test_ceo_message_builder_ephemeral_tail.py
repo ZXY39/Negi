@@ -74,15 +74,6 @@ async def test_build_for_ceo_appends_ephemeral_tail_messages_only_to_model_messa
     assert all(item.get("content") != "Ephemeral reminder header" for item in result.dynamic_appendix_messages)
 
 
-def test_frontdoor_memory_snapshot_carries_the_dated_lines() -> None:
-    raw = (
-        "260425:Prefer concise answers\n"
-        "260425:Use headings (note: n12345)\n"
-    )
-
-    message = CeoMessageBuilder._memory_snapshot_stable_message(raw)
-
-    assert message is not None
-    content = str(message["content"] or "")
-    assert content == "## 长期记忆\n" + raw.strip()
-    assert "id:" not in content
+def test_builder_no_longer_injects_a_memory_block_into_the_head() -> None:
+    """基座由通知车道的尾部消息承载；builder 不再产出 `## 长期记忆` 头部位。"""
+    assert not hasattr(CeoMessageBuilder, "_memory_snapshot_stable_message")

@@ -34,6 +34,8 @@ SKILL_ROSTER_NOTICE_LOAD_HINT = 'Use `load_skill_context(skill_id="...")` to rea
 SKILL_ROSTER_CARRIED_HEADING = '### Skills newly readable in this session (still readable; kept across compaction)'
 # 长期记忆增量与 skill 名单共用一条通知消息；两节之间用空行分隔。
 MEMORY_NOTICE_HEADING = '### Long-term memory updates'
+# 基座（re-base / 首请求）那一节：整份文档一次性进上下文，替代旧的头部位。
+MEMORY_BASE_HEADING = '### Long-term memory (full snapshot)'
 
 SKILL_ROSTER_NOTICE_CONTEXT_KEY = 'skill_roster_notice_context'
 
@@ -97,6 +99,7 @@ def deliver_for_scope(
     pending = pending_notice_records(context)
     cursor = dict(context.get('memory_cursor') or {})
     memory_text = ''
+    memory_rebase = False
     if callable(memory_provider):
         try:
             delta = memory_provider(
@@ -111,6 +114,7 @@ def deliver_for_scope(
             text = str(delta.get('text') or '').strip()
             if text:
                 memory_text = text
+            memory_rebase = bool(delta.get('rebase'))
             next_cursor = {
                 'rev': max(next_rev, int(cursor.get('rev') or 0)),
                 'base_rev': int(cursor.get('base_rev') or 0),
@@ -123,7 +127,9 @@ def deliver_for_scope(
     if not pending and not memory_text:
         set_notice_context(scope_key, context)
         return None, []
-    message = build_notice_message(pending, memory_text=memory_text)
+    message = build_notice_message(
+        pending, memory_text=memory_text, memory_rebase=bool(memory_rebase)
+    )
     if message is not None and pending:
         context = mark_records_delivered(
             context,
@@ -133,6 +139,12 @@ def deliver_for_scope(
         context['memory_cursor'] = cursor
     set_notice_context(scope_key, context)
     return message, (pending if message is not None else [])
+
+
+def session_scope_key(session_key: Any) -> str:
+    """前门台账作用域：按会话一条，与节点道 `node:<task>:<node>` 同构。"""
+    normalized = str(session_key or '').strip()
+    return f'session:{normalized}' if normalized else ''
 
 
 def reset_memory_cursor(scope_key: str) -> None:
@@ -341,11 +353,12 @@ def render_carried_text(records: list[Any]) -> str:
 
 
 def build_notice_message(
-    records: list[Any], *, memory_text: str = ''
+    records: list[Any], *, memory_text: str = '', memory_rebase: bool = False
 ) -> dict[str, Any] | None:
     """一次性投递那条消息：role=user，落在本轮历史末尾、两份运行时块之前。
 
-    两节共用一条消息：skill 名单在前，记忆增量在后；空节省略。
+    两节共用一条消息：skill 名单在前，记忆在后；空节省略。`memory_rebase=True` 表示
+    这一节是整份基座（首请求或压缩后的重投），用基座抬头而不是增量抬头。
     """
     sections: list[str] = []
     skill_text = render_notice_text(records) if records else ''
@@ -353,7 +366,8 @@ def build_notice_message(
         sections.append(skill_text)
     memory_section = str(memory_text or '').strip()
     if memory_section:
-        sections.append('\n'.join([MEMORY_NOTICE_HEADING, memory_section]))
+        heading = MEMORY_BASE_HEADING if memory_rebase else MEMORY_NOTICE_HEADING
+        sections.append('\n'.join([heading, memory_section]))
     if not sections:
         return None
     content = '\n\n'.join([SKILL_ROSTER_NOTICE_MARKER, *sections]).strip()
@@ -439,6 +453,7 @@ def drop_records_after(context: Any, *, cutoff_iso: str) -> dict[str, Any]:
 
 
 __all__ = [
+    'MEMORY_BASE_HEADING',
     'MEMORY_NOTICE_HEADING',
     'RUNTIME_NOTICE_MARKER',
     'SKILL_ROSTER_CARRIED_HEADING',
@@ -470,6 +485,7 @@ __all__ = [
     'render_notice_lines',
     'render_notice_text',
     'reset_memory_cursor',
+    'session_scope_key',
     'set_notice_context',
     'strip_skill_roster_notice_echo',
 ]

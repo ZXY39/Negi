@@ -2522,6 +2522,11 @@ class RuntimeAgentSession:
                 kind="persistence_warning",
                 text="Memory compression flush failed; turn history is still available in session transcript.",
             )
+        scope = _skill_roster_notice.session_scope_key(
+            getattr(self._state, "session_key", "")
+        )
+        if scope:
+            _skill_roster_notice.reset_memory_cursor(scope)
 
     def append_context_compression_marker(
         self,

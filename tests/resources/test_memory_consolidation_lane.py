@@ -394,25 +394,36 @@ def test_an_ordinary_note_owned_by_a_retired_memory_survives_the_sweep(tmp_path:
         manager.close()
 
 
-def test_the_injected_snapshot_carries_the_block_verbatim(tmp_path: Path) -> None:
-    """The painted mirror is what the reader gets, byte for byte: nothing is re-rendered on
-    the way in, and nothing may re-read `memory/index` while injecting."""
-    builder_module = importlib.import_module("g3ku.runtime.frontdoor.message_builder")
-    markdown_memory = _markdown_memory()
+def test_the_notice_base_carries_the_document_block_verbatim() -> None:
+    """基座那一节逐字节携带文档（含归并区），不在注入侧二次渲染。"""
+    from g3ku.runtime.skill_roster_notice import (
+        MEMORY_BASE_HEADING,
+        clear_skill_roster_notice_stores,
+        deliver_for_scope,
+    )
 
-    entries = (
+    markdown_memory = _markdown_memory()
+    document = (
         "260417:用户偏好：回复先给结论 (note: n12345)\n"
         f"\n{markdown_memory.CONSOLIDATION_HEADING}\n{markdown_memory.CONSOLIDATION_REMINDER}\n"
         "- 工具技巧 (note: c54321)\n"
     )
 
-    message = builder_module.CeoMessageBuilder._memory_snapshot_stable_message(entries)
+    clear_skill_roster_notice_stores()
+
+    def provider(**_kwargs):
+        return {"rev": 1, "text": document.strip(), "rebase": True}
+
+    message, _ = deliver_for_scope(
+        "session:web:consolidation",
+        [],
+        now="2026-04-25T00:00:00+08:00",
+        memory_provider=provider,
+    )
 
     content = str(message["content"])
-    assert content.startswith("## 长期记忆")
-    assert "260417:用户偏好：回复先给结论 (note: n12345)" in content
-    assert markdown_memory.CONSOLIDATION_REMINDER in content
-    assert "- 工具技巧 (note: c54321)" in content
+    assert MEMORY_BASE_HEADING in content
+    assert document.strip() in content
 
 
 def test_a_consolidation_that_retires_nothing_leaves_the_store_alone(tmp_path: Path) -> None:

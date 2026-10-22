@@ -141,7 +141,7 @@ Start here when you are new to the repository or when a change crosses subsystem
 - 看到 `memory/MEMORY.md.bak.*`，或库里条目与投影不一致 → `runtime-overview.md`「Memory Runtime State」（投影只由库再生、外部改动先留证再重绘）+ `operations-and-maintenance.md`「Memory Queue Workflow」
 - 限流/上游故障期间某轮记忆没写进去、`memory/failed.jsonl` 有停车记录、或医生检查报 `failed_parked` → `runtime-overview.md`「队列状态机与失败停车语义」+ `operations-and-maintenance.md`「Memory Queue Workflow」
 - 记忆页点重试/放弃提示失败、或弹条正文是 `Request timeout` → `web-and-admin.md`「Memory Management Page And Admin Contract」（四条失败正文各自的指向与 30s 客户端超时）
-- 用户说「记住/忘掉」但模型照旧，或某轮命中前缀在第二条消息就分叉 → `runtime-overview.md`「Memory Runtime State」（快照会话级冻结与采纳点）+ `context-and-cache-troubleshooting.md`「长期记忆快照的会话级冻结」
+- 用户说「记住/忘掉」但模型照旧，或某轮命中前缀在尾部通知处变大 → `runtime-overview.md`「Memory Runtime State」（修订流与尾部基座）+ `context-and-cache-troubleshooting.md`「长期记忆的尾部基座与增量」
 - 某条记忆从长期记忆块里消失了、`memory/index/` 出现新文件、归并区的一整节摘不掉，或医生检查报 `broken_category_links` → `runtime-overview.md`「Memory Runtime State」（退场写 `consolidated_into`、归并区派生、摘整节按句柄寻址、机器压缩只降级不删除）
 - 记忆批次停在停车区而错误文本是 `memory_apply_confirm is required`、`line N is outside the memory block`、`line N is outside the candidate list`、`names no category with retired memories` → `runtime-overview.md`「Memory Runtime State」（两次提交那道门与行号的解释时刻）
 - 日志审计侧栏角标不更新、原始日志为空或翻页停在空白页、时间显示与事件时间戳不一致、`/api/audit` 503 → `web-and-admin.md`「Log Audit Page And Event Contract」

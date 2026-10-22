@@ -3373,12 +3373,16 @@ async def test_message_builder_keeps_turn_memory_from_different_session_in_share
 
 
 @pytest.mark.asyncio
-async def test_ceo_context_assembly_injects_memory_snapshot_without_legacy_memory_overlay() -> None:
+async def test_ceo_context_assembly_does_not_read_or_inject_the_memory_base() -> None:
+    """基座已迁到通知车道的尾部；装配路不读文档、也不在请求头放记忆块。"""
+    reads: list[dict[str, object]] = []
+
+    def _snapshot_text(**kwargs):
+        reads.append(dict(kwargs))
+        return "---\n2026/4/17-self：\n完成任务必须说明任务总耗时\n"
+
     loop = SimpleNamespace(
-        memory_manager=SimpleNamespace(
-            snapshot_text=lambda **_: "---\n2026/4/17-self：\n完成任务必须说明任务总耗时\n",
-            sync_catalog=None,
-        ),
+        memory_manager=SimpleNamespace(snapshot_text=_snapshot_text, sync_catalog=None),
         main_task_service=None,
         _memory_runtime_settings=SimpleNamespace(
             assembly=SimpleNamespace(
@@ -3403,22 +3407,18 @@ async def test_ceo_context_assembly_injects_memory_snapshot_without_legacy_memor
     overlay = "\n\n".join(result["turn_overlay_parts"])
     assert "2026/4/17-self：" not in overlay
     assert "完成任务必须说明任务总耗时" not in overlay
-    assert "完成任务必须说明任务总耗时" in str(result["memory_snapshot_text"] or "")
+    assert "memory_snapshot_text" not in result
+    assert reads == []
 
 
 @pytest.mark.asyncio
-async def test_frontdoor_uses_frozen_memory_snapshot_only_once_per_turn() -> None:
+async def test_frontdoor_assembly_never_reads_the_memory_document() -> None:
+    """同轮多次装配也不读文档：基座与增量都由发送准备点的通知车道负责。"""
     snapshot_calls: list[dict[str, object]] = []
-    snapshot_values = iter(
-        [
-            "---\n2026/4/17-self：\nUse the first frozen snapshot\n",
-            "---\n2026/4/17-self：\nDo not hot-reload within the same turn\n",
-        ]
-    )
 
     def _snapshot_text(**kwargs):
         snapshot_calls.append(dict(kwargs))
-        return next(snapshot_values)
+        return "---\n2026/4/17-self：\nUse the first frozen snapshot\n"
 
     loop = SimpleNamespace(
         memory_manager=SimpleNamespace(
@@ -3447,14 +3447,13 @@ async def test_frontdoor_uses_frozen_memory_snapshot_only_once_per_turn() -> Non
     )
 
     overlay = "\n\n".join(result["turn_overlay_parts"])
-    assert len(snapshot_calls) == 1
+    assert snapshot_calls == []
     assert "Use the first frozen snapshot" not in overlay
-    assert "Use the first frozen snapshot" in str(result["memory_snapshot_text"] or "")
-    assert "Do not hot-reload within the same turn" not in str(result["memory_snapshot_text"] or "")
+    assert "memory_snapshot_text" not in result
 
 
 @pytest.mark.asyncio
-async def test_ceo_context_assembly_keeps_memory_snapshot_out_of_turn_overlay_and_in_stable_prefix() -> None:
+async def test_ceo_context_assembly_keeps_the_memory_base_out_of_stable_messages() -> None:
     loop = SimpleNamespace(
         memory_manager=SimpleNamespace(
             snapshot_text=lambda **_: "260418:Prefer concise answers\n",
@@ -3486,11 +3485,8 @@ async def test_ceo_context_assembly_keeps_memory_snapshot_out_of_turn_overlay_an
     stable_messages = list(result.stable_messages or [])
 
     assert "Prefer concise answers" not in overlay
-    assert len(stable_messages) >= 2
     assert stable_messages[0]["role"] == "system"
-    assert stable_messages[1]["role"] == "assistant"
-    assert "id:" not in str(stable_messages[1]["content"] or "")
-    assert "260418:Prefer concise answers" in str(stable_messages[1]["content"] or "")
+    assert all("## 长期记忆" not in str(item.get("content") or "") for item in stable_messages)
 
 
 class _MutableMemoryManager:
@@ -3535,12 +3531,8 @@ async def _collect(builder: CeoMessageBuilder, session: SimpleNamespace) -> dict
 
 
 @pytest.mark.asyncio
-async def test_memory_snapshot_stays_frozen_between_requests_until_adopted() -> None:
-    """快照注入在 message index 1，同轮多次 provider 往返必须逐字节复用同一份文档。
-
-    磁盘被记忆 worker 改写（含同轮内改写）都不算：只有采纳点能换版本，否则轮内前缀漂移
-    会把块身后整段历史重铺一遍。
-    """
+async def test_memory_base_is_not_injected_during_context_assembly() -> None:
+    """文档被改写也不影响装配：装配路不读它，记忆只从通知车道进上下文。"""
     manager = _MutableMemoryManager("---\nid:AA11aa\n2026/9/1-self：\nfrozen v1\n")
     builder = _query_builder(manager)
     session = _session()
@@ -3549,14 +3541,9 @@ async def test_memory_snapshot_stays_frozen_between_requests_until_adopted() -> 
     manager.document = "---\nid:BB22bb\n2026/9/2-self：\nhot v2\n"
     second = await _collect(builder, session)
 
-    assert "frozen v1" in str(first["memory_snapshot_text"] or "")
-    assert str(second["memory_snapshot_text"] or "") == str(first["memory_snapshot_text"] or "")
-    assert manager.reads == ["---\nid:AA11aa\n2026/9/1-self：\nfrozen v1\n"]
-
-    adopt_memory_snapshot(session, memory_manager=manager, reason="token_compression")
-    third = await _collect(builder, session)
-    assert "hot v2" in str(third["memory_snapshot_text"] or "")
-    assert len(manager.reads) == 2
+    assert "memory_snapshot_text" not in first
+    assert "memory_snapshot_text" not in second
+    assert manager.reads == []
 
 
 @pytest.mark.asyncio
