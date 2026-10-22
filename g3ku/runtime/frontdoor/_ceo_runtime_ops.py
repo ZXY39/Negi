@@ -76,31 +76,6 @@ from g3ku.runtime.session_agent import (
     FRONTDOOR_LAST_SEND_AT_ATTR,
     PENDING_PROVIDER_BUNDLE_RECOMMIT_ATTR,
 )
-from g3ku.runtime.stage_prompt_compaction import (
-    ECHO_STRIP_ENABLED,
-    STAGE_ARCHIVE_HEADING,
-    STAGE_CLOSURE_INACTIVE_NOTES,
-    STAGE_RAW_PREFIXES,
-    STAGE_REF_SELECTION_RULE,
-    build_stage_archive_document,
-    closing_stage_target,
-    compact_stage_prompt_messages_in_place,
-    is_stage_block_echo_text,
-    render_stage_ref_candidate_block,
-    render_stage_ref_index,
-    split_stage_ref_selection,
-    stage_archive_selector_from_request_messages,
-    stage_block_indexes,
-    stage_created_at_ceiling,
-    stage_created_at_within_watermark,
-    stage_is_swallowable,
-    stage_ledger_may_have_moved,
-    stage_message_call_ids,
-    stage_ref_candidates,
-    stage_transition_signature,
-    strip_stage_block_echo,
-    summarized_stage_ids,
-)
 from g3ku.runtime.token_compact_markers import TOKEN_COMPACT_V2_PREFIX
 from g3ku.runtime.tool_context_presence import (
     contract_index_from_revisions,
@@ -154,35 +129,13 @@ from main.runtime.chat_backend import (
     build_prompt_cache_diagnostics,
     resolve_send_model_context_window_info,
 )
-from main.runtime.internal_tools import (
-    SilentTool,
-    SubmitNextStageTool,
-)
+from main.runtime.internal_tools import SilentTool
 from main.runtime.send_token_preflight import (
     build_runtime_estimated_input_truth,
     build_runtime_hybrid_send_token_estimate,
     build_runtime_observed_input_truth,
     build_runtime_send_token_preflight_snapshot,
     compute_runtime_send_token_preflight_thresholds,
-)
-from main.runtime.stage_budget import (
-    FRONTDOOR_STAGELESS_MEMORY_TOOL_NAMES,
-    STAGE_BUDGET_EXHAUSTED_FREE_PASS_REMINDER,
-    STAGE_BUDGET_EXHAUSTION_PREDICTED_REMINDER_TEMPLATE,
-    STAGE_TOOL_NAME,
-    STAGE_TOOL_ROUND_BUDGET_MAX,
-    STAGE_TOOL_ROUND_BUDGET_MIN,
-    STAGELESS_FREE_PASS_REMINDER,
-    response_tool_calls_count_against_stage_budget,
-    stage_free_pass_kind,
-    stage_gate_error_for_tool,
-    visible_tools_for_stage_iteration,
-)
-from main.runtime.stage_messages import (
-    STAGE_REPLY_BOUNCE_LIMIT,
-    build_ceo_stage_overlay,
-    build_ceo_stage_reply_bounce_message,
-    build_ceo_stage_result_block_message,
 )
 from main.runtime.tool_call_repair import (
     XML_REPAIR_ATTEMPT_LIMIT,
@@ -202,12 +155,6 @@ from main.service.create_async_task_contract import (
 
 from . import skill_roster as _skill_roster
 from ._ceo_support import CeoFrontDoorSupport
-from .canonical_context import (
-    combine_canonical_context,
-    default_frontdoor_canonical_context,
-    merge_turn_stage_state_into_canonical_context,
-    normalize_frontdoor_canonical_context,
-)
 from .message_builder import CeoMessageBuilder
 from .prompt_cache_contract import DEFAULT_CACHE_FAMILY_REVISION, build_frontdoor_prompt_contract
 from .session_temp_dir import ceo_session_temp_dir
@@ -218,6 +165,7 @@ from .state_models import (
     CeoRuntime,
 )
 from .tool_contract import (
+    ECHO_STRIP_ENABLED,
     apply_pinned_contract_to_head,
     build_frontdoor_tool_contract,
     bump_skill_roster_epoch,
@@ -276,21 +224,8 @@ _TOOL_CONTRACT_ECHO_REPAIR_MESSAGE = (
     'Do not output, summarize, or quote that contract. Return only the '
     'user-facing answer, or use the structured tool-calling interface when a tool is required.'
 )
-_STAGE_BLOCK_ECHO_REPAIR_MESSAGE = (
-    'The previous response repeated an internal stage-compaction block. '
-    'Do not output, summarize, or quote those blocks. '
-    'To open, advance, or close a stage call the `submit_next_stage` tool. '
-    'Otherwise reply to the user in natural language.'
-)
-
-# 节点暂停事件心跳自动补开阶段的预算。
-FRONTDOOR_NODE_ERROR_AUTO_STAGE_BUDGET = 10
-
-
 @dataclass(slots=True)
 class FrontdoorExecutionBundle:
-    base_stage_state: dict[str, Any]
-    mutable_stage_state: dict[str, Any]
     # 执行准入面：本轮 callable（常驻内置 + 契约在场的水合名 + 控制工具）。
     visible_tools: dict[str, Tool]
     # 声明面：钉住的 `tools[]` 名字解析出的实例（+ 控制工具）。只用来渲染 provider
@@ -607,10 +542,6 @@ def _merged_interrupt_values(state: dict[str, Any], payload: dict[str, Any]) -> 
                 tool_call_payloads = list(approval_request.get("tool_calls") or [])
                 if tool_call_payloads:
                     values["tool_call_payloads"] = tool_call_payloads
-    if isinstance(interrupt_state.get("frontdoor_stage_state"), dict):
-        values["frontdoor_stage_state"] = dict(interrupt_state.get("frontdoor_stage_state") or {})
-    if isinstance(interrupt_state.get("frontdoor_canonical_context"), dict):
-        values["frontdoor_canonical_context"] = dict(interrupt_state.get("frontdoor_canonical_context") or {})
     if isinstance(interrupt_state.get("compression_state"), dict):
         values["compression_state"] = dict(interrupt_state.get("compression_state") or {})
     if isinstance(interrupt_state.get("frontdoor_selection_debug"), dict):
@@ -758,7 +689,7 @@ def _normalize_frontdoor_tool_arguments(tool_name: str, arguments: dict[str, Any
 
 
 class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
-    _ALLOWED_FRONTDOOR_SHRINK_REASONS = frozenset({"", "token_compression", "stage_compaction", "user_edit_truncation"})
+    _ALLOWED_FRONTDOOR_SHRINK_REASONS = frozenset({"", "token_compression", "user_edit_truncation"})
     _TOKEN_COMPRESSION_TRIGGER_RATIO = 0.80
     _TOKEN_COMPRESSION_ESTIMATE_SAFETY_RATIO = 0.95
     _CONTENT_OPEN_IMAGE_CONTEXT_TEXT = "图片已通过 content_open 打开，视觉内容已附带在本轮上下文中"
@@ -929,31 +860,6 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
         # 无 metadata；warm 路径不经 prompt_history_messages，故 1.2 的折叠够不到这里。在基线
         # chokepoint 按内容标记折叠，避免 provider 长期不可用、同一事件每轮重投时 bundle 线性堆积。
         return fold_internal_prompt_history(durable)
-
-    @classmethod
-    def _trim_frontdoor_seed_stage_compaction(
-        cls,
-        seed: list[dict[str, Any]] | None,
-        stage_state: dict[str, Any] | None,
-    ) -> tuple[list[dict[str, Any]], bool]:
-        """把续跑 seed（上一份请求体基线）按阶段归属原位压缩：
-        过期阶段只移除工具肉身、压缩块落回原位、阶段外对话逐条保留，
-        使续跑路径真正收缩且不整体打碎前缀缓存。
-        返回 (裁剪结果, 本次是否实际移除了消息)。"""
-        records = [dict(item) for item in list(seed or []) if isinstance(item, dict)]
-        if not records or not list((stage_state or {}).get("stages") or []):
-            return records, False
-        parts = compact_stage_prompt_messages_in_place(
-            records,
-            stage_state=stage_state,
-            preserve_leading_system=True,
-            preserve_leading_user=True,
-        )
-        trimmed = [
-            *list(parts["prefix"]),
-            *list(parts["rewritten"]),
-        ]
-        return trimmed, bool(parts.get("stage_compaction_applied"))
 
     @classmethod
     def _reconcile_paused_user_turns_into_seed(
@@ -1440,55 +1346,17 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
         except Exception:
             return None
 
-    @staticmethod
-    def _frontdoor_active_stage_goal(state: dict[str, Any] | None) -> str:
-        """取当前活动阶段目标，供 content_open 图片叠加层锚定当前任务。
-
-        仅当阶段状态里存在真正的活动阶段（status=active 或 active_stage_id 命中）
-        时返回其目标；否则返回空串，叠加层退回通用文案，避免锚到无关历史阶段。
-        """
-        stage_state = state.get("frontdoor_stage_state") if isinstance(state, dict) else None
-        if not isinstance(stage_state, dict):
-            return ""
-        stages = list(stage_state.get("stages") or [])
-        active_stage_id = str(stage_state.get("active_stage_id") or "").strip()
-        fallback_goal = ""
-        for stage in stages:
-            if not isinstance(stage, dict):
-                continue
-            stage_goal = str(stage.get("stage_goal") or "").strip()
-            if not stage_goal:
-                continue
-            stage_id = str(stage.get("stage_id") or "").strip()
-            if active_stage_id and stage_id == active_stage_id:
-                return stage_goal
-            if str(stage.get("status") or "").strip().lower() == "active":
-                fallback_goal = stage_goal
-        return fallback_goal
-
     def _content_open_image_overlay_context_text(
         self,
         *,
-        active_stage_goal: str = "",
         base_text: str = "",
     ) -> str:
         """叠加层文案：带多模态图片的末尾用户消息只允许追加在请求尾部。
 
-        有活动阶段目标时附上目标锚点并提醒继续完成，避免长会话里的历史内部
-        事件与图片指令竞争注意力；无活动阶段时保持原有通用文案。`base_text` 让
-        载体自己声明身份（入站上传 vs content_open 重开），两种来源的说法不能互抄。
+        `base_text` 让载体自己声明身份（入站上传 vs content_open 重开），
+        两种来源的说法不能互抄。
         """
-        base = str(base_text or "").strip() or self._CONTENT_OPEN_IMAGE_CONTEXT_TEXT
-        goal = str(active_stage_goal or "").strip()
-        if not goal:
-            return base
-        if len(goal) > 300:
-            goal = goal[:300].rstrip() + "…"
-        return (
-            f"{base}\n"
-            f"当前阶段目标：{goal}\n"
-            "请继续完成该目标。这些图片服务于当前任务，不要切换到历史对话或历史定时任务。"
-        )
+        return str(base_text or "").strip() or self._CONTENT_OPEN_IMAGE_CONTEXT_TEXT
 
     @staticmethod
     def _frontdoor_tail_image_block_count(request_messages: list[dict[str, Any]] | None) -> int:
@@ -1510,7 +1378,6 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
         payloads: list[dict[str, Any]] | None,
         *,
         model_refs: list[str] | None,
-        active_stage_goal: str = "",
     ) -> list[dict[str, Any]]:
         image_enabled, image_model_name = self._ceo_image_multimodal_for_request(model_refs)
         if not image_enabled:
@@ -1528,7 +1395,6 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
                 carrier_text = str(raw.get("overlay_text") or "").strip()
                 break
         overlay_text = self._content_open_image_overlay_context_text(
-            active_stage_goal=active_stage_goal,
             base_text=carrier_text,
         )
         blocks: list[dict[str, Any]] = [{"type": "text", "text": overlay_text}]
@@ -1583,13 +1449,11 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
         request_messages: list[dict[str, Any]] | None,
         payloads: list[dict[str, Any]] | None,
         model_refs: list[str] | None,
-        active_stage_goal: str = "",
     ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
         records = [dict(item) for item in list(request_messages or []) if isinstance(item, dict)]
         blocks = self._content_open_image_overlay_message_blocks(
             payloads,
             model_refs=model_refs,
-            active_stage_goal=active_stage_goal,
         )
         if not blocks:
             durable = strip_multimodal_blocks_from_message_records(records)
@@ -1904,7 +1768,6 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
                 request_messages=request_messages,
                 payloads=pending_content_open_image_payloads,
                 model_refs=list(state_for_request.get("model_refs") or []),
-                active_stage_goal=self._frontdoor_active_stage_goal(state_for_request),
             )
         model_info = self._resolve_frontdoor_send_model_context_window(
             model_refs=list(state_for_request.get("model_refs") or []),
@@ -1972,10 +1835,8 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
                 current_tool_schemas=actual_tool_schemas,
                 previous_tools_record_basis=str(latest_record.get("tools_record_basis") or "proxy").strip(),
                 current_tools_record_basis=str(actual_tools_record_basis).strip(),
-                stage_state=dict(state_for_request.get("frontdoor_stage_state") or {}),
             )
-        # 锚点取的是上一跳的真实 usage，其中含这一跳已被阶段裁撤掉的工具肉身；
-        # 不扣回就直接把裁撤前的规模当读数挂到下一跳，且压缩触发用的是同一个数。
+        # 锚点取的是上一跳的真实 usage；投影修正量当前恒为 0。
         previous_effective_input_tokens = max(
             0,
             previous_effective_input_tokens - anchor_projection_shrink_tokens,
@@ -2060,279 +1921,6 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
         return min(len(body), 4)
 
     @staticmethod
-    def _frontdoor_render_stage_state(*, session: Any, state: dict[str, Any] | None) -> dict[str, Any]:
-        """界面阶段轨道读的那本账：本轮/会话的 `frontdoor_stage_state`，不掺 canonical 编号。
-
-        取值顺序必须与 `_frontdoor_durable_stage_state` 里的 `turn_state` 完全一致，否则
-        "压缩时看到的账"与"渲染出来的账"又不是同一本。
-        """
-        if isinstance(state, dict) and isinstance(state.get("frontdoor_stage_state"), dict):
-            return dict(state.get("frontdoor_stage_state") or {})
-        if session is not None and isinstance(getattr(session, "_frontdoor_stage_state", None), dict):
-            return dict(getattr(session, "_frontdoor_stage_state", None) or {})
-        return {}
-
-    @staticmethod
-    def _frontdoor_durable_stage_state(*, session: Any, state: dict[str, Any] | None) -> dict[str, Any]:
-        """压缩侧读的账本：durable canonical 链 + 本轮 stage_state 的合并视图。"""
-        canonical = getattr(session, "_frontdoor_canonical_context", None) if session is not None else None
-        turn_state: dict[str, Any] = {}
-        if isinstance(state, dict) and isinstance(state.get("frontdoor_stage_state"), dict):
-            turn_state = dict(state.get("frontdoor_stage_state") or {})
-        elif session is not None and isinstance(getattr(session, "_frontdoor_stage_state", None), dict):
-            turn_state = dict(getattr(session, "_frontdoor_stage_state", None) or {})
-        if not isinstance(canonical, dict) and not turn_state:
-            return {}
-        return combine_canonical_context(canonical or {}, turn_state)
-
-    def _frontdoor_write_stage_archive_file(
-        self,
-        *,
-        session_key: Any,
-        stages: list[dict[str, Any]],
-        kind: str = "frontdoor_stage_archive",
-    ) -> tuple[str, int, int]:
-        """把即将收口或被点名裁撤的阶段账本原样导出到会话临时目录，返回 (路径, stage 起, stage 止)。
-
-        收口只让阶段不再进 provider 上下文；全量真相源必须仍可回读。落点选
-        session_temp_dir 是因为它已在运行时工具契约里公示，模型 `content_open` 本来就
-        能开该目录下的文件，不需要新增工具面。写失败返回空路径——摘要里就不出现指针，
-        不阻塞压缩。`kind` 区分两条车道：收口归档与裁撤归档的成因不同，打开文件的人
-        与维护者都要能一眼看出是哪条。"""
-        records = [dict(item) for item in list(stages or []) if isinstance(item, dict)]
-        if not records:
-            return "", 0, 0
-        indexes = [int(item.get("stage_index") or 0) for item in records if int(item.get("stage_index") or 0) > 0]
-        try:
-            directory = Path(self._ceo_session_temp_dir(session_key))
-            directory.mkdir(parents=True, exist_ok=True)
-            payload = build_stage_archive_document(
-                kind=kind,
-                owner=str(session_key or "").strip(),
-                created_at=now_iso(),
-                stages=records,
-            )
-            path = directory / f"g3ku_stage_archive_{len(records)}_{uuid.uuid4().hex[:8]}.json"
-            path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
-            return str(path), min(indexes or [0]), max(indexes or [0])
-        except Exception:
-            logger.debug("frontdoor stage archive export failed for {}", str(session_key or ""))
-            return "", 0, 0
-
-    def _frontdoor_archive_evicted_stage(
-        self,
-        *,
-        session_key: str,
-        stage_state: dict[str, Any],
-        stage_id: str,
-    ) -> str:
-        """模型点名裁撤时把该阶段全量账本导成文件，路径写回账本的 archive_ref。
-
-        读回靠 `content_open`（三角色可见、能开绝对路径），不新增工具面：工具 schema
-        由 `_selected_tool_schemas` 从**全局** `loop.tools` 注册表解析，而阶段账本是
-        **每会话**的，注册一个全局可执行实例会把 A 会话的账本暴露给 B 会话。
-        一条阶段只在被裁撤时导一次，ref 落在账本上后续逐轮复用，不重复写盘。
-        写失败就留空：块里不出现指针，也不谎称可读回。
-        """
-        wanted = str(stage_id or "").strip()
-        if not wanted:
-            return ""
-        target = next(
-            (
-                stage
-                for stage in list(stage_state.get("stages") or [])
-                if isinstance(stage, dict) and str(stage.get("stage_id") or "").strip() == wanted
-            ),
-            None,
-        )
-        if not isinstance(target, dict) or target.get("context_evicted") is not True:
-            return ""
-        existing = str(target.get("archive_ref") or "").strip()
-        if existing:
-            return existing
-        path, archive_start, archive_end = self._frontdoor_write_stage_archive_file(
-            session_key=session_key,
-            stages=[target],
-            kind="frontdoor_stage_eviction",
-        )
-        if not path:
-            return ""
-        target["archive_ref"] = path
-        index = int(target.get("stage_index") or 0)
-        target["archive_stage_index_start"] = archive_start or index
-        target["archive_stage_index_end"] = archive_end or index
-        return path
-
-    def _frontdoor_summarized_stage_ids(
-        self,
-        *,
-        stage_state: dict[str, Any],
-        recent_tail: list[dict[str, Any]],
-    ) -> list[str]:
-        """本次压缩真正吞掉的阶段（判定规则与节点车道共用 `summarized_stage_ids`）。"""
-        return summarized_stage_ids(stage_state, body_messages=recent_tail)
-
-    @classmethod
-    def _frontdoor_compression_boundary_index(
-        cls,
-        render_stage_state: Any,
-        durable_stage_state: Any,
-        stage_ids: list[str],
-    ) -> int:
-        """折进摘要的最后一个阶段在**渲染账本**里的 `stage_index`；0 = 一条阶段都没折。
-
-        区分线在阶段轨道里的落点由它决定：`stage_index` 小于等于它的阶段画在线上方。
-        活动阶段永远不被吞（`stage_is_swallowable` 直接排除 `active_stage_id`），所以它
-        连同之后的阶段一定留在线下方继续长——线因此永远落在两张阶段卡之间，不切开任何
-        一张卡。
-
-        边界必须换算到 `_frontdoor_render_stage_state` 那本账：被吞清单出自 canonical
-        合并视图，那侧编号是全局单调的（实测一条会话里 canonical 17740..18445 对界面
-        1..706，交集 0）。原样把 canonical 编号交给前端，判据会读成"这一回合的阶段全部
-        在边界之下"，线就退回 feed 尾部。跨账靠 `_frontdoor_stage_content_identity`，
-        与收口标记 `_frontdoor_mark_stages_archived` 用的是同一座桥。
-        """
-        wanted = {str(item or "").strip() for item in list(stage_ids or []) if str(item or "").strip()}
-        if not wanted:
-            return 0
-        identities = {
-            cls._frontdoor_stage_content_identity(stage)
-            for stage in list((durable_stage_state or {}).get("stages") or [])
-            if isinstance(stage, dict) and str(stage.get("stage_id") or "").strip() in wanted
-        }
-        identities.discard("")
-        boundary = 0
-        for stage in list((render_stage_state or {}).get("stages") or []):
-            if not isinstance(stage, dict):
-                continue
-            if str(stage.get("stage_id") or "").strip() not in wanted:
-                if cls._frontdoor_stage_content_identity(stage) not in identities:
-                    continue
-            try:
-                boundary = max(boundary, int(stage.get("stage_index") or 0))
-            except (TypeError, ValueError):
-                continue
-        return boundary
-
-    @staticmethod
-    def _frontdoor_stage_content_identity(stage: Any) -> str:
-        """跨存储识别同一条逻辑阶段：canonical 链与本轮 stage_state 用的是两套
-        stage_id 序号（实测同一条会话里 1..382 对 843..1226，交集 0），只按 id 匹配
-        必然漏掉一半。字段口径对齐 `canonical_context._completed_stage_content_identity`。"""
-        if not isinstance(stage, dict):
-            return ""
-        if str(stage.get("status") or "").strip().lower() == "active":
-            return ""
-        created_at = str(stage.get("created_at") or "").strip()
-        if not created_at:
-            return ""
-        return "|".join(
-            (
-                str(stage.get("stage_kind") or "normal"),
-                created_at,
-                str(stage.get("finished_at") or "").strip(),
-                str(stage.get("stage_goal") or "").strip(),
-                str(stage.get("completed_stage_summary") or "").strip(),
-            )
-        )
-
-    @classmethod
-    def _frontdoor_mark_stages_archived(cls, stores: list[Any], selector: dict[str, Any], *, body_messages: Any) -> int:
-        """把收口标记就地写进给定的账本结构，返回实际新标记的条数（幂等）。
-
-        清单口径（存量压缩块的 `stage_ids`）走内容身份匹配：两份账本各维护一套 stage_id
-        序号（实测交集 0），只标 canonical 等于没标（合并去重留下的是本轮 stage_state
-        那份）；水位线直接命中，created_at 是同一条逻辑阶段在两边共享的同一个值。写入
-        刻意不过 `normalize_frontdoor_canonical_context`，归一化会重排账本。活动阶段、
-        已收口的、非普通阶段一律不收口；水位线口径额外保住肉身或 raw 块还在即将落定的
-        请求体里的阶段——那批内容没进摘要，收了就是挖洞（未被模型点名的阶段一直留在正文
-        里，所以这条守卫就是全部近场保护，没有额外的条数窗口）。"""
-        wanted = {
-            str(item or "").strip()
-            for item in list((selector or {}).get("stage_ids") or [])
-            if str(item or "").strip()
-        }
-        watermark = str((selector or {}).get("archived_through_created_at") or "").strip()
-        if not wanted and not watermark:
-            return 0
-        usable = [store for store in list(stores or []) if isinstance(store, dict)]
-        if not usable:
-            return 0
-        identities: set[str] = set()
-        for store in usable:
-            for stage in list(store.get("stages") or []):
-                if not isinstance(stage, dict):
-                    continue
-                if str(stage.get("stage_id") or "").strip() in wanted:
-                    identity = cls._frontdoor_stage_content_identity(stage)
-                    if identity:
-                        identities.add(identity)
-        body_raw_stage_indexes = stage_block_indexes(body_messages, prefixes=STAGE_RAW_PREFIXES)
-        body_call_ids = stage_message_call_ids(body_messages)
-        hidden = 0
-        for store in usable:
-            active_stage_id = str(store.get("active_stage_id") or "").strip()
-            for stage in list(store.get("stages") or []):
-                if not isinstance(stage, dict):
-                    continue
-                if str(stage.get("status") or "").strip().lower() == "active":
-                    continue
-                if stage.get("context_visible") is False:
-                    continue
-                stage_id = str(stage.get("stage_id") or "").strip()
-                matched = stage_id in wanted or (
-                    bool(identities) and cls._frontdoor_stage_content_identity(stage) in identities
-                )
-                if not matched:
-                    matched = bool(watermark) and stage_created_at_within_watermark(
-                        stage.get("created_at"), watermark
-                    )
-                if not matched:
-                    continue
-                if watermark and not stage_is_swallowable(
-                    stage,
-                    active_stage_id=active_stage_id,
-                    body_stage_indexes=body_raw_stage_indexes,
-                    body_call_ids=body_call_ids,
-                ):
-                    continue
-                stage["context_visible"] = False
-                hidden += 1
-        return hidden
-
-    @classmethod
-    def _frontdoor_apply_stage_archive(cls, result: dict[str, Any], request_messages: Any) -> int:
-        """账本提交点应用收口：标记必须跟着"即将成为 durable"的那份账本副本一起产出。
-
-        会话属性不是账本的权威写入者——`_graph_finalize_turn` 用轮初 state 快照重建
-        canonical 再回灌，只标会话属性会在同一回合收尾时被整体覆盖（实盘表现为
-        标记数归零、阶段块照旧逐轮渲染）。所以这里对 finalize 产出的两份 result
-        账本动手，读取的请求体也正是同一份即将落定的基线请求体。"""
-        if not isinstance(result, dict):
-            return 0
-        selector = stage_archive_selector_from_request_messages(request_messages)
-        return cls._frontdoor_mark_stages_archived(
-            [result.get("frontdoor_canonical_context"), result.get("frontdoor_stage_state")],
-            selector,
-            body_messages=request_messages,
-        )
-
-    @classmethod
-    def _frontdoor_hide_summarized_stages(cls, session: Any, request_messages: Any) -> int:
-        """会话属性版的收口标记（手动压缩车道：没有 finalize 回合，持久化点即提交点）。"""
-        if session is None:
-            return 0
-        selector = stage_archive_selector_from_request_messages(request_messages)
-        return cls._frontdoor_mark_stages_archived(
-            [
-                getattr(session, "_frontdoor_canonical_context", None),
-                getattr(session, "_frontdoor_stage_state", None),
-            ],
-            selector,
-            body_messages=request_messages,
-        )
-
-    @staticmethod
     def _estimate_frontdoor_compression_body_tokens(messages: list[dict[str, Any]] | None) -> int:
         """压缩侧的正文尺子：装箱用量、单发请求体用量必须走同一个估算器。
 
@@ -2397,7 +1985,6 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
         prompt_cache_key = str(state.get("prompt_cache_key") or "").strip()
         parallel_tool_calls = bool(state.get("parallel_enabled")) if list(tool_schemas or []) else None
         session = getattr(getattr(runtime, "context", None), "session", None)
-        durable_stage_state = self._frontdoor_durable_stage_state(session=session, state=state)
         recent_tail_count = self._frontdoor_compaction_tail_count(normalized_body)
         # 尾部边界不得落在工具调用组中间（与节点通道同一不变量）：尾部首条是
         # tool 结果时向前扩展边界，把声明它的 assistant 消息一并保留；最坏
@@ -2485,21 +2072,7 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
                     diagnostics={"applied": False, "reason": "no_compressible_history"},
                 )
             context_window_tokens = int(model_info.get("context_window_tokens") or 0)
-            # 收口候选 = 本次真正会被摘要吞掉的阶段；它们的 key_refs 带编号交给摘要
-            # 模型挑选，正文由结果侧逐字回填。候选清单并进指令消息本体，历史前缀
-            # （system + older_history）保持与刚发出的正常请求字节一致。
-            summarized_stage_ids = self._frontdoor_summarized_stage_ids(
-                stage_state=durable_stage_state,
-                recent_tail=recent_tail,
-            )
-            ref_candidates = stage_ref_candidates(durable_stage_state, stage_ids=set(summarized_stage_ids))
             instruction_text = _FRONTDOOR_TOKEN_COMPRESSION_INSTRUCTION
-            candidate_block = render_stage_ref_candidate_block(ref_candidates)
-            if candidate_block:
-                instruction_text = (
-                    f"{_FRONTDOOR_TOKEN_COMPRESSION_INSTRUCTION}\n"
-                    f"{STAGE_REF_SELECTION_RULE}\n\n{candidate_block}"
-                )
             # append-only 单发压缩请求：原请求体（去尾/去契约）+ 末尾一条 user 指令。
             # 前缀与刚发出的正常请求字节一致，provider 前缀缓存真实命中，压缩请求
             # 的新增 token 只有指令本身——与正常流量同形，快速成功或快速 429 重试，
@@ -2585,6 +2158,7 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
                     runtime=runtime,
                     is_cancelled=_compression_cancelled,
                     model_info=model_info,
+                    compression_source=compression_source,
                 )
             else:
                 compressed_text, _compressed_message = await self._run_frontdoor_compression_helper_request(
@@ -2595,6 +2169,7 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
                     is_cancelled=_compression_cancelled,
                     model_info=model_info,
                     progress_text="上下文压缩中",
+                    compression_source=compression_source,
                 )
             if _compression_cancelled():
                 raise asyncio.CancelledError()
@@ -2619,53 +2194,13 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
                         "chunk_failed_count": int(chunk_failed_count or 0),
                     },
                 )
-            # 收口三段：模型选的引用（逐字回填）、被吞阶段的落档指针、账本标记。
-            # 分块车道不要求模型选号（每块看不到全量候选），只落档并留指针。
-            selected_ref_ids: list[int] = []
-            if not chunked_mode:
-                compressed_text, selected_ref_ids = split_stage_ref_selection(compressed_text)
-            index_text, selected_ref_count, dropped_dead_refs = render_stage_ref_index(
-                ref_candidates,
-                selected_ref_ids,
-            )
-            summarized_stage_records = [
-                dict(stage)
-                for stage in list(durable_stage_state.get("stages") or [])
-                if isinstance(stage, dict) and str(stage.get("stage_id") or "").strip() in set(summarized_stage_ids)
-            ]
-            archive_path, archive_stage_start, archive_stage_end = self._frontdoor_write_stage_archive_file(
-                session_key=state.get("session_key"),
-                stages=summarized_stage_records,
-            )
-            archive_text = ""
-            if archive_path:
-                archive_text = "\n".join(
-                    [
-                        STAGE_ARCHIVE_HEADING,
-                        f"- stage {archive_stage_start}-{archive_stage_end} 共 {len(summarized_stage_records)} "
-                        f"个阶段的完整记录（含逐条 key_refs 与工具轮次）已收口，不再逐轮进入上下文："
-                        f"{archive_path}",
-                        "  需要回看这些阶段的细节时用 content_open 按上面的路径打开。",
-                    ]
-                )
-            summary_sections = [item for item in (compressed_text.strip(), index_text, archive_text) if item]
+            # 收口：摘要正文直接成为压缩块。
+            summary_sections = [item for item in (compressed_text.strip(),) if item]
             compressed_text = "\n\n".join(summary_sections).strip()
             compacted_payload = {
                 "kind": "frontdoor_token_compaction_llm",
                 "history_message_count": len(older_history_messages),
             }
-            if archive_path:
-                compacted_payload["stage_archive"] = {
-                    "ref": archive_path,
-                    "stage_index_start": archive_stage_start,
-                    "stage_index_end": archive_stage_end,
-                    "stage_count": len(summarized_stage_records),
-                    # 收口水位线随摘要块一起 durable：基线推进到这份请求体的那一刻才被应用。
-                    # 逐条 stage_id 清单换成一个 created_at 上限：375 条 id 要 8.4k 字符，
-                    # 比它守护的摘要正文还长且每轮重发。缺时间戳的阶段收不到，只能多渲染
-                    # 一轮——反方向（收了没摘要的阶段）才是丢内容。
-                    "archived_through_created_at": stage_created_at_ceiling(summarized_stage_records),
-                }
             compacted_block = {
                 "role": "assistant",
                 "content": (
@@ -2721,17 +2256,6 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
                     "dropped_dangling_tool_groups": int(dropped_dangling_tool_groups or 0),
                     "retained_recent_tail_count": recent_tail_count,
                     "compressed_history_message_count": len(older_history_messages),
-                    "stage_ref_candidate_count": len(ref_candidates),
-                    "stage_ref_selected_count": int(selected_ref_count),
-                    "stage_ref_dropped_dead": int(dropped_dead_refs),
-                    "stage_archive_pending_count": len(summarized_stage_ids),
-                    # 区分线在阶段轨道里的落点；收尾落行时原样带进 stats，实时帧同带。
-                    "boundary_stage_index": self._frontdoor_compression_boundary_index(
-                        self._frontdoor_render_stage_state(session=session, state=state),
-                        durable_stage_state,
-                        summarized_stage_ids,
-                    ),
-                    "stage_archive_ref": archive_path,
                     "final_request_tokens": rewritten_tokens,
                 },
             )
@@ -2822,6 +2346,7 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
         is_cancelled: Any,
         model_info: dict[str, Any],
         progress_text: str = "上下文压缩中",
+        compression_source: str = "token_compression",
     ) -> tuple[str, Any]:
         """压缩 helper 的单次请求发送 + 空响应对齐普通路径的重试语义。
 
@@ -2945,6 +2470,7 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
         runtime: CeoRuntime,
         is_cancelled: Any,
         model_info: dict[str, Any],
+        compression_source: str = "token_compression",
     ) -> tuple[str, int, bool, int, int, list[dict[str, Any]], int]:
         """执行规划器给出的块，提交最长成功前缀，其余原始历史留在本跳请求里。
 
@@ -3319,34 +2845,16 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
         current_request_messages: list[dict[str, Any]] | None,
         previous_tool_schemas: list[dict[str, Any]] | None,
         current_tool_schemas: list[dict[str, Any]] | None,
-        stage_state: dict[str, Any] | None = None,
         previous_tools_record_basis: str = "proxy",
         current_tools_record_basis: str = "proxy",
     ) -> tuple[int, bool, int]:
-        """返回 (本跳相对上一跳的增量, 是否可比, 上一跳被阶段裁撤掉的投影体量)。
-
-        第三项是 usage-first 锚点的修正量：锚点取的是上一跳的真实 provider usage，
-        里面还留着这一跳已被裁掉的工具肉身，不扣回去就会把整段被裁体量算回读数。
-        """
+        """返回 (本跳相对上一跳的增量, 是否可比, 投影修正量)。"""
         # 两侧走同一跨轮可比性投影（契约 / turn-only / 记忆快照 / 多模态 / 动态
         # overlay 剥离 + 内部提示折叠）。长期记忆快照与工具契约块是每轮重新生成
         # 的动态块，只存在于已发出的真实请求里，而下一轮请求由 durable 基线重新
         # 拼装，按原始形态比对会让前缀恒不等，usage-first 估算静默退化成全量 preview。
-        previous_projection = cls._frontdoor_comparable_request_records(previous_request_messages)
+        previous_records = cls._frontdoor_comparable_request_records(previous_request_messages)
         current_records = cls._frontdoor_comparable_request_records(current_request_messages)
-        # 阶段窗口重写是原位块重写：两侧在同一份阶段状态下做同一 trim（幂等）后才
-        # 可能前缀相等，否则阶段压缩会让历史中段字节漂移、可比性失效。
-        previous_records = previous_projection
-        previous_stage_trimmed = False
-        if isinstance(stage_state, dict) and list(stage_state.get("stages") or []):
-            previous_records, previous_stage_trimmed = cls._trim_frontdoor_seed_stage_compaction(
-                previous_projection,
-                stage_state,
-            )
-            current_records, _current_trimmed = cls._trim_frontdoor_seed_stage_compaction(
-                current_records,
-                stage_state,
-            )
         if not previous_records or len(current_records) < len(previous_records):
             return 0, False, 0
         if not cls._fresh_turn_seed_records_match(current_records[: len(previous_records)], previous_records):
@@ -3407,21 +2915,6 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
             or 0
         )
         projection_shrink_tokens = 0
-        if previous_stage_trimmed:
-            # 同一投影下再量一次「未裁」版本：裁撤掉的肉身仍算在上一跳的真实 usage 里，
-            # 差额不扣回锚点就会在每个过期点把整段被裁体量算回读数。
-            untrimmed_previous_estimate_tokens = int(
-                _estimate_frontdoor_provider_request_tokens(
-                    provider_request_body=None,
-                    request_messages=previous_projection,
-                    tool_schemas=normalized_previous_tool_schemas,
-                )
-                or 0
-            )
-            projection_shrink_tokens = max(
-                0,
-                untrimmed_previous_estimate_tokens - previous_estimate_tokens,
-            )
         return (
             max(0, current_estimate_tokens - previous_estimate_tokens),
             True,
@@ -3866,7 +3359,7 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
         `tools[]` 是声明面、callable 集是准入面，两者不同义：声明里的名字在
         `load_tool_context` 把契约送进上下文（下一跳在场、进 callable）之前调用一律被拒，
         回执引导先 load。这是"先读契约再调"的唯一落点——只在尾块点名、执行侧照旧放行，
-        规则就只剩文案效果（`perf_inspect` 那例）。`submit_next_stage` / `silent` 是合成实例，
+        规则就只剩文案效果（`perf_inspect` 那例）。`silent` 是合成实例，
         由 `_frontdoor_execution_bundle` 直接装进对象字典，不在这份名单里。
 
         RBAC 收回要当跳生效：声明名被收回时仍挂在钉住的 `tools[]` 上（清单滞后），所以
@@ -3882,7 +3375,7 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
             for name in self._frontdoor_callable_tool_names_for_state(state)
             # 控制工具是执行束里另装的合成实例（`_frontdoor_execution_bundle`），不在
             # registry 里，留在这份名单只会让按名取实例空转、污染排障视图。
-            if name not in {STAGE_TOOL_NAME, SILENT_TOOL_NAME}
+            if name not in {SILENT_TOOL_NAME}
         ]
         if not callable_names and "tool_names" not in state:
             return self._frontdoor_dispatch_tool_names(state)
@@ -4251,15 +3744,6 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
             provider_visible.append(str(tool.name or name).strip())
         return self._normalized_tool_name_state_list(provider_visible) or normalized
 
-    def _frontdoor_has_valid_stage(self, state: CeoGraphState | dict[str, Any] | None) -> bool:
-        normalized_state = (
-            state
-            if isinstance(state, dict) and "frontdoor_stage_state" in state
-            else {"frontdoor_stage_state": dict(state or {}) if isinstance(state, dict) else {}}
-        )
-        snapshot = self._frontdoor_stage_state_snapshot(normalized_state)
-        return bool(str(snapshot.get("active_stage_id") or "").strip()) and not bool(snapshot.get("transition_required"))
-
     def _frontdoor_contract_presence_index(
         self,
         state: CeoGraphState | dict[str, Any] | None,
@@ -4279,9 +3763,7 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
         不缓存：前门的 `state` 是 session 的持久状态、跨跳活着，把这份跳级字典挂在它上面
         下一跳就读到陈旧结果；200×6KB 的视图重算实测 ~0.17 ms，每条装配路各算一次。
         """
-        view = self._frontdoor_view_without_evicted_stage_rows(
-            state, list((state or {}).get("messages") or [])
-        )
+        view = list((state or {}).get("messages") or [])
         return contract_presence_index(request_messages=view)
 
     def _frontdoor_contract_present_names(
@@ -4290,48 +3772,6 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
     ) -> list[str]:
         """在场 ``tool_id`` 的列表：前门每条装配路唯一的在场权威，callable 与 candidate 都只认它。"""
         return list(self._frontdoor_contract_presence_index(state))
-
-    def _frontdoor_view_without_evicted_stage_rows(
-        self,
-        state: CeoGraphState | dict[str, Any] | None,
-        messages: list[Any],
-    ) -> list[Any]:
-        """把"属于已裁撤阶段"的工具结果行从判据视图里剔除。
-
-        实盘（web:ceo-09057e72cac8）暴露的是两份视图不同源：裁撤发生在**请求体重建**
-        （`_trim_frontdoor_seed_stage_compaction`）时，而 `state["messages"]` 还是裁撤前那份，
-        于是判据读得到正文 ⇒ 名字仍被当在场、继续留在 callable；渲染却用裁切后的视图 ⇒
-        模型眼前已经没有契约，执行照旧放行。
-
-        这里不依赖调用方交来哪一份视图：按阶段账本自己把裁撤阶段的 call id 集合摘出来，
-        成对剔除这些行。剔除认的是**行**（`tool_call_id`）而不是 loader 名字——冲动调用
-        投进的契约块同样属于那条阶段，裁走时一起走；裁走即离场，下一次调用重新拿契约
-        （D9 之后没有"保留正文"这第二载体，撑住能力的只有眼前这份块）。
-        """
-        try:
-            from g3ku.runtime.stage_prompt_compaction import extract_call_id, stage_round_call_ids
-        except Exception:
-            return list(messages or [])
-        if not isinstance(state, dict):
-            return list(messages or [])
-        snapshot = self._frontdoor_stage_state_snapshot(state)
-        evicted_call_ids: set[str] = set()
-        for stage in list(snapshot.get("stages") or []):
-            if not isinstance(stage, dict):
-                continue
-            if stage.get("context_evicted") is not True:
-                continue
-            evicted_call_ids |= {str(cid or "").strip() for cid in stage_round_call_ids(stage) if str(cid or "").strip()}
-        if not evicted_call_ids:
-            return list(messages or [])
-        filtered: list[Any] = []
-        for message in list(messages or []):
-            if isinstance(message, dict) and str(message.get("role") or "").strip().lower() == "tool":
-                call_id = str(extract_call_id(message.get("tool_call_id")) or "").strip()
-                if call_id and call_id in evicted_call_ids:
-                    continue
-            filtered.append(message)
-        return filtered
 
     @staticmethod
     def _frontdoor_repair_required_tool_name_set(
@@ -4411,23 +3851,6 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
         # 缺了它模型只剩「把正文写短一点」这一种伪静默手段。
         if SILENT_TOOL_NAME not in normalized:
             normalized = [*normalized, SILENT_TOOL_NAME]
-        if isinstance(state, dict) and (
-            bool(state.get("cron_internal")) or bool(state.get("heartbeat_internal"))
-        ):
-            # Internal turns must keep the stage tool callable/visible even
-            # without an active stage, otherwise the execution gate (which
-            # only allows the stage tool before a stage exists) and the
-            # exposure disagree and the turn cannot use any tool at all.
-            if STAGE_TOOL_NAME not in normalized:
-                return [*normalized, STAGE_TOOL_NAME]
-            return normalized
-        if self._frontdoor_has_valid_stage(state):
-            return normalized
-        # 新协议:无有效阶段时不再把 callable 收窄到只剩 sns —— 普通工具可调,
-        # 但必须与 sns 同批提交;单独调用普通工具会被宽限执行一次,再次违规才硬拦。
-        # 阶段规则仍在执行期由 stage_gate_error_for_tool / free-pass 判定兜底。
-        if STAGE_TOOL_NAME not in normalized:
-            return [STAGE_TOOL_NAME, *normalized]
         return normalized
 
     def _frontdoor_runtime_visible_tool_names_for_state(
@@ -4440,18 +3863,8 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
         if raw_names is None and isinstance(state, dict):
             raw_names = list(state.get("provider_tool_names") or state.get("tool_names") or [])
         normalized = self._normalized_tool_name_state_list(raw_names)
-        # 与 callable 侧同一份常驻合同：provider schema 里也要恒定出现，
-        # 否则模型看见了名字却调不动（或反之，两种都造成静默失败）。
         if SILENT_TOOL_NAME not in normalized:
             normalized = [*normalized, SILENT_TOOL_NAME]
-        if isinstance(state, dict) and (
-            bool(state.get("cron_internal")) or bool(state.get("heartbeat_internal"))
-        ):
-            if STAGE_TOOL_NAME not in normalized:
-                return [*normalized, STAGE_TOOL_NAME]
-            return normalized
-        if STAGE_TOOL_NAME not in normalized:
-            return [*normalized, STAGE_TOOL_NAME]
         return normalized
 
     def _selected_tool_schemas(self, tool_names: list[str] | None) -> list[dict[str, Any]]:
@@ -4613,19 +4026,6 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
         )
 
     @staticmethod
-    def _default_frontdoor_stage_state() -> dict[str, Any]:
-        return {
-            "active_stage_id": "",
-            "transition_required": False,
-            "stages": [],
-            "pending_orphan_rounds": [],
-        }
-
-    @staticmethod
-    def _default_frontdoor_canonical_context() -> dict[str, Any]:
-        return default_frontdoor_canonical_context()
-
-    @staticmethod
     def _default_compression_state() -> dict[str, Any]:
         return {
             "status": "",
@@ -4760,35 +4160,13 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
     def _runtime_session_frontdoor_state(
         cls,
         state: CeoGraphState | None,
-        *,
-        preview_pending_tool_round: bool = False,
-    ) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any], dict[str, Any]]:
-        frontdoor_canonical_context = cls._frontdoor_canonical_context_snapshot(state)
-        frontdoor_stage_state = cls._frontdoor_stage_state_snapshot(state)
-        if preview_pending_tool_round and isinstance(state, dict):
-            frontdoor_stage_state = cls._record_frontdoor_stage_round(
-                frontdoor_stage_state,
-                tool_call_payloads=list(state.get("tool_call_payloads") or []),
-            )
+    ) -> tuple[dict[str, Any], dict[str, Any]]:
         compression_state = (
             dict(state.get("compression_state") or cls._default_compression_state())
             if isinstance(state, dict)
             else cls._default_compression_state()
         )
-        return (
-            frontdoor_stage_state,
-            frontdoor_canonical_context,
-            compression_state,
-            {},
-        )
-
-    @classmethod
-    def _frontdoor_canonical_context_snapshot(cls, state: CeoGraphState | None) -> dict[str, Any]:
-        if not isinstance(state, dict):
-            return cls._default_frontdoor_canonical_context()
-        return normalize_frontdoor_canonical_context(
-            state.get("frontdoor_canonical_context") or cls._default_frontdoor_canonical_context()
-        )
+        return (compression_state, {})
 
     @classmethod
     def _frontdoor_selection_debug_snapshot(cls, state: CeoGraphState | None) -> dict[str, Any]:
@@ -4944,23 +4322,18 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
                 return True
         return False
 
-    async def _emit_frontdoor_stage_sync_event(self, *, runtime: CeoRuntime) -> None:
-        """Notify CEO websocket subscribers that the session's frontdoor stage
-        state was just refreshed, so they can push a live ceo.turn.patch.
-
-        Stage/canonical context on the session object only updates at graph-node
-        boundaries; without this event the web UI learns about a newly started
-        stage only on the next tool event, and with an empty delta it wipes the
-        timeline instead.
+    async def _emit_frontdoor_turns_sync_event(self, *, runtime: CeoRuntime) -> None:
+        """Notify CEO websocket subscribers that the session's frontdoor turn
+        ledger was just refreshed, so they can push a live ceo.turn.patch.
         """
         session = getattr(getattr(runtime, "context", None), "session", None)
         emit = getattr(session, "_emit", None)
         if not callable(emit):
             return
         try:
-            await emit("frontdoor_stage_synced")
+            await emit("frontdoor_turns_synced")
         except Exception:
-            logger.opt(exception=True).warning("Failed to emit frontdoor_stage_synced event")
+            logger.opt(exception=True).warning("Failed to emit frontdoor_turns_synced event")
 
     def _sync_runtime_session_frontdoor_state(
         self,
@@ -4968,22 +4341,14 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
         state: CeoGraphState | None,
         runtime: CeoRuntime | None = None,
         session: Any | None = None,
-        preview_pending_tool_round: bool = False,
     ) -> None:
         target_session = session or getattr(getattr(runtime, "context", None), "session", None)
         if target_session is None:
             return
         (
-            frontdoor_stage_state,
-            frontdoor_canonical_context,
             compression_state,
             _semantic_context_state,
-        ) = self._runtime_session_frontdoor_state(
-            state,
-            preview_pending_tool_round=preview_pending_tool_round,
-        )
-        setattr(target_session, "_frontdoor_stage_state", frontdoor_stage_state)
-        setattr(target_session, "_frontdoor_canonical_context", frontdoor_canonical_context)
+        ) = self._runtime_session_frontdoor_state(state)
         if isinstance(state, dict):
             setattr(
                 target_session,
@@ -5367,7 +4732,7 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
     ) -> bool:
         if not (heartbeat_internal or cron_internal):
             return False
-        if shrink_reason in {"token_compression", "stage_compaction"}:
+        if shrink_reason in {"token_compression"}:
             return False
         candidate = [
             dict(item)
@@ -5476,13 +4841,7 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
                 FRONTDOOR_LAST_SEND_AT_ATTR,
                 str(provider_request_started_at or "").strip() or now_iso(),
             )
-        # 这里是 durable 基线唯一的前进点，阶段收口跟着它一起落地：请求体里那份摘要块
-        # 自带收口水位线（`stage_archive.archived_through_created_at`）。压缩算完但没走到
-        # 这一步的回合（发送失败、压缩后被暂停）不翻任何标记，下一轮照旧渲染块，不会丢历史。
-        try:
-            self._frontdoor_hide_summarized_stages(target_session, request_messages)
-        except Exception:
-            logger.debug("frontdoor stage archive apply failed for {}", session_key)
+        # 这里是 durable 基线唯一的前进点。
         turn_id = ""
         turn_id_getter = getattr(target_session, "_current_turn_id", None) if target_session is not None else None
         if callable(turn_id_getter):
@@ -5901,15 +5260,11 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
             ]
         # callable 由这一跳的请求视图重算：load 送进的契约块就在同批工具结果里，它落进
         # `state["messages"]` 之后自然在场——没有台账需要在这段里喂。
-        # 阶段工具是 callable 渲染端的注入项，不进 `tool_names` 这一池：那池的口径是
-        # builder 的 callable，历来不含它。
-        tool_names = [
-            name
-            for name in self._frontdoor_callable_tool_names_for_state(
+        tool_names = list(
+            self._frontdoor_callable_tool_names_for_state(
                 {**dict(state or {}), "tool_names": tool_names}
             )
-            if name != STAGE_TOOL_NAME
-        ]
+        )
         # candidate = 治理可见 −（callable ∪ 待修复）。契约缺席的名字在这一刻就回到候选：
         # 不在场进不了 callable，同一个减法把它留在候选里，回合内重新 load 的出口始终可达。
         # 待修复那一档不进候选——builder 侧本来就把它们摘出去，这里重新派生必须同口径。
@@ -6015,927 +5370,6 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
         refreshed["prompt_cache_key"] = contract.prompt_cache_key
         refreshed["prompt_cache_diagnostics"] = dict(contract.diagnostics)
         return refreshed
-
-    @classmethod
-    def _frontdoor_stage_state_snapshot(cls, state: CeoGraphState | None) -> dict[str, Any]:
-        raw = {}
-        if isinstance(state, dict):
-            raw_value = state.get("frontdoor_stage_state")
-            raw = dict(raw_value) if isinstance(raw_value, dict) else {}
-        active_stage_id = str(raw.get("active_stage_id") or "").strip()
-        normalized_stages: list[dict[str, Any]] = []
-        for index, raw_stage in enumerate(list(raw.get("stages") or []), start=1):
-            if not isinstance(raw_stage, dict):
-                continue
-            stage_id = str(raw_stage.get("stage_id") or f"frontdoor-stage-{index}").strip()
-            stage_status = str(raw_stage.get("status") or "").strip() or (
-                "active" if stage_id and stage_id == active_stage_id else "completed"
-            )
-            normalized_stage = {
-                "stage_id": stage_id,
-                "stage_index": int(raw_stage.get("stage_index") or index),
-                "stage_goal": str(raw_stage.get("stage_goal") or "").strip(),
-                "preamble_text": str(raw_stage.get("preamble_text") or "").strip(),
-                "tool_round_budget": max(0, int(raw_stage.get("tool_round_budget") or 0)),
-                "tool_rounds_used": max(0, int(raw_stage.get("tool_rounds_used") or 0)),
-                "status": stage_status,
-                "mode": str(raw_stage.get("mode") or "自主执行").strip() or "自主执行",
-                "stage_kind": str(raw_stage.get("stage_kind") or "normal").strip() or "normal",
-                "system_generated": bool(raw_stage.get("system_generated", False)),
-                "completed_stage_summary": str(raw_stage.get("completed_stage_summary") or "").strip(),
-                "final_stage": bool(raw_stage.get("final_stage", False)),
-                "key_refs": [
-                    dict(item)
-                    for item in list(raw_stage.get("key_refs") or [])
-                    if isinstance(item, dict)
-                ],
-                "archive_ref": str(raw_stage.get("archive_ref") or "").strip(),
-                "archive_stage_index_start": max(0, int(raw_stage.get("archive_stage_index_start") or 0)),
-                "archive_stage_index_end": max(0, int(raw_stage.get("archive_stage_index_end") or 0)),
-                "rounds": [
-                    dict(item)
-                    for item in list(raw_stage.get("rounds") or [])
-                    if isinstance(item, dict)
-                ],
-                "created_at": str(raw_stage.get("created_at") or ""),
-                "finished_at": str(raw_stage.get("finished_at") or ""),
-            }
-            # 收口标记必须穿过这份白名单：渲染读的是 stage_state，标记一旦在这里被
-            # 丢掉，压缩落地的水位线就只活在 canonical 那份里，块照旧逐轮渲染。
-            # 与 canonical 归一化器同一口径——只在 False 时写，缺失即视为可见。
-            if raw_stage.get("context_visible") is False:
-                normalized_stage["context_visible"] = False
-            # 裁撤标记必须和收口标记一样穿过这份白名单，否则 stage_state 侧读到的一直是
-            # "没裁过"，模型点了名也不会生效（与 canonical 归一化器同一口径）。
-            if raw_stage.get("context_evicted") is True:
-                normalized_stage["context_evicted"] = True
-            normalized_stages.append(normalized_stage)
-        if active_stage_id and not any(
-            str(stage.get("stage_id") or "").strip() == active_stage_id
-            and str(stage.get("status") or "").strip().lower() == "active"
-            for stage in normalized_stages
-        ):
-            active_stage_id = ""
-        transition_required = bool(raw.get("transition_required"))
-        if not active_stage_id:
-            transition_required = False
-        pending_orphan_rounds = [
-            dict(item)
-            for item in list(raw.get("pending_orphan_rounds") or [])
-            if isinstance(item, dict)
-        ]
-        return {
-            "active_stage_id": active_stage_id,
-            "transition_required": transition_required,
-            "stages": normalized_stages,
-            "pending_orphan_rounds": pending_orphan_rounds,
-        }
-
-    @classmethod
-    def _frontdoor_stage_gate(cls, state: CeoGraphState | None) -> dict[str, Any]:
-        stage_state = cls._frontdoor_stage_state_snapshot(state)
-        active_stage_id = str(stage_state.get("active_stage_id") or "").strip()
-        active_stage = next(
-            (
-                dict(stage)
-                for stage in list(stage_state.get("stages") or [])
-                if str(stage.get("stage_id") or "").strip() == active_stage_id
-                and str(stage.get("status") or "").strip().lower() == "active"
-            ),
-            None,
-        )
-        completed_stages = [
-            dict(stage)
-            for stage in list(stage_state.get("stages") or [])
-            if active_stage is None or str(stage.get("stage_id") or "").strip() != str(active_stage.get("stage_id") or "").strip()
-        ]
-        return {
-            "enabled": True,
-            "has_active_stage": active_stage is not None,
-            "transition_required": bool(stage_state.get("transition_required")),
-            "active_stage": active_stage,
-            "completed_stages": completed_stages,
-        }
-
-    @staticmethod
-    def _frontdoor_stage_has_substantive_progress(active_stage: dict[str, Any] | None) -> bool:
-        if not isinstance(active_stage, dict):
-            return False
-        non_substantive = {STAGE_TOOL_NAME, *CeoFrontDoorSupport._CONTROL_TOOL_NAMES}
-        for round_item in list(active_stage.get("rounds") or []):
-            if not isinstance(round_item, dict):
-                continue
-            tools = [dict(item) for item in list(round_item.get("tools") or []) if isinstance(item, dict)]
-            tool_names = [
-                str(item.get("tool_name") or "").strip()
-                for item in tools
-                if str(item.get("tool_name") or "").strip()
-            ]
-            if not tool_names:
-                tool_names = [
-                    str(name or "").strip()
-                    for name in list(round_item.get("tool_names") or [])
-                    if str(name or "").strip()
-                ]
-            if any(name not in non_substantive for name in tool_names):
-                return True
-        return False
-
-    @staticmethod
-    def _frontdoor_closing_stage(stage_state: dict[str, Any] | None) -> dict[str, Any] | None:
-        """`completed_stage_summary` / `key_refs` / 裁撤材料的归属对象，两车道共用 `closing_stage_target`。
-
-        判据只允许有一份：前门与节点都会在轮末 / run 终局把活动阶段结清并清空
-        `active_stage_id`，而模型可能到下一个回合（前门的渠道会话形态）或恢复后的下一次提交
-        （节点的错误恢复与验收打回）才补发 `submit_next_stage`。只认活动位会让三样材料一起
-        静默悬空，新阶段却照常追加，从外表看不出异常（实盘
-        `ext:qq-official-1903529517:f8a8001865631301`：12/12 条阶段无总结、点名过的裁撤一次都没
-        兑现、归档文件 0 个）。合同详见
-        `docs/architecture/runtime-overview.md`「stage_compaction」。
-        """
-        target = closing_stage_target(stage_state)
-        return target if isinstance(target, dict) else None
-
-    @classmethod
-    def _frontdoor_closing_stage_id(cls, stage_state: dict[str, Any] | None) -> str:
-        return str((cls._frontdoor_closing_stage(stage_state) or {}).get("stage_id") or "").strip()
-
-    def _frontdoor_submit_next_stage(
-        self,
-        stage_state: dict[str, Any],
-        *,
-        session_key: str,
-        arguments: dict[str, Any],
-        preamble_text: str = "",
-        system_generated: bool = False,
-        archive: bool = True,
-    ) -> tuple[dict[str, Any], dict[str, Any]]:
-        """一次 `submit_next_stage` 提交的完整落账：解析归属 → 提交 → 按需导档 → 回报。
-
-        两条车道（图闭包的本轮工作副本、finalize 重建 durable 账本）共用这里，收尾判据只有
-        一份；`archive=False` 给闭包用，因为写在会被 durable 返回值覆盖的工作副本上的
-        `archive_ref` 只会多留一份无人引用的归档文件。`stage_closure` 回执只在模型给了收尾
-        材料时附上——没有它，模型只能按提示词文案倒推自己有没有裁撤成功，于是向用户谎报。
-        """
-        closing_stage_id = self._frontdoor_closing_stage_id(stage_state)
-        normalized_summary = str(arguments.get("completed_stage_summary") or "").strip()
-        drop_detail = bool(arguments.get("drop_completed_stage_tool_detail"))
-        next_state, next_stage = self._submit_frontdoor_next_stage_state(
-            stage_state,
-            stage_goal=str(arguments.get("stage_goal") or ""),
-            tool_round_budget=int(arguments.get("tool_round_budget") or 0),
-            completed_stage_summary=normalized_summary,
-            key_refs=[
-                dict(item)
-                for item in list(arguments.get("key_refs") or [])
-                if isinstance(item, dict)
-            ],
-            final=bool(arguments.get("final")),
-            preamble_text=preamble_text,
-            system_generated=system_generated,
-            drop_completed_stage_tool_detail=drop_detail,
-        )
-        if drop_detail and archive:
-            self._frontdoor_archive_evicted_stage(
-                session_key=session_key,
-                stage_state=next_state,
-                stage_id=closing_stage_id,
-            )
-        payload = dict(next_stage)
-        if normalized_summary or drop_detail:
-            closed = next(
-                (
-                    stage
-                    for stage in list(next_state.get("stages") or [])
-                    if isinstance(stage, dict)
-                    and str(stage.get("stage_id") or "").strip() == closing_stage_id
-                ),
-                None,
-            )
-            if not closing_stage_id:
-                reason = "no_closing_target"
-            elif drop_detail and not normalized_summary:
-                reason = "summary_required"
-            else:
-                reason = "applied"
-            payload["stage_closure"] = {
-                "target_stage_id": closing_stage_id,
-                "summary_attached": bool(
-                    closed and str(closed.get("completed_stage_summary") or "").strip()
-                ),
-                "evicted": bool(closed and closed.get("context_evicted") is True),
-                "reason": reason,
-                # 落空时在结果里自带一句可读说明：schema 描述两车道共用，改它会整体失效
-                # provider 前缀，而结果属动态尾部，模型不必再靠猜。
-                **({} if reason == "applied" else {"note": STAGE_CLOSURE_INACTIVE_NOTES[reason]}),
-            }
-        return next_state, payload
-
-    @classmethod
-    def _submit_frontdoor_next_stage_state(
-        cls,
-        stage_state: dict[str, Any],
-        *,
-        stage_goal: str,
-        tool_round_budget: int,
-        completed_stage_summary: str = "",
-        key_refs: list[dict[str, Any]] | None = None,
-        final: bool = False,
-        preamble_text: str = "",
-        system_generated: bool = False,
-        drop_completed_stage_tool_detail: bool = False,
-        include_pending_in_budget: bool = True,
-    ) -> tuple[dict[str, Any], dict[str, Any]]:
-        normalized_state = cls._frontdoor_stage_state_snapshot({"frontdoor_stage_state": stage_state})
-        normalized_goal = str(stage_goal or "").strip()
-        normalized_budget = max(STAGE_TOOL_ROUND_BUDGET_MIN, int(tool_round_budget or 0))
-        normalized_summary = str(completed_stage_summary or "").strip()
-        normalized_key_refs = [dict(item) for item in list(key_refs or []) if isinstance(item, dict)]
-        if not normalized_goal:
-            raise ValueError("stage_goal must not be empty")
-        if normalized_budget > STAGE_TOOL_ROUND_BUDGET_MAX:
-            raise ValueError(
-                f"tool_round_budget must not exceed {STAGE_TOOL_ROUND_BUDGET_MAX}"
-            )
-
-        active_stage_id = str(normalized_state.get("active_stage_id") or "").strip()
-        active_stage = next(
-            (
-                dict(stage)
-                for stage in list(normalized_state.get("stages") or [])
-                if str(stage.get("stage_id") or "").strip() == active_stage_id
-                and str(stage.get("status") or "").strip().lower() == "active"
-            ),
-            None,
-        )
-        if active_stage is not None and not cls._frontdoor_stage_has_substantive_progress(active_stage):
-            raise ValueError(
-                "current active stage has no substantive progress yet; "
-                "do not call submit_next_stage again before using a non-control tool "
-                "in this stage"
-            )
-
-        # 归属对象只有一处判据：活动阶段优先，跨回合提交时回退到刚被轮末结清、总结还空着
-        # 的最后一条阶段。少了回退这一支，渠道会话的 summary / key_refs / 裁撤会一起悬空，
-        # 而新阶段照常追加，从外表看不出任何异常。
-        closing_stage = cls._frontdoor_closing_stage(normalized_state)
-        closing_stage_id = str((closing_stage or {}).get("stage_id") or "").strip()
-
-        now = now_iso()
-        stages: list[dict[str, Any]] = []
-        for stage in list(normalized_state.get("stages") or []):
-            current = dict(stage)
-            if closing_stage_id and str(current.get("stage_id") or "").strip() == closing_stage_id:
-                current.update(
-                    {
-                        "status": "completed",
-                        # 轮末结清时已经落过 finished_at，跨回合补记不改动它：
-                        # 收口水位线与阶段排序都按这个时间命中。
-                        "finished_at": str(current.get("finished_at") or "").strip() or now,
-                        "completed_stage_summary": normalized_summary,
-                        "key_refs": normalized_key_refs,
-                    }
-                )
-                # 与节点侧同一口径：只有同批带了非空总结才落裁撤标记，缺失即未裁撤，
-                # 所以落盘不会给每条阶段添一个布尔键。
-                if drop_completed_stage_tool_detail and normalized_summary:
-                    current["context_evicted"] = True
-            stages.append(current)
-
-        next_stage_index = max((int(stage.get("stage_index") or 0) for stage in stages), default=0) + 1
-        next_stage_id = f"frontdoor-stage-{next_stage_index}"
-        pending_orphan_rounds = [
-            dict(item)
-            for item in list(normalized_state.get("pending_orphan_rounds") or [])
-            if isinstance(item, dict)
-        ]
-        grafted_rounds: list[dict[str, Any]] = []
-        for orphan_index, round_item in enumerate(pending_orphan_rounds, start=1):
-            grafted = dict(round_item)
-            grafted["round_id"] = f"{next_stage_id}:round-{orphan_index}"
-            grafted["round_index"] = orphan_index
-            grafted["orphan_grafted"] = True
-            grafted_rounds.append(grafted)
-        grafted_used = sum(
-            1 for round_item in grafted_rounds if bool(round_item.get("budget_counted"))
-        )
-        stage_budget = (
-            normalized_budget + grafted_used
-            if include_pending_in_budget
-            else normalized_budget
-        )
-        stage_rounds_used = (
-            grafted_used
-            if include_pending_in_budget
-            else min(normalized_budget, grafted_used)
-        )
-        next_stage = {
-            "stage_id": next_stage_id,
-            "stage_index": next_stage_index,
-            "stage_kind": "normal",
-            "system_generated": bool(system_generated),
-            "mode": "自主执行",
-            "status": "active",
-            "stage_goal": normalized_goal,
-            "preamble_text": str(preamble_text or "").strip(),
-            "completed_stage_summary": "",
-            "final_stage": bool(final),
-            "key_refs": [],
-            "tool_round_budget": stage_budget,
-            "tool_rounds_used": stage_rounds_used,
-            "created_at": now,
-            "finished_at": "",
-            "rounds": grafted_rounds,
-        }
-        next_state = {
-            "active_stage_id": next_stage_id,
-            "transition_required": False,
-            "stages": [*stages, next_stage],
-            "pending_orphan_rounds": [],
-        }
-        return next_state, next_stage
-
-    @classmethod
-    def _record_frontdoor_stage_round(
-        cls,
-        stage_state: dict[str, Any],
-        *,
-        tool_call_payloads: list[dict[str, Any]],
-        tools: list[dict[str, Any]] | None = None,
-        text: str = "",
-    ) -> dict[str, Any]:
-        normalized_state = cls._frontdoor_stage_state_snapshot({"frontdoor_stage_state": stage_state})
-        active_stage_id = str(normalized_state.get("active_stage_id") or "").strip()
-        if not active_stage_id or bool(normalized_state.get("transition_required")):
-            return normalized_state
-        visible_calls = [
-            dict(item)
-            for item in list(tool_call_payloads or [])
-            if str(item.get("name") or "").strip() and str(item.get("name") or "").strip() != STAGE_TOOL_NAME
-        ]
-        if not visible_calls:
-            return normalized_state
-        counts_budget = response_tool_calls_count_against_stage_budget(
-            visible_calls,
-            extra_non_budget_tools=CeoFrontDoorSupport._CONTROL_TOOL_NAMES,
-        )
-        stages: list[dict[str, Any]] = []
-        latest_active: dict[str, Any] | None = None
-        for stage in list(normalized_state.get("stages") or []):
-            current = dict(stage)
-            if (
-                str(current.get("stage_id") or "").strip() == active_stage_id
-                and str(current.get("status") or "").strip().lower() == "active"
-            ):
-                rounds = [dict(item) for item in list(current.get("rounds") or []) if isinstance(item, dict)]
-                round_index = len(rounds) + 1
-                rounds.append(
-                    {
-                        "round_id": f"{active_stage_id}:round-{round_index}",
-                        "round_index": round_index,
-                        "created_at": now_iso(),
-                        "text": str(text or "").strip(),
-                        "tool_names": [
-                            str(item.get("name") or "").strip()
-                            for item in visible_calls
-                            if str(item.get("name") or "").strip()
-                        ],
-                        "tool_call_ids": [
-                            str(item.get("id") or "").strip()
-                            for item in visible_calls
-                            if str(item.get("id") or "").strip()
-                        ],
-                        "budget_counted": counts_budget,
-                        "tools": [
-                            dict(item)
-                            for item in list(tools or [])
-                            if isinstance(item, dict)
-                        ],
-                    }
-                )
-                next_used = int(current.get("tool_rounds_used") or 0) + (1 if counts_budget else 0)
-                budget = int(current.get("tool_round_budget") or 0)
-                if budget > 0:
-                    next_used = min(next_used, budget)
-                current.update(
-                    {
-                        "tool_rounds_used": next_used,
-                        "rounds": rounds,
-                    }
-                )
-                latest_active = current
-            stages.append(current)
-        return {
-            "active_stage_id": active_stage_id,
-            "transition_required": bool(
-                latest_active is not None
-                and not bool(latest_active.get("final_stage"))
-                and int(latest_active.get("tool_round_budget") or 0) > 0
-                and int(latest_active.get("tool_rounds_used") or 0) >= int(latest_active.get("tool_round_budget") or 0)
-            ),
-            "stages": stages,
-            "pending_orphan_rounds": [
-                dict(item)
-                for item in list(normalized_state.get("pending_orphan_rounds") or [])
-                if isinstance(item, dict)
-            ],
-        }
-
-    def _merged_frontdoor_canonical_context(
-        self,
-        *,
-        state: CeoGraphState,
-        frontdoor_stage_state: dict[str, Any] | None,
-    ) -> dict[str, Any]:
-        return merge_turn_stage_state_into_canonical_context(
-            self._frontdoor_canonical_context_snapshot(state),
-            frontdoor_stage_state or self._default_frontdoor_stage_state(),
-        )
-
-    def _frontdoor_round_tool_entry(
-        self,
-        *,
-        payload: dict[str, Any],
-        result: dict[str, Any],
-        source: str,
-    ) -> dict[str, Any]:
-        tool_name = str(payload.get("name") or result.get("tool_name") or "tool").strip() or "tool"
-        tool_call_id = str(payload.get("id") or result.get("tool_call_id") or "").strip()
-        arguments = dict(payload.get("arguments") or {}) if isinstance(payload.get("arguments"), dict) else {}
-        result_text = str(result.get("result_text") or "")
-        status = str(result.get("status") or self._tool_status(result_text)).strip().lower() or "success"
-        tool_message = dict(result.get("tool_message") or {}) if isinstance(result.get("tool_message"), dict) else {}
-        progress_payload = self._tool_result_progress_event_data(
-            tool_name=tool_name,
-            result_text=result_text,
-            tool_call_id=tool_call_id or None,
-        )
-        timestamp = str(
-            tool_message.get("finished_at")
-            or result.get("finished_at")
-            or tool_message.get("started_at")
-            or result.get("started_at")
-            or ""
-        ).strip()
-        item: dict[str, Any] = {
-            "tool_call_id": tool_call_id,
-            "tool_name": tool_name,
-            "arguments": arguments,
-            "arguments_text": self._tool_invocation_hint(tool_name, arguments),
-            "output_text": result_text,
-            "output_ref": str(progress_payload.get("output_ref") or "").strip(),
-            "status": status,
-            "started_at": str(tool_message.get("started_at") or result.get("started_at") or "").strip(),
-            "finished_at": str(tool_message.get("finished_at") or result.get("finished_at") or "").strip(),
-            "timestamp": timestamp,
-            "kind": "tool_result" if status == "success" else "tool_error",
-            "source": str(source or "user").strip().lower() or "user",
-        }
-        output_preview_text = str(progress_payload.get("output_preview_text") or "").strip()
-        if output_preview_text:
-            item["output_preview_text"] = output_preview_text
-        elapsed_seconds = result.get("elapsed_seconds", tool_message.get("elapsed_seconds"))
-        if isinstance(elapsed_seconds, (int, float)):
-            item["elapsed_seconds"] = float(elapsed_seconds)
-        # 只交契约、没执行的那一行：轨道据此把它画成"加载 tool"，而不是普通工具调用。
-        contract_delivery = str(result.get(CONTRACT_DELIVERY_FIELD) or "").strip()
-        if contract_delivery:
-            item[CONTRACT_DELIVERY_FIELD] = contract_delivery
-        # 这次调用实际走的道（D15）与"同一份入参重发"补格。阶段记录是前门唯一的耐久落点：
-        # 节点那边有 `task_node_tool_result.payload.execution_path` 可按行查，前门没有那种
-        # 行，不在这儿落就等于只能用回执文本反推——而文本反推已经被证明会数错。
-        execution_path = str(result.get("execution_path") or "").strip()
-        if execution_path:
-            item["execution_path"] = execution_path
-        staged_replay = str(result.get(STAGED_REPLAY_FIELD) or "").strip()
-        if staged_replay:
-            item[STAGED_REPLAY_FIELD] = staged_replay
-        if bool(result.get(REUSE_FLAG_IGNORED_FIELD)):
-            item[REUSE_FLAG_IGNORED_FIELD] = True
-        return item
-
-    def _frontdoor_stage_state_after_tool_cycle(
-        self,
-        state: CeoGraphState,
-        *,
-        tool_call_payloads: list[dict[str, Any]],
-        tool_results: list[dict[str, Any]],
-    ) -> dict[str, Any]:
-        stage_state = self._frontdoor_stage_state_snapshot(state)
-        ordinary_calls: list[dict[str, Any]] = []
-        ordinary_results: list[dict[str, Any]] = []
-        source = "cron" if bool(state.get("cron_internal")) else "heartbeat" if bool(state.get("heartbeat_internal")) else "user"
-        cycle_narration_text = str(state.get("analysis_text") or "").strip()
-        node_error_context = self._frontdoor_node_error_heartbeat_context(state)
-        stage_created_this_cycle = False
-        for payload, result in zip(list(tool_call_payloads or []), list(tool_results or []), strict=False):
-            tool_name = str(payload.get("name") or "").strip()
-            status = str(result.get("status") or "").strip().lower()
-            if tool_name == STAGE_TOOL_NAME:
-                if status != "error":
-                    arguments = dict(payload.get("arguments") or {})
-                    # 标记、导档、块里的指针必须由这条"回合后重建 durable 账本"的路径产出：
-                    # 图节点里那份 mutable_stage_state 只是本轮工作副本，finalize 会用这里的
-                    # 返回值覆盖状态。与收口标记同一教训——标记要落在 durable 基线推进的那一步。
-                    stage_state, _ = self._frontdoor_submit_next_stage(
-                        stage_state,
-                        session_key=str(state.get("session_key") or "").strip(),
-                        arguments=arguments,
-                        preamble_text=cycle_narration_text,
-                    )
-                    stage_created_this_cycle = True
-                continue
-            ordinary_calls.append(dict(payload))
-            ordinary_results.append(dict(result))
-        # 节点暂停事件心跳：本轮没有显式 submit 且无活动阶段时，自动补开一个
-        # system_generated 阶段（预算 10），让实质性工具落进一个可追溯的阶段。
-        # 预算耗尽后 transition_required 置真，仍需 submit_next_stage 才能继续。
-        if (
-            not stage_created_this_cycle
-            and node_error_context is not None
-            and ordinary_calls
-            and not str(stage_state.get("active_stage_id") or "").strip()
-        ):
-            stage_state, _ = self._frontdoor_auto_open_node_error_stage(
-                stage_state,
-                context=node_error_context,
-            )
-            stage_created_this_cycle = True
-        round_entries = [
-            self._frontdoor_round_tool_entry(payload=payload, result=result, source=source)
-            for payload, result in zip(list(ordinary_calls or []), list(ordinary_results or []), strict=False)
-        ]
-        free_pass_kind = ""
-        for result in ordinary_results:
-            kind = str(result.get("free_pass_kind") or "").strip()
-            if kind:
-                free_pass_kind = kind
-                break
-        # 宽限执行的工具按归属记账：无阶段 → 待入账孤儿轮；预算耗尽 → 本阶段溢出轮。
-        if free_pass_kind == "stageless" and ordinary_calls and not str(stage_state.get("active_stage_id") or "").strip():
-            return self._record_frontdoor_orphan_rounds(
-                stage_state,
-                tool_call_payloads=ordinary_calls,
-                tools=round_entries,
-                text=cycle_narration_text,
-            )
-        if free_pass_kind == "exhausted" and ordinary_calls:
-            return self._record_frontdoor_overflow_round(
-                stage_state,
-                tool_call_payloads=ordinary_calls,
-                tools=round_entries,
-                text=cycle_narration_text,
-            )
-        updated_state = self._record_frontdoor_stage_round(
-            stage_state,
-            tool_call_payloads=ordinary_calls,
-            tools=round_entries,
-            text="" if stage_created_this_cycle else cycle_narration_text,
-        )
-        return updated_state
-
-    @classmethod
-    def _record_frontdoor_orphan_rounds(
-        cls,
-        stage_state: dict[str, Any],
-        *,
-        tool_call_payloads: list[dict[str, Any]],
-        tools: list[dict[str, Any]] | None = None,
-        text: str = "",
-    ) -> dict[str, Any]:
-        normalized_state = cls._frontdoor_stage_state_snapshot({"frontdoor_stage_state": stage_state})
-        visible_calls = [
-            dict(item)
-            for item in list(tool_call_payloads or [])
-            if str(item.get("name") or "").strip() and str(item.get("name") or "").strip() != STAGE_TOOL_NAME
-        ]
-        if not visible_calls:
-            return normalized_state
-        counts_budget = response_tool_calls_count_against_stage_budget(
-            visible_calls,
-            extra_non_budget_tools=CeoFrontDoorSupport._CONTROL_TOOL_NAMES,
-        )
-        pending = [
-            dict(item)
-            for item in list(normalized_state.get("pending_orphan_rounds") or [])
-            if isinstance(item, dict)
-        ]
-        round_index = len(pending) + 1
-        pending.append(
-            {
-                "round_id": f"orphan-round-{round_index}",
-                "round_index": round_index,
-                "created_at": now_iso(),
-                "text": str(text or "").strip(),
-                "tool_names": [
-                    str(item.get("name") or "").strip()
-                    for item in visible_calls
-                    if str(item.get("name") or "").strip()
-                ],
-                "tool_call_ids": [
-                    str(item.get("id") or "").strip()
-                    for item in visible_calls
-                    if str(item.get("id") or "").strip()
-                ],
-                "budget_counted": counts_budget,
-                "orphan": True,
-                "tools": [dict(item) for item in list(tools or []) if isinstance(item, dict)],
-            }
-        )
-        return {
-            "active_stage_id": str(normalized_state.get("active_stage_id") or "").strip(),
-            "transition_required": bool(normalized_state.get("transition_required")),
-            "stages": list(normalized_state.get("stages") or []),
-            "pending_orphan_rounds": pending,
-        }
-
-    @classmethod
-    def _record_frontdoor_overflow_round(
-        cls,
-        stage_state: dict[str, Any],
-        *,
-        tool_call_payloads: list[dict[str, Any]],
-        tools: list[dict[str, Any]] | None = None,
-        text: str = "",
-    ) -> dict[str, Any]:
-        normalized_state = cls._frontdoor_stage_state_snapshot({"frontdoor_stage_state": stage_state})
-        active_stage_id = str(normalized_state.get("active_stage_id") or "").strip()
-        visible_calls = [
-            dict(item)
-            for item in list(tool_call_payloads or [])
-            if str(item.get("name") or "").strip() and str(item.get("name") or "").strip() != STAGE_TOOL_NAME
-        ]
-        if not visible_calls or not active_stage_id:
-            return normalized_state
-        stages: list[dict[str, Any]] = []
-        for stage in list(normalized_state.get("stages") or []):
-            current = dict(stage)
-            if (
-                str(current.get("stage_id") or "").strip() == active_stage_id
-                and str(current.get("status") or "").strip().lower() == "active"
-            ):
-                rounds = [dict(item) for item in list(current.get("rounds") or []) if isinstance(item, dict)]
-                round_index = len(rounds) + 1
-                rounds.append(
-                    {
-                        "round_id": f"{active_stage_id}:round-{round_index}",
-                        "round_index": round_index,
-                        "created_at": now_iso(),
-                        "text": str(text or "").strip(),
-                        "tool_names": [
-                            str(item.get("name") or "").strip()
-                            for item in visible_calls
-                            if str(item.get("name") or "").strip()
-                        ],
-                        "tool_call_ids": [
-                            str(item.get("id") or "").strip()
-                            for item in visible_calls
-                            if str(item.get("id") or "").strip()
-                        ],
-                        "budget_counted": False,
-                        "overflow": True,
-                        "tools": [dict(item) for item in list(tools or []) if isinstance(item, dict)],
-                    }
-                )
-                current["rounds"] = rounds
-            stages.append(current)
-        return {
-            "active_stage_id": active_stage_id,
-            "transition_required": bool(normalized_state.get("transition_required")),
-            "stages": stages,
-            "pending_orphan_rounds": [
-                dict(item)
-                for item in list(normalized_state.get("pending_orphan_rounds") or [])
-                if isinstance(item, dict)
-            ],
-        }
-
-    @classmethod
-    def _complete_active_frontdoor_stage_state(
-        cls,
-        stage_state: dict[str, Any] | None,
-        *,
-        completed_stage_summary: str = "",
-    ) -> dict[str, Any]:
-        normalized_state = cls._frontdoor_stage_state_snapshot({"frontdoor_stage_state": stage_state or {}})
-        active_stage_id = str(normalized_state.get("active_stage_id") or "").strip()
-        if not active_stage_id:
-            return normalized_state
-
-        now = now_iso()
-        normalized_summary = str(completed_stage_summary or "").strip()
-        stages: list[dict[str, Any]] = []
-        completed_any = False
-        for stage in list(normalized_state.get("stages") or []):
-            current = dict(stage)
-            if (
-                str(current.get("stage_id") or "").strip() == active_stage_id
-                and str(current.get("status") or "").strip().lower() == "active"
-            ):
-                current["status"] = "completed"
-                current["finished_at"] = str(current.get("finished_at") or "").strip() or now
-                if normalized_summary and not str(current.get("completed_stage_summary") or "").strip():
-                    current["completed_stage_summary"] = normalized_summary
-                completed_any = True
-            stages.append(current)
-
-        return {
-            "active_stage_id": "" if completed_any else active_stage_id,
-            "transition_required": False if completed_any else bool(normalized_state.get("transition_required")),
-            "stages": stages,
-            "pending_orphan_rounds": [
-                dict(item)
-                for item in list(normalized_state.get("pending_orphan_rounds") or [])
-                if isinstance(item, dict)
-            ],
-        }
-
-    @classmethod
-    def _frontdoor_stage_gate_error(
-        cls,
-        *,
-        tool_name: str,
-        stage_state: dict[str, Any],
-        allow_stageless: bool = False,
-    ) -> str:
-        snapshot = cls._frontdoor_stage_state_snapshot({"frontdoor_stage_state": stage_state})
-        has_active_stage = bool(str(snapshot.get("active_stage_id") or "").strip())
-        transition_required = bool(snapshot.get("transition_required"))
-        if allow_stageless and not has_active_stage and not transition_required:
-            # 节点暂停事件心跳：无活动阶段时放行本轮首个实质性工具调用，阶段由
-            # _frontdoor_stage_state_after_tool_cycle 自动补开，避免"必撞一次闸"。
-            return ""
-        return stage_gate_error_for_tool(
-            tool_name,
-            has_active_stage=has_active_stage,
-            transition_required=transition_required,
-            extra_allowed_tools={*cls._CONTROL_TOOL_NAMES, *FRONTDOOR_STAGELESS_MEMORY_TOOL_NAMES},
-            stage_tool_name=STAGE_TOOL_NAME,
-        )
-
-    @classmethod
-    def _frontdoor_stage_free_pass_kind(cls, stage_state: dict[str, Any] | None) -> str:
-        """撞闸普通工具是否获得本轮宽限执行，及记账归属。
-
-        返回 "stageless"(无活动阶段、宽限未用尽)、"exhausted"(预算耗尽、宽限未用尽)，
-        或 ""(宽限已用尽，应硬拦)。节点暂停事件心跳的 allow_stageless 放行优先于本判定
-        (在 _frontdoor_stage_gate_error 已返回空串，不会走到这里)。
-        """
-        snapshot = cls._frontdoor_stage_state_snapshot({"frontdoor_stage_state": stage_state or {}})
-        has_active_stage = bool(str(snapshot.get("active_stage_id") or "").strip())
-        transition_required = bool(snapshot.get("transition_required"))
-        active_stage = next(
-            (
-                dict(stage)
-                for stage in list(snapshot.get("stages") or [])
-                if str(stage.get("stage_id") or "").strip() == str(snapshot.get("active_stage_id") or "").strip()
-                and str(stage.get("status") or "").strip().lower() == "active"
-            ),
-            None,
-        )
-        return stage_free_pass_kind(
-            has_active_stage=has_active_stage,
-            transition_required=transition_required,
-            active_stage_rounds=list(active_stage.get("rounds") or []) if active_stage is not None else [],
-            pending_orphan_rounds=list(snapshot.get("pending_orphan_rounds") or []),
-        )
-
-    @classmethod
-    def _frontdoor_predicted_exhaustion_reminder(
-        cls,
-        stage_state: dict[str, Any] | None,
-        *,
-        ordinary_payloads: list[dict[str, Any]],
-    ) -> str:
-        """在合法轮即将打满预算时,给本轮结果附上"下轮必须同批 sns"的预告提醒。
-
-        仅当本轮不含 sns、且预算计数的普通调用会把 used 推到预算上限时触发;
-        含 sns 的同批无需预告(模型已主动开下一阶段)。
-        """
-        if not ordinary_payloads:
-            return ""
-        if not response_tool_calls_count_against_stage_budget(
-            ordinary_payloads,
-            extra_non_budget_tools=cls._CONTROL_TOOL_NAMES,
-        ):
-            return ""
-        snapshot = cls._frontdoor_stage_state_snapshot({"frontdoor_stage_state": stage_state or {}})
-        if not str(snapshot.get("active_stage_id") or "").strip() or bool(snapshot.get("transition_required")):
-            return ""
-        active_stage = next(
-            (
-                dict(stage)
-                for stage in list(snapshot.get("stages") or [])
-                if str(stage.get("stage_id") or "").strip() == str(snapshot.get("active_stage_id") or "").strip()
-                and str(stage.get("status") or "").strip().lower() == "active"
-            ),
-            None,
-        )
-        if active_stage is None or bool(active_stage.get("final_stage")):
-            return ""
-        budget = int(active_stage.get("tool_round_budget") or 0)
-        used = int(active_stage.get("tool_rounds_used") or 0)
-        if budget <= 0 or used + 1 < budget:
-            return ""
-        return STAGE_BUDGET_EXHAUSTION_PREDICTED_REMINDER_TEMPLATE.format(used=used, budget=budget)
-
-    @classmethod
-    def _frontdoor_node_error_heartbeat_context(cls, state: CeoGraphState) -> dict[str, Any] | None:
-        """节点暂停事件心跳的上下文；非该事件返回 None。
-
-        心跳轮里节点 `task_node_error` 事件要求模型用 manage_task_nodes 处置，
-        但无活动阶段时这些工具会被闸门拦下。这里提取 task/node 信息，供闸门放行
-        与自动补开阶段（标题体现"任务 ID xxx 中的节点出现自动暂停"）使用。
-        """
-        if not isinstance(state, dict):
-            return None
-        metadata = _user_input_metadata(state.get("user_input"))
-        heartbeat_internal = bool(state.get("heartbeat_internal")) or bool(metadata.get("heartbeat_internal"))
-        if not heartbeat_internal:
-            return None
-        if str(metadata.get("heartbeat_reason") or "").strip() != "task_node_error":
-            return None
-        task_ids = [
-            str(item or "").strip()
-            for item in list(metadata.get("heartbeat_task_ids") or [])
-            if str(item or "").strip()
-        ]
-        node_ids = [
-            str(item or "").strip()
-            for item in list(metadata.get("heartbeat_node_ids") or [])
-            if str(item or "").strip()
-        ]
-        return {"task_id": task_ids[0] if task_ids else "", "node_id": node_ids[0] if node_ids else ""}
-
-    @staticmethod
-    def _frontdoor_node_error_stage_goal(context: dict[str, Any]) -> str:
-        task_id = str((context or {}).get("task_id") or "").strip()
-        if task_id:
-            return f"任务 ID {task_id} 中的节点出现自动暂停，检查原因并处理"
-        return "任务中的节点出现自动暂停，检查原因并处理"
-
-    @classmethod
-    def _frontdoor_auto_open_node_error_stage(
-        cls,
-        stage_state: dict[str, Any],
-        *,
-        context: dict[str, Any],
-    ) -> tuple[dict[str, Any], dict[str, Any]]:
-        return cls._submit_frontdoor_next_stage_state(
-            stage_state,
-            stage_goal=cls._frontdoor_node_error_stage_goal(context),
-            tool_round_budget=FRONTDOOR_NODE_ERROR_AUTO_STAGE_BUDGET,
-            completed_stage_summary="",
-            final=False,
-            preamble_text="",
-            system_generated=True,
-        )
-
-    @classmethod
-    def _frontdoor_absorb_orphan_rounds(cls, stage_state: dict[str, Any]) -> dict[str, Any]:
-        """轮末收尾前,把待入账孤儿轮收纳进一个 system_generated 阶段。
-
-        只处理"无活动阶段且本轮直接输出文本、不再调用 sns"的边界情况:
-        复用 _submit_frontdoor_next_stage_state 的嫁接逻辑,把孤儿轮作为该自动阶段的
-        rounds(标记 orphan_grafted),阶段保持 kind="normal"(阶段压缩只认 normal),
-        system_generated=True 以区分来源;随后由轮末 output 收尾以指针摘要关闭它。
-        有活动阶段时孤儿轮留给下一次 sns 嫁接,这里不动。
-        """
-        snapshot = cls._frontdoor_stage_state_snapshot({"frontdoor_stage_state": stage_state})
-        pending = [
-            dict(item)
-            for item in list(snapshot.get("pending_orphan_rounds") or [])
-            if isinstance(item, dict)
-        ]
-        if not pending or str(snapshot.get("active_stage_id") or "").strip():
-            return snapshot
-        first_round_text = str(pending[0].get("text") or "").strip()
-        stage_goal = (
-            first_round_text[:60]
-            if first_round_text
-            else "自动补记：无阶段期间执行的工具调用"
-        )
-        budget = min(max(STAGE_TOOL_ROUND_BUDGET_MIN, len(pending)), STAGE_TOOL_ROUND_BUDGET_MAX)
-        absorbed, _ = cls._submit_frontdoor_next_stage_state(
-            snapshot,
-            stage_goal=stage_goal,
-            tool_round_budget=budget,
-            completed_stage_summary="",
-            key_refs=[],
-            final=False,
-            preamble_text=first_round_text,
-            system_generated=True,
-            include_pending_in_budget=False,
-        )
-        return absorbed
-
-    @classmethod
-    def _frontdoor_default_overlay_text(cls, state: CeoGraphState) -> str:
-        stage_gate = cls._frontdoor_stage_gate(state)
-        return _join_overlay_text(
-            build_ceo_stage_overlay(stage_gate),
-            build_ceo_stage_result_block_message(stage_gate),
-        )
 
     @staticmethod
     def _normalize_review_risk_level(value: Any, *, default: str = "high") -> str:
@@ -7305,7 +5739,7 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
         keep = self._normalized_tool_name_state_list(
             list(state.get("provider_tool_names") or [])
         ) or self._frontdoor_dispatch_tool_names(state)
-        for forced in (STAGE_TOOL_NAME, SILENT_TOOL_NAME):
+        for forced in (SILENT_TOOL_NAME,):
             if forced not in keep:
                 keep.append(forced)
         keep_names = [str(name or "").strip() for name in keep if str(name or "").strip()]
@@ -7580,9 +6014,7 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
         去掉已裁撤阶段的行）。读数若另取一份视图，就会报出与准入不同的在场集合——那正是本次
         改造要消灭的形状。
         """
-        view = self._frontdoor_view_without_evicted_stage_rows(
-            state, list((state or {}).get("messages") or [])
-        )
+        view = list((state or {}).get("messages") or [])
         revisions = loader_contract_revisions(view)
         index = contract_index_from_revisions(revisions)
         session_key = str(getattr(getattr(session, 'state', None), 'session_key', '') or '').strip()
@@ -7633,7 +6065,7 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
         deliver = getattr(service, 'deliver_impulse_contract', None) if service is not None else None
         if not callable(deliver):
             return None
-        view = self._frontdoor_view_without_evicted_stage_rows(state, list((state or {}).get('messages') or []))
+        view = list((state or {}).get('messages') or [])
         presence_index = runtime_context.get('tool_contract_presence')
         if not isinstance(presence_index, dict):
             presence_index = contract_presence_index(request_messages=view)
@@ -7717,9 +6149,7 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
             # 在场视图与权威同源：走 `_frontdoor_contract_presence_index` 那一条。
             # 只在容器里真有该名字时才摊这份视图——普通调用一律零成本返回。
             if 'entries' not in resolved:
-                view = self._frontdoor_view_without_evicted_stage_rows(
-                    state, list((state or {}).get('messages') or [])
-                )
+                view = list((state or {}).get('messages') or [])
                 presence_index = runtime_context.get('tool_contract_presence')
                 if not isinstance(presence_index, dict):
                     presence_index = contract_presence_index(request_messages=view)
@@ -7881,40 +6311,8 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
         runtime: CeoRuntime,
     ) -> FrontdoorExecutionBundle:
         registered_tools = self._registered_tools_for_state(state)
-        base_stage_state = self._frontdoor_stage_state_snapshot(state)
-        mutable_stage_state = copy.deepcopy(base_stage_state)
-
-        async def _submit_stage(
-            stage_goal: str,
-            tool_round_budget: int,
-            completed_stage_summary: str = "",
-            key_refs: list[dict[str, Any]] | None = None,
-            final: bool = False,
-            drop_completed_stage_tool_detail: bool = False,
-        ) -> dict[str, Any]:
-            # 与 durable 侧重建共用同一个入口，差别只在 `archive=False`：归档要落在
-            # durable 账本那一步，写在一份会被覆盖掉的工作副本上只会多留一份没人引用的文件。
-            next_stage_state, stage_payload = self._frontdoor_submit_next_stage(
-                mutable_stage_state,
-                session_key=str(state.get("session_key") or "").strip(),
-                arguments={
-                    "stage_goal": stage_goal,
-                    "tool_round_budget": tool_round_budget,
-                    "completed_stage_summary": completed_stage_summary,
-                    "key_refs": key_refs or [],
-                    "final": final,
-                    "drop_completed_stage_tool_detail": drop_completed_stage_tool_detail,
-                },
-                preamble_text=str(state.get("analysis_text") or "").strip(),
-                archive=False,
-            )
-            mutable_stage_state.clear()
-            mutable_stage_state.update(next_stage_state)
-            return stage_payload
-
         all_tools = {
             **registered_tools,
-            STAGE_TOOL_NAME: SubmitNextStageTool(_submit_stage),
             SILENT_TOOL_NAME: SilentTool(),
         }
         # 声明面与准入面分源：schema 用的实例按钉住的派发名单单独解析（同一道
@@ -7926,21 +6324,11 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
                     self._frontdoor_dispatch_tool_names(state)
                 )
             ),
-            STAGE_TOOL_NAME: all_tools[STAGE_TOOL_NAME],
             SILENT_TOOL_NAME: all_tools[SILENT_TOOL_NAME],
         }
-        stage_gate = self._frontdoor_stage_gate({"frontdoor_stage_state": mutable_stage_state})
-        visible_tools = visible_tools_for_stage_iteration(
-            all_tools,
-            has_active_stage=bool(stage_gate.get("has_active_stage")),
-            transition_required=bool(stage_gate.get("transition_required")),
-            stage_tool_name=STAGE_TOOL_NAME,
-        )
         runtime_context = self._build_tool_runtime_context(state=state, runtime=runtime)
         return FrontdoorExecutionBundle(
-            base_stage_state=base_stage_state,
-            mutable_stage_state=mutable_stage_state,
-            visible_tools=visible_tools,
+            visible_tools=all_tools,
             declared_tools=declared_tools,
             runtime_context=runtime_context,
             on_progress=runtime_context.get("on_progress"),
@@ -8339,8 +6727,6 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
             return {
                 "session_key": str(state.get("session_key") or "").strip(),
                 "messages": list(state.get("messages") or []),
-                "frontdoor_stage_state": self._default_frontdoor_stage_state(),
-                "frontdoor_canonical_context": self._frontdoor_canonical_context_snapshot(state),
                 "compression_state": dict(state.get("compression_state") or self._default_compression_state()),
                 "frontdoor_selection_debug": self._frontdoor_selection_debug_snapshot(state),
             }
@@ -8388,35 +6774,6 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
         )
         if paused_manual_snapshot and not self._persisted_session_has_paused_user_turn(runtime_session):
             paused_manual_snapshot = {}
-        current_frontdoor_stage_state = self._frontdoor_stage_state_snapshot(state)
-        if not list(current_frontdoor_stage_state.get("stages") or []):
-            current_frontdoor_stage_state = self._frontdoor_stage_state_snapshot(
-                {"frontdoor_stage_state": getattr(session, "_frontdoor_stage_state", {})}
-            )
-        if not list(current_frontdoor_stage_state.get("stages") or []) and paused_manual_snapshot:
-            paused_stage_source = (
-                paused_manual_snapshot.get("frontdoor_stage_state")
-                or paused_manual_snapshot.get("visible_canonical_context")
-                or paused_manual_snapshot.get("canonical_context")
-                or {}
-            )
-            current_frontdoor_stage_state = self._frontdoor_stage_state_snapshot(
-                {"frontdoor_stage_state": paused_stage_source}
-            )
-        current_frontdoor_canonical_context = self._frontdoor_canonical_context_snapshot(state)
-        if not list(current_frontdoor_canonical_context.get("stages") or []):
-            current_frontdoor_canonical_context = normalize_frontdoor_canonical_context(
-                getattr(session, "_frontdoor_canonical_context", {}) or {}
-            )
-        if not list(current_frontdoor_canonical_context.get("stages") or []) and paused_manual_snapshot:
-            paused_canonical_source = paused_manual_snapshot.get("frontdoor_canonical_context") or {}
-            current_frontdoor_canonical_context = normalize_frontdoor_canonical_context(paused_canonical_source)
-            if not list(current_frontdoor_canonical_context.get("stages") or []):
-                current_frontdoor_canonical_context = normalize_frontdoor_canonical_context(
-                    paused_manual_snapshot.get("canonical_context")
-                    or paused_manual_snapshot.get("visible_canonical_context")
-                    or {}
-                )
         current_compression_state = (
             dict(state.get("compression_state") or self._default_compression_state())
             if isinstance(state, dict)
@@ -8466,16 +6823,10 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
         current_turn_has_multimodal_uploads = self._message_content_has_multimodal_blocks(
             current_turn_user_content
         )
-        seed_stage_compaction_applied = False
         if session_request_body_messages:
-            # 接通 stage 数据源：优先 frontdoor_stage_state，为空时回退 canonical 的 stages，
-            # 使续跑路径的 seed 裁剪能拿到完成阶段摘要（无损裁剪的前提）。
-            seed_stage_state = dict(current_frontdoor_stage_state or {})
-            if not list(seed_stage_state.get("stages") or []):
-                seed_stage_state = dict(current_frontdoor_canonical_context or {})
-            request_body_seed_messages, seed_stage_compaction_applied = self._trim_frontdoor_seed_stage_compaction(
-                session_request_body_messages, seed_stage_state
-            )
+            request_body_seed_messages = [
+                dict(item) for item in list(session_request_body_messages) if isinstance(item, dict)
+            ]
             # 手动暂停回合的请求从未发出，其用户消息不在基线里；按转录对账补回，
             # 避免“发送后立即暂停再补发”时暂停消息从模型上下文消失。
             request_body_seed_messages = self._reconcile_paused_user_turns_into_seed(
@@ -8538,8 +6889,6 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
             # 请求视图取 builder 真正会用的那一份：有续跑种子就用种子，没有才回到检查点消息。
             internal_presence_state = {
                 "messages": list(request_body_seed_messages or checkpoint_messages or []),
-                "frontdoor_stage_state": current_frontdoor_stage_state,
-                "frontdoor_canonical_context": current_frontdoor_canonical_context,
                 "rbac_visible_tool_names": rbac_visible_tool_names,
                 "tool_names": inherited_tool_names,
                 "repair_required_tool_items": repair_required_tool_items,
@@ -8619,8 +6968,6 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
             # `checkpoint_messages` 已被置空），没有种子才回到状态里的那份消息。
             assembly_presence_state = {
                 "messages": list(request_body_seed_messages or checkpoint_messages or []),
-                "frontdoor_stage_state": current_frontdoor_stage_state,
-                "frontdoor_canonical_context": current_frontdoor_canonical_context,
                 "cron_internal": cron_internal,
                 "heartbeat_internal": heartbeat_internal,
             }
@@ -8635,8 +6982,6 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
                 internal_seed_messages=internal_seed_messages,
                 user_content=current_turn_user_content,
                 user_metadata=builder_user_metadata,
-                frontdoor_stage_state=current_frontdoor_stage_state,
-                frontdoor_canonical_context=current_frontdoor_canonical_context,
                 semantic_context_state={},
                 contract_present_tool_names=list(contract_present_tool_names),
             )
@@ -8793,7 +7138,6 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
                 callable_tool_names=list(callable_tool_names),
                 candidate_tool_names=list(candidate_tool_names),
                 candidate_tool_items=list(candidate_tool_items),
-                frontdoor_stage_state=dict(current_frontdoor_stage_state or {}),
                 visible_skill_ids=list(selected_skill_ids),
                 candidate_skill_ids=list(selected_skill_ids),
                 repair_required_tool_items=list(repair_required_tool_items),
@@ -8894,7 +7238,6 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
                 persisted_dynamic_appendix_messages = []
         shrink_reason = str(
             frontdoor_history_shrink_reason_from_prepare
-            or ("stage_compaction" if seed_stage_compaction_applied else "")
             or state.get("frontdoor_history_shrink_reason")
             or session_shrink_reason
             or ""
@@ -8938,8 +7281,6 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
             frontdoor_selection_debug["tool_contract_presence"] = self._frontdoor_contract_presence_reading(
                 state={
                     "messages": messages,
-                    "frontdoor_stage_state": current_frontdoor_stage_state,
-                    "frontdoor_canonical_context": current_frontdoor_canonical_context,
                 },
                 candidate_tool_names=list(frontdoor_selection_debug.get("candidate_tool_names") or []),
                 session=session,
@@ -8952,8 +7293,6 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
             "approval_status": "",
             "query_text": query_text,
             "messages": persisted_messages,
-            "frontdoor_stage_state": current_frontdoor_stage_state,
-            "frontdoor_canonical_context": current_frontdoor_canonical_context,
             "compression_state": dict(
                 compression_state_payload
                 or current_compression_state
@@ -9010,8 +7349,6 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
             "xml_repair_tool_names": [],
             "xml_repair_last_issue": "",
             "tool_contract_echo_attempt_count": 0,
-            "stage_block_echo_attempt_count": 0,
-            "stage_reply_bounce_count": 0,
             "empty_response_retry_count": 0,
             "heartbeat_internal": heartbeat_internal,
             "cron_internal": cron_internal,
@@ -9292,19 +7629,19 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
                     # 布尔标志：被打断的回合留下的标志不会被下一个回合误读成一次新压缩。
                     compressed_turn_id = str(getattr(runtime_session, "_active_turn_id", "") or "").strip()
                     setattr(runtime_session, "_frontdoor_compressed_turn_id", compressed_turn_id)
-                    compression_boundary_index = int(
-                        dict(preflight.diagnostics or {}).get("boundary_stage_index") or 0
+                    compression_boundary_turn_seq = len(
+                        list(getattr(runtime_session, "_frontdoor_turns", []) or [])
                     )
                     setattr(
                         runtime_session,
-                        "_frontdoor_compression_boundary_index",
-                        compression_boundary_index,
+                        "_frontdoor_compression_boundary_turn_seq",
+                        compression_boundary_turn_seq,
                     )
                     # 摘要一落地就先把边界广播出去：这一回合之后还要跑很多跳，等收尾再画线
-                    # 的话，压缩之后跑出来的阶段已经全在线上方了。转录行仍由收尾那次写盘落。
+                    # 的话，压缩之后跑出来的内容已经全在线上方了。转录行仍由收尾那次写盘落。
                     await runtime_session.announce_context_compression_boundary(
                         turn_id=compressed_turn_id,
-                        boundary_stage_index=compression_boundary_index,
+                        boundary_turn_seq=compression_boundary_turn_seq,
                     )
                 post_compaction_tokens = int(preflight.final_request_tokens or 0)
                 post_compaction_snapshot = build_runtime_send_token_preflight_snapshot(
@@ -9645,14 +7982,6 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
         current_route_kind = str(state.get("route_kind") or "direct_reply")
         used_tools = list(state.get("used_tools") or [])
         xml_repair_attempt_count = int(state.get("xml_repair_attempt_count", 0) or 0)
-        stage_gate = self._frontdoor_stage_gate(state)
-        # 只有「阶段刚创建且尚无实质工具轮」才允许打回纯文本收尾，且整回合限次
-        # （stage_reply_bounce_count）；预算耗尽不再打回，文本收尾直接 finalize，
-        # 由 _graph_finalize_turn 以指针摘要关闭活动阶段。
-        stage_reply_bounce_message = ""
-        if not bool(state.get("heartbeat_internal")) and not bool(state.get("cron_internal")):
-            stage_reply_bounce_message = build_ceo_stage_reply_bounce_message(stage_gate)
-        stage_reply_bounce_count = int(state.get("stage_reply_bounce_count", 0) or 0)
 
         if not response_tool_calls and visible_tool_names:
             xml_extraction = extract_tool_calls_from_xml_pseudo_content(
@@ -9697,7 +8026,6 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
                 "xml_repair_tool_names": [],
                 "xml_repair_last_issue": "",
                 "tool_contract_echo_attempt_count": 0,
-                "stage_block_echo_attempt_count": 0,
                 "next_step": "review_tool_calls",
             }
 
@@ -9800,32 +8128,6 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
                 'tool_contract_echo_attempt_count': echo_attempt_count,
                 'next_step': 'finalize',
             }
-        if not response_tool_calls and is_stage_block_echo_text(text):
-            stage_echo_attempt_count = int(state.get('stage_block_echo_attempt_count', 0) or 0) + 1
-            if stage_echo_attempt_count == 1:
-                return {
-                    'repair_overlay_text': _STAGE_BLOCK_ECHO_REPAIR_MESSAGE,
-                    'stage_block_echo_attempt_count': stage_echo_attempt_count,
-                    'final_output': '',
-                    'next_step': 'call_model',
-                }
-            # Never promote a repeated internal stage-compaction block to
-            # final output, and never persist or deliver the raw block text.
-            # The normal empty-response explanation is user-facing and
-            # contains no stage-protocol material.
-            return {
-                'final_output': self._empty_response_explanation(
-                    used_tools=used_tools,
-                    verified_task_ids=list(state.get('verified_task_ids') or []),
-                ),
-                'route_kind': self._route_kind_for_turn(
-                    used_tools=used_tools,
-                    default=current_route_kind,
-                    verified_task_ids=list(state.get('verified_task_ids') or []),
-                ),
-                'stage_block_echo_attempt_count': stage_echo_attempt_count,
-                'next_step': 'finalize',
-            }
         if str(response_view.finish_reason or "").strip().lower() == "error":
             error_detail = str(
                 response_view.error_text
@@ -9855,11 +8157,8 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
 
         if text.strip():
             if ECHO_STRIP_ENABLED:
-                # 回显裁剪开关见 stage_prompt_compaction.ECHO_STRIP_ENABLED；关闭时
-                # 尾部契约/阶段块片段随回复原样放行，避免合法内联引用被齐根截断。
                 text = strip_frontdoor_tool_contract_echo(text)
                 text = _skill_roster_notice.strip_skill_roster_notice_echo(text)
-                text = strip_stage_block_echo(text)
             if not text:
                 return {
                     'final_output': self._empty_response_explanation(
@@ -9874,13 +8173,6 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
                     'next_step': 'finalize',
                 }
         if text.strip():
-            if stage_reply_bounce_message and stage_reply_bounce_count < STAGE_REPLY_BOUNCE_LIMIT:
-                return {
-                    "repair_overlay_text": stage_reply_bounce_message,
-                    "stage_reply_bounce_count": stage_reply_bounce_count + 1,
-                    "final_output": "",
-                    "next_step": "call_model",
-                }
             return {
                 "final_output": text.strip(),
                 "route_kind": self._route_kind_for_turn(
@@ -9889,14 +8181,6 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
                     verified_task_ids=list(state.get("verified_task_ids") or []),
                 ),
                 "next_step": "finalize",
-            }
-
-        if stage_reply_bounce_message and stage_reply_bounce_count < STAGE_REPLY_BOUNCE_LIMIT:
-            return {
-                "repair_overlay_text": stage_reply_bounce_message,
-                "stage_reply_bounce_count": stage_reply_bounce_count + 1,
-                "final_output": "",
-                "next_step": "call_model",
             }
 
         return {
@@ -9925,18 +8209,11 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
 
         preview_state = dict(state or {})
         (
-            preview_frontdoor_stage_state,
-            preview_frontdoor_canonical_context,
             preview_compression_state,
             _preview_semantic_context_state,
-        ) = self._runtime_session_frontdoor_state(
-            preview_state,
-            preview_pending_tool_round=True,
-        )
+        ) = self._runtime_session_frontdoor_state(preview_state)
         interrupt_payload = {
             **approval_request,
-            "frontdoor_stage_state": preview_frontdoor_stage_state,
-            "frontdoor_canonical_context": preview_frontdoor_canonical_context,
             "compression_state": preview_compression_state,
             "tool_call_payloads": [
                 dict(item)
@@ -10023,9 +8300,6 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
             )
 
         visible_tools = execution_bundle.visible_tools
-        mutable_stage_state = execution_bundle.mutable_stage_state
-        base_stage_state = execution_bundle.base_stage_state
-        node_error_context = self._frontdoor_node_error_heartbeat_context(state)
         semaphore = asyncio.Semaphore(
             self._parallel_slot_count(
                 state.get("max_parallel_tool_calls"),
@@ -10090,16 +8364,6 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
                 if (runtime_context.get("tool_reuse_flag_ignored") or {}).get(call_key):
                     fields[REUSE_FLAG_IGNORED_FIELD] = True
                 return fields
-            gate_error = self._frontdoor_stage_gate_error(
-                tool_name=tool_name,
-                stage_state=mutable_stage_state,
-                allow_stageless=bool(node_error_context),
-            )
-            free_pass_kind = ""
-            if gate_error:
-                free_pass_kind = self._frontdoor_stage_free_pass_kind(mutable_stage_state)
-                if not free_pass_kind:
-                    return await _error_result(payload, gate_error)
             duplicate_load_error = await self._frontdoor_load_tool_context_duplicate_error(
                 payload=payload,
                 state=dict(state or {}),
@@ -10139,7 +8403,6 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
                         "status": "success",
                         "raw_result": impulse_content,
                         "result_text": impulse_content,
-                        "free_pass_kind": free_pass_kind,
                         CONTRACT_DELIVERY_FIELD: kind,
                         **_impulse_ledger_fields(),
                         "tool_message": self._tool_result_message(
@@ -10195,7 +8458,6 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
                     "status": self._tool_status(reuse_content),
                     "raw_result": reuse_content,
                     "result_text": reuse_content,
-                    "free_pass_kind": free_pass_kind,
                     **_impulse_ledger_fields(),
                     "tool_message": self._tool_result_message(
                         tool_call_id=str(payload.get("id") or ""),
@@ -10225,16 +8487,6 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
             }
             result_text = str(result_payload.get("result_text") or "")
             status = str(result_payload.get("status") or self._tool_status(result_text))
-            if status == "success":
-                if free_pass_kind:
-                    reminder = (
-                        STAGELESS_FREE_PASS_REMINDER
-                        if free_pass_kind == "stageless"
-                        else STAGE_BUDGET_EXHAUSTED_FREE_PASS_REMINDER
-                    )
-                    result_text = f"{result_text}\n\n{reminder}".strip()
-                elif predicted_exhaustion_reminder:
-                    result_text = f"{result_text}\n\n{predicted_exhaustion_reminder}".strip()
             await self._emit_progress(
                 on_progress,
                 result_text,
@@ -10251,7 +8503,6 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
                 "status": status,
                 "raw_result": result_payload.get("raw_result"),
                 "result_text": result_text,
-                "free_pass_kind": free_pass_kind,
                 **_impulse_ledger_fields(),
                 "tool_message": self._tool_result_message(
                     tool_call_id=str(payload.get("id") or ""),
@@ -10268,57 +8519,12 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
             for index, payload in enumerate(list(executable_tool_call_payloads or []))
             if isinstance(payload, dict)
         ]
-        stage_items = [
-            (index, payload)
-            for index, payload in indexed_payloads
-            if str(payload.get("name") or "").strip() == STAGE_TOOL_NAME
-        ]
-        ordinary_items = [
-            (index, payload)
-            for index, payload in indexed_payloads
-            if str(payload.get("name") or "").strip() != STAGE_TOOL_NAME
-        ]
-        # 同批含 submit_next_stage 时不预告:那批普通工具记到刚开的新阶段上,按旧阶段预算
-        # 算出的预告既失配、又会贴到 sns 自己的返回值里,成为与账本相反的陈述。
-        predicted_exhaustion_reminder = (
-            ""
-            if stage_items
-            else self._frontdoor_predicted_exhaustion_reminder(
-                mutable_stage_state,
-                ordinary_payloads=[payload for _, payload in ordinary_items],
-            )
-        )
         ordered_results: dict[int, dict[str, Any]] = {}
-        stage_failed = False
-        for position, (index, payload) in enumerate(stage_items):
-            if position > 0:
-                ordered_results[index] = await _error_result(
-                    payload,
-                    f"{STAGE_TOOL_NAME} can be called at most once per batch; the extra call was ignored",
-                )
-                stage_failed = True
-                continue
-            stage_signature_before = stage_transition_signature(mutable_stage_state)
-            result = await _run_single(payload)
+        ordinary_results = await asyncio.gather(
+            *[_run_single(payload) for _, payload in indexed_payloads]
+        )
+        for (index, _payload), result in zip(indexed_payloads, ordinary_results, strict=False):
             ordered_results[index] = result
-            if str(result.get("status") or "").strip().lower() == "error":
-                # 与节点道同一条判据：账本一字未动（提交前就被参数契约或闸门判拒）时，本批
-                # 普通调用看到的阶段面还是模型上一跳看过的那份，作废整批只是白烧一轮。
-                stage_failed = stage_ledger_may_have_moved(
-                    before=stage_signature_before,
-                    after=stage_transition_signature(mutable_stage_state),
-                )
-        if ordinary_items:
-            if stage_items and stage_failed:
-                for index, payload in ordinary_items:
-                    ordered_results[index] = await _error_result(
-                        payload,
-                        f"{STAGE_TOOL_NAME} failed earlier in this batch; retry other tools after a successful stage transition",
-                    )
-            else:
-                ordinary_results = await asyncio.gather(*[_run_single(payload) for _, payload in ordinary_items])
-                for (index, _payload), result in zip(ordinary_items, ordinary_results, strict=False):
-                    ordered_results[index] = result
         executed_tool_results = [ordered_results[index] for index, _payload in indexed_payloads if index in ordered_results]
         tool_results = self._merge_ordered_tool_results(
             original_payloads=original_tool_call_payloads,
@@ -10331,14 +8537,6 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
             if isinstance(item, dict)
         ]
         pending_content_open_image_payloads.extend(self._content_open_image_payloads_from_tool_results(tool_results))
-        frontdoor_stage_state = self._frontdoor_stage_state_after_tool_cycle(
-            {
-                **dict(state or {}),
-                "frontdoor_stage_state": base_stage_state,
-            },
-            tool_call_payloads=original_tool_call_payloads,
-            tool_results=tool_results,
-        )
         tool_messages = [dict(item.get("tool_message") or {}) for item in tool_results]
         response_payload = dict(state.get("response_payload") or {})
         assistant_message = {
@@ -10357,27 +8555,11 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
         messages = self._strip_frontdoor_turn_only_artifacts(messages)
         messages.append(assistant_message)
         messages.extend(tool_messages)
-        # 回合内过期点：模型在 `submit_next_stage` 里点名裁撤后，前门过去要等到下一回合
-        # 装配才兑现（`_trim_frontdoor_seed_stage_compaction` 只在 prepare_turn 调用），
-        # 于是一个长回合的正文一路线性涨。这里与节点道 `_stage_expiry_hop` 同构：踩到
-        # 过期点的这一跳把正文按阶段归属原位压缩，压缩结果成为下一跳的发送基线；裁完
-        # 之后判据自然转假，下一跳回到 append-only 链，前缀失效面只有过期点那么多次。
-        stage_compacted_messages, stage_compaction_applied = self._trim_frontdoor_seed_stage_compaction(
-            messages,
-            frontdoor_stage_state,
-        )
-        if stage_compaction_applied:
-            messages = stage_compacted_messages
         authoritative_request_body_messages = self._durable_frontdoor_request_body_messages(messages)
-        # 工具态写回读**这一跳之后**的视图：裁撤与写回同批时，写回早于阶段账本落地就会读成
-        # "还没裁"，于是名字仍被当在场，而下一跳的渲染/派发读的是裁后的视图 ⇒ 同一份状态里
-        # 出现 `already_callable` 回执与 `tool not available` 两种答案。这里把新的阶段态与
-        # 裁后的消息一并交进去，在场判据、候选、回执、执行四者从此同源。
         updated_tool_contract_state = self._frontdoor_tool_state_after_tool_results(
             state={
                 **dict(state or {}),
                 "messages": messages,
-                "frontdoor_stage_state": frontdoor_stage_state,
             },
         )
 
@@ -10443,14 +8625,9 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
             "verified_task_ids": list(verified_task_ids),
             "dispatched_task_ids": list(dispatched_task_ids),
             "synthetic_tool_calls_used": False,
-            "frontdoor_stage_state": frontdoor_stage_state,
             "pending_content_open_image_payloads": pending_content_open_image_payloads,
             "next_step": "call_model",
         }
-        if stage_compaction_applied:
-            # 基线因阶段裁撤收缩过就得带合法原因落库：下一次 prepare 的非法收缩守卫
-            # 按 `frontdoor_history_shrink_reason` 放行 stage_compaction，否则会被隔离。
-            result["frontdoor_history_shrink_reason"] = "stage_compaction"
         if dispatch_reply_overlay_text:
             result["repair_overlay_text"] = dispatch_reply_overlay_text
         result.update(updated_tool_contract_state)
@@ -10567,8 +8744,6 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
             ]
         )
         frontdoor_history_shrink_reason = str(state.get("frontdoor_history_shrink_reason") or "").strip()
-        finalized_stage_state = self._frontdoor_stage_state_snapshot(state)
-        finalized_stage_state = self._frontdoor_absorb_orphan_rounds(finalized_stage_state)
         is_internal_turn = bool(state.get("heartbeat_internal")) or bool(state.get("cron_internal"))
         # 内部回合的真实可见回复必须像普通回合一样进基线，才能被下一轮上下文看见；
         # 只排除空输出的内部 ACK，与 session_agent 转录持久化的判据一致。旧的
@@ -10592,36 +8767,10 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
             result["messages"] = list(messages)
             result["frontdoor_request_body_messages"] = list(authoritative_request_body_messages)
             result["frontdoor_history_shrink_reason"] = frontdoor_history_shrink_reason
-            # 轮末不写摘要:纯文本收尾的回合里,该阶段的最终回复就紧邻在块之后,摘要写
-            # 指针只会让块宣称"结论已交付"却指不到任何东西(它指向的助手回复会被上下文
-            # 压缩吃掉)。留空即可——块两侧就是对话原文。模型经 submit_next_stage 自带
-            # 摘要的阶段不受影响(_complete_active_frontdoor_stage_state 仅在为空时填充)。
-            finalized_stage_state = self._complete_active_frontdoor_stage_state(finalized_stage_state)
-            result["frontdoor_stage_state"] = finalized_stage_state
-            result["frontdoor_canonical_context"] = self._merged_frontdoor_canonical_context(
-                state=state,
-                frontdoor_stage_state=finalized_stage_state,
-            )
-            self._frontdoor_apply_stage_archive(result, authoritative_request_body_messages)
             return result
-        if visible_output or silent_reply:
-            # 轮末不写摘要:纯文本收尾的回合里,该阶段的最终回复就紧邻在块之后,摘要写
-            # 指针只会让块宣称"结论已交付"却指不到任何东西(它指向的助手回复会被上下文
-            # 压缩吃掉)。留空即可——块两侧就是对话原文。模型经 submit_next_stage 自带
-            # 摘要的阶段不受影响(_complete_active_frontdoor_stage_state 仅在为空时填充)。
-            # 静默轮同样收口但不传摘要:不收口会把这条活动阶段留给下一轮继承,后面的可见
-            # 回合会在同一条卡里长出静默轮的轮次;而把 reason 写进摘要槽会顶掉下一次
-            # submit 的真实结论——理由已有去处,就是本轮 silent 调用的 arguments.reason。
-            finalized_stage_state = self._complete_active_frontdoor_stage_state(finalized_stage_state)
-        result["frontdoor_stage_state"] = finalized_stage_state
-        result["frontdoor_canonical_context"] = self._merged_frontdoor_canonical_context(
-            state=state,
-            frontdoor_stage_state=finalized_stage_state,
-        )
         result["messages"] = list(messages)
         result["frontdoor_request_body_messages"] = list(authoritative_request_body_messages)
         result["frontdoor_history_shrink_reason"] = frontdoor_history_shrink_reason
-        self._frontdoor_apply_stage_archive(result, authoritative_request_body_messages)
         return result
 
     @staticmethod

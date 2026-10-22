@@ -55,7 +55,7 @@ def tool_supports_context_load(tool: Any) -> bool:
 
     资源工具实例（ManifestBackedTool / EmbeddedMCPTool / RepairRequiredTool）
     携带 `_descriptor`，其参数契约/工具说明可经 load_tool_context 加载；纯内部
-    工具（如 spawn_child_nodes / submit_next_stage 等运行时注入的控制工具）没有
+    工具（如 spawn_child_nodes 等运行时注入的控制工具）没有
     资源条目，加载必然失败。
     """
     return tool is not None and getattr(tool, "_descriptor", None) is not None

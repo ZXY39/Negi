@@ -5,7 +5,6 @@ from typing import Any, Callable
 
 from typing_extensions import TypedDict
 
-from .canonical_context import default_frontdoor_canonical_context
 from .prompt_cache_contract import DEFAULT_CACHE_FAMILY_REVISION
 
 
@@ -72,9 +71,7 @@ class CeoPersistentState(TypedDict, total=False):
 
     tool_contract_echo_attempt_count: int
 
-    stage_block_echo_attempt_count: int
 
-    stage_reply_bounce_count: int
 
     empty_response_retry_count: int
 
@@ -136,8 +133,6 @@ class CeoPersistentState(TypedDict, total=False):
 
     next_step: str
 
-    frontdoor_stage_state: dict[str, Any]
-    frontdoor_canonical_context: dict[str, Any]
 
     compression_state: dict[str, Any]
 
@@ -264,17 +259,7 @@ def initial_persistent_state(*, user_input: Any) -> dict[str, Any]:
         "verified_task_ids": [],
         "dispatched_task_ids": [],
 
-        "frontdoor_stage_state": {
 
-            "active_stage_id": "",
-
-            "transition_required": False,
-
-            "stages": [],
-
-        },
-
-        "frontdoor_canonical_context": default_frontdoor_canonical_context(),
 
         "frontdoor_turns": [],
 

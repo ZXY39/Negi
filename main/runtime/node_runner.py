@@ -67,7 +67,6 @@ from main.runtime.internal_tools import (
     SpawnChildNodesTool,
     SubmitFinalResultTool,
     SubmitMessageDistributionTool,
-    SubmitNextStageTool,
     SubmitNoticeInspectionDecisionTool,
 )
 from main.runtime.node_prompt_contract import extract_node_dynamic_contract_payload
@@ -320,17 +319,6 @@ class NodeRunner:
             except Exception:
                 frame = {}
         metadata = dict(getattr(node, 'metadata', {}) or {}) if node is not None else {}
-        execution_stages = dict(metadata.get('execution_stages') or {})
-        stages = list(execution_stages.get('stages') or [])
-        active_stage_id = str(execution_stages.get('active_stage_id') or '').strip()
-        active_stage = next(
-            (
-                dict(stage or {})
-                for stage in stages
-                if str((stage or {}).get('stage_id') or '').strip() == active_stage_id
-            ),
-            {},
-        )
         diagnostics = {
             'recorded_at': now_iso(),
             'task_id': str(task_id or '').strip(),
@@ -339,11 +327,6 @@ class NodeRunner:
             'node_kind': str(getattr(node, 'node_kind', '') or '').strip(),
             'phase': str(frame.get('phase') or '').strip(),
             'await_marker': str(frame.get('await_marker') or '').strip(),
-            'stage_goal': self._trim_diagnostic_text(
-                frame.get('stage_goal') or active_stage.get('stage_goal') or ''
-            ),
-            'active_stage_id': active_stage_id,
-            'execution_stage_count': len(stages),
             'exception_type': type(exc).__name__,
             'exception_text': self._trim_diagnostic_text(str(exc or '')),
             'traceback_tail': self._trim_diagnostic_text(traceback.format_exc(), max_chars=6000),
@@ -903,7 +886,7 @@ class NodeRunner:
             messages = await self._notice_resume_messages(task=task, node=node)
             messages = self._append_notice_messages(messages=messages, notices=notifications)
             messages = self._append_notice_messages(messages=messages, notices=pending_root_notice_records)
-            self._close_active_stage_for_message_consumption(task_id=task.task_id, node_id=node.node_id)
+            self._close_active_round_for_message_consumption(task_id=task.task_id, node_id=node.node_id)
             return {
                 'messages': messages,
                 'message_source': 'notice',
@@ -1190,7 +1173,7 @@ class NodeRunner:
             for item in list(new_root_notice_records or [])
             if str(item.get('notification_id') or '').strip()
         )
-        self._close_active_stage_for_message_consumption(
+        self._close_active_round_for_message_consumption(
             task_id=task.task_id,
             node_id=latest_node.node_id,
         )
@@ -2700,17 +2683,13 @@ class NodeRunner:
 
         self._log_service.update_node_metadata(node_id, _mutate)
 
-    def _close_active_stage_for_message_consumption(self, *, task_id: str, node_id: str) -> None:
+    def _close_active_round_for_message_consumption(self, *, task_id: str, node_id: str) -> None:
         self._log_service.update_frame(
             task_id,
             node_id,
             lambda frame: {
                 **dict(frame or {}),
                 'phase': 'before_model',
-                'stage_mode': '',
-                'stage_status': '',
-                'stage_goal': '',
-                'stage_total_steps': 0,
                 'active_round_id': '',
                 'active_round_tool_call_ids': [],
             },
@@ -3964,25 +3943,11 @@ class NodeRunner:
     def _build_tools(self, *, task, node: NodeRecord) -> dict[str, Tool]:
         tools = dict(self._tool_provider(node) or {})
         if node.node_kind in {KIND_EXECUTION, KIND_ACCEPTANCE}:
-            tools['submit_next_stage'] = SubmitNextStageTool(
-                lambda stage_goal, tool_round_budget, completed_stage_summary, key_refs, final, drop_completed_stage_tool_detail, **keep_contracts: self._submit_next_stage(
-                    task_id=task.task_id,
-                    node_id=node.node_id,
-                    stage_goal=stage_goal,
-                    tool_round_budget=tool_round_budget,
-                    completed_stage_summary=completed_stage_summary,
-                    key_refs=key_refs,
-                    final=final,
-                    drop_completed_stage_tool_detail=drop_completed_stage_tool_detail,
-                    **keep_contracts,
-                )
-            )
             tools['submit_final_result'] = SubmitFinalResultTool(
                 lambda payload: self._submit_final_result(payload),
                 node_kind=node.node_kind,
             )
         else:
-            tools.pop('submit_next_stage', None)
             tools.pop('submit_final_result', None)
         if node.node_kind == KIND_EXECUTION:
             if node.can_spawn_children:
@@ -4040,9 +4005,6 @@ class NodeRunner:
     def _build_system_prompt(self, *, node: NodeRecord) -> str:
         system_name = 'acceptance_execution.md' if node.node_kind == KIND_ACCEPTANCE else 'node_execution.md'
         return load_prompt(system_name).strip()
-
-    def _execution_stage_payload(self, *, task, node: NodeRecord) -> dict[str, Any]:
-        return self._log_service.execution_stage_prompt_payload(task.task_id, node.node_id)
 
     def _completion_contract_payload(self, *, task, node: NodeRecord) -> dict[str, Any] | None:
         if node.node_kind != KIND_EXECUTION or node.parent_node_id is not None:
@@ -4826,7 +4788,6 @@ class NodeRunner:
             raise ValueError('parent task or node missing')
         if not parent.can_spawn_children:
             raise ValueError('spawn_child_nodes is not available for this node')
-        self._log_service.mark_execution_stage_contains_spawn(task.task_id, parent.node_id)
         cache_key = self._spawn_round_cache_key(specs=specs, call_id=call_id)
         self.reconcile_spawn_entry_child_bindings(
             task_id=task.task_id,
@@ -7971,46 +7932,6 @@ class NodeRunner:
             result_payload_ref='',
         )
 
-    async def _submit_next_stage(
-        self,
-        *,
-        task_id: str,
-        node_id: str,
-        stage_goal: str,
-        tool_round_budget: int,
-        completed_stage_summary: str,
-        key_refs: list[dict[str, Any]],
-        final: bool,
-        drop_completed_stage_tool_detail: bool = False,
-    ) -> dict[str, Any]:
-        stage = self._log_service.submit_next_stage(
-            task_id,
-            node_id,
-            stage_goal=str(stage_goal or '').strip(),
-            tool_round_budget=int(tool_round_budget or 0),
-            completed_stage_summary=str(completed_stage_summary or '').strip(),
-            key_refs=[dict(item) for item in list(key_refs or []) if isinstance(item, dict)],
-            final=False,
-            drop_completed_stage_tool_detail=bool(drop_completed_stage_tool_detail),
-        )
-        result = {
-            'stage_id': str(stage.get('stage_id') or ''),
-            'stage_index': int(stage.get('stage_index') or 0),
-            'stage_kind': str(stage.get('stage_kind') or 'normal'),
-            'mode': str(stage.get('mode') or ''),
-            'status': str(stage.get('status') or ''),
-            'stage_goal': str(stage.get('stage_goal') or ''),
-            'tool_round_budget': int(stage.get('tool_round_budget') or 0),
-            'tool_rounds_used': int(stage.get('tool_rounds_used') or 0),
-            'final_stage': bool(stage.get('final_stage') or False),
-        }
-        closure = stage.get('stage_closure')
-        if isinstance(closure, dict):
-            # 收尾材料的回执原样透出：模型据此判断裁撤有没有兑现、原文在哪个文件，
-            # 不必再凭参数倒推（与前门 stage_closure 同形）。
-            result['stage_closure'] = dict(closure)
-        return result
-
     @staticmethod
     async def _submit_final_result(payload: dict[str, Any]) -> dict[str, Any]:
         return dict(payload or {})
@@ -8051,7 +7972,6 @@ class NodeRunner:
                 reason=result.failure_text,
             )
         status = STATUS_SUCCESS if result.status == STATUS_SUCCESS else STATUS_FAILED
-        self._log_service.finalize_execution_stage(task_id, node_id, status=status)
         if status == STATUS_SUCCESS:
             clear_retry_snapshot = getattr(self._log_service, 'clear_retry_resume_snapshot', None)
             if callable(clear_retry_snapshot):

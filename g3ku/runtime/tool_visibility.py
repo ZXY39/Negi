@@ -16,7 +16,7 @@ CEO_FIXED_BUILTIN_TOOL_NAMES: tuple[str, ...] = (
 )
 
 NODE_FIXED_BUILTIN_TOOL_NAMES: tuple[str, ...] = (
-    "submit_next_stage",
+    "submit_final_result",
     "submit_final_result",
     "spawn_child_nodes",
     "exec",
@@ -34,7 +34,7 @@ NODE_CONTROL_SIGNAL_TOOL_NAMES: tuple[str, ...] = (
 
 # 两条车道共用的无契约信号：静默/异步控制 + 加载器（加载器自己就是送契约的那一跳）。
 #
-# 这几个名字的正本在 `main/runtime/stage_budget.py`。这里不 import 它：
+# 这几个名字的正本在 `main/runtime/tool_names.py`。这里不 import 它：
 # `base → tool_visibility → main.runtime…` 会经 `main/__init__.py` 绕回 `base`，是个真循环。
 # 等价性由 `tests/resources/test_reuse_args_surface.py` 逐名钉住——漂移在测试里红，而不是
 # 悄悄少加/多加一个字段。

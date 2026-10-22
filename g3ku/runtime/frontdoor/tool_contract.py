@@ -15,12 +15,12 @@ from g3ku.utils.helpers import (
 FRONTDOOR_DYNAMIC_TOOL_CONTRACT_KIND = 'frontdoor_runtime_tool_contract'
 FRONTDOOR_DYNAMIC_TOOL_CONTRACT_HEADING = '## Runtime Tool Contract'
 FRONTDOOR_DYNAMIC_TOOL_CONTRACT_PAYLOAD_KEY = '_frontdoor_tool_contract_payload'
-# 活状态块：`denied_tools` / `stage_summary` 每次阶段切换都按当轮状态重算
-# （实盘 1001 跳里 stage_summary 重写 362 次），其余段一回合内是常量。拆成两份后，重写只
-# 顶掉这份小块的字节，稳定块与它前面的携带正文继续命中前缀缓存。
-FRONTDOOR_DYNAMIC_STAGE_GATE_KIND = 'frontdoor_runtime_stage_gate'
-FRONTDOOR_DYNAMIC_STAGE_GATE_HEADING = '## Runtime Stage Gate'
-RUNTIME_APPENDIX_HEADINGS = (FRONTDOOR_DYNAMIC_TOOL_CONTRACT_HEADING, FRONTDOOR_DYNAMIC_STAGE_GATE_HEADING)
+# 回显裁剪总开关（两个消费点：`_graph_normalize_model_output` 与渠道出站
+# `sanitize_channel_outbound_text`）。裁剪按"任意位置子串匹配块前缀"实现，会把用户答案里
+# 合法引用的块齐根截断，因此默认关；恢复前必须换成与当前注入真块逐字比对的实现。
+# standalone 打回守卫（`is_frontdoor_tool_contract_echo_text`）不受此开关影响，始终生效。
+ECHO_STRIP_ENABLED = False
+RUNTIME_APPENDIX_HEADINGS = (FRONTDOOR_DYNAMIC_TOOL_CONTRACT_HEADING,)
 
 # 钉住的静态声明：技能名单、执行策略、会话临时目录进的是 `stable_messages[0]` 那段
 # system_prompt 文本（`message_builder` 拼 `## Capability Exposure Snapshot` 的同一位置），
@@ -673,37 +673,6 @@ def _render_attachment_reopen_target_section(items: list[dict[str, str]] | None)
     return lines
 
 
-def _render_stage_summary(stage_summary: dict[str, Any] | None) -> str:
-    payload = dict(stage_summary or {})
-    active_stage_id = str(payload.get('active_stage_id') or '').strip() or 'none'
-    transition_required = bool(payload.get('transition_required'))
-    active_stage = dict(payload.get('active_stage') or {}) if isinstance(payload.get('active_stage'), dict) else {}
-    if not active_stage:
-        # 两种状态的处置指令（"没有活动阶段""预算耗尽"）都在 `ceo_frontdoor.md` 的阶段闸门
-        # 那组条款里写死了，这里只报状态本身；把整段英文处置意见每跳重贴一遍是尾块里最贵
-        # 的一句废话。宽限轮的并入与预算记账由运行时完成，模型侧不需要读这段账。
-        return (
-            f'stage_summary: active_stage_id={active_stage_id}; '
-            f'transition_required={transition_required}'
-        )
-    parts = [
-        f'active_stage_id={active_stage_id}',
-        f'transition_required={transition_required}',
-    ]
-    stage_goal = str(active_stage.get('stage_goal') or '').strip()
-    if stage_goal:
-        parts.append(f'stage_goal={stage_goal}')
-    tool_round_budget = active_stage.get('tool_round_budget')
-    if tool_round_budget not in (None, ''):
-        parts.append(f'tool_round_budget={int(tool_round_budget)}')
-    stage_kind = str(active_stage.get('stage_kind') or '').strip()
-    if stage_kind:
-        parts.append(f'stage_kind={stage_kind}')
-    if 'final_stage' in active_stage:
-        parts.append(f'final_stage={bool(active_stage.get("final_stage"))}')
-    return 'stage_summary: ' + '; '.join(parts)
-
-
 def _render_exec_runtime_policy(exec_runtime_policy: dict[str, Any] | None) -> str:
     payload = dict(exec_runtime_policy or {})
     if not payload:
@@ -770,23 +739,6 @@ def _render_frontdoor_contract_summary(payload: dict[str, Any]) -> str:
     return '\n'.join(lines)
 
 
-def _render_frontdoor_stage_gate_summary(payload: dict[str, Any]) -> str:
-    """每跳活的状态：活动阶段轨道。排在请求体末位。
-
-    `denied_tools` 已搬到回合内常量的 `## Runtime Tool Contract` 块；`callable_tools`
-    那行删掉了：准入面就是"钉住的 `tools[]` 减去 `denied_tools` 减去契约不在场"，
-    而契约不在场不再是死路——直接调用那一个工具就会把它的契约带回来。
-    """
-    lines = [
-        FRONTDOOR_DYNAMIC_STAGE_GATE_HEADING,
-        f'kind: {FRONTDOOR_DYNAMIC_STAGE_GATE_KIND}',
-        # `contract_revision` 整回合不变，已在上一块出现过；两块各印一份等于每跳为同一个
-        # 值付两遍，而它在这条道没有消费者（曝光 revision 的刷新判据在头部键里算）。
-    ]
-    lines.append(_render_stage_summary(payload.get('stage_summary')))
-    return '\n'.join(lines)
-
-
 def _render_path_anchor() -> list[str]:
     """落点合同的唯一渲染点：与节点道 `runtime_environment.path_policy` 同一函数、同一句规则，
     两条车道不允许各自措辞。token 集由 `path_anchor_tokens()` 给，实际可用性以解析器为准。
@@ -807,49 +759,10 @@ def _render_session_temp_dir(session_temp_dir: Any) -> list[str]:
     return [f'session_temp_dir: {text}']
 
 
-def _active_stage_prompt_view(active_stage: dict[str, Any] | None) -> dict[str, Any] | None:
-    if not isinstance(active_stage, dict):
-        return None
-    stage_id = str(active_stage.get('stage_id') or '').strip()
-    if not stage_id:
-        return None
-    return {
-        'stage_id': stage_id,
-        'stage_goal': str(active_stage.get('stage_goal') or '').strip(),
-        'tool_round_budget': max(0, int(active_stage.get('tool_round_budget') or 0)),
-        'stage_kind': str(active_stage.get('stage_kind') or 'normal').strip() or 'normal',
-        'final_stage': bool(active_stage.get('final_stage', False)),
-    }
-
-
-def _active_stage_summary(frontdoor_stage_state: dict[str, Any] | None) -> dict[str, Any]:
-    payload = dict(frontdoor_stage_state or {})
-    active_stage_id = str(payload.get('active_stage_id') or '').strip()
-    stages = [dict(item) for item in list(payload.get('stages') or []) if isinstance(item, dict)]
-    active_stage = next(
-        (
-            item
-            for item in stages
-            if str(item.get('stage_id') or '').strip() == active_stage_id
-        ),
-        None,
-    )
-    pending_orphan_rounds = [
-        dict(item) for item in list(payload.get('pending_orphan_rounds') or []) if isinstance(item, dict)
-    ]
-    return {
-        'active_stage_id': active_stage_id,
-        'transition_required': bool(payload.get('transition_required')),
-        'active_stage': _active_stage_prompt_view(active_stage),
-        'pending_orphan_rounds': pending_orphan_rounds,
-    }
-
-
 @dataclass(slots=True)
 class FrontdoorToolContract:
     callable_tool_names: list[str]
     candidate_tool_names: list[str]
-    stage_summary: dict[str, Any]
     visible_skill_ids: list[str]
     candidate_skill_ids: list[str]
     rbac_visible_tool_names: list[str]
@@ -878,7 +791,6 @@ class FrontdoorToolContract:
                 fallback_names=list(self.candidate_tool_names),
             ),
             'candidate_skill_ids': list(self.candidate_skill_ids),
-            'stage_summary': dict(self.stage_summary),
             'contract_revision': str(self.contract_revision or '').strip(),
             'exec_runtime_policy': (
                 dict(self.exec_runtime_policy)
@@ -911,13 +823,6 @@ class FrontdoorToolContract:
             'role': 'user',
             'content': _render_frontdoor_contract_summary(payload),
             FRONTDOOR_DYNAMIC_TOOL_CONTRACT_PAYLOAD_KEY: payload,
-        }
-
-    def to_stage_gate_message(self) -> dict[str, Any]:
-        """活状态块：与契约同源，但只含每跳重写的行，排在请求体真正末位。"""
-        return {
-            'role': 'user',
-            'content': _render_frontdoor_stage_gate_summary(self.to_message_payload()),
         }
 
 
@@ -975,7 +880,6 @@ def build_frontdoor_tool_contract(
     callable_tool_names: list[str] | None,
     candidate_tool_names: list[str] | None,
     candidate_tool_items: list[dict[str, str]] | None = None,
-    frontdoor_stage_state: dict[str, Any] | None,
     visible_skill_ids: list[str] | None = None,
     candidate_skill_ids: list[str] | None = None,
     candidate_skill_items: list[dict[str, str]] | None = None,
@@ -1001,7 +905,6 @@ def build_frontdoor_tool_contract(
     return FrontdoorToolContract(
         callable_tool_names=callable_names,
         candidate_tool_names=candidate_names,
-        stage_summary=_active_stage_summary(frontdoor_stage_state),
         visible_skill_ids=_normalized_name_list(visible_skill_ids),
         candidate_skill_ids=_normalized_name_list(candidate_skill_ids),
         rbac_visible_tool_names=_normalized_name_list(rbac_visible_tool_names),
@@ -1024,16 +927,11 @@ def build_frontdoor_tool_contract(
 def _runtime_appendix_pair(heading: str) -> str:
     return {
         FRONTDOOR_DYNAMIC_TOOL_CONTRACT_HEADING: FRONTDOOR_DYNAMIC_TOOL_CONTRACT_KIND,
-        FRONTDOOR_DYNAMIC_STAGE_GATE_HEADING: FRONTDOOR_DYNAMIC_STAGE_GATE_KIND,
     }[heading]
 
 
 def is_frontdoor_tool_contract_message(message: dict[str, Any]) -> bool:
-    """Whether a message is one of the runtime-injected appendix blocks.
-
-    Both the turn-stable contract and the live stage gate are runtime metadata,
-    so every strip/persist/transcript path must treat them the same way.
-    """
+    """Whether a message is the runtime-injected appendix block."""
     if frontdoor_tool_contract_payload_from_message(message) is not None:
         return True
     if _frontdoor_message_declares_tool_calls(message):
@@ -1054,8 +952,7 @@ def _frontdoor_tool_contract_heading_index(text: str) -> int:
     The heading alone is not enough to classify ordinary user prose that
     happens to mention the contract.  Requiring the canonical kind marker in
     the nearby suffix keeps this helper focused on the provider-facing blocks
-    that the runtime injects.  The live stage gate counts too: it is the block
-    sitting at the continuation point, so it is the one a model can echo.
+    that the runtime injects.
     """
     normalized = str(text or '')
     best = -1
@@ -1101,8 +998,8 @@ def upsert_frontdoor_tool_contract_message(
     messages: list[dict[str, Any]] | None,
     contract: FrontdoorToolContract,
 ) -> list[dict[str, Any]]:
-    """携带历史里 0 份运行时块，尾部恰好一份契约 + 一份活状态块（稳定在前、活在后）。"""
-    appendix = [contract.to_message(), contract.to_stage_gate_message()]
+    """携带历史里 0 份运行时块，尾部恰好一份契约。"""
+    appendix = [contract.to_message()]
     updated: list[dict[str, Any]] = []
     inserted = False
     for message in list(messages or []):

@@ -8,7 +8,6 @@ import json
 import re
 import time
 import traceback
-import uuid
 from collections import deque
 from pathlib import Path
 from types import SimpleNamespace
@@ -62,46 +61,6 @@ from g3ku.runtime.frontdoor.tool_contract import (
 )
 from g3ku.runtime.frontdoor.tool_contract import (
     skill_roster_epoch_for as _skill_roster_epoch_for,
-)
-from g3ku.runtime.stage_prompt_compaction import (
-    STAGE_ARCHIVE_HEADING,
-    STAGE_REF_SELECTION_RULE,
-    build_stage_archive_document,
-    render_stage_ref_candidate_block,
-    render_stage_ref_index,
-    split_stage_ref_selection,
-    stage_archive_owner,
-    stage_created_at_ceiling,
-    stage_record_dict,
-    stage_ref_candidates,
-    summarized_stage_ids,
-)
-from g3ku.runtime.stage_prompt_compaction import (
-    STAGE_COMPACT_PREFIXES as _STAGE_COMPACT_PREFIXES,
-)
-from g3ku.runtime.stage_prompt_compaction import (
-    STAGE_EXTERNALIZED_PREFIXES as _STAGE_EXTERNALIZED_PREFIXES,
-)
-from g3ku.runtime.stage_prompt_compaction import (
-    compact_stage_prompt_messages_in_place as _shared_compact_stage_prompt_messages_in_place,
-)
-from g3ku.runtime.stage_prompt_compaction import (
-    completed_stage_blocks as _shared_completed_stage_blocks,
-)
-from g3ku.runtime.stage_prompt_compaction import (
-    is_stage_context_message as _shared_is_stage_context_message,
-)
-from g3ku.runtime.stage_prompt_compaction import (
-    stage_ledger_may_have_moved as _shared_stage_ledger_may_have_moved,
-)
-from g3ku.runtime.stage_prompt_compaction import (
-    stage_message_call_ids as _shared_stage_message_call_ids,
-)
-from g3ku.runtime.stage_prompt_compaction import (
-    stage_prompt_prefix as _shared_stage_prompt_prefix,
-)
-from g3ku.runtime.stage_prompt_compaction import (
-    stage_transition_signature as _shared_stage_transition_signature,
 )
 from g3ku.runtime.token_compact_markers import (
     TOKEN_COMPACT_V2_PREFIX as _SHARED_TOKEN_COMPACT_V2_PREFIX,
@@ -169,7 +128,6 @@ from main.models import (
     NodeEvidenceItem,
     NodeFinalResult,
     SpawnChildSpec,
-    normalize_execution_stage_metadata,
 )
 from main.protocol import now_iso
 from main.runtime import chat_backend as runtime_chat_backend
@@ -212,25 +170,7 @@ from main.runtime.pending_notice_state import (
     normalize_pending_notice_state,
 )
 from main.runtime.recovery_check import RecoveryCheckDecision, RecoveryCheckEngine
-from main.runtime.stage_budget import (
-    DEFAULT_NON_BUDGET_STAGE_TOOLS,
-    DEFAULT_STAGE_GATE_BYPASS_TOOLS,
-    STAGE_BUDGET_EXHAUSTED_FREE_PASS_REMINDER,
-    STAGE_BUDGET_EXHAUSTION_PREDICTED_REMINDER_TEMPLATE,
-    STAGE_TOOL_NAME,
-    STAGE_TOOL_ROUND_BUDGET_MAX,
-    STAGE_TOOL_ROUND_BUDGET_MIN,
-    STAGELESS_FREE_PASS_REMINDER,
-    callable_tool_names_for_stage_iteration,
-    response_tool_calls_count_against_stage_budget,
-    stage_free_pass_kind,
-    stage_gate_error_for_tool,
-    visible_tools_for_stage_iteration,
-)
-from main.runtime.stage_messages import (
-    build_execution_stage_overlay,
-    build_node_plain_text_reply_block_message,
-)
+from main.runtime.plain_text_reply import build_node_plain_text_reply_block_message
 from main.runtime.subtree_hold import (
     DISTRIBUTION_ACTIVE_STATES,
     make_epoch_state_lookup,
@@ -246,7 +186,7 @@ from main.runtime.tool_call_repair import (
     format_xml_repair_failure_reason,
     recover_tool_calls_from_json_payload,
 )
-from main.runtime.tool_names import FINAL_RESULT_TOOL_NAME
+from main.runtime.tool_names import FINAL_RESULT_TOOL_NAME, SILENT_TOOL_NAME
 from main.runtime.turn_overlay import (
     build_turn_only_system_note_message,
     is_turn_only_system_note_message,
@@ -263,7 +203,6 @@ _STAGE_SPAWN_TOOL_NAME = 'spawn_child_nodes'
 _EXEC_TRUNCATION_REOPEN_MARKER = '⚠️ exec 输出未整篇交付到本轮上下文。'
 _READ_ONLY_REPEAT_SOFT_REJECT_LIMIT = 3
 _INVALID_FINAL_SUBMISSION_LIMIT = 5
-_INVALID_STAGE_SUBMISSION_LIMIT = 5
 # 载荷**逐字相同**地被连着拒收时的早停上限，比总预算更低：第 2 次起上下文里已经躺着
 # 一条同形状的反例，再发同一份提示只是白烧一轮（实测 node:ce794e2526f2 2026-10-03：
 # 同一份 `summary=''` 的裁定连交 9 次，每击新输入 123K-143K token）。
@@ -293,11 +232,8 @@ _TRUNCATED_SUBMISSION_CLAUSE = (
 # 与上面两条同档：一次抖动不该熔断，但运行时自身缺陷必须在一分钟内被叫停。
 # 实盘基线：2026-09-23 task:321604599eb0 同一 NameError 连撞 18 次无人发现。
 _TOOL_FAULT_LIMIT = 5
-# 阶段进行中只回纯文本（零工具调用）的连续打回上限：到点转错误暂停。
-# 与 _INVALID_STAGE_SUBMISSION_LIMIT 分道，是因为两道的出口不同：预算边界那一道
-# 要求同批开新阶段，这一道要求继续干活或直接 submit_final_result。
+# 只回纯文本（零工具调用、非 final 载荷）的连续打回上限：到点转错误暂停。
 _PLAIN_TEXT_REPLY_STRIKE_LIMIT = 3
-_STAGE_ONLY_TRANSITION_LIMIT = 5
 _NODE_CONTRACT_ECHO_REPAIR_LIMIT = 2
 _PROVIDER_RETRY_LIMIT = 3
 _NODE_SEND_CONTEXT_WINDOW_HARD_MIN_TOKENS = 25000
@@ -371,7 +307,16 @@ class ReActToolLoop:
     _CONTROL_TOOL_NAMES = {'stop_tool_execution'}
     _ORDERED_CONTROL_TOOL_NAMES = ('stop_tool_execution',)
     _EXCLUSIVE_TOOL_TURN_NAMES = {FINAL_RESULT_TOOL_NAME}
-    _BUDGET_BYPASS_TOOL_NAMES = set(DEFAULT_NON_BUDGET_STAGE_TOOLS) - {'wait_tool_execution'}
+    _ALWAYS_CALLABLE_TOOL_NAMES = {
+        FINAL_RESULT_TOOL_NAME,
+        _STAGE_SPAWN_TOOL_NAME,
+        SILENT_TOOL_NAME,
+        *_CONTROL_TOOL_NAMES,
+        'load_tool_context',
+        'load_tool_context_v2',
+        'load_skill_context',
+        'load_skill_context_v2',
+    }
 
     def __init__(
         self,
@@ -429,15 +374,12 @@ class ReActToolLoop:
         orphan_tool_result_strikes = 0
         repair_overlay_text: str | None = None
         invalid_final_submission_count = 0
-        invalid_stage_submission_count = 0
         identical_final_submission_streak = 0
         payload_shape_fault_count = 0
         marker_fault_streak = 0
         last_marker_fault_fingerprint = ''
         plain_text_reply_strikes = 0
-        stage_only_transition_streak = 0
         last_invalid_final_submission_reason = ''
-        last_invalid_stage_submission_reason = ''
         xml_repair_attempt_count = 0
         xml_repair_excerpt = ''
         xml_repair_tool_names: list[str] = []
@@ -530,7 +472,7 @@ class ReActToolLoop:
             # 派发字典做准入，两者都在同一跳里消费台账。判据排在它们后面（原来排在写帧前）
             # 就等于"新一轮照旧宣传并放行无契约的工具"，实盘 task:92ad2fe69148 的 01:37:03 跳
             # 正是这个形状：帧里已记撤销，发出去的 callable 仍含它，下一跳直调成功。
-            model_messages, stage_compaction_parts = self._prepare_messages_with_parts(
+            model_messages, _stage_parts = self._prepare_messages_with_parts(
                 message_history,
                 runtime_context=runtime_context,
             )
@@ -582,22 +524,12 @@ class ReActToolLoop:
             runtime_context['tool_execution_paths'] = {}
             # 只交契约、没执行的那批调用：Web 面据此把行画成"加载 tool"卡片而不是普通调用。
             runtime_context['tool_contract_deliveries'] = {}
-            stage_gate = self._execution_stage_gate(
-                task_id=task.task_id,
-                node_id=node.node_id,
-                node_kind=node.node_kind,
-            )
-            callable_visible_tools = self._visible_tools_for_iteration(
-                tools=current_tools,
-                node_kind=node.node_kind,
-                stage_gate=stage_gate,
-            )
+            callable_visible_tools = dict(current_tools)
             model_visible_tools, tool_schema_selection = self._model_visible_tools_for_iteration(
                 task_id=task.task_id,
                 node_id=node.node_id,
                 node_kind=node.node_kind,
                 visible_tools=current_tools,
-                stage_gate=stage_gate,
                 runtime_context=runtime_context,
             )
             provider_tool_names = self._normalized_name_list(
@@ -622,7 +554,6 @@ class ReActToolLoop:
                 node=node,
                 message_history=message_history,
                 tool_schema_selection=tool_schema_selection,
-                stage_gate=stage_gate,
                 runtime_context=runtime_context,
                 skill_roster_items=skill_roster_items,
             )
@@ -647,16 +578,12 @@ class ReActToolLoop:
                 model_messages,
                 dynamic_contract,
             )
-            overlay_parts = [
-                build_execution_stage_overlay(node_kind=node.node_kind, stage_gate=stage_gate),
-                repair_overlay_text,
-            ]
+            overlay_parts = [repair_overlay_text]
             assembled_request_messages = self._apply_temporary_system_overlay(
                 request_messages,
                 overlay_text='\n\n'.join(str(part or '').strip() for part in overlay_parts if str(part or '').strip()),
             )
             request_tail_messages = assembled_request_messages[len(model_messages) :]
-            stage_compaction_hop = False
             if fresh_turn_request_seed_messages:
                 # fresh turn 第一跳：以持久 actual-request scaffold 为请求前缀，
                 # 投影超出 seed 覆盖点的尾段（notice/恢复重放/当前 user 回合）
@@ -683,26 +610,14 @@ class ReActToolLoop:
                 pending_request_delta_messages = []
             elif previous_actual_request_messages:
                 request_seed_message_count = 0
-                # 阶段过期点：当前发送基线里还留着「已判过期阶段」的工具肉身。这一跳改用
-                # 投影作请求体（那批肉身换成原位 compact 块），下一跳起基线就是裁过的这份、
-                # append-only 链照旧。只在过期点让位一次，是为了把 provider 前缀失效面压到
-                # 阶段过期次数，而不是每轮按投影重排。
-                stage_compaction_hop = self._stage_expiry_hop(
-                    previous_request_messages=previous_actual_request_messages,
-                    stage_compaction_parts=stage_compaction_parts,
-                )
-                if stage_compaction_hop:
-                    request_messages = list(assembled_request_messages)
-                    request_seed_source = 'same_turn_stage_compacted'
-                else:
-                    request_messages, request_seed_source = (
-                        self._same_turn_append_only_request_messages_with_source(
-                            previous_request_messages=previous_actual_request_messages,
-                            current_model_messages=model_messages,
-                            pending_delta_messages=pending_request_delta_messages,
-                            request_tail_messages=request_tail_messages,
-                        )
+                request_messages, request_seed_source = (
+                    self._same_turn_append_only_request_messages_with_source(
+                        previous_request_messages=previous_actual_request_messages,
+                        current_model_messages=model_messages,
+                        pending_delta_messages=pending_request_delta_messages,
+                        request_tail_messages=request_tail_messages,
                     )
+                )
             else:
                 request_seed_message_count = 0
                 request_messages = list(assembled_request_messages)
@@ -763,9 +678,7 @@ class ReActToolLoop:
             )
             current_tool_choice = self._repair_tool_choice(
                 visible_tools=callable_visible_tools,
-                stage_gate=stage_gate,
                 invalid_final_submission_count=invalid_final_submission_count,
-                invalid_stage_submission_count=invalid_stage_submission_count,
             )
             # 尺子必须在压缩之前定，而"这一跳打到谁"要到准入才定：这里先问准入一份与尺寸
             # 无关的预测（同一份资格判据，不看 permit 也不看限流），用那个组的最小成员窗口
@@ -807,9 +720,6 @@ class ReActToolLoop:
                 )
                 previous_actual_request_messages = adopted_compacted_baseline
                 request_seed_source = 'same_turn_token_compacted'
-            if stage_compaction_hop and not str(history_shrink_reason or '').strip():
-                # 请求体因阶段过期点变短必须有合法理由，否则逐轮对账会把它读成非法 shrink。
-                history_shrink_reason = 'stage_compaction'
             bundle_recommit_reason = self._node_bundle_recommit_reason(
                 history_shrink_reason=str(history_shrink_reason or ''),
                 idle_boundary=hop_idle_boundary,
@@ -1106,7 +1016,6 @@ class ReActToolLoop:
                     'request_seed_message_count': int(request_seed_message_count or 0),
                     'token_preflight_diagnostics': dict(token_preflight_diagnostics or {}),
                     'history_shrink_reason': str(history_shrink_reason or '').strip(),
-                    **self._execution_stage_frame_payload(node_kind=node.node_kind, stage_gate=stage_gate),
                     'last_error': str(preflight_failure_reason or '').strip(),
                 },
                 publish_snapshot=True,
@@ -1366,16 +1275,6 @@ class ReActToolLoop:
                     if repaired_final_call is not None:
                         response_tool_calls = [repaired_final_call]
                         synthetic_tool_calls_used = True
-                if not response_tool_calls and STAGE_TOOL_NAME in visible_tool_names:
-                    repaired_stage_call = self._recover_stage_submission_tool_call_from_context(
-                        node=node,
-                        stage_gate=stage_gate,
-                        model_messages=model_messages,
-                        invalid_stage_submission_count=invalid_stage_submission_count,
-                    )
-                    if repaired_stage_call is not None:
-                        response_tool_calls = [repaired_stage_call]
-                        synthetic_tool_calls_used = True
             tool_calls = [
                 {
                     'id': call.id,
@@ -1448,19 +1347,15 @@ class ReActToolLoop:
                     response_tool_calls,
                     FINAL_RESULT_TOOL_NAME,
                 ) and not final_result_turn
-                stage_only_transition_turn = self._is_stage_only_transition_turn(response_tool_calls)
                 ordinary_tool_turn = self._has_ordinary_tool_call(response_tool_calls)
                 if ordinary_tool_turn:
                     invalid_final_submission_count = 0
-                    invalid_stage_submission_count = 0
                     identical_final_submission_streak = 0
                     payload_shape_fault_count = 0
                     marker_fault_streak = 0
                     last_marker_fault_fingerprint = ''
                     plain_text_reply_strikes = 0
-                    stage_only_transition_streak = 0
                     last_invalid_final_submission_reason = ''
-                    last_invalid_stage_submission_reason = ''
                     # 清单必须跟着一起清：_clear_invalid_final_submission_state 已把持久帧
                     # 里的 last_contract_violations 写成空，本地留着就会让迭代用尽时的终态
                     # 归因引用一轮已被普通工具轮作废的违规。
@@ -1723,7 +1618,7 @@ class ReActToolLoop:
                     tool_name = str(getattr(call, 'name', '') or '').strip()
                     arguments = self._normalize_tool_call_arguments(getattr(call, 'arguments', {}))
                     signature = f"{tool_name}:{json.dumps(arguments, ensure_ascii=False, sort_keys=True)}"
-                    if tool_name in self._CONTROL_TOOL_NAMES or tool_name in {STAGE_TOOL_NAME, FINAL_RESULT_TOOL_NAME}:
+                    if tool_name in self._CONTROL_TOOL_NAMES or tool_name == FINAL_RESULT_TOOL_NAME:
                         continue
                     # 未水合工具的调用这一跳不执行（只交契约+暂存），不该进重复调用熔断：
                     # 撞两次同样的"先给契约"被软拒，等于把机制自己的代价算成模型的错（D3）。
@@ -1772,22 +1667,10 @@ class ReActToolLoop:
                     )
                     repair_overlay_text = combined_repair_text
                     continue
-                active_round_payload = None
-                if self._should_record_execution_stage_round(
-                    node_kind=node.node_kind,
-                    stage_gate=stage_gate,
-                    response_tool_calls=tool_calls,
-                ):
-                    created_at = ''
-                    if updated_node is not None and list(getattr(updated_node, 'output', []) or []):
-                        created_at = str(updated_node.output[-1].created_at or '')
-                    active_round_payload = self._log_service.record_execution_stage_round(
-                        task.task_id,
-                        node.node_id,
-                        tool_calls=tool_calls,
-                        created_at=created_at or now_iso(),
-                        text=str(getattr(response, 'content', '') or ''),
-                    )
+                active_round_payload = {
+                    'round_id': f"round:{node.node_id}:{now_iso()}",
+                    'created_at': now_iso(),
+                }
                 assistant_tool_calls = [
                     {
                         'id': call.id,
@@ -1815,14 +1698,6 @@ class ReActToolLoop:
                         ],
                         'active_round_started_at': str((active_round_payload or {}).get('created_at') or now_iso()),
                         'tool_calls': live_tool_calls,
-                        **self._execution_stage_frame_payload(
-                            node_kind=node.node_kind,
-                            stage_gate=self._execution_stage_gate(
-                                task_id=task.task_id,
-                                node_id=node.node_id,
-                                node_kind=node.node_kind,
-                            ),
-                        ),
                         'last_error': '',
                     },
                     publish_snapshot=True,
@@ -1833,27 +1708,9 @@ class ReActToolLoop:
                     response_tool_calls=response_tool_calls,
                     tools=current_tools,
                     round_text=str(getattr(response, 'content', '') or ''),
-                    runtime_context={
-                        **runtime_context,
-                        'stage_turn_granted': bool(
-                            stage_gate.get('enabled')
-                            and stage_gate.get('has_active_stage')
-                            and not stage_gate.get('transition_required')
-                        ),
-                        'stage_exhaustion_predicted_reminder': self._execution_stage_exhaustion_predicted_reminder(
-                            stage_gate=stage_gate,
-                            tool_calls=response_tool_calls,
-                        ),
-                    },
+                    runtime_context=dict(runtime_context),
                     prior_overflow_signatures=self._overflowed_search_signatures(message_history),
                     max_parallel_tool_calls=max_parallel_tool_calls,
-                )
-                self._refund_stage_round_for_non_executed_calls(
-                    task_id=task.task_id,
-                    node_id=node.node_id,
-                    active_round_payload=active_round_payload,
-                    response_tool_calls=response_tool_calls,
-                    runtime_context=runtime_context,
                 )
                 self._remind_content_open_reopen_on_exec_truncation(results=results)
                 assistant_body = None if synthetic_tool_calls_used else response.content
@@ -1908,14 +1765,6 @@ class ReActToolLoop:
                         'active_round_tool_call_ids': [],
                         'active_round_started_at': '',
                         'tool_calls': [item['live_state'] for item in results],
-                        **self._execution_stage_frame_payload(
-                            node_kind=node.node_kind,
-                            stage_gate=self._execution_stage_gate(
-                                task_id=task.task_id,
-                                node_id=node.node_id,
-                                node_kind=node.node_kind,
-                            ),
-                        ),
                         'last_error': '',
                     },
                     publish_snapshot=True,
@@ -1930,34 +1779,6 @@ class ReActToolLoop:
                         signature=str(tool_fault_hit.get('signature') or ''),
                         count=int(tool_fault_hit.get('count') or 0),
                     )
-                if stage_only_transition_turn:
-                    stage_turn_succeeded = self._tool_results_succeeded(results)
-                    stage_goal = str((tool_calls[0].get('arguments') or {}).get('stage_goal') or '').strip()
-                    if stage_turn_succeeded:
-                        invalid_stage_submission_count = 0
-                        last_invalid_stage_submission_reason = ''
-                        stage_only_transition_streak += 1
-                        if stage_only_transition_streak >= _STAGE_ONLY_TRANSITION_LIMIT:
-                            return self._stage_only_transition_failure(
-                                count=stage_only_transition_streak,
-                                stage_goal=stage_goal,
-                            )
-                    else:
-                        stage_only_transition_streak = 0
-                        invalid_stage_submission_count += 1
-                        last_invalid_stage_submission_reason = (
-                            self._first_tool_error_text(results) or f'{STAGE_TOOL_NAME} rejected'
-                        )
-                        if invalid_stage_submission_count >= _INVALID_STAGE_SUBMISSION_LIMIT:
-                            return self._invalid_stage_submission_failure(
-                                reason=last_invalid_stage_submission_reason,
-                                count=invalid_stage_submission_count,
-                                stage_goal=stage_goal,
-                            )
-                        repair_overlay_text = self._stage_submission_repair_message(
-                            reason=last_invalid_stage_submission_reason,
-                            node_kind=node.node_kind,
-                        )
                 if control_only_turn:
                     attempts = max(0, attempts - 1)
                 continue
@@ -2040,7 +1861,6 @@ class ReActToolLoop:
             plain_text_reply_message = (
                 build_node_plain_text_reply_block_message(
                     node_kind=node.node_kind,
-                    stage_gate=stage_gate,
                 )
                 if not matched_raw_final_result_payload
                 and str(response.content or '').strip()
@@ -2183,7 +2003,6 @@ class ReActToolLoop:
         ordered_results: list[dict[str, Any] | None] = []
         result_indexes_by_call_id: dict[str, list[int]] = {}
         inspected_items: list[dict[str, Any]] = []
-        suppressed_stage_replays: list[dict[str, Any]] = []
 
         for index, item in enumerate(pending_tool_calls):
             call_id = str(item.get('id') or '').strip()
@@ -2205,35 +2024,6 @@ class ReActToolLoop:
                 )
                 evidence = [{'kind': 'live_tool_result', 'path': '', 'note': f'live status={recorded_status}'}]
                 reuse_content = recorded_content
-            elif tool_name == STAGE_TOOL_NAME and (
-                applied_stage := self._log_service.stage_transition_already_applied(
-                    task.task_id,
-                    node.node_id,
-                    stage_goal=str(dict(arguments or {}).get('stage_goal') or ''),
-                )
-            ):
-                # 重放已落到账本的 submit_next_stage 不是幂等重跑：它会再把阶段往前推一格，
-                # 用上一跳的旧摘要结清当时还持有未送达调用的阶段，并顺手打上裁撤标记——
-                # 于是那条调用的结果迟到三天后，按 call id 命中过期集被移出可见层。
-                # 账本里已有同一个 stage_goal 即"这次结清已应用过"，只补结果、不再推进。
-                decision = RecoveryCheckDecision.VERIFIED_DONE
-                expected_tool_status = 'success'
-                lost_result_summary = (
-                    'Recovery suppressed a replayed submit_next_stage: the stage ledger already carries '
-                    'this stage goal, so re-running it would advance the stage a second time and evict a '
-                    'stage whose tool result has not been delivered yet.'
-                )
-                evidence = [{
-                    'kind': 'execution_stage_ledger',
-                    'path': '',
-                    'note': f"stage_index={applied_stage.get('stage_index')} status={applied_stage.get('status')}",
-                }]
-                reuse_content = json.dumps(
-                    {'ok': True, 'suppressed_replay': True, **dict(applied_stage)},
-                    ensure_ascii=False,
-                    sort_keys=True,
-                )
-                suppressed_stage_replays.append({'call_id': call_id, **dict(applied_stage)})
             else:
                 inspection = self._recovery_check_engine.inspect_tool_call(
                     tool_name=tool_name,
@@ -2334,31 +2124,6 @@ class ReActToolLoop:
             inspected_items=inspected_items,
         )
 
-        if suppressed_stage_replays:
-            try:
-                from g3ku.audit_events import emit_audit_event
-
-                emit_audit_event(
-                    'task',
-                    'info',
-                    'closure_replay_suppressed',
-                    f'恢复车道抑制重放的阶段收口：{node.node_id}（{len(suppressed_stage_replays)} 次）',
-                    detail={
-                        'task_id': str(task.task_id or ''),
-                        'node_id': str(node.node_id or ''),
-                        'stages': [
-                            {
-                                'stage_index': int(item.get('stage_index') or 0),
-                                'stage_id': str(item.get('stage_id') or ''),
-                                'call_id': str(item.get('call_id') or ''),
-                            }
-                            for item in suppressed_stage_replays
-                        ],
-                    },
-                )
-            except Exception:
-                pass
-
         if replay_calls:
             replay_results = await self._execute_tool_calls(
                 task=task,
@@ -2367,7 +2132,6 @@ class ReActToolLoop:
                 tools=tools,
                 runtime_context={
                     **runtime_context,
-                    'stage_turn_granted': True,
                 },
                 prior_overflow_signatures=self._overflowed_search_signatures(message_history),
                 round_text=str(assistant_content or ''),
@@ -2445,14 +2209,6 @@ class ReActToolLoop:
                 'active_round_tool_call_ids': [],
                 'active_round_started_at': '',
                 'tool_calls': [dict(item.get('live_state') or {}) for item in ordered_results if isinstance(item, dict)],
-                **self._execution_stage_frame_payload(
-                    node_kind=node.node_kind,
-                    stage_gate=self._execution_stage_gate(
-                        task_id=task.task_id,
-                        node_id=node.node_id,
-                        node_kind=node.node_kind,
-                    ),
-                ),
                 'last_error': '',
             },
             publish_snapshot=True,
@@ -2579,7 +2335,6 @@ class ReActToolLoop:
             tools=tools,
             runtime_context={
                 **runtime_context,
-                'stage_turn_granted': True,
             },
             prior_overflow_signatures=self._overflowed_search_signatures(message_history),
             round_text=str(assistant_content or ''),
@@ -2635,14 +2390,6 @@ class ReActToolLoop:
                 'pending_child_specs': [],
                 'partial_child_results': [],
                 **recovery_diagnostic,
-                **self._execution_stage_frame_payload(
-                    node_kind=node.node_kind,
-                    stage_gate=self._execution_stage_gate(
-                        task_id=task.task_id,
-                        node_id=node.node_id,
-                        node_kind=node.node_kind,
-                    ),
-                ),
                 'last_error': '',
             },
             publish_snapshot=True,
@@ -3308,30 +3055,6 @@ class ReActToolLoop:
             },
         )
 
-    def _execution_stage_gate(self, *, task_id: str, node_id: str, node_kind: str) -> dict[str, Any]:
-        if str(node_kind or '').strip().lower() not in _STAGE_BUDGET_NODE_KINDS:
-            return {'enabled': False, 'has_active_stage': False, 'transition_required': False, 'active_stage': None}
-        getter = getattr(self._log_service, 'execution_stage_gate_snapshot', None)
-        if not callable(getter):
-            return {'enabled': False, 'has_active_stage': False, 'transition_required': False, 'active_stage': None}
-        payload = getter(task_id, node_id)
-        if not isinstance(payload, dict):
-            return {'enabled': False, 'has_active_stage': False, 'transition_required': False, 'active_stage': None}
-        return {'enabled': True, **payload}
-
-    @staticmethod
-    def _visible_tools_for_iteration(*, tools: dict[str, Tool], node_kind: str, stage_gate: dict[str, Any]) -> dict[str, Tool]:
-        if str(node_kind or '').strip().lower() not in _STAGE_BUDGET_NODE_KINDS:
-            return dict(tools or {})
-        if not bool(stage_gate.get('enabled')):
-            return dict(tools or {})
-        return visible_tools_for_stage_iteration(
-            tools,
-            has_active_stage=bool(stage_gate.get('has_active_stage')),
-            transition_required=bool(stage_gate.get('transition_required')),
-            stage_tool_name=STAGE_TOOL_NAME,
-        )
-
     @staticmethod
     def _render_provider_tool_schemas(
         *,
@@ -3474,7 +3197,6 @@ class ReActToolLoop:
         node_id: str,
         node_kind: str,
         visible_tools: dict[str, Tool],
-        stage_gate: dict[str, Any],
         runtime_context: dict[str, Any],
     ) -> tuple[dict[str, Tool], dict[str, Any]]:
         selected_tools = dict(visible_tools or {})
@@ -3497,7 +3219,7 @@ class ReActToolLoop:
             'lightweight_tool_ids': [],
             'trace': {},
         }
-        if str(node_kind or '').strip().lower() not in _STAGE_BUDGET_NODE_KINDS:
+        if str(node_kind or '').strip().lower() not in {'execution', 'acceptance'}:
             return selected_tools, selection_payload
         declaration_only_names: set[str] = set()
         declaration_renderable_names: set[str] = set()
@@ -3631,12 +3353,7 @@ class ReActToolLoop:
         full_callable_tool_names = traced_full_callable_tool_names or self._normalized_name_list(
             list(selection_payload.get('tool_names') or list(selected_tools.keys()))
         )
-        model_visible_callable_tool_names = callable_tool_names_for_stage_iteration(
-            full_callable_tool_names,
-            has_active_stage=bool(stage_gate.get('has_active_stage')),
-            transition_required=bool(stage_gate.get('transition_required')),
-            stage_tool_name=STAGE_TOOL_NAME,
-        )
+        model_visible_callable_tool_names = list(full_callable_tool_names)
         selected_tools = {
             name: visible_tools[name]
             for name in model_visible_callable_tool_names
@@ -3673,10 +3390,6 @@ class ReActToolLoop:
             'provider_tool_exposure_revision': str(selection_payload.get('provider_tool_exposure_revision') or ''),
             'provider_tool_exposure_commit_reason': str(
                 selection_payload.get('provider_tool_exposure_commit_reason') or ''
-            ),
-            'stage_locked_to_submit_next_stage': (
-                list(model_visible_callable_tool_names) == [STAGE_TOOL_NAME]
-                and list(full_callable_tool_names) != [STAGE_TOOL_NAME]
             ),
         }
         return selected_tools, selection_payload
@@ -3755,15 +3468,6 @@ class ReActToolLoop:
         if any(isinstance(item, dict) for item in list(diagnostics.get('entries') or [])):
             return True
         return False
-
-    @staticmethod
-    def _stage_prompt_payload_from_gate(stage_gate: dict[str, Any]) -> dict[str, Any]:
-        active_stage = stage_gate.get('active_stage') if isinstance(stage_gate.get('active_stage'), dict) else None
-        return {
-            'has_active_stage': bool(stage_gate.get('has_active_stage')),
-            'transition_required': bool(stage_gate.get('transition_required')),
-            'active_stage': dict(active_stage or {}) if isinstance(active_stage, dict) else None,
-        }
 
     def _node_skill_roster_items(
         self,
@@ -3899,7 +3603,6 @@ class ReActToolLoop:
         node,
         message_history: list[dict[str, Any]],
         tool_schema_selection: dict[str, Any],
-        stage_gate: dict[str, Any],
         runtime_context: dict[str, Any] | None = None,
         skill_roster_items: list[dict[str, str]] | None = None,
     ) -> NodeRuntimeToolContract:
@@ -4042,7 +3745,6 @@ class ReActToolLoop:
             candidate_skill_items=candidate_skill_items,
             contract_visible_skill_ids=contract_visible_skill_ids,
             skill_visibility_diagnostics=skill_visibility_diagnostics,
-            stage_payload=self._stage_prompt_payload_from_gate(stage_gate),
             lightweight_tool_ids=self._normalized_name_list(list(tool_schema_selection.get('lightweight_tool_ids') or [])),
             selection_trace=dict(tool_schema_selection.get('trace') or {}),
             denied_tool_names=self._normalized_name_list(
@@ -4170,13 +3872,11 @@ class ReActToolLoop:
         node,
         message_history: list[dict[str, Any]],
         tool_schema_selection: dict[str, Any],
-        stage_gate: dict[str, Any],
     ) -> list[dict[str, Any]]:
         contract = self._build_node_dynamic_contract(
             node=node,
             message_history=message_history,
             tool_schema_selection=tool_schema_selection,
-            stage_gate=stage_gate,
         )
         return upsert_node_dynamic_contract_message(message_history, contract)
 
@@ -4260,56 +3960,27 @@ class ReActToolLoop:
         }
         return [
             name
-            for name in cls._ordered_budget_bypass_tool_names()
+            for name in cls._ordered_control_tool_names()
             if not visible_name_set or name in visible_name_set
         ]
 
     @classmethod
-    def _ordered_budget_bypass_tool_names(cls) -> tuple[str, ...]:
+    def _ordered_control_tool_names(cls) -> tuple[str, ...]:
         ordered: list[str] = []
-        for name in (*cls._ORDERED_CONTROL_TOOL_NAMES, STAGE_TOOL_NAME, FINAL_RESULT_TOOL_NAME, _STAGE_SPAWN_TOOL_NAME):
-            if name not in cls._BUDGET_BYPASS_TOOL_NAMES or name in ordered:
+        for name in (
+            *cls._ORDERED_CONTROL_TOOL_NAMES,
+            FINAL_RESULT_TOOL_NAME,
+            _STAGE_SPAWN_TOOL_NAME,
+            SILENT_TOOL_NAME,
+        ):
+            if name not in cls._ALWAYS_CALLABLE_TOOL_NAMES or name in ordered:
                 continue
             ordered.append(name)
-        for name in sorted(cls._BUDGET_BYPASS_TOOL_NAMES):
+        for name in sorted(cls._ALWAYS_CALLABLE_TOOL_NAMES):
             if name in ordered:
                 continue
             ordered.append(name)
         return tuple(ordered)
-
-    @staticmethod
-    def _execution_stage_frame_payload(*, node_kind: str, stage_gate: dict[str, Any]) -> dict[str, Any]:
-        if str(node_kind or '').strip().lower() not in _STAGE_BUDGET_NODE_KINDS:
-            return {}
-        if not bool(stage_gate.get('enabled')):
-            return {}
-        active = stage_gate.get('active_stage') if isinstance(stage_gate, dict) else None
-        if not isinstance(active, dict):
-            return {
-                'stage_mode': '',
-                'stage_status': '',
-                'stage_goal': '',
-                'stage_total_steps': 0,
-            }
-        return {
-            'stage_mode': str(active.get('mode') or ''),
-            'stage_status': str(active.get('status') or ''),
-            'stage_goal': str(active.get('stage_goal') or ''),
-            'stage_total_steps': int(active.get('tool_round_budget') or 0),
-        }
-
-    @staticmethod
-    def _should_record_execution_stage_round(*, node_kind: str, stage_gate: dict[str, Any], response_tool_calls: list[dict[str, Any]]) -> bool:
-        if str(node_kind or '').strip().lower() not in _STAGE_BUDGET_NODE_KINDS:
-            return False
-        if not bool(stage_gate.get('enabled')):
-            return False
-        if not bool(stage_gate.get('has_active_stage')) or bool(stage_gate.get('transition_required')):
-            return False
-        names = [str(item.get('name') or '').strip() for item in list(response_tool_calls or []) if str(item.get('name') or '').strip()]
-        if any(name == STAGE_TOOL_NAME for name in names):
-            return False
-        return any(name != STAGE_TOOL_NAME for name in names)
 
     @staticmethod
     def _execution_prompt_cache_key(*, model_messages: list[dict[str, Any]], tool_schemas: list[dict[str, Any]], model_refs: list[str]) -> str:
@@ -4408,14 +4079,7 @@ class ReActToolLoop:
             if str(item or '').strip()
         ]
 
-        def _call_runtime_context(
-            call: Any,
-            *,
-            stage_turn_granted: bool | None = None,
-            stage_free_pass_kind: str = '',
-        ) -> dict[str, Any]:
-            granted = bool(runtime_context.get('stage_turn_granted')) if stage_turn_granted is None else bool(stage_turn_granted)
-            free_pass_kind = str(stage_free_pass_kind or '').strip()
+        def _call_runtime_context(call: Any) -> dict[str, Any]:
             image_multimodal_enabled, image_model_display_name = self._image_multimodal_for_request(current_model_refs)
             return {
                 **runtime_context,
@@ -4427,8 +4091,6 @@ class ReActToolLoop:
                 'callable_tool_names': list(callable_tool_names),
                 'full_callable_tool_names': list(full_callable_tool_names),
                 'prior_overflow_signatures': sorted(prior_overflow_signatures or set()),
-                'stage_turn_granted': granted,
-                'stage_free_pass_kind': free_pass_kind,
                 'image_multimodal_enabled': image_multimodal_enabled,
                 'image_model_display_name': image_model_display_name,
             }
@@ -4521,64 +4183,9 @@ class ReActToolLoop:
                 },
             }
 
-        def _record_mixed_stage_round(ordinary_calls: list[Any]) -> dict[str, Any] | None:
-            if not ordinary_calls:
-                return None
-            store = getattr(self._log_service, '_store', None)
-            get_node = getattr(store, 'get_node', None)
-            latest_node = get_node(node.node_id) if callable(get_node) else None
-            created_at = ''
-            if latest_node is not None:
-                outputs = list(getattr(latest_node, 'output', []) or [])
-                if outputs:
-                    created_at = str(outputs[-1].created_at or '').strip()
-            round_payload = self._log_service.record_execution_stage_round(
-                task.task_id,
-                node.node_id,
-                tool_calls=[
-                    {
-                        'id': str(call.id or '').strip(),
-                        'name': str(call.name or '').strip(),
-                        'arguments': self._normalize_tool_call_arguments(getattr(call, 'arguments', {})),
-                    }
-                    for call in list(ordinary_calls or [])
-                ],
-                created_at=created_at or now_iso(),
-                text=round_text,
-            )
-            if round_payload is None:
-                return None
-            self._log_service.update_frame(
-                task.task_id,
-                node.node_id,
-                lambda frame: {
-                    **frame,
-                    'active_round_id': str(round_payload.get('round_id') or ''),
-                    'active_round_tool_call_ids': [
-                        str(call.id or '').strip()
-                        for call in ordinary_calls
-                        if str(call.id or '').strip()
-                    ],
-                    'active_round_started_at': str(round_payload.get('created_at') or now_iso()),
-                    **self._execution_stage_frame_payload(
-                        node_kind=node.node_kind,
-                        stage_gate=self._execution_stage_gate(
-                            task_id=task.task_id,
-                            node_id=node.node_id,
-                            node_kind=node.node_kind,
-                        ),
-                    ),
-                },
-                publish_snapshot=True,
-            )
-            return round_payload
-
         async def _run_call(
             index: int,
             call: Any,
-            *,
-            stage_turn_granted: bool | None = None,
-            stage_free_pass_kind: str = '',
         ) -> dict[str, Any]:
             async with semaphore:
                 self._check_pause_or_cancel(task.task_id, str(runtime_context.get('node_id') or '').strip())
@@ -4587,7 +4194,7 @@ class ReActToolLoop:
                 slot_lease = None
                 runtime_fault = ''
                 controller = getattr(self, '_adaptive_tool_budget_controller', None)
-                if controller is not None and not self._should_bypass_execution_budget(call=call):
+                if controller is not None and not self._should_bypass_tool_slot_controller(call=call):
                     slot_lease = await controller.acquire_tool_slot(
                         task_id=task.task_id,
                         node_id=node.node_id,
@@ -4622,11 +4229,7 @@ class ReActToolLoop:
                         tools=tools,
                         tool_name=call.name,
                         arguments=self._normalize_tool_call_arguments(getattr(call, 'arguments', {})),
-                        runtime_context=_call_runtime_context(
-                            call,
-                            stage_turn_granted=stage_turn_granted,
-                            stage_free_pass_kind=stage_free_pass_kind,
-                        ),
+                        runtime_context=_call_runtime_context(call),
                     )
                     tool_content = self._render_tool_message_content(
                         raw_result,
@@ -4638,21 +4241,6 @@ class ReActToolLoop:
                             arguments=dict(getattr(call, 'arguments', {}) or {}),
                         ),
                     )
-                    if (
-                        stage_free_pass_kind
-                        and str(getattr(call, 'name', '') or '').strip() not in DEFAULT_STAGE_GATE_BYPASS_TOOLS
-                        and not is_error_like_tool_result(raw_result)
-                    ):
-                        reminder = (
-                            STAGELESS_FREE_PASS_REMINDER
-                            if stage_free_pass_kind == 'stageless'
-                            else STAGE_BUDGET_EXHAUSTED_FREE_PASS_REMINDER
-                        )
-                        tool_content = f'{tool_content}\n\n{reminder}'.strip()
-                    elif not stage_free_pass_kind:
-                        predicted = str(runtime_context.get('stage_exhaustion_predicted_reminder') or '').strip()
-                        if predicted and not is_error_like_tool_result(raw_result):
-                            tool_content = f'{tool_content}\n\n{predicted}'.strip()
                 except TaskPausedError:
                     raise
                 except NodePausedError:
@@ -4745,129 +4333,32 @@ class ReActToolLoop:
                 }
 
         indexed_calls = list(enumerate(list(response_tool_calls or [])))
-        stage_items = [
-            (index, call)
-            for index, call in indexed_calls
-            if str(getattr(call, 'name', '') or '').strip() == STAGE_TOOL_NAME
-        ]
-        ordinary_items = [
-            (index, call)
-            for index, call in indexed_calls
-            if str(getattr(call, 'name', '') or '').strip() != STAGE_TOOL_NAME
-        ]
-        # 同轮同签名去重:同一条回复里出现多个规范化后完全相同的普通调用时,只执行第一个,
+        # 同轮同签名去重:同一条回复里出现多个规范化后完全相同的调用时,只执行第一个,
         # 其余复用首个结果(标记 reused)。签名规则与 RepeatedActionCircuitBreaker 一致,
-        # 豁免工具镜像跨轮 breaker(control/stage/final 不参与)。去重发生在执行前,防止
-        # 非幂等工具(如 spawn_child_nodes)因同轮双发产生重复副作用;跨轮连续重复仍由
-        # 主循环 breaker 先行软拒绝(连续 3 个相同签名整轮不执行),本去重不影响该路径。
+        # 控制工具与 final 不参与。去重发生在执行前,防止非幂等工具(如 spawn_child_nodes)
+        # 因同轮双发产生重复副作用。
         same_turn_duplicate_items: list[tuple[int, Any, int]] = []
-        seen_ordinary_signatures: dict[str, int] = {}
-        unique_ordinary_items: list[tuple[int, Any]] = []
-        for index, call in ordinary_items:
+        seen_signatures: dict[str, int] = {}
+        unique_items: list[tuple[int, Any]] = []
+        for index, call in indexed_calls:
             tool_name = str(getattr(call, 'name', '') or '').strip()
-            if tool_name in self._CONTROL_TOOL_NAMES or tool_name in {STAGE_TOOL_NAME, FINAL_RESULT_TOOL_NAME}:
-                unique_ordinary_items.append((index, call))
+            if tool_name in self._CONTROL_TOOL_NAMES or tool_name == FINAL_RESULT_TOOL_NAME:
+                unique_items.append((index, call))
                 continue
             normalized_arguments = self._normalize_tool_call_arguments(getattr(call, 'arguments', {}))
             signature = f'{tool_name}:{json.dumps(normalized_arguments, ensure_ascii=False, sort_keys=True)}'
-            first_index = seen_ordinary_signatures.get(signature)
+            first_index = seen_signatures.get(signature)
             if first_index is None:
-                seen_ordinary_signatures[signature] = index
-                unique_ordinary_items.append((index, call))
+                seen_signatures[signature] = index
+                unique_items.append((index, call))
             else:
                 same_turn_duplicate_items.append((index, call, first_index))
-        ordinary_items = unique_ordinary_items
-        # 宽限执行判定:仅当本批不含 submit_next_stage、且主循环未按"已记账轮"授予 stage_turn_granted、
-        # 且本批至少有一个真正会被闸门拦截的普通工具(非 spawn/final/control 等永久豁免)时,才做一次宽限。
-        free_pass_kind = ''
-        if ordinary_items and not stage_items and not bool(runtime_context.get('stage_turn_granted')):
-            current_gate = self._execution_stage_gate(
-                task_id=task.task_id,
-                node_id=node.node_id,
-                node_kind=node.node_kind,
-            )
-            if bool(current_gate.get('enabled')):
-                gated = any(
-                    bool(
-                        stage_gate_error_for_tool(
-                            str(getattr(call, 'name', '') or '').strip(),
-                            has_active_stage=bool(current_gate.get('has_active_stage')),
-                            transition_required=bool(current_gate.get('transition_required')),
-                            stage_tool_name=STAGE_TOOL_NAME,
-                        )
-                    )
-                    for _, call in ordinary_items
-                )
-                if gated:
-                    free_pass_kind = stage_free_pass_kind(
-                        has_active_stage=bool(current_gate.get('has_active_stage')),
-                        transition_required=bool(current_gate.get('transition_required')),
-                        active_stage_rounds=list((current_gate.get('active_stage') or {}).get('rounds') or []),
-                        pending_orphan_rounds=list(current_gate.get('pending_orphan_rounds') or []),
-                    )
         ordered_results: dict[int, dict[str, Any]] = {}
-        stage_failed = False
-        for position, (index, call) in enumerate(stage_items):
-            if position > 0:
-                ordered_results[index] = _blocked_call_result(
-                    index,
-                    call,
-                    error_content=f'Error: {STAGE_TOOL_NAME} can be called at most once per batch; the extra call was ignored',
-                )
-                stage_failed = True
-                continue
-            stage_signature_before = self._execution_stage_transition_signature(runtime_context=runtime_context)
-            result = await _run_call(index, call, stage_turn_granted=False)
+        ordinary_results = await asyncio.gather(
+            *[_run_call(index, call) for index, call in unique_items]
+        )
+        for (index, _call), result in zip(unique_items, ordinary_results, strict=False):
             ordered_results[index] = result
-            if str(dict(result.get('live_state') or {}).get('status') or '').strip().lower() == 'error':
-                # 只有阶段账本真被动过时，本批普通调用才可能读到与上一跳不一致的能力集。
-                # 提交前就被判拒的那些（参数契约、drop↔summary 配对、keep_* 闸门、无实质进度）
-                # 一字未动，活动阶段还是模型上一跳看过的那份，整批作废只是白烧一轮：实盘
-                # 85,773 条工具结果里 14 批连带作废全部属于这一类，无一例是改到一半失败。
-                stage_failed = _shared_stage_ledger_may_have_moved(
-                    before=stage_signature_before,
-                    after=self._execution_stage_transition_signature(runtime_context=runtime_context),
-                )
-        if ordinary_items:
-            if stage_items and stage_failed:
-                blocked_error = (
-                    f'Error: {STAGE_TOOL_NAME} failed earlier in this turn; '
-                    'retry other tools after a successful stage transition'
-                )
-                for index, call in ordinary_items:
-                    ordered_results[index] = _blocked_call_result(index, call, error_content=blocked_error)
-            else:
-                if stage_items:
-                    _record_mixed_stage_round([call for _, call in ordinary_items])
-                ordinary_results = await asyncio.gather(
-                    *[
-                        _run_call(
-                            index,
-                            call,
-                            stage_turn_granted=True if stage_items else None,
-                            stage_free_pass_kind=free_pass_kind,
-                        )
-                        for index, call in ordinary_items
-                    ]
-                )
-                for (index, _call), result in zip(ordinary_items, ordinary_results, strict=False):
-                    ordered_results[index] = result
-                if free_pass_kind:
-                    self._log_service.record_execution_stage_free_pass_round(
-                        task.task_id,
-                        node.node_id,
-                        tool_calls=[
-                            {
-                                'id': str(call.id or '').strip(),
-                                'name': str(call.name or '').strip(),
-                                'arguments': self._normalize_tool_call_arguments(getattr(call, 'arguments', {})),
-                            }
-                            for _, call in ordinary_items
-                        ],
-                        kind=free_pass_kind,
-                        created_at=now_iso(),
-                        text=round_text,
-                    )
         for dup_index, dup_call, first_index in same_turn_duplicate_items:
             first_result = ordered_results.get(first_index)
             if first_result is None:
@@ -4886,9 +4377,9 @@ class ReActToolLoop:
         return [ordered_results[index] for index, _call in indexed_calls if index in ordered_results]
 
     @classmethod
-    def _should_bypass_execution_budget(cls, *, call: Any) -> bool:
+    def _should_bypass_tool_slot_controller(cls, *, call: Any) -> bool:
         tool_name = str(getattr(call, 'name', '') or '').strip()
-        return tool_name in cls._BUDGET_BYPASS_TOOL_NAMES
+        return tool_name in cls._ALWAYS_CALLABLE_TOOL_NAMES
 
     @staticmethod
     def _normalize_optional_limit(value: int | None | object, *, default: int | None) -> int | None:
@@ -5051,41 +4542,6 @@ class ReActToolLoop:
         handle = dict(result.get('handle') or {}) if isinstance(result.get('handle'), dict) else {}
         source_kind = str(handle.get('source_kind') or result.get('source_kind') or '').strip().lower()
         return source_kind == _STAGE_HISTORY_ARCHIVE_SOURCE_KIND
-
-    def _refund_stage_round_for_non_executed_calls(
-        self,
-        *,
-        task_id: str,
-        node_id: str,
-        active_round_payload: dict[str, Any] | None,
-        response_tool_calls: list[Any],
-        runtime_context: dict[str, Any],
-    ) -> None:
-        """这一轮的调用**一个都没执行**（只交契约+暂存）⇒ 退还那一轮预算（D3）。
-
-        只要有一个真执行过的调用混在同一轮里，就不退——预算度量的是"模型干了活"，
-        不是"模型发了几条消息"。
-        """
-        round_id = str((active_round_payload or {}).get('round_id') or '').strip()
-        staged_ids = runtime_context.get('impulse_staged_call_ids')
-        if not round_id or not isinstance(staged_ids, set) or not staged_ids:
-            return
-        if not bool((active_round_payload or {}).get('budget_counted', True)):
-            return
-        visible_calls = [
-            call for call in list(response_tool_calls or []) if str(getattr(call, 'name', '') or '').strip()
-        ]
-        if not visible_calls:
-            return
-        if not all(str(getattr(call, 'id', '') or '').strip() in staged_ids for call in visible_calls):
-            return
-        refund = getattr(self._log_service, 'refund_execution_stage_round', None)
-        if not callable(refund):
-            return
-        try:
-            refund(str(task_id or ''), str(node_id or ''), round_id)
-        except Exception:
-            return
 
     def _advance_node_stash_hop(self, node: Any, runtime_context: dict[str, Any]) -> dict[str, Any]:
         service = getattr(self, '_tool_impulse_service', None)
@@ -5476,8 +4932,7 @@ class ReActToolLoop:
         )
         if reuse_content is not None:
             return reuse_content
-        # 契约不在场而名字已授权：这一跳**不执行**，交契约 + 暂存入参（D3）。排在阶段闸门
-        # 之前，因为这条豁免是按状态而不是按名字——闸门今天会把"没开阶段就调它"先拒掉。
+        # 契约不在场而名字已授权：这一跳**不执行**，交契约 + 暂存入参（D3）。
         impulse_content = await self._impulse_contract_content(
             tools=tools,
             tool_name=tool_name,
@@ -5486,9 +4941,6 @@ class ReActToolLoop:
         )
         if impulse_content is not None:
             return impulse_content
-        stage_gate_error = self._execution_tool_gate_error(tool_name=tool_name, runtime_context=runtime_context)
-        if stage_gate_error:
-            return f'Error: {stage_gate_error}'
         tool = tools.get(tool_name)
         if tool is None:
             # 只说"不可用"模型无从判断该改名、该先加载、还是该换工具；两个名单都
@@ -5679,72 +5131,6 @@ class ReActToolLoop:
             ),
             'invocation_text': invocation_text,
         }
-
-    def _execution_tool_gate_error(self, *, tool_name: str, runtime_context: dict[str, Any]) -> str:
-        node_kind = str(runtime_context.get('node_kind') or '').strip().lower()
-        if node_kind not in _STAGE_BUDGET_NODE_KINDS:
-            return ''
-        normalized_tool_name = str(tool_name or '').strip()
-        if normalized_tool_name in self._CONTROL_TOOL_NAMES or normalized_tool_name == STAGE_TOOL_NAME:
-            return ''
-        stage_gate = self._execution_stage_gate(
-            task_id=str(runtime_context.get('task_id') or ''),
-            node_id=str(runtime_context.get('node_id') or ''),
-            node_kind=node_kind,
-        )
-        if not bool(stage_gate.get('enabled')):
-            return ''
-        active_stage = stage_gate.get('active_stage') if isinstance(stage_gate.get('active_stage'), dict) else {}
-        if bool(runtime_context.get('stage_turn_granted')):
-            return ''
-        if str(runtime_context.get('stage_free_pass_kind') or '').strip():
-            return ''
-        if normalized_tool_name == _STAGE_SPAWN_TOOL_NAME and bool(stage_gate.get('transition_required')):
-            return f'current stage budget is exhausted; call {STAGE_TOOL_NAME} before using other tools'
-        return stage_gate_error_for_tool(
-            normalized_tool_name,
-            has_active_stage=bool(stage_gate.get('has_active_stage')),
-            transition_required=bool(stage_gate.get('transition_required')),
-            stage_tool_name=STAGE_TOOL_NAME,
-        )
-
-    def _execution_stage_exhaustion_predicted_reminder(
-        self,
-        *,
-        stage_gate: dict[str, Any],
-        tool_calls: list[Any],
-    ) -> str:
-        """在合法轮即将打满预算时,给本轮普通工具结果附上"下轮必须同批 sns"的预告提醒。
-
-        同批已含 submit_next_stage 时整批不预告：那批普通工具会记到刚开的新阶段上,
-        按旧阶段预算算出的预告既失配、又会贴到 sns 自己的返回值里,成为与账本相反的陈述。
-        """
-        if not bool(stage_gate.get('enabled')):
-            return ''
-        if not bool(stage_gate.get('has_active_stage')) or bool(stage_gate.get('transition_required')):
-            return ''
-        if any(
-            str(getattr(call, 'name', '') or '').strip() == STAGE_TOOL_NAME
-            for call in list(tool_calls or [])
-        ):
-            return ''
-        active = stage_gate.get('active_stage') if isinstance(stage_gate.get('active_stage'), dict) else {}
-        budget = int(active.get('tool_round_budget') or 0)
-        used = int(active.get('tool_rounds_used') or 0)
-        if budget <= 0 or used + 1 < budget:
-            return ''
-        payload = [
-            {
-                'name': str(getattr(call, 'name', '') or '').strip(),
-                'id': str(getattr(call, 'id', '') or '').strip(),
-            }
-            for call in list(tool_calls or [])
-            if str(getattr(call, 'name', '') or '').strip()
-            and str(getattr(call, 'name', '') or '').strip() != STAGE_TOOL_NAME
-        ]
-        if not response_tool_calls_count_against_stage_budget(payload):
-            return ''
-        return STAGE_BUDGET_EXHAUSTION_PREDICTED_REMINDER_TEMPLATE.format(used=used, budget=budget)
 
     @classmethod
     def _overflowed_search_signatures(cls, messages: list[dict[str, Any]]) -> set[str]:
@@ -6079,18 +5465,13 @@ class ReActToolLoop:
     def _is_final_result_turn(response_tool_calls: list[Any]) -> bool:
         return len(list(response_tool_calls or [])) == 1 and ReActToolLoop._contains_tool_name(response_tool_calls, FINAL_RESULT_TOOL_NAME)
 
-    @staticmethod
-    def _is_stage_only_transition_turn(response_tool_calls: list[Any]) -> bool:
-        calls = list(response_tool_calls or [])
-        return bool(calls) and all(str(getattr(call, 'name', '') or '').strip() == STAGE_TOOL_NAME for call in calls)
-
     @classmethod
     def _has_ordinary_tool_call(cls, response_tool_calls: list[Any]) -> bool:
         for call in list(response_tool_calls or []):
             name = str(getattr(call, 'name', '') or '').strip()
             if not name:
                 continue
-            if name in cls._CONTROL_TOOL_NAMES or name in {STAGE_TOOL_NAME, FINAL_RESULT_TOOL_NAME}:
+            if name in cls._CONTROL_TOOL_NAMES or name == FINAL_RESULT_TOOL_NAME:
                 continue
             return True
         return False
@@ -6099,25 +5480,6 @@ class ReActToolLoop:
     def _exclusive_tool_turn_error(tool_name: str) -> str:
         normalized = str(tool_name or 'tool').strip() or 'tool'
         return f'Error: {normalized} must be the only tool call in its turn'
-
-    @classmethod
-    def _invalid_stage_submission_failure(cls, *, reason: str, count: int, stage_goal: str) -> NodeFinalResult:
-        text = str(reason or f'invalid stage submission detected {count} times').strip() or f'invalid stage submission detected {count} times'
-        goal = str(stage_goal or '').strip()
-        suffix = f' Latest stage goal: {goal}.' if goal else ''
-        return NodeFinalResult(
-            status='failed',
-            delivery_status='blocked',
-            summary='invalid stage submission guard triggered',
-            answer='',
-            evidence=[],
-            remaining_work=[],
-            blocking_reason=(
-                f'Invalid stage progression detected {int(count or 0)} consecutive times. '
-                f'Latest issue: {text}.{suffix}'
-            ),
-            failure_disposition='pause',
-        )
 
     @staticmethod
     def _runtime_fault_signature(*, tool_name: str, exc: BaseException | None) -> str:
@@ -6384,24 +5746,6 @@ class ReActToolLoop:
             failure_disposition='pause',
         )
 
-    @classmethod
-    def _stage_only_transition_failure(cls, *, count: int, stage_goal: str) -> NodeFinalResult:
-        goal = str(stage_goal or '').strip()
-        suffix = f' Latest stage goal: {goal}.' if goal else ''
-        return NodeFinalResult(
-            status='failed',
-            delivery_status='blocked',
-            summary='stage transition guard triggered',
-            answer='',
-            evidence=[],
-            remaining_work=[],
-            blocking_reason=(
-                f'Repeated stage switching without progress detected {int(count or 0)} consecutive times.'
-                f'{suffix}'
-            ),
-            failure_disposition='pause',
-        )
-
     @staticmethod
     def _duplicate_tool_call_target(*, tool_name: str, arguments: dict[str, Any]) -> str:
         normalized_tool = str(tool_name or '').strip()
@@ -6441,22 +5785,6 @@ class ReActToolLoop:
         if target:
             return f'Duplicate tool call detected. {detail} Latest repeated target: `{target}`.'
         return f'Duplicate tool call detected. {detail}'
-
-    @staticmethod
-    def _stage_submission_repair_message(*, reason: str, node_kind: str = 'execution') -> str:
-        text = str(reason or '').strip() or f'{STAGE_TOOL_NAME} rejected'
-        normalized_kind = str(node_kind or '').strip().lower()
-        if normalized_kind == 'acceptance':
-            return (
-                f'Your last `{STAGE_TOOL_NAME}` call was rejected: {text}. '
-                'Do not call `submit_next_stage` again until you first perform verification work in the active stage. '
-                'Continue this stage with evidence-checking tools before switching stages.'
-            )
-        return (
-            f'Your last `{STAGE_TOOL_NAME}` call was rejected: {text}. '
-            'Do not call `submit_next_stage` again until you first perform substantive work in the active stage. '
-            'Continue this stage with a non-control tool call or `spawn_child_nodes` before switching stages.'
-        )
 
     @staticmethod
     def _tool_results_succeeded(results: list[dict[str, Any]]) -> bool:
@@ -6776,17 +6104,6 @@ class ReActToolLoop:
             bounded.append(updated)
         return bounded
 
-    def _node_durable_stage_state(self, node_id: str) -> Any:
-        """节点压缩侧读的账本：与渲染端同源的那份 durable ledger。
-
-        节点只有一份账本，没有前门"canonical 与 stage_state 各一套 stage_id"的问题。"""
-        store = getattr(self._log_service, '_store', None)
-        getter = getattr(store, 'get_node', None) if store is not None else None
-        node = getter(str(node_id or '').strip()) if callable(getter) else None
-        metadata = getattr(node, 'metadata', None) if node is not None else None
-        payload = metadata.get('execution_stages') if isinstance(metadata, dict) else {}
-        return normalize_execution_stage_metadata(payload)
-
     def _node_task_temp_dir(self, task_id: str) -> str:
         """节点归档的落点：只认任务 runtime meta 里的绝对 task_temp_dir，拿不到返回空串。
 
@@ -6807,115 +6124,6 @@ class ReActToolLoop:
             return ''
         return str(candidate) if candidate.is_absolute() else ''
 
-    def _write_node_stage_archive_file(
-        self,
-        *,
-        task_id: str,
-        node_id: str,
-        records: list[dict[str, Any]],
-    ) -> tuple[str, int, int]:
-        """被吞阶段的完整账本导档，返回 (路径, stage 区间起, 区间止)；落不了盘时 ('', 0, 0)。"""
-        if not list(records or []):
-            return '', 0, 0
-        directory = self._node_task_temp_dir(task_id)
-        if not directory:
-            return '', 0, 0
-        try:
-            target = Path(directory)
-            target.mkdir(parents=True, exist_ok=True)
-            payload = build_stage_archive_document(
-                kind='node_stage_archive',
-                owner=stage_archive_owner(task_id, node_id),
-                created_at=now_iso(),
-                stages=records,
-            )
-            path = target / f'g3ku_node_stage_archive_{len(records)}_{uuid.uuid4().hex[:8]}.json'
-            path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding='utf-8')
-            indexes = [int((item or {}).get('stage_index') or 0) for item in list(payload.get('stages') or [])]
-            return str(path), min(indexes or [0]), max(indexes or [0])
-        except Exception:
-            return '', 0, 0
-
-    def _node_stage_archive_plan(self, *, stage_state: Any, recent_tail: list[dict[str, Any]]) -> dict[str, Any]:
-        """本轮真正吞掉的阶段 + 交给模型挑号的证据引用候选。"""
-        swallowed_ids = summarized_stage_ids(stage_state, body_messages=recent_tail)
-        if not swallowed_ids:
-            return {'stage_ids': [], 'candidates': [], 'records': []}
-        wanted = set(swallowed_ids)
-        records = [
-            stage_record_dict(stage)
-            for stage in list(getattr(stage_state, 'stages', []) or [])
-            if str(getattr(stage, 'stage_id', '') or '').strip() in wanted
-        ]
-        return {
-            'stage_ids': swallowed_ids,
-            'candidates': list(stage_ref_candidates(stage_state, stage_ids=wanted)),
-            'records': records,
-        }
-
-    def _node_stage_archive_envelope(
-        self,
-        *,
-        task_id: str,
-        node_id: str,
-        compressed_text: str,
-        plan: dict[str, Any],
-        allow_ref_selection: bool = True,
-    ) -> tuple[str, dict[str, Any], dict[str, Any]]:
-        """把摘要正文补成与前门同款的信封，返回 (正文, 压缩块 stage_archive, 诊断计数)。
-
-        `## 证据索引` 由模型选编号、运行时逐字回填；`## 阶段归档` 只留一行路径指针。
-        归档落不了盘就整轮不声明（payload 不带 `stage_archive`、正文不出现归档小节）：
-        宁可不缩，也不能把阶段收进模型打不开的地方。分块车道 `allow_ref_selection=False`
-        ——每块看不到全量候选，选择语义不成立，只留指针。"""
-        records = list((plan or {}).get('records') or [])
-        if not records:
-            return compressed_text, {}, {}
-        candidates = list((plan or {}).get('candidates') or [])
-        body = str(compressed_text or '')
-        selected_ids: list[int] = []
-        if allow_ref_selection:
-            body, selected_ids = split_stage_ref_selection(body)
-        index_text, selected_count, dropped_dead = render_stage_ref_index(candidates, selected_ids)
-        archive_path, archive_start, archive_end = self._write_node_stage_archive_file(
-            task_id=task_id,
-            node_id=node_id,
-            records=records,
-        )
-        archive_text = ''
-        stage_archive: dict[str, Any] = {}
-        if archive_path:
-            # 措辞只声明本次发送移出了什么：节点压缩按契约是 live-only， durable 帧里没有
-            # 阶段块层，也没有任何应用 `context_visible` 的落点，写"已收口、不再逐轮进入
-            # 上下文"会让模型以为这些细节已经不在体内，而它们下一轮照样会被再摘要一次。
-            archive_text = '\n'.join(
-                [
-                    STAGE_ARCHIVE_HEADING,
-                    f'- stage {archive_start}-{archive_end} 共 {len(records)} '
-                    '个阶段的完整记录（含逐条 key_refs 与工具轮次）已导档，本次压缩不再把它们逐条展开：'
-                    f'{archive_path}',
-                    '  需要回看这些阶段的细节时用 content_open 按上面的路径打开。',
-                ]
-            )
-            stage_archive = {
-                'ref': archive_path,
-                'stage_index_start': archive_start,
-                'stage_index_end': archive_end,
-                'stage_count': len(records),
-                # 水位线今天没有任何读者：节点侧还没有把标记写回账本的落点。留着它是为了
-                # 接入时不必再改块形态（届时按 created_at <= 此值标记，见前门同名小节）。
-                'archived_through_created_at': stage_created_at_ceiling(records),
-            }
-        sections = [item for item in (body.strip(), index_text, archive_text) if item]
-        diagnostics = {
-            'stage_ref_candidate_count': len(candidates),
-            'stage_ref_selected_count': int(selected_count),
-            'stage_ref_dropped_dead': int(dropped_dead),
-            'stage_archive_pending_count': len(records),
-            'stage_archive_ref': archive_path,
-        }
-        return '\n\n'.join(sections).strip(), stage_archive, diagnostics
-
     @classmethod
     def _rewrite_request_messages_for_token_compaction(
         cls,
@@ -6924,7 +6132,6 @@ class ReActToolLoop:
         request_messages: list[dict[str, Any]] | None,
         compressed_text: str = "",
         recent_tail_count: int = _NODE_TOKEN_COMPACTION_RECENT_TAIL_COUNT,
-        stage_archive: dict[str, Any] | None = None,
         preserved_raw_messages: list[dict[str, Any]] | None = None,
     ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
         parts = cls._split_request_messages_for_token_compaction(
@@ -6948,8 +6155,6 @@ class ReActToolLoop:
             # 分块没压中的原始历史留在请求体里，条数进块元数据：下一跳的规划器按"还没压
             # 的原子组"重算，靠的就是这部分仍然在场。
             compacted_payload["retained_raw_message_count"] = len(raw_leftover)
-        if dict(stage_archive or {}).get("ref"):
-            compacted_payload["stage_archive"] = dict(stage_archive)
         summary_text = str(compressed_text or "").strip()
         # 块形态与前门一致：首行前缀、第二行 JSON 元数据、空行后接摘要正文。元数据行必须
         # 能单独解析回来——落盘点要靠它读收口水位线，写成转义字面量就等于永远读不到。
@@ -7170,12 +6375,6 @@ class ReActToolLoop:
         }
         if not older_history_messages:
             return "", helper_payload
-        stage_state = self._node_durable_stage_state(node_id)
-        plan = self._node_stage_archive_plan(
-            stage_state=stage_state,
-            recent_tail=list(parts.get("recent_tail") or []),
-        )
-        helper_payload["stage_archive_plan"] = plan
         task_goal = self._node_token_compression_task_goal(
             task_id=task_id,
             node_id=node_id,
@@ -7184,10 +6383,6 @@ class ReActToolLoop:
         instruction_text = _NODE_TOKEN_COMPRESSION_INSTRUCTION_TEMPLATE.format(
             task_goal=task_goal or "（未提供）"
         )
-        # 候选清单只挂在单发指令尾部：分块车道每块看不到全量候选，选择语义不成立。
-        candidate_block = render_stage_ref_candidate_block(list(plan.get("candidates") or []))
-        if candidate_block:
-            instruction_text = f"{instruction_text}\n{STAGE_REF_SELECTION_RULE}\n\n{candidate_block}"
         must_preserve_records = self._node_compression_must_preserve_records(node_id=node_id)
         must_preserve_block = render_append_notice_must_preserve_block(must_preserve_records)
         if must_preserve_block:
@@ -8040,21 +7235,10 @@ class ReActToolLoop:
                     # 无可压缩历史：跳过压缩，请求原样下发。
                     return (request_messages, token_preflight_diagnostics, "", "")
                 compact_payload: dict[str, Any] = {}
-                # 阶段收口信封：正文补 `## 证据索引` / `## 阶段归档` 两节，压缩块带上
-                # 收口水位线，供真实发送落盘点（`_persist_actual_request_artifact`）标账本。
-                compressed_text, stage_archive_payload, stage_archive_diagnostics = self._node_stage_archive_envelope(
-                    task_id=task_id,
-                    node_id=node_id,
-                    compressed_text=compressed_text,
-                    plan=dict(compression_helper_call.get('stage_archive_plan') or {}),
-                    allow_ref_selection=str(compression_helper_call.get('compression_mode') or 'llm') == 'llm',
-                )
-                token_preflight_diagnostics.update(stage_archive_diagnostics)
                 rewritten_messages, compact_payload = self._rewrite_request_messages_for_token_compaction(
                     node_id=node_id,
                     request_messages=request_messages,
                     compressed_text=compressed_text,
-                    stage_archive=stage_archive_payload,
                     preserved_raw_messages=list(compression_helper_call.get('deferred_raw_messages') or []),
                 )
                 request_messages = rewritten_messages
@@ -8301,11 +7485,6 @@ class ReActToolLoop:
                 node_kind=node.node_kind,
                 tags=repair_tags,
             )
-        stage_gate = self._execution_stage_gate(
-            task_id=task.task_id,
-            node_id=node.node_id,
-            node_kind=node.node_kind,
-        )
         self._log_service.update_frame(
             task.task_id,
             node.node_id,
@@ -8317,7 +7496,6 @@ class ReActToolLoop:
                 'messages': self._prepare_messages(message_history, runtime_context=runtime_context),
                 'pending_tool_calls': [tool_payload],
                 'tool_calls': [self._live_tool_entry(tool_call)],
-                **self._execution_stage_frame_payload(node_kind=node.node_kind, stage_gate=stage_gate),
                 'last_error': '',
             },
             publish_snapshot=True,
@@ -8341,11 +7519,6 @@ class ReActToolLoop:
             runtime_context={
                 **runtime_context,
                 'current_tool_call_id': tool_payload['id'],
-                'stage_turn_granted': bool(
-                    stage_gate.get('enabled')
-                    and stage_gate.get('has_active_stage')
-                    and not stage_gate.get('transition_required')
-                ),
             },
         )
         tool_content = self._render_tool_message_content(
@@ -8454,14 +7627,6 @@ class ReActToolLoop:
                         'elapsed_seconds': elapsed_seconds,
                     }
                 ],
-                **self._execution_stage_frame_payload(
-                    node_kind=node.node_kind,
-                    stage_gate=self._execution_stage_gate(
-                        task_id=task.task_id,
-                        node_id=node.node_id,
-                        node_kind=node.node_kind,
-                    ),
-                ),
                 'last_error': tool_content if status == 'error' else '',
             },
             publish_snapshot=True,
@@ -8542,14 +7707,6 @@ class ReActToolLoop:
                     }
                     for call in list(response_tool_calls or [])
                 ],
-                **self._execution_stage_frame_payload(
-                    node_kind=node.node_kind,
-                    stage_gate=self._execution_stage_gate(
-                        task_id=task.task_id,
-                        node_id=node.node_id,
-                        node_kind=node.node_kind,
-                    ),
-                ),
                 'last_error': error_content,
             },
             publish_snapshot=True,
@@ -9109,7 +8266,7 @@ class ReActToolLoop:
             )
         return (
             f'Your previous reply did not submit a valid final result for result contract v{RESULT_SCHEMA_VERSION}. '
-            'If the task is not complete yet — deliverables not actually produced and verified — continue with tools or `submit_next_stage` instead of forcing a premature final submission. '
+            'If the task is not complete yet — deliverables not actually produced and verified — continue with tools instead of forcing a premature final submission. '
             f'If you are ending the node now because the work is truly finished, call `{FINAL_RESULT_TOOL_NAME}` with exactly these fields: '
             '{"status":"success|failed","delivery_status":"final|blocked","summary":"...","answer":"...",'
             '"evidence":[{"kind":"file|artifact|url","path":"","ref":"","start_line":1,"end_line":1,"note":"..."}],'
@@ -9133,7 +8290,7 @@ class ReActToolLoop:
             )
         return (
             f'Your last `{FINAL_RESULT_TOOL_NAME}` payload violated result contract v{RESULT_SCHEMA_VERSION}: {bullet_text}. '
-            'If the task is not complete yet, continue with tools or `submit_next_stage`; do not force another premature final submission. '
+            'If the task is not complete yet, continue with tools; do not force another premature final submission. '
             f'If you are ending the node now because the work is truly finished, fix the payload and call `{FINAL_RESULT_TOOL_NAME}` again. '
             'Never fill the fields with placeholder text such as "placeholder": `summary` and `answer` must carry the real, verifiable conclusion, and a success+final submission goes straight to acceptance. '
             f'{guidance}'
@@ -9234,7 +8391,7 @@ class ReActToolLoop:
         return (
             f'Execution nodes must end through `{FINAL_RESULT_TOOL_NAME}`. '
             'Use success+final on completion, and use failed+blocked only when the node is genuinely blocked. '
-            'If work remains, continue with tools or `submit_next_stage` instead of finalizing. '
+            'If work remains, continue with tools instead of finalizing. '
             'A failed+blocked claim is independently verified by an acceptance node and rejected claims are sent back; '
             'never use a failed result as a placeholder or to escape remaining work while budget and a viable next step exist. '
             'A success+final submission goes straight to acceptance as well: never use it as a placeholder — '
@@ -9288,9 +8445,7 @@ class ReActToolLoop:
     def _repair_tool_choice(
         *,
         visible_tools: dict[str, Tool],
-        stage_gate: dict[str, Any],
         invalid_final_submission_count: int,
-        invalid_stage_submission_count: int,
     ) -> dict[str, Any] | None:
         visible_tool_names = {
             str(name or '').strip()
@@ -9302,48 +8457,7 @@ class ReActToolLoop:
                 'type': 'function',
                 'function': {'name': FINAL_RESULT_TOOL_NAME},
             }
-        if (
-            invalid_stage_submission_count > 0
-            and STAGE_TOOL_NAME in visible_tool_names
-            and bool(stage_gate.get('enabled'))
-            and (
-                not bool(stage_gate.get('has_active_stage'))
-                or bool(stage_gate.get('transition_required'))
-            )
-        ):
-            return {
-                'type': 'function',
-                'function': {'name': STAGE_TOOL_NAME},
-            }
         return None
-
-    @classmethod
-    def _recover_stage_submission_tool_call_from_context(
-        cls,
-        *,
-        node,
-        stage_gate: dict[str, Any],
-        model_messages: list[dict[str, Any]],
-        invalid_stage_submission_count: int,
-    ) -> ToolCallRequest | None:
-        if invalid_stage_submission_count <= 0:
-            return None
-        if not bool(stage_gate.get('enabled')):
-            return None
-        has_active_stage = bool(stage_gate.get('has_active_stage'))
-        transition_required = bool(stage_gate.get('transition_required'))
-        if has_active_stage and not transition_required:
-            return None
-        arguments = cls._default_stage_submission_arguments(
-            node_kind=str(getattr(node, 'node_kind', '') or ''),
-            stage_gate=stage_gate,
-            messages=model_messages,
-        )
-        return ToolCallRequest(
-            id=f'call:auto-stage:{int(invalid_stage_submission_count)}',
-            name=STAGE_TOOL_NAME,
-            arguments=arguments,
-        )
 
     @classmethod
     def _auto_wrapped_final_result_evidence(
@@ -9384,7 +8498,7 @@ class ReActToolLoop:
             if str(message.get('role') or '').strip().lower() != 'tool':
                 continue
             tool_name = str(message.get('name') or '').strip()
-            if not tool_name or tool_name in {STAGE_TOOL_NAME, FINAL_RESULT_TOOL_NAME, *cls._CONTROL_TOOL_NAMES}:
+            if not tool_name or tool_name in {FINAL_RESULT_TOOL_NAME, *cls._CONTROL_TOOL_NAMES}:
                 continue
             if tool_name not in tool_names:
                 tool_names.append(tool_name)
@@ -9396,59 +8510,6 @@ class ReActToolLoop:
                 }
             )
         return evidence
-
-    @classmethod
-    def _default_stage_submission_arguments(
-        cls,
-        *,
-        node_kind: str,
-        stage_gate: dict[str, Any],
-        messages: list[dict[str, Any]],
-    ) -> dict[str, Any]:
-        context = cls._extract_node_context_payload(messages)
-        prompt_text = str((context or {}).get('prompt') or '').strip()
-        goal_text = str((context or {}).get('goal') or '').strip()
-        focus_text = cls._truncate_stage_goal_text(prompt_text or goal_text)
-        normalized_kind = str(node_kind or '').strip().lower()
-        has_active_stage = bool(stage_gate.get('has_active_stage'))
-        active_stage = stage_gate.get('active_stage') if isinstance(stage_gate.get('active_stage'), dict) else {}
-        if not has_active_stage:
-            if normalized_kind == 'acceptance':
-                stage_goal = '先创建首个验收阶段并聚焦当前节点目标，完成第一轮关键证据定位与结论核验。'
-            else:
-                stage_goal = '先创建首个执行阶段并围绕当前节点目标完成首轮定向信息收集与关键入口定位。'
-            if focus_text:
-                stage_goal = f'{stage_goal} 当前焦点：{focus_text}'
-            return {
-                'stage_goal': stage_goal,
-                'tool_round_budget': STAGE_TOOL_ROUND_BUDGET_MIN,
-            }
-        previous_goal = str((active_stage or {}).get('stage_goal') or '').strip()
-        previous_budget = int((active_stage or {}).get('tool_round_budget') or 0)
-        used_budget = int((active_stage or {}).get('tool_rounds_used') or 0)
-        if normalized_kind == 'acceptance':
-            next_goal = '在上一阶段基础上继续当前验收目标，优先补齐未确认的关键证据与结论。'
-        else:
-            next_goal = '在上一阶段基础上继续推进当前节点目标，优先补齐剩余关键证据并避免重复搜索。'
-        if previous_goal:
-            next_goal = f'{next_goal} 上一阶段目标：{cls._truncate_stage_goal_text(previous_goal)}'
-        if focus_text:
-            next_goal = f'{next_goal} 当前焦点：{focus_text}'
-        return {
-            'stage_goal': next_goal,
-            'tool_round_budget': min(
-                STAGE_TOOL_ROUND_BUDGET_MAX,
-                max(
-                    STAGE_TOOL_ROUND_BUDGET_MIN,
-                    previous_budget if previous_budget > 0 else STAGE_TOOL_ROUND_BUDGET_MIN,
-                ),
-            ),
-            'completed_stage_summary': (
-                f'自动阶段切换：上一阶段预算 {used_budget}/{previous_budget or used_budget or 0} '
-                '已耗尽，但模型未显式创建下一阶段。'
-            ),
-            'key_refs': [],
-        }
 
     @staticmethod
     def _extract_node_context_payload(messages: list[dict[str, Any]]) -> dict[str, Any]:
@@ -9467,13 +8528,6 @@ class ReActToolLoop:
             if isinstance(parsed, dict):
                 return parsed
         return {}
-
-    @staticmethod
-    def _truncate_stage_goal_text(value: Any, *, limit: int = 180) -> str:
-        text = ' '.join(str(value or '').split())
-        if len(text) <= limit:
-            return text
-        return text[: max(0, limit - 3)].rstrip() + '...'
 
     @classmethod
     def _recover_final_result_tool_call_from_raw_json(
@@ -9654,16 +8708,6 @@ class ReActToolLoop:
                 return
             if isinstance(item, str):
                 text = str(item or '')
-                for prefix in (*_STAGE_COMPACT_PREFIXES, *_STAGE_EXTERNALIZED_PREFIXES):
-                    if text.startswith(prefix):
-                        payload_text = text[len(prefix) :].strip()
-                        if payload_text.startswith('{') or payload_text.startswith('['):
-                            try:
-                                parsed = json.loads(payload_text)
-                            except Exception:
-                                parsed = None
-                            if parsed is not None:
-                                _visit(parsed)
                 for match in _ARTIFACT_REF_PATTERN.finditer(text):
                     found.add(match.group(0))
                 stripped = text.strip()
@@ -9986,7 +9030,7 @@ class ReActToolLoop:
     # 信封里 ref 是空的），而模型重复同一份提交时，最新一拍正是它会读的那行。
     # 实盘 node:ce794e2526f2（2026-10-03）：第 3 次拒收给的是 369 字完整契约，
     # 第 4/5 次被折成 250 字 reused 信封、summary 在契约中段就截断了。
-    _NO_DEDUPE_RECEIPT_TOOL_NAMES = frozenset({FINAL_RESULT_TOOL_NAME, STAGE_TOOL_NAME})
+    _NO_DEDUPE_RECEIPT_TOOL_NAMES = frozenset({FINAL_RESULT_TOOL_NAME})
 
     @classmethod
     def _is_no_dedupe_receipt_message(cls, message: Any) -> bool:
@@ -10112,37 +9156,6 @@ class ReActToolLoop:
             failure_disposition='pause',
         )
 
-    def _execution_stage_state_for_runtime(self, *, runtime_context: dict[str, Any]):
-        store = getattr(self._log_service, '_store', None)
-        getter = getattr(store, 'get_node', None) if store is not None else None
-        if not callable(getter):
-            return normalize_execution_stage_metadata({})
-        node = getter(str(runtime_context.get('node_id') or '').strip())
-        if node is None:
-            return normalize_execution_stage_metadata({})
-        payload = (node.metadata or {}).get('execution_stages') if isinstance(node.metadata, dict) else {}
-        return normalize_execution_stage_metadata(payload)
-
-    def _execution_stage_transition_signature(self, *, runtime_context: dict[str, Any]):
-        """本节点阶段账本的事实指纹；读不到返回 None（调用方按"可能动过"处理）。"""
-        try:
-            return _shared_stage_transition_signature(
-                self._execution_stage_state_for_runtime(runtime_context=runtime_context)
-            )
-        except Exception:
-            return None
-
-    @staticmethod
-    def _is_stage_context_message(message: dict[str, Any]) -> bool:
-        return _shared_is_stage_context_message(message)
-
-    def _stage_prompt_prefix(self, messages: list[dict[str, Any]]) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
-        return _shared_stage_prompt_prefix(messages)
-
-    @staticmethod
-    def _completed_stage_blocks(stage_state: Any, *, skip_stage_ids: set[str] | None = None) -> list[dict[str, Any]]:
-        return _shared_completed_stage_blocks(stage_state, skip_stage_ids=skip_stage_ids)
-
     def _prepare_messages(self, messages: list[dict[str, Any]], *, runtime_context: dict[str, Any]) -> list[dict[str, Any]]:
         return self._prepare_messages_with_parts(messages, runtime_context=runtime_context)[0]
 
@@ -10153,32 +9166,22 @@ class ReActToolLoop:
         runtime_context: dict[str, Any],
     ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
         normalized_messages = strip_turn_only_system_note_messages(strip_node_dynamic_contract_messages(messages))
-        stage_state = self._execution_stage_state_for_runtime(runtime_context=runtime_context)
-        parts = _shared_compact_stage_prompt_messages_in_place(
-            normalized_messages,
-            stage_state=stage_state,
-            stage_tool_name=STAGE_TOOL_NAME,
-        )
-        rewritten = list(parts.get('rewritten') or [])
         visible_user_messages = [
             str(item.get('content') or '').strip()
-            for item in rewritten
+            for item in normalized_messages
             if isinstance(item, dict) and str(item.get('role') or '').strip().lower() == 'user'
         ]
         notice_tail_messages = self._append_notice_tail_messages(
             runtime_context=runtime_context,
             visible_user_messages=visible_user_messages,
-            existing_messages=rewritten,
+            existing_messages=normalized_messages,
         )
-        # notice_tail 保持在压缩内容之前；重写区内的块原位放置，输出头两条
-        # 恒为系统+首条用户，保证同回合 append-only 前缀探针不退化。
         return (
             [
-                *list(parts.get('prefix') or []),
                 *notice_tail_messages,
-                *rewritten,
+                *normalized_messages,
             ],
-            parts,
+            {},
         )
 
     def _append_notice_tail_messages(
@@ -10331,23 +9334,6 @@ class ReActToolLoop:
             source = 'scaffold_seed_with_delta' if derived_delta else 'scaffold_seed'
             return seed_records, derived_delta, source
         return None, [], 'fallback_seed_misaligned'
-
-    @staticmethod
-    def _stage_expiry_hop(
-        *,
-        previous_request_messages: list[dict[str, Any]] | None,
-        stage_compaction_parts: dict[str, Any] | None,
-    ) -> bool:
-        """本跳是否正踩在阶段过期点上：当前发送基线里仍留着被判过期阶段的工具肉身。
-
-        只有这一跳允许用投影替换 append-only 基线，所以判据必须"换过基线后立刻转为假"
-        ——裁完的正文不再含那些 call id，下一跳回到字面前缀链。否则每轮按投影重排会把
-        provider 前缀失效面从"每个过期点一次"放大到"每轮一次"。
-        """
-        expired_call_ids = set(dict(stage_compaction_parts or {}).get('expired_call_ids') or set())
-        if not expired_call_ids:
-            return False
-        return bool(_shared_stage_message_call_ids(previous_request_messages) & expired_call_ids)
 
     @classmethod
     def _same_turn_append_only_request_messages_with_source(

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, model_serializer
+from pydantic import BaseModel, ConfigDict, Field
 
 from main.types import NodeKind, NodeStatus, TaskStatus
 
@@ -123,78 +123,6 @@ class FinalAcceptanceState(Model):
 
 class ExecutionPolicyState(Model):
     mode: Literal['focus', 'coverage'] = EXECUTION_POLICY_FOCUS
-
-
-class ExecutionStageRound(Model):
-    round_id: str = ''
-    round_index: int = 0
-    created_at: str = ''
-    # 模型在本轮工具调用同批响应里的中途叙述文本,供 Web 阶段时间线展示
-    text: str = ''
-    tool_call_ids: list[str] = Field(default_factory=list)
-    tool_names: list[str] = Field(default_factory=list)
-    budget_counted: bool = False
-    # 宽限执行记账标记(与 CEO/frontdoor 侧语义一致):
-    # orphan       — 无活动阶段时撞闸宽限执行的轮次,暂存于 pending_orphan_rounds
-    # overflow     — 预算耗尽时宽限执行的轮次,attach 回耗尽阶段自身(不占预算)
-    # orphan_grafted — 前两者的孤儿轮被下一次 submit_next_stage 嫁接进新阶段后打此标记
-    orphan: bool = False
-    overflow: bool = False
-    orphan_grafted: bool = False
-
-
-class ExecutionStageKeyRef(Model):
-    ref: str = ''
-    note: str = ''
-
-
-class ExecutionStageRecord(Model):
-    stage_id: str = ''
-    stage_index: int = 0
-    stage_kind: Literal['normal', 'compression'] = 'normal'
-    system_generated: bool = False
-    mode: Literal['自主执行', '包含派生'] = '自主执行'
-    status: Literal['进行中', '完成', '失败'] = '进行中'
-    stage_goal: str = ''
-    completed_stage_summary: str = ''
-    final_stage: bool = False
-    # 收口标记：False 表示这条完成阶段已经被某次 token_compression 吞进全局摘要，
-    # 不再逐轮进入 provider 上下文。口径与 CEO/frontdoor 一致：只在收口时写出这个键，
-    # 缺失即可见；账本条数与 stage_index 都不变，Web 时间线仍以账本为权威。
-    context_visible: bool = True
-    # 裁撤标记：模型在关闭本阶段时主动要求把它的原始工具入参/出参移出 provider 上下文，
-    # 只留下阶段块里的总结。与 context_visible 是两件事——收口连块都不再渲染（正文已进
-    # 全局摘要），裁撤只移出肉身、块照旧逐轮在场，所以总结永远不会是唯一记录。
-    # 写出前提是 completed_stage_summary 非空，由提交点校验，不在此处兜底。
-    context_evicted: bool = False
-    key_refs: list[ExecutionStageKeyRef] = Field(default_factory=list)
-    archive_ref: str = ''
-    archive_stage_index_start: int = 0
-    archive_stage_index_end: int = 0
-    tool_round_budget: int = 0
-    tool_rounds_used: int = 0
-    created_at: str = ''
-    finished_at: str = ''
-    rounds: list[ExecutionStageRound] = Field(default_factory=list)
-
-    @model_serializer(mode='wrap')
-    def _serialize_omitting_visible_flag(self, handler: Any) -> dict[str, Any]:
-        """落盘只写"已收口 / 已裁撤"这一侧：两者默认态都是 True/False 的"未发生"，
-        逐条写等于给每条阶段都加一份体积。"""
-        payload = handler(self)
-        if payload.get('context_visible') is not False:
-            payload.pop('context_visible', None)
-        if payload.get('context_evicted') is not True:
-            payload.pop('context_evicted', None)
-        return payload
-
-
-class ExecutionStageState(Model):
-    active_stage_id: str = ''
-    transition_required: bool = False
-    stages: list[ExecutionStageRecord] = Field(default_factory=list)
-    # 无活动阶段时宽限执行产生的待入账孤儿轮,下一次 submit_next_stage 嫁接进新阶段后清空
-    pending_orphan_rounds: list[ExecutionStageRound] = Field(default_factory=list)
 
 
 class SpawnChildSpec(Model):
@@ -435,53 +363,6 @@ def build_execution_policy_schema(*, description: str) -> dict[str, Any]:
         },
         'required': ['mode'],
     }
-
-
-def normalize_execution_stage_metadata(value: Any) -> ExecutionStageState:
-    payload = value.model_dump(mode='json') if isinstance(value, ExecutionStageState) else (dict(value) if isinstance(value, dict) else {})
-    active_stage_id = str(payload.get('active_stage_id') or '').strip()
-    transition_required = bool(payload.get('transition_required'))
-    stages: list[ExecutionStageRecord] = []
-    for item in list(payload.get('stages') or []):
-        if not isinstance(item, dict):
-            continue
-        try:
-            stage = ExecutionStageRecord.model_validate(item)
-        except Exception:
-            continue
-        tool_round_budget = max(0, int(stage.tool_round_budget or 0))
-        tool_rounds_used = max(0, min(int(stage.tool_rounds_used or 0), tool_round_budget or int(stage.tool_rounds_used or 0)))
-        stages.append(
-            stage.model_copy(
-                update={
-                    'tool_round_budget': tool_round_budget,
-                    'tool_rounds_used': tool_rounds_used,
-                    'archive_stage_index_start': max(0, int(stage.archive_stage_index_start or 0)),
-                    'archive_stage_index_end': max(0, int(stage.archive_stage_index_end or 0)),
-                    'completed_stage_summary': str(stage.completed_stage_summary or ''),
-                    'key_refs': [
-                        ExecutionStageKeyRef.model_validate(key_ref)
-                        for key_ref in list(stage.key_refs or [])
-                    ],
-                }
-            )
-        )
-    if active_stage_id and not any(stage.stage_id == active_stage_id for stage in stages):
-        active_stage_id = ''
-    pending_orphan_rounds: list[ExecutionStageRound] = []
-    for item in list(payload.get('pending_orphan_rounds') or []):
-        if not isinstance(item, dict):
-            continue
-        try:
-            pending_orphan_rounds.append(ExecutionStageRound.model_validate(item))
-        except Exception:
-            continue
-    return ExecutionStageState(
-        active_stage_id=active_stage_id,
-        transition_required=transition_required,
-        stages=stages,
-        pending_orphan_rounds=pending_orphan_rounds,
-    )
 
 
 def normalize_tool_file_changes(value: Any) -> list[NodeToolFileChange]:

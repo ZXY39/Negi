@@ -10,10 +10,6 @@ from g3ku.runtime.project_environment import (
 )
 from g3ku.runtime.tool_visibility import CEO_FIXED_BUILTIN_TOOL_NAMES
 from main.prompts import INCLUDE_RE, load_prompt
-from main.runtime.stage_budget import (
-    STAGE_TOOL_NAME,
-    ceo_stage_free_tool_names,
-)
 from main.runtime.tool_names import (
     FINAL_RESULT_TOOL_NAME,
     SILENT_TOOL_NAME,
@@ -22,21 +18,16 @@ from main.runtime.tool_names import (
 
 # 提示词只点名前门真会曝光的工具：`stop_tool_execution` / `wait_tool_execution` 没有
 # resource.yaml 族、进不了 exposure，`*_v2` 也不是注册名——把它们印进名单等于教模型去发
-# 一个发不出的动作。豁免集本身仍以闸门为唯一来源，这里只做可曝光投影。
-_CEO_ADVERTISABLE_STAGELESS_TOOL_NAMES = frozenset(CEO_FIXED_BUILTIN_TOOL_NAMES) | {
-    STAGE_TOOL_NAME,
+# 一个发不出的动作。
+_CEO_ADVERTISABLE_TOOL_NAMES = frozenset(CEO_FIXED_BUILTIN_TOOL_NAMES) | {
     FINAL_RESULT_TOOL_NAME,
     SPAWN_CHILD_NODES_TOOL_NAME,
     SILENT_TOOL_NAME,
 }
 
 
-def _stage_free_prompt_tool_names() -> list[str]:
-    return sorted(
-        name
-        for name in ceo_stage_free_tool_names()
-        if name in _CEO_ADVERTISABLE_STAGELESS_TOOL_NAMES
-    )
+def _ceo_prompt_tool_names() -> list[str]:
+    return sorted(_CEO_ADVERTISABLE_TOOL_NAMES)
 
 
 _PROMPT_TEMPLATE_VARIABLE = re.compile(r'{{\s*([a-zA-Z_][a-zA-Z0-9_]*)\s*}}')
@@ -77,7 +68,7 @@ class CeoPromptBuilder:
         prompt = self._read_prompt('ceo_frontdoor.md')
         rendered = self._render_prompt(
             prompt,
-            {'stage_free_tools': ', '.join(_stage_free_prompt_tool_names())},
+            {'control_tools': ', '.join(_ceo_prompt_tool_names())},
         )
         rendered = self._sanitize_prompt(rendered)
         runtime_environment_block = self._runtime_environment_block(project_environment)
@@ -134,8 +125,7 @@ class CeoPromptBuilder:
             [
                 '## 本轮可见技能',
                 '- 只有以下 `skill_id` 在本轮可见，不要假设其他 skill 可用。',
-                '- “可见”不等于“本轮一开始就应该读取正文”；如果当前还没有活动阶段且你需要使用工具，必须把 `submit_next_stage` 与目标工具同批提交（`submit_next_stage` 先执行，工具记入新阶段首轮）。',
-                '- 仅当当前已经存在活动阶段且你确实需要完整工作流正文时，才可对下列 `skill_id` 调用 `load_skill_context(skill_id="<skill_id>")`。',
+                '- “可见”不等于“本轮一开始就应该读取正文”；需要完整工作流正文时，对下列 `skill_id` 调用 `load_skill_context(skill_id="<skill_id>")`。',
                 '- candidate skill 不走 hydration；不要把候选 skill 误当成需要安装或等待下一轮才可读取正文的工具。',
                 *lines,
             ]

@@ -841,38 +841,6 @@ async def withdraw_ceo_queued_follow_up(session_id: str, payload: dict = Body(..
     return {"ok": True, "session_id": session.key, "turn_id": turn_id}
 
 
-def _tool_arguments_from_ledger(ledger: object, tool_call_id: str) -> dict | None:
-    """按 tool_call_id 在 frontdoor 账本里找那一次调用的原始入参。
-
-    出帧时超长入参会被裁空（`canonical_context._cap_tool_payload`），账本这一份没有裁，
-    所以"面板点开才回取一次"是零常驻字节的那条车道。完成态 sidecar 把账本包在键里，
-    live 快照则是平铺的 stage state，两种形状在这里一次认掉。
-    """
-    payload = ledger if isinstance(ledger, dict) else {}
-    stages = payload.get("stages")
-    if not isinstance(stages, list):
-        for nested_key in ("frontdoor_stage_state", "frontdoor_canonical_context"):
-            nested = payload.get(nested_key)
-            if isinstance(nested, dict) and isinstance(nested.get("stages"), list):
-                stages = nested["stages"]
-                break
-    for stage in list(stages or []):
-        if not isinstance(stage, dict):
-            continue
-        for round_item in list(stage.get("rounds") or []):
-            if not isinstance(round_item, dict):
-                continue
-            for tool in list(round_item.get("tools") or []):
-                if not isinstance(tool, dict):
-                    continue
-                if str(tool.get("tool_call_id") or "").strip() != tool_call_id:
-                    continue
-                arguments = tool.get("arguments")
-                if isinstance(arguments, dict):
-                    return arguments
-    return None
-
-
 def _tool_arguments_from_turns(turns: object, tool_call_id: str) -> dict | None:
     tool = find_frontdoor_turn_tool(turns, tool_call_id)
     if not tool:
@@ -902,19 +870,13 @@ async def get_ceo_session_tool_arguments(session_id: str, tool_call_id: str = ""
         session_id,
         create=False,
     )
-    # turns 账本是新的全量入参来源；旧 stage 账本只作过渡回退，P4 删除。
+    # 全量入参的唯一来源是 turns 账本：会话没驻留（进程重启后还没人连过）时读完成态 sidecar。
     turns = getattr(runtime_session, "_frontdoor_turns", None)
     if not turns:
         continuity = read_completed_continuity_snapshot(session_key)
         if isinstance(continuity, dict):
             turns = continuity.get("frontdoor_turns")
     arguments = _tool_arguments_from_turns(turns, target)
-    if arguments is None:
-        ledger = getattr(runtime_session, "_frontdoor_stage_state", None)
-        if not isinstance(ledger, dict) or not list(ledger.get("stages") or []):
-            # 会话没驻留（进程重启后还没人连过）时读完成态 sidecar，那份同样是未裁的账本。
-            ledger = read_completed_continuity_snapshot(session_key)
-        arguments = _tool_arguments_from_ledger(ledger, target)
     if arguments is None:
         raise HTTPException(status_code=404, detail="tool_arguments_not_found")
     return {

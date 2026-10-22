@@ -9,11 +9,7 @@ from g3ku.utils.helpers import render_candidate_tool_line
 NODE_DYNAMIC_CONTRACT_KIND = 'node_runtime_tool_contract'
 NODE_DYNAMIC_CONTRACT_HEADING = '## Runtime Tool Contract'
 NODE_DYNAMIC_CONTRACT_PAYLOAD_KEY = '_node_runtime_tool_contract_payload'
-# 与前门 FrontdoorToolContract 同形：回合内常量的候选/修复/策略留在这份契约里，
-# 每跳重写的 callable / 活动阶段单独成块落在请求体末位，重写只顶掉它自己。
-NODE_DYNAMIC_STAGE_GATE_KIND = 'node_runtime_stage_gate'
-NODE_DYNAMIC_STAGE_GATE_HEADING = '## Runtime Stage Gate'
-NODE_RUNTIME_APPENDIX_HEADINGS = (NODE_DYNAMIC_CONTRACT_HEADING, NODE_DYNAMIC_STAGE_GATE_HEADING)
+NODE_RUNTIME_APPENDIX_HEADINGS = (NODE_DYNAMIC_CONTRACT_HEADING,)
 
 
 def _normalized_name_list(items: list[Any] | None) -> list[str]:
@@ -116,32 +112,6 @@ def _normalized_repair_required_skill_items(items: list[Any] | None) -> list[dic
     return ordered
 
 
-def _active_stage_prompt_view(active_stage: dict[str, Any] | None) -> dict[str, Any] | None:
-    if not isinstance(active_stage, dict):
-        return None
-    stage_id = str(active_stage.get('stage_id') or '').strip()
-    if not stage_id:
-        return None
-    return {
-        'stage_id': stage_id,
-        'stage_goal': str(active_stage.get('stage_goal') or '').strip(),
-        'tool_round_budget': max(0, int(active_stage.get('tool_round_budget') or 0)),
-        'stage_kind': str(active_stage.get('stage_kind') or 'normal').strip() or 'normal',
-        'final_stage': bool(active_stage.get('final_stage', False)),
-    }
-
-
-def _stable_stage_payload(stage_payload: dict[str, Any] | None) -> dict[str, Any]:
-    payload = dict(stage_payload or {})
-    return {
-        'has_active_stage': bool(payload.get('has_active_stage')),
-        'transition_required': bool(payload.get('transition_required')),
-        'active_stage': _active_stage_prompt_view(
-            payload.get('active_stage') if isinstance(payload.get('active_stage'), dict) else None
-        ),
-    }
-
-
 def _render_name_list(items: list[str] | None) -> str:
     names = _normalized_name_list(items)
     if not names:
@@ -174,32 +144,6 @@ def _render_repair_required_tool_section(items: list[dict[str, str]] | None) -> 
             detail = f'{detail} Reason: {reason}'
         lines.append(f'- `{tool_id}`: {detail}')
     return lines
-
-
-def _render_stage_summary(stage_payload: dict[str, Any] | None) -> str:
-    payload = _stable_stage_payload(stage_payload)
-    active_stage = dict(payload.get('active_stage') or {}) if isinstance(payload.get('active_stage'), dict) else {}
-    if not active_stage:
-        return (
-            'stage_summary: '
-            f'has_active_stage={bool(payload.get("has_active_stage"))}; '
-            f'transition_required={bool(payload.get("transition_required"))}'
-        )
-    parts = [
-        f'has_active_stage={bool(payload.get("has_active_stage"))}',
-        f'transition_required={bool(payload.get("transition_required"))}',
-        f'stage_id={str(active_stage.get("stage_id") or "").strip() or "none"}',
-    ]
-    stage_goal = str(active_stage.get('stage_goal') or '').strip()
-    if stage_goal:
-        parts.append(f'stage_goal={stage_goal}')
-    tool_round_budget = active_stage.get('tool_round_budget')
-    if tool_round_budget not in (None, ''):
-        parts.append(f'tool_round_budget={int(tool_round_budget)}')
-    stage_kind = str(active_stage.get('stage_kind') or '').strip()
-    if stage_kind:
-        parts.append(f'stage_kind={stage_kind}')
-    return 'stage_summary: ' + '; '.join(parts)
 
 
 def _render_exec_runtime_policy(exec_runtime_policy: dict[str, Any] | None) -> str:
@@ -240,21 +184,6 @@ def _render_node_dynamic_contract_summary(payload: dict[str, Any]) -> str:
             'denied_tools (`tools[]` 里带着参数表，但这一跳调不动——无权限或资源已下架，'
             f'调用一律被拒；不要反复重试或改着名字试): {_render_name_list(denied_tool_names)}'
         )
-    return '\n'.join(lines)
-
-
-def _render_node_stage_gate_summary(payload: dict[str, Any]) -> str:
-    """每跳重写的活状态：活动阶段轨道。排在请求体末位。
-
-    `denied_tools` 已搬到回合内常量的 `## Runtime Tool Contract` 块；与前门同一口径
-    删掉 `callable_tools`：契约不在场不再是"调不动"，而是"这一跳先拿契约"，
-    列一份每跳变化的名单没有可执行动作，只能靠模型自己去比对。
-    """
-    lines = [
-        NODE_DYNAMIC_STAGE_GATE_HEADING,
-        f'kind: {NODE_DYNAMIC_STAGE_GATE_KIND}',
-    ]
-    lines.append(_render_stage_summary(payload.get('execution_stage')))
     return '\n'.join(lines)
 
 
@@ -303,7 +232,6 @@ class NodeRuntimeToolContract:
     candidate_tool_names: list[str]
     visible_skills: list[dict[str, str]]
     candidate_skill_ids: list[str]
-    stage_payload: dict[str, Any]
     lightweight_tool_ids: list[str]
     selection_trace: dict[str, Any]
     contract_visible_skill_ids: list[str] | None = None
@@ -330,7 +258,6 @@ class NodeRuntimeToolContract:
                 list(self.candidate_skill_items or []),
                 fallback_ids=list(self.candidate_skill_ids or []),
             ),
-            'execution_stage': _stable_stage_payload(self.stage_payload),
         }
         repair_required_tools = _normalized_repair_required_tool_items(self.repair_required_tool_items)
         if repair_required_tools:
@@ -361,18 +288,9 @@ class NodeRuntimeToolContract:
             NODE_DYNAMIC_CONTRACT_PAYLOAD_KEY: payload,
         }
 
-    def to_stage_gate_message(self) -> dict[str, Any]:
-        """活状态块：与契约同源，只含每跳重写的行，排在请求体真正末位。"""
-        return {
-            'role': 'user',
-            'content': _render_node_stage_gate_summary(self.to_message_payload()),
-        }
-
-
 def _node_runtime_appendix_kind(heading: str) -> str:
     return {
         NODE_DYNAMIC_CONTRACT_HEADING: NODE_DYNAMIC_CONTRACT_KIND,
-        NODE_DYNAMIC_STAGE_GATE_HEADING: NODE_DYNAMIC_STAGE_GATE_KIND,
     }[heading]
 
 
@@ -398,8 +316,7 @@ def _node_dynamic_contract_heading_index(text: str) -> int:
     The heading alone is not enough to classify ordinary prose that merely
     mentions the contract. Requiring the canonical kind marker in the nearby
     suffix keeps this helper focused on the provider-facing contract summary
-    that the runtime injects. The live stage gate counts too: it is the block
-    at the continuation point, so it is the one a model can echo.
+    that the runtime injects.
     """
     normalized = str(text or '')
     best = -1
@@ -435,10 +352,9 @@ def upsert_node_dynamic_contract_message(
     messages: list[dict[str, Any]],
     contract: NodeRuntimeToolContract,
 ) -> list[dict[str, Any]]:
-    """尾部恰好两份：回合内常量的契约 + 每跳重写的活状态块（契约在前、活块在末位）。"""
+    """尾部恰好一份回合内契约。"""
     updated = strip_node_dynamic_contract_messages(messages)
     updated.append(contract.to_message())
-    updated.append(contract.to_stage_gate_message())
     return updated
 
 

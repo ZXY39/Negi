@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import hashlib
-import json
 import re
 import time
 from datetime import datetime
@@ -18,15 +17,9 @@ from g3ku.core.timefmt import (
 )
 from g3ku.llm_config.runtime_resolver import resolve_chat_target
 from g3ku.runtime.context.types import ContextAssemblyResult, RetrievedContextBundle
-from g3ku.runtime.frontdoor.canonical_context import (
-    combine_canonical_context,
-    materialize_transcript_view,
-    normalize_frontdoor_canonical_context,
-)
 from g3ku.runtime.frontdoor.capability_snapshot import CapabilitySnapshot, build_capability_snapshot
 from g3ku.runtime.frontdoor.cron_hidden_prompt import strip_cron_hidden_prompt
 from g3ku.runtime.frontdoor.prompt_cache_contract import DEFAULT_CACHE_FAMILY_REVISION
-from g3ku.runtime.frontdoor.raw_stage_renderer import retained_raw_stage_messages
 from g3ku.runtime.frontdoor.session_temp_dir import ceo_session_temp_dir
 from g3ku.runtime.frontdoor.tool_contract import (
     build_frontdoor_tool_contract,
@@ -38,13 +31,6 @@ from g3ku.runtime.frontdoor.tool_contract import (
     upsert_frontdoor_tool_contract_message,
 )
 from g3ku.runtime.message_token_estimation import estimate_message_tokens
-from g3ku.runtime.stage_prompt_compaction import (
-    compact_stage_prompt_messages_in_place,
-    completed_stage_blocks,
-    current_stage_active_window,
-    keep_stage_blocks_off_continuation_tail,
-    stage_prompt_prefix,
-)
 from g3ku.runtime.tool_visibility import (
     CEO_FIXED_BUILTIN_TOOL_NAMES,
 )
@@ -883,9 +869,6 @@ class CeoMessageBuilder:
     @staticmethod
     def _normalize_hidden_internal_summary_message(
         message: dict[str, Any],
-        *,
-        source_rows: list[Any] | None = None,
-        row_index: int = -1,
     ) -> dict[str, Any] | None:
         if not isinstance(message, dict):
             return None
@@ -895,26 +878,10 @@ class CeoMessageBuilder:
         source = str(metadata.get("source") or "").strip().lower()
         if source not in {"heartbeat", "cron"}:
             return None
-        text_parts: list[str] = []
         content = str(message.get("content") or "").strip()
-        if content:
-            text_parts.append(content)
-        canonical_context = (
-            dict(message.get("canonical_context"))
-            if isinstance(message.get("canonical_context"), dict)
-            else {}
-        )
-        if not canonical_context and isinstance(message.get("cc_upsert"), dict) and source_rows is not None:
-            # delta 存储行只带当轮 upsert；进 prompt 的内部摘要需要该行自己的累积视图。
-            canonical_context = materialize_transcript_view(source_rows, row_index)
-        if canonical_context:
-            text_parts.append(
-                "Canonical context:\n"
-                + json.dumps(canonical_context, ensure_ascii=False, sort_keys=True)
-            )
-        if not text_parts:
+        if not content:
             return None
-        return {"role": "assistant", "content": "\n\n".join(text_parts), "metadata": {"source": source}}
+        return {"role": "assistant", "content": content, "metadata": {"source": source}}
 
     @classmethod
     def _hidden_internal_summary_messages(
@@ -925,13 +892,9 @@ class CeoMessageBuilder:
     ) -> list[dict[str, Any]]:
         items: list[dict[str, Any]] = []
         persisted_rows = list(getattr(persisted_session, "messages", []) or []) if persisted_session is not None else []
-        for row_index, raw in enumerate(persisted_rows):
+        for raw in persisted_rows:
             if isinstance(raw, dict):
-                normalized = cls._normalize_hidden_internal_summary_message(
-                    raw,
-                    source_rows=persisted_rows,
-                    row_index=row_index,
-                )
+                normalized = cls._normalize_hidden_internal_summary_message(raw)
                 if normalized is not None:
                     items.append(normalized)
         for raw in list(checkpoint_messages or []):
@@ -1399,52 +1362,6 @@ class CeoMessageBuilder:
             'current_user_in_transcript': current_user_in_transcript,
         }
 
-    def _frontdoor_prompt_history(
-        self,
-        *,
-        history_state: dict[str, Any],
-        frontdoor_stage_state: dict[str, Any] | None,
-        query_text: str,
-        user_metadata: dict[str, Any] | None,
-    ) -> dict[str, Any]:
-        has_stage_state = bool(list(dict(frontdoor_stage_state or {}).get("stages") or []))
-        history_source = str(history_state.get("history_source") or "").strip() or "transcript"
-        history_messages = [
-            dict(item)
-            for item in list(history_state.get("history_messages") or [])
-            if isinstance(item, dict)
-        ]
-        if has_stage_state and history_source == "checkpoint":
-            transcript_history = [
-                dict(item)
-                for item in list(history_state.get("transcript_history") or [])
-                if isinstance(item, dict)
-            ]
-            if transcript_history:
-                history_messages = transcript_history
-                history_source = "transcript"
-            else:
-                history_messages = [
-                    dict(item)
-                    for item in history_messages
-                    if message_role(item) == "user"
-                ]
-        _prefix, cleaned_messages = stage_prompt_prefix(
-            history_messages,
-            preserve_leading_system=False,
-            preserve_leading_user=False,
-        )
-        current_user_in_history = self._history_has_current_user(
-            history_messages=cleaned_messages,
-            query_text=query_text,
-            user_metadata=user_metadata,
-        )
-        return {
-            "history_messages": cleaned_messages,
-            "history_source": history_source,
-            "current_user_in_history": current_user_in_history,
-        }
-
     @staticmethod
     def _current_user_content_with_arrival_time(user_content: Any) -> Any:
         """当前回合用户消息不在历史里、直接追加进请求时，用 now() 盖送达时间戳。
@@ -1650,7 +1567,6 @@ class CeoMessageBuilder:
             callable_tool_names=list(context_sources['callable_tool_names']),
             candidate_tool_names=list(context_sources['selected_tool_names']),
             candidate_tool_items=list(context_sources.get('selected_tool_items') or []),
-            frontdoor_stage_state=dict(context_sources.get('frontdoor_stage_state') or {}),
             visible_skill_ids=[
                 self._skill_id(item)
                 for item in list(context_sources['selected_skills'] or [])
@@ -1829,8 +1745,6 @@ class CeoMessageBuilder:
         internal_seed_messages: list[dict[str, Any]] | None = None,
         user_content: Any | None = None,
         user_metadata: dict[str, Any] | None = None,
-        frontdoor_stage_state: dict[str, Any] | None = None,
-        frontdoor_canonical_context: dict[str, Any] | None = None,
         semantic_context_state: dict[str, Any] | None = None,
         contract_present_tool_names: list[str] | None = None,
         ephemeral_tail_messages: list[dict[str, Any]] | None = None,
@@ -1851,10 +1765,7 @@ class CeoMessageBuilder:
         )
         request_body_seed_records = self._request_body_seed_records(request_body_seed_messages)
         if request_body_seed_records:
-            context_sources = {
-                **dict(context_sources or {}),
-                "frontdoor_stage_state": dict(frontdoor_stage_state or {}),
-            }
+            context_sources = dict(context_sources or {})
             return self._build_direct_request_body_continuation_result(
                 context_sources=context_sources,
                 persisted_session=persisted_session,
@@ -1877,69 +1788,15 @@ class CeoMessageBuilder:
             user_metadata=user_metadata,
         )
         history_elapsed_ms = self._elapsed_ms(history_started_at)
-        normalized_frontdoor_stage_state = dict(frontdoor_stage_state or {})
-        normalized_frontdoor_canonical_context = normalize_frontdoor_canonical_context(
-            frontdoor_canonical_context or {}
-        )
-        combined_frontdoor_context = combine_canonical_context(
-            normalized_frontdoor_canonical_context,
-            normalized_frontdoor_stage_state,
-        )
-        prompt_history_state = self._frontdoor_prompt_history(
-            history_state=history_state,
-            frontdoor_stage_state=combined_frontdoor_context,
-            query_text=query_text,
-            user_metadata=user_metadata,
-        )
-        raw_history_messages = list(prompt_history_state["history_messages"])
-        effective_history_source = str(prompt_history_state["history_source"] or "").strip() or str(
-            history_state["history_source"] or ""
-        )
-        current_user_in_history = bool(prompt_history_state["current_user_in_history"])
-        retained_raw_stage_blocks, retained_completed_stage_ids = retained_raw_stage_messages(
-            combined_frontdoor_context,
-        )
-        completed_blocks = completed_stage_blocks(
-            combined_frontdoor_context,
-            skip_stage_ids=retained_completed_stage_ids,
-        )
-        # 双模式裁剪：含模型内容的历史走"按阶段归属原位压缩"（过期阶段只删工具肉身、
-        # 块落回原位、对话保留）；checkpoint 路径 raw 只剩 user，维持 workset 拼装。
-        lead_prefix, raw_remainder = stage_prompt_prefix(
-            raw_history_messages,
-            preserve_leading_system=False,
-            preserve_leading_user=True,
-        )
-        raw_has_model_content = any(
-            str((item or {}).get("role") or "").strip().lower() in ("assistant", "tool")
-            for item in raw_remainder
-        )
-        if raw_has_model_content:
-            in_place_parts = compact_stage_prompt_messages_in_place(
-                raw_history_messages,
-                stage_state=combined_frontdoor_context,
-                preserve_leading_system=False,
-                preserve_leading_user=True,
-            )
-            trimmed_raw_history = [*list(in_place_parts["prefix"]), *list(in_place_parts["rewritten"])]
-            stage_workset_history: list[dict[str, Any]] = []
-            stage_compaction_applied = bool(in_place_parts.get("stage_compaction_applied"))
-        else:
-            raw_active_window = current_stage_active_window(
-                raw_remainder,
-                keep_completed_stages=0,
-            )
-            trimmed_raw_history = [*lead_prefix, *raw_active_window]
-            stage_workset_history = [*list(completed_blocks), *list(retained_raw_stage_blocks)]
-            stage_compaction_applied = bool(completed_blocks)
-        # 不变量守卫：块不占续写位。当前用户回合已在历史里时，workset 块/回插块
-        # 不得落在其后方——落在最后一条 user 之后的阶段块整体前移到该 user 之前
-        # （见 keep_stage_blocks_off_continuation_tail），请求末位保持用户回合。
-        staged_stage_history = keep_stage_blocks_off_continuation_tail(
-            [*list(trimmed_raw_history), *list(stage_workset_history)]
-        )
+        raw_history_messages = [
+            dict(item)
+            for item in list(history_state.get("history_messages") or [])
+            if isinstance(item, dict)
+        ]
+        effective_history_source = str(history_state["history_source"] or "").strip()
+        current_user_in_history = bool(history_state["current_user_in_history"])
         history_zone_source = [
-            *list(staged_stage_history),
+            *list(raw_history_messages),
             *self._hidden_internal_summary_messages(
                 persisted_session=persisted_session,
                 checkpoint_messages=checkpoint_messages,
@@ -1948,7 +1805,7 @@ class CeoMessageBuilder:
         ]
         pre_request_messages = [
             {"role": "system", "content": str(context_sources["system_prompt"] or "")},
-            *staged_stage_history,
+            *raw_history_messages,
             *internal_seed_records,
         ]
         if not current_user_in_history:
@@ -1961,9 +1818,9 @@ class CeoMessageBuilder:
             "source": "",
             "needs_recheck": False,
         }
-        frontdoor_history_shrink_reason = "stage_compaction" if stage_compaction_applied else ""
+        frontdoor_history_shrink_reason = ""
         staged_history_for_injection = [
-            *staged_stage_history,
+            *list(raw_history_messages),
             *internal_seed_records,
         ]
         history_state['history_messages'] = staged_history_for_injection
@@ -1991,7 +1848,6 @@ class CeoMessageBuilder:
             callable_tool_names=list(context_sources['callable_tool_names']),
             candidate_tool_names=list(context_sources['selected_tool_names']),
             candidate_tool_items=list(context_sources.get('selected_tool_items') or []),
-            frontdoor_stage_state=normalized_frontdoor_stage_state,
             visible_skill_ids=[
                 self._skill_id(item)
                 for item in list(context_sources['selected_skills'] or [])
@@ -2075,7 +1931,6 @@ class CeoMessageBuilder:
             'checkpoint_message_count': len(history_state['checkpoint_history']),
             'transcript_message_count': len(history_state['transcript_history']),
             'raw_history_message_count': len(raw_history_messages),
-            'stage_workset_history_message_count': len(stage_workset_history),
             'history_zone_message_count': len(history_zone_source),
             'history_zone_tokens': history_zone_tokens,
             'pre_request_prompt_tokens': pre_request_prompt_tokens,

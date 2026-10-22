@@ -33,24 +33,6 @@ from g3ku.runtime.ceo_catalog_offload import (
     run_off_event_loop,
 )
 from g3ku.runtime.external_sessions import ExternalSessionEntry, get_external_session_registry
-from g3ku.runtime.frontdoor.canonical_context import (
-    TRANSCRIPT_PROJECTION_MODE,
-)
-from g3ku.runtime.frontdoor.canonical_context import (
-    apply_cc_upsert as _apply_cc_upsert,
-)
-from g3ku.runtime.frontdoor.canonical_context import (
-    materialize_transcript_view as _materialize_transcript_view,
-)
-from g3ku.runtime.frontdoor.canonical_context import (
-    project_canonical_context_for_transcript as _project_canonical_context_for_transcript,
-)
-from g3ku.runtime.frontdoor.canonical_context import (
-    ui_canonical_context_delta as _ui_canonical_context_delta,
-)
-from g3ku.runtime.frontdoor.canonical_context import (
-    ui_canonical_context_delta_from_views as _ui_canonical_context_delta_from_views,
-)
 from g3ku.runtime.frontdoor.turns import frontdoor_turns_for_turn
 from g3ku.runtime.session_keys import (
     EXTERNAL_SESSION_KEY_PREFIX,
@@ -67,7 +49,6 @@ from g3ku.runtime.web_ceo_sessions import (
     ceo_session_family,
     create_web_ceo_session,
     ensure_ceo_session_metadata,
-    final_reply_canonical_merge,
     find_ceo_session_catalog_item,
     is_internal_ceo_user_message,
     read_inflight_turn_snapshot,
@@ -580,15 +561,8 @@ def _build_live_turn_payload(
     session_id: str,
     persisted_session: Any | None = None,
 ) -> dict[str, Any]:
-    baseline_context = _latest_persisted_assistant_canonical_context(persisted_session)
-    inflight_turn = _with_canonical_context_delta(
-        _build_inflight_turn_snapshot(session, session_id, persisted_session),
-        baseline_context,
-    )
-    preserved_turn = _with_canonical_context_delta(
-        _build_preserved_turn_snapshot(session, session_id, persisted_session),
-        baseline_context,
-    )
+    inflight_turn = _build_inflight_turn_snapshot(session, session_id, persisted_session)
+    preserved_turn = _build_preserved_turn_snapshot(session, session_id, persisted_session)
     inflight_turn = _rewrite_turn_snapshot_media(session_id, inflight_turn)
     preserved_turn = _rewrite_turn_snapshot_media(session_id, preserved_turn)
     session_turns = list(getattr(session, "_frontdoor_turns", []) or [])
@@ -1057,28 +1031,6 @@ def _snapshot_compression_marker(metadata: Any) -> dict[str, Any]:
     return marker
 
 
-def _snapshot_row_transcript_view(
-    raw: dict[str, Any],
-    role: str,
-    storage_cursor: dict[str, Any],
-) -> dict[str, Any]:
-    """三态解析一条转录行的投影视图：stage_window 直通、cc_upsert 重放一步、旧格式投影一次。
-
-    存储重放链必须遍历所有带轨道的行（含 ui_visible False 的 heartbeat/cron 运行轮——
-    写入侧的 upsert 是相对物理上一轨道行编码的），与只遍历可见行的出帧 delta 链分开。"""
-    if role != 'assistant':
-        return {}
-    stored = raw.get('canonical_context')
-    if isinstance(stored, dict) and stored:
-        if str(raw.get('canonical_context_projection') or '').strip() == TRANSCRIPT_PROJECTION_MODE:
-            return stored
-        return _project_canonical_context_for_transcript(stored)
-    upsert = raw.get('cc_upsert')
-    if isinstance(upsert, dict):
-        return _apply_cc_upsert(storage_cursor, upsert)
-    return {}
-
-
 def _build_ceo_snapshot(
     messages: list[dict[str, Any]] | None,
     *,
@@ -1099,11 +1051,6 @@ def _build_ceo_snapshot(
     inflight_status = str(inflight_payload.get("status") or "").strip().lower()
     hide_pending_users = inflight_status in {"running", "in_progress", "active"}
     items: list[dict[str, Any]] = []
-    # 滚动保存上一条 assistant 行的转录投影视图：快照按序回放，逐行重新投影会
-    # 让整帧构建退化为平方级（渠道会话单转录数十 MB 时实测 12s+）。
-    previous_transcript_view: dict[str, Any] = {}
-    # 存储重放游标：cc_upsert 行相对物理上一轨道行编码，须连同隐藏行一起推进。
-    storage_view_cursor: dict[str, Any] = {}
     # 按 turn_id 聚合的请求工件扫描要 glob 整个 artifact 目录并逐文件解析
     # （大会话实测 300+ 文件 / 70MB ≈ 1s+）。transcript 级 usage 自收尾起随每轮
     # 持久化：只有当存在"带 turn_id 却无 usage"的 assistant 行（旧转录）时才付
@@ -1134,9 +1081,11 @@ def _build_ceo_snapshot(
         role = str(raw.get('role') or '').strip().lower()
         if role not in {'user', 'assistant', 'system'}:
             continue
-        current_view = _snapshot_row_transcript_view(raw, role, storage_view_cursor)
-        if current_view:
-            storage_view_cursor = current_view
+        row_turn_id = (
+            str(raw.get('turn_id') or '').strip()
+            or str((metadata.get('_transcript_turn_id')) or '').strip()
+        )
+        row_turns = copy.deepcopy(turns_by_turn_id.get(row_turn_id) or []) if row_turn_id else []
         if metadata.get('ui_visible') is False:
             continue
         if is_internal_ceo_user_message(raw):
@@ -1151,11 +1100,6 @@ def _build_ceo_snapshot(
         if role == 'assistant' and session_id:
             content = rewrite_assistant_media_content(session_id, content)
         attachments = _normalize_snapshot_attachments(raw, session_id) if role == 'user' else []
-        canonical_context = (
-            raw.get('canonical_context')
-            if role == 'assistant' and isinstance(raw.get('canonical_context'), dict)
-            else None
-        )
         compression = (
             dict(raw.get('compression'))
             if role == 'assistant' and isinstance(raw.get('compression'), dict)
@@ -1167,29 +1111,29 @@ def _build_ceo_snapshot(
             if role == 'assistant' and isinstance(raw.get('thinking'), dict)
             else {}
         )
-        if not content and not attachments and not current_view and not compression and not thinking:
+        if not content and not attachments and not row_turns and not compression and not thinking:
             continue
         item = {'role': role, 'content': content}
         if role == 'assistant':
             status = str(raw.get('status') or '').strip().lower()
             if status:
                 item['status'] = status
-            # 静默回合的空 assistant 行只为承载阶段轨道；没有轨道就没有可展示的内容，
+            # 静默回合的空 assistant 行只为承载 turns；没有 turns 就没有可展示的内容，
             # 整行跳过，避免前端渲染出一个空气泡。旧转录里的占位文案同样按静默处理。
             if metadata.get('silent_reply') is True or content == _LEGACY_SILENT_REPLY_TEXT:
                 # 保留正文：它是折叠行「展开」要显示的内容，也是模型下一轮的痕迹。
-                # 空正文且无轨道的行由上方的空行过滤统一跳过。
+                # 空正文且无 turns 的行由上方的空行过滤统一跳过。
                 item['silent_reply'] = True
                 silent_reason = str(metadata.get('silent_reason') or '').strip()
                 if silent_reason:
                     item['silent_reason'] = silent_reason
                 if content == _LEGACY_SILENT_REPLY_TEXT:
                     item['content'] = ''
-        turn_id = str(raw.get('turn_id') or raw.get('metadata', {}).get('_transcript_turn_id') or '').strip() if isinstance(raw.get('metadata'), dict) else str(raw.get('turn_id') or '').strip()
+        turn_id = row_turn_id
         if turn_id:
             item['turn_id'] = turn_id
-            if role == 'assistant' and turns_by_turn_id.get(turn_id):
-                item['turns'] = copy.deepcopy(turns_by_turn_id[turn_id])
+            if role == 'assistant' and row_turns:
+                item['turns'] = row_turns
         if role == 'user':
             if edit_fork_gates and edit_fork_gates.get(index):
                 item['can_edit_fork'] = True
@@ -1208,18 +1152,6 @@ def _build_ceo_snapshot(
             item['timestamp'] = timestamp.strip()
         if attachments:
             item['attachments'] = attachments
-        if current_view:
-            # 出帧只携带 delta：前端轨道渲染是 delta 优先，逐行全量累积 cc 是首帧
-            # payload 平方级膨胀的主项（QQ 渠道会话实测 69 MB 中 51 MB 前端直接
-            # 丢弃）。空 delta 以 {} 落键——前端据此渲染纯文本气泡而不回退重画旧
-            # 轨道（org_graph_app.js hasDelta 语义）。body 回填只对带全量 cc 的行
-            # 用存量原文（旧 raw 行保留未截断正文），cc_upsert 行的正文就在视图里。
-            item['canonical_context_delta'] = _ui_canonical_context_delta_from_views(
-                previous_transcript_view,
-                current_view,
-                canonical_context if canonical_context is not None else current_view,
-            )
-            previous_transcript_view = current_view
         if compression:
             item['compression'] = compression
         if role == 'assistant':
@@ -1264,99 +1196,6 @@ def _assistant_turn_already_persisted(persisted_session: Any | None, *, turn_id:
             continue
         return True
     return False
-
-
-def _canonical_context_copy(raw: Any) -> dict[str, Any]:
-    if not isinstance(raw, dict):
-        return {}
-    return copy.deepcopy(raw)
-
-
-def _assistant_canonical_context(message: dict[str, Any] | None) -> dict[str, Any]:
-    if not isinstance(message, dict):
-        return {}
-    if str(message.get("role") or "").strip().lower() != "assistant":
-        return {}
-    return _canonical_context_copy(message.get("canonical_context"))
-
-
-def _latest_persisted_assistant_canonical_context(persisted_session: Any | None) -> dict[str, Any]:
-    messages = list(getattr(persisted_session, "messages", None) or [])
-    for index in range(len(messages) - 1, -1, -1):
-        raw = messages[index]
-        canonical_context = _assistant_canonical_context(raw)
-        if canonical_context:
-            return canonical_context
-        if (
-            isinstance(raw, dict)
-            and str(raw.get("role") or "").strip().lower() == "assistant"
-            and isinstance(raw.get("cc_upsert"), dict)
-        ):
-            # delta 存储行：live/final 基线要的是该行自己的累积视图。
-            view = _materialize_transcript_view(messages, index)
-            if view:
-                return dict(view)
-    return {}
-
-
-def _with_canonical_context_delta(payload: dict[str, Any] | None, previous_context: dict[str, Any] | None) -> dict[str, Any] | None:
-    if not isinstance(payload, dict):
-        return payload
-    next_payload = copy.deepcopy(payload)
-    canonical_context = next_payload.pop('canonical_context', None)
-    if not isinstance(canonical_context, dict) or not canonical_context:
-        next_payload.pop('canonical_context_delta', None)
-        return next_payload
-    delta = _ui_canonical_context_delta(previous_context, canonical_context)
-    if delta:
-        next_payload['canonical_context_delta'] = delta
-    else:
-        next_payload.pop('canonical_context_delta', None)
-    # 全量投影只属于 final 帧：live 轨道读的是 delta，附上整份工作集既没人用，
-    # 又让每个工具事件都为 500+ 个阶段付一次投影（QQ 会话实测单帧 462KB / 160ms）。
-    return next_payload
-
-
-def _resolve_final_canonical_context(
-    *,
-    payload: dict[str, Any] | None,
-    session: Any,
-    persisted_session: Any,
-) -> dict[str, Any]:
-    data = payload if isinstance(payload, dict) else {}
-    direct_context = data.get("canonical_context")
-    if isinstance(direct_context, dict) and direct_context:
-        return dict(direct_context)
-    snapshot_supplier = getattr(session, "_frontdoor_visible_canonical_context_snapshot", None)
-    if callable(snapshot_supplier):
-        try:
-            canonical_context = snapshot_supplier()
-        except Exception:
-            canonical_context = None
-        if isinstance(canonical_context, dict) and canonical_context:
-            return dict(canonical_context)
-    return {}
-
-
-def _resolve_final_canonical_context_delta(
-    *,
-    payload: dict[str, Any] | None,
-    session: Any,
-    persisted_session: Any,
-) -> dict[str, Any]:
-    data = payload if isinstance(payload, dict) else {}
-    direct_delta = data.get("canonical_context_delta")
-    if isinstance(direct_delta, dict) and direct_delta:
-        return dict(direct_delta)
-    canonical_context = _resolve_final_canonical_context(
-        payload=payload,
-        session=session,
-        persisted_session=persisted_session,
-    )
-    return _ui_canonical_context_delta(
-        _latest_persisted_assistant_canonical_context(persisted_session),
-        canonical_context,
-    )
 
 
 def _should_forward_tool_event(*, session_id: str, event: AgentEvent) -> bool:
@@ -1977,8 +1816,8 @@ async def ceo_websocket(websocket: WebSocket):
         if event.type == 'message_end':
             payload = dict(event.payload or {})
             # 静默回合（模型调用 silent 工具）走同一条 final 通道，只是回复文本置空：
-            # 早退会让 final 丢掉 canonical_context / user_messages / usage，前端就没有
-            # 阶段轨道可收尾，本回合的阶段与工具调用会被整段吞掉。外部渠道仍由 external
+            # 早退会让 final 丢掉 user_messages / usage，前端就没有折叠行可收尾，
+            # 本回合的工具调用会被整段吞掉。外部渠道仍由 external
             # relay 依据 silent_reply 跳过，不会投递到 QQ。
             silent_reply = bool(payload.get('silent_reply'))
             if not silent_reply and not _should_forward_message_end(payload):
@@ -1996,17 +1835,6 @@ async def ceo_websocket(websocket: WebSocket):
                 for item in list((snapshot or {}).get('user_messages') or [])
                 if isinstance(item, dict)
             ]
-            persisted = transcript_store.get_or_create(session_id)
-            canonical_context = _resolve_final_canonical_context(
-                payload=payload,
-                session=session,
-                persisted_session=persisted,
-            )
-            canonical_context_delta = _resolve_final_canonical_context_delta(
-                payload=payload,
-                session=session,
-                persisted_session=persisted,
-            )
             if not turn_id:
                 if isinstance(snapshot, dict):
                     turn_id = str(snapshot.get('turn_id') or '').strip()
@@ -2017,7 +1845,7 @@ async def ceo_websocket(websocket: WebSocket):
             if not turn_usage and isinstance(snapshot, dict):
                 turn_usage = snapshot.get("usage") or None
             # 内部轮（heartbeat / cron）的静默不再换成一条 ceo.internal.ack 早退：那条 ack 会
-            # 吞掉 final 帧，于是这一轮在实时视图里没有折叠行也没有阶段轨道，刷新后才从转录行
+            # 吞掉 final 帧，于是这一轮在实时视图里没有折叠行也没有 turns，刷新后才从转录行
             # 冒出来——同一事实两种画法。静默的最终回复帧本来就带 silent_reply，渠道侧由它闸门。
             await _flush_pending_turn_patch()
             await _push_stream_event(
@@ -2030,7 +1858,6 @@ async def ceo_websocket(websocket: WebSocket):
                     **({'silent_reason': silent_reason} if silent_reply and silent_reason else {}),
                     **({'user_messages': user_messages} if user_messages else {}),
                     **({'usage': turn_usage} if turn_usage else {}),
-                    **final_reply_canonical_merge(canonical_context, canonical_context_delta),
                 },
             )
             _publish_ceo_session_patch(
@@ -2060,9 +1887,9 @@ async def ceo_websocket(websocket: WebSocket):
                 },
             )
             return
-        if event.type == 'frontdoor_stage_synced':
-            # 图节点边界同步后主动推送一次 live turn patch:阶段/轮次状态刚刷新,
-            # 若等到下一工具事件才推,新开阶段的 delta 会为空导致前端清空时间线
+        if event.type == 'frontdoor_turns_synced':
+            # 图节点边界同步后主动推送一次 live turn patch：turns 刚刷新，
+            # 若等到下一工具事件才推，新一轮会在前端晚一拍出现。
             await _push_turn_patch()
             return
         if not _should_forward_tool_event(session_id=session_id, event=event):
@@ -2079,8 +1906,8 @@ async def ceo_websocket(websocket: WebSocket):
     try:
         await _safe_send(build_envelope(channel='ceo', session_id=session_id, type='hello', data={'session_id': session_id}))
         # Session catalog goes out BEFORE the transcript snapshot: the snapshot
-        # can be tens of megabytes on long channel sessions (canonical-context
-        # payloads), and the list must never be queued behind it — otherwise the
+        # payloads can be tens of megabytes on long channel sessions, and the
+        # list must never be queued behind it — otherwise the
         # sidebar stays stale until the whole transcript drains (or the socket
         # drops mid-transfer). Frontend envelope handling is order-independent.
         initial_catalog = await build_ceo_session_catalog_async(

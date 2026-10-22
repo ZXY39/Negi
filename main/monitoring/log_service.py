@@ -6,7 +6,6 @@ import json
 import sys
 import threading
 import time
-import uuid
 from contextlib import contextmanager
 from datetime import datetime
 from pathlib import Path
@@ -24,34 +23,21 @@ from g3ku.content.navigation import INLINE_CHAR_LIMIT
 from g3ku.deployment.data_root import data_work_path
 from g3ku.providers.base import provider_body_output_cap, provider_body_reasoning_effort
 from g3ku.providers.fallback import MODEL_RETRY_LIVE_STATES, MODEL_RETRY_STATE_WAITING_UPSTREAM
-from g3ku.runtime.stage_prompt_compaction import (
-    STAGE_CLOSURE_INACTIVE_NOTES,
-    build_stage_archive_document,
-    closing_stage_target,
-    stage_archive_owner,
-    stage_record_dict,
-)
 from g3ku.runtime.tool_impulse import (
     CONTRACT_DELIVERY_FIELD,
     REUSE_FLAG_IGNORED_FIELD,
     STAGED_REPLAY_FIELD,
 )
-from main.ids import new_stage_id, new_stage_round_id
 from main.models import (
     FAILURE_CLASS_BUSINESS_UNPASSED,
     FAILURE_CLASS_ENGINE,
     FAILURE_CLASS_NON_RETRYABLE_BLOCKED,
-    ExecutionStageKeyRef,
-    ExecutionStageRecord,
-    ExecutionStageRound,
-    ExecutionStageState,
     NodeOutputEntry,
     NodeRecord,
     NodeToolFileChange,
     TaskErrorLogRecord,
     TaskNodePauseRecord,
     TaskRecord,
-    normalize_execution_stage_metadata,
     normalize_failure_class,
     normalize_final_acceptance_metadata,
     normalize_optional_text,
@@ -76,27 +62,14 @@ from main.runtime.acceptance_handshake import (
     normalize_acceptance_handshake,
 )
 from main.runtime.append_notice_context import (
-    APPEND_NOTICE_CONTEXT_KEY,
     PENDING_APPEND_NOTICE_RECORDS_KEY,
-    normalize_append_notice_context,
     normalize_pending_append_notice_records,
-    roll_append_notice_context_for_compression_stage,
 )
 from main.runtime.chat_backend import build_actual_request_diagnostics
 from main.runtime.send_token_preflight import (
     build_runtime_estimated_input_truth,
     build_runtime_observed_input_truth,
 )
-from main.runtime.stage_budget import (
-    CONTEXT_LOADER_STAGE_TOOL_NAMES,
-    CONTROL_STAGE_TOOL_NAMES,
-    STAGE_TOOL_NAME,
-    STAGE_TOOL_ROUND_BUDGET_MAX,
-    STAGE_TOOL_ROUND_BUDGET_MIN,
-    response_tool_calls_count_against_stage_budget,
-    tool_call_counts_against_stage_budget,
-)
-from main.runtime.tool_names import FINAL_RESULT_TOOL_NAME
 from main.storage.disk_guard import has_emergency_disk_budget
 from main.token_usage import (
     build_token_usage_from_attempts,
@@ -116,24 +89,6 @@ def _precise_now_iso() -> str:
     return datetime.now().astimezone().isoformat(timespec='microseconds')
 
 
-def _latest_execution_stage_goal(node: NodeRecord) -> str:
-    """节点树上那一行阶段文案：阶段台账里 `(stage_index, stage_id)` 最大且写了 goal 的那一条。
-
-    比较键与 `SQLiteTaskStore` 那条一次性补戳语句必须逐字一致，否则存量补出来的标签会
-    和新写出来的同节点不同名。
-    """
-    metadata = node.metadata if isinstance(node.metadata, dict) else {}
-    state = normalize_execution_stage_metadata(metadata.get(_EXECUTION_STAGE_METADATA_KEY))
-    scored = [
-        (int(stage.stage_index or 0), str(stage.stage_id or ''), str(stage.stage_goal or '').strip())
-        for stage in list(state.stages or [])
-        if str(stage.stage_goal or '').strip()
-    ]
-    if not scored:
-        return ''
-    return max(scored, key=lambda item: (item[0], item[1]))[2]
-
-
 def _latest_progress_text(node: NodeRecord) -> str:
     """节点树上那一行进展文案：最近一条非空 assistant 正文，final_output 兜底。"""
     for entry in reversed(list(node.output or [])):
@@ -142,35 +97,6 @@ def _latest_progress_text(node: NodeRecord) -> str:
             return text
     return str(node.final_output or '').strip()
 
-
-_EXECUTION_STAGE_METADATA_KEY = 'execution_stages'
-_EXECUTION_STAGE_TOOL_NAME = STAGE_TOOL_NAME
-_EXECUTION_STAGE_MODE_SELF = '自主执行'
-_EXECUTION_STAGE_MODE_WITH_CHILDREN = '包含派生'
-_EXECUTION_STAGE_STATUS_ACTIVE = '进行中'
-_EXECUTION_STAGE_STATUS_COMPLETED = '完成'
-_EXECUTION_STAGE_STATUS_FAILED = '失败'
-_EXECUTION_STAGE_KIND_NORMAL = 'normal'
-_EXECUTION_STAGE_KIND_COMPRESSION = 'compression'
-_NON_BUDGET_EXECUTION_TOOLS = {
-    _EXECUTION_STAGE_TOOL_NAME,
-    FINAL_RESULT_TOOL_NAME,
-    'spawn_child_nodes',
-    'wait_tool_execution',
-    'stop_tool_execution',
-    *CONTEXT_LOADER_STAGE_TOOL_NAMES,
-}
-_NON_SUBSTANTIVE_EXECUTION_PROGRESS_TOOLS = {
-    _EXECUTION_STAGE_TOOL_NAME,
-    FINAL_RESULT_TOOL_NAME,
-    *CONTROL_STAGE_TOOL_NAMES,
-}
-_LATEST_SPAWN_STAGE_KEY_REF_NOTE = '最近一次 spawn_child_nodes 返回结果'
-
-
-_STAGE_GOAL_CHAR_LIMIT = 240
-_STAGE_ROUND_TEXT_CHAR_LIMIT = 800
-_STAGE_KEY_REF_LIMIT = 4
 
 # 运行时帧摘要的复用上限（按任务）。一个 180 帧任务的公开帧合计约 4.3 MB，
 # 只留最近几个任务的账，超出按插入序淘汰。
@@ -451,10 +377,6 @@ class TaskLogService:
             'phase': str(phase or '').strip(),
             'await_marker': '',
             'await_started_at': '',
-            'stage_mode': '',
-            'stage_status': '',
-            'stage_goal': '',
-            'stage_total_steps': 0,
             'active_round_id': '',
             'active_round_tool_call_ids': [],
             'active_round_started_at': '',
@@ -553,9 +475,6 @@ class TaskLogService:
             'snapshot_index': max(1, int(snapshot.get('snapshot_index') or default_index or 1)),
             'captured_at': str(snapshot.get('captured_at') or ''),
             'phase': str(snapshot.get('phase') or ''),
-            'stage_mode': str(snapshot.get('stage_mode') or ''),
-            'stage_status': str(snapshot.get('stage_status') or ''),
-            'stage_goal': str(snapshot.get('stage_goal') or ''),
             'active_round_id': str(snapshot.get('active_round_id') or ''),
             'active_round_tool_call_ids': cls._normalized_name_list(snapshot.get('active_round_tool_call_ids') or []),
             'messages_count': max(0, int(snapshot.get('messages_count') or 0)),
@@ -604,9 +523,6 @@ class TaskLogService:
         snapshot = cls._sanitize_callable_tool_snapshot(
             {
                 'phase': str(frame.get('phase') or ''),
-                'stage_mode': str(frame.get('stage_mode') or ''),
-                'stage_status': str(frame.get('stage_status') or ''),
-                'stage_goal': str(frame.get('stage_goal') or ''),
                 'active_round_id': str(frame.get('active_round_id') or ''),
                 'active_round_tool_call_ids': list(frame.get('active_round_tool_call_ids') or []),
                 'messages_count': len(list(messages or [])),
@@ -2877,978 +2793,6 @@ class TaskLogService:
     def set_pause_state(self, task_id: str, *, pause_requested: bool | None = None, is_paused: bool | None = None) -> TaskRecord | None:
         return self.update_task_control(task_id, pause_requested=pause_requested, is_paused=is_paused)
 
-    @staticmethod
-    def _execution_stage_state(node: NodeRecord | None) -> ExecutionStageState:
-        payload = (node.metadata or {}).get(_EXECUTION_STAGE_METADATA_KEY) if node is not None and isinstance(node.metadata, dict) else {}
-        return normalize_execution_stage_metadata(payload)
-
-    @classmethod
-    def _tool_call_counts_against_stage_budget(cls, tool_call: dict[str, Any]) -> bool:
-        return tool_call_counts_against_stage_budget(tool_call, extra_non_budget_tools=_NON_BUDGET_EXECUTION_TOOLS)
-
-    @staticmethod
-    def _active_execution_stage(state: ExecutionStageState) -> ExecutionStageRecord | None:
-        active_stage_id = str(state.active_stage_id or '').strip()
-        if not active_stage_id:
-            return None
-        for stage in list(state.stages or []):
-            if str(stage.stage_id or '').strip() == active_stage_id:
-                return stage
-        return None
-
-    @staticmethod
-    def _execution_stage_has_substantive_progress(stage: ExecutionStageRecord | None) -> bool:
-        if stage is None:
-            return False
-        for round_item in list(stage.rounds or []):
-            tool_names = [
-                str(name or '').strip()
-                for name in list(round_item.tool_names or [])
-                if str(name or '').strip()
-            ]
-            if any(name not in _NON_SUBSTANTIVE_EXECUTION_PROGRESS_TOOLS for name in tool_names):
-                return True
-        return False
-
-    @staticmethod
-    def _execution_stage_frame_payload(state: ExecutionStageState) -> dict[str, Any]:
-        active = TaskLogService._active_execution_stage(state)
-        if active is None:
-            return {
-                'stage_mode': '',
-                'stage_status': '',
-                'stage_goal': '',
-                'stage_total_steps': 0,
-            }
-        return {
-            'stage_mode': str(active.mode or ''),
-            'stage_status': str(active.status or ''),
-            'stage_goal': str(active.stage_goal or ''),
-            'stage_total_steps': int(active.tool_round_budget or 0),
-        }
-
-    @staticmethod
-    def _normalize_stage_key_refs(value: Any) -> list[ExecutionStageKeyRef]:
-        refs: list[ExecutionStageKeyRef] = []
-        for item in list(value or []):
-            try:
-                key_ref = ExecutionStageKeyRef.model_validate(item)
-            except Exception:
-                continue
-            normalized_ref = str(key_ref.ref or '').strip()
-            normalized_note = str(key_ref.note or '').strip()
-            if not normalized_ref or not normalized_note:
-                continue
-            refs.append(
-                key_ref.model_copy(
-                    update={
-                        'ref': normalized_ref,
-                        'note': _single_line_text(normalized_note, max_chars=160),
-                    }
-                )
-            )
-        return refs
-
-    @staticmethod
-    def _clip_stage_text(value: Any, *, limit: int | None) -> str:
-        text = " ".join(str(value or "").split()).strip()
-        if limit is None or len(text) <= limit:
-            return text
-        return f"{text[: max(0, limit - 3)].rstrip()}..."
-
-    def _canonicalize_stage_key_refs(self, refs: list[ExecutionStageKeyRef]) -> list[ExecutionStageKeyRef]:
-        normalized: list[ExecutionStageKeyRef] = []
-        seen: set[str] = set()
-        navigator = getattr(self, '_content_store', None)
-        for item in list(refs or []):
-            current = item
-            target_ref = str(item.ref or '').strip()
-            if navigator is not None and target_ref:
-                try:
-                    described = navigator.describe(ref=target_ref, view='canonical')
-                    resolved_ref = str((described or {}).get('resolved_ref') or '').strip()
-                    if resolved_ref:
-                        current = item.model_copy(update={'ref': resolved_ref})
-                except Exception:
-                    current = item
-            dedupe_key = str(current.ref or '').strip()
-            if not dedupe_key or dedupe_key in seen:
-                continue
-            seen.add(dedupe_key)
-            normalized.append(current)
-            if len(normalized) >= _STAGE_KEY_REF_LIMIT:
-                break
-        return normalized
-
-    def _latest_spawn_stage_key_ref_locked(
-        self,
-        *,
-        task_id: str,
-        node_id: str,
-        active_stage: ExecutionStageRecord | None,
-    ) -> ExecutionStageKeyRef | None:
-        if active_stage is None:
-            return None
-        spawn_call_ids: list[str] = []
-        for round_record in list(active_stage.rounds or []):
-            tool_names = [str(item or '').strip() for item in list(round_record.tool_names or [])]
-            tool_call_ids = [str(item or '').strip() for item in list(round_record.tool_call_ids or [])]
-            for index, tool_name in enumerate(tool_names):
-                if tool_name != 'spawn_child_nodes':
-                    continue
-                tool_call_id = tool_call_ids[index] if index < len(tool_call_ids) else ''
-                if tool_call_id:
-                    spawn_call_ids.append(tool_call_id)
-        if not spawn_call_ids:
-            return None
-        records_by_call_id = {
-            str(item.tool_call_id or '').strip(): item
-            for item in list(self._store.list_task_node_tool_results(task_id, node_id) or [])
-            if str(item.tool_call_id or '').strip()
-        }
-        for tool_call_id in reversed(spawn_call_ids):
-            record = records_by_call_id.get(tool_call_id)
-            output_ref = str(getattr(record, 'output_ref', '') or '').strip() if record is not None else ''
-            if output_ref:
-                return ExecutionStageKeyRef(
-                    ref=output_ref,
-                    note=_LATEST_SPAWN_STAGE_KEY_REF_NOTE,
-                )
-        return None
-
-    def execution_stage_gate_snapshot(self, task_id: str, node_id: str) -> dict[str, Any]:
-        with self._task_lock(task_id):
-            node = self._store.get_node(node_id)
-            state = self._execution_stage_state(node)
-            active = self._active_execution_stage(state)
-            completed_stages = [
-                {
-                    'stage_index': int(stage.stage_index or 0),
-                    'stage_kind': str(stage.stage_kind or _EXECUTION_STAGE_KIND_NORMAL),
-                    'system_generated': bool(stage.system_generated),
-                    'mode': str(stage.mode or ''),
-                    'status': str(stage.status or ''),
-                    'stage_goal': str(stage.stage_goal or ''),
-                    'completed_stage_summary': str(stage.completed_stage_summary or ''),
-                    'key_refs': [item.model_dump(mode='json') for item in list(stage.key_refs or [])],
-                    'archive_ref': str(stage.archive_ref or ''),
-                    'archive_stage_index_start': int(stage.archive_stage_index_start or 0),
-                    'archive_stage_index_end': int(stage.archive_stage_index_end or 0),
-                    'tool_round_budget': int(stage.tool_round_budget or 0),
-                    'tool_rounds_used': int(stage.tool_rounds_used or 0),
-                    **({} if stage.context_visible else {'context_visible': False}),
-                }
-                for stage in list(state.stages or [])
-                if str(stage.status or '') != _EXECUTION_STAGE_STATUS_ACTIVE
-            ]
-            return {
-                'has_active_stage': active is not None,
-                'transition_required': bool(state.transition_required),
-                'active_stage': active.model_dump(mode='json') if active is not None else None,
-                'completed_stages': completed_stages,
-                'pending_orphan_rounds': [
-                    item.model_dump(mode='json') for item in list(state.pending_orphan_rounds or [])
-                ],
-            }
-
-    def execution_stage_prompt_payload(self, task_id: str, node_id: str) -> dict[str, Any]:
-        snapshot = self.execution_stage_gate_snapshot(task_id, node_id)
-        active = snapshot.get('active_stage') if isinstance(snapshot, dict) else None
-        return {
-            'has_active_stage': bool(snapshot.get('has_active_stage')) if isinstance(snapshot, dict) else False,
-            'transition_required': bool(snapshot.get('transition_required')) if isinstance(snapshot, dict) else False,
-            'active_stage': dict(active or {}) if isinstance(active, dict) else None,
-        }
-
-    def _persist_execution_stage_state_locked(
-        self,
-        *,
-        task: TaskRecord,
-        node_id: str,
-        state: ExecutionStageState,
-    ) -> NodeRecord | None:
-        payload = state.model_dump(mode='json')
-        updated = self._store.update_node(
-            node_id,
-            lambda current: current.model_copy(
-                update={
-                    'metadata': self._execution_stage_metadata_with_notice_context(
-                        metadata=dict(current.metadata or {}),
-                        state=state,
-                        payload=payload,
-                    ),
-                    'updated_at': now_iso(),
-                }
-            ),
-        )
-        if updated is not None:
-            self._sync_node_read_models_locked(updated, invalidate_execution_trace_ref=True)
-            self._publish_task_node_patch_locked(task=task, node=updated)
-        return updated
-
-    @staticmethod
-    def _execution_stage_metadata_with_notice_context(
-        *,
-        metadata: dict[str, Any],
-        state: ExecutionStageState,
-        payload: dict[str, Any],
-    ) -> dict[str, Any]:
-        next_metadata = {**dict(metadata or {}), _EXECUTION_STAGE_METADATA_KEY: payload}
-        notice_context = normalize_append_notice_context(next_metadata.get(APPEND_NOTICE_CONTEXT_KEY))
-        known_segment_ids = {
-            str(item.get('compression_stage_id') or '').strip()
-            for item in list(notice_context.get('compression_segments') or [])
-            if str(item.get('compression_stage_id') or '').strip()
-        }
-        for stage in list(state.stages or []):
-            if str(stage.stage_kind or '') != _EXECUTION_STAGE_KIND_COMPRESSION:
-                continue
-            stage_id = str(stage.stage_id or '').strip()
-            if not stage_id or stage_id in known_segment_ids:
-                continue
-            notice_context = roll_append_notice_context_for_compression_stage(
-                notice_context,
-                compression_stage_id=stage_id,
-                created_at=str(stage.finished_at or stage.created_at or now_iso()),
-            )
-            known_segment_ids.add(stage_id)
-        if list(notice_context.get('notice_records') or []) or list(notice_context.get('compression_segments') or []):
-            next_metadata[APPEND_NOTICE_CONTEXT_KEY] = notice_context
-        else:
-            next_metadata.pop(APPEND_NOTICE_CONTEXT_KEY, None)
-        return next_metadata
-
-    def _sync_execution_stage_frame_locked(self, *, task_id: str, node_id: str, state: ExecutionStageState) -> None:
-        payload = self._execution_stage_frame_payload(state)
-        self.update_frame(
-            task_id,
-            node_id,
-            lambda frame: {
-                **(frame or self._default_frame(node_id=node_id)),
-                **payload,
-            },
-            publish_snapshot=True,
-        )
-
-    def _execution_stage_eviction_record(
-        self,
-        task_id: str,
-        node_id: str,
-        stage: ExecutionStageRecord,
-    ) -> dict[str, Any]:
-        """导出用的阶段账本：逐轮按 call id 关联已外置的工具信封。
-
-        前门必须把逐字入参出参一起写进归档（它没有别的全量通道）；节点不重抄正文——
-        全文本来就在 `task_node_tool_results` 与 `output_ref` 后面，这里只带上入参文本、
-        出参预览与指针，打开一次就能知道"这条阶段做了什么、原文去哪取"，同时不把
-        一个几十轮的阶段复制成兆级文件、绕开磁盘治理。
-        """
-        record = stage_record_dict(stage)
-        try:
-            rows = list(self._store.list_task_node_tool_results(task_id, node_id) or [])
-        except Exception:
-            rows = []
-        by_call: dict[str, dict[str, Any]] = {}
-        for row in rows:
-            call_id = str(getattr(row, 'tool_call_id', '') or '').strip()
-            if not call_id:
-                continue
-            by_call[call_id] = {
-                'tool_name': str(getattr(row, 'tool_name', '') or ''),
-                'status': str(getattr(row, 'status', '') or ''),
-                'arguments_text': str(getattr(row, 'arguments_text', '') or ''),
-                'output_preview_text': str(getattr(row, 'output_preview_text', '') or ''),
-                'output_ref': str(getattr(row, 'output_ref', '') or ''),
-            }
-        rounds: list[dict[str, Any]] = []
-        for round_item in list(record.get('rounds') or []):
-            current = dict(round_item or {})
-            current['tools'] = [
-                {
-                    'tool_call_id': str(call_id),
-                    **(by_call.get(str(call_id).strip()) or {'status': 'unresolved_at_eviction'}),
-                }
-                for call_id in list(current.get('tool_call_ids') or [])
-            ]
-            rounds.append(current)
-        return {**record, 'rounds': rounds}
-
-    def _export_execution_stage_eviction_locked(
-        self,
-        *,
-        task: Any,
-        node_id: str,
-        stage: ExecutionStageRecord,
-    ) -> ExecutionStageRecord:
-        """模型点名裁撤时把该阶段全量账本导成文件，路径写回 `archive_ref`。
-
-        与前门 `_frontdoor_archive_evicted_stage` 同一合同：块里那一行 `archive_ref` 是
-        `content_open` 的入口，节点此前只有 `task_node_detail` 一条读回通道，块本身没有指针。
-        落点只认任务 runtime meta 里的绝对 `task_temp_dir`（拿不到就不写 ref，也不谎称可读回，
-        更不回退到工作区根目录——那会让归档落在任务目录之外、躲开磁盘治理）。
-        一条阶段只导一次，已有 ref 直接复用。
-        """
-        if stage.context_evicted is not True:
-            return stage
-        if str(stage.archive_ref or '').strip():
-            return stage
-        runtime_meta = self.read_task_runtime_meta(str(task.task_id or '').strip()) or {}
-        directory = str(runtime_meta.get('task_temp_dir') or '').strip()
-        if not directory:
-            return stage
-        try:
-            target = Path(directory)
-            target.mkdir(parents=True, exist_ok=True)
-            payload = build_stage_archive_document(
-                kind='node_stage_eviction',
-                owner=stage_archive_owner(task.task_id, node_id),
-                created_at=now_iso(),
-                stages=[self._execution_stage_eviction_record(task_id=str(task.task_id or ''), node_id=node_id, stage=stage)],
-            )
-            path = target / f'g3ku_node_stage_eviction_1_{uuid.uuid4().hex[:8]}.json'
-            path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding='utf-8')
-        except Exception:
-            logger.debug(
-                'node stage eviction archive export failed for task {} node {} stage {}',
-                str(task.task_id or ''),
-                str(node_id or ''),
-                str(stage.stage_id or ''),
-            )
-            return stage
-        stage_index = int(stage.stage_index or 0)
-        return stage.model_copy(
-            update={
-                'archive_ref': str(path),
-                'archive_stage_index_start': stage_index,
-                'archive_stage_index_end': stage_index,
-            }
-        )
-
-    def _emit_stage_ledger_event(
-        self,
-        event: str,
-        message: str,
-        *,
-        task_id: str,
-        node_id: str,
-        detail: dict[str, Any],
-    ) -> None:
-        """账本侧的静默处置必须可数：抑制重放、拦下结清这两类都不给模型报错，也没有别的落点。"""
-        try:
-            from g3ku.audit_events import emit_audit_event
-
-            emit_audit_event(
-                'task',
-                'info',
-                str(event or ''),
-                str(message or ''),
-                detail={'task_id': str(task_id or ''), 'node_id': str(node_id or ''), **dict(detail or {})},
-            )
-        except Exception:
-            pass
-
-    def stage_transition_already_applied(self, task_id: str, node_id: str, *, stage_goal: str) -> dict[str, Any]:
-        """这条 `submit_next_stage` 是否已经落到账本——恢复车道重放它之前先问这里。
-
-        判据只有一条：账本里已存在一条 `stage_goal` 相同（按落盘同一裁剪口径比较）的阶段。
-        正常路径不可能重复提交同一目标：模型要发出下一跳必须先拿到上一跳的工具结果，而派生
-        调用只会在所有子节点终态后才返回（实测 342 个等待窗口内父节点模型调用为 0 次）。所以
-        "账本里已有这个目标"只能来自绕过模型的写入者——孤儿重派把已记录的入参又跑了一遍。
-        """
-        normalized_goal = str(self._clip_stage_text(stage_goal, limit=_STAGE_GOAL_CHAR_LIMIT) or '').strip()
-        if not normalized_goal:
-            return {}
-        node = self._store.get_node(node_id)
-        if node is None:
-            return {}
-        state = self._execution_stage_state(node)
-        for stage in list(state.stages or []):
-            if str(stage.stage_goal or '').strip() != normalized_goal:
-                continue
-            return {
-                'stage_id': str(stage.stage_id or ''),
-                'stage_index': int(stage.stage_index or 0),
-                'status': str(stage.status or ''),
-                'active': str(state.active_stage_id or '').strip() == str(stage.stage_id or '').strip(),
-            }
-        return {}
-
-    def _unresolved_dispatch_in_stage(
-        self,
-        *,
-        task_id: str,
-        node_id: str,
-        stage: ExecutionStageRecord,
-    ) -> list[str]:
-        """这条阶段里还有哪些调用没把结果送回模型：只看帧的活状态，不查结果表。
-
-        `task_node_tool_results` 有缺行（同一节点 03:09 那次收口就没有行），把它当"未送达"
-        判据会连合法裁撤一起拦住；帧的 `pending_tool_calls` / `tool_calls` 才是运行态真相。
-        """
-        claimed = {
-            str(call_id or '').strip()
-            for round_item in list(stage.rounds or [])
-            for call_id in list(getattr(round_item, 'tool_call_ids', None) or [])
-        }
-        claimed.discard('')
-        if not claimed:
-            return []
-        frame = self.read_runtime_frame_payload(task_id, node_id) or {}
-        pending_ids = {
-            str(item.get('id') or '').strip()
-            for item in list(frame.get('pending_tool_calls') or [])
-            if isinstance(item, dict) and str(item.get('id') or '').strip()
-        }
-        unfinished_ids = {
-            str(item.get('tool_call_id') or '').strip()
-            for item in list(frame.get('tool_calls') or [])
-            if isinstance(item, dict)
-            and str(item.get('tool_call_id') or '').strip()
-            and not str(item.get('finished_at') or '').strip()
-        }
-        unresolved = sorted(claimed & (pending_ids | unfinished_ids))
-        if str(frame.get('phase') or '').strip().lower() == 'waiting_children':
-            # 派生还没等完：整条阶段的调用都算未送达，结果回来之前这条阶段不许移出可见层。
-            unresolved = sorted(set(unresolved) | claimed)
-        return unresolved
-
-    def submit_next_stage(
-        self,
-        task_id: str,
-        node_id: str,
-        *,
-        stage_goal: str,
-        tool_round_budget: int,
-        completed_stage_summary: str = '',
-        key_refs: list[dict[str, Any]] | None = None,
-        final: bool = False,
-        drop_completed_stage_tool_detail: bool = False,
-    ) -> dict[str, Any]:
-        with self._task_lock(task_id):
-            task = self._require_task(task_id)
-            node = self._store.get_node(node_id)
-            if node is None:
-                raise ValueError(f'node not found: {node_id}')
-            normalized_goal = self._clip_stage_text(stage_goal, limit=_STAGE_GOAL_CHAR_LIMIT)
-            normalized_budget = max(
-                STAGE_TOOL_ROUND_BUDGET_MIN,
-                int(tool_round_budget or 0),
-            )
-            # 阶段摘要是模型自己写的收尾内容，逐字落盘；只折叠换行，不截长度。
-            normalized_completed_summary = self._clip_stage_text(completed_stage_summary, limit=None)
-            normalized_key_refs = self._canonicalize_stage_key_refs(self._normalize_stage_key_refs(key_refs))
-            if not normalized_goal:
-                raise ValueError('stage_goal must not be empty')
-            if normalized_budget > STAGE_TOOL_ROUND_BUDGET_MAX:
-                raise ValueError(
-                    f'tool_round_budget must not exceed {STAGE_TOOL_ROUND_BUDGET_MAX}'
-                )
-            state = self._execution_stage_state(node)
-            active = self._active_execution_stage(state)
-            if (
-                active is not None
-                and str(active.status or '') == _EXECUTION_STAGE_STATUS_ACTIVE
-                and not self._execution_stage_has_substantive_progress(active)
-            ):
-                raise ValueError(
-                    'current active stage has no substantive progress yet; '
-                    'do not call submit_next_stage again before using a non-control tool '
-                    'or spawn_child_nodes in this stage'
-                )
-            if active is not None and str(active.status or '') == _EXECUTION_STAGE_STATUS_ACTIVE:
-                unresolved = self._unresolved_dispatch_in_stage(
-                    task_id=task_id,
-                    node_id=node_id,
-                    stage=active,
-                )
-                if unresolved:
-                    # 结果还没送到模型面前就结清，等于让这条阶段带着一个未送达的调用去裁撤：
-                    # 那正是本轮事故里"迟到结果被当成已见过而删掉"的起点。宁可拒绝推进。
-                    self._emit_stage_ledger_event(
-                        'stage_close_blocked_unresolved',
-                        f'阶段结清被拦：{node_id} 阶段 {int(active.stage_index or 0)} 仍持有未送达调用 {len(unresolved)} 条',
-                        task_id=task_id,
-                        node_id=node_id,
-                        detail={
-                            'stage_id': str(active.stage_id or ''),
-                            'stage_index': int(active.stage_index or 0),
-                            'unresolved_call_ids': unresolved[:8],
-                        },
-                    )
-                    raise ValueError(
-                        'submit_next_stage refused: the current stage still owns tool calls whose results '
-                        'have not been delivered yet; wait for them to return (spawn_child_nodes returns only '
-                        'after every child node is terminal) before opening the next stage'
-                    )
-            latest_spawn_key_ref = self._latest_spawn_stage_key_ref_locked(
-                task_id=task_id,
-                node_id=node_id,
-                active_stage=active,
-            )
-            if (
-                latest_spawn_key_ref is not None
-                and not any(str(item.ref or '').strip() == str(latest_spawn_key_ref.ref or '').strip() for item in normalized_key_refs)
-            ):
-                normalized_key_refs = [*normalized_key_refs, latest_spawn_key_ref]
-            now = now_iso()
-            # 收尾材料的归属对象与前门共用同一个判据：活动阶段优先；run 终局（含失败态）会
-            # 把活动阶段结清并清空 active_stage_id，而节点可以被恢复继续跑（错误恢复、验收打回），
-            # 此时模型才补发提交，落点就是那条被结清、总结还空着的阶段。
-            closing_stage = closing_stage_target(state)
-            closing_stage_id = str((closing_stage.stage_id if closing_stage is not None else '') or '').strip()
-            closing_was_active = bool(closing_stage_id) and closing_stage_id == str(state.active_stage_id or '').strip()
-            stages: list[ExecutionStageRecord] = []
-            for stage in list(state.stages or []):
-                current = stage
-                if closing_stage_id and str(stage.stage_id or '').strip() == closing_stage_id:
-                    stage_evicts = bool(drop_completed_stage_tool_detail and normalized_completed_summary)
-                    stage_update: dict[str, Any] = {
-                        'status': _EXECUTION_STAGE_STATUS_COMPLETED,
-                        # 被结清的阶段保留原 finished_at：它是时间线与收口水位线的命中键。
-                        'finished_at': now if closing_was_active else (
-                            str(stage.finished_at or '').strip() or now
-                        ),
-                        'completed_stage_summary': normalized_completed_summary,
-                        'key_refs': normalized_key_refs,
-                        # 工具层已用 validate_params 拦过"空总结+点名裁撤"，这里再收一次：
-                        # 绕过工具层的写入者不能造出"肉身和总结一起消失"的黑洞态。
-                        'context_evicted': stage_evicts,
-                    }
-                    current = stage.model_copy(update=stage_update)
-                stages.append(current)
-            closing_index = next(
-                (index for index, item in enumerate(stages) if str(item.stage_id or '').strip() == closing_stage_id),
-                None,
-            )
-            if closing_index is not None:
-                stages[closing_index] = self._export_execution_stage_eviction_locked(
-                    task=task,
-                    node_id=node_id,
-                    stage=stages[closing_index],
-                )
-            closing_stage = stages[closing_index] if closing_index is not None else None
-            next_stage_index = max((int(stage.stage_index or 0) for stage in stages), default=0) + 1
-            pending_orphan_rounds = [item.model_copy() for item in list(state.pending_orphan_rounds or [])]
-            grafted_rounds: list[ExecutionStageRound] = []
-            for orphan_index, round_item in enumerate(pending_orphan_rounds, start=1):
-                grafted_rounds.append(
-                    round_item.model_copy(
-                        update={
-                            'round_id': new_stage_round_id(),
-                            'round_index': orphan_index,
-                            'orphan_grafted': True,
-                        }
-                    )
-                )
-            grafted_used = sum(1 for round_item in grafted_rounds if bool(round_item.budget_counted))
-            # 模型提交的预算是"接下来还能用多少轮"；宽限轮由运行时自动并入，
-            # 不从模型侧扣预算，也不需要模型在总结或目标里为它们留位。
-            next_stage = ExecutionStageRecord(
-                stage_id=new_stage_id(),
-                stage_index=next_stage_index,
-                stage_kind=_EXECUTION_STAGE_KIND_NORMAL,
-                system_generated=False,
-                mode=_EXECUTION_STAGE_MODE_SELF,
-                status=_EXECUTION_STAGE_STATUS_ACTIVE,
-                stage_goal=normalized_goal,
-                completed_stage_summary='',
-                final_stage=False,
-                key_refs=[],
-                archive_ref='',
-                archive_stage_index_start=0,
-                archive_stage_index_end=0,
-                tool_round_budget=normalized_budget + grafted_used,
-                tool_rounds_used=grafted_used,
-                created_at=now,
-                finished_at='',
-                rounds=grafted_rounds,
-            )
-            next_state = ExecutionStageState(
-                active_stage_id=next_stage.stage_id,
-                transition_required=False,
-                stages=[*stages, next_stage],
-                pending_orphan_rounds=[],
-            )
-            self._persist_execution_stage_state_locked(task=task, node_id=node_id, state=next_state)
-            self._sync_execution_stage_frame_locked(task_id=task_id, node_id=node_id, state=next_state)
-            self.refresh_task_view(task_id, mark_unread=True)
-            payload = next_stage.model_dump(mode='json')
-            if normalized_completed_summary or drop_completed_stage_tool_detail:
-                # 与前门同一份回执：这批收尾材料落到哪条阶段、肉身有没有移出、归档在哪。
-                # 没有它，模型只能按提示词文案倒推自己是否裁撤成功，于是向用户谎报。
-                if not closing_stage_id:
-                    reason = 'no_closing_target'
-                elif drop_completed_stage_tool_detail and not normalized_completed_summary:
-                    reason = 'summary_required'
-                else:
-                    reason = 'applied'
-                payload['stage_closure'] = {
-                    'target_stage_id': closing_stage_id,
-                    'summary_attached': bool(
-                        closing_stage is not None and str(closing_stage.completed_stage_summary or '').strip()
-                    ),
-                    'evicted': bool(closing_stage is not None and closing_stage.context_evicted is True),
-                    'archive_ref': str(closing_stage.archive_ref or '') if closing_stage is not None else '',
-                    'reason': reason,
-                    # 与前门同一份落空说明：结果属动态尾部，工具 schema 是两车道共享的
-                    # provider 前缀，改它会整体失效一次缓存。
-                    **({} if reason == 'applied' else {'note': STAGE_CLOSURE_INACTIVE_NOTES[reason]}),
-                }
-            return payload
-
-    def record_execution_stage_round(
-        self,
-        task_id: str,
-        node_id: str,
-        *,
-        tool_calls: list[dict[str, Any]],
-        created_at: str,
-        text: str = '',
-    ) -> dict[str, Any] | None:
-        with self._task_lock(task_id):
-            task = self._require_task(task_id)
-            node = self._store.get_node(node_id)
-            if node is None:
-                return None
-            state = self._execution_stage_state(node)
-            active = self._active_execution_stage(state)
-            if active is None or bool(state.transition_required):
-                return None
-            visible_calls = [
-                item for item in list(tool_calls or [])
-                if str(item.get('name') or '').strip() and str(item.get('name') or '').strip() != _EXECUTION_STAGE_TOOL_NAME
-            ]
-            if not visible_calls:
-                return None
-            tool_names = [str(item.get('name') or '').strip() for item in visible_calls if str(item.get('name') or '').strip()]
-            counts_budget = response_tool_calls_count_against_stage_budget(
-                visible_calls,
-                extra_non_budget_tools=_NON_BUDGET_EXECUTION_TOOLS,
-            )
-            next_round = ExecutionStageRound(
-                round_id=new_stage_round_id(),
-                round_index=len(list(active.rounds or [])) + 1,
-                created_at=str(created_at or now_iso()),
-                text=self._clip_stage_text(text, limit=_STAGE_ROUND_TEXT_CHAR_LIMIT),
-                tool_call_ids=[str(item.get('id') or '').strip() for item in visible_calls if str(item.get('id') or '').strip()],
-                tool_names=tool_names,
-                budget_counted=counts_budget,
-            )
-            stages: list[ExecutionStageRecord] = []
-            for stage in list(state.stages or []):
-                current = stage
-                if str(stage.stage_id or '').strip() == str(active.stage_id or '').strip():
-                    next_used = int(stage.tool_rounds_used or 0) + (1 if counts_budget else 0)
-                    if int(stage.tool_round_budget or 0) > 0:
-                        next_used = min(next_used, int(stage.tool_round_budget or 0))
-                    current = stage.model_copy(
-                        update={
-                            'tool_rounds_used': next_used,
-                            'rounds': [*list(stage.rounds or []), next_round],
-                        }
-                    )
-                stages.append(current)
-            latest_active = next((item for item in stages if str(item.stage_id or '').strip() == str(active.stage_id or '').strip()), None)
-            next_state = ExecutionStageState(
-                active_stage_id=str(state.active_stage_id or '').strip(),
-                transition_required=bool(
-                    latest_active is not None
-                    and int(latest_active.tool_round_budget or 0) > 0
-                    and int(latest_active.tool_rounds_used or 0) >= int(latest_active.tool_round_budget or 0)
-                ),
-                stages=stages,
-                pending_orphan_rounds=list(state.pending_orphan_rounds or []),
-            )
-            self._persist_execution_stage_state_locked(task=task, node_id=node_id, state=next_state)
-            self._sync_execution_stage_frame_locked(task_id=task_id, node_id=node_id, state=next_state)
-            self.refresh_task_view(task_id, mark_unread=True)
-            return next_round.model_dump(mode='json')
-
-    def refund_execution_stage_round(self, task_id: str, node_id: str, round_id: str) -> bool:
-        """退还一次回合预算：那一轮里没有任何调用真的执行过（D3）。
-
-        判定放在调用方（它才知道每个调用的结果），这里只做记账纠正。不退还的话，模型为
-        "先拿契约"这一跳付掉一轮预算——那是机制自己的代价被算成模型的错，而契约在场时
-        同一批调用本就不占预算。
-        """
-        target_round_id = str(round_id or '').strip()
-        if not target_round_id:
-            return False
-        with self._task_lock(task_id):
-            task = self._require_task(task_id)
-            node = self._store.get_node(node_id)
-            if node is None:
-                return False
-            state = self._execution_stage_state(node)
-            active = self._active_execution_stage(state)
-            if active is None:
-                return False
-            target = next(
-                (
-                    item
-                    for item in list(active.rounds or [])
-                    if str(item.get('round_id') if isinstance(item, dict) else getattr(item, 'round_id', '')) == target_round_id
-                ),
-                None,
-            )
-            if target is None or not bool(
-                target.get('budget_counted') if isinstance(target, dict) else getattr(target, 'budget_counted', False)
-            ):
-                return False
-            stages: list[ExecutionStageRecord] = []
-            for stage in list(state.stages or []):
-                current = stage
-                if str(stage.stage_id or '').strip() == str(active.stage_id or '').strip():
-                    rounds = [
-                        item.model_copy(update={'budget_counted': False})
-                        if str(getattr(item, 'round_id', '') or '') == target_round_id
-                        else item
-                        for item in list(stage.rounds or [])
-                    ]
-                    current = stage.model_copy(
-                        update={
-                            'rounds': rounds,
-                            'tool_rounds_used': max(0, int(stage.tool_rounds_used or 0) - 1),
-                        }
-                    )
-                stages.append(current)
-            refunded = next(
-                (item for item in stages if str(item.stage_id or '').strip() == str(active.stage_id or '').strip()),
-                None,
-            )
-            next_state = ExecutionStageState(
-                active_stage_id=str(state.active_stage_id or '').strip(),
-                transition_required=bool(
-                    refunded is not None
-                    and int(refunded.tool_round_budget or 0) > 0
-                    and int(refunded.tool_rounds_used or 0) >= int(refunded.tool_round_budget or 0)
-                ),
-                stages=stages,
-                pending_orphan_rounds=list(state.pending_orphan_rounds or []),
-            )
-            self._persist_execution_stage_state_locked(task=task, node_id=node_id, state=next_state)
-            self._sync_execution_stage_frame_locked(task_id=task_id, node_id=node_id, state=next_state)
-            self.refresh_task_view(task_id, mark_unread=True)
-            return True
-
-    def mark_execution_stage_contains_spawn(self, task_id: str, node_id: str) -> dict[str, Any] | None:
-        with self._task_lock(task_id):
-            task = self._require_task(task_id)
-            node = self._store.get_node(node_id)
-            if node is None:
-                return None
-            state = self._execution_stage_state(node)
-            active = self._active_execution_stage(state)
-            if active is None or str(active.mode or '') == _EXECUTION_STAGE_MODE_WITH_CHILDREN:
-                return active.model_dump(mode='json') if active is not None else None
-            stages: list[ExecutionStageRecord] = []
-            for stage in list(state.stages or []):
-                current = stage
-                if str(stage.stage_id or '').strip() == str(active.stage_id or '').strip():
-                    current = stage.model_copy(update={'mode': _EXECUTION_STAGE_MODE_WITH_CHILDREN})
-                stages.append(current)
-            next_state = ExecutionStageState(
-                active_stage_id=str(state.active_stage_id or '').strip(),
-                transition_required=bool(state.transition_required),
-                stages=stages,
-                pending_orphan_rounds=list(state.pending_orphan_rounds or []),
-            )
-            self._persist_execution_stage_state_locked(task=task, node_id=node_id, state=next_state)
-            self._sync_execution_stage_frame_locked(task_id=task_id, node_id=node_id, state=next_state)
-            self.refresh_task_view(task_id, mark_unread=True)
-            current = next((item for item in stages if str(item.stage_id or '').strip() == str(active.stage_id or '').strip()), None)
-            return current.model_dump(mode='json') if current is not None else None
-
-    def finalize_execution_stage(self, task_id: str, node_id: str, *, status: str) -> dict[str, Any] | None:
-        with self._task_lock(task_id):
-            task = self._store.get_task(task_id)
-            node = self._store.get_node(node_id)
-            if task is None or node is None:
-                return None
-            state = self._execution_stage_state(node)
-            had_pending = bool(list(state.pending_orphan_rounds or []))
-            state = self._absorb_execution_orphan_rounds(state)
-            active = self._active_execution_stage(state)
-            if active is None:
-                if had_pending:
-                    # 仅有孤儿轮、无活动阶段:吸收为一个已完成收纳阶段并落盘
-                    self._persist_execution_stage_state_locked(task=task, node_id=node_id, state=state)
-                    self._sync_execution_stage_frame_locked(task_id=task_id, node_id=node_id, state=state)
-                    self.refresh_task_view(task_id, mark_unread=True)
-                return None
-            final_status = _EXECUTION_STAGE_STATUS_COMPLETED if str(status or '').strip().lower() == 'success' else _EXECUTION_STAGE_STATUS_FAILED
-            now = now_iso()
-            stages: list[ExecutionStageRecord] = []
-            for stage in list(state.stages or []):
-                current = stage
-                if str(stage.stage_id or '').strip() == str(active.stage_id or '').strip():
-                    current = stage.model_copy(update={'status': final_status, 'finished_at': now})
-                stages.append(current)
-            next_state = ExecutionStageState(
-                active_stage_id='',
-                transition_required=False,
-                stages=stages,
-                pending_orphan_rounds=list(state.pending_orphan_rounds or []),
-            )
-            self._persist_execution_stage_state_locked(task=task, node_id=node_id, state=next_state)
-            self._sync_execution_stage_frame_locked(task_id=task_id, node_id=node_id, state=next_state)
-            self.refresh_task_view(task_id, mark_unread=True)
-            current = next((item for item in stages if str(item.stage_id or '').strip() == str(active.stage_id or '').strip()), None)
-            return current.model_dump(mode='json') if current is not None else None
-
-    @staticmethod
-    def _absorb_execution_orphan_rounds(state: ExecutionStageState) -> ExecutionStageState:
-        """把待入账孤儿轮收纳进一个 completed 阶段(无活动阶段),或嫁接进活动阶段(防御)。
-
-        有活动阶段时孤儿轮嫁接进其 rounds 末尾并标 orphan_grafted(不改变 used/budget);无活动阶段时
-        自动补开一个 system_generated、stage_kind="normal" 的 completed 收纳阶段(保证可被阶段压缩回收)。
-        无待入账孤儿轮时原样返回 state。
-        """
-        pending = [item.model_copy() for item in list(state.pending_orphan_rounds or [])]
-        if not pending:
-            return state
-        active = TaskLogService._active_execution_stage(state)
-        if active is not None:
-            grafted = [
-                item.model_copy(
-                    update={
-                        'round_id': new_stage_round_id(),
-                        'round_index': len(list(active.rounds or [])) + index,
-                        'orphan_grafted': True,
-                    }
-                )
-                for index, item in enumerate(pending, start=1)
-            ]
-            stages: list[ExecutionStageRecord] = []
-            for stage in list(state.stages or []):
-                if str(stage.stage_id or '').strip() == str(active.stage_id or '').strip():
-                    stages.append(stage.model_copy(update={'rounds': [*list(stage.rounds or []), *grafted]}))
-                else:
-                    stages.append(stage)
-            return ExecutionStageState(
-                active_stage_id=str(state.active_stage_id or '').strip(),
-                transition_required=bool(state.transition_required),
-                stages=stages,
-                pending_orphan_rounds=[],
-            )
-        node_now = now_iso()
-        next_stage_index = max((int(stage.stage_index or 0) for stage in list(state.stages or [])), default=0) + 1
-        grafted = [
-            item.model_copy(update={'round_id': new_stage_round_id(), 'round_index': index, 'orphan_grafted': True})
-            for index, item in enumerate(pending, start=1)
-        ]
-        used = sum(1 for item in grafted if bool(item.budget_counted))
-        absorbing = ExecutionStageRecord(
-            stage_id=new_stage_id(),
-            stage_index=next_stage_index,
-            stage_kind=_EXECUTION_STAGE_KIND_NORMAL,
-            system_generated=True,
-            mode=_EXECUTION_STAGE_MODE_SELF,
-            status=_EXECUTION_STAGE_STATUS_COMPLETED,
-            stage_goal=f'自动补记:无阶段期间执行的工具调用({len(grafted)} 轮)',
-            completed_stage_summary='',
-            final_stage=False,
-            key_refs=[],
-            archive_ref='',
-            archive_stage_index_start=0,
-            archive_stage_index_end=0,
-            tool_round_budget=max(STAGE_TOOL_ROUND_BUDGET_MIN, min(len(grafted), STAGE_TOOL_ROUND_BUDGET_MAX)),
-            tool_rounds_used=used,
-            created_at=node_now,
-            finished_at=node_now,
-            rounds=grafted,
-        )
-        return ExecutionStageState(
-            active_stage_id='',
-            transition_required=False,
-            stages=[*list(state.stages or []), absorbing],
-            pending_orphan_rounds=[],
-        )
-
-    def record_execution_stage_free_pass_round(
-        self,
-        task_id: str,
-        node_id: str,
-        *,
-        tool_calls: list[dict[str, Any]],
-        kind: str,
-        created_at: str,
-        text: str = '',
-    ) -> dict[str, Any] | None:
-        """宽限执行轮次记账:kind=='stageless' 记入 pending_orphan_rounds;'exhausted' 记 overflow 轮。"""
-        with self._task_lock(task_id):
-            task = self._require_task(task_id)
-            node = self._store.get_node(node_id)
-            if node is None:
-                return None
-            state = self._execution_stage_state(node)
-            visible_calls = [
-                item for item in list(tool_calls or [])
-                if str(item.get('name') or '').strip() and str(item.get('name') or '').strip() != _EXECUTION_STAGE_TOOL_NAME
-            ]
-            if not visible_calls:
-                return None
-            tool_names = [str(item.get('name') or '').strip() for item in visible_calls if str(item.get('name') or '').strip()]
-            counts_budget = response_tool_calls_count_against_stage_budget(
-                visible_calls,
-                extra_non_budget_tools=_NON_BUDGET_EXECUTION_TOOLS,
-            )
-            normalized_kind = str(kind or '').strip()
-            call_ids = [str(item.get('id') or '').strip() for item in visible_calls if str(item.get('id') or '').strip()]
-            normalized_text = self._clip_stage_text(text, limit=_STAGE_ROUND_TEXT_CHAR_LIMIT)
-            if normalized_kind == 'exhausted':
-                active = self._active_execution_stage(state)
-                if active is None or not bool(state.transition_required):
-                    return None
-                overflow_round = ExecutionStageRound(
-                    round_id=new_stage_round_id(),
-                    round_index=len(list(active.rounds or [])) + 1,
-                    created_at=str(created_at or now_iso()),
-                    text=normalized_text,
-                    tool_call_ids=call_ids,
-                    tool_names=tool_names,
-                    budget_counted=False,
-                    overflow=True,
-                )
-                stages: list[ExecutionStageRecord] = []
-                for stage in list(state.stages or []):
-                    current = stage
-                    if str(stage.stage_id or '').strip() == str(active.stage_id or '').strip():
-                        current = stage.model_copy(update={'rounds': [*list(stage.rounds or []), overflow_round]})
-                    stages.append(current)
-                next_state = ExecutionStageState(
-                    active_stage_id=str(state.active_stage_id or '').strip(),
-                    transition_required=True,
-                    stages=stages,
-                    pending_orphan_rounds=list(state.pending_orphan_rounds or []),
-                )
-                self._persist_execution_stage_state_locked(task=task, node_id=node_id, state=next_state)
-                self._sync_execution_stage_frame_locked(task_id=task_id, node_id=node_id, state=next_state)
-                self.refresh_task_view(task_id, mark_unread=True)
-                return overflow_round.model_dump(mode='json')
-            if bool(state.active_stage_id):
-                return None
-            orphan_round = ExecutionStageRound(
-                round_id=new_stage_round_id(),
-                round_index=len(list(state.pending_orphan_rounds or [])) + 1,
-                created_at=str(created_at or now_iso()),
-                text=normalized_text,
-                tool_call_ids=call_ids,
-                tool_names=tool_names,
-                budget_counted=counts_budget,
-                orphan=True,
-            )
-            next_state = ExecutionStageState(
-                active_stage_id=str(state.active_stage_id or '').strip(),
-                transition_required=bool(state.transition_required),
-                stages=list(state.stages or []),
-                pending_orphan_rounds=[*list(state.pending_orphan_rounds or []), orphan_round],
-            )
-            self._persist_execution_stage_state_locked(task=task, node_id=node_id, state=next_state)
-            self._sync_execution_stage_frame_locked(task_id=task_id, node_id=node_id, state=next_state)
-            self.refresh_task_view(task_id, mark_unread=True)
-            return orphan_round.model_dump(mode='json')
-
     def update_node_metadata(self, node_id: str, metadata_mutator: Callable[[dict[str, Any]], dict[str, Any]]) -> NodeRecord | None:
         record = self._store.get_node(node_id)
         if record is None:
@@ -3867,14 +2811,13 @@ class TaskLogService:
             if updated is not None and task is not None:
                 next_metadata = dict(updated.metadata or {})
                 spawn_changed = previous_metadata.get('spawn_operations') != next_metadata.get('spawn_operations')
-                execution_stage_changed = previous_metadata.get(_EXECUTION_STAGE_METADATA_KEY) != next_metadata.get(_EXECUTION_STAGE_METADATA_KEY)
                 result_payload_only_keys = {'result_schema_version', 'result_payload', 'result_payload_ref', 'result_payload_summary'}
                 changed_keys = {
                     key
                     for key in set(previous_metadata) | set(next_metadata)
                     if previous_metadata.get(key) != next_metadata.get(key)
                 }
-                if spawn_changed or execution_stage_changed or any(key not in result_payload_only_keys for key in changed_keys):
+                if spawn_changed or any(key not in result_payload_only_keys for key in changed_keys):
                     self._sync_node_read_models_locked(updated, invalidate_execution_trace_ref=True)
                 if spawn_changed:
                     self._sync_task_node_rounds_locked(updated)
@@ -5363,10 +4306,6 @@ class TaskLogService:
                 'model_retry_status': self._sanitize_model_retry_status(
                     next_frame.get('model_retry_status')
                 ),
-                'stage_mode': str(next_frame.get('stage_mode') or ''),
-                'stage_status': str(next_frame.get('stage_status') or ''),
-                'stage_goal': str(next_frame.get('stage_goal') or ''),
-                'stage_total_steps': int(next_frame.get('stage_total_steps') or 0),
                 'active_round_id': str(next_frame.get('active_round_id') or ''),
                 'active_round_tool_call_ids': [
                     str(item or '').strip()
@@ -5573,10 +4512,6 @@ class TaskLogService:
             'model_retry_status': self._sanitize_model_retry_status(
                 payload.get('model_retry_status')
             ),
-            'stage_mode': str(payload.get('stage_mode') or ''),
-            'stage_status': str(payload.get('stage_status') or ''),
-            'stage_goal': str(payload.get('stage_goal') or ''),
-            'stage_total_steps': int(payload.get('stage_total_steps') or 0),
             'active_round_id': str(payload.get('active_round_id') or ''),
             'active_round_tool_call_ids': [
                 str(item or '').strip()
@@ -6368,10 +5303,6 @@ class TaskLogService:
             'model_retry_status': TaskLogService._sanitize_model_retry_status(
                 payload.get('model_retry_status')
             ),
-            'stage_mode': str(payload.get('stage_mode') or ''),
-            'stage_status': str(payload.get('stage_status') or ''),
-            'stage_goal': str(payload.get('stage_goal') or ''),
-            'stage_total_steps': int(payload.get('stage_total_steps') or 0),
             'active_round_id': str(payload.get('active_round_id') or ''),
             'active_round_tool_call_ids': [
                 str(item or '').strip()
@@ -6504,10 +5435,6 @@ class TaskLogService:
             'model_retry_status': TaskLogService._sanitize_model_retry_status(
                 payload.get('model_retry_status')
             ),
-            'stage_mode': str(payload.get('stage_mode') or ''),
-            'stage_status': str(payload.get('stage_status') or ''),
-            'stage_goal': str(payload.get('stage_goal') or ''),
-            'stage_total_steps': int(payload.get('stage_total_steps') or 0),
             'tool_calls': [dict(item) for item in list(payload.get('tool_calls') or []) if isinstance(item, dict)],
             'child_pipelines': [dict(item) for item in list(payload.get('child_pipelines') or []) if isinstance(item, dict)],
             # 公开投影也要带这两份读数：界面读的就是这一层，漏一处就等于面板永远空。

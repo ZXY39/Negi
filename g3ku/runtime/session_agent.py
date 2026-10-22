@@ -23,24 +23,12 @@ from g3ku.providers.fallback import MODEL_RETRY_LIVE_STATES
 from g3ku.runtime import skill_roster_notice as _skill_roster_notice
 from g3ku.runtime import tool_arg_stash as _tool_arg_stash
 from g3ku.runtime.cancellation import ToolCancellationToken
-from g3ku.runtime.frontdoor.canonical_context import (
-    TRANSCRIPT_CC_UPSERT_FIELD,
-    TRANSCRIPT_PROJECTION_MODE,
-    canonical_context_tool_items,
-    default_frontdoor_canonical_context,
-    materialize_transcript_view,
-    normalize_frontdoor_canonical_context,
-    plan_transcript_cc_row,
-    project_canonical_context_for_transcript,
-    repair_transcript_cc_chain,
-)
 from g3ku.runtime.frontdoor.message_builder import (
     MEMORY_SNAPSHOT_ADOPTION_TOKEN_COMPRESSION,
     adopt_memory_snapshot,
 )
 from g3ku.runtime.frontdoor.state_models import CeoFrontdoorInterrupted
 from g3ku.runtime.frontdoor.turns import frontdoor_turns_for_turn, normalize_frontdoor_turns
-from main.runtime.stage_budget import STAGE_TURN_END_SUMMARY_POINTER
 
 _CONTROL_TOOL_NAMES = {"stop_tool_execution"}
 _LEGACY_CONTROL_TOOL_NAMES = {"wait_tool_execution", "stop_tool_execution"}
@@ -102,12 +90,6 @@ CONTEXT_COMPRESSION_MARKER_LABELS = {
     "completed": "会话已压缩",
     "paused": "压缩已暂停",
 }
-
-
-def _project_transcript_canonical_context(canonical_context: Any) -> dict[str, Any]:
-    if not isinstance(canonical_context, dict) or not canonical_context:
-        return {}
-    return project_canonical_context_for_transcript(canonical_context)
 
 
 # 回合 finalize 尾部（转录落盘 → 记忆复核簿记 → 终态 emit）的慢阈值。正常情况
@@ -217,8 +199,6 @@ class RuntimeAgentSession:
         self._preserved_inflight_turn: dict[str, Any] | None = None
         self._follow_up_transition_snapshot: dict[str, Any] | None = None
         self._paused_execution_context: dict[str, Any] | None = None
-        self._frontdoor_stage_state: dict[str, Any] = {}
-        self._frontdoor_canonical_context: dict[str, Any] = default_frontdoor_canonical_context()
         self._frontdoor_turns: list[dict[str, Any]] = []
         self._compression_state: dict[str, Any] = {}
         self._semantic_context_state: dict[str, Any] = {}
@@ -616,8 +596,6 @@ class RuntimeAgentSession:
         ]
         self._frontdoor_actual_request_path = actual_request_path
         self._frontdoor_actual_request_history = actual_request_history
-        self._frontdoor_stage_state = dict(payload.get("frontdoor_stage_state") or {})
-        self._frontdoor_canonical_context = dict(payload.get("frontdoor_canonical_context") or {})
         # 摘要任务随进程一起没了，所以恢复回来的 `running` 一定是假的——不挡在这里，
         # 已经把它写进连续性文件的会话每次重启都会重新钉住那条「上下文压缩中」。
         self._compression_state = self._adopt_compression_state(
@@ -739,8 +717,7 @@ class RuntimeAgentSession:
             self._frontdoor_token_preflight_diagnostics = {}
             self._frontdoor_actual_request_path = ""
             self._frontdoor_actual_request_history = []
-            self._frontdoor_stage_state = {}
-            self._frontdoor_canonical_context = default_frontdoor_canonical_context()
+            self._frontdoor_turns = []
             self._compression_state = {}
             self._semantic_context_state = {}
             self._frontdoor_model_retry_status = None
@@ -964,11 +941,8 @@ class RuntimeAgentSession:
                     for item in list(getattr(self, "_frontdoor_actual_request_history", []) or [])
                     if isinstance(item, dict)
                 ],
-                "frontdoor_stage_state": copy.deepcopy(
-                    getattr(self, "_frontdoor_stage_state", None) or {}
-                ),
-                "frontdoor_canonical_context": copy.deepcopy(
-                    getattr(self, "_frontdoor_canonical_context", None) or {}
+                "frontdoor_turns": normalize_frontdoor_turns(
+                    getattr(self, "_frontdoor_turns", None)
                 ),
                 # 每跳的观测读数（在场三档 / 清扫计数）。CEO-only 回合既没有 task/node 帧，
                 # 请求工件里又只有 request_messages——不在这份载荷里落盘，读数就只活在内存。
@@ -1261,60 +1235,23 @@ class RuntimeAgentSession:
         return task_ids
 
     @classmethod
-    def _task_ids_from_canonical_context(cls, canonical_context: dict[str, Any] | None) -> list[str]:
+    def _task_ids_from_turns(cls, turns: list[dict[str, Any]] | None) -> list[str]:
         task_ids: list[str] = []
-        if not isinstance(canonical_context, dict):
-            return task_ids
-        for tool in canonical_context_tool_items(canonical_context):
-            if not isinstance(tool, dict):
+        for turn in list(turns or []):
+            if not isinstance(turn, dict):
                 continue
-            for candidate in (
-                tool.get("output_text"),
-                tool.get("output_preview_text"),
-                tool.get("arguments_text"),
-            ):
-                for task_id in cls._extract_task_ids_from_text(candidate):
-                    if task_id not in task_ids:
-                        task_ids.append(task_id)
+            for tool in list(turn.get("tools") or []):
+                if not isinstance(tool, dict):
+                    continue
+                for candidate in (
+                    tool.get("output_text"),
+                    tool.get("output_preview_text"),
+                    tool.get("arguments_text"),
+                ):
+                    for task_id in cls._extract_task_ids_from_text(candidate):
+                        if task_id not in task_ids:
+                            task_ids.append(task_id)
         return task_ids
-
-    @classmethod
-    def _complete_active_frontdoor_stage_state(
-        cls,
-        stage_state: dict[str, Any] | None,
-        *,
-        completed_stage_summary: str = "",
-    ) -> dict[str, Any]:
-        normalized_state = dict(stage_state or {})
-        active_stage_id = str(normalized_state.get("active_stage_id") or "").strip()
-        if not active_stage_id:
-            return normalized_state
-        now = datetime.now().isoformat()
-        normalized_summary = str(completed_stage_summary or "").strip()
-        stages: list[dict[str, Any]] = []
-        completed_any = False
-        for raw_stage in list(normalized_state.get("stages") or []):
-            current = dict(raw_stage) if isinstance(raw_stage, dict) else {}
-            if (
-                str(current.get("stage_id") or "").strip() == active_stage_id
-                and str(current.get("status") or "").strip().lower() == "active"
-            ):
-                current["status"] = "completed"
-                current["finished_at"] = str(current.get("finished_at") or "").strip() or now
-                if normalized_summary and not str(current.get("completed_stage_summary") or "").strip():
-                    current["completed_stage_summary"] = normalized_summary
-                completed_any = True
-            stages.append(current)
-        return {
-            "active_stage_id": "" if completed_any else active_stage_id,
-            "transition_required": False if completed_any else bool(normalized_state.get("transition_required")),
-            "stages": stages,
-            "pending_orphan_rounds": [
-                dict(item)
-                for item in list(normalized_state.get("pending_orphan_rounds") or [])
-                if isinstance(item, dict)
-            ],
-        }
 
     def _recover_dispatched_async_runtime_error(
         self,
@@ -1347,37 +1284,8 @@ class RuntimeAgentSession:
             "task_ids": task_ids,
         }
 
-    @staticmethod
-    def _frontdoor_stage_summary_candidates(stage_state: dict[str, Any] | None) -> list[str]:
-        if not isinstance(stage_state, dict):
-            return []
-        summaries: list[str] = []
-        for raw_stage in reversed(list(stage_state.get("stages") or [])):
-            if not isinstance(raw_stage, dict):
-                continue
-            summary = str(raw_stage.get("completed_stage_summary") or "").strip()
-            if not summary or summary == STAGE_TURN_END_SUMMARY_POINTER:
-                continue
-            if summary not in summaries:
-                summaries.append(summary)
-        return summaries
-
     def _best_effort_async_dispatch_visible_text(self, *, task_ids: list[str]) -> str:
-        candidates: list[str] = []
-        latest_message = str(self._state.latest_message or "").strip()
-        if latest_message:
-            candidates.append(latest_message)
-        for summary in self._frontdoor_stage_summary_candidates(getattr(self, "_frontdoor_stage_state", None)):
-            if summary not in candidates:
-                candidates.append(summary)
-        if not candidates:
-            return ""
-        normalized_task_ids = self._normalize_verified_task_ids(task_ids)
-        if normalized_task_ids:
-            for candidate in candidates:
-                if any(task_id in candidate for task_id in normalized_task_ids):
-                    return candidate
-        return candidates[0]
+        return str(self._state.latest_message or "").strip()
 
     def _ensure_user_turn_id(self, user_input: UserInputMessage, *, reuse_active: bool = True) -> str:
         metadata = dict(user_input.metadata or {})
@@ -1602,20 +1510,15 @@ class RuntimeAgentSession:
         index: int,
         assistant_text: str,
         assistant_payload: dict[str, Any],
-        projected: dict[str, Any],
     ) -> None:
         """续跑轮的回复就地写回暂停归档行，取代在尾部另起一行。
 
-        归档行是 append-only 链上的全量 checkpoint，替换它沿用归档写入那套：新行也落全量
-        （`plan_transcript_cc_row` 规划出来的 delta 是相对这行自己编码的，就地写会自指），
-        并让下游 upsert 行按新链重编码。`status: paused` 与 `metadata.history_visible:
-        False` 随 metadata 整体换掉——留着前者气泡一直显示已暂停，留着后者这条回复不进
-        模型种子。
+        `status: paused` 与 `metadata.history_visible: False` 随 metadata 整体换掉——
+        留着前者气泡一直显示已暂停，留着后者这条回复不进模型种子。
         """
         messages = getattr(persisted_session, "messages", None)
         if not isinstance(messages, list):
             return
-        replaced_view = materialize_transcript_view(messages, index)
         row = dict(messages[index])
         payload = dict(assistant_payload or {})
         row["content"] = assistant_text
@@ -1628,13 +1531,7 @@ class RuntimeAgentSession:
                 row[key] = dict(payload[key])
             else:
                 row.pop(key, None)
-        for key in ("canonical_context", TRANSCRIPT_CC_UPSERT_FIELD, "canonical_context_projection"):
-            row.pop(key, None)
-        if projected:
-            row["canonical_context"] = copy.deepcopy(projected)
-            row["canonical_context_projection"] = TRANSCRIPT_PROJECTION_MODE
         messages[index] = row
-        repair_transcript_cc_chain(messages, index, replaced_view)
         if hasattr(persisted_session, "updated_at"):
             persisted_session.updated_at = datetime.now()
 
@@ -1908,18 +1805,14 @@ class RuntimeAgentSession:
         source = str(snapshot.get("source") or "").strip().lower()
         if source in {"heartbeat", "cron", "approval"}:
             return None
-        canonical_context = (
-            copy.deepcopy(snapshot.get("canonical_context"))
-            if isinstance(snapshot.get("canonical_context"), dict)
-            else {}
-        )
+        snapshot_turns = normalize_frontdoor_turns(snapshot.get("frontdoor_turns"))
         compression = (
             copy.deepcopy(snapshot.get("compression"))
             if isinstance(snapshot.get("compression"), dict)
             else {}
         )
         assistant_text = str(snapshot.get("assistant_text") or "").strip()
-        if not assistant_text and not canonical_context and not compression:
+        if not assistant_text and not snapshot_turns and not compression:
             return None
         archived_text = assistant_text or "处理中..."
         archived_from_turn_id = str(snapshot.get("turn_id") or "").strip()
@@ -1932,7 +1825,7 @@ class RuntimeAgentSession:
         }
         if archived_from_turn_id:
             metadata["archived_from_turn_id"] = archived_from_turn_id
-        archived_task_ids = self._task_ids_from_canonical_context(canonical_context)
+        archived_task_ids = self._task_ids_from_turns(snapshot_turns)
         if archived_task_ids:
             metadata["task_ids"] = archived_task_ids
         try:
@@ -1960,12 +1853,6 @@ class RuntimeAgentSession:
                 "turn_id": archive_turn_id,
                 "metadata": metadata,
             }
-            if canonical_context:
-                projected = _project_transcript_canonical_context(canonical_context)
-                if projected:
-                    assistant_payload.update(
-                        plan_transcript_cc_row(getattr(persisted_session, "messages", None), projected)
-                    )
             if compression:
                 assistant_payload["compression"] = compression
             persisted_session.add_message("assistant", archived_text, **assistant_payload)
@@ -2006,7 +1893,7 @@ class RuntimeAgentSession:
             return
         if (
             not str(snapshot.get("assistant_text") or "").strip()
-            and not isinstance(snapshot.get("canonical_context"), dict)
+            and not normalize_frontdoor_turns(snapshot.get("frontdoor_turns"))
             and not isinstance(snapshot.get("compression"), dict)
         ):
             return
@@ -2044,11 +1931,7 @@ class RuntimeAgentSession:
         if not turn_id:
             return
         assistant_text = str(snapshot.get("assistant_text") or "").strip() or "已暂停"
-        canonical_context = (
-            copy.deepcopy(snapshot.get("canonical_context"))
-            if isinstance(snapshot.get("canonical_context"), dict)
-            else {}
-        )
+        snapshot_turns = normalize_frontdoor_turns(snapshot.get("frontdoor_turns"))
         compression = (
             copy.deepcopy(snapshot.get("compression"))
             if isinstance(snapshot.get("compression"), dict)
@@ -2059,7 +1942,7 @@ class RuntimeAgentSession:
             "source": "manual_pause_archive",
             "archived_paused_turn": True,
         }
-        archived_task_ids = self._task_ids_from_canonical_context(canonical_context)
+        archived_task_ids = self._task_ids_from_turns(snapshot_turns)
         if archived_task_ids:
             metadata["task_ids"] = archived_task_ids
         assistant_payload: dict[str, Any] = {
@@ -2067,53 +1950,24 @@ class RuntimeAgentSession:
             "status": "paused",
             "metadata": metadata,
         }
-        projected_paused_context: dict[str, Any] = {}
-        if canonical_context:
-            projected_paused_context = _project_transcript_canonical_context(canonical_context)
         if compression:
             assistant_payload["compression"] = compression
         try:
             persisted_session = self._loop.sessions.get_or_create(self._state.session_key)
             existing_index = self._find_archived_paused_assistant_index(persisted_session, turn_id=turn_id)
             if existing_index is None:
-                if projected_paused_context:
-                    # 暂停归档行永远落全量 checkpoint：它可能被后续替换重写，
-                    # delta 形态会让那次就地变更牵连下游链。
-                    assistant_payload.update(
-                        {
-                            "canonical_context": projected_paused_context,
-                            "canonical_context_projection": TRANSCRIPT_PROJECTION_MODE,
-                        }
-                    )
                 persisted_session.add_message("assistant", assistant_text, **assistant_payload)
             else:
-                # 修复下游链要先按旧链取回被替换行的原视图。
-                replaced_old_view = materialize_transcript_view(
-                    persisted_session.messages,
-                    existing_index,
-                )
                 archived_message = dict(persisted_session.messages[existing_index])
                 archived_message["content"] = assistant_text
                 archived_message["turn_id"] = turn_id
                 archived_message["status"] = "paused"
                 archived_message["metadata"] = metadata
-                if projected_paused_context:
-                    archived_message["canonical_context"] = projected_paused_context
-                    archived_message["canonical_context_projection"] = TRANSCRIPT_PROJECTION_MODE
-                else:
-                    archived_message.pop("canonical_context", None)
-                    archived_message.pop("canonical_context_projection", None)
                 if compression:
                     archived_message["compression"] = compression
                 else:
                     archived_message.pop("compression", None)
                 persisted_session.messages[existing_index] = archived_message
-                # 就地替换了轨道行：以旧视图为锚的后续 delta 行按新链重编码。
-                repair_transcript_cc_chain(
-                    persisted_session.messages,
-                    existing_index,
-                    replaced_old_view,
-                )
                 if hasattr(persisted_session, "updated_at"):
                     persisted_session.updated_at = datetime.now()
             if self._state.session_key.startswith("web:"):
@@ -2446,32 +2300,6 @@ class RuntimeAgentSession:
                 items[-1]["elapsed_seconds"] = float(elapsed_seconds)
         return items
 
-    def _has_renderable_frontdoor_stage_state(self) -> bool:
-        stage_state = getattr(self, "_frontdoor_stage_state", None)
-        stages = stage_state.get("stages") if isinstance(stage_state, dict) else None
-        if not isinstance(stages, list):
-            return False
-        for stage in stages:
-            if not isinstance(stage, dict):
-                continue
-            stage_id = str(stage.get("stage_id") or "").strip()
-            rounds = stage.get("rounds")
-            if stage_id and isinstance(rounds, list):
-                return True
-        return False
-
-    def _frontdoor_canonical_context_snapshot(self) -> dict[str, Any]:
-        snapshot = normalize_frontdoor_canonical_context(
-            copy.deepcopy(getattr(self, "_frontdoor_canonical_context", None) or {})
-        )
-        return snapshot if list(snapshot.get("stages") or []) else {}
-
-    def _frontdoor_visible_canonical_context_snapshot(self) -> dict[str, Any]:
-        snapshot = normalize_frontdoor_canonical_context(
-            copy.deepcopy(getattr(self, "_frontdoor_stage_state", None) or {})
-        )
-        return snapshot if list(snapshot.get("stages") or []) else {}
-
     def _compression_has_live_host(self) -> bool:
         """`running` 只能由活的宿主持有：回合在跑，或本机手动压缩任务在跑。
 
@@ -2620,12 +2448,12 @@ class RuntimeAgentSession:
         self,
         *,
         turn_id: str,
-        boundary_stage_index: int,
+        boundary_turn_seq: int,
     ) -> None:
         """把压缩边界广播给实时车道，同时把标记行当场记进内存账——但不单独落盘。
 
-        区分线要停在阶段轨道中间，就必须在摘要落地那一刻把边界送出去；等收尾再发的话，
-        压缩之后跑出来的那一截阶段已经全画在线上方了。行也一样：只等收尾落行的话，
+        区分线要停在回合工具轨迹中间，就必须在摘要落地那一刻把边界送出去；等收尾再发的话，
+        压缩之后跑出来的那一截已经全画在线上方了。行也一样：只等收尾落行的话，
         长回合中途一刷新，这条线就凭空消失到收尾为止。所以行在这里就 append 进内存账
         （快照直接从内存账读转录，刷新当场可见），整份转录的重写仍由回合收尾或下一次
         会话保存顺带完成——不为此多做一次全量写盘。收尾路径凭
@@ -2633,7 +2461,7 @@ class RuntimeAgentSession:
         标志不置位，收尾照旧补落，行为退回原样。转录行没落成（进程中途死掉且此后再无
         保存）时刷新仍会把这条线撤掉：行才是事实源，帧只负责提前画。
         """
-        stats: dict[str, Any] = {"boundary_stage_index": int(boundary_stage_index or 0)}
+        stats: dict[str, Any] = {"boundary_turn_seq": int(boundary_turn_seq or 0)}
         normalized_turn_id = str(turn_id or "").strip()
         if normalized_turn_id:
             stats["turn_id"] = normalized_turn_id
@@ -3057,27 +2885,13 @@ class RuntimeAgentSession:
             status = "running"
         if not (self._state.is_running or status in {"running", "paused", "error"}):
             return None
-        canonical_context = self._frontdoor_visible_canonical_context_snapshot()
-        frontdoor_canonical_context = self._frontdoor_canonical_context_snapshot()
         compression = self._compression_snapshot()
-        frontdoor_stage_state = (
-            copy.deepcopy(getattr(self, "_frontdoor_stage_state", None) or {})
-            if self._has_renderable_frontdoor_stage_state()
-            else {}
-        )
         snapshot: dict[str, Any] = {
             "status": status or ("running" if self._state.is_running else "idle"),
             "compression": compression,
-            "execution_trace_summary": copy.deepcopy(canonical_context) if canonical_context else {},
         }
-        if canonical_context:
-            snapshot["canonical_context"] = canonical_context
-        if frontdoor_stage_state:
-            snapshot["frontdoor_stage_state"] = frontdoor_stage_state
         if self._frontdoor_turns:
             snapshot["frontdoor_turns"] = copy.deepcopy(self._frontdoor_turns)
-        if frontdoor_canonical_context:
-            snapshot["frontdoor_canonical_context"] = frontdoor_canonical_context
         turn_id = self._current_turn_id()
         if turn_id:
             snapshot["turn_id"] = turn_id
@@ -3174,15 +2988,13 @@ class RuntimeAgentSession:
         if frontdoor_baseline_sync_decision:
             snapshot["frontdoor_baseline_sync_decision"] = frontdoor_baseline_sync_decision
         if (
-            not canonical_context
-            and not compression
+            not compression
             and "turn_id" not in snapshot
+            and "frontdoor_turns" not in snapshot
             and "source" not in snapshot
             and "user_message" not in snapshot
             and "assistant_text" not in snapshot
             and "last_error" not in snapshot
-            and "frontdoor_stage_state" not in snapshot
-            and "frontdoor_canonical_context" not in snapshot
             and "repair_required_tool_items" not in snapshot
             and "repair_required_skill_items" not in snapshot
             and "frontdoor_request_body_messages" not in snapshot
@@ -3325,8 +3137,8 @@ class RuntimeAgentSession:
         """静默回合的落盘元数据与痕迹正文；非静默时返回 ``({}, output)``。
 
         痕迹行必须 ``prompt_visible=True``：下一轮的模型要靠它看见"上次对哪个任务选了
-        静默"才谈得上反悔 —— 取消机器闸门之后这是唯一兜底。静默回合照样落一行，因为
-        本轮 canonical_context 挂在它上面，Web 刷新后才画得出阶段轨道。
+        静默"才谈得上反悔 —— 取消机器闸门之后这是唯一兜底。静默回合照样落一行，
+        本轮的工具轨迹随 `frontdoor_turns` 由回合 id 关联，Web 刷新后才画得出折叠行。
         """
         if not self._resolve_silent_reply():
             return {}, str(output or "")
@@ -3386,15 +3198,7 @@ class RuntimeAgentSession:
                 # 而心跳/cron 回合同样会在 prepare 阶段消费排队的 follow-up。
                 self._retire_consumed_pending_user_messages(persisted_session)
             assistant_payload: dict[str, Any] = {}
-            projected: dict[str, Any] = {}
-            canonical_context = self._frontdoor_visible_canonical_context_snapshot()
             compression = self._compression_snapshot()
-            if canonical_context:
-                projected = _project_transcript_canonical_context(canonical_context)
-                if projected:
-                    assistant_payload.update(
-                        plan_transcript_cc_row(getattr(persisted_session, "messages", None), projected)
-                    )
             if compression:
                 assistant_payload["compression"] = compression
             metadata_payload = dict(assistant_metadata or {})
@@ -3437,17 +3241,19 @@ class RuntimeAgentSession:
                     index=archived_index,
                     assistant_text=assistant_text,
                     assistant_payload=assistant_payload,
-                    projected=projected,
                 )
                 self._complete_paused_user_message_for_turn(persisted_session, turn_id)
             # 发送时（自动）压缩在收尾处落线：区分线以上是这轮被折进摘要的历史。
             if str(getattr(self, "_frontdoor_compressed_turn_id", "") or "").strip() == turn_id and turn_id:
                 setattr(self, "_frontdoor_compressed_turn_id", "")
-                boundary_stage_index = int(getattr(self, "_frontdoor_compression_boundary_index", 0) or 0)
-                setattr(self, "_frontdoor_compression_boundary_index", 0)
-                marker_stats: dict[str, Any] = {"turn_id": turn_id}
-                if boundary_stage_index:
-                    marker_stats["boundary_stage_index"] = boundary_stage_index
+                boundary_turn_seq = int(
+                    getattr(self, "_frontdoor_compression_boundary_turn_seq", 0) or 0
+                )
+                setattr(self, "_frontdoor_compression_boundary_turn_seq", 0)
+                marker_stats: dict[str, Any] = {
+                    "turn_id": turn_id,
+                    "boundary_turn_seq": boundary_turn_seq,
+                }
                 # 摘要落地那一刻行已经随 announce 记进内存账，本次收尾写盘顺带把它持久化；
                 # 只有那条道没写成（标志未置位）才在这里补落，避免同一回合落出两条线。
                 if str(getattr(self, "_frontdoor_compression_marker_appended_turn", "") or "").strip() == turn_id:
@@ -3720,32 +3526,14 @@ class RuntimeAgentSession:
     async def _pause_for_frontdoor_interrupt(self, exc: CeoFrontdoorInterrupted) -> RunResult:
         serialized_interrupts = self._serialize_pending_interrupts(exc.interrupts)
         interrupt_values = dict(exc.values or {}) if isinstance(exc.values, dict) else {}
-        frontdoor_stage_state = interrupt_values.get("frontdoor_stage_state")
-        frontdoor_canonical_context = interrupt_values.get("frontdoor_canonical_context")
         compression_state = interrupt_values.get("compression_state")
         repair_required_tool_items = interrupt_values.get("repair_required_tool_items")
         repair_required_skill_items = interrupt_values.get("repair_required_skill_items")
         frontdoor_selection_debug = interrupt_values.get("frontdoor_selection_debug")
-        preserved_frontdoor_stage_state = getattr(self, "_frontdoor_stage_state", None)
-        preserved_frontdoor_canonical_context = getattr(self, "_frontdoor_canonical_context", None)
         preserved_compression_state = getattr(self, "_compression_state", None)
         preserved_repair_required_tool_items = getattr(self, "_frontdoor_repair_required_tool_items", None)
         preserved_repair_required_skill_items = getattr(self, "_frontdoor_repair_required_skill_items", None)
         preserved_frontdoor_selection_debug = getattr(self, "_frontdoor_selection_debug", None)
-        self._frontdoor_stage_state = (
-            dict(frontdoor_stage_state)
-            if isinstance(frontdoor_stage_state, dict)
-            else dict(preserved_frontdoor_stage_state)
-            if isinstance(preserved_frontdoor_stage_state, dict)
-            else {}
-        )
-        self._frontdoor_canonical_context = normalize_frontdoor_canonical_context(
-            frontdoor_canonical_context
-            if isinstance(frontdoor_canonical_context, dict)
-            else preserved_frontdoor_canonical_context
-            if isinstance(preserved_frontdoor_canonical_context, dict)
-            else default_frontdoor_canonical_context()
-        )
         self._compression_state = (
             dict(compression_state)
             if isinstance(compression_state, dict)
@@ -4068,10 +3856,7 @@ class RuntimeAgentSession:
                     internal_source or "user",
                     ",".join(task_ids),
                 )
-                # 与普通轮末收尾一致:不写指针摘要,该阶段的最终回复就是这个可见输出本身。
-                self._frontdoor_stage_state = self._complete_active_frontdoor_stage_state(
-                    self._frontdoor_stage_state,
-                )
+                # 与普通轮末收尾一致：该轮的最终回复就是这个可见输出本身。
                 assistant = AssistantMessage(content=output, timestamp=self._now())
                 self._state.messages.append(assistant)
                 self._cancel_assistant_stream_flush_task()
@@ -4302,8 +4087,6 @@ class RuntimeAgentSession:
                             turn_id=review_turn_id,
                             user_messages=user_messages,
                             assistant_text=output,
-                            compression_summary=self._compression_snapshot(),
-                            canonical_summary=self._frontdoor_visible_canonical_context_snapshot(),
                             turns=frontdoor_turns_for_turn(
                                 getattr(self, "_frontdoor_turns", None),
                                 review_turn_id,

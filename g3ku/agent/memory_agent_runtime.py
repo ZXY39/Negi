@@ -4711,11 +4711,6 @@ class MemoryManager:
                 for item in list(raw_state.get("pending_turns") or [])
                 if isinstance(item, dict)
             ]
-            stage_versions = {
-                str(key or "").strip(): str(value or "").strip()
-                for key, value in dict(raw_state.get("stage_versions") or {}).items()
-                if str(key or "").strip() and str(value or "").strip()
-            }
             reported_tool_keys: list[str] = []
             seen_reported_tool_keys: set[str] = set()
             for raw_reported_key in list(raw_state.get("reported_tool_keys") or []):
@@ -4727,7 +4722,6 @@ class MemoryManager:
             reported_tool_keys = reported_tool_keys[-_REVIEW_REPORTED_TOOL_ID_CAP:]
             normalized_sessions[session_key] = {
                 "pending_turns": pending_turns,
-                "stage_versions": stage_versions,
                 "reported_tool_keys": reported_tool_keys,
             }
         return {"sessions": normalized_sessions}
@@ -4943,82 +4937,6 @@ class MemoryManager:
     @staticmethod
     def _allowed_review_flush_sources() -> set[str]:
         return {"token_compression", "session_boundary", "stale_buffer"}
-
-    @staticmethod
-    def _compact_review_stage_summary(canonical_summary: dict[str, Any] | None) -> dict[str, Any] | None:
-        if not isinstance(canonical_summary, dict):
-            return None
-        compact: dict[str, Any] = {}
-        active_stage_id = str(canonical_summary.get("active_stage_id") or "").strip()
-        if active_stage_id:
-            compact["active_stage_id"] = active_stage_id
-        stages: list[dict[str, str]] = []
-        for raw_stage in list(canonical_summary.get("stages") or []):
-            if not isinstance(raw_stage, dict):
-                continue
-            entry: dict[str, str] = {}
-            for key in ("stage_id", "stage_goal", "completed_stage_summary"):
-                value = str(raw_stage.get(key) or "").strip()
-                if value:
-                    entry[key] = value
-            if entry:
-                stages.append(entry)
-        if stages:
-            compact["stages"] = stages
-        return compact or None
-
-    @staticmethod
-    def _review_stage_identity(stage: dict[str, Any]) -> str:
-        stage_id = str(stage.get("stage_id") or "").strip()
-        if stage_id:
-            return stage_id
-        encoded = json.dumps(stage, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
-        return f"anonymous:{hashlib.sha256(encoded.encode('utf-8')).hexdigest()[:16]}"
-
-    @staticmethod
-    def _review_stage_version(stage: dict[str, Any]) -> str:
-        payload = {
-            "stage_goal": str(stage.get("stage_goal") or "").strip(),
-            "completed_stage_summary": str(stage.get("completed_stage_summary") or "").strip(),
-        }
-        encoded = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
-        return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
-
-    @staticmethod
-    def _compact_review_stage_summary_delta(
-        *,
-        canonical_summary: dict[str, Any] | None,
-        stage_versions: dict[str, str] | None,
-    ) -> tuple[dict[str, Any] | None, dict[str, str]]:
-        compact = MemoryManager._compact_review_stage_summary(canonical_summary)
-        normalized_versions = {
-            str(key or "").strip(): str(value or "").strip()
-            for key, value in dict(stage_versions or {}).items()
-            if str(key or "").strip() and str(value or "").strip()
-        }
-        if not isinstance(compact, dict):
-            return None, normalized_versions
-
-        next_versions = dict(normalized_versions)
-        delta_stages: list[dict[str, str]] = []
-        for stage in list(compact.get("stages") or []):
-            if not isinstance(stage, dict):
-                continue
-            identity = MemoryManager._review_stage_identity(stage)
-            version = MemoryManager._review_stage_version(stage)
-            if normalized_versions.get(identity) == version:
-                continue
-            next_versions[identity] = version
-            delta_stages.append(stage)
-
-        if not delta_stages:
-            return None, next_versions
-
-        delta: dict[str, Any] = {"stages": delta_stages}
-        active_stage_id = str(compact.get("active_stage_id") or "").strip()
-        if active_stage_id and any(str(stage.get("stage_id") or "").strip() == active_stage_id for stage in delta_stages):
-            delta["active_stage_id"] = active_stage_id
-        return delta, next_versions
 
     @staticmethod
     def _message_to_request_dict(message: Any) -> dict[str, Any]:
@@ -5296,24 +5214,6 @@ class MemoryManager:
         return payload
 
     @staticmethod
-    def _review_tool_record_key(*, stage_id: str, round_id: str, tool: dict[str, Any]) -> str:
-        tool_call_id = str(tool.get("tool_call_id") or "").strip()
-        if tool_call_id:
-            return tool_call_id
-        fingerprint_source = json.dumps(
-            {
-                "stage_id": str(stage_id or "").strip(),
-                "round_id": str(round_id or "").strip(),
-                "tool_name": str(tool.get("tool_name") or "").strip(),
-                "arguments_text": str(tool.get("arguments_text") or "").strip(),
-                "output_head": str(tool.get("output_text") or "").strip()[:64],
-            },
-            ensure_ascii=False,
-            sort_keys=True,
-        )
-        return f"fingerprint:{hashlib.sha256(fingerprint_source.encode('utf-8')).hexdigest()[:24]}"
-
-    @staticmethod
     def _review_turn_tool_record_key(tool: dict[str, Any]) -> str:
         tool_call_id = str(tool.get("tool_call_id") or "").strip()
         if tool_call_id:
@@ -5361,192 +5261,6 @@ class MemoryManager:
         return records
 
     @staticmethod
-    def _collect_visible_tool_records(canonical_summary: dict[str, Any] | None) -> list[dict[str, Any]]:
-        """Collect user-visible tool records from canonical stages that still carry rounds."""
-
-        records: list[dict[str, Any]] = []
-        if not isinstance(canonical_summary, dict):
-            return records
-        for stage in list(canonical_summary.get("stages") or []):
-            if not isinstance(stage, dict):
-                continue
-            stage_id = str(stage.get("stage_id") or "").strip()
-            rounds = [item for item in list(stage.get("rounds") or []) if isinstance(item, dict)]
-            if not rounds:
-                continue
-            for round_item in rounds:
-                round_id = str(round_item.get("round_id") or "").strip()
-                round_text = str(round_item.get("text") or "").strip()
-                for tool in list(round_item.get("tools") or []):
-                    if not isinstance(tool, dict):
-                        continue
-                    tool_name = str(tool.get("tool_name") or "").strip()
-                    if not tool_name:
-                        continue
-                    status = str(tool.get("status") or "").strip().lower()
-                    records.append(
-                        {
-                            "key": MemoryManager._review_tool_record_key(
-                                stage_id=stage_id,
-                                round_id=round_id,
-                                tool=tool,
-                            ),
-                            "stage_id": stage_id,
-                            "round_id": round_id,
-                            "round_text": round_text,
-                            "tool_name": tool_name,
-                            "status": status or "unknown",
-                            "is_error": bool(status) and status != "success",
-                            "arguments_text": str(tool.get("arguments_text") or "").strip(),
-                            "output_preview_text": str(tool.get("output_preview_text") or "").strip(),
-                            "output_text": str(tool.get("output_text") or "").strip(),
-                        }
-                    )
-        return records
-
-    @staticmethod
-    def _gate_stage_tool_records(records: list[dict[str, Any]]) -> list[dict[str, Any]]:
-        """本批该阶段没出过失败，就只留工具名、状态与伴随的中途输出。
-
-        失败调用的入参与报错原文是防错规则唯一的原料，成功调用的明细则与阶段总结、
-        最终回复重复。判据只看本批记录，所以失败记录出现的那一批必然把整阶段原文带齐，
-        不需要再记一份历史失败 cursor。
-        """
-        record_list = list(records or [])
-        if any(
-            str(record.get("status") or "").strip().lower() not in ("", "success")
-            for record in record_list
-        ):
-            return record_list
-        gated: list[dict[str, Any]] = []
-        for record in record_list:
-            entry: dict[str, Any] = {
-                "tool_name": record.get("tool_name"),
-                "status": record.get("status"),
-            }
-            narration = str(record.get("中途输出") or "").strip()
-            if narration:
-                entry["中途输出"] = narration
-            gated.append(entry)
-        return gated
-
-    @staticmethod
-    def _merge_review_stage_payload(
-        *,
-        canonical_summary: dict[str, Any] | None,
-        stage_delta: dict[str, Any] | None,
-        tool_records: list[dict[str, Any]] | None,
-    ) -> dict[str, Any] | None:
-        """Nest new tool records under their stages, mirroring the on-screen order."""
-
-        records_by_stage: dict[str, list[dict[str, Any]]] = {}
-        rounds_with_text: set[str] = set()
-        for record in list(tool_records or []):
-            entry: dict[str, Any] = {
-                "tool_name": str(record.get("tool_name") or "").strip() or "tool",
-                "status": str(record.get("status") or "").strip() or "unknown",
-            }
-            arguments_text = str(record.get("arguments_text") or "").strip()
-            if arguments_text:
-                # 入参长度由写入侧统一限（canonical_context 的 4000 字），这里不再二次截断。
-                entry["args"] = arguments_text
-            preview_text = MemoryManager._inline_preview_text(
-                record.get("output_preview_text"),
-                max_chars=_REVIEW_TOOL_PREVIEW_MAX_CHARS,
-            )
-            if preview_text:
-                entry["output_preview"] = preview_text
-            output_text = str(record.get("output_text") or "").strip()
-            if output_text:
-                entry["output_full"] = MemoryManager._inline_preview_text(
-                    output_text,
-                    max_chars=_REVIEW_TOOL_OUTPUT_MAX_CHARS,
-                )
-            round_key = str(record.get("round_id") or "").strip()
-            round_text = str(record.get("round_text") or "").strip()
-            # Round narration is user-visible as-is and is intentionally not truncated.
-            if round_text and (not round_key or round_key not in rounds_with_text):
-                if round_key:
-                    rounds_with_text.add(round_key)
-                entry["中途输出"] = round_text
-            stage_id = str(record.get("stage_id") or "").strip() or "(unknown-stage)"
-            records_by_stage.setdefault(stage_id, []).append(entry)
-
-        delta_stages: dict[str, dict[str, Any]] = {}
-        for raw_stage in list((stage_delta or {}).get("stages") or []):
-            if not isinstance(raw_stage, dict):
-                continue
-            stage_id = str(raw_stage.get("stage_id") or "").strip()
-            if stage_id:
-                delta_stages[stage_id] = raw_stage
-
-        merged: list[dict[str, Any]] = []
-        emitted_stage_ids: set[str] = set()
-
-        canonical_stages = (
-            list(canonical_summary.get("stages") or [])
-            if isinstance(canonical_summary, dict)
-            else []
-        )
-        canonical_stage_by_id: dict[str, dict[str, Any]] = {}
-        for raw_stage in canonical_stages:
-            if isinstance(raw_stage, dict):
-                canonical_stage_id = str(raw_stage.get("stage_id") or "").strip()
-                if canonical_stage_id:
-                    canonical_stage_by_id.setdefault(canonical_stage_id, raw_stage)
-
-        def _build_stage_entry(stage_id: str) -> dict[str, Any] | None:
-            delta_entry = delta_stages.get(stage_id)
-            stage_records = records_by_stage.pop(stage_id, None)
-            if delta_entry is None and not stage_records:
-                return None
-            # 阶段条目必须自描述：目标/总结优先取本轮 delta；阶段只携带新工具记录时
-            # 回退可见面当前值，保证复核载荷里的阶段始终是完整未压缩形态。
-            source_entry = delta_entry or canonical_stage_by_id.get(stage_id) or {}
-            stage_entry: dict[str, Any] = {"stage_id": stage_id}
-            stage_goal = str(source_entry.get("stage_goal") or "").strip()
-            if stage_goal:
-                stage_entry["stage_goal"] = stage_goal
-            if stage_records:
-                stage_entry["tool_records"] = MemoryManager._gate_stage_tool_records(stage_records)
-            completed_summary = str(source_entry.get("completed_stage_summary") or "").strip()
-            if completed_summary:
-                stage_entry["completed_stage_summary"] = completed_summary
-            return stage_entry
-
-        for raw_stage in canonical_stages:
-            if not isinstance(raw_stage, dict):
-                continue
-            stage_id = str(raw_stage.get("stage_id") or "").strip()
-            if not stage_id or stage_id in emitted_stage_ids:
-                continue
-            stage_entry = _build_stage_entry(stage_id)
-            if stage_entry is None:
-                continue
-            emitted_stage_ids.add(stage_id)
-            merged.append(stage_entry)
-        for stage_id in list(records_by_stage.keys()) + [
-            stage_id for stage_id in delta_stages if stage_id not in emitted_stage_ids
-        ]:
-            if stage_id in emitted_stage_ids:
-                continue
-            stage_entry = _build_stage_entry(stage_id)
-            if stage_entry is None:
-                continue
-            emitted_stage_ids.add(stage_id)
-            merged.append(stage_entry)
-
-        active_stage_id = str((stage_delta or {}).get("active_stage_id") or "").strip()
-        if not merged and not active_stage_id:
-            return None
-        payload: dict[str, Any] = {}
-        if active_stage_id:
-            payload["active_stage_id"] = active_stage_id
-        if merged:
-            payload["stages"] = merged
-        return payload or None
-
-    @staticmethod
     def _review_window_payload(*, session_key: str, pending_turns: list[dict[str, Any]]) -> str:
         sections = [f"[session_key] {str(session_key or '').strip()}"]
         for index, item in enumerate(list(pending_turns or []), start=1):
@@ -5563,13 +5277,8 @@ class MemoryManager:
         turn_id: str,
         user_messages: list[str],
         assistant_text: str,
-        compression_summary: dict[str, Any] | None,
-        canonical_summary: dict[str, Any] | None,
-        stage_delta: dict[str, Any] | None = None,
-        tool_records: list[dict[str, Any]] | None = None,
         turns: list[dict[str, Any]] | None = None,
     ) -> str:
-        _ = compression_summary
         parts = [f"[turn_id] {str(turn_id or '').strip() or '(unknown)'}"]
         normalized_user_messages = [
             str(item or "").strip()
@@ -5579,20 +5288,10 @@ class MemoryManager:
         if normalized_user_messages:
             parts.append("user_messages:")
             parts.extend(f"- {item}" for item in normalized_user_messages)
-        if turns:
-            turn_records = MemoryManager._collect_turn_tool_records(turns)
-            if turn_records:
-                parts.append("tool_records:")
-                parts.append(json.dumps(turn_records, ensure_ascii=False, indent=2))
-        else:
-            stage_payload = MemoryManager._merge_review_stage_payload(
-                canonical_summary=canonical_summary,
-                stage_delta=stage_delta,
-                tool_records=tool_records,
-            )
-            if isinstance(stage_payload, dict) and stage_payload:
-                parts.append("stages:")
-                parts.append(json.dumps(stage_payload, ensure_ascii=False, indent=2))
+        turn_records = MemoryManager._collect_turn_tool_records(turns)
+        if turn_records:
+            parts.append("tool_records:")
+            parts.append(json.dumps(turn_records, ensure_ascii=False, indent=2))
         assistant = str(assistant_text or "").strip()
         if assistant:
             parts.append("assistant_text:")
@@ -5601,10 +5300,10 @@ class MemoryManager:
 
     @staticmethod
     def _window_turn_sections(section: str, *, max_tokens: int) -> list[str]:
-        """单个窗口回合超容量时按 stage 边界切；stage 是不可分原子组，永不腰斩。
+        """单个窗口回合超容量时按工具记录边界切；一条记录是不可分原子组，永不腰斩。
 
         回合头（turn_id、user_messages）和回合尾（assistant_text）每片都完整带上：
-        拆的是"带多少个阶段"，不是"少带这一轮说了什么"。
+        拆的是"带多少条工具记录"，不是"少带这一轮说了什么"。
         """
 
         value = str(section or "")
@@ -5639,54 +5338,11 @@ class MemoryManager:
             if group:
                 sections.append(f"{head}{tool_marker}{json.dumps(group, ensure_ascii=False, indent=2)}{tail}")
             return sections or [value]
-        marker = "\nstages:\n"
-        head_end = value.find(marker)
-        if head_end < 0:
-            return [value]
-        head = value[:head_end]
-        body_start = head_end + len(marker)
-        try:
-            data, consumed = json.JSONDecoder().raw_decode(value[body_start:])
-        except ValueError:
-            return [value]
-        tail = value[body_start + consumed:]
-        stages = data.get("stages") if isinstance(data, dict) else None
-        if not isinstance(stages, list) or len(stages) < 2:
-            return [value]
-        active_stage_id = data.get("active_stage_id") if isinstance(data, dict) else None
-
-        def _render(group: list[Any]) -> str:
-            payload: dict[str, Any] = {"stages": group}
-            if active_stage_id:
-                payload["active_stage_id"] = active_stage_id
-            return f"{head}{marker}{json.dumps(payload, ensure_ascii=False, indent=2)}{tail}"
-
-        # 每个阶段只数一次、按累计和装箱。此前每收一个阶段就把已积累的整组重新
-        # 序列化再逐字符数一遍，597 个阶段的实盘载荷因此要 26.7 秒（同一份载荷按
-        # 一次性数是 0.4 秒），而重试点下去的那次同步请求就是这么把前端 30 秒超时擦过去的。
-        stage_sizes = [max(1, estimate_tokens(json.dumps(stage, ensure_ascii=False, indent=2))) for stage in stages]
-        frame_tokens = estimate_tokens(f"{head}{marker}{tail}")
-        budget = max(1, max_tokens - frame_tokens)
-        if sum(stage_sizes) <= budget:
-            return [value]
-        sections: list[str] = []
-        group: list[Any] = []
-        used_tokens = 0
-        for stage, size in zip(stages, stage_sizes):
-            if group and used_tokens + size > budget:
-                sections.append(_render(group))
-                group = [stage]
-                used_tokens = size
-            else:
-                group.append(stage)
-                used_tokens += size
-        if group:
-            sections.append(_render(group))
-        return sections or [value]
+        return [value]
 
     @classmethod
     def _split_window_payload(cls, payload_text: str, *, max_tokens: int) -> list[str]:
-        """复核窗口的拆片：先按窗口回合装箱，单回合仍超则按 stage 边界再切。
+        """复核窗口的拆片：先按窗口回合装箱，单回合仍超则按工具记录边界再切。
 
         目标不是少带内容（工具明细按既有合同继续全带），而是让每一片都落在发送闸门
         之内——超容量的整批只会停在停车区等人工，那条路上没有自动出口。
@@ -5806,8 +5462,6 @@ class MemoryManager:
         turn_id: str,
         user_messages: list[str],
         assistant_text: str,
-        compression_summary: dict[str, Any] | None,
-        canonical_summary: dict[str, Any] | None,
         turns: list[dict[str, Any]] | None = None,
     ) -> dict[str, Any]:
         normalized_session = str(session_key or "").strip()
@@ -5815,38 +5469,20 @@ class MemoryManager:
             return {"ok": True, "status": "ignored", "reason": "missing_session_key"}
         state = self._read_review_state()
         session_state = dict((state.get("sessions") or {}).get(normalized_session) or {})
-        stage_versions = {
-            str(key or "").strip(): str(value or "").strip()
-            for key, value in dict(session_state.get("stage_versions") or {}).items()
-            if str(key or "").strip() and str(value or "").strip()
-        }
         reported_tool_keys = [
             str(key or "").strip()
             for key in list(session_state.get("reported_tool_keys") or [])
             if str(key or "").strip()
         ]
         reported_tool_key_set = set(reported_tool_keys)
-        collected_tool_records = (
-            self._collect_turn_tool_records(turns)
-            if turns
-            else self._collect_visible_tool_records(canonical_summary)
-        )
+        collected_tool_records = self._collect_turn_tool_records(turns)
         new_tool_records = [
             record for record in collected_tool_records if record["key"] not in reported_tool_key_set
         ]
-        # 记录时全量捕获：本轮新出现的工具记录不设每轮数量上限，全部固化进缓冲载荷，
-        # 不受会话侧阶段压缩影响。送达时每个阶段带多少明细由 `_gate_stage_tool_records` 决定。
+        # 记录时全量捕获：本轮新出现的工具记录不设每轮数量上限，全部固化进缓冲载荷。
         next_reported_tool_keys = (
             reported_tool_keys + [str(record.get("key") or "").strip() for record in new_tool_records]
         )[-_REVIEW_REPORTED_TOOL_ID_CAP:]
-        stage_summary_delta, next_stage_versions = (
-            (None, stage_versions)
-            if turns
-            else self._compact_review_stage_summary_delta(
-                canonical_summary=canonical_summary,
-                stage_versions=stage_versions,
-            )
-        )
         pending_turns = [
             dict(item)
             for item in list(session_state.get("pending_turns") or [])
@@ -5856,10 +5492,6 @@ class MemoryManager:
             turn_id=turn_id,
             user_messages=user_messages,
             assistant_text=assistant_text,
-            compression_summary=compression_summary,
-            canonical_summary=canonical_summary,
-            stage_delta=stage_summary_delta,
-            tool_records=new_tool_records,
             turns=turns,
         )
         if not payload_text:
@@ -5876,7 +5508,6 @@ class MemoryManager:
                 session_key=normalized_session,
                 session_state={
                     "pending_turns": pending_turns,
-                    "stage_versions": next_stage_versions,
                     "reported_tool_keys": next_reported_tool_keys,
                 },
             )
@@ -5890,7 +5521,6 @@ class MemoryManager:
             session_key=normalized_session,
             session_state={
                 "pending_turns": pending_turns,
-                "stage_versions": next_stage_versions,
                 "reported_tool_keys": next_reported_tool_keys,
             },
         )
@@ -6026,8 +5656,6 @@ class MemoryManager:
         user_messages: list[str],
         assistant_text: str,
         turn_id: str,
-        compression_summary: dict[str, Any] | None = None,
-        canonical_summary: dict[str, Any] | None = None,
         turns: list[dict[str, Any]] | None = None,
     ) -> dict[str, Any]:
         _ = channel, chat_id
@@ -6036,8 +5664,6 @@ class MemoryManager:
             turn_id=turn_id,
             user_messages=user_messages,
             assistant_text=assistant_text,
-            compression_summary=compression_summary,
-            canonical_summary=canonical_summary,
             turns=turns,
         )
 

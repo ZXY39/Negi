@@ -245,8 +245,6 @@ class SessionManager:
                 last_user_turn_at=last_user_turn_at,
                 commit_turn_counter=commit_turn_counter,
             )
-            self._migrate_oversized_records(session)
-            self._migrate_cc_rows_to_delta(session)
             path_size = path.stat().st_size if path.exists() else 0
             self._file_states[key] = {
                 "record_count": len(session.messages),
@@ -256,81 +254,6 @@ class SessionManager:
         except Exception as e:
             logger.warning("Failed to load session {}: {}", key, e)
             return None
-
-    def _migrate_oversized_records(self, session: Session) -> None:
-        """Shrink legacy transcript records once so future saves are append-only."""
-        try:
-            from g3ku.runtime.frontdoor.canonical_context import (
-                project_canonical_context_for_transcript,
-                TRANSCRIPT_PROJECTION_MODE,
-            )
-
-            messages = session.messages
-            migrated = 0
-            for index, message in enumerate(list(messages)):
-                if not isinstance(message, dict):
-                    continue
-                if str(message.get("canonical_context_projection") or "").strip():
-                    # Already a transcript projection: re-projecting cannot shrink
-                    # it further and would force a full rewrite on every load.
-                    continue
-                canonical_context = message.get("canonical_context")
-                if not isinstance(canonical_context, dict) or not canonical_context:
-                    continue
-                try:
-                    serialized = json.dumps(canonical_context, ensure_ascii=False)
-                except Exception:
-                    serialized = ""
-                if len(serialized) <= 256 * 1024:
-                    continue
-                projected = project_canonical_context_for_transcript(canonical_context)
-                if not list(projected.get("stages") or []):
-                    continue
-                updated = dict(message)
-                updated["canonical_context"] = projected
-                updated["canonical_context_projection"] = TRANSCRIPT_PROJECTION_MODE
-                messages[index] = updated
-                migrated += 1
-            if migrated:
-                logger.info(
-                    "Projected {} oversized transcript record(s) for session {}; next save rewrites",
-                    migrated,
-                    session.key,
-                )
-        except Exception as exc:
-            logger.warning(
-                "Skipped transcript projection migration for session {}: {}",
-                session.key,
-                exc,
-            )
-
-    def _migrate_cc_rows_to_delta(self, session: Session) -> None:
-        """Fold cumulative transcript cc rows into checkpoint/cc_upsert form.
-
-        Idempotent and crash-reentrant: every rewritten row is replay-verified
-        by the encoder, rows already in either stored form only advance the
-        chain cursor, and any failure leaves the transcript untouched. The
-        row mutations flag a structural edit, so the next save persists the
-        converged file."""
-        try:
-            if str((session.metadata or {}).get("cc_format") or "") == "delta_window_v1":
-                return
-            from g3ku.runtime.frontdoor.canonical_context import migrate_transcript_rows_to_delta
-
-            migrated = migrate_transcript_rows_to_delta(session.messages)
-            session.metadata = {**(session.metadata or {}), "cc_format": "delta_window_v1"}
-            if migrated:
-                logger.info(
-                    "Delta-encoded {} transcript cc row(s) for session {}; next save rewrites",
-                    migrated,
-                    session.key,
-                )
-        except Exception as exc:
-            logger.warning(
-                "Skipped transcript cc migration for session {}: {}",
-                session.key,
-                exc,
-            )
 
     def _metadata_line(self, session: Session) -> dict[str, Any]:
         return {

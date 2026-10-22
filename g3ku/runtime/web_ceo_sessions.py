@@ -16,11 +16,6 @@ from g3ku.config.live_runtime import get_runtime_config
 from g3ku.config.loader import get_config_path, load_config
 from g3ku.deployment.data_root import data_root
 from g3ku.runtime.external_sessions import ExternalSessionEntry, ExternalSessionRegistry
-from g3ku.runtime.frontdoor.canonical_context import (
-    canonical_context_tool_items,
-    materialize_transcript_view,
-    project_canonical_context_for_ui_payload,
-)
 from g3ku.runtime.frontdoor.turns import normalize_frontdoor_turns
 from g3ku.runtime.memory_scope import DEFAULT_WEB_MEMORY_SCOPE, normalize_memory_scope
 from g3ku.runtime.session_keys import (
@@ -258,13 +253,6 @@ def _normalize_execution_snapshot(snapshot: Any) -> dict[str, Any] | None:
     return dict(snapshot)
 
 
-def _snapshot_canonical_context(snapshot: dict[str, Any] | None) -> dict[str, Any]:
-    if not isinstance(snapshot, dict):
-        return {}
-    raw = snapshot.get("canonical_context")
-    return dict(raw) if isinstance(raw, dict) else {}
-
-
 def _snapshot_compression(snapshot: dict[str, Any] | None) -> dict[str, Any]:
     if not isinstance(snapshot, dict):
         return {}
@@ -272,8 +260,19 @@ def _snapshot_compression(snapshot: dict[str, Any] | None) -> dict[str, Any]:
     return dict(raw) if isinstance(raw, dict) else {}
 
 
-def _canonical_context_tool_items(snapshot: dict[str, Any] | None) -> list[dict[str, Any]]:
-    return canonical_context_tool_items(snapshot or {})
+def _snapshot_turns(snapshot: dict[str, Any] | None) -> list[dict[str, Any]]:
+    if not isinstance(snapshot, dict):
+        return []
+    return normalize_frontdoor_turns(snapshot.get("frontdoor_turns"))
+
+
+def _snapshot_turn_tool_items(snapshot: dict[str, Any] | None) -> list[dict[str, Any]]:
+    items: list[dict[str, Any]] = []
+    for turn in _snapshot_turns(snapshot):
+        for tool in list(turn.get("tools") or []):
+            if isinstance(tool, dict):
+                items.append(tool)
+    return items
 
 
 def _session_key_for_execution_sources(runtime_session: Any | None, persisted_session: Any | None) -> str:
@@ -331,15 +330,15 @@ def _execution_snapshot_history_messages(snapshot: dict[str, Any] | None) -> lis
     assistant_text = summarize_preview_text(normalized_snapshot.get('assistant_text') or '', max_chars=480)
     if assistant_text:
         assistant_message['content'] = assistant_text
-    canonical_context = _snapshot_canonical_context(normalized_snapshot)
-    if canonical_context:
-        assistant_message['canonical_context'] = canonical_context
+    turns = _snapshot_turns(normalized_snapshot)
+    if turns:
+        assistant_message['turns'] = turns
     compression = _snapshot_compression(normalized_snapshot)
     if compression:
         assistant_message['compression'] = compression
     if (
         assistant_message.get('content')
-        or assistant_message.get('canonical_context')
+        or assistant_message.get('turns')
         or assistant_message.get('compression')
     ):
         messages.append(_history_entry_from_message(assistant_message))
@@ -357,11 +356,10 @@ def _snapshot_has_material_live_history(
     if require_active_stage:
         return False
     assistant_text = str(normalized_snapshot.get('assistant_text') or '').strip()
-    canonical_context = _snapshot_canonical_context(normalized_snapshot)
-    has_canonical_context = bool(list((canonical_context or {}).get("stages") or []))
+    has_turns = bool(_snapshot_turns(normalized_snapshot))
     compression = _snapshot_compression(normalized_snapshot)
     has_compression = bool(str(compression.get('text') or '').strip() or str(compression.get('status') or '').strip())
-    if has_canonical_context or assistant_text or has_compression:
+    if has_turns or assistant_text or has_compression:
         return True
     return False
 
@@ -384,38 +382,30 @@ def _compact_task_meta_payload(message: dict[str, Any]) -> dict[str, Any] | None
     return payload or None
 
 
-def _compact_tool_trace_payload(
-    message: dict[str, Any],
-    *,
-    transcript_view: dict[str, Any] | None = None,
-) -> list[dict[str, str]]:
+def _compact_tool_trace_payload(message: dict[str, Any]) -> list[dict[str, str]]:
     summaries: list[dict[str, str]] = []
-    canonical_context = transcript_view if transcript_view else (
-        message.get('canonical_context')
-        if isinstance(message.get('canonical_context'), dict)
-        else {}
-    )
-    for item in canonical_context_tool_items(canonical_context):
-        if not isinstance(item, dict):
+    for turn in list(message.get('turns') or []):
+        if not isinstance(turn, dict):
             continue
-        tool_name = str(item.get('tool_name') or 'tool').strip() or 'tool'
-        status = str(item.get('status') or '').strip().lower()
-        if status not in {'success', 'error'}:
-            continue
-        text = summarize_preview_text(
-            item.get('output_text') or item.get('output_preview_text') or '',
-            max_chars=_RECENT_HISTORY_TOOL_TEXT_MAX_CHARS,
-        )
-        if not text:
-            continue
-        summaries.append({'tool': tool_name, 'status': status, 'text': text})
+        for item in list(turn.get('tools') or []):
+            if not isinstance(item, dict):
+                continue
+            tool_name = str(item.get('tool_name') or 'tool').strip() or 'tool'
+            status = str(item.get('status') or '').strip().lower()
+            if status not in {'success', 'error'}:
+                continue
+            text = summarize_preview_text(
+                item.get('output_text') or '',
+                max_chars=_RECENT_HISTORY_TOOL_TEXT_MAX_CHARS,
+            )
+            if not text:
+                continue
+            summaries.append({'tool': tool_name, 'status': status, 'text': text})
     return summaries[-_RECENT_HISTORY_TOOL_TRACE_LIMIT:]
 
 
 def _history_content_from_message(
     message: dict[str, Any],
-    *,
-    transcript_view: dict[str, Any] | None = None,
 ) -> str:
     blocks: list[str] = []
     content = str(message.get('content') or '').strip()
@@ -440,7 +430,7 @@ def _history_content_from_message(
             if task_id and excerpt:
                 lines.append(f"- {task_id}: {excerpt}")
         blocks.append('\n'.join(lines))
-    tool_trace = _compact_tool_trace_payload(message, transcript_view=transcript_view)
+    tool_trace = _compact_tool_trace_payload(message)
     if tool_trace:
         lines = ['Recent tool results:']
         for item in tool_trace:
@@ -451,31 +441,14 @@ def _history_content_from_message(
     return '\n'.join(block for block in blocks if block).strip()
 
 
-def _live_tail_transcript_view(session: Any, message: dict[str, Any]) -> dict[str, Any] | None:
-    """delta 存储行在 live tail 里的物化视图；全量行返回 None（走原读取路径）。"""
-    if not isinstance(message, dict) or not isinstance(message.get('cc_upsert'), dict):
-        return None
-    rows = list(getattr(session, 'messages', []) or [])
-    for row_index, row in enumerate(rows):
-        if row is message:
-            return materialize_transcript_view(rows, row_index)
-    return None
-
-
-def _history_entry_from_message(
-    message: dict[str, Any],
-    *,
-    transcript_view: dict[str, Any] | None = None,
-) -> dict[str, Any]:
+def _history_entry_from_message(message: dict[str, Any]) -> dict[str, Any]:
     entry: dict[str, Any] = {
         "role": str(message.get("role") or ""),
-        "content": _history_content_from_message(message, transcript_view=transcript_view),
+        "content": _history_content_from_message(message),
     }
-    for key in ("tool_calls", "tool_call_id", "name", "canonical_context", "compression"):
+    for key in ("tool_calls", "tool_call_id", "name", "turns", "compression"):
         if key in message:
             entry[key] = message[key]
-    if transcript_view and "canonical_context" not in entry:
-        entry["canonical_context"] = transcript_view
     return entry
 
 
@@ -621,13 +594,13 @@ def extract_live_raw_tail_context(
         turn_groups.append(list(pending_users))
     if not turn_groups:
         return [
-            _history_entry_from_message(message, transcript_view=_live_tail_transcript_view(session, message))
+            _history_entry_from_message(message)
             for message in messages
         ], 'transcript'
     selected_groups = turn_groups[-normalized_turns:]
     flattened = [message for group in selected_groups for message in group]
     return [
-        _history_entry_from_message(message, transcript_view=_live_tail_transcript_view(session, message))
+        _history_entry_from_message(message)
         for message in flattened
     ], 'transcript'
 
@@ -713,52 +686,6 @@ def _has_visible_message_content(content: Any) -> bool:
     if isinstance(content, dict):
         return any(_has_visible_message_content(value) for value in content.values())
     return content is not None
-
-
-def final_reply_canonical_merge(canonical_context: Any, canonical_context_delta: Any) -> dict[str, Any]:
-    delta = canonical_context_delta if isinstance(canonical_context_delta, dict) else {}
-    if not delta:
-        return {}
-    payload: dict[str, Any] = {}
-    canonical = canonical_context if isinstance(canonical_context, dict) else {}
-    if canonical:
-        projected_canonical = project_canonical_context_for_ui_payload(canonical)
-        if projected_canonical:
-            payload["canonical_context"] = projected_canonical
-    payload["canonical_context_delta"] = dict(delta)
-    return payload
-
-
-def latest_assistant_message_canonical_context(session: Any, *, exclude_turn_id: str = "") -> dict[str, Any]:
-    excluded = str(exclude_turn_id or "").strip()
-    messages = list(getattr(session, "messages", []) or [])
-    for row_index in range(len(messages) - 1, -1, -1):
-        raw = messages[row_index]
-        if not isinstance(raw, dict):
-            continue
-        if str(raw.get("role") or "").strip().lower() != "assistant":
-            continue
-        if excluded:
-            message_turn_id = str(
-                raw.get("turn_id")
-                or (
-                    raw.get("metadata", {}).get("_transcript_turn_id")
-                    if isinstance(raw.get("metadata"), dict)
-                    else ""
-                )
-                or ""
-            ).strip()
-            if message_turn_id == excluded:
-                continue
-        canonical_context = raw.get("canonical_context")
-        if isinstance(canonical_context, dict) and canonical_context:
-            return dict(canonical_context)
-        if isinstance(raw.get("cc_upsert"), dict):
-            # delta 存储行：调用方要的是该行自己的累积视图。
-            view = materialize_transcript_view(messages, row_index)
-            if view:
-                return dict(view)
-    return {}
 
 
 def latest_llm_output_at(session: Any) -> str:
@@ -949,10 +876,6 @@ def upload_dir_for_session(session_id: str, *, create: bool = True) -> Path:
     safe_session = safe_filename(str(session_id or "web_shared").replace(":", "_")) or "web_shared"
     path = data_root() / WEB_CEO_UPLOAD_ROOT / safe_session
     return ensure_dir(path) if create else path
-
-
-def frontdoor_stage_archive_task_id(session_id: str) -> str:
-    return f"frontdoor-stage-archive:{str(session_id or '').strip()}"
 
 
 def _json_sidecar_path(root: Path, session_id: str, *, create: bool = True) -> Path:
@@ -1196,8 +1119,6 @@ def _normalized_completed_continuity_snapshot(payload: Any) -> dict[str, Any] | 
         "frontdoor_token_preflight_diagnostics": dict(payload.get("frontdoor_token_preflight_diagnostics") or {}),
         "frontdoor_actual_request_path": str(payload.get("frontdoor_actual_request_path") or "").strip(),
         "frontdoor_actual_request_history": _normalized_message_records(payload.get("frontdoor_actual_request_history")),
-        "frontdoor_stage_state": dict(payload.get("frontdoor_stage_state") or {}),
-        "frontdoor_canonical_context": dict(payload.get("frontdoor_canonical_context") or {}),
         "frontdoor_turns": normalize_frontdoor_turns(payload.get("frontdoor_turns")),
         "compression_state": dict(payload.get("compression_state") or {}),
         "semantic_context_state": dict(payload.get("semantic_context_state") or {}),
@@ -1713,11 +1634,8 @@ def _inflight_preview_text(snapshot: dict[str, Any] | None) -> str:
     assistant_preview = summarize_preview_text((snapshot or {}).get("assistant_text") or "")
     if assistant_preview:
         return assistant_preview
-    canonical_context = _snapshot_canonical_context(snapshot)
-    for item in reversed(_canonical_context_tool_items(canonical_context)):
-        if not isinstance(item, dict):
-            continue
-        preview = summarize_preview_text(item.get("output_text") or item.get("output_preview_text") or "")
+    for item in reversed(_snapshot_turn_tool_items(snapshot)):
+        preview = summarize_preview_text(item.get("output_text") or "")
         if preview:
             return preview
     return ""
@@ -1732,11 +1650,8 @@ def _inflight_updated_at(snapshot: dict[str, Any] | None) -> str:
         timestamp = str(user_message.get("timestamp") or "").strip()
         if timestamp:
             candidates.append(timestamp)
-    canonical_context = _snapshot_canonical_context(snapshot)
-    for item in _canonical_context_tool_items(canonical_context):
-        if not isinstance(item, dict):
-            continue
-        timestamp = str(item.get("timestamp") or "").strip()
+    for item in _snapshot_turn_tool_items(snapshot):
+        timestamp = str(item.get("finished_at") or item.get("started_at") or "").strip()
         if timestamp:
             candidates.append(timestamp)
     persisted_at = str(snapshot.get("persisted_at") or "").strip()
@@ -2473,21 +2388,7 @@ def clear_web_ceo_session_artifacts(*, session_id: str, task_service: Any | None
         channel_dir = workspace_path() / EXTERNAL_UPLOAD_ROOT / channel_slug
         if channel_dir.exists():
             shutil.rmtree(channel_dir, ignore_errors=True)
-    archive_task_id = frontdoor_stage_archive_task_id(session_id)
-    artifact_store = getattr(task_service, "artifact_store", None) if task_service is not None else None
-    list_artifacts = getattr(artifact_store, "list_artifacts", None) if artifact_store is not None else None
-    delete_artifacts = getattr(artifact_store, "delete_artifacts_for_task", None) if artifact_store is not None else None
-    store = getattr(task_service, "store", None) if task_service is not None else None
-    delete_task = getattr(store, "delete_task", None) if store is not None else None
-    if callable(list_artifacts) and callable(delete_artifacts):
-        artifacts = list(list_artifacts(archive_task_id) or [])
-        if artifacts:
-            delete_artifacts(archive_task_id, artifacts=artifacts)
-    if callable(delete_task):
-        try:
-            delete_task(archive_task_id)
-        except Exception:
-            pass
+    _ = task_service
 
 
 def delete_web_ceo_session_artifacts(*, session_manager: Any, session_id: str, task_service: Any | None = None) -> None:

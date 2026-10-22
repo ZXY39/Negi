@@ -32,15 +32,7 @@ class CreateAgentCeoFrontDoorRunner(CeoFrontDoorRuntimeOps):
             overlay_text = str(state.get("repair_overlay_text") or "").strip()
         else:
             overlay_text = self._effective_turn_overlay_text(state)
-        default_overlay_text = self._frontdoor_default_overlay_text(state)
-        if overlay_text:
-            combined_overlay = "\n\n".join(
-                part
-                for part in (overlay_text, default_overlay_text)
-                if str(part or "").strip()
-            ).strip()
-            return {"system_overlay": combined_overlay}
-        return {"system_overlay": default_overlay_text}
+        return {"system_overlay": overlay_text}
 
     def visible_tool_schemas(self, *, state, runtime) -> list[Any]:
         return list(self._frontdoor_tool_schemas_for_state(state=state, runtime=runtime))
@@ -272,7 +264,7 @@ class CreateAgentCeoFrontDoorRunner(CeoFrontDoorRuntimeOps):
         ]
         if missing_fields:
             raise RuntimeError(
-                "运行时工具合同损坏/缺失：前门状态缺少 canonical 合同字段 "
+                "运行时工具合同损坏/缺失：前门状态缺少合同字段 "
                 + ", ".join(missing_fields)
             )
         raw_dynamic_messages = list(state.get("dynamic_appendix_messages") or [])
@@ -302,7 +294,6 @@ class CreateAgentCeoFrontDoorRunner(CeoFrontDoorRuntimeOps):
             callable_tool_names=list(callable_tool_names),
             candidate_tool_names=list(candidate_tool_names),
             candidate_tool_items=list(candidate_tool_items),
-            frontdoor_stage_state=dict(state.get("frontdoor_stage_state") or {}),
             visible_skill_ids=list(state.get("visible_skill_ids") or []),
             candidate_skill_ids=list(state.get("candidate_skill_ids") or []),
             repair_required_tool_items=list(state.get("repair_required_tool_items") or []),
@@ -599,9 +590,6 @@ class CreateAgentCeoFrontDoorRunner(CeoFrontDoorRuntimeOps):
         # 判为失配并清空 trace（见 session_agent._enrich_restored_frontdoor_actual_request_trace）。
         state_for_request["frontdoor_token_preflight_diagnostics"] = {
             **dict(state_for_request.get("frontdoor_token_preflight_diagnostics") or {}),
-            # 收口与证据引用的计数（stage_archive_* / stage_ref_*）必须随这条基线工件落盘：
-            # 手动车道没有 provider 回执，工件是唯一能解释"块为什么少了"的证据。
-            **{key: value for key, value in diagnostics.items() if str(key).startswith("stage_")},
             "applied": True,
             "final_request_tokens": post_tokens,
             "max_context_tokens": context_window_tokens,
@@ -698,11 +686,6 @@ class CreateAgentCeoFrontDoorRunner(CeoFrontDoorRuntimeOps):
                 strict=False,
             )
         ]
-        frontdoor_stage_state = self._frontdoor_stage_state_after_tool_cycle(
-            state,
-            tool_call_payloads=tool_call_payloads,
-            tool_results=tool_results,
-        )
         verified_task_ids: list[str] = []
         dispatched_task_ids: list[str] = []
         repair_overlay_text: str | None = None
@@ -737,12 +720,6 @@ class CreateAgentCeoFrontDoorRunner(CeoFrontDoorRuntimeOps):
                     + ", ".join(verified_task_ids)
                     + "."
                 )
-        substantive_tool_names = [
-            str(payload.get("name") or "").strip()
-            for payload in tool_call_payloads
-            if str(payload.get("name") or "").strip()
-            and str(payload.get("name") or "").strip() not in self._CONTROL_TOOL_NAMES
-        ]
         assistant_text = ""
         for item in reversed(messages[: len(messages) - len(trailing_tools)]):
             if str(item.get("role") or "").strip().lower() != "assistant":
@@ -757,7 +734,6 @@ class CreateAgentCeoFrontDoorRunner(CeoFrontDoorRuntimeOps):
         )
         result = {
             **self._replace_messages_update(messages),
-            "frontdoor_stage_state": frontdoor_stage_state,
             "frontdoor_turns": frontdoor_turns,
             "used_tools": used_tools,
             "route_kind": route_kind,
@@ -802,7 +778,7 @@ class CreateAgentCeoFrontDoorRunner(CeoFrontDoorRuntimeOps):
             state={**dict(state or {}), **dict(prepared or {}), "messages": messages},
             runtime=runtime,
         )
-        await self._emit_frontdoor_stage_sync_event(runtime=runtime)
+        await self._emit_frontdoor_turns_sync_event(runtime=runtime)
         return update
 
     async def _node_call_model(self, state, runtime) -> dict[str, Any]:
@@ -828,31 +804,24 @@ class CreateAgentCeoFrontDoorRunner(CeoFrontDoorRuntimeOps):
         if next_step == "review_tool_calls":
             preview_state = {**current_state, **dict(normalized or {})}
             (
-                preview_frontdoor_stage_state,
-                preview_frontdoor_canonical_context,
                 preview_compression_state,
                 preview_semantic_context_state,
-            ) = self._runtime_session_frontdoor_state(
-                preview_state,
-                preview_pending_tool_round=True,
-            )
+            ) = self._runtime_session_frontdoor_state(preview_state)
             self._sync_runtime_session_frontdoor_state(
                 state={
                     **preview_state,
-                    "frontdoor_stage_state": preview_frontdoor_stage_state,
-                    "frontdoor_canonical_context": preview_frontdoor_canonical_context,
                     "compression_state": preview_compression_state,
                     "semantic_context_state": preview_semantic_context_state,
                 },
                 runtime=runtime,
             )
-            await self._emit_frontdoor_stage_sync_event(runtime=runtime)
+            await self._emit_frontdoor_turns_sync_event(runtime=runtime)
         elif next_step in {"call_model", "finalize"}:
             self._sync_runtime_session_frontdoor_state(
                 state={**current_state, **dict(normalized or {})},
                 runtime=runtime,
             )
-            await self._emit_frontdoor_stage_sync_event(runtime=runtime)
+            await self._emit_frontdoor_turns_sync_event(runtime=runtime)
         return normalized
 
     def _node_review_tool_calls(self, state, runtime, resume_decision: Any = _NO_RESUME) -> dict[str, Any]:
@@ -874,7 +843,7 @@ class CreateAgentCeoFrontDoorRunner(CeoFrontDoorRuntimeOps):
             state={**dict(state or {}), **dict(executed or {}), "messages": messages},
             runtime=runtime,
         )
-        await self._emit_frontdoor_stage_sync_event(runtime=runtime)
+        await self._emit_frontdoor_turns_sync_event(runtime=runtime)
         return update
 
     async def _node_finalize_turn(self, state, runtime) -> dict[str, Any]:
@@ -888,7 +857,7 @@ class CreateAgentCeoFrontDoorRunner(CeoFrontDoorRuntimeOps):
             state={**dict(state or {}), **dict(finalized or {}), "messages": messages},
             runtime=runtime,
         )
-        await self._emit_frontdoor_stage_sync_event(runtime=runtime)
+        await self._emit_frontdoor_turns_sync_event(runtime=runtime)
         return update
 
     async def _run_step_loop(

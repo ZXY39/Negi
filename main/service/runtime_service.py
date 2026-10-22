@@ -124,7 +124,6 @@ from main.runtime.node_runner import NodeRunner
 from main.runtime.node_seed_contracts import seed_drop_reason, trim_seed_contracts
 from main.runtime.node_turn_controller import NodeTurnController
 from main.runtime.react_loop import ReActToolLoop
-from main.runtime.stage_budget import STAGE_TOOL_NAME, callable_tool_names_for_stage_iteration
 from main.runtime.subtree_hold import DISTRIBUTION_ACTIVE_STATES
 from main.runtime.task_actor_service import TaskActorService
 from main.runtime.tool_pressure_monitor import WorkerPressureMonitor
@@ -7703,30 +7702,8 @@ class MainRuntimeService:
         node_id: str,
         node_kind: str,
         callable_tool_names: list[str] | None,
-        stage_payload: dict[str, Any] | None = None,
     ) -> list[str]:
-        full_callable_tool_names = self._normalized_tool_name_list(list(callable_tool_names or []))
-        if str(node_kind or '').strip().lower() not in {'execution', 'acceptance'}:
-            return full_callable_tool_names
-        effective_stage_payload = dict(stage_payload or {}) if isinstance(stage_payload, dict) else {}
-        if not effective_stage_payload:
-            log_service = getattr(self, 'log_service', None)
-            stage_payload_supplier = getattr(log_service, 'execution_stage_prompt_payload', None)
-            if callable(stage_payload_supplier):
-                supplied_stage_payload = stage_payload_supplier(
-                    str(task_id or '').strip(),
-                    str(node_id or '').strip(),
-                )
-                if isinstance(supplied_stage_payload, dict):
-                    effective_stage_payload = dict(supplied_stage_payload)
-        if not effective_stage_payload:
-            return full_callable_tool_names
-        return callable_tool_names_for_stage_iteration(
-            full_callable_tool_names,
-            has_active_stage=bool(effective_stage_payload.get('has_active_stage')),
-            transition_required=bool(effective_stage_payload.get('transition_required')),
-            stage_tool_name=STAGE_TOOL_NAME,
-        )
+        return self._normalized_tool_name_list(list(callable_tool_names or []))
 
     def _candidate_tool_names_for_node(
         self,
@@ -11672,22 +11649,12 @@ class MainRuntimeService:
         used_selector_selected_as_callable = not bool(full_callable_tool_names)
         if used_selector_selected_as_callable:
             full_callable_tool_names = self._normalized_tool_name_list(list(getattr(selection, 'selected_tool_names', []) or []))
-        stage_payload = {}
         log_service = getattr(self, 'log_service', None)
-        stage_payload_supplier = getattr(log_service, 'execution_stage_prompt_payload', None)
-        if callable(stage_payload_supplier):
-            supplied_stage_payload = stage_payload_supplier(
-                str(getattr(task, 'task_id', '') or '').strip(),
-                str(getattr(node, 'node_id', '') or '').strip(),
-            )
-            if isinstance(supplied_stage_payload, dict):
-                stage_payload = dict(supplied_stage_payload)
         callable_tool_names = self._model_visible_callable_tool_names_for_node(
             task_id=str(getattr(task, 'task_id', '') or '').strip(),
             node_id=str(getattr(node, 'node_id', '') or '').strip(),
             node_kind=str(getattr(node, 'node_kind', '') or '').strip(),
             callable_tool_names=full_callable_tool_names,
-            stage_payload=stage_payload,
         )
         candidate_tool_names = self._candidate_tool_names_for_node(
             task=task,
@@ -11789,7 +11756,6 @@ class MainRuntimeService:
                 skill_visibility_diagnostics=skill_visibility_diagnostics,
                 repair_required_tool_items=repair_required_tool_items,
                 repair_required_skill_items=repair_required_skill_items,
-                stage_payload=stage_payload,
                 lightweight_tool_ids=[],
                 selection_trace={
                     'mode': 'node_context_enricher',

@@ -41,10 +41,6 @@ from g3ku.providers.fallback import (
     wait_for_model_attempt,
 )
 from g3ku.providers.provider_factory import build_provider_from_model_key
-from g3ku.runtime.stage_prompt_compaction import (
-    STAGE_COMPACT_PREFIXES as _STAGE_COMPACT_PREFIXES,
-    STAGE_EXTERNALIZED_PREFIXES as _STAGE_EXTERNALIZED_PREFIXES,
-)
 from g3ku.utils.api_keys import iter_api_key_retry_slots
 from main.runtime.model_key_concurrency import ModelKeyConcurrencyController, ModelKeyPermitLease
 from main.runtime.model_route import (
@@ -537,22 +533,6 @@ def build_actual_request_diagnostics(
     }
 
 
-def _stage_context_digest(messages: list[dict]) -> str:
-    found = False
-    digest = hashlib.sha256()
-    for message in list(messages or []):
-        # 阶段块现在以 user 角色落地；存量 baseline / sidecar / seed / scaffold 里仍有
-        # system 与更早 assistant 角色的旧块，迁移期三角色都参与摘要，保证 cache key 稳定。
-        if str(message.get('role') or '').strip().lower() not in {'assistant', 'system', 'user'}:
-            continue
-        content = str(message.get('content') or '')
-        if not content.startswith((*_STAGE_COMPACT_PREFIXES, *_STAGE_EXTERNALIZED_PREFIXES)):
-            continue
-        found = True
-        digest.update(content.encode('utf-8'))
-    return digest.hexdigest() if found else ''
-
-
 def build_stable_prompt_cache_key(messages: list[dict], tools: list[dict] | None, provider_model: str) -> str:
     _ = tools
     system_prompt = ''
@@ -569,7 +549,6 @@ def build_stable_prompt_cache_key(messages: list[dict], tools: list[dict] | None
         'system': system_prompt,
         'bootstrap_user': bootstrap_user,
         'provider_model': str(provider_model or '').strip(),
-        'stage_context_digest': _stage_context_digest(messages),
     }
     return hashlib.sha256(_json_compact(payload).encode('utf-8')).hexdigest()
 
