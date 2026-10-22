@@ -5407,7 +5407,7 @@ class MainRuntimeService:
             or ''
         )).strip()
         if not output and frontier:
-            output = str(self._repair_legacy_display_text(frontier[0].get('stage_goal') or frontier[0].get('phase') or '')).strip()
+            output = str(self._repair_legacy_display_text(frontier[0].get('phase') or '')).strip()
         text = f'{title} [{status}]'
         if output:
             text = f'{text}: {output}'
@@ -7394,10 +7394,6 @@ class MainRuntimeService:
                 'rbac_visible_tool_names': list(visible_rbac_tool_names),
                 'callable_tool_names': list(full_callable_tool_names),
                 'full_callable_tool_names': list(full_callable_tool_names),
-                'stage_locked_to_submit_next_stage': (
-                    list(model_visible_callable_tool_names) == [STAGE_TOOL_NAME]
-                    and list(full_callable_tool_names) != [STAGE_TOOL_NAME]
-                ),
                 'contract_present_tool_names': list(contract_present_tool_names),
                 'candidate_tool_names': list(candidate_tool_names),
                 'desired_provider_tool_names': list(exposure.get('desired_provider_tool_names') or []),
@@ -7631,7 +7627,7 @@ class MainRuntimeService:
         normalized_node_kind = str(node_kind or '').strip().lower()
         ordered: list[str] = []
         if normalized_node_kind in {'execution', 'acceptance'}:
-            ordered.extend(['submit_next_stage', 'submit_final_result'])
+            ordered.append('submit_final_result')
         if normalized_node_kind == 'execution' and bool(can_spawn_children):
             ordered.append('spawn_child_nodes')
         return ordered
@@ -10537,47 +10533,6 @@ class MainRuntimeService:
         }
 
     @staticmethod
-    def _compact_execution_trace_for_tool(execution_trace: Any) -> dict[str, Any]:
-        trace = execution_trace if isinstance(execution_trace, dict) else {}
-        stages_payload: list[dict[str, Any]] = []
-        for stage in list(trace.get('stages') or []):
-            if not isinstance(stage, dict):
-                continue
-            tool_calls: list[dict[str, str]] = []
-            for round_item in list(stage.get('rounds') or []):
-                if not isinstance(round_item, dict):
-                    continue
-                for step in list(round_item.get('tools') or []):
-                    compact_step = MainRuntimeService._compact_execution_trace_tool_call(step)
-                    if compact_step is not None:
-                        tool_calls.append(compact_step)
-            stages_payload.append(
-                {
-                    'stage_goal': str(stage.get('stage_goal') or ''),
-                    'tool_calls': tool_calls,
-                }
-            )
-
-        if stages_payload:
-            return {'stages': stages_payload}
-
-        fallback_tool_calls: list[dict[str, str]] = []
-        for step in list(trace.get('tool_steps') or []):
-            compact_step = MainRuntimeService._compact_execution_trace_tool_call(step)
-            if compact_step is not None:
-                fallback_tool_calls.append(compact_step)
-        if fallback_tool_calls:
-            return {
-                'stages': [
-                    {
-                        'stage_goal': '',
-                        'tool_calls': fallback_tool_calls,
-                    }
-                ]
-            }
-        return {'stages': []}
-
-    @staticmethod
     def _compact_execution_trace_tool_call(step: Any) -> dict[str, Any] | None:
         return compact_tool_step_for_summary(step if isinstance(step, dict) else None)
 
@@ -11839,10 +11794,6 @@ class MainRuntimeService:
                 selection_trace={
                     'mode': 'node_context_enricher',
                     'full_callable_tool_names': list(full_callable_tool_names),
-                    'stage_locked_to_submit_next_stage': (
-                        list(callable_tool_names) == [STAGE_TOOL_NAME]
-                        and list(full_callable_tool_names) != [STAGE_TOOL_NAME]
-                    ),
                 },
                 exec_runtime_policy=self._node_exec_runtime_policy_payload(
                     callable_tool_names=callable_tool_names,

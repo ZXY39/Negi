@@ -79,7 +79,6 @@ from main.runtime.pending_notice_state import (
     normalize_pending_notice_state,
     set_pending_notice_state,
 )
-from main.runtime.stage_messages import _stage_has_substantive_progress
 from main.runtime.subtree_hold import (
     NOTICE_ACTION_CONTINUE_ACCEPTANCE,
     NOTICE_ACTION_RESUME_EXECUTION,
@@ -2360,14 +2359,13 @@ class NodeRunner:
         result: NodeFinalResult,
         result_ref: str,
     ) -> str:
-        try:
-            snapshot = self._log_service.execution_stage_gate_snapshot(task_id, node.node_id) or {}
-        except Exception:
-            snapshot = {}
-        active = snapshot.get('active_stage') if isinstance(snapshot, dict) else None
-        active = dict(active or {}) if isinstance(active, dict) else {}
-        has_stage = bool(snapshot.get('has_active_stage')) if isinstance(snapshot, dict) else False
-        substantive = bool(active) and _stage_has_substantive_progress(active)
+        _ = task_id
+        progress_text = ''
+        for entry in reversed(list(node.output or [])):
+            text = str(getattr(entry, 'content', '') or '').strip()
+            if text:
+                progress_text = text
+                break
         remaining = [str(item or '').strip() for item in list(result.remaining_work or []) if str(item or '').strip()]
         lines = [
             '执行节点提交了 failed+blocked（声称被阻塞而申请终止）。请核验该阻塞声明是否成立。',
@@ -2377,13 +2375,10 @@ class NodeRunner:
             f'自称未完成工作：{"；".join(remaining) or "(empty)"}',
             f'结果载荷 ref：{result_ref or "(none)"}',
         ]
-        if has_stage and active:
+        if progress_text:
             lines.append(
-                '当前阶段机械信号：'
-                f'stage_goal={str(active.get("stage_goal") or "")}；'
-                f'tool_round_budget={int(active.get("tool_round_budget") or 0)}，'
-                f'tool_rounds_used={int(active.get("tool_rounds_used") or 0)}；'
-                f'本阶段实质执行记录：{"有" if substantive else "无"}'
+                '执行节点最近进展：'
+                + self._trim_diagnostic_text(progress_text, max_chars=400)
             )
         lines.append(
             '判定契约：阻塞成立（当前权限、环境、工具条件下确实无法继续，且执行节点已尽力）→ '

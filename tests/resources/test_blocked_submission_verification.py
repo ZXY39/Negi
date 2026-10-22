@@ -215,8 +215,8 @@ async def test_gate_allows_justified_block_and_creates_adhoc_verifier(tmp_path: 
         activation = next(item for item in messages if "failed+blocked" in item)
         assert "执行节点提交了 failed+blocked" in activation
         assert "占位，避免误结束" in activation
-        assert "机械信号" in activation
-        assert "tool_round_budget" in activation
+        assert "当前阶段机械信号" not in activation
+        assert "tool_round_budget" not in activation
         assert "判定契约" in activation
     finally:
         await service.close()
