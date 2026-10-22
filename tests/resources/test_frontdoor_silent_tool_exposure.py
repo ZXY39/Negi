@@ -22,12 +22,7 @@ from g3ku.runtime.frontdoor.message_builder import CeoMessageBuilder
 from g3ku.runtime.frontdoor.state_models import initial_persistent_state
 from g3ku.runtime.tool_visibility import NODE_FIXED_BUILTIN_TOOL_NAMES
 from main.runtime.internal_tools import SilentTool
-from main.runtime.stage_budget import (
-    DEFAULT_NON_BUDGET_STAGE_TOOLS,
-    DEFAULT_STAGE_GATE_BYPASS_TOOLS,
-    SILENT_TOOL_NAME,
-    STAGE_TOOL_NAME,
-)
+from main.runtime.tool_names import SILENT_TOOL_NAME
 
 
 def _ops(*, registered: bool = True) -> CeoFrontDoorRuntimeOps:
@@ -57,18 +52,15 @@ def test_message_builder_injects_silent_without_visibility_precondition() -> Non
     assert 'stop_tool_execution' not in names  # 未声明族 ⇒ RESERVED 不具备注入能力
 
 
-def test_silent_survives_every_stage_and_lane_state() -> None:
+def test_silent_survives_every_lane_state() -> None:
     ops = _ops()
     states = [
         {'tool_names': ['exec'], 'provider_tool_names': ['exec']},
         {'tool_names': [], 'provider_tool_names': []},
         {'tool_names': ['exec'], 'heartbeat_internal': True},
         {'tool_names': ['exec'], 'cron_internal': True},
-        {'tool_names': [STAGE_TOOL_NAME], 'frontdoor_stage_state': {'active_stage_id': 's1'}},
-        {
-            'tool_names': [STAGE_TOOL_NAME],
-            'frontdoor_stage_state': {'active_stage_id': 's1', 'transition_required': True},
-        },
+        {'tool_names': ['submit_final_result']},
+        {'tool_names': ['exec', 'load_tool_context'], 'frontdoor_turn_usage': {'input_tokens': 10}},
     ]
     for index, state in enumerate(states):
         names = _names(ops, state)
@@ -93,9 +85,6 @@ def test_silent_never_reaches_node_prompts() -> None:
     assert SILENT_TOOL_NAME not in set(CeoMessageBuilder.FIXED_BUILTIN_TOOL_NAMES)
 
 
-def test_silent_is_gate_bypassed_and_budget_free() -> None:
-    assert SILENT_TOOL_NAME in DEFAULT_STAGE_GATE_BYPASS_TOOLS
-    assert SILENT_TOOL_NAME in DEFAULT_NON_BUDGET_STAGE_TOOLS
 
 
 def test_reason_is_required_and_carries_the_audit_trail() -> None:
@@ -125,7 +114,6 @@ def test_silent_schema_stays_cheap_in_the_stable_prefix() -> None:
 def _contract(callable_names: list[str]) -> str:
     from g3ku.runtime.frontdoor.tool_contract import (
         _render_frontdoor_contract_summary,
-        _render_frontdoor_stage_gate_summary,
     )
 
     payload = {
@@ -133,7 +121,7 @@ def _contract(callable_names: list[str]) -> str:
         'candidate_skill_ids': [],
         'candidate_tools': [],
     }
-    return _render_frontdoor_contract_summary(payload) + "\n" + _render_frontdoor_stage_gate_summary(payload)
+    return _render_frontdoor_contract_summary(payload)
 
 
 _CEO_FRONTDOOR_PROMPT = Path(__file__).resolve().parents[2] / 'g3ku' / 'runtime' / 'prompts' / 'ceo_frontdoor.md'
@@ -152,7 +140,7 @@ def test_visible_turns_are_told_the_silent_tool_is_the_only_exit() -> None:
     assert 'silent_help:' not in rendered
     prompt = _CEO_FRONTDOOR_PROMPT.read_text(encoding='utf-8')
     assert '没有文本写法' in prompt
-    assert '不占阶段预算' in prompt  # 免阶段那半句已归注入名单，这里只留预算与出口措辞
+    assert '`silent` 是控制信号，不是实质工作' in prompt  # 出口措辞的唯一落点仍在基础提示词
 
 
 def test_execution_bundle_resolves_the_silent_tool_object() -> None:

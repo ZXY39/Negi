@@ -11,11 +11,6 @@ from __future__ import annotations
 
 from g3ku.runtime.context.types import ContextAssemblyResult
 from g3ku.runtime.frontdoor._ceo_runtime_ops import _normalize_frontdoor_tool_arguments
-from g3ku.runtime.stage_prompt_compaction import (
-    _message_role,
-    compact_stage_prompt_messages_in_place,
-    repair_split_stage_tool_boundaries,
-)
 
 from main.service.create_async_task_contract import (
     build_create_async_task_parameters,
@@ -140,35 +135,10 @@ def test_frontdoor_normalize_treats_none_targets_as_empty() -> None:
 # P0.1 message-record dict guards
 # ---------------------------------------------------------------------------
 
-def test_message_role_guards_non_dict_inputs() -> None:
-    # Non-dict message objects are skipped, never crashed on.
-    assert _message_role(object()) == ""
-    assert _message_role(None) == ""
-    assert _message_role(42) == ""
-    assert _message_role({"role": "user", "content": "x"}) == "user"
 
 
-def test_repair_split_stage_tool_boundaries_tolerates_non_dict_objects() -> None:
-    messages: list[object] = [
-        object(),
-        {"role": "user", "content": "hello"},
-    ]
-    repaired = repair_split_stage_tool_boundaries(messages)  # type: ignore[arg-type]
-    assert isinstance(repaired, list)
-    assert all(isinstance(item, dict) for item in repaired)
-    assert any(str(item.get("role") or "").strip().lower() == "user" for item in repaired)
 
 
-def test_stage_compaction_tolerates_non_dict_objects() -> None:
-    messages: list[object] = [
-        {"role": "system", "content": "sys"},
-        {"role": "user", "content": "hello"},
-        object(),
-        {"role": "user", "content": "again"},
-    ]
-    parts = compact_stage_prompt_messages_in_place(messages, stage_state={})  # type: ignore[arg-type]
-    assert isinstance(parts["prefix"], list)
-    assert isinstance(parts["rewritten"], list)
 
 
 def test_context_assembly_ignores_non_dict_stable_messages() -> None:

@@ -28,7 +28,6 @@ from main.runtime.node_runner import (
     node_message_body,
 )
 from main.runtime.react_loop import ReActToolLoop
-from main.runtime.stage_budget import STAGE_TOOL_ROUND_BUDGET_MIN
 from main.service.runtime_service import MainRuntimeService
 from main.storage.artifact_store import read_artifact_text
 from main.types import KIND_ACCEPTANCE, STATUS_FAILED, STATUS_SUCCESS
@@ -167,12 +166,6 @@ async def test_gate_allows_justified_block_and_creates_adhoc_verifier(tmp_path: 
         task = service.get_task(record.task_id)
         root = service.get_node(record.root_node_id)
         child = _create_execution_child(service, task=task, parent=root)
-        service.log_service.submit_next_stage(
-            record.task_id,
-            child.node_id,
-            stage_goal="从已落盘的 batch 文件汇总生成 child_c.md",
-            tool_round_budget=STAGE_TOOL_ROUND_BUDGET_MIN,
-        )
         verifier_calls = _install_fake_verifier(service, [
             _verdict(
                 "success",

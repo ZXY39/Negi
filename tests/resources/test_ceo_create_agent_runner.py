@@ -13,7 +13,6 @@ from g3ku.runtime import web_ceo_sessions
 from g3ku.runtime.frontdoor import _ceo_create_agent_impl as create_agent_impl
 from g3ku.runtime.frontdoor import _ceo_runtime_ops as ceo_runtime_ops
 from g3ku.runtime.frontdoor import ceo_runner, prompt_cache_contract
-from g3ku.runtime.frontdoor.canonical_context import combine_canonical_context
 from g3ku.runtime.frontdoor.state_models import CeoFrontdoorInterrupted, initial_persistent_state
 from g3ku.runtime.frontdoor.tool_contract import (
     clear_pinned_contract_stores,
@@ -513,20 +512,6 @@ def test_memory_assembly_config_no_longer_exposes_frontdoor_global_summary_setti
     assert not hasattr(cfg, "frontdoor_global_summary_failure_cooldown_seconds")
 
 
-def test_initial_persistent_state_tracks_stage_state_and_runtime_marker() -> None:
-    state = initial_persistent_state(user_input={"content": "hello", "metadata": {}})
-
-    assert "summary_text" not in state
-    assert "summary_payload" not in state
-    assert "summary_version" not in state
-    assert "summary_model_key" not in state
-    assert state["frontdoor_stage_state"] == {
-        "active_stage_id": "",
-        "transition_required": False,
-        "stages": [],
-    }
-    assert "hydrated_tool_names" not in state
-    assert state["agent_runtime"] == "create_agent"
 
 
 @pytest.mark.asyncio
@@ -689,18 +674,6 @@ def test_ceo_runner_always_selects_create_agent_impl(monkeypatch) -> None:
     assert isinstance(runner._impl, _New)
 
 
-def test_create_agent_runner_build_prompt_context_uses_effective_turn_overlay(monkeypatch) -> None:
-    runner = create_agent_impl.CreateAgentCeoFrontDoorRunner(loop=SimpleNamespace())
-    monkeypatch.setattr(runner, "_effective_turn_overlay_text", lambda state: "overlay-text")
-
-    result = runner.build_prompt_context(
-        state={"turn_overlay_text": "## Retrieved Context\n- memory", "repair_overlay_text": "repair"},
-        runtime=SimpleNamespace(),
-        tools=[],
-    )
-
-    assert result["system_overlay"].startswith("overlay-text")
-    assert "submit_next_stage" in result["system_overlay"]
 
 
 def test_create_agent_runner_visible_tool_schemas_uses_prepared_state(monkeypatch) -> None:
@@ -1004,237 +977,10 @@ async def test_graph_execute_tools_grows_authoritative_request_body_baseline() -
     ]
 
 
-@pytest.mark.asyncio
-async def test_graph_execute_tools_applies_named_stage_eviction_inside_the_turn() -> None:
-    """(a) 回合内过期点：模型点名裁撤后，下一跳的发送基线就得是裁过的投影。
-
-    前门过去只在 prepare_turn 裁一次，于是长回合里点名完全不兑现，正文一路线性涨。
-    这里锁定两件事：裁完的基线里那些工具肉身不在、原位有 compact 块；且判据在下一跳
-    自动转假（回到 append-only 链），否则前缀失效面会从"每个过期点一次"放大成"每轮一次"。
-    """
-    runner = create_agent_impl.CreateAgentCeoFrontDoorRunner(
-        loop=SimpleNamespace(
-            tools=SimpleNamespace(
-                push_runtime_context=lambda context: object(),
-                pop_runtime_context=lambda token: None,
-            )
-        )
-    )
-
-    async def _on_progress(content: str, *, event_kind=None, event_data=None, **kwargs):
-        _ = content, event_kind, event_data, kwargs
-
-    runner._build_tool_runtime_context = lambda **kwargs: {"on_progress": _on_progress}
-    runner._registered_tools_for_state = lambda state: {"demo_tool": _DemoTool()}
-
-    async def _fake_execute_tool_call_with_raw_result(*, tool, tool_name, arguments, runtime_context, on_progress, tool_call_id):
-        _ = tool, tool_name, runtime_context, on_progress
-        return (
-            {"value": arguments["value"]},
-            json.dumps({"value": arguments["value"]}),
-            "success",
-            "2026-04-18T00:06:39+08:00",
-            "2026-04-18T00:06:40+08:00",
-            1.0,
-        )
-
-    runner._execute_tool_call_with_raw_result = _fake_execute_tool_call_with_raw_result
-
-    old_round = {
-        "round_index": 1,
-        "round_id": "r-old",
-        "tool_call_ids": ["call-old-1"],
-        "tools": [{"tool_call_id": "call-old-1", "tool_name": "demo_tool", "output_text": "old body " * 40}],
-    }
-    state = {
-        "tool_call_payloads": [
-            {"id": "call-new-1", "name": "demo_tool", "arguments": {"value": "beta"}},
-        ],
-        "messages": [
-            {"role": "system", "content": "SYSTEM"},
-            {"role": "user", "content": "本轮问题"},
-            {
-                "role": "assistant",
-                "content": "",
-                "tool_calls": [
-                    {"id": "call-old-1", "type": "function", "function": {"name": "demo_tool", "arguments": "{\"value\":\"alpha\"}"}}
-                ],
-            },
-            {"role": "tool", "tool_call_id": "call-old-1", "name": "demo_tool", "content": "old body " * 40},
-        ],
-        "frontdoor_request_body_messages": [],
-        "frontdoor_history_shrink_reason": "",
-        "used_tools": [],
-        "route_kind": "direct_reply",
-        "parallel_enabled": False,
-        "max_parallel_tool_calls": 1,
-        "synthetic_tool_calls_used": False,
-        "response_payload": {"content": "", "tool_calls": []},
-        "frontdoor_stage_state": {
-            "active_stage_id": "frontdoor-stage-2",
-            "transition_required": False,
-            "stages": [
-                {
-                    "stage_id": "frontdoor-stage-1",
-                    "stage_index": 1,
-                    "stage_kind": "normal",
-                    "mode": "自主执行",
-                    "status": "completed",
-                    "stage_goal": "inspect repository",
-                    "completed_stage_summary": "已看完仓库结构",
-                    "context_evicted": True,
-                    "tool_round_budget": 2,
-                    "tool_rounds_used": 1,
-                    "key_refs": [],
-                    "rounds": [old_round],
-                },
-                {
-                    "stage_id": "frontdoor-stage-2",
-                    "stage_index": 2,
-                    "stage_kind": "normal",
-                    "mode": "自主执行",
-                    "status": "active",
-                    "stage_goal": "run the selected tool calls",
-                    "completed_stage_summary": "",
-                    "tool_round_budget": 2,
-                    "tool_rounds_used": 0,
-                    "key_refs": [],
-                    "rounds": [],
-                },
-            ],
-        },
-    }
-
-    result = await runner._graph_execute_tools(
-        state,
-        runtime=SimpleNamespace(context=SimpleNamespace()),
-    )
-
-    contents = [str(item.get("content") or "") for item in list(result["messages"])]
-    carried_tool_call_ids = {
-        str(item.get("tool_call_id") or "")
-        for item in list(result["messages"])
-        if str(item.get("role") or "") == "tool"
-    }
-    assert "call-old-1" not in carried_tool_call_ids  # 过期阶段肉身当场离开基线
-    assert "call-new-1" in carried_tool_call_ids  # 活动阶段原位不动
-    assert any(item.startswith("[STAGE_COMPACT]") for item in contents)
-    assert result["frontdoor_history_shrink_reason"] == "stage_compaction"
-    assert len(result["frontdoor_request_body_messages"]) == len(result["messages"])
-    # 一次性：裁过之后同一账本再投影不再移除任何东西，下一跳回到 append-only 链
-    _, applied_again = runner._trim_frontdoor_seed_stage_compaction(
-        list(result["messages"]),
-        result["frontdoor_stage_state"],
-    )
-    assert applied_again is False
 
 
-def test_frontdoor_stage_state_after_tool_cycle_writes_precise_round_tools() -> None:
-    runner = create_agent_impl.CreateAgentCeoFrontDoorRunner(loop=SimpleNamespace(main_task_service=None))
-
-    result = runner._frontdoor_stage_state_after_tool_cycle(
-        {
-            "session_key": "web:shared",
-            "frontdoor_stage_state": {
-                "active_stage_id": "frontdoor-stage-1",
-                "transition_required": False,
-                "stages": [
-                    {
-                        "stage_id": "frontdoor-stage-1",
-                        "stage_index": 1,
-                        "stage_kind": "normal",
-                        "mode": "自主执行",
-                        "status": "active",
-                        "stage_goal": "inspect repository",
-                        "completed_stage_summary": "",
-                        "tool_round_budget": 4,
-                        "tool_rounds_used": 0,
-                        "created_at": "2026-04-14T20:20:54+08:00",
-                        "finished_at": "",
-                        "rounds": [],
-                    }
-                ],
-            },
-        },
-        tool_call_payloads=[
-            {"id": "call-exec-1", "name": "exec", "arguments": {"command": "pwd"}},
-            {"id": "call-load-1", "name": "load_tool_context", "arguments": {"tool_id": "filesystem_write"}},
-        ],
-        tool_results=[
-            {
-                "tool_name": "exec",
-                "status": "success",
-                "result_text": '{"status":"success","head_preview":"D:\\\\NewProjects\\\\G3KU"}',
-            },
-            {
-                "tool_name": "load_tool_context",
-                "status": "success",
-                "result_text": '{"ok":true,"tool_id":"filesystem_write","summary":"write file content"}',
-            },
-        ],
-    )
-
-    rounds = result["stages"][0]["rounds"]
-    assert len(rounds) == 1
-    assert rounds[0]["tool_call_ids"] == ["call-exec-1", "call-load-1"]
-    assert rounds[0]["tool_names"] == ["exec", "load_tool_context"]
-    assert [tool["tool_call_id"] for tool in rounds[0]["tools"]] == ["call-exec-1", "call-load-1"]
-    assert [tool["tool_name"] for tool in rounds[0]["tools"]] == ["exec", "load_tool_context"]
-    assert rounds[0]["tools"][0]["arguments"] == {"command": "pwd"}
-    assert rounds[0]["tools"][1]["arguments"] == {"tool_id": "filesystem_write"}
-    assert rounds[0]["tools"][0]["arguments_text"] == "exec (command=pwd)"
-    assert rounds[0]["tools"][0]["status"] == "success"
-    assert rounds[0]["tools"][0]["output_text"] == '{"status":"success","head_preview":"D:\\\\NewProjects\\\\G3KU"}'
-    assert rounds[0]["tools"][1]["output_preview_text"] == "write file content"
-    assert rounds[0]["tools"][1]["output_ref"] == ""
 
 
-@pytest.mark.parametrize("loader_tool_name", ["load_tool_context", "load_skill_context"])
-def test_frontdoor_stage_state_after_loader_only_tool_cycle_does_not_consume_budget(loader_tool_name: str) -> None:
-    runner = create_agent_impl.CreateAgentCeoFrontDoorRunner(loop=SimpleNamespace(main_task_service=None))
-    arguments = {"skill_id": "find-skills"} if "skill" in loader_tool_name else {"tool_id": "filesystem_write"}
-
-    result = runner._frontdoor_stage_state_after_tool_cycle(
-        {
-            "session_key": "web:shared",
-            "frontdoor_stage_state": {
-                "active_stage_id": "frontdoor-stage-1",
-                "transition_required": False,
-                "stages": [
-                    {
-                        "stage_id": "frontdoor-stage-1",
-                        "stage_index": 1,
-                        "stage_kind": "normal",
-                        "mode": "自主执行",
-                        "status": "active",
-                        "stage_goal": "inspect loader context",
-                        "completed_stage_summary": "",
-                        "tool_round_budget": 2,
-                        "tool_rounds_used": 0,
-                        "created_at": "2026-04-15T10:00:00+08:00",
-                        "finished_at": "",
-                        "rounds": [],
-                    }
-                ],
-            },
-        },
-        tool_call_payloads=[
-            {"id": "call-loader-1", "name": loader_tool_name, "arguments": arguments},
-        ],
-        tool_results=[
-            {
-                "tool_name": loader_tool_name,
-                "status": "success",
-                "result_text": '{"ok":true}',
-            }
-        ],
-    )
-
-    stage = result["stages"][0]
-    assert stage["tool_rounds_used"] == 0
-    assert len(stage["rounds"]) == 1
-    assert stage["rounds"][0]["tool_names"] == [loader_tool_name]
-    assert stage["rounds"][0]["budget_counted"] is False
 
 
 def test_create_agent_frontdoor_tool_arguments_normalize_execution_policy() -> None:
@@ -1441,89 +1187,8 @@ async def test_create_agent_runner_resume_raises_structured_interrupt(monkeypatc
     assert [item.interrupt_id for item in exc_info.value.interrupts] == ["interrupt-2"]
 
 
-@pytest.mark.asyncio
-async def test_create_agent_runner_run_turn_wires_frontdoor_stage_and_compression_to_session(monkeypatch) -> None:
-    session = SimpleNamespace(
-        state=SimpleNamespace(session_key="web:shared"),
-        _last_route_kind="task_dispatch",
-        _frontdoor_stage_state={},
-        _compression_state={},
-    )
-
-    async def _fake_run_step_loop(*, state, runtime, entry, resume_decision=None):
-        _ = state, runtime, entry, resume_decision
-        return {
-            "messages": [],
-            "route_kind": "self_execute",
-            "final_output": "ok",
-            "verified_task_ids": ["task:demo-123"],
-            "frontdoor_stage_state": {
-                "active_stage_id": "frontdoor-stage-1",
-                "transition_required": False,
-                "stages": [{"stage_id": "frontdoor-stage-1", "rounds": []}],
-            },
-            "compression_state": {"status": "", "text": "", "source": ""},
-        }
-
-    runner = create_agent_impl.CreateAgentCeoFrontDoorRunner(loop=SimpleNamespace())
-    monkeypatch.setattr(runner, "_run_step_loop", _fake_run_step_loop)
-
-    output = await runner.run_turn(
-        user_input=SimpleNamespace(content="hello", metadata={}),
-        session=session,
-        on_progress=None,
-    )
-
-    assert output == "ok"
-    assert session._last_route_kind == "self_execute"
-    assert session._last_verified_task_ids == ["task:demo-123"]
-    assert session._frontdoor_stage_state["active_stage_id"] == "frontdoor-stage-1"
-    assert session._compression_state == {"status": "", "text": "", "source": ""}
-    assert session._semantic_context_state == {}
 
 
-@pytest.mark.asyncio
-async def test_create_agent_runner_resume_turn_wires_frontdoor_stage_and_compression_to_session(monkeypatch) -> None:
-    session = SimpleNamespace(
-        state=SimpleNamespace(session_key="web:shared"),
-        _last_route_kind="task_dispatch",
-        _frontdoor_stage_state={},
-        _compression_state={},
-        paused_execution_context_snapshot=lambda: {
-            "graph_state": {"version": 2, "state": {"approval_request": {"kind": "frontdoor_tool_approval"}}}
-        },
-    )
-
-    async def _fake_run_step_loop(*, state, runtime, entry, resume_decision=None):
-        _ = state, runtime, entry, resume_decision
-        return {
-            "messages": [],
-            "route_kind": "direct_reply",
-            "final_output": "approved",
-            "verified_task_ids": [],
-            "frontdoor_stage_state": {
-                "active_stage_id": "",
-                "transition_required": True,
-                "stages": [{"stage_id": "frontdoor-stage-1", "status": "completed", "rounds": []}],
-            },
-            "compression_state": {"status": "idle", "text": "", "source": ""},
-        }
-
-    runner = create_agent_impl.CreateAgentCeoFrontDoorRunner(loop=SimpleNamespace())
-    monkeypatch.setattr(runner, "_run_step_loop", _fake_run_step_loop)
-
-    output = await runner.resume_turn(
-        session=session,
-        resume_value={"decisions": [{"type": "approve"}]},
-        on_progress=None,
-    )
-
-    assert output == "approved"
-    assert session._last_route_kind == "direct_reply"
-    assert session._frontdoor_stage_state["active_stage_id"] == ""
-    assert session._frontdoor_stage_state["transition_required"] is False
-    assert session._frontdoor_stage_state["stages"][0]["status"] == "completed"
-    assert session._compression_state == {"status": "idle", "text": "", "source": ""}
 
 
 @pytest.mark.asyncio
@@ -1702,7 +1367,7 @@ async def test_create_agent_graph_execute_tools_makes_loaded_contract_callable()
         for item in list(result["dynamic_appendix_messages"])
         if _is_frontdoor_runtime_tool_contract_record(dict(item))
     ]
-    assert len(contract_messages) == 2  # 一份稳定契约 + 一份活状态块
+    assert len(contract_messages) == 1  # 一份稳定契约 + 一份活状态块
     contract_text = "\n".join(str(item["content"] or "") for item in contract_messages)
     assert "callable_tools:" not in contract_text
     # 这一跳的 callable 读点是上面的 `result["tool_names"]`：契约块随 load 结果进入请求视图
@@ -1718,52 +1383,6 @@ async def test_create_agent_graph_execute_tools_makes_loaded_contract_callable()
     assert "`agent_browser`: Browser automation via semantic shortlist." not in contract_text
 
 
-def test_frontdoor_stage_state_after_tool_cycle_ignores_raw_result_when_writing_round_tools() -> None:
-    runner = create_agent_impl.CreateAgentCeoFrontDoorRunner(loop=SimpleNamespace(main_task_service=None))
-
-    result = runner._frontdoor_stage_state_after_tool_cycle(
-        {
-            "session_key": "web:shared",
-            "frontdoor_stage_state": {
-                "active_stage_id": "frontdoor-stage-1",
-                "transition_required": False,
-                "stages": [
-                    {
-                        "stage_id": "frontdoor-stage-1",
-                        "stage_index": 1,
-                        "stage_kind": "normal",
-                        "mode": "自主执行",
-                        "status": "active",
-                        "stage_goal": "inspect repository",
-                        "completed_stage_summary": "",
-                        "tool_round_budget": 4,
-                        "tool_rounds_used": 0,
-                        "created_at": "2026-04-14T20:20:54+08:00",
-                        "finished_at": "",
-                        "rounds": [],
-                    }
-                ],
-            },
-        },
-        tool_call_payloads=[
-            {"id": "call-load-1", "name": "load_tool_context", "arguments": {"tool_id": "filesystem_write"}},
-        ],
-        tool_results=[
-            {
-                "tool_name": "load_tool_context",
-                "status": "success",
-                "result_text": '{"ok":true,"tool_id":"filesystem_write","summary":"write file content"}',
-                "raw_result": {
-                    "ok": True,
-                    "tool_id": "filesystem_write",
-                    "hydration_targets": ["filesystem_write"],
-                },
-            },
-        ],
-    )
-
-    round_tool = result["stages"][0]["rounds"][0]["tools"][0]
-    assert "raw_result" not in round_tool
 
 
 @pytest.mark.asyncio
@@ -1871,7 +1490,7 @@ async def test_create_agent_runner_graph_prepare_turn_keeps_contract_present_too
             "visible_skill_ids": [],
         },
         "selected_skills": [],
-        "callable_tool_names": ["submit_next_stage", "load_tool_context", "filesystem_write", "silent"],
+        "callable_tool_names": ["load_tool_context", "filesystem_write", "silent"],
         "candidate_tool_names": [],
         "contract_present_tool_names": ["filesystem_write"],
         # D15 的两档读数：在场那份带自己的修订与本跳暂存份数；清扫计数缺省空。
@@ -1889,7 +1508,7 @@ async def test_create_agent_runner_graph_prepare_turn_keeps_contract_present_too
         for item in list(prepared["dynamic_appendix_messages"])
         if _is_frontdoor_runtime_tool_contract_record(dict(item))
     ]
-    assert len(contract_messages) == 2  # 一份稳定契约 + 一份活状态块
+    assert len(contract_messages) == 1  # 一份稳定契约 + 一份活状态块
     contract_text = "\n".join(str(item["content"] or "") for item in contract_messages)
     # D11：callable 面不再渲成模型可见的一行（水合不再拦路 ⇒ 该行无信息量），上面
     # `frontdoor_selection_debug.callable_tool_names` 才是这一跳的读点。
@@ -2226,7 +1845,7 @@ async def test_create_agent_runner_graph_prepare_turn_keeps_normal_ceo_tools_for
         for item in list(prepared["dynamic_appendix_messages"] or [])
         if _is_frontdoor_runtime_tool_contract_record(dict(item))
     ]
-    assert len(contract_messages) == 2  # 一份稳定契约 + 一份活状态块
+    assert len(contract_messages) == 1  # 一份稳定契约 + 一份活状态块
     contract_text = "\n".join(str(item["content"] or "") for item in contract_messages)
     # D11：callable 面不再渲成一行，读点是下面的 `frontdoor_selection_debug`。
     assert "callable_tools:" not in contract_text
@@ -2235,112 +1854,9 @@ async def test_create_agent_runner_graph_prepare_turn_keeps_normal_ceo_tools_for
         "task_list",
         "cron",
         "silent",
-        "submit_next_stage",
     ]
 
 
-@pytest.mark.asyncio
-async def test_create_agent_runner_graph_prepare_turn_keeps_candidate_tools_visible_without_valid_stage() -> None:
-    session = RuntimeAgentSession(
-        SimpleNamespace(model="demo", reasoning_effort=None, multi_agent_runner=None),
-        session_key="web:shared",
-        channel="web",
-        chat_id="shared",
-    )
-
-    runner = create_agent_impl.CreateAgentCeoFrontDoorRunner(
-        loop=SimpleNamespace(
-            sessions=SimpleNamespace(get_or_create=lambda session_key: SimpleNamespace(session_key=session_key)),
-            main_task_service=None,
-            tools=SimpleNamespace(get=lambda *_: None, tool_names=[]),
-            provider_name="openai",
-            model="gpt-test",
-        )
-    )
-
-    async def _resolve_for_actor(**kwargs):
-        _ = kwargs
-        return {
-            "skills": [],
-            "tool_families": [],
-            "tool_names": ["submit_next_stage", "load_tool_context", "filesystem_write"],
-        }
-
-    async def _build_for_ceo(**kwargs):
-        _ = kwargs
-        return SimpleNamespace(
-            model_messages=[
-                {"role": "system", "content": "system"},
-                {"role": "user", "content": "hello"},
-            ],
-            stable_messages=[
-                {"role": "system", "content": "system"},
-                {"role": "user", "content": "hello"},
-            ],
-            dynamic_appendix_messages=[],
-            tool_names=["submit_next_stage", "load_tool_context", "filesystem_write"],
-            candidate_tool_names=["filesystem_write"],
-            candidate_tool_items=[{"tool_id": "filesystem_write", "description": "Write file content to disk."}],
-            trace={
-                "selected_skills": [{"skill_id": "memory"}],
-                "tool_selection": {
-                    "mode": "inventory_only",
-                    "candidate_tool_names": ["filesystem_write"],
-                },
-                "capability_snapshot": {
-                    "visible_tool_ids": ["submit_next_stage", "load_tool_context", "filesystem_write"],
-                    "visible_skill_ids": ["memory"],
-                },
-            },
-            cache_family_revision="frontdoor:v1",
-            turn_overlay_text="",
-        )
-
-    runner._resolver = SimpleNamespace(resolve_for_actor=_resolve_for_actor)
-    runner._builder = SimpleNamespace(build_for_ceo=_build_for_ceo)
-    runner._resolve_ceo_model_refs = lambda: ["openai:gpt-4.1"]
-    runner._selected_tool_schemas = lambda tool_names: [{"name": name, "parameters": {"type": "object"}} for name in list(tool_names or [])]
-
-    prepared = await runner._graph_prepare_turn(
-        state=initial_persistent_state(user_input={"content": "hello", "metadata": {}}),
-        runtime=SimpleNamespace(context=SimpleNamespace(session=session)),
-    )
-
-    assert prepared["tool_names"] == ["submit_next_stage", "load_tool_context", "filesystem_write"]
-    assert prepared["candidate_tool_names"] == ["filesystem_write"]
-    assert prepared["candidate_skill_ids"] == ["memory"]
-    assert prepared["visible_skill_ids"] == ["memory"]
-    contract_messages = [
-        dict(item)
-        for item in list(prepared["dynamic_appendix_messages"])
-        if _is_frontdoor_runtime_tool_contract_record(dict(item))
-    ]
-    assert len(contract_messages) == 2  # 一份稳定契约 + 一份活状态块
-    contract_text = "\n".join(str(item["content"] or "") for item in contract_messages)
-    # 契约不在场的候选不进 callable，但声明面照旧钉住：`tools[]` 仍带着这个名字，
-    # 模型看得见它、也能直接调用拿契约（候选 = 已授权 − callable）。D11 后这一面的读点
-    # 是 `frontdoor_selection_debug.callable_tool_names`，尾块不再渲成模型可见的一行。
-    assert list(prepared["frontdoor_selection_debug"]["callable_tool_names"]) == [
-        "submit_next_stage",
-        "load_tool_context",
-        "silent",
-    ]
-    assert "callable_tools:" not in contract_text
-    assert "filesystem_write" in list(prepared["provider_tool_names"] or [])
-    assert "- `filesystem_write`: Write file content to disk." not in contract_text
-    # 名单钉在头部（每跳逐字节复用，全量可见 + 描述）；尾块不再有 skill 名单机制。
-    head_text = "\n".join(
-        str(record.get("content") or "")
-        for record in [dict(item) for item in list(prepared["messages"] or []) if isinstance(item, dict)]
-        if str(record.get("role") or "").strip().lower() == "system"
-    )
-    assert "candidate_skills (loadable with `load_skill_context`; `id | name | description`):" in head_text
-    assert "- `memory` |" in head_text
-    assert "candidate_skills" not in contract_text
-    assert 'Call `load_skill_context(skill_id="<skill_id>")`' not in contract_text
-    assert "visible_skill_ids" not in contract_text
-    assert "rbac_visible_tool_names" not in contract_text
-    assert "rbac_visible_skill_ids" not in contract_text
 
 
 @pytest.mark.asyncio
@@ -2416,232 +1932,15 @@ async def test_create_agent_runner_graph_prepare_turn_persists_request_body_with
         {"role": "user", "content": "hello"},
         {"role": "assistant", "content": "## Retrieved Context\n- authoritative memory"},
     ]
-    assert len(prepared["dynamic_appendix_messages"]) == 2  # 一份稳定契约 + 一份活状态块
+    assert len(prepared["dynamic_appendix_messages"]) == 1  # 一份稳定契约 + 一份活状态块
     contract_message = dict(prepared["dynamic_appendix_messages"][0] or {})
     assert is_frontdoor_tool_contract_message(contract_message)
     assert contract_message["role"] == "user"
     assert str(contract_message.get("content") or "").startswith("## Runtime Tool Contract")
 
 
-@pytest.mark.asyncio
-async def test_create_agent_runner_graph_prepare_turn_recovers_paused_manual_context_for_new_turn() -> None:
-    session = RuntimeAgentSession(
-        SimpleNamespace(model="demo", reasoning_effort=None, multi_agent_runner=None),
-        session_key="web:shared",
-        channel="web",
-        chat_id="shared",
-    )
-    session._set_paused_execution_context(
-        {
-            "status": "paused",
-            "user_message": {"content": "Original paused request"},
-            "canonical_context": {
-                "active_stage_id": "frontdoor-stage-1",
-                "transition_required": False,
-                "stages": [
-                    {
-                        "stage_id": "frontdoor-stage-1",
-                        "stage_index": 1,
-                        "stage_goal": "Continue the paused investigation",
-                        "representation": "raw",
-                        "status": "active",
-                        "stage_kind": "normal",
-                        "tool_round_budget": 6,
-                        "tool_rounds_used": 2,
-                        "rounds": [],
-                    }
-                ],
-            },
-            "frontdoor_canonical_context": {
-                "active_stage_id": "",
-                "transition_required": False,
-                "stages": [
-                    {
-                        "stage_id": "frontdoor-stage-0",
-                        "stage_index": 0,
-                        "stage_goal": "Earlier completed context",
-                        "representation": "summary",
-                        "status": "completed",
-                        "stage_kind": "normal",
-                        "tool_round_budget": 4,
-                        "tool_rounds_used": 4,
-                        "rounds": [],
-                    }
-                ],
-            },
-            "frontdoor_request_body_messages": [
-                # 暂停快照在产线里就是连请求体一起存的
-                # （`_session_frontdoor_context_window_snapshot` 读 `frontdoor_request_body_messages`）。
-                # 装配路按当次请求视图判在场（FIX_PLAN §0 不变量）：契约块在这份请求体里，
-                # 恢复出来的那一跳才继续可调。
-                _contract_block_message("filesystem_write")
-            ],
-            "compression": {
-                "status": "running",
-                "text": "??????",
-                "source": "token_compression",
-                "needs_recheck": False,
-            },
-        }
-    )
-    session._frontdoor_stage_state = {}
-    session._frontdoor_canonical_context = {}
-    session._compression_state = {}
-    session._semantic_context_state = {}
-
-    runner = create_agent_impl.CreateAgentCeoFrontDoorRunner(
-        loop=SimpleNamespace(
-            sessions=SimpleNamespace(
-                get_or_create=lambda session_key: SimpleNamespace(
-                    session_key=session_key,
-                    messages=[
-                        {
-                            "role": "user",
-                            "content": "Original paused request",
-                            "metadata": {"_transcript_state": "paused"},
-                        }
-                    ],
-                )
-            ),
-            main_task_service=None,
-            tools=SimpleNamespace(get=lambda *_: None, tool_names=[]),
-            provider_name="openai",
-            model="gpt-test",
-        )
-    )
-
-    async def _resolve_for_actor(**kwargs):
-        _ = kwargs
-        return {
-            "skills": [],
-            "tool_families": [],
-            "tool_names": ["submit_next_stage", "load_tool_context", "filesystem_write"],
-        }
-
-    captured_builder_kwargs: dict[str, object] = {}
-
-    async def _build_for_ceo(**kwargs):
-        captured_builder_kwargs.update(kwargs)
-        return SimpleNamespace(
-            model_messages=[
-                {"role": "system", "content": "system"},
-                {"role": "user", "content": "continue"},
-            ],
-            stable_messages=[
-                {"role": "system", "content": "system"},
-                {"role": "user", "content": "continue"},
-            ],
-            dynamic_appendix_messages=[],
-            tool_names=["submit_next_stage", "load_tool_context", "filesystem_write"],
-            candidate_tool_names=[],
-            candidate_tool_items=[],
-            trace={
-                "selected_skills": [],
-                "tool_selection": {"mode": "inventory_only", "candidate_tool_names": []},
-                "capability_snapshot": {
-                    "visible_tool_ids": ["submit_next_stage", "load_tool_context", "filesystem_write"],
-                    "visible_skill_ids": [],
-                },
-            },
-            cache_family_revision="frontdoor:v1",
-            turn_overlay_text="",
-        )
-
-    runner._resolver = SimpleNamespace(resolve_for_actor=_resolve_for_actor)
-    runner._builder = SimpleNamespace(build_for_ceo=_build_for_ceo)
-    runner._resolve_ceo_model_refs = lambda: ["openai:gpt-4.1"]
-    runner._selected_tool_schemas = (
-        lambda tool_names: [{"name": name, "parameters": {"type": "object"}} for name in list(tool_names or [])]
-    )
-
-    prepared = await runner._graph_prepare_turn(
-        state=initial_persistent_state(user_input={"content": "continue", "metadata": {}}),
-        runtime=SimpleNamespace(context=SimpleNamespace(session=session)),
-    )
-
-    assert captured_builder_kwargs["frontdoor_stage_state"]["active_stage_id"] == "frontdoor-stage-1"
-    assert captured_builder_kwargs["frontdoor_canonical_context"]["stages"][0]["stage_id"] == "frontdoor-stage-0"
-    assert captured_builder_kwargs["semantic_context_state"] == {}
-    assert captured_builder_kwargs["contract_present_tool_names"] == ["filesystem_write"]
-    assert prepared["frontdoor_stage_state"]["active_stage_id"] == "frontdoor-stage-1"
-    assert prepared["compression_state"]["status"] == "running"
-    assert "semantic_context_state" not in prepared
-    assert "hydrated_tool_names" not in prepared
-    contract_messages = [
-        dict(item)
-        for item in list(prepared["dynamic_appendix_messages"])
-        if _is_frontdoor_runtime_tool_contract_record(dict(item))
-    ]
-    assert len(contract_messages) == 2  # 一份稳定契约 + 一份活状态块
-    contract_text = "\n".join(str(item["content"] or "") for item in contract_messages)
-    # 恢复出来的这一跳：`filesystem_write` 的块在请求视图里 ⇒ 在场 ⇒ 进 callable（上面
-    # `contract_present_tool_names` 那条已经在钉这件事）。D11 后 callable 不再渲成一行。
-    assert "callable_tools:" not in contract_text
-    assert "filesystem_write" in list(prepared["frontdoor_selection_debug"]["callable_tool_names"] or [])
 
 
-def test_runtime_agent_session_paused_snapshot_keeps_frontdoor_runtime_context() -> None:
-    session = RuntimeAgentSession(
-        SimpleNamespace(model="demo", reasoning_effort=None, multi_agent_runner=None),
-        session_key="web:shared",
-        channel="web",
-        chat_id="shared",
-    )
-    session._state.is_running = True
-    session._state.status = "running"
-    session._frontdoor_stage_state = {
-        "active_stage_id": "frontdoor-stage-1",
-        "transition_required": False,
-        "stages": [
-            {
-                "stage_id": "frontdoor-stage-1",
-                "stage_index": 1,
-                "stage_goal": "Continue the paused investigation",
-                "representation": "raw",
-                "status": "active",
-                "stage_kind": "normal",
-                "tool_round_budget": 6,
-                "tool_rounds_used": 2,
-                "rounds": [],
-            }
-        ],
-    }
-    session._frontdoor_canonical_context = {
-        "active_stage_id": "",
-        "transition_required": False,
-        "stages": [
-            {
-                "stage_id": "frontdoor-stage-0",
-                "stage_index": 0,
-                "stage_goal": "Earlier completed context",
-                "representation": "summary",
-                "status": "completed",
-                "stage_kind": "normal",
-                "tool_round_budget": 4,
-                "tool_rounds_used": 4,
-                "rounds": [],
-            }
-        ],
-    }
-    session._compression_state = {
-        "status": "running",
-        "text": "??????",
-        "source": "token_compression",
-        "needs_recheck": False,
-    }
-    session._semantic_context_state = {}
-
-    snapshot = session._build_execution_context_snapshot(
-        allow_manual_pause=True,
-        status_override="paused",
-    )
-
-    assert isinstance(snapshot, dict)
-    assert snapshot["canonical_context"]["active_stage_id"] == "frontdoor-stage-1"
-    assert snapshot["frontdoor_canonical_context"]["stages"][0]["stage_id"] == "frontdoor-stage-0"
-    assert snapshot["compression"]["source"] == "token_compression"
-    assert "semantic_context_state" not in snapshot
-    assert "hydrated_tool_names" not in snapshot
 
 
 def test_runtime_agent_session_persists_paused_request_body_baseline(
@@ -3118,60 +2417,6 @@ def _stub_loop() -> SimpleNamespace:
     return SimpleNamespace(model="demo", reasoning_effort=None, multi_agent_runner=None, sessions=SimpleNamespace())
 
 
-def test_channel_session_completed_continuity_write_and_restore_roundtrip(
-    tmp_path: Path,
-    monkeypatch,
-) -> None:
-    # 存量渠道会话（china:*，子系统已删除后的只读归档）的 completed-continuity
-    # 写盘/恢复回环：重启后基线不丢。
-    monkeypatch.setattr(web_ceo_sessions, "workspace_path", lambda: tmp_path)
-    session_key = "china:qqbot:default:dm"
-    baseline = [
-        {"role": "system", "content": "BASE SYSTEM PROMPT"},
-        {"role": "user", "content": "channel question"},
-        {"role": "assistant", "content": "channel answer"},
-    ]
-    stage_state = {
-        "active_stage_id": "",
-        "transition_required": False,
-        "stages": [
-            {"stage_id": "frontdoor-stage-1", "stage_index": 1, "stage_kind": "normal", "status": "completed"}
-        ],
-    }
-    canonical_context = {
-        "active_stage_id": "",
-        "transition_required": False,
-        "stages": [
-            {"stage_id": "frontdoor-stage-1", "stage_index": 1, "stage_kind": "normal", "status": "completed"}
-        ],
-    }
-
-    writer = RuntimeAgentSession(
-        _stub_loop(),
-        session_key=session_key,
-        channel="qqbot",
-        chat_id="default:dm",
-    )
-    writer._frontdoor_request_body_messages = list(baseline)
-    writer._frontdoor_history_shrink_reason = "stage_compaction"
-    writer._frontdoor_stage_state = dict(stage_state)
-    writer._frontdoor_canonical_context = dict(canonical_context)
-    writer._sync_completed_continuity_snapshot(source_reason="finalize")
-
-    snapshot_path = web_ceo_sessions.completed_continuity_snapshot_path_for_session(session_key, create=False)
-    assert snapshot_path.exists()
-
-    restored = RuntimeAgentSession(
-        _stub_loop(),
-        session_key=session_key,
-        channel="qqbot",
-        chat_id="default:dm",
-    )
-    assert restored._frontdoor_request_body_messages == baseline
-    assert restored._frontdoor_history_shrink_reason == "stage_compaction"
-    assert restored._frontdoor_stage_state == stage_state
-    assert restored._frontdoor_canonical_context == canonical_context
-    assert restored._frontdoor_restore_source == "completed_continuity"
 
 
 def test_cron_session_continuity_is_persisted_and_restored(
@@ -4358,16 +3603,9 @@ def test_frontdoor_send_contract_prints_declared_denied_tools_line() -> None:
         for item in list(contract.dynamic_appendix_messages)
         if "frontdoor_runtime_tool_contract" in str(item.get("content") or "")
     ]
-    stage_gate_texts = [
-        str(item.get("content") or "")
-        for item in list(contract.dynamic_appendix_messages)
-        if "frontdoor_runtime_stage_gate" in str(item.get("content") or "")
-    ]
     assert len(contract_texts) == 1
-    assert len(stage_gate_texts) == 1
     assert "denied_tools" in contract_texts[0]
     assert "web_fetch" in contract_texts[0]
-    assert "denied_tools" not in stage_gate_texts[0]
 
 
 def test_build_frontdoor_request_artifact_payload_includes_provider_tool_exposure_fields() -> None:
@@ -5504,100 +4742,6 @@ def test_frontdoor_send_preflight_snapshot_adds_content_open_image_overlay_only_
     assert snapshot["durable_request_messages"][-1]["content"] == folded_text
 
 
-def test_frontdoor_send_preflight_snapshot_content_open_image_overlay_anchors_active_stage_goal(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    _stub_live_runtime_model(monkeypatch, image_multimodal_enabled=True)
-    loop = SimpleNamespace(
-        app_config=SimpleNamespace(
-            get_managed_model=lambda key: SimpleNamespace(image_multimodal_enabled=(key == "ceo_primary"))
-        ),
-    )
-    runner = ceo_runner.CeoFrontDoorRunner(loop=loop)
-
-    monkeypatch.setattr(
-        runner,
-        "_frontdoor_prompt_contract",
-        lambda **kwargs: SimpleNamespace(
-            request_messages=list(kwargs["state"].get("messages") or []),
-            prompt_cache_key="cache-key",
-            diagnostics={},
-        ),
-    )
-    monkeypatch.setattr(
-        runner,
-        "_resolve_frontdoor_send_model_context_window",
-        lambda **_: {
-            "model_key": "ceo_primary",
-            "provider_id": "responses",
-            "provider_model": "responses:gpt-test",
-            "resolved_model": "gpt-test",
-            "context_window_tokens": 128000,
-        },
-        raising=False,
-    )
-
-    image_path = tmp_path / "opened.png"
-    image_path.write_bytes(b"\x89PNG\r\n\x1a\nsmall")
-    state = {
-        "messages": [
-            {"role": "system", "content": "SYSTEM"},
-            {"role": "user", "content": "Please inspect the reopened image"},
-        ],
-        "model_refs": ["ceo_primary"],
-        "frontdoor_stage_state": {
-            "active_stage_id": "frontdoor-stage-80",
-            "transition_required": False,
-            "stages": [
-                {
-                    "stage_id": "frontdoor-stage-79",
-                    "stage_index": 79,
-                    "status": "completed",
-                    "stage_goal": "旧阶段目标",
-                },
-                {
-                    "stage_id": "frontdoor-stage-80",
-                    "stage_index": 80,
-                    "status": "active",
-                    "stage_goal": "拉取用户两张图片的高清原图",
-                },
-            ],
-        },
-        "pending_content_open_image_payloads": [
-            {
-                "ok": True,
-                "operation": "open",
-                "content_kind": "image",
-                "mime_type": "image/png",
-                "summary": "图片已通过 content_open 打开，视觉内容将在下一轮请求中附带。",
-                "multimodal_open_pending": True,
-                "runtime_image_target": {"path": str(image_path), "mime_type": "image/png", "source_ref": ""},
-            }
-        ],
-    }
-
-    snapshot = runner._frontdoor_send_preflight_snapshot(
-        state=state,
-        runtime=SimpleNamespace(context=SimpleNamespace(session=None, session_key="web:shared")),
-        tool_schemas=[],
-    )
-
-    live_blocks = [
-        block
-        for block in list(snapshot["request_messages"][-1]["content"] or [])
-        if isinstance(block, dict)
-    ]
-    overlay_text = str(live_blocks[0].get("text") or "")
-    # 载体折进末位记录的原文字，所以阶段锚点出现在同一块里（不是块首）。
-    assert "图片已通过 content_open 打开，视觉内容已附带在本轮上下文中" in overlay_text
-    assert "当前阶段目标：拉取用户两张图片的高清原图" in overlay_text
-    assert "请继续完成该目标" in overlay_text
-    assert "不要切换到历史对话或历史定时任务" in overlay_text
-    assert "旧阶段目标" not in overlay_text
-    assert any(block.get("type") == "image_url" for block in live_blocks)
-    # durable 记录同样携带锚点文本（多模态块已剥离）
-    assert "当前阶段目标：拉取用户两张图片的高清原图" in str(snapshot["durable_request_messages"][-1]["content"])
 
 
 def test_frontdoor_send_preflight_snapshot_rejects_content_open_image_overlay_without_multimodal_model(
@@ -6067,145 +5211,8 @@ async def test_graph_call_model_fresh_turn_reuses_previous_message_artifact_pref
     assert final_answer_index < next_user_index
 
 
-def test_create_agent_runner_sync_preserves_durable_frontdoor_canonical_context() -> None:
-    runner = create_agent_impl.CreateAgentCeoFrontDoorRunner(loop=SimpleNamespace(main_task_service=None))
-    session = SimpleNamespace()
-    durable_canonical_context = {
-        "active_stage_id": "",
-        "transition_required": False,
-        "stages": [
-            {
-                "stage_id": "frontdoor-stage-1",
-                "stage_index": 1,
-                "stage_goal": "Completed context",
-                "representation": "raw",
-                "status": "completed",
-                "stage_kind": "normal",
-                "tool_round_budget": 6,
-                "tool_rounds_used": 1,
-                "rounds": [],
-            }
-        ],
-    }
-    current_stage_state = {
-        "active_stage_id": "frontdoor-stage-2",
-        "transition_required": False,
-        "stages": [
-            {
-                "stage_id": "frontdoor-stage-2",
-                "stage_index": 2,
-                "stage_goal": "Current active stage",
-                "representation": "raw",
-                "status": "active",
-                "stage_kind": "normal",
-                "tool_round_budget": 8,
-                "tool_rounds_used": 2,
-                "rounds": [],
-            }
-        ],
-    }
-
-    runner._sync_runtime_session_frontdoor_state(
-        state={
-            "frontdoor_stage_state": current_stage_state,
-            "frontdoor_canonical_context": durable_canonical_context,
-            "compression_state": {"status": "", "text": "", "source": "", "needs_recheck": False},
-            "semantic_context_state": {},
-        },
-        session=session,
-    )
-
-    assert session._frontdoor_stage_state["active_stage_id"] == "frontdoor-stage-2"
-    assert [stage["stage_id"] for stage in session._frontdoor_stage_state["stages"]] == ["frontdoor-stage-2"]
-    assert session._frontdoor_canonical_context["active_stage_id"] == ""
-    assert [stage["stage_id"] for stage in session._frontdoor_canonical_context["stages"]] == ["frontdoor-stage-1"]
 
 
-def test_combine_canonical_context_skips_overlapping_completed_stage_from_turn_state() -> None:
-    durable_canonical_context = {
-        "active_stage_id": "",
-        "transition_required": False,
-        "stages": [
-            {
-                "stage_id": "frontdoor-stage-1",
-                "stage_index": 1,
-                "stage_goal": "Completed context",
-                "representation": "raw",
-                "status": "completed",
-                "stage_kind": "normal",
-                "tool_round_budget": 6,
-                "tool_rounds_used": 1,
-                "completed_stage_summary": "verified sources collected",
-                "created_at": "2026-04-17T22:49:22+08:00",
-                "finished_at": "2026-04-17T22:49:57+08:00",
-                "rounds": [
-                    {
-                        "round_id": "frontdoor-stage-1:round-1",
-                        "round_index": 1,
-                        "created_at": "2026-04-17T22:49:28+08:00",
-                        "budget_counted": True,
-                        "tool_names": ["content_search"],
-                        "tool_call_ids": ["call-1"],
-                        "tools": [],
-                    }
-                ],
-            }
-        ],
-    }
-    current_stage_state = {
-        "active_stage_id": "frontdoor-stage-2",
-        "transition_required": False,
-        "stages": [
-            {
-                "stage_id": "frontdoor-stage-1",
-                "stage_index": 1,
-                "stage_goal": "Completed context",
-                "representation": "raw",
-                "status": "completed",
-                "stage_kind": "normal",
-                "tool_round_budget": 6,
-                "tool_rounds_used": 1,
-                "completed_stage_summary": "verified sources collected",
-                "created_at": "2026-04-17T22:49:22+08:00",
-                "finished_at": "2026-04-17T22:49:57+08:00",
-                "rounds": [
-                    {
-                        "round_id": "frontdoor-stage-1:round-1",
-                        "round_index": 1,
-                        "created_at": "2026-04-17T22:49:28+08:00",
-                        "budget_counted": True,
-                        "tool_names": ["content_search"],
-                        "tool_call_ids": ["call-1"],
-                        "tools": [],
-                    }
-                ],
-            },
-            {
-                "stage_id": "frontdoor-stage-2",
-                "stage_index": 2,
-                "stage_goal": "Active stage",
-                "representation": "raw",
-                "status": "active",
-                "stage_kind": "normal",
-                "tool_round_budget": 8,
-                "tool_rounds_used": 0,
-                "completed_stage_summary": "",
-                "created_at": "2026-04-17T22:50:30+08:00",
-                "finished_at": "",
-                "rounds": [],
-            },
-        ],
-    }
-
-    combined = combine_canonical_context(durable_canonical_context, current_stage_state)
-
-    assert combined["active_stage_id"] == "frontdoor-stage-2"
-    assert [stage["stage_id"] for stage in combined["stages"]] == [
-        "frontdoor-stage-1",
-        "frontdoor-stage-2",
-    ]
-    assert combined["stages"][0]["status"] == "completed"
-    assert combined["stages"][1]["status"] == "active"
 
 
 @pytest.mark.asyncio
@@ -6423,54 +5430,6 @@ async def test_create_agent_runner_preserves_verified_dispatch_text_from_model()
     assert result["route_kind"] == "task_dispatch"
 
 
-@pytest.mark.asyncio
-async def test_create_agent_runner_reprompts_when_active_stage_has_no_substantive_progress() -> None:
-    runner = create_agent_impl.CreateAgentCeoFrontDoorRunner(
-        loop=SimpleNamespace(
-            main_task_service=SimpleNamespace(get_task=lambda task_id: None),
-            tools=SimpleNamespace(get=lambda *_: None),
-        )
-    )
-
-    result = await runner._graph_normalize_model_output(
-        {
-            "response_payload": {
-                "content": "我现在继续写文件。",
-                "tool_calls": [],
-                "finish_reason": "stop",
-                "error_text": "",
-                "reasoning_content": None,
-                "thinking_blocks": None,
-            },
-            "used_tools": [],
-            "route_kind": "direct_reply",
-            "frontdoor_stage_state": {
-                "active_stage_id": "frontdoor-stage-1",
-                "transition_required": False,
-                "stages": [
-                    {
-                        "stage_id": "frontdoor-stage-1",
-                        "stage_index": 1,
-                        "stage_kind": "normal",
-                        "mode": "自主执行",
-                        "status": "active",
-                        "stage_goal": "write the file",
-                        "completed_stage_summary": "",
-                        "tool_round_budget": 5,
-                        "tool_rounds_used": 0,
-                        "rounds": [],
-                    }
-                ],
-            },
-        },
-        runtime=SimpleNamespace(context=SimpleNamespace()),
-    )
-
-    assert result["next_step"] == "call_model"
-    assert result["final_output"] == ""
-    assert "repair_overlay_text" in result
-    assert "submit_next_stage" in result["repair_overlay_text"]
-    assert "ordinary tool" in result["repair_overlay_text"]
 
 
 @pytest.mark.asyncio
@@ -6936,25 +5895,7 @@ async def test_create_agent_graph_execute_tools_does_not_mark_duplicate_rejectio
             **_canonical_frontdoor_state(
                 tool_names=["create_async_task"],
                 rbac_visible_tool_names=["create_async_task"],
-                frontdoor_stage_state={
-                    "active_stage_id": "frontdoor-stage-1",
-                    "transition_required": False,
-                    "stages": [
-                        {
-                            "stage_id": "frontdoor-stage-1",
-                            "stage_index": 1,
-                            "stage_goal": "Dispatch the async task",
-                            "tool_round_budget": 2,
-                            "tool_rounds_used": 0,
-                            "status": "active",
-                            "mode": "自主执行",
-                            "stage_kind": "normal",
-                            "completed_stage_summary": "",
-                            "key_refs": [],
-                            "rounds": [],
-                        }
-                    ],
-                },
+                
             ),
             "tool_call_payloads": [
                 {"id": "call-1", "name": "create_async_task", "arguments": {"task": "demo"}}
@@ -7007,25 +5948,7 @@ async def test_create_agent_graph_execute_tools_accumulates_multiple_verified_ta
             **_canonical_frontdoor_state(
                 tool_names=["create_async_task"],
                 rbac_visible_tool_names=["create_async_task"],
-                frontdoor_stage_state={
-                    "active_stage_id": "frontdoor-stage-1",
-                    "transition_required": False,
-                    "stages": [
-                        {
-                            "stage_id": "frontdoor-stage-1",
-                            "stage_index": 1,
-                            "stage_goal": "Dispatch the async tasks",
-                            "tool_round_budget": 3,
-                            "tool_rounds_used": 0,
-                            "status": "active",
-                            "mode": "自主执行",
-                            "stage_kind": "normal",
-                            "completed_stage_summary": "",
-                            "key_refs": [],
-                            "rounds": [],
-                        }
-                    ],
-                },
+                
             ),
             "tool_call_payloads": [
                 {"id": "call-1", "name": "create_async_task", "arguments": {"task": "demo-1"}},
@@ -7764,57 +6687,10 @@ def _node_error_heartbeat_state() -> dict:
     }
 
 
-def test_frontdoor_node_error_heartbeat_context_detection() -> None:
-    runner = create_agent_impl.CreateAgentCeoFrontDoorRunner(loop=SimpleNamespace(main_task_service=None))
-
-    context = runner._frontdoor_node_error_heartbeat_context(_node_error_heartbeat_state())
-    assert context == {"task_id": "task:26e64d1dc8b3", "node_id": "node:cbbde9623fb4"}
-
-    terminal = _node_error_heartbeat_state()
-    terminal["user_input"]["metadata"]["heartbeat_reason"] = "task_terminal"
-    assert runner._frontdoor_node_error_heartbeat_context(terminal) is None
-
-    non_heartbeat = {"session_key": "x", "user_input": {"metadata": {}}}
-    assert runner._frontdoor_node_error_heartbeat_context(non_heartbeat) is None
 
 
-def test_frontdoor_stage_gate_whitelists_memory_tools_and_node_error_stageless() -> None:
-    runner = create_agent_impl.CreateAgentCeoFrontDoorRunner(loop=SimpleNamespace(main_task_service=None))
-    stage_state = {"active_stage_id": "", "transition_required": False, "stages": []}
-
-    # memory 两个工具全局白名单：无活动阶段也能调
-    for name in ("memory_update", "memory_note"):
-        assert runner._frontdoor_stage_gate_error(tool_name=name, stage_state=stage_state) == ""
-    # 非白名单工具仍被拦
-    assert runner._frontdoor_stage_gate_error(tool_name="manage_task_nodes", stage_state=stage_state) != ""
-    # 节点暂停事件心跳 allow_stageless：无活动阶段放行
-    assert (
-        runner._frontdoor_stage_gate_error(
-            tool_name="manage_task_nodes", stage_state=stage_state, allow_stageless=True
-        )
-        == ""
-    )
 
 
-def test_frontdoor_auto_opens_stage_for_node_error_heartbeat() -> None:
-    runner = create_agent_impl.CreateAgentCeoFrontDoorRunner(loop=SimpleNamespace(main_task_service=None))
-
-    result = runner._frontdoor_stage_state_after_tool_cycle(
-        _node_error_heartbeat_state(),
-        tool_call_payloads=[
-            {"id": "call-1", "name": "manage_task_nodes", "arguments": {"action": "resume", "task_id": "task:26e64d1dc8b3"}}
-        ],
-        tool_results=[
-            {"tool_name": "manage_task_nodes", "status": "success", "result_text": '{"ok": true}'}
-        ],
-    )
-
-    assert result["active_stage_id"] == "frontdoor-stage-1"
-    stage = result["stages"][-1]
-    assert stage["system_generated"] is True
-    assert stage["tool_round_budget"] == 10
-    assert "任务 ID task:26e64d1dc8b3" in stage["stage_goal"]
-    assert stage["rounds"][0]["tool_names"] == ["manage_task_nodes"]
 
 
 @pytest.mark.asyncio

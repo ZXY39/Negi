@@ -18,7 +18,7 @@ from g3ku.runtime.frontdoor.message_builder import (
 )
 from g3ku.runtime.frontdoor.prompt_builder import CeoPromptBuilder
 from g3ku.runtime.tool_contract_block import render_tool_contract_block
-from main.runtime.stage_budget import SILENT_TOOL_NAME
+from main.runtime.tool_names import SILENT_TOOL_NAME
 from g3ku.runtime.frontdoor.tool_contract import (
     build_frontdoor_tool_contract,
     frontdoor_tool_contract_payload_from_message,
@@ -238,78 +238,7 @@ def _stage_history_with_global_zone() -> tuple[list[dict[str, object]], dict[str
         {"role": "tool", "name": "submit_next_stage", "tool_call_id": "call-stage-5", "content": '{"ok": true}'},
         {"role": "assistant", "content": "active stage raw detail"},
     ]
-    stage_state = {
-        "active_stage_id": "frontdoor-stage-5",
-        "transition_required": False,
-        "stages": [
-            {
-                "stage_id": "frontdoor-stage-1",
-                "stage_index": 1,
-                "stage_kind": "normal",
-                "system_generated": False,
-                "mode": "自主执行",
-                "status": "completed",
-                "stage_goal": "inspect stage one",
-                "completed_stage_summary": "finished stage one",
-                "key_refs": [],
-                "tool_round_budget": 2,
-                "tool_rounds_used": 1,
-            },
-            {
-                "stage_id": "frontdoor-stage-2",
-                "stage_index": 2,
-                "stage_kind": "normal",
-                "system_generated": False,
-                "mode": "自主执行",
-                "status": "completed",
-                "stage_goal": "inspect stage two",
-                "completed_stage_summary": "finished stage two",
-                "key_refs": [],
-                "tool_round_budget": 2,
-                "tool_rounds_used": 1,
-            },
-            {
-                "stage_id": "frontdoor-stage-3",
-                "stage_index": 3,
-                "stage_kind": "normal",
-                "system_generated": False,
-                "mode": "自主执行",
-                "status": "completed",
-                "stage_goal": "inspect stage three",
-                "completed_stage_summary": "finished stage three",
-                "key_refs": [],
-                "tool_round_budget": 2,
-                "tool_rounds_used": 1,
-            },
-            {
-                "stage_id": "frontdoor-stage-4",
-                "stage_index": 4,
-                "stage_kind": "normal",
-                "system_generated": False,
-                "mode": "自主执行",
-                "status": "completed",
-                "stage_goal": "inspect stage four",
-                "completed_stage_summary": "finished stage four",
-                "key_refs": [],
-                "tool_round_budget": 2,
-                "tool_rounds_used": 1,
-            },
-            {
-                "stage_id": "frontdoor-stage-5",
-                "stage_index": 5,
-                "stage_kind": "normal",
-                "system_generated": False,
-                "mode": "自主执行",
-                "status": "active",
-                "stage_goal": "inspect stage five",
-                "completed_stage_summary": "",
-                "key_refs": [],
-                "tool_round_budget": 2,
-                "tool_rounds_used": 0,
-            },
-        ],
-    }
-    return messages, stage_state
+    return messages, {}
 
 
 def test_ceo_prompt_builder_keeps_memory_guidance() -> None:
@@ -320,7 +249,7 @@ def test_ceo_prompt_builder_keeps_memory_guidance() -> None:
     assert "memory_write" not in prompt
     assert "memory_delete" not in prompt
     assert "长期记忆" in prompt
-    assert "submit_next_stage" in prompt
+    assert "submit_next_stage" not in prompt
 
 
 def test_capability_snapshot_exposure_revision_ignores_records_outside_exposed_tool_names() -> None:
@@ -844,7 +773,7 @@ async def test_message_builder_renders_candidate_tools_as_structured_tool_id_and
         and is_frontdoor_tool_contract_message(item)
     ]
 
-    assert len(contract_messages) == 2  # 一份稳定契约 + 一份活状态块
+    assert len(contract_messages) == 1  # 一份稳定契约 + 一份活状态块
     payload = frontdoor_tool_contract_payload_from_message(contract_messages[0])
     assert isinstance(payload, dict)
     assert sorted(payload["candidate_tools"], key=lambda item: item["tool_id"]) == [
@@ -1167,29 +1096,25 @@ async def test_message_builder_appends_frontdoor_runtime_tool_contract_to_dynami
         and is_frontdoor_tool_contract_message(item)
     ]
 
-    assert len(contract_messages) == 2  # 一份稳定契约 + 一份活状态块
-    stable_message, gate_message = contract_messages
-    stable_text = str(stable_message.get("content") or "")
-    gate_text = str(gate_message.get("content") or "")
-    contract_text = stable_text + "\n" + gate_text
+    assert len(contract_messages) == 1  # 一份同形尾块：稳定契约与活状态都在里面
+    contract_message = contract_messages[0]
+    contract_text = str(contract_message.get("content") or "")
 
-    assert stable_message["role"] == "user"
-    assert gate_message["role"] == "user"
-    assert stable_text.startswith("## Runtime Tool Contract")
-    assert gate_text.startswith("## Runtime Stage Gate")
+    assert contract_message["role"] == "user"
+    assert contract_text.startswith("## Runtime Tool Contract")
     assert '"message_type"' not in contract_text
     assert '"callable_tool_names"' not in contract_text
     # D11：callable 面不再渲染成行（水合不再拦路 ⇒ 该行无信息量），名字只由 `tools[]`
-    # 与请求视图里的契约块承载；活状态尾块只留拦得住的那两面。
+    # 与请求视图里的契约块承载。
     assert "callable_tools:" not in contract_text
-    assert "denied_tools" not in gate_text
-    assert "stage_summary:" in gate_text and "stage_summary:" not in stable_text
+    assert "denied_tools" not in contract_text
+    assert "stage_summary:" not in contract_text
     assert 'load_tool_context(tool_id="filesystem_write")' not in contract_text
     # 候选整表不再重列：这份样本里 filesystem_write 已经 callable、池子为空，所以候选行
     # 一条都不该出现（旧形状会固定打一行 `candidate_tools: none`）。
-    assert "candidate_tools:" not in stable_text
-    assert "undeclared_candidates" not in stable_text
-    assert "To use one, call" not in stable_text
+    assert "candidate_tools:" not in contract_text
+    assert "undeclared_candidates" not in contract_text
+    assert "To use one, call" not in contract_text
 
 
 @pytest.mark.asyncio
@@ -1226,7 +1151,7 @@ async def test_message_builder_appends_frontdoor_runtime_tool_contract_with_exec
         and is_frontdoor_tool_contract_message(item)
     ]
 
-    assert len(contract_messages) == 2  # 一份稳定契约 + 一份活状态块
+    assert len(contract_messages) == 1  # 一份稳定契约 + 一份活状态块
     contract_text = "\n".join(str(item["content"] or "") for item in contract_messages)
 
     assert contract_messages[0]["role"] == "user"
@@ -1279,7 +1204,7 @@ def test_frontdoor_dynamic_appendix_records_prefer_state_tool_contract_over_stal
         if is_frontdoor_tool_contract_message(item)
     ]
 
-    assert len(contract_messages) == 2  # 一份稳定契约 + 一份活状态块
+    assert len(contract_messages) == 1  # 一份稳定契约 + 一份活状态块
     contract_text = "\n".join(str(item["content"] or "") for item in contract_messages)
     assert contract_messages[0]["role"] == "user"
     assert contract_text.startswith("## Runtime Tool Contract")
@@ -1341,11 +1266,6 @@ def test_frontdoor_tool_contract_upsert_accepts_legacy_dict_and_writes_summary_t
         callable_tool_names=["submit_next_stage", "filesystem_write"],
         candidate_tool_names=["agent_browser"],
         candidate_tool_items=[{"tool_id": "agent_browser", "description": "Browser automation"}],
-        frontdoor_stage_state={
-            "active_stage_id": "stage:1",
-            "transition_required": False,
-            "stages": [{"stage_id": "stage:1", "status": "active", "stage_goal": "write"}],
-        },
         visible_skill_ids=["memory"],
         candidate_skill_ids=["memory"],
         rbac_visible_tool_names=["submit_next_stage", "filesystem_write", "agent_browser"],
@@ -1365,16 +1285,15 @@ def test_frontdoor_tool_contract_upsert_accepts_legacy_dict_and_writes_summary_t
     assert is_frontdoor_tool_contract_message(contract.to_message())
 
     updated = upsert_frontdoor_tool_contract_message([legacy_message], contract)
-    assert len(updated) == 2  # upsert 一次写入稳定契约 + 活状态块
+    assert len(updated) == 1  # upsert 一次写入稳定契约 + 活状态块
     assert is_frontdoor_tool_contract_message(updated[0])
     assert updated[0]["role"] == "user"
     assert isinstance(updated[0]["content"], str)
     assert str(updated[0]["content"] or "").startswith("## Runtime Tool Contract")
     assert '"message_type"' not in str(updated[0]["content"] or "")
-    assert str(updated[1]["content"] or "").startswith("## Runtime Stage Gate")
     # D11：callable 名单不再渲染成行，装配层算出的那份只留在载荷里（执行准入读它，模型侧
     # 由请求视图里的契约块决定）。
-    assert "callable_tools:" not in str(updated[1]["content"] or "")
+    assert "callable_tools:" not in str(updated[0]["content"] or "")
     upserted_payload = updated[0].get("_frontdoor_tool_contract_payload") or {}
     assert list(upserted_payload.get("callable_tool_names") or []) == [
         "submit_next_stage",
@@ -1463,11 +1382,6 @@ def test_frontdoor_tool_contract_renders_repair_required_sections_separately() -
                 "reason": "missing required paths",
             }
         ],
-        frontdoor_stage_state={
-            "active_stage_id": "stage:1",
-            "transition_required": False,
-            "stages": [{"stage_id": "stage:1", "status": "active", "stage_goal": "repair"}],
-        },
         visible_skill_ids=[],
         candidate_skill_ids=[],
         candidate_skill_items=[],
@@ -1526,11 +1440,6 @@ def test_frontdoor_tool_contract_renders_attachment_reopen_targets() -> None:
         callable_tool_names=["create_async_task", "content_open"],
         candidate_tool_names=[],
         candidate_tool_items=[],
-        frontdoor_stage_state={
-            "active_stage_id": "stage:1",
-            "transition_required": False,
-            "stages": [{"stage_id": "stage:1", "status": "active", "stage_goal": "dispatch"}],
-        },
         visible_skill_ids=[],
         candidate_skill_ids=[],
         rbac_visible_tool_names=["create_async_task", "content_open"],
@@ -1642,7 +1551,7 @@ async def test_message_builder_surfaces_current_and_historical_attachment_reopen
         if is_frontdoor_tool_contract_message(item)
     ]
 
-    assert len(contract_messages) == 2  # 一份稳定契约 + 一份活状态块
+    assert len(contract_messages) == 1  # 一份稳定契约 + 一份活状态块
     payload = frontdoor_tool_contract_payload_from_message(contract_messages[0])
     assert payload is not None
     assert payload["attachment_reopen_targets"] == [
@@ -1674,11 +1583,6 @@ def test_frontdoor_tool_contract_drops_audio_attachment_reopen_targets() -> None
         callable_tool_names=["create_async_task", "content_open"],
         candidate_tool_names=[],
         candidate_tool_items=[],
-        frontdoor_stage_state={
-            "active_stage_id": "stage:1",
-            "transition_required": False,
-            "stages": [{"stage_id": "stage:1", "status": "active", "stage_goal": "dispatch"}],
-        },
         visible_skill_ids=[],
         candidate_skill_ids=[],
         rbac_visible_tool_names=["create_async_task", "content_open"],
@@ -2280,281 +2184,6 @@ async def test_message_builder_trace_includes_frontdoor_context_span_timings() -
         assert float(value) >= 0.0
 
 
-@pytest.mark.asyncio
-async def test_message_builder_applies_frontdoor_stage_workset_compaction_to_history() -> None:
-    prompt_builder = _SplitPromptBuilder()
-    memory_manager = _MemoryManager(response="")
-    builder = CeoMessageBuilder(loop=_loop(memory_manager), prompt_builder=prompt_builder)
-
-    checkpoint_messages = [
-        {"role": "user", "content": "bootstrap request"},
-        {
-            "role": "assistant",
-            "content": "",
-            "tool_calls": [
-                {
-                    "id": "call-stage-1",
-                    "type": "function",
-                    "function": {"name": "submit_next_stage", "arguments": "{}"},
-                }
-            ],
-        },
-        {"role": "tool", "name": "submit_next_stage", "tool_call_id": "call-stage-1", "content": '{"ok": true}'},
-        {"role": "assistant", "content": "stage one raw detail"},
-        {
-            "role": "assistant",
-            "content": "",
-            "tool_calls": [
-                {
-                    "id": "call-stage-2",
-                    "type": "function",
-                    "function": {"name": "submit_next_stage", "arguments": "{}"},
-                }
-            ],
-        },
-        {"role": "tool", "name": "submit_next_stage", "tool_call_id": "call-stage-2", "content": '{"ok": true}'},
-        {"role": "assistant", "content": "stage two raw detail"},
-        {
-            "role": "assistant",
-            "content": "",
-            "tool_calls": [
-                {
-                    "id": "call-stage-3",
-                    "type": "function",
-                    "function": {"name": "submit_next_stage", "arguments": "{}"},
-                }
-            ],
-        },
-        {"role": "tool", "name": "submit_next_stage", "tool_call_id": "call-stage-3", "content": '{"ok": true}'},
-        {"role": "assistant", "content": "stage three raw detail"},
-        {
-            "role": "assistant",
-            "content": "",
-            "tool_calls": [
-                {
-                    "id": "call-stage-4",
-                    "type": "function",
-                    "function": {"name": "submit_next_stage", "arguments": "{}"},
-                }
-            ],
-        },
-        {"role": "tool", "name": "submit_next_stage", "tool_call_id": "call-stage-4", "content": '{"ok": true}'},
-        {"role": "assistant", "content": "stage four raw detail"},
-        {
-            "role": "assistant",
-            "content": "",
-            "tool_calls": [
-                {
-                    "id": "call-stage-5",
-                    "type": "function",
-                    "function": {"name": "submit_next_stage", "arguments": "{}"},
-                }
-            ],
-        },
-        {"role": "tool", "name": "submit_next_stage", "tool_call_id": "call-stage-5", "content": '{"ok": true}'},
-        {"role": "assistant", "content": "active stage raw detail"},
-    ]
-
-    def _tool_entry(
-        stage_index: int,
-        *,
-        tool_name: str,
-        arguments: dict[str, object],
-        output_text: str,
-    ) -> dict[str, object]:
-        return {
-            "tool_call_id": f"call-stage-{stage_index}-{tool_name}",
-            "tool_name": tool_name,
-            "arguments": dict(arguments),
-            "arguments_text": f"{tool_name} ({json.dumps(arguments, ensure_ascii=False, sort_keys=True)})",
-            "output_text": output_text,
-            "output_preview_text": "",
-            "output_ref": "",
-            "status": "success",
-            "started_at": f"2026-04-16T09:0{stage_index}:00+08:00",
-            "finished_at": f"2026-04-16T09:0{stage_index}:01+08:00",
-            "timestamp": f"2026-04-16T09:0{stage_index}:01+08:00",
-            "elapsed_seconds": 1.0,
-            "kind": "tool_result",
-            "source": "user",
-        }
-
-    result = await builder.build_for_ceo(
-        session=_session(),
-        query_text="continue",
-        exposure={"skills": [], "tools": [], "tool_names": ["filesystem"]},
-        persisted_session=None,
-        checkpoint_messages=checkpoint_messages,
-        user_content="continue",
-        frontdoor_stage_state={
-            "active_stage_id": "frontdoor-stage-5",
-            "transition_required": False,
-            "stages": [
-                {
-                    "stage_id": "frontdoor-stage-1",
-                    "stage_index": 1,
-                    "context_evicted": True,  # 窗口已移除：离开可见层只能由模型点名
-                    "stage_kind": "normal",
-                    "system_generated": False,
-                    "mode": "自主执行",
-                    "status": "completed",
-                    "stage_goal": "inspect stage one",
-                    "completed_stage_summary": "finished stage one",
-                    "key_refs": [],
-                    "tool_round_budget": 2,
-                    "tool_rounds_used": 1,
-                },
-                {
-                    "stage_id": "frontdoor-stage-2",
-                    "stage_index": 2,
-                    "stage_kind": "normal",
-                    "system_generated": False,
-                    "mode": "自主执行",
-                    "status": "completed",
-                    "stage_goal": "inspect stage two",
-                    "completed_stage_summary": "finished stage two",
-                    "key_refs": [],
-                    "tool_round_budget": 2,
-                    "tool_rounds_used": 1,
-                    "rounds": [
-                        {
-                            "round_id": "frontdoor-stage-2:round-1",
-                            "round_index": 1,
-                            "tool_names": ["filesystem_write"],
-                            "tool_call_ids": ["call-stage-2-filesystem_write"],
-                            "budget_counted": True,
-                            "tools": [
-                                _tool_entry(
-                                    2,
-                                    tool_name="filesystem_write",
-                                    arguments={"path": "stage-two.txt", "content": "raw"},
-                                    output_text="stage two inline output",
-                                )
-                            ],
-                        }
-                    ],
-                },
-                {
-                    "stage_id": "frontdoor-stage-3",
-                    "stage_index": 3,
-                    "stage_kind": "normal",
-                    "system_generated": False,
-                    "mode": "自主执行",
-                    "status": "completed",
-                    "stage_goal": "inspect stage three",
-                    "completed_stage_summary": "finished stage three",
-                    "key_refs": [],
-                    "tool_round_budget": 2,
-                    "tool_rounds_used": 1,
-                    "rounds": [
-                        {
-                            "round_id": "frontdoor-stage-3:round-1",
-                            "round_index": 1,
-                            "tool_names": ["filesystem_write"],
-                            "tool_call_ids": ["call-stage-3-filesystem_write"],
-                            "budget_counted": True,
-                            "tools": [
-                                _tool_entry(
-                                    3,
-                                    tool_name="filesystem_write",
-                                    arguments={"path": "stage-three.txt", "content": "raw"},
-                                    output_text="stage three inline output",
-                                )
-                            ],
-                        }
-                    ],
-                },
-                {
-                    "stage_id": "frontdoor-stage-4",
-                    "stage_index": 4,
-                    "stage_kind": "normal",
-                    "system_generated": False,
-                    "mode": "自主执行",
-                    "status": "completed",
-                    "stage_goal": "inspect stage four",
-                    "completed_stage_summary": "finished stage four",
-                    "key_refs": [],
-                    "tool_round_budget": 2,
-                    "tool_rounds_used": 1,
-                    "rounds": [
-                        {
-                            "round_id": "frontdoor-stage-4:round-1",
-                            "round_index": 1,
-                            "tool_names": ["filesystem_write"],
-                            "tool_call_ids": ["call-stage-4-filesystem_write"],
-                            "budget_counted": True,
-                            "tools": [
-                                _tool_entry(
-                                    4,
-                                    tool_name="filesystem_write",
-                                    arguments={"path": "stage-four.txt", "content": "raw"},
-                                    output_text="stage four inline output",
-                                )
-                            ],
-                        }
-                    ],
-                },
-                {
-                    "stage_id": "frontdoor-stage-5",
-                    "stage_index": 5,
-                    "stage_kind": "normal",
-                    "system_generated": False,
-                    "mode": "自主执行",
-                    "status": "active",
-                    "stage_goal": "inspect stage five",
-                    "completed_stage_summary": "",
-                    "key_refs": [],
-                    "tool_round_budget": 2,
-                    "tool_rounds_used": 0,
-                    "rounds": [
-                        {
-                            "round_id": "frontdoor-stage-5:round-1",
-                            "round_index": 1,
-                            "tool_names": ["filesystem_write"],
-                            "tool_call_ids": ["call-stage-5-filesystem_write"],
-                            "budget_counted": True,
-                            "tools": [
-                                _tool_entry(
-                                    5,
-                                    tool_name="filesystem_write",
-                                    arguments={"path": "stage-five.txt", "content": "raw"},
-                                    output_text="active stage inline output",
-                                )
-                            ],
-                        }
-                    ],
-                },
-            ],
-        },
-    )
-
-    stable_contents = [str(item.get("content") or "") for item in result.stable_messages]
-    rendered = "\n\n".join(stable_contents)
-    raw_blocks = [
-        json.loads(content.split("\n", 1)[1])
-        for content in stable_contents
-        if content.startswith("[STAGE_RAW]")
-    ]
-    assert "stage one raw detail" not in rendered
-    assert "stage two raw detail" not in rendered
-    assert "stage three raw detail" not in rendered
-    assert "stage four raw detail" not in rendered
-    assert "active stage raw detail" not in rendered
-    assert [int(item["stage_index"]) for item in raw_blocks] == [2, 3, 4, 5]
-    assert raw_blocks[0]["rounds"][0]["tools"][0]["output_text"] == "stage two inline output"
-    assert raw_blocks[3]["rounds"][0]["tools"][0]["arguments"] == {
-        "path": "stage-five.txt",
-        "content": "raw",
-    }
-    assert any(content.startswith("[STAGE_COMPACT]") for content in stable_contents)
-    # raw 块以 system 角色落地（压缩元数据、非对话内容）
-    raw_block_messages = [
-        item
-        for item in result.stable_messages
-        if str(item.get("content") or "").startswith("[STAGE_RAW]")
-    ]
-    assert raw_block_messages
-    assert all(str(item.get("role") or "") == "user" for item in raw_block_messages)
 
 
 def _completed_stage_with_round(index: int) -> dict[str, object]:
@@ -2600,254 +2229,8 @@ def _completed_stage_with_round(index: int) -> dict[str, object]:
     }
 
 
-@pytest.mark.asyncio
-async def test_message_builder_keeps_stage_blocks_off_request_tail_when_current_user_in_history() -> None:
-    # 不变量：块不占续写位——请求末位保持当前 user 回合。workset 拼装路径下
-    # 当前用户回合已在历史里时，阶段块不得落在其后（否则模型在块之后续写，
-    # 把整块 JSON 当成"自己上一轮说的话"仿造/回显，事故
-    # ext:qq-official:f8a8001865631301 的请求形态）；越界块整体前移到最后一条
-    # 真实 user 回合之前（块自己也是 user 角色，不能算"最后一条 user"），且全部
-    # 以 user 角色落地。
-    prompt_builder = _SplitPromptBuilder()
-    memory_manager = _MemoryManager(response="")
-    builder = CeoMessageBuilder(loop=_loop(memory_manager), prompt_builder=prompt_builder)
-
-    checkpoint_messages = [
-        {"role": "user", "content": "bootstrap request"},
-        {"role": "user", "content": "continue"},
-    ]
-
-    result = await builder.build_for_ceo(
-        session=_session(),
-        query_text="continue",
-        exposure={"skills": [], "tools": [], "tool_names": []},
-        persisted_session=None,
-        checkpoint_messages=checkpoint_messages,
-        user_content="continue",
-        frontdoor_stage_state={
-            "active_stage_id": "",
-            "transition_required": False,
-            "stages": [_completed_stage_with_round(index) for index in range(1, 5)],
-        },
-    )
-
-    stable = result.stable_messages
-    block_prefixes = ("[STAGE_COMPACT]", "[STAGE_EXTERNALIZED]", "[STAGE_RAW]")
-    block_indexes = [
-        index
-        for index, item in enumerate(stable)
-        if str(item.get("content") or "").startswith(block_prefixes)
-    ]
-    assert block_indexes  # 4 个完成阶段：1 个 compact 块 + 3 个 raw 块被渲染
-    last_user_index = max(
-        index
-        for index, item in enumerate(stable)
-        if str(item.get("role") or "").strip().lower() == "user"
-    )
-    # 末位是当前用户回合（允许送达时间装饰），块全部位于其前
-    assert last_user_index == len(stable) - 1
-    assert strip_arrival_time_stamp(str(stable[-1].get("content") or "")).strip() == "continue"
-    assert max(block_indexes) < last_user_index
-    # 块以 user 角色落地（线体只许一份首位 system）
-    assert all(str(stable[index].get("role") or "") == "user" for index in block_indexes)
 
 
-@pytest.mark.asyncio
-async def test_message_builder_renders_retained_raw_stage_blocks_from_stage_state_without_active_stage() -> None:
-    prompt_builder = _SplitPromptBuilder()
-    memory_manager = _MemoryManager(response="")
-    builder = CeoMessageBuilder(loop=_loop(memory_manager), prompt_builder=prompt_builder)
-
-    checkpoint_messages = [
-        {"role": "user", "content": "bootstrap request"},
-        {"role": "assistant", "content": "checkpoint stage one raw detail"},
-        {"role": "assistant", "content": "checkpoint stage two raw detail"},
-        {"role": "assistant", "content": "checkpoint stage three raw detail"},
-        {"role": "assistant", "content": "checkpoint stage four raw detail"},
-    ]
-
-    def _tool_entry(
-        stage_index: int,
-        *,
-        tool_name: str,
-        arguments: dict[str, object],
-        output_text: str,
-        output_preview_text: str = "",
-        output_ref: str = "",
-    ) -> dict[str, object]:
-        return {
-            "tool_call_id": f"call-stage-{stage_index}-{tool_name}",
-            "tool_name": tool_name,
-            "arguments": dict(arguments),
-            "arguments_text": f"{tool_name} ({json.dumps(arguments, ensure_ascii=False, sort_keys=True)})",
-            "output_text": output_text,
-            "output_preview_text": output_preview_text,
-            "output_ref": output_ref,
-            "status": "success",
-            "started_at": f"2026-04-16T10:0{stage_index}:00+08:00",
-            "finished_at": f"2026-04-16T10:0{stage_index}:01+08:00",
-            "timestamp": f"2026-04-16T10:0{stage_index}:01+08:00",
-            "elapsed_seconds": 1.0,
-            "kind": "tool_result",
-            "source": "user",
-        }
-
-    result = await builder.build_for_ceo(
-        session=_session(),
-        query_text="continue",
-        exposure={"skills": [], "tools": [], "tool_names": ["filesystem_write", "content_open"]},
-        persisted_session=None,
-        checkpoint_messages=checkpoint_messages,
-        user_content="continue",
-        frontdoor_stage_state={
-            "active_stage_id": "",
-            "transition_required": False,
-            "stages": [
-                {
-                    "stage_id": "frontdoor-stage-1",
-                    "stage_index": 1,
-                    "context_evicted": True,  # 窗口已移除：离开可见层只能由模型点名
-                    "stage_kind": "normal",
-                    "system_generated": False,
-                    "mode": "自主执行",
-                    "status": "completed",
-                    "stage_goal": "inspect stage one",
-                    "completed_stage_summary": "finished stage one",
-                    "key_refs": [],
-                    "tool_round_budget": 2,
-                    "tool_rounds_used": 1,
-                    "rounds": [
-                        {
-                            "round_id": "frontdoor-stage-1:round-1",
-                            "round_index": 1,
-                            "tool_names": ["content_open"],
-                            "tool_call_ids": ["call-stage-1-content_open"],
-                            "budget_counted": True,
-                            "tools": [
-                                _tool_entry(
-                                    1,
-                                    tool_name="content_open",
-                                    arguments={"path": "README.md"},
-                                    output_text="stage one inline output",
-                                )
-                            ],
-                        }
-                    ],
-                },
-                {
-                    "stage_id": "frontdoor-stage-2",
-                    "stage_index": 2,
-                    "stage_kind": "normal",
-                    "system_generated": False,
-                    "mode": "自主执行",
-                    "status": "completed",
-                    "stage_goal": "inspect stage two",
-                    "completed_stage_summary": "finished stage two",
-                    "key_refs": [],
-                    "tool_round_budget": 2,
-                    "tool_rounds_used": 1,
-                    "rounds": [
-                        {
-                            "round_id": "frontdoor-stage-2:round-1",
-                            "round_index": 1,
-                            "tool_names": ["filesystem_write"],
-                            "tool_call_ids": ["call-stage-2-filesystem_write"],
-                            "budget_counted": True,
-                            "tools": [
-                                _tool_entry(
-                                    2,
-                                    tool_name="filesystem_write",
-                                    arguments={"path": "notes.txt", "content": "hello"},
-                                    output_text="stage two inline output",
-                                )
-                            ],
-                        }
-                    ],
-                },
-                {
-                    "stage_id": "frontdoor-stage-3",
-                    "stage_index": 3,
-                    "stage_kind": "normal",
-                    "system_generated": False,
-                    "mode": "自主执行",
-                    "status": "completed",
-                    "stage_goal": "inspect stage three",
-                    "completed_stage_summary": "finished stage three",
-                    "key_refs": [],
-                    "tool_round_budget": 2,
-                    "tool_rounds_used": 1,
-                    "rounds": [
-                        {
-                            "round_id": "frontdoor-stage-3:round-1",
-                            "round_index": 1,
-                            "tool_names": ["content_open"],
-                            "tool_call_ids": ["call-stage-3-content_open"],
-                            "budget_counted": True,
-                            "tools": [
-                                _tool_entry(
-                                    3,
-                                    tool_name="content_open",
-                                    arguments={"path": "artifact.txt"},
-                                    output_text="",
-                                    output_preview_text="output captured in ref",
-                                    output_ref="artifact:artifact:stage-three",
-                                )
-                            ],
-                        }
-                    ],
-                },
-                {
-                    "stage_id": "frontdoor-stage-4",
-                    "stage_index": 4,
-                    "stage_kind": "normal",
-                    "system_generated": False,
-                    "mode": "自主执行",
-                    "status": "completed",
-                    "stage_goal": "inspect stage four",
-                    "completed_stage_summary": "finished stage four",
-                    "key_refs": [],
-                    "tool_round_budget": 2,
-                    "tool_rounds_used": 1,
-                    "rounds": [
-                        {
-                            "round_id": "frontdoor-stage-4:round-1",
-                            "round_index": 1,
-                            "tool_names": ["filesystem_write"],
-                            "tool_call_ids": ["call-stage-4-filesystem_write"],
-                            "budget_counted": True,
-                            "tools": [
-                                _tool_entry(
-                                    4,
-                                    tool_name="filesystem_write",
-                                    arguments={"path": "summary.txt", "content": "done"},
-                                    output_text="stage four inline output",
-                                )
-                            ],
-                        }
-                    ],
-                },
-            ],
-        },
-    )
-
-    stable_contents = [str(item.get("content") or "") for item in result.stable_messages]
-    rendered = "\n\n".join(stable_contents)
-    raw_blocks = [
-        json.loads(content.split("\n", 1)[1])
-        for content in stable_contents
-        if content.startswith("[STAGE_RAW]")
-    ]
-
-    assert "checkpoint stage one raw detail" not in rendered
-    assert "checkpoint stage two raw detail" not in rendered
-    assert "checkpoint stage three raw detail" not in rendered
-    assert "checkpoint stage four raw detail" not in rendered
-    assert len(raw_blocks) == 3
-    assert [int(item["stage_index"]) for item in raw_blocks] == [2, 3, 4]
-    assert raw_blocks[0]["rounds"][0]["tools"][0]["arguments"] == {"path": "notes.txt", "content": "hello"}
-    assert raw_blocks[1]["rounds"][0]["tools"][0]["output_ref"] == "artifact:artifact:stage-three"
-    assert raw_blocks[2]["rounds"][0]["tools"][0]["output_text"] == "stage four inline output"
-    assert any(content.startswith("[STAGE_COMPACT]") for content in stable_contents)
 
 
 @pytest.mark.asyncio
@@ -2864,7 +2247,6 @@ async def test_message_builder_does_not_inject_global_summary_block_during_histo
     persisted_session.add_message(
         "assistant",
         "Heartbeat finished a background inspection.",
-        canonical_context={"stages": [{"stage_goal": "inspect repo", "rounds": []}]},
         metadata={"source": "heartbeat", "history_visible": False},
     )
 
@@ -2896,7 +2278,6 @@ async def test_message_builder_does_not_inject_global_summary_block_during_histo
             {"role": "assistant", "content": "older assistant"},
         ],
         user_content="continue",
-        frontdoor_stage_state={"active_stage_id": "", "transition_required": False, "stages": []},
     )
 
     assert summary_calls == 0
@@ -2926,33 +2307,14 @@ async def test_message_builder_trace_reports_pre_request_and_effective_prompt_to
         exposure={"skills": [], "tools": [], "tool_names": ["filesystem"]},
         persisted_session=None,
         user_content="continue",
-        frontdoor_canonical_context={
-            "active_stage_id": "",
-            "transition_required": False,
-            "stages": [
-                {
-                    "stage_id": f"frontdoor-stage-{index}",
-                    "stage_index": index,
-                    "stage_kind": "normal",
-                    "representation": "raw",
-                    "system_generated": False,
-                    "mode": "自主执行",
-                    "status": "completed",
-                    "stage_goal": f"inspect stage {index}",
-                    "completed_stage_summary": f"finished stage {index}",
-                    "key_refs": [],
-                    "tool_round_budget": 2,
-                    "tool_rounds_used": 1,
-                    "rounds": [],
-                }
-                for index in range(1, 5)
-            ],
-        },
     )
 
     assert "prompt_estimate_tokens" not in result.trace
-    assert result.trace["pre_request_prompt_tokens"] == 300
-    assert result.trace["effective_prompt_tokens"] >= 300
+    # 锚点量的是"这一跳真要发出去的那一份"：稳定上下文全算进来，
+    # 尾部契约块与 ephemeral 尾不计入，所以 effective 只会不小于它。
+    stable_count = len([item for item in result.stable_messages if isinstance(item, dict)])
+    assert result.trace["pre_request_prompt_tokens"] == 50 * stable_count
+    assert result.trace["effective_prompt_tokens"] >= 50 * stable_count
 
 
 @pytest.mark.asyncio
@@ -2986,7 +2348,7 @@ async def test_message_builder_does_not_recompute_or_reuse_global_summary_blocks
         "g3ku.runtime.frontdoor.message_builder.estimate_message_tokens",
         _fake_estimate,
     )
-    checkpoint_messages, frontdoor_stage_state = _stage_history_with_global_zone()
+    checkpoint_messages, _seed_state = _stage_history_with_global_zone()
 
     result = await builder.build_for_ceo(
         session=_session(),
@@ -2995,7 +2357,6 @@ async def test_message_builder_does_not_recompute_or_reuse_global_summary_blocks
         persisted_session=None,
         checkpoint_messages=checkpoint_messages,
         user_content="continue",
-        frontdoor_stage_state=frontdoor_stage_state,
         semantic_context_state={
             "summary_text": "## Goals\nExisting summary",
             "coverage_history_source": "checkpoint",
@@ -3017,7 +2378,7 @@ async def test_message_builder_directly_continues_request_body_seed_without_stag
     prompt_builder = _SplitPromptBuilder()
     memory_manager = _MemoryManager(response="")
     builder = CeoMessageBuilder(loop=_loop(memory_manager), prompt_builder=prompt_builder)
-    _checkpoint_messages, frontdoor_stage_state = _stage_history_with_global_zone()
+    _checkpoint_messages, _seed_state = _stage_history_with_global_zone()
     request_body_seed_messages = [
         {"role": "system", "content": "BASE PROMPT"},
         {"role": "user", "content": "previous user"},
@@ -3049,7 +2410,6 @@ async def test_message_builder_directly_continues_request_body_seed_without_stag
         checkpoint_messages=[],
         request_body_seed_messages=request_body_seed_messages,
         user_content="strict follow up",
-        frontdoor_stage_state=frontdoor_stage_state,
     )
 
     stable_contents = [str(item.get("content") or "") for item in result.stable_messages]
@@ -3114,7 +2474,7 @@ async def test_message_builder_ignores_global_summary_failure_cooldown_during_hi
         "g3ku.runtime.frontdoor.message_builder.estimate_message_tokens",
         _fake_estimate,
     )
-    checkpoint_messages, frontdoor_stage_state = _stage_history_with_global_zone()
+    checkpoint_messages, _seed_state = _stage_history_with_global_zone()
 
     result = await builder.build_for_ceo(
         session=_session(),
@@ -3123,7 +2483,6 @@ async def test_message_builder_ignores_global_summary_failure_cooldown_during_hi
         persisted_session=None,
         checkpoint_messages=checkpoint_messages,
         user_content="continue",
-        frontdoor_stage_state=frontdoor_stage_state,
         semantic_context_state={
             "summary_text": "## Goals\nExisting summary",
             "coverage_history_source": "checkpoint",
@@ -3187,65 +2546,6 @@ async def test_message_builder_no_longer_emits_global_summary_threshold_trace(
     assert "global_summary_force_refresh_tokens" not in result.trace
 
 
-@pytest.mark.asyncio
-async def test_message_builder_keeps_externalized_compression_block_without_global_summary_readback(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    prompt_builder = _SplitPromptBuilder()
-    memory_manager = _MemoryManager(response="")
-    loop = _loop(memory_manager)
-    loop.context_length = 200_000
-    builder = CeoMessageBuilder(loop=loop, prompt_builder=prompt_builder)
-
-    summary_calls = 0
-
-    async def _fake_summary(messages, *, max_output_tokens, model_key=None):
-        nonlocal summary_calls
-        _ = max_output_tokens, model_key
-        summary_calls += 1
-        return "## Goals\nUse the externalized block only"
-
-    monkeypatch.setattr(
-        "g3ku.runtime.frontdoor.message_builder.summarize_global_context_model_first",
-        _fake_summary,
-        raising=False,
-    )
-    monkeypatch.setattr(
-        "g3ku.runtime.frontdoor.message_builder.estimate_message_tokens",
-        lambda messages: 120_000 if messages else 0,
-    )
-    checkpoint_messages, frontdoor_stage_state = _stage_history_with_global_zone()
-    frontdoor_stage_state["stages"].insert(
-        0,
-        {
-            "stage_id": "frontdoor-stage-compression-0",
-            "stage_index": 0,
-            "stage_kind": "compression",
-            "system_generated": True,
-            "status": "completed",
-            "stage_goal": "older archived work",
-            "completed_stage_summary": "archived summary",
-            "archive_ref": "artifact:artifact:frontdoor-stage-archive",
-            "archive_stage_index_start": 1,
-            "archive_stage_index_end": 10,
-        },
-    )
-
-    result = await builder.build_for_ceo(
-        session=_session(),
-        query_text="continue",
-        exposure={"skills": [], "tools": [], "tool_names": ["filesystem"]},
-        persisted_session=None,
-        checkpoint_messages=checkpoint_messages,
-        user_content="continue",
-        frontdoor_stage_state=frontdoor_stage_state,
-    )
-
-    rendered = "\n\n".join(str(item.get("content") or "") for item in result.stable_messages)
-    assert "[STAGE_EXTERNALIZED]" in rendered
-    assert "artifact:artifact:frontdoor-stage-archive" in rendered
-    assert "archived summary" in rendered
-    assert summary_calls == 0
 
 
 @pytest.mark.asyncio
@@ -3658,137 +2958,8 @@ def test_actual_request_artifact_reports_memory_snapshot_provenance() -> None:
     assert dict(_artifact_payload(runner, _session())["memory_snapshot"] or {}) == {}  # type: ignore[arg-type]
 
 
-@pytest.mark.asyncio
-async def test_message_builder_trims_full_transcript_history_to_active_window() -> None:
-    """transcript/续跑全量历史按阶段归属原位压缩：过期阶段只删工具肉身，文本对话保留。"""
-    prompt_builder = _SplitPromptBuilder()
-    memory_manager = _MemoryManager(response="")
-    builder = CeoMessageBuilder(loop=_loop(memory_manager), prompt_builder=prompt_builder)
-
-    transcript: list[dict[str, object]] = [{"role": "user", "content": "bootstrap request"}]
-    for index in range(1, 6):
-        transcript.append(
-            {
-                "role": "assistant",
-                "content": "",
-                "tool_calls": [
-                    {
-                        "id": f"call-stage-{index}",
-                        "type": "function",
-                        "function": {"name": "submit_next_stage", "arguments": "{}"},
-                    }
-                ],
-            }
-        )
-        transcript.append(
-            {"role": "tool", "name": "submit_next_stage", "tool_call_id": f"call-stage-{index}", "content": '{"ok": true}'}
-        )
-        transcript.append({"role": "assistant", "content": f"stage {index} raw detail"})
-
-    stages = [
-        {
-            "stage_id": f"frontdoor-stage-{index}",
-            "stage_index": index,
-            "stage_kind": "normal",
-            "system_generated": False,
-            "status": "completed" if index < 5 else "active",
-            "stage_goal": f"inspect stage {index}",
-            "completed_stage_summary": f"finished stage {index}",
-            "key_refs": [],
-            "tool_round_budget": 2,
-            "tool_rounds_used": 1,
-            # 窗口已移除：阶段 1 靠模型点名裁撤离开可见层
-            **({'context_evicted': True} if index == 1 else {}),
-        }
-        for index in range(1, 6)
-    ]
-    persisted = SimpleNamespace(
-        state=SimpleNamespace(session_key="web:shared"),
-        messages=transcript,
-        metadata={},
-        _memory_channel="web",
-        _memory_chat_id="shared",
-        _channel="web",
-        _chat_id="shared",
-    )
-
-    result = await builder.build_for_ceo(
-        session=_session(),
-        query_text="continue",
-        exposure={"skills": [], "tools": [], "tool_names": ["filesystem"]},
-        persisted_session=persisted,
-        checkpoint_messages=None,
-        user_content="continue",
-        frontdoor_stage_state={
-            "active_stage_id": "frontdoor-stage-5",
-            "transition_required": False,
-            "stages": stages,
-        },
-    )
-
-    rendered = "\n\n".join(str(item.get("content") or "") for item in result.stable_messages)
-    # 过期阶段（阶段1）的工具肉身成对移除：5 个 submit 响应只剩 4 个
-    assert rendered.count('{"ok": true}') == 4
-    # 阶段文本汇报作为对话保留（不再盲切丢弃）
-    for index in range(1, 6):
-        assert f"stage {index} raw detail" in rendered
-    # 活动窗口保留 active 阶段原文
-    assert "stage 5 raw detail" in rendered
-    # 首条用户请求保留，且有压缩块代表过期阶段（原位放置）
-    assert "bootstrap request" in rendered
-    assert "[STAGE_COMPACT]" in rendered
 
 
-@pytest.mark.asyncio
-async def test_seed_continuation_path_trims_old_raw_with_stage_summaries() -> None:
-    """续跑 seed 路径：有完成阶段摘要时应裁掉旧 raw 并以压缩块代表（接通后第一层生效）。"""
-    prompt_builder = _SplitPromptBuilder()
-    memory_manager = _MemoryManager(response="")
-    builder = CeoMessageBuilder(loop=_loop(memory_manager), prompt_builder=prompt_builder)
-
-    seed: list[dict[str, object]] = [{"role": "user", "content": "bootstrap request"}]
-    for index in range(1, 6):
-        seed.append(
-            {
-                "role": "assistant",
-                "content": "",
-                "tool_calls": [
-                    {"id": f"call-stage-{index}", "type": "function", "function": {"name": "submit_next_stage", "arguments": "{}"}}
-                ],
-            }
-        )
-        seed.append({"role": "tool", "name": "submit_next_stage", "tool_call_id": f"call-stage-{index}", "content": '{"ok": true}'})
-        seed.append({"role": "assistant", "content": f"stage {index} raw detail"})
-
-    stages = [
-        {
-            "stage_id": f"frontdoor-stage-{index}",
-            "stage_index": index,
-            "stage_kind": "normal",
-            "system_generated": False,
-            "status": "completed" if index < 5 else "active",
-            "stage_goal": f"inspect stage {index}",
-            "completed_stage_summary": f"finished stage {index}",
-            "key_refs": [],
-            "tool_round_budget": 2,
-            "tool_rounds_used": 1,
-            # 窗口已移除：阶段 1 靠模型点名裁撤离开可见层
-            **({'context_evicted': True} if index == 1 else {}),
-        }
-        for index in range(1, 6)
-    ]
-
-    stage_state = {"active_stage_id": "frontdoor-stage-5", "transition_required": False, "stages": stages}
-    trimmed, stage_compaction_applied = CreateAgentCeoFrontDoorRunner._trim_frontdoor_seed_stage_compaction(
-        seed, stage_state
-    )
-    rendered = "\n\n".join(str(item.get("content") or "") for item in trimmed)
-    assert stage_compaction_applied is True
-    # 过期阶段（阶段1）的 submit 调用与响应成对移除；文本汇报作为对话保留
-    assert rendered.count('{"ok": true}') == 4
-    assert "stage 1 raw detail" in rendered
-    assert "stage 2 raw detail" in rendered
-    assert "[STAGE_COMPACT]" in rendered
 
 
 def _paused_user_transcript_message(text: str, **metadata_overrides: object) -> dict[str, object]:
@@ -4008,7 +3179,6 @@ def test_frontdoor_contract_lists_declared_but_denied_tools() -> None:
     contract = build_frontdoor_tool_contract(
         callable_tool_names=["exec"],
         candidate_tool_names=[],
-        frontdoor_stage_state={},
         denied_tool_names=["web_fetch"],
     )
 
@@ -4020,15 +3190,12 @@ def test_frontdoor_contract_lists_declared_but_denied_tools() -> None:
     assert "denied_tools" in contract_text
     assert "web_fetch" in contract_text.split("denied_tools", 1)[1]
     assert "无权限" in contract_text
-    assert "denied_tools" not in contract.to_stage_gate_message()["content"]
 
     clean = build_frontdoor_tool_contract(
         callable_tool_names=["exec"],
         candidate_tool_names=[],
-        frontdoor_stage_state={},
     )
     assert "denied_tools" not in clean.to_message()["content"]
-    assert "denied_tools" not in clean.to_stage_gate_message()["content"]
 
 
 @pytest.mark.asyncio
