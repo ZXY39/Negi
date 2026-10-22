@@ -32,6 +32,8 @@ SKILL_ROSTER_NOTICE_HEADING = 'Skills newly readable in this session:'
 SKILL_ROSTER_NOTICE_LOAD_HINT = 'Use `load_skill_context(skill_id="...")` to read a skill body.'
 # 压缩跳带过去的那一段：抬头写明它没被压缩移出，模型不必再猜名单是否还有效。
 SKILL_ROSTER_CARRIED_HEADING = '### Skills newly readable in this session (still readable; kept across compaction)'
+# 长期记忆增量与 skill 名单共用一条通知消息；两节之间用空行分隔。
+MEMORY_NOTICE_HEADING = '### Long-term memory updates'
 
 SKILL_ROSTER_NOTICE_CONTEXT_KEY = 'skill_roster_notice_context'
 
@@ -76,11 +78,15 @@ def deliver_for_scope(
     *,
     now: str,
     covered_skill_ids: list[Any] | None = None,
+    memory_provider: Any = None,
 ) -> tuple[dict[str, Any] | None, list[dict[str, str]]]:
     """每跳唯一动作：记账 + 有未宣布的就投一条。
 
-    返回（消息或 None，本次宣布的条目）；None 表示本轮不追加提示。调用方拿条目去发
-    前端事件，两条信息同源，不再回头扫文本。
+    返回（消息或 None，本次宣布的 skill 条目）；None 表示本轮不追加提示。调用方拿条目
+    去发前端事件，两条信息同源，不再回头扫文本。
+
+    `memory_provider(since_rev=..., base_rev=...)` 返回 `{rev, text, rebase}`：记忆增量
+    与 skill 名单合成同一条消息，游标随消息一起推进（同一次投递、同一份耐久基线）。
     """
     context, _fresh = record_live_skills(
         notice_context_for(scope_key),
@@ -89,18 +95,51 @@ def deliver_for_scope(
         covered_skill_ids=covered_skill_ids,
     )
     pending = pending_notice_records(context)
-    if not pending:
+    cursor = dict(context.get('memory_cursor') or {})
+    memory_text = ''
+    if callable(memory_provider):
+        try:
+            delta = memory_provider(
+                since_rev=int(cursor.get('rev') or 0),
+                base_rev=int(cursor.get('base_rev') or 0),
+            )
+        except Exception:
+            delta = None
+        if isinstance(delta, dict):
+            next_rev = int(delta.get('rev') or 0)
+            text = str(delta.get('text') or '').strip()
+            if text:
+                memory_text = text
+            if next_rev > int(cursor.get('rev') or 0):
+                cursor = {
+                    'rev': next_rev,
+                    'base_rev': next_rev if delta.get('rebase') else int(cursor.get('base_rev') or 0),
+                }
+    context['memory_cursor'] = cursor
+    if not pending and not memory_text:
         set_notice_context(scope_key, context)
         return None, []
-    message = build_notice_message(pending)
-    if message is not None:
+    message = build_notice_message(pending, memory_text=memory_text)
+    if message is not None and pending:
         context = mark_records_delivered(
             context,
             [str(record.get('skill_id') or '') for record in pending],
             now=now,
         )
+        context['memory_cursor'] = cursor
     set_notice_context(scope_key, context)
     return message, (pending if message is not None else [])
+
+
+def reset_memory_cursor(scope_key: str) -> None:
+    """压缩跳的唯一动作：下一跳重新以整份快照作基座。
+
+    提示正文被压缩重写后，之前的增量行已经不在上下文里；游标停在原处会让那些记忆
+    永久不再出现，所以在这里归零，由下一次投递走 `rebase`。
+    """
+    context = notice_context_for(scope_key)
+    context['memory_cursor'] = {'rev': 0, 'base_rev': 0}
+    set_notice_context(scope_key, context)
 
 
 def carry_for_scope(
@@ -162,9 +201,18 @@ def normalize_skill_roster_notice_context(payload: Any) -> dict[str, Any]:
         for item in list(source.get('carried_stages') or [])
         if str(item or '').strip()
     ]
+    cursor_source = source.get('memory_cursor') if isinstance(source.get('memory_cursor'), dict) else {}
+
+    def _cursor_value(name: str) -> int:
+        try:
+            return max(int(cursor_source.get(name) or 0), 0)
+        except (TypeError, ValueError):
+            return 0
+
     return {
         'records': ordered,
         'carried_stages': sorted(set(carried)),
+        'memory_cursor': {'rev': _cursor_value('rev'), 'base_rev': _cursor_value('base_rev')},
     }
 
 
@@ -284,12 +332,24 @@ def render_carried_text(records: list[Any]) -> str:
     ).strip()
 
 
-def build_notice_message(records: list[Any]) -> dict[str, Any] | None:
-    """一次性投递那条消息：role=user，落在本轮历史末尾、两份运行时块之前。"""
-    text = render_notice_text(records)
-    if len(text.splitlines()) <= 2:
+def build_notice_message(
+    records: list[Any], *, memory_text: str = ''
+) -> dict[str, Any] | None:
+    """一次性投递那条消息：role=user，落在本轮历史末尾、两份运行时块之前。
+
+    两节共用一条消息：skill 名单在前，记忆增量在后；空节省略。
+    """
+    sections: list[str] = []
+    skill_text = render_notice_text(records) if records else ''
+    if len(skill_text.splitlines()) > 2:
+        sections.append(skill_text)
+    memory_section = str(memory_text or '').strip()
+    if memory_section:
+        sections.append('\n'.join([MEMORY_NOTICE_HEADING, memory_section]))
+    if not sections:
         return None
-    return {'role': SKILL_ROSTER_NOTICE_ROLE, 'content': text}
+    content = '\n\n'.join([SKILL_ROSTER_NOTICE_MARKER, *sections]).strip()
+    return {'role': SKILL_ROSTER_NOTICE_ROLE, 'content': content}
 
 
 def build_carried_message(records: list[Any]) -> dict[str, Any] | None:
@@ -371,6 +431,8 @@ def drop_records_after(context: Any, *, cutoff_iso: str) -> dict[str, Any]:
 
 
 __all__ = [
+    'MEMORY_NOTICE_HEADING',
+    'RUNTIME_NOTICE_MARKER',
     'SKILL_ROSTER_CARRIED_HEADING',
     'SKILL_ROSTER_NOTICE_CONTEXT_KEY',
     'SKILL_ROSTER_NOTICE_HEADING',
@@ -399,6 +461,7 @@ __all__ = [
     'render_carried_text',
     'render_notice_lines',
     'render_notice_text',
+    'reset_memory_cursor',
     'set_notice_context',
     'strip_skill_roster_notice_echo',
 ]

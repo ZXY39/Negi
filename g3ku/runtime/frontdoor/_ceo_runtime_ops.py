@@ -4082,11 +4082,34 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
             # 钉住表按裸 session_key 分桶（`session:` 前缀只是台账的作用域写法），
             # 拿前缀键去查会取回空名单，把全部技能当成新增。
             covered_skill_ids=pinned_skill_ids_for(None, session_key=normalized_session_key),
+            memory_provider=self._frontdoor_memory_notice_provider,
         )
         if message is None:
             return base_messages
         self._emit_frontdoor_skill_roster_notice_event(session_key=session_key, records=delivered)
         return [*base_messages, message]
+
+    def _frontdoor_memory_notice_provider(self, *, since_rev: int, base_rev: int) -> dict[str, Any] | None:
+        """长期记忆增量：与 skill 名单同一条通知消息、同一个游标。
+
+        首次投递（游标为 0）只对齐到当前修订——会话 index 1 的冻结快照就是这份文档，
+        再投一遍整篇会把同一份内容放两次。
+        """
+        manager = getattr(self._loop, "memory_manager", None)
+        if manager is None or not callable(getattr(manager, "memory_notice_delta", None)):
+            return None
+        try:
+            latest = int(manager.latest_memory_revision() or 0)
+        except Exception:
+            return None
+        if int(since_rev or 0) <= 0:
+            return {"rev": latest, "from_rev": 0, "text": "", "rebase": False}
+        if latest <= int(since_rev):
+            return {"rev": latest, "from_rev": int(since_rev), "text": "", "rebase": False}
+        try:
+            return manager.memory_notice_delta(since_rev=int(since_rev))
+        except Exception:
+            return None
 
     def _emit_frontdoor_skill_roster_notice_event(self, *, session_key: str, records: list[dict[str, Any]]) -> None:
         """会话流里画一条内部行（与心跳 ack 同一族 system 行），不是用户气泡。

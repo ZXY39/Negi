@@ -1235,6 +1235,22 @@ class _MemorySqliteRepository:
                 ON memories(passed_count DESC, refresh_count ASC)
                 """
             )
+            # 每个真实改变文档的提交写一条修订：会话按 rev 游标消费增量，
+            # 不再靠"采纳整份快照"把记忆更新推到模型眼前。
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS memory_revisions (
+                    rev INTEGER PRIMARY KEY AUTOINCREMENT,
+                    created_at TEXT NOT NULL,
+                    op TEXT NOT NULL,
+                    added_ids TEXT NOT NULL DEFAULT '[]',
+                    changed_ids TEXT NOT NULL DEFAULT '[]',
+                    retired_ids TEXT NOT NULL DEFAULT '[]',
+                    rendered TEXT NOT NULL DEFAULT '',
+                    chars INTEGER NOT NULL DEFAULT 0
+                )
+                """
+            )
             # Stores created before these columns existed get them in place; SQLite has
             # no IF NOT EXISTS for ADD COLUMN, so probe first and keep it re-runnable.
             present = {str(row[1]) for row in conn.execute("PRAGMA table_info(memories)")}
@@ -1242,6 +1258,65 @@ class _MemorySqliteRepository:
                 if column not in present:
                     conn.execute(f"ALTER TABLE memories ADD COLUMN {column} TEXT NOT NULL DEFAULT ''")
             conn.commit()
+        finally:
+            conn.close()
+
+    def append_revision(
+        self,
+        *,
+        created_at: str,
+        op: str,
+        added_ids: list[str],
+        changed_ids: list[str],
+        retired_ids: list[str],
+        rendered: str,
+    ) -> int:
+        conn = self._connect()
+        try:
+            with conn:
+                cursor = conn.execute(
+                    """
+                    INSERT INTO memory_revisions(
+                        created_at, op, added_ids, changed_ids, retired_ids, rendered, chars
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        str(created_at or ""),
+                        str(op or "write"),
+                        json.dumps(sorted({str(item or "").strip() for item in added_ids if str(item or "").strip()}), ensure_ascii=False),
+                        json.dumps(sorted({str(item or "").strip() for item in changed_ids if str(item or "").strip()}), ensure_ascii=False),
+                        json.dumps(sorted({str(item or "").strip() for item in retired_ids if str(item or "").strip()}), ensure_ascii=False),
+                        str(rendered or ""),
+                        len(str(rendered or "")),
+                    ),
+                )
+                return int(cursor.lastrowid or 0)
+        finally:
+            conn.close()
+
+    def latest_revision(self) -> int:
+        conn = self._connect()
+        try:
+            try:
+                row = conn.execute("SELECT COALESCE(MAX(rev), 0) AS rev FROM memory_revisions").fetchone()
+            except sqlite3.OperationalError:
+                return 0
+            return int(row["rev"] or 0) if row is not None else 0
+        finally:
+            conn.close()
+
+    def revisions_after(self, rev: int) -> list[dict[str, Any]]:
+        conn = self._connect()
+        try:
+            try:
+                rows = conn.execute(
+                    "SELECT rev, created_at, op, added_ids, changed_ids, retired_ids, rendered, chars"
+                    " FROM memory_revisions WHERE rev > ? ORDER BY rev",
+                    (int(rev or 0),),
+                ).fetchall()
+            except sqlite3.OperationalError:
+                return []
+            return [dict(row) for row in rows]
         finally:
             conn.close()
 
@@ -2031,6 +2106,83 @@ class MemoryManager:
         """The live resident entries in line order - the address book the model's lines mean."""
 
         return self._resident_entries(self._memory_repo.list_memories())
+
+    def _resident_line_map(
+        self, rows: list[dict[str, Any]], *, now_iso: str | None = None
+    ) -> dict[str, str]:
+        return {
+            entry.memory_id: format_memory_entry(entry)
+            for entry in self._resident_entries(rows, now_iso=now_iso)
+        }
+
+    def _record_memory_revision_locked(
+        self,
+        *,
+        now_iso: str,
+        op: str,
+        rows_before: list[dict[str, Any]],
+        rows_after: list[dict[str, Any]],
+    ) -> int:
+        """记下这次提交对**居民行**造成的可见变化；没有净变化就不写修订。
+
+        判据是渲染后的行：同一 id 改写、压缩降级、行序变化都算变化，计数器更新不算。
+        """
+        before = self._resident_line_map(rows_before, now_iso=now_iso)
+        after = self._resident_line_map(rows_after, now_iso=now_iso)
+        added = [memory_id for memory_id in after if memory_id not in before]
+        changed = [
+            memory_id
+            for memory_id in after
+            if memory_id in before and after[memory_id] != before[memory_id]
+        ]
+        retired = [memory_id for memory_id in before if memory_id not in after]
+        if not (added or changed or retired):
+            return 0
+        visible = set(added) | set(changed)
+        rendered = "".join(after[memory_id] for memory_id in after if memory_id in visible)
+        return self._memory_repo.append_revision(
+            created_at=now_iso,
+            op=op,
+            added_ids=added,
+            changed_ids=changed,
+            retired_ids=retired,
+            rendered=rendered,
+        )
+
+    def latest_memory_revision(self) -> int:
+        """当前文档对应的最新修订号；没有修订的存量库返回 0。"""
+        try:
+            return int(self._memory_repo.latest_revision())
+        except Exception:
+            return 0
+
+    def memory_notice_delta(self, *, since_rev: int, now_iso: str | None = None) -> dict[str, Any]:
+        """会话通知车道用的一跳增量：`since_rev` 之后的可见变化。
+
+        `rebase=True` 时 `text` 是整份文档（压缩/归并把旧增量重写过，或增量超过基座
+        的四分之一）；调用方把游标置到 `rev`，下一跳从零开始累计。
+        """
+        latest = self.latest_memory_revision()
+        since = max(int(since_rev or 0), 0)
+        document_text = str(self.snapshot_text() or "").strip()
+        cap = max(800, min(4000, len(document_text) // 4))
+        revisions = self._memory_repo.revisions_after(since)
+        if not revisions:
+            return {"rev": latest, "from_rev": since, "text": "", "rebase": False}
+        consolidated = any(str(item.get("op") or "") == "consolidate" for item in revisions)
+        lines: list[str] = []
+        seen: set[str] = set()
+        for item in revisions:
+            for line in str(item.get("rendered") or "").splitlines():
+                key = line.strip()
+                if not key or key in seen:
+                    continue
+                seen.add(key)
+                lines.append(key)
+        rendered = "\n".join(lines)
+        if consolidated or (rendered and len(rendered) > cap):
+            return {"rev": latest, "from_rev": since, "text": document_text, "rebase": True}
+        return {"rev": latest, "from_rev": since, "text": rendered, "rebase": False}
 
     def reformat_store(self, *, now_iso: str | None = None) -> dict[str, Any]:
         """The one pass that moves everything to the current on-disk shape.
@@ -3880,6 +4032,12 @@ class MemoryManager:
             raise
         validated.memory_chars_after = self._resident_memory_chars()
         validated.document_preview = self._document_preview(self.snapshot_text())
+        self._record_memory_revision_locked(
+            now_iso=now_iso,
+            op="consolidate",
+            rows_before=rows_before,
+            rows_after=self._memory_repo.list_memories(),
+        )
         if not validated.retirements:
             # The compress lane already ran before this consolidation was ever queued, so
             # "nothing retired" means the pool is spent and the consolidator found no home
@@ -4074,6 +4232,12 @@ class MemoryManager:
             post_action = str(compression_result.get("capacity_action") or "").strip()
             if post_action:
                 validated.capacity_action = post_action
+            self._record_memory_revision_locked(
+                now_iso=now_iso,
+                op="write",
+                rows_before=rows_before,
+                rows_after=self._memory_repo.list_memories(),
+            )
 
     @classmethod
     def _processed_batch_retention_delta(cls) -> timedelta:
