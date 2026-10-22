@@ -447,7 +447,7 @@ function buildTurnGroupDescriptors(turns) {
                 seq: turn.seq,
                 text,
                 created_at: String(turn?.created_at || ""),
-                tools: [],
+                rounds: [],
             });
         }
         if (!tools.length) return;
@@ -455,35 +455,39 @@ function buildTurnGroupDescriptors(turns) {
         if (!target) {
             target = entries.find((entry) => entry.kind === "preamble");
             if (!target) {
-                target = { kind: "preamble", tools: [] };
+                target = { kind: "preamble", seq: "", text: "", created_at: "", rounds: [] };
                 entries.push(target);
             }
         }
-        target.tools.push(...tools);
+        target.rounds.push({
+            seq: turn.seq,
+            created_at: String(turn?.created_at || ""),
+            tools,
+        });
     });
 
     const steps = [];
     entries.forEach((entry) => {
+        const tools = entry.rounds.flatMap((round) => round.tools);
         if (entry.kind === "preamble") {
             steps.push({
                 traceKey: "turn:preamble",
                 title: "开始执行",
-                status: roundTraceStatus({ tools: entry.tools }),
+                status: roundTraceStatus({ tools }),
                 open: false,
-                bodyHtml: renderExecutionRoundToolStrip({ round_id: "turn:preamble" }, entry.tools),
+                tools,
+                bodyHtml: entry.rounds.map(renderTurnRoundBlock).join(""),
             });
             return;
         }
-        if (entry.tools.length) {
+        if (entry.rounds.length) {
             steps.push({
                 traceKey: `turn:${entry.seq}`,
                 title: compactNodeHeading({ title: entry.text }, 80),
-                status: roundTraceStatus({ tools: entry.tools }),
+                status: roundTraceStatus({ tools }),
                 open: false,
-                bodyHtml: renderExecutionRoundToolStrip(
-                    { round_id: `turn:${entry.seq}`, created_at: entry.created_at },
-                    entry.tools
-                ),
+                tools,
+                bodyHtml: entry.rounds.map(renderTurnRoundBlock).join(""),
             });
             return;
         }
@@ -495,6 +499,19 @@ function buildTurnGroupDescriptors(turns) {
         });
     });
     return steps;
+}
+
+// 账本一行就是一轮：正文、时间与工具条都属于这一轮。多轮叠在组体内纵向排列，
+// 不并成一条横向长条，否则"哪一轮调了什么"会被抹平成一行。
+function renderTurnRoundBlock(round) {
+    const time = round?.created_at ? formatCompactTime(round.created_at) : "";
+    const roundKey = `turn:${String(round?.seq ?? "").trim()}`;
+    return `
+        <section class="task-trace-round-group" data-round-key="${esc(roundKey)}">
+            ${time ? `<div class="task-trace-round-meta">${esc(time)}</div>` : ""}
+            ${renderExecutionRoundToolStrip({ round_id: roundKey, created_at: round?.created_at || "" }, round?.tools)}
+        </section>
+    `;
 }
 
 function buildTurnTraceSteps(turns, initialPromptStep) {

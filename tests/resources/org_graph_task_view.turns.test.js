@@ -86,6 +86,7 @@ test("turns group by progress text and keep the tools that follow", () => {
     assert.match(steps[2].bodyHtml, /tool-c/);
     assert.match(steps[2].bodyHtml, /tool-d/);
     assert.doesNotMatch(steps[2].bodyHtml, /tool-a/);
+    assert.equal((steps[2].bodyHtml.match(/task-trace-round-group/g) || []).length, 2);
     assert.equal(steps[3].traceKey, "turn:4");
     assert.equal(steps[3].textOnly, true);
     assert.equal(steps[3].text, "纯文本进展");
@@ -93,6 +94,23 @@ test("turns group by progress text and keep the tools that follow", () => {
     assert.match(steps[4].bodyHtml, /submit_final_result/);
     assert.equal(steps[4].open, true);
     assert.equal(steps[2].open, false);
+});
+
+test("textless rounds stay separate sections instead of one merged strip", () => {
+    const { buildExecutionTraceSteps } = load();
+    const trace = {
+        initial_prompt: "initial",
+        turns: [turn(1, "", ["tool-a"]), turn(2, "", ["tool-b"]), turn(3, "", ["tool-c", "tool-d"])],
+        tool_steps: [],
+        stages: [],
+    };
+
+    const steps = buildExecutionTraceSteps(trace, {});
+
+    assert.equal(steps.length, 2);
+    assert.equal(steps[1].traceKey, "turn:preamble");
+    assert.equal((steps[1].bodyHtml.match(/task-trace-round-group/g) || []).length, 3);
+    assert.equal((steps[1].bodyHtml.match(/task-trace-round-tools/g) || []).length, 3);
 });
 
 test("buildNodeExecutionTrace keeps turns from full trace and summary", () => {
