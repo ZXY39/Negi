@@ -65,15 +65,12 @@ MEMORY_WRITE_HINT_HEADER = "## 长期记忆写入提示"
 RETRIEVED_MEMORY_HINT_HEADER = "## 已检索记忆使用提示"
 
 # 长期记忆快照的会话级冻结载体。快照注入在 message index 1（system 之后、整段历史之前），
-# 所以它的字节变化等价于把身后全部历史重铺一遍；采纳点因此被限制在"前缀反正已经断了"的
-# 位置：会话首请求、内联 token 压缩轮末、手动压缩成功后、空闲刷新边界。
+# 所以它的字节变化等价于把身后全部历史重铺一遍；冻结值只在会话首请求采纳一次，
+# 之后的变化由修订流增量投递（见 `skill_roster_notice` 的 `memory_cursor`）。
 MEMORY_SNAPSHOT_TEXT_ATTR = "_frontdoor_memory_snapshot_text"
 MEMORY_SNAPSHOT_ADOPTED_AT_ATTR = "_frontdoor_memory_snapshot_adopted_at"
 MEMORY_SNAPSHOT_ADOPTION_REASON_ATTR = "_frontdoor_memory_snapshot_adoption_reason"
 MEMORY_SNAPSHOT_ADOPTION_FIRST_REQUEST = "session_first_request"
-MEMORY_SNAPSHOT_ADOPTION_TOKEN_COMPRESSION = "token_compression"
-MEMORY_SNAPSHOT_ADOPTION_MANUAL_COMPRESSION = "manual_compression"
-MEMORY_SNAPSHOT_ADOPTION_IDLE_REFRESH = "idle_refresh"
 
 
 def _read_memory_snapshot_text(session: Any, memory_manager: Any) -> str | None:

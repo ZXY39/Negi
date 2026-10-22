@@ -12,7 +12,6 @@ from g3ku.runtime.frontdoor._ceo_create_agent_impl import CreateAgentCeoFrontDoo
 from g3ku.runtime.context.types import RetrievedContextBundle
 from g3ku.runtime.frontdoor.capability_snapshot import build_capability_snapshot
 from g3ku.runtime.frontdoor.message_builder import (
-    MEMORY_SNAPSHOT_ADOPTION_TOKEN_COMPRESSION,
     CeoMessageBuilder,
     adopt_memory_snapshot,
     memory_snapshot_provenance,
@@ -3554,7 +3553,7 @@ async def test_memory_snapshot_stays_frozen_between_requests_until_adopted() -> 
     assert str(second["memory_snapshot_text"] or "") == str(first["memory_snapshot_text"] or "")
     assert manager.reads == ["---\nid:AA11aa\n2026/9/1-self：\nfrozen v1\n"]
 
-    adopt_memory_snapshot(session, memory_manager=manager, reason=MEMORY_SNAPSHOT_ADOPTION_TOKEN_COMPRESSION)
+    adopt_memory_snapshot(session, memory_manager=manager, reason="token_compression")
     third = await _collect(builder, session)
     assert "hot v2" in str(third["memory_snapshot_text"] or "")
     assert len(manager.reads) == 2
@@ -3597,13 +3596,13 @@ def test_failed_snapshot_read_keeps_the_frozen_value_and_the_old_adoption_stamp(
     session = _session()
     session._frontdoor_memory_snapshot_text = "frozen v1"
     session._frontdoor_memory_snapshot_adopted_at = "2026-09-21T00:00:00+08:00"
-    session._frontdoor_memory_snapshot_adoption_reason = MEMORY_SNAPSHOT_ADOPTION_TOKEN_COMPRESSION
+    session._frontdoor_memory_snapshot_adoption_reason = "token_compression"
 
     adopted = adopt_memory_snapshot(session, memory_manager=_Boom(), reason="manual_compression")
 
     assert adopted == "frozen v1"
     assert session._frontdoor_memory_snapshot_adopted_at == "2026-09-21T00:00:00+08:00"
-    assert session._frontdoor_memory_snapshot_adoption_reason == MEMORY_SNAPSHOT_ADOPTION_TOKEN_COMPRESSION
+    assert session._frontdoor_memory_snapshot_adoption_reason == "token_compression"
 
 
 def test_snapshot_adoption_is_per_session_and_reported_in_artifact_provenance() -> None:
@@ -3613,15 +3612,15 @@ def test_snapshot_adoption_is_per_session_and_reported_in_artifact_provenance() 
     second = _session()
 
     assert memory_snapshot_provenance(first) == {}
-    adopt_memory_snapshot(first, memory_manager=manager, reason=MEMORY_SNAPSHOT_ADOPTION_TOKEN_COMPRESSION)
+    adopt_memory_snapshot(first, memory_manager=manager, reason="token_compression")
     first_hash = memory_snapshot_provenance(first)["hash"]
     manager.document = ""
-    adopt_memory_snapshot(second, memory_manager=manager, reason=MEMORY_SNAPSHOT_ADOPTION_TOKEN_COMPRESSION)
+    adopt_memory_snapshot(second, memory_manager=manager, reason="token_compression")
 
     provenance = memory_snapshot_provenance(second)
     assert first_hash and provenance["hash"] != first_hash
     assert first._frontdoor_memory_snapshot_text == "---\nid:AA11aa\n2026/9/1-self：\nshared doc"
-    assert provenance["adoption_reason"] == MEMORY_SNAPSHOT_ADOPTION_TOKEN_COMPRESSION
+    assert provenance["adoption_reason"] == "token_compression"
     assert provenance["adopted_at"]
 
 
@@ -3648,11 +3647,11 @@ def test_actual_request_artifact_reports_memory_snapshot_provenance() -> None:
     session = _session()
     session._frontdoor_memory_snapshot_text = "---\nid:AA11aa\n2026/9/1-self：\nfrozen v1\n"
     session._frontdoor_memory_snapshot_adopted_at = "2026-09-21T01:00:00+08:00"
-    session._frontdoor_memory_snapshot_adoption_reason = MEMORY_SNAPSHOT_ADOPTION_TOKEN_COMPRESSION
+    session._frontdoor_memory_snapshot_adoption_reason = "token_compression"
 
     payload = _artifact_payload(runner, session)
     reported = dict(payload["memory_snapshot"] or {})  # type: ignore[arg-type]
-    assert reported["adoption_reason"] == MEMORY_SNAPSHOT_ADOPTION_TOKEN_COMPRESSION
+    assert reported["adoption_reason"] == "token_compression"
     assert reported["adopted_at"] == "2026-09-21T01:00:00+08:00"
     assert len(str(reported["hash"])) == 12
     # 尚未采纳过的会话留空字典，不伪造时间戳。
