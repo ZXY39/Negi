@@ -9,7 +9,7 @@
 
 ## 1. 基本启动方式
 
-产品显示名是 **Negi**，仓库路径 `ZXY39/Negi`，操作者敲的命令与入口脚本也叫 Negi（`negi web`、`negi status`、`start-negi.ps1` / `start-negi.sh` / `start-negi.cmd`、包装 `negi.ps1` / `negi.sh` / `negi.cmd`、引导 `negi_bootstrap.py`）。Python 包目录 `g3ku/` 与 `python -m g3ku` 形态、数据根 `.g3ku`、`G3KU_*` 环境变量仍是旧拼写，属冻结项（清单见 `AGENTS.md`「Brand Name vs Frozen Identifiers」）。写进模型上下文的协议块前缀已经去品牌（`[STAGE_*]` / `[TOKEN_COMPACT_V2]` / `[NOTICE_TAIL]`），运行时只是继续**读**存量数据里的旧拼写（`_V1` 与 `[G3KU_STAGE_*]`）——排障时在老会话的 sidecar 或账本里看到 `[G3KU_STAGE_*]` 是历史形态，不是缺陷。排障时看到的 `.g3ku/config.json`、进程 cmdline 里的 `-m g3ku web` 都是正常的当前形态——入口名换了不代表进程形状换了，按进程找实例仍然要看 `-m g3ku`。
+产品显示名是 **Negi**，仓库路径 `ZXY39/Negi`，操作者敲的命令与入口脚本也叫 Negi（`negi web`、`negi status`、`start-negi.ps1` / `start-negi.sh` / `start-negi.cmd`、包装 `negi.ps1` / `negi.sh` / `negi.cmd`、引导 `negi_bootstrap.py`）。Python 包目录 `g3ku/` 与 `python -m g3ku` 形态、数据根 `.g3ku`、`G3KU_*` 环境变量仍是旧拼写，属冻结项（清单见 `AGENTS.md`「Brand Name vs Frozen Identifiers」）。写进模型上下文的协议块前缀已经去品牌（`[TOKEN_COMPACT_V2]` / `[NOTICE_TAIL]` / `[SKILL_ROSTER_NOTICE]`），运行时只是继续**读**存量数据里的少数旧拼写（`[G3KU_TOKEN_COMPACT_V2]`、`[G3KU_APPEND_NOTICE_TAIL_V1]`、`[SKILL_ROSTER_NOTICE_V1]` 与 `[G3KU_SILENT]`）——排障时在老会话的 sidecar 或账本里看到它们属于历史形态，不是缺陷。排障时看到的 `.g3ku/config.json`、进程 cmdline 里的 `-m g3ku web` 都是正常的当前形态——入口名换了不代表进程形状换了，按进程找实例仍然要看 `-m g3ku`。
 
 ### 新设备首次安装与升级
 

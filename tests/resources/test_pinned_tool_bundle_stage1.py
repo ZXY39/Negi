@@ -98,7 +98,7 @@ def test_renderer_persists_bundle_and_records_path_and_revision(tmp_path) -> Non
     assert path.exists() and revision
     payload = json.loads(path.read_text(encoding="utf-8"))
     # names 是钉住顺序，含渲染器追加的两颗合成控制工具；tool_schemas 才是线上字节。
-    assert payload["names"] == ["alpha", "beta", "submit_next_stage", "silent"]
+    assert payload["names"] == ["alpha", "beta", "silent"]
     assert [str((item.get("function") or {}).get("name")) for item in payload["tool_schemas"]] == payload["names"]
     assert payload["build_reason"] == "membership_changed"
 
@@ -123,15 +123,14 @@ def test_singleton_path_is_reused_while_revision_tracks_content() -> None:
     assert pinned_tool_bundle.bundle_names_for_session(session_key) == [
         "alpha",
         "beta",
-        "submit_next_stage",
         "silent",
     ]
 
 
-def test_bundle_names_include_the_two_synthetic_control_tools() -> None:
+def test_bundle_names_include_the_synthetic_control_tool() -> None:
     """N5：前门的合成控制工具不在治理集也不在注册表，靠渲染器追加。
 
-    整表若不显式含它们，阶段 2 "按名单从整表取字节"会静默少两名——模型看不见阶段工具，
+    整表若不显式含它，阶段 2 "按名单从整表取字节"会静默少一名——模型看不见静默工具，
     那是功能回归不是缓存事件。
     """
     session_key = "web:control-tools"
@@ -140,8 +139,8 @@ def test_bundle_names_include_the_two_synthetic_control_tools() -> None:
     _render(_runner(["alpha"]), session, session_key, ["alpha"])
 
     names = pinned_tool_bundle.bundle_names_for_session(session_key)
-    assert names[-2:] == ["submit_next_stage", "silent"]
-    assert set(session._frontdoor_pinned_tool_schema_bundle) >= {"submit_next_stage", "silent"}
+    assert names[-1:] == ["silent"]
+    assert "silent" in session._frontdoor_pinned_tool_schema_bundle
 
 
 def test_deleted_tool_survives_restart_byte_for_byte() -> None:

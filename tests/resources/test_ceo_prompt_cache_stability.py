@@ -155,7 +155,6 @@ def test_frontdoor_prompt_cache_key_ignores_dynamic_tool_contract_changes() -> N
         callable_tool_names=["exec"],
         candidate_tool_names=["filesystem_write"],
         candidate_tool_items=[{"tool_id": "filesystem_write", "description": "Write file content"}],
-        frontdoor_stage_state={"active_stage_id": "stage:1", "transition_required": False, "stages": []},
         candidate_skill_ids=["memory"],
         contract_revision="frontdoor:v1",
     ).to_message()
@@ -163,7 +162,6 @@ def test_frontdoor_prompt_cache_key_ignores_dynamic_tool_contract_changes() -> N
         callable_tool_names=["exec", "filesystem_write"],
         candidate_tool_names=[],
         candidate_tool_items=[],
-        frontdoor_stage_state={"active_stage_id": "stage:1", "transition_required": False, "stages": []},
         candidate_skill_ids=["memory"],
         contract_revision="frontdoor:v1",
     ).to_message()
@@ -213,7 +211,6 @@ def test_frontdoor_prompt_cache_key_ignores_repair_required_contract_changes() -
         repair_required_tool_items=[
             {"tool_id": "agent_browser", "description": "Browser automation", "reason": "missing required paths"}
         ],
-        frontdoor_stage_state={"active_stage_id": "stage:1", "transition_required": False, "stages": []},
         candidate_skill_ids=[],
         repair_required_skill_items=[],
         contract_revision="frontdoor:v1",
@@ -225,7 +222,6 @@ def test_frontdoor_prompt_cache_key_ignores_repair_required_contract_changes() -
         repair_required_tool_items=[
             {"tool_id": "agent_browser", "description": "Browser automation", "reason": "missing required paths"}
         ],
-        frontdoor_stage_state={"active_stage_id": "stage:1", "transition_required": False, "stages": []},
         candidate_skill_ids=[],
         repair_required_skill_items=[
             {"skill_id": "writing-skills", "description": "Skill maintenance workflow", "reason": "missing required bins"}
@@ -313,7 +309,6 @@ def test_frontdoor_prompt_contract_keeps_same_turn_contract_history_append_only(
         callable_tool_names=["exec", "submit_next_stage"],
         candidate_tool_names=[],
         candidate_tool_items=[],
-        frontdoor_stage_state={"active_stage_id": "stage:1", "transition_required": False, "stages": []},
         candidate_skill_ids=[],
         contract_revision="frontdoor:v1",
     ).to_message()
@@ -424,7 +419,6 @@ def test_frontdoor_prompt_contract_appends_dynamic_appendix_at_tail_for_main_lan
         callable_tool_names=["submit_next_stage"],
         candidate_tool_names=["web_fetch"],
         candidate_tool_items=[{"tool_id": "web_fetch", "description": "HTTP fetch helper"}],
-        frontdoor_stage_state={},
         contract_revision="frontdoor:v1",
     ).to_message()
     contract_record = {"role": contract_message["role"], "content": contract_message["content"]}
@@ -469,45 +463,19 @@ def test_frontdoor_prompt_contract_appends_dynamic_appendix_at_tail_for_main_lan
     ]
 
 
-def test_frontdoor_tool_contract_stage_summary_omits_round_counters_and_trace_fields() -> None:
+def test_frontdoor_tool_contract_payload_has_no_stage_fields() -> None:
     from g3ku.runtime.frontdoor.tool_contract import build_frontdoor_tool_contract
 
     payload = build_frontdoor_tool_contract(
         callable_tool_names=["exec"],
         candidate_tool_names=["filesystem_write"],
-        frontdoor_stage_state={
-            "active_stage_id": "frontdoor-stage-2",
-            "transition_required": False,
-            "stages": [
-                {
-                    "stage_id": "frontdoor-stage-2",
-                    "stage_goal": "inspect repo",
-                    "tool_round_budget": 6,
-                    "tool_rounds_used": 3,
-                    "stage_kind": "normal",
-                    "final_stage": False,
-                    "completed_stage_summary": "should not leak",
-                    "key_refs": [{"ref": "file:a"}],
-                    "rounds": [{"round_id": "round-1"}],
-                    "created_at": "2026-04-16T02:49:26+08:00",
-                }
-            ],
-        },
         contract_revision="frontdoor:v1",
     ).to_message_payload()
 
-    assert payload["stage_summary"] == {
-        "active_stage_id": "frontdoor-stage-2",
-        "transition_required": False,
-        "active_stage": {
-            "stage_id": "frontdoor-stage-2",
-            "stage_goal": "inspect repo",
-            "tool_round_budget": 6,
-            "stage_kind": "normal",
-            "final_stage": False,
-        },
-        "pending_orphan_rounds": [],
-    }
+    assert "stage_summary" not in payload
+    assert "execution_stage" not in payload
+    assert "frontdoor_stage_state" not in payload
+
 
 
 def test_frontdoor_turn_overlay_appends_ephemeral_tail_message_without_mutating_existing_prefix() -> None:
@@ -531,37 +499,6 @@ def test_frontdoor_turn_overlay_appends_ephemeral_tail_message_without_mutating_
     }
 
 
-def test_prompt_stage_free_list_is_the_gate_own_set() -> None:
-    """提示词里那份名单必须就是闸门用的那份：分开维护就会让模型照名单裸调被拦的工具。"""
-    from main.runtime.stage_budget import (
-        FRONTDOOR_STAGELESS_MEMORY_TOOL_NAMES,
-        normalize_stage_gate_bypass_tools,
-    )
-
-    builder = CeoPromptBuilder(loop=SimpleNamespace(workspace='.'))
-    rendered = builder.build_base_prompt(cache_stamp='first|r1')
-    gate_names = sorted(
-        normalize_stage_gate_bypass_tools(
-            {
-                *CeoFrontDoorRuntimeOps._CONTROL_TOOL_NAMES,
-                *FRONTDOOR_STAGELESS_MEMORY_TOOL_NAMES,
-            }
-        )
-    )
-    line = next(item for item in rendered.splitlines() if '是运行时注入的名单' in item)
-    start = line.index('`') + 1
-    shown = sorted(name.strip() for name in line[start:line.index('`', start)].split(','))
-    assert set(shown) <= set(gate_names)
-    assert 'memory_note' in shown
-    assert 'memory_update' in shown
-    assert '唯一例外是' not in rendered
-    # 差集就是那批进不了 exposure 的名字：点名它们等于教模型发一个发不出的动作
-    assert set(gate_names) - set(shown) == {
-        'stop_tool_execution',
-        'wait_tool_execution',
-        'load_skill_context_v2',
-        'load_tool_context_v2',
-    }
 
 
 def test_base_prompt_is_re_read_only_when_the_refresh_stamp_moves() -> None:

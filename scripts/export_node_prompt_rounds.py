@@ -47,12 +47,10 @@ class _FakeTaskStore:
 
 
 class _RecordingLogService:
-    def __init__(self, *, task: Any, node: Any, stage_gate: dict[str, Any]) -> None:
+    def __init__(self, *, task: Any, node: Any) -> None:
         self._store = _FakeTaskStore(task=task, node=node)
         self._frames: dict[tuple[str, str], dict[str, Any]] = {}
-        self._stage_gate = dict(stage_gate or {})
         self.node_inputs: list[dict[str, Any]] = []
-        self._round_counter = 0
         self._latest_node_input_messages: list[dict[str, Any]] = []
 
     def set_pause_state(self, task_id: str, pause_requested: bool, is_paused: bool) -> None:
@@ -115,30 +113,8 @@ class _RecordingLogService:
     def read_runtime_frame(self, task_id: str, node_id: str) -> dict[str, Any]:
         return dict(self._frames.get((str(task_id or "").strip(), str(node_id or "").strip())) or {})
 
-    def execution_stage_gate_snapshot(self, task_id: str, node_id: str) -> dict[str, Any]:
-        _ = task_id, node_id
-        return copy.deepcopy(self._stage_gate)
-
     def latest_node_input_messages(self) -> list[dict[str, Any]]:
         return [dict(item) for item in list(self._latest_node_input_messages or []) if isinstance(item, dict)]
-
-    def record_execution_stage_round(
-        self,
-        task_id: str,
-        node_id: str,
-        *,
-        tool_calls: list[dict[str, Any]],
-        created_at: str,
-        text: str = '',
-    ) -> dict[str, Any]:
-        _ = task_id, node_id, text
-        self._round_counter += 1
-        return {
-            "round_id": f"round-{self._round_counter}",
-            "created_at": str(created_at or now_iso()),
-            "tool_calls": [dict(item) for item in list(tool_calls or []) if isinstance(item, dict)],
-        }
-
 
 class _RecordingChatBackend:
     def __init__(self, *, log_service: _RecordingLogService) -> None:
@@ -263,26 +239,7 @@ class _FilesystemWriteTool(Tool):
         return json.dumps({"ok": True}, ensure_ascii=False)
 
 
-def _stage_gate_payload() -> dict[str, Any]:
-    return {
-        "has_active_stage": True,
-        "transition_required": False,
-        "active_stage": {
-            "stage_id": "stage-1",
-            "stage_goal": "Inspect the repo and prepare a small file write.",
-            "tool_round_budget": 6,
-            "tool_rounds_used": 0,
-            "stage_kind": "normal",
-            "final_stage": False,
-            "mode": "self",
-            "status": "active",
-            "rounds": [],
-        },
-        "completed_stages": [],
-    }
-
-
-def _initial_messages(*, task_id: str, node_id: str, output_dir: Path, stage_gate: dict[str, Any]) -> list[dict[str, str]]:
+def _initial_messages(*, task_id: str, node_id: str, output_dir: Path) -> list[dict[str, str]]:
     user_payload = {
         "task_id": task_id,
         "node_id": node_id,
@@ -411,7 +368,6 @@ def _build_selector(log_service: _RecordingLogService):
             "trace": {
                 "mode": "export_node_prompt_rounds",
                 "full_callable_tool_names": list(callable_tool_names),
-                "stage_locked_to_submit_next_stage": False,
             },
         }
 
@@ -447,8 +403,7 @@ async def _export_rounds(*, output_dir: Path) -> dict[str, Any]:
         metadata={},
         output=[],
     )
-    stage_gate = _stage_gate_payload()
-    log_service = _RecordingLogService(task=task, node=node, stage_gate=stage_gate)
+    log_service = _RecordingLogService(task=task, node=node)
     _seed_runtime_frame(log_service, task_id=task.task_id, node_id=node.node_id)
 
     backend = _RecordingChatBackend(log_service=log_service)
@@ -471,7 +426,6 @@ async def _export_rounds(*, output_dir: Path) -> dict[str, Any]:
             task_id=task.task_id,
             node_id=node.node_id,
             output_dir=output_dir,
-            stage_gate=stage_gate,
         ),
         tools=tools,
         tools_supplier=lambda: dict(tools),

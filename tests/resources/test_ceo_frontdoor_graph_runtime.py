@@ -80,21 +80,6 @@ def test_graph_review_tool_calls_interrupt_payload_includes_runtime_contract_and
                     "arguments": {"tool_id": "filesystem_write"},
                 }
             ],
-            "frontdoor_stage_state": {
-                "active_stage_id": "frontdoor-stage-1",
-                "transition_required": False,
-                "stages": [
-                    {
-                        "stage_id": "frontdoor-stage-1",
-                        "stage_index": 1,
-                        "stage_goal": "Write a file",
-                        "tool_round_budget": 2,
-                        "tool_rounds_used": 0,
-                        "status": "active",
-                        "rounds": [],
-                    }
-                ],
-            },
             "compression_state": {"status": "running", "text": "compressing", "source": "user"},
             "semantic_context_state": {"summary_text": "summary", "needs_refresh": False},
             # 存量会话状态里残留的台账键：裁决卡片的载荷只从 approval_request 与下面几份
@@ -152,10 +137,8 @@ def test_graph_review_tool_calls_interrupt_payload_includes_runtime_contract_and
     assert payload["frontdoor_selection_debug"] == {
         "tool_selection": {"candidate_tool_names": ["filesystem_write"]}
     }
-    assert payload["frontdoor_stage_state"]["active_stage_id"] == "frontdoor-stage-1"
-    assert payload["frontdoor_stage_state"]["transition_required"] is False
-    assert payload["frontdoor_stage_state"]["stages"][0]["stage_goal"] == "Write a file"
-    assert payload["frontdoor_stage_state"]["stages"][0]["tool_round_budget"] == 2
+    assert "frontdoor_stage_state" not in payload
+    assert "canonical_context" not in payload
 
 
 def test_graph_review_tool_calls_rejects_partial_batch_submit(monkeypatch) -> None:
@@ -486,159 +469,8 @@ async def test_frontdoor_duplicate_load_tool_context_guard_allows_refresh_when_f
     assert error_text == ""
 
 
-@pytest.mark.asyncio
-async def test_graph_execute_tools_executes_runtime_submit_next_stage_and_persists_stage_state(
-    monkeypatch,
-) -> None:
-    runner = create_agent_impl.CreateAgentCeoFrontDoorRunner(loop=SimpleNamespace())
-
-    monkeypatch.setattr(runner, "_registered_tools_for_state", lambda state: {})
-    monkeypatch.setattr(runner, "_build_tool_runtime_context", lambda **kwargs: {"on_progress": None})
-
-    async def _fake_execute_tool_call_with_raw_result(*, tool, tool_name, arguments, runtime_context, on_progress, tool_call_id):
-        _ = tool_name, runtime_context, on_progress, tool_call_id
-        raw_result = await tool.execute(**arguments)
-        return (
-            raw_result,
-            json.dumps(raw_result, ensure_ascii=False),
-            "success",
-            "2026-04-15T00:00:00+08:00",
-            "2026-04-15T00:00:01+08:00",
-            1.0,
-        )
-
-    monkeypatch.setattr(runner, "_execute_tool_call_with_raw_result", _fake_execute_tool_call_with_raw_result)
-
-    result = await runner._graph_execute_tools(
-        {
-            "messages": [],
-            "tool_names": [],
-            "candidate_tool_names": [],
-            "visible_skill_ids": [],
-            "candidate_skill_ids": [],
-            "rbac_visible_tool_names": [],
-            "rbac_visible_skill_ids": [],
-            "frontdoor_stage_state": {
-                "active_stage_id": "",
-                "transition_required": False,
-                "stages": [],
-            },
-            "tool_call_payloads": [
-                {
-                    "id": "call-stage-1",
-                    "name": ceo_runtime_ops.STAGE_TOOL_NAME,
-                    "arguments": {
-                        "stage_goal": "Create a stage before using tools",
-                        "tool_round_budget": 12,
-                    },
-                }
-            ],
-            "used_tools": [],
-            "route_kind": "direct_reply",
-            "parallel_enabled": False,
-            "max_parallel_tool_calls": 1,
-            "synthetic_tool_calls_used": False,
-            "response_payload": {"content": "", "tool_calls": []},
-            "session_key": "web:shared",
-        },
-        runtime=SimpleNamespace(context=SimpleNamespace()),
-    )
-
-    assert result["next_step"] == "call_model"
-    assert result["frontdoor_stage_state"]["active_stage_id"] == "frontdoor-stage-1"
-    assert result["frontdoor_stage_state"]["transition_required"] is False
-    assert result["frontdoor_stage_state"]["stages"] == [
-        {
-            "stage_id": "frontdoor-stage-1",
-            "stage_index": 1,
-            "stage_goal": "Create a stage before using tools",
-            "preamble_text": "",
-            "tool_round_budget": 12,
-            "tool_rounds_used": 0,
-            "status": "active",
-            "mode": "自主执行",
-            "stage_kind": "normal",
-            "system_generated": False,
-            "completed_stage_summary": "",
-            "final_stage": False,
-            "key_refs": [],
-            "archive_ref": "",
-            "archive_stage_index_start": 0,
-            "archive_stage_index_end": 0,
-            "rounds": [],
-            "created_at": result["frontdoor_stage_state"]["stages"][0]["created_at"],
-            "finished_at": "",
-        }
-    ]
 
 
-@pytest.mark.asyncio
-async def test_graph_execute_tools_free_passes_first_ordinary_tool_without_active_stage(
-    monkeypatch,
-) -> None:
-    runner = create_agent_impl.CreateAgentCeoFrontDoorRunner(loop=SimpleNamespace())
-    executed: list[tuple[str, dict[str, object]]] = []
-
-    monkeypatch.setattr(runner, "_registered_tools_for_state", lambda state: {"echo_tool": _EchoTool()})
-    monkeypatch.setattr(runner, "_build_tool_runtime_context", lambda **kwargs: {"on_progress": None})
-
-    async def _fake_execute_tool_call_with_raw_result(*, tool, tool_name, arguments, runtime_context, on_progress, tool_call_id):
-        _ = tool, runtime_context, on_progress, tool_call_id
-        executed.append((tool_name, dict(arguments)))
-        return (
-            {"ok": True},
-            json.dumps({"ok": True}),
-            "success",
-            "2026-04-15T00:00:00+08:00",
-            "2026-04-15T00:00:01+08:00",
-            1.0,
-        )
-
-    monkeypatch.setattr(runner, "_execute_tool_call_with_raw_result", _fake_execute_tool_call_with_raw_result)
-
-    result = await runner._graph_execute_tools(
-        {
-            "messages": [],
-            "tool_names": ["echo_tool"],
-            "candidate_tool_names": [],
-            "visible_skill_ids": [],
-            "candidate_skill_ids": [],
-            "rbac_visible_tool_names": ["echo_tool"],
-            "rbac_visible_skill_ids": [],
-            "frontdoor_stage_state": {
-                "active_stage_id": "",
-                "transition_required": False,
-                "stages": [],
-            },
-            "tool_call_payloads": [
-                {"id": "call-echo-1", "name": "echo_tool", "arguments": {"value": "alpha"}}
-            ],
-            "used_tools": [],
-            "route_kind": "direct_reply",
-            "parallel_enabled": False,
-            "max_parallel_tool_calls": 1,
-            "synthetic_tool_calls_used": False,
-            "response_payload": {"content": "", "tool_calls": []},
-            "session_key": "web:shared",
-        },
-        runtime=SimpleNamespace(context=SimpleNamespace()),
-    )
-
-    tool_messages = [
-        dict(message)
-        for message in list(result["messages"])
-        if str(message.get("role") or "").strip().lower() == "tool"
-    ]
-    assert executed == [("echo_tool", {"value": "alpha"})]
-    assert result["next_step"] == "call_model"
-    assert result["frontdoor_stage_state"]["active_stage_id"] == ""
-    pending = result["frontdoor_stage_state"]["pending_orphan_rounds"]
-    assert len(pending) == 1
-    assert pending[0]["orphan"] is True
-    assert pending[0]["budget_counted"] is True
-    assert pending[0]["tool_names"] == ["echo_tool"]
-    assert len(tool_messages) == 1
-    assert "This call ran without an active stage" in str(tool_messages[0]["content"])
 
 
 @pytest.mark.asyncio
@@ -702,21 +534,6 @@ async def test_graph_execute_tools_marks_direct_contract_delivery(
             "candidate_skill_ids": [],
             "rbac_visible_tool_names": ["filesystem_edit"],
             "rbac_visible_skill_ids": [],
-            "frontdoor_stage_state": {
-                "active_stage_id": "frontdoor-stage-1",
-                "transition_required": False,
-                "stages": [
-                    {
-                        "stage_id": "frontdoor-stage-1",
-                        "stage_index": 1,
-                        "stage_goal": "edit a file",
-                        "tool_round_budget": 10,
-                        "tool_rounds_used": 0,
-                        "status": "active",
-                        "rounds": [],
-                    }
-                ],
-            },
             "tool_call_payloads": [
                 {"id": "call-delivery-1", "name": "filesystem_edit", "arguments": {"path": "/a"}}
             ],
@@ -739,8 +556,6 @@ async def test_graph_execute_tools_marks_direct_contract_delivery(
     )
     assert "TOOL_CONTRACT:filesystem_edit:tcf:delivery" in str(tool_message.get("content") or "")
 
-    rounds = result["frontdoor_stage_state"]["stages"][0]["rounds"]
-    assert rounds[0]["tools"][0]["contract_delivery"] == "staged"
 
     delivery_events = [
         event for event in progress_events
@@ -751,81 +566,6 @@ async def test_graph_execute_tools_marks_direct_contract_delivery(
     assert delivery_events[0]["data"]["contract_delivery"] == "staged"
 
 
-@pytest.mark.asyncio
-async def test_graph_execute_tools_blocks_ordinary_tool_after_free_pass_consumed(
-    monkeypatch,
-) -> None:
-    runner = create_agent_impl.CreateAgentCeoFrontDoorRunner(loop=SimpleNamespace())
-    executed: list[tuple[str, dict[str, object]]] = []
-
-    monkeypatch.setattr(runner, "_registered_tools_for_state", lambda state: {"echo_tool": _EchoTool()})
-    monkeypatch.setattr(runner, "_build_tool_runtime_context", lambda **kwargs: {"on_progress": None})
-
-    async def _fake_execute_tool_call_with_raw_result(*, tool, tool_name, arguments, runtime_context, on_progress, tool_call_id):
-        _ = tool, runtime_context, on_progress, tool_call_id
-        executed.append((tool_name, dict(arguments)))
-        return (
-            {"ok": True},
-            json.dumps({"ok": True}),
-            "success",
-            "2026-04-15T00:00:00+08:00",
-            "2026-04-15T00:00:01+08:00",
-            1.0,
-        )
-
-    monkeypatch.setattr(runner, "_execute_tool_call_with_raw_result", _fake_execute_tool_call_with_raw_result)
-
-    base_state = {
-        "messages": [],
-        "tool_names": ["echo_tool"],
-        "candidate_tool_names": [],
-        "visible_skill_ids": [],
-        "candidate_skill_ids": [],
-        "rbac_visible_tool_names": ["echo_tool"],
-        "rbac_visible_skill_ids": [],
-        "frontdoor_stage_state": {
-            "active_stage_id": "",
-            "transition_required": False,
-            "stages": [],
-            "pending_orphan_rounds": [
-                {
-                    "round_id": "orphan-round-1",
-                    "round_index": 1,
-                    "created_at": "2026-04-15T00:00:00+08:00",
-                    "text": "",
-                    "tool_names": ["echo_tool"],
-                    "tool_call_ids": ["call-prev-1"],
-                    "budget_counted": True,
-                    "orphan": True,
-                }
-            ],
-        },
-        "tool_call_payloads": [
-            {"id": "call-echo-1", "name": "echo_tool", "arguments": {"value": "alpha"}}
-        ],
-        "used_tools": [],
-        "route_kind": "direct_reply",
-        "parallel_enabled": False,
-        "max_parallel_tool_calls": 1,
-        "synthetic_tool_calls_used": False,
-        "response_payload": {"content": "", "tool_calls": []},
-        "session_key": "web:shared",
-    }
-
-    result = await runner._graph_execute_tools(
-        base_state,
-        runtime=SimpleNamespace(context=SimpleNamespace()),
-    )
-
-    tool_messages = [
-        dict(message)
-        for message in list(result["messages"])
-        if str(message.get("role") or "").strip().lower() == "tool"
-    ]
-    assert executed == []
-    assert str(tool_messages[0]["content"]).startswith(
-        "Error: no active stage; call submit_next_stage before using other tools"
-    )
 
 
 def _grafting_orphan_round() -> dict[str, object]:
@@ -841,174 +581,8 @@ def _grafting_orphan_round() -> dict[str, object]:
     }
 
 
-@pytest.mark.asyncio
-async def test_graph_execute_tools_grafts_pending_orphan_rounds_into_new_stage(
-    monkeypatch,
-) -> None:
-    runner = create_agent_impl.CreateAgentCeoFrontDoorRunner(loop=SimpleNamespace())
-    executed: list[str] = []
-
-    monkeypatch.setattr(runner, "_registered_tools_for_state", lambda state: {"echo_tool": _EchoTool()})
-    monkeypatch.setattr(runner, "_build_tool_runtime_context", lambda **kwargs: {"on_progress": None})
-
-    async def _fake_execute_tool_call_with_raw_result(*, tool, tool_name, arguments, runtime_context, on_progress, tool_call_id):
-        _ = tool, runtime_context, on_progress, tool_call_id
-        executed.append(tool_name)
-        raw_result = await tool.execute(**arguments)
-        return (
-            raw_result,
-            json.dumps(raw_result, ensure_ascii=False),
-            "success",
-            "2026-04-15T00:00:00+08:00",
-            "2026-04-15T00:00:01+08:00",
-            1.0,
-        )
-
-    monkeypatch.setattr(runner, "_execute_tool_call_with_raw_result", _fake_execute_tool_call_with_raw_result)
-
-    result = await runner._graph_execute_tools(
-        {
-            "messages": [],
-            "tool_names": ["echo_tool"],
-            "candidate_tool_names": [],
-            "visible_skill_ids": [],
-            "candidate_skill_ids": [],
-            "rbac_visible_tool_names": ["echo_tool"],
-            "rbac_visible_skill_ids": [],
-            "frontdoor_stage_state": {
-                "active_stage_id": "",
-                "transition_required": False,
-                "stages": [],
-                "pending_orphan_rounds": [_grafting_orphan_round()],
-            },
-            "tool_call_payloads": [
-                {
-                    "id": "call-stage-1",
-                    "name": ceo_runtime_ops.STAGE_TOOL_NAME,
-                    "arguments": {"stage_goal": "继续验证", "tool_round_budget": 3},
-                },
-                {"id": "call-echo-1", "name": "echo_tool", "arguments": {"value": "alpha"}},
-            ],
-            "used_tools": [],
-            "route_kind": "direct_reply",
-            "parallel_enabled": True,
-            "max_parallel_tool_calls": 2,
-            "synthetic_tool_calls_used": False,
-            "response_payload": {"content": "", "tool_calls": []},
-            "session_key": "web:shared",
-        },
-        runtime=SimpleNamespace(context=SimpleNamespace()),
-    )
-
-    assert executed == [ceo_runtime_ops.STAGE_TOOL_NAME, "echo_tool"]
-    stage_state = result["frontdoor_stage_state"]
-    assert stage_state["active_stage_id"] == "frontdoor-stage-1"
-    assert stage_state["pending_orphan_rounds"] == []
-    stage = stage_state["stages"][0]
-    assert stage["tool_round_budget"] == 11
-    assert stage["tool_rounds_used"] == 2
-    assert len(stage["rounds"]) == 2
-    assert stage["rounds"][0]["orphan_grafted"] is True
-    assert stage["rounds"][0]["tool_names"] == ["echo_tool"]
-    assert stage["rounds"][1]["tool_names"] == ["echo_tool"]
 
 
-@pytest.mark.asyncio
-async def test_graph_execute_tools_attaches_overflow_round_when_budget_exhausted(
-    monkeypatch,
-) -> None:
-    runner = create_agent_impl.CreateAgentCeoFrontDoorRunner(loop=SimpleNamespace())
-    executed: list[str] = []
-
-    monkeypatch.setattr(runner, "_registered_tools_for_state", lambda state: {"echo_tool": _EchoTool()})
-    monkeypatch.setattr(runner, "_build_tool_runtime_context", lambda **kwargs: {"on_progress": None})
-
-    async def _fake_execute_tool_call_with_raw_result(*, tool, tool_name, arguments, runtime_context, on_progress, tool_call_id):
-        _ = tool, runtime_context, on_progress, tool_call_id
-        executed.append(tool_name)
-        return (
-            {"ok": True},
-            json.dumps({"ok": True}),
-            "success",
-            "2026-04-15T00:00:00+08:00",
-            "2026-04-15T00:00:01+08:00",
-            1.0,
-        )
-
-    monkeypatch.setattr(runner, "_execute_tool_call_with_raw_result", _fake_execute_tool_call_with_raw_result)
-
-    exhausted_stage_state = {
-        "active_stage_id": "frontdoor-stage-1",
-        "transition_required": True,
-        "stages": [
-            {
-                "stage_id": "frontdoor-stage-1",
-                "stage_index": 1,
-                "stage_goal": "work",
-                "preamble_text": "",
-                "tool_round_budget": 1,
-                "tool_rounds_used": 1,
-                "status": "active",
-                "mode": "自主执行",
-                "stage_kind": "normal",
-                "system_generated": False,
-                "completed_stage_summary": "",
-                "final_stage": False,
-                "key_refs": [],
-                "rounds": [
-                    {
-                        "round_id": "frontdoor-stage-1:round-1",
-                        "round_index": 1,
-                        "created_at": "2026-04-15T00:00:00+08:00",
-                        "text": "",
-                        "tool_names": ["echo_tool"],
-                        "tool_call_ids": ["call-prev-1"],
-                        "budget_counted": True,
-                    }
-                ],
-            }
-        ],
-        "pending_orphan_rounds": [],
-    }
-
-    result = await runner._graph_execute_tools(
-        {
-            "messages": [],
-            "tool_names": ["echo_tool"],
-            "candidate_tool_names": [],
-            "visible_skill_ids": [],
-            "candidate_skill_ids": [],
-            "rbac_visible_tool_names": ["echo_tool"],
-            "rbac_visible_skill_ids": [],
-            "frontdoor_stage_state": exhausted_stage_state,
-            "tool_call_payloads": [
-                {"id": "call-echo-1", "name": "echo_tool", "arguments": {"value": "alpha"}}
-            ],
-            "used_tools": [],
-            "route_kind": "direct_reply",
-            "parallel_enabled": False,
-            "max_parallel_tool_calls": 1,
-            "synthetic_tool_calls_used": False,
-            "response_payload": {"content": "", "tool_calls": []},
-            "session_key": "web:shared",
-        },
-        runtime=SimpleNamespace(context=SimpleNamespace()),
-    )
-
-    tool_messages = [
-        dict(message)
-        for message in list(result["messages"])
-        if str(message.get("role") or "").strip().lower() == "tool"
-    ]
-    assert executed == ["echo_tool"]
-    stage_state = result["frontdoor_stage_state"]
-    stage = stage_state["stages"][0]
-    assert stage_state["transition_required"] is True
-    assert stage["tool_rounds_used"] == 1
-    assert len(stage["rounds"]) == 2
-    assert stage["rounds"][-1]["overflow"] is True
-    assert stage["rounds"][-1]["budget_counted"] is False
-    assert "The current stage's budget is exhausted" in str(tool_messages[0]["content"])
 
 
 def _near_exhaustion_stage_state() -> dict[str, object]:
@@ -1050,7 +624,6 @@ def _near_exhaustion_stage_state() -> dict[str, object]:
 
 def _execute_tools_state(
     *,
-    frontdoor_stage_state: dict[str, object],
     tool_call_payloads: list[dict[str, object]],
     parallel_enabled: bool = False,
     max_parallel_tool_calls: int = 1,
@@ -1063,7 +636,6 @@ def _execute_tools_state(
         "candidate_skill_ids": [],
         "rbac_visible_tool_names": ["echo_tool"],
         "rbac_visible_skill_ids": [],
-        "frontdoor_stage_state": frontdoor_stage_state,
         "tool_call_payloads": tool_call_payloads,
         "used_tools": [],
         "route_kind": "direct_reply",
@@ -1075,285 +647,14 @@ def _execute_tools_state(
     }
 
 
-@pytest.mark.asyncio
-async def test_graph_execute_tools_attaches_predicted_exhaustion_reminder_on_last_legal_round(
-    monkeypatch,
-) -> None:
-    runner = create_agent_impl.CreateAgentCeoFrontDoorRunner(loop=SimpleNamespace())
-    executed: list[str] = []
-
-    monkeypatch.setattr(runner, "_registered_tools_for_state", lambda state: {"echo_tool": _EchoTool()})
-    monkeypatch.setattr(runner, "_build_tool_runtime_context", lambda **kwargs: {"on_progress": None})
-
-    async def _fake_execute_tool_call_with_raw_result(*, tool, tool_name, arguments, runtime_context, on_progress, tool_call_id):
-        _ = tool, runtime_context, on_progress, tool_call_id
-        executed.append(tool_name)
-        return (
-            {"ok": True},
-            json.dumps({"ok": True}),
-            "success",
-            "2026-04-15T00:00:00+08:00",
-            "2026-04-15T00:00:01+08:00",
-            1.0,
-        )
-
-    monkeypatch.setattr(runner, "_execute_tool_call_with_raw_result", _fake_execute_tool_call_with_raw_result)
-
-    result = await runner._graph_execute_tools(
-        _execute_tools_state(
-            frontdoor_stage_state=_near_exhaustion_stage_state(),
-            tool_call_payloads=[{"id": "call-echo-1", "name": "echo_tool", "arguments": {"value": "alpha"}}],
-        ),
-        runtime=SimpleNamespace(context=SimpleNamespace()),
-    )
-
-    tool_messages = [
-        dict(message)
-        for message in list(result["messages"])
-        if str(message.get("role") or "").strip().lower() == "tool"
-    ]
-    assert executed == ["echo_tool"]
-    content = str(tool_messages[0]["content"])
-    assert (
-        "The current stage's tool-round budget will be exhausted after this round (1/2 used up)" in content
-    )
-    # 预告必须说清单调仍会执行一次，否则模型读到的是与执行期政策相反的威胁。
-    assert "a lone call still runs once" in content
-    assert "only a lone call after that is blocked" in content
-    assert "otherwise next round's calls will be blocked" not in content
-    assert result["frontdoor_stage_state"]["stages"][0]["tool_rounds_used"] == 2
 
 
-@pytest.mark.asyncio
-async def test_graph_execute_tools_omits_predicted_exhaustion_reminder_when_stage_tool_in_batch(
-    monkeypatch,
-) -> None:
-    runner = create_agent_impl.CreateAgentCeoFrontDoorRunner(loop=SimpleNamespace())
-    executed: list[str] = []
-
-    monkeypatch.setattr(runner, "_registered_tools_for_state", lambda state: {"echo_tool": _EchoTool()})
-    monkeypatch.setattr(runner, "_build_tool_runtime_context", lambda **kwargs: {"on_progress": None})
-
-    async def _fake_execute_tool_call_with_raw_result(*, tool, tool_name, arguments, runtime_context, on_progress, tool_call_id):
-        _ = tool, runtime_context, on_progress, tool_call_id
-        executed.append(tool_name)
-        return (
-            {"ok": True},
-            json.dumps({"ok": True}),
-            "success",
-            "2026-04-15T00:00:00+08:00",
-            "2026-04-15T00:00:01+08:00",
-            1.0,
-        )
-
-    monkeypatch.setattr(runner, "_execute_tool_call_with_raw_result", _fake_execute_tool_call_with_raw_result)
-
-    result = await runner._graph_execute_tools(
-        _execute_tools_state(
-            frontdoor_stage_state=_near_exhaustion_stage_state(),
-            tool_call_payloads=[
-                {
-                    "id": "call-stage-2",
-                    "name": ceo_runtime_ops.STAGE_TOOL_NAME,
-                    "arguments": {
-                        "stage_goal": "Continue after the budget is filled",
-                        "completed_stage_summary": "stage-1 done",
-                        "tool_round_budget": 3,
-                    },
-                },
-                {"id": "call-echo-1", "name": "echo_tool", "arguments": {"value": "alpha"}},
-            ],
-            parallel_enabled=True,
-            max_parallel_tool_calls=2,
-        ),
-        runtime=SimpleNamespace(context=SimpleNamespace()),
-    )
-
-    tool_messages = [
-        dict(message)
-        for message in list(result["messages"])
-        if str(message.get("role") or "").strip().lower() == "tool"
-    ]
-    assert executed == [ceo_runtime_ops.STAGE_TOOL_NAME, "echo_tool"]
-    # 模型已合规同批开阶段：旧阶段算出的预告既失配，又会贴到 submit_next_stage 自己的
-    # 返回值上，与它刚写进结果的 tool_rounds_used=0 直接矛盾。
-    for message in tool_messages:
-        assert "The current stage's tool-round budget will be exhausted" not in str(message["content"])
-    stage_state = result["frontdoor_stage_state"]
-    assert stage_state["active_stage_id"] == "frontdoor-stage-2"
-    assert stage_state["stages"][-1]["tool_rounds_used"] == 1
 
 
-@pytest.mark.asyncio
-async def test_graph_execute_tools_rejects_extra_submit_next_stage_in_same_batch(
-    monkeypatch,
-) -> None:
-    runner = create_agent_impl.CreateAgentCeoFrontDoorRunner(loop=SimpleNamespace())
-    monkeypatch.setattr(runner, "_registered_tools_for_state", lambda state: {"echo_tool": _EchoTool()})
-    monkeypatch.setattr(runner, "_build_tool_runtime_context", lambda **kwargs: {"on_progress": None})
-
-    async def _fake_execute_tool_call_with_raw_result(*, tool, tool_name, arguments, runtime_context, on_progress, tool_call_id):
-        _ = tool, runtime_context, on_progress, tool_call_id
-        raw_result = await tool.execute(**arguments)
-        return (
-            raw_result,
-            json.dumps(raw_result, ensure_ascii=False),
-            "success",
-            "2026-04-15T00:00:00+08:00",
-            "2026-04-15T00:00:01+08:00",
-            1.0,
-        )
-
-    monkeypatch.setattr(runner, "_execute_tool_call_with_raw_result", _fake_execute_tool_call_with_raw_result)
-
-    result = await runner._graph_execute_tools(
-        {
-            "messages": [],
-            "tool_names": ["echo_tool"],
-            "candidate_tool_names": [],
-            "visible_skill_ids": [],
-            "candidate_skill_ids": [],
-            "rbac_visible_tool_names": ["echo_tool"],
-            "rbac_visible_skill_ids": [],
-            "frontdoor_stage_state": {
-                "active_stage_id": "",
-                "transition_required": False,
-                "stages": [],
-                "pending_orphan_rounds": [],
-            },
-            "tool_call_payloads": [
-                {
-                    "id": "call-stage-1",
-                    "name": ceo_runtime_ops.STAGE_TOOL_NAME,
-                    "arguments": {"stage_goal": "first", "tool_round_budget": 3},
-                },
-                {
-                    "id": "call-stage-2",
-                    "name": ceo_runtime_ops.STAGE_TOOL_NAME,
-                    "arguments": {"stage_goal": "second", "tool_round_budget": 3},
-                },
-            ],
-            "used_tools": [],
-            "route_kind": "direct_reply",
-            "parallel_enabled": True,
-            "max_parallel_tool_calls": 2,
-            "synthetic_tool_calls_used": False,
-            "response_payload": {"content": "", "tool_calls": []},
-            "session_key": "web:shared",
-        },
-        runtime=SimpleNamespace(context=SimpleNamespace()),
-    )
-
-    tool_messages = [
-        dict(message)
-        for message in list(result["messages"])
-        if str(message.get("role") or "").strip().lower() == "tool"
-    ]
-    assert len(result["frontdoor_stage_state"]["stages"]) == 1
-    assert any(
-        "at most once per batch" in str(message["content"])
-        for message in tool_messages
-    )
 
 
-def test_absorb_orphan_rounds_auto_opens_system_stage() -> None:
-    runner = create_agent_impl.CreateAgentCeoFrontDoorRunner(loop=SimpleNamespace())
-
-    absorbed = runner._frontdoor_absorb_orphan_rounds(
-        {
-            "active_stage_id": "",
-            "transition_required": False,
-            "stages": [],
-            "pending_orphan_rounds": [_grafting_orphan_round()],
-        }
-    )
-
-    assert absorbed["pending_orphan_rounds"] == []
-    assert absorbed["active_stage_id"] == "frontdoor-stage-1"
-    stage = absorbed["stages"][0]
-    assert stage["system_generated"] is True
-    assert stage["stage_kind"] == "normal"
-    assert stage["tool_rounds_used"] >= 1
-    assert len(stage["rounds"]) == 1
-    assert stage["rounds"][0]["orphan_grafted"] is True
 
 
-@pytest.mark.asyncio
-async def test_graph_execute_tools_allows_submit_next_stage_mixed_with_other_tools(
-    monkeypatch,
-) -> None:
-    runner = create_agent_impl.CreateAgentCeoFrontDoorRunner(loop=SimpleNamespace())
-    executed: list[str] = []
-
-    monkeypatch.setattr(runner, "_registered_tools_for_state", lambda state: {"echo_tool": _EchoTool()})
-    monkeypatch.setattr(runner, "_build_tool_runtime_context", lambda **kwargs: {"on_progress": None})
-
-    async def _fake_execute_tool_call_with_raw_result(*, tool, tool_name, arguments, runtime_context, on_progress, tool_call_id):
-        _ = tool, runtime_context, on_progress, tool_call_id
-        executed.append(tool_name)
-        raw_result = await tool.execute(**arguments)
-        return (
-            raw_result,
-            json.dumps(raw_result, ensure_ascii=False),
-            "success",
-            "2026-04-15T00:00:00+08:00",
-            "2026-04-15T00:00:01+08:00",
-            1.0,
-        )
-
-    monkeypatch.setattr(runner, "_execute_tool_call_with_raw_result", _fake_execute_tool_call_with_raw_result)
-
-    result = await runner._graph_execute_tools(
-        {
-            "messages": [],
-            "tool_names": ["echo_tool"],
-            "candidate_tool_names": [],
-            "visible_skill_ids": [],
-            "candidate_skill_ids": [],
-            "rbac_visible_tool_names": ["echo_tool"],
-            "rbac_visible_skill_ids": [],
-            "frontdoor_stage_state": {
-                "active_stage_id": "",
-                "transition_required": False,
-                "stages": [],
-            },
-            "tool_call_payloads": [
-                {
-                    "id": "call-stage-1",
-                    "name": ceo_runtime_ops.STAGE_TOOL_NAME,
-                    "arguments": {
-                        "stage_goal": "Create a stage before using tools",
-                        "tool_round_budget": 2,
-                    },
-                },
-                {"id": "call-echo-1", "name": "echo_tool", "arguments": {"value": "alpha"}},
-            ],
-            "used_tools": [],
-            "route_kind": "direct_reply",
-            "parallel_enabled": True,
-            "max_parallel_tool_calls": 2,
-            "synthetic_tool_calls_used": False,
-            "response_payload": {"content": "", "tool_calls": []},
-            "session_key": "web:shared",
-        },
-        runtime=SimpleNamespace(context=SimpleNamespace()),
-    )
-
-    tool_messages = [
-        dict(message)
-        for message in list(result["messages"])
-        if str(message.get("role") or "").strip().lower() == "tool"
-    ]
-    assert executed == [ceo_runtime_ops.STAGE_TOOL_NAME, "echo_tool"]
-    assert result["frontdoor_stage_state"]["active_stage_id"] == "frontdoor-stage-1"
-    assert result["frontdoor_stage_state"]["transition_required"] is False
-    assert len(result["frontdoor_stage_state"]["stages"]) == 1
-    assert result["frontdoor_stage_state"]["stages"][0]["tool_rounds_used"] == 1
-    assert len(result["frontdoor_stage_state"]["stages"][0]["rounds"]) == 1
-    assert result["frontdoor_stage_state"]["stages"][0]["rounds"][0]["tool_names"] == ["echo_tool"]
-    assert len(tool_messages) == 2
-    assert tool_messages[0]["name"] == ceo_runtime_ops.STAGE_TOOL_NAME
-    assert tool_messages[1]["name"] == "echo_tool"
 
 
 @pytest.mark.asyncio
@@ -1365,7 +666,6 @@ async def test_graph_execute_tools_executes_only_approved_calls_and_merges_synth
 
     monkeypatch.setattr(runner, "_registered_tools_for_state", lambda state: {"echo_tool": _EchoTool()})
     monkeypatch.setattr(runner, "_build_tool_runtime_context", lambda **kwargs: {"on_progress": None})
-    monkeypatch.setattr(runner, "_frontdoor_stage_gate_error", lambda **kwargs: "")
 
     async def _fake_execute_tool_call_with_raw_result(*, tool, tool_name, arguments, runtime_context, on_progress, tool_call_id):
         _ = tool, runtime_context, on_progress, tool_call_id
@@ -1397,11 +697,6 @@ async def test_graph_execute_tools_executes_only_approved_calls_and_merges_synth
             "candidate_skill_ids": [],
             "rbac_visible_tool_names": ["echo_tool"],
             "rbac_visible_skill_ids": [],
-            "frontdoor_stage_state": {
-                "active_stage_id": "",
-                "transition_required": False,
-                "stages": [],
-            },
             "tool_call_payloads": [
                 {"id": "call-1", "name": "echo_tool", "arguments": {"value": "alpha"}},
                 {"id": "call-2", "name": "exec", "arguments": {"command": "echo hi"}},
@@ -1530,7 +825,6 @@ async def test_rejected_batch_item_never_reaches_the_tool_executor(monkeypatch) 
         lambda state: {"content_open": echo_tool, "exec": echo_tool, "echo_tool": echo_tool},
     )
     monkeypatch.setattr(runner, "_build_tool_runtime_context", lambda **kwargs: {"on_progress": None})
-    monkeypatch.setattr(runner, "_frontdoor_stage_gate_error", lambda **kwargs: "")
 
     async def _fake_execute(*, tool, tool_name, arguments, runtime_context, on_progress, tool_call_id):
         _ = tool, arguments, runtime_context, on_progress
@@ -1556,11 +850,6 @@ async def test_rejected_batch_item_never_reaches_the_tool_executor(monkeypatch) 
         "candidate_skill_ids": [],
         "rbac_visible_tool_names": ["content_open", "exec", "echo_tool"],
         "rbac_visible_skill_ids": [],
-        "frontdoor_stage_state": {
-            "active_stage_id": "",
-            "transition_required": False,
-            "stages": [],
-        },
         "used_tools": [],
         "route_kind": "direct_reply",
         "parallel_enabled": True,

@@ -529,10 +529,6 @@ class _LargeModelSchemaTool(_ModelSchemaRecordingTool):
 
 
 def test_compact_schema_internal_execution_tools_expose_shorter_model_visible_contracts() -> None:
-    async def _submit_stage(*args, **kwargs):
-        _ = args, kwargs
-        return {"ok": True}
-
     async def _spawn_children(*args, **kwargs):
         _ = args, kwargs
         return []
@@ -541,7 +537,6 @@ def test_compact_schema_internal_execution_tools_expose_shorter_model_visible_co
         return dict(payload)
 
     tools = [
-        SubmitNextStageTool(_submit_stage),
         SpawnChildNodesTool(_spawn_children),
         SubmitFinalResultTool(_submit_final, node_kind="execution"),
     ]
@@ -556,11 +551,10 @@ def test_compact_schema_internal_execution_tools_expose_shorter_model_visible_co
             json.dumps(authoritative["parameters"], ensure_ascii=False, sort_keys=True)
         )
 
-    assert tools[0].validate_params({"stage_goal": "investigate"}) == ["missing required tool_round_budget"]
-    assert tools[1].validate_params({"children": [{"goal": "a", "prompt": "b"}]}) == [
+    assert tools[0].validate_params({"children": [{"goal": "a", "prompt": "b"}]}) == [
         "missing required children[0].execution_policy"
     ]
-    assert tools[2].validate_params({"status": "success"}) == [
+    assert tools[1].validate_params({"status": "success"}) == [
         "missing required delivery_status",
         "missing required summary",
         "missing required answer",
@@ -835,24 +829,20 @@ async def test_execution_first_turn_does_not_emit_all_visible_tool_schemas(tmp_p
             frame = react_log_service.read_runtime_frame('task-first-turn-schemas', 'node-first-turn-schemas')
             assert frame.get('phase') == 'before_model'
             assert frame.get('callable_tool_names') == [
-                'submit_next_stage',
                 'submit_final_result',
                 'spawn_child_nodes',
                 'stop_tool_execution',
             ]
             assert frame.get('model_visible_tool_names') == [
-                'submit_next_stage',
                 'submit_final_result',
                 'spawn_child_nodes',
                 'stop_tool_execution',
             ]
             assert frame.get('model_visible_tool_selection_trace', {}).get('full_callable_tool_names') == [
-                'submit_next_stage',
                 'submit_final_result',
                 'spawn_child_nodes',
                 'stop_tool_execution',
             ]
-            assert frame.get('model_visible_tool_selection_trace', {}).get('stage_locked_to_submit_next_stage') is False
             # 钉头原文与 roster epoch 必须随这份 trace 一起落盘（载体缺失＝重启后那一跳只能重渲头部）。
             assert 'pinned_head' in frame.get('model_visible_tool_selection_trace', {})
             return LLMResponse(
@@ -932,7 +922,6 @@ async def test_execution_first_turn_does_not_emit_all_visible_tool_schemas(tmp_p
             ),
             'memory_update': _LargeModelSchemaTool(name='memory_update'),
             'stop_tool_execution': _StageProtocolNoopTool('stop_tool_execution'),
-            'submit_next_stage': _StageProtocolNoopTool('submit_next_stage'),
             'submit_final_result': _submit_final_result_tool(),
             'spawn_child_nodes': _StageProtocolNoopTool('spawn_child_nodes'),
         },
@@ -955,7 +944,6 @@ async def test_execution_first_turn_does_not_emit_all_visible_tool_schemas(tmp_p
         'filesystem_stat',
         'memory_update',
         'stop_tool_execution',
-        'submit_next_stage',
         'submit_final_result',
         'spawn_child_nodes',
     ]
@@ -1009,14 +997,12 @@ async def test_execution_root_replay_semantic_selection_includes_split_tools_wit
             # 来回摆那批的形态），所以夹具两份都带上。
             'provider_tool_names': [
                 'stop_tool_execution',
-                'submit_next_stage',
                 'submit_final_result',
                 'spawn_child_nodes',
                 'load_tool_context_v2',
             ],
             'model_visible_tool_names': [
                 'stop_tool_execution',
-                'submit_next_stage',
                 'submit_final_result',
                 'spawn_child_nodes',
                 'load_tool_context_v2',
@@ -1124,7 +1110,6 @@ async def test_execution_root_replay_semantic_selection_includes_split_tools_wit
                 model_description='load tool context compact model schema',
             ),
             'stop_tool_execution': _StageProtocolNoopTool('stop_tool_execution'),
-            'submit_next_stage': _StageProtocolNoopTool('submit_next_stage'),
             'submit_final_result': _submit_final_result_tool(),
             'spawn_child_nodes': _StageProtocolNoopTool('spawn_child_nodes'),
         },
@@ -1142,7 +1127,7 @@ async def test_execution_root_replay_semantic_selection_includes_split_tools_wit
     assert requests
     emitted_tools = list(requests[0].get('tools') or [])
     emitted_tool_names = [item['function']['name'] for item in emitted_tools]
-    assert 'submit_next_stage' in emitted_tool_names
+    assert 'submit_final_result' in emitted_tool_names
     assert 'submit_final_result' in emitted_tool_names
     assert 'spawn_child_nodes' in emitted_tool_names
     assert 'load_tool_context_v2' in emitted_tool_names
@@ -1153,7 +1138,6 @@ async def test_execution_root_replay_semantic_selection_includes_split_tools_wit
     # load 或冲动调用把契约带回来才走可调用面，参数契约由 load 返回承载；声明在压缩跳才吸收。
     assert emitted_tool_names == [
         'stop_tool_execution',
-        'submit_next_stage',
         'submit_final_result',
         'spawn_child_nodes',
         'load_tool_context_v2',
@@ -1244,7 +1228,6 @@ def test_execution_selector_uses_stable_visible_tool_order_independent_of_iterat
             authoritative_description='memory write authoritative schema',
             model_description='memory write compact model schema ' + ('M' * 800),
         ),
-        'submit_next_stage': _StageProtocolNoopTool('submit_next_stage'),
         'submit_final_result': _submit_final_result_tool(),
         'spawn_child_nodes': _StageProtocolNoopTool('spawn_child_nodes'),
     }
@@ -1330,7 +1313,6 @@ def test_execution_selector_uses_stable_visible_tool_order_independent_of_iterat
 
     assert filesystem_first_selection['tool_names'] == memory_first_selection['tool_names']
     assert filesystem_first_selection['tool_names'] == [
-        'submit_next_stage',
         'submit_final_result',
         'spawn_child_nodes',
     ]
@@ -1391,7 +1373,6 @@ def test_execution_selector_preserves_prior_model_visible_tool_order_across_turn
         ),
         'spawn_child_nodes': _StageProtocolNoopTool('spawn_child_nodes'),
         'submit_final_result': _submit_final_result_tool(),
-        'submit_next_stage': _StageProtocolNoopTool('submit_next_stage'),
     }
     log_service = _FakeLogService()
     log_service.upsert_frame(
@@ -1399,7 +1380,6 @@ def test_execution_selector_preserves_prior_model_visible_tool_order_across_turn
         {
             'node_id': 'node-prior-order',
             'model_visible_tool_names': [
-                'submit_next_stage',
                 'submit_final_result',
                 'spawn_child_nodes',
                 'filesystem',
@@ -1450,16 +1430,13 @@ def test_execution_selector_preserves_prior_model_visible_tool_order_across_turn
     )
 
     assert selection['tool_names'] == [
-        'submit_next_stage',
         'submit_final_result',
         'spawn_child_nodes',
     ]
     assert selection['trace']['full_callable_tool_names'] == [
-        'submit_next_stage',
         'submit_final_result',
         'spawn_child_nodes',
     ]
-    assert selection['trace']['stage_locked_to_submit_next_stage'] is False
 
 
 def test_execution_selector_appends_missing_tools_after_prior_stable_prefix() -> None:
@@ -1471,14 +1448,13 @@ def test_execution_selector_appends_missing_tools_after_prior_stable_prefix() ->
         ),
         'spawn_child_nodes': _StageProtocolNoopTool('spawn_child_nodes'),
         'submit_final_result': _submit_final_result_tool(),
-        'submit_next_stage': _StageProtocolNoopTool('submit_next_stage'),
     }
     log_service = _FakeLogService()
     log_service.upsert_frame(
         'task-partial-prior-order',
         {
             'node_id': 'node-partial-prior-order',
-            'model_visible_tool_names': ['submit_next_stage'],
+            'model_visible_tool_names': ['submit_final_result'],
         },
     )
     log_service.execution_stage_prompt_payload = lambda task_id, node_id: {
@@ -1525,16 +1501,13 @@ def test_execution_selector_appends_missing_tools_after_prior_stable_prefix() ->
     )
 
     assert selection['tool_names'] == [
-        'submit_next_stage',
         'submit_final_result',
         'spawn_child_nodes',
     ]
     assert selection['trace']['full_callable_tool_names'] == [
-        'submit_next_stage',
         'submit_final_result',
         'spawn_child_nodes',
     ]
-    assert selection['trace']['stage_locked_to_submit_next_stage'] is False
 
 
 def test_execution_selector_keeps_full_callable_tools_when_transition_required() -> None:
@@ -1546,7 +1519,6 @@ def test_execution_selector_keeps_full_callable_tools_when_transition_required()
         ),
         'spawn_child_nodes': _StageProtocolNoopTool('spawn_child_nodes'),
         'submit_final_result': _submit_final_result_tool(),
-        'submit_next_stage': _StageProtocolNoopTool('submit_next_stage'),
     }
     log_service = _FakeLogService()
     log_service.execution_stage_prompt_payload = lambda task_id, node_id: {
@@ -1593,16 +1565,13 @@ def test_execution_selector_keeps_full_callable_tools_when_transition_required()
     )
 
     assert selection['tool_names'] == [
-        'submit_next_stage',
         'submit_final_result',
         'spawn_child_nodes',
     ]
     assert selection['trace']['full_callable_tool_names'] == [
-        'submit_next_stage',
         'submit_final_result',
         'spawn_child_nodes',
     ]
-    assert selection['trace']['stage_locked_to_submit_next_stage'] is False
 
 
 def test_load_tool_context_projection_reports_promotion_and_keeps_fingerprint_stable() -> None:
@@ -1701,7 +1670,6 @@ def test_execution_selector_admits_contract_present_concrete_tools_and_ignores_s
             authoritative_description='content describe authoritative schema',
             model_description='content describe compact model schema',
         ),
-        'submit_next_stage': _StageProtocolNoopTool('submit_next_stage'),
         'submit_final_result': _submit_final_result_tool(),
         'spawn_child_nodes': _StageProtocolNoopTool('spawn_child_nodes'),
     }
@@ -1799,7 +1767,6 @@ def test_execution_selector_preserves_concrete_contract_present_tool_names_witho
             authoritative_description='task list authoritative schema',
             model_description='task list compact model schema',
         ),
-        'submit_next_stage': _StageProtocolNoopTool('submit_next_stage'),
         'submit_final_result': _submit_final_result_tool(),
         'spawn_child_nodes': _StageProtocolNoopTool('spawn_child_nodes'),
     }
@@ -1847,14 +1814,12 @@ def test_execution_selector_preserves_concrete_contract_present_tool_names_witho
     )
 
     assert selection['tool_names'] == [
-        'submit_next_stage',
         'submit_final_result',
         'spawn_child_nodes',
         'task_list',
     ]
     assert selection['trace']['contract_present_tool_names'] == ['task_list']
     assert selection['trace']['full_callable_tool_names'] == [
-        'submit_next_stage',
         'submit_final_result',
         'spawn_child_nodes',
         'task_list',
@@ -2403,7 +2368,6 @@ def test_react_iteration_bundle_filter_keys_on_renderable_schema_not_dispatch_di
 
 def _collapsed_bundle_selector_service():
     visible_tools = {
-        'submit_next_stage': _StageProtocolNoopTool('submit_next_stage'),
         'submit_final_result': _submit_final_result_tool(),
         'exec': _ModelSchemaRecordingTool(name='exec', authoritative_description='exec', model_description='exec'),
         'load_tool_context': _ModelSchemaRecordingTool(
@@ -2433,7 +2397,6 @@ def _collapsed_bundle_selector_service():
         ),
     )
     service.list_effective_tool_names = lambda *, actor_role, session_id: [
-        'submit_next_stage',
         'submit_final_result',
         'exec',
         'load_tool_context',
@@ -2640,7 +2603,6 @@ def test_execution_selector_web_research_query_does_not_directly_promote_candida
             authoritative_description='agent_browser authoritative schema',
             model_description='agent_browser compact model schema',
         ),
-        'submit_next_stage': _StageProtocolNoopTool('submit_next_stage'),
         'submit_final_result': _submit_final_result_tool(),
         'spawn_child_nodes': _StageProtocolNoopTool('spawn_child_nodes'),
     }
@@ -2691,7 +2653,6 @@ def test_execution_selector_web_research_query_does_not_directly_promote_candida
     )
 
     assert selection['tool_names'] == [
-        'submit_next_stage',
         'submit_final_result',
         'spawn_child_nodes',
     ]
@@ -8126,7 +8087,6 @@ async def test_empty_model_responses_stop_at_retry_limit(tmp_path, monkeypatch) 
             ],
             tools={
                 'stop_tool_execution': _StageProtocolNoopTool('stop_tool_execution'),
-                'submit_next_stage': _StageProtocolNoopTool('submit_next_stage'),
                 'submit_final_result': _submit_final_result_tool(),
                 'spawn_child_nodes': _StageProtocolNoopTool('spawn_child_nodes'),
             },

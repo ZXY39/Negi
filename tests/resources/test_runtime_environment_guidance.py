@@ -56,39 +56,6 @@ def test_ceo_prompt_builder_mentions_skill_loading_guidance(monkeypatch) -> None
     assert 'skill_id' in prompt
 
 
-def test_ceo_prompt_builder_includes_co_batch_stage_protocol_and_free_pass_rule(monkeypatch) -> None:
-    monkeypatch.setattr(prompt_builder_module, 'current_project_environment', lambda **kwargs: _fake_project_environment())
-
-    prompt = CeoPromptBuilder(loop=SimpleNamespace(workspace=r'D:\projects\G3KU')).build(skills=[])
-
-    assert '必须把 `submit_next_stage` 与目标工具在同一条消息里一起提交' in prompt
-    assert '无活动阶段下单独调用普通工具只有一次机会' in prompt
-
-
-def test_ceo_prompt_builder_visible_skills_block_requires_active_stage() -> None:
-    builder = CeoPromptBuilder(loop=SimpleNamespace(workspace=r'D:\projects\G3KU'))
-
-    block = builder.build_visible_skills_block(
-        skills=[
-            {
-                'skill_id': 'find-skills',
-                'display_name': 'find-skills',
-                'description': '查找 skill',
-                'l0': '查找 skill',
-            }
-        ]
-    )
-
-    assert '## 本轮可见技能' in block
-    assert '如果当前还没有活动阶段且你需要使用工具，必须把 `submit_next_stage` 与目标工具同批提交' in block
-    assert '仅当当前已经存在活动阶段且你确实需要完整工作流正文时' in block
-    assert '才可对下列 `skill_id` 调用 `load_skill_context(skill_id="<skill_id>")`。' in block
-    assert '- `find-skills` (find-skills): 查找 skill。' in block
-    assert 'load_skill_context(skill_id="find-skills")' not in block
-    assert 'skill 不走 hydration' in block
-    assert '不要把候选 skill 误当成需要安装或等待下一轮才可读取正文的工具' in block
-
-
 def test_node_runner_runtime_context_and_prompt_contract_include_project_python(monkeypatch) -> None:
     monkeypatch.setattr(node_runner_module, 'current_project_environment', lambda **kwargs: _fake_project_environment())
     runner = NodeRunner(

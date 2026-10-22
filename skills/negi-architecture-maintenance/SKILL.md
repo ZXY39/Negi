@@ -86,7 +86,7 @@ Focus on:
 Update when touching:
 
 - Prompt cache / prefix stability (node prompt assembly, CEO frontdoor context construction)
-- Context shrink/compression paths (`token_compression`, `stage_compaction`)
+- Context shrink/compression paths (`token_compression`) and the turns ledger (`frontdoor_turns`, `execution_trace.turns`)
 - Request artifact persistence (`provider_request_body`, actual-request JSON, prompt cache family)
 - Send-side token preflight or usage normalization
 - Session continuation baselines, fresh-turn scaffold continuity
@@ -142,7 +142,7 @@ Update when touching:
 - `g3ku/runtime/tool_error_guidance.py`, tool parameter validation and model-facing schema projection
 - hydration ledger / promotion paths in `main/service/runtime_service.py` and `g3ku/runtime/frontdoor/`
 - the universal tool timeout ladder (`g3ku/agent/tools/` timeout enforcement, `resource.yaml` `timeout_policy`)
-- stage gating, grace rounds and turn-end finalization in the frontdoor and node loops
+- the strict plain-text rejection and fixed builtin set in the node loop, turn-end finalization in both loops
 - externalized tool result envelopes (`artifact:` refs, `content_open` / `content_read`)
 
 Focus on:

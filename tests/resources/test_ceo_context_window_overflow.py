@@ -491,112 +491,6 @@ def _evicted_first_stage_state() -> dict[str, object]:
     return {"active_stage_id": "frontdoor-stage-5", "transition_required": False, "stages": stages}
 
 
-def test_stage_eviction_hop_subtracts_compacted_body_from_usage_anchor(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """过期点那一跳：锚点必须扣掉本次被裁撤的肉身，且不许退回 preview。
-
-    比对两侧都过同一份阶段 trim，所以上一跳的真实 usage 里仍留着已被裁掉的工具
-    肉身；直接当锚点会让读数停在裁撤前的大小（实盘 2026-09-29 web_ceo-4678f281bb10：
-    显示 51.4k / 实发 13.5k，下一跳才回落）。
-    """
-    runner = CreateAgentCeoFrontDoorRunner(loop=SimpleNamespace())
-    stage_state = _evicted_first_stage_state()
-    previous_messages = _stage_round_messages('{"ok": true, "body": "' + "x" * 60000 + '"}')
-    compacted_messages, trimmed = CreateAgentCeoFrontDoorRunner._trim_frontdoor_seed_stage_compaction(
-        previous_messages,
-        stage_state,
-    )
-    assert trimmed is True
-    current_messages = [*compacted_messages, {"role": "user", "content": "新增内容 " * 40}]
-    anchor_tokens = 50_000
-    tool_schemas = [{"name": "submit_next_stage", "description": "", "parameters": {"type": "object"}}]
-
-    monkeypatch.setattr(
-        runner,
-        "_resolve_frontdoor_send_model_context_window",
-        lambda **_: {
-            "model_key": "responses:gpt-test",
-            "provider_id": "responses",
-            "provider_model": "responses:gpt-test",
-            "resolved_model": "gpt-test",
-            "context_window_tokens": 200_000,
-        },
-        raising=False,
-    )
-    monkeypatch.setattr(
-        runner,
-        "_frontdoor_prompt_contract",
-        lambda **kwargs: SimpleNamespace(
-            request_messages=list(kwargs.get("state", {}).get("messages") or []),
-            prompt_cache_key="cache-key",
-            diagnostics={"family": "ok"},
-        ),
-        raising=False,
-    )
-    monkeypatch.setattr(runner, "_selected_tool_schemas", lambda names: list(tool_schemas), raising=False)
-    monkeypatch.setattr(runner, "_estimate_frontdoor_send_total_tokens", lambda **_: 12_840, raising=False)
-    monkeypatch.setattr(
-        runner.__class__,
-        "_frontdoor_previous_observed_input_truth",
-        lambda self, **_: {
-            "effective_input_tokens": anchor_tokens,
-            "input_tokens": anchor_tokens,
-            "cache_hit_tokens": 0,
-            "provider_model": "responses:gpt-test",
-            "actual_request_hash": "prev-request-hash",
-            "source": "provider_usage",
-        },
-        raising=False,
-    )
-    monkeypatch.setattr(
-        runner.__class__,
-        "_frontdoor_latest_actual_request_record",
-        lambda self, **_: {
-            "actual_request_hash": "prev-request-hash",
-            "request_messages": list(previous_messages),
-            "tool_schemas": list(tool_schemas),
-        },
-        raising=False,
-    )
-
-    session = SimpleNamespace(
-        state=SimpleNamespace(session_key="web:shared"),
-        announce_context_compression_boundary=_announce_boundary_noop,
-        _frontdoor_actual_request_history=[],
-        _frontdoor_previous_actual_request_history=[],
-        _frontdoor_previous_actual_request_path="",
-    )
-    runtime = SimpleNamespace(
-        context=CeoRuntimeContext(loop=None, session=session, session_key="web:shared", on_progress=None)
-    )
-    preflight = runner._frontdoor_send_preflight_snapshot(
-        state={
-            "session_key": "web:shared",
-            "model_refs": ["responses:gpt-test"],
-            "messages": list(current_messages),
-            "tool_names": ["submit_next_stage"],
-            "provider_tool_names": ["submit_next_stage"],
-            "parallel_enabled": False,
-            "turn_overlay_text": "",
-            "dynamic_appendix_messages": [],
-            "frontdoor_stage_state": stage_state,
-        },
-        runtime=runtime,
-        tool_schemas=[],
-    )
-
-    shrink = int(preflight["anchor_projection_shrink_tokens"])
-    # 可比性必须保住：过期点不许静默退化成全量 preview
-    assert preflight["comparable_to_previous_request"] is True
-    assert preflight["estimate_source"] == "usage_plus_delta"
-    assert shrink > 5_000
-    assert preflight["effective_input_tokens"] == anchor_tokens - shrink
-    assert (
-        preflight["usage_based_estimate_tokens"]
-        == preflight["effective_input_tokens"] + preflight["delta_estimate_tokens"]
-    )
-    assert preflight["estimated_total_tokens"] < anchor_tokens
 
 
 def test_frontdoor_seed_record_prefers_live_trace_over_stale_previous_slot(tmp_path) -> None:
@@ -857,13 +751,12 @@ async def test_graph_call_model_token_compression_keeps_repair_required_contract
     monkeypatch.setattr(runner, "_persist_frontdoor_actual_request", lambda **_: {})
 
     contract_message = build_frontdoor_tool_contract(
-        callable_tool_names=["submit_next_stage"],
+        callable_tool_names=["exec"],
         candidate_tool_names=[],
         candidate_tool_items=[],
         repair_required_tool_items=[
             {"tool_id": "agent_browser", "description": "Browser automation", "reason": "missing required paths"}
         ],
-        frontdoor_stage_state={"active_stage_id": "", "transition_required": False, "stages": []},
         candidate_skill_ids=[],
         repair_required_skill_items=[
             {"skill_id": "writing-skills", "description": "Skill maintenance workflow", "reason": "missing required bins"}

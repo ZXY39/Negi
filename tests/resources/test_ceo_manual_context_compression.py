@@ -190,8 +190,6 @@ def _patch_compression_runner(monkeypatch, runner, *, applied: bool, context_win
                 "reason": "" if applied else "no_compressible_history",
                 "compression_mode": "llm",
                 "compressed_history_message_count": 12,
-                "stage_archive_pending_count": 7,
-                "stage_ref_selected_count": 3,
             },
         )
 
@@ -243,10 +241,6 @@ def test_compress_session_context_rewrites_durable_baseline(monkeypatch) -> None
     assert calls["compression_source"] == "manual_context_compression"
     # shrink 原因必须随工件一起落，工件自己就说得清这次缩短是谁做的。
     assert calls["persisted_shrink_reason"] == "token_compression"
-    # 收口与证据引用计数必须随工件落盘：手动车道没有 provider 回执，这条工件是唯一能
-    # 解释"下一轮阶段块为什么变少"的证据，计数只留在返回值里就等于没有。
-    assert calls["persisted_diagnostics"]["stage_archive_pending_count"] == 7
-    assert calls["persisted_diagnostics"]["stage_ref_selected_count"] == 3
     assert session._frontdoor_history_shrink_reason == "token_compression"
     assert synced == {"source_reason": "finalize"}
 
@@ -509,10 +503,8 @@ def test_live_turn_payload_carries_out_of_turn_compression(monkeypatch) -> None:
     谁先到，也不能依赖 inflight turn（回合外压缩根本没有回合可挂）。"""
     from g3ku.runtime.api import websocket_ceo as ws
 
-    monkeypatch.setattr(ws, "_latest_persisted_assistant_canonical_context", lambda *_: {})
     monkeypatch.setattr(ws, "_build_inflight_turn_snapshot", lambda *_, **__: None)
     monkeypatch.setattr(ws, "_build_preserved_turn_snapshot", lambda *_, **__: None)
-    monkeypatch.setattr(ws, "_with_canonical_context_delta", lambda snapshot, _previous: snapshot)
     monkeypatch.setattr(ws, "_rewrite_turn_snapshot_media", lambda _sid, snapshot: snapshot)
 
     running = SimpleNamespace(

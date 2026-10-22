@@ -467,6 +467,18 @@ class _HeartbeatReplayRecorder:
         return {"task_terminal": 0, "task_stall": 0}
 
 
+def _sample_frontdoor_turns() -> list[dict[str, object]]:
+    return [
+        {
+            "seq": 1,
+            "turn_id": "turn-paused",
+            "text": "inspect repository",
+            "status": "running",
+            "tools": [{"tool_call_id": "filesystem:1", "tool_name": "filesystem", "status": "success"}],
+        }
+    ]
+
+
 def _sample_frontdoor_stage_state() -> dict[str, object]:
     return {
         "active_stage_id": "frontdoor-stage-1",
@@ -581,28 +593,7 @@ async def test_runtime_agent_session_parallel_same_name_tools_distinct_call_ids(
     )
     session._state.is_running = True
     session._state.status = "running"
-    session._frontdoor_stage_state = {
-        "active_stage_id": "frontdoor-stage-1",
-        "transition_required": False,
-        "stages": [
-            {
-                "stage_id": "frontdoor-stage-1",
-                "stage_index": 1,
-                "stage_kind": "normal",
-                "stage_goal": "fetch references",
-                "tool_round_budget": 2,
-                "tool_rounds_used": 1,
-                "status": "active",
-                "rounds": [
-                    {
-                        "round_index": 1,
-                        "tool_call_ids": ["web_fetch-call-1", "web_fetch-call-2"],
-                        "tool_names": ["web_fetch", "web_fetch"],
-                    }
-                ],
-            }
-        ],
-    }
+    session._frontdoor_turns = _sample_frontdoor_turns()
 
     await session._handle_progress(
         "first fetch started",
@@ -628,10 +619,6 @@ async def test_runtime_agent_session_parallel_same_name_tools_distinct_call_ids(
     snapshot = session.inflight_turn_snapshot()
 
     assert snapshot is not None
-    round_item = snapshot["execution_trace_summary"]["stages"][0]["rounds"][0]
-    assert round_item["tool_call_ids"] == ["web_fetch-call-1", "web_fetch-call-2"]
-    assert round_item["tool_names"] == ["web_fetch", "web_fetch"]
-    assert round_item["tools"] == []
     tool_end_events = [event for event in session._event_log if event["type"] == "tool_execution_end"]
     assert [event["payload"]["tool_call_id"] for event in tool_end_events] == [
         "web_fetch-call-1",
@@ -706,6 +693,7 @@ async def test_runtime_agent_session_cancel_clears_pending_tool_call_indexes() -
     )
     session._state.is_running = True
     session._state.status = "running"
+    session._frontdoor_turns = _sample_frontdoor_turns()
 
     await session._handle_progress(
         "first fetch started",
@@ -864,7 +852,15 @@ async def test_runtime_agent_session_converts_frontdoor_interrupt_into_paused_st
 
     class _InterruptingRunner:
         async def run_turn(self, *, user_input, session, on_progress):
-            _ = user_input, session, on_progress
+            _ = user_input, on_progress
+            session._frontdoor_turns = [
+                {
+                    "seq": 1,
+                    "turn_id": "turn-1",
+                    "text": "inspect repository",
+                    "tools": [{"tool_call_id": "call-1", "tool_name": "filesystem", "status": "success"}],
+                }
+            ]
             raise CeoFrontdoorInterrupted(
                 interrupts=[
                     CeoPendingInterrupt(
@@ -874,19 +870,6 @@ async def test_runtime_agent_session_converts_frontdoor_interrupt_into_paused_st
                 ],
                 values={
                     "tool_call_payloads": [{"name": "create_async_task"}],
-                    "frontdoor_stage_state": {
-                        "active_stage_id": "frontdoor-stage-1",
-                        "transition_required": False,
-                        "stages": [
-                            {
-                                "stage_id": "frontdoor-stage-1",
-                                "stage_index": 1,
-                                "stage_goal": "inspect repository",
-                                "status": "active",
-                                "rounds": [{"round_index": 1, "tools": [{"tool_name": "filesystem"}]}],
-                            }
-                        ],
-                    },
                     "compression_state": {"status": "running", "text": "上下文压缩中", "source": "user"},
                 },
             )
@@ -923,251 +906,14 @@ async def test_runtime_agent_session_converts_frontdoor_interrupt_into_paused_st
     ]
     paused = session.paused_execution_context_snapshot()
     assert paused["interrupts"][0]["id"] == "interrupt-1"
-    assert paused["execution_trace_summary"]["stages"][0]["stage_goal"] == "inspect repository"
+    assert paused["frontdoor_turns"][0]["text"] == "inspect repository"
     assert paused["compression"]["status"] == "running"
     inflight = session.inflight_turn_snapshot()
     assert inflight is not None
-    assert inflight["execution_trace_summary"]["active_stage_id"] == "frontdoor-stage-1"
+    assert inflight["frontdoor_turns"][0]["text"] == "inspect repository"
     assert inflight["compression"]["text"] == "上下文压缩中"
 
 
-@pytest.mark.asyncio
-async def test_runtime_agent_session_preserves_previewed_round_through_real_middleware_order_interrupt_pause(
-    tmp_path: Path,
-    monkeypatch,
-) -> None:
-    from g3ku.runtime.frontdoor import _ceo_runtime_ops as ceo_runtime_ops
-    from g3ku.runtime.frontdoor.prompt_cache_contract import FrontdoorPromptContract
-    from g3ku.runtime import web_ceo_sessions
-
-    async def _refresh_web_agent_runtime(*, force: bool = False, reason: str = "") -> None:
-        _ = force, reason
-        return None
-
-    monkeypatch.setattr("g3ku.shells.web.refresh_web_agent_runtime", _refresh_web_agent_runtime)
-    monkeypatch.setattr(web_ceo_sessions, "workspace_path", lambda: tmp_path)
-
-    class _CancelToken:
-        def cancel(self, *, reason: str = "") -> None:
-            _ = reason
-
-    class _BackendRecorder:
-        def __init__(self, responses: list[LLMResponse]) -> None:
-            self.responses = list(responses)
-
-        async def chat(self, **kwargs):
-            _ = kwargs
-            return self.responses.pop(0)
-
-    class _FakeToolRegistry:
-        def __init__(self, tools: list[Tool]) -> None:
-            self._tools = {tool.name: tool for tool in list(tools)}
-            self.tool_names = sorted(self._tools)
-
-        def get(self, name: str):
-            return self._tools.get(str(name or "").strip())
-
-        def push_runtime_context(self, context: dict[str, object]):
-            _ = context
-            return object()
-
-        def pop_runtime_context(self, token) -> None:
-            _ = token
-
-    class _ContinuationTaskTool(Tool):
-        @property
-        def name(self) -> str:
-            return "create_async_task"
-
-        @property
-        def description(self) -> str:
-            return "dispatch async task"
-
-        @property
-        def parameters(self) -> dict[str, object]:
-            return {
-                "type": "object",
-                "properties": {
-                    "task": {"type": "string"},
-                    "core_requirement": {"type": "string"},
-                    "execution_policy": {"type": "object"},
-                },
-                "required": ["task", "core_requirement", "execution_policy"],
-            }
-
-        async def execute(
-            self,
-            task: str,
-            core_requirement: str,
-            execution_policy: dict[str, object],
-            **kwargs,
-        ) -> str:
-            _ = task, core_requirement, execution_policy, kwargs
-            return json.dumps({"ok": True}, ensure_ascii=False)
-
-    async def _cancel_session_tasks(session_key: str) -> int:
-        _ = session_key
-        return 0
-
-    async def _startup() -> None:
-        return None
-
-    backend = _BackendRecorder(
-        [
-            LLMResponse(
-                content="",
-                tool_calls=[
-                    ToolCallRequest(
-                        id="call-stage-1",
-                        name="submit_next_stage",
-                        arguments={
-                            "stage_goal": "Inspect the repository structure",
-                            "tool_round_budget": 12,
-                        },
-                    )
-                ],
-                finish_reason="tool_calls",
-            ),
-            LLMResponse(
-                content="",
-                tool_calls=[
-                    ToolCallRequest(
-                        id="call-task-1",
-                        name="create_async_task",
-                        arguments={
-                            "task": "Inspect the repository structure",
-                            "core_requirement": "Inspect the repository structure",
-                            "execution_policy": {"mode": "focus"},
-                        },
-                    )
-                ],
-                finish_reason="tool_calls",
-            ),
-        ]
-    )
-    loop = SimpleNamespace(
-        model="gpt-test",
-        reasoning_effort=None,
-        sessions=SessionManager(tmp_path),
-        _ensure_checkpointer_ready=lambda: None,
-        _store=None,
-        main_task_service=SimpleNamespace(startup=_startup),
-        tools=_FakeToolRegistry([_ContinuationTaskTool()]),
-        max_iterations=8,
-        resource_manager=None,
-        tool_execution_manager=None,
-        memory_manager=None,
-        commit_service=None,
-        prompt_trace=False,
-        create_session_cancellation_token=lambda _session_key: _CancelToken(),
-        release_session_cancellation_token=lambda _session_key, _token: None,
-        cancel_session_tasks=_cancel_session_tasks,
-        _use_rag_memory=lambda: False,
-        _memory_runtime_settings=SimpleNamespace(
-            assembly=SimpleNamespace(
-                frontdoor_interrupt_approval_enabled=True,
-                frontdoor_interrupt_tool_names=["create_async_task"],
-            )
-        ),
-    )
-    runner = CeoFrontDoorRunner(loop=loop)
-    loop.multi_agent_runner = runner
-
-    async def _resolve_for_actor(*, actor_role: str, session_id: str):
-        _ = actor_role, session_id
-        return {"skills": [], "tool_families": [], "tool_names": ["create_async_task"]}
-
-    async def _build_for_ceo(**kwargs):
-        seed_messages = list(kwargs.get("request_body_seed_messages") or [])
-        user_content = kwargs.get("user_content")
-        return SimpleNamespace(
-            system_prompt="SYSTEM PROMPT",
-            recent_history=[],
-            tool_names=["create_async_task"],
-            trace={
-                "selected_skills": [],
-                "semantic_frontdoor": {},
-                "tool_selection": {},
-                "capability_snapshot": {
-                    "visible_tool_ids": ["create_async_task"],
-                    "visible_skill_ids": [],
-                },
-            },
-            model_messages=[*seed_messages, {"role": "user", "content": user_content}],
-            stable_messages=[*seed_messages, {"role": "user", "content": user_content}],
-            dynamic_appendix_messages=[],
-            candidate_tool_names=[],
-            candidate_tool_items=[],
-            cache_family_revision="frontdoor:v1",
-            turn_overlay_text="",
-        )
-
-    def _fake_build_frontdoor_prompt_contract(**kwargs):
-        return FrontdoorPromptContract(
-            request_messages=list(kwargs.get("stable_messages") or []),
-            prompt_cache_key="frontdoor-cache-key",
-            diagnostics={"stable_prompt_signature": "frontdoor-sig"},
-            stable_prefix_hash="stable-hash",
-            dynamic_appendix_hash="dynamic-hash",
-            stable_messages=list(kwargs.get("stable_messages") or []),
-            dynamic_appendix_messages=list(kwargs.get("dynamic_appendix_messages") or []),
-            diagnostic_dynamic_messages=[],
-            cache_family_revision="frontdoor:v1",
-        )
-
-    monkeypatch.setattr(runner._resolver, "resolve_for_actor", _resolve_for_actor)
-    monkeypatch.setattr(runner._builder, "build_for_ceo", _build_for_ceo)
-    monkeypatch.setattr(runner, "_resolve_chat_backend", lambda: backend)
-    monkeypatch.setattr(runner, "_resolve_ceo_model_refs", lambda: ["openai:gpt-4.1"])
-    monkeypatch.setattr(
-        runner,
-        "_resolve_frontdoor_send_model_context_window",
-        lambda model_refs: {
-            "model_key": "openai:gpt-4.1",
-            "provider_model": "openai:gpt-4.1",
-            "context_window_tokens": 128000,
-        },
-    )
-    monkeypatch.setattr(ceo_runtime_ops, "build_frontdoor_prompt_contract", _fake_build_frontdoor_prompt_contract)
-
-    session = RuntimeAgentSession(loop, session_key="web:shared", channel="web", chat_id="shared")
-
-    result = await session.prompt("create a task")
-
-    assert result.output == ""
-    assert session.state.status == "paused"
-    assert len(session.state.pending_interrupts) == 1
-    pending_interrupt = session.state.pending_interrupts[0]
-    assert str(pending_interrupt["id"]).strip()
-    assert pending_interrupt["value"]["kind"] == "frontdoor_tool_approval_batch"
-    assert str(pending_interrupt["value"]["batch_id"]).startswith("batch:")
-    assert pending_interrupt["value"]["tool_calls"] == [
-        {
-            "id": "call-task-1",
-            "name": "create_async_task",
-            "arguments": {
-                "task": "Inspect the repository structure",
-                "core_requirement": "Inspect the repository structure",
-                "execution_policy": {"mode": "focus"},
-            },
-        }
-    ]
-    paused = session.paused_execution_context_snapshot()
-    assert paused["interrupts"][0]["id"] == pending_interrupt["id"]
-    assert paused["execution_trace_summary"]["active_stage_id"] == "frontdoor-stage-1"
-    paused_stage = paused["execution_trace_summary"]["stages"][0]
-    assert paused_stage["stage_goal"] == "Inspect the repository structure"
-    assert paused_stage["tool_round_budget"] == 12
-    assert [round_item["tool_names"] for round_item in paused_stage["rounds"]] == [["create_async_task"]]
-    assert "tool_events" not in paused
-    assert paused["compression"] == {}
-    inflight = session.inflight_turn_snapshot()
-    assert inflight is not None
-    assert inflight["execution_trace_summary"]["active_stage_id"] == "frontdoor-stage-1"
-    assert [round_item["tool_names"] for round_item in inflight["execution_trace_summary"]["stages"][0]["rounds"]] == [
-        ["create_async_task"]
-    ]
-    assert inflight["compression"] == {}
 
 
 @pytest.mark.asyncio
@@ -1188,7 +934,7 @@ async def test_runtime_agent_session_preserves_pre_synced_frontdoor_state_when_i
     class _SparseInterruptRunner:
         async def run_turn(self, *, user_input, session, on_progress):
             _ = user_input, on_progress
-            session._frontdoor_stage_state = _sample_frontdoor_stage_state()
+            session._frontdoor_turns = _sample_frontdoor_turns()
             session._compression_state = {"status": "running", "text": "compressing", "source": "user"}
             raise CeoFrontdoorInterrupted(
                 interrupts=[
@@ -1225,12 +971,11 @@ async def test_runtime_agent_session_preserves_pre_synced_frontdoor_state_when_i
     assert session.state.status == "paused"
     paused = session.paused_execution_context_snapshot()
     assert paused is not None
-    assert paused["execution_trace_summary"]["active_stage_id"] == "frontdoor-stage-1"
-    assert paused["execution_trace_summary"]["stages"][0]["stage_goal"] == "inspect repository"
+    assert paused["frontdoor_turns"][0]["text"] == "inspect repository"
     assert paused["compression"]["status"] == "running"
     inflight = session.inflight_turn_snapshot()
     assert inflight is not None
-    assert inflight["execution_trace_summary"]["active_stage_id"] == "frontdoor-stage-1"
+    assert inflight["frontdoor_turns"][0]["text"] == "inspect repository"
     assert inflight["compression"]["text"] == "compressing"
 
 
@@ -1487,15 +1232,14 @@ def test_runtime_agent_session_separates_current_heartbeat_snapshot_from_preserv
         "status": "running",
         "user_message": {"content": "Install the skill"},
         "assistant_text": "Still working on the previous turn",
-        "execution_trace_summary": {
-            "stages": [
-                {
-                    "stage_id": "frontdoor-stage-user",
-                    "stage_goal": "install skill",
-                    "rounds": [],
-                }
-            ]
-        },
+        "frontdoor_turns": [
+            {
+                "seq": 1,
+                "turn_id": "turn-user-preserved",
+                "text": "install skill",
+                "tools": [{"tool_call_id": "call-1", "tool_name": "skill-installer", "status": "success"}],
+            }
+        ],
     }
 
     current_snapshot = session.inflight_turn_snapshot()
@@ -1509,97 +1253,9 @@ def test_runtime_agent_session_separates_current_heartbeat_snapshot_from_preserv
     assert preserved_snapshot is not None
     assert preserved_snapshot["source"] == "user"
     assert preserved_snapshot["turn_id"] == "turn-user-preserved"
-    assert preserved_snapshot["execution_trace_summary"]["stages"][0]["stage_id"] == "frontdoor-stage-user"
+    assert preserved_snapshot["frontdoor_turns"][0]["text"] == "install skill"
 
 
-@pytest.mark.asyncio
-@pytest.mark.parametrize(
-    ("prompt_input", "expected_source"),
-    [
-        pytest.param("new prompt", None, id="user-turn"),
-        pytest.param(
-            UserInputMessage(
-                content="heartbeat prompt",
-                metadata={"heartbeat_internal": True, "heartbeat_reason": "tool_background"},
-            ),
-            "heartbeat",
-            id="heartbeat-turn",
-        ),
-        pytest.param(
-            UserInputMessage(
-                content="cron prompt",
-                metadata={"cron_internal": True, "cron_job_id": "job-77"},
-            ),
-            "cron",
-            id="cron-turn",
-        ),
-    ],
-)
-async def test_turn_start_clears_stale_frontdoor_stage_and_compression_before_first_running_snapshot(
-    tmp_path: Path,
-    monkeypatch,
-    prompt_input: str | UserInputMessage,
-    expected_source: str | None,
-) -> None:
-    async def _refresh_web_agent_runtime(*, force: bool = False, reason: str = "") -> None:
-        _ = force, reason
-        return None
-
-    monkeypatch.setattr("g3ku.shells.web.refresh_web_agent_runtime", _refresh_web_agent_runtime)
-
-    class _CancelToken:
-        def cancel(self, *, reason: str = "") -> None:
-            _ = reason
-
-    class _FakeRunner:
-        async def run_turn(self, *, user_input, session, on_progress):
-            _ = user_input, session, on_progress
-            return "ok"
-
-    async def _cancel_session_tasks(session_key: str) -> int:
-        _ = session_key
-        return 0
-
-    loop = SimpleNamespace(
-        model="gpt-test",
-        reasoning_effort=None,
-        sessions=SessionManager(tmp_path),
-        multi_agent_runner=_FakeRunner(),
-        memory_manager=None,
-        commit_service=None,
-        prompt_trace=False,
-        create_session_cancellation_token=lambda _session_key: _CancelToken(),
-        release_session_cancellation_token=lambda _session_key, _token: None,
-        cancel_session_tasks=_cancel_session_tasks,
-        _use_rag_memory=lambda: False,
-    )
-    session = RuntimeAgentSession(loop, session_key="web:shared", channel="web", chat_id="shared")
-    session._frontdoor_stage_state = _sample_frontdoor_stage_state()
-    session._compression_state = {"status": "running", "text": "旧压缩状态", "source": "user"}
-    session._frontdoor_selection_debug = {"selected_tool_names": ["filesystem_write"]}
-    captured: dict[str, object] = {}
-
-    async def _listener(event: AgentEvent) -> None:
-        if event.type != "state_snapshot":
-            return
-        state = event.payload.get("state") if isinstance(event.payload, dict) else {}
-        if str((state or {}).get("status") or "") != "running":
-            return
-        if "snapshot" not in captured:
-            captured["snapshot"] = session.inflight_turn_snapshot()
-
-    session.subscribe(_listener)
-    await session.prompt(prompt_input)
-
-    snapshot = captured.get("snapshot")
-    assert isinstance(snapshot, dict)
-    assert snapshot["execution_trace_summary"]["active_stage_id"] == "frontdoor-stage-1"
-    assert snapshot["compression"]["text"] == "旧压缩状态"
-    assert "frontdoor_selection_debug" not in snapshot
-    if expected_source is None:
-        assert "source" not in snapshot
-    else:
-        assert snapshot.get("source") == expected_source
 
 
 @pytest.mark.asyncio
@@ -1675,7 +1331,7 @@ async def test_runtime_agent_session_persists_hidden_cron_prompt_messages_and_vi
     assert isinstance(inflight, dict)
     assert inflight["source"] == "cron"
     assert "user_message" not in inflight
-    assert inflight["execution_trace_summary"] == {}
+    assert not inflight.get("frontdoor_turns")
 
     persisted = loop.sessions.get_or_create("web:shared")
     assert [message["role"] for message in persisted.messages] == ["user", "user", "assistant"]
@@ -2483,7 +2139,7 @@ def test_runtime_agent_session_restores_completed_continuity_snapshot_from_disk(
                 {"role": "system", "content": "SYSTEM"},
                 {"role": "user", "content": "Resume from continuity"},
             ],
-            "frontdoor_history_shrink_reason": "stage_compaction",
+            "frontdoor_history_shrink_reason": "token_compression",
             "frontdoor_actual_request_path": record["path"],
             "frontdoor_actual_request_history": [record],
             "frontdoor_stage_state": {"active_stage_id": "stage-1", "transition_required": False, "stages": []},
@@ -2511,10 +2167,9 @@ def test_runtime_agent_session_restores_completed_continuity_snapshot_from_disk(
         {"role": "system", "content": "SYSTEM"},
         {"role": "user", "content": "Resume from continuity"},
     ]
-    assert session._frontdoor_history_shrink_reason == "stage_compaction"
+    assert session._frontdoor_history_shrink_reason == "token_compression"
     assert session._frontdoor_actual_request_path == record["path"]
     assert session._frontdoor_actual_request_history == [record]
-    assert session._frontdoor_stage_state == {"active_stage_id": "stage-1", "transition_required": False, "stages": []}
     assert session._compression_state == {"status": "ready", "text": "ok", "source": "semantic"}
     assert session._semantic_context_state == {"summary_text": "summary", "needs_refresh": False}
     assert not hasattr(session, "_frontdoor_hydrated_tool_names")
@@ -2886,22 +2541,6 @@ def test_inflight_snapshot_skips_watchdog_progress_updates() -> None:
     assert all(item["text"] != "watchdog synthetic update" for item in tools)
 
 
-def test_inflight_turn_snapshot_prefers_stage_trace_summary_over_flat_tool_events() -> None:
-    session = RuntimeAgentSession(
-        SimpleNamespace(model="demo", reasoning_effort=None, multi_agent_runner=None),
-        session_key="web:shared",
-        channel="web",
-        chat_id="shared",
-    )
-    session._state.status = "running"
-    session._frontdoor_stage_state = _sample_frontdoor_stage_state()
-
-    snapshot = session.inflight_turn_snapshot()
-
-    assert snapshot is not None
-    assert "execution_trace_summary" in snapshot
-    assert snapshot["execution_trace_summary"]["stages"][0]["stage_goal"] == "inspect repository"
-    assert "tool_events" not in snapshot
 
 
 def test_inflight_snapshot_without_real_stage_state_omits_tool_flow_snapshot() -> None:
@@ -2913,7 +2552,6 @@ def test_inflight_snapshot_without_real_stage_state_omits_tool_flow_snapshot() -
     )
     session._state.is_running = True
     session._state.status = "running"
-    session._frontdoor_stage_state = {}
     session._event_log = [
         {
             "type": "tool_execution_start",
@@ -2959,7 +2597,6 @@ def test_inflight_snapshot_with_empty_stage_list_omits_tool_flow_snapshot() -> N
     )
     session._state.is_running = True
     session._state.status = "running"
-    session._frontdoor_stage_state = {"stages": []}
     session._event_log = [
         {
             "type": "tool_execution_start",
@@ -2996,90 +2633,6 @@ def test_inflight_snapshot_with_empty_stage_list_omits_tool_flow_snapshot() -> N
     assert snapshot is None
 
 
-def test_inflight_snapshot_with_real_stage_state_preserves_goal_budget_and_round_boundaries() -> None:
-    session = RuntimeAgentSession(
-        SimpleNamespace(model="demo", reasoning_effort=None, multi_agent_runner=None),
-        session_key="web:ceo-da58bee7f1ca",
-        channel="web",
-        chat_id="ceo-da58bee7f1ca",
-    )
-    session._state.is_running = True
-    session._state.status = "running"
-    session._frontdoor_stage_state = {
-        "active_stage_id": "frontdoor-stage-1",
-        "transition_required": False,
-        "stages": [
-            {
-                "stage_id": "frontdoor-stage-1",
-                "stage_index": 1,
-                "stage_goal": "查看当前可检索的长期记忆，并向用户按类别清晰汇总我已记住的内容。",
-                "tool_round_budget": 3,
-                "tool_rounds_used": 2,
-                    "status": "active",
-                    "mode": "自主执行",
-                    "stage_kind": "normal",
-                    "rounds": [
-                        {
-                            "round_index": 1,
-                            "tool_call_ids": ["load_tool_context:1"],
-                            "tool_names": ["load_tool_context"],
-                        },
-                        {
-                            "round_index": 2,
-                            "tool_call_ids": ["memory_note:2"],
-                            "tool_names": ["memory_note"],
-                        },
-                    ],
-                }
-            ],
-        }
-    session._event_log = [
-        {
-            "type": "tool_execution_start",
-            "timestamp": "2026-04-08T08:01:00Z",
-            "payload": {
-                "tool_name": "load_tool_context",
-                "text": "round 1 started",
-                "tool_call_id": "load_tool_context:1",
-            },
-        },
-        {
-            "type": "tool_execution_end",
-            "timestamp": "2026-04-08T08:01:01Z",
-            "payload": {
-                "tool_name": "load_tool_context",
-                "text": "round 1 done",
-                "tool_call_id": "load_tool_context:1",
-                "is_error": False,
-            },
-        },
-        {
-            "type": "tool_execution_start",
-            "timestamp": "2026-04-08T08:01:10Z",
-            "payload": {
-                "tool_name": "memory_note",
-                "text": "round 2 started",
-                "tool_call_id": "memory_note:2",
-            },
-        },
-    ]
-
-    snapshot = session.inflight_turn_snapshot()
-
-    assert snapshot is not None
-    trace = snapshot["execution_trace_summary"]
-    assert trace["active_stage_id"] == "frontdoor-stage-1"
-    assert len(trace["stages"]) == 1
-    stage = trace["stages"][0]
-    assert stage["stage_id"] == "frontdoor-stage-1"
-    assert stage["stage_goal"] == "查看当前可检索的长期记忆，并向用户按类别清晰汇总我已记住的内容。"
-    assert stage["tool_round_budget"] == 3
-    assert [len(round_item["tools"]) for round_item in stage["rounds"]] == [0, 0]
-    assert [round_item["tool_names"] for round_item in stage["rounds"]] == [["load_tool_context"], ["memory_note"]]
-    assert [round_item["tool_call_ids"] for round_item in stage["rounds"]] == [
-        ["load_tool_context:1"],
-        ["memory_note:2"],
-    ]
 
 
 def test_snapshot_includes_compression_state_when_frontdoor_archive_is_running() -> None:
@@ -3251,7 +2804,7 @@ async def test_auto_compression_marker_names_the_turn_it_folded(tmp_path: Path) 
     turn_id = str((queued[0].metadata or {}).get("_transcript_turn_id") or "").strip()
     assert turn_id
     session._frontdoor_compressed_turn_id = turn_id
-    session._frontdoor_compression_boundary_index = 7
+    session._frontdoor_compression_boundary_turn_seq = 7
 
     await session._persist_turn_transcript(
         user_input=queued[0],
@@ -3268,66 +2821,15 @@ async def test_auto_compression_marker_names_the_turn_it_folded(tmp_path: Path) 
         if isinstance(item.get("metadata"), dict) and item["metadata"].get("kind") == "context_compression"
     ]
     assert [row["metadata"]["compression_state"] for row in rows] == ["completed"]
-    assert rows[0]["metadata"]["stats"] == {"turn_id": turn_id, "boundary_stage_index": 7}
+    assert rows[0]["metadata"]["stats"] == {"turn_id": turn_id, "boundary_turn_seq": 7}
     marker_events = [event for event in events if event.type == "context_compression_marker"]
     assert [event.payload["stats"] for event in marker_events] == [
-        {"turn_id": turn_id, "boundary_stage_index": 7}
+        {"turn_id": turn_id, "boundary_turn_seq": 7}
     ]
     # 边界是一次性的：落过之后必须收回去，否则下一回合会被钉上一条不属于它的线。
-    assert int(getattr(session, "_frontdoor_compression_boundary_index", 0) or 0) == 0
+    assert int(getattr(session, "_frontdoor_compression_boundary_turn_seq", 0) or 0) == 0
 
 
-def test_compression_boundary_index_is_the_last_swallowed_stage() -> None:
-    """边界 = 被吞集合在**渲染账本**里最大的 stage_index；没吞阶段就是 0。
-
-    活动阶段永远不在被吞集合里（`stage_is_swallowable` 排除 `active_stage_id`），所以这条
-    边界永远落在两张阶段卡之间，不会切开任何一张卡。两本账各有一套编号，只按 id 匹配必然
-    落空，跨账靠内容身份（与收口标记同一座桥）。
-    """
-    runner = create_agent_impl.CreateAgentCeoFrontDoorRunner(loop=SimpleNamespace())
-
-    def _canonical(offset: int) -> dict:
-        return {
-            "stage_id": f"frontdoor-stage-{900 + offset}",
-            "stage_index": 900 + offset,
-            "stage_goal": f"目标 {offset}",
-            "completed_stage_summary": f"结论 {offset}",
-            "created_at": f"2026-09-20T10:{offset:02d}:00+08:00",
-            "finished_at": f"2026-09-20T10:{offset:02d}:30+08:00",
-            "status": "completed",
-            "stage_kind": "normal",
-        }
-
-    def _ledger(stages: list[dict]) -> dict:
-        return {"active_stage_id": "", "stages": stages}
-
-    # 同一批逻辑阶段在界面账本里是另一套编号（1..3），stage_id 与 canonical 交集为空。
-    rendered = _ledger(
-        [{**_canonical(offset), "stage_id": f"turn-{offset + 1}", "stage_index": offset + 1} for offset in range(3)]
-    )
-    durable = _ledger([_canonical(offset) for offset in range(3)])
-    assert (
-        runner._frontdoor_compression_boundary_index(
-            rendered, durable, ["frontdoor-stage-900", "frontdoor-stage-901"]
-        )
-        == 2
-    )
-
-    # 两本账合成一本（id 直接命中）时口径不变。
-    same = _ledger(
-        [
-            {"stage_id": "frontdoor-stage-1", "stage_index": 1},
-            {"stage_id": "frontdoor-stage-7", "stage_index": 7},
-            "junk",
-            {"stage_id": "frontdoor-stage-9"},
-        ]
-    )
-    assert runner._frontdoor_compression_boundary_index(same, same, ["frontdoor-stage-1", "frontdoor-stage-7"]) == 7
-    assert runner._frontdoor_compression_boundary_index(same, same, []) == 0
-    # 一条都映不到就不给边界：宁可得"没折阶段"，也不能报一个界面读不懂的大编号——后者
-    # 会被判成"整回合都在边界之下"，线退回 feed 尾部。
-    assert runner._frontdoor_compression_boundary_index(rendered, durable, ["frontdoor-stage-404"]) == 0
-    assert runner._frontdoor_compression_boundary_index(None, None, ["frontdoor-stage-1"]) == 0
 
 
 @pytest.mark.asyncio
@@ -3346,7 +2848,7 @@ async def test_announce_compression_boundary_stages_row_in_memory(tmp_path: Path
 
     session.subscribe(_listener)
 
-    await session.announce_context_compression_boundary(turn_id="a1", boundary_stage_index=7)
+    await session.announce_context_compression_boundary(turn_id="a1", boundary_turn_seq=7)
 
     store = session._loop.sessions
     rows = [
@@ -3357,7 +2859,7 @@ async def test_announce_compression_boundary_stages_row_in_memory(tmp_path: Path
     assert len(rows) == 1
     assert rows[0]["metadata"]["compression_state"] == "completed"
     assert rows[0]["metadata"]["source"] == "auto"
-    assert rows[0]["metadata"]["stats"] == {"boundary_stage_index": 7, "turn_id": "a1"}
+    assert rows[0]["metadata"]["stats"] == {"boundary_turn_seq": 7, "turn_id": "a1"}
     # 收尾路径凭这个标志跳过重复落行。
     assert str(getattr(session, "_frontdoor_compression_marker_appended_turn", "")) == "a1"
     # 行记进账但不为它单独写盘：转录文件此刻还不该存在。
@@ -3367,7 +2869,7 @@ async def test_announce_compression_boundary_stages_row_in_memory(tmp_path: Path
     assert marker_events[0].payload == {
         "compression_state": "completed",
         "source": "auto",
-        "stats": {"boundary_stage_index": 7, "turn_id": "a1"},
+        "stats": {"boundary_turn_seq": 7, "turn_id": "a1"},
     }
 
 
@@ -3421,70 +2923,6 @@ def test_abandoned_turn_cannot_write_running_compression_back(tmp_path: Path) ->
     assert session.state_dict().get("compression") in (None, {})
 
 
-def test_stage_trace_round_enrichment_uses_latest_tool_event_status() -> None:
-    session = RuntimeAgentSession(
-        SimpleNamespace(model="demo", reasoning_effort=None, multi_agent_runner=None),
-        session_key="web:shared",
-        channel="web",
-        chat_id="shared",
-    )
-    session._state.is_running = True
-    session._state.status = "running"
-    session._frontdoor_stage_state = {
-        "active_stage_id": "frontdoor-stage-1",
-        "transition_required": False,
-        "stages": [
-            {
-                "stage_id": "frontdoor-stage-1",
-                "stage_index": 1,
-                "stage_goal": "inspect repository",
-                "status": "active",
-                "rounds": [
-                    {
-                        "round_index": 1,
-                        "tool_call_ids": ["skill-installer:1"],
-                        "tool_names": ["skill-installer"],
-                        "tools": [
-                            {
-                                "tool_call_id": "skill-installer:1",
-                                "tool_name": "skill-installer",
-                                "status": "success",
-                            }
-                        ],
-                    }
-                ],
-            }
-        ],
-    }
-    session._event_log = [
-        {
-            "type": "tool_execution_start",
-            "timestamp": "2026-03-18T12:00:00",
-            "payload": {
-                "tool_name": "skill-installer",
-                "text": "started",
-                "tool_call_id": "skill-installer:1",
-            },
-        },
-        {
-            "type": "tool_execution_end",
-            "timestamp": "2026-03-18T12:00:10",
-            "payload": {
-                "tool_name": "skill-installer",
-                "text": "completed",
-                "tool_call_id": "skill-installer:1",
-                "is_error": False,
-            },
-        },
-    ]
-
-    snapshot = session.inflight_turn_snapshot()
-
-    assert snapshot is not None
-    tool = snapshot["execution_trace_summary"]["stages"][0]["rounds"][0]["tools"][0]
-    assert tool["tool_call_id"] == "skill-installer:1"
-    assert tool["tool_name"] == "skill-installer"
-    assert tool["status"] == "success"
 
 
 @pytest.mark.asyncio
@@ -3515,33 +2953,21 @@ async def test_runtime_agent_session_persists_execution_trace_summary_into_sessi
                 event_kind="tool_result",
                 event_data={"tool_name": "skill-installer"},
             )
-            session._frontdoor_stage_state = {
-                "active_stage_id": "frontdoor-stage-1",
-                "transition_required": False,
-                "stages": [
-                    {
-                        "stage_id": "frontdoor-stage-1",
-                        "stage_index": 1,
-                        "stage_goal": "Install the weather skill",
-                        "status": "active",
-                        "rounds": [
-                            {
-                                "round_index": 1,
-                                "tool_names": ["skill-installer"],
-                                "tool_call_ids": ["skill-installer:1"],
-                                "tools": [
-                                    {
-                                        "tool_call_id": "skill-installer:1",
-                                        "tool_name": "skill-installer",
-                                        "status": "success",
-                                        "output_text": "installed weather",
-                                    }
-                                ],
-                            }
-                        ],
-                    }
-                ],
-            }
+            session._frontdoor_turns = [
+                {
+                    "seq": 1,
+                    "turn_id": session._current_turn_id(),
+                    "text": "Install the weather skill",
+                    "tools": [
+                        {
+                            "tool_call_id": "skill-installer:1",
+                            "tool_name": "skill-installer",
+                            "status": "success",
+                            "output_text": "installed weather",
+                        }
+                    ],
+                }
+            ]
             return "The weather skill has been installed."
 
     async def _cancel_session_tasks(session_key: str) -> int:
@@ -3570,350 +2996,22 @@ async def test_runtime_agent_session_persists_execution_trace_summary_into_sessi
     reloaded_session = SessionManager(tmp_path).get_or_create(session_id)
     assert [message["role"] for message in reloaded_session.messages] == ["user", "assistant"]
     assert reloaded_session.messages[1]["content"] == "The weather skill has been installed."
-    canonical_context = reloaded_session.messages[1]["canonical_context"]
-    tool = canonical_context["stages"][0]["rounds"][0]["tools"][0]
-    assert tool["status"] == "success"
-    assert tool["tool_name"] == "skill-installer"
+    assert "turns" not in reloaded_session.messages[1]
 
     recent_history = web_ceo_sessions.extract_live_raw_tail(reloaded_session, turn_limit=4)
     assert recent_history[-2] == {"role": "user", "content": "Install the weather skill"}
-    assert "Recent tool results:" in recent_history[-1]["content"]
-    assert "skill-installer (success): installed weather" in recent_history[-1]["content"]
-
-
-def test_inflight_execution_trace_summary_compacts_tool_payloads() -> None:
-    session = RuntimeAgentSession(
-        SimpleNamespace(model="gpt-test", reasoning_effort=None, multi_agent_runner=None),
-        session_key="web:shared",
-        channel="web",
-        chat_id="shared",
-    )
-    session._state.is_running = True
-    session._state.status = "running"
-    session._frontdoor_stage_state = {
-        "active_stage_id": "frontdoor-stage-1",
-        "transition_required": False,
-        "stages": [
-            {
-                "stage_id": "frontdoor-stage-1",
-                "stage_index": 1,
-                "stage_kind": "normal",
-                "stage_goal": "inspect repository",
-                "tool_round_budget": 2,
-                "tool_rounds_used": 1,
-                "status": "active",
-                "rounds": [
-                    {
-                        "round_id": "frontdoor-stage-1:round-1",
-                        "round_index": 1,
-                        "created_at": "2026-04-08T12:00:00+08:00",
-                        "budget_counted": True,
-                        "tool_call_ids": ["call-1"],
-                        "tool_names": ["load_tool_context"],
-                        "tools": [
-                            {
-                                "tool_call_id": "call-1",
-                                "tool_name": "load_tool_context",
-                                "status": "success",
-                                "arguments_text": '{"tool_id": "filesystem"}',
-                                "output_text": "very long inline tool output",
-                                "output_preview_text": "preview preserved",
-                                "output_ref": "artifact:artifact:tool-output",
-                                "started_at": "2026-04-08T12:00:00+08:00",
-                                "finished_at": "2026-04-08T12:00:05+08:00",
-                                "elapsed_seconds": 5.0,
-                            }
-                        ],
-                    }
-                ],
-            }
-        ],
+    assert recent_history[-1] == {
+        "role": "assistant",
+        "content": "The weather skill has been installed.",
     }
-    session._event_log = [
-        {
-            "timestamp": "2026-04-08T12:00:01+08:00",
-            "type": "tool_execution_start",
-            "payload": {
-                "tool_call_id": "call-1",
-                "tool_name": "load_tool_context",
-                "text": "started",
-                "data": {
-                    "arguments_text": '{"tool_id": "filesystem"}',
-                    "started_at": "2026-04-08T12:00:00+08:00",
-                },
-            },
-        },
-        {
-            "timestamp": "2026-04-08T12:00:05+08:00",
-            "type": "tool_execution_end",
-            "payload": {
-                "tool_call_id": "call-1",
-                "tool_name": "load_tool_context",
-                "text": "very long inline tool output",
-                "is_error": False,
-                "data": {
-                    "arguments_text": '{"tool_id": "filesystem"}',
-                    "output_text": "very long inline tool output",
-                    "output_ref": "artifact:artifact:tool-output",
-                    "started_at": "2026-04-08T12:00:00+08:00",
-                    "finished_at": "2026-04-08T12:00:05+08:00",
-                    "elapsed_seconds": 5.0,
-                    "recovery_decision": "retry",
-                    "related_tool_call_ids": ["call-0"],
-                    "attempted_tools": ["filesystem"],
-                    "evidence": [{"kind": "artifact", "ref": "artifact:artifact:tool-output"}],
-                    "lost_result_summary": "preview preserved",
-                },
-            },
-        }
-    ]
-
-    snapshot = session.inflight_turn_snapshot()
-
-    assert snapshot is not None
-    tools = snapshot["execution_trace_summary"]["stages"][0]["rounds"][0]["tools"]
-
-    assert tools[0]["arguments_text"] == '{"tool_id": "filesystem"}'
-    assert tools[0]["output_preview_text"] == "preview preserved"
-    assert tools[0]["output_ref"] == "artifact:artifact:tool-output"
-    assert tools[0]["started_at"] == "2026-04-08T12:00:00+08:00"
-    assert tools[0]["finished_at"] == "2026-04-08T12:00:05+08:00"
-    assert tools[0]["elapsed_seconds"] == 5.0
-    assert "recovery_decision" not in tools[0]
-    assert "related_tool_call_ids" not in tools[0]
-    assert "attempted_tools" not in tools[0]
-    assert "evidence" not in tools[0]
-    assert "lost_result_summary" not in tools[0]
 
 
-def test_ceo_snapshot_summary_keeps_old_tool_details_only_as_preview_and_ref() -> None:
-    raw_output = "short raw result"
-    session = RuntimeAgentSession(
-        SimpleNamespace(model="gpt-test", reasoning_effort=None, multi_agent_runner=None),
-        session_key="web:shared",
-        channel="web",
-        chat_id="shared",
-    )
-    session._state.is_running = True
-    session._state.status = "running"
-    session._frontdoor_stage_state = {
-        "active_stage_id": "frontdoor-stage-1",
-        "transition_required": False,
-        "stages": [
-            {
-                "stage_id": "frontdoor-stage-1",
-                "stage_index": 1,
-                "stage_kind": "normal",
-                "stage_goal": "inspect repository",
-                "tool_round_budget": 2,
-                "tool_rounds_used": 1,
-                "status": "active",
-                "rounds": [
-                        {
-                            "round_id": "frontdoor-stage-1:round-1",
-                            "round_index": 1,
-                            "created_at": "2026-04-08T12:00:00+08:00",
-                            "budget_counted": True,
-                            "tool_call_ids": ["call-1"],
-                            "tool_names": ["load_tool_context"],
-                            "tools": [
-                                {
-                                    "tool_call_id": "call-1",
-                                    "tool_name": "load_tool_context",
-                                    "status": "success",
-                                    "output_preview_text": "short raw result",
-                                    "output_ref": "artifact:artifact:tool-output",
-                                }
-                            ],
-                        }
-                    ],
-                }
-        ],
-    }
-    session._event_log = [
-        {
-            "timestamp": "2026-04-08T12:00:01+08:00",
-            "type": "tool_execution_start",
-            "payload": {
-                "tool_call_id": "call-1",
-                "tool_name": "load_tool_context",
-                "text": "started",
-            },
-        },
-        {
-            "timestamp": "2026-04-08T12:00:05+08:00",
-            "type": "tool_execution_end",
-            "payload": {
-                "tool_call_id": "call-1",
-                "tool_name": "load_tool_context",
-                "text": raw_output,
-                "is_error": False,
-                "data": {
-                    "output_text": raw_output,
-                    "output_ref": "artifact:artifact:tool-output",
-                    "finished_at": "2026-04-08T12:00:05+08:00",
-                },
-            },
-        }
-    ]
-
-    snapshot = session.inflight_turn_snapshot()
-
-    assert snapshot is not None
-    tools = snapshot["execution_trace_summary"]["stages"][0]["rounds"][0]["tools"]
-
-    assert tools[0]["output_preview_text"]
-    assert tools[0]["output_preview_text"] == raw_output
-    assert tools[0]["output_ref"] == "artifact:artifact:tool-output"
 
 
-def test_ceo_snapshot_summary_preserves_falsy_event_payload_values() -> None:
-    session = RuntimeAgentSession(
-        SimpleNamespace(model="gpt-test", reasoning_effort=None, multi_agent_runner=None),
-        session_key="web:shared",
-        channel="web",
-        chat_id="shared",
-    )
-    session._state.is_running = True
-    session._state.status = "running"
-    session._frontdoor_stage_state = {
-        "active_stage_id": "frontdoor-stage-1",
-        "transition_required": False,
-        "stages": [
-            {
-                "stage_id": "frontdoor-stage-1",
-                "stage_index": 1,
-                "stage_kind": "normal",
-                "stage_goal": "inspect repository",
-                "tool_round_budget": 2,
-                "tool_rounds_used": 1,
-                "status": "active",
-                "rounds": [
-                    {
-                        "round_id": "frontdoor-stage-1:round-1",
-                        "round_index": 1,
-                        "created_at": "2026-04-08T12:00:00+08:00",
-                        "budget_counted": True,
-                        "tool_call_ids": ["call-1"],
-                        "tool_names": ["calculator"],
-                        "tools": [
-                            {
-                                "tool_call_id": "call-1",
-                                "tool_name": "calculator",
-                                "status": "success",
-                                "arguments_text": "0",
-                                "output_text": "False",
-                            }
-                        ],
-                    }
-                ],
-            }
-        ],
-    }
-    session._event_log = [
-        {
-            "timestamp": "2026-04-08T12:00:01+08:00",
-            "type": "tool_execution_end",
-            "payload": {
-                "tool_call_id": "call-1",
-                "tool_name": "calculator",
-                "text": "finished",
-                "is_error": False,
-                "data": {
-                    "arguments_text": 0,
-                    "output_text": False,
-                },
-            },
-        }
-    ]
-
-    snapshot = session.inflight_turn_snapshot()
-
-    assert snapshot is not None
-    tool = snapshot["execution_trace_summary"]["stages"][0]["rounds"][0]["tools"][0]
-
-    assert tool["arguments_text"] == "0"
-    assert tool["output_text"] == "False"
 
 
-def test_ceo_snapshot_summary_falls_back_to_tool_result_text_when_output_text_missing() -> None:
-    session = RuntimeAgentSession(
-        SimpleNamespace(model="gpt-test", reasoning_effort=None, multi_agent_runner=None),
-        session_key="web:shared",
-        channel="web",
-        chat_id="shared",
-    )
-    session._state.is_running = True
-    session._state.status = "running"
-    session._frontdoor_stage_state = {
-        "active_stage_id": "frontdoor-stage-1",
-        "transition_required": False,
-        "stages": [
-            {
-                "stage_id": "frontdoor-stage-1",
-                "stage_index": 1,
-                "stage_kind": "normal",
-                "stage_goal": "inspect skill workflow",
-                "tool_round_budget": 2,
-                "tool_rounds_used": 1,
-                "status": "active",
-                "rounds": [
-                    {
-                        "round_id": "frontdoor-stage-1:round-1",
-                        "round_index": 1,
-                        "created_at": "2026-04-08T12:00:00+08:00",
-                        "budget_counted": True,
-                        "tool_call_ids": ["call-1"],
-                        "tool_names": ["load_skill_context"],
-                        "tools": [
-                            {
-                                "tool_call_id": "call-1",
-                                "tool_name": "load_skill_context",
-                                "status": "success",
-                                "arguments_text": "load_skill_context (skill_id=find-skills)",
-                                "output_preview_text": "loaded full skill body",
-                            }
-                        ],
-                    }
-                ],
-            }
-        ],
-    }
-    session._event_log = [
-        {
-            "timestamp": "2026-04-08T12:00:01+08:00",
-            "type": "tool_execution_start",
-            "payload": {
-                "tool_call_id": "call-1",
-                "tool_name": "load_skill_context",
-                "text": "load_skill_context (skill_id=find-skills)",
-                "data": {
-                    "arguments_text": "load_skill_context (skill_id=find-skills)",
-                },
-            },
-        },
-        {
-            "timestamp": "2026-04-08T12:00:05+08:00",
-            "type": "tool_execution_end",
-            "payload": {
-                "tool_call_id": "call-1",
-                "tool_name": "load_skill_context",
-                "text": '{"result_text":"loaded full skill body","status":"success"}',
-                "is_error": False,
-                "data": {
-                    "output_text": "",
-                },
-            },
-        },
-    ]
 
-    snapshot = session.inflight_turn_snapshot()
 
-    assert snapshot is not None
-    tool = snapshot["execution_trace_summary"]["stages"][0]["rounds"][0]["tools"][0]
-
-    assert tool["arguments_text"] == "load_skill_context (skill_id=find-skills)"
-    assert tool["output_preview_text"] == "loaded full skill body"
 
 
 def test_ceo_frontdoor_support_extracts_output_ref_for_progress_events() -> None:
@@ -4298,335 +3396,12 @@ async def test_ceo_slow_generic_tool_stays_inline_and_never_detaches() -> None:
     assert elapsed_seconds is not None and elapsed_seconds >= 0.1
 
 
-def test_stage_trace_call_id_fallback_does_not_reuse_same_tool_result_across_rounds() -> None:
-    session = RuntimeAgentSession(
-        SimpleNamespace(model="gpt-test", reasoning_effort=None, multi_agent_runner=None),
-        session_key="web:shared",
-        channel="web",
-        chat_id="shared",
-    )
-    session._state.is_running = True
-    session._state.status = "running"
-    session._frontdoor_stage_state = {
-        "active_stage_id": "frontdoor-stage-1",
-        "transition_required": False,
-        "stages": [
-            {
-                "stage_id": "frontdoor-stage-1",
-                "stage_index": 1,
-                "stage_kind": "normal",
-                "stage_goal": "inspect repository",
-                "tool_round_budget": 3,
-                "tool_rounds_used": 2,
-                "status": "active",
-                "rounds": [
-                    {"round_index": 1, "tool_call_ids": ["filesystem:1"], "tool_names": ["filesystem"]},
-                    {"round_index": 2, "tool_call_ids": ["filesystem:2"], "tool_names": ["filesystem"]},
-                ],
-            }
-        ],
-    }
-    session._event_log = [
-        {
-            "type": "tool_execution_start",
-            "timestamp": "2026-04-08T08:00:00Z",
-            "payload": {
-                "tool_name": "filesystem",
-                "text": "round 1 started",
-                "tool_call_id": "filesystem:1",
-            },
-        },
-        {
-            "type": "tool_execution_end",
-            "timestamp": "2026-04-08T08:00:02Z",
-            "payload": {
-                "tool_name": "filesystem",
-                "text": "round 1 done",
-                "tool_call_id": "filesystem:1",
-                "is_error": False,
-            },
-        },
-        {
-            "type": "tool_execution_start",
-            "timestamp": "2026-04-08T08:00:03Z",
-            "payload": {
-                "tool_name": "filesystem",
-                "text": "round 2 started",
-                "tool_call_id": "filesystem:2",
-            },
-        },
-        {
-            "type": "tool_execution_end",
-            "timestamp": "2026-04-08T08:00:04Z",
-            "payload": {
-                "tool_name": "filesystem",
-                "text": "round 2 done",
-                "tool_call_id": "filesystem:2",
-                "is_error": False,
-            },
-        },
-    ]
-
-    snapshot = session.inflight_turn_snapshot()
-
-    assert snapshot is not None
-    rounds = snapshot["execution_trace_summary"]["stages"][0]["rounds"]
-    assert [round_item["tool_call_ids"] for round_item in rounds] == [["filesystem:1"], ["filesystem:2"]]
-    assert [round_item["tool_names"] for round_item in rounds] == [["filesystem"], ["filesystem"]]
-    assert [round_item["tools"] for round_item in rounds] == [[], []]
 
 
-def test_stage_trace_with_mixed_same_name_rounds_does_not_pull_future_exec_into_prior_round() -> None:
-    session = RuntimeAgentSession(
-        SimpleNamespace(model="gpt-test", reasoning_effort=None, multi_agent_runner=None),
-        session_key="web:shared",
-        channel="web",
-        chat_id="shared",
-    )
-    session._state.is_running = True
-    session._state.status = "running"
-    exec_round_1 = "call_yng5IS4S1QGJ7gGa35BArtLt|fc_036f236b3fb53d5b0169de312be2f48191934a3b4ca58f9b80"
-    load_round_1 = "call_lftc3j1B076UIrNCmn4kyyrZ|fc_036f236b3fb53d5b0169de312be30081918fc4c8ce00206cc9"
-    exec_round_2 = "call_4TQeCNWdG1PeIjqrgRLm8NkG|fc_036f236b3fb53d5b0169de312f5e1c8191ab2796363eb60754"
-    exec_round_3 = "call_7HkcgF1xR6v670xKw298IF1m|fc_036f236b3fb53d5b0169de3139173c8191a267d514c2c85d1d"
-    session._frontdoor_stage_state = {
-        "active_stage_id": "frontdoor-stage-1",
-        "transition_required": True,
-        "stages": [
-            {
-                "stage_id": "frontdoor-stage-1",
-                "stage_index": 1,
-                "stage_kind": "normal",
-                "stage_goal": "write markdown file on desktop",
-                "tool_round_budget": 4,
-                "tool_rounds_used": 3,
-                "status": "active",
-                "created_at": "2026-04-14T20:20:54+08:00",
-                "rounds": [
-                    {
-                        "round_id": "frontdoor-stage-1:round-1",
-                        "round_index": 1,
-                        "created_at": "2026-04-14T20:21:01+08:00",
-                        "tool_call_ids": [exec_round_1, load_round_1],
-                        "tool_names": ["exec", "load_tool_context"],
-                    },
-                    {
-                        "round_id": "frontdoor-stage-1:round-2",
-                        "round_index": 2,
-                        "created_at": "2026-04-14T20:21:08+08:00",
-                        "tool_call_ids": [exec_round_2],
-                        "tool_names": ["exec"],
-                    },
-                    {
-                        "round_id": "frontdoor-stage-1:round-3",
-                        "round_index": 3,
-                        "created_at": "2026-04-14T20:21:18+08:00",
-                        "tool_call_ids": [exec_round_3],
-                        "tool_names": ["exec"],
-                    },
-                ],
-            }
-        ],
-    }
-    session._event_log = [
-        {
-            "type": "tool_execution_end",
-            "timestamp": "2026-04-14T20:21:01.642584",
-            "payload": {
-                "tool_name": "exec",
-                "text": '{"status":"success","head_preview":"env"}',
-                "tool_call_id": exec_round_1,
-                "is_error": False,
-            },
-        },
-        {
-            "type": "tool_execution_end",
-            "timestamp": "2026-04-14T20:21:00.822205",
-            "payload": {
-                "tool_name": "load_tool_context",
-                "text": '{"ok":true,"tool_id":"filesystem_write"}',
-                "tool_call_id": load_round_1,
-                "is_error": False,
-            },
-        },
-        {
-            "type": "tool_execution_end",
-            "timestamp": "2026-04-14T20:21:08.273269",
-            "payload": {
-                "tool_name": "exec",
-                "text": '{"status":"error","head_preview":"blocked"}',
-                "tool_call_id": exec_round_2,
-                "is_error": False,
-            },
-        },
-        {
-            "type": "tool_execution_end",
-            "timestamp": "2026-04-14T20:21:18.232596",
-            "payload": {
-                "tool_name": "exec",
-                "text": '{"status":"error","head_preview":"retry"}',
-                "tool_call_id": exec_round_3,
-                "is_error": False,
-            },
-        },
-    ]
-
-    snapshot = session.inflight_turn_snapshot()
-
-    assert snapshot is not None
-    rounds = snapshot["execution_trace_summary"]["stages"][0]["rounds"]
-    assert [round_item["tool_call_ids"] for round_item in rounds] == [
-        [exec_round_1, load_round_1],
-        [exec_round_2],
-        [exec_round_3],
-    ]
-    assert [round_item["tool_names"] for round_item in rounds] == [
-        ["exec", "load_tool_context"],
-        ["exec"],
-        ["exec"],
-    ]
-    assert [round_item["tools"] for round_item in rounds] == [[], [], []]
 
 
-def test_stage_trace_uses_existing_round_tools_without_event_log_reassignment() -> None:
-    session = RuntimeAgentSession(
-        SimpleNamespace(model="gpt-test", reasoning_effort=None, multi_agent_runner=None),
-        session_key="web:shared",
-        channel="web",
-        chat_id="shared",
-    )
-    session._state.is_running = True
-    session._state.status = "running"
-    session._frontdoor_stage_state = {
-        "active_stage_id": "frontdoor-stage-1",
-        "transition_required": False,
-        "stages": [
-            {
-                "stage_id": "frontdoor-stage-1",
-                "stage_index": 1,
-                "stage_kind": "normal",
-                "stage_goal": "inspect repository",
-                "tool_round_budget": 2,
-                "tool_rounds_used": 2,
-                "status": "active",
-                "rounds": [
-                    {
-                        "round_id": "frontdoor-stage-1:round-1",
-                        "round_index": 1,
-                        "created_at": "2026-04-08T08:00:00Z",
-                        "tool_call_ids": ["filesystem:1"],
-                        "tool_names": ["filesystem"],
-                        "tools": [
-                            {
-                                "tool_call_id": "filesystem:1",
-                                "tool_name": "filesystem",
-                                "status": "success",
-                                "arguments_text": "filesystem (path=/tmp/a.txt)",
-                                "output_text": "round 1 done",
-                                "output_ref": "",
-                                "timestamp": "2026-04-08T08:00:02Z",
-                                "kind": "tool_result",
-                                "source": "user",
-                            }
-                        ],
-                    },
-                    {
-                        "round_id": "frontdoor-stage-1:round-2",
-                        "round_index": 2,
-                        "created_at": "2026-04-08T08:00:03Z",
-                        "tool_call_ids": ["filesystem:2"],
-                        "tool_names": ["filesystem"],
-                        "tools": [
-                            {
-                                "tool_call_id": "filesystem:2",
-                                "tool_name": "filesystem",
-                                "status": "success",
-                                "arguments_text": "filesystem (path=/tmp/b.txt)",
-                                "output_text": "round 2 done",
-                                "output_ref": "",
-                                "timestamp": "2026-04-08T08:00:04Z",
-                                "kind": "tool_result",
-                                "source": "user",
-                            }
-                        ],
-                    },
-                ],
-            }
-        ],
-    }
-    session._event_log = [
-        {
-            "type": "tool_execution_end",
-            "timestamp": "2026-04-08T08:00:05Z",
-            "payload": {
-                "tool_name": "filesystem",
-                "text": "future stray tool",
-                "tool_call_id": "filesystem:3",
-                "is_error": False,
-            },
-        }
-    ]
-
-    snapshot = session.inflight_turn_snapshot()
-
-    assert snapshot is not None
-    rounds = snapshot["execution_trace_summary"]["stages"][0]["rounds"]
-    assert [tool["tool_call_id"] for tool in rounds[0]["tools"]] == ["filesystem:1"]
-    assert [tool["tool_call_id"] for tool in rounds[1]["tools"]] == ["filesystem:2"]
 
 
-@pytest.mark.parametrize(
-    "stages",
-    [
-        [None],
-        [{}],
-        [{"foo": "bar"}],
-    ],
-)
-def test_inflight_snapshot_with_malformed_stage_state_keeps_legacy_tool_flow(stages: list[object]) -> None:
-    session = RuntimeAgentSession(
-        SimpleNamespace(model="demo", reasoning_effort=None, multi_agent_runner=None),
-        session_key="web:shared",
-        channel="web",
-        chat_id="shared",
-    )
-    session._state.is_running = True
-    session._state.status = "running"
-    session._frontdoor_stage_state = {"stages": stages}
-    session._event_log = [
-        {
-            "type": "tool_execution_start",
-            "timestamp": "2026-04-08T08:20:00Z",
-            "payload": {
-                "tool_name": "load_tool_context",
-                "text": "load_tool_context started",
-                "tool_call_id": "load_tool_context:1",
-            },
-        },
-        {
-            "type": "tool_execution_end",
-            "timestamp": "2026-04-08T08:20:02Z",
-            "payload": {
-                "tool_name": "load_tool_context",
-                "text": "load_tool_context done",
-                "tool_call_id": "load_tool_context:1",
-                "is_error": False,
-            },
-        },
-    ]
-
-    snapshot = session.inflight_turn_snapshot()
-
-    if stages == [None]:
-        assert snapshot is None
-        return
-
-    assert snapshot is not None
-    summary = snapshot.get("execution_trace_summary") or {}
-    assert summary["stages"][0]["stage_id"] == "frontdoor-stage-1"
-    assert summary["stages"][0]["stage_goal"] == ""
-    assert summary["stages"][0]["rounds"] == []
-    assert "tool_events" not in snapshot
 
 
 @pytest.mark.asyncio
@@ -4899,7 +3674,7 @@ async def test_runtime_agent_session_recovers_dispatched_async_task_after_intern
     class _FakeRunner:
         async def run_turn(self, *, user_input, session, on_progress):
             _ = user_input
-            session._frontdoor_stage_state = _sample_frontdoor_stage_state()
+            session._frontdoor_turns = _sample_frontdoor_turns()
             await on_progress(
                 "create_async_task started",
                 event_kind="tool_start",
@@ -4976,7 +3751,7 @@ async def test_runtime_agent_session_preserves_streamed_reply_when_async_dispatc
     class _FakeRunner:
         async def run_turn(self, *, user_input, session, on_progress):
             _ = user_input
-            session._frontdoor_stage_state = _sample_frontdoor_stage_state()
+            session._frontdoor_turns = _sample_frontdoor_turns()
             await on_progress(
                 "create_async_task started",
                 event_kind="tool_start",
@@ -5062,7 +3837,7 @@ async def test_runtime_agent_session_logs_traceback_for_recovered_async_dispatch
     class _FakeRunner:
         async def run_turn(self, *, user_input, session, on_progress):
             _ = user_input
-            session._frontdoor_stage_state = _sample_frontdoor_stage_state()
+            session._frontdoor_turns = _sample_frontdoor_turns()
             await on_progress(
                 "create_async_task started",
                 event_kind="tool_start",
@@ -6127,94 +4902,6 @@ def test_ceo_websocket_turn_patch_carries_live_execution_trace_summary(tmp_path:
     assert final_payload["data"]["turn_id"] == "turn-user-live"
 
 
-def test_ceo_websocket_frontdoor_stage_synced_pushes_live_turn_patch(tmp_path: Path, monkeypatch) -> None:
-    """frontdoor_stage_synced(图节点同步后发射)必须主动推送一次 ceo.turn.patch,
-    让新开阶段的 canonical 增量在没有后续工具事件时也能立刻到达前端。"""
-    _mock_workspace(monkeypatch, tmp_path)
-
-    async def _ensure_services(_agent) -> None:
-        return None
-
-    monkeypatch.setattr(websocket_ceo, "ensure_web_runtime_services", _ensure_services)
-
-    class _StageSyncSession:
-        def __init__(self) -> None:
-            self.state = SimpleNamespace(status="idle", is_running=False)
-            self._listeners = set()
-
-        def subscribe(self, listener):
-            self._listeners.add(listener)
-            return lambda: self._listeners.discard(listener)
-
-        def state_dict(self) -> dict[str, object]:
-            return {"status": self.state.status, "is_running": self.state.is_running}
-
-        def inflight_turn_snapshot(self):
-            return {
-                "status": "running",
-                "turn_id": "turn-stage-sync-live",
-                "source": "user",
-                "user_message": {"content": "继续"},
-                "assistant_text": "已进入第二阶段",
-                "canonical_context": {
-                    "active_stage_id": "frontdoor-stage-2",
-                    "transition_required": False,
-                    "stages": [
-                        {
-                            "stage_id": "frontdoor-stage-2",
-                            "stage_index": 2,
-                            "stage_kind": "normal",
-                            "system_generated": False,
-                            "status": "active",
-                            "stage_goal": "第二阶段：分析",
-                            "tool_round_budget": 6,
-                            "tool_rounds_used": 0,
-                            "completed_stage_summary": "",
-                            "key_refs": [],
-                            "rounds": [],
-                        }
-                    ],
-                },
-            }
-
-        async def prompt(self, user_message) -> SimpleNamespace:
-            _ = user_message
-            self.state.status = "running"
-            self.state.is_running = True
-            event = AgentEvent(type="frontdoor_stage_synced", timestamp="2026-09-05T12:00:00", payload={})
-            for listener in list(self._listeners):
-                result = listener(event)
-                if hasattr(result, "__await__"):
-                    await result
-            return SimpleNamespace(output="ok")
-
-    session_id = "web:ceo-stage-sync"
-    session_manager = SessionManager(tmp_path)
-    live_session = _StageSyncSession()
-    agent = SimpleNamespace(
-        sessions=session_manager,
-        main_task_service=_TaskService(),
-    )
-    monkeypatch.setattr(websocket_ceo, "get_agent", lambda: agent)
-    monkeypatch.setattr(websocket_ceo, "get_runtime_manager", lambda _agent=None: _RuntimeManager(live_session))
-
-    client = TestClient(_build_app())
-    with client.websocket_connect(f"/api/ws/ceo?session_id={session_id}") as ws:
-        _recv_until(ws, lambda payload: payload.get("type") == "ceo.sessions.snapshot")
-
-        ws.send_json({"type": "client.user_message", "text": "go"})
-
-        patch_payload, _seen = _recv_until(
-            ws,
-            lambda payload: payload.get("type") == "ceo.turn.patch"
-            and isinstance(payload.get("data", {}).get("inflight_turn"), dict),
-        )
-
-    inflight_turn = patch_payload["data"]["inflight_turn"]
-    assert inflight_turn["turn_id"] == "turn-stage-sync-live"
-    delta = inflight_turn.get("canonical_context_delta") or {}
-    assert [item.get("stage_id") for item in list(delta.get("stages") or [])] == ["frontdoor-stage-2"]
-    assert "canonical_context" not in inflight_turn
 
 
 def test_ceo_websocket_error_payload_omits_legacy_interaction_trace(tmp_path: Path, monkeypatch) -> None:
@@ -6294,170 +4981,6 @@ def test_ceo_websocket_memory_error_emits_non_empty_error_message(tmp_path: Path
     assert len(error_events) == 1
     assert error_events[0]["data"]["message"] == "运行时内存不足，未能完成当前轮次"
     assert error_events[0]["data"]["source"] == "user"
-
-
-def test_ceo_websocket_manual_pause_restores_paused_inflight_turn_without_final_reply(tmp_path: Path, monkeypatch) -> None:
-    _mock_workspace(monkeypatch, tmp_path)
-
-    async def _ensure_services(_agent) -> None:
-        return None
-
-    async def _refresh_web_agent_runtime(*, force: bool = False, reason: str = "") -> None:
-        _ = force, reason
-        return None
-
-    monkeypatch.setattr(websocket_ceo, "ensure_web_runtime_services", _ensure_services)
-    monkeypatch.setattr("g3ku.shells.web.refresh_web_agent_runtime", _refresh_web_agent_runtime)
-
-    class _CancelToken:
-        def cancel(self, *, reason: str = "") -> None:
-            _ = reason
-
-    class _PauseableRunner:
-        async def run_turn(self, *, user_input, session, on_progress):
-            _ = user_input
-            await on_progress(
-                "skill-installer started",
-                event_kind="tool_start",
-                event_data={"tool_name": "skill-installer"},
-            )
-            session.state.latest_message = "Working on it..."
-            session._frontdoor_stage_state = {
-                "active_stage_id": "frontdoor-stage-1",
-                "transition_required": False,
-                "stages": [
-                    {
-                        "stage_id": "frontdoor-stage-1",
-                        "stage_index": 1,
-                        "stage_goal": "Pause and restore me",
-                        "status": "active",
-                        "rounds": [
-                            {
-                                "round_index": 1,
-                                "tool_names": ["skill-installer"],
-                                "tool_call_ids": ["skill-installer:1"],
-                                "tools": [
-                                    {
-                                        "tool_call_id": "skill-installer:1",
-                                        "tool_name": "skill-installer",
-                                        "status": "running",
-                                        "source": "user",
-                                    }
-                                ],
-                            }
-                        ],
-                    }
-                ],
-            }
-            await session._emit_state_snapshot()
-            await asyncio.Future()
-
-    class _AgentLoopStub:
-        def __init__(self, workspace: Path) -> None:
-            self.model = "gpt-test"
-            self.reasoning_effort = None
-            self.sessions = SessionManager(workspace)
-            self.main_task_service = _TaskService()
-            self.multi_agent_runner = _PauseableRunner()
-            self.memory_manager = None
-            self.commit_service = None
-            self.prompt_trace = False
-            self._active_tasks: dict[str, set[asyncio.Task[object]]] = {}
-            self.web_session_heartbeat = _HeartbeatController()
-
-        def create_session_cancellation_token(self, _session_key: str):
-            return _CancelToken()
-
-        def release_session_cancellation_token(self, _session_key: str, _token) -> None:
-            return None
-
-        def _register_active_task(self, session_key: str, task: asyncio.Task[object]) -> None:
-            bucket = self._active_tasks.setdefault(str(session_key or ""), set())
-            bucket.add(task)
-
-        async def cancel_session_tasks(self, session_key: str) -> int:
-            key = str(session_key or "")
-            tasks = list(self._active_tasks.pop(key, set()))
-            for task in tasks:
-                task.cancel()
-            if tasks:
-                await asyncio.gather(*tasks, return_exceptions=True)
-            return len(tasks)
-
-        def _use_rag_memory(self) -> bool:
-            return False
-
-    session_id = "web:ceo-pause-reconnect"
-    agent = _AgentLoopStub(tmp_path)
-    runtime_manager = SessionRuntimeManager(agent)
-    holder = SimpleNamespace(manager=runtime_manager)
-
-    monkeypatch.setattr(websocket_ceo, "get_agent", lambda: agent)
-    monkeypatch.setattr(websocket_ceo, "get_runtime_manager", lambda _agent=None: holder.manager)
-
-    client = TestClient(_build_app())
-    with client.websocket_connect(f"/api/ws/ceo?session_id={session_id}") as ws:
-        _recv_until(ws, lambda payload: payload.get("type") == "ceo.sessions.snapshot")
-
-        ws.send_json({"type": "client.user_message", "text": "Pause and restore me"})
-
-        patch_payload, _tool_seen = _recv_until(
-            ws,
-            lambda payload: payload.get("type") == "ceo.turn.patch"
-            and isinstance(payload.get("data", {}).get("inflight_turn"), dict)
-            and list(
-                ((payload.get("data", {}).get("inflight_turn", {}) or {}).get("execution_trace_summary", {}) or {})
-                .get("stages")
-                or []
-            ),
-        )
-        inflight_turn = patch_payload["data"]["inflight_turn"]
-        tool = inflight_turn["execution_trace_summary"]["stages"][0]["rounds"][0]["tools"][0]
-        assert tool["tool_name"] == "skill-installer"
-        assert tool["source"] == "user"
-        assert "interaction_trace" not in inflight_turn
-        assert "stage" not in inflight_turn
-
-        ws.send_json({"type": "client.pause_turn"})
-
-        paused_state, seen = _recv_until(
-            ws,
-            lambda payload: payload.get("type") == "ceo.state"
-            and str(payload.get("data", {}).get("state", {}).get("status") or "") == "completed",
-        )
-        pause_ack = next(item for item in seen if item.get("type") == "ceo.control_ack")
-        assert pause_ack["data"]["source"] == "user"
-        assert all(item.get("type") != "ceo.reply.final" for item in seen)
-
-        gates_frame, _gates_seen = _recv_until(
-            ws,
-            lambda payload: payload.get("type") == "ceo.edit_fork.gates",
-        )
-        gates_data = dict(gates_frame.get("data") or {})
-        # 暂停收尾必须仍补发门槛帧（它曾被 paused 分支整段跳过），且 Fork 资格不跟着
-        # 稳定态一起收窄：暂停时输入不可用，Fork 是把这条前缀救走的唯一出口。
-        assert isinstance(gates_data.get("turn_ids"), list)
-        assert isinstance(gates_data.get("fork_reply_turn_ids"), list)
-        assert len(gates_data["fork_reply_turn_ids"]) >= len(gates_data["turn_ids"])
-        # 那颗按钮只挂在回复行上，提问轴的列表没有渲染者，帧里不许再出现。
-        assert "fork_turn_ids" not in gates_data, "补发帧仍带着 fork_turn_ids"
-
-    holder.manager = SessionRuntimeManager(agent)
-
-    with client.websocket_connect(f"/api/ws/ceo?session_id={session_id}") as ws:
-        snapshot, _seen = _recv_until(ws, lambda payload: payload.get("type") == "snapshot.ceo")
-
-    inflight_turn = snapshot["data"].get("inflight_turn")
-    assert inflight_turn is None
-    assert [message["role"] for message in snapshot["data"].get("messages", [])] == ["user", "assistant"]
-    assert snapshot["data"]["messages"][0]["content"] == "Pause and restore me"
-    assert snapshot["data"]["messages"][1]["status"] == "paused"
-    persisted = SessionManager(tmp_path).get_or_create(session_id)
-    assert [message["role"] for message in persisted.messages] == ["user", "assistant"]
-    assert persisted.messages[0]["content"] == "Pause and restore me"
-    assert persisted.messages[1]["status"] == "paused"
-    assert persisted.messages[1]["metadata"]["source"] == "manual_pause_archive"
-    assert agent.web_session_heartbeat.clear_calls == []
 
 
 def test_ceo_websocket_does_not_restore_terminal_error_inflight_snapshot_from_disk(tmp_path: Path, monkeypatch) -> None:
@@ -6792,24 +5315,21 @@ def test_ceo_tool_event_serializer_falls_back_to_output_text_when_text_is_blank(
 def test_execution_trace_snapshot_helpers_extract_preview_and_updated_at() -> None:
     snapshot = {
         "assistant_text": "",
-        "canonical_context": {
-            "stages": [
-                {
-                    "rounds": [
-                        {
-                            "tools": [
-                                {
-                                    "tool_name": "create_async_task",
-                                    "status": "success",
-                                    "output_text": "created background task task:demo-123",
-                                    "timestamp": "2026-04-07T12:10:00",
-                                }
-                            ]
-                        }
-                    ]
-                }
-            ]
-        },
+        "frontdoor_turns": [
+            {
+                "seq": 1,
+                "turn_id": "turn-1",
+                "text": "",
+                "tools": [
+                    {
+                        "tool_name": "create_async_task",
+                        "status": "success",
+                        "output_text": "created background task task:demo-123",
+                        "finished_at": "2026-04-07T12:10:00",
+                    }
+                ],
+            }
+        ],
         "persisted_at": "2026-04-07T12:00:00",
     }
 
@@ -7661,7 +6181,6 @@ async def test_ceo_frontdoor_prepare_turn_heartbeat_inherits_previous_tool_state
         "task_list",
         "filesystem_write",
         "silent",
-        "submit_next_stage",
     ]
     assert state_update["frontdoor_selection_debug"]["candidate_tool_names"] == ["web_fetch"]
     assert state_update["frontdoor_selection_debug"]["contract_present_tool_names"] == ["filesystem_write"]
@@ -7693,11 +6212,11 @@ async def test_ceo_frontdoor_prepare_turn_heartbeat_inherits_previous_tool_state
         for item in list(state_update["dynamic_appendix_messages"] or [])
         if is_frontdoor_tool_contract_message(dict(item))
     ]
-    assert len(contract_messages) == 2  # 一份稳定契约 + 一份活状态块
+    assert len(contract_messages) == 1  # 运行时工具合同只有一份
     contract_text = "\n".join(str(item["content"] or "") for item in contract_messages)
     assert (
         list(state_update["frontdoor_selection_debug"]["callable_tool_names"])
-        == ["create_async_task", "task_list", "filesystem_write", "silent", "submit_next_stage"]
+        == ["create_async_task", "task_list", "filesystem_write", "silent"]
     )
     # D11：callable 不再渲成模型可见的一行，上一跳继承来的那份只在上面的读数里可见。
     assert "callable_tools:" not in contract_text
@@ -7887,7 +6406,6 @@ async def test_ceo_frontdoor_prepare_turn_cron_inherits_previous_tool_state_with
         "task_list",
         "filesystem_write",
         "silent",
-        "submit_next_stage",
     ]
     assert state_update["frontdoor_selection_debug"]["candidate_tool_names"] == ["web_fetch"]
     assert state_update["frontdoor_selection_debug"]["contract_present_tool_names"] == ["filesystem_write"]
@@ -7952,11 +6470,11 @@ async def test_ceo_frontdoor_prepare_turn_cron_inherits_previous_tool_state_with
         for item in list(state_update["dynamic_appendix_messages"] or [])
         if is_frontdoor_tool_contract_message(dict(item))
     ]
-    assert len(contract_messages) == 2  # 一份稳定契约 + 一份活状态块
+    assert len(contract_messages) == 1  # 运行时工具合同只有一份
     contract_text = "\n".join(str(item["content"] or "") for item in contract_messages)
     assert (
         list(state_update["frontdoor_selection_debug"]["callable_tool_names"])
-        == ["create_async_task", "task_list", "filesystem_write", "silent", "submit_next_stage"]
+        == ["create_async_task", "task_list", "filesystem_write", "silent"]
     )
     # D11：callable 不再渲成模型可见的一行，上一跳继承来的那份只在上面的读数里可见。
     assert "callable_tools:" not in contract_text
@@ -8501,80 +7019,8 @@ def _stage(stage_id: str, stage_index: int, *, summary: str) -> dict:
     }
 
 
-def test_web_session_heartbeat_final_payload_carries_canonical_context_delta(tmp_path: Path) -> None:
-    session_id = "web:ceo-heartbeat-final-canonical"
-    session_manager = SessionManager(tmp_path)
-    persisted = session_manager.get_or_create(session_id)
-    previous_context = {
-        "active_stage_id": "",
-        "transition_required": False,
-        "stages": [_stage("frontdoor-stage-1", 1, summary="创建任务成功")],
-    }
-    current_context = copy.deepcopy(previous_context)
-    current_context["stages"].append(_stage("frontdoor-stage-2", 2, summary="最终报告"))
-    persisted.add_message("assistant", "前置回复", turn_id="turn-previous-phase")
-    persisted.messages[-1]["canonical_context"] = copy.deepcopy(previous_context)
-    persisted.add_message("assistant", "当前回复", turn_id="turn-current-phase")
-    persisted.messages[-1]["canonical_context"] = copy.deepcopy(current_context)
-    session_manager.save(persisted)
-    live_session = _FakeHeartbeatSession(output="Background final result.")
-    service = WebSessionHeartbeatService(
-        workspace=tmp_path,
-        agent=SimpleNamespace(tool_execution_manager=None),
-        runtime_manager=_RuntimeManager(live_session),
-        main_task_service=_TaskService(),
-        session_manager=session_manager,
-    )
-
-    payload = service._build_heartbeat_final_payload(
-        session_id,
-        text="Background final result.",
-        turn_id="turn-heartbeat-final",
-        previous_canonical_context=previous_context,
-    )
-
-    assert payload["source"] == "heartbeat"
-    assert payload["turn_id"] == "turn-heartbeat-final"
-    assert payload["text"] == "Background final result."
-    assert [stage["stage_id"] for stage in payload["canonical_context"]["stages"]] == [
-        "frontdoor-stage-1",
-        "frontdoor-stage-2",
-    ]
-    assert [stage["stage_id"] for stage in payload["canonical_context_delta"]["stages"]] == [
-        "frontdoor-stage-2"
-    ]
 
 
-def test_web_session_heartbeat_final_payload_omits_canonical_when_delta_empty(tmp_path: Path) -> None:
-    session_id = "web:ceo-heartbeat-final-canonical-empty"
-    session_manager = SessionManager(tmp_path)
-    persisted = session_manager.get_or_create(session_id)
-    current_context = {
-        "active_stage_id": "",
-        "transition_required": False,
-        "stages": [_stage("frontdoor-stage-1", 1, summary="已完成的阶段")],
-    }
-    persisted.add_message("assistant", "前置回复", turn_id="turn-previous-phase")
-    persisted.messages[-1]["canonical_context"] = copy.deepcopy(current_context)
-    session_manager.save(persisted)
-    service = WebSessionHeartbeatService(
-        workspace=tmp_path,
-        agent=SimpleNamespace(tool_execution_manager=None),
-        runtime_manager=_RuntimeManager(_FakeHeartbeatSession(output="done.")),
-        main_task_service=_TaskService(),
-        session_manager=session_manager,
-    )
-
-    payload = service._build_heartbeat_final_payload(
-        session_id,
-        text="done.",
-        turn_id="turn-heartbeat-default",
-        previous_canonical_context=current_context,
-    )
-
-    assert list(payload.keys()) == ["text", "source", "turn_id"]
-    assert "canonical_context" not in payload
-    assert "canonical_context_delta" not in payload
 
 
 @pytest.mark.asyncio
@@ -8745,15 +7191,14 @@ def test_web_ceo_session_summary_helpers_exclude_hidden_heartbeat_reply_surfaces
 
 
 def test_websocket_build_ceo_snapshot_keeps_archived_paused_assistant_status_for_ui_restore() -> None:
-    summary = {
-        "stages": [
-            {
-                "stage_id": "frontdoor-stage-1",
-                "stage_goal": "inspect repository",
-                "rounds": [],
-            }
-        ]
-    }
+    ledger = [
+        {
+            "seq": 1,
+            "turn_id": "paused-turn-1",
+            "text": "inspect repository",
+            "tools": [{"tool_call_id": "call-1", "tool_name": "filesystem", "status": "success"}],
+        }
+    ]
 
     snapshot = websocket_ceo._build_ceo_snapshot(
         [
@@ -8762,13 +7207,13 @@ def test_websocket_build_ceo_snapshot_keeps_archived_paused_assistant_status_for
                 "content": "已暂停",
                 "turn_id": "paused-turn-1",
                 "status": "paused",
-                "canonical_context": summary,
                 "metadata": {
                     "history_visible": False,
                     "source": "manual_pause_archive",
                 },
             }
-        ]
+        ],
+        frontdoor_turns=ledger,
     )
 
     assert len(snapshot) == 1
@@ -8778,7 +7223,8 @@ def test_websocket_build_ceo_snapshot_keeps_archived_paused_assistant_status_for
     assert snapshot[0]["status"] == "paused"
     # 快照只携带 delta；暂停回合的轨道由 delta 完整承载（首行基线为空）。
     assert "canonical_context" not in snapshot[0]
-    assert snapshot[0]["canonical_context_delta"]["stages"][0]["stage_id"] == "frontdoor-stage-1"
+    assert "canonical_context_delta" not in snapshot[0]
+    assert snapshot[0]["turns"][0]["text"] == "inspect repository"
 
 
 def test_websocket_build_ceo_snapshot_hides_internal_prompt_messages_but_keeps_visible_reply() -> None:

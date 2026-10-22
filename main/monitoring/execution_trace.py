@@ -121,6 +121,18 @@ def build_execution_trace(
             tool_steps.append(step)
             step_by_call_id[tool_call_id] = step
 
+    # 运行时补写的工具步（恢复核验、恢复裁决）没有模型调用行，turn 里挂不进去；
+    # 但它们仍是操作员判断"这一步凭什么算完成"的证据，按 order 补进扁平列表。
+    standalone_steps: list[tuple[int, dict[str, Any]]] = []
+    for record in list(tool_results or []):
+        call_id = str(getattr(record, 'tool_call_id', '') or '').strip()
+        if not call_id or call_id in seen_ids:
+            continue
+        step = _standalone_tool_result_step(record)
+        if step is not None:
+            standalone_steps.append((int(getattr(record, 'order_index', 0) or 0), step))
+    tool_steps.extend(step for _, step in sorted(standalone_steps, key=lambda item: item[0]))
+
     turns = _build_execution_turns(node, step_by_call_id)
     return {
         'initial_prompt': str(node.prompt or node.goal or ''),
@@ -133,6 +145,54 @@ def build_execution_trace(
         'acceptance_result': str(node.check_result or ''),
         'acceptance_result_ref': str(getattr(node, 'check_result_ref', '') or ''),
     }
+
+
+def _standalone_tool_result_step(
+    record: TaskProjectionToolResultRecord,
+) -> dict[str, Any] | None:
+    tool_call_id = str(getattr(record, 'tool_call_id', '') or '').strip()
+    if not tool_call_id:
+        return None
+    record_payload = dict(getattr(record, 'payload', None) or {})
+    payload = dict(record_payload.get('parsed_payload') or {})
+    status = _tool_step_status(
+        str(getattr(record, 'output_preview_text', '') or ''),
+        '',
+        payload=payload,
+        recorded_status=str(getattr(record, 'status', '') or ''),
+    )
+    step: dict[str, Any] = {
+        'tool_call_id': tool_call_id,
+        'tool_name': str(getattr(record, 'tool_name', '') or '').strip() or 'tool',
+        'arguments_text': str(getattr(record, 'arguments_text', '') or ''),
+        'output_text': str(getattr(record, 'output_preview_text', '') or ''),
+        'output_ref': _execution_trace_output_ref(record),
+        'status': status,
+        'started_at': str(getattr(record, 'started_at', '') or ''),
+        'finished_at': str(getattr(record, 'finished_at', '') or ''),
+        'kind': str(payload.get('kind') or ''),
+        'round_id': str(payload.get('round_id') or ''),
+        'recovery_decision': str(payload.get('recovery_decision') or '').strip(),
+        'related_tool_call_ids': [
+            str(item or '').strip()
+            for item in list(payload.get('related_tool_call_ids') or [])
+            if str(item or '').strip()
+        ],
+        'attempted_tools': [
+            str(item or '').strip()
+            for item in list(payload.get('attempted_tools') or [])
+            if str(item or '').strip()
+        ],
+        'evidence': [dict(item) for item in list(payload.get('evidence') or []) if isinstance(item, dict)],
+        'lost_result_summary': str(payload.get('lost_result_summary') or '').strip(),
+    }
+    step['elapsed_seconds'] = _resolve_tool_elapsed_seconds(
+        raw_elapsed=getattr(record, 'elapsed_seconds', None),
+        started_at=step['started_at'],
+        finished_at=step['finished_at'],
+        is_running=status == 'running',
+    )
+    return step
 
 
 def _build_execution_turns(

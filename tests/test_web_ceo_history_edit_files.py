@@ -455,8 +455,7 @@ def _truncation_stub():
     stub._frontdoor_token_preflight_diagnostics = {"x": 1}
     stub._frontdoor_actual_request_path = "stale.json"
     stub._frontdoor_actual_request_history = [{"a": 1}]
-    stub._frontdoor_stage_state = {"stages": [1]}
-    stub._frontdoor_canonical_context = {"stages": [1]}
+    stub._frontdoor_turns = [{"seq": 1, "turn_id": "t2", "text": "stale"}]
     stub._compression_state = {"c": 1}
     stub._semantic_context_state = {"s": 1}
     stub._frontdoor_model_retry_status = {"r": 1}
@@ -519,10 +518,7 @@ def test_apply_history_truncation_state_empty_baseline_resets_everything():
     try:
         session_cls.apply_history_truncation_state(stub, payload, removed_turn_ids=["t2"])
         assert stub._frontdoor_request_body_messages == []
-        assert stub._frontdoor_stage_state == {}
-        from g3ku.runtime.frontdoor.canonical_context import default_frontdoor_canonical_context
-
-        assert stub._frontdoor_canonical_context == default_frontdoor_canonical_context()
+        assert stub._frontdoor_turns == []
         assert stub._frontdoor_history_shrink_reason == "user_edit_truncation"
         assert stub._frontdoor_restore_source == "none"
         assert stub._frontdoor_actual_request_message_count == 0

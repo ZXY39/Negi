@@ -1260,6 +1260,7 @@ class TaskQueryService:
             ],
             'evidence': [dict(item) for item in list(step.get('evidence') or []) if isinstance(item, dict)],
             'lost_result_summary': str(step.get('lost_result_summary') or '').strip(),
+            'kind': str(step.get('kind') or '').strip(),
         }
 
     @staticmethod

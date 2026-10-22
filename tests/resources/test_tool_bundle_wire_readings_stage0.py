@@ -166,20 +166,17 @@ def test_frontdoor_renderer_counts_schema_sources_with_denominator() -> None:
         state=state, runtime=SimpleNamespace(context=SimpleNamespace(session=session))
     )
 
-    # 名单 4 名 + 渲染器尾部追加的两颗合成控制工具；控制工具本例既不在 declared 也不在注册表，
+    # 名单 4 名 + 渲染器尾部追加的合成控制工具；控制工具本例既不在 declared 也不在注册表，
     # 因此落占位档——这正是 N5 说的"前门集合口径与节点不同"。
     assert state["frontdoor_tool_schema_hits"] == {
         "declared": 1,
         "registry": 1,
         "retired": 0,
         "bundle": 1,
-        "placeholder": 3,
+        "placeholder": 2,
     }
-    assert state["frontdoor_tool_schema_fallback_opportunities"] == 4
-    assert [(item.get("function") or {}).get("name") for item in rendered][-2:] == [
-        "submit_next_stage",
-        "silent",
-    ]
+    assert state["frontdoor_tool_schema_fallback_opportunities"] == 3
+    assert [(item.get("function") or {}).get("name") for item in rendered][-1:] == ["silent"]
 
 
 def test_node_readings_land_in_trace_and_warn_on_byte_drift_without_membership_change() -> None:

@@ -160,10 +160,9 @@ class SpawnChildNodesTool(Tool):
         return (
             'Create child nodes for delegated work. One call = one concurrent batch (no ordering); '
             'never put a node that consumes its siblings’ outputs (e.g. acceptance) in the same '
-            'batch — spawn it in a later batch, or use requires_acceptance for single-child acceptance. '
-            'Per child, optional `seed_tools` lists tools whose contracts that child gets in its first '
-            'request so its first call runs directly; the child result reports any declared name the '
-            'runtime did not seed.'
+            'batch — spawn it later, or use requires_acceptance for single-child acceptance. '
+            'Optional per-child `seed_tools` seeds those tool contracts into the child’s first '
+            'request; the result reports declared names the runtime did not seed.'
         )
 
     @property

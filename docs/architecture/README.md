@@ -9,7 +9,7 @@ Start here when you are new to the repository or when a change crosses subsystem
 3. `operations-and-maintenance.md` when you need to run, debug, or deploy the system
 4. `context-and-cache-troubleshooting.md` when the change touches prompt caching, context retention, append-only request growth, or request artifact forensics
 5. `tool-and-skill-system.md`
-6. `tool-hydration-and-callable-chain.md` when the change touches contract presence and delivery, the staged-argument reuse lane, parameter-error guidance, the universal tool timeout, or stage gating
+6. `tool-hydration-and-callable-chain.md` when the change touches contract presence and delivery, the staged-argument reuse lane, parameter-error guidance, the universal tool timeout, or the strict plain-text rejection
 7. `web-and-admin.md`
 8. `heartbeat-system.md` when the change touches heartbeat turns, task terminal / stall / distribution-error wakeups, or shutdown-resume session wakes
 9. `config-and-models.md` when the change touches runtime config, provider/model routing, or model bindings
@@ -30,7 +30,7 @@ Start here when you are new to the repository or when a change crosses subsystem
 - `tool-and-skill-system.md`
   Use for the four tool/skill concepts, fixed builtin tool contracts, candidate tools, skill loading, tool RBAC, and resource-directory generation checks.
 - `tool-hydration-and-callable-chain.md`
-  Use for what makes a tool callable this hop (contract presence), the delivery hop that returns the contract and stages arguments, the `reuse_args` batch lane, re-read and fingerprints, parameter-error lane, externalized result envelope, universal tool timeout, tool rerun-safe declaration for the recovery lane, stage gating, and the context→callable chain.
+  Use for what makes a tool callable this hop (contract presence), the delivery hop that returns the contract and stages arguments, the `reuse_args` batch lane, re-read and fingerprints, parameter-error lane, the strict plain-text rejection, externalized result envelope, universal tool timeout, tool rerun-safe declaration for the recovery lane, stage gating, and the context→callable chain.
 - `web-and-admin.md`
   Use for websocket contracts, frontend/backend responsibility boundaries, and operator-visible UI behavior.
 - `heartbeat-system.md`
@@ -60,7 +60,7 @@ Start here when you are new to the repository or when a change crosses subsystem
 - `task_progress` 显示的运行/检验状态与真实执行不符（陈旧帧被当作运行中、未派发的验收节点被当作检验中）→ `main-task-runtime.md`「Node-Level Pause and Recovery」（活性标注与判读合同）+ `tools/task_progress_cn/resource.yaml`（工具描述判读规则）
 - 任务树节点徽标与真实执行不符（未派发的检验节点显示「检验中」、被检验的执行节点跟着显示「检验中」、非终态节点出现 `IN_PROGRESS` 原文、检验节点不见了、打回后整个返工期间挂着 `FAILED`、验收节点已终局失败却一直读成非终态）→ `web-and-admin.md`「Task Tree Live Sync And Self-Healing Contract」+「Task Message Distribution UI Contract」
 - 任务树刷新时轮次下拉框自己收起/跳回默认轮次 → `web-and-admin.md`「Task Tree Live Sync And Self-Healing Contract」（重绘后的稳定身份与展开态恢复）
-- 节点详情刷新时展开的阶段卡或某轮的工具面板自己折回去、切走再切回对不上 → `web-and-admin.md`「Node Detail Redraw And Expansion State Contract」（捕获时机与按轮账本）
+- 节点详情刷新时展开的工具组或某轮的工具面板自己折回去、切走再切回对不上 → `web-and-admin.md`「Node Detail Redraw And Expansion State Contract」（捕获时机与按轮账本）
 - 会话回合那行、消息元信息行与节点详情头部的 token 读数对不上，或想知道缓存命中后面的百分比与「轮数」各取哪个数 → `web-and-admin.md`「Per-Turn Token Usage Contract」
 - 本地会话列表拖动后的顺序被打回原样、渠道分组折叠不记住或折叠后看不到新消息数、或换浏览器顺序不一致 → `web-and-admin.md`「CEO Session List Interaction Contract」（手动顺序与渠道折叠态都只存前端 localStorage）
 - 改了密码旧密码还能用、勾了自动解锁重启仍要输密码、或「锁定项目」后界面仍可读数 → `config-and-models.md`「Deployment Unlock Contract」（改密只换信封不换钥匙、解锁顺序 env→本地密钥文件→口令、锁定只清 web 进程内存主密钥）
@@ -78,13 +78,12 @@ Start here when you are new to the repository or when a change crosses subsystem
 - 任务大厅卡顿/滚动卡死、Edge 窗口「未响应」或崩溃 → `operations-and-maintenance.md`「任务大厅卡顿 / 冻结（浏览器端）」+ `web-and-admin.md`「Web Event Loop Contract」
 - 任务卡片 token 数字在涨却看不到任何反馈 → `web-and-admin.md`「Web Event Loop Contract」（卡片增量补丁的增长提示与 reduced-motion 例外）
 - 打开/切换 CEO 或渠道会话等待数十秒到几分钟、首帧快照体积异常 → `web-and-admin.md`「Web Event Loop Contract」+「CEO Turn Timeline Rendering Contract」（快照只发 delta 与滚动投影合同）
-- 回合进行中看不到新工具调用/新阶段，最终答复落地才一口气出现 → `web-and-admin.md`「CEO Websocket Lane Failure Contract」（单写者与丢帧计数）+「Streamed Reply Delta Contract」（轨道补丁的合并窗口）
+- 回合进行中看不到新工具调用/新工具组，最终答复落地才一口气出现 → `web-and-admin.md`「CEO Websocket Lane Failure Contract」（单写者与丢帧计数）+「Streamed Reply Delta Contract」（轨道补丁的合并窗口）
 - Multimodal image not reaching model or fabricated image content → `runtime-overview.md` + `web-and-admin.md` (web upload/reopen) or `external-agent-api.md` (bridge inbound attachments)
 - A config refresh disrupts an in-flight turn → `config-and-models.md`「配置热刷新」
 - Same task result pushed to the channel multiple times → `heartbeat-system.md`「Task Terminal Repair Contract」
-- Channel/bridge reply emits `## Runtime Tool Contract` or `[STAGE_*]` stage-block/internal context text -> `runtime-overview.md`「frontdoor 与任务运行时的关系」(回显守卫) + `external-agent-api.md` (outbound sanitize contract)
-- 请求体里阶段块成批堆在上下文最前面、与自己的用户消息/最终回复脱节 → `runtime-overview.md`「stage_compaction」（块锚点三级取定与顺序不变量）
-- 工具上一轮还直接执行、这一轮调用它只交回契约不产出结果，名字却仍留在 `tools[]` 上（既不在 `denied_tools`、也不在 `undeclared_candidates`）→ 它的 toolskill 契约块被阶段裁撤或压缩移出了上下文，按"契约不在 ⇒ 那一跳先交回契约"处理，下一跳起照旧可调；判据与唯一载体见 `tool-hydration-and-callable-chain.md`「契约在场与 callable」，读数是 `tool_contract_presence`
+- Channel/bridge reply emits `## Runtime Tool Contract` or other internal context text -> `runtime-overview.md`「frontdoor 与任务运行时的关系」(回显守卫) + `external-agent-api.md` (outbound sanitize contract)
+- 工具上一轮还直接执行、这一轮调用它只交回契约不产出结果，名字却仍留在 `tools[]` 上（既不在 `denied_tools`、也不在 `undeclared_candidates`）→ 它的 toolskill 契约块被 `token_compression` 移出了上下文，按"契约不在 ⇒ 那一跳先交回契约"处理，下一跳起照旧可调；判据与唯一载体见 `tool-hydration-and-callable-chain.md`「契约在场与 callable」，读数是 `tool_contract_presence`
 - 一批里 `reuse_args=true` 只跑出比暂存份数少的结果、或整批报"没有可复用的入参" → 先确认这是**上一跳**落的条目（严格一跳），再比该工具当轮在场指纹与条目里的指纹是否同修订；份数与执行数都记在工具行的 `execution_path`/`items` 上，机制见 `tool-hydration-and-callable-chain.md`「入参暂存与 `reuse_args` 批量执行」
 - 第三方桥接应用接入（/api/v1 鉴权、外部会话、事件流、主动推送不到达）→ `external-agent-api.md`「常见排障入口」
 - 外部 agent 看不见全部会话、或要把某个 token 的可见范围收回去 → `external-agent-api.md`「启用与鉴权」的跨桥作用域一档
@@ -105,7 +104,7 @@ Start here when you are new to the repository or when a change crosses subsystem
 - 用户连续发送消息时助手只看到最后一条、或渠道消息收到重复回复 → `runtime-overview.md`「prompt_batch 批次回合内容合并」+ `external-agent-api.md`「回合契约」与「内置官方 QQ 适配器」
 - Node error pause is not delivered to the source session, or node-error heartbeats retry forever -> `heartbeat-system.md`「Task Node Error Delivery」
 - 验收反复打回同一交付、任务长时间停在「执行→验收」循环而没有判失败（是否存在打回次数上限）→ `main-task-runtime.md`「验收节点：提前创建、激活与握手重派发」（验收拒收无次数上限：打回只发反馈并复活执行节点，不终态化任务）
-- 节点详情里 `submit_final_result` 的 `summary` 是 `auto-wrapped plain-text final result`、`evidence` 全是 `Auto-collected tool result from X.` → 该轮没有真实提交，纯文本被当成规划的残留；判据与两条打回车道见 `tool-hydration-and-callable-chain.md`「阶段门控与 callable 收紧」
+- 节点详情里 `submit_final_result` 的 `summary` 是 `auto-wrapped plain-text final result`、`evidence` 全是 `Auto-collected tool result from X.` → 该轮没有真实提交，纯文本被当成规划的残留；判据与两条打回车道见 `tool-hydration-and-callable-chain.md`「严格纯文本打回与固定内置集合」
 - 验收节点上下文里堆着历次交付全文、或对已被取代的提交下结论、验收 bootstrap 每轮都在变 → `context-and-cache-troubleshooting.md`「验收 bootstrap 定稿与回合尾块」+ `main-task-runtime.md`「信箱投递、重激活与上行传播」（交接通知与回合尾块给 ref + 内联额度内的摘要，超限才带头段指回 ref）
 - False "task may be stalled" heartbeat while a long node tool (e.g. `exec` with a large `timeout_seconds`) legitimately runs, or a genuine hang after a tool timeout goes unreported -> `heartbeat-system.md`「Task Stall Detection」
 - 想判断任务停滞是不是资源排队造成 → `heartbeat-system.md`「Task Stall Detection」（失速事件自带 `stall_detail`：共享池闸位、本任务闸外排队、上游限流与占位任务，只有事实没有建议）；要看过去那段区间 → `runtime-overview.md`「Worker Performance History」（同一行窗口判读，更长区间用 `perf_inspect`）；性能条「节点队列」等待恒 0 而闸口其实在排队 → `runtime-overview.md`「节点回合闸（执行器存在的成本也要闸）」
@@ -136,9 +135,9 @@ Start here when you are new to the repository or when a change crosses subsystem
 - 任务显示「已取消」但无人取消过（payload `cancel_requested=false`，常伴随 `Managed task worker exited` 日志）→ `main-task-runtime.md`「Node-Level Pause and Recovery」
 - 任务大厅持续显示「worker stale」、托管 worker 崩溃后一直不自动重启、managed-worker.log 长时间不滚动但心跳与进程仍在 → `operations-and-maintenance.md`「托管 worker 看门狗」
 - 会话在重启后自动续跑（`shutdown_resume` 内部轮）行为异常 → `heartbeat-system.md`「Shutdown Resume Wake」
-- 一条 CEO 请求在网页上并排画出两个气泡（同一阶段两张卡，上面那张停在一句中途旁白）→ `web-and-admin.md`「CEO Turn Timeline Rendering Contract」+ `runtime-overview.md`「`RuntimeAgentSession` 内部做什么」
+- 一条 CEO 请求在网页上并排画出两个气泡（同一回合两段轨道，上面那段停在一句中途旁白）→ `web-and-admin.md`「CEO Turn Timeline Rendering Contract」+ `runtime-overview.md`「`RuntimeAgentSession` 内部做什么」
 - cron 定时任务到点不触发、`jobs.json` 停在 `running`/`timeout`/`interrupted`、调度器长时间静默或某次投递疑似挂死 → `heartbeat-system.md`「Cron Reminder Contract」+ `operations-and-maintenance.md`「任务没创建或没推进」
-- 记忆复核批次什么时候入队（攒满轮数 / 缓冲躺够 1 小时 / 压缩轮末 / 会话边界），或某阶段的工具明细只剩名字没有原文 → `runtime-overview.md`「Memory Runtime State」（四个冲刷时点、按阶段门裁剪的明细、按轮次指纹摘除的写回）
+- 记忆复核批次什么时候入队（攒满轮数 / 缓冲躺够 1 小时 / 压缩轮末 / 会话边界），或某段历史的工具明细只剩名字没有原文 → `runtime-overview.md`「Memory Runtime State」（四个冲刷时点、按阶段门裁剪的明细、按轮次指纹摘除的写回）
 - 看到 `memory/MEMORY.md.bak.*`，或库里条目与投影不一致 → `runtime-overview.md`「Memory Runtime State」（投影只由库再生、外部改动先留证再重绘）+ `operations-and-maintenance.md`「Memory Queue Workflow」
 - 限流/上游故障期间某轮记忆没写进去、`memory/failed.jsonl` 有停车记录、或医生检查报 `failed_parked` → `runtime-overview.md`「队列状态机与失败停车语义」+ `operations-and-maintenance.md`「Memory Queue Workflow」
 - 记忆页点重试/放弃提示失败、或弹条正文是 `Request timeout` → `web-and-admin.md`「Memory Management Page And Admin Contract」（四条失败正文各自的指向与 30s 客户端超时）
@@ -149,12 +148,6 @@ Start here when you are new to the repository or when a change crosses subsystem
 - Broken image icons, file-route 400s, snapshot path mismatch → `web-and-admin.md`「Inline Markdown Image Rendering And Media Middle Layer」
 - 模型重复处理已回答的问题、连续请求尾部反复出现同一条无回复的用户消息、渠道会话里旧提问冒到最新回复下面（像用户重发）；或反向——某轮失败后用户发"继续"，模型答的是上一件成功的事 → `context-and-cache-troubleshooting.md`「残留 paused / pending 转录条目与未回答的用户输入」
 - 同一份 heartbeat 规则 / event bundle 在请求体里重复多份、token 逐轮线性上涨而对话无实质推进、或模型被已 success 节点的过期暂停通知误导 → `context-and-cache-troubleshooting.md`「heartbeat / cron 上下文残骸」
-- CEO 阶段卡里被裁撤/收口的阶段只剩一颗「取回本阶段的调用记录」、点开才出轮次 → 显示层带行与按 `rounds_archive_ref` 取档的车道，见 `web-and-admin.md`「CEO Stage Trace Round Rendering Contract」的阶段轨道条目
-- 同一个阶段在会话里刷好几遍、收尾总结只长在最后那遍 → 同一文档的副本归并条目（只归并已收尾的副本，未收尾的半截各画一张是设计）
-- 回合进行中最新气泡夹着历史阶段一起出现（新阶段带着旧阶段）、旧阶段排在新阶段下面，或刷新网页才恢复正常 → 同上条目：live 帧 delta 只按投影互比，源正文的回填发生在 delta 定型之后；轨道顺序按 `stage_index` 升序合并，不按到达顺序
-- 被模型点名移出上下文的阶段，卡片徽章仍写「完成」而不是「已移出上下文」（或反过来）→ 裁撤标记有没有穿过出帧面与前端阶段白名单，见 `web-and-admin.md`「CEO Turn Timeline Rendering Contract」
-- 一批里 `submit_next_stage` 被拒之后，同批其它工具全收到 `failed earlier in this turn` / `failed earlier in this batch` → `tool-hydration-and-callable-chain.md`「阶段门控与 callable 收紧」（只有阶段账本被动过才牵连同批）
-- 工具执行时先在阶段外面冒出来、过一会才进阶段卡（气泡跳一下），或某条工具的"加载中"迟迟不消失 → 同一文档的在飞工具行条目（落位、按 `tool_call_id` 退场、`submit_next_stage` 不建行）
 - 项目一启动会话就自动回一条几小时前的旧任务结果、或某个任务结果迟迟没汇报却也没报错 → `heartbeat-system.md`「Task Terminal Repair Contract」（终态 outbox 投递耐久性与 `abandoned` 留痕）+ `operations-and-maintenance.md`「会话无回复」
 - 会话该静默却发话、或该发话却整轮无声；模型写了像哨兵的文本却没静默 → `runtime-overview.md`「3.3 静默回复（`silent` 工具）」+ `web-and-admin.md`「CEO Turn Silent Reply Contract」
 - 新增常驻内置控制工具后模型从不使用它、或调用即报错 → `tool-and-skill-system.md`「3.1.1 为什么"常驻"需要独立机制」
@@ -193,25 +186,19 @@ Start here when you are new to the repository or when a change crosses subsystem
 - 拆分前端模块后页面白屏并报 `ApiCore` / `ApiClient is not defined`、新模块请求 404、或页面脚本顺序与测试装载对不上 → `web-and-admin.md`「Frontend Script Layout And Test Loading」
 - 长按脑图标不发起压缩、区分线停在「压缩已暂停」、压缩中区分线凭空消失刷新后才出现、一条「上下文压缩中」长期钉住收不掉、中断线旁边像按钮却点不动、心跳唤醒的回合里压缩全程没有线、「会话已压缩」要刷新才出现、区分线跑到回合气泡之前或压缩之后那段内容的下方、刷新后区分线重复两条、往回翻页时区分线在窗口边界重复、渠道会话脑图标没有读数 → `web-and-admin.md`「CEO Compression UI Contract」+「Manual Context Compression」+ `context-and-cache-troubleshooting.md`「Shrink 原因与压缩边界」
 - 压缩报成功、`post_tokens` 也降了，但下一回合请求体又回到原大小；或压缩途中发的消息没被回答 → `runtime-overview.md`「压缩窗口：入站闸门与基线写入仲裁」+ `context-and-cache-troubleshooting.md`「Shrink 原因与压缩边界」
-- 压缩后 `[STAGE_COMPACT]` 块数量没下降、模型报告"压缩了但历史阶段还在"、或摘要里查不到某条证据引用 → `context-and-cache-troubleshooting.md`「Shrink 原因与压缩边界」（阶段收口判读）+ `runtime-overview.md`「Frontdoor Context Compression」；节点 artifact 带 `stage_archive` 而账本没有 `context_visible` 不属该症状（节点不应用收口标记，见同节）
-- 阶段边界那一跳 `cache_hit` 塌下去、非缓存 `input` 冲高，但下一跳就回血，且此后正文天花板明显更低 → 这是裁撤生效的正常账单（断点位置不动、动的是断点后面的载荷），读数口径见 `context-and-cache-troubleshooting.md`「Shrink 原因与压缩边界」
-- `cache_hit` 每阶段推进都塌回同一小值（头部块末尾的 token 位）而历史没被裁 → 活状态块被搬到了请求头部，位置与角色合同见 `context-and-cache-troubleshooting.md`「线体角色合同」
-- 脑图标读数在阶段边界那一跳冲高数倍、下一跳回落，而 `comparable_to_previous_request` 仍为 `true` → `context-and-cache-troubleshooting.md`「同 turn 的 append-only 规则被破坏」（锚点与阶段投影同源）
 - 节点反复收到"缺必填参数"式拒绝、错误首行逐字相同而 arguments 后缀不同，眼看要被无效提交上限判死 → `context-and-cache-troubleshooting.md`「Shrink 原因与压缩边界」（provider 参数块未转义 + 宽容解析吞参数，按协议故障单独计数）
 - 节点连续多轮重交同一份被拒载荷、越到后面收到的参数契约越短（只剩 `summary` 残段、`ref` 为空） → `tool-and-skill-system.md`「Duplicate Tool Call Guard」（控制工具 error 回执不参与消息级折叠）
 - 模型报告"上一轮我想到哪了"却读不到任何思路、或开了思考回放的 binding 一上线就整条链报 400 → `runtime-overview.md`「思考内容（reasoning）的上下文回放」（写入闸门按整条链取交集，咽喉点只透传）
 - 一个回合只剩转圈、长时间没有任何输出，而 usage 里 `completion_tokens` 已经跑了几千 → 先分清"慢"和"不可见"：解码几乎全花在思考上时界面本来看不到任何东西，`web-and-admin.md`「Live Reasoning Row Contract」（实时思考行；Responses 车道没有增量分片，只有耗时与估算 token）+ `runtime-overview.md`「思考内容（reasoning）的上下文回放」
 - 会话里「思考 N秒」比真实思考长（工具调用参数写了一大段、或该跳根本没思考也报了秒数）、或回合还在跑而那一行的秒数不再涨 → 计时窗口与两个收口点见 `web-and-admin.md`「Live Reasoning Row Contract」
-- 一个回合跑了一两百跳、请求字符与 `effective_input_tokens` 全程只涨不降 → 先确认有没有阶段被模型点名裁撤过：**没点名的阶段一直逐轮重发是设计**（只有点名或压缩收口会让它降）。确有裁撤却仍不降，按 `runtime-overview.md`「stage_compaction」（两条车道都在过期点换基线；节点另看投影与发送体是否分叉）查
-- 模型或节点声称"已把某阶段移出"却找不到 `archive_ref`、或点名裁撤后那批工具帧仍逐轮重发、提交时写的阶段总结在账本里是空的 → `runtime-overview.md`「stage_compaction」（跨结清的收尾对象判据与 `stage_closure` 回执，前门与节点同一条）+ `context-and-cache-troubleshooting.md`「Shrink 原因与压缩边界」（粘着的 shrink 原因不能当"裁过"的证据）
-- 切回仍在处理的会话看不到期间产生的阶段/工具调用（刷新网页才出现）→ `web-and-admin.md`「CEO Feed View State And Scroll Preservation Contract」
+- 切回仍在处理的会话看不到期间产生的工具组/工具调用（刷新网页才出现）→ `web-and-admin.md`「CEO Feed View State And Scroll Preservation Contract」
 - 用户气泡的「编辑」或模型回复元信息行里的「Fork」要刷新网页才出现、会话被暂停/审批/压缩挡住输入时找不到 Fork 入口、点了按钮提示「当前不可编辑」、或点击消息后用量/复制仍不显形 → `web-and-admin.md`「Message Edit-Resend And Session Fork Contract」+「Per-Turn Token Usage Contract」
 - 回合进行中发的补充没被回答、待发送条目上的「插话 / 编辑 / 删除」行为疑问、撤下后条目又被画回来，或条目挂着不动、点删除只回 `follow_up_not_queued` → `web-and-admin.md`「Queued Follow-Ups」
 - 回合卡在半截、下方一直转圈，刷新网页才同步到最终回复（本地与渠道会话同症状，转录里其实已有完整回复）→ `web-and-admin.md`「CEO Websocket Lane Failure Contract」
 - 节点详情页的「加载 skill / 加载 tool」chip 风险色全部同一档、展开看不到正文，或契约不在场时直接调用工具的那一行仍画成普通工具行（会话轨道/节点卡片） → `web-and-admin.md`「Context Loader Notices」
-- 工具面板的「参数」只有 48 字调用提示、超长入参点开也不回补 → `web-and-admin.md`「CEO Stage Trace Round Rendering Contract」（`arguments_truncated` 标记与 `tool-arguments` 按需回取车道）
+- 工具面板的「参数」只有 48 字调用提示、超长入参点开也不回补 → `web-and-admin.md`「CEO Turn Timeline Rendering Contract」（`arguments_truncated` 标记与 `tool-arguments` 按需回取车道）
 - 翻看工具输出时新输出把输出框滚动条顶回顶部 → `web-and-admin.md`「CEO Feed View State And Scroll Preservation Contract」
-- 模型正在输出最终内容时整页被定住无法滚动（上翻每一帧都被拽回底部）、或回合进行中的流式文本要等收尾才从阶段卡里搬到外面 → `web-and-admin.md`「Streamed Reply Delta Contract」+「CEO Feed View State And Scroll Preservation Contract」
+- 模型正在输出最终内容时整页被定住无法滚动（上翻每一帧都被拽回底部）、或回合进行中的流式文本要等收尾才从工具组里搬到外面 → `web-and-admin.md`「Streamed Reply Delta Contract」+「CEO Feed View State And Scroll Preservation Contract」
 - 「回到最新」按钮该不该呼吸（回合早已收尾还在闪、或正在进行却不闪）、呼吸光晕盖到周围消息上 → `web-and-admin.md`「CEO Feed View State And Scroll Preservation Contract」
 - 日志板块反复出现「接口返回 500：/api/content/read」、节点详情输出框报「加载完整输出失败」或显示「完整输出已被清理」、点开工具行只有开头一段或整页卡死 → `web-and-admin.md`「Node Output Content Read Contract」
 - 主题切换不生效或刷新后丢失、亮色主题出现大面积灰底、亮色主题下解锁/初始化窗口仍是暗卡片、侧栏折叠后审计角标消失、页面卡片列数在某宽度错乱、某颗勾选框仍画成系统默认方框、样式写进了不加载的样式文件→ `web-and-admin.md`「Frontend Theme And Layout Contract」
@@ -240,13 +227,13 @@ These rules prevent the docs from re-accumulating redundancy. Every edit to this
 
 | Topic | Owning doc |
 |---|---|
-| Runtime layering, message execution chain, session/task relationship, task temp directory resolution, provider timeout boundary, worker performance history (`perf_samples` sampling, retention, and the shared perf read model), silent reply via the `silent` tool (turn-terminal semantics, transcript trace row, compaction exemption, turn-end stage closure with an empty summary slot) | `runtime-overview.md` |
+| Runtime layering, message execution chain, session/task relationship, task temp directory resolution, provider timeout boundary, worker performance history (`perf_samples` sampling, retention, and the shared perf read model), silent reply via the `silent` tool (turn-terminal semantics, transcript trace row, compaction exemption, turns ledger write/restore) | `runtime-overview.md` |
 | Append-notice distribution contract: sub-tree control transaction and drain ledger, epoch state machine and barriers, single-flight epoch driver with wave-retry/degraded skip, mailbox delivery and uplink propagation, epoch-completed vs deferred consumption, acceptance node lifecycle and handshake re-dispatch, spawn review, task tree depth ceiling, force-delete precedence, node-level pause/resume/cancel and circuit breakers, graceful shutdown pause and startup auto-resume | `main-task-runtime.md` |
-| Frontdoor context compression contract (`token_compression` / `stage_compaction`, 阶段收口 `context_visible` 与证据索引回填), 思考内容的上下文回放（reasoning 写入闸门与随压缩退出）, provider/model binding flag `reasoningContextEnabled` 的运行时语义 | `runtime-overview.md` |
+| Frontdoor context compression contract (`token_compression`, 压缩边界 `boundary_turn_seq`), 思考内容的上下文回放（reasoning 写入闸门与随压缩退出）, provider/model binding flag `reasoningContextEnabled` | `runtime-overview.md` |
 | Memory queue state/file semantics (`runtime-overview`); queue/reset operator workflows (`operations-and-maintenance`) | both, split as shown |
 | Heartbeat continuation contract, cron at-most-once delivery, task terminal repair (including terminal-outbox delivery durability and the `abandoned` state), node-error, distribution-error, and task-stall detection/delivery | `heartbeat-system.md` |
 | Tool/skill four concepts, fixed builtin tool contracts, candidate tools and candidate skills, frontdoor head-pinned static declarations (`candidate_skills` / `exec_runtime_policy` / `session_temp_dir`) and their three reprint boundaries, Tool Admin RBAC semantics, provider-facing `tools[]` surface contract (frontdoor live RBAC superset vs node pinned bundle and its single reprint point), duplicate-call guard, resource-directory generation checks and semantic catalog freshness, always-callable resident internal control tools (`silent`, and why fixed-builtin membership does not inject a tool), skill policy role contract (write-side normalization with 400, read-side per-row degradation, and the empty-set fallback that differs from tools) | `tool-and-skill-system.md` |
-| Contract presence as the callability authority, contract delivery and the staged-argument `reuse_args` batch lane, re-read and fingerprints, parameter-error guidance lane, externalized tool result envelope, universal tool timeout contract, tool rerun-safe declaration for the recovery lane, stage gating and callable tightening, context→callable chain | `tool-hydration-and-callable-chain.md` |
+| Contract presence as the callability authority, contract delivery and the staged-argument `reuse_args` batch lane, re-read and fingerprints, parameter-error guidance lane, externalized tool result envelope, universal tool timeout contract, tool rerun-safe declaration for the recovery lane, strict plain-text rejection and the fixed builtin set, context→callable chain | `tool-hydration-and-callable-chain.md` |
 | Actual-request forensics, 线体角色合同（一条请求里 system 至多一份且只能在首位）, append-only rule, cache-miss triage, token preflight diagnostics | `context-and-cache-troubleshooting.md` |
 | Websocket/UI contracts, composer/media rendering, image upload gating, frontend theme and layout contract, model config admin draft contract, log audit event sink and audit page contract, node detail redraw expansion-state contract, node output content-read API contract, per-call model-call ledger (its writer lanes and `call_kind`) and the Token统计 window, exec approval and command-allowlist admin surface (`/api/resources/tools/exec-*` paths, 503-is-not-empty, the frontend↔mounted-route parity guard), container deployment, frontend vendor asset state (tracked manifest vs data-root probe overlay) | `web-and-admin.md` |
 | Config schema, hot refresh, model bindings, secret location, deployment unlock, config bundle export/import, role route entries and load-balance group config semantics | `config-and-models.md` |

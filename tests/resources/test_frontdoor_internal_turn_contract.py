@@ -103,14 +103,14 @@ def test_internal_turn_keeps_frozen_declaration_and_narrows_dispatch() -> None:
     assert state["provider_tool_names"] == frozen_declaration
 
 
-def test_internal_turn_keeps_stage_tool_callable_without_active_stage() -> None:
-    """内部轮没有活动阶段时，阶段工具仍可调用（否则整轮一个工具都用不了）。"""
+def test_internal_turn_keeps_fixed_builtin_tools_callable() -> None:
+    """内部轮继承固定内置集合：不需要任何前置动作就能收尾或静默。"""
     ops = _ops()
     state = _internal_turn_state()
 
     callable_names = ops._frontdoor_callable_tool_names_for_state(state)
 
-    assert "submit_next_stage" in callable_names
+    assert "silent" in callable_names
 
 
 def test_stale_compression_reason_is_not_a_recommit_boundary() -> None:

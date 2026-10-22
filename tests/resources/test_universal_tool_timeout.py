@@ -154,14 +154,12 @@ def test_long_running_orchestration_and_control_tools_are_exempt() -> None:
     from main.runtime.internal_tools import (
         SubmitFinalResultTool,
         SubmitMessageDistributionTool,
-        SubmitNextStageTool,
     )
 
     async def _noop(payload):
         return dict(payload or {})
 
     instant_protocol_tools = [
-        SubmitNextStageTool(_noop),
         SubmitFinalResultTool(_noop, node_kind="execution"),
         SubmitMessageDistributionTool(_noop),
     ]

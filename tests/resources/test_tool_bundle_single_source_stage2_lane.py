@@ -213,7 +213,6 @@ async def test_frontdoor_record_face_and_wire_are_the_same_array(monkeypatch) ->
     assert wire, 'wire 不能是空表'
     assert recorded == wire, '记录面与发送面必须同源'
     assert hop['tool_count'] == len(recorded)
-    assert 'submit_next_stage' in _names(wire)
     assert 'silent' in _names(wire)
 
 

@@ -190,7 +190,6 @@ def test_tail_contract_blocks_no_longer_render_the_roster_line() -> None:
             "lightweight_tool_ids": [],
             "trace": {},
         },
-        stage_gate={},
         runtime_context={"live_skill_roster_supplier": lambda: [_item("beta")]},
         skill_roster_items=[_item("beta")],
     )

@@ -30,10 +30,6 @@ def test_core_tools_default_roster_matches_the_tool_face() -> None:
     assert "memory_delete" not in core
 
 
-def test_memory_tools_stay_exempt_from_the_active_stage_gate() -> None:
-    ops = importlib.import_module("g3ku.runtime.frontdoor._ceo_runtime_ops")
-
-    assert ops.FRONTDOOR_STAGELESS_MEMORY_TOOL_NAMES == frozenset({"memory_update", "memory_note"})
 
 
 def test_memory_note_result_still_inlines_without_opening_a_window() -> None:

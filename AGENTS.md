@@ -25,7 +25,7 @@ Use this mapping:
   `docs/architecture/heartbeat-system.md`
 - Tool registry, skills, candidate pools, resource reload and RBAC:
   `docs/architecture/tool-and-skill-system.md`
-- Tool hydration and promotion, parameter-error guidance, universal tool timeout, stage gating:
+- Tool hydration and promotion, parameter-error guidance, universal tool timeout, strict plain-text rejection:
   `docs/architecture/tool-hydration-and-callable-chain.md`
 - Web server, admin APIs, frontend/runtime integration:
   `docs/architecture/web-and-admin.md`
@@ -102,7 +102,7 @@ The product is displayed as **Negi**, the repository is `ZXY39/Negi`, and the op
 
 - The repository path `ZXY39/Negi` and the URLs and directory built from it: `$RepoName` / `REPO_NAME` in `install.ps1` / `install.sh`, and the default install directory `~/Negi`. `G3KU-Agent` must not appear as a name: GitHub drops an old-name redirect as soon as that name is taken, and installed devices check and upgrade through their own `origin` (`g3ku/update_check.py` `git ls-remote --tags origin`, `install.ps1` `git fetch origin`), so they would silently stop receiving updates.
 - The Python package directory `g3ku/` and therefore every `python -m g3ku` form. This is not only an import path: it is the cmdline shape the stale-process reaper matches (`negi_bootstrap.py` / `start-negi.sh` test `-m\s+g3ku\s+web|worker`, and `g3ku/web/launcher.py::_web_runtime_cmdline_matches`), and `worker_control.py`, `update_apply.py` and `docker/*-entrypoint.sh` all spawn that shape. Renaming the package would disable the reaper silently.
-- Context protocol markers, written brand-free and unversioned: `[STAGE_COMPACT]`, `[STAGE_EXTERNALIZED]`, `[STAGE_RAW]`, `[TOKEN_COMPACT_V2]`, `[NOTICE_TAIL]`, `[TOOL_CONTRACT:<tool_id>:<fingerprint>]` / `[/TOOL_CONTRACT]`, `[RUNTIME_NOTICE]`, and the patch artifact section markers `### PATCH_METADATA ###` / `### PATCH_DIFF ###`. The runtime also *reads* the older `_V1` spellings of those blocks (`[STAGE_RAW_V1]`, `[SKILL_ROSTER_NOTICE_V1]`, …) and the `[G3KU_*]` spellings — stored baselines, sidecars and request artifacts carry them — so never write those spellings, and do not delete those read tuples until the data rolls out. `[G3KU_SILENT` decides nothing: it is only stripped from outbound text.
+- Context protocol markers, written brand-free and unversioned: `[TOKEN_COMPACT_V2]`, `[NOTICE_TAIL]`, `[SKILL_ROSTER_NOTICE]`, `[TOOL_CONTRACT:<tool_id>:<fingerprint>]` / `[/TOOL_CONTRACT]`, `[RUNTIME_NOTICE]`, and the patch artifact section markers `### PATCH_METADATA ###` / `### PATCH_DIFF ###`. The runtime also *reads* a few legacy spellings (`[G3KU_TOKEN_COMPACT_V2]`, `[G3KU_APPEND_NOTICE_TAIL_V1]`, `[SKILL_ROSTER_NOTICE_V1]`) — stored baselines, sidecars and request artifacts carry them — so never write those spellings, and do not delete those read tuples until the data rolls out. `[G3KU_SILENT` decides nothing: it is only stripped from outbound text.
 - `G3KU_*` environment variables, including every config field, because the
   root settings model declares `env_prefix="G3KU_"` — the set is open-ended,
   not a list to migrate.
@@ -129,7 +129,7 @@ If you are taking over this repository for the first time and need the shortest 
 1. Read `docs/architecture/README.md`
 2. Read `docs/architecture/runtime-overview.md`
 3. Read `docs/architecture/main-task-runtime.md` for anything on the task side (distribution, acceptance, node pause/resume, shutdown resume)
-4. Read `docs/architecture/tool-and-skill-system.md`, plus `docs/architecture/tool-hydration-and-callable-chain.md` when the change touches hydration, timeouts, parameter errors or stage gating
+4. Read `docs/architecture/tool-and-skill-system.md`, plus `docs/architecture/tool-hydration-and-callable-chain.md` when the change touches hydration, timeouts, parameter errors or the strict plain-text rejection
 5. Read `docs/architecture/web-and-admin.md`
 6. If the task touches heartbeat, config/models, the external bridge API, the agent gateway, or speech-to-text, read those topic docs before opening source files
 7. After the docs pass, inspect the concrete entrypoints:

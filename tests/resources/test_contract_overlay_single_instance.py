@@ -435,9 +435,9 @@ def test_frontdoor_append_tail_cleans_stale_contract_from_body() -> None:
 
 
 def test_frontdoor_live_contract_rewrite_only_moves_the_tail() -> None:
-    """同一回合内活状态改写不得顶掉正文前缀。
+    """同一回合内契约改写不得顶掉正文前缀。
 
-    `stage_summary` / `callable_tools` 每次阶段切换都会重写契约。契约锚在正文
+    候选/修复名单每跳都可能重写契约。契约锚在正文
     任何前序位置时，断言的是"上一条尾帧之前逐字节不变"——只有尾插能满足。
     """
     from g3ku.runtime.frontdoor import prompt_cache_contract
@@ -445,20 +445,8 @@ def test_frontdoor_live_contract_rewrite_only_moves_the_tail() -> None:
 
     def contract_for(stage_id: str) -> dict[str, str]:
         return build_frontdoor_tool_contract(
-            callable_tool_names=["exec", "submit_next_stage"],
-            candidate_tool_names=[],
-            frontdoor_stage_state={
-                "active_stage_id": stage_id,
-                "stages": [
-                    {
-                        "stage_id": stage_id,
-                        "stage_index": 1,
-                        "status": "active",
-                        "stage_goal": f"goal of {stage_id}",
-                        "tool_round_budget": 10,
-                    }
-                ],
-            },
+            callable_tool_names=["exec", "silent"],
+            candidate_tool_names=["web_fetch"] if stage_id == "stage-2" else [],
             candidate_skill_ids=[],
             contract_revision="exp:test",
         ).to_message()

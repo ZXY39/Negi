@@ -29,7 +29,6 @@ from main.models import (
     TaskNodeNotification,
     TaskRecord,
     TokenUsageSummary,
-    normalize_execution_stage_metadata,
     normalize_final_acceptance_metadata,
 )
 from main.runtime.acceptance_handshake import (
@@ -49,7 +48,7 @@ from main.runtime.append_notice_context import (
     PENDING_APPEND_NOTICE_RECORDS_KEY,
     record_pending_append_notice_records,
 )
-from main.runtime.internal_tools import SpawnChildNodesTool, SubmitFinalResultTool, SubmitNextStageTool
+from main.runtime.internal_tools import SpawnChildNodesTool, SubmitFinalResultTool
 from main.runtime.node_prompt_contract import extract_node_dynamic_contract_payload
 from main.runtime.pending_notice_state import (
     PENDING_NOTICE_STATE_KEY,
@@ -129,12 +128,9 @@ class _CapturedRequestFinalResultChatBackend:
                 content="",
                 tool_calls=[
                     ToolCallRequest(
-                        id="call:stage",
-                        name="submit_next_stage",
-                        arguments={
-                            "stage_goal": "resume after restart",
-                            "tool_round_budget": 5,
-                        },
+                        id="call:exec",
+                        name="exec",
+                        arguments={"command": "inspect workspace"},
                     )
                 ],
                 finish_reason="tool_calls",
@@ -178,12 +174,9 @@ class _InjectedNoticeStageThenFinalChatBackend:
                 content="",
                 tool_calls=[
                     ToolCallRequest(
-                        id="call:stage",
-                        name="submit_next_stage",
-                        arguments={
-                            "stage_goal": "notice-adjusted stage",
-                            "tool_round_budget": 5,
-                        },
+                        id="call:exec",
+                        name="exec",
+                        arguments={"command": "inspect workspace"},
                     )
                 ],
                 finish_reason="tool_calls",
@@ -530,19 +523,10 @@ def _create_pending_tool_round(
     live_tool_calls: list[dict[str, object]] | None = None,
     content: str = "assistant tool turn",
 ) -> dict[str, object]:
-    service.log_service.submit_next_stage(
-        task_id,
-        node_id,
-        stage_goal="recovery test stage",
-        tool_round_budget=5,
-    )
-    round_payload = service.log_service.record_execution_stage_round(
-        task_id,
-        node_id,
-        tool_calls=tool_calls,
-        created_at=now_iso(),
-    )
-    assert round_payload is not None
+    round_payload = {
+        "round_id": f"round:{node_id}:{now_iso()}",
+        "created_at": now_iso(),
+    }
     service.log_service.append_node_output(
         task_id,
         node_id,
@@ -2615,7 +2599,7 @@ def test_task_live_patch_history_persists_latest_payload_after_window(tmp_path: 
                 "depth": 0,
                 "node_kind": "execution",
                 "phase": "before_model",
-                "stage_goal": f"stage-{idx}",
+                "await_marker": f"progress-{idx}",
             },
             publish_snapshot=True,
         )
@@ -2639,7 +2623,7 @@ def test_task_live_patch_history_persists_latest_payload_after_window(tmp_path: 
     assert snapshot_path.exists()
     with gzip.open(snapshot_path, "rt", encoding="utf-8") as handle:
         snapshot = json.loads(handle.read())
-    assert snapshot["frame"]["stage_goal"] == "stage-19"
+    assert snapshot["frame"]["await_marker"] == "progress-19"
 
 
 def test_task_detail_payload_and_websocket_include_model_call_events(tmp_path: Path, monkeypatch):
@@ -2886,7 +2870,7 @@ def test_task_model_call_event_includes_cache_diagnostics(tmp_path: Path) -> Non
         request_message_chars=321,
         actual_tool_schemas=[
             {
-                "name": "submit_next_stage",
+                "name": "exec",
                 "description": "",
                 "parameters": {"type": "object"},
             }
@@ -2931,7 +2915,7 @@ def test_task_model_call_event_persists_dedicated_actual_request_artifact(tmp_pa
     ]
     actual_tool_schemas = [
         {
-            "name": "submit_next_stage",
+            "name": "exec",
             "description": "",
             "parameters": {"type": "object"},
         }
@@ -2942,7 +2926,7 @@ def test_task_model_call_event_persists_dedicated_actual_request_artifact(tmp_pa
             {"role": "system", "content": "system prompt"},
             {"role": "user", "content": "provider body payload"},
         ],
-        "tools": [{"name": "submit_next_stage"}],
+        "tools": [{"name": "exec"}],
     }
 
     service.log_service.append_node_output(
@@ -3018,7 +3002,7 @@ def test_task_model_call_actual_request_artifact_degrades_after_memory_error(
                 ],
             }
         ],
-        "tools": [{"name": "submit_next_stage"}],
+        "tools": [{"name": "exec"}],
         "prompt_cache_key": "stable-cache-key",
     }
 
@@ -4562,11 +4546,6 @@ async def test_execution_node_build_messages_appends_dynamic_tool_contract_when_
         assert task is not None
         assert root is not None
 
-        service.log_service.execution_stage_prompt_payload = lambda task_id, node_id: {
-            "has_active_stage": True,
-            "transition_required": False,
-            "active_stage": {"stage_id": "stage-1"},
-        }
         service.log_service.upsert_frame(
             record.task_id,
             {
@@ -4578,7 +4557,7 @@ async def test_execution_node_build_messages_appends_dynamic_tool_contract_when_
                     {"role": "system", "content": "system"},
                     {"role": "user", "content": json.dumps({"prompt": "write file"}, ensure_ascii=False)},
                 ],
-                "callable_tool_names": ["submit_next_stage", "submit_final_result", "spawn_child_nodes", "load_tool_context"],
+                "callable_tool_names": ["exec", "submit_final_result", "spawn_child_nodes", "load_tool_context"],
                 "candidate_tool_names": [],
                 "selected_skill_ids": [],
                 "candidate_skill_ids": [],
@@ -4588,10 +4567,12 @@ async def test_execution_node_build_messages_appends_dynamic_tool_contract_when_
 
         messages = await service.node_runner._build_messages(task=task, node=root)
 
-        assert len(messages) >= 3
+        assert len(messages) >= 2
         assert messages[-1]["role"] == "user"
-        assert str(messages[-1]["content"] or "").startswith("## Runtime Stage Gate")
-        assert str(messages[-2]["content"] or "").startswith("## Runtime Tool Contract")
+        assert any(
+            str(item.get("content") or "").startswith("## Runtime Tool Contract")
+            for item in messages
+        )
         payload = extract_node_dynamic_contract_payload(messages)
         assert payload is not None
         # 台账键不再进契约 payload：帧白名单与契约都不带水合名单。
@@ -4631,11 +4612,6 @@ async def test_execution_node_build_messages_exposes_full_callable_tools_without
         assert task is not None
         assert root is not None
 
-        service.log_service.execution_stage_prompt_payload = lambda task_id, node_id: {
-            "has_active_stage": False,
-            "transition_required": False,
-            "active_stage": None,
-        }
         service.log_service.upsert_frame(
             record.task_id,
             {
@@ -4647,7 +4623,7 @@ async def test_execution_node_build_messages_exposes_full_callable_tools_without
                     {"role": "system", "content": "system"},
                     {"role": "user", "content": json.dumps({"prompt": "write file"}, ensure_ascii=False)},
                 ],
-                "callable_tool_names": ["submit_next_stage", "submit_final_result", "spawn_child_nodes", "load_tool_context"],
+                "callable_tool_names": ["exec", "submit_final_result", "spawn_child_nodes", "load_tool_context"],
                 "candidate_tool_names": ["filesystem_write"],
                 "selected_skill_ids": [],
                 "candidate_skill_ids": [],
@@ -4657,22 +4633,23 @@ async def test_execution_node_build_messages_exposes_full_callable_tools_without
 
         messages = await service.node_runner._build_messages(task=task, node=root)
 
-        assert len(messages) >= 3
+        assert len(messages) >= 2
         assert messages[-1]["role"] == "user"
-        assert str(messages[-1]["content"] or "").startswith("## Runtime Stage Gate")
-        assert str(messages[-2]["content"] or "").startswith("## Runtime Tool Contract")
+        assert any(
+            str(item.get("content") or "").startswith("## Runtime Tool Contract")
+            for item in messages
+        )
         payload = extract_node_dynamic_contract_payload(messages)
         assert payload is not None
         assert "hydrated_executor_names" not in payload
         assert "model_visible_tool_selection_trace" not in payload
-        # 无活动阶段不把可调用集锁死到 submit_next_stage 一颗；带契约块的 granted 工具当跳可调。
+        # 带契约块的 granted 工具当跳可调，未带块的不放行。
         callable_with_block = service._callable_tool_names_for_node(
             task=task,
             node=root,
             request_messages=[_contract_block_message("filesystem_write")],
         )
         assert "filesystem_write" in callable_with_block
-        assert callable_with_block != ["submit_next_stage"]
         assert "filesystem_write" not in service._callable_tool_names_for_node(
             task=task,
             node=root,
@@ -4711,11 +4688,6 @@ async def test_acceptance_node_build_messages_appends_dynamic_tool_contract_when
             metadata={"final_acceptance": True},
         )
 
-        service.log_service.execution_stage_prompt_payload = lambda task_id, node_id: {
-            "has_active_stage": True,
-            "transition_required": False,
-            "active_stage": {"stage_id": "stage-acceptance-1"},
-        }
         service.log_service.upsert_frame(
             record.task_id,
             {
@@ -4727,7 +4699,7 @@ async def test_acceptance_node_build_messages_appends_dynamic_tool_contract_when
                     {"role": "system", "content": "system"},
                     {"role": "user", "content": json.dumps({"prompt": "verify file"}, ensure_ascii=False)},
                 ],
-                "callable_tool_names": ["submit_next_stage", "submit_final_result", "load_tool_context", "content_open"],
+                "callable_tool_names": ["exec", "submit_final_result", "load_tool_context", "content_open"],
                 "candidate_tool_names": [],
                 "selected_skill_ids": [],
                 "candidate_skill_ids": [],
@@ -4737,10 +4709,12 @@ async def test_acceptance_node_build_messages_appends_dynamic_tool_contract_when
 
         messages = await service.node_runner._build_messages(task=task, node=acceptance)
 
-        assert len(messages) >= 3
+        assert len(messages) >= 2
         assert messages[-1]["role"] == "user"
-        assert str(messages[-1]["content"] or "").startswith("## Runtime Stage Gate")
-        assert str(messages[-2]["content"] or "").startswith("## Runtime Tool Contract")
+        assert any(
+            str(item.get("content") or "").startswith("## Runtime Tool Contract")
+            for item in messages
+        )
         payload = extract_node_dynamic_contract_payload(messages)
         assert payload is not None
         # 台账键不再进契约 payload。
@@ -6274,17 +6248,11 @@ def test_get_node_detail_payload_summary_mode_rebuilds_flattened_execution_trace
     )
 
     record = asyncio.run(_create_web_task(service))
-    service.log_service.submit_next_stage(
+    service.log_service.append_node_output(
         record.task_id,
         record.root_node_id,
-        stage_goal="inspect repository structure",
-        tool_round_budget=6,
-    )
-    service.log_service.record_execution_stage_round(
-        record.task_id,
-        record.root_node_id,
+        content='',
         tool_calls=[{"id": "call:1", "name": "filesystem", "arguments": {"action": "list", "path": str(tmp_path)}}],
-        created_at=now_iso(),
     )
     service.log_service.sync_node_read_model(record.task_id, record.root_node_id, externalize_execution_trace=True)
     detail_before = service.store.get_task_node_detail(record.root_node_id)
@@ -6325,11 +6293,11 @@ def test_get_node_detail_payload_summary_mode_rebuilds_flattened_execution_trace
 
     assert payload is not None
     summary = payload["item"]["execution_trace_summary"]
-    assert summary["stages"][0]["rounds"][0]["tools"][0]["tool_name"] == "filesystem"
-    assert summary["stages"][0]["tool_calls"][0]["tool_name"] == "filesystem"
+    assert summary["turns"][0]["tools"][0]["tool_name"] == "filesystem"
+    assert summary["tool_steps"][0]["tool_name"] == "filesystem"
 
 
-def test_node_detail_trace_carries_round_narration_text_and_completed_stage_summary(tmp_path: Path):
+def test_node_detail_trace_carries_turn_narration_text(tmp_path: Path):
     service = MainRuntimeService(
         chat_backend=_DummyChatBackend(),
         workspace_root=tmp_path,
@@ -6341,25 +6309,11 @@ def test_node_detail_trace_carries_round_narration_text_and_completed_stage_summ
     )
 
     record = asyncio.run(_create_web_task(service))
-    service.log_service.submit_next_stage(
+    service.log_service.append_node_output(
         record.task_id,
         record.root_node_id,
-        stage_goal="inspect repository structure",
-        tool_round_budget=6,
-    )
-    service.log_service.record_execution_stage_round(
-        record.task_id,
-        record.root_node_id,
+        content="文件较长，我分页读取完整内容。",
         tool_calls=[{"id": "call:1", "name": "filesystem", "arguments": {"action": "list"}}],
-        created_at=now_iso(),
-        text="文件较长，我分页读取完整内容。",
-    )
-    service.log_service.submit_next_stage(
-        record.task_id,
-        record.root_node_id,
-        stage_goal="produce exploration report",
-        tool_round_budget=4,
-        completed_stage_summary="任务书已完整读取，按任务包创建三个并行异步任务。",
     )
     service.log_service.sync_node_read_model(record.task_id, record.root_node_id, externalize_execution_trace=True)
 
@@ -6367,15 +6321,13 @@ def test_node_detail_trace_carries_round_narration_text_and_completed_stage_summ
 
     assert payload is not None
     trace = payload["item"]["execution_trace"]
-    assert trace["stages"][0]["rounds"][0]["text"] == "文件较长，我分页读取完整内容。"
-    assert trace["stages"][0]["completed_stage_summary"] == "任务书已完整读取，按任务包创建三个并行异步任务。"
+    assert trace["turns"][0]["text"] == "文件较长，我分页读取完整内容。"
 
     summary_payload = service.get_node_detail_payload(record.task_id, record.root_node_id)
 
     assert summary_payload is not None
     summary = summary_payload["item"]["execution_trace_summary"]
-    assert summary["stages"][0]["rounds"][0]["text"] == "文件较长，我分页读取完整内容。"
-    assert summary["stages"][0]["completed_stage_summary"] == "任务书已完整读取，按任务包创建三个并行异步任务。"
+    assert summary["turns"][0]["text"] == "文件较长，我分页读取完整内容。"
 
 
 def test_get_node_detail_payload_summary_mode_uses_previews_instead_of_full_inline_text(tmp_path: Path):
@@ -6482,11 +6434,9 @@ def test_node_detail_summary_compacts_tool_payloads_from_trace(tmp_path: Path):
 
     assert payload is not None
     summary = payload["item"]["execution_trace_summary"]
-    stages = summary.get("stages") or []
-    assert stages
-    rounds = stages[0].get("rounds") or []
-    assert rounds
-    tools = rounds[0].get("tools") or []
+    turns = summary.get("turns") or []
+    assert turns
+    tools = turns[0].get("tools") or []
     assert tools
     tool = tools[0]
 
@@ -6539,7 +6489,7 @@ def test_node_detail_summary_mode_keeps_tool_output_only_in_refs(tmp_path: Path)
     payload = service.node_detail(record.task_id, root.node_id, detail_level="summary")
 
     assert payload is not None
-    tools = payload["item"]["execution_trace_summary"]["stages"][0]["rounds"][0]["tools"]
+    tools = payload["item"]["execution_trace_summary"]["turns"][0]["tools"]
 
     assert tools[0]["output_text"] == "output captured in ref"
     assert tools[0]["output_ref"] == "artifact:artifact:tool-output"
@@ -6983,7 +6933,7 @@ def test_runtime_messages_artifact_accumulates_per_round_callable_snapshots(tmp_
                     "content": json.dumps(
                         _frame_payload(
                             prompt="first prompt",
-                            callable_tools=["submit_next_stage", "filesystem_write"],
+                            callable_tools=["exec", "filesystem_write"],
                             candidate_tools=["filesystem_read"],
                         ),
                         ensure_ascii=False,
@@ -6991,7 +6941,7 @@ def test_runtime_messages_artifact_accumulates_per_round_callable_snapshots(tmp_
                 }
             ],
             "model_visible_tool_names": [
-                "submit_next_stage",
+                "exec",
                 "filesystem_write",
                 "filesystem_read",
             ],
@@ -7036,7 +6986,7 @@ def test_runtime_messages_artifact_accumulates_per_round_callable_snapshots(tmp_
                     "content": json.dumps(
                         _frame_payload(
                             prompt="first prompt updated",
-                            callable_tools=["submit_next_stage", "filesystem_write"],
+                            callable_tools=["exec", "filesystem_write"],
                             candidate_tools=["filesystem_read"],
                         ),
                         ensure_ascii=False,
@@ -7060,7 +7010,7 @@ def test_runtime_messages_artifact_accumulates_per_round_callable_snapshots(tmp_
                     "content": json.dumps(
                         _frame_payload(
                             prompt="second prompt",
-                            callable_tools=["submit_next_stage", "filesystem_edit"],
+                            callable_tools=["exec", "filesystem_edit"],
                             candidate_tools=["filesystem_write"],
                         ),
                         ensure_ascii=False,
@@ -7068,7 +7018,7 @@ def test_runtime_messages_artifact_accumulates_per_round_callable_snapshots(tmp_
                 }
             ],
             "model_visible_tool_names": [
-                "submit_next_stage",
+                "exec",
                 "filesystem_edit",
                 "filesystem_write",
             ],
@@ -7222,16 +7172,16 @@ def test_runtime_messages_artifact_accumulates_per_round_callable_snapshots(tmp_
     assert len(snapshots) == 2
     assert snapshots[0]["snapshot_index"] == 1
     assert snapshots[0]["active_round_id"] == "round:1"
-    assert snapshots[0]["callable_tool_names"] == ["submit_next_stage", "filesystem_write"]
+    assert snapshots[0]["callable_tool_names"] == ["exec", "filesystem_write"]
     assert snapshots[0]["candidate_tool_names"] == ["filesystem_read"]
     assert snapshots[0]["model_visible_tool_names"] == [
-        "submit_next_stage",
+        "exec",
         "filesystem_write",
         "filesystem_read",
     ]
     assert snapshots[1]["snapshot_index"] == 2
     assert snapshots[1]["active_round_id"] == "round:2"
-    assert snapshots[1]["callable_tool_names"] == ["submit_next_stage", "filesystem_edit"]
+    assert snapshots[1]["callable_tool_names"] == ["exec", "filesystem_edit"]
     assert snapshots[1]["candidate_tool_names"] == ["filesystem_write"]
     assert "hydrated_executor_names" not in snapshots[1]
     assert snapshots[1]["lightweight_tool_ids"] == ["filesystem", "content"]
@@ -7325,7 +7275,7 @@ def test_rest_node_detail_accepts_full_detail_level_query_parameter(tmp_path: Pa
                 "task_id": task_id,
                 "node_id": node_id,
                 "detail_level": detail_level,
-                "execution_trace": {"stages": []},
+                "execution_trace": {"turns": [], "tool_steps": []},
             },
         }
 
@@ -9184,7 +9134,7 @@ async def test_runtime_frame_persists_model_visible_tool_selection_fields(tmp_pa
                     {"role": "user", "content": "user prompt"},
                 ],
                 "model_visible_tool_names": [
-                    "submit_next_stage",
+                    "exec",
                     "submit_final_result",
                     "spawn_child_nodes",
                     "web_fetch",
@@ -9209,7 +9159,7 @@ async def test_runtime_frame_persists_model_visible_tool_selection_fields(tmp_pa
 
         assert runtime_frame is not None
         assert runtime_frame.get("model_visible_tool_names") == [
-            "submit_next_stage",
+            "exec",
             "submit_final_result",
             "spawn_child_nodes",
             "web_fetch",
@@ -9236,7 +9186,7 @@ def test_same_turn_append_only_request_messages_reuses_previous_actual_request_p
         {"role": "system", "content": "system"},
         {"role": "user", "content": "prompt"},
         {"role": "assistant", "content": "assistant-1"},
-        {"role": "tool", "tool_call_id": "call-1", "name": "submit_next_stage", "content": "ok"},
+        {"role": "tool", "tool_call_id": "call-1", "name": "exec", "content": "ok"},
         dict(note),
         dict(contract),
     ]
@@ -9267,7 +9217,7 @@ def test_same_turn_append_only_request_messages_reuses_previous_actual_request_p
         {"role": "system", "content": "system"},
         {"role": "user", "content": "prompt"},
         {"role": "assistant", "content": "assistant-1"},
-        {"role": "tool", "tool_call_id": "call-1", "name": "submit_next_stage", "content": "ok"},
+        {"role": "tool", "tool_call_id": "call-1", "name": "exec", "content": "ok"},
         *pending_delta_messages,
         *request_tail_messages,
     ]
@@ -9339,12 +9289,12 @@ async def test_run_node_after_restart_reuses_persisted_actual_request_prefix_for
             "content": "",
             "tool_calls": [
                 {
-                    "id": "call:stage",
+                    "id": "call:exec",
                     "type": "function",
                     "function": {
-                        "name": "submit_next_stage",
+                        "name": "exec",
                         "arguments": json.dumps(
-                            {"stage_goal": "carry forward prior round", "tool_round_budget": 5},
+                            {"command": "carry forward prior round"},
                             ensure_ascii=False,
                         ),
                     },
@@ -9353,8 +9303,8 @@ async def test_run_node_after_restart_reuses_persisted_actual_request_prefix_for
         },
         {
             "role": "tool",
-            "name": "submit_next_stage",
-            "tool_call_id": "call:stage",
+            "name": "exec",
+            "tool_call_id": "call:exec",
             "content": '{"status":"success"}',
         },
     ]
@@ -9403,7 +9353,7 @@ async def test_run_node_after_restart_reuses_persisted_actual_request_prefix_for
         request_message_chars=321,
         actual_tool_schemas=[
             {
-                "name": "submit_next_stage",
+                "name": "exec",
                 "description": "advance stage",
                 "parameters": {"type": "object"},
             }
@@ -9438,17 +9388,7 @@ async def test_run_node_after_restart_reuses_persisted_actual_request_prefix_for
 
         react_state = await restarted.node_runner._resume_react_state(task=task, node=root)
         tools = {
-            "submit_next_stage": SubmitNextStageTool(
-                lambda stage_goal, tool_round_budget, completed_stage_summary, key_refs, final: restarted.node_runner._submit_next_stage(
-                    task_id=task.task_id,
-                    node_id=root.node_id,
-                    stage_goal=stage_goal,
-                    tool_round_budget=tool_round_budget,
-                    completed_stage_summary=completed_stage_summary,
-                    key_refs=key_refs,
-                    final=final,
-                )
-            ),
+            "exec": _StaticTool("exec"),
             "submit_final_result": SubmitFinalResultTool(
                 lambda payload: restarted.node_runner._submit_final_result(payload),
                 node_kind=root.node_kind,
@@ -9501,16 +9441,16 @@ async def test_pending_notice_keeps_provider_seed_messages_while_request_history
             "content": "",
             "tool_calls": [
                 {
-                    "id": "call:stage",
+                    "id": "call:exec",
                     "type": "function",
-                    "function": {"name": "submit_next_stage", "arguments": "{}"},
+                    "function": {"name": "exec", "arguments": "{}"},
                 }
             ],
         },
         {
             "role": "tool",
-            "tool_call_id": "call:stage",
-            "name": "submit_next_stage",
+            "tool_call_id": "call:exec",
+            "name": "exec",
             "content": [{"type": "output_text", "text": '{"status":"success"}'}],
         },
     ]
@@ -9522,16 +9462,16 @@ async def test_pending_notice_keeps_provider_seed_messages_while_request_history
             "content": "",
             "tool_calls": [
                 {
-                    "id": "call:stage",
+                    "id": "call:exec",
                     "type": "function",
-                    "function": {"name": "submit_next_stage", "arguments": "{}"},
+                    "function": {"name": "exec", "arguments": "{}"},
                 }
             ],
         },
         {
             "role": "tool",
-            "tool_call_id": "call:stage",
-            "name": "submit_next_stage",
+            "tool_call_id": "call:exec",
+            "name": "exec",
             "content": '{"status":"success"}',
         },
     ]
@@ -9571,7 +9511,7 @@ async def test_pending_notice_keeps_provider_seed_messages_while_request_history
             prompt_cache_key="stable-family-key-for-notice",
             request_message_count=len(previous_request_messages),
             request_message_chars=321,
-            actual_tool_schemas=[{"name": "submit_next_stage", "parameters": {"type": "object"}}],
+            actual_tool_schemas=[{"name": "exec", "parameters": {"type": "object"}}],
             provider_request_meta={"provider": "openai"},
             provider_request_body={"input": previous_provider_input},
         )
@@ -9619,17 +9559,7 @@ async def test_pending_notice_keeps_provider_seed_messages_while_request_history
         assert react_state["request_seed_state"] == "ok"
         assert react_state["request_body_seed_messages"] == previous_request_messages
         tools = {
-            "submit_next_stage": SubmitNextStageTool(
-                lambda stage_goal, tool_round_budget, completed_stage_summary, key_refs, final: restarted.node_runner._submit_next_stage(
-                    task_id=task.task_id,
-                    node_id=root.node_id,
-                    stage_goal=stage_goal,
-                    tool_round_budget=tool_round_budget,
-                    completed_stage_summary=completed_stage_summary,
-                    key_refs=key_refs,
-                    final=final,
-                )
-            ),
+            "exec": _StaticTool("exec"),
             "submit_final_result": SubmitFinalResultTool(
                 lambda payload: restarted.node_runner._submit_final_result(payload),
                 node_kind=root.node_kind,
@@ -9702,16 +9632,16 @@ async def test_notice_resume_first_hop_adopts_seed_prefix_with_single_notice_and
             "content": "",
             "tool_calls": [
                 {
-                    "id": "call:stage",
+                    "id": "call:exec",
                     "type": "function",
-                    "function": {"name": "submit_next_stage", "arguments": "{}"},
+                    "function": {"name": "exec", "arguments": "{}"},
                 }
             ],
         },
         {
             "role": "tool",
-            "tool_call_id": "call:stage",
-            "name": "submit_next_stage",
+            "tool_call_id": "call:exec",
+            "name": "exec",
             "content": '{"status":"success"}',
         },
     ]
@@ -9749,7 +9679,7 @@ async def test_notice_resume_first_hop_adopts_seed_prefix_with_single_notice_and
             prompt_cache_key="stable-family-key-e1",
             request_message_count=len(previous_request_messages),
             request_message_chars=321,
-            actual_tool_schemas=[{"name": "submit_next_stage", "parameters": {"type": "object"}}],
+            actual_tool_schemas=[{"name": "exec", "parameters": {"type": "object"}}],
             provider_request_meta={"provider": "openai"},
         )
         seed_service.log_service.update_node_metadata(
@@ -9793,17 +9723,7 @@ async def test_notice_resume_first_hop_adopts_seed_prefix_with_single_notice_and
         react_state = await restarted.node_runner._resume_react_state(task=task, node=root)
         assert react_state["request_seed_state"] == "ok"
         tools = {
-            "submit_next_stage": SubmitNextStageTool(
-                lambda stage_goal, tool_round_budget, completed_stage_summary, key_refs, final: restarted.node_runner._submit_next_stage(
-                    task_id=task.task_id,
-                    node_id=root.node_id,
-                    stage_goal=stage_goal,
-                    tool_round_budget=tool_round_budget,
-                    completed_stage_summary=completed_stage_summary,
-                    key_refs=key_refs,
-                    final=final,
-                )
-            ),
+            "exec": _StaticTool("exec"),
             "submit_final_result": SubmitFinalResultTool(
                 lambda payload: restarted.node_runner._submit_final_result(payload),
                 node_kind=root.node_kind,
@@ -9966,17 +9886,7 @@ async def test_degraded_actual_request_artifact_falls_back_with_explicit_seed_di
         assert react_state["request_body_seed_messages"] == []
 
         tools = {
-            "submit_next_stage": SubmitNextStageTool(
-                lambda stage_goal, tool_round_budget, completed_stage_summary, key_refs, final: restarted.node_runner._submit_next_stage(
-                    task_id=task.task_id,
-                    node_id=root.node_id,
-                    stage_goal=stage_goal,
-                    tool_round_budget=tool_round_budget,
-                    completed_stage_summary=completed_stage_summary,
-                    key_refs=key_refs,
-                    final=final,
-                )
-            ),
+            "exec": _StaticTool("exec"),
             "submit_final_result": SubmitFinalResultTool(
                 lambda payload: restarted.node_runner._submit_final_result(payload),
                 node_kind=root.node_kind,
@@ -10046,24 +9956,15 @@ async def test_run_node_appends_notice_delivered_after_first_model_response_befo
         first_messages = list(backend.calls[0].get("messages") or [])
         second_messages = list(backend.calls[1].get("messages") or [])
         # The carried prefix keeps the real conversation, but the previous round's
-        # turn-only note/contract are dropped: exactly one of each stays at the tail.
+        # contract is dropped: exactly one stays at the tail.
         assert second_messages[:2] == first_messages[:2]
-        note_count = sum(
-            1
-            for item in second_messages
-            if str(item.get("content") or "").startswith("System note for this turn only:")
-        )
         contract_count = sum(
             1
             for item in second_messages
             if str(item.get("content") or "").startswith("## Runtime Tool Contract")
         )
-        assert note_count == 1
         assert contract_count == 1
-        # 尾部顺序：稳定契约、活状态块，当轮 turn-only 阶段提示压尾（末位是 user 回合提示）。
-        assert str(second_messages[-1].get("content") or "").startswith("System note for this turn only:")
-        assert str(second_messages[-2].get("content") or "").startswith("## Runtime Stage Gate")
-        assert str(second_messages[-3].get("content") or "").startswith("## Runtime Tool Contract")
+        assert str(second_messages[-1].get("content") or "").startswith("## Runtime Tool Contract")
 
         notice_indexes = [
             index
@@ -10075,7 +9976,7 @@ async def test_run_node_appends_notice_delivered_after_first_model_response_befo
         stage_round_indexes = [
             index
             for index, item in enumerate(second_messages)
-            if "call:stage" in json.dumps(item, ensure_ascii=False)
+            if "call:exec" in json.dumps(item, ensure_ascii=False)
         ]
         assert stage_round_indexes
         assert notice_indexes[0] > max(stage_round_indexes)
@@ -10210,7 +10111,7 @@ async def test_resume_react_state_keeps_canonical_messages_separate_from_provide
             "content": [
                 {
                     "type": "output_text",
-                    "text": '[STAGE_COMPACT_V1]\n{"stage_goal":"old stage","status":"完成"}',
+                    "text": "prior assistant summary",
                 }
             ],
         },
@@ -10219,38 +10120,38 @@ async def test_resume_react_state_keeps_canonical_messages_separate_from_provide
             "content": [
                 {
                     "type": "output_text",
-                    "text": "## Runtime Tool Contract\nkind: node_runtime_tool_contract\ncallable_tools: `submit_next_stage`",
+                    "text": "## Runtime Tool Contract\nkind: node_runtime_tool_contract\ncallable_tools: `exec`",
                 }
             ],
         },
-        {"type": "function_call", "call_id": "call:stage", "name": "submit_next_stage", "arguments": "{}"},
-        {"type": "function_call_output", "call_id": "call:stage", "output": '{"status":"success"}'},
+        {"type": "function_call", "call_id": "call:exec", "name": "exec", "arguments": "{}"},
+        {"type": "function_call_output", "call_id": "call:exec", "output": '{"status":"success"}'},
     ]
     canonical_messages = [
         {"role": "system", "content": "[SYSTEM] execution node prompt"},
         {"role": "user", "content": '{"task_id":"task:demo","node_id":"node:leaf","goal":"demo"}'},
-        {"role": "user", "content": "System note for this turn only:\nCurrent stage [autonomous | in progress] goal: canonical stage goal"},
+        {"role": "user", "content": "System note for this turn only:\nnew parent constraint"},
     ]
     previous_request_messages = [
         {"role": "system", "content": "[SYSTEM] execution node prompt"},
         {"role": "user", "content": '{"task_id":"task:demo","node_id":"node:leaf","goal":"demo"}'},
-        {"role": "assistant", "content": '[STAGE_COMPACT_V1]\n{"stage_goal":"old stage","status":"完成"}'},
+        {"role": "assistant", "content": "prior assistant summary"},
         {
             "role": "assistant",
-            "content": "## Runtime Tool Contract\nkind: node_runtime_tool_contract\ncallable_tools: `submit_next_stage`",
+            "content": "## Runtime Tool Contract\nkind: node_runtime_tool_contract\ncallable_tools: `exec`",
         },
         {
             "role": "assistant",
             "content": "",
             "tool_calls": [
                 {
-                    "id": "call:stage",
+                    "id": "call:exec",
                     "type": "function",
-                    "function": {"name": "submit_next_stage", "arguments": "{}"},
+                    "function": {"name": "exec", "arguments": "{}"},
                 }
             ],
         },
-        {"role": "tool", "tool_call_id": "call:stage", "name": "submit_next_stage", "content": '{"status":"success"}'},
+        {"role": "tool", "tool_call_id": "call:exec", "name": "exec", "content": '{"status":"success"}'},
     ]
 
     try:
@@ -10264,8 +10165,6 @@ async def test_resume_react_state_keeps_canonical_messages_separate_from_provide
                 "depth": root.depth,
                 "node_kind": root.node_kind,
                 "phase": "before_model",
-                "stage_status": "active",
-                "stage_goal": "canonical stage goal",
                 "messages": canonical_messages,
                 "actual_request_hash": "notice-seed-canonical-hash",
                 "actual_request_message_count": len(previous_provider_input),
@@ -10290,7 +10189,7 @@ async def test_resume_react_state_keeps_canonical_messages_separate_from_provide
             prompt_cache_key="stable-key-canonical-notice",
             request_message_count=len(previous_request_messages),
             request_message_chars=456,
-            actual_tool_schemas=[{"name": "submit_next_stage", "parameters": {"type": "object"}}],
+            actual_tool_schemas=[{"name": "exec", "parameters": {"type": "object"}}],
             provider_request_meta={"provider": "openai"},
             provider_request_body={"input": previous_provider_input},
         )
@@ -10387,11 +10286,11 @@ async def test_model_visible_tool_selection_keeps_pinned_bundle_when_current_vis
                     {"role": "user", "content": "user prompt"},
                 ],
                 "model_visible_tool_names": [
-                    "submit_next_stage",
+                    "exec",
                     "content_open",
                 ],
                 "provider_tool_names": [
-                    "submit_next_stage",
+                    "exec",
                     "content_open",
                 ],
                 "model_visible_tool_selection_trace": {
@@ -10403,7 +10302,7 @@ async def test_model_visible_tool_selection_keeps_pinned_bundle_when_current_vis
         )
 
         visible_tools = {
-            "submit_next_stage": _StaticTool("submit_next_stage"),
+            "exec": _StaticTool("exec"),
             "content_open": _StaticTool("content_open"),
             "web_fetch": _StaticTool("web_fetch"),
         }
@@ -10411,7 +10310,7 @@ async def test_model_visible_tool_selection_keeps_pinned_bundle_when_current_vis
             "main.service.runtime_service.build_execution_tool_selection",
             lambda **_kwargs: SimpleNamespace(
                 callable_tool_names=[
-                    "submit_next_stage",
+                    "exec",
                     "content_open",
                     "web_fetch",
                 ],
@@ -10425,7 +10324,7 @@ async def test_model_visible_tool_selection_keeps_pinned_bundle_when_current_vis
             service,
             "_model_visible_callable_tool_names_for_node",
             lambda **_kwargs: [
-                "submit_next_stage",
+                "exec",
                 "content_open",
                 "web_fetch",
             ],
@@ -10443,7 +10342,7 @@ async def test_model_visible_tool_selection_keeps_pinned_bundle_when_current_vis
         # 换束等于把身后全部存活正文重铺一次，成员只在重印边界（token 压缩 / 空闲）变。
         assert "web_fetch" in list(selection.get("tool_names") or [])
         assert selection["provider_tool_names"] == [
-            "submit_next_stage",
+            "exec",
             "content_open",
         ]
         assert selection["provider_tool_bundle_mode"] == "pinned_frozen"
@@ -10452,7 +10351,7 @@ async def test_model_visible_tool_selection_keeps_pinned_bundle_when_current_vis
         assert selection["trace"]["provider_tool_exposure_pending"] is False
         assert selection["trace"]["provider_tool_exposure_commit_reason"] == ""
         assert selection["trace"]["prior_provider_tool_names"] == [
-            "submit_next_stage",
+            "exec",
             "content_open",
         ]
 
@@ -10465,7 +10364,7 @@ async def test_model_visible_tool_selection_keeps_pinned_bundle_when_current_vis
         )
 
         assert repeated_selection["provider_tool_names"] == [
-            "submit_next_stage",
+            "exec",
             "content_open",
         ]
         assert repeated_selection["trace"]["provider_tool_exposure_commit_reason"] == ""
@@ -10481,7 +10380,7 @@ async def test_model_visible_tool_selection_keeps_pinned_bundle_when_current_vis
         )
 
         assert stage_compaction_selection["provider_tool_names"] == [
-            "submit_next_stage",
+            "exec",
             "content_open",
         ]
         assert stage_compaction_selection["trace"]["provider_tool_exposure_commit_reason"] == ""
@@ -10499,7 +10398,7 @@ async def test_model_visible_tool_selection_keeps_pinned_bundle_when_current_vis
         )
 
         assert token_compaction_selection["provider_tool_names"] == [
-            "submit_next_stage",
+            "exec",
             "content_open",
         ]
         assert "web_fetch" in list(token_compaction_selection["pinned_provider_tool_names"] or [])
@@ -10546,12 +10445,12 @@ async def test_model_visible_tool_selection_preserves_prior_provider_order_when_
                     {"role": "user", "content": "user prompt"},
                 ],
                 "model_visible_tool_names": [
-                    "submit_next_stage",
+                    "exec",
                     "content_open",
                     "web_fetch",
                 ],
                 "provider_tool_names": [
-                    "submit_next_stage",
+                    "exec",
                     "web_fetch",
                     "content_open",
                 ],
@@ -10564,7 +10463,7 @@ async def test_model_visible_tool_selection_preserves_prior_provider_order_when_
         )
 
         visible_tools = {
-            "submit_next_stage": _StaticTool("submit_next_stage"),
+            "exec": _StaticTool("exec"),
             "content_open": _StaticTool("content_open"),
             "web_fetch": _StaticTool("web_fetch"),
         }
@@ -10572,7 +10471,7 @@ async def test_model_visible_tool_selection_preserves_prior_provider_order_when_
             "main.service.runtime_service.build_execution_tool_selection",
             lambda **_kwargs: SimpleNamespace(
                 callable_tool_names=[
-                    "submit_next_stage",
+                    "exec",
                     "content_open",
                     "web_fetch",
                 ],
@@ -10586,7 +10485,7 @@ async def test_model_visible_tool_selection_preserves_prior_provider_order_when_
             service,
             "_model_visible_callable_tool_names_for_node",
             lambda **_kwargs: [
-                "submit_next_stage",
+                "exec",
                 "content_open",
                 "web_fetch",
             ],
@@ -10601,7 +10500,7 @@ async def test_model_visible_tool_selection_preserves_prior_provider_order_when_
         )
 
         assert selection["provider_tool_names"] == [
-            "submit_next_stage",
+            "exec",
             "web_fetch",
             "content_open",
         ]
@@ -10613,83 +10512,6 @@ async def test_model_visible_tool_selection_preserves_prior_provider_order_when_
 
 
 @pytest.mark.asyncio
-async def test_provider_tool_bundle_preserves_full_tool_set_under_stage_gate(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
-    service = MainRuntimeService(
-        chat_backend=_DummyChatBackend(),
-        workspace_root=tmp_path,
-        store_path=tmp_path / "runtime.sqlite3",
-        files_base_dir=tmp_path / "tasks",
-        artifact_dir=tmp_path / "artifacts",
-        governance_store_path=tmp_path / "governance.sqlite3",
-        execution_mode="embedded",
-    )
-    service.global_scheduler.enqueue_task = _noop_enqueue_task
-
-    try:
-        record = await service.create_task(
-            "provider tool names still respect stage lock",
-            session_id="web:shared",
-        )
-        root = service.get_node(record.root_node_id)
-
-        assert root is not None
-
-        react_loop = service.node_runner._react_loop
-        visible_tools = {
-            "submit_next_stage": _StaticTool("submit_next_stage"),
-            "web_fetch": _StaticTool("web_fetch"),
-        }
-
-        monkeypatch.setattr(
-            react_loop,
-            "_model_visible_tool_schema_selector",
-            lambda **_kwargs: {
-                "tool_names": [
-                    "submit_next_stage",
-                    "web_fetch",
-                ],
-                "provider_tool_names": [
-                    "submit_next_stage",
-                    "web_fetch",
-                ],
-                "trace": {
-                    "full_callable_tool_names": [
-                        "submit_next_stage",
-                        "web_fetch",
-                    ],
-                    "provider_tool_names": [
-                        "submit_next_stage",
-                        "web_fetch",
-                    ],
-                },
-            },
-        )
-
-        selected_tools, selection_payload = react_loop._model_visible_tools_for_iteration(
-            task_id=record.task_id,
-            node_id=root.node_id,
-            node_kind=root.node_kind,
-            visible_tools=visible_tools,
-            stage_gate={
-                "enabled": True,
-                "has_active_stage": True,
-                "transition_required": True,
-                "active_stage": {"step_index": 1, "step_total": 1},
-            },
-            runtime_context={},
-        )
-
-        assert list(selected_tools.keys()) == ["submit_next_stage", "web_fetch"]
-        assert selection_payload["tool_names"] == ["submit_next_stage", "web_fetch"]
-        assert selection_payload["provider_tool_names"] == [
-            "submit_next_stage",
-            "web_fetch",
-        ]
-        assert selection_payload["trace"]["stage_locked_to_submit_next_stage"] is False
-    finally:
-        await service.close()
-
-
 def test_task_model_call_event_persists_provider_tool_bundle_in_actual_request_artifact(tmp_path: Path) -> None:
     service = MainRuntimeService(
         chat_backend=_DummyChatBackend(),
@@ -10729,7 +10551,7 @@ def test_task_model_call_event_persists_provider_tool_bundle_in_actual_request_a
         request_message_chars=222,
         actual_tool_schemas=[
             {
-                "name": "submit_next_stage",
+                "name": "exec",
                 "description": "",
                 "parameters": {"type": "object"},
             },
@@ -10740,10 +10562,10 @@ def test_task_model_call_event_persists_provider_tool_bundle_in_actual_request_a
             },
         ],
         callable_tool_names=[
-            "submit_next_stage",
+            "exec",
         ],
         provider_tool_names=[
-            "submit_next_stage",
+            "exec",
             "web_fetch",
         ],
         provider_tool_bundle_seeded=True,
@@ -10756,8 +10578,8 @@ def test_task_model_call_event_persists_provider_tool_bundle_in_actual_request_a
     model_call = calls[-1]["payload"]
     actual_request_ref = str(model_call.get("actual_request_ref") or "")
 
-    assert model_call["callable_tool_names"] == ["submit_next_stage"]
-    assert model_call["provider_tool_names"] == ["submit_next_stage", "web_fetch"]
+    assert model_call["callable_tool_names"] == ["exec"]
+    assert model_call["provider_tool_names"] == ["exec", "web_fetch"]
     assert model_call["provider_tool_bundle_seeded"] is True
     assert model_call["provider_tool_bundle_mode"] == "pinned_seeded"
     assert model_call["provider_tool_exposure_revision"] == "pte:tool-revision"
@@ -10765,8 +10587,8 @@ def test_task_model_call_event_persists_provider_tool_bundle_in_actual_request_a
     assert actual_request_ref.startswith("artifact:")
 
     actual_request_payload = json.loads(service.log_service.resolve_content_ref(actual_request_ref))
-    assert actual_request_payload["callable_tool_names"] == ["submit_next_stage"]
-    assert actual_request_payload["provider_tool_names"] == ["submit_next_stage", "web_fetch"]
+    assert actual_request_payload["callable_tool_names"] == ["exec"]
+    assert actual_request_payload["provider_tool_names"] == ["exec", "web_fetch"]
     assert actual_request_payload["provider_tool_bundle_seeded"] is True
     assert actual_request_payload["provider_tool_bundle_mode"] == "pinned_seeded"
     assert actual_request_payload["provider_tool_exposure_revision"] == "pte:tool-revision"
@@ -10832,9 +10654,9 @@ def test_task_model_call_row_records_route_tier_attribution_and_sentinels(tmp_pa
         prompt_cache_key="stable-cache-key-route-tier",
         request_message_count=2,
         request_message_chars=20,
-        actual_tool_schemas=[{"name": "submit_next_stage", "description": "", "parameters": {"type": "object"}}],
-        callable_tool_names=["submit_next_stage"],
-        provider_tool_names=["submit_next_stage"],
+        actual_tool_schemas=[{"name": "exec", "description": "", "parameters": {"type": "object"}}],
+        callable_tool_names=["exec"],
+        provider_tool_names=["exec"],
         provider_tool_bundle_seeded=True,
         provider_tool_bundle_mode="pinned_frozen",
         route_admission_group="flash",
@@ -10931,22 +10753,10 @@ def test_view_progress_text_contains_status_activity_and_tree(tmp_path: Path):
     assert task is not None
     assert root is not None
 
-    service.log_service.submit_next_stage(
-        record.task_id,
-        root.node_id,
-        stage_goal="鏍归樁娈电洰鏍?",
-        tool_round_budget=5,
-    )
     child = service.node_runner._create_execution_child(
         task=task,
         parent=root,
         spec=SpawnChildSpec(goal="child goal", prompt="child prompt", execution_policy=_execution_policy()),
-    )
-    service.log_service.submit_next_stage(
-        record.task_id,
-        child.node_id,
-        stage_goal="瀛愰樁娈电洰鏍?",
-        tool_round_budget=5,
     )
     acceptance = service.node_runner.create_acceptance_node(
         task=task,
@@ -10969,102 +10779,6 @@ def test_view_progress_text_contains_status_activity_and_tree(tmp_path: Path):
     assert "调度:" in text
     assert "待检验" in text
     assert "检验中" not in text
-
-
-def test_view_progress_tree_text_shows_acceptance_stage_goal_when_present(tmp_path: Path):
-    service = MainRuntimeService(
-        chat_backend=_DummyChatBackend(),
-        workspace_root=tmp_path,
-        store_path=tmp_path / "runtime.sqlite3",
-        files_base_dir=tmp_path / "tasks",
-        artifact_dir=tmp_path / "artifacts",
-        governance_store_path=tmp_path / "governance.sqlite3",
-        execution_mode="web",
-    )
-
-    import asyncio
-
-    record = asyncio.run(_create_web_task(service))
-    task = service.get_task(record.task_id)
-    root = service.get_node(record.root_node_id)
-
-    assert task is not None
-    assert root is not None
-
-    acceptance = service.node_runner.create_acceptance_node(
-        task=task,
-        accepted_node=root,
-        goal="accept root",
-        acceptance_prompt="verify root output",
-        parent_node_id=root.node_id,
-    )
-    service.log_service.submit_next_stage(
-        record.task_id,
-        acceptance.node_id,
-        stage_goal="validate cited evidence before final verdict",
-        tool_round_budget=5,
-    )
-
-    progress = service.query_service.view_progress(record.task_id, mark_read=False)
-    acceptance_detail = service.get_node_detail_payload(record.task_id, acceptance.node_id, detail_level="full")
-
-    assert progress is not None
-    assert acceptance_detail is not None
-    assert acceptance.node_id in progress.tree_text
-    assert "validate cited evidence before final verdict" in progress.tree_text
-    assert acceptance_detail["item"]["execution_trace"]["stages"][0]["stage_goal"] == "validate cited evidence before final verdict"
-
-
-def test_view_progress_tree_text_prefers_live_stage_goal_over_historical_goal(tmp_path: Path):
-    service = MainRuntimeService(
-        chat_backend=_DummyChatBackend(),
-        workspace_root=tmp_path,
-        store_path=tmp_path / "runtime.sqlite3",
-        files_base_dir=tmp_path / "tasks",
-        artifact_dir=tmp_path / "artifacts",
-        governance_store_path=tmp_path / "governance.sqlite3",
-        execution_mode="web",
-    )
-
-    import asyncio
-
-    record = asyncio.run(_create_web_task(service))
-    root = service.get_node(record.root_node_id)
-
-    assert root is not None
-
-    service.log_service.submit_next_stage(
-        record.task_id,
-        root.node_id,
-        stage_goal="鏃ч樁娈电洰鏍?",
-        tool_round_budget=5,
-    )
-    service.log_service.replace_runtime_frames(
-        record.task_id,
-        active_node_ids=[root.node_id],
-        runnable_node_ids=[],
-        waiting_node_ids=[],
-        frames=[
-            {
-                "node_id": root.node_id,
-                "depth": 0,
-                "node_kind": "execution",
-                "phase": "execution",
-                "stage_mode": "鑷富鎵ц",
-                "stage_status": "杩涜涓?",
-                "stage_goal": "鏈€鏂伴樁娈电洰鏍?",
-                "stage_total_steps": 1,
-                "tool_calls": [],
-                "child_pipelines": [],
-            }
-        ],
-    )
-
-    progress = service.query_service.view_progress(record.task_id, mark_read=False)
-
-    assert progress is not None
-    # 活跃帧带活性标注:该根节点此刻确实在运行,文本如实标注「运行中」。
-    assert progress.tree_text == f"({root.node_id},in_progress,鏈€鏂伴樁娈电洰鏍?,运行中)"
 
 
 def test_running_node_output_does_not_pollute_final_output_in_projection(tmp_path: Path):
@@ -11132,24 +10846,6 @@ def test_exec_output_ref_is_persisted_and_full_detail_hydrates_tool_output(tmp_p
     assert envelope is not None
     assert envelope.ref
 
-    service.log_service.submit_next_stage(
-        record.task_id,
-        root.node_id,
-        stage_goal="capture exec output",
-        tool_round_budget=5,
-    )
-    service.log_service.record_execution_stage_round(
-        record.task_id,
-        root.node_id,
-        tool_calls=[
-            {
-                "id": "call:exec-output-ref",
-                "name": "exec",
-                "arguments": {"command": "git status"},
-            }
-        ],
-        created_at=now_iso(),
-    )
     service.log_service.append_node_output(
         record.task_id,
         root.node_id,
@@ -11212,8 +10908,8 @@ def test_exec_output_ref_is_persisted_and_full_detail_hydrates_tool_output(tmp_p
     assert summary_detail is not None
     assert full_detail is not None
 
-    summary_tool = summary_detail["item"]["execution_trace_summary"]["stages"][0]["rounds"][0]["tools"][0]
-    full_tool = full_detail["item"]["execution_trace"]["stages"][0]["rounds"][0]["tools"][0]
+    summary_tool = summary_detail["item"]["execution_trace_summary"]["turns"][0]["tools"][0]
+    full_tool = full_detail["item"]["execution_trace"]["turns"][0]["tools"][0]
 
     assert summary_tool["output_ref"] == envelope.ref
     assert summary_tool["output_text"] == "output captured in ref"
@@ -11223,23 +10919,17 @@ def test_exec_output_ref_is_persisted_and_full_detail_hydrates_tool_output(tmp_p
 
 def test_execution_trace_summary_does_not_inline_hydrated_full_text_when_output_ref_exists() -> None:
     hydrated_trace = {
-        "stages": [
+        "turns": [
             {
-                "stage_id": "stage:1",
-                "stage_index": 1,
-                "rounds": [
+                "seq": 1,
+                "text": "",
+                "tools": [
                     {
-                        "round_id": "round:1",
-                        "round_index": 1,
-                        "tools": [
-                            {
-                                "tool_call_id": "call:exec-output-ref",
-                                "tool_name": "exec",
-                                "output_text": "\n".join(f"exec line {index:03d}" for index in range(220)),
-                                "output_ref": "artifact:artifact:exec-output",
-                                "status": "success",
-                            }
-                        ],
+                        "tool_call_id": "call:exec-output-ref",
+                        "tool_name": "exec",
+                        "output_text": "\n".join(f"exec line {index:03d}" for index in range(220)),
+                        "output_ref": "artifact:artifact:exec-output",
+                        "status": "success",
                     }
                 ],
             }
@@ -11250,7 +10940,7 @@ def test_execution_trace_summary_does_not_inline_hydrated_full_text_when_output_
         build_execution_trace_summary(hydrated_trace)
     )
 
-    summary_tool = summary["stages"][0]["rounds"][0]["tools"][0]
+    summary_tool = summary["turns"][0]["tools"][0]
     assert summary_tool["output_ref"] == "artifact:artifact:exec-output"
     assert summary_tool["output_text"] == "output captured in ref"
 
@@ -11283,7 +10973,7 @@ def test_view_progress_nodes_are_compact_summaries(tmp_path: Path):
     assert root_progress_node["title"] == root.goal
     assert root_progress_node["status"] == root.status
     assert root_progress_node["execution_trace"]["tool_steps"] == []
-    assert root_progress_node["execution_trace"]["stages"] == []
+    assert root_progress_node["execution_trace"]["turns"] == []
     assert "prompt" not in root_progress_node
     assert "input" not in root_progress_node
     assert "metadata" not in root_progress_node
@@ -11554,9 +11244,9 @@ async def test_pause_during_model_call_keeps_task_resumable_and_resume_finishes_
                     content="",
                     tool_calls=[
                         ToolCallRequest(
-                            id="call:stage",
-                            name="submit_next_stage",
-                            arguments={"stage_goal": "resume after pause", "tool_round_budget": 5},
+                            id="call:exec",
+                            name="exec",
+                            arguments={"command": "resume after pause"},
                         )
                     ],
                     finish_reason="tool_calls",
@@ -13019,8 +12709,7 @@ async def test_resume_react_state_keeps_restored_frame_when_pending_notice_waits
                     node_kind=root.node_kind,
                     phase="waiting_children",
                 ),
-                "stage_status": "active",
-                "stage_goal": "keep existing round",
+                "await_marker": "keep existing round",
                 "messages": [
                     {"role": "system", "content": "system seed"},
                     {"role": "user", "content": "historic request"},
@@ -13043,8 +12732,7 @@ async def test_resume_react_state_keeps_restored_frame_when_pending_notice_waits
             {"role": "user", "content": "historic request"},
         ]
         assert list(react_state.get("pending_root_notice_ids") or []) == []
-        assert frame.get("stage_status") == "active"
-        assert frame.get("stage_goal") == "keep existing round"
+        assert frame.get("await_marker") == "keep existing round"
         assert list((root_after.metadata or {}).get("pending_append_notice_records") or [])
         assert pending_notice_state["resume_mode"] == RESUME_MODE_WAIT_FOR_CHILDREN
         assert pending_notice_state["holding_round_id"] == "call:spawn-round"
@@ -13573,8 +13261,7 @@ async def test_resume_react_state_injects_pending_notice_once_active_round_is_go
                     node_kind=root.node_kind,
                     phase="before_model",
                 ),
-                "stage_status": "active",
-                "stage_goal": "consume held notice",
+
                 "messages": [
                     {"role": "system", "content": "system seed"},
                     {"role": "user", "content": "historic request"},
@@ -13595,8 +13282,6 @@ async def test_resume_react_state_injects_pending_notice_once_active_round_is_go
         assert react_state["messages"][-1]["role"] == "user"
         assert react_state["messages"][-1]["content"] == "new constraint"
         assert react_state["pending_root_notice_ids"] == ["root-notice:demo:1"]
-        assert frame.get("stage_status") == ""
-        assert frame.get("stage_goal") == ""
         assert pending_notice_state["resume_mode"] == RESUME_MODE_ORDINARY
         assert pending_notice_state["holding_round_id"] == ""
     finally:
@@ -13816,9 +13501,10 @@ async def test_resume_pending_tool_turn_uses_recovery_check_for_verified_done_wr
 
         detail = service.get_node_detail_payload(record.task_id, root.node_id)
         assert detail is not None
-        round_tools = detail["item"]["execution_trace_summary"]["stages"][0]["rounds"][0]["tools"]
-        assert [item["tool_name"] for item in round_tools] == ["recovery_check", "filesystem_write"]
-        recovery_step = round_tools[0]
+        summary = detail["item"]["execution_trace_summary"]
+        assert [item["tool_name"] for item in summary["turns"][0]["tools"]] == ["filesystem_write"]
+        # 恢复核验没有模型调用行，按运行时补写的工具步进扁平列表。
+        recovery_step = next(item for item in summary["tool_steps"] if item["kind"] == "recovery_check")
         assert recovery_step["status"] == "success"
         assert recovery_step["tool_call_id"] == f"recovery_check:{round_payload['round_id']}"
     finally:
@@ -13878,10 +13564,11 @@ async def test_resume_pending_tool_turn_marks_exec_round_for_model_decide_when_s
 
         detail = service.get_node_detail_payload(record.task_id, root.node_id)
         assert detail is not None
-        round_tools = detail["item"]["execution_trace_summary"]["stages"][0]["rounds"][0]["tools"]
-        assert [item["tool_name"] for item in round_tools] == ["recovery_check", "exec"]
-        assert round_tools[0]["status"] == "warning"
-        assert round_tools[1]["status"] == "interrupted"
+        summary = detail["item"]["execution_trace_summary"]
+        assert [item["tool_name"] for item in summary["turns"][0]["tools"]] == ["exec"]
+        recovery_step = next(item for item in summary["tool_steps"] if item["kind"] == "recovery_check")
+        assert recovery_step["status"] == "warning"
+        assert summary["turns"][0]["tools"][0]["status"] == "interrupted"
     finally:
         await service.close()
 
@@ -14143,7 +13830,7 @@ async def test_spawn_children_prefilters_specs_and_preserves_result_order(tmp_pa
 
 
 @pytest.mark.asyncio
-async def test_spawn_review_request_uses_root_to_parent_path_tree_and_stage_goals(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+async def test_spawn_review_request_uses_root_to_parent_path_tree_and_goals(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     backend = _SpawnReviewToolCallChatBackend(
         arguments={"allowed_indexes": [0], "blocked_specs": []}
     )
@@ -14175,8 +13862,6 @@ async def test_spawn_review_request_uses_root_to_parent_path_tree_and_stage_goal
             parent=parent,
             spec=SpawnChildSpec(goal="existing child", prompt="existing child prompt", execution_policy=_execution_policy()),
         )
-        service.log_service.submit_next_stage(record.task_id, root.node_id, stage_goal="root stage goal", tool_round_budget=5)
-        service.log_service.submit_next_stage(record.task_id, parent.node_id, stage_goal="parent stage goal", tool_round_budget=5)
 
         async def _fake_run_node(task_id: str, node_id: str):
             node = service.get_node(node_id)
@@ -14214,8 +13899,8 @@ async def test_spawn_review_request_uses_root_to_parent_path_tree_and_stage_goal
         payload = json.loads(str(call["messages"][1]["content"]))
         assert payload["parent_node_id"] == parent.node_id
         assert payload["spawn_request"]["requested_specs"][0]["goal"] == "new child"
-        assert "root stage goal" in payload["path_tree_text"]
-        assert "parent stage goal" in payload["path_tree_text"]
+        assert "existing child" not in payload["path_tree_text"]
+        assert "parent branch" in payload["path_tree_text"]
         assert root.node_id in payload["path_tree_text"]
         assert parent.node_id in payload["path_tree_text"]
         assert existing_child.node_id not in payload["path_tree_text"]

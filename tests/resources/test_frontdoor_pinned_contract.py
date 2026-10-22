@@ -45,10 +45,7 @@ def _isolate_pinned_contract_stores():
 
 
 def _contract_text(contract) -> str:
-    return "\n".join(
-        str(item.get("content") or "")
-        for item in [contract.to_message(), contract.to_stage_gate_message()]
-    )
+    return str(contract.to_message().get("content") or "")
 
 
 def _items(*ids: str) -> list[dict[str, str]]:
@@ -179,7 +176,6 @@ def test_tail_has_no_skill_roster_mechanism_anymore() -> None:
     tail = build_frontdoor_tool_contract(
         callable_tool_names=["exec"],
         candidate_tool_names=["exec"],
-        frontdoor_stage_state={},
         candidate_skill_ids=[f"skill-{index}" for index in range(12)],
         visible_skill_ids=[f"skill-{index}" for index in range(12)],
         rbac_visible_tool_names=["exec"],
@@ -280,7 +276,6 @@ def _canonical_state(**overrides) -> dict[str, object]:
         "candidate_skill_ids": list(BASE_ROSTER),
         "rbac_visible_tool_names": [],
         "rbac_visible_skill_ids": list(BASE_ROSTER),
-        "frontdoor_stage_state": {"active_stage_id": "", "transition_required": False, "stages": []},
         "session_key": "web:pinned",
         "cache_family_revision": "rev-1",
     }

@@ -6,8 +6,6 @@ import subprocess
 import textwrap
 from pathlib import Path
 
-from main.monitoring.query_service import TaskQueryService
-from main.runtime.execution_trace_compaction import build_execution_trace_summary
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 
@@ -1974,9 +1972,7 @@ def test_build_node_execution_trace_uses_summary_execution_trace_when_full_trace
         const fs = require("fs");
         const vm = require("vm");
         global.window = global;
-        global.S = {
-          liveFrameMap: {},
-        };
+        global.S = { liveFrameMap: {} };
         global.U = {};
         global.ApiClient = {};
         global.showToast = () => {};
@@ -1990,19 +1986,17 @@ def test_build_node_execution_trace_uses_summary_execution_trace_when_full_trace
         vm.runInThisContext(code);
 
         const trace = buildNodeExecutionTrace(
-          {
-            node_id: "node:test",
-            goal: "inspect repository",
-            final_output: "done",
-          },
+          { node_id: "node:test", goal: "inspect repository" },
           {
             prompt: "inspect repository",
             final_output: "done",
             execution_trace_summary: {
-              stages: [
+              turns: [
                 {
-                  stage_goal: "inspect repository",
-                  tool_calls: [
+                  seq: 1,
+                  text: "inspect repository",
+                  status: "completed",
+                  tools: [
                     {
                       tool_name: "filesystem",
                       arguments_text: "{\\"path\\": \\".\\"}",
@@ -2016,156 +2010,23 @@ def test_build_node_execution_trace_uses_summary_execution_trace_when_full_trace
         );
 
         console.log(JSON.stringify({
-          stageCount: trace.stages.length,
-          stageGoal: trace.stages[0]?.stage_goal || "",
-          roundCount: trace.stages[0]?.rounds?.length || 0,
-          toolName: trace.stages[0]?.rounds?.[0]?.tools?.[0]?.tool_name || "",
-          outputText: trace.stages[0]?.rounds?.[0]?.tools?.[0]?.output_text || "",
+          turnCount: trace.turns.length,
+          turnText: trace.turns[0]?.text || "",
+          toolName: trace.turns[0]?.tools?.[0]?.tool_name || "",
+          outputText: trace.turns[0]?.tools?.[0]?.output_text || "",
         }));
         """
     )
 
-    assert result["stageCount"] == 1
-    assert result["stageGoal"] == "inspect repository"
-    assert result["roundCount"] == 1
+    assert result["turnCount"] == 1
+    assert result["turnText"] == "inspect repository"
     assert result["toolName"] == "filesystem"
     assert result["outputText"] == "repo listing"
 
 
-def test_build_node_execution_trace_preserves_summary_stage_budget() -> None:
-    result = _run_node_script(
-        """
-        const fs = require("fs");
-        const vm = require("vm");
-        global.window = global;
-        global.S = {
-          liveFrameMap: {},
-        };
-        global.U = {};
-        global.ApiClient = {};
-        global.showToast = () => {};
-        global.isAbortLike = () => false;
-        global.renderTree = () => {};
-        global.normalizeInt = (value, fallback = 0) => {
-          const parsed = Number.parseInt(String(value ?? ""), 10);
-          return Number.isFinite(parsed) ? parsed : fallback;
-        };
-        const code = ["g3ku/web/frontend/tasks/tree-store.js", "g3ku/web/frontend/tasks/tree-view.js", "g3ku/web/frontend/tasks/node-detail-store.js", "g3ku/web/frontend/tasks/node-detail.js", "g3ku/web/frontend/org_graph_task_view.js"].map((name) => fs.readFileSync(name, "utf8")).join("\\n");
-        vm.runInThisContext(code);
-
-        const trace = buildNodeExecutionTrace(
-          {
-            node_id: "node:test",
-            goal: "inspect repository",
-          },
-          {
-            execution_trace_summary: {
-              stages: [
-                {
-                  stage_goal: "inspect repository",
-                  tool_round_budget: 5,
-                  tool_calls: [
-                    {
-                      tool_name: "filesystem",
-                      arguments_text: "{\\"path\\": \\".\\"}",
-                      output_text: "repo listing",
-                    },
-                  ],
-                },
-              ],
-            },
-          },
-        );
-
-        console.log(JSON.stringify({
-          stageTotalSteps: trace.stages[0]?.stage_total_steps ?? null,
-        }));
-        """
-    )
-
-    assert result["stageTotalSteps"] == 5
 
 
-def test_build_node_execution_trace_preserves_summary_round_boundaries() -> None:
-    result = _run_node_script(
-        """
-        const fs = require("fs");
-        const vm = require("vm");
-        global.window = global;
-        global.S = {
-          liveFrameMap: {},
-        };
-        global.U = {};
-        global.ApiClient = {};
-        global.showToast = () => {};
-        global.isAbortLike = () => false;
-        global.renderTree = () => {};
-        global.normalizeInt = (value, fallback = 0) => {
-          const parsed = Number.parseInt(String(value ?? ""), 10);
-          return Number.isFinite(parsed) ? parsed : fallback;
-        };
-        const code = ["g3ku/web/frontend/tasks/tree-store.js", "g3ku/web/frontend/tasks/tree-view.js", "g3ku/web/frontend/tasks/node-detail-store.js", "g3ku/web/frontend/tasks/node-detail.js", "g3ku/web/frontend/org_graph_task_view.js"].map((name) => fs.readFileSync(name, "utf8")).join("\\n");
-        vm.runInThisContext(code);
 
-        const trace = buildNodeExecutionTrace(
-          {
-            node_id: "node:test",
-            goal: "inspect repository",
-          },
-          {
-            execution_trace_summary: {
-              stages: [
-                {
-                  stage_goal: "inspect repository",
-                  tool_round_budget: 8,
-                  tool_rounds_used: 2,
-                  rounds: [
-                    {
-                      round_id: "round-1",
-                      round_index: 1,
-                      budget_counted: true,
-                      tools: [
-                        {
-                          tool_name: "filesystem",
-                          arguments_text: "{\\"path\\": \\".\\"}",
-                          output_text: "repo listing",
-                          status: "success",
-                        },
-                      ],
-                    },
-                    {
-                      round_id: "round-2",
-                      round_index: 2,
-                      budget_counted: true,
-                      tools: [
-                        {
-                          tool_name: "content",
-                          arguments_text: "{\\"ref\\": \\"artifact:1\\"}",
-                          output_text: "file contents",
-                          status: "success",
-                        },
-                      ],
-                    },
-                  ],
-                },
-              ],
-            },
-          },
-        );
-
-        console.log(JSON.stringify({
-          roundCount: trace.stages[0]?.rounds?.length || 0,
-          firstTool: trace.stages[0]?.rounds?.[0]?.tools?.[0]?.tool_name || "",
-          secondTool: trace.stages[0]?.rounds?.[1]?.tools?.[0]?.tool_name || "",
-          roundsUsed: trace.stages[0]?.tool_rounds_used ?? null,
-        }));
-        """
-    )
-
-    assert result["roundCount"] == 2
-    assert result["firstTool"] == "filesystem"
-    assert result["secondTool"] == "content"
-    assert result["roundsUsed"] == 2
 
 
 def test_build_node_execution_trace_prefers_detail_final_output_when_full_trace_output_is_blank() -> None:
@@ -2305,70 +2166,6 @@ def test_build_node_execution_trace_falls_back_to_failure_reason_when_failed_wit
     assert result["finalOutput"] == "root failed hard"
 
 
-def test_build_execution_trace_steps_use_stage_goal_as_stage_title_without_duplicate_goal_or_status_field() -> None:
-    result = _run_node_script(
-        """
-        const fs = require("fs");
-        const vm = require("vm");
-        global.window = global;
-        global.S = {
-          liveFrameMap: {},
-        };
-        global.U = {};
-        global.ApiClient = {};
-        global.showToast = () => {};
-        global.isAbortLike = () => false;
-        global.renderTree = () => {};
-        global.esc = (value) => String(value ?? "");
-        global.readableText = (value, { emptyText = "" } = {}) => {
-          const text = String(value ?? "").trim();
-          return text || emptyText;
-        };
-        global.normalizeInt = (value, fallback = 0) => {
-          const parsed = Number.parseInt(String(value ?? ""), 10);
-          return Number.isFinite(parsed) ? parsed : fallback;
-        };
-        const code = ["g3ku/web/frontend/tasks/tree-store.js", "g3ku/web/frontend/tasks/tree-view.js", "g3ku/web/frontend/tasks/node-detail-store.js", "g3ku/web/frontend/tasks/node-detail.js", "g3ku/web/frontend/org_graph_task_view.js"].map((name) => fs.readFileSync(name, "utf8")).join("\\n");
-        vm.runInThisContext(code);
-
-        const trace = buildNodeExecutionTrace(
-          {
-            node_id: "node:test",
-            goal: "inspect repository",
-          },
-          {
-            execution_trace_summary: {
-              stages: [
-                {
-                  stage_goal: "full stage goal: locate entry, read context, organize evidence",
-                  tool_calls: [
-                    {
-                      tool_name: "filesystem",
-                      arguments_text: "{\\"path\\": \\".\\"}",
-                      output_text: "repo listing",
-                    },
-                  ],
-                },
-              ],
-            },
-          },
-        );
-        const steps = buildExecutionTraceSteps(trace, { state: "in_progress" });
-        const stageStep = steps[1];
-
-        console.log(JSON.stringify({
-          title: stageStep?.title || "",
-          containsStageGoalField: String(stageStep?.bodyHtml || "").includes("\\u9636\\u6bb5\\u76ee\\u6807"),
-          containsStatusField: String(stageStep?.bodyHtml || "").includes("\\u72b6\\u6001"),
-          containsToolOutput: String(stageStep?.bodyHtml || "").includes("repo listing"),
-        }));
-        """
-    )
-
-    assert result["title"] == "full stage goal: locate entry, read context, organize evidence"
-    assert result["containsStageGoalField"] is False
-    assert result["containsStatusField"] is False
-    assert result["containsToolOutput"] is True
 
 
 _LOADER_CHIP_NODE_STUBS = """
@@ -2422,7 +2219,7 @@ def test_node_detail_renders_context_load_chips_without_tool_names() -> None:
         const vm = require("vm");
 """
         + _LOADER_CHIP_NODE_STUBS
-        + """
+        + r"""
         const toolLoad = {
           tool_call_id: "call:load:tool",
           tool_name: "load_tool_context",
@@ -2445,22 +2242,12 @@ def test_node_detail_renders_context_load_chips_without_tool_names() -> None:
           status: "success",
         };
 
-        function stageHtmlOf(tools) {
+        function turnHtmlOf(tools) {
           const trace = buildNodeExecutionTrace(
             { node_id: "node:test", goal: "inspect repository" },
             {
               execution_trace: {
-                stages: [
-                  {
-                    stage_id: "stage:1",
-                    stage_index: 1,
-                    stage_goal: "加载上下文并执行",
-                    tool_round_budget: 3,
-                    tool_rounds_used: 1,
-                    status: "进行中",
-                    rounds: [{ round_id: "round:1", round_index: 1, budget_counted: true, tools }],
-                  },
-                ],
+                turns: [{ seq: 1, text: "加载上下文并执行", status: "completed", tools }],
               },
             },
             null,
@@ -2468,8 +2255,8 @@ def test_node_detail_renders_context_load_chips_without_tool_names() -> None:
           return String(buildExecutionTraceSteps(trace, { state: "in_progress" })[1].bodyHtml || "");
         }
 
-        const mixed = stageHtmlOf([toolLoad, skillLoad, ordinary]);
-        const failed = stageHtmlOf([
+        const mixed = turnHtmlOf([toolLoad, skillLoad, ordinary]);
+        const failed = turnHtmlOf([
           {
             tool_call_id: "call:load:fail",
             tool_name: "load_skill_context",
@@ -2525,25 +2312,23 @@ def test_node_detail_renders_context_load_chips_without_tool_names() -> None:
     assert result["flatSkipsArgs"] is True
 
 
-def test_build_execution_trace_steps_label_summary_rounds_by_spawn_presence() -> None:
+
+
+
+
+
+def test_summary_execution_trace_defaults_running_when_tool_lacks_completion_signal() -> None:
     result = _run_node_script(
         """
         const fs = require("fs");
         const vm = require("vm");
         global.window = global;
-        global.S = {
-          liveFrameMap: {},
-        };
+        global.S = { liveFrameMap: {} };
         global.U = {};
         global.ApiClient = {};
         global.showToast = () => {};
         global.isAbortLike = () => false;
         global.renderTree = () => {};
-        global.esc = (value) => String(value ?? "");
-        global.readableText = (value, { emptyText = "" } = {}) => {
-          const text = String(value ?? "").trim();
-          return text || emptyText;
-        };
         global.normalizeInt = (value, fallback = 0) => {
           const parsed = Number.parseInt(String(value ?? ""), 10);
           return Number.isFinite(parsed) ? parsed : fallback;
@@ -2552,176 +2337,14 @@ def test_build_execution_trace_steps_label_summary_rounds_by_spawn_presence() ->
         vm.runInThisContext(code);
 
         const trace = buildNodeExecutionTrace(
-          {
-            node_id: "node:test",
-            goal: "inspect repository",
-          },
+          { node_id: "node:test", goal: "inspect repository" },
           {
             execution_trace_summary: {
-              stages: [
+              turns: [
                 {
-                  stage_goal: "normal stage",
-                  mode: "自主执行",
-                  tool_calls: [
-                    {
-                      tool_name: "filesystem",
-                      arguments_text: "{\\"path\\": \\".\\"}",
-                      output_text: "repo listing",
-                    },
-                  ],
-                },
-                {
-                  stage_goal: "spawn stage",
-                  mode: "包含派生",
-                  tool_calls: [
-                    {
-                      tool_name: "spawn_child_nodes",
-                      arguments_text: "{\\"children\\": 3}",
-                      output_text: "spawned",
-                    },
-                  ],
-                },
-              ],
-            },
-          },
-        );
-        const steps = buildExecutionTraceSteps(trace, { state: "in_progress" });
-
-        console.log(JSON.stringify({
-          normalStageTitle: String(steps[1]?.title || ""),
-          spawnStageTitle: String(steps[2]?.title || ""),
-          normalStageHasSelfMode: String(steps[1]?.bodyHtml || "").includes("\\u81ea\\u4e3b\\u6267\\u884c"),
-          spawnStageHasWithChildrenMode: String(steps[2]?.bodyHtml || "").includes("\\u5305\\u542b\\u6d3e\\u751f"),
-        }));
-        """
-    )
-
-    assert "normal stage" in result["normalStageTitle"]
-    assert "spawn stage" in result["spawnStageTitle"]
-    assert result["normalStageHasSelfMode"] is False
-    assert result["spawnStageHasWithChildrenMode"] is False
-
-
-def test_build_execution_trace_steps_label_mixed_full_round_as_with_children() -> None:
-    result = _run_node_script(
-        """
-        const fs = require("fs");
-        const vm = require("vm");
-        global.window = global;
-        global.S = {
-          liveFrameMap: {},
-        };
-        global.U = {};
-        global.ApiClient = {};
-        global.showToast = () => {};
-        global.isAbortLike = () => false;
-        global.renderTree = () => {};
-        global.esc = (value) => String(value ?? "");
-        global.readableText = (value, { emptyText = "" } = {}) => {
-          const text = String(value ?? "").trim();
-          return text || emptyText;
-        };
-        global.normalizeInt = (value, fallback = 0) => {
-          const parsed = Number.parseInt(String(value ?? ""), 10);
-          return Number.isFinite(parsed) ? parsed : fallback;
-        };
-        const code = ["g3ku/web/frontend/tasks/tree-store.js", "g3ku/web/frontend/tasks/tree-view.js", "g3ku/web/frontend/tasks/node-detail-store.js", "g3ku/web/frontend/tasks/node-detail.js", "g3ku/web/frontend/org_graph_task_view.js"].map((name) => fs.readFileSync(name, "utf8")).join("\\n");
-        vm.runInThisContext(code);
-
-        const trace = buildNodeExecutionTrace(
-          {
-            node_id: "node:test",
-            goal: "inspect repository",
-          },
-          {
-            execution_trace: {
-              stages: [
-                {
-                  stage_id: "stage:test",
-                  stage_index: 1,
-                  mode: "包含派生",
-                  status: "完成",
-                  stage_goal: "mixed stage",
-                  tool_round_budget: 7,
-                  tool_rounds_used: 1,
-                  rounds: [
-                    {
-                      round_id: "round:1",
-                      round_index: 1,
-                      budget_counted: true,
-                      tools: [
-                        {
-                          tool_name: "filesystem",
-                          arguments_text: "{\\"path\\": \\".\\"}",
-                          output_text: "repo listing",
-                          status: "success",
-                        },
-                        {
-                          tool_name: "spawn_child_nodes",
-                          arguments_text: "{\\"children\\": 2}",
-                          output_text: "spawned",
-                          status: "success",
-                        },
-                      ],
-                    },
-                  ],
-                },
-              ],
-            },
-          },
-        );
-        const steps = buildExecutionTraceSteps(trace, { state: "completed" });
-
-        console.log(JSON.stringify({
-          stageTitle: String(steps[1]?.title || ""),
-          stageHasWithChildrenMode: String(steps[1]?.bodyHtml || "").includes("\\u5305\\u542b\\u6d3e\\u751f"),
-          stageHasRoundIndexLabel: String(steps[1]?.bodyHtml || "").includes("\\u7b2c 1 \\u8f6e"),
-        }));
-        """
-    )
-
-    assert "mixed stage" in result["stageTitle"]
-    assert result["stageHasWithChildrenMode"] is False
-    assert result["stageHasRoundIndexLabel"] is False
-
-
-def test_summary_execution_trace_defaults_running_when_stage_or_tool_lacks_completion_signal() -> None:
-    result = _run_node_script(
-        """
-        const fs = require("fs");
-        const vm = require("vm");
-        global.window = global;
-        global.S = {
-          liveFrameMap: {},
-        };
-        global.U = {};
-        global.ApiClient = {};
-        global.showToast = () => {};
-        global.isAbortLike = () => false;
-        global.renderTree = () => {};
-        global.esc = (value) => String(value ?? "");
-        global.readableText = (value, { emptyText = "" } = {}) => {
-          const text = String(value ?? "").trim();
-          return text || emptyText;
-        };
-        global.normalizeInt = (value, fallback = 0) => {
-          const parsed = Number.parseInt(String(value ?? ""), 10);
-          return Number.isFinite(parsed) ? parsed : fallback;
-        };
-        const code = ["g3ku/web/frontend/tasks/tree-store.js", "g3ku/web/frontend/tasks/tree-view.js", "g3ku/web/frontend/tasks/node-detail-store.js", "g3ku/web/frontend/tasks/node-detail.js", "g3ku/web/frontend/org_graph_task_view.js"].map((name) => fs.readFileSync(name, "utf8")).join("\\n");
-        vm.runInThisContext(code);
-
-        const trace = buildNodeExecutionTrace(
-          {
-            node_id: "node:test",
-            goal: "inspect repository",
-          },
-          {
-            execution_trace_summary: {
-              stages: [
-                {
-                  stage_goal: "launch child researchers",
-                  tool_calls: [
+                  seq: 1,
+                  text: "launch child researchers",
+                  tools: [
                     {
                       tool_name: "spawn_child_nodes",
                       arguments_text: "{\\"children\\": 3}",
@@ -2737,14 +2360,13 @@ def test_summary_execution_trace_defaults_running_when_stage_or_tool_lacks_compl
         );
 
         console.log(JSON.stringify({
-          stageStatus: trace.stages[0]?.status || "",
-          toolStatus: trace.stages[0]?.rounds?.[0]?.tools?.[0]?.status || "",
+          toolStatus: trace.turns[0]?.tools?.[0]?.status || "",
         }));
         """
     )
 
-    assert result["stageStatus"] == "\u8fdb\u884c\u4e2d"
     assert result["toolStatus"] == "running"
+
 
 
 def test_render_trace_step_status_label_override_preserves_success_color() -> None:
@@ -2794,318 +2416,14 @@ def test_render_trace_step_status_label_override_preserves_success_color() -> No
     assert result["firstLabel"] == "完成"
 
 
-def test_render_execution_stage_rounds_show_completed_round_and_tool_result_labels() -> None:
-    result = _run_node_script(
-        """
-        const fs = require("fs");
-        const vm = require("vm");
-        global.window = global;
-        global.S = { liveFrameMap: {} };
-        global.U = {};
-        global.ApiClient = {};
-        global.showToast = () => {};
-        global.isAbortLike = () => false;
-        global.renderTree = () => {};
-        global.esc = (value) => String(value ?? "");
-        global.readableText = (value, { emptyText = "" } = {}) => {
-          const text = String(value ?? "").trim();
-          return text || emptyText;
-        };
-        global.normalizeInt = (value, fallback = 0) => {
-          const parsed = Number.parseInt(String(value ?? ""), 10);
-          return Number.isFinite(parsed) ? parsed : fallback;
-        };
-        const code = ["g3ku/web/frontend/tasks/tree-store.js", "g3ku/web/frontend/tasks/tree-view.js", "g3ku/web/frontend/tasks/node-detail-store.js", "g3ku/web/frontend/tasks/node-detail.js", "g3ku/web/frontend/org_graph_task_view.js"].map((name) => fs.readFileSync(name, "utf8")).join("\\n");
-        vm.runInThisContext(code);
-
-        const html = renderExecutionStageRounds({
-          stage_id: "stage:test",
-          mode: "自主执行",
-          rounds: [
-            {
-              round_id: "round:1",
-              round_index: 1,
-              tools: [
-                {
-                  tool_name: "filesystem",
-                  status: "success",
-                  arguments_text: "{\\"path\\": \\".\\"}",
-                  output_text: "repo listing",
-                },
-                {
-                  tool_name: "web_fetch",
-                  status: "error",
-                  arguments_text: "{\\"url\\": \\"https://example.com\\"}",
-                  output_text: "fetch failed",
-                },
-              ],
-            },
-          ],
-        });
-        const labels = [...html.matchAll(/task-trace-round-chip-status\">([^<]+)</g)].map((match) => match[1]);
-        const classes = [...html.matchAll(/task-trace-round-chip\\s+([^\"\\s]+)/g)].map((match) => match[1]);
-        const roundClasses = [...html.matchAll(/task-trace-step\\s+([^\"\\s]+)/g)].map((match) => match[1]);
-
-        console.log(JSON.stringify({
-          labels,
-          classes,
-          roundClasses,
-        }));
-        """
-    )
-
-    assert result["roundClasses"] == []
-    assert result["labels"][:2] == ["成功", "失败"]
-    assert result["classes"][:2] == ["success", "error"]
 
 
-def test_summary_execution_trace_preview_fields_render_tool_arguments_and_output() -> None:
-    result = _run_node_script(
-        """
-        const fs = require("fs");
-        const vm = require("vm");
-        global.window = global;
-        global.S = { liveFrameMap: {} };
-        global.U = {};
-        global.ApiClient = {};
-        global.showToast = () => {};
-        global.isAbortLike = () => false;
-        global.renderTree = () => {};
-        global.esc = (value) => String(value ?? "");
-        global.readableText = (value, { emptyText = "" } = {}) => {
-          const text = String(value ?? "").trim();
-          return text || emptyText;
-        };
-        global.normalizeInt = (value, fallback = 0) => {
-          const parsed = Number.parseInt(String(value ?? ""), 10);
-          return Number.isFinite(parsed) ? parsed : fallback;
-        };
-        const code = ["g3ku/web/frontend/tasks/tree-store.js", "g3ku/web/frontend/tasks/tree-view.js", "g3ku/web/frontend/tasks/node-detail-store.js", "g3ku/web/frontend/tasks/node-detail.js", "g3ku/web/frontend/org_graph_task_view.js"].map((name) => fs.readFileSync(name, "utf8")).join("\\n");
-        vm.runInThisContext(code);
-
-        const trace = buildNodeExecutionTrace(
-          { node_id: "node:test", goal: "remember preference" },
-          {
-            execution_trace_summary: {
-              stages: [
-                {
-                  stage_goal: "remember preference",
-                  mode: "自主执行",
-                  status: "active",
-                  rounds: [
-                    {
-                      round_id: "round:1",
-                      round_index: 1,
-                      tools: [
-                        {
-                          tool_call_id: "call-1",
-                          tool_name: "memory_update",
-                          arguments_preview: '{"facts":[{"attribute":"default_document_save_location"}]}',
-                          output_preview: 'Error: facts[0] should be object',
-                          status: "error",
-                        },
-                      ],
-                    },
-                  ],
-                },
-              ],
-            },
-          },
-        );
-        const html = renderExecutionStageRounds(trace.stages[0]);
-
-        console.log(JSON.stringify({
-          hasArgumentsPreview: html.includes("default_document_save_location"),
-          hasOutputPreview: html.includes("facts[0] should be object"),
-        }));
-        """
-    )
-
-    assert result["hasArgumentsPreview"] is True
-    assert result["hasOutputPreview"] is True
 
 
-def test_summary_execution_trace_round_with_tool_names_only_renders_placeholder_tool_chip() -> None:
-    result = _run_node_script(
-        """
-        const fs = require("fs");
-        const vm = require("vm");
-        global.window = global;
-        global.S = { liveFrameMap: {} };
-        global.U = {};
-        global.ApiClient = {};
-        global.showToast = () => {};
-        global.isAbortLike = () => false;
-        global.renderTree = () => {};
-        global.esc = (value) => String(value ?? "");
-        global.readableText = (value, { emptyText = "" } = {}) => {
-          const text = String(value ?? "").trim();
-          return text || emptyText;
-        };
-        global.normalizeInt = (value, fallback = 0) => {
-          const parsed = Number.parseInt(String(value ?? ""), 10);
-          return Number.isFinite(parsed) ? parsed : fallback;
-        };
-        const code = ["g3ku/web/frontend/tasks/tree-store.js", "g3ku/web/frontend/tasks/tree-view.js", "g3ku/web/frontend/tasks/node-detail-store.js", "g3ku/web/frontend/tasks/node-detail.js", "g3ku/web/frontend/org_graph_task_view.js"].map((name) => fs.readFileSync(name, "utf8")).join("\\n");
-        vm.runInThisContext(code);
-
-        const trace = buildNodeExecutionTrace(
-          { node_id: "node:test", goal: "remember preference" },
-          {
-            execution_trace_summary: {
-              stages: [
-                {
-                  stage_goal: "remember preference",
-                  mode: "自主执行",
-                  status: "active",
-                  rounds: [
-                    {
-                      round_id: "round:2",
-                      round_index: 2,
-                      tool_names: ["memory_update"],
-                      tool_call_ids: ["call-2"],
-                      tools: [],
-                    },
-                  ],
-                },
-              ],
-            },
-          },
-        );
-        const html = renderExecutionStageRounds(trace.stages[0]);
-
-        console.log(JSON.stringify({
-          showsEmptyRoundPlaceholder: html.includes("本轮暂无工具记录"),
-          hasToolChip: html.includes("memory_update"),
-        }));
-        """
-    )
-
-    assert result["showsEmptyRoundPlaceholder"] is False
-    assert result["hasToolChip"] is True
 
 
-def test_execution_trace_summary_drops_empty_round_shells_before_ui() -> None:
-    summary = TaskQueryService._sanitize_execution_trace_summary(
-        build_execution_trace_summary(
-            {
-            "stages": [
-                {
-                    "stage_id": "stage:1",
-                    "stage_goal": "remember preference",
-                    "tool_rounds_used": 2,
-                    "rounds": [
-                        {
-                            "round_id": "round:phantom",
-                            "round_index": 1,
-                            "tool_names": ["memory_update"],
-                            "tool_call_ids": ["call-phantom"],
-                            "tools": [],
-                        },
-                        {
-                            "round_id": "round:real",
-                            "round_index": 2,
-                            "tools": [
-                                {
-                                    "tool_call_id": "call-real",
-                                    "tool_name": "filesystem",
-                                    "arguments_text": "{\"path\":\".\"}",
-                                    "output_text": "repo listing",
-                                    "status": "success",
-                                },
-                            ],
-                        },
-                    ],
-                },
-            ],
-        }
-        )
-    )
-
-    rounds = summary["stages"][0]["rounds"]
-
-    assert [round_item["round_id"] for round_item in rounds] == ["round:real"]
-    assert summary["stages"][0]["tool_calls"] == [
-        {
-            "tool_call_id": "call-real",
-            "tool_name": "filesystem",
-            "arguments_text": "{\"path\":\".\"}",
-            "output_text": "repo listing",
-            "output_ref": "",
-            "status": "success",
-            "started_at": "",
-            "finished_at": "",
-            "elapsed_seconds": None,
-            "recovery_decision": "",
-            "related_tool_call_ids": [],
-            "attempted_tools": [],
-            "evidence": [],
-            "lost_result_summary": "",
-        }
-    ]
 
 
-def test_summary_execution_trace_no_tool_records_skips_empty_round_shells() -> None:
-    result = _run_node_script(
-        """
-        const fs = require("fs");
-        const vm = require("vm");
-        global.window = global;
-        global.S = { liveFrameMap: {} };
-        global.U = {};
-        global.ApiClient = {};
-        global.showToast = () => {};
-        global.isAbortLike = () => false;
-        global.renderTree = () => {};
-        global.esc = (value) => String(value ?? "");
-        global.readableText = (value, { emptyText = "" } = {}) => {
-          const text = String(value ?? "").trim();
-          return text || emptyText;
-        };
-        global.normalizeInt = (value, fallback = 0) => {
-          const parsed = Number.parseInt(String(value ?? ""), 10);
-          return Number.isFinite(parsed) ? parsed : fallback;
-        };
-        const code = ["g3ku/web/frontend/tasks/tree-store.js", "g3ku/web/frontend/tasks/tree-view.js", "g3ku/web/frontend/tasks/node-detail-store.js", "g3ku/web/frontend/tasks/node-detail.js", "g3ku/web/frontend/org_graph_task_view.js"].map((name) => fs.readFileSync(name, "utf8")).join("\\n");
-        vm.runInThisContext(code);
-
-        const trace = buildNodeExecutionTrace(
-          { node_id: "node:test", goal: "remember preference" },
-          {
-            execution_trace: {
-              stages: [
-                {
-                  stage_id: "stage:1",
-                  stage_goal: "remember preference",
-                  mode: "鑷富鎵ц",
-                  status: "active",
-                  rounds: [
-                    {
-                      round_id: "round:phantom",
-                      round_index: 1,
-                      tool_names: ["memory_update"],
-                      tool_call_ids: ["call-phantom"],
-                      tools: [],
-                    },
-                  ],
-                },
-              ],
-            },
-          },
-        );
-        const html = renderExecutionStageRounds(trace.stages[0]);
-
-        console.log(JSON.stringify({
-          roundCount: trace.stages[0]?.rounds?.length || 0,
-          showsEmptyRoundPlaceholder: html.includes("鏈疆鏆傛棤宸ュ叿璁板綍"),
-          hasToolChip: html.includes("memory_update"),
-        }));
-        """
-    )
-
-    assert result["roundCount"] == 0
-    assert result["showsEmptyRoundPlaceholder"] is False
-    assert result["hasToolChip"] is False
 
 
 def test_execution_trace_round_status_supports_warning_and_interrupted() -> None:
@@ -3150,77 +2468,6 @@ def test_execution_trace_round_status_supports_warning_and_interrupted() -> None
     assert result["roundStatus"] == "warning"
 
 
-def test_render_execution_stage_rounds_show_recovery_check_panel_fields() -> None:
-    result = _run_node_script(
-        """
-        const fs = require("fs");
-        const vm = require("vm");
-        global.window = global;
-        global.S = { liveFrameMap: {} };
-        global.U = {};
-        global.ApiClient = {};
-        global.showToast = () => {};
-        global.isAbortLike = () => false;
-        global.renderTree = () => {};
-        global.esc = (value) => String(value ?? "");
-        global.readableText = (value, { emptyText = "" } = {}) => {
-          const text = String(value ?? "").trim();
-          return text || emptyText;
-        };
-        global.normalizeInt = (value, fallback = 0) => {
-          const parsed = Number.parseInt(String(value ?? ""), 10);
-          return Number.isFinite(parsed) ? parsed : fallback;
-        };
-        const code = ["g3ku/web/frontend/tasks/tree-store.js", "g3ku/web/frontend/tasks/tree-view.js", "g3ku/web/frontend/tasks/node-detail-store.js", "g3ku/web/frontend/tasks/node-detail.js", "g3ku/web/frontend/org_graph_task_view.js"].map((name) => fs.readFileSync(name, "utf8")).join("\\n");
-        vm.runInThisContext(code);
-
-        const html = renderExecutionStageRounds({
-          stage_id: "stage:test",
-          mode: "自主执行",
-          rounds: [
-            {
-              round_id: "round:1",
-              round_index: 1,
-              tools: [
-                {
-                  tool_call_id: "recovery_check:round:1",
-                  tool_name: "recovery_check",
-                  status: "warning",
-                  output_text: "Recovery check executed before resuming interrupted tool round.",
-                  recovery_decision: "model_decide",
-                  attempted_tools: ["exec"],
-                  lost_result_summary: "The previous exec attempt may have already produced side effects.",
-                  evidence: [
-                    { kind: "file", path: "D:/tmp/demo.txt", note: "file still exists" },
-                  ],
-                },
-                {
-                  tool_call_id: "call:exec",
-                  tool_name: "exec",
-                  status: "interrupted",
-                  arguments_text: "{\\"command\\": \\"git apply patch.diff\\"}",
-                  output_text: "Recovery check: the previous exec attempt may have already produced side effects.",
-                },
-              ],
-            },
-          ],
-        });
-
-        console.log(JSON.stringify({
-          hasWarningChip: html.includes('task-trace-round-chip warning'),
-          hasInterruptedChip: html.includes('task-trace-round-chip interrupted'),
-          hasRecoveryDecision: html.includes("恢复检查结论"),
-          hasAttemptedTools: html.includes("之前尝试执行了"),
-          hasEvidence: html.includes("证据摘要"),
-        }));
-        """
-    )
-
-    assert result["hasWarningChip"] is True
-    assert result["hasInterruptedChip"] is True
-    assert result["hasRecoveryDecision"] is True
-    assert result["hasAttemptedTools"] is True
-    assert result["hasEvidence"] is True
 
 
 def test_load_selected_node_latest_context_preserves_detail_and_context_scroll() -> None:
@@ -4475,58 +3722,6 @@ def test_render_tree_hides_distribution_notice_when_only_node_pending_notice_rem
     assert result["noticeText"] == ""
 
 
-def test_build_execution_trace_steps_no_longer_inserts_notice_pseudo_stage() -> None:
-    result = _run_node_script(
-        """
-        const fs = require("fs");
-        const vm = require("vm");
-        global.window = global;
-        global.S = {};
-        global.U = {};
-        global.normalizeInt = (value, fallback = 0) => {
-          const parsed = Number.parseInt(String(value ?? ""), 10);
-          return Number.isFinite(parsed) ? parsed : fallback;
-        };
-        global.treeNormalizeInt = global.normalizeInt;
-        global.esc = (value) => String(value ?? "");
-        global.readableText = (value, { emptyText = "" } = {}) => {
-          const text = String(value ?? "").trim();
-          return text || emptyText;
-        };
-        global.formatCompactTime = (value) => String(value || "");
-        global.displayTaskStageStatus = (value) => String(value || "");
-        const code = ["g3ku/web/frontend/tasks/tree-store.js", "g3ku/web/frontend/tasks/tree-view.js", "g3ku/web/frontend/tasks/node-detail-store.js", "g3ku/web/frontend/tasks/node-detail.js", "g3ku/web/frontend/org_graph_task_view.js"].map((name) => fs.readFileSync(name, "utf8")).join("\\n");
-        vm.runInThisContext(code);
-
-        const steps = buildExecutionTraceSteps(
-          {
-            initial_prompt: "root prompt",
-            stages: [
-              {
-                stage_id: "stage:1",
-                stage_index: 1,
-                stage_goal: "collect sources",
-                status: "completed",
-                tool_round_budget: 3,
-                tool_rounds_used: 1,
-                rounds: [],
-                tool_calls: [],
-              },
-            ],
-          },
-          {}
-        );
-
-        console.log(JSON.stringify({
-          traceKeys: steps.map((item) => item.traceKey),
-          titles: steps.map((item) => item.title),
-        }));
-        """
-    )
-
-    assert result["traceKeys"][0] == "initial_prompt"
-    assert result["traceKeys"][1] == "stage:stage:1"
-    assert "消息通知" not in result["titles"]
 
 
 def test_render_tree_hides_resume_ready_notice_after_pending_message_lands_on_node() -> None:
@@ -5521,128 +4716,8 @@ def test_sync_selected_task_node_detail_status_follows_live_frames() -> None:
     assert result["untouched"] == result["stalled"]
 
 
-def test_build_execution_trace_steps_excludes_spawn_review_rounds() -> None:
-    result = _run_node_script(
-        """
-        const fs = require("fs");
-        const vm = require("vm");
-        global.window = global;
-        global.S = {};
-        global.U = {};
-        global.ApiClient = {};
-        global.showToast = () => {};
-        global.isAbortLike = () => false;
-        global.renderTree = () => {};
-        global.esc = (value) => String(value ?? "");
-        global.readableText = (value, { emptyText = "" } = {}) => {
-          const text = String(value ?? "").trim();
-          return text || emptyText;
-        };
-        global.normalizeInt = (value, fallback = 0) => {
-          const parsed = Number.parseInt(String(value ?? ""), 10);
-          return Number.isFinite(parsed) ? parsed : fallback;
-        };
-        const code = ["g3ku/web/frontend/tasks/tree-store.js", "g3ku/web/frontend/tasks/tree-view.js", "g3ku/web/frontend/tasks/node-detail-store.js", "g3ku/web/frontend/tasks/node-detail.js", "g3ku/web/frontend/org_graph_task_view.js"].map((name) => fs.readFileSync(name, "utf8")).join("\\n");
-        vm.runInThisContext(code);
-
-        const steps = buildExecutionTraceSteps({
-          initial_prompt: "root prompt",
-          tool_steps: [],
-          stages: [
-            {
-              stage_id: "stage:1",
-              stage_index: 1,
-              mode: "自主执行",
-              status: "完成",
-              stage_goal: "阶段目标",
-              rounds: [],
-            },
-          ],
-        }, {
-          spawn_review_rounds: [
-            {
-              round_id: "call:spawn-1",
-              reviewed_at: "2026-04-06T12:00:00+08:00",
-              entries: [],
-            },
-          ],
-        });
-        console.log(JSON.stringify({
-          count: steps.length,
-          titles: steps.map((item) => item?.title || ""),
-        }));
-        """
-    )
-
-    assert result["count"] == 2
-    assert result["titles"][0] == "初始提示词"
-    assert "派生记录" not in "\n".join(result["titles"])
 
 
-def test_render_execution_stage_rounds_use_horizontal_strip_and_full_width_panel() -> None:
-    result = _run_node_script(
-        """
-        const fs = require("fs");
-        const vm = require("vm");
-        global.window = global;
-        global.S = { liveFrameMap: {} };
-        global.U = {};
-        global.ApiClient = {};
-        global.showToast = () => {};
-        global.isAbortLike = () => false;
-        global.renderTree = () => {};
-        global.esc = (value) => String(value ?? "");
-        global.readableText = (value, { emptyText = "" } = {}) => {
-          const text = String(value ?? "").trim();
-          return text || emptyText;
-        };
-        global.normalizeInt = (value, fallback = 0) => {
-          const parsed = Number.parseInt(String(value ?? ""), 10);
-          return Number.isFinite(parsed) ? parsed : fallback;
-        };
-        const code = ["g3ku/web/frontend/tasks/tree-store.js", "g3ku/web/frontend/tasks/tree-view.js", "g3ku/web/frontend/tasks/node-detail-store.js", "g3ku/web/frontend/tasks/node-detail.js", "g3ku/web/frontend/org_graph_task_view.js"].map((name) => fs.readFileSync(name, "utf8")).join("\\n");
-        vm.runInThisContext(code);
-
-        const html = renderExecutionStageRounds({
-          stage_id: "stage:test",
-          mode: "鑷富鎵ц",
-          rounds: [
-            {
-              round_id: "round:1",
-              round_index: 1,
-              tools: [
-                {
-                  tool_name: "filesystem",
-                  status: "success",
-                  arguments_text: "{\\"path\\": \\".\\"}",
-                  output_text: "repo listing",
-                },
-                {
-                  tool_name: "web_fetch",
-                  status: "success",
-                  arguments_text: "{\\"url\\": \\"https://example.com\\"}",
-                  output_text: "fetch result",
-                },
-              ],
-            },
-          ],
-        });
-
-        console.log(JSON.stringify({
-          hasStripContainer: html.includes("task-trace-round-strip"),
-          chipCount: (html.match(/class=\\"task-trace-round-chip\\s/g) || []).length,
-          hasDetailPanel: html.includes("task-trace-round-panel"),
-          hasFilesystemTitle: html.includes(">filesystem<"),
-          hasWebFetchTitle: html.includes(">web_fetch<"),
-        }));
-        """
-    )
-
-    assert result["hasStripContainer"] is True
-    assert result["chipCount"] == 2
-    assert result["hasDetailPanel"] is True
-    assert result["hasFilesystemTitle"] is True
-    assert result["hasWebFetchTitle"] is True
 
 
 def test_execution_trace_round_strip_uses_horizontal_scroller() -> None:
@@ -5775,130 +4850,10 @@ def test_model_retry_toasts_are_wired_for_ceo_and_task_node_views() -> None:
     assert ".model-retry-toast" in css
 
 
-def test_ceo_execution_trace_reuses_stage_round_helpers() -> None:
-    app_js = (REPO_ROOT / "g3ku/web/frontend/org_graph_app.js").read_text(encoding="utf-8")
-
-    assert "function renderCeoStageTraceIntoTurn" in app_js
-    assert "normalizeExecutionStageTrace(" in app_js
-    assert "renderExecutionStageRounds(" in app_js
 
 
-def test_stage_body_renders_round_narration_text_and_stage_summary() -> None:
-    result = _run_node_script(
-        """
-        const fs = require("fs");
-        const vm = require("vm");
-        global.window = global;
-        global.S = {};
-        global.U = {};
-        global.esc = (v) => String(v ?? "").replaceAll("&", "&amp;").replaceAll("<", "&lt;")
-          .replaceAll(">", "&gt;").replaceAll('"', "&quot;").replaceAll("'", "&#39;");
-        global.normalizeInt = (value, fallback = 0) => {
-          const parsed = Number.parseInt(String(value ?? ""), 10);
-          return Number.isFinite(parsed) ? parsed : fallback;
-        };
-        global.readableText = (value, options = {}) => String(value ?? "").trim() || String(options.emptyText || "");
-        global.formatCompactTime = (value) => String(value || "");
-        const code = ["g3ku/web/frontend/tasks/tree-store.js", "g3ku/web/frontend/tasks/tree-view.js", "g3ku/web/frontend/tasks/node-detail-store.js", "g3ku/web/frontend/tasks/node-detail.js", "g3ku/web/frontend/org_graph_task_view.js"].map((name) => fs.readFileSync(name, "utf8")).join("\\n");
-        vm.runInThisContext(code);
-
-        const summary = normalizeSummaryExecutionTrace({
-          stages: [
-            {
-              stage_id: "stage:1",
-              stage_goal: "read task book",
-              completed_stage_summary: "task book fully read; three async tasks created.",
-              rounds: [
-                {
-                  round_id: "round:1",
-                  round_index: 1,
-                  created_at: "2026-09-05T19:34:58",
-                  text: "file is long, reading it in pages.",
-                  tools: [{ tool_name: "content_open", status: "success" }],
-                },
-              ],
-            },
-          ],
-        });
-        const stage = summary.stages[0];
-        const html = renderExecutionStageRounds(stage);
-        console.log(JSON.stringify({
-          roundTextCarried: stage.rounds[0].text,
-          summaryCarried: stage.completed_stage_summary,
-          hasRoundTextBlock: html.includes("task-trace-round-text"),
-          hasRoundText: html.includes("file is long, reading it in pages."),
-          hasSummaryBlock: html.includes("task-trace-stage-summary"),
-          hasSummaryLabel: html.includes("阶段总结"),
-          hasSummaryText: html.includes("task book fully read; three async tasks created."),
-          titleWithTime: formatExecutionStageTitle({ stage_goal: "read task book", created_at: "2026-09-05T19:34:58" }),
-        }));
-        """
-    )
-
-    assert result["roundTextCarried"] == "file is long, reading it in pages."
-    assert result["summaryCarried"] == "task book fully read; three async tasks created."
-    assert result["hasRoundTextBlock"] is True
-    assert result["hasRoundText"] is True
-    assert result["hasSummaryBlock"] is True
-    assert result["hasSummaryText"] is True
-    # 总结正文自己就是那块引用条，不再印「阶段总结」四个字；标题也不再把开始时间挤进最后一行。
-    assert result["hasSummaryLabel"] is False
-    assert result["titleWithTime"] == "read task book"
 
 
-def test_stage_tool_panel_renders_full_arguments_instead_of_the_hint() -> None:
-    result = _run_node_script(
-        """
-        const fs = require("fs");
-        const vm = require("vm");
-        global.window = global;
-        global.S = {};
-        global.U = {};
-        global.esc = (v) => String(v ?? "").replaceAll("&", "&amp;").replaceAll("<", "&lt;")
-          .replaceAll(">", "&gt;").replaceAll('"', "&quot;").replaceAll("'", "&#39;");
-        global.normalizeInt = (value, fallback = 0) => {
-          const parsed = Number.parseInt(String(value ?? ""), 10);
-          return Number.isFinite(parsed) ? parsed : fallback;
-        };
-        global.readableText = (value, options = {}) => String(value ?? "").trim() || String(options.emptyText || "");
-        global.formatCompactTime = (value) => String(value || "");
-        const code = ["g3ku/web/frontend/tasks/tree-store.js", "g3ku/web/frontend/tasks/tree-view.js", "g3ku/web/frontend/tasks/node-detail-store.js", "g3ku/web/frontend/tasks/node-detail.js", "g3ku/web/frontend/org_graph_task_view.js"].map((name) => fs.readFileSync(name, "utf8")).join("\\n");
-        vm.runInThisContext(code);
-
-        const stage = normalizeExecutionStageTrace({
-          stage_id: "stage:1",
-          stage_goal: "run the probe",
-          rounds: [
-            {
-              round_id: "round:1",
-              round_index: 1,
-              created_at: "2026-09-05T19:34:58",
-              tools: [
-                {
-                  tool_name: "exec",
-                  status: "success",
-                  // 模型-facing 的调用提示在 48 字处截断，面板要读的是原始入参。
-                  arguments_text: "exec (command=printf aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa..., timeout_seconds=10)",
-                  arguments: { command: "printf " + "a".repeat(120), timeout_seconds: 10 },
-                },
-                { tool_name: "content_open", status: "success", arguments_text: "content_open (ref=artifact:1)", arguments: {} },
-              ],
-            },
-          ],
-        }, 0);
-        const html = renderExecutionStageRounds(stage);
-        console.log(JSON.stringify({
-          fullCommandShown: html.includes("a".repeat(120)),
-          sharedCodeBlock: html.includes('class="code-block task-trace-code"') && !html.includes("task-trace-args"),
-          hintOnlyWhenNoArgs: html.includes("content_open (ref=artifact:1)"),
-        }));
-        """
-    )
-
-    assert result["fullCommandShown"] is True
-    # 参数与输出共用同一个代码块：固定高度 + 内部滚动，长入参不许把面板撑成一整屏。
-    assert result["sharedCodeBlock"] is True
-    assert result["hintOnlyWhenNoArgs"] is True
 
 
 def test_tree_node_search_matches_id_or_goal_and_ranks_exact_prefix_above_contains() -> None:

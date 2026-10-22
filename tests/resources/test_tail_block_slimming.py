@@ -47,14 +47,13 @@ def _stage_state(active: bool) -> dict:
 
 def _frontdoor_pair(**overrides) -> list[dict]:
     kwargs = dict(
-        callable_tool_names=['exec', 'submit_next_stage'],
+        callable_tool_names=['exec', 'silent'],
         candidate_tool_names=['web_fetch', 'memory_note'],
-        frontdoor_stage_state=_stage_state(True),
         candidate_skill_ids=['find-skills'],
         visible_skill_ids=['find-skills'],
         rbac_visible_tool_names=['exec', 'web_fetch', 'memory_note'],
         contract_revision='exp:abc',
-        declared_tool_names=['exec', 'submit_next_stage', 'web_fetch', 'memory_note'],
+        declared_tool_names=['exec', 'silent', 'web_fetch', 'memory_note'],
         repair_required_tool_items=[],
         repair_required_skill_items=[],
         attachment_reopen_targets=[],
@@ -67,24 +66,19 @@ def _node_pair(**overrides) -> list[dict]:
     kwargs = dict(
         node_id='node-1',
         node_kind='execution',
-        callable_tool_names=['exec', 'submit_next_stage'],
+        callable_tool_names=['exec', 'silent'],
         candidate_tool_names=['web_fetch', 'memory_note'],
         visible_skills=[],
         candidate_skill_ids=['find-skills'],
-        stage_payload={
-            'has_active_stage': True,
-            'transition_required': False,
-            'active_stage': {'stage_id': 'stage:1', 'stage_goal': 'dispatch', 'tool_round_budget': 12},
-        },
         lightweight_tool_ids=[],
         selection_trace={},
-        declared_tool_names=['exec', 'submit_next_stage', 'web_fetch', 'memory_note'],
+        declared_tool_names=['exec', 'silent', 'web_fetch', 'memory_note'],
         repair_required_tool_items=[],
         repair_required_skill_items=[],
     )
     kwargs.update(overrides)
     contract = NodeRuntimeToolContract(**kwargs)
-    return [contract.to_message(), contract.to_stage_gate_message()]
+    return [contract.to_message()]
 
 
 def _text(messages: list[dict]) -> str:
@@ -101,8 +95,8 @@ def test_declared_bundle_hides_the_derivable_candidate_list() -> None:
 
 def test_declaration_lag_renders_one_line_on_both_lanes() -> None:
     # memory_note 这一跳刚被放行、还没进 tools[] ⇒ 两车道各渲同一行，字节必须相同
-    frontdoor = _text(_frontdoor_pair(declared_tool_names=['exec', 'submit_next_stage', 'web_fetch']))
-    node = _text(_node_pair(declared_tool_names=['exec', 'submit_next_stage', 'web_fetch']))
+    frontdoor = _text(_frontdoor_pair(declared_tool_names=['exec', 'silent', 'web_fetch']))
+    node = _text(_node_pair(declared_tool_names=['exec', 'silent', 'web_fetch']))
     frontdoor_line = next(line for line in frontdoor.splitlines() if line.startswith('undeclared_candidates'))
     node_line = next(line for line in node.splitlines() if line.startswith('undeclared_candidates'))
     assert frontdoor_line == node_line
@@ -122,7 +116,6 @@ def test_missing_declaration_falls_back_to_the_full_pool() -> None:
 def test_contract_revision_printed_once_per_request_body() -> None:
     text = _text(_frontdoor_pair())
     assert text.count('contract_revision:') == 1
-    assert 'contract_revision:' not in str(_frontdoor_pair()[1]['content'] or '')
 
 
 def test_fixed_disposal_prose_left_the_tail_on_both_lanes() -> None:
@@ -153,30 +146,16 @@ def test_attachment_handles_remain_without_the_reopen_prose() -> None:
     assert 'remain reopenable in later turns' not in text
 
 
-def test_stage_gate_reports_state_without_repeating_the_gate_rules() -> None:
-    # 无活动阶段：只报状态，处置指令归稳定提示词
-    gate = str(_frontdoor_pair(frontdoor_stage_state=_stage_state(False))[1]['content'] or '')
-    assert 'stage_summary: active_stage_id=none; transition_required=False' in gate
-    assert 'no active stage' not in gate
-    assert 'calling ordinary tools alone gets one grace execution' not in gate
 
 
 def test_tail_pair_is_user_role_and_carries_no_second_system_message() -> None:
     for pair in (_frontdoor_pair(), _node_pair()):
-        assert [item['role'] for item in pair] == ['user', 'user']
+        assert [item['role'] for item in pair] == ['user']
         assert sum(1 for item in pair if item['role'] == 'system') == 0
 
 
-def test_stable_contract_bytes_do_not_move_between_hops() -> None:
-    """同一回合两跳之间，稳定契约块必须逐字节相同；只有活状态块随阶段变化。
-
-    这条是整刀的设计意图本身：尾块每跳被 strip-and-append 顶到末尾，实盘 72.2% 的断点首差
-    就落在它的旧下标上，所以块里任何一跳不变的内容都只该付一次。
-    """
-    first = _frontdoor_pair(frontdoor_stage_state=_stage_state(False))
-    second = _frontdoor_pair(
-        callable_tool_names=['exec', 'submit_next_stage', 'web_fetch'],
-        frontdoor_stage_state=_stage_state(True),
-    )
+def test_contract_bytes_are_byte_stable_for_the_same_inputs() -> None:
+    first = _frontdoor_pair()
+    second = _frontdoor_pair()
     assert str(first[0]['content']) == str(second[0]['content'])
-    assert str(first[1]['content']) != str(second[1]['content'])
+

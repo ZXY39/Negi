@@ -36,152 +36,109 @@ def _frontdoor_tool_contract_payload(message: dict[str, object]) -> dict[str, ob
     return dict(payload)
 
 
-def test_ceo_snapshot_keeps_canonical_context_and_compression_payloads() -> None:
+def test_ceo_snapshot_attaches_turn_ledger_and_compression_payloads() -> None:
     snapshot = websocket_ceo._build_ceo_snapshot(
         [
             {
                 "role": "assistant",
-                "content": "stage running",
-                "canonical_context": {
-                    "active_stage_id": "frontdoor-stage-1",
-                    "transition_required": False,
-                    "stages": [
-                        {
-                            "stage_id": "frontdoor-stage-1",
-                            "stage_goal": "inspect repository",
-                            "rounds": [{"round_index": 1, "tools": [{"tool_name": "filesystem"}]}],
-                        }
-                    ],
-                },
+                "content": "turn running",
+                "turn_id": "turn-1",
                 "compression": {"status": "running", "text": "上下文压缩中", "source": "user"},
             }
-        ]
+        ],
+        frontdoor_turns=[
+            {
+                "seq": 1,
+                "turn_id": "turn-1",
+                "text": "inspect repository",
+                "tools": [{"tool_call_id": "call-1", "tool_name": "filesystem", "status": "running"}],
+            }
+        ],
     )
 
-    assert snapshot[0]["canonical_context_delta"]["stages"][0]["stage_goal"] == "inspect repository"
+    assert snapshot[0]["turns"][0]["text"] == "inspect repository"
+    assert snapshot[0]["turns"][0]["tools"][0]["tool_name"] == "filesystem"
     assert "canonical_context" not in snapshot[0]
+    assert "canonical_context_delta" not in snapshot[0]
     assert snapshot[0]["compression"]["status"] == "running"
     assert "execution_trace_summary" not in snapshot[0]
     assert "tool_events" not in snapshot[0]
 
 
+
 def test_ceo_snapshot_projects_silent_turn_as_rail_only_assistant_row() -> None:
-    canonical_context = {
-        "active_stage_id": "frontdoor-stage-1",
-        "transition_required": False,
-        "stages": [
-            {
-                "stage_id": "frontdoor-stage-1",
-                "stage_goal": "inspect repository",
-                "rounds": [{"round_index": 1, "tools": [{"tool_name": "filesystem"}]}],
-            }
-        ],
-    }
+    ledger = [
+        {
+            "seq": 1,
+            "turn_id": "turn-1",
+            "text": "",
+            "tools": [{"tool_call_id": "call-1", "tool_name": "filesystem", "status": "success"}],
+        }
+    ]
 
     snapshot = websocket_ceo._build_ceo_snapshot(
         [
-            {"role": "user", "content": "静默测试"},
+            {"role": "user", "content": "静默测试", "turn_id": "turn-1"},
             {
                 "role": "assistant",
                 "content": "",
+                "turn_id": "turn-1",
                 "metadata": {"silent_reply": True, "prompt_visible": False},
-                "canonical_context": canonical_context,
             },
             # 改动前落盘的占位文案同样按静默归一化，不再显示到会话框。
             {
                 "role": "assistant",
                 "content": "信息已静默",
-                "canonical_context": canonical_context,
+                "turn_id": "turn-2",
+                "metadata": {"silent_reply": True},
             },
-            # 没有任何阶段/工具轨道的静默行没有可展示内容，整行跳过。
+            # 空正文且没有任何 turns 的静默行没有可展示内容，整行跳过。
             {
                 "role": "assistant",
                 "content": "",
+                "turn_id": "turn-3",
                 "metadata": {"silent_reply": True},
             },
-        ]
+        ],
+        frontdoor_turns=ledger,
     )
 
     assert [item["role"] for item in snapshot] == ["user", "assistant", "assistant"]
     assert [item["content"] for item in snapshot[1:]] == ["", ""]
     assert [item["silent_reply"] for item in snapshot[1:]] == [True, True]
-    # 快照只携带 delta：首行相对空基线带 1 条轨道；第二行 cc 与上一行完全相同，
-    # delta 为 {}——前端据此不再重画旧轨道（与 WS 渲染的 hasDelta 语义一致）。
-    assert len(snapshot[1]["canonical_context_delta"]["stages"]) == 1
-    assert snapshot[2]["canonical_context_delta"] == {}
+    assert snapshot[1]["turns"][0]["tools"][0]["tool_call_id"] == "call-1"
+    assert "turns" not in snapshot[2]
     assert all("canonical_context" not in item for item in snapshot[1:])
+    assert all("canonical_context_delta" not in item for item in snapshot[1:])
 
 
-def test_ceo_snapshot_includes_message_local_canonical_context_delta() -> None:
+
+def test_ceo_snapshot_keeps_turns_message_local() -> None:
     snapshot = websocket_ceo._build_ceo_snapshot(
         [
+            {"role": "assistant", "content": "first reply", "turn_id": "turn-1"},
+            {"role": "assistant", "content": "second reply", "turn_id": "turn-2"},
+        ],
+        frontdoor_turns=[
             {
-                "role": "assistant",
-                "content": "first reply",
-                "canonical_context": {
-                    "active_stage_id": "frontdoor-stage-1",
-                    "transition_required": False,
-                    "stages": [
-                        {
-                            "stage_id": "frontdoor-stage-1",
-                            "stage_goal": "collect sources",
-                            "completed_stage_summary": "stage one complete",
-                            "rounds": [
-                                {
-                                    "round_id": "round-1",
-                                    "tools": [
-                                        {"tool_call_id": "filesystem:1", "tool_name": "filesystem", "status": "success"}
-                                    ],
-                                }
-                            ],
-                        }
-                    ],
-                },
+                "seq": 1,
+                "turn_id": "turn-1",
+                "text": "collect sources",
+                "tools": [{"tool_call_id": "filesystem:1", "tool_name": "filesystem", "status": "success"}],
             },
             {
-                "role": "assistant",
-                "content": "second reply",
-                "canonical_context": {
-                    "active_stage_id": "frontdoor-stage-2",
-                    "transition_required": False,
-                    "stages": [
-                        {
-                            "stage_id": "frontdoor-stage-1",
-                            "stage_goal": "collect sources",
-                            "completed_stage_summary": "stage one complete",
-                            "rounds": [
-                                {
-                                    "round_id": "round-1",
-                                    "tools": [
-                                        {"tool_call_id": "filesystem:1", "tool_name": "filesystem", "status": "success"}
-                                    ],
-                                }
-                            ],
-                        },
-                        {
-                            "stage_id": "frontdoor-stage-2",
-                            "stage_goal": "rank candidates",
-                            "completed_stage_summary": "stage two complete",
-                            "rounds": [
-                                {
-                                    "round_id": "round-2",
-                                    "tools": [
-                                        {"tool_call_id": "web_search:2", "tool_name": "web_search", "status": "success"}
-                                    ],
-                                }
-                            ],
-                        },
-                    ],
-                },
+                "seq": 2,
+                "turn_id": "turn-2",
+                "text": "rank candidates",
+                "tools": [{"tool_call_id": "web_search:2", "tool_name": "web_search", "status": "success"}],
             },
-        ]
+        ],
     )
 
-    assert "canonical_context_delta" in snapshot[0]
-    assert snapshot[0]["canonical_context_delta"]["stages"][0]["stage_id"] == "frontdoor-stage-1"
-    assert "canonical_context_delta" in snapshot[1]
-    delta_stages = snapshot[1]["canonical_context_delta"]["stages"]
-    assert [stage["stage_id"] for stage in delta_stages] == ["frontdoor-stage-2"]
+    assert [turn["turn_id"] for turn in snapshot[0]["turns"]] == ["turn-1"]
+    assert [turn["turn_id"] for turn in snapshot[1]["turns"]] == ["turn-2"]
+    assert snapshot[1]["turns"][0]["tools"][0]["tool_name"] == "web_search"
+
 
 
 def test_ceo_snapshot_prefers_transcript_usage_over_artifact_aggregation(monkeypatch) -> None:
@@ -263,82 +220,42 @@ def test_ceo_snapshot_ignores_empty_or_invalid_transcript_usage(monkeypatch) -> 
     assert "usage" not in snapshot[1]
 
 
-def test_ceo_live_turn_payload_includes_inflight_canonical_context_delta() -> None:
+def test_ceo_live_turn_payload_attaches_only_the_current_turn() -> None:
     persisted_session = SimpleNamespace(
         messages=[
-            {
-                "role": "assistant",
-                "content": "older reply",
-                "canonical_context": {
-                    "active_stage_id": "frontdoor-stage-1",
-                    "transition_required": False,
-                    "stages": [
-                        {
-                            "stage_id": "frontdoor-stage-1",
-                            "stage_goal": "collect sources",
-                            "completed_stage_summary": "stage one complete",
-                            "rounds": [
-                                {
-                                    "round_id": "round-1",
-                                    "tools": [
-                                        {"tool_call_id": "filesystem:1", "tool_name": "filesystem", "status": "success"}
-                                    ],
-                                }
-                            ],
-                        }
-                    ],
-                },
-            }
+            {"role": "assistant", "content": "older reply", "turn_id": "turn-old"},
         ]
     )
     session = SimpleNamespace(
+        _frontdoor_turns=[
+            {
+                "seq": 1,
+                "turn_id": "turn-old",
+                "text": "collect sources",
+                "tools": [{"tool_call_id": "filesystem:1", "tool_name": "filesystem", "status": "success"}],
+            },
+            {
+                "seq": 2,
+                "turn_id": "turn-current",
+                "text": "rank candidates",
+                "tools": [{"tool_call_id": "web_search:2", "tool_name": "web_search", "status": "success"}],
+            },
+        ],
         inflight_turn_snapshot=lambda: {
             "turn_id": "turn-current",
             "source": "user",
             "status": "running",
             "assistant_text": "working",
-            "canonical_context": {
-                "active_stage_id": "frontdoor-stage-2",
-                "transition_required": False,
-                "stages": [
-                    {
-                        "stage_id": "frontdoor-stage-1",
-                        "stage_goal": "collect sources",
-                        "completed_stage_summary": "stage one complete",
-                        "rounds": [
-                            {
-                                "round_id": "round-1",
-                                "tools": [
-                                    {"tool_call_id": "filesystem:1", "tool_name": "filesystem", "status": "success"}
-                                ],
-                            }
-                        ],
-                    },
-                    {
-                        "stage_id": "frontdoor-stage-2",
-                        "stage_goal": "rank candidates",
-                        "completed_stage_summary": "stage two complete",
-                        "rounds": [
-                            {
-                                "round_id": "round-2",
-                                "tools": [
-                                    {"tool_call_id": "web_search:2", "tool_name": "web_search", "status": "success"}
-                                ],
-                            }
-                        ],
-                    },
-                ],
-            },
-        }
+        },
     )
 
     payload = websocket_ceo._build_live_turn_payload(session, "web:shared", persisted_session)
 
     live_turn = payload["inflight_turn"]
     assert "canonical_context" not in live_turn
-    assert [
-        stage["stage_id"] for stage in live_turn["canonical_context_delta"]["stages"]
-    ] == ["frontdoor-stage-2"]
+    assert [turn["turn_id"] for turn in live_turn["turns"]] == ["turn-current"]
+    assert live_turn["turns"][0]["tools"][0]["tool_name"] == "web_search"
+
 
 
 def test_ceo_snapshot_ignores_legacy_tool_events_without_canonical_context() -> None:
@@ -382,7 +299,7 @@ def test_ceo_frontdoor_refresh_dynamic_contract_state_keeps_repair_required_list
                 {"role": "user", "content": "repair this"},
             ],
             "dynamic_appendix_messages": [],
-            "tool_names": ["submit_next_stage", "exec"],
+            "tool_names": ["exec"],
             "provider_tool_names": ["submit_next_stage", "exec"],
             "candidate_tool_names": [],
             "candidate_tool_items": [],
@@ -412,7 +329,7 @@ def test_ceo_frontdoor_refresh_dynamic_contract_state_keeps_repair_required_list
     )
 
     contract_messages = [dict(message) for message in list(refreshed["dynamic_appendix_messages"] or [])]
-    assert len(contract_messages) == 2  # 一份稳定契约 + 一份活状态块
+    assert len(contract_messages) == 1  # 运行时工具合同只有一份
     assert is_frontdoor_tool_contract_message(contract_messages[0])
     assert "repair_required_tools:" in str(contract_messages[0]["content"] or "")
     assert "agent_browser" in str(contract_messages[0]["content"] or "")
@@ -435,48 +352,30 @@ def test_ceo_frontdoor_refresh_dynamic_contract_state_keeps_repair_required_list
     ]
 
 
-def test_execution_snapshot_history_uses_canonical_context_without_legacy_tool_events() -> None:
+def test_execution_snapshot_history_uses_turns_without_legacy_tool_events() -> None:
     runtime_session = SimpleNamespace(
         inflight_turn_snapshot=lambda: {
+            "turn_id": "turn-1",
+            "source": "user",
             "status": "running",
+            "assistant_text": "installing weather skill",
             "user_message": {"content": "install weather skill"},
-            "canonical_context": {
-                "active_stage_id": "frontdoor-stage-1",
-                "transition_required": False,
-                "stages": [
-                    {
-                        "stage_id": "frontdoor-stage-1",
-                        "stage_index": 1,
-                        "stage_goal": "install weather skill",
-                        "representation": "raw",
-                        "status": "active",
-                        "stage_kind": "normal",
-                        "tool_round_budget": 3,
-                        "tool_rounds_used": 1,
-                        "rounds": [
-                            {
-                                "round_index": 1,
-                                "budget_counted": True,
-                                "tool_names": ["skill-installer"],
-                                "tool_call_ids": ["skill-installer:1"],
-                                "tools": [
-                                    {
-                                        "tool_call_id": "skill-installer:1",
-                                        "tool_name": "skill-installer",
-                                        "status": "success",
-                                        "arguments": {"skill_id": "weather"},
-                                        "arguments_text": "{\"skill_id\": \"weather\"}",
-                                        "output_text": "installed weather",
-                                        "output_preview_text": "",
-                                        "output_ref": "",
-                                        "source": "user",
-                                    }
-                                ],
-                            }
-                        ],
-                    }
-                ],
-            },
+            "frontdoor_turns": [
+                {
+                    "seq": 1,
+                    "turn_id": "turn-1",
+                    "text": "install weather skill",
+                    "tools": [
+                        {
+                            "tool_call_id": "skill-installer:1",
+                            "tool_name": "skill-installer",
+                            "status": "success",
+                            "arguments_text": '{"skill_id": "weather"}',
+                            "output_text": "installed weather",
+                        }
+                    ],
+                }
+            ],
         },
         paused_execution_context_snapshot=lambda: None,
         state=SimpleNamespace(session_key="web:shared"),
@@ -490,60 +389,43 @@ def test_execution_snapshot_history_uses_canonical_context_without_legacy_tool_e
 
     assert source == "live_runtime"
     assert history[0] == {"role": "user", "content": "install weather skill"}
-    assert history[1]["canonical_context"]["stages"][0]["rounds"][0]["tools"][0]["tool_name"] == "skill-installer"
+    assert history[1]["turns"][0]["tools"][0]["tool_name"] == "skill-installer"
     assert "tool_events" not in history[1]
 
 
-def test_inflight_snapshot_uses_current_turn_canonical_context_not_durable_history() -> None:
-    loop = SimpleNamespace(model="gpt-test", reasoning_effort=None)
-    session = RuntimeAgentSession(loop, session_key="web:shared", channel="web", chat_id="shared")
-    session._state.is_running = True
-    session._state.status = "running"
-    session._last_prompt = UserInputMessage(content="new request")
-    session._frontdoor_canonical_context = {
-        "active_stage_id": "",
-        "transition_required": False,
-        "stages": [
+
+def test_inflight_snapshot_attaches_the_current_turn_not_durable_history() -> None:
+    session = SimpleNamespace(
+        _frontdoor_turns=[
             {
-                "stage_id": "frontdoor-stage-old",
-                "stage_index": 1,
-                "stage_goal": "old durable stage",
-                "representation": "raw",
-                "status": "completed",
-                "stage_kind": "normal",
-                "tool_round_budget": 2,
-                "tool_rounds_used": 1,
-                "rounds": [],
-            }
-        ],
-    }
-
-    snapshot = session.inflight_turn_snapshot()
-
-    assert isinstance(snapshot, dict)
-    assert "canonical_context" not in snapshot
-
-    session._frontdoor_stage_state = {
-        "active_stage_id": "frontdoor-stage-1",
-        "transition_required": False,
-        "stages": [
+                "seq": 1,
+                "turn_id": "turn-old",
+                "text": "old durable turn",
+                "tools": [{"tool_call_id": "call-old", "tool_name": "filesystem"}],
+            },
             {
-                "stage_id": "frontdoor-stage-1",
-                "stage_index": 1,
-                "stage_goal": "current visible stage",
-                "status": "active",
-                "stage_kind": "normal",
-                "tool_round_budget": 3,
-                "tool_rounds_used": 0,
-                "rounds": [],
-            }
+                "seq": 2,
+                "turn_id": "turn-current",
+                "text": "current visible turn",
+                "tools": [{"tool_call_id": "call-current", "tool_name": "filesystem"}],
+            },
         ],
-    }
+        inflight_turn_snapshot=lambda: {
+            "turn_id": "turn-current",
+            "source": "user",
+            "status": "running",
+            "assistant_text": "working",
+        },
+    )
 
-    snapshot_with_stage = session.inflight_turn_snapshot()
+    payload = websocket_ceo._build_live_turn_payload(session, "web:shared", None)
 
-    assert snapshot_with_stage["canonical_context"]["stages"][0]["stage_goal"] == "current visible stage"
-    assert snapshot_with_stage["canonical_context"]["stages"][0]["stage_id"] == "frontdoor-stage-1"
+    live_turn = payload["inflight_turn"]
+    assert "canonical_context" not in live_turn
+    assert [turn["turn_id"] for turn in live_turn["turns"]] == ["turn-current"]
+    assert live_turn["turns"][0]["tools"][0]["tool_call_id"] == "call-current"
+
+
 
 
 class _ExecTool(Tool):
@@ -2043,7 +1925,7 @@ async def test_ceo_frontdoor_prepare_turn_keeps_messages_uncompacted(
         for message in list(state_update["dynamic_appendix_messages"] or [])
         if isinstance(message, dict) and is_frontdoor_tool_contract_message(dict(message))
     ]
-    assert len(contract_payloads) == 2  # 一份稳定契约 + 一份活状态块
+    assert len(contract_payloads) == 1  # 运行时工具合同只有一份
     assert "callable_tools:" not in "\n".join(
         str(item.get("content") or "") for item in contract_payloads
     )
@@ -2425,7 +2307,7 @@ async def test_graph_prepare_turn_real_session_path_drops_summary_fields(
         for message in list(result["dynamic_appendix_messages"] or [])
         if isinstance(message, dict) and is_frontdoor_tool_contract_message(dict(message))
     ]
-    assert len(contract_payloads) == 2  # 一份稳定契约 + 一份活状态块
+    assert len(contract_payloads) == 1  # 运行时工具合同只有一份
     assert "callable_tools:" not in "\n".join(
         str(item.get("content") or "") for item in contract_payloads
     )
@@ -2456,108 +2338,8 @@ async def test_graph_finalize_turn_ignores_stale_summary_fields_on_direct_reply(
     assert "summary_model_key" not in result
 
 
-@pytest.mark.asyncio
-async def test_graph_finalize_turn_completes_active_frontdoor_stage_for_direct_reply() -> None:
-    runner = CeoFrontDoorRunner(loop=SimpleNamespace())
-
-    result = await runner._graph_finalize_turn(
-        {
-            "messages": [{"role": "user", "content": "remember this"}],
-            "final_output": "记住了。以后默认把文档保存到桌面。",
-            "route_kind": "direct_reply",
-            "heartbeat_internal": False,
-            "query_text": "记住，文档保存到桌面",
-            "frontdoor_stage_state": {
-                "active_stage_id": "frontdoor-stage-2",
-                "transition_required": False,
-                "stages": [
-                    {
-                        "stage_id": "frontdoor-stage-2",
-                        "stage_index": 2,
-                        "stage_kind": "normal",
-                        "mode": "自主执行",
-                        "status": "active",
-                        "stage_goal": "save memory",
-                        "completed_stage_summary": "",
-                        "tool_round_budget": 2,
-                        "tool_rounds_used": 1,
-                        "created_at": "2026-04-09T13:46:30+08:00",
-                        "finished_at": "",
-                        "rounds": [
-                            {
-                                "round_id": "frontdoor-stage-2:round-1",
-                                "round_index": 1,
-                                "created_at": "2026-04-09T13:46:36+08:00",
-                                "budget_counted": True,
-                                "tool_names": ["memory_update"],
-                                "tool_call_ids": ["call-1"],
-                            }
-                        ],
-                    }
-                ],
-            },
-        }
-    )
-
-    stage_state = dict(result.get("frontdoor_stage_state") or {})
-    assert stage_state["active_stage_id"] == ""
-    assert stage_state["transition_required"] is False
-    stage = stage_state["stages"][0]
-    assert stage["status"] == "completed"
-    assert stage["finished_at"]
 
 
-@pytest.mark.asyncio
-async def test_graph_finalize_turn_completes_active_frontdoor_stage_for_self_execute() -> None:
-    runner = CeoFrontDoorRunner(loop=SimpleNamespace())
-
-    result = await runner._graph_finalize_turn(
-        {
-            "messages": [{"role": "user", "content": "write the file and verify it"}],
-            "final_output": "The file has been written and verified.",
-            "route_kind": "self_execute",
-            "heartbeat_internal": False,
-            "query_text": "write the file and verify it",
-            "frontdoor_stage_state": {
-                "active_stage_id": "frontdoor-stage-1",
-                "transition_required": False,
-                "stages": [
-                    {
-                        "stage_id": "frontdoor-stage-1",
-                        "stage_index": 1,
-                        "stage_kind": "normal",
-                        "mode": "自主执行",
-                        "status": "active",
-                        "stage_goal": "write the file and verify it",
-                        "completed_stage_summary": "",
-                        "tool_round_budget": 6,
-                        "tool_rounds_used": 2,
-                        "created_at": "2026-04-14T17:38:36+08:00",
-                        "finished_at": "",
-                        "rounds": [
-                            {
-                                "round_id": "frontdoor-stage-1:round-1",
-                                "round_index": 1,
-                                "created_at": "2026-04-14T17:38:55+08:00",
-                                "budget_counted": True,
-                                "tool_names": ["filesystem_write"],
-                                "tool_call_ids": ["call-1"],
-                            }
-                        ],
-                    }
-                ],
-            },
-        }
-    )
-
-    stage_state = dict(result.get("frontdoor_stage_state") or {})
-    assert stage_state["active_stage_id"] == ""
-    assert stage_state["transition_required"] is False
-    stage = stage_state["stages"][0]
-    assert stage["status"] == "completed"
-    # 轮末收尾不再写指针摘要:该阶段的最终回复就是紧随块之后的对话原文,摘要留空。
-    assert not str(stage["completed_stage_summary"] or "").strip()
-    assert stage["finished_at"]
 
 
 def test_prune_frontdoor_request_artifacts_keeps_referenced_and_newest(

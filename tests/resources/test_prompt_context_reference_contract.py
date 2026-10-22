@@ -24,17 +24,8 @@ BLOCKED_PROMPT = load_prompt("blocked_verification.md")
 OVERLAY_HEADER = "System note for this turn only:"
 
 
-def test_stage_budget_rules_point_at_the_injected_overlay_header() -> None:
-    for prompt in (NODE_PROMPT, ACCEPTANCE_PROMPT):
-        assert OVERLAY_HEADER in prompt
-        assert "stage_summary:" in prompt
-    # 节点上下文里没有 rounds[*] 这个 JSON 路径，不能再把它当权威字段名引用。
-    assert "rounds[*].budget_counted" not in NODE_PROMPT
-    assert "rounds[*].budget_counted" not in ACCEPTANCE_PROMPT
 
 
-def test_acceptance_free_tool_list_declares_overlay_as_authority() -> None:
-    assert "该名单每轮由系统 overlay 重新列出" in ACCEPTANCE_PROMPT
 
 
 def test_blocked_verification_defers_judgment_contract_to_acceptance_prompt() -> None:
@@ -58,9 +49,6 @@ def test_frontdoor_failure_rules_bind_to_rendered_fields() -> None:
     assert "节点级 `resume`" in CEO_PROMPT
 
 
-def test_frontdoor_stage_protocol_reference_points_the_right_way() -> None:
-    assert "上面 §1.1「下一步协议」" in CEO_PROMPT
-    assert "下面的“阶段优先协议”" not in CEO_PROMPT
 
 
 def test_node_prompt_states_ledger_and_wording_check_semantics() -> None:

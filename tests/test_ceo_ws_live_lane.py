@@ -66,15 +66,6 @@ def harness(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
         "role": "assistant",
         "content": "上一轮结论",
         "timestamp": "2026-09-24T16:00:10",
-        "canonical_context": {
-            "stages": [{
-                "stage_id": "frontdoor-stage-1",
-                "stage_index": 0,
-                "title": "读简历",
-                "status": "completed",
-                "rounds": [],
-            }],
-        },
     })
     manager.save(session)
 
@@ -160,13 +151,21 @@ def harness(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
         "source": "user",
         "status": "running",
         "assistant_text": "正在读",
-        "canonical_context": {
-            "stages": [
-                {"stage_id": "frontdoor-stage-1", "stage_index": 0, "title": "读简历", "status": "completed", "rounds": []},
-                {"stage_id": "frontdoor-stage-2", "stage_index": 1, "title": "改技能特长", "status": "running", "rounds": []},
-            ],
-        },
     }
+    runtime_session._frontdoor_turns = [
+        {
+            "seq": 1,
+            "turn_id": "turn-live",
+            "text": "读简历",
+            "tools": [{"tool_call_id": "call-1", "tool_name": "content", "status": "success"}],
+        },
+        {
+            "seq": 2,
+            "turn_id": "turn-live",
+            "text": "改技能特长",
+            "tools": [{"tool_call_id": "call-2", "tool_name": "filesystem_edit", "status": "running"}],
+        },
+    ]
 
     app = FastAPI()
     app.include_router(wcz.router, prefix="/api")
@@ -210,8 +209,8 @@ def test_all_socket_writes_are_serialized(harness):
     assert "snapshot.ceo" in harness.frame_types()
 
 
-def test_live_frames_carry_delta_only(harness):
-    """live 帧不再挂整份 canonical_context，但 delta 恒在，前端才拿得到阶段。"""
+def test_live_frames_carry_the_turn_ledger_only(harness):
+    """live 帧只挂本回合的 turns，不挂整份 canonical_context。"""
     with _connect(harness):
         _burst(harness, tool_calls=2)
     live = [
@@ -222,9 +221,8 @@ def test_live_frames_carry_delta_only(harness):
     assert live, "没有带 inflight_turn 的帧"
     for turn in live:
         assert "canonical_context" not in turn
-        assert [stage.get("stage_id") for stage in (turn.get("canonical_context_delta") or {}).get("stages") or []] == [
-            "frontdoor-stage-2"
-        ]
+        assert "canonical_context_delta" not in turn
+        assert [item.get("seq") for item in turn.get("turns") or []] == [1, 2]
 
 
 def test_turn_patches_are_coalesced(harness):

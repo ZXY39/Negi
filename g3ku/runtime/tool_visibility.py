@@ -17,7 +17,6 @@ CEO_FIXED_BUILTIN_TOOL_NAMES: tuple[str, ...] = (
 
 NODE_FIXED_BUILTIN_TOOL_NAMES: tuple[str, ...] = (
     "submit_final_result",
-    "submit_final_result",
     "spawn_child_nodes",
     "exec",
     "load_skill_context",

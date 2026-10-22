@@ -332,162 +332,6 @@ async def test_node_detail_exposes_consumed_append_notice_messages(tmp_path: Pat
 
 
 @pytest.mark.asyncio
-async def test_compression_notice_tail_block_precedes_externalized_stage_block(tmp_path: Path) -> None:
-    from main.runtime.append_notice_context import APPEND_NOTICE_TAIL_PREFIX
-
-    service = _build_service(tmp_path)
-    try:
-        record = await service.create_task("整理重点客户流失信号", session_id="web:ceo-demo")
-        task = service.get_task(record.task_id)
-        root = service.store.get_node(record.root_node_id)
-        assert task is not None
-        assert root is not None
-
-        service.log_service.update_node_metadata(
-            root.node_id,
-            lambda metadata: {
-                **metadata,
-                "append_notice_context": {
-                    "notice_records": [
-                        {
-                            "notification_id": "notif:compression-1",
-                            "epoch_id": "epoch:compression",
-                            "source_node_id": root.node_id,
-                            "message": "必须按董事会模板输出",
-                            "consumed_at": "2026-04-19T10:00:00+08:00",
-                            "compression_stage_id": "",
-                        },
-                        {
-                            "notification_id": "notif:compression-2",
-                            "epoch_id": "epoch:compression",
-                            "source_node_id": root.node_id,
-                            "message": "必须补充风险分层",
-                            "consumed_at": "2026-04-19T10:05:00+08:00",
-                            "compression_stage_id": "",
-                        },
-                    ],
-                    "compression_segments": [],
-                },
-            },
-        )
-        service.log_service.update_node_metadata(
-            root.node_id,
-            lambda metadata: {
-                **metadata,
-                "execution_stages": {
-                    "active_stage_id": "stage-14",
-                    "transition_required": False,
-                    "stages": [
-                        {
-                            "stage_id": "stage-compression-1",
-                            "stage_index": 10,
-                            "stage_kind": "compression",
-                            "system_generated": True,
-                            "mode": "\u81ea\u4e3b\u6267\u884c",
-                            "status": "\u5b8c\u6210",
-                            "stage_goal": "Archive completed stage history 1-10",
-                            "completed_stage_summary": "archived old stages",
-                            "key_refs": [],
-                            "archive_ref": "artifact:artifact:stage-archive-1",
-                            "archive_stage_index_start": 1,
-                            "archive_stage_index_end": 10,
-                            "tool_round_budget": 0,
-                            "tool_rounds_used": 0,
-                            "created_at": "2026-04-19T10:10:00+08:00",
-                            "finished_at": "2026-04-19T10:10:00+08:00",
-                            "rounds": [],
-                        },
-                        {
-                            "stage_id": "stage-11",
-                            "stage_index": 11,
-                            "stage_kind": "normal",
-                            "system_generated": False,
-                            "mode": "\u81ea\u4e3b\u6267\u884c",
-                            "status": "\u5b8c\u6210",
-                            "stage_goal": "completed stage eleven",
-                            "completed_stage_summary": "finished stage eleven",
-                            "key_refs": [],
-                            "tool_round_budget": 3,
-                            "tool_rounds_used": 1,
-                            "created_at": "2026-04-19T10:11:00+08:00",
-                            "finished_at": "2026-04-19T10:11:30+08:00",
-                            "rounds": [],
-                        },
-                        {
-                            "stage_id": "stage-12",
-                            "stage_index": 12,
-                            "stage_kind": "normal",
-                            "system_generated": False,
-                            "mode": "\u81ea\u4e3b\u6267\u884c",
-                            "status": "\u5b8c\u6210",
-                            "stage_goal": "completed stage twelve",
-                            "completed_stage_summary": "finished stage twelve",
-                            "key_refs": [],
-                            "tool_round_budget": 3,
-                            "tool_rounds_used": 1,
-                            "created_at": "2026-04-19T10:12:00+08:00",
-                            "finished_at": "2026-04-19T10:12:30+08:00",
-                            "rounds": [],
-                        },
-                        {
-                            "stage_id": "stage-13",
-                            "stage_index": 13,
-                            "stage_kind": "normal",
-                            "system_generated": False,
-                            "mode": "\u81ea\u4e3b\u6267\u884c",
-                            "status": "\u5b8c\u6210",
-                            "stage_goal": "completed stage thirteen",
-                            "completed_stage_summary": "finished stage thirteen",
-                            "key_refs": [],
-                            "tool_round_budget": 3,
-                            "tool_rounds_used": 1,
-                            "created_at": "2026-04-19T10:13:00+08:00",
-                            "finished_at": "2026-04-19T10:13:30+08:00",
-                            "rounds": [],
-                        },
-                        {
-                            "stage_id": "stage-14",
-                            "stage_index": 14,
-                            "stage_kind": "normal",
-                            "system_generated": False,
-                            "mode": "\u81ea\u4e3b\u6267\u884c",
-                            "status": "\u8fdb\u884c\u4e2d",
-                            "stage_goal": "current stage",
-                            "completed_stage_summary": "",
-                            "key_refs": [],
-                            "tool_round_budget": 3,
-                            "tool_rounds_used": 0,
-                            "created_at": "2026-04-19T10:14:00+08:00",
-                            "finished_at": "",
-                            "rounds": [],
-                        },
-                    ],
-                },
-            },
-        )
-
-        # Persist once so the append notice interval is rolled into a compression segment.
-        stage_payload = (service.store.get_node(root.node_id).metadata or {}).get("execution_stages")
-        from main.models import normalize_execution_stage_metadata
-        service.log_service._persist_execution_stage_state_locked(
-            task=task,
-            node_id=root.node_id,
-            state=normalize_execution_stage_metadata(stage_payload),
-        )
-
-        prepared = service._react_loop._prepare_messages(
-            [{"role": "system", "content": "system"}, {"role": "user", "content": "hello"}],
-            runtime_context={"task_id": record.task_id, "node_id": root.node_id},
-        )
-        contents = [str(item.get("content") or "") for item in prepared]
-        notice_index = next(index for index, content in enumerate(contents) if content.startswith(APPEND_NOTICE_TAIL_PREFIX))
-        compression_index = next(index for index, content in enumerate(contents) if content.startswith("[STAGE_EXTERNALIZED]"))
-
-        assert notice_index < compression_index
-        assert "必须按董事会模板输出" in contents[notice_index]
-        assert "必须补充风险分层" in contents[notice_index]
-    finally:
-        await service.close()
 
 @pytest.mark.asyncio
 async def test_task_append_notice_coalesces_root_messages_before_distribution_starts(tmp_path: Path) -> None:
@@ -2079,7 +1923,7 @@ async def test_distribution_turn_runs_through_task_dispatcher_and_persists_child
         second_notifications = service.store.list_task_node_notifications(record.task_id, second_child.node_id)
         runtime_meta = service.log_service.read_task_runtime_meta(record.task_id) or {}
         distribution = dict(runtime_meta.get("distribution") or {})
-        frame = service.log_service.read_runtime_frame(record.task_id, root.node_id) or {}
+        frame = service.log_service.read_runtime_frame(record.task_id, record.root_node_id) or {}
 
         assert len(backend.calls) == 1
         assert frame.get("phase") == "message_distribution"
@@ -2886,13 +2730,10 @@ async def test_delivered_mailbox_message_is_appended_at_next_safe_boundary(tmp_p
         resumed = await service.node_runner._resume_react_state(task=task, node=root)
 
         notifications = service.store.list_task_node_notifications(record.task_id, root.node_id)
-        frame = service.log_service.read_runtime_frame(record.task_id, root.node_id) or {}
 
         assert resumed["messages"][-1]["role"] == "user"
         assert resumed["messages"][-1]["content"] == "新增董事会验收格式"
         assert notifications[0].status == "delivered"
-        assert frame.get("stage_status") == ""
-        assert frame.get("stage_goal") == ""
     finally:
         await service.close()
 
@@ -3217,13 +3058,9 @@ async def test_root_distribution_message_is_consumed_into_append_notice_context_
 
         resumed = await service.node_runner._resume_react_state(task=task, node=updated_root)
         pending_root_notice_ids = list(resumed.get("pending_root_notice_ids") or [])
-        frame = service.log_service.read_runtime_frame(record.task_id, record.root_node_id) or {}
-
         assert resumed["messages"][-1]["role"] == "user"
         assert resumed["messages"][-1]["content"] == "改成男性角色Top20并停止女性候选收集"
         assert pending_root_notice_ids == [f"root-notice:{epoch.epoch_id}:1"]
-        assert frame.get("stage_status") == ""
-        assert frame.get("stage_goal") == ""
 
         service.node_runner._record_consumed_notice_context(
             node_id=record.root_node_id,
@@ -4225,143 +4062,6 @@ def test_atomic_child_bind_creates_node_and_updates_spawn_entry_under_same_task_
 
 
 @pytest.mark.asyncio
-async def test_prepare_messages_keeps_append_notice_tail_before_stage_compaction_block(tmp_path: Path) -> None:
-    from main.runtime.append_notice_context import APPEND_NOTICE_TAIL_PREFIX
-
-    service = _build_service(tmp_path)
-    try:
-        record = await service.create_task("整理重点客户流失信号", session_id="web:ceo-demo")
-        root = service.store.get_node(record.root_node_id)
-        assert root is not None
-
-        stage_state = {
-            "active_stage_id": "stage-5",
-            "transition_required": False,
-            "stages": [
-                {
-                    "stage_id": "stage-1",
-                    "stage_index": 1,
-                    "stage_kind": "normal",
-                    "system_generated": False,
-                    "mode": "自主执行",
-                    "status": "完成",
-                    # 裁撤由模型点名：没有这个标记就没有阶段离开可见层，压缩块不会出现。
-                    "context_evicted": True,
-                    "stage_goal": "inspect stage one",
-                    "completed_stage_summary": "finished stage one",
-                    "key_refs": [],
-                    "tool_round_budget": 2,
-                    "tool_rounds_used": 1,
-                },
-                {
-                    "stage_id": "stage-2",
-                    "stage_index": 2,
-                    "stage_kind": "normal",
-                    "system_generated": False,
-                    "mode": "自主执行",
-                    "status": "完成",
-                    "stage_goal": "inspect stage two",
-                    "completed_stage_summary": "finished stage two",
-                    "key_refs": [],
-                    "tool_round_budget": 2,
-                    "tool_rounds_used": 1,
-                },
-                {
-                    "stage_id": "stage-3",
-                    "stage_index": 3,
-                    "stage_kind": "normal",
-                    "system_generated": False,
-                    "mode": "自主执行",
-                    "status": "完成",
-                    "stage_goal": "inspect stage three",
-                    "completed_stage_summary": "finished stage three",
-                    "key_refs": [],
-                    "tool_round_budget": 2,
-                    "tool_rounds_used": 1,
-                },
-                {
-                    "stage_id": "stage-4",
-                    "stage_index": 4,
-                    "stage_kind": "normal",
-                    "system_generated": False,
-                    "mode": "自主执行",
-                    "status": "完成",
-                    "stage_goal": "inspect stage four",
-                    "completed_stage_summary": "finished stage four",
-                    "key_refs": [],
-                    "tool_round_budget": 2,
-                    "tool_rounds_used": 1,
-                },
-                {
-                    "stage_id": "stage-5",
-                    "stage_index": 5,
-                    "stage_kind": "normal",
-                    "system_generated": False,
-                    "mode": "自主执行",
-                    "status": "进行中",
-                    "stage_goal": "inspect stage five",
-                    "completed_stage_summary": "",
-                    "key_refs": [],
-                    "tool_round_budget": 3,
-                    "tool_rounds_used": 0,
-                },
-            ],
-        }
-        service.log_service.update_node_metadata(
-            root.node_id,
-            lambda metadata: {
-                **metadata,
-                "execution_stages": stage_state,
-                "append_notice_context": {
-                    "notice_records": [
-                        {
-                            "notification_id": "notif:tail-1",
-                            "epoch_id": "epoch:tail",
-                            "source_node_id": root.node_id,
-                            "message": "财务复核要求保留原始凭据",
-                            "consumed_at": "2026-04-19T10:00:00+08:00",
-                            "compression_stage_id": "",
-                        }
-                    ],
-                    "compression_segments": [],
-                },
-            },
-        )
-
-        messages = [
-            {"role": "system", "content": "system"},
-            {"role": "user", "content": "{\"task_id\":\"task-1\",\"goal\":\"demo\"}"},
-            {"role": "assistant", "content": "", "tool_calls": [{"id": "call-stage-1", "type": "function", "function": {"name": "submit_next_stage", "arguments": "{}"}}]},
-            {"role": "tool", "name": "submit_next_stage", "tool_call_id": "call-stage-1", "content": "{\"ok\": true}"},
-            {"role": "assistant", "content": "stage one raw detail"},
-            {"role": "user", "content": "必须按董事会模板输出"},
-            {"role": "assistant", "content": "", "tool_calls": [{"id": "call-stage-2", "type": "function", "function": {"name": "submit_next_stage", "arguments": "{}"}}]},
-            {"role": "tool", "name": "submit_next_stage", "tool_call_id": "call-stage-2", "content": "{\"ok\": true}"},
-            {"role": "assistant", "content": "stage two raw detail"},
-            {"role": "assistant", "content": "", "tool_calls": [{"id": "call-stage-3", "type": "function", "function": {"name": "submit_next_stage", "arguments": "{}"}}]},
-            {"role": "tool", "name": "submit_next_stage", "tool_call_id": "call-stage-3", "content": "{\"ok\": true}"},
-            {"role": "assistant", "content": "stage three raw detail"},
-            {"role": "assistant", "content": "", "tool_calls": [{"id": "call-stage-4", "type": "function", "function": {"name": "submit_next_stage", "arguments": "{}"}}]},
-            {"role": "tool", "name": "submit_next_stage", "tool_call_id": "call-stage-4", "content": "{\"ok\": true}"},
-            {"role": "assistant", "content": "stage four raw detail"},
-            {"role": "assistant", "content": "", "tool_calls": [{"id": "call-stage-5", "type": "function", "function": {"name": "submit_next_stage", "arguments": "{}"}}]},
-            {"role": "tool", "name": "submit_next_stage", "tool_call_id": "call-stage-5", "content": "{\"ok\": true}"},
-            {"role": "assistant", "content": "current stage assistant detail"},
-        ]
-
-        prepared = service._react_loop._prepare_messages(
-            messages,
-            runtime_context={"task_id": record.task_id, "node_id": root.node_id},
-        )
-
-        contents = [str(item.get("content") or "") for item in prepared]
-        notice_index = next(index for index, content in enumerate(contents) if content.startswith(APPEND_NOTICE_TAIL_PREFIX))
-        compact_index = next(index for index, content in enumerate(contents) if content.startswith("[STAGE_COMPACT]"))
-
-        assert notice_index < compact_index
-        assert "财务复核要求保留原始凭据" in contents[notice_index]
-    finally:
-        await service.close()
 
 
 @pytest.mark.skip(reason="covered by unicode-safe replacement below")

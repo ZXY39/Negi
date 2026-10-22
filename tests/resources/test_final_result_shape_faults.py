@@ -595,14 +595,6 @@ def test_control_tool_rejection_receipt_is_not_collapsed_on_repeat() -> None:
     assert '"reused"' not in out[0]["content"]
 
 
-def test_stage_tool_error_receipt_also_survives_repeat() -> None:
-    text = "Error: tool_round_budget must be >= 1"
-    first = {"role": "tool", "tool_call_id": "call-a", "name": "submit_next_stage", "content": text}
-    again = {"role": "tool", "tool_call_id": "call-b", "name": "submit_next_stage", "content": text}
-
-    out = _loop_for_dedupe()._dedupe_tool_messages([again], existing_messages=[first])
-
-    assert out[0]["content"] == text
 
 
 def test_ordinary_tool_duplicate_result_still_collapses() -> None:
