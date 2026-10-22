@@ -150,24 +150,14 @@ function buildNodeRoundState(node, selections = S.treeSelectedRoundByNodeId) {
             options: [],
             selectedRoundId: "",
             defaultRoundId: "",
-            summary: "当前节点无派生轮次",
         };
     }
     const defaultRoundId = snapshotNodeDefaultRoundId(node);
     const selectedRoundId = snapshotNodeSelectedRoundId(node, selections);
-    const selectedRound = rounds.find((round) => round.roundId === selectedRoundId) || rounds[rounds.length - 1];
-    const selectionMode = selectedRound.roundId && selectedRound.roundId !== defaultRoundId ? "手动" : "最新";
-    const totalChildren = selectedRound.totalChildren || selectedRound.childCount;
-    const counts = [
-        `${selectedRound.completedChildren}/${totalChildren || selectedRound.childCount} 完成`,
-        selectedRound.runningChildren ? `${selectedRound.runningChildren} 进行中` : "",
-        selectedRound.failedChildren ? `${selectedRound.failedChildren} 失败` : "",
-    ].filter(Boolean).join("，");
     return {
         options: rounds,
         selectedRoundId,
         defaultRoundId,
-        summary: `${selectedRound.label}${selectedRound.isLatest ? "（最新）" : ""} | ${selectionMode} | ${counts || `${selectedRound.childCount} 个子节点`} | 共 ${rounds.length} 轮`,
     };
 }
 
@@ -227,7 +217,6 @@ function buildExecutionTreeFromSnapshot(
         roundOptions: roundState.options,
         selectedRoundId: roundState.selectedRoundId,
         defaultRoundId: roundState.defaultRoundId,
-        roundSummary: roundState.summary,
         inspectionNodes,
         children: childNodes,
         activeNodeCount,

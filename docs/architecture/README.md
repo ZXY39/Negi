@@ -61,6 +61,7 @@ Start here when you are new to the repository or when a change crosses subsystem
 - 任务树节点徽标与真实执行不符（未派发的检验节点显示「检验中」、被检验的执行节点跟着显示「检验中」、非终态节点出现 `IN_PROGRESS` 原文、检验节点不见了、打回后整个返工期间挂着 `FAILED`、验收节点已终局失败却一直读成非终态）→ `web-and-admin.md`「Task Tree Live Sync And Self-Healing Contract」+「Task Message Distribution UI Contract」
 - 任务树刷新时轮次下拉框自己收起/跳回默认轮次 → `web-and-admin.md`「Task Tree Live Sync And Self-Healing Contract」（重绘后的稳定身份与展开态恢复）
 - 节点详情刷新时展开的阶段卡或某轮的工具面板自己折回去、切走再切回对不上 → `web-and-admin.md`「Node Detail Redraw And Expansion State Contract」（捕获时机与按轮账本）
+- 会话回合那行、消息元信息行与节点详情头部的 token 读数对不上，或想知道缓存命中后面的百分比与「轮数」各取哪个数 → `web-and-admin.md`「Per-Turn Token Usage Contract」
 - 本地会话列表拖动后的顺序被打回原样、渠道分组折叠不记住或折叠后看不到新消息数、或换浏览器顺序不一致 → `web-and-admin.md`「CEO Session List Interaction Contract」（手动顺序与渠道折叠态都只存前端 localStorage）
 - 改了密码旧密码还能用、勾了自动解锁重启仍要输密码、或「锁定项目」后界面仍可读数 → `config-and-models.md`「Deployment Unlock Contract」（改密只换信封不换钥匙、解锁顺序 env→本地密钥文件→口令、锁定只清 web 进程内存主密钥）
 - 任务与会话数据不在代码检出目录里、首次初始化时选过别的盘、重启后旧任务像空库一样找不到、或按文档路径找不到 `console.log`/`managed-worker.log` → `operations-and-maintenance.md`「关键状态文件与目录」（安装根与数据根各装什么、`G3KU_DATA_DIR`→指针→cwd 的解析顺序、盘上两个 `.g3ku` 的嵌套、`get_data_dir()` 其实是安装根、指针丢失即回退 cwd 的形态）

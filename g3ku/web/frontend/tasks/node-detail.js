@@ -1486,7 +1486,7 @@ function showTaskNodeLoadingState(node) {
     if (U.adRole) U.adRole.hidden = true;
     renderTaskNodeDetailStatus(node);
     renderTaskNodeModelRetryToast(null);
-    if (U.adRoundSummary) U.adRoundSummary.textContent = String(node?.roundSummary || "");
+    if (U.adTokenSummary) U.adTokenSummary.textContent = "";
     if (U.adFlow) U.adFlow.innerHTML = '<div class="empty-state task-trace-empty">Loading node details...</div>';
     if (U.adMessages) U.adMessages.innerHTML = '<div class="empty-state task-trace-empty">Loading node details...</div>';
     if (U.adSpawnReviews) U.adSpawnReviews.innerHTML = '<div class="empty-state task-trace-empty">Loading node details...</div>';

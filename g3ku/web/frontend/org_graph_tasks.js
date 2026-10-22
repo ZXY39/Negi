@@ -1305,7 +1305,7 @@ function resetTaskView() {
     if (U.adOutput) U.adOutput.textContent = "暂无最终输出";
     if (U.adFlow) U.adFlow.innerHTML = '<div class="empty-state task-trace-empty">选择任务树中的节点后，这里会显示执行流程。</div>';
     if (U.adAcceptance) U.adAcceptance.textContent = "暂无验收结果";
-    if (U.adRoundSummary) U.adRoundSummary.textContent = "默认显示：最新树";
+    if (U.adTokenSummary) U.adTokenSummary.textContent = "";
     if (U.nodeEmpty) U.nodeEmpty.style.display = "block";
     if (U.artifactList) U.artifactList.innerHTML = '<div class="empty-state" style="padding: 10px;">No file changes yet.</div>';
     if (U.artifactContent) U.artifactContent.textContent = "展开后查看节点完整上下文。";

@@ -655,7 +655,7 @@ const U = {
     detail: document.getElementById("agent-detail-view"),
     adRole: document.getElementById("ad-role"),
     adStatus: document.getElementById("ad-status"),
-    adRoundSummary: document.getElementById("ad-round-summary"),
+    adTokenSummary: document.getElementById("ad-token-summary"),
     adFlow: document.getElementById("ad-input"),
     adMessages: document.getElementById("ad-messages"),
     adNoticeComposer: document.getElementById("ad-notice-composer"),
@@ -6210,6 +6210,25 @@ function formatCeoTokenCount(value) {
     return `${m >= 100 ? Math.round(m) : m.toFixed(1)}M`;
 }
 
+// 会话回合行、消息元信息、节点详情头部共用这一份读数：同一串 token 文案只在一处印，
+// 改口径时三处同时跟着变。
+function buildTokenUsageParts(usage) {
+    const normalized = normalizeCeoTurnUsage(usage);
+    if (!normalized) return [];
+    // 命中率按整份 prompt 算（未命中新增 + 缓存命中），与逐次调用明细表的 modelCallHitRate 同口径。
+    const totalInput = normalized.input_tokens + normalized.cache_hit_tokens;
+    const hitRateText = totalInput
+        ? ` (${((normalized.cache_hit_tokens / totalInput) * 100).toFixed(1)}%)`
+        : "";
+    const parts = [
+        `输入 ${formatCeoTokenCount(normalized.input_tokens)}`,
+        `缓存命中 ${formatCeoTokenCount(normalized.cache_hit_tokens)}${hitRateText}`,
+        `输出 ${formatCeoTokenCount(normalized.output_tokens)}`,
+    ];
+    if (normalized.call_count > 0) parts.push(`轮数 ${normalized.call_count}`);
+    return parts;
+}
+
 function setCeoTurnUsage(turn, usage = null, { completedAt = "" } = {}) {
     if (!turn) return;
     // 元数据记忆在 turn 对象上（sticky）：历史渲染与 finalize 复用同一 turn 时，
@@ -6220,14 +6239,7 @@ function setCeoTurnUsage(turn, usage = null, { completedAt = "" } = {}) {
     if (nextCompletedAt) turn.completedAt = nextCompletedAt;
     if (!turn.usageEl) return;
     const parts = [];
-    const currentUsage = normalizeCeoTurnUsage(turn.usage);
-    if (currentUsage) {
-        parts.push(
-            `输入 ${formatCeoTokenCount(currentUsage.input_tokens)}`,
-            `缓存命中 ${formatCeoTokenCount(currentUsage.cache_hit_tokens)}`,
-            `输出 ${formatCeoTokenCount(currentUsage.output_tokens)}`
-        );
-    }
+    parts.push(...buildTokenUsageParts(turn.usage));
     const completedText = formatCompactTime(turn.completedAt);
     if (completedText) parts.push(`完成于 ${completedText}`);
     if (!parts.length) {
@@ -6250,14 +6262,7 @@ function buildCeoMessageMetaText({ role = "", timestamp = "", usage = null } = {
         const isUser = String(role || "").trim().toLowerCase() === "user";
         parts.push(`${isUser ? "发送于" : "完成于"} ${timeText}`);
     }
-    const normalizedUsage = normalizeCeoTurnUsage(usage);
-    if (normalizedUsage) {
-        parts.push(
-            `输入 ${formatCeoTokenCount(normalizedUsage.input_tokens)}`,
-            `缓存命中 ${formatCeoTokenCount(normalizedUsage.cache_hit_tokens)}`,
-            `输出 ${formatCeoTokenCount(normalizedUsage.output_tokens)}`
-        );
-    }
+    parts.push(...buildTokenUsageParts(usage));
     return parts.join(" · ");
 }
 

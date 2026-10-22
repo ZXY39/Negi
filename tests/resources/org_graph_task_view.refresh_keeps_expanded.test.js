@@ -319,7 +319,7 @@ function loadApp({ apiClient = null } = {}) {
     api.U.detail.style.display = "flex";
     api.U.nodeEmpty = new StubHTMLElement();
     api.U.feedTitle = new StubHTMLElement();
-    api.U.adRoundSummary = new StubHTMLElement();
+    api.U.adTokenSummary = new StubHTMLElement();
     api.U.adStatus = new StubHTMLElement();
     api.U.adRole = new StubHTMLElement();
     api.U.adOutput = new StubHTMLElement();
@@ -365,6 +365,13 @@ function detailPayload(nodeId, stageDefs) {
         state: "in_progress",
         // 带 full 档才不会被本地缓存判成"需要重拉"，首帧才走得通。
         detail_level: "full",
+        token_usage: {
+            tracked: true,
+            input_tokens: 1200,
+            output_tokens: 340,
+            cache_hit_tokens: 800,
+            call_count: 2,
+        },
         execution_trace: {
             initial_prompt: "prompt",
             final_output: "",
@@ -555,4 +562,17 @@ test("换成另一个节点时按该节点自己的存档起板", async () => {
         "另一个节点必须按自己的默认档起板,不能继承上一节点的展开");
     assert.deepEqual(out.find((item) => item.key === "stage:stage-2").panels, [],
         "另一个节点不能继承上一节点选中的工具面板");
+});
+
+test("节点详情头部写与会话页同款的 token 读数行", async () => {
+    const client = makeClient((nodeId) => detailPayload(nodeId, v1Stages()));
+    const api = loadApp({ apiClient: client });
+    await firstPaint(api);
+
+    // 这一行原来印的是「第N轮树 | 最新 | x/y 完成 | 共 N 轮」；文案必须由 app bundle
+    // 里的 buildTokenUsageParts 单点产出,节点页不许再抄一份。
+    assert.equal(
+        api.U.adTokenSummary.textContent,
+        "输入 1.2k · 缓存命中 800 (40.0%) · 输出 340 · 轮数 2",
+    );
 });

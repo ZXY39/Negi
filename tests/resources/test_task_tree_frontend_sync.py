@@ -3327,7 +3327,7 @@ def test_show_agent_does_not_auto_refresh_latest_context_when_disclosure_is_open
           detail: { style: { display: "flex" } },
           nodeEmpty: { style: {} },
           adRole: { hidden: false },
-          adRoundSummary: { textContent: "" },
+          adTokenSummary: { textContent: "" },
           adStatus: { textContent: "", dataset: {} },
           adFlow: { innerHTML: "" },
           adMessages: { innerHTML: "" },
@@ -3384,13 +3384,15 @@ def test_show_agent_does_not_auto_refresh_latest_context_when_disclosure_is_open
         global.restoreTaskDetailViewState = () => {};
         global.stashTaskDetailViewState = () => {};
         global.syncArtifactsForSelectedNode = () => {};
+        // buildTokenUsageParts 住在 app bundle：这一只跑 task_view bundle 的夹具里
+        // 只需要它不抛，头部文本不是本用例的断言对象。
+        global.buildTokenUsageParts = () => [];
 
         showAgent(
           {
             node_id: "node:1",
             status: "in_progress",
             visual_state: "in_progress",
-            roundSummary: "",
           },
           { forceRefresh: true }
         ).then(() => {
