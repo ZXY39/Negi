@@ -192,7 +192,7 @@ Start here when you are new to the repository or when a change crosses subsystem
 - 拆分前端模块后页面白屏并报 `ApiCore` / `ApiClient is not defined`、新模块请求 404、或页面脚本顺序与测试装载对不上 → `web-and-admin.md`「Frontend Script Layout And Test Loading」
 - 长按脑图标不发起压缩、区分线停在「压缩已暂停」、压缩中区分线凭空消失刷新后才出现、一条「上下文压缩中」长期钉住收不掉、中断线旁边像按钮却点不动、心跳唤醒的回合里压缩全程没有线、「会话已压缩」要刷新才出现、区分线跑到回合气泡之前或压缩之后那段内容的下方、刷新后区分线重复两条、往回翻页时区分线在窗口边界重复、渠道会话脑图标没有读数 → `web-and-admin.md`「CEO Compression UI Contract」+「Manual Context Compression」+ `context-and-cache-troubleshooting.md`「Shrink 原因与压缩边界」
 - 压缩报成功、`post_tokens` 也降了，但下一回合请求体又回到原大小；或压缩途中发的消息没被回答 → `runtime-overview.md`「压缩窗口：入站闸门与基线写入仲裁」+ `context-and-cache-troubleshooting.md`「Shrink 原因与压缩边界」
-- 压缩后 `[STAGE_COMPACT_V1]` 块数量没下降、模型报告"压缩了但历史阶段还在"、或摘要里查不到某条证据引用 → `context-and-cache-troubleshooting.md`「Shrink 原因与压缩边界」（阶段收口判读）+ `runtime-overview.md`「Frontdoor Context Compression」；节点 artifact 带 `stage_archive` 而账本没有 `context_visible` 不属该症状（节点不应用收口标记，见同节）
+- 压缩后 `[STAGE_COMPACT]` 块数量没下降、模型报告"压缩了但历史阶段还在"、或摘要里查不到某条证据引用 → `context-and-cache-troubleshooting.md`「Shrink 原因与压缩边界」（阶段收口判读）+ `runtime-overview.md`「Frontdoor Context Compression」；节点 artifact 带 `stage_archive` 而账本没有 `context_visible` 不属该症状（节点不应用收口标记，见同节）
 - 阶段边界那一跳 `cache_hit` 塌下去、非缓存 `input` 冲高，但下一跳就回血，且此后正文天花板明显更低 → 这是裁撤生效的正常账单（断点位置不动、动的是断点后面的载荷），读数口径见 `context-and-cache-troubleshooting.md`「Shrink 原因与压缩边界」
 - `cache_hit` 每阶段推进都塌回同一小值（头部块末尾的 token 位）而历史没被裁 → 活状态块被搬到了请求头部，位置与角色合同见 `context-and-cache-troubleshooting.md`「线体角色合同」
 - 脑图标读数在阶段边界那一跳冲高数倍、下一跳回落，而 `comparable_to_previous_request` 仍为 `true` → `context-and-cache-troubleshooting.md`「同 turn 的 append-only 规则被破坏」（锚点与阶段投影同源）

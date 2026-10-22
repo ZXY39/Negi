@@ -20,7 +20,11 @@ from typing import Any
 
 from g3ku.runtime.frontdoor.skill_roster import normalize_skill_roster_item
 
-SKILL_ROSTER_NOTICE_MARKER = '[SKILL_ROSTER_NOTICE_V1]'
+RUNTIME_NOTICE_MARKER = '[RUNTIME_NOTICE]'
+SKILL_ROSTER_NOTICE_MARKER = RUNTIME_NOTICE_MARKER
+# 存量转录里的通知仍是带版本号的旧拼写：读侧都认，写侧只出新拼写。
+SKILL_ROSTER_NOTICE_MARKER_ALIASES = ('[SKILL_ROSTER_NOTICE_V1]',)
+SKILL_ROSTER_NOTICE_MARKERS = (RUNTIME_NOTICE_MARKER, *SKILL_ROSTER_NOTICE_MARKER_ALIASES)
 SKILL_ROSTER_NOTICE_ROLE = 'user'
 # 模型可见文案一律英文：这条提示会长期留在可复用前缀里，措辞只写"该做什么"
 # （名字 + 一句描述 + 取正文的入口），并限定作用域在本会话，不写运行时承诺。
@@ -329,7 +333,7 @@ def carry_records_for_compression(
 
 def is_skill_roster_notice_text(text: Any) -> bool:
     normalized = str(text or '').strip()
-    return normalized.startswith(SKILL_ROSTER_NOTICE_MARKER)
+    return normalized.startswith(SKILL_ROSTER_NOTICE_MARKERS)
 
 
 def strip_skill_roster_notice_echo(text: Any) -> str:
@@ -338,9 +342,11 @@ def strip_skill_roster_notice_echo(text: Any) -> str:
     与运行时块的剥离同一判据源：抬头标记固定，不从名单内容反推。
     """
     normalized = str(text or '')
-    marker_index = normalized.find(SKILL_ROSTER_NOTICE_MARKER)
-    if marker_index < 0:
+    marker_indexes = [normalized.find(marker) for marker in SKILL_ROSTER_NOTICE_MARKERS]
+    marker_indexes = [index for index in marker_indexes if index >= 0]
+    if not marker_indexes:
         return normalized.strip()
+    marker_index = min(marker_indexes)
     tail = normalized[marker_index:]
     if not (SKILL_ROSTER_NOTICE_HEADING in tail or SKILL_ROSTER_CARRIED_HEADING in tail):
         return normalized.strip()
@@ -370,7 +376,10 @@ __all__ = [
     'SKILL_ROSTER_NOTICE_HEADING',
     'SKILL_ROSTER_NOTICE_LOAD_HINT',
     'SKILL_ROSTER_NOTICE_MARKER',
+    'SKILL_ROSTER_NOTICE_MARKER_ALIASES',
+    'SKILL_ROSTER_NOTICE_MARKERS',
     'SKILL_ROSTER_NOTICE_ROLE',
+    'RUNTIME_NOTICE_MARKER',
     'build_carried_message',
     'build_notice_message',
     'carry_for_scope',

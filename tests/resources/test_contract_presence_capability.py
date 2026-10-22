@@ -2,7 +2,7 @@
 
 不变量：一个工具在某一跳能不能被调用，取决于它的 toolskill 契约**标记块**在这一跳是不是
 在模型可见上下文里。判据只有一个函数（`g3ku/runtime/tool_context_presence.py`），载体也
-只有这一个：请求视图消息里的 `[TOOL_CONTRACT_V1:<tool_id>:<fingerprint>]` 块。
+只有这一个：请求视图消息里的 `[TOOL_CONTRACT:<tool_id>:<fingerprint>]` 块。
 
 > 阶段台账的 `keep_tools` / `keep_skills` 通道已整条删除：正文不在模型眼前就不算在场，
 > 裁撤即离场、下次调用由那一次调用自己把契约带回来。
@@ -1014,3 +1014,20 @@ def test_path_anchor_contract_renders_from_one_source_across_lanes():
     # `{data}` 无条件列出：数据根与项目根重合时它是同一个目录，但仍是唯一的交付锚名。
     # 按分离与否增减 token，就等于让操作员第一次设置数据目录那一跳重付一遍头部前缀。
     assert '{data}' in node_policy['path_anchor_tokens']
+
+
+def test_contract_presence_reads_the_versioned_legacy_block() -> None:
+    """存量请求体里的 `[TOOL_CONTRACT_V1:…]` 块仍算在场；写侧只出新拼写。"""
+    rendered = render_tool_contract_block("filesystem_stat", "tcf:current", "body")
+    legacy = {
+        "role": "tool",
+        "content": "[TOOL_CONTRACT_V1:filesystem_stat:tcf:legacy]\nbody\n[/TOOL_CONTRACT_V1]",
+    }
+    current = {"role": "tool", "content": rendered}
+
+    assert rendered.startswith("[TOOL_CONTRACT:filesystem_stat:tcf:current]")
+    assert rendered.endswith("[/TOOL_CONTRACT]")
+    assert "[TOOL_CONTRACT_V1" not in rendered
+    assert contract_presence_index(request_messages=[legacy]) == {"filesystem_stat": "tcf:legacy"}
+    assert contract_presence_index(request_messages=[current]) == {"filesystem_stat": "tcf:current"}
+    assert contract_presence("filesystem_stat", request_messages=[legacy]) == (True, "tcf:legacy")

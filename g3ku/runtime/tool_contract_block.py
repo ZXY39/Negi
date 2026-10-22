@@ -6,9 +6,11 @@
 
 块形如：
 
-    [TOOL_CONTRACT_V1:filesystem_edit:tcf:01234546789abcdef]
+    [TOOL_CONTRACT:filesystem_edit:tcf:01234546789abcdef]
     <契约正文>
-    [/TOOL_CONTRACT_V1]
+    [/TOOL_CONTRACT]
+
+存量请求体里的旧拼写 `[TOOL_CONTRACT_V1:…]` / `[/TOOL_CONTRACT_V1]` 读侧同认，写侧只出新拼写。
 
 `load_tool_context(_v2)` 与未水合工具的冲动调用两条投递道都调 `render_tool_contract`，
 产出逐字节相同的块（D14）。块放进结果载荷的 `content` 字段：信封形状（`ok` / `uri` /
@@ -24,15 +26,23 @@ import json
 import re
 from typing import Any
 
-MARKER_NAME = "TOOL_CONTRACT_V1"
+MARKER_NAME = "TOOL_CONTRACT"
+# 存量请求体、基线、侧车里带着带版本号的旧拼写：只读不写。
+MARKER_NAME_ALIASES = ("TOOL_CONTRACT_V1",)
+MARKER_NAMES = (MARKER_NAME, *MARKER_NAME_ALIASES)
 MARKER_CLOSE = f"[/{MARKER_NAME}]"
+MARKER_CLOSES = tuple(f"[/{name}]" for name in MARKER_NAMES)
 CONTRACT_CONTENT_FIELD = "content"
 
-# 块头 = `[TOOL_CONTRACT_V1:<tool_id>:<fingerprint>]`。tool_id 不含冒号/换行，
+# 块头 = `[TOOL_CONTRACT:<tool_id>:<fingerprint>]`（以及旧拼写）。tool_id 不含冒号/换行，
 # fingerprint 是 `tcf:<hex>`；两个捕获组都不吃 `]`，所以正文里再出现块头也不会被误当成边界。
 _BLOCK_HEADER_RE = re.compile(
-    r"\[" + re.escape(MARKER_NAME) + r":([^\]\n:]+):([^\]\n]+)\]"
+    r"\[(?:" + "|".join(re.escape(name) for name in MARKER_NAMES) + r"):([^\]\n:]+):([^\]\n]+)\]"
 )
+
+
+def _contains_marker(text: str) -> bool:
+    return any(name in text for name in MARKER_NAMES)
 
 
 def _normalized_text(value: Any) -> str:
@@ -97,20 +107,20 @@ def attach_tool_contract_block(payload: dict[str, Any] | None) -> dict[str, Any]
 
 
 def _leading_block_pairs(text: str) -> list[tuple[str, str]]:
-    """只认**开头**那一块：`^[TOOL_CONTRACT_V1:<tool>:<fp>] … [/TOOL_CONTRACT_V1]`。
+    """只认**开头**那一块：`^[TOOL_CONTRACT:<tool>:<fp>] … [/TOOL_CONTRACT]`（旧拼写同认）。
 
     锚在开头而不是全文扫，是因为块里的正文本身可能出现一颗长得一样的块头（别的工具的
     toolskill 里抄了一段示例）。全文扫会把那颗假头当成第二份契约认下来，等于让一份契约
     正文替另一个工具声明"我的契约在场了"——在场只是三道闸门里的一道，但这条不变量
     （执行发生在契约对模型可见之后）正是本次改造的全部依据，不能让正文自己造出来。
     """
-    if not text or MARKER_CLOSE not in text:
+    if not text or not any(close in text for close in MARKER_CLOSES):
         return []
     stripped = text.lstrip()
     match = _BLOCK_HEADER_RE.match(stripped)
     if match is None:
         return []
-    if MARKER_CLOSE not in stripped:
+    if not any(close in stripped for close in MARKER_CLOSES):
         return []
     tool_id = _normalized_text(match.group(1))
     fingerprint = _normalized_text(match.group(2))
@@ -123,14 +133,14 @@ def _candidate_contract_texts(value: Any) -> list[str]:
     """一条结果里值得判块的位置。先做子串预筛，再决定要不要花一次 JSON 解析。
 
     在场判据每跳对**每一条**工具行都跑，历史里绝大多数行不是契约。块头本身不含任何会被
-    转义的字符，所以 `MARKER_NAME in text` 这一步在整串上就等价于在字段上，用它把
+    转义的字符，所以 `_contains_marker(text)` 这一步在整串上就等价于在字段上，用它把
     `json.loads` 挡在真正的契约行之前——去掉 loader 名字闸门换来的那点开销就在这里补回。
     """
     if isinstance(value, dict):
         content = value.get(CONTRACT_CONTENT_FIELD)
-        return [content] if isinstance(content, str) and MARKER_NAME in content else []
+        return [content] if isinstance(content, str) and _contains_marker(content) else []
     text = str(value or "")
-    if not text or MARKER_NAME not in text:
+    if not text or not _contains_marker(text):
         return []
     candidates = [text]
     stripped = text.strip()
@@ -162,6 +172,6 @@ def contract_text_length(value: Any) -> int:
         if _leading_block_pairs(segment):
             return len(segment)
     for segment in candidates:
-        if MARKER_NAME in segment:
+        if _contains_marker(segment):
             return len(segment)
     return 0

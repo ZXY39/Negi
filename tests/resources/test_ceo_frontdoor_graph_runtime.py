@@ -272,7 +272,7 @@ def test_merge_ordered_tool_results_preserves_original_tool_call_order() -> None
 
 
 def _contract_load_row(tool_id: str, *, tool_call_id: str = "call-load-1") -> dict:
-    """一条**真在场**的 load 行：JSON 信封的 `content` 里装着 `[TOOL_CONTRACT_V1:…]` 块。
+    """一条**真在场**的 load 行：JSON 信封的 `content` 里装着 `[TOOL_CONTRACT:…]` 块。
 
     只带 `tool_context_fingerprint` 键而没有块，在场判据读成"不在场"，用例会因此假绿。
     """

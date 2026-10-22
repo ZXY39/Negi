@@ -4,7 +4,7 @@
 是不是在模型可见上下文里。**
 
 在场判据只有这一个函数，且只有**一个载体**：请求视图里未被压缩删除的消息文本里的
-`[TOOL_CONTRACT_V1:<tool_id>:<fingerprint>]` 块（块与解析成对见
+`[TOOL_CONTRACT:<tool_id>:<fingerprint>]` 块（块与解析成对见
 `g3ku/runtime/tool_context_block.py`）。两条投递道（`load_tool_context(_v2)` 与未水合
 工具的冲动调用）都印同一个块，所以判据不需要知道是谁送的。
 

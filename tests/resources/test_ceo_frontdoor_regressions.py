@@ -116,7 +116,7 @@ class _ContractLoadTool(Tool):
     """真把契约放进请求视图的 `load_tool_context` 替身。
 
     在场判据取代台账后，"注册了就能调"不再成立；这几条用例测的是无阶段直发、XML 调用
-    解析与修复，所以契约得靠正当途径进场：让模型先 load 一次，回执里的 `[TOOL_CONTRACT_V1]`
+    解析与修复，所以契约得靠正当途径进场：让模型先 load 一次，回执里的 `[TOOL_CONTRACT]`
     块落进消息，下一跳该工具就真在场。
     """
 
@@ -1314,9 +1314,13 @@ async def test_graph_normalize_model_output_bounces_plain_text_once_for_stage_wi
 
 
 _STAGE_ECHO_PREFIX_CASES = [
-    ("[STAGE_COMPACT_V1]", "compact"),
-    ("[STAGE_EXTERNALIZED_V1]", "externalized"),
-    ("[STAGE_RAW_V1]", "raw"),
+    ("[STAGE_COMPACT]", "compact"),
+    ("[STAGE_EXTERNALIZED]", "externalized"),
+    ("[STAGE_RAW]", "raw"),
+    # 存量请求里带的是旧拼写，剥离判据同样要认。
+    ("[STAGE_COMPACT_V1]", "compact-legacy"),
+    ("[STAGE_EXTERNALIZED_V1]", "externalized-legacy"),
+    ("[STAGE_RAW_V1]", "raw-legacy"),
 ]
 
 

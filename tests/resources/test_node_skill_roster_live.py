@@ -15,7 +15,12 @@ from types import SimpleNamespace
 import pytest
 
 from g3ku.runtime.frontdoor.tool_contract import clear_pinned_contract_stores
-from g3ku.runtime.skill_roster_notice import clear_skill_roster_notice_stores
+from g3ku.runtime.skill_roster_notice import (
+    RUNTIME_NOTICE_MARKER,
+    clear_skill_roster_notice_stores,
+    is_skill_roster_notice_text,
+    strip_skill_roster_notice_echo,
+)
 from main.runtime.node_runner import NodeRunner
 from main.runtime.react_loop import ReActToolLoop
 from main.service.runtime_service import MainRuntimeService
@@ -127,7 +132,7 @@ def test_supplier_feeds_each_hop_while_head_stays_frozen() -> None:
     injected = [
         str(item.get("content") or "")
         for item in history_second
-        if str(item.get("content") or "").startswith("[SKILL_ROSTER_NOTICE_V1]")
+        if str(item.get("content") or "").startswith(RUNTIME_NOTICE_MARKER)
     ]
     assert len(injected) == 1
     assert "- `beta` | Beta | beta 的描述。" in injected[0]
@@ -137,7 +142,7 @@ def test_supplier_feeds_each_hop_while_head_stays_frozen() -> None:
     )
     assert len([
         item for item in history_third
-        if str(item.get("content") or "").startswith("[SKILL_ROSTER_NOTICE_V1]")
+        if str(item.get("content") or "").startswith(RUNTIME_NOTICE_MARKER)
     ]) == 1
     # 每跳各问一次 supplier（不是回合初快照复用）
     assert len(sampled) == 2
@@ -297,3 +302,20 @@ def test_restore_node_pinned_head_never_overwrites_a_live_pin() -> None:
     )
     assert head_after[0]["content"] == head_live[0]["content"]
     assert "stale" not in head_after[0]["content"]
+
+
+def test_notice_marker_keeps_reading_the_versioned_legacy_spelling() -> None:
+    """存量转录里的通知是带版本号的旧拼写：判据与回声剥离都仍要认，写侧只出新拼写。"""
+    legacy = (
+        "[SKILL_ROSTER_NOTICE_V1]\n"
+        "Skills newly readable in this session:\n"
+        "- `beta` | Beta | beta 的描述。\n"
+        "Use `load_skill_context(skill_id=\"...\")` to read a skill body."
+    )
+    current = legacy.replace("[SKILL_ROSTER_NOTICE_V1]", RUNTIME_NOTICE_MARKER, 1)
+
+    assert RUNTIME_NOTICE_MARKER == "[RUNTIME_NOTICE]"
+    assert is_skill_roster_notice_text(legacy)
+    assert is_skill_roster_notice_text(current)
+    assert strip_skill_roster_notice_echo("答完了。\n\n" + legacy) == "答完了。"
+    assert strip_skill_roster_notice_echo("答完了。\n\n" + current) == "答完了。"

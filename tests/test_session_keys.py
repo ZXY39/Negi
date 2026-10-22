@@ -140,10 +140,15 @@ def test_sanitize_channel_outbound_text_passes_contract_echo_while_strip_disable
 
 
 def test_sanitize_channel_outbound_text_passes_stage_block_echo_while_strip_disabled():
-    compact_block = '[STAGE_COMPACT_V1]\n{"stage_index": 48, "status": "completed"}'
-    externalized_block = '[STAGE_EXTERNALIZED_V1]\n{"stage_index": 48}'
-    raw_block = '[STAGE_RAW_V1]\n{"stage_index": 48}'
-    for block in (compact_block, externalized_block, raw_block):
+    compact_block = '[STAGE_COMPACT]\n{"stage_index": 48, "status": "completed"}'
+    externalized_block = '[STAGE_EXTERNALIZED]\n{"stage_index": 48}'
+    raw_block = '[STAGE_RAW]\n{"stage_index": 48}'
+    legacy_blocks = (
+        '[STAGE_COMPACT_V1]\n{"stage_index": 48, "status": "completed"}',
+        '[STAGE_EXTERNALIZED_V1]\n{"stage_index": 48}',
+        '[STAGE_RAW_V1]\n{"stage_index": 48}',
+    )
+    for block in (compact_block, externalized_block, raw_block, *legacy_blocks):
         assert sanitize_channel_outbound_text(block) == block
         assert sanitize_channel_outbound_text("Visible answer\n\n" + block) == "Visible answer\n\n" + block
 

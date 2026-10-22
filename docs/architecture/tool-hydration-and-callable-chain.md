@@ -9,7 +9,7 @@
 
 ### 在场的唯一载体
 
-- 载体只有 `[TOOL_CONTRACT_V1:<tool_id>:<fingerprint>]` 标记块，三条投递道都产出它：`load_tool_context(_v2)` 的结果行、「契约不在场却直接调用」那条投递回执，以及派发时预置进节点 bootstrap 的独立消息（见「派发时预置契约」）。前两条落在工具结果正文里，第三条落在一条独立 user 消息里——三条经**同一个**渲染函数产出，逐字节相同，所以判据不需要知道是谁送的（`g3ku/runtime/tool_contract_block.py` 渲染、`g3ku/runtime/tool_context_presence.py` 解析）。
+- 载体只有 `[TOOL_CONTRACT:<tool_id>:<fingerprint>]` 标记块（存量请求体里的 `[TOOL_CONTRACT_V1:…]` 同认），三条投递道都产出它：`load_tool_context(_v2)` 的结果行、「契约不在场却直接调用」那条投递回执，以及派发时预置进节点 bootstrap 的独立消息（见「派发时预置契约」）。前两条落在工具结果正文里，第三条落在一条独立 user 消息里——三条经**同一个**渲染函数产出，逐字节相同，所以判据不需要知道是谁送的（`g3ku/runtime/tool_contract_block.py` 渲染、`g3ku/runtime/tool_context_presence.py` 解析）。
 - 判据按**当次请求视图**现算，每跳只扫一次（`main/runtime/react_loop.py` 的 `loader_contract_revisions` 与 `g3ku/runtime/frontdoor/_ceo_runtime_ops.py` 的在场索引各算各道的那一次），结果下传给本跳全部消费点：执行准入、投递判据、观测读数。同一跳里出现两个答案是这层设计禁止的。
 - 阶段账本里留存的正文**不算在场**：正文不在模型眼前就不算。第二载体正是"看得见名字却调不动"这类漂移的来源。
 - 常驻内置与循环自己注入的控制信号不进判据（`CEO_NEVER_CONTRACT_TOOL_NAMES` / `NODE_NEVER_CONTRACT_TOOL_NAMES`，`g3ku/runtime/tool_visibility.py`）：`silent`、`submit_next_stage`、`wait_tool_execution` 这些没有 toolskill 的名字一旦进判据就被判成"契约不在场"，整个回合锁死。名单漏一处就是一起事故。

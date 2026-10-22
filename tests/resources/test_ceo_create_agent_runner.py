@@ -1118,7 +1118,7 @@ async def test_graph_execute_tools_applies_named_stage_eviction_inside_the_turn(
     }
     assert "call-old-1" not in carried_tool_call_ids  # 过期阶段肉身当场离开基线
     assert "call-new-1" in carried_tool_call_ids  # 活动阶段原位不动
-    assert any(item.startswith("[STAGE_COMPACT_V1]") for item in contents)
+    assert any(item.startswith("[STAGE_COMPACT]") for item in contents)
     assert result["frontdoor_history_shrink_reason"] == "stage_compaction"
     assert len(result["frontdoor_request_body_messages"]) == len(result["messages"])
     # 一次性：裁过之后同一账本再投影不再移除任何东西，下一跳回到 append-only 链

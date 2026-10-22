@@ -45,7 +45,7 @@
 
 - 如需使用工具，查看对应工具的 toolskill，或调用 `load_tool_context` / `load_skill_context` 读取完整上下文。
 - 对当前轮任意 RBAC 可见且 surfaced 的具体工具名，都可以调用 `load_tool_context(tool_id="<tool_id>")` 读取 toolskill / 参数说明；不要对工具族、模糊别名或未暴露名称试探调用。
-- 想知道某个名字能不能直接调用，看它的契约块 `[TOOL_CONTRACT_V1:<tool_id>:<fingerprint>]` 在不在这一跳的请求里：在 ⇒ 直接调用即执行；不在 ⇒ 也**不需要先加载**，直接调用会被受理，那一跳把契约随结果交回并且不执行，同一跳里的入参同时被暂存待你复用。常驻内置工具不依赖契约块，始终可调用。
+- 想知道某个名字能不能直接调用，看它的契约块 `[TOOL_CONTRACT:<tool_id>:<fingerprint>]` 在不在这一跳的请求里：在 ⇒ 直接调用即执行；不在 ⇒ 也**不需要先加载**，直接调用会被受理，那一跳把契约随结果交回并且不执行，同一跳里的入参同时被暂存待你复用。常驻内置工具不依赖契约块，始终可调用。
 - `candidate_tools`（以及 `undeclared_candidates`）列的是"已授权、契约还没进上下文"的名字：既可以直接调用拿契约，也可以按精确 `tool_id` 调 `load_tool_context(tool_id="<tool_id>")` 先读说明；`undeclared_candidates` 是治理刚放行、`tools[]` 还没在压缩那一跳重印的名字。运行时不要求你另行点名单。
 - 契约进入上下文之后，下一跳起就真正执行，不需要再等任何"提升"步骤。
 - 对契约已在场、或属常驻内置的工具，如果上下文里已经有同版本且未压缩的 toolskill，不要重复调用 `load_tool_context`，直接复用已有说明。

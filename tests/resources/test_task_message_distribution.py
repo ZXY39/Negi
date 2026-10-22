@@ -481,7 +481,7 @@ async def test_compression_notice_tail_block_precedes_externalized_stage_block(t
         )
         contents = [str(item.get("content") or "") for item in prepared]
         notice_index = next(index for index, content in enumerate(contents) if content.startswith(APPEND_NOTICE_TAIL_PREFIX))
-        compression_index = next(index for index, content in enumerate(contents) if content.startswith("[STAGE_EXTERNALIZED_V1]"))
+        compression_index = next(index for index, content in enumerate(contents) if content.startswith("[STAGE_EXTERNALIZED]"))
 
         assert notice_index < compression_index
         assert "必须按董事会模板输出" in contents[notice_index]
@@ -4356,7 +4356,7 @@ async def test_prepare_messages_keeps_append_notice_tail_before_stage_compaction
 
         contents = [str(item.get("content") or "") for item in prepared]
         notice_index = next(index for index, content in enumerate(contents) if content.startswith(APPEND_NOTICE_TAIL_PREFIX))
-        compact_index = next(index for index, content in enumerate(contents) if content.startswith("[STAGE_COMPACT_V1]"))
+        compact_index = next(index for index, content in enumerate(contents) if content.startswith("[STAGE_COMPACT]"))
 
         assert notice_index < compact_index
         assert "财务复核要求保留原始凭据" in contents[notice_index]
@@ -4508,7 +4508,7 @@ async def test_new_compression_stage_rolls_append_notices_into_compressed_tail_b
         )
         contents = [str(item.get("content") or "") for item in prepared]
         notice_index = next(index for index, content in enumerate(contents) if content.startswith(APPEND_NOTICE_TAIL_PREFIX))
-        compression_index = next(index for index, content in enumerate(contents) if content.startswith("[STAGE_EXTERNALIZED_V1]"))
+        compression_index = next(index for index, content in enumerate(contents) if content.startswith("[STAGE_EXTERNALIZED]"))
 
         assert notice_index < compression_index
         assert "必须按董事会模板输出" in contents[notice_index]

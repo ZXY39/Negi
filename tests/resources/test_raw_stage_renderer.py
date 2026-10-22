@@ -19,7 +19,12 @@ from typing import Any
 import pytest
 
 from g3ku.runtime.frontdoor.raw_stage_renderer import retained_raw_stage_messages
-from g3ku.runtime.stage_prompt_compaction import LEGACY_STAGE_RAW_PREFIX, STAGE_RAW_PREFIX
+from g3ku.runtime.stage_prompt_compaction import (
+    LEGACY_STAGE_RAW_PREFIX,
+    STAGE_RAW_PREFIX,
+    STAGE_RAW_PREFIXES,
+    STAGE_RAW_V1_PREFIX,
+)
 
 
 def _stage(
@@ -172,7 +177,9 @@ def test_retained_raw_stage_messages_content_contract() -> None:
     assert message["role"] == "user"
     content = message["content"]
     assert content.startswith(f"{STAGE_RAW_PREFIX}\n")
-    assert STAGE_RAW_PREFIX == "[STAGE_RAW_V1]"
+    assert STAGE_RAW_PREFIX == "[STAGE_RAW]"
+    # 旧拼写只读不写：存量请求体与基线里仍然带着它。
+    assert STAGE_RAW_V1_PREFIX in STAGE_RAW_PREFIXES
     assert LEGACY_STAGE_RAW_PREFIX == "[G3KU_STAGE_RAW_V1]"
     payload_text = content[len(STAGE_RAW_PREFIX) + 1 :]
     assert "\n" not in payload_text  # 单行 JSON，无缩进

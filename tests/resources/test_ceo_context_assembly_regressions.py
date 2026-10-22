@@ -2534,7 +2534,7 @@ async def test_message_builder_applies_frontdoor_stage_workset_compaction_to_his
     raw_blocks = [
         json.loads(content.split("\n", 1)[1])
         for content in stable_contents
-        if content.startswith("[STAGE_RAW_V1]")
+        if content.startswith("[STAGE_RAW]")
     ]
     assert "stage one raw detail" not in rendered
     assert "stage two raw detail" not in rendered
@@ -2547,12 +2547,12 @@ async def test_message_builder_applies_frontdoor_stage_workset_compaction_to_his
         "path": "stage-five.txt",
         "content": "raw",
     }
-    assert any(content.startswith("[STAGE_COMPACT_V1]") for content in stable_contents)
+    assert any(content.startswith("[STAGE_COMPACT]") for content in stable_contents)
     # raw 块以 system 角色落地（压缩元数据、非对话内容）
     raw_block_messages = [
         item
         for item in result.stable_messages
-        if str(item.get("content") or "").startswith("[STAGE_RAW_V1]")
+        if str(item.get("content") or "").startswith("[STAGE_RAW]")
     ]
     assert raw_block_messages
     assert all(str(item.get("role") or "") == "user" for item in raw_block_messages)
@@ -2633,7 +2633,7 @@ async def test_message_builder_keeps_stage_blocks_off_request_tail_when_current_
     )
 
     stable = result.stable_messages
-    block_prefixes = ("[STAGE_COMPACT_V1]", "[STAGE_EXTERNALIZED_V1]", "[STAGE_RAW_V1]")
+    block_prefixes = ("[STAGE_COMPACT]", "[STAGE_EXTERNALIZED]", "[STAGE_RAW]")
     block_indexes = [
         index
         for index, item in enumerate(stable)
@@ -2836,7 +2836,7 @@ async def test_message_builder_renders_retained_raw_stage_blocks_from_stage_stat
     raw_blocks = [
         json.loads(content.split("\n", 1)[1])
         for content in stable_contents
-        if content.startswith("[STAGE_RAW_V1]")
+        if content.startswith("[STAGE_RAW]")
     ]
 
     assert "checkpoint stage one raw detail" not in rendered
@@ -2848,7 +2848,7 @@ async def test_message_builder_renders_retained_raw_stage_blocks_from_stage_stat
     assert raw_blocks[0]["rounds"][0]["tools"][0]["arguments"] == {"path": "notes.txt", "content": "hello"}
     assert raw_blocks[1]["rounds"][0]["tools"][0]["output_ref"] == "artifact:artifact:stage-three"
     assert raw_blocks[2]["rounds"][0]["tools"][0]["output_text"] == "stage four inline output"
-    assert any(content.startswith("[STAGE_COMPACT_V1]") for content in stable_contents)
+    assert any(content.startswith("[STAGE_COMPACT]") for content in stable_contents)
 
 
 @pytest.mark.asyncio
@@ -3079,8 +3079,8 @@ async def test_message_builder_directly_continues_request_body_seed_without_stag
     assert follow_up_rows, model_contents
     assert MESSAGE_ARRIVAL_TIME_MARKER in follow_up_rows[0]
     assert str(result.model_messages[-1].get("role") or "") == "user"
-    assert "[STAGE_COMPACT_V1]" not in rendered
-    assert "[STAGE_RAW_V1]" not in rendered
+    assert "[STAGE_COMPACT]" not in rendered
+    assert "[STAGE_RAW]" not in rendered
     assert result.trace["history_source"] == "session_window"
 
 
@@ -3243,7 +3243,7 @@ async def test_message_builder_keeps_externalized_compression_block_without_glob
     )
 
     rendered = "\n\n".join(str(item.get("content") or "") for item in result.stable_messages)
-    assert "[STAGE_EXTERNALIZED_V1]" in rendered
+    assert "[STAGE_EXTERNALIZED]" in rendered
     assert "artifact:artifact:frontdoor-stage-archive" in rendered
     assert "archived summary" in rendered
     assert summary_calls == 0
@@ -3737,7 +3737,7 @@ async def test_message_builder_trims_full_transcript_history_to_active_window() 
     assert "stage 5 raw detail" in rendered
     # 首条用户请求保留，且有压缩块代表过期阶段（原位放置）
     assert "bootstrap request" in rendered
-    assert "[STAGE_COMPACT_V1]" in rendered
+    assert "[STAGE_COMPACT]" in rendered
 
 
 @pytest.mark.asyncio
@@ -3789,7 +3789,7 @@ async def test_seed_continuation_path_trims_old_raw_with_stage_summaries() -> No
     assert rendered.count('{"ok": true}') == 4
     assert "stage 1 raw detail" in rendered
     assert "stage 2 raw detail" in rendered
-    assert "[STAGE_COMPACT_V1]" in rendered
+    assert "[STAGE_COMPACT]" in rendered
 
 
 def _paused_user_transcript_message(text: str, **metadata_overrides: object) -> dict[str, object]:

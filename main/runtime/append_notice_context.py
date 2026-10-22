@@ -5,10 +5,15 @@ from typing import Any
 
 APPEND_NOTICE_CONTEXT_KEY = 'append_notice_context'
 PENDING_APPEND_NOTICE_RECORDS_KEY = 'pending_append_notice_records'
-APPEND_NOTICE_TAIL_PREFIX = '[NOTICE_TAIL_V1]'
-# 存量节点台账与已装配消息里仍是旧拼写：读侧两种都认，写侧只出新拼写。
+APPEND_NOTICE_TAIL_PREFIX = '[NOTICE_TAIL]'
+# 存量节点台账与已装配消息里仍是旧拼写：读侧都认，写侧只出新拼写。
+APPEND_NOTICE_TAIL_V1_PREFIX = '[NOTICE_TAIL_V1]'
 LEGACY_APPEND_NOTICE_TAIL_PREFIX = '[G3KU_APPEND_NOTICE_TAIL_V1]'
-APPEND_NOTICE_TAIL_PREFIXES = (APPEND_NOTICE_TAIL_PREFIX, LEGACY_APPEND_NOTICE_TAIL_PREFIX)
+APPEND_NOTICE_TAIL_PREFIXES = (
+    APPEND_NOTICE_TAIL_PREFIX,
+    APPEND_NOTICE_TAIL_V1_PREFIX,
+    LEGACY_APPEND_NOTICE_TAIL_PREFIX,
+)
 
 # 定向通知转述族：系统把用户追加的通知转述给祖先/验收节点时生成的包装消息。
 # 新记录在通知行的 payload 里带 origin 标记；存量行用消息前缀兜底识别。

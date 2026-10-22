@@ -8805,7 +8805,7 @@ class ReActToolLoop:
     ) -> dict[str, str]:
         """在场的 toolskill 契约：``tool_id -> fingerprint``，与 callable 收窄共用同一判据函数。
 
-        判据只认模型眼前的 `[TOOL_CONTRACT_V1:…]` 块（两条投递道都印它），阶段台账里保留的
+        判据只认模型眼前的 `[TOOL_CONTRACT:…]` 块（两条投递道都印它），阶段台账里保留的
         正文不再算在场（D9）。两处必须同判据，否则裁撤后重读被放行、同一份正文在上下文里
         出现两次。
         """
