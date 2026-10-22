@@ -132,50 +132,6 @@ def build_execution_trace_summary(execution_trace: dict[str, Any] | None) -> dic
     `node:8e2382a036e3` 的 425 条工具行 0 条保住参数。
     """
     trace = execution_trace if isinstance(execution_trace, dict) else {}
-    stages_payload: list[dict[str, Any]] = []
-    for stage in list(trace.get("stages") or []):
-        if not isinstance(stage, dict):
-            continue
-        tool_calls: list[dict[str, Any]] = []
-        rounds_payload: list[dict[str, Any]] = []
-        for round_item in list(stage.get("rounds") or []):
-            if not isinstance(round_item, dict):
-                continue
-            compact_tools: list[dict[str, Any]] = []
-            for step in list(round_item.get("tools") or []):
-                compact_step = compact_tool_step_for_summary(step)
-                if compact_step is not None:
-                    tool_calls.append(compact_step)
-                    compact_tools.append(compact_step)
-            rounds_payload.append(
-                {
-                    "round_id": str(round_item.get("round_id") or ""),
-                    "round_index": int(round_item.get("round_index") or 0),
-                    "created_at": str(round_item.get("created_at") or ""),
-                    "text": str(round_item.get("text") or ""),
-                    "budget_counted": bool(round_item.get("budget_counted")),
-                    "tools": compact_tools,
-                }
-            )
-        stages_payload.append(
-            {
-                "stage_id": str(stage.get("stage_id") or ""),
-                "stage_index": int(stage.get("stage_index") or 0),
-                "mode": str(stage.get("mode") or ""),
-                "status": str(stage.get("status") or ""),
-                "stage_goal": str(stage.get("stage_goal") or ""),
-                "completed_stage_summary": str(stage.get("completed_stage_summary") or ""),
-                "tool_round_budget": int(stage.get("tool_round_budget") or 0),
-                "tool_rounds_used": int(stage.get("tool_rounds_used") or 0),
-                "created_at": str(stage.get("created_at") or ""),
-                "finished_at": str(stage.get("finished_at") or ""),
-                # 摘要侧也要带上裁撤标记：节点详情在完整轨迹缺席时读的就是这份，
-                # 漏掉它阶段卡只会把"模型点名移出上下文"画成普通"完成"。
-                **({"context_evicted": True} if stage.get("context_evicted") is True else {}),
-                "rounds": rounds_payload,
-                "tool_calls": tool_calls,
-            }
-        )
     turns_payload: list[dict[str, Any]] = []
     for turn in list(trace.get("turns") or []):
         if not isinstance(turn, dict):
@@ -198,26 +154,9 @@ def build_execution_trace_summary(execution_trace: dict[str, Any] | None) -> dic
                 "tools": compact_tools,
             }
         )
-    if stages_payload:
-        return {"stages": stages_payload, "turns": turns_payload}
-    fallback_tool_calls: list[dict[str, Any]] = []
+    tool_steps_payload: list[dict[str, Any]] = []
     for step in list(trace.get("tool_steps") or []):
         compact_step = compact_tool_step_for_summary(step)
         if compact_step is not None:
-            fallback_tool_calls.append(compact_step)
-    if fallback_tool_calls:
-        return {
-            "stages": [{
-                "stage_goal": "",
-                "rounds": [{
-                    "round_id": "",
-                    "round_index": 1,
-                    "created_at": "",
-                    "budget_counted": False,
-                    "tools": fallback_tool_calls,
-                }],
-                "tool_calls": fallback_tool_calls,
-            }],
-            "turns": turns_payload,
-        }
-    return {"stages": [], "turns": turns_payload}
+            tool_steps_payload.append(compact_step)
+    return {"turns": turns_payload, "tool_steps": tool_steps_payload}

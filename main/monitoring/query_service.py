@@ -562,7 +562,6 @@ class TaskQueryService:
             node_map=node_map,
             rounds_by_parent=rounds_by_parent,
             direct_children=direct_children,
-            live_state=live_state,
             activity_by_node=activity_by_node,
             final_acceptance_label=final_acceptance_label,
         )
@@ -828,7 +827,7 @@ class TaskQueryService:
                     build_execution_trace_summary(execution_trace)
                 )
             execution_trace = self._hydrate_execution_trace_output_texts(execution_trace)
-        elif not execution_trace_summary or not self._execution_trace_summary_has_rounds(execution_trace_summary):
+        elif not execution_trace_summary or not self._execution_trace_summary_has_content(execution_trace_summary):
             execution_trace = self._resolve_execution_trace(
                 detail_record=detail_record,
                 runtime_node=runtime_node,
@@ -839,7 +838,7 @@ class TaskQueryService:
                     build_execution_trace_summary(execution_trace)
                 )
         if normalized_detail_level == 'summary' and not execution_trace:
-            # 现成摘要已含 rounds 时此前不会解析完整轨迹;summary 档要附带
+            # 现成摘要已含工具行时此前不会解析完整轨迹;summary 档要附带
             # 「最新一批」工具调用的完整入参/状态/出参,兜底解析一次
             # (节点级低频诊断路径,成本可接受;只解析最后几步的出参,不全量水合)。
             execution_trace = self._resolve_execution_trace(
@@ -1063,23 +1062,12 @@ class TaskQueryService:
     ) -> list[dict[str, Any]]:
         """summary 档附带的「最新一批」工具调用完整信息。
 
-        取轨迹最后 limit 步(优先 tool_steps 扁平列表,其按时间序且已合并
-        live 状态与完整入参;兜底展平 stages→rounds→tools)。出参只在工具
-        结束后解析输出 ref 全文,超 max_output_chars 截断并置 output_truncated,
-        output_ref 始终保留供按需再取。
+        取轨迹最后 limit 步(`tool_steps` 扁平列表,其按时间序且已合并 live 状态与
+        完整入参)。出参只在工具结束后解析输出 ref 全文,超 max_output_chars 截断并置
+        output_truncated, output_ref 始终保留供按需再取。
         """
         trace = dict(execution_trace or {}) if isinstance(execution_trace, dict) else {}
         steps = [item for item in list(trace.get('tool_steps') or []) if isinstance(item, dict)]
-        if not steps:
-            for stage in list(trace.get('stages') or []):
-                if not isinstance(stage, dict):
-                    continue
-                for round_item in list(stage.get('rounds') or []):
-                    if not isinstance(round_item, dict):
-                        continue
-                    steps.extend(
-                        item for item in list(round_item.get('tools') or []) if isinstance(item, dict)
-                    )
         normalized_limit = max(1, int(limit or _LATEST_TOOL_CALLS_FULL_LIMIT))
         recent = [item for item in steps if isinstance(item, dict)][-normalized_limit:]
         batch: list[dict[str, Any]] = []
@@ -1128,16 +1116,11 @@ class TaskQueryService:
 
         for step in list(trace.get('tool_steps') or []):
             _hydrate_step(step)
-        for stage in list(trace.get('stages') or []):
-            if not isinstance(stage, dict):
+        for turn in list(trace.get('turns') or []):
+            if not isinstance(turn, dict):
                 continue
-            for step in list(stage.get('tool_calls') or []):
+            for step in list(turn.get('tools') or []):
                 _hydrate_step(step)
-            for round_item in list(stage.get('rounds') or []):
-                if not isinstance(round_item, dict):
-                    continue
-                for step in list(round_item.get('tools') or []):
-                    _hydrate_step(step)
         return trace
 
     @staticmethod
@@ -1192,69 +1175,6 @@ class TaskQueryService:
     @staticmethod
     def _sanitize_execution_trace_summary(summary: dict[str, Any] | None) -> dict[str, Any]:
         payload = summary if isinstance(summary, dict) else {}
-        stages_payload: list[dict[str, Any]] = []
-        for stage in list(payload.get('stages') or []):
-            if not isinstance(stage, dict):
-                continue
-            rounds_payload: list[dict[str, Any]] = []
-            tool_calls: list[dict[str, Any]] = []
-            counted_rounds = 0
-            for round_item in list(stage.get('rounds') or []):
-                if not isinstance(round_item, dict):
-                    continue
-                if bool(round_item.get('budget_counted')):
-                    counted_rounds += 1
-                compact_tools = [
-                    compact_step
-                    for compact_step in (
-                        TaskQueryService._compact_execution_trace_tool_call(step)
-                        for step in list(round_item.get('tools') or [])
-                    )
-                    if compact_step is not None
-                ]
-                if not compact_tools:
-                    continue
-                rounds_payload.append(
-                    {
-                        'round_id': str(round_item.get('round_id') or ''),
-                        'round_index': int(round_item.get('round_index') or 0),
-                        'created_at': str(round_item.get('created_at') or ''),
-                        'text': str(round_item.get('text') or ''),
-                        'budget_counted': bool(round_item.get('budget_counted')),
-                        'tools': compact_tools,
-                    }
-                )
-                tool_calls.extend(compact_tools)
-            fallback_tool_calls = [
-                compact_step
-                for compact_step in (
-                    TaskQueryService._compact_execution_trace_tool_call(step)
-                    for step in list(stage.get('tool_calls') or [])
-                )
-                if compact_step is not None
-            ]
-            tool_rounds_used = int(stage.get('tool_rounds_used') or 0)
-            if rounds_payload:
-                tool_rounds_used = counted_rounds
-            elif fallback_tool_calls and tool_rounds_used <= 0:
-                tool_rounds_used = 1
-            stages_payload.append(
-                {
-                    'stage_id': str(stage.get('stage_id') or ''),
-                    'stage_index': int(stage.get('stage_index') or 0),
-                    'mode': str(stage.get('mode') or ''),
-                    'status': str(stage.get('status') or ''),
-                    'stage_goal': str(stage.get('stage_goal') or ''),
-                    'completed_stage_summary': str(stage.get('completed_stage_summary') or ''),
-                    'tool_round_budget': int(stage.get('tool_round_budget') or 0),
-                    'tool_rounds_used': tool_rounds_used,
-                    'created_at': str(stage.get('created_at') or ''),
-                    'finished_at': str(stage.get('finished_at') or ''),
-                    **({'context_evicted': True} if stage.get('context_evicted') is True else {}),
-                    'rounds': rounds_payload,
-                    'tool_calls': tool_calls if rounds_payload else fallback_tool_calls,
-                }
-            )
         turns_payload: list[dict[str, Any]] = []
         for turn in list(payload.get('turns') or []):
             if not isinstance(turn, dict):
@@ -1277,23 +1197,25 @@ class TaskQueryService:
                     'tools': compact_tools,
                 }
             )
-        return {'stages': stages_payload, 'turns': turns_payload}
+        tool_steps_payload = [
+            compact_step
+            for compact_step in (
+                TaskQueryService._compact_execution_trace_tool_call(step)
+                for step in list(payload.get('tool_steps') or [])
+            )
+            if compact_step is not None
+        ]
+        return {'turns': turns_payload, 'tool_steps': tool_steps_payload}
 
     @staticmethod
-    def _execution_trace_summary_has_rounds(summary: dict[str, Any] | None) -> bool:
+    def _execution_trace_summary_has_content(summary: dict[str, Any] | None) -> bool:
         payload = summary if isinstance(summary, dict) else {}
         for turn in list(payload.get('turns') or []):
             if not isinstance(turn, dict):
                 continue
             if list(turn.get('tools') or []) or str(turn.get('text') or '').strip():
                 return True
-        for stage in list(payload.get('stages') or []):
-            if not isinstance(stage, dict):
-                continue
-            rounds = stage.get('rounds')
-            if isinstance(rounds, list) and rounds:
-                return True
-        return False
+        return bool(list(payload.get('tool_steps') or []))
 
     @staticmethod
     def _compact_execution_trace_tool_call(step: Any) -> dict[str, Any] | None:
@@ -2015,10 +1937,6 @@ class TaskQueryService:
                 model_retry_status=self._log_service._sanitize_model_retry_status(
                     payload.get('model_retry_status')
                 ),
-                stage_mode=str(payload.get('stage_mode') or ''),
-                stage_status=str(payload.get('stage_status') or ''),
-                stage_goal=str(payload.get('stage_goal') or ''),
-                stage_total_steps=int(payload.get('stage_total_steps') or 0),
                 tool_calls=[
                     TaskLiveToolCall(
                         tool_call_id=str(item.get('tool_call_id') or ''),
@@ -2401,7 +2319,6 @@ class TaskQueryService:
         node_map: dict[str, Any],
         rounds_by_parent: dict[str, list[Any]],
         direct_children: dict[str, list[str]],
-        live_state: TaskLiveState | None = None,
         activity_by_node: dict[str, str] | None = None,
         final_acceptance_label: str = '',
     ) -> str:
@@ -2409,7 +2326,7 @@ class TaskQueryService:
         if not normalized_root_node_id or normalized_root_node_id not in node_map:
             return '(empty tree)'
         lines: list[str] = []
-        stage_goals = self._node_stage_goal_map(task_id, live_state=live_state)
+        progress_by_node = self._node_progress_text_map(task_id)
         activities = dict(activity_by_node or {})
 
         def _walk(node_id: str, prefix: str = '', *, is_root: bool = False, seen: set[str]) -> None:
@@ -2422,7 +2339,7 @@ class TaskQueryService:
             seen.add(normalized_node_id)
             label = self._tree_text_label(
                 record,
-                stage_goals,
+                progress_by_node,
                 activity_label=activities.get(normalized_node_id, ''),
                 final_acceptance_label=final_acceptance_label,
             )
@@ -2439,14 +2356,9 @@ class TaskQueryService:
         _walk(normalized_root_node_id, is_root=True, seen=set())
         return '\n'.join(lines)
 
-    def _node_stage_goal_map(
-        self,
-        task_id: str,
-        *,
-        live_state: TaskLiveState | None = None,
-    ) -> dict[str, str]:
+    def _node_progress_text_map(self, task_id: str) -> dict[str, str]:
         goals: dict[str, str] = {}
-        # 阶段文案读投影表，不再读整任务明细：明细里那份内联轨迹摘要（实盘 71.0 MB/989 行
+        # 进展文案读投影表，不再读整任务明细：明细里那份内联轨迹摘要（实盘 71.0 MB/989 行
         # 里占 85%）已经不是它的家，取一个字符串要为整表买单（投影同任务 1.26 MB / 8.3 ms）。
         for item in list(self._store.list_task_nodes(task_id) or []):
             node_id = str(getattr(item, 'node_id', '') or '').strip()
@@ -2456,28 +2368,21 @@ class TaskQueryService:
             progress_text = str(payload.get('latest_progress_text') or '').strip()
             if progress_text:
                 goals[node_id] = progress_text
-        if live_state is None:
-            return goals
-        for frame in list(live_state.frames or []):
-            node_id = str(frame.node_id or '').strip()
-            stage_goal = str(frame.stage_goal or '').strip()
-            if node_id and stage_goal:
-                goals[node_id] = stage_goal
         return goals
 
     @staticmethod
-    def _tree_display_stage_goal(
+    def _tree_display_progress_text(
         node: Any,
-        stage_goals: dict[str, str],
+        progress_by_node: dict[str, str],
         *,
         activity_label: str = '',
         final_acceptance_label: str = '',
     ) -> str:
-        stage_goal = str(stage_goals.get(str(node.node_id or '').strip()) or '').strip()
-        if stage_goal:
-            return stage_goal
+        progress_text = str(progress_by_node.get(str(node.node_id or '').strip()) or '').strip()
+        if progress_text:
+            return progress_text
         if str(getattr(node, 'node_kind', 'execution') or 'execution').strip().lower() != 'acceptance':
-            return '无阶段目标'
+            return '暂无进展'
         # 验收节点只有存在新鲜运行证据(活跃帧)时才能表述为「检验中」;
         # 否则如实显示等待态或已有检验结果——禁止把从未被真正派发的
         # 验收节点渲染成「检验中」。
@@ -2506,24 +2411,24 @@ class TaskQueryService:
     def _tree_text_label(
         cls,
         node: Any,
-        stage_goals: dict[str, str],
+        progress_by_node: dict[str, str],
         *,
         activity_label: str = '',
         final_acceptance_label: str = '',
     ) -> str:
         node_id = str(getattr(node, 'node_id', '') or '').strip()
         status = cls._tree_pause_display(node)
-        stage_goal = cls._tree_display_stage_goal(
+        progress_text = cls._tree_display_progress_text(
             node,
-            stage_goals,
+            progress_by_node,
             activity_label=activity_label,
             final_acceptance_label=final_acceptance_label,
         )
         if str(getattr(node, 'node_kind', 'execution') or 'execution').strip().lower() == 'acceptance':
             parent_node_id = str(getattr(node, 'parent_node_id', '') or '').strip() or '?'
-            label = f'([验收上层父节点:{parent_node_id}] {node_id},{status},{stage_goal}'
+            label = f'([验收上层父节点:{parent_node_id}] {node_id},{status},{progress_text}'
         else:
-            label = f'({node_id},{status},{stage_goal}'
+            label = f'({node_id},{status},{progress_text}'
         if activity_label:
             label = f'{label},{activity_label}'
         return f'{label})'
@@ -2592,8 +2497,8 @@ class TaskQueryService:
             'updated_at': str(node.updated_at or ''),
             'execution_trace': {
                 'initial_prompt': '',
+                'turns': [],
                 'tool_steps': [],
-                'stages': [],
                 'live_tool_calls': [],
                 'live_child_pipelines': [],
                 'final_output': final_output,

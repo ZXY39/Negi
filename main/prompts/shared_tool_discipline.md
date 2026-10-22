@@ -15,5 +15,4 @@
 - 当前链路不提供直接长期记忆搜索；如未在当前上下文里给出相关长期记忆，就不要自行模拟或替代这类能力。
 - 除非上游提示词或用户需求明确要求你搜索或核对其他 skill 或工具，否则一律不允许自行搜索、猜测或扩展范围。
 - 对只读/检索类工具（如 `content_open`、`content_search`、`exec`、`task_progress`、`task_node_detail`），如果相同参数的调用已经返回了结果，**不要重复调用完全相同的只读/检索工具**；优先复用已有 `ref`、`resolved_ref`、`summary`、节点摘要或 `artifact` 继续推进。若确实信息不足，改用不同的行号窗口、不同的 query、不同的目标对象，或直接进入收尾判断。
-- 判断哪些历史 round 扣除了本阶段预算时，**禁止按工具名自行猜测**；以每轮注入的系统 overlay（抬头为 `System note for this turn only:`，节点运行合同块的 `stage_summary:` 行）给出的 `tool_rounds_used` 与「已用/预算」实数为准。不计预算的工具名单不在本文件列名：该名单每轮由系统 overlay 重新列出，两份说法不一致时以 overlay 为准。
 {{> shared_tool_reuse_rules.md}}

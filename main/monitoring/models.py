@@ -119,10 +119,6 @@ class TaskLiveFrame(Model):
     # 等于每次刷新都被抹掉——分发期间重试 toast 长期不显示即由此而来。
     await_started_at: str = ''
     model_retry_status: dict[str, Any] | None = None
-    stage_mode: str = ''
-    stage_status: str = ''
-    stage_goal: str = ''
-    stage_total_steps: int = 0
     tool_calls: list[TaskLiveToolCall] = Field(default_factory=list)
     child_pipelines: list[TaskLiveChildPipeline] = Field(default_factory=list)
 

@@ -219,7 +219,7 @@ def summarize_runtime_snapshot(
         tool_steps = [item for item in list(execution_trace.get("tool_steps") or []) if isinstance(item, dict)]
         if not tool_steps:
             # 任务快照这一跳只带轨迹摘要，正文走按节点道（`query_service.get_node_detail`
-            # 的 `resolve_execution_trace`），所以第二读者是摘要的 stages[].rounds[].tools[]。
+            # 的 `resolve_execution_trace`），所以第二读者是摘要的 turns[].tools[]。
             tool_steps = _execution_trace_summary_tool_steps(root_node)
         if not tool_steps:
             tool_steps = _runtime_summary_tool_steps(live_state)
@@ -236,7 +236,6 @@ def summarize_runtime_snapshot(
             root_node.get("final_output")
             or root_node.get("output")
             or root_node.get("failure_reason")
-            or str((frontier[0] if frontier else {}).get("stage_goal") or "")
             or _runtime_summary_tool_calls_summary(
                 live_state,
                 preferred_node_id=preferred_node_id,
@@ -383,30 +382,29 @@ def _tool_steps_summary(tool_steps: list[dict[str, Any]], *, limit: int = 3) -> 
 
 
 def _execution_trace_summary_tool_steps(root_node: Any) -> list[dict[str, Any]]:
-    """从节点轨迹摘要里按 (阶段序, 轮序) 摊平工具行。
+    """从节点轨迹摘要取摊平的工具行。
 
-    摘要的 `stages` 不保证有序（存量行里实测 stage:1 / stage:3 / stage:2 这样写），
-    而这里的结果只取"最后 N 条"，顺序错了就会把旧轮当最近的报给 agent。
+    摘要的 `tool_steps` 按轨迹生成顺序落盘，所以"最后 N 条"就是最近 N 条；
+    缺席时按 `turns` 的 seq 升序摊平工具，两条路都不会把旧轮当成最近的报给 agent。
     """
     if not isinstance(root_node, dict):
         return []
     summary = root_node.get("execution_trace_summary")
     if not isinstance(summary, dict):
         return []
-    rows: list[tuple[int, int, dict[str, Any]]] = []
-    for stage in list(summary.get("stages") or []):
-        if not isinstance(stage, dict):
+    flat_steps = [item for item in list(summary.get("tool_steps") or []) if isinstance(item, dict)]
+    if flat_steps:
+        return flat_steps
+    rows: list[tuple[int, dict[str, Any]]] = []
+    for turn in list(summary.get("turns") or []):
+        if not isinstance(turn, dict):
             continue
-        stage_index = int(stage.get("stage_index") or 0)
-        for round_item in list(stage.get("rounds") or []):
-            if not isinstance(round_item, dict):
-                continue
-            round_index = int(round_item.get("round_index") or 0)
-            for item in list(round_item.get("tools") or []):
-                if isinstance(item, dict):
-                    rows.append((stage_index, round_index, item))
-    rows.sort(key=lambda row: (row[0], row[1]))
-    return [row[2] for row in rows]
+        turn_seq = int(turn.get("seq") or 0)
+        for item in list(turn.get("tools") or []):
+            if isinstance(item, dict):
+                rows.append((turn_seq, item))
+    rows.sort(key=lambda row: row[0])
+    return [row[1] for row in rows]
 
 
 def _runtime_summary_tool_steps(runtime_summary: Any) -> list[dict[str, Any]]:

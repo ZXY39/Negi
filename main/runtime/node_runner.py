@@ -2172,7 +2172,7 @@ class NodeRunner:
                     '若无法给出证据，请改为 failed+final 并在 blocking_reason 写明执行节点应继续完成的工作。'
                     if decision == 'invalid'
                     else '你上一轮以 failed+blocked 结束核验（核验无法完成）。请再尝试一次完成核验：'
-                    '优先基于激活消息中的机械信号与结果载荷 ref 判断阻塞声明是否成立；'
+                    '优先基于激活消息中的执行记录与结果载荷 ref 判断阻塞声明是否成立；'
                     '确实无法核验时再次提交 failed+blocked，系统将放行执行节点的失败并记录"核验无法完成"。'
                 )
                 self._persist_node_notification_direct(
@@ -2366,7 +2366,7 @@ class NodeRunner:
         lines.append(
             '判定契约：阻塞成立（当前权限、环境、工具条件下确实无法继续，且执行节点已尽力）→ '
             'submit_final_result(status=success)，evidence 必须给出你实际核验过的证据；'
-            '阻塞不成立（仍有预算或存在可行下一步，或声明属于占位/逃避）→ '
+            '阻塞不成立（存在可行下一步，或声明属于占位/逃避）→ '
             'submit_final_result(status=failed, delivery_status=final)，'
             'blocking_reason 写明执行节点接下来必须做什么。'
             '禁止不做核验就下结论，禁止占位式裁决。'

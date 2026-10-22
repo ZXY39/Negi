@@ -194,10 +194,9 @@ from main.runtime.turn_overlay import (
 )
 
 _ARTIFACT_REF_PATTERN = re.compile(r'artifact:(?:artifact:)?[A-Za-z0-9_-]+')
-_STAGE_HISTORY_ARCHIVE_SOURCE_KIND = 'stage_history_archive'
 _COMPACT_HISTORY_STEP_MAX_CHARS = 160
 _ORPHAN_TOOL_RESULT_THRESHOLD = 3
-_STAGE_SPAWN_TOOL_NAME = 'spawn_child_nodes'
+_SPAWN_CHILDREN_TOOL_NAME = 'spawn_child_nodes'
 # exec 截断提醒的幂等标记：这句只出现在这里注入的提醒开头，同一结果第二次注入按它判。
 # 文案不许写"已自动加载"——台账删除后没有任何东西被自动加载，契约要模型自己取。
 _EXEC_TRUNCATION_REOPEN_MARKER = '⚠️ exec 输出未整篇交付到本轮上下文。'
@@ -284,7 +283,7 @@ _RESULT_REQUIRED_KEYS = (
     'remaining_work',
     'blocking_reason',
 )
-_STAGE_BUDGET_NODE_KINDS = {'execution', 'acceptance'}
+_TOOL_DISCIPLINE_NODE_KINDS = {'execution', 'acceptance'}
 _UNSET = object()
 
 
@@ -309,7 +308,7 @@ class ReActToolLoop:
     _EXCLUSIVE_TOOL_TURN_NAMES = {FINAL_RESULT_TOOL_NAME}
     _ALWAYS_CALLABLE_TOOL_NAMES = {
         FINAL_RESULT_TOOL_NAME,
-        _STAGE_SPAWN_TOOL_NAME,
+        _SPAWN_CHILDREN_TOOL_NAME,
         SILENT_TOOL_NAME,
         *_CONTROL_TOOL_NAMES,
         'load_tool_context',
@@ -2767,7 +2766,7 @@ class ReActToolLoop:
             replay_calls.append(
                 SimpleNamespace(
                     id=str(cache_key or '').strip(),
-                    name=_STAGE_SPAWN_TOOL_NAME,
+                    name=_SPAWN_CHILDREN_TOOL_NAME,
                     arguments={'children': specs},
                 )
             )
@@ -3848,12 +3847,12 @@ class ReActToolLoop:
             f"{str((item or {}).get('role') or '')}:{len(str((item or {}).get('content') or ''))}"
             for item in base_messages
         )
-        stage_id = f"comp:{hashlib.sha1(signature.encode('utf-8')).hexdigest()[:12]}"
+        segment_id = f"comp:{hashlib.sha1(signature.encode('utf-8')).hexdigest()[:12]}"
         self._hydrate_node_skill_roster_notice(node=node)
         readable_items = _skill_roster_notice.readable_skill_items(list(skill_roster_items or []))
         message = _skill_roster_notice.carry_for_scope(
             scope,
-            compression_stage_id=stage_id,
+            compression_stage_id=segment_id,
             readable_skill_ids=[
                 str((item or {}).get('skill_id') or '').strip()
                 for item in readable_items
@@ -3970,7 +3969,7 @@ class ReActToolLoop:
         for name in (
             *cls._ORDERED_CONTROL_TOOL_NAMES,
             FINAL_RESULT_TOOL_NAME,
-            _STAGE_SPAWN_TOOL_NAME,
+            _SPAWN_CHILDREN_TOOL_NAME,
             SILENT_TOOL_NAME,
         ):
             if name not in cls._ALWAYS_CALLABLE_TOOL_NAMES or name in ordered:
@@ -4267,10 +4266,6 @@ class ReActToolLoop:
                 finished_at = now_iso()
                 elapsed_seconds = round(max(0.0, time.monotonic() - started_monotonic), 1)
                 status = self._tool_message_status(raw_result if raw_result is not None else tool_content)
-                ephemeral = self._is_ephemeral_tool_result(
-                    raw_result,
-                    tool_name=str(call.name or ''),
-                )
                 self._update_tool_live_state(
                     task_id=task.task_id,
                     node_id=node.node_id,
@@ -4280,7 +4275,7 @@ class ReActToolLoop:
                     finished_at=finished_at,
                     elapsed_seconds=elapsed_seconds,
                     result_content=tool_content,
-                    ephemeral=ephemeral,
+                    ephemeral=False,
                 )
                 contract_delivery = str(
                     dict(runtime_context.get('tool_contract_deliveries') or {}).get(str(call.id or '')) or ''
@@ -4296,7 +4291,7 @@ class ReActToolLoop:
                         'started_at': started_at,
                         'finished_at': finished_at,
                         'elapsed_seconds': elapsed_seconds,
-                        'ephemeral': ephemeral,
+                        'ephemeral': False,
                         # 这次调用实际走的道（复用批 / 改参数重调 / 非法复用），缺省 normal。
                         'execution_path': str(
                             dict(runtime_context.get('tool_execution_paths') or {}).get(str(call.id or ''))
@@ -4328,7 +4323,7 @@ class ReActToolLoop:
                         'started_at': started_at,
                         'finished_at': finished_at,
                         'elapsed_seconds': elapsed_seconds,
-                        'ephemeral': ephemeral,
+                        'ephemeral': False,
                     },
                 }
 
@@ -4532,16 +4527,6 @@ class ReActToolLoop:
     @staticmethod
     def _tool_message_status(tool_result: Any) -> str:
         return 'error' if is_error_like_tool_result(tool_result) else 'success'
-
-    @staticmethod
-    def _is_ephemeral_tool_result(result: Any, *, tool_name: str) -> bool:
-        if str(tool_name or '').strip() != 'content':
-            return False
-        if not isinstance(result, dict):
-            return False
-        handle = dict(result.get('handle') or {}) if isinstance(result.get('handle'), dict) else {}
-        source_kind = str(handle.get('source_kind') or result.get('source_kind') or '').strip().lower()
-        return source_kind == _STAGE_HISTORY_ARCHIVE_SOURCE_KIND
 
     def _advance_node_stash_hop(self, node: Any, runtime_context: dict[str, Any]) -> dict[str, Any]:
         service = getattr(self, '_tool_impulse_service', None)
@@ -7903,7 +7888,7 @@ class ReActToolLoop:
         tools: dict[str, Tool],
     ) -> list[dict[str, Any]]:
         normalized_kind = str(getattr(node, "node_kind", "") or "").strip().lower()
-        if normalized_kind not in _STAGE_BUDGET_NODE_KINDS:
+        if normalized_kind not in _TOOL_DISCIPLINE_NODE_KINDS:
             return []
         requested_tool_ids = [
             str(
@@ -8030,7 +8015,7 @@ class ReActToolLoop:
         if not normalized_task_id:
             return []
         normalized_kind = str(node_kind or '').strip().lower()
-        if normalized_kind not in _STAGE_BUDGET_NODE_KINDS:
+        if normalized_kind not in _TOOL_DISCIPLINE_NODE_KINDS:
             return []
         latest_messages_by_signature = cls._latest_tool_messages_by_signature(message_history)
         latest_spawn_ref = cls._latest_spawn_child_nodes_ref(message_history)
@@ -8095,7 +8080,7 @@ class ReActToolLoop:
                 continue
             if str((message or {}).get('role') or '').strip().lower() != 'tool':
                 continue
-            if str((message or {}).get('name') or '').strip() != _STAGE_SPAWN_TOOL_NAME:
+            if str((message or {}).get('name') or '').strip() != _SPAWN_CHILDREN_TOOL_NAME:
                 continue
             payload = cls._tool_message_json_payload(message)
             ref = str(payload.get('ref') or payload.get('resolved_ref') or '').strip()

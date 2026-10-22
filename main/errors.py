@@ -93,7 +93,7 @@ def is_runtime_self_fault(exc: BaseException | None) -> bool:
     只认最后一帧落在本仓库运行时包（`main/`、`g3ku/`）内的那批异常：炸在 `tools/`
     里是工具实现的输入校验问题，炸在标准库或三方库里多半是数据问题，两者都不该
     被当成运行时坏了。2026-09-23 事故里 worker 进程加载了改到一半的 `log_service.py`，
-    每次 `submit_next_stage` 抛同一个 `NameError`，空转 24 轮无人发现。
+    每次控制工具调用都抛同一个 `NameError`，空转 24 轮无人发现。
     """
     if exc is None:
         return False
