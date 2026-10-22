@@ -136,7 +136,7 @@ function loadApp({ readContent, openContent, getToolArguments } = {}) {
     };
     vm.createContext(context);
     vm.runInContext(
-        `${TASK_VIEW_CODE}\n${APP_CODE}\nthis.__testExports = { ensureTraceOutputCodeBlockContent, ensureTraceArgumentsCodeBlockContent, ensureCeoToolStepFullOutput, getTraceOutputContentByRef, getTraceOutputWindowByRef, loadMoreTraceOutputBlock, traceContentTextUrl, capTraceDisplayText, renderTraceOutputField, toolArgumentsFullText, TRACE_DISPLAY_CHAR_LIMIT };`,
+        `${TASK_VIEW_CODE}\n${APP_CODE}\nthis.__testExports = { ensureTraceOutputCodeBlockContent, ensureTraceArgumentsCodeBlockContent, ensureCeoToolStepFullOutput, getTraceOutputContentByRef, getTraceOutputWindowByRef, loadMoreTraceOutputBlock, capTraceDisplayText, renderTraceOutputField, toolArgumentsFullText, TRACE_DISPLAY_CHAR_LIMIT };`,
         context
     );
     return context.__testExports;
@@ -371,15 +371,6 @@ test("归档参数按一屏封顶显示，复制仍拿全文", () => {
     assert.ok(shown.length < big.length, `capped ${shown.length} should be under ${big.length}`);
     assert.match(shown, /查看完整/);
     assert.equal(capTraceDisplayText("short"), "short");
-});
-
-test("查看完整走纯文本路由并转义 ref", () => {
-    const { traceContentTextUrl } = loadApp({});
-
-    assert.equal(traceContentTextUrl(ARTIFACT_REF), "/api/content/text?ref=artifact%3Ae9f4b91c3391");
-    assert.equal(traceContentTextUrl(""), "");
-    const encoded = traceContentTextUrl("path:temp/中 文报告.txt");
-    assert.ok(encoded.includes(encodeURIComponent("中 文报告")));
 });
 
 function cssRuleBody(selectorText) {

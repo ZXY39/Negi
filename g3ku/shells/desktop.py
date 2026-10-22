@@ -8,6 +8,10 @@
 但麦克风权限要宿主点头，而 pywebview 不注册 `PermissionRequested`。这里的做法是在
 `loaded` 回调里补挂——该回调由 WinForms 的 NavigationCompleted 触发，跑在 UI 线程
 上，而 `CoreWebView2` 只允许在 UI 线程访问。
+
+pywebview 的 `ALLOW_DOWNLOADS` 默认关，`DownloadStarting` 会被直接取消，界面里的下载
+（导出配置包）就是这样在窗口里静默消失的。开壳前把它打开，下载就落到窗口自己的
+「另存为」对话框上；浏览器轨道不受影响。
 """
 
 from __future__ import annotations
@@ -19,6 +23,12 @@ WINDOW_WIDTH = 1280
 WINDOW_HEIGHT = 860
 MICROPHONE_PERMISSION = "Microphone"
 PERMISSION_ALLOWED = 1
+DOWNLOADS_SETTING = "ALLOW_DOWNLOADS"
+
+
+def apply_shell_settings(settings: Any) -> None:
+    """把壳需要的 pywebview 全局开关落到实处。"""
+    settings[DOWNLOADS_SETTING] = True
 
 
 def shell_url(port: int | None = None) -> str:
@@ -93,6 +103,8 @@ def run_desktop_shell(url: str | None = None, *, port: int | None = None) -> int
         return 1
 
     import webview
+
+    apply_shell_settings(webview.settings)
 
     target = url or shell_url(port)
     window = webview.create_window(

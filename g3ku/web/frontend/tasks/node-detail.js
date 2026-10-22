@@ -818,7 +818,7 @@ function renderTraceLabelRow(label, { copyable = false, fullViewRef = "", loadMo
         ? `<button type="button" class="task-trace-copy" aria-label="${esc(copyTitle)}" title="${esc(copyTitle)}"><i data-lucide="copy"></i></button>`
         : "";
     const fullViewMarkup = fullViewRef
-        ? `<button type="button" class="task-trace-copy task-trace-full-view" data-full-view-ref="${esc(fullViewRef)}" aria-label="查看完整内容" title="在新标签页查看完整内容"><i data-lucide="external-link"></i></button>`
+        ? `<button type="button" class="task-trace-copy task-trace-full-view" data-full-view-ref="${esc(fullViewRef)}" aria-label="查看完整内容" title="查看完整内容"><i data-lucide="eye"></i></button>`
         : "";
     const loadMoreMarkup = loadMore
         ? `<button type="button" class="task-trace-copy task-trace-more" data-trace-more="" hidden aria-label="继续加载下一段" title="继续加载下一段"><i data-lucide="chevrons-down"></i></button>`
@@ -963,8 +963,9 @@ function bindTraceFieldCopyActions(traceList) {
                 event.preventDefault();
                 event.stopPropagation();
                 const ref = String(fullView.dataset?.fullViewRef || "").trim();
-                const url = typeof traceContentTextUrl === "function" ? traceContentTextUrl(ref) : "";
-                if (url && typeof window?.open === "function") window.open(url, "_blank", "noopener");
+                if (ref && typeof openMediaViewer === "function") {
+                    openMediaViewer({ mode: "content", title: "完整内容", outputRef: ref });
+                }
                 return;
             }
             const more = origin.closest("[data-trace-more]");
@@ -2098,7 +2099,7 @@ function renderTraceLabelRow(label, { copyable = false, fullViewRef = "", loadMo
         ? `<button type="button" class="task-trace-copy" aria-label="${esc(copyTitle)}" title="${esc(copyTitle)}"><i data-lucide="copy"></i></button>`
         : "";
     const fullViewMarkup = fullViewRef
-        ? `<button type="button" class="task-trace-copy task-trace-full-view" data-full-view-ref="${esc(fullViewRef)}" aria-label="查看完整内容" title="在新标签页查看完整内容"><i data-lucide="external-link"></i></button>`
+        ? `<button type="button" class="task-trace-copy task-trace-full-view" data-full-view-ref="${esc(fullViewRef)}" aria-label="查看完整内容" title="查看完整内容"><i data-lucide="eye"></i></button>`
         : "";
     const loadMoreMarkup = loadMore
         ? `<button type="button" class="task-trace-copy task-trace-more" data-trace-more="" hidden aria-label="继续加载下一段" title="继续加载下一段"><i data-lucide="chevrons-down"></i></button>`
@@ -2241,8 +2242,9 @@ function bindTraceFieldCopyActions(traceList) {
                 event.preventDefault();
                 event.stopPropagation();
                 const ref = String(fullView.dataset?.fullViewRef || "").trim();
-                const url = typeof traceContentTextUrl === "function" ? traceContentTextUrl(ref) : "";
-                if (url && typeof window?.open === "function") window.open(url, "_blank", "noopener");
+                if (ref && typeof openMediaViewer === "function") {
+                    openMediaViewer({ mode: "content", title: "完整内容", outputRef: ref });
+                }
                 return;
             }
             const more = origin.closest("[data-trace-more]");

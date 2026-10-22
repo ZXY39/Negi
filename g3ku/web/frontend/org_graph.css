@@ -1676,6 +1676,50 @@ textarea {
     }
 }
 
+/* 程序内媒体查看器：显示面按视口封顶，长内容在本层滚动，盒子不跟内容一起长。 */
+.media-viewer-drawer {
+    width: min(1180px, calc(100vw - 32px));
+    height: min(86vh, calc(100dvh - 48px));
+    z-index: 112;
+}
+
+#media-viewer-backdrop.detail-backdrop {
+    z-index: 111;
+    backdrop-filter: none;
+    -webkit-backdrop-filter: none;
+    background: var(--modal-backdrop);
+}
+
+.media-viewer-body {
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-4);
+    min-height: 0;
+}
+
+.media-viewer-image {
+    align-self: center;
+    max-width: 100%;
+    max-height: min(72vh, calc(100dvh - 190px));
+    object-fit: contain;
+    border-radius: var(--radius-lg);
+}
+
+.media-viewer-frame {
+    width: 100%;
+    height: min(72vh, calc(100dvh - 190px));
+    border: 1px solid var(--border-color);
+    border-radius: var(--radius-lg);
+    background: var(--bg-app);
+}
+
+@media (max-width: 960px) {
+    .media-viewer-drawer {
+        width: calc(100vw - 20px);
+        height: min(88vh, calc(100dvh - 24px));
+    }
+}
+
 .tree-flow-wrapper {
     display: flex;
     flex-direction: column;

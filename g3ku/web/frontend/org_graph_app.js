@@ -1234,12 +1234,6 @@ function traceOutputWindowCacheKey(outputRef = "", view = "canonical", startLine
     return `${normalizedView}:${normalizedRef}:${startLine ?? ""}-${endLine ?? ""}`;
 }
 
-function traceContentTextUrl(outputRef = "") {
-    const normalizedRef = normalizeTraceOutputRef(outputRef);
-    if (!normalizedRef) return "";
-    return `/api/content/text?ref=${encodeURIComponent(normalizedRef)}`;
-}
-
 // 输出正文按「服务端一屏」取，不再整份搬到浏览器：/api/content/read 会把 artifact
 // 全文（实测单行 7,024,971 字符的节点详情）一次性交给页面，decode + indent 重排 +
 // 一次性 DOM 注入三步都在主线程，整页就是这样冻住的。
@@ -2903,7 +2897,7 @@ function renderInlineMarkdown(value, { allowLinks = true } = {}) {
             if (!clickHref) return createMarkdownToken(tokens, imgTag);
             return createMarkdownToken(
                 tokens,
-                `<a class="msg-inline-image-link" href="${clickHref}" target="_blank" rel="noreferrer noopener">${imgTag}</a>`
+                `<a class="msg-inline-image-link" href="${clickHref}" data-media-open="image" data-media-name="${label}">${imgTag}</a>`
             );
         });
         text = text.replace(/\[([^\]]+)\]\(([^)\s]+(?:\s+"[^"]*")?)\)/g, (_match, label, target) => {
@@ -2912,7 +2906,7 @@ function renderInlineMarkdown(value, { allowLinks = true } = {}) {
                 const chipLabel = esc(String(label || "file").trim() || "file");
                 return createMarkdownToken(
                     tokens,
-                    `<a class="msg-file-chip" href="${esc(href)}" target="_blank" rel="noreferrer noopener">` +
+                    `<a class="msg-file-chip" href="${esc(href)}" data-media-open="auto" data-media-name="${chipLabel}">` +
                         `<svg class="msg-file-chip-icon" viewBox="0 0 16 16" width="14" height="14" aria-hidden="true">` +
                         `<path d="M4.5 1.5h5l2.5 2.5v10.5h-7.5z" fill="none" stroke="currentColor" stroke-width="1.1"/>` +
                         `<path d="M9.5 1.5V4h2.5" fill="none" stroke="currentColor" stroke-width="1.1"/></svg>` +
@@ -3190,7 +3184,7 @@ function renderStructuredChatAttachmentCard(item = {}, { sessionId = activeSessi
     const size = esc(formatFileSize(item.size));
     if (String(item.kind || "").trim() === "image") {
         return `
-            <a class="chat-attachment-link chat-attachment-image" role="listitem" href="${safeHref}" target="_blank" rel="noreferrer noopener">
+            <a class="chat-attachment-link chat-attachment-image" role="listitem" href="${safeHref}" data-media-open="image" data-media-name="${label}">
                 <img class="chat-attachment-thumb" src="${safeHref}" alt="${label}" loading="lazy">
                 <span class="chat-attachment-image-meta">
                     <span class="chat-attachment-name">${label}</span>
@@ -3200,7 +3194,7 @@ function renderStructuredChatAttachmentCard(item = {}, { sessionId = activeSessi
         `;
     }
     return `
-        <a class="chat-attachment-link chat-attachment-file" role="listitem" href="${safeHref}" target="_blank" rel="noreferrer noopener">
+        <a class="chat-attachment-link chat-attachment-file" role="listitem" href="${safeHref}" data-media-open="auto" data-media-name="${label}">
             <span class="chat-attachment-kind">文件</span>
             <span class="chat-attachment-name">${label}</span>
             <span class="chat-attachment-size">${size}</span>
@@ -8265,12 +8259,7 @@ function closeConfigBundleDialog() {
 }
 
 function downloadConfigBundleFile(filename) {
-    const link = document.createElement("a");
-    link.href = ApiClient.getConfigBundleDownloadUrl(filename);
-    link.download = String(filename || "");
-    document.body.appendChild(link);
-    link.click();
-    link.remove();
+    triggerMediaDownload(ApiClient.getConfigBundleDownloadUrl(filename), filename);
 }
 
 async function submitConfigBundleExport() {
@@ -10127,6 +10116,7 @@ function bind() {
     bindModelPage();
     bindTaskHall();
     bindResourcePages();
+    bindMediaViewer();
     bindGlobalOverlays();
     renderPendingCeoUploads();
     syncCeoInputHeight();
@@ -10938,6 +10928,7 @@ function bindGlobalOverlays() {
             closeConfirm();
             return;
         }
+        if (closeMediaViewer()) return;
         if (closeTaskMenus({ restoreFocus: true })) return;
         if (S.taskErrorLogOpen) {
             setTaskErrorLogOpen(false);

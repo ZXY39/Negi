@@ -28,6 +28,7 @@ const FRONTEND_BUNDLES = Object.freeze({
         "ui/toast.js",
         "ui/confirm.js",
         "ui/drawer.js",
+        "ui/media-viewer.js",
         "ceo/model-panel.js",
         "ceo/composer.js",
         "ceo/compression.js",

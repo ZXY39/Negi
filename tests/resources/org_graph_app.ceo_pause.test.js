@@ -862,7 +862,8 @@ test("render snapshot separates text bubble from file attachments and keeps file
     assert.match(markup, /chat-attachment-stack/);
     assert.match(markup, /chat-attachment-file/);
     assert.match(markup, /chat-attachment-link/);
-    assert.match(markup, /target="_blank"/);
+    assert.match(markup, /data-media-open="auto"/);
+    assert.doesNotMatch(markup, /target="_blank"/);
     assert.match(markup, /\/api\/ceo\/uploads\/file\?/);
 });
 
