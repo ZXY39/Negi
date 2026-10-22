@@ -19,7 +19,6 @@ from g3ku.runtime.session_agent import RuntimeAgentSession
 from g3ku.runtime.tool_contract_block import render_tool_contract_block
 from g3ku.session.manager import SessionManager
 from main.runtime.internal_tools import SilentTool
-from main.runtime.stage_messages import build_ceo_stage_reply_bounce_message
 
 
 class _IngestRecorder:
@@ -233,8 +232,7 @@ async def test_runtime_agent_session_prompt_keeps_rag_ingest_payload_raw_and_ski
     assert str(memory_manager.calls[0]["turn_id"] or "").strip()
     assert memory_manager.calls[0]["user_messages"] == ["what changed?"]
     assert memory_manager.calls[0]["assistant_text"] == "assistant reply"
-    assert memory_manager.calls[0]["compression_summary"] == {}
-    assert memory_manager.calls[0]["canonical_summary"] == {}
+    assert memory_manager.calls[0]["turns"] == []
     assert commit_service.calls == []
 
 
@@ -1101,69 +1099,24 @@ def test_build_prompt_context_no_longer_uses_summary_text_overlay() -> None:
     result = runner.build_prompt_context(
         state={
             "summary_text": "## CEO Durable Summary\n- durable memory",
-            "frontdoor_stage_state": {
-                "active_stage_id": "stage-1",
-                "transition_required": True,
-                "stages": [
-                    {
-                        "stage_id": "stage-1",
-                        "stage_index": 1,
-                        "stage_goal": "Inspect the current request",
-                        "tool_round_budget": 1,
-                        "tool_rounds_used": 1,
-                        "status": "active",
-                        "mode": "自主执行",
-                        "completed_stage_summary": "",
-                        "key_refs": [],
-                        "rounds": [],
-                    }
-                ],
-            },
         },
         runtime=SimpleNamespace(),
         tools=[],
     )
 
     overlay = str(result["system_overlay"])
-    assert "The CEO stage tool-round budget is exhausted: 1/1." in overlay
-    assert "output the final reply for the user directly" in overlay
+    assert overlay == ""
     assert "no real tool result exists yet" not in overlay
     assert "Use the existing CEO layered context rules." not in overlay
     assert "## CEO Durable Summary" not in overlay
 
 
-def test_build_prompt_context_keeps_dispatch_overlay_and_exhausted_stage_instruction() -> None:
+def test_build_prompt_context_keeps_dispatch_overlay() -> None:
     runner = CreateAgentCeoFrontDoorRunner(loop=SimpleNamespace())
 
     result = runner.build_prompt_context(
         state={
             "repair_overlay_text": "Dispatch result is already available. Reply naturally based on the verified task id task:demo-123.",
-            "frontdoor_stage_state": {
-                "active_stage_id": "stage-1",
-                "transition_required": True,
-                "stages": [
-                    {
-                        "stage_id": "stage-1",
-                        "stage_index": 1,
-                        "stage_goal": "Dispatch the follow-up investigation",
-                        "tool_round_budget": 1,
-                        "tool_rounds_used": 1,
-                        "status": "active",
-                        "mode": "自主执行",
-                        "completed_stage_summary": "",
-                        "key_refs": [],
-                        "rounds": [
-                            {
-                                "round_id": "stage-1:round-1",
-                                "round_index": 1,
-                                "tool_names": ["create_async_task"],
-                                "tool_call_ids": ["call-1"],
-                                "budget_counted": True,
-                            }
-                        ],
-                    }
-                ],
-            },
         },
         runtime=SimpleNamespace(),
         tools=[],
@@ -1171,8 +1124,21 @@ def test_build_prompt_context_keeps_dispatch_overlay_and_exhausted_stage_instruc
 
     overlay = str(result["system_overlay"])
     assert "verified task id task:demo-123" in overlay
-    assert "The CEO stage tool-round budget is exhausted: 1/1." in overlay
-    assert "submit `submit_next_stage` in the same batch as the target tool to open the next" in overlay
+
+
+def test_build_prompt_context_keeps_dispatch_overlay() -> None:
+    runner = CreateAgentCeoFrontDoorRunner(loop=SimpleNamespace())
+
+    result = runner.build_prompt_context(
+        state={
+            "repair_overlay_text": "Dispatch result is already available. Reply naturally based on the verified task id task:demo-123.",
+        },
+        runtime=SimpleNamespace(),
+        tools=[],
+    )
+
+    overlay = str(result["system_overlay"])
+    assert "verified task id task:demo-123" in overlay
 
 
 @pytest.mark.asyncio
@@ -1218,99 +1184,8 @@ async def test_graph_normalize_model_output_finalizes_plain_text_when_transition
     assert not str(result.get("repair_overlay_text") or "")
 
 
-def test_build_ceo_stage_reply_bounce_message_only_for_fresh_stage_without_progress() -> None:
-    def _gate(*, rounds: list[dict[str, object]], transition_required: bool, used: int = 0) -> dict[str, object]:
-        return {
-            "enabled": True,
-            "has_active_stage": True,
-            "transition_required": transition_required,
-            "active_stage": {
-                "stage_id": "frontdoor-stage-1",
-                "stage_index": 1,
-                "stage_goal": "向用户交付派发确认",
-                "tool_round_budget": 1,
-                "tool_rounds_used": used,
-                "status": "active",
-                "mode": "自主执行",
-                "rounds": rounds,
-            },
-        }
-
-    # 无活动阶段：不打回（无阶段文本收尾本就合法）。
-    assert build_ceo_stage_reply_bounce_message({"active_stage": None, "transition_required": False}) == ""
-    # 预算耗尽：绝不打回——旧 A 类拦截是死循环的一半（会话 22124b26b86b）。
-    assert build_ceo_stage_reply_bounce_message(_gate(rounds=[], transition_required=True, used=1)) == ""
-    # 已有实质工具轮：不打回。
-    substantive = _gate(
-        rounds=[{"round_index": 1, "tool_names": ["create_async_task"], "budget_counted": True}],
-        transition_required=False,
-        used=1,
-    )
-    assert build_ceo_stage_reply_bounce_message(substantive) == ""
-    # 阶段刚创建、零工具轮：打回一次，文本必须带逃生句。
-    fresh = _gate(rounds=[], transition_required=False)
-    message = build_ceo_stage_reply_bounce_message(fresh)
-    assert "no real tool result exists yet" in message
-    assert "向用户交付派发确认" in message
-    assert "output the reply text again" in message
-    # 仅含 sns/控制类轮次不算实质进展，同样打回。
-    sns_only = _gate(
-        rounds=[{"round_index": 1, "tool_names": ["submit_next_stage"], "budget_counted": False}],
-        transition_required=False,
-    )
-    assert "no real tool result exists yet" in build_ceo_stage_reply_bounce_message(sns_only)
 
 
-@pytest.mark.asyncio
-async def test_graph_normalize_model_output_bounces_plain_text_once_for_stage_without_progress() -> None:
-    runner = CreateAgentCeoFrontDoorRunner(loop=SimpleNamespace())
-
-    def _state(**overrides) -> dict[str, object]:
-        state = {
-            "response_payload": {
-                "content": "调研任务已派发，结果出来我再推给你。",
-                "tool_calls": [],
-                "finish_reason": "stop",
-            },
-            "route_kind": "direct_reply",
-            "used_tools": [],
-            "frontdoor_stage_state": {
-                "active_stage_id": "frontdoor-stage-1",
-                "transition_required": False,
-                "stages": [
-                    {
-                        "stage_id": "frontdoor-stage-1",
-                        "stage_index": 1,
-                        "stage_goal": "向用户交付派发确认",
-                        "tool_round_budget": 1,
-                        "tool_rounds_used": 0,
-                        "status": "active",
-                        "mode": "自主执行",
-                        "completed_stage_summary": "",
-                        "key_refs": [],
-                        "rounds": [],
-                    }
-                ],
-            },
-        }
-        state.update(overrides)
-        return state
-
-    first = await runner._graph_normalize_model_output(_state(), runtime=SimpleNamespace())
-    assert first["next_step"] == "call_model"
-    assert str(first.get("final_output") or "") == ""
-    assert int(first.get("stage_reply_bounce_count") or 0) == 1
-    assert "no real tool result exists yet" in str(first["repair_overlay_text"])
-    assert "output the reply text again" in str(first["repair_overlay_text"])
-
-    # 整回合上限一次：计数已达上限时，即使阶段仍无工具轮也必须放行收尾。
-    second = await runner._graph_normalize_model_output(
-        _state(stage_reply_bounce_count=1),
-        runtime=SimpleNamespace(),
-    )
-    assert second["next_step"] == "finalize"
-    assert second["final_output"] == "调研任务已派发，结果出来我再推给你。"
-    assert not str(second.get("repair_overlay_text") or "")
 
 
 _STAGE_ECHO_PREFIX_CASES = [
@@ -1349,49 +1224,8 @@ def _stage_echo_state(content: str, **overrides) -> dict[str, object]:
     return state
 
 
-@pytest.mark.asyncio
-@pytest.mark.parametrize(("prefix", "_kind"), _STAGE_ECHO_PREFIX_CASES)
-async def test_graph_normalize_model_output_repairs_standalone_stage_block_echo_once(prefix: str, _kind: str) -> None:
-    # 事故：上下文含有大量阶段压缩块的会话里，模型把伪造的阶段块 JSON 当作
-    # 整条最终文本回复输出，运行时按纯文本收尾把它投递给了 QQ 用户。
-    # 修复：standalone 阶段块回显绝不作为最终回复，第一次转向私有修复提示重问。
-    runner = CreateAgentCeoFrontDoorRunner(loop=SimpleNamespace())
-    block = _stage_echo_block(prefix)
-
-    first = await runner._graph_normalize_model_output(
-        _stage_echo_state(block),
-        runtime=SimpleNamespace(),
-    )
-
-    assert first["next_step"] == "call_model"
-    assert str(first.get("final_output") or "") == ""
-    assert int(first.get("stage_block_echo_attempt_count") or 0) == 1
-    repair_text = str(first.get("repair_overlay_text") or "")
-    assert "submit_next_stage" in repair_text
-    assert prefix not in repair_text
 
 
-@pytest.mark.asyncio
-@pytest.mark.parametrize(("prefix", "_kind"), _STAGE_ECHO_PREFIX_CASES)
-async def test_graph_normalize_model_output_falls_back_on_repeated_stage_block_echo(prefix: str, _kind: str) -> None:
-    # 重复回显不再无限打回：整回合一次修复提示后转为用户友好回退文本收尾，
-    # 回退文本与转录/投递都不含阶段协议原文。
-    runner = CreateAgentCeoFrontDoorRunner(loop=SimpleNamespace())
-    block = _stage_echo_block(prefix)
-
-    repeated = await runner._graph_normalize_model_output(
-        _stage_echo_state(block, stage_block_echo_attempt_count=1),
-        runtime=SimpleNamespace(),
-    )
-
-    assert repeated["next_step"] == "finalize"
-    fallback = str(repeated.get("final_output") or "")
-    assert fallback  # 用户友好回退存在
-    assert prefix not in fallback
-    assert "[G3KU_STAGE" not in fallback
-    assert "stage_index" not in fallback
-    assert not str(repeated.get("repair_overlay_text") or "")
-    assert int(repeated.get("stage_block_echo_attempt_count") or 0) == 2
 
 
 @pytest.mark.asyncio

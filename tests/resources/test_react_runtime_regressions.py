@@ -22,16 +22,10 @@ from g3ku.resources.loader import ManifestBackedTool
 from g3ku.resources.models import ResourceKind, ToolResourceDescriptor
 from g3ku.resources.registry import ResourceRegistry
 from g3ku.runtime.context.node_context_selection import NodeContextSelectionResult
-from g3ku.runtime.stage_prompt_compaction import STAGE_COMPACT_PREFIX
 from g3ku.runtime.tool_contract_block import attach_tool_contract_block
 from g3ku.runtime.tool_history import analyze_tool_call_history
 from g3ku.utils.helpers import tools_bundle_single_source_enabled
 from main.errors import TaskPausedError
-from main.monitoring.log_service import (
-    _EXECUTION_STAGE_MODE_SELF,
-    _EXECUTION_STAGE_STATUS_ACTIVE,
-    _EXECUTION_STAGE_STATUS_COMPLETED,
-)
 from main.governance.tool_context import (
     apply_runtime_tool_context_projection,
     build_tool_context_fingerprint,
@@ -43,9 +37,8 @@ from main.runtime.node_prompt_contract import (
     is_node_dynamic_contract_message,
 )
 import main.service.runtime_service as runtime_service_module
-from main.runtime.internal_tools import SubmitFinalResultTool, SubmitNextStageTool, SpawnChildNodesTool
+from main.runtime.internal_tools import SubmitFinalResultTool, SpawnChildNodesTool
 from main.runtime.react_loop import _INVALID_FINAL_SUBMISSION_LIMIT, _PLAIN_TEXT_REPLY_STRIKE_LIMIT, ReActToolLoop
-from main.runtime.stage_budget import STAGELESS_FREE_PASS_REMINDER
 from main.runtime.tool_call_repair import extract_tool_calls_from_xml_pseudo_content
 from main.service.runtime_service import MainRuntimeService
 from main.storage.artifact_store import TaskArtifactStore
@@ -252,15 +245,6 @@ class _StageRuntimeProbeTool(Tool):
         )
 
 
-@pytest.mark.parametrize(
-    "loader_tool_name",
-    ["load_tool_context", "load_tool_context_v2", "load_skill_context", "load_skill_context_v2"],
-)
-def test_react_loop_treats_loader_tools_as_budget_bypass(loader_tool_name: str) -> None:
-    assert ReActToolLoop._should_bypass_execution_budget(call=SimpleNamespace(name=loader_tool_name)) is True
-    assert ReActToolLoop.model_visible_always_callable_tool_names(
-        visible_tool_names=[loader_tool_name]
-    ) == [loader_tool_name]
 
 
 def test_react_tool_message_status_treats_ok_false_payload_as_error() -> None:
@@ -1352,51 +1336,8 @@ def test_execution_selector_uses_stable_visible_tool_order_independent_of_iterat
     ]
 
 
-def test_execution_stage_gate_allows_spawn_child_nodes_without_active_stage() -> None:
-    log_service = _FakeLogService()
-    log_service.execution_stage_gate_snapshot = lambda task_id, node_id: {
-        'has_active_stage': False,
-        'transition_required': False,
-        'active_stage': None,
-    }
-    loop = ReActToolLoop(chat_backend=SimpleNamespace(), log_service=log_service, max_iterations=2)
-
-    error = loop._execution_tool_gate_error(
-        tool_name='spawn_child_nodes',
-        runtime_context={
-            'task_id': 'task-spawn-gate',
-            'node_id': 'node-spawn-gate',
-            'node_kind': 'execution',
-        },
-    )
-
-    assert error == ''
 
 
-@pytest.mark.parametrize(
-    "loader_tool_name",
-    ["load_tool_context", "load_tool_context_v2", "load_skill_context", "load_skill_context_v2"],
-)
-def test_execution_stage_gate_allows_context_loaders_without_active_stage(loader_tool_name: str) -> None:
-    log_service = _FakeLogService()
-    log_service.execution_stage_gate_snapshot = lambda task_id, node_id: {
-        'has_active_stage': False,
-        'transition_required': False,
-        'active_stage': None,
-        'pending_orphan_rounds': [],
-    }
-    loop = ReActToolLoop(chat_backend=SimpleNamespace(), log_service=log_service, max_iterations=2)
-
-    error = loop._execution_tool_gate_error(
-        tool_name=loader_tool_name,
-        runtime_context={
-            'task_id': 'task-loader-gate',
-            'node_id': 'node-loader-gate',
-            'node_kind': 'acceptance',
-        },
-    )
-
-    assert error == ''
 
 
 class _FreePassStubTool(Tool):
@@ -1437,69 +1378,8 @@ def _stageless_free_pass_log_service(free_pass_rounds: list[dict[str, object]]) 
     return log_service
 
 
-@pytest.mark.asyncio
-async def test_stageless_free_pass_round_appends_reminder_without_crashing() -> None:
-    """回归:无活动阶段时普通工具宽限执行,结果追加提醒而非 NameError 兜底错误文本。"""
-    free_pass_rounds: list[dict[str, object]] = []
-    loop = ReActToolLoop(
-        chat_backend=SimpleNamespace(),
-        log_service=_stageless_free_pass_log_service(free_pass_rounds),
-        max_iterations=2,
-    )
-    task = SimpleNamespace(task_id='task-free-pass')
-    node = SimpleNamespace(node_id='node-free-pass', depth=0, node_kind='acceptance')
-    tools = {'exec': _FreePassStubTool('exec', '{"ok": true, "stdout": "done"}')}
-
-    results = await loop._execute_tool_calls(
-        task=task,
-        node=node,
-        response_tool_calls=[ToolCallRequest(id='call-free-pass-exec', name='exec', arguments={})],
-        tools=tools,
-        runtime_context={'task_id': task.task_id, 'node_id': node.node_id, 'actor_role': 'execution'},
-    )
-
-    assert len(results) == 1
-    content = str(results[0]['tool_message']['content'])
-    assert 'Error executing' not in content
-    assert STAGELESS_FREE_PASS_REMINDER in content
-    assert len(free_pass_rounds) == 1
-    assert free_pass_rounds[0]['kind'] == 'stageless'
 
 
-@pytest.mark.asyncio
-async def test_stageless_loader_only_round_executes_without_free_pass() -> None:
-    """回归:无活动阶段时纯 load_tool_context 轮不撞闸、不消耗宽限、结果不加提醒。"""
-    free_pass_rounds: list[dict[str, object]] = []
-    loop = ReActToolLoop(
-        chat_backend=SimpleNamespace(),
-        log_service=_stageless_free_pass_log_service(free_pass_rounds),
-        max_iterations=2,
-    )
-    task = SimpleNamespace(task_id='task-loader-stageless')
-    node = SimpleNamespace(node_id='node-loader-stageless', depth=0, node_kind='acceptance')
-    tools = {
-        'load_tool_context': _FreePassStubTool(
-            'load_tool_context', {'ok': True, 'tool_id': 'content_open'}
-        )
-    }
-
-    results = await loop._execute_tool_calls(
-        task=task,
-        node=node,
-        response_tool_calls=[
-            ToolCallRequest(id='call-loader-open', name='load_tool_context', arguments={'tool_id': 'content_open'}),
-            ToolCallRequest(id='call-loader-search', name='load_tool_context', arguments={'tool_id': 'content_search'}),
-        ],
-        tools=tools,
-        runtime_context={'task_id': task.task_id, 'node_id': node.node_id, 'actor_role': 'execution'},
-    )
-
-    assert len(results) == 2
-    for result in results:
-        content = str(result['tool_message']['content'])
-        assert 'Error executing' not in content
-        assert STAGELESS_FREE_PASS_REMINDER not in content
-    assert free_pass_rounds == []
 
 
 def test_execution_selector_preserves_prior_model_visible_tool_order_across_turns() -> None:
@@ -2502,7 +2382,7 @@ def test_react_iteration_bundle_filter_keys_on_renderable_schema_not_dispatch_di
         node_id='node-render',
         node_kind='execution',
         visible_tools={'exec': exec_tool},
-        stage_gate={},
+        
         runtime_context={},
     )
     assert payload['provider_tool_names'] == ['exec', 'content_open']
@@ -2515,7 +2395,7 @@ def test_react_iteration_bundle_filter_keys_on_renderable_schema_not_dispatch_di
         node_id='node-render',
         node_kind='execution',
         visible_tools={'exec': exec_tool},
-        stage_gate={},
+        
         runtime_context={},
     )
     assert payload_empty['provider_tool_names'] == ['exec']
@@ -2907,179 +2787,6 @@ def test_prepare_messages_rebuilds_prompt_from_completed_stages_and_active_windo
     assert "current stage tool output" in rendered_contents
 
 
-def test_prepare_messages_keeps_active_stage_and_evicts_only_the_named_stage() -> None:
-    loop = ReActToolLoop(chat_backend=SimpleNamespace(), log_service=_FakeLogService(), max_iterations=2)
-    loop._log_service._store._node = SimpleNamespace(
-        metadata={
-            "execution_stages": {
-                "active_stage_id": "stage-5",
-                "transition_required": False,
-                "stages": [
-                    {
-                        "stage_id": "stage-1",
-                        "stage_index": 1,
-                        "stage_kind": "normal",
-                        "system_generated": False,
-                        "mode": _EXECUTION_STAGE_MODE_SELF,
-                        "status": _EXECUTION_STAGE_STATUS_COMPLETED,
-                        "stage_goal": "inspect stage one",
-                        "completed_stage_summary": "finished stage one",
-                        # 窗口已移除：离开可见层只能由模型在关闭它时点名。
-                        "context_evicted": True,
-                        "key_refs": [],
-                        "tool_round_budget": 2,
-                        "tool_rounds_used": 1,
-                    },
-                    {
-                        "stage_id": "stage-2",
-                        "stage_index": 2,
-                        "stage_kind": "normal",
-                        "system_generated": False,
-                        "mode": _EXECUTION_STAGE_MODE_SELF,
-                        "status": _EXECUTION_STAGE_STATUS_COMPLETED,
-                        "stage_goal": "inspect stage two",
-                        "completed_stage_summary": "finished stage two",
-                        "key_refs": [],
-                        "tool_round_budget": 2,
-                        "tool_rounds_used": 1,
-                    },
-                    {
-                        "stage_id": "stage-3",
-                        "stage_index": 3,
-                        "stage_kind": "normal",
-                        "system_generated": False,
-                        "mode": _EXECUTION_STAGE_MODE_SELF,
-                        "status": _EXECUTION_STAGE_STATUS_COMPLETED,
-                        "stage_goal": "inspect stage three",
-                        "completed_stage_summary": "finished stage three",
-                        "key_refs": [],
-                        "tool_round_budget": 2,
-                        "tool_rounds_used": 1,
-                    },
-                    {
-                        "stage_id": "stage-4",
-                        "stage_index": 4,
-                        "stage_kind": "normal",
-                        "system_generated": False,
-                        "mode": _EXECUTION_STAGE_MODE_SELF,
-                        "status": _EXECUTION_STAGE_STATUS_COMPLETED,
-                        "stage_goal": "inspect stage four",
-                        "completed_stage_summary": "finished stage four",
-                        "key_refs": [],
-                        "tool_round_budget": 2,
-                        "tool_rounds_used": 1,
-                    },
-                    {
-                        "stage_id": "stage-5",
-                        "stage_index": 5,
-                        "stage_kind": "normal",
-                        "system_generated": False,
-                        "mode": _EXECUTION_STAGE_MODE_SELF,
-                        "status": _EXECUTION_STAGE_STATUS_ACTIVE,
-                        "stage_goal": "inspect stage five",
-                        "tool_round_budget": 3,
-                        "tool_rounds_used": 0,
-                    },
-                ],
-            }
-        }
-    )
-    original = [
-        {"role": "system", "content": "system"},
-        {"role": "user", "content": '{"task_id":"task-1","goal":"demo"}'},
-        {
-            "role": "assistant",
-            "content": "",
-            "tool_calls": [
-                {
-                    "id": "call-stage-1",
-                    "type": "function",
-                    "function": {"name": "submit_next_stage", "arguments": "{}"},
-                }
-            ],
-        },
-        {"role": "tool", "name": "submit_next_stage", "tool_call_id": "call-stage-1", "content": '{"ok": true}'},
-        {"role": "assistant", "content": "stage one raw detail"},
-        {
-            "role": "assistant",
-            "content": "",
-            "tool_calls": [
-                {
-                    "id": "call-stage-2",
-                    "type": "function",
-                    "function": {"name": "submit_next_stage", "arguments": "{}"},
-                }
-            ],
-        },
-        {"role": "tool", "name": "submit_next_stage", "tool_call_id": "call-stage-2", "content": '{"ok": true}'},
-        {"role": "assistant", "content": "stage two raw detail"},
-        {
-            "role": "assistant",
-            "content": "",
-            "tool_calls": [
-                {
-                    "id": "call-stage-3",
-                    "type": "function",
-                    "function": {"name": "submit_next_stage", "arguments": "{}"},
-                }
-            ],
-        },
-        {"role": "tool", "name": "submit_next_stage", "tool_call_id": "call-stage-3", "content": '{"ok": true}'},
-        {"role": "assistant", "content": "stage three raw detail"},
-        {
-            "role": "assistant",
-            "content": "",
-            "tool_calls": [
-                {
-                    "id": "call-stage-4",
-                    "type": "function",
-                    "function": {"name": "submit_next_stage", "arguments": "{}"},
-                }
-            ],
-        },
-        {"role": "tool", "name": "submit_next_stage", "tool_call_id": "call-stage-4", "content": '{"ok": true}'},
-        {"role": "assistant", "content": "stage four raw detail"},
-        {
-            "role": "assistant",
-            "content": "",
-            "tool_calls": [
-                {
-                    "id": "call-stage-5",
-                    "type": "function",
-                    "function": {"name": "submit_next_stage", "arguments": "{}"},
-                }
-            ],
-        },
-        {"role": "tool", "name": "submit_next_stage", "tool_call_id": "call-stage-5", "content": '{"ok": true}'},
-        {"role": "assistant", "content": "current stage assistant detail"},
-        {"role": "tool", "name": "filesystem", "tool_call_id": "call-a", "content": "current stage tool output"},
-    ]
-
-    prepared = loop._prepare_messages(original, runtime_context={"task_id": "task-1", "node_id": "node-1"})
-
-    rendered_contents = [str(item.get("content") or "") for item in prepared]
-    assert "stage two raw detail" in rendered_contents
-    assert "stage three raw detail" in rendered_contents
-    assert "stage four raw detail" in rendered_contents
-    assert "current stage assistant detail" in rendered_contents
-    assert "current stage tool output" in rendered_contents
-    # 过期阶段的工具肉身被移除，但其文本汇报作为对话保留
-    assert "stage one raw detail" in rendered_contents
-    # 阶段 1 的 submit 调用与响应成对移除：5 个阶段只剩 4 个 submit 响应
-    assert rendered_contents.count('{"ok": true}') == 4
-
-    compact_blocks = [
-        content
-        for content in rendered_contents
-        if content.startswith("[STAGE_COMPACT]")
-    ]
-    assert len(compact_blocks) == 1
-    compact_payload = json.loads(compact_blocks[0].split("\n", 1)[1])
-    assert compact_payload["stage_index"] == 1
-    assert compact_payload["completed_stage_summary"] == "finished stage one"
-    # 压缩块原位放置：落在阶段 1 被移除工具消息的位置（其文本汇报之前）
-    block_index = rendered_contents.index(compact_blocks[0])
-    assert rendered_contents.index("stage one raw detail") == block_index + 1
 
 
 def test_prepare_messages_is_idempotent_for_compacted_stage_prompt() -> None:
@@ -3156,251 +2863,10 @@ def test_prepare_messages_is_idempotent_for_compacted_stage_prompt() -> None:
     assert prepared_again == prepared
 
 
-def test_prepare_messages_repairs_split_submit_next_stage_boundary_in_retained_window() -> None:
-    loop = ReActToolLoop(chat_backend=SimpleNamespace(), log_service=_FakeLogService(), max_iterations=2)
-    loop._log_service._store._node = SimpleNamespace(
-        metadata={
-            "execution_stages": {
-                "active_stage_id": "stage-7",
-                "transition_required": False,
-                "stages": [
-                    {
-                        "stage_id": "stage-1",
-                        "stage_index": 1,
-                        "stage_kind": "normal",
-                        "system_generated": False,
-                        "mode": _EXECUTION_STAGE_MODE_SELF,
-                        "status": _EXECUTION_STAGE_STATUS_COMPLETED,
-                        "stage_goal": "inspect stage one",
-                        "completed_stage_summary": "finished stage one",
-                        "key_refs": [],
-                        "tool_round_budget": 2,
-                        "tool_rounds_used": 1,
-                    },
-                    {
-                        "stage_id": "stage-2",
-                        "stage_index": 2,
-                        "stage_kind": "normal",
-                        "system_generated": False,
-                        "mode": _EXECUTION_STAGE_MODE_SELF,
-                        "status": _EXECUTION_STAGE_STATUS_COMPLETED,
-                        "stage_goal": "inspect stage two",
-                        "completed_stage_summary": "finished stage two",
-                        "key_refs": [],
-                        "tool_round_budget": 2,
-                        "tool_rounds_used": 1,
-                    },
-                    {
-                        "stage_id": "stage-3",
-                        "stage_index": 3,
-                        "stage_kind": "normal",
-                        "system_generated": False,
-                        "mode": _EXECUTION_STAGE_MODE_SELF,
-                        "status": _EXECUTION_STAGE_STATUS_COMPLETED,
-                        "stage_goal": "inspect stage three",
-                        "completed_stage_summary": "finished stage three",
-                        "key_refs": [],
-                        "tool_round_budget": 2,
-                        "tool_rounds_used": 1,
-                    },
-                    {
-                        "stage_id": "stage-4",
-                        "stage_index": 4,
-                        "stage_kind": "normal",
-                        "system_generated": False,
-                        "mode": _EXECUTION_STAGE_MODE_SELF,
-                        "status": _EXECUTION_STAGE_STATUS_COMPLETED,
-                        "stage_goal": "inspect stage four",
-                        "completed_stage_summary": "finished stage four",
-                        "key_refs": [],
-                        "tool_round_budget": 2,
-                        "tool_rounds_used": 1,
-                    },
-                    {
-                        "stage_id": "stage-5",
-                        "stage_index": 5,
-                        "stage_kind": "normal",
-                        "system_generated": False,
-                        "mode": _EXECUTION_STAGE_MODE_SELF,
-                        "status": _EXECUTION_STAGE_STATUS_COMPLETED,
-                        "stage_goal": "inspect stage five",
-                        "completed_stage_summary": "finished stage five",
-                        "key_refs": [],
-                        "tool_round_budget": 2,
-                        "tool_rounds_used": 1,
-                    },
-                    {
-                        "stage_id": "stage-6",
-                        "stage_index": 6,
-                        "stage_kind": "normal",
-                        "system_generated": False,
-                        "mode": _EXECUTION_STAGE_MODE_SELF,
-                        "status": _EXECUTION_STAGE_STATUS_COMPLETED,
-                        "stage_goal": "inspect stage six",
-                        "completed_stage_summary": "finished stage six",
-                        "key_refs": [],
-                        "tool_round_budget": 2,
-                        "tool_rounds_used": 1,
-                    },
-                    {
-                        "stage_id": "stage-7",
-                        "stage_index": 7,
-                        "stage_kind": "normal",
-                        "system_generated": False,
-                        "mode": _EXECUTION_STAGE_MODE_SELF,
-                        "status": _EXECUTION_STAGE_STATUS_ACTIVE,
-                        "stage_goal": "inspect stage seven",
-                        "tool_round_budget": 2,
-                        "tool_rounds_used": 0,
-                    },
-                ],
-            }
-        }
-    )
-    original = [
-        {"role": "system", "content": "system"},
-        {"role": "user", "content": '{"task_id":"task-1","goal":"demo"}'},
-        {
-            "role": "assistant",
-            "content": "",
-            "tool_calls": [
-                {
-                    "id": "call-stage-4",
-                    "type": "function",
-                    "function": {"name": "submit_next_stage", "arguments": "{}"},
-                }
-            ],
-        },
-        {"role": "tool", "name": "submit_next_stage", "tool_call_id": "call-stage-4", "content": '{"ok": true}'},
-        {
-            "role": "assistant",
-            "content": "",
-            "tool_calls": [
-                {
-                    "id": "call-stage-5",
-                    "type": "function",
-                    "function": {"name": "submit_next_stage", "arguments": "{}"},
-                }
-            ],
-        },
-        {"role": "tool", "name": "submit_next_stage", "tool_call_id": "call-stage-5", "content": '{"ok": true}'},
-        # Reproduce the broken history shape seen in task:9001280b6cbe:
-        # the retained stage-6 window only keeps the tool half.
-        {"role": "tool", "name": "submit_next_stage", "tool_call_id": "call-stage-6", "content": '{"ok": true}'},
-        {
-            "role": "assistant",
-            "content": "",
-            "tool_calls": [
-                {
-                    "id": "call-stage-7",
-                    "type": "function",
-                    "function": {"name": "submit_next_stage", "arguments": "{}"},
-                }
-            ],
-        },
-        {"role": "tool", "name": "submit_next_stage", "tool_call_id": "call-stage-7", "content": '{"ok": true}'},
-    ]
-
-    prepared = loop._prepare_messages(original, runtime_context={"task_id": "task-1", "node_id": "node-1"})
-    history = analyze_tool_call_history(prepared)
-
-    assert history.orphan_tool_result_ids == []
-    assert any(
-        str(item.get("role") or "") == "assistant"
-        and any(str((tool_call or {}).get("id") or "").startswith("call-stage-6") for tool_call in list(item.get("tool_calls") or []))
-        for item in prepared
-    )
 
 
-@pytest.mark.asyncio
-async def test_execute_tool_calls_marks_stage_history_archive_reads_ephemeral() -> None:
-    class _ArchiveTool(Tool):
-        @property
-        def name(self) -> str:
-            return "content"
-
-        @property
-        def description(self) -> str:
-            return "open archived stage history"
-
-        @property
-        def parameters(self) -> dict[str, object]:
-            return {"type": "object", "properties": {}, "required": []}
-
-        async def execute(self, **kwargs):
-            _ = kwargs
-            return {
-                "ok": True,
-                "ref": "artifact:artifact:archive",
-                "handle": {
-                    "ref": "artifact:artifact:archive",
-                    "source_kind": "stage_history_archive",
-                },
-                "excerpt": "archived stage body",
-            }
-
-    loop = ReActToolLoop(chat_backend=SimpleNamespace(), log_service=_FakeLogService(), max_iterations=2)
-    results = await loop._execute_tool_calls(
-        task=SimpleNamespace(task_id="task-1"),
-        node=SimpleNamespace(node_id="node-1", depth=0, node_kind="execution"),
-        response_tool_calls=[ToolCallRequest(id="call-archive", name="content", arguments={})],
-        tools={"content": _ArchiveTool()},
-        runtime_context={"task_id": "task-1", "node_id": "node-1", "actor_role": "execution"},
-    )
-
-    assert len(results) == 1
-    assert results[0]["tool_message"]["ephemeral"] is True
-    assert results[0]["live_state"]["ephemeral"] is True
 
 
-@pytest.mark.asyncio
-async def test_execute_tool_calls_allows_submit_next_stage_and_passes_runtime_contract_candidates() -> None:
-    loop = ReActToolLoop(chat_backend=SimpleNamespace(), log_service=_FakeLogService(), max_iterations=2)
-    tool = _StageRuntimeProbeTool()
-
-    results = await loop._execute_tool_calls(
-        task=SimpleNamespace(task_id="task-stage-probe"),
-        node=SimpleNamespace(node_id="node-stage-probe", depth=0, node_kind="execution"),
-        response_tool_calls=[
-            ToolCallRequest(
-                id="call-stage-probe",
-                name="submit_next_stage",
-                arguments={"stage_goal": "probe stage", "tool_round_budget": 1},
-            )
-        ],
-        tools={"submit_next_stage": tool},
-        runtime_context={
-            "task_id": "task-stage-probe",
-            "node_id": "node-stage-probe",
-            "actor_role": "execution",
-            "stage_turn_granted": True,
-            "candidate_tool_names": ["filesystem_write"],
-            "candidate_skill_ids": ["skill-creator"],
-        },
-    )
-
-    assert len(results) == 1
-    assert results[0]["live_state"]["status"] == "success"
-    assert '"stage_goal": "probe stage"' in str(results[0]["tool_message"]["content"])
-    assert tool.runtime_payloads == [
-        {
-            "task_id": "task-stage-probe",
-            "node_id": "node-stage-probe",
-            "actor_role": "execution",
-            "stage_turn_granted": False,
-            "candidate_tool_names": ["filesystem_write"],
-            "candidate_skill_ids": ["skill-creator"],
-            "current_tool_call_id": "call-stage-probe",
-            "tool_contract_enforced": True,
-            "rbac_visible_tool_names": [],
-            "callable_tool_names": [],
-            "full_callable_tool_names": [],
-            "prior_overflow_signatures": [],
-            "stage_free_pass_kind": "",
-            "image_multimodal_enabled": False,
-            "image_model_display_name": "",
-        }
-    ]
 
 
 @pytest.mark.asyncio
@@ -3693,127 +3159,6 @@ async def test_react_loop_ordinary_tool_turn_clears_stale_contract_violations() 
         )
 
 
-@pytest.mark.asyncio
-async def test_contract_echo_with_stage_tool_call_keeps_pairing_and_tail_order() -> None:
-    # 回归 task:38687a51b14d：阶段预算耗尽后，模型把请求末尾的
-    # `## Runtime Tool Contract` 块原样复读进回复文本，同时正常声明
-    # submit_next_stage 调用。旧实现按契约抬头把该 assistant 消息整体剥离，
-    # 留下孤儿工具结果，最终触发孤儿子工具结果熔断。修复后：
-    # 1) 携带工具调用的回显消息不再被判为注入契约（历史与请求 delta 都保留）；
-    # 2) 请求末位是当轮 turn-only 阶段提示，契约不再压尾。
-    gate_state = {"transition_required": True}
-
-    class _StageTransitionTool(_StageProtocolNoopTool):
-        async def execute(self, **kwargs):
-            gate_state["transition_required"] = False
-            return await super().execute(**kwargs)
-
-    requests: list[list[dict[str, object]]] = []
-
-    class _Backend:
-        def __init__(self) -> None:
-            self._turn = 0
-
-        async def chat(self, **kwargs):
-            requests.append([dict(item) for item in list(kwargs.get("messages") or [])])
-            self._turn += 1
-            if self._turn == 1:
-                return LLMResponse(
-                    content=(
-                        "## Runtime Tool Contract\n"
-                        "kind: node_runtime_tool_contract\n"
-                        "callable_tools: `submit_next_stage`\n"
-                        "已确认的核心事实（多源交叉）：事件经多轮检索交叉确认。"
-                    ),
-                    tool_calls=[
-                        ToolCallRequest(
-                            id="call_echo_stage",
-                            name="submit_next_stage",
-                            arguments={"stage_goal": "核验通报原文并落盘报告", "tool_round_budget": 10},
-                        )
-                    ],
-                    finish_reason="tool_calls",
-                    usage={"input_tokens": 8, "output_tokens": 3},
-                )
-            return LLMResponse(
-                content="",
-                tool_calls=[
-                    ToolCallRequest(
-                        id="call_final",
-                        name="submit_final_result",
-                        arguments={
-                            "status": "success",
-                            "delivery_status": "final",
-                            "summary": "done",
-                            "answer": "done",
-                            "evidence": [],
-                            "remaining_work": [],
-                            "blocking_reason": "",
-                        },
-                    )
-                ],
-                finish_reason="tool_calls",
-                usage={"input_tokens": 8, "output_tokens": 3},
-            )
-
-    log_service = _FakeLogService()
-    log_service.execution_stage_gate_snapshot = lambda task_id, node_id: {
-        "has_active_stage": True,
-        "transition_required": bool(gate_state["transition_required"]),
-        "active_stage": {
-            "stage_id": "stage-echo",
-            "stage_goal": "首轮检索",
-            "tool_round_budget": 8,
-            "tool_rounds_used": 8,
-        },
-    }
-    loop = ReActToolLoop(chat_backend=_Backend(), log_service=log_service, max_iterations=5)
-
-    result = await loop.run(
-        task=SimpleNamespace(task_id="task-contract-echo"),
-        node=SimpleNamespace(node_id="node-contract-echo", depth=0, node_kind="execution"),
-        messages=[
-            {"role": "system", "content": "system"},
-            {"role": "user", "content": '{"task_id":"task-contract-echo","goal":"demo"}'},
-        ],
-        tools={
-            "submit_next_stage": _StageTransitionTool("submit_next_stage"),
-            "submit_final_result": _submit_final_result_tool(),
-        },
-        model_refs=["fake"],
-        runtime_context={"task_id": "task-contract-echo", "node_id": "node-contract-echo"},
-        max_iterations=5,
-    )
-
-    assert result.status == "success"
-    assert len(requests) >= 2
-
-    second_request = requests[1]
-    analysis = analyze_tool_call_history(second_request)
-    assert analysis.orphan_tool_result_ids == []
-    assert analysis.has_orphan_tool_results is False
-
-    echoed_declarations = [
-        message
-        for message in second_request
-        if str(message.get("role") or "") == "assistant"
-        and any(
-            str((tool_call or {}).get("id") or "") == "call_echo_stage"
-            for tool_call in list(message.get("tool_calls") or [])
-        )
-    ]
-    assert len(echoed_declarations) == 1
-    assert str(echoed_declarations[0].get("content") or "").startswith("## Runtime Tool Contract")
-
-    # 尾部顺序：稳定契约、活状态块，然后当轮 turn-only 提示压尾（末位是 user 回合提示）。
-    assert str(second_request[-1].get("role") or "") == "user"
-    assert str(second_request[-1].get("content") or "").startswith("System note for this turn only:")
-    gate_message = second_request[-2]
-    assert str(gate_message.get("role") or "") == "user"
-    assert str(gate_message.get("content") or "").startswith("## Runtime Stage Gate")
-    contract_message = second_request[-3]
-    assert str(contract_message.get("role") or "") == "user"
-    assert str(contract_message.get("content") or "").startswith("## Runtime Tool Contract")
 
 
 @pytest.mark.asyncio
@@ -3985,7 +3330,7 @@ async def test_react_loop_writes_candidate_skill_items_into_before_model_frame()
                 },
             ],
         },
-        stage_payload={},
+        
         lightweight_tool_ids=[],
         selection_trace={},
     ).to_message()
@@ -4089,7 +3434,7 @@ def test_build_node_dynamic_contract_does_not_resurrect_stale_candidate_tools_wh
         candidate_skill_ids=[],
         candidate_skill_items=[],
         candidate_tool_items=[{"tool_id": "filesystem_write", "description": "write file"}],
-        stage_payload={},
+        
         lightweight_tool_ids=[],
         selection_trace={},
     ).to_message()
@@ -4128,7 +3473,7 @@ def test_build_node_dynamic_contract_does_not_resurrect_stale_candidate_tools_wh
             "lightweight_tool_ids": [],
             "trace": {},
         },
-        stage_gate={"has_active_stage": True, "transition_required": False, "active_stage": {"stage_id": "stage-1"}},
+        
     )
 
     assert contract.candidate_tool_names == []
@@ -4149,7 +3494,7 @@ def test_build_node_dynamic_contract_does_not_resurrect_stale_candidate_skills_w
         visible_skills=[],
         candidate_skill_ids=["tmux"],
         candidate_skill_items=[{"skill_id": "tmux", "description": "terminal workflow"}],
-        stage_payload={},
+        
         lightweight_tool_ids=[],
         selection_trace={},
     ).to_message()
@@ -4189,7 +3534,7 @@ def test_build_node_dynamic_contract_does_not_resurrect_stale_candidate_skills_w
             "lightweight_tool_ids": [],
             "trace": {},
         },
-        stage_gate={"has_active_stage": True, "transition_required": False, "active_stage": {"stage_id": "stage-1"}},
+        
     )
 
     assert contract.candidate_skill_ids == []
@@ -4235,7 +3580,7 @@ def test_build_node_dynamic_contract_uses_fresh_message_skill_contract_when_boot
                 },
             ],
         },
-        stage_payload={},
+        
         lightweight_tool_ids=[],
         selection_trace={},
     ).to_message()
@@ -4273,7 +3618,7 @@ def test_build_node_dynamic_contract_uses_fresh_message_skill_contract_when_boot
             "lightweight_tool_ids": [],
             "trace": {},
         },
-        stage_gate={"has_active_stage": True, "transition_required": False, "active_stage": {"stage_id": "stage-1"}},
+        
     )
 
     assert contract.candidate_skill_ids == ["web-access", "multi-search-engine"]
@@ -4341,7 +3686,7 @@ def test_build_node_dynamic_contract_prefers_fresh_runtime_seeded_skill_contract
             "lightweight_tool_ids": [],
             "trace": {},
         },
-        stage_gate={"has_active_stage": True, "transition_required": False, "active_stage": {"stage_id": "stage-1"}},
+        
         runtime_context={
             "fresh_node_dynamic_contract_payload": {
                 "message_type": "node_runtime_tool_contract",
@@ -4397,7 +3742,7 @@ async def test_react_loop_before_model_frame_keeps_candidate_tool_items_aligned_
         candidate_skill_ids=[],
         candidate_skill_items=[],
         candidate_tool_items=[{"tool_id": "filesystem_write", "description": "write file"}],
-        stage_payload={},
+        
         lightweight_tool_ids=[],
         selection_trace={},
     ).to_message()
@@ -4477,7 +3822,7 @@ async def test_react_loop_before_model_frame_keeps_candidate_skill_items_aligned
         visible_skills=[],
         candidate_skill_ids=["tmux"],
         candidate_skill_items=[{"skill_id": "tmux", "description": "terminal workflow"}],
-        stage_payload={},
+        
         lightweight_tool_ids=[],
         selection_trace={},
     ).to_message()
@@ -5052,7 +4397,7 @@ def test_refresh_node_dynamic_contract_restores_skill_candidates_from_frame_afte
                 "description": "terminal workflow",
             }
         ],
-        stage_payload={},
+        
         lightweight_tool_ids=[],
         selection_trace={},
     ).to_message()
@@ -5090,7 +4435,7 @@ def test_refresh_node_dynamic_contract_restores_skill_candidates_from_frame_afte
             "lightweight_tool_ids": [],
             "trace": {},
         },
-        stage_gate={"has_active_stage": True, "transition_required": False, "active_stage": {"stage_id": "stage-1"}},
+        
     )
 
     payload = extract_node_dynamic_contract_payload(refreshed)
@@ -5123,17 +4468,7 @@ def test_node_dynamic_contract_injection_keeps_request_only_message_after_bootst
                 "description": "terminal workflow",
             }
         ],
-        stage_payload={
-            "has_active_stage": True,
-            "transition_required": False,
-            "active_stage": {
-                "stage_id": "stage-1",
-                "stage_goal": "inspect repo",
-                "tool_round_budget": 6,
-                "tool_rounds_used": 3,
-                "rounds": [{"round_id": "round-1"}],
-            },
-        },
+        
         lightweight_tool_ids=["filesystem"],
         selection_trace={
             "mode": "execution_tool_selection",
@@ -5155,17 +4490,6 @@ def test_node_dynamic_contract_injection_keeps_request_only_message_after_bootst
     assert [item["role"] for item in injected[:4]] == ["system", "user", "assistant", "user"]
     payload = extract_node_dynamic_contract_payload(injected)
     assert payload is not None
-    assert payload["execution_stage"] == {
-        "has_active_stage": True,
-        "transition_required": False,
-        "active_stage": {
-            "stage_id": "stage-1",
-            "stage_goal": "inspect repo",
-            "tool_round_budget": 6,
-            "stage_kind": "normal",
-            "final_stage": False,
-        },
-    }
     assert payload["candidate_skills"] == [
         {
             "skill_id": "tmux",
@@ -5187,7 +4511,7 @@ def test_node_token_compaction_keeps_append_notice_tail_before_compact_block() -
         visible_skills=[],
         candidate_skill_ids=[],
         candidate_skill_items=[],
-        stage_payload={},
+        
         lightweight_tool_ids=[],
         selection_trace={},
     ).to_message()
@@ -6026,73 +5350,6 @@ async def test_enrich_node_messages_includes_exec_runtime_policy_in_dynamic_cont
     }
 
 
-@pytest.mark.asyncio
-async def test_enrich_node_messages_exposes_full_callable_tools_without_valid_stage(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    async def _fake_build_node_context_selection(**kwargs):
-        _ = kwargs
-        return NodeContextSelectionResult(
-            selected_skill_ids=["tmux"],
-            selected_tool_names=["content"],
-            candidate_skill_ids=["tmux"],
-            candidate_tool_names=["content"],
-        )
-
-    monkeypatch.setattr(
-        runtime_service_module,
-        "build_node_context_selection",
-        _fake_build_node_context_selection,
-    )
-
-    service = object.__new__(MainRuntimeService)
-    service.memory_manager = SimpleNamespace(_feature_enabled=lambda _key: False)
-    service._node_context_selection_cache = {}
-    service.log_service = _FakeLogService()
-    service.log_service.execution_stage_prompt_payload = lambda task_id, node_id: {
-        'has_active_stage': False,
-        'transition_required': False,
-        'active_stage': None,
-    }
-    service.list_visible_tools = lambda *, actor_role, session_id: [
-        SimpleNamespace(tool_id='content'),
-        SimpleNamespace(tool_id='filesystem'),
-    ]
-    service.list_visible_skill_resources = lambda *, actor_role, session_id: [
-        SimpleNamespace(skill_id='tmux', display_name='tmux', description='terminal workflow'),
-    ]
-    service.list_effective_tool_names = lambda *, actor_role, session_id: ['content', 'filesystem_write', 'load_tool_context']
-    task = SimpleNamespace(task_id='task-stage-locked-payload', session_id="web:ceo-origin", metadata={})
-    node = SimpleNamespace(
-        task_id='task-stage-locked-payload',
-        node_id='node-stage-locked-payload',
-        prompt="terminal workflow",
-        goal="terminal workflow",
-        node_kind="execution",
-        can_spawn_children=False,
-    )
-
-    enriched = await service._enrich_node_messages(
-        task=task,
-        node=node,
-        messages=[
-            {"role": "system", "content": "base prompt"},
-            {"role": "user", "content": '{"prompt":"terminal workflow"}'},
-        ],
-    )
-
-    dynamic_payload = extract_node_dynamic_contract_payload(enriched)
-    assert dynamic_payload is not None
-    assert dynamic_payload["message_type"] == "node_runtime_tool_contract"
-    # 没有有效阶段：callable 不被阶段闸收成只剩 submit_next_stage，控制信号 + 常驻内置全在
-    assert dynamic_payload["callable_tool_names"] == ["submit_next_stage", "load_tool_context"]
-    assert dynamic_payload["candidate_tools"] == [
-        {
-            "tool_id": "content",
-            "description": "",
-        }
-    ]
-    assert "model_visible_tool_selection_trace" not in dynamic_payload
 
 
 @pytest.mark.asyncio
@@ -8960,67 +8217,8 @@ def _six_stage_node_history(
     return state, messages
 
 
-def test_stage_expiry_hop_adopts_pruned_projection_once_then_stays_append_only() -> None:
-    # 阶段压缩要真省 token，必须有一个"过期点"把发送基线换成裁过的投影；但只能换一次，
-    # 否则前缀失效面从每个过期点一次放大成每轮一次。
-    loop = ReActToolLoop(chat_backend=SimpleNamespace(), log_service=_FakeLogService(), max_iterations=2)
-    state, history = _six_stage_node_history(evict_indexes=[1, 2])
-    loop._log_service._store._node = SimpleNamespace(metadata={"execution_stages": state})
-    runtime_context = {"task_id": "task-1", "node_id": "node-1"}
-
-    projection, parts = loop._prepare_messages_with_parts(history, runtime_context=runtime_context)
-    contents = [str(item.get("content") or "") for item in projection]
-    # 点名裁撤 stage-1/2 => 它们的工具肉身从投影里消失，并换成两块摘要
-    assert set(parts["expired_call_ids"]) == {"call-work-1", "call-work-2"}
-    assert "body-1" not in contents
-    assert "body-2" not in contents
-    assert "body-3" in contents
-    assert len([content for content in contents if content.startswith(STAGE_COMPACT_PREFIX)]) == 2
-    assert ReActToolLoop._stage_expiry_hop(
-        previous_request_messages=history, stage_compaction_parts=parts
-    ) is True
-
-    # 换过基线之后：判据立刻转假，且下一轮投影仍以这份正文为字面前缀（只追加新轮次）。
-    next_history = [
-        *projection,
-        {
-            "role": "assistant",
-            "content": "",
-            "tool_calls": [
-                {"id": "call-work-6b", "type": "function", "function": {"name": "exec", "arguments": "{}"}}
-            ],
-        },
-        {"role": "tool", "name": "exec", "tool_call_id": "call-work-6b", "content": "body-6b"},
-    ]
-    projection_next, parts_next = loop._prepare_messages_with_parts(next_history, runtime_context=runtime_context)
-    assert ReActToolLoop._stage_expiry_hop(
-        previous_request_messages=projection, stage_compaction_parts=parts_next
-    ) is False
-    assert projection_next[: len(projection)] == projection
-    assert "body-6b" in [str(item.get("content") or "") for item in projection_next]
 
 
-def test_stage_submission_rejects_eviction_without_a_summary() -> None:
-    async def _submit(*args, **kwargs):
-        return {}
-
-    tool = SubmitNextStageTool(_submit)
-
-    assert "drop_completed_stage_tool_detail" in tool.parameters["properties"]
-    assert "drop_completed_stage_tool_detail" in tool.model_parameters["properties"]
-    assert tool.validate_params({
-        "stage_goal": "g", "tool_round_budget": 10, "drop_completed_stage_tool_detail": True,
-    }) == [
-        "drop_completed_stage_tool_detail requires a non-empty completed_stage_summary in the same call"
-    ]
-    assert tool.validate_params({
-        "stage_goal": "g",
-        "tool_round_budget": 10,
-        "completed_stage_summary": "本阶段确认了 X，剩余目标 Y",
-        "drop_completed_stage_tool_detail": True,
-    }) == []
-    # 不点名裁撤时空总结仍然合法：库里 48.8% 的终态阶段本来就是空总结。
-    assert tool.validate_params({"stage_goal": "g", "tool_round_budget": 10}) == []
 
 
 def test_task_node_detail_manifest_is_agent_full_and_unscoped_by_design() -> None:

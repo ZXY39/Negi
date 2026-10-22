@@ -31,11 +31,7 @@ from g3ku.runtime.tool_visibility import (
 )
 from main.runtime import internal_tools
 from main.runtime.react_loop import ReActToolLoop
-from main.runtime.stage_budget import (
-    CONTEXT_LOADER_STAGE_TOOL_NAMES,
-    CONTROL_STAGE_TOOL_NAMES,
-    SILENT_TOOL_NAME,
-)
+from main.runtime.tool_names import SILENT_TOOL_NAME
 
 
 async def _callback(*_args: object, **_kwargs: object) -> dict:
@@ -160,16 +156,13 @@ def test_exempt_names_do_not_get_the_field_on_either_surface() -> None:
 
 
 # ---------------------------------------------------------------------------
-# 豁免名单与正本等价（tool_visibility 不能 import stage_budget：真循环）
+# 豁免名单与正本等价（tool_visibility 与 react_loop 不能互相 import：真循环）
 # ---------------------------------------------------------------------------
 
 
 def test_non_hydratable_set_matches_the_authoritative_constants() -> None:
-    for name in (
-        CONTROL_STAGE_TOOL_NAMES
-        | CONTEXT_LOADER_STAGE_TOOL_NAMES
-        | frozenset({SILENT_TOOL_NAME})
-    ):
+    _FIXED_BUILTIN_NAMES = (*CEO_FIXED_BUILTIN_TOOL_NAMES, *NODE_FIXED_BUILTIN_TOOL_NAMES)
+    for name in (*_FIXED_BUILTIN_NAMES, SILENT_TOOL_NAME, "load_tool_context", "load_skill_context"):
         assert name in NON_HYDRATABLE_TOOL_NAMES, name
     for name in (*CEO_FIXED_BUILTIN_TOOL_NAMES, *NODE_FIXED_BUILTIN_TOOL_NAMES):
         assert name in NON_HYDRATABLE_TOOL_NAMES, name
@@ -188,7 +181,6 @@ def test_every_loop_injected_control_tool_is_exempt() -> None:
             internal_tools.SpawnChildNodesTool(_callback),
             internal_tools.SubmitFinalResultTool(_callback, node_kind='execution'),
             internal_tools.SubmitMessageDistributionTool(_callback),
-            internal_tools.SubmitNextStageTool(_callback),
             internal_tools.SubmitNoticeInspectionDecisionTool(_callback),
         )
     }

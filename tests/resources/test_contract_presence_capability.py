@@ -39,7 +39,7 @@ from g3ku.runtime.tool_error_guidance import availability_hint
 from g3ku.runtime.web_ceo_sessions import _normalized_completed_continuity_snapshot
 from main.monitoring.log_service import TaskLogService
 from main.monitoring.models import TaskProjectionRuntimeFrameRecord
-from main.runtime.internal_tools import STAGE_TOOL_NAME
+from main.runtime.tool_names import SILENT_TOOL_NAME
 from main.runtime.react_loop import ReActToolLoop
 from main.service.runtime_service import MainRuntimeService
 
@@ -178,7 +178,7 @@ def _node_service(
     effective_visible = list(
         visible
         if visible is not None
-        else [TOOL_ID, OTHER_ID, "filesystem_edit", "exec", STAGE_TOOL_NAME, "submit_final_result"]
+        else [TOOL_ID, OTHER_ID, "filesystem_edit", "exec", SILENT_TOOL_NAME, "submit_final_result"]
     )
     service.list_effective_tool_names = lambda *, actor_role, session_id: list(effective_visible)
     service.list_visible_tools = lambda *, actor_role, session_id: [
@@ -250,7 +250,7 @@ def test_node_presence_requires_request_view() -> None:
 
 def test_node_presence_follows_granted_order_and_drops_ungranted_blocks() -> None:
     """在场索引里可能有上一跳留下的名字，治理已收回的不得进 callable。"""
-    service, _log = _node_service(visible=[STAGE_TOOL_NAME, "submit_final_result"])
+    service, _log = _node_service(visible=[SILENT_TOOL_NAME, "submit_final_result"])
     present = service.contract_present_tool_names_for_node(
         actor_role="execution",
         session_id="web:shared",
@@ -284,7 +284,7 @@ def test_absent_tool_returns_to_candidates() -> None:
     fixed = [
         name
         for name in visible
-        if name in {STAGE_TOOL_NAME, "submit_final_result", "exec"}
+        if name in {SILENT_TOOL_NAME, "submit_final_result", "exec"}
     ]
     selection = build_execution_tool_selection(
         prompt="p",
@@ -595,40 +595,8 @@ def _loader_messages() -> list[dict]:
     ]
 
 
-def test_presence_view_excludes_evicted_stage_loader_row() -> None:
-    """判据必须与渲染同源：裁撤阶段的正文行虽在 `state['messages']` 里，也算不在场。
-
-    实盘 web:ceo-09057e72cac8 上，裁撤发生在请求体重建时，而判据读裁撤前的视图，于是名字
-    仍被当在场、继续留在 callable，渲染却用裁后的视图 ⇒ 模型眼前已经没有契约还能被放行。
-    台账时代这条还要"记撤销 + 并回候选"两步，现在裁走即离场，一步判据就够了。
-    """
-
-    ops = _ops()
-    state = {"messages": _loader_messages(), "frontdoor_stage_state": _evicted_stage_state()}
-    assert ops._frontdoor_contract_present_names(state) == []
-    kept = {"messages": _loader_messages(), "frontdoor_stage_state": {"stages": [], "active_stage_id": ""}}
-    assert ops._frontdoor_contract_present_names(kept) == [TOOL_ID]
 
 
-def test_evicted_tool_leaves_the_admission_surface_not_the_declaration() -> None:
-    """裁撤当跳必须把名字从**准入面**摘掉（调它只拿契约），但声明面钉死不跟着抖。
-
-    实盘（perf_inspect 那例）的症状是尾块 callable 行已不含它、调用却仍成功——所以 enforce
-    必须在执行准入层。反过来，把在场差集套到 `tools[]` 上会让钉住的清单每跳改成员：一次 load
-    多一个名字、一次裁撤少一个，前缀缓存按跳断，所以这里断的是两面**分别**的答案。
-    """
-
-    ops = _ops()
-    state = {
-        "messages": _loader_messages(),
-        "frontdoor_stage_state": _evicted_stage_state(),
-        "provider_tool_names": ["exec", TOOL_ID],
-        "rbac_visible_tool_names": ["exec", TOOL_ID],
-        "tool_names": ["exec", TOOL_ID],
-    }
-    assert TOOL_ID not in ops._frontdoor_executable_tool_names(state)
-    assert "exec" in ops._frontdoor_executable_tool_names(state)
-    assert ops._frontdoor_dispatch_tool_names(state) == ["exec", TOOL_ID]
 
 
 def test_dispatch_stays_pinned_while_executable_set_carries_present_tool() -> None:
@@ -750,7 +718,7 @@ def test_execution_bundle_keeps_declared_surface_wider_than_admission() -> None:
         state=state,
         runtime=SimpleNamespace(context=SimpleNamespace()),
     )
-    assert set(bundle.declared_tools) >= {"exec", OTHER_ID, STAGE_TOOL_NAME}
+    assert set(bundle.declared_tools) >= {"exec", OTHER_ID, SILENT_TOOL_NAME}
     assert OTHER_ID not in bundle.visible_tools
     assert "exec" in bundle.visible_tools
     schema_names = [item["function"]["name"] for item in ops._frontdoor_tool_schemas_for_state(state=state, runtime=SimpleNamespace(context=SimpleNamespace()))]
@@ -785,115 +753,8 @@ def test_rejection_hint_prefers_denied_over_declared() -> None:
     assert "load_tool_context" not in hint
 
 
-def _eviction_batch_state() -> dict:
-    """一条活动阶段：本阶段 load 过 TOOL_ID，正文行还挂在 `messages` 里，本批要点名裁撤。"""
-    stage_arguments = {
-        "stage_goal": "run the selected tool calls",
-        "tool_round_budget": 4,
-        "completed_stage_summary": "已看完仓库结构",
-        "drop_completed_stage_tool_detail": True,
-    }
-    return {
-        "session_key": "web:shared",
-        "messages": [
-            {"role": "system", "content": "SYSTEM"},
-            {"role": "user", "content": "本轮问题"},
-            {
-                "role": "assistant",
-                "content": "",
-                "tool_calls": [
-                    {
-                        "id": "call-load-1",
-                        "type": "function",
-                        "function": {"name": "load_tool_context", "arguments": json.dumps({"tool_id": TOOL_ID})},
-                    }
-                ],
-            },
-            {
-                "role": "tool",
-                "name": "load_tool_context",
-                "tool_call_id": "call-load-1",
-                "content": json.dumps(
-                    {"ok": True, "tool_id": TOOL_ID, "tool_context_fingerprint": "tcf:fixture-presence"},
-                    ensure_ascii=False,
-                ),
-            },
-        ],
-        "tool_names": ["exec", TOOL_ID, "load_tool_context"],
-        "candidate_tool_names": [],
-        "candidate_tool_items": [],
-        "hydrated_tool_names": [TOOL_ID],
-        "hydration_revoked_executor_names": [],
-        "rbac_visible_tool_names": ["exec", TOOL_ID, "load_tool_context"],
-        "visible_skill_ids": [],
-        "candidate_skill_ids": [],
-        "rbac_visible_skill_ids": [],
-        "used_tools": [],
-        "route_kind": "direct_reply",
-        "parallel_enabled": False,
-        "max_parallel_tool_calls": 1,
-        "synthetic_tool_calls_used": False,
-        "response_payload": {"content": "", "tool_calls": []},
-        "frontdoor_request_body_messages": [],
-        "frontdoor_history_shrink_reason": "",
-        "frontdoor_stage_state": {
-            "active_stage_id": "frontdoor-stage-1",
-            "transition_required": False,
-            "stages": [
-                {
-                    "stage_id": "frontdoor-stage-1",
-                    "stage_index": 1,
-                    "stage_kind": "normal",
-                    "mode": "自主执行",
-                    "status": "active",
-                    "stage_goal": "inspect repository",
-                    "completed_stage_summary": "",
-                    "tool_round_budget": 4,
-                    "tool_rounds_used": 1,
-                    "key_refs": [],
-                    "created_at": "2026-10-08T00:19:01+08:00",
-                    "finished_at": "",
-                    "rounds": [
-                        {
-                            "round_id": "frontdoor-stage-1:round-1",
-                            "round_index": 1,
-                            "tool_call_ids": ["call-load-1"],
-                            "tools": [
-                                {
-                                    "tool_call_id": "call-load-1",
-                                    "tool_name": "load_tool_context",
-                                    "status": "success",
-                                    "arguments": {"tool_id": TOOL_ID},
-                                }
-                            ],
-                        }
-                    ],
-                }
-            ],
-        },
-        "tool_call_payloads": [{"id": "call-stage-1", "name": STAGE_TOOL_NAME, "arguments": stage_arguments}],
-    }
 
 
-async def _run_graph_eviction_batch(monkeypatch, state: dict) -> dict:
-    runner = create_agent_impl.CreateAgentCeoFrontDoorRunner(loop=SimpleNamespace(main_task_service=None))
-    monkeypatch.setattr(runner, "_registered_tools_for_state", lambda state: {})
-    monkeypatch.setattr(runner, "_build_tool_runtime_context", lambda **kwargs: {"on_progress": None})
-
-    async def _fake_execute_tool_call_with_raw_result(*, tool, tool_name, arguments, runtime_context, on_progress, tool_call_id):
-        _ = tool_name, runtime_context, on_progress, tool_call_id
-        raw_result = await tool.execute(**arguments)
-        return (
-            raw_result,
-            json.dumps(raw_result, ensure_ascii=False),
-            "success",
-            "2026-10-08T00:19:22+08:00",
-            "2026-10-08T00:19:23+08:00",
-            1.0,
-        )
-
-    monkeypatch.setattr(runner, "_execute_tool_call_with_raw_result", _fake_execute_tool_call_with_raw_result)
-    return await runner._graph_execute_tools(state, runtime=SimpleNamespace(context=SimpleNamespace()))
 
 
 def _surviving_tool_call_ids(result: dict) -> set[str]:
@@ -904,29 +765,6 @@ def _surviving_tool_call_ids(result: dict) -> set[str]:
     }
 
 
-async def test_graph_execute_tools_returns_the_evicted_tool_to_candidates(monkeypatch) -> None:
-    """裁撤落地的那一批就必须让名字离开准入，不能等下一批或下一回合。
-
-    实盘 web:ceo-1e834a45b8e7（main 45b10c13）：`submit_next_stage(drop=true, 带总结)`
-    这一跳把阶段裁了，工具态写回读的是裁撤前的阶段视图 ⇒ 名字仍被当在场，模型再 load 拿到
-    `already_callable` 而没有正文，执行侧却回 `tool not available`（第四态）。
-    根因是节点体内的先后：写回早于阶段账本落地。台账删除后同一条时间线只剩判据一次读取，
-    这条用例钉的是"当跳同源"，不再钉撤销记录。
-    """
-    result = await _run_graph_eviction_batch(monkeypatch, _eviction_batch_state())
-
-    # 夹具自检：裁撤确实落在这一批里（标记落了、正文行离开了发送基线）
-    evicted = result["frontdoor_stage_state"]["stages"][0]
-    assert evicted["context_evicted"] is True
-    assert "call-load-1" not in _surviving_tool_call_ids(result)
-
-    assert TOOL_ID not in list(result["tool_names"] or [])
-    assert TOOL_ID in list(result["candidate_tool_names"] or [])
-    # 候选视图（提升门禁与重复读守卫共用的那份）也必须含它，否则重载没有出口。
-    assert TOOL_ID in _ops()._frontdoor_candidate_tool_view(result)
-    # 尾块 `candidate_tools` 那行读的是 `candidate_tool_items`：只并名字不补条目，这一行就少它
-    # 一个（实盘 web:ceo-fb4616acbe9d 的 010401 跳：出路存在但对模型不可见，等于没有出路）。
-    assert TOOL_ID in [str(item.get("tool_id") or "") for item in list(result["candidate_tool_items"] or [])]
 
 
 # ---------------------------------------------------------------------------

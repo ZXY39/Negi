@@ -21,7 +21,6 @@ from main.models import SpawnChildResult, SpawnChildSpec
 from main.protocol import now_iso
 from main.runtime.node_prompt_contract import (
     NODE_DYNAMIC_CONTRACT_HEADING,
-    NODE_DYNAMIC_STAGE_GATE_HEADING,
 )
 from main.runtime.node_seed_contracts import (
     NODE_SEED_CONTRACT_SINGLE_CHAR_LIMIT,
@@ -30,7 +29,7 @@ from main.runtime.node_seed_contracts import (
 from main.service.runtime_service import MainRuntimeService
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
-MARKER_PREFIX = '[TOOL_CONTRACT_V1:'
+MARKER_PREFIX = '[TOOL_CONTRACT:'
 
 
 class _DummyChatBackend:
@@ -391,9 +390,8 @@ async def test_bootstrap_inserts_seed_messages_after_payload(tmp_path: Path) -> 
         assert str(messages[1]['content']).lstrip().startswith('{'), 'bootstrap payload 仍是第二条'
         assert str(messages[2]['content']).lstrip().startswith(MARKER_PREFIX)
         assert str(messages[3]['content']).lstrip().startswith(MARKER_PREFIX)
-        # 每跳重写的两份尾块仍在最末，预置没把它们挤出末位（那会顶掉缓存前缀）。
-        assert str(messages[-1]['content']).startswith(NODE_DYNAMIC_STAGE_GATE_HEADING)
-        assert str(messages[-2]['content']).startswith(NODE_DYNAMIC_CONTRACT_HEADING)
+        # 每跳重写的尾块仍在最末，预置没把它挤出末位（那会顶掉缓存前缀）。
+        assert str(messages[-1]['content']).startswith(NODE_DYNAMIC_CONTRACT_HEADING)
     finally:
         await _shutdown(service, manager)
 
@@ -423,7 +421,7 @@ async def test_bootstrap_message_count_unchanged_without_declaration(tmp_path: P
         record, root = await _make_task(service, seed_tools=None)
         messages = await service.node_runner._build_messages(task=service.get_task(record.task_id), node=root)
         assert not any(str(item.get('content') or '').lstrip().startswith(MARKER_PREFIX) for item in messages)
-        assert len(messages) == 4, 'system + payload + 契约尾块 + 活状态尾块'
+        assert len(messages) == 3, 'system + payload + 契约尾块'
     finally:
         await _shutdown(service, manager)
 

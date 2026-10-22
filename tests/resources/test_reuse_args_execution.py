@@ -25,7 +25,6 @@ from g3ku.runtime import tool_arg_stash
 from g3ku.runtime.frontdoor._ceo_runtime_ops import CeoFrontDoorRuntimeOps
 from g3ku.runtime.frontdoor.tool_contract import (
     _render_frontdoor_contract_summary,
-    _render_frontdoor_stage_gate_summary,
 )
 from g3ku.runtime.tool_contract_block import render_tool_contract_block
 from g3ku.runtime.tool_impulse import (
@@ -40,7 +39,6 @@ from g3ku.runtime.tool_result_status import is_error_like_tool_result
 from main.models import NodeRecord
 from main.runtime.node_prompt_contract import (
     _render_node_dynamic_contract_summary,
-    _render_node_stage_gate_summary,
 )
 from main.runtime.react_loop import ReActToolLoop
 from main.service.runtime_service import MainRuntimeService
@@ -436,7 +434,7 @@ def test_reuse_flag_never_reaches_the_tool_arguments() -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_tail_blocks_drop_callable_tools_and_contract_keeps_denied_tools() -> None:
+def test_contract_blocks_drop_callable_tools_and_keep_denied_tools() -> None:
     frontdoor_contract = _render_frontdoor_contract_summary(
         {
             "callable_tool_names": ["exec", "filesystem_edit"],
@@ -453,24 +451,6 @@ def test_tail_blocks_drop_callable_tools_and_contract_keeps_denied_tools() -> No
         assert "callable_tools:" not in text
         assert "denied_tools" in text
         assert "perf_inspect" in text
-
-    frontdoor_gate = _render_frontdoor_stage_gate_summary(
-        {
-            "callable_tool_names": ["exec", "filesystem_edit"],
-            "denied_tool_names": ["perf_inspect"],
-            "stage_summary": {},
-        }
-    )
-    node_gate = _render_node_stage_gate_summary(
-        {
-            "callable_tool_names": ["exec", "filesystem_edit"],
-            "denied_tool_names": ["perf_inspect"],
-            "execution_stage": {},
-        }
-    )
-    for text in (frontdoor_gate, node_gate):
-        assert "callable_tools:" not in text
-        assert "denied_tools" not in text
 
 
 def _presence_message(tool_id: str = TOOL_ID, fingerprint: str = FINGERPRINT) -> dict:

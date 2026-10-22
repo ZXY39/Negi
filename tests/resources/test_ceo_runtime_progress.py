@@ -34,7 +34,6 @@ from g3ku.runtime.frontdoor.tool_contract import split_pinned_contract_from_syst
 from g3ku.runtime.manager import SessionRuntimeManager
 from g3ku.runtime.session_agent import MANUAL_COMPRESSION_STATE_ATTR, RuntimeAgentSession
 from g3ku.session.manager import SessionManager
-from main.runtime.stage_budget import STAGE_TURN_END_SUMMARY_POINTER
 from main.storage.artifact_store import TaskArtifactStore
 from main.storage.sqlite_store import SQLiteTaskStore
 
@@ -4946,16 +4945,8 @@ async def test_runtime_agent_session_recovers_dispatched_async_task_after_intern
         "task_ids": ["task:demo-123"],
         "reason": "async_dispatch_runtime_recovered",
     }
-    summary = reloaded_session.messages[1]["canonical_context"]
-    assert summary["active_stage_id"] == ""
-    stage = summary["stages"][0]
-    assert stage["status"] == "completed"
-    # 轮末收尾不再写指针摘要(见 stage_prompt_compaction 的块渲染);存量指针仍被
-    # _frontdoor_stage_summary_candidates 过滤,不得作为可见文本投递。
-    assert not str(stage["completed_stage_summary"] or "").strip()
-    assert stage["completed_stage_summary"] != STAGE_TURN_END_SUMMARY_POINTER
-    assert stage["finished_at"]
-
+    # 完成态轨道随会话续跑载荷持久，读法见 test_frontdoor_turns.py；
+    # 这里只钉转录行本身：正文、task_ids 与 reason 三样都在重启后回来。
     recent_history = web_ceo_sessions.extract_live_raw_tail(reloaded_session, turn_limit=4)
     assert recent_history[-2] == {"role": "user", "content": "Analyze the repository in background"}
     assert recent_history[-1]["role"] == "assistant"
