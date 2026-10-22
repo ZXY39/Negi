@@ -7552,7 +7552,9 @@ textarea {
     flex-direction: column;
     gap: var(--space-2);
     min-height: 0;
-    max-height:  520px;
+    /* 不写死 520px：≥1024px 由下方 .llm-page-layout 的铺满档接管（flex:1 + 内滚），
+       窄屏按内容排高。写死上限会在矮盒下留一整条空白带。 */
+    max-height: none;
     overflow-y: auto;
     padding: var(--space-4);
     background-color: var(--bg-surface-inner);
@@ -13999,14 +14001,15 @@ textarea {
 
 .content-header #skill-refresh-btn,
 .content-header #tool-refresh-btn,
-.content-header #memory-refresh-btn,
-.content-header #model-refresh-btn,
-.content-header #external-refresh-btn {
+.content-header #memory-refresh-btn {
     position: absolute;
     left: var(--ui-space-6);
     top: 50%;
     transform: translateY(-50%);
 }
+
+/* 模型 / 外部两页的刷新按钮回到文档流，与标题同一行右对齐（见文末「模型 / 外部页统一」）。
+   其余页面仍沿用左侧绝对定位的旧版式，未在本次范围内。 */
 
 .content-header #audit-refresh-btn {
     position: absolute;
@@ -15066,17 +15069,6 @@ textarea {
     top: 50%;
     transform: translateY(-50%);
     margin-left: 0;
-}
-
-#view-models .resource-header-title {
-    position: absolute;
-    min-width: 0;
-}
-
-#view-models .resource-header-actions {
-    justify-content: flex-start;
-    margin-left: 0;
-    width: 100%;
 }
 
 .resource-select-trigger {
@@ -16572,4 +16564,124 @@ textarea {
 
 .qq-bot-sandbox-input:checked::after {
     border-color: var(--ui-on-brand);
+}
+
+/* ═══════════════════════════════════════════════════════════════════
+   模型 / 外部页统一版式（2026-10-22）
+   这两页此前各堆了一层覆盖 hack：页标题被全局 sr-only 藏掉、刷新按钮绝对定位到
+   左侧、模型页六个面板头三种样式、五条列表各自 520px 内滚、外部页 QQ 卡被
+   height:100% 撑出空腔。这里一次性收口成同一套版式：
+     页头 = h1 + 副标题 + 右侧操作；面板头 = 15px/700 + 发丝下边框；内容按高度排。
+   其余六个页面未动。若确认这套版式，删掉上文 `.content-header h1` 的 sr-only 块
+   即可全站生效。
+   ═══════════════════════════════════════════════════════════════════ */
+
+/* 1 · 页头：标题重新可见，操作区回到文档流右对齐 */
+#view-models .content-header h1,
+#view-external .content-header h1 {
+    position: static;
+    width: auto;
+    height: auto;
+    margin: 0;
+    padding: 0;
+    overflow: visible;
+    clip-path: none;
+    white-space: normal;
+    border: 0;
+}
+#view-models .content-header,
+#view-external .content-header {
+    align-items: center;
+    flex-wrap: nowrap;
+    gap: var(--ui-space-4);
+}
+#view-models .resource-header-title,
+#view-external .resource-header-title {
+    min-width: 0;
+}
+#view-models .content-header .subtitle,
+#view-external .content-header .subtitle {
+    display: block;
+    margin-top: 3px;
+    font-size: 0.8rem;
+    line-height: 1.5;
+    color: var(--text-muted);
+}
+#view-models .resource-header-actions,
+#view-external .resource-header-actions {
+    margin-left: auto;
+    justify-content: flex-end;
+    flex-wrap: wrap;
+}
+
+/* 2 · 模型页：六个面板头统一成一种（标题 + 发丝下边框，右挂操作） */
+.llm-groups-panel .panel-header.panel-header,
+.llm-bindings-panel .panel-header.panel-header,
+.model-chain-card > .card-header {
+    align-items: center;
+    padding: 0 0 10px;
+    border-bottom: 1px solid var(--border-color);
+}
+.llm-groups-panel .panel-header h3,
+.llm-bindings-panel .panel-header h3,
+.model-chain-card .card-header h3 {
+    font-size: 15px;
+    font-weight: 700;
+    line-height: 1.35;
+    letter-spacing: -0.01em;
+}
+.model-chain-card > .card-header {
+    margin-bottom: var(--space-3);
+}
+/* 模型列表的搜索框在 300px 窄列里不再右浮换行：整行铺满，放在标题下方 */
+.llm-bindings-panel .model-shared-header {
+    flex-direction: column;
+    align-items: stretch;
+    gap: 10px;
+}
+.llm-bindings-panel .model-shared-actions {
+    width: 100%;
+    min-width: 0;
+}
+.llm-bindings-panel .model-shared-actions .resource-search {
+    width: 100%;
+    max-width: none;
+    min-width: 0;
+}
+
+/* 3 · 模型页：卡片与列表内衬收紧一档，去掉「盒中盒」的厚边感。
+      铺满 / 内滚的行为沿用下方 ≥1024px 的既有档，不在这里重复声明。 */
+.model-chain-card {
+    gap: var(--space-3);
+    padding: var(--space-4);
+    border-radius: var(--radius-lg);
+}
+.model-chain-list,
+.model-available-list {
+    padding: var(--space-3);
+    border-radius: var(--radius-lg);
+}
+
+/* 4 · 外部页：收紧外壳留白，三块面板同一节奏 */
+.external-api-shell {
+    gap: var(--ui-space-4);
+    padding: var(--ui-space-4) var(--ui-space-6) var(--ui-space-6);
+}
+.external-security-hint {
+    padding: 0 var(--space-5) var(--space-4);
+}
+/* QQ 账号卡：不再被 height:100% 撑出空腔，三段按内容紧凑排列 */
+.resource-list-item.qq-bot-account-row {
+    height: auto;
+    gap: var(--ui-space-3);
+}
+.qq-bot-account-head {
+    min-height: 0;
+}
+.qq-bot-account-fields {
+    align-content: start;
+}
+.qq-bot-account-row .external-token-actions {
+    padding-top: 2px;
+    border-top: 1px solid var(--border-color);
 }
