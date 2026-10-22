@@ -262,7 +262,7 @@ test("setCeoTurnUsage 渲染 token + 完成时间,且后续空调用不清空(st
     api.setCeoTurnUsage(turn, USAGE, { completedAt: "2026-09-14T10:00:00" });
     assert.equal(turn.usageEl.hidden, false);
     assert.ok(turn.usageEl.textContent.includes("输入 1.2k"), turn.usageEl.textContent);
-    assert.ok(turn.usageEl.textContent.includes("缓存命中 800 (40.0%)"), turn.usageEl.textContent);
+    assert.ok(turn.usageEl.textContent.includes("缓存命中 800 / 40.0%"), turn.usageEl.textContent);
     assert.ok(turn.usageEl.textContent.includes("输出 340"), turn.usageEl.textContent);
     assert.ok(turn.usageEl.textContent.includes("轮数 2"), turn.usageEl.textContent);
     assert.ok(turn.usageEl.textContent.includes("完成于"), turn.usageEl.textContent);
@@ -282,12 +282,12 @@ test("buildTokenUsageParts 命中率按整份 prompt 算,轮数缺项不印", ()
 
     assert.equal(
         line({ input_tokens: 1200, output_tokens: 340, cache_hit_tokens: 800, call_count: 2 }),
-        "输入 1.2k · 缓存命中 800 (40.0%) · 输出 340 · 轮数 2",
+        "输入 1.2k · 缓存命中 800 / 40.0% · 输出 340 · 轮数 2",
     );
     // 一次都没命中也要给读数,否则"没有缓存"和"没统计"看着一样。
     assert.equal(
         line({ input_tokens: 1000, output_tokens: 20, cache_hit_tokens: 0 }),
-        "输入 1.0k · 缓存命中 0 (0.0%) · 输出 20",
+        "输入 1.0k · 缓存命中 0 / 0.0% · 输出 20",
     );
     // 没有 call_count 的旧数据不补 0:轮数 0 会被读成"没跑过"。
     assert.equal(line(null), "");

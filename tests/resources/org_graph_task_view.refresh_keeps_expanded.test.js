@@ -573,6 +573,6 @@ test("节点详情头部写与会话页同款的 token 读数行", async () => {
     // 里的 buildTokenUsageParts 单点产出,节点页不许再抄一份。
     assert.equal(
         api.U.adTokenSummary.textContent,
-        "输入 1.2k · 缓存命中 800 (40.0%) · 输出 340 · 轮数 2",
+        "输入 1.2k · 缓存命中 800 / 40.0% · 输出 340 · 轮数 2",
     );
 });

@@ -6218,7 +6218,7 @@ function buildTokenUsageParts(usage) {
     // 命中率按整份 prompt 算（未命中新增 + 缓存命中），与逐次调用明细表的 modelCallHitRate 同口径。
     const totalInput = normalized.input_tokens + normalized.cache_hit_tokens;
     const hitRateText = totalInput
-        ? ` (${((normalized.cache_hit_tokens / totalInput) * 100).toFixed(1)}%)`
+        ? ` / ${((normalized.cache_hit_tokens / totalInput) * 100).toFixed(1)}%`
         : "";
     const parts = [
         `输入 ${formatCeoTokenCount(normalized.input_tokens)}`,
