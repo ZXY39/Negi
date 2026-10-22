@@ -79,7 +79,7 @@ def test_contract_block_is_byte_identical_across_delivery_lanes() -> None:
         contract_body_from_payload(payload),
     )
     assert from_loader == from_impulse
-    assert from_loader.startswith(f"[TOOL_CONTRACT_V1:{TOOL_ID}:{FINGERPRINT}]")
+    assert from_loader.startswith(f"[TOOL_CONTRACT:{TOOL_ID}:{FINGERPRINT}]")
     assert from_loader.endswith(MARKER_CLOSE)
 
 

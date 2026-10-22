@@ -4353,14 +4353,21 @@ def test_frontdoor_send_contract_prints_declared_denied_tools_line() -> None:
         session_key="web:shared",
     )
 
+    contract_texts = [
+        str(item.get("content") or "")
+        for item in list(contract.dynamic_appendix_messages)
+        if "frontdoor_runtime_tool_contract" in str(item.get("content") or "")
+    ]
     stage_gate_texts = [
         str(item.get("content") or "")
         for item in list(contract.dynamic_appendix_messages)
         if "frontdoor_runtime_stage_gate" in str(item.get("content") or "")
     ]
+    assert len(contract_texts) == 1
     assert len(stage_gate_texts) == 1
-    assert "denied_tools" in stage_gate_texts[0]
-    assert "web_fetch" in stage_gate_texts[0]
+    assert "denied_tools" in contract_texts[0]
+    assert "web_fetch" in contract_texts[0]
+    assert "denied_tools" not in stage_gate_texts[0]
 
 
 def test_build_frontdoor_request_artifact_payload_includes_provider_tool_exposure_fields() -> None:

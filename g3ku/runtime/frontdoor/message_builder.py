@@ -57,8 +57,7 @@ from g3ku.runtime.web_ceo_sessions import (
     trailing_turn_record,
     transcript_messages,
 )
-from main.runtime.stage_budget import SILENT_TOOL_NAME
-
+from main.runtime.tool_names import SILENT_TOOL_NAME
 
 # 动态 overlay 块头（跨轮可比性投影按这些常量识别并剥离，禁止散文匹配）。
 MEMORY_WRITE_HINT_HEADER = "## 长期记忆写入提示"

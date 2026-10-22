@@ -10,7 +10,7 @@ from main.runtime.chat_backend import (
     build_session_prompt_cache_key,
     sanitize_provider_messages,
 )
-from main.runtime.stage_messages import is_turn_only_system_note_message
+from main.runtime.turn_overlay import is_turn_only_system_note_message
 
 DEFAULT_CACHE_FAMILY_REVISION = "ceo_frontdoor:stable-prefix:v1"
 

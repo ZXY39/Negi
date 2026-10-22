@@ -3,14 +3,16 @@ from __future__ import annotations
 from collections.abc import Iterable
 from typing import Any
 
+from main.runtime.tool_names import (
+    FINAL_RESULT_TOOL_NAME,
+    SILENT_TOOL_NAME,
+    SPAWN_CHILD_NODES_TOOL_NAME,
+)
 
 STAGE_TOOL_NAME = "submit_next_stage"
-FINAL_RESULT_TOOL_NAME = "submit_final_result"
-SPAWN_CHILD_NODES_TOOL_NAME = "spawn_child_nodes"
 # 前门专用的收尾控制信号：调它 = 本轮不外发、不推渠道，正文仍留在上下文里。
 # 只在前门的三处硬注入里曝光（见 _ceo_runtime_ops），所以节点侧永远不会看到它，
 # 这里只需要拿到「不占阶段预算、不被阶段闸门拦」两条豁免。
-SILENT_TOOL_NAME = "silent"
 # 下限不当错处理：模型给得比 MIN 少时按 MIN 起算（两个 submit 收口），所以工具 schema 只声明 maximum。
 STAGE_TOOL_ROUND_BUDGET_MIN = 10
 STAGE_TOOL_ROUND_BUDGET_MAX = 30

@@ -83,9 +83,6 @@ from g3ku.runtime.stage_prompt_compaction import (
     STAGE_EXTERNALIZED_PREFIXES as _STAGE_EXTERNALIZED_PREFIXES,
 )
 from g3ku.runtime.stage_prompt_compaction import (
-    TOKEN_COMPACT_V2_PREFIX as _SHARED_TOKEN_COMPACT_V2_PREFIX,
-)
-from g3ku.runtime.stage_prompt_compaction import (
     compact_stage_prompt_messages_in_place as _shared_compact_stage_prompt_messages_in_place,
 )
 from g3ku.runtime.stage_prompt_compaction import (
@@ -105,6 +102,9 @@ from g3ku.runtime.stage_prompt_compaction import (
 )
 from g3ku.runtime.stage_prompt_compaction import (
     stage_transition_signature as _shared_stage_transition_signature,
+)
+from g3ku.runtime.token_compact_markers import (
+    TOKEN_COMPACT_V2_PREFIX as _SHARED_TOKEN_COMPACT_V2_PREFIX,
 )
 from g3ku.runtime.tool_arg_stash import node_scope_key as _stash_node_scope_key
 from g3ku.runtime.tool_context_presence import (
@@ -215,7 +215,6 @@ from main.runtime.recovery_check import RecoveryCheckDecision, RecoveryCheckEngi
 from main.runtime.stage_budget import (
     DEFAULT_NON_BUDGET_STAGE_TOOLS,
     DEFAULT_STAGE_GATE_BYPASS_TOOLS,
-    FINAL_RESULT_TOOL_NAME,
     STAGE_BUDGET_EXHAUSTED_FREE_PASS_REMINDER,
     STAGE_BUDGET_EXHAUSTION_PREDICTED_REMINDER_TEMPLATE,
     STAGE_TOOL_NAME,
@@ -232,9 +231,6 @@ from main.runtime.stage_messages import (
     build_execution_stage_overlay,
     build_execution_stage_result_block_message,
     build_node_plain_text_reply_block_message,
-    build_turn_only_system_note_message,
-    is_turn_only_system_note_message,
-    strip_turn_only_system_note_messages,
 )
 from main.runtime.subtree_hold import (
     DISTRIBUTION_ACTIVE_STATES,
@@ -250,6 +246,12 @@ from main.runtime.tool_call_repair import (
     extract_tool_calls_from_xml_pseudo_content,
     format_xml_repair_failure_reason,
     recover_tool_calls_from_json_payload,
+)
+from main.runtime.tool_names import FINAL_RESULT_TOOL_NAME
+from main.runtime.turn_overlay import (
+    build_turn_only_system_note_message,
+    is_turn_only_system_note_message,
+    strip_turn_only_system_note_messages,
 )
 
 _ARTIFACT_REF_PATTERN = re.compile(r'artifact:(?:artifact:)?[A-Za-z0-9_-]+')

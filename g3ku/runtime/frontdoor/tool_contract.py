@@ -755,6 +755,12 @@ def _render_frontdoor_contract_summary(payload: dict[str, Any]) -> str:
             *_render_repair_required_tool_section(repair_required_tools),
         ]
     )
+    denied_tool_names = _normalized_name_list(payload.get('denied_tool_names'))
+    if denied_tool_names:
+        lines.append(
+            'denied_tools (`tools[]` 里带着参数表，但这一跳调不动——无权限或资源已下架，'
+            f'调用一律被拒；不要反复重试或改着名字试): {_render_name_list(denied_tool_names)}'
+        )
     if not pinned_exec:
         lines.append(_render_exec_runtime_policy(payload.get('exec_runtime_policy')))
     if not pinned_temp:
@@ -765,11 +771,11 @@ def _render_frontdoor_contract_summary(payload: dict[str, Any]) -> str:
 
 
 def _render_frontdoor_stage_gate_summary(payload: dict[str, Any]) -> str:
-    """每跳活的状态：不可调名字与活动阶段轨道。排在请求体末位。
+    """每跳活的状态：活动阶段轨道。排在请求体末位。
 
-    `callable_tools` 那行删掉了：准入面就是"钉住的 `tools[]` 减去 `denied_tools` 减去契约
-    不在场"，而契约不在场不再是死路——直接调用那一个工具就会把它的契约带回来。列一份每跳
-    变化的名单既不可推导不动作，又要每跳重付一遍。
+    `denied_tools` 已搬到回合内常量的 `## Runtime Tool Contract` 块；`callable_tools`
+    那行删掉了：准入面就是"钉住的 `tools[]` 减去 `denied_tools` 减去契约不在场"，
+    而契约不在场不再是死路——直接调用那一个工具就会把它的契约带回来。
     """
     lines = [
         FRONTDOOR_DYNAMIC_STAGE_GATE_HEADING,
@@ -777,12 +783,6 @@ def _render_frontdoor_stage_gate_summary(payload: dict[str, Any]) -> str:
         # `contract_revision` 整回合不变，已在上一块出现过；两块各印一份等于每跳为同一个
         # 值付两遍，而它在这条道没有消费者（曝光 revision 的刷新判据在头部键里算）。
     ]
-    denied_tool_names = _normalized_name_list(payload.get('denied_tool_names'))
-    if denied_tool_names:
-        lines.append(
-            'denied_tools (`tools[]` 里带着参数表，但这一跳调不动——无权限或资源已下架，'
-            f'调用一律被拒；不要反复重试或改着名字试): {_render_name_list(denied_tool_names)}'
-        )
     lines.append(_render_stage_summary(payload.get('stage_summary')))
     return '\n'.join(lines)
 

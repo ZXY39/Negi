@@ -14,7 +14,7 @@ import json
 from types import SimpleNamespace
 
 from main.runtime.react_loop import ReActToolLoop
-from main.runtime.stage_messages import (
+from main.runtime.turn_overlay import (
     build_turn_only_system_note_message,
     is_turn_only_system_note_message,
     strip_turn_only_system_note_messages,

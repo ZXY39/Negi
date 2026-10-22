@@ -4,15 +4,20 @@ import re
 from pathlib import Path
 from typing import Any
 
-from g3ku.runtime.project_environment import current_project_environment, format_python_env_reference
+from g3ku.runtime.project_environment import (
+    current_project_environment,
+    format_python_env_reference,
+)
 from g3ku.runtime.tool_visibility import CEO_FIXED_BUILTIN_TOOL_NAMES
 from main.prompts import INCLUDE_RE, load_prompt
 from main.runtime.stage_budget import (
+    STAGE_TOOL_NAME,
+    ceo_stage_free_tool_names,
+)
+from main.runtime.tool_names import (
     FINAL_RESULT_TOOL_NAME,
     SILENT_TOOL_NAME,
     SPAWN_CHILD_NODES_TOOL_NAME,
-    STAGE_TOOL_NAME,
-    ceo_stage_free_tool_names,
 )
 
 # 提示词只点名前门真会曝光的工具：`stop_tool_execution` / `wait_tool_execution` 没有

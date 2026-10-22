@@ -6,6 +6,15 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
+from g3ku.runtime.internal_rule_markers import (
+    DEFAULT_INTERNAL_RULE_MARKERS,
+    internal_rule_message_indexes,
+)
+from g3ku.runtime.token_compact_markers import (
+    LEGACY_TOKEN_COMPACT_V2_PREFIX,
+    TOKEN_COMPACT_V2_PREFIX,
+    TOKEN_COMPACT_V2_PREFIXES,
+)
 from g3ku.runtime.tool_history import extract_call_id
 
 STAGE_COMPACT_PREFIX = "[STAGE_COMPACT]"
@@ -57,11 +66,8 @@ ECHO_STRIP_ENABLED = False
 #   "## EVENT BUNDLE"（心跳事件束）、"[CRON INTERNAL EVENT]" 与
 #   "你接收到了之前你定时的任务"（定时任务种子）。
 # - 稳定规则文本（重复框架规则）随过期内容一并移除：每次心跳都注入相同的规则，
-#   压缩时顺路清理，避免在历史中无限堆积。
-DEFAULT_INTERNAL_RULE_MARKERS: tuple[str, ...] = (
-    "This is a background heartbeat.",
-    "# Heartbeat Rules",
-)
+#   压缩时顺路清理，避免在历史中无限堆积。标记与清理谓词已搬到
+#   `g3ku/runtime/internal_rule_markers.py`，token 压缩车道与阶段压缩共用。
 
 
 def _stage_get(stage: Any, key: str, default: Any = None) -> Any:
@@ -777,14 +783,12 @@ def compact_stage_prompt_messages_in_place(
     )
     if markers and structural_change_points:
         earliest_structural_change = min(structural_change_points)
-        for index, message in enumerate(remainder):
-            if index < earliest_structural_change:
-                continue
-            if _message_role(message) not in ("user", "system"):
-                continue
-            content = str(message.get("content") or "")
-            if any(marker in content for marker in markers):
-                remove_flags[index] = True
+        for index in internal_rule_message_indexes(
+            remainder,
+            after_index=earliest_structural_change,
+            markers=markers,
+        ):
+            remove_flags[index] = True
 
     rewritten: list[dict[str, Any]] = []
     anchor_pointer = 0
@@ -896,9 +900,6 @@ def stage_ref_candidates(
 # 抄引用不可靠（跨代实测：路径逐字保真约 30%、不透明 id 约 10%），所以选择权给模型、
 # 逐字性归运行时；两车道共用同一份实现，避免同一合同出现第二套写法后各自漂移。
 
-TOKEN_COMPACT_V2_PREFIX = "[TOKEN_COMPACT_V2]"
-LEGACY_TOKEN_COMPACT_V2_PREFIX = "[G3KU_TOKEN_COMPACT_V2]"
-TOKEN_COMPACT_V2_PREFIXES = (TOKEN_COMPACT_V2_PREFIX, LEGACY_TOKEN_COMPACT_V2_PREFIX)
 STAGE_REF_INDEX_HEADING = "## 证据索引"
 STAGE_ARCHIVE_HEADING = "## 阶段归档"
 # 收尾材料没承接上时，结果里自带一句可读说明（两车道共用）。工具 schema 描述是两车道共享的

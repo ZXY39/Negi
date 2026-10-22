@@ -30,7 +30,7 @@ from g3ku.runtime.web_ceo_sessions import (
 )
 from main.models import TaskRecord
 from main.protocol import build_envelope, now_iso
-from main.runtime.stage_budget import SILENT_TOOL_NAME
+from main.runtime.tool_names import SILENT_TOOL_NAME
 from main.service.task_distribution_error_callback import normalize_task_distribution_error_payload
 from main.service.task_stall_callback import (
     TASK_STALL_REASON_SUSPECTED_STALL,

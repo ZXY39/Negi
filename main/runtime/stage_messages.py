@@ -5,11 +5,11 @@ from typing import Any
 from main.runtime.stage_budget import (
     CONTEXT_LOADER_STAGE_TOOL_NAMES,
     CONTROL_STAGE_TOOL_NAMES,
-    FINAL_RESULT_TOOL_NAME,
     STAGE_TOOL_NAME,
     STAGE_TOOL_ROUND_BUDGET_MAX,
     STAGE_TOOL_ROUND_BUDGET_MIN,
 )
+from main.runtime.tool_names import FINAL_RESULT_TOOL_NAME
 
 _STAGE_BUDGET_NODE_KINDS = {'execution', 'acceptance'}
 # 整回合内 CEO 纯文本收尾最多被打回的次数（仅 B 类：阶段刚创建且无实质工具轮）。
@@ -318,29 +318,3 @@ def build_node_plain_text_reply_block_message(*, node_kind: str, stage_gate: dic
         'stage. '
         'Writing plans, progress notes or "what I will do next" into the reply body counts as no submission at all.'
     )
-
-
-TURN_ONLY_SYSTEM_NOTE_PREFIX = "System note for this turn only:"
-
-
-def build_turn_only_system_note_message(overlay_text: str | None) -> dict[str, Any] | None:
-    text = str(overlay_text or '').strip()
-    if not text:
-        return None
-    return {"role": "user", "content": f"{TURN_ONLY_SYSTEM_NOTE_PREFIX}\n{text}"}
-
-
-def is_turn_only_system_note_message(message: Any) -> bool:
-    if not isinstance(message, dict):
-        return False
-    if str((message or {}).get("role") or "").strip().lower() != "user":
-        return False
-    return str((message or {}).get("content") or "").strip().startswith(TURN_ONLY_SYSTEM_NOTE_PREFIX)
-
-
-def strip_turn_only_system_note_messages(messages: Any) -> list[dict[str, Any]]:
-    return [
-        dict(item)
-        for item in list(messages or [])
-        if isinstance(item, dict) and not is_turn_only_system_note_message(item)
-    ]

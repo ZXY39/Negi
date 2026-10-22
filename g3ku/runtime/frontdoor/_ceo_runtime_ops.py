@@ -81,7 +81,6 @@ from g3ku.runtime.stage_prompt_compaction import (
     STAGE_CLOSURE_INACTIVE_NOTES,
     STAGE_RAW_PREFIXES,
     STAGE_REF_SELECTION_RULE,
-    TOKEN_COMPACT_V2_PREFIX,
     build_stage_archive_document,
     closing_stage_target,
     compact_stage_prompt_messages_in_place,
@@ -101,6 +100,7 @@ from g3ku.runtime.stage_prompt_compaction import (
     strip_stage_block_echo,
     summarized_stage_ids,
 )
+from g3ku.runtime.token_compact_markers import TOKEN_COMPACT_V2_PREFIX
 from g3ku.runtime.tool_context_presence import (
     contract_index_from_revisions,
     contract_presence_index,
@@ -166,7 +166,6 @@ from main.runtime.send_token_preflight import (
 )
 from main.runtime.stage_budget import (
     FRONTDOOR_STAGELESS_MEMORY_TOOL_NAMES,
-    SILENT_TOOL_NAME,
     STAGE_BUDGET_EXHAUSTED_FREE_PASS_REMINDER,
     STAGE_BUDGET_EXHAUSTION_PREDICTED_REMINDER_TEMPLATE,
     STAGE_TOOL_NAME,
@@ -183,14 +182,17 @@ from main.runtime.stage_messages import (
     build_ceo_stage_overlay,
     build_ceo_stage_reply_bounce_message,
     build_ceo_stage_result_block_message,
-    is_turn_only_system_note_message,
-    strip_turn_only_system_note_messages,
 )
 from main.runtime.tool_call_repair import (
     XML_REPAIR_ATTEMPT_LIMIT,
     build_xml_tool_repair_message,
     extract_tool_calls_from_xml_pseudo_content,
     recover_tool_calls_from_json_payload,
+)
+from main.runtime.tool_names import SILENT_TOOL_NAME
+from main.runtime.turn_overlay import (
+    is_turn_only_system_note_message,
+    strip_turn_only_system_note_messages,
 )
 from main.service.create_async_task_contract import (
     normalize_create_async_task_file_targets,

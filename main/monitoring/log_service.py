@@ -90,13 +90,13 @@ from main.runtime.send_token_preflight import (
 from main.runtime.stage_budget import (
     CONTEXT_LOADER_STAGE_TOOL_NAMES,
     CONTROL_STAGE_TOOL_NAMES,
-    FINAL_RESULT_TOOL_NAME,
     STAGE_TOOL_NAME,
     STAGE_TOOL_ROUND_BUDGET_MAX,
     STAGE_TOOL_ROUND_BUDGET_MIN,
     response_tool_calls_count_against_stage_budget,
     tool_call_counts_against_stage_budget,
 )
+from main.runtime.tool_names import FINAL_RESULT_TOOL_NAME
 from main.storage.disk_guard import has_emergency_disk_budget
 from main.token_usage import (
     build_token_usage_from_attempts,

@@ -4003,8 +4003,8 @@ def test_frontdoor_provider_tool_schemas_carry_model_description() -> None:
     assert description == "Browser automation via semantic shortlist."
     assert isinstance(parameters, dict)
     assert (parameters.get("properties") or {}).get("url")
-def test_frontdoor_stage_gate_lists_declared_but_denied_tools() -> None:
-    """前门清单钉住后，无权限的名字要靠尾块提前说，不靠模型撞一次拒绝。"""
+def test_frontdoor_contract_lists_declared_but_denied_tools() -> None:
+    """前门清单钉住后，无权限的名字要靠回合内契约块提前说，不靠模型撞一次拒绝。"""
     contract = build_frontdoor_tool_contract(
         callable_tool_names=["exec"],
         candidate_tool_names=[],
@@ -4012,20 +4012,22 @@ def test_frontdoor_stage_gate_lists_declared_but_denied_tools() -> None:
         denied_tool_names=["web_fetch"],
     )
 
-    gate = contract.to_stage_gate_message()["content"]
+    contract_text = contract.to_message()["content"]
     # D11：本轮可调用面不再渲进尾块——契约不在场也不拦路，那行只剩噪声；拦得住的
-    # denied_tools 必须仍在。
-    assert "callable_tools:" not in gate
+    # denied_tools 现在住在回合内契约块。
+    assert "callable_tools:" not in contract_text
     assert list((contract.to_message_payload().get("callable_tool_names") or [])) == ["exec"]
-    assert "denied_tools" in gate
-    assert "web_fetch" in gate.split("denied_tools", 1)[1]
-    assert "无权限" in gate
+    assert "denied_tools" in contract_text
+    assert "web_fetch" in contract_text.split("denied_tools", 1)[1]
+    assert "无权限" in contract_text
+    assert "denied_tools" not in contract.to_stage_gate_message()["content"]
 
     clean = build_frontdoor_tool_contract(
         callable_tool_names=["exec"],
         candidate_tool_names=[],
         frontdoor_stage_state={},
     )
+    assert "denied_tools" not in clean.to_message()["content"]
     assert "denied_tools" not in clean.to_stage_gate_message()["content"]
 
 

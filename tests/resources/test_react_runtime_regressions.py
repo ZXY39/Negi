@@ -3071,7 +3071,7 @@ def test_prepare_messages_keeps_active_stage_and_evicts_only_the_named_stage() -
     compact_blocks = [
         content
         for content in rendered_contents
-        if content.startswith("[STAGE_COMPACT_V1]")
+        if content.startswith("[STAGE_COMPACT]")
     ]
     assert len(compact_blocks) == 1
     compact_payload = json.loads(compact_blocks[0].split("\n", 1)[1])
@@ -8467,7 +8467,7 @@ async def test_node_second_tool_round_request_carries_no_stale_contract_or_note(
     """End-to-end: two tool rounds in one `run()` must keep exactly one contract and
     at most one turn-only note at the tail; the carried prefix must not retain the
     stale note/contract from the previous round."""
-    from main.runtime.stage_messages import is_turn_only_system_note_message
+    from main.runtime.turn_overlay import is_turn_only_system_note_message
 
     calls: list[list[dict[str, object]]] = []
     executed: list[tuple[str, str]] = []

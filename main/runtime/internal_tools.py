@@ -5,14 +5,18 @@ from collections.abc import Awaitable, Callable
 from typing import Any
 
 from g3ku.agent.tools.base import Tool
-from main.models import NodeEvidenceItem, SpawnChildResult, SpawnChildSpec, build_execution_policy_schema
+from main.models import (
+    NodeEvidenceItem,
+    SpawnChildResult,
+    SpawnChildSpec,
+    build_execution_policy_schema,
+)
 from main.runtime.stage_budget import (
-    FINAL_RESULT_TOOL_NAME,
-    SILENT_TOOL_NAME,
     STAGE_TOOL_NAME,
     STAGE_TOOL_ROUND_BUDGET_MAX,
     STAGE_TOOL_ROUND_BUDGET_MIN,
 )
+from main.runtime.tool_names import FINAL_RESULT_TOOL_NAME, SILENT_TOOL_NAME
 
 
 def build_detail_level_schema(*, description: str) -> dict[str, Any]:

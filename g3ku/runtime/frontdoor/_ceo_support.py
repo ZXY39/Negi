@@ -35,10 +35,10 @@ from g3ku.runtime.web_ceo_sessions import (
 )
 from main.protocol import now_iso
 from main.runtime.chat_backend import ConfigChatBackend, sanitize_provider_messages
-from main.runtime.stage_messages import (
+from main.runtime.tool_call_repair import format_xml_repair_failure_reason
+from main.runtime.turn_overlay import (
     build_turn_only_system_note_message,
 )
-from main.runtime.tool_call_repair import format_xml_repair_failure_reason
 
 _CREATE_ASYNC_TASK_CONTRACT_TYPE_ERROR_HINTS = (
     "should be array",
