@@ -15761,18 +15761,32 @@ textarea {
     height: 16px;
 }
 
-/* 下拉面板与按钮同宽：shell 已铺满按钮，left/right 归零即等宽。 */
+/* 下拉面板与按钮同宽：shell 已铺满按钮，left/right 归零即等宽。
+   宽度不够时按内容撑开（min-width: max-content）：选项是 grid 项，`min-width: auto`
+   让它不肯低于自己的文字宽，面板停在按钮宽度就会横向溢出，底下就多出一条滚动条。 */
 .task-depth-setting .resource-select-menu,
 .task-sort-setting .resource-select-menu {
     left: 0;
-    right: 0;
+    right: auto;
     transform: none;
-    width: auto;
+    /* 面板按内容取宽：选项里除了文字还有勾选图标那一列，停在按钮宽度上就会横向
+       溢出（多一条滚动条）或把「按时间」裁成省略号。 */
+    width: max-content;
     min-width: 0;
+    /* 隐式列只按内容收，面板比它宽时（树深度的按钮比选项宽）右侧会缺一条空带，
+       这条让唯一一列铺满面板，选项左右内衬因此相等。 */
+    grid-template-columns: minmax(0, 1fr);
     gap: 2px;
     padding: var(--ui-space-1);
     border-radius: var(--ui-radius-card);
     box-shadow: var(--ui-shadow-dialog);
+    overflow-x: hidden;
+}
+
+.task-depth-setting .resource-select-option,
+.task-sort-setting .resource-select-option {
+    min-width: 0;
+    padding: 10px 12px;
 }
 
 /* 任务大厅头部：多选 → 排序 → 树深度靠左成组，性能读数推到右端。 */
