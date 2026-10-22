@@ -122,6 +122,9 @@ _MEMORY_WINDOW_SPLIT_RATIO = 0.5
 # 分母只算 gain>0 的行：已压行占着字节却省不出字，用全量当分母会让预算先被它们吃光。
 COMPRESSIBLE_SACRIFICE_SHARE_NUM = 7
 COMPRESSIBLE_SACRIFICE_SHARE_DEN = 10
+
+# 增量里"这行不再有效"的小节标题；模型可见文案统一英文。
+MEMORY_DELETED_HEADING = "Deleted memories:"
 # 一批业务请求最多因"库装不下"被放回队列几次：每次都排一次归并在它前面。归并可能拒收
 # 也可能整批失败，不设上限就是让这一批永远在"插归并→归并无效→再插归并"里自旋。
 CAPACITY_REPLAY_LIMIT = 2
@@ -2126,6 +2129,8 @@ class MemoryManager:
         """记下这次提交对**居民行**造成的可见变化；没有净变化就不写修订。
 
         判据是渲染后的行：同一 id 改写、压缩降级、行序变化都算变化，计数器更新不算。
+        退场行也进修订（`Deleted memories:` 一节），这样增量能表达"这行不再有效"，
+        不必为了删除重发整份文档。
         """
         before = self._resident_line_map(rows_before, now_iso=now_iso)
         after = self._resident_line_map(rows_after, now_iso=now_iso)
@@ -2139,7 +2144,20 @@ class MemoryManager:
         if not (added or changed or retired):
             return 0
         visible = set(added) | set(changed)
-        rendered = "".join(after[memory_id] for memory_id in after if memory_id in visible)
+        parts: list[str] = []
+        visible_text = "".join(
+            after[memory_id] for memory_id in after if memory_id in visible
+        ).strip()
+        if visible_text:
+            parts.append(visible_text)
+        deleted_text = "\n".join(
+            f"- {before[memory_id].strip()}"
+            for memory_id in before
+            if memory_id in set(retired)
+        ).strip()
+        if deleted_text:
+            parts.append(f"{MEMORY_DELETED_HEADING}\n{deleted_text}")
+        rendered = "\n".join(parts).strip()
         return self._memory_repo.append_revision(
             created_at=now_iso,
             op=op,
@@ -2159,30 +2177,30 @@ class MemoryManager:
     def memory_notice_delta(self, *, since_rev: int, now_iso: str | None = None) -> dict[str, Any]:
         """会话通知车道用的一跳增量：`since_rev` 之后的可见变化。
 
-        `rebase=True` 时 `text` 是整份文档（压缩/归并把旧增量重写过，或增量超过基座
-        的四分之一）；调用方把游标置到 `rev`，下一跳从零开始累计。
+        只投增量（新增/改写行 + `Deleted memories:` 行）。整份文档只在基座初始化与
+        压缩边界出现，这里不再按大小或归并类型改投整篇。
         """
         latest = self.latest_memory_revision()
         since = max(int(since_rev or 0), 0)
-        document_text = str(self.snapshot_text() or "").strip()
-        cap = max(800, min(4000, len(document_text) // 4))
         revisions = self._memory_repo.revisions_after(since)
         if not revisions:
             return {"rev": latest, "from_rev": since, "text": "", "rebase": False}
-        consolidated = any(str(item.get("op") or "") == "consolidate" for item in revisions)
-        lines: list[str] = []
+        visible: list[str] = []
+        deleted: list[str] = []
         seen: set[str] = set()
         for item in revisions:
             for line in str(item.get("rendered") or "").splitlines():
                 key = line.strip()
-                if not key or key in seen:
+                if not key or key in seen or key == MEMORY_DELETED_HEADING:
                     continue
                 seen.add(key)
-                lines.append(key)
-        rendered = "\n".join(lines)
-        if consolidated or (rendered and len(rendered) > cap):
-            return {"rev": latest, "from_rev": since, "text": document_text, "rebase": True}
-        return {"rev": latest, "from_rev": since, "text": rendered, "rebase": False}
+                (deleted if key.startswith("- ") else visible).append(key)
+        parts: list[str] = []
+        if visible:
+            parts.append("\n".join(visible))
+        if deleted:
+            parts.append("\n".join([MEMORY_DELETED_HEADING, *deleted]))
+        return {"rev": latest, "from_rev": since, "text": "\n".join(parts).strip(), "rebase": False}
 
     def reformat_store(self, *, now_iso: str | None = None) -> dict[str, Any]:
         """The one pass that moves everything to the current on-disk shape.

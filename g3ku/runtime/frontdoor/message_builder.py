@@ -71,6 +71,9 @@ MEMORY_SNAPSHOT_TEXT_ATTR = "_frontdoor_memory_snapshot_text"
 MEMORY_SNAPSHOT_ADOPTED_AT_ATTR = "_frontdoor_memory_snapshot_adopted_at"
 MEMORY_SNAPSHOT_ADOPTION_REASON_ATTR = "_frontdoor_memory_snapshot_adoption_reason"
 MEMORY_SNAPSHOT_ADOPTION_FIRST_REQUEST = "session_first_request"
+# 压缩边界：上下文被整段重写，头部基座在这一跳更新到最新文档。
+MEMORY_SNAPSHOT_ADOPTION_TOKEN_COMPRESSION = "token_compression"
+MEMORY_SNAPSHOT_ADOPTION_MANUAL_COMPRESSION = "manual_compression"
 
 
 def _read_memory_snapshot_text(session: Any, memory_manager: Any) -> str | None:

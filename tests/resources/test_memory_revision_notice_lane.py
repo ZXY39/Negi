@@ -101,15 +101,23 @@ def test_revision_is_written_only_for_visible_changes(tmp_path) -> None:
         manager.close()
 
 
-def test_consolidation_commit_forces_a_rebase(tmp_path) -> None:
+def test_consolidation_commit_reports_retired_rows_as_deleted(tmp_path) -> None:
+    """归并不再重发整篇：被退场的行以 `Deleted memories:` 一节进增量。"""
     manager = _manager(tmp_path)
     try:
-        row = manager._memory_repo.create_memory(
+        retired = manager._memory_repo.create_memory(
             memory_body="要归并的规则",
             minimal_memory="要归并的规则",
             source="self",
             from_user=False,
             now_iso="2026-04-25T00:00:00+08:00",
+        )
+        manager._memory_repo.create_memory(
+            memory_body="保留的规则",
+            minimal_memory="保留的规则",
+            source="self",
+            from_user=False,
+            now_iso="2026-04-25T00:00:01+08:00",
         )
         manager._rebuild_memory_snapshot_from_sqlite(now_iso="2026-04-25T00:00:00+08:00")
         module = _module()
@@ -123,21 +131,31 @@ def test_consolidation_commit_forces_a_rebase(tmp_path) -> None:
             consolidation_writes=[
                 {"note_ref": "play_flow", "body": "## 方法论\n- 先读再写\n", "edits": []}
             ],
-            retirements=[{"memory_id": row["memory_id"], "note_ref": "play_flow"}],
+            retirements=[{"memory_id": retired["memory_id"], "note_ref": "play_flow"}],
         )
         manager._commit_validated_write(validated)
 
         assert manager.latest_memory_revision() >= 1
         delta = manager.memory_notice_delta(since_rev=0)
-        assert delta["rebase"] is True
-        assert delta["text"] == str(manager.snapshot_text() or "").strip()
+        assert delta["rebase"] is False
+        assert "Deleted memories:" in delta["text"]
+        assert "要归并的规则" in delta["text"]
+        assert "保留的规则" not in delta["text"]
     finally:
         manager.close()
 
 
-def test_oversized_delta_falls_back_to_a_rebase(tmp_path) -> None:
+def test_oversized_delta_stays_incremental(tmp_path) -> None:
+    """增量再大也不改投整篇：整份只在基座初始化与压缩边界出现。"""
     manager = _manager(tmp_path)
     try:
+        manager._memory_repo.create_memory(
+            memory_body="早已存在的规则",
+            minimal_memory="早已存在的规则",
+            source="self",
+            from_user=False,
+            now_iso="2026-04-25T00:00:00+08:00",
+        )
         manager._rebuild_memory_snapshot_from_sqlite(now_iso="2026-04-25T00:00:00+08:00")
         _commit(
             manager,
@@ -147,8 +165,10 @@ def test_oversized_delta_falls_back_to_a_rebase(tmp_path) -> None:
             ],
         )
         delta = manager.memory_notice_delta(since_rev=0)
-        assert delta["rebase"] is True
-        assert delta["text"] == str(manager.snapshot_text() or "").strip()
+        assert delta["rebase"] is False
+        assert "第0条规则" in delta["text"]
+        assert "第4条规则" in delta["text"]
+        assert "早已存在的规则" not in delta["text"]
     finally:
         manager.close()
 
@@ -213,12 +233,17 @@ def test_notice_lane_merges_skill_and_memory_into_one_message() -> None:
     assert third is None
 
 
-def test_notice_lane_rebase_replaces_the_cursor_base() -> None:
+def test_notice_lane_carries_deleted_memory_lines() -> None:
+    """删除以增量文本进同一条通知，不触发整篇重投。"""
     clear_skill_roster_notice_stores()
-    scope = "session:web:rebase"
+    scope = "session:web:deleted"
 
     def provider(*, since_rev: int, base_rev: int, initialized: bool = False):
-        return {"rev": 9, "text": "整份文档", "rebase": True}
+        return {
+            "rev": 5,
+            "text": "261022:新行\nDeleted memories:\n- 261021:旧行",
+            "rebase": False,
+        }
 
     message, _ = deliver_for_scope(
         scope,
@@ -226,9 +251,14 @@ def test_notice_lane_rebase_replaces_the_cursor_base() -> None:
         now="2026-04-25T00:00:00+08:00",
         memory_provider=provider,
     )
-    assert message is not None
-    assert "整份文档" in str(message.get("content") or "")
-    assert notice_context_for(scope)["memory_cursor"] == {"rev": 9, "base_rev": 9, "initialized": True}
+    content = str(message.get("content") or "")
+    assert "Deleted memories:" in content
+    assert "261021:旧行" in content
+    assert notice_context_for(scope)["memory_cursor"] == {
+        "rev": 5,
+        "base_rev": 0,
+        "initialized": True,
+    }
 
 
 def test_frontdoor_provider_aligns_the_first_cursor_without_replaying_history() -> None:

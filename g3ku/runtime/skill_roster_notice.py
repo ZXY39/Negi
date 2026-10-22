@@ -135,6 +135,12 @@ def deliver_for_scope(
     return message, (pending if message is not None else [])
 
 
+def session_scope_key(session_key: Any) -> str:
+    """前门台账作用域：按会话一条，与节点道 `node:<task>:<node>` 同构。"""
+    normalized = str(session_key or '').strip()
+    return f'session:{normalized}' if normalized else ''
+
+
 def reset_memory_cursor(scope_key: str) -> None:
     """压缩跳的唯一动作：下一跳重新以整份快照作基座。
 
@@ -470,6 +476,7 @@ __all__ = [
     'render_notice_lines',
     'render_notice_text',
     'reset_memory_cursor',
+    'session_scope_key',
     'set_notice_context',
     'strip_skill_roster_notice_echo',
 ]

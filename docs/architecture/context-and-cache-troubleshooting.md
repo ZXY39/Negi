@@ -227,11 +227,11 @@ Heartbeat / cron 不在主 CEO/frontdoor 路径上使用单独的短 `ceo_heartb
 - 不变量：验收 bootstrap 在 `create_acceptance_node` 一次定稿，之后没有任何写路径回写它（`_refresh_acceptance_node_metadata` 只维护 metadata）。每轮的变化量全部落在**只进本轮的尾块**里：交接通知（`_acceptance_handoff_message`）与重建尾块（`_acceptance_turn_tail`）都只给 `result_payload_ref` / `final_output_ref` + 按内联额度（`_NODE_MESSAGE_INLINE_CHAR_LIMIT`）交付的摘要——额度内整篇、超限才给头段并指回同一个 ref，正文的完整副本住在 ref 指向的 artifact 里，上下文里不堆历次全文；尾块是每轮重付的未缓存段，因此它的实际尺寸就是这套额度的成本（实盘提交摘要与打回反馈都落在额度内）；恢复指纹同样只认验收标准模板 + 提交载荷 ref。派发侧合同见 `main-task-runtime.md`「验收节点：提前创建、激活与握手重派发」。
 - 症状：验收节点上下文里堆着历次交付全文、或对已被取代的提交下结论 → 先确认 `node.prompt` 跨轮逐字节未变（变了就是刷新路径回写了 bootstrap），再看 `request_seed_source` 是否仍在 `scaffold_seed*`。
 
-### 3.17 长期记忆快照的会话级冻结
+### 3.17 长期记忆的头部基座与增量
 
-- 坑：`## 长期记忆` 块注入在 message index 1（`system` 之后、全部历史之前），身后是整段对话历史。块字节一变，可复用前缀就只剩 `system` 与 `tools[]`：实测中位请求要重铺 84% 的正文，其中块本身只占 8%，其余全是被它顶掉的历史。
-- 不变量：取数是**会话级冻结**，采纳点只有一个 = 会话首请求；压缩轮末、手动压缩与空闲边界都不再改写它，之后的变化由修订流增量进上下文（规则本体见 `runtime-overview.md`「Memory Runtime State」）。所以这个块在一次会话的整个生命周期内字节恒定：跨轮可比性投影与 durable 基线两侧都剥这个块，它的变化因此永不应被 `comparable_to_previous_request` 报成前缀破坏；`build_stable_prompt_cache_key` 同样不含它——本地 cache key 对这个块是盲的，判读只能看 artifact 的 `memory_snapshot` 字段。
-- 症状：某轮命中前缀在第二条消息就分叉且 `memory_snapshot.hash` 同时变了 → 会话基座被中途改写，属缺陷（采纳点只剩首请求）；`adoption_reason` 出现 `idle_refresh` / `token_compression` / `manual_compression` 同理，是旧代码或旧数据的读数。「用户说记住/忘掉，模型照旧」→ 先看该会话的 `memory_cursor` 是否落后于最新修订，再看下一跳 artifact 里有没有 `### Long-term memory updates` 一节；两者都在但记忆没进上下文，才是投递链问题。
+- 坑：这个块只在**压缩边界**更新（内联 `token_compression` 轮末、手动压缩），不是每跳现取。块字节一变，可复用前缀就只剩 `system` 与 `tools[]`：实测中位请求要重铺 84% 的正文，其中块本身只占 8%，其余全是被它顶掉的历史——所以更新点被限制在"前缀反正已经断了"的压缩跳；空闲边界不更新。
+- 不变量：取数是**会话级基座**，首次请求采纳一次，之后只在压缩边界换版本（规则本体见 `runtime-overview.md`「Memory Runtime State」）。两处更新都必须先冲刷复核窗口并落盘记忆批次，再读盘，反序会采纳到旧文档。压缩之间新增/改写/删除的行由修订流增量进上下文（`### Long-term memory updates`，退场行在 `Deleted memories:` 一节）；增量不重投整篇。跨轮可比性投影与 durable 基线两侧都剥这个块，`build_stable_prompt_cache_key` 同样不含它——本地 cache key 对这个块是盲的，判读看 artifact 的 `memory_snapshot` 字段与通知消息。
+- 症状：`adoption_reason` 是 `session_first_request` / `token_compression` / `manual_compression` 之外的值（例如 `idle_refresh`）→ 旧代码或旧数据的读数。某轮命中前缀在第二条消息就分叉、`memory_snapshot.hash` 同时变了、而该跳不是压缩跳 → 基座被非边界路径改写，属缺陷。「用户说记住/忘掉，模型照旧」→ 先看该会话 `memory_cursor` 是否落后于最新修订，再看下一跳有没有 `### Long-term memory updates`；两者都在却没进上下文，才是投递链问题。
 
 ### 3.18 静态声明钉在请求体头部
 
