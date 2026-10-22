@@ -308,7 +308,8 @@ test("勾选态下不填任何口令就能导出，提交空口令", async () =>
         ["export", { password: "", useProjectPassword: true, includeConfig: true, includeMemory: false }],
     ]);
     assert.equal(app.anchors.length, 1);
-    assert.equal(app.toasts.at(-1).text, "共 6 个文件，导入时输项目解锁密码。");
+    assert.equal(app.toasts.at(-1).title, "配置包已生成");
+    assert.equal(app.toasts.at(-1).text, "共 6 个文件。下载已发起，取消保存则不会落盘；导入时输项目解锁密码。");
 });
 
 test("自定义口令两次不一致时不发请求", async () => {
@@ -339,7 +340,7 @@ test("自定义口令导出成功后按服务端返回的文件名触发下载�
         "http://localhost/api/bootstrap/config-bundle/download?filename=g3ku-config-bundle-20260924-010203.g3kucb",
     ]);
     assert.equal(app.U.configBundleExportPassword.value, "");
-    assert.equal(app.toasts.at(-1).text, "共 6 个文件。口令不会随文件另存，丢了无法导入。");
+    assert.equal(app.toasts.at(-1).text, "共 6 个文件。下载已发起，取消保存则不会落盘；口令不会随文件另存，丢了无法导入。");
     assert.equal(app.U.configBundleExport.disabled, false);
 });
 
@@ -502,7 +503,7 @@ test("勾上记忆才提交 includeMemory，提示按面报数", async () => {
         includeConfig: true,
         includeMemory: true,
     }]);
-    assert.equal(app.toasts.at(-1).text, "共 9 个文件（配置 4、记忆 5），导入时输项目解锁密码。");
+    assert.equal(app.toasts.at(-1).text, "共 9 个文件（配置 4、记忆 5）。下载已发起，取消保存则不会落盘；导入时输项目解锁密码。");
 });
 
 test("范围两颗都不勾时导出与导入都不提交", async () => {

@@ -730,6 +730,7 @@ const U = {
     projectSettingsClose: document.getElementById("project-settings-close-btn"),
     projectSettingsOpenPassword: document.getElementById("project-settings-open-password-btn"),
     projectSettingsOpenBundle: document.getElementById("project-settings-open-bundle-btn"),
+    readingScale: document.getElementById("project-settings-reading-scale"),
     updateNavDot: document.getElementById("update-nav-dot"),
     projectSettingsUpdateText: document.getElementById("project-settings-update-text"),
     projectSettingsCheckUpdate: document.getElementById("project-settings-check-update-btn"),
@@ -8294,10 +8295,10 @@ async function submitConfigBundleExport() {
         clearConfigBundleInputs();
         const counts = `共 ${item?.entry_count || 0} 个文件${bundleScopeSummary(item)}`;
         showToast({
-            title: "配置包已导出",
+            title: "配置包已生成",
             text: useProject
-                ? `${counts}，导入时输项目解锁密码。`
-                : `${counts}。口令不会随文件另存，丢了无法导入。`,
+                ? `${counts}。下载已发起，取消保存则不会落盘；导入时输项目解锁密码。`
+                : `${counts}。下载已发起，取消保存则不会落盘；口令不会随文件另存，丢了无法导入。`,
             kind: "success",
         });
     } catch (error) {
@@ -10098,10 +10099,51 @@ function initializeTheme() {
     updateThemeToggleA11y();
 }
 
+const READING_SCALE_KEY = "g3ku.ui.reading-scale.v1";
+const READING_SCALE_DEFAULT = 1.1;
+const READING_SCALE_MIN = 0.9;
+const READING_SCALE_MAX = 1.3;
+const READING_SCALE_STEP = 0.05;
+
+// 字号档位只写 --reading-font-scale：CSS 里乘在正文/回复/代码块/笔记正文的字号上，
+// 控件字号与间距不跟，所以它不同于窗口缩放（桌面壳的 ZoomFactor）。
+function normalizeReadingScale(raw) {
+    const text = String(raw ?? "").trim();
+    // 空串要当"没设过"：下拉框没有匹配项时读出来就是空串，而 Number("") 是 0。
+    if (!text) return READING_SCALE_DEFAULT;
+    const value = Number(text);
+    if (!Number.isFinite(value)) return READING_SCALE_DEFAULT;
+    const clamped = Math.min(READING_SCALE_MAX, Math.max(READING_SCALE_MIN, value));
+    const snapped = Math.round(clamped / READING_SCALE_STEP) * READING_SCALE_STEP;
+    return Math.round(snapped * 100) / 100;
+}
+
+function applyReadingScale(raw) {
+    const scale = normalizeReadingScale(raw);
+    if (document.documentElement?.style?.setProperty) {
+        document.documentElement.style.setProperty("--reading-font-scale", String(scale));
+    }
+    if (U.readingScale) U.readingScale.value = String(scale);
+    return scale;
+}
+
+function initializeReadingScale() {
+    const stored = readStoredUiPreference(READING_SCALE_KEY);
+    applyReadingScale(stored ? stored : READING_SCALE_DEFAULT);
+}
+
+function bindReadingScale() {
+    U.readingScale?.addEventListener("change", () => {
+        const scale = applyReadingScale(U.readingScale.value);
+        writeStoredUiPreference(READING_SCALE_KEY, String(scale));
+    });
+}
+
 function initializeUiPreferences() {
     // 本模块会被 tests/resources 的 vm 桩环境直接求值，那里没有 documentElement。
     if (!document.documentElement) return;
     initializeTheme();
+    initializeReadingScale();
     S.ceoSessionOrder = readStoredCeoSessionOrder();
     S.ceoChannelCollapsed = readStoredCeoChannelCollapse();
 }
@@ -10130,6 +10172,7 @@ function bind() {
 function bindProjectSettings() {
     U.theme?.addEventListener("click", toggleTheme);
     bindModelRetryToastExpansion();
+    bindReadingScale();
     U.projectSettings?.addEventListener("click", () => openProjectSettingsDialog());
     U.projectSettingsClose?.addEventListener("click", () => closeProjectSettingsDialog());
     U.projectSettingsBackdrop?.addEventListener("click", (e) => {

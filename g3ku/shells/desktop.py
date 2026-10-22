@@ -12,6 +12,10 @@
 pywebview 的 `ALLOW_DOWNLOADS` 默认关，`DownloadStarting` 会被直接取消，界面里的下载
 （导出配置包）就是这样在窗口里静默消失的。开壳前把它打开，下载就落到窗口自己的
 「另存为」对话框上；浏览器轨道不受影响。
+
+窗口按 `DEFAULT_ZOOM_FACTOR` 打开：这版界面在 100% 下对 1280×860 的窗偏大，缩放走
+WebView2 的 `ZoomFactor`（原生缩放，不是 CSS），每次 `loaded` 重设一次，所以刷新后
+仍是 75%。界面里的「字号」是另一个旋钮，只动阅读面（见 web-and-admin.md）。
 """
 
 from __future__ import annotations
@@ -24,11 +28,21 @@ WINDOW_HEIGHT = 860
 MICROPHONE_PERMISSION = "Microphone"
 PERMISSION_ALLOWED = 1
 DOWNLOADS_SETTING = "ALLOW_DOWNLOADS"
+DEFAULT_ZOOM_FACTOR = 0.75
 
 
 def apply_shell_settings(settings: Any) -> None:
     """把壳需要的 pywebview 全局开关落到实处。"""
     settings[DOWNLOADS_SETTING] = True
+
+
+def apply_zoom(control: Any, factor: float = DEFAULT_ZOOM_FACTOR) -> str:
+    """把窗口缩放设到默认档；返回一句给操作员看的判读。"""
+    try:
+        control.ZoomFactor = float(factor)
+    except Exception as exc:
+        return f"窗口缩放未生效：{type(exc).__name__}"
+    return f"窗口缩放 {round(factor * 100):d}%"
 
 
 def shell_url(port: int | None = None) -> str:
@@ -95,6 +109,15 @@ def _attach_microphone_permission(window: Any) -> str:
     return "麦克风权限已交给界面按需申请"
 
 
+def _attach_window_controls(window: Any) -> str:
+    """窗口就绪后一次性交出缩放与麦克风，拼成一行给操作员看。"""
+    try:
+        control = window.native.webview
+    except Exception as exc:
+        return f"未能接管窗口控制：{type(exc).__name__}"
+    return f"{apply_zoom(control)}；{_attach_microphone_permission(window)}"
+
+
 def run_desktop_shell(url: str | None = None, *, port: int | None = None) -> int:
     """开一扇指向本地服务的窗口，窗口关闭即返回。"""
     problem = import_error()
@@ -115,7 +138,7 @@ def run_desktop_shell(url: str | None = None, *, port: int | None = None) -> int
     )
 
     def on_loaded() -> None:
-        print(f"[negi] 窗口已连接 {target}；{_attach_microphone_permission(window)}")
+        print(f"[negi] 窗口已连接 {target}；{_attach_window_controls(window)}")
 
     window.events.loaded += on_loaded
     print(f"[negi] 正在打开桌面窗口 {target}")
