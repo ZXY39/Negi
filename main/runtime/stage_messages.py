@@ -284,37 +284,47 @@ def build_execution_stage_result_block_message(*, node_kind: str, stage_gate: di
 
 
 def build_node_plain_text_reply_block_message(*, node_kind: str, stage_gate: dict[str, Any]) -> str:
-    """阶段进行中、预算未耗尽时只回纯文本的打回文案。
+    """纯文本不是交付：没有工具调用时一律打回。
 
-    只在「有活动阶段且未 `transition_required`」时非空：没开首阶段与预算耗尽两种状态由
-    `build_execution_stage_result_block_message` 负责，两条道的限次与出口不同。
+    有活动阶段且未 `transition_required` 时保留阶段目标与预算读数，并给出
+    「继续工具 / submit_next_stage / submit_final_result」三档；其余情况给两档
+    「继续工具 / submit_final_result」。
     """
     normalized_kind = str(node_kind or '').strip().lower()
     if normalized_kind not in _STAGE_BUDGET_NODE_KINDS:
         return ''
-    if not bool(stage_gate.get('enabled')):
-        return ''
-    if not bool(stage_gate.get('has_active_stage')) or bool(stage_gate.get('transition_required')):
-        return ''
-    active = stage_gate.get('active_stage') if isinstance(stage_gate.get('active_stage'), dict) else {}
-    goal = str(active.get('stage_goal') or '').strip() or '(empty)'
-    mode = str(active.get('mode') or '').strip() or 'autonomous'
-    status = str(active.get('status') or '').strip() or 'in progress'
-    used = int(active.get('tool_rounds_used') or 0)
-    budget = int(active.get('tool_round_budget') or 0)
     work = (
         'call ordinary tools to keep verifying the acceptance criteria'
         if normalized_kind == 'acceptance'
-        else 'call ordinary tools (spawn child nodes if needed) to keep advancing the stage goal'
+        else 'call ordinary tools (spawn child nodes if needed) to keep advancing'
     )
+    if (
+        bool(stage_gate.get('enabled'))
+        and bool(stage_gate.get('has_active_stage'))
+        and not bool(stage_gate.get('transition_required'))
+    ):
+        active = stage_gate.get('active_stage') if isinstance(stage_gate.get('active_stage'), dict) else {}
+        goal = str(active.get('stage_goal') or '').strip() or '(empty)'
+        mode = str(active.get('mode') or '').strip() or 'autonomous'
+        status = str(active.get('status') or '').strip() or 'in progress'
+        used = int(active.get('tool_rounds_used') or 0)
+        budget = int(active.get('tool_round_budget') or 0)
+        return (
+            'This round output plain text with no tool call. The runtime does not treat it as a delivery and will not '
+            'submit anything on your behalf. '
+            f'Current stage [{mode} | {status}] goal: {goal}, ordinary tool rounds used {used}/{budget}. '
+            f'The next step is exactly one of three: {work}; '
+            'if the goal is done, call `submit_final_result` to submit properly (put `status`, `answer` and '
+            '`evidence` all in the tool arguments); '
+            'if new work is needed, submit `submit_next_stage` in the same batch as the target tool to open the next '
+            'stage. '
+            'Writing plans, progress notes or "what I will do next" into the reply body counts as no submission at all.'
+        )
     return (
         'This round output plain text with no tool call. The runtime does not treat it as a delivery and will not '
         'submit anything on your behalf. '
-        f'Current stage [{mode} | {status}] goal: {goal}, ordinary tool rounds used {used}/{budget}. '
-        f'The next step is exactly one of three: {work}; '
+        f'The next step is exactly one of two: {work}; '
         'if the goal is done, call `submit_final_result` to submit properly (put `status`, `answer` and '
-        '`evidence` all in the tool arguments); '
-        'if new work is needed, submit `submit_next_stage` in the same batch as the target tool to open the next '
-        'stage. '
+        '`evidence` all in the tool arguments). '
         'Writing plans, progress notes or "what I will do next" into the reply body counts as no submission at all.'
     )

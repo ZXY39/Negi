@@ -229,7 +229,6 @@ from main.runtime.stage_budget import (
 )
 from main.runtime.stage_messages import (
     build_execution_stage_overlay,
-    build_execution_stage_result_block_message,
     build_node_plain_text_reply_block_message,
 )
 from main.runtime.subtree_hold import (
@@ -2036,44 +2035,14 @@ class ReActToolLoop:
                 )
                 continue
 
-            stage_protocol_message = (
-                build_execution_stage_result_block_message(
-                    node_kind=node.node_kind,
-                    stage_gate=stage_gate,
-                )
-                if bool(stage_gate.get('enabled'))
-                else ''
-            )
-            if bool(stage_gate.get('enabled')) and stage_protocol_message:
-                invalid_stage_submission_count += 1
-                last_invalid_stage_submission_reason = (
-                    str(stage_protocol_message or '').strip()
-                    or 'reply did not use tools, submit_next_stage, or submit_final_result'
-                )
-                if invalid_stage_submission_count >= _INVALID_STAGE_SUBMISSION_LIMIT:
-                    active_stage = stage_gate.get('active_stage') if isinstance(stage_gate.get('active_stage'), dict) else {}
-                    return self._invalid_stage_submission_failure(
-                        reason=last_invalid_stage_submission_reason,
-                        count=invalid_stage_submission_count,
-                        stage_goal=str((active_stage or {}).get('stage_goal') or ''),
-                    )
-                repair_overlay_text = stage_protocol_message or build_execution_stage_overlay(
-                    node_kind=node.node_kind,
-                    stage_gate=stage_gate,
-                )
-                continue
-
-            # 阶段进行中、预算还剩一半却只回一段规划文字：过去这里直接落到下面的
-            # auto-wrap，把这段文字升格成 success+final 交付（事故 task:355a512a78d8：
-            # 三轮同一份纯文本载荷，磁盘零变更）。现在打回并自动续跑，逼节点继续
-            # 用工具，连续到上限才收口成可恢复的错误暂停。
+            # 纯文本不是交付：有工具调用时正文是进展文本，继续执行；没有工具调用
+            # 且不是可解析 final 载荷时一律打回，连续到上限转可恢复的错误暂停。
             plain_text_reply_message = (
                 build_node_plain_text_reply_block_message(
                     node_kind=node.node_kind,
                     stage_gate=stage_gate,
                 )
-                if bool(stage_gate.get('enabled'))
-                and not matched_raw_final_result_payload
+                if not matched_raw_final_result_payload
                 and str(response.content or '').strip()
                 else ''
             )
@@ -2085,60 +2054,6 @@ class ReActToolLoop:
                         reply_excerpt=str(response.content or ''),
                     )
                 repair_overlay_text = plain_text_reply_message
-                continue
-
-            auto_wrapped_final_call = (
-                None
-                if matched_raw_final_result_payload
-                else self._wrap_plain_text_final_result_tool_call(
-                    response_content=response.content,
-                    message_history=message_history,
-                )
-            )
-            if auto_wrapped_final_call is not None:
-                terminal_result, next_history, contract_violations, protocol_error = await self._handle_final_result_tool_turn(
-                    task=task,
-                    node=node,
-                    response=response,
-                    tool_call=auto_wrapped_final_call,
-                    tools=tools,
-                    message_history=message_history,
-                    runtime_context=runtime_context,
-                    assistant_content=response.content,
-                )
-                message_history = next_history
-                if terminal_result is not None:
-                    self._log_service.remove_frame(task.task_id, node.node_id, publish_snapshot=True)
-                    return terminal_result
-                reason_parts = list(contract_violations or [])
-                if protocol_error:
-                    reason_parts.append(protocol_error)
-                reason = '; '.join(reason_parts) or f'{FINAL_RESULT_TOOL_NAME} rejected'
-                invalid_final_submission_count = self._apply_invalid_final_submission_strike(
-                    task_id=task.task_id,
-                    node_id=node.node_id,
-                    node_title=node.goal,
-                    count=invalid_final_submission_count,
-                    reason=reason,
-                    violations=reason_parts,
-                    response=response,
-                    response_tool_calls=response_tool_calls,
-                )
-                last_invalid_final_submission_reason = reason
-                last_contract_violations = reason_parts
-                if invalid_final_submission_count >= _INVALID_FINAL_SUBMISSION_LIMIT:
-                    return self._invalid_final_submission_failure(
-                        reason=reason,
-                        count=invalid_final_submission_count,
-                    )
-                repair_overlay_text = (
-                    self._result_contract_violation_message(
-                        reason_parts,
-                        node_kind=node.node_kind,
-                    )
-                    if reason_parts
-                    else self._result_protocol_message(node_kind=node.node_kind)
-                )
                 continue
 
             if not str(getattr(response, 'content', None) or '').strip():
@@ -6276,9 +6191,9 @@ class ReActToolLoop:
             evidence=[],
             remaining_work=[],
             blocking_reason=(
-                f'Node answered with plain text and no tool call {int(count or 0)} consecutive times '
-                f'while a stage with unused budget was active, instead of continuing with a tool '
-                f'or calling {FINAL_RESULT_TOOL_NAME}. Plain-text answers are never a delivery.{suffix}'
+                f'Node answered with plain text and no tool call {int(count or 0)} consecutive times, '
+                f'instead of continuing with a tool or calling {FINAL_RESULT_TOOL_NAME}. '
+                f'Plain-text answers are never a delivery.{suffix}'
             ),
             failure_disposition='pause',
         )
@@ -9428,31 +9343,6 @@ class ReActToolLoop:
             id=f'call:auto-stage:{int(invalid_stage_submission_count)}',
             name=STAGE_TOOL_NAME,
             arguments=arguments,
-        )
-
-    @classmethod
-    def _wrap_plain_text_final_result_tool_call(
-        cls,
-        *,
-        response_content: Any,
-        message_history: list[dict[str, Any]],
-    ) -> ToolCallRequest | None:
-        answer = str(response_content or '')
-        if not answer.strip():
-            return None
-        evidence = cls._auto_wrapped_final_result_evidence(message_history=message_history, response_content=answer)
-        return ToolCallRequest(
-            id='call:auto-final-wrap:1',
-            name=FINAL_RESULT_TOOL_NAME,
-            arguments={
-                'status': 'success',
-                'delivery_status': 'final',
-                'summary': 'auto-wrapped plain-text final result',
-                'answer': answer,
-                'evidence': evidence,
-                'remaining_work': [],
-                'blocking_reason': '',
-            },
         )
 
     @classmethod

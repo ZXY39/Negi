@@ -101,7 +101,7 @@ def test_presence_wording_replaces_the_callable_line() -> None:
         load_prompt("acceptance_execution.md"),
         CeoPromptBuilder(loop=SimpleNamespace(workspace=None))._read_prompt("ceo_frontdoor.md"),
     ):
-        assert "TOOL_CONTRACT_V1" in text
+        assert "TOOL_CONTRACT" in text
         assert "不执行" in text
 
 

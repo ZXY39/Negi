@@ -6901,18 +6901,45 @@ async def test_react_loop_retries_empty_response_until_valid_result(monkeypatch:
 
 
 @pytest.mark.asyncio
-async def test_react_loop_auto_wraps_plain_text_final_result() -> None:
+async def test_react_loop_bounces_plain_text_then_accepts_final_submission() -> None:
+    requests: list[dict[str, object]] = []
+
     class _Backend:
+        def __init__(self) -> None:
+            self.turn = 0
+
         async def chat(self, **kwargs):
-            _ = kwargs
+            requests.append(kwargs)
+            self.turn += 1
+            if self.turn == 1:
+                return LLMResponse(
+                    content='Final structured summary line 1\n- detail a\n- detail b',
+                    tool_calls=[],
+                    finish_reason='stop',
+                    usage={'input_tokens': 8, 'output_tokens': 3},
+                )
             return LLMResponse(
-                content='Final structured summary line 1\n- detail a\n- detail b',
-                tool_calls=[],
-                finish_reason='stop',
+                content='',
+                tool_calls=[
+                    ToolCallRequest(
+                        id='call:final',
+                        name='submit_final_result',
+                        arguments={
+                            'status': 'success',
+                            'delivery_status': 'final',
+                            'summary': 'done',
+                            'answer': 'done after bounce',
+                            'evidence': [],
+                            'remaining_work': [],
+                            'blocking_reason': '',
+                        },
+                    )
+                ],
+                finish_reason='tool_calls',
                 usage={'input_tokens': 8, 'output_tokens': 3},
             )
 
-    loop = ReActToolLoop(chat_backend=_Backend(), log_service=_FakeLogService(), max_iterations=2)
+    loop = ReActToolLoop(chat_backend=_Backend(), log_service=_FakeLogService(), max_iterations=3)
     result = await loop.run(
         task=SimpleNamespace(task_id='task-plain-final'),
         node=SimpleNamespace(node_id='node-plain-final', depth=0, node_kind='execution'),
@@ -6923,18 +6950,18 @@ async def test_react_loop_auto_wraps_plain_text_final_result() -> None:
         tools={'submit_final_result': _submit_final_result_tool()},
         model_refs=['fake'],
         runtime_context={'task_id': 'task-plain-final', 'node_id': 'node-plain-final'},
-        max_iterations=2,
+        max_iterations=3,
     )
 
     assert result.status == 'success'
     assert result.delivery_status == 'final'
-    assert result.answer == 'Final structured summary line 1\n- detail a\n- detail b'
-    assert result.summary == 'auto-wrapped plain-text final result'
-    assert result.evidence == []
+    assert result.answer == 'done after bounce'
+    assert result.summary == 'done'
+    assert 'does not treat it as a delivery' in _request_message_text(requests[1])
 
 
 @pytest.mark.asyncio
-async def test_react_loop_auto_wraps_plain_text_final_result_with_tool_evidence() -> None:
+async def test_react_loop_bounces_plain_text_after_tool_usage() -> None:
     executed: list[int] = []
 
     class _Backend:
@@ -6957,14 +6984,35 @@ async def test_react_loop_auto_wraps_plain_text_final_result_with_tool_evidence(
                     finish_reason='tool_calls',
                     usage={'input_tokens': 8, 'output_tokens': 3},
                 )
+            if self.turn == 2:
+                return LLMResponse(
+                    content='Final answer after tool usage',
+                    tool_calls=[],
+                    finish_reason='stop',
+                    usage={'input_tokens': 8, 'output_tokens': 3},
+                )
             return LLMResponse(
-                content='Final answer after tool usage',
-                tool_calls=[],
-                finish_reason='stop',
+                content='',
+                tool_calls=[
+                    ToolCallRequest(
+                        id='call:final',
+                        name='submit_final_result',
+                        arguments={
+                            'status': 'success',
+                            'delivery_status': 'final',
+                            'summary': 'done',
+                            'answer': 'done after tool bounce',
+                            'evidence': [],
+                            'remaining_work': [],
+                            'blocking_reason': '',
+                        },
+                    )
+                ],
+                finish_reason='tool_calls',
                 usage={'input_tokens': 8, 'output_tokens': 3},
             )
 
-    loop = ReActToolLoop(chat_backend=_Backend(), log_service=_FakeLogService(), max_iterations=3)
+    loop = ReActToolLoop(chat_backend=_Backend(), log_service=_FakeLogService(), max_iterations=4)
     result = await loop.run(
         task=SimpleNamespace(task_id='task-plain-final-with-tools'),
         node=SimpleNamespace(node_id='node-plain-final-with-tools', depth=0, node_kind='execution'),
@@ -6978,14 +7026,118 @@ async def test_react_loop_auto_wraps_plain_text_final_result_with_tool_evidence(
         },
         model_refs=['fake'],
         runtime_context={'task_id': 'task-plain-final-with-tools', 'node_id': 'node-plain-final-with-tools'},
-        max_iterations=3,
+        max_iterations=4,
     )
 
     assert executed == [2]
     assert result.status == 'success'
-    assert result.answer == 'Final answer after tool usage'
-    assert result.evidence
-    assert any('count_tool' in str(item.note or '') for item in result.evidence)
+    assert result.answer == 'done after tool bounce'
+
+
+@pytest.mark.asyncio
+async def test_react_loop_allows_progress_text_with_tool_calls() -> None:
+    requests: list[dict[str, object]] = []
+    executed: list[int] = []
+
+    class _Backend:
+        def __init__(self) -> None:
+            self.turn = 0
+
+        async def chat(self, **kwargs):
+            requests.append(kwargs)
+            self.turn += 1
+            if self.turn == 1:
+                return LLMResponse(
+                    content='正在核对第二批文件',
+                    tool_calls=[
+                        ToolCallRequest(
+                            id='call:count',
+                            name='count_tool',
+                            arguments={'count': 1},
+                        )
+                    ],
+                    finish_reason='tool_calls',
+                    usage={'input_tokens': 8, 'output_tokens': 3},
+                )
+            return LLMResponse(
+                content='',
+                tool_calls=[
+                    ToolCallRequest(
+                        id='call:final',
+                        name='submit_final_result',
+                        arguments={
+                            'status': 'success',
+                            'delivery_status': 'final',
+                            'summary': 'done',
+                            'answer': 'done',
+                            'evidence': [],
+                            'remaining_work': [],
+                            'blocking_reason': '',
+                        },
+                    )
+                ],
+                finish_reason='tool_calls',
+                usage={'input_tokens': 8, 'output_tokens': 3},
+            )
+
+    loop = ReActToolLoop(chat_backend=_Backend(), log_service=_FakeLogService(), max_iterations=3)
+    result = await loop.run(
+        task=SimpleNamespace(task_id='task-progress-text'),
+        node=SimpleNamespace(node_id='node-progress-text', depth=0, node_kind='execution'),
+        messages=[
+            {'role': 'system', 'content': 'system'},
+            {'role': 'user', 'content': '{"task_id":"task-progress-text","goal":"demo"}'},
+        ],
+        tools={
+            'count_tool': _CountTool(executed),
+            'submit_final_result': _submit_final_result_tool(),
+        },
+        model_refs=['fake'],
+        runtime_context={'task_id': 'task-progress-text', 'node_id': 'node-progress-text'},
+        max_iterations=3,
+    )
+
+    assert executed == [1]
+    assert result.status == 'success'
+    assert '正在核对第二批文件' in _request_message_text(requests[1])
+    assert 'does not treat it as a delivery' not in _request_message_text(requests[1])
+
+
+@pytest.mark.asyncio
+async def test_react_loop_pauses_after_three_plain_text_replies_without_a_stage() -> None:
+    turns: list[int] = []
+
+    class _Backend:
+        async def chat(self, **kwargs):
+            _ = kwargs
+            turns.append(1)
+            return LLMResponse(
+                content='接下来我要检查列错位。',
+                tool_calls=[],
+                finish_reason='stop',
+                usage={'input_tokens': 8, 'output_tokens': 3},
+            )
+
+    loop = ReActToolLoop(chat_backend=_Backend(), log_service=_FakeLogService(), max_iterations=4)
+    result = await loop.run(
+        task=SimpleNamespace(task_id='task-plain-text-strike-no-stage'),
+        node=SimpleNamespace(node_id='node-plain-text-strike-no-stage', depth=0, node_kind='execution'),
+        messages=[
+            {'role': 'system', 'content': 'system'},
+            {'role': 'user', 'content': '{"task_id":"task-plain-text-strike-no-stage","goal":"demo"}'},
+        ],
+        tools={'submit_final_result': _submit_final_result_tool()},
+        model_refs=['fake'],
+        runtime_context={'task_id': 'task-plain-text-strike-no-stage', 'node_id': 'node-plain-text-strike-no-stage'},
+        max_iterations=4,
+    )
+
+    assert len(turns) == _PLAIN_TEXT_REPLY_STRIKE_LIMIT
+    assert result.status == 'failed'
+    assert result.delivery_status == 'blocked'
+    assert result.summary == 'plain-text reply guard triggered'
+    assert result.failure_disposition == 'pause'
+    assert 'submit_final_result' in str(result.blocking_reason)
 
 
 def _midstage_stage_gate(*args, **kwargs) -> dict[str, object]:
