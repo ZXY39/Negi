@@ -4,6 +4,7 @@ import asyncio
 from pathlib import Path
 from types import SimpleNamespace
 
+import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
@@ -568,3 +569,33 @@ def test_composer_preflight_endpoint_covers_channel_session(tmp_path: Path, monk
     assert response.json()["item"]["estimated_total_tokens"] == 15_230
     # 空草稿照常估：渠道会话没有输入框内容，读数只能来自基线本身。
     assert captured["user_inputs"] == []
+
+
+@pytest.mark.asyncio
+async def test_manual_compression_marker_carries_the_turn_boundary() -> None:
+    from g3ku.runtime.api import ceo_sessions
+
+    captured: list[dict] = []
+
+    class _Session:
+        _frontdoor_turns = [
+            {"seq": 1, "turn_id": "t1", "text": "a", "tools": []},
+            {"seq": 2, "turn_id": "t2", "text": "b", "tools": []},
+        ]
+
+        def append_context_compression_marker(self, *, state, source, stats):
+            captured.append({"state": state, "source": source, "stats": dict(stats)})
+
+        def _sync_completed_continuity_snapshot(self, *, source_reason):
+            _ = source_reason
+
+    session = _Session()
+    await ceo_sessions._finish_manual_compression(
+        session,
+        status="completed",
+        marker_state="completed",
+        stats={"pre_tokens": 10, "post_tokens": 5, "boundary_turn_seq": len(session._frontdoor_turns)},
+        reason="",
+    )
+
+    assert captured[0]["stats"]["boundary_turn_seq"] == 2

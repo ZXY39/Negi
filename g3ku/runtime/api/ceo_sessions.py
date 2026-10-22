@@ -1270,6 +1270,8 @@ async def _execute_manual_context_compression(agent, runtime_session, *, pause_f
         key: result.get(key)
         for key in ("pre_tokens", "post_tokens", "provider_model", "context_window_tokens", "compression_mode")
     }
+    # 区分线要按回合边界切分回合账本；手动压缩跑在回合外，边界就是当下的账本长度。
+    stats["boundary_turn_seq"] = len(list(getattr(runtime_session, "_frontdoor_turns", []) or []))
     await _finish_manual_compression(
         runtime_session,
         status="completed",

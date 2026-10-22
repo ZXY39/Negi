@@ -69,7 +69,11 @@ from g3ku.runtime.frontdoor.message_builder import (
 from g3ku.runtime.frontdoor.token_preflight_compaction import (
     FrontdoorTokenPreflightResult,
 )
-from g3ku.runtime.frontdoor.turns import normalize_frontdoor_turns
+from g3ku.runtime.frontdoor.turns import (
+    append_frontdoor_turn,
+    build_frontdoor_turn_tools,
+    normalize_frontdoor_turns,
+)
 from g3ku.runtime.message_token_estimation import estimate_message_tokens
 from g3ku.runtime.project_environment import current_project_environment
 from g3ku.runtime.session_agent import (
@@ -8612,8 +8616,31 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
                     + ", ".join(verified_task_ids)
                     + "."
                 )
+        # 回合账本在这里落盘：一次工具周期一个 turn。工具结果只在执行完的这一跳拿得到，
+        # 放到 finalize 才写会让"只有工具、没有最终正文"的轮次整条缺席。
+        assistant_text = ""
+        for item in reversed(list(messages)):
+            if str(item.get("role") or "").strip().lower() != "assistant":
+                continue
+            assistant_text = str(item.get("content") or "")
+            break
+        turn_tool_results = [
+            {
+                **dict(item),
+                "started_at": str((dict(item.get("tool_message") or {})).get("started_at") or ""),
+                "finished_at": str((dict(item.get("tool_message") or {})).get("finished_at") or ""),
+            }
+            for item in list(tool_results or [])
+        ]
+        frontdoor_turns = append_frontdoor_turn(
+            state.get("frontdoor_turns") or [],
+            turn_id=str(state.get("frontdoor_turn_id") or "").strip(),
+            text=assistant_text,
+            tools=build_frontdoor_turn_tools(original_tool_call_payloads, turn_tool_results),
+        )
         result = {
             "messages": messages,
+            "frontdoor_turns": frontdoor_turns,
             "frontdoor_live_request_messages": list(messages),
             "frontdoor_request_body_messages": authoritative_request_body_messages,
             "used_tools": used_tools,

@@ -555,6 +555,10 @@ async def test_graph_execute_tools_marks_direct_contract_delivery(
         if str(message.get("role") or "").strip().lower() == "tool"
     )
     assert "TOOL_CONTRACT:filesystem_edit:tcf:delivery" in str(tool_message.get("content") or "")
+    # 契约投递也要进回合账本，刷新后会话轨才知道这里发生过一次加载。
+    ledger_tool = result["frontdoor_turns"][-1]["tools"][0]
+    assert ledger_tool["tool_name"] == "filesystem_edit"
+    assert ledger_tool["contract_delivery"] == "staged"
 
 
     delivery_events = [
@@ -868,3 +872,39 @@ async def test_rejected_batch_item_never_reaches_the_tool_executor(monkeypatch) 
     ]
     assert [item["tool_call_id"] for item in tool_messages] == ["call-1", "call-2", "call-3"]
     assert "用户不允许运行此工具" in str(tool_messages[1]["content"] or "")
+
+
+@pytest.mark.asyncio
+async def test_node_prepare_turn_seeds_the_session_turn_ledger(monkeypatch) -> None:
+    runner = create_agent_impl.CreateAgentCeoFrontDoorRunner(loop=SimpleNamespace())
+
+    async def _fake_graph_prepare(state, runtime=None):
+        _ = state, runtime
+        return {"messages": [{"role": "user", "content": "hi"}]}
+
+    synced: dict[str, object] = {}
+
+    async def _fake_emit(runtime=None):
+        _ = runtime
+
+    monkeypatch.setattr(runner, "_graph_prepare_turn", _fake_graph_prepare)
+    monkeypatch.setattr(
+        runner,
+        "_sync_runtime_session_frontdoor_state",
+        lambda *, state, runtime=None: synced.update(state),
+    )
+    monkeypatch.setattr(runner, "_emit_frontdoor_turns_sync_event", _fake_emit)
+
+    ledger = [{"seq": 1, "turn_id": "turn-1", "text": "prior", "tools": []}]
+    session = SimpleNamespace(
+        _frontdoor_turns=[dict(item) for item in ledger],
+        _current_turn_id=lambda: "turn-2",
+    )
+    runtime = SimpleNamespace(context=SimpleNamespace(session=session))
+
+    update = await runner._node_prepare_turn({}, runtime)
+
+    # 回合状态初值里账本是空的；起手不灌回去，下一次 sync 就会把会话账本清空。
+    assert update["frontdoor_turns"][0]["turn_id"] == "turn-1"
+    assert update["frontdoor_turn_id"] == "turn-2"
+    assert synced["frontdoor_turns"][0]["turn_id"] == "turn-1"

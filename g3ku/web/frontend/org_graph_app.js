@@ -4941,6 +4941,8 @@ function renderCeoTurnsIntoTurn(turn, turns = [], { interruptedMarker = false } 
     if (typeof bindTraceRoundToolStrips === "function") bindTraceRoundToolStrips(turn.listEl);
     if (typeof bindTraceFieldCopyActions === "function") bindTraceFieldCopyActions(turn.listEl);
     turn.steps = descriptors.length;
+    turn.railTurns = visibleTurns;
+    turn.railMetaLabel = ceoRailMetaLabel(turn, visibleTurns) || `${descriptors.length} 组`;
     turn.lastExecutionTraceSummary = { turns: descriptors };
     turn.flowEl.hidden = false;
     turn.flowEl.open = true;
@@ -4949,7 +4951,7 @@ function renderCeoTurnsIntoTurn(turn, turns = [], { interruptedMarker = false } 
     // 还在跑的挂回新的组体内——同一件事不再因为换帧而改变位置。
     pruneCeoLiveToolSteps(turn, turn.lastExecutionTraceSummary);
     if (turn?.liveToolStepsEl?.children?.length) ceoLiveToolStepHost(turn);
-    updateCeoTurnMeta(turn, ceoRailMetaLabel(turn) || `${descriptors.length} 组`);
+    updateCeoTurnMeta(turn, turn.railMetaLabel);
     if (typeof bindTraceOutputAutoLoad === "function") bindTraceOutputAutoLoad(turn.listEl);
     if (typeof hydrateTraceOutputBlocks === "function") {
         Array.from(turn.listEl.querySelectorAll?.(".task-trace-step[open]") || []).forEach((item) => {
@@ -5799,8 +5801,15 @@ function ensureActiveCeoTurn({ source = "", turnId = "" } = {}) {
 
 function updateCeoTurnMeta(turn, stateLabel) {
     if (!turn?.metaEl) return;
-    const stepLabel = turn.steps > 0 ? `${turn.steps} 个步骤` : "等待工具开始...";
     const nextStateLabel = String(stateLabel || "").trim();
+    const railLabel = String(turn?.railMetaLabel || "").trim();
+    // 轨道在场时这一行只报组数/调用数（见 `ceoRailMetaLabel`）；再在前面叠一层
+    // "N 个步骤" 是同一件事的第二种口径，且组数并不等于交互步骤数。
+    if (railLabel && nextStateLabel === railLabel) {
+        turn.metaEl.textContent = railLabel;
+        return;
+    }
+    const stepLabel = turn.steps > 0 ? `${turn.steps} 个步骤` : "等待工具开始...";
     turn.metaEl.textContent = nextStateLabel && nextStateLabel !== stepLabel ? `${stepLabel} - ${nextStateLabel}` : stepLabel;
 }
 
@@ -5808,9 +5817,10 @@ function updateCeoTurnMeta(turn, stateLabel) {
 // 工具帧不许把它换成"正在处理中"这种静态句子——一个十几秒的并行批次里那读起来
 // 就是"一直在加载、不刷新"，而刷新后快照重渲又把计数放了回来。
 function ceoRailMetaLabel(turn, turns = null) {
+    // 入参是账本 turn（带 tools），不是渲染分组；传渲染分组会把调用数恒算成 0。
     const items = Array.isArray(turns)
         ? turns
-        : (Array.isArray(turn?.lastExecutionTraceSummary?.turns) ? turn.lastExecutionTraceSummary.turns : []);
+        : (Array.isArray(turn?.railTurns) ? turn.railTurns : []);
     if (!items.length) return "";
     const toolCount = items.reduce((sum, item) => sum + (Array.isArray(item?.tools) ? item.tools.length : 0), 0);
     const running = turn.liveToolStepsEl
@@ -6989,7 +6999,9 @@ function finalizeCeoTurn(text, meta = {}) {
                 if (!finalTurns.length) turn.flowEl.open = true;
                 updateCeoTurnMeta(
                     turn,
-                    turn.hasError ? "处理完成，但有异常" : (hasRunningStep ? "已返回当前判断，后台任务仍在运行" : "处理完成")
+                    turn.hasError
+                        ? "处理完成，但有异常"
+                        : (turn.railMetaLabel || (hasRunningStep ? "已返回当前判断，后台任务仍在运行" : "处理完成"))
                 );
             } else {
                 turn.flowEl.hidden = true;
@@ -7068,7 +7080,9 @@ function finalizeCeoTurn(text, meta = {}) {
                 if (!finalTurns.length) turn.flowEl.open = true;
                 updateCeoTurnMeta(
                     turn,
-                    turn.hasError ? "处理完成，但有异常" : (hasRunningStep ? "已返回当前判断，后台任务仍在运行" : "处理完成")
+                    turn.hasError
+                        ? "处理完成，但有异常"
+                        : (turn.railMetaLabel || (hasRunningStep ? "已返回当前判断，后台任务仍在运行" : "处理完成"))
                 );
             } else {
                 turn.flowEl.hidden = true;

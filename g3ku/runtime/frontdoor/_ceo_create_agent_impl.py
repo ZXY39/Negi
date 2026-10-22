@@ -769,6 +769,15 @@ class CreateAgentCeoFrontDoorRunner(CeoFrontDoorRuntimeOps):
 
     async def _node_prepare_turn(self, state, runtime) -> dict[str, Any]:
         prepared = await self._graph_prepare_turn(state, runtime=runtime)
+        # 回合状态是每轮新建的（`frontdoor_turns` 初值为空），账本的唯一活载体是会话对象：
+        # 起手先把它灌回状态，否则下一次 sync 会拿空列表把会话账本整本清掉。
+        session = getattr(getattr(runtime, "context", None), "session", None)
+        prepared["frontdoor_turns"] = normalize_frontdoor_turns(
+            getattr(session, "_frontdoor_turns", None)
+        )
+        turn_id_getter = getattr(session, "_current_turn_id", None)
+        if callable(turn_id_getter):
+            prepared["frontdoor_turn_id"] = str(turn_id_getter() or "").strip()
         messages = self._state_message_records(prepared.get("messages") or [])
         update = dict(prepared or {})
         if "messages" in update:
