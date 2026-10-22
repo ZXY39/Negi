@@ -47,10 +47,10 @@ function normalizeCeoSnapshotCompressionMarker(marker = null) {
     if (turnId) next.turn_id = turnId;
     // 0 是有效落点（本次压缩只折了更早的历史），不是“没有边界”。
     // 缺键/null/空串才表示没有边界；不要把 Number(null) 的 0 当成显式值。
-    const rawBoundary = marker?.stats?.boundary_stage_index;
+    const rawBoundary = marker?.stats?.boundary_turn_seq;
     if (rawBoundary !== undefined && rawBoundary !== null && rawBoundary !== "") {
         const boundary = Number(rawBoundary);
-        if (Number.isFinite(boundary) && boundary >= 0) next.boundary_stage_index = boundary;
+        if (Number.isFinite(boundary) && boundary >= 0) next.boundary_turn_seq = boundary;
     }
     return next;
 }
@@ -241,13 +241,13 @@ function syncCeoCompressionDivider() {
     syncCeoCompressionRetryAffordances();
 }
 
-function ceoCompressionStagesAroundBoundary(stages, boundary) {
-    const indexes = (Array.isArray(stages) ? stages : [])
-        .map((stage) => Number(stage?.stage_index))
+function ceoCompressionTurnsAroundBoundary(turns, boundary) {
+    const seqs = (Array.isArray(turns) ? turns : [])
+        .map((item) => Number(item?.seq))
         .filter((value) => Number.isFinite(value));
     return {
-        total: indexes.length,
-        pre: indexes.filter((value) => value <= boundary).length,
+        total: seqs.length,
+        pre: seqs.filter((value) => value <= boundary).length,
     };
 }
 
@@ -255,7 +255,7 @@ function resolveCeoCompressionPlacement(rule, turn = null) {
     const boundary = Number(rule?.boundary);
     if (!Number.isFinite(boundary)) return { mode: "row-position" };
     if (boundary === 0) return { mode: "before-turn" };
-    const { total, pre } = ceoCompressionStagesAroundBoundary(turn?.stages, boundary);
+    const { total, pre } = ceoCompressionTurnsAroundBoundary(turn?.turns, boundary);
     if (!total) {
         return turn?.live && !turn?.finalized
             ? { mode: "split", headWindowTo: null, tailWindowFrom: null }
@@ -292,9 +292,9 @@ function splitCeoTurnAtCompression(turn, boundary, state) {
     if (turn.finalized) return false;
     // 这条规则已经在这个回合身上落过一次（重建吸收、或同一帧早前切过）：再切就是重复的线。
     if (turn.compressionBoundary === boundary) return true;
-    const stages = turn.lastExecutionTraceSummary?.stages;
+    const turns = Array.isArray(turn.turns) ? turn.turns : [];
     const placement = resolveCeoCompressionPlacement({ boundary }, {
-        stages,
+        turns,
         live: true,
         finalized: false,
     });
@@ -308,7 +308,7 @@ function splitCeoTurnAtCompression(turn, boundary, state) {
     });
     if (!divider) return false;
     if (placement.mode === "before-turn") {
-        // 这一回合的阶段全在压缩之后（或 boundary 0）：线挪到气泡之前，不切。
+        // 这一回合的轨道全在压缩之后（或 boundary 0）：线挪到气泡之前，不切。
         turn.compressionBoundary = boundary;
         mutateCeoFeed(() => {
             turn.el.parentNode.insertBefore(divider, turn.el);
@@ -320,20 +320,20 @@ function splitCeoTurnAtCompression(turn, boundary, state) {
     const continuation = createPendingCeoTurn(turn.source, { scrollMode: "preserve" });
     if (!continuation?.el?.parentNode) return false;
     const head = turn;
-    const summary = head.lastExecutionTraceSummary;
-    // 轨道未知时两头都不设窗口：被折的那几张卡随时可能才第一次到达，按 boundary 把它们
+    // 轨道未知时两头都不设窗口：被折的那几组随时可能才第一次到达，按 boundary 把它们
     // 筛掉就等于让它们彻底不出现；宁可让续跑段先把它们画出来，等轨道真到了再补切。
-    const knownStages = !!ceoCompressionStagesAroundBoundary(stages, boundary).total;
-    if (knownStages) head.stageWindowTo = boundary;
+    const knownTurns = !!ceoCompressionTurnsAroundBoundary(turns, boundary).total;
+    if (knownTurns) head.turnWindowTo = boundary;
     freezeCeoCompressionHeadKey(head.el, boundary);
     // 头段不再收帧：回合身份让给续跑段，之后的 finalize / 插话锚点都落在它身上。
     head.finalized = true;
-    continuation.stageWindowFrom = knownStages ? boundary + 1 : null;
+    continuation.turnWindowFrom = knownTurns ? boundary + 1 : null;
     continuation.turnId = head.turnId;
     continuation.compressionBoundary = boundary;
+    continuation.turns = turns;
     // 还没切的那一半先记在续跑段身上：轨道第一次到达时由
-    // reconcileDeferredCeoCompressionSplit 把 <= boundary 的卡补回头段。
-    if (!knownStages) continuation.compressionHead = head;
+    // reconcileDeferredCeoCompressionSplit 把 <= boundary 的组补回头段。
+    if (!knownTurns) continuation.compressionHead = head;
     // 续跑段立刻顶上门牌：视图状态还原与"线插在哪一回合后面"的查找都按 key 认，
     // 等下一帧才补的话，中间这段时间这条气泡是匿名的。
     if (head.turnId && continuation.el?.setAttribute) {
@@ -347,9 +347,9 @@ function splitCeoTurnAtCompression(turn, boundary, state) {
         parent.insertBefore(continuation.el, divider.nextSibling || null);
         icons();
     }, { scrollMode: "preserve" });
-    renderCeoStageTraceIntoTurn(head, summary);
+    renderCeoTurnsIntoTurn(head, turns);
     settleCeoCompressionHeadText(head);
-    renderCeoStageTraceIntoTurn(continuation, summary);
+    renderCeoTurnsIntoTurn(continuation, turns);
     syncCeoCompressionRetryAffordances();
     return true;
 }
@@ -376,17 +376,18 @@ function reconcileDeferredCeoCompressionSplit(turn) {
     if (!head || turn.finalized) return false;
     const boundary = Number(turn.compressionBoundary);
     if (!Number.isFinite(boundary) || boundary < 0) return false;
-    const summary = turn.lastExecutionTraceSummary;
-    const { total, pre } = ceoCompressionStagesAroundBoundary(summary?.stages, boundary);
-    // 轨道还没到、或一张被折的卡都没有（压缩折的是更早的历史）：整段留在续跑段就是对的。
+    const turns = Array.isArray(turn.turns) ? turn.turns : [];
+    const { total, pre } = ceoCompressionTurnsAroundBoundary(turns, boundary);
+    // 轨道还没到、或被折的一组都没有（压缩折的是更早的历史）：整段留在续跑段就是对的。
     if (!total || !pre) return false;
     turn.compressionHead = null;
-    head.stageWindowTo = boundary;
-    turn.stageWindowFrom = boundary + 1;
+    head.turnWindowTo = boundary;
+    turn.turnWindowFrom = boundary + 1;
+    head.turns = turns;
     mutateCeoFeed(() => {
-        renderCeoStageTraceIntoTurn(head, summary);
+        renderCeoTurnsIntoTurn(head, turns);
         settleCeoCompressionHeadText(head);
-        renderCeoStageTraceIntoTurn(turn, summary);
+        renderCeoTurnsIntoTurn(turn, turns);
     }, { scrollMode: "preserve" });
     return true;
 }
@@ -402,7 +403,7 @@ function applyCeoCompressionMarker(sessionId = "", marker = null) {
     removeCeoCompressionLiveDivider();
     const stats = (marker || {}).stats || {};
     const turnId = String((marker || {}).turn_id || stats.turn_id || "").trim();
-    const boundary = Number(stats.boundary_stage_index);
+    const boundary = Number(stats.boundary_turn_seq);
     // boundary 0 也是有效落点（本次压缩折的是更早的历史，整条回合都在线下方）：
     // 把它当成"没有边界"就会退回追 feed 尾部，压缩之后跑出来的内容全在线上方。
     if (state === "completed" && Number.isFinite(boundary) && boundary >= 0) {
@@ -640,7 +641,7 @@ function adoptCeoContextCompression(sessionId, compression) {
     syncCeoCompressionDivider();
 }
 
-function planHistoryCompressionSegments(stages, rules = []) {
+function planHistoryCompressionSegments(turns, rules = []) {
     const before = [];
     const splits = [];
     const after = [];
@@ -650,7 +651,7 @@ function planHistoryCompressionSegments(stages, rules = []) {
         .sort((left, right) => Number(left.boundary) - Number(right.boundary))
         .forEach((rule) => {
             const placement = resolveCeoCompressionPlacement(rule, {
-                stages,
+                turns,
                 live: false,
                 finalized: true,
             });
@@ -678,8 +679,8 @@ function planHistoryCompressionSegments(stages, rules = []) {
 function createHistoryCompressionHead(turnId, split) {
     const head = createPendingCeoTurn("history", { scrollMode: "preserve" });
     if (!head) return null;
-    head.stageWindowFrom = split.windowFrom;
-    head.stageWindowTo = split.windowTo;
+    head.turnWindowFrom = split.windowFrom;
+    head.turnWindowTo = split.windowTo;
     head.finalized = true;
     if (turnId && head.el?.setAttribute) {
         head.el.setAttribute("data-ceo-key", `turn:${turnId}#pre-${split.boundary}`);
@@ -718,11 +719,7 @@ function placeHistoryCompressionAroundElement(el, rules, turnId) {
 function assistantRowHostsCompressionRule(item = {}) {
     const status = String(item?.status || "").trim().toLowerCase();
     if (status === "paused" || item?.silent_reply === true) return true;
-    const hasDelta = item?.canonical_context_delta !== null && item?.canonical_context_delta !== undefined;
-    const canonical = hasDelta
-        ? normalizeCeoSnapshotCanonicalContext(item.canonical_context_delta)
-        : normalizeCeoSnapshotCanonicalContext(item.canonical_context);
-    if (canonical) return true;
+    if (Array.isArray(item?.turns) && item.turns.length) return true;
     // 无轨道的纯文本行也能承载 completed 线：total=0 时按“回合结束”约定放前/后。
     return !!String(item?.turn_id || "").trim();
 }
@@ -740,7 +737,7 @@ function buildCeoCompressionPlan(messages) {
         if (!marker || marker.state !== "completed") return;
         const markerTurnId = String(marker.turn_id || "").trim();
         if (!markerTurnId) return;
-        const boundary = Number(marker.boundary_stage_index);
+        const boundary = Number(marker.boundary_turn_seq);
         if (!Number.isFinite(boundary)) return;
         const rule = {
             rowIndex: index,

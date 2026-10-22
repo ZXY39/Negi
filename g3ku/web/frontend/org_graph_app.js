@@ -1393,7 +1393,7 @@ async function ensureTraceOutputCodeBlockContent(
 
 const TRACE_ARGUMENTS_MISSING_TEXT = "完整入参已不在账本里，这里只有调用提示";
 
-// 入参的按需车道：转录投影会把超长入参清空（canonical_context._cap_tool_payload），
+// 入参的按需车道：转录投影会把超长入参清空，
 // 原文仍在 frontdoor 账本里，所以点开工具面板时按 tool_call_id 回取一次。
 async function getTraceArgumentsContentByCallId(toolCallId = "") {
     const normalized = String(toolCallId || "").trim();
@@ -1466,75 +1466,6 @@ async function ensureTraceArgumentsCodeBlockContent(element) {
     } finally {
         delete element.dataset.outputHydrating;
     }
-}
-
-const ceoStageArchiveHtmlByKey = new Map();
-
-async function loadCeoStageArchiveHtml(archiveRef) {
-    const payload = await ApiClient.readContent({ path: archiveRef, view: "canonical" });
-    const raw = String(payload?.content || payload?.excerpt || "").trim();
-    const parsed = raw.startsWith("{") ? JSON.parse(raw) : null;
-    const stage = (Array.isArray(parsed?.stages) ? parsed.stages : [])[0] || null;
-    if (!Array.isArray(stage?.rounds) || !stage.rounds.length) {
-        const error = new Error("stage_archive_empty");
-        error.status = 404;
-        throw error;
-    }
-    // 归档里存的是未裁的原始账本，键名和轨道投影同一套；过一遍轨道自己的归一化，
-    // 工具名/状态/由 `arguments` 复原的全量入参才是同一种读法。
-    const normalized = typeof normalizeExecutionStageTrace === "function"
-        ? normalizeExecutionStageTrace(stage)
-        : { rounds: stage.rounds };
-    // 总结不重复画：卡片自己那半已经有一份。
-    return renderExecutionStageRounds({ ...normalized, completed_stage_summary: "" });
-}
-
-// 裁撤阶段的调用记录留在归档里（`stage.archive_ref`）：点开取一次，按归档路径缓存，
-// 之后每帧重绘都不再碰网络。归档里带的是未裁的原文，所以这一道取回来的参数本来就是全的。
-function getCeoStageArchiveHtml(archiveRef) {
-    const key = String(archiveRef || "").trim();
-    if (!key) return Promise.resolve("");
-    const cached = ceoStageArchiveHtmlByKey.get(key);
-    if (cached) return cached;
-    const request = loadCeoStageArchiveHtml(key).catch((error) => {
-        // 失败的请求不能留在表里，否则一次抖动就让这张卡永久失去重试机会。
-        ceoStageArchiveHtmlByKey.delete(key);
-        throw error;
-    });
-    ceoStageArchiveHtmlByKey.set(key, request);
-    return request;
-}
-
-function bindStageArchiveOpens(scopeEl) {
-    if (!(scopeEl instanceof HTMLElement) || scopeEl.dataset.stageArchiveBindings === "true") return;
-    scopeEl.dataset.stageArchiveBindings = "true";
-    scopeEl.addEventListener("click", (event) => {
-        const button = event.target instanceof Element ? event.target.closest("[data-stage-archive-open]") : null;
-        if (!(button instanceof HTMLElement)) return;
-        const host = button.closest(".task-trace-stage-archive");
-        if (!(host instanceof HTMLElement)) return;
-        const ref = String(button.dataset.stageArchiveOpen || "").trim();
-        button.disabled = true;
-        getCeoStageArchiveHtml(ref).then((html) => {
-            if (!html) throw new Error("stage_archive_empty");
-            host.innerHTML = html;
-            host.classList.add("is-filled");
-            if (typeof hydrateTraceOutputBlocks === "function") hydrateTraceOutputBlocks(host);
-            icons();
-        }).catch((error) => {
-            // 404 是终态（归档已被磁盘治理清理）；其余失败留着重试的机会。
-            const missing = Number(error?.status) === 404;
-            host.innerHTML = `
-                <div class="task-trace-stage-archive-missing">${esc(missing
-    ? "归档已被清理，取不回本阶段的调用记录"
-    : `取档失败：${String(error?.message || error || "未知错误")}`)}</div>
-            `;
-            if (!missing) {
-                host.insertAdjacentHTML("beforeend", `<button type="button" class="task-trace-stage-archive-btn" data-stage-archive-open="${esc(ref)}"><i data-lucide="archive-restore"></i><span>重试取档</span></button>`);
-                icons();
-            }
-        });
-    });
 }
 
 async function ensureCeoToolStepFullOutput(item, { view = "canonical" } = {}) {    if (!(item instanceof HTMLElement)) return "";
@@ -1839,94 +1770,6 @@ function activeCeoSessionHasHistory(sessionId = activeSessionId()) {
     return !!(cached?.messages || []).length;
 }
 
-function resolvePreferredCeoCanonicalContext(context = null, previousContext = null) {
-    return normalizeCeoSnapshotCanonicalContext(context)
-        || normalizeCeoSnapshotCanonicalContext(previousContext)
-        || null;
-}
-
-function resolvePreferredCeoTraceContext(deltaContext = null, fullContext = null, previousContext = null) {
-    return normalizeCeoSnapshotCanonicalContext(deltaContext)
-        || normalizeCeoSnapshotCanonicalContext(fullContext)
-        || normalizeCeoSnapshotCanonicalContext(previousContext)
-        || null;
-}
-
-function mergeCeoStageSummaryDelta(baseSummary = null, deltaContext = null) {
-    const mergedStages = [];
-    const stageIndexById = new Map();
-    const accumulateStage = (stage) => {
-        const stageId = String(stage?.stage_id ?? stage?.stage_index ?? "");
-        if (stageId) {
-            const existingIndex = stageIndexById.get(stageId);
-            if (existingIndex !== undefined) {
-                const existing = mergedStages[existingIndex];
-                const baseRounds = Array.isArray(existing?.rounds) ? [...existing.rounds] : [];
-                const roundIndexById = new Map(
-                    baseRounds.map((round, roundIndex) => [String(round?.round_id ?? round?.round_index ?? roundIndex), roundIndex])
-                );
-                (Array.isArray(stage?.rounds) ? stage.rounds : []).forEach((round, roundIndex) => {
-                    const roundId = String(round?.round_id ?? round?.round_index ?? roundIndex);
-                    const existingRoundIndex = roundIndexById.get(roundId);
-                    if (existingRoundIndex === undefined) {
-                        roundIndexById.set(roundId, baseRounds.length);
-                        baseRounds.push(round);
-                    } else {
-                        baseRounds[existingRoundIndex] = round;
-                    }
-                });
-                // delta 的轮次只包含"新增/变更";轮次保持基线位置,追加新轮,
-                // 阶段头以 delta 为准(后端 delta 轮次为空时代表头变更,保留原轮次)
-                mergedStages[existingIndex] = { ...stage, rounds: baseRounds };
-                return;
-            }
-            stageIndexById.set(stageId, mergedStages.length);
-        }
-        mergedStages.push(stage);
-    };
-    const normalize = (value) => {
-        const summary = normalizeCeoSnapshotCanonicalContext(value);
-        return Array.isArray(summary?.stages) ? summary.stages : [];
-    };
-    normalize(baseSummary).forEach(accumulateStage);
-    normalize(deltaContext).forEach(accumulateStage);
-    if (!mergedStages.length) return null;
-    // 轨道顺序按 stage_index，不按到达顺序。跨回合补写会让旧阶段晚于新阶段到齐：
-    // submit_next_stage 的工具帧先把新阶段画上轨（provisional 头），而它同一刻给上一条
-    // 阶段补的 completed_stage_summary 要等下一个 delta 才到——按到达顺序就把旧阶段画在下面。
-    // stage_index 缺失或并列时按 created_at 拆，两者都缺就保持原序（sort 是稳定的）。
-    mergedStages.sort((left, right) => {
-        const leftIndex = Number(left?.stage_index);
-        const rightIndex = Number(right?.stage_index);
-        if (Number.isFinite(leftIndex) && Number.isFinite(rightIndex) && leftIndex !== rightIndex) {
-            return leftIndex - rightIndex;
-        }
-        const leftTime = String(left?.created_at || "");
-        const rightTime = String(right?.created_at || "");
-        if (leftTime && rightTime && leftTime !== rightTime) return leftTime < rightTime ? -1 : 1;
-        return 0;
-    });
-    return { stages: mergedStages };
-}
-
-function mergeCeoLiveTraceContext(deltaContext = null, previousSummary = null) {
-    if (filterCeoInteractionFlowSummary(deltaContext)?.stages?.length) {
-        return mergeCeoStageSummaryDelta(previousSummary, deltaContext);
-    }
-    // 无新增量:保留本轮已渲染的轨道;从未渲染过则返回空,由渲染层维持占位状态
-    return normalizeCeoSnapshotCanonicalContext(previousSummary) || null;
-}
-
-function resolveFinalCeoTraceContext(meta = {}) {
-    if (meta?.canonical_context_delta) {
-        return normalizeCeoSnapshotCanonicalContext(meta.canonical_context_delta) || null;
-    }
-    if (meta?.canonical_context) {
-        return normalizeCeoSnapshotCanonicalContext(meta.canonical_context) || null;
-    }
-    return null;
-}
-
 const CEO_MODEL_RETRY_LIVE_STATES = new Set(["retrying", "waiting_upstream"]);
 
 function normalizeCeoModelRetryStatus(value = null) {
@@ -1994,28 +1837,28 @@ function activeCeoRuntimeUsageEstimate(sessionId = activeSessionId()) {
 // 放置唯一判据：实时道与重建道都只消费这里的结果。
 // boundary 0 是有效落点；null/缺失表示“没有边界”，退回行位置。
 // 头段是冻结的那半：它不再收帧，所以没有正文可显示时不能把加载动画留在线上头。
-// 实时道：把正在跑的那个回合就地切成两段——头段冻结在边界之前那几阶段，续跑段接住之后
-// 的每一帧（阶段、流式文字、用量）。中间夹一条 feed 级的线，于是"压缩之后才发进来的用户
+// 实时道：把正在跑的那个回合就地切成两段——头段冻结在边界之前那几组，续跑段接住之后
+// 的每一帧（轨道、流式文字、用量）。中间夹一条 feed 级的线，于是"压缩之后才发进来的用户
 // 插话"按它既有的"插到当前气泡之前"规则落点，天然就落到了线下方。
 //
 // 判据分三种，都只为同一件事服务：**线上方定住，线下方继续长**。
-//   - boundary 0，或已知阶段全在边界之下 ⇒ 这一回合没有任何阶段被折进摘要，整条气泡都在
+//   - boundary 0，或已知轨道全在边界之下 ⇒ 这一回合没有任何组被折进摘要，整条气泡都在
 //     线下方，线插在气泡之前，不切；
-//   - 轨道还没到（total 0 且 boundary > 0）⇒ 不知道哪几阶段被折，但"当前已渲染的这一截"
-//     就是压缩那一刻的界面，必须整段冻在线上方；照切，续跑段不设阶段窗口兜住之后的一切；
-//   - 有阶段在线上方 ⇒ 按 stage_index 切，头段只留 <= boundary 的那几张卡。
+//   - 轨道还没到（total 0 且 boundary > 0）⇒ 不知道哪几组被折，但"当前已渲染的这一截"
+//     就是压缩那一刻的界面，必须整段冻在线上方；照切，续跑段不设轨道窗口兜住之后的一切；
+//   - 有组在线上方 ⇒ 按回合内 seq 切，头段只留 <= boundary 的那几组。
 // 唯一不切的是已收尾的历史回合：它之后不会再有内容，线交给 findCeoCompressionAnchor 兜底。
 // 压缩帧要切的那个实时回合。turn_id 对得上就用它；对不上时认下**唯一那条还没拿到
 // turn_id 的实时气泡**——手动暂停/首帧竞态里，标记帧可能比第一条 turn patch 先到，
-// 此时本地气泡还是匿名的，放过它就只能把线追到 feed 尾部，之后的新阶段全在线上方。
-// 压缩帧到达时这一回合还没有阶段轨道（首跳就压缩、或轨道帧还没到）：线已经画在气泡
-// 之间了，但两半都没法按 stage_index 分——于是续跑段先把整份轨道画出来，等轨道第一次
-// 到达时再补切一次：<= boundary 的卡搬回头段，续跑段只留边界之后的。
-// 不补这一步，压缩之后新跑出来的阶段会跟被折进去的那些混在同一段里，界面上看不出
+// 此时本地气泡还是匿名的，放过它就只能把线追到 feed 尾部，之后的新内容全在线上方。
+// 压缩帧到达时这一回合还没有轨道（首跳就压缩、或轨道帧还没到）：线已经画在气泡
+// 之间了，但两半都没法按 seq 分——于是续跑段先把整份轨道画出来，等轨道第一次
+// 到达时再补切一次：<= boundary 的组搬回头段，续跑段只留边界之后的。
+// 不补这一步，压缩之后新跑出来的内容会跟被折进去的那些混在同一段里，界面上看不出
 // 哪些是"已经压过的历史"、哪些是"压缩之后的新内容"——正是用户报的那个形状。
 // 刷新/重连后的整页重建：进行中回合由实时道画在 feed 尾部，而转录里的压缩标记行只能
 // 落在它前面（这一回合自己的行还没落盘）。按行位置画的那条线会把"压缩之后才跑出来的
-// 阶段"整段留在线上方。所以重建后要把这条规则从行位置摘下来，改按阶段边界切进进行中
+// 内容"整段留在线上方。所以重建后要把这条规则从行位置摘下来，改按回合边界切进进行中
 // 回合里——与实时帧 announce 当场的切法保持同一落点。
 // running 状态随快照缓存落 sessionStorage：刷新后能先挂线，不必等整份 snapshot.ceo。
 // seen_at 每次确认 running 都刷新；终局写 null 清键。
@@ -2261,7 +2104,7 @@ function normalizeTaskDetailViewState(value) {
             title: String(item?.title || "").trim(),
             open: !!item?.open,
             activeToolKey: String(item?.activeToolKey || "").trim(),
-            // 一个阶段卡里可以有多轮，每轮各自选中一个工具面板。这份按轮账本是
+            // 一个分组卡里可以有多轮，每轮各自选中一个工具面板。这份按轮账本是
             // 唯一能把选中态放回正确那一轮的依据：只留 activeToolKey 时还原器会把它
             // 兜到第一轮上，于是用户展开的工具面板在刷新后换轮、等于被折掉。
             roundActiveToolKeys: normalizeRoundActiveToolKeys(item?.roundActiveToolKeys),
@@ -3515,7 +3358,7 @@ function finalizePausedCeoTurn(text = "已暂停", { source = null, landTranscri
     const turn = pullActiveCeoTurn(normalizedSource, normalizedTurnId);
     // live 元素可能已经不在（心跳内部轮、或这一跳在别处被摘掉），但那不代表这一回合
     // 没发生过。收尾的两半——气泡就地定稿、缓存补转录行——必须各自独立：早退一次，
-    // 随后补发的门槛帧会按缓存整页重建，把这一回合的用户行、回复行和阶段卡一起抹掉，
+    // 随后补发的门槛帧会按缓存整页重建，把这一回合的用户行、回复行和分组卡一起抹掉，
     // 用户只能刷新才重新看见。
     if (turn?.textEl && turn?.flowEl) {
         mutateCeoFeed(() => {
@@ -3562,18 +3405,16 @@ function finalizePausedCeoTurn(text = "已暂停", { source = null, landTranscri
             inflightTurn?.user_messages,
             inflightTurn?.user_message
         ).map((item) => (item.turn_id || !laneTurnId ? item : { ...item, turn_id: laneTurnId }));
-        // 阶段轨道优先取 live 回合自己渲染出的那份；live 元素已经不在时回退到在飞快照
-        // 携带的轨道。少了这一步，暂停后重建出来的回复行没有轨道，阶段卡整段消失。
-        const pausedTraceContext = turn?.lastExecutionTraceSummary
-            || normalizeCeoSnapshotCanonicalContext(inflightTurn?.canonical_context_delta)
-            || normalizeCeoSnapshotCanonicalContext(inflightTurn?.canonical_context)
-            || null;
+        // 回合轨道优先取 live 回合自己渲染出的那份；live 元素已经不在时回退到在飞快照
+        // 携带的 turns。少了这一步，暂停后重建出来的回复行没有轨道，工具组整段消失。
+        const pausedTurns = (Array.isArray(turn?.turns) && turn.turns.length)
+            ? turn.turns
+            : (Array.isArray(inflightTurn?.turns) ? inflightTurn.turns : []);
         const payload = buildFinalizedCeoTurnPayload(sessionId, {
             normalizedSource: normalizedSource || inflightSource,
             normalizedTurnId: laneTurnId,
             finalUserMessages: laneUserMessages,
-            finalTraceContext: pausedTraceContext,
-            finalCanonicalContext: null,
+            finalTurns: pausedTurns,
             text,
             meta: turn?.usage ? { usage: turn.usage } : {},
             completedAt: new Date().toISOString(),
@@ -4343,12 +4184,12 @@ async function handleCeoForkClick(turnId) {
 
 const CEO_FEED_SCROLL_UP_KEYS = new Set(["PageUp", "Home", "ArrowUp", "Up"]);
 
-// 这次滚动会不会真的落到会话面：内层滚动容器（工具输出框、阶段代码框）还能吃掉
+// 这次滚动会不会真的落到会话面：内层滚动容器（工具输出框、组代码框）还能吃掉
 // 就轮不到会话面，已经滚到头才继续往外链。
 
 // preserve 模式的滚动快照:贴底标志 + 上滚时的元素锚点 + 像素兜底。
 // 旧实现是纯像素 clamp(min(prevTop, maxTop)):直播重建导致内容高度变化(展开的
-// 阶段被折叠、新轮次撑高)时视口会跳变;锚点按「当前可见的 feed 子元素 + 元素内
+// 分组被折叠、工具条撑高)时视口会跳变;锚点按「当前可见的 feed 子元素 + 元素内
 // 偏移」还原,高度增减都稳定。用户原本贴底时视为跟随最新内容(聊天 stick-to-bottom),
 // 不再被新产出的内容留在原地。
 function addMsg(text, role, { markdown = false, attachments = [], scrollMode = "preserve", sessionId = activeSessionId(), timestamp = "", usage = null, turnId = "", canEditFork = false, canForkReply = false } = {}) {
@@ -4483,11 +4324,10 @@ function ceoInflightTurnHasVisibleAssistantState(snapshot = null) {
     const status = String(snapshot.status || "").trim().toLowerCase();
     const assistantText = String(snapshot.assistant_text || "").trim();
     const turnId = String(snapshot?.turn_id || "").trim();
-    const canonicalContext = normalizeCeoSnapshotCanonicalContext(snapshot.canonical_context);
-    const canonicalContextDelta = normalizeCeoSnapshotCanonicalContext(snapshot?.canonical_context_delta);
+    const turns = Array.isArray(snapshot?.turns) ? snapshot.turns : [];
     // 只有思考读数、正文还空的进行中帧也要建行：那一行就是这一跳的全部进度。
     const reasoning = normalizeCeoSnapshotReasoning(snapshot?.reasoning);
-    return !!assistantText || !!canonicalContext || !!canonicalContextDelta || !!reasoning || status === "paused" || status === "error";
+    return !!assistantText || !!turns.length || !!reasoning || status === "paused" || status === "error";
 }
 
 function ceoNeedsAssistantTurn(snapshot = null) {
@@ -4549,7 +4389,7 @@ function renderCeoLiveStreamTextIntoTurn(turn) {
     // pending 是「这行内容归直播车道」的标记：收尾 markdown、静默正文、已暂停都把它摘掉。
     // 没有这道闸门，旁白全部进轨之后的空 residual 会把那一份权威正文换成转圈。
     if (!turn.textEl.classList?.contains?.("pending")) return;
-    // 流式文本一律走气泡车道（纯文本，ceo.reply.final 才换 markdown），不再挂进末位阶段卡体。
+    // 流式文本一律走气泡车道（纯文本，ceo.reply.final 才换 markdown），不再挂进末位分组卡体。
     const text = ceoLiveStreamResidual(turn, turn.lastExecutionTraceSummary);
     if (!text.trim()) {
         // 旁白都已经进轨：回到等待态。只在状态真的变化时重写 markup——
@@ -4567,9 +4407,9 @@ function renderCeoLiveStreamTextIntoTurn(turn) {
 function ceoLiveStreamResidual(turn, summary) {
     let residual = String(turn?.liveStreamText || "");
     if (!residual.trim()) return "";
-    // 轨道上已渲染的文本（preamble + 各 round.text）从 live 流里按
+    // 轨道上已渲染的文本（各组的正文）从 live 流里按
     // 出现位置删掉，剩下的才是真正还没进轨的尾巴。子串级删除对「间隙旁白、
-    // 建阶段 preamble、空白符差异」都不再断链；按轨道顺序找最早出现位置，
+    // 空白符差异」都不再断链；按轨道顺序找最早出现位置，
     // 避免 echo 场景删错新的那一段。
     const absorb = (text) => {
         const normalized = String(text || "").trim();
@@ -4579,11 +4419,8 @@ function ceoLiveStreamResidual(turn, summary) {
             residual = residual.slice(0, index) + residual.slice(index + normalized.length);
         }
     };
-    for (const stage of summary?.stages || []) {
-        absorb(stage?.preamble_text);
-        for (const round of stage?.rounds || []) {
-            absorb(round?.text);
-        }
+    for (const turnItem of summary?.turns || []) {
+        absorb(turnItem?.text);
     }
     return residual.trim();
 }
@@ -4617,9 +4454,9 @@ function renderCeoAssistantTextIntoTurn(turn, text = "", { status = "" } = {}) {
     syncCeoTurnLoadingOnlyState(turn, false);
 }
 
-// 静默回合（模型调用 silent 工具）不外发，但正文与阶段轨道是留给模型和运维的痕迹。
+// 静默回合（模型调用 silent 工具）不外发，但正文与回合轨道是留给模型和运维的痕迹。
 // 呈现方式：整条响应折成一行「静默消息 HH:MM:SS」+ 下箭头，这一行在气泡**外面**——
-// 折叠时气泡整体不出现（不给它套一层壳），点开才露出正文、阶段轨道与工具步骤。
+// 折叠时气泡整体不出现（不给它套一层壳），点开才露出正文、回合轨道与工具步骤。
 // 不单独渲染静默原因：工具静默时正文本身就是 reason（finalize 取 accompanying_text or
 // reason），再补一行会重复。折叠行用 DOM 节点 + textContent 装配，本文件没有 HTML
 // 转义助手，拼进 innerHTML 等于开一个注入面。
@@ -4977,7 +4814,7 @@ function renderCeoToolEventsIntoTurn(turn, toolEvents = [], { source = "" } = {}
 }
 
 function ceoTurnTraceRoundHostKey(host = null, hostIndex = 0) {
-    // 轮次工具条还原键:按所属阶段的 traceKey 分域(round_index 跨阶段会重复);
+    // 轮次工具条还原键:按所属组的 traceKey 分域(工具位置跨组会重复);
     // round 缺 data-round-key 时用回合内 DOM 顺序兜底(与 feed 级 capture 一致)。
     const stepEl = host && typeof host.closest === "function" ? host.closest(".task-trace-step") : null;
     const scope = String(stepEl?.dataset?.traceKey || "").trim();
@@ -4988,11 +4825,11 @@ function ceoTurnTraceRoundHostKey(host = null, hostIndex = 0) {
 }
 
 function captureCeoTurnTraceViewState(turn = null) {
-    // 直播重建(renderCeoStageTraceIntoTurn 整段 wipe listEl.innerHTML)前捕获回合内
-    // 展开态:Interaction Flow 开合、各阶段 <details> 开合(data-trace-key)、轮次工具
+    // 直播重建(renderCeoTurnsIntoTurn 整段 wipe listEl.innerHTML)前捕获回合内
+    // 展开态:Interaction Flow 开合、各组 <details> 开合(data-trace-key)、组内工具
     // 条选中(data-active-tool-key)。全是纯 DOM 态,重建即丢,必须在 resetCeoToolFlow
     // 之前捕获。仅对已渲染过轨道的回合生效:换新 turnId 时 patchCeoInflightTurn 会先
-    // 清空 lastExecutionTraceSummary,此时不能沿用上一轮的展开态(stage id 跨轮会重复)。
+    // 清空 lastExecutionTraceSummary,此时不能沿用上一轮的展开态(组 key 跨轮会重复)。
     if (!turn?.listEl || typeof turn.listEl.querySelectorAll !== "function") return null;
     if (!turn.lastExecutionTraceSummary) return null;
     const state = {
@@ -5016,7 +4853,7 @@ function captureCeoTurnTraceViewState(turn = null) {
 }
 
 function ceoNestedScrollTargets(scopeEl = null) {
-    // 阶段轨道重建只复活 <details> 开合,输出框自身的滚动位置同样需要带过去:
+    // 回合轨道重建只复活 <details> 开合,输出框自身的滚动位置同样需要带过去:
     // .interaction-step-detail 与 .task-trace-code 都是封顶滚动容器,DOM 换代即归零。
     if (!(scopeEl instanceof HTMLElement)) return [];
     return Array.from(scopeEl.querySelectorAll(".interaction-step-detail, .task-trace-code") || [])
@@ -5048,7 +4885,7 @@ function applyCeoNestedScrollState(stepEl = null, traceKey = "", source = null) 
 }
 
 function applyCeoTurnTraceViewState(turn = null, viewState = null) {
-    // 重建后按稳定键还原;直接赋 open 不触发 toggle 事件,阶段输出的懒加载副作用由
+    // 重建后按稳定键还原;直接赋 open 不触发 toggle 事件,组输出的懒加载副作用由
     // 调用方随后的 hydrateTraceOutputBlocks 遍历 + setTraceRoundActiveTool 内部的面板
     // hydration 补齐(与 applyCeoFeedViewState 行为一致)。
     if (!viewState || !turn?.listEl || typeof turn.listEl.querySelectorAll !== "function") return;
@@ -5065,107 +4902,27 @@ function applyCeoTurnTraceViewState(turn = null, viewState = null) {
     });
 }
 
-// 一个回合被压缩线切成两段时，两段各渲染自己那截阶段：头段 stage_index <= 边界，
-// 续跑段 > 边界。编号缺失的阶段（老会话、非前门来源）不参与切分，整段照旧渲染。
-function sliceCeoRailStages(stages, turn) {
-    const from = Number.isFinite(turn?.stageWindowFrom) ? turn.stageWindowFrom : null;
-    const to = Number.isFinite(turn?.stageWindowTo) ? turn.stageWindowTo : null;
-    if (from === null && to === null) return stages;
-    return stages.filter((stage) => {
-        const index = Number(stage?.stage_index);
-        if (!Number.isFinite(index)) return true;
-        if (to !== null && index > to) return false;
-        if (from !== null && index < from) return false;
+// 一个回合被压缩线切成两段时，两段各渲染自己那截：头段 seq <= 边界，续跑段 > 边界。
+// 缺 seq 的条目（非前门来源）不参与切分，整段照旧渲染。
+function sliceCeoRailTurns(turns, turn) {
+    const from = Number.isFinite(turn?.turnWindowFrom) ? turn.turnWindowFrom : null;
+    const to = Number.isFinite(turn?.turnWindowTo) ? turn.turnWindowTo : null;
+    if (from === null && to === null) return turns;
+    return turns.filter((item) => {
+        const seq = Number(item?.seq);
+        if (!Number.isFinite(seq)) return true;
+        if (to !== null && seq > to) return false;
+        if (from !== null && seq < from) return false;
         return true;
     });
 }
 
-function renderCeoStageTraceIntoTurn(turn, canonicalContext = null, { interruptedStageMarker = false } = {}) {
-    if (!turn?.listEl || !turn?.flowEl) return 0;
-    const turns = Array.isArray(turn?.turns) ? turn.turns : [];
-    if (turns.length) {
-        return renderCeoTurnsIntoTurn(turn, turns, { interruptedStageMarker });
-    }
-    const summary = filterCeoInteractionFlowSummary(canonicalContext);
-    if (!summary?.stages?.length) {
-        // 无新增量(如阶段刚提交但轮次尚未进入增量)时保留已渲染的时间线,
-        // 避免清空正在显示的新阶段/工具步骤;只有从未有内容时才显示占位
-        const hasExistingTrace = !!turn?.lastExecutionTraceSummary
-            || (turn?.listEl instanceof HTMLElement && turn.listEl.children.length > 0);
-        if (!hasExistingTrace) {
-            resetCeoToolFlow(turn);
-            updateCeoTurnMeta(turn, "等待工具开始...");
-            renderCeoLiveStreamTextIntoTurn(turn);
-        }
-        return 0;
-    }
-    if (typeof renderTraceStep !== "function"
-        || typeof renderExecutionStageRounds !== "function"
-        || typeof stageTraceStatus !== "function"
-        || typeof formatExecutionStageTitle !== "function"
-        || typeof stageTraceStatusLabel !== "function"
-        || typeof stageIsContextEvicted !== "function") {
-        return 0;
-    }
-    const stages = sliceCeoRailStages(summary.stages, turn);
-    if (!stages.length) return 0;
-    const visibleSummary = stages === summary.stages ? summary : { ...summary, stages };
-    syncCeoTurnLoadingOnlyState(turn, false);
-    // 整段重建会 wipe 掉回合内全部 DOM 态,先在 reset 之前捕获用户展开态快照。
-    const turnViewState = captureCeoTurnTraceViewState(turn);
-    resetCeoToolFlow(turn);
-    turn.el?.classList?.add?.("ceo-timeline");
-    turn.listEl.classList?.add?.("task-trace-list");
-    turn.listEl.innerHTML = visibleSummary.stages.map((stage, index) => {
-        const isInterrupted = interruptedStageMarker && index === visibleSummary.stages.length - 1;
-        const preamble = String(stage?.preamble_text || "").trim();
-        const preambleHtml = preamble ? `<div class="ceo-stage-preamble">${esc(preamble)}</div>` : "";
-        return renderTraceStep({
-            traceKey: `ceo:stage:${stage.stage_id || stage.stage_index || index}`,
-            stageId: String(stage?.stage_id || ""),
-            title: `${formatExecutionStageTitle(stage)}${isInterrupted ? " · 收到补充，续跑见下" : ""}`,
-            status: stageTraceStatus(stage),
-            statusLabel: stageTraceStatusLabel(stage),
-            evicted: stageIsContextEvicted(stage),
-            open: false,
-            extraClass: isInterrupted ? "ceo-stage-interrupted" : "",
-            bodyHtml: preambleHtml + renderExecutionStageRounds(stage),
-        });
-    }).join("");
-    if (typeof bindTraceRoundToolStrips === "function") bindTraceRoundToolStrips(turn.listEl);
-    if (typeof bindStageArchiveOpens === "function") bindStageArchiveOpens(turn.listEl);
-    if (typeof bindTraceFieldCopyActions === "function") bindTraceFieldCopyActions(turn.listEl);
-    // 计数与在飞行的归属都按这一截渲染出来的阶段算；merge 基线仍留整份，
-    // 否则下一帧的增量没有可对的上游账本。
-    const stageCount = visibleSummary.stages.length;
-    const roundCount = visibleSummary.stages.reduce((sum, stage) => sum + (Array.isArray(stage?.rounds) ? stage.rounds.length : 0), 0);
-    turn.steps = roundCount || stageCount;
-    turn.lastExecutionTraceSummary = summary;
-    turn.flowEl.hidden = false;
-    turn.flowEl.open = true;
-    // 有既有轨道时按重建前捕获的快照还原用户展开态(Flow 开合、阶段 details、
-    // 轮次工具条选中),覆盖上面的默认展开;必须发生在下方 [open] 懒加载遍历之前,
-    // 让用户此前展开的阶段重新水合输出块。
-    applyCeoTurnTraceViewState(turn, turnViewState);
-    // 整帧重建换掉了 listEl，实时行先躲在容器里；这一帧账本已经画上的调用让它退场，
-    // 还在跑的挂回新的阶段卡体内——同一件事不再因为换帧而改变位置。
-    pruneCeoLiveToolSteps(turn, visibleSummary);
-    if (turn?.liveToolStepsEl?.children?.length) ceoLiveToolStepHost(turn);
-    updateCeoTurnMeta(turn, ceoRailMetaLabel(turn, visibleSummary.stages) || `${stageCount} 个阶段 · ${roundCount} 轮工具`);
-    if (typeof bindTraceOutputAutoLoad === "function") bindTraceOutputAutoLoad(turn.listEl);
-    if (typeof hydrateTraceOutputBlocks === "function") {
-        Array.from(turn.listEl.querySelectorAll?.(".task-trace-step[open]") || []).forEach((item) => {
-            if (item instanceof HTMLElement) hydrateTraceOutputBlocks(item);
-        });
-    }
-    renderCeoLiveStreamTextIntoTurn(turn);
-    return turn.steps;
-}
-
-function renderCeoTurnsIntoTurn(turn, turns = [], { interruptedStageMarker = false } = {}) {
+function renderCeoTurnsIntoTurn(turn, turns = [], { interruptedMarker = false } = {}) {
     if (!turn?.listEl || !turn?.flowEl) return 0;
     if (typeof buildTurnGroupDescriptors !== "function" || typeof renderTraceStep !== "function") return 0;
-    const descriptors = buildTurnGroupDescriptors(turns);
+    const visibleTurns = sliceCeoRailTurns(Array.isArray(turns) ? turns : [], turn);
+    if (!visibleTurns.length) return 0;
+    const descriptors = buildTurnGroupDescriptors(visibleTurns);
     if (!descriptors.length) return 0;
     syncCeoTurnLoadingOnlyState(turn, false);
     const turnViewState = captureCeoTurnTraceViewState(turn);
@@ -5179,7 +4936,7 @@ function renderCeoTurnsIntoTurn(turn, turns = [], { interruptedStageMarker = fal
     turn.listEl.innerHTML = descriptors.map((step, index) => renderTraceStep({
         ...step,
         open: index === lastGroupIndex,
-        extraClass: interruptedStageMarker && index === descriptors.length - 1 ? "ceo-stage-interrupted" : "",
+        extraClass: interruptedMarker && index === descriptors.length - 1 ? "ceo-turn-interrupted" : "",
     })).join("");
     if (typeof bindTraceRoundToolStrips === "function") bindTraceRoundToolStrips(turn.listEl);
     if (typeof bindTraceFieldCopyActions === "function") bindTraceFieldCopyActions(turn.listEl);
@@ -5188,7 +4945,11 @@ function renderCeoTurnsIntoTurn(turn, turns = [], { interruptedStageMarker = fal
     turn.flowEl.hidden = false;
     turn.flowEl.open = true;
     applyCeoTurnTraceViewState(turn, turnViewState);
-    updateCeoTurnMeta(turn, `${descriptors.length} 组`);
+    // 整帧重建换掉了 listEl，实时行先躲在容器里；这一帧账本已经画上的调用让它退场，
+    // 还在跑的挂回新的组体内——同一件事不再因为换帧而改变位置。
+    pruneCeoLiveToolSteps(turn, turn.lastExecutionTraceSummary);
+    if (turn?.liveToolStepsEl?.children?.length) ceoLiveToolStepHost(turn);
+    updateCeoTurnMeta(turn, ceoRailMetaLabel(turn) || `${descriptors.length} 组`);
     if (typeof bindTraceOutputAutoLoad === "function") bindTraceOutputAutoLoad(turn.listEl);
     if (typeof hydrateTraceOutputBlocks === "function") {
         Array.from(turn.listEl.querySelectorAll?.(".task-trace-step[open]") || []).forEach((item) => {
@@ -5229,7 +4990,7 @@ function patchCeoInflightTurn(snapshot = null, { sessionId = "", cacheField = "i
     let turn = shouldReuseExistingTurn ? existingTurn : null;
     if (!turn) {
         // 续跑轮的 turn patch 与被截断那一跳同 turn_id：先摘掉那条已渲染的暂停气泡，
-        // 否则实时回合与它并排就是同一个阶段两张卡。
+        // 否则实时回合与它并排就是同一个回合两段轨道。
         if (turnId) discardPausedCeoArchiveTurn(turnId);
         turn = createPendingCeoTurn(source, { scrollMode: "preserve" });
         if (turnId && turn) turn.turnId = turnId;
@@ -5255,19 +5016,6 @@ function patchCeoInflightTurn(snapshot = null, { sessionId = "", cacheField = "i
         }
     }
     turn.turns = Array.isArray(snapshot?.turns) ? snapshot.turns : [];
-    // live inflight 只渲染本轮 delta（或本轮已渲染的 summary），不回退 full，
-    // 避免新 turn 继承上一轮阶段；跨 turn 时 lastExecutionTraceSummary 已在上面被清空；
-    // preserved 保留 full 回退。delta 与已渲染轨道做增量合并,保证阶段累计可见
-    const preferredCanonicalContext = cacheField === "inflight_turn"
-        ? mergeCeoLiveTraceContext(
-            snapshot?.canonical_context_delta || null,
-            turn?.lastExecutionTraceSummary || null
-        )
-        : resolvePreferredCeoTraceContext(
-            snapshot?.canonical_context_delta || null,
-            snapshot?.canonical_context || null,
-            turn?.lastExecutionTraceSummary || null
-        );
     mutateCeoFeed(() => {
         if (status === "running") {
             turn.liveStreamText = String(snapshot?.assistant_text || "");
@@ -5276,19 +5024,17 @@ function patchCeoInflightTurn(snapshot = null, { sessionId = "", cacheField = "i
             turn.liveStreamText = "";
             renderCeoAssistantTextIntoTurn(turn, snapshot?.assistant_text || "", { status });
         }
-        const stageRoundCount = turn.turns.length
-            ? renderCeoTurnsIntoTurn(turn, turn.turns)
-            : renderCeoStageTraceIntoTurn(turn, preferredCanonicalContext);
-        // 压缩帧早于轨道到达时留下的半切状态：轨道一落地就把 <= boundary 的卡补回头段。
+        const renderedGroups = renderCeoTurnsIntoTurn(turn, turn.turns);
+        // 压缩帧早于轨道到达时留下的半切状态：轨道一落地就把 <= boundary 的组补回头段。
         reconcileDeferredCeoCompressionSplit(turn);
-        if (!stageRoundCount) {
+        if (!renderedGroups) {
             const timelineActive = !!turn?.lastExecutionTraceSummary
                 || (turn?.listEl instanceof HTMLElement && turn.listEl.children.length > 0);
             if (status === "paused") updateCeoTurnMeta(turn, "已暂停");
             else if (status === "error") updateCeoTurnMeta(turn, "运行出错");
             else if (!timelineActive) updateCeoTurnMeta(turn, "等待工具开始...");
         }
-        if (stageRoundCount) {
+        if (renderedGroups) {
             turn.flowEl.hidden = false;
         }
         setCeoTurnUsage(turn, snapshot?.usage);
@@ -5296,19 +5042,10 @@ function patchCeoInflightTurn(snapshot = null, { sessionId = "", cacheField = "i
         applyCeoThinkingFromInflightSnapshot(turn, snapshot?.reasoning);
         icons();
     }, { scrollMode: "preserve" });
-    // 阶段收尾先到 live 回合，不重建整帧；不在这里对账的话，旧行要等一次刷新才改口。
-    reconcileCeoFeedStageStatuses();
-    reconcileCeoFeedStageCards();
     if (targetSessionId) {
         const inflightTurn = dedupeInflightUserMessageAgainstMessages(
             getCeoSessionSnapshotCache(targetSessionId)?.messages || [],
-            preferredCanonicalContext
-            ? {
-                ...(snapshot || {}),
-                canonical_context: normalizeCeoSnapshotCanonicalContext(snapshot?.canonical_context || null),
-                canonical_context_delta: preferredCanonicalContext,
-            }
-            : snapshot
+            snapshot
         );
         setCeoSessionSnapshotCache(targetSessionId, { [cacheField]: inflightTurn });
         if (cacheField === "inflight_turn") {
@@ -5468,17 +5205,13 @@ restoreCeoInflightTurn = function approvalAwareRestoreCeoInflightTurn(
 };
 
 function renderPersistedCeoAssistantTurn(item = {}, options = {}) {
-    const hasDelta = item?.canonical_context_delta !== null && item?.canonical_context_delta !== undefined;
-    const canonicalContext = hasDelta
-        ? normalizeCeoSnapshotCanonicalContext(item.canonical_context_delta)
-        : (normalizeCeoSnapshotCanonicalContext(item.canonical_context) || null);
     const content = String(item?.content || "");
     const turns = Array.isArray(item?.turns) ? item.turns : [];
     const silentReply = item?.silent_reply === true;
     const silentReason = String(item?.silent_reason || "");
     const status = String(item?.status || "").trim().toLowerCase();
     // follow-up 归档半截回合(后端 archive turn_id = `{原 turn_id}:followup:{随机}`)：
-    // 其最后一个阶段在收到补充消息时被拦腰打断,需要打上打断标记。
+    // 其最后一组工具在收到补充消息时被拦腰打断,需要打上打断标记。
     const isFollowUpArchive = String(item?.turn_id || "").includes(":followup:");
     const historyTimestamp = String(item?.timestamp || "").trim();
     const historyUsage = item?.usage || null;
@@ -5499,7 +5232,7 @@ function renderPersistedCeoAssistantTurn(item = {}, options = {}) {
             try { target.dataset.ceoKey = messageKey; } catch (error) { void error; }
         }
     };
-    if (status !== "paused" && !canonicalContext && !turns.length && !silentReply) {
+    if (status !== "paused" && !turns.length && !silentReply) {
         // 无轨道兜底气泡同样携带元信息(完成时间 + token 用量),同样是点击才显形。
         // 静默回合不走这条：它有自己的折叠行，落到下方共用路径渲染，避免两处装配。
         const el = addMsg(content, "system", { markdown: true, scrollMode: "preserve", timestamp: historyTimestamp, usage: historyUsage, turnId: forkTurnId, canForkReply });
@@ -5522,9 +5255,9 @@ function renderPersistedCeoAssistantTurn(item = {}, options = {}) {
         turn.el.setAttribute("data-ceo-key", `turn:${historyTurnId}`);
     }
     S.ceoPendingTurns.push(turn);
-    // 重建道：区分线按转录里的边界键放回这一回合的阶段中间（或气泡之前/之后），
+    // 重建道：区分线按转录里的边界键放回这一回合的轨道中间（或气泡之前/之后），
     // 而不是照抄转录行的位置——自动压缩的行是在摘要落地时落的，可能在回复行之前。
-    const segments = planHistoryCompressionSegments(canonicalContext?.stages, rules);
+    const segments = planHistoryCompressionSegments(turns, rules);
     const headEntries = [];
     for (const split of segments.splits) {
         const head = createHistoryCompressionHead(historyTurnId, split);
@@ -5534,16 +5267,12 @@ function renderPersistedCeoAssistantTurn(item = {}, options = {}) {
     const lastBoundary = headEntries.length
         ? headEntries[headEntries.length - 1].split.boundary
         : null;
-    turn.stageWindowFrom = lastBoundary === null ? null : lastBoundary + 1;
+    turn.turnWindowFrom = lastBoundary === null ? null : lastBoundary + 1;
     if (lastBoundary !== null) turn.compressionBoundary = lastBoundary;
     withCeoFeedBatch(() => {
         if (silentReply) renderCeoSilentTurn(turn, { text: content, timestamp: historyTimestamp });
         else renderCeoAssistantTextIntoTurn(turn, content || (status === "paused" ? "已暂停" : ""), { status });
-        if (turns.length) {
-            renderCeoTurnsIntoTurn(turn, turns, { interruptedStageMarker: isFollowUpArchive });
-        } else {
-            renderCeoStageTraceIntoTurn(turn, canonicalContext, { interruptedStageMarker: isFollowUpArchive });
-        }
+        renderCeoTurnsIntoTurn(turn, turns, { interruptedMarker: isFollowUpArchive });
         turn.flowEl.hidden = false;
         turn.flowEl.open = true;
         setCeoTurnUsage(turn, historyUsage, { completedAt: historyTimestamp });
@@ -5567,7 +5296,8 @@ function renderPersistedCeoAssistantTurn(item = {}, options = {}) {
                 if (divider) parent.insertBefore(divider, firstEl);
             });
             headEntries.forEach(({ head, split }) => {
-                renderCeoStageTraceIntoTurn(head, canonicalContext);
+                head.turns = turns;
+                renderCeoTurnsIntoTurn(head, turns);
                 settleCeoCompressionHeadText(head);
                 parent.insertBefore(head.el, turn.el);
                 const divider = buildHistoryCompressionDivider(split.rule, historyTurnId);
@@ -5601,10 +5331,10 @@ function renderPersistedCeoAssistantTurn(item = {}, options = {}) {
 }
 
 // ---- CEO 会话视图状态保持 -----------------------------------------------------
-// 整页重建(renderCeoSnapshot → resetCeoFeed)会丢三样东西:展开的阶段/轮次工具/全部历史、
+// 整页重建(renderCeoSnapshot → resetCeoFeed)会丢三样东西:展开的分组/组内工具条/全部历史、
 // 以及滚动锚点。重建前从 DOM 捕获、重建后按稳定 key 还原,key 失效时回退为像素 clamp。
 // 身份 key:消息/回合元素上的 data-ceo-key;未打 key 的元素用"从底部计数"的位置兜底。
-// 阶段 step 用 data-trace-key,但 stage_index 兜底会在不同回合间撞车,所以按回合身份分域。
+// 分组 step 用 data-trace-key,但纯序号兜底会在不同回合间撞车,所以按回合身份分域。
 
 function ceoFeedMatchesIncrementalFinalize(messageKeys = [], turn = null) {
     // 增量 finalize 的前置契约:DOM 与记录的消息 key 完全一致,且最后一个
@@ -5620,7 +5350,7 @@ function ceoFeedMatchesIncrementalFinalize(messageKeys = [], turn = null) {
     return true;
 }
 
-function buildFinalizedCeoTurnPayload(sessionId, { normalizedSource = "", normalizedTurnId = "", finalUserMessages = [], finalTraceContext = null, finalCanonicalContext = null, text = "", meta = null, completedAt = "", status = "" } = {}) {
+function buildFinalizedCeoTurnPayload(sessionId, { normalizedSource = "", normalizedTurnId = "", finalUserMessages = [], finalTurns = [], text = "", meta = null, completedAt = "", status = "" } = {}) {
     // finalize 三个旧分支的缓存写入统一为一次计算:消息列表与 inflight 清空只在此处构建。
     const entry = getCeoSessionSnapshotCache(sessionId);
     const inflightTurn = normalizeCeoSnapshotInflight(entry?.inflight_turn);
@@ -5630,9 +5360,7 @@ function buildFinalizedCeoTurnPayload(sessionId, { normalizedSource = "", normal
         || (normalizedTurnId && inflightTurnId && inflightTurnId !== normalizedTurnId ? false : true)
         || !String(inflightTurn?.source || "").trim()
         || ceoTurnSourceMatches(normalizedSource, inflightSource);
-    const persistedCanonicalContext = finalTraceContext
-        ? (finalCanonicalContext || finalTraceContext)
-        : null;
+    const persistedTurns = Array.isArray(finalTurns) ? finalTurns : [];
     const userMessagesToAppend = finalUserMessages.length
         ? finalUserMessages
         : (inflightMatchesSource
@@ -5646,7 +5374,7 @@ function buildFinalizedCeoTurnPayload(sessionId, { normalizedSource = "", normal
     const silentReply = meta?.silent_reply === true;
     // 暂停收尾写的这一行必须是「暂停的回复行」而不是「正常的最终回复」：刷新后服务端
     // 归档行带 status=paused，缓存行不带的话，同一回合在暂停后与刷新后是两种画法
-    // （前者普通气泡、后者带暂停标记），阶段卡的渲染分支也不同。
+    // （前者普通气泡、后者带暂停标记），分组卡的渲染分支也不同。
     const rowStatus = String(status || "").trim().toLowerCase();
     const rowTurnId = normalizeCeoTurnId(normalizedTurnId || inflightTurn?.turn_id || "");
     messages = appendCeoSessionSnapshotMessage(messages, {
@@ -5660,8 +5388,7 @@ function buildFinalizedCeoTurnPayload(sessionId, { normalizedSource = "", normal
         // 的唯一身份。缺了它，暂停收尾补出来的回复行既等不到 Fork 章，也不会阻止同一
         // 回合被 preserved_turn 再画一遍。
         ...(rowTurnId ? { turn_id: rowTurnId } : {}),
-        canonical_context: persistedCanonicalContext,
-        canonical_context_delta: finalTraceContext,
+        ...(persistedTurns.length ? { turns: persistedTurns } : {}),
         usage: meta?.usage || null,
         ...(completedTimestamp ? { timestamp: completedTimestamp } : {}),
     });
@@ -5723,7 +5450,7 @@ function renderCeoSnapshotMessageRange(messages, keys, fromIndex, toIndex, targe
                 // 被 assistant 行接管的标记不再按行位置画；消费方可能不在当前窗口，
                 // 它进入窗口时会在边界处画线（plan 按全量 messages 计算）。
                 if (compressionPlan.consumedMarkerRows.has(index)) continue;
-                const rawBoundary = Number(marker.boundary_stage_index);
+                const rawBoundary = Number(marker.boundary_turn_seq);
                 appendCeoCompressionDivider(marker.state, {
                     interactive: false,
                     turnId: String(marker.turn_id || ""),
@@ -5737,110 +5464,6 @@ function renderCeoSnapshotMessageRange(messages, keys, fromIndex, toIndex, targe
             }
         }
     }
-}
-
-const CEO_STAGE_STATUS_TOKENS = ["running", "success", "error", "info"];
-const CEO_STAGE_TERMINAL_TOKENS = ["success", "error"];
-
-function ceoFeedStageStepStatus(stepEl) {
-    for (const token of CEO_STAGE_STATUS_TOKENS) {
-        if (stepEl.classList?.contains?.(token)) return token;
-    }
-    return "";
-}
-
-// 轨道是逐助手行各画一份的，转录行 append-only：阶段后来收尾不会回写早先那几行，
-// 所以跨回合的阶段会停在它被写入那一刻的状态（心跳/静默回合驱动的会话尤其明显）。
-// 这里只把更早副本的状态升到终态：卡片位置、rounds、展开态、懒加载的输出块全不动，
-// 去重会牵动滚动还原与 round key 分域，不在这一步的范围里。
-function reconcileCeoFeedStageStatuses(feedEl = null) {
-    if (typeof displayTaskStageStatus !== "function") return 0;
-    const feed = feedEl || U.ceoFeed;
-    if (!feed?.querySelectorAll) return 0;
-    const steps = Array.from(feed.querySelectorAll(".task-trace-step[data-stage-id]"));
-    if (steps.length < 2) return 0;
-    const latestStatus = new Map();
-    steps.forEach((step) => {
-        const stageId = String(step.dataset?.stageId || "").trim();
-        if (!stageId) return;
-        latestStatus.set(stageId, ceoFeedStageStepStatus(step));
-    });
-    let applied = 0;
-    steps.forEach((step) => {
-        const stageId = String(step.dataset?.stageId || "").trim();
-        const finalStatus = latestStatus.get(stageId);
-        if (!CEO_STAGE_TERMINAL_TOKENS.includes(finalStatus)) return;
-        const currentStatus = ceoFeedStageStepStatus(step);
-        // 已经是终态的副本保持原样：error 不该被后来的 success 抹平。
-        if (!currentStatus || CEO_STAGE_TERMINAL_TOKENS.includes(currentStatus)) return;
-        step.classList.remove(currentStatus);
-        step.classList.add(finalStatus);
-        const label = step.querySelector?.(".interaction-step-status");
-        if (label) label.textContent = displayTaskStageStatus(finalStatus);
-        applied += 1;
-    });
-    return applied;
-}
-
-// 收尾判据：写了阶段总结，或状态已是终态（含被点名移出上下文——那只发生在收口那一刻）。
-function ceoFeedStageCardIsClosed(step) {
-    if (step.classList?.contains("stage-evicted")) return true;
-    if (String(step.querySelector?.(".task-trace-stage-summary")?.textContent || "").trim()) return true;
-    return CEO_STAGE_TERMINAL_TOKENS.includes(ceoFeedStageStepStatus(step));
-}
-
-function mergeCeoStageCardBody(host, donor) {
-    const hostBody = host.querySelector?.(".task-trace-body");
-    const donorBody = donor.querySelector?.(".task-trace-body");
-    if (!hostBody || !donorBody) return;
-    const seen = new Set(Array.from(hostBody.querySelectorAll(".task-trace-round-group"))
-        .map((item) => String(item.dataset?.roundKey || "")).filter(Boolean));
-    const hostSummary = hostBody.querySelector(".task-trace-stage-summary");
-    const donorSummary = donorBody.querySelector(".task-trace-stage-summary");
-    const donorSummaryText = String(donorSummary?.textContent || "").trim();
-    // 总结取最新的非空一份：副本是后写的，收尾那一刻的正文在它身上。
-    if (donorSummaryText && hostSummary) hostSummary.remove();
-    Array.from(donorBody.children).forEach((node) => {
-        if (node === donorSummary || !node.classList) return;
-        // 实时行属宿主自己那一帧，不从副本搬。
-        if (node.classList.contains("task-trace-live-steps")) return;
-        const roundKey = String(node.dataset?.roundKey || "");
-        if (roundKey && seen.has(roundKey)) return;
-        hostBody.appendChild(node);
-        if (roundKey) seen.add(roundKey);
-    });
-    if (donorSummaryText) hostBody.appendChild(donorSummary);
-}
-
-function reconcileCeoFeedStageCards(feedEl = null) {
-    const feed = feedEl || U.ceoFeed;
-    if (!feed?.querySelectorAll) return 0;
-    const hosts = new Map();
-    let merged = 0;
-    Array.from(feed.querySelectorAll(".task-trace-step[data-stage-id]")).forEach((step) => {
-        const stageId = String(step.dataset?.stageId || "").trim();
-        if (!stageId) return;
-        const host = hosts.get(stageId);
-        if (!host) {
-            hosts.set(stageId, step);
-            return;
-        }
-        // 只有收尾的阶段才归并。未收尾的副本各画一张是设计：`follow_up_archive` 那半截
-        // 与续跑那半截说的是同一阶段的不同时刻，合成一张就把"在哪被劈开"抹掉了。
-        if (!ceoFeedStageCardIsClosed(step)) return;
-        mergeCeoStageCardBody(host, step);
-        if (step.classList?.contains("stage-evicted") && !host.classList.contains("stage-evicted")) {
-            // 「已移出上下文」不是生命周期 token，终态对账不搬它，而它是这张卡现在唯一
-            // 说得出"肉身不再进模型上下文"的标记。
-            host.classList.add("stage-evicted");
-            const hostLabel = host.querySelector?.(".interaction-step-status");
-            const donorLabel = step.querySelector?.(".interaction-step-status");
-            if (hostLabel && donorLabel) hostLabel.innerHTML = donorLabel.innerHTML;
-        }
-        step.remove();
-        merged += 1;
-    });
-    return merged;
 }
 
 function renderCeoSnapshot(messages = [], inflightTurn = null, { sessionId = "", preservedTurn = null } = {}) {
@@ -5888,7 +5511,7 @@ function renderCeoSnapshot(messages = [], inflightTurn = null, { sessionId = "",
             normalizedInflightTurn,
             { sessionId: targetSessionId, cacheField: "inflight_turn" }
         );
-        // 转录里进行中回合的压缩标记行改切进回合阶段轨道（见函数注）。
+        // 转录里进行中回合的压缩标记行改切进回合回合轨道（见函数注）。
         applyCeoInflightCompressionRule(messages, normalizedInflightTurn);
         const representedMessages = [
             ...normalizeCeoSnapshotUserMessages(messages),
@@ -5927,9 +5550,6 @@ function renderCeoSnapshot(messages = [], inflightTurn = null, { sessionId = "",
     syncCeoCompressionDivider();
     // 批次内的像素 clamp 之后再按捕获状态精校(锚定滚动/展开项)。
     applyCeoFeedViewState(viewState);
-    // 放在还原之后：这里只换 class 与标签文字，不改卡片数量与高度，不会动到刚算好的锚点。
-    reconcileCeoFeedStageStatuses();
-    reconcileCeoFeedStageCards();
 }
 
 function createPendingCeoTurn(source = "user", { scrollMode = "preserve" } = {}) {
@@ -6148,7 +5768,7 @@ function discardPendingCeoTurns({ force = false, source = null, turnId = "" } = 
 
 function discardPausedCeoArchiveTurn(turnId = "") {
     // 停机截断那一跳的气泡是转录里的历史行，续跑轮与它同 turn_id（后端复用），
-    // 不摘掉它就会和实时回合并排画出同一个阶段两张卡——正是"一个回合被切成两个气泡"。
+    // 不摘掉它就会和实时回合并排画出同一个回合两段轨道——正是"一个回合被切成两个气泡"。
     const normalizedTurnId = normalizeCeoTurnId(turnId);
     if (!normalizedTurnId) return false;
     const pausedTurn = S.ceoPausedArchiveTurns?.[normalizedTurnId];
@@ -6184,19 +5804,19 @@ function updateCeoTurnMeta(turn, stateLabel) {
     turn.metaEl.textContent = nextStateLabel && nextStateLabel !== stepLabel ? `${stepLabel} - ${nextStateLabel}` : stepLabel;
 }
 
-// 轨道在气泡上唯一一直在动的一行：阶段数、轮数、以及此刻还在跑的工具数。
+// 轨道在气泡上唯一一直在动的一行：组数、轮数、以及此刻还在跑的工具数。
 // 工具帧不许把它换成"正在处理中"这种静态句子——一个十几秒的并行批次里那读起来
 // 就是"一直在加载、不刷新"，而刷新后快照重渲又把计数放了回来。
-function ceoRailMetaLabel(turn, stages = null) {
-    const items = Array.isArray(stages)
-        ? stages
-        : (Array.isArray(turn?.lastExecutionTraceSummary?.stages) ? turn.lastExecutionTraceSummary.stages : []);
+function ceoRailMetaLabel(turn, turns = null) {
+    const items = Array.isArray(turns)
+        ? turns
+        : (Array.isArray(turn?.lastExecutionTraceSummary?.turns) ? turn.lastExecutionTraceSummary.turns : []);
     if (!items.length) return "";
-    const rounds = items.reduce((sum, stage) => sum + (Array.isArray(stage?.rounds) ? stage.rounds.length : 0), 0);
+    const toolCount = items.reduce((sum, item) => sum + (Array.isArray(item?.tools) ? item.tools.length : 0), 0);
     const running = turn.liveToolStepsEl
         ? Array.from(turn.liveToolStepsEl.children).filter((item) => String(item?.dataset?.stepState || "") === "running").length
         : 0;
-    return `${items.length} 个阶段 · ${rounds} 轮工具${running ? ` · 正在跑 ${running} 个工具` : ""}`;
+    return `${items.length} 组 · ${toolCount} 次调用${running ? ` · 正在跑 ${running} 个工具` : ""}`;
 }
 
 function formatCeoTokenCount(value) {
@@ -6331,8 +5951,8 @@ function parseJsonObjectText(raw = "") {
     }
 }
 
-// 这一族记的是"模型对上下文动的一次手"：三类载入加上记忆写入。它们都不值得占一条阶段工具行——
-// 载入的内容就躺在身后那段上下文里，写入的内容就是用户刚说的那句话；失败才要回到阶段行，
+// 这一族记的是"模型对上下文动的一次手"：三类载入加上记忆写入。它们都不值得占一条工具行——
+// 载入的内容就躺在身后那段上下文里，写入的内容就是用户刚说的那句话；失败才要回到工具行，
 // 因为失败是一个需要被看见的结果。
 function ceoContextLoaderKind(toolName = "") {
     const normalized = String(toolName || "").trim().toLowerCase();
@@ -6357,7 +5977,7 @@ function isCeoContextLoadStep(step = null) {
     return isCeoContextLoaderToolName(step?.tool_name) || isCeoContractDeliveryStep(step);
 }
 
-// `silent` 是控制信号不是活动：它既不进 live 步骤也不进阶段轨道。展开气泡里看到
+// `silent` 是控制信号不是活动：它既不进 live 步骤也不进回合轨道。展开气泡里看到
 // "模型调用了 silent"没有信息量（静默本身已由折叠行表达），失败时还会误导成任务出错。
 function isCeoSilentToolName(toolName = "") {
     return String(toolName || "").trim().toLowerCase() === "silent";
@@ -6614,49 +6234,6 @@ function maybeShowCeoContextLoadNotice(turn, { toolName = "", status = "", detai
         riskLevel: memoryNotice ? memoryNotice.riskLevel : resolveCeoContextLoadNoticeRiskLevel(loaderKind, targetId),
     });
     return true;
-}
-
-function filterCeoInteractionFlowSummary(summary = null) {
-    const normalizedSummary = normalizeCeoSnapshotCanonicalContext(summary);
-    if (!normalizedSummary?.stages?.length) return null;
-    return {
-        stages: normalizedSummary.stages.map((stage) => {
-            const originalRounds = Array.isArray(stage?.rounds) ? stage.rounds : [];
-            return {
-                ...stage,
-                rounds: originalRounds
-                    .map((round) => ({
-                        ...round,
-                        tools: (Array.isArray(round?.tools) ? round.tools : []).filter((step) => {
-                            const toolName = String(step?.tool_name || "").trim().toLowerCase();
-                            const status = String(step?.status || "").trim().toLowerCase();
-                            if (isCeoSilentToolName(toolName)) return false;
-                            // 直接调用投递与 loader 同族：成功的加载动作不上普通工具行。
-                            return !isCeoContextLoadStep(step) || status === "error";
-                        }),
-                    }))
-                    .filter((round) => Array.isArray(round?.tools) && round.tools.length),
-            };
-        }),
-    };
-}
-
-function maybeShowCeoContextLoadNoticesFromSummary(turn, summary = null) {
-    const normalizedSummary = normalizeCeoSnapshotCanonicalContext(summary);
-    if (!normalizedSummary?.stages?.length) return;
-    normalizedSummary.stages.forEach((stage) => {
-        (Array.isArray(stage?.rounds) ? stage.rounds : []).forEach((round) => {
-            (Array.isArray(round?.tools) ? round.tools : []).forEach((step) => {
-                const contractDelivery = isCeoContractDeliveryStep(step);
-                maybeShowCeoContextLoadNotice(turn, {
-                    toolName: contractDelivery ? "load_tool_context" : (step?.tool_name || ""),
-                    status: step?.status || "",
-                    targetId: contractDelivery ? String(step?.tool_name || "") : "",
-                    detailTexts: [step?.output_text || "", step?.arguments_text || ""],
-                });
-            });
-        });
-    });
 }
 
 function ceoPayloadStatus(detail = "") {
@@ -6918,7 +6495,7 @@ async function copyCeoToolStepOutput(item) {
 
 async function copyCeoBubbleContent(button) {
     if (!(button instanceof HTMLElement)) return;
-    // 复制的是气泡里渲染出来的可见文本:轨道回合只取正文(不含阶段轨道),
+    // 复制的是气泡里渲染出来的可见文本:轨道回合只取正文(不含回合轨道),
     // 普通气泡取 msg-content。历史回放与 live 收尾都走同一份 DOM,无需回源。
     const message = button.closest(".message");
     const source = message?.querySelector?.(".assistant-text") || message?.querySelector?.(".msg-content");
@@ -6958,7 +6535,7 @@ async function copyCeoSessionId(button) {
 
 function trimCeoToolSteps(turn) {
     if (!turn?.liveToolStepsEl) return;
-    // 实时行现在住在阶段卡体内的容器里，"较早进度"的封顶只按这些行算，不再数阶段卡。
+    // 实时行现在住在分组卡体内的容器里，"较早进度"的封顶只按这些行算，不再数分组卡。
     const items = Array.from(turn.liveToolStepsEl.children || []).filter((item) => (
         item instanceof HTMLElement
     ));
@@ -7104,33 +6681,7 @@ function stopLiveDurationTicker() {
     S.liveDurationIntervalId = null;
 }
 
-function parseCeoSubmittedStage(event = {}) {
-    const candidates = [event?.text, event?.output_preview_text, event?.output_text, event?.arguments_text];
-    for (const raw of candidates) {
-        const text = String(raw || "").trim();
-        if (!text.startsWith("{") || !text.includes("stage_id")) continue;
-        let parsed = null;
-        try {
-            parsed = JSON.parse(text);
-        } catch (error) {
-            // 工具输出被预览截断时不是完整 JSON，交回普通工具卡片渲染。
-            continue;
-        }
-        if (!parsed || typeof parsed !== "object") continue;
-        if (!parsed.stage_id && !parsed.stage_index) continue;
-        if (!String(parsed.stage_goal || parsed.preamble_text || "").trim()) continue;
-        return parsed;
-    }
-    return null;
-}
-
-function extractCeoSubmittedStageContext(toolName = "", event = {}) {
-    if (String(toolName || "").trim().toLowerCase() !== "submit_next_stage") return null;
-    const stage = parseCeoSubmittedStage(event);
-    return stage ? { stages: [stage] } : null;
-}
-
-function ceoLastStageTraceStepEl(turn) {
+function ceoLastTraceStepEl(turn) {
     if (!turn?.listEl || typeof turn.listEl.querySelectorAll !== "function") return null;
     const steps = turn.listEl.querySelectorAll(".task-trace-step");
     return steps && steps.length ? steps[steps.length - 1] : null;
@@ -7149,33 +6700,31 @@ function ceoToolCallKey(value = "") {
 
 function ceoCommittedToolCallKeys(summary = null) {
     const keys = new Set();
-    (Array.isArray(summary?.stages) ? summary.stages : []).forEach((stage) => {
-        (Array.isArray(stage?.rounds) ? stage.rounds : []).forEach((round) => {
-            (Array.isArray(round?.tools) ? round.tools : []).forEach((tool) => {
-                const key = ceoToolCallKey(tool?.tool_call_id);
-                if (key) keys.add(key);
-            });
+    (Array.isArray(summary?.turns) ? summary.turns : []).forEach((turn) => {
+        (Array.isArray(turn?.tools) ? turn.tools : []).forEach((tool) => {
+            const key = ceoToolCallKey(tool?.tool_call_id);
+            if (key) keys.add(key);
         });
     });
     return keys;
 }
 
-// 在飞工具行的家：最后一个阶段卡的体内。画在阶段外面时，它对应的轮次一进账本，
-// 整帧重建就把它从阶段外搬进阶段里——同一条工具在界面上跳一次位置。
+// 在飞工具行的家：最后一个文本组的体内。画在组外面时，它对应的工具一进账本，
+// 整帧重建就把它从组外搬进组里——同一条工具在界面上跳一次位置。
 // 卡片开合是用户的选择：这里只挂行，不替他展开（收起时行随卡一起藏起来）。
 function ceoLiveToolStepHost(turn) {
     if (!turn?.listEl) return null;
     if (!(turn.liveToolStepsEl instanceof HTMLElement)) {
         const container = document.createElement("div");
         container.className = "task-trace-live-steps";
-        // 行本身带 role=listitem，挂进阶段卡后父节点换成这个容器，列表语义要跟着落在这里
+        // 行本身带 role=listitem，挂进组体后父节点换成这个容器，列表语义要跟着落在这里
         container.setAttribute("role", "list");
         turn.liveToolStepsEl = container;
     }
     const host = turn.liveToolStepsEl;
-    const stageEl = ceoLastStageTraceStepEl(turn);
-    const body = stageEl instanceof HTMLElement && typeof stageEl.querySelector === "function"
-        ? stageEl.querySelector(".task-trace-body")
+    const groupEl = ceoLastTraceStepEl(turn);
+    const body = groupEl instanceof HTMLElement && typeof groupEl.querySelector === "function"
+        ? groupEl.querySelector(".task-trace-body")
         : null;
     const target = body instanceof HTMLElement ? body : turn.listEl;
     if (host.parentElement !== target) target.appendChild(host);
@@ -7244,18 +6793,6 @@ function applyCeoToolEventToTurn(turn, event = {}) {
         });
         return null;
     }
-    if (String(toolName || "").trim().toLowerCase() === "submit_next_stage" && status !== "error") {
-        // 这条调用不建实时行：账本按设计不收它（_ceo_runtime_ops 里 STAGE_TOOL_NAME 直接 continue），
-        // 留着它就是一行永远对不上账的"加载中"，只能等收尾才没；而它的成绩就是新阶段卡本身。
-        const submittedStageContext = extractCeoSubmittedStageContext(toolName, event);
-        if (submittedStageContext) {
-            renderCeoStageTraceIntoTurn(turn, mergeCeoLiveTraceContext(
-                submittedStageContext,
-                turn.lastExecutionTraceSummary
-            ));
-        }
-        return null;
-    }
     const eventKind = String(event.kind || "").trim().toLowerCase();
     const detail = status === "running" && eventKind === "tool_start"
         ? ""
@@ -7264,7 +6801,7 @@ function applyCeoToolEventToTurn(turn, event = {}) {
     const toolCallId = String(event.tool_call_id || "").trim();
     const callKey = ceoToolCallKey(toolCallId);
     // 账本已经画上这次调用（补丁按帧先到、工具帧后到）就不再建行，
-    // 否则阶段卡里会同时挂着正式轮次和一条实时行。
+    // 否则分组卡里会同时挂着正式轮次和一条实时行。
     if (callKey && ceoCommittedToolCallKeys(turn.lastExecutionTraceSummary).has(callKey)) return null;
     const host = ceoLiveToolStepHost(turn);
     let item = findCeoToolStep(turn, { toolCallId, toolName });
@@ -7373,16 +6910,15 @@ function finalizeCeoTurn(text, meta = {}) {
     const normalizedSource = normalizeCeoTurnSource(meta?.source || "user");
     const normalizedTurnId = normalizeCeoTurnId(meta?.turn_id || "");
     const silentReply = meta?.silent_reply === true;
-    const finalCanonicalContext = normalizeCeoSnapshotCanonicalContext(meta?.canonical_context || null);
     const finalUserMessages = normalizeCeoSnapshotUserMessages(meta?.user_messages, meta?.user_message);
     let turn = pullActiveCeoTurn(normalizedSource, normalizedTurnId);
-    // final 事件带的 canonical 数据优先（后端在 delta 为空时会连 canonical_context 一起省略）；
-    // 缺失时回退到本轮在 run 中自己渲染出的轨道（lastExecutionTraceSummary），
-    // 避免「阶段在最终答复后消失、刷新才回来」。该兜底是当前轮的 per-turn delta，
-    // 不会回填旧轮次全量 trace；心跳轮没有 live 轨道（null）不受影响。
-    const finalTraceContext = resolveFinalCeoTraceContext(meta || {})
-        || turn?.lastExecutionTraceSummary
-        || null;
+    // final 事件带的 turns 优先；缺失时回退到本轮 run 中自己渲染出的那份，
+    // 避免「工具组在最终答复后消失、刷新才回来」。该兜底是当前轮的 turns，
+    // 不会回填旧轮次全量轨迹；心跳轮没有 live turns（空）不受影响。
+    const metaTurns = Array.isArray(meta?.turns) ? meta.turns : [];
+    const finalTurns = metaTurns.length
+        ? metaTurns
+        : ((Array.isArray(turn?.turns) && turn.turns.length) ? turn.turns : []);
     // 三个旧分支的缓存写入统一为一次计算:消息列表与 inflight 清空只在处构建,
     // 渲染层再决定走增量更新还是全量快照重建。完成时间:历史回合用消息自带
     // timestamp,live 回合用收尾时刻的本地时间。
@@ -7391,8 +6927,7 @@ function finalizeCeoTurn(text, meta = {}) {
         normalizedSource,
         normalizedTurnId,
         finalUserMessages,
-        finalTraceContext,
-        finalCanonicalContext,
+        finalTurns,
         text,
         meta,
         completedAt,
@@ -7441,17 +6976,17 @@ function finalizeCeoTurn(text, meta = {}) {
                 turn.textEl.classList.remove("assistant-text-loading");
                 syncCeoAssistantLoadingAria(turn.textEl);
             }
-            if (finalTraceContext) {
-                // 收尾帧先摘掉实时行：正式轮次这时已经在这张卡里，留着一份就是同一件事画两遍
+            if (finalTurns.length) {
+                // 收尾帧先摘掉实时行：正式工具这时已经在这组里，留着一份就是同一件事画两遍
                 clearCeoLiveToolSteps(turn);
-                renderCeoStageTraceIntoTurn(turn, finalTraceContext);
+                renderCeoTurnsIntoTurn(turn, finalTurns);
             }
             if (turn.steps > 0) {
                 const hasRunningStep = hasRunningCeoToolStep(turn);
                 turn.flowEl.hidden = false;
-                // 阶段轨道的展开态已由 renderCeoStageTraceIntoTurn 按用户选择还原,
-                // 收尾不再强制展开;仅无阶段轨道(纯工具事件回合)保留默认展开旧行为。
-                if (!finalTraceContext) turn.flowEl.open = true;
+                // 轨道的展开态已由 renderCeoTurnsIntoTurn 按用户选择还原,
+                // 收尾不再强制展开;仅无轨道(纯工具事件回合)保留默认展开旧行为。
+                if (!finalTurns.length) turn.flowEl.open = true;
                 updateCeoTurnMeta(
                     turn,
                     turn.hasError ? "处理完成，但有异常" : (hasRunningStep ? "已返回当前判断，后台任务仍在运行" : "处理完成")
@@ -7469,9 +7004,6 @@ function finalizeCeoTurn(text, meta = {}) {
             turnId: normalizedTurnId,
         });
         // 收尾后才对账：discardPendingCeoTurns / hasRunningCeoToolStep 都按 .running 判活，
-        // 抢在它们前面改 class 会让一个还没收尾的回合被当成可丢弃。
-        reconcileCeoFeedStageStatuses();
-        reconcileCeoFeedStageCards();
         maybeDispatchQueuedCeoFollowUps();
         return;
     }
@@ -7523,17 +7055,17 @@ function finalizeCeoTurn(text, meta = {}) {
                 turn.textEl.classList.remove("assistant-text-loading");
                 syncCeoAssistantLoadingAria(turn.textEl);
             }
-            if (finalTraceContext) {
-                // 收尾帧先摘掉实时行：正式轮次这时已经在这张卡里，留着一份就是同一件事画两遍
+            if (finalTurns.length) {
+                // 收尾帧先摘掉实时行：正式工具这时已经在这组里，留着一份就是同一件事画两遍
                 clearCeoLiveToolSteps(turn);
-                renderCeoStageTraceIntoTurn(turn, finalTraceContext);
+                renderCeoTurnsIntoTurn(turn, finalTurns);
             }
             if (turn.steps > 0) {
                 const hasRunningStep = hasRunningCeoToolStep(turn);
                 turn.flowEl.hidden = false;
-                // 阶段轨道的展开态已由 renderCeoStageTraceIntoTurn 按用户选择还原,
-                // 收尾不再强制展开;仅无阶段轨道(纯工具事件回合)保留默认展开旧行为。
-                if (!finalTraceContext) turn.flowEl.open = true;
+                // 轨道的展开态已由 renderCeoTurnsIntoTurn 按用户选择还原,
+                // 收尾不再强制展开;仅无轨道(纯工具事件回合)保留默认展开旧行为。
+                if (!finalTurns.length) turn.flowEl.open = true;
                 updateCeoTurnMeta(
                     turn,
                     turn.hasError ? "处理完成，但有异常" : (hasRunningStep ? "已返回当前判断，后台任务仍在运行" : "处理完成")
@@ -7550,9 +7082,6 @@ function finalizeCeoTurn(text, meta = {}) {
             source: normalizedSource,
             turnId: normalizedTurnId,
         });
-        // 增量分支同样要排在 discardPendingCeoTurns 之后，理由见上面的对账点。
-        reconcileCeoFeedStageStatuses();
-        reconcileCeoFeedStageCards();
         S.ceoFeedRenderedMessageKeys = nextKeys;
         S.ceoFeedRenderSignature = buildCeoRenderSignature(
             finalPayload.messages || [],

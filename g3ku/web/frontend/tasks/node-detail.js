@@ -1,4 +1,4 @@
-// 节点详情渲染：执行轨迹（阶段/轮次/工具/参数/输出分页/复制）、消息投递、
+// 节点详情渲染：执行轨迹（回合/工具/参数/输出分页/复制）、消息投递、
 // 派生评审、上下文与错误历史、模型重试提示。状态投影在 node-detail-store.js。
 
 function taskNodeDisplayState(node, taskPaused = taskPauseDisplayActive()) {
@@ -39,7 +39,7 @@ function formatNodeDetailHeading(node, { maxChars = 72, compact = true } = {}) {
     return `${nodeId} | ${heading}`;
 }
 
-function renderTraceStep({ traceKey = "", title, status = "info", statusLabel = "", open = false, bodyHtml = "", showRuntime = true, showStatus = true, extraClass = "", leadHtml = "", stageId = "", evicted = false, textOnly = false, text = "" }) {
+function renderTraceStep({ traceKey = "", title, status = "info", statusLabel = "", open = false, bodyHtml = "", showRuntime = true, showStatus = true, extraClass = "", leadHtml = "", textOnly = false, text = "" }) {
     if (textOnly) {
         return `
         <section class="interaction-step task-trace-step task-trace-text-block" data-trace-key="${esc(traceKey)}">
@@ -50,23 +50,14 @@ function renderTraceStep({ traceKey = "", title, status = "info", statusLabel = 
     const classes = ["interaction-step", "task-trace-step", esc(status)];
     const normalizedExtraClass = String(extraClass || "").trim();
     if (normalizedExtraClass) classes.push(esc(normalizedExtraClass));
-    // 阶段被模型点名移出上下文：生命周期状态（完成/失败）保留在 class 上供状态对账用，
-    // 徽章换成中性灰 + eye-off 图标，文案改成"已移出上下文"——它说的是"还在账本里、
-    // 但不再进模型上下文"，与"完成"是两件不同的事。
-    if (evicted) classes.push("stage-evicted");
-    // data-trace-key 的 key 允许退化成 stage_index 乃至序号，跨回合会撞车；
-    // 阶段状态对账需要的是真 stage_id，所以单独落一个属性，不做字符串推断。
-    const normalizedStageId = String(stageId || "").trim();
-    const stageIdAttr = normalizedStageId ? ` data-stage-id="${esc(normalizedStageId)}"` : "";
     const sideParts = [];
     if (showRuntime) sideParts.push('<span class="task-trace-runtime" hidden></span>');
     if (showStatus) {
         const label = String(statusLabel || "").trim() || traceStatusLabel(status);
-        const leadIcon = evicted ? '<i data-lucide="eye-off" aria-hidden="true"></i>' : "";
-        sideParts.push(`<span class="interaction-step-status">${leadIcon}${esc(label)}</span>`);
+        sideParts.push(`<span class="interaction-step-status">${esc(label)}</span>`);
     }
     return `
-        <details class="${classes.join(" ")}" data-trace-key="${esc(traceKey)}"${stageIdAttr} data-default-open="${open ? "true" : "false"}"${open ? " open" : ""}>
+        <details class="${classes.join(" ")}" data-trace-key="${esc(traceKey)}" data-default-open="${open ? "true" : "false"}"${open ? " open" : ""}>
             <summary class="task-trace-summary">
                 <span class="interaction-step-lead">
                     ${leadHtml}
@@ -145,13 +136,6 @@ function contextLoadBodyFromStep(step) {
 
 
 
-
-
-
-const STAGE_EVICTED_LABEL = "已移出上下文";
-
-// 裁撤标记由后端账本落到 UI 投影（canonical_context._normalize_stage 只在成立时写
-// context_evicted:true，缺失即未裁撤），前端不做推断。
 
 
 
@@ -301,10 +285,8 @@ function renderContextLoadIcon(contextLoad) {
 
 function traceHasContextLoadStep(trace) {
     const steps = [];
-    (Array.isArray(trace?.stages) ? trace.stages : []).forEach((stage) => {
-        (Array.isArray(stage?.rounds) ? stage.rounds : []).forEach((round) => {
-            steps.push(...(Array.isArray(round?.tools) ? round.tools : []));
-        });
+    (Array.isArray(trace?.turns) ? trace.turns : []).forEach((turn) => {
+        steps.push(...(Array.isArray(turn?.tools) ? turn.tools : []));
     });
     steps.push(...(Array.isArray(trace?.tool_steps) ? trace.tool_steps : []));
     return steps.some((step) => !!contextLoadDisplayFor(step));
@@ -454,77 +436,6 @@ function bindTraceOutputAutoLoad(traceList) {
     }, true);
 }
 
-function renderExecutionStageRoundBlock(stage, round, index) {
-    const tools = Array.isArray(round?.tools) ? round.tools : [];
-    const time = round?.created_at ? formatCompactTime(round.created_at) : "";
-    const roundText = String(round?.text || "").trim();
-    return `
-        <section class="task-trace-round-group" data-round-key="${esc(String(round?.round_id || round?.round_index || index + 1).trim())}">
-            ${time ? `<div class="task-trace-round-meta">${esc(time)}</div>` : ""}
-            ${roundText ? `<div class="task-trace-round-text">${esc(roundText)}</div>` : ""}
-            ${renderExecutionRoundToolStrip(round, tools)}
-        </section>
-    `;
-}
-
-function renderExecutionStageSummary(stage) {
-    const summaryText = String(stage?.completed_stage_summary || "").trim();
-    if (!summaryText) return "";
-    return `
-        <div class="task-trace-stage-summary">${esc(summaryText)}</div>
-    `;
-}
-
-function renderExecutionStageRounds(stage) {
-    const rounds = Array.isArray(stage?.rounds) ? stage.rounds : [];
-    const summaryHtml = renderExecutionStageSummary(stage);
-    if (!rounds.length) {
-        const archiveRef = String(stage?.rounds_archive_ref || "").trim();
-        if (archiveRef) {
-            // 阶段被点名裁撤后轨道不再带正文，整段原文留在归档里：这里只给入口，
-            // 点开才取档（把正文塞回每一行 checkpoint 会让转录成倍变大）。
-            return `
-                <div class="task-trace-stage-archive" data-stage-archive="${esc(archiveRef)}">
-                    <button type="button" class="task-trace-stage-archive-btn" data-stage-archive-open="${esc(archiveRef)}">
-                        <i data-lucide="archive-restore"></i><span>取回本阶段的调用记录</span>
-                    </button>
-                </div>
-            ` + summaryHtml;
-        }
-        // 既没有轮次也没有可取的档：体内什么都不画，占位句只是把"这张卡没有内容"重说一遍。
-        // 在飞工具行照常挂得进这个体内（org_graph_app.js ceoLiveToolStepHost）。
-        return summaryHtml;
-    }
-    return rounds.map((round, index) => renderExecutionStageRoundBlock(stage, round, index)).join("") + summaryHtml;
-}
-
-function displayTaskStageStatus(status) {
-    return ({
-        "进行中": "进行中",
-        "in_progress": "进行中",
-        "running": "进行中",
-        "active": "进行中",
-        "完成": "完成",
-        "success": "完成",
-        "completed": "完成",
-        "失败": "失败",
-        "failed": "失败",
-        "error": "失败",
-    }[String(status || "").trim()]) || String(status || "").trim() || "进行中";
-}
-
-function stageIsContextEvicted(stage) {
-    return Boolean(stage && stage.context_evicted === true);
-}
-
-function formatExecutionStageTitle(stage) {
-    const stageGoal = String(stage?.stage_goal || "").trim();
-    const fallbackTitle = String(stage?.mode || "自主执行").trim() || "自主执行";
-    // 标题只带阶段目标：开始时间在卡内逐轮那行已经印过一遍，轮数（用过/预算）
-    // 更是账本字段而非显示字段。
-    return stageGoal || fallbackTitle;
-}
-
 function buildTurnGroupDescriptors(turns) {
     const entries = [];
     (Array.isArray(turns) ? turns : []).forEach((turn) => {
@@ -603,20 +514,6 @@ function buildExecutionTraceSteps(trace, node) {
     };
     if (Array.isArray(trace?.turns) && trace.turns.length) {
         return buildTurnTraceSteps(trace.turns, initialPromptStep);
-    }
-    if (Array.isArray(trace?.stages) && trace.stages.length) {
-        return [
-            initialPromptStep,
-            ...trace.stages.map((stage, index) => ({
-                traceKey: `stage:${stage.stage_id || stage.stage_index || index}`,
-                title: formatExecutionStageTitle(stage),
-                status: stageTraceStatus(stage),
-                statusLabel: stageTraceStatusLabel(stage),
-                evicted: stageIsContextEvicted(stage),
-                open: index === trace.stages.length - 1,
-                bodyHtml: renderExecutionStageRounds(stage),
-            })),
-        ];
     }
     return [
         initialPromptStep,
@@ -1238,7 +1135,6 @@ function renderExecutionTrace(node, { viewState = null } = {}) {
         if (runtimeEl instanceof HTMLElement) updateRuntimeBadge(item, runtimeEl);
     });
     bindTraceRoundToolStrips(traceList);
-    if (typeof bindStageArchiveOpens === "function") bindStageArchiveOpens(traceList);
     bindTraceOutputAutoLoad(traceList);
     bindTraceFieldCopyActions(traceList);
     traceItems.filter((item) => item instanceof HTMLElement && item.open).forEach((item) => hydrateTraceOutputBlocks(item));
@@ -1505,11 +1401,6 @@ function showTaskNodeLoadingState(node) {
     refreshTaskDetailScrollRegions();
 }
 
-function executionTraceSummaryHasRoundBoundaries(summary) {
-    const stages = Array.isArray(summary?.stages) ? summary.stages : [];
-    return stages.some((stage) => Array.isArray(stage?.rounds) && stage.rounds.length > 0);
-}
-
 function taskNodePatchSummary(nodeId) {
     const key = String(nodeId || "").trim();
     return key ? ((S.taskNodePatchSummaries || {})[key] || null) : null;
@@ -1548,13 +1439,7 @@ function taskNodeDetailNeedsRefresh(detail, { patchSummary = null } = {}) {
     if (!detail || typeof detail !== "object") return true;
     if (String(detail?.detail_level || "").trim().toLowerCase() !== "full") return true;
     if (taskNodeTerminalSummaryIncomplete(detail) && taskNodePatchSummaryIsNewer(detail, patchSummary)) return true;
-    const summary = detail.execution_trace_summary;
-    if (!summary || typeof summary !== "object") return false;
-    const stages = Array.isArray(summary.stages) ? summary.stages : [];
-    if (!stages.length) return false;
-    const hasToolCalls = stages.some((stage) => Array.isArray(stage?.tool_calls) && stage.tool_calls.length > 0);
-    if (!hasToolCalls) return false;
-    return !executionTraceSummaryHasRoundBoundaries(summary);
+    return false;
 }
 
 async function ensureTaskNodeDetail(nodeId, { force = false } = {}) {

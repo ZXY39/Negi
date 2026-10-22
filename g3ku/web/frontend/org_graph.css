@@ -3927,21 +3927,6 @@ textarea {
     color: var(--status-failed-text);
 }
 
-/* 阶段被模型点名移出上下文：中性灰徽章 + eye-off，取代"完成"。写在 success/error
-   之后并按 stage-evicted 类提权，生命周期 class 仍留在元素上供状态对账读取。 */
-.interaction-step.stage-evicted .interaction-step-status {
-    gap: 5px;
-    background: var(--status-evicted-bg);
-    color: var(--status-evicted-text);
-}
-
-.interaction-step.stage-evicted .interaction-step-status i,
-.interaction-step.stage-evicted .interaction-step-status svg {
-    width: 12px;
-    height: 12px;
-    stroke-width: 2;
-}
-
 .interaction-step-preview,
 .interaction-step-detail {
     color: var(--text-secondary);
@@ -13176,74 +13161,13 @@ textarea {
     display: none;
 }
 
-.ceo-stage-preamble {
-    margin: 0 0 var(--space-2);
-    padding: var(--space-2) var(--space-4);
-    border-left: 2px solid color-mix(in srgb, var(--brand-primary) 45%, transparent);
-    color: var(--text-secondary);
-    font-size: 0.9rem;
-    line-height: 1.6;
-    white-space: pre-wrap;
-    word-break: break-word;
-}
-
 /* 跟进消息打断标记:归档半截回合里被补充消息拦腰打断的那个阶段标题用警示色提示 */
-.ceo-stage-interrupted .interaction-step-title {
+.ceo-turn-interrupted .interaction-step-title {
     color: var(--warning);
 }
 
 .task-trace-round-text {
     color: var(--text-primary);
-    font-size: 0.9rem;
-    line-height: 1.65;
-    white-space: pre-wrap;
-    word-break: break-word;
-}
-
-/* 裁撤阶段的调用记录留在归档里：卡片只给一颗取档按钮，取完就地换成轮次。 */
-.task-trace-stage-archive {
-    margin-top: var(--space-2);
-}
-
-.task-trace-stage-archive.is-filled {
-    margin-top: 0;
-}
-
-.task-trace-stage-archive-btn {
-    display: inline-flex;
-    align-items: center;
-    gap: 6px;
-    padding: var(--space-2) var(--space-3);
-    border: 1px solid color-mix(in srgb, var(--border-color) 78%, transparent);
-    border-radius: 999px;
-    background: color-mix(in srgb, var(--bg-app) 72%, transparent);
-    color: var(--text-secondary);
-    font-size: 0.8rem;
-    cursor: pointer;
-}
-
-.task-trace-stage-archive-btn svg {
-    width: 14px;
-    height: 14px;
-}
-
-.task-trace-stage-archive-btn[disabled] {
-    opacity: 0.6;
-    cursor: progress;
-}
-
-.task-trace-stage-archive-missing {
-    font-size: 0.8rem;
-    color: var(--text-muted);
-}
-
-.task-trace-stage-summary {
-    margin-top: var(--space-2);
-    padding: var(--space-2) var(--space-4);
-    border-left: 2px solid color-mix(in srgb, var(--brand-primary) 45%, transparent);
-    border-radius: 0 var(--radius-md) var(--radius-md) 0;
-    background: color-mix(in srgb, var(--bg-msg-sys) 60%, transparent);
-    color: var(--text-secondary);
     font-size: 0.9rem;
     line-height: 1.65;
     white-space: pre-wrap;
@@ -14846,7 +14770,7 @@ textarea {
 }
 
 /* 41. 状态类内容不画侧边强调条；2px 的 .interaction-step /
-   .ceo-stage-preamble / blockquote 是内容引用条，保留。 */
+   blockquote 是内容引用条，保留。 */
 :root .notice-item {
     border-left: 0;
 }

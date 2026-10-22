@@ -18,44 +18,53 @@ function cloneCeoSnapshotAttachments(items = []) {
     }).filter((item) => item.path);
 }
 
-function isRenderableCeoSnapshotStage(stage = null) {
-    if (!stage || typeof stage !== "object") return false;
-    const stageGoal = String(stage?.stage_goal || "").trim();
-    const stageBudget = Number(stage?.tool_round_budget ?? stage?.stage_total_steps ?? 0);
-    const systemGenerated = stage?.system_generated === true;
-    if (systemGenerated && !stageGoal && (!Number.isFinite(stageBudget) || stageBudget <= 0)) {
-        return false;
-    }
-    return true;
+function normalizeCeoSnapshotTurnTool(step = null, index = 0) {
+    if (!step || typeof step !== "object") return null;
+    const next = {
+        tool_call_id: String(step?.tool_call_id || `turn-tool-${index + 1}`).trim(),
+        tool_name: String(step?.tool_name || "tool").trim() || "tool",
+        status: String(step?.status || "").trim(),
+        arguments_text: String(step?.arguments_text ?? step?.arguments_preview ?? ""),
+        output_text: String(step?.output_text ?? step?.output_preview ?? step?.text ?? ""),
+        output_ref: String(step?.output_ref || "").trim(),
+        started_at: String(step?.started_at || "").trim(),
+        finished_at: String(step?.finished_at || "").trim(),
+    };
+    const elapsed = Number(step?.elapsed_seconds);
+    if (Number.isFinite(elapsed)) next.elapsed_seconds = elapsed;
+    const contractDelivery = String(step?.contract_delivery || "").trim();
+    if (contractDelivery) next.contract_delivery = contractDelivery;
+    const recoveryDecision = String(step?.recovery_decision || "").trim();
+    if (recoveryDecision) next.recovery_decision = recoveryDecision;
+    const evidence = (Array.isArray(step?.evidence) ? step.evidence : []).filter((item) => item && typeof item === "object");
+    if (evidence.length) next.evidence = evidence;
+    const attempted = (Array.isArray(step?.attempted_tools) ? step.attempted_tools : []).map((item) => String(item || "")).filter(Boolean);
+    if (attempted.length) next.attempted_tools = attempted;
+    const lost = String(step?.lost_result_summary || "").trim();
+    if (lost) next.lost_result_summary = lost;
+    return next;
 }
 
-function normalizeCeoSnapshotCanonicalContext(context = null) {
-    if (!context || typeof context !== "object") return null;
-    const rawStages = Array.isArray(context?.stages) ? context.stages : [];
-    const hasRenderableRealStages = rawStages.some((stage) => (
-        isRenderableCeoSnapshotStage(stage) && stage?.system_generated !== true
-    ));
-    const stages = rawStages
-        .filter((stage) => {
-            if (!isRenderableCeoSnapshotStage(stage)) return false;
-            const systemGenerated = stage?.system_generated === true;
-            const stageKind = String(stage?.stage_kind || "normal").trim() || "normal";
-            if (hasRenderableRealStages && systemGenerated && stageKind === "normal") {
-                return false;
-            }
-            return true;
+function normalizeCeoSnapshotTurns(turns = []) {
+    return (Array.isArray(turns) ? turns : [])
+        .map((turn, index) => {
+            if (!turn || typeof turn !== "object") return null;
+            const seq = Number.parseInt(String(turn?.seq ?? ""), 10);
+            const tools = (Array.isArray(turn?.tools) ? turn.tools : [])
+                .map((step, stepIndex) => normalizeCeoSnapshotTurnTool(step, stepIndex))
+                .filter(Boolean);
+            return {
+                seq: Number.isFinite(seq) ? seq : index + 1,
+                turn_id: String(turn?.turn_id || "").trim(),
+                text: String(turn?.text ?? ""),
+                text_ref: String(turn?.text_ref || "").trim(),
+                created_at: String(turn?.created_at || "").trim(),
+                status: String(turn?.status || "").trim(),
+                tools,
+            };
         })
-        .map((stage, index) => {
-            if (typeof normalizeExecutionStageTrace !== "function") return null;
-            return normalizeExecutionStageTrace(stage, index);
-        })
-        .filter(Boolean);
-    if (!stages.length) return null;
-    const next = { stages };
-    const activeStageId = String(context?.active_stage_id || "").trim();
-    if (activeStageId) next.active_stage_id = activeStageId;
-    if (context?.transition_required === true) next.transition_required = true;
-    return next;
+        .filter(Boolean)
+        .sort((left, right) => left.seq - right.seq);
 }
 
 function normalizeCeoSnapshotToolEvents() {
@@ -80,24 +89,18 @@ function normalizeCeoSnapshotMessage(message = {}) {
     if (attachments.length) next.attachments = attachments;
     if (role === "assistant") {
         const status = String(message?.status || "").trim().toLowerCase();
-        const canonicalContext = normalizeCeoSnapshotCanonicalContext(message?.canonical_context);
-        // {} delta 是后端"本轮无新轨道"的显式信号：必须原样保留键存在性，
-        // 否则缓存重渲会按"无 delta"回退全量 cc，把上一轮的旧轨道复活。
-        const hasDeltaKey = message?.canonical_context_delta
-            && typeof message.canonical_context_delta === "object";
-        const canonicalContextDelta = hasDeltaKey
-            ? normalizeCeoSnapshotCanonicalContext(message.canonical_context_delta)
-            : null;
+        // 回合轨道是这一行唯一的工具面来源：缓存必须原样带走 turns，
+        // 否则从缓存重渲时只剩正文，工具组整段消失。
+        const turns = normalizeCeoSnapshotTurns(message?.turns);
         const usage = normalizeCeoTurnUsage(message?.usage);
         if (status) next.status = status;
-        if (canonicalContext) next.canonical_context = canonicalContext;
-        if (hasDeltaKey) next.canonical_context_delta = canonicalContextDelta || {};
+        if (turns.length) next.turns = turns;
         if (usage) next.usage = usage;
         if (message?.task_dispatched === true) next.task_dispatched = true;
         if (message?.can_fork_reply === true) next.can_fork_reply = true;
         if (message?.silent_reply === true) next.silent_reply = true;
         if (message?.silent_reason) next.silent_reason = String(message.silent_reason);
-        if (!String(next.content || "").trim() && !canonicalContext && !hasDeltaKey && status !== "paused") return null;
+        if (!String(next.content || "").trim() && !turns.length && status !== "paused") return null;
         return next;
     }
     if (role === "user" && message?.can_edit_fork === true) next.can_edit_fork = true;
@@ -158,15 +161,13 @@ function normalizeCeoSnapshotInflight(snapshot = null) {
             if (userTimestamp) next.user_message.timestamp = userTimestamp;
         }
     }
-    const canonicalContext = normalizeCeoSnapshotCanonicalContext(snapshot?.canonical_context);
-    const canonicalContextDelta = normalizeCeoSnapshotCanonicalContext(snapshot?.canonical_context_delta);
+    const turns = normalizeCeoSnapshotTurns(snapshot?.turns);
     const compression = normalizeCeoSnapshotCompression(snapshot?.compression);
     const modelRetryStatus = normalizeCeoModelRetryStatus(snapshot?.model_retry_status);
     const errorMessage = String(snapshot?.last_error?.message || "").trim();
     const runtimeUsageDiagnostics = normalizeCeoRuntimeUsageDiagnostics(snapshot?.frontdoor_token_preflight_diagnostics);
     const actualRequestMessageCount = Number(snapshot?.actual_request_message_count ?? snapshot?.actualRequestMessageCount);
-    if (canonicalContext) next.canonical_context = canonicalContext;
-    if (canonicalContextDelta) next.canonical_context_delta = canonicalContextDelta;
+    if (turns.length) next.turns = turns;
     if (compression) next.compression = compression;
     if (modelRetryStatus) next.model_retry_status = modelRetryStatus;
     if (errorMessage) next.last_error = { message: errorMessage };
@@ -366,8 +367,7 @@ function appendCeoSessionSnapshotMessage(messages = [], message = null) {
         && sameAttachments
         && sameTurnId
     ) {
-        if (nextMessage.canonical_context) previous.canonical_context = nextMessage.canonical_context;
-        if (nextMessage.canonical_context_delta) previous.canonical_context_delta = nextMessage.canonical_context_delta;
+        if (Array.isArray(nextMessage.turns) && nextMessage.turns.length) previous.turns = nextMessage.turns;
         // 点击显形的元数据同样参与合并:重复 finalize/快照回写时新值覆盖旧值,不丢失。
         if (nextMessage.usage) previous.usage = nextMessage.usage;
         if (nextMessage.timestamp) previous.timestamp = nextMessage.timestamp;

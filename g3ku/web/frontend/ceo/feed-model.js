@@ -75,9 +75,8 @@ function buildCeoRenderSignature(messages = [], inflightTurn = null, preservedTu
             String(item.role || "").trim().toLowerCase(),
             String(item.turn_id || "").trim(),
             String(item.status || "").trim().toLowerCase(),
-            item.canonical_context ? 1 : 0,
-            item.canonical_context_delta ? 1 : 0,
             String(item.content || ""),
+            projectTrace(item.turns),
             // usage/timestamp 参与签名:缓存先行渲染(可能缺元数据)后到达的
             // 服务端权威快照必须触发重建,否则元信息永远停留在缺失状态。
             item.usage && typeof item.usage === "object" ? JSON.stringify(item.usage) : "",
@@ -89,23 +88,22 @@ function buildCeoRenderSignature(messages = [], inflightTurn = null, preservedTu
             item.task_dispatched === true ? 1 : 0,
         ];
     };
-    const projectTrace = (context) => {
-        // 阶段轨道参与签名:live 回合只渲染 canonical_context_delta,而该增量在
-        // assistant_text/usage 未变时也会长出新的阶段与工具轮。开关失效就会让
-        // 切回会话时的缓存先行渲染占住签名,把携带新阶段的权威快照整份跳过。
-        // 只投影会改像素的骨架字段(阶段/状态/工具名与状态/输出长度),不搬输出正文。
-        const stages = Array.isArray(context?.stages) ? context.stages : [];
-        if (!stages.length) return null;
-        return stages.map((stage) => [
-            String(stage?.stage_id || "").trim() || String(stage?.stage_index ?? ""),
-            String(stage?.status || "").trim().toLowerCase(),
-            (Array.isArray(stage?.rounds) ? stage.rounds : []).map((round) => (
-                (Array.isArray(round?.tools) ? round.tools : []).map((step) => [
-                    String(step?.tool_name || "").trim(),
-                    String(step?.status || "").trim().toLowerCase(),
-                    String(step?.output_text || "").length,
-                ])
-            )),
+    const projectTrace = (turns) => {
+        // 回合轨道参与签名:同一回合的 turns 在 assistant_text/usage 未变时也会长出
+        // 新的工具组。签名漏掉它就会让切回会话时的缓存先行渲染占住签名,把携带新
+        // turns 的权威快照整份跳过。只投影会改像素的骨架字段(seq/状态/正文长度/
+        // 工具名与状态/输出长度),不搬输出正文。
+        const entries = Array.isArray(turns) ? turns : [];
+        if (!entries.length) return null;
+        return entries.map((turn) => [
+            String(turn?.seq ?? ""),
+            String(turn?.status || "").trim().toLowerCase(),
+            String(turn?.text || "").length,
+            (Array.isArray(turn?.tools) ? turn.tools : []).map((step) => [
+                String(step?.tool_name || "").trim(),
+                String(step?.status || "").trim().toLowerCase(),
+                String(step?.output_text || "").length,
+            ]),
         ]);
     };
     const projectTurn = (snapshot) => {
@@ -121,7 +119,7 @@ function buildCeoRenderSignature(messages = [], inflightTurn = null, preservedTu
             retryStatus ? Number(retryStatus.retry_count || 0) : -1,
             retryStatus ? String(retryStatus.state || "") : "",
             snapshot.usage && typeof snapshot.usage === "object" ? JSON.stringify(snapshot.usage) : "",
-            projectTrace(snapshot.canonical_context_delta || snapshot.canonical_context || null),
+            projectTrace(snapshot.turns),
         ];
     };
     try {
