@@ -134,6 +134,15 @@ def _latest_execution_stage_goal(node: NodeRecord) -> str:
     return max(scored, key=lambda item: (item[0], item[1]))[2]
 
 
+def _latest_progress_text(node: NodeRecord) -> str:
+    """节点树上那一行进展文案：最近一条非空 assistant 正文，final_output 兜底。"""
+    for entry in reversed(list(node.output or [])):
+        text = str(getattr(entry, 'content', '') or '').strip()
+        if text:
+            return text
+    return str(node.final_output or '').strip()
+
+
 _EXECUTION_STAGE_METADATA_KEY = 'execution_stages'
 _EXECUTION_STAGE_TOOL_NAME = STAGE_TOOL_NAME
 _EXECUTION_STAGE_MODE_SELF = '自主执行'
@@ -4861,10 +4870,10 @@ class TaskLogService:
                 # 快照构建不必为每个节点全量读 nodes.payload（大 payload IO 是大树
                 # tree-snapshot 超时的根因之一）。
                 'pending_append_notice_count': len(pending_records),
-                # 树上那一行「当前阶段」文案的家也在投影：明细行不再内联整份轨迹摘要之后，
-                # 树文本按节点取阶段只剩这一条字符串可读（实盘整任务投影 1.26 MB / 8.3 ms，
+                # 树上那一行进展文案的家也在投影：明细行不再内联整份轨迹摘要之后，
+                # 树文本按节点取进展只剩这一条字符串可读（实盘整任务投影 1.26 MB / 8.3 ms，
                 # 对比整任务明细 71.0 MB / 447–725 ms）。
-                'latest_stage_goal': _latest_execution_stage_goal(node),
+                'latest_progress_text': _latest_progress_text(node),
             },
         )
 

@@ -474,36 +474,6 @@ def test_recent_tool_calls_come_from_structured_names_newest_first():
     ]
 
 
-def test_stage_projection_gives_status_counts_and_goal_prefix_only():
-    from g3ku.runtime.api.external_v1 import summarize_external_session_stages
-
-    ledger = {
-        "stages": [
-            {
-                "stage_index": index,
-                "status": "completed",
-                "stage_kind": "work",
-                "stage_goal": "核查" + ("细" * 400),
-                "tool_rounds_used": index,
-                "tool_round_budget": 12,
-                "rounds": [{}, {}],
-                "completed_stage_summary": "不该出现的摘要",
-                "key_refs": [{"secret": "不该出现"}],
-            }
-            for index in range(1, 6)
-        ]
-    }
-    stages = summarize_external_session_stages(ledger)
-    assert [item["stage_index"] for item in stages] == [3, 4, 5]
-    assert stages[0]["goal"].startswith("核查") and len(stages[0]["goal"]) == 120
-    assert stages[0]["round_count"] == 2 and stages[0]["tool_round_budget"] == 12
-    joined = __import__("json").dumps(stages, ensure_ascii=False)
-    assert "不该出现" not in joined
-    # 账本读不到时是 None（"不知道"），不是空列表——空列表会被读成"这个会话没有阶段"
-    assert summarize_external_session_stages(None) is None
-    assert summarize_external_session_stages({"stages": []}) == []
-
-
 def test_task_activity_projects_node_cells_and_reports_the_real_count():
     """任务级 `in_progress` 说不清卡在哪一格：一个任务是执行 + 验收节点的树。"""
     from g3ku.runtime.api.external_v1 import _session_task_activity
@@ -943,28 +913,6 @@ async def test_reply_absence_is_split_into_decidable_reasons():
     assert nothing["reason"] == "nothing_pending"
 
 
-def test_stage_totals_give_the_sum_three_goal_rows_cannot_show():
-    """实测形状：4 个阶段、30+30+31+23=114 轮，其中 1 个还 active。"""
-    from g3ku.runtime.api.external_v1 import summarize_external_stage_totals
-
-    ledger = {
-        "stages": [
-            {"stage_index": index, "status": status, "tool_rounds_used": used, "tool_round_budget": 30}
-            for index, (status, used) in enumerate(
-                [("completed", 30), ("completed", 30), ("completed", 31), ("active", 23)], start=1
-            )
-        ]
-    }
-    assert summarize_external_stage_totals(ledger) == {
-        "stages_total": 4,
-        "stages_completed": 3,
-        "rounds_used_total": 114,
-        "rounds_budget_total": 120,
-    }
-    # 账本读不到时给 None（"不知道"），不折成"0 个阶段"。
-    assert summarize_external_stage_totals(None) is None
-
-
 def test_tool_call_counts_scan_the_whole_buffer_not_up_to_the_first_reply():
     """提前 break 会把次数变成假数：交付正文常常在缓冲尾部之前就到。"""
     from g3ku.runtime.api.external_v1 import summarize_external_session_activity
@@ -994,17 +942,11 @@ async def test_session_status_carries_stop_reason_totals_and_unconsumed_count():
                 "stop_reason": "user_pause",
                 "unconsumed_replies": 2,
                 "turn_left_unconsumed_reply": True,
-                "stage_totals": {
-                    "stages_total": 4,
-                    "stages_completed": 3,
-                    "rounds_used_total": 114,
-                    "rounds_budget_total": 120,
-                },
-                "stages_recent": [{"stage_index": 4, "status": "active"}],
             }
 
     result = await _call(build_mcp_server(_StateClient()), "negi_session_status", {"conversation": "c1"})
     assert result["stop_reason"] == "user_pause"
     assert result["unconsumed_replies"] == 2
     assert result["turn_left_unconsumed_reply"] is True
-    assert result["stage_totals"]["rounds_used_total"] == 114
+    assert "stage_totals" not in result
+    assert "stages_recent" not in result

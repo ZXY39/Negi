@@ -15,8 +15,7 @@ import json
 import sqlite3
 from pathlib import Path
 
-
-from main.models import NodeRecord
+from main.models import NodeOutputEntry, NodeRecord
 from main.monitoring.log_service import _latest_execution_stage_goal
 from main.monitoring.models import TaskProjectionNodeDetailRecord, TaskProjectionNodeRecord
 from main.monitoring.query_service import TaskQueryService
@@ -50,7 +49,7 @@ def _open_store(path: Path) -> SQLiteTaskStore:
 
 
 def _seed_legacy_rows(store: SQLiteTaskStore) -> None:
-    """按迁移前的形状写：明细行内联摘要，投影行没有 latest_stage_goal。"""
+    """按迁移前的形状写：明细行内联摘要，投影行没有进展文案。"""
     stamp = now_iso()
     summaries = {
         'node:a': _summary([
@@ -79,7 +78,7 @@ def _seed_legacy_rows(store: SQLiteTaskStore) -> None:
                 task_id=TASK_ID,
                 root_node_id=node_id,
                 updated_at=stamp,
-                payload={'latest_stage_goal': ''},
+                payload={'latest_progress_text': ''},
             )
         )
 
@@ -94,7 +93,7 @@ def _pretend_written_before_this_version(path: Path) -> None:
         conn.execute('PRAGMA user_version = 0')
 
 
-def test_reopening_the_store_retires_inline_summaries_and_stamps_goals(tmp_path: Path):
+def test_reopening_the_store_retires_inline_summaries(tmp_path: Path):
     path = tmp_path / 'runtime.sqlite3'
     store = _open_store(path)
     try:
@@ -105,11 +104,11 @@ def test_reopening_the_store_retires_inline_summaries_and_stamps_goals(tmp_path:
 
     store = _open_store(path)
     try:
-        goals = {
-            str(item.node_id): str(dict(item.payload or {}).get('latest_stage_goal') or '')
+        progress_texts = {
+            str(item.node_id): str(dict(item.payload or {}).get('latest_progress_text') or '')
             for item in store.list_task_nodes(TASK_ID)
         }
-        assert goals == {'node:a': 'newest goal', 'node:b': '', 'node:c': 'goal from y'}
+        assert progress_texts == {'node:a': '', 'node:b': '', 'node:c': ''}
         remaining = store._fetchall(  # noqa: SLF001 - 只读账本
             "SELECT COUNT(*) AS c FROM task_node_details "
             "WHERE json_extract(payload_json, '$.payload.execution_trace_summary') IS NOT NULL",
@@ -195,7 +194,7 @@ def test_sql_goal_rule_matches_the_writer_helper():
     assert _latest_execution_stage_goal(node) == 'goal from y'
 
 
-def test_projection_written_by_the_service_carries_the_stage_goal(tmp_path: Path):
+def test_projection_written_by_the_service_carries_latest_progress_text(tmp_path: Path):
     service = MainRuntimeService(
         chat_backend=_StubChatBackend(),
         workspace_root=tmp_path,
@@ -214,20 +213,13 @@ def test_projection_written_by_the_service_carries_the_stage_goal(tmp_path: Path
         prompt='p',
         created_at=now_iso(),
         updated_at=now_iso(),
-        metadata={
-            'execution_stages': {
-                'stages': [
-                    {'stage_id': 'stage:1', 'stage_index': 1, 'stage_goal': 'first'},
-                    {'stage_id': 'stage:2', 'stage_index': 2, 'stage_goal': 'second'},
-                ]
-            }
-        },
+        output=[NodeOutputEntry(seq=1, content='latest progress', created_at=now_iso())],
     )
     detail = service.log_service._task_projection_node_detail_record(node)  # noqa: SLF001
     projection = service.log_service._task_projection_node_record(node)  # noqa: SLF001
 
     assert 'execution_trace_summary' not in dict(detail.payload or {})
-    assert dict(projection.payload or {})['latest_stage_goal'] == 'second'
+    assert dict(projection.payload or {})['latest_progress_text'] == 'latest progress'
 
 
 def test_detail_api_still_returns_the_same_summary_document(tmp_path: Path):

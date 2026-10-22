@@ -38,12 +38,12 @@ from loguru import logger
 from g3ku.core.messages import UserInputMessage
 from g3ku.runtime.api.ceo_sessions import _publish_ceo_sessions_snapshot
 from g3ku.runtime.api.external_auth import ExternalApiPrincipal, require_external_api
+from g3ku.runtime.api.external_turns import get_external_turn_service
+from g3ku.runtime.ceo_catalog_offload import build_ceo_session_catalog_async
 from g3ku.runtime.external_events import (
     SSE_HEARTBEAT_INTERVAL_SECONDS,
     get_session_event_hub,
 )
-from g3ku.runtime.api.external_turns import get_external_turn_service
-from g3ku.runtime.ceo_catalog_offload import build_ceo_session_catalog_async
 from g3ku.runtime.external_outbox import REPLY_EVENT, ack_outbound_message, load_pending_outbound
 from g3ku.runtime.external_sessions import (
     ExternalSessionEntry,
@@ -363,8 +363,6 @@ async def clear_external_session(
 
 LATEST_MODEL_TEXT_MAX_CHARS = 300
 RECENT_TOOL_NAMES_MAX = 5
-STAGES_RECENT_MAX = 3
-STAGE_GOAL_MAX_CHARS = 120
 # 实测每任务节点数 p50=2、p90=3（1227 那份是基准副本），6 项已盖住常规树的两层；
 # 超出时 `node_count` 报真实条数，截断可见。
 TASK_NODE_PROJECTION_MAX = 6
@@ -413,56 +411,6 @@ def summarize_external_session_activity(events: list[dict[str, Any]]) -> dict[st
             {"tool_name": name, "calls": tool_counts[name]} for name in tool_order[:RECENT_TOOL_NAMES_MAX]
         ],
     }
-
-
-def summarize_external_stage_totals(ledger: Any) -> dict[str, Any] | None:
-    """跨阶段的整数读数：一共几个阶段、几个已收口、累计用了多少轮预算多少轮。
-
-    `stages_recent` 只给最新 3 条（尺寸定的），于是"4 个阶段的会话被读成 3 个"，
-    "114 轮"这种量一口都给不出来。这里补的全是账本求和，零新状态；账本读不到时
-    整键省略，与 `stages_recent` 同一个"不知道不折成 0"的口径。
-    """
-    if not isinstance(ledger, dict):
-        return None
-    stages = [item for item in list(ledger.get("stages") or []) if isinstance(item, dict)]
-    return {
-        "stages_total": len(stages),
-        "stages_completed": sum(
-            1 for item in stages if str(item.get("status") or "").strip().lower() == "completed"
-        ),
-        "rounds_used_total": sum(int(item.get("tool_rounds_used") or 0) for item in stages),
-        "rounds_budget_total": sum(int(item.get("tool_round_budget") or 0) for item in stages),
-    }
-
-
-def summarize_external_session_stages(ledger: Any) -> list[dict[str, Any]] | None:
-    """最近几个阶段"在干哪件"：状态与计数加 goal 前缀，不给摘要、不给 key_refs。
-
-    尺寸是实测定的：原样五个阶段平均 87.8 KB（最大 600 KB ≈ 15 万 token），窄化到
-    这个形状后平均 666 B（≈166 token）。账本读不到（会话没驻留）时返回 None，
-    调用方按"不知道"处理，不折成空列表。
-    """
-    if not isinstance(ledger, dict):
-        return None
-    stages = list(ledger.get("stages") or [])
-    if not stages:
-        return []
-    summary: list[dict[str, Any]] = []
-    for stage in stages[-STAGES_RECENT_MAX:]:
-        if not isinstance(stage, dict):
-            continue
-        summary.append(
-            {
-                "stage_index": int(stage.get("stage_index") or 0),
-                "status": str(stage.get("status") or "").strip(),
-                "stage_kind": str(stage.get("stage_kind") or "").strip(),
-                "goal": str(stage.get("stage_goal") or "").strip()[:STAGE_GOAL_MAX_CHARS],
-                "tool_rounds_used": int(stage.get("tool_rounds_used") or 0),
-                "tool_round_budget": int(stage.get("tool_round_budget") or 0),
-                "round_count": len(list(stage.get("rounds") or [])),
-            }
-        )
-    return summary
 
 
 def _session_task_activity(agent: Any, session_key: str) -> dict[str, Any] | None:
@@ -571,10 +519,6 @@ async def get_external_session_state(
 
     last_activity_at = str((tail_event or {}).get("ts") or "")
     activity = summarize_external_session_activity(list(hub.replay(0)) if hub is not None else [])
-    # 只读引用、不 deepcopy：与 `ceo_sessions` 的轨道读法同形，取账本到序列化之间不放 await。
-    stage_ledger = getattr(session, "_frontdoor_stage_state", None) if session is not None else None
-    stages_recent = summarize_external_session_stages(stage_ledger)
-    stage_totals = summarize_external_stage_totals(stage_ledger)
     # 会话自己就知道这一轮是怎么停的（`RuntimeAgentSession._last_stop_reason`，正常交/
     # 用户暂停/没交正文就收），以前只写进续跑状态、没往外给。调用方看到
     # `turn.completed` 而阶段还 active 时，唯一能分辨交付与早退的就是它。
@@ -620,16 +564,6 @@ async def get_external_session_state(
         "stop_reason": stop_reason,
         "unconsumed_replies": unconsumed,
         "turn_left_unconsumed_reply": bool(unconsumed),
-        **(
-            {"stages_recent": stages_recent}
-            if stages_recent is not None
-            else {}
-        ),
-        **(
-            {"stage_totals": stage_totals}
-            if stage_totals is not None
-            else {}
-        ),
         "last_error": last_error,
         **(
             {

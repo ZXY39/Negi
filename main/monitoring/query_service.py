@@ -2453,9 +2453,9 @@ class TaskQueryService:
             if not node_id:
                 continue
             payload = dict(getattr(item, 'payload', {}) or {})
-            stage_goal = str(payload.get('latest_stage_goal') or '').strip()
-            if stage_goal:
-                goals[node_id] = stage_goal
+            progress_text = str(payload.get('latest_progress_text') or '').strip()
+            if progress_text:
+                goals[node_id] = progress_text
         if live_state is None:
             return goals
         for frame in list(live_state.frames or []):

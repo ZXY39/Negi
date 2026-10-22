@@ -623,11 +623,8 @@ def build_mcp_server(client: G3kuMcpClient, *, name: str = "negi") -> FastMCP:
             "40 seconds and silence of 12 minutes are different decisions), plus "
             "`last_activity_kind`/`last_activity_text` for what it is doing right now. "
             "Also carries `latest_model_text` (the newest model output, outbound-sanitized and "
-            "truncated — `latest_model_text_total_chars` says how long it really was), "
-            "`recent_tool_calls` (tool names used, newest first) and `stages_recent` (last three "
-            "stages: status, tool-round usage/budget, round count and a goal prefix — no summaries, "
-            "no key_refs). A missing `stages_recent` means the session is not resident, not that "
-            "it has no stages. "
+            "truncated — `latest_model_text_total_chars` says how long it really was), and "
+            "`recent_tool_calls` (tool names used, newest first). "
             "`last_seq` is the gateway's SSE event cursor, NOT a progress percentage or a step "
             "count — do not read a slow-rising `last_seq` as a stall. Task-side activity is a "
             "separate clock: `tasks_running`/`tasks` plus `task_activity_at`/`task_silence_seconds` "
@@ -657,15 +654,11 @@ def build_mcp_server(client: G3kuMcpClient, *, name: str = "negi") -> FastMCP:
                 "last_activity_text": str(state.get("last_activity_text") or ""),
                 "last_event_seq": int(state.get("last_event_seq") or 0),
                 # 在做什么：最新一段模型文本（已过出站消毒、截断后仍报总字数）与最近
-                # 调用过的工具名；阶段只给状态/计数与 goal 前缀，不给摘要与 key_refs。
+                # 调用过的工具名。
                 "latest_model_text": str(state.get("latest_model_text") or ""),
                 "latest_model_text_total_chars": int(state.get("latest_model_text_total_chars") or 0),
                 "recent_tool_calls": list(state.get("recent_tool_calls") or []),
-                "stages_recent": list(state.get("stages_recent") or []) if "stages_recent" in state else None,
-                # 跨阶段整数读数：只给最新 3 条 goal 会被读成"就 3 个阶段"，累计轮数
-                # 更是没有任何一口能给出（实测 114 轮那种活）。账本读不到时为 None。
-                "stage_totals": state.get("stage_totals"),
-                # 结束方式：回合 completed 而阶段仍 active 时，这是唯一分辨交付/早退的读数。
+                # 结束方式：回合 completed 而任务仍在跑时，这是分辨交付/早退的读数。
                 "stop_reason": str(state.get("stop_reason") or ""),
                 "unconsumed_replies": int(state.get("unconsumed_replies") or 0),
                 "turn_left_unconsumed_reply": bool(state.get("turn_left_unconsumed_reply")),
