@@ -28,7 +28,7 @@
   渲染面不读执行束的准入视图：`_frontdoor_tool_schemas_for_state` 从声明面单独解析出的实例渲染，参数表来源链与回落顺序归 `tool-and-skill-system.md`「Provider Tool Surface」。拿准入视图 `visible_tools` 渲染会把参数表随 callable 一起从 32 收窄到十几个，钉住语义当场失效，而 `tools[]` 一旦逐跳增删名字，前缀缓存每跳都断。
   两层差出来的那批名字（`tools[]` 里带着参数表、块却不在场）本轮调用**不撞墙**：走「契约不在场时发生什么」那条投递路径，同一跳把契约拿回来。第四态才是禁止形态——"既调不动、又发现不了"；声明面始终是可发现、可按名 load 的，`availability_hint` 的 `declared_names` 为钉住清单里没进本轮 callable 的声明名补指引，不落成"未知名字"。
   节点把能力收窄做在选择之前：判据不在场的名字直接摘出本轮 callable 组，选择组出的 callable 与执行准入用同一份收窄结果；收窄只作用执行面，钉住的 `tools[]` 里那个名字由声明侧自带的参数表继续供着，模型真去调它拿到的是契约投递。
-- 非声明的名字（mid-turn 注册的工具）被 RBAC 收回时的出口在工具态收尾的实时卫生：治理实时读不放行的名字当跳从 `tool_names` 摘除（它不在 `tools[]` 里，`denied_tools` 点不到名），callable 不再含它；RBAC 重新放行后由发现出口重新送回候选。声明名的收回仍走 `denied_tools`（名单源＝钉住声明）+ 重印边界。
+- 非声明的名字（mid-turn 注册的工具）被 RBAC 收回时的出口在工具态收尾的实时卫生：治理实时读不放行的名字当跳从 `tool_names` 摘除（它不在 `tools[]` 里，`denied_tools` 点不到名），callable 不含它；RBAC 重新放行后由发现出口重新送回候选。声明名的收回仍走 `denied_tools`（名单源＝钉住声明）+ 重印边界。
 
 ### 重读与指纹
 
@@ -67,7 +67,7 @@
 
 ### 交付被切割时的复开提醒
 
-- 节点道上 `exec` 的交付被切割时，运行时在该条 exec 结果尾部附上复开方法（`ReActToolLoop._remind_content_open_reopen_on_exec_truncation`），使下一轮能按区间精确读取。触发判据取"模型没拿全"这一件事：`output_truncated`（内联额度切割）或 `stdout_truncated` / `stderr_truncated`（捕获环丢中段）。只判后两者会漏掉绝大多数实际切割——正文短于 64 KB 捕获环却超出内联额度时它们恒为 false。被切割的载荷同时已被统一信封外置，信封文本给的是 `content_open(ref=...)`；提醒里的按路径重开用于尚未外置的本地文件目标。同一结果重复处理不再二次注入（按已写入的提醒文本幂等）。
+- 节点道上 `exec` 的交付被切割时，运行时在该条 exec 结果尾部附上复开方法（`ReActToolLoop._remind_content_open_reopen_on_exec_truncation`），使下一轮能按区间精确读取。触发判据取"模型没拿全"这一件事：`output_truncated`（内联额度切割）或 `stdout_truncated` / `stderr_truncated`（捕获环丢中段）。只判后两者会漏掉绝大多数实际切割——正文短于 64 KB 捕获环却超出内联额度时它们恒为 false。被切割的载荷同时已被统一信封外置，信封文本给的是 `content_open(ref=...)`；提醒里的按路径重开用于尚未外置的本地文件目标。同一结果重复处理不二次注入（按已写入的提醒文本幂等）。
 
 ### 参数错误与状态分类
 
@@ -166,7 +166,7 @@ frontdoor 边界：
 节点边界：
 
 - 对执行/验收节点，当轮合同分两块尾部注入：`candidate_tools` / 修复名单在稳定的 `node_runtime_tool_contract`，`denied_tools` / `execution_stage` 在每跳重写的 `node_runtime_stage_gate`（再后面才是当轮 turn-only note）。skill 全量名单钉在节点 system 首条（与会话道同一渲染函数、同一 epoch 语义），重印点之间新变为可读的 skill 走一次性持久提示，合同见 `tool-and-skill-system.md`「Pinned Static Declarations」。稳定 bootstrap user JSON 只保留稳定节点上下文。与运行时合同同轮出现的 overlay / repair overlay 只允许作为 request-tail 临时消息追加，不原地改写 bootstrap user 或任何更早的持久化消息，否则破坏稳定前缀与 prompt cache 命中。
-- `candidate_tool_names` / `candidate_skill_ids` 是唯一 gate truth source；`candidate_tool_items` / `candidate_skill_items` 只是描述文本投影（`candidate_skills` 不再渲染进合同正文，payload 字段保留供派发侧消费）。canonical 列表为空时，重建后的合同也必须把 `candidate_tools` / `candidate_skills` 渲染为空，不从旧 contract item 列表或旧 frame item 缓存复活失效候选。
+- `candidate_tool_names` / `candidate_skill_ids` 是唯一 gate truth source；`candidate_tool_items` / `candidate_skill_items` 只是描述文本投影（`candidate_skills` 不渲染进合同正文，payload 字段保留供派发侧消费）。canonical 列表为空时，重建后的合同也必须把 `candidate_tools` / `candidate_skills` 渲染为空，不从旧 contract item 列表或旧 frame item 缓存复活失效候选。
 - 恢复链路：restored `selected_tool_names` 保持“恢复的 callable 工具 ∪ 恢复的 candidate concrete 工具”，不塌缩成“仅 callable”，让下一轮 node tool-provider 能把两个集合一起交回 schema selection；node tool provider 也要把恢复的 candidate executors 作为可见工具暴露，即使当前只有 `callable_tool_names` 立即可调——否则一次成功的契约投递就可能把下一轮候选池清空，后续 `load_tool_context(tool_id="content_open")` / `load_tool_context(tool_id="filesystem_write")` 会在人为缩小的候选集上失败。暂存载体与跳序随 `node.metadata` 一起活过 pause/resume，恢复后的第一跳仍按严格一跳判它。
 - 区分“当前轮对模型暴露的 callable 合同”与“内部可恢复的完整 callable pool”：前者在无有效阶段时保留全量并把 `submit_next_stage` 置首；后者只保留在本地 `model_visible_tool_selection_trace.full_callable_tool_names` 供排障。节点 `runtime frame`、动态 `node_runtime_tool_contract` 与 `runtime-frame-messages:{node_id}` artifact 必须写入同一份 callable 列表；三者不一致按运行时合同分裂排查，而不是先怀疑 prompt 文本。frame 与重建合同对 skill 候选也必须一致：`candidate_skill_ids` / `candidate_skill_items` 在 frame 中存在时，不应因阶段压缩或 active window 裁剪而在下一轮合同中无故清空；但“从 frame 恢复”的前提是 frame 本身已是 authoritative skill-contract frame——当前 frame 只是初始化的默认空字段、而本轮已携带 fresh skill 合同时，rebuild 必须优先保留 fresh 合同。
 
