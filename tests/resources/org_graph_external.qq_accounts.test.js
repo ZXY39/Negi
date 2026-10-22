@@ -184,7 +184,7 @@ test("QQ 账号面板：徽标坐在卡片右上角，取色跟服务态走", ()
     assert.equal(t._qqBotRowStatus(t.QQ_BOT_STATE.rows[3]).badge, "pending");
 });
 
-test("QQ 账号面板：一卡两列，AppID/AppSecret 在前一行、备注/环境在后一行", () => {
+test("QQ 账号面板：字段按 AppID → AppSecret → 备注 → 环境 固定顺序排布，宽度够时同排一行", () => {
     const listEl = makeListEl();
     const { t } = loadModule({ listEl, statusEl: { textContent: "", className: "" } });
     t.QQ_BOT_STATE.loaded = true;

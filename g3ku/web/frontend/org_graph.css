@@ -15367,7 +15367,7 @@ textarea {
 }
 
 .model-group-item.is-editing:hover {
-    border-color: color-mix(in srgb, var(--ui-accent) 45%, var(--ui-border));
+    border-color: color-mix(in srgb, var(--ui-brand) 45%, var(--ui-border));
 }
 
 .model-group-item.is-incomplete {
@@ -15385,7 +15385,7 @@ textarea {
 }
 
 .model-group-member-option.is-selected span {
-    color: var(--ui-accent);
+    color: var(--ui-brand);
 }
 
 .model-group-dialog-members {
@@ -15459,8 +15459,8 @@ textarea {
 }
 
 .model-chain-slide.is-group-tile {
-    border-color: color-mix(in srgb, var(--ui-accent) 40%, var(--ui-border));
-    background: color-mix(in srgb, var(--ui-accent) 6%, var(--ui-bg-elevated));
+    border-color: color-mix(in srgb, var(--ui-brand) 40%, var(--ui-border));
+    background: color-mix(in srgb, var(--ui-brand) 6%, var(--ui-bg-elevated));
 }
 
 .model-chain-slide.is-group-tile.is-incomplete {
@@ -16614,74 +16614,182 @@ textarea {
     flex-wrap: wrap;
 }
 
-/* 2 · 模型页：六个面板头统一成一种（标题 + 发丝下边框，右挂操作） */
-.llm-groups-panel .panel-header.panel-header,
-.llm-bindings-panel .panel-header.panel-header,
-.model-chain-card > .card-header {
-    align-items: center;
-    padding: 0 0 10px;
-    border-bottom: 1px solid var(--border-color);
+/* 2 · 模型页三列同构：列头 = 15px/700 左对齐；容器不出面，一列就是「列头 + 卡片列表」 */
+#view-models .llm-groups-panel,
+#view-models .llm-bindings-panel,
+#view-models .llm-routes-panel {
+    padding: 0;
+    border: 0;
+    border-radius: 0;
+    background: none;
+    box-shadow: none;
 }
-.llm-groups-panel .panel-header h3,
-.llm-bindings-panel .panel-header h3,
-.model-chain-card .card-header h3 {
+#view-models .llm-groups-panel .panel-header,
+#view-models .llm-bindings-panel .panel-header,
+#view-models .model-chain-card > .card-header {
+    flex: 0 0 auto;
+    align-items: flex-start;
+    min-height: 42px;
+    margin-bottom: 0;
+    padding: 0 0 10px;
+    border-bottom: 0;
+}
+#view-models .llm-groups-panel .panel-header h3,
+#view-models .llm-bindings-panel .panel-header h3,
+#view-models .model-chain-card .card-header h3 {
+    margin: 0;
     font-size: 15px;
     font-weight: 700;
     line-height: 1.35;
     letter-spacing: -0.01em;
 }
-.model-chain-card > .card-header {
-    margin-bottom: var(--space-3);
-}
-/* 模型列表的搜索框在 300px 窄列里不再右浮换行：整行铺满，放在标题下方 */
-.llm-bindings-panel .model-shared-header {
+/* 模型列表列：标题一行，搜索框独占下一行；标题留在左端，不被列布局居中。 */
+#view-models .llm-bindings-panel .panel-header.model-shared-header {
     flex-direction: column;
     align-items: stretch;
-    gap: 10px;
+    gap: 8px;
 }
-.llm-bindings-panel .model-shared-actions {
+#view-models .llm-bindings-panel .model-shared-actions {
     width: 100%;
     min-width: 0;
 }
-.llm-bindings-panel .model-shared-actions .resource-search {
+#view-models .llm-bindings-panel .model-shared-actions .resource-search {
     width: 100%;
     max-width: none;
     min-width: 0;
 }
 
-/* 3 · 模型页：卡片与列表内衬收紧一档，去掉「盒中盒」的厚边感。
+/* 3 · 模型页：三条列表同一间距，卡片左缘与列头标题对齐；组卡 / 模型卡 / 链上瓦片同一表面。
       铺满 / 内滚的行为沿用下方 ≥1024px 的既有档，不在这里重复声明。 */
-.model-chain-card {
-    gap: var(--space-3);
-    padding: var(--space-4);
-    border-radius: var(--radius-lg);
+#view-models #model-group-list,
+#view-models #llm-bindings-list,
+#view-models .model-chain-list {
+    padding: 0;
+    gap: var(--ui-space-2);
 }
-.model-chain-list,
-.model-available-list {
-    padding: var(--space-3);
-    border-radius: var(--radius-lg);
+#view-models .model-chain-card {
+    gap: 0;
+    padding: 0;
+    border: 0;
+    border-radius: 0;
+    background: none;
+    box-shadow: none;
+}
+#view-models .model-group-item,
+#view-models .llm-binding-card.model-available-item,
+#view-models .model-chain-slide {
+    gap: 6px;
+    padding: var(--ui-space-3);
+    border: 1px solid var(--ui-border);
+    border-radius: var(--ui-radius-card);
+    background: var(--ui-bg-surface);
+    box-shadow: none;
+}
+#view-models .model-chain-slide.is-group-tile {
+    border-style: dashed;
+    border-color: color-mix(in srgb, var(--ui-brand) 45%, var(--ui-border));
+    background: color-mix(in srgb, var(--ui-brand) 6%, var(--ui-bg-surface));
+}
+#view-models .model-group-item.is-incomplete,
+#view-models .model-chain-slide.is-group-tile.is-incomplete {
+    border-color: color-mix(in srgb, var(--ui-danger) 50%, var(--ui-border));
+}
+/* 表面规则带 id，悬停 / 选中 / 拖放的高亮要一并按同一档写回来，否则被上面的表面色盖掉。 */
+#view-models .llm-binding-card.model-available-item:hover,
+#view-models .model-chain-slide:hover,
+#view-models .model-group-item.is-editing:hover {
+    border-color: var(--ui-border-strong);
+    background: var(--ui-bg-elevated);
+}
+#view-models .llm-binding-card.model-available-item.is-selected {
+    border-color: var(--ui-brand);
+    background: var(--ui-brand-soft);
+}
+#view-models .model-chain-slide.is-group-tile:hover {
+    border-color: color-mix(in srgb, var(--ui-brand) 70%, var(--ui-border));
+}
+#view-models .model-chain-card.is-drop-zone {
+    border-radius: var(--ui-radius-card);
+    background: color-mix(in srgb, var(--ui-brand) 4%, transparent);
+    box-shadow: 0 0 0 3px color-mix(in srgb, var(--ui-brand) 12%, transparent);
+}
+/* 卡片内三级文字：标题 13/600、副标题 12 灰、元信息 chip 12。 */
+#view-models .model-group-name,
+#view-models .model-available-item .resource-list-title,
+#view-models .model-chain-slide .resource-list-title {
+    font-size: 13px;
+    font-weight: 600;
+    line-height: 1.5;
+    color: var(--ui-text);
+}
+#view-models .model-available-item .resource-list-subtitle,
+#view-models .model-chain-slide .resource-list-subtitle {
+    font-size: 12px;
+    line-height: 1.5;
+    color: var(--ui-text-muted);
 }
 
-/* 4 · 外部页：收紧外壳留白，三块面板同一节奏 */
-.external-api-shell {
-    gap: var(--ui-space-4);
+/* 4 · 外部页：三块面板同一套列头、同一左缘；去掉列头的发丝线与表单底色，卡片才是可见的面。 */
+#view-external .external-api-shell {
+    gap: var(--ui-space-5);
     padding: var(--ui-space-4) var(--ui-space-6) var(--ui-space-6);
 }
-.external-security-hint {
-    padding: 0 var(--space-5) var(--space-4);
+#view-external .external-api-shell > .resource-detail-panel {
+    padding: 0;
+    border: 0;
+    border-radius: 0;
+    background: none;
 }
-/* QQ 账号卡：不再被 height:100% 撑出空腔，三段按内容紧凑排列 */
-.resource-list-item.qq-bot-account-row {
+#view-external .panel-header {
+    align-items: flex-start;
+    padding: 0 0 var(--ui-space-3);
+    border-bottom: 0;
+}
+#view-external .panel-header h3 {
+    font-size: 15px;
+    font-weight: 700;
+    line-height: 1.35;
+    letter-spacing: -0.01em;
+}
+#view-external .external-panel-subtitle {
+    margin: 2px 0 0;
+    font-size: 0.8rem;
+    line-height: 1.5;
+    color: var(--ui-text-muted);
+}
+#view-external .external-security-hint {
+    margin: 0;
+    padding: 0;
+    font-size: 0.8rem;
+    line-height: 1.5;
+}
+#view-external .external-token-form {
+    padding: 0;
+    border: 0;
+    background: none;
+}
+#view-external .external-token-list {
+    padding: 0;
+}
+#view-external .external-token-item {
+    gap: 6px;
+    padding: var(--ui-space-3);
+}
+/* QQ 账号卡：徽标一行 + 字段按 200px 自动排布 + 操作一行；卡内不再留空腔，操作行不再画分隔线。 */
+#view-external .resource-list-item.qq-bot-account-row {
     height: auto;
-    gap: var(--ui-space-3);
+    gap: 10px;
+    padding: var(--ui-space-3);
 }
-.qq-bot-account-head {
+#view-external .qq-bot-account-head {
     min-height: 0;
 }
-.qq-bot-account-fields {
+#view-external .qq-bot-account-fields {
+    grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
     align-content: start;
+    gap: 10px var(--ui-space-4);
 }
-.qq-bot-account-row .external-token-actions {
-    padding-top: 2px;
-    border-top: 1px solid var(--border-color);
+#view-external .qq-bot-account-row .external-token-actions {
+    padding-top: 0;
+    border-top: 0;
 }

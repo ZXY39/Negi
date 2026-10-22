@@ -1360,7 +1360,12 @@
               if (isGroupRef(ref)) return renderModelGroupChainTile(scope.key, groupKeyFromRef(ref), index, editing);
               const item = llmState().bindingMap[trim(ref)] || modelRefItem(ref);
               const key = trim(item?.key || ref);
-              return `<article class="model-chain-slide${editing ? ' is-editing' : ''}"${editing ? ' draggable="true"' : ''} data-model-chain-ref="${escv(key)}" data-scope="${scope.key}"><button type="button" class="model-chain-main" data-model-open="${escv(key)}"><span class="resource-list-title">${escv(bindingTitle(item) || key)}</span><span class="resource-list-subtitle">${escv(item?.api_base || "")}</span></button>${editing ? `<button type="button" class="model-chain-remove" data-model-chain-action="remove" data-scope="${scope.key}" data-index="${index}" title="移除" aria-label="移除模型"><i data-lucide="x"></i></button>` : ''}</article>`;
+              const badges = [index === 0
+                ? '<span class="policy-chip risk-low">首选</span>'
+                : '<span class="policy-chip neutral">候选</span>'];
+              if (item && item.enabled === false) badges.push('<span class="policy-chip neutral">已禁用</span>');
+              if (!item) badges.push('<span class="policy-chip neutral">未托管</span>');
+              return `<article class="model-chain-slide${editing ? ' is-editing' : ''}"${editing ? ' draggable="true"' : ''} data-model-chain-ref="${escv(key)}" data-scope="${scope.key}"><button type="button" class="model-chain-main" data-model-open="${escv(key)}"><span class="resource-list-title">${escv(bindingTitle(item) || key)}</span><span class="resource-list-subtitle">${escv(item?.api_base || "")}</span><span class="model-inline-meta">${badges.join("")}</span></button>${editing ? `<button type="button" class="model-chain-remove" data-model-chain-action="remove" data-scope="${scope.key}" data-index="${index}" title="移除" aria-label="移除模型"><i data-lucide="x"></i></button>` : ''}</article>`;
             }).join("") : `<div class="empty-state compact">${editing ? '把左侧模型拖到这里，编排当前角色链。' : '点击“编辑模型链”后再调整角色链。'}</div>`}</div>
           </div>
         </section>`;
