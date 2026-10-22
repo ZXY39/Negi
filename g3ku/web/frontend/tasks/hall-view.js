@@ -83,12 +83,12 @@ function renderTasks() {
         }).join("");
         const cardActions = taskCardActions(task);
         const el = document.createElement("div");
-        el.className = `project-card${selected ? " is-selected" : ""}`;
+        el.className = `project-card${selected ? " is-selected" : ""}${S.multiSelectMode ? " is-multi-mode" : ""}`;
         el.dataset.taskId = taskId;
         el.innerHTML = `
             <div class="pc-topbar">
                 <div class="pc-topbar-left">
-                    <label class="project-select-toggle"><input type="checkbox" class="project-select-checkbox ui-checkbox-input" aria-label="选择任务" ${selected ? "checked" : ""} ${S.taskBusy ? "disabled" : ""}><span class="ui-checkbox-box" aria-hidden="true"></span></label>
+                    <label class="project-select-toggle${S.multiSelectMode ? " is-visible" : ""}"><input type="checkbox" class="project-select-checkbox ui-checkbox-input" aria-label="选择任务" ${selected ? "checked" : ""} ${S.taskBusy ? "disabled" : ""}><span class="ui-checkbox-box" aria-hidden="true"></span></label>
                     <div class="pc-topbar-meta">
                         <span class="status-badge" data-status="${esc(statusKey)}" data-task-status>${esc(taskStatusLabel(task))}</span>
                         <span class="pc-task-id-chip">
@@ -150,9 +150,9 @@ function renderTasks() {
             renderTasksIfVisible();
             await performTaskAction(taskId, "resume");
         }));
-        // 已经有选区时，点卡就是加/减选；一张都没选时点卡照常打开详情。
+        // 多选态里点整张卡就是加/减选；关掉多选后点卡照常打开详情。
         el.addEventListener("click", () => {
-            if (S.selectedTaskIds.size) {
+            if (S.multiSelectMode) {
                 toggleTaskSelection(taskId);
                 return;
             }

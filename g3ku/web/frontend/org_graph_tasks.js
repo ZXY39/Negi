@@ -25,7 +25,7 @@ function getSelectedTasks() {
 }
 
 function setTaskMenuVisibility() {
-    const filterOpen = S.taskFilterMenuOpen && !U.taskToolbar?.hidden;
+    const filterOpen = !!(S.multiSelectMode && S.taskFilterMenuOpen);
     if (U.taskFilterMenu) U.taskFilterMenu.hidden = !filterOpen;
     U.taskFilterTrigger?.setAttribute("aria-expanded", filterOpen ? "true" : "false");
 }
@@ -83,7 +83,15 @@ function closeTaskMenus({ restoreFocus = false } = {}) {
     return hadToolbarOpen || cardClosed;
 }
 
+function setMultiSelectMode(enabled) {
+    S.multiSelectMode = !!enabled;
+    if (!S.multiSelectMode) S.selectedTaskIds.clear();
+    closeTaskMenus();
+    renderTasks();
+}
+
 function clearTaskSelection() {
+    S.multiSelectMode = false;
     S.selectedTaskIds.clear();
     closeTaskMenus();
     renderTasks();
@@ -98,6 +106,7 @@ function toggleTaskSelection(taskId) {
 function syncTaskSelection() {
     const ids = new Set(S.tasks.map((task) => task.task_id));
     [...S.selectedTaskIds].forEach((id) => !ids.has(id) && S.selectedTaskIds.delete(id));
+    if (!S.multiSelectMode) S.selectedTaskIds.clear();
 }
 
 function isTaskDetailVisible() {
@@ -840,6 +849,7 @@ function taskGridRenderSignature(meta) {
         // 磁盘紧急横幅由快照数据驱动，属于可见状态，需要能触发重建。
         diskEmergencyActive: !!taskWorkerStatusMetrics()?.disk_emergency_active,
         taskBusy: !!S.taskBusy,
+        multiSelectMode: !!S.multiSelectMode,
         selectedTaskCount: S.selectedTaskIds.size,
         sortMode: String(S.taskSortMode || "time"),
         emptyText: taskSessionEmptyText(),
@@ -890,15 +900,19 @@ async function loadTasks() {
 function updateTaskToolbar() {
     syncTaskSelection();
     const selected = getSelectedTasks();
-    // 批量条常驻：「按状态选」是从冷页面建选区的唯一快路，藏在选区后面就永远点不到。
-    if (U.taskToolbar) U.taskToolbar.hidden = !S.tasks.length;
-    if (U.taskSelectionCount) U.taskSelectionCount.textContent = `已选 ${selected.length} 个任务`;
+    // 头部只留一颗「多选」；点开才在同一行里出现选区读数、按状态选与三个动作。
+    if (U.taskMultiToggle) {
+        U.taskMultiToggle.setAttribute("aria-pressed", S.multiSelectMode ? "true" : "false");
+        U.taskMultiToggle.classList.toggle("active", S.multiSelectMode);
+    }
+    if (U.taskSelectionBar) U.taskSelectionBar.hidden = !S.multiSelectMode;
+    if (U.taskSelectionCount) U.taskSelectionCount.textContent = `已选 ${selected.length} 个`;
     if (U.taskClearSelection) U.taskClearSelection.disabled = S.taskBusy || !selected.length;
     const filterButtons = [...(U.taskFilterMenu?.querySelectorAll("[data-select-bucket]") || [])];
     filterButtons.forEach((button) => {
         button.disabled = S.taskBusy || !S.tasks.some((task) => statusBucketMatches(task, button.dataset.selectBucket));
     });
-    const batchButtons = [...(U.taskToolbar?.querySelectorAll("[data-batch-action]") || [])];
+    const batchButtons = [...(U.taskSelectionBar?.querySelectorAll("[data-batch-action]") || [])];
     batchButtons.forEach((button) => {
         const action = button.dataset.batchAction;
         const workerReady = !["pause", "resume"].includes(String(action || "")) || taskWorkerControlsAvailable();

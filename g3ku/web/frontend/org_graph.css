@@ -8279,15 +8279,23 @@ textarea {
     transition: opacity 120ms var(--ui-motion-ease);
 }
 
-/* 勾选框不靠「多选模式」显形：悬停或键盘聚焦时出现，选中后常驻。 */
-.project-card:hover .project-select-toggle,
-.project-card:focus-within .project-select-toggle,
+/* 多选态里每张卡的图标位就是勾选框；未进多选态时不占位。 */
+.project-select-toggle.is-visible,
 .project-card.is-selected .project-select-toggle {
     opacity: 1;
 }
 
+.task-selection-bar {
+    display: flex;
+    align-items: center;
+    gap: var(--ui-space-2);
+}
+
+.task-selection-bar[hidden] {
+    display: none;
+}
+
 .task-selection-count {
-    align-self: center;
     font-size: 13px;
     color: var(--ui-text-secondary);
     white-space: nowrap;

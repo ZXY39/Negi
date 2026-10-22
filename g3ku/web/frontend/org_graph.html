@@ -319,6 +319,35 @@
                     </div>
                     <div class="task-header-actions">
                         <div id="task-performance-bar" class="task-performance-bar" aria-live="polite"></div>
+                        <button id="task-multi-toggle" class="toolbar-btn" type="button"
+                            aria-pressed="false">多选</button>
+                        <div id="task-selection-bar" class="task-selection-bar" hidden>
+                            <span id="task-selection-count" class="task-selection-count" aria-live="polite"></span>
+                            <div id="task-filter-wrap" class="toolbar-dropdown">
+                                <button id="task-filter-menu-trigger" class="toolbar-btn ghost" type="button"
+                                    aria-haspopup="menu" aria-expanded="false">按状态选</button>
+                                <div id="task-filter-menu" class="toolbar-menu" role="menu" hidden>
+                                    <button class="toolbar-menu-item" type="button" role="menuitem"
+                                        data-select-bucket="all">全部任务</button>
+                                    <button class="toolbar-menu-item" type="button" role="menuitem"
+                                        data-select-bucket="paused">已暂停</button>
+                                    <button class="toolbar-menu-item" type="button" role="menuitem"
+                                        data-select-bucket="completed">完成</button>
+                                    <button class="toolbar-menu-item" type="button" role="menuitem"
+                                        data-select-bucket="unread">未读</button>
+                                    <button class="toolbar-menu-item" type="button" role="menuitem"
+                                        data-select-bucket="failed">失败</button>
+                                    <button class="toolbar-menu-item" type="button" role="menuitem"
+                                        data-select-bucket="unpassed">未通过</button>
+                                    <button class="toolbar-menu-item" type="button" role="menuitem"
+                                        data-select-bucket="running">进行中</button>
+                                </div>
+                            </div>
+                            <button class="toolbar-btn ghost" type="button" data-batch-action="pause">暂停</button>
+                            <button class="toolbar-btn ghost" type="button" data-batch-action="resume">开始</button>
+                            <button class="toolbar-btn ghost danger" type="button" data-batch-action="delete">删除</button>
+                            <button id="task-clear-selection" class="toolbar-btn ghost" type="button">取消选择</button>
+                        </div>
                         <div class="task-toolbar-preferences">
                             <div class="task-session-scope" role="group" aria-label="任务范围">
                                 <button id="task-session-current-btn" class="task-session-scope-btn" type="button"
@@ -358,35 +387,6 @@
                 <div class="resource-layout full-list-layout task-list-layout">
                     <section class="resource-list-panel task-list-panel full-width-panel">
                         <div class="project-list-container">
-                            <div id="task-toolbar" class="project-toolbar" hidden>
-                                <span id="task-selection-count" class="task-selection-count" aria-live="polite"></span>
-                                <div class="project-toolbar-group">
-                                    <div id="task-filter-wrap" class="toolbar-dropdown">
-                                        <button id="task-filter-menu-trigger" class="toolbar-btn ghost" type="button"
-                                            aria-haspopup="menu" aria-expanded="false">按状态选</button>
-                                        <div id="task-filter-menu" class="toolbar-menu" role="menu" hidden>
-                                            <button class="toolbar-menu-item" type="button" role="menuitem"
-                                                data-select-bucket="all">全部任务</button>
-                                            <button class="toolbar-menu-item" type="button" role="menuitem"
-                                                data-select-bucket="paused">已暂停</button>
-                                            <button class="toolbar-menu-item" type="button" role="menuitem"
-                                                data-select-bucket="completed">完成</button>
-                                            <button class="toolbar-menu-item" type="button" role="menuitem"
-                                                data-select-bucket="unread">未读</button>
-                                            <button class="toolbar-menu-item" type="button" role="menuitem"
-                                                data-select-bucket="failed">失败</button>
-                                            <button class="toolbar-menu-item" type="button" role="menuitem"
-                                                data-select-bucket="unpassed">未通过</button>
-                                            <button class="toolbar-menu-item" type="button" role="menuitem"
-                                                data-select-bucket="running">进行中</button>
-                                        </div>
-                                    </div>
-                                    <button class="toolbar-btn ghost" type="button" data-batch-action="pause">暂停</button>
-                                    <button class="toolbar-btn ghost" type="button" data-batch-action="resume">开始</button>
-                                    <button class="toolbar-btn ghost danger" type="button" data-batch-action="delete">删除</button>
-                                    <button id="task-clear-selection" class="toolbar-btn ghost" type="button">取消选择</button>
-                                </div>
-                            </div>
                             <div id="task-card-grid" class="project-card-grid">
                                 <div class="empty-state" style="grid-column: 1/-1;">暂无任务，先在 Leader 会话中创建一个异步任务。</div>
                             </div>

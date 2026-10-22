@@ -273,6 +273,7 @@ const S = {
     traceOutputContentByKey: {},
     traceOutputRequestsByKey: {},
     selectedTaskIds: new Set(),
+    multiSelectMode: false,
     taskFilterMenuOpen: false,
     taskBusy: false,
     taskPage: 1,
@@ -613,6 +614,8 @@ const U = {
     taskPageInfo: document.getElementById("task-page-info"),
     taskPagePrev: document.getElementById("task-page-prev"),
     taskPageNext: document.getElementById("task-page-next"),
+    taskMultiToggle: document.getElementById("task-multi-toggle"),
+    taskSelectionBar: document.getElementById("task-selection-bar"),
     taskSelectionCount: document.getElementById("task-selection-count"),
     taskClearSelection: document.getElementById("task-clear-selection"),
     taskSortSelect: document.getElementById("task-sort-select"),
@@ -10889,6 +10892,7 @@ function bindTaskHall() {
     U.taskPageSize?.addEventListener("change", (e) => setTaskPageSize(e.target.value));
     U.taskPagePrev?.addEventListener("click", () => setTaskPage(S.taskPage - 1));
     U.taskPageNext?.addEventListener("click", () => setTaskPage(S.taskPage + 1));
+    U.taskMultiToggle?.addEventListener("click", () => setMultiSelectMode(!S.multiSelectMode));
     U.taskClearSelection?.addEventListener("click", () => clearTaskSelection());
     U.taskFilterTrigger?.addEventListener("click", (e) => {
         e.stopPropagation();
@@ -10902,7 +10906,7 @@ function bindTaskHall() {
     document.addEventListener("visibilitychange", () => {
         if (typeof ensureTaskListVisibleReconcile === "function") ensureTaskListVisibleReconcile();
     });
-    U.taskToolbar?.querySelectorAll("[data-batch-action]")?.forEach((button) => button.addEventListener("click", async () => {
+    U.taskSelectionBar?.querySelectorAll("[data-batch-action]")?.forEach((button) => button.addEventListener("click", async () => {
         await runTaskBatchAction(button.dataset.batchAction, { returnFocus: button });
     }));
     U.taskTreeResetRounds?.addEventListener("click", () => resetTaskTreeRoundSelections());
