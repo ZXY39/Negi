@@ -550,6 +550,12 @@ function formatTaskDiskFreeBytes(metrics) {
 
 function renderTaskPerformanceBar() {
     if (!U.taskPerformanceBar) return;
+    // 多选态里这一行要让位给动作组，否则读数会把按钮挤到换行、看着像叠在一起。
+    // 内容不清掉：退出多选时先亮出上一次读数，再由轮询刷新。
+    if (S.multiSelectMode) {
+        U.taskPerformanceBar.hidden = true;
+        return;
+    }
     const metrics = taskWorkerStatusMetrics();
     const pressureState = taskWorkerPressureStateMeta(metrics);
     const cpuText = formatTaskWorkerPercent(metrics?.machine_pressure_cpu_percent);
@@ -906,6 +912,7 @@ function updateTaskToolbar() {
         U.taskMultiToggle.classList.toggle("active", S.multiSelectMode);
     }
     if (U.taskSelectionBar) U.taskSelectionBar.hidden = !S.multiSelectMode;
+    if (U.taskPerformanceBar) U.taskPerformanceBar.hidden = S.multiSelectMode;
     if (U.taskSelectionCount) U.taskSelectionCount.textContent = `已选 ${selected.length} 个`;
     if (U.taskClearSelection) U.taskClearSelection.disabled = S.taskBusy || !selected.length;
     const filterButtons = [...(U.taskFilterMenu?.querySelectorAll("[data-select-bucket]") || [])];
