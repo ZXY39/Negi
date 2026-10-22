@@ -19,6 +19,7 @@ from .tool_contract import (
     pinned_contract_is_carried_by_head,
     upsert_frontdoor_tool_contract_message,
 )
+from .turns import append_frontdoor_turn, build_frontdoor_turn_tools, normalize_frontdoor_turns
 
 
 class CreateAgentCeoFrontDoorRunner(CeoFrontDoorRuntimeOps):
@@ -438,6 +439,13 @@ class CreateAgentCeoFrontDoorRunner(CeoFrontDoorRuntimeOps):
         prepared["agent_runtime"] = "create_agent"
         refreshed = self._refresh_prompt_cache_state(state=dict(prepared))
         refreshed["agent_runtime"] = "create_agent"
+        session = getattr(runtime_context, "session", None)
+        refreshed["frontdoor_turns"] = normalize_frontdoor_turns(
+            getattr(session, "_frontdoor_turns", None)
+        )
+        turn_id_getter = getattr(session, "_current_turn_id", None)
+        if callable(turn_id_getter):
+            refreshed["frontdoor_turn_id"] = str(turn_id_getter() or "").strip()
         return refreshed
 
     async def estimate_turn_preflight(
@@ -735,9 +743,22 @@ class CreateAgentCeoFrontDoorRunner(CeoFrontDoorRuntimeOps):
             if str(payload.get("name") or "").strip()
             and str(payload.get("name") or "").strip() not in self._CONTROL_TOOL_NAMES
         ]
+        assistant_text = ""
+        for item in reversed(messages[: len(messages) - len(trailing_tools)]):
+            if str(item.get("role") or "").strip().lower() != "assistant":
+                continue
+            assistant_text = str(item.get("content") or "")
+            break
+        frontdoor_turns = append_frontdoor_turn(
+            state.get("frontdoor_turns") or [],
+            turn_id=str(state.get("frontdoor_turn_id") or "").strip(),
+            text=assistant_text,
+            tools=build_frontdoor_turn_tools(tool_call_payloads, tool_results),
+        )
         result = {
             **self._replace_messages_update(messages),
             "frontdoor_stage_state": frontdoor_stage_state,
+            "frontdoor_turns": frontdoor_turns,
             "used_tools": used_tools,
             "route_kind": route_kind,
             "analysis_text": "",

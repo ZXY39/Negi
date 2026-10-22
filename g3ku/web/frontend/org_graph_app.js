@@ -5156,6 +5156,43 @@ function renderCeoStageTraceIntoTurn(turn, canonicalContext = null, { interrupte
     return turn.steps;
 }
 
+function renderCeoTurnsIntoTurn(turn, turns = [], { interruptedStageMarker = false } = {}) {
+    if (!turn?.listEl || !turn?.flowEl) return 0;
+    if (typeof buildTurnGroupDescriptors !== "function" || typeof renderTraceStep !== "function") return 0;
+    const descriptors = buildTurnGroupDescriptors(turns);
+    if (!descriptors.length) return 0;
+    syncCeoTurnLoadingOnlyState(turn, false);
+    const turnViewState = captureCeoTurnTraceViewState(turn);
+    resetCeoToolFlow(turn);
+    turn.el?.classList?.add?.("ceo-timeline");
+    turn.listEl.classList?.add?.("task-trace-list");
+    let lastGroupIndex = -1;
+    descriptors.forEach((step, index) => {
+        if (!step.textOnly) lastGroupIndex = index;
+    });
+    turn.listEl.innerHTML = descriptors.map((step, index) => renderTraceStep({
+        ...step,
+        open: index === lastGroupIndex,
+        extraClass: interruptedStageMarker && index === descriptors.length - 1 ? "ceo-stage-interrupted" : "",
+    })).join("");
+    if (typeof bindTraceRoundToolStrips === "function") bindTraceRoundToolStrips(turn.listEl);
+    if (typeof bindTraceFieldCopyActions === "function") bindTraceFieldCopyActions(turn.listEl);
+    turn.steps = descriptors.length;
+    turn.lastExecutionTraceSummary = { turns: descriptors };
+    turn.flowEl.hidden = false;
+    turn.flowEl.open = true;
+    applyCeoTurnTraceViewState(turn, turnViewState);
+    updateCeoTurnMeta(turn, `${descriptors.length} 组`);
+    if (typeof bindTraceOutputAutoLoad === "function") bindTraceOutputAutoLoad(turn.listEl);
+    if (typeof hydrateTraceOutputBlocks === "function") {
+        Array.from(turn.listEl.querySelectorAll?.(".task-trace-step[open]") || []).forEach((item) => {
+            if (item instanceof HTMLElement) hydrateTraceOutputBlocks(item);
+        });
+    }
+    renderCeoLiveStreamTextIntoTurn(turn);
+    return turn.steps;
+}
+
 function patchCeoInflightTurn(snapshot = null, { sessionId = "", cacheField = "inflight_turn" } = {}) {
     if (!snapshot || typeof snapshot !== "object") {
         const targetSessionId = String(sessionId || activeSessionId()).trim();
@@ -5426,6 +5463,7 @@ function renderPersistedCeoAssistantTurn(item = {}, options = {}) {
         ? normalizeCeoSnapshotCanonicalContext(item.canonical_context_delta)
         : (normalizeCeoSnapshotCanonicalContext(item.canonical_context) || null);
     const content = String(item?.content || "");
+    const turns = Array.isArray(item?.turns) ? item.turns : [];
     const silentReply = item?.silent_reply === true;
     const silentReason = String(item?.silent_reason || "");
     const status = String(item?.status || "").trim().toLowerCase();
@@ -5451,7 +5489,7 @@ function renderPersistedCeoAssistantTurn(item = {}, options = {}) {
             try { target.dataset.ceoKey = messageKey; } catch (error) { void error; }
         }
     };
-    if (status !== "paused" && !canonicalContext && !silentReply) {
+    if (status !== "paused" && !canonicalContext && !turns.length && !silentReply) {
         // 无轨道兜底气泡同样携带元信息(完成时间 + token 用量),同样是点击才显形。
         // 静默回合不走这条：它有自己的折叠行，落到下方共用路径渲染，避免两处装配。
         const el = addMsg(content, "system", { markdown: true, scrollMode: "preserve", timestamp: historyTimestamp, usage: historyUsage, turnId: forkTurnId, canForkReply });
@@ -5491,7 +5529,11 @@ function renderPersistedCeoAssistantTurn(item = {}, options = {}) {
     withCeoFeedBatch(() => {
         if (silentReply) renderCeoSilentTurn(turn, { text: content, timestamp: historyTimestamp });
         else renderCeoAssistantTextIntoTurn(turn, content || (status === "paused" ? "已暂停" : ""), { status });
-        renderCeoStageTraceIntoTurn(turn, canonicalContext, { interruptedStageMarker: isFollowUpArchive });
+        if (turns.length) {
+            renderCeoTurnsIntoTurn(turn, turns, { interruptedStageMarker: isFollowUpArchive });
+        } else {
+            renderCeoStageTraceIntoTurn(turn, canonicalContext, { interruptedStageMarker: isFollowUpArchive });
+        }
         turn.flowEl.hidden = false;
         turn.flowEl.open = true;
         setCeoTurnUsage(turn, historyUsage, { completedAt: historyTimestamp });

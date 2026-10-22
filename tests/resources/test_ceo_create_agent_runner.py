@@ -7815,3 +7815,45 @@ def test_frontdoor_auto_opens_stage_for_node_error_heartbeat() -> None:
     assert stage["tool_round_budget"] == 10
     assert "任务 ID task:26e64d1dc8b3" in stage["stage_goal"]
     assert stage["rounds"][0]["tool_names"] == ["manage_task_nodes"]
+
+
+@pytest.mark.asyncio
+async def test_postprocess_appends_a_frontdoor_turn_with_tool_results() -> None:
+    runner = create_agent_impl.CreateAgentCeoFrontDoorRunner(loop=SimpleNamespace(main_task_service=None))
+    state = {
+        "messages": [
+            {"role": "user", "content": "start"},
+            {
+                "role": "assistant",
+                "content": "checking files",
+                "tool_calls": [
+                    {
+                        "id": "call-1",
+                        "type": "function",
+                        "function": {"name": "exec", "arguments": "{\"command\": \"dir\"}"},
+                    }
+                ],
+            },
+            {
+                "role": "tool",
+                "name": "exec",
+                "tool_call_id": "call-1",
+                "content": "{\"result_text\": \"ok\", \"status\": \"success\"}",
+            },
+        ],
+        "tool_call_payloads": [
+            {"id": "call-1", "name": "exec", "arguments": {"command": "dir"}},
+        ],
+        "frontdoor_turn_id": "turn-1",
+        "frontdoor_turns": [],
+    }
+
+    result = await runner._postprocess_completed_tool_cycle(state=state)
+
+    assert result is not None
+    turns = result["frontdoor_turns"]
+    assert len(turns) == 1
+    assert turns[0]["turn_id"] == "turn-1"
+    assert turns[0]["text"] == "checking files"
+    assert turns[0]["tools"][0]["tool_call_id"] == "call-1"
+    assert turns[0]["tools"][0]["output_text"] == "ok"

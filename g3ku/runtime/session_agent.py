@@ -39,6 +39,7 @@ from g3ku.runtime.frontdoor.message_builder import (
     adopt_memory_snapshot,
 )
 from g3ku.runtime.frontdoor.state_models import CeoFrontdoorInterrupted
+from g3ku.runtime.frontdoor.turns import normalize_frontdoor_turns
 from main.runtime.stage_budget import STAGE_TURN_END_SUMMARY_POINTER
 
 _CONTROL_TOOL_NAMES = {"stop_tool_execution"}
@@ -218,6 +219,7 @@ class RuntimeAgentSession:
         self._paused_execution_context: dict[str, Any] | None = None
         self._frontdoor_stage_state: dict[str, Any] = {}
         self._frontdoor_canonical_context: dict[str, Any] = default_frontdoor_canonical_context()
+        self._frontdoor_turns: list[dict[str, Any]] = []
         self._compression_state: dict[str, Any] = {}
         self._semantic_context_state: dict[str, Any] = {}
         self._frontdoor_repair_required_tool_items: list[dict[str, Any]] = []
@@ -601,6 +603,7 @@ class RuntimeAgentSession:
         self._frontdoor_token_preflight_diagnostics = dict(
             payload.get("frontdoor_token_preflight_diagnostics") or {}
         )
+        self._frontdoor_turns = normalize_frontdoor_turns(payload.get("frontdoor_turns"))
         actual_request_path = str(
             payload.get("frontdoor_actual_request_path") or payload.get("actual_request_path") or ""
         ).strip()
@@ -3071,6 +3074,8 @@ class RuntimeAgentSession:
             snapshot["canonical_context"] = canonical_context
         if frontdoor_stage_state:
             snapshot["frontdoor_stage_state"] = frontdoor_stage_state
+        if self._frontdoor_turns:
+            snapshot["frontdoor_turns"] = copy.deepcopy(self._frontdoor_turns)
         if frontdoor_canonical_context:
             snapshot["frontdoor_canonical_context"] = frontdoor_canonical_context
         turn_id = self._current_turn_id()

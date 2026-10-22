@@ -525,7 +525,7 @@ function formatExecutionStageTitle(stage) {
     return stageGoal || fallbackTitle;
 }
 
-function buildTurnTraceSteps(turns, initialPromptStep) {
+function buildTurnGroupDescriptors(turns) {
     const entries = [];
     (Array.isArray(turns) ? turns : []).forEach((turn) => {
         const text = String(turn?.text || "").trim();
@@ -551,7 +551,7 @@ function buildTurnTraceSteps(turns, initialPromptStep) {
         target.tools.push(...tools);
     });
 
-    const steps = [initialPromptStep];
+    const steps = [];
     entries.forEach((entry) => {
         if (entry.kind === "preamble") {
             steps.push({
@@ -583,6 +583,11 @@ function buildTurnTraceSteps(turns, initialPromptStep) {
             status: "info",
         });
     });
+    return steps;
+}
+
+function buildTurnTraceSteps(turns, initialPromptStep) {
+    const steps = [initialPromptStep, ...buildTurnGroupDescriptors(turns)];
     const last = steps[steps.length - 1];
     if (last && !last.textOnly) last.open = true;
     return steps;

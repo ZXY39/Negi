@@ -69,6 +69,7 @@ from g3ku.runtime.frontdoor.message_builder import (
 from g3ku.runtime.frontdoor.token_preflight_compaction import (
     FrontdoorTokenPreflightResult,
 )
+from g3ku.runtime.frontdoor.turns import normalize_frontdoor_turns
 from g3ku.runtime.message_token_estimation import estimate_message_tokens
 from g3ku.runtime.project_environment import current_project_environment
 from g3ku.runtime.session_agent import (
@@ -4983,6 +4984,12 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
         )
         setattr(target_session, "_frontdoor_stage_state", frontdoor_stage_state)
         setattr(target_session, "_frontdoor_canonical_context", frontdoor_canonical_context)
+        if isinstance(state, dict):
+            setattr(
+                target_session,
+                "_frontdoor_turns",
+                normalize_frontdoor_turns(state.get("frontdoor_turns")),
+            )
         # 会话自己判"这个 running 还有没有活的宿主"：被放弃的那一轮会按图状态把旧的
         # running 覆盖回来，不挡在这里就会一路传到快照与连续性文件，界面上那条线就没人收。
         adopt = getattr(target_session, "_adopt_compression_state", None)

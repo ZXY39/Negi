@@ -21,6 +21,7 @@ from g3ku.runtime.frontdoor.canonical_context import (
     materialize_transcript_view,
     project_canonical_context_for_ui_payload,
 )
+from g3ku.runtime.frontdoor.turns import normalize_frontdoor_turns
 from g3ku.runtime.memory_scope import DEFAULT_WEB_MEMORY_SCOPE, normalize_memory_scope
 from g3ku.runtime.session_keys import (
     build_session_key,
@@ -1197,6 +1198,7 @@ def _normalized_completed_continuity_snapshot(payload: Any) -> dict[str, Any] | 
         "frontdoor_actual_request_history": _normalized_message_records(payload.get("frontdoor_actual_request_history")),
         "frontdoor_stage_state": dict(payload.get("frontdoor_stage_state") or {}),
         "frontdoor_canonical_context": dict(payload.get("frontdoor_canonical_context") or {}),
+        "frontdoor_turns": normalize_frontdoor_turns(payload.get("frontdoor_turns")),
         "compression_state": dict(payload.get("compression_state") or {}),
         "semantic_context_state": dict(payload.get("semantic_context_state") or {}),
         "capability_snapshot_exposure_revision": str(payload.get("capability_snapshot_exposure_revision") or "").strip(),

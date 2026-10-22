@@ -20,6 +20,7 @@ from g3ku.runtime.frontdoor.message_builder import (
     MEMORY_SNAPSHOT_ADOPTION_MANUAL_COMPRESSION,
     adopt_memory_snapshot,
 )
+from g3ku.runtime.frontdoor.turns import find_frontdoor_turn_tool
 from g3ku.runtime.session_agent import (
     MANUAL_COMPRESSION_RUNNING,
     MANUAL_COMPRESSION_STATE_ATTR,
@@ -872,6 +873,20 @@ def _tool_arguments_from_ledger(ledger: object, tool_call_id: str) -> dict | Non
     return None
 
 
+def _tool_arguments_from_turns(turns: object, tool_call_id: str) -> dict | None:
+    tool = find_frontdoor_turn_tool(turns, tool_call_id)
+    if not tool:
+        return None
+    text = str(tool.get("arguments_text") or "").strip()
+    if not text:
+        return None
+    try:
+        parsed = json.loads(text)
+    except Exception:
+        return None
+    return parsed if isinstance(parsed, dict) else None
+
+
 @router.get("/ceo/sessions/{session_id}/tool-arguments")
 async def get_ceo_session_tool_arguments(session_id: str, tool_call_id: str = ""):
     """取一次工具调用的全量入参：Web 轨道上被投影裁掉的入参按这条车道回补。"""
@@ -887,15 +902,19 @@ async def get_ceo_session_tool_arguments(session_id: str, tool_call_id: str = ""
         session_id,
         create=False,
     )
-    # 账本按引用读，不走 `_frontdoor_visible_canonical_context_snapshot()`：那份是
-    # deepcopy + normalize，590 阶段的实测 11 ms，而这里全程只读、也不改形状。
-    # 前提钉在"取账本到序列化之间不许出现 await"——单线程里没有 await 点，回合就
-    # 没机会在遍历中途改写这张 dict；将来要是在下面任何一步之前加了 await，得退回快照口径。
-    ledger = getattr(runtime_session, "_frontdoor_stage_state", None)
-    if not isinstance(ledger, dict) or not list(ledger.get("stages") or []):
-        # 会话没驻留（进程重启后还没人连过）时读完成态 sidecar，那份同样是未裁的账本。
-        ledger = read_completed_continuity_snapshot(session_key)
-    arguments = _tool_arguments_from_ledger(ledger, target)
+    # turns 账本是新的全量入参来源；旧 stage 账本只作过渡回退，P4 删除。
+    turns = getattr(runtime_session, "_frontdoor_turns", None)
+    if not turns:
+        continuity = read_completed_continuity_snapshot(session_key)
+        if isinstance(continuity, dict):
+            turns = continuity.get("frontdoor_turns")
+    arguments = _tool_arguments_from_turns(turns, target)
+    if arguments is None:
+        ledger = getattr(runtime_session, "_frontdoor_stage_state", None)
+        if not isinstance(ledger, dict) or not list(ledger.get("stages") or []):
+            # 会话没驻留（进程重启后还没人连过）时读完成态 sidecar，那份同样是未裁的账本。
+            ledger = read_completed_continuity_snapshot(session_key)
+        arguments = _tool_arguments_from_ledger(ledger, target)
     if arguments is None:
         raise HTTPException(status_code=404, detail="tool_arguments_not_found")
     return {

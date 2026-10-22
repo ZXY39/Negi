@@ -1,19 +1,12 @@
 from __future__ import annotations
 
-
-
 from dataclasses import dataclass
-
 from typing import Any, Callable
-
-
 
 from typing_extensions import TypedDict
 
 from .canonical_context import default_frontdoor_canonical_context
 from .prompt_cache_contract import DEFAULT_CACHE_FAMILY_REVISION
-
-
 
 
 class CeoPersistentState(TypedDict, total=False):
@@ -282,6 +275,8 @@ def initial_persistent_state(*, user_input: Any) -> dict[str, Any]:
         },
 
         "frontdoor_canonical_context": default_frontdoor_canonical_context(),
+
+        "frontdoor_turns": [],
 
         "compression_state": {
 

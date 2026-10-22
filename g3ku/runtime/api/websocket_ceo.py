@@ -1078,7 +1078,15 @@ def _build_ceo_snapshot(
     session_id: str | None = None,
     edit_fork_gates: dict[int, bool] | None = None,
     reply_fork_turn_ids: set[str] | None = None,
+    frontdoor_turns: list[dict[str, Any]] | None = None,
 ) -> list[dict[str, Any]]:
+    turns_by_turn_id: dict[str, list[dict[str, Any]]] = {}
+    for turn in list(frontdoor_turns or []):
+        if not isinstance(turn, dict):
+            continue
+        turn_id_value = str(turn.get("turn_id") or "").strip()
+        if turn_id_value:
+            turns_by_turn_id.setdefault(turn_id_value, []).append(turn)
     inflight_payload = inflight_turn if isinstance(inflight_turn, dict) else {}
     inflight_status = str(inflight_payload.get("status") or "").strip().lower()
     hide_pending_users = inflight_status in {"running", "in_progress", "active"}
@@ -1172,6 +1180,8 @@ def _build_ceo_snapshot(
         turn_id = str(raw.get('turn_id') or raw.get('metadata', {}).get('_transcript_turn_id') or '').strip() if isinstance(raw.get('metadata'), dict) else str(raw.get('turn_id') or '').strip()
         if turn_id:
             item['turn_id'] = turn_id
+            if role == 'assistant' and turns_by_turn_id.get(turn_id):
+                item['turns'] = copy.deepcopy(turns_by_turn_id[turn_id])
         if role == 'user':
             if edit_fork_gates and edit_fork_gates.get(index):
                 item['can_edit_fork'] = True
@@ -1551,6 +1561,7 @@ async def ceo_websocket(websocket: WebSocket):
             session_id=session_id,
             edit_fork_gates=edit_gates,
             reply_fork_turn_ids=_reply_fork_turn_id_set(raw_messages, fork_gates),
+            frontdoor_turns=list(getattr(session, "_frontdoor_turns", []) or []),
         )
 
     persisted_messages = await run_off_event_loop(_compose_ceo_snapshot)

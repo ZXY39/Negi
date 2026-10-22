@@ -102,6 +102,64 @@ def test_endpoint_serves_full_arguments_from_the_resident_ledger(env):
     assert runtime.snapshot_calls == 0
 
 
+def test_endpoint_serves_full_arguments_from_the_turns_ledger(env):
+    runtime = _RuntimeStub({})
+    runtime._frontdoor_turns = [
+        {
+            "seq": 1,
+            "turn_id": "turn-1",
+            "text": "progress",
+            "tools": [
+                {
+                    "tool_call_id": "call-1",
+                    "tool_name": "exec",
+                    "arguments_text": json.dumps(
+                        {"command": LONG_COMMAND, "timeout_seconds": 60},
+                        ensure_ascii=False,
+                    ),
+                }
+            ],
+        }
+    ]
+    env.holder["session"] = runtime
+
+    response = _get(env, "call-1")
+
+    assert response.status_code == 200, response.text
+    assert json.loads(response.json()["arguments_text"]) == {
+        "command": LONG_COMMAND,
+        "timeout_seconds": 60,
+    }
+
+
+def test_endpoint_falls_back_to_turns_in_the_completed_continuity_sidecar(env):
+    wcs.write_completed_continuity_snapshot(
+        env.key,
+        {
+            "frontdoor_turns": [
+                {
+                    "seq": 1,
+                    "turn_id": "turn-1",
+                    "text": "",
+                    "tools": [
+                        {
+                            "tool_call_id": "call-1",
+                            "tool_name": "exec",
+                            "arguments_text": json.dumps({"command": LONG_COMMAND}),
+                        }
+                    ],
+                }
+            ]
+        },
+    )
+    assert env.holder["session"] is None
+
+    response = _get(env, "call-1")
+
+    assert response.status_code == 200, response.text
+    assert json.loads(response.json()["arguments_text"])["command"] == LONG_COMMAND
+
+
 def test_endpoint_falls_back_to_the_completed_continuity_sidecar(env):
     # 会话没驻留（重启后没人打开过）：sidecar 里那份同样是未裁的账本。
     wcs.write_completed_continuity_snapshot(env.key, {"frontdoor_stage_state": _ledger()})
