@@ -737,7 +737,7 @@ async def test_graph_execute_tools_marks_direct_contract_delivery(
         for message in list(result["messages"])
         if str(message.get("role") or "").strip().lower() == "tool"
     )
-    assert "TOOL_CONTRACT_V1:filesystem_edit:tcf:delivery" in str(tool_message.get("content") or "")
+    assert "TOOL_CONTRACT:filesystem_edit:tcf:delivery" in str(tool_message.get("content") or "")
 
     rounds = result["frontdoor_stage_state"]["stages"][0]["rounds"]
     assert rounds[0]["tools"][0]["contract_delivery"] == "staged"
