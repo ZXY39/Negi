@@ -71,6 +71,21 @@ function normalizeSummaryTraceToolCall(step, index = 0) {
     };
 }
 
+function normalizeTraceTurns(turns) {
+    return (Array.isArray(turns) ? turns : [])
+        .map((turn, turnIndex) => ({
+            seq: normalizeInt(turn?.seq, turnIndex + 1),
+            text: String(turn?.text || ""),
+            text_ref: String(turn?.text_ref || ""),
+            created_at: String(turn?.created_at || ""),
+            status: String(turn?.status || ""),
+            tools: (Array.isArray(turn?.tools) ? turn.tools : []).map((step, stepIndex) => (
+                normalizeSummaryTraceToolCall(step, stepIndex)
+            )),
+        }))
+        .sort((left, right) => left.seq - right.seq);
+}
+
 function normalizeSummaryExecutionTrace(summary) {
     const toInt = (value, fallback = 0) => {
         const parsed = Number.parseInt(String(value ?? ""), 10);
@@ -136,6 +151,7 @@ function normalizeSummaryExecutionTrace(summary) {
     ));
     return {
         tool_steps: toolSteps,
+        turns: normalizeTraceTurns(summary?.turns),
         stages,
     };
 }
@@ -188,6 +204,7 @@ function buildNodeExecutionTrace(node, detail, liveFrame = null) {
     );
     return {
         initial_prompt: initialPrompt,
+        turns: normalizeTraceTurns(source.turns ?? summaryTrace.turns),
         tool_steps: toolSteps.map((step) => ({
             tool_call_id: String(step?.tool_call_id || ""),
             tool_name: String(step?.tool_name || "tool"),

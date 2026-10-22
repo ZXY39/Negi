@@ -39,7 +39,14 @@ function formatNodeDetailHeading(node, { maxChars = 72, compact = true } = {}) {
     return `${nodeId} | ${heading}`;
 }
 
-function renderTraceStep({ traceKey = "", title, status = "info", statusLabel = "", open = false, bodyHtml = "", showRuntime = true, showStatus = true, extraClass = "", leadHtml = "", stageId = "", evicted = false }) {
+function renderTraceStep({ traceKey = "", title, status = "info", statusLabel = "", open = false, bodyHtml = "", showRuntime = true, showStatus = true, extraClass = "", leadHtml = "", stageId = "", evicted = false, textOnly = false, text = "" }) {
+    if (textOnly) {
+        return `
+        <section class="interaction-step task-trace-step task-trace-text-block" data-trace-key="${esc(traceKey)}">
+            <div class="task-trace-round-text">${esc(text)}</div>
+        </section>
+    `;
+    }
     const classes = ["interaction-step", "task-trace-step", esc(status)];
     const normalizedExtraClass = String(extraClass || "").trim();
     if (normalizedExtraClass) classes.push(esc(normalizedExtraClass));
@@ -518,6 +525,69 @@ function formatExecutionStageTitle(stage) {
     return stageGoal || fallbackTitle;
 }
 
+function buildTurnTraceSteps(turns, initialPromptStep) {
+    const entries = [];
+    (Array.isArray(turns) ? turns : []).forEach((turn) => {
+        const text = String(turn?.text || "").trim();
+        const tools = Array.isArray(turn?.tools) ? turn.tools : [];
+        if (text) {
+            entries.push({
+                kind: "text",
+                seq: turn.seq,
+                text,
+                created_at: String(turn?.created_at || ""),
+                tools: [],
+            });
+        }
+        if (!tools.length) return;
+        let target = [...entries].reverse().find((entry) => entry.kind === "text");
+        if (!target) {
+            target = entries.find((entry) => entry.kind === "preamble");
+            if (!target) {
+                target = { kind: "preamble", tools: [] };
+                entries.push(target);
+            }
+        }
+        target.tools.push(...tools);
+    });
+
+    const steps = [initialPromptStep];
+    entries.forEach((entry) => {
+        if (entry.kind === "preamble") {
+            steps.push({
+                traceKey: "turn:preamble",
+                title: "开始执行",
+                status: roundTraceStatus({ tools: entry.tools }),
+                open: false,
+                bodyHtml: renderExecutionRoundToolStrip({ round_id: "turn:preamble" }, entry.tools),
+            });
+            return;
+        }
+        if (entry.tools.length) {
+            steps.push({
+                traceKey: `turn:${entry.seq}`,
+                title: compactNodeHeading({ title: entry.text }, 80),
+                status: roundTraceStatus({ tools: entry.tools }),
+                open: false,
+                bodyHtml: renderExecutionRoundToolStrip(
+                    { round_id: `turn:${entry.seq}`, created_at: entry.created_at },
+                    entry.tools
+                ),
+            });
+            return;
+        }
+        steps.push({
+            traceKey: `turn:${entry.seq}`,
+            textOnly: true,
+            text: entry.text,
+            status: "info",
+        });
+    });
+    const last = steps[steps.length - 1];
+    if (last && !last.textOnly) last.open = true;
+    return steps;
+}
+
 function buildExecutionTraceSteps(trace, node) {
     const initialPromptStep = {
         traceKey: "initial_prompt",
@@ -526,6 +596,9 @@ function buildExecutionTraceSteps(trace, node) {
         open: false,
         bodyHtml: renderTraceField("内容", trace.initial_prompt, "暂无初始提示词"),
     };
+    if (Array.isArray(trace?.turns) && trace.turns.length) {
+        return buildTurnTraceSteps(trace.turns, initialPromptStep);
+    }
     if (Array.isArray(trace?.stages) && trace.stages.length) {
         return [
             initialPromptStep,
@@ -1119,6 +1192,8 @@ function buildTraceRenderSignature(stepDescriptors) {
         String(step?.title || ""),
         String(step?.status || ""),
         String(step?.bodyHtml || ""),
+        String(step?.text || ""),
+        step?.textOnly === true ? "1" : "0",
     ].join("\u0002")).join("\u0001");
 }
 
