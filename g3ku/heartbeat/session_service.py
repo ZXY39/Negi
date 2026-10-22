@@ -18,14 +18,11 @@ from g3ku.heartbeat.prompt_lane import (
 )
 from g3ku.heartbeat.session_events import SessionHeartbeatEvent, SessionHeartbeatEventQueue
 from g3ku.heartbeat.session_wake import SessionHeartbeatWakeQueue
-from g3ku.runtime.frontdoor.canonical_context import ui_canonical_context_delta
 from g3ku.runtime.session_keys import normalize_account_id, parse_china_session_key
 from g3ku.runtime.web_ceo_sessions import (
     _extract_task_ids_from_text,
     clear_inflight_turn_snapshot,
     ensure_ceo_session_metadata,
-    final_reply_canonical_merge,
-    latest_assistant_message_canonical_context,
     normalize_ceo_metadata,
 )
 from main.models import TaskRecord
@@ -798,10 +795,6 @@ class WebSessionHeartbeatService:
         而本条由运行时直接发出，配额死掉时也能让用户看到节点卡住、需要裁决。
         """
         escalation_text = self._task_node_error_escalation_text(node_error_events)
-        previous_canonical_context = latest_assistant_message_canonical_context(
-            persisted_session,
-            exclude_turn_id=heartbeat_turn_id,
-        )
         # 落盘失败（如磁盘满 Errno 28）不得阻断升级通知：消息此刻已 append 进内存
         # session（下一次成功 save 会连带写出），而渠道推送与 CEO final 都是内存
         # 链路，与这次写盘无关。该异常曾直接穿透 wake 任务把它杀死，导致磁盘满
@@ -825,7 +818,6 @@ class WebSessionHeartbeatService:
                     key,
                     text=escalation_text,
                     turn_id=heartbeat_turn_id,
-                    previous_canonical_context=previous_canonical_context,
                 ),
             )
         await self._notify_reply(key, escalation_text)
@@ -1700,10 +1692,6 @@ class WebSessionHeartbeatService:
             if preserved_turn_id:
                 discard_payload["turn_id"] = preserved_turn_id
             self._publish_ceo(key, "ceo.turn.discard", discard_payload)
-        previous_canonical_context = latest_assistant_message_canonical_context(
-            persisted_session,
-            exclude_turn_id=heartbeat_turn_id,
-        )
         handled_terminal_keys = [
             str(getattr(event, "dedupe_key", "") or "").strip()
             for event in self._task_terminal_events(events)
@@ -1730,7 +1718,6 @@ class WebSessionHeartbeatService:
                 key,
                 text=output,
                 turn_id=heartbeat_turn_id,
-                previous_canonical_context=previous_canonical_context,
             )
             self._publish_ceo(key, "ceo.reply.final", final_payload)
         await self._notify_reply(key, output)
@@ -1761,18 +1748,10 @@ class WebSessionHeartbeatService:
         *,
         text: str,
         turn_id: str,
-        previous_canonical_context: dict[str, Any],
     ) -> dict[str, Any]:
         final_payload: dict[str, Any] = {
             "text": str(text or "").strip(),
             "source": "heartbeat",
             "turn_id": str(turn_id or "").strip(),
         }
-        current_canonical_context = latest_assistant_message_canonical_context(
-            self._session_manager.get_or_create(key)
-        )
-        if not current_canonical_context:
-            return final_payload
-        canonical_delta = ui_canonical_context_delta(previous_canonical_context, current_canonical_context)
-        final_payload.update(final_reply_canonical_merge(current_canonical_context, canonical_delta))
         return final_payload
