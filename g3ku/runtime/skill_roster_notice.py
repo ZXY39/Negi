@@ -102,19 +102,23 @@ def deliver_for_scope(
             delta = memory_provider(
                 since_rev=int(cursor.get('rev') or 0),
                 base_rev=int(cursor.get('base_rev') or 0),
+                initialized=bool(cursor.get('initialized')),
             )
         except Exception:
             delta = None
         if isinstance(delta, dict):
-            next_rev = int(delta.get('rev') or 0)
+            next_rev = max(int(delta.get('rev') or 0), 0)
             text = str(delta.get('text') or '').strip()
             if text:
                 memory_text = text
-            if next_rev > int(cursor.get('rev') or 0):
-                cursor = {
-                    'rev': next_rev,
-                    'base_rev': next_rev if delta.get('rebase') else int(cursor.get('base_rev') or 0),
-                }
+            next_cursor = {
+                'rev': max(next_rev, int(cursor.get('rev') or 0)),
+                'base_rev': int(cursor.get('base_rev') or 0),
+                'initialized': True,
+            }
+            if delta.get('rebase') or delta.get('align'):
+                next_cursor['base_rev'] = next_rev
+            cursor = next_cursor
     context['memory_cursor'] = cursor
     if not pending and not memory_text:
         set_notice_context(scope_key, context)
@@ -138,7 +142,7 @@ def reset_memory_cursor(scope_key: str) -> None:
     永久不再出现，所以在这里归零，由下一次投递走 `rebase`。
     """
     context = notice_context_for(scope_key)
-    context['memory_cursor'] = {'rev': 0, 'base_rev': 0}
+    context['memory_cursor'] = {'rev': 0, 'base_rev': 0, 'initialized': False}
     set_notice_context(scope_key, context)
 
 
@@ -212,7 +216,11 @@ def normalize_skill_roster_notice_context(payload: Any) -> dict[str, Any]:
     return {
         'records': ordered,
         'carried_stages': sorted(set(carried)),
-        'memory_cursor': {'rev': _cursor_value('rev'), 'base_rev': _cursor_value('base_rev')},
+        'memory_cursor': {
+            'rev': _cursor_value('rev'),
+            'base_rev': _cursor_value('base_rev'),
+            'initialized': bool(cursor_source.get('initialized')),
+        },
     }
 
 

@@ -158,10 +158,10 @@ def test_notice_lane_merges_skill_and_memory_into_one_message() -> None:
     scope = "session:web:shared"
     calls: list[tuple[int, int]] = []
 
-    def provider(*, since_rev: int, base_rev: int):
+    def provider(*, since_rev: int, base_rev: int, initialized: bool = False):
         calls.append((since_rev, base_rev))
-        if since_rev <= 0:
-            return {"rev": 3, "text": "", "rebase": False}
+        if not initialized:
+            return {"rev": 3, "text": "", "rebase": False, "align": True}
         if since_rev >= 4:
             return {"rev": 4, "text": "", "rebase": False}
         return {"rev": 4, "text": "261022:新规则：先读再写", "rebase": False}
@@ -175,7 +175,11 @@ def test_notice_lane_merges_skill_and_memory_into_one_message() -> None:
     )
     assert first is None
     assert delivered == []
-    assert notice_context_for(scope)["memory_cursor"] == {"rev": 3, "base_rev": 0}
+    assert notice_context_for(scope)["memory_cursor"] == {
+        "rev": 3,
+        "base_rev": 3,
+        "initialized": True,
+    }
 
     second, delivered = deliver_for_scope(
         scope,
@@ -192,8 +196,12 @@ def test_notice_lane_merges_skill_and_memory_into_one_message() -> None:
     assert MEMORY_NOTICE_HEADING in content
     assert "新规则：先读再写" in content
     assert [record["skill_id"] for record in delivered] == ["beta"]
-    assert notice_context_for(scope)["memory_cursor"] == {"rev": 4, "base_rev": 0}
-    assert calls[-1] == (3, 0)
+    assert notice_context_for(scope)["memory_cursor"] == {
+        "rev": 4,
+        "base_rev": 3,
+        "initialized": True,
+    }
+    assert calls[-1] == (3, 3)
 
     third, _ = deliver_for_scope(
         scope,
@@ -209,7 +217,7 @@ def test_notice_lane_rebase_replaces_the_cursor_base() -> None:
     clear_skill_roster_notice_stores()
     scope = "session:web:rebase"
 
-    def provider(*, since_rev: int, base_rev: int):
+    def provider(*, since_rev: int, base_rev: int, initialized: bool = False):
         return {"rev": 9, "text": "整份文档", "rebase": True}
 
     message, _ = deliver_for_scope(
@@ -220,19 +228,59 @@ def test_notice_lane_rebase_replaces_the_cursor_base() -> None:
     )
     assert message is not None
     assert "整份文档" in str(message.get("content") or "")
-    assert notice_context_for(scope)["memory_cursor"] == {"rev": 9, "base_rev": 9}
+    assert notice_context_for(scope)["memory_cursor"] == {"rev": 9, "base_rev": 9, "initialized": True}
 
 
 def test_frontdoor_provider_aligns_the_first_cursor_without_replaying_history() -> None:
     ops = object.__new__(CeoFrontDoorRuntimeOps)
     ops._loop = SimpleNamespace(
         memory_manager=SimpleNamespace(
-            latest_memory_revision=lambda: 8,
-            memory_notice_delta=lambda since_rev: {"rev": 8, "text": "增量", "rebase": False},
+            latest_memory_revision=lambda: 9,
+            memory_notice_delta=lambda since_rev: {"rev": 9, "text": "增量", "rebase": False},
         )
     )
-    first = ops._frontdoor_memory_notice_provider(since_rev=0, base_rev=0)
-    assert first == {"rev": 8, "from_rev": 0, "text": "", "rebase": False}
-    later = ops._frontdoor_memory_notice_provider(since_rev=7, base_rev=0)
-    assert later == {"rev": 8, "text": "增量", "rebase": False}
-    assert ops._frontdoor_memory_notice_provider(since_rev=8, base_rev=0)["text"] == ""
+    first = ops._frontdoor_memory_notice_provider(since_rev=0, base_rev=0, initialized=False)
+    assert first == {"rev": 9, "from_rev": 0, "text": "", "rebase": False, "align": True}
+    later = ops._frontdoor_memory_notice_provider(since_rev=8, base_rev=8, initialized=True)
+    assert later == {"rev": 9, "text": "增量", "rebase": False}
+    assert ops._frontdoor_memory_notice_provider(since_rev=9, base_rev=9, initialized=True)["text"] == ""
+
+
+def test_first_revision_after_an_empty_alignment_is_still_delivered() -> None:
+    """首跳时还没有任何修订也要记为"已对齐"：否则会话会跳过第一条真实记忆。"""
+    clear_skill_roster_notice_stores()
+    scope = "session:web:emptybase"
+    revision = {"latest": 0, "text": ""}
+    ops = object.__new__(CeoFrontDoorRuntimeOps)
+    ops._loop = SimpleNamespace(
+        memory_manager=SimpleNamespace(
+            latest_memory_revision=lambda: revision["latest"],
+            memory_notice_delta=lambda since_rev: {
+                "rev": revision["latest"],
+                "text": revision["text"],
+                "rebase": False,
+            },
+        )
+    )
+    first, _ = deliver_for_scope(
+        scope,
+        [],
+        now="2026-04-25T00:00:00+08:00",
+        memory_provider=ops._frontdoor_memory_notice_provider,
+    )
+    assert first is None
+    assert notice_context_for(scope)["memory_cursor"] == {
+        "rev": 0,
+        "base_rev": 0,
+        "initialized": True,
+    }
+
+    revision.update(latest=1, text="261022:第一条真实记忆")
+    second, _ = deliver_for_scope(
+        scope,
+        [],
+        now="2026-04-25T00:01:00+08:00",
+        memory_provider=ops._frontdoor_memory_notice_provider,
+    )
+    assert second is not None
+    assert "第一条真实记忆" in str(second.get("content") or "")
