@@ -199,8 +199,10 @@ def build_execution_trace(
             }
         )
 
+    turns = _build_execution_turns(node, step_by_call_id)
     return {
         'initial_prompt': str(node.prompt or node.goal or ''),
+        'turns': turns,
         'tool_steps': tool_steps,
         'stages': stages,
         'live_tool_calls': [dict(item) for item in list(live_tool_calls or []) if isinstance(item, dict)],
@@ -210,6 +212,39 @@ def build_execution_trace(
         'acceptance_result': str(node.check_result or ''),
         'acceptance_result_ref': str(getattr(node, 'check_result_ref', '') or ''),
     }
+
+
+def _build_execution_turns(
+    node: NodeRecord,
+    step_by_call_id: dict[str, dict[str, Any]],
+) -> list[dict[str, Any]]:
+    turns: list[dict[str, Any]] = []
+    for fallback_index, entry in enumerate(list(node.output or []), start=1):
+        seq = int(getattr(entry, 'seq', 0) or fallback_index)
+        tools: list[dict[str, Any]] = []
+        for call in list(getattr(entry, 'tool_calls', []) or []):
+            call_id = str((call or {}).get('id') or '').strip() if isinstance(call, dict) else ''
+            step = step_by_call_id.get(call_id) if call_id else None
+            if step is not None:
+                tools.append(copy.deepcopy(step))
+        turns.append(
+            {
+                'seq': seq,
+                'text': str(getattr(entry, 'content', '') or ''),
+                'text_ref': str(getattr(entry, 'content_ref', '') or ''),
+                'created_at': str(getattr(entry, 'created_at', '') or ''),
+                'status': (
+                    'running'
+                    if any(
+                        str(tool.get('status') or '').strip().lower() in {'queued', 'running'}
+                        for tool in tools
+                    )
+                    else 'completed'
+                ),
+                'tools': tools,
+            }
+        )
+    return turns
 
 
 def _tool_result_map(tool_results: list[TaskProjectionToolResultRecord] | None) -> dict[str, TaskProjectionToolResultRecord]:

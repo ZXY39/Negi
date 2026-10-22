@@ -176,8 +176,30 @@ def build_execution_trace_summary(execution_trace: dict[str, Any] | None) -> dic
                 "tool_calls": tool_calls,
             }
         )
+    turns_payload: list[dict[str, Any]] = []
+    for turn in list(trace.get("turns") or []):
+        if not isinstance(turn, dict):
+            continue
+        compact_tools = [
+            compact_step
+            for compact_step in (
+                compact_tool_step_for_summary(step)
+                for step in list(turn.get("tools") or [])
+            )
+            if compact_step is not None
+        ]
+        turns_payload.append(
+            {
+                "seq": int(turn.get("seq") or 0),
+                "text": str(turn.get("text") or ""),
+                "text_ref": str(turn.get("text_ref") or ""),
+                "created_at": str(turn.get("created_at") or ""),
+                "status": str(turn.get("status") or ""),
+                "tools": compact_tools,
+            }
+        )
     if stages_payload:
-        return {"stages": stages_payload}
+        return {"stages": stages_payload, "turns": turns_payload}
     fallback_tool_calls: list[dict[str, Any]] = []
     for step in list(trace.get("tool_steps") or []):
         compact_step = compact_tool_step_for_summary(step)
@@ -195,6 +217,7 @@ def build_execution_trace_summary(execution_trace: dict[str, Any] | None) -> dic
                     "tools": fallback_tool_calls,
                 }],
                 "tool_calls": fallback_tool_calls,
-            }]
+            }],
+            "turns": turns_payload,
         }
-    return {"stages": []}
+    return {"stages": [], "turns": turns_payload}

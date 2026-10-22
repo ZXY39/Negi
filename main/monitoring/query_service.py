@@ -1255,11 +1255,38 @@ class TaskQueryService:
                     'tool_calls': tool_calls if rounds_payload else fallback_tool_calls,
                 }
             )
-        return {'stages': stages_payload}
+        turns_payload: list[dict[str, Any]] = []
+        for turn in list(payload.get('turns') or []):
+            if not isinstance(turn, dict):
+                continue
+            compact_tools = [
+                compact_step
+                for compact_step in (
+                    TaskQueryService._compact_execution_trace_tool_call(step)
+                    for step in list(turn.get('tools') or [])
+                )
+                if compact_step is not None
+            ]
+            turns_payload.append(
+                {
+                    'seq': int(turn.get('seq') or 0),
+                    'text': str(turn.get('text') or ''),
+                    'text_ref': str(turn.get('text_ref') or ''),
+                    'created_at': str(turn.get('created_at') or ''),
+                    'status': str(turn.get('status') or ''),
+                    'tools': compact_tools,
+                }
+            )
+        return {'stages': stages_payload, 'turns': turns_payload}
 
     @staticmethod
     def _execution_trace_summary_has_rounds(summary: dict[str, Any] | None) -> bool:
         payload = summary if isinstance(summary, dict) else {}
+        for turn in list(payload.get('turns') or []):
+            if not isinstance(turn, dict):
+                continue
+            if list(turn.get('tools') or []) or str(turn.get('text') or '').strip():
+                return True
         for stage in list(payload.get('stages') or []):
             if not isinstance(stage, dict):
                 continue
