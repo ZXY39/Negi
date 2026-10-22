@@ -15,10 +15,6 @@ from g3ku.runtime.ceo_catalog_offload import (
 from g3ku.runtime.external_events import drop_session_event_hub
 from g3ku.runtime.external_outbox import load_pending_outbound
 from g3ku.runtime.external_sessions import get_external_session_registry
-from g3ku.runtime.frontdoor.message_builder import (
-    MEMORY_SNAPSHOT_ADOPTION_MANUAL_COMPRESSION,
-    adopt_memory_snapshot,
-)
 from g3ku.runtime.session_agent import (
     MANUAL_COMPRESSION_RUNNING,
     MANUAL_COMPRESSION_STATE_ATTR,
@@ -1298,15 +1294,6 @@ async def _execute_manual_context_compression(agent, runtime_session, *, pause_f
     # 手动车道产出的是 `[TOKEN_COMPACT_V2]` 全量正文重写，可复用前缀反正已经断在这里：
     # 挂一个待重印标记，让下一跳顺手把 tools[] 按当前 RBAC 重取一次（钉住期间只有压缩跳重印）。
     setattr(runtime_session, PENDING_PROVIDER_BUNDLE_RECOMMIT_ATTR, True)
-    memory_manager = getattr(agent, "memory_manager", None)
-    if memory_manager is not None:
-        # 采纳点：手动压缩同样把可复用前缀砍到 system 头部，且它跑在回合外，
-        # 够不到 session_agent 轮末那个压缩采纳点，所以在这里单独接一次。
-        adopt_memory_snapshot(
-            runtime_session,
-            memory_manager=memory_manager,
-            reason=MEMORY_SNAPSHOT_ADOPTION_MANUAL_COMPRESSION,
-        )
 
 
 @router.post("/ceo/sessions/{session_id}/compress-context")

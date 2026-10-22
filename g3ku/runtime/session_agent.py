@@ -34,10 +34,6 @@ from g3ku.runtime.frontdoor.canonical_context import (
     project_canonical_context_for_transcript,
     repair_transcript_cc_chain,
 )
-from g3ku.runtime.frontdoor.message_builder import (
-    MEMORY_SNAPSHOT_ADOPTION_TOKEN_COMPRESSION,
-    adopt_memory_snapshot,
-)
 from g3ku.runtime.frontdoor.state_models import CeoFrontdoorInterrupted
 from main.runtime.stage_budget import STAGE_TURN_END_SUMMARY_POINTER
 
@@ -2504,10 +2500,10 @@ class RuntimeAgentSession:
         return snapshot
 
     async def _flush_memory_review_after_compression(self) -> None:
-        """压缩轮末：先冲刷复核窗口，再采纳冻结的长期记忆快照。
+        """压缩轮末：先冲刷复核窗口，让这一轮产生的记忆修订落进文档与修订流。
 
-        顺序是这套采纳规则的契约本身：`run_due_batch_once()` 会同步应用记忆批次改写
-        `MEMORY.md`，先读快照就永远读到旧文档，采纳点等于没接上。
+        顺序是这套规则本身：`run_due_batch_once()` 会同步应用记忆批次改写 `MEMORY.md`；
+        压缩把提示行重写后，下一跳的通知车道按修订游标把新记忆投回上下文。
         """
         memory_manager = getattr(self._loop, "memory_manager", None)
         if memory_manager is None:
@@ -2526,11 +2522,6 @@ class RuntimeAgentSession:
                 kind="persistence_warning",
                 text="Memory compression flush failed; turn history is still available in session transcript.",
             )
-        adopt_memory_snapshot(
-            self,
-            memory_manager=memory_manager,
-            reason=MEMORY_SNAPSHOT_ADOPTION_TOKEN_COMPRESSION,
-        )
 
     def append_context_compression_marker(
         self,

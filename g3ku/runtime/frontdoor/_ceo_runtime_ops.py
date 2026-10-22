@@ -19,7 +19,6 @@ from typing import Any
 from loguru import logger
 
 from g3ku.agent.tools.base import Tool
-from g3ku.config.context_refresh import idle_boundary_exceeded
 from g3ku.config.live_runtime import get_runtime_config, peek_runtime_revision
 from g3ku.core.messages import UserInputMessage
 from g3ku.core.timefmt import render_arrival_stamp, strip_arrival_time_stamp
@@ -63,10 +62,8 @@ from g3ku.runtime.context.image_metrics import bmp_dimensions, webp_dimensions
 from g3ku.runtime.context.summarizer import estimate_tokens
 from g3ku.runtime.frontdoor import pinned_tool_bundle
 from g3ku.runtime.frontdoor.message_builder import (
-    MEMORY_SNAPSHOT_ADOPTION_IDLE_REFRESH,
     MEMORY_WRITE_HINT_HEADER,
     RETRIEVED_MEMORY_HINT_HEADER,
-    adopt_memory_snapshot,
     memory_snapshot_provenance,
 )
 from g3ku.runtime.frontdoor.token_preflight_compaction import (
@@ -4202,16 +4199,12 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
         setattr(session, "_frontdoor_request_body_messages", list(carried))
 
     def _frontdoor_bundle_recommit_boundary(self, *, session: Any, state: CeoGraphState) -> bool:
-        """`tools[]` 与 skill 头部名单共用的唯一重新提交点：压缩（内联 preflight 的
-        token_compression 或手动压缩挂的待重印标记）与空闲窗口第一跳。
+        """`tools[]` 与 skill 头部名单共用的唯一重新提交点：压缩。
 
-        换车道**不再**重印：心跳/定时内部轮与外部轮共用同一份冻结名单，一次车道切换
+        换车道**不**重印：心跳/定时内部轮与外部轮共用同一份冻结名单，一次车道切换
         不该把身后整段正文的缓存打掉（用户决策，保缓存命中）。内部轮的工具面收窄由
         执行准入承担（派发字典 ∩ 当轮治理可见集），声明面保持冻结；skill 名单同理，
         全量名单跨车道共享。
-
-        空闲这条不自建标记：它读的是上一次发送的墙钟，而每一次发送都会推进它，所以一条
-        回合内只可能在最前面那一跳成立。
 
         返回 True 的同一处递增 skill roster epoch：skill 头部名单与 `tools[]` 共用一套
         "什么时候允许变"的口径，两份名单在同一个跳上一起重印。
@@ -4220,27 +4213,8 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
             setattr(session, PENDING_PROVIDER_BUNDLE_RECOMMIT_ATTR, False)
             bump_skill_roster_epoch(session, session_key=str(state.get("session_key") or ""))
             return True
-        if idle_boundary_exceeded(str(getattr(session, FRONTDOOR_LAST_SEND_AT_ATTR, "") or "")):
-            self._adopt_frontdoor_idle_memory_snapshot(session)
-            bump_skill_roster_epoch(session, session_key=str(state.get("session_key") or ""))
-            return True
         return False
 
-    def _adopt_frontdoor_idle_memory_snapshot(self, session: Any) -> None:
-        """空闲边界把长期记忆快照读到最新：只重读盘，不冲刷复核窗口。
-
-        "先冲刷再读"那条契约是压缩轮末专用的——记忆 worker 自己按节拍排队列，在请求边界
-        同步冲刷会把一次内部 memory agent 往返塞进用户这一跳。代价是复核窗口最后几轮缓冲
-        可能还没进文档，这一跳读到的仍是旧版。
-        """
-        memory_manager = getattr(self._loop, "memory_manager", None)
-        if memory_manager is None:
-            return
-        adopt_memory_snapshot(
-            session,
-            memory_manager=memory_manager,
-            reason=MEMORY_SNAPSHOT_ADOPTION_IDLE_REFRESH,
-        )
     def _registered_tools_for_state(self, state: CeoGraphState) -> dict[str, Tool]:
         """执行束的工具实例表：按**可执行名单**（本轮 callable）取名。
 

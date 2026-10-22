@@ -84,16 +84,16 @@ def _frontdoor_ops(*, idle_minutes: int = 120, last_send_at: str):
     return runner, session, memory_manager, monkeypatched
 
 
-def test_frontdoor_idle_boundary_reprints_bundle_and_adopts_memory_snapshot(monkeypatch) -> None:
+def test_frontdoor_idle_boundary_does_not_reprint_or_read_the_snapshot(monkeypatch) -> None:
+    """空闲窗口不再是重印点：tools[]/roster 只在压缩跳重印，记忆靠修订流投递。"""
     runner, session, memory_manager, config = _frontdoor_ops(last_send_at=_stamp(minutes=180))
     monkeypatch.setattr(context_refresh_module, "get_runtime_config", lambda **_k: (config, 1, False))
 
     boundary = runner._frontdoor_bundle_recommit_boundary(session=session, state={})
 
-    assert boundary is True
-    assert memory_manager.reads == 1
-    assert session._frontdoor_memory_snapshot_text == "## 长期记忆\n- refreshed by idle boundary"
-    assert session._frontdoor_memory_snapshot_adoption_reason == "idle_refresh"
+    assert boundary is False
+    assert memory_manager.reads == 0
+    assert not hasattr(session, "_frontdoor_memory_snapshot_adoption_reason")
 
 
 def test_frontdoor_fresh_send_keeps_the_bundle_pinned(monkeypatch) -> None:

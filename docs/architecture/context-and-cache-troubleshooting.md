@@ -230,8 +230,8 @@ Heartbeat / cron 不在主 CEO/frontdoor 路径上使用单独的短 `ceo_heartb
 ### 3.17 长期记忆快照的会话级冻结
 
 - 坑：`## 长期记忆` 块注入在 message index 1（`system` 之后、全部历史之前），身后是整段对话历史。块字节一变，可复用前缀就只剩 `system` 与 `tools[]`：实测中位请求要重铺 84% 的正文，其中块本身只占 8%，其余全是被它顶掉的历史。
-- 不变量：取数是**会话级冻结**，采纳点 = 会话首请求 / 内联 `token_compression` 轮末 / 手动压缩成功后 / 空闲边界，规则本体见 `runtime-overview.md`「Memory Runtime State」。选压缩轮末是因为那里前缀已经被 `[TOKEN_COMPACT_V2]` 砍到 system 头部，记忆更新搭这次断点不额外破缓存；所以复核冲刷（含 `run_due_batch_once()`）必须先于读快照，反序会让采纳点静默失效、表现为整会话冻结。空闲边界那一档（`memory_snapshot.adoption_reason = idle_refresh`）与前两条不同：它**只重读盘、不冲刷复核窗口**——冲刷会把一次内部 memory agent 往返放到用户这一跳上，而记忆 worker 自己按节拍排队列；代价是窗口最后几轮缓冲可能还没进文档，这一跳读到的仍是旧版。跨轮可比性投影与 durable 基线两侧都剥这个块，它的变化因此永不应被 `comparable_to_previous_request` 报成前缀破坏；`build_stable_prompt_cache_key` 同样不含它——本地 cache key 对这个块是盲的，判读只能看 artifact 的 `memory_snapshot` 字段。
-- 症状：某轮命中前缀在第二条消息就分叉且 `memory_snapshot.hash` 同时变了 → 该轮是采纳点，属预期；「用户说记住/忘掉，模型照旧」→ 比对 `memory_snapshot.adopted_at` 与该会话的压缩/空闲边界时间差，就是这条记忆的可见性延迟。`adoption_reason` 只有 `session_first_request` 一种读数时，说明这个会话的记忆版本是重启或首请求定下来的，压缩与空闲两条都没接上。
+- 不变量：取数是**会话级冻结**，采纳点只有一个 = 会话首请求；压缩轮末、手动压缩与空闲边界都不再改写它，之后的变化由修订流增量进上下文（规则本体见 `runtime-overview.md`「Memory Runtime State」）。所以这个块在一次会话的整个生命周期内字节恒定：跨轮可比性投影与 durable 基线两侧都剥这个块，它的变化因此永不应被 `comparable_to_previous_request` 报成前缀破坏；`build_stable_prompt_cache_key` 同样不含它——本地 cache key 对这个块是盲的，判读只能看 artifact 的 `memory_snapshot` 字段。
+- 症状：某轮命中前缀在第二条消息就分叉且 `memory_snapshot.hash` 同时变了 → 会话基座被中途改写，属缺陷（采纳点只剩首请求）；`adoption_reason` 出现 `idle_refresh` / `token_compression` / `manual_compression` 同理，是旧代码或旧数据的读数。「用户说记住/忘掉，模型照旧」→ 先看该会话的 `memory_cursor` 是否落后于最新修订，再看下一跳 artifact 里有没有 `### Long-term memory updates` 一节；两者都在但记忆没进上下文，才是投递链问题。
 
 ### 3.18 静态声明钉在请求体头部
 

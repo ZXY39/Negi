@@ -3561,8 +3561,8 @@ async def test_memory_snapshot_stays_frozen_between_requests_until_adopted() -> 
 
 
 @pytest.mark.asyncio
-async def test_compression_turn_tail_adopts_the_snapshot_after_the_review_flush() -> None:
-    """顺序契约：冲刷会同步应用记忆批次，先读快照就永远采纳到旧文档。"""
+async def test_compression_turn_tail_flushes_the_review_window_without_rewriting_the_frozen_snapshot() -> None:
+    """压缩轮末只负责让这一轮的记忆修订落盘；会话基座不再中途改写（增量走通知车道）。"""
     from g3ku.runtime.session_agent import RuntimeAgentSession
 
     manager = _MutableMemoryManager("---\nid:AA11aa\n2026/9/1-self：\nbefore flush\n")
@@ -3580,8 +3580,8 @@ async def test_compression_turn_tail_adopts_the_snapshot_after_the_review_flush(
 
     await RuntimeAgentSession._flush_memory_review_after_compression(stub)
 
-    assert manager.events == ["flush", "apply", "read"]
-    assert "adopted after flush" in str(stub._frontdoor_memory_snapshot_text or "")
+    assert manager.events == ["flush", "apply"]
+    assert str(stub._frontdoor_memory_snapshot_text or "") == "stale"
     assert emitted == []
 
 
