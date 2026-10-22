@@ -188,25 +188,13 @@ class StubHTMLButtonElement extends StubHTMLElement {}
 class StubHTMLDetailsElement extends StubHTMLElement {}
 class StubHTMLFormElement extends StubHTMLElement {}
 
-const STAGE_TRACE = {
-    active_stage_id: "frontdoor-stage-1",
-    transition_required: false,
-    stages: [
-        {
-            stage_id: "frontdoor-stage-1",
-            stage_goal: "inspect repository",
-            status: "completed",
-            tool_round_budget: 3,
-            rounds: [
-                {
-                    round_id: "round-1",
-                    round_index: 1,
-                    tools: [{ tool_name: "filesystem", status: "success", output_text: "ok" }],
-                },
-            ],
-        },
-    ],
-};
+const TURN_TRACE = [{
+    seq: 1,
+    turn_id: "t1",
+    text: "inspect repository",
+    status: "completed",
+    tools: [{ tool_call_id: "c1", tool_name: "filesystem", status: "success", output_text: "ok" }],
+}];
 
 function makeTurn({ turnId = "", source = "user" } = {}) {
     // 真实结构是 .message > .msg-content.ceo-turn-content > [assistant-text, usage,
@@ -384,13 +372,13 @@ function finalizeSilent(api, turn, overrides = {}) {
         turn_id: "t1",
         silent_reply: true,
         silent_reason: SILENT_REASON,
-        canonical_context: STAGE_TRACE,
+        turns: TURN_TRACE,
         timestamp: SILENT_AT,
         ...overrides,
     });
 }
 
-test("live 静默收尾折成一行「静默消息 + 时间」，正文与阶段轨道照常但默认收起", () => {
+test("live 静默收尾折成一行「静默消息 + 时间」，正文与回合轨道照常但默认收起", () => {
     const api = setup();
     const turn = makeTurn({ turnId: "t1" });
     finalizeSilent(api, turn);
@@ -409,7 +397,7 @@ test("live 静默收尾折成一行「静默消息 + 时间」，正文与阶段
     assert.equal(turn.textEl.hidden, false, "靠 CSS 折叠，不靠 hidden 属性");
     assert.equal(String(turn.textEl.innerHTML).includes("汇报过了"), true, "正文照常渲染，展开才可见");
     assert.equal(reasonNodes(turn).length, 0, "不再单独挂原因行");
-    assert.equal(turn.flowEl.hidden, false, "阶段轨道必须保持存在");
+    assert.equal(turn.flowEl.hidden, false, "回合轨道必须保持存在");
     assert.equal(String(turn.listEl.innerHTML).includes("inspect repository"), true);
     assert.equal(findByClass(turn.el, "ceo-silent-turn"), null, "旧的 details 折叠盒已去掉");
 });
@@ -513,7 +501,7 @@ test("历史静默行渲染为带轨道的回合，折叠行取消息自带时�
         silent_reason: SILENT_REASON,
         turn_id: "t1",
         timestamp: SILENT_AT,
-        canonical_context: STAGE_TRACE,
+        turns: TURN_TRACE,
     });
 
     assert.equal(feed.children.length, 1);
@@ -526,7 +514,7 @@ test("历史静默行渲染为带轨道的回合，折叠行取消息自带时�
     assert.equal(String(turn.listEl.innerHTML).includes("inspect repository"), true);
 });
 
-test("历史静默行没有阶段轨道时也要渲染折叠行", () => {
+test("历史静默行没有回合轨道时也要渲染折叠行", () => {
     // 合同：旧实现"无轨道 ⇒ 整行不渲染"，因为那时后端把静默行正文抹成空串。
     // 现在正文与理由都下发，折叠行本身就是可展示内容。
     const api = setup();

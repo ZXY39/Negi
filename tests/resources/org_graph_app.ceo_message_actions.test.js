@@ -333,9 +333,9 @@ test("R4 buildCeoRenderSignature 覆盖两颗按钮的 flag", () => {
     assert.equal(signatureBase, api.buildCeoRenderSignature(withStaleCanFork, null, null));
 });
 
-test("R4b buildCeoRenderSignature 覆盖 live 回合的阶段轨道增量", () => {
-    // 切回会话时先按缓存渲染并写签名;随后到达的权威快照若只在阶段轨道上更新,
-    // 签名相同就会被整份跳过,新阶段/新工具轮要刷新网页才出现。
+test("R4b buildCeoRenderSignature 覆盖 live 回合的轨道增量", () => {
+    // 切回会话时先按缓存渲染并写签名;随后到达的权威快照若只在回合轨道上更新,
+    // 签名相同就会被整份跳过,新分组/新工具要刷新网页才出现。
     const api = setup();
     const inflight = {
         source: "user",
@@ -344,24 +344,16 @@ test("R4b buildCeoRenderSignature 覆盖 live 回合的阶段轨道增量", () =
         assistant_text: "正在执行",
         usage: { input_tokens: 10, output_tokens: 2 },
     };
-    const oneStage = { stages: [{ stage_id: "s1", status: "running", rounds: [] }] };
-    const twoStages = {
-        stages: [
-            { stage_id: "s1", status: "running", rounds: [] },
-            { stage_id: "s2", status: "running", rounds: [] },
-        ],
-    };
-    const newRound = {
-        stages: [{
-            stage_id: "s1",
-            status: "running",
-            rounds: [{ tools: [{ tool_name: "exec", status: "running", output_text: "abc" }] }],
-        }],
-    };
+    const oneGroup = [{ seq: 1, text: "s1", tools: [] }];
+    const twoGroups = [
+        { seq: 1, text: "s1", tools: [] },
+        { seq: 2, text: "s2", tools: [] },
+    ];
+    const newTool = [{ seq: 1, text: "s1", tools: [{ tool_name: "exec", status: "running", output_text: "abc" }] }];
 
-    const base = api.buildCeoRenderSignature([], { ...inflight, canonical_context_delta: oneStage }, null);
-    const grownStage = api.buildCeoRenderSignature([], { ...inflight, canonical_context_delta: twoStages }, null);
-    const grownRound = api.buildCeoRenderSignature([], { ...inflight, canonical_context_delta: newRound }, null);
+    const base = api.buildCeoRenderSignature([], { ...inflight, turns: oneGroup }, null);
+    const grownStage = api.buildCeoRenderSignature([], { ...inflight, turns: twoGroups }, null);
+    const grownRound = api.buildCeoRenderSignature([], { ...inflight, turns: newTool }, null);
 
     assert.ok(base && grownStage && grownRound);
     assert.notEqual(base, grownStage);

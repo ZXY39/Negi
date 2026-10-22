@@ -192,7 +192,7 @@ test("snapshot.ceo caches messages under the payload session id", () => {
     assert.equal(sharedEntry, null);
 });
 
-test("snapshot.ceo preserves canonical_context_delta in cached assistant messages and inflight turns", () => {
+test("snapshot.ceo preserves turns in cached assistant messages and inflight turns", () => {
     const { S, initCeoWs, getCeoSessionSnapshotCache, __socket } = loadApp();
 
     S.activeSessionId = "web:shared";
@@ -210,42 +210,41 @@ test("snapshot.ceo preserves canonical_context_delta in cached assistant message
                     {
                         role: "assistant",
                         content: "persisted reply",
-                        canonical_context: {
-                            stages: [
-                                { stage_id: "frontdoor-stage-1", stage_goal: "full stage", status: "completed", rounds: [] },
-                            ],
-                        },
-                        canonical_context_delta: {
-                            stages: [
-                                { stage_id: "frontdoor-stage-1", stage_goal: "delta stage", status: "completed", rounds: [] },
-                            ],
-                        },
+                        turns: [
+                            {
+                                seq: 1,
+                                turn_id: "turn-1",
+                                text: "cached group",
+                                status: "completed",
+                                tools: [{ tool_call_id: "c1", tool_name: "exec", status: "success", output_text: "ok" }],
+                            },
+                        ],
                     },
                 ],
                 inflight_turn: {
                     source: "user",
-                    turn_id: "turn-1",
+                    turn_id: "turn-2",
                     status: "running",
                     assistant_text: "working",
-                    canonical_context: {
-                        stages: [
-                            { stage_id: "frontdoor-stage-1", stage_goal: "full stage", status: "completed", rounds: [] },
-                            { stage_id: "frontdoor-stage-2", stage_goal: "current full stage", status: "running", rounds: [] },
-                        ],
-                    },
-                    canonical_context_delta: {
-                        stages: [
-                            { stage_id: "frontdoor-stage-2", stage_goal: "current delta stage", status: "running", rounds: [] },
-                        ],
-                    },
+                    turns: [
+                        {
+                            seq: 2,
+                            turn_id: "turn-2",
+                            text: "live group",
+                            status: "running",
+                            tools: [{ tool_call_id: "c2", tool_name: "exec", status: "running" }],
+                        },
+                    ],
                 },
             },
         }),
     });
 
     const entry = getCeoSessionSnapshotCache("web:shared");
-    assert.equal(entry?.messages?.[0]?.canonical_context_delta?.stages?.[0]?.stage_id, "frontdoor-stage-1");
-    assert.equal(entry?.inflight_turn?.canonical_context_delta?.stages?.[0]?.stage_id, "frontdoor-stage-2");
+    assert.equal(entry?.messages?.[0]?.turns?.[0]?.seq, 1);
+    assert.equal(entry?.messages?.[0]?.turns?.[0]?.tools?.[0]?.tool_name, "exec");
+    assert.equal(entry?.inflight_turn?.turns?.[0]?.seq, 2);
+    assert.equal(entry?.inflight_turn?.turns?.[0]?.tools?.[0]?.status, "running");
 });
 
 test("snapshot.ceo for a different session does not render into the active feed", () => {
@@ -448,7 +447,7 @@ test("ceo.turn.patch syncs approval flow from preserved_turn interrupts", () => 
     assert.equal(__context.__approvalRefreshCalls.length, 0);
 });
 
-test("ceo.turn.patch preserves canonical_context_delta on cached inflight turn", () => {
+test("ceo.turn.patch preserves turns on cached inflight turn", () => {
     const { S, initCeoWs, __socket, getCeoSessionSnapshotCache } = loadApp();
 
     S.activeSessionId = "web:active";
@@ -467,17 +466,15 @@ test("ceo.turn.patch preserves canonical_context_delta on cached inflight turn",
                     turn_id: "turn-1",
                     status: "running",
                     assistant_text: "working",
-                    canonical_context: {
-                        stages: [
-                            { stage_id: "frontdoor-stage-1", stage_goal: "full stage", status: "completed", rounds: [] },
-                            { stage_id: "frontdoor-stage-2", stage_goal: "current full stage", status: "running", rounds: [] },
-                        ],
-                    },
-                    canonical_context_delta: {
-                        stages: [
-                            { stage_id: "frontdoor-stage-2", stage_goal: "current delta stage", status: "running", rounds: [] },
-                        ],
-                    },
+                    turns: [
+                        {
+                            seq: 2,
+                            turn_id: "turn-1",
+                            text: "current group",
+                            status: "running",
+                            tools: [{ tool_call_id: "c2", tool_name: "exec", status: "running" }],
+                        },
+                    ],
                 },
                 preserved_turn: null,
             },
@@ -485,7 +482,7 @@ test("ceo.turn.patch preserves canonical_context_delta on cached inflight turn",
     });
 
     const entry = getCeoSessionSnapshotCache("web:other");
-    assert.equal(entry?.inflight_turn?.canonical_context_delta?.stages?.[0]?.stage_id, "frontdoor-stage-2");
+    assert.equal(entry?.inflight_turn?.turns?.[0]?.seq, 2);
 });
 
 test("ceo.reply.delta updates cached inflight assistant text without invoking turn patch rendering", () => {
@@ -784,7 +781,7 @@ test("ceo.agent.tool forwards live tool events into the active session feed", ()
     assert.equal(__context.__toolEvents[0].status, "success");
 });
 
-test("snapshot.ceo keeps empty-delta rows in cache so re-render cannot resurrect old stages", () => {
+test("snapshot.ceo keeps turn-less rows in cache without inventing a rail", () => {
     const { S, initCeoWs, getCeoSessionSnapshotCache, __socket } = loadApp();
 
     S.activeSessionId = "web:shared";
@@ -799,8 +796,8 @@ test("snapshot.ceo keeps empty-delta rows in cache so re-render cannot resurrect
             session_id: "web:shared",
             data: {
                 messages: [
-                    { role: "assistant", content: "no new rail", canonical_context_delta: {} },
-                    { role: "assistant", content: "", silent_reply: true, canonical_context_delta: {} },
+                    { role: "assistant", content: "no new rail" },
+                    { role: "assistant", content: "已经汇报过了", silent_reply: true },
                 ],
                 inflight_turn: null,
             },
@@ -808,12 +805,10 @@ test("snapshot.ceo keeps empty-delta rows in cache so re-render cannot resurrect
     });
 
     const entry = getCeoSessionSnapshotCache("web:shared");
-    // 后端快照不再逐行携带全量 canonical_context；{} delta 键必须原样进缓存，
-    // 缓存重渲走 hasDelta 分支渲染纯文本/跳过，而不是回退全量重画旧轨道。
-    assert.ok(entry?.messages?.[0] && "canonical_context_delta" in entry.messages[0]);
-    assert.equal(Object.keys(entry.messages[0].canonical_context_delta).length, 0);
+    // 没有轨道的行必须照样进缓存（正文与静默标记是它的全部可渲染内容），
+    // 但缓存里不能凭空长出一个 turns 键——重渲时它会画出一条别的回合的轨道。
     assert.equal(entry?.messages?.[0]?.content, "no new rail");
+    assert.equal("turns" in (entry?.messages?.[0] || {}), false);
     assert.equal(entry?.messages?.[1]?.silent_reply, true);
-    assert.ok(entry?.messages?.[1] && "canonical_context_delta" in entry.messages[1]);
-    assert.equal(Object.keys(entry.messages[1].canonical_context_delta).length, 0);
+    assert.equal("turns" in (entry?.messages?.[1] || {}), false);
 });

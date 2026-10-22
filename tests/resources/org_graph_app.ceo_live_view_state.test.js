@@ -4,7 +4,7 @@ const fs = require("node:fs");
 const vm = require("node:vm");
 const { readFrontendSources } = require("./support/frontend_sources.js");
 
-// 直播回合视图状态保持:renderCeoStageTraceIntoTurn 整段重建前后的展开态捕获/还原,
+// 直播回合视图状态保持:renderCeoTurnsIntoTurn 整段重建前后的展开态捕获/还原,
 // 以及 mutateCeoFeed preserve 模式的锚定滚动/贴底跟随契约。
 // 覆盖:阶段 details 开合、轮次工具条选中、Interaction Flow 用户折叠、跨轮换轨不串态、
 // 上滚锚定(上方内容增高/缩短不跳变)、贴底自动跟随、「回到最新」按钮的呼吸门控与动画载体。
@@ -160,7 +160,7 @@ function loadApp() {
     context.window = context;
     vm.createContext(context);
     vm.runInContext(
-        `${TASK_VIEW_CODE}\n${APP_CODE}\nthis.__testExports = { renderCeoStageTraceIntoTurn, mutateCeoFeed, scrollCeoFeedToBottom, updateCeoScrollToLatestButton, syncCeoFeedTurnActiveClass, setCeoFeedFollowLatest, handleCeoFeedUserGesture, handleCeoFeedScrollEvent, markCeoFeedProgrammaticScroll, S, U };`,
+        `${TASK_VIEW_CODE}\n${APP_CODE}\nthis.__testExports = { renderCeoTurnsIntoTurn, mutateCeoFeed, scrollCeoFeedToBottom, updateCeoScrollToLatestButton, syncCeoFeedTurnActiveClass, setCeoFeedFollowLatest, handleCeoFeedUserGesture, handleCeoFeedScrollEvent, markCeoFeedProgrammaticScroll, S, U };`,
         context
     );
     return context.__testExports;
@@ -211,70 +211,63 @@ function makeTurn({ flowOpen = false } = {}) {
     };
 }
 
-function stageFixture(stageId, { roundId = null } = {}) {
-    const rounds = roundId
-        ? [{
-            round_id: roundId,
-            round_index: 1,
-            text: "先搜一下候选",
-            tools: [{ tool_name: "filesystem", status: "success", output_text: "ok" }],
-        }]
-        : [];
+function turnFixture(seq, { withTools = false } = {}) {
     return {
-        stage_id: stageId,
-        stage_goal: `goal ${stageId}`,
-        status: "running",
-        tool_round_budget: 3,
-        rounds,
+        seq,
+        turn_id: `turn-${seq}`,
+        text: withTools ? `goal ${seq}` : `旁白 ${seq}`,
+        created_at: "",
+        status: "completed",
+        tools: withTools
+            ? [{ tool_call_id: "call-1", tool_name: "filesystem", status: "success", output_text: "ok" }]
+            : [],
     };
 }
 
-test("直播重建保留用户展开的阶段与折叠的 Interaction Flow", () => {
-    const { renderCeoStageTraceIntoTurn } = loadApp();
+test("直播重建保留用户展开的分组与折叠的 Interaction Flow", () => {
+    const { renderCeoTurnsIntoTurn } = loadApp();
     const turn = makeTurn();
 
-    renderCeoStageTraceIntoTurn(turn, { stages: [stageFixture("stage-1", { roundId: "round-1" })] });
-    // 首渲染默认:Flow 自动展开、阶段全部折叠。
+    renderCeoTurnsIntoTurn(turn, [turnFixture(1, { withTools: true })]);
+    // 首渲染默认:Flow 自动展开、组全部折叠。
     assert.equal(turn.flowEl.open, true);
     const firstSteps = turn.listEl.querySelectorAll(".task-trace-step");
     assert.equal(firstSteps.length, 1);
     assert.equal(firstSteps[0].open, false);
 
-    // 用户操作:展开 stage-1、选中 round-1 的某个工具、折叠 Flow 容器。
+    // 用户操作:展开第一组、选中组里的某个工具、折叠 Flow 容器。
     firstSteps[0].open = true;
     const firstHosts = turn.listEl.querySelectorAll(".task-trace-round-tools");
     assert.ok(firstHosts.length >= 1);
-    firstHosts[0].dataset.activeToolKey = "round-1:tool:0";
+    firstHosts[0].dataset.activeToolKey = "turn:1:tool:0";
     turn.flowEl.open = false;
 
-    // 新阶段增量到达 → 整段重建。
-    renderCeoStageTraceIntoTurn(turn, {
-        stages: [stageFixture("stage-1", { roundId: "round-1" }), stageFixture("stage-2")],
-    });
+    // 新回合增量到达 → 整段重建。
+    renderCeoTurnsIntoTurn(turn, [turnFixture(1, { withTools: true }), turnFixture(2)]);
 
     const steps = turn.listEl.querySelectorAll(".task-trace-step");
     assert.equal(steps.length, 2);
-    const stage1 = steps.find((step) => step.dataset.traceKey === "ceo:stage:stage-1");
-    const stage2 = steps.find((step) => step.dataset.traceKey === "ceo:stage:stage-2");
-    assert.equal(stage1.open, true, "用户展开的阶段在重建后必须保持展开");
-    assert.equal(stage2.open, false, "新阶段保持默认折叠");
+    const group1 = steps.find((step) => step.dataset.traceKey === "turn:1");
+    const group2 = steps.find((step) => step.dataset.traceKey === "turn:2");
+    assert.equal(group1.open, true, "用户展开的分组在重建后必须保持展开");
+    assert.equal(group2.open, false, "新分组保持默认折叠");
     const hosts = turn.listEl.querySelectorAll(".task-trace-round-tools");
-    assert.equal(hosts[0].dataset.activeToolKey, "round-1:tool:0", "轮次工具选中必须按 round key 还原");
+    assert.equal(hosts[0].dataset.activeToolKey, "turn:1:tool:0", "组内工具选中必须按组 key 还原");
     assert.equal(turn.flowEl.open, false, "用户折叠的 Flow 容器不能被重建强制展开");
 });
 
 test("首渲染与换轨(turnId 变更清空轨道)仍走默认展开语义", () => {
-    const { renderCeoStageTraceIntoTurn } = loadApp();
+    const { renderCeoTurnsIntoTurn } = loadApp();
     const turn = makeTurn();
 
-    renderCeoStageTraceIntoTurn(turn, { stages: [stageFixture("stage-1")] });
+    renderCeoTurnsIntoTurn(turn, [turnFixture(1)]);
     turn.listEl.querySelectorAll(".task-trace-step")[0].open = true;
 
     // patchCeoInflightTurn 在 turnId 变化时清空 lastExecutionTraceSummary:
-    // 新一轮渲染不得沿用上一轮的展开态(stage id 跨轮会重复)。
+    // 新一轮渲染不得沿用上一轮的展开态(组 key 跨轮会重复)。
     turn.lastExecutionTraceSummary = null;
     turn.flowEl.open = false;
-    renderCeoStageTraceIntoTurn(turn, { stages: [stageFixture("stage-1")] });
+    renderCeoTurnsIntoTurn(turn, [turnFixture(1)]);
 
     assert.equal(turn.listEl.querySelectorAll(".task-trace-step")[0].open, false);
     assert.equal(turn.flowEl.open, true);

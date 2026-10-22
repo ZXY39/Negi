@@ -105,7 +105,6 @@ function loadApp({ getCeoToolArguments }) {
         this.__testExports = {
             S,
             esc: (v) => String(v ?? ""),
-            normalizeExecutionStageTrace,
             renderExecutionRoundToolPanel,
             ensureTraceArgumentsCodeBlockContent,
             resolveTraceFieldCopyText,
@@ -122,25 +121,15 @@ function httpError(message, status) {
     return error;
 }
 
-// 投影把超长入参清空后的那一行：arguments 空、arguments_text 是 48 字提示、带截断标记。
-function cappedStage() {
+// 投影把超长入参清空后的那一行：屏幕上是 48 字提示，带截断标记。
+function cappedStep() {
     return {
-        stage_id: "stage:1",
-        stage_goal: "enumerate packages",
-        rounds: [{
-            round_id: "round:1",
-            round_index: 1,
-            created_at: "2026-10-07T10:44:25",
-            tools: [{
-                tool_call_id: "call-42",
-                tool_name: "exec",
-                status: "success",
-                arguments: {},
-                arguments_text: HINT,
-                arguments_truncated: true,
-                output_ref: "artifact:tool-output-1",
-            }],
-        }],
+        tool_call_id: "call-42",
+        tool_name: "exec",
+        status: "success",
+        arguments_text: HINT,
+        arguments_truncated: true,
+        output_ref: "artifact:tool-output-1",
     };
 }
 
@@ -158,20 +147,19 @@ test("面板只对被清空的那一行留按需取档标记", () => {
         getCeoToolArguments: async () => { throw httpError("unused", 500); },
     });
 
-    const capped = normalizeExecutionStageTrace(cappedStage(), 0);
-    const cappedHtml = renderExecutionRoundToolPanel(capped.rounds[0], capped.rounds[0].tools[0], 0);
+    const round = { round_id: "turn:1", created_at: "2026-10-07T10:44:25" };
+    const cappedHtml = renderExecutionRoundToolPanel(round, cappedStep(), 0);
     assert.match(cappedHtml, /data-arguments-lookup="call-42"/);
     assert.match(cappedHtml, new RegExp(HINT.replace(/[\\.*+?^${}()|[\]\\]/g, "\\$&")));
 
-    // 内联入参还在的时候不该多发一次请求：直接用对象渲染全量。
-    const inline = normalizeExecutionStageTrace({
-        stage_id: "stage:2",
-        rounds: [{
-            round_id: "round:1",
-            tools: [{ tool_call_id: "call-7", tool_name: "exec", status: "success", arguments: { command: LONG_COMMAND } }],
-        }],
-    }, 0);
-    const inlineHtml = renderExecutionRoundToolPanel(inline.rounds[0], inline.rounds[0].tools[0], 0);
+    // 入参原文在场的时候不该多发一次请求：面板直接印全量，不留取档标记。
+    const inline = {
+        tool_call_id: "call-7",
+        tool_name: "exec",
+        status: "success",
+        arguments_text: JSON.stringify({ command: LONG_COMMAND }, null, 2),
+    };
+    const inlineHtml = renderExecutionRoundToolPanel(round, inline, 0);
     assert.doesNotMatch(inlineHtml, /data-arguments-lookup/);
     assert.match(inlineHtml, /Get-ChildItem -Path C:/);
 });

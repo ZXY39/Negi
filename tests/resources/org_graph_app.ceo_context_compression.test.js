@@ -1009,15 +1009,15 @@ test("P1-b 标记归一化保留 boundary 0（0 是有效落点）", () => {
     const marker = api.normalizeCeoSnapshotCompressionMarker({
         state: "completed",
         source: "auto",
-        stats: { turn_id: "a1", boundary_stage_index: 0 },
+        stats: { turn_id: "a1", boundary_turn_seq: 0 },
     });
-    assert.equal(marker.boundary_stage_index, 0);
+    assert.equal(marker.boundary_turn_seq, 0);
     const absent = api.normalizeCeoSnapshotCompressionMarker({
         state: "completed",
         source: "auto",
         stats: { turn_id: "a1" },
     });
-    assert.equal(absent.boundary_stage_index, undefined);
+    assert.equal(absent.boundary_turn_seq, undefined);
 });
 
 test("P1-b running 缓存镜像带 seen_at，过期旧镜像不画线", () => {

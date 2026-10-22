@@ -136,7 +136,7 @@ function loadApp({ readContent, openContent, getToolArguments } = {}) {
     };
     vm.createContext(context);
     vm.runInContext(
-        `${TASK_VIEW_CODE}\n${APP_CODE}\nthis.__testExports = { ensureTraceOutputCodeBlockContent, ensureTraceArgumentsCodeBlockContent, ensureCeoToolStepFullOutput, getTraceOutputContentByRef, getTraceOutputWindowByRef, loadMoreTraceOutputBlock, capTraceDisplayText, renderTraceOutputField, toolArgumentsFullText, TRACE_DISPLAY_CHAR_LIMIT };`,
+        `${TASK_VIEW_CODE}\n${APP_CODE}\nthis.__testExports = { ensureTraceOutputCodeBlockContent, ensureTraceArgumentsCodeBlockContent, ensureCeoToolStepFullOutput, getTraceOutputContentByRef, getTraceOutputWindowByRef, loadMoreTraceOutputBlock, capTraceDisplayText, renderTraceOutputField, TRACE_DISPLAY_CHAR_LIMIT };`,
         context
     );
     return context.__testExports;
@@ -362,11 +362,11 @@ test("单行巨型 artifact 的行窗推不动，继续加载保持隐藏", asyn
     assert.equal(button.hidden, true);
 });
 
-test("归档参数按一屏封顶显示，复制仍拿全文", () => {
-    const { capTraceDisplayText, toolArgumentsFullText, TRACE_DISPLAY_CHAR_LIMIT } = loadApp({});
+test("超长参数按一屏封顶显示，复制仍走全量车道", () => {
+    const { capTraceDisplayText, TRACE_DISPLAY_CHAR_LIMIT } = loadApp({});
     const big = "y".repeat(TRACE_DISPLAY_CHAR_LIMIT + 5000);
 
-    const shown = toolArgumentsFullText({ arguments: { command: big } });
+    const shown = capTraceDisplayText(big);
 
     assert.ok(shown.length < big.length, `capped ${shown.length} should be under ${big.length}`);
     assert.match(shown, /查看完整/);

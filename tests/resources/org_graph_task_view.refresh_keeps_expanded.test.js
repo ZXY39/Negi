@@ -5,7 +5,7 @@ const vm = require("node:vm");
 const { readFrontendSources } = require("./support/frontend_sources.js");
 
 // 节点详情「工具刷新不折掉已展开内容」合同:
-// 同一节点重绘时,阶段卡/初始提示词的 details 开合、以及每张卡里**按轮**选中的工具面板
+// 同一节点重绘时,工具组/初始提示词的 details 开合、以及每张卡里**按轮**选中的工具面板
 // 都必须回到用户放下的位置——包括请求在飞窗口里才点开的那些。
 
 const TASK_VIEW_PATH = "g3ku/web/frontend/org_graph_task_view.js";
@@ -211,11 +211,11 @@ function parseStepsHtml(html) {
             title: (/class="interaction-step-title">([^<]*)</.exec(body) || [, ""])[1],
             rounds: [],
         };
-        const roundRe = /<section class="task-trace-round-group" data-round-key="([^"]*)">/g;
+        const roundRe = /<div class="task-trace-round-tools" data-round-key="([^"]*)" data-active-tool-key="([^"]*)">/g;
         const marks = [];
         let roundMatch = roundRe.exec(body);
         while (roundMatch) {
-            marks.push({ roundKey: roundMatch[1], start: roundMatch.index + roundMatch[0].length });
+            marks.push({ roundKey: roundMatch[1], activeToolKey: roundMatch[2], start: roundMatch.index + roundMatch[0].length });
             roundMatch = roundRe.exec(body);
         }
         marks.forEach((mark, index) => {
@@ -241,7 +241,7 @@ function parseStepsHtml(html) {
             }
             step.rounds.push({
                 roundKey: mark.roundKey,
-                activeToolKey: attr(chunk, "data-active-tool-key"),
+                activeToolKey: mark.activeToolKey,
                 chips,
                 panels,
             });
@@ -342,24 +342,19 @@ function tool(id, name, status, output) {
     };
 }
 
-function stage(id, roundSpecs) {
+function turn(seq, toolGroups) {
+    // 一个回合一条正文 + 紧接其后的一批工具；多条工具并到同一条工具条里。
     return {
-        stage_id: id,
-        stage_index: Number(id.slice(-1)) || 1,
-        mode: "自主执行",
-        status: "进行中",
-        stage_goal: `goal ${id}`,
-        rounds: roundSpecs.map((round, index) => ({
-            round_id: `${id}-r${index + 1}`,
-            round_index: index + 1,
-            created_at: `2026-10-09T10:0${index}:00`,
-            text: `round ${index + 1}`,
-            tools: round,
-        })),
+        seq,
+        turn_id: `turn-${seq}`,
+        text: `进展 ${seq}`,
+        created_at: `2026-10-09T10:0${seq}:00`,
+        status: "completed",
+        tools: toolGroups.flat(),
     };
 }
 
-function detailPayload(nodeId, stageDefs) {
+function detailPayload(nodeId, turnDefs) {
     return {
         node_id: nodeId,
         state: "in_progress",
@@ -375,7 +370,7 @@ function detailPayload(nodeId, stageDefs) {
         execution_trace: {
             initial_prompt: "prompt",
             final_output: "",
-            stages: stageDefs,
+            turns: turnDefs,
         },
     };
 }
@@ -430,21 +425,21 @@ function openChip(api, stepKey, roundKey, toolKey) {
     api.setTraceRoundActiveTool(host, toolKey);
 }
 
-function v1Stages() {
+function v1Turns() {
     return [
-        stage("stage-1", [[tool("call-a", "filesystem_read", "success", "aaa")]]),
-        stage("stage-2", [
+        turn(1, [[tool("call-a", "filesystem_read", "success", "aaa")]]),
+        turn(2, [
             [tool("call-b", "filesystem_read", "success", "bbb")],
             [tool("call-c", "exec", "running", "")],
         ]),
     ];
 }
 
-function v2Stages() {
+function v2Turns() {
     // 工具刷新:在飞的那次调用返回,正文与状态都变了 ⇒ 轨道整段重建
     return [
-        stage("stage-1", [[tool("call-a", "filesystem_read", "success", "aaa")]]),
-        stage("stage-2", [
+        turn(1, [[tool("call-a", "filesystem_read", "success", "aaa")]]),
+        turn(2, [
             [tool("call-b", "filesystem_read", "success", "bbb")],
             [tool("call-c", "exec", "success", "ccc done")],
         ]),
@@ -454,7 +449,7 @@ function v2Stages() {
 async function firstPaint(api) {
     api.S.currentTaskId = "t1";
     api.S.selectedNodeId = "n1";
-    api.S.taskNodeDetails = { n1: detailPayload("n1", v1Stages()) };
+    api.S.taskNodeDetails = { n1: detailPayload("n1", v1Turns()) };
     await api.showAgent({ node_id: "n1", title: "n1", state: "in_progress" }, { preserveViewState: false });
 }
 
@@ -464,16 +459,16 @@ async function refresh(api, client, node, options) {
     await pending;
 }
 
-test("工具刷新后:展开的阶段卡与按轮选中的工具面板回到同一轮", async () => {
-    const client = makeClient((nodeId) => detailPayload(nodeId, v2Stages()));
+test("工具刷新后:展开的工具组与组内选中的工具面板回到同一组", async () => {
+    const client = makeClient((nodeId) => detailPayload(nodeId, v2Turns()));
     const api = loadApp({ apiClient: client });
     await firstPaint(api);
 
-    // 用户:展开第一张阶段卡,并在 stage-2 的第 2 轮点开工具面板。
-    stepByKey(api, "stage:stage-1").open = true;
-    openChip(api, "stage:stage-2", "stage-2-r2", "stage-2-r2:tool:call-c");
-    assert.deepEqual(readOut(api).find((item) => item.key === "stage:stage-2").panels, [
-        "stage-2-r2=stage-2-r2:tool:call-c",
+    // 用户:展开第一张工具组,并在 turn 2 的工具条点开工具面板。
+    stepByKey(api, "turn:1").open = true;
+    openChip(api, "turn:2", "turn:2", "turn:2:tool:call-c");
+    assert.deepEqual(readOut(api).find((item) => item.key === "turn:2").panels, [
+        "turn:2=turn:2:tool:call-c",
     ]);
 
     // task.node.patch 那一步:先捕获+存档,再把同一节点按 forceRefresh 重绘。
@@ -483,51 +478,51 @@ test("工具刷新后:展开的阶段卡与按轮选中的工具面板回到同�
     await refresh(api, client, { node_id: "n1", state: "in_progress" }, { preserveViewState: true, forceRefresh: true });
 
     const out = readOut(api);
-    const stage1 = out.find((item) => item.key === "stage:stage-1");
-    const stage2 = out.find((item) => item.key === "stage:stage-2");
-    assert.equal(stage1.open, true, "用户展开的阶段卡在刷新后必须仍展开");
-    assert.deepEqual(stage2.panels, ["stage-2-r2=stage-2-r2:tool:call-c"],
+    const group1 = out.find((item) => item.key === "turn:1");
+    const group2 = out.find((item) => item.key === "turn:2");
+    assert.equal(group1.open, true, "用户展开的工具组在刷新后必须仍展开");
+    assert.deepEqual(group2.panels, ["turn:2=turn:2:tool:call-c"],
         "工具面板必须还原到用户选中的那一轮,不是兜到第一轮");
     assert.equal(out.find((item) => item.key === "initial_prompt").open, false,
         "还原只搬用户放下的位置,不能顺手替用户开别的卡片");
 });
 
 test("请求在飞窗口里新展开的内容不被上一次捕获折回", async () => {
-    const client = makeClient((nodeId) => detailPayload(nodeId, v2Stages()));
+    const client = makeClient((nodeId) => detailPayload(nodeId, v2Turns()));
     const api = loadApp({ apiClient: client });
     await firstPaint(api);
 
-    stepByKey(api, "stage:stage-1").open = true;
-    openChip(api, "stage:stage-2", "stage-2-r2", "stage-2-r2:tool:call-c");
+    stepByKey(api, "turn:1").open = true;
+    openChip(api, "turn:2", "turn:2", "turn:2:tool:call-c");
 
     const pending = api.showAgent(
         { node_id: "n1", state: "in_progress" },
         { preserveViewState: true, forceRefresh: true },
     );
-    // 详情请求在飞:用户在这段窗口里又展开了初始提示词与 stage-1 的工具面板。
+    // 详情请求在飞:用户在这段窗口里又展开了初始提示词与 turn 1 的工具面板。
     stepByKey(api, "initial_prompt").open = true;
-    openChip(api, "stage:stage-1", "stage-1-r1", "stage-1-r1:tool:call-a");
+    openChip(api, "turn:1", "turn:1", "turn:1:tool:call-a");
     client.letThrough();
     await pending;
 
     const out = readOut(api);
     assert.equal(out.find((item) => item.key === "initial_prompt").open, true,
         "在飞窗口里刚展开的卡片不能被刷新折回");
-    assert.deepEqual(out.find((item) => item.key === "stage:stage-1").panels, [
-        "stage-1-r1=stage-1-r1:tool:call-a",
+    assert.deepEqual(out.find((item) => item.key === "turn:1").panels, [
+        "turn:1=turn:1:tool:call-a",
     ], "在飞窗口里刚点开的工具面板必须保持打开");
-    assert.deepEqual(out.find((item) => item.key === "stage:stage-2").panels, [
-        "stage-2-r2=stage-2-r2:tool:call-c",
+    assert.deepEqual(out.find((item) => item.key === "turn:2").panels, [
+        "turn:2=turn:2:tool:call-c",
     ], "窗口之前放下的面板同样要保持");
 });
 
 test("切走再切回:按轮选中的工具面板从该节点自己的存档里回来", async () => {
-    const client = makeClient((nodeId) => detailPayload(nodeId, v1Stages()));
+    const client = makeClient((nodeId) => detailPayload(nodeId, v1Turns()));
     const api = loadApp({ apiClient: client });
     await firstPaint(api);
 
-    stepByKey(api, "stage:stage-1").open = true;
-    openChip(api, "stage:stage-2", "stage-2-r2", "stage-2-r2:tool:call-c");
+    stepByKey(api, "turn:1").open = true;
+    openChip(api, "turn:2", "turn:2", "turn:2:tool:call-c");
     // 树上来回换节点时,离开的那一步会把当前节点的展开态存档（存档是要过一遍归一的）。
     api.stashTaskDetailViewState({ nodeId: "n1" });
 
@@ -539,33 +534,33 @@ test("切走再切回:按轮选中的工具面板从该节点自己的存档里�
     await refresh(api, client, { node_id: "n1", state: "in_progress" }, { preserveViewState: false });
 
     const out = readOut(api);
-    assert.equal(out.find((item) => item.key === "stage:stage-1").open, true,
-        "切回来时用户展开的阶段卡必须按存档回来");
-    assert.deepEqual(out.find((item) => item.key === "stage:stage-2").panels, [
-        "stage-2-r2=stage-2-r2:tool:call-c",
+    assert.equal(out.find((item) => item.key === "turn:1").open, true,
+        "切回来时用户展开的工具组必须按存档回来");
+    assert.deepEqual(out.find((item) => item.key === "turn:2").panels, [
+        "turn:2=turn:2:tool:call-c",
     ], "按轮选中的工具面板必须一起进存档,否则切回来只剩第一轮");
 });
 
 test("换成另一个节点时按该节点自己的存档起板", async () => {
-    const client = makeClient((nodeId) => detailPayload(nodeId, v1Stages()));
+    const client = makeClient((nodeId) => detailPayload(nodeId, v1Turns()));
     const api = loadApp({ apiClient: client });
     await firstPaint(api);
-    stepByKey(api, "stage:stage-1").open = true;
-    openChip(api, "stage:stage-2", "stage-2-r2", "stage-2-r2:tool:call-c");
+    stepByKey(api, "turn:1").open = true;
+    openChip(api, "turn:2", "turn:2", "turn:2:tool:call-c");
 
     api.S.selectedNodeId = "n2";
     api.S.taskNodeDetails = {};
     await refresh(api, client, { node_id: "n2", state: "in_progress" }, { preserveViewState: false });
 
     const out = readOut(api);
-    assert.equal(out.find((item) => item.key === "stage:stage-1").open, false,
+    assert.equal(out.find((item) => item.key === "turn:1").open, false,
         "另一个节点必须按自己的默认档起板,不能继承上一节点的展开");
-    assert.deepEqual(out.find((item) => item.key === "stage:stage-2").panels, [],
+    assert.deepEqual(out.find((item) => item.key === "turn:2").panels, [],
         "另一个节点不能继承上一节点选中的工具面板");
 });
 
 test("节点详情头部写与会话页同款的 token 读数行", async () => {
-    const client = makeClient((nodeId) => detailPayload(nodeId, v1Stages()));
+    const client = makeClient((nodeId) => detailPayload(nodeId, v1Turns()));
     const api = loadApp({ apiClient: client });
     await firstPaint(api);
 

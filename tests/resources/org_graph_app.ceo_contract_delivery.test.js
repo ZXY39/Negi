@@ -116,11 +116,11 @@ function loadApp() {
             maybeShowCeoContextLoadNotice,
             isCeoContractDeliveryStep,
             isCeoContextLoadStep,
-            filterCeoInteractionFlowSummary,
+            ceoCommittedToolCallKeys,
             contextLoadDisplayFor,
             renderExecutionRoundToolChip,
             renderExecutionRoundToolPanel,
-            normalizeExecutionStageTrace,
+            normalizeTraceTurns,
             normalizeSummaryTraceToolCall,
             buildNodeExecutionTrace,
         };`,
@@ -130,47 +130,37 @@ function loadApp() {
     return { ...context.__testExports, __context: context };
 }
 
-function _canonicalContext() {
-    return {
-        stages: [
-            {
-                stage_id: "stage-1",
-                stage_index: 1,
-                stage_goal: "inspect repository",
-                status: "active",
-                tool_round_budget: 10,
-                rounds: [
-                    {
-                        round_id: "round-1",
-                        round_index: 1,
-                        budget_counted: true,
-                        tools: [
-                            {
-                                tool_call_id: "call-delivered",
-                                tool_name: "filesystem_edit",
-                                status: "success",
-                                contract_delivery: "staged",
-                                output_text: "[TOOL_CONTRACT_V1:filesystem_edit:tcf:abc]\nbody\n[/TOOL_CONTRACT_V1]",
-                            },
-                            {
-                                tool_call_id: "call-delivered-error",
-                                tool_name: "filesystem_edit",
-                                status: "error",
-                                contract_delivery: "staged",
-                                output_text: "Error: could not deliver the contract",
-                            },
-                            {
-                                tool_call_id: "call-executed",
-                                tool_name: "filesystem_stat",
-                                status: "success",
-                                output_text: "ok",
-                            },
-                        ],
-                    },
-                ],
-            },
-        ],
-    };
+function _turnFixture() {
+    return [
+        {
+            seq: 1,
+            turn_id: "turn-1",
+            text: "inspect repository",
+            status: "completed",
+            tools: [
+                {
+                    tool_call_id: "call-delivered",
+                    tool_name: "filesystem_edit",
+                    status: "success",
+                    contract_delivery: "staged",
+                    output_text: "[TOOL_CONTRACT_V1:filesystem_edit:tcf:abc]\nbody\n[/TOOL_CONTRACT_V1]",
+                },
+                {
+                    tool_call_id: "call-delivered-error",
+                    tool_name: "filesystem_edit",
+                    status: "error",
+                    contract_delivery: "staged",
+                    output_text: "Error: could not deliver the contract",
+                },
+                {
+                    tool_call_id: "call-executed",
+                    tool_name: "filesystem_stat",
+                    status: "success",
+                    output_text: "ok",
+                },
+            ],
+        },
+    ];
 }
 
 test("contract delivery is part of the context-load family", () => {
@@ -183,15 +173,16 @@ test("contract delivery is part of the context-load family", () => {
     assert.equal(isCeoContextLoadStep({ tool_name: "filesystem_edit" }), false);
 });
 
-test("successful contract deliveries stay out of the visible stage rail", () => {
-    const { filterCeoInteractionFlowSummary } = loadApp();
+test("a ledger turn retires the live rows it already contains", () => {
+    const { ceoCommittedToolCallKeys, normalizeTraceTurns } = loadApp();
+    const turnRow = normalizeTraceTurns(_turnFixture())[0];
 
-    const filtered = filterCeoInteractionFlowSummary(_canonicalContext());
-    const tools = filtered.stages[0].rounds[0].tools;
+    const committed = ceoCommittedToolCallKeys({ turns: [{ tools: turnRow.tools }] });
 
     assert.deepEqual(
-        JSON.parse(JSON.stringify(tools.map((step) => step.tool_call_id))),
-        ["call-delivered-error", "call-executed"]
+        [...committed].sort(),
+        ["call-delivered", "call-delivered-error", "call-executed"],
+        "账本里每条工具都要能让对应实时行退场，漏一条就是一行永远挂着的“加载中”"
     );
 });
 
@@ -216,11 +207,11 @@ test("a direct-load step renders as the load-tool card with its own tool id", ()
 });
 
 test("the node card uses the load-tool chip and skips the arguments panel", () => {
-    const { ResourcesState, S, normalizeExecutionStageTrace, renderExecutionRoundToolChip, renderExecutionRoundToolPanel } = loadApp();
+    const { ResourcesState, S, normalizeTraceTurns, renderExecutionRoundToolChip, renderExecutionRoundToolPanel } = loadApp();
     ResourcesState.tools = [{ tool_id: "filesystem_edit", risk_level: "high" }];
-    const stage = normalizeExecutionStageTrace(_canonicalContext().stages[0], 0);
-    const round = stage.rounds[0];
-    const step = round.tools[0];
+    const turnRow = normalizeTraceTurns(_turnFixture())[0];
+    const round = { round_id: `turn:${turnRow.seq}` };
+    const step = turnRow.tools[0];
 
     const chip = renderExecutionRoundToolChip(round, step, 0);
     assert.match(chip, /is-context-load is-tool/);
@@ -233,11 +224,11 @@ test("the node card uses the load-tool chip and skips the arguments panel", () =
     assert.doesNotMatch(panel, /参数/);
 });
 
-test("the delivery marker survives stage and summary normalizers", () => {
-    const { normalizeExecutionStageTrace, normalizeSummaryTraceToolCall } = loadApp();
+test("the delivery marker survives the turn and summary normalizers", () => {
+    const { normalizeTraceTurns, normalizeSummaryTraceToolCall } = loadApp();
 
-    const stage = normalizeExecutionStageTrace(_canonicalContext().stages[0], 0);
-    assert.equal(stage.rounds[0].tools[0].contract_delivery, "staged");
+    const turnRow = normalizeTraceTurns(_turnFixture())[0];
+    assert.equal(turnRow.tools[0].contract_delivery, "staged");
 
     const summaryStep = normalizeSummaryTraceToolCall({
         tool_call_id: "call-1",
@@ -262,7 +253,6 @@ test("node detail keeps the marker on flat tool steps", () => {
                     output_text: "contract",
                 },
             ],
-            stages: [],
         },
     });
 

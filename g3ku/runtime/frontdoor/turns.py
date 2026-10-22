@@ -4,6 +4,8 @@ import json
 from datetime import datetime
 from typing import Any
 
+from g3ku.runtime.tool_impulse import CONTRACT_DELIVERY_FIELD
+
 FRONTDOOR_TURNS_MAX = 200
 
 
@@ -32,6 +34,11 @@ def _normalized_tool(raw: Any) -> dict[str, Any] | None:
             float(raw.get("elapsed_seconds"))
             if isinstance(raw.get("elapsed_seconds"), (int, float))
             else None
+        ),
+        **(
+            {CONTRACT_DELIVERY_FIELD: str(raw.get(CONTRACT_DELIVERY_FIELD) or "").strip()}
+            if str(raw.get(CONTRACT_DELIVERY_FIELD) or "").strip()
+            else {}
         ),
     }
 
@@ -134,6 +141,13 @@ def build_frontdoor_turn_tools(
                 "started_at": str(result.get("started_at") or ""),
                 "finished_at": str(result.get("finished_at") or ""),
                 "elapsed_seconds": None,
+                # 直接调用交付的标记要跟着进账本：会话轨道按它把这一行画成「已加载工具 X」，
+                # 少了它刷新后就只有工具名，读起来像目标工具真的跑了一次。
+                **(
+                    {CONTRACT_DELIVERY_FIELD: str(result.get(CONTRACT_DELIVERY_FIELD) or "").strip()}
+                    if str(result.get(CONTRACT_DELIVERY_FIELD) or "").strip()
+                    else {}
+                ),
             }
         )
     return tools

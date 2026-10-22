@@ -193,22 +193,15 @@ this.__x = {
         syncCeoModelRetryToast = () => {};
         syncCeoComposerUsageOutline = () => {};
         scheduleCeoComposerUsageRefresh = () => {};
-        normalizeExecutionStageTrace = (stage, index) => ({
-            stage_id: String(stage?.stage_id || ""),
-            stage_index: index + 1,
-            stage_goal: String(stage?.stage_goal || ""),
-            status: String(stage?.status || "running"),
-            rounds: Array.isArray(stage?.rounds) ? stage.rounds : [],
-        });
-        renderCeoStageTraceIntoTurn = (turn, summary) => {
-            const hasStages = Array.isArray(summary?.stages) && summary.stages.length > 0;
-            if (!hasStages) return 0;
-            turn.renderMode = "stage";
-            turn.lastExecutionTraceSummary = summary;
-            turn.steps = summary.stages.length;
+        renderCeoTurnsIntoTurn = (turn, turns) => {
+            const items = Array.isArray(turns) ? turns : [];
+            if (!items.length) return 0;
+            turn.renderMode = "turns";
+            turn.lastExecutionTraceSummary = { turns: items };
+            turn.steps = items.length;
             turn.flowEl.hidden = false;
             turn.flowEl.open = true;
-            turn.listEl.innerHTML = "stage-trace";
+            turn.listEl.innerHTML = "turns-trace";
             return turn.steps;
         };
     `, context);
@@ -226,15 +219,13 @@ this.__x = {
     return api;
 }
 
-const STAGE_DELTA = {
-    stages: [{
-        stage_id: "st1",
-        stage_index: 1,
-        stage_goal: "看仓库",
-        status: "active",
-        rounds: [{ round_index: 1, tool_names: ["exec"], tools: [{ tool_call_id: "c1", tool_name: "exec", status: "running" }] }],
-    }],
-};
+const TURN_DELTA = [{
+    seq: 1,
+    turn_id: "t1",
+    text: "看仓库",
+    status: "running",
+    tools: [{ tool_call_id: "c1", tool_name: "exec", status: "running" }],
+}];
 
 function startRunningTurn(api) {
     api.sendImmediateCeoMessage({ text: "帮我看下仓库", uploads: [], scrollMode: "bottom" });
@@ -244,7 +235,7 @@ function startRunningTurn(api) {
         status: "running",
         assistant_text: "正在处理",
         user_messages: [{ role: "user", content: "帮我看下仓库", turn_id: "t1", timestamp: "2026-10-20T10:00:00" }],
-        canonical_context_delta: STAGE_DELTA,
+        turns: TURN_DELTA,
     }, { sessionId: SESSION_ID, cacheField: "inflight_turn" });
 }
 
@@ -286,8 +277,8 @@ test("暂停后：用户气泡、模型气泡与阶段卡都留在会话面上",
     const bubbles = renderedTurnBubbles(api);
     assert.equal(bubbles.length, 1, `暂停后必须仍有且只有一条模型气泡: ${JSON.stringify(bubbles)}`);
     assert.equal(bubbles[0].text, "已暂停", "暂停后模型气泡必须留下「已暂停」");
-    assert.equal(bubbles[0].trace, "stage-trace", "暂停后阶段卡必须还在");
-    assert.equal(bubbles[0].flowHidden, false, "有阶段卡的回合不能把轨道折起来");
+    assert.equal(bubbles[0].trace, "turns-trace", "暂停后回合轨道必须还在");
+    assert.equal(bubbles[0].flowHidden, false, "有轨道的回合不能把轨道折起来");
 
     const entry = api.getCeoSessionSnapshotCache(SESSION_ID);
     const rows = entry?.messages || [];
@@ -298,8 +289,8 @@ test("暂停后：用户气泡、模型气泡与阶段卡都留在会话面上",
     assert.equal(pausedReply.status, "paused", "暂停收尾写进缓存的模型行必须带 status=paused");
     assert.equal(pausedReply.turn_id, "t1", "暂停收尾的模型行必须带同一个 turn_id，门槛帧才落得上");
     assert.ok(
-        pausedReply.canonical_context_delta || pausedReply.canonical_context,
-        `暂停收尾的模型行必须带住阶段轨道: ${JSON.stringify(pausedReply)}`
+        Array.isArray(pausedReply.turns) && pausedReply.turns.length,
+        `暂停收尾的模型行必须带住回合轨道: ${JSON.stringify(pausedReply)}`
     );
 });
 

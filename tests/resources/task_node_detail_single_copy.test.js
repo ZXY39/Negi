@@ -27,9 +27,9 @@ test("node-detail.js declares every top-level function once", () => {
         "buildExecutionTraceSteps",
         "renderExecutionTrace",
         "showTaskNodeLoadingState",
-        "renderExecutionStageRoundBlock",
-        "renderExecutionStageRounds",
-        "formatExecutionStageTitle",
+        "buildTurnGroupDescriptors",
+        "buildTurnTraceSteps",
+        "renderExecutionRoundToolStrip",
     ]) {
         assert.equal(
             names.filter((candidate) => candidate === name).length,

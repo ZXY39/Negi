@@ -150,22 +150,15 @@ function loadApp() {
             return {};
         };
         setCeoSessionSnapshotCache = () => ({});
-        normalizeExecutionStageTrace = (stage, index) => ({
-            stage_id: String(stage?.stage_id || ""),
-            stage_index: index + 1,
-            stage_goal: String(stage?.stage_goal || ""),
-            status: String(stage?.status || "running"),
-            rounds: Array.isArray(stage?.rounds) ? stage.rounds : [],
-        });
-        renderCeoStageTraceIntoTurn = (turn, summary) => {
-            const hasStages = Array.isArray(summary?.stages) && summary.stages.length > 0;
-            if (!hasStages) return 0;
-            turn.renderMode = "stage";
-            turn.lastExecutionTraceSummary = summary;
-            turn.steps = summary.stages.length;
+        renderCeoTurnsIntoTurn = (turn, turns) => {
+            const items = Array.isArray(turns) ? turns : [];
+            if (!items.length) return 0;
+            turn.renderMode = "turns";
+            turn.lastExecutionTraceSummary = { turns: items };
+            turn.steps = items.length;
             turn.flowEl.hidden = false;
             turn.flowEl.open = true;
-            turn.listEl.innerHTML = "stage-trace";
+            turn.listEl.innerHTML = "turns-trace";
             return turn.steps;
         };
         renderCeoToolEventsIntoTurn = (turn, toolEvents) => {
@@ -296,9 +289,9 @@ test("paused inflight snapshot does not fall back to processing placeholder", ()
         source: "user",
         status: "paused",
         assistant_text: "",
-        canonical_context: {
-            stages: [{ stage_id: "frontdoor-stage-1", stage_goal: "install skill", rounds: [] }],
-        },
+        turns: [
+            { seq: 1, text: "install skill", tools: [] },
+        ],
     });
 
     assert.equal(patched, true);
@@ -317,9 +310,9 @@ test("approval inflight snapshot restore keeps a single active turn instead of f
             source: "approval",
             turn_id: "turn-approval-restore",
             status: "paused",
-            canonical_context: {
-                stages: [{ stage_id: "frontdoor-stage-1", stage_goal: "inspect repo", rounds: [] }],
-            },
+            turns: [
+                { seq: 1, text: "inspect repo", tools: [] },
+            ],
         },
     );
 
@@ -348,9 +341,9 @@ test("approval inflight snapshot with source user still keeps a single active tu
                     },
                 },
             ],
-            canonical_context: {
-                stages: [{ stage_id: "frontdoor-stage-1", stage_goal: "inspect repo", rounds: [] }],
-            },
+            turns: [
+                { seq: 1, text: "inspect repo", tools: [] },
+            ],
         },
     );
 
@@ -413,14 +406,14 @@ test("persisted paused assistant history renders as a paused bubble", () => {
         role: "assistant",
         content: "",
         status: "paused",
-        canonical_context: {
-            stages: [{ stage_id: "frontdoor-stage-1", stage_goal: "inspect repo", rounds: [] }],
-        },
+        turns: [
+            { seq: 1, text: "inspect repo", tools: [] },
+        ],
     });
 
     assert.equal(turn.textEl.textContent, PAUSED_LABEL);
     assert.equal(turn.finalized, true);
-    assert.equal(turn.renderMode, "stage");
+    assert.equal(turn.renderMode, "turns");
     assert.equal(turn.flowEl.hidden, false);
     assert.equal(turn.flowEl.open, true);
     assert.equal(S.ceoPendingTurns.length, 0);
@@ -445,9 +438,9 @@ test("shutdown-resume live turn takes over the paused archive bubble of the same
         content: "继续定位：读取探测结果的尾部关键段落。",
         status: "paused",
         turn_id: "turn-cut",
-        canonical_context: {
-            stages: [{ stage_id: "frontdoor-stage-39", stage_goal: "定位证据目录", rounds: [] }],
-        },
+        turns: [
+            { seq: 1, text: "定位证据目录", tools: [] },
+        ],
     });
     assert.equal(S.ceoPausedArchiveTurns["turn-cut"], paused);
 
@@ -482,9 +475,9 @@ test("a resume turn patch takes over the paused archive bubble instead of adding
         content: "继续定位：读取探测结果的尾部关键段落。",
         status: "paused",
         turn_id: "turn-cut",
-        canonical_context: {
-            stages: [{ stage_id: "frontdoor-stage-39", stage_goal: "定位证据目录", rounds: [] }],
-        },
+        turns: [
+            { seq: 1, text: "定位证据目录", tools: [] },
+        ],
     });
 
     // 实盘那条转圈气泡是 turn patch 建的（心跳轮回合同一个 runtime session），
@@ -495,9 +488,9 @@ test("a resume turn patch takes over the paused archive bubble instead of adding
         turn_id: "turn-cut",
         source: "heartbeat",
         status: "running",
-        canonical_context_delta: {
-            stages: [{ stage_id: "frontdoor-stage-39", stage_goal: "定位证据目录", rounds: [{ round_id: "r7" }] }],
-        },
+        turns: [
+            { seq: 1, text: "定位证据目录", tools: [] },
+        ],
     });
 
     assert.equal(patched, true);
@@ -525,9 +518,9 @@ test("a live turn of another turn_id leaves the paused archive bubble mounted", 
         content: "上一件被截断的事",
         status: "paused",
         turn_id: "turn-cut",
-        canonical_context: {
-            stages: [{ stage_id: "frontdoor-stage-39", stage_goal: "定位证据目录", rounds: [] }],
-        },
+        turns: [
+            { seq: 1, text: "定位证据目录", tools: [] },
+        ],
     });
     setCreatePendingCeoTurn(() => makeTurn({ text: "", source: "user", steps: 0 }));
 
@@ -604,40 +597,27 @@ test("finalize uses final canonical context instead of stale inflight trace", ()
         turn_id: "turn-final",
         source: "user",
         status: "running",
-        canonical_context: {
-            stages: [
-                {
-                    stage_id: "frontdoor-stage-4",
-                    stage_goal: "write file",
-                    rounds: [],
-                },
-            ],
-        },
+        turns: [
+            { seq: 4, text: "write file", tools: [] },
+        ],
     });
 
     finalizeCeoTurn("done", {
         source: "user",
         turn_id: "turn-final",
-        canonical_context: {
-            stages: [
-                {
-                    stage_id: "frontdoor-stage-4",
-                    stage_goal: "write file",
-                    rounds: [
-                        {
-                            round_id: "frontdoor-stage-4:round-1",
-                            tools: [{ tool_name: "filesystem_write", status: "success" }],
-                        },
-                    ],
-                },
-            ],
-        },
+        turns: [
+            {
+                seq: 4,
+                text: "write file",
+                tools: [{ tool_call_id: "call-1", tool_name: "filesystem_write", status: "success" }],
+            },
+        ],
     });
 
     assert.equal(turn.finalized, true);
-    assert.equal(turn.renderMode, "stage");
-    assert.equal(turn.lastExecutionTraceSummary.stages[0].rounds.length, 1);
-    assert.equal(turn.lastExecutionTraceSummary.stages[0].rounds[0].tools[0].tool_name, "filesystem_write");
+    assert.equal(turn.renderMode, "turns");
+    assert.equal(turn.lastExecutionTraceSummary.turns.length, 1);
+    assert.equal(turn.lastExecutionTraceSummary.turns[0].tools[0].tool_name, "filesystem_write");
 });
 
 test("running state without source does not create a phantom pending turn", () => {
@@ -660,16 +640,16 @@ test("stage trace stays visible when a later patch only carries assistant text",
     patchCeoInflightTurn({
         source: "user",
         status: "running",
-        canonical_context: {
-            stages: [{ stage_id: "frontdoor-stage-1", stage_goal: "inspect repo" }],
-        },
-        canonical_context_delta: {
-            stages: [{ stage_id: "frontdoor-stage-1", stage_goal: "inspect repo" }],
-        },
+        turns: [
+            { seq: 1, text: "inspect repo", tools: [] },
+        ],
+        turns: [
+            { seq: 1, text: "inspect repo", tools: [] },
+        ],
     });
 
-    assert.equal(turn.renderMode, "stage");
-    assert.equal(turn.listEl.innerHTML, "stage-trace");
+    assert.equal(turn.renderMode, "turns");
+    assert.equal(turn.listEl.innerHTML, "turns-trace");
 
     patchCeoInflightTurn({
         source: "user",
@@ -677,8 +657,8 @@ test("stage trace stays visible when a later patch only carries assistant text",
         assistant_text: "still working",
     });
 
-    assert.equal(turn.renderMode, "stage");
-    assert.equal(turn.listEl.innerHTML, "stage-trace");
+    assert.equal(turn.renderMode, "turns");
+    assert.equal(turn.listEl.innerHTML, "turns-trace");
 });
 
 test("render snapshot keeps preserved user flow separate from current heartbeat bubble", () => {
@@ -700,9 +680,9 @@ test("render snapshot keeps preserved user flow separate from current heartbeat 
                 status: "running",
                 user_message: { content: "Install the skill" },
                 assistant_text: "Still working on it...",
-                canonical_context: {
-                    stages: [{ stage_id: "frontdoor-stage-user", stage_goal: "install skill" }],
-                },
+                turns: [
+                    { seq: 1, text: "install skill", tools: [] },
+                ],
             },
         },
     );
@@ -711,8 +691,8 @@ test("render snapshot keeps preserved user flow separate from current heartbeat 
     const userTurn = S.ceoPendingTurns.find((turn) => turn.turnId === "turn-user-preserved");
     const heartbeatTurn = S.ceoPendingTurns.find((turn) => turn.turnId === "turn-heartbeat-current");
 
-    assert.equal(userTurn?.renderMode, "stage");
-    assert.equal(userTurn?.listEl?.innerHTML, "stage-trace");
+    assert.equal(userTurn?.renderMode, "turns");
+    assert.equal(userTurn?.listEl?.innerHTML, "turns-trace");
     assert.equal(heartbeatTurn?.renderMode || "", "");
     assert.equal(heartbeatTurn?.lastExecutionTraceSummary || null, null);
     assert.equal(heartbeatTurn?.flowEl?.hidden, true);
@@ -727,9 +707,9 @@ test("preserved turn is not re-rendered when an assistant message with the same 
                 role: "assistant",
                 turn_id: "turn-user-preserved",
                 content: "Already persisted final reply",
-                canonical_context: {
-                    stages: [{ stage_id: "frontdoor-stage-user", stage_goal: "install skill" }],
-                },
+                turns: [
+                    { seq: 1, text: "install skill", tools: [] },
+                ],
             },
         ],
         {
@@ -746,9 +726,9 @@ test("preserved turn is not re-rendered when an assistant message with the same 
                 status: "running",
                 user_message: { content: "Install the skill" },
                 assistant_text: "Still working on it...",
-                canonical_context: {
-                    stages: [{ stage_id: "frontdoor-stage-user", stage_goal: "install skill" }],
-                },
+                turns: [
+                    { seq: 1, text: "install skill", tools: [] },
+                ],
             },
         },
     );
@@ -778,9 +758,9 @@ test("anonymous user inflight turn does not reuse preserved user stage trace", (
                 status: "running",
                 user_message: { content: "Install the skill" },
                 assistant_text: "Still working on it...",
-                canonical_context: {
-                    stages: [{ stage_id: "frontdoor-stage-user", stage_goal: "install skill" }],
-                },
+                turns: [
+                    { seq: 1, text: "install skill", tools: [] },
+                ],
             },
         },
     );
@@ -789,8 +769,8 @@ test("anonymous user inflight turn does not reuse preserved user stage trace", (
     const preservedTurn = S.ceoPendingTurns.find((turn) => turn.turnId === "turn-user-preserved");
     const anonymousTurns = S.ceoPendingTurns.filter((turn) => !String(turn.turnId || "").trim());
 
-    assert.equal(preservedTurn?.renderMode, "stage");
-    assert.equal(preservedTurn?.listEl?.innerHTML, "stage-trace");
+    assert.equal(preservedTurn?.renderMode, "turns");
+    assert.equal(preservedTurn?.listEl?.innerHTML, "turns-trace");
     assert.equal(anonymousTurns.length, 1);
     assert.equal(anonymousTurns[0]?.renderMode || "", "");
     assert.equal(anonymousTurns[0]?.lastExecutionTraceSummary || null, null);
@@ -812,9 +792,9 @@ test("render snapshot dedupes already-persisted user messages before restoring c
                 role: "assistant",
                 content: "处理中...",
                 turn_id: "turn-live:followup:archive",
-                canonical_context: {
-                    stages: [{ stage_id: "frontdoor-stage-1", stage_goal: "inspect repo", rounds: [] }],
-                },
+                turns: [
+                    { seq: 1, text: "inspect repo", tools: [] },
+                ],
             },
         ],
         {
