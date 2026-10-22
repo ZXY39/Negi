@@ -5228,7 +5228,6 @@ class NodeRunner:
             'consumed_distribution_notices': self._spawn_review_consumed_distribution_notices(parent=parent),
             'path_tree_text': self._spawn_review_path_tree_text(task_id=task.task_id, parent=parent),
             'path_nodes': self._spawn_review_path_nodes(task_id=task.task_id, parent=parent),
-            'parent_stages': self._spawn_review_parent_stages(task_id=task.task_id, parent=parent),
             'tree_summary': self._spawn_review_tree_summary(task_id=task.task_id, parent=parent),
             'spawn_request': {
                 'call_id': str(cache_key or ''),
@@ -5260,8 +5259,8 @@ class NodeRunner:
         path_nodes.reverse()
         lines: list[str] = []
         for depth, node in enumerate(path_nodes):
-            stage_goal = self._spawn_review_stage_goal(task_id=task_id, node=node)
-            lines.append(f'{"  " * depth}- ({node.node_id},{node.status},{stage_goal})')
+            goal = self._trim_diagnostic_text(node.goal, max_chars=80)
+            lines.append(f'{"  " * depth}- ({node.node_id},{node.status},{goal})')
         return '\n'.join(lines) if lines else '(empty path)'
 
     def _spawn_review_path_nodes(self, *, task_id: str, parent: NodeRecord) -> list[dict[str, Any]]:
@@ -5284,43 +5283,10 @@ class NodeRunner:
                 'status': str(node.status or ''),
                 'goal': self._trim_diagnostic_text(node.goal, max_chars=400),
                 'prompt': self._trim_diagnostic_text(node.prompt, max_chars=1600),
-                'stage_goal': self._spawn_review_stage_goal(task_id=task_id, node=node),
+                'recent_text': NodeRunner._spawn_review_recent_text(node),
             }
             for node in path_nodes
         ]
-
-    def _spawn_review_parent_stages(self, *, task_id: str, parent: NodeRecord) -> dict[str, Any]:
-        try:
-            snapshot = self._log_service.execution_stage_gate_snapshot(task_id, parent.node_id)
-        except Exception:
-            snapshot = None
-        if not isinstance(snapshot, dict):
-            return {}
-        return {
-            'has_active_stage': bool(snapshot.get('has_active_stage')),
-            'transition_required': bool(snapshot.get('transition_required')),
-            'active_stage': self._spawn_review_compact_stage(snapshot.get('active_stage')),
-            'completed_stages': [
-                self._spawn_review_compact_stage(item)
-                for item in list(snapshot.get('completed_stages') or [])
-                if isinstance(item, dict)
-            ],
-        }
-
-    @staticmethod
-    def _spawn_review_compact_stage(value: Any) -> dict[str, Any] | None:
-        stage = dict(value) if isinstance(value, dict) else None
-        if not stage:
-            return None
-        return {
-            'stage_index': int(stage.get('stage_index') or 0),
-            'stage_kind': str(stage.get('stage_kind') or ''),
-            'mode': str(stage.get('mode') or ''),
-            'status': str(stage.get('status') or ''),
-            'stage_goal': str(stage.get('stage_goal') or ''),
-            'tool_round_budget': int(stage.get('tool_round_budget') or 0),
-            'tool_rounds_used': int(stage.get('tool_rounds_used') or 0),
-        }
 
     def _spawn_review_tree_summary(self, *, task_id: str, parent: NodeRecord) -> dict[str, Any]:
         # 读投影表而不是运行时 `nodes`：这里只要"前 10 行分支文本 + 一个计数"，
@@ -5355,7 +5321,7 @@ class NodeRunner:
         )
         lines: list[str] = []
         for node in others[:10]:
-            stage_goal = self._spawn_review_stage_goal(task_id=task_id, node=node)
+            recent_text = NodeRunner._spawn_review_recent_text(node)
             lines.append(
                 '{} {}- ({},{},{},{})'.format(
                     '  ' * int(getattr(node, 'depth', 0) or 0),
@@ -5367,7 +5333,7 @@ class NodeRunner:
                         else str(getattr(node, 'title', '') or ''),
                         max_chars=80,
                     ),
-                    self._trim_diagnostic_text(stage_goal, max_chars=60),
+                    recent_text,
                 )
             )
         return {
@@ -5375,18 +5341,18 @@ class NodeRunner:
             'visible_other_branch_lines': lines,
         }
 
-    def _spawn_review_stage_goal(self, *, task_id: str, node: NodeRecord) -> str:
-        frame = self._log_service.read_runtime_frame(task_id, node.node_id) or {}
-        stage_goal = str(frame.get('stage_goal') or '').strip()
-        if stage_goal:
-            return stage_goal
-        snapshot = self._log_service.execution_stage_prompt_payload(task_id, node.node_id)
-        active_stage = snapshot.get('active_stage') if isinstance(snapshot, dict) else None
-        if isinstance(active_stage, dict):
-            stage_goal = str(active_stage.get('stage_goal') or '').strip()
-            if stage_goal:
-                return stage_goal
-        return '无阶段目标'
+    @staticmethod
+    def _spawn_review_recent_text(node: Any) -> str:
+        for entry in reversed(list(getattr(node, 'output', None) or [])):
+            text = str(getattr(entry, 'content', '') or '').strip()
+            if text:
+                return ' '.join(text.split())[:120]
+        payload = getattr(node, 'payload', None)
+        if isinstance(payload, dict):
+            text = str(payload.get('latest_progress_text') or '').strip()
+            if text:
+                return ' '.join(text.split())[:120]
+        return ''
 
     @staticmethod
     def _spawn_review_requested_spec_payload(*, index: int, spec: SpawnChildSpec) -> dict[str, Any]:

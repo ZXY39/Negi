@@ -11,8 +11,8 @@
   - `node_kind="acceptance"`：仅当 `requires_acceptance=true` 时由运行时**自动创建**的**独立验收节点**。它的 goal 是 `accept:<候选 goal>`，父节点是上面那条 execution 节点（depth+1），**只在该执行子节点整条管线终态之后才被激活**。
 - 因此 `requires_acceptance=true` + `acceptance_prompt` **本身就等于"结构上独立的验收节点"**。它和"把验收标准写进生成节点的 prompt 让它自检"是两回事：候选携带 `acceptance_prompt` 绝不等于验收内嵌在生成节点里，也不构成自产自销。
 - 真正的"生成与验收同批"只有一种形态：**验收以同批另一个候选节点的身份出现**（该候选的 `goal`/`prompt` 表明它要检验/消费兄弟候选的产出）。
-- 当 `root_prompt` / `stage_goal` / 分发消息要求「每个子节点必须派生独立验收节点」「验收节点独立核验、不采信执行节点自检」时，它在运行时契约里的唯一正确落地就是**每个候选各自 `requires_acceptance=true` + `acceptance_prompt`**。按这个口径，「2 岗位 × [生成 + 独立验收]」= **2 个候选**（各带自己的独立验收节点），不是 4 个候选；不得因为候选没把验收单列成同批兄弟节点而拦截它——那恰恰是被禁止的写法。
-- 行格式图例：`path_tree_text` 每行为 `- (node_id,status,stage_goal)`，`tree_summary.visible_other_branch_lines` 每行为 `  depth- (node_id,status,goal,stage_goal)`；其中 goal 以 `accept:` 开头的行，就是 `requires_acceptance` 已经物化出的独立验收节点——这种节点在任务树里本来就存在且合法。
+- 当 `root_prompt` / 分发消息要求「每个子节点必须派生独立验收节点」「验收节点独立核验、不采信执行节点自检」时，它在运行时契约里的唯一正确落地就是**每个候选各自 `requires_acceptance=true` + `acceptance_prompt`**。按这个口径，「2 岗位 × [生成 + 独立验收]」= **2 个候选**（各带自己的独立验收节点），不是 4 个候选；不得因为候选没把验收单列成同批兄弟节点而拦截它——那恰恰是被禁止的写法。
+- 行格式图例：`path_tree_text` 每行为 `- (node_id,status,goal)`，`tree_summary.visible_other_branch_lines` 每行为 `  depth- (node_id,status,goal,recent_text)`；其中 goal 以 `accept:` 开头的行，就是 `requires_acceptance` 已经物化出的独立验收节点——这种节点在任务树里本来就存在且合法。
 
 审查时必须逐点判断以下要求：
 1. 候选派生是否服务当前父节点目标和补充的分发消息。
@@ -24,7 +24,7 @@
    - 按本条拦截时，`suggestion` **必须**给出可一次执行完的合并指令，固定模板（把 `<n>` 替换成实际候选数，不要在建议里留下尖括号占位）：“把本轮 <n> 个互不依赖分支合并为一次 `spawn_child_nodes` 调用：`children` 数组一次性提交 <n> 项，每项都完整带 `goal` / `prompt` / `execution_policy`；需要独立验收的分支在该项上带 `requires_acceptance=true` + `acceptance_prompt`（运行时为该子节点单独创建独立验收节点）；本批不要放任何需要消费兄弟产出的验收/汇总候选；不要拆成多轮单派。”
    - 本条的建议**不得**指向"下一轮再派剩下的"——那正是本条要避免的形态；也**不得**通过删掉 `requires_acceptance` / `acceptance_prompt` 来凑批量。
 7. 候选派生的总工作量是否超过了父节点的工作量，导致过度拆分。
-8. 候选派生是否把父节点本可直接完成的任务只是下推一层，形成无实质拆分的接力：结合 `path_nodes` 中祖先前后的 `prompt`/`goal`/`stage_goal` 与 `parent_stages` 的阶段推进情况判断，若候选没有显著拆分任务量也没有引入需要探索的未知信息，应拦截并由父节点直接执行。
+8. 候选派生是否把父节点本可直接完成的任务只是下推一层，形成无实质拆分的接力：结合 `path_nodes` 中祖先前后的 `prompt`/`goal` 与 `recent_text` 判断，若候选没有显著拆分任务量也没有引入需要探索的未知信息，应拦截并由父节点直接执行。
 9. 结合 `tree_summary` 的其余分支摘要判断任务树整体是否已明显膨胀（大量接力节点重复推进同一目标）；若整体已过度派生，对新增候选默认拦截，建议由父节点收拢执行。
 10. 如果你不确定，默认拦截，并给出保守原因和操作建议。
 
@@ -50,9 +50,8 @@
 - 根节点 `prompt`
 - 当前父节点已消费的分发消息 `consumed_distribution_notices`
 - 从根节点到当前父节点的路径树文本 `path_tree_text`
-- 路径上各节点的阶段目标
-- `path_nodes`：从根到当前父节点路径上每个节点的 `goal` / `prompt` / `stage_goal`，其中 `prompt` 是该节点的任务边界证据，优先于 `goal` 判断任务范围
-- `parent_stages`：当前父节点全部阶段，包括已完成阶段列表（`completed_stages`）与当前活动阶段（`active_stage`），用于判断父节点的阶段推进是否允许该次派生
+- 路径上各节点的最近进展 `recent_text`
+- `path_nodes`：从根到当前父节点路径上每个节点的 `goal` / `prompt` / `recent_text`，其中 `prompt` 是该节点的任务边界证据，优先于 `goal` 判断任务范围
 - `tree_summary`：路径之外的任务树分支摘要（`execution_node_count` 与 `visible_other_branch_lines`），用于判断任务树整体是否过度派生
 - 当前 `spawn_child_nodes` 的候选派生列表 `spawn_request.requested_specs`（运行时解析后的物化结构；每个候选的 `runtime_nodes` 就是它将创建的节点全集，字段语义见上方「派生会物化成什么」）
 
