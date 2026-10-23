@@ -3276,6 +3276,9 @@ class RuntimeAgentSession:
                 )
             self._loop.sessions.save(persisted_session)
         except Exception:
+            # 这条车道过去只往 UI 发一个 analysis 事件，日志里什么都不留：实盘出现过
+            # "回合正常收尾、正文进了模型上下文、转录里却没有那一行" 且无法归因。
+            logger.exception("Transcript persistence failed for {}", self._state.session_key)
             await self._emit(
                 "message_delta",
                 channel="analysis",

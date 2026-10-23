@@ -1599,8 +1599,12 @@ async def ceo_websocket(websocket: WebSocket):
                     )
                 current_payload = list(queued_follow_ups)
         except asyncio.CancelledError:
+            # 取消落在"模型已答完、转录还没落"这段尾窗时，回合会既无助手行也无错误行地
+            # 消失（实盘出现过一次）。留一条带会话键的痕迹，否则事后无法归因。
+            logger.warning("CEO turn task cancelled for session={}", session_id)
             return
         except Exception as exc:
+            logger.exception("CEO turn failed for session={}", session_id)
             snapshot = _build_inflight_turn_snapshot(session, session_id)
             error_message = str(exc).strip()
             if not error_message and isinstance(snapshot, dict):
