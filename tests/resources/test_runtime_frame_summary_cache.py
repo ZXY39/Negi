@@ -62,8 +62,7 @@ def _frame(node_id: str, *, goal: str, phase: str = 'running', runnable: bool = 
         'active': False,
         'runnable': runnable,
         'waiting': False,
-        'stage_goal': goal,
-        'stage_status': '进行中',
+        'await_marker': goal,
         'tool_calls': [],
     }
 
@@ -110,7 +109,7 @@ def test_cached_summary_matches_row_by_row_reference(tmp_path: Path) -> None:
 
     assert cached == _reference_summary(service)
     assert cached_again == cached
-    assert [item['stage_goal'] for item in cached['frames']] == ['goal-node:a', 'goal-node:b', 'goal-node:c']
+    assert [item['await_marker'] for item in cached['frames']] == ['goal-node:a', 'goal-node:b', 'goal-node:c']
 
 
 def test_unchanged_frames_are_not_read_back(tmp_path: Path) -> None:
@@ -129,13 +128,13 @@ def test_unchanged_frames_are_not_read_back(tmp_path: Path) -> None:
     service._store.get_task_runtime_frame = counting  # type: ignore[method-assign]
     # 变更本身要读回那一帧（update_frame 的前置读），所以先把这次读记完再清空计数：
     # 断言的是"组装摘要时只回表变化的那一帧"。
-    service.update_frame(TASK_ID, 'node:b', lambda frame: {**frame, 'stage_goal': 'changed'})
+    service.update_frame(TASK_ID, 'node:b', lambda frame: {**frame, 'await_marker': 'changed'})
     reads.clear()
 
     summary = service._runtime_summary_payload(TASK_ID)
 
     assert reads == ['node:b']
-    goals = {item['node_id']: item['stage_goal'] for item in summary['frames']}
+    goals = {item['node_id']: item['await_marker'] for item in summary['frames']}
     assert goals == {'node:a': 'goal-node:a', 'node:b': 'changed', 'node:c': 'goal-node:c'}
     assert summary == _reference_summary(service)
 
@@ -161,7 +160,7 @@ def test_rows_without_digest_are_never_served_from_cache(tmp_path: Path) -> None
 
     summary = service._runtime_summary_payload(TASK_ID)
 
-    assert summary['frames'][0]['stage_goal'] == 'rewritten'
+    assert summary['frames'][0]['await_marker'] == 'rewritten'
 
 
 def test_cleared_ledger_drops_the_task_cache(tmp_path: Path) -> None:
@@ -204,7 +203,7 @@ def test_existing_node_update_publishes_delta_without_frames(tmp_path: Path) -> 
     for node_id in ('node:a', 'node:b', 'node:c'):
         service.upsert_frame(TASK_ID, _frame(node_id, goal=f'goal-{node_id}'))
 
-    service.update_frame(TASK_ID, 'node:b', lambda frame: {**frame, 'stage_goal': 'changed'}, publish_snapshot=True)
+    service.update_frame(TASK_ID, 'node:b', lambda frame: {**frame, 'await_marker': 'changed'}, publish_snapshot=True)
 
     assert len(envelopes) == 1
     data = dict(envelopes[0].get('data') or {})
@@ -212,7 +211,7 @@ def test_existing_node_update_publishes_delta_without_frames(tmp_path: Path) -> 
     assert summary.get('frames_partial') is True
     assert 'frames' not in summary
     assert (data.get('frame') or {}).get('node_id') == 'node:b'
-    assert (data.get('frame') or {}).get('stage_goal') == 'changed'
+    assert (data.get('frame') or {}).get('await_marker') == 'changed'
     # active 由"有 node_id 就是活跃帧"决定（runnable 取决于 phase 集合），这里只验名单在
     assert sorted(summary.get('active_node_ids') or []) == ['node:a', 'node:b', 'node:c']
 
