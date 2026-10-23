@@ -160,7 +160,7 @@ def test_node_error_bundle_marks_runtime_fault_class() -> None:
         events=[{
             "reason": "task_node_error", "task_id": "task:t", "node_id": "node:n",
             "pause_reason": "error",
-            "error_text": "runtime_fault:submit_next_stage:NameError: name '_X' is not defined",
+            "error_text": "runtime_fault:filesystem_stat:NameError: name '_X' is not defined",
             "retry_attempt": 1, "retry_cap": 5, "retry_escalated": False,
         }],
     )
@@ -467,7 +467,7 @@ def test_failure_class_line_carries_no_action_sentences() -> None:
         assert "处置见 Error 正文" in line or "成因见 Error 正文" in line, line
         for banned in ("resume", "无效", "重启", "请先", "必须", "建议"):
             assert banned not in line, f"{marker} → {line}"
-    assert "重启 worker" in _runtime_fault_class("runtime_fault:submit_next_stage:NameError: x")
+    assert "重启 worker" in _runtime_fault_class("runtime_fault:filesystem_stat:NameError: x")
 
 
 def test_shutdown_resume_wake_does_not_render_as_a_completed_task() -> None:

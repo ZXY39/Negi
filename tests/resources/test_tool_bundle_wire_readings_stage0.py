@@ -159,7 +159,6 @@ def test_frontdoor_renderer_counts_schema_sources_with_denominator() -> None:
         "session_key": "web:renderer-counts",
         "rbac_visible_tool_names": [],
         "messages": [],
-        "frontdoor_stage_state": {},
     }
 
     rendered = runner._frontdoor_tool_schemas_for_state(

@@ -70,7 +70,7 @@ def _node(task_id: str, node_id: str) -> SimpleNamespace:
 
 def _tool_schema_selection() -> dict:
     return {
-        "tool_names": ["submit_next_stage"],
+        "tool_names": ["filesystem_stat"],
         "candidate_tool_names": [],
         "lightweight_tool_ids": [],
         "trace": {},

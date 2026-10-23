@@ -153,15 +153,8 @@ class _FakeLiveSession:
         self.state = SimpleNamespace(status="idle", is_running=False)
         self._listeners = set()
         self._final_trace = {
-            "active_stage_id": "",
-            "transition_required": False,
             "stages": [
                 {
-                    "stage_id": "frontdoor-stage-1",
-                    "stage_index": 1,
-                    "stage_goal": "install the requested skill",
-                    "tool_round_budget": 5,
-                    "tool_rounds_used": 1,
                     "status": "completed",
                     "rounds": [
                         {
@@ -335,21 +328,10 @@ class _FakeHeartbeatFinalSession(_FakeHeartbeatSession):
             "user_message": {"content": "Install the skill"},
             "assistant_text": "Still working on it...",
             "execution_trace_summary": {
-                "active_stage_id": "inflight-stage-1",
-                "transition_required": False,
                 "stages": [
                     {
-                        "stage_id": "inflight-stage-1",
-                        "stage_index": 1,
-                        "stage_goal": "",
-                        "tool_round_budget": 0,
-                        "tool_rounds_used": 1,
                         "status": "active",
                         "mode": "自主执行",
-                        "stage_kind": "normal",
-                        "system_generated": True,
-                        "completed_stage_summary": "",
-                        "key_refs": [],
                         "archive_ref": "",
                         "archive_stage_index_start": 0,
                         "archive_stage_index_end": 0,
@@ -479,21 +461,10 @@ def _sample_frontdoor_turns() -> list[dict[str, object]]:
 
 def _sample_frontdoor_stage_state() -> dict[str, object]:
     return {
-        "active_stage_id": "frontdoor-stage-1",
-        "transition_required": False,
         "stages": [
             {
-                "stage_id": "frontdoor-stage-1",
-                "stage_index": 1,
-                "stage_goal": "inspect repository",
-                "tool_round_budget": 3,
-                "tool_rounds_used": 1,
                 "status": "active",
                 "mode": "自主执行",
-                "stage_kind": "normal",
-                "system_generated": False,
-                "completed_stage_summary": "",
-                "key_refs": [],
                 "archive_ref": "",
                 "archive_stage_index_start": 0,
                 "archive_stage_index_end": 0,
@@ -1971,7 +1942,6 @@ def test_web_ceo_continuity_snapshot_round_trip_and_clear(tmp_path: Path, monkey
         "frontdoor_history_shrink_reason": "",
         "frontdoor_actual_request_path": str(request_path),
         "frontdoor_actual_request_history": [{"path": str(request_path), "turn_id": "turn-1"}],
-        "frontdoor_stage_state": {"active_stage_id": "", "transition_required": False, "stages": []},
         "frontdoor_canonical_context": {"active_stage_id": "", "transition_required": False, "stages": []},
         "compression_state": {"status": "ready", "text": "ok", "source": "semantic"},
         "semantic_context_state": {"summary_text": "summary", "needs_refresh": False},
@@ -2020,7 +1990,6 @@ def test_web_ceo_continuity_snapshot_strips_multimodal_blocks_from_frontdoor_req
             "frontdoor_history_shrink_reason": "",
             "frontdoor_actual_request_path": str(request_path),
             "frontdoor_actual_request_history": [{"path": str(request_path), "turn_id": "turn-1"}],
-            "frontdoor_stage_state": {"active_stage_id": "", "transition_required": False, "stages": []},
             "frontdoor_canonical_context": {"active_stage_id": "", "transition_required": False, "stages": []},
             "compression_state": {},
             "semantic_context_state": {},
@@ -2051,7 +2020,6 @@ def test_completed_continuity_snapshot_round_trips_token_preflight_diagnostics(t
         "frontdoor_history_shrink_reason": "token_compression",
         "frontdoor_actual_request_path": str(request_path),
         "frontdoor_actual_request_history": [{"path": str(request_path), "turn_id": "turn-1"}],
-        "frontdoor_stage_state": {"active_stage_id": "", "transition_required": False, "stages": []},
         "frontdoor_canonical_context": {"active_stage_id": "", "transition_required": False, "stages": []},
         "compression_state": {"status": "ready", "text": "ok", "source": "semantic"},
         "semantic_context_state": {"summary_text": "summary", "needs_refresh": False},
@@ -2094,7 +2062,6 @@ def test_clear_web_ceo_session_artifacts_clears_completed_continuity_snapshot(
             "frontdoor_history_shrink_reason": "",
             "frontdoor_actual_request_path": str(request_path),
             "frontdoor_actual_request_history": [{"path": str(request_path), "turn_id": "turn-1"}],
-            "frontdoor_stage_state": {"active_stage_id": "", "transition_required": False, "stages": []},
             "frontdoor_canonical_context": {"active_stage_id": "", "transition_required": False, "stages": []},
             "compression_state": {},
             "semantic_context_state": {},
@@ -2140,7 +2107,6 @@ def test_runtime_agent_session_restores_completed_continuity_snapshot_from_disk(
             "frontdoor_history_shrink_reason": "token_compression",
             "frontdoor_actual_request_path": record["path"],
             "frontdoor_actual_request_history": [record],
-            "frontdoor_stage_state": {"active_stage_id": "stage-1", "transition_required": False, "stages": []},
             "frontdoor_canonical_context": {"active_stage_id": "", "transition_required": False, "stages": []},
             "compression_state": {"status": "ready", "text": "ok", "source": "semantic"},
             "semantic_context_state": {"summary_text": "summary", "needs_refresh": False},
@@ -4807,21 +4773,10 @@ def test_ceo_websocket_turn_patch_carries_live_execution_trace_summary(tmp_path:
             }
             await self._emit("state_snapshot", state=self.state_dict())
             self._snapshot["execution_trace_summary"] = {
-                "active_stage_id": "inflight-stage-1",
-                "transition_required": False,
                 "stages": [
                     {
-                        "stage_id": "inflight-stage-1",
-                        "stage_index": 1,
-                        "stage_goal": "",
-                        "tool_round_budget": 0,
-                        "tool_rounds_used": 1,
                         "status": "active",
                         "mode": "自主执行",
-                        "stage_kind": "normal",
-                        "system_generated": True,
-                        "completed_stage_summary": "",
-                        "key_refs": [],
                         "archive_ref": "",
                         "archive_stage_index_start": 0,
                         "archive_stage_index_end": 0,
@@ -7005,14 +6960,8 @@ async def test_web_session_heartbeat_handled_terminal_keys_normalized(tmp_path: 
 
 def _stage(stage_id: str, stage_index: int, *, summary: str) -> dict:
     return {
-        "stage_id": stage_id,
-        "stage_index": stage_index,
         "status": "completed",
-        "stage_kind": "normal",
         "mode": "自主执行",
-        "system_generated": False,
-        "stage_goal": "",
-        "completed_stage_summary": summary,
         "rounds": [],
     }
 
@@ -7027,9 +6976,6 @@ async def test_web_session_heartbeat_full_run_publishes_final_without_canonical_
     session_manager = SessionManager(tmp_path)
     persisted = session_manager.get_or_create(session_id)
     current_context = {
-        "active_stage_id": "",
-        "transition_required": False,
-        "stages": [_stage("frontdoor-stage-1", 1, summary="已汇报")],
     }
     persisted.add_message("assistant", "此前回复", turn_id="turn-previous-phase")
     persisted.messages[-1]["canonical_context"] = copy.deepcopy(current_context)

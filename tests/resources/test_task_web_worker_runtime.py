@@ -6259,9 +6259,6 @@ def test_get_node_detail_payload_summary_mode_rebuilds_flattened_execution_trace
     legacy_summary = {
         "stages": [
             {
-                "stage_goal": "inspect repository structure",
-                "tool_round_budget": 6,
-                "tool_rounds_used": 1,
                 "tool_calls": [
                     {
                         "tool_call_id": "call:1",

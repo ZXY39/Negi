@@ -79,13 +79,12 @@ def _internal_turn_state() -> dict:
         "session_key": "web:shared",
         "heartbeat_internal": True,
         # 声明面：外部轮钉住的那份，跨车道原样继承
-        "provider_tool_names": ["exec", "web_fetch", "filesystem_write", "submit_next_stage"],
-        "tool_names": ["exec", "web_fetch", "filesystem_write", "submit_next_stage"],
+        "provider_tool_names": ["exec", "web_fetch", "filesystem_write", "filesystem_stat"],
+        "tool_names": ["exec", "web_fetch", "filesystem_write", "filesystem_stat"],
         # 治理可见集：当轮只授权了这三个（web_fetch 被收回）
-        "rbac_visible_tool_names": ["exec", "filesystem_write", "submit_next_stage"],
+        "rbac_visible_tool_names": ["exec", "filesystem_write", "filesystem_stat"],
         "hydrated_tool_names": [],
         "messages": [],
-        "frontdoor_stage_state": {},
     }
 
 
@@ -97,7 +96,7 @@ def test_internal_turn_keeps_frozen_declaration_and_narrows_dispatch() -> None:
 
     dispatch = ops._frontdoor_dispatch_tool_names(state)
 
-    assert dispatch == ["exec", "filesystem_write", "submit_next_stage"]
+    assert dispatch == ["exec", "filesystem_write", "filesystem_stat"]
     assert "web_fetch" not in dispatch
     # 声明面一个名字没少：tools[] 的字节不因这一跳的权限收窄而变
     assert state["provider_tool_names"] == frozen_declaration

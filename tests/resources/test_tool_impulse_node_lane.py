@@ -202,8 +202,8 @@ async def test_fixed_builtin_is_never_treated_as_impulsive(tmp_path: Path) -> No
     context['current_tool_call_id'] = 'call-silent'
 
     content = await loop._execute_tool_raw(
-        tools={'submit_next_stage': object()},
-        tool_name='submit_next_stage',
+        tools={'filesystem_stat': object()},
+        tool_name='filesystem_stat',
         arguments={},
         runtime_context=context,
     )

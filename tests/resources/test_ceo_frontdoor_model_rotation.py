@@ -153,7 +153,6 @@ async def test_graph_call_model_rotates_stale_model_refs_before_send(
         "rbac_visible_skill_ids": [],
         "turn_overlay_text": "",
         "repair_overlay_text": None,
-        "frontdoor_stage_state": {"active_stage_id": "", "transition_required": False, "stages": []},
         "frontdoor_history_shrink_reason": "",
         "frontdoor_token_preflight_diagnostics": {},
     }

@@ -540,9 +540,9 @@ def test_frontdoor_fresh_turn_seed_with_stale_note_keeps_real_prefix() -> None:
                 {"role": "assistant", "content": "old retrieved"},
                 {"role": "assistant", "content": "", "tool_calls": [{
                     "id": "call-1", "type": "function",
-                    "function": {"name": "submit_next_stage", "arguments": "{}"},
+                    "function": {"name": "filesystem_stat", "arguments": "{}"},
                 }]},
-                {"role": "tool", "name": "submit_next_stage", "tool_call_id": "call-1", "content": '{"status":"success"}'},
+                {"role": "tool", "name": "filesystem_stat", "tool_call_id": "call-1", "content": '{"status":"success"}'},
                 _note("stale-seed-note"),
                 _contract("stale-seed-contract"),
             ]
@@ -556,9 +556,9 @@ def test_frontdoor_fresh_turn_seed_with_stale_note_keeps_real_prefix() -> None:
                 {"role": "assistant", "content": "old retrieved"},
                 {"role": "assistant", "content": "", "tool_calls": [{
                     "id": "call-1", "type": "function",
-                    "function": {"name": "submit_next_stage", "arguments": "{}"},
+                    "function": {"name": "filesystem_stat", "arguments": "{}"},
                 }]},
-                {"role": "tool", "name": "submit_next_stage", "tool_call_id": "call-1", "content": '{"status":"success"}'},
+                {"role": "tool", "name": "filesystem_stat", "tool_call_id": "call-1", "content": '{"status":"success"}'},
                 _note("stale-seed-note"),
                 _contract("stale-seed-contract"),
             ]
@@ -583,9 +583,9 @@ def test_frontdoor_fresh_turn_seed_with_stale_note_keeps_real_prefix() -> None:
                 {"role": "assistant", "content": "old retrieved"},
                 {"role": "assistant", "content": "", "tool_calls": [{
                     "id": "call-1", "type": "function",
-                    "function": {"name": "submit_next_stage", "arguments": "{}"},
+                    "function": {"name": "filesystem_stat", "arguments": "{}"},
                 }]},
-                {"role": "tool", "name": "submit_next_stage", "tool_call_id": "call-1", "content": '{"status":"success"}'},
+                {"role": "tool", "name": "filesystem_stat", "tool_call_id": "call-1", "content": '{"status":"success"}'},
                 {"role": "assistant", "content": "final answer"},
             ],
             live_request_messages=[
@@ -594,9 +594,9 @@ def test_frontdoor_fresh_turn_seed_with_stale_note_keeps_real_prefix() -> None:
                 {"role": "assistant", "content": "old retrieved"},
                 {"role": "assistant", "content": "", "tool_calls": [{
                     "id": "call-1", "type": "function",
-                    "function": {"name": "submit_next_stage", "arguments": "{}"},
+                    "function": {"name": "filesystem_stat", "arguments": "{}"},
                 }]},
-                {"role": "tool", "name": "submit_next_stage", "tool_call_id": "call-1", "content": '{"status":"success"}'},
+                {"role": "tool", "name": "filesystem_stat", "tool_call_id": "call-1", "content": '{"status":"success"}'},
                 {"role": "assistant", "content": "final answer"},
                 {"role": "user", "content": "next user"},
             ],

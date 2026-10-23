@@ -26,7 +26,6 @@ def _payload(baseline: list[dict] | None = None) -> dict:
     return {
         "frontdoor_request_body_messages": baseline if baseline is not None else [{"role": "user", "content": "hi"}],
         "frontdoor_history_shrink_reason": "user_edit_truncation",
-        "frontdoor_stage_state": {"stages": []},
         "frontdoor_canonical_context": {"stages": []},
         "source_reason": "finalize",
     }

@@ -592,23 +592,12 @@ def _grafting_orphan_round() -> dict[str, object]:
 def _near_exhaustion_stage_state() -> dict[str, object]:
     """frontdoor-stage-1: 预算 2 已用 1，本轮就是最后一条合法轮。"""
     return {
-        "active_stage_id": "frontdoor-stage-1",
-        "transition_required": False,
         "stages": [
             {
-                "stage_id": "frontdoor-stage-1",
-                "stage_index": 1,
-                "stage_goal": "work",
                 "preamble_text": "",
-                "tool_round_budget": 2,
-                "tool_rounds_used": 1,
                 "status": "active",
                 "mode": "自主执行",
-                "stage_kind": "normal",
-                "system_generated": False,
-                "completed_stage_summary": "",
                 "final_stage": False,
-                "key_refs": [],
                 "rounds": [
                     {
                         "round_id": "frontdoor-stage-1:round-1",

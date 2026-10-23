@@ -2706,7 +2706,6 @@ async def test_delivered_mailbox_message_is_appended_at_next_safe_boundary(tmp_p
                 "node_kind": root.node_kind,
                 "phase": "before_model",
                 "stage_status": "active",
-                "stage_goal": "old stage",
                 "messages": [
                     {"role": "system", "content": "system seed"},
                     {"role": "user", "content": "historic request"},
@@ -3008,9 +3007,8 @@ async def test_root_distribution_message_is_consumed_into_append_notice_context_
                 "node_kind": root.node_kind,
                 "phase": "before_model",
                 "stage_status": "active",
-                "stage_goal": "old stage",
                 "callable_tool_names": [
-                    "submit_next_stage",
+                    "filesystem_stat",
                     "submit_final_result",
                     "spawn_child_nodes",
                     "content_describe",
@@ -3021,7 +3019,7 @@ async def test_root_distribution_message_is_consumed_into_append_notice_context_
                     "load_tool_context",
                 ],
                 "provider_tool_names": [
-                    "submit_next_stage",
+                    "filesystem_stat",
                     "submit_final_result",
                     "spawn_child_nodes",
                     "content_describe",
@@ -3179,9 +3177,8 @@ async def test_root_distribution_message_is_consumed_immediately_after_first_mod
                 "node_kind": root.node_kind,
                 "phase": "before_model",
                 "stage_status": "active",
-                "stage_goal": "old stage",
                 "callable_tool_names": [
-                    "submit_next_stage",
+                    "filesystem_stat",
                     "submit_final_result",
                     "spawn_child_nodes",
                     "content_describe",
@@ -3192,7 +3189,7 @@ async def test_root_distribution_message_is_consumed_immediately_after_first_mod
                     "load_tool_context",
                 ],
                 "provider_tool_names": [
-                    "submit_next_stage",
+                    "filesystem_stat",
                     "submit_final_result",
                     "spawn_child_nodes",
                     "content_describe",

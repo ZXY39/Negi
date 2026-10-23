@@ -230,7 +230,7 @@ def test_model_echo_of_contract_heading_with_tool_calls_is_not_a_contract_messag
         "content": (
             "## Runtime Tool Contract\n"
             "kind: node_runtime_tool_contract\n"
-            "callable_tools: `submit_next_stage`\n"
+            "callable_tools: `filesystem_stat`\n"
             "已确认的核心事实（多源交叉）：事件经多轮检索交叉确认。"
         ),
         "tool_calls": [
@@ -238,7 +238,7 @@ def test_model_echo_of_contract_heading_with_tool_calls_is_not_a_contract_messag
                 "id": "call_c14c83473e364be98ad08c16",
                 "type": "function",
                 "function": {
-                    "name": "submit_next_stage",
+                    "name": "filesystem_stat",
                     "arguments": json.dumps({"stage_goal": "核验通报原文", "tool_round_budget": 10}, ensure_ascii=False),
                 },
             }
@@ -253,14 +253,14 @@ def test_model_echo_of_contract_heading_with_tool_calls_is_not_a_contract_messag
     json_echo_turn = {
         "role": "assistant",
         "content": json.dumps(
-            {"message_type": NODE_DYNAMIC_CONTRACT_KIND, "callable_tool_names": ["submit_next_stage"]},
+            {"message_type": NODE_DYNAMIC_CONTRACT_KIND, "callable_tool_names": ["filesystem_stat"]},
             ensure_ascii=False,
         ),
         "tool_calls": [
             {
                 "id": "call_json_echo",
                 "type": "function",
-                "function": {"name": "submit_next_stage", "arguments": "{}"},
+                "function": {"name": "filesystem_stat", "arguments": "{}"},
             }
         ],
     }
@@ -271,14 +271,14 @@ def test_model_echo_of_contract_heading_with_tool_calls_is_not_a_contract_messag
     # 两种角色都识别（旧 frame / seed 重建里仍可能有 assistant 残留）。
     real_contract = {
         "role": "assistant",
-        "content": "## Runtime Tool Contract\nkind: node_runtime_tool_contract\ncallable_tools: `submit_next_stage`",
+        "content": "## Runtime Tool Contract\nkind: node_runtime_tool_contract\ncallable_tools: `filesystem_stat`",
     }
     assert is_node_dynamic_contract_message(real_contract) is True
     assert strip_node_dynamic_contract_messages([real_contract]) == []
 
     system_contract = {
         "role": "system",
-        "content": "## Runtime Tool Contract\nkind: node_runtime_tool_contract\ncallable_tools: `submit_next_stage`",
+        "content": "## Runtime Tool Contract\nkind: node_runtime_tool_contract\ncallable_tools: `filesystem_stat`",
     }
     assert is_node_dynamic_contract_message(system_contract) is True
     assert strip_node_dynamic_contract_messages([system_contract]) == []

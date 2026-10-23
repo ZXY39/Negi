@@ -214,7 +214,6 @@ def _make_runner_state(monkeypatch: pytest.MonkeyPatch, runner: CreateAgentCeoFr
         "rbac_visible_skill_ids": [],
         "turn_overlay_text": "",
         "repair_overlay_text": None,
-        "frontdoor_stage_state": {"active_stage_id": "", "transition_required": False, "stages": []},
         "frontdoor_history_shrink_reason": "",
         "frontdoor_token_preflight_diagnostics": {},
     }

@@ -50,7 +50,7 @@ def _item(skill_id: str) -> dict[str, str]:
 def _frontdoor_runner(live_skills: list[dict[str, str]]):
     service = SimpleNamespace(
         list_contract_visible_skill_resources=lambda *, actor_role, session_id: list(live_skills),
-        list_effective_tool_names=lambda *, actor_role, session_id: ["exec", "submit_next_stage"],
+        list_effective_tool_names=lambda *, actor_role, session_id: ["exec", "filesystem_stat"],
         _current_exec_runtime_policy_payload=lambda: {},
     )
     return create_agent_impl.CreateAgentCeoFrontDoorRunner(loop=SimpleNamespace(main_task_service=service))
@@ -185,7 +185,7 @@ def test_tail_contract_blocks_no_longer_render_the_roster_line() -> None:
         node=_node(),
         message_history=[{"role": "system", "content": "node system"}],
         tool_schema_selection={
-            "tool_names": ["submit_next_stage"],
+            "tool_names": ["filesystem_stat"],
             "candidate_tool_names": [],
             "lightweight_tool_ids": [],
             "trace": {},
@@ -499,7 +499,7 @@ def test_frontdoor_delivery_publishes_one_internal_row_event() -> None:
 
     service = SimpleNamespace(
         list_contract_visible_skill_resources=lambda *, actor_role, session_id: [_item("alpha"), _item("beta")],
-        list_effective_tool_names=lambda *, actor_role, session_id: ["exec", "submit_next_stage"],
+        list_effective_tool_names=lambda *, actor_role, session_id: ["exec", "filesystem_stat"],
         _current_exec_runtime_policy_payload=lambda: {},
         registry=_Registry(),
     )

@@ -33,20 +33,10 @@ from main.runtime.internal_tools import SilentTool
 from main.runtime.tool_names import SILENT_TOOL_NAME
 
 _STAGE_STATE = {
-    "active_stage_id": "frontdoor-stage-1",
-    "transition_required": False,
     "stages": [
         {
-            "stage_id": "frontdoor-stage-1",
-            "stage_index": 1,
-            "stage_goal": "verify",
-            "tool_round_budget": 3,
-            "tool_rounds_used": 0,
             "status": "active",
             "mode": "自主执行",
-            "stage_kind": "normal",
-            "completed_stage_summary": "",
-            "key_refs": [],
             "rounds": [],
         }
     ],
@@ -117,7 +107,6 @@ async def _execute_tools(monkeypatch, *, payloads, response_content=""):
         "max_parallel_tool_calls": 4,
         "synthetic_tool_calls_used": False,
         "response_payload": {"content": response_content, "tool_calls": []},
-        "frontdoor_stage_state": json.loads(json.dumps(_STAGE_STATE)),
     }
     result = await runner._graph_execute_tools(state, runtime=SimpleNamespace(context=SimpleNamespace()))
     return result, executed
@@ -178,7 +167,6 @@ async def test_finalize_carries_the_tool_signal_and_does_not_duplicate_the_text(
                 {"role": "tool", "tool_call_id": "c1", "content": '{"silenced": true}'},
             ],
             "frontdoor_request_body_messages": [],
-            "frontdoor_stage_state": json.loads(json.dumps(_STAGE_STATE)),
             "heartbeat_internal": True,
         }
     )
@@ -207,7 +195,6 @@ async def test_legacy_text_sentinel_no_longer_silences_but_is_scrubbed() -> None
             "route_kind": "direct_reply",
             "messages": [{"role": "user", "content": "x"}],
             "frontdoor_request_body_messages": [],
-            "frontdoor_stage_state": json.loads(json.dumps(_STAGE_STATE)),
             "heartbeat_internal": True,
         }
     )
@@ -228,7 +215,6 @@ async def test_sentinel_wording_inside_a_sentence_is_left_alone() -> None:
             "route_kind": "direct_reply",
             "messages": [{"role": "user", "content": "x"}],
             "frontdoor_request_body_messages": [],
-            "frontdoor_stage_state": json.loads(json.dumps(_STAGE_STATE)),
         }
     )
     result = await runner._graph_finalize_turn(state)
@@ -255,7 +241,6 @@ async def _finalize(output: str, **overrides) -> dict:
             "route_kind": "direct_reply",
             "messages": [{"role": "user", "content": "x"}],
             "frontdoor_request_body_messages": [],
-            "frontdoor_stage_state": json.loads(json.dumps(_STAGE_STATE)),
             **overrides,
         }
     )
@@ -334,16 +319,10 @@ def _assistant_with_calls(call_id: str, name: str, *, content: str = "") -> dict
 
 def _stage(index: int, *, tool_call_ids: list[str] | None = None) -> dict:
     stage = {
-        "stage_id": f"frontdoor-stage-{index}",
-        "stage_index": index,
-        "stage_goal": f"目标 {index}",
         "status": "completed",
-        "stage_kind": "normal",
         "mode": "自主执行",
-        "completed_stage_summary": f"结论 {index}",
         "created_at": f"2026-09-20T0{index}:00:00+08:00",
         "finished_at": f"2026-09-20T0{index}:00:30+08:00",
-        "key_refs": [],
         "rounds": [],
     }
     if tool_call_ids:

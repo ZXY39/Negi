@@ -46,7 +46,7 @@ class _Tool:
 
 def _synthetic_control_tools() -> dict[str, _Tool]:
     return {
-        'submit_next_stage': _Tool('submit_next_stage', 'start the next stage'),
+        'filesystem_stat': _Tool('filesystem_stat', 'start the next stage'),
         'silent': _Tool('silent', 'reply with nothing'),
     }
 
@@ -202,7 +202,7 @@ def _isolate_bundle_stores(tmp_path, monkeypatch):
 async def test_frontdoor_record_face_and_wire_are_the_same_array(monkeypatch) -> None:
     """G4：工件收到的 `tool_schemas` 与 provider 收到的那份必须逐条相等。
 
-    偏差的形状是记录面比 wire 少 `submit_next_stage` / `silent` 两颗（预检另渲的那份不含它们），
+    偏差的形状是记录面比 wire 少 `filesystem_stat` / `silent` 两颗（预检另渲的那份不含它们），
     所以这条同时是 N5 的回归守卫：wire 里少了任何一颗阶段工具都是功能回归，不只是缓存事件。
     """
     runner, runtime, captured, state = await _make_lane({name: _Tool(name) for name in _TASK_TOOLS}, monkeypatch)

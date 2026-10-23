@@ -493,10 +493,8 @@ def test_sanitize_provider_messages_normalizes_internal_tool_call_shape() -> Non
                 "tool_calls": [
                     {
                         "id": "call-1",
-                        "name": "submit_next_stage",
+                        "name": "filesystem_stat",
                         "args": {
-                            "stage_goal": "create markdown file",
-                            "tool_round_budget": 5,
                         },
                         "type": "tool_call",
                     }
@@ -514,10 +512,8 @@ def test_sanitize_provider_messages_normalizes_internal_tool_call_shape() -> Non
                     "id": "call-1",
                     "type": "function",
                     "function": {
-                        "name": "submit_next_stage",
+                        "name": "filesystem_stat",
                         "arguments": {
-                            "stage_goal": "create markdown file",
-                            "tool_round_budget": 5,
                         },
                     },
                 }

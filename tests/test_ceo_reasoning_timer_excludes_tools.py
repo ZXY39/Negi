@@ -174,7 +174,7 @@ def test_frontdoor_closes_reasoning_segment_when_the_model_call_returns(
         monkeypatch.setattr(
             runner,
             "_selected_tool_schemas",
-            lambda tool_names: [{"name": "submit_next_stage", "description": "", "parameters": {"type": "object"}}],
+            lambda tool_names: [{"name": "filesystem_stat", "description": "", "parameters": {"type": "object"}}],
         )
         monkeypatch.setattr(web_ceo_sessions, "workspace_path", lambda: tmp_path)
         monkeypatch.setattr(
@@ -211,8 +211,7 @@ def test_frontdoor_closes_reasoning_segment_when_the_model_call_returns(
                 "stable_messages": [{"role": "user", "content": "hello"}],
                 "dynamic_appendix_messages": [],
                 "user_input": {"content": "hello", "metadata": {}},
-                "tool_names": ["submit_next_stage"],
-                "frontdoor_stage_state": {"active_stage_id": "", "transition_required": False, "stages": []},
+                "tool_names": ["filesystem_stat"],
                 "model_refs": ["openai:test"],
                 "parallel_enabled": False,
                 "iteration": 0,

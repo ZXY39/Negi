@@ -24,14 +24,14 @@ def test_selector_keeps_only_internal_protocol_and_fixed_builtin_tools_callable(
             _tool_record("exec"),
         ],
         visible_tool_names=[
-            "submit_next_stage",
+            "filesystem_stat",
             "submit_final_result",
             "spawn_child_nodes",
             "exec",
             "filesystem_write",
         ],
         always_callable_tool_names=[
-            "submit_next_stage",
+            "filesystem_stat",
             "submit_final_result",
             "spawn_child_nodes",
             "exec",
@@ -39,7 +39,7 @@ def test_selector_keeps_only_internal_protocol_and_fixed_builtin_tools_callable(
     )
 
     assert result.callable_tool_names == [
-        "submit_next_stage",
+        "filesystem_stat",
         "submit_final_result",
         "spawn_child_nodes",
         "exec",
@@ -59,7 +59,7 @@ def test_selector_keeps_contract_absent_tools_out_of_callable() -> None:
             _tool_record("web_fetch"),
         ],
         visible_tool_names=[
-            "submit_next_stage",
+            "filesystem_stat",
             "submit_final_result",
             "spawn_child_nodes",
             "filesystem_write",
@@ -68,14 +68,14 @@ def test_selector_keeps_contract_absent_tools_out_of_callable() -> None:
             "web_fetch",
         ],
         always_callable_tool_names=[
-            "submit_next_stage",
+            "filesystem_stat",
             "submit_final_result",
             "spawn_child_nodes",
         ],
     )
 
     assert result.callable_tool_names == [
-        "submit_next_stage",
+        "filesystem_stat",
         "submit_final_result",
         "spawn_child_nodes",
     ]
@@ -98,7 +98,7 @@ def test_selector_contract_present_tools_are_callable() -> None:
             _tool_record("memory_note"),
         ],
         visible_tool_names=[
-            "submit_next_stage",
+            "filesystem_stat",
             "submit_final_result",
             "spawn_child_nodes",
             "filesystem_propose_patch",
@@ -106,7 +106,7 @@ def test_selector_contract_present_tools_are_callable() -> None:
             "memory_note",
         ],
         always_callable_tool_names=[
-            "submit_next_stage",
+            "filesystem_stat",
             "submit_final_result",
             "spawn_child_nodes",
         ],
@@ -114,7 +114,7 @@ def test_selector_contract_present_tools_are_callable() -> None:
     )
 
     assert result.callable_tool_names == [
-        "submit_next_stage",
+        "filesystem_stat",
         "submit_final_result",
         "spawn_child_nodes",
         "filesystem_propose_patch",
@@ -149,14 +149,14 @@ def test_selector_accepts_runtime_helper_dict_shape_tools() -> None:
             },
         ],
         visible_tool_names=[
-            "submit_next_stage",
+            "filesystem_stat",
             "submit_final_result",
             "spawn_child_nodes",
             "exec",
             "filesystem_write",
         ],
         always_callable_tool_names=[
-            "submit_next_stage",
+            "filesystem_stat",
             "submit_final_result",
             "spawn_child_nodes",
             "exec",
@@ -165,7 +165,7 @@ def test_selector_accepts_runtime_helper_dict_shape_tools() -> None:
 
     assert result.lightweight_tool_ids == ["filesystem_write", "exec"]
     assert result.callable_tool_names == [
-        "submit_next_stage",
+        "filesystem_stat",
         "submit_final_result",
         "spawn_child_nodes",
         "exec",

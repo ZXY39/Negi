@@ -30,7 +30,6 @@ def test_frontdoor_no_longer_uses_summary_text_overlay() -> None:
         state={
             "summary_text": "obsolete summary overlay",
             "turn_overlay_text": "stage overlay",
-            "frontdoor_stage_state": {"active_stage_id": "", "transition_required": False, "stages": []},
         },
         runtime=None,
         tools=[],

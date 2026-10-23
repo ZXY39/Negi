@@ -177,7 +177,6 @@ def test_stage_ledger_entry_is_not_a_presence_carrier() -> None:
     只认块字节。
     """
     legacy_stage = {
-        "stage_id": "frontdoor-stage-1",
         "kept_tool_contexts": [{"tool_id": TOOL_ID, "tool_context_fingerprint": FINGERPRINT, "body": BODY}],
     }
     assert contract_presence(TOOL_ID, request_messages=[legacy_stage])[0] is False

@@ -47,7 +47,7 @@ def _runner(tools: dict[str, _Tool], *, declared: dict[str, _Tool] | None = None
     # 生产里 `declared_tools` 一定含两颗合成控制工具（`_frontdoor_execution_bundle` 现场加），
     # 替身不给就会让它们掉进占位档——那正是 N5 警告过的形状，别用它当常态。
     control = {
-        'submit_next_stage': _Tool('submit_next_stage', 'start the next stage'),
+        'filesystem_stat': _Tool('filesystem_stat', 'start the next stage'),
         'silent': _Tool('silent', 'reply with nothing'),
     }
     runner._frontdoor_execution_bundle = lambda **kwargs: SimpleNamespace(
@@ -188,7 +188,7 @@ def test_denied_tools_names_a_pinned_placeholder_name() -> None:
     占位），所以"这一跳在 `tools[]` 里"对名单里的每个名字恒真。
     """
     runner = _runner({'alpha': _Tool('alpha')})
-    runner._frontdoor_live_granted_tool_names = lambda session_key: ['alpha', 'submit_next_stage', 'silent']
+    runner._frontdoor_live_granted_tool_names = lambda session_key: ['alpha', 'filesystem_stat', 'silent']
     state = {
         'provider_tool_names': ['alpha', 'ghost'],
         'session_key': 'web:denied-line',

@@ -83,12 +83,8 @@ def test_already_projected_records_do_not_repeatedly_force_rewrite(tmp_path) -> 
     manager = SessionManager(tmp_path)
     session = manager.get_or_create("web:test")
     stage = {
-        "stage_id": "frontdoor-stage-1",
-        "stage_index": 1,
         "status": "completed",
-        "stage_kind": "normal",
         "created_at": "2026-09-01T00:00:00+08:00",
-        "completed_stage_summary": "done",
         "representation": "raw",
         "rounds": [
             {

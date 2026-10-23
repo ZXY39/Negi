@@ -23,7 +23,7 @@ async def test_first_frontdoor_request_records_inbound_to_send_latency(
     monkeypatch.setattr(
         runner,
         "_selected_tool_schemas",
-        lambda tool_names: [{"name": "submit_next_stage", "description": "", "parameters": {"type": "object"}}],
+        lambda tool_names: [{"name": "filesystem_stat", "description": "", "parameters": {"type": "object"}}],
     )
     monkeypatch.setattr(web_ceo_sessions, "workspace_path", lambda: tmp_path)
     monkeypatch.setattr(
@@ -62,8 +62,7 @@ async def test_first_frontdoor_request_records_inbound_to_send_latency(
                 "content": "hello",
                 "metadata": {"turn_inbound_received_at": inbound_at.isoformat()},
             },
-            "tool_names": ["submit_next_stage"],
-            "frontdoor_stage_state": {"active_stage_id": "", "transition_required": False, "stages": []},
+            "tool_names": ["filesystem_stat"],
             "model_refs": ["openai:test"],
             "parallel_enabled": False,
             "iteration": 0,
@@ -97,7 +96,7 @@ async def test_request_timing_is_null_without_inbound_metadata(
     monkeypatch.setattr(
         runner,
         "_selected_tool_schemas",
-        lambda tool_names: [{"name": "submit_next_stage", "description": "", "parameters": {"type": "object"}}],
+        lambda tool_names: [{"name": "filesystem_stat", "description": "", "parameters": {"type": "object"}}],
     )
     monkeypatch.setattr(web_ceo_sessions, "workspace_path", lambda: tmp_path)
     monkeypatch.setattr(
@@ -127,8 +126,7 @@ async def test_request_timing_is_null_without_inbound_metadata(
             "messages": [{"role": "user", "content": "hello"}],
             "stable_messages": [{"role": "user", "content": "hello"}],
             "dynamic_appendix_messages": [],
-            "tool_names": ["submit_next_stage"],
-            "frontdoor_stage_state": {"active_stage_id": "", "transition_required": False, "stages": []},
+            "tool_names": ["filesystem_stat"],
             "model_refs": ["openai:test"],
             "parallel_enabled": False,
             "iteration": 0,

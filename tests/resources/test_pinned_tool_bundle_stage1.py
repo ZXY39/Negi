@@ -45,7 +45,6 @@ def _state(session_key: str, names: list[str]) -> dict:
         "hydrated_tool_names": [],
         "rbac_visible_tool_names": [],
         "messages": [],
-        "frontdoor_stage_state": {},
     }
 
 

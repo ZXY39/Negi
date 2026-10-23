@@ -305,7 +305,7 @@ def test_frontdoor_prompt_contract_keeps_same_turn_contract_history_append_only(
     from g3ku.runtime.frontdoor.prompt_cache_contract import build_frontdoor_prompt_contract
 
     contract_message = build_frontdoor_tool_contract(
-        callable_tool_names=["exec", "submit_next_stage"],
+        callable_tool_names=["exec", "filesystem_stat"],
         candidate_tool_names=[],
         candidate_tool_items=[],
         candidate_skill_ids=[],
@@ -415,7 +415,7 @@ def test_frontdoor_prompt_contract_appends_dynamic_appendix_at_tail_for_main_lan
     from g3ku.runtime.frontdoor.prompt_cache_contract import build_frontdoor_prompt_contract
 
     contract_message = build_frontdoor_tool_contract(
-        callable_tool_names=["submit_next_stage"],
+        callable_tool_names=["filesystem_stat"],
         candidate_tool_names=["web_fetch"],
         candidate_tool_items=[{"tool_id": "web_fetch", "description": "HTTP fetch helper"}],
         contract_revision="frontdoor:v1",

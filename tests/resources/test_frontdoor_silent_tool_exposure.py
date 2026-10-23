@@ -132,7 +132,7 @@ def test_visible_turns_are_told_the_silent_tool_is_the_only_exit() -> None:
 
     23:25 与 01:17 两次实盘的成因都是"上下文里残留的旧契约"被当成权威，所以这句说明
     不再抄进每轮重渲染的契约。D11 之后连"`silent` 在 callable 名单里"这条事实也不再由
-    契约点名——可调用面不渲染，模型看见的名字源是 `tools[]`（`submit_next_stage` / `silent`
+    契约点名——可调用面不渲染，模型看见的名字源是 `tools[]`（`filesystem_stat` / `silent`
     两颗合成控制工具恒定在内），对象可解析性由下面的执行束用例钉。
     """
     rendered = _contract(['exec', SILENT_TOOL_NAME])
@@ -147,8 +147,8 @@ def test_execution_bundle_resolves_the_silent_tool_object() -> None:
     """01:17 实盘：模型确实调了 `silent`，却收到 `Error: tool not available: silent`。
 
     P1 只把名字注进三个名单，而执行侧查的是 `_frontdoor_execution_bundle` 组装的
-    **工具对象字典** —— 那里历史上只塞过 `submit_next_stage`。名字可见 ≠ 对象可解析，
-    这条就是钉住第四处注入点（与 submit_next_stage 同一处、同样不依赖注册表）。
+    **工具对象字典** —— 那里历史上只塞过 `filesystem_stat`。名字可见 ≠ 对象可解析，
+    这条就是钉住第四处注入点（与 filesystem_stat 同一处、同样不依赖注册表）。
     """
     ops = _ops(registered=False)
     ops._build_tool_runtime_context = lambda **kwargs: {}

@@ -296,12 +296,12 @@ def test_ceo_frontdoor_refresh_dynamic_contract_state_keeps_repair_required_list
             ],
             "dynamic_appendix_messages": [],
             "tool_names": ["exec"],
-            "provider_tool_names": ["submit_next_stage", "exec"],
+            "provider_tool_names": ["filesystem_stat", "exec"],
             "candidate_tool_names": [],
             "candidate_tool_items": [],
             "visible_skill_ids": [],
             "candidate_skill_ids": [],
-            "rbac_visible_tool_names": ["submit_next_stage", "exec", "agent_browser"],
+            "rbac_visible_tool_names": ["filesystem_stat", "exec", "agent_browser"],
             "rbac_visible_skill_ids": ["writing-skills"],
             "repair_required_tool_items": [
                 {
@@ -317,7 +317,6 @@ def test_ceo_frontdoor_refresh_dynamic_contract_state_keeps_repair_required_list
                     "reason": "missing required bins",
                 }
             ],
-            "frontdoor_stage_state": {"active_stage_id": "", "transition_required": False, "stages": []},
             "model_refs": ["openai:gpt-4.1"],
             "cache_family_revision": "frontdoor:v1",
             "turn_overlay_text": "",
@@ -1017,15 +1016,13 @@ async def test_ceo_frontdoor_call_model_rebuilds_request_messages_from_stable_an
                     "content": json.dumps(
                         {
                             "message_type": "frontdoor_runtime_tool_contract",
-                            "callable_tool_names": ["submit_next_stage"],
+                            "callable_tool_names": ["filesystem_stat"],
                             "candidate_tool_names": [],
                                             "visible_skill_ids": [],
                             "candidate_skill_ids": [],
-                            "rbac_visible_tool_names": ["submit_next_stage"],
+                            "rbac_visible_tool_names": ["filesystem_stat"],
                             "rbac_visible_skill_ids": [],
                             "stage_summary": {
-                                "active_stage_id": "",
-                                "transition_required": False,
                                 "active_stage": None,
                             },
                             "contract_revision": "exp:test",
@@ -1036,13 +1033,12 @@ async def test_ceo_frontdoor_call_model_rebuilds_request_messages_from_stable_an
             ],
             "turn_overlay_text": "## Retrieved Context\n- memory",
             "repair_overlay_text": "repair only",
-            "tool_names": ["submit_next_stage"],
+            "tool_names": ["filesystem_stat"],
             "candidate_tool_names": [],
             "visible_skill_ids": [],
             "candidate_skill_ids": [],
-            "rbac_visible_tool_names": ["submit_next_stage"],
+            "rbac_visible_tool_names": ["filesystem_stat"],
             "rbac_visible_skill_ids": [],
-            "frontdoor_stage_state": {"active_stage_id": "", "transition_required": False, "stages": []},
             "model_refs": ["openai_codex:gpt-test"],
             "parallel_enabled": False,
             "prompt_cache_key": "cache-key",
@@ -1088,7 +1084,7 @@ async def test_ceo_frontdoor_call_model_persists_actual_request_to_disk(
         lambda **kwargs: [
             {
                 "type": "function",
-                "function": {"name": "submit_next_stage", "description": "", "parameters": {"type": "object"}},
+                "function": {"name": "filesystem_stat", "description": "", "parameters": {"type": "object"}},
             }
         ],
     )
@@ -1150,14 +1146,13 @@ async def test_ceo_frontdoor_call_model_persists_actual_request_to_disk(
                 {"role": "user", "content": '{"message_type":"frontdoor_runtime_tool_contract"}'},
             ],
             "turn_overlay_text": "## Retrieved Context\n- memory",
-            "tool_names": ["submit_next_stage"],
+            "tool_names": ["filesystem_stat"],
             "candidate_tool_names": [],
             "candidate_tool_items": [],
             "visible_skill_ids": [],
             "candidate_skill_ids": [],
-            "rbac_visible_tool_names": ["submit_next_stage"],
+            "rbac_visible_tool_names": ["filesystem_stat"],
             "rbac_visible_skill_ids": [],
-            "frontdoor_stage_state": {"active_stage_id": "", "transition_required": False, "stages": []},
             "model_refs": ["openai_codex:gpt-test"],
             "parallel_enabled": False,
             "prompt_cache_key": "cache-key",
@@ -1217,7 +1212,7 @@ async def test_frontdoor_actual_request_trace_round_trips_usage_ground_truth(
         lambda **kwargs: [
             {
                 "type": "function",
-                "function": {"name": "submit_next_stage", "description": "", "parameters": {"type": "object"}},
+                "function": {"name": "filesystem_stat", "description": "", "parameters": {"type": "object"}},
             }
         ],
     )
@@ -1279,14 +1274,13 @@ async def test_frontdoor_actual_request_trace_round_trips_usage_ground_truth(
                 {"role": "user", "content": '{"message_type":"frontdoor_runtime_tool_contract"}'},
             ],
             "turn_overlay_text": "## Retrieved Context\n- memory",
-            "tool_names": ["submit_next_stage"],
+            "tool_names": ["filesystem_stat"],
             "candidate_tool_names": [],
             "candidate_tool_items": [],
             "visible_skill_ids": [],
             "candidate_skill_ids": [],
-            "rbac_visible_tool_names": ["submit_next_stage"],
+            "rbac_visible_tool_names": ["filesystem_stat"],
             "rbac_visible_skill_ids": [],
-            "frontdoor_stage_state": {"active_stage_id": "", "transition_required": False, "stages": []},
             "model_refs": ["openai_codex:gpt-test"],
             "parallel_enabled": False,
             "prompt_cache_key": "cache-key",
@@ -1335,7 +1329,7 @@ async def test_ceo_frontdoor_call_model_falls_back_to_preflight_truth_when_usage
         lambda **kwargs: [
             {
                 "type": "function",
-                "function": {"name": "submit_next_stage", "description": "", "parameters": {"type": "object"}},
+                "function": {"name": "filesystem_stat", "description": "", "parameters": {"type": "object"}},
             }
         ],
     )
@@ -1392,14 +1386,13 @@ async def test_ceo_frontdoor_call_model_falls_back_to_preflight_truth_when_usage
             ],
             "dynamic_appendix_messages": [],
             "turn_overlay_text": "",
-            "tool_names": ["submit_next_stage"],
+            "tool_names": ["filesystem_stat"],
             "candidate_tool_names": [],
             "candidate_tool_items": [],
             "visible_skill_ids": [],
             "candidate_skill_ids": [],
-            "rbac_visible_tool_names": ["submit_next_stage"],
+            "rbac_visible_tool_names": ["filesystem_stat"],
             "rbac_visible_skill_ids": [],
-            "frontdoor_stage_state": {"active_stage_id": "", "transition_required": False, "stages": []},
             "model_refs": ["openai_codex:gpt-test"],
             "parallel_enabled": False,
             "prompt_cache_key": "cache-key",
@@ -1472,10 +1465,9 @@ async def test_ceo_frontdoor_call_model_keeps_request_messages_append_only_insid
     contract_text = json.dumps(
         {
             "message_type": "frontdoor_runtime_tool_contract",
-            "callable_tool_names": ["submit_next_stage"],
+            "callable_tool_names": ["filesystem_stat"],
             "candidate_tools": [],
             "candidate_skill_ids": [],
-            "stage_summary": {"active_stage_id": "", "transition_required": False},
             "contract_revision": "frontdoor:v1",
         },
         ensure_ascii=False,
@@ -1494,13 +1486,13 @@ async def test_ceo_frontdoor_call_model_keeps_request_messages_append_only_insid
                         {
                             "id": "call-1",
                             "type": "function",
-                            "function": {"name": "submit_next_stage", "arguments": "{}"},
+                            "function": {"name": "filesystem_stat", "arguments": "{}"},
                         }
                     ],
                 },
                 {
                     "role": "tool",
-                    "name": "submit_next_stage",
+                    "name": "filesystem_stat",
                     "tool_call_id": "call-1",
                     "content": '{"status":"success"}',
                 },
@@ -1511,14 +1503,13 @@ async def test_ceo_frontdoor_call_model_keeps_request_messages_append_only_insid
             ],
             "dynamic_appendix_messages": [{"role": "user", "content": contract_text}],
             "turn_overlay_text": "",
-            "tool_names": ["submit_next_stage"],
+            "tool_names": ["filesystem_stat"],
             "candidate_tool_names": [],
             "candidate_tool_items": [],
             "visible_skill_ids": [],
             "candidate_skill_ids": [],
-            "rbac_visible_tool_names": ["submit_next_stage"],
+            "rbac_visible_tool_names": ["filesystem_stat"],
             "rbac_visible_skill_ids": [],
-            "frontdoor_stage_state": {"active_stage_id": "", "transition_required": False, "stages": []},
             "model_refs": ["openai_codex:gpt-test"],
             "parallel_enabled": False,
             "prompt_cache_key": "cache-key",
@@ -1541,13 +1532,13 @@ async def test_ceo_frontdoor_call_model_keeps_request_messages_append_only_insid
                 {
                     "id": "call-1",
                     "type": "function",
-                    "function": {"name": "submit_next_stage", "arguments": "{}"},
+                    "function": {"name": "filesystem_stat", "arguments": "{}"},
                 }
             ],
         },
         {
             "role": "tool",
-            "name": "submit_next_stage",
+            "name": "filesystem_stat",
             "tool_call_id": "call-1",
             "content": '{"status":"success"}',
         },
@@ -1620,31 +1611,13 @@ async def test_ceo_frontdoor_call_model_keeps_provider_tool_schema_set_stable_wh
             ],
             "dynamic_appendix_messages": [],
             "turn_overlay_text": "",
-            "tool_names": ["exec", "load_tool_context", "submit_next_stage"],
+            "tool_names": ["exec", "load_tool_context", "filesystem_stat"],
             "candidate_tool_names": [],
             "candidate_tool_items": [],
             "visible_skill_ids": [],
             "candidate_skill_ids": [],
-            "rbac_visible_tool_names": ["exec", "load_tool_context", "submit_next_stage"],
+            "rbac_visible_tool_names": ["exec", "load_tool_context", "filesystem_stat"],
             "rbac_visible_skill_ids": [],
-            "frontdoor_stage_state": {
-                "active_stage_id": "frontdoor-stage-1",
-                "transition_required": True,
-                "stages": [
-                    {
-                        "stage_id": "frontdoor-stage-1",
-                        "stage_index": 1,
-                        "stage_goal": "Wrap up the current stage before continuing",
-                        "tool_round_budget": 5,
-                        "tool_rounds_used": 5,
-                        "status": "active",
-                        "mode": "自主执行",
-                        "completed_stage_summary": "",
-                        "key_refs": [],
-                        "rounds": [],
-                    }
-                ],
-            },
             "model_refs": ["openai_codex:gpt-test"],
             "parallel_enabled": False,
             "prompt_cache_key": "cache-key",
@@ -1658,7 +1631,7 @@ async def test_ceo_frontdoor_call_model_keeps_provider_tool_schema_set_stable_wh
     )
 
     assert renderer_name_sets
-    assert renderer_name_sets[-1] == ["exec", "load_tool_context", "submit_next_stage"]
+    assert renderer_name_sets[-1] == ["exec", "load_tool_context", "filesystem_stat"]
     replaced_messages = [dict(item) for item in list(update["messages"] or []) if isinstance(item, dict)]
     # Turn-only tool contract must not be persisted into state messages, even when a
     # stage transition is required; the latest request still exposes it at its tail.

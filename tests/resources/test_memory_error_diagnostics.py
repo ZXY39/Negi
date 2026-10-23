@@ -180,11 +180,8 @@ def test_node_runner_captures_memory_error_diagnostics_snapshot() -> None:
                 "cache_hit_tokens": 34304,
             },
             "execution_stages": {
-                "active_stage_id": "stage-oom",
                 "stages": [
                     {
-                        "stage_id": "stage-oom",
-                        "stage_goal": "probe the next before_model transition",
                     }
                 ],
             },
@@ -198,7 +195,6 @@ def test_node_runner_captures_memory_error_diagnostics_snapshot() -> None:
             "node_id": node.node_id,
             "phase": "before_model",
             "await_marker": "react_loop.run",
-            "stage_goal": "probe the next before_model transition",
             "memory_error_probe": {
                 "stage": "load_tool_context_direct_read_violations",
                 "message_history_count": 12,

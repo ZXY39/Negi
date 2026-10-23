@@ -56,7 +56,7 @@ def _signature(tool_name: str) -> str:
 
 def test_tool_fault_signature_only_for_runtime_self_faults() -> None:
     exc = _raise_with_frame(exc_name='NameError', filename=_owned('main/runtime/node_runner.py'))
-    assert ReActToolLoop._runtime_fault_signature(tool_name='submit_next_stage', exc=exc) == _signature('submit_next_stage')
+    assert ReActToolLoop._runtime_fault_signature(tool_name='filesystem_stat', exc=exc) == _signature('filesystem_stat')
     ordinary = _raise_with_frame(exc_name='ValueError', filename=_owned('tools/x/main/tool.py'))
     assert ReActToolLoop._runtime_fault_signature(tool_name='exec', exc=ordinary) == ''
 
@@ -67,7 +67,7 @@ def test_tool_fault_breaker_trips_on_repeated_identical_fault() -> None:
     hit = None
     for _ in range(_TOOL_FAULT_LIMIT - 1):
         hit = ReActToolLoop._register_tool_fault_results(
-            results=[_fault_result(tool_name='submit_next_stage', fault=_signature('submit_next_stage'))],
+            results=[_fault_result(tool_name='filesystem_stat', fault=_signature('filesystem_stat'))],
             fault_counts=counts,
         )
         assert hit is None
@@ -77,24 +77,24 @@ def test_tool_fault_breaker_trips_on_repeated_identical_fault() -> None:
             fault_counts=counts,
         )
     hit = ReActToolLoop._register_tool_fault_results(
-        results=[_fault_result(tool_name='submit_next_stage', fault=_signature('submit_next_stage'))],
+        results=[_fault_result(tool_name='filesystem_stat', fault=_signature('filesystem_stat'))],
         fault_counts=counts,
     )
     assert hit is not None
     assert hit['count'] == _TOOL_FAULT_LIMIT
-    assert hit['signature'] == _signature('submit_next_stage')
+    assert hit['signature'] == _signature('filesystem_stat')
 
 
 def test_tool_fault_counter_drops_signature_when_that_tool_recovers() -> None:
     counts: dict[str, int] = {}
     for _ in range(2):
         ReActToolLoop._register_tool_fault_results(
-            results=[_fault_result(tool_name='submit_next_stage', fault=_signature('submit_next_stage'))],
+            results=[_fault_result(tool_name='filesystem_stat', fault=_signature('filesystem_stat'))],
             fault_counts=counts,
         )
     assert counts
     ReActToolLoop._register_tool_fault_results(
-        results=[_fault_result(tool_name='submit_next_stage', fault='')],
+        results=[_fault_result(tool_name='filesystem_stat', fault='')],
         fault_counts=counts,
     )
     assert counts == {}
@@ -106,7 +106,7 @@ def test_tool_fault_failure_routes_into_error_pause_lane() -> None:
     `node_runner.run_node` 只认 disposition，心跳分型只认错误文本里的标记，
     两者缺一都会让这条道退回成"静默空转"。
     """
-    result = ReActToolLoop._tool_fault_failure(signature=_signature('submit_next_stage'), count=_TOOL_FAULT_LIMIT)
+    result = ReActToolLoop._tool_fault_failure(signature=_signature('filesystem_stat'), count=_TOOL_FAULT_LIMIT)
     assert result.status == 'failed'
     assert result.failure_disposition == 'pause'
     assert 'runtime_fault:' in result.failure_text

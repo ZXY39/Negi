@@ -212,19 +212,17 @@ class _StageRuntimeProbeTool(Tool):
 
     @property
     def name(self) -> str:
-        return "submit_next_stage"
+        return "filesystem_stat"
 
     @property
     def description(self) -> str:
-        return "Capture runtime tool contract details during submit_next_stage execution."
+        return "Capture runtime tool contract details during filesystem_stat execution."
 
     @property
     def parameters(self) -> dict[str, object]:
         return {
             "type": "object",
             "properties": {
-                "stage_goal": {"type": "string"},
-                "tool_round_budget": {"type": "integer"},
             },
             "required": ["stage_goal", "tool_round_budget"],
         }
@@ -242,8 +240,6 @@ class _StageRuntimeProbeTool(Tool):
         return json.dumps(
             {
                 "ok": True,
-                "stage_goal": str(stage_goal or ""),
-                "tool_round_budget": int(tool_round_budget or 0),
             },
             ensure_ascii=False,
         )
@@ -2667,37 +2663,20 @@ def test_prepare_messages_rebuilds_prompt_from_completed_stages_and_active_windo
     loop._log_service._store._node = SimpleNamespace(
         metadata={
             "execution_stages": {
-                "active_stage_id": "stage-2",
-                "transition_required": False,
                 "stages": [
                     {
-                        "stage_id": "stage-1",
-                        "stage_index": 1,
-                        "stage_kind": "normal",
-                        "system_generated": False,
                         "mode": "自主执行",
                         "status": "完成",
-                        "stage_goal": "inspect the first stage",
-                        "completed_stage_summary": "finished stage one",
                         "key_refs": [
                             {
                                 "ref": "artifact:artifact:stage-one",
                                 "note": "stage one evidence summary",
                             }
                         ],
-                        "tool_round_budget": 2,
-                        "tool_rounds_used": 1,
                     },
                     {
-                        "stage_id": "stage-2",
-                        "stage_index": 2,
-                        "stage_kind": "normal",
-                        "system_generated": False,
                         "mode": "自主执行",
                         "status": "进行中",
-                        "stage_goal": "inspect the second stage",
-                        "tool_round_budget": 3,
-                        "tool_rounds_used": 0,
                     },
                 ],
             }
@@ -2713,11 +2692,11 @@ def test_prepare_messages_rebuilds_prompt_from_completed_stages_and_active_windo
                 {
                     "id": "call-stage-1",
                     "type": "function",
-                    "function": {"name": "submit_next_stage", "arguments": "{}"},
+                    "function": {"name": "filesystem_stat", "arguments": "{}"},
                 }
             ],
         },
-        {"role": "tool", "name": "submit_next_stage", "tool_call_id": "call-stage-1", "content": '{"ok": true}'},
+        {"role": "tool", "name": "filesystem_stat", "tool_call_id": "call-stage-1", "content": '{"ok": true}'},
         {"role": "assistant", "content": "stage one raw detail"},
         {
             "role": "tool",
@@ -2733,11 +2712,11 @@ def test_prepare_messages_rebuilds_prompt_from_completed_stages_and_active_windo
                 {
                     "id": "call-stage-2",
                     "type": "function",
-                    "function": {"name": "submit_next_stage", "arguments": "{}"},
+                    "function": {"name": "filesystem_stat", "arguments": "{}"},
                 }
             ],
         },
-        {"role": "tool", "name": "submit_next_stage", "tool_call_id": "call-stage-2", "content": '{"ok": true}'},
+        {"role": "tool", "name": "filesystem_stat", "tool_call_id": "call-stage-2", "content": '{"ok": true}'},
         {"role": "assistant", "content": "current stage assistant detail"},
         {"role": "tool", "name": "filesystem", "tool_call_id": "call-a", "content": "current stage tool output"},
     ]
@@ -2759,32 +2738,14 @@ def test_prepare_messages_is_idempotent_for_compacted_stage_prompt() -> None:
     loop._log_service._store._node = SimpleNamespace(
         metadata={
             "execution_stages": {
-                "active_stage_id": "stage-2",
-                "transition_required": False,
                 "stages": [
                     {
-                        "stage_id": "stage-1",
-                        "stage_index": 1,
-                        "stage_kind": "normal",
-                        "system_generated": False,
                         "mode": "自主执行",
                         "status": "完成",
-                        "stage_goal": "inspect the first stage",
-                        "completed_stage_summary": "finished stage one",
-                        "key_refs": [],
-                        "tool_round_budget": 2,
-                        "tool_rounds_used": 1,
                     },
                     {
-                        "stage_id": "stage-2",
-                        "stage_index": 2,
-                        "stage_kind": "normal",
-                        "system_generated": False,
                         "mode": "自主执行",
                         "status": "进行中",
-                        "stage_goal": "inspect the second stage",
-                        "tool_round_budget": 3,
-                        "tool_rounds_used": 0,
                     },
                 ],
             }
@@ -2800,11 +2761,11 @@ def test_prepare_messages_is_idempotent_for_compacted_stage_prompt() -> None:
                 {
                     "id": "call-stage-1",
                     "type": "function",
-                    "function": {"name": "submit_next_stage", "arguments": "{}"},
+                    "function": {"name": "filesystem_stat", "arguments": "{}"},
                 }
             ],
         },
-        {"role": "tool", "name": "submit_next_stage", "tool_call_id": "call-stage-1", "content": '{"ok": true}'},
+        {"role": "tool", "name": "filesystem_stat", "tool_call_id": "call-stage-1", "content": '{"ok": true}'},
         {"role": "assistant", "content": "stage one raw detail"},
         {
             "role": "assistant",
@@ -2813,11 +2774,11 @@ def test_prepare_messages_is_idempotent_for_compacted_stage_prompt() -> None:
                 {
                     "id": "call-stage-2",
                     "type": "function",
-                    "function": {"name": "submit_next_stage", "arguments": "{}"},
+                    "function": {"name": "filesystem_stat", "arguments": "{}"},
                 }
             ],
         },
-        {"role": "tool", "name": "submit_next_stage", "tool_call_id": "call-stage-2", "content": '{"ok": true}'},
+        {"role": "tool", "name": "filesystem_stat", "tool_call_id": "call-stage-2", "content": '{"ok": true}'},
         {"role": "assistant", "content": "current stage assistant detail"},
         {"role": "tool", "name": "filesystem", "tool_call_id": "call-a", "content": "current stage tool output"},
     ]
@@ -3135,7 +3096,7 @@ async def test_standalone_contract_echo_repairs_once_then_pauses() -> None:
     echo_content = (
         "## Runtime Tool Contract\n"
         "kind: node_runtime_tool_contract\n"
-        "callable_tools: `submit_next_stage`, `submit_final_result`, `exec`\n"
+        "callable_tools: `filesystem_stat`, `submit_final_result`, `exec`\n"
         "candidate_tools:\n"
         "- `filesystem_write`\n"
     )
@@ -3393,7 +3354,7 @@ def test_build_node_dynamic_contract_does_not_resurrect_stale_candidate_tools_wh
     stale_contract = NodeRuntimeToolContract(
         node_id=node.node_id,
         node_kind=node.node_kind,
-        callable_tool_names=["submit_next_stage"],
+        callable_tool_names=["filesystem_stat"],
         candidate_tool_names=["filesystem_write"],
         visible_skills=[],
         candidate_skill_ids=[],
@@ -3416,7 +3377,7 @@ def test_build_node_dynamic_contract_does_not_resurrect_stale_candidate_tools_wh
                 {"role": "user", "content": '{"prompt":"demo"}'},
                 stale_contract,
             ],
-            "callable_tool_names": ["submit_next_stage"],
+            "callable_tool_names": ["filesystem_stat"],
             "candidate_tool_names": [],
             "candidate_tool_items": [{"tool_id": "filesystem_write", "description": "write file"}],
             "selected_skill_ids": [],
@@ -3433,7 +3394,7 @@ def test_build_node_dynamic_contract_does_not_resurrect_stale_candidate_tools_wh
             stale_contract,
         ],
         tool_schema_selection={
-            "tool_names": ["submit_next_stage"],
+            "tool_names": ["filesystem_stat"],
             "candidate_tool_names": [],
             "lightweight_tool_ids": [],
             "trace": {},
@@ -3454,7 +3415,7 @@ def test_build_node_dynamic_contract_does_not_resurrect_stale_candidate_skills_w
     stale_contract = NodeRuntimeToolContract(
         node_id=node.node_id,
         node_kind=node.node_kind,
-        callable_tool_names=["submit_next_stage"],
+        callable_tool_names=["filesystem_stat"],
         candidate_tool_names=[],
         visible_skills=[],
         candidate_skill_ids=["tmux"],
@@ -3476,7 +3437,7 @@ def test_build_node_dynamic_contract_does_not_resurrect_stale_candidate_skills_w
                 {"role": "user", "content": '{"prompt":"demo"}'},
                 stale_contract,
             ],
-            "callable_tool_names": ["submit_next_stage"],
+            "callable_tool_names": ["filesystem_stat"],
             "candidate_tool_names": [],
             "candidate_tool_items": [],
             "selected_skill_ids": [],
@@ -3494,7 +3455,7 @@ def test_build_node_dynamic_contract_does_not_resurrect_stale_candidate_skills_w
             stale_contract,
         ],
         tool_schema_selection={
-            "tool_names": ["submit_next_stage"],
+            "tool_names": ["filesystem_stat"],
             "candidate_tool_names": [],
             "lightweight_tool_ids": [],
             "trace": {},
@@ -3515,7 +3476,7 @@ def test_build_node_dynamic_contract_uses_fresh_message_skill_contract_when_boot
     fresh_contract = NodeRuntimeToolContract(
         node_id=node.node_id,
         node_kind=node.node_kind,
-        callable_tool_names=["submit_next_stage", "load_skill_context"],
+        callable_tool_names=["filesystem_stat", "load_skill_context"],
         candidate_tool_names=["content"],
         visible_skills=[],
         candidate_skill_ids=["web-access", "multi-search-engine"],
@@ -3578,7 +3539,7 @@ def test_build_node_dynamic_contract_uses_fresh_message_skill_contract_when_boot
             fresh_contract,
         ],
         tool_schema_selection={
-            "tool_names": ["submit_next_stage", "load_skill_context"],
+            "tool_names": ["filesystem_stat", "load_skill_context"],
             "candidate_tool_names": ["content"],
             "lightweight_tool_ids": [],
             "trace": {},
@@ -3646,7 +3607,7 @@ def test_build_node_dynamic_contract_prefers_fresh_runtime_seeded_skill_contract
         node=node,
         message_history=prepared_history,
         tool_schema_selection={
-            "tool_names": ["submit_next_stage", "load_skill_context"],
+            "tool_names": ["filesystem_stat", "load_skill_context"],
             "candidate_tool_names": ["content"],
             "lightweight_tool_ids": [],
             "trace": {},
@@ -4318,12 +4279,8 @@ def test_refresh_node_dynamic_contract_restores_skill_candidates_from_frame_afte
     log_service._store._node = SimpleNamespace(
         metadata={
             "execution_stages": {
-                "active_stage_id": "stage-1",
                 "stages": [
                     {
-                        "stage_id": "stage-1",
-                        "stage_index": 1,
-                        "stage_kind": "normal",
                     }
                 ],
             }
@@ -4346,7 +4303,7 @@ def test_refresh_node_dynamic_contract_restores_skill_candidates_from_frame_afte
     stage_contract = NodeRuntimeToolContract(
         node_id=node.node_id,
         node_kind=node.node_kind,
-        callable_tool_names=["submit_next_stage", "load_skill_context"],
+        callable_tool_names=["filesystem_stat", "load_skill_context"],
         candidate_tool_names=["content"],
         visible_skills=[
             {
@@ -4377,11 +4334,11 @@ def test_refresh_node_dynamic_contract_restores_skill_candidates_from_frame_afte
                 {
                     "id": "call-stage-1",
                     "type": "function",
-                    "function": {"name": "submit_next_stage", "arguments": "{}"},
+                    "function": {"name": "filesystem_stat", "arguments": "{}"},
                 }
             ],
         },
-        {"role": "tool", "name": "submit_next_stage", "tool_call_id": "call-stage-1", "content": '{"ok": true}'},
+        {"role": "tool", "name": "filesystem_stat", "tool_call_id": "call-stage-1", "content": '{"ok": true}'},
     ]
 
     prepared = loop._prepare_messages(
@@ -4395,7 +4352,7 @@ def test_refresh_node_dynamic_contract_restores_skill_candidates_from_frame_afte
         node=node,
         message_history=prepared,
         tool_schema_selection={
-            "tool_names": ["submit_next_stage", "load_skill_context"],
+            "tool_names": ["filesystem_stat", "load_skill_context"],
             "candidate_tool_names": ["content"],
             "lightweight_tool_ids": [],
             "trace": {},
@@ -4417,7 +4374,7 @@ def test_node_dynamic_contract_injection_keeps_request_only_message_after_bootst
     contract = NodeRuntimeToolContract(
         node_id="node-1",
         node_kind="execution",
-        callable_tool_names=["submit_next_stage"],
+        callable_tool_names=["filesystem_stat"],
         candidate_tool_names=["filesystem_write"],
         visible_skills=[
             {
@@ -4437,8 +4394,8 @@ def test_node_dynamic_contract_injection_keeps_request_only_message_after_bootst
         lightweight_tool_ids=["filesystem"],
         selection_trace={
             "mode": "execution_tool_selection",
-            "full_callable_tool_names": ["submit_next_stage", "filesystem_write"],
-            "stage_locked_to_submit_next_stage": True,
+            "full_callable_tool_names": ["filesystem_stat", "filesystem_write"],
+            "stage_locked_to_filesystem_stat": True,
             "final_schema_chars": 4096,
         },
     )
@@ -4461,7 +4418,7 @@ def test_node_dynamic_contract_injection_keeps_request_only_message_after_bootst
             "description": "terminal workflow",
         }
     ]
-    assert payload["callable_tool_names"] == ["submit_next_stage"]
+    assert payload["callable_tool_names"] == ["filesystem_stat"]
     assert "model_visible_tool_selection_trace" not in payload
 
 
@@ -8127,17 +8084,8 @@ def _six_stage_node_history(
         active = index == stage_total
         stages.append(
             {
-                "stage_id": f"stage-{index}",
-                "stage_index": index,
-                "stage_kind": "normal",
-                "system_generated": False,
                 "mode": "自主执行",
                 "status": "进行中" if active else "完成",
-                "stage_goal": f"goal {index}",
-                "completed_stage_summary": "" if active else f"summary {index}",
-                "key_refs": [],
-                "tool_round_budget": 3,
-                "tool_rounds_used": 1,
                 **({'context_evicted': True} if index in set(evict_indexes or []) else {}),
                 "rounds": [
                     {
@@ -8157,13 +8105,13 @@ def _six_stage_node_history(
                         {
                             "id": f"call-stage-{index}",
                             "type": "function",
-                            "function": {"name": "submit_next_stage", "arguments": "{}"},
+                            "function": {"name": "filesystem_stat", "arguments": "{}"},
                         }
                     ],
                 },
                 {
                     "role": "tool",
-                    "name": "submit_next_stage",
+                    "name": "filesystem_stat",
                     "tool_call_id": f"call-stage-{index}",
                     "content": json.dumps({"stage_id": f"stage-{index}", "stage_index": index}, ensure_ascii=False),
                 },
