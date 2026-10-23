@@ -316,7 +316,7 @@ Current RBAC rules for surfaced tools:
 ### Exec Runtime Mode Contract
 
 - `exec` 是当前唯一带额外持久化模式字段的 surfaced 工具：`tools` 记录上的 `metadata.execution_mode`。
-- The resource manifest may provide a default `settings.execution_mode`, but the persisted tool metadata is the runtime source of truth once an operator saves an override; resource refresh must preserve that override, otherwise Tool Admin would show one mode while runtime execution silently falls back to another.
+- The resource manifest does not declare `settings.execution_mode`; the governance store's tool record (`metadata.execution_mode`) is the only persisted source, and a fresh install starts from `governed`. Resource refresh must preserve that record, otherwise Tool Admin would show one mode while runtime execution silently falls back to another.
 - `load_tool_context("exec")`、node dynamic contracts 与 frontdoor dynamic contracts 必须给出同一份 `exec_runtime_policy`。不一致时先查那条持久化的工具记录，再查合同注入路径。
 
 ### CEO Regulatory Governance Mode

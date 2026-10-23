@@ -31,7 +31,10 @@ settings:
   path_append: ''
   restrict_to_workspace: false
   enable_safety_guard: true
-  execution_mode: governed
+  # execution_mode (governed|full_access) is not declared here: the persisted
+  # source of truth is the governance store's exec tool record
+  # (metadata.execution_mode). A value in this manifest is ignored whenever the
+  # record carries one, so keeping a copy here only creates two disagreeing truths.
 parameters:
   type: object
   properties:
