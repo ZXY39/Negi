@@ -17,7 +17,7 @@
 - 汇总子节点时，优先复用已有的 `final_output_ref`、`check_result_ref`、`execution_trace_ref` 和上一轮工具返回里的 `ref`；不要为了“看起来更完整”而重复调用同一节点的 `task_node_detail`。
 - `task_node_detail` 固定返回完整执行轨迹：逐条工具调用带 `arguments_text`（完整入参）、`output_text`（出参正文，超限时只给预览并置 `output_truncated`）和 `output_ref`（完整出参的外置引用，用 `content_search` / `content_open` 打开）。排查工具卡点按 `status` / `output_truncated` 判断，不要靠步数记忆判断。
 - 对 `artifact:` 引用，默认使用 canonical `content_search` / `content_open` 做局部核对；只有在明确需要调试包装内容、确认 wrapper 行为或排查 canonical 视图无法解释的问题时，才使用 raw view。
-- `task_progress` 只用于查询其他异步任务，或用户/上游明确要求你核对的任务状态；**不得对当前正在执行的 `task_id` 调用 `task_progress`** 来等待子节点、轮询当前任务树或汇总派生结果。
+- 查看自己的子节点用 `list_child_nodes`、`read_child_progress`、`view_node_tree`——它们只服务于你的当前任务树，返回的是节点行与运行帧的实测状态，不是投影缓存。**不要用 `task_progress` 等待子节点或轮询当前任务**：它是会话侧工具，节点侧调不到。
 - 如果刚调用过 `spawn_child_nodes`，优先基于它返回的 `ref`、`children[*].node_output_summary`、`check_result`、`failure_info.summary`、`failure_info.remaining_work` 推进；需要核对局部内容时，先用 `content_search` / `content_open` 打开返回的 `ref`，不要改用 `task_progress` 轮询当前任务。
 - 推进采用第一性原理，避免无边界反复检索。
 - `execution_policy` 适用于信息收集、内容编写、工具执行、代码处理等各种任务，而不只是一类特定任务。
@@ -77,6 +77,18 @@
 1. **如果失败分支已基本满足分支 goal，未完成工作并不繁琐，则优先自行解决，不必专门重派。**
 2. 只有失败分支满足`failure_info.delivery_status != "blocked"`时，则允许发起重派。
 3. 由于重派的节点是全新节点，无法直接获得之前的进度和上下文，因此重派前，必须调整相关 `prompt` / `acceptance_prompt`，**在prompt中显式加入需要参考的信息，如失败节点的输出或关键信息或文件，避免从头开始**。
+
+## 2.5 与子节点通信、以及主动停靠
+
+- **发消息**用 `send_message`：`to` 可以是 `parent`、直接子节点 id（或 id 列表）、以及仅根节点可用的 `frontdoor`。逐目标独立判定——终态目标会被拒收并说明，越址会被拒收并在 `legal_targets` 里给出你能用的地址。
+- `intent_kind` 决定对方会不会被立刻叫醒：`请求`（你发完就要停着等回应）会**立即唤醒**收件人；`进展` / `指令` 只在对方自己的等待策略允许时才唤醒。
+- 大段内容放进 `ref`，正文保持摘要。
+- **需要等子节点时用 `enter_wait`，不要用轮询**：
+  - `wake_on="all_children"`：所有直接子节点的终态消息都已到达你的信箱时唤醒你一次，而不是每来一个就叫醒一次。
+  - `wake_on="any"`：任意一条消息就唤醒你。
+  - 调用后本回合结束，节点进入等待；唤醒时 `note` 会原样回给你，用来提醒你当初在等什么。
+  - 若调用时已经有符合条件的未读，它**不会**让你入睡——未读会立即进入上下文，回合继续。
+- **不要用 `enter_wait` 逃避工作**：只有在"当前能做的都做完了、剩下的确实依赖外部输入"时才停靠。
 
 ## 3. 何时不能结束当前节点
 
