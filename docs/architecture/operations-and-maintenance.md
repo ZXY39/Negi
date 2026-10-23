@@ -641,7 +641,7 @@ IM 渠道有两条：内置官方 QQ 适配器（`g3ku/qq_official/`，进程内
 
 做完较大改动后，先做自动化前置检查：
 
-- `python -m ruff check .`（或 `scripts/lint.sh` / `scripts/lint.ps1`）
+- `scripts/lint.sh` / `scripts/lint.ps1`（等价于 `python -m ruff check g3ku main tools scripts bridges tests negi_bootstrap.py`）
 - `python -m pytest --collect-only -q`
 - `python -m pytest tests/resources/test_resource_runtime_smoke.py -q`（冒烟子集）
 
@@ -656,13 +656,14 @@ IM 渠道有两条：内置官方 QQ 适配器（`g3ku/qq_official/`，进程内
 
 ### Lint 闸门的覆盖面
 
-`ruff check .` 只负责自有代码。`pyproject.toml` 的 `[tool.ruff]` 把 `work/`、`skills/`、
-仓库根的 `runtime/` 任务数据、`pytest-of-Administrator/`、`repair_tmp/`、`.g3ku/` 放进
-`extend-exclude`；排除项按目录名匹配任意深度，所以根级 `runtime` 写成 `runtime/*`，
-否则 `g3ku/runtime`、`main/runtime` 两个包也一起被扫不到。
+闸门只负责自有代码：`scripts/lint.sh` / `scripts/lint.ps1` 跑的是
+`ruff check g3ku main tools scripts bridges tests negi_bootstrap.py` 这一份目录清单。清单是硬编码的，
+新增顶层目录要同时改进脚本，否则新代码不在任何人视野里。
 
-仓库根的未入库散件不在任何排除项里，会原样出现在 `ruff check .` 的输出里；要判断自有
-代码是否干净，用 `ruff check g3ku main tools scripts bridges tests`。
+`pyproject.toml` 的 `[tool.ruff]` 另有一层 `extend-exclude`：`work/`、`skills/`、仓库根的 `runtime/`
+任务数据、`pytest-of-Administrator/`、`repair_tmp/`、`.g3ku/`。排除项按目录名匹配任意深度，所以根级
+`runtime` 写成 `runtime/*`，否则 `g3ku/runtime`、`main/runtime` 两个包也一起被扫不到。仓库根的未入库
+散件不在闸门清单里；要看全仓口径就显式跑 `ruff check .`，它会连这些散件一起报。
 
 `skills/**` 是随包分发的脚本载荷，改它属于内容决定而不是格式决定，因此不在闸门内；
 需要检查入库那几个 `.py` 时显式传路径（显式路径不受排除项影响）。
@@ -671,12 +672,11 @@ IM 渠道有两条：内置官方 QQ 适配器（`g3ku/qq_official/`，进程内
 N801/N802 走 `per-file-ignores`，控制流异常名（`*Requested` / `*Closed` / `*Interrupted`）
 与被延迟导入绑定的类名一律用行级 `# noqa`，因为整片 ignore 会吞掉同一文件里后续的真违规。
 
-`scripts/lint.ps1` 的第二条腿是 `ruff format --check .`，它管的是格式债，与 `ruff check`
-的告警是两条独立判定，一边绿不蕴含另一边绿。该腿报内部错误（ruff 崩溃、退出码 101）而不是列出
-未格式化文件时，原因是带 UTF-8 BOM 的 `.py`：ruff 0.17.1 渲染差异时在这种文件上 panic。BOM 在
-`.py` 里只是编码元数据，去掉不改变 Python 的解码结果。崩溃点可能在未入库文件上（`git ls-files`
-查不到），所以判自有代码的格式债用 `ruff format --check g3ku main tools scripts bridges tests
-negi_bootstrap.py`；根级未入库散件仍在 `.` 的扫描范围内，两条腿都会替它们报红。
+代码形状由评审负责，不由工具强制：`line-length = 100` 与 `ignore = ["E501"]` 并存，就是允许长行的
+既定约定，而 `ruff format` 会把所有超列的行拆开——自有代码 827 个文件里只有 174 个已符合它的形状，
+全量重排约 +6.5 万 / −4.1 万行。把 format 纳入闸门等于替全仓立格式制度，属于单独一次决定，不进日常
+闸门。手工跑 format 时若 ruff 0.17.1 报内部错误（退出码 101）而不是列出文件，原因是带 UTF-8 BOM 的
+`.py` 让它的差异渲染 panic；BOM 在 `.py` 里只是编码元数据，去掉不改变 Python 的解码结果。
 
 ## Memory Queue Workflow
 

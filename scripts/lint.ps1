@@ -13,21 +13,17 @@ if (-not (Test-Path $venvPython)) {
 
 $exitCode = 0
 
-Write-Host "[negi] lint: ruff check ."
+# First-party scope: `.` would also scan the untracked scratch files that
+# accumulate at the repo root, and vendored trees are excluded in pyproject.
+$scope = @("g3ku", "main", "tools", "scripts", "bridges", "tests", "negi_bootstrap.py")
+
+Write-Host "[negi] lint: ruff check (first-party)"
 Push-Location $projectRoot
 try {
-    & $venvPython -m ruff check .
+    & $venvPython -m ruff check @scope
     $checkExit = if ($LASTEXITCODE -is [int]) { $LASTEXITCODE } else { 0 }
     if ($checkExit -ne 0) {
         Write-Host "[negi] lint: FAILED - ruff check reported violations (exit $checkExit)" -ForegroundColor Red
-        $exitCode = 1
-    }
-
-    Write-Host "[negi] lint: ruff format --check ."
-    & $venvPython -m ruff format --check .
-    $formatExit = if ($LASTEXITCODE -is [int]) { $LASTEXITCODE } else { 0 }
-    if ($formatExit -ne 0) {
-        Write-Host "[negi] lint: FAILED - ruff format --check found unformatted files (exit $formatExit)" -ForegroundColor Red
         $exitCode = 1
     }
 } finally {

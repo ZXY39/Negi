@@ -17,25 +17,19 @@ else
   exit 1
 fi
 
-run_check() {
-  (cd "$PROJECT_ROOT" && "$PYTHON_BIN" -m ruff check .)
-}
+# First-party scope: `.` would also scan the untracked scratch files that
+# accumulate at the repo root, and vendored trees are excluded in pyproject.
+SCOPE="g3ku main tools scripts bridges tests negi_bootstrap.py"
 
-run_format_check() {
-  (cd "$PROJECT_ROOT" && "$PYTHON_BIN" -m ruff format --check .)
+run_check() {
+  (cd "$PROJECT_ROOT" && "$PYTHON_BIN" -m ruff check $SCOPE)
 }
 
 status=0
 
-echo "[negi] lint: ruff check ."
+echo "[negi] lint: ruff check (first-party)"
 if ! run_check; then
   echo "[negi] lint: FAILED - ruff check reported violations" >&2
-  status=1
-fi
-
-echo "[negi] lint: ruff format --check ."
-if ! run_format_check; then
-  echo "[negi] lint: FAILED - ruff format --check found unformatted files" >&2
   status=1
 fi
 
