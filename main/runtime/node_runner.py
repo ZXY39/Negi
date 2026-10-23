@@ -64,11 +64,13 @@ from main.runtime.append_notice_context import (
     supersede_append_notice_records,
 )
 from main.runtime.internal_tools import (
+    SendMessageTool,
     SpawnChildNodesTool,
     SubmitFinalResultTool,
     SubmitMessageDistributionTool,
     SubmitNoticeInspectionDecisionTool,
 )
+from main.runtime.node_message_kind import INTENT_PROGRESS
 from main.runtime.node_prompt_contract import extract_node_dynamic_contract_payload
 from main.runtime.pending_notice_state import (
     PENDING_NOTICE_STATE_KEY,
@@ -87,6 +89,7 @@ from main.runtime.subtree_hold import (
     resolve_subtree_hold_epoch_id,
     spawn_round_has_unmaterialized_entries,
 )
+from main.runtime.tool_names import SEND_MESSAGE_TOOL_NAME
 from main.service.create_async_task_contract import normalize_create_async_task_file_targets
 from main.storage.disk_guard import is_disk_full_error
 from main.types import KIND_ACCEPTANCE, KIND_EXECUTION, STATUS_FAILED, STATUS_SUCCESS
@@ -3940,6 +3943,37 @@ class NodeRunner:
             return [item for item in messages if isinstance(item, dict)]
         return []
 
+    async def _deliver_node_message(
+        self,
+        *,
+        task_id: str,
+        node: NodeRecord,
+        to: Any,
+        intent_kind: str = '',
+        content: str = '',
+        ref: str = '',
+        in_reply_to: str = '',
+    ) -> dict[str, Any]:
+        """`send_message` 的运行时侧：寻址与投递都由服务层裁定，这里只转交。
+
+        回调缺失时返回一个可读错误而不是静默成功——工具在表里却什么都不做，
+        是比工具不在表里更难查的一类缺陷。
+        """
+        callback = getattr(self, 'node_message_delivery_callback', None)
+        if not callable(callback):
+            return {'ok': False, 'error': 'node_message_delivery_unavailable', 'results': []}
+        return await callback(
+            task_id=task_id,
+            sender_node_id=str(node.node_id or '').strip(),
+            sender_is_root=str(node.node_id or '').strip()
+            == str(node.root_node_id or '').strip(),
+            to=to,
+            intent_kind=str(intent_kind or '').strip() or INTENT_PROGRESS,
+            content=content,
+            ref=ref,
+            in_reply_to=in_reply_to,
+        )
+
     def _build_tools(self, *, task, node: NodeRecord) -> dict[str, Tool]:
         tools = dict(self._tool_provider(node) or {})
         if node.node_kind in {KIND_EXECUTION, KIND_ACCEPTANCE}:
@@ -3950,6 +3984,13 @@ class NodeRunner:
         else:
             tools.pop('submit_final_result', None)
         if node.node_kind == KIND_EXECUTION:
+            tools[SEND_MESSAGE_TOOL_NAME] = SendMessageTool(
+                lambda **payload: self._deliver_node_message(
+                    task_id=task.task_id,
+                    node=node,
+                    **payload,
+                )
+            )
             if node.can_spawn_children:
                 tools['spawn_child_nodes'] = SpawnChildNodesTool(
                     lambda children, call_id=None: self._spawn_children(

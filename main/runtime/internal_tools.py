@@ -11,7 +11,11 @@ from main.models import (
     SpawnChildSpec,
     build_execution_policy_schema,
 )
-from main.runtime.tool_names import FINAL_RESULT_TOOL_NAME, SILENT_TOOL_NAME
+from main.runtime.tool_names import (
+    FINAL_RESULT_TOOL_NAME,
+    SEND_MESSAGE_TOOL_NAME,
+    SILENT_TOOL_NAME,
+)
 
 
 def build_detail_level_schema(*, description: str) -> dict[str, Any]:
@@ -123,6 +127,99 @@ class SilentTool(Tool):
             ensure_ascii=False,
             sort_keys=True,
         )
+
+
+class SendMessageTool(Tool):
+    """给父节点、直接子节点、或（仅根节点）前门 agent 发一条消息。
+
+    一次可发给多个直接子节点；投递逐目标独立判定。`intent_kind=请求` 表示发完就要
+    停靠等回应，因此收件人会被立即唤醒；`进展` / `指令` 只在收件人自己的等待策略
+    允许时才唤醒它。
+
+    工具本身不做寻址判定：合法目标集合与父/子关系由运行时的投递入口算，越址时
+    回执里会带上可用的地址，避免模型只能靠猜。
+    """
+
+    hide_universal_timeout_parameter = True
+
+    def __init__(self, deliver: Callable[..., Awaitable[dict[str, Any]]]) -> None:
+        self._deliver = deliver
+
+    @property
+    def name(self) -> str:
+        return SEND_MESSAGE_TOOL_NAME
+
+    @property
+    def description(self) -> str:
+        return (
+            'Send a message to your parent node, to one or more of your direct children, or (root '
+            'node only) to the front-door agent. Each target is judged on its own: a terminal target '
+            'rejects and says so, a paused target still accepts a machine message (that is how it '
+            'gets unstuck), and an out-of-scope target is rejected with the addresses you may use. '
+            'Use `请求` when you are about to park waiting for an answer — it wakes the recipient '
+            'immediately; `进展` and `指令` only wake a recipient whose own wait policy says so. '
+            'Large bodies belong in `ref`; the message itself should stay a summary.'
+        )
+
+    @property
+    def model_description(self) -> str:
+        return 'Message your parent, children, or the front door. Use 请求 when you will wait for an answer.'
+
+    @property
+    def parameters(self) -> dict[str, Any]:
+        return {
+            'type': 'object',
+            'properties': {
+                'to': {
+                    'type': ['string', 'array'],
+                    'items': {'type': 'string'},
+                    'description': (
+                        "`parent`, `frontdoor` (root only), a direct child node id, or a list of them."
+                    ),
+                    'minLength': 1,
+                },
+                'intent_kind': {
+                    'type': 'string',
+                    'enum': ['进展', '请求', '指令'],
+                    'description': (
+                        '进展 = report without expecting a reply; 请求 = you will park and wait for an '
+                        'answer; 指令 = tell someone below you what to do.'
+                    ),
+                },
+                'content': {'type': 'string', 'minLength': 1, 'description': 'Message body.'},
+                'ref': {
+                    'type': 'string',
+                    'description': 'Optional pointer to a large artifact; keep `content` a summary then.',
+                },
+                'in_reply_to': {'type': 'string', 'description': 'Optional id of the message answered.'},
+            },
+            'required': ['to', 'content'],
+        }
+
+    def validate_params(self, params: dict[str, Any]) -> list[str]:
+        errors = super().validate_params(params)
+        if not str((params or {}).get('content') or '').strip():
+            errors.append('content must not be empty')
+        return errors
+
+    async def execute(
+        self,
+        to: Any = None,
+        intent_kind: str = '',
+        content: str = '',
+        ref: str = '',
+        in_reply_to: str = '',
+        **kwargs: Any,
+    ) -> str:
+        _ = kwargs
+        result = await self._deliver(
+            to=to,
+            intent_kind=str(intent_kind or '').strip(),
+            content=str(content or '').strip(),
+            ref=str(ref or '').strip(),
+            in_reply_to=str(in_reply_to or '').strip(),
+        )
+        return json.dumps(result, ensure_ascii=False, sort_keys=True)
 
 
 class SpawnChildNodesTool(Tool):

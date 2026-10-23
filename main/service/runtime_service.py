@@ -115,7 +115,7 @@ from main.runtime.internal_tools import build_detail_level_schema
 from main.runtime.model_key_concurrency import ModelKeyConcurrencyController
 from main.runtime.model_load_balancer import ModelLoadBalancer, quota_bucket_key
 from main.runtime.model_route import build_model_route_plan
-from main.runtime.node_mailbox import message_fingerprint, plan_delivery
+from main.runtime.node_mailbox import message_fingerprint, normalize_targets, plan_delivery
 from main.runtime.node_message_kind import PRIORITY_HIGH, derive_message_kind, derive_priority
 from main.runtime.node_prompt_contract import (
     NodeRuntimeToolContract,
@@ -744,6 +744,8 @@ class MainRuntimeService:
         # （与 `_tool_snapshot_supplier` 同一条 side-channel）。
         self.node_runner._skill_roster_supplier = self._node_skill_roster_supplier
         self.node_runner.distribution_delivery_callback = self._deliver_distribution_message
+        # 节点侧 `send_message` 的投递口：NodeRunner 没有 service 引用，走同一条 side-channel。
+        self.node_runner.node_message_delivery_callback = self._deliver_node_message_from_node
         self.node_runner._tool_default_timeout_seconds = self._tool_default_timeout_seconds(app_config)
         self.task_actor_service = TaskActorService(
             store=self.store,
@@ -4977,6 +4979,113 @@ class MainRuntimeService:
             'priority': priority,
             'wake': wake_outcome,
             'reason': '',
+        }
+
+    async def _deliver_node_message_from_node(
+        self,
+        *,
+        task_id: str,
+        sender_node_id: str,
+        sender_is_root: bool,
+        to: Any,
+        intent_kind: str = '',
+        content: str = '',
+        ref: str = '',
+        in_reply_to: str = '',
+    ) -> dict[str, Any]:
+        """`send_message` 的寻址层：把 `parent` / `frontdoor` / 子节点 id 解析成投递。
+
+        越址不抛异常，而是在回执里给出合法目标集合——只告诉模型"不允许"会让它
+        再猜一轮；告诉它"可以发给谁"只需要一次往返。
+        """
+        normalized_task_id = self.normalize_task_id(task_id)
+        sender = self.store.get_node(sender_node_id)
+        if sender is None:
+            return {'ok': False, 'error': 'sender_missing', 'results': [], 'legal_targets': []}
+
+        children = [
+            str(child.node_id or '').strip()
+            for child in list(self.store.list_nodes(normalized_task_id) or [])
+            if str(getattr(child, 'parent_node_id', '') or '').strip() == sender_node_id
+        ]
+        legal_targets: list[str] = ['parent', *children]
+        if sender_is_root:
+            legal_targets.append('frontdoor')
+
+        requested = normalize_targets(to)
+        if not requested:
+            return {
+                'ok': False,
+                'error': 'no_targets',
+                'results': [],
+                'legal_targets': legal_targets,
+            }
+
+        results: list[dict[str, Any]] = []
+        for target in requested:
+            if target == 'parent':
+                parent_id = str(getattr(sender, 'parent_node_id', '') or '').strip()
+                if not parent_id:
+                    results.append(
+                        {'target': 'parent', 'status': 'rejected', 'reason': 'sender_has_no_parent'}
+                    )
+                    continue
+                results.append(
+                    await self.deliver_node_message(
+                        task_id=normalized_task_id,
+                        target_node_id=parent_id,
+                        message=content,
+                        origin='node',
+                        relation='parent',
+                        source_node_id=sender_node_id,
+                        intent_kind=intent_kind,
+                        ref=ref,
+                        in_reply_to=in_reply_to,
+                    )
+                )
+                continue
+            if target == 'frontdoor':
+                if not sender_is_root:
+                    results.append(
+                        {
+                            'target': 'frontdoor',
+                            'status': 'rejected',
+                            'reason': 'frontdoor_root_only',
+                        }
+                    )
+                    continue
+                # 根节点 → 前门通道尚未落地：宁可报错，也不假装送达。
+                results.append(
+                    {
+                        'target': 'frontdoor',
+                        'status': 'rejected',
+                        'reason': 'frontdoor_channel_not_implemented',
+                    }
+                )
+                continue
+            if target not in children:
+                results.append(
+                    {'target': target, 'status': 'rejected', 'reason': 'not_a_direct_child'}
+                )
+                continue
+            results.append(
+                await self.deliver_node_message(
+                    task_id=normalized_task_id,
+                    target_node_id=target,
+                    message=content,
+                    origin='node',
+                    relation='child',
+                    source_node_id=sender_node_id,
+                    intent_kind=intent_kind,
+                    ref=ref,
+                    in_reply_to=in_reply_to,
+                )
+            )
+
+        return {
+            'ok': bool(results) and all(item.get('status') != 'rejected' for item in results),
+            'results': results,
+            'legal_targets': legal_targets,
         }
 
     def _deliver_distribution_message(
