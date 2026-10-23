@@ -970,7 +970,9 @@ class TaskActorService:
         for node in list(self._store.list_nodes(task_id) or []):
             if str(getattr(node, 'node_kind', '') or '').strip().lower() != KIND_ACCEPTANCE:
                 continue
-            if str(getattr(node, 'status', '') or '').strip().lower() not in {'success', 'failed'}:
+            node_terminal = str(getattr(node, 'status', '') or '').strip().lower() in {'success', 'failed'}
+            persisted_verdict = normalize_result_payload((node.metadata or {}).get('result_payload'))
+            if not node_terminal and persisted_verdict is None:
                 continue
             execution = self._node_runner._accepted_execution_node(task_id=task_id, acceptance=node)
             if execution is None:
@@ -981,6 +983,36 @@ class TaskActorService:
             handshake_state = str(handshake.get('state') or '').strip()
             named_node_id = str(handshake.get('acceptance_node_id') or '').strip()
             if named_node_id and named_node_id != str(node.node_id or '').strip():
+                continue
+            if not node_terminal:
+                # 裁决已落盘、节点行还没收口（pass 后被重放回路重置，或进程在
+                # “写结果→落终态”之间被杀）：只认绑定当前提交的裁决，陈旧载荷不得
+                # 被当成本次裁定。
+                persisted_submission_id = str(getattr(persisted_verdict, 'submission_id', '') or '').strip()
+                handshake_submission_id = str(handshake.get('latest_execution_submission_id') or '').strip()
+                if (
+                    persisted_submission_id
+                    and handshake_submission_id
+                    and persisted_submission_id != handshake_submission_id
+                ):
+                    continue
+                if handshake_state not in pending_states:
+                    continue
+                result = persisted_verdict
+                handled = self._node_runner._handle_acceptance_node_result(
+                    task=task,
+                    acceptance=node,
+                    result=result,
+                )
+                progressed = True
+                if str(getattr(handled, 'verdict', '') or '').strip() == 'reject_no_progress':
+                    continue
+                handled_status = str(getattr(handled, 'status', '') or '').strip().lower()
+                handled_delivery = str(getattr(handled, 'delivery_status', '') or '').strip().lower()
+                if handled_status == 'success' and handled_delivery == 'final':
+                    self._node_runner.finalize_inspected_execution_node(
+                        task_id=task_id, node_id=execution.node_id
+                    )
                 continue
             execution_terminal = str(getattr(execution, 'status', '') or '').strip().lower() in {
                 'success',

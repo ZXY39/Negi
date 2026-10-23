@@ -512,6 +512,60 @@ class TestVerdictContext:
             'reject_no_progress',
         ]
 
+    @pytest.mark.asyncio
+    async def test_persisted_verdict_is_settled_when_node_was_reopened(self, tmp_path, monkeypatch):
+        """裁决已落盘但节点行被重放回路重置：只认绑定当前提交的裁决，幂等收口。"""
+        service = _service(tmp_path)
+        _seed(service)
+        _capture_calls(service, monkeypatch)
+        service.store.update_node(
+            CHILD,
+            lambda record: record.model_copy(
+                update={
+                    'metadata': {
+                        **dict(record.metadata or {}),
+                        'acceptance_handshake': {
+                            **dict((record.metadata or {}).get(ACCEPTANCE_HANDSHAKE_KEY) or {}),
+                            'latest_execution_submission_id': 'submission:current',
+                        },
+                    }
+                }
+            ),
+        )
+        service.store.update_node(
+            ACCEPTANCE,
+            lambda record: record.model_copy(
+                update={
+                    'status': 'in_progress',
+                    'metadata': {
+                        **dict(record.metadata or {}),
+                        'result_payload': NodeFinalResult(
+                            status='success',
+                            delivery_status='final',
+                            summary='验收通过',
+                            answer='验收通过',
+                            evidence=[],
+                            remaining_work=[],
+                            blocking_reason='',
+                            verdict='pass',
+                            submission_id='submission:current',
+                        ).model_dump(mode='json'),
+                    },
+                }
+            ),
+        )
+
+        progressed = await service.task_actor_service._drain_acceptance_verdicts(TASK)
+        await _settle(service)
+
+        assert progressed is True
+        assert service.store.get_node(ACCEPTANCE).status == 'success'
+        assert service.store.get_node(CHILD).status == 'success'
+        handshake = dict((service.store.get_node(CHILD).metadata or {}).get(ACCEPTANCE_HANDSHAKE_KEY) or {})
+        assert handshake['state'] == ACCEPTANCE_STATE_ACCEPTED
+        # 幂等：再来一次不再产生动作。
+        assert await service.task_actor_service._drain_acceptance_verdicts(TASK) is False
+
     def test_acceptance_follows_subject_terminal_state(self, tmp_path: Path) -> None:
         """T15：任务收口时验收节点随被验节点终局、状态一致，不按残留节点判失败。"""
         service = _service(tmp_path)

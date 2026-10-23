@@ -697,6 +697,13 @@ class NodeRunner:
                     node_title=node.goal,
                 )
                 self._mark_node_paused(task_id, node.node_id, reason='error', remark=error_text)
+                # 非根节点的异常暂停必须升级父节点：心跳只报根节点，漏掉这一跳
+                # 就会让协议修复/预检类暂停在子树上静默悬空。
+                self.notify_parent_abnormal_pause(
+                    task_id=task_id,
+                    node_id=node.node_id,
+                    reason=error_text,
+                )
                 raise NodePausedError(task_id, node.node_id)
             if self._pause_requested(task_id):
                 self._mark_finished(task_id, node.node_id, result)
@@ -1956,25 +1963,9 @@ class NodeRunner:
         if acceptance is None:
             return None
         if self._normalized_status(getattr(acceptance, 'status', '')) in {STATUS_SUCCESS, STATUS_FAILED}:
-            # 验收节点已是终态：通知无法再唤醒它。重置回 in_progress，让正常握手
-            # 重新核验本次新提交，避免把通知投递给永不消费的终态节点导致死锁。
-            # 重置前先把既有裁决文本存入 rejection_history，防止原始结论被清空。
-            self._stash_node_verdict_history(acceptance.node_id)
-            self._store.update_node(
-                acceptance.node_id,
-                lambda record: record.model_copy(
-                    update={
-                        'status': 'in_progress',
-                        'final_output': '',
-                        'final_output_ref': '',
-                        'failure_reason': '',
-                        'updated_at': _now(),
-                    }
-                ),
-            )
-            self._log_service.publish_node_state(task.task_id, acceptance.node_id)
-            self._log_service.refresh_task_view(task.task_id, mark_unread=True)
-            acceptance = self._store.get_node(acceptance.node_id) or acceptance
+            # 验收节点已是终态：通知无法再唤醒它。新提交到达时重置回 in_progress，
+            # 让正常握手重新核验本次提交（旧裁决先存入 rejection_history）。
+            acceptance = self._reset_terminal_acceptance_for_reverify(task=task, acceptance=acceptance)
         result_ref = self._persist_acceptance_candidate_result(task_id=task.task_id, node_id=node.node_id, result=result)
         self._set_execution_waiting_acceptance_state(
             task_id=task.task_id,
@@ -5771,31 +5762,11 @@ class NodeRunner:
         acceptance_id = str(entry.get('acceptance_node_id') or '').strip()
         acceptance = self._store.get_node(acceptance_id) if acceptance_id else None
         if acceptance is not None:
-            # 绑定的验收节点可能已是终态：那是它更早（甚至对着空交接）下的结论，
-            # 不能当成本轮裁定。先作废回 in_progress，本轮交付才有人重验。
-            # 例外：终态验收是在当前提交之后落下的（或握手已 accepted）——这份终态
-            # 就是对本轮交付的裁定，重放 spawn 轮不得把它重新打开（否则 pass 之后
-            # 会被再验一轮、甚至改判 reject）。
-            child_handshake = normalize_acceptance_handshake(
-                (child.metadata or {}).get(ACCEPTANCE_HANDSHAKE_KEY)
-            )
-            handshake_says_accepted = (
-                str(child_handshake.get('state') or '').strip() == ACCEPTANCE_STATE_ACCEPTED
-            )
-            verdict_is_current = False
-            if self._normalized_status(getattr(acceptance, 'status', '')) in {STATUS_SUCCESS, STATUS_FAILED}:
-                try:
-                    verdict_at = datetime.fromisoformat(
-                        str(getattr(acceptance, 'updated_at', '') or '').replace('Z', '+00:00')
-                    )
-                    submitted_at = datetime.fromisoformat(
-                        str(child_handshake.get('updated_at') or '').replace('Z', '+00:00')
-                    )
-                    verdict_is_current = verdict_at >= submitted_at
-                except ValueError:
-                    verdict_is_current = False
-            if not handshake_says_accepted and not verdict_is_current:
-                acceptance = self._reset_terminal_acceptance_for_reverify(task=task, acceptance=acceptance)
+            # 已绑定的验收节点直接复用。终态不再在这里作废：新的提交由
+            # `_maybe_start_acceptance_handshake` 负责把终态验收节点重置回 in_progress；
+            # 重放 spawn 轮只是重放创建账本，不能重新打开一份已经对当前提交下过的裁定
+            # （否则 pass 之后会被再验一轮，甚至改判 reject）。
+            pass
         if acceptance is None:
             acceptance_goal = _spawn_acceptance_goal(spec.goal)
             acceptance_prompt = str(spec.acceptance_prompt or '')
@@ -5808,9 +5779,7 @@ class NodeRunner:
                 child=child,
                 exclude_node_ids=claimed_acceptance_ids,
             )
-            if acceptance is not None:
-                acceptance = self._reset_terminal_acceptance_for_reverify(task=task, acceptance=acceptance)
-            else:
+            if acceptance is None:
                 acceptance = self._find_reusable_acceptance_node(
                     task=task,
                     accepted_node=child,
