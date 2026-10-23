@@ -106,10 +106,30 @@ include = [
 [tool.ruff]
 line-length = 100
 target-version = "py312"
+# Vendored payloads, generated task data and untracked scratch trees are not first-party debt.
+# skills/** ships as model-visible script payloads: changing them is a content decision, not a lint one.
+# "runtime/*" is root-anchored on purpose: a bare "runtime" also drops the g3ku/runtime and main/runtime packages.
+extend-exclude = [
+    "work",
+    "skills",
+    "runtime/*",
+    "pytest-of-Administrator",
+    "repair_tmp",
+    ".g3ku",
+]
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "N", "W"]
 ignore = ["E501"]
+
+[tool.ruff.lint.per-file-ignores]
+# Tests and scripts insert REPO_ROOT into sys.path before importing repo modules.
+"tests/**" = ["E402"]
+"scripts/*.py" = ["E402"]
+# Win32/COM struct and entry-point names are the OS contract; renaming them breaks the call.
+"g3ku/web/windows_job.py" = ["N801", "N802"]
+"tests/resources/test_windows_job_runtime.py" = ["N802"]
+"tests/resources/test_desktop_shell_lane.py" = ["N802"]
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
