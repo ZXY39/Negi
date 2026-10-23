@@ -30,7 +30,7 @@ async def test_frontdoor_postprocess_tool_cycle_drops_summary_fields(monkeypatch
     assert "summary_model_key" not in result
 
 
-def test_frontdoor_build_prompt_context_uses_stage_overlay_only() -> None:
+def test_frontdoor_build_prompt_context_carries_no_stage_overlay() -> None:
     runner = CreateAgentCeoFrontDoorRunner(loop=SimpleNamespace())
 
     context = runner.build_prompt_context(
@@ -59,5 +59,7 @@ def test_frontdoor_build_prompt_context_uses_stage_overlay_only() -> None:
         tools=[],
     )
 
+    # state 里带的是拆除前形状的台账：存量行不能把旧摘要带回提示词，也不能把阶段 overlay 带回。
+    assert context["system_overlay"] == ""
     assert "legacy summary should be ignored" not in context["system_overlay"]
-    assert "Inspect the request" in context["system_overlay"]
+    assert "Inspect the request" not in context["system_overlay"]
