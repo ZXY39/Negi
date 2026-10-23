@@ -33,7 +33,10 @@ from main.models import (
 )
 from main.runtime.acceptance_handshake import (
     ACCEPTANCE_HANDSHAKE_KEY,
+    ACCEPTANCE_STATE_ACCEPTED,
+    ACCEPTANCE_STATE_CANCELED_BY_EXECUTION_FAILURE,
     ACCEPTANCE_STATE_IDLE,
+    ACCEPTANCE_STATE_REJECTED_TERMINAL,
     ACCEPTANCE_STATE_WAITING_ACCEPTANCE,
     ACCEPTANCE_STATE_WAITING_EXECUTION_RETRY,
     normalize_acceptance_handshake,
@@ -55,15 +58,6 @@ from main.runtime.pending_notice_state import (
     RESUME_MODE_ORDINARY,
     RESUME_MODE_WAIT_FOR_CHILDREN,
     set_pending_notice_state,
-)
-from main.runtime.acceptance_handshake import (
-    ACCEPTANCE_STATE_ACCEPTED,
-    ACCEPTANCE_STATE_CANCELED_BY_EXECUTION_FAILURE,
-    ACCEPTANCE_STATE_IDLE,
-    ACCEPTANCE_STATE_REJECTED_TERMINAL,
-    ACCEPTANCE_STATE_WAITING_ACCEPTANCE,
-    normalize_acceptance_handshake,
-    set_acceptance_handshake_state,
 )
 from main.runtime.react_loop import ReActToolLoop
 from main.runtime.node_runner import SKIPPED_CHECK_RESULT
@@ -8998,21 +8992,6 @@ def test_acceptance_handshake_numeric_fields_fall_back_safely() -> None:
     assert "max_rejections" not in normalized
     assert updated["state"] == ACCEPTANCE_STATE_WAITING_ACCEPTANCE
     assert updated["rejection_count"] == 0
-
-
-def test_normalize_final_acceptance_metadata_allows_handshake_statuses() -> None:
-    payload = normalize_final_acceptance_metadata(
-        {
-            "required": True,
-            "prompt": "verify output",
-            "node_id": "node:acceptance",
-            "status": "waiting_execution_retry",
-        }
-    )
-
-    assert payload.required is True
-    assert payload.node_id == "node:acceptance"
-    assert payload.status == "waiting_execution_retry"
 
 
 @pytest.mark.parametrize(

@@ -1126,21 +1126,6 @@ def test_build_prompt_context_keeps_dispatch_overlay() -> None:
     assert "verified task id task:demo-123" in overlay
 
 
-def test_build_prompt_context_keeps_dispatch_overlay() -> None:
-    runner = CreateAgentCeoFrontDoorRunner(loop=SimpleNamespace())
-
-    result = runner.build_prompt_context(
-        state={
-            "repair_overlay_text": "Dispatch result is already available. Reply naturally based on the verified task id task:demo-123.",
-        },
-        runtime=SimpleNamespace(),
-        tools=[],
-    )
-
-    overlay = str(result["system_overlay"])
-    assert "verified task id task:demo-123" in overlay
-
-
 @pytest.mark.asyncio
 async def test_graph_normalize_model_output_finalizes_plain_text_when_transition_required() -> None:
     runner = CreateAgentCeoFrontDoorRunner(loop=SimpleNamespace())
