@@ -1,8 +1,9 @@
 """Check docs/architecture against the structural invariants in README「Maintenance Rules」.
 
 Reports leaf sections over the size limit, pointers whose topic phrase resolves to no
-heading, pointers naming a doc file that does not exist, and — as warnings only — the
-rule 4 wording family (calendar dates and changelog phrasing). Exit 1 on any error.
+heading (including 见「topic」 that names no doc), pointers naming a doc file that does
+not exist, and — as warnings only — the rule 4 wording family (calendar dates and
+changelog phrasing). Exit 1 on any error.
 
     python scripts/check_architecture_docs.py [docs/architecture]
 """
@@ -17,6 +18,9 @@ LEAF_LIMIT_BYTES = 25 * 1024
 STRIP = re.compile('[\\s，。、；：“”‘’（）`*_#>|/\\\\.,:;!？!?(){}<>-]+')
 HEADING = re.compile(r'^(#{1,6}) (.+)$')
 POINTER = re.compile(r'`([a-z0-9\-]+\.md)`\s*[「"]([^\n]{3,90}?)[」"]')
+# 见「topic」 without a doc name: rule 3 says a pointer names a topic, so an unnamed one is only
+# valid when the topic is a heading in the same doc.
+BARE_POINTER = re.compile(r'(?:见|参见|详见)\s*「([^」\n]{3,60})」')
 CALENDAR_DATE = re.compile(r'\b20\d{2}-\d{2}(?:-\d{2})?\b')
 CHANGELOG = re.compile(r'不再|曾经|以前|已拆除|\bused to\b|\bpreviously\b|\bno longer\b', re.IGNORECASE)
 # Sections whose job is to quote are exempt from the wording family: the rule list quotes the
@@ -137,6 +141,21 @@ def main(argv: list[str]) -> int:
                     warnings.append(f'{f}:{i + 1} "{topic[:44]}" resolves to prose, not a heading, in {doc}')
                 else:
                     errors.append(f'{f}:{i + 1} dangling pointer to {doc} "{topic[:44]}"')
+
+    for f in files:
+        for i, line in enumerate(contents[f]):
+            for topic in BARE_POINTER.findall(line):
+                t = norm(topic)
+                if any(t in h or (len(h) > 8 and h in t) for h in titles[f]):
+                    continue
+                other = [g for g in files if g != f
+                         and any(t in h or (len(h) > 8 and h in t) for h in titles[g])]
+                if other:
+                    warnings.append(f'{f}:{i + 1} 见「{topic[:34]}」 resolves in {other[0]} '
+                                    f'but the pointer names no doc')
+                else:
+                    warnings.append(f'{f}:{i + 1} dangling pointer 见「{topic[:34]}」 — '
+                                    f'no heading of that name in any doc')
 
     print(f'\n{"total":42} {total / 1024:7.1f} KB in {len(files)} docs')
     for w in warnings:
