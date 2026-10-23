@@ -800,20 +800,6 @@ class MainRuntimeService:
             max_concurrent_tasks=None if execution_runtime_enabled else 4,
             per_task_limit=1,
         )
-        self.task_actor_service.distribution_resume_callback = (
-            lambda task_id: asyncio.get_running_loop().call_soon(
-                lambda normalized_task_id=str(task_id or '').strip(): asyncio.create_task(
-                    self.global_scheduler.enqueue_task(normalized_task_id)
-                )
-            )
-        )
-        self.task_actor_service.distribution_failure_notifier = (
-            lambda task_id, epoch_id, error_text: self.emit_task_distribution_error(
-                task_id=task_id,
-                epoch_id=epoch_id,
-                error_text=error_text,
-            )
-        )
         self.task_actor_service.distribution_skipped_notifier = (
             lambda task_id, epoch_id, root_message, items: self.emit_task_distribution_skipped(
                 task_id=task_id,
@@ -918,7 +904,7 @@ class MainRuntimeService:
         # 磁盘治理（P1）：对账循环、紧急态自动暂停互斥与边沿状态。
         self._task_disk_reconcile_task: asyncio.Task[Any] | None = None
         # 分发驱动器接管对账循环（子树屏障不能只靠驱动器自己活着）。
-        self._distribution_reconcile_task: asyncio.Task[Any] | None = None
+        self._terminal_outbox_reconcile_task: asyncio.Task[Any] | None = None
         self._disk_emergency_pause_lock = asyncio.Lock()
         self._disk_emergency_alerted = False
         self._task_terminal_delivery_tasks: dict[str, asyncio.Task[Any]] = {}
@@ -1043,12 +1029,12 @@ class MainRuntimeService:
                     self._task_disk_reconcile_loop(),
                     name=f'main-runtime-disk-reconcile:{self.worker_id or self.execution_mode}',
                 )
-            # 分发接管：epoch 处于活跃分发态但驱动器已不在跑 → 重新武装，
-            # 让「驱动器退出」从永久冻结降级为 ≤60s 自愈。
-            if self._distribution_reconcile_task is None or self._distribution_reconcile_task.done():
-                self._distribution_reconcile_task = asyncio.create_task(
-                    self._distribution_reconcile_loop(),
-                    name=f'main-runtime-distribution-reconcile:{self.worker_id or self.execution_mode}',
+            # 终态 outbox 的周期重投：宿主循环原先是分发对账的搭车者，分发下线后
+            # 单独保留这一半（失败投递否则要等到下次重启才会重放）。
+            if self._terminal_outbox_reconcile_task is None or self._terminal_outbox_reconcile_task.done():
+                self._terminal_outbox_reconcile_task = asyncio.create_task(
+                    self._terminal_outbox_reconcile_loop(),
+                    name=f'main-runtime-terminal-outbox-reconcile:{self.worker_id or self.execution_mode}',
                 )
         if self.execution_mode == 'worker':
             if self.tool_pressure_monitor is not None:
@@ -1390,11 +1376,6 @@ class MainRuntimeService:
             elif command_type == 'resume_task':
                 if task_id:
                     await self.resume_task(task_id)
-                success = True
-            elif command_type == 'run_distribution_epoch':
-                # 定向通知：只唤醒子树分发驱动器，不动任务暂停状态。
-                if task_id:
-                    self.task_actor_service.ensure_scoped_epoch_driver(task_id)
                 success = True
             elif command_type == 'pause_task':
                 if task_id:
@@ -1953,9 +1934,6 @@ class MainRuntimeService:
             results.append({'node_id': node_id, 'result': 'resumed' if updated is not None else 'not_found'})
         if schedule_if_inactive and dispatcher is None and any(item.get('result') == 'resumed' for item in results) and str(task.status or '').strip().lower() == 'in_progress' and not bool(task.is_paused):
             await self.global_scheduler.enqueue_task(normalized_task_id)
-        if any(item.get('result') == 'resumed' for item in results):
-            # 被延迟的分发目标（人工暂停入队）随节点恢复重新唤醒驱动器。
-            self.task_actor_service.ensure_scoped_epoch_driver(normalized_task_id)
         return {'ok': True, 'task_id': normalized_task_id, 'items': results}
 
     async def _apply_fail_node_command(self, task_id: str, *, node_ids: list[str], reason: str = '', force: bool = False) -> dict[str, Any]:
@@ -2477,7 +2455,6 @@ class MainRuntimeService:
                 and not bool(getattr(resumed_task, 'is_paused', False))
             ):
                 await self.global_scheduler.enqueue_task(normalized_task_id)
-            self.task_actor_service.ensure_scoped_epoch_driver(normalized_task_id)
         if self.execution_mode == 'web':
             # 每条目一条命令：携带 leader 已展开的显式 node_ids + cascade=False，
             # worker 不再重展开（防两次展开漂移），并保条目顺序与 remark 保真。
@@ -4798,16 +4775,8 @@ class MainRuntimeService:
         )
 
     async def _schedule_distribution_epoch(self, task: TaskRecord) -> None:
-        # 不再借道 resume_task（那会清除操作员的任务暂停）：只唤醒分发驱动器。
-        if self.execution_mode in {'embedded', 'worker'}:
-            self.task_actor_service.ensure_scoped_epoch_driver(task.task_id)
-            return
-        self._enqueue_task_command(
-            command_type='run_distribution_epoch',
-            task_id=task.task_id,
-            session_id=task.session_id,
-            payload={'task_id': task.task_id},
-        )
+        """已随决策 M 下线：epoch 子系统不再接受新任务。"""
+        _ = task
 
     def _refresh_distribution_meta(self, task_id: str) -> None:
         """分发 runtime meta 的唯一写入口：从 epoch 行全量重算后整体覆盖。
@@ -9383,26 +9352,15 @@ class MainRuntimeService:
             except Exception:
                 continue
 
-    async def _distribution_reconcile_loop(self) -> None:
-        """分发收尾接管对账（60s）：驱动器缺席 → 重新武装；释放账未销 → 补跑释放。
+    async def _terminal_outbox_reconcile_loop(self) -> None:
+        """终态 outbox 的周期重投（60s）。
 
-        分发驱动器与释放路径都是子树屏障的唯一解除者，任何一次半路退出都会把任务留成
-        「无声 in_progress」；这里保证那种形态最多存活一个扫描周期。必须在事件循环线程
-        调用（ensure 依赖 get_running_loop，释放要 resume 进程内 entry）。
-
-        同一次扫描顺带补投 pending 的终态 outbox 行：在接入这条节拍之前，滞留的终态行
-        只有进程启动时才被重放（`_schedule_pending_task_terminal_callbacks` 的唯一调用点
-        在 startup），一次投递失败就是把结果压到下次重启 —— 2026-09-23 实盘两条分别压了
-        1h39m 与 10h16m，重启后作为陈旧事件唤醒会话、自动向用户回一条考古汇报。
+        原宿主是分发对账循环；epoch 子系统下线后只保留这一半：滞留的终态行若只在
+        进程启动时重放，一次投递失败就会把结果压到下次重启（2026-09-23 实盘两条分别
+        压了 1h39m 与 10h16m）。
         """
         while True:
             await asyncio.sleep(60.0)
-            try:
-                await self.task_actor_service.reconcile_distribution_drivers()
-            except asyncio.CancelledError:
-                raise
-            except Exception:
-                pass
             try:
                 self._schedule_pending_task_terminal_callbacks()
             except asyncio.CancelledError:
@@ -11836,7 +11794,6 @@ class MainRuntimeService:
                 'stop_tool_execution': StopToolExecutionTool(
                     task_service_getter,
                 ),
-                'task_append_notice': TaskAppendNoticeTool(self),
             }
         return dict(self._builtin_tool_cache)
 
@@ -12402,7 +12359,7 @@ class MainRuntimeService:
             self._command_poller_task,
             self._worker_heartbeat_task,
             self._task_disk_reconcile_task,
-            self._distribution_reconcile_task,
+            self._terminal_outbox_reconcile_task,
         ]
         for task in loop_tasks:
             if task is not None and not task.done():
@@ -13616,6 +13573,12 @@ class TaskNodeDetailTool(Tool):
 
 
 class TaskAppendNoticeTool(Tool):
+    """已随决策 M/O 下线：不再注册到 CEO 工具面。
+
+    保留类只为平滑外部 import；工具面已无此工具，不要重新注册——新模型里节点间
+    通信走 `send_message`，前门 → 根的通道另行落地。
+    """
+
     hide_universal_timeout_parameter = True
 
     def __init__(self, service: MainRuntimeService):
@@ -13633,21 +13596,15 @@ class TaskAppendNoticeTool(Tool):
     def parameters(self) -> dict[str, Any]:
         return build_task_append_notice_parameters()
 
-    async def execute(
-        self,
-        task_ids: list[str] | None = None,
-        node_ids: list[str] | None = None,
-        message: str = '',
-        __g3ku_runtime: dict[str, Any] | None = None,
-        **kwargs: Any,
-    ) -> str:
-        runtime = _tool_runtime_payload(__g3ku_runtime, kwargs)
-        result = await self._service.task_append_notice(
-            task_ids=list(task_ids or []),
-            node_ids=list(node_ids or []),
-            message=str(message or '').strip(),
-            session_id=str(runtime.get('session_key') or 'web:shared').strip() or 'web:shared',
+    async def execute(self, **kwargs: Any) -> str:
+        _ = kwargs
+        return json.dumps(
+            {
+                'ok': False,
+                'error': 'task_append_notice_retired',
+                'details': '该工具已下线：节点侧请用 send_message，用户侧请通过会话补充要求。',
+            },
+            ensure_ascii=False,
         )
-        return result if isinstance(result, str) else json.dumps(result, ensure_ascii=False)
 
 

@@ -747,16 +747,13 @@ class TaskActorService:
                 default=_DEFAULT_NODE_DISPATCH_LIMITS['inspection'],
             ),
         }
-        self.distribution_resume_callback = None
-        self.distribution_failure_notifier = None
-        # 降级跳过（单节点决策耗尽）的汇总提醒：一个 epoch 一条，交给会话 agent 决策。
+        # 降级跳过（单节点决策耗尽）的汇总提醒：随分发 epoch 下线，保留字段供旧
+        # 调用方读取，但不再有人设置。
         self.distribution_skipped_notifier = None
         # 引擎级中断（无取消/暂停标志的 CancelledError）后的尽力即时重排钩子：
         # 由 MainRuntimeService 接到 global_scheduler.enqueue_task。进程退出中
         # 调度器关闭时自然无效，任务由下一个 worker 启动恢复兜底。
         self.interrupted_task_requeue_callback = None
-        # 每任务单飞的子树分发驱动器（side asyncio.Task）。
-        self._epoch_drivers: dict[str, asyncio.Task[None]] = {}
         # A3：释放后校验清扫任务（每任务替换式单飞，run_task finally 取消）。
         self._release_sweeps: dict[str, asyncio.Task[None]] = {}
         self._node_runner.nested_node_executor = self._execute_nested_node
@@ -765,29 +762,6 @@ class TaskActorService:
         # 子节点创建后的立即派发：拆掉阻塞承诺后，父节点不再等子管线，
         # 创建完成就必须交给调度器起跑。
         self._node_runner.dispatch_node_callback = self.schedule_node_nowait
-
-    async def _resume_distribution_if_needed(self, task_id: str) -> None:
-        resume_callback = self.distribution_resume_callback
-        if not callable(resume_callback):
-            return
-        result = resume_callback(task_id)
-        if asyncio.iscoroutine(result):
-            await result
-
-    def _notify_distribution_failure(self, *, task_id: str, epoch_id: str, error_text: str) -> None:
-        notifier = self.distribution_failure_notifier
-        if not callable(notifier):
-            return
-        try:
-            result = notifier(
-                task_id=str(task_id or '').strip(),
-                epoch_id=str(epoch_id or '').strip(),
-                error_text=str(error_text or '').strip(),
-            )
-            if asyncio.iscoroutine(result):
-                asyncio.get_running_loop().create_task(result)
-        except Exception:
-            logger.debug("distribution failure notifier callback failed for {}")
 
     async def _resume_pending_notice_nodes(self, task_id: str) -> bool:
         distribution = self._distribution_runtime_state(task_id)
@@ -819,12 +793,9 @@ class TaskActorService:
             # 执行路径（执行节点先干活，提交后握手自然放行验收）。
             return False
         if skipped_premature_acceptance:
-            # 其他节点消费了通知但最终验收仍过早：补一次入队，避免
-            # control_only_return 后无人再驱动根节点继续执行。
-            await self._enqueue_acceptance_followup_if_needed(task_id)
-        refreshed = self._distribution_runtime_state(task_id)
-        if any(str(item or '').strip() for item in list(refreshed.get('pending_notice_node_ids') or [])):
-            await self._resume_distribution_if_needed(task_id)
+            # 其他节点消费了通知但最终验收仍过早：run_task 的派发循环会在回到
+            # 静止后重新扫描，无需再显式补入队。
+            pass
         return True
 
     def _is_root_final_acceptance_node(self, *, task, node) -> bool:
@@ -890,9 +861,8 @@ class TaskActorService:
         if str(handled.delivery_status or '').strip() != 'partial':
             return
         # 打回（或通知中断）：执行节点回到 waiting_execution_retry 并持有拒绝
-        # 反馈通知；刷新分发态使根节点进入待恢复清单，并显式补入队驱动重跑。
+        # 反馈通知；派发循环会在回到静止后重新拾起它。
         self._node_runner._refresh_resume_ready_distribution_state(task_id=task_id)
-        await self._enqueue_acceptance_followup_if_needed(task_id)
 
     async def _resume_inflight_final_acceptance(self, task_id: str) -> bool:
         """重派发「握手在等、但回合半路断掉」的最终验收节点——通知账本之外的兜底路径。
@@ -976,14 +946,6 @@ class TaskActorService:
                     blocking_reason='missing root node',
                 )
             else:
-                distribution = self._distribution_runtime_state(task_id)
-                if str(distribution.get('state') or '').strip() in _DISTRIBUTION_ACTIVE_STATES:
-                    # 子树分发进行中：确保单飞驱动器在跑，然后继续普通执行路径。
-                    # - 根在屏障内（根定向=原全局冻结）：根 entry 被 hold 谓词
-                    #   挂起为 pending future，run_task 自然等待到驱动器释放；
-                    # - 根不在屏障内：无关分支照常执行，驱动器并发推进 epoch。
-                    # 不再 control_only_return：那会把整任务冻结，违背局部暂停。
-                    self.ensure_scoped_epoch_driver(task_id)
                 # C：孤儿收尸/重派发——每次 worker 拾取都决断"DB 非终态但无执行器
                 # 也无重放路径"的节点，杜绝幽灵 in_progress（2026-09-15 事故 L3）。
                 await self._reconcile_orphan_in_progress_nodes(task_id, dispatcher)
@@ -1649,14 +1611,6 @@ class TaskActorService:
     async def _execute_node(self, task_id: str, node_id: str) -> NodeFinalResult:
         return await self._execute_nested_node(task_id, node_id)
 
-    async def _enqueue_acceptance_followup_if_needed(self, task_id: str) -> None:
-        resume_callback = self.distribution_resume_callback
-        if not callable(resume_callback):
-            return
-        result = resume_callback(task_id)
-        if asyncio.iscoroutine(result):
-            await result
-
     def _create_dispatcher(self, task_id: str) -> TaskNodeDispatcher:
         return TaskNodeDispatcher(
             task_id=task_id,
@@ -1923,7 +1877,7 @@ class TaskActorService:
         # task level so the task hall shows 「任务暂停」 instead of a running task.
         # Resume (operator or CEO) clears this via set_pause_state(False, False).
         self._log_service.set_pause_state(task_id, pause_requested=True, is_paused=True)
-        # Deliberately no clear_pause / _resume_distribution_if_needed here: the task
+        # Deliberately no clear_pause here: the task
         # stays paused until an operator or the CEO explicitly resumes it or appends a
         # new notice (which queues a fresh epoch and re-runs distribution).
         self._notify_distribution_failure(
