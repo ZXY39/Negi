@@ -2094,7 +2094,7 @@ class NodeRunner:
             return None
         task_id = str(task.task_id or '')
         node_id = str(node.node_id or '')
-        # run_node 传入的可能是入口时的旧快照；握手/阶段元数据以库内最新记录为准。
+        # run_node 传入的可能是入口时的旧快照；握手元数据以库内最新记录为准。
         node = self._store.get_node(node_id) or node
         handshake = normalize_acceptance_handshake((node.metadata or {}).get(ACCEPTANCE_HANDSHAKE_KEY))
         rejection_count = int(handshake.get('rejection_count') or 0)

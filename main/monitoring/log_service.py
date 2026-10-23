@@ -4452,7 +4452,7 @@ class TaskLogService:
 
         正文解析（读盘 + 解码 + `json.loads` + 建导航索引）是这条链最贵的一段：负载窗口
         py-spy 里 `_resolve_content_ref` 一层就占 hydration 总开销的四分之三。只读帧内
-        状态（阶段、工具调用、指针本身）的读点都该传 False——指针与计数是写帧时就在
+        状态（工具调用、指针本身）的读点都该传 False——指针与计数是写帧时就在
         payload 里的字段，解析正文不会改变它们。
         """
         payload = dict(record.payload or {})

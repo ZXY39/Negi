@@ -521,7 +521,7 @@ async def get_external_session_state(
     activity = summarize_external_session_activity(list(hub.replay(0)) if hub is not None else [])
     # 会话自己就知道这一轮是怎么停的（`RuntimeAgentSession._last_stop_reason`，正常交/
     # 用户暂停/没交正文就收），以前只写进续跑状态、没往外给。调用方看到
-    # `turn.completed` 而阶段还 active 时，唯一能分辨交付与早退的就是它。
+    # 调用方看到 `turn.completed` 时，分辨"交付完了"与"没交正文就收"就靠它。
     stop_reason = str(getattr(session, "_last_stop_reason", "") or "")
     # 账本读是整份文件读（实测 31 条 pending ≈ 0.8ms）。它只在两个地方变小：消费方 ack
     # 落墓碑 + 每小时 compact，所以轮询这颗端点不会把它养成大读口。真养大了就该换成
@@ -559,7 +559,7 @@ async def get_external_session_state(
         "latest_model_text": activity["latest_model_text"],
         "latest_model_text_total_chars": activity["latest_model_text_total_chars"],
         "recent_tool_calls": activity["recent_tool_calls"],
-        # 结束方式与"这轮留没留下没被取走的正文"：completed 与阶段 active 同时出现时，
+        # 结束方式与"这轮留没留下没被取走的正文"：回合已收而正文仍未被取走时，
         # 这两行是调用方唯一能分辨"交付完了"还是"中途早退"的读数。
         "stop_reason": stop_reason,
         "unconsumed_replies": unconsumed,

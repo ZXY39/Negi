@@ -389,7 +389,7 @@ class NodeTurnController:
         )
 
     def forget_route_binding(self, node_id: str) -> None:
-        """节点结束或阶段边界：清掉 balancer 里该节点的粘滞绑定。"""
+        """节点结束：清掉 balancer 里该节点的粘滞绑定（绑定跨回合保留）。"""
         if self._balancer is not None:
             self._balancer.forget_node(node_id)
 

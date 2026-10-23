@@ -1968,7 +1968,7 @@ class TaskQueryService:
             if digest:
                 cache[node_id] = (digest, frame)
             return frame
-        # 抬头派生的四个字段每拍重算后覆盖：写进缓存会把一帧的"过期"时刻与阶段
+        # 抬头派生的四个字段每拍重算后覆盖：写进缓存会把一帧的"过期"时刻与抬头
         # 冻结在第一次读取那一刻。
         return frame.model_copy(update={
             'depth': depth,

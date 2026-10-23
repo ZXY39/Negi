@@ -1026,9 +1026,9 @@ class ReActToolLoop:
                 )
             node_turn_lease = None
             if node_turn_controller is not None and (route_plan_for_turn is not None or primary_model_ref):
-                # 绑定跨回合、跨阶段都保留：换 model_key 等于换前缀缓存命名空间，而
+                # 绑定跨回合保留：换 model_key 等于换前缀缓存命名空间，而
                 # "该换人了"的所有真实理由（无容量、限流惩罚、窗口不再匹配、成员被移出组）
-                # 都在下一次准入里现判，不需要按阶段节拍强制重选。
+                # 都在下一次准入里现判，不需要按节拍强制重选。
                 try:
                     node_turn_lease = await self._await_with_model_marker(
                         task_id=task.task_id,
@@ -4360,7 +4360,7 @@ class ReActToolLoop:
                 continue
             first_live = dict(first_result.get('live_state') or {})
             if str(first_live.get('status') or '').strip().lower() == 'error':
-                # 首个调用被阶段闸门拦截或执行出错:重复调用同样返回该错误,不标 reused。
+                # 首个调用执行出错:重复调用同样返回该错误,不标 reused。
                 first_content = str(dict(first_result.get('tool_message') or {}).get('content') or '')
                 ordered_results[dup_index] = _blocked_call_result(
                     dup_index,
@@ -6202,7 +6202,7 @@ class ReActToolLoop:
         """摘要带上了就只留摘要；没带上就把原文滚成代持段，从下一跳起以段的形式在场。
 
         段是逐字原文且带 `notice_ids`，所以"信息在不在"从赌模型变成可对账；代价是这条
-        要求此后每跳占位（本次样本 1,567 字符），直到被 supersede 或另立阶段。
+        要求此后每跳占位（本次样本 1,567 字符），直到被 supersede 或下一次压缩另立段。
         """
         probe = score_append_notice_preservation(compressed_text, records)
         if int(probe.get('miss_count') or 0) <= 0:
@@ -7864,7 +7864,7 @@ class ReActToolLoop:
     ) -> dict[str, str]:
         """在场的 toolskill 契约：``tool_id -> fingerprint``，与 callable 收窄共用同一判据函数。
 
-        判据只认模型眼前的 `[TOOL_CONTRACT:…]` 块（两条投递道都印它），阶段台账里保留的
+        判据只认模型眼前的 `[TOOL_CONTRACT:…]` 块（两条投递道都印它），回合台账里保留的
         正文不再算在场（D9）。两处必须同判据，否则裁撤后重读被放行、同一份正文在上下文里
         出现两次。
         """
@@ -8712,7 +8712,7 @@ class ReActToolLoop:
         return ReActToolLoop._runtime_context_parameter_name(tool) is not None
 
     def forget_node_route_binding(self, node_id: str) -> None:
-        """节点结束时释放负载均衡的粘滞绑定（绑定跨回合保留，只在节点结束或阶段推进时清）。"""
+        """节点结束时释放负载均衡的粘滞绑定（绑定跨回合保留，只有节点结束才清）。"""
         controller = getattr(self, '_node_turn_controller', None)
         forget = getattr(controller, 'forget_route_binding', None)
         if callable(forget):
@@ -8857,8 +8857,8 @@ class ReActToolLoop:
         if not request_messages:
             return [{'role': 'user', 'content': blocks}]
         last_message = dict(request_messages[-1] or {})
-        # 末位可能是当轮契约或 turn-only 阶段提示：替换为多模态块时把原文字
-        # 折进首个 text 块，避免当前轮契约/阶段引导信息丢失。
+        # 末位可能是当轮契约或 turn-only 提示：替换为多模态块时把原文字
+        # 折进首个 text 块，避免当前轮契约与引导信息丢失。
         existing_text = str(last_message.get('content') or '').strip()
         if existing_text:
             blocks = [
@@ -9265,7 +9265,7 @@ class ReActToolLoop:
         返回 (adopted_seed_records, derived_delta, request_seed_source)；adopted 为
         None 时调用方回退投影重组装，source 为 fallback_* 之一——禁止静默回退。
 
-        不再要求投影整体与 seed 结构等价：投影（阶段压缩块、工具正文外部化、
+        要求投影整体与 seed 结构等价会带来永久降级：投影（压缩块、工具正文外部化、
         归档 notice tail 重渲染）与发送侧形态必然在中段分叉。只校验两点：
         - 头探针：前两条（system + 首条 user）归一化相等，拦截跨 run 模板漂移
           与 legacy wire 形态 seed（/responses 项无 role，回灌 adapter 会被丢弃）；
