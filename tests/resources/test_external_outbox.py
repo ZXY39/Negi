@@ -32,6 +32,38 @@ def test_record_and_load_pending_roundtrip() -> None:
     assert pending[0]["session_key"] == "ext:qq-official:aaa"
 
 
+def test_newer_reply_supersedes_older_pending_reply_in_same_session() -> None:
+    older = external_outbox.record_outbound_message(
+        session_key="ext:qoder:aaa",
+        external_key="mcp:probe",
+        text="旧回复",
+        event=external_outbox.REPLY_EVENT,
+    )
+    push = external_outbox.record_outbound_message(
+        session_key="ext:qoder:aaa", external_key="mcp:probe", text="主动推送"
+    )
+    other_session = external_outbox.record_outbound_message(
+        session_key="ext:qoder:bbb",
+        external_key="mcp:probe",
+        text="别的会话",
+        event=external_outbox.REPLY_EVENT,
+    )
+    newer = external_outbox.record_outbound_message(
+        session_key="ext:qoder:aaa",
+        external_key="mcp:probe",
+        text="新回复",
+        event=external_outbox.REPLY_EVENT,
+    )
+
+    pending_ids = {str(item.get("id") or "") for item in external_outbox.load_pending_outbound()}
+    # 拉取式客户端只会取到最新一条回复：旧的同会话回复销账，正文仍在转录里。
+    assert older not in pending_ids
+    assert newer in pending_ids
+    # 主动推送不折叠，别的会话也不动。
+    assert push in pending_ids
+    assert other_session in pending_ids
+
+
 def test_ack_removes_from_pending_and_is_session_scoped() -> None:
     outbox_id = external_outbox.record_outbound_message(
         session_key="ext:s1", external_key="qq:c2c:u1", text="x"

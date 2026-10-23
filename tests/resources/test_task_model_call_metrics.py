@@ -77,3 +77,49 @@ def test_streaming_diagnostics_first_token_ms_prefers_first_chunk() -> None:
     delta_only = StreamingDiagnostics.start('test2')
     delta_only.first_text_delta_received_at = delta_only.started_at + 0.5
     assert delta_only.first_token_ms() == 500.0
+
+
+def test_streaming_diagnostics_measures_from_the_request_start() -> None:
+    import time
+
+    request_started_at = time.perf_counter() - 0.4
+    diagnostics = StreamingDiagnostics.start('test', started_at=request_started_at)
+    diagnostics.note_chunk('chunk')
+
+    # 起点由调用方在发请求前取：从"开始迭代响应"起算会得到亚毫秒的假读数。
+    assert 380.0 <= diagnostics.first_token_ms() <= 460.0
+
+
+def test_token_usage_counts_calls_not_attempts() -> None:
+    from main.token_usage import build_token_usage_from_attempts
+
+    summary, by_model = build_token_usage_from_attempts(
+        [
+            _attempt(model_key='flash', usage={}),
+            _attempt(model_key='flash', usage={}),
+            _attempt(model_key='v4', usage={'input_tokens': 100, 'output_tokens': 5, 'cache_hit_tokens': 20}),
+        ],
+        tracked=True,
+    )
+
+    # 一次调用试了三颗成员：调用数是 1，不是 3；被服务的那一发有 usage。
+    assert summary.call_count == 1
+    assert summary.calls_with_usage == 1
+    assert summary.calls_without_usage == 0
+    assert summary.is_partial is False
+    assert summary.input_tokens == 100
+    assert sorted((item.model_key, item.call_count) for item in by_model) == [('flash', 0), ('v4', 1)]
+
+
+def test_token_usage_marks_partial_only_when_the_call_had_no_usage() -> None:
+    from main.token_usage import build_token_usage_from_attempts
+
+    summary, _by_model = build_token_usage_from_attempts(
+        [_attempt(usage={}), _attempt(usage={})],
+        tracked=True,
+    )
+
+    assert summary.call_count == 1
+    assert summary.calls_with_usage == 0
+    assert summary.calls_without_usage == 1
+    assert summary.is_partial is True

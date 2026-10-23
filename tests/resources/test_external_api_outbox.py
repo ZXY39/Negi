@@ -111,3 +111,34 @@ async def test_ack_unknown_session_returns_404(env) -> None:
     async with AsyncClient(transport=transport, base_url="http://test") as http:
         response = await http.post("/api/v1/sessions/ext:ghost:0000/outbox/obx-1/ack")
     assert response.status_code == 404
+
+
+def test_streamed_reply_acks_the_outbox_record(env) -> None:
+    outbox_id = external_outbox.record_outbound_message(
+        session_key="ext:qoder:streamed",
+        external_key="mcp:probe",
+        text="回复正文",
+        event=external_outbox.REPLY_EVENT,
+    )
+    external_v1._ack_streamed_outbox_event(
+        {"type": "reply.final", "outbox_id": outbox_id},
+        "ext:qoder:streamed",
+    )
+
+    assert external_outbox.load_pending_outbound() == []
+
+
+def test_streamed_reply_ack_is_session_scoped_and_ignores_plain_events(env) -> None:
+    foreign = external_outbox.record_outbound_message(
+        session_key="ext:qoder:owner",
+        external_key="mcp:probe",
+        text="别人的回复",
+        event=external_outbox.REPLY_EVENT,
+    )
+    external_v1._ack_streamed_outbox_event(
+        {"type": "reply.final", "outbox_id": foreign},
+        "ext:qoder:intruder",
+    )
+    external_v1._ack_streamed_outbox_event({"type": "reply.final"}, "ext:qoder:owner")
+
+    assert [item["id"] for item in external_outbox.load_pending_outbound()] == [foreign]

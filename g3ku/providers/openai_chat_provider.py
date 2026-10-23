@@ -2,15 +2,16 @@
 
 from __future__ import annotations
 
+import time
 from typing import Any
 
 import json_repair
-from openai import AsyncOpenAI
 from openai import APIError as OpenAISDKAPIError
+from openai import AsyncOpenAI
 
+from g3ku.json_schema_utils import normalize_openai_tool_definitions
 from g3ku.providers.base import LLMProvider, LLMResponse, ToolCallRequest, normalize_usage_payload
 from g3ku.providers.fallback import normalize_forced_function_tool_choice
-from g3ku.json_schema_utils import normalize_openai_tool_definitions
 from g3ku.providers.streaming_timeouts import (
     StreamingDiagnostics,
     consume_openai_like_chat_stream,
@@ -18,7 +19,6 @@ from g3ku.providers.streaming_timeouts import (
     resolve_streaming_timeout_seconds,
     should_fallback_to_non_streaming_from_error,
 )
-
 
 # 出 provider 的参数面：证据只取这些标量，工具按数量记，正文不进这份副本
 # （sidecar 与台账会各复制一份，整份请求体落账会把明细表顶成大头字节）。
@@ -187,8 +187,9 @@ class OpenAIChatProvider(LLMProvider):
                 "timeout": float(stream_timeout_seconds),
             }
             try:
+                request_started_at = time.perf_counter()
                 stream = await self._client.chat.completions.create(**stream_kwargs)
-                diagnostics = StreamingDiagnostics.start("openai_chat")
+                diagnostics = StreamingDiagnostics.start("openai_chat", started_at=request_started_at)
                 content, tool_calls, finish_reason, usage, reasoning_content = await consume_openai_like_chat_stream(
                     stream,
                     diagnostics=diagnostics,

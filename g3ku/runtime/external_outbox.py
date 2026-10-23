@@ -25,11 +25,13 @@ replay path. This module is the durable ledger for that lane:
 Age is deliberately not a discard reason: ``PENDING_MAX_AGE_SECONDS`` used to
 retire everything unacked for 24h, which threw away answers the requester was
 still waiting for. A record leaves the ledger only through an ack, and the
-non-time exits are ``delivered`` (channel confirmed), ``undeliverable`` (bridge
-gave up after its attempt budget), ``unconfirmed`` (the request reached the
-channel API but no receipt came back, so the bridge refuses to send a second
-copy of the same text) and ``unreachable`` (no enabled bridge token
-can ever see it again — see ``g3ku.shells.web``).
+non-time exits are ``delivered`` (channel confirmed, or the external SSE frame
+was written out), ``superseded`` (a newer ``reply.final`` for the same session
+replaced this pull-only reply; the text itself stays in the transcript),
+``undeliverable`` (bridge gave up after its attempt budget), ``unconfirmed``
+(the request reached the channel API but no receipt came back, so the bridge
+refuses to send a second copy of the same text) and ``unreachable`` (no enabled
+bridge token can ever see it again — see ``g3ku.shells.web``).
 
 Storage is a single append-only jsonl (``.g3ku/external-outbox/outbox.jsonl``)
 of ``{"kind":"msg",...}`` records plus ``{"kind":"ack","id":...}`` tombstones.
@@ -170,7 +172,37 @@ def record_outbound_message(
         record["attachments"] = [dict(item) for item in attachments if isinstance(item, dict)]
     if not _append_record(record):
         return ""
+    if str(event or PROACTIVE_EVENT) == REPLY_EVENT:
+        _retire_superseded_replies(session_key=str(session_key or ""), keep_id=outbox_id)
     return outbox_id
+
+
+def _retire_superseded_replies(*, session_key: str, keep_id: str) -> None:
+    """同一会话里更早的未取走回复已被新回复取代，销掉它们的投递记录。
+
+    拉取式客户端（MCP get_reply / OpenAI 兼容端点）只会取到"最新一条回复"；
+    旧记录没有人会再来取，留着只会被对账循环每轮重投。正文本身仍在会话转录里
+    （按 transcript_turn_id 可取），这里销掉的只是"待投递"这一个事实。
+    """
+    key = str(session_key or "").strip()
+    if not key:
+        return
+    try:
+        pending = load_pending_outbound()
+    except Exception:
+        return
+    for record in pending:
+        record_id = str(record.get("id") or "").strip()
+        if not record_id or record_id == keep_id:
+            continue
+        if str(record.get("event") or "") != REPLY_EVENT:
+            continue
+        if str(record.get("session_key") or "") != key:
+            continue
+        try:
+            ack_outbound_message(record_id, session_key=key, status="superseded")
+        except Exception:
+            continue
 
 
 def ack_outbound_message(outbox_id: str, *, session_key: str = "", status: str = "delivered") -> bool:

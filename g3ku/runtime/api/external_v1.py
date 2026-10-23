@@ -1154,6 +1154,22 @@ def _sse_chunk(event: dict[str, Any]) -> str:
     return f"id: {event.get('seq')}\nevent: {event.get('type')}\ndata: {data}\n\n"
 
 
+def _ack_streamed_outbox_event(event: dict[str, Any], session_key: str) -> None:
+    """外部 SSE 把这一帧写出去了 = 拉取式客户端已经拿到正文，就地销账。
+
+    与桥在渠道 API 确认后发起的 ack 同义；重复 ack 是幂等墓碑。跨进程的
+    MCP 网关（negi_get_reply 走这条 SSE）过去没有任何 ack 点，未取走的回复
+    只能靠对账循环无限重投。
+    """
+    outbox_id = str((event or {}).get("outbox_id") or "").strip()
+    if not outbox_id:
+        return
+    try:
+        ack_outbound_message(outbox_id, session_key=session_key)
+    except Exception:
+        pass
+
+
 @router.get("/sessions/{session_id}/events")
 async def stream_external_events(
     session_id: str,
@@ -1181,6 +1197,7 @@ async def stream_external_events(
             for event in hub.replay(last_seq):
                 emitted_seq = max(emitted_seq, int(event.get("seq") or 0))
                 yield _sse_chunk(event)
+                _ack_streamed_outbox_event(event, entry.session_key)
             while True:
                 if await request.is_disconnected():
                     break
@@ -1191,6 +1208,7 @@ async def stream_external_events(
                         continue
                     emitted_seq = max(emitted_seq, seq)
                     yield _sse_chunk(event)
+                    _ack_streamed_outbox_event(event, entry.session_key)
                 except asyncio.TimeoutError:
                     yield ": keep-alive\n\n"
         finally:

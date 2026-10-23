@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-import json
 import os
 import time
 from typing import Any
@@ -14,9 +13,9 @@ from loguru import logger
 from g3ku.providers.base import RETRYABLE_STATUS_CODES, LLMProvider, LLMResponse
 from g3ku.providers.fallback import normalize_forced_function_tool_choice
 from g3ku.providers.responses_protocol_helpers import (
+    _consume_sse,
     _convert_messages,
     _convert_tools,
-    _consume_sse,
     _friendly_error,
     _prompt_cache_key,
 )
@@ -26,7 +25,6 @@ from g3ku.providers.streaming_timeouts import (
     notice_payload_silence,
     resolve_streaming_timeout_seconds,
 )
-
 
 _TLS_VERIFY_DISABLED_VALUES = frozenset({"off", "false", "0", "no"})
 
@@ -64,10 +62,11 @@ class _SSEDiagnosticsResponseProxy:
         first_line_timeout_seconds: float,
         idle_line_timeout_seconds: float,
         on_upstream_wait: Any = None,
+        started_at: float | None = None,
     ) -> None:
         self._response = response
         self.status_code = response.status_code
-        self._diagnostics = StreamingDiagnostics.start("responses")
+        self._diagnostics = StreamingDiagnostics.start("responses", started_at=started_at)
         self._on_upstream_wait = on_upstream_wait
         self._first_event_received_at: float | None = None
         self._first_data_received_at: float | None = None
@@ -253,6 +252,7 @@ class ResponsesProvider(LLMProvider):
         try:
             stream_timeout_seconds = resolve_streaming_timeout_seconds(request_timeout_seconds)
             client_timeout = stream_timeout_seconds
+            request_started_at = time.perf_counter()
             async with httpx.AsyncClient(timeout=client_timeout, verify=_tls_verify_enabled()) as client:
                 async with client.stream("POST", url, headers=headers, json=body) as response:
                     if response.status_code != 200:
@@ -269,6 +269,7 @@ class ResponsesProvider(LLMProvider):
                         first_line_timeout_seconds=stream_timeout_seconds,
                         idle_line_timeout_seconds=stream_timeout_seconds,
                         on_upstream_wait=on_upstream_wait,
+                        started_at=request_started_at,
                     )
                     consume_kwargs: dict[str, Any] = {}
                     if on_text_delta is not None:

@@ -45,6 +45,9 @@ from main.storage.fs_utils import remove_tree
 T = TypeVar('T', bound=BaseModel)
 R = TypeVar('R')
 
+# 每个 worker 角色在 worker_status 里保留的最近行数（写入时顺带裁剪）。
+WORKER_STATUS_KEEP_PER_ROLE = 50
+
 
 class SQLiteTaskStore:
     def __init__(
@@ -2988,12 +2991,26 @@ class SQLiteTaskStore:
         updated_at: str,
         payload: dict[str, object],
     ) -> None:
-        self._upsert(
-            'worker_status',
-            ['worker_id', 'role', 'status', 'updated_at', 'payload_json'],
-            [worker_id, role, status, updated_at, json.dumps(payload)],
-            'worker_id',
-        )
+        def _write(conn: sqlite3.Connection) -> None:
+            self._upsert_conn(
+                conn,
+                'worker_status',
+                ['worker_id', 'role', 'status', 'updated_at', 'payload_json'],
+                [worker_id, role, status, updated_at, json.dumps(payload)],
+                'worker_id',
+            )
+            # 心跳每拍写一行，死掉的 worker 永远不会再被覆盖：表里会一直留着几个月前
+            # 的 status=running 行（实盘 596/606 行超过 1 小时，最老 08-15）。按角色
+            # 只保留最近 N 台，排序以 updated_at 为准；同一台 worker 的旧行本来就被
+            # 主键覆盖，不占额外名额。保留窗口取 50 是给"最近换过多台"的排查留余量。
+            conn.execute(
+                'DELETE FROM worker_status WHERE role = ? AND worker_id NOT IN ('
+                'SELECT worker_id FROM worker_status WHERE role = ? ORDER BY updated_at DESC LIMIT ?'
+                ')',
+                (str(role or ''), str(role or ''), WORKER_STATUS_KEEP_PER_ROLE),
+            )
+
+        self._run_write(_write)
 
     def list_worker_status(self, *, role: str | None = None) -> list[dict[str, object]]:
         if role:

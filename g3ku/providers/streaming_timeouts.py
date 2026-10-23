@@ -75,8 +75,14 @@ class StreamingDiagnostics:
     finish_reason_seen: bool = False
 
     @classmethod
-    def start(cls, provider_label: str) -> "StreamingDiagnostics":
-        return cls(provider_label=provider_label, started_at=time.perf_counter())
+    def start(cls, provider_label: str, *, started_at: float | None = None) -> "StreamingDiagnostics":
+        # 起点必须是"发出请求"那一刻，不是"开始迭代响应"那一刻：流式客户端在
+        # create() 返回时首分片已经在缓冲区里，从迭代起点算出来的首 token 恒为亚毫秒
+        # （实盘 3,826/4,000 条落在 0），那一列读数就废了。
+        return cls(
+            provider_label=provider_label,
+            started_at=float(started_at) if started_at is not None else time.perf_counter(),
+        )
 
     def note_chunk(self, kind: str, *, is_text: bool = False) -> None:
         now = time.perf_counter()

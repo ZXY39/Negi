@@ -186,6 +186,18 @@ class AgentRuntimeEngine:
         key = str(session_key or '').strip()
         self.signal_session_cancellation(key, reason="user_cancelled")
         tasks = list(self._active_tasks.pop(key, set()))
+        if tasks:
+            # 取消落在"模型已答完、转录还没落"的尾窗时，回合会既无助手行也无错误行地
+            # 消失（2026-10-23 实盘一次，已用受控取消复现）。留一条带调用栈的痕迹，
+            # 否则事后只能看到结果、看不到谁发起的取消。
+            import traceback
+
+            logger.warning(
+                "cancel_session_tasks: cancelling {} task(s) for session={} caller={}",
+                len(tasks),
+                key,
+                " | ".join(frame.strip() for frame in traceback.format_stack()[-4:-1]),
+            )
         for task in tasks:
             task.cancel()
         if tasks:

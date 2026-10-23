@@ -112,10 +112,26 @@ def build_token_usage_from_attempts(attempts: Iterable[LLMModelAttempt], *, trac
     if not tracked:
         return empty_token_usage(tracked=False), []
 
+    attempt_list = list(attempts or [])
+    if not attempt_list:
+        return empty_token_usage(tracked=True), []
+
+    # 一次模型调用可以试多颗成员（429 / 换链）：attempt 是"试了几次"，call 才是
+    # "调用了几次"。usage 只落在真正被服务的那一发上，所以调用级计数只记一次，
+    # 缺 usage 只在**整次调用都没拿到 usage** 时成立——否则每次重试过的调用都会被
+    # 标成"部分缺失"（实盘 208/284 行是这么来的，而 284/284 次调用其实都有 usage）。
+    served_index = None
+    for index, attempt in enumerate(attempt_list):
+        if dict(getattr(attempt, 'usage', {}) or {}):
+            served_index = index
+    call_has_usage = served_index is not None
+    if served_index is None:
+        served_index = len(attempt_list) - 1
+
     records: list[object] = []
-    for attempt in attempts:
+    for index, attempt in enumerate(attempt_list):
         usage = dict(getattr(attempt, 'usage', {}) or {})
-        has_usage = bool(usage)
+        is_serving_attempt = index == served_index
         records.append(
             ModelTokenUsageRecord(
                 model_key=str(getattr(attempt, 'model_key', '') or '').strip(),
@@ -125,10 +141,10 @@ def build_token_usage_from_attempts(attempts: Iterable[LLMModelAttempt], *, trac
                 input_tokens=int(usage.get('input_tokens', 0) or 0),
                 output_tokens=int(usage.get('output_tokens', 0) or 0),
                 cache_hit_tokens=int(usage.get('cache_hit_tokens', 0) or 0),
-                call_count=1,
-                calls_with_usage=1 if has_usage else 0,
-                calls_without_usage=0 if has_usage else 1,
-                is_partial=not has_usage,
+                call_count=1 if is_serving_attempt else 0,
+                calls_with_usage=1 if (is_serving_attempt and call_has_usage) else 0,
+                calls_without_usage=1 if (is_serving_attempt and not call_has_usage) else 0,
+                is_partial=(not call_has_usage) if is_serving_attempt else False,
                 route_index=_as_slot(getattr(attempt, 'route_index', -1)),
                 group_key=str(getattr(attempt, 'group_key', '') or '').strip(),
                 quota_bucket_index=_as_slot(getattr(attempt, 'quota_bucket_index', -1)),

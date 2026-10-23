@@ -130,7 +130,11 @@ def test_route_identity_survives_usage_merge_and_takes_first_declared() -> None:
     assert len(merged) == 1
     record = merged[0]
     assert (record.route_index, record.group_key, record.quota_bucket_index) == (1, "v4", 2)
-    assert record.call_count == 2
+    # 同一次调用试了两颗成员：调用数仍是 1（attempt 数另算），缺 usage 只在
+    # 整次调用都没拿到 usage 时成立。
+    assert record.call_count == 1
+    assert record.calls_without_usage == 1
+    assert record.is_partial is True
 
 
 def test_route_record_defaults_are_sentinels_not_zero() -> None:
