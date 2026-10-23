@@ -854,6 +854,9 @@ class MainRuntimeConfig(Base):
     # 派生闸门：单任务节点总数上限（含验收节点）。验收节点是资源约束的一部分
     # （不计入完成判据，但占节点额度）。
     max_task_nodes: int = 200
+    # H3：节点道单次工具调用的机器上限（秒）。模型请求更长的值时被夹紧到上限并在
+    # 结果里说明；需要更久的工作应拆成子节点。数值需按实盘资源标定（设计 §16 开放点 3）。
+    node_tool_timeout_ceiling_seconds: float = 900.0
     event_history: "MainRuntimeEventHistoryConfig" = Field(default_factory=lambda: MainRuntimeEventHistoryConfig())
     disk_guard: "MainRuntimeDiskGuardConfig" = Field(default_factory=lambda: MainRuntimeDiskGuardConfig())
     node_dispatch_concurrency: "NodeDispatchConcurrencyConfig" = Field(default_factory=lambda: NodeDispatchConcurrencyConfig())

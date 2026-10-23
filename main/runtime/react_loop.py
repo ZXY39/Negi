@@ -9,6 +9,7 @@ import re
 import time
 import traceback
 from collections import deque
+from contextvars import ContextVar
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -297,6 +298,37 @@ _RESULT_REQUIRED_KEYS = (
 )
 _TOOL_DISCIPLINE_NODE_KINDS = {'execution', 'acceptance'}
 _UNSET = object()
+
+# 本次工具调用是否被 H3 上限夹紧。逐调用用 ContextVar 承载：同一批并行工具调用
+# 各自在独立 task 里执行，task 的上下文是写时复制的，不会串到别的调用上。
+_TOOL_TIMEOUT_CLAMP_NOTE: ContextVar[str] = ContextVar('tool_timeout_clamp_note', default='')
+
+
+def resolve_node_tool_timeout(
+    arguments: dict[str, Any] | None,
+    runtime_context: Any,
+) -> tuple[float, str]:
+    """节点道工具超时 = 显式/默认值夹紧到 `NODE_TOOL_TIMEOUT_CEILING`（H3）。
+
+    返回 `(seconds, clamp_note)`；没有夹紧时 note 为空。夹紧而不是拒绝，是因为拒绝
+    会把重试负担推给模型；把上限写进结果里，模型才知道"再长的工作要拆子节点"。
+    `runtime_context` 不是节点道（没有该键）时不夹紧——CEO 车道不受 H3 约束。
+    """
+    requested = float(resolve_effective_tool_timeout(arguments, runtime_context))
+    ceiling = 0.0
+    if isinstance(runtime_context, dict):
+        try:
+            ceiling = float(runtime_context.get('node_tool_timeout_ceiling_seconds') or 0.0)
+        except (TypeError, ValueError):
+            ceiling = 0.0
+    if ceiling >= 1.0 and requested > ceiling:
+        note = (
+            f'[timeout clamped] 请求的 {requested:.0f}s 超过节点道单次工具上限 '
+            f'{ceiling:.0f}s，本次调用按 {ceiling:.0f}s 计时。'
+            '需要更久的工作请拆成子节点。'
+        )
+        return ceiling, note
+    return requested, ''
 
 
 class RepeatedActionCircuitBreaker:
@@ -4558,7 +4590,7 @@ class ReActToolLoop:
         if bool(getattr(tool, 'exempt_universal_timeout', False)):
             return None
         try:
-            return float(resolve_effective_tool_timeout(arguments, runtime_context))
+            return float(resolve_node_tool_timeout(arguments, runtime_context)[0])
         except Exception:
             return None
 
@@ -5022,7 +5054,13 @@ class ReActToolLoop:
         # 其余工具由外层硬执行。
         self_enforced = bool(getattr(tool, 'self_enforced_timeout', False))
         timeout_exempt = bool(getattr(tool, 'exempt_universal_timeout', False))
-        effective_timeout = resolve_effective_tool_timeout(arguments, runtime_context)
+        if self_enforced or timeout_exempt:
+            # 豁免/自持工具不套外层时限，H3 的夹紧只作用于外层硬执行的工具。
+            effective_timeout = resolve_effective_tool_timeout(arguments, runtime_context)
+            _TOOL_TIMEOUT_CLAMP_NOTE.set('')
+        else:
+            effective_timeout, clamp_note = resolve_node_tool_timeout(arguments, runtime_context)
+            _TOOL_TIMEOUT_CLAMP_NOTE.set(clamp_note)
         if self_enforced:
             execute_kwargs['timeout_seconds'] = effective_timeout
         else:
@@ -5110,6 +5148,9 @@ class ReActToolLoop:
             source_kind=f'tool_result:{tool_name}',
             delivery_metadata=metadata,
         )
+        clamp_note = _TOOL_TIMEOUT_CLAMP_NOTE.get()
+        if clamp_note:
+            text = f'{text}\n\n{clamp_note}'
         return text, str(metadata.get('tool_status') or 'success')
 
     async def _execute_tool_with_status(

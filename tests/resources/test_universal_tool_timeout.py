@@ -144,10 +144,10 @@ def _control_tools():
 
 
 def test_long_running_orchestration_and_control_tools_are_exempt() -> None:
-    """spawn_child_nodes 与 stop_tool_execution 必须整体豁免外层机械超时；
-    瞬时协议工具保留 backstop（豁免=False），自持工具走 self_enforced 语义。"""
+    """stop_tool_execution 必须整体豁免外层机械超时；spawn_child_nodes 拆掉阻塞
+    承诺后只做创建、毫秒级返回，不再豁免，改由 H3 的节点道上限约束。"""
     spawn = _spawn_tool()
-    assert spawn.exempt_universal_timeout is True
+    assert spawn.exempt_universal_timeout is False
     for tool in _control_tools():
         assert tool.exempt_universal_timeout is True
 

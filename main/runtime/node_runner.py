@@ -293,6 +293,8 @@ class NodeRunner:
         self._tool_default_timeout_seconds: float | None = None
         # 派生闸门：单任务节点总数上限（含验收节点），由 runtime_service 注入。
         self._max_task_nodes = 200
+        # H3：节点道单次工具调用的时长上限（秒），由 runtime_service 注入。
+        self._node_tool_timeout_ceiling_seconds = 900.0
         self._adaptive_tool_budget_controller = getattr(react_loop, '_adaptive_tool_budget_controller', None)
         self._context_enricher = context_enricher
         self._context_preparer = context_preparer
@@ -4538,6 +4540,10 @@ class NodeRunner:
             'task_temp_dir': task_temp_dir,
             'temp_dir': task_temp_dir,
             'tool_watchdog': self._tool_watchdog_runtime_config(),
+            # H3：节点道的工具超时上限由 react_loop 夹紧（它才是每次调用的唯一入口）。
+            'node_tool_timeout_ceiling_seconds': float(
+                getattr(self, '_node_tool_timeout_ceiling_seconds', 900.0) or 900.0
+            ),
             'distribution_state': self._distribution_runtime_state(task.task_id),
             'tool_snapshot_supplier': (
                 (lambda current_task_id=task.task_id: self._tool_snapshot_supplier(current_task_id))
