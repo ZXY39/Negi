@@ -1,0 +1,397 @@
+"""Scheduler-driven acceptance: a child's verdict no longer needs the parent's pipeline.
+
+These tests pin R13: after `_run_child_pipeline` stops driving
+execution -> acceptance, a submitted child must still be inspected, finalised and
+reported to its parent. The drain lane is the replacement: it looks only at the
+durable handshake + acceptance row, so it works whether the acceptance turn was
+started by the old pipeline or by the dispatcher.
+"""
+
+from __future__ import annotations
+
+from pathlib import Path
+from types import SimpleNamespace
+
+import pytest
+
+from main.models import NodeFinalResult, NodeRecord, TaskRecord
+from main.runtime.acceptance_handshake import (
+    ACCEPTANCE_HANDSHAKE_KEY,
+    ACCEPTANCE_STATE_ACCEPTED,
+    ACCEPTANCE_STATE_WAITING_ACCEPTANCE,
+    set_acceptance_handshake_state,
+)
+from main.service.runtime_service import MainRuntimeService
+
+TASK = 'task:acceptance-scheduler'
+ROOT = 'node:root'
+CHILD = 'node:child'
+ACCEPTANCE = 'node:acceptance'
+STAMP = '2026-10-24T00:00:00+08:00'
+RESULT_REF = 'artifact:payload-1'
+
+
+def _service(tmp_path: Path) -> MainRuntimeService:
+    return MainRuntimeService(
+        chat_backend=SimpleNamespace(),
+        workspace_root=tmp_path,
+        store_path=tmp_path / 'runtime.sqlite3',
+        files_base_dir=tmp_path / 'tasks',
+        artifact_dir=tmp_path / 'artifacts',
+        governance_store_path=tmp_path / 'governance.sqlite3',
+        execution_mode='web',
+    )
+
+
+def _node(node_id: str, *, parent: str | None, kind: str = 'execution', depth: int = 0) -> NodeRecord:
+    return NodeRecord(
+        node_id=node_id,
+        task_id=TASK,
+        parent_node_id=parent,
+        root_node_id=ROOT,
+        depth=depth,
+        node_kind=kind,
+        goal=node_id,
+        prompt='p',
+        created_at=STAMP,
+        updated_at=STAMP,
+    )
+
+
+def _seed(service: MainRuntimeService, *, handshake_state: str = ACCEPTANCE_STATE_WAITING_ACCEPTANCE) -> None:
+    service.store.upsert_task(
+        TaskRecord(
+            task_id=TASK,
+            title='t',
+            user_request='u',
+            root_node_id=ROOT,
+            created_at=STAMP,
+            updated_at=STAMP,
+        )
+    )
+    service.store.upsert_node(_node(ROOT, parent=None))
+    service.store.upsert_node(_node(CHILD, parent=ROOT, depth=1))
+    service.store.upsert_node(
+        _node(ACCEPTANCE, parent=CHILD, kind='acceptance', depth=2)
+    )
+    service.store.update_node(
+        ACCEPTANCE,
+        lambda record: record.model_copy(
+            update={'metadata': {**dict(record.metadata or {}), 'accepted_node_id': CHILD}}
+        ),
+    )
+    payload = NodeFinalResult(
+        status='success',
+        delivery_status='final',
+        summary='child done',
+        answer='the answer',
+        evidence=[],
+        remaining_work=[],
+        blocking_reason='',
+    ).model_dump(mode='json')
+    handshake = set_acceptance_handshake_state(
+        {},
+        state=handshake_state,
+        acceptance_node_id=ACCEPTANCE,
+        rejection_count=0,
+        latest_execution_result_ref=RESULT_REF,
+        latest_execution_result_summary='child done',
+        latest_rejection_feedback_ref='',
+        latest_rejection_feedback_summary='',
+        updated_at=STAMP,
+    )
+    service.store.update_node(
+        CHILD,
+        lambda record: record.model_copy(
+            update={
+                'metadata': {
+                    **dict(record.metadata or {}),
+                    'result_payload': payload,
+                    ACCEPTANCE_HANDSHAKE_KEY: handshake,
+                }
+            }
+        ),
+    )
+
+
+def _capture_calls(service: MainRuntimeService, monkeypatch) -> tuple[list[str], list[dict]]:
+    wakes: list[str] = []
+    deliveries: list[dict] = []
+
+    async def wake(*, task_id: str, node_id: str) -> str:
+        wakes.append(node_id)
+        return 'resumed'
+
+    original = service.deliver_node_message
+
+    async def deliver(**kwargs):
+        deliveries.append(kwargs)
+        return await original(**kwargs)
+
+    monkeypatch.setattr(service, 'wake_node_on_message', wake)
+    monkeypatch.setattr(service, 'deliver_node_message', deliver)
+    return wakes, deliveries
+
+
+async def _settle(service: MainRuntimeService) -> None:
+    await service.node_runner.wait_pending_terminal_messages()
+
+
+class TestVerdictDrain:
+    @pytest.mark.asyncio
+    async def test_pass_finalises_child_and_reports_to_parent(self, tmp_path, monkeypatch):
+        service = _service(tmp_path)
+        _seed(service)
+        wakes, deliveries = _capture_calls(service, monkeypatch)
+        # 验收节点的回合已经跑完并落了成功裁决。
+        service.store.update_node(
+            ACCEPTANCE,
+            lambda record: record.model_copy(
+                update={
+                    'status': 'success',
+                    'final_output': '验收通过',
+                    'metadata': {
+                        **dict(record.metadata or {}),
+                        'result_payload': NodeFinalResult(
+                            status='success',
+                            delivery_status='final',
+                            summary='验收通过',
+                            answer='',
+                            evidence=[],
+                            remaining_work=[],
+                            blocking_reason='',
+                        ).model_dump(mode='json'),
+                    },
+                }
+            ),
+        )
+
+        progressed = await service.task_actor_service._drain_acceptance_verdicts(TASK)
+        await _settle(service)
+
+        assert progressed is True
+        child = service.store.get_node(CHILD)
+        assert child.status == 'success'
+        handshake = dict((child.metadata or {}).get(ACCEPTANCE_HANDSHAKE_KEY) or {})
+        assert handshake['state'] == ACCEPTANCE_STATE_ACCEPTED
+        assert deliveries, 'child_final must be delivered to the parent'
+        assert deliveries[0]['target_node_id'] == ROOT
+        assert deliveries[0]['system_kind'] == 'child_final'
+        assert deliveries[0]['source_node_id'] == CHILD
+        assert wakes == [ROOT]
+
+    @pytest.mark.asyncio
+    async def test_drain_is_idempotent(self, tmp_path, monkeypatch):
+        service = _service(tmp_path)
+        _seed(service)
+        _capture_calls(service, monkeypatch)
+        service.store.update_node(
+            ACCEPTANCE,
+            lambda record: record.model_copy(
+                update={
+                    'status': 'success',
+                    'metadata': {
+                        **dict(record.metadata or {}),
+                        'result_payload': NodeFinalResult(
+                            status='success',
+                            delivery_status='final',
+                            summary='验收通过',
+                            answer='',
+                            evidence=[],
+                            remaining_work=[],
+                            blocking_reason='',
+                        ).model_dump(mode='json'),
+                    },
+                }
+            ),
+        )
+        await service.task_actor_service._drain_acceptance_verdicts(TASK)
+        await _settle(service)
+        before = len(service.store.list_task_node_notifications(TASK, ROOT))
+
+        second = await service.task_actor_service._drain_acceptance_verdicts(TASK)
+        await _settle(service)
+        assert second is False
+        assert len(service.store.list_task_node_notifications(TASK, ROOT)) == before
+
+    @pytest.mark.asyncio
+    async def test_reject_reactivates_the_child_without_finalising_it(self, tmp_path, monkeypatch):
+        service = _service(tmp_path)
+        _seed(service)
+        _capture_calls(service, monkeypatch)
+        service.store.update_node(
+            ACCEPTANCE,
+            lambda record: record.model_copy(
+                update={
+                    'status': 'failed',
+                    'failure_reason': '第 2 节缺少实测数据',
+                    'metadata': {
+                        **dict(record.metadata or {}),
+                        'result_payload': NodeFinalResult(
+                            status='failed',
+                            delivery_status='final',
+                            summary='第 2 节缺少实测数据',
+                            answer='',
+                            evidence=[],
+                            remaining_work=[],
+                            blocking_reason='',
+                        ).model_dump(mode='json'),
+                    },
+                }
+            ),
+        )
+
+        progressed = await service.task_actor_service._drain_acceptance_verdicts(TASK)
+        await _settle(service)
+
+        assert progressed is True
+        child = service.store.get_node(CHILD)
+        assert child.status == 'in_progress'
+        acceptance = service.store.get_node(ACCEPTANCE)
+        assert acceptance.status == 'in_progress'
+        handshake = dict((child.metadata or {}).get(ACCEPTANCE_HANDSHAKE_KEY) or {})
+        assert handshake['state'] == 'waiting_execution_retry'
+        assert handshake['rejection_count'] == 1
+        feedback = service.store.list_task_node_notifications(TASK, CHILD)
+        assert feedback and '第 2 节缺少实测数据' in feedback[0].message
+        # 打回不是终局：父节点不应收到 child_final。
+        assert service.store.list_task_node_notifications(TASK, ROOT) == []
+
+    @pytest.mark.asyncio
+    async def test_terminal_failure_verdict_fails_the_child(self, tmp_path, monkeypatch):
+        service = _service(tmp_path)
+        _seed(service)
+        _capture_calls(service, monkeypatch)
+        service.store.update_node(
+            ACCEPTANCE,
+            lambda record: record.model_copy(
+                update={
+                    'status': 'failed',
+                    'failure_reason': '交付物不可用且无法修复',
+                    'metadata': {
+                        **dict(record.metadata or {}),
+                        'result_payload': NodeFinalResult(
+                            status='failed',
+                            delivery_status='blocked',
+                            summary='交付物不可用且无法修复',
+                            answer='',
+                            evidence=[],
+                            remaining_work=[],
+                            blocking_reason='交付物不可用且无法修复',
+                        ).model_dump(mode='json'),
+                    },
+                }
+            ),
+        )
+
+        progressed = await service.task_actor_service._drain_acceptance_verdicts(TASK)
+        await _settle(service)
+
+        assert progressed is True
+        child = service.store.get_node(CHILD)
+        assert child.status == 'failed'
+        assert '无法修复' in (child.failure_reason or '')
+        assert service.store.list_task_node_notifications(TASK, ROOT)
+
+
+    @pytest.mark.asyncio
+    async def test_accepted_handshake_still_finalises_the_live_child(self, tmp_path, monkeypatch):
+        # 旧管线把裁决记在握手/spawn entry 上，执行节点行停在 in_progress。
+        # 这是拆管线后最容易留下的半截形态：握手已 accepted，节点却永远不结清。
+        service = _service(tmp_path)
+        _seed(service, handshake_state=ACCEPTANCE_STATE_ACCEPTED)
+        _capture_calls(service, monkeypatch)
+        service.store.update_node(
+            ACCEPTANCE,
+            lambda record: record.model_copy(
+                update={
+                    'status': 'success',
+                    'metadata': {
+                        **dict(record.metadata or {}),
+                        'result_payload': NodeFinalResult(
+                            status='success',
+                            delivery_status='final',
+                            summary='验收通过',
+                            answer='',
+                            evidence=[],
+                            remaining_work=[],
+                            blocking_reason='',
+                        ).model_dump(mode='json'),
+                    },
+                }
+            ),
+        )
+
+        progressed = await service.task_actor_service._drain_acceptance_verdicts(TASK)
+        await _settle(service)
+
+        assert progressed is True
+        assert service.store.get_node(CHILD).status == 'success'
+        assert service.store.list_task_node_notifications(TASK, ROOT)
+
+    @pytest.mark.asyncio
+    async def test_rejected_terminal_handshake_finalises_the_child_as_failed(self, tmp_path, monkeypatch):
+        service = _service(tmp_path)
+        _seed(service, handshake_state='rejected_terminal')
+        _capture_calls(service, monkeypatch)
+        service.store.update_node(
+            ACCEPTANCE,
+            lambda record: record.model_copy(
+                update={
+                    'status': 'failed',
+                    'failure_reason': '不可修复',
+                    'metadata': {
+                        **dict(record.metadata or {}),
+                        'result_payload': NodeFinalResult(
+                            status='failed',
+                            delivery_status='blocked',
+                            summary='不可修复',
+                            answer='',
+                            evidence=[],
+                            remaining_work=[],
+                            blocking_reason='不可修复',
+                        ).model_dump(mode='json'),
+                    },
+                }
+            ),
+        )
+
+        progressed = await service.task_actor_service._drain_acceptance_verdicts(TASK)
+        await _settle(service)
+
+        assert progressed is True
+        assert service.store.get_node(CHILD).status == 'failed'
+        assert service.store.list_task_node_notifications(TASK, ROOT)
+
+
+class TestNonRootAcceptanceHandshake:
+    @pytest.mark.asyncio
+    async def test_non_root_submission_enters_waiting_acceptance(self, tmp_path, monkeypatch):
+        service = _service(tmp_path)
+        _seed(service)
+        _capture_calls(service, monkeypatch)
+        task = service.store.get_task(TASK)
+        child = service.store.get_node(CHILD)
+        result = NodeFinalResult(
+            status='success',
+            delivery_status='final',
+            summary='child done',
+            answer='the answer',
+            evidence=[],
+            remaining_work=[],
+            blocking_reason='',
+        )
+
+        handled = service.node_runner._maybe_start_acceptance_handshake(
+            task=task, node=child, result=result
+        )
+        await _settle(service)
+
+        assert handled is not None
+        assert handled.delivery_status == 'partial'
+        refreshed = service.store.get_node(CHILD)
+        handshake = dict((refreshed.metadata or {}).get(ACCEPTANCE_HANDSHAKE_KEY) or {})
+        assert handshake['state'] == ACCEPTANCE_STATE_WAITING_ACCEPTANCE
+        assert handshake['acceptance_node_id'] == ACCEPTANCE
+        assert refreshed.status == 'in_progress'
+        assert service.store.list_task_node_notifications(TASK, ACCEPTANCE)

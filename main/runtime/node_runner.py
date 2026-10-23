@@ -304,6 +304,11 @@ class NodeRunner:
         self.node_liveness_probe = None
         self._spawn_operation_locks: dict[str, asyncio.Lock] = {}
         self.distribution_delivery_callback = None
+        # 节点终局 → 父节点信箱的投递口（由 runtime_service 绑定）。投递是异步的，
+        # 而终局写入发生在同步代码里，所以这里只登记任务；`run_task` 的空转判定读
+        # `has_pending_terminal_messages()`，避免"终局消息还没送出就把任务收工"。
+        self.child_final_sink = None
+        self._pending_terminal_messages: set[asyncio.Task[None]] = set()
         # 磁盘治理（P0）：磁盘满时未能落盘的节点错误文本，仅内存诊断用（有界）。
         self._unpersisted_error_logs: deque[tuple[str, str, str]] = deque(maxlen=64)
 
@@ -1368,7 +1373,20 @@ class NodeRunner:
     def _required_acceptance_node(self, *, task, node: NodeRecord) -> NodeRecord | None:
         if str(getattr(node, 'node_kind', '') or '').strip().lower() != KIND_EXECUTION:
             return None
-        if str(getattr(node, 'node_id', '') or '').strip() != str(getattr(task, 'root_node_id', '') or '').strip():
+        is_root = str(getattr(node, 'node_id', '') or '').strip() == str(getattr(task, 'root_node_id', '') or '').strip()
+        if not is_root:
+            # 非根执行节点的验收节点在派生时已提前创建并挂在它下面（设计偏差 4：
+            # 保留提前创建）。旧模型只让根节点走握手，子节点的"执行→验收"循环由
+            # `_run_child_pipeline` 私下驱动；拆掉那条循环后，子节点必须和根一样从
+            # 提交进入 `waiting_acceptance`，否则验收节点没有任何东西会派发它。
+            for candidate in list(self._store.list_children(node.node_id) or []):
+                if str(getattr(candidate, 'node_kind', '') or '').strip().lower() != KIND_ACCEPTANCE:
+                    continue
+                metadata = dict(getattr(candidate, 'metadata', {}) or {})
+                accepted_id = str(metadata.get('accepted_node_id') or '').strip()
+                if accepted_id and accepted_id != str(node.node_id or '').strip():
+                    continue
+                return candidate
             return None
         final_acceptance = normalize_final_acceptance_metadata((task.metadata or {}).get('final_acceptance'))
         if not bool(final_acceptance.required):
@@ -8347,7 +8365,14 @@ class NodeRunner:
         except Exception:
             pass
 
-    def _mark_finished(self, task_id: str, node_id: str, result: NodeFinalResult) -> NodeFinalResult:
+    def _mark_finished(
+        self,
+        task_id: str,
+        node_id: str,
+        result: NodeFinalResult,
+        *,
+        notify_parent: bool = True,
+    ) -> NodeFinalResult:
         task = self._store.get_task(task_id)
         self._forget_node_route_binding(node_id)
         if (
@@ -8391,10 +8416,111 @@ class NodeRunner:
             failure_reason='' if status == STATUS_SUCCESS else result.failure_text,
         )
         self._log_service.ensure_node_result_payload_externalized(task_id, node_id)
+        if notify_parent:
+            self.schedule_terminal_child_message(task_id, node_id)
         latest = self._store.get_node(node_id)
         return self._result_from_record(latest) if latest is not None else result
 
-    def _mark_failed(self, task_id: str, node_id: str, *, reason: str) -> NodeFinalResult:
+    def schedule_terminal_child_message(self, task_id: str, node_id: str) -> None:
+        """终局 → 父节点 `child_final`：唯一上报点，异步但不丢。
+
+        P1「终局必上报」要求每个执行节点的终局都有一条机器消息抵达父节点；这是
+        `all_children` 唤醒判据与父节点"子节点到底怎么了"的唯一来源，所以只在这一处
+        产出，模型既伪造不了也漏发不了。验收节点不发（T15：它随被验收节点终局）。
+        父节点自己发起的 terminate 由调用方传 `notify_parent=False` 抑制（设计 §4.4：
+        终止者在同一个工具返回里已经知道了结果）。
+
+        投递任务登记在 `_pending_terminal_messages` 里，`run_task` 的空转判定要等它
+        跑完——否则消息还在路上，任务演员就收工关掉了 dispatcher。
+        """
+        sink = getattr(self, 'child_final_sink', None)
+        if not callable(sink):
+            return
+        try:
+            node = self._store.get_node(node_id)
+        except Exception:
+            return
+        if node is None:
+            return
+        if str(getattr(node, 'node_kind', '') or '').strip().lower() != KIND_EXECUTION:
+            return
+        if not str(getattr(node, 'parent_node_id', '') or '').strip():
+            return
+        if self._normalized_status(getattr(node, 'status', '')) not in {STATUS_SUCCESS, STATUS_FAILED}:
+            return
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            return
+
+        task = loop.create_task(
+            self._emit_terminal_child_message(task_id=task_id, node_id=node_id),
+            name=f'node-child-final:{task_id}:{node_id}',
+        )
+        self._pending_terminal_messages.add(task)
+        task.add_done_callback(self._pending_terminal_messages.discard)
+
+    async def _emit_terminal_child_message(self, *, task_id: str, node_id: str) -> None:
+        sink = getattr(self, 'child_final_sink', None)
+        if not callable(sink):
+            return
+        try:
+            await sink(task_id=task_id, node_id=node_id)
+        except Exception as exc:  # noqa: BLE001 - 消息送不出去不能回滚终局
+            # 静默失败会让父节点永久等一个不会来的终局——正是 R13 那类"零 ERROR 悬空"。
+            logger.warning(
+                'title=child_final_delivery_failed task={} node={} error={}',
+                task_id,
+                node_id,
+                describe_exception(exc),
+            )
+
+    def has_pending_terminal_messages(self) -> bool:
+        return any(not task.done() for task in list(self._pending_terminal_messages))
+
+    async def wait_pending_terminal_messages(self) -> None:
+        while True:
+            pending = [task for task in list(self._pending_terminal_messages) if not task.done()]
+            if not pending:
+                return
+            await asyncio.gather(*pending, return_exceptions=True)
+
+    def finalize_inspected_execution_node(
+        self,
+        *,
+        task_id: str,
+        node_id: str,
+        failure_reason: str = '',
+    ) -> NodeRecord | None:
+        """验收裁决落地后给被验收的执行节点签发终态。
+
+        旧模型里这一步由 `_run_child_pipeline` 隐式完成（它把子节点的"终态"记在
+        spawn entry 上，节点行反而留在 in_progress）；新模型必须显式写节点行，否则
+        子节点会永远停在 `waiting_acceptance`：零 ERROR、零告警。失败原因非空表示
+        验收判了"不可修复"，否则按执行节点自己提交的结果载荷收尾。
+        """
+        node = self._store.get_node(str(node_id or '').strip())
+        if node is None:
+            return None
+        if self._normalized_status(getattr(node, 'status', '')) in {STATUS_SUCCESS, STATUS_FAILED}:
+            return node
+        if failure_reason:
+            self._mark_failed(task_id, node.node_id, reason=failure_reason)
+            return self._store.get_node(node.node_id)
+        payload = normalize_result_payload((node.metadata or {}).get('result_payload'))
+        if payload is None:
+            return None
+        self._mark_finished(task_id, node.node_id, payload)
+        return self._store.get_node(node.node_id)
+
+    def _mark_failed(
+        self,
+        task_id: str,
+        node_id: str,
+        *,
+        reason: str,
+        notify_parent: bool = True,
+    ) -> NodeFinalResult:
         self._forget_node_route_binding(node_id)
         text = str(reason or 'node failed').strip() or 'node failed'
         return self._mark_finished(
@@ -8409,6 +8535,7 @@ class NodeRunner:
                 remaining_work=[],
                 blocking_reason=text,
             ),
+            notify_parent=notify_parent,
         )
 
     def _node_pause_requested(self, task_id: str, node_id: str) -> bool:
@@ -8472,14 +8599,21 @@ class NodeRunner:
             delivered=bool(existing.delivered) if existing is not None else False,
         )
 
-    def fail_paused_node(self, task_id: str, node_id: str, reason: str = '') -> NodeFinalResult:
+    def fail_paused_node(
+        self,
+        task_id: str,
+        node_id: str,
+        reason: str = '',
+        *,
+        notify_parent: bool = True,
+    ) -> NodeFinalResult:
         node = self._store.get_node(node_id)
         if node is None or str(node.task_id or '').strip() != str(task_id or '').strip():
             raise ValueError(f'node not found: {node_id}')
         if node.status in {STATUS_SUCCESS, STATUS_FAILED}:
             return self._result_from_record(node)
         text = str(reason or node.failure_reason or 'failed by operator').strip() or 'failed by operator'
-        return self._mark_failed(task_id, node_id, reason=text)
+        return self._mark_failed(task_id, node_id, reason=text, notify_parent=notify_parent)
 
     def _pause_requested(self, task_id: str) -> bool:
         task = self._store.get_task(task_id)

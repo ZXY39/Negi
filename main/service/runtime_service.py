@@ -99,6 +99,7 @@ from main.models import (
     TokenUsageSummary,
     normalize_execution_policy_metadata,
     normalize_final_acceptance_metadata,
+    normalize_result_payload,
 )
 from main.monitoring.file_store import TaskFileStore
 from main.monitoring.log_service import TaskLogService
@@ -118,6 +119,8 @@ from main.runtime.model_route import build_model_route_plan
 from main.runtime.node_mailbox import message_fingerprint, normalize_targets, plan_delivery
 from main.runtime.node_message_kind import (
     INTENT_INSTRUCTION,
+    INTENT_PROGRESS,
+    KIND_CHILD_FINAL,
     PRIORITY_HIGH,
     derive_message_kind,
     derive_priority,
@@ -754,6 +757,8 @@ class MainRuntimeService:
         # 节点侧 `manage_child_nodes` 的控制口：暂停/恢复/终止需要 dispatcher、暂停账本
         # 与投递通道，全部在这一层。
         self.node_runner.manage_child_nodes_callback = self._manage_child_nodes_from_node
+        # P1「终局必上报」的唯一出口：执行节点终局 → 父节点信箱 `child_final`。
+        self.node_runner.child_final_sink = self._deliver_child_final_message
         self.node_runner._tool_default_timeout_seconds = self._tool_default_timeout_seconds(app_config)
         self.task_actor_service = TaskActorService(
             store=self.store,
@@ -5132,6 +5137,48 @@ class MainRuntimeService:
             'legal_targets': legal_targets,
         }
 
+    async def _deliver_child_final_message(self, *, task_id: str, node_id: str) -> dict[str, Any]:
+        """子节点终局 → 父节点信箱。内容取自主节点自己提交的结果载荷。
+
+        这是运行时生成的系统消息（`system_kind=child_final`），模型无法通过
+        `send_message` 伪造。父节点若在停靠，投递路径按 R2 唤醒它；若在跑，消息
+        在下一个安全边界并入当前回合。
+        """
+        normalized_task_id = self.normalize_task_id(task_id)
+        node = self.store.get_node(str(node_id or '').strip())
+        if node is None:
+            return {'status': 'rejected', 'reason': 'source_missing'}
+        parent_node_id = str(getattr(node, 'parent_node_id', '') or '').strip()
+        if not parent_node_id:
+            return {'status': 'skipped', 'reason': 'no_parent'}
+        status = str(getattr(node, 'status', '') or '').strip().lower()
+        if status not in {'success', 'failed'}:
+            return {'status': 'skipped', 'reason': 'source_not_terminal'}
+        payload = normalize_result_payload((node.metadata or {}).get('result_payload'))
+        summary = ''
+        if payload is not None:
+            summary = str(payload.summary or payload.answer or '').strip()
+        summary = summary or str(getattr(node, 'final_output', '') or '').strip()
+        summary = summary or str(getattr(node, 'failure_reason', '') or '').strip()
+        summary = summary or ('执行完成' if status == 'success' else '执行失败')
+        ref = str(getattr(node, 'final_output_ref', '') or '').strip()
+        if not ref and isinstance(getattr(node, 'metadata', None), dict):
+            ref = str((node.metadata or {}).get('result_payload_ref') or '').strip()
+        goal = str(getattr(node, 'goal', '') or '').strip()
+        verdict_word = '完成' if status == 'success' else '失败'
+        body = f'子节点「{goal or node.node_id}」已{verdict_word}：{summary[:1200]}'
+        return await self.deliver_node_message(
+            task_id=normalized_task_id,
+            target_node_id=parent_node_id,
+            message=body,
+            origin='node',
+            relation='parent',
+            system_kind=KIND_CHILD_FINAL,
+            source_node_id=str(node.node_id or '').strip(),
+            intent_kind=INTENT_PROGRESS,
+            ref=ref,
+        )
+
     async def _manage_child_nodes_from_node(
         self,
         *,
@@ -5275,9 +5322,11 @@ class MainRuntimeService:
                     remark=reason,
                 )
             if dispatcher is not None:
-                await dispatcher.fail_node(node_id, reason)
+                await dispatcher.fail_node(node_id, reason, notify_parent=False)
             else:
-                self.node_runner.fail_paused_node(normalized_task_id, node_id, reason)
+                self.node_runner.fail_paused_node(
+                    normalized_task_id, node_id, reason, notify_parent=False
+                )
             items.append({'node_id': node_id, 'action': action, 'result': 'terminated'})
 
         return {

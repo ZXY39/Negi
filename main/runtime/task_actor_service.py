@@ -401,7 +401,9 @@ class TaskNodeDispatcher:
             elif not entry.future.done():
                 try:
                     entry.future.set_result(
-                        self._node_runner.fail_paused_node(self._task_id, node_id, landing_reason)
+                        self._node_runner.fail_paused_node(
+                            self._task_id, node_id, landing_reason, notify_parent=False
+                        )
                     )
                 except Exception:
                     entry.future.set_exception(asyncio.CancelledError())
@@ -418,7 +420,11 @@ class TaskNodeDispatcher:
         # success 改写掉。
         for entry in entries:
             try:
-                result = self._node_runner.fail_paused_node(self._task_id, entry.node_id, landing_reason)
+                # supersede/cancel 是清理车道，不是子节点的"结果"：给父节点发 child_final
+                # 会让父节点把一次内部清扫读成子节点失败，也会误满足 all_children。
+                result = self._node_runner.fail_paused_node(
+                    self._task_id, entry.node_id, landing_reason, notify_parent=False
+                )
             except Exception:
                 if not entry.future.done():
                     entry.future.set_exception(asyncio.CancelledError())
@@ -473,10 +479,18 @@ class TaskNodeDispatcher:
         if not entry.future.done():
             entry.future.set_result(result)
 
-    async def fail_node(self, node_id: str, reason: str = '') -> NodeFinalResult:
+    async def fail_node(
+        self,
+        node_id: str,
+        reason: str = '',
+        *,
+        notify_parent: bool = True,
+    ) -> NodeFinalResult:
         normalized_node_id = str(node_id or '').strip()
         entry = self._entries.get(normalized_node_id)
-        result = self._node_runner.fail_paused_node(self._task_id, normalized_node_id, reason)
+        result = self._node_runner.fail_paused_node(
+            self._task_id, normalized_node_id, reason, notify_parent=notify_parent
+        )
         if entry is not None and not entry.future.done():
             entry.future.set_result(result)
         return result
@@ -936,6 +950,8 @@ class TaskActorService:
                     # 账本里消失，落回根节点会让被检验节点白跑一轮新回合。
                     resumed_offroot_nodes = await self._resume_inflight_final_acceptance(task_id)
                 if resumed_offroot_nodes:
+                    await self._drain_acceptance_verdicts(task_id)
+                    await self._node_runner.wait_pending_terminal_messages()
                     resumed_result = self._terminal_result_after_notice_resume(task_id)
                     if resumed_result is None:
                         control_only_return = True
@@ -943,12 +959,18 @@ class TaskActorService:
                     result = resumed_result
                 else:
                     result = await dispatcher.execute_node(task_id, root_node.node_id)
+                    # 子节点验收回合由派发器独立跑完后，裁决必须在这里落账；旧管线
+                    # 在途时这一步是空转（握手已被管线推进过），不产生重复处理。
+                    if await self._drain_acceptance_verdicts(task_id):
+                        await self._node_runner.wait_pending_terminal_messages()
                     if str(result.delivery_status or '').strip() == 'partial':
                         await self._enqueue_acceptance_followup_if_needed(task_id)
                         control_only_return = True
                         return
                     if result.status == 'success':
                         result = await self._run_final_acceptance_if_needed(task_id)
+                        if await self._drain_acceptance_verdicts(task_id):
+                            await self._node_runner.wait_pending_terminal_messages()
                         if str(result.delivery_status or '').strip() == 'partial':
                             await self._enqueue_acceptance_followup_if_needed(task_id)
                             control_only_return = True
@@ -1044,6 +1066,92 @@ class TaskActorService:
                     self._stall_notifier.pause_task(task_id)
                 elif str(getattr(latest, 'status', '') or '').strip().lower() in {'success', 'failed'}:
                     self._stall_notifier.terminal_task(latest)
+
+    async def _drain_acceptance_verdicts(self, task_id: str) -> bool:
+        """验收节点终局后，把裁决落到被验执行节点上（调度闸门模型的收口）。
+
+        旧模型里 `_run_child_pipeline` 在同一个协程里依次驱动执行与验收，裁决的落账
+        是它的私有步骤；拆掉那条循环后，验收节点的回合由调度器独立跑完，必须由这里
+        把"验收节点已终局 + 握手仍在等裁决"这个持久组合翻译成下一步动作：
+
+        * 通过 → 给被验执行节点签发成功终态（会向父节点发 `child_final`）；
+        * 普通驳回 → 已有逻辑把双方复活、写回反馈；下一轮由可派发扫描重新拾起；
+        * 不可修复驳回 → 给被验执行节点签发失败终态。
+
+        只按持久状态判定，因此**幂等**：裁定落账后握手不再是"待裁决"，重复扫描是空转。
+        这是 R13 的收口点——漏掉它，子节点提交后会永久停在 `waiting_acceptance`。
+        """
+        task = self._store.get_task(task_id)
+        if task is None:
+            return False
+        progressed = False
+        pending_states = {
+            ACCEPTANCE_STATE_WAITING_ACCEPTANCE,
+            ACCEPTANCE_STATE_WAITING_BLOCK_VERIFICATION,
+        }
+        for node in list(self._store.list_nodes(task_id) or []):
+            if str(getattr(node, 'node_kind', '') or '').strip().lower() != KIND_ACCEPTANCE:
+                continue
+            if str(getattr(node, 'status', '') or '').strip().lower() not in {'success', 'failed'}:
+                continue
+            execution = self._node_runner._accepted_execution_node(task_id=task_id, acceptance=node)
+            if execution is None:
+                continue
+            handshake = normalize_acceptance_handshake(
+                (execution.metadata or {}).get(ACCEPTANCE_HANDSHAKE_KEY)
+            )
+            handshake_state = str(handshake.get('state') or '').strip()
+            named_node_id = str(handshake.get('acceptance_node_id') or '').strip()
+            if named_node_id and named_node_id != str(node.node_id or '').strip():
+                continue
+            execution_terminal = str(getattr(execution, 'status', '') or '').strip().lower() in {
+                'success',
+                'failed',
+            }
+            if handshake_state not in pending_states:
+                # 旧管线（或本函数的上一次运行）已经落过账，只差把执行节点行收尾：
+                # 握手 accepted / rejected_terminal 且执行节点仍非终态，是旧模型把
+                # "结果"记在 spawn entry 上、节点行没动留下的形态。补上终态才会
+                # 触发 child_final，也才会让父节点的 all_children 满足。
+                if execution_terminal:
+                    continue
+                if handshake_state == ACCEPTANCE_STATE_ACCEPTED and str(node.status or '').strip().lower() == 'success':
+                    self._node_runner.finalize_inspected_execution_node(
+                        task_id=task_id, node_id=execution.node_id
+                    )
+                    progressed = True
+                elif handshake_state == ACCEPTANCE_STATE_REJECTED_TERMINAL and str(node.status or '').strip().lower() == 'failed':
+                    self._node_runner.finalize_inspected_execution_node(
+                        task_id=task_id,
+                        node_id=execution.node_id,
+                        failure_reason=str(node.failure_reason or 'acceptance rejected without retry').strip()
+                        or 'acceptance rejected without retry',
+                    )
+                    progressed = True
+                continue
+            result = self._node_runner._result_from_record(node)
+            handled = self._node_runner._handle_acceptance_node_result(
+                task=task,
+                acceptance=node,
+                result=result,
+            )
+            progressed = True
+            handled_status = str(getattr(handled, 'status', '') or '').strip().lower()
+            handled_delivery = str(getattr(handled, 'delivery_status', '') or '').strip().lower()
+            if handled_status == 'success' and handled_delivery == 'final':
+                self._node_runner.finalize_inspected_execution_node(
+                    task_id=task_id, node_id=execution.node_id
+                )
+            elif handled_status == 'failed' and handled_delivery == 'blocked':
+                self._node_runner.finalize_inspected_execution_node(
+                    task_id=task_id,
+                    node_id=execution.node_id,
+                    failure_reason=str(
+                        getattr(handled, 'blocking_reason', '') or getattr(handled, 'summary', '') or ''
+                    ).strip()
+                    or 'acceptance rejected without retry',
+                )
+        return progressed
 
     async def _reconcile_orphan_in_progress_nodes(self, task_id: str, dispatcher: 'TaskNodeDispatcher') -> None:
         """C：孤儿收尸/重派发（每次 run_task 拾取时执行，幂等）。
