@@ -93,7 +93,6 @@ from main.ids import new_command_id, new_node_id, new_task_id, new_worker_id
 from main.models import (
     NodeRecord,
     TaskArtifactRecord,
-    TaskMessageDistributionEpoch,
     TaskNodeNotification,
     TaskRecord,
     TokenUsageSummary,
@@ -141,14 +140,9 @@ from main.runtime.node_wake import (
     wake_parked_node,
 )
 from main.runtime.react_loop import ReActToolLoop
-from main.runtime.subtree_hold import DISTRIBUTION_ACTIVE_STATES
 from main.runtime.task_actor_service import TaskActorService
 from main.runtime.tool_pressure_monitor import WorkerPressureMonitor
 from main.service.event_registry import TaskEventRegistry
-from main.service.task_append_notice_contract import (
-    TASK_APPEND_NOTICE_DESCRIPTION,
-    build_task_append_notice_parameters,
-)
 from main.service.task_distribution_error_callback import (
     TASK_DISTRIBUTION_ERROR_CALLBACK_PATH,
     normalize_task_distribution_error_payload,
@@ -166,7 +160,6 @@ from main.service.task_event_callback import (
 from main.service.task_stall_callback import (
     TASK_STALL_CALLBACK_PATH,
     TASK_STALL_REASON_CANCEL_REQUESTED,
-    TASK_STALL_REASON_DISTRIBUTION_BARRIER,
     TASK_STALL_REASON_MISSING_TASK,
     TASK_STALL_REASON_NOT_IN_PROGRESS,
     TASK_STALL_REASON_SUSPECTED_STALL,
@@ -209,11 +202,6 @@ from main.storage.fs_utils import remove_tree
 from main.storage.sqlite_store import SQLiteTaskStore
 
 _UNSET = object()
-# "分发在飞"的判据只有一份作者：`subtree_hold.DISTRIBUTION_ACTIVE_STATES`（hold 谓词与
-# 恢复车道都用它）。读侧与追加车道必须沿用同一份，否则驱动真会写下的 barrier_requested /
-# barrier_draining 会被当成"没有活动 epoch"——屏障排空期间另起一条 epoch 并行下发。
-# 'resuming' 是存量 epoch 行里可能出现的旧形状，多算在飞只会把闸门收紧，不会绕过屏障。
-_ACTIVE_DISTRIBUTION_EPOCH_STATES = DISTRIBUTION_ACTIVE_STATES | {'resuming'}
 GOVERNANCE_MODE_META_KEY = 'ceo_frontdoor_regulatory_mode_enabled'
 GOVERNANCE_MODE_UPDATED_AT_META_KEY = 'ceo_frontdoor_regulatory_mode_enabled:updated_at'
 _WORKER_STATUS_STALE_AFTER_SECONDS = 15.0
@@ -771,7 +759,6 @@ class MainRuntimeService:
         # 节点道 skill 名单的每跳取数口：react_loop 无 service 引用，只能由这里递进去
         # （与 `_tool_snapshot_supplier` 同一条 side-channel）。
         self.node_runner._skill_roster_supplier = self._node_skill_roster_supplier
-        self.node_runner.distribution_delivery_callback = self._deliver_distribution_message
         # 节点侧 `send_message` 的投递口：NodeRunner 没有 service 引用，走同一条 side-channel。
         self.node_runner.node_message_delivery_callback = self._deliver_node_message_from_node
         # 节点侧 `manage_child_nodes` 的控制口：暂停/恢复/终止需要 dispatcher、暂停账本
@@ -799,14 +786,6 @@ class MainRuntimeService:
             runner=self.task_actor_service,
             max_concurrent_tasks=None if execution_runtime_enabled else 4,
             per_task_limit=1,
-        )
-        self.task_actor_service.distribution_skipped_notifier = (
-            lambda task_id, epoch_id, root_message, items: self.emit_task_distribution_skipped(
-                task_id=task_id,
-                epoch_id=epoch_id,
-                root_message=root_message,
-                items=items,
-            )
         )
         self.task_actor_service.interrupted_task_requeue_callback = (
             lambda task_id: asyncio.get_running_loop().call_soon(
@@ -2650,7 +2629,6 @@ class MainRuntimeService:
 
     async def resume_task(self, task_id: str) -> TaskRecord | None:
         task_id = self.normalize_task_id(task_id)
-        self._reset_failed_distribution_state_on_resume(task_id)
         if self.execution_mode in {'embedded', 'worker'}:
             task = self.get_task(task_id)
             if task is None:
@@ -2671,24 +2649,6 @@ class MainRuntimeService:
             )
         return self.get_task(task_id)
 
-    def _reset_failed_distribution_state_on_resume(self, task_id: str) -> None:
-        # An explicit resume is the operator's choice to accept the degraded path: the
-        # undistributed messages stay queued as pending notices on their targets, so
-        # downgrade the visible failure banner to the ordinary pending-notice state and
-        # release the subtree hold. The epoch row keeps state='failed' + error_text as
-        # the durable forensic record.
-        runtime_meta = self.log_service.read_task_runtime_meta(task_id) or {}
-        distribution = dict(runtime_meta.get('distribution') or {})
-        if str(distribution.get('state') or '').strip() != 'failed':
-            return
-        distribution['active_epoch_id'] = ''
-        distribution['state'] = 'resume_ready'
-        distribution['mode'] = ''
-        distribution['target_node_ids'] = []
-        distribution['frontier_node_ids'] = []
-        distribution['blocked_node_ids'] = []
-        distribution['error_text'] = ''
-        self.log_service.update_task_runtime_meta(task_id, distribution=distribution)
 
     @staticmethod
     def _runtime_session_context(session_id: str) -> dict[str, str]:
@@ -2709,7 +2669,6 @@ class MainRuntimeService:
             return None
         if not (bool(task.is_paused) or task.status in {'success', 'failed'}):
             raise ValueError('task_not_paused')
-        self._cancel_distribution_for_force_delete(task_id=task_id, reason='task_delete')
         if self.global_scheduler.is_active(task_id):
             try:
                 await asyncio.wait_for(self.global_scheduler.wait(task_id), timeout=2.0)
@@ -4322,473 +4281,6 @@ class MainRuntimeService:
             final_acceptance_prompt=str(final_acceptance_prompt or '').strip(),
         )
 
-    async def task_append_notice(
-        self,
-        *,
-        task_ids: list[str] | None,
-        node_ids: list[str] | None,
-        message: str,
-        session_id: str,
-    ) -> str:
-        return await self.append_notice_to_targets(
-            task_ids=task_ids,
-            node_ids=node_ids,
-            message=message,
-            session_id=session_id,
-            require_session_ownership=True,
-        )
-
-    async def append_notice_to_targets(
-        self,
-        *,
-        task_ids: list[str] | None,
-        node_ids: list[str] | None,
-        message: str,
-        session_id: str = '',
-        require_session_ownership: bool = True,
-    ) -> str:
-        """定向通知统一入口（工具与网页 REST 共用）。
-
-        node_ids 是真正的投递目标：分发以每个目标为根做「子树屏障」，
-        冻结范围仅为目标子树的存活节点；task_ids 等价于以该任务根节点
-        为目标（即原全局通知行为）。不再有任务级 pause_task——子树冻结
-        由 hold 谓词在执行检查点强制，任务人工暂停时 epoch 延迟到恢复。
-        """
-        normalized_message = str(message or '').strip()
-        normalized_session_id = self._normalize_session_key(session_id)
-        if not normalized_message:
-            raise ValueError('message_required')
-        normalized_task_ids = self._normalize_task_id_list(task_ids or [], allow_empty=True)
-        normalized_node_ids: list[str] = []
-        seen_node_ids: set[str] = set()
-        for raw_node_id in list(node_ids or []):
-            node_id = str(raw_node_id or '').strip()
-            if not node_id or node_id in seen_node_ids:
-                continue
-            seen_node_ids.add(node_id)
-            normalized_node_ids.append(node_id)
-        if not normalized_task_ids and not normalized_node_ids:
-            raise ValueError('append_notice_targets_required')
-
-        session_tasks: dict[str, TaskRecord] | None = None
-        if require_session_ownership:
-            session_tasks = {
-                task.task_id: task
-                for task in self.list_unfinished_tasks_for_session(normalized_session_id)
-            }
-
-        def _resolve_unfinished_task(candidate_task_id: str) -> TaskRecord | None:
-            if session_tasks is not None:
-                return session_tasks.get(candidate_task_id)
-            # 网页端定向通知：不做会话归属校验，但任务必须仍未完成。
-            candidate = self.get_task(candidate_task_id)
-            if candidate is None:
-                return None
-            if str(candidate.status or '').strip().lower() in {'success', 'failed'}:
-                return None
-            return candidate
-
-        targets_by_task: dict[str, list[str]] = {}
-        tasks_by_id: dict[str, TaskRecord] = {}
-        for task_id in normalized_task_ids:
-            task = _resolve_unfinished_task(task_id)
-            if task is None:
-                raise ValueError('append_notice_invalid_task_target')
-            root_node_id = str(task.root_node_id or '').strip()
-            if not root_node_id:
-                raise ValueError('append_notice_invalid_task_target')
-            tasks_by_id[task.task_id] = task
-            targets_by_task.setdefault(task.task_id, []).append(root_node_id)
-        for node_id in normalized_node_ids:
-            node = self.store.get_node(node_id)
-            if node is None or str(getattr(node, 'node_kind', '') or '').strip().lower() == 'acceptance':
-                raise ValueError('append_notice_invalid_node_target')
-            # 终态目标拒绝定向通知：终态节点不接收，也不允许程序化绕过下传。
-            if str(getattr(node, 'status', '') or '').strip().lower() in {'success', 'failed'}:
-                raise ValueError('append_notice_target_terminal')
-            task = _resolve_unfinished_task(str(getattr(node, 'task_id', '') or '').strip())
-            if task is None:
-                raise ValueError('append_notice_invalid_task_target')
-            snapshot = self.query_service.get_tree_subtree(task.task_id, task.root_node_id)
-            visible_ids = set((snapshot.nodes_by_id or {}).keys()) if snapshot is not None else set()
-            if node_id not in visible_ids:
-                raise ValueError('append_notice_invalid_node_target')
-            tasks_by_id[task.task_id] = task
-            targets_by_task.setdefault(task.task_id, []).append(node_id)
-        if not targets_by_task:
-            raise ValueError('append_notice_invalid_task_target')
-
-        updated_task_ids: list[str] = []
-        for task_id in sorted(targets_by_task):
-            task = tasks_by_id[task_id]
-            target_node_ids = self._reduce_notice_targets_to_topmost(task_id, targets_by_task[task_id])
-            current_state = self._task_distribution_state(task_id)
-            active_epoch_id = str(current_state.get('active_epoch_id') or '').strip()
-            active_state = str(current_state.get('state') or '').strip()
-            queued_epoch: dict[str, Any] | None = None
-            if active_epoch_id and active_state in {'pause_requested', 'barrier_requested'}:
-                self._coalesce_pending_notice(
-                    task_id=task_id,
-                    root_message=normalized_message,
-                    target_node_ids=target_node_ids,
-                )
-            else:
-                queued_epoch = self._queue_distribution_epoch(
-                    task_id=task_id,
-                    task=task,
-                    target_node_ids=target_node_ids,
-                    root_message=normalized_message,
-                )
-            # 不再 pause_task：冻结范围只是子树（根目标即全树），任务暂停
-            # 状态属于操作员；任务/目标人工暂停时驱动器延迟启动分发。
-            self._refresh_distribution_meta(task_id)
-            if queued_epoch is not None and str(queued_epoch.get('state') or '').strip() == 'pause_requested':
-                await self._schedule_distribution_epoch(task)
-            updated_task_ids.append(task_id)
-        joined_task_ids = ', '.join(updated_task_ids)
-        return f'已向任务 {joined_task_ids} 追加通知。'
-
-    def _reduce_notice_targets_to_topmost(self, task_id: str, node_ids: list[str]) -> list[str]:
-        """嵌套目标合并为最上层祖先；不相交目标全部保留（共享一个 epoch）。"""
-        unique_ids = list(dict.fromkeys(
-            str(item or '').strip()
-            for item in list(node_ids or [])
-            if str(item or '').strip()
-        ))
-        if len(unique_ids) <= 1:
-            return unique_ids
-        subtrees = {
-            node_id: {
-                str(item.node_id or '').strip()
-                for item in self._node_subtree(task_id, node_id, include_root=True)
-            }
-            for node_id in unique_ids
-        }
-        return [
-            node_id
-            for node_id in unique_ids
-            if not any(
-                other != node_id and node_id in subtrees[other]
-                for other in unique_ids
-            )
-        ]
-
-    def _task_distribution_epochs(self, task_id: str) -> list[TaskMessageDistributionEpoch]:
-        terminal_states = {'completed', 'failed', 'cancelled', 'cancelled_by_task_delete'}
-        return [
-            epoch
-            for epoch in list(self.store.list_active_task_message_distribution_epochs(task_id) or [])
-            if str(epoch.state or '').strip().lower() not in terminal_states
-        ]
-
-    def _task_distribution_state(self, task_id: str) -> dict[str, Any]:
-        epochs = self._task_distribution_epochs(task_id)
-        active = next(
-            (
-                epoch
-                for epoch in epochs
-                if str(epoch.state or '').strip() in _ACTIVE_DISTRIBUTION_EPOCH_STATES
-            ),
-            None,
-        )
-        if active is None:
-            active = next((epoch for epoch in epochs if str(epoch.state or '').strip() == 'queued'), None)
-        if active is None:
-            # Surface a still-unresolved distribution failure: the latest epoch failed and
-            # the task is still paused waiting for operator/CEO intervention. A newer epoch
-            # (retry via append notice) or a resume supersedes this signal.
-            all_epochs = list(self.store.list_active_task_message_distribution_epochs(task_id) or [])
-            latest_epoch = all_epochs[-1] if all_epochs else None
-            if latest_epoch is not None and str(latest_epoch.state or '').strip() == 'failed':
-                latest_task = self.get_task(task_id)
-                if latest_task is not None and (bool(latest_task.pause_requested) or bool(latest_task.is_paused)):
-                    failed_payload = dict(latest_epoch.payload or {}) if isinstance(latest_epoch.payload, dict) else {}
-                    failed_targets = [
-                        str(item or '').strip()
-                        for item in list(failed_payload.get('target_node_ids') or [])
-                        if str(item or '').strip()
-                    ]
-                    failed_barrier = [
-                        str(item or '').strip()
-                        for item in list(failed_payload.get('barrier_node_ids') or [])
-                        if str(item or '').strip()
-                    ]
-                    failed_pending = [
-                        str(item or '').strip()
-                        for item in list(failed_payload.get('pending_notice_node_ids') or [])
-                        if str(item or '').strip()
-                    ]
-                    failed_frozen = [
-                        str(item or '').strip()
-                        for item in list(failed_payload.get('frozen_node_ids') or [])
-                        if str(item or '').strip()
-                    ]
-                    if not failed_pending:
-                        failed_pending = list(failed_targets)
-                    if not failed_pending:
-                        failed_root_node_id = str(latest_epoch.root_node_id or '').strip()
-                        failed_pending = [failed_root_node_id] if failed_root_node_id else []
-                    return {
-                        'active_epoch_id': str(latest_epoch.epoch_id or '').strip(),
-                        'state': 'failed',
-                        'mode': 'subtree_barrier' if failed_barrier else '',
-                        'target_node_ids': failed_targets,
-                        'frontier_node_ids': [],
-                        'blocked_node_ids': failed_barrier,
-                        'frozen_node_ids': failed_frozen,
-                        'pending_notice_node_ids': failed_pending,
-                        'queued_epoch_count': 0,
-                        'pending_mailbox_count': 0,
-                        'error_text': str(latest_epoch.error_text or '').strip(),
-                    }
-        queued_epoch_count = sum(
-            1
-            for epoch in epochs
-            if str(epoch.state or '').strip() in {'queued', 'pause_requested'}
-        )
-        pending_mailbox_count = 0
-        if active is not None:
-            pending_mailbox_count = sum(
-                1
-                for item in list(self.store.list_task_epoch_notifications(task_id, active.epoch_id) or [])
-                if str(item.status or '').strip() in {'pending_distribution', 'delivered'}
-            )
-        frontier_node_ids = []
-        blocked_node_ids = []
-        frozen_node_ids = []
-        pending_notice_node_ids = []
-        target_node_ids = []
-        mode = ''
-        state = str(active.state or '').strip() if active is not None else ''
-        if active is not None and isinstance(active.payload, dict):
-            frontier_node_ids = [
-                str(item or '').strip()
-                for item in list(active.payload.get('frontier_node_ids') or [])
-                if str(item or '').strip()
-            ]
-            # 排空账本与 blocked 同源于 epoch 行：只搬 blocked 的话，横幅分子恒 0。
-            frozen_node_ids = [
-                str(item or '').strip()
-                for item in list(active.payload.get('frozen_node_ids') or [])
-                if str(item or '').strip()
-            ]
-            target_node_ids = [
-                str(item or '').strip()
-                for item in list(active.payload.get('target_node_ids') or [])
-                if str(item or '').strip()
-            ]
-            blocked_node_ids = [
-                str(item or '').strip()
-                for item in list(active.payload.get('barrier_node_ids') or [])
-                if str(item or '').strip()
-            ]
-            if blocked_node_ids:
-                mode = 'subtree_barrier'
-                if state == 'pause_requested':
-                    state = 'barrier_requested'
-                pending_notice_node_ids = [
-                    str(item or '').strip()
-                    for item in list(active.payload.get('pending_notice_node_ids') or [])
-                    if str(item or '').strip()
-                ]
-                if not pending_notice_node_ids:
-                    # 定向通知的"本地保留"目标是 epoch 的目标节点集合；
-                    # 目标缺省（旧数据）时回退任务根。
-                    fallback_ids = list(target_node_ids)
-                    if not fallback_ids:
-                        root_node_id = str(active.root_node_id or '').strip()
-                        if root_node_id:
-                            fallback_ids = [root_node_id]
-                    pending_notice_node_ids = fallback_ids
-        return {
-            'active_epoch_id': str(active.epoch_id or '').strip() if active is not None else '',
-            'state': state,
-            'mode': mode,
-            'target_node_ids': target_node_ids,
-            'frontier_node_ids': frontier_node_ids,
-            'blocked_node_ids': blocked_node_ids,
-            'frozen_node_ids': frozen_node_ids,
-            'pending_notice_node_ids': pending_notice_node_ids,
-            'queued_epoch_count': queued_epoch_count,
-            'pending_mailbox_count': pending_mailbox_count,
-            'error_text': '',
-        }
-
-    def _queue_distribution_epoch(
-        self,
-        *,
-        task_id: str,
-        target_node_ids: list[str],
-        root_message: str,
-        task: TaskRecord | None = None,
-    ) -> dict[str, Any]:
-        epochs = self._task_distribution_epochs(task_id)
-        active_states = _ACTIVE_DISTRIBUTION_EPOCH_STATES
-        next_state = 'queued' if any(str(epoch.state or '').strip() in active_states for epoch in epochs) else 'pause_requested'
-        epoch_id = new_command_id().replace('command:', 'epoch:', 1)
-        targets = list(dict.fromkeys(
-            str(item or '').strip()
-            for item in list(target_node_ids or [])
-            if str(item or '').strip()
-        ))
-        resolved_task = task if task is not None else self.get_task(task_id)
-        root_node_id = str(getattr(resolved_task, 'root_node_id', '') or '').strip() if resolved_task is not None else ''
-        # 屏障 = 各目标子树 ∩ 存活分发树（验收节点天然排除）+ 目标自身。
-        # 快照仅用于取证/UI：hold 谓词按波次实时重推，防止 drain 期间
-        # 新物化的子孙节点逃出冻结范围。
-        live_ids = set(
-            getattr(self.node_runner, 'live_distribution_tree_node_ids', lambda **_: [])(task_id=task_id) or []
-        )
-        scope_ids: list[str] = []
-        for target_id in targets:
-            scope_ids.append(target_id)
-            scope_ids.extend(
-                str(item.node_id or '').strip()
-                for item in self._node_subtree(task_id, target_id, include_root=True)
-            )
-        deduped_scope = [item for item in dict.fromkeys(scope_ids) if item]
-        barrier_node_ids = [
-            node_id
-            for node_id in deduped_scope
-            if node_id in live_ids or node_id in set(targets)
-        ]
-        record = self.store.upsert_task_message_distribution_epoch(
-            TaskMessageDistributionEpoch(
-                epoch_id=epoch_id,
-                task_id=task_id,
-                root_node_id=root_node_id,
-                root_message=str(root_message or '').strip(),
-                state=next_state,
-                created_at=now_iso(),
-                payload={
-                    'barrier_root_node_id': root_node_id,
-                    'target_node_ids': list(targets),
-                    'scope_node_ids': list(deduped_scope),
-                    'barrier_node_ids': list(barrier_node_ids),
-                    'drain_pending_node_ids': list(barrier_node_ids),
-                    'frontier_node_ids': [],
-                    'deferred_frontier_node_ids': [],
-                    'queued_root_messages': [str(root_message or '').strip()],
-                    'distributed_node_ids': [],
-                    'decision_records': [],
-                },
-            )
-        )
-        return record.model_dump(mode='json')
-
-    def _coalesce_pending_notice(
-        self,
-        *,
-        task_id: str,
-        root_message: str,
-        target_node_ids: list[str],
-    ) -> dict[str, Any]:
-        epochs = self._task_distribution_epochs(task_id)
-        target = next(
-            (epoch for epoch in epochs if str(epoch.state or '').strip() == 'pause_requested'),
-            None,
-        )
-        new_targets = list(dict.fromkeys(
-            str(item or '').strip()
-            for item in list(target_node_ids or [])
-            if str(item or '').strip()
-        ))
-        if target is None:
-            return self._queue_distribution_epoch(
-                task_id=task_id,
-                target_node_ids=new_targets,
-                root_message=root_message,
-            )
-        payload = dict(target.payload or {})
-        queued_root_messages = [
-            str(item or '').strip()
-            for item in list(payload.get('queued_root_messages') or [])
-            if str(item or '').strip()
-        ]
-        if not queued_root_messages:
-            queued_root_messages.append(str(target.root_message or '').strip())
-        queued_root_messages.append(str(root_message or '').strip())
-        payload['queued_root_messages'] = queued_root_messages
-        # 目标并集后重新收敛嵌套目标，并按新目标重建屏障快照。
-        merged_targets = self._reduce_notice_targets_to_topmost(
-            task_id,
-            [
-                str(item or '').strip()
-                for item in list(payload.get('target_node_ids') or [])
-                if str(item or '').strip()
-            ] + new_targets,
-        )
-        payload['target_node_ids'] = merged_targets
-        live_ids = set(
-            getattr(self.node_runner, 'live_distribution_tree_node_ids', lambda **_: [])(task_id=task_id) or []
-        )
-        scope_ids: list[str] = []
-        for merged_target in merged_targets:
-            scope_ids.append(merged_target)
-            scope_ids.extend(
-                str(item.node_id or '').strip()
-                for item in self._node_subtree(task_id, merged_target, include_root=True)
-            )
-        deduped_scope = [item for item in dict.fromkeys(scope_ids) if item]
-        payload['scope_node_ids'] = deduped_scope
-        payload['barrier_node_ids'] = [
-            node_id
-            for node_id in deduped_scope
-            if node_id in live_ids or node_id in set(merged_targets)
-        ]
-        payload['drain_pending_node_ids'] = list(payload['barrier_node_ids'])
-        updated = target.model_copy(update={'payload': payload})
-        stored = self.store.upsert_task_message_distribution_epoch(updated)
-        return stored.model_dump(mode='json')
-
-    def _cancel_distribution_for_force_delete(self, *, task_id: str, reason: str) -> None:
-        epochs = self._task_distribution_epochs(task_id)
-        for epoch in epochs:
-            updated_epoch = epoch.model_copy(
-                update={
-                    'state': 'cancelled_by_task_delete',
-                    'error_text': str(reason or '').strip(),
-                    'completed_at': now_iso(),
-                }
-            )
-            self.store.upsert_task_message_distribution_epoch(updated_epoch)
-            for notification in list(self.store.list_task_epoch_notifications(task_id, epoch.epoch_id) or []):
-                updated_notification = notification.model_copy(
-                    update={
-                        'status': 'cancelled',
-                        'consumed_at': str(notification.consumed_at or now_iso()).strip() or now_iso(),
-                    }
-                )
-                self.store.upsert_task_node_notification(updated_notification)
-        self.log_service.update_task_runtime_meta(
-            task_id,
-            distribution={
-                'active_epoch_id': '',
-                'state': '',
-                'mode': '',
-                'frontier_node_ids': [],
-                'blocked_node_ids': [],
-                'pending_notice_node_ids': [],
-                'queued_epoch_count': 0,
-                'pending_mailbox_count': 0,
-            },
-        )
-
-    async def _schedule_distribution_epoch(self, task: TaskRecord) -> None:
-        """已随决策 M 下线：epoch 子系统不再接受新任务。"""
-        _ = task
-
-    def _refresh_distribution_meta(self, task_id: str) -> None:
-        """分发 runtime meta 的唯一写入口：从 epoch 行全量重算后整体覆盖。
-
-        所有调用方（追加通知、驱动波次、投递回调）都经此收敛，避免
-        局部字段补丁式写入互相覆盖（last-write-wins 竞态）。
-        """
-        self.log_service.update_task_runtime_meta(
-            task_id,
-            distribution=self._task_distribution_state(task_id),
-        )
-
     # ------------------------------------------------------------------
     # 节点信箱直投 + R2 唤醒（不走 distribution epoch）
     # ------------------------------------------------------------------
@@ -5326,133 +4818,6 @@ class MainRuntimeService:
             'legal_targets': legal_targets,
         }
 
-    def _deliver_distribution_message(
-        self,
-        *,
-        task_id: str,
-        epoch_id: str,
-        source_node_id: str,
-        target_node_id: str,
-        message: str,
-    ) -> dict[str, Any]:
-        target = self.store.get_node(target_node_id)
-        if target is None or str(target.task_id or '').strip() != str(task_id or '').strip():
-            raise ValueError('distribution_target_missing')
-        target_kind = str(target.node_kind or '').strip().lower()
-        if target_kind not in {'execution', 'acceptance'}:
-            raise ValueError('distribution_target_must_be_execution_or_acceptance_node')
-        notification = self.store.upsert_task_node_notification(
-            next(
-                (
-                    item
-                    for item in list(self.store.list_task_node_notifications(task_id, target_node_id) or [])
-                    if str(item.epoch_id or '').strip() == str(epoch_id or '').strip()
-                    and str(item.source_node_id or '').strip() == str(source_node_id or '').strip()
-                    and str(item.message or '').strip() == str(message or '').strip()
-                ),
-                TaskNodeNotification(
-                    notification_id=new_command_id().replace('command:', 'notif:', 1),
-                    task_id=str(task_id or '').strip(),
-                    node_id=str(target_node_id or '').strip(),
-                    epoch_id=str(epoch_id or '').strip(),
-                    source_node_id=str(source_node_id or '').strip(),
-                    message=str(message or '').strip(),
-                    status='delivered',
-                    created_at=now_iso(),
-                    delivered_at=now_iso(),
-                    consumed_at='',
-                    payload={},
-                ),
-            )
-        )
-        if target_kind == 'execution':
-            self._reactivate_execution_node_for_distribution(
-                task_id=task_id,
-                node_id=target_node_id,
-                epoch_id=epoch_id,
-            )
-            self._invalidate_acceptance_for_reactivated_execution_node(
-                task_id=task_id,
-                execution_node_id=target_node_id,
-                epoch_id=epoch_id,
-            )
-        self.node_runner.stamp_distribution_target_pending_notice_state(
-            task_id=task_id,
-            node_id=target_node_id,
-            epoch_id=epoch_id,
-            updated_at=now_iso(),
-        )
-        self._refresh_distribution_meta(task_id)
-        return notification.model_dump(mode='json')
-
-    def _reactivate_execution_node_for_distribution(
-        self,
-        *,
-        task_id: str,
-        node_id: str,
-        epoch_id: str,
-    ) -> None:
-        _ = epoch_id
-        node = self.store.get_node(node_id)
-        if node is None or str(node.task_id or '').strip() != str(task_id or '').strip():
-            return
-        if str(node.node_kind or '').strip().lower() != 'execution':
-            return
-        if str(node.status or '').strip().lower() not in {'success', 'failed'}:
-            return
-        updated = self.store.update_node(
-            node_id,
-            lambda record: record.model_copy(
-                update={
-                    'status': 'in_progress',
-                    'updated_at': now_iso(),
-                    'final_output': '',
-                    'final_output_ref': '',
-                    'failure_reason': '',
-                    'check_result': '',
-                    'check_result_ref': '',
-                }
-            ),
-        )
-        if updated is not None:
-            self.log_service.sync_node_read_model(task_id, node_id)
-            self.log_service.refresh_task_view(task_id, mark_unread=True)
-
-    def _invalidate_acceptance_for_reactivated_execution_node(
-        self,
-        *,
-        task_id: str,
-        execution_node_id: str,
-        epoch_id: str,
-    ) -> None:
-        execution_node = self.store.get_node(execution_node_id)
-        if execution_node is None or str(execution_node.task_id or '').strip() != str(task_id or '').strip():
-            return
-        metadata = dict(execution_node.metadata or {})
-        owner_parent_node_id = str(metadata.get('spawn_owner_parent_node_id') or '').strip()
-        owner_round_id = str(metadata.get('spawn_owner_round_id') or '').strip()
-        owner_entry_index = int(metadata.get('spawn_owner_entry_index') or 0)
-        if not owner_parent_node_id or not owner_round_id:
-            return
-        parent = self.store.get_node(owner_parent_node_id)
-        if parent is None or str(parent.task_id or '').strip() != str(task_id or '').strip():
-            return
-        operations = dict((parent.metadata or {}).get('spawn_operations') or {})
-        payload = dict(operations.get(owner_round_id) or {})
-        entries = list(payload.get('entries') or [])
-        if owner_entry_index < 0 or owner_entry_index >= len(entries) or not isinstance(entries[owner_entry_index], dict):
-            return
-        entry = dict(entries[owner_entry_index] or {})
-        acceptance_node_id = str(entry.get('acceptance_node_id') or '').strip()
-        if not acceptance_node_id:
-            return
-        self.log_service.invalidate_acceptance_node(
-            task_id,
-            acceptance_node_id,
-            epoch_id=epoch_id,
-            reason='task_message_distribution',
-        )
-
     def list_active_task_snapshots_for_session(self, session_id: str, *, limit: int = 3) -> list[dict[str, str]]:
         unfinished = list(self.list_unfinished_tasks_for_session(session_id))
         unfinished.sort(
@@ -5639,52 +5004,6 @@ class MainRuntimeService:
             return False
         return bool(heartbeat.enqueue_task_distribution_error_payload(normalized))
 
-    def emit_task_distribution_skipped(
-        self,
-        *,
-        task_id: str,
-        epoch_id: str,
-        root_message: str,
-        items: list[dict[str, Any]],
-    ) -> bool:
-        """本轮降级跳过的子树根节点汇总：交给会话 agent，不自动重投也不自动关闭。
-
-        与 `emit_task_distribution_error` 同一条通道（worker 走 outbox 回调、web 直接入
-        心跳队列），差别只在 payload 的 `kind='skipped'`：分发 epoch 已经完成、任务并未
-        暂停，所以提示词不能写成失败暂停那一套。
-        """
-        normalized_items = [
-            {
-                'node_id': str(item.get('node_id') or '').strip(),
-                'reason': str(item.get('reason') or '').strip() or 'distribution turn failed',
-            }
-            for item in list(items or [])
-            if isinstance(item, dict) and str(item.get('node_id') or '').strip()
-        ]
-        if not normalized_items:
-            return False
-        task = self.get_task(task_id)
-        payload = {
-            'task_id': task_id,
-            'session_id': self._task_origin_session_id(task),
-            'title': str(getattr(task, 'title', '') or task_id).strip() or task_id,
-            'epoch_id': epoch_id,
-            'notice_kind': 'skipped',
-            'root_message': str(root_message or '').strip(),
-            'skipped': normalized_items,
-        }
-        normalized = normalize_task_distribution_error_payload(payload)
-        if not normalized:
-            return False
-        if self.execution_mode == 'worker':
-            self._enqueue_task_distribution_error_callback(normalized)
-            return True
-        loop = getattr(self, '_runtime_loop', None)
-        heartbeat = getattr(loop, 'web_session_heartbeat', None) if loop is not None else None
-        if heartbeat is None or not hasattr(heartbeat, 'enqueue_task_distribution_error_payload'):
-            return False
-        return bool(heartbeat.enqueue_task_distribution_error_payload(normalized))
-
     def classify_task_stall_reason(
         self,
         task_id: str,
@@ -5707,19 +5026,6 @@ class MainRuntimeService:
             return TASK_STALL_REASON_CANCEL_REQUESTED
         if bool(current_runtime_state.get('cancel_requested')):
             return TASK_STALL_REASON_CANCEL_REQUESTED
-        # 子树分发屏障（含根目标=全树冻结）期间的静默是预期行为：
-        # 分发控制回合不产生节点可见输出，不得误报 suspected_stall。
-        runtime_meta = self.log_service.read_task_runtime_meta(task.task_id) or {}
-        distribution = dict(runtime_meta.get('distribution') or {})
-        if str(distribution.get('state') or '').strip() in {
-            'pause_requested',
-            'barrier_requested',
-            'paused',
-            'barrier_draining',
-            'distributing',
-            'failed',
-        }:
-            return TASK_STALL_REASON_DISTRIBUTION_BARRIER
         if self.execution_mode == 'web':
             if not self.is_worker_online():
                 return TASK_STALL_REASON_WORKER_UNAVAILABLE
@@ -5855,10 +5161,6 @@ class MainRuntimeService:
             detail['occupiers'] = occupiers
 
         lane: dict[str, Any] = {}
-        distribution = dict(meta.get('distribution') or {})
-        if str(distribution.get('state') or '').strip():
-            lane['distribution_state'] = str(distribution.get('state') or '').strip()
-            lane['distribution_epoch_id'] = str(distribution.get('active_epoch_id') or '').strip()
         deadline = running_tool_deadline(runtime_state)
         if deadline is not None:
             lane['running_tool_deadline'] = deadline.isoformat(timespec='seconds')
@@ -13570,41 +12872,5 @@ class TaskNodeDetailTool(Tool):
                 raise
             result = self._service.node_detail(task_id, node_id)
         return result if isinstance(result, str) else json.dumps(result, ensure_ascii=False)
-
-
-class TaskAppendNoticeTool(Tool):
-    """已随决策 M/O 下线：不再注册到 CEO 工具面。
-
-    保留类只为平滑外部 import；工具面已无此工具，不要重新注册——新模型里节点间
-    通信走 `send_message`，前门 → 根的通道另行落地。
-    """
-
-    hide_universal_timeout_parameter = True
-
-    def __init__(self, service: MainRuntimeService):
-        self._service = service
-
-    @property
-    def name(self) -> str:
-        return 'task_append_notice'
-
-    @property
-    def description(self) -> str:
-        return TASK_APPEND_NOTICE_DESCRIPTION
-
-    @property
-    def parameters(self) -> dict[str, Any]:
-        return build_task_append_notice_parameters()
-
-    async def execute(self, **kwargs: Any) -> str:
-        _ = kwargs
-        return json.dumps(
-            {
-                'ok': False,
-                'error': 'task_append_notice_retired',
-                'details': '该工具已下线：节点侧请用 send_message，用户侧请通过会话补充要求。',
-            },
-            ensure_ascii=False,
-        )
 
 

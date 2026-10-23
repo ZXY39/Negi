@@ -2021,11 +2021,6 @@ class ReActToolLoop:
         frame = self._runtime_frame(task.task_id, node.node_id)
         if not isinstance(frame, dict):
             return None
-        if self._distribution_priority_blocks_recovery(
-            runtime_context=runtime_context,
-            node=node,
-        ):
-            return None
         pending_tool_calls = [
             dict(item)
             for item in list(frame.get('pending_tool_calls') or [])
@@ -2268,11 +2263,6 @@ class ReActToolLoop:
         )
         return prepared_history
 
-    def _distribution_priority_blocks_recovery(self, *, runtime_context: dict[str, Any], node) -> bool:
-        """分发 epoch 已下线：不再有"分发优先级压制崩溃恢复"的情形。"""
-        _ = (runtime_context, node)
-        return False
-
     @staticmethod
     def _park_requested(results: list[dict[str, Any]]) -> bool:
         """本批工具结果里是否有一个成功的 `enter_wait`。
@@ -2323,11 +2313,6 @@ class ReActToolLoop:
     ) -> list[dict[str, Any]] | None:
         frame = self._runtime_frame(task.task_id, node.node_id)
         if not isinstance(frame, dict):
-            return None
-        if self._distribution_priority_blocks_recovery(
-            runtime_context=runtime_context,
-            node=node,
-        ):
             return None
         if str(frame.get('phase') or '').strip() != 'waiting_children':
             return None

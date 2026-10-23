@@ -151,17 +151,13 @@ def test_long_running_orchestration_and_control_tools_are_exempt() -> None:
     for tool in _control_tools():
         assert tool.exempt_universal_timeout is True
 
-    from main.runtime.internal_tools import (
-        SubmitFinalResultTool,
-        SubmitMessageDistributionTool,
-    )
+    from main.runtime.internal_tools import SubmitFinalResultTool
 
     async def _noop(payload):
         return dict(payload or {})
 
     instant_protocol_tools = [
         SubmitFinalResultTool(_noop, node_kind="execution"),
-        SubmitMessageDistributionTool(_noop),
     ]
     for tool in instant_protocol_tools:
         # 瞬时协议工具：隐藏 timeout 参数，但保留机械保底（不豁免）。
