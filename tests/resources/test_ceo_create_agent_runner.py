@@ -177,11 +177,6 @@ def _canonical_frontdoor_state(**overrides) -> dict[str, object]:
         "candidate_skill_ids": [],
         "rbac_visible_tool_names": [],
         "rbac_visible_skill_ids": [],
-        "frontdoor_stage_state": {
-            "active_stage_id": "",
-            "transition_required": False,
-            "stages": [],
-        },
     }
     state.update(dict(overrides))
     return state
@@ -388,35 +383,12 @@ class _RuntimeToolStack:
         return None
 
 
-def _frontdoor_active_stage(goal: str) -> dict[str, object]:
-    return {
-        "active_stage_id": "frontdoor-stage-1",
-        "transition_required": False,
-        "pending_orphan_rounds": [],
-        "stages": [
-            {
-                "stage_id": "frontdoor-stage-1",
-                "stage_index": 1,
-                "stage_goal": goal,
-                "tool_round_budget": 2,
-                "tool_rounds_used": 0,
-                "status": "active",
-                "mode": "自主执行",
-                "completed_stage_summary": "",
-                "key_refs": [],
-                "rounds": [],
-            }
-        ],
-    }
-
-
 async def _run_frontdoor_tool_once(runner, *, tool_name: str, arguments: dict[str, object], call_id: str):
     """Execute one tool through the production execute_tools node and return its result row."""
     payload = {"id": call_id, "name": tool_name, "arguments": dict(arguments or {})}
     update = await runner._graph_execute_tools(
         {
             "tool_names": [tool_name],
-            "frontdoor_stage_state": _frontdoor_active_stage(f"Run {tool_name}"),
             "tool_call_payloads": [payload],
         },
         runtime=SimpleNamespace(context=SimpleNamespace()),
@@ -541,7 +513,6 @@ async def test_create_agent_runner_prompt_keeps_history_uncompacted_after_legacy
             {"role": "assistant", "content": "a2"},
             {"role": "user", "content": "u3"},
         ],
-        "frontdoor_stage_state": {"active_stage_id": "", "transition_required": False, "stages": []},
         "compression_state": {"status": "", "text": "", "source": ""},
     }
 
@@ -824,25 +795,6 @@ async def test_create_agent_graph_execute_tools_preserves_parallel_same_name_too
                 "max_parallel_tool_calls": 2,
                 "synthetic_tool_calls_used": False,
                 "response_payload": {"content": "", "tool_calls": []},
-                "frontdoor_stage_state": {
-                    "active_stage_id": "frontdoor-stage-1",
-                    "transition_required": False,
-                    "stages": [
-                        {
-                            "stage_id": "frontdoor-stage-1",
-                            "stage_index": 1,
-                            "stage_goal": "Run the selected tool calls",
-                            "tool_round_budget": 2,
-                            "tool_rounds_used": 0,
-                            "status": "active",
-                            "mode": "自主执行",
-                            "stage_kind": "normal",
-                            "completed_stage_summary": "",
-                            "key_refs": [],
-                            "rounds": [],
-                        }
-                    ],
-                },
             },
             runtime=SimpleNamespace(context=SimpleNamespace()),
         )
@@ -923,25 +875,6 @@ async def test_graph_execute_tools_grows_authoritative_request_body_baseline() -
         "max_parallel_tool_calls": 1,
         "synthetic_tool_calls_used": False,
         "response_payload": {"content": "", "tool_calls": []},
-        "frontdoor_stage_state": {
-            "active_stage_id": "frontdoor-stage-1",
-            "transition_required": False,
-            "stages": [
-                {
-                    "stage_id": "frontdoor-stage-1",
-                    "stage_index": 1,
-                    "stage_goal": "Run the selected tool calls",
-                    "tool_round_budget": 2,
-                    "tool_rounds_used": 0,
-                    "status": "active",
-                    "mode": "自主执行",
-                    "stage_kind": "normal",
-                    "completed_stage_summary": "",
-                    "key_refs": [],
-                    "rounds": [],
-                }
-            ],
-        },
     }
 
     result = await runner._graph_execute_tools(
@@ -1324,25 +1257,6 @@ async def test_create_agent_graph_execute_tools_makes_loaded_contract_callable()
                 "response_payload": {"content": "", "tool_calls": []},
                 "compression_state": {"status": "running", "text": "compressing", "source": "user"},
                 "semantic_context_state": {"summary_text": "summary", "needs_refresh": False},
-                "frontdoor_stage_state": {
-                    "active_stage_id": "frontdoor-stage-1",
-                    "transition_required": False,
-                    "stages": [
-                        {
-                            "stage_id": "frontdoor-stage-1",
-                            "stage_index": 1,
-                            "stage_goal": "Load the filesystem tool context",
-                            "tool_round_budget": 2,
-                            "tool_rounds_used": 0,
-                            "status": "active",
-                            "mode": "自主执行",
-                            "stage_kind": "normal",
-                            "completed_stage_summary": "",
-                            "key_refs": [],
-                            "rounds": [],
-                        }
-                    ],
-                },
             },
             runtime=SimpleNamespace(context=SimpleNamespace()),
         )
@@ -1408,7 +1322,7 @@ async def test_create_agent_runner_graph_prepare_turn_keeps_contract_present_too
         return {
             "skills": [],
             "tool_families": [],
-            "tool_names": ["submit_next_stage", "load_tool_context", "filesystem_write"],
+            "tool_names": ["filesystem_stat", "load_tool_context", "filesystem_write"],
         }
 
     async def _build_for_ceo(**kwargs):
@@ -1426,7 +1340,7 @@ async def test_create_agent_runner_graph_prepare_turn_keeps_contract_present_too
                 {"role": "user", "content": "hello"},
             ],
             dynamic_appendix_messages=[],
-            tool_names=["submit_next_stage", "load_tool_context", "filesystem_write"],
+            tool_names=["filesystem_stat", "load_tool_context", "filesystem_write"],
             candidate_tool_names=[],
             candidate_tool_items=[],
             trace={
@@ -1436,7 +1350,7 @@ async def test_create_agent_runner_graph_prepare_turn_keeps_contract_present_too
                     "candidate_tool_names": [],
                 },
                 "capability_snapshot": {
-                    "visible_tool_ids": ["submit_next_stage", "load_tool_context", "filesystem_write"],
+                    "visible_tool_ids": ["filesystem_stat", "load_tool_context", "filesystem_write"],
                     "visible_skill_ids": [],
                 },
             },
@@ -1477,7 +1391,7 @@ async def test_create_agent_runner_graph_prepare_turn_keeps_contract_present_too
 
     assert "hydrated_tool_names" not in prepared
     assert "hydration_revoked_executor_names" not in prepared
-    assert prepared["tool_names"] == ["submit_next_stage", "load_tool_context", "filesystem_write"]
+    assert prepared["tool_names"] == ["filesystem_stat", "load_tool_context", "filesystem_write"]
     assert prepared["frontdoor_selection_debug"] == {
         "query_text": "hello",
         "raw_turn_query_text": "hello",
@@ -1486,7 +1400,7 @@ async def test_create_agent_runner_graph_prepare_turn_keeps_contract_present_too
             "candidate_tool_names": [],
         },
         "capability_snapshot": {
-            "visible_tool_ids": ["submit_next_stage", "load_tool_context", "filesystem_write"],
+            "visible_tool_ids": ["filesystem_stat", "load_tool_context", "filesystem_write"],
             "visible_skill_ids": [],
         },
         "selected_skills": [],
@@ -1565,7 +1479,7 @@ async def test_create_agent_runner_presence_reading_follows_the_assembled_reques
         return {
             "skills": [],
             "tool_families": [],
-            "tool_names": ["submit_next_stage", "load_tool_context", "filesystem_write"],
+            "tool_names": ["filesystem_stat", "load_tool_context", "filesystem_write"],
         }
 
     async def _build_for_ceo(**kwargs):
@@ -1578,14 +1492,14 @@ async def test_create_agent_runner_presence_reading_follows_the_assembled_reques
             ],
             stable_messages=[{"role": "system", "content": "system"}],
             dynamic_appendix_messages=[],
-            tool_names=["submit_next_stage", "load_tool_context", "filesystem_write"],
+            tool_names=["filesystem_stat", "load_tool_context", "filesystem_write"],
             candidate_tool_names=[],
             candidate_tool_items=[],
             trace={
                 "selected_skills": [],
                 "tool_selection": {"mode": "inventory_only", "candidate_tool_names": []},
                 "capability_snapshot": {
-                    "visible_tool_ids": ["submit_next_stage", "load_tool_context", "filesystem_write"],
+                    "visible_tool_ids": ["filesystem_stat", "load_tool_context", "filesystem_write"],
                     "visible_skill_ids": [],
                 },
             },
@@ -1883,7 +1797,7 @@ async def test_create_agent_runner_graph_prepare_turn_persists_request_body_with
         return {
             "skills": [],
             "tool_families": [],
-            "tool_names": ["submit_next_stage", "load_tool_context", "filesystem_write"],
+            "tool_names": ["filesystem_stat", "load_tool_context", "filesystem_write"],
         }
 
     async def _build_for_ceo(**kwargs):
@@ -1900,14 +1814,14 @@ async def test_create_agent_runner_graph_prepare_turn_persists_request_body_with
             dynamic_appendix_messages=[
                 {"role": "assistant", "content": "## Retrieved Context\n- authoritative memory"}
             ],
-            tool_names=["submit_next_stage", "load_tool_context", "filesystem_write"],
+            tool_names=["filesystem_stat", "load_tool_context", "filesystem_write"],
             candidate_tool_names=[],
             candidate_tool_items=[],
             trace={
                 "selected_skills": [],
                 "tool_selection": {"mode": "inventory_only", "candidate_tool_names": []},
                 "capability_snapshot": {
-                    "visible_tool_ids": ["submit_next_stage", "load_tool_context", "filesystem_write"],
+                    "visible_tool_ids": ["filesystem_stat", "load_tool_context", "filesystem_write"],
                     "visible_skill_ids": [],
                 },
             },
@@ -2488,10 +2402,9 @@ async def test_graph_finalize_turn_strips_all_frontdoor_tool_contract_snapshots_
     contract_text = json.dumps(
         {
             "message_type": "frontdoor_runtime_tool_contract",
-            "callable_tool_names": ["submit_next_stage"],
+            "callable_tool_names": ["filesystem_stat"],
             "candidate_tools": [],
             "candidate_skill_ids": [],
-            "stage_summary": {"active_stage_id": "", "transition_required": False},
             "contract_revision": "frontdoor:v1",
         },
         ensure_ascii=False,
@@ -2510,13 +2423,13 @@ async def test_graph_finalize_turn_strips_all_frontdoor_tool_contract_snapshots_
                         {
                             "id": "call-1",
                             "type": "function",
-                            "function": {"name": "submit_next_stage", "arguments": "{}"},
+                            "function": {"name": "filesystem_stat", "arguments": "{}"},
                         }
                     ],
                 },
                 {
                     "role": "tool",
-                    "name": "submit_next_stage",
+                    "name": "filesystem_stat",
                     "tool_call_id": "call-1",
                     "content": '{"status":"success"}',
                 },
@@ -2539,13 +2452,13 @@ async def test_graph_finalize_turn_strips_all_frontdoor_tool_contract_snapshots_
                 {
                     "id": "call-1",
                     "type": "function",
-                    "function": {"name": "submit_next_stage", "arguments": "{}"},
+                    "function": {"name": "filesystem_stat", "arguments": "{}"},
                 }
             ],
         },
         {
             "role": "tool",
-            "name": "submit_next_stage",
+            "name": "filesystem_stat",
             "tool_call_id": "call-1",
             "content": '{"status":"success"}',
         },
@@ -2567,7 +2480,6 @@ def test_create_agent_runner_syncs_frontdoor_selection_debug_into_inflight_snaps
 
     runner._sync_runtime_session_frontdoor_state(
         state={
-            "frontdoor_stage_state": {"active_stage_id": "", "transition_required": False, "stages": []},
             "compression_state": {"status": "", "text": "", "source": "", "needs_recheck": False},
             "semantic_context_state": {},
             "frontdoor_selection_debug": {
@@ -2601,7 +2513,6 @@ def test_create_agent_runner_syncs_frontdoor_actual_request_trace_into_inflight_
 
     runner._sync_runtime_session_frontdoor_state(
         state={
-            "frontdoor_stage_state": {"active_stage_id": "", "transition_required": False, "stages": []},
             "compression_state": {"status": "", "text": "", "source": "", "needs_recheck": False},
             "semantic_context_state": {},
             "frontdoor_actual_request_path": str(Path("D:/tmp/frontdoor-request.json")),
@@ -2667,7 +2578,6 @@ def test_create_agent_runner_sync_keeps_previous_actual_request_baseline_for_pre
 
     runner._sync_runtime_session_frontdoor_state(
         state={
-            "frontdoor_stage_state": {"active_stage_id": "", "transition_required": False, "stages": []},
             "compression_state": {"status": "", "text": "", "source": "", "needs_recheck": False},
             "semantic_context_state": {},
             "frontdoor_request_body_messages": [
@@ -2730,7 +2640,6 @@ def test_create_agent_runner_sync_allows_finalize_to_extend_existing_actual_requ
 
     runner._sync_runtime_session_frontdoor_state(
         state={
-            "frontdoor_stage_state": {"active_stage_id": "", "transition_required": False, "stages": []},
             "compression_state": {"status": "", "text": "", "source": "", "needs_recheck": False},
             "semantic_context_state": {},
             "frontdoor_request_body_messages": [
@@ -2795,7 +2704,6 @@ def test_create_agent_runner_sync_blocks_internal_only_heartbeat_baseline_regres
 
     runner._sync_runtime_session_frontdoor_state(
         state={
-            "frontdoor_stage_state": {"active_stage_id": "", "transition_required": False, "stages": []},
             "compression_state": {"status": "", "text": "", "source": "", "needs_recheck": False},
             "semantic_context_state": {},
             "heartbeat_internal": True,
@@ -2878,7 +2786,6 @@ def test_create_agent_runner_sync_allows_appending_legitimate_heartbeat_continua
 
     runner._sync_runtime_session_frontdoor_state(
         state={
-            "frontdoor_stage_state": {"active_stage_id": "", "transition_required": False, "stages": []},
             "compression_state": {"status": "", "text": "", "source": "", "needs_recheck": False},
             "semantic_context_state": {},
             "heartbeat_internal": True,
@@ -2954,7 +2861,7 @@ def test_fresh_turn_live_request_messages_reuses_previous_actual_request_prefix(
                     {"role": "assistant", "content": "old retrieved"},
                     {
                         "role": "user",
-                        "content": '{"message_type":"frontdoor_runtime_tool_contract","callable_tool_names":["submit_next_stage"]}',
+                        "content": '{"message_type":"frontdoor_runtime_tool_contract","callable_tool_names":["filesystem_stat"]}',
                     },
                     {
                         "role": "assistant",
@@ -2963,13 +2870,13 @@ def test_fresh_turn_live_request_messages_reuses_previous_actual_request_prefix(
                             {
                                 "id": "call-1",
                                 "type": "function",
-                                "function": {"name": "submit_next_stage", "arguments": "{}"},
+                                "function": {"name": "filesystem_stat", "arguments": "{}"},
                             }
                         ],
                     },
                     {
                         "role": "tool",
-                        "name": "submit_next_stage",
+                        "name": "filesystem_stat",
                         "tool_call_id": "call-1",
                         "content": '{"status":"success"}',
                     },
@@ -3002,13 +2909,13 @@ def test_fresh_turn_live_request_messages_reuses_previous_actual_request_prefix(
                     {
                         "id": "call-1",
                         "type": "function",
-                        "function": {"name": "submit_next_stage", "arguments": "{}"},
+                        "function": {"name": "filesystem_stat", "arguments": "{}"},
                     }
                 ],
             },
             {
                 "role": "tool",
-                "name": "submit_next_stage",
+                "name": "filesystem_stat",
                 "tool_call_id": "call-1",
                 "content": '{"status":"success"}',
             },
@@ -3025,13 +2932,13 @@ def test_fresh_turn_live_request_messages_reuses_previous_actual_request_prefix(
                     {
                         "id": "call-1",
                         "type": "function",
-                        "function": {"name": "submit_next_stage", "arguments": "{}"},
+                        "function": {"name": "filesystem_stat", "arguments": "{}"},
                     }
                 ],
             },
             {
                 "role": "tool",
-                "name": "submit_next_stage",
+                "name": "filesystem_stat",
                 "tool_call_id": "call-1",
                 "content": '{"status":"success"}',
             },
@@ -3051,13 +2958,13 @@ def test_fresh_turn_live_request_messages_reuses_previous_actual_request_prefix(
                 {
                     "id": "call-1",
                     "type": "function",
-                    "function": {"name": "submit_next_stage", "arguments": "{}"},
+                    "function": {"name": "filesystem_stat", "arguments": "{}"},
                 }
             ],
         },
         {
             "role": "tool",
-            "name": "submit_next_stage",
+            "name": "filesystem_stat",
             "tool_call_id": "call-1",
             "content": '{"status":"success"}',
         },
@@ -3076,7 +2983,7 @@ def test_fresh_turn_live_request_messages_reuses_previous_actual_request_prefix_
         {"role": "user", "content": "old question"},
         {
             "role": "user",
-            "content": '{"message_type":"frontdoor_runtime_tool_contract","callable_tool_names":["submit_next_stage"]}',
+            "content": '{"message_type":"frontdoor_runtime_tool_contract","callable_tool_names":["filesystem_stat"]}',
         },
         {
             "role": "assistant",
@@ -3085,13 +2992,13 @@ def test_fresh_turn_live_request_messages_reuses_previous_actual_request_prefix_
                 {
                     "id": "call-1",
                     "type": "function",
-                    "function": {"name": "submit_next_stage", "arguments": "{}"},
+                    "function": {"name": "filesystem_stat", "arguments": "{}"},
                 }
             ],
         },
         {
             "role": "tool",
-            "name": "submit_next_stage",
+            "name": "filesystem_stat",
             "tool_call_id": "call-1",
             "content": '{"status":"success"} ',
         },
@@ -3122,13 +3029,13 @@ def test_fresh_turn_live_request_messages_reuses_previous_actual_request_prefix_
                     {
                         "id": "call-1",
                         "type": "function",
-                        "function": {"name": "submit_next_stage", "arguments": "{}"},
+                        "function": {"name": "filesystem_stat", "arguments": "{}"},
                     }
                 ],
             },
             {
                 "role": "tool",
-                "name": "submit_next_stage",
+                "name": "filesystem_stat",
                 "tool_call_id": "call-1",
                 "content": '{"status":"success"}',
             },
@@ -3144,13 +3051,13 @@ def test_fresh_turn_live_request_messages_reuses_previous_actual_request_prefix_
                     {
                         "id": "call-1",
                         "type": "function",
-                        "function": {"name": "submit_next_stage", "arguments": "{}"},
+                        "function": {"name": "filesystem_stat", "arguments": "{}"},
                     }
                 ],
             },
             {
                 "role": "tool",
-                "name": "submit_next_stage",
+                "name": "filesystem_stat",
                 "tool_call_id": "call-1",
                 "content": '{"status":"success"}',
             },
@@ -3171,13 +3078,13 @@ def test_fresh_turn_live_request_messages_reuses_previous_actual_request_prefix_
                 {
                     "id": "call-1",
                     "type": "function",
-                    "function": {"name": "submit_next_stage", "arguments": "{}"},
+                    "function": {"name": "filesystem_stat", "arguments": "{}"},
                 }
             ],
         },
         {
             "role": "tool",
-            "name": "submit_next_stage",
+            "name": "filesystem_stat",
             "tool_call_id": "call-1",
             "content": '{"status":"success"} ',
         },
@@ -3203,13 +3110,13 @@ def test_restart_restored_trace_reuses_previous_actual_request_scaffold_for_next
                 {
                     "id": "call-1",
                     "type": "function",
-                    "function": {"name": "submit_next_stage", "arguments": "{}"},
+                    "function": {"name": "filesystem_stat", "arguments": "{}"},
                 }
             ],
         },
         {
             "role": "tool",
-            "name": "submit_next_stage",
+            "name": "filesystem_stat",
             "tool_call_id": "call-1",
             "content": '{"status":"success"}',
         },
@@ -3224,7 +3131,7 @@ def test_restart_restored_trace_reuses_previous_actual_request_scaffold_for_next
                 {"role": "assistant", "content": "old retrieved"},
                 {
                     "role": "user",
-                    "content": '{"message_type":"frontdoor_runtime_tool_contract","callable_tool_names":["submit_next_stage"]}',
+                    "content": '{"message_type":"frontdoor_runtime_tool_contract","callable_tool_names":["filesystem_stat"]}',
                 },
                 {
                     "role": "assistant",
@@ -3233,13 +3140,13 @@ def test_restart_restored_trace_reuses_previous_actual_request_scaffold_for_next
                         {
                             "id": "call-1",
                             "type": "function",
-                            "function": {"name": "submit_next_stage", "arguments": "{}"},
+                            "function": {"name": "filesystem_stat", "arguments": "{}"},
                         }
                     ],
                 },
                 {
                     "role": "tool",
-                    "name": "submit_next_stage",
+                    "name": "filesystem_stat",
                     "tool_call_id": "call-1",
                     "content": '{"status":"success"}',
                 },
@@ -3257,9 +3164,9 @@ def test_restart_restored_trace_reuses_previous_actual_request_scaffold_for_next
             "frontdoor_request_body_messages": list(continuity_baseline),
             "frontdoor_actual_request_path": "",
             "frontdoor_actual_request_history": [],
-            "visible_tool_ids": ["submit_next_stage"],
+            "visible_tool_ids": ["filesystem_stat"],
             "visible_skill_ids": ["writing-plans"],
-            "provider_tool_schema_names": ["submit_next_stage"],
+            "provider_tool_schema_names": ["filesystem_stat"],
             "capability_snapshot_exposure_revision": "exp:continuity",
             "source_reason": "actual_request_sync",
         },
@@ -3289,13 +3196,13 @@ def test_restart_restored_trace_reuses_previous_actual_request_scaffold_for_next
                     {
                         "id": "call-1",
                         "type": "function",
-                        "function": {"name": "submit_next_stage", "arguments": "{}"},
+                        "function": {"name": "filesystem_stat", "arguments": "{}"},
                     }
                 ],
             },
             {
                 "role": "tool",
-                "name": "submit_next_stage",
+                "name": "filesystem_stat",
                 "tool_call_id": "call-1",
                 "content": '{"status":"success"}',
             },
@@ -3312,13 +3219,13 @@ def test_restart_restored_trace_reuses_previous_actual_request_scaffold_for_next
                     {
                         "id": "call-1",
                         "type": "function",
-                        "function": {"name": "submit_next_stage", "arguments": "{}"},
+                        "function": {"name": "filesystem_stat", "arguments": "{}"},
                     }
                 ],
             },
             {
                 "role": "tool",
-                "name": "submit_next_stage",
+                "name": "filesystem_stat",
                 "tool_call_id": "call-1",
                 "content": '{"status":"success"}',
             },
@@ -3338,13 +3245,13 @@ def test_restart_restored_trace_reuses_previous_actual_request_scaffold_for_next
                 {
                     "id": "call-1",
                     "type": "function",
-                    "function": {"name": "submit_next_stage", "arguments": "{}"},
+                    "function": {"name": "filesystem_stat", "arguments": "{}"},
                 }
             ],
         },
         {
             "role": "tool",
-            "name": "submit_next_stage",
+            "name": "filesystem_stat",
             "tool_call_id": "call-1",
             "content": '{"status":"success"}',
         },
@@ -3365,7 +3272,7 @@ def test_fresh_turn_tool_schema_seed_does_not_expand_previous_actual_request_sch
                     {"type": "function", "function": {"name": "exec", "description": "", "parameters": {"type": "object"}}},
                     {
                         "type": "function",
-                        "function": {"name": "submit_next_stage", "description": "", "parameters": {"type": "object"}},
+                        "function": {"name": "filesystem_stat", "description": "", "parameters": {"type": "object"}},
                     },
                 ]
             },
@@ -3393,7 +3300,7 @@ def test_fresh_turn_tool_schema_seed_does_not_expand_previous_actual_request_sch
             },
             {
                 "type": "function",
-                "function": {"name": "submit_next_stage", "description": "", "parameters": {"type": "object"}},
+                "function": {"name": "filesystem_stat", "description": "", "parameters": {"type": "object"}},
             },
         ],
     )
@@ -3407,7 +3314,7 @@ def test_fresh_turn_tool_schema_seed_does_not_expand_previous_actual_request_sch
         },
         {
             "type": "function",
-            "function": {"name": "submit_next_stage", "description": "", "parameters": {"type": "object"}},
+            "function": {"name": "filesystem_stat", "description": "", "parameters": {"type": "object"}},
         },
     ]
 
@@ -3429,18 +3336,18 @@ def test_frontdoor_provider_tool_bundle_pins_and_recommits_only_at_compression()
             commit_reason=commit_reason,
         )
 
-    addition = resolve(["exec", "submit_next_stage"], ["exec", "web_fetch", "submit_next_stage"])
+    addition = resolve(["exec", "filesystem_stat"], ["exec", "web_fetch", "filesystem_stat"])
     # 冻结分支不并入新增：tools[] 到重印边界才吸收新名字
-    assert addition["provider_tool_names"] == ["exec", "submit_next_stage"]
+    assert addition["provider_tool_names"] == ["exec", "filesystem_stat"]
     assert addition["provider_tool_bundle_mode"] == "pinned_frozen"
     assert addition["pending_provider_tool_names"] == []
     assert addition["provider_tool_exposure_pending"] is False
     assert addition["provider_tool_exposure_commit_reason"] == ""
 
-    stage_compaction = resolve(["exec", "submit_next_stage"], ["exec", "web_fetch", "submit_next_stage"],
+    stage_compaction = resolve(["exec", "filesystem_stat"], ["exec", "web_fetch", "filesystem_stat"],
                                commit_reason="stage_compaction")
     # stage_compaction 不是重印判据（只有 token_compression/显式标记是），照样冻结
-    assert stage_compaction["provider_tool_names"] == ["exec", "submit_next_stage"]
+    assert stage_compaction["provider_tool_names"] == ["exec", "filesystem_stat"]
     assert stage_compaction["provider_tool_bundle_mode"] == "pinned_frozen"
 
     removal = resolve(["exec", "web_fetch"], ["exec"])
@@ -3470,14 +3377,14 @@ def test_frontdoor_denied_names_use_live_grant_not_turn_snapshot() -> None:
     于是清单里那个"已声明无权限"的名字没人点名，模型只能撞一次拒绝才知道。
     """
     service = SimpleNamespace(
-        list_effective_tool_names=lambda *, actor_role, session_id: ["exec", "submit_next_stage"]
+        list_effective_tool_names=lambda *, actor_role, session_id: ["exec", "filesystem_stat"]
     )
     runner = create_agent_impl.CreateAgentCeoFrontDoorRunner(loop=SimpleNamespace(main_task_service=service))
 
     granted = runner._frontdoor_live_granted_tool_names(session_key="web:shared")
-    assert granted == ["exec", "submit_next_stage"]
+    assert granted == ["exec", "filesystem_stat"]
     assert runner._frontdoor_declared_denied_tool_names(
-        declared_tool_names=["exec", "web_fetch", "submit_next_stage"],
+        declared_tool_names=["exec", "web_fetch", "filesystem_stat"],
         granted_tool_names=granted,
     ) == ["web_fetch"]
 
@@ -3552,12 +3459,12 @@ def test_frontdoor_dispatch_stays_live_while_declaration_is_pinned() -> None:
     runner = create_agent_impl.CreateAgentCeoFrontDoorRunner(loop=SimpleNamespace(main_task_service=None))
 
     state = {
-        "provider_tool_names": ["exec", "web_fetch", "submit_next_stage"],
-        "rbac_visible_tool_names": ["exec", "submit_next_stage"],
+        "provider_tool_names": ["exec", "web_fetch", "filesystem_stat"],
+        "rbac_visible_tool_names": ["exec", "filesystem_stat"],
         "tool_names": ["exec"],
     }
 
-    assert runner._frontdoor_dispatch_tool_names(state) == ["exec", "submit_next_stage"]
+    assert runner._frontdoor_dispatch_tool_names(state) == ["exec", "filesystem_stat"]
     assert runner._frontdoor_declared_denied_tool_names(
         declared_tool_names=state["provider_tool_names"],
         granted_tool_names=state["rbac_visible_tool_names"],
@@ -3582,15 +3489,15 @@ def test_frontdoor_send_contract_prints_declared_denied_tools_line() -> None:
     upsert 一份契约，重建处不传这一行，算出来的东西被自己覆盖掉了。
     """
     service = SimpleNamespace(
-        list_effective_tool_names=lambda *, actor_role, session_id: ["exec", "submit_next_stage"]
+        list_effective_tool_names=lambda *, actor_role, session_id: ["exec", "filesystem_stat"]
     )
     runner = create_agent_impl.CreateAgentCeoFrontDoorRunner(loop=SimpleNamespace(main_task_service=service))
 
     contract = runner._frontdoor_prompt_contract(
         state=_canonical_frontdoor_state(
             messages=[{"role": "user", "content": "hello"}],
-            provider_tool_names=["exec", "web_fetch", "submit_next_stage"],
-            rbac_visible_tool_names=["exec", "submit_next_stage"],
+            provider_tool_names=["exec", "web_fetch", "filesystem_stat"],
+            rbac_visible_tool_names=["exec", "filesystem_stat"],
             tool_names=["exec"],
         ),
         provider_model="openai:gpt-4.1",
@@ -3785,7 +3692,7 @@ def test_fresh_turn_tool_schema_seed_skips_expected_bridge_when_previous_names_d
                     {"type": "function", "function": {"name": "exec", "description": "", "parameters": {"type": "object"}}},
                     {
                         "type": "function",
-                        "function": {"name": "submit_next_stage", "description": "", "parameters": {"type": "object"}},
+                        "function": {"name": "filesystem_stat", "description": "", "parameters": {"type": "object"}},
                     },
                 ]
             },
@@ -3810,7 +3717,7 @@ def test_fresh_turn_tool_schema_seed_skips_expected_bridge_when_previous_names_d
         },
         {
             "type": "function",
-            "function": {"name": "submit_next_stage", "description": "", "parameters": {"type": "object"}},
+            "function": {"name": "filesystem_stat", "description": "", "parameters": {"type": "object"}},
         },
     ]
 
@@ -3877,7 +3784,7 @@ async def test_graph_call_model_fresh_turn_reuses_previous_message_artifact_pref
         {"role": "assistant", "content": "older answer"},
         {
             "role": "user",
-            "content": '{"message_type":"frontdoor_runtime_tool_contract","callable_tool_names":["exec","submit_next_stage"]}',
+            "content": '{"message_type":"frontdoor_runtime_tool_contract","callable_tool_names":["exec","filesystem_stat"]}',
         },
         {
             "role": "assistant",
@@ -3908,7 +3815,7 @@ async def test_graph_call_model_fresh_turn_reuses_previous_message_artifact_pref
                     },
                     {
                         "type": "function",
-                        "function": {"name": "submit_next_stage", "description": "", "parameters": {"type": "object"}},
+                        "function": {"name": "filesystem_stat", "description": "", "parameters": {"type": "object"}},
                     },
                 ],
             },
@@ -3919,14 +3826,14 @@ async def test_graph_call_model_fresh_turn_reuses_previous_message_artifact_pref
 
     async def _resolve_for_actor(*, actor_role: str, session_id: str):
         _ = actor_role, session_id
-        return {"skills": [], "tool_families": [], "tool_names": ["exec", "submit_next_stage"]}
+        return {"skills": [], "tool_families": [], "tool_names": ["exec", "filesystem_stat"]}
 
     async def _build_for_ceo(**kwargs):
         stable_messages = list(kwargs.get("request_body_seed_messages") or [])
         user_content = str(kwargs.get("user_content") or "").strip()
         model_messages = [*stable_messages, {"role": "user", "content": user_content}]
         return SimpleNamespace(
-            tool_names=["exec", "submit_next_stage"],
+            tool_names=["exec", "filesystem_stat"],
             model_messages=model_messages,
             stable_messages=list(stable_messages),
             dynamic_appendix_messages=[],
@@ -3936,7 +3843,7 @@ async def test_graph_call_model_fresh_turn_reuses_previous_message_artifact_pref
                 "selected_skills": [],
                 "tool_selection": {},
                 "capability_snapshot": {
-                    "visible_tool_ids": ["exec", "submit_next_stage"],
+                    "visible_tool_ids": ["exec", "filesystem_stat"],
                     "visible_skill_ids": [],
                 },
             },
@@ -4007,8 +3914,6 @@ async def test_graph_call_model_fresh_turn_reuses_previous_message_artifact_pref
             {"role": "assistant", "content": "final answer"},
         ],
         _frontdoor_history_shrink_reason="",
-        _frontdoor_stage_state={},
-        _frontdoor_canonical_context={"active_stage_id": "", "transition_required": False, "stages": []},
         _compression_state={"status": "", "text": "", "source": "", "needs_recheck": False},
         _semantic_context_state={"summary_text": "", "needs_refresh": False},
         _frontdoor_selection_debug={},
@@ -4076,7 +3981,7 @@ async def test_graph_call_model_runs_token_preflight_after_fresh_turn_seed_and_b
         {"role": "assistant", "content": "older answer"},
         {
             "role": "user",
-            "content": '{"message_type":"frontdoor_runtime_tool_contract","callable_tool_names":["exec","submit_next_stage"]}',
+            "content": '{"message_type":"frontdoor_runtime_tool_contract","callable_tool_names":["exec","filesystem_stat"]}',
         },
         {
             "role": "assistant",
@@ -4107,7 +4012,7 @@ async def test_graph_call_model_runs_token_preflight_after_fresh_turn_seed_and_b
                     },
                     {
                         "type": "function",
-                        "function": {"name": "submit_next_stage", "description": "", "parameters": {"type": "object"}},
+                        "function": {"name": "filesystem_stat", "description": "", "parameters": {"type": "object"}},
                     },
                 ],
             },
@@ -4118,14 +4023,14 @@ async def test_graph_call_model_runs_token_preflight_after_fresh_turn_seed_and_b
 
     async def _resolve_for_actor(*, actor_role: str, session_id: str):
         _ = actor_role, session_id
-        return {"skills": [], "tool_families": [], "tool_names": ["exec", "submit_next_stage"]}
+        return {"skills": [], "tool_families": [], "tool_names": ["exec", "filesystem_stat"]}
 
     async def _build_for_ceo(**kwargs):
         stable_messages = list(kwargs.get("request_body_seed_messages") or [])
         user_content = str(kwargs.get("user_content") or "").strip()
         model_messages = [*stable_messages, {"role": "user", "content": user_content}]
         return SimpleNamespace(
-            tool_names=["exec", "submit_next_stage"],
+            tool_names=["exec", "filesystem_stat"],
             model_messages=model_messages,
             stable_messages=list(stable_messages),
             dynamic_appendix_messages=[],
@@ -4135,7 +4040,7 @@ async def test_graph_call_model_runs_token_preflight_after_fresh_turn_seed_and_b
                 "selected_skills": [],
                 "tool_selection": {},
                 "capability_snapshot": {
-                    "visible_tool_ids": ["exec", "submit_next_stage"],
+                    "visible_tool_ids": ["exec", "filesystem_stat"],
                     "visible_skill_ids": [],
                 },
             },
@@ -4229,8 +4134,6 @@ async def test_graph_call_model_runs_token_preflight_after_fresh_turn_seed_and_b
             {"role": "assistant", "content": "final answer"},
         ],
         _frontdoor_history_shrink_reason="",
-        _frontdoor_stage_state={},
-        _frontdoor_canonical_context={"active_stage_id": "", "transition_required": False, "stages": []},
         _compression_state={"status": "", "text": "", "source": "", "needs_recheck": False},
         _semantic_context_state={"summary_text": "", "needs_refresh": False},
         _frontdoor_selection_debug={},
@@ -4300,12 +4203,12 @@ async def test_prepare_turn_promotes_uploaded_image_only_into_live_request_when_
 
     async def _resolve_for_actor(*, actor_role: str, session_id: str):
         _ = actor_role, session_id
-        return {"skills": [], "tool_families": [], "tool_names": ["submit_next_stage"]}
+        return {"skills": [], "tool_families": [], "tool_names": ["filesystem_stat"]}
 
     async def _build_for_ceo(**kwargs):
         _ = kwargs
         return SimpleNamespace(
-            tool_names=["submit_next_stage"],
+            tool_names=["filesystem_stat"],
             model_messages=[
                 {"role": "system", "content": "SYSTEM"},
                 {"role": "user", "content": merged_text},
@@ -4321,7 +4224,7 @@ async def test_prepare_turn_promotes_uploaded_image_only_into_live_request_when_
                 "selected_skills": [],
                 "tool_selection": {},
                 "capability_snapshot": {
-                    "visible_tool_ids": ["submit_next_stage"],
+                    "visible_tool_ids": ["filesystem_stat"],
                     "visible_skill_ids": [],
                 },
             },
@@ -4355,8 +4258,6 @@ async def test_prepare_turn_promotes_uploaded_image_only_into_live_request_when_
         inflight_turn_snapshot=lambda: None,
         _frontdoor_request_body_messages=[],
         _frontdoor_history_shrink_reason="",
-        _frontdoor_stage_state={},
-        _frontdoor_canonical_context={"active_stage_id": "", "transition_required": False, "stages": []},
         _compression_state={"status": "", "text": "", "source": "", "needs_recheck": False},
         _semantic_context_state={"summary_text": "", "needs_refresh": False},
         _frontdoor_selection_debug={},
@@ -4426,12 +4327,12 @@ async def test_prepare_turn_keeps_uploaded_image_as_text_only_when_binding_disab
 
     async def _resolve_for_actor(*, actor_role: str, session_id: str):
         _ = actor_role, session_id
-        return {"skills": [], "tool_families": [], "tool_names": ["submit_next_stage"]}
+        return {"skills": [], "tool_families": [], "tool_names": ["filesystem_stat"]}
 
     async def _build_for_ceo(**kwargs):
         _ = kwargs
         return SimpleNamespace(
-            tool_names=["submit_next_stage"],
+            tool_names=["filesystem_stat"],
             model_messages=[
                 {"role": "system", "content": "SYSTEM"},
                 {"role": "user", "content": merged_text},
@@ -4447,7 +4348,7 @@ async def test_prepare_turn_keeps_uploaded_image_as_text_only_when_binding_disab
                 "selected_skills": [],
                 "tool_selection": {},
                 "capability_snapshot": {
-                    "visible_tool_ids": ["submit_next_stage"],
+                    "visible_tool_ids": ["filesystem_stat"],
                     "visible_skill_ids": [],
                 },
             },
@@ -4481,8 +4382,6 @@ async def test_prepare_turn_keeps_uploaded_image_as_text_only_when_binding_disab
         inflight_turn_snapshot=lambda: None,
         _frontdoor_request_body_messages=[],
         _frontdoor_history_shrink_reason="",
-        _frontdoor_stage_state={},
-        _frontdoor_canonical_context={"active_stage_id": "", "transition_required": False, "stages": []},
         _compression_state={"status": "", "text": "", "source": "", "needs_recheck": False},
         _semantic_context_state={"summary_text": "", "needs_refresh": False},
         _frontdoor_selection_debug={},
@@ -4548,7 +4447,7 @@ def test_prompt_contract_keeps_attachment_reopen_targets_in_request_messages(
                 {"role": "system", "content": "SYSTEM"},
                 {"role": "user", "content": "参考JD优化简历"},
             ],
-            "tool_names": ["submit_next_stage"],
+            "tool_names": ["filesystem_stat"],
             "provider_tool_names": [],
             "pending_provider_tool_names": [],
             "provider_tool_exposure_pending": False,
@@ -4558,7 +4457,7 @@ def test_prompt_contract_keeps_attachment_reopen_targets_in_request_messages(
             "candidate_tool_items": [],
             "visible_skill_ids": [],
             "candidate_skill_ids": [],
-            "rbac_visible_tool_names": ["submit_next_stage"],
+            "rbac_visible_tool_names": ["filesystem_stat"],
             "rbac_visible_skill_ids": [],
             "cache_family_revision": "frontdoor:v1",
             "attachment_reopen_targets": [
@@ -4899,12 +4798,12 @@ async def test_prepare_turn_rejects_oversized_uploaded_image_when_binding_enable
 
     async def _resolve_for_actor(*, actor_role: str, session_id: str):
         _ = actor_role, session_id
-        return {"skills": [], "tool_families": [], "tool_names": ["submit_next_stage"]}
+        return {"skills": [], "tool_families": [], "tool_names": ["filesystem_stat"]}
 
     async def _build_for_ceo(**kwargs):
         _ = kwargs
         return SimpleNamespace(
-            tool_names=["submit_next_stage"],
+            tool_names=["filesystem_stat"],
             model_messages=[
                 {"role": "system", "content": "SYSTEM"},
                 {"role": "user", "content": merged_text},
@@ -4920,7 +4819,7 @@ async def test_prepare_turn_rejects_oversized_uploaded_image_when_binding_enable
                 "selected_skills": [],
                 "tool_selection": {},
                 "capability_snapshot": {
-                    "visible_tool_ids": ["submit_next_stage"],
+                    "visible_tool_ids": ["filesystem_stat"],
                     "visible_skill_ids": [],
                 },
             },
@@ -4942,8 +4841,6 @@ async def test_prepare_turn_rejects_oversized_uploaded_image_when_binding_enable
         inflight_turn_snapshot=lambda: None,
         _frontdoor_request_body_messages=[],
         _frontdoor_history_shrink_reason="",
-        _frontdoor_stage_state={},
-        _frontdoor_canonical_context={"active_stage_id": "", "transition_required": False, "stages": []},
         _compression_state={"status": "", "text": "", "source": "", "needs_recheck": False},
         _semantic_context_state={"summary_text": "", "needs_refresh": False},
         _frontdoor_selection_debug={},
@@ -5040,7 +4937,7 @@ async def test_graph_call_model_fresh_turn_reuses_previous_message_artifact_pref
         {"role": "user", "content": "old question"},
         {
             "role": "user",
-            "content": '{"message_type":"frontdoor_runtime_tool_contract","callable_tool_names":["exec","submit_next_stage"]}',
+            "content": '{"message_type":"frontdoor_runtime_tool_contract","callable_tool_names":["exec","filesystem_stat"]}',
         },
         {
             "role": "assistant",
@@ -5071,7 +4968,7 @@ async def test_graph_call_model_fresh_turn_reuses_previous_message_artifact_pref
                     },
                     {
                         "type": "function",
-                        "function": {"name": "submit_next_stage", "description": "", "parameters": {"type": "object"}},
+                        "function": {"name": "filesystem_stat", "description": "", "parameters": {"type": "object"}},
                     },
                 ],
             },
@@ -5082,14 +4979,14 @@ async def test_graph_call_model_fresh_turn_reuses_previous_message_artifact_pref
 
     async def _resolve_for_actor(*, actor_role: str, session_id: str):
         _ = actor_role, session_id
-        return {"skills": [], "tool_families": [], "tool_names": ["exec", "submit_next_stage"]}
+        return {"skills": [], "tool_families": [], "tool_names": ["exec", "filesystem_stat"]}
 
     async def _build_for_ceo(**kwargs):
         stable_messages = list(kwargs.get("request_body_seed_messages") or [])
         user_content = str(kwargs.get("user_content") or "").strip()
         model_messages = [*stable_messages, {"role": "user", "content": user_content}]
         return SimpleNamespace(
-            tool_names=["exec", "submit_next_stage"],
+            tool_names=["exec", "filesystem_stat"],
             model_messages=model_messages,
             stable_messages=list(stable_messages),
             dynamic_appendix_messages=[],
@@ -5099,7 +4996,7 @@ async def test_graph_call_model_fresh_turn_reuses_previous_message_artifact_pref
                 "selected_skills": [],
                 "tool_selection": {},
                 "capability_snapshot": {
-                    "visible_tool_ids": ["exec", "submit_next_stage"],
+                    "visible_tool_ids": ["exec", "filesystem_stat"],
                     "visible_skill_ids": [],
                 },
             },
@@ -5170,8 +5067,6 @@ async def test_graph_call_model_fresh_turn_reuses_previous_message_artifact_pref
             {"role": "assistant", "content": "final answer"},
         ],
         _frontdoor_history_shrink_reason="",
-        _frontdoor_stage_state={},
-        _frontdoor_canonical_context={"active_stage_id": "", "transition_required": False, "stages": []},
         _compression_state={"status": "", "text": "", "source": "", "needs_recheck": False},
         _semantic_context_state={"summary_text": "", "needs_refresh": False},
         _frontdoor_selection_debug={},
@@ -5233,15 +5128,15 @@ async def test_prepare_turn_keeps_provider_schema_hash_stable_when_web_fetch_is_
                 "required": ["command"],
             },
         ),
-        "submit_next_stage": _NamedSchemaTool(
-            name="submit_next_stage",
-            description="Start the next stage for the current node.",
+        "filesystem_stat": _NamedSchemaTool(
+            name="filesystem_stat",
+            description="List files and measure paths in the workspace.",
             parameters={
                 "type": "object",
                 "properties": {
-                    "stage_goal": {"type": "string", "description": "Goal for the next stage."},
+                    "path": {"type": "string", "description": "Absolute path to stat."},
                 },
-                "required": ["stage_goal"],
+                "required": ["path"],
             },
         ),
         "web_fetch": _NamedSchemaTool(
@@ -5279,13 +5174,13 @@ async def test_prepare_turn_keeps_provider_schema_hash_stable_when_web_fetch_is_
         return {
             "skills": [],
             "tool_families": [],
-            "tool_names": ["exec", "submit_next_stage", "web_fetch"],
+            "tool_names": ["exec", "filesystem_stat", "web_fetch"],
         }
 
     captured_builds: list[dict[str, object]] = []
     assembly_tool_name_sets = [
-        ["exec", "submit_next_stage"],
-        ["exec", "submit_next_stage", "web_fetch"],
+        ["exec", "filesystem_stat"],
+        ["exec", "filesystem_stat", "web_fetch"],
     ]
     assembly_candidate_sets = [
         ["web_fetch"],
@@ -5316,7 +5211,7 @@ async def test_prepare_turn_keeps_provider_schema_hash_stable_when_web_fetch_is_
                 "selected_skills": [],
                 "tool_selection": {},
                 "capability_snapshot": {
-                    "visible_tool_ids": ["exec", "submit_next_stage", "web_fetch"],
+                    "visible_tool_ids": ["exec", "filesystem_stat", "web_fetch"],
                     "visible_skill_ids": [],
                 },
             },
@@ -5338,8 +5233,6 @@ async def test_prepare_turn_keeps_provider_schema_hash_stable_when_web_fetch_is_
             inflight_turn_snapshot=lambda: None,
             _frontdoor_request_body_messages=[],
             _frontdoor_history_shrink_reason="",
-            _frontdoor_stage_state={},
-            _frontdoor_canonical_context={"active_stage_id": "", "transition_required": False, "stages": []},
             _compression_state={"status": "", "text": "", "source": "", "needs_recheck": False},
             _semantic_context_state={"summary_text": "", "needs_refresh": False},
             _frontdoor_selection_debug={},
@@ -5354,8 +5247,8 @@ async def test_prepare_turn_keeps_provider_schema_hash_stable_when_web_fetch_is_
         runtime=SimpleNamespace(context=SimpleNamespace(session=_assembly_session())),
     )
 
-    assert first_prepared["provider_tool_names"] == ["exec", "submit_next_stage", "web_fetch"]
-    assert second_prepared["provider_tool_names"] == ["exec", "submit_next_stage", "web_fetch"]
+    assert first_prepared["provider_tool_names"] == ["exec", "filesystem_stat", "web_fetch"]
+    assert second_prepared["provider_tool_names"] == ["exec", "filesystem_stat", "web_fetch"]
     assert (
         first_prepared["prompt_cache_diagnostics"]["actual_tool_schema_hash"]
         == second_prepared["prompt_cache_diagnostics"]["actual_tool_schema_hash"]
@@ -5433,7 +5326,7 @@ async def test_create_agent_runner_preserves_verified_dispatch_text_from_model()
 
 
 @pytest.mark.asyncio
-async def test_create_agent_runner_allows_finalize_after_substantive_stage_progress() -> None:
+async def test_create_agent_runner_allows_finalize_after_substantive_text_progress() -> None:
     runner = create_agent_impl.CreateAgentCeoFrontDoorRunner(
         loop=SimpleNamespace(
             main_task_service=SimpleNamespace(get_task=lambda task_id: None),
@@ -5453,33 +5346,6 @@ async def test_create_agent_runner_allows_finalize_after_substantive_stage_progr
             },
             "used_tools": ["filesystem_write"],
             "route_kind": "self_execute",
-            "frontdoor_stage_state": {
-                "active_stage_id": "frontdoor-stage-1",
-                "transition_required": False,
-                "stages": [
-                    {
-                        "stage_id": "frontdoor-stage-1",
-                        "stage_index": 1,
-                        "stage_kind": "normal",
-                        "mode": "自主执行",
-                        "status": "active",
-                        "stage_goal": "write the file",
-                        "completed_stage_summary": "",
-                        "tool_round_budget": 5,
-                        "tool_rounds_used": 1,
-                        "rounds": [
-                            {
-                                "round_id": "frontdoor-stage-1:round-1",
-                                "round_index": 1,
-                                "created_at": "2026-04-16T01:00:00+08:00",
-                                "budget_counted": True,
-                                "tool_names": ["filesystem_write"],
-                                "tool_call_ids": ["call-1"],
-                            }
-                        ],
-                    }
-                ],
-            },
         },
         runtime=SimpleNamespace(context=SimpleNamespace()),
     )
@@ -5490,7 +5356,7 @@ async def test_create_agent_runner_allows_finalize_after_substantive_stage_progr
 
 
 @pytest.mark.asyncio
-async def test_create_agent_runner_keeps_heartbeat_finalize_even_with_empty_active_stage_progress() -> None:
+async def test_create_agent_runner_keeps_heartbeat_finalize_even_with_empty_progress_text() -> None:
     runner = create_agent_impl.CreateAgentCeoFrontDoorRunner(
         loop=SimpleNamespace(
             main_task_service=SimpleNamespace(get_task=lambda task_id: None),
@@ -5511,24 +5377,6 @@ async def test_create_agent_runner_keeps_heartbeat_finalize_even_with_empty_acti
             "used_tools": [],
             "route_kind": "direct_reply",
             "heartbeat_internal": True,
-            "frontdoor_stage_state": {
-                "active_stage_id": "frontdoor-stage-1",
-                "transition_required": False,
-                "stages": [
-                    {
-                        "stage_id": "frontdoor-stage-1",
-                        "stage_index": 1,
-                        "stage_kind": "normal",
-                        "mode": "自主执行",
-                        "status": "active",
-                        "stage_goal": "write the file",
-                        "completed_stage_summary": "",
-                        "tool_round_budget": 5,
-                        "tool_rounds_used": 0,
-                        "rounds": [],
-                    }
-                ],
-            },
             "user_input": {
                 "content": "[SESSION EVENTS]",
                 "metadata": {
@@ -6014,7 +5862,7 @@ def test_sanitize_provider_messages_repairs_null_tool_call_arguments() -> None:
                         "id": "call-1",
                         "type": "function",
                         "function": {
-                            "name": "submit_next_stage",
+                            "name": "filesystem_stat",
                             "arguments": None,
                         },
                     }
@@ -6027,7 +5875,7 @@ def test_sanitize_provider_messages_repairs_null_tool_call_arguments() -> None:
     assert sanitized[0]["tool_calls"] == [
         {
             "type": "function",
-            "function": {"name": "submit_next_stage", "arguments": {}},
+            "function": {"name": "filesystem_stat", "arguments": {}},
             "id": "call-1",
         }
     ]
@@ -6168,13 +6016,13 @@ def test_create_agent_prompt_contract_keeps_request_body_prefix_before_same_turn
                         {
                             "id": "call-1",
                             "type": "function",
-                            "function": {"name": "submit_next_stage", "arguments": "{}"},
+                            "function": {"name": "filesystem_stat", "arguments": "{}"},
                         }
                     ],
                 },
                 {
                     "role": "tool",
-                    "name": "submit_next_stage",
+                    "name": "filesystem_stat",
                     "tool_call_id": "call-1",
                     "content": '{"status":"success"}',
                 },
@@ -6220,13 +6068,13 @@ def test_create_agent_prompt_contract_keeps_request_body_prefix_before_same_turn
                 {
                     "id": "call-1",
                     "type": "function",
-                    "function": {"name": "submit_next_stage", "arguments": "{}"},
+                    "function": {"name": "filesystem_stat", "arguments": "{}"},
                 }
             ],
         },
         {
             "role": "tool",
-            "name": "submit_next_stage",
+            "name": "filesystem_stat",
             "tool_call_id": "call-1",
             "content": '{"status":"success"}',
         },
@@ -6683,7 +6531,6 @@ def _node_error_heartbeat_state() -> dict:
                 "heartbeat_node_ids": ["node:cbbde9623fb4"],
             },
         },
-        "frontdoor_stage_state": {"active_stage_id": "", "transition_required": False, "stages": []},
     }
 
 

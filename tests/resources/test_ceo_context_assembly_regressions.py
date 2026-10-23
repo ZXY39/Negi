@@ -168,7 +168,7 @@ def _tool_resource_record(
     )
 
 
-def _stage_history_with_global_zone() -> tuple[list[dict[str, object]], dict[str, object]]:
+def _round_history_with_global_zone() -> tuple[list[dict[str, object]], dict[str, object]]:
     messages = [
         {"role": "user", "content": "bootstrap request"},
         {
@@ -176,66 +176,66 @@ def _stage_history_with_global_zone() -> tuple[list[dict[str, object]], dict[str
             "content": "",
             "tool_calls": [
                 {
-                    "id": "call-stage-1",
+                    "id": "call-round-1",
                     "type": "function",
-                    "function": {"name": "submit_next_stage", "arguments": "{}"},
+                    "function": {"name": "filesystem_stat", "arguments": "{}"},
                 }
             ],
         },
-        {"role": "tool", "name": "submit_next_stage", "tool_call_id": "call-stage-1", "content": '{"ok": true}'},
-        {"role": "assistant", "content": "stage one raw detail"},
+        {"role": "tool", "name": "filesystem_stat", "tool_call_id": "call-round-1", "content": '{"ok": true}'},
+        {"role": "assistant", "content": "round one raw detail"},
         {
             "role": "assistant",
             "content": "",
             "tool_calls": [
                 {
-                    "id": "call-stage-2",
+                    "id": "call-round-2",
                     "type": "function",
-                    "function": {"name": "submit_next_stage", "arguments": "{}"},
+                    "function": {"name": "filesystem_stat", "arguments": "{}"},
                 }
             ],
         },
-        {"role": "tool", "name": "submit_next_stage", "tool_call_id": "call-stage-2", "content": '{"ok": true}'},
-        {"role": "assistant", "content": "stage two raw detail"},
+        {"role": "tool", "name": "filesystem_stat", "tool_call_id": "call-round-2", "content": '{"ok": true}'},
+        {"role": "assistant", "content": "round two raw detail"},
         {
             "role": "assistant",
             "content": "",
             "tool_calls": [
                 {
-                    "id": "call-stage-3",
+                    "id": "call-round-3",
                     "type": "function",
-                    "function": {"name": "submit_next_stage", "arguments": "{}"},
+                    "function": {"name": "filesystem_stat", "arguments": "{}"},
                 }
             ],
         },
-        {"role": "tool", "name": "submit_next_stage", "tool_call_id": "call-stage-3", "content": '{"ok": true}'},
-        {"role": "assistant", "content": "stage three raw detail"},
+        {"role": "tool", "name": "filesystem_stat", "tool_call_id": "call-round-3", "content": '{"ok": true}'},
+        {"role": "assistant", "content": "round three raw detail"},
         {
             "role": "assistant",
             "content": "",
             "tool_calls": [
                 {
-                    "id": "call-stage-4",
+                    "id": "call-round-4",
                     "type": "function",
-                    "function": {"name": "submit_next_stage", "arguments": "{}"},
+                    "function": {"name": "filesystem_stat", "arguments": "{}"},
                 }
             ],
         },
-        {"role": "tool", "name": "submit_next_stage", "tool_call_id": "call-stage-4", "content": '{"ok": true}'},
-        {"role": "assistant", "content": "stage four raw detail"},
+        {"role": "tool", "name": "filesystem_stat", "tool_call_id": "call-round-4", "content": '{"ok": true}'},
+        {"role": "assistant", "content": "round four raw detail"},
         {
             "role": "assistant",
             "content": "",
             "tool_calls": [
                 {
-                    "id": "call-stage-5",
+                    "id": "call-round-5",
                     "type": "function",
-                    "function": {"name": "submit_next_stage", "arguments": "{}"},
+                    "function": {"name": "filesystem_stat", "arguments": "{}"},
                 }
             ],
         },
-        {"role": "tool", "name": "submit_next_stage", "tool_call_id": "call-stage-5", "content": '{"ok": true}'},
-        {"role": "assistant", "content": "active stage raw detail"},
+        {"role": "tool", "name": "filesystem_stat", "tool_call_id": "call-round-5", "content": '{"ok": true}'},
+        {"role": "assistant", "content": "active round raw detail"},
     ]
     return messages, {}
 
@@ -1174,13 +1174,6 @@ def test_frontdoor_dynamic_appendix_records_prefer_state_tool_contract_over_stal
             "candidate_skill_ids": ["memory"],
             "rbac_visible_tool_names": ["filesystem_write"],
             "rbac_visible_skill_ids": ["memory"],
-            "frontdoor_stage_state": {
-                "active_stage_id": "stage:1",
-                "transition_required": False,
-                "stages": [
-                    {"stage_id": "stage:1", "stage_goal": "write the file", "status": "active"},
-                ],
-            },
             "dynamic_appendix_messages": [
                 {
                     "role": "user",
@@ -1230,14 +1223,9 @@ def test_frontdoor_dynamic_appendix_records_require_canonical_tool_state_fields(
     with pytest.raises(RuntimeError, match="运行时工具合同"):
         runner._dynamic_appendix_message_records_for_state(
             state={
-                "tool_names": ["submit_next_stage"],
+                "tool_names": ["filesystem_stat"],
                 "candidate_tool_names": [],
                 "candidate_tool_items": [],
-                "frontdoor_stage_state": {
-                    "active_stage_id": "stage:1",
-                    "transition_required": False,
-                    "stages": [{"stage_id": "stage:1", "stage_goal": "write the file", "status": "active"}],
-                },
             }
         )
 
@@ -1262,12 +1250,12 @@ def test_message_builder_detects_chinese_memory_write_phrases(
 
 def test_frontdoor_tool_contract_upsert_accepts_legacy_dict_and_writes_summary_text() -> None:
     contract = build_frontdoor_tool_contract(
-        callable_tool_names=["submit_next_stage", "filesystem_write"],
+        callable_tool_names=["filesystem_stat", "filesystem_write"],
         candidate_tool_names=["agent_browser"],
         candidate_tool_items=[{"tool_id": "agent_browser", "description": "Browser automation"}],
         visible_skill_ids=["memory"],
         candidate_skill_ids=["memory"],
-        rbac_visible_tool_names=["submit_next_stage", "filesystem_write", "agent_browser"],
+        rbac_visible_tool_names=["filesystem_stat", "filesystem_write", "agent_browser"],
         rbac_visible_skill_ids=["memory"],
         contract_revision="frontdoor:v1",
     )
@@ -1295,7 +1283,7 @@ def test_frontdoor_tool_contract_upsert_accepts_legacy_dict_and_writes_summary_t
     assert "callable_tools:" not in str(updated[0]["content"] or "")
     upserted_payload = updated[0].get("_frontdoor_tool_contract_payload") or {}
     assert list(upserted_payload.get("callable_tool_names") or []) == [
-        "submit_next_stage",
+        "filesystem_stat",
         "filesystem_write",
     ]
     stable_text = str(updated[0]["content"] or "")
@@ -1311,7 +1299,7 @@ def test_frontdoor_tool_contract_upsert_accepts_legacy_dict_and_writes_summary_t
     )
     assert 'load_tool_context(tool_id="agent_browser")' not in stable_text
     payload = contract.to_message_payload()
-    assert payload["callable_tool_names"] == ["submit_next_stage", "filesystem_write"]
+    assert payload["callable_tool_names"] == ["filesystem_stat", "filesystem_write"]
     assert payload["candidate_tools"] == [
         {
             "tool_id": "agent_browser",
@@ -1371,7 +1359,7 @@ def test_frontdoor_contract_detection_ignores_model_echo_declaring_tool_calls() 
 
 def test_frontdoor_tool_contract_renders_repair_required_sections_separately() -> None:
     contract = build_frontdoor_tool_contract(
-        callable_tool_names=["submit_next_stage", "exec"],
+        callable_tool_names=["filesystem_stat", "exec"],
         candidate_tool_names=[],
         candidate_tool_items=[],
         repair_required_tool_items=[
@@ -1391,7 +1379,7 @@ def test_frontdoor_tool_contract_renders_repair_required_sections_separately() -
                 "reason": "missing required bins",
             }
         ],
-        rbac_visible_tool_names=["submit_next_stage", "exec", "agent_browser"],
+        rbac_visible_tool_names=["filesystem_stat", "exec", "agent_browser"],
         rbac_visible_skill_ids=["writing-skills"],
         contract_revision="frontdoor:v1",
     )
@@ -2185,54 +2173,6 @@ async def test_message_builder_trace_includes_frontdoor_context_span_timings() -
 
 
 
-def _completed_stage_with_round(index: int) -> dict[str, object]:
-    return {
-        "stage_id": f"frontdoor-stage-{index}",
-        "stage_index": index,
-        "stage_kind": "normal",
-        "system_generated": False,
-        "mode": "自主执行",
-        "status": "completed",
-        "stage_goal": f"goal {index}",
-        "completed_stage_summary": f"finished {index}",
-        "key_refs": [],
-        "tool_round_budget": 2,
-        "tool_rounds_used": 1,
-        "rounds": [
-            {
-                "round_id": f"frontdoor-stage-{index}:round-1",
-                "round_index": 1,
-                "tool_names": ["exec"],
-                "tool_call_ids": [f"call-{index}"],
-                "budget_counted": True,
-                "tools": [
-                    {
-                        "tool_call_id": f"call-{index}",
-                        "tool_name": "exec",
-                        "arguments": {},
-                        "arguments_text": "exec {}",
-                        "output_text": f"output-{index}",
-                        "output_preview_text": "",
-                        "output_ref": "",
-                        "status": "success",
-                        "started_at": "",
-                        "finished_at": "",
-                        "timestamp": "",
-                        "elapsed_seconds": 1.0,
-                        "kind": "tool_result",
-                        "source": "user",
-                    }
-                ],
-            }
-        ],
-    }
-
-
-
-
-
-
-@pytest.mark.asyncio
 async def test_message_builder_does_not_inject_global_summary_block_during_history_assembly(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -2347,7 +2287,7 @@ async def test_message_builder_does_not_recompute_or_reuse_global_summary_blocks
         "g3ku.runtime.frontdoor.message_builder.estimate_message_tokens",
         _fake_estimate,
     )
-    checkpoint_messages, _seed_state = _stage_history_with_global_zone()
+    checkpoint_messages, _seed_state = _round_history_with_global_zone()
 
     result = await builder.build_for_ceo(
         session=_session(),
@@ -2360,7 +2300,6 @@ async def test_message_builder_does_not_recompute_or_reuse_global_summary_blocks
             "summary_text": "## Goals\nExisting summary",
             "coverage_history_source": "checkpoint",
             "coverage_message_index": 3,
-            "coverage_stage_index": 1,
             "needs_refresh": False,
             "failure_cooldown_until": "",
             "updated_at": "2026-04-13T18:00:00",
@@ -2377,7 +2316,7 @@ async def test_message_builder_directly_continues_request_body_seed_without_stag
     prompt_builder = _SplitPromptBuilder()
     memory_manager = _MemoryManager(response="")
     builder = CeoMessageBuilder(loop=_loop(memory_manager), prompt_builder=prompt_builder)
-    _checkpoint_messages, _seed_state = _stage_history_with_global_zone()
+    _checkpoint_messages, _seed_state = _round_history_with_global_zone()
     request_body_seed_messages = [
         {"role": "system", "content": "BASE PROMPT"},
         {"role": "user", "content": "previous user"},
@@ -2473,7 +2412,7 @@ async def test_message_builder_ignores_global_summary_failure_cooldown_during_hi
         "g3ku.runtime.frontdoor.message_builder.estimate_message_tokens",
         _fake_estimate,
     )
-    checkpoint_messages, _seed_state = _stage_history_with_global_zone()
+    checkpoint_messages, _seed_state = _round_history_with_global_zone()
 
     result = await builder.build_for_ceo(
         session=_session(),
@@ -2486,7 +2425,6 @@ async def test_message_builder_ignores_global_summary_failure_cooldown_during_hi
             "summary_text": "## Goals\nExisting summary",
             "coverage_history_source": "checkpoint",
             "coverage_message_index": 3,
-            "coverage_stage_index": 1,
             "needs_refresh": True,
             "failure_cooldown_until": "2999-01-01T00:00:00",
             "updated_at": "2026-04-13T18:00:00",

@@ -86,7 +86,6 @@ async def test_graph_call_model_attempts_token_compression_before_context_window
         "rbac_visible_skill_ids": [],
         "turn_overlay_text": "",
         "repair_overlay_text": None,
-        "frontdoor_stage_state": {"active_stage_id": "", "transition_required": False, "stages": []},
         "frontdoor_history_shrink_reason": "",
         "frontdoor_token_preflight_diagnostics": {},
     }
@@ -152,7 +151,6 @@ async def test_graph_call_model_surfaces_resolution_error_when_context_window_is
         "rbac_visible_skill_ids": [],
         "turn_overlay_text": "",
         "repair_overlay_text": None,
-        "frontdoor_stage_state": {"active_stage_id": "", "transition_required": False, "stages": []},
         "frontdoor_history_shrink_reason": "",
         "frontdoor_token_preflight_diagnostics": {},
     }
@@ -505,7 +503,6 @@ async def test_graph_call_model_runs_llm_token_compression_before_main_send(
     session = SimpleNamespace(
         state=SimpleNamespace(session_key="web:shared"),
         announce_context_compression_boundary=_announce_boundary_noop,
-        _frontdoor_canonical_context={"active_stage_id": "", "transition_required": False, "stages": []},
         _compression_state={},
         _semantic_context_state={},
         _emit_state_snapshot=lambda: None,
@@ -541,7 +538,6 @@ async def test_graph_call_model_runs_llm_token_compression_before_main_send(
         "rbac_visible_skill_ids": [],
         "turn_overlay_text": "",
         "repair_overlay_text": None,
-        "frontdoor_stage_state": {"active_stage_id": "", "transition_required": False, "stages": []},
         "frontdoor_history_shrink_reason": "",
         "frontdoor_token_preflight_diagnostics": {},
     }
@@ -604,7 +600,6 @@ async def test_graph_call_model_token_compression_keeps_prior_provider_tool_sche
     session = SimpleNamespace(
         state=SimpleNamespace(session_key="web:shared"),
         announce_context_compression_boundary=_announce_boundary_noop,
-        _frontdoor_canonical_context={"active_stage_id": "", "transition_required": False, "stages": []},
         _compression_state={},
         _semantic_context_state={},
         _emit_state_snapshot=lambda: None,
@@ -644,7 +639,6 @@ async def test_graph_call_model_token_compression_keeps_prior_provider_tool_sche
         "rbac_visible_skill_ids": [],
         "turn_overlay_text": "",
         "repair_overlay_text": None,
-        "frontdoor_stage_state": {"active_stage_id": "", "transition_required": False, "stages": []},
         "frontdoor_history_shrink_reason": "",
         "frontdoor_token_preflight_diagnostics": {},
         "dynamic_appendix_messages": [],
@@ -715,7 +709,6 @@ async def test_graph_call_model_token_compression_keeps_repair_required_contract
     session = SimpleNamespace(
         state=SimpleNamespace(session_key="web:shared"),
         announce_context_compression_boundary=_announce_boundary_noop,
-        _frontdoor_canonical_context={"active_stage_id": "", "transition_required": False, "stages": []},
         _compression_state={},
         _semantic_context_state={},
         _emit_state_snapshot=lambda: None,
@@ -758,7 +751,6 @@ async def test_graph_call_model_token_compression_keeps_repair_required_contract
         "rbac_visible_skill_ids": [],
         "turn_overlay_text": "",
         "repair_overlay_text": None,
-        "frontdoor_stage_state": {"active_stage_id": "", "transition_required": False, "stages": []},
         "frontdoor_history_shrink_reason": "",
         "frontdoor_token_preflight_diagnostics": {},
     }
@@ -803,7 +795,6 @@ async def test_graph_call_model_discards_late_compression_result_after_pause(
     class _CompressionAwareSession:
         def __init__(self) -> None:
             self.state = SimpleNamespace(session_key="web:shared")
-            self._frontdoor_canonical_context = {"active_stage_id": "", "transition_required": False, "stages": []}
             self._compression_state = {}
             self._semantic_context_state = {}
             self._active_cancel_token = cancel_token
@@ -875,7 +866,6 @@ async def test_graph_call_model_discards_late_compression_result_after_pause(
         "rbac_visible_skill_ids": [],
         "turn_overlay_text": "",
         "repair_overlay_text": None,
-        "frontdoor_stage_state": {"active_stage_id": "", "transition_required": False, "stages": []},
         "frontdoor_history_shrink_reason": "",
         "frontdoor_token_preflight_diagnostics": {},
     }
