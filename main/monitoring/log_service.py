@@ -50,7 +50,6 @@ from main.monitoring.frame_liveness import frame_is_stale
 from main.monitoring.models import (
     TaskProjectionNodeDetailRecord,
     TaskProjectionNodeRecord,
-    TaskProjectionRoundRecord,
     TaskProjectionRuntimeFrameRecord,
     TaskProjectionToolResultRecord,
 )
@@ -777,7 +776,6 @@ class TaskLogService:
         with self._task_lock(task_id):
             self._store.upsert_node(node)
             self._sync_node_read_models_locked(node)
-            self._sync_task_node_rounds_locked(node)
             task = self._store.get_task(task_id)
             if task is not None:
                 self._publish_task_node_patch_locked(task=task, node=node)
@@ -786,7 +784,6 @@ class TaskLogService:
                     parent = self._store.get_node(parent_node_id)
                     if parent is not None and str(parent.task_id or '').strip() == str(task.task_id or '').strip():
                         self._sync_node_read_models_locked(parent)
-                        self._sync_task_node_rounds_locked(parent)
                         self._publish_task_node_patch_locked(task=task, node=parent)
             self.refresh_task_view(task_id, mark_unread=True)
             return node
@@ -843,10 +840,8 @@ class TaskLogService:
             )
 
             self._sync_node_read_models_locked(persisted_child)
-            self._sync_task_node_rounds_locked(persisted_child)
             if persisted_parent is not None:
                 self._sync_node_read_models_locked(persisted_parent)
-                self._sync_task_node_rounds_locked(persisted_parent)
             self._publish_task_node_patch_locked(task=task, node=persisted_child)
             if persisted_parent is not None:
                 self._publish_task_node_patch_locked(task=task, node=persisted_parent)
@@ -2820,7 +2815,6 @@ class TaskLogService:
                 if spawn_changed or any(key not in result_payload_only_keys for key in changed_keys):
                     self._sync_node_read_models_locked(updated, invalidate_execution_trace_ref=True)
                 if spawn_changed:
-                    self._sync_task_node_rounds_locked(updated)
                     self._publish_task_node_patch_locked(task=task, node=updated)
             return updated
 
@@ -3622,7 +3616,6 @@ class TaskLogService:
                     externalize_execution_trace=externalize_execution_trace,
                     preserved_execution_trace_ref=preserved_execution_trace_ref,
                 )
-                self._sync_task_node_rounds_locked(node)
             self.refresh_task_view(task_id, mark_unread=False)
             if self._store.get_task_runtime_meta(task.task_id) is None:
                 self.update_task_runtime_meta(task.task_id, last_stall_notice_bucket_minutes=0)
@@ -3655,7 +3648,6 @@ class TaskLogService:
                 externalize_execution_trace=externalize_execution_trace,
                 preserved_execution_trace_ref=preserved_execution_trace_ref,
             )
-            self._sync_task_node_rounds_locked(node)
             return self._store.get_task_node_detail(node_id)
 
     def publish_node_state(self, task_id: str, node_id: str) -> NodeRecord | None:
@@ -3667,7 +3659,6 @@ class TaskLogService:
             if node is None or str(node.task_id or '').strip() != str(task_id or '').strip():
                 return None
             self._sync_node_read_models_locked(node)
-            self._sync_task_node_rounds_locked(node)
             task = self._store.get_task(task_id)
             if task is not None:
                 self._publish_task_node_patch_locked(task=task, node=node)
@@ -3697,82 +3688,27 @@ class TaskLogService:
                 ),
             )
 
-    def _sync_task_node_rounds_locked(self, node: NodeRecord) -> None:
-        if node is None:
-            return
-        next_records = self._task_projection_round_records(node)
-        current_records = [
-            item
-            for item in list(self._store.list_task_node_rounds(node.task_id) or [])
-            if str(getattr(item, 'parent_node_id', '') or '').strip() == str(node.node_id or '').strip()
-        ]
-        if self._round_records_fingerprint(current_records) == self._round_records_fingerprint(next_records):
-            return
-        self._projector.sync_rounds_for_parent(node.task_id, node.node_id, next_records)
-
-    @staticmethod
-    def _round_records_fingerprint(records: list[TaskProjectionRoundRecord]) -> str:
-        normalized = [
-            {
-                'round_id': str(item.round_id or '').strip(),
-                'round_index': int(item.round_index or 0),
-                'label': str(item.label or '').strip(),
-                'is_latest': bool(item.is_latest),
-                'created_at': str(item.created_at or '').strip(),
-                'source': str(item.source or '').strip(),
-                'total_children': int(item.total_children or 0),
-                'completed_children': int(item.completed_children or 0),
-                'running_children': int(item.running_children or 0),
-                'failed_children': int(item.failed_children or 0),
-                'child_node_ids': [str(child_id or '').strip() for child_id in list(item.child_node_ids or []) if str(child_id or '').strip()],
-            }
-            for item in list(records or [])
-        ]
-        return json.dumps(normalized, ensure_ascii=False, sort_keys=True)
-
-    def _task_projection_node_children_fingerprint(
-        self,
-        node: NodeRecord,
-        *,
-        rounds: list[TaskProjectionRoundRecord] | None = None,
-    ) -> str:
-        round_records = list(rounds or self._task_projection_round_records(node))
-        default_round_id = str(round_records[-1].round_id or '') if round_records else ''
+    def _task_projection_node_children_fingerprint(self, node: NodeRecord) -> str:
+        # 轮次投影已停写：指纹只由直接子节点集合构成（顺序按 sort_key 稳定），
+        # 用来判定树缓存是否需要刷新。`rounds` 恒为空，保留键只为兼容旧读端。
         direct_children = list(self._store.list_children(node.node_id) or [])
         direct_child_ids = [
             str(child.node_id or '').strip()
             for child in direct_children
             if str(child.node_id or '').strip()
         ]
-        round_child_ids = {
-            str(child_id or '').strip()
-            for round_record in round_records
-            for child_id in list(round_record.child_node_ids or [])
-            if str(child_id or '').strip()
-        }
-        auxiliary_child_ids = [child_id for child_id in direct_child_ids if child_id not in round_child_ids]
         payload = {
-            'default_round_id': default_round_id,
-            'auxiliary_child_ids': auxiliary_child_ids,
-            'rounds': [
-                {
-                    'round_id': str(round_record.round_id or ''),
-                    'round_index': int(round_record.round_index or 0),
-                    'child_node_ids': [
-                        str(child_id or '').strip()
-                        for child_id in list(round_record.child_node_ids or [])
-                        if str(child_id or '').strip()
-                    ],
-                }
-                for round_record in round_records
-            ],
+            'default_round_id': '',
+            'auxiliary_child_ids': direct_child_ids,
+            'rounds': [],
         }
         return json.dumps(payload, ensure_ascii=False, sort_keys=True)
 
     def _task_projection_node_record(self, node: NodeRecord) -> TaskProjectionNodeRecord:
-        rounds = self._task_projection_round_records(node)
-        default_round_id = str(rounds[-1].round_id or '') if rounds else ''
-        children_fingerprint = self._task_projection_node_children_fingerprint(node, rounds=rounds)
+        # 轮次投影已停止写入（前端不再按轮次分组）。三个 round_* 字段保留空值，
+        # 只为旧读端反序列化不炸；真正的子节点关系由 parent_node_id 直接表达。
+        default_round_id = ''
+        children_fingerprint = self._task_projection_node_children_fingerprint(node)
         acceptance_handshake = normalize_acceptance_handshake((node.metadata or {}).get(ACCEPTANCE_HANDSHAKE_KEY))
         acceptance_handshake_state = str(acceptance_handshake.get('state') or '').strip()
         pending_records = normalize_pending_append_notice_records((node.metadata or {}).get(PENDING_APPEND_NOTICE_RECORDS_KEY))
@@ -3789,8 +3725,8 @@ class TaskLogService:
             title=node.goal or node.node_id,
             updated_at=str(node.updated_at or ''),
             default_round_id=default_round_id,
-            selected_round_id=default_round_id,
-            round_options_count=len(rounds),
+            selected_round_id='',
+            round_options_count=0,
             children_fingerprint=children_fingerprint,
             sort_key=f'{str(node.created_at or "")}:{str(node.node_id or "")}',
             payload={
@@ -3805,8 +3741,8 @@ class TaskLogService:
                 'is_paused': bool(node.is_paused),
                 'pause_reason': str(node.pause_reason or ''),
                 'default_round_id': default_round_id,
-                'selected_round_id': default_round_id,
-                'round_options_count': len(rounds),
+                'selected_round_id': '',
+                'round_options_count': 0,
                 'children_fingerprint': children_fingerprint,
                 'acceptance_handshake_state': acceptance_handshake_state,
                 # 树快照窄读路径：pending_notice_count 的元数据部分直接落在投影里，
@@ -4120,80 +4056,6 @@ class TaskLogService:
                 }
             )
         return latest_round_id, results
-
-    def _projection_entry_effective_status(self, entry: dict[str, Any]) -> str:
-        """D：spawn entry 的投影有效状态——绑定节点真实状态优先。
-
-        - 节点已终态（success/failed）：以节点为准（entry 的 running/error 都是漂移）；
-        - 节点非终态：queued/running 保持原义，其余记账态（如历史事故误盖的
-          error）计为 running——节点还活着就不算 failed；
-        - 绑定节点不可解析：回退 entry.status。
-        """
-        entry_status = str(entry.get('status') or '').strip().lower()
-        bound_node_id = str(entry.get('child_node_id') or '').strip()
-        if not bound_node_id:
-            return entry_status
-        try:
-            node = self._store.get_node(bound_node_id)
-        except Exception:
-            node = None
-        if node is None:
-            return entry_status
-        node_status = str(getattr(node, 'status', '') or '').strip().lower()
-        if node_status in {'success', 'failed'}:
-            return node_status
-        if node_status:
-            return entry_status if entry_status in {'queued', 'running'} else 'running'
-        return entry_status
-
-    def _task_projection_round_records(self, node: NodeRecord) -> list[TaskProjectionRoundRecord]:
-        payload = (node.metadata or {}).get('spawn_operations') if isinstance(node.metadata, dict) else {}
-        if not isinstance(payload, dict):
-            return []
-        records: list[TaskProjectionRoundRecord] = []
-        for index, (round_id, operation) in enumerate(payload.items(), start=1):
-            if not isinstance(operation, dict):
-                continue
-            entries = [item for item in list(operation.get('entries') or []) if isinstance(item, dict)]
-            materialized_entries = [
-                item for item in entries
-                if str(item.get('child_node_id') or '').strip()
-            ]
-            child_node_ids = [
-                str(item.get('child_node_id') or '').strip()
-                for item in materialized_entries
-                if str(item.get('child_node_id') or '').strip()
-            ]
-            total_children = len(child_node_ids)
-            # D：计数以绑定节点真实状态优先于 spawn 合成记账——修复
-            # "entry 被误盖 error 而节点仍 in_progress"（2026-09-15 事故，
-            # failed_children 与节点状态互相矛盾）及反向漂移。
-            effective_statuses = [self._projection_entry_effective_status(item) for item in materialized_entries]
-            completed_children = sum(1 for status in effective_statuses if status == 'success')
-            failed_children = sum(1 for status in effective_statuses if status in {'error', 'failed'})
-            running_children = sum(1 for status in effective_statuses if status in {'queued', 'running'})
-            records.append(
-                TaskProjectionRoundRecord(
-                    task_id=node.task_id,
-                    parent_node_id=node.node_id,
-                    round_id=str(round_id or '').strip() or f'round:{index}',
-                    round_index=index,
-                    label=f'Round {index}',
-                    is_latest=index == len(payload),
-                    created_at=str(
-                        operation.get('created_at')
-                        or next((item.get('started_at') for item in entries if str(item.get('started_at') or '').strip()), '')
-                        or str(node.updated_at or '')
-                    ),
-                    source='explicit',
-                    total_children=total_children,
-                    completed_children=completed_children,
-                    running_children=running_children,
-                    failed_children=failed_children,
-                    child_node_ids=child_node_ids,
-                )
-            )
-        return records
 
     def _runtime_frame_record(self, *, task: TaskRecord, frame: dict[str, Any]) -> TaskProjectionRuntimeFrameRecord:
         payload = dict(frame or {})

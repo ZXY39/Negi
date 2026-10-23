@@ -382,6 +382,8 @@ class SQLiteTaskStore:
             )
             ''',
             '''
+            -- 停写：轮次分组已下线（前端平铺 + query_service 不再读该表）。
+            -- 表保留只为旧库升级时不破坏数据；新代码不得写入。
             CREATE TABLE IF NOT EXISTS task_node_rounds (
                 task_id TEXT NOT NULL,
                 parent_node_id TEXT NOT NULL,

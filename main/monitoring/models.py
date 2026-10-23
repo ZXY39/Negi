@@ -16,6 +16,8 @@ from main.types import NodeStatus, TaskStatus
 
 
 class TaskTreeSnapshotRound(Model):
+    """已废弃：轮次分组下线后不再生成。保留类型只为旧响应反序列化。"""
+
     round_id: str = ''
     label: str = ''
     is_latest: bool = False
@@ -37,6 +39,8 @@ class TaskTreeSnapshotNode(Model):
     title: str = ''
     updated_at: str = ''
     children_fingerprint: str = ''
+    # 已废弃：恒为空串 / 空列表，只为旧客户端保持响应形状；子节点关系看
+    # auxiliary_child_ids（现在是全部直接子节点）与 parent_node_id。
     default_round_id: str = ''
     rounds: list[TaskTreeSnapshotRound] = Field(default_factory=list)
     auxiliary_child_ids: list[str] = Field(default_factory=list)

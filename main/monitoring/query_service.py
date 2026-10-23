@@ -31,7 +31,6 @@ from main.monitoring.models import (
     TaskSummaryResult,
     TaskTreeSnapshot,
     TaskTreeSnapshotNode,
-    TaskTreeSnapshotRound,
 )
 from main.runtime.acceptance_handshake import (
     ACCEPTANCE_HANDSHAKE_KEY,
@@ -680,7 +679,8 @@ class TaskQueryService:
             # `total_model_calls` 也是界面那句"任务开始以来共 N 次调用"的出处——明细行
             # 只带最近一窗，条数不能从明细行的长度反推。
             'total_nodes': self._store.count_task_nodes(task.task_id),
-            'total_rounds': self._store.count_task_node_rounds(task.task_id),
+            # 轮次投影已停写：保留键（旧前端可能读），恒为 0，不再查表。
+            'total_rounds': 0,
             'total_model_calls': self._store.count_task_model_calls(task.task_id),
             'active_node_count': len(list(runtime_summary.get('active_node_ids') or [])),
             'runnable_node_count': len(list(runtime_summary.get('runnable_node_ids') or [])),
@@ -1016,15 +1016,9 @@ class TaskQueryService:
             for item in projection_nodes
             if str(item.node_id or '').strip()
         }
-        rounds = list(self._store.list_task_node_rounds(task_id) or [])
+        # 轮次投影已停写：不再读 task_node_rounds。第三个返回值保留（恒空）只为
+        # 签名稳定；子节点关系一律由投影节点的 parent_node_id 直接推导。
         rounds_by_parent: dict[str, list[Any]] = {}
-        for item in rounds:
-            rounds_by_parent.setdefault(str(item.parent_node_id or '').strip(), []).append(item)
-        for parent_id, items in rounds_by_parent.items():
-            rounds_by_parent[parent_id] = sorted(
-                [item for item in items if str(getattr(item, 'round_id', '') or '').strip()],
-                key=lambda item: (int(getattr(item, 'round_index', 0) or 0), str(getattr(item, 'round_id', '') or '')),
-            )
         direct_children: dict[str, list[str]] = {}
         for item in projection_nodes:
             parent_id = str(getattr(item, 'parent_node_id', '') or '').strip()
@@ -1262,27 +1256,6 @@ class TaskQueryService:
             'kind': str(step.get('kind') or '').strip(),
         }
 
-    @staticmethod
-    def _projection_default_round_id(record: Any, rounds: list[Any]) -> str:
-        explicit_default = str(getattr(record, 'default_round_id', '') or '').strip()
-        if explicit_default and any(str(getattr(item, 'round_id', '') or '').strip() == explicit_default for item in rounds):
-            return explicit_default
-        if rounds:
-            latest = next((item for item in rounds if bool(getattr(item, 'is_latest', False))), rounds[-1])
-            return str(getattr(latest, 'round_id', '') or '').strip()
-        return ''
-
-    @staticmethod
-    def _projection_round_child_ids(round_record: Any, *, node_map: dict[str, Any] | None = None) -> list[str]:
-        child_ids = [
-            str(child_id or '').strip()
-            for child_id in list(getattr(round_record, 'child_node_ids', []) or [])
-            if str(child_id or '').strip()
-        ]
-        if node_map is None:
-            return child_ids
-        return [child_id for child_id in child_ids if child_id in node_map]
-
     def _projection_auxiliary_child_ids(
         self,
         parent_node_id: str,
@@ -1291,54 +1264,13 @@ class TaskQueryService:
         rounds_by_parent: dict[str, list[Any]],
         direct_children: dict[str, list[str]],
     ) -> list[str]:
-        normalized_parent_id = str(parent_node_id or '').strip()
-        round_child_ids = {
-            child_id
-            for round_record in list(rounds_by_parent.get(normalized_parent_id, []) or [])
-            for child_id in self._projection_round_child_ids(round_record, node_map=node_map)
-        }
+        # 轮次分组下线后，“辅助子节点”就是全部直接子节点（保持原有排序）。
+        _ = rounds_by_parent
         return [
             child_id
-            for child_id in list(direct_children.get(normalized_parent_id, []) or [])
-            if child_id not in round_child_ids
+            for child_id in list(direct_children.get(str(parent_node_id or '').strip(), []) or [])
+            if child_id in node_map
         ]
-
-    @staticmethod
-    def _projection_round_visible_in_snapshot(round_record: Any) -> bool:
-        child_ids = [
-            str(child_id or '').strip()
-            for child_id in list(getattr(round_record, 'child_node_ids', []) or [])
-            if str(child_id or '').strip()
-        ]
-        if child_ids:
-            return True
-        return any(
-            int(getattr(round_record, field_name, 0) or 0) > 0
-            for field_name in ('total_children', 'completed_children', 'running_children', 'failed_children')
-        )
-
-    def _projection_selected_round(
-        self,
-        record: Any,
-        rounds: list[Any],
-        *,
-        round_override: str = '',
-    ) -> Any | None:
-        if not rounds:
-            return None
-        requested_round_id = str(round_override or '').strip()
-        selected_round_id = str(getattr(record, 'selected_round_id', '') or '').strip()
-        default_round_id = self._projection_default_round_id(record, rounds)
-        for candidate_round_id in [requested_round_id, selected_round_id, default_round_id]:
-            if not candidate_round_id:
-                continue
-            selected = next(
-                (item for item in rounds if str(getattr(item, 'round_id', '') or '').strip() == candidate_round_id),
-                None,
-            )
-            if selected is not None:
-                return selected
-        return next((item for item in rounds if bool(getattr(item, 'is_latest', False))), None) or rounds[-1]
 
     def _projection_visible_child_ids(
         self,
@@ -1349,35 +1281,14 @@ class TaskQueryService:
         direct_children: dict[str, list[str]],
         round_override: str = '',
     ) -> list[str]:
-        normalized_parent_id = str(parent_node_id or '').strip()
-        seen: set[str] = set()
-        out: list[str] = []
-        for child_id in self._projection_auxiliary_child_ids(
-            normalized_parent_id,
+        # 子节点平铺：全部直接子节点都可见，轮次选择参数只为旧调用签名保留。
+        _ = (rounds_by_parent, round_override)
+        return self._projection_auxiliary_child_ids(
+            parent_node_id,
             node_map=node_map,
-            rounds_by_parent=rounds_by_parent,
+            rounds_by_parent={},
             direct_children=direct_children,
-        ):
-            if child_id in seen:
-                continue
-            seen.add(child_id)
-            out.append(child_id)
-        record = node_map.get(normalized_parent_id)
-        if record is None:
-            return out
-        selected_round = self._projection_selected_round(
-            record,
-            list(rounds_by_parent.get(normalized_parent_id, []) or []),
-            round_override=round_override,
         )
-        if selected_round is None:
-            return out
-        for child_id in self._projection_round_child_ids(selected_round, node_map=node_map):
-            if child_id in seen:
-                continue
-            seen.add(child_id)
-            out.append(child_id)
-        return out
 
     def _snapshot_node_from_projection(
         self,
@@ -1390,27 +1301,13 @@ class TaskQueryService:
         delivered_child_counts: dict[str, int],
     ) -> TaskTreeSnapshotNode:
         node_id = str(getattr(record, 'node_id', '') or '').strip()
-        parent_rounds = list(rounds_by_parent.get(node_id, []))
+        # 轮次投影已停写：快照不再携带 rounds，子节点全部平铺在 auxiliary_child_ids。
         auxiliary_child_ids = self._projection_auxiliary_child_ids(
             node_id,
             node_map=node_map,
             rounds_by_parent=rounds_by_parent,
             direct_children=direct_children,
         )
-        snapshot_rounds = [
-            TaskTreeSnapshotRound(
-                round_id=str(getattr(round_record, 'round_id', '') or '').strip(),
-                label=str(getattr(round_record, 'label', '') or '').strip(),
-                is_latest=bool(getattr(round_record, 'is_latest', False)),
-                total_children=int(getattr(round_record, 'total_children', 0) or 0),
-                completed_children=int(getattr(round_record, 'completed_children', 0) or 0),
-                running_children=int(getattr(round_record, 'running_children', 0) or 0),
-                failed_children=int(getattr(round_record, 'failed_children', 0) or 0),
-                child_ids=self._projection_round_child_ids(round_record),
-            )
-            for round_record in parent_rounds
-            if self._projection_round_visible_in_snapshot(round_record)
-        ]
         payload = dict(getattr(record, 'payload', {}) or {})
         node_kind = str(getattr(record, 'node_kind', '') or 'execution').strip() or 'execution'
         status = str(getattr(record, 'status', '') or 'in_progress').strip() or 'in_progress'
@@ -1447,8 +1344,8 @@ class TaskQueryService:
             title=str(getattr(record, 'title', '') or node_id).strip() or node_id,
             updated_at=str(getattr(record, 'updated_at', '') or '').strip(),
             children_fingerprint=str(getattr(record, 'children_fingerprint', '') or '').strip(),
-            default_round_id=self._projection_default_round_id(record, snapshot_rounds),
-            rounds=snapshot_rounds,
+            default_round_id='',
+            rounds=[],
             auxiliary_child_ids=auxiliary_child_ids,
             pending_notice_count=self._node_pending_notice_count(
                 node_id=node_id,
