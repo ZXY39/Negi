@@ -4968,9 +4968,23 @@ class MainRuntimeService:
             node=node,
             priority=priority,
         ):
-            wake_outcome = await self.wake_node_on_message(
-                task_id=normalized_task_id, node_id=normalized_node_id
-            )
+            try:
+                wake_outcome = await self.wake_node_on_message(
+                    task_id=normalized_task_id, node_id=normalized_node_id
+                )
+            except Exception as exc:  # noqa: BLE001 - 投递已落箱，唤醒失败不能回滚它
+                # 消息已经在信箱里；把调用打成失败会让发送方以为没送达并重发。
+                # 唤醒失败只降级为一条读数，由对账/下次投递再唤醒。
+                wake_outcome = f'wake_error:{type(exc).__name__}'
+                try:
+                    logger.warning(
+                        'node wake failed after delivery: task={} node={} error={!r}',
+                        normalized_task_id,
+                        normalized_node_id,
+                        exc,
+                    )
+                except Exception:
+                    pass
         return {
             'target': normalized_node_id,
             'status': 'delivered',
