@@ -7068,22 +7068,16 @@ class MainRuntimeService:
                 prior_history_shrink_reason = str(prior_frame.get('history_shrink_reason') or '').strip()
                 prior_actual_request_ref = str(prior_frame.get('actual_request_ref') or '').strip()
                 prior_declaration_backfill = dict(
-                    dict(prior_frame.get('model_visible_tool_selection_trace') or {}).get(
-                        'declaration_schema_backfill'
-                    ) or {}
+                    prior_trace.get('declaration_schema_backfill') or {}
                 )
                 prior_declaration_schema_ref = str(
-                    dict(prior_frame.get('model_visible_tool_selection_trace') or {}).get(
-                        'declaration_schema_ref'
-                    )
+                    prior_trace.get('declaration_schema_ref')
                     or ''
                 ).strip()
                 # 单源化后整表的缓存键是 (ref, revision)；存量帧没有 revision 时读空串，
                 # 读侧会退化成"每次读盘"，宁可能一次多读也不供可能过期的内容。
                 prior_declaration_bundle_revision = str(
-                    dict(prior_frame.get('model_visible_tool_selection_trace') or {}).get(
-                        'bundle_revision'
-                    )
+                    prior_trace.get('bundle_revision')
                     or ''
                 ).strip()
         selected_tool_names: list[str] = []

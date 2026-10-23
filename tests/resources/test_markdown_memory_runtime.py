@@ -7,6 +7,7 @@ import re
 import sqlite3
 from pathlib import Path
 from types import SimpleNamespace
+from typing import Any
 
 import pytest
 

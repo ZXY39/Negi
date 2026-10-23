@@ -1070,7 +1070,6 @@ class CeoMessageBuilder:
         user_content: Any | None,
         contract_present_tool_names: list[str] | None = None,
     ) -> dict[str, Any]:
-        retrieval_started_at = 0.0
         retrieval_elapsed_ms = 0.0
         main_service = getattr(self._loop, 'main_task_service', None)
         memory_manager = getattr(self._loop, 'memory_manager', None)

@@ -269,11 +269,11 @@ async def test_sse_replays_backlog_with_last_event_id(sse_env):
     lines = await _collect_lines(iterator, want_data_lines=3)
     await iterator.aclose()
 
-    data_lines = [l for l in lines if l.startswith("data:")]
+    data_lines = [line for line in lines if line.startswith("data:")]
     assert len(data_lines) == 3
     assert '"turn.started"' in data_lines[0]
     assert '"turn.completed"' in data_lines[2]
-    id_lines = [l for l in lines if l.startswith("id:")]
+    id_lines = [line for line in lines if line.startswith("id:")]
     assert id_lines[:3] == ["id: 1", "id: 2", "id: 3"]
 
     # Replay honors Last-Event-ID: only events after seq 2 arrive.
@@ -281,7 +281,7 @@ async def test_sse_replays_backlog_with_last_event_id(sse_env):
     lines2 = await _collect_lines(iterator2, want_data_lines=1)
     await iterator2.aclose()
 
-    data_lines2 = [l for l in lines2 if l.startswith("data:")]
+    data_lines2 = [line for line in lines2 if line.startswith("data:")]
     assert len(data_lines2) == 1
     assert '"turn.completed"' in data_lines2[0]
 

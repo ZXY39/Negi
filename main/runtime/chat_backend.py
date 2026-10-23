@@ -1406,7 +1406,6 @@ class ConfigChatBackend:
                 )
                 request_messages = sanitize_provider_messages(preview_payload.get("messages"))
                 request_tools = list(preview_payload.get("tools") or []) or None
-                stable_prompt_cache_key = str(preview_payload.get("prompt_cache_key") or "").strip()
                 # 图片能力按**这一发落到的这颗模型**判：装配层（前门/节点拼图道）手里有上传
                 # 路径，能就地给出"路径 + 原因"；这里兜住其余车道与"链前进到不收图的成员"。
                 # 降级不抛错、也不让链前进——收不收图与"该用哪颗模型"是两条独立判断，混在

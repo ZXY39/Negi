@@ -479,7 +479,6 @@ def test_frontdoor_prompt_contract_key_stable_with_dirty_live_base() -> None:
     from g3ku.runtime.frontdoor.prompt_cache_contract import build_frontdoor_prompt_contract
 
     contract = _contract_record()
-    clean_backend = _frontdoor_prompt_contract_module()
     clean = build_frontdoor_prompt_contract(
         scope="ceo_frontdoor",
         provider_model="openai:gpt-test",
@@ -528,8 +527,7 @@ def test_frontdoor_fresh_turn_seed_with_stale_note_keeps_real_prefix() -> None:
     from g3ku.runtime.frontdoor._ceo_create_agent_impl import CreateAgentCeoFrontDoorRunner
 
     runner = CreateAgentCeoFrontDoorRunner(loop=SimpleNamespace(main_task_service=None))
-    previous_record_path = None  # session carries inline history, not a file
-
+    # session carries inline history, not a file
     attempt = SimpleNamespace(
         _frontdoor_previous_actual_request_path="",
         _frontdoor_previous_actual_request_history=[

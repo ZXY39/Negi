@@ -442,7 +442,6 @@ def test_memory_failed_panel_is_hidden_by_default_and_gated_by_mutations_flag() 
 
 
 def test_memory_failed_action_reports_progress_with_a_spinning_toast() -> None:
-    app_js = _memory_frontend_source()
     css = (REPO_ROOT / "g3ku/web/frontend/org_graph.css").read_text(encoding="utf-8")
     api_js = (REPO_ROOT / "g3ku/web/frontend/client_api/memory.js").read_text(encoding="utf-8")
 

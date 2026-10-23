@@ -1616,7 +1616,6 @@ class WebSessionHeartbeatService:
             (key, tuple(sorted({str(event.reason or "").strip().lower() or "heartbeat" for event in events}))),
             None,
         )
-        task_terminal_events = self._task_terminal_events(events)
         require_visible_reply = self._events_require_visible_reply(events)
         repair_attempt = 0
         repair_failed = False

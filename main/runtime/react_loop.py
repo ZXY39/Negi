@@ -1283,7 +1283,7 @@ class ReActToolLoop:
                 for call in response_tool_calls
             ]
             ledger_reasoning_field = self._node_assistant_reasoning_field(response)
-            updated_node = self._log_service.append_node_output(
+            self._log_service.append_node_output(
                 task.task_id,
                 node.node_id,
                 content=str(response.content or ''),

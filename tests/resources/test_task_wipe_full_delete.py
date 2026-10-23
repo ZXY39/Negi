@@ -140,7 +140,7 @@ async def test_delete_task_exports_deliverables_only(tmp_path) -> None:
         payload={'text': 'final content'}, extension='.json', mime_type='application/json',
         preview_text='final',
     )
-    kept_report = store.create_text_artifact(
+    store.create_text_artifact(
         task_id=task_id, node_id='node-root', kind='node_output', title='weekly report draft',
         content='# report body', extension='.md', mime_type='text/markdown',
     )

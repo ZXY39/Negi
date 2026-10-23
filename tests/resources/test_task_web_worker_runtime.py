@@ -13253,7 +13253,6 @@ async def test_resume_react_state_injects_pending_notice_once_active_round_is_go
 
         react_state = await service.node_runner._resume_react_state(task=task, node=root)
 
-        frame = service.log_service.read_runtime_frame(record.task_id, root.node_id) or {}
         root_after = service.get_node(root.node_id)
         pending_notice_state = dict((root_after.metadata or {}).get(PENDING_NOTICE_STATE_KEY) or {})
 

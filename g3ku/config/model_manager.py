@@ -225,7 +225,7 @@ class ModelManager:
             raise ValueError("Model key is required")
         if self.config.get_managed_model(clean_key) is not None:
             raise ValueError(f"Model key already exists: {clean_key}")
-        item = self.facade.create_binding(
+        self.facade.create_binding(
             self.config,
             draft_payload=_chat_binding_draft(
                 provider_model=str(provider_model or "").strip(),
