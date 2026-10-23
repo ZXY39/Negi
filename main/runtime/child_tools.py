@@ -1,0 +1,152 @@
+"""Read-only child inspection tools for execution nodes.
+
+Three tools over one snapshot shape so the model sees the same facts whichever
+door it comes through: a child's state is always the node row plus its runtime
+frame, never a projection that could lag. Progress is derived from what the
+child actually produced (its last assistant text, its tool calls, its acceptance
+rounds) — there is deliberately no field the child has to write for a parent to
+understand it.
+"""
+
+from __future__ import annotations
+
+import json
+from collections.abc import Awaitable, Callable
+from typing import Any
+
+from g3ku.agent.tools.base import Tool
+from main.runtime.tool_names import (
+    LIST_CHILD_NODES_TOOL_NAME,
+    READ_CHILD_PROGRESS_TOOL_NAME,
+    VIEW_NODE_TREE_TOOL_NAME,
+)
+
+
+class ListChildNodesTool(Tool):
+    """直接子节点清单：一行一个，带状态与未读数。"""
+
+    hide_universal_timeout_parameter = True
+
+    def __init__(self, list_children: Callable[..., Awaitable[dict[str, Any]]]) -> None:
+        self._list_children = list_children
+
+    @property
+    def name(self) -> str:
+        return LIST_CHILD_NODES_TOOL_NAME
+
+    @property
+    def description(self) -> str:
+        return (
+            'List your direct child nodes with their state, how many unread messages each has, '
+            'and whether it has settled. Use it to see who is still outstanding; you do not need '
+            'it to know when they finish — an unsettled child reports to you by message.'
+        )
+
+    @property
+    def model_description(self) -> str:
+        return 'List direct children with state and unread counts.'
+
+    @property
+    def parameters(self) -> dict[str, Any]:
+        return {
+            'type': 'object',
+            'properties': {
+                'state': {
+                    'type': 'array',
+                    'items': {'type': 'string'},
+                    'description': 'Optional filter, e.g. ["running"] or ["paused"].',
+                },
+                'settled': {
+                    'type': 'boolean',
+                    'description': 'Optional: true for finished children only, false for live ones.',
+                },
+            },
+            'required': [],
+        }
+
+    async def execute(self, state: Any = None, settled: Any = None, **kwargs: Any) -> str:
+        _ = kwargs
+        payload = await self._list_children(state=state, settled=settled)
+        return json.dumps(payload, ensure_ascii=False, sort_keys=True)
+
+
+class ReadChildProgressTool(Tool):
+    """一个子节点的进度：最近文本、近期工具流水、验收轮次、看门狗判停史。"""
+
+    hide_universal_timeout_parameter = True
+
+    def __init__(self, read_progress: Callable[..., Awaitable[dict[str, Any]]]) -> None:
+        self._read_progress = read_progress
+
+    @property
+    def name(self) -> str:
+        return READ_CHILD_PROGRESS_TOOL_NAME
+
+    @property
+    def description(self) -> str:
+        return (
+            'Read what one direct child is actually doing: its latest assistant text, its recent '
+            'tool calls, how many acceptance rounds it has been through and the last verdict, and '
+            'any watchdog pauses it hit. Pointers to large bodies are returned instead of the '
+            'bodies themselves.'
+        )
+
+    @property
+    def model_description(self) -> str:
+        return 'Inspect one child: latest text, recent tools, acceptance rounds, watchdog history.'
+
+    @property
+    def parameters(self) -> dict[str, Any]:
+        return {
+            'type': 'object',
+            'properties': {
+                'node_id': {'type': 'string', 'description': 'Direct child node id.', 'minLength': 1},
+                'focus': {'type': 'string', 'description': 'Optional: what you care about.'},
+            },
+            'required': ['node_id'],
+        }
+
+    async def execute(self, node_id: str = '', focus: str = '', **kwargs: Any) -> str:
+        _ = kwargs
+        payload = await self._read_progress(node_id=str(node_id or '').strip(), focus=focus)
+        return json.dumps(payload, ensure_ascii=False, sort_keys=True)
+
+
+class ViewNodeTreeTool(Tool):
+    """以本节点为根的整棵子树，一行一个节点。"""
+
+    hide_universal_timeout_parameter = True
+
+    def __init__(self, view_tree: Callable[..., Awaitable[dict[str, Any]]]) -> None:
+        self._view_tree = view_tree
+
+    @property
+    def name(self) -> str:
+        return VIEW_NODE_TREE_TOOL_NAME
+
+    @property
+    def description(self) -> str:
+        return (
+            'One line per node for the whole subtree under you, so you can orient before delegating '
+            'or messaging. Depth and total node count are both bounded; when a tree is too large the '
+            'result says so and gives a pointer instead of half a tree.'
+        )
+
+    @property
+    def model_description(self) -> str:
+        return 'First line per node for your whole subtree, bounded in depth and size.'
+
+    @property
+    def parameters(self) -> dict[str, Any]:
+        return {
+            'type': 'object',
+            'properties': {
+                'depth': {'type': 'integer', 'minimum': 1, 'description': 'How deep to walk.'},
+            },
+            'required': [],
+        }
+
+    async def execute(self, depth: Any = None, **kwargs: Any) -> str:
+        _ = kwargs
+        payload = await self._view_tree(depth=depth)
+        return json.dumps(payload, ensure_ascii=False, sort_keys=True)

@@ -63,6 +63,11 @@ from main.runtime.append_notice_context import (
     record_pending_append_notice_records,
     supersede_append_notice_records,
 )
+from main.runtime.child_tools import (
+    ListChildNodesTool,
+    ReadChildProgressTool,
+    ViewNodeTreeTool,
+)
 from main.runtime.internal_tools import (
     EnterWaitTool,
     SendMessageTool,
@@ -94,7 +99,13 @@ from main.runtime.subtree_hold import (
     resolve_subtree_hold_epoch_id,
     spawn_round_has_unmaterialized_entries,
 )
-from main.runtime.tool_names import ENTER_WAIT_TOOL_NAME, SEND_MESSAGE_TOOL_NAME
+from main.runtime.tool_names import (
+    ENTER_WAIT_TOOL_NAME,
+    LIST_CHILD_NODES_TOOL_NAME,
+    READ_CHILD_PROGRESS_TOOL_NAME,
+    SEND_MESSAGE_TOOL_NAME,
+    VIEW_NODE_TREE_TOOL_NAME,
+)
 from main.service.create_async_task_contract import normalize_create_async_task_file_targets
 from main.storage.disk_guard import is_disk_full_error
 from main.types import KIND_ACCEPTANCE, KIND_EXECUTION, STATUS_FAILED, STATUS_SUCCESS
@@ -3948,6 +3959,181 @@ class NodeRunner:
             return [item for item in messages if isinstance(item, dict)]
         return []
 
+    MAX_TREE_NODES = 200
+
+    def _task_node_records(self, task_id: str) -> list[NodeRecord]:
+        try:
+            return list(self._store.list_nodes(task_id) or [])
+        except Exception:
+            return []
+
+    def _direct_child_records(self, task_id: str, node_id: str) -> list[NodeRecord]:
+        return [
+            item
+            for item in self._task_node_records(task_id)
+            if str(getattr(item, 'parent_node_id', '') or '').strip() == node_id
+        ]
+
+    def _node_frame_dict(self, task_id: str, node_id: str) -> dict[str, Any]:
+        try:
+            frame = self._log_service.read_runtime_frame(task_id, node_id)
+        except Exception:
+            return {}
+        return dict(frame or {}) if isinstance(frame, dict) else {}
+
+    def _unread_from_node(self, task_id: str, node_id: str) -> int:
+        try:
+            rows = list(self._store.list_task_node_notifications(task_id, node_id) or [])
+        except Exception:
+            return 0
+        return sum(1 for item in rows if str(item.status or '').strip() == 'delivered')
+
+    @staticmethod
+    def _node_state_label(node: NodeRecord, phase: str) -> str:
+        status = str(getattr(node, 'status', '') or '').strip().lower()
+        if status in {'success', 'failed'}:
+            return status
+        if bool(getattr(node, 'is_paused', False) or getattr(node, 'pause_requested', False)):
+            return 'paused'
+        if phase in {'waiting_explicit', 'waiting_acceptance'}:
+            return 'waiting'
+        return 'running'
+
+    def _node_brief(self, task_id: str, node: NodeRecord) -> dict[str, Any]:
+        phase = str(self._node_frame_dict(task_id, node.node_id).get('phase') or '')
+        return {
+            'node_id': str(node.node_id or ''),
+            'goal': str(node.goal or '')[:200],
+            'node_kind': str(node.node_kind or 'execution'),
+            'state': self._node_state_label(node, phase),
+            'state_detail': phase,
+            'settled': str(node.status or '').strip().lower() in {'success', 'failed'},
+            'unread_count': self._unread_from_node(task_id, node.node_id),
+            'pause_reason': str(getattr(node, 'pause_reason', '') or ''),
+        }
+
+    async def _list_children(
+        self,
+        *,
+        task_id: str,
+        node: NodeRecord,
+        state: Any = None,
+        settled: Any = None,
+    ) -> dict[str, Any]:
+        wanted = (
+            {str(item).strip().lower() for item in state if str(item).strip()}
+            if isinstance(state, (list, tuple, set))
+            else set()
+        )
+        rows: list[dict[str, Any]] = []
+        for child in self._direct_child_records(task_id, node.node_id):
+            brief = self._node_brief(task_id, child)
+            if wanted and brief['state'] not in wanted:
+                continue
+            if settled is not None and bool(brief['settled']) != bool(settled):
+                continue
+            rows.append(brief)
+        return {'children': rows, 'count': len(rows)}
+
+    async def _read_child_progress(
+        self,
+        *,
+        task_id: str,
+        node: NodeRecord,
+        node_id: str,
+        focus: str = '',
+    ) -> dict[str, Any]:
+        children = self._direct_child_records(task_id, node.node_id)
+        target = next((item for item in children if str(item.node_id or '') == node_id), None)
+        if target is None:
+            return {
+                'ok': False,
+                'error': 'not_a_direct_child',
+                'node_id': node_id,
+                'legal_targets': [str(item.node_id or '') for item in children],
+            }
+        frame = self._node_frame_dict(task_id, target.node_id)
+        last_text = ''
+        recent_tools: list[dict[str, Any]] = []
+        for message in list(frame.get('messages') or []):
+            if not isinstance(message, dict) or str(message.get('role') or '') != 'assistant':
+                continue
+            text = str(message.get('content') or '').strip()
+            if text:
+                last_text = text[:800]
+            for call in list(message.get('tool_calls') or []):
+                function = (call or {}).get('function') or {}
+                name = str(function.get('name') or (call or {}).get('name') or '').strip()
+                if name:
+                    recent_tools.append({'name': name})
+        metadata = dict(getattr(target, 'metadata', {}) or {})
+        handshake = dict(metadata.get('acceptance_handshake') or {})
+        brief = self._node_brief(task_id, target)
+        abnormal = ''
+        if str(getattr(target, 'pause_reason', '') or '').strip() == 'error':
+            abnormal = str(getattr(target, 'failure_reason', '') or '')[:400]
+        return {
+            'ok': True,
+            'node_id': target.node_id,
+            'state': brief['state'],
+            'state_detail': brief['state_detail'],
+            'last_progress_text': last_text,
+            'recent_tool_calls': recent_tools[-12:],
+            'unread_from_child': brief['unread_count'],
+            'final_result_ref': str(getattr(target, 'final_output_ref', '') or ''),
+            'abnormal_pause_reason': abnormal,
+            'acceptance_rounds': int(handshake.get('rejection_count') or 0),
+            'latest_verdict_ref': str(handshake.get('latest_rejection_feedback_ref') or ''),
+            'focus': str(focus or ''),
+        }
+
+    async def _view_tree(
+        self,
+        *,
+        task_id: str,
+        node: NodeRecord,
+        depth: Any = None,
+    ) -> dict[str, Any]:
+        try:
+            limit_depth = max(1, int(depth)) if depth is not None else 3
+        except (TypeError, ValueError):
+            limit_depth = 3
+        nodes = self._task_node_records(task_id)
+        lines: list[dict[str, Any]] = []
+        truncated = False
+
+        def walk(parent_id: str, level: int) -> None:
+            nonlocal truncated
+            if level > limit_depth or truncated:
+                return
+            for child in nodes:
+                if str(getattr(child, 'parent_node_id', '') or '').strip() != parent_id:
+                    continue
+                if len(lines) >= self.MAX_TREE_NODES:
+                    truncated = True
+                    return
+                brief = self._node_brief(task_id, child)
+                lines.append(
+                    {
+                        'node_id': brief['node_id'],
+                        'level': level,
+                        'state': brief['state'],
+                        'node_kind': brief['node_kind'],
+                        'goal': brief['goal'][:80],
+                    }
+                )
+                walk(str(child.node_id or ''), level + 1)
+
+        walk(str(node.node_id or ''), 1)
+        return {
+            'ok': True,
+            'root': str(node.node_id or ''),
+            'depth': limit_depth,
+            'nodes': lines,
+            'truncated': truncated,
+            'pointer': 'use read_child_progress on a node_id for detail' if truncated else '',
+        }
+
     NODE_WAIT_WAKE_ON_KEY = 'node_wait_wake_on'
     NODE_WAIT_NOTE_KEY = 'node_wait_note'
 
@@ -4070,6 +4256,21 @@ class NodeRunner:
         else:
             tools.pop('submit_final_result', None)
         if node.node_kind == KIND_EXECUTION:
+            tools[LIST_CHILD_NODES_TOOL_NAME] = ListChildNodesTool(
+                lambda state=None, settled=None: self._list_children(
+                    task_id=task.task_id, node=node, state=state, settled=settled
+                )
+            )
+            tools[READ_CHILD_PROGRESS_TOOL_NAME] = ReadChildProgressTool(
+                lambda node_id='', focus='': self._read_child_progress(
+                    task_id=task.task_id, node=node, node_id=node_id, focus=focus
+                )
+            )
+            tools[VIEW_NODE_TREE_TOOL_NAME] = ViewNodeTreeTool(
+                lambda depth=None: self._view_tree(
+                    task_id=task.task_id, node=node, depth=depth
+                )
+            )
             tools[ENTER_WAIT_TOOL_NAME] = EnterWaitTool(
                 lambda wake_on='any', note='': self._enter_wait(
                     task_id=task.task_id,
