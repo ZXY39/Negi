@@ -1,7 +1,7 @@
 from fastapi import APIRouter
 
-from main.api.bootstrap_rest import router as bootstrap_router
 from main.api.admin_rest import router as admin_router
+from main.api.bootstrap_rest import router as bootstrap_router
 from main.api.internal_rest import router as internal_router
 from main.api.rest import router as rest_router
 from main.api.update_rest import router as update_router

@@ -4,7 +4,6 @@ import threading
 
 import uvicorn
 
-
 _SERVER_LOCK = threading.RLock()
 _SERVER_INSTANCE: uvicorn.Server | None = None
 

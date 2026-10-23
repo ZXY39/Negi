@@ -12,7 +12,6 @@ import asyncio
 import json
 
 import pytest
-
 from qq_onebot_bridge.config import BehaviorConfig
 from qq_onebot_bridge.dispatcher import (
     Dispatcher,

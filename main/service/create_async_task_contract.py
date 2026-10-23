@@ -7,7 +7,6 @@ from typing import Any
 from g3ku.utils.helpers import normalize_seed_tool_names
 from main.models import build_execution_policy_schema, normalize_execution_policy_metadata
 
-
 CREATE_ASYNC_TASK_DESCRIPTION = (
     "Dispatch the user request into a detached background task. "
     "The caller must provide a distilled `core_requirement` and an explicit "

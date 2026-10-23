@@ -5895,7 +5895,7 @@ async def test_create_agent_graph_execute_tools_does_not_mark_duplicate_rejectio
             **_canonical_frontdoor_state(
                 tool_names=["create_async_task"],
                 rbac_visible_tool_names=["create_async_task"],
-                
+
             ),
             "tool_call_payloads": [
                 {"id": "call-1", "name": "create_async_task", "arguments": {"task": "demo"}}
@@ -5948,7 +5948,7 @@ async def test_create_agent_graph_execute_tools_accumulates_multiple_verified_ta
             **_canonical_frontdoor_state(
                 tool_names=["create_async_task"],
                 rbac_visible_tool_names=["create_async_task"],
-                
+
             ),
             "tool_call_payloads": [
                 {"id": "call-1", "name": "create_async_task", "arguments": {"task": "demo-1"}},

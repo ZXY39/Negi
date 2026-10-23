@@ -8,7 +8,6 @@ from fastapi.testclient import TestClient
 
 from main.api import admin_rest
 
-
 REPO_ROOT = Path(__file__).resolve().parents[2]
 
 

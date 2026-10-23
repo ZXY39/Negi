@@ -7,9 +7,10 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 from uuid import uuid4
 
+from g3ku.utils.retry_keywords import DEFAULT_RETRY_ON_KEYWORDS
+
 from .enums import AuthMode, Capability, ProtocolAdapter
 from .models import NormalizedProviderConfig
-from g3ku.utils.retry_keywords import DEFAULT_RETRY_ON_KEYWORDS
 
 if TYPE_CHECKING:
     from .facade import LLMConfigFacade

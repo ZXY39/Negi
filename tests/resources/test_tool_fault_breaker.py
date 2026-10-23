@@ -4,7 +4,7 @@ from pathlib import Path
 
 import main.errors as errors_module
 from main.errors import is_runtime_self_fault
-from main.runtime.react_loop import ReActToolLoop, _TOOL_FAULT_LIMIT
+from main.runtime.react_loop import _TOOL_FAULT_LIMIT, ReActToolLoop
 
 
 def _raise_with_frame(*, exc_name: str, filename: str) -> BaseException:

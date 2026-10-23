@@ -3,7 +3,6 @@ from __future__ import annotations
 import re
 from typing import Any
 
-
 CRON_STOP_CONDITION_CANCEL_SUFFIX = "或用户要求取消"
 CRON_STOP_CONDITION_LEGACY_FALLBACK = "用户要求取消"
 

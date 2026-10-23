@@ -1,4 +1,11 @@
-from main.models import NodeFinalResult, NodeRecord, TaskArtifactRecord, TaskErrorLogRecord, TaskNodePauseRecord, TaskRecord
+from main.models import (
+    NodeFinalResult,
+    NodeRecord,
+    TaskArtifactRecord,
+    TaskErrorLogRecord,
+    TaskNodePauseRecord,
+    TaskRecord,
+)
 from main.service.runtime_service import (
     GetTasksTool,
     MainRuntimeService,

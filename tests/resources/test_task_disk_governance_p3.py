@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import os
 import subprocess
-import sys
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -12,7 +11,7 @@ import pytest
 
 from main.models import TaskRecord
 from main.storage import disk_guard
-from main.storage.disk_guard import DiskPolicies, configure_disk_policies
+from main.storage.disk_guard import configure_disk_policies
 from main.storage.sqlite_store import SQLiteTaskStore
 
 REPO_ROOT = Path(__file__).resolve().parents[2]

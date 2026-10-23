@@ -31,8 +31,8 @@ from datetime import datetime
 from typing import Any
 
 from g3ku.core.messages import UserInputMessage
-from g3ku.runtime.external_events import get_session_event_hub, make_session_event_relay
 from g3ku.runtime.bridge import SessionRuntimeBridge
+from g3ku.runtime.external_events import get_session_event_hub, make_session_event_relay
 from g3ku.runtime.external_sessions import (
     EXTERNAL_OUTBOUND_CHANNEL,
     ExternalSessionEntry,

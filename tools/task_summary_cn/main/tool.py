@@ -7,7 +7,6 @@ import yaml
 
 from g3ku.agent.tools.base import Tool
 
-
 SCOPE_PARAM = '查询范围'
 SCOPE_GLOBAL = '全局'
 _MANIFEST = yaml.safe_load((Path(__file__).resolve().parents[1] / 'resource.yaml').read_text(encoding='utf-8'))

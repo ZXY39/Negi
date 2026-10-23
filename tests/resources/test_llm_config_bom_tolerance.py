@@ -1,10 +1,9 @@
 from __future__ import annotations
 
-from datetime import UTC, datetime
 import json
+from datetime import UTC, datetime
 
 from g3ku.llm_config.enums import AuthMode, Capability, ProtocolAdapter
-from g3ku.llm_config.facade import LLMConfigFacade
 from g3ku.llm_config.models import NormalizedProviderConfig, StoredConfigSummary
 from g3ku.llm_config.repositories import EncryptedConfigRepository
 

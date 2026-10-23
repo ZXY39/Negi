@@ -20,19 +20,17 @@ from g3ku.content import ContentNavigationService, parse_content_envelope
 from g3ku.core.events import AgentEvent
 from g3ku.core.messages import UserInputMessage
 from g3ku.heartbeat.session_service import WebSessionHeartbeatService
-from g3ku.providers.base import LLMResponse, ToolCallRequest
 from g3ku.resources.models import ResourceKind, ToolResourceDescriptor
 from g3ku.runtime import web_ceo_sessions
 from g3ku.runtime.api import ceo_sessions, websocket_ceo
 from g3ku.runtime.frontdoor import _ceo_create_agent_impl as create_agent_impl
 from g3ku.runtime.frontdoor._ceo_support import CeoFrontDoorSupport
-from g3ku.runtime.tool_contract_block import render_tool_contract_block
 from g3ku.runtime.frontdoor.ceo_runner import CeoFrontDoorRunner
 from g3ku.runtime.frontdoor.message_builder import CeoMessageBuilder
 from g3ku.runtime.frontdoor.state_models import CeoFrontdoorInterrupted, CeoPendingInterrupt
 from g3ku.runtime.frontdoor.tool_contract import split_pinned_contract_from_system_text
-from g3ku.runtime.manager import SessionRuntimeManager
 from g3ku.runtime.session_agent import MANUAL_COMPRESSION_STATE_ATTR, RuntimeAgentSession
+from g3ku.runtime.tool_contract_block import render_tool_contract_block
 from g3ku.session.manager import SessionManager
 from main.storage.artifact_store import TaskArtifactStore
 from main.storage.sqlite_store import SQLiteTaskStore

@@ -126,7 +126,10 @@ class _SSEDiagnosticsResponseProxy:
 
     def render_summary(self, *, outcome: str) -> str:
         started_at = self._diagnostics.started_at
-        elapsed_ms = lambda ts: "" if ts is None else f"{max(0.0, (ts - started_at) * 1000.0):.1f}"
+
+        def elapsed_ms(ts):
+            return "" if ts is None else f"{max(0.0, (ts - started_at) * 1000.0):.1f}"
+
         return self._diagnostics.render_summary(
             outcome=outcome,
             extra_fields={

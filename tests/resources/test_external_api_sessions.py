@@ -8,9 +8,9 @@ import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
+from g3ku.runtime import web_ceo_sessions
 from g3ku.runtime.api import external_v1
 from g3ku.runtime.api.external_auth import ExternalApiPrincipal, require_external_api
-from g3ku.runtime import web_ceo_sessions
 from g3ku.runtime.external_sessions import (
     ExternalSessionRegistry,
     reset_external_session_registry,

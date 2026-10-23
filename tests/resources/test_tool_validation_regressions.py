@@ -7,7 +7,6 @@ import pytest
 from g3ku.agent.tools.base import Tool
 from g3ku.agent.tools.registry import ToolRegistry
 
-
 _PARAMETER_GUIDANCE_TEMPLATE = (
     '请先调用 load_tool_context(tool_id="{tool_name}") 查看该工具的详细说明、参数契约和示例后，再重新使用该工具。'
 )

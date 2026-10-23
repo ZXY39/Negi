@@ -15,7 +15,6 @@ from main.service.create_async_task_contract import (
     validate_create_async_task_file_targets,
 )
 
-
 _MANIFEST = yaml.safe_load((Path(__file__).resolve().parents[1] / 'resource.yaml').read_text(encoding='utf-8'))
 
 

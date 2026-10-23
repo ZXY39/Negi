@@ -1,14 +1,14 @@
 from __future__ import annotations
 
 import base64
-from copy import deepcopy
-from datetime import UTC, datetime
 import hashlib
 import json
 import os
-from pathlib import Path
 import shutil
 import threading
+from copy import deepcopy
+from datetime import UTC, datetime
+from pathlib import Path
 from typing import Any
 
 from cryptography.fernet import Fernet, InvalidToken
@@ -20,8 +20,6 @@ from g3ku.security.key_store_backup import (
     record_event,
     snapshot_key_store,
 )
-
-
 
 MASTER_KEY_VERSION = 2
 UNLOCK_SCOPE = "global"

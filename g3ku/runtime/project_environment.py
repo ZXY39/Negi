@@ -6,7 +6,6 @@ import sys
 from pathlib import Path
 from typing import Any, Mapping
 
-
 _PROJECT_ENV_KEYS = (
     'process_cwd',
     'workspace_root',

@@ -11,7 +11,12 @@ from loguru import logger
 
 from g3ku.resources.loader import ResourceLoader
 from g3ku.resources.locks import ResourceLockManager
-from g3ku.resources.models import ResourceKind, ResourceSnapshot, SkillResourceDescriptor, ToolResourceDescriptor
+from g3ku.resources.models import (
+    ResourceKind,
+    ResourceSnapshot,
+    SkillResourceDescriptor,
+    ToolResourceDescriptor,
+)
 from g3ku.resources.registry import DiscoveryResult, ResourceRegistry
 
 _MANAGER_CACHE: dict[str, "ResourceManager"] = {}

@@ -1211,7 +1211,7 @@ def test_reformat_store_folds_multiline_rows_and_the_second_pass_changes_nothing
         snapshot = manager.snapshot_text()
         markdown_module = _load_markdown_memory_module()
         assert len(snapshot.strip().splitlines()) == 2, "一条记忆一行，正文里的换行不再产出续行"
-        assert f"260425:文件->默认格式" in snapshot, "已降级的行仍按最小摘要渲染"
+        assert "260425:文件->默认格式" in snapshot, "已降级的行仍按最小摘要渲染"
         assert "260425:回信先给结论" in snapshot
         markdown_module.validate_memory_document(
             snapshot,

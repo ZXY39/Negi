@@ -168,9 +168,8 @@ def test_long_running_orchestration_and_control_tools_are_exempt() -> None:
         assert tool.hide_universal_timeout_parameter is True
         assert tool.exempt_universal_timeout is False
 
-    from g3ku.agent.tools.memory_note import MemoryNoteTool  # noqa: F401  仅作导入冒烟
-
     from g3ku.agent.tools.base import Tool
+    from g3ku.agent.tools.memory_note import MemoryNoteTool  # noqa: F401  仅作导入冒烟
 
     assert Tool.exempt_universal_timeout is False
 

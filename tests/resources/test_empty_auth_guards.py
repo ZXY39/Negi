@@ -7,17 +7,20 @@ from types import SimpleNamespace
 import httpx
 import pytest
 
+import g3ku.llm_config.probe_strategies as probe_strategies_module
 import g3ku.providers.responses_provider as responses_provider_module
 import main.runtime.chat_backend as chat_backend_module
 from g3ku.llm_config.enums import AuthMode, Capability, ProbeStatus, ProtocolAdapter
 from g3ku.llm_config.models import NormalizedProviderConfig
-import g3ku.llm_config.probe_strategies as probe_strategies_module
-from g3ku.llm_config.probe_strategies import _build_openai_headers, probe_config, probe_config_for_concurrency
-from g3ku.providers.openai_chat_provider import OpenAIChatProvider
-from g3ku.providers.provider_factory import ProviderTarget
-from g3ku.providers.fallback import FallbackProvider
+from g3ku.llm_config.probe_strategies import (
+    _build_openai_headers,
+    probe_config,
+    probe_config_for_concurrency,
+)
 from g3ku.providers.base import LLMResponse
-from g3ku.providers.provider_factory import build_provider_from_model_key
+from g3ku.providers.fallback import FallbackProvider
+from g3ku.providers.openai_chat_provider import OpenAIChatProvider
+from g3ku.providers.provider_factory import ProviderTarget, build_provider_from_model_key
 from g3ku.providers.responses_provider import ResponsesProvider
 
 

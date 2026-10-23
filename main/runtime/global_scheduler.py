@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import asyncio
 from collections import deque
-from collections.abc import Awaitable
 from contextlib import suppress
 from typing import Any
 

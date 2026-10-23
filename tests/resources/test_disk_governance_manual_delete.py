@@ -9,8 +9,6 @@ from __future__ import annotations
 
 from types import SimpleNamespace
 
-import pytest
-
 from main.models import TaskRecord
 from main.monitoring.log_service import TaskLogService
 from main.service.runtime_service import MainRuntimeService

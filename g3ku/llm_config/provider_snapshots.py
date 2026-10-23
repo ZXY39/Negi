@@ -4,7 +4,6 @@ from .enums import ProtocolAdapter
 from .models import ProviderTemplate
 from .template_builders import build_openai_compatible_template
 
-
 PROVIDER_TEMPLATES: list[ProviderTemplate] = [
     build_openai_compatible_template(
         provider_id="openai",

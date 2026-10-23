@@ -26,8 +26,8 @@ from main.runtime.acceptance_handshake import (
     ACCEPTANCE_STATE_WAITING_ACCEPTANCE,
 )
 from main.runtime.node_runner import (
-    NOTICE_RETRY_STATE_KEY,
     _DISTRIBUTION_DECISION_MAX_ATTEMPTS,
+    NOTICE_RETRY_STATE_KEY,
     NodeRunner,
 )
 from main.runtime.pending_notice_state import (
@@ -1143,7 +1143,9 @@ def test_distribution_skipped_payload_uses_notice_kind_not_kind() -> None:
     （`g3ku/heartbeat/session_service.py` 的事件富化），所以带 `kind` 不会顶掉 reason；
     避开它是因为载荷与事件同键存放时，手工/离线构造的字典会把档位误当事件类型。
     """
-    from main.service.task_distribution_error_callback import normalize_task_distribution_error_payload
+    from main.service.task_distribution_error_callback import (
+        normalize_task_distribution_error_payload,
+    )
 
     normalized = normalize_task_distribution_error_payload(
         {

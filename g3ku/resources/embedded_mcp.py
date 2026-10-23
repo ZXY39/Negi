@@ -6,9 +6,9 @@ import logging
 from collections.abc import Sequence
 from typing import Any
 
+import mcp.server.fastmcp.server as fastmcp_server
 from mcp import types
 from mcp.server.fastmcp import FastMCP
-import mcp.server.fastmcp.server as fastmcp_server
 
 from g3ku.agent.tools.base import Tool
 from g3ku.resources.models import ToolResourceDescriptor

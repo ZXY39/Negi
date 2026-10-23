@@ -4,9 +4,11 @@ import hashlib
 import re
 from dataclasses import dataclass
 
-from g3ku.runtime.frontdoor.tool_contract import strip_frontdoor_tool_contract_echo
+from g3ku.runtime.frontdoor.tool_contract import (
+    ECHO_STRIP_ENABLED,
+    strip_frontdoor_tool_contract_echo,
+)
 from g3ku.runtime.skill_roster_notice import strip_skill_roster_notice_echo
-from g3ku.runtime.frontdoor.tool_contract import ECHO_STRIP_ENABLED
 
 """Channel-agnostic session key rules.
 

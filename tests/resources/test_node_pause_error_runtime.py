@@ -10,9 +10,9 @@ import pytest
 
 from g3ku.heartbeat.node_error_scanner import NodeErrorScanner
 from main.errors import NodePausedError
-from main.monitoring.query_service import TaskQueryService
-from main.monitoring.models import TaskProjectionNodeRecord
 from main.models import NodeFinalResult, NodeRecord, SpawnChildSpec, TaskRecord, TokenUsageSummary
+from main.monitoring.models import TaskProjectionNodeRecord
+from main.monitoring.query_service import TaskQueryService
 from main.runtime.react_loop import ReActToolLoop
 from main.runtime.task_actor_service import TaskNodeDispatcher
 from main.service.runtime_service import MainRuntimeService

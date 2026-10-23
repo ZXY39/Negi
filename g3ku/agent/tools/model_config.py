@@ -422,7 +422,7 @@ class ModelConfigTool(Tool):
         if loop is None:
             return
         try:
-            from g3ku.shells.web import refresh_web_agent_runtime, is_no_ceo_model_configured_error
+            from g3ku.shells.web import is_no_ceo_model_configured_error, refresh_web_agent_runtime
             # Model routing changes do not alter the memory_runtime resource
             # fingerprint, so the memory runtime sync stays fingerprint-gated
             # (force_memory_sync defaults to False). Forcing it would reset the

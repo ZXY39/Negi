@@ -7,10 +7,9 @@ structured fact plus a few small helper utilities used by the memory runtime.
 from __future__ import annotations
 
 import json
-from datetime import datetime
 from dataclasses import dataclass
+from datetime import datetime
 from typing import Any, Literal, get_args
-
 
 StructuredCategory = Literal[
     "identity",

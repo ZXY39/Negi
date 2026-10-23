@@ -2,7 +2,6 @@ from __future__ import annotations
 
 from types import SimpleNamespace
 
-from g3ku.runtime.frontdoor._ceo_runtime_ops import CeoFrontDoorRuntimeOps
 from g3ku.runtime.frontdoor.prompt_builder import CeoPromptBuilder
 from g3ku.runtime.frontdoor.tool_contract import build_frontdoor_tool_contract
 

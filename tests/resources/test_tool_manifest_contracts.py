@@ -9,7 +9,6 @@ import yaml
 from g3ku.resources.registry import ResourceRegistry
 from main.governance.action_mapper import DEFAULT_TOOL_GOVERNANCE
 
-
 REPO_ROOT = Path(__file__).resolve().parents[2]
 TOOLS_ROOT = REPO_ROOT / 'tools'
 

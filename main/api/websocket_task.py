@@ -6,7 +6,11 @@ from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 from loguru import logger
 
 from g3ku.security import get_bootstrap_security_service
-from g3ku.shells.web import get_agent, is_no_ceo_model_configured_error, no_ceo_model_configured_payload
+from g3ku.shells.web import (
+    get_agent,
+    is_no_ceo_model_configured_error,
+    no_ceo_model_configured_payload,
+)
 from main.api.websocket_utils import (
     WebSocketChannelClosed,
     websocket_close,

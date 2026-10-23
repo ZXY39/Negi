@@ -5,15 +5,13 @@ from types import SimpleNamespace
 
 import pytest
 
+import main.api.bootstrap_rest as bootstrap_rest
 from g3ku.heartbeat.session_service import WebSessionHeartbeatService
+from g3ku.shells import web as web_shell
 from main.models import NodeRecord, TaskRecord, TokenUsageSummary
 from main.protocol import now_iso
 from main.service.runtime_service import MainRuntimeService
 from main.storage.sqlite_store import SQLiteTaskStore
-
-from g3ku import shells
-from g3ku.shells import web as web_shell
-import main.api.bootstrap_rest as bootstrap_rest
 
 
 class _DummyChatBackend:

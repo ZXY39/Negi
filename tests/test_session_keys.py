@@ -13,6 +13,7 @@ from datetime import datetime
 from pathlib import Path
 from types import SimpleNamespace
 
+from g3ku.runtime.session_agent import RuntimeAgentSession
 from g3ku.runtime.session_keys import (
     build_memory_chat_id,
     build_runtime_chat_id,
@@ -20,7 +21,6 @@ from g3ku.runtime.session_keys import (
     parse_china_session_key,
     sanitize_channel_outbound_text,
 )
-from g3ku.runtime.session_agent import RuntimeAgentSession
 from g3ku.runtime.web_ceo_sessions import build_ceo_session_catalog
 
 
@@ -205,7 +205,10 @@ def test_build_ceo_session_catalog_lists_external_bridge_sessions_in_channel_gro
     """Live ``ext:*`` bridge sessions surface in the channel catalog as
     bridge-keyed groups, titled from the registry mapping: history stays
     read-only, but a registered session accepts web input."""
-    from g3ku.runtime.external_sessions import ExternalSessionRegistry, reset_external_session_registry
+    from g3ku.runtime.external_sessions import (
+        ExternalSessionRegistry,
+        reset_external_session_registry,
+    )
 
     monkeypatch.setattr(
         "g3ku.runtime.web_ceo_sessions.load_config",
@@ -443,7 +446,10 @@ class _RefreshStore:
 def test_resolve_active_ceo_session_id_keeps_external_channel_session(tmp_path: Path) -> None:
     """刷新网页时激活的 ``ext:`` 渠道会话必须保住：解析器不能因为它不是
     ``web:`` 键就回退到最近的本地会话并改写状态存储（P3 回归形态）。"""
-    from g3ku.runtime.external_sessions import ExternalSessionRegistry, reset_external_session_registry
+    from g3ku.runtime.external_sessions import (
+        ExternalSessionRegistry,
+        reset_external_session_registry,
+    )
     from g3ku.runtime.web_ceo_sessions import WebCeoStateStore, resolve_active_ceo_session_id
 
     reset_external_session_registry()
@@ -559,7 +565,10 @@ def test_publish_ceo_session_patch_emits_channel_shape_for_channel_keys(tmp_path
     """``ceo.sessions.patch`` 对渠道键必须发渠道形状条目：本地形状条目会
     被前端短暂插进本地 web 会话列表（P4）。"""
     from g3ku.runtime.api.websocket_ceo import _publish_ceo_session_patch
-    from g3ku.runtime.external_sessions import ExternalSessionRegistry, reset_external_session_registry
+    from g3ku.runtime.external_sessions import (
+        ExternalSessionRegistry,
+        reset_external_session_registry,
+    )
     from g3ku.runtime.web_ceo_sessions import WebCeoStateStore
 
     reset_external_session_registry()

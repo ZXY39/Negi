@@ -169,8 +169,8 @@ from main.runtime.pending_notice_state import (
     RESUME_MODE_WAIT_FOR_CHILDREN,
     normalize_pending_notice_state,
 )
-from main.runtime.recovery_check import RecoveryCheckDecision, RecoveryCheckEngine
 from main.runtime.plain_text_reply import build_node_plain_text_reply_block_message
+from main.runtime.recovery_check import RecoveryCheckDecision, RecoveryCheckEngine
 from main.runtime.subtree_hold import (
     DISTRIBUTION_ACTIVE_STATES,
     make_epoch_state_lookup,

@@ -11,7 +11,6 @@ from pathlib import Path
 from types import SimpleNamespace
 
 from g3ku.config.schema import ManagedModelConfig
-
 from g3ku.providers.responses_protocol_helpers import (
     _consume_sse,
     _convert_messages,
@@ -22,12 +21,12 @@ from g3ku.runtime.frontdoor.message_builder import CeoMessageBuilder
 from main.models import NodeOutputEntry, NodeRecord, TaskRecord, TokenUsageSummary
 from main.monitoring.file_store import TaskFileStore
 from main.monitoring.log_service import TaskLogService
-from main.storage.sqlite_store import SQLiteTaskStore
 from main.runtime.chat_backend import (
     model_chain_replays_reasoning,
     sanitize_provider_messages,
 )
 from main.runtime.react_loop import ReActToolLoop
+from main.storage.sqlite_store import SQLiteTaskStore
 
 _REASONING_ITEM = {
     "type": "reasoning",
@@ -73,7 +72,10 @@ def test_replay_capability_defaults_on_per_binding() -> None:
 
 
 def test_stream_collects_both_reasoning_dialects() -> None:
-    from g3ku.providers.streaming_timeouts import StreamingDiagnostics, consume_openai_like_chat_stream
+    from g3ku.providers.streaming_timeouts import (
+        StreamingDiagnostics,
+        consume_openai_like_chat_stream,
+    )
 
     async def run(key: str) -> str | None:
         async def gen():

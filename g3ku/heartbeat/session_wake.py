@@ -5,7 +5,6 @@ from collections.abc import Awaitable, Callable
 
 from loguru import logger
 
-
 WakeHandler = Callable[[str], Awaitable[float | None]]
 
 # handler 泄漏未捕获异常时的重试间隔。wake 循环不能被单次异常杀死：任务死亡后

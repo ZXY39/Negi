@@ -10,7 +10,6 @@ from main.service.task_terminal_callback import (
     resolve_task_terminal_callback_url,
 )
 
-
 TASK_DISTRIBUTION_ERROR_CALLBACK_PATH = "/api/internal/task-distribution-error"
 
 

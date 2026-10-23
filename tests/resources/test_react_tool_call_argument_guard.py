@@ -6,9 +6,9 @@ from typing import Any
 import pytest
 
 import main.runtime.react_loop as react_loop_module
-from main.runtime.chat_backend import SendModelContextWindowInfo
 from g3ku.agent.tools.base import Tool
 from g3ku.providers.base import LLMResponse, ToolCallRequest
+from main.runtime.chat_backend import SendModelContextWindowInfo
 from main.runtime.react_loop import ReActToolLoop
 
 

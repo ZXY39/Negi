@@ -10,7 +10,6 @@ from main.service.runtime_service import MainRuntimeService, TaskDeleteTool, Tas
 from main.storage import disk_guard
 from main.storage.disk_guard import DiskPolicies, configure_disk_policies
 
-
 TASK_KEYWORDS = '\u4efb\u52a1\u5173\u952e\u8bcd'
 TASK_IDS = '\u4efb\u52a1id\u5217\u8868'
 

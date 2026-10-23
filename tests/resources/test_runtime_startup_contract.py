@@ -5,14 +5,15 @@ import json
 import os
 from pathlib import Path
 
-from fastapi.testclient import TestClient
 import pytest
+from fastapi.testclient import TestClient
 from typer.testing import CliRunner
 
 import g3ku.cli.commands as commands
 import g3ku.web.launcher as launcher
 import g3ku.web.main as web_main
-from g3ku.deployment.data_root import DATA_DIR_ENV, reset_cache as reset_data_root_cache
+from g3ku.deployment.data_root import DATA_DIR_ENV
+from g3ku.deployment.data_root import reset_cache as reset_data_root_cache
 from g3ku.deployment.runtime_startup import (
     BOOTSTRAP_PASSWORD_ENV,
     auto_unlock_from_env,

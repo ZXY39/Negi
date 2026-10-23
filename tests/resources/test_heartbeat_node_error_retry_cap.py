@@ -5,10 +5,10 @@ from pathlib import Path
 from types import SimpleNamespace
 
 from g3ku.heartbeat.session_service import (
-    WebSessionHeartbeatService,
-    _TASK_NODE_ERROR_MAX_CONSECUTIVE_FAILURES,
     _NODE_ERROR_BACKOFF_BASE_SECONDS,
     _NODE_ERROR_BACKOFF_CAP_SECONDS,
+    _TASK_NODE_ERROR_MAX_CONSECUTIVE_FAILURES,
+    WebSessionHeartbeatService,
 )
 
 

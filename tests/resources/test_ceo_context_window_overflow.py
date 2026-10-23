@@ -9,12 +9,12 @@ from types import SimpleNamespace
 
 import pytest
 
+from g3ku.runtime.cancellation import ToolCancellationToken
 from g3ku.runtime.frontdoor import _ceo_runtime_ops as ceo_runtime_ops
 from g3ku.runtime.frontdoor._ceo_create_agent_impl import CreateAgentCeoFrontDoorRunner
-from g3ku.runtime.frontdoor.tool_contract import build_frontdoor_tool_contract
-from g3ku.runtime.cancellation import ToolCancellationToken
-from g3ku.runtime.frontdoor.token_preflight_compaction import FrontdoorTokenPreflightResult
 from g3ku.runtime.frontdoor.state_models import CeoRuntimeContext
+from g3ku.runtime.frontdoor.token_preflight_compaction import FrontdoorTokenPreflightResult
+from g3ku.runtime.frontdoor.tool_contract import build_frontdoor_tool_contract
 
 
 async def _announce_boundary_noop(**_kwargs) -> None:

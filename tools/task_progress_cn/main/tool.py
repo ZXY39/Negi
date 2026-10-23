@@ -7,7 +7,6 @@ import yaml
 
 from g3ku.agent.tools.base import Tool
 
-
 TASK_ID_PARAM = '\u4efb\u52a1id'
 _MANIFEST = yaml.safe_load((Path(__file__).resolve().parents[1] / 'resource.yaml').read_text(encoding='utf-8'))
 

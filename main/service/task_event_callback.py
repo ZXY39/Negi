@@ -10,7 +10,6 @@ from main.service.task_terminal_callback import (
     resolve_task_terminal_callback_url,
 )
 
-
 TASK_EVENT_CALLBACK_PATH = "/api/internal/task-event"
 TASK_EVENT_BATCH_CALLBACK_PATH = "/api/internal/task-event-batch"
 _ALLOWED_TASK_EVENT_TYPES = {

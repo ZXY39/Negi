@@ -7,7 +7,6 @@ import yaml
 
 from g3ku.agent.tools.base import Tool
 
-
 TASK_TYPE_PARAM = '任务类型'
 SCOPE_PARAM = '查询范围'
 SCOPE_GLOBAL = '全局'

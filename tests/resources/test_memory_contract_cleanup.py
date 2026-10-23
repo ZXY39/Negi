@@ -4,8 +4,8 @@ from importlib import import_module
 from pathlib import Path
 from types import SimpleNamespace
 
-from typer.testing import CliRunner
 import yaml
+from typer.testing import CliRunner
 
 from g3ku.utils.helpers import sync_workspace_templates
 

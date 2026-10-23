@@ -2,7 +2,6 @@ from __future__ import annotations
 
 from types import SimpleNamespace
 
-
 from g3ku.runtime.api import websocket_ceo
 
 

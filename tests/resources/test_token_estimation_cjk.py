@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from g3ku.runtime.context.summarizer import estimate_tokens, truncate_by_tokens, _count_cjk
+from g3ku.runtime.context.summarizer import _count_cjk, estimate_tokens, truncate_by_tokens
 
 
 def test_estimate_tokens_ascii_unchanged() -> None:

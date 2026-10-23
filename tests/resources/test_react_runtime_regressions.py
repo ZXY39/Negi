@@ -9,6 +9,7 @@ from typing import Any
 import pytest
 import yaml
 
+import main.service.runtime_service as runtime_service_module
 from g3ku.agent.tools.base import (
     REUSE_ARGS_MODEL_DESCRIPTION_SENTENCE,
     REUSE_ARGS_PARAMETER_NAME,
@@ -18,8 +19,7 @@ from g3ku.agent.tools.main_runtime import LoadSkillContextTool, LoadToolContextT
 from g3ku.content import ContentNavigationService, parse_content_envelope
 from g3ku.providers.base import LLMResponse, ToolCallRequest
 from g3ku.resources.embedded_mcp import EmbeddedMCPTool
-from g3ku.resources.loader import ResourceLoader
-from g3ku.resources.loader import ManifestBackedTool
+from g3ku.resources.loader import ManifestBackedTool, ResourceLoader
 from g3ku.resources.models import ResourceKind, ToolResourceDescriptor
 from g3ku.resources.registry import ResourceRegistry
 from g3ku.runtime.context.node_context_selection import NodeContextSelectionResult
@@ -31,15 +31,18 @@ from main.governance.tool_context import (
     apply_runtime_tool_context_projection,
     build_tool_context_fingerprint,
 )
+from main.runtime.internal_tools import SpawnChildNodesTool, SubmitFinalResultTool
 from main.runtime.node_prompt_contract import (
     NodeRuntimeToolContract,
     extract_node_dynamic_contract_payload,
     inject_node_dynamic_contract_message,
     is_node_dynamic_contract_message,
 )
-import main.service.runtime_service as runtime_service_module
-from main.runtime.internal_tools import SubmitFinalResultTool, SpawnChildNodesTool
-from main.runtime.react_loop import _INVALID_FINAL_SUBMISSION_LIMIT, _PLAIN_TEXT_REPLY_STRIKE_LIMIT, ReActToolLoop
+from main.runtime.react_loop import (
+    _INVALID_FINAL_SUBMISSION_LIMIT,
+    _PLAIN_TEXT_REPLY_STRIKE_LIMIT,
+    ReActToolLoop,
+)
 from main.runtime.tool_call_repair import extract_tool_calls_from_xml_pseudo_content
 from main.service.runtime_service import MainRuntimeService
 from main.storage.artifact_store import TaskArtifactStore
@@ -2348,7 +2351,7 @@ def test_react_iteration_bundle_filter_keys_on_renderable_schema_not_dispatch_di
         node_id='node-render',
         node_kind='execution',
         visible_tools={'exec': exec_tool},
-        
+
         runtime_context={},
     )
     assert payload['provider_tool_names'] == ['exec', 'content_open']
@@ -2361,7 +2364,7 @@ def test_react_iteration_bundle_filter_keys_on_renderable_schema_not_dispatch_di
         node_id='node-render',
         node_kind='execution',
         visible_tools={'exec': exec_tool},
-        
+
         runtime_context={},
     )
     assert payload_empty['provider_tool_names'] == ['exec']
@@ -3292,7 +3295,7 @@ async def test_react_loop_writes_candidate_skill_items_into_before_model_frame()
                 },
             ],
         },
-        
+
         lightweight_tool_ids=[],
         selection_trace={},
     ).to_message()
@@ -3396,7 +3399,7 @@ def test_build_node_dynamic_contract_does_not_resurrect_stale_candidate_tools_wh
         candidate_skill_ids=[],
         candidate_skill_items=[],
         candidate_tool_items=[{"tool_id": "filesystem_write", "description": "write file"}],
-        
+
         lightweight_tool_ids=[],
         selection_trace={},
     ).to_message()
@@ -3435,7 +3438,7 @@ def test_build_node_dynamic_contract_does_not_resurrect_stale_candidate_tools_wh
             "lightweight_tool_ids": [],
             "trace": {},
         },
-        
+
     )
 
     assert contract.candidate_tool_names == []
@@ -3456,7 +3459,7 @@ def test_build_node_dynamic_contract_does_not_resurrect_stale_candidate_skills_w
         visible_skills=[],
         candidate_skill_ids=["tmux"],
         candidate_skill_items=[{"skill_id": "tmux", "description": "terminal workflow"}],
-        
+
         lightweight_tool_ids=[],
         selection_trace={},
     ).to_message()
@@ -3496,7 +3499,7 @@ def test_build_node_dynamic_contract_does_not_resurrect_stale_candidate_skills_w
             "lightweight_tool_ids": [],
             "trace": {},
         },
-        
+
     )
 
     assert contract.candidate_skill_ids == []
@@ -3542,7 +3545,7 @@ def test_build_node_dynamic_contract_uses_fresh_message_skill_contract_when_boot
                 },
             ],
         },
-        
+
         lightweight_tool_ids=[],
         selection_trace={},
     ).to_message()
@@ -3580,7 +3583,7 @@ def test_build_node_dynamic_contract_uses_fresh_message_skill_contract_when_boot
             "lightweight_tool_ids": [],
             "trace": {},
         },
-        
+
     )
 
     assert contract.candidate_skill_ids == ["web-access", "multi-search-engine"]
@@ -3648,7 +3651,7 @@ def test_build_node_dynamic_contract_prefers_fresh_runtime_seeded_skill_contract
             "lightweight_tool_ids": [],
             "trace": {},
         },
-        
+
         runtime_context={
             "fresh_node_dynamic_contract_payload": {
                 "message_type": "node_runtime_tool_contract",
@@ -3704,7 +3707,7 @@ async def test_react_loop_before_model_frame_keeps_candidate_tool_items_aligned_
         candidate_skill_ids=[],
         candidate_skill_items=[],
         candidate_tool_items=[{"tool_id": "filesystem_write", "description": "write file"}],
-        
+
         lightweight_tool_ids=[],
         selection_trace={},
     ).to_message()
@@ -3784,7 +3787,7 @@ async def test_react_loop_before_model_frame_keeps_candidate_skill_items_aligned
         visible_skills=[],
         candidate_skill_ids=["tmux"],
         candidate_skill_items=[{"skill_id": "tmux", "description": "terminal workflow"}],
-        
+
         lightweight_tool_ids=[],
         selection_trace={},
     ).to_message()
@@ -4359,7 +4362,7 @@ def test_refresh_node_dynamic_contract_restores_skill_candidates_from_frame_afte
                 "description": "terminal workflow",
             }
         ],
-        
+
         lightweight_tool_ids=[],
         selection_trace={},
     ).to_message()
@@ -4397,7 +4400,7 @@ def test_refresh_node_dynamic_contract_restores_skill_candidates_from_frame_afte
             "lightweight_tool_ids": [],
             "trace": {},
         },
-        
+
     )
 
     payload = extract_node_dynamic_contract_payload(refreshed)
@@ -4430,7 +4433,7 @@ def test_node_dynamic_contract_injection_keeps_request_only_message_after_bootst
                 "description": "terminal workflow",
             }
         ],
-        
+
         lightweight_tool_ids=["filesystem"],
         selection_trace={
             "mode": "execution_tool_selection",
@@ -4473,7 +4476,7 @@ def test_node_token_compaction_keeps_append_notice_tail_before_compact_block() -
         visible_skills=[],
         candidate_skill_ids=[],
         candidate_skill_items=[],
-        
+
         lightweight_tool_ids=[],
         selection_trace={},
     ).to_message()

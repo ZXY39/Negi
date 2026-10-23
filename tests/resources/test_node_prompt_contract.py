@@ -4,8 +4,8 @@ import json
 from pathlib import Path
 
 from main.runtime.node_prompt_contract import (
-    NODE_DYNAMIC_CONTRACT_KIND,
     NODE_DYNAMIC_CONTRACT_HEADING,
+    NODE_DYNAMIC_CONTRACT_KIND,
     NodeRuntimeToolContract,
     extract_node_dynamic_contract_payload,
     inject_node_dynamic_contract_message,

@@ -11,9 +11,9 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
-from g3ku.shells.cli import run_agent_shell
 from g3ku.resources.embedded_mcp import EmbeddedMCPTool
 from g3ku.resources.models import ResourceKind, ToolResourceDescriptor
+from g3ku.shells.cli import run_agent_shell
 
 
 class _CollectHandler(logging.Handler):

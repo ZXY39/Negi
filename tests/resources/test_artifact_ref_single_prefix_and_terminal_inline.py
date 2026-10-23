@@ -10,8 +10,8 @@ from g3ku.content.navigation import ContentNavigationService, _artifact_id_from_
 from main.service.task_terminal_callback import (
     TASK_TERMINAL_OUTPUT_INLINE_CHAR_LIMIT,
     TASK_TERMINAL_OUTPUT_INLINE_LINE_LIMIT,
-    build_terminal_output_resolver,
     build_task_terminal_payload,
+    build_terminal_output_resolver,
     enrich_task_terminal_payload,
 )
 

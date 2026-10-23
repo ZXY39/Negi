@@ -2,11 +2,11 @@
 
 from __future__ import annotations
 
+import re
 from datetime import datetime, timedelta, timezone, tzinfo
 from functools import lru_cache
 from importlib import resources
 from importlib.util import find_spec
-import re
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 _FIXED_OFFSET_ALIASES: dict[str, tzinfo] = {

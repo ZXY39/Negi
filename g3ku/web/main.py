@@ -1,5 +1,5 @@
-import atexit
 import asyncio
+import atexit
 import mimetypes
 import os
 import signal
@@ -14,13 +14,13 @@ from fastapi.responses import FileResponse, JSONResponse
 from loguru import logger
 
 from g3ku.deployment.runtime_startup import auto_unlock_from_env
-from g3ku.security import get_bootstrap_security_service
-from g3ku.shells.web import ensure_web_runtime_services, shutdown_web_runtime
 from g3ku.runtime.api import router as runtime_router
 from g3ku.runtime.api.external_v1 import router as external_v1_router
 from g3ku.runtime.api.openai_compat import router as openai_compat_router
-from g3ku.web.launcher import run_default_web_entrypoint
+from g3ku.security import get_bootstrap_security_service
+from g3ku.shells.web import ensure_web_runtime_services, shutdown_web_runtime
 from g3ku.web.frontend_assets import ensure_frontend_vendor_assets, frontend_assets_available
+from g3ku.web.launcher import run_default_web_entrypoint
 from g3ku.web.server_control import request_server_shutdown, set_server_instance
 from g3ku.web.windows_asyncio import install_windows_connection_reset_filter
 from main.api import router as main_router

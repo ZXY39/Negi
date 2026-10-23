@@ -8,16 +8,13 @@ Covers FIX_PLAN_create-async-task-aimessage-crash.md:
 
 from __future__ import annotations
 
-
 from g3ku.runtime.context.types import ContextAssemblyResult
 from g3ku.runtime.frontdoor._ceo_runtime_ops import _normalize_frontdoor_tool_arguments
-
 from main.service.create_async_task_contract import (
     build_create_async_task_parameters,
     normalize_create_async_task_inbound_params,
     validate_create_async_task_file_targets,
 )
-
 
 # ---------------------------------------------------------------------------
 # P1.1 contract schema tightening

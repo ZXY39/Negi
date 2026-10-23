@@ -33,8 +33,8 @@ import pytest
 from g3ku.core.messages import UserInputMessage
 from g3ku.runtime.api import external_turns, external_v1
 from g3ku.runtime.api.external_turns import (
-    QUEUED_RECEIPT_TEXT,
     QUEUED_IDEMPOTENCY_SENTINEL,
+    QUEUED_RECEIPT_TEXT,
     ExternalTurnService,
 )
 from g3ku.runtime.external_events import get_session_event_hub, reset_session_event_hubs

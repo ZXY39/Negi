@@ -1,10 +1,8 @@
 from __future__ import annotations
 
+import importlib
 import threading
 import time
-import types
-import importlib
-import sys
 from pathlib import Path
 
 import pytest

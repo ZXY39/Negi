@@ -1,26 +1,26 @@
 from __future__ import annotations
 
-from datetime import UTC, datetime
 import importlib
+from datetime import UTC, datetime
 from types import SimpleNamespace
 
 import pytest
-from g3ku.runtime.frontdoor import _ceo_create_agent_impl as create_agent_impl
 
-import main.runtime.chat_backend as chat_backend_module
 import g3ku.providers.fallback as fallback_module
-from g3ku.providers.fallback import DEFAULT_PROVIDER_ATTEMPT_TIMEOUT_SECONDS
-from g3ku.config.schema import DEFAULT_MAX_OUTPUT_TOKENS
+import main.runtime.chat_backend as chat_backend_module
 from g3ku.agent.tools.base import Tool
 from g3ku.agent.tools.registry import ToolRegistry
+from g3ku.config.schema import DEFAULT_MAX_OUTPUT_TOKENS
 from g3ku.llm_config.enums import AuthMode, Capability, ProtocolAdapter
 from g3ku.llm_config.migration import migrate_raw_config_if_needed
 from g3ku.llm_config.models import NormalizedProviderConfig, ProviderConfigDraft
 from g3ku.llm_config.normalization import normalize_draft
 from g3ku.llm_config.template_registry import TemplateRegistry
 from g3ku.providers.base import LLMResponse, ToolCallRequest
-from g3ku.runtime.frontdoor._ceo_runtime_ops import _provider_tool_schemas
+from g3ku.providers.fallback import DEFAULT_PROVIDER_ATTEMPT_TIMEOUT_SECONDS
 from g3ku.providers.provider_factory import ProviderTarget
+from g3ku.runtime.frontdoor import _ceo_create_agent_impl as create_agent_impl
+from g3ku.runtime.frontdoor._ceo_runtime_ops import _provider_tool_schemas
 from g3ku.runtime.frontdoor._ceo_support import _DirectProviderChatBackend
 from main.runtime.internal_tools import SubmitFinalResultTool
 from main.runtime.react_loop import ReActToolLoop

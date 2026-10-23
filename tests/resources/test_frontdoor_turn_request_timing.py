@@ -9,7 +9,6 @@ import pytest
 from g3ku.core.messages import UserInputMessage
 from g3ku.runtime import web_ceo_sessions
 from g3ku.runtime.bridge import SessionRuntimeBridge
-from g3ku.runtime.frontdoor import _ceo_runtime_ops as ceo_runtime_ops
 from g3ku.runtime.frontdoor.ceo_runner import CeoFrontDoorRunner
 from g3ku.runtime.frontdoor.state_models import CeoRuntimeContext
 

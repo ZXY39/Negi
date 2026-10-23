@@ -1,8 +1,8 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
 import hashlib
 import re
+from dataclasses import dataclass
 
 _ENTRY_LINE_RE = re.compile(
     r"^(?P<date>\d{6}):(?P<body>.+?)(?:\s\(note:\s(?P<handle>[A-Za-z0-9_-]{1,80})\))?$"

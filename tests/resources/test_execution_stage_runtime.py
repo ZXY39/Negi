@@ -8,15 +8,18 @@ from types import SimpleNamespace
 
 import pytest
 
-from g3ku.providers.base import LLMResponse, ToolCallRequest
 from g3ku.agent.tools.base import Tool
+from g3ku.providers.base import LLMResponse, ToolCallRequest
 from g3ku.runtime.context.node_context_selection import NodeContextSelectionResult
 from main.protocol import now_iso
 from main.runtime.acceptance_handshake import ACCEPTANCE_HANDSHAKE_KEY
 from main.runtime.chat_backend import build_stable_prompt_cache_key
-from main.runtime.node_runner import NodeRunner
 from main.runtime.internal_tools import SpawnChildNodesTool, SubmitFinalResultTool
-from main.runtime.node_prompt_contract import NodeRuntimeToolContract, extract_node_dynamic_contract_payload
+from main.runtime.node_prompt_contract import (
+    NodeRuntimeToolContract,
+    extract_node_dynamic_contract_payload,
+)
+from main.runtime.node_runner import NodeRunner
 from main.service.runtime_service import MainRuntimeService
 
 runtime_service_module = importlib.import_module("main.service.runtime_service")
@@ -647,7 +650,7 @@ async def test_prepare_node_context_selection_restores_callable_tools_from_persi
                     candidate_tool_names=[],
                     visible_skills=[],
                     candidate_skill_ids=[],
-                    
+
                     lightweight_tool_ids=[],
                     selection_trace={"mode": "persisted_frame_restore"},
                 ).to_message(),

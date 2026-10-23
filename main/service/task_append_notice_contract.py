@@ -2,7 +2,6 @@ from __future__ import annotations
 
 from typing import Any
 
-
 TASK_APPEND_NOTICE_DESCRIPTION = (
     "Append new requirements, constraints, or acceptance details to an existing unfinished task "
     "in the current session. This updates existing work instead of creating a new task. "

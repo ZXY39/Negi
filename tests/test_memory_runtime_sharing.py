@@ -9,7 +9,6 @@ import pytest
 from g3ku.providers.responses_protocol_helpers import _convert_messages
 from g3ku.resources import ResourceManager
 from g3ku.runtime.bootstrap_bridge import RuntimeBootstrapBridge
-from g3ku.security import get_bootstrap_security_service
 
 
 class _AsyncCloseSpy:

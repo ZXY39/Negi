@@ -1,6 +1,5 @@
 ﻿from __future__ import annotations
 
-import asyncio
 from typing import Any
 
 from g3ku.core.messages import UserInputMessage

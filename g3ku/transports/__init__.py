@@ -2,12 +2,12 @@
 
 from g3ku.bus.events import InboundMessage, OutboundMessage
 from g3ku.bus.queue import MessageBus
-from g3ku.transports.channel_session import ChannelSessionTransport
 from g3ku.runtime.channel_events import (
     build_channel_outbound_message,
     make_channel_event_listener,
     publish_channel_event,
 )
+from g3ku.transports.channel_session import ChannelSessionTransport
 
 __all__ = [
     "ChannelSessionTransport",

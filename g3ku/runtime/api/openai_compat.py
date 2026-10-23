@@ -50,6 +50,7 @@ from fastapi.responses import JSONResponse, StreamingResponse
 # semantic base (cross-module private imports have precedent: external_v1 ↔
 # ceo_sessions). Do not rename these helpers.
 from g3ku.runtime.api.external_auth import ExternalApiPrincipal, require_external_api
+from g3ku.runtime.api.external_turns import get_external_turn_service
 from g3ku.runtime.api.external_v1 import (
     WEB_CEO_IMAGE_UPLOAD_MAX_BYTES,
     _attachment_descriptor,
@@ -57,7 +58,6 @@ from g3ku.runtime.api.external_v1 import (
     _publish_ceo_catalog_best_effort,
     _store_base64_attachment,
 )
-from g3ku.runtime.api.external_turns import get_external_turn_service
 from g3ku.runtime.external_events import (
     SSE_HEARTBEAT_INTERVAL_SECONDS,
     ExternalReplyOutcome,

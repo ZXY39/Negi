@@ -3,7 +3,6 @@
 from dataclasses import dataclass, field
 from typing import Literal
 
-
 CRON_STORE_VERSION = 2
 
 

@@ -129,7 +129,10 @@ class StreamingDiagnostics:
 
     def render_summary(self, *, outcome: str, extra_fields: dict[str, object] | None = None) -> str:
         now = time.perf_counter()
-        elapsed_ms = lambda ts: "" if ts is None else f"{max(0.0, (ts - self.started_at) * 1000.0):.1f}"
+
+        def elapsed_ms(ts):
+            return "" if ts is None else f"{max(0.0, (ts - self.started_at) * 1000.0):.1f}"
+
         parts = [
             f"outcome={outcome}",
             f"first_chunk_received_ms={elapsed_ms(self.first_chunk_received_at)}",

@@ -3,7 +3,6 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any, Literal, TypeAlias
 
-
 ContentPayload: TypeAlias = str | list[dict[str, Any]]
 
 

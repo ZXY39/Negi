@@ -8,8 +8,8 @@ import pytest
 
 import g3ku.runtime.frontdoor.message_builder as message_builder_module
 from g3ku.core.timefmt import strip_arrival_time_stamp
-from g3ku.runtime.frontdoor._ceo_create_agent_impl import CreateAgentCeoFrontDoorRunner
 from g3ku.runtime.context.types import RetrievedContextBundle
+from g3ku.runtime.frontdoor._ceo_create_agent_impl import CreateAgentCeoFrontDoorRunner
 from g3ku.runtime.frontdoor.capability_snapshot import build_capability_snapshot
 from g3ku.runtime.frontdoor.message_builder import (
     CeoMessageBuilder,
@@ -17,16 +17,15 @@ from g3ku.runtime.frontdoor.message_builder import (
     memory_snapshot_provenance,
 )
 from g3ku.runtime.frontdoor.prompt_builder import CeoPromptBuilder
-from g3ku.runtime.tool_contract_block import render_tool_contract_block
-from main.runtime.tool_names import SILENT_TOOL_NAME
 from g3ku.runtime.frontdoor.tool_contract import (
     build_frontdoor_tool_contract,
     frontdoor_tool_contract_payload_from_message,
     is_frontdoor_tool_contract_message,
     upsert_frontdoor_tool_contract_message,
 )
+from g3ku.runtime.tool_contract_block import render_tool_contract_block
 from g3ku.session.manager import Session
-
+from main.runtime.tool_names import SILENT_TOOL_NAME
 
 CONTRACT_FINGERPRINT = "tcf:" + "a" * 16
 

@@ -2,12 +2,13 @@ from __future__ import annotations
 
 from types import SimpleNamespace
 
+import pytest
+
 from g3ku.config.schema import ManagedModelConfig
 from g3ku.llm_config.facade import LLMConfigFacade
 from g3ku.llm_config.models import ModelBindingDraft, ProviderConfigDraft
 from g3ku.llm_config.normalization import normalize_draft
 from g3ku.llm_config.template_registry import TemplateRegistry
-import pytest
 
 
 def test_managed_model_config_accepts_multiple_api_keys() -> None:

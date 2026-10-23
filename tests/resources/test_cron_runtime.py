@@ -11,10 +11,10 @@ from zoneinfo import ZoneInfoNotFoundError
 import pytest
 from loguru import logger
 
+import g3ku.cron.timezones as cron_timezones
 import g3ku.shells.web as web_shell
 from g3ku.agent.tools.cron import CronTool
 from g3ku.bus.events import OutboundMessage
-import g3ku.cron.timezones as cron_timezones
 from g3ku.config.loader import get_data_dir
 from g3ku.core.messages import UserInputMessage
 from g3ku.core.task_diagnostics import format_task_await_chain

@@ -4,8 +4,8 @@ import argparse
 import asyncio
 import copy
 import json
-from pathlib import Path
 import sys
+from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
@@ -13,11 +13,12 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
+import main.runtime.react_loop as react_loop_module
 from g3ku.agent.tools.base import Tool
 from g3ku.providers.base import LLMResponse, ToolCallRequest
 from g3ku.runtime.tool_contract_block import render_tool_contract_block
-from main.protocol import now_iso
 from main.prompts import load_prompt
+from main.protocol import now_iso
 from main.runtime.chat_backend import SendModelContextWindowInfo
 from main.runtime.internal_tools import SubmitFinalResultTool
 from main.runtime.node_prompt_contract import (
@@ -25,7 +26,6 @@ from main.runtime.node_prompt_contract import (
     is_node_dynamic_contract_message,
 )
 from main.runtime.react_loop import ReActToolLoop
-import main.runtime.react_loop as react_loop_module
 
 
 class _FakeTaskStore:

@@ -16,9 +16,8 @@ import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
-from g3ku.security.bootstrap import get_bootstrap_security_service
-
 import main.api.admin_rest as admin_rest
+from g3ku.security.bootstrap import get_bootstrap_security_service
 
 
 def _config_payload(qq_bot: dict) -> dict:

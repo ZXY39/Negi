@@ -2,9 +2,8 @@
 
 from __future__ import annotations
 
-import os
 import asyncio
-import sys
+import os
 from typing import Any, Optional
 
 from loguru import logger
@@ -12,6 +11,15 @@ from loguru import logger
 from g3ku.agent.loop import AgentLoop
 from g3ku.bus.events import OutboundMessage
 from g3ku.bus.queue import MessageBus
+from g3ku.config.live_runtime import get_runtime_config
+from g3ku.config.loader import get_data_dir
+from g3ku.cron.runtime_dispatch import dispatch_cron_job
+from g3ku.cron.service import CronService
+from g3ku.heartbeat.bootstrap import build_web_session_heartbeat, start_web_session_heartbeat
+from g3ku.runtime import SessionRuntimeBridge, SessionRuntimeManager
+from g3ku.runtime.bootstrap_factory import make_agent_loop as _make_agent_loop
+from g3ku.runtime.bootstrap_factory import make_provider as _make_provider
+from g3ku.runtime.config_refresh import refresh_loop_runtime_config
 from g3ku.runtime.external_events import get_session_event_hub
 from g3ku.runtime.external_outbox import (
     ack_outbound_message,
@@ -29,18 +37,8 @@ from g3ku.runtime.session_keys import (
     EXTERNAL_SESSION_KEY_PREFIX,
     sanitize_channel_outbound_text,
 )
-from g3ku.config.loader import get_data_dir
-from g3ku.config.live_runtime import get_runtime_config
-from g3ku.update_check import DEFAULT_INTERVAL_SECONDS, run_update_check
-from g3ku.cron.runtime_dispatch import dispatch_cron_job
-from g3ku.cron.service import CronService
-from g3ku.heartbeat.bootstrap import build_web_session_heartbeat, start_web_session_heartbeat
-from g3ku.runtime.bootstrap_factory import make_agent_loop as _make_agent_loop
-from g3ku.runtime.bootstrap_factory import make_provider as _make_provider
-from g3ku.runtime import SessionRuntimeBridge
-from g3ku.runtime import SessionRuntimeManager
-from g3ku.runtime.config_refresh import refresh_loop_runtime_config
 from g3ku.security import get_bootstrap_security_service
+from g3ku.update_check import DEFAULT_INTERVAL_SECONDS, run_update_check
 from g3ku.web.launcher import run_web_server_entrypoint
 from g3ku.web.worker_control import (
     auto_worker_enabled,
@@ -50,7 +48,6 @@ from g3ku.web.worker_control import (
     run_managed_task_worker_watchdog,
     shutdown_managed_task_worker,
 )
-from main.protocol import now_iso
 
 _global_agent: Optional[AgentLoop] = None
 _global_bus: Optional[MessageBus] = None

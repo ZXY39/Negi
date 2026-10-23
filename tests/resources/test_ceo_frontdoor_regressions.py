@@ -5,14 +5,12 @@ from types import SimpleNamespace
 
 import pytest
 
-
 import g3ku.shells.web as web_shell
 from g3ku.agent.tools.base import Tool
 from g3ku.core.messages import UserInputMessage
 from g3ku.providers.base import LLMResponse, ToolCallRequest
 from g3ku.runtime import web_ceo_sessions
 from g3ku.runtime.context.types import ContextAssemblyResult
-from g3ku.config.schema import MemoryAssemblyConfig
 from g3ku.runtime.frontdoor._ceo_create_agent_impl import CreateAgentCeoFrontDoorRunner
 from g3ku.runtime.frontdoor.ceo_runner import CeoFrontDoorRunner
 from g3ku.runtime.session_agent import RuntimeAgentSession

@@ -3,9 +3,9 @@ from __future__ import annotations
 import os
 from types import SimpleNamespace
 
+import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
-import pytest
 
 import main.api.bootstrap_rest as bootstrap_rest
 from g3ku.deployment.runtime_startup import BOOTSTRAP_PASSWORD_ENV, auto_unlock_from_env

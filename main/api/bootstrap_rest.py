@@ -30,8 +30,8 @@ from g3ku.shells.web import (
     get_agent,
     get_runtime_manager,
     shutdown_web_runtime,
+    wait_shutdown_pause_commands_drained,
 )
-from g3ku.shells.web import wait_shutdown_pause_commands_drained
 from g3ku.web.server_control import can_request_server_shutdown, request_server_shutdown
 from main.api.admin_rest import _refresh_runtime_after_save
 

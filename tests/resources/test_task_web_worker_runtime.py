@@ -31,6 +31,9 @@ from main.models import (
     TokenUsageSummary,
     normalize_final_acceptance_metadata,
 )
+from main.monitoring.query_service import TaskQueryService
+from main.prompts import load_prompt
+from main.protocol import now_iso
 from main.runtime.acceptance_handshake import (
     ACCEPTANCE_HANDSHAKE_KEY,
     ACCEPTANCE_STATE_ACCEPTED,
@@ -38,21 +41,18 @@ from main.runtime.acceptance_handshake import (
     ACCEPTANCE_STATE_IDLE,
     ACCEPTANCE_STATE_REJECTED_TERMINAL,
     ACCEPTANCE_STATE_WAITING_ACCEPTANCE,
-    ACCEPTANCE_STATE_WAITING_EXECUTION_RETRY,
     normalize_acceptance_handshake,
     set_acceptance_handshake_state,
 )
-from main.monitoring.query_service import TaskQueryService
-from main.runtime.execution_trace_compaction import build_execution_trace_summary
-from main.prompts import load_prompt
-from main.protocol import now_iso
 from main.runtime.append_notice_context import (
     APPEND_NOTICE_CONTEXT_KEY,
     PENDING_APPEND_NOTICE_RECORDS_KEY,
     record_pending_append_notice_records,
 )
+from main.runtime.execution_trace_compaction import build_execution_trace_summary
 from main.runtime.internal_tools import SpawnChildNodesTool, SubmitFinalResultTool
 from main.runtime.node_prompt_contract import extract_node_dynamic_contract_payload
+from main.runtime.node_runner import SKIPPED_CHECK_RESULT
 from main.runtime.pending_notice_state import (
     PENDING_NOTICE_STATE_KEY,
     RESUME_MODE_ORDINARY,
@@ -60,9 +60,11 @@ from main.runtime.pending_notice_state import (
     set_pending_notice_state,
 )
 from main.runtime.react_loop import ReActToolLoop
-from main.runtime.node_runner import SKIPPED_CHECK_RESULT
 from main.service.runtime_service import _INTERNAL_CALLBACK_TIMEOUT_SECONDS, MainRuntimeService
-from main.service.task_stall_callback import build_task_stall_dedupe_key, normalize_task_stall_payload
+from main.service.task_stall_callback import (
+    build_task_stall_dedupe_key,
+    normalize_task_stall_payload,
+)
 from main.service.task_terminal_callback import (
     TASK_TERMINAL_CALLBACK_TOKEN_ENV,
     TASK_TERMINAL_CALLBACK_URL_ENV,
@@ -9159,7 +9161,7 @@ async def test_runtime_frame_persists_model_visible_tool_selection_fields(tmp_pa
 
 
 def test_same_turn_append_only_request_messages_reuses_previous_actual_request_prefix() -> None:
-    note = {"role": "user", "content": f"System note for this turn only:\nstage overlay"}
+    note = {"role": "user", "content": "System note for this turn only:\nstage overlay"}
     contract = {"role": "assistant", "content": "## Runtime Tool Contract\ncontract-payload-1", "tool_calls": [], }
     previous_request_messages = [
         {"role": "system", "content": "system"},

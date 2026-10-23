@@ -8,7 +8,6 @@ turn_id 并另起了一行助手回复。
 from __future__ import annotations
 
 import asyncio
-import copy
 from types import SimpleNamespace
 
 import g3ku.runtime.web_ceo_sessions as web_ceo_sessions

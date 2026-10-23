@@ -2,7 +2,6 @@ from __future__ import annotations
 
 from typing import Any
 
-
 DEFAULT_ALLOWED_ROLES = ['ceo', 'execution', 'inspection']
 READ_ALLOWED_ROLES = ['ceo', 'execution', 'inspection']
 WRITE_ALLOWED_ROLES = ['ceo', 'execution']

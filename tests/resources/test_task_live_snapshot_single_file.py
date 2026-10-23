@@ -12,14 +12,13 @@ from __future__ import annotations
 import gzip
 import json
 import threading
-from pathlib import Path
 from types import MethodType, SimpleNamespace
 
 import pytest
 
 from main.models import TaskRecord
 from main.storage import disk_guard
-from main.storage.disk_guard import configure_disk_policies, disk_policies
+from main.storage.disk_guard import configure_disk_policies
 from main.storage.sqlite_store import SQLiteTaskStore
 
 

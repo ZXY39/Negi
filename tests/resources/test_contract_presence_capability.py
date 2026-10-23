@@ -39,8 +39,8 @@ from g3ku.runtime.tool_error_guidance import availability_hint
 from g3ku.runtime.web_ceo_sessions import _normalized_completed_continuity_snapshot
 from main.monitoring.log_service import TaskLogService
 from main.monitoring.models import TaskProjectionRuntimeFrameRecord
-from main.runtime.tool_names import SILENT_TOOL_NAME
 from main.runtime.react_loop import ReActToolLoop
+from main.runtime.tool_names import SILENT_TOOL_NAME
 from main.service.runtime_service import MainRuntimeService
 
 TOOL_ID = "filesystem_write"
@@ -828,7 +828,10 @@ def test_node_presence_never_reads_the_stage_ledger_again() -> None:
 
 def test_path_anchor_contract_renders_from_one_source_across_lanes():
     """落点规则只允许一个来源：两条车道必须同句、同 token 串，否则就是分叉实现。"""
-    from g3ku.runtime.frontdoor.tool_contract import _render_path_anchor, render_pinned_contract_text
+    from g3ku.runtime.frontdoor.tool_contract import (
+        _render_path_anchor,
+        render_pinned_contract_text,
+    )
     from g3ku.utils.helpers import PATH_ANCHOR_RULE_TEXT, path_anchor_policy, path_anchor_tokens
 
     frontdoor_lines = _render_path_anchor()

@@ -7,7 +7,6 @@ from g3ku.runtime.frontdoor.tool_contract import (
     upsert_frontdoor_tool_contract_message,
 )
 
-
 REPO_ROOT = Path(__file__).resolve().parents[2]
 
 

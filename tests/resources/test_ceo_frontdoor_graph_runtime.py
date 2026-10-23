@@ -5,10 +5,10 @@ from types import SimpleNamespace
 
 import pytest
 
+from g3ku.agent.tools.base import Tool
 from g3ku.runtime.frontdoor import _ceo_create_agent_impl as create_agent_impl
 from g3ku.runtime.frontdoor import _ceo_runtime_ops as ceo_runtime_ops
 from g3ku.runtime.tool_contract_block import attach_tool_contract_block, render_tool_contract_block
-from g3ku.agent.tools.base import Tool
 from main.governance.tool_context import build_tool_context_fingerprint
 
 

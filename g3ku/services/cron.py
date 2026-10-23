@@ -22,7 +22,6 @@ from g3ku.cron.types import (
     CronStore,
 )
 
-
 _FAILED_AT_RETRY_DELAY_MS = 60_000
 
 # 投递级看门狗默认预算：必须大于最长合理回合时长（provider 单次尝试默认上限
@@ -292,7 +291,7 @@ class CronService:
         tmp_path.write_text(json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8")
         os.replace(tmp_path, self.store_path)
         self._last_mtime_ns = self.store_path.stat().st_mtime_ns
-    
+
     async def start(self) -> None:
         """Start the cron service."""
         if self._running:

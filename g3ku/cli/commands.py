@@ -1,11 +1,8 @@
 ﻿"""CLI commands for Negi."""
 
 import asyncio
-import json
 import os
 import select
-import signal
-import shutil
 import sys
 import warnings
 from pathlib import Path
@@ -211,7 +208,12 @@ def onboard(
     ),
 ):
     """Initialize Negi configuration and workspace."""
-    from g3ku.config.loader import build_project_config_from_example, get_config_path, load_config, save_config
+    from g3ku.config.loader import (
+        build_project_config_from_example,
+        get_config_path,
+        load_config,
+        save_config,
+    )
     from g3ku.utils.helpers import get_workspace_path
 
     config_path = (Path.cwd() / ".g3ku" / "config.json") if project else get_config_path()
@@ -447,6 +449,7 @@ def cron_list(
 
     import time
     from datetime import datetime as _dt
+
     from g3ku.cron.timezones import resolve_timezone
     for job in jobs:
         # Format schedule
@@ -718,12 +721,14 @@ def status():
             console.print(f"{spec.label}: {'[green]OK[/green]' if has_key else '[dim]not set[/dim]'}")
 
 
-from g3ku.shells.memory_cli import build_memory_app
+# Each sub-CLI import sits beside the block that builds and registers its app,
+# so they stay below the module header on purpose.
+from g3ku.shells.memory_cli import build_memory_app  # noqa: E402
 
 memory_app = build_memory_app(console)
 app.add_typer(memory_app, name="memory")
 
-from g3ku.shells.security_cli import build_security_app
+from g3ku.shells.security_cli import build_security_app  # noqa: E402
 
 security_app = build_security_app(console)
 app.add_typer(security_app, name="security")
@@ -732,12 +737,12 @@ app.add_typer(security_app, name="security")
 # OAuth Login
 # ============================================================================
 
-from g3ku.shells.provider_cli import build_provider_app
+from g3ku.shells.provider_cli import build_provider_app  # noqa: E402
 
 provider_app = build_provider_app(console, _logo())
 app.add_typer(provider_app, name="provider")
 
-from g3ku.shells.resource_cli import build_resource_app
+from g3ku.shells.resource_cli import build_resource_app  # noqa: E402
 
 resource_app = build_resource_app(console)
 app.add_typer(resource_app, name="resource")
@@ -746,7 +751,7 @@ app.add_typer(resource_app, name="resource")
 # MCP gateway (stdio proxy to the External Agent API)
 # ============================================================================
 
-from g3ku.shells.mcp_cli import build_mcp_app
+from g3ku.shells.mcp_cli import build_mcp_app  # noqa: E402
 
 mcp_app = build_mcp_app(console)
 app.add_typer(mcp_app, name="mcp")

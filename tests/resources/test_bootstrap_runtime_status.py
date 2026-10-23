@@ -1,10 +1,11 @@
 from __future__ import annotations
 
 import asyncio
+from types import SimpleNamespace
+
+import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
-import pytest
-from types import SimpleNamespace
 
 import g3ku.shells.web as web_shell
 import main.api.bootstrap_rest as bootstrap_rest
