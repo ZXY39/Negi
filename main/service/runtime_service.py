@@ -119,6 +119,7 @@ from main.runtime.node_mailbox import message_fingerprint, normalize_targets, pl
 from main.runtime.node_message_kind import (
     INTENT_INSTRUCTION,
     INTENT_PROGRESS,
+    KIND_CHILD_ABNORMAL_PAUSE,
     KIND_CHILD_FINAL,
     PRIORITY_HIGH,
     derive_message_kind,
@@ -766,6 +767,8 @@ class MainRuntimeService:
         self.node_runner.manage_child_nodes_callback = self._manage_child_nodes_from_node
         # P1「终局必上报」的唯一出口：执行节点终局 → 父节点信箱 `child_final`。
         self.node_runner.child_final_sink = self._deliver_child_final_message
+        # 异常暂停 → 父节点信箱 `child_abnormal_pause`（high 优先级，必唤醒）。
+        self.node_runner.abnormal_pause_sink = self._deliver_child_abnormal_pause
         self.node_runner._tool_default_timeout_seconds = self._tool_default_timeout_seconds(app_config)
         self.node_runner._max_task_nodes = self._max_task_nodes
         self.node_runner._node_tool_timeout_ceiling_seconds = self._node_tool_timeout_ceiling_seconds
@@ -4660,6 +4663,39 @@ class MainRuntimeService:
             source_node_id=str(node.node_id or '').strip(),
             intent_kind=INTENT_PROGRESS,
             ref=ref,
+        )
+
+    async def _deliver_child_abnormal_pause(
+        self,
+        *,
+        task_id: str,
+        node_id: str,
+        reason: str,
+    ) -> dict[str, Any]:
+        """子节点异常暂停 → 父节点信箱（runtime 生成，模型无法伪造）。"""
+        normalized_task_id = self.normalize_task_id(task_id)
+        node = self.store.get_node(str(node_id or '').strip())
+        if node is None:
+            return {'status': 'rejected', 'reason': 'source_missing'}
+        parent_node_id = str(getattr(node, 'parent_node_id', '') or '').strip()
+        if not parent_node_id:
+            return {'status': 'skipped', 'reason': 'no_parent'}
+        goal = str(getattr(node, 'goal', '') or '').strip() or str(node.node_id or '')
+        reason_text = str(reason or '').strip() or '节点被判定为无进展并暂停'
+        body = (
+            f'子节点「{goal}」已被暂停（异常暂停）。\n'
+            f'原因：{reason_text[:1200]}\n'
+            f'节点 id：{node.node_id}。请决定是继续推进、改写要求还是终止这条分支。'
+        )
+        return await self.deliver_node_message(
+            task_id=normalized_task_id,
+            target_node_id=parent_node_id,
+            message=body,
+            origin='node',
+            relation='parent',
+            system_kind=KIND_CHILD_ABNORMAL_PAUSE,
+            source_node_id=str(node.node_id or '').strip(),
+            intent_kind=INTENT_PROGRESS,
         )
 
     async def _manage_child_nodes_from_node(

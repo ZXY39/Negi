@@ -505,37 +505,57 @@ class SubmitFinalResultTool(Tool):
     def description(self) -> str:
         if self._node_kind == 'acceptance':
             return (
-                'Submit the final structured acceptance result for the current node. '
-                'Use this only when you are ready to end the node, and make it the only tool call in the turn. '
-                'For a repairable rejection, use failed + delivery_status=final; the runtime returns revised execution output for another acceptance pass. For an execution anomaly that must not be retried, use failed + delivery_status=blocked and explain why in blocking_reason.'
+                'Submit this turn\'s acceptance verdict. Make it the only tool call in the turn. '
+                'verdict=pass ends the inspected node as successful; verdict=reject sends the feedback back '
+                'and the inspected node retries; verdict=reject_no_progress additionally pauses the inspected '
+                'node as abnormal, so use it only when the new submission shows no real change against the '
+                'previous rejection.'
             )
         return (
             'Submit the final structured result for the current execution node. '
             'Use this only when you are ready to end the node, and make it the only tool call in the turn. '
-            'If acceptance rejects the submission, the tool returns the rejection feedback and you must continue from that feedback.'
+            'If the node has an acceptance reviewer, the submission enters acceptance instead of ending the node.'
         )
 
     @property
     def model_description(self) -> str:
         if self._node_kind == 'acceptance':
-            return 'Submit the current acceptance result; failed+final requests repair, while failed+blocked records an execution anomaly as terminal without retry. For a repairable failed+final verdict, send blocking_reason as an empty string: the inspected execution node reads summary plus remaining_work as its repair instructions, and nothing else you write into blocking_reason.'
-        return 'Submit the current result; rejection returns acceptance feedback instead of ending the node.'
+            return (
+                'Submit the acceptance verdict: pass | reject | reject_no_progress, plus feedback. '
+                'feedback must explain what is still wrong for reject-like verdicts. The tool returns '
+                '{outcome, submission_id, acceptance_node_id}.'
+            )
+        return (
+            'Submit the current result: summary, answer, evidence, remaining_work. '
+            'The tool returns {outcome, submission_id, acceptance_node_id}.'
+        )
 
     @property
     def parameters(self) -> dict[str, Any]:
+        if self._node_kind == 'acceptance':
+            return {
+                'type': 'object',
+                'properties': {
+                    'verdict': {
+                        'type': 'string',
+                        'enum': ['pass', 'reject', 'reject_no_progress'],
+                        'description': (
+                            'pass: the submission meets the acceptance criteria. '
+                            'reject: repairable rejection with concrete feedback. '
+                            'reject_no_progress: the submission repeats a previously rejected flaw without '
+                            'meaningful change; the inspected node is paused for an operator.'
+                        ),
+                    },
+                    'feedback': {
+                        'type': 'string',
+                        'description': 'What is still wrong and what must change. Required for reject verdicts.',
+                    },
+                },
+                'required': ['verdict', 'feedback'],
+            }
         return {
             'type': 'object',
             'properties': {
-                'status': {
-                    'type': 'string',
-                    'enum': ['success', 'failed'],
-                    'description': 'Whether the node completed successfully or failed.',
-                },
-                'delivery_status': {
-                    'type': 'string',
-                    'enum': ['final', 'blocked'],
-                    'description': 'Use final for success or a repairable rejection; use blocked for an execution anomaly that must not be retried or a genuine blocker.',
-                },
                 'summary': {
                     'type': 'string',
                     'description': 'Short conclusion for the node result.',
@@ -563,95 +583,35 @@ class SubmitFinalResultTool(Tool):
                 },
                 'remaining_work': {
                     'type': 'array',
-                    'description': 'Remaining work items. Must be empty on success.',
+                    'description': 'Remaining work items, if any. Informational only.',
                     'items': {'type': 'string'},
                 },
-                'blocking_reason': {
-                    'type': 'string',
-                    'description': 'Blocking reason. Must be empty on success.',
-                },
             },
-            'required': [
-                'status',
-                'delivery_status',
-                'summary',
-                'answer',
-                'evidence',
-                'remaining_work',
-                'blocking_reason',
-            ],
+            'required': ['summary', 'answer'],
         }
 
     @property
     def model_parameters(self) -> dict[str, Any]:
-        return {
-            'type': 'object',
-            'properties': {
-                'status': {
-                    'type': 'string',
-                    'enum': ['success', 'failed'],
-                },
-                'delivery_status': {
-                    'type': 'string',
-                    'enum': ['final', 'blocked'],
-                },
-                'summary': {'type': 'string', 'minLength': 1},
-                'answer': {'type': 'string'},
-                'evidence': {
-                    'type': 'array',
-                    'items': {
-                        'type': 'object',
-                        'properties': {
-                            'kind': {'type': 'string', 'enum': ['file', 'artifact', 'url']},
-                            'path': {'type': 'string'},
-                            'ref': {'type': 'string'},
-                            'start_line': {'type': 'integer', 'minimum': 1},
-                            'end_line': {'type': 'integer', 'minimum': 1},
-                            'note': {'type': 'string'},
-                        },
-                        'required': ['kind'],
-                    },
-                },
-                'remaining_work': {
-                    'type': 'array',
-                    'items': {'type': 'string'},
-                },
-                'blocking_reason': {'type': 'string'},
-            },
-            'required': [
-                'status',
-                'delivery_status',
-                'summary',
-                'answer',
-                'evidence',
-                'remaining_work',
-                'blocking_reason',
-            ],
-        }
+        parameters = self.parameters
+        for prop in parameters.get('properties', {}).values():
+            prop.pop('description', None)
+        return parameters
 
-    async def execute(
-        self,
-        status: str,
-        delivery_status: str,
-        summary: str,
-        answer: str,
-        evidence: list[dict[str, Any]],
-        remaining_work: list[str],
-        blocking_reason: str,
-        **kwargs: Any,
-    ) -> dict[str, Any]:
-        _ = kwargs
-        payload = {
-            'status': str(status or '').strip().lower(),
-            'delivery_status': str(delivery_status or '').strip().lower(),
-            'summary': str(summary or '').strip(),
-            'answer': str(answer or ''),
-            'evidence': [
-                NodeEvidenceItem.model_validate(item).model_dump(mode='json')
-                for item in list(evidence or [])
-                if isinstance(item, dict)
-            ],
-            'remaining_work': [str(item or '').strip() for item in list(remaining_work or [])],
-            'blocking_reason': str(blocking_reason or '').strip(),
-        }
+    async def execute(self, **kwargs: Any) -> dict[str, Any]:
+        if self._node_kind == 'acceptance':
+            payload = {
+                'verdict': str(kwargs.get('verdict') or '').strip().lower(),
+                'feedback': str(kwargs.get('feedback') or '').strip(),
+            }
+        else:
+            payload = {
+                'summary': str(kwargs.get('summary') or '').strip(),
+                'answer': str(kwargs.get('answer') or ''),
+                'evidence': [
+                    NodeEvidenceItem.model_validate(item).model_dump(mode='json')
+                    for item in list(kwargs.get('evidence') or [])
+                    if isinstance(item, dict)
+                ],
+                'remaining_work': [str(item or '').strip() for item in list(kwargs.get('remaining_work') or [])],
+            }
         return await self._submit_callback(payload)

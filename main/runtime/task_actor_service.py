@@ -19,7 +19,6 @@ from main.runtime.acceptance_handshake import (
     ACCEPTANCE_STATE_CANCELED_BY_EXECUTION_FAILURE,
     ACCEPTANCE_STATE_REJECTED_TERMINAL,
     ACCEPTANCE_STATE_WAITING_ACCEPTANCE,
-    ACCEPTANCE_STATE_WAITING_BLOCK_VERIFICATION,
     normalize_acceptance_handshake,
 )
 from main.runtime.node_runner import SKIPPED_CHECK_RESULT
@@ -690,9 +689,9 @@ class TaskActorService:
     def _final_acceptance_awaiting_execution_submission(self, task_id: str, node_id: str) -> bool:
         """最终验收抢跑门控：是根最终验收节点且执行节点尚未提交待验时返回 True。
 
-        仅当握手处于 waiting_acceptance / waiting_block_verification（执行节点
-        已提交结果、正等待验收或阻塞核验）时放行；idle（从未提交）、
-        waiting_execution_retry（应先跑执行节点）及各类终态一律拦截。
+        仅当握手处于 waiting_acceptance（执行节点已提交结果、正等待验收）时
+        放行；idle（从未提交）、waiting_execution_retry（应先跑执行节点）及
+        各类终态一律拦截。
         """
         task = self._store.get_task(task_id)
         node = self._store.get_node(node_id)
@@ -708,7 +707,6 @@ class TaskActorService:
         )
         return str(handshake.get('state') or '').strip() not in {
             ACCEPTANCE_STATE_WAITING_ACCEPTANCE,
-            ACCEPTANCE_STATE_WAITING_BLOCK_VERIFICATION,
         }
 
     async def _settle_final_acceptance_notice_result(
@@ -962,7 +960,6 @@ class TaskActorService:
         progressed = False
         pending_states = {
             ACCEPTANCE_STATE_WAITING_ACCEPTANCE,
-            ACCEPTANCE_STATE_WAITING_BLOCK_VERIFICATION,
         }
         for node in list(self._store.list_nodes(task_id) or []):
             if str(getattr(node, 'node_kind', '') or '').strip().lower() != KIND_ACCEPTANCE:
@@ -990,6 +987,12 @@ class TaskActorService:
                 # 触发 child_final，也才会让父节点的 all_children 满足。
                 if execution_terminal:
                     continue
+                if bool(getattr(execution, 'is_paused', False)) or bool(
+                    getattr(execution, 'pause_requested', False)
+                ):
+                    # 异常暂停（reject_no_progress 或看门狗）是人工裁决面：不许在这里
+                    # 被 "补终态" 静默改写成 failed。
+                    continue
                 if handshake_state == ACCEPTANCE_STATE_ACCEPTED and str(node.status or '').strip().lower() == 'success':
                     self._node_runner.finalize_inspected_execution_node(
                         task_id=task_id, node_id=execution.node_id
@@ -1011,6 +1014,9 @@ class TaskActorService:
                 result=result,
             )
             progressed = True
+            if str(getattr(handled, 'verdict', '') or '').strip() == 'reject_no_progress':
+                # 被验节点已在裁决处理里转暂停·abnormal；这里不能再补终态。
+                continue
             handled_status = str(getattr(handled, 'status', '') or '').strip().lower()
             handled_delivery = str(getattr(handled, 'delivery_status', '') or '').strip().lower()
             if handled_status == 'success' and handled_delivery == 'final':
@@ -1100,8 +1106,7 @@ class TaskActorService:
                     (execution.metadata or {}).get(ACCEPTANCE_HANDSHAKE_KEY)
                 )
                 pending = (
-                    str(handshake.get('state') or '').strip()
-                    in {ACCEPTANCE_STATE_WAITING_ACCEPTANCE, ACCEPTANCE_STATE_WAITING_BLOCK_VERIFICATION}
+                    str(handshake.get('state') or '').strip() == ACCEPTANCE_STATE_WAITING_ACCEPTANCE
                     and bool(str(handshake.get('latest_execution_result_ref') or '').strip())
                 )
                 if not pending and not unread:
@@ -1719,7 +1724,7 @@ class TaskActorService:
                 remaining_work=[],
                 blocking_reason='missing root node',
             )
-        if str(final_acceptance.status or '').strip().lower() in {'waiting_acceptance', 'waiting_execution_retry', 'waiting_block_verification'}:
+        if str(final_acceptance.status or '').strip().lower() in {'waiting_acceptance', 'waiting_execution_retry'}:
             return self._result_from_node(root)
 
         existing_acceptance_node_id = str(final_acceptance.node_id or '').strip()

@@ -45,9 +45,7 @@ from main.runtime.acceptance_handshake import (
     ACCEPTANCE_STATE_CANCELED_BY_EXECUTION_FAILURE,
     ACCEPTANCE_STATE_REJECTED_TERMINAL,
     ACCEPTANCE_STATE_WAITING_ACCEPTANCE,
-    ACCEPTANCE_STATE_WAITING_BLOCK_VERIFICATION,
     ACCEPTANCE_STATE_WAITING_EXECUTION_RETRY,
-    FINAL_ACCEPTANCE_STATUS_FAILED,
     normalize_acceptance_handshake,
     set_acceptance_handshake_state,
 )
@@ -100,9 +98,6 @@ from main.types import KIND_ACCEPTANCE, KIND_EXECUTION, STATUS_FAILED, STATUS_SU
 
 SKIPPED_CHECK_RESULT = '未检验'
 _RECOVERY_FINGERPRINT_KEY = 'recovery_fingerprint'
-BLOCKED_VERIFICATION_PROMPT_FILE = 'blocked_verification.md'
-_BLOCKED_VERIFICATION_ONLY_KEY = 'blocked_verification_only'
-_BLOCKED_VERIFICATION_LOG_KEY = 'blocked_verification_log'
 # 定向通知导致的"打断验收→回去重做"是按节点累积的事实计数：决策回合的模型只看得见
 # 手里这条通知，跨轮、跨重启的返工圈必须有人替它记着，否则"这条线已经重做五次"不可判。
 # 它不拦任何模型选择——只作为事实渲染进决策束，重做与否仍由节点决定，问不问用户由前门决定。
@@ -148,11 +143,6 @@ def node_message_body(text: str, *, ref: str = '') -> str:
     )
 
 
-_BLOCKED_VERIFICATION_FALLBACK_PROMPT = (
-    '核验被检验执行节点提交的 failed+blocked 阻塞声明是否成立：'
-    '阻塞成立返回 success 并附证据；阻塞不成立返回 failed+final，'
-    '并在 blocking_reason 写明执行节点应继续完成的工作。禁止占位式裁决。'
-)
 _SUPERSEDED_SPAWN_REASON_PREFIX = 'superseded by newer spawn round'
 # 派生轮自身抛异常、但本轮仍绑着非终态节点时的滞留节拍：每片检查一次节点状态，
 # 每满 report 秒补一条可检索的告警。不设上限——交付"派生失败"会让父节点重发新轮，
@@ -280,6 +270,8 @@ class NodeRunner:
         # 而终局写入发生在同步代码里，所以这里只登记任务；`run_task` 的空转判定读
         # `has_pending_terminal_messages()`，避免"终局消息还没送出就把任务收工"。
         self.child_final_sink = None
+        # 异常暂停 → 父节点 `child_abnormal_pause` 的投递口（由 runtime_service 绑定）。
+        self.abnormal_pause_sink = None
         self._pending_terminal_messages: set[asyncio.Task[None]] = set()
         # 子节点创建后的立即派发口（由 task_actor_service 绑定）。拆掉阻塞承诺后
         # 父节点不再等待子管线，创建完就必须把节点交给调度器；没有这个口时（单测、
@@ -719,9 +711,6 @@ class NodeRunner:
                 return self._mark_failed(task_id, node.node_id, reason=terminal_reason)
             if (self._store.get_task(task_id) or task).cancel_requested:
                 return self._mark_failed(task_id, node.node_id, reason='canceled')
-            gated_blocked_result = await self._maybe_gate_blocked_submission(task=task, node=node, result=result)
-            if gated_blocked_result is not None:
-                return gated_blocked_result
             result = self._maybe_start_acceptance_handshake(task=task, node=node, result=result) or result
             if str(result.delivery_status or '').strip() == 'partial':
                 self._log_service.refresh_task_view(task_id, mark_unread=True)
@@ -1304,7 +1293,6 @@ class NodeRunner:
     # 拿的是上一轮的旧指针），`accepted` / `rejected_terminal`＝裁定已经落过。
     _PENDING_VERDICT_STATES = frozenset({
         ACCEPTANCE_STATE_WAITING_ACCEPTANCE,
-        ACCEPTANCE_STATE_WAITING_BLOCK_VERIFICATION,
     })
 
     def _final_acceptance_freeze_reason(self, *, task, node: NodeRecord) -> str:
@@ -1375,7 +1363,6 @@ class NodeRunner:
         handshake = normalize_acceptance_handshake((root.metadata or {}).get(ACCEPTANCE_HANDSHAKE_KEY))
         if str(handshake.get('state') or '').strip() not in {
             ACCEPTANCE_STATE_WAITING_ACCEPTANCE,
-            ACCEPTANCE_STATE_WAITING_BLOCK_VERIFICATION,
         }:
             return ''
         acceptance = self._required_acceptance_node(task=task, node=root)
@@ -1430,11 +1417,6 @@ class NodeRunner:
             parts.append('修复要求：\n' + '\n'.join(f'- {item}' for item in remaining_work))
         text = '\n\n'.join(parts).strip()
         return text or str(result.blocking_reason or '').strip()
-
-    @staticmethod
-    def _blocked_verification_feedback_text(result: NodeFinalResult) -> str:
-        """阻塞核验车道的正文：核验方按契约把「接下来做什么」写进 blocking_reason。"""
-        return str(result.blocking_reason or result.summary or result.answer or '').strip()
 
     def _accepted_execution_node(self, *, task_id: str, acceptance: NodeRecord) -> NodeRecord | None:
         metadata = dict(getattr(acceptance, 'metadata', {}) or {})
@@ -1501,6 +1483,7 @@ class NodeRunner:
         latest_execution_result_summary: str,
         latest_rejection_feedback_ref: str,
         latest_rejection_feedback_summary: str,
+        latest_execution_submission_id: str | None = None,
     ) -> None:
         updated_at = now_iso()
 
@@ -1516,6 +1499,7 @@ class NodeRunner:
                 latest_rejection_feedback_ref=str(latest_rejection_feedback_ref or '').strip(),
                 latest_rejection_feedback_summary=str(latest_rejection_feedback_summary or '').strip(),
                 updated_at=updated_at,
+                latest_execution_submission_id=latest_execution_submission_id,
             )
             return metadata
 
@@ -1647,7 +1631,7 @@ class NodeRunner:
             )
         self._log_service.refresh_task_view(task.task_id, mark_unread=True)
 
-    def _finalize_acceptance_terminal_failure(
+    def _finalize_acceptance_no_progress(
         self,
         *,
         task,
@@ -1656,15 +1640,20 @@ class NodeRunner:
         result: NodeFinalResult,
         rejection_count: int,
     ) -> None:
-        """Persist an explicit acceptance verdict that must not trigger a retry."""
-        failure_text = str(result.failure_text or result.summary or 'acceptance rejected without retry').strip()
+        """第三档裁决的落账：验收终局、被验节点暂停·abnormal、父节点升 high。
+
+        与 terminal reject 的区别：终局失败的是**验收这条线**，被验节点保留
+        现场供人工查看（暂停而不是 failed），因此这里不写 final_acceptance.failed——
+        任务级终态由操作员决定是否放弃。
+        """
+        feedback_text = self._acceptance_feedback_text(result) or str(result.summary or '').strip()
         if str(getattr(acceptance, 'status', '') or '').strip().lower() != STATUS_FAILED:
             self._log_service.update_node_status(
                 task.task_id,
                 acceptance.node_id,
                 status=STATUS_FAILED,
                 final_output=str(result.output or '').strip(),
-                failure_reason=failure_text,
+                failure_reason=feedback_text or 'reject_no_progress',
             )
         if execution is None:
             return
@@ -1677,16 +1666,56 @@ class NodeRunner:
             latest_execution_result_ref=str(current.get('latest_execution_result_ref') or '').strip(),
             latest_execution_result_summary=str(current.get('latest_execution_result_summary') or '').strip(),
             latest_rejection_feedback_ref=self._externalized_result_payload_ref(task_id=task.task_id, node=acceptance),
-            latest_rejection_feedback_summary=failure_text,
+            latest_rejection_feedback_summary=feedback_text,
+            latest_execution_submission_id=str(result.submission_id or '').strip(),
         )
-        if self._acceptance_updates_task_final_acceptance(task=task, execution=execution, acceptance=acceptance):
-            self._set_task_final_acceptance_state(
-                task_id=task.task_id,
-                acceptance_node_id=acceptance.node_id,
-                status=FINAL_ACCEPTANCE_STATUS_FAILED,
-                final_execution_output=str(getattr(execution, 'final_output', '') or '').strip(),
-            )
+        self._mark_node_paused(
+            task.task_id,
+            execution.node_id,
+            reason='error',
+            remark=feedback_text or 'acceptance rejected without progress',
+        )
+        self.notify_parent_abnormal_pause(
+            task_id=task.task_id,
+            node_id=execution.node_id,
+            reason=feedback_text or 'acceptance rejected without progress',
+        )
         self._log_service.refresh_task_view(task.task_id, mark_unread=True)
+
+    def notify_parent_abnormal_pause(self, *, task_id: str, node_id: str, reason: str) -> None:
+        """异常暂停 → 父节点信箱（`child_abnormal_pause`，high 优先级）。
+
+        与 `child_final` 同一个异步投递形态：登记在 `_pending_terminal_messages`，
+        `run_task` 的空转判定会等它送出。
+        """
+        sink = getattr(self, 'abnormal_pause_sink', None)
+        if not callable(sink):
+            return
+        try:
+            node = self._store.get_node(node_id)
+        except Exception:
+            return
+        if node is None or not str(getattr(node, 'parent_node_id', '') or '').strip():
+            return
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            return
+        task = loop.create_task(
+            self._emit_abnormal_pause(task_id=task_id, node_id=node_id, reason=reason),
+            name=f'node-abnormal-pause:{task_id}:{node_id}',
+        )
+        self._pending_terminal_messages.add(task)
+        task.add_done_callback(self._pending_terminal_messages.discard)
+
+    async def _emit_abnormal_pause(self, *, task_id: str, node_id: str, reason: str) -> None:
+        sink = getattr(self, 'abnormal_pause_sink', None)
+        if not callable(sink):
+            return
+        try:
+            await sink(task_id=task_id, node_id=node_id, reason=reason)
+        except Exception as exc:
+            logger.debug(f'abnormal pause delivery skipped: {node_id}: {describe_exception(exc)}')
 
     def _finalize_acceptance_pass(
         self,
@@ -1739,7 +1768,6 @@ class NodeRunner:
         handshake = normalize_acceptance_handshake(((execution.metadata or {}).get(ACCEPTANCE_HANDSHAKE_KEY)))
         if str(handshake.get('state') or '').strip() not in {
             ACCEPTANCE_STATE_WAITING_EXECUTION_RETRY,
-            ACCEPTANCE_STATE_WAITING_BLOCK_VERIFICATION,
         }:
             return
         acceptance_node_id = str(handshake.get('acceptance_node_id') or '').strip()
@@ -1831,10 +1859,12 @@ class NodeRunner:
             )
 
         next_rejection_count = int(handshake.get('rejection_count') or 0) + 1
-        if str(result.delivery_status or '').strip().lower() == 'blocked':
-            # 显式 blocked 是验收节点对执行结果作出的「不再打回」终局失败，
-            # 与普通 failed+final 质量拒收严格区分：不得进入无上限拒收循环。
-            self._finalize_acceptance_terminal_failure(
+        verdict = str(result.verdict or '').strip().lower()
+        if verdict == 'reject_no_progress':
+            # 第三档：不是「再来一轮」，而是「这条线在原地打转」。被验节点转
+            # 暂停·abnormal（pause_reason=error），父节点收 high 优先级的
+            # child_abnormal_pause 并带上验收方的驳回理由——恢复与否交给人。
+            self._finalize_acceptance_no_progress(
                 task=task,
                 execution=execution,
                 acceptance=acceptance,
@@ -1843,14 +1873,16 @@ class NodeRunner:
             )
             return NodeFinalResult(
                 status=STATUS_FAILED,
-                delivery_status='blocked',
-                summary=str(result.summary or ''),
+                delivery_status='final',
+                summary=str(result.summary or result.answer or '').strip(),
                 answer=str(result.answer or ''),
-                evidence=list(result.evidence or []),
+                evidence=[],
                 remaining_work=[],
-                blocking_reason=str(result.blocking_reason or result.summary or '').strip(),
+                blocking_reason='',
+                verdict='reject_no_progress',
+                submission_id=str(result.submission_id or '').strip(),
             )
-        # 拒收无次数上限：每一次普通 failed+final 拒绝都只是打回——把验收反馈
+        # 拒收无次数上限：每一次 reject 都只是打回——把验收反馈
         # 投给执行节点、复活验收与执行双方，交给下一轮「执行→验收」继续，
         # 绝不因拒收次数把节点对或任务判成终态。
         feedback_text = self._acceptance_feedback_text(result)
@@ -1880,6 +1912,7 @@ class NodeRunner:
         result_ref: str,
         result_summary: str,
         rejection_count: int | None = None,
+        submission_id: str = '',
     ) -> None:
         execution = self._store.get_node(execution_node_id)
         current = normalize_acceptance_handshake(
@@ -1894,6 +1927,7 @@ class NodeRunner:
             latest_execution_result_summary=str(result_summary or '').strip(),
             latest_rejection_feedback_ref='',
             latest_rejection_feedback_summary='',
+            latest_execution_submission_id=str(submission_id or '').strip(),
         )
         task = self._store.get_task(task_id)
         acceptance = self._store.get_node(acceptance_node_id)
@@ -1948,6 +1982,7 @@ class NodeRunner:
             acceptance_node_id=acceptance.node_id,
             result_ref=result_ref,
             result_summary=str(result.summary or '').strip(),
+            submission_id=str(result.submission_id or '').strip(),
         )
         # 新一轮交付到达前，作废验收节点上下文中来自本执行节点的旧交接通知，
         # 保证通知尾窗里只保留最新一次"请继续核验"的指令。
@@ -1976,221 +2011,6 @@ class NodeRunner:
             remaining_work=[],
             blocking_reason='',
         )
-
-    async def _maybe_gate_blocked_submission(
-        self,
-        *,
-        task,
-        node: NodeRecord,
-        result: NodeFinalResult,
-    ) -> NodeFinalResult | None:
-        """Gate voluntary execution failed+blocked submissions behind acceptance verification.
-
-        The execution node's claimed blockage is verified by its acceptance node
-        (existing, final-acceptance, or an ad-hoc one created on demand). The
-        verdict either allows the failure or rejects the claim and sends the
-        execution node back to work; the claim may be rejected any number of
-        times, because the rejection loop has no budget. A rejected claim only
-        ever consumes one more ``rejection_count`` tick for feedback/forensics.
-        Returns the finalized NodeFinalResult when the gate handled the
-        submission, or None when the gate does not apply.
-        """
-        if str(getattr(node, 'node_kind', '') or '').strip().lower() != KIND_EXECUTION:
-            return None
-        if str(result.status or '').strip().lower() != STATUS_FAILED:
-            return None
-        if str(result.delivery_status or '').strip().lower() != 'blocked':
-            return None
-        task_id = str(task.task_id or '')
-        node_id = str(node.node_id or '')
-        # run_node 传入的可能是入口时的旧快照；握手元数据以库内最新记录为准。
-        node = self._store.get_node(node_id) or node
-        handshake = normalize_acceptance_handshake((node.metadata or {}).get(ACCEPTANCE_HANDSHAKE_KEY))
-        rejection_count = int(handshake.get('rejection_count') or 0)
-        acceptance = self._blocked_verification_node(task=task, node=node)
-        if acceptance is None:
-            return self._allow_blocked_failure(
-                task_id=task_id,
-                node=node,
-                result=result,
-                decision='no_verifier',
-                acceptance=None,
-                verdict=None,
-                result_ref='',
-                rejection_count=rejection_count,
-            )
-        invalid_verdict_rounds = 0
-        loop_round = 0
-        while True:
-            if loop_round > 0:
-                if self._pause_requested(task_id):
-                    self._mark_finished(task_id, node_id, result)
-                    self._log_service.set_pause_state(task_id, pause_requested=True, is_paused=True)
-                    raise TaskPausedError(task_id)
-                if self._node_pause_requested(task_id, node_id):
-                    self._flush_latest_valid_result_if_paused(task_id=task_id, node_id=node_id)
-                    self._mark_node_paused(task_id, node_id)
-                    raise NodePausedError(task_id, node_id)
-                latest_task = self._store.get_task(task_id) or task
-                terminal_reason = self._task_terminal_reason(task_id, task=latest_task)
-                if terminal_reason:
-                    return self._mark_failed(task_id, node_id, reason=terminal_reason)
-                if bool(getattr(latest_task, 'cancel_requested', False)):
-                    return self._mark_failed(task_id, node_id, reason='canceled')
-            loop_round += 1
-            result_ref = self._persist_acceptance_candidate_result(task_id=task_id, node_id=node_id, result=result)
-            self._update_execution_acceptance_handshake(
-                node_id=node_id,
-                state=ACCEPTANCE_STATE_WAITING_BLOCK_VERIFICATION,
-                acceptance_node_id=acceptance.node_id,
-                rejection_count=rejection_count,
-                latest_execution_result_ref=result_ref,
-                latest_execution_result_summary=str(result.summary or '').strip(),
-                latest_rejection_feedback_ref='',
-                latest_rejection_feedback_summary='',
-            )
-            if self._acceptance_updates_task_final_acceptance(task=task, execution=node, acceptance=acceptance):
-                self._set_task_final_acceptance_state(
-                    task_id=task_id,
-                    acceptance_node_id=acceptance.node_id,
-                    status=ACCEPTANCE_STATE_WAITING_BLOCK_VERIFICATION,
-                )
-            acceptance = self._reset_terminal_acceptance_for_reverify(task=task, acceptance=acceptance)
-            acceptance = self._refresh_acceptance_node_metadata(task=task, node=acceptance)
-            self._persist_node_notification_direct(
-                task_id=task_id,
-                epoch_id='',
-                source_node_id=node_id,
-                target_node_id=acceptance.node_id,
-                message=self._blocked_verification_activation_message(
-                    task_id=task_id,
-                    node=node,
-                    result=result,
-                    result_ref=result_ref,
-                ),
-            )
-            self._log_service.refresh_task_view(task_id, mark_unread=True)
-            verdict = await self._run_nested_node(task_id, acceptance.node_id)
-            acceptance = self._store.get_node(acceptance.node_id) or acceptance
-            decision = self._classify_blocked_verdict(verdict)
-            if decision in {'invalid', 'unverifiable'} and invalid_verdict_rounds < 1:
-                invalid_verdict_rounds += 1
-                repair_message = (
-                    '你上一轮"阻塞成立"的裁决没有附带任何 evidence，属于无效裁决。请重新核验：'
-                    '若阻塞成立，必须给出你实际核验过的证据（evidence 至少一条）后重新调用 submit_final_result(status=success)；'
-                    '若无法给出证据，请改为 failed+final 并在 blocking_reason 写明执行节点应继续完成的工作。'
-                    if decision == 'invalid'
-                    else '你上一轮以 failed+blocked 结束核验（核验无法完成）。请再尝试一次完成核验：'
-                    '优先基于激活消息中的执行记录与结果载荷 ref 判断阻塞声明是否成立；'
-                    '确实无法核验时再次提交 failed+blocked，系统将放行执行节点的失败并记录"核验无法完成"。'
-                )
-                self._persist_node_notification_direct(
-                    task_id=task_id,
-                    epoch_id='',
-                    source_node_id=node_id,
-                    target_node_id=acceptance.node_id,
-                    message=repair_message,
-                )
-                continue
-            # 本轮阻塞核验已裁决（放行/打回/额度耗尽均走到这里）：作废该执行节点
-            # 此前发给验收节点的阻塞核验激活与修复指令，防止已处理的指令继续出现在
-            # 验收节点的通知尾窗里，把后续正常验收轮次误导回"只鉴定阻塞"模式。
-            self._supersede_consumed_notices_from_source(
-                node_id=str(acceptance.node_id or ''),
-                source_node_id=node_id,
-            )
-            if decision == 'unverifiable':
-                return self._allow_blocked_failure(
-                    task_id=task_id,
-                    node=node,
-                    result=result,
-                    decision='unverifiable',
-                    acceptance=acceptance,
-                    verdict=verdict,
-                    result_ref=result_ref,
-                    rejection_count=rejection_count,
-                )
-            if decision == 'allow':
-                return self._allow_blocked_failure(
-                    task_id=task_id,
-                    node=node,
-                    result=result,
-                    decision='justified',
-                    acceptance=acceptance,
-                    verdict=verdict,
-                    result_ref=result_ref,
-                    rejection_count=rejection_count,
-                )
-            # decision == 'reject'（阻塞不成立），或 invalid 裁决两次后按不成立处理
-            if decision == 'invalid':
-                feedback_text = (
-                    '核验方两次未能给出带证据的"阻塞成立"裁决，阻塞声明不能证实。'
-                    '请继续执行剩余工作后重新提交结果。'
-                )
-            else:
-                feedback_text = self._blocked_verification_feedback_text(verdict) or (
-                    '阻塞声明不成立：仍存在可行下一步。请继续处理剩余工作后重新提交。'
-                )
-            next_rejection_count = rejection_count + 1
-            self._record_blocked_verification_log(node_id, {
-                'at': now_iso(),
-                'decision': 'rejected',
-                'verdict_summary': str(verdict.summary or '').strip(),
-                'feedback': feedback_text,
-                'acceptance_node_id': str(acceptance.node_id or ''),
-                'rejection_count': next_rejection_count,
-            })
-            # 打回无次数上限：被驳回的阻塞声明一律交还执行节点重跑，重复声明
-            # 多少次都不会因次数被放行。
-            self._persist_rejection_feedback_and_keep_acceptance_live(
-                task=task,
-                execution=node,
-                acceptance=acceptance,
-                feedback_text=feedback_text,
-                rejection_count=next_rejection_count,
-            )
-            return await self.run_node(task_id, node_id)
-
-    def _blocked_verification_node(self, *, task, node: NodeRecord, create_if_missing: bool = True) -> NodeRecord | None:
-        handshake = normalize_acceptance_handshake((node.metadata or {}).get(ACCEPTANCE_HANDSHAKE_KEY))
-        acceptance_id = str(handshake.get('acceptance_node_id') or '').strip()
-        acceptance = self._store.get_node(acceptance_id) if acceptance_id else None
-        if self._is_acceptance_verifier_for(task=task, node=node, acceptance=acceptance):
-            return acceptance
-        for candidate in list(self._store.list_children(node.node_id) or []):
-            if self._is_acceptance_verifier_for(task=task, node=node, acceptance=candidate):
-                return candidate
-        final_acceptance = self._required_acceptance_node(task=task, node=node)
-        if final_acceptance is not None:
-            return final_acceptance
-        if not create_if_missing:
-            return None
-        try:
-            template = load_prompt(BLOCKED_VERIFICATION_PROMPT_FILE)
-        except Exception:
-            template = _BLOCKED_VERIFICATION_FALLBACK_PROMPT
-        goal = f'blocked-check:{str(node.goal or node.node_id or "").strip()}'
-        return self.create_acceptance_node(
-            task=task,
-            accepted_node=node,
-            goal=goal[:200],
-            acceptance_prompt=str(template or '').strip() or _BLOCKED_VERIFICATION_FALLBACK_PROMPT,
-            parent_node_id=node.node_id,
-            metadata={_BLOCKED_VERIFICATION_ONLY_KEY: True},
-        )
-
-    def _is_acceptance_verifier_for(self, *, task, node: NodeRecord, acceptance: NodeRecord | None) -> bool:
-        if acceptance is None:
-            return False
-        if str(getattr(acceptance, 'node_kind', '') or '').strip().lower() != KIND_ACCEPTANCE:
-            return False
-        if str(getattr(acceptance, 'task_id', '') or '').strip() != str(getattr(task, 'task_id', '') or '').strip():
-            return False
-        metadata = dict(getattr(acceptance, 'metadata', {}) or {})
-        accepted_node_id = str(metadata.get('accepted_node_id') or '').strip()
-        if accepted_node_id:
-            return accepted_node_id == str(node.node_id or '').strip()
-        return str(getattr(acceptance, 'parent_node_id', '') or '').strip() == str(node.node_id or '').strip()
 
     def _reset_terminal_acceptance_for_reverify(self, *, task, acceptance: NodeRecord) -> NodeRecord:
         """将已终态的验收节点作废回 in_progress，让它重新验本轮交付。
@@ -2243,64 +2063,6 @@ class NodeRunner:
         ]
         return '\n'.join(lines)
 
-    def _blocked_verification_activation_message(
-        self,
-        *,
-        task_id: str,
-        node: NodeRecord,
-        result: NodeFinalResult,
-        result_ref: str,
-    ) -> str:
-        _ = task_id
-        progress_text = ''
-        for entry in reversed(list(node.output or [])):
-            text = str(getattr(entry, 'content', '') or '').strip()
-            if text:
-                progress_text = text
-                break
-        remaining = [str(item or '').strip() for item in list(result.remaining_work or []) if str(item or '').strip()]
-        lines = [
-            '执行节点提交了 failed+blocked（声称被阻塞而申请终止）。请核验该阻塞声明是否成立。',
-            f'被核验执行节点：{node.node_id}',
-            f'声明摘要：{str(result.summary or "").strip() or "(empty)"}',
-            f'阻塞理由：{str(result.blocking_reason or "").strip() or "(empty)"}',
-            f'自称未完成工作：{"；".join(remaining) or "(empty)"}',
-            f'结果载荷 ref：{result_ref or "(none)"}',
-        ]
-        if progress_text:
-            lines.append(
-                '执行节点最近进展：'
-                + self._trim_diagnostic_text(progress_text, max_chars=400)
-            )
-        lines.append(
-            '判定契约：阻塞成立（当前权限、环境、工具条件下确实无法继续，且执行节点已尽力）→ '
-            'submit_final_result(status=success)，evidence 必须给出你实际核验过的证据；'
-            '阻塞不成立（存在可行下一步，或声明属于占位/逃避）→ '
-            'submit_final_result(status=failed, delivery_status=final)，'
-            'blocking_reason 写明执行节点接下来必须做什么。'
-            '禁止不做核验就下结论，禁止占位式裁决。'
-        )
-        return '\n'.join(lines)
-
-    @staticmethod
-    def _classify_blocked_verdict(verdict: NodeFinalResult) -> str:
-        status = str(getattr(verdict, 'status', '') or '').strip().lower()
-        delivery = str(getattr(verdict, 'delivery_status', '') or '').strip().lower()
-        if status == STATUS_SUCCESS:
-            return 'allow' if bool(list(getattr(verdict, 'evidence', None) or [])) else 'invalid'
-        if delivery == 'blocked':
-            return 'unverifiable'
-        return 'reject'
-
-    def _record_blocked_verification_log(self, node_id: str, entry: dict[str, Any]) -> None:
-        def _mutate(metadata: dict[str, Any]) -> dict[str, Any]:
-            history = list(metadata.get(_BLOCKED_VERIFICATION_LOG_KEY) or [])
-            history.append(dict(entry or {}))
-            metadata[_BLOCKED_VERIFICATION_LOG_KEY] = history[-20:]
-            return metadata
-
-        self._log_service.update_node_metadata(node_id, _mutate)
-
     def _record_acceptance_evidence_audit(self, *, acceptance: NodeRecord, result: NodeFinalResult) -> None:
         """记录验收裁定引用的文件证据在裁定时刻的磁盘真值（中立事实，不做判定）。
 
@@ -2342,84 +2104,6 @@ class NodeRunner:
             return metadata
 
         self._log_service.update_node_metadata(acceptance.node_id, _mutate)
-
-    def _allow_blocked_failure(
-        self,
-        *,
-        task_id: str,
-        node: NodeRecord,
-        result: NodeFinalResult,
-        decision: str,
-        acceptance: NodeRecord | None,
-        verdict: NodeFinalResult | None,
-        result_ref: str,
-        rejection_count: int,
-    ) -> NodeFinalResult:
-        acceptance_node_id = str(getattr(acceptance, 'node_id', '') or '').strip()
-        verdict_summary = str(getattr(verdict, 'summary', '') or '').strip() if verdict is not None else ''
-        self._record_blocked_verification_log(str(node.node_id or ''), {
-            'at': now_iso(),
-            'decision': 'allowed:' + str(decision or ''),
-            'verdict_summary': verdict_summary,
-            'acceptance_node_id': acceptance_node_id,
-            'rejection_count': int(rejection_count or 0),
-        })
-        self._update_execution_acceptance_handshake(
-            node_id=str(node.node_id or ''),
-            state=ACCEPTANCE_STATE_REJECTED_TERMINAL,
-            acceptance_node_id=acceptance_node_id,
-            rejection_count=int(rejection_count or 0),
-            latest_execution_result_ref=str(result_ref or ''),
-            latest_execution_result_summary=str(result.summary or '').strip(),
-            latest_rejection_feedback_ref='',
-            latest_rejection_feedback_summary=verdict_summary,
-        )
-        task = self._store.get_task(task_id)
-        if (
-            task is not None
-            and acceptance is not None
-            and self._acceptance_updates_task_final_acceptance(task=task, execution=node, acceptance=acceptance)
-        ):
-            self._set_task_final_acceptance_state(
-                task_id=task_id,
-                acceptance_node_id=acceptance_node_id,
-                status=FINAL_ACCEPTANCE_STATUS_FAILED,
-                final_execution_output='',
-            )
-        marker = {
-            'justified': '[blocked核验] 验收核验判定阻塞成立，失败放行。',
-            'unverifiable': '[blocked核验] 核验方无法完成核验，失败放行（核验无法完成）。',
-            'no_verifier': '[blocked核验] 无法创建核验节点，失败放行。',
-        }.get(str(decision or ''), '')
-        amended = result
-        if marker:
-            amended = result.model_copy(update={
-                'blocking_reason': f'{str(result.blocking_reason or "").strip()}\n\n{marker}'.strip(),
-            })
-        return self._mark_finished(task_id, str(node.node_id or ''), amended)
-
-    def _finalize_adhoc_blocked_verifier(self, task_id: str, node_id: str) -> None:
-        node = self._store.get_node(node_id)
-        if node is None or str(getattr(node, 'node_kind', '') or '').strip().lower() != KIND_EXECUTION:
-            return
-        handshake = normalize_acceptance_handshake((node.metadata or {}).get(ACCEPTANCE_HANDSHAKE_KEY))
-        acceptance_id = str(handshake.get('acceptance_node_id') or '').strip()
-        acceptance = self._store.get_node(acceptance_id) if acceptance_id else None
-        if acceptance is None:
-            return
-        if str(getattr(acceptance, 'node_kind', '') or '').strip().lower() != KIND_ACCEPTANCE:
-            return
-        if not bool(dict(getattr(acceptance, 'metadata', {}) or {}).get(_BLOCKED_VERIFICATION_ONLY_KEY)):
-            return
-        if self._normalized_status(getattr(acceptance, 'status', '')) in {STATUS_SUCCESS, STATUS_FAILED}:
-            return
-        self._log_service.update_node_status(
-            task_id,
-            acceptance.node_id,
-            status=STATUS_SUCCESS,
-            final_output='阻塞核验结束：被核验执行节点已继续执行并完成，无需再核验其失败声明。',
-            failure_reason='',
-        )
 
     def _stash_node_verdict_history(self, node_id: str) -> None:
         node = self._store.get_node(node_id)
@@ -3021,7 +2705,7 @@ class NodeRunner:
         tools = dict(self._tool_provider(node) or {})
         if node.node_kind in {KIND_EXECUTION, KIND_ACCEPTANCE}:
             tools['submit_final_result'] = SubmitFinalResultTool(
-                lambda payload: self._submit_final_result(payload),
+                lambda payload: self._submit_final_result(task=task, node=node, payload=payload),
                 node_kind=node.node_kind,
             )
         else:
@@ -6219,9 +5903,6 @@ class NodeRunner:
             if str(node.node_kind or '').strip().lower() != KIND_ACCEPTANCE:
                 continue
             metadata = dict(node.metadata or {})
-            if metadata.get(_BLOCKED_VERIFICATION_ONLY_KEY):
-                # 阻塞核验车道给同一个执行节点另配的临时验收人，不是本轮的配对对象。
-                continue
             if str(metadata.get('accepted_node_id') or '').strip() != str(child.node_id or '').strip():
                 continue
             candidates.append(node)
@@ -6739,9 +6420,9 @@ class NodeRunner:
         )
 
     def _acceptance_turn_tail(self, *, task, node: NodeRecord) -> str:
-        """验收回合的只进本轮尾块：当前待验提交的指针 + 根节点的追加任务要求。
+        """验收回合的只进本轮尾块：当前待验提交的指针 + 历次裁定 + 被验节点的追加要求。
 
-        这两块每轮都在变。放进 bootstrap 等于把持久历史里最该稳定的首记录改成
+        这些块每轮都在变。放进 bootstrap 等于把持久历史里最该稳定的首记录改成
         移动靶（scaffold 头探针比对的正是它，见
         `context-and-cache-troubleshooting.md`「append-only 规则」）；放在尾块里，
         bootstrap 一次定稿，而"这一轮该判哪份提交"仍然每轮重新按当前状态算出来。
@@ -6763,13 +6444,49 @@ class NodeRunner:
             lines.append(f'交付输出 ref：{output_ref or "(none)"}')
             if result_summary:
                 lines.append(f'提交摘要：{node_message_body(result_summary, ref=result_ref or output_ref)}')
-        if str(accepted_node.node_id or '').strip() == str(task.root_node_id or '').strip():
-            notice_block = self._acceptance_notice_block(accepted_node=accepted_node)
-            if notice_block:
-                lines.append(notice_block)
+        history_block = self._acceptance_verdict_history_block(node=node)
+        if history_block:
+            lines.append(history_block)
+        else:
+            # 首轮没有可比对象：no_progress 的判据是"与上一次驳回相比无实质变化"，
+            # 没有上一次就无从成立，提示词与运行时都禁用这一档。
+            lines.append('【历次验收裁定】这是本节点的首次裁定，不得使用 reject_no_progress。')
+        # 决策 J：被验节点的追加要求对任何层级都可见，不再只对根节点开放。
+        notice_block = self._acceptance_notice_block(accepted_node=accepted_node)
+        if notice_block:
+            lines.append(notice_block)
         if not lines:
             return ''
         return '【本轮验收上下文（运行时注入，不是新的用户指令）】\n' + '\n'.join(lines)
+
+    def _acceptance_verdict_history_block(self, *, node: NodeRecord) -> str:
+        """从 `metadata.rejection_history` 派生的紧凑裁定清单（机器派生，不做压缩保护）。"""
+        metadata = dict(getattr(node, 'metadata', {}) or {})
+        raw_history = metadata.get(_REJECTION_HISTORY_KEY)
+        if not isinstance(raw_history, list) or not raw_history:
+            return ''
+        entries: list[str] = []
+        for index, item in enumerate(raw_history, start=1):
+            if not isinstance(item, dict):
+                continue
+            status = str(item.get('status') or '').strip().lower()
+            verdict = 'pass' if status == STATUS_SUCCESS else ('reject' if status == STATUS_FAILED else '')
+            text = str(item.get('final_output') or item.get('failure_reason') or '').strip()
+            if not text:
+                continue
+            if len(text) > 400:
+                text = text[:400] + '…'
+            label = verdict or status or '裁定'
+            entries.append(f'#{index} [{label}] {text}')
+        if not entries:
+            return ''
+        body = '\n'.join(entries)
+        if len(body) > _NODE_MESSAGE_INLINE_CHAR_LIMIT:
+            body = body[:_NODE_MESSAGE_INLINE_CHAR_LIMIT] + '\n…（更早的裁定已省略）'
+        return (
+            '【历次验收裁定（供本次自比；措辞变化、格式调整、补充无关细节都不算实质改变）】\n'
+            + body
+        )
 
     def _child_handoff_payload(self, *, task_id: str, node: NodeRecord, fallback_output: str) -> dict[str, str]:
         latest = self._log_service.ensure_node_output_externalized(task_id, node.node_id) or self._store.get_node(node.node_id) or node
@@ -6831,9 +6548,44 @@ class NodeRunner:
             result_payload_ref='',
         )
 
-    @staticmethod
-    async def _submit_final_result(payload: dict[str, Any]) -> dict[str, Any]:
-        return dict(payload or {})
+    async def _submit_final_result(self, *, task, node: NodeRecord, payload: dict[str, Any]) -> dict[str, Any]:
+        """提交回执：模型看到的是 outcome/submission_id/acceptance_node_id，
+        真正的载荷由 turn 参数一路带回（见 react_loop `_handle_final_result_tool_turn`）。
+
+        submission_id 在这里签发并写回载荷：验收裁决与回执都按它对齐同一次提交。
+        """
+        submitted = dict(payload or {})
+        normalized_kind = str(getattr(node, 'node_kind', '') or '').strip().lower()
+        if normalized_kind == KIND_ACCEPTANCE:
+            verdict = str(submitted.get('verdict') or '').strip().lower()
+            history = (node.metadata or {}).get(_REJECTION_HISTORY_KEY)
+            if verdict == 'reject_no_progress' and not (isinstance(history, list) and history):
+                # 首轮没有可比对象：这一档的判据是「与上次驳回相比无实质变化」，
+                # 运行时直接拒绝，别让模型在第一次裁定就替人按下暂停。
+                raise ValueError(
+                    'reject_no_progress is unavailable on the first verdict: '
+                    'no previous rejection to compare against'
+                )
+            execution = self._accepted_execution_node(task_id=task.task_id, acceptance=node)
+            handshake = normalize_acceptance_handshake(
+                ((execution.metadata or {}).get(ACCEPTANCE_HANDSHAKE_KEY) if execution is not None else {})
+            )
+            submission_id = str(handshake.get('latest_execution_submission_id') or '').strip()
+            submitted['submission_id'] = submission_id
+            return {
+                'outcome': str(submitted.get('verdict') or '').strip().lower() or 'reject',
+                'submission_id': submission_id,
+                'acceptance_node_id': str(node.node_id or '').strip(),
+            }
+        submission_id = new_command_id().replace('command:', 'submission:', 1)
+        submitted['submission_id'] = submission_id
+        acceptance = self._required_acceptance_node(task=task, node=node)
+        acceptance_node_id = str(getattr(acceptance, 'node_id', '') or '').strip()
+        return {
+            'outcome': 'pending_acceptance' if acceptance_node_id else 'submitted',
+            'submission_id': submission_id,
+            'acceptance_node_id': acceptance_node_id,
+        }
 
     def _forget_node_route_binding(self, node_id: str) -> None:
         """节点落终态时清掉负载均衡的粘滞绑定，避免绑定表随节点数无界增长。"""
@@ -6885,7 +6637,6 @@ class NodeRunner:
                     clear_retry_snapshot(task_id)
                 except Exception:
                     pass
-            self._finalize_adhoc_blocked_verifier(task_id, node_id)
             self._log_service.remove_frame(task_id, node_id, publish_snapshot=False)
         self._persist_result_payload(task_id, node_id, result)
         self._log_service.update_node_status(

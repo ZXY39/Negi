@@ -90,6 +90,12 @@ class NodeFinalResult(Model):
     evidence: list[NodeEvidenceItem] = Field(default_factory=list)
     remaining_work: list[str] = Field(default_factory=list)
     blocking_reason: str = ''
+    # 验收三档裁决（P4）：只有验收节点提交的载荷带这个字段；执行节点恒为空。
+    # 进入 result_payload 持久化——验收节点回合结束后，裁决只能从节点行读回
+    # （`_drain_acceptance_verdicts` 就是这么消费的）。
+    verdict: Literal['', 'pass', 'reject', 'reject_no_progress'] = ''
+    # 被验方提交的幂等标识：验收裁决与回执都按它对齐同一次提交。
+    submission_id: str = ''
     # This flag controls only the current runner handoff. Result payloads remain
     # backwards-compatible and must never persist an internal pause instruction.
     failure_disposition: Literal['terminal', 'pause'] = Field(default='terminal', exclude=True)

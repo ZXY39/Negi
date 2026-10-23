@@ -39,7 +39,6 @@ from main.runtime.acceptance_handshake import (
     ACCEPTANCE_STATE_CANCELED_BY_EXECUTION_FAILURE,
     ACCEPTANCE_STATE_REJECTED_TERMINAL,
     ACCEPTANCE_STATE_WAITING_ACCEPTANCE,
-    ACCEPTANCE_STATE_WAITING_BLOCK_VERIFICATION,
     ACCEPTANCE_STATE_WAITING_EXECUTION_RETRY,
     normalize_acceptance_handshake,
 )
@@ -1435,7 +1434,6 @@ class TaskQueryService:
                 parent_visible = False
             elif node_kind == 'execution' and handshake_state in {
                 ACCEPTANCE_STATE_WAITING_ACCEPTANCE,
-                ACCEPTANCE_STATE_WAITING_BLOCK_VERIFICATION,
             }:
                 parent_visible = False
         return TaskTreeSnapshotNode(
@@ -2108,7 +2106,6 @@ class TaskQueryService:
             label_by_status = {
                 ACCEPTANCE_STATE_WAITING_ACCEPTANCE: '等待验收',
                 ACCEPTANCE_STATE_WAITING_EXECUTION_RETRY: '等待执行节点重试',
-                ACCEPTANCE_STATE_WAITING_BLOCK_VERIFICATION: '等待冻结核验',
                 'running': '验收运行中',
                 'passed': '验收通过',
                 'failed': '验收失败',

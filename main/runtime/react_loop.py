@@ -279,15 +279,6 @@ def _node_goal_anchor_text(node: Any) -> str:
 
 def _node_contract_echo_repair_message(node: Any) -> str:
     return _NODE_CONTRACT_ECHO_REPAIR_MESSAGE + _node_goal_anchor_text(node)
-_RESULT_REQUIRED_KEYS = (
-    'status',
-    'delivery_status',
-    'summary',
-    'answer',
-    'evidence',
-    'remaining_work',
-    'blocking_reason',
-)
 _TOOL_DISCIPLINE_NODE_KINDS = {'execution', 'acceptance'}
 _UNSET = object()
 
@@ -5338,6 +5329,7 @@ class ReActToolLoop:
             for item in (remaining_work_raw if isinstance(remaining_work_raw, list) else [])
             if str(item or '').strip()
         ]
+        verdict = str(raw_payload.get('verdict') or '').strip().lower()
         return NodeFinalResult(
             status=status,
             delivery_status=normalized_delivery_status,
@@ -5346,27 +5338,32 @@ class ReActToolLoop:
             evidence=evidence_items,
             remaining_work=remaining_work,
             blocking_reason=str(raw_payload.get('blocking_reason') or '').strip(),
+            verdict=verdict if verdict in {'pass', 'reject', 'reject_no_progress'} else '',
+            submission_id=str(raw_payload.get('submission_id') or '').strip(),
         )
 
     @staticmethod
     def _validate_final_result(
         *,
         raw_payload: dict[str, Any],
+        node_kind: str = 'execution',
     ) -> list[str]:
-        """只校载荷形状：必填键、枚举取值、`summary` 非空、每条证据自身的字段与行号。
+        """只校载荷形状：必填键、枚举取值、验收反馈非空、每条证据自身的字段与行号。
 
-        这里不判"证据够不够"，但不等于没人判：阻塞核验那一条在裁决分类器里
-        （`NodeRunner._classify_blocked_verdict` —— `success` 且 evidence 为空记
-        `invalid`，吃一次重验轮，再空就按"阻塞不成立"打回执行节点）。普通交付
-        裁决的空证据今天不设门槛。
+        新旧两套形状都在这里收口：验收节点是 `{verdict, feedback}`；执行节点是
+        `{summary, answer, evidence, remaining_work}`（`status`/`delivery_status`
+        由运行时推导，不再由模型填写）。
         """
         violations: list[str] = []
-        missing_keys = [key for key in _RESULT_REQUIRED_KEYS if key not in raw_payload]
-        violations.extend([f'missing required field: {key}' for key in missing_keys])
+        normalized_kind = str(node_kind or '').strip().lower()
+        if normalized_kind == 'acceptance':
+            verdict = str(raw_payload.get('verdict') or '').strip().lower()
+            if verdict not in {'pass', 'reject', 'reject_no_progress'}:
+                violations.append('verdict must be one of pass|reject|reject_no_progress')
+            if not str(raw_payload.get('feedback') or '').strip():
+                violations.append('feedback must not be empty')
+            return violations
 
-        raw_delivery_status = str(raw_payload.get('delivery_status') or '').strip().lower()
-        if raw_delivery_status not in {'final', 'blocked'}:
-            violations.append('delivery_status must be one of final|blocked')
         if not str(raw_payload.get('summary') or '').strip():
             violations.append('summary must not be empty')
 
@@ -5409,9 +5406,11 @@ class ReActToolLoop:
                                 pass
 
         remaining_work_raw = raw_payload.get('remaining_work')
-        if not isinstance(remaining_work_raw, list):
+        if remaining_work_raw is not None and not isinstance(remaining_work_raw, list):
             violations.append('remaining_work must be an array')
-        elif any(not str(item or '').strip() for item in remaining_work_raw):
+        elif isinstance(remaining_work_raw, list) and any(
+            not str(item or '').strip() for item in remaining_work_raw
+        ):
             violations.append('remaining_work items must be non-empty strings')
         return violations
 
@@ -7594,7 +7593,9 @@ class ReActToolLoop:
         if isinstance(raw_result, str) and raw_result.startswith('Error:'):
             return None, prepared_history, [], str(raw_result or '').strip()
 
-        raw_payload = raw_result if isinstance(raw_result, dict) else None
+        # 工具返回的是给模型看的回执（outcome/submission_id/acceptance_node_id），
+        # 真正的提交载荷是这次调用的参数——回执不参与结果构造。
+        raw_payload = tool_payload.get('arguments') if isinstance(tool_payload.get('arguments'), dict) else None
         if raw_payload is None:
             return None, prepared_history, [], f'{FINAL_RESULT_TOOL_NAME} must return an object payload'
         raw_payload = self._normalize_final_result_payload(
@@ -7603,10 +7604,15 @@ class ReActToolLoop:
             response_content=assistant_content,
             node_kind=node.node_kind,
         )
+        if isinstance(raw_result, dict):
+            # 回执里的 submission_id 是运行时签发的权威值（验收裁决按它对齐同一次提交）。
+            receipt_submission_id = str(raw_result.get('submission_id') or '').strip()
+            if receipt_submission_id:
+                raw_payload['submission_id'] = receipt_submission_id
         result = self._coerce_final_result_payload(raw_payload)
         if result is None:
             return None, prepared_history, [], f'{FINAL_RESULT_TOOL_NAME} returned an invalid payload'
-        violations = self._validate_final_result(raw_payload=raw_payload)
+        violations = self._validate_final_result(raw_payload=raw_payload, node_kind=node.node_kind)
         if violations:
             return None, prepared_history, violations, ''
         return result, prepared_history, [], ''
@@ -8220,9 +8226,7 @@ class ReActToolLoop:
             return (
                 f'Your previous reply did not submit a valid final result for result contract v{RESULT_SCHEMA_VERSION}. '
                 f'If you are ending the node now, call `{FINAL_RESULT_TOOL_NAME}` with exactly these fields: '
-                '{"status":"success|failed","delivery_status":"final|blocked","summary":"...","answer":"...",'
-                '"evidence":[{"kind":"file|artifact|url","path":"","ref":"","start_line":1,"end_line":1,"note":"..."}],'
-                '"remaining_work":["..."],"blocking_reason":"..."}. '
+                '{"verdict":"pass|reject|reject_no_progress","feedback":"..."}. '
                 'Do not reply with prose, Markdown, or a raw JSON object. '
                 f'{guidance}'
             )
@@ -8230,10 +8234,10 @@ class ReActToolLoop:
             f'Your previous reply did not submit a valid final result for result contract v{RESULT_SCHEMA_VERSION}. '
             'If the task is not complete yet — deliverables not actually produced and verified — continue with tools instead of forcing a premature final submission. '
             f'If you are ending the node now because the work is truly finished, call `{FINAL_RESULT_TOOL_NAME}` with exactly these fields: '
-            '{"status":"success|failed","delivery_status":"final|blocked","summary":"...","answer":"...",'
+            '{"summary":"...","answer":"...",'
             '"evidence":[{"kind":"file|artifact|url","path":"","ref":"","start_line":1,"end_line":1,"note":"..."}],'
-            '"remaining_work":["..."],"blocking_reason":"..."}. '
-            'Never fill these fields with placeholder text such as "placeholder": `summary` and `answer` must carry the real, verifiable conclusion, and a success+final submission goes straight to acceptance. '
+            '"remaining_work":["..."]}. '
+            'Never fill these fields with placeholder text such as "placeholder": `summary` and `answer` must carry the real, verifiable conclusion, and a submission that has an acceptance reviewer enters acceptance. '
             'Do not reply with prose, Markdown, or a raw JSON object. '
             f'{guidance}'
         )
@@ -8346,18 +8350,20 @@ class ReActToolLoop:
         normalized_kind = str(node_kind or '').strip().lower()
         if normalized_kind == 'acceptance':
             return (
-                f'Acceptance nodes must end through `{FINAL_RESULT_TOOL_NAME}`. '
-                'Use failed+final for a normal rejection, and failed+blocked only when verification is genuinely blocked. '
-                'Never use a failed verdict as a placeholder; in blocked-verification mode a "blockage justified" success verdict must cite evidence you actually checked.'
+                f'Acceptance nodes must end through `{FINAL_RESULT_TOOL_NAME}` with exactly '
+                '`{"verdict": "pass" | "reject" | "reject_no_progress", "feedback": "..."}`. '
+                '`pass` closes the inspected node as successful. `reject` sends `feedback` back and the '
+                'inspected node retries. `reject_no_progress` additionally pauses the inspected node as '
+                'abnormal — use it only when this submission repeats a flaw the previous rejection already '
+                'named and nothing meaningful changed; it is forbidden on the first verdict.'
             )
         return (
-            f'Execution nodes must end through `{FINAL_RESULT_TOOL_NAME}`. '
-            'Use success+final on completion, and use failed+blocked only when the node is genuinely blocked. '
-            'If work remains, continue with tools instead of finalizing. '
-            'A failed+blocked claim is independently verified by an acceptance node and rejected claims are sent back; '
-            'never use a failed result as a placeholder or to escape remaining work while budget and a viable next step exist. '
-            'A success+final submission goes straight to acceptance as well: never use it as a placeholder — '
-            'if the deliverables are not actually produced and verifiable, keep working with tools instead of submitting success.'
+            f'Execution nodes must end through `{FINAL_RESULT_TOOL_NAME}` with exactly '
+            '`{"summary": "...", "answer": "...", "evidence": [...], "remaining_work": [...]}`. '
+            'There is no status field: submitting means the work is done; if deliverables are not actually '
+            'produced and verifiable, keep working with tools instead of submitting. '
+            'A submission that has an acceptance reviewer enters acceptance; rejection feedback comes back '
+            'as a later notice and you must continue from it.'
         )
 
     @staticmethod
@@ -8542,30 +8548,36 @@ class ReActToolLoop:
     ) -> dict[str, Any]:
         payload = dict(raw_payload or {})
         normalized_kind = str(node_kind or '').strip().lower()
-        status = str(payload.get('status') or '').strip().lower()
-        delivery_status = str(payload.get('delivery_status') or '').strip().lower()
 
-        # 只收大小写与空白：值本身不在 enum（`partial` 那类）必须留给校验拒收，
-        # 否则就是替模型改裁定。
-        if status in {'success', 'failed'}:
-            payload['status'] = status
-        if delivery_status in {'final', 'blocked'}:
-            payload['delivery_status'] = delivery_status
-        elif not delivery_status:
-            # 判据是 status 而不是节点类型：`success` 在两份正文里都只有一种搭配
-            # （node_execution.md「delivery_status 搭配规则」与 acceptance_execution.md
-            # 的验收/阻塞核验两条道都写死 success+final），所以缺的那个字段有唯一解。
-            # 歧义只在验收节点的 `failed` 上：final=打回重验、blocked=终局不再打回，
-            # 两个结论相反，运行时无权替它选。
-            paired = 'final' if status == 'success' else ''
-            if not paired and status == 'failed' and normalized_kind != 'acceptance':
-                paired = 'blocked'
-            if paired:
-                payload['delivery_status'] = paired
+        if normalized_kind == 'acceptance':
+            verdict = str(payload.get('verdict') or '').strip().lower()
+            if verdict not in {'pass', 'reject', 'reject_no_progress'}:
+                # 旧形状（status/delivery_status）在崩溃恢复重放旧工具调用时仍会出现：
+                # 只做语义映射，不把新字段补成伪造的裁定。
+                legacy_status = str(payload.get('status') or '').strip().lower()
+                verdict = 'pass' if legacy_status == 'success' else 'reject'
+            feedback = str(payload.get('feedback') or payload.get('summary') or payload.get('answer') or '').strip()
+            payload['verdict'] = verdict
+            payload['feedback'] = feedback
+            payload['status'] = 'success' if verdict == 'pass' else 'failed'
+            payload['delivery_status'] = 'final'
+            payload['summary'] = feedback or ('验收通过' if verdict == 'pass' else '')
+            payload['answer'] = feedback
+            payload['evidence'] = []
+            payload['remaining_work'] = []
+            payload['blocking_reason'] = ''
+            payload['submission_id'] = str(payload.get('submission_id') or '').strip()
+            return payload
 
+        # 执行节点：status/delivery_status 由运行时推导——一次提交就是「我做完了」。
+        payload['status'] = 'success'
+        payload['delivery_status'] = 'final'
+        payload['verdict'] = ''
+        payload['blocking_reason'] = ''
+        payload.setdefault('summary', '')
         payload.setdefault('answer', '')
         payload.setdefault('remaining_work', [])
-        payload.setdefault('blocking_reason', '')
+        payload['submission_id'] = str(payload.get('submission_id') or '').strip()
         raw_evidence = payload.get('evidence')
         if not isinstance(raw_evidence, list):
             raw_evidence = []
@@ -8575,23 +8587,14 @@ class ReActToolLoop:
             else item
             for item in list(raw_evidence or [])
         ]
-
-        if status == 'success':
+        if not list(payload.get('evidence') or []):
+            payload['evidence'] = cls._auto_wrapped_final_result_evidence(
+                message_history=message_history,
+                response_content=str(response_content or ''),
+            )
+        remaining_work = payload.get('remaining_work')
+        if not isinstance(remaining_work, list):
             payload['remaining_work'] = []
-            payload['blocking_reason'] = ''
-            if not list(payload.get('evidence') or []):
-                payload['evidence'] = cls._auto_wrapped_final_result_evidence(
-                    message_history=message_history,
-                    response_content=str(response_content or ''),
-                )
-        elif status == 'failed':
-            remaining_work = payload.get('remaining_work')
-            if not isinstance(remaining_work, list):
-                payload['remaining_work'] = []
-            current_delivery_status = str(payload.get('delivery_status') or '').strip().lower()
-            if current_delivery_status == 'blocked' and not str(payload.get('blocking_reason') or '').strip():
-                payload['blocking_reason'] = str(payload.get('summary') or payload.get('answer') or '').strip()
-
         return payload
 
     @staticmethod

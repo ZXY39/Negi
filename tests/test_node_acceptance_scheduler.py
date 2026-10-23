@@ -258,7 +258,7 @@ class TestVerdictDrain:
         assert service.store.list_task_node_notifications(TASK, ROOT) == []
 
     @pytest.mark.asyncio
-    async def test_terminal_failure_verdict_fails_the_child(self, tmp_path, monkeypatch):
+    async def test_no_progress_verdict_pauses_the_child_and_escalates(self, tmp_path, monkeypatch):
         service = _service(tmp_path)
         _seed(service)
         _capture_calls(service, monkeypatch)
@@ -267,17 +267,19 @@ class TestVerdictDrain:
             lambda record: record.model_copy(
                 update={
                     'status': 'failed',
-                    'failure_reason': '交付物不可用且无法修复',
+                    'failure_reason': '第 2 节仍缺少实测数据（与上一轮相同）',
                     'metadata': {
                         **dict(record.metadata or {}),
                         'result_payload': NodeFinalResult(
                             status='failed',
-                            delivery_status='blocked',
-                            summary='交付物不可用且无法修复',
-                            answer='',
+                            delivery_status='final',
+                            summary='第 2 节仍缺少实测数据（与上一轮相同）',
+                            answer='第 2 节仍缺少实测数据（与上一轮相同）',
                             evidence=[],
                             remaining_work=[],
-                            blocking_reason='交付物不可用且无法修复',
+                            blocking_reason='',
+                            verdict='reject_no_progress',
+                            submission_id='submission:test',
                         ).model_dump(mode='json'),
                     },
                 }
@@ -289,9 +291,18 @@ class TestVerdictDrain:
 
         assert progressed is True
         child = service.store.get_node(CHILD)
-        assert child.status == 'failed'
-        assert '无法修复' in (child.failure_reason or '')
-        assert service.store.list_task_node_notifications(TASK, ROOT)
+        # 第三档不是 failed：被验节点停在人工可见的异常暂停上，现场保留。
+        assert child.status == 'in_progress'
+        assert child.pause_reason == 'error'
+        assert child.is_paused is True
+        assert '缺少实测数据' in (child.failure_reason or '') or '缺少实测数据' in (
+            (service.store.get_task_node_pause(CHILD).remark if service.store.get_task_node_pause(CHILD) else '')
+        )
+        parent_notices = service.store.list_task_node_notifications(TASK, ROOT)
+        assert any(
+            '子节点' in str(item.message or '') and '暂停' in str(item.message or '')
+            for item in parent_notices
+        )
 
 
     @pytest.mark.asyncio
@@ -395,3 +406,108 @@ class TestNonRootAcceptanceHandshake:
         assert handshake['acceptance_node_id'] == ACCEPTANCE
         assert refreshed.status == 'in_progress'
         assert service.store.list_task_node_notifications(TASK, ACCEPTANCE)
+
+
+class TestVerdictContext:
+    def test_first_round_tail_forbids_no_progress(self, tmp_path: Path) -> None:
+        service = _service(tmp_path)
+        _seed(service)
+        task = service.store.get_task(TASK)
+        acceptance = service.store.get_node(ACCEPTANCE)
+
+        tail = service.node_runner._acceptance_turn_tail(task=task, node=acceptance)
+
+        assert '首次裁定' in tail
+        assert 'reject_no_progress' in tail
+
+    def test_verdict_history_is_injected_each_round(self, tmp_path: Path) -> None:
+        service = _service(tmp_path)
+        _seed(service)
+        service.store.update_node(
+            ACCEPTANCE,
+            lambda record: record.model_copy(
+                update={
+                    'metadata': {
+                        **dict(record.metadata or {}),
+                        'rejection_history': [
+                            {'at': STAMP, 'status': 'failed', 'final_output': '第 2 节缺少实测数据', 'failure_reason': ''},
+                            {'at': STAMP, 'status': 'failed', 'final_output': '第 2 节仍缺少实测数据', 'failure_reason': ''},
+                        ],
+                    }
+                }
+            ),
+        )
+        task = service.store.get_task(TASK)
+        acceptance = service.store.get_node(ACCEPTANCE)
+
+        tail = service.node_runner._acceptance_turn_tail(task=task, node=acceptance)
+
+        assert '#1 [reject]' in tail
+        assert '#2 [reject]' in tail
+        assert '第 2 节缺少实测数据' in tail
+        assert '第 2 节仍缺少实测数据' in tail
+        assert '首次裁定' not in tail
+
+    def test_acceptance_sees_non_root_notices(self, tmp_path: Path) -> None:
+        """决策 J：验收节点看被验节点的追加要求，不再只对根节点开放。"""
+        service = _service(tmp_path)
+        _seed(service)
+        service.store.update_node(
+            CHILD,
+            lambda record: record.model_copy(
+                update={
+                    'metadata': {
+                        **dict(record.metadata or {}),
+                        'pending_append_notice_records': [
+                            {
+                                'notification_id': 'notif:1',
+                                'message': '验收口径改为 B：必须给出实测值',
+                                'created_at': STAMP,
+                                'order_index': 1,
+                            }
+                        ],
+                    }
+                }
+            ),
+        )
+        task = service.store.get_task(TASK)
+        acceptance = service.store.get_node(ACCEPTANCE)
+
+        tail = service.node_runner._acceptance_turn_tail(task=task, node=acceptance)
+
+        assert '验收口径改为 B' in tail
+
+    @pytest.mark.asyncio
+    async def test_first_round_cannot_select_no_progress(self, tmp_path: Path) -> None:
+        service = _service(tmp_path)
+        _seed(service)
+        task = service.store.get_task(TASK)
+        acceptance = service.store.get_node(ACCEPTANCE)
+
+        with pytest.raises(ValueError):
+            await service.node_runner._submit_final_result(
+                task=task,
+                node=acceptance,
+                payload={'verdict': 'reject_no_progress', 'feedback': '毫无变化'},
+            )
+
+    def test_submission_schema_has_no_status_or_blocked_shape(self) -> None:
+        from main.runtime.internal_tools import SubmitFinalResultTool
+
+        async def _callback(payload):
+            return payload
+
+        execution = SubmitFinalResultTool(_callback, node_kind='execution')
+        acceptance = SubmitFinalResultTool(_callback, node_kind='acceptance')
+
+        execution_props = set(execution.parameters['properties'])
+        assert 'status' not in execution_props
+        assert 'delivery_status' not in execution_props
+        assert 'blocking_reason' not in execution_props
+        assert 'remaining_work' in execution_props
+        assert set(acceptance.parameters['properties']) == {'verdict', 'feedback'}
+        assert acceptance.parameters['properties']['verdict']['enum'] == [
+            'pass',
+            'reject',
+            'reject_no_progress',
+        ]
