@@ -821,6 +821,15 @@ class MainRuntimeService:
             per_task_limit=1,
         )
         self.task_actor_service.node_watchdog = self.node_watchdog
+
+        def _notify_wait_cycle(**kwargs: Any) -> None:
+            try:
+                loop = asyncio.get_running_loop()
+            except RuntimeError:
+                return
+            loop.create_task(self._notify_wait_cycle(**kwargs), name='wait-cycle-notice')
+
+        self.task_actor_service.wait_cycle_notifier = _notify_wait_cycle
         self.task_actor_service.interrupted_task_requeue_callback = (
             lambda task_id: asyncio.get_running_loop().call_soon(
                 lambda normalized_task_id=str(task_id or '').strip(): asyncio.create_task(
@@ -4704,6 +4713,15 @@ class MainRuntimeService:
             source_node_id=str(node.node_id or '').strip(),
             intent_kind=INTENT_PROGRESS,
             ref=ref,
+        )
+
+    async def _notify_wait_cycle(self, *, task_id: str, node_id: str, reason: str) -> dict[str, Any]:
+        """等待图环检测的系统通知：以 frontdoor 身份投递（必唤醒，可外部破环）。"""
+        return await self.deliver_node_message(
+            task_id=task_id,
+            target_node_id=node_id,
+            message=str(reason or '').strip(),
+            origin='frontdoor',
         )
 
     async def _deliver_child_abnormal_pause(

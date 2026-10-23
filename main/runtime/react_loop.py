@@ -2124,11 +2124,18 @@ class ReActToolLoop:
                     round_id=round_id,
                     item=inspected_item,
                 )
+                # 决策 H：进程没了，在途的同步工具也没了。按**工具失败**注入结果
+                # （Error 前缀 + error 状态），让模型带着这条失败继续本回合；原因里
+                # 保留"可能已产生副作用、重试前先核对"的分类器结论。
+                interrupted_content = (
+                    'Error: tool call interrupted by a process restart before its result was recorded. '
+                    + self._recovery_checked_tool_content(inspected_item)
+                ).strip()
                 synthetic_live_state = self._resume_live_tool_state(
                     live_state,
                     call_id=call_id,
                     tool_name=tool_name,
-                    status='interrupted',
+                    status='error',
                 )
                 synthetic_live_state['finished_at'] = now_iso()
                 ordered_results.append(
@@ -2138,8 +2145,8 @@ class ReActToolLoop:
                             synthetic_live_state,
                             call_id=call_id,
                             tool_name=tool_name,
-                            content=self._recovery_checked_tool_content(inspected_item),
-                            status='interrupted',
+                            content=interrupted_content,
+                            status='error',
                         ),
                     }
                 )

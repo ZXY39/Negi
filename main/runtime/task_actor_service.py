@@ -22,6 +22,7 @@ from main.runtime.acceptance_handshake import (
     normalize_acceptance_handshake,
 )
 from main.runtime.node_runner import SKIPPED_CHECK_RESULT
+from main.runtime.wait_graph import build_wait_nodes, find_wait_cycles
 from main.types import KIND_ACCEPTANCE
 
 _DEFAULT_NODE_DISPATCH_LIMITS = {
@@ -616,6 +617,8 @@ class TaskActorService:
         self._stall_notifier = stall_notifier
         # P6 节点看门狗：结构判停（三条判据）。由 MainRuntimeService 注入。
         self.node_watchdog = None
+        # 等待图环检测命中时的系统通知口（由 MainRuntimeService 注入）。
+        self.wait_cycle_notifier = None
         self._dispatchers: dict[str, TaskNodeDispatcher] = {}
         self._node_dispatch_entry_budget = node_dispatch_entry_budget
         self._node_dispatch_limits = {
@@ -1229,6 +1232,69 @@ class TaskActorService:
             except Exception:
                 logger.exception('failed to settle leftover node: task={} node={}', task_id, node_id)
 
+    async def _break_wait_cycles(self, task_id: str) -> bool:
+        """等待图环检测（P6 兜底）：命中则强制唤醒环里最靠近根的节点。
+
+        判据只读持久事实：节点行 + 帧相位 + 握手状态 + `wake_on`。`wake_on=any`
+        的停靠被视为有外部唤醒源，不参与成环；终态节点会发出终局消息，也不参与。
+        """
+        task = self._store.get_task(task_id)
+        if task is None:
+            return False
+        records = list(self._store.list_nodes(task_id) or [])
+        frames: dict[str, dict[str, Any]] = {}
+        for record in records:
+            node_id = str(getattr(record, 'node_id', '') or '').strip()
+            if not node_id:
+                continue
+            try:
+                payload_reader = getattr(self._log_service, 'read_runtime_frame_payload', None)
+                frame = payload_reader(task_id, node_id) if callable(payload_reader) else None
+                if frame is None:
+                    frame = self._log_service.read_runtime_frame(task_id, node_id)
+            except Exception:
+                frame = None
+            if isinstance(frame, dict):
+                frames[node_id] = dict(frame)
+        nodes = build_wait_nodes(
+            records=records,
+            frames=frames,
+            handshake_lookup=lambda record: normalize_acceptance_handshake(
+                (getattr(record, 'metadata', None) or {}).get(ACCEPTANCE_HANDSHAKE_KEY)
+                if isinstance(getattr(record, 'metadata', None), dict)
+                else {}
+            ),
+        )
+        cycles = find_wait_cycles(nodes)
+        if not cycles:
+            return False
+        broke = False
+        for cycle in cycles:
+            node_id = str(cycle[0] or '').strip()
+            if not node_id:
+                continue
+            reason = (
+                '【运行时等待图检测】检测到等待成环：'
+                + ' → '.join(cycle)
+                + '。已强制唤醒本节点以打破死锁；请根据当前事实决定继续推进、调整要求还是终止这条分支。'
+            )
+            try:
+                await self.resume_node_entry(task_id, node_id)
+            except Exception:
+                logger.exception('wait-cycle resume failed: task={} node={}', task_id, node_id)
+            notifier = self.wait_cycle_notifier
+            if callable(notifier):
+                try:
+                    notifier(task_id=task_id, node_id=node_id, reason=reason)
+                except Exception:
+                    logger.exception('wait-cycle notice failed: task={} node={}', task_id, node_id)
+            try:
+                logger.warning('wait-for cycle broken: task={} cycle={}', task_id, cycle)
+            except Exception:
+                pass
+            broke = True
+        return broke
+
     async def _drive_scheduler_loop(
         self,
         *,
@@ -1256,6 +1322,9 @@ class TaskActorService:
             if await self._drain_acceptance_verdicts(task_id):
                 continue
             if await self._dispatch_runnable_nodes(task_id, dispatcher):
+                continue
+            # 只剩停靠节点时哨一次等待图：成环就强制唤醒最靠近根的节点。
+            if await self._break_wait_cycles(task_id):
                 continue
             if dispatcher.has_live_entries():
                 await dispatcher.wait_activity()
