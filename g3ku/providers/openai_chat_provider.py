@@ -1,4 +1,4 @@
-﻿"""OpenAI Chat Completions protocol provider (/v1/chat/completions)."""
+"""OpenAI Chat Completions protocol provider (/v1/chat/completions)."""
 
 from __future__ import annotations
 

@@ -1,4 +1,4 @@
-﻿"""File system tools: read, write, edit, delete."""
+"""File system tools: read, write, edit, delete."""
 
 import difflib
 from pathlib import Path

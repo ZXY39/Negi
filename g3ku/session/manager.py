@@ -1,4 +1,4 @@
-﻿"""Session management for conversation history."""
+"""Session management for conversation history."""
 
 import json
 import os

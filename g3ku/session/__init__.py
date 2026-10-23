@@ -1,4 +1,4 @@
-﻿"""Session management module."""
+"""Session management module."""
 
 from g3ku.session.manager import Session, SessionManager
 

@@ -1,4 +1,4 @@
-﻿"""CLI commands for Negi."""
+"""CLI commands for Negi."""
 
 import asyncio
 import os

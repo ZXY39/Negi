@@ -1,4 +1,4 @@
-﻿"""Shell execution tool."""
+"""Shell execution tool."""
 
 import asyncio
 import json

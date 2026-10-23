@@ -1,4 +1,4 @@
-﻿"""Transport adapter that routes channel inbound messages into SessionRuntimeBridge."""
+"""Transport adapter that routes channel inbound messages into SessionRuntimeBridge."""
 
 from __future__ import annotations
 

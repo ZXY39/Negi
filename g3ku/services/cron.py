@@ -1,4 +1,4 @@
-﻿"""Cron service for scheduling agent tasks."""
+"""Cron service for scheduling agent tasks."""
 
 import asyncio
 import json

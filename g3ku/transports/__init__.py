@@ -1,4 +1,4 @@
-﻿"""Transport-layer re-exports for bus and channel event adapters."""
+"""Transport-layer re-exports for bus and channel event adapters."""
 
 from g3ku.bus.events import InboundMessage, OutboundMessage
 from g3ku.bus.queue import MessageBus

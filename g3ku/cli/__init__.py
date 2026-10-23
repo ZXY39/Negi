@@ -1,2 +1,2 @@
-﻿"""CLI module for g3ku."""
+"""CLI module for g3ku."""
 

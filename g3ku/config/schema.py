@@ -1,4 +1,4 @@
-﻿"""Configuration schema using Pydantic."""
+"""Configuration schema using Pydantic."""
 
 import re
 from pathlib import Path

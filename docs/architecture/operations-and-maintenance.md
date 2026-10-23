@@ -671,9 +671,10 @@ IM 渠道有两条：内置官方 QQ 适配器（`g3ku/qq_official/`，进程内
 N801/N802 走 `per-file-ignores`，控制流异常名（`*Requested` / `*Closed` / `*Interrupted`）
 与被延迟导入绑定的类名一律用行级 `# noqa`，因为整片 ignore 会吞掉同一文件里后续的真违规。
 
-`scripts/lint.ps1` 的第二条腿是 `ruff format --check .`。带 UTF-8 BOM 的 `.py` 会让
-ruff 0.17.1 在渲染差异时报内部错误（退出码 101），这条腿的红灯既来自格式债也来自该
-崩溃，判读时先按 `ruff check` 的自有代码口径确认前者。
+`scripts/lint.ps1` 的第二条腿是 `ruff format --check .`，它管的是格式债，与 `ruff check`
+的告警是两条独立判定，一边绿不蕴含另一边绿。该腿若报内部错误（ruff 崩溃、退出码 101）而不是
+列出未格式化文件，先在 `git ls-files '*.py'` 里找带 UTF-8 BOM 的源文件：ruff 0.17.1 渲染差异
+时会在 BOM 文件上 panic，而 `.py` 里的 BOM 只是编码元数据，去掉它不改变 Python 的解码结果。
 
 ## Memory Queue Workflow
 

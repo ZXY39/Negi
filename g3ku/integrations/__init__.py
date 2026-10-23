@@ -1,2 +1,2 @@
-﻿"""Third-party integration adapters for g3ku."""
+"""Third-party integration adapters for g3ku."""
 

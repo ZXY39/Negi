@@ -1,4 +1,4 @@
-﻿"""Core runtime-facing state, message, and event types."""
+"""Core runtime-facing state, message, and event types."""
 
 from g3ku.core.events import AgentEvent
 from g3ku.core.messages import (

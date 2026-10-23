@@ -1,4 +1,4 @@
-﻿"""Agent core module (lazy exports to avoid heavy optional deps at import-time)."""
+"""Agent core module (lazy exports to avoid heavy optional deps at import-time)."""
 
 from __future__ import annotations
 

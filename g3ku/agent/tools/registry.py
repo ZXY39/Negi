@@ -1,4 +1,4 @@
-﻿"""Tool registry for dynamic tool management."""
+"""Tool registry for dynamic tool management."""
 
 from __future__ import annotations
 

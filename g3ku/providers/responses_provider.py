@@ -1,4 +1,4 @@
-﻿"""Generic /v1/responses provider (Codex protocol) using API Key."""
+"""Generic /v1/responses provider (Codex protocol) using API Key."""
 
 from __future__ import annotations
 

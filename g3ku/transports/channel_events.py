@@ -1,4 +1,4 @@
-﻿"""Transport helpers for runtime-to-channel event projection."""
+"""Transport helpers for runtime-to-channel event projection."""
 
 from g3ku.runtime.channel_events import (
     build_channel_outbound_message,

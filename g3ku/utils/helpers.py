@@ -1,4 +1,4 @@
-﻿"""Utility functions for g3ku."""
+"""Utility functions for g3ku."""
 
 import os
 import re
