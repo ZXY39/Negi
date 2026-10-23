@@ -19,7 +19,6 @@ from g3ku.runtime.memory_scope import normalize_memory_scope
 from g3ku.runtime.project_environment import current_project_environment
 from g3ku.utils.helpers import PATH_ANCHOR_RULE_TEXT, path_anchor_policy
 from main.errors import (
-    DistributionHoldError,
     NodePausedError,
     TaskPausedError,
     describe_exception,
@@ -91,15 +90,6 @@ from main.runtime.pending_notice_state import (
     normalize_pending_notice_state,
     set_pending_notice_state,
 )
-from main.runtime.subtree_hold import (
-    NOTICE_ACTION_CONTINUE_ACCEPTANCE,
-    NOTICE_ACTION_RESUME_EXECUTION,
-    NOTICE_INTERRUPT_REASON,
-    make_epoch_state_lookup,
-    make_stale_hold_logger,
-    resolve_subtree_hold_epoch_id,
-    spawn_round_has_unmaterialized_entries,
-)
 from main.runtime.tool_names import (
     ENTER_WAIT_TOOL_NAME,
     LIST_CHILD_NODES_TOOL_NAME,
@@ -113,6 +103,9 @@ from main.storage.disk_guard import is_disk_full_error
 from main.types import KIND_ACCEPTANCE, KIND_EXECUTION, STATUS_FAILED, STATUS_SUCCESS
 
 SKIPPED_CHECK_RESULT = '未检验'
+# 分发决策回合已随 epoch 下线；这两个常量只被那段休眠代码引用，随它一起删除。
+NOTICE_ACTION_RESUME_EXECUTION = 'resume_execution'
+NOTICE_ACTION_CONTINUE_ACCEPTANCE = 'continue_acceptance'
 _RECOVERY_FINGERPRINT_KEY = 'recovery_fingerprint'
 BLOCKED_VERIFICATION_PROMPT_FILE = 'blocked_verification.md'
 _BLOCKED_VERIFICATION_ONLY_KEY = 'blocked_verification_only'
@@ -498,11 +491,6 @@ class NodeRunner:
             default_success='parent node already completed',
         ):
             return True
-        # 分发屏障 hold 期间的取消（看门狗 poll 抛 DistributionHoldError 后中止在飞
-        # spawn 协程）必须传播，绝不能把仍存活的 spawn entries 盖成 error——那会让
-        # round 永远无法 finish、同 id 幂等重入失去意义（2026-09-15 孤儿子节点事故 L1）。
-        if self._subtree_hold_epoch_id(task_id=task_id, node_id=parent_node_id):
-            return True
         return False
 
     def _spawn_spec_payload(self, spec: SpawnChildSpec | dict[str, Any] | Any) -> dict[str, Any] | None:
@@ -594,13 +582,6 @@ class NodeRunner:
                 pause_reason=str(getattr(node, 'pause_reason', '') or 'manual'),
             )
             raise NodePausedError(task_id, node.node_id)
-        if self._distribution_mode_active(task_id=task_id, node_id=node.node_id):
-            return await self._run_distribution_node(task=task, node=node)
-        # 子树分发屏障 hold：必须在分发 frontier 分支之后（frontier 节点走控制
-        # 回合而非冻结）、在人工节点暂停之后（操作员暂停优先，延迟分发目标）。
-        hold_epoch_id = self._blocking_subtree_hold_epoch_id(task_id=task_id, node=node)
-        if hold_epoch_id:
-            raise DistributionHoldError(task_id, node.node_id, hold_epoch_id)
         if self._pause_requested(task_id):
             self._log_service.set_pause_state(task_id, pause_requested=True, is_paused=True)
             raise TaskPausedError(task_id)
@@ -759,11 +740,6 @@ class NodeRunner:
                 self._flush_latest_valid_result_if_paused(task_id=task_id, node_id=node.node_id)
                 self._mark_node_paused(task_id, node.node_id)
                 raise NodePausedError(task_id, node.node_id)
-            hold_epoch_id = self._subtree_hold_epoch_id(task_id=task_id, node_id=node.node_id)
-            if hold_epoch_id:
-                # 节点在屏障生效期间跑完了本轮：不落终态，冻结等待释放后恢复。
-                self._flush_latest_valid_result_if_paused(task_id=task_id, node_id=node.node_id)
-                raise DistributionHoldError(task_id, node.node_id, hold_epoch_id)
             terminal_reason = self._task_terminal_reason(task_id, task=task)
             if terminal_reason:
                 return self._mark_failed(task_id, node.node_id, reason=terminal_reason)
@@ -774,7 +750,6 @@ class NodeRunner:
                 return gated_blocked_result
             result = self._maybe_start_acceptance_handshake(task=task, node=node, result=result) or result
             if str(result.delivery_status or '').strip() == 'partial':
-                self._refresh_resume_ready_distribution_state(task_id=task_id)
                 self._log_service.refresh_task_view(task_id, mark_unread=True)
                 return result
             return self._mark_finished(task_id, node.node_id, result)
@@ -788,12 +763,6 @@ class NodeRunner:
                 self._mark_node_paused(task_id, node.node_id)
             except Exception:
                 pass
-            raise
-        except DistributionHoldError:
-            # 子树屏障冻结：只刷新最新有效结果、保留 frame 供恢复；绝不落
-            # 暂停/失败标志（那不是操作员暂停），也绝不能落入下方通用
-            # Exception 陷阱（会被转成 error-pause 污染节点状态）。
-            self._flush_latest_valid_result_if_paused(task_id=task_id, node_id=node.node_id)
             raise
         except asyncio.CancelledError:
             latest_task = self._store.get_task(task_id)
@@ -810,13 +779,6 @@ class NodeRunner:
                 except Exception:
                     pass
                 raise NodePausedError(task_id, node.node_id)
-            # 无任何取消/暂停标志却收到取消（如分发屏障期间看门狗中止在飞工具、
-            # 进程内杂散取消）：若节点正处于活动 hold，转为冻结而非落 failed——
-            # 保持 future pending 等释放复活（2026-09-15 孤儿子节点事故 B3）。
-            hold_epoch_id = self._subtree_hold_epoch_id(task_id=task_id, node_id=node.node_id)
-            if hold_epoch_id:
-                self._flush_latest_valid_result_if_paused(task_id=task_id, node_id=node.node_id)
-                raise DistributionHoldError(task_id, node.node_id, hold_epoch_id)
             # 引擎级中断（worker 进程退出收尾、无标志的杂散取消）：绝不落
             # failed/canceled 终态——节点保持 in_progress，任务留给下一个
             # worker 启动的 _recover_interrupted_task 恢复重排（2026-09-16
@@ -1949,26 +1911,6 @@ class NodeRunner:
             )
 
         next_rejection_count = int(handshake.get('rejection_count') or 0) + 1
-        if str(result.blocking_reason or '').strip() == NOTICE_INTERRUPT_REASON:
-            # 定向通知打断验收（决策回合 resume_execution 的合成结果）：
-            # 不消耗拒收计数、不发验收→执行交接消息（用户通知本身就是给
-            # 执行节点的消息）。验收节点的作废与 frame 丢弃由驱动器在解析
-            # future 前完成；这里只把执行节点恢复为等待重试并交还管线循环。
-            self._interrupt_acceptance_for_notice_retry(
-                task=task,
-                execution=execution,
-                acceptance=acceptance,
-                handshake=handshake,
-            )
-            return NodeFinalResult(
-                status=STATUS_SUCCESS,
-                delivery_status='partial',
-                summary='acceptance interrupted by user notice; waiting for execution re-run',
-                answer='',
-                evidence=[],
-                remaining_work=[],
-                blocking_reason='',
-            )
         if str(result.delivery_status or '').strip().lower() == 'blocked':
             # 显式 blocked 是验收节点对执行结果作出的「不再打回」终局失败，
             # 与普通 failed+final 质量拒收严格区分：不得进入无上限拒收循环。
@@ -2753,60 +2695,10 @@ class NodeRunner:
             return {}
         return dict(runtime_meta.get('distribution') or {})
 
-    def _subtree_hold_epoch_id(self, *, task_id: str, node_id: str) -> str:
-        """节点当前是否被子树分发屏障冻结；返回 epoch id 或空串。
-
-        A1：命中 hold 时回查 epochs 表校验 meta 新鲜度——已完成 epoch 的陈旧
-        meta 不再冻结节点（2026-09-15 孤儿子节点事故 L2：复活即再冻结）。
-        """
-        normalized_node_id = str(node_id or '').strip()
-        if not normalized_node_id:
-            return ''
-        return resolve_subtree_hold_epoch_id(
-            distribution=self._distribution_runtime_state(task_id),
-            get_node=self._store.get_node,
-            node_id=normalized_node_id,
-            get_epoch_state=make_epoch_state_lookup(self._store, task_id),
-            on_stale_hold=make_stale_hold_logger(logger.warning),
-        )
-
-    def _blocking_subtree_hold_epoch_id(self, *, task_id: str, node) -> str:
-        """应真正中止该节点运行的分发 hold epoch id（空串 = 不中止）。
-
-        要点 5 未物化豁免（`main/runtime/subtree_hold.py`）：持有未完成且仍有未物化
-        entry 的 spawn 轮的节点，在物化完成前不被 hold 中止——子节点物化只能由该节点
-        自己的协程产出，物化前中止它，屏障 drain 就会等一个只有「释放屏障」才能产生的
-        结果（互等死锁）。物化一完成谓词立即为假，下个检查点照常冻结。
-        判定通道异常时保守维持原有冻结行为。
-        """
-        hold_epoch_id = self._subtree_hold_epoch_id(task_id=task_id, node_id=str(getattr(node, 'node_id', '') or '').strip())
-        if not hold_epoch_id:
-            return ''
-        try:
-            if spawn_round_has_unmaterialized_entries(
-                get_node=self._store.get_node,
-                task_id=task_id,
-                node=node,
-            ):
-                return ''
-        except Exception:
-            pass
-        return hold_epoch_id
-
     def _distribution_mode_active(self, *, task_id: str, node_id: str) -> bool:
-        distribution = self._distribution_runtime_state(task_id)
-        state = str(distribution.get('state') or '').strip()
-        # 仅 distributing 态允许进入控制回合：驱动器总是先把 frontier 写入
-        # meta 再执行回合；drain 期间（barrier_requested/barrier_draining）
-        # 目标节点必须走 hold 而不是提前分发。
-        if state != 'distributing':
-            return False
-        frontier_node_ids = [
-            str(item or '').strip()
-            for item in list(distribution.get('frontier_node_ids') or [])
-            if str(item or '').strip()
-        ]
-        return str(node_id or '').strip() in frontier_node_ids
+        """分发 epoch 已下线：不再有节点走分发控制回合。保留方法供旧调用方探测。"""
+        _ = (task_id, node_id)
+        return False
 
     def _active_distribution_epoch(self, task_id: str) -> tuple[str, dict[str, Any], Any] | None:
         distribution = self._distribution_runtime_state(task_id)
@@ -4698,7 +4590,7 @@ class NodeRunner:
                     specs=specs,
                     call_id=call_id,
                 )
-            except (TaskPausedError, NodePausedError, DistributionHoldError):
+            except (TaskPausedError, NodePausedError):
                 # 冻结类控制信号照旧上抛，绝不改写成一次交付（见 main-task-runtime
                 # 「Node-Level Pause and Recovery」的结算车道合同）。
                 raise
@@ -5136,7 +5028,7 @@ class NodeRunner:
                 entries=[dict(item) for item in resolved if isinstance(item, dict)],
                 specs=specs,
             )
-        except (NodePausedError, TaskPausedError, DistributionHoldError, asyncio.CancelledError):
+        except (NodePausedError, TaskPausedError, asyncio.CancelledError):
             raise
         except Exception as exc:
             detail = f'stage={stage} entry_count={len(resolved) if counted else "unreadable"}'

@@ -116,7 +116,6 @@ from g3ku.runtime.tool_watchdog import (
     run_tool_with_watchdog,
 )
 from main.errors import (
-    DistributionHoldError,
     NodePausedError,
     TaskPausedError,
     describe_exception,
@@ -172,13 +171,6 @@ from main.runtime.pending_notice_state import (
 )
 from main.runtime.plain_text_reply import build_node_plain_text_reply_block_message
 from main.runtime.recovery_check import RecoveryCheckDecision, RecoveryCheckEngine
-from main.runtime.subtree_hold import (
-    DISTRIBUTION_ACTIVE_STATES,
-    make_epoch_state_lookup,
-    make_stale_hold_logger,
-    resolve_subtree_hold_epoch_id,
-    spawn_round_has_unmaterialized_entries,
-)
 from main.runtime.tool_call_repair import (
     XML_REPAIR_ATTEMPT_LIMIT,
     build_xml_tool_repair_message,
@@ -2277,46 +2269,9 @@ class ReActToolLoop:
         return prepared_history
 
     def _distribution_priority_blocks_recovery(self, *, runtime_context: dict[str, Any], node) -> bool:
-        distribution = dict((runtime_context or {}).get('distribution_state') or {})
-        # 兼容旧持久化 meta：task_wide_barrier 是 subtree_barrier 的历史名称
-        # （根目标定向即原全局模式），两者语义一致。
-        if str(distribution.get('mode') or '').strip() not in {'subtree_barrier', 'task_wide_barrier'}:
-            return False
-        normalized_node_id = str(getattr(node, 'node_id', '') or '').strip()
-        if not normalized_node_id:
-            return False
-        # 要点 5 豁免：持有未物化 spawn 轮的节点必须让它的同 id 重放跑完（走
-        # waiting_children / pending_tool 恢复），否则被拦下的父节点只会让模型
-        # 重发一轮 spawn（新 call id → 双轮/重复派生），而屏障 drain 正等着的
-        # 是原轮的子节点。判定不可用时维持既有行为（照常拦阻）。
-        try:
-            if spawn_round_has_unmaterialized_entries(
-                get_node=self._log_service._store.get_node,
-                task_id=str(getattr(node, 'task_id', '') or '').strip(),
-                node=node,
-            ):
-                return False
-        except Exception:
-            pass
-        blocked_node_ids = {
-            str(item or '').strip()
-            for item in list(distribution.get('blocked_node_ids') or [])
-            if str(item or '').strip()
-        }
-        if normalized_node_id in blocked_node_ids:
-            return True
-        pending_notice_node_ids = {
-            str(item or '').strip()
-            for item in list(distribution.get('pending_notice_node_ids') or [])
-            if str(item or '').strip()
-        }
-        if normalized_node_id not in pending_notice_node_ids:
-            return False
-        metadata = dict(getattr(node, 'metadata', None) or {}) if isinstance(getattr(node, 'metadata', None), dict) else {}
-        pending_notice_state = normalize_pending_notice_state(metadata.get(PENDING_NOTICE_STATE_KEY))
-        if str(pending_notice_state.get('resume_mode') or '').strip() == RESUME_MODE_WAIT_FOR_CHILDREN:
-            return False
-        return True
+        """分发 epoch 已下线：不再有"分发优先级压制崩溃恢复"的情形。"""
+        _ = (runtime_context, node)
+        return False
 
     @staticmethod
     def _park_requested(results: list[dict[str, Any]]) -> bool:
@@ -2339,9 +2294,7 @@ class ReActToolLoop:
 
     @staticmethod
     def _wait_for_children_recovery_only(*, runtime_context: dict[str, Any], node) -> bool:
-        distribution = dict((runtime_context or {}).get('distribution_state') or {})
-        if str(distribution.get('state') or '').strip() in DISTRIBUTION_ACTIVE_STATES:
-            return False
+        _ = runtime_context
         metadata = dict(getattr(node, 'metadata', None) or {}) if isinstance(getattr(node, 'metadata', None), dict) else {}
         pending_notice_state = normalize_pending_notice_state(metadata.get(PENDING_NOTICE_STATE_KEY))
         return str(pending_notice_state.get('resume_mode') or '').strip() == RESUME_MODE_WAIT_FOR_CHILDREN
@@ -4328,10 +4281,6 @@ class ReActToolLoop:
                     # 转成 'Error executing ...' 会消费掉 tool_call_id、触发批后帧写
                     # 清空 pending_tool_calls，摧毁同 id 幂等重放通道。
                     raise
-                except DistributionHoldError:
-                    # 同上：分发屏障 hold 只冻结、不损坏。重抛让节点走 run_node 的
-                    # hold 冻结路径（frame 保留 pending_tool_calls，释放后同 id 重放）。
-                    raise
                 except asyncio.CancelledError:
                     raise
                 except Exception as exc:  # pragma: no cover - defensive fallback
@@ -5086,7 +5035,7 @@ class ReActToolLoop:
                 # 这三个是「节点该停」，不是「工具坏了该被取消」：观测旁路里只有它们允许
                 # 冒泡出 _safe_observe，其余异常一律降级。类型由本模块声明（g3ku 侧不得
                 # 反向 import main.errors），所以在这里显式交给看门狗。
-                observation_control_signals=(TaskPausedError, NodePausedError, DistributionHoldError),
+                observation_control_signals=(TaskPausedError, NodePausedError),
             )
             return outcome.value
         except Exception as exc:
@@ -5369,56 +5318,6 @@ class ReActToolLoop:
                     delivered=bool(getattr(existing, 'delivered', False)) if existing is not None else False,
                 )
                 raise NodePausedError(task_id, normalized_node_id)
-            # 子树分发屏障：每个安全检查点重读 runtime meta（不用 runtime_context
-            # 快照——通知可能在节点运行中途追加），命中即抛 hold 让节点在安全
-            # 相位停摆。人工节点暂停在上方优先，任务暂停/取消更优先。
-            # 防御式读取：log_service 缺 read_task_runtime_meta（离线回放等
-            # 场景）或读取失败时视为无分发，绝不阻断 ReAct 主循环。
-            distribution_meta: Any = None
-            meta_getter = getattr(self._log_service, 'read_task_runtime_meta', None)
-            if callable(meta_getter):
-                try:
-                    distribution_meta = dict(meta_getter(task_id) or {}).get('distribution')
-                except Exception:
-                    distribution_meta = None
-            # A1：命中 hold 时回查 epochs 表校验 meta 新鲜度——已完成 epoch 的
-            # 陈旧 meta 不再冻结节点（2026-09-15 孤儿子节点事故 L2）。store 缺
-            # 相应方法（离线回放等）时传 None，维持旧行为。
-            hold_store = self._log_service._store
-            hold_epoch_state_getter = (
-                make_epoch_state_lookup(hold_store, task_id)
-                if callable(getattr(hold_store, 'get_task_message_distribution_epoch', None))
-                else None
-            )
-            hold_epoch_id = resolve_subtree_hold_epoch_id(
-                distribution=distribution_meta if isinstance(distribution_meta, dict) else None,
-                get_node=hold_store.get_node,
-                node_id=normalized_node_id,
-                get_epoch_state=hold_epoch_state_getter,
-                on_stale_hold=make_stale_hold_logger(logger.warning),
-            )
-            if hold_epoch_id:
-                # 这条豁免要读整行（spawn 轮有没有未物化条目），所以整行读跟着这个稀有分支
-                # 取一次，而不是在每个检查点上先搬平均 254 KB 的正文。
-                node = hold_store.get_node(normalized_node_id)
-                # 要点 5 豁免：持有未物化 spawn 轮的节点不得在物化前被中止——
-                # 它的子节点只可能由它自己的协程产出，而屏障 drain 正等着那些
-                # 子节点（否则互等死锁，2026-09-18 task:d596a609bbb3 事故）。
-                # 只放宽「何时停」：物化一完成，谓词立刻为假，下个检查点照常冻结。
-                # 判定不可用时保守维持既有行为（照常冻结）。
-                if node is not None:
-                    deferred = False
-                    try:
-                        deferred = spawn_round_has_unmaterialized_entries(
-                            get_node=hold_store.get_node,
-                            task_id=task_id,
-                            node=node,
-                        )
-                    except Exception:
-                        deferred = False
-                    if deferred:
-                        return
-                raise DistributionHoldError(task_id, normalized_node_id, hold_epoch_id)
 
     def _abort_queued_tool_waits(self, task_id: str, exc: BaseException) -> None:
         """磁盘治理（P1）：任务暂停生效时中止其在预算队列中排队的工具调用。"""

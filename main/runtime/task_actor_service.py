@@ -8,7 +8,7 @@ from typing import Any
 
 from loguru import logger
 
-from main.errors import DistributionHoldError, NodePausedError, TaskPausedError, describe_exception
+from main.errors import NodePausedError, TaskPausedError, describe_exception
 from main.models import (
     NodeFinalResult,
     normalize_final_acceptance_metadata,
@@ -595,31 +595,6 @@ class TaskNodeDispatcher:
             lease = _DispatchLease(dispatcher=self, entry=entry, semaphore=semaphore)
             context_token = _CURRENT_DISPATCH_LEASE.set(lease)
             result = await self._node_runner.run_node(self._task_id, entry.node_id)
-        except DistributionHoldError as exc:
-            # 子树分发屏障冻结：对包括根在内的所有节点保持 future pending。
-            # 父管线自然停摆；分发驱动器在释放时对每个 held entry 调
-            # resume_node 在原 future 上重跑。绝不能 set_exception——那会被
-            # 父管线的通用错误处理转成 spawn 运行时错误、杀死整条分支。
-            # A2：冻结不再静默——落 WARN 供排查"复活失败"类事故（2026-09-15）。
-            try:
-                logger.warning(
-                    'node frozen by distribution hold (future kept pending): task={} node={} epoch={}',
-                    self._task_id,
-                    entry.node_id,
-                    str(getattr(exc, 'epoch_id', '') or ''),
-                )
-            except Exception:
-                pass
-            # 排空账本：把「这个节点已经停住」记下来，供分发期间的进度显示逐节点判读。
-            # 只做旁证写入，失败也不影响下面的 return（future 必须保持 pending）。
-            record_frozen_node_id(
-                self._store,
-                self._log_service,
-                task_id=self._task_id,
-                epoch_id=str(getattr(exc, 'epoch_id', '') or ''),
-                node_id=entry.node_id,
-            )
-            return
         except NodePausedError as exc:
             # Child entries keep their waiter future pending so the parent
             # pipeline pauses naturally. The root has no parent waiter, so it
