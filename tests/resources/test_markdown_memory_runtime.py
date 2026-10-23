@@ -2155,6 +2155,9 @@ async def test_v2_review_turn_payload_carries_the_whole_visible_tool_record(tmp_
         assert "HUGE_TOOL_OUTPUT_HEAD_MARKER" in payload_text
         assert "HUGE_TOOL_OUTPUT_TAIL_MARKER" in payload_text
         assert huge_output_text in payload_text
+        # 出参只带一份：不复制 output_preview_text 镜像（那份会把每条原子的尺寸翻倍）
+        assert '"output_preview_text"' not in payload_text
+        assert payload_text.count(huge_output_text) == 1
         # 回合旁白是用户可见的，原样带
         assert round_narration in payload_text
         # 载体上没有的字段不凭空出现

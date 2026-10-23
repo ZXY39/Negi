@@ -108,8 +108,6 @@ def resolve_note_token(
         return matches[0]
     return normalized
 
-_REVIEW_TOOL_OUTPUT_MAX_CHARS = 400
-_REVIEW_TOOL_PREVIEW_MAX_CHARS = 240
 _REVIEW_REPORTED_TOOL_ID_CAP = 5000
 # 轮次窗口默认 5 轮，攒不满就一直躺在缓冲里（活体实测 48 个会话压着 78 轮、最老 8 天
 # 从未送达 memory agent），所以再加一条按龄出口。每 tick 最多倒 2 个会话是入队侧限速，
@@ -5254,7 +5252,6 @@ class MemoryManager:
                         "status": status or "unknown",
                         "is_error": bool(status) and status != "success",
                         "arguments_text": str(tool.get("arguments_text") or "").strip(),
-                        "output_preview_text": str(tool.get("output_text") or "").strip(),
                         "output_text": str(tool.get("output_text") or "").strip(),
                     }
                 )
