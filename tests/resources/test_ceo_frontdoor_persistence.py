@@ -1307,7 +1307,8 @@ async def test_frontdoor_actual_request_trace_round_trips_usage_ground_truth(
         "effective_input_tokens": 168,
         "input_tokens": 123,
         "cache_hit_tokens": 45,
-        "provider_model": "openai:gpt-5.2",
+        # 真值记的是这一跳实际发出去的模型（provider_request_body.model），不是链首。
+        "provider_model": "gpt-5.4-mini",
         "actual_request_hash": str(payload["actual_request_hash"] or "").strip(),
         "source": "provider_usage",
     }
@@ -1426,7 +1427,8 @@ async def test_ceo_frontdoor_call_model_falls_back_to_preflight_truth_when_usage
         "effective_input_tokens": 1200,
         "input_tokens": 1200,
         "cache_hit_tokens": 0,
-        "provider_model": "openai:gpt-5.2",
+        # 真值记的是这一跳实际发出去的模型（provider_request_body.model），不是链首。
+        "provider_model": "gpt-5.4-mini",
         "actual_request_hash": str(payload["actual_request_hash"] or "").strip(),
         "source": "preflight_estimate",
     }

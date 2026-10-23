@@ -5091,12 +5091,16 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
         memory_snapshot: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         diagnostics = dict(prompt_cache_diagnostics or {})
-        provider_model = str((list(state.get("model_refs") or []) or [""])[0] or "").strip()
-        resolved_provider_model = str(
+        requested_provider_model = str((list(state.get("model_refs") or []) or [""])[0] or "").strip()
+        resolved_requested_model = str(
             dict(state.get("frontdoor_token_preflight_diagnostics") or {}).get("provider_model")
-            or provider_model
+            or requested_provider_model
             or ""
         ).strip()
+        # provider_request_body.model 才是这一跳真正发出去的模型：链上换成员（429 降档）
+        # 之后，链首显示名会把跨档那一跳的用量记到没服务它的模型头上（实盘 5/40 跳）。
+        served_provider_model = str(dict(provider_request_body or {}).get("model") or "").strip()
+        resolved_provider_model = served_provider_model or resolved_requested_model
         preflight_diagnostics = dict(state.get("frontdoor_token_preflight_diagnostics") or {})
         observed_input_truth = self._frontdoor_observed_input_truth(
             usage=usage,
@@ -5126,6 +5130,7 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
             "created_at": now_iso(),
             **turn_timing,
             "provider_model": resolved_provider_model,
+            "requested_provider_model": resolved_requested_model,
             "model_refs": [
                 str(item or "").strip()
                 for item in list(state.get("model_refs") or [])

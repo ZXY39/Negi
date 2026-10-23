@@ -6733,3 +6733,62 @@ async def test_postprocess_appends_a_frontdoor_turn_with_tool_results() -> None:
     assert turns[0]["text"] == "checking files"
     assert turns[0]["tools"][0]["tool_call_id"] == "call-1"
     assert turns[0]["tools"][0]["output_text"] == "ok"
+
+
+def test_build_frontdoor_request_artifact_payload_records_the_served_model() -> None:
+    runner = create_agent_impl.CreateAgentCeoFrontDoorRunner(loop=SimpleNamespace(main_task_service=None))
+
+    payload = runner._build_frontdoor_request_artifact_payload(
+        state={
+            "model_refs": ["deepseek-flash", "sensenova-6.8-flash-lite"],
+            "frontdoor_token_preflight_diagnostics": {"provider_model": "openai:deepseek-flash"},
+        },
+        session_key="web:shared",
+        turn_id="turn-escalated",
+        request_messages=[{"role": "user", "content": "hi"}],
+        tool_schemas=[],
+        prompt_cache_key="cache-key",
+        prompt_cache_diagnostics=build_actual_request_diagnostics(
+            request_messages=[{"role": "user", "content": "hi"}],
+            tool_schemas=[],
+        ),
+        parallel_tool_calls=False,
+        provider_request_meta={"provider": "openai_chat"},
+        provider_request_body={"model": "sensenova-6.8-flash-lite"},
+        usage={"input_tokens": 70744, "cache_hit_tokens": 0},
+        request_kind="frontdoor_actual_request",
+        request_lane="visible_frontdoor",
+    )
+
+    assert payload["provider_model"] == "sensenova-6.8-flash-lite"
+    assert payload["requested_provider_model"] == "openai:deepseek-flash"
+    assert payload["observed_input_truth"]["provider_model"] == "sensenova-6.8-flash-lite"
+
+
+def test_build_frontdoor_request_artifact_payload_falls_back_to_the_requested_model() -> None:
+    runner = create_agent_impl.CreateAgentCeoFrontDoorRunner(loop=SimpleNamespace(main_task_service=None))
+
+    payload = runner._build_frontdoor_request_artifact_payload(
+        state={
+            "model_refs": ["deepseek-flash"],
+            "frontdoor_token_preflight_diagnostics": {"provider_model": "openai:deepseek-flash"},
+        },
+        session_key="web:shared",
+        turn_id="turn-plain",
+        request_messages=[{"role": "user", "content": "hi"}],
+        tool_schemas=[],
+        prompt_cache_key="cache-key",
+        prompt_cache_diagnostics=build_actual_request_diagnostics(
+            request_messages=[{"role": "user", "content": "hi"}],
+            tool_schemas=[],
+        ),
+        parallel_tool_calls=False,
+        provider_request_meta={"provider": "responses"},
+        provider_request_body={},
+        usage={"input_tokens": 10, "cache_hit_tokens": 2},
+        request_kind="frontdoor_actual_request",
+        request_lane="visible_frontdoor",
+    )
+
+    assert payload["provider_model"] == "openai:deepseek-flash"
+    assert payload["requested_provider_model"] == "openai:deepseek-flash"

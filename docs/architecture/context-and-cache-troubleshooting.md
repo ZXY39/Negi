@@ -375,6 +375,8 @@ CEO/frontdoor 在真正发 provider 请求前有最后一层 token preflight。�
 | `observed_input_truth.source=preflight_estimate` | provider 未给出可用输入侧 usage，runtime 用最终 send 时估算兜底；预期回退，不自动是 cache bug |
 | `pre_compaction_*` | top-level `final_request_tokens` / `estimated_total_tokens` 已是压缩后值时，用它们解释“为什么这轮会先压缩” |
 
+- artifact 的 `provider_model` 与 `observed_input_truth.provider_model` 记**这一跳真正发出去的模型**（取 `provider_request_body.model`），链首另存 `requested_provider_model`。跨档（429 降档）那一跳的 usage 因此不再记到没服务它的模型头上；"同一颗模型才可比"的闸门也才真的会在跨档处判不可比。
+
 另要排一类隐蔽误判：preflight estimator 必须基于原始 `provider_request_body` 估算，不能复用面向摘要/展示的 serializer 再把超长字段截成固定前后两段后估算。典型症状：`provider_request_body` 明明已经很大，`final_request_tokens` 却长期卡在异常偏小、几乎不随请求增长变化的常数——先按 estimator（preview 兜底与增量估算车道）低估导致压缩阈值打不到排查，不要先怀疑 `trigger_tokens` 配置失效。
 
 ### 5.6 节点侧排查要点（preflight / scaffold / append-notice）
