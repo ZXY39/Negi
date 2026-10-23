@@ -274,6 +274,14 @@ _NODE_CONTRACT_ECHO_REPAIR_MESSAGE = (
     '不要输出、总结或引用这份契约；'
     '或通过结构化工具调用（例如 `submit_final_result`）提交最终结果。'
 )
+
+def _node_goal_anchor_text(node: Any) -> str:
+    """节点真实目标：打回文案要给模型一个能核对的对象，而不是没有指称的"下一步"。"""
+    goal = ' '.join(str(getattr(node, 'goal', '') or getattr(node, 'prompt', '') or '').split())[:160]
+    return f'这一节点的交付目标：{goal}。' if goal else ''
+
+def _node_contract_echo_repair_message(node: Any) -> str:
+    return _NODE_CONTRACT_ECHO_REPAIR_MESSAGE + _node_goal_anchor_text(node)
 _RESULT_REQUIRED_KEYS = (
     'status',
     'delivery_status',
@@ -1369,6 +1377,7 @@ class ReActToolLoop:
                     task_id=task.task_id,
                     node_kind=node.node_kind,
                     message_history=message_history,
+                    node_goal=_node_goal_anchor_text(node),
                     prior_violation_counts=read_only_repeat_violation_counts,
                 )
                 direct_load_repeat_violations = await self._load_tool_context_direct_read_violations(
@@ -1811,7 +1820,7 @@ class ReActToolLoop:
                         response=response,
                     )
                     return self._contract_echo_failure(count=contract_echo_attempt_count)
-                repair_overlay_text = _NODE_CONTRACT_ECHO_REPAIR_MESSAGE
+                repair_overlay_text = _node_contract_echo_repair_message(node)
                 continue
 
             if xml_pseudo_call is not None:
@@ -8010,6 +8019,7 @@ class ReActToolLoop:
         node_kind: str,
         message_history: list[dict[str, Any]],
         prior_violation_counts: dict[str, int],
+        node_goal: str = '',
     ) -> list[dict[str, Any]]:
         normalized_task_id = str(task_id or '').strip()
         if not normalized_task_id:
@@ -8054,6 +8064,8 @@ class ReActToolLoop:
                         ),
                     }
                 )
+        for violation in violations:
+            violation['repair_text'] = str(violation.get('repair_text') or '') + node_goal
         return violations
 
     @staticmethod
