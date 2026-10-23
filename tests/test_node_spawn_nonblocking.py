@@ -346,6 +346,84 @@ class TestRunnableScan:
         assert dispatcher.scheduled == [CHILD_B]
 
 
+class TestOrphanReaperAdaptation:
+    def _child_with_owner(self, service) -> None:
+        service.store.update_node(
+            CHILD_A,
+            lambda record: record.model_copy(
+                update={
+                    'metadata': {
+                        **dict(record.metadata or {}),
+                        'spawn_owner_kind': 'child',
+                        'spawn_owner_round_id': 'round:1',
+                    }
+                }
+            ),
+        )
+        service.store.update_node(
+            CHILD_B,
+            lambda record: record.model_copy(update={'status': 'success'}),
+        )
+
+    @pytest.mark.asyncio
+    async def test_parked_child_is_not_an_orphan(self, tmp_path):
+        service = _service(tmp_path)
+        _seed(service)
+        self._child_with_owner(service)
+        service.store.upsert_task_runtime_frame(
+            TaskProjectionRuntimeFrameRecord(task_id=TASK, node_id=CHILD_A, phase='waiting_explicit')
+        )
+        await service.task_actor_service._reconcile_orphan_in_progress_nodes(TASK, _FakeDispatcher())
+        child = service.store.get_node(CHILD_A)
+        assert child.pause_reason != 'error'
+        assert child.is_paused is False
+
+    @pytest.mark.asyncio
+    async def test_child_with_unread_is_not_an_orphan(self, tmp_path):
+        service = _service(tmp_path)
+        _seed(service)
+        self._child_with_owner(service)
+        service.store.upsert_task_runtime_frame(
+            TaskProjectionRuntimeFrameRecord(task_id=TASK, node_id=CHILD_A, phase='before_model')
+        )
+        service.store.upsert_task_node_notification(
+            {
+                'notification_id': 'notif:orphan',
+                'task_id': TASK,
+                'node_id': CHILD_A,
+                'epoch_id': '',
+                'source_node_id': ROOT,
+                'message': 'continue',
+                'status': 'delivered',
+                'created_at': STAMP,
+                'delivered_at': STAMP,
+            }
+        )
+        await service.task_actor_service._reconcile_orphan_in_progress_nodes(TASK, _FakeDispatcher())
+        assert service.store.get_node(CHILD_A).is_paused is False
+
+    @pytest.mark.asyncio
+    async def test_fresh_child_is_not_an_orphan(self, tmp_path):
+        service = _service(tmp_path)
+        _seed(service)
+        self._child_with_owner(service)
+        await service.task_actor_service._reconcile_orphan_in_progress_nodes(TASK, _FakeDispatcher())
+        assert service.store.get_node(CHILD_A).is_paused is False
+
+    @pytest.mark.asyncio
+    async def test_stranded_child_with_a_frame_is_parked_for_an_operator(self, tmp_path):
+        service = _service(tmp_path)
+        _seed(service)
+        self._child_with_owner(service)
+        service.store.upsert_task_runtime_frame(
+            TaskProjectionRuntimeFrameRecord(task_id=TASK, node_id=CHILD_A, phase='before_model')
+        )
+        await service.task_actor_service._reconcile_orphan_in_progress_nodes(TASK, _FakeDispatcher())
+        child = service.store.get_node(CHILD_A)
+        assert child.pause_reason == 'error'
+        assert child.is_paused is True
+
+
 class TestAllChildrenWake:
     @pytest.mark.asyncio
     async def test_wakes_only_after_every_child_reported(self, tmp_path, monkeypatch):

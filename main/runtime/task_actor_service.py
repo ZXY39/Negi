@@ -1207,6 +1207,13 @@ class TaskActorService:
         dispatcher.schedule_node(str(node_id or '').strip())
         return True
 
+    def _frame_phase(self, task_id: str, node_id: str) -> str:
+        try:
+            frame = self._log_service.read_runtime_frame(task_id, node_id)
+        except Exception:
+            return ''
+        return str((frame or {}).get('phase') or '') if isinstance(frame, dict) else ''
+
     def _node_has_unread(self, task_id: str, node_id: str) -> bool:
         try:
             return any(
@@ -1401,7 +1408,7 @@ class TaskActorService:
             return
         root_node_id = str(getattr(task, 'root_node_id', '') or '').strip()
         try:
-            records = list(self._store.list_task_nodes(task_id) or [])
+            records = list(self._store.list_nodes(task_id) or [])
         except Exception:
             return
         for record in records:
@@ -1422,6 +1429,24 @@ class TaskActorService:
                 # 未挂派生轮的节点（非常规形态）不武断收尸，交由父管线/失速监控。
                 continue
             if self._node_operator_paused(node):
+                continue
+            # 非阻塞派生下，"in_progress 且没有执行器"有四种正常形态，收尸器不能
+            # 把其中任何一种读成幽灵：
+            #   * 停靠中（waiting_explicit / waiting_acceptance）——等消息，唤醒源到达即继续；
+            #   * 信箱有未读——复活/派发由可派发扫描负责；
+            #   * 还没有运行帧——刚创建、尚未起跑；
+            #   * 正在被本进程驱动。
+            # 只有"有帧、不在停靠态、没有未读、也没有执行器"才是真正说不清去向的形态。
+            phase = self._frame_phase(task_id, node_id)
+            if phase in {'waiting_explicit', 'waiting_acceptance'}:
+                continue
+            if self._node_has_unread(task_id, node_id):
+                continue
+            try:
+                frame_exists = self._log_service.read_runtime_frame(task_id, node_id) is not None
+            except Exception:
+                frame_exists = True  # 读不到就按"有帧"处理，宁可上报也不忽略
+            if not frame_exists:
                 continue
             if dispatcher.node_is_being_driven(node_id) is True:
                 continue  # 已有活执行器（问持有者，不问投影）
