@@ -65,6 +65,7 @@ from main.runtime.append_notice_context import (
 )
 from main.runtime.child_tools import (
     ListChildNodesTool,
+    ManageChildNodesTool,
     ReadChildProgressTool,
     ViewNodeTreeTool,
 )
@@ -102,6 +103,7 @@ from main.runtime.subtree_hold import (
 from main.runtime.tool_names import (
     ENTER_WAIT_TOOL_NAME,
     LIST_CHILD_NODES_TOOL_NAME,
+    MANAGE_CHILD_NODES_TOOL_NAME,
     READ_CHILD_PROGRESS_TOOL_NAME,
     SEND_MESSAGE_TOOL_NAME,
     VIEW_NODE_TREE_TOOL_NAME,
@@ -4246,6 +4248,62 @@ class NodeRunner:
             in_reply_to=in_reply_to,
         )
 
+    async def _manage_child_nodes(
+        self,
+        *,
+        task_id: str,
+        node: NodeRecord,
+        ops: Any = None,
+    ) -> dict[str, Any]:
+        """`manage_child_nodes` 的运行时侧：只做转发与直接子节点预筛。
+
+        寻址、暂停/恢复/终止的实际裁定都在服务层（那里才有 dispatcher、暂停账本
+        与投递通道）。这里先挡掉明显不是直接子节点的条目，避免服务层为一次笔误
+        付整套控制的代价；返回里带合法目标集合，模型不用猜。
+        """
+        callback = getattr(self, 'manage_child_nodes_callback', None)
+        if not callable(callback):
+            return {
+                'ok': False,
+                'error': 'manage_child_nodes_unavailable',
+                'items': [],
+                'legal_targets': [],
+            }
+        children = {
+            str(child.node_id or '').strip(): child
+            for child in self._direct_child_records(task_id, node.node_id)
+        }
+        legal_targets = [node_id for node_id in children if node_id]
+        normalized_ops: list[dict[str, Any]] = []
+        results: list[dict[str, Any]] = []
+        for raw in list(ops or []) if isinstance(ops, (list, tuple)) else []:
+            item = dict(raw) if isinstance(raw, dict) else {}
+            node_id = str(item.get('node_id') or '').strip()
+            action = str(item.get('action') or '').strip().lower()
+            if node_id not in children:
+                results.append(
+                    {
+                        'node_id': node_id,
+                        'action': action,
+                        'result': 'rejected',
+                        'reason': 'not_a_direct_child',
+                    }
+                )
+                continue
+            normalized_ops.append({**item, 'node_id': node_id, 'action': action})
+        if normalized_ops:
+            applied = await callback(
+                task_id=task_id,
+                sender_node_id=str(node.node_id or '').strip(),
+                ops=normalized_ops,
+            )
+            results.extend(list(applied.get('items') or []))
+        return {
+            'ok': bool(results) and all(str(item.get('result') or '') != 'rejected' for item in results),
+            'items': results,
+            'legal_targets': legal_targets,
+        }
+
     def _build_tools(self, *, task, node: NodeRecord) -> dict[str, Tool]:
         tools = dict(self._tool_provider(node) or {})
         if node.node_kind in {KIND_EXECUTION, KIND_ACCEPTANCE}:
@@ -4284,6 +4342,13 @@ class NodeRunner:
                     task_id=task.task_id,
                     node=node,
                     **payload,
+                )
+            )
+            tools[MANAGE_CHILD_NODES_TOOL_NAME] = ManageChildNodesTool(
+                lambda ops=None: self._manage_child_nodes(
+                    task_id=task.task_id,
+                    node=node,
+                    ops=ops,
                 )
             )
             if node.can_spawn_children:

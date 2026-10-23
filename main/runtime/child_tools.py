@@ -17,6 +17,7 @@ from typing import Any
 from g3ku.agent.tools.base import Tool
 from main.runtime.tool_names import (
     LIST_CHILD_NODES_TOOL_NAME,
+    MANAGE_CHILD_NODES_TOOL_NAME,
     READ_CHILD_PROGRESS_TOOL_NAME,
     VIEW_NODE_TREE_TOOL_NAME,
 )
@@ -149,4 +150,107 @@ class ViewNodeTreeTool(Tool):
     async def execute(self, depth: Any = None, **kwargs: Any) -> str:
         _ = kwargs
         payload = await self._view_tree(depth=depth)
+        return json.dumps(payload, ensure_ascii=False, sort_keys=True)
+
+
+class ManageChildNodesTool(Tool):
+    """批量处理直接子节点：暂停、恢复、终止。
+
+    `resume` 走到父→子消息通道：系统代父节点写一条 `parent_notice`（正文 =
+    `note`）并唤醒子节点，恢复与修复信息一次完成。对正在等待的子节点 `resume`
+    会被打回——等待由唤醒源驱动，不需要也不应该用 resume 干预。
+
+    整批校验是同步的：任一条 `terminate` 缺 `reason` 打回整次调用，避免
+    "前几条已生效、后面才发现参数不全"的半批副作用。
+    """
+
+    hide_universal_timeout_parameter = True
+
+    def __init__(self, manage_children: Callable[..., Awaitable[dict[str, Any]]]) -> None:
+        self._manage_children = manage_children
+
+    @property
+    def name(self) -> str:
+        return MANAGE_CHILD_NODES_TOOL_NAME
+
+    @property
+    def description(self) -> str:
+        return (
+            'Pause, resume, or terminate your direct child nodes in one batch. `pause` is '
+            'cooperative: the child finishes the tool call it is in and starts no new turn. '
+            '`resume` writes a message to the child and wakes it — put the fix or instruction in '
+            '`note`; it is rejected for a child that is merely waiting (a waiting node continues '
+            'when its own wake source delivers). `terminate` moves any non-terminal child to '
+            'failed and requires `reason`. Results are per item and independent. Terminating a '
+            'node does not terminate its children; list them too if that is what you want.'
+        )
+
+    @property
+    def model_description(self) -> str:
+        return 'Pause, resume, or terminate direct children; terminate needs a reason.'
+
+    @property
+    def parameters(self) -> dict[str, Any]:
+        return {
+            'type': 'object',
+            'properties': {
+                'ops': {
+                    'type': 'array',
+                    'minItems': 1,
+                    'items': {
+                        'type': 'object',
+                        'properties': {
+                            'node_id': {
+                                'type': 'string',
+                                'minLength': 1,
+                                'description': 'Direct child node id.',
+                            },
+                            'action': {
+                                'type': 'string',
+                                'enum': ['pause', 'resume', 'terminate'],
+                            },
+                            'note': {
+                                'type': 'string',
+                                'description': 'For resume: the message that wakes the child.',
+                            },
+                            'reason': {
+                                'type': 'string',
+                                'description': 'Required for terminate: why it is given up.',
+                            },
+                        },
+                        'required': ['node_id', 'action'],
+                    },
+                },
+            },
+            'required': ['ops'],
+        }
+
+    async def execute(self, ops: Any = None, **kwargs: Any) -> str:
+        _ = kwargs
+        items = list(ops or []) if isinstance(ops, (list, tuple)) else []
+        if not items:
+            return json.dumps(
+                {'ok': False, 'error': 'invalid_param', 'details': 'ops must contain at least one entry'},
+                ensure_ascii=False,
+                sort_keys=True,
+            )
+        for position, item in enumerate(items):
+            if not isinstance(item, dict):
+                return json.dumps(
+                    {'ok': False, 'error': 'invalid_param', 'details': f'ops[{position}] must be an object'},
+                    ensure_ascii=False,
+                    sort_keys=True,
+                )
+            action = str(item.get('action') or '').strip().lower()
+            if action == 'terminate' and not str(item.get('reason') or '').strip():
+                return json.dumps(
+                    {
+                        'ok': False,
+                        'error': 'invalid_param',
+                        'details': f'ops[{position}].reason is required for terminate',
+                    },
+                    ensure_ascii=False,
+                    sort_keys=True,
+                )
+        payload = await self._manage_children(ops=items)
         return json.dumps(payload, ensure_ascii=False, sort_keys=True)

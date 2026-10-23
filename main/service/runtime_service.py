@@ -116,7 +116,12 @@ from main.runtime.model_key_concurrency import ModelKeyConcurrencyController
 from main.runtime.model_load_balancer import ModelLoadBalancer, quota_bucket_key
 from main.runtime.model_route import build_model_route_plan
 from main.runtime.node_mailbox import message_fingerprint, normalize_targets, plan_delivery
-from main.runtime.node_message_kind import PRIORITY_HIGH, derive_message_kind, derive_priority
+from main.runtime.node_message_kind import (
+    INTENT_INSTRUCTION,
+    PRIORITY_HIGH,
+    derive_message_kind,
+    derive_priority,
+)
 from main.runtime.node_prompt_contract import (
     NodeRuntimeToolContract,
     extract_node_dynamic_contract_payload,
@@ -746,6 +751,9 @@ class MainRuntimeService:
         self.node_runner.distribution_delivery_callback = self._deliver_distribution_message
         # 节点侧 `send_message` 的投递口：NodeRunner 没有 service 引用，走同一条 side-channel。
         self.node_runner.node_message_delivery_callback = self._deliver_node_message_from_node
+        # 节点侧 `manage_child_nodes` 的控制口：暂停/恢复/终止需要 dispatcher、暂停账本
+        # 与投递通道，全部在这一层。
+        self.node_runner.manage_child_nodes_callback = self._manage_child_nodes_from_node
         self.node_runner._tool_default_timeout_seconds = self._tool_default_timeout_seconds(app_config)
         self.task_actor_service = TaskActorService(
             store=self.store,
@@ -4853,13 +4861,17 @@ class MainRuntimeService:
         node_id: str,
         node: Any,
         priority: str,
+        park_state: str = '',
     ) -> bool:
-        """高优先级无条件唤醒；否则按目标自己的 `wake_on` 策略判定。
+        """高优先级无条件唤醒；暂停与验收待决采用最大宽容；其余按 `wake_on`。
 
-        `wake_on` 由 `enter_wait` 写入节点 metadata；没有写过就是默认的 `any`
-        ——任何一个未读都唤醒。
+        `wake_on` 只约束 `等待·explicit`（设计 §2.3 的两套策略）。暂停态与
+        `等待·acceptance` 是"任意满足投递矩阵的未读均唤醒"——`manage_child_nodes(resume)`
+        的消息必须能叫醒一个此前用 `all_children` 停靠过的暂停节点，否则恢复会静默失效。
         """
         if str(priority or '').strip() == PRIORITY_HIGH:
+            return True
+        if str(park_state or '').strip() in {'paused', 'waiting_acceptance'}:
             return True
         metadata = dict(getattr(node, 'metadata', {}) or {})
         policy = str(metadata.get(self.NODE_WAIT_WAKE_ON_KEY) or '').strip()
@@ -4922,17 +4934,34 @@ class MainRuntimeService:
         )
 
         # 去重只对「还没被处理」的同一指纹生效：消费过的重复是一次新的意图。
+        # 去重收敛的是消息本身，不是唤醒意图——重发一条仍在箱里的消息（例如重试
+        # 一次 resume）如果只回 deduplicated 而不尝试唤醒，失败的唤醒就永远补不上。
         for item in list(self.store.list_task_node_notifications(normalized_task_id, normalized_node_id) or []):
             if (
                 str(item.status or '').strip() == 'delivered'
                 and str(item.fingerprint or '').strip() == fingerprint
             ):
+                wake_outcome = ''
+                if self._delivery_wakes_target(
+                    task_id=normalized_task_id,
+                    node_id=normalized_node_id,
+                    node=node,
+                    priority=priority,
+                    park_state=park_state,
+                ):
+                    try:
+                        wake_outcome = await self.wake_node_on_message(
+                            task_id=normalized_task_id, node_id=normalized_node_id
+                        )
+                    except Exception as exc:  # noqa: BLE001 - 消息已在箱里，唤醒失败不回滚
+                        wake_outcome = f'wake_error:{type(exc).__name__}'
                 return {
                     'target': normalized_node_id,
                     'status': 'deduplicated',
                     'message_id': str(item.notification_id or ''),
                     'kind': kind,
                     'priority': priority,
+                    'wake': wake_outcome,
                     'reason': '',
                 }
 
@@ -4967,6 +4996,7 @@ class MainRuntimeService:
             node_id=normalized_node_id,
             node=node,
             priority=priority,
+            park_state=park_state,
         ):
             try:
                 wake_outcome = await self.wake_node_on_message(
@@ -5099,6 +5129,160 @@ class MainRuntimeService:
         return {
             'ok': bool(results) and all(item.get('status') != 'rejected' for item in results),
             'results': results,
+            'legal_targets': legal_targets,
+        }
+
+    async def _manage_child_nodes_from_node(
+        self,
+        *,
+        task_id: str,
+        sender_node_id: str,
+        ops: list[dict[str, Any]] | None = None,
+    ) -> dict[str, Any]:
+        """`manage_child_nodes` 的裁定层：批量 pause / resume / terminate，只限直接子节点。
+
+        `resume` 按设计 §2.3 的"唯一激活通道"实现——不是清标志，而是**代父节点写一条
+        `parent_notice`**（正文 = `note`），由投递路径按 R2 唤醒收件人；恢复与修复信息
+        一次完成。暂停态的投递矩阵本就接收机器消息，`wake_parked_node` 会在唤醒前清掉
+        暂停位。`note` 为空时给一句最小正文，避免"空消息唤醒"让模型无从判断为什么醒。
+
+        `terminate` 走"先挂暂停位、再落失败"两步，而不是放开
+        `_apply_fail_node_command` 的"必须已暂停"前置。理由：正在跑的回合只在
+        `_check_pause_or_cancel` 检查点读暂停位，不读节点行终态；先直接落 `failed`
+        会让协程在下一个检查点之前继续烧模型调用与工具预算，而"任意非终态 → 失败"
+        的设计语义要求终止立即生效。两步法把影响面限制在本工具内，不改 CEO /
+        worker 命令通道沿用多年的前置条件（那些通道的暂停语义有自己的事故史）。
+        终止由父节点自己发起，按设计 §4.4 不向父节点重复投递 `child_final`。
+        """
+        normalized_task_id = self.normalize_task_id(task_id)
+        sender = self.store.get_node(str(sender_node_id or '').strip())
+        if sender is None or str(sender.task_id or '').strip() != normalized_task_id:
+            return {'ok': False, 'error': 'sender_missing', 'items': [], 'legal_targets': []}
+
+        children = {
+            str(child.node_id or '').strip(): child
+            for child in list(self.store.list_nodes(normalized_task_id) or [])
+            if str(getattr(child, 'parent_node_id', '') or '').strip() == str(sender.node_id or '').strip()
+        }
+        legal_targets = list(children)
+        dispatcher = self.task_actor_service._dispatchers.get(normalized_task_id)
+        items: list[dict[str, Any]] = []
+
+        for raw in list(ops or []):
+            item = dict(raw) if isinstance(raw, dict) else {}
+            node_id = str(item.get('node_id') or '').strip()
+            action = str(item.get('action') or '').strip().lower()
+            note = str(item.get('note') or '').strip()
+            reason = str(item.get('reason') or '').strip()
+
+            child = children.get(node_id)
+            if child is None:
+                items.append(
+                    {'node_id': node_id, 'action': action, 'result': 'rejected', 'reason': 'not_a_direct_child'}
+                )
+                continue
+            if action not in {'pause', 'resume', 'terminate'}:
+                items.append(
+                    {'node_id': node_id, 'action': action, 'result': 'rejected', 'reason': 'invalid_action'}
+                )
+                continue
+            if str(child.status or '').strip().lower() in {'success', 'failed'}:
+                items.append(
+                    {'node_id': node_id, 'action': action, 'result': 'rejected', 'reason': 'node_terminal'}
+                )
+                continue
+            paused = bool(getattr(child, 'is_paused', False)) or bool(getattr(child, 'pause_requested', False))
+
+            if action == 'pause':
+                if paused:
+                    items.append({'node_id': node_id, 'action': action, 'result': 'paused', 'reason': 'already_paused'})
+                    continue
+                await self._apply_pause_node_command(
+                    normalized_task_id,
+                    node_ids=[node_id],
+                    reason='agent',
+                    remark=note,
+                )
+                items.append({'node_id': node_id, 'action': action, 'result': 'paused'})
+                continue
+
+            if action == 'resume':
+                if not paused:
+                    phase = self._frame_phase(normalized_task_id, node_id)
+                    if phase in {'waiting_explicit', 'waiting_acceptance'}:
+                        items.append(
+                            {
+                                'node_id': node_id,
+                                'action': action,
+                                'result': 'rejected',
+                                'reason': 'node_waiting',
+                                'hint': (
+                                    '该节点在等待唤醒源，消息到达即自动继续；resume 只对暂停态有效，'
+                                    '如需放弃请用 terminate。'
+                                ),
+                            }
+                        )
+                        continue
+                    items.append(
+                        {'node_id': node_id, 'action': action, 'result': 'rejected', 'reason': 'node_not_paused'}
+                    )
+                    continue
+                delivered = await self.deliver_node_message(
+                    task_id=normalized_task_id,
+                    target_node_id=node_id,
+                    message=note or '上级节点恢复了你，请继续当前任务。',
+                    origin='node',
+                    relation='parent',
+                    source_node_id=str(sender.node_id or '').strip(),
+                    intent_kind=INTENT_INSTRUCTION,
+                )
+                if str(delivered.get('status') or '') in {'delivered', 'deduplicated'}:
+                    items.append(
+                        {
+                            'node_id': node_id,
+                            'action': action,
+                            'result': 'resumed',
+                            'delivery': str(delivered.get('status') or ''),
+                            'wake': str(delivered.get('wake') or ''),
+                        }
+                    )
+                else:
+                    items.append(
+                        {
+                            'node_id': node_id,
+                            'action': action,
+                            'result': 'rejected',
+                            'reason': str(delivered.get('reason') or 'delivery_failed'),
+                        }
+                    )
+                continue
+
+            # terminate
+            if not reason:
+                # 工具层已同步打回整批；这里是服务层的第二道闸（worker 命令或内部
+                # 调用绕开工具 schema 时同样拒绝，不留"无理由终止"的入口）。
+                items.append(
+                    {'node_id': node_id, 'action': action, 'result': 'rejected', 'reason': 'reason_required'}
+                )
+                continue
+            if not paused:
+                self.log_service.set_node_pause_state(
+                    normalized_task_id,
+                    node_id,
+                    pause_requested=True,
+                    is_paused=bool(getattr(child, 'is_paused', False)),
+                    pause_reason='agent',
+                    remark=reason,
+                )
+            if dispatcher is not None:
+                await dispatcher.fail_node(node_id, reason)
+            else:
+                self.node_runner.fail_paused_node(normalized_task_id, node_id, reason)
+            items.append({'node_id': node_id, 'action': action, 'result': 'terminated'})
+
+        return {
+            'ok': bool(items) and all(str(item.get('result') or '') != 'rejected' for item in items),
+            'items': items,
             'legal_targets': legal_targets,
         }
 
