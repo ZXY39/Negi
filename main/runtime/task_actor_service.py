@@ -1156,6 +1156,14 @@ class TaskActorService:
                 dispatched = True
                 continue
             if not unread:
+                # 已提交、正等验收裁决的节点不重派：收尾回合会删掉运行帧，
+                # “无帧”不等于“没起跑过”；再派一次只会在等裁决期间重复提交
+                # （实盘：同一子节点 11 秒内三次交付，把刚通过的验收反复重开）。
+                handshake = normalize_acceptance_handshake(
+                    (node.metadata or {}).get(ACCEPTANCE_HANDSHAKE_KEY)
+                )
+                if str(handshake.get('state') or '').strip() == ACCEPTANCE_STATE_WAITING_ACCEPTANCE:
+                    continue
                 try:
                     frame = self._log_service.read_runtime_frame(task_id, node_id)
                 except Exception:

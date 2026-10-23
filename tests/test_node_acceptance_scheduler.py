@@ -9,6 +9,7 @@ started by the old pipeline or by the dispatcher.
 
 from __future__ import annotations
 
+import asyncio
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -565,6 +566,29 @@ class TestVerdictContext:
         assert handshake['state'] == ACCEPTANCE_STATE_ACCEPTED
         # 幂等：再来一次不再产生动作。
         assert await service.task_actor_service._drain_acceptance_verdicts(TASK) is False
+
+    def test_waiting_acceptance_node_is_not_redispatched_without_unread(self, tmp_path: Path) -> None:
+        """收尾回合会删运行帧；“无帧”不等于“没起跑过”。
+
+        等裁决的执行节点被再次派发，会在验收进行期间重复提交，把刚通过的验收反复重开。
+        """
+        service = _service(tmp_path)
+        try:
+            _seed(service)
+            dispatcher = service.task_actor_service._create_dispatcher(TASK)
+
+            asyncio.run(service.task_actor_service._dispatch_runnable_nodes(TASK, dispatcher))
+
+            # 验收节点该被派发；等裁决的执行节点不该被再派一遍。
+            assert dispatcher._entries.get(CHILD) is None
+            assert dispatcher._entries.get(ACCEPTANCE) is not None
+
+            async def _cleanup() -> None:
+                await dispatcher.close()
+
+            asyncio.run(_cleanup())
+        finally:
+            asyncio.run(service.close())
 
     def test_acceptance_follows_subject_terminal_state(self, tmp_path: Path) -> None:
         """T15：任务收口时验收节点随被验节点终局、状态一致，不按残留节点判失败。"""
