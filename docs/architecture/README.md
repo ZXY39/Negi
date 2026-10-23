@@ -137,7 +137,7 @@ Start here when you are new to the repository or when a change crosses subsystem
 - 会话在重启后自动续跑（`shutdown_resume` 内部轮）行为异常 → `heartbeat-system.md`「Shutdown Resume Wake」
 - 一条 CEO 请求在网页上并排画出两个气泡（同一回合两段轨道，上面那段停在一句中途旁白）→ `web-and-admin.md`「CEO Turn Timeline Rendering Contract」+ `runtime-overview.md`「`RuntimeAgentSession` 内部做什么」
 - cron 定时任务到点不触发、`jobs.json` 停在 `running`/`timeout`/`interrupted`、调度器长时间静默或某次投递疑似挂死 → `heartbeat-system.md`「Cron Reminder Contract」+ `operations-and-maintenance.md`「任务没创建或没推进」
-- 记忆复核批次什么时候入队（攒满轮数 / 缓冲躺够 1 小时 / 压缩轮末 / 会话边界），或某段历史的工具明细只剩名字没有原文 → `runtime-overview.md`「Memory Runtime State」（四个冲刷时点、按阶段门裁剪的明细、按轮次指纹摘除的写回）
+- 记忆复核批次什么时候入队（攒满轮数 / 缓冲躺够 1 小时 / 压缩轮末 / 会话边界），或某段历史的工具明细只剩名字没有原文 → `runtime-overview.md`「Memory Runtime State」（四个冲刷时点、进批次的工具记录按原子组装载、按轮次指纹摘除的写回）
 - 看到 `memory/MEMORY.md.bak.*`，或库里条目与投影不一致 → `runtime-overview.md`「Memory Runtime State」（投影只由库再生、外部改动先留证再重绘）+ `operations-and-maintenance.md`「Memory Queue Workflow」
 - 限流/上游故障期间某轮记忆没写进去、`memory/failed.jsonl` 有停车记录、或医生检查报 `failed_parked` → `runtime-overview.md`「队列状态机与失败停车语义」+ `operations-and-maintenance.md`「Memory Queue Workflow」
 - 记忆页点重试/放弃提示失败、或弹条正文是 `Request timeout` → `web-and-admin.md`「Memory Management Page And Admin Contract」（四条失败正文各自的指向与 30s 客户端超时）
