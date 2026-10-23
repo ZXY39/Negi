@@ -1858,8 +1858,6 @@ async def test_self_pruning_enqueue_session_boundary_flushes_pending_turns(tmp_p
             turn_id="turn-1",
             user_messages=["记住这个偏好"],
             assistant_text="好的",
-            compression_summary={},
-            canonical_summary={"stages": []},
         )
         result = await manager.enqueue_session_boundary_flush(
             session_key="session-1",
@@ -2012,8 +2010,6 @@ async def test_v2_record_turn_for_review_queues_write_after_five_turns(tmp_path:
                 turn_id=f"turn-{index + 1}",
                 user_messages=[f"user {index + 1}"],
                 assistant_text=f"assistant {index + 1}",
-                compression_summary={"status": ""},
-                canonical_summary={"stages": []},
             )
             assert result["status"] == "buffered"
             assert await manager.list_queue(limit=10) == []
@@ -2023,8 +2019,6 @@ async def test_v2_record_turn_for_review_queues_write_after_five_turns(tmp_path:
             turn_id="turn-5",
             user_messages=["user 5"],
             assistant_text="assistant 5",
-            compression_summary={"status": ""},
-            canonical_summary={"stages": []},
         )
         queue_items = await manager.list_queue(limit=10)
 
@@ -2049,16 +2043,12 @@ async def test_v2_flush_review_window_queues_write_before_threshold_on_compressi
             turn_id="turn-1",
             user_messages=["user 1"],
             assistant_text="assistant 1",
-            compression_summary={"status": ""},
-            canonical_summary={"stages": []},
         )
         await manager.record_turn_for_review(
             session_key="web:shared",
             turn_id="turn-2",
             user_messages=["user 2"],
             assistant_text="assistant 2",
-            compression_summary={"status": ""},
-            canonical_summary={"stages": []},
         )
 
         result = await manager.flush_review_window(
@@ -2088,8 +2078,6 @@ async def test_v2_flush_review_window_ignores_non_compression_trigger(tmp_path: 
             turn_id="turn-1",
             user_messages=["user 1"],
             assistant_text="assistant 1",
-            compression_summary={"status": "running", "text": "should not persist"},
-            canonical_summary={"stages": []},
         )
 
         # Only token_compression and session_boundary may force-flush the window;
@@ -2111,47 +2099,39 @@ async def test_v2_flush_review_window_ignores_non_compression_trigger(tmp_path: 
 
 
 @pytest.mark.asyncio
-async def test_v2_review_turn_payload_renders_visible_tool_records_with_limits(tmp_path: Path) -> None:
+async def test_v2_review_turn_payload_carries_the_whole_visible_tool_record(tmp_path: Path) -> None:
+    """一条工具记录整套字段原样进载荷：记录时全量捕获，渲染侧不裁尺寸。
+
+    防错规则要的是"失败前试了什么"，所以入参与回执正文都得活着送达内部 memory agent；
+    载荷里的记录就是 `_collect_turn_tool_records` 的那一份，阶段时代的 goal/summary
+    不在载体上，也不该出现在正文里。
+    """
     module = _load_memory_agent_runtime_module()
     manager = module.MemoryManager(tmp_path, _memory_cfg())
     try:
         huge_output_text = "HUGE_TOOL_OUTPUT_HEAD_MARKER " + "x" * 500 + " HUGE_TOOL_OUTPUT_TAIL_MARKER"
-        long_preview_text = "PREVIEW_HEAD_MARKER " + "y" * 300 + " PREVIEW_TAIL_MARKER"
         round_narration = "ROUND_NARRATION_START " + "z" * 600 + " ROUND_NARRATION_END"
-        canonical_summary = {
-            "active_stage_id": "frontdoor-stage-2",
-            "stages": [
-                {
-                    "stage_id": "frontdoor-stage-1",
-                    "stage_goal": "collect candidate pool",
-                    "completed_stage_summary": "verified current ranking methodology",
-                    "rounds": [
-                        {
-                            "round_id": "frontdoor-stage-1:round-1",
-                            "text": round_narration,
-                            "tools": [
-                                {
-                                    "tool_call_id": "call-visible-1",
-                                    "tool_name": "web_fetch",
-                                    "status": "error",
-                                    "arguments_text": "url=https://example.com",
-                                    "output_preview_text": long_preview_text,
-                                    "output_text": huge_output_text,
-                                }
-                            ],
-                        }
-                    ],
-                    "contract_revision": "exp:should-not-appear",
-                }
-            ],
-        }
         result = await manager.record_turn_for_review(
             session_key="web:shared",
             turn_id="turn-1",
             user_messages=["user wants a durable preference"],
             assistant_text="assistant confirmed the preference",
-            compression_summary={"status": "running", "text": "TOKEN_COMPACTION_SHOULD_NOT_APPEAR"},
-            canonical_summary=canonical_summary,
+            turns=[
+                {
+                    "turn_id": "turn-1",
+                    "seq": 3,
+                    "text": round_narration,
+                    "tools": [
+                        {
+                            "tool_call_id": "call-visible-1",
+                            "tool_name": "web_fetch",
+                            "status": "error",
+                            "arguments_text": "url=https://example.com",
+                            "output_text": huge_output_text,
+                        }
+                    ],
+                }
+            ],
         )
 
         assert result["status"] == "buffered"
@@ -2159,239 +2139,61 @@ async def test_v2_review_turn_payload_renders_visible_tool_records_with_limits(t
         payload_text = state["sessions"]["web:shared"]["pending_turns"][0]["payload_text"]
         assert "user wants a durable preference" in payload_text
         assert "assistant confirmed the preference" in payload_text
-        assert "collect candidate pool" in payload_text
-        assert "verified current ranking methodology" in payload_text
-        # Visible tool record fields are present.
-        assert "stages:" in payload_text
+        # 每轮载荷只有这四块
+        assert "[turn_id] turn-1" in payload_text
+        assert "tool_records:" in payload_text
+        assert "assistant_text:" in payload_text
+        # 记录整套字段原样带上
+        assert '"key": "call-visible-1"' in payload_text
+        assert '"tool_call_id": "call-visible-1"' in payload_text
+        assert '"seq": 3' in payload_text
         assert '"tool_name": "web_fetch"' in payload_text
         assert '"status": "error"' in payload_text
+        assert '"is_error": true' in payload_text
         assert "url=https://example.com" in payload_text
-        # Full output is truncated: head appears, tail and full text do not.
+        # 正文不裁：头尾标记与整串原文都留下
         assert "HUGE_TOOL_OUTPUT_HEAD_MARKER" in payload_text
-        assert "HUGE_TOOL_OUTPUT_TAIL_MARKER" not in payload_text
-        assert huge_output_text not in payload_text
-        # Preview is truncated the same way.
-        assert "PREVIEW_HEAD_MARKER" in payload_text
-        assert "PREVIEW_TAIL_MARKER" not in payload_text
-        # Round narration is user-visible and must not be truncated.
+        assert "HUGE_TOOL_OUTPUT_TAIL_MARKER" in payload_text
+        assert huge_output_text in payload_text
+        # 回合旁白是用户可见的，原样带
         assert round_narration in payload_text
-        # Non-visible fields stay excluded.
+        # 载体上没有的字段不凭空出现
+        assert "stages:" not in payload_text
+        assert "stage_goal" not in payload_text
+        assert "contract_revision" not in payload_text
         assert "TOKEN_COMPACTION_SHOULD_NOT_APPEAR" not in payload_text
-        assert "exp:should-not-appear" not in payload_text
     finally:
         manager.close()
 
 
-@pytest.mark.asyncio
-async def test_v2_review_window_keeps_stage_summary_deltas_inside_one_window(tmp_path: Path) -> None:
-    module = _load_memory_agent_runtime_module()
-    manager = module.MemoryManager(tmp_path, _memory_cfg())
-    try:
-        await manager.record_turn_for_review(
-            session_key="web:shared",
-            turn_id="turn-1",
-            user_messages=["first turn"],
-            assistant_text="assistant one",
-            compression_summary={"status": ""},
-            canonical_summary={
-                "stages": [
-                    {
-                        "stage_id": "frontdoor-stage-alpha",
-                        "stage_goal": "stage alpha goal",
-                        "completed_stage_summary": "stage alpha completed",
-                    }
-                ]
-            },
-        )
-        await manager.record_turn_for_review(
-            session_key="web:shared",
-            turn_id="turn-2",
-            user_messages=["second turn"],
-            assistant_text="assistant two",
-            compression_summary={"status": ""},
-            canonical_summary={
-                "stages": [
-                    {
-                        "stage_id": "frontdoor-stage-alpha",
-                        "stage_goal": "stage alpha goal",
-                        "completed_stage_summary": "stage alpha completed",
-                    },
-                    {
-                        "stage_id": "frontdoor-stage-beta",
-                        "stage_goal": "stage beta goal",
-                        "completed_stage_summary": "stage beta completed",
-                    },
-                ]
-            },
-        )
-
-        result = await manager.flush_review_window(
-            session_key="web:shared",
-            trigger_source="token_compression",
-        )
-        queue_items = await manager.list_queue(limit=10)
-
-        assert result["status"] == "queued"
-        payload_text = queue_items[0]["payload_text"]
-        assert payload_text.count("frontdoor-stage-alpha") == 1
-        assert payload_text.count("stage alpha completed") == 1
-        assert payload_text.count("frontdoor-stage-beta") == 1
-        assert payload_text.count("stage beta completed") == 1
-    finally:
-        manager.close()
-
-
-@pytest.mark.asyncio
-async def test_v2_review_window_stage_cursor_survives_flush_for_next_window(tmp_path: Path) -> None:
-    module = _load_memory_agent_runtime_module()
-    manager = module.MemoryManager(tmp_path, _memory_cfg())
-    try:
-        await manager.record_turn_for_review(
-            session_key="web:shared",
-            turn_id="turn-1",
-            user_messages=["first window"],
-            assistant_text="assistant one",
-            compression_summary={"status": ""},
-            canonical_summary={
-                "stages": [
-                    {
-                        "stage_id": "frontdoor-stage-alpha",
-                        "stage_goal": "stage alpha goal",
-                        "completed_stage_summary": "stage alpha completed",
-                    }
-                ]
-            },
-        )
-        first_flush = await manager.flush_review_window(
-            session_key="web:shared",
-            trigger_source="token_compression",
-        )
-        assert first_flush["status"] == "queued"
-
-        await manager.record_turn_for_review(
-            session_key="web:shared",
-            turn_id="turn-2",
-            user_messages=["second window"],
-            assistant_text="assistant two",
-            compression_summary={"status": ""},
-            canonical_summary={
-                "stages": [
-                    {
-                        "stage_id": "frontdoor-stage-alpha",
-                        "stage_goal": "stage alpha goal",
-                        "completed_stage_summary": "stage alpha completed",
-                    },
-                    {
-                        "stage_id": "frontdoor-stage-beta",
-                        "stage_goal": "stage beta goal",
-                        "completed_stage_summary": "stage beta completed",
-                    },
-                ]
-            },
-        )
-        second_flush = await manager.flush_review_window(
-            session_key="web:shared",
-            trigger_source="token_compression",
-        )
-        queue_items = await manager.list_queue(limit=10)
-
-        assert second_flush["status"] == "queued"
-        assert len(queue_items) == 2
-        second_payload = queue_items[1]["payload_text"]
-        assert "frontdoor-stage-alpha" not in second_payload
-        assert "stage alpha completed" not in second_payload
-        assert "frontdoor-stage-beta" in second_payload
-        assert "stage beta completed" in second_payload
-    finally:
-        manager.close()
-
-
-@pytest.mark.asyncio
-async def test_v2_review_window_records_stage_when_summary_version_changes(tmp_path: Path) -> None:
-    module = _load_memory_agent_runtime_module()
-    manager = module.MemoryManager(tmp_path, _memory_cfg())
-    try:
-        await manager.record_turn_for_review(
-            session_key="web:shared",
-            turn_id="turn-1",
-            user_messages=["stage started"],
-            assistant_text="assistant one",
-            compression_summary={"status": ""},
-            canonical_summary={
-                "stages": [
-                    {
-                        "stage_id": "frontdoor-stage-alpha",
-                        "stage_goal": "stage alpha goal",
-                    }
-                ]
-            },
-        )
-        await manager.record_turn_for_review(
-            session_key="web:shared",
-            turn_id="turn-2",
-            user_messages=["stage completed"],
-            assistant_text="assistant two",
-            compression_summary={"status": ""},
-            canonical_summary={
-                "stages": [
-                    {
-                        "stage_id": "frontdoor-stage-alpha",
-                        "stage_goal": "stage alpha goal",
-                        "completed_stage_summary": "stage alpha completed later",
-                    }
-                ]
-            },
-        )
-
-        result = await manager.flush_review_window(
-            session_key="web:shared",
-            trigger_source="token_compression",
-        )
-        queue_items = await manager.list_queue(limit=10)
-
-        assert result["status"] == "queued"
-        payload_text = queue_items[0]["payload_text"]
-        assert payload_text.count("frontdoor-stage-alpha") == 2
-        assert "stage alpha completed later" in payload_text
-    finally:
-        manager.close()
-
-
-def _canonical_with_visible_tool(
+def _turns_with_tool(
     *,
-    stage_id: str = "frontdoor-stage-1",
     tool_call_id: str = "",
     tool_name: str = "web_search",
     status: str = "success",
     arguments_text: str = "q=hello",
     output_text: str = "ok",
     round_text: str = "narration",
-) -> dict[str, Any]:
-    return {
-        "active_stage_id": stage_id,
-        "stages": [
-            {
-                "stage_id": stage_id,
-                "stage_goal": f"goal {stage_id}",
-                "completed_stage_summary": f"summary {stage_id}",
-                "rounds": [
-                    {
-                        "round_id": f"{stage_id}:round-1",
-                        "text": round_text,
-                        "tools": [
-                            {
-                                "tool_call_id": tool_call_id,
-                                "tool_name": tool_name,
-                                "status": status,
-                                "arguments_text": arguments_text,
-                                "output_text": output_text,
-                            }
-                        ],
-                    }
-                ],
-            }
-        ],
-    }
+    turn_id: str = "turn-1",
+    seq: int = 1,
+) -> list[dict[str, Any]]:
+    """活的载体：一轮 `turns[].tools[]`，没有阶段账本那一层。"""
+    return [
+        {
+            "turn_id": turn_id,
+            "seq": seq,
+            "text": round_text,
+            "tools": [
+                {
+                    "tool_call_id": tool_call_id,
+                    "tool_name": tool_name,
+                    "status": status,
+                    "arguments_text": arguments_text,
+                    "output_text": output_text,
+                }
+            ],
+        }
+    ]
 
 
 @pytest.mark.asyncio
@@ -2399,30 +2201,27 @@ async def test_v2_review_window_reports_new_tool_records_once_per_window(tmp_pat
     module = _load_memory_agent_runtime_module()
     manager = module.MemoryManager(tmp_path, _memory_cfg())
     try:
-        canonical = _canonical_with_visible_tool(tool_call_id="call-1")
+        first_turns = _turns_with_tool(tool_call_id="call-1")
         await manager.record_turn_for_review(
             session_key="web:shared",
             turn_id="turn-1",
             user_messages=["first"],
             assistant_text="first reply",
-            compression_summary={},
-            canonical_summary=canonical,
+            turns=first_turns,
         )
         await manager.record_turn_for_review(
             session_key="web:shared",
             turn_id="turn-2",
             user_messages=["second"],
             assistant_text="second reply",
-            compression_summary={},
-            canonical_summary=canonical,
+            turns=first_turns,
         )
         await manager.record_turn_for_review(
             session_key="web:shared",
             turn_id="turn-3",
             user_messages=["third"],
             assistant_text="third reply",
-            compression_summary={},
-            canonical_summary=_canonical_with_visible_tool(tool_call_id="call-2"),
+            turns=_turns_with_tool(tool_call_id="call-2"),
         )
 
         state = manager._read_review_state()
@@ -2445,8 +2244,7 @@ async def test_v2_review_tool_record_cursor_survives_flush(tmp_path: Path) -> No
             turn_id="turn-1",
             user_messages=["first"],
             assistant_text="first reply",
-            compression_summary={},
-            canonical_summary=_canonical_with_visible_tool(tool_call_id="call-A"),
+            turns=_turns_with_tool(tool_call_id="call-A"),
         )
         flush_result = await manager.flush_review_window(
             session_key="web:shared",
@@ -2461,16 +2259,14 @@ async def test_v2_review_tool_record_cursor_survives_flush(tmp_path: Path) -> No
             turn_id="turn-2",
             user_messages=["second"],
             assistant_text="second reply",
-            compression_summary={},
-            canonical_summary=_canonical_with_visible_tool(tool_call_id="call-A"),
+            turns=_turns_with_tool(tool_call_id="call-A"),
         )
         await manager.record_turn_for_review(
             session_key="web:shared",
             turn_id="turn-3",
             user_messages=["third"],
             assistant_text="third reply",
-            compression_summary={},
-            canonical_summary=_canonical_with_visible_tool(tool_call_id="call-B"),
+            turns=_turns_with_tool(tool_call_id="call-B"),
         )
 
         state = manager._read_review_state()
@@ -2498,24 +2294,12 @@ async def test_v2_review_tool_records_full_capture_has_no_per_turn_cap(tmp_path:
                     "output_text": f"out-{index}",
                 }
             )
-        canonical_summary = {
-            "active_stage_id": "frontdoor-stage-1",
-            "stages": [
-                {
-                    "stage_id": "frontdoor-stage-1",
-                    "stage_goal": "goal",
-                    "completed_stage_summary": "summary",
-                    "rounds": [{"round_id": "frontdoor-stage-1:round-1", "text": "", "tools": tools}],
-                }
-            ],
-        }
         await manager.record_turn_for_review(
             session_key="web:shared",
             turn_id="turn-1",
             user_messages=["first"],
             assistant_text="first reply",
-            compression_summary={},
-            canonical_summary=canonical_summary,
+            turns=_turns_with_tools(tools),
         )
 
         state = manager._read_review_state()
@@ -2529,67 +2313,62 @@ async def test_v2_review_tool_records_full_capture_has_no_per_turn_cap(tmp_path:
 
 
 @pytest.mark.asyncio
-async def test_v2_review_stage_with_new_records_carries_full_goal_summary(tmp_path: Path) -> None:
+async def test_v2_review_partial_rereport_carries_only_the_new_record(tmp_path: Path) -> None:
+    """下一轮重报一个有重叠的集合：只有没见过的那条进载荷，并且带齐它自己的明细。
+
+    去重按记录键逐条判，不按"这轮见过没"整批判——整批判会让第二次重报一条都不带，
+    新出现的记录也就永远进不了内部 memory agent。
+    """
+
+    def _turns_with_call_ids(*tool_call_ids: str) -> list[dict[str, Any]]:
+        return [
+            {
+                "turn_id": "turn-1",
+                "seq": 1,
+                "text": "",
+                "tools": [
+                    {
+                        "tool_call_id": tool_call_id,
+                        "tool_name": "web_search",
+                        "status": "success",
+                        "arguments_text": f"q={tool_call_id}",
+                        "output_text": f"out-{tool_call_id}",
+                    }
+                    for tool_call_id in tool_call_ids
+                ],
+            }
+        ]
+
     module = _load_memory_agent_runtime_module()
     manager = module.MemoryManager(tmp_path, _memory_cfg())
     try:
-        def _canonical_with_tools(*tool_call_ids: str) -> dict[str, Any]:
-            return {
-                "active_stage_id": "frontdoor-stage-1",
-                "stages": [
-                    {
-                        "stage_id": "frontdoor-stage-1",
-                        "stage_goal": "durable stage goal",
-                        "completed_stage_summary": "durable stage summary",
-                        "rounds": [
-                            {
-                                "round_id": "frontdoor-stage-1:round-1",
-                                "text": "",
-                                "tools": [
-                                    {
-                                        "tool_call_id": tool_call_id,
-                                        "tool_name": "web_search",
-                                        "status": "success",
-                                        "arguments_text": f"q={tool_call_id}",
-                                        "output_text": f"out-{tool_call_id}",
-                                    }
-                                    for tool_call_id in tool_call_ids
-                                ],
-                            }
-                        ],
-                    }
-                ],
-            }
-
         await manager.record_turn_for_review(
             session_key="web:shared",
             turn_id="turn-1",
             user_messages=["first"],
             assistant_text="first reply",
-            compression_summary={},
-            canonical_summary=_canonical_with_tools("call-1"),
+            turns=_turns_with_call_ids("call-1"),
         )
-        # Second turn adds one new tool record to the same stage; goal/summary unchanged.
+        # 第二轮把上一条一起重报，并多出一条新的
         await manager.record_turn_for_review(
             session_key="web:shared",
             turn_id="turn-2",
             user_messages=["second"],
             assistant_text="second reply",
-            compression_summary={},
-            canonical_summary=_canonical_with_tools("call-1", "call-2"),
+            turns=_turns_with_call_ids("call-1", "call-2"),
         )
 
         state = manager._read_review_state()
         pending = state["sessions"]["web:shared"]["pending_turns"]
         second_payload = pending[1]["payload_text"]
-        # The stage entry stays self-describing: full goal/summary accompany the new
-        # record even without a stage delta this turn.
-        assert "durable stage goal" in second_payload
-        assert "durable stage summary" in second_payload
-        # Only the newly reported record shows up, and a clean stage carries no detail.
+        assert '"tool_call_id": "call-2"' in second_payload
+        assert '"tool_call_id": "call-1"' not in second_payload
         assert second_payload.count('"tool_name": "web_search"') == 1
-        assert '"args"' not in second_payload
-        assert '"output_full"' not in second_payload
+        # 新记录带齐自己的入参与正文，不是只剩名字
+        assert "q=call-2" in second_payload
+        assert "out-call-2" in second_payload
+        # 两条都记进了游标，第三轮再重报就一条也不带
+        assert set(state["sessions"]["web:shared"]["reported_tool_keys"]) == {"call-1", "call-2"}
     finally:
         manager.close()
 
@@ -2599,30 +2378,27 @@ async def test_v2_review_tool_records_empty_id_fingerprint_dedup(tmp_path: Path)
     module = _load_memory_agent_runtime_module()
     manager = module.MemoryManager(tmp_path, _memory_cfg())
     try:
-        canonical = _canonical_with_visible_tool(tool_call_id="", output_text="same-output")
+        same_turns = _turns_with_tool(tool_call_id="", output_text="same-output")
         await manager.record_turn_for_review(
             session_key="web:shared",
             turn_id="turn-1",
             user_messages=["first"],
             assistant_text="first reply",
-            compression_summary={},
-            canonical_summary=canonical,
+            turns=same_turns,
         )
         await manager.record_turn_for_review(
             session_key="web:shared",
             turn_id="turn-2",
             user_messages=["second"],
             assistant_text="second reply",
-            compression_summary={},
-            canonical_summary=canonical,
+            turns=same_turns,
         )
         await manager.record_turn_for_review(
             session_key="web:shared",
             turn_id="turn-3",
             user_messages=["third"],
             assistant_text="third reply",
-            compression_summary={},
-            canonical_summary=_canonical_with_visible_tool(tool_call_id="", output_text="changed-output"),
+            turns=_turns_with_tool(tool_call_id="", output_text="changed-output"),
         )
 
         state = manager._read_review_state()
@@ -2636,47 +2412,36 @@ async def test_v2_review_tool_records_empty_id_fingerprint_dedup(tmp_path: Path)
         manager.close()
 
 
-def _canonical_stage_with_tools(stage_id: str, tools: list[dict[str, Any]], *, round_text: str = "") -> dict[str, Any]:
-    return {
-        "active_stage_id": stage_id,
-        "stages": [
-            {
-                "stage_id": stage_id,
-                "stage_goal": f"goal {stage_id}",
-                "completed_stage_summary": f"summary {stage_id}",
-                "rounds": [
-                    {
-                        "round_id": f"{stage_id}:round-1",
-                        "text": round_text,
-                        "tools": tools,
-                    }
-                ],
-            }
-        ],
-    }
+def _turns_with_tools(tools: list[dict[str, Any]], *, round_text: str = "") -> list[dict[str, Any]]:
+    """一轮里带多条工具记录的载体。"""
+    return [{"turn_id": "turn-1", "seq": 1, "text": round_text, "tools": tools}]
 
 
 @pytest.mark.asyncio
-async def test_v2_review_clean_stage_drops_tool_detail_keeps_names(tmp_path: Path) -> None:
+async def test_v2_review_success_records_keep_their_detail_too(tmp_path: Path) -> None:
+    """全成功的批次不按状态筛明细：闸门那边要的是完整过程，不是只留工具名。
+
+    曾经有一道"这轮没失败就只带 tool_name/status"的收窄，阶段账本一起删掉了它；
+    现行合同是逐条整套带（`runtime-overview.md`「Memory Runtime State」的记录时全量捕获）。
+    """
     module = _load_memory_agent_runtime_module()
     manager = module.MemoryManager(tmp_path, _memory_cfg())
     try:
-        canonical = _canonical_stage_with_tools(
-            "frontdoor-stage-1",
+        carrier = _turns_with_tools(
             [
                 {
                     "tool_call_id": "call-clean-1",
                     "tool_name": "web_fetch",
                     "status": "success",
-                    "arguments_text": "url=CLEAN_ARGS_MUST_NOT_TRAVEL",
-                    "output_text": "CLEAN_OUTPUT_MUST_NOT_TRAVEL",
+                    "arguments_text": "url=CLEAN_ARGS_TRAVEL",
+                    "output_text": "CLEAN_OUTPUT_TRAVEL",
                 },
                 {
                     "tool_call_id": "call-clean-2",
                     "tool_name": "filesystem_stat",
                     "status": "success",
-                    "arguments_text": "path=CLEAN_ARGS_2_MUST_NOT_TRAVEL",
-                    "output_text": "CLEAN_OUTPUT_2_MUST_NOT_TRAVEL",
+                    "arguments_text": "path=CLEAN_ARGS_2_TRAVEL",
+                    "output_text": "CLEAN_OUTPUT_2_TRAVEL",
                 },
             ],
             round_text="ROUND_NARRATION_STAYS",
@@ -2686,31 +2451,28 @@ async def test_v2_review_clean_stage_drops_tool_detail_keeps_names(tmp_path: Pat
             turn_id="turn-1",
             user_messages=["pref"],
             assistant_text="reply",
-            compression_summary={},
-            canonical_summary=canonical,
+            turns=carrier,
         )
         payload_text = manager._read_review_state()["sessions"]["web:clean"]["pending_turns"][0]["payload_text"]
         assert '"tool_name": "web_fetch"' in payload_text
         assert '"tool_name": "filesystem_stat"' in payload_text
         assert '"status": "success"' in payload_text
-        assert "CLEAN_ARGS_MUST_NOT_TRAVEL" not in payload_text
-        assert "CLEAN_OUTPUT_MUST_NOT_TRAVEL" not in payload_text
-        assert "CLEAN_ARGS_2_MUST_NOT_TRAVEL" not in payload_text
-        assert "CLEAN_OUTPUT_2_MUST_NOT_TRAVEL" not in payload_text
-        # 阶段自己的东西一条不少
+        assert "CLEAN_ARGS_TRAVEL" in payload_text
+        assert "CLEAN_OUTPUT_TRAVEL" in payload_text
+        assert "CLEAN_ARGS_2_TRAVEL" in payload_text
+        assert "CLEAN_OUTPUT_2_TRAVEL" in payload_text
+        # 回合旁白跟着每条记录带上
         assert "ROUND_NARRATION_STAYS" in payload_text
-        assert "summary frontdoor-stage-1" in payload_text
     finally:
         manager.close()
 
 
 @pytest.mark.asyncio
-async def test_v2_review_failed_record_keeps_the_whole_stages_detail(tmp_path: Path) -> None:
+async def test_v2_review_failed_record_keeps_the_whole_record_detail(tmp_path: Path) -> None:
     module = _load_memory_agent_runtime_module()
     manager = module.MemoryManager(tmp_path, _memory_cfg())
     try:
-        canonical = _canonical_stage_with_tools(
-            "frontdoor-stage-1",
+        carrier = _turns_with_tools(
             [
                 {
                     "tool_call_id": "call-before",
@@ -2733,11 +2495,11 @@ async def test_v2_review_failed_record_keeps_the_whole_stages_detail(tmp_path: P
             turn_id="turn-1",
             user_messages=["pref"],
             assistant_text="reply",
-            compression_summary={},
-            canonical_summary=canonical,
+            turns=carrier,
         )
         payload_text = manager._read_review_state()["sessions"]["web:dirty"]["pending_turns"][0]["payload_text"]
-        # 防错规则要的是"失败前试了什么"，所以同阶段的兄弟记录跟着整套留下。
+        # 防错规则要的是"失败前试了什么"：失败那条带齐自己的入参与正文，同轮的前一条也不被裁。
+        assert '"is_error": true' in payload_text
         assert "BOOM_ARGS" in payload_text
         assert "BOOM_OUTPUT" in payload_text
         assert "KEEP_SIBLING_ARGS" in payload_text
@@ -2758,8 +2520,7 @@ async def test_stale_review_buffer_flushes_by_age_without_a_full_window(tmp_path
             turn_id="turn-1",
             user_messages=["one turn only"],
             assistant_text="reply one",
-            compression_summary={},
-            canonical_summary=_canonical_with_visible_tool(tool_call_id="call-old"),
+            turns=_turns_with_tool(tool_call_id="call-old"),
         )
         state = manager._read_review_state()
         session_state = dict(state["sessions"]["ext:short"])
@@ -2792,8 +2553,7 @@ async def test_stale_sweep_skips_fresh_buffer_and_is_rate_limited(tmp_path: Path
             turn_id="turn-1",
             user_messages=["just now"],
             assistant_text="reply",
-            compression_summary={},
-            canonical_summary=_canonical_with_visible_tool(tool_call_id="call-now"),
+            turns=_turns_with_tool(tool_call_id="call-now"),
         )
         result = await manager.sweep_stale_review_windows(force=True)
         assert result["status"] == "idle"
@@ -2819,8 +2579,7 @@ async def test_stale_flush_leaves_nothing_for_the_turn_window_to_resend(tmp_path
                 turn_id=f"turn-{index}",
                 user_messages=[f"message-{index}"],
                 assistant_text=f"reply-{index}",
-                compression_summary={},
-                canonical_summary=_canonical_with_visible_tool(tool_call_id=f"call-{index}"),
+                turns=_turns_with_tool(tool_call_id=f"call-{index}"),
             )
         state = manager._read_review_state()
         session_state = dict(state["sessions"]["web:half"])
@@ -2842,8 +2601,7 @@ async def test_stale_flush_leaves_nothing_for_the_turn_window_to_resend(tmp_path
                 turn_id=f"turn-{index}",
                 user_messages=[f"message-{index}"],
                 assistant_text=f"reply-{index}",
-                compression_summary={},
-                canonical_summary=_canonical_with_visible_tool(tool_call_id=f"call-{index}"),
+                turns=_turns_with_tool(tool_call_id=f"call-{index}"),
             )
         rows = manager._read_queue_requests()
         assert len(rows) == 2
@@ -2865,8 +2623,7 @@ async def test_review_window_flush_does_not_clobber_sessions_it_never_read(tmp_p
             turn_id="turn-a",
             user_messages=["A message"],
             assistant_text="A reply",
-            compression_summary={},
-            canonical_summary=_canonical_with_visible_tool(stage_id="frontdoor-stage-a", tool_call_id="call-a"),
+            turns=_turns_with_tool(tool_call_id="call-a"),
         )
         stale_snapshot = manager._read_review_state()
 
@@ -2875,8 +2632,7 @@ async def test_review_window_flush_does_not_clobber_sessions_it_never_read(tmp_p
             turn_id="turn-b",
             user_messages=["B message"],
             assistant_text="B reply",
-            compression_summary={},
-            canonical_summary=_canonical_with_visible_tool(stage_id="frontdoor-stage-b", tool_call_id="call-b"),
+            turns=_turns_with_tool(tool_call_id="call-b"),
         )
 
         read_calls = {"count": 0}
@@ -3912,18 +3668,40 @@ async def test_queue_row_projects_payload_and_pages_from_the_live_row(tmp_path: 
             await manager.get_payload_window("queue", "write_absent")
     finally:
         manager.close()
-def test_window_payload_split_packs_turns_and_preserves_stage_order() -> None:
-    """拆片只切"带多少个阶段"，不切内容：回合头尾每片都带，顺序与总数守恒。"""
+
+
+def test_window_payload_split_packs_turns_and_keeps_every_record_whole() -> None:
+    """拆片只切"带多少条工具记录"，不切内容：回合头尾每片都带，顺序与总数守恒。"""
     module = _load_memory_agent_runtime_module()
     manager = module.MemoryManager  # 拆片是无状态类方法，不需要实例
-    big = json.dumps(
-        {"stages": [{"stage_id": f"s{i}", "completed_stage_summary": "x" * 4000} for i in range(8)]},
-        ensure_ascii=False,
-        indent=2,
+
+    def section(turn_id: str, user_text: str, assistant_text: str, tools: list[dict[str, Any]]) -> str:
+        return manager._review_turn_payload(
+            turn_id=turn_id,
+            user_messages=[user_text],
+            assistant_text=assistant_text,
+            tool_records=manager._collect_turn_tool_records(
+                turns=[{"turn_id": turn_id, "seq": 1, "text": "这一轮的可见旁白", "tools": tools}]
+            ),
+        )
+
+    records = [
+        {
+            "tool_call_id": f"c{i}",
+            "tool_name": "web_search",
+            "status": "success",
+            "arguments_text": f"q={i}",
+            "output_text": "y" * 1600,
+        }
+        for i in range(12)
+    ]
+    payload = manager._review_window_payload(
+        session_key="web:ceo-1",
+        pending_turns=[
+            {"payload_text": section("t1", "第一条", "回答一", records)},
+            {"payload_text": section("t2", "第二条", "回答二", [])},
+        ],
     )
-    turn_one = f"[turn_id] t1\nuser_messages:\n- 第一条\nstages:\n{big}\nassistant_text:\n回答一"
-    turn_two = "[turn_id] t2\nuser_messages:\n- 第二条\nstages:\n{\"stages\": []}\nassistant_text:\n回答二"
-    payload = "[session_key] web:ceo-1\n\n## 窗口回合 1\n" + turn_one + "\n\n## 窗口回合 2\n" + turn_two
 
     pieces = manager._split_window_payload(payload, max_tokens=2000)
 
@@ -3931,14 +3709,20 @@ def test_window_payload_split_packs_turns_and_preserves_stage_order() -> None:
     for piece in pieces:
         assert piece.startswith("[session_key] web:ceo-1"), "每片都要自描述会话归属"
         assert module.estimate_tokens(piece) <= 2000, f"单片仍超目标: {module.estimate_tokens(piece)}"
-    ids = [m for piece in pieces for m in re.findall(r'"stage_id": "s(\d+)"', piece)]
-    assert ids == [str(i) for i in range(8)], f"阶段必须按原顺序全数保留: {ids}"
-    assert "第二条" in pieces[-1], "第二个回合的正文必须留在某一片里（小回合跟着尾片）"
+    ids = [m for piece in pieces for m in re.findall(r'"tool_call_id": "c(\d+)"', piece)]
+    assert ids == [str(i) for i in range(12)], f"工具记录必须按原顺序全数保留: {ids}"
+    # 切的是记录条数，不是"少带这一轮说了什么"
+    turn_one_pieces = [piece for piece in pieces if re.search(r'"tool_call_id": "c\d+"', piece)]
+    assert all("第一条" in piece and "回答一" in piece for piece in turn_one_pieces)
+    assert any("第二条" in piece and "回答二" in piece for piece in pieces), "第二个回合整片留在某一片里"
 
-    # 不超容量 / 拿不到目标 / 阶段 JSON 解析不了：三种情况都必须原样一条，交回既有闸门处置。
+    # 不超容量 / 拿不到目标 / 记录 JSON 解析不了：三种情况都必须原样一条，交回既有闸门处置。
     assert manager._split_window_payload(payload, max_tokens=999_999) == [payload]
     assert manager._split_window_payload(payload, max_tokens=0) == [payload]
-    broken = "[session_key] s\n\n## 窗口回合 1\n[turn_id] t\nstages:\n{坏掉的 json"
+    broken = (
+        "[session_key] s\n\n## 窗口回合 1\n[turn_id] t\nuser_messages:\n- 提问\n"
+        "tool_records:\n{坏掉的 json"
+    )
     assert manager._split_window_payload(broken, max_tokens=10) == [broken]
 
 
@@ -3947,7 +3731,11 @@ async def test_flush_review_window_splits_oversized_window_into_queue_rows(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """入队侧拆片后的每一片都能过发送闸门——整批停在停车区那种结局不再发生。"""
+    """入队侧拆片后的每一片都能过发送闸门：整批超容量不会停在停车区等人工。
+
+    另一半合同同样在这里钉住——单条工具记录是不可分原子组，它自己就超过目标时整片
+    发出，由发送闸门按 `window_refusal` 拒（`runtime-overview.md`「Memory Runtime State」）。
+    """
     module = _load_memory_agent_runtime_module()
     manager = module.MemoryManager(tmp_path, _memory_cfg())
     try:
@@ -3957,23 +3745,22 @@ async def test_flush_review_window_splits_oversized_window_into_queue_rows(
             "resolve_send_model_context_window_info",
             lambda **_: SimpleNamespace(context_window_tokens=4000),
         )
-        canonical = {
-            "stages": [
-                {
-                    "stage_id": f"s{i}",
-                    "stage_goal": f"目标{i}",
-                    "completed_stage_summary": "y" * 4000,
-                }
-                for i in range(8)
-            ]
-        }
+        records = [
+            {
+                "tool_call_id": f"c{i}",
+                "tool_name": "web_search",
+                "status": "success",
+                "arguments_text": f"q={i}",
+                "output_text": "y" * 1600,
+            }
+            for i in range(12)
+        ]
         await manager.record_turn_for_review(
             session_key="web:split",
             turn_id="turn-1",
-            user_messages=["把这条长任务的阶段都记下来"],
+            user_messages=["把这一轮的工具明细都记下来"],
             assistant_text="已完成",
-            compression_summary={"status": ""},
-            canonical_summary=canonical,
+            turns=[{"turn_id": "turn-1", "seq": 1, "text": "可见旁白", "tools": records}],
         )
 
         result = await manager.flush_review_window(session_key="web:split", trigger_source="token_compression")
@@ -3986,8 +3773,8 @@ async def test_flush_review_window_splits_oversized_window_into_queue_rows(
         collected: list[str] = []
         for row in queue_items:
             body = str(row["payload_text"] or "")
-            assert module.estimate_tokens(body) <= 2000
-            collected.extend(re.findall(r'"stage_id": "s(\d+)"', body))
+            assert module.estimate_tokens(body) <= 2000, f"单片仍超目标: {module.estimate_tokens(body)}"
+            collected.extend(re.findall(r'"tool_call_id": "c(\d+)"', body))
             # 拆完之后每片都要过闸门（窗口 4000 → 容量 3000）
             manager._memory_window_guard(
                 runtime_config=SimpleNamespace(),
@@ -3997,6 +3784,45 @@ async def test_flush_review_window_splits_oversized_window_into_queue_rows(
                 usage_total={"input_tokens": 0, "output_tokens": 0, "cache_read_tokens": 0},
                 request_artifacts=[],
             )
-        assert sorted(collected) == [str(i) for i in range(8)], f"阶段不许丢: {sorted(collected)}"
+        assert collected == [str(i) for i in range(12)], f"记录不许丢也不许乱序: {collected}"
+
+        # 原子组超过目标：不腰斩，整片发出，闸门按真实原因拒
+        await manager.record_turn_for_review(
+            session_key="web:atom",
+            turn_id="turn-1",
+            user_messages=["一条装不下的记录"],
+            assistant_text="已完成",
+            turns=[
+                {
+                    "turn_id": "turn-1",
+                    "seq": 1,
+                    "text": "",
+                    "tools": [
+                        {
+                            "tool_call_id": "fat",
+                            "tool_name": "filesystem_read",
+                            "status": "success",
+                            "arguments_text": "path=big",
+                            "output_text": "z" * 40000,
+                        }
+                    ],
+                }
+            ],
+        )
+        atom = await manager.flush_review_window(session_key="web:atom", trigger_source="token_compression")
+        atom_rows = await manager.list_queue(limit=20)
+        atom_body = next(str(row["payload_text"] or "") for row in atom_rows if row["session_key"] == "web:atom")
+
+        assert atom["split_parts"] == 1, "单条记录拆不出第二片"
+        assert module.estimate_tokens(atom_body) > 2000
+        with pytest.raises(module._MemoryProviderError):
+            manager._memory_window_guard(
+                runtime_config=SimpleNamespace(),
+                model_chain=["memory-primary"],
+                request_messages=[{"role": "user", "content": atom_body}],
+                tool_schemas=[],
+                usage_total={"input_tokens": 0, "output_tokens": 0, "cache_read_tokens": 0},
+                request_artifacts=[],
+            )
     finally:
         manager.close()

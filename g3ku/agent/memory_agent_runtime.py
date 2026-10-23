@@ -5277,7 +5277,7 @@ class MemoryManager:
         turn_id: str,
         user_messages: list[str],
         assistant_text: str,
-        turns: list[dict[str, Any]] | None = None,
+        tool_records: list[dict[str, Any]] | None = None,
     ) -> str:
         parts = [f"[turn_id] {str(turn_id or '').strip() or '(unknown)'}"]
         normalized_user_messages = [
@@ -5288,10 +5288,10 @@ class MemoryManager:
         if normalized_user_messages:
             parts.append("user_messages:")
             parts.extend(f"- {item}" for item in normalized_user_messages)
-        turn_records = MemoryManager._collect_turn_tool_records(turns)
-        if turn_records:
+        records = list(tool_records or [])
+        if records:
             parts.append("tool_records:")
-            parts.append(json.dumps(turn_records, ensure_ascii=False, indent=2))
+            parts.append(json.dumps(records, ensure_ascii=False, indent=2))
         assistant = str(assistant_text or "").strip()
         if assistant:
             parts.append("assistant_text:")
@@ -5492,7 +5492,7 @@ class MemoryManager:
             turn_id=turn_id,
             user_messages=user_messages,
             assistant_text=assistant_text,
-            turns=turns,
+            tool_records=new_tool_records,
         )
         if not payload_text:
             return {"ok": True, "status": "ignored", "reason": "empty_turn"}

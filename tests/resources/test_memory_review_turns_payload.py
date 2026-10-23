@@ -34,9 +34,7 @@ def test_review_turn_payload_uses_flat_tool_records() -> None:
         turn_id="turn-1",
         user_messages=["检查文件"],
         assistant_text="已完成",
-        compression_summary=None,
-        canonical_summary=None,
-        turns=[_turn()],
+        tool_records=MemoryManager._collect_turn_tool_records(turns=[_turn()]),
     )
 
     assert "tool_records:" in payload
@@ -53,9 +51,7 @@ def test_review_window_splits_flat_tool_records_without_losing_header() -> None:
         turn_id="turn-1",
         user_messages=["检查文件"],
         assistant_text="已完成",
-        compression_summary=None,
-        canonical_summary=None,
-        turns=[_turn()],
+        tool_records=MemoryManager._collect_turn_tool_records(turns=[_turn()]),
     )
 
     pieces = MemoryManager._window_turn_sections(section, max_tokens=40)
