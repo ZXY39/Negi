@@ -653,6 +653,28 @@ IM 渠道有两条：内置官方 QQ 适配器（`g3ku/qq_official/`，进程内
 4. 至少一个异步任务可创建并完成
 5. task detail / node detail API 正常
 6. 若改动涉及工具系统，验证候选工具与 callable 工具行为
+
+### Lint 闸门的覆盖面
+
+`ruff check .` 只负责自有代码。`pyproject.toml` 的 `[tool.ruff]` 把 `work/`、`skills/`、
+仓库根的 `runtime/` 任务数据、`pytest-of-Administrator/`、`repair_tmp/`、`.g3ku/` 放进
+`extend-exclude`；排除项按目录名匹配任意深度，所以根级 `runtime` 写成 `runtime/*`，
+否则 `g3ku/runtime`、`main/runtime` 两个包也一起被扫不到。
+
+仓库根的未入库散件不在任何排除项里，会原样出现在 `ruff check .` 的输出里；要判断自有
+代码是否干净，用 `ruff check g3ku main tools scripts bridges tests`。
+
+`skills/**` 是随包分发的脚本载荷，改它属于内容决定而不是格式决定，因此不在闸门内；
+需要检查入库那几个 `.py` 时显式传路径（显式路径不受排除项影响）。
+
+命名与导入位置类抑制的落点：`tests/**` 与 `scripts/*.py` 的 E402、Win32/ctypes 面的
+N801/N802 走 `per-file-ignores`，控制流异常名（`*Requested` / `*Closed` / `*Interrupted`）
+与被延迟导入绑定的类名一律用行级 `# noqa`，因为整片 ignore 会吞掉同一文件里后续的真违规。
+
+`scripts/lint.ps1` 的第二条腿是 `ruff format --check .`。带 UTF-8 BOM 的 `.py` 会让
+ruff 0.17.1 在渲染差异时报内部错误（退出码 101），这条腿的红灯既来自格式债也来自该
+崩溃，判读时先按 `ruff check` 的自有代码口径确认前者。
+
 ## Memory Queue Workflow
 
 For the queued Markdown memory runtime, the first operator checks should be:
