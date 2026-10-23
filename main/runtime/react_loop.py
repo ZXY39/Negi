@@ -1764,6 +1764,7 @@ class ReActToolLoop:
                     node.node_id,
                     json.dumps(prepared_history, ensure_ascii=False, indent=2),
                 )
+                park_requested = self._park_requested(results)
                 self._log_service.update_frame(
                     task.task_id,
                     node.node_id,
@@ -1771,7 +1772,10 @@ class ReActToolLoop:
                         **frame,
                         'depth': node.depth,
                         'node_kind': node.node_kind,
-                        'phase': 'waiting_tool_results',
+                        # `enter_wait` 在工具执行时已把相位写成 waiting_explicit；这一跳
+                        # 若照常写 waiting_tool_results，会把停靠节点伪装成"运行中"，
+                        # 唤醒判定就不会派发它（投递侧把 running 当 in-flight 吞掉）。
+                        'phase': 'waiting_explicit' if park_requested else 'waiting_tool_results',
                         'messages': prepared_history,
                         'pending_tool_calls': [],
                         'active_round_id': '',
@@ -1792,7 +1796,7 @@ class ReActToolLoop:
                         signature=str(tool_fault_hit.get('signature') or ''),
                         count=int(tool_fault_hit.get('count') or 0),
                     )
-                if self._park_requested(results):
+                if park_requested:
                     # enter_wait 已把本回合声明为停靠：回合到此结束，不终局、不进入验收。
                     # partial 是既有的非终局出口（恢复车道用同一形态）。
                     return NodeFinalResult(
