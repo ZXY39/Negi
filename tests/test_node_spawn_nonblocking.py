@@ -79,6 +79,58 @@ def _spec(goal: str) -> SpawnChildSpec:
     return SpawnChildSpec(goal=goal, prompt='p', execution_policy={'mode': 'focus'})
 
 
+class TestCreationGates:
+    def _runner(self, service, max_nodes: int = 200):
+        service.node_runner._max_task_nodes = max_nodes
+        return service.node_runner
+
+    def test_depth_gate_rejects_the_whole_batch(self, tmp_path):
+        service = _service(tmp_path)
+        _seed(service)
+        task = service.store.get_task(TASK)
+        task = task.model_copy(update={'max_depth': 1})
+        root = service.store.get_node(ROOT)
+        runner = self._runner(service)
+        specs = [_spec('a'), _spec('b')]
+        payload = {'entries': [{'goal': 'a'}, {'goal': 'b'}]}
+        kept = runner._apply_spawn_creation_gates(
+            task=task, parent=root, specs=specs, allowed_indexes=[0, 1], cached_payload=payload
+        )
+        assert kept == []
+        assert payload['entries'][0]['creation_gate'] == 'depth'
+        receipts = runner._spawn_creation_receipts(specs=specs, entries=payload['entries'])
+        assert [item.state for item in receipts] == ['rejected', 'rejected']
+        assert receipts[0].gate == 'depth'
+        assert 'max_depth' in receipts[0].reject_reason
+
+    def test_max_nodes_budget_counts_acceptance_nodes(self, tmp_path):
+        service = _service(tmp_path)
+        _seed(service)  # root + 2 children = 3 nodes
+        task = service.store.get_task(TASK)
+        task = task.model_copy(update={'max_depth': 10})
+        root = service.store.get_node(ROOT)
+        runner = self._runner(service, max_nodes=5)
+        with_acceptance = _spec('a')
+        with_acceptance = with_acceptance.model_copy(
+            update={'acceptance_prompt': 'check', 'requires_acceptance': True}
+        )
+        specs = [with_acceptance, _spec('b')]
+        payload = {'entries': [{'goal': 'a'}, {'goal': 'b'}]}
+        kept = runner._apply_spawn_creation_gates(
+            task=task, parent=root, specs=specs, allowed_indexes=[0, 1], cached_payload=payload
+        )
+        # 3 + (1 child + 1 acceptance) = 5 → 第一个刚好用满，第二个再无额度。
+        assert kept == [0]
+        assert payload['entries'][1]['creation_gate'] == 'max_nodes'
+        receipts = runner._spawn_creation_receipts(specs=specs, entries=[
+            {'goal': 'a', 'child_node_id': CHILD_A, 'acceptance_node_id': ACCEPTANCE},
+            payload['entries'][1],
+        ])
+        assert [item.state for item in receipts] == ['created', 'rejected']
+        assert receipts[1].gate == 'max_nodes'
+        assert '上限' in receipts[1].reject_reason
+
+
 class TestCreationReceipts:
     def test_created_blocked_and_unmaterialized(self):
         service = _service(Path('.'))

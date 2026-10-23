@@ -647,7 +647,16 @@ class MainRuntimeService:
         self._resource_tree_state_poll_interval_ms = self._resource_reload_poll_interval_ms(app_config)
         self.memory_manager = None
         self._default_max_depth = max(0, int(default_max_depth or 0))
+        # `hard_max_depth` 是机器上限，`default_max_depth` 是未显式指定时的默认值。
+        # 两者在配置里可能倒挂（默认 10 / 硬顶 4），取大者保持"硬顶不小于默认"的
+        # 不变式；真正的裁剪只在 `_clamp_depth` 一处做，不在别处再抄一份。
         self._hard_max_depth = max(self._default_max_depth, int(hard_max_depth or self._default_max_depth))
+        self._max_task_nodes = max(
+            1,
+            int(
+                getattr(getattr(app_config, 'main_runtime', None), 'max_task_nodes', 200) or 200
+            ),
+        )
         self._builtin_tool_cache: dict[str, Tool] | None = None
         self._node_context_selection_cache: dict[tuple[str, str], dict[str, Any]] = {}
         parallel_enabled, max_parallel_tool_calls, max_parallel_child_pipelines = self._node_parallelism_settings(app_config)
@@ -760,6 +769,7 @@ class MainRuntimeService:
         # P1「终局必上报」的唯一出口：执行节点终局 → 父节点信箱 `child_final`。
         self.node_runner.child_final_sink = self._deliver_child_final_message
         self.node_runner._tool_default_timeout_seconds = self._tool_default_timeout_seconds(app_config)
+        self.node_runner._max_task_nodes = self._max_task_nodes
         self.task_actor_service = TaskActorService(
             store=self.store,
             log_service=self.log_service,
@@ -7009,6 +7019,9 @@ class MainRuntimeService:
             self._chat_backend._config = config
         self._default_max_depth = max(0, int(getattr(config.main_runtime, 'default_max_depth', 1) or 0))
         self._hard_max_depth = max(self._default_max_depth, int(getattr(config.main_runtime, 'hard_max_depth', self._default_max_depth) or self._default_max_depth))
+        self._max_task_nodes = max(1, int(getattr(config.main_runtime, 'max_task_nodes', 200) or 200))
+        if hasattr(self, 'node_runner') and self.node_runner is not None:
+            self.node_runner._max_task_nodes = self._max_task_nodes
         self.node_runner._execution_model_refs = list(config.get_role_model_keys('execution'))
         self.node_runner._acceptance_model_refs = list(config.get_role_model_keys('inspection') or config.get_role_model_keys('execution'))
         # route plan 是权威来源；refs 只是候选展开视图。检验缺省时继承整份执行 route plan。

@@ -291,6 +291,8 @@ class NodeRunner:
         self._parallel_child_pipelines_enabled = True
         # 统一工具 timeout 全局默认值（秒），由 runtime_service 从配置注入/热更新。
         self._tool_default_timeout_seconds: float | None = None
+        # 派生闸门：单任务节点总数上限（含验收节点），由 runtime_service 注入。
+        self._max_task_nodes = 200
         self._adaptive_tool_budget_controller = getattr(react_loop, '_adaptive_tool_budget_controller', None)
         self._context_enricher = context_enricher
         self._context_preparer = context_preparer
@@ -5280,6 +5282,13 @@ class NodeRunner:
             specs=specs,
             spawn_review=spawn_review,
         )
+        allowed_indexes = self._apply_spawn_creation_gates(
+            task=task,
+            parent=parent,
+            specs=specs,
+            allowed_indexes=allowed_indexes,
+            cached_payload=cached_payload,
+        )
 
         if allowed_indexes:
             await self._admit_spawn_batch(
@@ -5346,6 +5355,77 @@ class NodeRunner:
             detail=f'created={len(receipts)} dispatched={len(dispatched_ids)}',
         )
         return receipts
+
+    @staticmethod
+    def _depth_allows_spawn(parent_depth: int, max_depth: int) -> bool:
+        """深度闸门的唯一判据（派生闸门第 1 条）。
+
+        语义沿用既有实现：`max_depth` 是允许的层级数，深 `d` 的节点能派生当且仅当
+        `d + 1 < max_depth`。不要在别处再抄一份（旧代码在 `can_spawn_children`
+        与工具摘除两处各写了一次）。
+        """
+        try:
+            return int(parent_depth) + 1 < int(max_depth)
+        except (TypeError, ValueError):
+            return False
+
+    def _apply_spawn_creation_gates(
+        self,
+        *,
+        task,
+        parent: NodeRecord,
+        specs: list[SpawnChildSpec],
+        allowed_indexes: list[int],
+        cached_payload: dict[str, Any],
+    ) -> list[int]:
+        """派生闸门的创建期判定：深度与本任务节点总数。
+
+        与 `review_spawn_candidates`（第 8 条闸门）分开：这两条是机器可判的资源约束，
+        不需要模型参与。被拒候选写入 entry 的 `creation_gate` / `creation_reject_reason`，
+        由 `_spawn_creation_receipts` 转成 `rejected[]`；**不物化、不派发**。
+        节点额度把验收节点算进去：它是资源约束的一部分，只是不参与完成判据。
+        """
+        if not allowed_indexes:
+            return []
+        entries = list(cached_payload.get('entries') or [])
+        try:
+            current_total = len(self._store.list_nodes(task.task_id) or [])
+        except Exception:
+            current_total = 0
+        max_nodes = max(1, int(getattr(self, '_max_task_nodes', 200) or 200))
+        budget = max_nodes - current_total
+        depth_ok = self._depth_allows_spawn(parent.depth, int(getattr(task, 'max_depth', 0) or 0))
+        depth_reason = (
+            f'已达最大派生深度（max_depth={int(getattr(task, "max_depth", 0) or 0)}，'
+            f'当前深度={parent.depth}）'
+        )
+        kept: list[int] = []
+        for index in allowed_indexes:
+            if index >= len(entries) or not isinstance(entries[index], dict):
+                continue
+            entry = entries[index]
+            spec = specs[index] if index < len(specs) else None
+            if not depth_ok:
+                entry['creation_gate'] = 'depth'
+                entry['creation_reject_reason'] = depth_reason
+                continue
+            requires_acceptance = bool(
+                getattr(spec, 'requires_acceptance', None)
+                if getattr(spec, 'requires_acceptance', None) is not None
+                else str(getattr(spec, 'acceptance_prompt', '') or '').strip()
+            )
+            cost = 1 + (1 if requires_acceptance else 0)
+            if cost > budget:
+                entry['creation_gate'] = 'max_nodes'
+                entry['creation_reject_reason'] = (
+                    f'任务节点总数上限 {max_nodes} 已不足以容纳本批：'
+                    f'剩余额度 {max(budget, 0)}，本候选需要 {cost} 个节点（含验收节点）。'
+                )
+                continue
+            budget -= cost
+            kept.append(index)
+        cached_payload['entries'] = entries
+        return kept
 
     def _materialized_spawn_round_review(self, *, specs: list[SpawnChildSpec]) -> dict[str, Any]:
         specs_list = list(specs or [])
@@ -6681,6 +6761,20 @@ class NodeRunner:
             child_node_id = str(entry.get('child_node_id') or '').strip()
             acceptance_node_id = str(entry.get('acceptance_node_id') or '').strip()
             review_decision = str(entry.get('review_decision') or '').strip().lower()
+            creation_gate = str(entry.get('creation_gate') or '').strip().lower()
+            if creation_gate and not child_node_id:
+                reason = str(entry.get('creation_reject_reason') or '').strip() or creation_gate
+                receipts.append(
+                    SpawnChildResult(
+                        goal=goal,
+                        check_result='派生被拒绝',
+                        node_output=reason,
+                        state='rejected',
+                        gate=creation_gate,
+                        reject_reason=reason,
+                    )
+                )
+                continue
             if review_decision == 'blocked' and not child_node_id:
                 reason = str(entry.get('blocked_reason') or '').strip()
                 suggestion = str(entry.get('blocked_suggestion') or '').strip()
@@ -8070,7 +8164,7 @@ class NodeRunner:
             output=[],
             check_result='',
             final_output='',
-            can_spawn_children=(parent.depth + 1) < int(task.max_depth),
+            can_spawn_children=self._depth_allows_spawn(parent.depth, int(task.max_depth)),
             created_at=_now(),
             updated_at=_now(),
             token_usage=TokenUsageSummary(tracked=bool(getattr(task.token_usage, 'tracked', False))),

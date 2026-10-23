@@ -851,6 +851,9 @@ class MainRuntimeConfig(Base):
     governance_store_path: str = '.g3ku/main-runtime/governance.sqlite3'
     default_max_depth: int = 10
     hard_max_depth: int = 4
+    # 派生闸门：单任务节点总数上限（含验收节点）。验收节点是资源约束的一部分
+    # （不计入完成判据，但占节点额度）。
+    max_task_nodes: int = 200
     event_history: "MainRuntimeEventHistoryConfig" = Field(default_factory=lambda: MainRuntimeEventHistoryConfig())
     disk_guard: "MainRuntimeDiskGuardConfig" = Field(default_factory=lambda: MainRuntimeDiskGuardConfig())
     node_dispatch_concurrency: "NodeDispatchConcurrencyConfig" = Field(default_factory=lambda: NodeDispatchConcurrencyConfig())
