@@ -836,16 +836,9 @@ async function submitNodeNoticeComposer() {
 
 
 function taskNoticeSettleWindowOpen(now) {
-    if (typeof activeTaskDistributionState !== "function") return false;
-    const distributionState = activeTaskDistributionState();
-    if (!distributionState) return false;
-    const state = S.noticeSettle;
-    const oldestAt = (state?.pending || []).reduce(
-        (min, item) => (item?.addedAt && (!min || item.addedAt < min) ? item.addedAt : min),
-        0,
-    );
-    if (!oldestAt) return true;
-    return Number(now) - oldestAt <= TASK_NOTICE_SETTLE_DISTRIBUTION_MAX_MS;
+    // 分发 epoch 已删除：不再存在"分发窗口内不收窗"的特殊宽容，按普通超时收窗。
+    void now;
+    return false;
 }
 
 
@@ -1042,140 +1035,6 @@ function syncExecutionTreeSelection(previousNodeId, nextNodeId) {
 }
 
 
-function taskDistributionPendingNoticeNodeIds(distribution = null) {
-    if (!distribution || typeof distribution !== "object") return [];
-    return (Array.isArray(distribution.pending_notice_node_ids) ? distribution.pending_notice_node_ids : [])
-        .map((item) => String(item || "").trim())
-        .filter(Boolean);
-}
-
-
-function taskDistributionPendingNoticeAlreadyVisible(distribution = null) {
-    const pendingNodeIds = taskDistributionPendingNoticeNodeIds(distribution);
-    if (!pendingNodeIds.length) return false;
-    return pendingNodeIds.every((nodeId) => {
-        const snapshotNode = treeSnapshotNode(nodeId);
-        return Math.max(0, treeNormalizeInt(snapshotNode?.pending_notice_count, 0)) > 0;
-    });
-}
-
-
-function activeTaskDistributionState() {
-    const distribution = S.taskRuntimeSummary?.distribution;
-    if (distribution && typeof distribution === "object") {
-        const activeEpochId = String(distribution.active_epoch_id || "").trim();
-        const state = String(distribution.state || "").trim();
-        const mode = String(distribution.mode || "").trim();
-        const hasBlockedNodes = Array.isArray(distribution.blocked_node_ids) && distribution.blocked_node_ids.length > 0;
-        const pendingNoticeAlreadyVisible = taskDistributionPendingNoticeAlreadyVisible(distribution);
-        if (state === "resume_ready") {
-            if (pendingNoticeAlreadyVisible) return null;
-            return { ...distribution, ui_mode: "pending_notice" };
-        }
-        if (state === "failed") {
-            return { ...distribution, ui_mode: "distribution_failed" };
-        }
-        // subtree_barrier 是统一后的单一分发模式；task_wide_barrier 是旧
-        // 持久化 meta 的历史名称（根目标定向即原全局模式），同样进入分发 UI。
-        if (mode === "subtree_barrier" || mode === "task_wide_barrier") {
-            if (
-                activeEpochId
-                || state === "barrier_requested"
-                || state === "barrier_draining"
-                || state === "distributing"
-                || hasBlockedNodes
-            ) {
-                return { ...distribution, ui_mode: "distribution" };
-            }
-        }
-        if (
-            activeEpochId
-            || state === "barrier_requested"
-            || state === "barrier_draining"
-            || state === "distributing"
-        ) {
-            return { ...distribution, ui_mode: "distribution" };
-        }
-    }
-    return null;
-}
-
-
-function distributionAffectedNodeIds(distributionState = activeTaskDistributionState()) {
-    const affected = new Set();
-    if (!distributionState || typeof distributionState !== "object") return affected;
-    const uiMode = String(distributionState.ui_mode || "").trim();
-    if (uiMode !== "distribution" && uiMode !== "distribution_failed") return affected;
-    const seeds = [
-        ...(Array.isArray(distributionState.blocked_node_ids) ? distributionState.blocked_node_ids : []),
-        ...(Array.isArray(distributionState.target_node_ids) ? distributionState.target_node_ids : []),
-    ];
-    seeds.forEach((rawNodeId) => {
-        const seedNodeId = String(rawNodeId || "").trim();
-        if (!seedNodeId) return;
-        collectSnapshotSubtreeIds(seedNodeId).forEach((subtreeNodeId) => affected.add(subtreeNodeId));
-    });
-    return affected;
-}
-
-
-function summarizeDistributionProgress(distributionState) {
-    const state = distributionState && typeof distributionState === "object" ? distributionState : {};
-    const asIds = (value) => (Array.isArray(value)
-        ? value.map((item) => String(item || "").trim()).filter(Boolean)
-        : []);
-    const blockedIds = asIds(state.blocked_node_ids);
-    if (!blockedIds.length) return { frozenCount: 0, blockedCount: 0, text: "" };
-    const nodesById = S.treeNodesById && typeof S.treeNodesById === "object" ? S.treeNodesById : null;
-    let denominatorIds = blockedIds;
-    if (nodesById && Object.keys(nodesById).length) {
-        denominatorIds = blockedIds.filter((nodeId) => {
-            const status = String(nodesById[nodeId]?.status || "").trim().toLowerCase();
-            return !status || !TREE_TERMINAL_STATUSES.has(status);
-        });
-    }
-    const blockedCount = denominatorIds.length;
-    if (!blockedCount) return { frozenCount: 0, blockedCount: 0, text: "" };
-    const denominatorSet = new Set(denominatorIds);
-    const frozenCount = asIds(state.frozen_node_ids).filter((nodeId) => denominatorSet.has(nodeId)).length;
-    const phase = String(state.state || "").trim();
-    const tail = frozenCount < blockedCount
-        ? "其余节点仍有在飞请求未落"
-        : (phase === "distributing" ? "已进入分发决策回合" : "全部已停，等待决策回合");
-    return {
-        frozenCount,
-        blockedCount,
-        text: `新消息分发中 · 已停步 ${frozenCount}/${blockedCount} · ${tail}`,
-    };
-}
-
-
-function buildTaskTreeDistributionBubble(text = "") {
-    const distributionState = activeTaskDistributionState();
-    const failedMode = distributionState?.ui_mode === "distribution_failed";
-    const failureText = String(distributionState?.error_text || "").trim();
-    let fallbackText;
-    if (distributionState?.ui_mode === "pending_notice") {
-        fallbackText = "接收到新消息，等待节点处理";
-    } else if (failedMode) {
-        fallbackText = failureText
-            ? `消息分发失败（${failureText.slice(0, 120)}），任务保持暂停；可重新追加通知重试，或手动恢复任务`
-            : "消息分发失败，任务保持暂停；可重新追加通知重试，或手动恢复任务";
-    } else {
-        // 分发窗口可以长达分钟级（排空要等在飞回合落地），静态一句「新消息分发中」
-        // 读不出"在推进"还是"卡死"，因此带上已停步计数。
-        const progress = summarizeDistributionProgress(distributionState);
-        fallbackText = progress.text || "新消息分发中";
-    }
-    const bubble = document.createElement("div");
-    bubble.className = failedMode
-        ? "task-tree-distribution-bubble task-tree-distribution-bubble--failed"
-        : "task-tree-distribution-bubble";
-    bubble.setAttribute("role", "status");
-    bubble.setAttribute("aria-live", "polite");
-    bubble.textContent = String(text || "").trim() || fallbackText;
-    return bubble;
-}
 
 
 function treeNodeHasActiveChildren(node) {

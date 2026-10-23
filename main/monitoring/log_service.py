@@ -40,8 +40,6 @@ from main.models import (
     TaskRecord,
     normalize_failure_class,
     normalize_final_acceptance_metadata,
-    normalize_optional_text,
-    normalize_string_list,
     normalize_tool_file_changes,
 )
 from main.monitoring.execution_trace import build_execution_trace
@@ -663,13 +661,6 @@ class TaskLogService:
             'summary_fingerprint': '',
             'summary_last_published_at': '',
             'governance': _default_governance_state(),
-            'distribution': {
-                'active_epoch_id': '',
-                'state': '',
-                'frontier_node_ids': [],
-                'queued_epoch_count': 0,
-                'pending_mailbox_count': 0,
-            },
         }
 
     @classmethod
@@ -713,37 +704,6 @@ class TaskLogService:
             'latest_limit_reason': str(current.get('latest_limit_reason') or '').strip(),
             'supervision_disabled_after_limit': bool(current.get('supervision_disabled_after_limit')),
             'history': history_payload,
-        }
-
-    @staticmethod
-    def _sanitize_distribution_state(payload: Any) -> dict[str, Any]:
-        current = dict(payload or {}) if isinstance(payload, dict) else {}
-        target_node_ids = normalize_string_list(current.get('target_node_ids'))
-        frontier_node_ids = normalize_string_list(current.get('frontier_node_ids'))
-        blocked_node_ids = normalize_string_list(current.get('blocked_node_ids'))
-        # 排空账本：已走到安全检查点停住的节点子集，只作进度下界，不是释放依据。
-        frozen_node_ids = normalize_string_list(current.get('frozen_node_ids'))
-        pending_notice_node_ids = normalize_string_list(current.get('pending_notice_node_ids'))
-        try:
-            queued_epoch_count = max(0, int(current.get('queued_epoch_count') or 0))
-        except (TypeError, ValueError):
-            queued_epoch_count = 0
-        try:
-            pending_mailbox_count = max(0, int(current.get('pending_mailbox_count') or 0))
-        except (TypeError, ValueError):
-            pending_mailbox_count = 0
-        return {
-            'active_epoch_id': normalize_optional_text(current.get('active_epoch_id')),
-            'state': normalize_optional_text(current.get('state')),
-            'mode': normalize_optional_text(current.get('mode')),
-            'target_node_ids': target_node_ids,
-            'frontier_node_ids': frontier_node_ids,
-            'blocked_node_ids': blocked_node_ids,
-            'frozen_node_ids': frozen_node_ids,
-            'pending_notice_node_ids': pending_notice_node_ids,
-            'queued_epoch_count': queued_epoch_count,
-            'pending_mailbox_count': pending_mailbox_count,
-            'error_text': normalize_optional_text(current.get('error_text')),
         }
 
     def initialize_task(self, task: TaskRecord, root: NodeRecord) -> tuple[TaskRecord, NodeRecord]:
@@ -3086,8 +3046,6 @@ class TaskLogService:
                 current['dispatch_queued'] = self._sanitize_dispatch_counters(payload.get('dispatch_queued'))
             if 'governance' in payload:
                 current['governance'] = self._sanitize_governance_state(payload.get('governance'))
-            if 'distribution' in payload:
-                current['distribution'] = self._sanitize_distribution_state(payload.get('distribution'))
             current['updated_at'] = now_iso()
             self._store.upsert_task_runtime_meta(
                 task_id=task.task_id,
@@ -3212,7 +3170,6 @@ class TaskLogService:
         current.setdefault('summary_fingerprint', '')
         current.setdefault('summary_last_published_at', '')
         current['governance'] = self._sanitize_governance_state(current.get('governance'))
-        current['distribution'] = self._sanitize_distribution_state(current.get('distribution'))
         current['task_temp_dir'] = self._normalize_task_temp_dir(current.get('task_temp_dir'))
         try:
             current['last_stall_notice_bucket_minutes'] = max(0, int(current.get('last_stall_notice_bucket_minutes') or 0))
@@ -3311,7 +3268,6 @@ class TaskLogService:
                 'last_visible_output_at': str(meta.get('last_visible_output_at') or '').strip(),
                 'last_stall_notice_bucket_minutes': max(0, int(meta.get('last_stall_notice_bucket_minutes') or 0)),
                 'governance': self._sanitize_governance_state(meta.get('governance')),
-                'distribution': self._sanitize_distribution_state(meta.get('distribution')),
                 'frames': frames,
                 'active_node_ids': [str(row['node_id']) for row in frame_rows if bool(row['active'])],
                 'runnable_node_ids': [str(row['node_id']) for row in frame_rows if bool(row['runnable'])],
@@ -3332,7 +3288,6 @@ class TaskLogService:
             'last_visible_output_at': str(meta.get('last_visible_output_at') or '').strip(),
             'last_stall_notice_bucket_minutes': max(0, int(meta.get('last_stall_notice_bucket_minutes') or 0)),
             'governance': self._sanitize_governance_state(meta.get('governance')),
-            'distribution': self._sanitize_distribution_state(meta.get('distribution')),
             'frames': frames,
             'active_node_ids': [record.node_id for record in frame_records if bool(record.active)],
             'runnable_node_ids': [record.node_id for record in frame_records if bool(record.runnable)],
@@ -5035,7 +4990,6 @@ class TaskLogService:
             'dispatch_running': self._sanitize_dispatch_counters(state.get('dispatch_running')),
             'dispatch_queued': self._sanitize_dispatch_counters(state.get('dispatch_queued')),
             'governance': self._sanitize_governance_state(state.get('governance')),
-            'distribution': self._sanitize_distribution_state(state.get('distribution')),
             'frames': frames,
         }
         # 只有增量档自带过期名单；全量档每帧自己有 stale 字段，别的生产者（read_runtime_state）
@@ -5073,7 +5027,6 @@ class TaskLogService:
         state['dispatch_running'] = cls._sanitize_dispatch_counters(state.get('dispatch_running'))
         state['dispatch_queued'] = cls._sanitize_dispatch_counters(state.get('dispatch_queued'))
         state['governance'] = cls._sanitize_governance_state(state.get('governance'))
-        state['distribution'] = cls._sanitize_distribution_state(state.get('distribution'))
         state['frames'] = [cls._sanitize_runtime_frame(frame) for frame in list(state.get('frames') or []) if isinstance(frame, dict)]
         return state
 

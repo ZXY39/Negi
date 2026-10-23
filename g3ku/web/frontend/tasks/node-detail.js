@@ -182,8 +182,7 @@ const TASK_NOTICE_SETTLE_INTERVAL_MS = 2500;
 const TASK_NOTICE_SETTLE_TIMEOUT_MS = 90000;
 // 分发进行中不能按 90 秒收窗：一次根目标分发的排空+控制回合可以跑到 9 分钟以上，
 // 固定窗口会让条目在消息真正落地前被丢弃，此后只剩手动刷新。
-// 上限用于兜住分发失败/驱动器缺席时的无限轮询。
-const TASK_NOTICE_SETTLE_DISTRIBUTION_MAX_MS = 30 * 60 * 1000;
+// 分发窗口已随 epoch 删除，不再有额外的长宽容上限。
 
 
 

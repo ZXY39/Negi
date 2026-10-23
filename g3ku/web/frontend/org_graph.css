@@ -1096,33 +1096,6 @@ textarea {
     overscroll-behavior: contain;
 }
 
-.task-tree-distribution-bubble {
-    position: sticky;
-    top: var(--space-3);
-    z-index: 4;
-    width: fit-content;
-    max-width: min(720px, calc(100% - var(--space-6)));
-    margin: 0 auto var(--space-3);
-    padding: 10px 14px;
-    border-radius: 999px;
-    border: 1px solid color-mix(in srgb, #f59e0b 44%, var(--border-color));
-    background: color-mix(in srgb, #f59e0b 14%, var(--bg-app));
-    box-shadow: 0 12px 32px rgba(245, 158, 11, 0.12);
-    color: color-mix(in srgb, #92400e 88%, var(--text-primary));
-    font-size: 0.84rem;
-    font-weight: 700;
-    line-height: 1.35;
-    text-align: center;
-    pointer-events: none;
-}
-
-.task-tree-distribution-bubble--failed {
-    border-color: color-mix(in srgb, #ef4444 52%, var(--border-color));
-    background: color-mix(in srgb, #ef4444 14%, var(--bg-app));
-    box-shadow: 0 12px 32px rgba(239, 68, 68, 0.14);
-    color: color-mix(in srgb, #b91c1c 88%, var(--text-primary));
-}
-
 .tree-container.is-panning {
     cursor: grabbing;
     user-select: none;
@@ -1297,19 +1270,6 @@ textarea {
     --tree-branch-color: var(--tree-line-failed);
 }
 
-/* 定向通知分发不再全局改色：只把"受影响节点之间"的连线标记为分发色。
-   .execution-tree-list--distribution-affected 表示该子列表的父节点被冻结
-   （父→子垂线段可染黄）；.execution-tree-item--distribution-affected 表示
-   节点自身在冻结子树内。两者同时成立才覆盖该条连线的分支色，子树根节点
-   与其（未受影响的）父节点之间的边界连线因此保持原状态色。通知被消费、
-   epoch 完成后 distribution UI 退出，类名随重渲染移除，连线自动恢复。 */
-.execution-tree.execution-tree--distribution-active .execution-tree-list.execution-tree-list--distribution-affected {
-    --tree-branch-color: var(--tree-line-distribution);
-}
-
-.execution-tree.execution-tree--distribution-active .execution-tree-list.execution-tree-list--distribution-affected > .execution-tree-item.execution-tree-item--distribution-affected {
-    --tree-branch-color: var(--tree-line-distribution);
-}
 
 .execution-tree-node {
     position: relative;

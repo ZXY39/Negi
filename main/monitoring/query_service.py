@@ -1360,30 +1360,6 @@ class TaskQueryService:
             acceptance_handshake_state=handshake_state,
         )
 
-    def _distribution_state_with_ledger(self, task_id: str, runtime_meta: dict[str, Any]) -> TaskDistributionState:
-        """分发读数：meta 副本 + 权威 epoch 行的排空账本。
-
-        meta 的 `frozen_node_ids` 是写入侧顺带维护的副本，可能是空的（epoch 失败后驱动器
-        不再跑、或进程重启后还没重算过一版）；账本的单一真源在 epoch 行里，空的时侯回查
-        一次单行读。只影响进度下界与节点 `barrier_frozen` 标注，不参与冻结/释放判定。
-        """
-        distribution = TaskDistributionState.model_validate(runtime_meta.get('distribution') or {})
-        if distribution.frozen_node_ids or not distribution.active_epoch_id:
-            return distribution
-        try:
-            epoch = self._store.get_task_message_distribution_epoch(task_id, distribution.active_epoch_id)
-        except Exception:
-            return distribution
-        payload = dict(epoch.payload or {}) if epoch is not None and isinstance(epoch.payload, dict) else {}
-        ledger = [
-            str(item or '').strip()
-            for item in list(payload.get('frozen_node_ids') or [])
-            if str(item or '').strip()
-        ]
-        if not ledger:
-            return distribution
-        return distribution.model_copy(update={'frozen_node_ids': ledger})
-
     def _build_tree_snapshot(
         self,
         *,
@@ -1490,20 +1466,8 @@ class TaskQueryService:
                 for node_id in included_ids
                 if node_id in node_map
             }
-        runtime_meta = self._log_service.read_task_runtime_meta(task_id) or {}
-        distribution = self._distribution_state_with_ledger(task_id, runtime_meta)
-        # subtree_barrier 是统一后的单一分发模式；task_wide_barrier 是旧持久化
-        # meta 的历史名称（根目标定向即原全局模式），两者同样标记 barrier_blocked。
-        if distribution.mode in {'subtree_barrier', 'task_wide_barrier'}:
-            frozen_node_ids = set(distribution.frozen_node_ids or [])
-            for node_id in set(distribution.blocked_node_ids or []):
-                current = snapshot_nodes.get(str(node_id or '').strip())
-                if current is None:
-                    continue
-                # 排空账本比 blocked 快照更精确：blocked 只说明「该停」，
-                # frozen 才说明「已经停在检查点上了」。
-                status = 'barrier_frozen' if current.node_id in frozen_node_ids else 'barrier_blocked'
-                snapshot_nodes[current.node_id] = current.model_copy(update={'distribution_status': status})
+        # distribution epoch 已删除：runtime_meta.distribution 恒为空，不再读取；
+        # 快照节点的 distribution_status 保持空串（字段仅为旧客户端保留）。
         projection_meta = self._store.get_task_projection_meta(task_id)
         snapshot_version = str(getattr(projection_meta, 'version', '') or '').strip() or str(
             max(0, len(node_map))
@@ -1721,7 +1685,8 @@ class TaskQueryService:
         dispatch_pool = int(dispatch_limits.pop('pool', 0) or 0)
         dispatch_running = self._sanitize_dispatch_counters(runtime_meta.get('dispatch_running'))
         dispatch_queued = self._sanitize_dispatch_counters(runtime_meta.get('dispatch_queued'))
-        distribution = TaskDistributionState.model_validate(runtime_meta.get('distribution') or {})
+        # epoch 下线后 runtime_meta.distribution 恒为空：不读，直接给空结构保持响应形状。
+        distribution = TaskDistributionState()
         if not heads:
             self._live_frame_cache.pop(task_id, None)
             if any(dispatch_limits.values()) or any(dispatch_running.values()) or any(dispatch_queued.values()):
