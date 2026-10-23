@@ -2481,6 +2481,9 @@ class NodeRunner:
             'unread_from_child': brief['unread_count'],
             'final_result_ref': str(getattr(target, 'final_output_ref', '') or ''),
             'abnormal_pause_reason': abnormal,
+            'watchdog_history': [
+                dict(item) for item in list(metadata.get('watchdog_history') or [])[-5:] if isinstance(item, dict)
+            ],
             'acceptance_rounds': int(handshake.get('rejection_count') or 0),
             'latest_verdict_ref': str(handshake.get('latest_rejection_feedback_ref') or ''),
             'focus': str(focus or ''),

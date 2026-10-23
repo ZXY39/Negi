@@ -614,6 +614,8 @@ class TaskActorService:
         self._log_service = log_service
         self._node_runner = node_runner
         self._stall_notifier = stall_notifier
+        # P6 节点看门狗：结构判停（三条判据）。由 MainRuntimeService 注入。
+        self.node_watchdog = None
         self._dispatchers: dict[str, TaskNodeDispatcher] = {}
         self._node_dispatch_entry_budget = node_dispatch_entry_budget
         self._node_dispatch_limits = {
@@ -787,6 +789,8 @@ class TaskActorService:
             return
         if self._stall_notifier is not None and hasattr(self._stall_notifier, 'start_task'):
             self._stall_notifier.start_task(task_id)
+        if self.node_watchdog is not None and hasattr(self.node_watchdog, 'start_task'):
+            self.node_watchdog.start_task(task_id)
         control_only_return = False
         result = NodeFinalResult(
             status='failed',
@@ -915,6 +919,8 @@ class TaskActorService:
                     sweep.cancel()
             await dispatcher.close()
             self._dispatchers.pop(task_id, None)
+            if self.node_watchdog is not None and hasattr(self.node_watchdog, 'cancel_task'):
+                self.node_watchdog.cancel_task(task_id)
             latest = self._store.get_task(task_id)
             root = self._store.get_node(latest.root_node_id) if latest is not None else None
             if (

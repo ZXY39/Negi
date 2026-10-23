@@ -140,6 +140,7 @@ from main.runtime.node_wake import (
     node_park_state,
     wake_parked_node,
 )
+from main.runtime.node_watchdog import NodeWatchdog
 from main.runtime.react_loop import ReActToolLoop
 from main.runtime.task_actor_service import TaskActorService
 from main.runtime.tool_pressure_monitor import WorkerPressureMonitor
@@ -657,6 +658,35 @@ class MainRuntimeService:
                 or 900.0
             ),
         )
+        self._node_watchdog_interval_seconds = max(
+            1.0,
+            float(
+                getattr(
+                    getattr(app_config, 'main_runtime', None),
+                    'node_watchdog_interval_seconds',
+                    30.0,
+                )
+                or 30.0
+            ),
+        )
+        self._node_watchdog_stall_seconds = max(
+            60.0,
+            float(
+                getattr(
+                    getattr(app_config, 'main_runtime', None),
+                    'node_watchdog_stall_seconds',
+                    600.0,
+                )
+                or 600.0
+            ),
+        )
+        # P6：节点看门狗（结构判停）。与任务级失速通知并存：后者只发会话回调，
+        # 前者把节点转成「暂停·异常」并升级父节点。
+        self.node_watchdog = NodeWatchdog(
+            service=self,
+            interval_seconds=self._node_watchdog_interval_seconds,
+            stall_seconds=self._node_watchdog_stall_seconds,
+        )
         self._builtin_tool_cache: dict[str, Tool] | None = None
         self._node_context_selection_cache: dict[tuple[str, str], dict[str, Any]] = {}
         parallel_enabled, max_parallel_tool_calls, max_parallel_child_pipelines = self._node_parallelism_settings(app_config)
@@ -790,6 +820,7 @@ class MainRuntimeService:
             max_concurrent_tasks=None if execution_runtime_enabled else 4,
             per_task_limit=1,
         )
+        self.task_actor_service.node_watchdog = self.node_watchdog
         self.task_actor_service.interrupted_task_requeue_callback = (
             lambda task_id: asyncio.get_running_loop().call_soon(
                 lambda normalized_task_id=str(task_id or '').strip(): asyncio.create_task(
@@ -1004,6 +1035,7 @@ class MainRuntimeService:
                 if ref_id and ref_id not in known_task_ids:
                     self.store.mark_shutdown_pause_entry_consumed(kind='task', ref_id=ref_id)
             self.task_stall_notifier.bootstrap_running_tasks()
+            self.node_watchdog.bootstrap_running_tasks()
         if self.execution_mode in {'embedded', 'worker'}:
             # 磁盘治理（P1）：任务大小对账循环（每小时增量纠偏 + 终态即时对账）。
             if self._task_disk_reconcile_task is None or self._task_disk_reconcile_task.done():
@@ -11763,6 +11795,7 @@ class MainRuntimeService:
             await self.node_turn_controller.close()
         await self.worker_heartbeat_service.close()
         await self.task_stall_notifier.close()
+        await self.node_watchdog.close()
         if self.execution_mode == 'worker' and self.worker_id and self._worker_lease_acquired:
             stopped_item = {
                 'worker_id': self.worker_id,

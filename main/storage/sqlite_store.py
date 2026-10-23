@@ -1718,7 +1718,11 @@ class SQLiteTaskStore:
             "COALESCE((SELECT e.error_text FROM task_error_logs e WHERE e.task_id = p.task_id AND e.node_id = p.node_id ORDER BY e.seq DESC LIMIT 1), '') AS error_text, "
             "COALESCE((SELECT e.node_title FROM task_error_logs e WHERE e.task_id = p.task_id AND e.node_id = p.node_id ORDER BY e.seq DESC LIMIT 1), '') AS node_title "
             "FROM task_node_pauses p JOIN nodes n ON n.node_id = p.node_id "
-            "WHERE p.pause_reason = 'error' AND p.delivered = 0 AND n.status = 'in_progress' AND COALESCE(json_extract(n.payload_json, '$.is_paused'), 0) = 1 "
+            "WHERE p.pause_reason = 'error' AND p.delivered = 0 AND n.status = 'in_progress' "
+            "AND COALESCE(json_extract(n.payload_json, '$.is_paused'), 0) = 1 "
+            # P6：心跳只报根节点。非根节点的异常暂停走父节点信箱（child_abnormal_pause），
+            # 否则一个深度 5 的子节点也能直接惊动会话 agent。
+            "AND n.node_id = (SELECT json_extract(t.payload_json, '$.root_node_id') FROM tasks t WHERE t.task_id = p.task_id) "
             "ORDER BY p.created_at ASC, p.id ASC"
         )
         return [dict(row) for row in rows]
