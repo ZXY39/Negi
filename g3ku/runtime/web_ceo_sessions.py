@@ -70,6 +70,9 @@ _RECENT_HISTORY_TOOL_TRACE_LIMIT = 2
 _RECENT_HISTORY_TOOL_TEXT_MAX_CHARS = 96
 _TASK_RESULT_OUTPUT_MAX_CHARS = 480
 _TASK_RESULT_REASON_MAX_CHARS = 180
+# `stage_compaction` 只服务存量：182 份续跑快照里 23 份仍带这个值，而写入侧已经不再产出它。
+# 删掉这一项不会改变发送侧判据——发送侧 `_ALLOWED_FRONTDOOR_SHRINK_REASONS` 早已不含该值——
+# 只会把存量快照里的收缩理由静默写成空串，让下一个读者以为这段历史从没收缩过。
 _CONTINUITY_ALLOWED_SHRINK_REASONS = {"", "token_compression", "stage_compaction", "user_edit_truncation"}
 _CONTINUITY_ALLOWED_SOURCE_REASONS = {"actual_request_sync", "finalize", "manual_stop", "user_edit_truncation"}
 _CONTINUITY_ALLOWED_RESTORE_SOURCES = {
