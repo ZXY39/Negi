@@ -228,6 +228,19 @@ class TaskNodeNotification(Model):
     # 消息三态：consumed_at=控制/决策回合处理过；merged_at=内容真正并入模型上下文。
     # consumed 而未 merged 显示「已消费」，merged 后显示「已并入上下文」。
     merged_at: str = ''
+    # 以下七格由 `main/runtime/node_message_kind.py` 机械推导，发送方不能自报：
+    # kind/priority 决定投递与唤醒，intent_kind 是模型唯一可声明的意图词。
+    # 全部带默认值，存量行（payload_json 里没有这些键）照旧解析。
+    kind: str = ''
+    priority: str = ''
+    intent_kind: str = ''
+    fingerprint: str = ''
+    in_reply_to: str = ''
+    # 大内容外部化指针：消息正文只放摘要，全文走 ref。
+    ref: str = ''
+    # 仅 acceptance_verdict：绑定被验的那一份提交（迟到裁决规则唯一判据）。
+    submission_id: str = ''
+    verdict: str = ''
     payload: dict[str, Any] = Field(default_factory=dict)
 
 
