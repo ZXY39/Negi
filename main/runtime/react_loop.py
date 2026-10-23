@@ -186,7 +186,11 @@ from main.runtime.tool_call_repair import (
     format_xml_repair_failure_reason,
     recover_tool_calls_from_json_payload,
 )
-from main.runtime.tool_names import FINAL_RESULT_TOOL_NAME, SILENT_TOOL_NAME
+from main.runtime.tool_names import (
+    ENTER_WAIT_TOOL_NAME,
+    FINAL_RESULT_TOOL_NAME,
+    SILENT_TOOL_NAME,
+)
 from main.runtime.turn_overlay import (
     build_turn_only_system_note_message,
     is_turn_only_system_note_message,
@@ -315,6 +319,7 @@ class ReActToolLoop:
     _ORDERED_CONTROL_TOOL_NAMES = ('stop_tool_execution',)
     _EXCLUSIVE_TOOL_TURN_NAMES = {FINAL_RESULT_TOOL_NAME}
     _ALWAYS_CALLABLE_TOOL_NAMES = {
+        ENTER_WAIT_TOOL_NAME,
         FINAL_RESULT_TOOL_NAME,
         _SPAWN_CHILDREN_TOOL_NAME,
         SILENT_TOOL_NAME,
@@ -1787,6 +1792,18 @@ class ReActToolLoop:
                         signature=str(tool_fault_hit.get('signature') or ''),
                         count=int(tool_fault_hit.get('count') or 0),
                     )
+                if self._park_requested(results):
+                    # enter_wait 已把本回合声明为停靠：回合到此结束，不终局、不进入验收。
+                    # partial 是既有的非终局出口（恢复车道用同一形态）。
+                    return NodeFinalResult(
+                        status='success',
+                        delivery_status='partial',
+                        summary='本回合已按 enter_wait 停靠，等待消息唤醒。',
+                        answer='',
+                        evidence=[],
+                        remaining_work=[],
+                        blocking_reason='',
+                    )
                 if control_only_turn:
                     attempts = max(0, attempts - 1)
                 continue
@@ -2264,6 +2281,25 @@ class ReActToolLoop:
         if str(pending_notice_state.get('resume_mode') or '').strip() == RESUME_MODE_WAIT_FOR_CHILDREN:
             return False
         return True
+
+    @staticmethod
+    def _park_requested(results: list[dict[str, Any]]) -> bool:
+        """本批工具结果里是否有一个成功的 `enter_wait`。
+
+        只看工具结果、不回读节点行：这一跳的事实都在手上，多一次读库只是把判定点
+        推远一步，还会引入"读到的是上一跳状态"的窗口。
+        """
+        for item in list(results or []):
+            message = dict((item or {}).get('tool_message') or {})
+            if str(message.get('name') or '').strip() != ENTER_WAIT_TOOL_NAME:
+                continue
+            try:
+                payload = json.loads(str(message.get('content') or ''))
+            except Exception:
+                continue
+            if isinstance(payload, dict) and str(payload.get('status') or '').strip() == 'parked':
+                return True
+        return False
 
     @staticmethod
     def _wait_for_children_recovery_only(*, runtime_context: dict[str, Any], node) -> bool:

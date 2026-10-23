@@ -12,6 +12,7 @@ from main.models import (
     build_execution_policy_schema,
 )
 from main.runtime.tool_names import (
+    ENTER_WAIT_TOOL_NAME,
     FINAL_RESULT_TOOL_NAME,
     SEND_MESSAGE_TOOL_NAME,
     SILENT_TOOL_NAME,
@@ -127,6 +128,73 @@ class SilentTool(Tool):
             ensure_ascii=False,
             sort_keys=True,
         )
+
+
+class EnterWaitTool(Tool):
+    """主动停靠，等一条消息把自己叫醒。
+
+    这是节点"现在没活可干、但在等某件事"的唯一表达方式：调用它之后本回合就结束，
+    节点进入等待，直到信箱里出现满足 `wake_on` 的未读消息才被唤醒。
+
+    防丢唤醒：调用时若已经有满足条件的未读，不会入睡——未读立即注入、回合继续，
+    工具回执说明"有未读消息，未进入等待"。这条把"最后一条完成消息在入睡前到达"
+    的竞态从机制上消灭，因此不需要调用方先查一遍信箱。
+    """
+
+    hide_universal_timeout_parameter = True
+
+    def __init__(self, park: Callable[..., Awaitable[dict[str, Any]]]) -> None:
+        self._park = park
+
+    @property
+    def name(self) -> str:
+        return ENTER_WAIT_TOOL_NAME
+
+    @property
+    def description(self) -> str:
+        return (
+            'Stop this turn and wait until a message wakes you. Use `all_children` when you have '
+            'finished your own work and only the children\'s results are outstanding: it wakes you '
+            'once every direct execution child has settled and its terminal message is already in '
+            'your mailbox, so you are not woken once per child. Use `any` when any single message '
+            'should bring you back. If qualifying mail is already waiting, this does not park you — '
+            'it injects that mail and the turn continues. `note` is echoed back to you on wake so '
+            'you remember what you were waiting for. Do not call this while you still have work you '
+            'can do now.'
+        )
+
+    @property
+    def model_description(self) -> str:
+        return 'Park until a message wakes you. all_children waits for every direct child to report.'
+
+    @property
+    def parameters(self) -> dict[str, Any]:
+        return {
+            'type': 'object',
+            'properties': {
+                'wake_on': {
+                    'type': 'string',
+                    'enum': ['any', 'all_children'],
+                    'description': (
+                        'any = first qualifying message wakes you; all_children = every direct '
+                        'execution child settled and reported.'
+                    ),
+                },
+                'note': {
+                    'type': 'string',
+                    'description': 'What you are waiting for. Echoed back when you wake.',
+                },
+            },
+            'required': [],
+        }
+
+    async def execute(self, wake_on: str = 'any', note: str = '', **kwargs: Any) -> str:
+        _ = kwargs
+        result = await self._park(
+            wake_on=str(wake_on or '').strip() or 'any',
+            note=str(note or '').strip(),
+        )
+        return json.dumps(result, ensure_ascii=False, sort_keys=True)
 
 
 class SendMessageTool(Tool):

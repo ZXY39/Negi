@@ -64,6 +64,7 @@ from main.runtime.append_notice_context import (
     supersede_append_notice_records,
 )
 from main.runtime.internal_tools import (
+    EnterWaitTool,
     SendMessageTool,
     SpawnChildNodesTool,
     SubmitFinalResultTool,
@@ -72,6 +73,7 @@ from main.runtime.internal_tools import (
 )
 from main.runtime.node_message_kind import INTENT_PROGRESS
 from main.runtime.node_prompt_contract import extract_node_dynamic_contract_payload
+from main.runtime.node_wake import WAKE_ON_ALL_CHILDREN, all_children_satisfied
 from main.runtime.pending_notice_state import (
     PENDING_NOTICE_STATE_KEY,
     RESUME_MODE_ORDINARY,
@@ -89,7 +91,7 @@ from main.runtime.subtree_hold import (
     resolve_subtree_hold_epoch_id,
     spawn_round_has_unmaterialized_entries,
 )
-from main.runtime.tool_names import SEND_MESSAGE_TOOL_NAME
+from main.runtime.tool_names import ENTER_WAIT_TOOL_NAME, SEND_MESSAGE_TOOL_NAME
 from main.service.create_async_task_contract import normalize_create_async_task_file_targets
 from main.storage.disk_guard import is_disk_full_error
 from main.types import KIND_ACCEPTANCE, KIND_EXECUTION, STATUS_FAILED, STATUS_SUCCESS
@@ -3943,6 +3945,85 @@ class NodeRunner:
             return [item for item in messages if isinstance(item, dict)]
         return []
 
+    NODE_WAIT_WAKE_ON_KEY = 'node_wait_wake_on'
+    NODE_WAIT_NOTE_KEY = 'node_wait_note'
+
+    async def _enter_wait(
+        self,
+        *,
+        task_id: str,
+        node: NodeRecord,
+        wake_on: str = 'any',
+        note: str = '',
+    ) -> dict[str, Any]:
+        """记下停靠意图；真正的停靠由回合结束表达（见 react_loop 的 _park_requested）。
+
+        防丢唤醒（R3）：入睡前先看有没有已经满足条件的未读。有就**不睡**——未读立即
+        进入上下文、回合继续，因此不存在"最后一条完成消息在入睡前到达"的竞态。
+        """
+        policy = str(wake_on or '').strip() or 'any'
+        if policy not in {'any', WAKE_ON_ALL_CHILDREN}:
+            return {'status': 'rejected', 'reason': f'unknown_wake_on:{policy}'}
+
+        unread = [
+            item
+            for item in list(self._store.list_task_node_notifications(task_id, node.node_id) or [])
+            if str(item.status or '').strip() == 'delivered'
+        ]
+        if policy == 'any' and unread:
+            return {
+                'status': 'not_parked_unread_present',
+                'wake_on': policy,
+                'unread_injected': len(unread),
+            }
+        if policy == WAKE_ON_ALL_CHILDREN:
+            children = [
+                {
+                    'node_id': str(child.node_id or ''),
+                    'status': str(child.status or ''),
+                    'node_kind': str(child.node_kind or ''),
+                }
+                for child in list(self._store.list_nodes(task_id) or [])
+                if str(getattr(child, 'parent_node_id', '') or '').strip() == node.node_id
+            ]
+            finals = [
+                str(item.source_node_id or '').strip()
+                for item in unread
+                if str(item.kind or '').strip() == 'child_final'
+            ]
+            if all_children_satisfied(children, unread_final_sources=finals):
+                # 空停靠不允许：没有未结清子节点就没有可等的事件（P4 推论一）。
+                return {
+                    'status': 'not_parked_unread_present',
+                    'wake_on': policy,
+                    'unread_injected': len(unread),
+                    'reason': 'no_unsettled_children',
+                }
+
+        self._store.update_node(
+            node.node_id,
+            lambda record: record.model_copy(
+                update={
+                    'metadata': {
+                        **dict(record.metadata or {}),
+                        self.NODE_WAIT_WAKE_ON_KEY: policy,
+                        self.NODE_WAIT_NOTE_KEY: str(note or '').strip(),
+                    }
+                }
+            ),
+        )
+        self._log_service.update_frame(
+            task_id,
+            node.node_id,
+            lambda frame: {**frame, 'phase': 'waiting_explicit'},
+        )
+        return {
+            'status': 'parked',
+            'wake_on': policy,
+            'note': str(note or '').strip(),
+            'unread_injected': 0,
+        }
+
     async def _deliver_node_message(
         self,
         *,
@@ -3984,6 +4065,14 @@ class NodeRunner:
         else:
             tools.pop('submit_final_result', None)
         if node.node_kind == KIND_EXECUTION:
+            tools[ENTER_WAIT_TOOL_NAME] = EnterWaitTool(
+                lambda wake_on='any', note='': self._enter_wait(
+                    task_id=task.task_id,
+                    node=node,
+                    wake_on=wake_on,
+                    note=note,
+                )
+            )
             tools[SEND_MESSAGE_TOOL_NAME] = SendMessageTool(
                 lambda **payload: self._deliver_node_message(
                     task_id=task.task_id,
