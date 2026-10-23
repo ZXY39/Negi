@@ -362,8 +362,12 @@ def build_notice_message(
         sections.append('\n'.join([MEMORY_NOTICE_HEADING, memory_section]))
     if not sections:
         return None
-    content = '\n\n'.join([SKILL_ROSTER_NOTICE_MARKER, *sections]).strip()
-    return {'role': SKILL_ROSTER_NOTICE_ROLE, 'content': content}
+    body = '\n\n'.join(sections).strip()
+    # `render_notice_text` 自带标记；此前这里再拼一次，实盘通知变成
+    # `[RUNTIME_NOTICE]` 连写两行（节点道用例一直是红的）。标记只保留一份。
+    if not body.startswith(SKILL_ROSTER_NOTICE_MARKER):
+        body = '\n\n'.join([SKILL_ROSTER_NOTICE_MARKER, body])
+    return {'role': SKILL_ROSTER_NOTICE_ROLE, 'content': body}
 
 
 def build_carried_message(records: list[Any]) -> dict[str, Any] | None:

@@ -2388,7 +2388,25 @@ def clear_web_ceo_session_artifacts(*, session_id: str, task_service: Any | None
         channel_dir = workspace_path() / EXTERNAL_UPLOAD_ROOT / channel_slug
         if channel_dir.exists():
             shutil.rmtree(channel_dir, ignore_errors=True)
-    _ = task_service
+    # 阶段机制拆除前写下的 `frontdoor-stage-archive:<session>` 归档还留在库里；写入方
+    # 已不存在，删除会话时要把这些遗留行一起收掉，否则它们永远挂着已删除的会话。
+    artifact_store = getattr(task_service, "artifact_store", None) if task_service is not None else None
+    if artifact_store is not None:
+        archive_task_id = f"frontdoor-stage-archive:{str(session_id or '').strip()}"
+        try:
+            artifacts = artifact_store.list_artifacts(archive_task_id)
+            if artifacts:
+                # `delete_artifacts_for_task` 只收文件与内容索引，行仍在 artifacts 表里；
+                # 会话删除要连行一起收，否则列表接口还会列出已删会话的归档。
+                store = getattr(task_service, "store", None) or getattr(artifact_store, "_store", None)
+                if store is not None and hasattr(store, "delete_artifacts_by_ids"):
+                    store.delete_artifacts_by_ids([item.artifact_id for item in artifacts])
+                artifact_store.delete_artifacts_for_task(archive_task_id, artifacts=artifacts)
+        except Exception:
+            logger.exception(
+                "failed to drop legacy frontdoor stage archives for session {}",
+                session_id,
+            )
 
 
 def delete_web_ceo_session_artifacts(*, session_manager: Any, session_id: str, task_service: Any | None = None) -> None:
