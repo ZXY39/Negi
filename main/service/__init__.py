@@ -6,7 +6,6 @@ from main.service.runtime_service import (
     TaskNodeDetailTool,
     TaskStatsTool,
     TaskSummaryTool,
-    ViewTaskProgressTool,
 )
 from main.service.task_service import TaskService
 
@@ -19,5 +18,4 @@ __all__ = [
     'TaskService',
     'TaskStatsTool',
     'TaskSummaryTool',
-    'ViewTaskProgressTool',
 ]

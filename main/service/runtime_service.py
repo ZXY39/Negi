@@ -12847,28 +12847,6 @@ class TaskDeleteTool(Tool):
         return result if isinstance(result, str) else json.dumps(result, ensure_ascii=False)
 
 
-class ViewTaskProgressTool(Tool):
-    def __init__(self, service: MainRuntimeService):
-        self._service = service
-
-    @property
-    def name(self) -> str:
-        return 'task_progress'
-
-    @property
-    def description(self) -> str:
-        return '按任务 id 返回任务状态和带阶段目标的树状图文本，并将任务标记为已读。'
-
-    @property
-    def parameters(self) -> dict[str, Any]:
-        return {'type': 'object', 'properties': {'任务id': {'type': 'string', 'description': '目标任务 id。'}}, 'required': ['任务id']}
-
-    async def execute(self, **kwargs: Any) -> str:
-        await self._service.startup()
-        task_id = str(kwargs.get('任务id') or '').strip()
-        return self._service.view_progress(task_id, mark_read=True)
-
-
 class TaskFailedNodesTool(Tool):
     def __init__(self, service: MainRuntimeService):
         self._service = service

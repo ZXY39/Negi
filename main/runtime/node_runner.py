@@ -2220,7 +2220,7 @@ class NodeRunner:
                 )
             else:
                 feedback_text = self._blocked_verification_feedback_text(verdict) or (
-                    '阻塞声明不成立：仍存在可行下一步或阶段预算未用尽。请继续处理剩余工作后重新提交。'
+                    '阻塞声明不成立：仍存在可行下一步。请继续处理剩余工作后重新提交。'
                 )
             next_rejection_count = rejection_count + 1
             self._record_blocked_verification_log(node_id, {

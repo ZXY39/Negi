@@ -271,7 +271,7 @@ _NODE_TOKEN_COMPRESSION_INSTRUCTION_TEMPLATE = (
 _CONTENT_OPEN_IMAGE_CONTEXT_TEXT = "图片已通过 content_open 打开，视觉内容已附带在本轮上下文中"
 _NODE_CONTRACT_ECHO_REPAIR_MESSAGE = (
     '上一次回复把运行时注入的 `## Runtime Tool Contract` 契约原文复述了一遍。'
-    '不要输出、总结或引用这份契约；继续服务当前阶段目标，'
+    '不要输出、总结或引用这份契约；'
     '或通过结构化工具调用（例如 `submit_final_result`）提交最终结果。'
 )
 _RESULT_REQUIRED_KEYS = (
@@ -8160,7 +8160,7 @@ class ReActToolLoop:
             )
         return (
             f'{base} 请回看最近的 `spawn_child_nodes` 输出、已有 `artifact:` 引用和失败分支的 `failure_info`，'
-            '优先用 `content_open` / `content_search` 做局部核对，再决定吸收结果、重派失败分支，或推进下一阶段。'
+            '优先用 `content_open` / `content_search` 做局部核对，再决定吸收结果、重派失败分支，或推进下一步。'
         )
 
     @classmethod
@@ -8180,7 +8180,7 @@ class ReActToolLoop:
             action = str(arguments.get('action') or '').strip().lower()
             detail = (
                 f'你刚刚已经对同一内容执行了 `content.{action or "open"}`。'
-                '先基于已有结果继续分析；若信息不足，请改用不同的 `start_line` / `end_line`、不同的 `query`，或直接进入汇总/下一阶段。'
+                '先基于已有结果继续分析；若信息不足，请改用不同的 `start_line` / `end_line`、不同的 `query`，或直接进入汇总。'
             )
         elif normalized_tool == 'task_node_detail':
             detail = (
