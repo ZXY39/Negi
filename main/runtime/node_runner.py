@@ -309,6 +309,10 @@ class NodeRunner:
         # `has_pending_terminal_messages()`，避免"终局消息还没送出就把任务收工"。
         self.child_final_sink = None
         self._pending_terminal_messages: set[asyncio.Task[None]] = set()
+        # 子节点创建后的立即派发口（由 task_actor_service 绑定）。拆掉阻塞承诺后
+        # 父节点不再等待子管线，创建完就必须把节点交给调度器；没有这个口时（单测、
+        # 或任务没有活跃 dispatcher）由任务演员的可派发扫描兜底。
+        self.dispatch_node_callback = None
         # 磁盘治理（P0）：磁盘满时未能落盘的节点错误文本，仅内存诊断用（有界）。
         self._unpersisted_error_logs: deque[tuple[str, str, str]] = deque(maxlen=64)
 
@@ -5226,17 +5230,16 @@ class NodeRunner:
             parent=parent,
             exclude_cache_key=cache_key,
             replacement_round_id=cache_key,
+            replacing_goals={str(spec.goal or '').strip() for spec in specs},
         )
         parent = self._store.get_node(parent_node_id) or parent
         cached = dict((parent.metadata or {}).get('spawn_operations') or {}).get(cache_key)
         if isinstance(cached, dict) and cached.get('completed'):
-            return self._deliver_spawn_round_results(
-                task_id=task.task_id,
-                parent_node_id=parent.node_id,
-                cache_key=cache_key,
-                stage='replay_completed_round',
-                entries=[dict(item) for item in list(cached.get('entries') or []) if isinstance(item, dict)],
+            # 同一 call id 的重放只返回创建回执（幂等）：不重新物化、也不再重复交付
+            # 子节点结果——那些结果以 child_final 消息留在父节点信箱里。
+            return self._spawn_creation_receipts(
                 specs=specs,
+                entries=[dict(item) for item in list(cached.get('entries') or []) if isinstance(item, dict)],
             )
         reused_results = self._completed_successful_spawn_results(
             parent=parent,
@@ -5294,92 +5297,55 @@ class NodeRunner:
             cached_payload=cached_payload,
         )
 
-        semaphore = asyncio.Semaphore(
-            self._parallel_slot_count(
-                self._max_parallel_child_pipelines_for(parent),
-                len(specs),
-                enabled=self._parallel_child_pipelines_enabled,
+        entries = list(cached_payload.get('entries') or [])
+        dispatch_callback = getattr(self, 'dispatch_node_callback', None)
+        dispatched_ids: list[str] = []
+        for index in range(len(specs)):
+            entry = dict((entries[index] if index < len(entries) else {}) or {})
+            child_node_id = str(entry.get('child_node_id') or '').strip()
+            if not child_node_id:
+                continue
+            if str(entry.get('review_decision') or '').strip().lower() == 'blocked':
+                continue
+            requires_acceptance = bool(entry.get('requires_acceptance'))
+            self._update_spawn_entry(
+                task_id=task.task_id,
+                parent_node_id=parent.node_id,
+                cache_key=cache_key,
+                cached_payload=cached_payload,
+                index=index,
+                status='running',
+                started_at=str(entry.get('started_at') or _now()),
+                finished_at='',
+                check_status='pending' if requires_acceptance else 'skipped',
             )
-        )
-
-        async def _run_spec(index: int, spec: SpawnChildSpec) -> SpawnChildResult:
-            async with semaphore:
+            if callable(dispatch_callback):
                 try:
-                    return await self._run_child_pipeline(
-                        task=task,
-                        parent=parent,
-                        spec=spec,
-                        cache_key=cache_key,
-                        cached_payload=cached_payload,
-                        index=index,
+                    if dispatch_callback(task.task_id, child_node_id):
+                        dispatched_ids.append(child_node_id)
+                except Exception as exc:  # noqa: BLE001 - 派发失败由可派发扫描兜底
+                    logger.warning(
+                        'title=spawn_immediate_dispatch_failed task={} parent={} child={} error={}',
+                        task.task_id,
+                        parent.node_id,
+                        child_node_id,
+                        describe_exception(exc),
                     )
-                except TaskPausedError:
-                    raise
-                except NodePausedError as exc:
-                    # 冻结信号不得成为交付结果（与 _run_entry 保持 future pending 的
-                    # 契约同源）：结清成 entry error 会被模型读成"子节点失败"，而子节点
-                    # 只是暂停且随时可被 resume，父节点随后重派即把它在飞的工作清扫掉。
-                    # 重抛让父节点走自己的暂停路径，轮次保持未完成、可按原 call id 重入。
-                    live_entries = list(cached_payload.get('entries') or [])
-                    live_entry = live_entries[index] if index < len(live_entries) else None
-                    self._emit_spawn_diagnostic(
-                        title='spawn_pause_reached_settlement_lane',
-                        task_id=task.task_id,
-                        parent_node_id=parent.node_id,
-                        cache_key=cache_key,
-                        index=index,
-                        entry=live_entry if isinstance(live_entry, dict) else None,
-                        detail=describe_exception(exc),
-                    )
-                    raise
-                except asyncio.CancelledError as exc:
-                    if self._should_propagate_child_pipeline_cancellation(
-                        task_id=task.task_id,
-                        parent_node_id=parent.node_id,
-                    ):
-                        raise
-                    result = self._settle_spec_fault(
-                        task=task,
-                        parent=parent,
-                        cache_key=cache_key,
-                        cached_payload=cached_payload,
-                        index=index,
-                        spec=spec,
-                        exc=exc,
-                    )
-                    if result is None:
-                        raise
-                    return result
-                except Exception as exc:
-                    result = self._settle_spec_fault(
-                        task=task,
-                        parent=parent,
-                        cache_key=cache_key,
-                        cached_payload=cached_payload,
-                        index=index,
-                        spec=spec,
-                        exc=exc,
-                    )
-                    if result is None:
-                        raise
-                    return result
-
-        await asyncio.gather(*[_run_spec(index, spec) for index, spec in enumerate(specs)])
-        cached_payload['completed'] = True
+        # 拆掉阻塞承诺：这里只做创建 + 交棒给调度器 + 立即返回。轮次 completed 由
+        # `reconcile_spawn_round_completion` 按节点行派生，不再由本协程宣布；子节点的
+        # 结果走 `child_final` 消息，父节点用 `enter_wait(all_children)` 等它们。
         self._save_spawn_cache(task.task_id, parent.node_id, cache_key, cached_payload)
-        latest_payload = self._latest_spawn_round_payload(
-            parent=parent,
-            cache_key=cache_key,
-            fallback=cached_payload,
-        )
-        return self._deliver_spawn_round_results(
+        receipts = self._spawn_creation_receipts(specs=specs, entries=list(cached_payload.get('entries') or []))
+        self._emit_spawn_diagnostic(
+            title='spawn_round_created_without_waiting',
             task_id=task.task_id,
             parent_node_id=parent.node_id,
             cache_key=cache_key,
-            stage='post_convergence',
-            entries=[dict(item) for item in list(latest_payload.get('entries') or []) if isinstance(item, dict)],
-            specs=specs,
+            index=None,
+            entry=None,
+            detail=f'created={len(receipts)} dispatched={len(dispatched_ids)}',
         )
+        return receipts
 
     def _materialized_spawn_round_review(self, *, specs: list[SpawnChildSpec]) -> dict[str, Any]:
         specs_list = list(specs or [])
@@ -6390,10 +6356,12 @@ class NodeRunner:
         *,
         parent: NodeRecord,
         exclude_cache_key: str,
+        replacing_goals: set[str] | None = None,
     ) -> list[tuple[str, dict[str, Any], list[int]]]:
         operations = (parent.metadata or {}).get('spawn_operations') if isinstance(parent.metadata, dict) else {}
         if not isinstance(operations, dict):
             return []
+        normalized_goals = {str(goal or '').strip() for goal in (replacing_goals or set()) if str(goal or '').strip()}
         active_operations: list[tuple[str, dict[str, Any], list[int]]] = []
         excluded = str(exclude_cache_key or '').strip()
         for cache_key, payload in operations.items():
@@ -6403,8 +6371,16 @@ class NodeRunner:
             payload_copy = copy.deepcopy(payload)
             active_indexes: list[int] = []
             for index, entry in enumerate(list(payload_copy.get('entries') or [])):
-                if isinstance(entry, dict) and self._spawn_entry_is_active(entry):
-                    active_indexes.append(index)
+                if not isinstance(entry, dict) or not self._spawn_entry_is_active(entry):
+                    continue
+                # 拆掉阻塞承诺后，上一轮的子节点可能仍在跑。只有"新批次里出现了同一个
+                # goal"才算重派、才允许作废旧分支；不同 goal 的批次是新增工作，不能
+                # 因为父节点又派了一批就被连带清扫。
+                if normalized_goals:
+                    entry_goal = str(entry.get('goal') or '').strip()
+                    if entry_goal not in normalized_goals:
+                        continue
+                active_indexes.append(index)
             if active_indexes:
                 active_operations.append((normalized_cache_key, payload_copy, active_indexes))
         return active_operations
@@ -6687,6 +6663,123 @@ class NodeRunner:
         result = self._spawn_runtime_result(goal, error_text=fallback_error)
         return result, 'error', 'failed', fallback_error
 
+    def _spawn_creation_receipts(
+        self,
+        *,
+        specs: list[SpawnChildSpec],
+        entries: list[dict[str, Any]],
+    ) -> list[SpawnChildResult]:
+        """创建回执：只说明"建了谁 / 谁被拒"，不含执行结果。
+
+        结果由子节点终局时的 `child_final` 消息送达（P1 终局必上报）。这条路同时是
+        重放路径的唯一输出：同一 call id 重放只返回同一批创建回执，不会重新物化。
+        """
+        receipts: list[SpawnChildResult] = []
+        for index, spec in enumerate(list(specs or [])):
+            entry = dict((entries[index] if index < len(entries) else {}) or {})
+            goal = str(entry.get('goal') or spec.goal or '').strip()
+            child_node_id = str(entry.get('child_node_id') or '').strip()
+            acceptance_node_id = str(entry.get('acceptance_node_id') or '').strip()
+            review_decision = str(entry.get('review_decision') or '').strip().lower()
+            if review_decision == 'blocked' and not child_node_id:
+                reason = str(entry.get('blocked_reason') or '').strip()
+                suggestion = str(entry.get('blocked_suggestion') or '').strip()
+                receipts.append(
+                    SpawnChildResult(
+                        goal=goal,
+                        check_result='派生已被拦截',
+                        node_output=self._spawn_review_blocked_text(
+                            reason=reason, suggestion=suggestion
+                        ),
+                        review_blocked=True,
+                        state='rejected',
+                        gate='review',
+                        reject_reason=reason or 'spawn review blocked this candidate',
+                    )
+                )
+                continue
+            if not child_node_id:
+                reason = str(entry.get('runtime_error_text') or '').strip() or (
+                    'child node was not materialized'
+                )
+                receipts.append(
+                    SpawnChildResult(
+                        goal=goal,
+                        check_result='派生未物化',
+                        node_output=reason,
+                        state='rejected',
+                        gate='materialization',
+                        reject_reason=reason,
+                    )
+                )
+                continue
+            receipts.append(
+                SpawnChildResult(
+                    goal=goal,
+                    state='created',
+                    child_node_id=child_node_id,
+                    acceptance_node_id=acceptance_node_id,
+                    seed_tools=self._seed_receipt_for_node(child_node_id),
+                )
+            )
+        return receipts
+
+    def reconcile_spawn_round_completion(self, task_id: str) -> bool:
+        """把"所有绑定节点都已终态"的 spawn 轮标记为 completed。
+
+        拆掉阻塞承诺后，轮次的完成不再由父协程的 gather 宣布，而是从节点行派生：
+        非阻塞模型下 `completed=True` 只表示"这一轮的节点都收尾了"，不再是"结果已交付"
+        （结果交付走信箱）。不标会让每一轮都永远"未完成"，孤儿收割与作废清扫都会
+        把它当成仍在飞的子树。
+        """
+        changed_any = False
+        try:
+            nodes = list(self._store.list_nodes(task_id) or [])
+        except Exception:
+            return False
+        for node in nodes:
+            metadata = dict(getattr(node, 'metadata', None) or {}) if isinstance(getattr(node, 'metadata', None), dict) else {}
+            operations = metadata.get('spawn_operations')
+            if not isinstance(operations, dict) or not operations:
+                continue
+            changed = False
+            for round_id, payload in list(operations.items()):
+                if not isinstance(payload, dict) or bool(payload.get('completed')):
+                    continue
+                bound_ids: list[str] = []
+                for item in list(payload.get('entries') or []):
+                    if not isinstance(item, dict):
+                        continue
+                    for field in ('child_node_id', 'acceptance_node_id'):
+                        node_id = str(item.get(field) or '').strip()
+                        if node_id:
+                            bound_ids.append(node_id)
+                if not bound_ids:
+                    continue
+                settled = True
+                for node_id in bound_ids:
+                    bound = self._store.get_node(node_id)
+                    if bound is None:
+                        continue
+                    if self._normalized_status(getattr(bound, 'status', '')) not in {STATUS_SUCCESS, STATUS_FAILED}:
+                        settled = False
+                        break
+                if not settled:
+                    continue
+                payload['completed'] = True
+                payload['completed_at'] = _now()
+                changed = True
+            if not changed:
+                continue
+            self._store.update_node(
+                node.node_id,
+                lambda record, ops=dict(operations): record.model_copy(
+                    update={'metadata': {**dict(record.metadata or {}), 'spawn_operations': ops}}
+                ),
+            )
+            changed_any = True
+        return changed_any
+
     def _spawn_round_results_from_entries(
         self,
         *,
@@ -6713,6 +6806,26 @@ class NodeRunner:
             # 交付这一跳只是把它转述给派发方。重放/恢复那一跳也走同一条口，不会给出两份答案。
             if result.seed_tools is None:
                 result.seed_tools = self._seed_receipt_for_node(str(entry.get('child_node_id') or '').strip())
+            child_node_id = str(entry.get('child_node_id') or '').strip()
+            acceptance_node_id = str(entry.get('acceptance_node_id') or '').strip()
+            review_decision = str(entry.get('review_decision') or '').strip().lower()
+            if review_decision == 'blocked' and not child_node_id:
+                result = result.model_copy(
+                    update={
+                        'state': 'rejected',
+                        'gate': 'review',
+                        'reject_reason': str(entry.get('blocked_reason') or '').strip()
+                        or 'spawn review blocked this candidate',
+                    }
+                )
+            elif child_node_id or acceptance_node_id:
+                result = result.model_copy(
+                    update={
+                        'state': 'created',
+                        'child_node_id': child_node_id,
+                        'acceptance_node_id': acceptance_node_id,
+                    }
+                )
             results.append(result)
         return results
 
@@ -6723,8 +6836,13 @@ class NodeRunner:
         parent: NodeRecord,
         exclude_cache_key: str,
         replacement_round_id: str,
+        replacing_goals: set[str] | None = None,
     ) -> None:
-        active_operations = self._active_prior_spawn_operations(parent=parent, exclude_cache_key=exclude_cache_key)
+        active_operations = self._active_prior_spawn_operations(
+            parent=parent,
+            exclude_cache_key=exclude_cache_key,
+            replacing_goals=replacing_goals,
+        )
         if not active_operations:
             return
         reason_text = self._spawn_round_superseded_reason(replacement_round_id)

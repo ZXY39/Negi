@@ -292,11 +292,10 @@ class SendMessageTool(Tool):
 
 class SpawnChildNodesTool(Tool):
     hide_universal_timeout_parameter = True
-    # 派生子节点工具在一次调用内跑完整个子节点流水线（含嵌套派生与验收节点），
-    # 运行时长天然无界，不得套任何外层机械超时；中断只能走任务级取消链。
-    exempt_universal_timeout = True
-    # 重跑按 tool_call_id 命中父节点 metadata 里的 spawn_operations 记录：已完成的
-    # 批次直接复用原 entries，不会再物化一批子节点。
+    # 拆掉阻塞承诺后本工具只做"创建 + 交棒"，毫秒级返回，不再需要豁免通用超时：
+    # 子节点的运行时长与父节点的工具调用无关。
+    # 重跑按 tool_call_id 命中父节点 metadata 里的 spawn_operations 记录：同一 call id
+    # 只返回同一批创建回执，不会再物化一批子节点。
     rerun_safe = True
 
     def __init__(
@@ -312,22 +311,24 @@ class SpawnChildNodesTool(Tool):
     @property
     def description(self) -> str:
         return (
-            'Create child nodes and run them with runtime-controlled concurrency. '
-            'All children in one call start concurrently with no ordering guarantee, and the call '
-            'returns only after every child pipeline is terminal. A child that consumes other '
-            "children's outputs (e.g. an acceptance/verification node for its siblings) must NOT "
-            'share the batch: spawn it in a later call after the depended-on batch returns, or use '
-            'requires_acceptance for per-child acceptance.'
+            'Create child nodes and hand them to the scheduler. The call returns as soon as they '
+            'exist — it does NOT wait for them, and it does not contain their results. Each child '
+            'reports its terminal result to you as a child_final message; call enter_wait with '
+            'wake_on=all_children (or any) to be woken when they are in. Only mutually independent '
+            'branches belong in one batch; a node that consumes its siblings\' outputs must be '
+            'created in a later call, after you have received those siblings\' results. Use '
+            'requires_acceptance for per-child acceptance; the acceptance node is created with the '
+            'child and runs after the child submits.'
         )
 
     @property
     def model_description(self) -> str:
         return (
-            'Create child nodes for delegated work. One call = one concurrent batch (no ordering); '
-            'never put a node that consumes its siblings’ outputs (e.g. acceptance) in the same '
-            'batch — spawn it later, or use requires_acceptance for single-child acceptance. '
-            'Optional per-child `seed_tools` seeds those tool contracts into the child’s first '
-            'request; the result reports declared names the runtime did not seed.'
+            'Create child nodes for delegated work and return immediately with their ids. One call = '
+            'one batch (no ordering); results arrive later as child_final messages — wait with '
+            'enter_wait(all_children). Never put a node that consumes its siblings’ outputs in the '
+            'same batch; create it after you have their results. Optional per-child `seed_tools` '
+            'seeds those tool contracts into the child’s first request.'
         )
 
     @property
@@ -387,9 +388,11 @@ class SpawnChildNodesTool(Tool):
                 'children': {
                     'type': 'array',
                     'description': (
-                        'One batch of children started concurrently (no ordering guarantee); the call returns after all of them are terminal. '
-                        'Put only mutually independent, ready branches in one batch. A child that depends on other children’s outputs '
-                        '(e.g. an acceptance/verification/aggregation node for its siblings) must be spawned in a separate later batch.'
+                        'One batch of children created together (no ordering guarantee). The call returns as soon as '
+                        'they exist; each child reports its result later as a child_final message. Put only mutually '
+                        'independent, ready branches in one batch. A child that depends on other children’s outputs '
+                        '(e.g. an acceptance/verification/aggregation node for its siblings) must be created in a separate '
+                        'later call, after you have received those results.'
                     ),
                     'items': child_schema,
                     'minItems': 1,
@@ -448,8 +451,36 @@ class SpawnChildNodesTool(Tool):
         runtime = __g3ku_runtime if isinstance(__g3ku_runtime, dict) else {}
         specs = [SpawnChildSpec.model_validate(item) for item in list(children or [])]
         results = await self._spawn_callback(specs, runtime.get('current_tool_call_id'))
+        created: list[dict[str, Any]] = []
+        rejected: list[dict[str, Any]] = []
+        for index, item in enumerate(results):
+            goal = str(item.goal or (specs[index].goal if index < len(specs) else '') or '').strip()
+            if str(item.state or '').strip() == 'rejected' or bool(item.review_blocked):
+                rejected.append(
+                    {
+                        'goal': goal,
+                        'gate': str(item.gate or ('review' if item.review_blocked else 'unknown')).strip(),
+                        'reason': str(item.reject_reason or item.node_output or '').strip(),
+                    }
+                )
+                continue
+            created.append(
+                {
+                    'node_id': str(item.child_node_id or '').strip(),
+                    'goal': goal,
+                    'acceptance_node_id': str(item.acceptance_node_id or '').strip(),
+                }
+            )
+        summary = (
+            f'已创建 {len(created)} 个子节点，结果会以 child_final 消息送达；'
+            '需要等它们全部结束时调用 enter_wait(wake_on="all_children")，不要轮询。'
+            if created
+            else '没有创建任何子节点。'
+        )
+        if rejected:
+            summary += f' 另有 {len(rejected)} 个候选被拒绝（见 rejected）。'
         return json.dumps(
-            {'children': [item.model_dump(mode='json', exclude_none=True) for item in results]},
+            {'created': created, 'rejected': rejected, 'summary': summary},
             ensure_ascii=False,
         )
 

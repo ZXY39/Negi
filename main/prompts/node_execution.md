@@ -35,9 +35,10 @@
 - **如果已经识别出多个互不交叉、可并行、且当前上下文已足够为每个分支写出可执行 prompt 的分支，必须在一次 `spawn_child_nodes` 调用中把这些“已就绪分支”作为一个 batch 一次性提交到 `children` 里。**
 - **不得在已经具备批量派生条件时，拆成多次单独的 `spawn_child_nodes` 调用。**
 - 只有在后续分支明确依赖前一分支的产出的情况下，才允许按顺序分多次派生。
-- **同批 = 并发、不分先后**：一次 `spawn_child_nodes` 调用里的所有 `children` 会被并发启动，彼此之间没有任何顺序或完成保证；调用要等整批子管线全部终态后才返回。
-- **禁止把需要消费同批其他子节点产出的候选放进同一批**（典型：验收/核验/汇总节点与其依赖的生成节点同批派生）。这类"裁判"节点必须等被依赖的批次全部终态、`spawn_child_nodes` 返回后，再作为下一批单独派生；否则验收会在产出落盘前空跑并误判失败。
-- 对**单个**子节点的验收，用该 child 的 `requires_acceptance=true` + `acceptance_prompt`：运行时为该子节点单独创建一条 `acceptance` 节点（goal 为 `accept:<子节点 goal>`、挂在它下面、等其整条管线终态后激活，独立取证独立判定），**这就是结构上独立的验收节点**，不是把验收写进生成节点让它自检；因此「每个子节点必须有独立验收节点」这类要求一律用它落地，不需要也不允许手工把验收节点排进同批。
+- **同批 = 并发、不分先后**：一次 `spawn_child_nodes` 调用里的所有 `children` 会被同时创建并交给调度器，彼此之间没有任何顺序或完成保证。**这个调用只做创建，创建完立即返回**（返回 `created` / `rejected`），**不包含子节点的执行结果**。
+- **子节点的结果稍后以 `child_final` 消息送达你**。要等它们时用 `enter_wait(wake_on="all_children")`（全部结束才叫你一次）或 `wake_on="any"`；不要轮询，也不要重复派生同一批。
+- **禁止把需要消费同批其他子节点产出的候选放进同一批**（典型：验收/核验/汇总节点与其依赖的生成节点同批派生）。这类"裁判"节点必须先用 `enter_wait` 等到被依赖的批次全部终局、拿到它们的 `child_final` 之后，再作为下一批单独派生；否则验收会在产出落盘前空跑并误判失败。
+- 对**单个**子节点的验收，用该 child 的 `requires_acceptance=true` + `acceptance_prompt`：运行时为该子节点单独创建一条 `acceptance` 节点（goal 为 `accept:<子节点 goal>`、挂在它下面、等该子节点提交后由调度器驱动，独立取证独立判定），**这就是结构上独立的验收节点**，不是把验收写进生成节点让它自检；因此「每个子节点必须有独立验收节点」这类要求一律用它落地，不需要也不允许手工把验收节点排进同批。
 - **验收闭环按候选逐条判定**。该候选满足以下任一条，就在它自己这一项上带 `requires_acceptance=true` + `acceptance_prompt`：
   - 产出会被上游当事实继续用：父节点要用它汇总、要写进父节点的 `submit_final_result.answer`，或它本身就是任务要求的交付物；
   - 产出是落盘或被改写的文件，或带数量与范围阈值（≥N 条、全部、逐份、去重后）；
@@ -60,23 +61,23 @@
 
 ### 2.3 处理 `spawn_child_nodes` 的返回结果
 
-`spawn_child_nodes` 返回后，先消费它返回的顶层 `ref` 或各 child 的 `node_output_ref` / `node_output_summary`，必要时用 `content_search` / `content_open` 做局部核对；不要把 `task_progress(current task_id)` 当作等待子节点或汇总结果的手段。
+`spawn_child_nodes` 的返回只有三类信息：`created`（已创建的 `node_id` / `acceptance_node_id`）、`rejected`（未创建及原因），以及一句 `summary`。**返回里没有执行结果**——结果会以 `child_final` 消息逐条送达你：
 
-当某个 child 返回 `review_blocked=true`（或 `check_result="派生已被拦截"`）时：该分支**没有被创建，也没有执行任何工作**。必须按 `node_output` 中的拦截原因与建议处置——由父节点直接执行、调整 spec 后重新派生，或对验收/汇总类分支等被依赖批次全部终态后再单独派生；**不得把被拦截分支当成已完成或已成功的分支**，也不得在未处置的情况下直接汇总收尾。
+- 需要等全部子节点时调用 `enter_wait(wake_on="all_children")`；只想被第一条结果叫醒时用 `wake_on="any"`。
+- 想在中途了解某个子节点的进展，用 `read_child_progress` / `list_child_nodes`，不要靠反复 `enter_wait` 或重复派生。
+- 汇总子节点时优先使用 `child_final` 消息里的摘要与 `ref`；需要核对局部内容时用 `content_search` / `content_open` 打开 `ref`。**不要用 `task_progress` 等待子节点或轮询当前任务**：它是会话侧工具，节点侧调不到。
 
-当 `spawn_child_nodes` 返回的某个 child 含有 `failure_info` 时，必须先判断该分支是否实质已基本满足分支 goal，不再需要重新派生。判断时至少同时参考以下信息：
-- `node_output_summary`
-- `check_result`
-- `failure_info.summary`
-- `failure_info.remaining_work`
+当某个 child 出现在 `rejected` 里（`gate` 说明是哪道闸）：该分支**没有被创建，也没有执行任何工作**。必须按 `reason` 处置——由父节点直接执行、调整 spec 后重新派生，或对验收/汇总类分支等被依赖批次全部终局后再单独派生；**不得把被拒分支当成已完成或已成功的分支**，也不得在未处置的情况下直接汇总收尾。
+
+当子节点在 `child_final` 里报告失败（`status=failed`）时，先判断该分支是否实质已基本满足分支 goal，不再需要重新派生。判断时至少同时参考：`child_final` 的摘要与 `ref`、`read_child_progress` 返回的 `abnormal_pause_reason` / `latest_verdict_ref`、以及交付物的实际状态。
 
 ### 2.4 失败分支的判断
 
 按以下顺序处理失败分支：
 
 1. **如果失败分支已基本满足分支 goal，未完成工作并不繁琐，则优先自行解决，不必专门重派。**
-2. 只有失败分支满足`failure_info.delivery_status != "blocked"`时，则允许发起重派。
-3. 由于重派的节点是全新节点，无法直接获得之前的进度和上下文，因此重派前，必须调整相关 `prompt` / `acceptance_prompt`，**在prompt中显式加入需要参考的信息，如失败节点的输出或关键信息或文件，避免从头开始**。
+2. 只有失败分支的 `child_final` 表明它是可重做的失败（而不是验收判定的不可修复失败）时，才允许发起重派。
+3. 由于重派的节点是全新节点，无法直接获得之前的进度和上下文，因此重派前，必须调整相关 `prompt` / `acceptance_prompt`，**在 prompt 中显式加入需要参考的信息，如失败节点的输出或关键信息或文件，避免从头开始**。
 
 ## 2.5 与子节点通信、以及主动停靠
 

@@ -300,7 +300,44 @@ class TaskNodeDispatcher:
         self._entries: dict[str, _DispatchEntry] = {}
         self._closed = False
         self._last_snapshot_fingerprint: tuple[tuple[str, int], ...] | None = None
+        # 任务演员的等待/唤醒信号：entry 创建/结束、节点复活都算一次"现场变化"。
+        # `run_task` 的空转循环等它而不是忙轮询；超时只是兜底，不是判据。
+        self._activity_event = asyncio.Event()
         self._publish_dispatch_state(force=True)
+
+    def _notify_activity(self) -> None:
+        event = getattr(self, '_activity_event', None)
+        if event is not None:
+            event.set()
+
+    def has_live_entries(self) -> bool:
+        return any(
+            entry.task is not None and not entry.task.done()
+            for entry in self._entries.values()
+        )
+
+    async def wait_activity(self, timeout: float = 0.5) -> None:
+        event = getattr(self, '_activity_event', None)
+        if event is None:
+            self._activity_event = asyncio.Event()
+            event = self._activity_event
+        event.clear()
+        try:
+            await asyncio.wait_for(event.wait(), timeout=max(0.05, float(timeout)))
+        except asyncio.TimeoutError:
+            return
+
+    def schedule_node(self, node_id: str) -> None:
+        """非阻塞派发：保证该节点有一条在跑的 entry，不等待它结束。
+
+        与 `resume_node` 的区别只在返回形态——两者最终都落到 `_get_or_create_entry`。
+        子节点创建后由这里立即起跑，父节点不再等整批子管线。
+        """
+        normalized_node_id = str(node_id or '').strip()
+        if not normalized_node_id:
+            return
+        self._get_or_create_entry(normalized_node_id)
+        self._notify_activity()
 
     def snapshot(self) -> dict[str, dict[str, int]]:
         return {
@@ -451,6 +488,7 @@ class TaskNodeDispatcher:
                 name=f'task-node-resume:{self._task_id}:{normalized_node_id}',
             )
             self._publish_dispatch_state()
+            self._notify_activity()
 
     async def interrupt_node(self, node_id: str, result: NodeFinalResult, *, on_stopped: Any = None) -> None:
         """定向中断一个运行中的节点，用合成结果解析其 future。
@@ -538,6 +576,7 @@ class TaskNodeDispatcher:
         )
         self._entries[normalized_node_id] = entry
         self._publish_dispatch_state()
+        self._notify_activity()
         return entry
 
     async def _run_entry(self, entry: _DispatchEntry) -> None:
@@ -661,6 +700,7 @@ class TaskNodeDispatcher:
             changed = True
         if changed:
             self._publish_dispatch_state()
+        self._notify_activity()
 
     def _publish_dispatch_state(self, *, force: bool = False) -> None:
         snapshot = self.snapshot()
@@ -722,6 +762,9 @@ class TaskActorService:
         self._node_runner.nested_node_executor = self._execute_nested_node
         self._node_runner.cancel_node_subtree_executor = self._cancel_node_subtree
         self._node_runner.node_liveness_probe = self._node_is_being_driven
+        # 子节点创建后的立即派发：拆掉阻塞承诺后，父节点不再等子管线，
+        # 创建完成就必须交给调度器起跑。
+        self._node_runner.dispatch_node_callback = self.schedule_node_nowait
 
     async def _resume_distribution_if_needed(self, task_id: str) -> None:
         resume_callback = self.distribution_resume_callback
@@ -953,28 +996,30 @@ class TaskActorService:
                     await self._drain_acceptance_verdicts(task_id)
                     await self._node_runner.wait_pending_terminal_messages()
                     resumed_result = self._terminal_result_after_notice_resume(task_id)
-                    if resumed_result is None:
-                        control_only_return = True
+                    if resumed_result is not None:
+                        result = resumed_result
+                    result, control_only_return = await self._drive_scheduler_loop(
+                        task_id=task_id,
+                        dispatcher=dispatcher,
+                        root_node_id=root_node.node_id,
+                        current_result=result,
+                    )
+                    if control_only_return:
                         return
-                    result = resumed_result
                 else:
                     result = await dispatcher.execute_node(task_id, root_node.node_id)
-                    # 子节点验收回合由派发器独立跑完后，裁决必须在这里落账；旧管线
-                    # 在途时这一步是空转（握手已被管线推进过），不产生重复处理。
-                    if await self._drain_acceptance_verdicts(task_id):
-                        await self._node_runner.wait_pending_terminal_messages()
-                    if str(result.delivery_status or '').strip() == 'partial':
-                        await self._enqueue_acceptance_followup_if_needed(task_id)
-                        control_only_return = True
-                        return
                     if result.status == 'success':
                         result = await self._run_final_acceptance_if_needed(task_id)
-                        if await self._drain_acceptance_verdicts(task_id):
-                            await self._node_runner.wait_pending_terminal_messages()
-                        if str(result.delivery_status or '').strip() == 'partial':
-                            await self._enqueue_acceptance_followup_if_needed(task_id)
-                            control_only_return = True
-                            return
+                    # 根回合（或最终验收）结束后，子节点与验收节点由派发循环独立推进；
+                    # 根停靠时循环返回 control_only，等下一次投递把它叫醒。
+                    result, control_only_return = await self._drive_scheduler_loop(
+                        task_id=task_id,
+                        dispatcher=dispatcher,
+                        root_node_id=root_node.node_id,
+                        current_result=result,
+                    )
+                    if control_only_return:
+                        return
         except NodePausedError as exc:
             control_only_return = True
             # 磁盘治理（P0）：pause 状态落库是表现层写入，磁盘满时失败只丢展示，
@@ -1152,6 +1197,188 @@ class TaskActorService:
                     or 'acceptance rejected without retry',
                 )
         return progressed
+
+    def schedule_node_nowait(self, task_id: str, node_id: str) -> bool:
+        """NodeRunner 的子节点立即派发口。没有活跃 dispatcher 时返回 False，
+        由下一次 `run_task` 的可派发扫描兜底。"""
+        dispatcher = self._dispatchers.get(str(task_id or '').strip())
+        if dispatcher is None:
+            return False
+        dispatcher.schedule_node(str(node_id or '').strip())
+        return True
+
+    def _node_has_unread(self, task_id: str, node_id: str) -> bool:
+        try:
+            return any(
+                str(item.status or '').strip() == 'delivered'
+                for item in list(self._store.list_task_node_notifications(task_id, node_id) or [])
+            )
+        except Exception:
+            return False
+
+    async def _dispatch_runnable_nodes(self, task_id: str, dispatcher: 'TaskNodeDispatcher') -> bool:
+        """把"现在就该跑、却没人跑"的节点交给调度器。
+
+        判据只看持久状态，不看"上一次是不是刚跑过"：
+
+        * 执行节点：信箱有未读，或**还没有任何运行帧**（刚创建、第一次起跑）。
+          有帧且无未读 = 停靠中（等待消息/等验收），再派发只会让它空转一回合。
+        * 验收节点：握手处于待裁决且登记了可解析的提交引用；或有未读消息。
+          被验节点已终态时不派发（没有可检验的对象；T15 的联动由 P4 收口）。
+
+        根节点不在本道：它的第一回合由 `run_task` 显式驱动，之后的复活走唤醒路径。
+        """
+        task = self._store.get_task(task_id)
+        if task is None:
+            return False
+        root_node_id = str(getattr(task, 'root_node_id', '') or '').strip()
+        dispatched = False
+        for node in list(self._store.list_nodes(task_id) or []):
+            node_id = str(getattr(node, 'node_id', '') or '').strip()
+            if not node_id:
+                continue
+            if str(getattr(node, 'status', '') or '').strip().lower() in {'success', 'failed'}:
+                continue
+            if bool(getattr(node, 'is_paused', False)) or bool(getattr(node, 'pause_requested', False)):
+                continue
+            if dispatcher.node_is_being_driven(node_id) is True:
+                continue
+            unread = self._node_has_unread(task_id, node_id)
+            if node_id == root_node_id:
+                # 根的第一回合由 run_task 显式驱动；这里只处理"根停靠着、信箱里有未读"
+                # 的复活（投递时唤醒可能已失败，或消息是在进程重启前落箱的）。没有
+                # 未读就不能重派：那会让一个等待中的根空转一回合。
+                if not unread:
+                    continue
+                dispatcher.schedule_node(node_id)
+                dispatched = True
+                continue
+            if str(getattr(node, 'node_kind', '') or '').strip().lower() == KIND_ACCEPTANCE:
+                execution = self._node_runner._accepted_execution_node(task_id=task_id, acceptance=node)
+                if execution is None:
+                    continue
+                if str(getattr(execution, 'status', '') or '').strip().lower() in {'success', 'failed'}:
+                    continue
+                handshake = normalize_acceptance_handshake(
+                    (execution.metadata or {}).get(ACCEPTANCE_HANDSHAKE_KEY)
+                )
+                pending = (
+                    str(handshake.get('state') or '').strip()
+                    in {ACCEPTANCE_STATE_WAITING_ACCEPTANCE, ACCEPTANCE_STATE_WAITING_BLOCK_VERIFICATION}
+                    and bool(str(handshake.get('latest_execution_result_ref') or '').strip())
+                )
+                if not pending and not unread:
+                    continue
+                dispatcher.schedule_node(node_id)
+                dispatched = True
+                continue
+            if not unread:
+                try:
+                    frame = self._log_service.read_runtime_frame(task_id, node_id)
+                except Exception:
+                    frame = None
+                if frame is not None:
+                    continue
+            dispatcher.schedule_node(node_id)
+            dispatched = True
+        return dispatched
+
+    def _consume_root_entry_pause(self, dispatcher: 'TaskNodeDispatcher', root_node_id: str) -> bool:
+        """后起根回合被暂停时，异常留在没人 await 的 future 上——这里取走并报告。"""
+        entry = dispatcher._entries.get(str(root_node_id or '').strip())
+        if entry is None or not entry.future.done() or entry.future.cancelled():
+            return False
+        exc = entry.future.exception()
+        return isinstance(exc, (NodePausedError, TaskPausedError))
+
+    def _fail_remaining_nodes(self, task_id: str, dispatcher: 'TaskNodeDispatcher', reason: str) -> None:
+        """任务已终局/取消：非根非终态节点不再有消费者，落成可解释的终态。"""
+        task = self._store.get_task(task_id)
+        root_node_id = str(getattr(task, 'root_node_id', '') or '').strip() if task is not None else ''
+        for node in list(self._store.list_nodes(task_id) or []):
+            node_id = str(getattr(node, 'node_id', '') or '').strip()
+            if not node_id or node_id == root_node_id:
+                continue
+            if str(getattr(node, 'status', '') or '').strip().lower() in {'success', 'failed'}:
+                continue
+            try:
+                self._node_runner.fail_paused_node(
+                    task_id, node_id, reason, notify_parent=False
+                )
+            except Exception:
+                logger.exception('failed to settle leftover node: task={} node={}', task_id, node_id)
+
+    async def _drive_scheduler_loop(
+        self,
+        *,
+        task_id: str,
+        dispatcher: 'TaskNodeDispatcher',
+        root_node_id: str,
+        current_result: NodeFinalResult,
+    ) -> tuple[NodeFinalResult, bool]:
+        """任务演员的派发循环：跑到静止，再决定"继续等消息"还是"任务终局"。
+
+        返回 `(result, control_only)`。`control_only=True` 表示根节点仍非终态且已无可
+        派发的工作——它停靠在信箱上，下一次投递会重新入队/直接复活它的执行器。
+
+        循环顺序是固定的：
+        1. 等终局消息投递完（父节点的唤醒由投递完成触发）；
+        2. 收验收裁决（可能复活执行节点或给执行节点签发终态）；
+        3. 把"该跑却没人在跑"的节点交给调度器（含刚创建的子节点）；
+        4. 有活执行器就等一次现场变化；全都静止再看根节点与任务状态。
+        """
+        task_snapshot = None
+        while True:
+            await self._node_runner.wait_pending_terminal_messages()
+            # 非阻塞派生的轮次完成度从节点行派生：没有父协程的 gather 来宣布它。
+            self._node_runner.reconcile_spawn_round_completion(task_id)
+            if await self._drain_acceptance_verdicts(task_id):
+                continue
+            if await self._dispatch_runnable_nodes(task_id, dispatcher):
+                continue
+            if dispatcher.has_live_entries():
+                await dispatcher.wait_activity()
+                continue
+            # 静止一拍：让最后排定的唤醒/投递任务先跑，避免把"消息还在路上"当成无事可做。
+            await asyncio.sleep(0)
+            if dispatcher.has_live_entries() or self._node_runner.has_pending_terminal_messages():
+                continue
+            task_snapshot = self._store.get_task(task_id)
+            root = self._store.get_node(root_node_id)
+            if task_snapshot is None or root is None:
+                return current_result, False
+            if bool(getattr(task_snapshot, 'cancel_requested', False)):
+                self._fail_remaining_nodes(task_id, dispatcher, 'canceled')
+                return (
+                    NodeFinalResult(
+                        status='failed',
+                        delivery_status='blocked',
+                        summary='canceled',
+                        answer='',
+                        evidence=[],
+                        remaining_work=[],
+                        blocking_reason='canceled',
+                    ),
+                    False,
+                )
+            if bool(getattr(task_snapshot, 'is_paused', False)) or bool(
+                getattr(task_snapshot, 'pause_requested', False)
+            ):
+                return current_result, True
+            if str(getattr(root, 'status', '') or '').strip().lower() in {'success', 'failed'}:
+                self._fail_remaining_nodes(task_id, dispatcher, 'parent task terminal')
+                # 根在同一轮里刚被最终验收收口时，`current_result` 带着验收摘要与
+                # check_result；只有它和节点行状态一致才沿用它，否则以库行为准。
+                root_status = str(getattr(root, 'status', '') or '').strip().lower()
+                if (
+                    str(getattr(current_result, 'status', '') or '').strip().lower() == root_status
+                    and str(getattr(current_result, 'delivery_status', '') or '').strip() == 'final'
+                ):
+                    return current_result, False
+                return self._result_from_node(root), False
+            if self._consume_root_entry_pause(dispatcher, root_node_id):
+                return current_result, True
+            return current_result, True
 
     async def _reconcile_orphan_in_progress_nodes(self, task_id: str, dispatcher: 'TaskNodeDispatcher') -> None:
         """C：孤儿收尸/重派发（每次 run_task 拾取时执行，幂等）。

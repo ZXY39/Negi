@@ -158,6 +158,14 @@ class SpawnChildResult(Model):
     # 预置契约回执：只在派发方声明过 seed_tools 时出现（exclude_none 让未声明时整键消失），
     # 出现时 accepted / dropped 两键恒在。
     seed_tools: dict[str, Any] | None = None
+    # 非阻塞派生的创建回执：`created` 表示节点已创建并交给调度器，结果稍后以
+    # child_final 消息送达；`rejected` 表示未创建（gate 说明是哪道闸）。
+    # 三个字段都是增量，存量 spawn_operations 里的旧 dict 反序列化时取默认值。
+    child_node_id: str = ''
+    acceptance_node_id: str = ''
+    state: str = ''
+    gate: str = ''
+    reject_reason: str = ''
 
 
 class TokenUsageSummary(Model):
