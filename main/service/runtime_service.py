@@ -115,6 +115,8 @@ from main.runtime.internal_tools import build_detail_level_schema
 from main.runtime.model_key_concurrency import ModelKeyConcurrencyController
 from main.runtime.model_load_balancer import ModelLoadBalancer, quota_bucket_key
 from main.runtime.model_route import build_model_route_plan
+from main.runtime.node_mailbox import message_fingerprint, plan_delivery
+from main.runtime.node_message_kind import PRIORITY_HIGH, derive_message_kind, derive_priority
 from main.runtime.node_prompt_contract import (
     NodeRuntimeToolContract,
     extract_node_dynamic_contract_payload,
@@ -123,6 +125,13 @@ from main.runtime.node_prompt_contract import (
 from main.runtime.node_runner import NodeRunner
 from main.runtime.node_seed_contracts import seed_drop_reason, trim_seed_contracts
 from main.runtime.node_turn_controller import NodeTurnController
+from main.runtime.node_wake import (
+    WAKE_ON_ALL_CHILDREN,
+    WakeDeps,
+    all_children_satisfied,
+    node_park_state,
+    wake_parked_node,
+)
 from main.runtime.react_loop import ReActToolLoop
 from main.runtime.subtree_hold import DISTRIBUTION_ACTIVE_STATES
 from main.runtime.task_actor_service import TaskActorService
@@ -4773,6 +4782,202 @@ class MainRuntimeService:
             task_id,
             distribution=self._task_distribution_state(task_id),
         )
+
+    # ------------------------------------------------------------------
+    # 节点信箱直投 + R2 唤醒（不走 distribution epoch）
+    # ------------------------------------------------------------------
+
+    NODE_WAIT_WAKE_ON_KEY = 'node_wait_wake_on'
+
+    def _frame_phase(self, task_id: str, node_id: str) -> str:
+        try:
+            frame = self.store.get_task_runtime_frame(task_id, node_id)
+        except Exception:
+            return ''
+        return str(getattr(frame, 'phase', '') or '') if frame is not None else ''
+
+    def node_park_snapshot(self, task_id: str, node_id: str) -> tuple[Any, str]:
+        """`(node, park_state)` for one node; park_state 与唤醒判定同源。"""
+        node = self.store.get_node(node_id)
+        if node is None:
+            return None, ''
+        state = node_park_state(
+            status=str(getattr(node, 'status', '') or ''),
+            is_paused=bool(getattr(node, 'is_paused', False) or getattr(node, 'pause_requested', False)),
+            phase=self._frame_phase(task_id, node_id),
+        )
+        return node, state
+
+    def node_wake_deps(self) -> WakeDeps:
+        async def _resume(task_id: str, node_id: str) -> str:
+            return await self.task_actor_service.resume_node_entry(task_id, node_id)
+
+        async def _enqueue(task_id: str) -> None:
+            await self.global_scheduler.enqueue_task(task_id)
+
+        async def _clear_pause(task_id: str, node_id: str) -> None:
+            # 清标志不等于恢复：它只是让执行器能起跑，真正复活由 resume 负责。
+            self.log_service.set_node_pause_state(
+                task_id,
+                node_id,
+                pause_requested=False,
+                is_paused=False,
+                pause_reason='',
+                remark='',
+            )
+
+        return WakeDeps(
+            get_node=self.store.get_node,
+            get_phase=self._frame_phase,
+            get_task=self.get_task,
+            dispatcher_for=lambda task_id: self.task_actor_service._dispatchers.get(task_id),
+            resume_node_entry=_resume,
+            enqueue_task=_enqueue,
+            clear_pause=_clear_pause,
+        )
+
+    async def wake_node_on_message(self, *, task_id: str, node_id: str) -> str:
+        outcome = await wake_parked_node(task_id=task_id, node_id=node_id, deps=self.node_wake_deps())
+        try:
+            logger.info('node wake: task={} node={} outcome={}', task_id, node_id, outcome)
+        except Exception:
+            pass
+        return outcome
+
+    def _delivery_wakes_target(
+        self,
+        *,
+        task_id: str,
+        node_id: str,
+        node: Any,
+        priority: str,
+    ) -> bool:
+        """高优先级无条件唤醒；否则按目标自己的 `wake_on` 策略判定。
+
+        `wake_on` 由 `enter_wait` 写入节点 metadata；没有写过就是默认的 `any`
+        ——任何一个未读都唤醒。
+        """
+        if str(priority or '').strip() == PRIORITY_HIGH:
+            return True
+        metadata = dict(getattr(node, 'metadata', {}) or {})
+        policy = str(metadata.get(self.NODE_WAIT_WAKE_ON_KEY) or '').strip()
+        if policy != WAKE_ON_ALL_CHILDREN:
+            return True
+        children = [
+            {
+                'node_id': str(child.node_id or ''),
+                'status': str(child.status or ''),
+                'node_kind': str(child.node_kind or ''),
+            }
+            for child in list(self.store.list_nodes(task_id) or [])
+            if str(getattr(child, 'parent_node_id', '') or '').strip() == node_id
+        ]
+        finals: list[str] = []
+        for item in list(self.store.list_task_node_notifications(task_id, node_id) or []):
+            if str(item.kind or '').strip() != 'child_final':
+                continue
+            if str(item.status or '').strip() not in {'delivered', 'consumed'}:
+                continue
+            finals.append(str(item.source_node_id or '').strip())
+        return all_children_satisfied(children, unread_final_sources=finals)
+
+    async def deliver_node_message(
+        self,
+        *,
+        task_id: str,
+        target_node_id: str,
+        message: str,
+        origin: str = 'node',
+        relation: str = '',
+        system_kind: str = '',
+        source_node_id: str = '',
+        intent_kind: str = '',
+        verdict: str = '',
+        ref: str = '',
+        in_reply_to: str = '',
+        submission_id: str = '',
+        epoch_id: str = '',
+    ) -> dict[str, Any]:
+        """一条定向投递：判定矩阵 → 机械推导 → 指纹去重 → 落箱 → 唤醒。
+
+        `origin`/`relation`/`system_kind` 决定 kind；`system_kind` 只有运行时能传。
+        """
+        normalized_task_id = self.normalize_task_id(task_id)
+        normalized_node_id = self.normalize_node_id(str(target_node_id or '').strip())
+        node, park_state = self.node_park_snapshot(normalized_task_id, normalized_node_id)
+        if node is None:
+            return {'target': normalized_node_id, 'status': 'rejected', 'reason': 'target_missing'}
+
+        accepted, reason = plan_delivery(target_park_state=park_state, sender_origin=origin)
+        if not accepted:
+            return {'target': normalized_node_id, 'status': 'rejected', 'reason': reason}
+
+        kind = derive_message_kind(origin=origin, relation=relation, system_kind=system_kind)
+        priority = derive_priority(kind=kind, intent_kind=intent_kind, verdict=verdict)
+        body = str(message or '').strip()
+        fingerprint = message_fingerprint(
+            kind=kind, source_node_id=source_node_id, message=body, ref=ref
+        )
+
+        # 去重只对「还没被处理」的同一指纹生效：消费过的重复是一次新的意图。
+        for item in list(self.store.list_task_node_notifications(normalized_task_id, normalized_node_id) or []):
+            if (
+                str(item.status or '').strip() == 'delivered'
+                and str(item.fingerprint or '').strip() == fingerprint
+            ):
+                return {
+                    'target': normalized_node_id,
+                    'status': 'deduplicated',
+                    'message_id': str(item.notification_id or ''),
+                    'kind': kind,
+                    'priority': priority,
+                    'reason': '',
+                }
+
+        notification = self.store.upsert_task_node_notification(
+            TaskNodeNotification(
+                notification_id=new_command_id().replace('command:', 'notif:', 1),
+                task_id=normalized_task_id,
+                node_id=normalized_node_id,
+                epoch_id=str(epoch_id or '').strip(),
+                source_node_id=str(source_node_id or '').strip(),
+                message=body,
+                status='delivered',
+                created_at=now_iso(),
+                delivered_at=now_iso(),
+                consumed_at='',
+                kind=kind,
+                priority=priority,
+                intent_kind=str(intent_kind or '').strip(),
+                fingerprint=fingerprint,
+                in_reply_to=str(in_reply_to or '').strip(),
+                ref=str(ref or '').strip(),
+                submission_id=str(submission_id or '').strip(),
+                verdict=str(verdict or '').strip(),
+                payload={},
+            )
+        )
+        self.log_service.refresh_task_view(normalized_task_id, mark_unread=True)
+
+        wake_outcome = ''
+        if self._delivery_wakes_target(
+            task_id=normalized_task_id,
+            node_id=normalized_node_id,
+            node=node,
+            priority=priority,
+        ):
+            wake_outcome = await self.wake_node_on_message(
+                task_id=normalized_task_id, node_id=normalized_node_id
+            )
+        return {
+            'target': normalized_node_id,
+            'status': 'delivered',
+            'message_id': str(notification.notification_id or ''),
+            'kind': kind,
+            'priority': priority,
+            'wake': wake_outcome,
+            'reason': '',
+        }
 
     def _deliver_distribution_message(
         self,
