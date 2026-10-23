@@ -1645,15 +1645,23 @@ class RuntimeAgentSession:
         return flipped
 
     def _retire_consumed_pending_user_messages(self, persisted_session: Any) -> int:
-        """回合正常完成后，把转录里已不再是排队真相的 pending 用户行翻成 completed。
+        """回合正常完成后，把**本轮真的接走过**的 pending 用户行翻成 completed。
 
         pending 行是排队队列的 durable 记录：`queue_follow_up_batch` 入队时写它，
         `_rehydrate_queued_follow_ups` 在会话重建时按它接回队列。回合完成时内存队列
         里已经没有这一条，说明本进程不再打算派发它（已被某轮消费，或被更新的输入取
         代）；行留在 pending 只会让下一次重建把它当作从未回答的提问重新投喂。
 
+        只认本轮批次里的行（`_active_user_batch_inputs`：主输入 + 本轮 drain 进来的
+        补充）。实盘 ``web:ceo-f2fa04192251``：一个回合被取消后既没落助手行、用户行也
+        没被升态，之后 08:57 的心跳回合把这条与本批无关的 pending 行退役成了 completed
+        ——这条提问就此同时失去回答与重投资格。孤儿 pending 行的终态只能由真正回答它的
+        那一轮授予。
+
         主要漏点是内部（心跳/cron）回合：它在 prepare 阶段清空批次上下文，完成时又
         整段跳过用户行回写，于是它中途消费的 follow-up 行永远停在 pending。
+        （`take_follow_up_batch_for_call_model` 把 drain 到的行放回 `_active_user_batch_inputs`，
+        所以这条车道仍然覆盖得到。）
 
         与 `_complete_lingering_paused_user_messages` 同一条硬约束：只在正常完成路径
         调用。错误/取消路径的内存队列可能仍持有这些条目，提前翻体会让 durable 那一
@@ -1664,6 +1672,11 @@ class RuntimeAgentSession:
         live_turn_ids = {
             self._user_input_turn_id(item)
             for item in list(self._state.queued_follow_up_messages or [])
+            if self._user_input_turn_id(item)
+        }
+        batch_turn_ids = {
+            self._user_input_turn_id(item)
+            for item in list(self._current_user_batch_inputs(None) or [])
             if self._user_input_turn_id(item)
         }
         flipped = 0
@@ -1679,6 +1692,8 @@ class RuntimeAgentSession:
                 continue
             turn_id = str(metadata.get(_TRANSCRIPT_TURN_ID_KEY) or "").strip()
             if turn_id and turn_id in live_turn_ids:
+                continue
+            if not turn_id or turn_id not in batch_turn_ids:
                 continue
             updated = dict(raw)
             updated_metadata = dict(metadata)
@@ -1913,23 +1928,28 @@ class RuntimeAgentSession:
             pending_follow_up_turn_ids=pending_follow_up_turn_ids,
         )
 
-    async def _archive_paused_execution_context_for_ui_history(self) -> None:
+    def _archive_paused_execution_context_rows(self) -> str:
+        """把被中断回合的执行上下文落成转录行（同步体，已取消的任务里也能调）。
+
+        返回 ``archived``（写了行）/ ``skipped``（按快照条件不该写）/ ``failed``（本该写
+        却没写成）；只有 ``failed`` 需要给 UI 发持久化告警，所以异步包装层保留在外面。
+        """
         snapshot = self.paused_execution_context_snapshot()
         if not isinstance(snapshot, dict) or not snapshot:
-            return
+            return "skipped"
         if str(snapshot.get("status") or "").strip().lower() != "paused":
-            return
+            return "skipped"
         source = str(snapshot.get("source") or "").strip().lower()
         if source in {"heartbeat", "cron", "approval"}:
-            return
+            return "skipped"
         user_message = snapshot.get("user_message") if isinstance(snapshot.get("user_message"), dict) else None
         if not isinstance(user_message, dict):
-            return
+            return "skipped"
         if not str(user_message.get("content") or "").strip() and not list(user_message.get("attachments") or []):
-            return
+            return "skipped"
         turn_id = str(snapshot.get("turn_id") or "").strip()
         if not turn_id:
-            return
+            return "skipped"
         assistant_text = str(snapshot.get("assistant_text") or "").strip() or "已暂停"
         snapshot_turns = normalize_frontdoor_turns(snapshot.get("frontdoor_turns"))
         compression = (
@@ -1975,13 +1995,53 @@ class RuntimeAgentSession:
 
                 ensure_ceo_session_metadata(persisted_session)
             self._loop.sessions.save(persisted_session)
+            return "archived"
         except Exception:
+            return "failed"
+
+    async def _archive_paused_execution_context_for_ui_history(self) -> None:
+        if self._archive_paused_execution_context_rows() == "failed":
             await self._emit(
                 "message_delta",
                 channel="analysis",
                 kind="persistence_warning",
                 text="Paused assistant history archival failed; the paused bubble is still available in snapshot state.",
             )
+
+    def _archive_interrupted_turn_body_before_cancel(self) -> None:
+        """取消/暂停落在收尾窗口时，先把本轮已经流出去的可见正文落成转录行。
+
+        `_prompt_locked` 只有正常收尾那一条路给助手回复 durable 行。实盘
+        ``web:ceo-f2fa04192251`` 的 ``ce31e1d391034cf7``：最后一跳 07:35:22.926
+        ``outcome=completed`` 且正文已流式到界面，回合却没走到 `_persist_turn_transcript`，
+        于是刷新后气泡消失；那条 pending 用户行又在 08:57:22 被下一轮成功回合的退役判据升成
+        completed，这条提问在转录里从此既没有回答也不再会被接回。
+
+        写的是手动暂停同一形状的行（``status=paused`` + ``manual_pause_archive``），续跑回合
+        才按 turn_id 就地替换它而不是另起一个气泡。没出过正文就不写：那种 pending 行要留给
+        `_rehydrate_queued_follow_ups` 接回重投。
+        """
+        if not bool(getattr(self, "_assistant_segment_open", False)):
+            return
+        if not str(self._state.latest_message or "").strip():
+            return
+        if self._internal_prompt_source() is not None:
+            return
+        try:
+            if self._paused_execution_context is None:
+                self._set_paused_execution_context(
+                    self._build_execution_context_snapshot(
+                        allow_manual_pause=True,
+                        status_override="paused",
+                    )
+                )
+            if self._archive_paused_execution_context_rows() == "failed":
+                logger.error(
+                    "Interrupted turn archive persistence failed for {}",
+                    self._state.session_key,
+                )
+        except Exception:
+            logger.exception("Interrupted turn archive failed for {}", self._state.session_key)
 
     async def _persist_pending_user_message(self, *, user_input: UserInputMessage, user_text: str) -> Any | None:
         return await self._persist_pending_user_messages(user_inputs=[user_input])
@@ -3826,6 +3886,7 @@ class RuntimeAgentSession:
             self._state.is_running = False
             self._state.paused = True
             self._state.status = "paused"
+            self._archive_interrupted_turn_body_before_cancel()
             if not already_paused:
                 # 与手动暂停同一条确认帧：带 turn_id 前端才认领得到「已暂停」那一回合。
                 cancelled_turn_id = str(self._active_turn_id or "").strip()
@@ -4665,6 +4726,28 @@ class RuntimeAgentSession:
             silent_reply = self._resolve_silent_reply()
             self._state.latest_message = "" if silent_reply else str(output or "")
             final_turn_id = self._current_turn_id()
+            resume_user_input = self._last_prompt if isinstance(self._last_prompt, UserInputMessage) else None
+            if str(output or "").strip():
+                # 批准续跑回合的回复过去只发 message_end，从不写转录：这一轮的 durable 助手行
+                # 永远缺席（刷新即消失），而它那条 pending 用户行之后会被别的成功回合退役成
+                # completed。这里走与正常收尾同一条写行车道，终态由回答它的那一轮授予。
+                assistant_metadata: dict[str, Any] | None = None
+                assistant_trace_text = str(output or "")
+                if silent_reply:
+                    silent_metadata, assistant_trace_text = self._silent_reply_metadata(assistant_trace_text)
+                    assistant_metadata = dict(silent_metadata)
+                await self._persist_turn_transcript(
+                    user_input=resume_user_input,
+                    user_text=(
+                        self._history_text(resume_user_input.content) if resume_user_input is not None else ""
+                    ),
+                    assistant_text=assistant_trace_text,
+                    interaction_flow=self._interaction_flow_snapshot(),
+                    internal_source=None,
+                    route_kind=str(getattr(self, "_last_route_kind", "") or ""),
+                    assistant_metadata=assistant_metadata,
+                    retire_lingering_transcript_rows=True,
+                )
             await self._emit(
                 "message_end",
                 role="assistant",

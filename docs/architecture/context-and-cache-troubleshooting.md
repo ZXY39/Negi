@@ -188,11 +188,12 @@ Heartbeat / cron 不在主 CEO/frontdoor 路径上使用单独的短 `ceo_heartb
 ### 3.11 残留 paused / pending 转录条目与未回答的用户输入
 
 - 坑（paused）：手动暂停终止的回合把用户消息以 `_transcript_state=paused` 写进转录；暂停回合不会再走回合完成路径，缺少退役路径时条目一直卡在 paused。对账在每个回合 prepare 阶段把它补到种子尾部——紧邻当前用户消息、中间没有任何助手回复——轮末回写后嵌进基线；`token_compression` 把它改写掉，下一轮对账又重新补到新请求尾部。同一条问题以“从未被回答的用户提问”形态在请求尾部反复出现，诱导模型重复处理早已回答过的问题。
-- 坑（pending）：排队消息以 `_transcript_state=pending` 写进转录，而"谁消费了它"不由行自己决定。内部（心跳/cron）回合会在 prepare 阶段吃掉排队的 follow-up，但它的完成回写整段跳过用户行，于是这些行永远停在 pending。下一次会话重建按 pending 把它们当作未回答的提问接回并成批发出：实测一条渠道会话 9 条跨 10 天的旧提问被并成一个批次重答了一遍，当轮真正要回答的输入被挤到批次中间，回复答的是那个旧问题。
+- 坑（pending）：排队消息以 `_transcript_state=pending` 写进转录，而"谁消费了它"不由行自己决定。内部（心跳/cron）回合会在 prepare 阶段吃掉排队的 follow-up，但它的完成回写整段跳过用户行，这些行要靠收尾退役那一步才升态（drain 时条目被放回 `_active_user_batch_inputs`，退役判据据此认得它们）。漏掉这一步，下一次会话重建按 pending 把它们当作未回答的提问接回并成批发出：实测一条渠道会话 9 条跨 10 天的旧提问被并成一个批次重答了一遍，当轮真正要回答的输入被挤到批次中间，回复答的是那个旧问题。
+- 坑（被中断的回合）：`_prompt_locked` 的助手行只在正常收尾那一条路上写。取消/暂停落在收尾窗口（正文已经流到界面、回合还没走到 `_persist_turn_transcript`）时，这一行哪儿都没落：刷新后气泡消失，而它那条 pending 用户行既不在内存队列也没被任何回合认走过。这条形状在界面上的表现是"回答出现过又不见了"，在转录里的表现是用户行长期停在 pending 且同 turn 没有助手行。审批中断的续跑回合同样要在收尾补写自己那一行，只发 `message_end` 等于没写。
 - 坑（失败回合）：运行时错误收尾写的助手行只证明"这一轮跑坏了"，不证明"用户被回答了"，但它带 `metadata.source=runtime_error`。把这种行算进"已回答"集合，等于把失败回合的用户输入永久锁在接回之外；同一条输入若又被按已消费翻成 `completed`，它就既不在内存队列、也不在待接回名单里，模型上下文里彻底消失。用户接着发"继续"，模型答的是上一件成功的事——这条与上面两条是同一族缺陷的相反方向（重复投喂 vs 永久缺席）。
-- 不变量：残留 paused 条目随下一个用户可见回合正常完成被对账退役一次；pending 行随**任何**正常完成回合（含内部回合）按"内存队列不持有它"退役一次。运行时错误路径既不退役也不升格，并把未获真实模型轮次的输入放回内存队列；状态机、为什么"队列才是真相"、以及哪条车道认领待重投输入，归 `runtime-overview.md`「压缩窗口：入站闸门与基线写入仲裁」。退役与对账在持久化侧的完整生命周期见「Baseline 合同与恢复顺序」。
+- 不变量：残留 paused 条目随下一个用户可见回合正常完成被对账退役一次；pending 行只在**真正接走过它的**那个回合收尾时退役（该行 `turn_id` 在本轮批次里），无关的成功回合不替别人升态。被取消/暂停而没收口的回合由该出口自己同步归档可见正文行，不落行就把终态留给别的回合是错的。运行时错误路径既不退役也不升格，并把未获真实模型轮次的输入放回内存队列；状态机、为什么"队列才是真相"、以及哪条车道认领待重投输入，归 `runtime-overview.md`「压缩窗口：入站闸门与基线写入仲裁」。退役与对账在持久化侧的完整生命周期见「Baseline 合同与恢复顺序」。
 - 症状：连续多轮 actual request artifact 里同一条历史用户消息反复出现在请求体尾部，紧邻当前轮用户消息且前后都没有助手回复；模型重复处理或批量补答早已回答过的历史问题，甚至把多条这样的消息合并成一条虚构的用户请求。渠道/Web 会话里另一副面孔是旧提问冒到最新回复下面，读起来像用户重发。反向症状是某轮失败后用户补一句"继续/刚才的问题"，模型回的内容与失败那轮无关。
-- 取证：日志锚点 `Rehydrated N queued follow-up message(s) for <session>`、`Requeued N unanswered user message(s) for <session> after turn failure` 与 `Retired N consumed pending transcript user message(s) for <session>`——前两个在健康系统里应当罕见且 N 很小，长期不为 0 说明退役没有发生。转录侧直接数 `role=user` 且 `metadata._transcript_state=pending` 的行，跨天存在即为漏网；再数 `role=assistant` 且 `metadata.source=runtime_error` 的行，逐个核它前面那条用户行的状态是否仍是 `pending`（成了 `completed` 就是这条被吃掉的路径）。
+- 取证：日志锚点 `Rehydrated N queued follow-up message(s) for <session>`、`Requeued N unanswered user message(s) for <session> after turn failure` 与 `Retired N consumed pending transcript user message(s) for <session>`——前两个在健康系统里应当罕见且 N 很小，长期不为 0 说明退役没有发生；`Retired` 只在排队补充被某轮消化时出现，读数为 0 而转录里有 pending 行通常意味着那些行从未被接走。转录侧数 `role=user` 且 `metadata._transcript_state=pending` 的行，再按它的 `turn_id` 找同轮真正的助手行：有回答行却还是 pending 即漏网（既不会被接回也拦得住下一轮），没有回答行则它仍在重投通道上；被中断回合的正确形态是那条 pending 行配一行 `status=paused` 的归档行，两个都没有才说明收尾出口没落 durable 记录。再数 `role=assistant` 且 `metadata.source=runtime_error` 的行，逐个核它前面那条用户行的状态是否仍是 `pending`（成了 `completed` 就是这条被吃掉的路径）。
 
 ### 3.12 heartbeat / cron 上下文残骸
 
@@ -375,7 +376,7 @@ CEO/frontdoor 在真正发 provider 请求前有最后一层 token preflight。�
 | `observed_input_truth.source=preflight_estimate` | provider 未给出可用输入侧 usage，runtime 用最终 send 时估算兜底；预期回退，不自动是 cache bug |
 | `pre_compaction_*` | top-level `final_request_tokens` / `estimated_total_tokens` 已是压缩后值时，用它们解释“为什么这轮会先压缩” |
 
-- artifact 的 `provider_model` 与 `observed_input_truth.provider_model` 记**这一跳真正发出去的模型**（取 `provider_request_body.model`），链首另存 `requested_provider_model`。跨档（429 降档）那一跳的 usage 因此不再记到没服务它的模型头上；"同一颗模型才可比"的闸门也才真的会在跨档处判不可比。
+- artifact 的 `provider_model` 与 `observed_input_truth.provider_model` 记**这一跳真正发出去的模型**（取 `provider_request_body.model`），链首另存 `requested_provider_model`。跨档（429 降档）那一跳的 usage 因此记在服务它的那颗模型上；"同一颗模型才可比"的闸门也才真的会在跨档处判不可比。
 
 另要排一类隐蔽误判：preflight estimator 必须基于原始 `provider_request_body` 估算，不能复用面向摘要/展示的 serializer 再把超长字段截成固定前后两段后估算。典型症状：`provider_request_body` 明明已经很大，`final_request_tokens` 却长期卡在异常偏小、几乎不随请求增长变化的常数——先按 estimator（preview 兜底与增量估算车道）低估导致压缩阈值打不到排查，不要先怀疑 `trigger_tokens` 配置失效。
 
