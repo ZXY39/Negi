@@ -134,11 +134,6 @@ def test_rework_state_with_a_previous_pointer_freezes() -> None:
     assert '没有待裁定的闭合提交' in reason
 
 
-def test_block_verification_state_releases_the_gate() -> None:
-    """阻塞核验车道派验前写 waiting_block_verification：那是待裁定状态。"""
-    assert _freeze(_runner(_execution(metadata=_handshake(state='waiting_block_verification')))) == ''
-
-
 def test_landed_verdict_states_do_not_reopen_the_gate() -> None:
     """裁定已落过的状态不再派验：重验必须由登记新一轮提交的车道重新开门。"""
     for state in ('accepted', 'rejected_terminal', 'canceled_by_execution_failure'):
@@ -163,8 +158,11 @@ def test_notice_rule_stays_scoped_to_the_root_final_acceptance() -> None:
     assert _freeze(runner) == ''
 
 
-def test_reused_terminal_acceptance_is_voided_before_reverify() -> None:
-    """spawn entry 绑定的验收节点已终态时，旧判词必须先作废再重验。"""
+def test_reused_terminal_acceptance_keeps_its_verdict() -> None:
+    """spawn entry 绑定的验收节点已终态时直接复用：重放创建账本不得重开裁定。
+
+    只有执行节点的新提交（握手路径）才有权重置终态验收。
+    """
     stale = _acceptance(status='failed', final_output='目标文件不存在', failure_reason='目标文件不存在', finished_at=now_iso())
     runner = object.__new__(NodeRunner)
     runner._store = _FakeStore({EXEC_ID: _execution(status='success'), ACC_ID: stale})  # type: ignore[attr-defined]
@@ -190,10 +188,10 @@ def test_reused_terminal_acceptance_is_voided_before_reverify() -> None:
         index=0,
     )
 
-    assert acceptance.status == 'in_progress'
-    assert acceptance.failure_reason == ''
-    assert [entry['failure_reason'] for entry in acceptance.metadata['rejection_history']] == ['目标文件不存在']
-    assert published == [ACC_ID]
+    assert acceptance.status == 'failed'
+    assert acceptance.failure_reason == '目标文件不存在'
+    assert acceptance.final_output == '目标文件不存在'
+    assert published == []
 
 
 def _consume(runner: NodeRunner, result: NodeFinalResult) -> NodeFinalResult:

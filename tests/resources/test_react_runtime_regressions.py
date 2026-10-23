@@ -555,12 +555,8 @@ def test_compact_schema_internal_execution_tools_expose_shorter_model_visible_co
         "missing required children[0].execution_policy"
     ]
     assert tools[1].validate_params({"status": "success"}) == [
-        "missing required delivery_status",
         "missing required summary",
         "missing required answer",
-        "missing required evidence",
-        "missing required remaining_work",
-        "missing required blocking_reason",
     ]
 
 
@@ -2927,9 +2923,9 @@ async def test_react_loop_recovers_when_a_rejected_final_submission_is_resubmitt
     assert turns == [1, 2]
     # The rejection reaches the next request, and it carries the contract that was violated.
     second_request = json.dumps(request_messages[1], ensure_ascii=False)
-    assert 'missing required status' in second_request
+    assert 'Only an empty `summary`/`answer`' in second_request
     assert _PARAMETER_CONTRACT_GUIDANCE_PREFIX in second_request
-    assert 'delivery_status=string(final|blocked)' in second_request
+    assert 'remaining_work' in second_request
 
 
 @pytest.mark.asyncio
@@ -2938,19 +2934,11 @@ async def test_react_loop_trips_final_submission_guard_only_after_the_full_strik
     每一击的 violation 都不同，守住"总预算耗尽才收口"这条主路。"""
     turns: list[int] = []
     distinct_payloads = [
-        {'answer': 'still no envelope', 'evidence': '[]'},
-        {'status': 'maybe', 'answer': 'x', 'evidence': []},
-        {'status': 'success', 'delivery_status': 'blocked', 'answer': 'x', 'evidence': []},
-        {'status': 'success', 'delivery_status': 'final', 'summary': '', 'answer': 'x', 'evidence': []},
-        {
-            'status': 'success',
-            'delivery_status': 'final',
-            'summary': 'ok',
-            'answer': 'x',
-            'evidence': [{'kind': 'nope', 'note': 'n'}],
-            'remaining_work': [],
-            'blocking_reason': '',
-        },
+        {'answer': 'still no summary'},
+        {'summary': '', 'answer': 'x'},
+        {'summary': 'ok', 'answer': 'x', 'remaining_work': ['']},
+        {'summary': 'ok', 'answer': 'x', 'evidence': [{'kind': 'file', 'path': 'p', 'start_line': 0}]},
+        {'summary': 'ok', 'answer': 'x', 'evidence': [{'kind': 'nope', 'note': 'n'}]},
     ]
 
     class _Backend:
@@ -3056,7 +3044,7 @@ async def test_react_loop_exhausting_budget_on_rejected_final_returns_pause_inst
     assert result.delivery_status == 'blocked'
     assert result.failure_disposition == 'pause'
     assert 'detected 1 consecutive times' in result.blocking_reason
-    assert 'missing required status' in result.blocking_reason
+    assert 'summary must be at least 1 chars' in result.blocking_reason
 
 
 @pytest.mark.asyncio
@@ -5902,7 +5890,7 @@ def test_execution_result_protocol_message_avoids_partial_guidance() -> None:
 
     assert 'delivery_status="partial"' not in message
     assert 'submit_final_result' in message
-    assert 'final|blocked' in message
+    assert 'remaining_work' in message
     assert 'If you are ending the node now' in message
     assert 'If the task is not complete yet' in message
 
@@ -5940,15 +5928,15 @@ def test_execution_repair_prompts_lead_with_continue_and_ban_success_placeholder
         assert message.index('If the task is not complete yet') < message.index('If you are ending the node now')
         assert 'placeholder' in message
 
-    assert 'success+final submission goes straight to acceptance' in guidance
-    assert 'never use it as a placeholder' in guidance
+    assert 'There is no status field' in guidance
+    assert 'keep working with tools' in guidance
 
     prompt = load_prompt('node_execution.md')
-    assert '同样禁止把 `success + final` 用于占位' in prompt
-    assert '如果我要返回 `success`' in prompt
+    assert '提交即表示' in prompt
+    assert '绝不允许填入' in prompt
 
 
-def test_acceptance_result_contract_violation_message_uses_final_or_blocked_only() -> None:
+def test_acceptance_result_contract_violation_message_uses_three_tier_verdict() -> None:
     message = ReActToolLoop._result_contract_violation_message(
         ['summary must not be empty'],
         node_kind='acceptance',
@@ -5956,8 +5944,8 @@ def test_acceptance_result_contract_violation_message_uses_final_or_blocked_only
 
     assert 'delivery_status="partial"' not in message
     assert 'submit_final_result' in message
-    assert 'failed+final' in message
-    assert 'failed+blocked' in message
+    assert 'reject_no_progress' in message
+    assert 'feedback' in message
 
 
 @pytest.mark.asyncio
@@ -6007,11 +5995,11 @@ async def test_react_loop_failed_final_payload_is_accepted_immediately_without_r
         max_iterations=3,
     )
 
-    assert result.status == 'failed'
+    # 旧形状的 failed 提交按兼容映射收成一次正常完成，不再触发修复重试。
+    assert result.status == 'success'
     assert result.delivery_status == 'final'
     assert len(calls) == 1
     assert result.summary == 'done'
-    assert result.blocking_reason == ''
 
 
 @pytest.mark.asyncio
@@ -6670,10 +6658,10 @@ async def test_react_loop_ignores_persisted_invalid_final_submission_count_and_a
         max_iterations=3,
     )
 
-    assert result.status == 'failed'
+    # 旧形状的 failed 提交按兼容映射收成一次正常完成；持久化的旧拒收计数不再生效。
+    assert result.status == 'success'
     assert result.delivery_status == 'final'
     assert result.summary == 'still invalid'
-    assert result.blocking_reason == ''
     assert backend.turn == 1
 
 
