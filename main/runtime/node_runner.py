@@ -73,7 +73,10 @@ from main.runtime.internal_tools import (
 )
 from main.runtime.node_message_kind import INTENT_PROGRESS
 from main.runtime.node_prompt_contract import extract_node_dynamic_contract_payload
-from main.runtime.node_wake import WAKE_ON_ALL_CHILDREN, all_children_satisfied
+from main.runtime.node_wake import (
+    WAKE_ON_ALL_CHILDREN,
+    enter_wait_verdict,
+)
 from main.runtime.pending_notice_state import (
     PENDING_NOTICE_STATE_KEY,
     RESUME_MODE_ORDINARY,
@@ -3970,12 +3973,7 @@ class NodeRunner:
             for item in list(self._store.list_task_node_notifications(task_id, node.node_id) or [])
             if str(item.status or '').strip() == 'delivered'
         ]
-        if policy == 'any' and unread:
-            return {
-                'status': 'not_parked_unread_present',
-                'wake_on': policy,
-                'unread_injected': len(unread),
-            }
+        children: list[dict[str, Any]] = []
         if policy == WAKE_ON_ALL_CHILDREN:
             children = [
                 {
@@ -3986,19 +3984,26 @@ class NodeRunner:
                 for child in list(self._store.list_nodes(task_id) or [])
                 if str(getattr(child, 'parent_node_id', '') or '').strip() == node.node_id
             ]
-            finals = [
-                str(item.source_node_id or '').strip()
-                for item in unread
-                if str(item.kind or '').strip() == 'child_final'
-            ]
-            if all_children_satisfied(children, unread_final_sources=finals):
-                # 空停靠不允许：没有未结清子节点就没有可等的事件（P4 推论一）。
-                return {
-                    'status': 'not_parked_unread_present',
-                    'wake_on': policy,
-                    'unread_injected': len(unread),
-                    'reason': 'no_unsettled_children',
-                }
+        finals = [
+            str(item.source_node_id or '').strip()
+            for item in unread
+            if str(item.kind or '').strip() == 'child_final'
+        ]
+        may_park, refusal = enter_wait_verdict(
+            wake_on=policy,
+            unread_count=len(unread),
+            children=children,
+            unread_final_sources=finals,
+        )
+        if not may_park:
+            if refusal.startswith('unknown_wake_on'):
+                return {'status': 'rejected', 'reason': refusal}
+            return {
+                'status': 'not_parked_unread_present',
+                'wake_on': policy,
+                'unread_injected': len(unread),
+                'reason': refusal,
+            }
 
         self._store.update_node(
             node.node_id,

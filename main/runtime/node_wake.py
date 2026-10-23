@@ -192,6 +192,38 @@ async def wake_parked_node(
     return OUTCOME_SCHEDULED
 
 
+def enter_wait_verdict(
+    *,
+    wake_on: str,
+    unread_count: int,
+    children: Iterable[Mapping[str, Any]] = (),
+    unread_final_sources: Iterable[str] = (),
+) -> tuple[bool, str]:
+    """Whether ``enter_wait`` may park, and why not when it may not.
+
+    Two refusals, both structural rather than advisory:
+
+    * qualifying mail is already waiting — parking would strand a message that
+      arrived a moment earlier, and the node would wait for a wake that already
+      happened;
+    * ``all_children`` with nothing left to wait for — an empty park is a node
+      nobody can ever wake.
+
+    Refusing means "do not park, keep going": the caller injects the mail and the
+    turn continues.
+    """
+    policy = str(wake_on or '').strip() or WAKE_ON_ANY
+    if policy not in WAKE_ON_VALUES:
+        return False, f'unknown_wake_on:{policy}'
+    if policy == WAKE_ON_ANY:
+        if int(unread_count or 0) > 0:
+            return False, 'unread_present'
+        return True, ''
+    if all_children_satisfied(children, unread_final_sources=unread_final_sources):
+        return False, 'no_unsettled_children'
+    return True, ''
+
+
 def schedule_wake(*, task_id: str, node_id: str, deps: WakeDeps) -> str:
     """Fire-and-forget variant for synchronous delivery sites.
 
