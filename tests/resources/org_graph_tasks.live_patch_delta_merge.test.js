@@ -48,12 +48,12 @@ test("full summary still replaces the whole frame table", () => {
 
 test("delta replaces one frame in place and keeps the order", () => {
     const { S, merge } = loadFrameMerge();
-    const nodeA = frame("node:a", { stage_goal: "a" });
-    const nodeB = frame("node:b", { stage_goal: "old" });
+    const nodeA = frame("node:a", { phase: "before_model" });
+    const nodeB = frame("node:b", { phase: "before_model" });
     S.frontier = [nodeA, nodeB];
     S.liveFrameMap = { "node:a": nodeA, "node:b": nodeB };
 
-    const changed = frame("node:b", { stage_goal: "new" });
+    const changed = frame("node:b", { phase: "after_tools" });
     const result = merge({ frames: null, frame: changed, staleNodeIds: [] });
 
     assert.equal(result.length, 2);

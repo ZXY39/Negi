@@ -256,7 +256,6 @@ async def seed_runtime(
                     "depth": 0,
                     "node_kind": "execution",
                     "phase": "before_model",
-                    "stage_goal": f"root goal {task_index}",
                     "tool_calls": [],
                     "child_pipelines": [],
                 },

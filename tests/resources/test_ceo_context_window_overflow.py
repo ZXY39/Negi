@@ -331,7 +331,7 @@ def test_frontdoor_preflight_prefers_effective_input_tokens_plus_delta_when_prev
         "_selected_tool_schemas",
         lambda names: [
             {
-                "name": str((list(names or []) or ["submit_next_stage"])[0]),
+                "name": str((list(names or []) or ["filesystem_stat"])[0]),
                 "description": "",
                 "parameters": {"type": "object"},
             }
@@ -363,7 +363,7 @@ def test_frontdoor_preflight_prefers_effective_input_tokens_plus_delta_when_prev
             ],
             "tool_schemas": [
                 {
-                    "name": "submit_next_stage",
+                    "name": "filesystem_stat",
                     "description": "",
                     "parameters": {"type": "object"},
                 }
@@ -396,8 +396,8 @@ def test_frontdoor_preflight_prefers_effective_input_tokens_plus_delta_when_prev
                 {"role": "system", "content": "SYSTEM"},
                 {"role": "user", "content": "hello"},
             ],
-            "tool_names": ["submit_next_stage"],
-            "provider_tool_names": ["submit_next_stage"],
+            "tool_names": ["filesystem_stat"],
+            "provider_tool_names": ["filesystem_stat"],
             "parallel_enabled": False,
             "turn_overlay_text": "",
             "dynamic_appendix_messages": [],
@@ -441,56 +441,6 @@ def test_frontdoor_append_only_comparison_tolerates_regenerated_dynamic_blocks()
     assert delta > 0
     # 没有阶段裁撤参与比对时不产生锚点修正量
     assert projection_shrink == 0
-
-
-def _stage_round_messages(fat_payload: str) -> list[dict[str, object]]:
-    """system + 首条用户请求 + 5 个阶段（submit 调用/响应 + 文本汇报），阶段 1 带肥肉身。"""
-    messages: list[dict[str, object]] = [
-        {"role": "system", "content": "SYSTEM"},
-        {"role": "user", "content": "bootstrap request"},
-    ]
-    for index in range(1, 6):
-        content = fat_payload if index == 1 else '{"ok": true}'
-        messages.append(
-            {
-                "role": "assistant",
-                "content": "",
-                "tool_calls": [
-                    {
-                        "id": f"call-stage-{index}",
-                        "type": "function",
-                        "function": {"name": "submit_next_stage", "arguments": "{}"},
-                    }
-                ],
-            }
-        )
-        messages.append(
-            {"role": "tool", "name": "submit_next_stage", "tool_call_id": f"call-stage-{index}", "content": content}
-        )
-        messages.append({"role": "assistant", "content": f"stage {index} raw detail"})
-    return messages
-
-
-def _evicted_first_stage_state() -> dict[str, object]:
-    stages = [
-        {
-            "stage_id": f"frontdoor-stage-{index}",
-            "stage_index": index,
-            "stage_kind": "normal",
-            "system_generated": False,
-            "status": "completed" if index < 5 else "active",
-            "stage_goal": f"inspect stage {index}",
-            "completed_stage_summary": f"finished stage {index}",
-            "key_refs": [],
-            "tool_round_budget": 2,
-            "tool_rounds_used": 1,
-            **({"context_evicted": True} if index == 1 else {}),
-        }
-        for index in range(1, 6)
-    ]
-    return {"active_stage_id": "frontdoor-stage-5", "transition_required": False, "stages": stages}
-
-
 
 
 def test_frontdoor_seed_record_prefers_live_trace_over_stale_previous_slot(tmp_path) -> None:
@@ -555,7 +505,6 @@ async def test_graph_call_model_runs_llm_token_compression_before_main_send(
     session = SimpleNamespace(
         state=SimpleNamespace(session_key="web:shared"),
         announce_context_compression_boundary=_announce_boundary_noop,
-        _frontdoor_stage_state={"active_stage_id": "", "transition_required": False, "stages": []},
         _frontdoor_canonical_context={"active_stage_id": "", "transition_required": False, "stages": []},
         _compression_state={},
         _semantic_context_state={},
@@ -655,7 +604,6 @@ async def test_graph_call_model_token_compression_keeps_prior_provider_tool_sche
     session = SimpleNamespace(
         state=SimpleNamespace(session_key="web:shared"),
         announce_context_compression_boundary=_announce_boundary_noop,
-        _frontdoor_stage_state={"active_stage_id": "", "transition_required": False, "stages": []},
         _frontdoor_canonical_context={"active_stage_id": "", "transition_required": False, "stages": []},
         _compression_state={},
         _semantic_context_state={},
@@ -767,7 +715,6 @@ async def test_graph_call_model_token_compression_keeps_repair_required_contract
     session = SimpleNamespace(
         state=SimpleNamespace(session_key="web:shared"),
         announce_context_compression_boundary=_announce_boundary_noop,
-        _frontdoor_stage_state={"active_stage_id": "", "transition_required": False, "stages": []},
         _frontdoor_canonical_context={"active_stage_id": "", "transition_required": False, "stages": []},
         _compression_state={},
         _semantic_context_state={},
@@ -856,7 +803,6 @@ async def test_graph_call_model_discards_late_compression_result_after_pause(
     class _CompressionAwareSession:
         def __init__(self) -> None:
             self.state = SimpleNamespace(session_key="web:shared")
-            self._frontdoor_stage_state = {"active_stage_id": "", "transition_required": False, "stages": []}
             self._frontdoor_canonical_context = {"active_stage_id": "", "transition_required": False, "stages": []}
             self._compression_state = {}
             self._semantic_context_state = {}
