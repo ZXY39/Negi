@@ -511,3 +511,32 @@ class TestVerdictContext:
             'reject',
             'reject_no_progress',
         ]
+
+    def test_acceptance_follows_subject_terminal_state(self, tmp_path: Path) -> None:
+        """T15：任务收口时验收节点随被验节点终局、状态一致，不按残留节点判失败。"""
+        service = _service(tmp_path)
+        try:
+            _seed(service)
+            service.store.update_node(
+                CHILD,
+                lambda record: record.model_copy(update={'status': 'success'}),
+            )
+            service.store.update_node(
+                ROOT,
+                lambda record: record.model_copy(update={'status': 'success'}),
+            )
+            dispatcher = service.task_actor_service._create_dispatcher(TASK)
+
+            service.task_actor_service._fail_remaining_nodes(TASK, dispatcher, 'parent task terminal')
+
+            acceptance = service.store.get_node(ACCEPTANCE)
+            assert acceptance.status == 'success'
+            assert acceptance.failure_reason == ''
+        finally:
+            import asyncio
+
+            async def _cleanup():
+                await dispatcher.close()
+                await service.close()
+
+            asyncio.run(_cleanup())

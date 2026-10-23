@@ -1140,7 +1140,10 @@ class TaskActorService:
         return isinstance(exc, (NodePausedError, TaskPausedError))
 
     def _fail_remaining_nodes(self, task_id: str, dispatcher: 'TaskNodeDispatcher', reason: str) -> None:
-        """任务已终局/取消：非根非终态节点不再有消费者，落成可解释的终态。"""
+        """任务已终局/取消：非根非终态节点不再有消费者，落成可解释的终态。
+
+        T15：验收节点不按“残留节点”处理，而是随被验收节点终局、状态一致。
+        """
         task = self._store.get_task(task_id)
         root_node_id = str(getattr(task, 'root_node_id', '') or '').strip() if task is not None else ''
         for node in list(self._store.list_nodes(task_id) or []):
@@ -1149,6 +1152,44 @@ class TaskActorService:
                 continue
             if str(getattr(node, 'status', '') or '').strip().lower() in {'success', 'failed'}:
                 continue
+            if str(getattr(node, 'node_kind', '') or '').strip().lower() == KIND_ACCEPTANCE:
+                execution = self._node_runner._accepted_execution_node(task_id=task_id, acceptance=node)
+                execution_status = (
+                    str(getattr(execution, 'status', '') or '').strip().lower() if execution is not None else ''
+                )
+                if execution_status in {'success', 'failed'}:
+                    try:
+                        self._log_service.update_node_status(
+                            task_id,
+                            node_id,
+                            status=execution_status,
+                            final_output=(
+                                '随被验收节点终局（T15）：被验收节点已完成。'
+                                if execution_status == 'success'
+                                else '随被验收节点终局（T15）：被验收节点已失败。'
+                            ),
+                            failure_reason='' if execution_status == 'success' else '被验收节点已失败',
+                        )
+                        current = normalize_acceptance_handshake(
+                            (execution.metadata or {}).get(ACCEPTANCE_HANDSHAKE_KEY)
+                        )
+                        self._node_runner._update_execution_acceptance_handshake(
+                            node_id=execution.node_id,
+                            state=(
+                                ACCEPTANCE_STATE_ACCEPTED
+                                if execution_status == 'success'
+                                else ACCEPTANCE_STATE_CANCELED_BY_EXECUTION_FAILURE
+                            ),
+                            acceptance_node_id=node_id,
+                            rejection_count=int(current.get('rejection_count') or 0),
+                            latest_execution_result_ref=str(current.get('latest_execution_result_ref') or ''),
+                            latest_execution_result_summary=str(current.get('latest_execution_result_summary') or ''),
+                            latest_rejection_feedback_ref=str(current.get('latest_rejection_feedback_ref') or ''),
+                            latest_rejection_feedback_summary=str(current.get('latest_rejection_feedback_summary') or ''),
+                        )
+                    except Exception:
+                        logger.exception('failed to settle acceptance node: task={} node={}', task_id, node_id)
+                    continue
             try:
                 self._node_runner.fail_paused_node(
                     task_id, node_id, reason, notify_parent=False

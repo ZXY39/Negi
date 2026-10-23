@@ -5773,7 +5773,13 @@ class NodeRunner:
         if acceptance is not None:
             # 绑定的验收节点可能已是终态：那是它更早（甚至对着空交接）下的结论，
             # 不能当成本轮裁定。先作废回 in_progress，本轮交付才有人重验。
-            acceptance = self._reset_terminal_acceptance_for_reverify(task=task, acceptance=acceptance)
+            # 例外：被验节点当前提交的握手已是 accepted——这份终态就是对本轮交付
+            # 的裁定，重放 spawn 轮（同一 call id 的物化）不得把它重新打开。
+            child_handshake = normalize_acceptance_handshake(
+                (child.metadata or {}).get(ACCEPTANCE_HANDSHAKE_KEY)
+            )
+            if str(child_handshake.get('state') or '').strip() != ACCEPTANCE_STATE_ACCEPTED:
+                acceptance = self._reset_terminal_acceptance_for_reverify(task=task, acceptance=acceptance)
         if acceptance is None:
             acceptance_goal = _spawn_acceptance_goal(spec.goal)
             acceptance_prompt = str(spec.acceptance_prompt or '')
