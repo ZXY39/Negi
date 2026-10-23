@@ -5773,12 +5773,28 @@ class NodeRunner:
         if acceptance is not None:
             # 绑定的验收节点可能已是终态：那是它更早（甚至对着空交接）下的结论，
             # 不能当成本轮裁定。先作废回 in_progress，本轮交付才有人重验。
-            # 例外：被验节点当前提交的握手已是 accepted——这份终态就是对本轮交付
-            # 的裁定，重放 spawn 轮（同一 call id 的物化）不得把它重新打开。
+            # 例外：终态验收是在当前提交之后落下的（或握手已 accepted）——这份终态
+            # 就是对本轮交付的裁定，重放 spawn 轮不得把它重新打开（否则 pass 之后
+            # 会被再验一轮、甚至改判 reject）。
             child_handshake = normalize_acceptance_handshake(
                 (child.metadata or {}).get(ACCEPTANCE_HANDSHAKE_KEY)
             )
-            if str(child_handshake.get('state') or '').strip() != ACCEPTANCE_STATE_ACCEPTED:
+            handshake_says_accepted = (
+                str(child_handshake.get('state') or '').strip() == ACCEPTANCE_STATE_ACCEPTED
+            )
+            verdict_is_current = False
+            if self._normalized_status(getattr(acceptance, 'status', '')) in {STATUS_SUCCESS, STATUS_FAILED}:
+                try:
+                    verdict_at = datetime.fromisoformat(
+                        str(getattr(acceptance, 'updated_at', '') or '').replace('Z', '+00:00')
+                    )
+                    submitted_at = datetime.fromisoformat(
+                        str(child_handshake.get('updated_at') or '').replace('Z', '+00:00')
+                    )
+                    verdict_is_current = verdict_at >= submitted_at
+                except ValueError:
+                    verdict_is_current = False
+            if not handshake_says_accepted and not verdict_is_current:
                 acceptance = self._reset_terminal_acceptance_for_reverify(task=task, acceptance=acceptance)
         if acceptance is None:
             acceptance_goal = _spawn_acceptance_goal(spec.goal)
