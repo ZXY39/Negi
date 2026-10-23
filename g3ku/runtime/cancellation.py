@@ -8,7 +8,7 @@ from typing import Any
 from g3ku.utils.process_tree import kill_process_tree_pid
 
 
-class ToolCancellationRequested(RuntimeError):
+class ToolCancellationRequested(RuntimeError):  # noqa: N818
     """Raised when a tool should stop because the session was paused or cancelled."""
 
 

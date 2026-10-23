@@ -48,7 +48,7 @@ class StreamingChunkTimeoutError(TimeoutError):
     """Raised when a streaming provider stops yielding chunks in time."""
 
 
-class StreamingFallbackRequested(RuntimeError):
+class StreamingFallbackRequested(RuntimeError):  # noqa: N818
     """Raised when a provider should transparently retry in non-streaming mode."""
 
 

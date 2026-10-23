@@ -161,8 +161,8 @@ def test_exempt_names_do_not_get_the_field_on_either_surface() -> None:
 
 
 def test_non_hydratable_set_matches_the_authoritative_constants() -> None:
-    _FIXED_BUILTIN_NAMES = (*CEO_FIXED_BUILTIN_TOOL_NAMES, *NODE_FIXED_BUILTIN_TOOL_NAMES)
-    for name in (*_FIXED_BUILTIN_NAMES, SILENT_TOOL_NAME, "load_tool_context", "load_skill_context"):
+    fixed_builtin_names = (*CEO_FIXED_BUILTIN_TOOL_NAMES, *NODE_FIXED_BUILTIN_TOOL_NAMES)
+    for name in (*fixed_builtin_names, SILENT_TOOL_NAME, "load_tool_context", "load_skill_context"):
         assert name in NON_HYDRATABLE_TOOL_NAMES, name
     for name in (*CEO_FIXED_BUILTIN_TOOL_NAMES, *NODE_FIXED_BUILTIN_TOOL_NAMES):
         assert name in NON_HYDRATABLE_TOOL_NAMES, name

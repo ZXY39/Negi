@@ -14,7 +14,7 @@ from main.api.websocket_utils import (
 )
 
 
-class _WindowsConnectionReset(ConnectionResetError):
+class _WindowsConnectionReset(ConnectionResetError):  # noqa: N818
     def __init__(self, winerror: int = 10054) -> None:
         super().__init__(winerror, 'peer reset')
         self.winerror = winerror

@@ -51,7 +51,7 @@ def merge_token_usage_records(records: Iterable[object], *, tracked: bool | None
 
 
 def merge_token_usage_by_model(records: Iterable[object], *, tracked: bool | None = None):
-    ModelTokenUsageRecord = _model_snapshot_cls()
+    ModelTokenUsageRecord = _model_snapshot_cls()  # noqa: N806
     grouped: dict[tuple[str, str, str], list[object]] = defaultdict(list)
     for record in records:
         if record is None:
@@ -108,7 +108,7 @@ def _as_slot(value: object) -> int:
 
 
 def build_token_usage_from_attempts(attempts: Iterable[LLMModelAttempt], *, tracked: bool):
-    ModelTokenUsageRecord = _model_snapshot_cls()
+    ModelTokenUsageRecord = _model_snapshot_cls()  # noqa: N806
     if not tracked:
         return empty_token_usage(tracked=False), []
 

@@ -15,7 +15,7 @@ _DISCONNECT_WINERRORS = {10053, 10054}
 _DISCONNECT_ERRNOS = {32, 54, 104}
 
 
-class WebSocketChannelClosed(Exception):
+class WebSocketChannelClosed(Exception):  # noqa: N818
     """Raised when a websocket client has already disconnected."""
 
 

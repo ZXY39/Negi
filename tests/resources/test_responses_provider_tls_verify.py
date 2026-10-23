@@ -80,7 +80,7 @@ def test_tls_verify_warning_not_logged_when_verification_stays_enabled(
     assert warnings == []
 
 
-def _FakeStream(status_code: int = 200) -> SimpleNamespace:
+def _fake_stream(status_code: int = 200) -> SimpleNamespace:
     class _Stream:
         async def __aenter__(self):
             return SimpleNamespace(status_code=status_code)
@@ -105,7 +105,7 @@ async def _chat_with_captured_client(
             return None
 
         def stream(self, *args, **kwargs):
-            return _FakeStream()
+            return _fake_stream()
 
     async def _fake_consume_sse(response):
         # 桩替换掉了真实流消费者：把终止事件补记进诊断，否则这条假流会被 provider
