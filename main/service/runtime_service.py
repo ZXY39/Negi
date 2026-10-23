@@ -1156,6 +1156,15 @@ class MainRuntimeService:
         )
         self.log_service.sync_task_read_models(task.task_id, externalize_execution_trace=False)
         self.log_service.refresh_task_view(task.task_id, mark_unread=True)
+        # P8：崩溃前发出、但父节点信箱里已经不存在的异常暂停升级，恢复时补发一次。
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            return
+        loop.create_task(
+            self.resend_lost_abnormal_pause_escalations(task.task_id),
+            name=f'abnormal-pause-resend:{task.task_id}',
+        )
 
     @staticmethod
     def _sanitize_recovered_task_metadata(metadata: dict[str, Any], *, preserve_final_acceptance: bool) -> dict[str, Any]:
@@ -4729,6 +4738,42 @@ class MainRuntimeService:
             source_node_id=str(node.node_id or '').strip(),
             intent_kind=INTENT_PROGRESS,
         )
+
+    async def resend_lost_abnormal_pause_escalations(self, task_id: str) -> list[str]:
+        """P8：异常暂停的升级消息丢了就补发（防 P6 第一类死锁从崩溃路径复活）。
+
+        判据只看持久事实：节点是 `pause_reason='error'` 的暂停态、有父节点，而父
+        节点信箱里没有来自它的 `child_abnormal_pause`（delivered/consumed 都算已到）。
+        """
+        normalized_task_id = str(task_id or '').strip()
+        if not normalized_task_id:
+            return []
+        resent: list[str] = []
+        for node in list(self.store.list_nodes(normalized_task_id) or []):
+            if str(getattr(node, 'node_kind', '') or '').strip().lower() != 'execution':
+                continue
+            if str(getattr(node, 'pause_reason', '') or '').strip().lower() != 'error':
+                continue
+            if not (bool(getattr(node, 'is_paused', False)) or bool(getattr(node, 'pause_requested', False))):
+                continue
+            parent_node_id = str(getattr(node, 'parent_node_id', '') or '').strip()
+            if not parent_node_id:
+                continue
+            already = any(
+                str(item.kind or '').strip() == KIND_CHILD_ABNORMAL_PAUSE
+                and str(item.source_node_id or '').strip() == str(node.node_id or '').strip()
+                and str(item.status or '').strip() in {'delivered', 'consumed'}
+                for item in list(self.store.list_task_node_notifications(normalized_task_id, parent_node_id) or [])
+            )
+            if already:
+                continue
+            await self._deliver_child_abnormal_pause(
+                task_id=normalized_task_id,
+                node_id=str(node.node_id or '').strip(),
+                reason=str(getattr(node, 'failure_reason', '') or '异常暂停'),
+            )
+            resent.append(str(node.node_id or '').strip())
+        return resent
 
     async def _manage_child_nodes_from_node(
         self,
