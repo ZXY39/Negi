@@ -318,9 +318,7 @@ def test_tree_text_label_keeps_status_when_not_paused() -> None:
     "result_factory",
     [
         lambda: ReActToolLoop._invalid_final_submission_failure(reason="missing required status", count=1),
-        lambda: ReActToolLoop._invalid_stage_submission_failure(reason="invalid stage", count=1, stage_goal="stage"),
         lambda: ReActToolLoop._read_only_repeat_failure(signature="same-call", count=1, repair_text="change the query"),
-        lambda: ReActToolLoop._stage_only_transition_failure(count=1, stage_goal="stage"),
         lambda: ReActToolLoop._xml_repair_failure(count=1, tool_names=["exec"], content_excerpt="<tool>"),
         lambda: ReActToolLoop._orphan_tool_result_failure(call_ids=["call:orphan"], strike_count=1),
     ],
