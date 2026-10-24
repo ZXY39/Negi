@@ -447,16 +447,24 @@ function bindTaskTraceListInteractions(traceList) {
     traceList.addEventListener("click", (event) => {
         const target = event.target instanceof Element ? event.target : null;
         if (!target) return;
-        // 展开态的中途输出正文要能滚动、能选中：点正文本身不再触发 <details> 收起。
-        if (target.closest(".task-trace-step--turn-text[open] .interaction-step-title")) {
-            event.preventDefault();
-            return;
-        }
         const nodeRef = target.closest("[data-node-jump]");
         if (nodeRef instanceof HTMLElement) {
             event.preventDefault();
             event.stopPropagation();
             void jumpToTaskNodeDetail(nodeRef.dataset.nodeJump || "");
+            return;
+        }
+        // 展开态的中途输出正文：点文字照常折叠；只有拖选文本或点滚动条时才拦下
+        // <details> 的默认切换，否则用户没法在滚动框里选中/拖动滚动条。
+        const turnTitle = target.closest(".task-trace-step--turn-text[open] .interaction-step-title");
+        if (turnTitle instanceof HTMLElement) {
+            const selectionText = typeof window.getSelection === "function"
+                ? String(window.getSelection() || "").trim()
+                : "";
+            const scrollbarWidth = Math.max(0, turnTitle.offsetWidth - turnTitle.clientWidth);
+            const rect = turnTitle.getBoundingClientRect();
+            const onScrollbar = scrollbarWidth > 0 && event.clientX - rect.left >= turnTitle.clientWidth;
+            if (selectionText || onScrollbar) event.preventDefault();
         }
     });
 }
