@@ -656,6 +656,7 @@ const U = {
     adStatus: document.getElementById("ad-status"),
     adTokenSummary: document.getElementById("ad-token-summary"),
     adInitialPrompt: document.getElementById("ad-initial-prompt"),
+    taskFlowBox: document.getElementById("task-flow-box"),
     adFlow: document.getElementById("ad-input"),
     adMessages: document.getElementById("ad-messages"),
     adMessageTabs: document.getElementById("ad-message-tabs"),

@@ -17244,14 +17244,24 @@ textarea {
     margin-bottom: var(--space-3);
 }
 
-/* 节点流程框常开、无展开箭头：统计行与上方初始提示词正文左对齐。 */
+/* 节点流程框可折叠但不画箭头/引导线：点统计行开合，文字与初始提示词左对齐。 */
 .task-flow-header {
     display: flex;
     align-items: center;
     padding: var(--space-3) var(--space-3) var(--space-3) 18px;
+    cursor: pointer;
+    list-style: none;
     color: var(--text-secondary);
     font-size: 0.8rem;
     font-variant-numeric: tabular-nums;
+}
+
+.task-flow-header::-webkit-details-marker {
+    display: none;
+}
+
+.task-flow-box[open] {
+    box-shadow: var(--shadow-sm);
 }
 
 .task-flow-usage {
@@ -17370,7 +17380,9 @@ textarea {
     animation: taskFlowBodyIn 0.18s ease-out;
 }
 
-/* 中途文本内部：时间行与工具条和正文同一条左基线（16px 箭头 + 12px 间距）。 */
-.task-trace-step--turn-text > .task-trace-body {
+/* 流程内每条的时间行与工具条统一让到正文列（16px 箭头 + 12px 间距），
+   中途文本、纯工具前言都落在同一条左基线上。 */
+.task-flow-box .task-trace-step > .task-trace-body,
+.interaction-flow-list .task-trace-step > .task-trace-body {
     padding-left: calc(16px + var(--space-3));
 }
