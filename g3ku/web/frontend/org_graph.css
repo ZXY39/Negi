@@ -3718,12 +3718,6 @@ textarea {
     transform: rotate(-135deg);
 }
 
-.interaction-flow-title {
-    font-size: 0.85rem;
-    font-weight: 600;
-    color: var(--text-primary);
-}
-
 .interaction-flow-meta {
     flex: 1;
     text-align: right;
@@ -17288,18 +17282,23 @@ textarea {
 }
 
 .interaction-flow {
-    border-color: color-mix(in srgb, var(--border-color) 78%, transparent);
+    /* 前门执行框不画边框线，只留底色与圆角。 */
+    border: 0;
     border-radius: 18px;
     background: color-mix(in srgb, var(--bg-app) 72%, transparent);
 }
 
+.interaction-flow-summary {
+    /* 秒数与展开箭头相邻，不再把箭头推到最右。 */
+    justify-content: flex-start;
+    gap: 8px;
+}
+
 .interaction-flow-usage {
-    flex: 1;
-    min-width: 0;
-    overflow: hidden;
-    white-space: nowrap;
-    text-overflow: ellipsis;
-    font-size: 0.8rem;
+    flex: none;
+    font-size: 0.85rem;
+    font-weight: 600;
+    color: var(--text-primary);
     font-variant-numeric: tabular-nums;
 }
 
@@ -17341,12 +17340,6 @@ textarea {
 
 /* 节点用量行与中途文本同款：0.85rem / 600 / 主文字色。 */
 .task-flow-usage,
-.interaction-flow-usage {
-    font-size: 0.85rem;
-    font-weight: 600;
-    color: var(--text-primary);
-}
-
 /* 外层框内不再画每条的轨道状态点；可折叠的只有中途文本的「>」。 */
 .task-flow-box .task-trace-step::before,
 .interaction-flow-list .task-trace-step::before {

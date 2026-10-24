@@ -5046,9 +5046,7 @@ function renderCeoTurnsIntoTurn(turn, turns = [], { interruptedMarker = false } 
     // 框默认折叠；用户此前展开过的话由 applyCeoTurnTraceViewState 按 flowOpen 还原。
     if (turn.flowUsageEl) {
         const elapsedSeconds = ceoTraceElapsedSeconds(visibleTurns);
-        turn.flowUsageEl.textContent = elapsedSeconds > 0
-            ? `耗时 ${formatCeoExecutionSeconds(elapsedSeconds)}`
-            : "耗时 --";
+        turn.flowUsageEl.textContent = formatCeoExecutionSeconds(elapsedSeconds) || "--";
     }
     applyCeoTurnTraceViewState(turn, turnViewState);
     // 整帧重建换掉了 listEl，实时行先躲在容器里；这一帧账本已经画上的调用让它退场，
@@ -5670,7 +5668,6 @@ function createPendingCeoTurn(source = "user", { scrollMode = "preserve" } = {})
                 </div>
                 <details class="interaction-flow" hidden>
                     <summary class="interaction-flow-summary">
-                        <span class="interaction-flow-title">执行流程</span>
                         <span class="interaction-flow-usage" data-flow-usage></span>
                         <span class="interaction-flow-meta" hidden>等待工具开始...</span>
                     </summary>
