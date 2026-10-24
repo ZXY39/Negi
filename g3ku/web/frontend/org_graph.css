@@ -3722,6 +3722,9 @@ textarea {
     height: 8px;
     border-radius: var(--radius-full);
     background: #39c5bb;
+    /* 点在盒中居中，中心落在左起 8px 的像素分界上；1px 引导线占 8~9px、中心是 8.5px。
+       把点右移半像素，两者才严格同轴；圆点旋转对称，这半步只影响边缘抗锯齿。 */
+    transform: translateX(0.5px);
 }
 
 .interaction-flow-meta {
@@ -4114,6 +4117,11 @@ textarea {
 .task-trace-live-steps {
     display: grid;
     gap: var(--space-3);
+}
+
+/* 在飞工具行不画左上角的轨道状态点：卡内正式轮次已经不画，实时行再留一颗跳动的蓝点只会多一层状态。 */
+.task-trace-live-steps .interaction-step::before {
+    display: none;
 }
 
 /* 阶段刚提交、第一轮还没落账本时体内是空的：展开不留一格行距。 */

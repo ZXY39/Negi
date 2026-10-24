@@ -5002,11 +5002,7 @@ function ceoTraceElapsedSeconds(turns = []) {
 function formatCeoExecutionSeconds(seconds) {
     const value = Number(seconds);
     if (!Number.isFinite(value) || value <= 0) return "";
-    if (value >= 60) {
-        const minutes = Math.floor(value / 60);
-        const rest = Math.round(value % 60);
-        return `${minutes}m${rest}s`;
-    }
+    // 头部读数固定用秒：跨分钟也只写 172s，换算成 m/h 会让同一读数在长回合里改变单位。
     return `${value >= 10 ? Math.round(value) : value.toFixed(1)}s`;
 }
 
@@ -6763,6 +6759,29 @@ function updateRuntimeBadge(element, runtimeEl, { runningPrefix = "已运行 ", 
     runtimeEl.textContent = `${status === "running" ? runningPrefix : donePrefix}${formatElapsedDuration(seconds)}`;
 }
 
+function ceoTurnLiveToolSeconds(turn) {
+    const host = turn?.liveToolStepsEl;
+    if (!host || typeof host.querySelectorAll !== "function") return 0;
+    let total = 0;
+    Array.from(host.querySelectorAll(".interaction-step") || []).forEach((item) => {
+        const seconds = resolveRuntimeSeconds(item);
+        if (Number.isFinite(seconds) && seconds > 0) total += seconds;
+    });
+    return total;
+}
+
+// 头部秒数只在整帧重建时算过一次，一条长工具跑着的时候读数会停在上一帧；
+// 每秒把账本里的工具耗时与在飞行的耗时相加，读数才会持续往上加。
+function refreshCeoFlowUsage(turn) {
+    if (!turn?.flowUsageEl || !turn?.flowEl || turn.flowEl.hidden) return;
+    const turns = Array.isArray(turn.lastExecutionTraceSummary?.turns)
+        ? turn.lastExecutionTraceSummary.turns
+        : [];
+    const seconds = ceoTraceElapsedSeconds(turns) + ceoTurnLiveToolSeconds(turn);
+    const text = formatCeoExecutionSeconds(seconds) || "--";
+    if (turn.flowUsageEl.textContent !== text) turn.flowUsageEl.textContent = text;
+}
+
 function refreshLiveDurationBadges() {
     document.querySelectorAll(".interaction-step").forEach((item) => {
         if (!(item instanceof HTMLElement)) return;
@@ -6776,6 +6795,9 @@ function refreshLiveDurationBadges() {
         const runtimeEl = item.querySelector(".task-trace-runtime");
         if (!(runtimeEl instanceof HTMLElement)) return;
         updateRuntimeBadge(item, runtimeEl);
+    });
+    (Array.isArray(S.ceoPendingTurns) ? S.ceoPendingTurns : []).forEach((turn) => {
+        refreshCeoFlowUsage(turn);
     });
     if (typeof refreshTaskWorkerState === "function") {
         refreshTaskWorkerState({ render: S.view === "tasks" });
