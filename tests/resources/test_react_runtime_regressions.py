@@ -8261,3 +8261,25 @@ async def test_node_loop_keeps_revoked_tool_declared_but_still_refuses_it() -> N
     assert "tool not available: web_fetch" in refusal_text
     assert "无权限" in refusal_text
 
+
+def test_tool_result_delivery_metadata_tolerates_non_object_arguments() -> None:
+    """模型把整份 arguments 给成子节点数组时，元数据构造不得抛 ValueError 掩盖参数错误。"""
+
+    payload = ReActToolLoop._tool_result_delivery_metadata(
+        tools={},
+        tool_name="spawn_child_nodes",
+        arguments=[
+            {
+                "goal": "g",
+                "prompt": "p",
+                "execution_policy": {},
+                "requires_acceptance": True,
+                "acceptance_prompt": "a",
+                "seed_tools": [],
+                "title": "t",
+            }
+        ],
+    )
+
+    assert payload["invocation_text"] == "spawn_child_nodes"
+

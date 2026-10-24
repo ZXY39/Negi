@@ -4232,6 +4232,7 @@ class ReActToolLoop:
                     except BaseException:
                         controller.release_tool_slot(slot_lease)
                         raise
+                normalized_arguments = self._normalize_tool_call_arguments(getattr(call, 'arguments', {}))
                 self._update_tool_live_state(
                     task_id=task.task_id,
                     node_id=node.node_id,
@@ -4243,7 +4244,7 @@ class ReActToolLoop:
                     timeout_seconds=self._stall_deadline_timeout_seconds(
                         tools=tools,
                         tool_name=str(call.name or 'tool'),
-                        arguments=self._normalize_tool_call_arguments(getattr(call, 'arguments', {})),
+                        arguments=normalized_arguments,
                         runtime_context=runtime_context,
                     ),
                 )
@@ -4251,7 +4252,7 @@ class ReActToolLoop:
                     raw_result = await self._execute_tool_raw(
                         tools=tools,
                         tool_name=call.name,
-                        arguments=self._normalize_tool_call_arguments(getattr(call, 'arguments', {})),
+                        arguments=normalized_arguments,
                         runtime_context=_call_runtime_context(call),
                     )
                     tool_content = self._render_tool_message_content(
@@ -4261,7 +4262,10 @@ class ReActToolLoop:
                         delivery_metadata=self._tool_result_delivery_metadata(
                             tools=tools,
                             tool_name=str(call.name or ''),
-                            arguments=dict(getattr(call, 'arguments', {}) or {}),
+                            # 归一后的入参：模型可能给出非对象顶层（实盘：整份
+                            # arguments 是子节点数组），原始值直接 dict() 会抛
+                            # ValueError 并把参数错误伪装成工具执行失败。
+                            arguments=normalized_arguments,
                         ),
                     )
                 except TaskPausedError:
@@ -5132,7 +5136,9 @@ class ReActToolLoop:
         descriptor = getattr(tool, '_descriptor', None)
         metadata = getattr(descriptor, 'metadata', None) or {}
         normalized_name = str(tool_name or '').strip() or 'tool'
-        normalized_arguments = dict(arguments or {})
+        # 入参可能是模型给的原始值（非对象顶层），这里必须走与执行同一套归一；
+        # 直接 dict(raw) 会在元数据构造阶段抛 ValueError，把参数错误伪装成执行失败。
+        normalized_arguments = ReActToolLoop._normalize_tool_call_arguments(arguments)
         invocation_text = (
             f"{normalized_name}({json.dumps(normalized_arguments, ensure_ascii=False, sort_keys=True)})"
             if normalized_arguments
