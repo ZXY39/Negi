@@ -91,12 +91,10 @@ function renderTasks() {
                     <label class="project-select-toggle${S.multiSelectMode ? " is-visible" : ""}"><input type="checkbox" class="project-select-checkbox ui-checkbox-input" aria-label="选择任务" ${selected ? "checked" : ""} ${S.taskBusy ? "disabled" : ""}><span class="ui-checkbox-box" aria-hidden="true"></span></label>
                     <div class="pc-topbar-meta">
                         <span class="status-badge" data-status="${esc(statusKey)}" data-task-status>${esc(taskStatusLabel(task))}</span>
-                        <span class="pc-task-id-chip">
+                        <button class="pc-task-id-chip" type="button" title="复制任务 ID" aria-label="复制任务 ID">
                             <span class="pc-task-id-label">Task</span>
                             <span class="pc-task-id-value">${esc(taskId)}</span>
-                        </span>
-                        <button class="icon-btn pc-copy-btn" type="button" title="复制任务 ID" aria-label="复制任务 ID">
-                            <i data-lucide="copy"></i>
+                            <i data-lucide="copy" class="pc-task-id-copy" aria-hidden="true"></i>
                         </button>
                     </div>
                 </div>
@@ -126,7 +124,7 @@ function renderTasks() {
             else S.selectedTaskIds.delete(taskId);
             renderTasks();
         });
-        el.querySelector(".pc-copy-btn")?.addEventListener("click", async (e) => {
+        el.querySelector(".pc-task-id-chip")?.addEventListener("click", async (e) => {
             e.stopPropagation();
             await copyTaskId(taskId);
         });

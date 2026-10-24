@@ -184,43 +184,17 @@ function renderTree() {
     }
 }
 
-function buildTerminalFilterToggle() {
-    const bar = document.createElement("div");
-    bar.className = "execution-tree-toolbar";
-    const label = document.createElement("label");
-    label.className = "ui-checkbox-row execution-tree-filter";
-    const input = document.createElement("input");
-    input.type = "checkbox";
-    input.className = "ui-checkbox-input";
-    input.checked = treeShowTerminalEffective();
-    input.addEventListener("change", () => {
-        S.treeShowTerminal = !!input.checked;
-        renderTree();
-    });
-    const box = document.createElement("span");
-    box.className = "ui-checkbox-box";
-    box.setAttribute("aria-hidden", "true");
-    const text = document.createElement("span");
-    text.textContent = "显示已结束节点";
-    label.append(input, box, text);
-    bar.appendChild(label);
-    return bar;
-}
-
-// 悬浮在树容器右上角：容器左上角被悬浮搜索框占着（更高 z-index），放在容器
-// 内容流首行会被完整遮住——这正是"看不见子节点也无法切换显示"的成因。
+// "展开全部"开关常驻任务详情头部（活跃节点右侧），状态由 S.treeShowTerminal 表达：
+// null/undefined = 跟随任务状态自动推导，true/false = 用户手动指定。
 function mountTerminalFilterToggle() {
-    const host = U.treeFloatingTools;
-    if (!host) {
-        U.tree.appendChild(buildTerminalFilterToggle());
-        return;
+    const input = U.taskExpandAllInput;
+    if (!(input instanceof HTMLInputElement)) return;
+    if (input.dataset.bound !== "true") {
+        input.dataset.bound = "true";
+        input.addEventListener("change", () => {
+            S.treeShowTerminal = !!input.checked;
+            renderTree();
+        });
     }
-    let toolbar = host.querySelector(".execution-tree-toolbar");
-    if (!toolbar) {
-        toolbar = buildTerminalFilterToggle();
-        host.appendChild(toolbar);
-        return;
-    }
-    const input = toolbar.querySelector(".execution-tree-filter input");
-    if (input) input.checked = treeShowTerminalEffective();
+    input.checked = treeShowTerminalEffective();
 }

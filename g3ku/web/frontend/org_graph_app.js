@@ -606,10 +606,8 @@ const U = {
     taskPerformanceBar: document.getElementById("task-performance-bar"),
     taskToolbar: document.getElementById("task-toolbar"),
     taskDepthSelect: document.getElementById("task-depth-select"),
-    taskDepthCustomWrap: document.getElementById("task-depth-custom-wrap"),
-    taskDepthCustomInput: document.getElementById("task-depth-custom-input"),
-    taskDepthCustomSave: document.getElementById("task-depth-custom-save"),
     taskDepthHint: document.getElementById("task-depth-hint"),
+    taskExpandAllInput: document.getElementById("td-expand-all-input"),
     taskPageSize: document.getElementById("task-page-size"),
     taskPageInfo: document.getElementById("task-page-info"),
     taskPagePrev: document.getElementById("task-page-prev"),
@@ -2560,17 +2558,12 @@ function applyTaskDefaultsPayload(payload = {}) {
 }
 
 function renderTaskDepthControl() {
-    if (!U.taskDepthSelect || !U.taskDepthHint || !U.taskDepthCustomWrap || !U.taskDepthCustomInput || !U.taskDepthCustomSave) return;
+    if (!U.taskDepthSelect || !U.taskDepthHint) return;
     const defaultMaxDepth = Math.max(0, normalizeInt(S.taskDefaults.defaultMaxDepth, 1));
     const currentMaxDepth = Math.max(0, normalizeInt(S.taskDefaults.maxDepth, defaultMaxDepth));
     const disabled = S.taskDefaults.loading || S.taskDefaults.saving;
     const currentIsCustomValue = !TASK_DEPTH_PRESET_VALUES.includes(currentMaxDepth);
     const editingCustomValue = !!S.taskDefaults.customMode;
-    const customDraft = String(
-        editingCustomValue
-            ? (S.taskDefaults.customDraft || currentMaxDepth)
-            : (S.taskDefaults.customDraft || "")
-    );
     const select = U.taskDepthSelect;
 
     select.innerHTML = "";
@@ -2598,11 +2591,6 @@ function renderTaskDepthControl() {
     select.dataset.scope = "global";
     buildResourceSelect(select);
     syncResourceSelectUI(select);
-
-    U.taskDepthCustomWrap.hidden = !editingCustomValue;
-    U.taskDepthCustomInput.disabled = disabled;
-    U.taskDepthCustomSave.disabled = disabled;
-    U.taskDepthCustomInput.value = customDraft;
 
     if (U.taskDepthHint) {
         U.taskDepthHint.textContent = "";
@@ -2651,19 +2639,81 @@ async function saveTaskDefaultMaxDepth(value) {
     }
 }
 
-async function submitCustomTaskDepth() {
-    if (!U.taskDepthCustomInput) return;
+async function submitCustomTaskDepth(rawValue) {
     if (S.taskDefaults.loading || S.taskDefaults.saving) return;
-    const parsed = parseNonNegativeInteger(U.taskDepthCustomInput.value);
+    const value = rawValue === undefined ? (S.taskDefaults.customDraft || "") : rawValue;
+    const parsed = parseNonNegativeInteger(value);
     if (parsed === null) {
         showToast({ title: "自定义深度无效", text: "请输入不为负数的整数。", kind: "error" });
-        U.taskDepthCustomInput.focus();
-        U.taskDepthCustomInput.select();
+        const inlineInput = taskDepthInlineInput();
+        inlineInput?.focus();
+        inlineInput?.select();
         return;
     }
     S.taskDefaults.customDraft = String(parsed);
     S.taskDefaults.customMode = !TASK_DEPTH_PRESET_VALUES.includes(parsed);
+    closeResourceSelects();
     await saveTaskDefaultMaxDepth(parsed);
+}
+
+function taskDepthInlineInput() {
+    return document.querySelector("#task-depth-select-menu .task-depth-inline-input");
+}
+
+// “自定义”这一行本身就是输入位：选中它不提交值，只把光标放进行内输入框，
+// 回车或“应用”才写入。以前是按钮旁边再挂一个独立输入框，占位又打断点击流。
+function buildTaskDepthCustomOptionRow(shell, row) {
+    row.classList.add("resource-select-option--custom");
+    const label = document.createElement("span");
+    label.className = "resource-select-option-label";
+    label.textContent = "自定义";
+    const input = document.createElement("input");
+    input.type = "number";
+    input.min = "0";
+    input.step = "1";
+    input.inputMode = "numeric";
+    input.className = "task-depth-inline-input spinless-number-input";
+    input.value = String(S.taskDefaults.customDraft || S.taskDefaults.maxDepth || "");
+    input.setAttribute("aria-label", "自定义全局任务树深度");
+    input.placeholder = "层数";
+    const apply = document.createElement("button");
+    apply.type = "button";
+    apply.className = "toolbar-btn ghost small task-depth-inline-apply";
+    apply.textContent = "应用";
+    row.addEventListener("click", (e) => {
+        e.stopPropagation();
+        if (e.target === input || e.target === apply) return;
+        input.focus();
+        input.select();
+    });
+    input.addEventListener("click", (e) => e.stopPropagation());
+    input.addEventListener("input", () => {
+        S.taskDefaults.customDraft = String(input.value ?? "");
+    });
+    input.addEventListener("keydown", (e) => {
+        if (e.key === "Enter") {
+            e.preventDefault();
+            e.stopPropagation();
+            void submitCustomTaskDepth(input.value);
+            return;
+        }
+        if (e.key === "Escape") {
+            e.preventDefault();
+            e.stopPropagation();
+            closeResourceSelects({ restoreFocus: true });
+        }
+    });
+    apply.addEventListener("click", (e) => {
+        e.stopPropagation();
+        void submitCustomTaskDepth(input.value);
+    });
+    row.append(label, input, apply);
+    queueMicrotask(() => {
+        if (!shell.classList.contains("is-open")) return;
+        input.focus();
+        input.select();
+    });
+    return row;
 }
 
 function taskCreatedSortValue(task) {
@@ -7218,6 +7268,10 @@ function buildResourceSelectOptionButton(select, shell, option) {
     optionButton.setAttribute("role", "option");
     optionButton.tabIndex = -1;
 
+    if (select.id === "task-depth-select" && option.value === TASK_DEPTH_CUSTOM_VALUE) {
+        return buildTaskDepthCustomOptionRow(shell, optionButton);
+    }
+
     const label = document.createElement("span");
     label.className = "resource-select-option-label";
     label.textContent = String(option.textContent || "").trim();
@@ -10416,12 +10470,16 @@ function bindTaskHall() {
     U.taskDepthSelect?.addEventListener("change", (e) => {
         const nextValue = String(e.target.value || "").trim();
         if (nextValue === TASK_DEPTH_CUSTOM_VALUE) {
+            // 选“自定义”不关面板：原地换成行内输入框，光标直接落在数字上。
             S.taskDefaults.customMode = true;
             S.taskDefaults.customDraft = String(Math.max(0, normalizeInt(S.taskDefaults.maxDepth, S.taskDefaults.defaultMaxDepth)));
             renderTaskDepthControl();
             queueMicrotask(() => {
-                U.taskDepthCustomInput?.focus();
-                U.taskDepthCustomInput?.select();
+                if (!(U.taskDepthSelect instanceof HTMLSelectElement)) return;
+                openResourceSelect(U.taskDepthSelect);
+                const inlineInput = taskDepthInlineInput();
+                inlineInput?.focus();
+                inlineInput?.select();
             });
             return;
         }
@@ -10431,12 +10489,6 @@ function bindTaskHall() {
     });
     U.taskSortSelect?.addEventListener("change", (e) => {
         setTaskSortMode(String(e.target.value || "time"));
-    });
-    U.taskDepthCustomInput?.addEventListener("input", (e) => {
-        S.taskDefaults.customDraft = String(e.target.value ?? "");
-    });
-    U.taskDepthCustomSave?.addEventListener("click", () => {
-        void submitCustomTaskDepth();
     });
     U.taskPageSize?.addEventListener("change", (e) => setTaskPageSize(e.target.value));
     U.taskPagePrev?.addEventListener("click", () => setTaskPage(S.taskPage - 1));
