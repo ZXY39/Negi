@@ -306,10 +306,6 @@ async def test_terminal_root_is_not_resumable(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
-@pytest.mark.skip(
-    reason='该用例在基线 baa6a89c 即挂起（与本轮重构无关）；等价覆盖见 '
-    'tests/test_node_recovery.py::test_unfinished_acceptance_round_is_dispatched_after_restart'
-)
 async def test_run_task_redispatches_inflight_acceptance_round_without_notice(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -320,13 +316,22 @@ async def test_run_task_redispatches_inflight_acceptance_round_without_notice(
     service = _build_service(tmp_path, chat_backend=backend)
     fake_logger = MagicMock()
     monkeypatch.setattr("main.runtime.task_actor_service.logger", fake_logger)
+
+    async def _noop_drive_scheduler_loop(*, task_id: str, dispatcher, root_node_id: str, current_result):
+        # 用例的主体是 run_task 的重派发决策；验收回合跑完后的调度循环不在断言范围内，
+        # 也不再给它一个会永远等空闲判定的真实循环。
+        return current_result, False
+
+    monkeypatch.setattr(
+        service.task_actor_service,
+        "_drive_scheduler_loop",
+        _noop_drive_scheduler_loop,
+    )
     try:
         task_id, root_id, acceptance_id = await _waiting_acceptance_task(service, prompt="redispatch round")
         # 通知账本必须真的是空的：本用例要证明的就是「账本之外还有一份承诺」。
-        distribution = dict(
-            (service.log_service.read_task_runtime_meta(task_id) or {}).get("distribution") or {}
-        )
-        assert not list(distribution.get("pending_notice_node_ids") or [])
+        # 握手是唯一凭据（旧的 distribution 投影已删除）。
+        assert service.node_runner.resumable_final_acceptance_node_id(task_id) == acceptance_id
 
         await service.task_actor_service.run_task(task_id)
 

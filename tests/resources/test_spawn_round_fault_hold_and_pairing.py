@@ -696,10 +696,6 @@ def _completed_round_store() -> _FakeStore:
     )
 
 
-@pytest.mark.skip(
-    reason='已收敛轮次在“收敛探测本身也读不到”时落入通用停等车道，重放交付仍返回空结论；'
-    '这是 P3 派生轮遗留缺陷（基线即失败），保留用例作为回归目标'
-)
 def test_converged_round_with_an_unreadable_delivery_pauses_then_replays_the_real_conclusion() -> None:
     """已收敛的轮次读不出结果 ⇒ 父节点可见地停下，库修好后同一 call id 重放回真实结论。
 
@@ -734,13 +730,13 @@ def test_converged_round_with_an_unreadable_delivery_pauses_then_replays_the_rea
     assert paused and paused[0]['node_id'] == ROOT_ID
     assert paused[0]['pause_reason'] == 'error'
     remark = str(paused[0]['remark'] or '')
-    # 收敛探测本身也被同一存储故障挡住时，落点是通用「派生轮停等」而非专用的
-    # results_unreadable 文案；两者都要求一手故障留在暂停行里。
-    assert 'spawn_round_stalled' in remark
+    # 已收敛轮次的重放直接进交付道：读不出子节点行就是 results_unreadable，
+    # 不是「收敛探测说不出话」的通用停等文案——后者会让人以为活儿还没干完。
+    assert 'spawn_round_results_unreadable' in remark
     assert 'disk I/O error' in remark, '一手故障必须留在暂停行里'
-    assert logged and 'spawn_round_stalled' in str(logged[0].get('error_text') or '')
+    assert logged and 'spawn_round_results_unreadable' in str(logged[0].get('error_text') or '')
     titles = [str(item.get('title') or '') for item in diagnostics]
-    assert 'spawn_round_parked_for_operator' in titles, titles
+    assert 'spawn_round_converged_results_unreadable' in titles, titles
     assert original_get_node(EXEC_ID).final_output == 'shard written', '交付失败不得改写子节点结论'
     round_payload = store.get_node(ROOT_ID).metadata['spawn_operations'][ROUND_ID]
     assert round_payload['completed'] is True, '轮次要留在可重放状态'
@@ -751,6 +747,35 @@ def test_converged_round_with_an_unreadable_delivery_pauses_then_replays_the_rea
     assert len(results) == 1
     assert results[0].node_output == 'shard written', '重放必须交付子节点的真实结论'
     assert len(paused) == 1, '库已修好的重放不该再停一次'
+
+
+def test_unreadable_ledger_replay_never_returns_an_all_success_result_set() -> None:
+    """记账读回空表 / 读失败时，交付道不许给出「全部成功」的空结论。"""
+    from main.errors import NodePausedError
+
+    store = _completed_round_store()
+    runner, diagnostics, paused, logged = _parking_runner(store)
+    # 轮次已 completed，但 entry 表读回来是空的——不是「0 个子节点」，是这一跳读不回。
+    store.nodes[ROOT_ID].metadata['spawn_operations'][ROUND_ID]['entries'] = []
+
+    with pytest.raises(NodePausedError):
+        asyncio.run(
+            runner._spawn_children(task_id=TASK_ID, parent_node_id=ROOT_ID, specs=_specs(), call_id=ROUND_ID)
+        )
+
+    assert paused and paused[0]['pause_reason'] == 'error'
+    assert 'spawn_round_results_unreadable' in str(paused[0]['remark'] or '')
+    assert logged, '错误行不落就没有人会被叫醒'
+    unreadable = [
+        item for item in diagnostics
+        if str(item.get('title') or '') == 'spawn_round_converged_results_unreadable'
+    ]
+    assert unreadable, diagnostics
+    assert 'entry_count=unreadable' in str(unreadable[0].get('detail') or ''), (
+        'entry 表读回空时不许把 0 当成实测条数'
+    )
+    # 交付道没有返回任何结果集，因此不存在一份「每条都成功」的假结论。
+    assert paused[0]['node_id'] == ROOT_ID
 
 
 def test_converged_delivery_that_cannot_record_a_park_reraises_the_raw_fault() -> None:

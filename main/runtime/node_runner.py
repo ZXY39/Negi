@@ -203,6 +203,22 @@ def _notification_awaits_injection(item: Any) -> bool:
 _UNSET = object()
 
 
+class _NodeTurnGate:
+    """同一节点上在飞回合的会合点：后来者等这一个事件，绝不并行开第二个回合。
+
+    `result` / `error` 由持有者（第一个进入 `run_node` 的协程）在回合真正结束后填写；
+    等待方等的是 Event 而不是持有者的 task，所以持有者被取消不会连带取消等待方——
+    等待方要的是「第一回合的结局」，结局是 `CancelledError` 时它也如实收到。
+    """
+
+    __slots__ = ('done', 'result', 'error')
+
+    def __init__(self) -> None:
+        self.done = asyncio.Event()
+        self.result: NodeFinalResult | None = None
+        self.error: BaseException | None = None
+
+
 class NodeRunner:
     def __init__(
         self,
@@ -266,6 +282,11 @@ class NodeRunner:
         # 读 dispatcher entry 是调用方的一跳（见 run_node 上方注释的分层），所以在这里注入。
         self.node_liveness_probe = None
         self._spawn_operation_locks: dict[str, asyncio.Lock] = {}
+        # 同一节点的在飞回合登记表（single-flight）。派发器在 entry.future 已结束而节点
+        # 非终态时会丢掉 entry 并允许重派（`TaskNodeDispatcher._get_or_create_entry`），
+        # 本进程因此可能在旧回合仍活着时再叫一次 `run_node`。那个洞不能靠调度器补：
+        # 重入守卫必须长在回合入口本身。
+        self._node_turn_gates: dict[str, _NodeTurnGate] = {}
         # 节点终局 → 父节点信箱的投递口（由 runtime_service 绑定）。投递是异步的，
         # 而终局写入发生在同步代码里，所以这里只登记任务；`run_task` 的空转判定读
         # `has_pending_terminal_messages()`，避免"终局消息还没送出就把任务收工"。
@@ -528,6 +549,40 @@ class NodeRunner:
         return None
 
     async def run_node(self, task_id: str, node_id: str) -> NodeFinalResult:
+        """节点回合的唯一入口：同一节点同一时刻只允许一个回合在跑。
+
+        判据选「后来者阻塞到第一回合结束」，不选「立刻返回一个 in-flight 回执」：
+        回执要么得编一个 partial 结果（上层会把它当本回合的结论写盘、甚至把节点签成
+        终态，而真正的回合还在跑），要么得抛一个异常（调用方会当成节点失败）。等，
+        则后来者拿到的就是第一回合的真实结局：成功同值、暂停同型、取消同型。
+
+        守卫按 node_id 登记；回合结束（含异常/取消）在 finally 摘除并唤醒等待方，
+        所以终态或暂停之后的合法重入（验收打回、resume、恢复重派）照常开新回合——
+        锁不会泄漏成永久阻塞。这条守卫只挡并发，不挡顺序重入。
+        """
+        gate = self._node_turn_gates.get(node_id)
+        if gate is not None:
+            await gate.done.wait()
+            if gate.error is not None:
+                # 复抛同一异常实例；控制类异常（NodePausedError/TaskPausedError/
+                # CancelledError）的语义本来就该原样到达第二个等待者。
+                raise gate.error
+            if gate.result is None:
+                raise RuntimeError(f'node turn finished without a result: {node_id}')
+            return gate.result
+        gate = _NodeTurnGate()
+        self._node_turn_gates[node_id] = gate
+        try:
+            gate.result = await self._run_node_turn(task_id, node_id)
+            return gate.result
+        except BaseException as exc:
+            gate.error = exc
+            raise
+        finally:
+            self._node_turn_gates.pop(node_id, None)
+            gate.done.set()
+
+    async def _run_node_turn(self, task_id: str, node_id: str) -> NodeFinalResult:
         task = self._store.get_task(task_id)
         node = self._store.get_node(node_id)
         if task is None or node is None:
@@ -3241,6 +3296,22 @@ class NodeRunner:
             entries.append(entry)
         return entries
 
+    def _read_spawn_round_ledger_entries(
+        self, *, parent_node_id: str, cache_key: str,
+    ) -> list[dict[str, Any]]:
+        """已完成轮次重放时现读记账；读失败/读空都交给停车道，不合成、不降级。
+
+        与 `_spawn_round_entries` 的区别是**不做节点树合成**：重放要交付的是这一轮记账
+        里的判决，合成出来的只是名单，没有判决的名单交给模型与空结论同罪。
+        """
+        parent = self._store.get_node(parent_node_id)
+        if parent is None:
+            raise RuntimeError(f'spawn round parent missing: {parent_node_id}')
+        payload = dict((parent.metadata or {}).get('spawn_operations') or {}).get(cache_key)
+        if not isinstance(payload, dict):
+            raise RuntimeError(f'spawn round ledger missing: {cache_key}')
+        return [dict(item) for item in list(payload.get('entries') or []) if isinstance(item, dict)]
+
     def _spawn_round_non_terminal_node_ids(self, *, entries: list[dict[str, Any]]) -> set[str]:
         pending: set[str] = set()
         for entry in list(entries or []):
@@ -3494,6 +3565,12 @@ class NodeRunner:
         try:
             if entries_loader is not None:
                 resolved = list(entries_loader() or [])
+            if specs and not resolved:
+                # 已完成轮次读回空 entry 表：这不是「0 个子节点」这个事实，只是这一跳读不回。
+                # 把空表当结论交付会被下游读成「全部成功、无事可做」，所以按读失败处理，
+                # 并把 entry_count 标成 unreadable（而不是实测的 0）。
+                counted = False
+                raise RuntimeError('spawn round ledger yielded no entries for a completed round')
             counted = True
             return self._spawn_round_results_from_entries(
                 task_id=task_id,
@@ -3569,6 +3646,41 @@ class NodeRunner:
             default_success='parent node already completed',
         )
 
+    def _replay_completed_spawn_round(
+        self,
+        *,
+        task_id: str,
+        parent: NodeRecord,
+        cache_key: str,
+        specs: list[SpawnChildSpec],
+    ) -> list[SpawnChildResult]:
+        """已完成轮次的重放只做**交付**：交出这一轮子节点的真实结论，绝不退回空回执。
+
+        旧实现返回创建回执（state='created'、`node_output=''`），在轮次因交付读失败被
+        停车、随后 resume 重放的形状里，模型拿到的是「孩子什么也没说」——这不是可观测的
+        事实，只是这一跳没读出来。交付本身仍然易碎（entry 表 / 子节点行 / 交接件都要现读），
+        所以统一走 `_deliver_spawn_round_results`：读失败就写错误行、落 `pause_reason='error'`
+        并抛 `NodePausedError`，把同一 `tool_call_id` 留给下一次重放。
+
+        这里先于 reconcile/settle：两者对 completed 轮都是空操作（reconcile 直接跳过、
+        settle 排除当前 cache_key），却各自要先裸读节点行——正是收敛时坏掉的那条路。
+        """
+        if self._pending_notice_waits_for_children(node=parent):
+            raise RuntimeError(
+                'pending local notice must wait for the active child round to finish before starting a new spawn round'
+            )
+        return self._deliver_spawn_round_results(
+            task_id=task_id,
+            parent_node_id=parent.node_id,
+            cache_key=cache_key,
+            stage='replay_completed_round',
+            entries_loader=lambda: self._read_spawn_round_ledger_entries(
+                parent_node_id=parent.node_id,
+                cache_key=cache_key,
+            ),
+            specs=specs,
+        )
+
     async def _spawn_children_locked(
         self,
         *,
@@ -3584,6 +3696,14 @@ class NodeRunner:
         if not parent.can_spawn_children:
             raise ValueError('spawn_child_nodes is not available for this node')
         cache_key = self._spawn_round_cache_key(specs=specs, call_id=call_id)
+        cached = dict((parent.metadata or {}).get('spawn_operations') or {}).get(cache_key)
+        if isinstance(cached, dict) and cached.get('completed'):
+            return self._replay_completed_spawn_round(
+                task_id=task.task_id,
+                parent=parent,
+                cache_key=cache_key,
+                specs=specs,
+            )
         self.reconcile_spawn_entry_child_bindings(
             task_id=task.task_id,
             parent_node_id=parent.node_id,
@@ -3607,11 +3727,13 @@ class NodeRunner:
         parent = self._store.get_node(parent_node_id) or parent
         cached = dict((parent.metadata or {}).get('spawn_operations') or {}).get(cache_key)
         if isinstance(cached, dict) and cached.get('completed'):
-            # 同一 call id 的重放只返回创建回执（幂等）：不重新物化、也不再重复交付
-            # 子节点结果——那些结果以 child_final 消息留在父节点信箱里。
-            return self._spawn_creation_receipts(
+            # 完成度从节点行派生、由调度器写在 `_spawn_operation_lock` 之外，所以 settle
+            # 期间本轮可能刚好收敛；这时同样只能交付，不能落回物化路径。
+            return self._replay_completed_spawn_round(
+                task_id=task.task_id,
+                parent=parent,
+                cache_key=cache_key,
                 specs=specs,
-                entries=[dict(item) for item in list(cached.get('entries') or []) if isinstance(item, dict)],
             )
         reused_results = self._completed_successful_spawn_results(
             parent=parent,
@@ -5208,6 +5330,24 @@ class NodeRunner:
             fallback_goal = str(entry.get('goal') or '').strip()
             if not fallback_goal and index < len(specs_list):
                 fallback_goal = str(specs_list[index].goal or '').strip()
+            creation_gate = str(entry.get('creation_gate') or '').strip().lower()
+            gated_child_id = str(entry.get('child_node_id') or '').strip()
+            gated_acceptance_id = str(entry.get('acceptance_node_id') or '').strip()
+            if creation_gate and not (gated_child_id or gated_acceptance_id):
+                # 创建期闸门拒掉的候选从未物化，没有节点行可读；交付它的拒绝理由，
+                # 不能落到下面 `_rebuild_spawn_entry_result` 的「child node missing」。
+                reason = str(entry.get('creation_reject_reason') or '').strip() or creation_gate
+                results.append(
+                    SpawnChildResult(
+                        goal=fallback_goal,
+                        check_result='派生被拒绝',
+                        node_output=reason,
+                        state='rejected',
+                        gate=creation_gate,
+                        reject_reason=reason,
+                    )
+                )
+                continue
             result, _status, _check_status, _child_check_result = self._rebuild_spawn_entry_result(
                 task_id=task_id,
                 entry=entry,
