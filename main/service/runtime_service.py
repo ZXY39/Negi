@@ -1129,7 +1129,13 @@ class MainRuntimeService:
             self.log_service.mark_task_failed(task.task_id, reason='missing root node during recovery')
             return
 
-        root_status = str(root.status or '').strip().lower()
+        # 仍存在的验收节点指针必须保留：终态节点由下一次提交的
+        # `_reset_terminal_acceptance_for_reverify` 作废重验；在这里清空指针会让
+        # 最终验收路径看不到旧节点并新建第二颗（task:a78c14859578 的重复验收）。
+        final_acceptance = normalize_final_acceptance_metadata((task.metadata or {}).get('final_acceptance'))
+        acceptance_node_id = str(final_acceptance.node_id or '').strip()
+        acceptance_node = self.store.get_node(acceptance_node_id) if acceptance_node_id else None
+        preserve_final_acceptance = acceptance_node is not None
 
         self.store.update_task(
             task.task_id,
@@ -1145,7 +1151,7 @@ class MainRuntimeService:
                     'updated_at': now_iso(),
                     'metadata': self._sanitize_recovered_task_metadata(
                         record.metadata,
-                        preserve_final_acceptance=bool(root_status == 'success'),
+                        preserve_final_acceptance=preserve_final_acceptance,
                     ),
                 }
             ),

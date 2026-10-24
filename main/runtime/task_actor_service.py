@@ -22,7 +22,7 @@ from main.runtime.acceptance_handshake import (
     normalize_acceptance_handshake,
 )
 from main.runtime.node_runner import SKIPPED_CHECK_RESULT
-from main.runtime.node_wake import WAKE_ON_ALL_CHILDREN, wait_inputs, wake_ready
+from main.runtime.node_wake import PARKED_PHASES, WAKE_ON_ALL_CHILDREN, wait_inputs, wake_ready
 from main.runtime.wait_graph import build_wait_nodes, find_wait_cycles
 from main.types import KIND_ACCEPTANCE
 
@@ -845,9 +845,30 @@ class TaskActorService:
                     if control_only_return:
                         return
                 else:
-                    result = await dispatcher.execute_node(task_id, root_node.node_id)
-                    if result.status == 'success':
-                        result = await self._run_final_acceptance_if_needed(task_id)
+                    root_phase = self._frame_phase(task_id, root_node.node_id)
+                    if root_phase in PARKED_PHASES:
+                        # 根节点也是停靠节点：没有信箱唤醒源时，恢复拾取不得点火。
+                        # 第一回合没有帧，仍由这里执行；停靠后的复活交给
+                        # `_resume_pending_notice_nodes` / `_dispatch_runnable_nodes`
+                        # 的根节点唤醒分支（它们会按 wake_on 判据决定）。
+                        logger.info(
+                            'root turn deferred: parked phase={} task={}',
+                            root_phase,
+                            task_id,
+                        )
+                        result = NodeFinalResult(
+                            status='success',
+                            delivery_status='partial',
+                            summary='root is parked; waiting for a wake source',
+                            answer='',
+                            evidence=[],
+                            remaining_work=[],
+                            blocking_reason='',
+                        )
+                    else:
+                        result = await dispatcher.execute_node(task_id, root_node.node_id)
+                        if self._is_final_submission_result(result):
+                            result = await self._run_final_acceptance_if_needed(task_id)
                     # 根回合（或最终验收）结束后，子节点与验收节点由派发循环独立推进；
                     # 根停靠时循环返回 control_only，等下一次投递把它叫醒。
                     result, control_only_return = await self._drive_scheduler_loop(
@@ -1093,6 +1114,18 @@ class TaskActorService:
         except Exception:
             return ''
         return str((frame or {}).get('phase') or '') if isinstance(frame, dict) else ''
+
+    @staticmethod
+    def _is_final_submission_result(result: NodeFinalResult) -> bool:
+        """只有真实提交（success + final）才允许进入最终验收。
+
+        `enter_wait` 等控制回合也返回 `success`，但 `delivery_status='partial'`；
+        把它们当成提交会凭空创建一颗最终验收节点。
+        """
+        return (
+            str(getattr(result, 'status', '') or '').strip().lower() == 'success'
+            and str(getattr(result, 'delivery_status', '') or '').strip().lower() == 'final'
+        )
 
     def _unread_rows(self, task_id: str, node_id: str) -> list[Any]:
         try:
@@ -1947,6 +1980,32 @@ class TaskActorService:
         if str(final_acceptance.status or '').strip().lower() in {'waiting_acceptance', 'waiting_execution_retry'}:
             return self._result_from_node(root)
 
+        # 最终验收只对真实提交开放：根仍是 in_progress（例如刚执行完 enter_wait
+        # 控制回合，或恢复后尚未重新提交）时，创建/执行验收节点只会对不存在的
+        # 交付下判词。真实提交落成后根状态为 success；握手 waiting_acceptance
+        # 覆盖"提交已排队、节点行尚未刷新"的窗口。
+        handshake = normalize_acceptance_handshake(
+            (getattr(root, 'metadata', None) or {}).get(ACCEPTANCE_HANDSHAKE_KEY)
+        )
+        root_status = str(getattr(root, 'status', '') or '').strip().lower()
+        if root_status != 'success' and str(handshake.get('state') or '').strip() != ACCEPTANCE_STATE_WAITING_ACCEPTANCE:
+            logger.info(
+                'final acceptance deferred: execution node has not submitted: task={} root={} status={} handshake={}',
+                task_id,
+                root.node_id,
+                root_status or '(empty)',
+                str(handshake.get('state') or '(empty)'),
+            )
+            return NodeFinalResult(
+                status='success',
+                delivery_status='partial',
+                summary='final acceptance deferred: execution node has not submitted',
+                answer='',
+                evidence=[],
+                remaining_work=[],
+                blocking_reason='',
+            )
+
         existing_acceptance_node_id = str(final_acceptance.node_id or '').strip()
         existing_acceptance = self._store.get_node(existing_acceptance_node_id) if existing_acceptance_node_id else None
         if existing_acceptance is not None:
@@ -2013,6 +2072,16 @@ class TaskActorService:
         node_id = str(final_acceptance.node_id or '').strip()
         acceptance = self._store.get_node(node_id) if node_id else None
         if acceptance is None:
+            # 指针丢失（恢复清洗/旧数据）时先收养现有根最终验收节点，不能直接
+            # 新建第二颗；子节点验收的 `_ensure_spawn_acceptance_node` 同款顺序。
+            acceptance = self._find_existing_root_final_acceptance_node(task_id=task_id, root=root)
+            if acceptance is not None:
+                logger.info(
+                    'adopted existing root final acceptance node: task={} node={}',
+                    task_id,
+                    acceptance.node_id,
+                )
+        if acceptance is None:
             acceptance = self._node_runner.create_acceptance_node(
                 task=task,
                 accepted_node=root,
@@ -2021,8 +2090,52 @@ class TaskActorService:
                 parent_node_id=root.node_id,
                 metadata={'final_acceptance': True},
             )
+        elif str(getattr(acceptance, 'status', '') or '').strip().lower() in {'success', 'failed'}:
+            # 旧裁决可能是在本轮交付之前下的；新提交到达时作废重验。
+            acceptance = self._node_runner._reset_terminal_acceptance_for_reverify(
+                task=task,
+                acceptance=acceptance,
+            )
         self._update_final_acceptance_state(task_id, node_id=acceptance.node_id, status='running')
         return acceptance
+
+    def _find_existing_root_final_acceptance_node(self, *, task_id: str, root) -> object | None:
+        """按 `accepted_node_id=root` + `final_acceptance=true` 收养，不依赖指针。"""
+        root_node_id = str(getattr(root, 'node_id', '') or '').strip()
+        if not root_node_id:
+            return None
+        candidates = []
+        for node in self._store.list_nodes(task_id) or []:
+            if str(getattr(node, 'node_kind', '') or '').strip().lower() != KIND_ACCEPTANCE:
+                continue
+            if str(getattr(node, 'parent_node_id', '') or '').strip() != root_node_id:
+                continue
+            metadata = getattr(node, 'metadata', None) if isinstance(getattr(node, 'metadata', None), dict) else {}
+            if str(metadata.get('accepted_node_id') or '').strip() != root_node_id:
+                continue
+            if not bool(metadata.get('final_acceptance')):
+                continue
+            candidates.append(node)
+        if not candidates:
+            return None
+
+        def _sort_key(node) -> tuple[int, str, str]:
+            status = str(getattr(node, 'status', '') or '').strip().lower()
+            return (
+                1 if status in {'success', 'failed'} else 0,
+                str(getattr(node, 'created_at', '') or ''),
+                str(getattr(node, 'node_id', '') or ''),
+            )
+
+        chosen = sorted(candidates, key=_sort_key)[0]
+        if len(candidates) > 1:
+            logger.warning(
+                'multiple root final acceptance nodes; adopting one: task={} chosen={} count={}',
+                task_id,
+                getattr(chosen, 'node_id', ''),
+                len(candidates),
+            )
+        return chosen
 
     def _update_final_acceptance_state(self, task_id: str, *, node_id: str | None = None, status: str | None = None) -> None:
         def _mutate(metadata):

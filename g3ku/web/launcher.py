@@ -5,6 +5,8 @@ import atexit
 import json
 import os
 import secrets
+import time
+import urllib.request
 from pathlib import Path
 
 import typer
@@ -79,11 +81,29 @@ def _web_runtime_cmdline_matches(cmdline: list[str]) -> bool:
     return False
 
 
-def _terminate_stale_web_runtime_processes() -> list[int]:
-    """Kill leftover `python -m g3ku web` servers of this workspace.
+def _request_runtime_exit(port: int, *, timeout: float = 20.0) -> bool:
+    """Ask a live instance to pause its work and stop before we force-kill it."""
+    body = json.dumps({"pause_running_work": True}).encode("utf-8")
+    request = urllib.request.Request(
+        f"http://127.0.0.1:{int(port)}/api/bootstrap/exit",
+        data=body,
+        method="POST",
+        headers={"Content-Type": "application/json"},
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=timeout) as resp:
+            return int(getattr(resp, "status", 200) or 200) < 400
+    except Exception:
+        return False
 
-    Closing the launcher console can orphan the runtime child process, which
-    keeps holding the port / start lock and makes every later start fail.
+
+def _terminate_stale_web_runtime_processes(*, port: int | None = None) -> list[int]:
+    """Stop leftover `python -m g3ku web` servers of this workspace.
+
+    The graceful path is tried first: `/api/bootstrap/exit` pauses running work
+    and writes the shutdown-pause ledger, so the next start resumes silently
+    instead of treating the task as an abnormal interruption. Only processes
+    still alive after the wait are force-killed (the old behavior).
     """
     try:
         import psutil
@@ -125,6 +145,18 @@ def _terminate_stale_web_runtime_processes() -> list[int]:
             victims.append(proc)
         except Exception:
             continue
+    if victims and port:
+        if _request_runtime_exit(int(port)):
+            typer.echo("[negi] graceful exit requested; waiting for the old runtime to pause its work and stop...")
+            deadline = time.monotonic() + 40.0
+            while victims and time.monotonic() < deadline:
+                try:
+                    _gone, alive = psutil.wait_procs(list(victims), timeout=0.5)
+                except Exception:
+                    break
+                victims = list(alive)
+                if not victims:
+                    break
     killed: list[int] = []
     for proc in victims:
         try:
@@ -245,7 +277,7 @@ def prepare_web_server_start(
     auto_unlock_from_env(workspace=root)
     _ensure_frontend_ready()
     resolved_host, resolved_port = _resolve_web_bind(host, port)
-    stale_pids = _terminate_stale_web_runtime_processes()
+    stale_pids = _terminate_stale_web_runtime_processes(port=resolved_port)
     if stale_pids:
         typer.echo(
             "[negi] terminated stale `negi web` runtime process(es): "

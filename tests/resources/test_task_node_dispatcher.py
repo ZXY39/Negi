@@ -341,7 +341,11 @@ async def test_task_node_dispatcher_runs_final_acceptance_via_inspection_role(tm
         call_order.append(node_id)
         roles.append("inspection" if node.node_kind == "acceptance" else "execution")
         await asyncio.sleep(0.01)
-        return _success_result(node_id)
+        result = _success_result(node_id)
+        if node.node_kind == "execution":
+            # 真实节点回合会在返回前把成功提交落成节点行；最终验收只对真实提交开放。
+            service.node_runner._mark_finished(_task_id, node_id, result)
+        return result
 
     service.node_runner.run_node = fake_run_node
 

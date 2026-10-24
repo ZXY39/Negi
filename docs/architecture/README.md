@@ -152,6 +152,7 @@ Start here when you are new to the repository or when a change crosses subsystem
 - 回复当时显示在界面上、刷新或重启后气泡没了（取消/暂停落在收尾窗口，或批准续跑轮只发了 `message_end`）→ `runtime-overview.md`「`RuntimeAgentSession` 内部做什么」+ `context-and-cache-troubleshooting.md`「残留 paused / pending 转录条目与未回答的用户输入」
 - 同一份 heartbeat 规则 / event bundle 在请求体里重复多份、token 逐轮线性上涨而对话无实质推进、或模型被已 success 节点的过期暂停通知误导 → `context-and-cache-troubleshooting.md`「heartbeat / cron 上下文残骸」
 - 新增一类运行时中途插入消息、要判断某条消息在哪个阶段被剥 / 是否跨压缩存活、或同一份通知叠了两份 → `context-and-cache-troubleshooting.md`「中途插入消息的家族、位置与生命周期」
+- 重启后停靠根节点被重跑、根下出现两颗同标题最终验收、或 `enter_wait` 之后突然新建验收节点 → `main-task-runtime.md`「验收节点：提前创建、激活与握手重派发」+「Node-Level Pause and Recovery」
 - 项目一启动会话就自动回一条几小时前的旧任务结果、或某个任务结果迟迟没汇报却也没报错 → `heartbeat-system.md`「Task Terminal Repair Contract」（终态 outbox 投递耐久性与 `abandoned` 留痕）+ `operations-and-maintenance.md`「会话无回复」
 - 会话该静默却发话、或该发话却整轮无声；模型写了像哨兵的文本却没静默 → `runtime-overview.md`「3.3 静默回复（`silent` 工具）」+ `web-and-admin.md`「CEO Turn Silent Reply Contract」
 - 新增常驻内置控制工具后模型从不使用它、或调用即报错 → `tool-and-skill-system.md`「3.1.1 为什么"常驻"需要独立机制」
