@@ -1929,7 +1929,11 @@ function refreshModelRetryToastClamp(toastEl, textEl) {
         toastEl.title = "点击收起";
         return;
     }
-    const clamped = (textEl.scrollHeight || 0) > (textEl.clientHeight || 0) + 1;
+    // 展开阈值带滞后：正文正好卡在 2 行边界时，实时文本每变一个字符就会在
+    // "可展开/不可展开"之间来回翻，框体高度跟着一跳一跳。
+    const overflow = (textEl.scrollHeight || 0) - (textEl.clientHeight || 0);
+    const wasClamped = toastEl.classList.contains("is-clamped");
+    const clamped = wasClamped ? overflow > 1 : overflow > 8;
     toastEl.classList.toggle("is-clamped", clamped);
     if (clamped) {
         toastEl.setAttribute("tabindex", "0");

@@ -301,7 +301,21 @@ function beginModelDrag(item, { scope = "", ref = "", source = "available" } = {
     if (dataTransfer) {
         dataTransfer.effectAllowed = source === "chain" ? "move" : "copyMove";
         dataTransfer.setData("text/plain", modelRef);
+        // 拖动影像显式取整张卡片：默认快照会跟着 .is-dragging 的旋转/缩放被裁掉
+        // 边缘，看起来只剩中间一截内容在跟着鼠标走。
+        try {
+            const rect = item.getBoundingClientRect();
+            dataTransfer.setDragImage(item, Math.round(rect.width / 2), Math.round(Math.min(rect.height, 60) / 2));
+        } catch (error) {
+            void error;
+        }
     }
+    showToast({
+        title: "可拖动至 Agent",
+        text: "把模型或负载均衡组拖到右侧任一 Agent 模型链即可加入。",
+        kind: "info",
+        durationMs: 2400,
+    });
     return true;
 }
 

@@ -1762,7 +1762,10 @@ function refreshRenderedTreeNodeStatuses() {
             }
             const titleEl = button.querySelector(".execution-tree-node-title");
             if (titleEl instanceof HTMLElement) titleEl.textContent = title;
-            const badgeEl = button.querySelector(".status-badge");
+            // 验收节点行有两个 .status-badge：验收徽标在前、状态徽标在后。就地刷新
+            // 只许改状态那一个，否则验收徽标会被改写成状态文本，一行里出现两个
+            // 同样的状态标记。
+            const badgeEl = button.querySelector(".status-badge:not(.acceptance-badge)");
             if (badgeEl instanceof HTMLElement) {
                 badgeEl.dataset.status = String(node.visual_state || node.state || "");
                 badgeEl.textContent = displayState;

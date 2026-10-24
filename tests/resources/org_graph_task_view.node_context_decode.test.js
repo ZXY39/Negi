@@ -154,6 +154,29 @@ test("task node retry toast renders live frame retry count and error", () => {
     assert.match(U.taskNodeModelRetryToastText.textContent, /Error code: 502/);
 });
 
+test("task node retry toast skips DOM writes when the retry text is unchanged", () => {
+    const { renderTaskNodeModelRetryToast, U } = loadApp();
+    let writes = 0;
+    let value = "";
+    Object.defineProperty(U.taskNodeModelRetryToastText, "textContent", {
+        configurable: true,
+        get: () => value,
+        set: (next) => {
+            writes += 1;
+            value = String(next ?? "");
+        },
+    });
+    const status = { model_retry_status: { state: "retrying", retry_count: 2, error_message: "boom" } };
+
+    renderTaskNodeModelRetryToast(status);
+    assert.equal(writes, 1);
+    // 实时帧每秒多次补丁：文本没变时一次都不许再写，否则每帧强制重排，
+    // 小框会以帧频抖动。
+    renderTaskNodeModelRetryToast(status);
+    renderTaskNodeModelRetryToast(status);
+    assert.equal(writes, 1);
+});
+
 test("task node retry toast shows last and next retry clock times", () => {
     const { renderTaskNodeModelRetryToast, U } = loadApp();
 

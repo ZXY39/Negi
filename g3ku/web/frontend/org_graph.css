@@ -3877,6 +3877,36 @@ textarea {
     min-width: 0;
 }
 
+/* 模型中途输出：摘要行只占一行并向右溢出（省略号），完整原文放进展开后的
+   固定高度滚动框。以前按 80 字硬截断，后半段要求直接看不见。 */
+.task-trace-step--turn-text .interaction-step-lead {
+    flex: 1 1 auto;
+    overflow: hidden;
+}
+
+.task-trace-step--turn-text .interaction-step-title {
+    flex: 1 1 auto;
+    overflow: hidden;
+    white-space: nowrap;
+    text-overflow: ellipsis;
+}
+
+.task-trace-turn-text {
+    max-height: 180px;
+    overflow-y: auto;
+    overscroll-behavior: contain;
+    padding: 10px 12px;
+    border: 1px solid var(--ui-border, var(--border-color));
+    border-radius: 10px;
+    background: var(--ui-bg-subtle, var(--bg-app));
+    color: var(--text-primary);
+    font-size: 0.88rem;
+    line-height: 1.6;
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
+    word-break: break-word;
+}
+
 .interaction-step-status {
     display: inline-flex;
     align-items: center;
@@ -7574,7 +7604,8 @@ textarea {
 .model-chain-slide.is-dragging,
 .model-available-item.is-dragging {
     opacity: 0.92;
-    transform: rotate(1deg) scale(1.01);
+    /* 不再旋转/缩放：拖动影像取的是这张卡片的快照，带变换时边缘会被裁掉，
+       只剩中间一截跟着鼠标走。 */
     border-color: color-mix(in srgb, var(--brand-primary) 42%, var(--border-color));
     box-shadow: 0 24px 42px -20px rgba(15, 23, 42, 0.55), 0 0 0 3px color-mix(in srgb, var(--brand-primary) 18%, transparent);
     background: color-mix(in srgb, var(--bg-panel) 92%, var(--brand-primary) 8%);
@@ -8941,10 +8972,10 @@ textarea {
     flex: 1;
 }
 
+/* 落区不再画虚线框：拖动时整条 Agent 模型链被框一圈，视觉噪声大于提示价值。 */
 .model-chain-list.is-drop-zone,
 .model-shared-list.is-drop-zone {
-    outline: 1px dashed color-mix(in srgb, var(--brand-primary) 42%, var(--border-color));
-    outline-offset: 6px;
+    outline: 0;
 }
 
 .model-shared-panel {
@@ -16875,14 +16906,15 @@ textarea {
     height: 30px;
 }
 
-/* 详情头部：提示词收紧到一行可读宽度，“展开全部”紧贴活跃节点，错误日志留在最右。 */
+/* 详情头部：提示词吃掉全部剩余宽度（随窗口伸缩），右侧依次是活跃节点、
+   展开全部、错误日志——展开全部因此紧贴错误日志，中间不再留空档。 */
 .task-detail-header .task-prompt-disclosure {
     flex: 1 1 auto;
-    max-width: 460px;
+    max-width: none;
 }
 
 .task-detail-header .header-actions {
-    margin-left: auto;
+    margin-left: 0;
 }
 
 .task-detail-header .task-detail-toggle {
@@ -16898,4 +16930,19 @@ textarea {
 .task-detail-header .task-detail-toggle:hover {
     border-color: var(--ui-border-strong);
     background: var(--ui-neutral-soft);
+}
+
+/* 节点卡：窄卡（验收行合并进位）里长状态徽标会把标题挤到一字一行，卡片能
+   长到几百像素。标题保底 min(10em, 100%)，放不下时徽标换行；标题最多 3 行。 */
+.execution-tree-node-head {
+    flex-wrap: wrap;
+    row-gap: 6px;
+}
+
+.execution-tree-node-title {
+    min-width: min(10em, 100%);
+    display: -webkit-box;
+    -webkit-box-orient: vertical;
+    -webkit-line-clamp: 3;
+    overflow: hidden;
 }

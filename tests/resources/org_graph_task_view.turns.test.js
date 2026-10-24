@@ -32,7 +32,7 @@ function load() {
     };
     vm.createContext(context);
     vm.runInContext(
-        `${STORE_CODE}\n${DETAIL_CODE}\nthis.__turns = { buildExecutionTraceSteps, buildNodeExecutionTrace, buildTraceRenderSignature };`,
+        `${STORE_CODE}\n${DETAIL_CODE}\nthis.__turns = { buildExecutionTraceSteps, buildNodeExecutionTrace, buildTraceRenderSignature, renderTraceStep };`,
         context
     );
     return context.__turns;
@@ -94,6 +94,31 @@ test("turns group by progress text and keep the tools that follow", () => {
     assert.match(steps[4].bodyHtml, /submit_final_result/);
     assert.equal(steps[4].open, true);
     assert.equal(steps[2].open, false);
+});
+
+test("turn text is kept whole and rendered as a one-line summary plus a scroll box", () => {
+    const { buildExecutionTraceSteps, renderTraceStep } = load();
+    const longText = `${"模型中途输出".repeat(20)}——最后一句要求：必须把四个角色全部接好。`;
+    const trace = {
+        initial_prompt: "initial",
+        turns: [turn(2, longText, ["tool-b"])],
+        tool_steps: [],
+        stages: [],
+    };
+
+    const steps = buildExecutionTraceSteps(trace, {});
+    const turnStep = steps.find((step) => step.traceKey === "turn:2");
+    // 不再按 80 字硬截断：标题与正文都是完整原文。
+    assert.equal(turnStep.title, longText);
+    assert.equal(turnStep.turnText, longText);
+    assert.doesNotMatch(turnStep.title, /\.\.\.$/);
+
+    const html = renderTraceStep({ ...turnStep, open: false });
+    // 摘要行靠 class 收成一行省略号；完整原文进固定高度滚动框。
+    assert.match(html, /task-trace-step--turn-text/);
+    assert.match(html, /class="task-trace-turn-text"/);
+    assert.ok(html.includes(longText));
+    assert.match(html, /title="[^"]*最后一句要求/);
 });
 
 test("textless rounds stay separate sections instead of one merged strip", () => {

@@ -39,7 +39,7 @@ function formatNodeDetailHeading(node, { maxChars = 72, compact = true } = {}) {
     return `${nodeId} | ${heading}`;
 }
 
-function renderTraceStep({ traceKey = "", title, status = "info", statusLabel = "", open = false, bodyHtml = "", showRuntime = true, showStatus = true, extraClass = "", leadHtml = "", textOnly = false, text = "" }) {
+function renderTraceStep({ traceKey = "", title, status = "info", statusLabel = "", open = false, bodyHtml = "", showRuntime = true, showStatus = true, extraClass = "", leadHtml = "", textOnly = false, text = "", turnText = "" }) {
     if (textOnly) {
         return `
         <section class="interaction-step task-trace-step task-trace-text-block" data-trace-key="${esc(traceKey)}">
@@ -50,6 +50,13 @@ function renderTraceStep({ traceKey = "", title, status = "info", statusLabel = 
     const classes = ["interaction-step", "task-trace-step", esc(status)];
     const normalizedExtraClass = String(extraClass || "").trim();
     if (normalizedExtraClass) classes.push(esc(normalizedExtraClass));
+    // 模型中途输出：摘要行只显示一行并向右溢出（CSS 省略号），点击展开后在
+    // 固定高度的滚动框里给完整原文，不再把正文截成固定字数的 "..."。
+    const assistantText = String(turnText || "").trim();
+    if (assistantText) classes.push("task-trace-step--turn-text");
+    const bodyContent = assistantText
+        ? `<div class="task-trace-turn-text">${esc(assistantText)}</div>${bodyHtml}`
+        : bodyHtml;
     const sideParts = [];
     if (showRuntime) sideParts.push('<span class="task-trace-runtime" hidden></span>');
     if (showStatus) {
@@ -61,13 +68,13 @@ function renderTraceStep({ traceKey = "", title, status = "info", statusLabel = 
             <summary class="task-trace-summary">
                 <span class="interaction-step-lead">
                     ${leadHtml}
-                    <span class="interaction-step-title">${esc(title)}</span>
+                    <span class="interaction-step-title"${assistantText ? ` title="${esc(assistantText)}"` : ""}>${esc(title)}</span>
                 </span>
                 <span class="interaction-step-side">
                     ${sideParts.join("")}
                 </span>
             </summary>
-            <div class="task-trace-body">${bodyHtml}</div>
+            <div class="task-trace-body">${bodyContent}</div>
         </details>
     `;
 }
@@ -482,7 +489,10 @@ function buildTurnGroupDescriptors(turns) {
         if (entry.rounds.length) {
             steps.push({
                 traceKey: `turn:${entry.seq}`,
-                title: compactNodeHeading({ title: entry.text }, 80),
+                // 标题保留全文：摘要行由 CSS 收成一行省略号，展开后正文给完整原文，
+                // 不再按 80 字硬截断（截断会吃掉模型中途输出的后半段要求）。
+                title: entry.text,
+                turnText: entry.text,
                 status: roundTraceStatus({ tools }),
                 open: false,
                 tools,
@@ -1383,11 +1393,18 @@ function renderTaskNodeModelRetryToast(nodeOrStatus = null) {
     const status = normalizeTaskNodeModelRetryStatus(rawStatus);
     const visible = !!status;
     const text = taskNodeModelRetryToastText(status);
-    textEl.textContent = text;
-    toastEl.hidden = !visible;
+    const wasHidden = toastEl.hidden === true;
+    const textChanged = textEl.textContent !== text;
+    // 实时帧每秒会打好几次补丁：文本没变就不要再写 DOM，否则每次写 textContent
+    // 都会强制重排 + 重新判定 clamp，小框看起来就是高频抖动。
+    if (textChanged) textEl.textContent = text;
+    const nextHidden = !visible;
+    const ariaHidden = visible ? "false" : "true";
+    if (toastEl.hidden !== nextHidden) toastEl.hidden = nextHidden;
     if (toastEl.classList?.toggle) toastEl.classList.toggle("is-visible", visible);
-    toastEl.setAttribute("aria-hidden", visible ? "false" : "true");
-    refreshModelRetryToastClamp(toastEl, textEl);
+    const currentAriaHidden = typeof toastEl.getAttribute === "function" ? toastEl.getAttribute("aria-hidden") : ariaHidden;
+    if (currentAriaHidden !== ariaHidden) toastEl.setAttribute("aria-hidden", ariaHidden);
+    if (textChanged || wasHidden !== nextHidden) refreshModelRetryToastClamp(toastEl, textEl);
 }
 
 function showTaskNodeLoadingState(node) {
