@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from pathlib import Path
 from typing import Any
 
 from g3ku.runtime.frontdoor._ceo_runtime_ops import CeoFrontDoorRuntimeOps
@@ -548,6 +549,32 @@ def test_insert_refuses_between_tool_call_and_results() -> None:
         assert "tool call" in str(exc)
     else:
         raise AssertionError("insert into a tool group must be refused")
+
+
+def test_consumer_strip_points_go_through_registry() -> None:
+    repo_root = Path(__file__).resolve().parents[2]
+    consumers = (
+        "g3ku/runtime/frontdoor/_ceo_runtime_ops.py",
+        "g3ku/runtime/frontdoor/prompt_cache_contract.py",
+        "g3ku/runtime/session_agent.py",
+        "main/runtime/react_loop.py",
+    )
+    forbidden = (
+        "strip_runtime_notice_messages(",
+        "strip_turn_only_system_note_messages(",
+        "strip_node_dynamic_contract_messages(",
+    )
+    required = (
+        "strip_for_stage(",
+        "strip_after_compaction(",
+        "keeps_record_for_stage(",
+        "split_runtime_contract_messages(",
+    )
+    for relative in consumers:
+        text = (repo_root / relative).read_text(encoding="utf-8")
+        for token in forbidden:
+            assert token not in text, f"{relative} still strips directly via {token}"
+        assert any(token in text for token in required), relative
 
 
 def test_node_prepare_strips_contract_and_turn_only() -> None:
