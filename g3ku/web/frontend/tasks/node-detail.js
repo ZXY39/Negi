@@ -1297,6 +1297,10 @@ function renderExecutionTrace(node, { viewState = null } = {}) {
     const liveFrameMap = liveFramesByNodeId();
     const fallbackLiveFrame = liveFrameMap.get(String(node?.node_id || "").trim()) || null;
     const trace = node?.executionTrace || buildNodeExecutionTrace(node, node, fallbackLiveFrame);
+    // 流程框头部用量每次重建都回填：切节点时的 loading 清空不会把它永久留在空态。
+    if (U.adTokenSummary && typeof taskFlowUsageText === "function") {
+        U.adTokenSummary.textContent = taskFlowUsageText(node, trace);
+    }
     const allStepDescriptors = buildExecutionTraceSteps(trace, node);
     const initialPromptStep = allStepDescriptors.find((step) => String(step?.traceKey || "") === "initial_prompt") || null;
     // 初始提示词独立成框，Execution Flow 只装中途文本与工具调用。

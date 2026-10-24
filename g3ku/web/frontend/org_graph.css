@@ -3703,19 +3703,21 @@ textarea {
 .interaction-flow-summary::-webkit-details-marker {
     display: none;
 }
-.interaction-flow-summary::after {
-    content: "";
-    width: 8px;
-    height: 8px;
-    flex-shrink: 0;
-    border-right: 2px solid currentColor;
-    border-bottom: 2px solid currentColor;
-    transform: rotate(45deg);
+.interaction-flow-chevron {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    flex: none;
+    width: 1em;
+    height: 1em;
+    font-size: 0.9rem;
+    line-height: 1;
+    color: var(--text-tertiary);
     transition: transform var(--transition-fast);
 }
 
-.interaction-flow[open] .interaction-flow-summary::after {
-    transform: rotate(-135deg);
+.interaction-flow[open] .interaction-flow-chevron {
+    transform: rotate(90deg);
 }
 
 .interaction-flow-meta {
@@ -17339,9 +17341,19 @@ textarea {
 }
 
 /* 节点用量行与中途文本同款：0.85rem / 600 / 主文字色。 */
-.task-flow-usage,
+.task-flow-usage {
+    font-size: 0.85rem;
+    font-weight: 600;
+    color: var(--text-primary);
+}
+
 /* 外层框内不再画每条的轨道状态点；可折叠的只有中途文本的「>」。 */
 .task-flow-box .task-trace-step::before,
 .interaction-flow-list .task-trace-step::before {
     display: none;
+}
+
+/* 前门：秒数与箭头和上方回答文本同一条左基线。 */
+.ceo-timeline .interaction-flow-summary {
+    padding-left: 0;
 }

@@ -5669,6 +5669,7 @@ function createPendingCeoTurn(source = "user", { scrollMode = "preserve" } = {})
                 <details class="interaction-flow" hidden>
                     <summary class="interaction-flow-summary">
                         <span class="interaction-flow-usage" data-flow-usage></span>
+                        <span class="interaction-flow-chevron" aria-hidden="true">&gt;</span>
                         <span class="interaction-flow-meta" hidden>等待工具开始...</span>
                     </summary>
                     <div class="interaction-flow-list" role="list"></div>
