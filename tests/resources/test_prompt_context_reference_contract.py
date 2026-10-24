@@ -19,27 +19,12 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 NODE_PROMPT = load_prompt("node_execution.md")
 ACCEPTANCE_PROMPT = load_prompt("acceptance_execution.md")
 CEO_PROMPT = (REPO_ROOT / "g3ku/runtime/prompts/ceo_frontdoor.md").read_text(encoding="utf-8")
-BLOCKED_PROMPT = load_prompt("blocked_verification.md")
 
 OVERLAY_HEADER = "System note for this turn only:"
 
 
 
 
-
-
-def test_blocked_verification_defers_judgment_contract_to_acceptance_prompt() -> None:
-    assert "权威定义在本节点系统提示词" in BLOCKED_PROMPT
-    # 判定契约的副本只允许一句指针式摘要，分支表只能有一份。
-    assert len(BLOCKED_PROMPT.split("## 判定契约", 1)[1]) < 700
-    assert "阻塞成立 → `success`" in BLOCKED_PROMPT
-
-
-def test_acceptance_prompt_keeps_one_terminal_blocked_branch() -> None:
-    assert "终局失败，或核验本身无法完成" in ACCEPTANCE_PROMPT
-    assert '**核验无法完成** → `failed`' not in ACCEPTANCE_PROMPT
-    # §3.4 的缺测量能力出口必须与 §3.1 的 blocked 禁令互相指认。
-    assert "不得用它规避必要检查" in ACCEPTANCE_PROMPT
 
 
 def test_frontdoor_failure_rules_bind_to_rendered_fields() -> None:
@@ -52,5 +37,6 @@ def test_frontdoor_failure_rules_bind_to_rendered_fields() -> None:
 
 
 def test_node_prompt_states_ledger_and_wording_check_semantics() -> None:
-    assert "不自动加重处罚" in NODE_PROMPT
+    # 执行节点的提交没有 status/delivery_status：提交即完成；措辞自检不是字符串匹配。
+    assert "提交即表示" in NODE_PROMPT
     assert "不是字符串匹配" in NODE_PROMPT

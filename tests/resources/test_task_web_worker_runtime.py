@@ -19,7 +19,6 @@ from g3ku.runtime.tool_contract_block import render_tool_contract_block
 from main.api.internal_rest import router as internal_router
 from main.api.rest import router as rest_router
 from main.api.websocket_task import router as task_ws_router
-from main.errors import NodePausedError
 from main.models import (
     ModelTokenUsageRecord,
     NodeFinalResult,
@@ -3804,6 +3803,119 @@ def test_task_node_patch_persists_when_only_updated_at_changes(tmp_path: Path, m
     assert len(node_events) == 2
 
 
+def test_task_node_patch_carries_pending_notice_badge_count(tmp_path: Path, monkeypatch):
+    service = MainRuntimeService(
+        chat_backend=_DummyChatBackend(),
+        workspace_root=tmp_path,
+        store_path=tmp_path / "runtime.sqlite3",
+        files_base_dir=tmp_path / "tasks",
+        artifact_dir=tmp_path / "artifacts",
+        governance_store_path=tmp_path / "governance.sqlite3",
+        execution_mode="web",
+    )
+
+    import asyncio
+
+    record = asyncio.run(_create_web_task(service))
+    task = service.get_task(record.task_id)
+    root = service.get_node(record.root_node_id)
+    assert task is not None
+    assert root is not None
+    child = service.node_runner._create_execution_child(
+        task=task,
+        parent=root,
+        spec=SpawnChildSpec(goal="badge child", prompt="badge prompt", execution_policy=_execution_policy()),
+    )
+    assert child is not None
+
+    stamped_at = now_iso()
+    service.store.upsert_task_node_notification(
+        TaskNodeNotification(
+            notification_id="notif:badge-1",
+            task_id=record.task_id,
+            node_id=child.node_id,
+            epoch_id="",
+            source_node_id=root.node_id,
+            message="hello badge",
+            status="delivered",
+            created_at=stamped_at,
+            delivered_at=stamped_at,
+        )
+    )
+
+    captured = []
+    original_dispatch = service.log_service._dispatch_live_event_locked
+    monkeypatch.setattr(
+        service.log_service,
+        "_dispatch_live_event_locked",
+        lambda **kwargs: (captured.append(kwargs), original_dispatch(**kwargs))[1],
+    )
+
+    def _latest_badge() -> int:
+        patches = [
+            kwargs["data"]["node"]
+            for kwargs in captured
+            if kwargs.get("event_type") == "task.node.patch"
+            and str((((kwargs.get("data") or {}).get("node") or {}).get("node_id") or "")).strip() == child.node_id
+        ]
+        assert patches
+        return int(patches[-1].get("pending_notice_count"))
+
+    service.log_service.publish_node_state(record.task_id, child.node_id)
+    assert _latest_badge() == 1
+
+    delivered = service.store.list_task_node_notifications(record.task_id, child.node_id)[0]
+    service.store.upsert_task_node_notification(
+        delivered.model_copy(update={"status": "consumed", "consumed_at": stamped_at, "merged_at": stamped_at})
+    )
+    service.log_service.publish_node_state(record.task_id, child.node_id)
+    # 并入上下文后徽标必须立即归零，不等下一次整树快照。
+    assert _latest_badge() == 0
+
+
+def test_update_node_output_publishes_submission_without_terminal_status(tmp_path: Path, monkeypatch):
+    service = MainRuntimeService(
+        chat_backend=_DummyChatBackend(),
+        workspace_root=tmp_path,
+        store_path=tmp_path / "runtime.sqlite3",
+        files_base_dir=tmp_path / "tasks",
+        artifact_dir=tmp_path / "artifacts",
+        governance_store_path=tmp_path / "governance.sqlite3",
+        execution_mode="web",
+    )
+
+    import asyncio
+
+    record = asyncio.run(_create_web_task(service))
+    root = service.get_node(record.root_node_id)
+    assert root is not None
+    assert root.status == "in_progress"
+
+    captured = []
+    original_dispatch = service.log_service._dispatch_live_event_locked
+    monkeypatch.setattr(
+        service.log_service,
+        "_dispatch_live_event_locked",
+        lambda **kwargs: (captured.append(kwargs), original_dispatch(**kwargs))[1],
+    )
+
+    service.log_service.update_node_output(record.task_id, root.node_id, "submitted body")
+
+    latest = service.get_node(root.node_id)
+    assert latest is not None
+    assert latest.final_output == "submitted body"
+    # 提交只写输出：等待验收期间状态仍是 in_progress。
+    assert latest.status == "in_progress"
+    patches = [
+        kwargs["data"]["node"]
+        for kwargs in captured
+        if kwargs.get("event_type") == "task.node.patch"
+        and str((((kwargs.get("data") or {}).get("node") or {}).get("node_id") or "")).strip() == root.node_id
+    ]
+    assert patches
+    assert patches[-1].get("final_output") == "submitted body"
+
+
 def test_task_node_patch_includes_terminal_output_summary_fields(tmp_path: Path, monkeypatch):
     service = MainRuntimeService(
         chat_backend=_DummyChatBackend(),
@@ -5092,10 +5204,13 @@ async def test_spawn_children_surfaces_acceptance_failure_info_while_preserving_
             )
 
         monkeypatch.setattr(service.node_runner, "run_node", _fake_run_node)
+        async def _passthrough_acceptance(*, task, acceptance, result):
+            return result
+
         monkeypatch.setattr(
             service.node_runner,
             "_handle_acceptance_node_result",
-            lambda *, task, acceptance, result: result,
+            _passthrough_acceptance,
         )
 
         results = await service.node_runner._spawn_children(
@@ -7354,18 +7469,20 @@ def test_final_acceptance_rejection_kicks_back_even_past_former_budget(tmp_path:
         result_summary="root deliverable",
         rejection_count=42,
     )
-    result = service.node_runner._handle_acceptance_node_result(
-        task=task,
-        acceptance=acceptance,
-        result=NodeFinalResult(
-            status="failed",
-            delivery_status="final",
-            summary="final acceptance failed",
-            answer="final acceptance failed",
-            evidence=[],
-            remaining_work=[],
-            blocking_reason="final acceptance failed",
-        ),
+    result = asyncio.run(
+        service.node_runner._handle_acceptance_node_result(
+            task=task,
+            acceptance=acceptance,
+            result=NodeFinalResult(
+                status="failed",
+                delivery_status="final",
+                summary="final acceptance failed",
+                answer="final acceptance failed",
+                evidence=[],
+                remaining_work=[],
+                blocking_reason="final acceptance failed",
+            ),
+        )
     )
 
     latest_task = service.get_task(record.task_id)
@@ -7552,7 +7669,7 @@ async def test_first_acceptance_rejection_keeps_acceptance_live_and_feeds_back_e
             blocking_reason="missing board format",
         )
 
-        partial = service.node_runner._handle_acceptance_node_result(task=task, acceptance=acceptance, result=rejection)
+        partial = await service.node_runner._handle_acceptance_node_result(task=task, acceptance=acceptance, result=rejection)
         latest_acceptance = service.store.get_node(acceptance.node_id)
         latest_root = service.store.get_node(root.node_id)
         notifications = service.store.list_task_node_notifications(task.task_id, root.node_id)
@@ -7592,7 +7709,7 @@ async def test_acceptance_blocked_result_is_terminal_without_retry(tmp_path: Pat
             result_ref="artifact:result",
             result_summary="execution crashed without a repair path",
         )
-        terminal = service.node_runner._handle_acceptance_node_result(
+        terminal = await service.node_runner._handle_acceptance_node_result(
             task=task,
             acceptance=acceptance,
             result=NodeFinalResult(
@@ -7655,7 +7772,7 @@ async def test_reactivated_acceptance_syncs_task_node_projection_after_rejection
             failure_reason="missing board format",
         )
 
-        service.node_runner._handle_acceptance_node_result(
+        await service.node_runner._handle_acceptance_node_result(
             task=task,
             acceptance=acceptance,
             result=NodeFinalResult(
@@ -7718,7 +7835,7 @@ async def test_second_acceptance_rejection_still_requests_execution_retry(tmp_pa
             blocking_reason="still missing board format",
         )
 
-        partial = service.node_runner._handle_acceptance_node_result(task=task, acceptance=acceptance, result=rejection)
+        partial = await service.node_runner._handle_acceptance_node_result(task=task, acceptance=acceptance, result=rejection)
         latest_task = service.get_task(record.task_id)
         latest_root = service.store.get_node(root.node_id)
         latest_acceptance = service.store.get_node(acceptance.node_id)
@@ -7775,7 +7892,7 @@ async def test_high_rejection_count_still_requests_execution_retry(tmp_path: Pat
             blocking_reason="still missing board format",
         )
 
-        partial = service.node_runner._handle_acceptance_node_result(task=task, acceptance=acceptance, result=rejection)
+        partial = await service.node_runner._handle_acceptance_node_result(task=task, acceptance=acceptance, result=rejection)
         latest_task = service.get_task(record.task_id)
         latest_root = service.store.get_node(root.node_id)
         latest_acceptance = service.store.get_node(acceptance.node_id)
@@ -7821,7 +7938,7 @@ async def test_execution_retry_failure_cancels_waiting_acceptance_pair(tmp_path:
             result_ref="artifact:result",
             result_summary="draft answer",
         )
-        partial = service.node_runner._handle_acceptance_node_result(
+        partial = await service.node_runner._handle_acceptance_node_result(
             task=task,
             acceptance=acceptance,
             result=NodeFinalResult(
@@ -7894,7 +8011,7 @@ async def test_execution_retry_failure_does_not_overwrite_successful_acceptance(
             result_ref="artifact:result",
             result_summary="draft answer",
         )
-        partial = service.node_runner._handle_acceptance_node_result(
+        partial = await service.node_runner._handle_acceptance_node_result(
             task=task,
             acceptance=acceptance,
             result=NodeFinalResult(
@@ -7976,7 +8093,7 @@ async def test_run_final_acceptance_avoids_duplicate_task_state_rewrites_after_s
                 blocking_reason="still missing board format",
             )
 
-        def _shared_handler(*, task, acceptance, result: NodeFinalResult) -> NodeFinalResult:
+        async def _shared_handler(*, task, acceptance, result: NodeFinalResult) -> NodeFinalResult:
             assert result.status == "failed"
             service.log_service.update_task_metadata(
                 task.task_id,
@@ -8020,621 +8137,6 @@ async def test_run_final_acceptance_avoids_duplicate_task_state_rewrites_after_s
 
 
 @pytest.mark.asyncio
-async def test_spawn_child_acceptance_bootstrap_stays_frozen_and_tail_carries_submission(tmp_path: Path) -> None:
-    service = _build_service(tmp_path)
-    try:
-        record = await service.create_task("child acceptance frozen bootstrap", session_id="web:shared")
-        task = service.get_task(record.task_id)
-        root = service.get_node(record.root_node_id)
-
-        assert task is not None
-        assert root is not None
-
-        spec = SpawnChildSpec(
-            goal="draft announcement",
-            prompt="write announcement",
-            execution_policy=_execution_policy(),
-            acceptance_prompt="verify announcement",
-        )
-        cached_payload = {
-            "specs": [spec.model_dump(mode="json")],
-            "entries": [service.node_runner._normalize_spawn_entry(index=0, spec=spec, entry={})],
-            "completed": False,
-        }
-
-        service.node_runner._materialize_spawn_batch_children(
-            task=task,
-            parent=root,
-            specs=[spec],
-            allowed_indexes=[0],
-            cache_key="round-live",
-            cached_payload=cached_payload,
-        )
-
-        refreshed_root = service.store.get_node(root.node_id)
-        assert refreshed_root is not None
-        entry = refreshed_root.metadata["spawn_operations"]["round-live"]["entries"][0]
-        eager_acceptance = service.store.get_node(str(entry["acceptance_node_id"]))
-
-        assert eager_acceptance is not None
-        assert "(empty)" in eager_acceptance.prompt
-
-        captured_prompt: dict[str, str] = {}
-
-        async def _nested_executor(task_id: str, node_id: str) -> NodeFinalResult:
-            target = service.store.get_node(node_id)
-            assert target is not None
-            if target.node_kind == "execution":
-                service.log_service.update_node_status(
-                    task_id,
-                    node_id,
-                    status="success",
-                    final_output="announcement complete",
-                )
-                return NodeFinalResult(status="success", summary="child complete", output="announcement complete")
-            if target.node_kind == "acceptance":
-                captured_prompt["prompt"] = str(target.prompt or "")
-                messages = await service.node_runner._build_messages(task=task, node=target)
-                captured_prompt["tail"] = _acceptance_turn_tail_of(messages)
-                return NodeFinalResult(status="success", summary="accepted", output="accepted")
-            raise AssertionError(f"unexpected nested node {node_id}")
-
-        service.node_runner.nested_node_executor = _nested_executor
-
-        result = await service.node_runner._run_child_pipeline(
-            task=task,
-            parent=root,
-            spec=spec,
-            cache_key="round-live",
-            cached_payload=cached_payload,
-            index=0,
-        )
-
-        assert result.check_result == "accepted"
-        # 验收 bootstrap 一次定稿：子节点交付不再回写 prompt，改由只进本轮的尾块带指针。
-        assert "(empty)" in captured_prompt["prompt"]
-        assert "announcement complete" not in captured_prompt["prompt"]
-        assert "待验提交结果载荷 ref" in captured_prompt["tail"]
-        assert "announcement complete" in captured_prompt["tail"]
-    finally:
-        await service.close()
-
-
-@pytest.mark.asyncio
-async def test_spawn_round_keeps_child_pause_as_freeze_instead_of_delivering_failure(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-):
-    """子节点暂停是冻结，不是子节点的交付结果。
-
-    结清成 entry error 会把"这个子节点失败"交给父节点模型；模型随即重派新一轮，
-    而新轮的活跃判据是"绑定节点非终态"，于是被 resume 救活的在飞子树整棵按
-    `superseded by newer spawn round` 清扫掉（2026-09-24 task:3151d7fe1d99）。
-    """
-    service = MainRuntimeService(
-        chat_backend=_DummyChatBackend(),
-        workspace_root=tmp_path,
-        store_path=tmp_path / "runtime.sqlite3",
-        files_base_dir=tmp_path / "tasks",
-        artifact_dir=tmp_path / "artifacts",
-        governance_store_path=tmp_path / "governance.sqlite3",
-        execution_mode="embedded",
-    )
-    try:
-        record = await _create_web_task(service)
-        task = service.get_task(record.task_id)
-        root = service.get_node(record.root_node_id)
-        assert task is not None
-        assert root is not None
-
-        spec = SpawnChildSpec(
-            goal="freeze child",
-            prompt="freeze prompt",
-            execution_policy=_execution_policy(),
-            acceptance_prompt="verify freeze child",
-        )
-        cached_payload = {
-            "specs": [spec.model_dump(mode="json")],
-            "entries": [service.node_runner._normalize_spawn_entry(index=0, spec=spec, entry={})],
-            "completed": False,
-        }
-        service.node_runner._materialize_spawn_batch_children(
-            task=task,
-            parent=root,
-            specs=[spec],
-            allowed_indexes=[0],
-            cache_key="round-freeze",
-            cached_payload=cached_payload,
-        )
-        bound_entry = service.store.get_node(root.node_id).metadata["spawn_operations"]["round-freeze"]["entries"][0]
-        child_id = str(bound_entry["child_node_id"])
-
-        execution_calls: list[str] = []
-        inline_run_node_calls: list[str] = []
-        diagnostics: list[dict] = []
-
-        async def _nested_executor(task_id: str, node_id: str) -> NodeFinalResult:
-            target = service.store.get_node(node_id)
-            assert target is not None
-            if target.node_kind == "acceptance":
-                service.log_service.update_node_status(
-                    task_id,
-                    node_id,
-                    status="failed",
-                    final_output="needs work",
-                    failure_reason="needs work",
-                )
-                return NodeFinalResult(
-                    status="failed",
-                    delivery_status="final",
-                    summary="needs work",
-                    answer="needs work",
-                    evidence=[],
-                    remaining_work=[],
-                    blocking_reason="needs work",
-                )
-            execution_calls.append(node_id)
-            if len(execution_calls) == 1:
-                return service.node_runner._mark_finished(
-                    task_id,
-                    node_id,
-                    NodeFinalResult(
-                        status="success",
-                        delivery_status="final",
-                        summary="draft v1",
-                        answer="draft v1",
-                        evidence=[],
-                        remaining_work=[],
-                        blocking_reason="",
-                    ),
-                )
-            # 打回后的重跑途中暂停（事故里由纯文本 3 连击守卫产生）
-            raise NodePausedError(task_id, node_id)
-
-        async def _spy_run_node(task_id: str, node_id: str) -> NodeFinalResult:
-            inline_run_node_calls.append(node_id)
-            return await _nested_executor(task_id, node_id)
-
-        monkeypatch.setattr(service.node_runner, "nested_node_executor", _nested_executor)
-        monkeypatch.setattr(service.node_runner, "run_node", _spy_run_node)
-        monkeypatch.setattr(service.node_runner, "_emit_spawn_diagnostic", lambda **kwargs: diagnostics.append(dict(kwargs)))
-
-        with pytest.raises(NodePausedError):
-            await service.node_runner._run_child_pipeline(
-                task=task,
-                parent=service.store.get_node(root.node_id) or root,
-                spec=spec,
-                cache_key="round-freeze",
-                cached_payload=cached_payload,
-                index=0,
-            )
-
-        latest_root = service.store.get_node(root.node_id)
-        assert latest_root is not None
-        entry = latest_root.metadata["spawn_operations"]["round-freeze"]["entries"][0]
-        assert entry["status"] == "running"
-        assert entry["finished_at"] == ""
-        assert latest_root.metadata["spawn_operations"]["round-freeze"]["completed"] is False
-        child = service.store.get_node(child_id)
-        assert child is not None
-        assert child.status == "in_progress"
-        # 打回后的重跑必须经 nested executor（生产里＝dispatch entry future），不得内联
-        assert execution_calls == [child_id, child_id]
-        assert inline_run_node_calls == []
-        assert "spawn_pause_reached_settlement_lane" in [str(item.get("title") or "") for item in diagnostics]
-    finally:
-        await service.close()
-
-
-@pytest.mark.asyncio
-async def test_run_child_pipeline_loops_past_former_rejection_budget(tmp_path: Path) -> None:
-    """拒收无次数上限：子节点流水线被打回 5 次后仍继续重跑，直到验收通过。"""
-    service = _build_service(tmp_path)
-    try:
-        record = await service.create_task("child acceptance retry loop", session_id="web:shared")
-        task = service.get_task(record.task_id)
-        root = service.get_node(record.root_node_id)
-
-        assert task is not None
-        assert root is not None
-
-        spec = SpawnChildSpec(
-            goal="announce child",
-            prompt="draft announcement",
-            execution_policy=_execution_policy(),
-            acceptance_prompt="verify announcement",
-        )
-        cached_payload = {
-            "specs": [spec.model_dump(mode="json")],
-            "entries": [service.node_runner._normalize_spawn_entry(index=0, spec=spec, entry={})],
-            "completed": False,
-        }
-
-        service.node_runner._materialize_spawn_batch_children(
-            task=task,
-            parent=root,
-            specs=[spec],
-            allowed_indexes=[0],
-            cache_key="round-loop",
-            cached_payload=cached_payload,
-        )
-
-        refreshed_root = service.store.get_node(root.node_id)
-        assert refreshed_root is not None
-        entry = refreshed_root.metadata["spawn_operations"]["round-loop"]["entries"][0]
-        acceptance = service.store.get_node(str(entry["acceptance_node_id"]))
-
-        assert acceptance is not None
-
-        rejection_limit = 5
-        accepted_summary = f"accepted after {rejection_limit} rejections"
-        execution_call_count = 0
-        acceptance_call_count = 0
-
-        async def _mock_run_node(task_id: str, node_id: str) -> NodeFinalResult:
-            nonlocal execution_call_count, acceptance_call_count
-
-            target = service.store.get_node(node_id)
-            assert target is not None
-            if target.node_kind == "execution":
-                execution_call_count += 1
-                output = f"draft attempt {execution_call_count}"
-                service.log_service.update_node_status(
-                    task_id,
-                    node_id,
-                    status="success",
-                    final_output=output,
-                )
-                return NodeFinalResult(status="success", summary=output, answer=output)
-            if target.node_kind == "acceptance":
-                acceptance_call_count += 1
-                if acceptance_call_count > rejection_limit:
-                    service.log_service.update_node_status(
-                        task_id,
-                        node_id,
-                        status="success",
-                        final_output=accepted_summary,
-                    )
-                    return NodeFinalResult(
-                        status="success",
-                        delivery_status="final",
-                        summary=accepted_summary,
-                        answer=accepted_summary,
-                        evidence=[],
-                        remaining_work=[],
-                        blocking_reason="",
-                    )
-                feedback = f"reject attempt {acceptance_call_count}"
-                service.log_service.update_node_status(
-                    task_id,
-                    node_id,
-                    status="failed",
-                    final_output=feedback,
-                    failure_reason=feedback,
-                )
-                return NodeFinalResult(
-                    status="failed",
-                    delivery_status="final",
-                    summary=feedback,
-                    answer=feedback,
-                    evidence=[],
-                    remaining_work=[],
-                    blocking_reason=feedback,
-                )
-            raise AssertionError(f"unexpected node kind: {target.node_kind}")
-
-        service.node_runner.run_node = _mock_run_node  # type: ignore[method-assign]
-
-        result = await service.node_runner._run_child_pipeline(
-            task=task,
-            parent=root,
-            spec=spec,
-            cache_key="round-loop",
-            cached_payload=cached_payload,
-            index=0,
-        )
-
-        latest_root = service.store.get_node(root.node_id)
-        assert latest_root is not None
-        latest_entry = latest_root.metadata["spawn_operations"]["round-loop"]["entries"][0]
-        child = service.store.get_node(str(latest_entry["child_node_id"]))
-        assert child is not None
-        latest_child = service.store.get_node(child.node_id)
-        latest_acceptance = service.store.get_node(acceptance.node_id)
-        handshake = dict((latest_child.metadata or {}).get("acceptance_handshake") or {}) if latest_child is not None else {}
-        assert execution_call_count == rejection_limit + 1
-        assert acceptance_call_count == rejection_limit + 1
-        assert result.check_result == accepted_summary
-        assert result.failure_info is None
-        assert latest_acceptance is not None
-        assert latest_acceptance.status == "success"
-        assert handshake["state"] == ACCEPTANCE_STATE_ACCEPTED
-        assert handshake["rejection_count"] == rejection_limit
-    finally:
-        await service.close()
-
-
-@pytest.mark.asyncio
-async def test_run_child_pipeline_reruns_reactivated_acceptance_without_duplicate_rejection_notification(
-    tmp_path: Path,
-) -> None:
-    service = _build_service(tmp_path)
-    task = None
-    try:
-        record = await service.create_task("child acceptance rerun", session_id="web:shared")
-        task = service.get_task(record.task_id)
-        root = service.get_node(record.root_node_id)
-
-        assert task is not None
-        assert root is not None
-
-        spec = SpawnChildSpec(
-            goal="announce child",
-            prompt="draft announcement",
-            execution_policy=_execution_policy(),
-            acceptance_prompt="verify announcement",
-        )
-        cached_payload = {
-            "specs": [spec.model_dump(mode="json")],
-            "entries": [service.node_runner._normalize_spawn_entry(index=0, spec=spec, entry={})],
-            "completed": False,
-        }
-
-        service.node_runner._materialize_spawn_batch_children(
-            task=task,
-            parent=root,
-            specs=[spec],
-            allowed_indexes=[0],
-            cache_key="round-rerun",
-            cached_payload=cached_payload,
-        )
-        dispatcher = service.task_actor_service._create_dispatcher(task.task_id)
-        service.task_actor_service._dispatchers[task.task_id] = dispatcher
-
-        call_counts = {"execution": 0, "acceptance": 0}
-
-        async def _mock_run_node(task_id: str, node_id: str) -> NodeFinalResult:
-            target = service.store.get_node(node_id)
-            assert target is not None
-            if target.node_kind == "execution":
-                call_counts["execution"] += 1
-                output = f"draft attempt {call_counts['execution']}"
-                service.log_service.update_node_status(
-                    task_id,
-                    node_id,
-                    status="success",
-                    final_output=output,
-                )
-                return NodeFinalResult(
-                    status="success",
-                    delivery_status="final",
-                    summary=output,
-                    answer=output,
-                    evidence=[],
-                    remaining_work=[],
-                    blocking_reason="",
-                )
-            if target.node_kind == "acceptance":
-                call_counts["acceptance"] += 1
-                if call_counts["acceptance"] == 1:
-                    feedback = "reject once"
-                    service.log_service.update_node_status(
-                        task_id,
-                        node_id,
-                        status="failed",
-                        final_output=feedback,
-                        failure_reason=feedback,
-                    )
-                    return NodeFinalResult(
-                        status="failed",
-                        delivery_status="final",
-                        summary=feedback,
-                        answer=feedback,
-                        evidence=[],
-                        remaining_work=[],
-                        blocking_reason=feedback,
-                    )
-                service.log_service.update_node_status(
-                    task_id,
-                    node_id,
-                    status="success",
-                    final_output="accepted",
-                    failure_reason="",
-                )
-                return NodeFinalResult(
-                    status="success",
-                    delivery_status="final",
-                    summary="accepted",
-                    answer="accepted",
-                    evidence=[],
-                    remaining_work=[],
-                    blocking_reason="",
-                )
-            raise AssertionError(f"unexpected node kind: {target.node_kind}")
-
-        service.node_runner.run_node = _mock_run_node  # type: ignore[method-assign]
-
-        result = await service.node_runner._run_child_pipeline(
-            task=task,
-            parent=root,
-            spec=spec,
-            cache_key="round-rerun",
-            cached_payload=cached_payload,
-            index=0,
-        )
-
-        latest_root = service.store.get_node(root.node_id)
-        assert latest_root is not None
-        latest_entry = latest_root.metadata["spawn_operations"]["round-rerun"]["entries"][0]
-        child_id = str(latest_entry["child_node_id"])
-        acceptance_id = str(latest_entry["acceptance_node_id"])
-        child = service.store.get_node(child_id)
-        acceptance = service.store.get_node(acceptance_id)
-        notifications = service.store.list_task_node_notifications(task.task_id, child_id)
-
-        assert child is not None
-        assert acceptance is not None
-        assert call_counts == {"execution": 2, "acceptance": 2}
-        assert result.check_result == "accepted"
-        assert result.failure_info is None
-        assert acceptance.status == "success"
-        assert len(notifications) == 1
-        assert notifications[0].message == "reject once"
-    finally:
-        dispatcher = service.task_actor_service._dispatchers.pop(task.task_id, None) if task is not None else None
-        if dispatcher is not None:
-            await dispatcher.close()
-        await service.close()
-
-
-@pytest.mark.asyncio
-async def test_run_child_pipeline_sends_continuation_notice_with_fresh_payload_ref(tmp_path: Path) -> None:
-    """打回重做后，验收节点必须收到携带最新载荷 ref 的续验消息，而不是只靠静默刷新的 prompt。"""
-    service = _build_service(tmp_path)
-    task = None
-    try:
-        record = await service.create_task("child acceptance continuation", session_id="web:shared")
-        task = service.get_task(record.task_id)
-        root = service.get_node(record.root_node_id)
-
-        assert task is not None
-        assert root is not None
-
-        spec = SpawnChildSpec(
-            goal="announce child",
-            prompt="draft announcement",
-            execution_policy=_execution_policy(),
-            acceptance_prompt="verify announcement",
-        )
-        cached_payload = {
-            "specs": [spec.model_dump(mode="json")],
-            "entries": [service.node_runner._normalize_spawn_entry(index=0, spec=spec, entry={})],
-            "completed": False,
-        }
-
-        service.node_runner._materialize_spawn_batch_children(
-            task=task,
-            parent=root,
-            specs=[spec],
-            allowed_indexes=[0],
-            cache_key="round-continuation",
-            cached_payload=cached_payload,
-        )
-        dispatcher = service.task_actor_service._create_dispatcher(task.task_id)
-        service.task_actor_service._dispatchers[task.task_id] = dispatcher
-
-        call_counts = {"execution": 0, "acceptance": 0}
-
-        async def _mock_run_node(task_id: str, node_id: str) -> NodeFinalResult:
-            target = service.store.get_node(node_id)
-            assert target is not None
-            if target.node_kind == "execution":
-                call_counts["execution"] += 1
-                output = f"draft attempt {call_counts['execution']}"
-                result = NodeFinalResult(
-                    status="success",
-                    delivery_status="final",
-                    summary=output,
-                    answer=output,
-                    evidence=[],
-                    remaining_work=[],
-                    blocking_reason="",
-                )
-                # 模拟真实提交：落盘结果载荷并外部化
-                service.node_runner._mark_finished(task_id, node_id, result)
-                return result
-            if target.node_kind == "acceptance":
-                call_counts["acceptance"] += 1
-                if call_counts["acceptance"] == 1:
-                    feedback = "reject once"
-                    service.log_service.update_node_status(
-                        task_id,
-                        node_id,
-                        status="failed",
-                        final_output=feedback,
-                        failure_reason=feedback,
-                    )
-                    return NodeFinalResult(
-                        status="failed",
-                        delivery_status="final",
-                        summary=feedback,
-                        answer=feedback,
-                        evidence=[],
-                        remaining_work=[],
-                        blocking_reason=feedback,
-                    )
-                service.log_service.update_node_status(
-                    task_id,
-                    node_id,
-                    status="success",
-                    final_output="accepted",
-                    failure_reason="",
-                )
-                return NodeFinalResult(
-                    status="success",
-                    delivery_status="final",
-                    summary="accepted",
-                    answer="accepted",
-                    evidence=[],
-                    remaining_work=[],
-                    blocking_reason="",
-                )
-            raise AssertionError(f"unexpected node kind: {target.node_kind}")
-
-        service.node_runner.run_node = _mock_run_node  # type: ignore[method-assign]
-
-        result = await service.node_runner._run_child_pipeline(
-            task=task,
-            parent=root,
-            spec=spec,
-            cache_key="round-continuation",
-            cached_payload=cached_payload,
-            index=0,
-        )
-
-        assert result.check_result == "accepted"
-        assert call_counts == {"execution": 2, "acceptance": 2}
-
-        latest_root = service.store.get_node(root.node_id)
-        assert latest_root is not None
-        latest_entry = latest_root.metadata["spawn_operations"]["round-continuation"]["entries"][0]
-        child_id = str(latest_entry["child_node_id"])
-        acceptance_id = str(latest_entry["acceptance_node_id"])
-        child = service.store.get_node(child_id)
-        assert child is not None
-
-        # 两次提交各自外部化一个结果载荷，且节点 ref 指向最新一次
-        payload_artifacts = [
-            item
-            for item in service.store.list_artifacts(task.task_id)
-            if str(getattr(item, "kind", "") or "") == "node_result_payload"
-            and str(getattr(item, "node_id", "") or "") == child_id
-        ]
-        assert len(payload_artifacts) == 2
-        latest_ref = str((child.metadata or {}).get("result_payload_ref") or "")
-        artifact_ids = {str(item.artifact_id or "") for item in payload_artifacts}
-        assert latest_ref in artifact_ids
-        stale_ids = artifact_ids - {latest_ref}
-        assert len(stale_ids) == 1
-        stale_ref = next(iter(stale_ids))
-
-        # 验收节点收到续验消息：携带上一轮反馈与最新的输出/载荷 ref
-        notices = service.store.list_task_node_notifications(task.task_id, acceptance_id)
-        continuation = [item for item in notices if "重新提交" in str(item.message or "")]
-        assert len(continuation) == 1
-        message = str(continuation[0].message or "")
-        assert "被检验执行节点已在打回后重新提交" in message
-        assert "上一轮验收反馈：reject once" in message
-        assert f"新的子节点结果载荷 ref：{latest_ref}" in message
-        assert stale_ref not in message
-    finally:
-        dispatcher = service.task_actor_service._dispatchers.pop(task.task_id, None) if task is not None else None
-        if dispatcher is not None:
-            await dispatcher.close()
-        await service.close()
-
-
-@pytest.mark.asyncio
 async def test_root_final_acceptance_bootstrap_is_frozen_and_tail_names_current_submission(tmp_path: Path) -> None:
     service = _build_service(tmp_path)
     try:
@@ -8661,7 +8163,7 @@ async def test_root_final_acceptance_bootstrap_is_frozen_and_tail_names_current_
             status="success",
             final_output="root deliverable ready",
         )
-        handoff = service.node_runner._maybe_start_acceptance_handshake(
+        handoff = await service.node_runner._maybe_start_acceptance_handshake(
             task=task,
             node=root,
             result=NodeFinalResult(
@@ -8687,7 +8189,7 @@ async def test_root_final_acceptance_bootstrap_is_frozen_and_tail_names_current_
 
         # 重提交只换待验指针：bootstrap 不受交付正文影响，指纹跟着载荷 ref 走。
         first_fingerprint = str((after_first_round.metadata or {}).get("recovery_fingerprint") or "")
-        resubmission = service.node_runner._maybe_start_acceptance_handshake(
+        resubmission = await service.node_runner._maybe_start_acceptance_handshake(
             task=task,
             node=service.store.get_node(root.node_id),
             result=NodeFinalResult(
@@ -13268,6 +12770,7 @@ async def test_resume_react_state_injects_pending_notice_once_active_round_is_go
 @pytest.mark.asyncio
 async def test_consuming_last_pending_notice_clears_pending_notice_state(
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ):
     service = MainRuntimeService(
         chat_backend=_DummyChatBackend(),
@@ -13309,12 +12812,29 @@ async def test_consuming_last_pending_notice_clears_pending_notice_state(
             },
         )
 
+        captured = []
+        original_dispatch = service.log_service._dispatch_live_event_locked
+        monkeypatch.setattr(
+            service.log_service,
+            "_dispatch_live_event_locked",
+            lambda **kwargs: (captured.append(kwargs), original_dispatch(**kwargs))[1],
+        )
         service.node_runner._consume_inflight_notice_ids(
             task_id=record.task_id,
             node_id=root.node_id,
             pending_notification_ids=[],
             pending_root_notice_ids=["root-notice:1"],
         )
+
+        root_patches = [
+            kwargs["data"]["node"]
+            for kwargs in captured
+            if kwargs.get("event_type") == "task.node.patch"
+            and str((((kwargs.get("data") or {}).get("node") or {}).get("node_id") or "")).strip() == root.node_id
+        ]
+        # 并入上下文即推徽标帧：角标数字不必等下一次整树快照。
+        assert root_patches
+        assert int(root_patches[-1].get("pending_notice_count")) == 0
 
         root_after = service.get_node(root.node_id)
         metadata = dict((root_after.metadata or {})) if root_after is not None else {}

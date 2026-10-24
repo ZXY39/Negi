@@ -32,7 +32,7 @@ function load() {
     };
     vm.createContext(context);
     vm.runInContext(
-        `${STORE_CODE}\n${DETAIL_CODE}\nthis.__turns = { buildExecutionTraceSteps, buildNodeExecutionTrace, buildTraceRenderSignature };`,
+        `${STORE_CODE}\n${DETAIL_CODE}\nthis.__turns = { buildExecutionTraceSteps, buildNodeExecutionTrace, buildTraceRenderSignature, renderTraceStep };`,
         context
     );
     return context.__turns;
@@ -60,7 +60,7 @@ function turn(seq, text, tools = []) {
 }
 
 test("turns group by progress text and keep the tools that follow", () => {
-    const { buildExecutionTraceSteps } = load();
+    const { buildExecutionTraceSteps, renderTraceStep } = load();
     const trace = {
         initial_prompt: "initial",
         turns: [
@@ -79,7 +79,13 @@ test("turns group by progress text and keep the tools that follow", () => {
     assert.equal(steps.length, 5);
     assert.equal(steps[0].traceKey, "initial_prompt");
     assert.equal(steps[1].traceKey, "turn:preamble");
-    assert.equal(steps[1].title, "开始执行");
+    // 首个叙述前的工具轮直接铺开，不再自动加「开始执行」标题。
+    assert.equal(steps[1].title, "");
+    assert.equal(steps[1].bare, true);
+    const preambleHtml = renderTraceStep(steps[1]);
+    assert.match(preambleHtml, /task-trace-step--bare/);
+    assert.doesNotMatch(preambleHtml, /开始执行/);
+    assert.doesNotMatch(preambleHtml, /task-trace-summary/);
     assert.equal(steps[2].traceKey, "turn:2");
     assert.equal(steps[2].title, "第一批完成");
     assert.match(steps[2].bodyHtml, /tool-b/);
@@ -89,11 +95,50 @@ test("turns group by progress text and keep the tools that follow", () => {
     assert.equal((steps[2].bodyHtml.match(/task-trace-round-group/g) || []).length, 2);
     assert.equal(steps[3].traceKey, "turn:4");
     assert.equal(steps[3].textOnly, true);
-    assert.equal(steps[3].text, "纯文本进展");
+    // 纯文本 turn 也走同一条「一行 + > 展开」的车道。
+    assert.equal(steps[3].title, "纯文本进展");
+    assert.equal(steps[3].turnText, "纯文本进展");
     assert.equal(steps[4].traceKey, "turn:5");
     assert.match(steps[4].bodyHtml, /submit_final_result/);
-    assert.equal(steps[4].open, true);
+    // 末组带中途正文（「最终检查」）也默认收起：摘要一行，点击才展开全文。
+    assert.equal(steps[4].open, false);
     assert.equal(steps[2].open, false);
+});
+
+test("turn text expands in place without a duplicate block or a status badge", () => {
+    const { buildExecutionTraceSteps, renderTraceStep } = load();
+    const longText = `${"模型中途输出".repeat(20)}——最后一句要求：必须把四个角色全部接好。`;
+    const trace = {
+        initial_prompt: "initial",
+        turns: [turn(2, longText, ["tool-b"])],
+        tool_steps: [],
+        stages: [],
+    };
+
+    const steps = buildExecutionTraceSteps(trace, {});
+    const turnStep = steps.find((step) => step.traceKey === "turn:2");
+    // 不再按 80 字硬截断：标题与正文都是完整原文。
+    assert.equal(turnStep.title, longText);
+    assert.equal(turnStep.turnText, longText);
+    assert.doesNotMatch(turnStep.title, /\.\.\.$/);
+
+    const html = renderTraceStep({ ...turnStep, open: false });
+    // 展开只是原文本换形态：体内不再重复一份正文，右侧也不再挂成功/失败状态。
+    assert.match(html, /task-trace-step--turn-text/);
+    assert.match(html, /task-trace-turn-toggle/);
+    assert.doesNotMatch(html, /task-trace-turn-text/);
+    assert.doesNotMatch(html, /interaction-step-status/);
+    assert.ok(html.includes(longText));
+    assert.match(html, /title="[^"]*最后一句要求/);
+    assert.match(html, /tool-b/);
+
+    // 展开态的固定高度滚动框就是标题自身，且不铺底色。
+    const css = fs.readFileSync(path.join(FRONTEND, "..", "org_graph.css"), "utf8");
+    assert.match(
+        css,
+        /\.task-trace-step--turn-text\[open\] \.interaction-step-title \{[^}]*max-height:\s*calc\(16\.5 \* 1\.6em\)[^}]*overflow-y:\s*auto[^}]*background:\s*transparent/
+    );
+    assert.doesNotMatch(css, /\.task-trace-turn-text\s*\{/);
 });
 
 test("textless rounds stay separate sections instead of one merged strip", () => {

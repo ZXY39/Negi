@@ -39,35 +39,43 @@ function formatNodeDetailHeading(node, { maxChars = 72, compact = true } = {}) {
     return `${nodeId} | ${heading}`;
 }
 
-function renderTraceStep({ traceKey = "", title, status = "info", statusLabel = "", open = false, bodyHtml = "", showRuntime = true, showStatus = true, extraClass = "", leadHtml = "", textOnly = false, text = "" }) {
-    if (textOnly) {
+function renderTraceStep({ traceKey = "", title, status = "info", statusLabel = "", open = false, bodyHtml = "", showRuntime = true, showStatus = true, extraClass = "", leadHtml = "", turnText = "", bare = false }) {
+    if (bare) {
         return `
-        <section class="interaction-step task-trace-step task-trace-text-block" data-trace-key="${esc(traceKey)}">
-            <div class="task-trace-round-text">${esc(text)}</div>
-        </section>
+        <div class="task-trace-step task-trace-step--bare" data-trace-key="${esc(traceKey)}">${bodyHtml}</div>
     `;
     }
     const classes = ["interaction-step", "task-trace-step", esc(status)];
     const normalizedExtraClass = String(extraClass || "").trim();
     if (normalizedExtraClass) classes.push(esc(normalizedExtraClass));
+    // 模型中途输出：折叠时摘要行只占一行向右溢出；展开后仍是同一段原文，
+    // 只是换成固定高度可滚动，体内不再重复一遍正文。状态徽标也不挂在正文右侧。
+    const assistantText = String(turnText || "").trim();
+    if (assistantText) classes.push("task-trace-step--turn-text");
+    const bodyContent = bodyHtml;
     const sideParts = [];
     if (showRuntime) sideParts.push('<span class="task-trace-runtime" hidden></span>');
-    if (showStatus) {
+    if (showStatus && !assistantText) {
         const label = String(statusLabel || "").trim() || traceStatusLabel(status);
         sideParts.push(`<span class="interaction-step-status">${esc(label)}</span>`);
     }
+    // 中途正文行最左侧的展开钮：折叠时是「>」，展开后转 90°。
+    const turnToggle = assistantText
+        ? '<span class="task-trace-turn-toggle" aria-hidden="true">&gt;</span>'
+        : "";
     return `
         <details class="${classes.join(" ")}" data-trace-key="${esc(traceKey)}" data-default-open="${open ? "true" : "false"}"${open ? " open" : ""}>
             <summary class="task-trace-summary">
+                ${turnToggle}
                 <span class="interaction-step-lead">
                     ${leadHtml}
-                    <span class="interaction-step-title">${esc(title)}</span>
+                    <span class="interaction-step-title"${assistantText ? ` title="${esc(assistantText)}"` : ""}>${esc(title)}</span>
                 </span>
                 <span class="interaction-step-side">
                     ${sideParts.join("")}
                 </span>
             </summary>
-            <div class="task-trace-body">${bodyHtml}</div>
+            <div class="task-trace-body">${bodyContent}</div>
         </details>
     `;
 }
@@ -141,14 +149,15 @@ function contextLoadBodyFromStep(step) {
 
 // 消息状态标签的唯一映射：分发链路上的每一档都从这里出，前端不再各自写字面量。
 // received/frozen 是投递前的视图层投影（后端 message_list 直接给这两档），
-// pending/consumed/merged 是既有三态，判定源仍是后端账本。
+// pending/consumed/merged 是既有三态，判定源仍是后端账本；merged 在消息行上
+// 与 consumed 同显示「已消费」（内容是否已并入由账本表达，不再分两个词）。
 // 原始账本 token（delivered 等）一律不得作为标签外泄，未知值走中性「待确认」。
 const MESSAGE_STATUS_LABELS = {
     received: "已接收",
     frozen: "已冻结待释放",
     pending: "待处理",
     consumed: "已消费",
-    merged: "已并入上下文",
+    merged: "已消费",
     skipped: "未下发",
 };
 
@@ -182,8 +191,7 @@ const TASK_NOTICE_SETTLE_INTERVAL_MS = 2500;
 const TASK_NOTICE_SETTLE_TIMEOUT_MS = 90000;
 // 分发进行中不能按 90 秒收窗：一次根目标分发的排空+控制回合可以跑到 9 分钟以上，
 // 固定窗口会让条目在消息真正落地前被丢弃，此后只剩手动刷新。
-// 上限用于兜住分发失败/驱动器缺席时的无限轮询。
-const TASK_NOTICE_SETTLE_DISTRIBUTION_MAX_MS = 30 * 60 * 1000;
+// 分发窗口已随 epoch 删除，不再有额外的长宽容上限。
 
 
 
@@ -436,6 +444,34 @@ function bindTraceOutputAutoLoad(traceList) {
     }, true);
 }
 
+function bindTaskTraceListInteractions(traceList) {
+    if (!(traceList instanceof HTMLElement) || traceList.dataset.traceUiBindings === "true") return;
+    traceList.dataset.traceUiBindings = "true";
+    traceList.addEventListener("click", (event) => {
+        const target = event.target instanceof Element ? event.target : null;
+        if (!target) return;
+        const nodeRef = target.closest("[data-node-jump]");
+        if (nodeRef instanceof HTMLElement) {
+            event.preventDefault();
+            event.stopPropagation();
+            void jumpToTaskNodeDetail(nodeRef.dataset.nodeJump || "");
+            return;
+        }
+        // 展开态的中途输出正文：点文字照常折叠；只有拖选文本或点滚动条时才拦下
+        // <details> 的默认切换，否则用户没法在滚动框里选中/拖动滚动条。
+        const turnTitle = target.closest(".task-trace-step--turn-text[open] .interaction-step-title");
+        if (turnTitle instanceof HTMLElement) {
+            const selectionText = typeof window.getSelection === "function"
+                ? String(window.getSelection() || "").trim()
+                : "";
+            const scrollbarWidth = Math.max(0, turnTitle.offsetWidth - turnTitle.clientWidth);
+            const rect = turnTitle.getBoundingClientRect();
+            const onScrollbar = scrollbarWidth > 0 && event.clientX - rect.left >= turnTitle.clientWidth;
+            if (selectionText || onScrollbar) event.preventDefault();
+        }
+    });
+}
+
 function buildTurnGroupDescriptors(turns) {
     const entries = [];
     (Array.isArray(turns) ? turns : []).forEach((turn) => {
@@ -470,9 +506,11 @@ function buildTurnGroupDescriptors(turns) {
     entries.forEach((entry) => {
         const tools = entry.rounds.flatMap((round) => round.tools);
         if (entry.kind === "preamble") {
+            // 第一段叙述之前的工具轮不再编一个「开始执行」标题，直接铺工具。
             steps.push({
                 traceKey: "turn:preamble",
-                title: "开始执行",
+                title: "",
+                bare: true,
                 status: roundTraceStatus({ tools }),
                 open: false,
                 tools,
@@ -483,7 +521,10 @@ function buildTurnGroupDescriptors(turns) {
         if (entry.rounds.length) {
             steps.push({
                 traceKey: `turn:${entry.seq}`,
-                title: compactNodeHeading({ title: entry.text }, 80),
+                // 标题保留全文：摘要行由 CSS 收成一行省略号，展开后正文给完整原文，
+                // 不再按 80 字硬截断（截断会吃掉模型中途输出的后半段要求）。
+                title: entry.text,
+                turnText: entry.text,
                 status: roundTraceStatus({ tools }),
                 open: false,
                 tools,
@@ -493,9 +534,13 @@ function buildTurnGroupDescriptors(turns) {
         }
         steps.push({
             traceKey: `turn:${entry.seq}`,
+            title: entry.text,
+            turnText: entry.text,
             textOnly: true,
-            text: entry.text,
             status: "info",
+            open: false,
+            tools: [],
+            bodyHtml: "",
         });
     });
     return steps;
@@ -517,7 +562,8 @@ function renderTurnRoundBlock(round) {
 function buildTurnTraceSteps(turns, initialPromptStep) {
     const steps = [initialPromptStep, ...buildTurnGroupDescriptors(turns)];
     const last = steps[steps.length - 1];
-    if (last && !last.textOnly) last.open = true;
+    // 中途输出默认只占一行；带正文的末组也不再自动展开，点击才看全文。
+    if (last && !last.textOnly && !String(last.turnText || "").trim()) last.open = true;
     return steps;
 }
 
@@ -585,117 +631,126 @@ function messageStatusDescriptor(status) {
 
 function messageListStatusDescriptor(status) {
     const descriptor = messageStatusDescriptor(status);
-    // 列表条目上的 key 是**视觉档位**（warning/info），与「分发情况」行用的语义 key
-    // 是两套词表：这里只做映射，不得把两套并成一套，否则徽标配色合同会被改掉。
-    if (["pending", "received", "frozen"].includes(descriptor.key)) {
-        return { key: "warning", label: descriptor.label };
-    }
-    return { key: "info", label: descriptor.label };
+    // 列表条目上的 key 是**视觉档位**（warning/info），与语义 key 是两套词表：
+    // 这里只做映射，不得把两套并成一套，否则徽标配色合同会被改掉。
+    const key = ["pending", "received", "frozen"].includes(descriptor.key) ? "warning" : "info";
+    // merged 与 consumed 共用「已消费」文案，图标也统一成勾选，避免同义词两套图形。
+    const icon = descriptor.key === "merged" ? "circle-check" : descriptor.icon;
+    return { key, statusKey: descriptor.key, label: descriptor.label, icon };
 }
 
-function formatRequestInFlightSuffix(status, nodeId) {
-    if (String(status || "").trim().toLowerCase() !== "received") return "";
-    const frame = (S.liveFrameMap || {})[String(nodeId || "").trim()] || null;
-    if (!isModelRequestInFlightFrame(frame)) return "";
-    const startedAt = Date.parse(String(frame.await_started_at || ""));
-    if (Number.isNaN(startedAt)) return " · 请求中";
-    const seconds = Math.max(0, Math.round((Date.now() - startedAt) / 1000));
-    return ` · 请求中(已等 ${seconds}s)`;
+function taskMessagePreviewText(message, maxChars = 140) {
+    const text = String(message || "").replace(/\s+/g, " ").trim();
+    if (!text) return "（无内容）";
+    const chars = Array.from(text);
+    return chars.length > maxChars ? `${chars.slice(0, maxChars).join("")}…` : text;
 }
 
-function formatMessageListTitle(entry, index) {
-    const time = String(entry?.received_at || entry?.consumed_at || "").trim();
-    const formattedTime = time ? formatCompactTime(time) : `消息 ${index + 1}`;
-    const status = messageListStatusDescriptor(entry?.status);
-    return `${formattedTime} · ${status.label}${formatRequestInFlightSuffix(entry?.status, S.selectedNodeId)}`;
+function taskMessageTimeText(entry) {
+    const time = String(entry?.received_at || entry?.consumed_at || entry?.merged_at || "").trim();
+    if (!time) return "暂无时间";
+    return typeof formatCompactTime === "function" ? formatCompactTime(time) : time;
 }
 
-function messageDeliveryStatusDescriptor(delivery = {}) {
-    const decision = String(delivery?.decision || "").trim().toLowerCase();
-    if (decision === "skipped") {
-        return { key: "skipped", label: "未下发", icon: "circle-slash" };
-    }
-    const status = String(delivery?.status || "").trim().toLowerCase();
-    const mergedAt = String(delivery?.merged_at || "").trim();
-    if (status === "delivered") {
-        return { key: "delivered", label: "已分发·待处理", icon: "inbox" };
-    }
-    if (status === "consumed") {
-        if (mergedAt) {
-            return { key: "merged", label: "已并入上下文", icon: "merge" };
-        }
-        return { key: "consumed", label: "已消费", icon: "circle-check" };
-    }
-    return messageStatusDescriptor(status);
+function renderTaskMessageBody(message) {
+    return `<div class="task-trace-message-body">${esc(String(message || "").trim() || "暂无消息内容")}</div>`;
 }
 
-function renderMessageDeliveriesField(deliveries = []) {
-    const items = Array.isArray(deliveries) ? deliveries : [];
-    const labelHtml = `<div class="task-trace-label">${esc("分发情况")}</div>`;
-    if (!items.length) {
-        return `
-        <div class="task-trace-field">
-            ${labelHtml}
-            <div class="code-block task-trace-code">${esc("无")}</div>
-        </div>
-    `;
-    }
-    const rows = items.map((item) => {
-        const descriptor = messageDeliveryStatusDescriptor(item);
-        const skipped = String(item?.decision || "").trim().toLowerCase() === "skipped";
-        const targetTitle = String(item?.target_title || item?.target_node_id || "").trim() || "未命名节点";
-        const targetNodeId = String(item?.target_node_id || "").trim();
-        const showNodeId = targetNodeId && targetNodeId !== targetTitle;
-        // 分发情况只展示节点信息与分发状态：distributed 行不再重复消息正文
-        // （正文已在条目「消息内容」区展示）；skipped 行保留跳过原因。
-        const detail = skipped
-            ? (String(item?.reason || "").trim() || "暂无跳过原因")
-            : "";
-        const detailHtml = detail
-            ? `<span class="notice-delivery-detail">${esc(detail)}</span>`
-            : "";
-        return `
-            <div class="notice-delivery-item notice-delivery-item--${esc(descriptor.key)}">
-                <span class="notice-delivery-icon" aria-hidden="true"><i data-lucide="${esc(descriptor.icon)}"></i></span>
-                <span class="notice-delivery-main">
-                    <span class="notice-delivery-head">
-                        <span class="notice-delivery-target">${esc(targetTitle)}</span>
-                        ${showNodeId ? `<span class="notice-delivery-node-id">${esc(targetNodeId)}</span>` : ""}
-                        <span class="notice-delivery-status">${esc(descriptor.label)}</span>
-                    </span>
-                    ${detailHtml}
-                </span>
-            </div>
-        `;
-    }).join("");
-    return `
-        <div class="task-trace-field">
-            ${labelHtml}
-            <div class="notice-delivery-list">${rows}</div>
-        </div>
-    `;
+function taskNodeDisplayId(nodeId) {
+    const raw = String(nodeId || "").trim();
+    return raw.startsWith("node:") ? raw.slice("node:".length) : raw;
+}
+
+// 节点关系预置词表：后端尚未下发关系字段，先给中性的「节点」占位；
+// 接通后按 node_relation=parent/child/sibling 直接落到三档文案。
+const TASK_NODE_RELATION_LABELS = {
+    parent: "父节点",
+    child: "子节点",
+    sibling: "同级节点",
+};
+const TASK_NODE_RELATION_PLACEHOLDER = "节点";
+
+function taskNodeRelationLabel(entry = null) {
+    const raw = String(entry?.node_relation || entry?.relation || "").trim().toLowerCase();
+    return TASK_NODE_RELATION_LABELS[raw] || TASK_NODE_RELATION_PLACEHOLDER;
+}
+
+// 节点 id 药丸：去 node: 前缀、带图标与关系文字，点击直接打开该节点详情
+// （消息行与派生记录共用）。
+function renderTaskNodeRef(nodeId, { icon = "circle-dot", relation = "" } = {}) {
+    const raw = String(nodeId || "").trim();
+    if (!raw) return "";
+    const relationLabel = String(relation || "").trim() || TASK_NODE_RELATION_PLACEHOLDER;
+    return `<button type="button" class="task-node-ref" data-node-jump="${esc(raw)}" title="打开节点 ${esc(raw)} 的详情"><i data-lucide="${esc(icon)}"></i><span class="task-node-ref-type">${esc(relationLabel)}</span><span class="task-node-ref-id">${esc(taskNodeDisplayId(raw))}</span></button>`;
+}
+
+function renderTaskMessageStatus(status) {
+    const label = String(status?.label || "").trim();
+    const icon = String(status?.icon || "circle").trim() || "circle";
+    return `<span class="task-message-status" data-status="${esc(status?.statusKey || "unknown")}" data-tone="${esc(status?.key || "info")}" title="${esc(label)}" aria-label="${esc(label)}"><i data-lucide="${esc(icon)}"></i></span>`;
 }
 
 function buildNodeMessageListSteps(node = {}) {
     const entries = Array.isArray(node?.message_list) ? node.message_list : [];
     return entries.map((entry, index) => {
         const status = messageListStatusDescriptor(entry?.status);
+        const sourceNodeId = String(entry?.source_node_id || "").trim();
+        const leadHtml = [
+            renderTaskMessageStatus(status),
+            `<span class="task-message-time">${esc(taskMessageTimeText(entry))}</span>`,
+            sourceNodeId
+                ? renderTaskNodeRef(sourceNodeId, {
+                    icon: "arrow-down-left",
+                    relation: taskNodeRelationLabel(entry),
+                })
+                : "",
+        ].join("");
         return {
             traceKey: `message:${String(entry?.notification_id || entry?.epoch_id || index).trim() || index}`,
-            title: formatMessageListTitle(entry, index),
+            // 折叠态一行：状态图标 · 时间 · 来自节点 id · 内容预览；展开态只给消息正文。
+            title: taskMessagePreviewText(entry?.message),
+            leadHtml,
             status: status.key,
             showStatus: false,
             open: index === 0,
-            bodyHtml: [
-                renderTraceField("状态", status.label, "已接收"),
-                renderTraceField("接收时间", entry?.received_at || entry?.consumed_at, "暂无时间"),
-                entry?.consumed_at ? renderTraceField("消费时间", entry?.consumed_at, "") : "",
-                entry?.merged_at ? renderTraceField("并入上下文时间", entry?.merged_at, "") : "",
-                renderTraceField("消息内容", entry?.message, "暂无消息内容"),
-                renderMessageDeliveriesField(entry?.deliveries),
-            ].join(""),
+            extraClass: "task-trace-step--message",
+            bodyHtml: renderTaskMessageBody(entry?.message),
         };
     });
+}
+
+function buildNodeSentMessageListSteps(node = {}) {
+    const entries = Array.isArray(node?.sent_message_list) ? node.sent_message_list : [];
+    return entries.map((entry, index) => {
+        const status = messageListStatusDescriptor(entry?.status);
+        const targetNodeId = String(entry?.target_node_id || "").trim();
+        const leadHtml = [
+            renderTaskMessageStatus(status),
+            `<span class="task-message-time">${esc(taskMessageTimeText(entry))}</span>`,
+            targetNodeId
+                ? renderTaskNodeRef(targetNodeId, {
+                    icon: "arrow-up-right",
+                    relation: taskNodeRelationLabel(entry),
+                })
+                : "",
+        ].join("");
+        return {
+            traceKey: `sent-message:${String(entry?.notification_id || index).trim() || index}`,
+            title: taskMessagePreviewText(entry?.message),
+            leadHtml,
+            status: status.key,
+            showStatus: false,
+            open: index === 0,
+            extraClass: "task-trace-step--message",
+            bodyHtml: renderTaskMessageBody(entry?.message),
+        };
+    });
+}
+
+function activeTaskMessageListSteps(node) {
+    return S.taskMessageViewMode === "outbox"
+        ? buildNodeSentMessageListSteps(node)
+        : buildNodeMessageListSteps(node);
 }
 
 function spawnReviewRoundStatus(round = {}) {
@@ -707,89 +762,147 @@ function spawnReviewRoundStatus(round = {}) {
     return "info";
 }
 
-function spawnSpecHasIndependentAcceptance(spec = null) {
-    // 新载荷按 runtime_nodes 判（一个元素=运行时创建的一个独立节点）；历史轮次与
-    // log_service 回落到原始 spec 投影片段时，只能照 requires_acceptance 的推断读。
-    if (Array.isArray(spec?.runtime_nodes)) {
-        return spec.runtime_nodes.some((node) => String(node?.node_kind || "").trim() === "acceptance");
-    }
-    if (typeof spec?.requires_acceptance === "boolean") {
-        return spec.requires_acceptance;
-    }
-    return String(spec?.acceptance_prompt || "").trim() !== "";
+function spawnSpecModeDescriptor(spec = null) {
+    const mode = String(spec?.execution_policy?.mode || "").trim().toLowerCase();
+    if (mode === "coverage") return { key: "coverage", label: "全面", icon: "layers" };
+    return { key: "focus", label: "专注", icon: "target" };
 }
 
-function summarizeRequestedSpawnSpecs(specs = []) {
-    const lines = (Array.isArray(specs) ? specs : []).map((spec, index) => {
-        const goal = String(spec?.goal || "").trim() || `spec ${index + 1}`;
-        const mode = String(spec?.execution_policy?.mode || "").trim() || "focus";
-        const acceptance = spawnSpecHasIndependentAcceptance(spec) ? " [独立验收]" : "";
-        return `#${index + 1} ${goal} [${mode}]${acceptance}`;
-    });
-    return lines.join("\n");
+function renderSpawnNodeItem(entry = {}, spec = null, childResult = null) {
+    const childNodeId = String(entry?.child_node_id || "").trim();
+    const goal = String(entry?.goal || spec?.goal || childNodeId || "未命名节点").trim();
+    const mode = spawnSpecModeDescriptor(spec);
+    const prompt = String(spec?.prompt || "").trim() || "暂无提示词";
+    const acceptance = String(childResult?.check_result || "").trim() || "暂无验收结果";
+    const nodeRef = renderTaskNodeRef(childNodeId, { relation: taskNodeRelationLabel(entry) });
+    return `
+        <details class="spawn-node" data-spawn-node-id="${esc(childNodeId)}">
+            <summary class="spawn-node-summary">
+                <span class="spawn-node-mode spawn-node-mode--${mode.key}"><i data-lucide="${mode.icon}"></i>${mode.label}</span>
+                <span class="spawn-node-goal">${esc(goal)}</span>
+                ${nodeRef || '<span class="spawn-node-id">未派生</span>'}
+            </summary>
+            <div class="spawn-node-body">
+                <div class="spawn-node-field">
+                    <span class="spawn-node-label">提示词</span>
+                    <div class="spawn-node-text">${esc(prompt)}</div>
+                </div>
+                <div class="spawn-node-field">
+                    <span class="spawn-node-label">验收结果</span>
+                    <div class="spawn-node-text">${esc(acceptance)}</div>
+                </div>
+            </div>
+        </details>
+    `;
 }
 
-function summarizeAllowedSpawnEntries(entries = []) {
-    const lines = (Array.isArray(entries) ? entries : [])
-        .filter((entry) => String(entry?.review_decision || "").trim().toLowerCase() === "allowed")
-        .map((entry, index) => {
-            const goal = String(entry?.goal || "").trim() || `allowed ${index + 1}`;
-            const childNodeId = String(entry?.child_node_id || "").trim();
-            return childNodeId ? `${goal} -> ${childNodeId}` : goal;
-        });
-    return lines.join("\n");
-}
-
-function summarizeBlockedSpawnEntries(entries = []) {
-    const lines = (Array.isArray(entries) ? entries : [])
-        .filter((entry) => String(entry?.review_decision || "").trim().toLowerCase() === "blocked")
-        .map((entry, index) => {
-            const goal = String(entry?.goal || "").trim() || `blocked ${index + 1}`;
-            const reason = String(entry?.blocked_reason || "").trim() || "暂无拦截原因";
-            return `${goal}: ${reason}`;
-        });
-    return lines.join("\n");
-}
-
-function summarizeBlockedSpawnSuggestions(entries = []) {
-    const lines = (Array.isArray(entries) ? entries : [])
-        .filter((entry) => String(entry?.review_decision || "").trim().toLowerCase() === "blocked")
-        .map((entry, index) => {
-            const goal = String(entry?.goal || "").trim() || `blocked ${index + 1}`;
-            const suggestion = String(entry?.blocked_suggestion || "").trim() || "暂无操作建议";
-            return `${goal}: ${suggestion}`;
-        });
-    return lines.join("\n");
-}
-
-function buildSpawnReviewTraceSteps(rounds = []) {
+function buildSpawnReviewTraceSteps(rounds = [], childResults = []) {
+    const results = Array.isArray(childResults) ? childResults : [];
     return (Array.isArray(rounds) ? rounds : []).map((round, index) => {
         const reviewedAt = String(round?.reviewed_at || "").trim();
         const formattedReviewedAt = reviewedAt
             ? (typeof formatCompactTime === "function" ? formatCompactTime(reviewedAt) : reviewedAt)
             : "";
         const titleSuffix = formattedReviewedAt ? ` · ${formattedReviewedAt}` : ` · 第${index + 1}轮`;
+        const specs = Array.isArray(round?.requested_specs) ? round.requested_specs : [];
+        const specByIndex = new Map(
+            specs.map((spec, specIndex) => [
+                Number.isFinite(Number(spec?.index)) ? Number(spec.index) : specIndex,
+                spec,
+            ]),
+        );
+        const allowedEntries = (Array.isArray(round?.entries) ? round.entries : [])
+            .filter((entry) => String(entry?.review_decision || "").trim().toLowerCase() === "allowed");
+        const nodeItems = allowedEntries.map((entry, entryIndex) => {
+            const specIndex = Number.isFinite(Number(entry?.index)) ? Number(entry.index) : entryIndex;
+            const childNodeId = String(entry?.child_node_id || "").trim();
+            const childResult = results.find((item) => (
+                String(item?.child_node_id || "").trim() === childNodeId
+            )) || null;
+            return renderSpawnNodeItem(entry, specByIndex.get(specIndex) || null, childResult);
+        }).join("");
         return {
             traceKey: `spawn-review:${String(round?.round_id || index).trim() || index}`,
-            title: `派生记录${titleSuffix}`,
+            title: nodeItems
+                ? `派生记录${titleSuffix} · ${allowedEntries.length} 个节点`
+                : `派生记录${titleSuffix}`,
             status: spawnReviewRoundStatus(round),
             showStatus: false,
             open: false,
-            bodyHtml: [
-                renderTraceField("原始请求", summarizeRequestedSpawnSpecs(round?.requested_specs), "本轮无原始派生请求"),
-                renderTraceField("放行结果", summarizeAllowedSpawnEntries(round?.entries), "本轮无放行派生"),
-                renderTraceField("被拦截原因", summarizeBlockedSpawnEntries(round?.entries), "本轮无被拦截项"),
-                renderTraceField("操作建议", summarizeBlockedSpawnSuggestions(round?.entries), "本轮无额外建议"),
-            ].join(""),
+            bodyHtml: nodeItems
+                ? `<div class="spawn-node-list">${nodeItems}</div>`
+                : '<div class="empty-state task-trace-empty">本轮无派生节点。</div>',
         };
     });
+}
+
+function jumpToTaskNodeDetail(nodeId) {
+    const key = String(nodeId || "").trim();
+    if (!key) return;
+    const node = (typeof findTreeNode === "function" ? findTreeNode(S.treeView, key) : null)
+        || (typeof treeSnapshotNode === "function" ? treeSnapshotNode(key) : null)
+        || S.taskNodeDetails?.[key]
+        || null;
+    if (!node) {
+        if (typeof showToast === "function") {
+            showToast({ title: "无法打开节点", text: `节点 ${key} 当前不在任务树中`, kind: "warn" });
+        }
+        return;
+    }
+    const previousNodeId = String(S.selectedNodeId || "").trim();
+    if (previousNodeId && previousNodeId !== key && typeof stashTaskDetailViewState === "function") {
+        stashTaskDetailViewState({ nodeId: previousNodeId });
+    }
+    S.selectedNodeId = key;
+    if (typeof syncExecutionTreeSelection === "function") syncExecutionTreeSelection(previousNodeId, key);
+    if (typeof showAgent === "function") void showAgent(node, { preserveViewState: false, forceRefresh: true });
+    // 详情先开；定位/居中在后台做，不阻塞抽屉（隐藏窗口里 rAF 可能不跑）。
+    if (typeof locateTaskNode === "function") {
+        void locateTaskNode(key).catch(() => null);
+    }
+}
+
+function syncTaskMessageTabs() {
+    const tabs = U.adMessageTabs;
+    if (!tabs) return;
+    const mode = S.taskMessageViewMode === "outbox" ? "outbox" : "inbox";
+    tabs.querySelectorAll("[data-message-tab]").forEach((button) => {
+        const active = String(button.dataset.messageTab || "") === mode;
+        button.classList.toggle("is-active", active);
+        button.setAttribute("aria-selected", active ? "true" : "false");
+    });
+}
+
+function setTaskMessageViewMode(mode) {
+    const next = String(mode || "").trim() === "outbox" ? "outbox" : "inbox";
+    if ((S.taskMessageViewMode === "outbox" ? "outbox" : "inbox") === next) return;
+    S.taskMessageViewMode = next;
+    syncTaskMessageTabs();
+    if (S.currentNodeDetail) renderMessageList(S.currentNodeDetail);
+}
+
+function bindTaskMessageTabs() {
+    const tabs = U.adMessageTabs;
+    if (!tabs || tabs.dataset.bound === "true") {
+        syncTaskMessageTabs();
+        return;
+    }
+    tabs.dataset.bound = "true";
+    tabs.addEventListener("click", (event) => {
+        const button = event.target instanceof Element ? event.target.closest("[data-message-tab]") : null;
+        if (!(button instanceof HTMLElement)) return;
+        setTaskMessageViewMode(button.dataset.messageTab);
+    });
+    syncTaskMessageTabs();
 }
 
 function renderMessageList(node, { viewState = null } = {}) {
     if (!U.adMessages) return false;
     const effectiveViewState = normalizeTaskDetailViewState(viewState || captureTaskDetailViewState());
     const preservedScrollTop = Number(effectiveViewState?.messageScrollTop || 0);
-    const stepDescriptors = buildNodeMessageListSteps(node);
+    const stepDescriptors = activeTaskMessageListSteps(node);
+    const isOutbox = S.taskMessageViewMode === "outbox";
+    const emptyText = isOutbox ? "当前节点暂无发出消息。" : "当前节点暂无消息。";
     const steps = stepDescriptors.map((step, index) => renderTraceStep({
         ...step,
         open: resolveTraceStepOpenState(
@@ -807,17 +920,21 @@ function renderMessageList(node, { viewState = null } = {}) {
         U.adMessages.innerHTML = "";
         U.adMessages.appendChild(traceList);
     }
-    const renderSignature = buildTraceRenderSignature(stepDescriptors);
+    const renderSignature = `${isOutbox ? "outbox" : "inbox"}:${buildTraceRenderSignature(stepDescriptors)}`;
     const renderNodeId = String(node?.node_id || "").trim();
     const shouldReplace = traceList.dataset.renderSignature !== renderSignature
         || traceList.dataset.renderNodeId !== renderNodeId;
     if (shouldReplace) {
         traceList.innerHTML = steps.length
             ? steps.join("")
-            : '<div class="empty-state task-trace-empty">当前节点暂无消息。</div>';
+            : `<div class="empty-state task-trace-empty">${esc(emptyText)}</div>`;
         traceList.dataset.renderSignature = renderSignature;
         traceList.dataset.renderNodeId = renderNodeId;
+        // 状态图标与节点 id 药丸是 lucide 占位，重建后立即水合（切 tab 时 showAgent 不会再兜底）。
+        if (typeof icons === "function") icons();
     }
+    bindTaskMessageTabs();
+    bindTaskTraceListInteractions(traceList);
     renderMessageHeading(stepDescriptors.length);
     syncNoticeComposerState();
     if (shouldReplace) {
@@ -840,7 +957,7 @@ function renderSpawnReviewTrace(node, { viewState = null } = {}) {
     const effectiveViewState = normalizeTaskDetailViewState(viewState || captureTaskDetailViewState());
     const preservedScrollTop = Number(effectiveViewState?.spawnReviewScrollTop || 0);
     const rounds = Array.isArray(node?.spawn_review_rounds) ? node.spawn_review_rounds : [];
-    const stepDescriptors = buildSpawnReviewTraceSteps(rounds);
+    const stepDescriptors = buildSpawnReviewTraceSteps(rounds, node?.direct_child_results);
     const steps = stepDescriptors.map((step, index) => renderTraceStep({
         ...step,
         open: resolveTraceStepOpenState(
@@ -868,7 +985,9 @@ function renderSpawnReviewTrace(node, { viewState = null } = {}) {
             : '<div class="empty-state task-trace-empty">当前节点暂无派生记录。</div>';
         traceList.dataset.renderSignature = renderSignature;
         traceList.dataset.renderNodeId = renderNodeId;
+        if (typeof icons === "function") icons();
     }
+    bindTaskTraceListInteractions(traceList);
     renderSpawnReviewHeading(stepDescriptors.length);
     if (shouldReplace) {
         const restoreScroll = () => {
@@ -991,6 +1110,45 @@ function flashTraceCopyButton(button, succeeded = true) {
         setTraceCopyButtonIcon(button, "copy");
         button.classList.remove("is-copied", "is-copy-failed");
     }, 1400));
+}
+
+function bindTaskOutputCopyActions() {
+    const targets = [
+        { targetId: "ad-output", buttonId: "ad-output-copy", label: "提交输出", emptyText: "暂无提交输出" },
+        { targetId: "ad-check", buttonId: "ad-check-copy", label: "验收结果", emptyText: "暂无验收结果" },
+    ];
+    targets.forEach(({ targetId, buttonId, label, emptyText }) => {
+        const button = document.getElementById(buttonId);
+        if (!(button instanceof HTMLButtonElement) || button.dataset.copyBound === "true") return;
+        button.dataset.copyBound = "true";
+        button.addEventListener("click", async (event) => {
+            event.preventDefault();
+            event.stopPropagation();
+            const target = document.getElementById(targetId);
+            const text = String(target?.textContent || "").trim();
+            if (!text || text === emptyText) {
+                flashTraceCopyButton(button, false);
+                if (typeof showToast === "function") {
+                    showToast({ title: "没有可复制的内容", text: `${label}当前为空。`, kind: "error" });
+                }
+                return;
+            }
+            let copied = false;
+            try {
+                copied = typeof copyTextToClipboard === "function" && await copyTextToClipboard(text);
+            } catch {
+                copied = false;
+            }
+            flashTraceCopyButton(button, !!copied);
+            if (typeof showToast === "function") {
+                showToast({
+                    title: copied ? "已复制" : "复制失败",
+                    text: copied ? `${label}已复制到剪贴板。` : "请手动选中文本后复制。",
+                    kind: copied ? "success" : "error",
+                });
+            }
+        });
+    });
 }
 
 async function resolveTraceFieldCopyText(code) {
@@ -1116,6 +1274,29 @@ function buildTraceRenderSignature(stepDescriptors) {
     ].join("\u0002")).join("\u0001");
 }
 
+function renderInitialPromptBox(step, node) {
+    if (!U.adInitialPrompt || !step) return false;
+    const nodeKey = `${S.currentTaskId || ""}:${node?.node_id || ""}`;
+    const existing = U.adInitialPrompt.querySelector("details");
+    const keepOpen = U.adInitialPrompt.dataset.renderNodeId === nodeKey && existing
+        ? !!existing.open
+        : false;
+    const html = renderTraceStep({ ...step, open: keepOpen });
+    if (U.adInitialPrompt.dataset.renderSignature === html
+        && U.adInitialPrompt.dataset.renderNodeId === nodeKey) {
+        return false;
+    }
+    U.adInitialPrompt.innerHTML = html;
+    U.adInitialPrompt.dataset.renderSignature = html;
+    U.adInitialPrompt.dataset.renderNodeId = nodeKey;
+    const details = U.adInitialPrompt.querySelector("details");
+    details?.addEventListener("toggle", () => {
+        if (U.adInitialPrompt?.dataset.renderNodeId !== nodeKey) return;
+        U.adInitialPrompt.dataset.open = details.open ? "true" : "false";
+    });
+    return true;
+}
+
 function renderExecutionTrace(node, { viewState = null } = {}) {
     if (!U.adFlow) return;
     const effectiveViewState = normalizeTaskDetailViewState(viewState || captureTaskDetailViewState());
@@ -1123,7 +1304,19 @@ function renderExecutionTrace(node, { viewState = null } = {}) {
     const liveFrameMap = liveFramesByNodeId();
     const fallbackLiveFrame = liveFrameMap.get(String(node?.node_id || "").trim()) || null;
     const trace = node?.executionTrace || buildNodeExecutionTrace(node, node, fallbackLiveFrame);
-    const stepDescriptors = buildExecutionTraceSteps(trace, node);
+    // 流程框头部用量每次重建都回填：切节点时的 loading 清空不会把它永久留在空态。
+    if (U.adTokenSummary && typeof taskFlowUsageText === "function") {
+        U.adTokenSummary.textContent = taskFlowUsageText(node, trace);
+    }
+    const allStepDescriptors = buildExecutionTraceSteps(trace, node);
+    const initialPromptStep = allStepDescriptors.find((step) => String(step?.traceKey || "") === "initial_prompt") || null;
+    // 初始提示词独立成框，Execution Flow 只装中途文本与工具调用。
+    // 没有独立宿主（旧页面/单测桩）时仍留在列表里，行为与改造前一致。
+    const splitInitialPrompt = !!(U.adInitialPrompt && initialPromptStep);
+    if (splitInitialPrompt) renderInitialPromptBox(initialPromptStep, node);
+    const stepDescriptors = splitInitialPrompt
+        ? allStepDescriptors.filter((step) => step !== initialPromptStep)
+        : allStepDescriptors;
     const steps = stepDescriptors.map((step, index) => renderTraceStep({
         ...step,
         open: resolveTraceStepOpenState(step, effectiveViewState, index),
@@ -1140,11 +1333,13 @@ function renderExecutionTrace(node, { viewState = null } = {}) {
     const shouldReplace = traceList.dataset.renderSignature !== renderSignature
         || traceList.dataset.renderNodeId !== renderNodeId;
     if (shouldReplace) {
-        traceList.innerHTML = steps.join("");
+        traceList.innerHTML = steps.length
+            ? steps.join("")
+            : '<div class="empty-state task-trace-empty">暂无执行流程。</div>';
         traceList.dataset.renderSignature = renderSignature;
         traceList.dataset.renderNodeId = renderNodeId;
     }
-    renderFlowHeading(stepDescriptors.length);
+    renderFlowHeading();
     const traceItems = Array.from(traceList.querySelectorAll(".task-trace-step"));
     traceItems.forEach((item) => {
         if (!(item instanceof HTMLElement)) return;
@@ -1154,6 +1349,7 @@ function renderExecutionTrace(node, { viewState = null } = {}) {
     bindTraceRoundToolStrips(traceList);
     bindTraceOutputAutoLoad(traceList);
     bindTraceFieldCopyActions(traceList);
+    bindTaskTraceListInteractions(traceList);
     traceItems.filter((item) => item instanceof HTMLElement && item.open).forEach((item) => hydrateTraceOutputBlocks(item));
     refreshTaskDetailScrollRegions();
     if (effectiveViewState && shouldReplace) {
@@ -1174,7 +1370,7 @@ function renderExecutionTrace(node, { viewState = null } = {}) {
 
 function renderFinalOutput(text) {
     if (!U.adOutput) return;
-    const nextText = readableText(text, { decodeEscapes: true, emptyText: "暂无最终输出" });
+    const nextText = readableText(text, { decodeEscapes: true, emptyText: "暂无提交输出" });
     const changed = U.adOutput.textContent !== nextText;
     if (changed) U.adOutput.textContent = nextText;
     return changed;
@@ -1384,11 +1580,18 @@ function renderTaskNodeModelRetryToast(nodeOrStatus = null) {
     const status = normalizeTaskNodeModelRetryStatus(rawStatus);
     const visible = !!status;
     const text = taskNodeModelRetryToastText(status);
-    textEl.textContent = text;
-    toastEl.hidden = !visible;
+    const wasHidden = toastEl.hidden === true;
+    const textChanged = textEl.textContent !== text;
+    // 实时帧每秒会打好几次补丁：文本没变就不要再写 DOM，否则每次写 textContent
+    // 都会强制重排 + 重新判定 clamp，小框看起来就是高频抖动。
+    if (textChanged) textEl.textContent = text;
+    const nextHidden = !visible;
+    const ariaHidden = visible ? "false" : "true";
+    if (toastEl.hidden !== nextHidden) toastEl.hidden = nextHidden;
     if (toastEl.classList?.toggle) toastEl.classList.toggle("is-visible", visible);
-    toastEl.setAttribute("aria-hidden", visible ? "false" : "true");
-    refreshModelRetryToastClamp(toastEl, textEl);
+    const currentAriaHidden = typeof toastEl.getAttribute === "function" ? toastEl.getAttribute("aria-hidden") : ariaHidden;
+    if (currentAriaHidden !== ariaHidden) toastEl.setAttribute("aria-hidden", ariaHidden);
+    if (textChanged || wasHidden !== nextHidden) refreshModelRetryToastClamp(toastEl, textEl);
 }
 
 function showTaskNodeLoadingState(node) {

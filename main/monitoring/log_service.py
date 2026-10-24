@@ -40,8 +40,6 @@ from main.models import (
     TaskRecord,
     normalize_failure_class,
     normalize_final_acceptance_metadata,
-    normalize_optional_text,
-    normalize_string_list,
     normalize_tool_file_changes,
 )
 from main.monitoring.execution_trace import build_execution_trace
@@ -50,7 +48,6 @@ from main.monitoring.frame_liveness import frame_is_stale
 from main.monitoring.models import (
     TaskProjectionNodeDetailRecord,
     TaskProjectionNodeRecord,
-    TaskProjectionRoundRecord,
     TaskProjectionRuntimeFrameRecord,
     TaskProjectionToolResultRecord,
 )
@@ -63,6 +60,7 @@ from main.runtime.acceptance_handshake import (
 )
 from main.runtime.append_notice_context import (
     PENDING_APPEND_NOTICE_RECORDS_KEY,
+    is_system_relay_notice,
     normalize_pending_append_notice_records,
 )
 from main.runtime.chat_backend import build_actual_request_diagnostics
@@ -664,13 +662,6 @@ class TaskLogService:
             'summary_fingerprint': '',
             'summary_last_published_at': '',
             'governance': _default_governance_state(),
-            'distribution': {
-                'active_epoch_id': '',
-                'state': '',
-                'frontier_node_ids': [],
-                'queued_epoch_count': 0,
-                'pending_mailbox_count': 0,
-            },
         }
 
     @classmethod
@@ -716,37 +707,6 @@ class TaskLogService:
             'history': history_payload,
         }
 
-    @staticmethod
-    def _sanitize_distribution_state(payload: Any) -> dict[str, Any]:
-        current = dict(payload or {}) if isinstance(payload, dict) else {}
-        target_node_ids = normalize_string_list(current.get('target_node_ids'))
-        frontier_node_ids = normalize_string_list(current.get('frontier_node_ids'))
-        blocked_node_ids = normalize_string_list(current.get('blocked_node_ids'))
-        # 排空账本：已走到安全检查点停住的节点子集，只作进度下界，不是释放依据。
-        frozen_node_ids = normalize_string_list(current.get('frozen_node_ids'))
-        pending_notice_node_ids = normalize_string_list(current.get('pending_notice_node_ids'))
-        try:
-            queued_epoch_count = max(0, int(current.get('queued_epoch_count') or 0))
-        except (TypeError, ValueError):
-            queued_epoch_count = 0
-        try:
-            pending_mailbox_count = max(0, int(current.get('pending_mailbox_count') or 0))
-        except (TypeError, ValueError):
-            pending_mailbox_count = 0
-        return {
-            'active_epoch_id': normalize_optional_text(current.get('active_epoch_id')),
-            'state': normalize_optional_text(current.get('state')),
-            'mode': normalize_optional_text(current.get('mode')),
-            'target_node_ids': target_node_ids,
-            'frontier_node_ids': frontier_node_ids,
-            'blocked_node_ids': blocked_node_ids,
-            'frozen_node_ids': frozen_node_ids,
-            'pending_notice_node_ids': pending_notice_node_ids,
-            'queued_epoch_count': queued_epoch_count,
-            'pending_mailbox_count': pending_mailbox_count,
-            'error_text': normalize_optional_text(current.get('error_text')),
-        }
-
     def initialize_task(self, task: TaskRecord, root: NodeRecord) -> tuple[TaskRecord, NodeRecord]:
         with self._task_lock(task.task_id):
             task = task.model_copy(
@@ -777,7 +737,6 @@ class TaskLogService:
         with self._task_lock(task_id):
             self._store.upsert_node(node)
             self._sync_node_read_models_locked(node)
-            self._sync_task_node_rounds_locked(node)
             task = self._store.get_task(task_id)
             if task is not None:
                 self._publish_task_node_patch_locked(task=task, node=node)
@@ -786,7 +745,6 @@ class TaskLogService:
                     parent = self._store.get_node(parent_node_id)
                     if parent is not None and str(parent.task_id or '').strip() == str(task.task_id or '').strip():
                         self._sync_node_read_models_locked(parent)
-                        self._sync_task_node_rounds_locked(parent)
                         self._publish_task_node_patch_locked(task=task, node=parent)
             self.refresh_task_view(task_id, mark_unread=True)
             return node
@@ -830,23 +788,31 @@ class TaskLogService:
             entries = list(payload.get('entries') or [])
             if normalized_entry_index < 0 or normalized_entry_index >= len(entries) or not isinstance(entries[normalized_entry_index], dict):
                 raise ValueError('spawn entry missing during child bind')
-            entry = dict(entries[normalized_entry_index] or {})
-            entry['child_node_id'] = persisted_child.node_id
-            entries[normalized_entry_index] = entry
-            payload['entries'] = entries
-            operations[normalized_cache_key] = payload
-            next_parent_metadata = dict(parent.metadata or {})
-            next_parent_metadata['spawn_operations'] = operations
-            persisted_parent = self._store.update_node(
-                normalized_parent_node_id,
-                lambda record: record.model_copy(update={'metadata': next_parent_metadata, 'updated_at': now_iso()}),
-            )
+            def _bind_entry(record: NodeRecord) -> NodeRecord:
+                # 必须在写锁内重读 metadata：用进入函数时的 parent 快照整块覆盖，
+                # 会把这两次读写之间写入的其它键（例如 enter_wait 的
+                # node_wait_wake_on）静默抹掉，唤醒策略随即退化成「任意消息都醒」。
+                metadata = dict(record.metadata or {})
+                current_operations = dict(metadata.get('spawn_operations') or {})
+                current_payload = dict(current_operations.get(normalized_cache_key) or {})
+                current_entries = list(current_payload.get('entries') or [])
+                if (
+                    0 <= normalized_entry_index < len(current_entries)
+                    and isinstance(current_entries[normalized_entry_index], dict)
+                ):
+                    current_entry = dict(current_entries[normalized_entry_index] or {})
+                    current_entry['child_node_id'] = persisted_child.node_id
+                    current_entries[normalized_entry_index] = current_entry
+                    current_payload['entries'] = current_entries
+                    current_operations[normalized_cache_key] = current_payload
+                    metadata['spawn_operations'] = current_operations
+                return record.model_copy(update={'metadata': metadata, 'updated_at': now_iso()})
+
+            persisted_parent = self._store.update_node(normalized_parent_node_id, _bind_entry)
 
             self._sync_node_read_models_locked(persisted_child)
-            self._sync_task_node_rounds_locked(persisted_child)
             if persisted_parent is not None:
                 self._sync_node_read_models_locked(persisted_parent)
-                self._sync_task_node_rounds_locked(persisted_parent)
             self._publish_task_node_patch_locked(task=task, node=persisted_child)
             if persisted_parent is not None:
                 self._publish_task_node_patch_locked(task=task, node=persisted_parent)
@@ -1492,6 +1458,41 @@ class TaskLogService:
             updated = self._store.update_node(
                 node_id,
                 lambda record: record.model_copy(update={'check_result': text, 'check_result_ref': ref, 'updated_at': changed_at}),
+            )
+            task = self._store.get_task(task_id)
+            if updated is not None and task is not None:
+                self._sync_node_read_models_locked(updated)
+                self._publish_task_node_patch_locked(task=task, node=updated)
+                self._notify_task_visible_output(task_id, occurred_at=_precise_now_iso())
+            self.refresh_task_view(task_id, mark_unread=True)
+            return updated
+
+    def update_node_output(self, task_id: str, node_id: str, final_output: str) -> NodeRecord | None:
+        """提交输出落账（submit_final_result）：只写输出，不动状态与结束时间。
+
+        执行节点等验收时状态仍是 in_progress，但用户此刻就该看到本次提交内容；
+        终态由后续裁决/收尾照旧写。
+        """
+        with self._task_lock(task_id):
+            changed_at = now_iso()
+            final_text, final_ref = self._summarize_content(
+                final_output,
+                task_id=task_id,
+                node_id=node_id,
+                display_name=f'final-output:{node_id}',
+                source_kind='node_final_output',
+            )
+            if not final_text:
+                return self._store.get_node(node_id)
+            updated = self._store.update_node(
+                node_id,
+                lambda record: record.model_copy(
+                    update={
+                        'final_output': final_text,
+                        'final_output_ref': final_ref,
+                        'updated_at': changed_at,
+                    }
+                ),
             )
             task = self._store.get_task(task_id)
             if updated is not None and task is not None:
@@ -2820,7 +2821,6 @@ class TaskLogService:
                 if spawn_changed or any(key not in result_payload_only_keys for key in changed_keys):
                     self._sync_node_read_models_locked(updated, invalidate_execution_trace_ref=True)
                 if spawn_changed:
-                    self._sync_task_node_rounds_locked(updated)
                     self._publish_task_node_patch_locked(task=task, node=updated)
             return updated
 
@@ -3092,8 +3092,6 @@ class TaskLogService:
                 current['dispatch_queued'] = self._sanitize_dispatch_counters(payload.get('dispatch_queued'))
             if 'governance' in payload:
                 current['governance'] = self._sanitize_governance_state(payload.get('governance'))
-            if 'distribution' in payload:
-                current['distribution'] = self._sanitize_distribution_state(payload.get('distribution'))
             current['updated_at'] = now_iso()
             self._store.upsert_task_runtime_meta(
                 task_id=task.task_id,
@@ -3218,7 +3216,6 @@ class TaskLogService:
         current.setdefault('summary_fingerprint', '')
         current.setdefault('summary_last_published_at', '')
         current['governance'] = self._sanitize_governance_state(current.get('governance'))
-        current['distribution'] = self._sanitize_distribution_state(current.get('distribution'))
         current['task_temp_dir'] = self._normalize_task_temp_dir(current.get('task_temp_dir'))
         try:
             current['last_stall_notice_bucket_minutes'] = max(0, int(current.get('last_stall_notice_bucket_minutes') or 0))
@@ -3317,7 +3314,6 @@ class TaskLogService:
                 'last_visible_output_at': str(meta.get('last_visible_output_at') or '').strip(),
                 'last_stall_notice_bucket_minutes': max(0, int(meta.get('last_stall_notice_bucket_minutes') or 0)),
                 'governance': self._sanitize_governance_state(meta.get('governance')),
-                'distribution': self._sanitize_distribution_state(meta.get('distribution')),
                 'frames': frames,
                 'active_node_ids': [str(row['node_id']) for row in frame_rows if bool(row['active'])],
                 'runnable_node_ids': [str(row['node_id']) for row in frame_rows if bool(row['runnable'])],
@@ -3338,7 +3334,6 @@ class TaskLogService:
             'last_visible_output_at': str(meta.get('last_visible_output_at') or '').strip(),
             'last_stall_notice_bucket_minutes': max(0, int(meta.get('last_stall_notice_bucket_minutes') or 0)),
             'governance': self._sanitize_governance_state(meta.get('governance')),
-            'distribution': self._sanitize_distribution_state(meta.get('distribution')),
             'frames': frames,
             'active_node_ids': [record.node_id for record in frame_records if bool(record.active)],
             'runnable_node_ids': [record.node_id for record in frame_records if bool(record.runnable)],
@@ -3622,7 +3617,6 @@ class TaskLogService:
                     externalize_execution_trace=externalize_execution_trace,
                     preserved_execution_trace_ref=preserved_execution_trace_ref,
                 )
-                self._sync_task_node_rounds_locked(node)
             self.refresh_task_view(task_id, mark_unread=False)
             if self._store.get_task_runtime_meta(task.task_id) is None:
                 self.update_task_runtime_meta(task.task_id, last_stall_notice_bucket_minutes=0)
@@ -3655,7 +3649,6 @@ class TaskLogService:
                 externalize_execution_trace=externalize_execution_trace,
                 preserved_execution_trace_ref=preserved_execution_trace_ref,
             )
-            self._sync_task_node_rounds_locked(node)
             return self._store.get_task_node_detail(node_id)
 
     def publish_node_state(self, task_id: str, node_id: str) -> NodeRecord | None:
@@ -3667,7 +3660,6 @@ class TaskLogService:
             if node is None or str(node.task_id or '').strip() != str(task_id or '').strip():
                 return None
             self._sync_node_read_models_locked(node)
-            self._sync_task_node_rounds_locked(node)
             task = self._store.get_task(task_id)
             if task is not None:
                 self._publish_task_node_patch_locked(task=task, node=node)
@@ -3697,82 +3689,27 @@ class TaskLogService:
                 ),
             )
 
-    def _sync_task_node_rounds_locked(self, node: NodeRecord) -> None:
-        if node is None:
-            return
-        next_records = self._task_projection_round_records(node)
-        current_records = [
-            item
-            for item in list(self._store.list_task_node_rounds(node.task_id) or [])
-            if str(getattr(item, 'parent_node_id', '') or '').strip() == str(node.node_id or '').strip()
-        ]
-        if self._round_records_fingerprint(current_records) == self._round_records_fingerprint(next_records):
-            return
-        self._projector.sync_rounds_for_parent(node.task_id, node.node_id, next_records)
-
-    @staticmethod
-    def _round_records_fingerprint(records: list[TaskProjectionRoundRecord]) -> str:
-        normalized = [
-            {
-                'round_id': str(item.round_id or '').strip(),
-                'round_index': int(item.round_index or 0),
-                'label': str(item.label or '').strip(),
-                'is_latest': bool(item.is_latest),
-                'created_at': str(item.created_at or '').strip(),
-                'source': str(item.source or '').strip(),
-                'total_children': int(item.total_children or 0),
-                'completed_children': int(item.completed_children or 0),
-                'running_children': int(item.running_children or 0),
-                'failed_children': int(item.failed_children or 0),
-                'child_node_ids': [str(child_id or '').strip() for child_id in list(item.child_node_ids or []) if str(child_id or '').strip()],
-            }
-            for item in list(records or [])
-        ]
-        return json.dumps(normalized, ensure_ascii=False, sort_keys=True)
-
-    def _task_projection_node_children_fingerprint(
-        self,
-        node: NodeRecord,
-        *,
-        rounds: list[TaskProjectionRoundRecord] | None = None,
-    ) -> str:
-        round_records = list(rounds or self._task_projection_round_records(node))
-        default_round_id = str(round_records[-1].round_id or '') if round_records else ''
+    def _task_projection_node_children_fingerprint(self, node: NodeRecord) -> str:
+        # 轮次投影已停写：指纹只由直接子节点集合构成（顺序按 sort_key 稳定），
+        # 用来判定树缓存是否需要刷新。`rounds` 恒为空，保留键只为兼容旧读端。
         direct_children = list(self._store.list_children(node.node_id) or [])
         direct_child_ids = [
             str(child.node_id or '').strip()
             for child in direct_children
             if str(child.node_id or '').strip()
         ]
-        round_child_ids = {
-            str(child_id or '').strip()
-            for round_record in round_records
-            for child_id in list(round_record.child_node_ids or [])
-            if str(child_id or '').strip()
-        }
-        auxiliary_child_ids = [child_id for child_id in direct_child_ids if child_id not in round_child_ids]
         payload = {
-            'default_round_id': default_round_id,
-            'auxiliary_child_ids': auxiliary_child_ids,
-            'rounds': [
-                {
-                    'round_id': str(round_record.round_id or ''),
-                    'round_index': int(round_record.round_index or 0),
-                    'child_node_ids': [
-                        str(child_id or '').strip()
-                        for child_id in list(round_record.child_node_ids or [])
-                        if str(child_id or '').strip()
-                    ],
-                }
-                for round_record in round_records
-            ],
+            'default_round_id': '',
+            'auxiliary_child_ids': direct_child_ids,
+            'rounds': [],
         }
         return json.dumps(payload, ensure_ascii=False, sort_keys=True)
 
     def _task_projection_node_record(self, node: NodeRecord) -> TaskProjectionNodeRecord:
-        rounds = self._task_projection_round_records(node)
-        default_round_id = str(rounds[-1].round_id or '') if rounds else ''
-        children_fingerprint = self._task_projection_node_children_fingerprint(node, rounds=rounds)
+        # 轮次投影已停止写入（前端不再按轮次分组）。三个 round_* 字段保留空值，
+        # 只为旧读端反序列化不炸；真正的子节点关系由 parent_node_id 直接表达。
+        default_round_id = ''
+        children_fingerprint = self._task_projection_node_children_fingerprint(node)
         acceptance_handshake = normalize_acceptance_handshake((node.metadata or {}).get(ACCEPTANCE_HANDSHAKE_KEY))
         acceptance_handshake_state = str(acceptance_handshake.get('state') or '').strip()
         pending_records = normalize_pending_append_notice_records((node.metadata or {}).get(PENDING_APPEND_NOTICE_RECORDS_KEY))
@@ -3789,8 +3726,8 @@ class TaskLogService:
             title=node.goal or node.node_id,
             updated_at=str(node.updated_at or ''),
             default_round_id=default_round_id,
-            selected_round_id=default_round_id,
-            round_options_count=len(rounds),
+            selected_round_id='',
+            round_options_count=0,
             children_fingerprint=children_fingerprint,
             sort_key=f'{str(node.created_at or "")}:{str(node.node_id or "")}',
             payload={
@@ -3805,8 +3742,8 @@ class TaskLogService:
                 'is_paused': bool(node.is_paused),
                 'pause_reason': str(node.pause_reason or ''),
                 'default_round_id': default_round_id,
-                'selected_round_id': default_round_id,
-                'round_options_count': len(rounds),
+                'selected_round_id': '',
+                'round_options_count': 0,
                 'children_fingerprint': children_fingerprint,
                 'acceptance_handshake_state': acceptance_handshake_state,
                 # 树快照窄读路径：pending_notice_count 的元数据部分直接落在投影里，
@@ -4120,80 +4057,6 @@ class TaskLogService:
                 }
             )
         return latest_round_id, results
-
-    def _projection_entry_effective_status(self, entry: dict[str, Any]) -> str:
-        """D：spawn entry 的投影有效状态——绑定节点真实状态优先。
-
-        - 节点已终态（success/failed）：以节点为准（entry 的 running/error 都是漂移）；
-        - 节点非终态：queued/running 保持原义，其余记账态（如历史事故误盖的
-          error）计为 running——节点还活着就不算 failed；
-        - 绑定节点不可解析：回退 entry.status。
-        """
-        entry_status = str(entry.get('status') or '').strip().lower()
-        bound_node_id = str(entry.get('child_node_id') or '').strip()
-        if not bound_node_id:
-            return entry_status
-        try:
-            node = self._store.get_node(bound_node_id)
-        except Exception:
-            node = None
-        if node is None:
-            return entry_status
-        node_status = str(getattr(node, 'status', '') or '').strip().lower()
-        if node_status in {'success', 'failed'}:
-            return node_status
-        if node_status:
-            return entry_status if entry_status in {'queued', 'running'} else 'running'
-        return entry_status
-
-    def _task_projection_round_records(self, node: NodeRecord) -> list[TaskProjectionRoundRecord]:
-        payload = (node.metadata or {}).get('spawn_operations') if isinstance(node.metadata, dict) else {}
-        if not isinstance(payload, dict):
-            return []
-        records: list[TaskProjectionRoundRecord] = []
-        for index, (round_id, operation) in enumerate(payload.items(), start=1):
-            if not isinstance(operation, dict):
-                continue
-            entries = [item for item in list(operation.get('entries') or []) if isinstance(item, dict)]
-            materialized_entries = [
-                item for item in entries
-                if str(item.get('child_node_id') or '').strip()
-            ]
-            child_node_ids = [
-                str(item.get('child_node_id') or '').strip()
-                for item in materialized_entries
-                if str(item.get('child_node_id') or '').strip()
-            ]
-            total_children = len(child_node_ids)
-            # D：计数以绑定节点真实状态优先于 spawn 合成记账——修复
-            # "entry 被误盖 error 而节点仍 in_progress"（2026-09-15 事故，
-            # failed_children 与节点状态互相矛盾）及反向漂移。
-            effective_statuses = [self._projection_entry_effective_status(item) for item in materialized_entries]
-            completed_children = sum(1 for status in effective_statuses if status == 'success')
-            failed_children = sum(1 for status in effective_statuses if status in {'error', 'failed'})
-            running_children = sum(1 for status in effective_statuses if status in {'queued', 'running'})
-            records.append(
-                TaskProjectionRoundRecord(
-                    task_id=node.task_id,
-                    parent_node_id=node.node_id,
-                    round_id=str(round_id or '').strip() or f'round:{index}',
-                    round_index=index,
-                    label=f'Round {index}',
-                    is_latest=index == len(payload),
-                    created_at=str(
-                        operation.get('created_at')
-                        or next((item.get('started_at') for item in entries if str(item.get('started_at') or '').strip()), '')
-                        or str(node.updated_at or '')
-                    ),
-                    source='explicit',
-                    total_children=total_children,
-                    completed_children=completed_children,
-                    running_children=running_children,
-                    failed_children=failed_children,
-                    child_node_ids=child_node_ids,
-                )
-            )
-        return records
 
     def _runtime_frame_record(self, *, task: TaskRecord, frame: dict[str, Any]) -> TaskProjectionRuntimeFrameRecord:
         payload = dict(frame or {})
@@ -4689,7 +4552,11 @@ class TaskLogService:
         return next_task
 
     def _publish_task_summary_patch_locked(self, *, task: TaskRecord, previous_task: TaskRecord | None = None) -> bool:
-        payload_task = self._task_summary_payload(task, disk_usage_bytes=self._safe_task_disk_usage(task.task_id))
+        payload_task = self._task_summary_payload(
+            task,
+            disk_usage_bytes=self._safe_task_disk_usage(task.task_id),
+            node_count=self._safe_task_node_count(task.task_id),
+        )
         fingerprint = self._task_summary_fingerprint(task)
         runtime_meta = dict(self._store.get_task_runtime_meta(task.task_id) or self._default_runtime_meta())
         previous_fingerprint = str(runtime_meta.get('summary_fingerprint') or '').strip()
@@ -4712,6 +4579,26 @@ class TaskLogService:
             dispatch_immediate=self._summary_dispatch_immediate(task=task, previous_task=previous_task),
         )
         return True
+
+    def _node_pending_notice_badge_count(self, *, task_id: str, node: NodeRecord) -> int:
+        """树上未读徽标：待处理根通知 + 子节点转上来的 delivered 行。
+
+        与 tree-snapshot 的 pending_notice_count 同口径（转述族不抬徽标）。
+        `(task_id, node_id)` 索引下每条 node.patch 只读本节点自己的少量通知行。
+        """
+        pending_root = len(
+            normalize_pending_append_notice_records(
+                (node.metadata or {}).get(PENDING_APPEND_NOTICE_RECORDS_KEY)
+            )
+        )
+        delivered = 0
+        for item in list(self._store.list_task_node_notifications(task_id, node.node_id) or []):
+            if str(item.status or '').strip() != 'delivered':
+                continue
+            if is_system_relay_notice(item):
+                continue
+            delivered += 1
+        return pending_root + delivered
 
     def _publish_task_node_patch_locked(self, *, task: TaskRecord, node: NodeRecord) -> None:
         projected = self._store.get_task_node(node.node_id)
@@ -4736,6 +4623,12 @@ class TaskLogService:
                     getattr(projected, 'children_fingerprint', '')
                     or ((getattr(projected, 'payload', None) or {}).get('children_fingerprint') if projected is not None else '')
                     or ''
+                ),
+                # 徽标数字随状态帧一起下发：消息投递/消费/并入后，树上的未读数
+                # 不必等下一次整树快照。
+                'pending_notice_count': self._node_pending_notice_badge_count(
+                    task_id=task.task_id,
+                    node=node,
                 ),
             }
         }
@@ -4771,7 +4664,13 @@ class TaskLogService:
         self._dispatch_live_event_locked(task=task, event_type='task.live.patch', data=payload)
 
     def _publish_task_terminal_locked(self, *, task: TaskRecord) -> None:
-        payload = {'task': self._task_summary_payload(task, disk_usage_bytes=self._safe_task_disk_usage(task.task_id))}
+        payload = {
+            'task': self._task_summary_payload(
+                task,
+                disk_usage_bytes=self._safe_task_disk_usage(task.task_id),
+                node_count=self._safe_task_node_count(task.task_id),
+            )
+        }
         self._append_task_event(task=task, event_type='task.terminal', data=payload)
         self._dispatch_live_event_locked(task=task, event_type='task.terminal', data=payload)
         status = str(getattr(task, 'status', '') or '').strip().lower()
@@ -5042,7 +4941,12 @@ class TaskLogService:
             return False
 
     @staticmethod
-    def _task_summary_payload(task: TaskRecord, *, disk_usage_bytes: int | None = None) -> dict[str, Any]:
+    def _task_summary_payload(
+        task: TaskRecord,
+        *,
+        disk_usage_bytes: int | None = None,
+        node_count: int | None = None,
+    ) -> dict[str, Any]:
         metadata = dict(task.metadata or {})
         payload: dict[str, Any] = {
             'task_id': task.task_id,
@@ -5061,6 +4965,10 @@ class TaskLogService:
             'max_depth': int(task.max_depth or 0),
             'token_usage': task.token_usage.model_dump(mode='json'),
         }
+        # 任务卡片的「节点数」随增量 patch 下发；取不到时省略字段
+        # （前端合并语义下缺字段不清空旧值）。
+        if node_count is not None:
+            payload['node_count'] = int(max(0, int(node_count or 0)))
         # 磁盘治理：任务总占用（目录+DB 明细，对账口径，延迟 ≤1h）随增量 patch
         # 下发；取不到时省略字段（前端合并语义下缺字段不清空旧值）。
         if disk_usage_bytes is not None:
@@ -5070,6 +4978,12 @@ class TaskLogService:
     def _safe_task_disk_usage(self, task_id: str) -> int | None:
         try:
             return int(self._store.get_task_disk_usage(task_id) or 0)
+        except Exception:
+            return None
+
+    def _safe_task_node_count(self, task_id: str) -> int | None:
+        try:
+            return int(self._store.count_task_nodes(task_id) or 0)
         except Exception:
             return None
 
@@ -5173,7 +5087,6 @@ class TaskLogService:
             'dispatch_running': self._sanitize_dispatch_counters(state.get('dispatch_running')),
             'dispatch_queued': self._sanitize_dispatch_counters(state.get('dispatch_queued')),
             'governance': self._sanitize_governance_state(state.get('governance')),
-            'distribution': self._sanitize_distribution_state(state.get('distribution')),
             'frames': frames,
         }
         # 只有增量档自带过期名单；全量档每帧自己有 stale 字段，别的生产者（read_runtime_state）
@@ -5211,7 +5124,6 @@ class TaskLogService:
         state['dispatch_running'] = cls._sanitize_dispatch_counters(state.get('dispatch_running'))
         state['dispatch_queued'] = cls._sanitize_dispatch_counters(state.get('dispatch_queued'))
         state['governance'] = cls._sanitize_governance_state(state.get('governance'))
-        state['distribution'] = cls._sanitize_distribution_state(state.get('distribution'))
         state['frames'] = [cls._sanitize_runtime_frame(frame) for frame in list(state.get('frames') or []) if isinstance(frame, dict)]
         return state
 

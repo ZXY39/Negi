@@ -784,7 +784,6 @@ class MemoryAssemblyConfig(Base):
             'create_async_task',
             'manage_task_nodes',
             'perf_inspect',
-            'task_append_notice',
             'task_delete',
             'task_failed_nodes',
             'task_list',
@@ -851,6 +850,12 @@ class MainRuntimeConfig(Base):
     governance_store_path: str = '.g3ku/main-runtime/governance.sqlite3'
     default_max_depth: int = 10
     hard_max_depth: int = 4
+    # 派生闸门：单任务节点总数上限（含验收节点）。验收节点是资源约束的一部分
+    # （不计入完成判据，但占节点额度）。
+    max_task_nodes: int = 200
+    # H3：节点道单次工具调用的机器上限（秒）。模型请求更长的值时被夹紧到上限并在
+    # 结果里说明；需要更久的工作应拆成子节点。数值需按实盘资源标定（设计 §16 开放点 3）。
+    node_tool_timeout_ceiling_seconds: float = 900.0
     event_history: "MainRuntimeEventHistoryConfig" = Field(default_factory=lambda: MainRuntimeEventHistoryConfig())
     disk_guard: "MainRuntimeDiskGuardConfig" = Field(default_factory=lambda: MainRuntimeDiskGuardConfig())
     node_dispatch_concurrency: "NodeDispatchConcurrencyConfig" = Field(default_factory=lambda: NodeDispatchConcurrencyConfig())
@@ -1187,12 +1192,11 @@ class UpdateCheckConfig(Base):
 
 
 class ContextRefreshConfig(Base):
-    """Idle boundary for the context carriers that are otherwise pinned.
+    """Legacy idle-refresh settings (kept for config compatibility).
 
-    `tools[]` and the frontdoor memory snapshot only change bytes where the reusable
-    prefix is already broken. Measured provider hits do not decay with idle length (the
-    residual is a shared head other traffic keeps warm), so this caps how long a revoked
-    tool name may stay declared; it does not buy a guaranteed free refresh.
+    Idle time is no longer a reprint boundary: pinned heads reprint only at compaction,
+    and changes between reprints are delivered as one-time `[RUNTIME_NOTICE]` messages.
+    The section remains so existing config files and the admin API keep loading.
     """
 
     enabled: bool = True

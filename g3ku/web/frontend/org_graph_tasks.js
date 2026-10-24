@@ -135,6 +135,12 @@ function formatTaskBytes(value) {
     return `${Math.round(bytes)}B`;
 }
 
+function formatTaskNodeCount(value) {
+    const count = Number(value);
+    if (!Number.isFinite(count) || count < 0) return "--";
+    return String(Math.trunc(count));
+}
+
 function taskDiskUsageSortValue(task) {
     const value = Number(task?.disk_usage_bytes);
     return Number.isFinite(value) && value > 0 ? value : 0;
@@ -871,6 +877,7 @@ function taskGridRenderSignature(meta) {
                 statusLabel: taskStatusLabel(task),
                 createdAt: taskCreatedAtText(task),
                 diskUsage: taskDiskUsageSortValue(task),
+                nodeCount: Number(task?.node_count || 0),
                 pauseHintPhase: String(taskPauseHintState(taskId)?.phase || ""),
                 tokenUsage: tokenUsage.tracked
                     ? [tokenUsage.input_tokens, tokenUsage.output_tokens, tokenUsage.cache_hit_tokens]
@@ -1302,7 +1309,7 @@ function resetTaskView() {
     if (U.tdStatus) U.tdStatus.textContent = "未知";
     if (U.tdStatusPill) U.tdStatusPill.dataset.status = "unknown";
     U.feedTitle.textContent = "Node Details";
-    if (U.adOutput) U.adOutput.textContent = "暂无最终输出";
+    if (U.adOutput) U.adOutput.textContent = "暂无提交输出";
     if (U.adFlow) U.adFlow.innerHTML = '<div class="empty-state task-trace-empty">选择任务树中的节点后，这里会显示执行流程。</div>';
     if (U.adAcceptance) U.adAcceptance.textContent = "暂无验收结果";
     if (U.adTokenSummary) U.adTokenSummary.textContent = "";

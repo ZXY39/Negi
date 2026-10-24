@@ -13,7 +13,6 @@ from __future__ import annotations
 
 import asyncio
 from types import SimpleNamespace
-from unittest.mock import MagicMock
 
 from main.models import NodeFinalResult, NodeRecord
 from main.protocol import now_iso
@@ -136,11 +135,6 @@ def test_rework_state_with_a_previous_pointer_freezes() -> None:
     assert '没有待裁定的闭合提交' in reason
 
 
-def test_block_verification_state_releases_the_gate() -> None:
-    """阻塞核验车道派验前写 waiting_block_verification：那是待裁定状态。"""
-    assert _freeze(_runner(_execution(metadata=_handshake(state='waiting_block_verification')))) == ''
-
-
 def test_landed_verdict_states_do_not_reopen_the_gate() -> None:
     """裁定已落过的状态不再派验：重验必须由登记新一轮提交的车道重新开门。"""
     for state in ('accepted', 'rejected_terminal', 'canceled_by_execution_failure'):
@@ -165,8 +159,11 @@ def test_notice_rule_stays_scoped_to_the_root_final_acceptance() -> None:
     assert _freeze(runner) == ''
 
 
-def test_reused_terminal_acceptance_is_voided_before_reverify() -> None:
-    """spawn entry 绑定的验收节点已终态时，旧判词必须先作废再重验。"""
+def test_reused_terminal_acceptance_keeps_its_verdict() -> None:
+    """spawn entry 绑定的验收节点已终态时直接复用：重放创建账本不得重开裁定。
+
+    只有执行节点的新提交（握手路径）才有权重置终态验收。
+    """
     stale = _acceptance(status='failed', final_output='目标文件不存在', failure_reason='目标文件不存在', finished_at=now_iso())
     runner = object.__new__(NodeRunner)
     runner._store = _FakeStore({EXEC_ID: _execution(status='success'), ACC_ID: stale})  # type: ignore[attr-defined]
@@ -192,90 +189,10 @@ def test_reused_terminal_acceptance_is_voided_before_reverify() -> None:
         index=0,
     )
 
-    assert acceptance.status == 'in_progress'
-    assert acceptance.failure_reason == ''
-    assert [entry['failure_reason'] for entry in acceptance.metadata['rejection_history']] == ['目标文件不存在']
-    assert published == [ACC_ID]
-
-
-def test_child_pipeline_waits_instead_of_consuming_a_frozen_acceptance() -> None:
-    """冻结的 partial 绝不能进裁定消费点：它会被读成一次通过。
-
-    构造：第一次判定冻结（对方还在重跑上一轮打回），等待后对方闭合，第二次判定放行。
-    断言验收节点只被派发一次、续接通知只在真打回后发、握手从未被写成 accepted。
-    """
-    runner = object.__new__(NodeRunner)
-    child = _execution(status='in_progress')
-    acceptance = _acceptance()
-    runner._store = _FakeStore({
-        EXEC_ID: child,
-        ACC_ID: acceptance,
-        ROOT_ID: child.model_copy(update={'node_id': ROOT_ID, 'parent_node_id': '', 'depth': 0}),
-    })  # type: ignore[attr-defined]
-    runner.reconcile_spawn_entry_child_bindings = lambda **kwargs: None  # type: ignore[attr-defined]
-    runner._stamp_spawn_owner_metadata = lambda **kwargs: None  # type: ignore[attr-defined]
-    runner._task_terminal_reason = lambda task_id, task=None: ''  # type: ignore[attr-defined]
-    runner._node_terminal_reason = lambda node, default_failed='', default_success='': ''  # type: ignore[attr-defined]
-    runner._update_spawn_entry = lambda **kwargs: None  # type: ignore[attr-defined]
-    runner._ensure_spawn_acceptance_node = lambda **kwargs: acceptance  # type: ignore[attr-defined]
-    runner._refresh_acceptance_node_metadata = lambda **kwargs: kwargs['node']  # type: ignore[attr-defined]
-    runner._set_execution_waiting_acceptance_state = lambda **kwargs: None  # type: ignore[attr-defined]
-    runner._child_handoff_payload = lambda **kwargs: {  # type: ignore[attr-defined]
-        'summary': '交付正文', 'output_ref': 'artifact:out-1', 'result_payload_ref': 'artifact:result-1', 'evidence_summary': '',
-    }
-    runner._log_service = SimpleNamespace(  # type: ignore[attr-defined]
-        update_node_check_result=lambda task_id, node_id, value: None
-    )
-    runner._supersede_consumed_notices_from_source = MagicMock()  # type: ignore[attr-defined]
-    runner._persist_node_notification_direct = MagicMock()  # type: ignore[attr-defined]
-    runner._spawn_failure_info_from_node = lambda **kwargs: None  # type: ignore[attr-defined]
-
-    dispatched: list[str] = []
-    reasons = iter(['验收冻结：被检验执行节点没有待裁定的闭合提交，需待其提交 final 结果并登记交接后再继续核验。', ''])
-    runner._final_acceptance_freeze_reason = lambda **kwargs: next(reasons)  # type: ignore[attr-defined]
-
-    async def _run_nested(task_id: str, node_id: str) -> NodeFinalResult:
-        dispatched.append(node_id)
-        if node_id == EXEC_ID:
-            return NodeFinalResult(status='success', delivery_status='final', summary='done', answer='正文', evidence=[], remaining_work=[], blocking_reason='')
-        return NodeFinalResult(status='success', delivery_status='final', summary='验收通过', answer='', evidence=[], remaining_work=[], blocking_reason='')
-
-    runner._run_nested_node = _run_nested  # type: ignore[attr-defined]
-
-    def _handle(*, task, acceptance, result):  # noqa: ANN001 - 只在真派发后被调用
-        assert result.delivery_status != 'partial', '冻结结果不得进入裁定消费点'
-        return result
-
-    runner._handle_acceptance_node_result = _handle  # type: ignore[attr-defined]
-
-    cached_payload = {
-        'entries': [{
-            'child_node_id': EXEC_ID,
-            'acceptance_node_id': ACC_ID,
-            'requires_acceptance': True,
-            'status': 'running',
-        }]
-    }
-    spec = SimpleNamespace(goal='do the work', acceptance_prompt='按验收标准核验')
-    parent = _execution().model_copy(update={'node_id': ROOT_ID, 'status': 'in_progress'})
-
-    result = asyncio.run(runner._run_child_pipeline(
-        task=_task(),
-        parent=parent,
-        spec=spec,
-        cache_key='round-1',
-        cached_payload=cached_payload,
-        index=0,
-    ))
-
-    assert result.check_result == '验收通过'
-    # 对方：进管线一次 + 冻结等待一次；验收：只在闭合后派发一次
-    assert dispatched.count(ACC_ID) == 1
-    assert dispatched.count(EXEC_ID) == 2
-    assert dispatched.index(EXEC_ID) < dispatched.index(ACC_ID)
-    # 等待轮没有拒收，所以不该发续接通知
-    runner._persist_node_notification_direct.assert_not_called()
-    runner._supersede_consumed_notices_from_source.assert_not_called()
+    assert acceptance.status == 'failed'
+    assert acceptance.failure_reason == '目标文件不存在'
+    assert acceptance.final_output == '目标文件不存在'
+    assert published == []
 
 
 def _consume(runner: NodeRunner, result: NodeFinalResult) -> NodeFinalResult:
@@ -283,7 +200,9 @@ def _consume(runner: NodeRunner, result: NodeFinalResult) -> NodeFinalResult:
     runner._finalize_acceptance_pass = lambda **kwargs: passed.append('pass')  # type: ignore[attr-defined]
     runner._record_acceptance_evidence_audit = lambda **kwargs: None  # type: ignore[attr-defined]
     runner._consumed_passes = passed  # type: ignore[attr-defined]
-    return runner._handle_acceptance_node_result(task=_task(), acceptance=_acceptance(), result=result)
+    return asyncio.run(
+        runner._handle_acceptance_node_result(task=_task(), acceptance=_acceptance(), result=result)
+    )
 
 
 def test_frozen_partial_passes_through_the_verdict_consumer_untouched() -> None:

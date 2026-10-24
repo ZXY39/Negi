@@ -606,10 +606,8 @@ const U = {
     taskPerformanceBar: document.getElementById("task-performance-bar"),
     taskToolbar: document.getElementById("task-toolbar"),
     taskDepthSelect: document.getElementById("task-depth-select"),
-    taskDepthCustomWrap: document.getElementById("task-depth-custom-wrap"),
-    taskDepthCustomInput: document.getElementById("task-depth-custom-input"),
-    taskDepthCustomSave: document.getElementById("task-depth-custom-save"),
     taskDepthHint: document.getElementById("task-depth-hint"),
+    taskExpandAllInput: document.getElementById("td-expand-all-input"),
     taskPageSize: document.getElementById("task-page-size"),
     taskPageInfo: document.getElementById("task-page-info"),
     taskPagePrev: document.getElementById("task-page-prev"),
@@ -639,6 +637,7 @@ const U = {
     taskTreeSearchInput: document.getElementById("task-tree-search-input"),
     taskTreeSearchResults: document.getElementById("task-tree-search-results"),
     tree: document.getElementById("org-tree-container"),
+    treeFloatingTools: document.getElementById("task-tree-floating-tools"),
     taskSelectionEmpty: document.getElementById("task-selection-empty-inline"),
     taskDetailBackdrop: document.getElementById("task-detail-backdrop"),
     taskDetailDrawer: document.getElementById("task-detail-drawer"),
@@ -656,14 +655,19 @@ const U = {
     adRole: document.getElementById("ad-role"),
     adStatus: document.getElementById("ad-status"),
     adTokenSummary: document.getElementById("ad-token-summary"),
+    adInitialPrompt: document.getElementById("ad-initial-prompt"),
+    taskFlowBox: document.getElementById("task-flow-box"),
     adFlow: document.getElementById("ad-input"),
     adMessages: document.getElementById("ad-messages"),
+    adMessageTabs: document.getElementById("ad-message-tabs"),
     adNoticeComposer: document.getElementById("ad-notice-composer"),
     adNoticeInput: document.getElementById("ad-notice-input"),
     adNoticeSend: document.getElementById("ad-notice-send"),
     adSpawnReviews: document.getElementById("ad-spawn-reviews"),
     adOutput: document.getElementById("ad-output"),
+    adOutputCopy: document.getElementById("ad-output-copy"),
     adAcceptance: document.getElementById("ad-check"),
+    adAcceptanceCopy: document.getElementById("ad-check-copy"),
     adErrorHistory: document.getElementById("ad-error-history"),
     adErrorHistoryRefresh: document.getElementById("ad-error-history-refresh"),
     adFlowHeading: document.getElementById("ad-input")?.closest(".agent-detail-section")?.querySelector("h4"),
@@ -1930,7 +1934,11 @@ function refreshModelRetryToastClamp(toastEl, textEl) {
         toastEl.title = "点击收起";
         return;
     }
-    const clamped = (textEl.scrollHeight || 0) > (textEl.clientHeight || 0) + 1;
+    // 展开阈值带滞后：正文正好卡在 2 行边界时，实时文本每变一个字符就会在
+    // "可展开/不可展开"之间来回翻，框体高度跟着一跳一跳。
+    const overflow = (textEl.scrollHeight || 0) - (textEl.clientHeight || 0);
+    const wasClamped = toastEl.classList.contains("is-clamped");
+    const clamped = wasClamped ? overflow > 1 : overflow > 8;
     toastEl.classList.toggle("is-clamped", clamped);
     if (clamped) {
         toastEl.setAttribute("tabindex", "0");
@@ -2353,8 +2361,9 @@ function renderTaskSectionHeading(heading, { icon, label, count = 0 } = {}) {
     `;
 }
 
-function renderFlowHeading(count = 0) {
-    renderTaskSectionHeading(U.adFlowHeading, { icon: "workflow", label: "执行流程", count });
+function renderFlowHeading() {
+    if (!(U.adFlowHeading instanceof HTMLElement)) return;
+    U.adFlowHeading.innerHTML = '<i data-lucide="workflow"></i><span>执行流程</span>';
     icons();
 }
 
@@ -2559,17 +2568,12 @@ function applyTaskDefaultsPayload(payload = {}) {
 }
 
 function renderTaskDepthControl() {
-    if (!U.taskDepthSelect || !U.taskDepthHint || !U.taskDepthCustomWrap || !U.taskDepthCustomInput || !U.taskDepthCustomSave) return;
+    if (!U.taskDepthSelect || !U.taskDepthHint) return;
     const defaultMaxDepth = Math.max(0, normalizeInt(S.taskDefaults.defaultMaxDepth, 1));
     const currentMaxDepth = Math.max(0, normalizeInt(S.taskDefaults.maxDepth, defaultMaxDepth));
     const disabled = S.taskDefaults.loading || S.taskDefaults.saving;
     const currentIsCustomValue = !TASK_DEPTH_PRESET_VALUES.includes(currentMaxDepth);
     const editingCustomValue = !!S.taskDefaults.customMode;
-    const customDraft = String(
-        editingCustomValue
-            ? (S.taskDefaults.customDraft || currentMaxDepth)
-            : (S.taskDefaults.customDraft || "")
-    );
     const select = U.taskDepthSelect;
 
     select.innerHTML = "";
@@ -2597,11 +2601,6 @@ function renderTaskDepthControl() {
     select.dataset.scope = "global";
     buildResourceSelect(select);
     syncResourceSelectUI(select);
-
-    U.taskDepthCustomWrap.hidden = !editingCustomValue;
-    U.taskDepthCustomInput.disabled = disabled;
-    U.taskDepthCustomSave.disabled = disabled;
-    U.taskDepthCustomInput.value = customDraft;
 
     if (U.taskDepthHint) {
         U.taskDepthHint.textContent = "";
@@ -2650,19 +2649,81 @@ async function saveTaskDefaultMaxDepth(value) {
     }
 }
 
-async function submitCustomTaskDepth() {
-    if (!U.taskDepthCustomInput) return;
+async function submitCustomTaskDepth(rawValue) {
     if (S.taskDefaults.loading || S.taskDefaults.saving) return;
-    const parsed = parseNonNegativeInteger(U.taskDepthCustomInput.value);
+    const value = rawValue === undefined ? (S.taskDefaults.customDraft || "") : rawValue;
+    const parsed = parseNonNegativeInteger(value);
     if (parsed === null) {
         showToast({ title: "自定义深度无效", text: "请输入不为负数的整数。", kind: "error" });
-        U.taskDepthCustomInput.focus();
-        U.taskDepthCustomInput.select();
+        const inlineInput = taskDepthInlineInput();
+        inlineInput?.focus();
+        inlineInput?.select();
         return;
     }
     S.taskDefaults.customDraft = String(parsed);
     S.taskDefaults.customMode = !TASK_DEPTH_PRESET_VALUES.includes(parsed);
+    closeResourceSelects();
     await saveTaskDefaultMaxDepth(parsed);
+}
+
+function taskDepthInlineInput() {
+    return document.querySelector("#task-depth-select-menu .task-depth-inline-input");
+}
+
+// “自定义”这一行本身就是输入位：选中它不提交值，只把光标放进行内输入框，
+// 回车或“应用”才写入。以前是按钮旁边再挂一个独立输入框，占位又打断点击流。
+function buildTaskDepthCustomOptionRow(shell, row) {
+    row.classList.add("resource-select-option--custom");
+    const label = document.createElement("span");
+    label.className = "resource-select-option-label";
+    label.textContent = "自定义";
+    const input = document.createElement("input");
+    input.type = "number";
+    input.min = "0";
+    input.step = "1";
+    input.inputMode = "numeric";
+    input.className = "task-depth-inline-input spinless-number-input";
+    input.value = String(S.taskDefaults.customDraft || S.taskDefaults.maxDepth || "");
+    input.setAttribute("aria-label", "自定义全局任务树深度");
+    input.placeholder = "层数";
+    const apply = document.createElement("button");
+    apply.type = "button";
+    apply.className = "toolbar-btn ghost small task-depth-inline-apply";
+    apply.textContent = "应用";
+    row.addEventListener("click", (e) => {
+        e.stopPropagation();
+        if (e.target === input || e.target === apply) return;
+        input.focus();
+        input.select();
+    });
+    input.addEventListener("click", (e) => e.stopPropagation());
+    input.addEventListener("input", () => {
+        S.taskDefaults.customDraft = String(input.value ?? "");
+    });
+    input.addEventListener("keydown", (e) => {
+        if (e.key === "Enter") {
+            e.preventDefault();
+            e.stopPropagation();
+            void submitCustomTaskDepth(input.value);
+            return;
+        }
+        if (e.key === "Escape") {
+            e.preventDefault();
+            e.stopPropagation();
+            closeResourceSelects({ restoreFocus: true });
+        }
+    });
+    apply.addEventListener("click", (e) => {
+        e.stopPropagation();
+        void submitCustomTaskDepth(input.value);
+    });
+    row.append(label, input, apply);
+    queueMicrotask(() => {
+        if (!shell.classList.contains("is-open")) return;
+        input.focus();
+        input.select();
+    });
+    return row;
 }
 
 function taskCreatedSortValue(task) {
@@ -3369,7 +3430,6 @@ function finalizePausedCeoTurn(text = "已暂停", { source = null, landTranscri
             turn.textEl.classList.remove("pending");
             if (turn.steps > 0) {
                 turn.flowEl.hidden = false;
-                turn.flowEl.open = true;
                 updateCeoTurnMeta(turn, "已暂停");
             } else {
                 turn.flowEl.hidden = true;
@@ -3443,7 +3503,6 @@ function holdApprovalPausedCeoTurnLegacy(text = "", { source = "", turnId = "" }
         turn.finalized = false;
         if (turn.steps > 0) {
             turn.flowEl.hidden = false;
-            turn.flowEl.open = true;
         }
         updateCeoTurnMeta(turn, "绛夊緟瀹℃壒");
     }, { scrollMode: "preserve" });
@@ -4807,7 +4866,7 @@ function renderCeoToolEventsIntoTurn(turn, toolEvents = [], { source = "" } = {}
     if (events.length) syncCeoTurnLoadingOnlyState(turn, false);
     if (events.length) {
         turn.flowEl.hidden = false;
-        turn.flowEl.open = wasFlowOpen;
+        // 外层执行流程框常开；可折叠的只有内部每条中途文本。
     }
     if (!events.length) updateCeoTurnMeta(turn, "等待工具开始...");
     return events.length;
@@ -4917,6 +4976,40 @@ function sliceCeoRailTurns(turns, turn) {
     });
 }
 
+function ceoTraceElapsedSeconds(turns = []) {
+    let elapsedTotal = 0;
+    let hasElapsed = false;
+    let startMs = null;
+    let endMs = null;
+    (Array.isArray(turns) ? turns : []).forEach((turnItem) => {
+        (Array.isArray(turnItem?.tools) ? turnItem.tools : []).forEach((tool) => {
+            const seconds = Number(tool?.elapsed_seconds);
+            if (Number.isFinite(seconds) && seconds > 0) {
+                elapsedTotal += seconds;
+                hasElapsed = true;
+            }
+            const started = Date.parse(String(tool?.started_at || ""));
+            const finished = Date.parse(String(tool?.finished_at || ""));
+            if (Number.isFinite(started)) startMs = startMs === null ? started : Math.min(startMs, started);
+            if (Number.isFinite(finished)) endMs = endMs === null ? finished : Math.max(endMs, finished);
+        });
+    });
+    if (hasElapsed) return elapsedTotal;
+    if (startMs !== null) return Math.max(0, ((endMs !== null ? endMs : Date.now()) - startMs) / 1000);
+    return 0;
+}
+
+function formatCeoExecutionSeconds(seconds) {
+    const value = Number(seconds);
+    if (!Number.isFinite(value) || value <= 0) return "";
+    if (value >= 60) {
+        const minutes = Math.floor(value / 60);
+        const rest = Math.round(value % 60);
+        return `${minutes}m${rest}s`;
+    }
+    return `${value >= 10 ? Math.round(value) : value.toFixed(1)}s`;
+}
+
 function renderCeoTurnsIntoTurn(turn, turns = [], { interruptedMarker = false } = {}) {
     if (!turn?.listEl || !turn?.flowEl) return 0;
     if (typeof buildTurnGroupDescriptors !== "function" || typeof renderTraceStep !== "function") return 0;
@@ -4933,19 +5026,28 @@ function renderCeoTurnsIntoTurn(turn, turns = [], { interruptedMarker = false } 
     descriptors.forEach((step, index) => {
         if (!step.textOnly) lastGroupIndex = index;
     });
+    // 末组带中途正文时默认收起（与节点详情一致）：摘要只留一行，点击展开全文；
+    // 无正文的末组（纯工具轮）仍保持原来的自动展开。
+    const autoOpenLast = lastGroupIndex >= 0
+        && !String(descriptors[lastGroupIndex]?.turnText || "").trim();
     turn.listEl.innerHTML = descriptors.map((step, index) => renderTraceStep({
         ...step,
-        open: index === lastGroupIndex,
+        open: index === lastGroupIndex ? autoOpenLast : false,
         extraClass: interruptedMarker && index === descriptors.length - 1 ? "ceo-turn-interrupted" : "",
     })).join("");
     if (typeof bindTraceRoundToolStrips === "function") bindTraceRoundToolStrips(turn.listEl);
     if (typeof bindTraceFieldCopyActions === "function") bindTraceFieldCopyActions(turn.listEl);
+    if (typeof bindTaskTraceListInteractions === "function") bindTaskTraceListInteractions(turn.listEl);
     turn.steps = descriptors.length;
     turn.railTurns = visibleTurns;
     turn.railMetaLabel = ceoRailMetaLabel(turn, visibleTurns) || `${descriptors.length} 组`;
     turn.lastExecutionTraceSummary = { turns: descriptors };
     turn.flowEl.hidden = false;
-    turn.flowEl.open = true;
+    // 框默认折叠；用户此前展开过的话由 applyCeoTurnTraceViewState 按 flowOpen 还原。
+    if (turn.flowUsageEl) {
+        const elapsedSeconds = ceoTraceElapsedSeconds(visibleTurns);
+        turn.flowUsageEl.textContent = formatCeoExecutionSeconds(elapsedSeconds) || "--";
+    }
     applyCeoTurnTraceViewState(turn, turnViewState);
     // 整帧重建换掉了 listEl，实时行先躲在容器里；这一帧账本已经画上的调用让它退场，
     // 还在跑的挂回新的组体内——同一件事不再因为换帧而改变位置。
@@ -5132,7 +5234,6 @@ function holdApprovalPausedCeoTurn({ source = "", turnId = "", text = "" } = {})
         turn.finalized = false;
         if (turn.steps > 0) {
             turn.flowEl.hidden = false;
-            turn.flowEl.open = true;
         }
         updateCeoTurnMeta(turn, "等待审批");
         icons();
@@ -5276,7 +5377,6 @@ function renderPersistedCeoAssistantTurn(item = {}, options = {}) {
         else renderCeoAssistantTextIntoTurn(turn, content || (status === "paused" ? "已暂停" : ""), { status });
         renderCeoTurnsIntoTurn(turn, turns, { interruptedMarker: isFollowUpArchive });
         turn.flowEl.hidden = false;
-        turn.flowEl.open = true;
         setCeoTurnUsage(turn, historyUsage, { completedAt: historyTimestamp });
         setCeoTurnUsageCollapsed(turn, true);
         renderCeoThinkingSummaryFromSnapshot(turn.el, item?.thinking);
@@ -5568,8 +5668,10 @@ function createPendingCeoTurn(source = "user", { scrollMode = "preserve" } = {})
                 </div>
                 <details class="interaction-flow" hidden>
                     <summary class="interaction-flow-summary">
-                        <span class="interaction-flow-title">Interaction Flow</span>
-                        <span class="interaction-flow-meta">等待工具开始...</span>
+                        <span class="interaction-flow-chevron" aria-hidden="true"></span>
+                        <span class="interaction-flow-usage" data-flow-usage></span>
+                        <span class="interaction-flow-meta" hidden>等待工具开始...</span>
+                        <span class="interaction-flow-guide" aria-hidden="true"></span>
                     </summary>
                     <div class="interaction-flow-list" role="list"></div>
                     <div class="interaction-flow-footer" hidden>
@@ -5585,6 +5687,7 @@ function createPendingCeoTurn(source = "user", { scrollMode = "preserve" } = {})
             textEl: el.querySelector(".assistant-text"),
             usageEl: el.querySelector(".ceo-turn-usage"),
             flowEl: el.querySelector(".interaction-flow"),
+            flowUsageEl: el.querySelector("[data-flow-usage]"),
             metaEl: el.querySelector(".interaction-flow-meta"),
             listEl: el.querySelector(".interaction-flow-list"),
             footerEl: el.querySelector(".interaction-flow-footer"),
@@ -6994,9 +7097,7 @@ function finalizeCeoTurn(text, meta = {}) {
             if (turn.steps > 0) {
                 const hasRunningStep = hasRunningCeoToolStep(turn);
                 turn.flowEl.hidden = false;
-                // 轨道的展开态已由 renderCeoTurnsIntoTurn 按用户选择还原,
-                // 收尾不再强制展开;仅无轨道(纯工具事件回合)保留默认展开旧行为。
-                if (!finalTurns.length) turn.flowEl.open = true;
+                // 执行流程框默认折叠，收尾也不再强制展开。
                 updateCeoTurnMeta(
                     turn,
                     turn.hasError
@@ -7075,9 +7176,7 @@ function finalizeCeoTurn(text, meta = {}) {
             if (turn.steps > 0) {
                 const hasRunningStep = hasRunningCeoToolStep(turn);
                 turn.flowEl.hidden = false;
-                // 轨道的展开态已由 renderCeoTurnsIntoTurn 按用户选择还原,
-                // 收尾不再强制展开;仅无轨道(纯工具事件回合)保留默认展开旧行为。
-                if (!finalTurns.length) turn.flowEl.open = true;
+                // 执行流程框默认折叠，收尾也不再强制展开。
                 updateCeoTurnMeta(
                     turn,
                     turn.hasError
@@ -7170,7 +7269,7 @@ function configureTaskDetailSections() {
     renderMessageHeading(0);
     renderSpawnReviewHeading(0);
     renderArtifactHeading(0);
-    if (U.adOutputHeading) U.adOutputHeading.innerHTML = '<i data-lucide="arrow-up-from-line"></i> 最终输出';
+    if (U.adOutputHeading) U.adOutputHeading.innerHTML = '<i data-lucide="arrow-up-from-line"></i> 提交输出';
     if (U.adOutput) U.adOutput.classList.add("task-trace-output");
     if (U.adAcceptanceHeading) U.adAcceptanceHeading.innerHTML = '<i data-lucide="shield-check"></i> 验收结果';
     if (U.adFlow) {
@@ -7186,7 +7285,9 @@ function configureTaskDetailSections() {
         U.adSpawnReviews.classList.add("task-trace-host");
     }
     if (U.adAcceptance) U.adAcceptance.classList.add("task-trace-acceptance");
-    if (U.nodeEmpty) U.nodeEmpty.textContent = "选择任务树中的节点后，这里会显示执行流程、最终输出、验收结果和工件。";
+    if (U.nodeEmpty) U.nodeEmpty.textContent = "选择任务树中的节点后，这里会显示执行流程、提交输出、验收结果和工件。";
+    if (typeof bindTaskMessageTabs === "function") bindTaskMessageTabs();
+    if (typeof bindTaskOutputCopyActions === "function") bindTaskOutputCopyActions();
     if (U.adOutputSection) U.adOutputSection.hidden = false;
     if (U.adLogsSection) U.adLogsSection.hidden = true;
     icons();
@@ -7216,6 +7317,10 @@ function buildResourceSelectOptionButton(select, shell, option) {
     optionButton.dataset.value = option.value;
     optionButton.setAttribute("role", "option");
     optionButton.tabIndex = -1;
+
+    if (select.id === "task-depth-select" && option.value === TASK_DEPTH_CUSTOM_VALUE) {
+        return buildTaskDepthCustomOptionRow(shell, optionButton);
+    }
 
     const label = document.createElement("span");
     label.className = "resource-select-option-label";
@@ -10415,12 +10520,16 @@ function bindTaskHall() {
     U.taskDepthSelect?.addEventListener("change", (e) => {
         const nextValue = String(e.target.value || "").trim();
         if (nextValue === TASK_DEPTH_CUSTOM_VALUE) {
+            // 选“自定义”不关面板：原地换成行内输入框，光标直接落在数字上。
             S.taskDefaults.customMode = true;
             S.taskDefaults.customDraft = String(Math.max(0, normalizeInt(S.taskDefaults.maxDepth, S.taskDefaults.defaultMaxDepth)));
             renderTaskDepthControl();
             queueMicrotask(() => {
-                U.taskDepthCustomInput?.focus();
-                U.taskDepthCustomInput?.select();
+                if (!(U.taskDepthSelect instanceof HTMLSelectElement)) return;
+                openResourceSelect(U.taskDepthSelect);
+                const inlineInput = taskDepthInlineInput();
+                inlineInput?.focus();
+                inlineInput?.select();
             });
             return;
         }
@@ -10430,12 +10539,6 @@ function bindTaskHall() {
     });
     U.taskSortSelect?.addEventListener("change", (e) => {
         setTaskSortMode(String(e.target.value || "time"));
-    });
-    U.taskDepthCustomInput?.addEventListener("input", (e) => {
-        S.taskDefaults.customDraft = String(e.target.value ?? "");
-    });
-    U.taskDepthCustomSave?.addEventListener("click", () => {
-        void submitCustomTaskDepth();
     });
     U.taskPageSize?.addEventListener("change", (e) => setTaskPageSize(e.target.value));
     U.taskPagePrev?.addEventListener("click", () => setTaskPage(S.taskPage - 1));

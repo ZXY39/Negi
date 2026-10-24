@@ -349,6 +349,25 @@ def test_resume_reuses_recorded_result_and_asks_per_call() -> None:
     assert replayed == [["call-read"]]
 
 
+def test_inflight_tool_treated_as_failed_after_restart() -> None:
+    """决策 H：进程在同步工具在途时被杀 → 恢复按工具失败注入结果，回合继续。"""
+    loop, engine, replayed, task, node = _resume_loop()
+
+    history = asyncio.run(loop._resume_pending_tool_turn_if_needed(
+        task=task, node=node, message_history=[{"role": "user", "content": "start"}],
+        tools={"content_search": object(), "exec": object(), "filesystem_stat": object()},
+        runtime_context={"node_id": node.node_id},
+    ))
+
+    messages = _tool_messages(history)
+    interrupted = messages.get("call-exec", "")
+    assert interrupted.startswith("Error:"), interrupted
+    assert "process restart" in interrupted
+    assert "call-exec" not in [cid for batch in replayed for cid in batch]
+    # 回合没有被丢弃：历史里同时保留了 assistant 的原始调用与它的工具结果。
+    assert any(message.get("role") == "assistant" and message.get("tool_calls") for message in history)
+
+
 def test_resume_does_not_replay_a_completed_call_even_when_classifier_would() -> None:
     loop, engine, replayed, task, node = _resume_loop()
 

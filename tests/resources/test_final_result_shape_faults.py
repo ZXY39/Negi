@@ -501,6 +501,22 @@ def test_final_result_repair_tags_cover_only_equivalence_repairs() -> None:
     assert ReActToolLoop._final_result_repair_tags(raw_payload=policy_raw, normalized_payload=policy_norm) == []
 
 
+def test_canonical_submission_is_not_counted_as_a_repair() -> None:
+    """schema 只暴露 summary/answer/evidence/remaining_work：缺 status/delivery_status
+    不是模型的形状错误。把它们记成"等价补齐"会让每次提交都报一条
+    （实盘 audit.jsonl 125/125 全是 delivery_from_status），基线失去意义。"""
+    raw = {
+        "summary": "s",
+        "answer": "a",
+        "evidence": [{"ref": "artifact:artifact:demo-ref"}],
+        "remaining_work": [],
+    }
+    normalized = ReActToolLoop._normalize_final_result_payload(
+        raw_payload=raw, message_history=[], response_content="", node_kind="execution"
+    )
+    assert ReActToolLoop._final_result_repair_tags(raw_payload=raw, normalized_payload=normalized) == []
+
+
 @pytest.mark.asyncio
 async def test_react_loop_records_each_repair_as_audit_event(monkeypatch: pytest.MonkeyPatch) -> None:
     import g3ku.audit_events as audit_module
@@ -552,11 +568,13 @@ async def test_react_loop_emits_nothing_when_the_submission_is_already_clean(
         lambda *args, **kwargs: events.append(dict(kwargs)),
     )
 
+    # 真实 schema 的提交体没有 status/delivery_status：按干净提交算，不得报补齐。
+    payload: dict[str, object] = {"verdict": "pass", "feedback": "ok"}
     result, _requests, logs = await _run_final_result_loop(
         responses=[
             LLMResponse(
                 content="",
-                tool_calls=[_final_call("call:clean-final", _good_final_arguments())],
+                tool_calls=[_final_call("call:clean-final", payload)],
                 finish_reason="tool_calls",
                 usage={"input_tokens": 8, "output_tokens": 4},
             )

@@ -97,7 +97,7 @@ async def test_acceptance_bootstrap_head_is_identical_across_resubmissions(tmp_p
         first = await service.node_runner._build_messages(task=service.store.get_task(task_id), node=acceptance)
         head_first = [json.dumps(item, ensure_ascii=False, sort_keys=True) for item in first[:2]]
 
-        service.node_runner._maybe_start_acceptance_handshake(
+        await service.node_runner._maybe_start_acceptance_handshake(
             task=service.store.get_task(task_id),
             node=service.store.get_node(root.node_id),
             result=_submit(_LONG_BODY),
@@ -106,7 +106,7 @@ async def test_acceptance_bootstrap_head_is_identical_across_resubmissions(tmp_p
         head_second = [json.dumps(item, ensure_ascii=False, sort_keys=True) for item in second[:2]]
         assert head_second == head_first
 
-        service.node_runner._maybe_start_acceptance_handshake(
+        await service.node_runner._maybe_start_acceptance_handshake(
             task=service.store.get_task(task_id),
             node=service.store.get_node(root.node_id),
             result=_submit("第二次提交：换了一份完全不同的交付"),
@@ -127,7 +127,7 @@ async def test_acceptance_handoff_notice_carries_refs_instead_of_the_full_answer
     try:
         task_id, root, acceptance = await _final_acceptance_nodes(service, title="bounded handoff")
 
-        handoff = service.node_runner._maybe_start_acceptance_handshake(
+        handoff = await service.node_runner._maybe_start_acceptance_handshake(
             task=service.store.get_task(task_id),
             node=service.store.get_node(root.node_id),
             result=_submit(_LONG_BODY),
@@ -195,7 +195,7 @@ async def test_acceptance_handoff_delivers_whole_summary_within_budget(tmp_path:
         assert len(body) <= _NODE_MESSAGE_INLINE_CHAR_LIMIT
         task_id, root, acceptance = await _final_acceptance_nodes(service, title="whole handoff")
 
-        service.node_runner._maybe_start_acceptance_handshake(
+        await service.node_runner._maybe_start_acceptance_handshake(
             task=service.store.get_task(task_id),
             node=service.store.get_node(root.node_id),
             result=_submit(body),

@@ -20,6 +20,8 @@ function resetTaskTreeSnapshotState({ clearDirty = true } = {}) {
     S.treeView = null;
     S.treeLargeMode = false;
     S.treeSelectedRoundByNodeId = {};
+    S.treeShowTerminal = null;
+    S.treeExpandedNodeIds = new Set();
     S.treeBranchSyncTokenById = {};
     S.treeBranchSyncInFlightById = {};
     S.treeBranchSyncQueuedById = {};
@@ -836,16 +838,9 @@ async function submitNodeNoticeComposer() {
 
 
 function taskNoticeSettleWindowOpen(now) {
-    if (typeof activeTaskDistributionState !== "function") return false;
-    const distributionState = activeTaskDistributionState();
-    if (!distributionState) return false;
-    const state = S.noticeSettle;
-    const oldestAt = (state?.pending || []).reduce(
-        (min, item) => (item?.addedAt && (!min || item.addedAt < min) ? item.addedAt : min),
-        0,
-    );
-    if (!oldestAt) return true;
-    return Number(now) - oldestAt <= TASK_NOTICE_SETTLE_DISTRIBUTION_MAX_MS;
+    // 分发 epoch 已删除：不再存在"分发窗口内不收窗"的特殊宽容，按普通超时收窗。
+    void now;
+    return false;
 }
 
 
@@ -1016,7 +1011,16 @@ function treeRoundSelectId(nodeId) {
 
 
 function refreshTreeViewFromSnapshot() {
-    S.treeView = buildExecutionTreeFromSnapshot(S.treeRootNodeId, S.treeSelectedRoundByNodeId);
+    // 第二参数是递归用的 seen 集合：传轮次选择对象会让 `seen.has` 抛错，
+    // 整条"就地刷新徽章"链路从第一行就死掉（树只在整树重建时才会更新）。
+    S.treeView = buildExecutionTreeFromSnapshot(
+        S.treeRootNodeId,
+        new Set(),
+        taskPauseDisplayActive(),
+        treeShowTerminalEffective(),
+        true,
+        treeExpandedNodeIds(),
+    );
     return S.treeView;
 }
 
@@ -1042,140 +1046,6 @@ function syncExecutionTreeSelection(previousNodeId, nextNodeId) {
 }
 
 
-function taskDistributionPendingNoticeNodeIds(distribution = null) {
-    if (!distribution || typeof distribution !== "object") return [];
-    return (Array.isArray(distribution.pending_notice_node_ids) ? distribution.pending_notice_node_ids : [])
-        .map((item) => String(item || "").trim())
-        .filter(Boolean);
-}
-
-
-function taskDistributionPendingNoticeAlreadyVisible(distribution = null) {
-    const pendingNodeIds = taskDistributionPendingNoticeNodeIds(distribution);
-    if (!pendingNodeIds.length) return false;
-    return pendingNodeIds.every((nodeId) => {
-        const snapshotNode = treeSnapshotNode(nodeId);
-        return Math.max(0, treeNormalizeInt(snapshotNode?.pending_notice_count, 0)) > 0;
-    });
-}
-
-
-function activeTaskDistributionState() {
-    const distribution = S.taskRuntimeSummary?.distribution;
-    if (distribution && typeof distribution === "object") {
-        const activeEpochId = String(distribution.active_epoch_id || "").trim();
-        const state = String(distribution.state || "").trim();
-        const mode = String(distribution.mode || "").trim();
-        const hasBlockedNodes = Array.isArray(distribution.blocked_node_ids) && distribution.blocked_node_ids.length > 0;
-        const pendingNoticeAlreadyVisible = taskDistributionPendingNoticeAlreadyVisible(distribution);
-        if (state === "resume_ready") {
-            if (pendingNoticeAlreadyVisible) return null;
-            return { ...distribution, ui_mode: "pending_notice" };
-        }
-        if (state === "failed") {
-            return { ...distribution, ui_mode: "distribution_failed" };
-        }
-        // subtree_barrier 是统一后的单一分发模式；task_wide_barrier 是旧
-        // 持久化 meta 的历史名称（根目标定向即原全局模式），同样进入分发 UI。
-        if (mode === "subtree_barrier" || mode === "task_wide_barrier") {
-            if (
-                activeEpochId
-                || state === "barrier_requested"
-                || state === "barrier_draining"
-                || state === "distributing"
-                || hasBlockedNodes
-            ) {
-                return { ...distribution, ui_mode: "distribution" };
-            }
-        }
-        if (
-            activeEpochId
-            || state === "barrier_requested"
-            || state === "barrier_draining"
-            || state === "distributing"
-        ) {
-            return { ...distribution, ui_mode: "distribution" };
-        }
-    }
-    return null;
-}
-
-
-function distributionAffectedNodeIds(distributionState = activeTaskDistributionState()) {
-    const affected = new Set();
-    if (!distributionState || typeof distributionState !== "object") return affected;
-    const uiMode = String(distributionState.ui_mode || "").trim();
-    if (uiMode !== "distribution" && uiMode !== "distribution_failed") return affected;
-    const seeds = [
-        ...(Array.isArray(distributionState.blocked_node_ids) ? distributionState.blocked_node_ids : []),
-        ...(Array.isArray(distributionState.target_node_ids) ? distributionState.target_node_ids : []),
-    ];
-    seeds.forEach((rawNodeId) => {
-        const seedNodeId = String(rawNodeId || "").trim();
-        if (!seedNodeId) return;
-        collectSnapshotSubtreeIds(seedNodeId).forEach((subtreeNodeId) => affected.add(subtreeNodeId));
-    });
-    return affected;
-}
-
-
-function summarizeDistributionProgress(distributionState) {
-    const state = distributionState && typeof distributionState === "object" ? distributionState : {};
-    const asIds = (value) => (Array.isArray(value)
-        ? value.map((item) => String(item || "").trim()).filter(Boolean)
-        : []);
-    const blockedIds = asIds(state.blocked_node_ids);
-    if (!blockedIds.length) return { frozenCount: 0, blockedCount: 0, text: "" };
-    const nodesById = S.treeNodesById && typeof S.treeNodesById === "object" ? S.treeNodesById : null;
-    let denominatorIds = blockedIds;
-    if (nodesById && Object.keys(nodesById).length) {
-        denominatorIds = blockedIds.filter((nodeId) => {
-            const status = String(nodesById[nodeId]?.status || "").trim().toLowerCase();
-            return !status || !TREE_TERMINAL_STATUSES.has(status);
-        });
-    }
-    const blockedCount = denominatorIds.length;
-    if (!blockedCount) return { frozenCount: 0, blockedCount: 0, text: "" };
-    const denominatorSet = new Set(denominatorIds);
-    const frozenCount = asIds(state.frozen_node_ids).filter((nodeId) => denominatorSet.has(nodeId)).length;
-    const phase = String(state.state || "").trim();
-    const tail = frozenCount < blockedCount
-        ? "其余节点仍有在飞请求未落"
-        : (phase === "distributing" ? "已进入分发决策回合" : "全部已停，等待决策回合");
-    return {
-        frozenCount,
-        blockedCount,
-        text: `新消息分发中 · 已停步 ${frozenCount}/${blockedCount} · ${tail}`,
-    };
-}
-
-
-function buildTaskTreeDistributionBubble(text = "") {
-    const distributionState = activeTaskDistributionState();
-    const failedMode = distributionState?.ui_mode === "distribution_failed";
-    const failureText = String(distributionState?.error_text || "").trim();
-    let fallbackText;
-    if (distributionState?.ui_mode === "pending_notice") {
-        fallbackText = "接收到新消息，等待节点处理";
-    } else if (failedMode) {
-        fallbackText = failureText
-            ? `消息分发失败（${failureText.slice(0, 120)}），任务保持暂停；可重新追加通知重试，或手动恢复任务`
-            : "消息分发失败，任务保持暂停；可重新追加通知重试，或手动恢复任务";
-    } else {
-        // 分发窗口可以长达分钟级（排空要等在飞回合落地），静态一句「新消息分发中」
-        // 读不出"在推进"还是"卡死"，因此带上已停步计数。
-        const progress = summarizeDistributionProgress(distributionState);
-        fallbackText = progress.text || "新消息分发中";
-    }
-    const bubble = document.createElement("div");
-    bubble.className = failedMode
-        ? "task-tree-distribution-bubble task-tree-distribution-bubble--failed"
-        : "task-tree-distribution-bubble";
-    bubble.setAttribute("role", "status");
-    bubble.setAttribute("aria-live", "polite");
-    bubble.textContent = String(text || "").trim() || fallbackText;
-    return bubble;
-}
 
 
 function treeNodeHasActiveChildren(node) {
@@ -1251,6 +1121,17 @@ async function handleTreeNodePauseAction(node, event) {
 }
 
 
+function taskTreeTopOverlayInset(viewport) {
+    let inset = 0;
+    [U.taskTreeSearch, U.treeFloatingTools].forEach((element) => {
+        if (!(element instanceof Element)) return;
+        const rect = element.getBoundingClientRect();
+        if (!rect.height || !rect.width) return;
+        inset = Math.max(inset, rect.bottom - viewport.top + 8);
+    });
+    return Math.min(Math.max(0, inset), viewport.height * 0.6);
+}
+
 function fitTaskTreeToView({ marginPx = 40 } = {}) {
     if (!U.tree) return false;
     const wrapper = U.tree.querySelector(".execution-tree");
@@ -1267,14 +1148,23 @@ function fitTaskTreeToView({ marginPx = 40 } = {}) {
     // 布局位置在变换下是不变量。变换只缩放内容在包装器内的偏移,
     // 包装器自身的布局偏移不参与缩放,须分开计算:
     // W = 包装器相对视口的布局偏移;C = 内容相对包装器的布局偏移。
-    const W = (wrapRect.left - viewport.left - state.offsetX) / state.scale;
-    const T = (wrapRect.top - viewport.top - state.offsetY) / state.scale;
+    // 包装器自身的布局偏移不参与 scale（transform-origin 0 0 下 rendered = layout + offset），
+    // 只有容器内部的 C/D 与树尺寸需要除以 scale。此前 W/T 也被除了一次，布局偏移因此
+    // 被放大 1/scale 倍——内边距一变大，树就被推离视口（整棵树看起来是空的）。
+    const W = wrapRect.left - viewport.left - state.offsetX;
+    const T = wrapRect.top - viewport.top - state.offsetY;
     const C = (contentRect.left - wrapRect.left) / state.scale;
     const D = (contentRect.top - wrapRect.top) / state.scale;
     const treeW = contentRect.width / state.scale;
     const treeH = contentRect.height / state.scale;
-    const availW = viewport.width - marginPx * 2;
-    const availH = viewport.height - marginPx * 2;
+    // 悬浮搜索框与悬浮工具钉在树容器的上半部，适配时把它们的高度从可用区域里扣掉：
+    // 否则树按整块容器居中，第一行会正好压在搜索框底下（顶部越挤越明显）。
+    const topInset = taskTreeTopOverlayInset(viewport);
+    const areaTop = viewport.top + topInset;
+    const areaHeight = viewport.height - topInset;
+    const margin = Math.min(marginPx, Math.max(8, areaHeight * 0.1));
+    const availW = viewport.width - margin * 2;
+    const availH = areaHeight - margin * 2;
     if (availW <= 0 || availH <= 0 || treeW <= 0 || treeH <= 0) return false;
     const fitScale = Math.min(availW / treeW, availH / treeH, 1);
     const nextScale = clamp(fitScale, TREE_SCALE_MIN, TREE_SCALE_MAX);
@@ -1289,7 +1179,7 @@ function fitTaskTreeToView({ marginPx = 40 } = {}) {
         ? U.tree.querySelector(executionTreeNodeSelector(anchorRootId))
         : null;
     const nextOffsetX = viewport.width / 2 - W - nextScale * (C + treeW / 2);
-    const nextOffsetY = viewport.height / 2 - T - nextScale * (D + treeH / 2);
+    const nextOffsetY = (areaTop - viewport.top) + areaHeight / 2 - T - nextScale * (D + treeH / 2);
     if (!anchorButton
         && Math.abs(nextScale - state.scale) < 0.001
         && Math.abs(nextOffsetX - state.offsetX) < 0.5
@@ -1435,6 +1325,9 @@ async function locateTaskNode(targetId, { scale = null } = {}) {
     for (const parentId of path.slice(1).reverse()) {
         const parent = treeSnapshotNode(parentId);
         const childId = path[path.indexOf(parentId) - 1];
+        // 定位一个被默认过滤藏起来的终态节点：把它所在的每一级父节点展开，
+        // 否则命中后仍无处高亮，只能退回到最近的可见祖先。
+        treeExpandedNodeIds().add(parentId);
         const round = (Array.isArray(parent?.rounds) ? parent.rounds : []).find((item) => Array.isArray(item?.child_ids) && item.child_ids.includes(childId));
         if (round?.round_id) S.treeSelectedRoundByNodeId[parentId] = round.round_id;
         if (typeof ensureTaskTreeSubtree === "function") {
@@ -1836,9 +1729,19 @@ function refreshRenderedTreeNodeStatuses() {
             .map((button) => [String(button.dataset.id || "").trim(), button])
             .filter(([nodeId]) => !!nodeId),
     );
+    // 就地刷新改不了"节点行上该不该有 ▸N / 未读角标"，也给不出新折叠/展开的分支：
+    // 一旦新模型与已渲染的 DOM 在挂件签名或节点数上对不上，就退回整树重建。
+    let needsRebuild = false;
+    let modelNodeCount = 0;
     const walk = (node) => {
         if (!node) return;
+        modelNodeCount += 1;
         const button = buttons.get(String(node.node_id || "").trim());
+        if (!(button instanceof HTMLElement)) {
+            needsRebuild = true;
+        } else if (String(button.dataset.treeChips || "") !== treeNodeChipSignature(node)) {
+            needsRebuild = true;
+        }
         if (button instanceof HTMLElement) {
             const title = String(node.title || node.node_id || "");
             const fullTitle = String(node.fullTitle || title);
@@ -1859,7 +1762,10 @@ function refreshRenderedTreeNodeStatuses() {
             }
             const titleEl = button.querySelector(".execution-tree-node-title");
             if (titleEl instanceof HTMLElement) titleEl.textContent = title;
-            const badgeEl = button.querySelector(".status-badge");
+            // 验收节点行有两个 .status-badge：验收徽标在前、状态徽标在后。就地刷新
+            // 只许改状态那一个，否则验收徽标会被改写成状态文本，一行里出现两个
+            // 同样的状态标记。
+            const badgeEl = button.querySelector(".status-badge:not(.acceptance-badge)");
             if (badgeEl instanceof HTMLElement) {
                 badgeEl.dataset.status = String(node.visual_state || node.state || "");
                 badgeEl.textContent = displayState;
@@ -1872,6 +1778,11 @@ function refreshRenderedTreeNodeStatuses() {
         treeViewChildren(node).forEach(walk);
     };
     walk(nextTreeView);
+    if (buttons.size !== modelNodeCount) needsRebuild = true;
+    if (needsRebuild) {
+        renderTree();
+        return;
+    }
     syncSelectedTaskNodeDetailStatus(nextTreeView);
 }
 
@@ -1914,6 +1825,15 @@ async function reconcileTaskTreeForNode(nodeId) {
 }
 
 
+function taskFlowUsageText(node, trace) {
+    const parts = typeof buildTokenUsageParts === "function" ? buildTokenUsageParts(node?.token_usage) : [];
+    const turnCount = Array.isArray(trace?.turns) ? trace.turns.length : 0;
+    if (turnCount > 0 && !parts.some((part) => String(part).startsWith("轮数"))) {
+        parts.push(`轮数 ${turnCount}`);
+    }
+    return parts.join(" · ") || "暂无用量";
+}
+
 async function showAgent(node, { preserveViewState = true, forceRefresh = false } = {}) {
     const nodeId = String(node?.node_id || "").trim();
     if (!nodeId) return;
@@ -1922,6 +1842,7 @@ async function showAgent(node, { preserveViewState = true, forceRefresh = false 
     const previousDetailNodeId = String(S.currentNodeDetail?.node_id || "").trim();
     const hadVisibleCurrentDetail = U.detail?.style?.display !== "none"
         && String(S.currentNodeDetail?.node_id || "").trim() === nodeId;
+    const nodeChanged = !hadVisibleCurrentDetail || previousDetailNodeId !== nodeId;
     const entryViewState = consumePendingTaskDetailRestore(nodeId)
         || (preserveViewState ? captureTaskDetailViewState() : getStoredTaskDetailViewState(S.currentTaskId, nodeId));
     if (!S.taskNodeDetails[nodeId] && !hadVisibleCurrentDetail) showTaskNodeLoadingState(node);
@@ -1952,7 +1873,10 @@ async function showAgent(node, { preserveViewState = true, forceRefresh = false 
     if (U.adRole) U.adRole.hidden = true;
     renderTaskNodeDetailStatus(mergedNode);
     renderTaskNodeModelRetryToast(mergedNode);
-    if (U.adTokenSummary) U.adTokenSummary.textContent = buildTokenUsageParts(mergedNode.token_usage).join(" · ");
+    if (U.adTokenSummary) {
+        U.adTokenSummary.textContent = taskFlowUsageText(mergedNode, mergedNode.executionTrace);
+    }
+    if (nodeChanged && U.taskFlowBox) U.taskFlowBox.open = false;
     // 同一节点刷新时，展开态取渲染前 DOM 的当下状态：入口那次捕获在请求之前，
     // 在飞窗口里用户刚点开的卡片和工具面板不在里面，沿用会把它们折回上一次的样子。
     const liveViewState = hadVisibleCurrentDetail ? captureTaskDetailViewState() : null;
@@ -1971,7 +1895,6 @@ async function showAgent(node, { preserveViewState = true, forceRefresh = false 
     U.feedTitle.title = formatNodeDetailHeading(mergedNode, { compact: false });
     setTaskDetailOpen(true);
     icons();
-    const nodeChanged = !hadVisibleCurrentDetail || previousDetailNodeId !== nodeId;
     if (U.nodeContextDisclosure) {
         if (nodeChanged) {
             U.nodeContextDisclosure.open = false;

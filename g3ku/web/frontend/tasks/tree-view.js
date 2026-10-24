@@ -9,14 +9,19 @@ function renderTree() {
     if (String(S.treeBulkLoadingTaskId || "").trim()
         && String(S.treeBulkLoadingTaskId || "").trim() === String(S.currentTaskId || "").trim()) return;
     maybeShowTaskRecoveryNoticeToast();
-    const distributionState = activeTaskDistributionState();
-    S.treeView = buildExecutionTreeFromSnapshot(S.treeRootNodeId, S.treeSelectedRoundByNodeId);
+    S.treeView = buildExecutionTreeFromSnapshot(
+        S.treeRootNodeId,
+        new Set(),
+        taskPauseDisplayActive(),
+        treeShowTerminalEffective(),
+        true,
+        treeExpandedNodeIds(),
+    );
     syncTaskTreeHeaderState(S.treeView);
     if (!S.treeView) {
         // 根节点缺失通常是增量合并损坏了缓存：空态之外再触发一次整表自愈重载。
         scheduleTaskTreeSnapshotSelfHeal();
         U.tree.innerHTML = "";
-        if (distributionState) U.tree.appendChild(buildTaskTreeDistributionBubble());
         const emptyState = document.createElement("div");
         emptyState.className = "empty-state";
         emptyState.textContent = "No nodes to display.";
@@ -44,12 +49,6 @@ function renderTree() {
     if (layoutDensity.mode === "dense") {
         wrapper.classList.add("execution-tree--dense");
     }
-    if (distributionState?.ui_mode === "distribution" || distributionState?.ui_mode === "distribution_failed") {
-        wrapper.classList.add("execution-tree--distribution-active");
-    }
-    // 受影响（被冻结子树）节点集合：仅用于连线按子树范围染色，
-    // 分发完成/通知消费后该集合随 distribution UI 退出而失效。
-    const distributionAffectedIds = distributionAffectedNodeIds(distributionState);
     const rootList = document.createElement("ul");
     rootList.className = "execution-tree-list";
     const handleTreeNodeClick = (node, event) => {
@@ -69,7 +68,7 @@ function renderTree() {
         syncExecutionTreeSelection(previousNodeId, nextNodeId);
         void showAgent(node, { preserveViewState: false });
     };
-    const createTreeNodeButton = (node, { showStaticSubtreeHint = false, mergedBase = false, inspectionBlock = false } = {}) => {
+    const createTreeNodeButton = (node, { mergedBase = false, inspectionBlock = false } = {}) => {
         const title = String(node.title || node.node_id || "");
         const fullTitle = String(node.fullTitle || title);
         const nodeStatus = String(node.visual_state || node.state || "").trim().toLowerCase();
@@ -81,11 +80,9 @@ function renderTree() {
         button.className = `execution-tree-node${S.selectedNodeId === node.node_id ? " selected" : ""}`;
         if (mergedBase) button.classList.add("execution-tree-node-base");
         if (inspectionBlock) button.classList.add("is-inspection");
-        if (String(node.distribution_status || "").trim() === "barrier_blocked") {
-            button.classList.add("execution-tree-node--distribution-blocked");
-        }
         button.dataset.id = node.node_id;
         button.dataset.kind = node.kind || "execution";
+        button.dataset.treeChips = treeNodeChipSignature(node);
         button.dataset.status = nodeStatus;
         button.dataset.paused = effectivePaused ? "true" : "false";
         button.dataset.pausedReason = String(node.pause_reason || "");
@@ -94,10 +91,39 @@ function renderTree() {
         const pauseAction = !isTerminalTreeNodeStatus(node.state) && !taskPaused
             ? `<span class="execution-tree-node-pause-action" data-node-pause-action="true" role="button" tabindex="0" title="${node.is_paused ? "\u6062\u590d\u8282\u70b9" : "\u6682\u505c\u8282\u70b9"}">${node.is_paused ? "\u25b6" : "\u2161"}</span>`
             : "";
-        button.innerHTML = `${showStaticSubtreeHint ? '<span class="execution-tree-node-note">\u6682\u65e0\u5176\u4ed6\u53ef\u5207\u6362\u5b50\u6811</span>' : ""}<span class="execution-tree-node-head"><span class="execution-tree-node-title">${esc(title)}</span><span class="status-badge" data-status="${esc(node.visual_state || node.state || "")}">${esc(displayState)}</span></span>${pauseAction}`;
+        const acceptanceBadge = String(node.kind || "").trim().toLowerCase() === "acceptance"
+            ? '<span class="status-badge acceptance-badge" data-status="acceptance">\u9a8c\u6536</span>'
+            : "";
+        // 折叠的已结束子节点必须留出入口：默认过滤把它们藏起来后，节点行上看不出
+        // 底下还有东西，任务结束后整棵树只剩根节点。
+        const hiddenChildCount = treeNormalizeInt(node.hidden_child_count, 0);
+        const expandAction = node.expandable
+            ? `<span class="execution-tree-expand${node.expanded ? " is-expanded" : ""}" data-node-expand-action="true" role="button" tabindex="0" title="${node.expanded ? "\u6536\u8d77\u5df2\u7ed3\u675f\u5b50\u8282\u70b9" : `\u5c55\u5f00 ${hiddenChildCount} \u4e2a\u5df2\u7ed3\u675f\u5b50\u8282\u70b9`}">${node.expanded ? "\u25be" : "\u25b8"}${hiddenChildCount > 0 ? `<span class="execution-tree-expand-count">${hiddenChildCount}</span>` : ""}</span>`
+            : "";
+        // 未读消息角标（设计 §10）：信箱里有待并入的消息时，节点行必须自己说出来，
+        // 否则用户只能靠进详情页才发现"它在等一条没人看的消息"。
+        const unreadCount = treeNormalizeInt(node.pending_notice_count, 0);
+        const unreadBadge = unreadCount > 0
+            ? `<span class="execution-tree-unread" title="\u672a\u8bfb\u6d88\u606f ${unreadCount} \u6761">${unreadCount}</span>`
+            : "";
+        button.innerHTML = `<span class="execution-tree-node-head"><span class="execution-tree-node-title">${esc(title)}</span>${unreadBadge}${expandAction}${acceptanceBadge}<span class="status-badge" data-status="${esc(node.visual_state || node.state || "")}">${esc(displayState)}</span></span>${pauseAction}`;
         button.addEventListener("click", (event) => {
             if (event.target instanceof Element && event.target.closest("[data-node-pause-action]")) return;
+            if (event.target instanceof Element && event.target.closest("[data-node-expand-action]")) return;
             handleTreeNodeClick(node, event);
+        });
+        const expandEl = button.querySelector("[data-node-expand-action]");
+        expandEl?.addEventListener("click", (event) => {
+            event.stopPropagation();
+            toggleTreeNodeExpanded(node.node_id);
+            renderTree();
+        });
+        expandEl?.addEventListener("keydown", (event) => {
+            if (event.key !== "Enter" && event.key !== " ") return;
+            event.preventDefault();
+            event.stopPropagation();
+            toggleTreeNodeExpanded(node.node_id);
+            renderTree();
         });
         const pauseEl = button.querySelector("[data-node-pause-action]");
         pauseEl?.addEventListener("click", (event) => handleTreeNodePauseAction(node, event));
@@ -107,61 +133,24 @@ function renderTree() {
         return button;
     };
     const walk = (node) => {
-        const fullTitle = String(node.fullTitle || node.title || node.node_id || "");
         const nodeStatus = String(node.visual_state || node.state || "").trim().toLowerCase();
-        const roundOptions = Array.isArray(node.roundOptions) ? node.roundOptions : [];
         const inspectionNodes = Array.isArray(node.inspectionNodes) ? node.inspectionNodes : [];
         const visibleChildren = Array.isArray(node.children) ? node.children : [];
-        const hasSwitchableSubtrees = roundOptions.length > 1;
-        const showStaticSubtreeHint = !hasSwitchableSubtrees && visibleChildren.length > 0;
-        const nodeAffected = distributionAffectedIds.has(String(node.node_id || "").trim());
         const item = document.createElement("li");
         item.className = "execution-tree-item";
         item.dataset.status = nodeStatus;
-        if (nodeAffected) item.classList.add("execution-tree-item--distribution-affected");
         const stack = document.createElement("div");
         stack.className = "execution-tree-node-stack";
         if (inspectionNodes.length) stack.classList.add("has-inspection");
         inspectionNodes.forEach((inspectionNode) => {
             stack.appendChild(createTreeNodeButton(inspectionNode, { inspectionBlock: true }));
         });
-        stack.appendChild(createTreeNodeButton(node, { showStaticSubtreeHint, mergedBase: inspectionNodes.length > 0 }));
-        if (hasSwitchableSubtrees) {
-            const roundWrap = document.createElement("div");
-            roundWrap.className = "execution-tree-node-rounds";
-            ["mousedown", "click", "wheel"].forEach((eventName) => {
-                roundWrap.addEventListener(eventName, (event) => event.stopPropagation());
-            });
-            const label = document.createElement("span");
-            label.className = "execution-tree-round-label";
-            label.textContent = "轮次";
-            const select = document.createElement("select");
-            select.id = treeRoundSelectId(node.node_id);
-            select.className = "execution-tree-round-select resource-select";
-            select.dataset.resourceSelectLabel = `${fullTitle} 轮次`;
-            roundOptions.forEach((round) => {
-                const option = document.createElement("option");
-                option.value = round.roundId;
-                option.textContent = round.isLatest ? `${round.label}（最新）` : round.label;
-                select.appendChild(option);
-            });
-            if (node.selectedRoundId) select.value = node.selectedRoundId;
-            select.addEventListener("change", (event) => {
-                event.stopPropagation();
-                setNodeRoundSelection(node.node_id, event.target.value);
-            });
-            roundWrap.appendChild(label);
-            roundWrap.appendChild(select);
-            stack.appendChild(roundWrap);
-        }
+        stack.appendChild(createTreeNodeButton(node, { mergedBase: inspectionNodes.length > 0 }));
         item.appendChild(stack);
         if (visibleChildren.length) {
             const branch = document.createElement("ul");
             branch.className = "execution-tree-list";
             branch.dataset.parentStatus = nodeStatus;
-            // 父节点受影响时，其子列表（父→子连线段）才允许染分发色；
-            // 子树根节点与未受影响父节点之间的边界连线保持原状态色。
-            if (nodeAffected) branch.classList.add("execution-tree-list--distribution-affected");
             visibleChildren.forEach((child) => branch.appendChild(walk(child)));
             item.appendChild(branch);
         }
@@ -172,7 +161,7 @@ function renderTree() {
     wrapper.style.transformOrigin = "0 0";
     wrapper.style.transform = `translate(${Math.round(S.treePan.offsetX)}px, ${Math.round(S.treePan.offsetY)}px) scale(${S.treePan.scale})`;
     U.tree.innerHTML = "";
-    if (distributionState) U.tree.appendChild(buildTaskTreeDistributionBubble());
+    mountTerminalFilterToggle();
     U.tree.appendChild(wrapper);
     if (typeof enhanceResourceSelects === "function") enhanceResourceSelects();
     if (typeof restoreOpenResourceSelect === "function") restoreOpenResourceSelect(U.tree);
@@ -193,4 +182,19 @@ function renderTree() {
         setTaskSelectionEmptyVisible(true);
         hideAgent();
     }
+}
+
+// "展开全部"开关常驻任务详情头部（活跃节点右侧），状态由 S.treeShowTerminal 表达：
+// null/undefined = 跟随任务状态自动推导，true/false = 用户手动指定。
+function mountTerminalFilterToggle() {
+    const input = U.taskExpandAllInput;
+    if (!(input instanceof HTMLInputElement)) return;
+    if (input.dataset.bound !== "true") {
+        input.dataset.bound = "true";
+        input.addEventListener("change", () => {
+            S.treeShowTerminal = !!input.checked;
+            renderTree();
+        });
+    }
+    input.checked = treeShowTerminalEffective();
 }

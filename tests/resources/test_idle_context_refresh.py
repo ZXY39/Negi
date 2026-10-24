@@ -48,12 +48,14 @@ def test_idle_boundary_fails_closed_when_live_config_cannot_be_read(monkeypatch)
     assert idle_boundary_exceeded(_stamp(days=9)) is False
 
 
-def test_node_recommit_reason_reports_compression_before_idle() -> None:
+def test_node_recommit_reason_only_accepts_compression() -> None:
+    """空闲不再是节点的重印边界：只有 token 压缩能重印 tools[]。"""
+
     decide = ReActToolLoop._node_bundle_recommit_reason
 
-    assert decide(history_shrink_reason="token_compression", idle_boundary=True) == "token_compression"
-    assert decide(history_shrink_reason="stage_compaction", idle_boundary=True) == "idle_refresh"
-    assert decide(history_shrink_reason="stage_compaction", idle_boundary=False) == ""
+    assert decide(history_shrink_reason="token_compression") == "token_compression"
+    assert decide(history_shrink_reason="stage_compaction") == ""
+    assert decide(history_shrink_reason="") == ""
 
 
 class _MemoryManager:

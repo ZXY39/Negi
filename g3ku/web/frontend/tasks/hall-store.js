@@ -28,6 +28,10 @@ function patchTaskCardElement(taskId) {
     if (diskUsageEl) {
         diskUsageEl.textContent = formatTaskBytes(task?.disk_usage_bytes);
     }
+    const nodeCountEl = card.querySelector("[data-task-node-count]");
+    if (nodeCountEl) {
+        nodeCountEl.textContent = formatTaskNodeCount(task?.node_count);
+    }
     // 总耗时随增量补丁刷新：运行中卡片走该路径避免整网格重建（防滚动清零），
     // 只有在这里同步数字，运行中任务的耗时才会逐分钟推进；暂停/终态卡片
     // taskElapsedText 返回定格值，重复写入也恒定。
@@ -202,9 +206,6 @@ function handleTaskEvent(payload) {
         return;
     }
     if (payload.type === "task.live.patch") {
-        const previousDistributionState = typeof activeTaskDistributionState === "function"
-            ? activeTaskDistributionState()
-            : null;
         const runtimeSummary = payload.data?.runtime_summary || {};
         const isDelta = runtimeSummary.frames_partial === true;
         const deltaFrame = payload.data?.frame && typeof payload.data.frame === "object" ? payload.data.frame : null;
@@ -245,14 +246,6 @@ function handleTaskEvent(payload) {
             waiting_node_count: waitingNodeIds.length,
         };
         if (String(S.treeRootNodeId || "").trim()) {
-            const nextDistributionState = typeof activeTaskDistributionState === "function"
-                ? activeTaskDistributionState()
-                : null;
-            const distributionUiChanged = String(previousDistributionState?.ui_mode || "").trim() !== String(nextDistributionState?.ui_mode || "").trim()
-                || String(previousDistributionState?.active_epoch_id || "").trim() !== String(nextDistributionState?.active_epoch_id || "").trim()
-                || String(previousDistributionState?.state || "").trim() !== String(nextDistributionState?.state || "").trim();
-            const sawDistributionFrame = frameList.some((item) => String(item?.phase || "").trim() === "message_distribution");
-            const rootNodeId = String(S.treeRootNodeId || "").trim();
             const candidateNodeIds = [...new Set([...activeNodeIds, ...runnableNodeIds, ...waitingNodeIds]
                 .map((item) => String(item || "").trim())
                 .filter(Boolean))];
@@ -260,10 +253,6 @@ function handleTaskEvent(payload) {
                 .filter((item) => !treeSnapshotNode(item))
                 .slice(0, 3)
                 .forEach((item) => { void reconcileTaskTreeForNode(item); });
-            if (rootNodeId && (distributionUiChanged || sawDistributionFrame)) {
-                scheduleTaskTreeBranchSync(rootNodeId, { delayMs: 0 });
-                renderTree();
-            }
             if (typeof scheduleRenderedTreeNodeStatusRefresh === "function") scheduleRenderedTreeNodeStatusRefresh();
         }
         return;
@@ -335,6 +324,12 @@ function handleTaskEvent(payload) {
         S.currentTask = { ...(S.currentTask || {}), ...payload.data.task };
         S.taskSummary = { ...(S.taskSummary || {}), ...payload.data.task };
         renderTaskTokenStats();
+        // 终态改变树的默认过滤（任务结束后默认展开整棵树）：详情页开着时必须
+        // 重建树模型，否则被折叠的终态子节点要等到下一次整树刷新才出现。
+        if (String(S.currentTaskId || "").trim() === String(payload.data.task.task_id || "").trim()
+            && typeof renderTree === "function") {
+            renderTree();
+        }
         const selectedNodeId = String(S.selectedNodeId || "").trim();
         if (selectedNodeId && typeof renderTaskNodeModelRetryToast === "function") {
             renderTaskNodeModelRetryToast(null);

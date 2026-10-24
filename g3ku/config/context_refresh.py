@@ -1,9 +1,9 @@
-"""Shared idle-boundary gate for the context carriers that are otherwise pinned.
+"""Deprecated idle-boundary settings (kept for config compatibility).
 
-`tools[]` and the frontdoor long-term memory snapshot only change bytes where the
-reusable provider prefix is already broken. Wall-clock idleness is one such boundary:
-both lanes read it through here so the frontdoor and the node cannot drift apart on
-what "long enough" means.
+The runtime no longer treats wall-clock idleness as a reprint boundary: pinned heads
+reprint only at compaction, and changes between reprints are delivered as one-time
+`[RUNTIME_NOTICE]` messages. `idle_boundary_exceeded` remains importable for older
+callers but has no runtime call site.
 """
 
 from __future__ import annotations
@@ -36,10 +36,10 @@ def context_refresh_settings(config: Any | None = None) -> tuple[bool, int]:
 
 
 def idle_boundary_exceeded(last_active_at: str, *, config: Any | None = None) -> bool:
-    """True when the previous activity is older than the configured idle window.
+    """Legacy idle-window probe; kept for config/API compatibility.
 
-    An empty stamp returns False on purpose: the first hop of a lane has no prefix to
-    preserve and already reseeds `tools[]` from the current RBAC view.
+    No runtime lane calls this anymore. Heads reprint only at compaction and the
+    between-reprint delta is carried by one-time notices.
     """
     stamp = str(last_active_at or "").strip()
     if not stamp:

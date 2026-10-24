@@ -11,6 +11,7 @@ from g3ku.utils.helpers import (
     path_anchor_tokens,
     render_candidate_tool_line,
 )
+from main.governance.exec_tool_policy import render_exec_runtime_policy_body
 
 FRONTDOOR_DYNAMIC_TOOL_CONTRACT_KIND = 'frontdoor_runtime_tool_contract'
 FRONTDOOR_DYNAMIC_TOOL_CONTRACT_HEADING = '## Runtime Tool Contract'
@@ -26,13 +27,19 @@ RUNTIME_APPENDIX_HEADINGS = (FRONTDOOR_DYNAMIC_TOOL_CONTRACT_HEADING,)
 # system_prompt 文本（`message_builder` 拼 `## Capability Exposure Snapshot` 的同一位置），
 # 不是新消息项——因此尾部重铺那条路（`_with_dynamic_appendix_at_tail` 只剥"运行时块"）
 # 根本碰不到它，也就不需要第三套消息分类。
-# 刷新键 = skill roster epoch + 策略签名 + 临时目录。epoch 只在重印边界（token 压缩、
-# 手动压缩、空闲窗口第一跳）递增——可见集在两次重印之间怎么变，头部都逐字节不动：
-# 新变为可读的 skill 由一次性持久提示落进历史（`g3ku/runtime/skill_roster_notice.py`），
+# 刷新键 = skill roster epoch（只在重印边界递增）。执行策略与临时目录**不进判据**：
+# 缓存命中第一，它们的变化由一次性 `[RUNTIME_NOTICE]` 消息纠正，头部留到下次压缩统一刷新。
+# epoch 只在重印边界（token 压缩、手动压缩）递增——可见集在两次重印之间怎么变，头部都
+# 逐字节不动：新变为可读的 skill 由一次性持久提示落进历史（`g3ku/runtime/skill_roster_notice.py`），
 # 被删/被收回的名字留在头部名单里直到下一次重印，模型去 load 时由
 # `load_skill_context` 的三态回执告知原因。
 FRONTDOOR_PINNED_CONTRACT_HEADING = '## Runtime Contract (pinned)'
 FRONTDOOR_PINNED_CONTRACT_KIND = 'frontdoor_runtime_pinned_contract'
+PINNED_CONTRACT_RENDERER_VERSION = 'pinned-contract-v2'
+PINNED_CONTRACT_SNAPSHOT_NOTE = (
+    'snapshot_note: this block refreshes only at compaction; later runtime notices '
+    'supersede changed values.'
+)
 FRONTDOOR_PINNED_CONTRACT_TEXT_ATTR = '_frontdoor_pinned_contract_text'
 FRONTDOOR_PINNED_CONTRACT_REVISION_ATTR = '_frontdoor_pinned_contract_revision'
 FRONTDOOR_PINNED_CONTRACT_SKILLS_ATTR = '_frontdoor_pinned_contract_skill_ids'
@@ -190,36 +197,27 @@ def drop_pinned_contract_state(session: Any, *, session_key: str | None = None) 
     _SKILL_ROSTER_EPOCH_STORES.pop(key, None)
 
 
-def _exec_policy_signature(exec_runtime_policy: dict[str, Any] | None) -> str:
-    payload = dict(exec_runtime_policy or {})
-    if not payload:
-        return ''
-    return '|'.join(
-        str(payload.get(key) if payload.get(key) is not None else '')
-        for key in ('mode', 'guardrails_enabled', 'summary')
-    )
-
-
 def pinned_contract_revision_key(
     *,
     exec_runtime_policy: dict[str, Any] | None,
     session_temp_dir: str | None,
     skill_roster_epoch: int,
 ) -> str:
-    """头部块的重印判据：只有三条结构性边界——roster epoch（随 token 压缩 / 手动压缩 /
-    空闲边界递增）、执行策略签名、会话临时目录。
+    """头部块的重印判据：只有 roster epoch（随 token 压缩 / 手动压缩递增）。
 
-    可见集本身**不进键**：两次重印之间可见集怎么变，头部都逐字节不动——新增的可读
-    skill 由一次性持久提示落进历史（`g3ku/runtime/skill_roster_notice.py`），被删/被收回的名字留在头部直到
-    下一次重印（`load_skill_context` 三态回执告知原因）。把可见集算进键会让一次资源
-    变化把整段头部（连同它后面的全部前缀）打掉。
+    执行策略与临时目录**刻意不进判据**：缓存命中第一。它们变化时不重印头部，改由一次性
+    `[RUNTIME_NOTICE]` 消息纠正；下次压缩 epoch 跳变时，头部才用当刻值重印。可见集本身
+    同样不进键：两次重印之间可见集怎么变，头部都逐字节不动——新增的可读 skill 由一次性
+    持久提示落进历史，被删/被收回的名字留在头部直到下一次重印（`load_skill_context`
+    三态回执告知原因）。把可见集或策略算进键会让一次资源/配置变化把整段头部（连同它
+    后面的全部前缀）打掉。
     """
+    _ = (exec_runtime_policy, session_temp_dir)
     digest = hashlib.sha256(
         '\n'.join(
             (
+                PINNED_CONTRACT_RENDERER_VERSION,
                 str(int(skill_roster_epoch or 0)),
-                _exec_policy_signature(exec_runtime_policy),
-                str(session_temp_dir or '').strip(),
             )
         ).encode('utf-8')
     ).hexdigest()[:16]
@@ -259,40 +257,40 @@ def render_pinned_contract_text(
     session_temp_dir: str | None,
     include_extras: bool = True,
 ) -> str:
-    """渲染钉住块；没有名单就返回空串。
+    """渲染钉住块；`include_extras=True` 时即使名单为空也渲静态声明。
 
-    名单是这块唯一的量，执行策略与会话临时目录各只一行。为两行短声明去动头部是不划算的
-    买卖——头部一改就顶掉身后全部前缀。所以名单为空时整块不钉，三段声明照旧留在尾块
-    （省略判定逐段看头部原文，头部没有就不省）。
+    头部是**快照**：只在重印边界（压缩/手动压缩）用当刻值重渲，两次重印之间逐字节不动。
+    执行策略、会话临时目录、路径锚因此必须始终在头部有一份——名单为空就不钉，会让删掉
+    尾块之后这些声明在整份上下文里消失。变化由一次性 `[RUNTIME_NOTICE]` 消息纠正。
 
     名单是**钉住时点的全量可见 skill**（语义筛选已删，"选哪个"由模型按描述判断），
     按 id 排序：钉住的那份是"能加载哪些"的集合声明，不带每回合的语义排名。两次重印
     之间名单会过期——新增的靠一次性持久提示点名，消失的靠
     `load_skill_context` 三态回执告知原因。
 
-    `include_extras=False` 只渲名单本体：节点道复用这份渲染函数钉自己的头部名单，
-    执行策略/临时目录/路径锚是会话道的三段声明，节点不进头部。
+    `include_extras=False` 只渲名单本体：节点道若只需要名单可用这一档；
+    会话语义下的节点头部现在也走 `include_extras=True`（exec 策略/临时目录/路径锚进头部）。
     """
     normalized_items = _normalize_skill_roster_items(skill_items)
-    if not normalized_items:
+    if not normalized_items and not include_extras:
         return ''
     lines = [
         FRONTDOOR_PINNED_CONTRACT_HEADING,
         f'kind: {FRONTDOOR_PINNED_CONTRACT_KIND}',
-        'candidate_skills (loadable with `load_skill_context`; `id | name | description`):',
+        PINNED_CONTRACT_SNAPSHOT_NOTE,
     ]
-    lines.extend(
-        f'- `{item["skill_id"]}` | {item["display_name"]} | {item["description"]}'
-        for item in normalized_items
-    )
+    if normalized_items:
+        lines.append(
+            'candidate_skills (loadable with `load_skill_context`; `id | name | description`):'
+        )
+        lines.extend(
+            f'- `{item["skill_id"]}` | {item["display_name"]} | {item["description"]}'
+            for item in normalized_items
+        )
     if not include_extras:
         return '\n'.join(lines).strip()
-    policy_line = _render_exec_runtime_policy(exec_runtime_policy)
-    if policy_line:
-        lines.append(policy_line)
-    temp_line = _render_session_temp_dir(session_temp_dir)
-    if temp_line:
-        lines.extend(temp_line)
+    lines.append(_render_exec_runtime_policy(exec_runtime_policy))
+    lines.extend(_render_session_temp_dir(session_temp_dir))
     lines.extend(_render_path_anchor())
     return '\n'.join(lines).strip()
 
@@ -383,6 +381,23 @@ def pinned_contract_state(session: Any, *, session_key: str | None = None) -> tu
     return '', []
 
 
+def pinned_contract_section_values(pinned_text: Any) -> dict[str, str]:
+    """从头部原文里取"快照已覆盖"的合同分节，作为一次性通知台账的初值。
+
+    只认头部真正渲染过的两行：exec 策略与临时目录。头部没有这两行（旧数据或
+    `include_extras=False`）时返回空表，通知层会把当刻值当首次快照投出去。
+    """
+    values: dict[str, str] = {}
+    for line in str(pinned_text or '').splitlines():
+        stripped = line.strip()
+        if stripped.startswith('exec_runtime_policy:'):
+            body = stripped.split(':', 1)[1].strip()
+            values['exec_runtime_policy'] = '' if body in {'', 'none'} else body
+        elif stripped.startswith('session_temp_dir:'):
+            values['session_temp_dir'] = stripped.split(':', 1)[1].strip()
+    return values
+
+
 def frontdoor_pinned_contract_text(
     session: Any,
     *,
@@ -395,11 +410,13 @@ def frontdoor_pinned_contract_text(
 ) -> str:
     """注入侧唯一取数口：命中已钉住的内容就复用原文，否则重钉一次并记下判据键。
 
-    读一次写一次都在同一跳内完成，重复调用幂等（同一判据键返回同一串原文）。渲染不出内容
-    （名单为空）时返回空串，装配侧据此不写头部、尾块照旧带全量——宁可重复不可缺。
+    读一次写一次都在同一跳内完成，重复调用幂等（同一判据键返回同一串原文）。
+    `include_extras=True` 时名单为空也会渲出静态声明（exec 策略/临时目录/路径锚），
+    因此正常情况下不再返回空串；空串只出现在 `include_extras=False` 且名单为空。
 
-    没有载体（既拿不到会话对象又没有 session_key）时也返回空串：钉不住就每回合现算，那份
+    没有载体（既拿不到会话对象又没有 session_key）时返回空串：钉不住就每回合现算，那份
     名单会随每回合的语义挑选变字节，头部每跳都改比不钉糟糕得多（头部一改就顶掉身后全部前缀）。
+    删掉尾块之后这类路径必须由装配侧补一条声明消息，不能当成"不用钉"静默放过。
     """
     normalized_session_key = str(session_key or '').strip()
     if session is None and not normalized_session_key:
@@ -677,16 +694,8 @@ def _render_exec_runtime_policy(exec_runtime_policy: dict[str, Any] | None) -> s
     payload = dict(exec_runtime_policy or {})
     if not payload:
         return 'exec_runtime_policy: none'
-    parts: list[str] = []
-    mode = str(payload.get('mode') or '').strip()
-    if mode:
-        parts.append(f'mode={mode}')
-    if 'guardrails_enabled' in payload:
-        parts.append(f'guardrails_enabled={bool(payload.get("guardrails_enabled"))}')
-    summary = str(payload.get('summary') or '').strip()
-    if summary:
-        parts.append(f'summary={summary}')
-    return 'exec_runtime_policy: ' + ('; '.join(parts) if parts else 'none')
+    body = render_exec_runtime_policy_body(payload)
+    return 'exec_runtime_policy: ' + (body or 'none')
 
 
 def _contract_revision_line(payload: dict[str, Any]) -> str:
@@ -998,17 +1007,14 @@ def upsert_frontdoor_tool_contract_message(
     messages: list[dict[str, Any]] | None,
     contract: FrontdoorToolContract,
 ) -> list[dict[str, Any]]:
-    """携带历史里 0 份运行时块，尾部恰好一份契约。"""
-    appendix = [contract.to_message()]
-    updated: list[dict[str, Any]] = []
-    inserted = False
-    for message in list(messages or []):
-        if is_frontdoor_tool_contract_message(message):
-            if not inserted:
-                updated.extend(appendix)
-                inserted = True
-            continue
-        updated.append(dict(message))
-    if not inserted:
-        updated.extend(appendix)
-    return updated
+    """剥离历史里的旧合同块，不再追加新尾块。
+
+    尾块已退役：静态声明在头部快照，变化由一次性 `[RUNTIME_NOTICE]` 投递。保留函数是为了
+    所有既有装配点零改动地停在"只剥离"语义上；`contract` 参数只为兼容调用方。
+    """
+    _ = contract
+    return [
+        dict(message)
+        for message in list(messages or [])
+        if isinstance(message, dict) and not is_frontdoor_tool_contract_message(message)
+    ]

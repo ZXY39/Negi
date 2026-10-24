@@ -51,40 +51,18 @@ def test_export_node_prompt_rounds_script_exports_two_consecutive_requests(tmp_p
     round1_contracts = _dynamic_contract_messages(list(round1.get("messages") or []))
     round2_contracts = _dynamic_contract_messages(list(round2.get("messages") or []))
 
-    assert len(round1_contracts) == 2  # 稳定契约 + 活状态块
-    # 历史回合的动态契约消息会被运行时剥离，第二轮请求只携带本轮新块
-    assert len(round2_contracts) == 2
+    assert len(round1_contracts) == 0
+    # 尾块退役：请求体里不再有动态合同消息。
+    assert len(round2_contracts) == 0
 
-    assert round1_payload["message_type"] == "node_runtime_tool_contract"
-    assert round1_payload["candidate_tools"] == [
-        {
-            "tool_id": "filesystem_write",
-            "description": "",
-        }
-    ]
-    assert round1_payload["candidate_skills"] == [
-        {
-            "skill_id": "tmux",
-            "description": "Terminal workflow helper.",
-        }
-    ]
-    assert "visible_skills" not in round1_payload
+    assert round1_payload == {}
+    assert round2_payload == {}
 
-    assert round2_payload["message_type"] == "node_runtime_tool_contract"
-    assert "filesystem_write" in list(round2_payload.get("callable_tool_names") or [])
-    assert round2_payload["candidate_tools"] == []
-    assert round2_payload["candidate_skills"] == [
-        {
-            "skill_id": "tmux",
-            "description": "Terminal workflow helper.",
-        }
-    ]
-
-    assert summary["rounds"][0]["dynamic_contract_message_indexes"] == [2, 3]  # 稳定契约 + 活状态块
-    assert summary["rounds"][1]["dynamic_contract_message_indexes"] == [4, 5]
-    # 契约之后还会追加本回合阶段提示（user 角色），因此最后一条消息是 user
-    assert summary["rounds"][1]["last_message_role"] == "user"
-    assert summary["rounds"][1]["dynamic_contract_message_count"] == 2  # 稳定契约 + 活状态块
+    assert summary["rounds"][0]["dynamic_contract_message_indexes"] == []
+    assert summary["rounds"][1]["dynamic_contract_message_indexes"] == []
+    # 尾块退役后请求以真实对话消息收尾（这一轮是工具结果），不再由合同块占末位。
+    assert summary["rounds"][1]["last_message_role"] == "tool"
+    assert summary["rounds"][1]["dynamic_contract_message_count"] == 0
 
     round1_model_messages = json.loads((output_dir / "round1.model_messages.json").read_text(encoding="utf-8"))
     round2_model_messages = json.loads((output_dir / "round2.model_messages.json").read_text(encoding="utf-8"))

@@ -229,8 +229,8 @@ test("直播重建保留用户展开的分组与折叠的 Interaction Flow", () 
     const turn = makeTurn();
 
     renderCeoTurnsIntoTurn(turn, [turnFixture(1, { withTools: true })]);
-    // 首渲染默认:Flow 自动展开、组全部折叠。
-    assert.equal(turn.flowEl.open, true);
+    // 首渲染默认:执行流程总框折叠、组全部折叠。
+    assert.equal(turn.flowEl.open, false);
     const firstSteps = turn.listEl.querySelectorAll(".task-trace-step");
     assert.equal(firstSteps.length, 1);
     assert.equal(firstSteps[0].open, false);
@@ -256,7 +256,7 @@ test("直播重建保留用户展开的分组与折叠的 Interaction Flow", () 
     assert.equal(turn.flowEl.open, false, "用户折叠的 Flow 容器不能被重建强制展开");
 });
 
-test("首渲染与换轨(turnId 变更清空轨道)仍走默认展开语义", () => {
+test("首渲染与换轨(turnId 变更清空轨道)仍走默认折叠语义", () => {
     const { renderCeoTurnsIntoTurn } = loadApp();
     const turn = makeTurn();
 
@@ -270,7 +270,7 @@ test("首渲染与换轨(turnId 变更清空轨道)仍走默认展开语义", ()
     renderCeoTurnsIntoTurn(turn, [turnFixture(1)]);
 
     assert.equal(turn.listEl.querySelectorAll(".task-trace-step")[0].open, false);
-    assert.equal(turn.flowEl.open, true);
+    assert.equal(turn.flowEl.open, false);
 });
 
 function makeFeed({ children = [], scrollTop = 0, scrollHeight = 0, clientHeight = 0 } = {}) {

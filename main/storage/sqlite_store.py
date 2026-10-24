@@ -382,6 +382,8 @@ class SQLiteTaskStore:
             )
             ''',
             '''
+            -- 停写：轮次分组已下线（前端平铺 + query_service 不再读该表）。
+            -- 表保留只为旧库升级时不破坏数据；新代码不得写入。
             CREATE TABLE IF NOT EXISTS task_node_rounds (
                 task_id TEXT NOT NULL,
                 parent_node_id TEXT NOT NULL,
@@ -514,6 +516,8 @@ class SQLiteTaskStore:
             'CREATE INDEX IF NOT EXISTS idx_task_commands_task_id ON task_commands(task_id)',
             'CREATE INDEX IF NOT EXISTS idx_task_nodes_task_id_sort_key ON task_nodes(task_id, sort_key)',
             'CREATE INDEX IF NOT EXISTS idx_task_nodes_parent_node_id ON task_nodes(parent_node_id)',
+            'CREATE INDEX IF NOT EXISTS idx_task_node_notifications_task_id ON task_node_notifications(task_id)',
+            'CREATE INDEX IF NOT EXISTS idx_task_node_notifications_task_node ON task_node_notifications(task_id, node_id)',
             'CREATE INDEX IF NOT EXISTS idx_task_node_details_task_id ON task_node_details(task_id)',
             'CREATE INDEX IF NOT EXISTS idx_task_runtime_frames_task_id ON task_runtime_frames(task_id)',
             'CREATE INDEX IF NOT EXISTS idx_task_node_tool_results_task_node_order ON task_node_tool_results(task_id, node_id, order_index)',
@@ -1718,7 +1722,11 @@ class SQLiteTaskStore:
             "COALESCE((SELECT e.error_text FROM task_error_logs e WHERE e.task_id = p.task_id AND e.node_id = p.node_id ORDER BY e.seq DESC LIMIT 1), '') AS error_text, "
             "COALESCE((SELECT e.node_title FROM task_error_logs e WHERE e.task_id = p.task_id AND e.node_id = p.node_id ORDER BY e.seq DESC LIMIT 1), '') AS node_title "
             "FROM task_node_pauses p JOIN nodes n ON n.node_id = p.node_id "
-            "WHERE p.pause_reason = 'error' AND p.delivered = 0 AND n.status = 'in_progress' AND COALESCE(json_extract(n.payload_json, '$.is_paused'), 0) = 1 "
+            "WHERE p.pause_reason = 'error' AND p.delivered = 0 AND n.status = 'in_progress' "
+            "AND COALESCE(json_extract(n.payload_json, '$.is_paused'), 0) = 1 "
+            # P6：心跳只报根节点。非根节点的异常暂停走父节点信箱（child_abnormal_pause），
+            # 否则一个深度 5 的子节点也能直接惊动会话 agent。
+            "AND n.node_id = (SELECT json_extract(t.payload_json, '$.root_node_id') FROM tasks t WHERE t.task_id = p.task_id) "
             "ORDER BY p.created_at ASC, p.id ASC"
         )
         return [dict(row) for row in rows]
@@ -2242,6 +2250,14 @@ class SQLiteTaskStore:
         """
         rows = self._fetchall(
             "SELECT payload_json FROM task_node_notifications WHERE task_id = ? AND TRIM(status) = 'delivered'",
+            (str(task_id or '').strip(),),
+        )
+        return [self._parse(row['payload_json'], TaskNodeNotification) for row in rows]
+
+    def list_task_notifications(self, task_id: str) -> list[TaskNodeNotification]:
+        """整任务通知台账（发出侧按 payload.source_node_id 过滤用）。"""
+        rows = self._fetchall(
+            'SELECT payload_json FROM task_node_notifications WHERE task_id = ? ORDER BY created_at ASC, notification_id ASC',
             (str(task_id or '').strip(),),
         )
         return [self._parse(row['payload_json'], TaskNodeNotification) for row in rows]
@@ -3209,6 +3225,23 @@ class SQLiteTaskStore:
             (str(task_id or '').strip(),),
         )
         return int(row['total']) if row is not None else 0
+
+    def count_task_nodes_by_task(self, task_ids: list[str] | None = None) -> dict[str, int]:
+        """任务大厅卡片上的「节点数」：一次分组计数，不逐任务回表。"""
+        wanted = [str(item or '').strip() for item in list(task_ids or []) if str(item or '').strip()]
+        if not wanted:
+            return {}
+        counts: dict[str, int] = {}
+        for start in range(0, len(wanted), 500):
+            chunk = wanted[start:start + 500]
+            placeholders = ','.join('?' for _ in chunk)
+            rows = self._fetchall_light(
+                f'SELECT task_id, COUNT(*) AS total FROM task_nodes WHERE task_id IN ({placeholders}) GROUP BY task_id',
+                tuple(chunk),
+            )
+            for row in rows:
+                counts[str(row['task_id'])] = int(row['total'] or 0)
+        return counts
 
     def count_task_node_rounds(self, task_id: str) -> int:
         """同上：轮次条数不靠整表建模。"""

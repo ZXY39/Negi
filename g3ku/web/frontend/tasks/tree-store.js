@@ -1,40 +1,44 @@
-// 执行树状态仓库：快照节点归一化、轮次选择、状态标签与树模型推导。
+// 执行树状态仓库：快照节点归一化、子节点平铺、状态标签与树模型推导。
 // 纯状态函数，不碰 DOM；视图层只消费 buildExecutionTreeFromSnapshot 的结果。
-
-function normalizeTreeRoundSelections(value) {
-    const next = {};
-    if (!value || typeof value !== "object") return next;
-    Object.entries(value).forEach(([nodeId, roundId]) => {
-        const normalizedNodeId = String(nodeId || "").trim();
-        const normalizedRoundId = String(roundId || "").trim();
-        if (!normalizedNodeId || !normalizedRoundId) return;
-        next[normalizedNodeId] = normalizedRoundId;
-    });
-    return next;
-}
+// 节点树不再按派生轮次分组：一个父节点的全部子节点平铺显示（验收节点单独附着）。
 
 function treeNormalizeInt(value, fallback = 0) {
     const numeric = Number.parseInt(String(value ?? ""), 10);
     return Number.isFinite(numeric) ? numeric : fallback;
 }
 
-function normalizeTaskTreeSnapshotRound(value = {}) {
-    return {
-        round_id: String(value?.round_id || "").trim(),
-        label: String(value?.label || "").trim(),
-        is_latest: !!value?.is_latest,
-        total_children: Math.max(0, treeNormalizeInt(value?.total_children, 0)),
-        completed_children: Math.max(0, treeNormalizeInt(value?.completed_children, 0)),
-        running_children: Math.max(0, treeNormalizeInt(value?.running_children, 0)),
-        failed_children: Math.max(0, treeNormalizeInt(value?.failed_children, 0)),
-        child_ids: (Array.isArray(value?.child_ids) ? value.child_ids : [])
-            .map((item) => String(item || "").trim())
-            .filter(Boolean),
-    };
-}
-
 function normalizeTaskTreeSnapshotNode(value = {}, existing = null) {
     const prior = existing && typeof existing === "object" ? existing : {};
+    const rounds = (Array.isArray(value?.rounds) ? value.rounds : Array.isArray(prior?.rounds) ? prior.rounds : []);
+    // `task.node.patch` 只带状态字段，不带任何子节点列表：合并时必须回退到既有
+    // 归一化结果里的 all_child_ids，否则每一次状态补丁都会把这个节点的子节点
+    // 从浏览器缓存里抹掉（树枝凭空消失，且 children_fingerprint 没变、不会触发
+    // 分支重拉）。
+    const priorChildIds = Array.isArray(prior?.auxiliary_child_ids)
+        ? prior.auxiliary_child_ids
+        : Array.isArray(prior?.all_child_ids)
+            ? prior.all_child_ids
+            : [];
+    const auxiliary = (Array.isArray(value?.auxiliary_child_ids) ? value.auxiliary_child_ids : priorChildIds)
+        .map((item) => String(item || "").trim())
+        .filter(Boolean);
+    const seenChildIds = new Set();
+    const allChildIds = [];
+    auxiliary.forEach((childId) => {
+        if (childId && !seenChildIds.has(childId)) {
+            seenChildIds.add(childId);
+            allChildIds.push(childId);
+        }
+    });
+    rounds.forEach((round) => {
+        (Array.isArray(round?.child_ids) ? round.child_ids : []).forEach((item) => {
+            const childId = String(item || "").trim();
+            if (childId && !seenChildIds.has(childId)) {
+                seenChildIds.add(childId);
+                allChildIds.push(childId);
+            }
+        });
+    });
     return {
         node_id: String(value?.node_id || prior?.node_id || "").trim(),
         parent_node_id: String(value?.parent_node_id || prior?.parent_node_id || "").trim() || null,
@@ -47,15 +51,8 @@ function normalizeTaskTreeSnapshotNode(value = {}, existing = null) {
         title: String(value?.title || prior?.title || value?.goal || "").trim(),
         updated_at: String(value?.updated_at || prior?.updated_at || "").trim(),
         children_fingerprint: String(value?.children_fingerprint || prior?.children_fingerprint || "").trim(),
-        default_round_id: String(value?.default_round_id || prior?.default_round_id || "").trim(),
-        rounds: (Array.isArray(value?.rounds) ? value.rounds : Array.isArray(prior?.rounds) ? prior.rounds : [])
-            .map((item) => normalizeTaskTreeSnapshotRound(item))
-            .filter((item) => item.round_id),
-        auxiliary_child_ids: (Array.isArray(value?.auxiliary_child_ids) ? value.auxiliary_child_ids : Array.isArray(prior?.auxiliary_child_ids) ? prior.auxiliary_child_ids : [])
-            .map((item) => String(item || "").trim())
-            .filter(Boolean),
+        all_child_ids: allChildIds,
         pending_notice_count: Math.max(0, treeNormalizeInt(value?.pending_notice_count ?? prior?.pending_notice_count, 0)),
-        distribution_status: String(value?.distribution_status || prior?.distribution_status || "").trim(),
         parent_visible: value?.parent_visible ?? prior?.parent_visible ?? true,
         acceptance_handshake_state: String(value?.acceptance_handshake_state || prior?.acceptance_handshake_state || "").trim(),
     };
@@ -67,43 +64,65 @@ function treeSnapshotNode(nodeId) {
     return S.treeNodesById?.[key] || null;
 }
 
+function treeTaskIsTerminal(task = S.currentTask) {
+    const status = String(task?.status || "").trim().toLowerCase();
+    return status === "success" || status === "failed";
+}
+
+// 默认只看非终态（决策 C）的前提是任务还在跑：任务本身已结束时不存在"活跃视图"，
+// 再按终态过滤只会剩下一根节点。用户手动切换过则以手动值为准（null/undefined = 自动）。
+function treeShowTerminalEffective() {
+    if (S.treeShowTerminal === true || S.treeShowTerminal === false) return S.treeShowTerminal;
+    return treeTaskIsTerminal();
+}
+
+// 节点行内小挂件（未读角标 / 展开钮）的渲染签名。就地刷新只能改文字与 class，
+// 增删这些元素要重排 DOM；签名一变就说明必须整树重建一次。
+function treeNodeChipSignature(node) {
+    return [
+        node?.expandable ? "1" : "0",
+        treeNormalizeInt(node?.hidden_child_count, 0),
+        node?.expanded ? "1" : "0",
+        treeNormalizeInt(node?.pending_notice_count, 0),
+        node?.kind === "acceptance" ? "1" : "0",
+    ].join("|");
+}
+
+function treeExpandedNodeIds() {
+    if (!(S.treeExpandedNodeIds instanceof Set)) S.treeExpandedNodeIds = new Set();
+    return S.treeExpandedNodeIds;
+}
+
+// 节点行上的展开钮：展开后显示该节点的全部直属子节点（任意状态）。
+function toggleTreeNodeExpanded(nodeId) {
+    const key = String(nodeId || "").trim();
+    if (!key) return false;
+    const expanded = treeExpandedNodeIds();
+    if (expanded.has(key)) {
+        expanded.delete(key);
+    } else {
+        expanded.add(key);
+    }
+    return expanded.has(key);
+}
+
 function snapshotNodeDefaultRoundId(node) {
-    const rounds = Array.isArray(node?.rounds) ? node.rounds : [];
-    if (!rounds.length) return "";
-    const explicit = String(node?.default_round_id || "").trim();
-    if (explicit && rounds.some((round) => round.round_id === explicit)) return explicit;
-    return String(rounds.find((round) => round?.is_latest)?.round_id || rounds[rounds.length - 1]?.round_id || "");
+    return "";
+}
+
+// 兼容旧状态序列化：轮次分组已下线，选择集恒为空。
+function normalizeTreeRoundSelections(value) {
+    return {};
 }
 
 function snapshotNodeSelectedRoundId(node, selections = S.treeSelectedRoundByNodeId) {
-    const rounds = Array.isArray(node?.rounds) ? node.rounds : [];
-    if (!rounds.length) return "";
-    const nodeId = String(node?.node_id || "").trim();
-    const selected = String(selections?.[nodeId] || "").trim();
-    if (selected && rounds.some((round) => round.round_id === selected)) return selected;
-    return snapshotNodeDefaultRoundId(node);
+    return "";
 }
 
-function snapshotNodeVisibleChildIds(node, selections = S.treeSelectedRoundByNodeId) {
-    const seen = new Set();
-    const out = [];
-    (Array.isArray(node?.auxiliary_child_ids) ? node.auxiliary_child_ids : []).forEach((childId) => {
-        const normalized = String(childId || "").trim();
-        if (!normalized || seen.has(normalized)) return;
-        seen.add(normalized);
-        out.push(normalized);
-    });
-    const rounds = Array.isArray(node?.rounds) ? node.rounds : [];
-    if (!rounds.length) return out;
-    const selectedRoundId = snapshotNodeSelectedRoundId(node, selections);
-    const selectedRound = rounds.find((round) => round.round_id === selectedRoundId) || null;
-    (Array.isArray(selectedRound?.child_ids) ? selectedRound.child_ids : []).forEach((childId) => {
-        const normalized = String(childId || "").trim();
-        if (!normalized || seen.has(normalized)) return;
-        seen.add(normalized);
-        out.push(normalized);
-    });
-    return out;
+function snapshotNodeVisibleChildIds(node) {
+    return (Array.isArray(node?.all_child_ids) ? node.all_child_ids : [])
+        .map((item) => String(item || "").trim())
+        .filter(Boolean);
 }
 
 function collectSnapshotSubtreeIds(rootNodeId, nodesById = S.treeNodesById) {
@@ -117,55 +136,20 @@ function collectSnapshotSubtreeIds(rootNodeId, nodesById = S.treeNodesById) {
         const node = nodesById?.[currentId];
         if (!node) continue;
         collected.add(currentId);
-        snapshotNodeVisibleChildIds(node, S.treeSelectedRoundByNodeId).forEach((childId) => {
-            if (!collected.has(childId)) queue.push(childId);
-        });
-        (Array.isArray(node?.rounds) ? node.rounds : []).forEach((round) => {
-            (Array.isArray(round?.child_ids) ? round.child_ids : []).forEach((childId) => {
-                if (!collected.has(childId)) queue.push(childId);
-            });
-        });
-        (Array.isArray(node?.auxiliary_child_ids) ? node.auxiliary_child_ids : []).forEach((childId) => {
+        snapshotNodeVisibleChildIds(node).forEach((childId) => {
             if (!collected.has(childId)) queue.push(childId);
         });
     }
     return collected;
 }
 
-function buildNodeRoundState(node, selections = S.treeSelectedRoundByNodeId) {
-    const rounds = (Array.isArray(node?.rounds) ? node.rounds : []).map((round, index) => ({
-        roundId: String(round?.round_id || ""),
-        roundIndex: index + 1,
-        label: formatRoundLabel(round?.label, index + 1),
-        isLatest: !!round?.is_latest,
-        childCount: Array.isArray(round?.child_ids) ? round.child_ids.length : 0,
-        createdAt: "",
-        totalChildren: Math.max(0, treeNormalizeInt(round?.total_children, Array.isArray(round?.child_ids) ? round.child_ids.length : 0)),
-        completedChildren: Math.max(0, treeNormalizeInt(round?.completed_children, 0)),
-        runningChildren: Math.max(0, treeNormalizeInt(round?.running_children, 0)),
-        failedChildren: Math.max(0, treeNormalizeInt(round?.failed_children, 0)),
-    }));
-    if (!rounds.length) {
-        return {
-            options: [],
-            selectedRoundId: "",
-            defaultRoundId: "",
-        };
-    }
-    const defaultRoundId = snapshotNodeDefaultRoundId(node);
-    const selectedRoundId = snapshotNodeSelectedRoundId(node, selections);
-    return {
-        options: rounds,
-        selectedRoundId,
-        defaultRoundId,
-    };
-}
-
 function buildExecutionTreeFromSnapshot(
     nodeId = S.treeRootNodeId,
-    selections = S.treeSelectedRoundByNodeId,
     seen = new Set(),
     taskPaused = taskPauseDisplayActive(),
+    showTerminal = treeShowTerminalEffective(),
+    isRoot = true,
+    expandedNodeIds = treeExpandedNodeIds(),
 ) {
     const normalizedNodeId = String(nodeId || "").trim();
     if (!normalizedNodeId || seen.has(normalizedNodeId)) return null;
@@ -175,16 +159,27 @@ function buildExecutionTreeFromSnapshot(
     const kind = String(snapshotNode.node_kind || "execution").trim().toLowerCase() || "execution";
     const status = String(snapshotNode.status || "unknown").trim().toLowerCase() || "unknown";
     const title = resolveNodeTitle(snapshotNode, snapshotNode);
-    const roundState = buildNodeRoundState(snapshotNode, selections);
-    const visibleChildren = snapshotNodeVisibleChildIds(snapshotNode, selections)
-        .map((childId) => buildExecutionTreeFromSnapshot(childId, selections, seen, taskPaused))
+    const expanded = expandedNodeIds.has(normalizedNodeId);
+    const builtChildren = snapshotNodeVisibleChildIds(snapshotNode)
+        .map((childId) => buildExecutionTreeFromSnapshot(childId, seen, taskPaused, showTerminal, false, expandedNodeIds))
         .filter(Boolean);
     const inspectionNodes = [];
     const childNodes = [];
-    visibleChildren.forEach((child) => {
-        if (isAcceptanceNodeKind(child?.kind)) inspectionNodes.push(child);
-        else childNodes.push(child);
+    let hiddenChildCount = 0;
+    builtChildren.forEach((child) => {
+        if (isAcceptanceNodeKind(child?.kind)) {
+            // 验收节点无条件附着在被验收节点上：不参与默认过滤。
+            inspectionNodes.push(child);
+        } else if (expanded || showTerminal || child?.contains_live) {
+            // contains_live：终态节点底下还有存活后代时必须显示，否则那些
+            // 非终态节点连同祖先链一起消失，违反"非终态全部可见"与祖先链规则。
+            childNodes.push(child);
+        } else {
+            hiddenChildCount += 1;
+        }
     });
+    const containsLive = !isTerminalTreeNodeStatus(status)
+        || builtChildren.some((child) => !!child?.contains_live);
     const inspectionPending = inspectionNodes.some((child) => !isTerminalTreeNodeStatus(child?.state));
     const effectiveIsPaused = effectiveTreeNodePaused(snapshotNode, taskPaused);
     const liveFrame = S.liveFrameMap?.[normalizedNodeId] || null;
@@ -193,17 +188,17 @@ function buildExecutionTreeFromSnapshot(
         kind,
         inTurn,
         modelInFlight: isModelRequestInFlightFrame(liveFrame),
-        distributionFrozen: String(snapshotNode?.distribution_status || "").trim() === "barrier_frozen",
         inspectionPending,
         isPaused: !!snapshotNode.is_paused,
         taskPaused,
         pauseReason: String(snapshotNode.pause_reason || "").trim(),
+        phase: String(liveFrame?.phase || "").trim().toLowerCase(),
     });
     // 检验节点常驻显示后，"活跃"必须按真实在执行判定，否则每个未派发的检验节点
     // 都会被计入头部计数。
     const isActiveNode = !isTerminalTreeNodeStatus(status) && (inTurn || effectiveIsPaused);
     const activeNodeCount = (isActiveNode ? 1 : 0)
-        + visibleChildren.reduce((sum, child) => sum + treeNormalizeInt(child?.activeNodeCount, 0), 0);
+        + builtChildren.reduce((sum, child) => sum + treeNormalizeInt(child?.activeNodeCount, 0), 0);
     return {
         node_id: snapshotNode.node_id,
         parent_node_id: snapshotNode.parent_node_id,
@@ -214,13 +209,14 @@ function buildExecutionTreeFromSnapshot(
         state: status,
         visual_state: stateMeta.visualState,
         display_state: stateMeta.displayState,
-        roundOptions: roundState.options,
-        selectedRoundId: roundState.selectedRoundId,
-        defaultRoundId: roundState.defaultRoundId,
         inspectionNodes,
         children: childNodes,
         activeNodeCount,
-        distribution_status: String(snapshotNode.distribution_status || "").trim(),
+        contains_live: containsLive,
+        expanded,
+        pending_notice_count: Math.max(0, treeNormalizeInt(snapshotNode.pending_notice_count, 0)),
+        hidden_child_count: hiddenChildCount,
+        expandable: hiddenChildCount > 0 || (expanded && builtChildren.some((child) => !isAcceptanceNodeKind(child?.kind))),
         parent_visible: snapshotNode.parent_visible !== false,
         acceptance_handshake_state: String(snapshotNode.acceptance_handshake_state || "").trim(),
         task_paused: taskPaused,
@@ -369,7 +365,7 @@ function effectiveTreeNodePaused(node, taskPaused = taskPauseDisplayActive()) {
     return !isTerminalTreeNodeStatus(status) && (taskPaused || !!node?.is_paused);
 }
 
-function resolveTreeNodeStatusLabel(status, { kind = "", inTurn = false, modelInFlight = false, inspectionPending = false, isPaused = false, taskPaused = false, pauseReason = "", distributionFrozen = false } = {}) {
+function resolveTreeNodeStatusLabel(status, { kind = "", inTurn = false, modelInFlight = false, inspectionPending = false, isPaused = false, taskPaused = false, pauseReason = "", phase = "" } = {}) {
     const normalizedStatus = String(status || "").trim().toLowerCase() || "unknown";
     if (taskPaused && !isTerminalTreeNodeStatus(normalizedStatus)) {
         return {
@@ -378,9 +374,10 @@ function resolveTreeNodeStatusLabel(status, { kind = "", inTurn = false, modelIn
         };
     }
     if (isPaused) {
+        const abnormal = String(pauseReason || "").trim().toLowerCase() === "error";
         return {
-            visualState: normalizedStatus,
-            displayState: pauseReason ? `\u5df2\u6682\u505c\uff08${pauseReason}\uff09` : "\u5df2\u6682\u505c",
+            visualState: abnormal ? "paused_abnormal" : "paused",
+            displayState: abnormal ? "\u6682\u505c\u00b7\u5f02\u5e38" : "\u6682\u505c\u00b7\u666e\u901a",
         };
     }
     if (isTerminalTreeNodeStatus(normalizedStatus)) {
@@ -393,10 +390,12 @@ function resolveTreeNodeStatusLabel(status, { kind = "", inTurn = false, modelIn
             displayState: normalizedStatus.toUpperCase(),
         };
     }
-    if (distributionFrozen) {
-        // 排空账本已记到该节点：它停在检查点上，等的只有屏障释放。与节点详情消息
-        // 条目同一串文案，避免同一个事实出现两种说法。
-        return { visualState: "waiting", displayState: "已冻结待释放" };
+    const normalizedPhase = String(phase || "").trim().toLowerCase();
+    if (normalizedPhase === "waiting_explicit") {
+        return { visualState: "waiting", displayState: "\u7b49\u5f85\uff08\u663e\u5f0f\uff09" };
+    }
+    if (normalizedPhase === "waiting_acceptance") {
+        return { visualState: "waiting", displayState: "\u7b49\u5f85\uff08\u9a8c\u6536\u5f85\u51b3\uff09" };
     }
     if (!inTurn) {
         return { visualState: "waiting", displayState: "\u7b49\u5f85\u4e2d" };
@@ -404,6 +403,9 @@ function resolveTreeNodeStatusLabel(status, { kind = "", inTurn = false, modelIn
     if (modelInFlight) {
         // \u8bf7\u6c42\u4e2d\u662f\u8fd0\u884c\u4e2d\u7684\u4e00\u79cd\uff0c\u4e0d\u53e6\u8d77\u989c\u8272\uff1a\u6cbf\u7528\u6267\u884c\u84dd\uff0c\u53ea\u628a"\u5728\u7b49 API \u56de\u5b8c"\u8bf4\u51fa\u53e3\u3002
         return { visualState: "running", displayState: "\u8bf7\u6c42\u4e2d" };
+    }
+    if (normalizedPhase === "waiting_tool_results" || normalizedPhase === "tool_running") {
+        return { visualState: "running", displayState: "\u8fd0\u884c\u4e2d\uff08\u5de5\u5177\u5728\u9014\uff09" };
     }
     return isAcceptanceNodeKind(kind)
         ? { visualState: "inspecting", displayState: "\u68c0\u9a8c\u4e2d" }

@@ -90,6 +90,12 @@ class NodeFinalResult(Model):
     evidence: list[NodeEvidenceItem] = Field(default_factory=list)
     remaining_work: list[str] = Field(default_factory=list)
     blocking_reason: str = ''
+    # 验收三档裁决（P4）：只有验收节点提交的载荷带这个字段；执行节点恒为空。
+    # 进入 result_payload 持久化——验收节点回合结束后，裁决只能从节点行读回
+    # （`_drain_acceptance_verdicts` 就是这么消费的）。
+    verdict: Literal['', 'pass', 'reject', 'reject_no_progress'] = ''
+    # 被验方提交的幂等标识：验收裁决与回执都按它对齐同一次提交。
+    submission_id: str = ''
     # This flag controls only the current runner handoff. Result payloads remain
     # backwards-compatible and must never persist an internal pause instruction.
     failure_disposition: Literal['terminal', 'pause'] = Field(default='terminal', exclude=True)
@@ -158,6 +164,14 @@ class SpawnChildResult(Model):
     # 预置契约回执：只在派发方声明过 seed_tools 时出现（exclude_none 让未声明时整键消失），
     # 出现时 accepted / dropped 两键恒在。
     seed_tools: dict[str, Any] | None = None
+    # 非阻塞派生的创建回执：`created` 表示节点已创建并交给调度器，结果稍后以
+    # child_final 消息送达；`rejected` 表示未创建（gate 说明是哪道闸）。
+    # 三个字段都是增量，存量 spawn_operations 里的旧 dict 反序列化时取默认值。
+    child_node_id: str = ''
+    acceptance_node_id: str = ''
+    state: str = ''
+    gate: str = ''
+    reject_reason: str = ''
 
 
 class TokenUsageSummary(Model):
@@ -228,6 +242,19 @@ class TaskNodeNotification(Model):
     # 消息三态：consumed_at=控制/决策回合处理过；merged_at=内容真正并入模型上下文。
     # consumed 而未 merged 显示「已消费」，merged 后显示「已并入上下文」。
     merged_at: str = ''
+    # 以下七格由 `main/runtime/node_message_kind.py` 机械推导，发送方不能自报：
+    # kind/priority 决定投递与唤醒，intent_kind 是模型唯一可声明的意图词。
+    # 全部带默认值，存量行（payload_json 里没有这些键）照旧解析。
+    kind: str = ''
+    priority: str = ''
+    intent_kind: str = ''
+    fingerprint: str = ''
+    in_reply_to: str = ''
+    # 大内容外部化指针：消息正文只放摘要，全文走 ref。
+    ref: str = ''
+    # 仅 acceptance_verdict：绑定被验的那一份提交（迟到裁决规则唯一判据）。
+    submission_id: str = ''
+    verdict: str = ''
     payload: dict[str, Any] = Field(default_factory=dict)
 
 

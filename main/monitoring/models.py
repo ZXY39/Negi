@@ -16,6 +16,8 @@ from main.types import NodeStatus, TaskStatus
 
 
 class TaskTreeSnapshotRound(Model):
+    """已废弃：轮次分组下线后不再生成。保留类型只为旧响应反序列化。"""
+
     round_id: str = ''
     label: str = ''
     is_latest: bool = False
@@ -37,6 +39,8 @@ class TaskTreeSnapshotNode(Model):
     title: str = ''
     updated_at: str = ''
     children_fingerprint: str = ''
+    # 已废弃：恒为空串 / 空列表，只为旧客户端保持响应形状；子节点关系看
+    # auxiliary_child_ids（现在是全部直接子节点）与 parent_node_id。
     default_round_id: str = ''
     rounds: list[TaskTreeSnapshotRound] = Field(default_factory=list)
     auxiliary_child_ids: list[str] = Field(default_factory=list)
@@ -191,6 +195,8 @@ class TaskListItem(Model):
     token_usage: TokenUsageSummary = Field(default_factory=TokenUsageSummary)
     # 磁盘治理（P1）：任务磁盘占用（增量记账 + 每小时/终态对账，展示允许 ≤1h 延迟）。
     disk_usage_bytes: int = 0
+    # 任务卡片「节点数」：task_nodes 投影行数（一次分组计数，见 get_tasks）。
+    node_count: int = 0
 
 
 class TaskRuntimeSummary(Model):
@@ -242,6 +248,8 @@ class TaskNodeDetail(Model):
     latest_spawn_round_id: str = ''
     append_notice_messages: list[dict[str, Any]] = Field(default_factory=list)
     message_list: list[dict[str, Any]] = Field(default_factory=list)
+    # 节点发出的消息（通知台账里 source_node_id=本节点的行），供「发出」分栏。
+    sent_message_list: list[dict[str, Any]] = Field(default_factory=list)
     direct_child_results: list[dict[str, Any]] = Field(default_factory=list)
     spawn_review_rounds: list[dict[str, Any]] = Field(default_factory=list)
     artifacts_preview: list[dict[str, Any]] = Field(default_factory=list)

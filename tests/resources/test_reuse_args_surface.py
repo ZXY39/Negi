@@ -180,8 +180,6 @@ def test_every_loop_injected_control_tool_is_exempt() -> None:
             internal_tools.SilentTool(),
             internal_tools.SpawnChildNodesTool(_callback),
             internal_tools.SubmitFinalResultTool(_callback, node_kind='execution'),
-            internal_tools.SubmitMessageDistributionTool(_callback),
-            internal_tools.SubmitNoticeInspectionDecisionTool(_callback),
         )
     }
     assert '' not in names

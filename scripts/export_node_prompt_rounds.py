@@ -318,11 +318,12 @@ def _serializable_chat_request(kwargs: dict[str, Any]) -> dict[str, Any]:
 
 
 def _extract_dynamic_contract_payload(messages: list[dict[str, Any]]) -> dict[str, Any]:
+    """尾块退役后请求体里不再有动态合同；导出空对象，脚本仍能完整跑完。"""
     for message in reversed(list(messages or [])):
         payload = extract_node_dynamic_contract_payload([dict(message) if isinstance(message, dict) else {}])
         if isinstance(payload, dict):
             return payload
-    raise RuntimeError("node runtime tool contract not found in request messages")
+    return {}
 
 
 def _render_messages_markdown(messages: list[dict[str, Any]]) -> str:

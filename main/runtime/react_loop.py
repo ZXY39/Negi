@@ -9,6 +9,7 @@ import re
 import time
 import traceback
 from collections import deque
+from contextvars import ContextVar
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -16,7 +17,6 @@ from typing import Any
 from loguru import logger
 
 from g3ku.agent.tools.base import Tool
-from g3ku.config.context_refresh import idle_boundary_exceeded
 from g3ku.config.live_runtime import get_runtime_config
 from g3ku.content import content_summary_and_ref, parse_content_envelope
 from g3ku.providers.base import (
@@ -49,6 +49,12 @@ from g3ku.runtime.frontdoor.tool_contract import (
 )
 from g3ku.runtime.frontdoor.tool_contract import (
     merge_pinned_contract_into_system_text as _merge_pinned_contract_into_system_text,
+)
+from g3ku.runtime.frontdoor.tool_contract import (
+    pinned_contract_section_values as _pinned_contract_section_values,
+)
+from g3ku.runtime.frontdoor.tool_contract import (
+    pinned_contract_state as _pinned_contract_state,
 )
 from g3ku.runtime.frontdoor.tool_contract import (
     pinned_head_carrier as _pinned_head_carrier,
@@ -115,13 +121,12 @@ from g3ku.runtime.tool_watchdog import (
     run_tool_with_watchdog,
 )
 from main.errors import (
-    DistributionHoldError,
     NodePausedError,
     TaskPausedError,
     describe_exception,
     is_runtime_self_fault,
 )
-from main.governance.exec_tool_policy import EXEC_TOOL_ID
+from main.governance.exec_tool_policy import EXEC_TOOL_ID, render_exec_runtime_policy_body
 from main.governance.tool_context import apply_runtime_tool_context_projection
 from main.models import (
     RESULT_SCHEMA_VERSION,
@@ -159,7 +164,6 @@ from main.runtime.node_prompt_contract import (
     extract_node_dynamic_contract_payload,
     inject_node_dynamic_contract_message,
     is_node_dynamic_contract_echo_text,
-    is_node_dynamic_contract_message,
     strip_node_dynamic_contract_messages,
     upsert_node_dynamic_contract_message,
 )
@@ -171,13 +175,6 @@ from main.runtime.pending_notice_state import (
 )
 from main.runtime.plain_text_reply import build_node_plain_text_reply_block_message
 from main.runtime.recovery_check import RecoveryCheckDecision, RecoveryCheckEngine
-from main.runtime.subtree_hold import (
-    DISTRIBUTION_ACTIVE_STATES,
-    make_epoch_state_lookup,
-    make_stale_hold_logger,
-    resolve_subtree_hold_epoch_id,
-    spawn_round_has_unmaterialized_entries,
-)
 from main.runtime.tool_call_repair import (
     XML_REPAIR_ATTEMPT_LIMIT,
     build_xml_tool_repair_message,
@@ -186,7 +183,11 @@ from main.runtime.tool_call_repair import (
     format_xml_repair_failure_reason,
     recover_tool_calls_from_json_payload,
 )
-from main.runtime.tool_names import FINAL_RESULT_TOOL_NAME, SILENT_TOOL_NAME
+from main.runtime.tool_names import (
+    ENTER_WAIT_TOOL_NAME,
+    FINAL_RESULT_TOOL_NAME,
+    SILENT_TOOL_NAME,
+)
 from main.runtime.turn_overlay import (
     build_turn_only_system_note_message,
     is_turn_only_system_note_message,
@@ -282,17 +283,39 @@ def _node_goal_anchor_text(node: Any) -> str:
 
 def _node_contract_echo_repair_message(node: Any) -> str:
     return _NODE_CONTRACT_ECHO_REPAIR_MESSAGE + _node_goal_anchor_text(node)
-_RESULT_REQUIRED_KEYS = (
-    'status',
-    'delivery_status',
-    'summary',
-    'answer',
-    'evidence',
-    'remaining_work',
-    'blocking_reason',
-)
 _TOOL_DISCIPLINE_NODE_KINDS = {'execution', 'acceptance'}
 _UNSET = object()
+
+# 本次工具调用是否被 H3 上限夹紧。逐调用用 ContextVar 承载：同一批并行工具调用
+# 各自在独立 task 里执行，task 的上下文是写时复制的，不会串到别的调用上。
+_TOOL_TIMEOUT_CLAMP_NOTE: ContextVar[str] = ContextVar('tool_timeout_clamp_note', default='')
+
+
+def resolve_node_tool_timeout(
+    arguments: dict[str, Any] | None,
+    runtime_context: Any,
+) -> tuple[float, str]:
+    """节点道工具超时 = 显式/默认值夹紧到 `NODE_TOOL_TIMEOUT_CEILING`（H3）。
+
+    返回 `(seconds, clamp_note)`；没有夹紧时 note 为空。夹紧而不是拒绝，是因为拒绝
+    会把重试负担推给模型；把上限写进结果里，模型才知道"再长的工作要拆子节点"。
+    `runtime_context` 不是节点道（没有该键）时不夹紧——CEO 车道不受 H3 约束。
+    """
+    requested = float(resolve_effective_tool_timeout(arguments, runtime_context))
+    ceiling = 0.0
+    if isinstance(runtime_context, dict):
+        try:
+            ceiling = float(runtime_context.get('node_tool_timeout_ceiling_seconds') or 0.0)
+        except (TypeError, ValueError):
+            ceiling = 0.0
+    if ceiling >= 1.0 and requested > ceiling:
+        note = (
+            f'[timeout clamped] 请求的 {requested:.0f}s 超过节点道单次工具上限 '
+            f'{ceiling:.0f}s，本次调用按 {ceiling:.0f}s 计时。'
+            '需要更久的工作请拆成子节点。'
+        )
+        return ceiling, note
+    return requested, ''
 
 
 class RepeatedActionCircuitBreaker:
@@ -315,6 +338,7 @@ class ReActToolLoop:
     _ORDERED_CONTROL_TOOL_NAMES = ('stop_tool_execution',)
     _EXCLUSIVE_TOOL_TURN_NAMES = {FINAL_RESULT_TOOL_NAME}
     _ALWAYS_CALLABLE_TOOL_NAMES = {
+        ENTER_WAIT_TOOL_NAME,
         FINAL_RESULT_TOOL_NAME,
         _SPAWN_CHILDREN_TOOL_NAME,
         SILENT_TOOL_NAME,
@@ -369,10 +393,6 @@ class ReActToolLoop:
         message_history = list(messages or [])
         fresh_turn_request_seed_messages = self._prompt_message_records(request_body_seed_messages)
         previous_actual_request_messages: list[dict[str, Any]] = []
-        # 上一跳发出去的墙钟，与"本跳是不是空闲边界"——判据必须在本跳把墙钟推前之前取，
-        # 否则每一跳看到的都是刚写上去的当下值。
-        previous_send_at: str = ""
-        hop_idle_boundary: bool = False
         pending_request_delta_messages: list[dict[str, Any]] = []
         request_seed_source = ''
         request_seed_message_count = 0
@@ -499,18 +519,14 @@ class ReActToolLoop:
                 node_id=str(node.node_id),
                 scope_key=skill_roster_scope,
             )
+            node_exec_runtime_policy = self._node_exec_runtime_policy_payload(runtime_context)
+            node_task_temp_dir = str(runtime_context.get('task_temp_dir') or '').strip()
             model_messages = self._apply_node_skill_roster_head(
                 model_messages,
                 scope_key=skill_roster_scope,
                 skill_items=skill_roster_items,
-            )
-            # 新增可读 skill 的一次性提示：节点每跳只在这里检测与投递（与会话道同口径）。
-            # 投递的那条同时落进 message_history，让它活过重启/续跑的历史重建。
-            model_messages = self._apply_node_skill_roster_notice(
-                model_messages,
-                node=node,
-                message_history=message_history,
-                skill_roster_items=skill_roster_items,
+                exec_runtime_policy=node_exec_runtime_policy,
+                session_temp_dir=node_task_temp_dir or None,
             )
             # 每跳只算一次在场索引（D12），下传给这一跳的所有消费点（执行准入、冲动投递、
             # 观测读数）。各消费点各自重算会造出"同一轮里两个答案"，那正是本次要消灭的漂移。
@@ -565,6 +581,24 @@ class ReActToolLoop:
                 skill_roster_items=skill_roster_items,
             )
             dynamic_contract_payload = dynamic_contract.to_message_payload()
+            # 运行时合同的一次性通知：与 skill 通知同一条消息、同一个单生产者。
+            # 放在选择结果之后，才能拿到当跳的 denied/candidate/repair。
+            model_messages = self._apply_node_skill_roster_notice(
+                model_messages,
+                node=node,
+                message_history=message_history,
+                skill_roster_items=skill_roster_items,
+                contract_sections=self._node_contract_notice_sections(
+                    payload=dynamic_contract_payload,
+                    tool_schema_selection=tool_schema_selection,
+                    runtime_context=runtime_context,
+                    exec_runtime_policy=node_exec_runtime_policy,
+                    task_temp_dir=node_task_temp_dir,
+                ),
+                covered_contract_sections=_pinned_contract_section_values(
+                    _pinned_contract_state(None, session_key=skill_roster_scope)[0]
+                ),
+            )
             selected_skill_ids = self._normalized_name_list(
                 [
                     item.get('skill_id')
@@ -636,8 +670,6 @@ class ReActToolLoop:
                     request_seed_source = 'fallback_seed_empty'
                 else:
                     request_seed_source = self._fallback_source_from_state(seed_state_for_source)
-            hop_idle_boundary = idle_boundary_exceeded(previous_send_at)
-            previous_send_at = now_iso()
             previous_actual_request_messages = self._prompt_message_records(request_messages)
             pending_request_delta_messages = []
             repair_overlay_text = None
@@ -718,31 +750,32 @@ class ReActToolLoop:
                 token_preflight_diagnostics,
             )
             if adopted_compacted_baseline is not None:
-                # 压缩把整份正文重写了，一次性提示可能随之离开上下文；那一跳可复用前缀
-                # 反正已经断在这里，把仍可读的名字带到压缩产物之后不额外付缓存。
-                adopted_compacted_baseline = self._carry_node_skill_roster_notice_on_compaction(
+                # 压缩整段重写正文：旧的一次性通知随之退役，头部已用当刻值重印。
+                # 剥离通知并清空合同台账，下一跳由单生产者按新头部重投状态快照。
+                adopted_compacted_baseline = self._reset_node_runtime_notice_after_compaction(
                     adopted_compacted_baseline,
                     node=node,
-                    skill_roster_items=skill_roster_items,
                 )
+                # durable 历史里的旧通知也一并剥掉：下一跳的历史重建不再把它们带回来。
+                message_history[:] = _skill_roster_notice.strip_runtime_notice_messages(message_history)
                 previous_actual_request_messages = adopted_compacted_baseline
                 request_seed_source = 'same_turn_token_compacted'
             bundle_recommit_reason = self._node_bundle_recommit_reason(
                 history_shrink_reason=str(history_shrink_reason or ''),
-                idle_boundary=hop_idle_boundary,
             )
             if bundle_recommit_reason:
-                # 清单的重新提交点只有这两条：token 压缩（正文这一跳已被 `[TOKEN_COMPACT_V2]`
-                # 全量重写，可复用前缀反正已经断在这里，重印说明书不额外破缓存）与空闲边界
-                # （距上次发送超过 `context_refresh.idle_minutes`，见 `g3ku/config/context_refresh.py`）。
-                # 空闲那一档确实会重付头部那一截，它是"被收回的名字不必等到下次压缩才退场"的价。
-                # 之后的跳按重印后的清单继续钉住。
+                # 清单的唯一重新提交点：token 压缩（正文这一跳已被 `[TOKEN_COMPACT_V2]`
+                # 全量重写，可复用前缀反正已经断在这里，重印说明书不额外破缓存）。
+                # 其它任何变化（策略、临时目录、可见集）都不许提前重印头部：缓存命中第一，
+                # 变化由一次性 `[RUNTIME_NOTICE]` 消息纠正，下次压缩再统一刷新。
                 # skill 头部名单与 tools[] 同源：同一个边界、同一个跳上重印。
                 _bump_skill_roster_epoch(None, session_key=skill_roster_scope)
                 request_messages = self._apply_node_skill_roster_head(
                     request_messages,
                     scope_key=skill_roster_scope,
                     skill_items=skill_roster_items,
+                    exec_runtime_policy=node_exec_runtime_policy,
+                    session_temp_dir=node_task_temp_dir or None,
                 )
                 compression_provider_tool_names = self._normalized_name_list(
                     list(tool_schema_selection.get('pinned_provider_tool_names') or [])
@@ -1759,6 +1792,7 @@ class ReActToolLoop:
                     node.node_id,
                     json.dumps(prepared_history, ensure_ascii=False, indent=2),
                 )
+                park_requested = self._park_requested(results)
                 self._log_service.update_frame(
                     task.task_id,
                     node.node_id,
@@ -1766,7 +1800,10 @@ class ReActToolLoop:
                         **frame,
                         'depth': node.depth,
                         'node_kind': node.node_kind,
-                        'phase': 'waiting_tool_results',
+                        # `enter_wait` 在工具执行时已把相位写成 waiting_explicit；这一跳
+                        # 若照常写 waiting_tool_results，会把停靠节点伪装成"运行中"，
+                        # 唤醒判定就不会派发它（投递侧把 running 当 in-flight 吞掉）。
+                        'phase': 'waiting_explicit' if park_requested else 'waiting_tool_results',
                         'messages': prepared_history,
                         'pending_tool_calls': [],
                         'active_round_id': '',
@@ -1786,6 +1823,18 @@ class ReActToolLoop:
                     return self._tool_fault_failure(
                         signature=str(tool_fault_hit.get('signature') or ''),
                         count=int(tool_fault_hit.get('count') or 0),
+                    )
+                if park_requested:
+                    # enter_wait 已把本回合声明为停靠：回合到此结束，不终局、不进入验收。
+                    # partial 是既有的非终局出口（恢复车道用同一形态）。
+                    return NodeFinalResult(
+                        status='success',
+                        delivery_status='partial',
+                        summary='本回合已按 enter_wait 停靠，等待消息唤醒。',
+                        answer='',
+                        evidence=[],
+                        remaining_work=[],
+                        blocking_reason='',
                     )
                 if control_only_turn:
                     attempts = max(0, attempts - 1)
@@ -1976,11 +2025,6 @@ class ReActToolLoop:
         frame = self._runtime_frame(task.task_id, node.node_id)
         if not isinstance(frame, dict):
             return None
-        if self._distribution_priority_blocks_recovery(
-            runtime_context=runtime_context,
-            node=node,
-        ):
-            return None
         pending_tool_calls = [
             dict(item)
             for item in list(frame.get('pending_tool_calls') or [])
@@ -2093,11 +2137,18 @@ class ReActToolLoop:
                     round_id=round_id,
                     item=inspected_item,
                 )
+                # 决策 H：进程没了，在途的同步工具也没了。按**工具失败**注入结果
+                # （Error 前缀 + error 状态），让模型带着这条失败继续本回合；原因里
+                # 保留"可能已产生副作用、重试前先核对"的分类器结论。
+                interrupted_content = (
+                    'Error: tool call interrupted by a process restart before its result was recorded. '
+                    + self._recovery_checked_tool_content(inspected_item)
+                ).strip()
                 synthetic_live_state = self._resume_live_tool_state(
                     live_state,
                     call_id=call_id,
                     tool_name=tool_name,
-                    status='interrupted',
+                    status='error',
                 )
                 synthetic_live_state['finished_at'] = now_iso()
                 ordered_results.append(
@@ -2107,8 +2158,8 @@ class ReActToolLoop:
                             synthetic_live_state,
                             call_id=call_id,
                             tool_name=tool_name,
-                            content=self._recovery_checked_tool_content(inspected_item),
-                            status='interrupted',
+                            content=interrupted_content,
+                            status='error',
                         ),
                     }
                 )
@@ -2223,53 +2274,28 @@ class ReActToolLoop:
         )
         return prepared_history
 
-    def _distribution_priority_blocks_recovery(self, *, runtime_context: dict[str, Any], node) -> bool:
-        distribution = dict((runtime_context or {}).get('distribution_state') or {})
-        # 兼容旧持久化 meta：task_wide_barrier 是 subtree_barrier 的历史名称
-        # （根目标定向即原全局模式），两者语义一致。
-        if str(distribution.get('mode') or '').strip() not in {'subtree_barrier', 'task_wide_barrier'}:
-            return False
-        normalized_node_id = str(getattr(node, 'node_id', '') or '').strip()
-        if not normalized_node_id:
-            return False
-        # 要点 5 豁免：持有未物化 spawn 轮的节点必须让它的同 id 重放跑完（走
-        # waiting_children / pending_tool 恢复），否则被拦下的父节点只会让模型
-        # 重发一轮 spawn（新 call id → 双轮/重复派生），而屏障 drain 正等着的
-        # 是原轮的子节点。判定不可用时维持既有行为（照常拦阻）。
-        try:
-            if spawn_round_has_unmaterialized_entries(
-                get_node=self._log_service._store.get_node,
-                task_id=str(getattr(node, 'task_id', '') or '').strip(),
-                node=node,
-            ):
-                return False
-        except Exception:
-            pass
-        blocked_node_ids = {
-            str(item or '').strip()
-            for item in list(distribution.get('blocked_node_ids') or [])
-            if str(item or '').strip()
-        }
-        if normalized_node_id in blocked_node_ids:
-            return True
-        pending_notice_node_ids = {
-            str(item or '').strip()
-            for item in list(distribution.get('pending_notice_node_ids') or [])
-            if str(item or '').strip()
-        }
-        if normalized_node_id not in pending_notice_node_ids:
-            return False
-        metadata = dict(getattr(node, 'metadata', None) or {}) if isinstance(getattr(node, 'metadata', None), dict) else {}
-        pending_notice_state = normalize_pending_notice_state(metadata.get(PENDING_NOTICE_STATE_KEY))
-        if str(pending_notice_state.get('resume_mode') or '').strip() == RESUME_MODE_WAIT_FOR_CHILDREN:
-            return False
-        return True
+    @staticmethod
+    def _park_requested(results: list[dict[str, Any]]) -> bool:
+        """本批工具结果里是否有一个成功的 `enter_wait`。
+
+        只看工具结果、不回读节点行：这一跳的事实都在手上，多一次读库只是把判定点
+        推远一步，还会引入"读到的是上一跳状态"的窗口。
+        """
+        for item in list(results or []):
+            message = dict((item or {}).get('tool_message') or {})
+            if str(message.get('name') or '').strip() != ENTER_WAIT_TOOL_NAME:
+                continue
+            try:
+                payload = json.loads(str(message.get('content') or ''))
+            except Exception:
+                continue
+            if isinstance(payload, dict) and str(payload.get('status') or '').strip() == 'parked':
+                return True
+        return False
 
     @staticmethod
     def _wait_for_children_recovery_only(*, runtime_context: dict[str, Any], node) -> bool:
-        distribution = dict((runtime_context or {}).get('distribution_state') or {})
-        if str(distribution.get('state') or '').strip() in DISTRIBUTION_ACTIVE_STATES:
-            return False
+        _ = runtime_context
         metadata = dict(getattr(node, 'metadata', None) or {}) if isinstance(getattr(node, 'metadata', None), dict) else {}
         pending_notice_state = normalize_pending_notice_state(metadata.get(PENDING_NOTICE_STATE_KEY))
         return str(pending_notice_state.get('resume_mode') or '').strip() == RESUME_MODE_WAIT_FOR_CHILDREN
@@ -2298,11 +2324,6 @@ class ReActToolLoop:
     ) -> list[dict[str, Any]] | None:
         frame = self._runtime_frame(task.task_id, node.node_id)
         if not isinstance(frame, dict):
-            return None
-        if self._distribution_priority_blocks_recovery(
-            runtime_context=runtime_context,
-            node=node,
-        ):
             return None
         if str(frame.get('phase') or '').strip() != 'waiting_children':
             return None
@@ -2548,6 +2569,13 @@ class ReActToolLoop:
 
         只比对运行时会等价收敛的那四个面，其余差异（`success` 清空 remaining_work、
         证据自动回挂等策略性改写）不算补齐。
+
+        判据是"模型真给过、运行时收敛了"：`submit_final_result` 的 schema 只暴露
+        summary/answer/evidence/remaining_work（验收节点只有 verdict/feedback），
+        status/delivery_status 由运行时无条件推导。把它们从空补成值再记一笔补齐，
+        等于每次提交都记一笔——实盘 audit 125/125 全是 `delivery_from_status`，
+        基线因此失去意义。只有旧形状（崩溃恢复重放的历史调用）真的带了 `status`
+        时，由它推导 delivery_status 才算一次等价补齐。
         """
         tags: list[str] = []
         if not isinstance(raw_payload, dict) or not isinstance(normalized_payload, dict):
@@ -2556,7 +2584,7 @@ class ReActToolLoop:
             raw_value = str(raw_payload.get(field) or '').strip()
             norm_value = str(normalized_payload.get(field) or '').strip()
             if not raw_value and norm_value:
-                if field == 'delivery_status':
+                if field == 'delivery_status' and 'status' in raw_payload:
                     tags.append('delivery_from_status')
                 continue
             if raw_value and norm_value and raw_value != norm_value:
@@ -3579,8 +3607,14 @@ class ReActToolLoop:
         *,
         scope_key: str,
         skill_items: list[dict[str, str]],
+        exec_runtime_policy: dict[str, Any] | None = None,
+        session_temp_dir: str | None = None,
     ) -> list[dict[str, Any]]:
-        """把 skill 名单钉进 system 首条；名单没变时逐字节幂等，追加链不受扰。"""
+        """把静态声明钉进 system 首条；名单/策略没变时逐字节幂等，追加链不受扰。
+
+        头部是快照：只在重印边界（token 压缩）用当刻值重渲；两次重印之间 exec 策略
+        变化不重印，由一次性通知纠正。临时目录/路径锚与 skill 名单同在一份块里。
+        """
         base_messages = list(messages or [])
         if not base_messages:
             return base_messages
@@ -3591,11 +3625,11 @@ class ReActToolLoop:
         roster_text = _frontdoor_pinned_contract_text(
             None,
             skill_items=skill_items,
-            exec_runtime_policy=None,
-            session_temp_dir=None,
+            exec_runtime_policy=exec_runtime_policy,
+            session_temp_dir=session_temp_dir,
             skill_roster_epoch=epoch,
             session_key=scope_key,
-            include_extras=False,
+            include_extras=True,
         )
         if not roster_text:
             return base_messages
@@ -3604,6 +3638,21 @@ class ReActToolLoop:
         if new_head['content'] == head.get('content'):
             return base_messages
         return [new_head, *base_messages[1:]]
+
+    @staticmethod
+    def _node_exec_runtime_policy_payload(runtime_context: dict[str, Any] | None) -> dict[str, Any] | None:
+        """节点道的 exec 策略取数口：由 runtime_service 经 side-channel 递进来。
+
+        每跳实时读治理记录（无缓存）；拿不到就返回 None，头部渲染 `exec_runtime_policy: none`。
+        """
+        supplier = (runtime_context or {}).get('exec_runtime_policy_supplier')
+        if not callable(supplier):
+            return None
+        try:
+            payload = supplier()
+        except Exception:
+            return None
+        return dict(payload) if isinstance(payload, dict) else None
 
     def _build_node_dynamic_contract(
         self,
@@ -3807,8 +3856,10 @@ class ReActToolLoop:
         node,
         message_history: list[dict[str, Any]] | None = None,
         skill_roster_items: list[dict[str, str]] | None = None,
+        contract_sections: dict[str, str] | None = None,
+        covered_contract_sections: dict[str, str] | None = None,
     ) -> list[dict[str, Any]]:
-        """新增可读 skill 的一次性提示：落在本轮历史末尾（运行时块之前），投过就不再投。
+        """一次性提示：落在本轮历史末尾，投过就不再投。skill 与合同增量共用一条。
 
         检测与投递只在这一处发生（与会话道同口径）。旧机制的失效原因就是一条回合内
         多个装配点共用一次消耗式读，先跑的把差集领走、落请求体那处永远拿空。
@@ -3828,6 +3879,8 @@ class ReActToolLoop:
             now=now_iso(),
             # 头部钉住块那份名单算"已宣布"：否则节点第一跳会重播整份名单。
             covered_skill_ids=_pinned_skill_ids_for(None, session_key=scope),
+            contract_sections=contract_sections,
+            covered_contract_sections=covered_contract_sections,
         )
         if message is None:
             return base_messages
@@ -3836,43 +3889,76 @@ class ReActToolLoop:
             message_history.append(dict(message))
         return [*base_messages, message]
 
-    def _carry_node_skill_roster_notice_on_compaction(
+    def _node_contract_notice_sections(
+        self,
+        *,
+        payload: dict[str, Any],
+        tool_schema_selection: dict[str, Any],
+        runtime_context: dict[str, Any] | None,
+        exec_runtime_policy: dict[str, Any] | None,
+        task_temp_dir: str,
+    ) -> dict[str, str]:
+        """节点头部的当刻合同值（单行正文）。空字符串表示这一节当前没有内容。"""
+        declared_names = {
+            str(name or '').strip()
+            for name in list((tool_schema_selection or {}).get('provider_tool_names') or [])
+            if str(name or '').strip()
+        }
+        candidate_names = [
+            str(item.get('tool_id') or '').strip()
+            for item in list(payload.get('candidate_tools') or [])
+            if isinstance(item, dict)
+            and str(item.get('tool_id') or '').strip()
+            and str(item.get('tool_id') or '').strip() not in declared_names
+        ]
+        repair_rows: list[str] = []
+        for item in list(payload.get('repair_required_tools') or []):
+            if not isinstance(item, dict):
+                continue
+            tool_id = str(item.get('tool_id') or '').strip()
+            if tool_id:
+                reason = str(item.get('reason') or '').strip()
+                repair_rows.append(f'`{tool_id}`' + (f' ({reason})' if reason else ''))
+        for item in list(payload.get('repair_required_skills') or []):
+            if not isinstance(item, dict):
+                continue
+            skill_id = str(item.get('skill_id') or '').strip()
+            if skill_id:
+                repair_rows.append(f'skill `{skill_id}`')
+        denied_names = [
+            str(name or '').strip()
+            for name in list((runtime_context or {}).get('declared_denied_tool_names') or [])
+            if str(name or '').strip()
+        ]
+        return {
+            'exec_runtime_policy': render_exec_runtime_policy_body(exec_runtime_policy),
+            'session_temp_dir': str(task_temp_dir or '').strip(),
+            'denied_tools': ', '.join(f'`{name}`' for name in denied_names),
+            'candidate_tools': ', '.join(f'`{name}`' for name in candidate_names),
+            'repair_required': '; '.join(repair_rows),
+            'attachment_targets': '',
+        }
+
+    def _reset_node_runtime_notice_after_compaction(
         self,
         baseline: list[dict[str, Any]],
         *,
         node,
-        skill_roster_items: list[dict[str, str]] | None,
     ) -> list[dict[str, Any]]:
-        """压缩跳：把仍可读的新增 skill 名单带到压缩产物之后，不可读的在那一跳退场。
+        """压缩跳：剥离旧 `[RUNTIME_NOTICE]`，清空合同台账与记忆游标。
 
-        压缩段号取压缩产物自身的形状签名——同一次压缩被反复沿用不会搬第二份，
-        而真的又压了一次（正文再次整段重写）会再搬一遍，那正是需要的行为。
+        头部已被当刻值重印（skill 名单 + exec 策略 + 临时目录 + 路径锚）；下一跳的单
+        生产者会把头部覆盖项按新头部初始化，非头部项（denied/candidate/repair）若非空
+        则投一条状态快照。旧通知不再搬运。
         """
         base_messages = list(baseline or [])
         scope = self._node_skill_roster_notice_scope(node)
         if not scope or not base_messages:
             return base_messages
-        signature = '|'.join(
-            f"{str((item or {}).get('role') or '')}:{len(str((item or {}).get('content') or ''))}"
-            for item in base_messages
-        )
-        segment_id = f"comp:{hashlib.sha1(signature.encode('utf-8')).hexdigest()[:12]}"
         self._hydrate_node_skill_roster_notice(node=node)
-        readable_items = _skill_roster_notice.readable_skill_items(list(skill_roster_items or []))
-        message = _skill_roster_notice.carry_for_scope(
-            scope,
-            compression_stage_id=segment_id,
-            readable_skill_ids=[
-                str((item or {}).get('skill_id') or '').strip()
-                for item in readable_items
-                if isinstance(item, dict) and str((item or {}).get('skill_id') or '').strip()
-            ],
-            now=now_iso(),
-        )
-        if message is None:
-            return base_messages
+        _skill_roster_notice.reset_contract_sections_for_compaction(scope, now=now_iso())
         self._persist_node_skill_roster_notice(node=node)
-        return [*base_messages, message]
+        return _skill_roster_notice.strip_runtime_notice_messages(base_messages)
 
     def _refresh_node_dynamic_contract_message(
         self,
@@ -4217,6 +4303,7 @@ class ReActToolLoop:
                     except BaseException:
                         controller.release_tool_slot(slot_lease)
                         raise
+                normalized_arguments = self._normalize_tool_call_arguments(getattr(call, 'arguments', {}))
                 self._update_tool_live_state(
                     task_id=task.task_id,
                     node_id=node.node_id,
@@ -4228,7 +4315,7 @@ class ReActToolLoop:
                     timeout_seconds=self._stall_deadline_timeout_seconds(
                         tools=tools,
                         tool_name=str(call.name or 'tool'),
-                        arguments=self._normalize_tool_call_arguments(getattr(call, 'arguments', {})),
+                        arguments=normalized_arguments,
                         runtime_context=runtime_context,
                     ),
                 )
@@ -4236,7 +4323,7 @@ class ReActToolLoop:
                     raw_result = await self._execute_tool_raw(
                         tools=tools,
                         tool_name=call.name,
-                        arguments=self._normalize_tool_call_arguments(getattr(call, 'arguments', {})),
+                        arguments=normalized_arguments,
                         runtime_context=_call_runtime_context(call),
                     )
                     tool_content = self._render_tool_message_content(
@@ -4246,7 +4333,10 @@ class ReActToolLoop:
                         delivery_metadata=self._tool_result_delivery_metadata(
                             tools=tools,
                             tool_name=str(call.name or ''),
-                            arguments=dict(getattr(call, 'arguments', {}) or {}),
+                            # 归一后的入参：模型可能给出非对象顶层（实盘：整份
+                            # arguments 是子节点数组），原始值直接 dict() 会抛
+                            # ValueError 并把参数错误伪装成工具执行失败。
+                            arguments=normalized_arguments,
                         ),
                     )
                 except TaskPausedError:
@@ -4255,10 +4345,6 @@ class ReActToolLoop:
                     # 冻结类控制信号绝不转工具错误（2026-09-15 孤儿子节点事故 L1）：
                     # 转成 'Error executing ...' 会消费掉 tool_call_id、触发批后帧写
                     # 清空 pending_tool_calls，摧毁同 id 幂等重放通道。
-                    raise
-                except DistributionHoldError:
-                    # 同上：分发屏障 hold 只冻结、不损坏。重抛让节点走 run_node 的
-                    # hold 冻结路径（frame 保留 pending_tool_calls，释放后同 id 重放）。
                     raise
                 except asyncio.CancelledError:
                     raise
@@ -4518,7 +4604,7 @@ class ReActToolLoop:
         if bool(getattr(tool, 'exempt_universal_timeout', False)):
             return None
         try:
-            return float(resolve_effective_tool_timeout(arguments, runtime_context))
+            return float(resolve_node_tool_timeout(arguments, runtime_context)[0])
         except Exception:
             return None
 
@@ -4982,7 +5068,13 @@ class ReActToolLoop:
         # 其余工具由外层硬执行。
         self_enforced = bool(getattr(tool, 'self_enforced_timeout', False))
         timeout_exempt = bool(getattr(tool, 'exempt_universal_timeout', False))
-        effective_timeout = resolve_effective_tool_timeout(arguments, runtime_context)
+        if self_enforced or timeout_exempt:
+            # 豁免/自持工具不套外层时限，H3 的夹紧只作用于外层硬执行的工具。
+            effective_timeout = resolve_effective_tool_timeout(arguments, runtime_context)
+            _TOOL_TIMEOUT_CLAMP_NOTE.set('')
+        else:
+            effective_timeout, clamp_note = resolve_node_tool_timeout(arguments, runtime_context)
+            _TOOL_TIMEOUT_CLAMP_NOTE.set(clamp_note)
         if self_enforced:
             execute_kwargs['timeout_seconds'] = effective_timeout
         else:
@@ -5008,7 +5100,7 @@ class ReActToolLoop:
                 # 这三个是「节点该停」，不是「工具坏了该被取消」：观测旁路里只有它们允许
                 # 冒泡出 _safe_observe，其余异常一律降级。类型由本模块声明（g3ku 侧不得
                 # 反向 import main.errors），所以在这里显式交给看门狗。
-                observation_control_signals=(TaskPausedError, NodePausedError, DistributionHoldError),
+                observation_control_signals=(TaskPausedError, NodePausedError),
             )
             return outcome.value
         except Exception as exc:
@@ -5070,6 +5162,9 @@ class ReActToolLoop:
             source_kind=f'tool_result:{tool_name}',
             delivery_metadata=metadata,
         )
+        clamp_note = _TOOL_TIMEOUT_CLAMP_NOTE.get()
+        if clamp_note:
+            text = f'{text}\n\n{clamp_note}'
         return text, str(metadata.get('tool_status') or 'success')
 
     async def _execute_tool_with_status(
@@ -5112,7 +5207,9 @@ class ReActToolLoop:
         descriptor = getattr(tool, '_descriptor', None)
         metadata = getattr(descriptor, 'metadata', None) or {}
         normalized_name = str(tool_name or '').strip() or 'tool'
-        normalized_arguments = dict(arguments or {})
+        # 入参可能是模型给的原始值（非对象顶层），这里必须走与执行同一套归一；
+        # 直接 dict(raw) 会在元数据构造阶段抛 ValueError，把参数错误伪装成执行失败。
+        normalized_arguments = ReActToolLoop._normalize_tool_call_arguments(arguments)
         invocation_text = (
             f"{normalized_name}({json.dumps(normalized_arguments, ensure_ascii=False, sort_keys=True)})"
             if normalized_arguments
@@ -5288,56 +5385,6 @@ class ReActToolLoop:
                     delivered=bool(getattr(existing, 'delivered', False)) if existing is not None else False,
                 )
                 raise NodePausedError(task_id, normalized_node_id)
-            # 子树分发屏障：每个安全检查点重读 runtime meta（不用 runtime_context
-            # 快照——通知可能在节点运行中途追加），命中即抛 hold 让节点在安全
-            # 相位停摆。人工节点暂停在上方优先，任务暂停/取消更优先。
-            # 防御式读取：log_service 缺 read_task_runtime_meta（离线回放等
-            # 场景）或读取失败时视为无分发，绝不阻断 ReAct 主循环。
-            distribution_meta: Any = None
-            meta_getter = getattr(self._log_service, 'read_task_runtime_meta', None)
-            if callable(meta_getter):
-                try:
-                    distribution_meta = dict(meta_getter(task_id) or {}).get('distribution')
-                except Exception:
-                    distribution_meta = None
-            # A1：命中 hold 时回查 epochs 表校验 meta 新鲜度——已完成 epoch 的
-            # 陈旧 meta 不再冻结节点（2026-09-15 孤儿子节点事故 L2）。store 缺
-            # 相应方法（离线回放等）时传 None，维持旧行为。
-            hold_store = self._log_service._store
-            hold_epoch_state_getter = (
-                make_epoch_state_lookup(hold_store, task_id)
-                if callable(getattr(hold_store, 'get_task_message_distribution_epoch', None))
-                else None
-            )
-            hold_epoch_id = resolve_subtree_hold_epoch_id(
-                distribution=distribution_meta if isinstance(distribution_meta, dict) else None,
-                get_node=hold_store.get_node,
-                node_id=normalized_node_id,
-                get_epoch_state=hold_epoch_state_getter,
-                on_stale_hold=make_stale_hold_logger(logger.warning),
-            )
-            if hold_epoch_id:
-                # 这条豁免要读整行（spawn 轮有没有未物化条目），所以整行读跟着这个稀有分支
-                # 取一次，而不是在每个检查点上先搬平均 254 KB 的正文。
-                node = hold_store.get_node(normalized_node_id)
-                # 要点 5 豁免：持有未物化 spawn 轮的节点不得在物化前被中止——
-                # 它的子节点只可能由它自己的协程产出，而屏障 drain 正等着那些
-                # 子节点（否则互等死锁，2026-09-18 task:d596a609bbb3 事故）。
-                # 只放宽「何时停」：物化一完成，谓词立刻为假，下个检查点照常冻结。
-                # 判定不可用时保守维持既有行为（照常冻结）。
-                if node is not None:
-                    deferred = False
-                    try:
-                        deferred = spawn_round_has_unmaterialized_entries(
-                            get_node=hold_store.get_node,
-                            task_id=task_id,
-                            node=node,
-                        )
-                    except Exception:
-                        deferred = False
-                    if deferred:
-                        return
-                raise DistributionHoldError(task_id, normalized_node_id, hold_epoch_id)
 
     def _abort_queued_tool_waits(self, task_id: str, exc: BaseException) -> None:
         """磁盘治理（P1）：任务暂停生效时中止其在预算队列中排队的工具调用。"""
@@ -5373,6 +5420,7 @@ class ReActToolLoop:
             for item in (remaining_work_raw if isinstance(remaining_work_raw, list) else [])
             if str(item or '').strip()
         ]
+        verdict = str(raw_payload.get('verdict') or '').strip().lower()
         return NodeFinalResult(
             status=status,
             delivery_status=normalized_delivery_status,
@@ -5381,27 +5429,32 @@ class ReActToolLoop:
             evidence=evidence_items,
             remaining_work=remaining_work,
             blocking_reason=str(raw_payload.get('blocking_reason') or '').strip(),
+            verdict=verdict if verdict in {'pass', 'reject', 'reject_no_progress'} else '',
+            submission_id=str(raw_payload.get('submission_id') or '').strip(),
         )
 
     @staticmethod
     def _validate_final_result(
         *,
         raw_payload: dict[str, Any],
+        node_kind: str = 'execution',
     ) -> list[str]:
-        """只校载荷形状：必填键、枚举取值、`summary` 非空、每条证据自身的字段与行号。
+        """只校载荷形状：必填键、枚举取值、验收反馈非空、每条证据自身的字段与行号。
 
-        这里不判"证据够不够"，但不等于没人判：阻塞核验那一条在裁决分类器里
-        （`NodeRunner._classify_blocked_verdict` —— `success` 且 evidence 为空记
-        `invalid`，吃一次重验轮，再空就按"阻塞不成立"打回执行节点）。普通交付
-        裁决的空证据今天不设门槛。
+        新旧两套形状都在这里收口：验收节点是 `{verdict, feedback}`；执行节点是
+        `{summary, answer, evidence, remaining_work}`（`status`/`delivery_status`
+        由运行时推导，不再由模型填写）。
         """
         violations: list[str] = []
-        missing_keys = [key for key in _RESULT_REQUIRED_KEYS if key not in raw_payload]
-        violations.extend([f'missing required field: {key}' for key in missing_keys])
+        normalized_kind = str(node_kind or '').strip().lower()
+        if normalized_kind == 'acceptance':
+            verdict = str(raw_payload.get('verdict') or '').strip().lower()
+            if verdict not in {'pass', 'reject', 'reject_no_progress'}:
+                violations.append('verdict must be one of pass|reject|reject_no_progress')
+            if not str(raw_payload.get('feedback') or '').strip():
+                violations.append('feedback must not be empty')
+            return violations
 
-        raw_delivery_status = str(raw_payload.get('delivery_status') or '').strip().lower()
-        if raw_delivery_status not in {'final', 'blocked'}:
-            violations.append('delivery_status must be one of final|blocked')
         if not str(raw_payload.get('summary') or '').strip():
             violations.append('summary must not be empty')
 
@@ -5444,9 +5497,11 @@ class ReActToolLoop:
                                 pass
 
         remaining_work_raw = raw_payload.get('remaining_work')
-        if not isinstance(remaining_work_raw, list):
+        if remaining_work_raw is not None and not isinstance(remaining_work_raw, list):
             violations.append('remaining_work must be an array')
-        elif any(not str(item or '').strip() for item in remaining_work_raw):
+        elif isinstance(remaining_work_raw, list) and any(
+            not str(item or '').strip() for item in remaining_work_raw
+        ):
             violations.append('remaining_work items must be non-empty strings')
         return violations
 
@@ -6007,14 +6062,10 @@ class ReActToolLoop:
             for item in list(request_messages or [])
             if isinstance(item, dict)
         ]
-        contract_tail: list[dict[str, Any]] = []
-        # 请求尾部顺序为「契约 + 当轮 turn-only note」；先暂存末尾 note，
-        # 收取契约尾后再把它放回契约之后，保持原顺序重建。
+        # 请求尾部的 turn-only note 先暂存，压缩后按原顺序放回。
         trailing_note: list[dict[str, Any]] = []
         if normalized and is_turn_only_system_note_message(normalized[-1]):
             trailing_note.append(normalized.pop())
-        while normalized and is_node_dynamic_contract_message(normalized[-1]):
-            contract_tail.insert(0, normalized.pop())
 
         system_prefix: list[dict[str, Any]] = []
         while normalized and str(normalized[0].get("role") or "").strip().lower() == "system":
@@ -6057,7 +6108,6 @@ class ReActToolLoop:
             "append_notice_tail": append_notice_tail,
             "compressible_history": compressible_history,
             "recent_tail": recent_tail,
-            "contract_tail": contract_tail,
             "trailing_note": trailing_note,
         }
 
@@ -6142,7 +6192,6 @@ class ReActToolLoop:
             "history_message_count": len(list(parts.get("compressible_history") or [])),
             "compacted_message_count": len(list(parts.get("compressible_history") or [])),
             "retained_recent_tail_count": len(list(parts.get("recent_tail") or [])),
-            "contract_message_count": len(list(parts.get("contract_tail") or [])),
             "append_notice_tail_count": len(list(parts.get("append_notice_tail") or [])),
         }
         if raw_leftover:
@@ -6166,7 +6215,6 @@ class ReActToolLoop:
             compacted_block,
             *raw_leftover,
             *cls._bound_node_compaction_tail_messages(parts.get("recent_tail")),
-            *list(parts.get("contract_tail") or []),
             *list(parts.get("trailing_note") or []),
         ]
         return rewritten, compacted_payload
@@ -6820,15 +6868,15 @@ class ReActToolLoop:
         return {}
 
     @staticmethod
-    def _node_bundle_recommit_reason(*, history_shrink_reason: str, idle_boundary: bool) -> str:
-        """本跳是否要重印 provider tools[]，以及是哪条边界逼出来的。
+    def _node_bundle_recommit_reason(*, history_shrink_reason: str) -> str:
+        """本跳是否要重印 provider tools[]。
 
-        token 压缩排前面：它正文已被整段重写，重印不额外破缓存；空闲那一档确实要重付头部
-        那一截，两条都命中时报压缩那一条（缓存侧按那条读数）。
+        只有 token 压缩这一条边界：正文已被整段重写，重印不额外破缓存。空闲时间不再
+        作为重印点（缓存命中第一）；被收回的名字由一次性通知点名，清单留到下次压缩。
         """
         if str(history_shrink_reason or '').strip() == 'token_compression':
             return 'token_compression'
-        return 'idle_refresh' if idle_boundary else ''
+        return ''
 
     @staticmethod
     def _node_send_baseline_after_compaction(
@@ -7629,7 +7677,9 @@ class ReActToolLoop:
         if isinstance(raw_result, str) and raw_result.startswith('Error:'):
             return None, prepared_history, [], str(raw_result or '').strip()
 
-        raw_payload = raw_result if isinstance(raw_result, dict) else None
+        # 工具返回的是给模型看的回执（outcome/submission_id/acceptance_node_id），
+        # 真正的提交载荷是这次调用的参数——回执不参与结果构造。
+        raw_payload = tool_payload.get('arguments') if isinstance(tool_payload.get('arguments'), dict) else None
         if raw_payload is None:
             return None, prepared_history, [], f'{FINAL_RESULT_TOOL_NAME} must return an object payload'
         raw_payload = self._normalize_final_result_payload(
@@ -7638,10 +7688,15 @@ class ReActToolLoop:
             response_content=assistant_content,
             node_kind=node.node_kind,
         )
+        if isinstance(raw_result, dict):
+            # 回执里的 submission_id 是运行时签发的权威值（验收裁决按它对齐同一次提交）。
+            receipt_submission_id = str(raw_result.get('submission_id') or '').strip()
+            if receipt_submission_id:
+                raw_payload['submission_id'] = receipt_submission_id
         result = self._coerce_final_result_payload(raw_payload)
         if result is None:
             return None, prepared_history, [], f'{FINAL_RESULT_TOOL_NAME} returned an invalid payload'
-        violations = self._validate_final_result(raw_payload=raw_payload)
+        violations = self._validate_final_result(raw_payload=raw_payload, node_kind=node.node_kind)
         if violations:
             return None, prepared_history, violations, ''
         return result, prepared_history, [], ''
@@ -8255,9 +8310,7 @@ class ReActToolLoop:
             return (
                 f'Your previous reply did not submit a valid final result for result contract v{RESULT_SCHEMA_VERSION}. '
                 f'If you are ending the node now, call `{FINAL_RESULT_TOOL_NAME}` with exactly these fields: '
-                '{"status":"success|failed","delivery_status":"final|blocked","summary":"...","answer":"...",'
-                '"evidence":[{"kind":"file|artifact|url","path":"","ref":"","start_line":1,"end_line":1,"note":"..."}],'
-                '"remaining_work":["..."],"blocking_reason":"..."}. '
+                '{"verdict":"pass|reject|reject_no_progress","feedback":"..."}. '
                 'Do not reply with prose, Markdown, or a raw JSON object. '
                 f'{guidance}'
             )
@@ -8265,10 +8318,10 @@ class ReActToolLoop:
             f'Your previous reply did not submit a valid final result for result contract v{RESULT_SCHEMA_VERSION}. '
             'If the task is not complete yet — deliverables not actually produced and verified — continue with tools instead of forcing a premature final submission. '
             f'If you are ending the node now because the work is truly finished, call `{FINAL_RESULT_TOOL_NAME}` with exactly these fields: '
-            '{"status":"success|failed","delivery_status":"final|blocked","summary":"...","answer":"...",'
+            '{"summary":"...","answer":"...",'
             '"evidence":[{"kind":"file|artifact|url","path":"","ref":"","start_line":1,"end_line":1,"note":"..."}],'
-            '"remaining_work":["..."],"blocking_reason":"..."}. '
-            'Never fill these fields with placeholder text such as "placeholder": `summary` and `answer` must carry the real, verifiable conclusion, and a success+final submission goes straight to acceptance. '
+            '"remaining_work":["..."]}. '
+            'Never fill these fields with placeholder text such as "placeholder": `summary` and `answer` must carry the real, verifiable conclusion, and a submission that has an acceptance reviewer enters acceptance. '
             'Do not reply with prose, Markdown, or a raw JSON object. '
             f'{guidance}'
         )
@@ -8381,18 +8434,20 @@ class ReActToolLoop:
         normalized_kind = str(node_kind or '').strip().lower()
         if normalized_kind == 'acceptance':
             return (
-                f'Acceptance nodes must end through `{FINAL_RESULT_TOOL_NAME}`. '
-                'Use failed+final for a normal rejection, and failed+blocked only when verification is genuinely blocked. '
-                'Never use a failed verdict as a placeholder; in blocked-verification mode a "blockage justified" success verdict must cite evidence you actually checked.'
+                f'Acceptance nodes must end through `{FINAL_RESULT_TOOL_NAME}` with exactly '
+                '`{"verdict": "pass" | "reject" | "reject_no_progress", "feedback": "..."}`. '
+                '`pass` closes the inspected node as successful. `reject` sends `feedback` back and the '
+                'inspected node retries. `reject_no_progress` additionally pauses the inspected node as '
+                'abnormal — use it only when this submission repeats a flaw the previous rejection already '
+                'named and nothing meaningful changed; it is forbidden on the first verdict.'
             )
         return (
-            f'Execution nodes must end through `{FINAL_RESULT_TOOL_NAME}`. '
-            'Use success+final on completion, and use failed+blocked only when the node is genuinely blocked. '
-            'If work remains, continue with tools instead of finalizing. '
-            'A failed+blocked claim is independently verified by an acceptance node and rejected claims are sent back; '
-            'never use a failed result as a placeholder or to escape remaining work while budget and a viable next step exist. '
-            'A success+final submission goes straight to acceptance as well: never use it as a placeholder — '
-            'if the deliverables are not actually produced and verifiable, keep working with tools instead of submitting success.'
+            f'Execution nodes must end through `{FINAL_RESULT_TOOL_NAME}` with exactly '
+            '`{"summary": "...", "answer": "...", "evidence": [...], "remaining_work": [...]}`. '
+            'There is no status field: submitting means the work is done; if deliverables are not actually '
+            'produced and verifiable, keep working with tools instead of submitting. '
+            'A submission that has an acceptance reviewer enters acceptance; rejection feedback comes back '
+            'as a later notice and you must continue from it.'
         )
 
     @staticmethod
@@ -8577,30 +8632,36 @@ class ReActToolLoop:
     ) -> dict[str, Any]:
         payload = dict(raw_payload or {})
         normalized_kind = str(node_kind or '').strip().lower()
-        status = str(payload.get('status') or '').strip().lower()
-        delivery_status = str(payload.get('delivery_status') or '').strip().lower()
 
-        # 只收大小写与空白：值本身不在 enum（`partial` 那类）必须留给校验拒收，
-        # 否则就是替模型改裁定。
-        if status in {'success', 'failed'}:
-            payload['status'] = status
-        if delivery_status in {'final', 'blocked'}:
-            payload['delivery_status'] = delivery_status
-        elif not delivery_status:
-            # 判据是 status 而不是节点类型：`success` 在两份正文里都只有一种搭配
-            # （node_execution.md「delivery_status 搭配规则」与 acceptance_execution.md
-            # 的验收/阻塞核验两条道都写死 success+final），所以缺的那个字段有唯一解。
-            # 歧义只在验收节点的 `failed` 上：final=打回重验、blocked=终局不再打回，
-            # 两个结论相反，运行时无权替它选。
-            paired = 'final' if status == 'success' else ''
-            if not paired and status == 'failed' and normalized_kind != 'acceptance':
-                paired = 'blocked'
-            if paired:
-                payload['delivery_status'] = paired
+        if normalized_kind == 'acceptance':
+            verdict = str(payload.get('verdict') or '').strip().lower()
+            if verdict not in {'pass', 'reject', 'reject_no_progress'}:
+                # 旧形状（status/delivery_status）在崩溃恢复重放旧工具调用时仍会出现：
+                # 只做语义映射，不把新字段补成伪造的裁定。
+                legacy_status = str(payload.get('status') or '').strip().lower()
+                verdict = 'pass' if legacy_status == 'success' else 'reject'
+            feedback = str(payload.get('feedback') or payload.get('summary') or payload.get('answer') or '').strip()
+            payload['verdict'] = verdict
+            payload['feedback'] = feedback
+            payload['status'] = 'success' if verdict == 'pass' else 'failed'
+            payload['delivery_status'] = 'final'
+            payload['summary'] = feedback or ('验收通过' if verdict == 'pass' else '')
+            payload['answer'] = feedback
+            payload['evidence'] = []
+            payload['remaining_work'] = []
+            payload['blocking_reason'] = ''
+            payload['submission_id'] = str(payload.get('submission_id') or '').strip()
+            return payload
 
+        # 执行节点：status/delivery_status 由运行时推导——一次提交就是「我做完了」。
+        payload['status'] = 'success'
+        payload['delivery_status'] = 'final'
+        payload['verdict'] = ''
+        payload['blocking_reason'] = ''
+        payload.setdefault('summary', '')
         payload.setdefault('answer', '')
         payload.setdefault('remaining_work', [])
-        payload.setdefault('blocking_reason', '')
+        payload['submission_id'] = str(payload.get('submission_id') or '').strip()
         raw_evidence = payload.get('evidence')
         if not isinstance(raw_evidence, list):
             raw_evidence = []
@@ -8610,23 +8671,14 @@ class ReActToolLoop:
             else item
             for item in list(raw_evidence or [])
         ]
-
-        if status == 'success':
+        if not list(payload.get('evidence') or []):
+            payload['evidence'] = cls._auto_wrapped_final_result_evidence(
+                message_history=message_history,
+                response_content=str(response_content or ''),
+            )
+        remaining_work = payload.get('remaining_work')
+        if not isinstance(remaining_work, list):
             payload['remaining_work'] = []
-            payload['blocking_reason'] = ''
-            if not list(payload.get('evidence') or []):
-                payload['evidence'] = cls._auto_wrapped_final_result_evidence(
-                    message_history=message_history,
-                    response_content=str(response_content or ''),
-                )
-        elif status == 'failed':
-            remaining_work = payload.get('remaining_work')
-            if not isinstance(remaining_work, list):
-                payload['remaining_work'] = []
-            current_delivery_status = str(payload.get('delivery_status') or '').strip().lower()
-            if current_delivery_status == 'blocked' and not str(payload.get('blocking_reason') or '').strip():
-                payload['blocking_reason'] = str(payload.get('summary') or payload.get('answer') or '').strip()
-
         return payload
 
     @staticmethod

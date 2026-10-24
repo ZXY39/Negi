@@ -99,7 +99,7 @@ async def test_rejection_reactivates_both_nodes_on_the_tree_patch_lane(tmp_path:
         record, task, root, acceptance = await _final_acceptance_pair(service)
         mark = len(captured)
 
-        handled = service.node_runner._handle_acceptance_node_result(
+        handled = await service.node_runner._handle_acceptance_node_result(
             task=task,
             acceptance=service.store.get_node(acceptance.node_id),
             result=NodeFinalResult(
@@ -131,7 +131,7 @@ async def test_execution_failure_cancelled_acceptance_shows_terminal_failure(tmp
     captured = _capture_node_patches(service)
     try:
         record, task, root, acceptance = await _final_acceptance_pair(service)
-        service.node_runner._handle_acceptance_node_result(
+        await service.node_runner._handle_acceptance_node_result(
             task=task,
             acceptance=service.store.get_node(acceptance.node_id),
             result=NodeFinalResult(

@@ -146,7 +146,7 @@ async def test_acceptance_verdict_path_records_audit(tmp_path: Path) -> None:
         str(kwargs.get("acceptance").node_id)
     )
 
-    service.node_runner._handle_acceptance_node_result(
+    await service.node_runner._handle_acceptance_node_result(
         task=task,
         acceptance=node,
         result=_verdict(status="success", evidence=[{"kind": "file", "path": str(real), "note": "核验"}]),

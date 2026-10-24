@@ -11,7 +11,12 @@ from main.models import (
     SpawnChildSpec,
     build_execution_policy_schema,
 )
-from main.runtime.tool_names import FINAL_RESULT_TOOL_NAME, SILENT_TOOL_NAME
+from main.runtime.tool_names import (
+    ENTER_WAIT_TOOL_NAME,
+    FINAL_RESULT_TOOL_NAME,
+    SEND_MESSAGE_TOOL_NAME,
+    SILENT_TOOL_NAME,
+)
 
 
 def build_detail_level_schema(*, description: str) -> dict[str, Any]:
@@ -125,13 +130,172 @@ class SilentTool(Tool):
         )
 
 
+class EnterWaitTool(Tool):
+    """主动停靠，等一条消息把自己叫醒。
+
+    这是节点"现在没活可干、但在等某件事"的唯一表达方式：调用它之后本回合就结束，
+    节点进入等待，直到信箱里出现满足 `wake_on` 的未读消息才被唤醒。
+
+    防丢唤醒：调用时若已经有满足条件的未读，不会入睡——未读立即注入、回合继续，
+    工具回执说明"有未读消息，未进入等待"。这条把"最后一条完成消息在入睡前到达"
+    的竞态从机制上消灭，因此不需要调用方先查一遍信箱。
+    """
+
+    hide_universal_timeout_parameter = True
+
+    def __init__(self, park: Callable[..., Awaitable[dict[str, Any]]]) -> None:
+        self._park = park
+
+    @property
+    def name(self) -> str:
+        return ENTER_WAIT_TOOL_NAME
+
+    @property
+    def description(self) -> str:
+        return (
+            'Stop this turn and wait until a message wakes you. Use `all_children` when you have '
+            'finished your own work and only the children\'s results are outstanding: it wakes you '
+            'once every direct execution child has settled and its terminal message is already in '
+            'your mailbox, so you are not woken once per child. Use `any` when any single message '
+            'should bring you back. If qualifying mail is already waiting, this does not park you — '
+            'it injects that mail and the turn continues. `note` is echoed back to you on wake so '
+            'you remember what you were waiting for. Do not call this while you still have work you '
+            'can do now.'
+        )
+
+    @property
+    def model_description(self) -> str:
+        return 'Park until a message wakes you. all_children waits for every direct child to report.'
+
+    @property
+    def parameters(self) -> dict[str, Any]:
+        return {
+            'type': 'object',
+            'properties': {
+                'wake_on': {
+                    'type': 'string',
+                    'enum': ['any', 'all_children'],
+                    'description': (
+                        'any = first qualifying message wakes you; all_children = every direct '
+                        'execution child settled and reported.'
+                    ),
+                },
+                'note': {
+                    'type': 'string',
+                    'description': 'What you are waiting for. Echoed back when you wake.',
+                },
+            },
+            'required': [],
+        }
+
+    async def execute(self, wake_on: str = 'any', note: str = '', **kwargs: Any) -> str:
+        _ = kwargs
+        result = await self._park(
+            wake_on=str(wake_on or '').strip() or 'any',
+            note=str(note or '').strip(),
+        )
+        return json.dumps(result, ensure_ascii=False, sort_keys=True)
+
+
+class SendMessageTool(Tool):
+    """给父节点、直接子节点、或（仅根节点）前门 agent 发一条消息。
+
+    一次可发给多个直接子节点；投递逐目标独立判定。`intent_kind=请求` 表示发完就要
+    停靠等回应，因此收件人会被立即唤醒；`进展` / `指令` 只在收件人自己的等待策略
+    允许时才唤醒它。
+
+    工具本身不做寻址判定：合法目标集合与父/子关系由运行时的投递入口算，越址时
+    回执里会带上可用的地址，避免模型只能靠猜。
+    """
+
+    hide_universal_timeout_parameter = True
+
+    def __init__(self, deliver: Callable[..., Awaitable[dict[str, Any]]]) -> None:
+        self._deliver = deliver
+
+    @property
+    def name(self) -> str:
+        return SEND_MESSAGE_TOOL_NAME
+
+    @property
+    def description(self) -> str:
+        return (
+            'Send a message to your parent node, to one or more of your direct children, or (root '
+            'node only) to the front-door agent. Each target is judged on its own: a terminal target '
+            'rejects and says so, a paused target still accepts a machine message (that is how it '
+            'gets unstuck), and an out-of-scope target is rejected with the addresses you may use. '
+            'Use `请求` when you are about to park waiting for an answer — it wakes the recipient '
+            'immediately; `进展` and `指令` only wake a recipient whose own wait policy says so. '
+            'Large bodies belong in `ref`; the message itself should stay a summary.'
+        )
+
+    @property
+    def model_description(self) -> str:
+        return 'Message your parent, children, or the front door. Use 请求 when you will wait for an answer.'
+
+    @property
+    def parameters(self) -> dict[str, Any]:
+        return {
+            'type': 'object',
+            'properties': {
+                'to': {
+                    'type': ['string', 'array'],
+                    'items': {'type': 'string'},
+                    'description': (
+                        "`parent`, `frontdoor` (root only), a direct child node id, or a list of them."
+                    ),
+                    'minLength': 1,
+                },
+                'intent_kind': {
+                    'type': 'string',
+                    'enum': ['进展', '请求', '指令'],
+                    'description': (
+                        '进展 = report without expecting a reply; 请求 = you will park and wait for an '
+                        'answer; 指令 = tell someone below you what to do.'
+                    ),
+                },
+                'content': {'type': 'string', 'minLength': 1, 'description': 'Message body.'},
+                'ref': {
+                    'type': 'string',
+                    'description': 'Optional pointer to a large artifact; keep `content` a summary then.',
+                },
+                'in_reply_to': {'type': 'string', 'description': 'Optional id of the message answered.'},
+            },
+            'required': ['to', 'content'],
+        }
+
+    def validate_params(self, params: dict[str, Any]) -> list[str]:
+        errors = super().validate_params(params)
+        if not str((params or {}).get('content') or '').strip():
+            errors.append('content must not be empty')
+        return errors
+
+    async def execute(
+        self,
+        to: Any = None,
+        intent_kind: str = '',
+        content: str = '',
+        ref: str = '',
+        in_reply_to: str = '',
+        **kwargs: Any,
+    ) -> str:
+        _ = kwargs
+        result = await self._deliver(
+            to=to,
+            intent_kind=str(intent_kind or '').strip(),
+            content=str(content or '').strip(),
+            ref=str(ref or '').strip(),
+            in_reply_to=str(in_reply_to or '').strip(),
+        )
+        return json.dumps(result, ensure_ascii=False, sort_keys=True)
+
+
 class SpawnChildNodesTool(Tool):
     hide_universal_timeout_parameter = True
-    # 派生子节点工具在一次调用内跑完整个子节点流水线（含嵌套派生与验收节点），
-    # 运行时长天然无界，不得套任何外层机械超时；中断只能走任务级取消链。
-    exempt_universal_timeout = True
-    # 重跑按 tool_call_id 命中父节点 metadata 里的 spawn_operations 记录：已完成的
-    # 批次直接复用原 entries，不会再物化一批子节点。
+    # 拆掉阻塞承诺后本工具只做"创建 + 交棒"，毫秒级返回，不再需要豁免通用超时：
+    # 子节点的运行时长与父节点的工具调用无关。
+    # 重跑按 tool_call_id 命中父节点 metadata 里的 spawn_operations 记录：同一 call id
+    # 只返回同一批创建回执，不会再物化一批子节点。
     rerun_safe = True
 
     def __init__(
@@ -147,22 +311,24 @@ class SpawnChildNodesTool(Tool):
     @property
     def description(self) -> str:
         return (
-            'Create child nodes and run them with runtime-controlled concurrency. '
-            'All children in one call start concurrently with no ordering guarantee, and the call '
-            'returns only after every child pipeline is terminal. A child that consumes other '
-            "children's outputs (e.g. an acceptance/verification node for its siblings) must NOT "
-            'share the batch: spawn it in a later call after the depended-on batch returns, or use '
-            'requires_acceptance for per-child acceptance.'
+            'Create child nodes and hand them to the scheduler. The call returns as soon as they '
+            'exist — it does NOT wait for them, and it does not contain their results. Each child '
+            'reports its terminal result to you as a child_final message; call enter_wait with '
+            'wake_on=all_children (or any) to be woken when they are in. Only mutually independent '
+            'branches belong in one batch; a node that consumes its siblings\' outputs must be '
+            'created in a later call, after you have received those siblings\' results. Use '
+            'requires_acceptance for per-child acceptance; the acceptance node is created with the '
+            'child and runs after the child submits.'
         )
 
     @property
     def model_description(self) -> str:
         return (
-            'Create child nodes for delegated work. One call = one concurrent batch (no ordering); '
-            'never put a node that consumes its siblings’ outputs (e.g. acceptance) in the same '
-            'batch — spawn it later, or use requires_acceptance for single-child acceptance. '
-            'Optional per-child `seed_tools` seeds those tool contracts into the child’s first '
-            'request; the result reports declared names the runtime did not seed.'
+            'Create child nodes for delegated work and return immediately with their ids. One call = '
+            'one batch (no ordering); results arrive later as child_final messages — wait with '
+            'enter_wait(all_children). Never put a node that consumes its siblings’ outputs in the '
+            'same batch; create it after you have their results. Optional per-child `seed_tools` '
+            'seeds those tool contracts into the child’s first request.'
         )
 
     @property
@@ -222,9 +388,11 @@ class SpawnChildNodesTool(Tool):
                 'children': {
                     'type': 'array',
                     'description': (
-                        'One batch of children started concurrently (no ordering guarantee); the call returns after all of them are terminal. '
-                        'Put only mutually independent, ready branches in one batch. A child that depends on other children’s outputs '
-                        '(e.g. an acceptance/verification/aggregation node for its siblings) must be spawned in a separate later batch.'
+                        'One batch of children created together (no ordering guarantee). The call returns as soon as '
+                        'they exist; each child reports its result later as a child_final message. Put only mutually '
+                        'independent, ready branches in one batch. A child that depends on other children’s outputs '
+                        '(e.g. an acceptance/verification/aggregation node for its siblings) must be created in a separate '
+                        'later call, after you have received those results.'
                     ),
                     'items': child_schema,
                     'minItems': 1,
@@ -283,140 +451,38 @@ class SpawnChildNodesTool(Tool):
         runtime = __g3ku_runtime if isinstance(__g3ku_runtime, dict) else {}
         specs = [SpawnChildSpec.model_validate(item) for item in list(children or [])]
         results = await self._spawn_callback(specs, runtime.get('current_tool_call_id'))
+        created: list[dict[str, Any]] = []
+        rejected: list[dict[str, Any]] = []
+        for index, item in enumerate(results):
+            goal = str(item.goal or (specs[index].goal if index < len(specs) else '') or '').strip()
+            if str(item.state or '').strip() == 'rejected' or bool(item.review_blocked):
+                rejected.append(
+                    {
+                        'goal': goal,
+                        'gate': str(item.gate or ('review' if item.review_blocked else 'unknown')).strip(),
+                        'reason': str(item.reject_reason or item.node_output or '').strip(),
+                    }
+                )
+                continue
+            created.append(
+                {
+                    'node_id': str(item.child_node_id or '').strip(),
+                    'goal': goal,
+                    'acceptance_node_id': str(item.acceptance_node_id or '').strip(),
+                }
+            )
+        summary = (
+            f'已创建 {len(created)} 个子节点，结果会以 child_final 消息送达；'
+            '需要等它们全部结束时调用 enter_wait(wake_on="all_children")，不要轮询。'
+            if created
+            else '没有创建任何子节点。'
+        )
+        if rejected:
+            summary += f' 另有 {len(rejected)} 个候选被拒绝（见 rejected）。'
         return json.dumps(
-            {'children': [item.model_dump(mode='json', exclude_none=True) for item in results]},
+            {'created': created, 'rejected': rejected, 'summary': summary},
             ensure_ascii=False,
         )
-
-
-class SubmitMessageDistributionTool(Tool):
-    hide_universal_timeout_parameter = True
-
-    def __init__(
-        self,
-        submit_callback: Callable[[dict[str, Any]], Awaitable[dict[str, Any]] | dict[str, Any]],
-    ) -> None:
-        self._submit_callback = submit_callback
-
-    @property
-    def name(self) -> str:
-        return 'submit_message_distribution'
-
-    @property
-    def description(self) -> str:
-        return (
-            'Submit per-child message delivery decisions for the current distribution turn. '
-            '每个子节点恰好一条 children 决策，target_node_id 必须原样取自 live_children。'
-            '字段必填是条件式的：action=distribute（或 should_distribute=true）时该条的 message 必须非空'
-            '（写给这个子节点的话，不是给你的理由）；action=skip/terminate 时 reason 必须非空。'
-        )
-
-    @property
-    def parameters(self) -> dict[str, Any]:
-        return {
-            'type': 'object',
-            'properties': {
-                'children': {
-                    'type': 'array',
-                    'items': {
-                        'type': 'object',
-                        'properties': {
-                            'target_node_id': {'type': 'string'},
-                            'should_distribute': {'type': 'boolean'},
-                            'action': {'type': 'string', 'enum': ['distribute', 'skip', 'terminate']},
-                            'message': {'type': 'string'},
-                            'reason': {'type': 'string'},
-                        },
-                        'required': ['target_node_id', 'should_distribute', 'reason'],
-                    },
-                },
-                'notes': {'type': 'string'},
-            },
-            'required': ['children'],
-        }
-
-    async def execute(
-        self,
-        children: list[dict[str, Any]],
-        notes: str = '',
-        **kwargs: Any,
-    ) -> dict[str, Any]:
-        _ = kwargs
-        payload = {
-            'children': [dict(item) for item in list(children or []) if isinstance(item, dict)],
-            'notes': str(notes or '').strip(),
-        }
-        result = self._submit_callback(payload)
-        if isinstance(result, Awaitable):
-            return await result
-        return dict(result or {}) if isinstance(result, dict) else payload
-
-
-class SubmitNoticeInspectionDecisionTool(Tool):
-    """被验收检验中的节点收到定向通知时的决策工具。
-
-    resume_execution：通知要求更改最终输出 → 程序打断验收节点，目标节点
-    带通知恢复执行；continue_acceptance：无需更改 → 验收继续，验收节点
-    会收到「被检验节点收到了通知（含原文）」的告知。
-    """
-
-    hide_universal_timeout_parameter = True
-
-    def __init__(
-        self,
-        submit_callback: Callable[[dict[str, Any]], Awaitable[dict[str, Any]] | dict[str, Any]],
-    ) -> None:
-        self._submit_callback = submit_callback
-
-    @property
-    def name(self) -> str:
-        return 'submit_notice_inspection_decision'
-
-    @property
-    def description(self) -> str:
-        return 'Submit the inspection decision for a notice received while this node is under acceptance inspection.'
-
-    @property
-    def parameters(self) -> dict[str, Any]:
-        return {
-            'type': 'object',
-            'properties': {
-                'action': {
-                    'type': 'string',
-                    'enum': ['resume_execution', 'continue_acceptance'],
-                    'description': (
-                        'resume_execution: the notice requires changing the final output; interrupt the '
-                        'running acceptance inspection and re-run this node with the notice merged. '
-                        'continue_acceptance: the notice does not require changing the final output; let '
-                        'the acceptance inspection continue (the inspector will be informed of the notice).'
-                    ),
-                },
-                'reason': {
-                    'type': 'string',
-                    'description': 'Why the notice does or does not require changing the final output.',
-                },
-                'notes': {'type': 'string'},
-            },
-            'required': ['action', 'reason'],
-        }
-
-    async def execute(
-        self,
-        action: str,
-        reason: str = '',
-        notes: str = '',
-        **kwargs: Any,
-    ) -> dict[str, Any]:
-        _ = kwargs
-        payload = {
-            'action': str(action or '').strip(),
-            'reason': str(reason or '').strip(),
-            'notes': str(notes or '').strip(),
-        }
-        result = self._submit_callback(payload)
-        if isinstance(result, Awaitable):
-            return await result
-        return dict(result or {}) if isinstance(result, dict) else payload
 
 
 class SubmitFinalResultTool(Tool):
@@ -439,37 +505,57 @@ class SubmitFinalResultTool(Tool):
     def description(self) -> str:
         if self._node_kind == 'acceptance':
             return (
-                'Submit the final structured acceptance result for the current node. '
-                'Use this only when you are ready to end the node, and make it the only tool call in the turn. '
-                'For a repairable rejection, use failed + delivery_status=final; the runtime returns revised execution output for another acceptance pass. For an execution anomaly that must not be retried, use failed + delivery_status=blocked and explain why in blocking_reason.'
+                'Submit this turn\'s acceptance verdict. Make it the only tool call in the turn. '
+                'verdict=pass ends the inspected node as successful; verdict=reject sends the feedback back '
+                'and the inspected node retries; verdict=reject_no_progress additionally pauses the inspected '
+                'node as abnormal, so use it only when the new submission shows no real change against the '
+                'previous rejection.'
             )
         return (
             'Submit the final structured result for the current execution node. '
             'Use this only when you are ready to end the node, and make it the only tool call in the turn. '
-            'If acceptance rejects the submission, the tool returns the rejection feedback and you must continue from that feedback.'
+            'If the node has an acceptance reviewer, the submission enters acceptance instead of ending the node.'
         )
 
     @property
     def model_description(self) -> str:
         if self._node_kind == 'acceptance':
-            return 'Submit the current acceptance result; failed+final requests repair, while failed+blocked records an execution anomaly as terminal without retry. For a repairable failed+final verdict, send blocking_reason as an empty string: the inspected execution node reads summary plus remaining_work as its repair instructions, and nothing else you write into blocking_reason.'
-        return 'Submit the current result; rejection returns acceptance feedback instead of ending the node.'
+            return (
+                'Submit the acceptance verdict: pass | reject | reject_no_progress, plus feedback. '
+                'feedback must explain what is still wrong for reject-like verdicts. The tool returns '
+                '{outcome, submission_id, acceptance_node_id}.'
+            )
+        return (
+            'Submit the current result: summary, answer, evidence, remaining_work. '
+            'The tool returns {outcome, submission_id, acceptance_node_id}.'
+        )
 
     @property
     def parameters(self) -> dict[str, Any]:
+        if self._node_kind == 'acceptance':
+            return {
+                'type': 'object',
+                'properties': {
+                    'verdict': {
+                        'type': 'string',
+                        'enum': ['pass', 'reject', 'reject_no_progress'],
+                        'description': (
+                            'pass: the submission meets the acceptance criteria. '
+                            'reject: repairable rejection with concrete feedback. '
+                            'reject_no_progress: the submission repeats a previously rejected flaw without '
+                            'meaningful change; the inspected node is paused for an operator.'
+                        ),
+                    },
+                    'feedback': {
+                        'type': 'string',
+                        'description': 'What is still wrong and what must change. Required for reject verdicts.',
+                    },
+                },
+                'required': ['verdict', 'feedback'],
+            }
         return {
             'type': 'object',
             'properties': {
-                'status': {
-                    'type': 'string',
-                    'enum': ['success', 'failed'],
-                    'description': 'Whether the node completed successfully or failed.',
-                },
-                'delivery_status': {
-                    'type': 'string',
-                    'enum': ['final', 'blocked'],
-                    'description': 'Use final for success or a repairable rejection; use blocked for an execution anomaly that must not be retried or a genuine blocker.',
-                },
                 'summary': {
                     'type': 'string',
                     'description': 'Short conclusion for the node result.',
@@ -497,95 +583,35 @@ class SubmitFinalResultTool(Tool):
                 },
                 'remaining_work': {
                     'type': 'array',
-                    'description': 'Remaining work items. Must be empty on success.',
+                    'description': 'Remaining work items, if any. Informational only.',
                     'items': {'type': 'string'},
                 },
-                'blocking_reason': {
-                    'type': 'string',
-                    'description': 'Blocking reason. Must be empty on success.',
-                },
             },
-            'required': [
-                'status',
-                'delivery_status',
-                'summary',
-                'answer',
-                'evidence',
-                'remaining_work',
-                'blocking_reason',
-            ],
+            'required': ['summary', 'answer'],
         }
 
     @property
     def model_parameters(self) -> dict[str, Any]:
-        return {
-            'type': 'object',
-            'properties': {
-                'status': {
-                    'type': 'string',
-                    'enum': ['success', 'failed'],
-                },
-                'delivery_status': {
-                    'type': 'string',
-                    'enum': ['final', 'blocked'],
-                },
-                'summary': {'type': 'string', 'minLength': 1},
-                'answer': {'type': 'string'},
-                'evidence': {
-                    'type': 'array',
-                    'items': {
-                        'type': 'object',
-                        'properties': {
-                            'kind': {'type': 'string', 'enum': ['file', 'artifact', 'url']},
-                            'path': {'type': 'string'},
-                            'ref': {'type': 'string'},
-                            'start_line': {'type': 'integer', 'minimum': 1},
-                            'end_line': {'type': 'integer', 'minimum': 1},
-                            'note': {'type': 'string'},
-                        },
-                        'required': ['kind'],
-                    },
-                },
-                'remaining_work': {
-                    'type': 'array',
-                    'items': {'type': 'string'},
-                },
-                'blocking_reason': {'type': 'string'},
-            },
-            'required': [
-                'status',
-                'delivery_status',
-                'summary',
-                'answer',
-                'evidence',
-                'remaining_work',
-                'blocking_reason',
-            ],
-        }
+        parameters = self.parameters
+        for prop in parameters.get('properties', {}).values():
+            prop.pop('description', None)
+        return parameters
 
-    async def execute(
-        self,
-        status: str,
-        delivery_status: str,
-        summary: str,
-        answer: str,
-        evidence: list[dict[str, Any]],
-        remaining_work: list[str],
-        blocking_reason: str,
-        **kwargs: Any,
-    ) -> dict[str, Any]:
-        _ = kwargs
-        payload = {
-            'status': str(status or '').strip().lower(),
-            'delivery_status': str(delivery_status or '').strip().lower(),
-            'summary': str(summary or '').strip(),
-            'answer': str(answer or ''),
-            'evidence': [
-                NodeEvidenceItem.model_validate(item).model_dump(mode='json')
-                for item in list(evidence or [])
-                if isinstance(item, dict)
-            ],
-            'remaining_work': [str(item or '').strip() for item in list(remaining_work or [])],
-            'blocking_reason': str(blocking_reason or '').strip(),
-        }
+    async def execute(self, **kwargs: Any) -> dict[str, Any]:
+        if self._node_kind == 'acceptance':
+            payload = {
+                'verdict': str(kwargs.get('verdict') or '').strip().lower(),
+                'feedback': str(kwargs.get('feedback') or '').strip(),
+            }
+        else:
+            payload = {
+                'summary': str(kwargs.get('summary') or '').strip(),
+                'answer': str(kwargs.get('answer') or ''),
+                'evidence': [
+                    NodeEvidenceItem.model_validate(item).model_dump(mode='json')
+                    for item in list(kwargs.get('evidence') or [])
+                    if isinstance(item, dict)
+                ],
+                'remaining_work': [str(item or '').strip() for item in list(kwargs.get('remaining_work') or [])],
+            }
         return await self._submit_callback(payload)

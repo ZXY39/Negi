@@ -93,12 +93,12 @@ from main.ids import new_command_id, new_node_id, new_task_id, new_worker_id
 from main.models import (
     NodeRecord,
     TaskArtifactRecord,
-    TaskMessageDistributionEpoch,
     TaskNodeNotification,
     TaskRecord,
     TokenUsageSummary,
     normalize_execution_policy_metadata,
     normalize_final_acceptance_metadata,
+    normalize_result_payload,
 )
 from main.monitoring.file_store import TaskFileStore
 from main.monitoring.log_service import TaskLogService
@@ -106,6 +106,11 @@ from main.monitoring.mem_probe import start_mem_probe
 from main.monitoring.query_service_v2 import TaskQueryServiceV2
 from main.prompts import load_prompt
 from main.protocol import build_envelope, now_iso
+from main.runtime.acceptance_handshake import (
+    ACCEPTANCE_HANDSHAKE_KEY,
+    ACCEPTANCE_STATE_WAITING_ACCEPTANCE,
+    normalize_acceptance_handshake,
+)
 from main.runtime.adaptive_tool_budget import AdaptiveToolBudgetController
 from main.runtime.chat_backend import ChatBackend
 from main.runtime.debug_recorder import RuntimeDebugRecorder
@@ -115,6 +120,18 @@ from main.runtime.internal_tools import build_detail_level_schema
 from main.runtime.model_key_concurrency import ModelKeyConcurrencyController
 from main.runtime.model_load_balancer import ModelLoadBalancer, quota_bucket_key
 from main.runtime.model_route import build_model_route_plan
+from main.runtime.node_mailbox import message_fingerprint, normalize_targets, plan_delivery
+from main.runtime.node_message_kind import (
+    INTENT_INSTRUCTION,
+    INTENT_PROGRESS,
+    KIND_CHILD_ABNORMAL_PAUSE,
+    KIND_CHILD_FINAL,
+    PRIORITY_HIGH,
+    RELATION_CHILD,
+    RELATION_PARENT,
+    derive_message_kind,
+    derive_priority,
+)
 from main.runtime.node_prompt_contract import (
     NodeRuntimeToolContract,
     extract_node_dynamic_contract_payload,
@@ -123,15 +140,19 @@ from main.runtime.node_prompt_contract import (
 from main.runtime.node_runner import NodeRunner
 from main.runtime.node_seed_contracts import seed_drop_reason, trim_seed_contracts
 from main.runtime.node_turn_controller import NodeTurnController
+from main.runtime.node_wake import (
+    WAKE_ON_ALL_CHILDREN,
+    WakeDeps,
+    node_park_state,
+    wait_inputs,
+    wake_parked_node,
+    wake_ready,
+)
+from main.runtime.node_watchdog import NodeWatchdog
 from main.runtime.react_loop import ReActToolLoop
-from main.runtime.subtree_hold import DISTRIBUTION_ACTIVE_STATES
 from main.runtime.task_actor_service import TaskActorService
 from main.runtime.tool_pressure_monitor import WorkerPressureMonitor
 from main.service.event_registry import TaskEventRegistry
-from main.service.task_append_notice_contract import (
-    TASK_APPEND_NOTICE_DESCRIPTION,
-    build_task_append_notice_parameters,
-)
 from main.service.task_distribution_error_callback import (
     TASK_DISTRIBUTION_ERROR_CALLBACK_PATH,
     normalize_task_distribution_error_payload,
@@ -149,7 +170,6 @@ from main.service.task_event_callback import (
 from main.service.task_stall_callback import (
     TASK_STALL_CALLBACK_PATH,
     TASK_STALL_REASON_CANCEL_REQUESTED,
-    TASK_STALL_REASON_DISTRIBUTION_BARRIER,
     TASK_STALL_REASON_MISSING_TASK,
     TASK_STALL_REASON_NOT_IN_PROGRESS,
     TASK_STALL_REASON_SUSPECTED_STALL,
@@ -192,11 +212,6 @@ from main.storage.fs_utils import remove_tree
 from main.storage.sqlite_store import SQLiteTaskStore
 
 _UNSET = object()
-# "分发在飞"的判据只有一份作者：`subtree_hold.DISTRIBUTION_ACTIVE_STATES`（hold 谓词与
-# 恢复车道都用它）。读侧与追加车道必须沿用同一份，否则驱动真会写下的 barrier_requested /
-# barrier_draining 会被当成"没有活动 epoch"——屏障排空期间另起一条 epoch 并行下发。
-# 'resuming' 是存量 epoch 行里可能出现的旧形状，多算在飞只会把闸门收紧，不会绕过屏障。
-_ACTIVE_DISTRIBUTION_EPOCH_STATES = DISTRIBUTION_ACTIVE_STATES | {'resuming'}
 GOVERNANCE_MODE_META_KEY = 'ceo_frontdoor_regulatory_mode_enabled'
 GOVERNANCE_MODE_UPDATED_AT_META_KEY = 'ceo_frontdoor_regulatory_mode_enabled:updated_at'
 _WORKER_STATUS_STALE_AFTER_SECONDS = 15.0
@@ -630,7 +645,56 @@ class MainRuntimeService:
         self._resource_tree_state_poll_interval_ms = self._resource_reload_poll_interval_ms(app_config)
         self.memory_manager = None
         self._default_max_depth = max(0, int(default_max_depth or 0))
+        # `hard_max_depth` 是机器上限，`default_max_depth` 是未显式指定时的默认值。
+        # 两者在配置里可能倒挂（默认 10 / 硬顶 4），取大者保持"硬顶不小于默认"的
+        # 不变式；真正的裁剪只在 `_clamp_depth` 一处做，不在别处再抄一份。
         self._hard_max_depth = max(self._default_max_depth, int(hard_max_depth or self._default_max_depth))
+        self._max_task_nodes = max(
+            1,
+            int(
+                getattr(getattr(app_config, 'main_runtime', None), 'max_task_nodes', 200) or 200
+            ),
+        )
+        self._node_tool_timeout_ceiling_seconds = max(
+            1.0,
+            float(
+                getattr(
+                    getattr(app_config, 'main_runtime', None),
+                    'node_tool_timeout_ceiling_seconds',
+                    900.0,
+                )
+                or 900.0
+            ),
+        )
+        self._node_watchdog_interval_seconds = max(
+            1.0,
+            float(
+                getattr(
+                    getattr(app_config, 'main_runtime', None),
+                    'node_watchdog_interval_seconds',
+                    30.0,
+                )
+                or 30.0
+            ),
+        )
+        self._node_watchdog_stall_seconds = max(
+            60.0,
+            float(
+                getattr(
+                    getattr(app_config, 'main_runtime', None),
+                    'node_watchdog_stall_seconds',
+                    600.0,
+                )
+                or 600.0
+            ),
+        )
+        # P6：节点看门狗（结构判停）。与任务级失速通知并存：后者只发会话回调，
+        # 前者把节点转成「暂停·异常」并升级父节点。
+        self.node_watchdog = NodeWatchdog(
+            service=self,
+            interval_seconds=self._node_watchdog_interval_seconds,
+            stall_seconds=self._node_watchdog_stall_seconds,
+        )
         self._builtin_tool_cache: dict[str, Tool] | None = None
         self._node_context_selection_cache: dict[tuple[str, str], dict[str, Any]] = {}
         parallel_enabled, max_parallel_tool_calls, max_parallel_child_pipelines = self._node_parallelism_settings(app_config)
@@ -734,8 +798,24 @@ class MainRuntimeService:
         # 节点道 skill 名单的每跳取数口：react_loop 无 service 引用，只能由这里递进去
         # （与 `_tool_snapshot_supplier` 同一条 side-channel）。
         self.node_runner._skill_roster_supplier = self._node_skill_roster_supplier
-        self.node_runner.distribution_delivery_callback = self._deliver_distribution_message
+        # 节点头部快照与一次性通知的 exec 策略取数口：节点不持 service 引用，
+        # 与 skill 取数口同一条 side-channel；每跳实时读治理记录（无缓存）。
+        self.node_runner._exec_runtime_policy_supplier = self._current_exec_runtime_policy_payload
+        # 节点侧 `send_message` 的投递口：NodeRunner 没有 service 引用，走同一条 side-channel。
+        self.node_runner.node_message_delivery_callback = self._deliver_node_message_from_node
+        # 节点侧 `manage_child_nodes` 的控制口：暂停/恢复/终止需要 dispatcher、暂停账本
+        # 与投递通道，全部在这一层。
+        self.node_runner.manage_child_nodes_callback = self._manage_child_nodes_from_node
+        # P1「终局必上报」的唯一出口：执行节点终局 → 父节点信箱 `child_final`。
+        self.node_runner.child_final_sink = self._deliver_child_final_message
+        # 异常暂停 → 父节点信箱 `child_abnormal_pause`（high 优先级，必唤醒）。
+        self.node_runner.abnormal_pause_sink = self._deliver_child_abnormal_pause
+        # 验收车道（交接单 + 三档裁决）的结构性消息与 `send_message` 共用同一条投递
+        # 实现，确保它们也带机械推导的 kind/priority（直写通知表会留下无类型行）。
+        self.node_runner.mailbox_delivery_sink = self._deliver_structural_node_message
         self.node_runner._tool_default_timeout_seconds = self._tool_default_timeout_seconds(app_config)
+        self.node_runner._max_task_nodes = self._max_task_nodes
+        self.node_runner._node_tool_timeout_ceiling_seconds = self._node_tool_timeout_ceiling_seconds
         self.task_actor_service = TaskActorService(
             store=self.store,
             log_service=self.log_service,
@@ -754,28 +834,16 @@ class MainRuntimeService:
             max_concurrent_tasks=None if execution_runtime_enabled else 4,
             per_task_limit=1,
         )
-        self.task_actor_service.distribution_resume_callback = (
-            lambda task_id: asyncio.get_running_loop().call_soon(
-                lambda normalized_task_id=str(task_id or '').strip(): asyncio.create_task(
-                    self.global_scheduler.enqueue_task(normalized_task_id)
-                )
-            )
-        )
-        self.task_actor_service.distribution_failure_notifier = (
-            lambda task_id, epoch_id, error_text: self.emit_task_distribution_error(
-                task_id=task_id,
-                epoch_id=epoch_id,
-                error_text=error_text,
-            )
-        )
-        self.task_actor_service.distribution_skipped_notifier = (
-            lambda task_id, epoch_id, root_message, items: self.emit_task_distribution_skipped(
-                task_id=task_id,
-                epoch_id=epoch_id,
-                root_message=root_message,
-                items=items,
-            )
-        )
+        self.task_actor_service.node_watchdog = self.node_watchdog
+
+        def _notify_wait_cycle(**kwargs: Any) -> None:
+            try:
+                loop = asyncio.get_running_loop()
+            except RuntimeError:
+                return
+            loop.create_task(self._notify_wait_cycle(**kwargs), name='wait-cycle-notice')
+
+        self.task_actor_service.wait_cycle_notifier = _notify_wait_cycle
         self.task_actor_service.interrupted_task_requeue_callback = (
             lambda task_id: asyncio.get_running_loop().call_soon(
                 lambda normalized_task_id=str(task_id or '').strip(): asyncio.create_task(
@@ -872,7 +940,7 @@ class MainRuntimeService:
         # 磁盘治理（P1）：对账循环、紧急态自动暂停互斥与边沿状态。
         self._task_disk_reconcile_task: asyncio.Task[Any] | None = None
         # 分发驱动器接管对账循环（子树屏障不能只靠驱动器自己活着）。
-        self._distribution_reconcile_task: asyncio.Task[Any] | None = None
+        self._terminal_outbox_reconcile_task: asyncio.Task[Any] | None = None
         self._disk_emergency_pause_lock = asyncio.Lock()
         self._disk_emergency_alerted = False
         self._task_terminal_delivery_tasks: dict[str, asyncio.Task[Any]] = {}
@@ -990,6 +1058,7 @@ class MainRuntimeService:
                 if ref_id and ref_id not in known_task_ids:
                     self.store.mark_shutdown_pause_entry_consumed(kind='task', ref_id=ref_id)
             self.task_stall_notifier.bootstrap_running_tasks()
+            self.node_watchdog.bootstrap_running_tasks()
         if self.execution_mode in {'embedded', 'worker'}:
             # 磁盘治理（P1）：任务大小对账循环（每小时增量纠偏 + 终态即时对账）。
             if self._task_disk_reconcile_task is None or self._task_disk_reconcile_task.done():
@@ -997,12 +1066,12 @@ class MainRuntimeService:
                     self._task_disk_reconcile_loop(),
                     name=f'main-runtime-disk-reconcile:{self.worker_id or self.execution_mode}',
                 )
-            # 分发接管：epoch 处于活跃分发态但驱动器已不在跑 → 重新武装，
-            # 让「驱动器退出」从永久冻结降级为 ≤60s 自愈。
-            if self._distribution_reconcile_task is None or self._distribution_reconcile_task.done():
-                self._distribution_reconcile_task = asyncio.create_task(
-                    self._distribution_reconcile_loop(),
-                    name=f'main-runtime-distribution-reconcile:{self.worker_id or self.execution_mode}',
+            # 终态 outbox 的周期重投：宿主循环原先是分发对账的搭车者，分发下线后
+            # 单独保留这一半（失败投递否则要等到下次重启才会重放）。
+            if self._terminal_outbox_reconcile_task is None or self._terminal_outbox_reconcile_task.done():
+                self._terminal_outbox_reconcile_task = asyncio.create_task(
+                    self._terminal_outbox_reconcile_loop(),
+                    name=f'main-runtime-terminal-outbox-reconcile:{self.worker_id or self.execution_mode}',
                 )
         if self.execution_mode == 'worker':
             if self.tool_pressure_monitor is not None:
@@ -1110,6 +1179,15 @@ class MainRuntimeService:
         )
         self.log_service.sync_task_read_models(task.task_id, externalize_execution_trace=False)
         self.log_service.refresh_task_view(task.task_id, mark_unread=True)
+        # P8：崩溃前发出、但父节点信箱里已经不存在的异常暂停升级，恢复时补发一次。
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            return
+        loop.create_task(
+            self.resend_lost_abnormal_pause_escalations(task.task_id),
+            name=f'abnormal-pause-resend:{task.task_id}',
+        )
 
     @staticmethod
     def _sanitize_recovered_task_metadata(metadata: dict[str, Any], *, preserve_final_acceptance: bool) -> dict[str, Any]:
@@ -1344,11 +1422,6 @@ class MainRuntimeService:
             elif command_type == 'resume_task':
                 if task_id:
                     await self.resume_task(task_id)
-                success = True
-            elif command_type == 'run_distribution_epoch':
-                # 定向通知：只唤醒子树分发驱动器，不动任务暂停状态。
-                if task_id:
-                    self.task_actor_service.ensure_scoped_epoch_driver(task_id)
                 success = True
             elif command_type == 'pause_task':
                 if task_id:
@@ -1900,6 +1973,15 @@ class MainRuntimeService:
                 pause_reason='',
                 remark='',
             )
+            handshake = normalize_acceptance_handshake(
+                ((updated.metadata if updated is not None else node.metadata) or {}).get(ACCEPTANCE_HANDSHAKE_KEY)
+            )
+            if str(handshake.get('state') or '').strip() == ACCEPTANCE_STATE_WAITING_ACCEPTANCE:
+                # 已提交、裁决在途：清暂停位就够了。再起一个执行回合会与正在跑的验收
+                # 并行（实盘 task:a0d1bd9bc9fa：15:48 resume 根节点后它和最终验收同时
+                # 跑到 15:53；验收通过把任务置 success，迟到的回合随后把根改写成 failed）。
+                results.append({'node_id': node_id, 'result': 'deferred', 'reason': 'waiting_acceptance'})
+                continue
             if dispatcher is not None and updated is not None:
                 # 走 TaskActorService 的复活入口：清标志不等于复活，必须留下活执行器
                 # 或把现场落进日志，并由延迟校验兜底（见 resume_node_entry）。
@@ -1907,9 +1989,6 @@ class MainRuntimeService:
             results.append({'node_id': node_id, 'result': 'resumed' if updated is not None else 'not_found'})
         if schedule_if_inactive and dispatcher is None and any(item.get('result') == 'resumed' for item in results) and str(task.status or '').strip().lower() == 'in_progress' and not bool(task.is_paused):
             await self.global_scheduler.enqueue_task(normalized_task_id)
-        if any(item.get('result') == 'resumed' for item in results):
-            # 被延迟的分发目标（人工暂停入队）随节点恢复重新唤醒驱动器。
-            self.task_actor_service.ensure_scoped_epoch_driver(normalized_task_id)
         return {'ok': True, 'task_id': normalized_task_id, 'items': results}
 
     async def _apply_fail_node_command(self, task_id: str, *, node_ids: list[str], reason: str = '', force: bool = False) -> dict[str, Any]:
@@ -2431,7 +2510,6 @@ class MainRuntimeService:
                 and not bool(getattr(resumed_task, 'is_paused', False))
             ):
                 await self.global_scheduler.enqueue_task(normalized_task_id)
-            self.task_actor_service.ensure_scoped_epoch_driver(normalized_task_id)
         if self.execution_mode == 'web':
             # 每条目一条命令：携带 leader 已展开的显式 node_ids + cascade=False，
             # worker 不再重展开（防两次展开漂移），并保条目顺序与 remark 保真。
@@ -2627,7 +2705,6 @@ class MainRuntimeService:
 
     async def resume_task(self, task_id: str) -> TaskRecord | None:
         task_id = self.normalize_task_id(task_id)
-        self._reset_failed_distribution_state_on_resume(task_id)
         if self.execution_mode in {'embedded', 'worker'}:
             task = self.get_task(task_id)
             if task is None:
@@ -2648,24 +2725,6 @@ class MainRuntimeService:
             )
         return self.get_task(task_id)
 
-    def _reset_failed_distribution_state_on_resume(self, task_id: str) -> None:
-        # An explicit resume is the operator's choice to accept the degraded path: the
-        # undistributed messages stay queued as pending notices on their targets, so
-        # downgrade the visible failure banner to the ordinary pending-notice state and
-        # release the subtree hold. The epoch row keeps state='failed' + error_text as
-        # the durable forensic record.
-        runtime_meta = self.log_service.read_task_runtime_meta(task_id) or {}
-        distribution = dict(runtime_meta.get('distribution') or {})
-        if str(distribution.get('state') or '').strip() != 'failed':
-            return
-        distribution['active_epoch_id'] = ''
-        distribution['state'] = 'resume_ready'
-        distribution['mode'] = ''
-        distribution['target_node_ids'] = []
-        distribution['frontier_node_ids'] = []
-        distribution['blocked_node_ids'] = []
-        distribution['error_text'] = ''
-        self.log_service.update_task_runtime_meta(task_id, distribution=distribution)
 
     @staticmethod
     def _runtime_session_context(session_id: str) -> dict[str, str]:
@@ -2686,7 +2745,6 @@ class MainRuntimeService:
             return None
         if not (bool(task.is_paused) or task.status in {'success', 'failed'}):
             raise ValueError('task_not_paused')
-        self._cancel_distribution_for_force_delete(task_id=task_id, reason='task_delete')
         if self.global_scheduler.is_active(task_id):
             try:
                 await asyncio.wait_for(self.global_scheduler.wait(task_id), timeout=2.0)
@@ -4299,607 +4357,633 @@ class MainRuntimeService:
             final_acceptance_prompt=str(final_acceptance_prompt or '').strip(),
         )
 
-    async def task_append_notice(
-        self,
-        *,
-        task_ids: list[str] | None,
-        node_ids: list[str] | None,
-        message: str,
-        session_id: str,
-    ) -> str:
-        return await self.append_notice_to_targets(
-            task_ids=task_ids,
-            node_ids=node_ids,
-            message=message,
-            session_id=session_id,
-            require_session_ownership=True,
+    # ------------------------------------------------------------------
+    # 节点信箱直投 + R2 唤醒（不走 distribution epoch）
+    # ------------------------------------------------------------------
+
+    NODE_WAIT_WAKE_ON_KEY = 'node_wait_wake_on'
+
+    def _frame_phase(self, task_id: str, node_id: str) -> str:
+        try:
+            frame = self.store.get_task_runtime_frame(task_id, node_id)
+        except Exception:
+            return ''
+        return str(getattr(frame, 'phase', '') or '') if frame is not None else ''
+
+    def node_park_snapshot(self, task_id: str, node_id: str) -> tuple[Any, str]:
+        """`(node, park_state)` for one node; park_state 与唤醒判定同源。"""
+        node = self.store.get_node(node_id)
+        if node is None:
+            return None, ''
+        state = node_park_state(
+            status=str(getattr(node, 'status', '') or ''),
+            is_paused=bool(getattr(node, 'is_paused', False) or getattr(node, 'pause_requested', False)),
+            phase=self._frame_phase(task_id, node_id),
         )
+        return node, state
 
-    async def append_notice_to_targets(
-        self,
-        *,
-        task_ids: list[str] | None,
-        node_ids: list[str] | None,
-        message: str,
-        session_id: str = '',
-        require_session_ownership: bool = True,
-    ) -> str:
-        """定向通知统一入口（工具与网页 REST 共用）。
+    def node_wake_deps(self) -> WakeDeps:
+        async def _resume(task_id: str, node_id: str) -> str:
+            return await self.task_actor_service.resume_node_entry(task_id, node_id)
 
-        node_ids 是真正的投递目标：分发以每个目标为根做「子树屏障」，
-        冻结范围仅为目标子树的存活节点；task_ids 等价于以该任务根节点
-        为目标（即原全局通知行为）。不再有任务级 pause_task——子树冻结
-        由 hold 谓词在执行检查点强制，任务人工暂停时 epoch 延迟到恢复。
-        """
-        normalized_message = str(message or '').strip()
-        normalized_session_id = self._normalize_session_key(session_id)
-        if not normalized_message:
-            raise ValueError('message_required')
-        normalized_task_ids = self._normalize_task_id_list(task_ids or [], allow_empty=True)
-        normalized_node_ids: list[str] = []
-        seen_node_ids: set[str] = set()
-        for raw_node_id in list(node_ids or []):
-            node_id = str(raw_node_id or '').strip()
-            if not node_id or node_id in seen_node_ids:
-                continue
-            seen_node_ids.add(node_id)
-            normalized_node_ids.append(node_id)
-        if not normalized_task_ids and not normalized_node_ids:
-            raise ValueError('append_notice_targets_required')
+        async def _enqueue(task_id: str) -> None:
+            await self.global_scheduler.enqueue_task(task_id)
 
-        session_tasks: dict[str, TaskRecord] | None = None
-        if require_session_ownership:
-            session_tasks = {
-                task.task_id: task
-                for task in self.list_unfinished_tasks_for_session(normalized_session_id)
-            }
-
-        def _resolve_unfinished_task(candidate_task_id: str) -> TaskRecord | None:
-            if session_tasks is not None:
-                return session_tasks.get(candidate_task_id)
-            # 网页端定向通知：不做会话归属校验，但任务必须仍未完成。
-            candidate = self.get_task(candidate_task_id)
-            if candidate is None:
-                return None
-            if str(candidate.status or '').strip().lower() in {'success', 'failed'}:
-                return None
-            return candidate
-
-        targets_by_task: dict[str, list[str]] = {}
-        tasks_by_id: dict[str, TaskRecord] = {}
-        for task_id in normalized_task_ids:
-            task = _resolve_unfinished_task(task_id)
-            if task is None:
-                raise ValueError('append_notice_invalid_task_target')
-            root_node_id = str(task.root_node_id or '').strip()
-            if not root_node_id:
-                raise ValueError('append_notice_invalid_task_target')
-            tasks_by_id[task.task_id] = task
-            targets_by_task.setdefault(task.task_id, []).append(root_node_id)
-        for node_id in normalized_node_ids:
-            node = self.store.get_node(node_id)
-            if node is None or str(getattr(node, 'node_kind', '') or '').strip().lower() == 'acceptance':
-                raise ValueError('append_notice_invalid_node_target')
-            # 终态目标拒绝定向通知：终态节点不接收，也不允许程序化绕过下传。
-            if str(getattr(node, 'status', '') or '').strip().lower() in {'success', 'failed'}:
-                raise ValueError('append_notice_target_terminal')
-            task = _resolve_unfinished_task(str(getattr(node, 'task_id', '') or '').strip())
-            if task is None:
-                raise ValueError('append_notice_invalid_task_target')
-            snapshot = self.query_service.get_tree_subtree(task.task_id, task.root_node_id)
-            visible_ids = set((snapshot.nodes_by_id or {}).keys()) if snapshot is not None else set()
-            if node_id not in visible_ids:
-                raise ValueError('append_notice_invalid_node_target')
-            tasks_by_id[task.task_id] = task
-            targets_by_task.setdefault(task.task_id, []).append(node_id)
-        if not targets_by_task:
-            raise ValueError('append_notice_invalid_task_target')
-
-        updated_task_ids: list[str] = []
-        for task_id in sorted(targets_by_task):
-            task = tasks_by_id[task_id]
-            target_node_ids = self._reduce_notice_targets_to_topmost(task_id, targets_by_task[task_id])
-            current_state = self._task_distribution_state(task_id)
-            active_epoch_id = str(current_state.get('active_epoch_id') or '').strip()
-            active_state = str(current_state.get('state') or '').strip()
-            queued_epoch: dict[str, Any] | None = None
-            if active_epoch_id and active_state in {'pause_requested', 'barrier_requested'}:
-                self._coalesce_pending_notice(
-                    task_id=task_id,
-                    root_message=normalized_message,
-                    target_node_ids=target_node_ids,
-                )
-            else:
-                queued_epoch = self._queue_distribution_epoch(
-                    task_id=task_id,
-                    task=task,
-                    target_node_ids=target_node_ids,
-                    root_message=normalized_message,
-                )
-            # 不再 pause_task：冻结范围只是子树（根目标即全树），任务暂停
-            # 状态属于操作员；任务/目标人工暂停时驱动器延迟启动分发。
-            self._refresh_distribution_meta(task_id)
-            if queued_epoch is not None and str(queued_epoch.get('state') or '').strip() == 'pause_requested':
-                await self._schedule_distribution_epoch(task)
-            updated_task_ids.append(task_id)
-        joined_task_ids = ', '.join(updated_task_ids)
-        return f'已向任务 {joined_task_ids} 追加通知。'
-
-    def _reduce_notice_targets_to_topmost(self, task_id: str, node_ids: list[str]) -> list[str]:
-        """嵌套目标合并为最上层祖先；不相交目标全部保留（共享一个 epoch）。"""
-        unique_ids = list(dict.fromkeys(
-            str(item or '').strip()
-            for item in list(node_ids or [])
-            if str(item or '').strip()
-        ))
-        if len(unique_ids) <= 1:
-            return unique_ids
-        subtrees = {
-            node_id: {
-                str(item.node_id or '').strip()
-                for item in self._node_subtree(task_id, node_id, include_root=True)
-            }
-            for node_id in unique_ids
-        }
-        return [
-            node_id
-            for node_id in unique_ids
-            if not any(
-                other != node_id and node_id in subtrees[other]
-                for other in unique_ids
+        async def _clear_pause(task_id: str, node_id: str) -> None:
+            # 清标志不等于恢复：它只是让执行器能起跑，真正复活由 resume 负责。
+            self.log_service.set_node_pause_state(
+                task_id,
+                node_id,
+                pause_requested=False,
+                is_paused=False,
+                pause_reason='',
+                remark='',
             )
-        ]
 
-    def _task_distribution_epochs(self, task_id: str) -> list[TaskMessageDistributionEpoch]:
-        terminal_states = {'completed', 'failed', 'cancelled', 'cancelled_by_task_delete'}
-        return [
-            epoch
-            for epoch in list(self.store.list_active_task_message_distribution_epochs(task_id) or [])
-            if str(epoch.state or '').strip().lower() not in terminal_states
-        ]
-
-    def _task_distribution_state(self, task_id: str) -> dict[str, Any]:
-        epochs = self._task_distribution_epochs(task_id)
-        active = next(
-            (
-                epoch
-                for epoch in epochs
-                if str(epoch.state or '').strip() in _ACTIVE_DISTRIBUTION_EPOCH_STATES
-            ),
-            None,
-        )
-        if active is None:
-            active = next((epoch for epoch in epochs if str(epoch.state or '').strip() == 'queued'), None)
-        if active is None:
-            # Surface a still-unresolved distribution failure: the latest epoch failed and
-            # the task is still paused waiting for operator/CEO intervention. A newer epoch
-            # (retry via append notice) or a resume supersedes this signal.
-            all_epochs = list(self.store.list_active_task_message_distribution_epochs(task_id) or [])
-            latest_epoch = all_epochs[-1] if all_epochs else None
-            if latest_epoch is not None and str(latest_epoch.state or '').strip() == 'failed':
-                latest_task = self.get_task(task_id)
-                if latest_task is not None and (bool(latest_task.pause_requested) or bool(latest_task.is_paused)):
-                    failed_payload = dict(latest_epoch.payload or {}) if isinstance(latest_epoch.payload, dict) else {}
-                    failed_targets = [
-                        str(item or '').strip()
-                        for item in list(failed_payload.get('target_node_ids') or [])
-                        if str(item or '').strip()
-                    ]
-                    failed_barrier = [
-                        str(item or '').strip()
-                        for item in list(failed_payload.get('barrier_node_ids') or [])
-                        if str(item or '').strip()
-                    ]
-                    failed_pending = [
-                        str(item or '').strip()
-                        for item in list(failed_payload.get('pending_notice_node_ids') or [])
-                        if str(item or '').strip()
-                    ]
-                    failed_frozen = [
-                        str(item or '').strip()
-                        for item in list(failed_payload.get('frozen_node_ids') or [])
-                        if str(item or '').strip()
-                    ]
-                    if not failed_pending:
-                        failed_pending = list(failed_targets)
-                    if not failed_pending:
-                        failed_root_node_id = str(latest_epoch.root_node_id or '').strip()
-                        failed_pending = [failed_root_node_id] if failed_root_node_id else []
-                    return {
-                        'active_epoch_id': str(latest_epoch.epoch_id or '').strip(),
-                        'state': 'failed',
-                        'mode': 'subtree_barrier' if failed_barrier else '',
-                        'target_node_ids': failed_targets,
-                        'frontier_node_ids': [],
-                        'blocked_node_ids': failed_barrier,
-                        'frozen_node_ids': failed_frozen,
-                        'pending_notice_node_ids': failed_pending,
-                        'queued_epoch_count': 0,
-                        'pending_mailbox_count': 0,
-                        'error_text': str(latest_epoch.error_text or '').strip(),
-                    }
-        queued_epoch_count = sum(
-            1
-            for epoch in epochs
-            if str(epoch.state or '').strip() in {'queued', 'pause_requested'}
-        )
-        pending_mailbox_count = 0
-        if active is not None:
-            pending_mailbox_count = sum(
-                1
-                for item in list(self.store.list_task_epoch_notifications(task_id, active.epoch_id) or [])
-                if str(item.status or '').strip() in {'pending_distribution', 'delivered'}
-            )
-        frontier_node_ids = []
-        blocked_node_ids = []
-        frozen_node_ids = []
-        pending_notice_node_ids = []
-        target_node_ids = []
-        mode = ''
-        state = str(active.state or '').strip() if active is not None else ''
-        if active is not None and isinstance(active.payload, dict):
-            frontier_node_ids = [
-                str(item or '').strip()
-                for item in list(active.payload.get('frontier_node_ids') or [])
-                if str(item or '').strip()
-            ]
-            # 排空账本与 blocked 同源于 epoch 行：只搬 blocked 的话，横幅分子恒 0。
-            frozen_node_ids = [
-                str(item or '').strip()
-                for item in list(active.payload.get('frozen_node_ids') or [])
-                if str(item or '').strip()
-            ]
-            target_node_ids = [
-                str(item or '').strip()
-                for item in list(active.payload.get('target_node_ids') or [])
-                if str(item or '').strip()
-            ]
-            blocked_node_ids = [
-                str(item or '').strip()
-                for item in list(active.payload.get('barrier_node_ids') or [])
-                if str(item or '').strip()
-            ]
-            if blocked_node_ids:
-                mode = 'subtree_barrier'
-                if state == 'pause_requested':
-                    state = 'barrier_requested'
-                pending_notice_node_ids = [
-                    str(item or '').strip()
-                    for item in list(active.payload.get('pending_notice_node_ids') or [])
-                    if str(item or '').strip()
-                ]
-                if not pending_notice_node_ids:
-                    # 定向通知的"本地保留"目标是 epoch 的目标节点集合；
-                    # 目标缺省（旧数据）时回退任务根。
-                    fallback_ids = list(target_node_ids)
-                    if not fallback_ids:
-                        root_node_id = str(active.root_node_id or '').strip()
-                        if root_node_id:
-                            fallback_ids = [root_node_id]
-                    pending_notice_node_ids = fallback_ids
-        return {
-            'active_epoch_id': str(active.epoch_id or '').strip() if active is not None else '',
-            'state': state,
-            'mode': mode,
-            'target_node_ids': target_node_ids,
-            'frontier_node_ids': frontier_node_ids,
-            'blocked_node_ids': blocked_node_ids,
-            'frozen_node_ids': frozen_node_ids,
-            'pending_notice_node_ids': pending_notice_node_ids,
-            'queued_epoch_count': queued_epoch_count,
-            'pending_mailbox_count': pending_mailbox_count,
-            'error_text': '',
-        }
-
-    def _queue_distribution_epoch(
-        self,
-        *,
-        task_id: str,
-        target_node_ids: list[str],
-        root_message: str,
-        task: TaskRecord | None = None,
-    ) -> dict[str, Any]:
-        epochs = self._task_distribution_epochs(task_id)
-        active_states = _ACTIVE_DISTRIBUTION_EPOCH_STATES
-        next_state = 'queued' if any(str(epoch.state or '').strip() in active_states for epoch in epochs) else 'pause_requested'
-        epoch_id = new_command_id().replace('command:', 'epoch:', 1)
-        targets = list(dict.fromkeys(
-            str(item or '').strip()
-            for item in list(target_node_ids or [])
-            if str(item or '').strip()
-        ))
-        resolved_task = task if task is not None else self.get_task(task_id)
-        root_node_id = str(getattr(resolved_task, 'root_node_id', '') or '').strip() if resolved_task is not None else ''
-        # 屏障 = 各目标子树 ∩ 存活分发树（验收节点天然排除）+ 目标自身。
-        # 快照仅用于取证/UI：hold 谓词按波次实时重推，防止 drain 期间
-        # 新物化的子孙节点逃出冻结范围。
-        live_ids = set(
-            getattr(self.node_runner, 'live_distribution_tree_node_ids', lambda **_: [])(task_id=task_id) or []
-        )
-        scope_ids: list[str] = []
-        for target_id in targets:
-            scope_ids.append(target_id)
-            scope_ids.extend(
-                str(item.node_id or '').strip()
-                for item in self._node_subtree(task_id, target_id, include_root=True)
-            )
-        deduped_scope = [item for item in dict.fromkeys(scope_ids) if item]
-        barrier_node_ids = [
-            node_id
-            for node_id in deduped_scope
-            if node_id in live_ids or node_id in set(targets)
-        ]
-        record = self.store.upsert_task_message_distribution_epoch(
-            TaskMessageDistributionEpoch(
-                epoch_id=epoch_id,
-                task_id=task_id,
-                root_node_id=root_node_id,
-                root_message=str(root_message or '').strip(),
-                state=next_state,
-                created_at=now_iso(),
-                payload={
-                    'barrier_root_node_id': root_node_id,
-                    'target_node_ids': list(targets),
-                    'scope_node_ids': list(deduped_scope),
-                    'barrier_node_ids': list(barrier_node_ids),
-                    'drain_pending_node_ids': list(barrier_node_ids),
-                    'frontier_node_ids': [],
-                    'deferred_frontier_node_ids': [],
-                    'queued_root_messages': [str(root_message or '').strip()],
-                    'distributed_node_ids': [],
-                    'decision_records': [],
-                },
-            )
-        )
-        return record.model_dump(mode='json')
-
-    def _coalesce_pending_notice(
-        self,
-        *,
-        task_id: str,
-        root_message: str,
-        target_node_ids: list[str],
-    ) -> dict[str, Any]:
-        epochs = self._task_distribution_epochs(task_id)
-        target = next(
-            (epoch for epoch in epochs if str(epoch.state or '').strip() == 'pause_requested'),
-            None,
-        )
-        new_targets = list(dict.fromkeys(
-            str(item or '').strip()
-            for item in list(target_node_ids or [])
-            if str(item or '').strip()
-        ))
-        if target is None:
-            return self._queue_distribution_epoch(
-                task_id=task_id,
-                target_node_ids=new_targets,
-                root_message=root_message,
-            )
-        payload = dict(target.payload or {})
-        queued_root_messages = [
-            str(item or '').strip()
-            for item in list(payload.get('queued_root_messages') or [])
-            if str(item or '').strip()
-        ]
-        if not queued_root_messages:
-            queued_root_messages.append(str(target.root_message or '').strip())
-        queued_root_messages.append(str(root_message or '').strip())
-        payload['queued_root_messages'] = queued_root_messages
-        # 目标并集后重新收敛嵌套目标，并按新目标重建屏障快照。
-        merged_targets = self._reduce_notice_targets_to_topmost(
-            task_id,
-            [
-                str(item or '').strip()
-                for item in list(payload.get('target_node_ids') or [])
-                if str(item or '').strip()
-            ] + new_targets,
-        )
-        payload['target_node_ids'] = merged_targets
-        live_ids = set(
-            getattr(self.node_runner, 'live_distribution_tree_node_ids', lambda **_: [])(task_id=task_id) or []
-        )
-        scope_ids: list[str] = []
-        for merged_target in merged_targets:
-            scope_ids.append(merged_target)
-            scope_ids.extend(
-                str(item.node_id or '').strip()
-                for item in self._node_subtree(task_id, merged_target, include_root=True)
-            )
-        deduped_scope = [item for item in dict.fromkeys(scope_ids) if item]
-        payload['scope_node_ids'] = deduped_scope
-        payload['barrier_node_ids'] = [
-            node_id
-            for node_id in deduped_scope
-            if node_id in live_ids or node_id in set(merged_targets)
-        ]
-        payload['drain_pending_node_ids'] = list(payload['barrier_node_ids'])
-        updated = target.model_copy(update={'payload': payload})
-        stored = self.store.upsert_task_message_distribution_epoch(updated)
-        return stored.model_dump(mode='json')
-
-    def _cancel_distribution_for_force_delete(self, *, task_id: str, reason: str) -> None:
-        epochs = self._task_distribution_epochs(task_id)
-        for epoch in epochs:
-            updated_epoch = epoch.model_copy(
-                update={
-                    'state': 'cancelled_by_task_delete',
-                    'error_text': str(reason or '').strip(),
-                    'completed_at': now_iso(),
-                }
-            )
-            self.store.upsert_task_message_distribution_epoch(updated_epoch)
-            for notification in list(self.store.list_task_epoch_notifications(task_id, epoch.epoch_id) or []):
-                updated_notification = notification.model_copy(
-                    update={
-                        'status': 'cancelled',
-                        'consumed_at': str(notification.consumed_at or now_iso()).strip() or now_iso(),
-                    }
-                )
-                self.store.upsert_task_node_notification(updated_notification)
-        self.log_service.update_task_runtime_meta(
-            task_id,
-            distribution={
-                'active_epoch_id': '',
-                'state': '',
-                'mode': '',
-                'frontier_node_ids': [],
-                'blocked_node_ids': [],
-                'pending_notice_node_ids': [],
-                'queued_epoch_count': 0,
-                'pending_mailbox_count': 0,
-            },
+        return WakeDeps(
+            get_node=self.store.get_node,
+            get_phase=self._frame_phase,
+            get_task=self.get_task,
+            dispatcher_for=lambda task_id: self.task_actor_service._dispatchers.get(task_id),
+            resume_node_entry=_resume,
+            enqueue_task=_enqueue,
+            clear_pause=_clear_pause,
         )
 
-    async def _schedule_distribution_epoch(self, task: TaskRecord) -> None:
-        # 不再借道 resume_task（那会清除操作员的任务暂停）：只唤醒分发驱动器。
-        if self.execution_mode in {'embedded', 'worker'}:
-            self.task_actor_service.ensure_scoped_epoch_driver(task.task_id)
-            return
-        self._enqueue_task_command(
-            command_type='run_distribution_epoch',
-            task_id=task.task_id,
-            session_id=task.session_id,
-            payload={'task_id': task.task_id},
-        )
+    async def wake_node_on_message(self, *, task_id: str, node_id: str) -> str:
+        outcome = await wake_parked_node(task_id=task_id, node_id=node_id, deps=self.node_wake_deps())
+        try:
+            logger.info('node wake: task={} node={} outcome={}', task_id, node_id, outcome)
+        except Exception:
+            pass
+        return outcome
 
-    def _refresh_distribution_meta(self, task_id: str) -> None:
-        """分发 runtime meta 的唯一写入口：从 epoch 行全量重算后整体覆盖。
-
-        所有调用方（追加通知、驱动波次、投递回调）都经此收敛，避免
-        局部字段补丁式写入互相覆盖（last-write-wins 竞态）。
-        """
-        self.log_service.update_task_runtime_meta(
-            task_id,
-            distribution=self._task_distribution_state(task_id),
-        )
-
-    def _deliver_distribution_message(
-        self,
-        *,
-        task_id: str,
-        epoch_id: str,
-        source_node_id: str,
-        target_node_id: str,
-        message: str,
-    ) -> dict[str, Any]:
-        target = self.store.get_node(target_node_id)
-        if target is None or str(target.task_id or '').strip() != str(task_id or '').strip():
-            raise ValueError('distribution_target_missing')
-        target_kind = str(target.node_kind or '').strip().lower()
-        if target_kind not in {'execution', 'acceptance'}:
-            raise ValueError('distribution_target_must_be_execution_or_acceptance_node')
-        notification = self.store.upsert_task_node_notification(
-            next(
-                (
-                    item
-                    for item in list(self.store.list_task_node_notifications(task_id, target_node_id) or [])
-                    if str(item.epoch_id or '').strip() == str(epoch_id or '').strip()
-                    and str(item.source_node_id or '').strip() == str(source_node_id or '').strip()
-                    and str(item.message or '').strip() == str(message or '').strip()
-                ),
-                TaskNodeNotification(
-                    notification_id=new_command_id().replace('command:', 'notif:', 1),
-                    task_id=str(task_id or '').strip(),
-                    node_id=str(target_node_id or '').strip(),
-                    epoch_id=str(epoch_id or '').strip(),
-                    source_node_id=str(source_node_id or '').strip(),
-                    message=str(message or '').strip(),
-                    status='delivered',
-                    created_at=now_iso(),
-                    delivered_at=now_iso(),
-                    consumed_at='',
-                    payload={},
-                ),
-            )
-        )
-        if target_kind == 'execution':
-            self._reactivate_execution_node_for_distribution(
-                task_id=task_id,
-                node_id=target_node_id,
-                epoch_id=epoch_id,
-            )
-            self._invalidate_acceptance_for_reactivated_execution_node(
-                task_id=task_id,
-                execution_node_id=target_node_id,
-                epoch_id=epoch_id,
-            )
-        self.node_runner.stamp_distribution_target_pending_notice_state(
-            task_id=task_id,
-            node_id=target_node_id,
-            epoch_id=epoch_id,
-            updated_at=now_iso(),
-        )
-        self._refresh_distribution_meta(task_id)
-        return notification.model_dump(mode='json')
-
-    def _reactivate_execution_node_for_distribution(
+    def _delivery_wakes_target(
         self,
         *,
         task_id: str,
         node_id: str,
-        epoch_id: str,
-    ) -> None:
-        _ = epoch_id
-        node = self.store.get_node(node_id)
-        if node is None or str(node.task_id or '').strip() != str(task_id or '').strip():
-            return
-        if str(node.node_kind or '').strip().lower() != 'execution':
-            return
-        if str(node.status or '').strip().lower() not in {'success', 'failed'}:
-            return
-        updated = self.store.update_node(
-            node_id,
-            lambda record: record.model_copy(
-                update={
-                    'status': 'in_progress',
-                    'updated_at': now_iso(),
-                    'final_output': '',
-                    'final_output_ref': '',
-                    'failure_reason': '',
-                    'check_result': '',
-                    'check_result_ref': '',
-                }
-            ),
-        )
-        if updated is not None:
-            self.log_service.sync_node_read_model(task_id, node_id)
-            self.log_service.refresh_task_view(task_id, mark_unread=True)
+        node: Any,
+        priority: str,
+        park_state: str = '',
+    ) -> bool:
+        """高优先级无条件唤醒；暂停与验收待决采用最大宽容；其余按 `wake_on`。
 
-    def _invalidate_acceptance_for_reactivated_execution_node(
+        `wake_on` 只约束 `等待·explicit`（设计 §2.3 的两套策略）。暂停态与
+        `等待·acceptance` 是"任意满足投递矩阵的未读均唤醒"——`manage_child_nodes(resume)`
+        的消息必须能叫醒一个此前用 `all_children` 停靠过的暂停节点，否则恢复会静默失效。
+        """
+        if str(priority or '').strip() == PRIORITY_HIGH:
+            return True
+        if str(park_state or '').strip() in {'paused', 'waiting_acceptance'}:
+            return True
+        metadata = dict(getattr(node, 'metadata', {}) or {})
+        policy = str(metadata.get(self.NODE_WAIT_WAKE_ON_KEY) or '').strip()
+        if policy != WAKE_ON_ALL_CHILDREN:
+            return True
+        children, finals = wait_inputs(
+            children=list(self.store.list_nodes(task_id) or []),
+            notifications=list(self.store.list_task_node_notifications(task_id, node_id) or []),
+            parent_node_id=node_id,
+        )
+        return wake_ready(
+            wake_on=policy,
+            unread_count=1,
+            children=children,
+            unread_final_sources=finals,
+        )
+
+    async def deliver_node_message(
         self,
         *,
         task_id: str,
-        execution_node_id: str,
-        epoch_id: str,
-    ) -> None:
-        execution_node = self.store.get_node(execution_node_id)
-        if execution_node is None or str(execution_node.task_id or '').strip() != str(task_id or '').strip():
-            return
-        metadata = dict(execution_node.metadata or {})
-        owner_parent_node_id = str(metadata.get('spawn_owner_parent_node_id') or '').strip()
-        owner_round_id = str(metadata.get('spawn_owner_round_id') or '').strip()
-        owner_entry_index = int(metadata.get('spawn_owner_entry_index') or 0)
-        if not owner_parent_node_id or not owner_round_id:
-            return
-        parent = self.store.get_node(owner_parent_node_id)
-        if parent is None or str(parent.task_id or '').strip() != str(task_id or '').strip():
-            return
-        operations = dict((parent.metadata or {}).get('spawn_operations') or {})
-        payload = dict(operations.get(owner_round_id) or {})
-        entries = list(payload.get('entries') or [])
-        if owner_entry_index < 0 or owner_entry_index >= len(entries) or not isinstance(entries[owner_entry_index], dict):
-            return
-        entry = dict(entries[owner_entry_index] or {})
-        acceptance_node_id = str(entry.get('acceptance_node_id') or '').strip()
-        if not acceptance_node_id:
-            return
-        self.log_service.invalidate_acceptance_node(
-            task_id,
-            acceptance_node_id,
-            epoch_id=epoch_id,
-            reason='task_message_distribution',
+        target_node_id: str,
+        message: str,
+        origin: str = 'node',
+        relation: str = '',
+        system_kind: str = '',
+        source_node_id: str = '',
+        intent_kind: str = '',
+        verdict: str = '',
+        ref: str = '',
+        in_reply_to: str = '',
+        submission_id: str = '',
+        epoch_id: str = '',
+        wake: bool = True,
+    ) -> dict[str, Any]:
+        """一条定向投递：判定矩阵 → 机械推导 → 指纹去重 → 落箱 → 唤醒。
+
+        `origin`/`relation`/`system_kind` 决定 kind；`system_kind` 只有运行时能传。
+
+        `wake=False` 用于「必须留痕、但不得叫醒收件人」的系统消息：pass 裁决的
+        收件人即将终局，reject_no_progress 裁决的收件人刚被判暂停（唤醒会立刻清掉
+        暂停位）。消息照常落箱并带 kind/priority，只是不触发 R2 唤醒。
+        """
+        normalized_task_id = self.normalize_task_id(task_id)
+        normalized_node_id = self.normalize_node_id(str(target_node_id or '').strip())
+        node, park_state = self.node_park_snapshot(normalized_task_id, normalized_node_id)
+        if node is None:
+            return {'target': normalized_node_id, 'status': 'rejected', 'reason': 'target_missing'}
+
+        accepted, reason = plan_delivery(target_park_state=park_state, sender_origin=origin)
+        if not accepted:
+            return {'target': normalized_node_id, 'status': 'rejected', 'reason': reason}
+
+        kind = derive_message_kind(origin=origin, relation=relation, system_kind=system_kind)
+        priority = derive_priority(kind=kind, intent_kind=intent_kind, verdict=verdict)
+        body = str(message or '').strip()
+        fingerprint = message_fingerprint(
+            kind=kind, source_node_id=source_node_id, message=body, ref=ref
         )
+
+        # 去重只对「还没被处理」的同一指纹生效：消费过的重复是一次新的意图。
+        # 去重收敛的是消息本身，不是唤醒意图——重发一条仍在箱里的消息（例如重试
+        # 一次 resume）如果只回 deduplicated 而不尝试唤醒，失败的唤醒就永远补不上。
+        for item in list(self.store.list_task_node_notifications(normalized_task_id, normalized_node_id) or []):
+            if (
+                str(item.status or '').strip() == 'delivered'
+                and str(item.fingerprint or '').strip() == fingerprint
+            ):
+                wake_outcome = ''
+                if wake and self._delivery_wakes_target(
+                    task_id=normalized_task_id,
+                    node_id=normalized_node_id,
+                    node=node,
+                    priority=priority,
+                    park_state=park_state,
+                ):
+                    try:
+                        wake_outcome = await self.wake_node_on_message(
+                            task_id=normalized_task_id, node_id=normalized_node_id
+                        )
+                    except Exception as exc:  # noqa: BLE001 - 消息已在箱里，唤醒失败不回滚
+                        wake_outcome = f'wake_error:{type(exc).__name__}'
+                return {
+                    'target': normalized_node_id,
+                    'status': 'deduplicated',
+                    'message_id': str(item.notification_id or ''),
+                    'kind': kind,
+                    'priority': priority,
+                    'wake': wake_outcome,
+                    'reason': '',
+                }
+
+        notification = self.store.upsert_task_node_notification(
+            TaskNodeNotification(
+                notification_id=new_command_id().replace('command:', 'notif:', 1),
+                task_id=normalized_task_id,
+                node_id=normalized_node_id,
+                epoch_id=str(epoch_id or '').strip(),
+                source_node_id=str(source_node_id or '').strip(),
+                message=body,
+                status='delivered',
+                created_at=now_iso(),
+                delivered_at=now_iso(),
+                consumed_at='',
+                kind=kind,
+                priority=priority,
+                intent_kind=str(intent_kind or '').strip(),
+                fingerprint=fingerprint,
+                in_reply_to=str(in_reply_to or '').strip(),
+                ref=str(ref or '').strip(),
+                submission_id=str(submission_id or '').strip(),
+                verdict=str(verdict or '').strip(),
+                payload={},
+            )
+        )
+        self.log_service.refresh_task_view(normalized_task_id, mark_unread=True)
+
+        wake_outcome = ''
+        if wake and self._delivery_wakes_target(
+            task_id=normalized_task_id,
+            node_id=normalized_node_id,
+            node=node,
+            priority=priority,
+            park_state=park_state,
+        ):
+            try:
+                wake_outcome = await self.wake_node_on_message(
+                    task_id=normalized_task_id, node_id=normalized_node_id
+                )
+            except Exception as exc:  # noqa: BLE001 - 投递已落箱，唤醒失败不能回滚它
+                # 消息已经在信箱里；把调用打成失败会让发送方以为没送达并重发。
+                # 唤醒失败只降级为一条读数，由对账/下次投递再唤醒。
+                wake_outcome = f'wake_error:{type(exc).__name__}'
+                try:
+                    logger.warning(
+                        'node wake failed after delivery: task={} node={} error={!r}',
+                        normalized_task_id,
+                        normalized_node_id,
+                        exc,
+                    )
+                except Exception:
+                    pass
+        return {
+            'target': normalized_node_id,
+            'status': 'delivered',
+            'message_id': str(notification.notification_id or ''),
+            'kind': kind,
+            'priority': priority,
+            'wake': wake_outcome,
+            'reason': '',
+        }
+
+    async def _deliver_structural_node_message(self, **payload: Any) -> dict[str, Any]:
+        """NodeRunner 的结构性消息投递口（交接单 / 验收裁决）。
+
+        只是 `deliver_node_message` 的一跳间接：绑定的是这个方法而不是 bound
+        method 本身，保证运行期替换/包装 `deliver_node_message` 时投递口跟着走，
+        也让"验收消息确实走了同一条投递"在测试里可观测。
+        """
+        return await self.deliver_node_message(**payload)
+
+    async def _deliver_node_message_from_node(
+        self,
+        *,
+        task_id: str,
+        sender_node_id: str,
+        sender_is_root: bool,
+        to: Any,
+        intent_kind: str = '',
+        content: str = '',
+        ref: str = '',
+        in_reply_to: str = '',
+    ) -> dict[str, Any]:
+        """`send_message` 的寻址层：把 `parent` / `frontdoor` / 子节点 id 解析成投递。
+
+        越址不抛异常，而是在回执里给出合法目标集合——只告诉模型"不允许"会让它
+        再猜一轮；告诉它"可以发给谁"只需要一次往返。
+        """
+        normalized_task_id = self.normalize_task_id(task_id)
+        sender = self.store.get_node(sender_node_id)
+        if sender is None:
+            return {'ok': False, 'error': 'sender_missing', 'results': [], 'legal_targets': []}
+
+        children = [
+            str(child.node_id or '').strip()
+            for child in list(self.store.list_nodes(normalized_task_id) or [])
+            if str(getattr(child, 'parent_node_id', '') or '').strip() == sender_node_id
+        ]
+        legal_targets: list[str] = ['parent', *children]
+        if sender_is_root:
+            legal_targets.append('frontdoor')
+
+        requested = normalize_targets(to)
+        if not requested:
+            return {
+                'ok': False,
+                'error': 'no_targets',
+                'results': [],
+                'legal_targets': legal_targets,
+            }
+
+        results: list[dict[str, Any]] = []
+        for target in requested:
+            if target == 'parent':
+                parent_id = str(getattr(sender, 'parent_node_id', '') or '').strip()
+                if not parent_id:
+                    results.append(
+                        {'target': 'parent', 'status': 'rejected', 'reason': 'sender_has_no_parent'}
+                    )
+                    continue
+                results.append(
+                    await self.deliver_node_message(
+                        task_id=normalized_task_id,
+                        target_node_id=parent_id,
+                        message=content,
+                        origin='node',
+                        # 收件人是我的父 ⇒ 我在这一对里是 child ⇒ child_progress（子→父）。
+                        relation=RELATION_CHILD,
+                        source_node_id=sender_node_id,
+                        intent_kind=intent_kind,
+                        ref=ref,
+                        in_reply_to=in_reply_to,
+                    )
+                )
+                continue
+            if target == 'frontdoor':
+                if not sender_is_root:
+                    results.append(
+                        {
+                            'target': 'frontdoor',
+                            'status': 'rejected',
+                            'reason': 'frontdoor_root_only',
+                        }
+                    )
+                    continue
+                # 根节点 → 前门通道尚未落地：宁可报错，也不假装送达。
+                results.append(
+                    {
+                        'target': 'frontdoor',
+                        'status': 'rejected',
+                        'reason': 'frontdoor_channel_not_implemented',
+                    }
+                )
+                continue
+            if target not in children:
+                results.append(
+                    {'target': target, 'status': 'rejected', 'reason': 'not_a_direct_child'}
+                )
+                continue
+            results.append(
+                await self.deliver_node_message(
+                    task_id=normalized_task_id,
+                    target_node_id=target,
+                    message=content,
+                    origin='node',
+                    # 收件人是我的直接子节点 ⇒ 我是 parent ⇒ parent_notice（父→子）。
+                    relation=RELATION_PARENT,
+                    source_node_id=sender_node_id,
+                    intent_kind=intent_kind,
+                    ref=ref,
+                    in_reply_to=in_reply_to,
+                )
+            )
+
+        return {
+            'ok': bool(results) and all(item.get('status') != 'rejected' for item in results),
+            'results': results,
+            'legal_targets': legal_targets,
+        }
+
+    async def _deliver_child_final_message(self, *, task_id: str, node_id: str) -> dict[str, Any]:
+        """子节点终局 → 父节点信箱。内容取自主节点自己提交的结果载荷。
+
+        这是运行时生成的系统消息（`system_kind=child_final`），模型无法通过
+        `send_message` 伪造。父节点若在停靠，投递路径按 R2 唤醒它；若在跑，消息
+        在下一个安全边界并入当前回合。
+        """
+        normalized_task_id = self.normalize_task_id(task_id)
+        node = self.store.get_node(str(node_id or '').strip())
+        if node is None:
+            return {'status': 'rejected', 'reason': 'source_missing'}
+        parent_node_id = str(getattr(node, 'parent_node_id', '') or '').strip()
+        if not parent_node_id:
+            return {'status': 'skipped', 'reason': 'no_parent'}
+        status = str(getattr(node, 'status', '') or '').strip().lower()
+        if status not in {'success', 'failed'}:
+            return {'status': 'skipped', 'reason': 'source_not_terminal'}
+        payload = normalize_result_payload((node.metadata or {}).get('result_payload'))
+        summary = ''
+        if payload is not None:
+            summary = str(payload.summary or payload.answer or '').strip()
+        summary = summary or str(getattr(node, 'final_output', '') or '').strip()
+        summary = summary or str(getattr(node, 'failure_reason', '') or '').strip()
+        summary = summary or ('执行完成' if status == 'success' else '执行失败')
+        ref = str(getattr(node, 'final_output_ref', '') or '').strip()
+        if not ref and isinstance(getattr(node, 'metadata', None), dict):
+            ref = str((node.metadata or {}).get('result_payload_ref') or '').strip()
+        goal = str(getattr(node, 'goal', '') or '').strip()
+        verdict_word = '完成' if status == 'success' else '失败'
+        body = f'子节点「{goal or node.node_id}」已{verdict_word}：{summary[:1200]}'
+        return await self.deliver_node_message(
+            task_id=normalized_task_id,
+            target_node_id=parent_node_id,
+            message=body,
+            origin='node',
+            # 子节点的终局消息：发送方是 child（relation 只是语义对齐，kind 由 system_kind 决定）。
+            relation=RELATION_CHILD,
+            system_kind=KIND_CHILD_FINAL,
+            source_node_id=str(node.node_id or '').strip(),
+            intent_kind=INTENT_PROGRESS,
+            ref=ref,
+        )
+
+    async def _notify_wait_cycle(self, *, task_id: str, node_id: str, reason: str) -> dict[str, Any]:
+        """等待图环检测的系统通知：以 frontdoor 身份投递（必唤醒，可外部破环）。"""
+        return await self.deliver_node_message(
+            task_id=task_id,
+            target_node_id=node_id,
+            message=str(reason or '').strip(),
+            origin='frontdoor',
+        )
+
+    async def _deliver_child_abnormal_pause(
+        self,
+        *,
+        task_id: str,
+        node_id: str,
+        reason: str,
+    ) -> dict[str, Any]:
+        """子节点异常暂停 → 父节点信箱（runtime 生成，模型无法伪造）。"""
+        normalized_task_id = self.normalize_task_id(task_id)
+        node = self.store.get_node(str(node_id or '').strip())
+        if node is None:
+            return {'status': 'rejected', 'reason': 'source_missing'}
+        parent_node_id = str(getattr(node, 'parent_node_id', '') or '').strip()
+        if not parent_node_id:
+            return {'status': 'skipped', 'reason': 'no_parent'}
+        goal = str(getattr(node, 'goal', '') or '').strip() or str(node.node_id or '')
+        reason_text = str(reason or '').strip() or '节点被判定为无进展并暂停'
+        body = (
+            f'子节点「{goal}」已被暂停（异常暂停）。\n'
+            f'原因：{reason_text[:1200]}\n'
+            f'节点 id：{node.node_id}。请决定是继续推进、改写要求还是终止这条分支。'
+        )
+        return await self.deliver_node_message(
+            task_id=normalized_task_id,
+            target_node_id=parent_node_id,
+            message=body,
+            origin='node',
+            # 发送方是 child（relation 只做语义对齐，kind 由 system_kind 决定）。
+            relation=RELATION_CHILD,
+            system_kind=KIND_CHILD_ABNORMAL_PAUSE,
+            source_node_id=str(node.node_id or '').strip(),
+            intent_kind=INTENT_PROGRESS,
+        )
+
+    async def resend_lost_abnormal_pause_escalations(self, task_id: str) -> list[str]:
+        """P8：异常暂停的升级消息丢了就补发（防 P6 第一类死锁从崩溃路径复活）。
+
+        判据只看持久事实：节点是 `pause_reason='error'` 的暂停态、有父节点，而父
+        节点信箱里没有来自它的 `child_abnormal_pause`（delivered/consumed 都算已到）。
+        """
+        normalized_task_id = str(task_id or '').strip()
+        if not normalized_task_id:
+            return []
+        resent: list[str] = []
+        for node in list(self.store.list_nodes(normalized_task_id) or []):
+            if str(getattr(node, 'node_kind', '') or '').strip().lower() != 'execution':
+                continue
+            if str(getattr(node, 'pause_reason', '') or '').strip().lower() != 'error':
+                continue
+            if not (bool(getattr(node, 'is_paused', False)) or bool(getattr(node, 'pause_requested', False))):
+                continue
+            parent_node_id = str(getattr(node, 'parent_node_id', '') or '').strip()
+            if not parent_node_id:
+                continue
+            already = any(
+                str(item.kind or '').strip() == KIND_CHILD_ABNORMAL_PAUSE
+                and str(item.source_node_id or '').strip() == str(node.node_id or '').strip()
+                and str(item.status or '').strip() in {'delivered', 'consumed'}
+                for item in list(self.store.list_task_node_notifications(normalized_task_id, parent_node_id) or [])
+            )
+            if already:
+                continue
+            await self._deliver_child_abnormal_pause(
+                task_id=normalized_task_id,
+                node_id=str(node.node_id or '').strip(),
+                reason=str(getattr(node, 'failure_reason', '') or '异常暂停'),
+            )
+            resent.append(str(node.node_id or '').strip())
+        return resent
+
+    async def _manage_child_nodes_from_node(
+        self,
+        *,
+        task_id: str,
+        sender_node_id: str,
+        ops: list[dict[str, Any]] | None = None,
+    ) -> dict[str, Any]:
+        """`manage_child_nodes` 的裁定层：批量 pause / resume / terminate，只限直接子节点。
+
+        `resume` 按设计 §2.3 的"唯一激活通道"实现——不是清标志，而是**代父节点写一条
+        `parent_notice`**（正文 = `note`），由投递路径按 R2 唤醒收件人；恢复与修复信息
+        一次完成。暂停态的投递矩阵本就接收机器消息，`wake_parked_node` 会在唤醒前清掉
+        暂停位。`note` 为空时给一句最小正文，避免"空消息唤醒"让模型无从判断为什么醒。
+
+        `terminate` 走"先挂暂停位、再落失败"两步，而不是放开
+        `_apply_fail_node_command` 的"必须已暂停"前置。理由：正在跑的回合只在
+        `_check_pause_or_cancel` 检查点读暂停位，不读节点行终态；先直接落 `failed`
+        会让协程在下一个检查点之前继续烧模型调用与工具预算，而"任意非终态 → 失败"
+        的设计语义要求终止立即生效。两步法把影响面限制在本工具内，不改 CEO /
+        worker 命令通道沿用多年的前置条件（那些通道的暂停语义有自己的事故史）。
+        终止由父节点自己发起，按设计 §4.4 不向父节点重复投递 `child_final`。
+        """
+        normalized_task_id = self.normalize_task_id(task_id)
+        sender = self.store.get_node(str(sender_node_id or '').strip())
+        if sender is None or str(sender.task_id or '').strip() != normalized_task_id:
+            return {'ok': False, 'error': 'sender_missing', 'items': [], 'legal_targets': []}
+
+        children = {
+            str(child.node_id or '').strip(): child
+            for child in list(self.store.list_nodes(normalized_task_id) or [])
+            if str(getattr(child, 'parent_node_id', '') or '').strip() == str(sender.node_id or '').strip()
+        }
+        legal_targets = list(children)
+        dispatcher = self.task_actor_service._dispatchers.get(normalized_task_id)
+        items: list[dict[str, Any]] = []
+
+        for raw in list(ops or []):
+            item = dict(raw) if isinstance(raw, dict) else {}
+            node_id = str(item.get('node_id') or '').strip()
+            action = str(item.get('action') or '').strip().lower()
+            note = str(item.get('note') or '').strip()
+            reason = str(item.get('reason') or '').strip()
+
+            child = children.get(node_id)
+            if child is None:
+                items.append(
+                    {'node_id': node_id, 'action': action, 'result': 'rejected', 'reason': 'not_a_direct_child'}
+                )
+                continue
+            if action not in {'pause', 'resume', 'terminate'}:
+                items.append(
+                    {'node_id': node_id, 'action': action, 'result': 'rejected', 'reason': 'invalid_action'}
+                )
+                continue
+            if str(child.status or '').strip().lower() in {'success', 'failed'}:
+                items.append(
+                    {'node_id': node_id, 'action': action, 'result': 'rejected', 'reason': 'node_terminal'}
+                )
+                continue
+            paused = bool(getattr(child, 'is_paused', False)) or bool(getattr(child, 'pause_requested', False))
+
+            if action == 'pause':
+                if paused:
+                    items.append({'node_id': node_id, 'action': action, 'result': 'paused', 'reason': 'already_paused'})
+                    continue
+                await self._apply_pause_node_command(
+                    normalized_task_id,
+                    node_ids=[node_id],
+                    reason='agent',
+                    remark=note,
+                )
+                items.append({'node_id': node_id, 'action': action, 'result': 'paused'})
+                continue
+
+            if action == 'resume':
+                if not paused:
+                    phase = self._frame_phase(normalized_task_id, node_id)
+                    if phase in {'waiting_explicit', 'waiting_acceptance'}:
+                        items.append(
+                            {
+                                'node_id': node_id,
+                                'action': action,
+                                'result': 'rejected',
+                                'reason': 'node_waiting',
+                                'hint': (
+                                    '该节点在等待唤醒源，消息到达即自动继续；resume 只对暂停态有效，'
+                                    '如需放弃请用 terminate。'
+                                ),
+                            }
+                        )
+                        continue
+                    items.append(
+                        {'node_id': node_id, 'action': action, 'result': 'rejected', 'reason': 'node_not_paused'}
+                    )
+                    continue
+                delivered = await self.deliver_node_message(
+                    task_id=normalized_task_id,
+                    target_node_id=node_id,
+                    message=note or '上级节点恢复了你，请继续当前任务。',
+                    origin='node',
+                    # 我是发送方、也是收件人的父 ⇒ relation='parent' ⇒ parent_notice。
+                    relation=RELATION_PARENT,
+                    source_node_id=str(sender.node_id or '').strip(),
+                    intent_kind=INTENT_INSTRUCTION,
+                )
+                if str(delivered.get('status') or '') in {'delivered', 'deduplicated'}:
+                    items.append(
+                        {
+                            'node_id': node_id,
+                            'action': action,
+                            'result': 'resumed',
+                            'delivery': str(delivered.get('status') or ''),
+                            'wake': str(delivered.get('wake') or ''),
+                        }
+                    )
+                else:
+                    items.append(
+                        {
+                            'node_id': node_id,
+                            'action': action,
+                            'result': 'rejected',
+                            'reason': str(delivered.get('reason') or 'delivery_failed'),
+                        }
+                    )
+                continue
+
+            # terminate
+            if not reason:
+                # 工具层已同步打回整批；这里是服务层的第二道闸（worker 命令或内部
+                # 调用绕开工具 schema 时同样拒绝，不留"无理由终止"的入口）。
+                items.append(
+                    {'node_id': node_id, 'action': action, 'result': 'rejected', 'reason': 'reason_required'}
+                )
+                continue
+            if not paused:
+                self.log_service.set_node_pause_state(
+                    normalized_task_id,
+                    node_id,
+                    pause_requested=True,
+                    is_paused=bool(getattr(child, 'is_paused', False)),
+                    pause_reason='agent',
+                    remark=reason,
+                )
+            if dispatcher is not None:
+                await dispatcher.fail_node(node_id, reason, notify_parent=False)
+            else:
+                self.node_runner.fail_paused_node(
+                    normalized_task_id, node_id, reason, notify_parent=False
+                )
+            items.append({'node_id': node_id, 'action': action, 'result': 'terminated'})
+
+        return {
+            'ok': bool(items) and all(str(item.get('result') or '') != 'rejected' for item in items),
+            'items': items,
+            'legal_targets': legal_targets,
+        }
 
     def list_active_task_snapshots_for_session(self, session_id: str, *, limit: int = 3) -> list[dict[str, str]]:
         unfinished = list(self.list_unfinished_tasks_for_session(session_id))
@@ -5087,52 +5171,6 @@ class MainRuntimeService:
             return False
         return bool(heartbeat.enqueue_task_distribution_error_payload(normalized))
 
-    def emit_task_distribution_skipped(
-        self,
-        *,
-        task_id: str,
-        epoch_id: str,
-        root_message: str,
-        items: list[dict[str, Any]],
-    ) -> bool:
-        """本轮降级跳过的子树根节点汇总：交给会话 agent，不自动重投也不自动关闭。
-
-        与 `emit_task_distribution_error` 同一条通道（worker 走 outbox 回调、web 直接入
-        心跳队列），差别只在 payload 的 `kind='skipped'`：分发 epoch 已经完成、任务并未
-        暂停，所以提示词不能写成失败暂停那一套。
-        """
-        normalized_items = [
-            {
-                'node_id': str(item.get('node_id') or '').strip(),
-                'reason': str(item.get('reason') or '').strip() or 'distribution turn failed',
-            }
-            for item in list(items or [])
-            if isinstance(item, dict) and str(item.get('node_id') or '').strip()
-        ]
-        if not normalized_items:
-            return False
-        task = self.get_task(task_id)
-        payload = {
-            'task_id': task_id,
-            'session_id': self._task_origin_session_id(task),
-            'title': str(getattr(task, 'title', '') or task_id).strip() or task_id,
-            'epoch_id': epoch_id,
-            'notice_kind': 'skipped',
-            'root_message': str(root_message or '').strip(),
-            'skipped': normalized_items,
-        }
-        normalized = normalize_task_distribution_error_payload(payload)
-        if not normalized:
-            return False
-        if self.execution_mode == 'worker':
-            self._enqueue_task_distribution_error_callback(normalized)
-            return True
-        loop = getattr(self, '_runtime_loop', None)
-        heartbeat = getattr(loop, 'web_session_heartbeat', None) if loop is not None else None
-        if heartbeat is None or not hasattr(heartbeat, 'enqueue_task_distribution_error_payload'):
-            return False
-        return bool(heartbeat.enqueue_task_distribution_error_payload(normalized))
-
     def classify_task_stall_reason(
         self,
         task_id: str,
@@ -5155,19 +5193,6 @@ class MainRuntimeService:
             return TASK_STALL_REASON_CANCEL_REQUESTED
         if bool(current_runtime_state.get('cancel_requested')):
             return TASK_STALL_REASON_CANCEL_REQUESTED
-        # 子树分发屏障（含根目标=全树冻结）期间的静默是预期行为：
-        # 分发控制回合不产生节点可见输出，不得误报 suspected_stall。
-        runtime_meta = self.log_service.read_task_runtime_meta(task.task_id) or {}
-        distribution = dict(runtime_meta.get('distribution') or {})
-        if str(distribution.get('state') or '').strip() in {
-            'pause_requested',
-            'barrier_requested',
-            'paused',
-            'barrier_draining',
-            'distributing',
-            'failed',
-        }:
-            return TASK_STALL_REASON_DISTRIBUTION_BARRIER
         if self.execution_mode == 'web':
             if not self.is_worker_online():
                 return TASK_STALL_REASON_WORKER_UNAVAILABLE
@@ -5303,10 +5328,6 @@ class MainRuntimeService:
             detail['occupiers'] = occupiers
 
         lane: dict[str, Any] = {}
-        distribution = dict(meta.get('distribution') or {})
-        if str(distribution.get('state') or '').strip():
-            lane['distribution_state'] = str(distribution.get('state') or '').strip()
-            lane['distribution_epoch_id'] = str(distribution.get('active_epoch_id') or '').strip()
         deadline = running_tool_deadline(runtime_state)
         if deadline is not None:
             lane['running_tool_deadline'] = deadline.isoformat(timespec='seconds')
@@ -6448,6 +6469,16 @@ class MainRuntimeService:
             self._chat_backend._config = config
         self._default_max_depth = max(0, int(getattr(config.main_runtime, 'default_max_depth', 1) or 0))
         self._hard_max_depth = max(self._default_max_depth, int(getattr(config.main_runtime, 'hard_max_depth', self._default_max_depth) or self._default_max_depth))
+        self._max_task_nodes = max(1, int(getattr(config.main_runtime, 'max_task_nodes', 200) or 200))
+        self._node_tool_timeout_ceiling_seconds = max(
+            1.0,
+            float(
+                getattr(config.main_runtime, 'node_tool_timeout_ceiling_seconds', 900.0) or 900.0
+            ),
+        )
+        if hasattr(self, 'node_runner') and self.node_runner is not None:
+            self.node_runner._max_task_nodes = self._max_task_nodes
+            self.node_runner._node_tool_timeout_ceiling_seconds = self._node_tool_timeout_ceiling_seconds
         self.node_runner._execution_model_refs = list(config.get_role_model_keys('execution'))
         self.node_runner._acceptance_model_refs = list(config.get_role_model_keys('inspection') or config.get_role_model_keys('execution'))
         # route plan 是权威来源；refs 只是候选展开视图。检验缺省时继承整份执行 route plan。
@@ -7997,11 +8028,16 @@ class MainRuntimeService:
                 )
             return {'ok': False, 'error': 'tool_id_or_search_query_required'}
         visible = self._visible_tool_map(actor_role=actor_role, session_id=session_id)
-        if tool_name not in visible:
-            return {'ok': False, 'error': f'Tool not visible: {tool_id}'}
         if self._resource_manager is None:
             return {'ok': False, 'error': 'Resource manager unavailable'}
         toolskill = self.get_tool_toolskill(tool_name) or {}
+        # 说明可读性与调用授权分开：本角色不可调用的工具，只要注册过 toolskill，
+        # 仍返回正文（callable_this_turn 如实为 false）。exec 就是这类——它是节点
+        # 道的常驻内置，同时带 tools/exec/toolskills；验收节点读它的契约来判断子
+        # 节点的命令是否合规，旧闸门把"不可调用"误答成"没有 toolskill"。
+        documentation_only = tool_name not in visible and bool(str(toolskill.get('content') or '').strip())
+        if tool_name not in visible and not documentation_only:
+            return {'ok': False, 'error': f'Tool not visible: {tool_id}'}
         content = str(toolskill.get('content') or '')
         resolved_tool_id = str(toolskill.get('tool_id') or tool_name)
         contract_payload = self._tool_context_contract_payload(
@@ -8009,23 +8045,27 @@ class MainRuntimeService:
             session_id=session_id,
             requested_tool_id=tool_name,
             resolved_tool_id=resolved_tool_id,
-            callable_value=toolskill.get('callable'),
-            available_value=toolskill.get('available'),
+            callable_value=toolskill.get('callable') if not documentation_only else False,
+            available_value=toolskill.get('available') if not documentation_only else False,
         )
+        warnings = list(toolskill.get('warnings') or [])
+        if documentation_only:
+            warnings.append('本角色不可调用该工具，本次仅返回说明正文')
         payload = {
             'ok': True,
             'tool_id': resolved_tool_id,
             'content': content,
             'tool_type': toolskill.get('tool_type'),
             'install_dir': toolskill.get('install_dir'),
-            'callable': toolskill.get('callable'),
-            'available': toolskill.get('available'),
+            'callable': toolskill.get('callable') if not documentation_only else False,
+            'available': toolskill.get('available') if not documentation_only else False,
+            'documentation_only': documentation_only,
             'repair_required': bool(toolskill.get('repair_required')),
             'parameters_schema': toolskill.get('parameters_schema') or {'type': 'object', 'properties': {}, 'required': []},
             'required_parameters': list(toolskill.get('required_parameters') or []),
             'parameter_contract_markdown': str(toolskill.get('parameter_contract_markdown') or ''),
             'example_arguments': toolskill.get('example_arguments') or {},
-            'warnings': list(toolskill.get('warnings') or []),
+            'warnings': warnings,
             'errors': list(toolskill.get('errors') or []),
             'exec_runtime_policy': toolskill.get('exec_runtime_policy'),
             **contract_payload,
@@ -8056,11 +8096,14 @@ class MainRuntimeService:
                 )
             return {'ok': False, 'error': 'tool_id_or_search_query_required'}
         visible = self._visible_tool_map(actor_role=actor_role, session_id=session_id)
-        if tool_name not in visible:
-            return {'ok': False, 'error': f'Tool not visible: {tool_id}'}
         if self._resource_manager is None:
             return {'ok': False, 'error': 'Resource manager unavailable'}
         toolskill = self.get_tool_toolskill(tool_name) or {}
+        # 说明可读性与调用授权分开：本角色不可调用的工具，只要注册过 toolskill，
+        # 仍返回正文（callable_this_turn 如实为 false）。见 load_tool_context。
+        documentation_only = tool_name not in visible and bool(str(toolskill.get('content') or '').strip())
+        if tool_name not in visible and not documentation_only:
+            return {'ok': False, 'error': f'Tool not visible: {tool_id}'}
         content = str(toolskill.get('content') or '')
         resolved_tool_id = str(toolskill.get('tool_id') or tool_name)
         contract_payload = self._tool_context_contract_payload(
@@ -8068,8 +8111,8 @@ class MainRuntimeService:
             session_id=session_id,
             requested_tool_id=tool_name,
             resolved_tool_id=resolved_tool_id,
-            callable_value=toolskill.get('callable'),
-            available_value=toolskill.get('available'),
+            callable_value=toolskill.get('callable') if not documentation_only else False,
+            available_value=toolskill.get('available') if not documentation_only else False,
         )
         layered_payload = layered_body_payload(
             body=content,
@@ -8077,6 +8120,9 @@ class MainRuntimeService:
             description=str(toolskill.get('description') or ''),
             path=str(toolskill.get('path') or ''),
         )
+        warnings = list(toolskill.get('warnings') or [])
+        if documentation_only:
+            warnings.append('本角色不可调用该工具，本次仅返回说明正文')
         payload = {
             'ok': True,
             'tool_id': resolved_tool_id,
@@ -8088,14 +8134,15 @@ class MainRuntimeService:
             'path': layered_payload['path'],
             'tool_type': toolskill.get('tool_type'),
             'install_dir': toolskill.get('install_dir'),
-            'callable': toolskill.get('callable'),
-            'available': toolskill.get('available'),
+            'callable': toolskill.get('callable') if not documentation_only else False,
+            'available': toolskill.get('available') if not documentation_only else False,
+            'documentation_only': documentation_only,
             'repair_required': bool(toolskill.get('repair_required')),
             'parameters_schema': toolskill.get('parameters_schema') or {'type': 'object', 'properties': {}, 'required': []},
             'required_parameters': list(toolskill.get('required_parameters') or []),
             'parameter_contract_markdown': str(toolskill.get('parameter_contract_markdown') or ''),
             'example_arguments': toolskill.get('example_arguments') or {},
-            'warnings': list(toolskill.get('warnings') or []),
+            'warnings': warnings,
             'errors': list(toolskill.get('errors') or []),
             'exec_runtime_policy': toolskill.get('exec_runtime_policy'),
             **contract_payload,
@@ -8790,26 +8837,15 @@ class MainRuntimeService:
             except Exception:
                 continue
 
-    async def _distribution_reconcile_loop(self) -> None:
-        """分发收尾接管对账（60s）：驱动器缺席 → 重新武装；释放账未销 → 补跑释放。
+    async def _terminal_outbox_reconcile_loop(self) -> None:
+        """终态 outbox 的周期重投（60s）。
 
-        分发驱动器与释放路径都是子树屏障的唯一解除者，任何一次半路退出都会把任务留成
-        「无声 in_progress」；这里保证那种形态最多存活一个扫描周期。必须在事件循环线程
-        调用（ensure 依赖 get_running_loop，释放要 resume 进程内 entry）。
-
-        同一次扫描顺带补投 pending 的终态 outbox 行：在接入这条节拍之前，滞留的终态行
-        只有进程启动时才被重放（`_schedule_pending_task_terminal_callbacks` 的唯一调用点
-        在 startup），一次投递失败就是把结果压到下次重启 —— 2026-09-23 实盘两条分别压了
-        1h39m 与 10h16m，重启后作为陈旧事件唤醒会话、自动向用户回一条考古汇报。
+        原宿主是分发对账循环；epoch 子系统下线后只保留这一半：滞留的终态行若只在
+        进程启动时重放，一次投递失败就会把结果压到下次重启（2026-09-23 实盘两条分别
+        压了 1h39m 与 10h16m）。
         """
         while True:
             await asyncio.sleep(60.0)
-            try:
-                await self.task_actor_service.reconcile_distribution_drivers()
-            except asyncio.CancelledError:
-                raise
-            except Exception:
-                pass
             try:
                 self._schedule_pending_task_terminal_callbacks()
             except asyncio.CancelledError:
@@ -11003,13 +11039,13 @@ class MainRuntimeService:
             raise RuntimeError('运行时工具合同损坏/缺失：节点运行时 frame 的 callable_tool_names 为空')
         candidate_skill_items = [
             dict(item)
-            for item in list(dynamic_contract_payload.get('candidate_skills') or [])
+            for item in list(frame.get('candidate_skill_items') or [])
             if isinstance(item, dict)
         ]
         if not candidate_skill_items:
             candidate_skill_items = [
                 dict(item)
-                for item in list(frame.get('candidate_skill_items') or [])
+                for item in list(dynamic_contract_payload.get('candidate_skills') or [])
                 if isinstance(item, dict)
             ]
         if not candidate_skill_items:
@@ -11030,13 +11066,13 @@ class MainRuntimeService:
         candidate_tool_names = self._normalized_tool_name_list(list(frame.get('candidate_tool_names') or []))
         candidate_tool_items = [
             dict(item)
-            for item in list(dynamic_contract_payload.get('candidate_tools') or [])
+            for item in list(frame.get('candidate_tool_items') or [])
             if isinstance(item, dict)
         ]
         if not candidate_tool_items:
             candidate_tool_items = [
                 dict(item)
-                for item in list(frame.get('candidate_tool_items') or [])
+                for item in list(dynamic_contract_payload.get('candidate_tools') or [])
                 if isinstance(item, dict)
             ]
         visible_tool_names = list(
@@ -11243,7 +11279,6 @@ class MainRuntimeService:
                 'stop_tool_execution': StopToolExecutionTool(
                     task_service_getter,
                 ),
-                'task_append_notice': TaskAppendNoticeTool(self),
             }
         return dict(self._builtin_tool_cache)
 
@@ -11809,7 +11844,7 @@ class MainRuntimeService:
             self._command_poller_task,
             self._worker_heartbeat_task,
             self._task_disk_reconcile_task,
-            self._distribution_reconcile_task,
+            self._terminal_outbox_reconcile_task,
         ]
         for task in loop_tasks:
             if task is not None and not task.done():
@@ -11875,6 +11910,7 @@ class MainRuntimeService:
             await self.node_turn_controller.close()
         await self.worker_heartbeat_service.close()
         await self.task_stall_notifier.close()
+        await self.node_watchdog.close()
         if self.execution_mode == 'worker' and self.worker_id and self._worker_lease_acquired:
             stopped_item = {
                 'worker_id': self.worker_id,
@@ -13019,42 +13055,6 @@ class TaskNodeDetailTool(Tool):
             if "unexpected keyword argument 'detail_level'" not in str(exc):
                 raise
             result = self._service.node_detail(task_id, node_id)
-        return result if isinstance(result, str) else json.dumps(result, ensure_ascii=False)
-
-
-class TaskAppendNoticeTool(Tool):
-    hide_universal_timeout_parameter = True
-
-    def __init__(self, service: MainRuntimeService):
-        self._service = service
-
-    @property
-    def name(self) -> str:
-        return 'task_append_notice'
-
-    @property
-    def description(self) -> str:
-        return TASK_APPEND_NOTICE_DESCRIPTION
-
-    @property
-    def parameters(self) -> dict[str, Any]:
-        return build_task_append_notice_parameters()
-
-    async def execute(
-        self,
-        task_ids: list[str] | None = None,
-        node_ids: list[str] | None = None,
-        message: str = '',
-        __g3ku_runtime: dict[str, Any] | None = None,
-        **kwargs: Any,
-    ) -> str:
-        runtime = _tool_runtime_payload(__g3ku_runtime, kwargs)
-        result = await self._service.task_append_notice(
-            task_ids=list(task_ids or []),
-            node_ids=list(node_ids or []),
-            message=str(message or '').strip(),
-            session_id=str(runtime.get('session_key') or 'web:shared').strip() or 'web:shared',
-        )
         return result if isinstance(result, str) else json.dumps(result, ensure_ascii=False)
 
 

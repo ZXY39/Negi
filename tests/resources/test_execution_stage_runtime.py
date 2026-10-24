@@ -214,26 +214,32 @@ def _build_selector_test_service(
 def _final_result_call(
     *,
     call_id: str = "call:final",
-    status: str,
-    delivery_status: str,
-    summary: str,
-    answer: str,
+    status: str = "",
+    delivery_status: str = "",
+    summary: str = "",
+    answer: str = "",
     evidence: list[dict[str, object]] | None = None,
     remaining_work: list[str] | None = None,
     blocking_reason: str = "",
 ) -> ToolCallRequest:
+    # 新契约只有 summary/answer/evidence/remaining_work；status/delivery_status/
+    # blocking_reason 仅在用例显式给值时写入，用于覆盖旧形状的兼容映射。
+    arguments: dict[str, object] = {
+        "summary": summary,
+        "answer": answer,
+        "evidence": list(evidence or []),
+        "remaining_work": list(remaining_work or []),
+    }
+    if status:
+        arguments["status"] = status
+    if delivery_status:
+        arguments["delivery_status"] = delivery_status
+    if blocking_reason:
+        arguments["blocking_reason"] = blocking_reason
     return ToolCallRequest(
         id=call_id,
         name="submit_final_result",
-        arguments={
-            "status": status,
-            "delivery_status": delivery_status,
-            "summary": summary,
-            "answer": answer,
-            "evidence": list(evidence or []),
-            "remaining_work": list(remaining_work or []),
-            "blocking_reason": blocking_reason,
-        },
+        arguments=arguments,
     )
 
 
@@ -1099,19 +1105,15 @@ def test_prompt_cache_key_ignores_tool_schema_changes_when_messages_match() -> N
     assert first == second
 
 
-def test_submit_final_result_tool_schema_is_hard_switched_to_final_or_blocked() -> None:
+def test_submit_final_result_tool_schema_has_no_status_or_blocked_fields() -> None:
     tool = _submit_final_result_tool()
 
-    assert tool.parameters['properties']['delivery_status']['enum'] == ['final', 'blocked']
-    assert tool.parameters['required'] == [
-        'status',
-        'delivery_status',
-        'summary',
-        'answer',
-        'evidence',
-        'remaining_work',
-        'blocking_reason',
-    ]
+    properties = tool.parameters['properties']
+    assert 'status' not in properties
+    assert 'delivery_status' not in properties
+    assert 'blocking_reason' not in properties
+    assert 'remaining_work' in properties
+    assert tool.parameters['required'] == ['summary', 'answer']
 
 
 
@@ -1209,71 +1211,6 @@ async def test_execution_node_can_finish_via_xml_direct_final_result(tmp_path: P
 
 
 @pytest.mark.asyncio
-async def test_execution_node_rejects_failed_final_then_accepts_blocked(tmp_path: Path):
-    class _Backend:
-        def __init__(self) -> None:
-            self.turn = 0
-
-        async def chat(self, **kwargs):
-            _ = kwargs
-            self.turn += 1
-            if self.turn == 1:
-                return LLMResponse(
-                    content='',
-                    tool_calls=[
-                        _final_result_call(
-                            status='failed',
-                            delivery_status='final',
-                            summary='invalid execution failure',
-                            answer='',
-                            evidence=[],
-                            remaining_work=[],
-                            blocking_reason='',
-                        )
-                    ],
-                    finish_reason='tool_calls',
-                    usage={'input_tokens': 10, 'output_tokens': 5, 'cache_hit_tokens': 0},
-                )
-            return LLMResponse(
-                content='',
-                tool_calls=[
-                    _final_result_call(
-                        status='failed',
-                        delivery_status='blocked',
-                        summary='blocked',
-                        answer='',
-                        evidence=[],
-                        remaining_work=[],
-                        blocking_reason='blocked correctly',
-                    )
-                ],
-                finish_reason='tool_calls',
-                usage={'input_tokens': 10, 'output_tokens': 5, 'cache_hit_tokens': 0},
-            )
-
-    backend = _Backend()
-    service = MainRuntimeService(
-        chat_backend=backend,
-        workspace_root=tmp_path,
-        store_path=tmp_path / 'runtime.sqlite3',
-        files_base_dir=tmp_path / 'tasks',
-        artifact_dir=tmp_path / 'artifacts',
-        governance_store_path=tmp_path / 'governance.sqlite3',
-        execution_mode='embedded',
-    )
-    try:
-        record = await service.create_task('invalid failed final', session_id='web:shared')
-        await service.wait_for_task(record.task_id)
-        task = service.store.get_task(record.task_id)
-        assert task is not None
-        assert backend.turn == 1
-        assert task.status == 'failed'
-        assert 'invalid execution failure' in str(task.failure_reason or '')
-    finally:
-        await service.close()
-
-
-@pytest.mark.asyncio
 async def test_old_text_json_no_longer_finishes_node(tmp_path: Path):
     class _Backend:
         def __init__(self) -> None:
@@ -1331,55 +1268,6 @@ async def test_old_text_json_no_longer_finishes_node(tmp_path: Path):
         await service.close()
 
 
-
-
-@pytest.mark.asyncio
-async def test_invalid_submit_final_result_fails_after_five_attempts(tmp_path: Path):
-    class _Backend:
-        def __init__(self) -> None:
-            self.turn = 0
-
-        async def chat(self, **kwargs):
-            _ = kwargs
-            self.turn += 1
-            return LLMResponse(
-                content='',
-                tool_calls=[
-                    _final_result_call(
-                        call_id=f'call:final:{self.turn}',
-                        status='failed',
-                        delivery_status='final',
-                        summary='still invalid',
-                        answer='',
-                        evidence=[],
-                        remaining_work=[],
-                        blocking_reason='',
-                    )
-                ],
-                finish_reason='tool_calls',
-                usage={'input_tokens': 10, 'output_tokens': 5, 'cache_hit_tokens': 0},
-            )
-
-    backend = _Backend()
-    service = MainRuntimeService(
-        chat_backend=backend,
-        workspace_root=tmp_path,
-        store_path=tmp_path / 'runtime.sqlite3',
-        files_base_dir=tmp_path / 'tasks',
-        artifact_dir=tmp_path / 'artifacts',
-        governance_store_path=tmp_path / 'governance.sqlite3',
-        execution_mode='embedded',
-    )
-    try:
-        record = await service.create_task('invalid final result limit', session_id='web:shared')
-        await service.wait_for_task(record.task_id)
-        task = service.store.get_task(record.task_id)
-        assert task is not None
-        assert backend.turn == 1
-        assert task.status == 'failed'
-        assert 'still invalid' in str(task.failure_reason or '')
-    finally:
-        await service.close()
 
 
 @pytest.mark.asyncio
@@ -1483,7 +1371,6 @@ async def test_model_request_attempt_timeout_falls_back_within_chain(tmp_path: P
     [
         ('success', 'final', 'accepted', ''),
         ('failed', 'final', 'rejected', ''),
-        ('failed', 'blocked', '', 'missing evidence'),
     ],
 )
 async def test_acceptance_node_supports_allowed_final_result_combinations(
@@ -1565,6 +1452,10 @@ async def test_acceptance_node_supports_allowed_final_result_combinations(
 
 
 @pytest.mark.asyncio
+@pytest.mark.skip(
+    reason='P6 后重复相同调用走「暂停·异常」判停；旧的「软拒后主动 failed+blocked 收尾」编排已删除，'
+    '由 test_node_watchdog.py 的重复调用判停用例取代'
+)
 async def test_repeated_exec_call_is_soft_rejected_without_engine_failure(tmp_path: Path):
     class _Backend:
         def __init__(self) -> None:
@@ -1608,33 +1499,24 @@ async def test_repeated_exec_call_is_soft_rejected_without_engine_failure(tmp_pa
                     content='',
                     tool_calls=[
                         _final_result_call(
-                            status='failed',
-                            delivery_status='blocked',
                             summary='intentional stop after duplicate tool warning',
-                            answer='',
-                            evidence=[],
+                            answer='stopped after duplicate-call soft reject check',
+                            evidence=[{'kind': 'artifact', 'note': 'duplicate-call soft reject observed'}],
                             remaining_work=['stop after duplicate-call soft reject check'],
-                            blocking_reason='intentional stop after duplicate tool warning',
                         )
                     ],
                     finish_reason='tool_calls',
                     usage={'input_tokens': 10, 'output_tokens': 5, 'cache_hit_tokens': 0},
                 )
             if self._turn == 5:
-                # blocked 核验节点：裁决阻塞成立，放行执行节点的主动失败
-                text = self._messages_text(kwargs)
-                assert 'failed+blocked' in text
+                # 最终验收节点：通过本次提交。
                 return LLMResponse(
                     content='',
                     tool_calls=[
-                        _final_result_call(
-                            status='success',
-                            delivery_status='final',
-                            summary='阻塞成立：重复调用软拒后主动停止属于合理终止',
-                            answer='',
-                            evidence=[{'kind': 'artifact', 'note': 'verified duplicate-call soft reject'}],
-                            remaining_work=[],
-                            blocking_reason='',
+                        ToolCallRequest(
+                            id='call:acceptance',
+                            name='submit_final_result',
+                            arguments={'verdict': 'pass', 'feedback': 'ok'},
                         )
                     ],
                     finish_reason='tool_calls',
@@ -1673,12 +1555,13 @@ async def test_repeated_exec_call_is_soft_rejected_without_engine_failure(tmp_pa
         record = await service.create_task('duplicate exec soft reject regression', session_id='web:shared')
         await service.wait_for_task(record.task_id)
         task = service.store.get_task(record.task_id)
+        root = service.store.get_node(record.root_node_id)
         assert task is not None
-        assert task.status == 'failed'
-        assert 'repeated tool call detected: exec' not in str(task.failure_reason or '')
-        assert 'intentional stop after duplicate tool warning' in str(task.failure_reason or '')
-        # failed+blocked 经过阻塞核验放行，失败记录带核验标记
-        assert '[blocked核验]' in str(task.failure_reason or '')
+        assert root is not None
+        # 重复调用只软拒，不打死引擎；节点随后以正常提交收尾（提交即完成）。
+        # 重复调用只软拒，不打死引擎；节点随后以正常提交收尾（提交即完成）。
+        assert task.status == 'success'
+        assert 'intentional stop after duplicate tool warning' in str(root.final_output or '')
     finally:
         await service.close()
 
@@ -2047,6 +1930,9 @@ async def test_repeated_content_open_fails_after_three_ignored_repair_guidances(
 
 
 @pytest.mark.asyncio
+@pytest.mark.skip(
+    reason='P6 后重复只读调用判停语义取代了旧编排；分签名计数的纯判定由 react_loop 的单测覆盖'
+)
 async def test_read_only_repeat_counts_are_tracked_per_signature(tmp_path: Path):
     class _Backend:
         def __init__(self) -> None:
@@ -2126,33 +2012,24 @@ async def test_read_only_repeat_counts_are_tracked_per_signature(tmp_path: Path)
                     content='',
                     tool_calls=[
                         _final_result_call(
-                            status='failed',
-                            delivery_status='blocked',
                             summary='intentional stop',
-                            answer='',
-                            evidence=[],
+                            answer='stopped after verifying per-signature counts',
+                            evidence=[{'kind': 'artifact', 'note': 'per-signature repeat counts observed'}],
                             remaining_work=['stop after verifying separate counts'],
-                            blocking_reason='intentional stop',
                         )
                     ],
                     finish_reason='tool_calls',
                     usage={'input_tokens': 10, 'output_tokens': 5, 'cache_hit_tokens': 0},
                 )
             if self._turn == 6:
-                # blocked 核验节点：裁决阻塞成立，放行执行节点的主动失败
-                text = self._messages_text(kwargs)
-                assert 'failed+blocked' in text
+                # 最终验收节点：通过本次提交。
                 return LLMResponse(
                     content='',
                     tool_calls=[
-                        _final_result_call(
-                            status='success',
-                            delivery_status='final',
-                            summary='阻塞成立：签名计数验证完成后的主动停止属于合理终止',
-                            answer='',
-                            evidence=[{'kind': 'artifact', 'note': 'verified per-signature counts'}],
-                            remaining_work=[],
-                            blocking_reason='',
+                        ToolCallRequest(
+                            id='call:acceptance',
+                            name='submit_final_result',
+                            arguments={'verdict': 'pass', 'feedback': 'ok'},
                         )
                     ],
                     finish_reason='tool_calls',
@@ -2191,12 +2068,11 @@ async def test_read_only_repeat_counts_are_tracked_per_signature(tmp_path: Path)
         record = await service.create_task('read-only signature counting regression', session_id='web:shared')
         await service.wait_for_task(record.task_id)
         task = service.store.get_task(record.task_id)
+        root = service.store.get_node(record.root_node_id)
         assert task is not None
-        assert task.status == 'failed'
-        assert 'intentional stop' in str(task.failure_reason or '')
-        assert 'read-only repair guidance' not in str(task.failure_reason or '')
-        # failed+blocked 经过阻塞核验放行，失败记录带核验标记
-        assert '[blocked核验]' in str(task.failure_reason or '')
+        assert root is not None
+        assert task.status == 'success'
+        assert 'intentional stop' in str(root.final_output or '')
     finally:
         await service.close()
 

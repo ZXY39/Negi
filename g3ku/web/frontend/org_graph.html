@@ -371,13 +371,6 @@
                                     <select id="task-depth-select" class="task-depth-select resource-select"
                                         aria-label="全局任务树深度"></select>
                                 </label>
-                                <div id="task-depth-custom-wrap" class="task-depth-custom" hidden>
-                                    <input id="task-depth-custom-input"
-                                        class="task-depth-custom-input spinless-number-input" type="number" min="0"
-                                        step="1" inputmode="numeric" aria-label="自定义全局任务树深度" placeholder="非负整数">
-                                    <button id="task-depth-custom-save" class="toolbar-btn ghost small"
-                                        type="button">应用</button>
-                                </div>
                             </div>
                             <span id="task-depth-hint" class="task-depth-hint" hidden></span>
                         </div>
@@ -847,6 +840,11 @@
                         <span class="task-detail-pill-label">活跃节点</span>
                         <span id="td-active-count" class="task-detail-pill-value">0</span>
                     </div>
+                    <label id="td-expand-all" class="task-detail-pill task-detail-toggle" title="展开全部节点（含已结束）">
+                        <input id="td-expand-all-input" type="checkbox" class="ui-checkbox-input" />
+                        <span class="ui-checkbox-box" aria-hidden="true"></span>
+                        <span class="task-detail-pill-label">展开全部</span>
+                    </label>
                     <div class="header-actions">
                         <button id="task-error-log-btn" class="task-detail-pill task-detail-error-log-btn" type="button" title="查看错误日志">
                             <i data-lucide="triangle-alert"></i>
@@ -867,7 +865,7 @@
                             <div id="task-tree-search-results" class="task-tree-search-results" role="listbox"
                                 aria-label="节点搜索结果" hidden></div>
                         </div>
-                        <div class="task-tree-floating-tools" aria-live="polite">
+                        <div class="task-tree-floating-tools" id="task-tree-floating-tools" aria-live="polite">
                             <button id="task-tree-reset-rounds-btn"
                                 class="toolbar-btn ghost small task-tree-floating-reset" type="button" hidden
                                 disabled>回到最新树</button>
@@ -903,7 +901,6 @@
                             <div class="agent-detail-header">
                                 <div class="agent-detail-header-copy">
                                     <h3 id="ad-role" hidden>节点</h3>
-                                    <div id="ad-token-summary" class="agent-detail-subtitle"></div>
                                 </div>
                                 <span class="status-badge" id="ad-status">STATUS</span>
                                 <button class="toolbar-btn ghost small" id="close-agent-btn" type="button"
@@ -921,12 +918,24 @@
 
                             <div class="agent-detail-section">
                                 <h4><i data-lucide="arrow-down-to-line"></i> 输入</h4>
-                                <div class="code-block" id="ad-input">-</div>
+                                <div id="ad-initial-prompt" class="task-initial-prompt"></div>
+                                <details id="task-flow-box" class="task-flow-box">
+                                    <summary class="task-flow-header">
+                                        <span id="ad-token-summary" class="task-flow-usage"></span>
+                                    </summary>
+                                    <div class="task-trace-host" id="ad-input">-</div>
+                                </details>
                             </div>
 
                             <div class="agent-detail-section">
                                 <div class="agent-detail-section-header">
                                     <h4><i data-lucide="inbox"></i> 消息列表</h4>
+                                    <div id="ad-message-tabs" class="ad-message-tabs" role="tablist" aria-label="消息方向">
+                                        <button type="button" class="ad-message-tab is-active" role="tab"
+                                            data-message-tab="inbox" aria-selected="true">接收</button>
+                                        <button type="button" class="ad-message-tab" role="tab"
+                                            data-message-tab="outbox" aria-selected="false">发出</button>
+                                    </div>
                                     <div class="ad-notice-composer" id="ad-notice-composer">
                                         <input id="ad-notice-input" type="text" maxlength="4000"
                                             placeholder="向该节点子树追加定向通知…" aria-label="向该节点子树追加定向通知" />
@@ -942,13 +951,25 @@
                             </div>
 
                             <div class="agent-detail-section">
-                                <h4><i data-lucide="arrow-up-from-line"></i> 输出</h4>
-                                <div class="code-block" id="ad-output">-</div>
+                                <h4><i data-lucide="arrow-up-from-line"></i> 提交输出</h4>
+                                <div class="task-output-shell">
+                                    <div class="code-block" id="ad-output">-</div>
+                                    <button id="ad-output-copy" class="icon-btn task-output-copy" type="button"
+                                        title="复制提交输出" aria-label="复制提交输出">
+                                        <i data-lucide="copy"></i>
+                                    </button>
+                                </div>
                             </div>
 
                             <div class="agent-detail-section">
                                 <h4><i data-lucide="shield-check"></i> 验收</h4>
-                                <div class="code-block" id="ad-check">-</div>
+                                <div class="task-output-shell">
+                                    <div class="code-block" id="ad-check">-</div>
+                                    <button id="ad-check-copy" class="icon-btn task-output-copy" type="button"
+                                        title="复制验收结果" aria-label="复制验收结果">
+                                        <i data-lucide="copy"></i>
+                                    </button>
+                                </div>
                             </div>
 
                             <div class="agent-detail-section">

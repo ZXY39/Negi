@@ -125,6 +125,7 @@ from g3ku.runtime.web_ceo_sessions import (
     trailing_turn_record,
 )
 from g3ku.utils.helpers import tools_bundle_single_source_enabled
+from main.governance.exec_tool_policy import render_exec_runtime_policy_body
 from main.governance.tool_context import apply_runtime_tool_context_projection
 from main.models import normalize_execution_policy_metadata
 from main.protocol import build_envelope, now_iso
@@ -178,8 +179,11 @@ from .tool_contract import (
     is_frontdoor_tool_contract_message,
     normalize_frontdoor_candidate_tool_items,
     pinned_contract_is_carried_by_head,
+    pinned_contract_section_values,
+    pinned_contract_state,
     pinned_skill_ids_for,
     skill_roster_epoch_for,
+    split_pinned_contract_from_system_text,
     strip_frontdoor_tool_contract_echo,
     upsert_frontdoor_tool_contract_message,
 )
@@ -838,6 +842,20 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
     ) -> list[dict[str, Any]]:
         body_messages, _contract_messages = cls._split_request_body_and_tool_contract_messages(request_messages)
         return [dict(item) for item in list(body_messages or []) if isinstance(item, dict)]
+
+    @staticmethod
+    def _without_pinned_contract_head(records: list[dict[str, Any]] | None) -> list[dict[str, Any]]:
+        """对比正文收缩时剥掉 system 首条的头部快照：它是每发都带的不变量，不算历史。"""
+        normalized: list[dict[str, Any]] = []
+        for index, item in enumerate(list(records or [])):
+            if not isinstance(item, dict):
+                continue
+            record = dict(item)
+            if index == 0 and str(record.get("role") or "").strip().lower() == "system":
+                base, _pinned = split_pinned_contract_from_system_text(record.get("content"))
+                record["content"] = base
+            normalized.append(record)
+        return normalized
 
     @classmethod
     def _durable_frontdoor_request_body_messages(
@@ -1707,6 +1725,7 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
         request_messages = self._apply_frontdoor_skill_roster_notice(
             list(state_for_request.get("messages") or []),
             session_key=str(state_for_request.get("session_key") or "").strip(),
+            state=state_for_request,
         )
         delivered_message = (
             request_messages[-1]
@@ -1976,7 +1995,7 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
         tool_schemas: list[dict[str, Any]],
         compression_source: str = "token_compression",
     ) -> FrontdoorTokenPreflightResult:
-        body_messages, contract_messages = self._split_request_body_and_tool_contract_messages(request_messages)
+        body_messages, _contract_messages = self._split_request_body_and_tool_contract_messages(request_messages)
         normalized_body = [dict(item) for item in body_messages if isinstance(item, dict)]
         system_prefix: list[dict[str, Any]] = []
         if normalized_body and str(normalized_body[0].get("role") or "").strip().lower() == "system":
@@ -2015,6 +2034,8 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
         older_history_messages, preserved_silent_groups = self._lift_silent_trace_groups(
             older_history_messages
         )
+        # 任务已终态的 silent 决策不再跨压缩累积：退休整组，不回插。
+        preserved_silent_groups = self._retire_terminal_silent_messages(preserved_silent_groups)
         # 防御：可压缩历史末尾若残留「assistant 声明工具调用但结果缺失」的悬空组
         # （正常对齐后不应出现，续跑种子/异常状态可能带入），从压缩请求里丢弃，
         # 避免 provider 拒绝请求；计数仅入诊断。
@@ -2218,7 +2239,6 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
                 *deferred_messages,
                 *preserved_silent_groups,
                 *recent_tail,
-                *contract_messages,
             ]
             rewritten_tokens = self._estimate_frontdoor_send_total_tokens(
                 provider_request_body=self._build_frontdoor_provider_request_body_preview(
@@ -2315,6 +2335,106 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
         remaining = [item for index, item in enumerate(records) if index not in preserved_indexes]
         preserved = [item for index, item in enumerate(records) if index in preserved_indexes]
         return remaining, preserved
+
+    @staticmethod
+    def _silent_group_task_subjects(group: list[dict[str, Any]]) -> list[str]:
+        """从 silent 决策组里取 `subject` 中以 `task:` 开头的任务 id。"""
+        subjects: list[str] = []
+        for item in list(group or []):
+            if str(item.get("role") or "").strip().lower() != "assistant":
+                continue
+            for call in list(item.get("tool_calls") or []):
+                function = call.get("function") if isinstance(call, dict) else None
+                name = (
+                    str((function or {}).get("name") or call.get("name") or "").strip()
+                    if isinstance(call, dict)
+                    else ""
+                )
+                if name != SILENT_TOOL_NAME:
+                    continue
+                raw_arguments = (
+                    (function or {}).get("arguments")
+                    if isinstance(function, dict)
+                    else call.get("arguments")
+                )
+                arguments: Any = raw_arguments
+                if isinstance(raw_arguments, str):
+                    text = raw_arguments.strip()
+                    if not text.startswith("{"):
+                        continue
+                    try:
+                        arguments = json.loads(text)
+                    except Exception:
+                        continue
+                if not isinstance(arguments, dict):
+                    continue
+                subject = str(arguments.get("subject") or "").strip()
+                if subject.startswith("task:") and subject not in subjects:
+                    subjects.append(subject)
+        return subjects
+
+    def _silent_subject_task_status(self, task_id: str) -> str:
+        """读 `task:<id>` 的当前状态；读不到返回空串（按“未终态”保守处理）。"""
+        service = getattr(self._loop, "main_task_service", None)
+        get_task = getattr(service, "get_task", None)
+        if not callable(get_task):
+            get_task = getattr(getattr(service, "store", None), "get_task", None)
+        if not callable(get_task):
+            return ""
+        try:
+            task = get_task(str(task_id or "").strip())
+        except Exception:
+            return ""
+        return str(getattr(task, "status", "") or "").strip().lower()
+
+    @staticmethod
+    def _silent_call_ids(item: dict[str, Any]) -> set[str]:
+        call_ids: set[str] = set()
+        for call in list(item.get("tool_calls") or []):
+            if not isinstance(call, dict):
+                continue
+            function = call.get("function") if isinstance(call.get("function"), dict) else {}
+            name = str(function.get("name") or call.get("name") or "").strip()
+            if name != SILENT_TOOL_NAME:
+                continue
+            call_id = str(call.get("id") or "").strip()
+            if call_id:
+                call_ids.add(call_id)
+        return call_ids
+
+    def _retire_terminal_silent_messages(
+        self,
+        messages: list[dict[str, Any]] | None,
+    ) -> list[dict[str, Any]]:
+        """任务已终态的 silent 决策组在压缩时退休；其余原样保留。
+
+        入参是 `_lift_silent_trace_groups` 返回的扁平列表（assistant 行 + 它声明的
+        tool 结果行）。判据：同一 assistant 行里所有 `subject=task:<id>` 的当前状态都在
+        `{success, failed}` 时，退休该 assistant 行和它声明的 tool 结果；没有 task
+        subject、任一任务非终态、或有任何一次读取失败，都保留（保守优先）。
+        """
+        records = [dict(item) for item in list(messages or []) if isinstance(item, dict)]
+        retire_indexes: set[int] = set()
+        terminal = frozenset({"success", "failed"})
+        for index, item in enumerate(records):
+            if str(item.get("role") or "").strip().lower() != "assistant":
+                continue
+            call_ids = self._silent_call_ids(item)
+            if not call_ids:
+                continue
+            task_subjects = self._silent_group_task_subjects([item])
+            if not task_subjects:
+                continue
+            statuses = [self._silent_subject_task_status(subject) for subject in task_subjects]
+            if not statuses or not all(status in terminal for status in statuses):
+                continue
+            retire_indexes.add(index)
+            for other_index, other in enumerate(records):
+                if str(other.get("role") or "").strip().lower() != "tool":
+                    continue
+                if str(other.get("tool_call_id") or "").strip() in call_ids:
+                    retire_indexes.add(other_index)
+        return [item for index, item in enumerate(records) if index not in retire_indexes]
 
     @classmethod
     def _drop_dangling_trailing_tool_call_groups(
@@ -3555,17 +3675,25 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
         messages: list[dict[str, Any]] | None,
         *,
         session_key: Any,
+        state: dict[str, Any] | None = None,
     ) -> list[dict[str, Any]]:
         """检测 + 一次性投递，只在这一处发生（真正落请求体的装配路径上）。
 
         旧机制一条回合内四个装配点共用一次消耗式读，先跑的把差集领走、落请求体那处
         永远拿空，提示因此从未上线。这里同时把"读者唯一"钉成结构：其它装配点不再读台账。
+
+        运行时合同的增量也并进同一条通知：exec 策略/临时目录/denied/candidate/repair/
+        附件按值摘要 diff，只有变化才写一行。头部快照已有的两节以头部原文为初值，
+        避免把钉住时已经说过的值再宣布一遍。
         """
         base_messages = list(messages or [])
         scope = self._frontdoor_skill_roster_notice_scope(session_key)
         if not scope:
             return base_messages
         normalized_session_key = str(session_key or "").strip()
+        covered_sections = pinned_contract_section_values(
+            pinned_contract_state(None, session_key=normalized_session_key)[0]
+        )
         message, delivered = _skill_roster_notice.deliver_for_scope(
             scope,
             _skill_roster_notice.readable_skill_items(
@@ -3577,11 +3705,107 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
             # 拿前缀键去查会取回空名单，把全部技能当成新增。
             covered_skill_ids=pinned_skill_ids_for(None, session_key=normalized_session_key),
             memory_provider=self._frontdoor_memory_notice_provider,
+            contract_sections=self._frontdoor_contract_notice_sections(
+                dict(state or {}),
+                session_key=normalized_session_key,
+            ),
+            covered_contract_sections=covered_sections,
         )
         if message is None:
             return base_messages
         self._emit_frontdoor_skill_roster_notice_event(session_key=session_key, records=delivered)
         return [*base_messages, message]
+
+    def _frontdoor_contract_notice_sections(
+        self,
+        state: dict[str, Any],
+        *,
+        session_key: str,
+    ) -> dict[str, str]:
+        """当刻合同值（单行正文）；空字符串表示这一节当前没有内容。"""
+        declared_names = {
+            str(name or '').strip()
+            for name in list(state.get("provider_tool_names") or [])
+            if str(name or '').strip()
+        }
+        candidate_items = self._normalized_candidate_tool_items(
+            state.get("candidate_tool_items"),
+            fallback_names=state.get("candidate_tool_names"),
+        )
+        candidate_names = [
+            str(item.get("tool_id") or '').strip()
+            for item in candidate_items
+            if str(item.get("tool_id") or '').strip()
+            and str(item.get("tool_id") or '').strip() not in declared_names
+        ]
+        repair_items = [
+            dict(item)
+            for item in list(state.get("repair_required_tool_items") or [])
+            if isinstance(item, dict)
+        ]
+        repair_skill_ids = [
+            str(item.get("skill_id") or '').strip()
+            for item in list(state.get("repair_required_skill_items") or [])
+            if isinstance(item, dict) and str(item.get("skill_id") or '').strip()
+        ]
+        attachment_targets = [
+            dict(item)
+            for item in list(state.get("attachment_reopen_targets") or [])
+            if isinstance(item, dict)
+        ]
+        return {
+            "exec_runtime_policy": render_exec_runtime_policy_body(
+                self._frontdoor_exec_runtime_policy()
+            ),
+            "session_temp_dir": str(self._ceo_session_temp_dir(session_key) or "").strip(),
+            "denied_tools": self._render_notice_names(
+                self._frontdoor_declared_denied_tool_names_for_state(state)
+            ),
+            "candidate_tools": self._render_notice_names(candidate_names),
+            "repair_required": self._render_repair_notice(repair_items, repair_skill_ids),
+            "attachment_targets": self._render_attachment_notice(attachment_targets),
+        }
+
+    @staticmethod
+    def _render_notice_names(names: Any) -> str:
+        ordered: list[str] = []
+        for name in list(names or []):
+            text = str(name or '').strip()
+            if text and text not in ordered:
+                ordered.append(text)
+        return ', '.join(f'`{name}`' for name in ordered)
+
+    @classmethod
+    def _render_repair_notice(
+        cls,
+        tool_items: list[dict[str, Any]],
+        skill_ids: list[str],
+    ) -> str:
+        rows: list[str] = []
+        for item in list(tool_items or []):
+            tool_id = str(item.get("tool_id") or "").strip()
+            if not tool_id:
+                continue
+            reason = str(item.get("reason") or "").strip()
+            rows.append(f"`{tool_id}`" + (f" ({reason})" if reason else ""))
+        for skill_id in list(skill_ids or []):
+            cleaned = str(skill_id or "").strip()
+            if cleaned:
+                rows.append(f"skill `{cleaned}`")
+        return "; ".join(rows)
+
+    @staticmethod
+    def _render_attachment_notice(items: list[dict[str, Any]]) -> str:
+        rows: list[str] = []
+        for item in list(items or []):
+            name = str(item.get("name") or "").strip()
+            path = str(item.get("path") or "").strip()
+            ref = str(item.get("ref") or "").strip()
+            target = path or ref
+            if not name and not target:
+                continue
+            rows.append(f"`{name or target}`" + (f" → {target}" if target and name else ""))
+        return "; ".join(rows)
 
     def _frontdoor_memory_notice_provider(
         self, *, since_rev: int, base_rev: int, initialized: bool = False
@@ -3647,33 +3871,30 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
             # 显示面失败不许影响这一跳能发出去：提示本体已经在历史里了。
             pass
 
-    def _carry_frontdoor_skill_roster_notice_on_compaction(
+    def _reset_frontdoor_runtime_notice_after_compaction(
         self,
         messages: list[dict[str, Any]] | None,
         *,
         session_key: Any,
         compression_stage_id: str,
     ) -> list[dict[str, Any]]:
-        """压缩跳：把仍可读的名字带到压缩产物之后，不可读的在那一跳退场。"""
+        """压缩跳：剥离旧 `[RUNTIME_NOTICE]`，清空合同台账与记忆游标。
+
+        头部已被当刻值重印，旧增量不再需要留在正文里；下一跳的单生产者会把头部覆盖项
+        按新头部初始化，非头部项（denied/candidate/repair/附件）若非空则投一条状态快照。
+        """
         base_messages = list(messages or [])
         scope = self._frontdoor_skill_roster_notice_scope(session_key)
         stage_id = str(compression_stage_id or "").strip()
         if not scope or not base_messages or not stage_id:
             return base_messages
-        message = _skill_roster_notice.carry_for_scope(
-            scope,
-            compression_stage_id=stage_id,
-            readable_skill_ids=self._readable_frontdoor_skill_ids(session_key),
-            now=now_iso(),
-        )
-        if message is None:
-            return base_messages
-        return [*base_messages, message]
+        _skill_roster_notice.reset_contract_sections_for_compaction(scope, now=now_iso())
+        return _skill_roster_notice.strip_runtime_notice_messages(base_messages)
 
     def _carry_manual_compression_notice_into_baseline(self, *, session: Any, session_key: str) -> None:
-        """手动压缩跑在回合外，够不到发送路径那一次搬运；在消费待重印标记的这一跳补。
+        """手动压缩跑在回合外，够不到发送路径那一次剥离；在消费待重印标记的这一跳补。
 
-        补的是 durable 基线本身——下一跳的请求体由它派生，提示因此重新进上下文。
+        改的是 durable 基线本身——旧通知被剥离，下一跳由单生产者按新头部重投状态快照。
         """
         if not session_key:
             return
@@ -3684,16 +3905,16 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
         ]
         if not baseline:
             return
-        carried = self._carry_frontdoor_skill_roster_notice_on_compaction(
+        stripped = self._reset_frontdoor_runtime_notice_after_compaction(
             baseline,
             session_key=session_key,
             compression_stage_id=(
                 "manual:" + str(getattr(session, "_active_turn_id", "") or now_iso()).strip()
             ),
         )
-        if len(carried) == len(baseline):
+        if stripped == baseline:
             return
-        setattr(session, "_frontdoor_request_body_messages", list(carried))
+        setattr(session, "_frontdoor_request_body_messages", list(stripped))
 
     def _frontdoor_bundle_recommit_boundary(self, *, session: Any, state: CeoGraphState) -> bool:
         """`tools[]` 与 skill 头部名单共用的唯一重新提交点：压缩。
@@ -6566,16 +6787,12 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
                 "rejection_kind": "",
             }
         if text.startswith("任务未创建："):
-            # The duplicate-rejection text also mentions task_append_notice as
-            # guidance, so only the dedicated append-notice phrasing (which
-            # starts with "现有任务") counts as the append-notice decision.
-            rejection_kind = "duplicate"
-            if text.startswith("任务未创建：现有任务") and ("task_append_notice" in text or "追加通知" in text):
-                rejection_kind = "append_notice"
+            # 追加通知那条车道已随节点树重构删除（决策 M/O）；模型现在被引导去
+            # resume 既有任务，所以任何「任务未创建」都只是重复判定，不再分档。
             return {
                 "created": False,
                 "created_task_ids": [],
-                "rejection_kind": rejection_kind,
+                "rejection_kind": "duplicate",
             }
         return {
             "created": False,
@@ -7235,13 +7452,11 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
         persisted_messages = list(stable_messages)
         persisted_dynamic_appendix_messages = list(dynamic_appendix_messages)
         if prompt_scope == "ceo_frontdoor":
-            request_body_messages, tool_contract_messages = self._split_request_body_and_tool_contract_messages(messages)
+            request_body_messages, _tool_contract_messages = self._split_request_body_and_tool_contract_messages(messages)
             if request_body_messages:
                 persisted_messages = self._durable_frontdoor_request_body_messages(request_body_messages)
-            if tool_contract_messages:
-                persisted_dynamic_appendix_messages = list(tool_contract_messages)
-            else:
-                persisted_dynamic_appendix_messages = []
+            # 旧合同尾块已退役：不再写回 dynamic appendix，只在装配/压缩时剥离。
+            persisted_dynamic_appendix_messages = []
         shrink_reason = str(
             frontdoor_history_shrink_reason_from_prepare
             or state.get("frontdoor_history_shrink_reason")
@@ -7262,14 +7477,20 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
             previous_tokens = estimate_message_tokens(
                 CeoMessageBuilder._request_body_seed_records(
                     strip_turn_only_system_note_messages(
-                        self._request_body_messages_without_tool_contracts(session_request_body_messages)
+                        self._without_pinned_contract_head(
+                            self._request_body_messages_without_tool_contracts(
+                                session_request_body_messages
+                            )
+                        )
                     )
                 )
             )
             next_tokens = estimate_message_tokens(
                 CeoMessageBuilder._request_body_seed_records(
                     strip_turn_only_system_note_messages(
-                        self._request_body_messages_without_tool_contracts(persisted_messages)
+                        self._without_pinned_contract_head(
+                            self._request_body_messages_without_tool_contracts(persisted_messages)
+                        )
                     )
                 )
             )
@@ -7620,7 +7841,7 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
                 # 压缩把整份正文重写了，一次性提示会随之离开上下文。那一跳可复用前缀反正
                 # 已经断在这里，把仍可读的名字带到压缩产物之后不额外付缓存；读不到的名字
                 # 在这同一跳退场（不写"已下架"行，裁决归 load_skill_context 三态回执）。
-                request_messages = self._carry_frontdoor_skill_roster_notice_on_compaction(
+                request_messages = self._reset_frontdoor_runtime_notice_after_compaction(
                     request_messages,
                     session_key=str(state_for_request.get("session_key") or "").strip(),
                     compression_stage_id=(

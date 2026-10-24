@@ -167,6 +167,17 @@ def _contract_block_message(tool_id: str, *, fingerprint: str = "sha256:" + "a" 
     }
 
 
+def _normalized_tool_content(messages):
+    """工具结果只按去掉尾随空白后的正文比较：artifact 种子允许空白漂移。"""
+    normalized = []
+    for item in list(messages or []):
+        if isinstance(item, dict) and str(item.get("role") or "").strip() == "tool":
+            normalized.append({**item, "content": str(item.get("content") or "").strip()})
+        else:
+            normalized.append(item)
+    return normalized
+
+
 def _canonical_frontdoor_state(**overrides) -> dict[str, object]:
     state: dict[str, object] = {
         "messages": [],
@@ -1281,20 +1292,8 @@ async def test_create_agent_graph_execute_tools_makes_loaded_contract_callable()
         for item in list(result["dynamic_appendix_messages"])
         if _is_frontdoor_runtime_tool_contract_record(dict(item))
     ]
-    assert len(contract_messages) == 1  # 一份稳定契约 + 一份活状态块
-    contract_text = "\n".join(str(item["content"] or "") for item in contract_messages)
-    assert "callable_tools:" not in contract_text
-    # 这一跳的 callable 读点是上面的 `result["tool_names"]`：契约块随 load 结果进入请求视图
-    # 之后，名字才留在这份名单里。
-    assert "hydrated_tools:" not in contract_text
-    # 静态规则不再抄进契约：加载/复读语义只由基础提示词 `ceo_frontdoor.md` 承载
-    assert "load_tool_context_help:" not in contract_text
-    assert "Any surfaced RBAC-visible tool may be loaded by exact `tool_id` for docs/help" not in contract_text
-    assert "load_tool_context_repeat_guard:" not in contract_text
-    assert "candidate_tools:" in contract_text
-    # 候选工具的一句话说明改由 provider tools[] 的 function.description 承载，契约只列名字
-    assert "`agent_browser`" in contract_text
-    assert "`agent_browser`: Browser automation via semantic shortlist." not in contract_text
+    # 尾块退役：动态附录只剩非合同消息，候选/可调用状态由 state 与一次性通知承载。
+    assert contract_messages == []
 
 
 
@@ -1422,17 +1421,8 @@ async def test_create_agent_runner_graph_prepare_turn_keeps_contract_present_too
         for item in list(prepared["dynamic_appendix_messages"])
         if _is_frontdoor_runtime_tool_contract_record(dict(item))
     ]
-    assert len(contract_messages) == 1  # 一份稳定契约 + 一份活状态块
-    contract_text = "\n".join(str(item["content"] or "") for item in contract_messages)
-    # D11：callable 面不再渲成模型可见的一行（水合不再拦路 ⇒ 该行无信息量），上面
-    # `frontdoor_selection_debug.callable_tool_names` 才是这一跳的读点。
-    assert "callable_tools:" not in contract_text
-    # 空池不再占一行 `candidate_tools: none`
-    assert "candidate_tools:" not in contract_text
-    assert "undeclared_candidates" not in contract_text
-    assert "visible_skill_ids" not in contract_text
-    assert "rbac_visible_tool_names" not in contract_text
-    assert "rbac_visible_skill_ids" not in contract_text
+    # 尾块退役：这一跳的 callable 状态仍由 state/selection trace 承载，模型面不再有合同块。
+    assert contract_messages == []
 
 
 @pytest.mark.asyncio
@@ -1759,10 +1749,8 @@ async def test_create_agent_runner_graph_prepare_turn_keeps_normal_ceo_tools_for
         for item in list(prepared["dynamic_appendix_messages"] or [])
         if _is_frontdoor_runtime_tool_contract_record(dict(item))
     ]
-    assert len(contract_messages) == 1  # 一份稳定契约 + 一份活状态块
-    contract_text = "\n".join(str(item["content"] or "") for item in contract_messages)
-    # D11：callable 面不再渲成一行，读点是下面的 `frontdoor_selection_debug`。
-    assert "callable_tools:" not in contract_text
+    # 尾块退役：callable 读点落在 selection debug / state 上，不再有合同消息。
+    assert contract_messages == []
     assert list(prepared["frontdoor_selection_debug"]["callable_tool_names"]) == [
         "create_async_task",
         "task_list",
@@ -1841,16 +1829,15 @@ async def test_create_agent_runner_graph_prepare_turn_persists_request_body_with
         runtime=SimpleNamespace(context=SimpleNamespace(session=session)),
     )
 
-    assert prepared["messages"] == [
-        {"role": "system", "content": "system"},
+    messages = list(prepared["messages"])
+    assert messages[0]["role"] == "system"
+    assert str(messages[0]["content"]).startswith("system")
+    assert "## Runtime Contract (pinned)" in str(messages[0]["content"])
+    assert messages[1:] == [
         {"role": "user", "content": "hello"},
         {"role": "assistant", "content": "## Retrieved Context\n- authoritative memory"},
     ]
-    assert len(prepared["dynamic_appendix_messages"]) == 1  # 一份稳定契约 + 一份活状态块
-    contract_message = dict(prepared["dynamic_appendix_messages"][0] or {})
-    assert is_frontdoor_tool_contract_message(contract_message)
-    assert contract_message["role"] == "user"
-    assert str(contract_message.get("content") or "").startswith("## Runtime Tool Contract")
+    assert prepared["dynamic_appendix_messages"] == []
 
 
 
@@ -3482,37 +3469,34 @@ def test_frontdoor_dispatch_stays_live_while_declaration_is_pinned() -> None:
         granted_tool_names=no_grant["rbac_visible_tool_names"],
     ) == []
 
-def test_frontdoor_send_contract_prints_declared_denied_tools_line() -> None:
-    """发送前重建尾块的那一处也必须带上 denied_tools 行。
-
-    实盘翻过一次：装配层算出了差集，但 `_frontdoor_prompt_contract` 会拿 state 重新
-    upsert 一份契约，重建处不传这一行，算出来的东西被自己覆盖掉了。
-    """
+def test_frontdoor_send_contract_reports_denied_tools_in_notice() -> None:
+    """尾块退役后 denied_tools 由发送前的单生产者投进一次性通知。"""
     service = SimpleNamespace(
         list_effective_tool_names=lambda *, actor_role, session_id: ["exec", "filesystem_stat"]
     )
     runner = create_agent_impl.CreateAgentCeoFrontDoorRunner(loop=SimpleNamespace(main_task_service=service))
-
-    contract = runner._frontdoor_prompt_contract(
-        state=_canonical_frontdoor_state(
-            messages=[{"role": "user", "content": "hello"}],
-            provider_tool_names=["exec", "web_fetch", "filesystem_stat"],
-            rbac_visible_tool_names=["exec", "filesystem_stat"],
-            tool_names=["exec"],
-        ),
-        provider_model="openai:gpt-4.1",
-        tool_schemas=[],
+    runner._ceo_session_temp_dir = lambda _session_key: ""
+    state = _canonical_frontdoor_state(
+        messages=[{"role": "user", "content": "hello"}],
+        provider_tool_names=["exec", "web_fetch", "filesystem_stat"],
+        rbac_visible_tool_names=["exec", "filesystem_stat"],
+        tool_names=["exec"],
         session_key="web:shared",
     )
 
-    contract_texts = [
+    messages = runner._apply_frontdoor_skill_roster_notice(
+        [{"role": "user", "content": "hello"}],
+        session_key="web:shared",
+        state=state,
+    )
+    notice_texts = [
         str(item.get("content") or "")
-        for item in list(contract.dynamic_appendix_messages)
-        if "frontdoor_runtime_tool_contract" in str(item.get("content") or "")
+        for item in messages
+        if str(item.get("content") or "").startswith("[RUNTIME_NOTICE]")
     ]
-    assert len(contract_texts) == 1
-    assert "denied_tools" in contract_texts[0]
-    assert "web_fetch" in contract_texts[0]
+    assert len(notice_texts) == 1
+    assert "denied_tools" in notice_texts[0]
+    assert "web_fetch" in notice_texts[0]
 
 
 def test_build_frontdoor_request_artifact_payload_includes_provider_tool_exposure_fields() -> None:
@@ -3946,7 +3930,10 @@ async def test_graph_call_model_fresh_turn_reuses_previous_message_artifact_pref
             and "message_type" in str(item.get("content") or "")
         )
     ]
-    assert captured_model_messages[: len(expected_scaffold_prefix)] == expected_scaffold_prefix
+    assert captured_model_messages[0]["role"] == "system"
+    assert "## Runtime Contract (pinned)" in str(captured_model_messages[0]["content"])
+    expected_tail = expected_scaffold_prefix[1:]
+    assert _normalized_tool_content(captured_model_messages[1 : 1 + len(expected_tail)]) == _normalized_tool_content(expected_tail)
     assert {"role": "assistant", "content": "final answer"} in captured_model_messages
     final_answer_index = captured_model_messages.index({"role": "assistant", "content": "final answer"})
     next_user_index = captured_model_messages.index({"role": "user", "content": "next question"})
@@ -4167,9 +4154,14 @@ async def test_graph_call_model_runs_token_preflight_after_fresh_turn_seed_and_b
             and "message_type" in str(item.get("content") or "")
         )
     ]
-    assert observed["request_messages"][: len(expected_scaffold_prefix)] == expected_scaffold_prefix
+    assert observed["request_messages"][0]["role"] == "system"
+    assert "## Runtime Contract (pinned)" in str(observed["request_messages"][0]["content"])
+    expected_tail = expected_scaffold_prefix[1:]
+    assert observed["request_messages"][1 : 1 + len(expected_tail)] == expected_tail
     assert observed["tool_schemas"]
-    assert captured_model_messages[: len(expected_scaffold_prefix)] == expected_scaffold_prefix
+    assert captured_model_messages[0]["role"] == "system"
+    assert "## Runtime Contract (pinned)" in str(captured_model_messages[0]["content"])
+    assert _normalized_tool_content(captured_model_messages[1 : 1 + len(expected_tail)]) == _normalized_tool_content(expected_tail)
 
 
 @pytest.mark.asyncio
@@ -4493,9 +4485,25 @@ def test_prompt_contract_keeps_attachment_reopen_targets_in_request_messages(
         for item in request_messages
         if isinstance(item, dict)
     )
-    assert "attachment_reopen_targets:" in rendered
-    assert str(docx_path) in rendered
-    assert str(image_path) in rendered
+    assert "attachment_reopen_targets:" not in rendered
+    # 尾块退役：附件句柄由发送前的单生产者投进一次性通知。
+    runner._ceo_session_temp_dir = lambda _session_key: ""
+    notified = runner._apply_frontdoor_skill_roster_notice(
+        request_messages,
+        session_key="web:shared",
+        state=round_tripped,
+    )
+    notice_texts = [
+        str(item.get("content") or "")
+        for item in notified
+        if str(item.get("content") or "").startswith("[RUNTIME_NOTICE]")
+    ]
+    assert any(
+        "attachment_targets" in text
+        and str(docx_path) in text
+        and str(image_path) in text
+        for text in notice_texts
+    )
 
 
 @pytest.mark.asyncio
@@ -5099,7 +5107,10 @@ async def test_graph_call_model_fresh_turn_reuses_previous_message_artifact_pref
             and "message_type" in str(item.get("content") or "")
         )
     ]
-    assert captured_model_messages[: len(expected_scaffold_prefix)] == expected_scaffold_prefix
+    assert captured_model_messages[0]["role"] == "system"
+    assert "## Runtime Contract (pinned)" in str(captured_model_messages[0]["content"])
+    expected_tail = expected_scaffold_prefix[1:]
+    assert _normalized_tool_content(captured_model_messages[1 : 1 + len(expected_tail)]) == _normalized_tool_content(expected_tail)
     assert {"role": "assistant", "content": "final answer"} in captured_model_messages
     final_answer_index = captured_model_messages.index({"role": "assistant", "content": "final answer"})
     next_user_index = captured_model_messages.index({"role": "user", "content": "next question"})

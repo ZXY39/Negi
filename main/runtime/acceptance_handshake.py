@@ -19,7 +19,6 @@ ACCEPTANCE_HANDSHAKE_KEY = "acceptance_handshake"
 ACCEPTANCE_STATE_IDLE = "idle"
 ACCEPTANCE_STATE_WAITING_ACCEPTANCE = "waiting_acceptance"
 ACCEPTANCE_STATE_WAITING_EXECUTION_RETRY = "waiting_execution_retry"
-ACCEPTANCE_STATE_WAITING_BLOCK_VERIFICATION = "waiting_block_verification"
 ACCEPTANCE_STATE_ACCEPTED = "accepted"
 ACCEPTANCE_STATE_REJECTED_TERMINAL = "rejected_terminal"
 ACCEPTANCE_STATE_CANCELED_BY_EXECUTION_FAILURE = "canceled_by_execution_failure"
@@ -32,7 +31,6 @@ FINAL_ACCEPTANCE_STATUS_VALUES = {
     FINAL_ACCEPTANCE_STATUS_RUNNING,
     ACCEPTANCE_STATE_WAITING_ACCEPTANCE,
     ACCEPTANCE_STATE_WAITING_EXECUTION_RETRY,
-    ACCEPTANCE_STATE_WAITING_BLOCK_VERIFICATION,
     FINAL_ACCEPTANCE_STATUS_PASSED,
     FINAL_ACCEPTANCE_STATUS_FAILED,
     ACCEPTANCE_STATE_ACCEPTED,
@@ -44,7 +42,6 @@ _KNOWN_ACCEPTANCE_STATES = {
     ACCEPTANCE_STATE_IDLE,
     ACCEPTANCE_STATE_WAITING_ACCEPTANCE,
     ACCEPTANCE_STATE_WAITING_EXECUTION_RETRY,
-    ACCEPTANCE_STATE_WAITING_BLOCK_VERIFICATION,
     ACCEPTANCE_STATE_ACCEPTED,
     ACCEPTANCE_STATE_REJECTED_TERMINAL,
     ACCEPTANCE_STATE_CANCELED_BY_EXECUTION_FAILURE,
@@ -70,6 +67,7 @@ def normalize_acceptance_handshake(payload: Any) -> dict[str, Any]:
         "rejection_count": rejection_count,
         "latest_execution_result_ref": str(current.get("latest_execution_result_ref") or "").strip(),
         "latest_execution_result_summary": str(current.get("latest_execution_result_summary") or "").strip(),
+        "latest_execution_submission_id": str(current.get("latest_execution_submission_id") or "").strip(),
         "latest_rejection_feedback_ref": str(current.get("latest_rejection_feedback_ref") or "").strip(),
         "latest_rejection_feedback_summary": str(current.get("latest_rejection_feedback_summary") or "").strip(),
         "updated_at": str(current.get("updated_at") or "").strip(),
@@ -87,6 +85,7 @@ def set_acceptance_handshake_state(
     latest_rejection_feedback_ref: str,
     latest_rejection_feedback_summary: str,
     updated_at: str,
+    latest_execution_submission_id: str | None = None,
 ) -> dict[str, Any]:
     current = normalize_acceptance_handshake(payload)
     current["state"] = state if state in _KNOWN_ACCEPTANCE_STATES else ACCEPTANCE_STATE_IDLE
@@ -94,6 +93,8 @@ def set_acceptance_handshake_state(
     current["rejection_count"] = max(0, _coerce_int(rejection_count, default=0))
     current["latest_execution_result_ref"] = str(latest_execution_result_ref or "").strip()
     current["latest_execution_result_summary"] = str(latest_execution_result_summary or "").strip()
+    if latest_execution_submission_id is not None:
+        current["latest_execution_submission_id"] = str(latest_execution_submission_id or "").strip()
     current["latest_rejection_feedback_ref"] = str(latest_rejection_feedback_ref or "").strip()
     current["latest_rejection_feedback_summary"] = str(latest_rejection_feedback_summary or "").strip()
     current["updated_at"] = str(updated_at or "").strip()

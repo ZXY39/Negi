@@ -6,7 +6,7 @@
 执行节点白跑三小时，而它等的那份裁定一直挂在握手状态里。
 
 本文件锁定修复契约：
-- B1：握手处于 waiting_acceptance / waiting_block_verification 且验收节点非终态、
+- B1：握手处于 waiting_acceptance 且验收节点非终态、
   未被冻结时，该节点是一个可重派发的持久承诺；
 - B2：冻结、点名他人、终态、人工暂停一律不算（否则会凭空多出一轮打回）；
 - B3：`run_task` 在通知账本无人可派发时重派发验收回合，且同一次遍历不再跑根节点；
@@ -27,7 +27,6 @@ from main.protocol import now_iso
 from main.runtime.acceptance_handshake import (
     ACCEPTANCE_HANDSHAKE_KEY,
     ACCEPTANCE_STATE_WAITING_ACCEPTANCE,
-    ACCEPTANCE_STATE_WAITING_BLOCK_VERIFICATION,
     ACCEPTANCE_STATE_WAITING_EXECUTION_RETRY,
     normalize_acceptance_handshake,
     set_acceptance_handshake_state,
@@ -221,26 +220,6 @@ async def test_waiting_acceptance_handshake_makes_acceptance_node_resumable(tmp_
         await service.close()
 
 
-@pytest.mark.asyncio
-async def test_waiting_block_verification_handshake_is_also_resumable(tmp_path: Path) -> None:
-    service = _build_service(tmp_path)
-    try:
-        task_id, root_id, acceptance_id = await _waiting_acceptance_task(
-            service,
-            prompt="resume blocked candidate",
-        )
-        _set_handshake(
-            service,
-            node_id=root_id,
-            state=ACCEPTANCE_STATE_WAITING_BLOCK_VERIFICATION,
-            acceptance_node_id=acceptance_id,
-        )
-
-        assert service.node_runner.resumable_final_acceptance_node_id(task_id) == acceptance_id
-    finally:
-        await service.close()
-
-
 # ---------------------------------------------------------------------------
 # B2：不该重派发的形态一律不匹配
 # ---------------------------------------------------------------------------
@@ -337,13 +316,22 @@ async def test_run_task_redispatches_inflight_acceptance_round_without_notice(
     service = _build_service(tmp_path, chat_backend=backend)
     fake_logger = MagicMock()
     monkeypatch.setattr("main.runtime.task_actor_service.logger", fake_logger)
+
+    async def _noop_drive_scheduler_loop(*, task_id: str, dispatcher, root_node_id: str, current_result):
+        # 用例的主体是 run_task 的重派发决策；验收回合跑完后的调度循环不在断言范围内，
+        # 也不再给它一个会永远等空闲判定的真实循环。
+        return current_result, False
+
+    monkeypatch.setattr(
+        service.task_actor_service,
+        "_drive_scheduler_loop",
+        _noop_drive_scheduler_loop,
+    )
     try:
         task_id, root_id, acceptance_id = await _waiting_acceptance_task(service, prompt="redispatch round")
         # 通知账本必须真的是空的：本用例要证明的就是「账本之外还有一份承诺」。
-        distribution = dict(
-            (service.log_service.read_task_runtime_meta(task_id) or {}).get("distribution") or {}
-        )
-        assert not list(distribution.get("pending_notice_node_ids") or [])
+        # 握手是唯一凭据（旧的 distribution 投影已删除）。
+        assert service.node_runner.resumable_final_acceptance_node_id(task_id) == acceptance_id
 
         await service.task_actor_service.run_task(task_id)
 
@@ -357,28 +345,6 @@ async def test_run_task_redispatches_inflight_acceptance_round_without_notice(
         assert _handshake(service, root_id).get("state") == "accepted"
         warnings = [str(call) for call in fake_logger.warning.call_args_list]
         assert any("final acceptance round re-dispatched" in text for text in warnings)
-    finally:
-        await service.close()
-
-
-@pytest.mark.asyncio
-async def test_inflight_acceptance_resume_skipped_while_distribution_holds(tmp_path: Path) -> None:
-    service = _build_service(tmp_path)
-    try:
-        task_id, _root_id, _acceptance_id = await _waiting_acceptance_task(service, prompt="hold guard")
-        meta = dict(service.log_service.read_task_runtime_meta(task_id) or {})
-        service.log_service.update_task_runtime_meta(
-            task_id,
-            distribution={**dict(meta.get("distribution") or {}), "state": "distributing"},
-        )
-
-        assert await service.task_actor_service._resume_inflight_final_acceptance(task_id) is False
-        # 失败冻结的 epoch 按设计保持冻结，不在兜底路径里复活。
-        service.log_service.update_task_runtime_meta(
-            task_id,
-            distribution={**dict(meta.get("distribution") or {}), "state": "failed"},
-        )
-        assert await service.task_actor_service._resume_inflight_final_acceptance(task_id) is False
     finally:
         await service.close()
 
@@ -422,7 +388,7 @@ async def test_rejection_after_resume_clears_resumable_candidate(tmp_path: Path)
             remaining_work=[],
             blocking_reason="缺少验收项",
         )
-        handled = service.node_runner._handle_acceptance_node_result(
+        handled = await service.node_runner._handle_acceptance_node_result(
             task=service.store.get_task(task_id),
             acceptance=acceptance,
             result=rejection,
@@ -435,3 +401,5 @@ async def test_rejection_after_resume_clears_resumable_candidate(tmp_path: Path)
         assert service.node_runner.resumable_final_acceptance_node_id(task_id) == ""
     finally:
         await service.close()
+
+

@@ -175,7 +175,9 @@ class ExecTool(Tool):
 
     @property
     def model_description(self) -> str:
-        execution_mode = self._resolve_execution_mode()
+        # 模式与授权只由运行时合同声明（前门头部 `exec_runtime_policy`、节点尾块），
+        # 工具说明不写第二份权威：`tools[]` 是钉住整表，写进 mode 后它在切模式时不刷新，
+        # 模型会按过期口径判断拦截边界。
         shell_hint = (
             " The command already runs inside PowerShell on Windows (sh on POSIX): write the body "
             "directly, do NOT wrap it in another `powershell -Command`/`bash -c`. To leave a process "
@@ -184,16 +186,14 @@ class ExecTool(Tool):
             "log with a normal exec and stop it later with process_kill. A foreground child left holding "
             "exec's output pipes is killed shortly after the call ends. For non-trivial Python, write a "
             "temp .py with filesystem_write and run `python file.py`; avoid inline `python -c` with heavy "
-            "quoting. Host/runtime process termination is always blocked, including in full_access mode; "
-            "raw kill spellings are rejected — stop the pids you started with process_kill."
+            "quoting. Host/runtime process termination is always blocked regardless of the active exec "
+            "policy; raw kill spellings are rejected — stop the pids you started with process_kill."
         )
-        if execution_mode == EXECUTION_MODE_FULL_ACCESS:
-            return (
-                "Execute shell commands without exec-side guardrails (ordinary checks) and return structured output. "
-                "The host-process termination boundary still applies."
-                + shell_hint
-            )
-        return "Execute shell commands with exec-side guardrails and return structured output." + shell_hint
+        return (
+            "Execute shell commands and return structured output. Exec-side guardrails follow the "
+            "`exec_runtime_policy` currently declared in the runtime contract."
+            + shell_hint
+        )
 
     @property
     def parameters(self) -> dict[str, Any]:

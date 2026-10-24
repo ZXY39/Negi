@@ -31,7 +31,6 @@ from main.monitoring.models import (
     TaskSummaryResult,
     TaskTreeSnapshot,
     TaskTreeSnapshotNode,
-    TaskTreeSnapshotRound,
 )
 from main.runtime.acceptance_handshake import (
     ACCEPTANCE_HANDSHAKE_KEY,
@@ -39,7 +38,6 @@ from main.runtime.acceptance_handshake import (
     ACCEPTANCE_STATE_CANCELED_BY_EXECUTION_FAILURE,
     ACCEPTANCE_STATE_REJECTED_TERMINAL,
     ACCEPTANCE_STATE_WAITING_ACCEPTANCE,
-    ACCEPTANCE_STATE_WAITING_BLOCK_VERIFICATION,
     ACCEPTANCE_STATE_WAITING_EXECUTION_RETRY,
     normalize_acceptance_handshake,
 )
@@ -457,6 +455,57 @@ class TaskQueryService:
         )
         return entries
 
+    def _node_sent_message_list(self, *, task_id: str, node_id: str) -> list[dict[str, Any]]:
+        """本节点发出的消息：通知台账里 source_node_id=本节点的行。
+
+        `node_id` 列是收件人，发送方只在 payload 里，所以这里按任务读一次再过滤；
+        节点详情是低频页，一次任务级读取可接受（(task_id) 索引见建表段）。
+        """
+        normalized_node_id = str(node_id or '').strip()
+        if not normalized_node_id:
+            return []
+        node_titles = {
+            str(item.node_id or '').strip(): str(item.title or item.node_id or '').strip()
+            for item in list(self._store.list_task_nodes(task_id) or [])
+        }
+        entries: list[dict[str, Any]] = []
+        for item in list(self._store.list_task_notifications(task_id) or []):
+            if str(item.source_node_id or '').strip() != normalized_node_id:
+                continue
+            message = str(item.message or '').strip()
+            if not message or is_system_relay_notice(item):
+                continue
+            target_node_id = str(item.node_id or '').strip()
+            ledger_status = str(item.status or '').strip()
+            consumed_at = str(item.consumed_at or '').strip()
+            merged_at = str(item.merged_at or '').strip()
+            if ledger_status == 'consumed':
+                display_status = 'merged' if merged_at else 'consumed'
+            elif ledger_status == 'delivered':
+                display_status = 'pending'
+            else:
+                display_status = ledger_status or 'pending'
+            entries.append(
+                {
+                    'notification_id': str(item.notification_id or '').strip(),
+                    'target_node_id': target_node_id,
+                    'target_title': str(node_titles.get(target_node_id) or target_node_id).strip(),
+                    'message': message,
+                    'received_at': str(item.delivered_at or item.created_at or '').strip(),
+                    'consumed_at': consumed_at,
+                    'merged_at': merged_at,
+                    'status': display_status,
+                }
+            )
+        entries.sort(
+            key=lambda entry: (
+                str(entry.get('received_at') or entry.get('consumed_at') or ''),
+                str(entry.get('notification_id') or ''),
+            ),
+            reverse=True,
+        )
+        return entries
+
     def get_tasks(self, session_id: str | None, task_type: int) -> list[TaskListItem]:
         # 窄读路径优先：json_extract 摘要避免逐任务全量解析 payload_json；
         # 窄读不可用（老 sqlite 无 json1 等）时回退整包 TaskRecord 解析。
@@ -480,8 +529,13 @@ class TaskQueryService:
             disk_usages = self._store.get_task_disk_usages([item.task_id for item in items])
         except Exception:
             disk_usages = {}
+        try:
+            node_counts = self._store.count_task_nodes_by_task([item.task_id for item in items])
+        except Exception:
+            node_counts = {}
         for item in items:
             item.disk_usage_bytes = int(disk_usages.get(item.task_id, 0) or 0)
+            item.node_count = int(node_counts.get(item.task_id, 0) or 0)
         return items
 
     def _task_list_item_from_record(self, item: Any) -> TaskListItem:
@@ -681,7 +735,8 @@ class TaskQueryService:
             # `total_model_calls` 也是界面那句"任务开始以来共 N 次调用"的出处——明细行
             # 只带最近一窗，条数不能从明细行的长度反推。
             'total_nodes': self._store.count_task_nodes(task.task_id),
-            'total_rounds': self._store.count_task_node_rounds(task.task_id),
+            # 轮次投影已停写：保留键（旧前端可能读），恒为 0，不再查表。
+            'total_rounds': 0,
             'total_model_calls': self._store.count_task_model_calls(task.task_id),
             'active_node_count': len(list(runtime_summary.get('active_node_ids') or [])),
             'runnable_node_count': len(list(runtime_summary.get('runnable_node_ids') or [])),
@@ -851,6 +906,10 @@ class TaskQueryService:
             node_id=node_id,
             runtime_node=runtime_node,
         )
+        sent_message_list = self._node_sent_message_list(
+            task_id=task_id,
+            node_id=node_id,
+        )
         append_notice_messages = [
             {
                 'notification_id': str(item.get('notification_id') or '').strip(),
@@ -922,6 +981,7 @@ class TaskQueryService:
             latest_spawn_round_id=str(payload.get('latest_spawn_round_id') or ''),
             append_notice_messages=append_notice_messages,
             message_list=message_list,
+            sent_message_list=sent_message_list,
             direct_child_results=[
                 dict(item)
                 for item in list(payload.get('direct_child_results') or [])
@@ -1017,15 +1077,9 @@ class TaskQueryService:
             for item in projection_nodes
             if str(item.node_id or '').strip()
         }
-        rounds = list(self._store.list_task_node_rounds(task_id) or [])
+        # 轮次投影已停写：不再读 task_node_rounds。第三个返回值保留（恒空）只为
+        # 签名稳定；子节点关系一律由投影节点的 parent_node_id 直接推导。
         rounds_by_parent: dict[str, list[Any]] = {}
-        for item in rounds:
-            rounds_by_parent.setdefault(str(item.parent_node_id or '').strip(), []).append(item)
-        for parent_id, items in rounds_by_parent.items():
-            rounds_by_parent[parent_id] = sorted(
-                [item for item in items if str(getattr(item, 'round_id', '') or '').strip()],
-                key=lambda item: (int(getattr(item, 'round_index', 0) or 0), str(getattr(item, 'round_id', '') or '')),
-            )
         direct_children: dict[str, list[str]] = {}
         for item in projection_nodes:
             parent_id = str(getattr(item, 'parent_node_id', '') or '').strip()
@@ -1263,27 +1317,6 @@ class TaskQueryService:
             'kind': str(step.get('kind') or '').strip(),
         }
 
-    @staticmethod
-    def _projection_default_round_id(record: Any, rounds: list[Any]) -> str:
-        explicit_default = str(getattr(record, 'default_round_id', '') or '').strip()
-        if explicit_default and any(str(getattr(item, 'round_id', '') or '').strip() == explicit_default for item in rounds):
-            return explicit_default
-        if rounds:
-            latest = next((item for item in rounds if bool(getattr(item, 'is_latest', False))), rounds[-1])
-            return str(getattr(latest, 'round_id', '') or '').strip()
-        return ''
-
-    @staticmethod
-    def _projection_round_child_ids(round_record: Any, *, node_map: dict[str, Any] | None = None) -> list[str]:
-        child_ids = [
-            str(child_id or '').strip()
-            for child_id in list(getattr(round_record, 'child_node_ids', []) or [])
-            if str(child_id or '').strip()
-        ]
-        if node_map is None:
-            return child_ids
-        return [child_id for child_id in child_ids if child_id in node_map]
-
     def _projection_auxiliary_child_ids(
         self,
         parent_node_id: str,
@@ -1292,54 +1325,13 @@ class TaskQueryService:
         rounds_by_parent: dict[str, list[Any]],
         direct_children: dict[str, list[str]],
     ) -> list[str]:
-        normalized_parent_id = str(parent_node_id or '').strip()
-        round_child_ids = {
-            child_id
-            for round_record in list(rounds_by_parent.get(normalized_parent_id, []) or [])
-            for child_id in self._projection_round_child_ids(round_record, node_map=node_map)
-        }
+        # 轮次分组下线后，“辅助子节点”就是全部直接子节点（保持原有排序）。
+        _ = rounds_by_parent
         return [
             child_id
-            for child_id in list(direct_children.get(normalized_parent_id, []) or [])
-            if child_id not in round_child_ids
+            for child_id in list(direct_children.get(str(parent_node_id or '').strip(), []) or [])
+            if child_id in node_map
         ]
-
-    @staticmethod
-    def _projection_round_visible_in_snapshot(round_record: Any) -> bool:
-        child_ids = [
-            str(child_id or '').strip()
-            for child_id in list(getattr(round_record, 'child_node_ids', []) or [])
-            if str(child_id or '').strip()
-        ]
-        if child_ids:
-            return True
-        return any(
-            int(getattr(round_record, field_name, 0) or 0) > 0
-            for field_name in ('total_children', 'completed_children', 'running_children', 'failed_children')
-        )
-
-    def _projection_selected_round(
-        self,
-        record: Any,
-        rounds: list[Any],
-        *,
-        round_override: str = '',
-    ) -> Any | None:
-        if not rounds:
-            return None
-        requested_round_id = str(round_override or '').strip()
-        selected_round_id = str(getattr(record, 'selected_round_id', '') or '').strip()
-        default_round_id = self._projection_default_round_id(record, rounds)
-        for candidate_round_id in [requested_round_id, selected_round_id, default_round_id]:
-            if not candidate_round_id:
-                continue
-            selected = next(
-                (item for item in rounds if str(getattr(item, 'round_id', '') or '').strip() == candidate_round_id),
-                None,
-            )
-            if selected is not None:
-                return selected
-        return next((item for item in rounds if bool(getattr(item, 'is_latest', False))), None) or rounds[-1]
 
     def _projection_visible_child_ids(
         self,
@@ -1350,35 +1342,14 @@ class TaskQueryService:
         direct_children: dict[str, list[str]],
         round_override: str = '',
     ) -> list[str]:
-        normalized_parent_id = str(parent_node_id or '').strip()
-        seen: set[str] = set()
-        out: list[str] = []
-        for child_id in self._projection_auxiliary_child_ids(
-            normalized_parent_id,
+        # 子节点平铺：全部直接子节点都可见，轮次选择参数只为旧调用签名保留。
+        _ = (rounds_by_parent, round_override)
+        return self._projection_auxiliary_child_ids(
+            parent_node_id,
             node_map=node_map,
-            rounds_by_parent=rounds_by_parent,
+            rounds_by_parent={},
             direct_children=direct_children,
-        ):
-            if child_id in seen:
-                continue
-            seen.add(child_id)
-            out.append(child_id)
-        record = node_map.get(normalized_parent_id)
-        if record is None:
-            return out
-        selected_round = self._projection_selected_round(
-            record,
-            list(rounds_by_parent.get(normalized_parent_id, []) or []),
-            round_override=round_override,
         )
-        if selected_round is None:
-            return out
-        for child_id in self._projection_round_child_ids(selected_round, node_map=node_map):
-            if child_id in seen:
-                continue
-            seen.add(child_id)
-            out.append(child_id)
-        return out
 
     def _snapshot_node_from_projection(
         self,
@@ -1391,27 +1362,13 @@ class TaskQueryService:
         delivered_child_counts: dict[str, int],
     ) -> TaskTreeSnapshotNode:
         node_id = str(getattr(record, 'node_id', '') or '').strip()
-        parent_rounds = list(rounds_by_parent.get(node_id, []))
+        # 轮次投影已停写：快照不再携带 rounds，子节点全部平铺在 auxiliary_child_ids。
         auxiliary_child_ids = self._projection_auxiliary_child_ids(
             node_id,
             node_map=node_map,
             rounds_by_parent=rounds_by_parent,
             direct_children=direct_children,
         )
-        snapshot_rounds = [
-            TaskTreeSnapshotRound(
-                round_id=str(getattr(round_record, 'round_id', '') or '').strip(),
-                label=str(getattr(round_record, 'label', '') or '').strip(),
-                is_latest=bool(getattr(round_record, 'is_latest', False)),
-                total_children=int(getattr(round_record, 'total_children', 0) or 0),
-                completed_children=int(getattr(round_record, 'completed_children', 0) or 0),
-                running_children=int(getattr(round_record, 'running_children', 0) or 0),
-                failed_children=int(getattr(round_record, 'failed_children', 0) or 0),
-                child_ids=self._projection_round_child_ids(round_record),
-            )
-            for round_record in parent_rounds
-            if self._projection_round_visible_in_snapshot(round_record)
-        ]
         payload = dict(getattr(record, 'payload', {}) or {})
         node_kind = str(getattr(record, 'node_kind', '') or 'execution').strip() or 'execution'
         status = str(getattr(record, 'status', '') or 'in_progress').strip() or 'in_progress'
@@ -1435,7 +1392,6 @@ class TaskQueryService:
                 parent_visible = False
             elif node_kind == 'execution' and handshake_state in {
                 ACCEPTANCE_STATE_WAITING_ACCEPTANCE,
-                ACCEPTANCE_STATE_WAITING_BLOCK_VERIFICATION,
             }:
                 parent_visible = False
         return TaskTreeSnapshotNode(
@@ -1449,8 +1405,8 @@ class TaskQueryService:
             title=str(getattr(record, 'title', '') or node_id).strip() or node_id,
             updated_at=str(getattr(record, 'updated_at', '') or '').strip(),
             children_fingerprint=str(getattr(record, 'children_fingerprint', '') or '').strip(),
-            default_round_id=self._projection_default_round_id(record, snapshot_rounds),
-            rounds=snapshot_rounds,
+            default_round_id='',
+            rounds=[],
             auxiliary_child_ids=auxiliary_child_ids,
             pending_notice_count=self._node_pending_notice_count(
                 node_id=node_id,
@@ -1464,30 +1420,6 @@ class TaskQueryService:
             parent_visible=parent_visible,
             acceptance_handshake_state=handshake_state,
         )
-
-    def _distribution_state_with_ledger(self, task_id: str, runtime_meta: dict[str, Any]) -> TaskDistributionState:
-        """分发读数：meta 副本 + 权威 epoch 行的排空账本。
-
-        meta 的 `frozen_node_ids` 是写入侧顺带维护的副本，可能是空的（epoch 失败后驱动器
-        不再跑、或进程重启后还没重算过一版）；账本的单一真源在 epoch 行里，空的时侯回查
-        一次单行读。只影响进度下界与节点 `barrier_frozen` 标注，不参与冻结/释放判定。
-        """
-        distribution = TaskDistributionState.model_validate(runtime_meta.get('distribution') or {})
-        if distribution.frozen_node_ids or not distribution.active_epoch_id:
-            return distribution
-        try:
-            epoch = self._store.get_task_message_distribution_epoch(task_id, distribution.active_epoch_id)
-        except Exception:
-            return distribution
-        payload = dict(epoch.payload or {}) if epoch is not None and isinstance(epoch.payload, dict) else {}
-        ledger = [
-            str(item or '').strip()
-            for item in list(payload.get('frozen_node_ids') or [])
-            if str(item or '').strip()
-        ]
-        if not ledger:
-            return distribution
-        return distribution.model_copy(update={'frozen_node_ids': ledger})
 
     def _build_tree_snapshot(
         self,
@@ -1595,20 +1527,8 @@ class TaskQueryService:
                 for node_id in included_ids
                 if node_id in node_map
             }
-        runtime_meta = self._log_service.read_task_runtime_meta(task_id) or {}
-        distribution = self._distribution_state_with_ledger(task_id, runtime_meta)
-        # subtree_barrier 是统一后的单一分发模式；task_wide_barrier 是旧持久化
-        # meta 的历史名称（根目标定向即原全局模式），两者同样标记 barrier_blocked。
-        if distribution.mode in {'subtree_barrier', 'task_wide_barrier'}:
-            frozen_node_ids = set(distribution.frozen_node_ids or [])
-            for node_id in set(distribution.blocked_node_ids or []):
-                current = snapshot_nodes.get(str(node_id or '').strip())
-                if current is None:
-                    continue
-                # 排空账本比 blocked 快照更精确：blocked 只说明「该停」，
-                # frozen 才说明「已经停在检查点上了」。
-                status = 'barrier_frozen' if current.node_id in frozen_node_ids else 'barrier_blocked'
-                snapshot_nodes[current.node_id] = current.model_copy(update={'distribution_status': status})
+        # distribution epoch 已删除：runtime_meta.distribution 恒为空，不再读取；
+        # 快照节点的 distribution_status 保持空串（字段仅为旧客户端保留）。
         projection_meta = self._store.get_task_projection_meta(task_id)
         snapshot_version = str(getattr(projection_meta, 'version', '') or '').strip() or str(
             max(0, len(node_map))
@@ -1826,7 +1746,8 @@ class TaskQueryService:
         dispatch_pool = int(dispatch_limits.pop('pool', 0) or 0)
         dispatch_running = self._sanitize_dispatch_counters(runtime_meta.get('dispatch_running'))
         dispatch_queued = self._sanitize_dispatch_counters(runtime_meta.get('dispatch_queued'))
-        distribution = TaskDistributionState.model_validate(runtime_meta.get('distribution') or {})
+        # epoch 下线后 runtime_meta.distribution 恒为空：不读，直接给空结构保持响应形状。
+        distribution = TaskDistributionState()
         if not heads:
             self._live_frame_cache.pop(task_id, None)
             if any(dispatch_limits.values()) or any(dispatch_running.values()) or any(dispatch_queued.values()):
@@ -2108,7 +2029,6 @@ class TaskQueryService:
             label_by_status = {
                 ACCEPTANCE_STATE_WAITING_ACCEPTANCE: '等待验收',
                 ACCEPTANCE_STATE_WAITING_EXECUTION_RETRY: '等待执行节点重试',
-                ACCEPTANCE_STATE_WAITING_BLOCK_VERIFICATION: '等待冻结核验',
                 'running': '验收运行中',
                 'passed': '验收通过',
                 'failed': '验收失败',

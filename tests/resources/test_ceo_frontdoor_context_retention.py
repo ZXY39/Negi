@@ -9,6 +9,18 @@ from g3ku.runtime.frontdoor import _ceo_runtime_ops as ceo_runtime_ops
 from g3ku.runtime.frontdoor import prompt_cache_contract
 from g3ku.runtime.frontdoor.ceo_runner import CeoFrontDoorRunner
 from g3ku.runtime.frontdoor.state_models import CeoRuntimeContext, initial_persistent_state
+from g3ku.runtime.frontdoor.tool_contract import split_pinned_contract_from_system_text
+
+
+def _without_pinned_head(messages):
+    normalized = []
+    for item in list(messages or []):
+        if isinstance(item, dict) and str(item.get("role") or "").strip() == "system":
+            base, _pinned = split_pinned_contract_from_system_text(item.get("content"))
+            normalized.append({**item, "content": base})
+        else:
+            normalized.append(item)
+    return normalized
 
 
 def _loop_with_session(session_key: str):
@@ -750,11 +762,13 @@ async def test_prepare_turn_quarantines_unexpected_context_shrink_without_reason
         runtime=runtime,
     )
     assert getattr(session, "_frontdoor_history_shrink_reason", "") == "context_shrink_quarantine"
-    assert session._frontdoor_request_body_messages == runner._durable_frontdoor_request_body_messages(
-        [
-            {"role": "system", "content": "SYSTEM"},
-            {"role": "user", "content": "new question"},
-        ]
+    assert _without_pinned_head(session._frontdoor_request_body_messages) == _without_pinned_head(
+        runner._durable_frontdoor_request_body_messages(
+            [
+                {"role": "system", "content": "SYSTEM"},
+                {"role": "user", "content": "new question"},
+            ]
+        )
     )
 
 
@@ -865,7 +879,7 @@ async def test_prepare_turn_ignores_runtime_only_tool_metadata_when_checking_con
     )
 
     assert prepared["frontdoor_history_shrink_reason"] == ""
-    assert prepared["frontdoor_request_body_messages"] == [
+    assert _without_pinned_head(prepared["frontdoor_request_body_messages"]) == [
         *normalized_baseline,
         {"role": "user", "content": "new question"},
     ]
@@ -1276,7 +1290,7 @@ async def test_prepare_turn_heartbeat_continues_previous_request_body_and_append
             "internal_prompt_kind": "heartbeat_rule",
         },
     }
-    assert [(item["role"], item["content"]) for item in prepared["messages"]] == [
+    assert [(item["role"], item["content"]) for item in _without_pinned_head(prepared["messages"])] == [
         ("system", "SYSTEM"),
         ("user", "u1"),
         ("assistant", "a1"),
@@ -1370,7 +1384,7 @@ async def test_prepare_turn_ignores_stale_turn_only_note_when_checking_context_s
     )
 
     assert prepared["frontdoor_history_shrink_reason"] == ""
-    assert prepared["frontdoor_request_body_messages"] == [
+    assert _without_pinned_head(prepared["frontdoor_request_body_messages"]) == [
         {"role": "system", "content": "SYSTEM"},
         {"role": "user", "content": "u1"},
         {"role": "user", "content": "new question"},

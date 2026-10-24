@@ -91,12 +91,10 @@ function renderTasks() {
                     <label class="project-select-toggle${S.multiSelectMode ? " is-visible" : ""}"><input type="checkbox" class="project-select-checkbox ui-checkbox-input" aria-label="选择任务" ${selected ? "checked" : ""} ${S.taskBusy ? "disabled" : ""}><span class="ui-checkbox-box" aria-hidden="true"></span></label>
                     <div class="pc-topbar-meta">
                         <span class="status-badge" data-status="${esc(statusKey)}" data-task-status>${esc(taskStatusLabel(task))}</span>
-                        <span class="pc-task-id-chip">
+                        <button class="pc-task-id-chip" type="button" title="复制任务 ID" aria-label="复制任务 ID">
                             <span class="pc-task-id-label">Task</span>
                             <span class="pc-task-id-value">${esc(taskId)}</span>
-                        </span>
-                        <button class="icon-btn pc-copy-btn" type="button" title="复制任务 ID" aria-label="复制任务 ID">
-                            <i data-lucide="copy"></i>
+                            <i data-lucide="copy" class="pc-task-id-copy" aria-hidden="true"></i>
                         </button>
                     </div>
                 </div>
@@ -113,7 +111,7 @@ function renderTasks() {
             </div>
             <div class="pc-header"><div class="pc-header-left"><h3 class="pc-title" data-task-title title="${esc(task.title || taskId)}">${esc(task.title || taskId)}</h3></div></div>
             <div class="pc-created-at"><span class="pc-field-label">开始</span><span class="pc-field-value">${esc(taskCreatedAtText(task))}</span>${taskIsTerminal(task) ? `<span class="pc-field-label pc-field-label--end">结束</span><span class="pc-field-value" data-task-finished-at>${esc(taskFinishedAtText(task))}</span>` : ""}</div>
-            <div class="pc-created-at"><span class="pc-field-label">占用大小</span><span class="pc-field-value" data-task-disk-usage>${esc(formatTaskBytes(task?.disk_usage_bytes))}</span><span class="pc-field-value pc-elapsed" data-task-elapsed title="总耗时">${esc(taskElapsedText(task))}</span></div>
+            <div class="pc-created-at"><span class="pc-field-label">占用大小</span><span class="pc-field-value" data-task-disk-usage>${esc(formatTaskBytes(task?.disk_usage_bytes))}</span><span class="pc-field-label pc-field-label--end">节点数</span><span class="pc-field-value" data-task-node-count>${esc(formatTaskNodeCount(task?.node_count))}</span><span class="pc-field-value pc-elapsed" data-task-elapsed title="总耗时">${esc(taskElapsedText(task))}</span></div>
             <div class="pc-metrics">${metricsMarkup}</div>
             ${taskPauseHintMarkup(taskId)}
         `;
@@ -126,7 +124,7 @@ function renderTasks() {
             else S.selectedTaskIds.delete(taskId);
             renderTasks();
         });
-        el.querySelector(".pc-copy-btn")?.addEventListener("click", async (e) => {
+        el.querySelector(".pc-task-id-chip")?.addEventListener("click", async (e) => {
             e.stopPropagation();
             await copyTaskId(taskId);
         });

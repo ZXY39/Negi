@@ -5,7 +5,7 @@ Start here when you are new to the repository or when a change crosses subsystem
 ## Reading Order
 
 1. `runtime-overview.md`
-2. `main-task-runtime.md` when the change touches task message distribution / append notices, acceptance handoff and spawn review, node-level pause and recovery, or shutdown pause / startup auto-resume
+2. `main-task-runtime.md` when the change touches the node mailbox / wake paths, acceptance verdicts and handoff, node-level pause and the watchdog, or shutdown pause / startup auto-resume
 3. `operations-and-maintenance.md` when you need to run, debug, or deploy the system
 4. `context-and-cache-troubleshooting.md` when the change touches prompt caching, context retention, append-only request growth, or request artifact forensics
 5. `tool-and-skill-system.md`
@@ -22,7 +22,7 @@ Start here when you are new to the repository or when a change crosses subsystem
 - `runtime-overview.md`
   Use for session lifecycle, frontdoor/runtime flow, tool execution flow, cross-module runtime behavior, frontdoor context compression, and node model route resolution.
 - `main-task-runtime.md`
-  Use for the task side of the runtime: append-notice distribution epochs, mailbox delivery and barriers, acceptance node lifecycle and spawn review, node-level pause/resume/cancel, and graceful shutdown pause with startup auto-resume.
+  Use for the task side of the runtime: node mailbox and wake semantics, acceptance three-tier verdicts, node-level pause/resume/cancel and the structural watchdog, and graceful shutdown pause with startup auto-resume.
 - `operations-and-maintenance.md`
   Use for startup workflows (including the `negi` command stub, icons and the uninstall entry that install writes), troubleshooting order, high-risk change types, memory queue/reset workflows, and Docker deployment.
 - `context-and-cache-troubleshooting.md`
@@ -48,9 +48,11 @@ Start here when you are new to the repository or when a change crosses subsystem
 
 - Node cache misses, restart-seed continuity, token preflight/compression questions → `context-and-cache-troubleshooting.md` (+ `runtime-overview.md`)
 - Append-notice delivery, `waiting_children` replay, task-tree banner after distribution → `runtime-overview.md` + `operations-and-maintenance.md`
-- 追加通知后任务停在 paused、任务树出现红色「消息分发失败」横幅、epoch state=failed → `main-task-runtime.md`「分发状态机与屏障」+ `operations-and-maintenance.md`「task_append_notice / 任务消息分发维护要点」
+- （历史，已删除）追加通知后任务停在 paused / 红色「消息分发失败」横幅 / epoch state=failed：distribution epoch 已整体删除，按 `main-task-runtime.md` 附录 A 理解旧库数据，不要按它排障。.md`「task_append_notice / 任务消息分发维护要点」
 - 分发期间想知道"每个节点到底卡在哪一步"（消息已受理但未投递 / 节点停在检查点等屏障释放 / 还压在一枚在飞模型请求上）、或节点详情已显示重试中而 toast 不出现 → `web-and-admin.md`「Task Message Distribution UI Contract」+「Model Retry Visibility UI Contract」
 - 任务非终态、一批验收节点长期 `in_progress` 而派发计数为 0（worker 日志只有 `node frozen by distribution hold`，零 ERROR 零告警）→ `main-task-runtime.md`「子树级控制事务与排空账本」（屏障释放集=冻结集）
+- 节点突然显示 `暂停·异常`（pause_reason=error）而模型没有报错 → 先看 `metadata.watchdog_history`：三条结构判据（重复相同调用 / 工具连续错误 / 超时无事件）见 `main-task-runtime.md`「看门狗」；验收方裁 `reject_no_progress` 也会走同一暂停形态，理由在验收节点 `failure_reason` 与父节点 `child_abnormal_pause` 里。
+- 验收节点选了 `reject_no_progress` 却被工具拒绝 → 首轮无 `metadata.rejection_history` 时该档按设计禁用（`main-task-runtime.md`「验收三档裁决」）。
 - 同一工具反复返回同一条 `Error executing <tool>`、节点长期 `in_progress` 且从不进错误暂停 → `main-task-runtime.md`「Node-Level Pause and Recovery」（`runtime_fault:` 断路器）
 - 操作员点了暂停、节点 `pause_requested=True` 而 `is_paused` 长期不变 → `main-task-runtime.md`「Node-Level Pause and Recovery」（脱离派发面后的暂停直落）
 - 渠道会话（`ext:`）任务长期静默却收不到失速提醒 → `heartbeat-system.md`「Task Stall Detection」（受众谓词与它要过的两道闸门）
@@ -157,7 +159,7 @@ Start here when you are new to the repository or when a change crosses subsystem
 - 相邻跳 provider `tools[]` 成员在变、且没有真实授权变化（缓存命中随之掉）→ `tool-and-skill-system.md`「Provider Tool Surface」+ `context-and-cache-troubleshooting.md`「跨普通 fresh turn 的 tool schema churn」
 - 前缀与 `tools[]` 逐字相同而命中掉了、要数"这一跳跳了几档/为什么跳"，或日志里按 `Model route selected` 统计档位却读出 0 次跨档 → `context-and-cache-troubleshooting.md`「跨档跳的未命中按台账的档位归属读」；组名与成员对不上先读 `GET /api/models/load-balance/status` 的 `group_drift_count`
 - 重启后第一跳把头部名单或 `tools[]` 重铺了一遍（停机期间增删过 skill/工具，该跳非缓存 input 冲高、下一跳就回血）→ `context-and-cache-troubleshooting.md`「重启后继续，不能退回 transcript/history fallback」+ `tool-and-skill-system.md`「Pinned Static Declarations」
-- 工具被收回后模型仍带着那份参数表，或想知道这个滞后最长多久才消 → `tool-and-skill-system.md`「Provider Tool Surface」（钉住全冻结，增删都落在压缩或空闲边界）+ `config-and-models.md`「context_refresh」
+- 工具被收回后模型仍带着那份参数表，或想知道这个滞后最长多久才消 → `tool-and-skill-system.md`「Provider Tool Surface」（钉住全冻结，增删都落在压缩边界；两次重印之间的变化由一次性通知点名）
 - 在 Tool Admin 改了一颗工具的参数定义、在跑会话与在飞节点这一跳还是旧字节 → `tool-and-skill-system.md`「参数表的来源」（参数表的字节由钉住整表供出，编辑到重印边界才被吸收）+ `tool-hydration-and-callable-chain.md`「钉住的 `tools[]` 与它的滞后出口」
 - 升级旧实例后，某条工具的角色/启停看起来回到默认，或工具停用后没有任何东西把它捞回来 → `tool-and-skill-system.md`「Tool Admin RBAC」（一次性展开迁移；核心工具允许停用、禁止删除，且没有自动拉起）
 - 前门改了尾块运行时契约的一个字段却不出现在请求体里 → `tool-and-skill-system.md`「Provider Tool Surface」（发送前会用 state 重建契约块，装配层那份会被覆盖）

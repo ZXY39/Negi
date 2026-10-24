@@ -889,10 +889,55 @@ textarea {
     position: absolute;
     top: 12px;
     right: 12px;
-    z-index: 5;
+    z-index: 7;
     display: flex;
+    align-items: center;
+    gap: var(--space-2);
     justify-content: flex-end;
     pointer-events: none;
+}
+
+/* 节点行上"展开已结束子节点"的入口：默认过滤把子节点藏起来时必须留下这个入口。 */
+.execution-tree-expand {
+    display: inline-flex;
+    align-items: center;
+    gap: 2px;
+    flex: 0 0 auto;
+    padding: 1px 6px;
+    border: 1px solid color-mix(in srgb, var(--border-color) 86%, transparent);
+    border-radius: var(--radius-full);
+    color: var(--text-muted);
+    font-size: 0.76rem;
+    line-height: 1.4;
+    cursor: pointer;
+}
+
+.execution-tree-expand:hover,
+.execution-tree-expand:focus-visible {
+    color: var(--text-primary);
+    border-color: color-mix(in srgb, var(--brand-primary) 46%, var(--border-color));
+    outline: none;
+}
+
+.execution-tree-expand-count {
+    font-variant-numeric: tabular-nums;
+}
+
+.execution-tree-unread {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    flex: 0 0 auto;
+    min-width: 18px;
+    height: 18px;
+    padding: 0 5px;
+    border-radius: var(--radius-full);
+    background: var(--brand-primary);
+    color: var(--text-on-brand, #fff);
+    font-size: 0.72rem;
+    font-weight: 700;
+    font-variant-numeric: tabular-nums;
+    line-height: 1;
 }
 
 .task-tree-floating-reset {
@@ -1096,33 +1141,6 @@ textarea {
     overscroll-behavior: contain;
 }
 
-.task-tree-distribution-bubble {
-    position: sticky;
-    top: var(--space-3);
-    z-index: 4;
-    width: fit-content;
-    max-width: min(720px, calc(100% - var(--space-6)));
-    margin: 0 auto var(--space-3);
-    padding: 10px 14px;
-    border-radius: 999px;
-    border: 1px solid color-mix(in srgb, #f59e0b 44%, var(--border-color));
-    background: color-mix(in srgb, #f59e0b 14%, var(--bg-app));
-    box-shadow: 0 12px 32px rgba(245, 158, 11, 0.12);
-    color: color-mix(in srgb, #92400e 88%, var(--text-primary));
-    font-size: 0.84rem;
-    font-weight: 700;
-    line-height: 1.35;
-    text-align: center;
-    pointer-events: none;
-}
-
-.task-tree-distribution-bubble--failed {
-    border-color: color-mix(in srgb, #ef4444 52%, var(--border-color));
-    background: color-mix(in srgb, #ef4444 14%, var(--bg-app));
-    box-shadow: 0 12px 32px rgba(239, 68, 68, 0.14);
-    color: color-mix(in srgb, #b91c1c 88%, var(--text-primary));
-}
-
 .tree-container.is-panning {
     cursor: grabbing;
     user-select: none;
@@ -1297,19 +1315,6 @@ textarea {
     --tree-branch-color: var(--tree-line-failed);
 }
 
-/* 定向通知分发不再全局改色：只把"受影响节点之间"的连线标记为分发色。
-   .execution-tree-list--distribution-affected 表示该子列表的父节点被冻结
-   （父→子垂线段可染黄）；.execution-tree-item--distribution-affected 表示
-   节点自身在冻结子树内。两者同时成立才覆盖该条连线的分支色，子树根节点
-   与其（未受影响的）父节点之间的边界连线因此保持原状态色。通知被消费、
-   epoch 完成后 distribution UI 退出，类名随重渲染移除，连线自动恢复。 */
-.execution-tree.execution-tree--distribution-active .execution-tree-list.execution-tree-list--distribution-affected {
-    --tree-branch-color: var(--tree-line-distribution);
-}
-
-.execution-tree.execution-tree--distribution-active .execution-tree-list.execution-tree-list--distribution-affected > .execution-tree-item.execution-tree-item--distribution-affected {
-    --tree-branch-color: var(--tree-line-distribution);
-}
 
 .execution-tree-node {
     position: relative;
@@ -3698,25 +3703,25 @@ textarea {
 .interaction-flow-summary::-webkit-details-marker {
     display: none;
 }
-.interaction-flow-summary::after {
+/* 前门展开钮是一个 8px 圆点（#39c5bb），16px 盒子用来对齐点击区。 */
+.interaction-flow-chevron {
+    position: relative;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    flex: none;
+    width: 16px;
+    height: 16px;
+    font-size: 0;
+    line-height: 1;
+}
+
+.interaction-flow-chevron::before {
     content: "";
     width: 8px;
     height: 8px;
-    flex-shrink: 0;
-    border-right: 2px solid currentColor;
-    border-bottom: 2px solid currentColor;
-    transform: rotate(45deg);
-    transition: transform var(--transition-fast);
-}
-
-.interaction-flow[open] .interaction-flow-summary::after {
-    transform: rotate(-135deg);
-}
-
-.interaction-flow-title {
-    font-size: 0.85rem;
-    font-weight: 600;
-    color: var(--text-primary);
+    border-radius: var(--radius-full);
+    background: #39c5bb;
 }
 
 .interaction-flow-meta {
@@ -3870,6 +3875,36 @@ textarea {
     font-weight: 600;
     color: var(--text-primary);
     min-width: 0;
+}
+
+/* 模型中途输出：折叠时摘要行只占一行并向右溢出（省略号）；展开后仍是同一段原文，
+   换成固定高度可滚动。正文框不铺底色、不描边，看起来就是原文本本身。 */
+.task-trace-step--turn-text .interaction-step-lead {
+    flex: 1 1 auto;
+    overflow: hidden;
+}
+
+.task-trace-step--turn-text .interaction-step-title {
+    flex: 1 1 auto;
+    overflow: hidden;
+    white-space: nowrap;
+    text-overflow: ellipsis;
+}
+
+.task-trace-step--turn-text[open] .interaction-step-title {
+    display: block;
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
+    word-break: break-word;
+    text-overflow: clip;
+    /* 16.5 行视窗：max-height 而不是 height，短正文不预占空白。 */
+    max-height: calc(16.5 * 1.6em);
+    overflow-y: auto;
+    overscroll-behavior: contain;
+    background: transparent;
+    border: 0;
+    line-height: 1.6;
+    cursor: text;
 }
 
 .interaction-step-status {
@@ -4038,10 +4073,6 @@ textarea {
 
 .task-trace-step[open] {
     box-shadow: var(--shadow-sm);
-}
-
-.task-trace-text-block {
-    padding: var(--space-2) var(--space-3);
 }
 
 .task-trace-step--notice {
@@ -7569,7 +7600,8 @@ textarea {
 .model-chain-slide.is-dragging,
 .model-available-item.is-dragging {
     opacity: 0.92;
-    transform: rotate(1deg) scale(1.01);
+    /* 不再旋转/缩放：拖动影像取的是这张卡片的快照，带变换时边缘会被裁掉，
+       只剩中间一截跟着鼠标走。 */
     border-color: color-mix(in srgb, var(--brand-primary) 42%, var(--border-color));
     box-shadow: 0 24px 42px -20px rgba(15, 23, 42, 0.55), 0 0 0 3px color-mix(in srgb, var(--brand-primary) 18%, transparent);
     background: color-mix(in srgb, var(--bg-panel) 92%, var(--brand-primary) 8%);
@@ -8936,10 +8968,10 @@ textarea {
     flex: 1;
 }
 
+/* 落区不再画虚线框：拖动时整条 Agent 模型链被框一圈，视觉噪声大于提示价值。 */
 .model-chain-list.is-drop-zone,
 .model-shared-list.is-drop-zone {
-    outline: 1px dashed color-mix(in srgb, var(--brand-primary) 42%, var(--border-color));
-    outline-offset: 6px;
+    outline: 0;
 }
 
 .model-shared-panel {
@@ -13151,14 +13183,6 @@ textarea {
 
 .ceo-timeline .interaction-flow {
     order: -1;
-    border: 0;
-    background: transparent;
-    border-radius: 0;
-    overflow: visible;
-}
-
-.ceo-timeline .interaction-flow-summary {
-    display: none;
 }
 
 /* 跟进消息打断标记:归档半截回合里被补充消息拦腰打断的那个阶段标题用警示色提示 */
@@ -16769,4 +16793,607 @@ textarea {
 #view-external .qq-bot-account-row .external-token-actions {
     padding-top: 0;
     border-top: 0;
+}
+
+/* ===== 任务卡片顶行 / 大厅筛选 / 详情头部（2026-10-24） ===== */
+
+/* 卡片顶行：状态胶囊、任务 ID 胶囊、更多按钮同高；未进多选态时勾选位不占位，
+   状态贴卡片左缘而不是被空槽挤到 ID 旁边。 */
+.pc-topbar .status-badge {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    height: 30px;
+    min-height: 30px;
+    padding: 0 10px;
+    flex: 0 0 auto;
+}
+
+.pc-topbar .pc-task-id-chip {
+    height: 30px;
+    min-height: 30px;
+    padding: 0 10px;
+    font: inherit;
+    text-align: left;
+    cursor: pointer;
+}
+
+.pc-topbar .pc-task-id-chip:hover {
+    border-color: color-mix(in srgb, var(--brand-primary) 34%, var(--border-color));
+    background: color-mix(in srgb, var(--brand-primary) 8%, var(--bg-panel));
+}
+
+.pc-topbar .pc-task-id-chip:focus-visible {
+    outline: 2px solid color-mix(in srgb, var(--brand-primary) 60%, transparent);
+    outline-offset: 2px;
+}
+
+/* 复制入口并进 ID 胶囊：复制图标常驻，整颗胶囊可点。 */
+.pc-task-id-copy {
+    width: 14px;
+    height: 14px;
+    flex: 0 0 auto;
+    color: var(--text-muted);
+}
+
+.pc-task-id-chip:hover .pc-task-id-copy {
+    color: var(--brand-primary);
+}
+
+.pc-topbar .pc-card-menu-trigger.pc-card-menu-trigger {
+    width: 30px;
+    min-width: 30px;
+    height: 30px;
+    min-height: 30px;
+}
+
+.pc-topbar .project-select-toggle:not(.is-visible) {
+    display: none;
+}
+
+/* 排序 / 树深度：标签居中，去掉右侧箭头（当前值本来就不在按钮上展示）。 */
+.task-depth-setting-main.task-depth-setting-main {
+    justify-content: center;
+    padding: 0 var(--ui-space-3);
+}
+
+.task-depth-setting .resource-select-icon,
+.task-sort-setting .resource-select-icon {
+    display: none;
+}
+
+/* 树深度“自定义”：这一行本身就是输入位。 */
+.resource-select-option--custom {
+    cursor: text;
+}
+
+.resource-select-option--custom .resource-select-option-label {
+    flex: 0 0 auto;
+}
+
+.task-depth-inline-input {
+    flex: 1 1 auto;
+    min-width: 56px;
+    height: 30px;
+    padding: 0 8px;
+    border: 1px solid var(--ui-border);
+    border-radius: 8px;
+    background: var(--ui-bg-surface);
+    color: var(--ui-text);
+    font: inherit;
+    font-weight: 600;
+}
+
+.task-depth-inline-input:focus-visible {
+    outline: 0;
+    border-color: var(--ui-brand);
+}
+
+.task-depth-inline-apply {
+    flex: 0 0 auto;
+    height: 30px;
+}
+
+/* 详情头部：提示词吃掉全部剩余宽度（随窗口伸缩），右侧依次是活跃节点、
+   展开全部、错误日志——展开全部因此紧贴错误日志，中间不再留空档。 */
+.task-detail-header .task-prompt-disclosure {
+    flex: 1 1 auto;
+    max-width: none;
+}
+
+.task-detail-header .header-actions {
+    margin-left: 0;
+}
+
+.task-detail-header .task-detail-toggle {
+    cursor: pointer;
+    user-select: none;
+}
+
+.task-detail-header .task-detail-toggle .ui-checkbox-box {
+    width: 16px;
+    height: 16px;
+}
+
+.task-detail-header .task-detail-toggle:hover {
+    border-color: var(--ui-border-strong);
+    background: var(--ui-neutral-soft);
+}
+
+/* 节点卡：窄卡（验收行合并进位）里长状态徽标会把标题挤到一字一行，卡片能
+   长到几百像素。标题保底 min(10em, 100%)，放不下时徽标换行；标题最多 3 行。 */
+.execution-tree-node-head {
+    flex-wrap: wrap;
+    row-gap: 6px;
+}
+
+.execution-tree-node-title {
+    min-width: min(10em, 100%);
+    /* 行高 1.45 × 3 行：标题最多占三行（flex 子项会被 blockify，
+       -webkit-line-clamp 在这里不生效，用高度硬约束）。 */
+    max-height: 4.35em;
+    overflow: hidden;
+}
+
+/* ---- 节点详情：消息列表收发分栏 / 派生记录节点列表 ---- */
+.ad-message-tabs {
+    display: inline-flex;
+    align-items: center;
+    gap: 2px;
+    flex: none;
+    padding: 2px;
+    border: 1px solid var(--border-color);
+    border-radius: var(--radius-full);
+    background: color-mix(in srgb, var(--bg-app) 82%, transparent);
+}
+
+.ad-message-tab {
+    border: 0;
+    background: transparent;
+    color: var(--text-secondary);
+    font-size: 0.76rem;
+    line-height: 1.5;
+    padding: 3px 12px;
+    border-radius: var(--radius-full);
+    cursor: pointer;
+}
+
+.ad-message-tab:hover {
+    color: var(--text-primary);
+}
+
+.ad-message-tab.is-active {
+    background: var(--bg-panel);
+    color: var(--text-primary);
+    box-shadow: 0 1px 2px rgba(0, 0, 0, 0.12);
+}
+
+/* 消息条目展开后只留正文：不铺底、不描边，框就是文字本身。 */
+.task-trace-message-body {
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
+    word-break: break-word;
+    color: var(--text-primary);
+    font-size: 0.86rem;
+    line-height: 1.65;
+    max-height: 320px;
+    overflow-y: auto;
+    overscroll-behavior: contain;
+}
+
+.spawn-node-list {
+    display: grid;
+    gap: var(--space-2);
+}
+
+.spawn-node {
+    border: 1px solid var(--border-color);
+    border-radius: var(--radius-md);
+    background: color-mix(in srgb, var(--bg-panel) 70%, var(--bg-app));
+    overflow: hidden;
+}
+
+.spawn-node-summary {
+    display: flex;
+    align-items: center;
+    gap: var(--space-2);
+    padding: var(--space-2) var(--space-3);
+    cursor: pointer;
+    list-style: none;
+}
+
+.spawn-node-summary::-webkit-details-marker {
+    display: none;
+}
+
+.spawn-node-mode {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    flex: none;
+    padding: 1px 8px;
+    border-radius: var(--radius-full);
+    font-size: 0.72rem;
+    line-height: 1.6;
+    background: color-mix(in srgb, var(--brand-primary) 12%, transparent);
+    color: var(--brand-primary);
+}
+
+.spawn-node-mode--coverage {
+    background: color-mix(in srgb, var(--status-running-text) 14%, transparent);
+    color: var(--status-running-text);
+}
+
+.spawn-node-mode svg {
+    width: 12px;
+    height: 12px;
+}
+
+.spawn-node-goal {
+    flex: 1;
+    min-width: 0;
+    overflow: hidden;
+    white-space: nowrap;
+    text-overflow: ellipsis;
+    font-size: 0.84rem;
+    color: var(--text-primary);
+}
+
+.spawn-node-id {
+    flex: none;
+    font-family: var(--font-mono, monospace);
+    font-size: 0.7rem;
+    color: var(--text-tertiary);
+}
+
+.spawn-node-body {
+    display: grid;
+    gap: var(--space-2);
+    padding: 0 var(--space-3) var(--space-3);
+}
+
+.spawn-node-field {
+    display: grid;
+    gap: 4px;
+}
+
+.spawn-node-label {
+    font-size: 0.72rem;
+    color: var(--text-tertiary);
+}
+
+.spawn-node-text {
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
+    word-break: break-word;
+    max-height: 220px;
+    overflow-y: auto;
+    overscroll-behavior: contain;
+    font-size: 0.84rem;
+    line-height: 1.6;
+    color: var(--text-primary);
+}
+
+/* 消息行折叠摘要：状态图标 + 时间 + 来自/发送至节点药丸 + 一行预览，不用分隔符。 */
+.task-trace-step--message .interaction-step-lead {
+    flex: 1 1 auto;
+    overflow: hidden;
+    gap: 8px;
+}
+
+.task-trace-step--message .interaction-step-title {
+    flex: 1 1 auto;
+    min-width: 0;
+    overflow: hidden;
+    white-space: nowrap;
+    text-overflow: ellipsis;
+    font-weight: 500;
+}
+
+.task-message-status {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    flex: none;
+    width: 20px;
+    height: 20px;
+    border-radius: var(--radius-full);
+    background: color-mix(in srgb, var(--text-tertiary) 14%, transparent);
+    color: var(--text-secondary);
+}
+
+.task-message-status svg {
+    width: 12px;
+    height: 12px;
+}
+
+.task-message-status[data-status="pending"],
+.task-message-status[data-status="received"],
+.task-message-status[data-status="frozen"] {
+    background: var(--status-pending-bg);
+    color: var(--status-pending-text);
+}
+
+.task-message-status[data-status="consumed"],
+.task-message-status[data-status="merged"] {
+    background: var(--status-success-bg);
+    color: var(--status-success-text);
+}
+
+.task-message-status[data-status="skipped"] {
+    background: color-mix(in srgb, var(--text-tertiary) 14%, transparent);
+    color: var(--text-tertiary);
+}
+
+.task-message-time {
+    flex: none;
+    color: var(--text-tertiary);
+    font-size: 0.78rem;
+    font-variant-numeric: tabular-nums;
+}
+
+.task-node-ref-type {
+    flex: none;
+    color: var(--text-tertiary);
+    font-family: inherit;
+}
+
+.task-node-ref-id {
+    overflow: hidden;
+    white-space: nowrap;
+    text-overflow: ellipsis;
+}
+
+/* 节点 id 药丸：去掉 node: 前缀，点击打开对应节点详情（消息行 / 派生记录共用）。 */
+.task-node-ref {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    flex: none;
+    max-width: 100%;
+    padding: 1px 8px;
+    border: 1px solid var(--border-color);
+    border-radius: var(--radius-full);
+    background: color-mix(in srgb, var(--bg-app) 80%, transparent);
+    color: var(--text-secondary);
+    font-family: var(--font-mono, monospace);
+    font-size: 0.72rem;
+    line-height: 1.6;
+    cursor: pointer;
+}
+
+.task-node-ref svg {
+    width: 11px;
+    height: 11px;
+    flex: none;
+}
+
+
+.task-node-ref:hover {
+    border-color: color-mix(in srgb, var(--brand-primary) 55%, var(--border-color));
+    background: color-mix(in srgb, var(--brand-primary) 10%, transparent);
+    color: var(--brand-primary);
+}
+
+.task-node-ref:focus-visible {
+    outline: 2px solid color-mix(in srgb, var(--brand-primary) 68%, transparent);
+    outline-offset: 2px;
+}
+
+/* 节点详情：消息列表 / 派生记录各自在 10.5 条处封顶，内部滚动；
+   max-height 不留预占位，条目不足 11 条时按内容自适应。
+   封的是 .task-trace-list（滚动位置由详情视图状态按它捕获/还原）。 */
+#ad-messages .task-trace-list,
+#ad-spawn-reviews .task-trace-list {
+    max-height: calc(10.5 * 48px + 10 * var(--space-3));
+    overflow-y: auto;
+    overscroll-behavior: contain;
+}
+
+/* 中途输出列表：节点详情与 CEO 回合轨各在 16.5 条处封顶，
+   条目再多只在框内滚动，不再把整页刷长。 */
+#ad-input .task-trace-list,
+.interaction-flow-list.task-trace-list {
+    max-height: calc(16.5 * 48px + 16 * var(--space-3));
+    overflow-y: auto;
+    overscroll-behavior: contain;
+}
+
+/* 提交输出 / 验收结果：15 行视窗，右上角常驻复制按钮（滚动时浮在框上）。 */
+.task-output-shell {
+    position: relative;
+}
+
+.task-output-shell > .code-block {
+    max-height: calc(15 * 1.65em);
+    overflow-y: auto;
+    overscroll-behavior: contain;
+    padding-right: 46px;
+}
+
+.task-output-copy {
+    position: absolute;
+    top: 8px;
+    right: 8px;
+    width: 30px;
+    height: 30px;
+    background: color-mix(in srgb, var(--bg-panel) 88%, transparent);
+    border: 1px solid color-mix(in srgb, var(--border-color) 80%, transparent);
+}
+
+.task-output-copy:hover {
+    border-color: color-mix(in srgb, var(--brand-primary) 55%, var(--border-color));
+    background: color-mix(in srgb, var(--brand-primary) 10%, var(--bg-panel));
+    color: var(--brand-primary);
+}
+
+/* ---- 执行流程总框：整段流程共用一张卡，内部条目扁平化 ---- */
+.task-flow-box {
+    border: 1px solid color-mix(in srgb, var(--border-color) 78%, transparent);
+    border-radius: 18px;
+    background: color-mix(in srgb, var(--bg-app) 72%, transparent);
+    padding: 0;
+}
+
+/* 收起态与单个中途文本卡片同尺寸：外边距/内边距都沿用 .task-trace-step。 */
+.task-flow-box > #ad-input {
+    padding: 0 var(--space-3) var(--space-3);
+}
+
+.task-initial-prompt {
+    margin-bottom: var(--space-3);
+}
+
+/* 节点流程框可折叠但不画箭头/引导线：点统计行开合，文字与初始提示词左对齐。 */
+.task-flow-header {
+    display: flex;
+    align-items: center;
+    padding: var(--space-3) var(--space-3) var(--space-3) 18px;
+    cursor: pointer;
+    list-style: none;
+    color: var(--text-secondary);
+    font-size: 0.8rem;
+    font-variant-numeric: tabular-nums;
+}
+
+.task-flow-header::-webkit-details-marker {
+    display: none;
+}
+
+.task-flow-box[open] {
+    box-shadow: var(--shadow-sm);
+}
+
+.task-flow-usage {
+    flex: 1;
+    min-width: 0;
+    overflow: hidden;
+    white-space: nowrap;
+    text-overflow: ellipsis;
+}
+
+.interaction-flow {
+    /* 前门执行框不画边框线，只留底色与圆角。 */
+    border: 0;
+    border-radius: 18px;
+    background: color-mix(in srgb, var(--bg-app) 72%, transparent);
+}
+
+.interaction-flow-summary {
+    /* 外箭头与最终回答正文左对齐；秒数仍落在内部中途文本正文的竖轴上。 */
+    justify-content: flex-start;
+    gap: 26px;
+    padding-left: 0;
+}
+
+.interaction-flow-usage {
+    flex: none;
+    font-size: 0.85rem;
+    font-weight: 600;
+    color: var(--text-primary);
+    font-variant-numeric: tabular-nums;
+}
+
+/* 外层框是唯一卡片：内部条目只留内容，不再各画一层卡。 */
+.task-flow-box .task-trace-step,
+.interaction-flow-list .task-trace-step {
+    border: 0;
+    background: transparent;
+    box-shadow: none;
+    border-radius: 10px;
+    padding: var(--space-2) var(--space-2);
+}
+
+/* 每条中途文本最左侧的「>」：只折叠这一条正文，展开成 16.5 行视窗。 */
+.task-trace-turn-toggle {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    flex: none;
+    width: 16px;
+    height: 16px;
+    color: var(--text-tertiary);
+    font-size: 0.95rem;
+    line-height: 1;
+    transition: transform 0.15s ease;
+}
+
+.task-trace-step--turn-text[open] > .task-trace-summary .task-trace-turn-toggle {
+    transform: rotate(90deg);
+    color: var(--text-secondary);
+}
+
+/* 执行流程框与初始提示词框保持原来的横向内缩，不扩大到抽屉整宽。 */
+.task-initial-prompt,
+.task-flow-box {
+    margin-left: 6px;
+    margin-right: 6px;
+}
+
+/* 节点用量行与中途文本同款：0.85rem / 600 / 主文字色。 */
+.task-flow-usage {
+    font-size: 0.85rem;
+    font-weight: 600;
+    color: var(--text-primary);
+}
+
+/* 外层框内不再画每条的轨道状态点；可折叠的只有中途文本的「>」。 */
+.task-flow-box .task-trace-step::before,
+.interaction-flow-list .task-trace-step::before {
+    display: none;
+}
+
+/* 前门展开时从圆点向下延伸的细线：收起态 scaleY(0)，展开过渡到满高。 */
+.interaction-flow {
+    position: relative;
+}
+
+.interaction-flow-guide {
+    position: absolute;
+    left: 8px;
+    top: 24px;
+    bottom: var(--space-3);
+    width: 1px;
+    background: #39c5bb;
+    transform: scaleY(0);
+    transform-origin: top;
+    transition: transform 0.22s ease;
+    pointer-events: none;
+}
+
+.interaction-flow[open] .interaction-flow-guide {
+    transform: scaleY(1);
+}
+
+@keyframes taskFlowBodyIn {
+    from {
+        opacity: 0;
+        transform: translateY(-4px);
+    }
+    to {
+        opacity: 1;
+        transform: none;
+    }
+}
+
+.interaction-flow[open] .interaction-flow-list {
+    animation: taskFlowBodyIn 0.18s ease-out;
+}
+
+/* 流程内每条的时间行与工具条统一让到正文列（16px 箭头 + 12px 间距），
+   中途文本、纯工具前言都落在同一条左基线上。 */
+.task-flow-box .task-trace-step > .task-trace-body,
+.interaction-flow-list .task-trace-step > .task-trace-body {
+    padding-left: calc(16px + var(--space-3));
+}
+
+/* 第一段叙述之前的纯工具块没有标题行，时间/工具仍对齐正文列。 */
+.task-trace-step--bare {
+    border: 0;
+    background: transparent;
+}
+
+.task-flow-box .task-trace-step--bare,
+.interaction-flow-list .task-trace-step--bare {
+    padding-left: calc(var(--space-2) + 16px + var(--space-3));
 }

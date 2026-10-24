@@ -234,7 +234,10 @@ def test_spawn_round_control_signals_bypass_the_hold() -> None:
 
 
 def test_reused_execution_child_keeps_its_original_acceptance_node() -> None:
-    """清扫把验收节点打成 failed 后，复用同一执行子节点的那一轮必须沿用它，不再另配一颗。"""
+    """复用同一执行子节点的那一轮必须沿用它已绑定的验收节点，不再另配一颗。
+
+    终态验收**不**在这里重置：只有执行节点的新提交（握手路径）才有权重置裁定。
+    """
     parent = _node(ROOT_ID, kind='execution', status='in_progress', parent='', depth=0)
     child = _node(EXEC_ID, kind='execution', status='success', parent=ROOT_ID)
     swept = _node(
@@ -269,8 +272,9 @@ def test_reused_execution_child_keeps_its_original_acceptance_node() -> None:
     )
 
     assert acceptance.node_id == ACC_ID
-    assert acceptance.status == 'in_progress'
-    assert acceptance.failure_reason == ''
+    # 没有新的执行提交：既有裁定（failed / superseded）原样保留。
+    assert acceptance.status == 'failed'
+    assert 'superseded by newer spawn round' in acceptance.failure_reason
     assert bound and bound[0]['acceptance_node_id'] == ACC_ID
 
 
@@ -393,43 +397,6 @@ def test_watchdog_poll_still_raises_a_real_pause_in_observation_mode() -> None:
     with pytest.raises(TaskPausedError):
         loop._check_pause_or_cancel(TASK_ID, ROOT_ID, observation_only=True)
 
-
-def test_ad_hoc_blocked_verifier_is_not_adopted_as_the_spawn_acceptance() -> None:
-    """阻塞核验车道给同一个执行节点配的临时验收人（blocked_verification_only）不是配对对象。"""
-    parent = _node(ROOT_ID, kind='execution', status='in_progress', parent='', depth=0)
-    child = _node(EXEC_ID, kind='execution', status='success', parent=ROOT_ID)
-    ad_hoc = _node(
-        ACC_ID,
-        kind='acceptance',
-        status='in_progress',
-        parent=EXEC_ID,
-        goal='blocked-check:do the work',
-        metadata={'accepted_node_id': EXEC_ID, 'blocked_verification_only': True},
-    )
-    store = _FakeStore({ROOT_ID: parent, EXEC_ID: child, ACC_ID: ad_hoc})
-    runner = _runner(store)
-    runner._update_spawn_entry = lambda **kwargs: None  # type: ignore[attr-defined]
-    runner._stamp_spawn_owner_metadata = lambda **kwargs: None  # type: ignore[attr-defined]
-    created: list[str] = []
-
-    def _create(**_kwargs):
-        created.append('created')
-        return _node('node:acc-new', kind='acceptance', status='in_progress', parent=EXEC_ID)
-
-    runner.create_acceptance_node = _create  # type: ignore[attr-defined]
-
-    acceptance = runner._ensure_spawn_acceptance_node(
-        task=SimpleNamespace(task_id=TASK_ID),
-        parent=parent,
-        child=child,
-        spec=SimpleNamespace(goal='do the work', acceptance_prompt='按验收标准核验'),
-        cache_key=ROUND_ID,
-        cached_payload={'entries': [{'index': 0, 'child_node_id': EXEC_ID, 'acceptance_node_id': ''}]},
-        index=0,
-    )
-
-    assert created == ['created']
-    assert acceptance.node_id == 'node:acc-new'
 
 
 # --- supersede：落定归取消方，NodeRunner 不再判第二次 --------------------------
@@ -763,6 +730,8 @@ def test_converged_round_with_an_unreadable_delivery_pauses_then_replays_the_rea
     assert paused and paused[0]['node_id'] == ROOT_ID
     assert paused[0]['pause_reason'] == 'error'
     remark = str(paused[0]['remark'] or '')
+    # 已收敛轮次的重放直接进交付道：读不出子节点行就是 results_unreadable，
+    # 不是「收敛探测说不出话」的通用停等文案——后者会让人以为活儿还没干完。
     assert 'spawn_round_results_unreadable' in remark
     assert 'disk I/O error' in remark, '一手故障必须留在暂停行里'
     assert logged and 'spawn_round_results_unreadable' in str(logged[0].get('error_text') or '')
@@ -778,6 +747,35 @@ def test_converged_round_with_an_unreadable_delivery_pauses_then_replays_the_rea
     assert len(results) == 1
     assert results[0].node_output == 'shard written', '重放必须交付子节点的真实结论'
     assert len(paused) == 1, '库已修好的重放不该再停一次'
+
+
+def test_unreadable_ledger_replay_never_returns_an_all_success_result_set() -> None:
+    """记账读回空表 / 读失败时，交付道不许给出「全部成功」的空结论。"""
+    from main.errors import NodePausedError
+
+    store = _completed_round_store()
+    runner, diagnostics, paused, logged = _parking_runner(store)
+    # 轮次已 completed，但 entry 表读回来是空的——不是「0 个子节点」，是这一跳读不回。
+    store.nodes[ROOT_ID].metadata['spawn_operations'][ROUND_ID]['entries'] = []
+
+    with pytest.raises(NodePausedError):
+        asyncio.run(
+            runner._spawn_children(task_id=TASK_ID, parent_node_id=ROOT_ID, specs=_specs(), call_id=ROUND_ID)
+        )
+
+    assert paused and paused[0]['pause_reason'] == 'error'
+    assert 'spawn_round_results_unreadable' in str(paused[0]['remark'] or '')
+    assert logged, '错误行不落就没有人会被叫醒'
+    unreadable = [
+        item for item in diagnostics
+        if str(item.get('title') or '') == 'spawn_round_converged_results_unreadable'
+    ]
+    assert unreadable, diagnostics
+    assert 'entry_count=unreadable' in str(unreadable[0].get('detail') or ''), (
+        'entry 表读回空时不许把 0 当成实测条数'
+    )
+    # 交付道没有返回任何结果集，因此不存在一份「每条都成功」的假结论。
+    assert paused[0]['node_id'] == ROOT_ID
 
 
 def test_converged_delivery_that_cannot_record_a_park_reraises_the_raw_fault() -> None:

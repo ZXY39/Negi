@@ -23,8 +23,6 @@ from main.runtime.internal_tools import (
     SilentTool,
     SpawnChildNodesTool,
     SubmitFinalResultTool,
-    SubmitMessageDistributionTool,
-    SubmitNoticeInspectionDecisionTool,
 )
 
 
@@ -73,8 +71,6 @@ CONTROL_TOOLS: list[tuple[str, Callable[[], Any]]] = [
     ('spawn_child_nodes', lambda: SpawnChildNodesTool(_callback)),
     ('submit_final_result(execution)', lambda: SubmitFinalResultTool(_callback, node_kind='execution')),
     ('submit_final_result(acceptance)', lambda: SubmitFinalResultTool(_callback, node_kind='acceptance')),
-    ('submit_message_distribution', lambda: SubmitMessageDistributionTool(_callback)),
-    ('submit_notice_inspection_decision', lambda: SubmitNoticeInspectionDecisionTool(_callback)),
 ]
 
 

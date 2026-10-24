@@ -2,12 +2,11 @@
 
 设计约束：
 1. 头部名单 = 钉住时点的**全量可见** skill，每行 `id | name | description`；两次重印之间
-   可见集怎么变头部都逐字节不动（新增靠尾块 `new_readable_skills` 注入块，消失靠
+   可见集怎么变头部都逐字节不动（新增靠一次性 `[RUNTIME_NOTICE]` 投递，消失靠
    `load_skill_context` 三态回执）。
-2. 头部只在重印边界动了才变——重印判据是 roster epoch（随 token 压缩 / 手动压缩 /
-   空闲边界递增）+ 执行策略签名 + 会话临时目录；可见集本身不进判据。
-3. 尾块不再有 skill 名单机制（candidate_skills / granted / unselected / repair 行全删），
-   只保留 `new_readable_skills` 注入段。
+2. 头部只在重印边界动了才变——重印判据只有 roster epoch（随 token 压缩 / 手动压缩递增）；
+   执行策略与临时目录**不进判据**，变化由一次性通知纠正，下次压缩才随头部刷新。
+3. 头部在名单为空时也钉静态声明（exec 策略/临时目录/路径锚），否则删尾块后声明会消失。
 """
 
 from __future__ import annotations
@@ -69,18 +68,24 @@ def _pinned(*, session=None, skill_items=None, session_key="web:pinned", epoch=N
     )
 
 
-def test_render_pinned_contract_skips_head_when_roster_is_empty() -> None:
-    """没有名单就不钉：为两行短声明去动头部是不划算的买卖。"""
-    assert render_pinned_contract_text(skill_items=[], exec_runtime_policy=None, session_temp_dir="C:/t") == ""
-    assert _pinned(skill_items=[]) == ""
+def test_render_pinned_contract_keeps_extras_when_roster_is_empty() -> None:
+    """名单为空也要钉静态声明：删尾块后头部是 exec/临时目录/路径锚的唯一载体。"""
+    text = render_pinned_contract_text(skill_items=[], exec_runtime_policy=None, session_temp_dir="C:/t")
+    assert text.startswith(FRONTDOOR_PINNED_CONTRACT_HEADING)
+    assert "candidate_skills" not in text
+    assert "exec_runtime_policy: none" in text
+    assert "session_temp_dir: C:/t" in text
+    assert "path_anchor:" in text
+    assert _pinned(skill_items=[]) != ""
     roster_only = render_pinned_contract_text(
         skill_items=_items("memory"), exec_runtime_policy=None, session_temp_dir="", include_extras=False
     )
     assert roster_only.startswith(FRONTDOOR_PINNED_CONTRACT_HEADING)
     assert "- `memory` | Memory | memory 的描述。" in roster_only
+    assert "exec_runtime_policy" not in roster_only
 
 
-def test_pinned_contract_revision_key_uses_roster_epoch() -> None:
+def test_pinned_contract_revision_key_only_follows_the_roster_epoch() -> None:
     base = pinned_contract_revision_key(
         exec_runtime_policy={"mode": "auto"}, session_temp_dir="C:/t", skill_roster_epoch=0
     )
@@ -97,17 +102,18 @@ def test_pinned_contract_revision_key_uses_roster_epoch() -> None:
         )
         != base
     )
+    # 策略/临时目录变化不是重印边界：头部字节必须保持，靠一次性通知纠正
     assert (
         pinned_contract_revision_key(
             exec_runtime_policy={"mode": "ask"}, session_temp_dir="C:/t", skill_roster_epoch=0
         )
-        != base
+        == base
     )
     assert (
         pinned_contract_revision_key(
             exec_runtime_policy={"mode": "auto"}, session_temp_dir="C:/other", skill_roster_epoch=0
         )
-        != base
+        == base
     )
 
 
