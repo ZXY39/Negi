@@ -341,7 +341,7 @@ Heartbeat / cron 不在主 CEO/frontdoor 路径上使用单独的短 `ceo_heartb
 - **hidden event 的 metadata 会丢**：`sanitize_provider_messages` 与 durable 基线只保留 `role` / `content`，重启后靠内容前缀识别；新增内部提示形态时两处都要能认出它。
 - **silent 组必须整组同进同出**：只搬 assistant 行会留下无声明方的 tool 结果，只搬 tool 行会留下悬空声明；同一 assistant 行混合 silent 与非 silent 调用时，非 silent 结果不在这组里，家族测试要覆盖这种边界。
 
-改动任一家族的插入位置、寿命或压缩策略时，先跑 `tests/resources/test_mid_insert_registry.py` 的 family × stage 矩阵，再用 actual-request artifact 核对两条车道的顺序：前门是 `system → 记忆快照 → 历史 → 当轮 user → runtime notice → turn-only`，节点是 `system → bootstrap user → append notice → runtime notice → turn-only`。
+改动任一家族的插入位置、寿命或压缩策略时，先跑 `tests/resources/test_mid_insert_registry.py` 的 family × stage 矩阵，再用 actual-request artifact 核对两条车道的顺序：前门是 `system → 记忆快照 → 历史 → 当轮 user → runtime notice → 动态 appendix（retrieval / overlay）→ turn-only`，节点是 `system → bootstrap user → append notice → runtime notice → turn-only`。
 
 ## 5. 排查流程
 
