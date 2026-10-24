@@ -3140,10 +3140,11 @@ def test_build_node_message_list_steps_keeps_only_time_status_and_preview() -> N
     assert 'data-status="pending"' in result["leadHtml"]
     assert "待处理" in result["leadHtml"]
     assert "2026-04-19T20:28:17+08:00" in result["leadHtml"]
-    assert "来自" in result["leadHtml"]
+    assert "来自" not in result["leadHtml"]
     assert 'data-node-jump="node:parent-1"' in result["leadHtml"]
-    # 展示时去掉 node: 前缀。
-    assert "<span>parent-1</span>" in result["leadHtml"]
+    # 药丸内先关系文字（预置占位「节点」），再去 node: 前缀的 id。
+    assert '<span class="task-node-ref-type">节点</span>' in result["leadHtml"]
+    assert '<span class="task-node-ref-id">parent-1</span>' in result["leadHtml"]
     assert ">node:parent-1<" not in result["leadHtml"]
     assert " · " not in result["leadHtml"]
     assert result["status"] == "warning"
@@ -3207,9 +3208,10 @@ def test_build_node_sent_message_list_steps_shows_target_and_message_only() -> N
     assert 'data-status="merged"' in result["leadHtml"]
     assert 'data-lucide="circle-check"' in result["leadHtml"]
     assert "2026-04-19T20:30:00+08:00" in result["leadHtml"]
-    assert "发送至" in result["leadHtml"]
+    assert "发送至" not in result["leadHtml"]
     assert 'data-node-jump="node:child-1"' in result["leadHtml"]
-    assert "<span>child-1</span>" in result["leadHtml"]
+    assert '<span class="task-node-ref-type">节点</span>' in result["leadHtml"]
+    assert '<span class="task-node-ref-id">child-1</span>' in result["leadHtml"]
     assert ">node:child-1<" not in result["leadHtml"]
     # 节点标题不再出现在消息行里，只用 id 药丸指路。
     assert "child one" not in result["leadHtml"]
@@ -3335,8 +3337,9 @@ def test_build_spawn_review_trace_steps_lists_nodes_with_mode_and_details() -> N
     # 节点 id 药丸就是跳转入口（去 node: 前缀），不再有单独的跳转按钮。
     assert 'data-node-jump="node:child-1"' in result["body"]
     assert 'data-node-jump="node:child-2"' in result["body"]
-    assert "<span>child-1</span>" in result["body"]
-    assert "<span>child-2</span>" in result["body"]
+    assert '<span class="task-node-ref-type">节点</span>' in result["body"]
+    assert '<span class="task-node-ref-id">child-1</span>' in result["body"]
+    assert '<span class="task-node-ref-id">child-2</span>' in result["body"]
     assert ">node:child-1<" not in result["body"]
     assert "跳转到节点详情" not in result["body"]
     assert result["body"].count('class="task-node-ref"') == 2

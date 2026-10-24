@@ -651,11 +651,27 @@ function taskNodeDisplayId(nodeId) {
     return raw.startsWith("node:") ? raw.slice("node:".length) : raw;
 }
 
-// 节点 id 药丸：去 node: 前缀、带图标，点击直接打开该节点详情（消息行与派生记录共用）。
-function renderTaskNodeRef(nodeId, { icon = "circle-dot" } = {}) {
+// 节点关系预置词表：后端尚未下发关系字段，先给中性的「节点」占位；
+// 接通后按 node_relation=parent/child/sibling 直接落到三档文案。
+const TASK_NODE_RELATION_LABELS = {
+    parent: "父节点",
+    child: "子节点",
+    sibling: "同级节点",
+};
+const TASK_NODE_RELATION_PLACEHOLDER = "节点";
+
+function taskNodeRelationLabel(entry = null) {
+    const raw = String(entry?.node_relation || entry?.relation || "").trim().toLowerCase();
+    return TASK_NODE_RELATION_LABELS[raw] || TASK_NODE_RELATION_PLACEHOLDER;
+}
+
+// 节点 id 药丸：去 node: 前缀、带图标与关系文字，点击直接打开该节点详情
+// （消息行与派生记录共用）。
+function renderTaskNodeRef(nodeId, { icon = "circle-dot", relation = "" } = {}) {
     const raw = String(nodeId || "").trim();
     if (!raw) return "";
-    return `<button type="button" class="task-node-ref" data-node-jump="${esc(raw)}" title="打开节点 ${esc(raw)} 的详情"><i data-lucide="${esc(icon)}"></i><span>${esc(taskNodeDisplayId(raw))}</span></button>`;
+    const relationLabel = String(relation || "").trim() || TASK_NODE_RELATION_PLACEHOLDER;
+    return `<button type="button" class="task-node-ref" data-node-jump="${esc(raw)}" title="打开节点 ${esc(raw)} 的详情"><i data-lucide="${esc(icon)}"></i><span class="task-node-ref-type">${esc(relationLabel)}</span><span class="task-node-ref-id">${esc(taskNodeDisplayId(raw))}</span></button>`;
 }
 
 function renderTaskMessageStatus(status) {
@@ -673,7 +689,10 @@ function buildNodeMessageListSteps(node = {}) {
             renderTaskMessageStatus(status),
             `<span class="task-message-time">${esc(taskMessageTimeText(entry))}</span>`,
             sourceNodeId
-                ? `<span class="task-message-direction">来自</span>${renderTaskNodeRef(sourceNodeId, { icon: "arrow-down-left" })}`
+                ? renderTaskNodeRef(sourceNodeId, {
+                    icon: "arrow-down-left",
+                    relation: taskNodeRelationLabel(entry),
+                })
                 : "",
         ].join("");
         return {
@@ -699,7 +718,10 @@ function buildNodeSentMessageListSteps(node = {}) {
             renderTaskMessageStatus(status),
             `<span class="task-message-time">${esc(taskMessageTimeText(entry))}</span>`,
             targetNodeId
-                ? `<span class="task-message-direction">发送至</span>${renderTaskNodeRef(targetNodeId, { icon: "arrow-up-right" })}`
+                ? renderTaskNodeRef(targetNodeId, {
+                    icon: "arrow-up-right",
+                    relation: taskNodeRelationLabel(entry),
+                })
                 : "",
         ].join("");
         return {
@@ -742,7 +764,7 @@ function renderSpawnNodeItem(entry = {}, spec = null, childResult = null) {
     const mode = spawnSpecModeDescriptor(spec);
     const prompt = String(spec?.prompt || "").trim() || "暂无提示词";
     const acceptance = String(childResult?.check_result || "").trim() || "暂无验收结果";
-    const nodeRef = renderTaskNodeRef(childNodeId);
+    const nodeRef = renderTaskNodeRef(childNodeId, { relation: taskNodeRelationLabel(entry) });
     return `
         <details class="spawn-node" data-spawn-node-id="${esc(childNodeId)}">
             <summary class="spawn-node-summary">

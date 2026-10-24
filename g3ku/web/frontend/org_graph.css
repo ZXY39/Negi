@@ -17143,10 +17143,16 @@ textarea {
     font-variant-numeric: tabular-nums;
 }
 
-.task-message-direction {
+.task-node-ref-type {
     flex: none;
     color: var(--text-tertiary);
-    font-size: 0.76rem;
+    font-family: inherit;
+}
+
+.task-node-ref-id {
+    overflow: hidden;
+    white-space: nowrap;
+    text-overflow: ellipsis;
 }
 
 /* 节点 id 药丸：去掉 node: 前缀，点击打开对应节点详情（消息行 / 派生记录共用）。 */
@@ -17173,11 +17179,6 @@ textarea {
     flex: none;
 }
 
-.task-node-ref span {
-    overflow: hidden;
-    white-space: nowrap;
-    text-overflow: ellipsis;
-}
 
 .task-node-ref:hover {
     border-color: color-mix(in srgb, var(--brand-primary) 55%, var(--border-color));
